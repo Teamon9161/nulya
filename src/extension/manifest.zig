@@ -19,7 +19,6 @@ pub const reserved_tool_names = [_][]const u8{ "shell", "edit" };
 
 pub const Runtime = struct {
     entry: []const u8,
-    mode: []const u8 = "oneshot",
 };
 
 pub const ToolSpec = struct {
@@ -41,7 +40,6 @@ pub const Manifest = struct {
     arena: std.heap.ArenaAllocator,
     schema: []const u8,
     id: []const u8,
-    version: []const u8,
     runtime: ?Runtime,
     tools: []const ToolSpec,
     skills: []const []const u8,
@@ -57,14 +55,10 @@ pub const Manifest = struct {
     pub fn validate(self: Manifest) ValidateError!void {
         if (!std.mem.eql(u8, self.schema, schema_id)) return error.UnsupportedSchema;
         if (!isValidId(self.id)) return error.InvalidId;
-        if (self.version.len == 0) return error.MissingVersion;
         if (self.tools.len == 0 and self.skills.len == 0) return error.NoContributions;
 
         if (self.runtime) |rt| {
             if (!isSafeRelPath(rt.entry)) return error.InvalidEntry;
-            // v0.1 only has the oneshot executor. Keep the field explicit in v2,
-            // but do not silently accept a mode the runtime cannot honor yet.
-            if (!std.mem.eql(u8, rt.mode, "oneshot")) return error.UnsupportedRuntimeMode;
         } else if (self.tools.len != 0) {
             return error.MissingRuntime;
         }
@@ -98,10 +92,8 @@ pub const ParseError = error{
 pub const ValidateError = error{
     UnsupportedSchema,
     InvalidId,
-    MissingVersion,
     MissingRuntime,
     InvalidEntry,
-    UnsupportedRuntimeMode,
     NoContributions,
     InvalidToolName,
     ReservedToolName,
@@ -133,7 +125,6 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!Manifest {
 
     const schema = try dupString(a, obj, "schema");
     const id = try dupString(a, obj, "id");
-    const version = try dupString(a, obj, "version");
     const runtime = try dupRuntime(a, obj);
     const tools = try dupTools(a, contributes);
     const skills = try dupStringList(a, contributes, "skills");
@@ -147,7 +138,6 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!Manifest {
         .arena = arena,
         .schema = schema,
         .id = id,
-        .version = version,
         .runtime = runtime,
         .tools = tools,
         .skills = skills,
@@ -184,7 +174,6 @@ fn dupRuntime(a: std.mem.Allocator, obj: std.json.ObjectMap) ParseError!?Runtime
     };
     return .{
         .entry = try dupString(a, runtime_obj, "entry"),
-        .mode = try dupStringOr(a, runtime_obj, "mode", "oneshot"),
     };
 }
 
@@ -257,8 +246,7 @@ const valid_manifest =
     \\{
     \\  "schema": "nulya.extension/v2",
     \\  "id": "web.search",
-    \\  "version": "0.2.0",
-    \\  "runtime": { "entry": "bin/web-search", "mode": "oneshot" },
+    \\  "runtime": { "entry": "bin/web-search" },
     \\  "contributes": {
     \\    "tools": [{
     \\      "name": "web_search",
@@ -278,7 +266,6 @@ test "parses and validates a well-formed manifest" {
     try std.testing.expectEqualStrings("web.search", m.id);
     try std.testing.expect(m.runtime != null);
     try std.testing.expectEqualStrings("bin/web-search", m.runtime.?.entry);
-    try std.testing.expectEqualStrings("oneshot", m.runtime.?.mode);
     try std.testing.expectEqual(@as(usize, 1), m.tools.len);
     try std.testing.expectEqualStrings("web_search", m.tools[0].name);
     try std.testing.expect(std.mem.indexOf(u8, m.tools[0].input_schema, "query") != null);
@@ -290,7 +277,7 @@ test "parses and validates a well-formed manifest" {
 
 test "validates a pure skill package without runtime" {
     const src =
-        \\{"schema":"nulya.extension/v2","id":"skills.finance","version":"1","contributes":{"skills":["skills/risk-parity"]}}
+        \\{"schema":"nulya.extension/v2","id":"skills.finance","contributes":{"skills":["skills/risk-parity"]}}
     ;
     var m = try parse(std.testing.allocator, src);
     defer m.deinit();
@@ -302,7 +289,7 @@ test "validates a pure skill package without runtime" {
 
 test "rejects wrong schema" {
     const src =
-        \\{"schema":"other/v9","id":"a","version":"1","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"t","input":{}}]}}
+        \\{"schema":"other/v9","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"t","input":{}}]}}
     ;
     var m = try parse(std.testing.allocator, src);
     defer m.deinit();
@@ -311,7 +298,7 @@ test "rejects wrong schema" {
 
 test "rejects tool contribution without runtime" {
     const src =
-        \\{"schema":"nulya.extension/v2","id":"a","version":"1","contributes":{"tools":[{"name":"t","input":{}}]}}
+        \\{"schema":"nulya.extension/v2","id":"a","contributes":{"tools":[{"name":"t","input":{}}]}}
     ;
     var m = try parse(std.testing.allocator, src);
     defer m.deinit();
@@ -320,7 +307,7 @@ test "rejects tool contribution without runtime" {
 
 test "rejects manifest with no contributions" {
     const src =
-        \\{"schema":"nulya.extension/v2","id":"a","version":"1","contributes":{}}
+        \\{"schema":"nulya.extension/v2","id":"a","contributes":{}}
     ;
     var m = try parse(std.testing.allocator, src);
     defer m.deinit();
@@ -329,7 +316,7 @@ test "rejects manifest with no contributions" {
 
 test "rejects reserved tool name" {
     const src =
-        \\{"schema":"nulya.extension/v2","id":"a","version":"1","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"shell","input":{}}]}}
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"shell","input":{}}]}}
     ;
     var m = try parse(std.testing.allocator, src);
     defer m.deinit();
@@ -338,7 +325,7 @@ test "rejects reserved tool name" {
 
 test "rejects duplicate tool names" {
     const src =
-        \\{"schema":"nulya.extension/v2","id":"a","version":"1","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"t","input":{}},{"name":"t","input":{}}]}}
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"t","input":{}},{"name":"t","input":{}}]}}
     ;
     var m = try parse(std.testing.allocator, src);
     defer m.deinit();
@@ -347,25 +334,16 @@ test "rejects duplicate tool names" {
 
 test "rejects entry that escapes the extension dir" {
     const src =
-        \\{"schema":"nulya.extension/v2","id":"a","version":"1","runtime":{"entry":"../evil"},"contributes":{"tools":[{"name":"t","input":{}}]}}
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"../evil"},"contributes":{"tools":[{"name":"t","input":{}}]}}
     ;
     var m = try parse(std.testing.allocator, src);
     defer m.deinit();
     try std.testing.expectError(error.InvalidEntry, m.validate());
 }
 
-test "rejects unsupported runtime mode" {
-    const src =
-        \\{"schema":"nulya.extension/v2","id":"a","version":"1","runtime":{"entry":"bin/a","mode":"persistent"},"contributes":{"tools":[{"name":"t","input":{}}]}}
-    ;
-    var m = try parse(std.testing.allocator, src);
-    defer m.deinit();
-    try std.testing.expectError(error.UnsupportedRuntimeMode, m.validate());
-}
-
 test "rejects skill path that escapes the extension dir" {
     const src =
-        \\{"schema":"nulya.extension/v2","id":"a","version":"1","contributes":{"skills":["../evil"]}}
+        \\{"schema":"nulya.extension/v2","id":"a","contributes":{"skills":["../evil"]}}
     ;
     var m = try parse(std.testing.allocator, src);
     defer m.deinit();
@@ -374,7 +352,7 @@ test "rejects skill path that escapes the extension dir" {
 
 test "missing required field is a parse error" {
     const src =
-        \\{"schema":"nulya.extension/v2","id":"a","contributes":{}}
+        \\{"schema":"nulya.extension/v2","contributes":{}}
     ;
     try std.testing.expectError(error.MissingField, parse(std.testing.allocator, src));
 }

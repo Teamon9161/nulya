@@ -26,6 +26,16 @@ const interrupted_tool_output =
     "previous tool execution was interrupted before Nulya recorded results; " ++
     "the real-world state is unknown, so inspect the workspace before retrying or assuming effects";
 
+pub const StepContext = struct {
+    tool_context: tool.ToolContext,
+    /// Directory under which `emit` spills overflowing output.
+    scratch_dir: []const u8,
+    /// Output discipline constants (base-tools.md §3).
+    budget: tool.OutputBudget = .{},
+    /// Aggregate budget for every tool result in one model step.
+    step_budget: tool.StepOutputBudget = .{},
+};
+
 /// Run exactly one step against `l`. Appends the assistant turn, and — if it
 /// carried tool calls — the single batched `tool_results` turn.
 pub fn runStep(
@@ -33,9 +43,9 @@ pub fn runStep(
     l: *ledger.Ledger,
     model: Model,
     tool_snapshot: registry.ToolSetSnapshot,
-    ctx_base: tool.CtxHeader,
+    step_ctx: StepContext,
 ) !provider.Usage {
-    return runStepWithOptions(alloc, l, model, tool_snapshot, ctx_base, .{});
+    return runStepWithOptions(alloc, l, model, tool_snapshot, step_ctx, .{});
 }
 
 pub fn runStepWithOptions(
@@ -43,7 +53,7 @@ pub fn runStepWithOptions(
     l: *ledger.Ledger,
     model: Model,
     tool_snapshot: registry.ToolSetSnapshot,
-    ctx_base: tool.CtxHeader,
+    step_ctx: StepContext,
     model_options: provider.Options,
 ) !provider.Usage {
     // If the previous process died after recording tool calls but before
@@ -81,14 +91,11 @@ pub fn runStepWithOptions(
         alloc.free(results);
     }
 
-    var step_output = emit.StepOutputLimiter.init(ctx_base.environment.io, ctx_base.scratch_dir, base_seq, ctx_base.step_budget);
+    var step_output = emit.StepOutputLimiter.init(step_ctx.tool_context.environment.io, step_ctx.scratch_dir, base_seq, step_ctx.step_budget);
     const max_concurrent_tools = maxConcurrentTools(batchExecutionPolicy(tool_snapshot, turn.calls));
     std.debug.assert(max_concurrent_tools == 1);
     for (turn.calls, 0..) |call, i| {
-        var ctx = ctx_base;
-        ctx.event_seq = base_seq;
-        ctx.call_index = i;
-        results[i] = try execOne(alloc, tool_snapshot, call, ctx);
+        results[i] = try execOne(alloc, tool_snapshot, call, step_ctx, base_seq, i);
         initialized_results += 1;
         try step_output.apply(alloc, call.tool, i, &results[i].output, &results[i].spill_path);
     }
@@ -143,7 +150,9 @@ fn execOne(
     alloc: std.mem.Allocator,
     tool_snapshot: registry.ToolSetSnapshot,
     call: ledger.ToolCall,
-    ctx: tool.CtxHeader,
+    step_ctx: StepContext,
+    event_seq: u64,
+    call_index: usize,
 ) !ledger.ToolResultEntry {
     var ok = false;
     const raw_output = blk: {
@@ -156,7 +165,7 @@ fn execOne(
         };
         defer parsed.deinit();
 
-        const res = t.executor.call(alloc, .{ .args = parsed.value, .ctx = ctx }) catch |err| {
+        const res = t.executor.call(alloc, .{ .args = parsed.value, .ctx = step_ctx.tool_context }) catch |err| {
             break :blk try std.fmt.allocPrint(alloc, "{s} failed: {s}", .{ call.tool, @errorName(err) });
         };
         ok = res.ok;
@@ -164,7 +173,7 @@ fn execOne(
     };
     defer alloc.free(raw_output);
 
-    const emitted = try emit.emit(alloc, ctx.environment.io, raw_output, call.tool, ctx.event_seq, ctx.call_index, ctx.scratch_dir, ctx.budget);
+    const emitted = try emit.emit(alloc, step_ctx.tool_context.environment.io, raw_output, call.tool, event_seq, call_index, step_ctx.scratch_dir, step_ctx.budget);
     return .{
         .call_id = call.id,
         .ok = ok,
@@ -246,11 +255,11 @@ test "one step runs a batch of two shell calls and appends one result turn" {
 
     var scripted = Scripted{};
     _ = try runStep(alloc, &l, .{ .ptr = &scripted, .vtable = &Scripted.vtable }, tools, .{
-        .environment = lenv.environment(),
-        .cwd = ".",
+        .tool_context = .{
+            .environment = lenv.environment(),
+            .cwd = ".",
+        },
         .scratch_dir = "/tmp",
-        .event_seq = 0,
-        .call_index = 0,
     });
 
     // user_text, assistant, tool_results — exactly one batched result turn.
@@ -321,11 +330,11 @@ test "interrupted tool batch is completed as unknown before next model request" 
 
     var model_impl = RecoveringModel{};
     _ = try runStep(alloc, &l, .{ .ptr = &model_impl, .vtable = &RecoveringModel.vtable }, .{ .tools = &.{} }, .{
-        .environment = lenv.environment(),
-        .cwd = ".",
+        .tool_context = .{
+            .environment = lenv.environment(),
+            .cwd = ".",
+        },
         .scratch_dir = "/tmp",
-        .event_seq = 0,
-        .call_index = 0,
     });
 
     try std.testing.expect(model_impl.saw_unknown_result);
@@ -382,18 +391,18 @@ test "a capability note reaches the provider as a capability_note block" {
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
     try l.append(.{ .user_text = "go" });
-    try l.append(.{ .capability_note = "New capabilities from extension `demo` version `v-aaaa` are now available:\n\n- greet — Say hello.\n\nInvoke through the shell tool:\nnulya ext run demo <tool> '<json-args>'" });
+    try l.append(.{ .capability_note = .{ .id = "demo", .version = "v-aaaa", .text = "New capabilities from extension `demo` version `v-aaaa` are now available:\n\n- greet — Say hello.\n\nInvoke through the shell tool:\nnulya ext run demo <tool> '<json-args>'" } });
 
     var lenv = try environment.LocalEnvironment.init(alloc, threaded.io(), .{});
     defer lenv.deinit();
 
     var model_impl = NoteModel{};
     _ = try runStep(alloc, &l, .{ .ptr = &model_impl, .vtable = &NoteModel.vtable }, .{ .tools = &.{} }, .{
-        .environment = lenv.environment(),
-        .cwd = ".",
+        .tool_context = .{
+            .environment = lenv.environment(),
+            .cwd = ".",
+        },
         .scratch_dir = "/tmp",
-        .event_seq = 0,
-        .call_index = 0,
     });
 
     try std.testing.expect(model_impl.saw_note);

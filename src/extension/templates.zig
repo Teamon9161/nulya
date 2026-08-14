@@ -81,8 +81,7 @@ pub fn manifestJson(alloc: std.mem.Allocator, id: []const u8, tool: []const u8) 
         \\{{
         \\  "schema": "nulya.extension/v2",
         \\  "id": "{s}",
-        \\  "version": "0.1.0",
-        \\  "runtime": {{ "entry": "bin/{s}", "mode": "oneshot" }},
+        \\  "runtime": {{ "entry": "bin/{s}" }},
         \\  "contributes": {{
         \\    "tools": [{{
         \\      "name": "{s}",

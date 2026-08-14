@@ -14,6 +14,7 @@ const builtin = @import("builtin");
 const ledger = @import("../ledger.zig");
 const manifest = @import("manifest.zig");
 const store = @import("store.zig");
+const integrity = @import("integrity.zig");
 
 const exe_suffix = if (builtin.os.tag == .windows) ".exe" else "";
 
@@ -37,13 +38,11 @@ pub fn noteText(alloc: std.mem.Allocator, id: []const u8, version: []const u8, t
     return out.toOwnedSlice(alloc);
 }
 
-/// True if the ledger already announced `id@version`. Detection keys on the
-/// exact ``extension `<id>` version `<version>` `` phrase `noteText` emits.
+/// True if the ledger already announced `id@version`.
 pub fn containsNoteFor(l: *const ledger.Ledger, alloc: std.mem.Allocator, id: []const u8, version: []const u8) !bool {
-    const marker = try std.fmt.allocPrint(alloc, "extension `{s}` version `{s}`", .{ id, version });
-    defer alloc.free(marker);
+    _ = alloc;
     for (l.view()) |event| switch (event) {
-        .capability_note => |text| if (std.mem.indexOf(u8, text, marker) != null) return true,
+        .capability_note => |note| if (std.mem.eql(u8, note.id, id) and std.mem.eql(u8, note.version, version)) return true,
         else => {},
     };
     return false;
@@ -91,6 +90,7 @@ pub fn syncOpen(alloc: std.mem.Allocator, io: std.Io, l: *ledger.Ledger, root: s
         const active = (st.activeVersion(alloc, id) catch continue) orelse continue;
         defer alloc.free(active);
 
+        if (!st.versionExists(alloc, id, active)) continue;
         if (try containsNoteFor(l, alloc, id, active)) continue;
 
         const manifest_sub = st.versionManifestPath(alloc, id, active) catch continue;
@@ -106,17 +106,17 @@ pub fn syncOpen(alloc: std.mem.Allocator, io: std.Io, l: *ledger.Ledger, root: s
 
         const text = try noteText(alloc, m.id, active, m.tools);
         defer alloc.free(text);
-        try l.append(.{ .capability_note = text });
+        try l.append(.{ .capability_note = .{ .id = m.id, .version = active, .text = text } });
     }
 }
 
 const test_manifest =
-    \\{"schema":"nulya.extension/v2","id":"demo","version":"0.1.0","runtime":{"entry":"bin/demo","mode":"oneshot"},
+    \\{"schema":"nulya.extension/v2","id":"demo","runtime":{"entry":"bin/demo"},
     \\ "contributes":{"tools":[{"name":"greet","description":"Say hello.","input":{}}],"skills":[]},"permissions":{}}
 ;
 
 const test_manifest_v2 =
-    \\{"schema":"nulya.extension/v2","id":"demo","version":"0.2.0","runtime":{"entry":"bin/demo","mode":"oneshot"},
+    \\{"schema":"nulya.extension/v2","id":"demo","runtime":{"entry":"bin/demo"},
     \\ "contributes":{"tools":[{"name":"greet","description":"Say hello.","input":{}},{"name":"wave","description":"Wave goodbye.","input":{}}],"skills":[]},"permissions":{}}
 ;
 
@@ -141,10 +141,11 @@ test "sync appends one note per active extension version and is idempotent" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try writeVersion(alloc, io, tmp.dir, "demo", "v-aaaa", test_manifest);
+    const version = try writeVersion(alloc, io, tmp.dir, "demo", test_manifest);
+    defer alloc.free(version);
     var root = try tmp.dir.openDir(io, ".", .{ .iterate = true });
     defer root.close(io);
-    try store.Store.init(io, root).activate(alloc, "demo", "v-aaaa");
+    try store.Store.init(io, root).activate(alloc, "demo", version);
 
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
@@ -152,8 +153,8 @@ test "sync appends one note per active extension version and is idempotent" {
     try syncOpen(alloc, io, &l, root);
     try std.testing.expectEqual(@as(usize, 1), l.len());
     try std.testing.expect(l.view()[0] == .capability_note);
-    try std.testing.expect(try containsNoteFor(&l, alloc, "demo", "v-aaaa"));
-    try std.testing.expect(std.mem.indexOf(u8, l.view()[0].capability_note, "stale") == null);
+    try std.testing.expect(try containsNoteFor(&l, alloc, "demo", version));
+    try std.testing.expect(std.mem.indexOf(u8, l.view()[0].capability_note.text, "stale") == null);
 
     // Running again adds nothing for the same active version.
     try syncOpen(alloc, io, &l, root);
@@ -166,8 +167,10 @@ test "activating a new version appends a new note with all tools" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try writeVersion(alloc, io, tmp.dir, "demo", "v-aaaa", test_manifest);
-    try writeVersion(alloc, io, tmp.dir, "demo", "v-bbbb", test_manifest_v2);
+    const first = try writeVersion(alloc, io, tmp.dir, "demo", test_manifest);
+    defer alloc.free(first);
+    const second = try writeVersion(alloc, io, tmp.dir, "demo", test_manifest_v2);
+    defer alloc.free(second);
     var root = try tmp.dir.openDir(io, ".", .{ .iterate = true });
     defer root.close(io);
     const st = store.Store.init(io, root);
@@ -175,16 +178,16 @@ test "activating a new version appends a new note with all tools" {
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
 
-    try st.activate(alloc, "demo", "v-aaaa");
+    try st.activate(alloc, "demo", first);
     try syncOpen(alloc, io, &l, root);
-    try st.activate(alloc, "demo", "v-bbbb");
+    try st.activate(alloc, "demo", second);
     try syncOpen(alloc, io, &l, root);
 
     try std.testing.expectEqual(@as(usize, 2), l.len());
-    try std.testing.expect(try containsNoteFor(&l, alloc, "demo", "v-aaaa"));
-    try std.testing.expect(try containsNoteFor(&l, alloc, "demo", "v-bbbb"));
-    try std.testing.expect(std.mem.indexOf(u8, l.view()[1].capability_note, "greet") != null);
-    try std.testing.expect(std.mem.indexOf(u8, l.view()[1].capability_note, "wave") != null);
+    try std.testing.expect(try containsNoteFor(&l, alloc, "demo", first));
+    try std.testing.expect(try containsNoteFor(&l, alloc, "demo", second));
+    try std.testing.expect(std.mem.indexOf(u8, l.view()[1].capability_note.text, "greet") != null);
+    try std.testing.expect(std.mem.indexOf(u8, l.view()[1].capability_note.text, "wave") != null);
 }
 
 test "an inactive extension is not announced" {
@@ -194,7 +197,8 @@ test "an inactive extension is not announced" {
     defer tmp.cleanup();
 
     // Built but never activated: no `current` pointer.
-    try writeVersion(alloc, io, tmp.dir, "demo", "v-aaaa", test_manifest);
+    const version = try writeVersion(alloc, io, tmp.dir, "demo", test_manifest);
+    defer alloc.free(version);
     var root = try tmp.dir.openDir(io, ".", .{ .iterate = true });
     defer root.close(io);
 
@@ -204,7 +208,21 @@ test "an inactive extension is not announced" {
     try std.testing.expectEqual(@as(usize, 0), l.len());
 }
 
-fn writeVersion(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id: []const u8, version: []const u8, manifest_bytes: []const u8) !void {
+fn writeVersion(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id: []const u8, manifest_bytes: []const u8) ![]u8 {
+    const source_bytes = "pub fn main() void {}";
+    const files = try alloc.alloc(integrity.SnapshotFile, 2);
+    files[0] = .{ .rel = try alloc.dupe(u8, "extension.json"), .bytes = try alloc.dupe(u8, manifest_bytes) };
+    files[1] = .{ .rel = try alloc.dupe(u8, "src/main.zig"), .bytes = try alloc.dupe(u8, source_bytes) };
+    const snapshot: integrity.PackageSnapshot = .{ .files = files };
+    defer snapshot.deinit(alloc);
+
+    const canonical = try snapshot.canonicalBytes(alloc);
+    defer alloc.free(canonical);
+    const compiler = "zig test";
+    const target = "test-target";
+    const version = try integrity.versionId(alloc, canonical, compiler, target);
+    errdefer alloc.free(version);
+
     const bin_dir = try std.fs.path.join(alloc, &.{ id, "versions", version, "bin" });
     defer alloc.free(bin_dir);
     try root.createDirPath(io, bin_dir);
@@ -219,9 +237,21 @@ fn writeVersion(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id: []co
 
     const source_sub = try std.fs.path.join(alloc, &.{ id, "versions", version, "package", "src", "main.zig" });
     defer alloc.free(source_sub);
-    try root.writeFile(io, .{ .sub_path = source_sub, .data = "pub fn main() void {}" });
+    try root.writeFile(io, .{ .sub_path = source_sub, .data = source_bytes });
 
     const entry_sub = try std.fs.path.join(alloc, &.{ id, "versions", version, "bin", "demo" ++ exe_suffix });
     defer alloc.free(entry_sub);
     try root.writeFile(io, .{ .sub_path = entry_sub, .data = "" });
+
+    const package_digest = try integrity.packageDigestHex(alloc, snapshot);
+    defer alloc.free(package_digest);
+    const binary_digest = try integrity.fileDigestHex(alloc, io, root, entry_sub);
+    defer alloc.free(binary_digest);
+    const seal = try integrity.sealJson(alloc, package_digest, compiler, target, binary_digest);
+    defer alloc.free(seal);
+    const seal_sub = try std.fs.path.join(alloc, &.{ id, "versions", version, "seal.json" });
+    defer alloc.free(seal_sub);
+    try root.writeFile(io, .{ .sub_path = seal_sub, .data = seal });
+
+    return version;
 }

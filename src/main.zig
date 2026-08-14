@@ -116,12 +116,12 @@ fn runDemo(alloc: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) 
 
     std.debug.print("provider: {s}/{s} (shell dialect: {s})\n", .{ model.name(), model.modelName(), lenv.dialect_val.label() });
 
-    const ctx: tool.CtxHeader = .{
-        .environment = lenv.environment(),
-        .cwd = ".",
+    const step_ctx: loop.StepContext = .{
+        .tool_context = .{
+            .environment = lenv.environment(),
+            .cwd = ".",
+        },
         .scratch_dir = ".nulya/scratch",
-        .event_seq = 0,
-        .call_index = 0,
     };
 
     var total: provider.Usage = .{};
@@ -129,12 +129,12 @@ fn runDemo(alloc: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) 
         var steps: usize = 0;
         while (steps < 4) : (steps += 1) {
             try prepareStep(alloc, io, &l, ".", ".nulya/extensions");
-            accumulate(&total, try loop.runStepWithOptions(alloc, &l, model, tools, ctx, model_options));
+            accumulate(&total, try loop.runStepWithOptions(alloc, &l, model, tools, step_ctx, model_options));
             if (lastAssistantDone(&l)) break;
         }
     } else {
         try prepareStep(alloc, io, &l, ".", ".nulya/extensions");
-        accumulate(&total, try loop.runStepWithOptions(alloc, &l, model, tools, ctx, model_options));
+        accumulate(&total, try loop.runStepWithOptions(alloc, &l, model, tools, step_ctx, model_options));
     }
 
     printLedger(&l);
@@ -193,7 +193,7 @@ fn printLedger(l: *const ledger.Ledger) void {
                 p("[{d}] tool_results ({d}):\n", .{ i, rs.len });
                 for (rs) |r| p("      {s} ok={} | {s}\n", .{ r.call_id, r.ok, std.mem.trimEnd(u8, r.output, "\n") });
             },
-            .capability_note => |t| p("[{d}] note: {s}\n", .{ i, t }),
+            .capability_note => |n| p("[{d}] note {s}@{s}: {s}\n", .{ i, n.id, n.version, n.text }),
         }
     }
 }

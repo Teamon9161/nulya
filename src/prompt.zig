@@ -64,7 +64,7 @@ pub fn project(alloc: std.mem.Allocator, events: []const ledger.Event) !PromptIR
                 try blocks.append(alloc, .{ .kind = .tool_result, .bytes = bytes });
             }
         },
-        .capability_note => |text| try appendBlock(alloc, &blocks, .capability_note, text),
+        .capability_note => |note| try appendBlock(alloc, &blocks, .capability_note, note.text),
     };
 
     return .{ .stable_blocks = try blocks.toOwnedSlice(alloc) };
@@ -117,7 +117,7 @@ test "a capability_note appends a capability_note block without breaking the pre
     defer before.deinit(alloc);
     const gen_before = currentGeneration(l.view());
 
-    try l.append(.{ .capability_note = "New capability available: `greet`." });
+    try l.append(.{ .capability_note = .{ .id = "demo", .version = "v-aaaa", .text = "New capability available: `greet`." } });
     const after = try project(alloc, l.view());
     defer after.deinit(alloc);
 

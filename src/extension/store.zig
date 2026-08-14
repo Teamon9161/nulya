@@ -22,16 +22,12 @@
 //! and buy nothing here.
 
 const std = @import("std");
-const builtin = @import("builtin");
-const manifest = @import("manifest.zig");
+const integrity = @import("integrity.zig");
 
-pub const version_prefix = "v-";
+pub const version_prefix = integrity.version_prefix;
 const current_file = "current";
 const versions_dir = "versions";
-const exe_suffix = if (builtin.os.tag == .windows) ".exe" else "";
-/// 12 bytes of digest -> 24 hex chars. Ample collision resistance for a local
-/// content-addressed store while keeping directory names short.
-const digest_bytes = 12;
+const exe_suffix = integrity.exe_suffix;
 
 pub const Store = struct {
     io: std.Io,
@@ -52,22 +48,7 @@ pub const Store = struct {
 
     /// `v-<hex>`. Pure function of the inputs — no I/O. Caller owns the result.
     pub fn versionId(alloc: std.mem.Allocator, inputs: VersionInputs) ![]u8 {
-        var h = std.crypto.hash.sha2.Sha256.init(.{});
-        // Length-prefix each field so no concatenation of two fields can alias
-        // another split of the same bytes.
-        inline for (.{ inputs.snapshot, inputs.compiler, inputs.target }) |field| {
-            var len_le: [8]u8 = undefined;
-            std.mem.writeInt(u64, &len_le, field.len, .little);
-            h.update(&len_le);
-            h.update(field);
-        }
-        var digest: [32]u8 = undefined;
-        h.final(&digest);
-
-        var out = try alloc.alloc(u8, version_prefix.len + digest_bytes * 2);
-        @memcpy(out[0..version_prefix.len], version_prefix);
-        _ = std.fmt.bufPrint(out[version_prefix.len..], "{x}", .{digest[0..digest_bytes]}) catch unreachable;
-        return out;
+        return integrity.versionId(alloc, inputs.snapshot, inputs.compiler, inputs.target);
     }
 
     /// Create `<id>/versions/<version>/bin/` (and parents). Idempotent.
@@ -175,35 +156,32 @@ pub const Store = struct {
 };
 
 fn validateBuiltVersion(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8) !void {
-    const manifest_sub = try self.versionManifestPath(alloc, id, version);
-    defer alloc.free(manifest_sub);
-    const bytes = self.root.readFileAlloc(self.io, manifest_sub, alloc, .limited(1 << 20)) catch
-        return error.VersionNotFound;
-    defer alloc.free(bytes);
-
-    var m = try manifest.parse(alloc, bytes);
-    defer m.deinit();
-    try m.validate();
-    if (!std.mem.eql(u8, m.id, id)) return error.VersionManifestIdMismatch;
-
-    if (m.runtime) |rt| {
-        const source_sub = try std.fs.path.join(alloc, &.{ id, versions_dir, version, "package", "src", "main.zig" });
-        defer alloc.free(source_sub);
-        self.root.access(self.io, source_sub, .{}) catch return error.VersionPackageMissing;
-
-        const entry_sub = try self.versionEntryPath(alloc, id, version, rt.entry);
-        defer alloc.free(entry_sub);
-        self.root.access(self.io, entry_sub, .{}) catch return error.VersionEntryNotFound;
-    }
-
-    for (m.skills) |skill_path| {
-        const skill_sub = try std.fs.path.join(alloc, &.{ id, versions_dir, version, "package", skill_path });
-        defer alloc.free(skill_sub);
-        self.root.access(self.io, skill_sub, .{}) catch return error.VersionPackageMissing;
-    }
+    const version_rel = try self.versionDir(alloc, id, version);
+    defer alloc.free(version_rel);
+    try integrity.validateVersionDir(alloc, self.io, self.root, version_rel, version, id);
 }
 
-fn writeBuiltVersion(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id: []const u8, version: []const u8) !void {
+fn writeBuiltVersion(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id: []const u8, marker: []const u8) ![]u8 {
+    const manifest_bytes = try std.fmt.allocPrint(alloc,
+        \\{{"schema":"nulya.extension/v2","id":"{s}","runtime":{{"entry":"bin/demo"}},"contributes":{{"tools":[{{"name":"greet","input":{{}}}}],"skills":[]}},"permissions":{{}}}}
+    , .{id});
+    defer alloc.free(manifest_bytes);
+    const source_bytes = try std.fmt.allocPrint(alloc, "pub fn main() void {{}} // {s}\n", .{marker});
+    defer alloc.free(source_bytes);
+
+    const files = try alloc.alloc(integrity.SnapshotFile, 2);
+    files[0] = .{ .rel = try alloc.dupe(u8, "extension.json"), .bytes = try alloc.dupe(u8, manifest_bytes) };
+    files[1] = .{ .rel = try alloc.dupe(u8, "src/main.zig"), .bytes = try alloc.dupe(u8, source_bytes) };
+    const snapshot: integrity.PackageSnapshot = .{ .files = files };
+    defer snapshot.deinit(alloc);
+
+    const canonical = try snapshot.canonicalBytes(alloc);
+    defer alloc.free(canonical);
+    const compiler = "zig test";
+    const target = "test-target";
+    const version = try integrity.versionId(alloc, canonical, compiler, target);
+    errdefer alloc.free(version);
+
     const dir = try std.fs.path.join(alloc, &.{ id, versions_dir, version, "bin" });
     defer alloc.free(dir);
     try root.createDirPath(io, dir);
@@ -212,12 +190,8 @@ fn writeBuiltVersion(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id:
     try root.createDirPath(io, src_dir);
     const main_sub = try std.fs.path.join(alloc, &.{ src_dir, "main.zig" });
     defer alloc.free(main_sub);
-    try root.writeFile(io, .{ .sub_path = main_sub, .data = "pub fn main() void {}" });
+    try root.writeFile(io, .{ .sub_path = main_sub, .data = source_bytes });
 
-    const manifest_bytes = try std.fmt.allocPrint(alloc,
-        \\{{"schema":"nulya.extension/v2","id":"{s}","version":"0.1.0","runtime":{{"entry":"bin/demo","mode":"oneshot"}},"contributes":{{"tools":[{{"name":"greet","input":{{}}}}],"skills":[]}},"permissions":{{}}}}
-    , .{id});
-    defer alloc.free(manifest_bytes);
     const manifest_sub = try std.fs.path.join(alloc, &.{ id, versions_dir, version, "extension.json" });
     defer alloc.free(manifest_sub);
     try root.writeFile(io, .{ .sub_path = manifest_sub, .data = manifest_bytes });
@@ -226,7 +200,59 @@ fn writeBuiltVersion(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id:
     defer alloc.free(entry);
     const entry_sub = try std.fs.path.join(alloc, &.{ id, versions_dir, version, entry });
     defer alloc.free(entry_sub);
-    try root.writeFile(io, .{ .sub_path = entry_sub, .data = "" });
+    try root.writeFile(io, .{ .sub_path = entry_sub, .data = marker });
+
+    const package_digest = try integrity.packageDigestHex(alloc, snapshot);
+    defer alloc.free(package_digest);
+    const binary_digest = try integrity.fileDigestHex(alloc, io, root, entry_sub);
+    defer alloc.free(binary_digest);
+    const seal = try integrity.sealJson(alloc, package_digest, compiler, target, binary_digest);
+    defer alloc.free(seal);
+    const seal_sub = try std.fs.path.join(alloc, &.{ id, versions_dir, version, "seal.json" });
+    defer alloc.free(seal_sub);
+    try root.writeFile(io, .{ .sub_path = seal_sub, .data = seal });
+
+    return version;
+}
+
+fn writeSkillVersion(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id: []const u8, body: []const u8) ![]u8 {
+    const manifest_bytes = try std.fmt.allocPrint(alloc,
+        \\{{"schema":"nulya.extension/v2","id":"{s}","contributes":{{"skills":["skills/demo"]}}}}
+    , .{id});
+    defer alloc.free(manifest_bytes);
+
+    const files = try alloc.alloc(integrity.SnapshotFile, 2);
+    files[0] = .{ .rel = try alloc.dupe(u8, "extension.json"), .bytes = try alloc.dupe(u8, manifest_bytes) };
+    files[1] = .{ .rel = try alloc.dupe(u8, "skills/demo/SKILL.md"), .bytes = try alloc.dupe(u8, body) };
+    const snapshot: integrity.PackageSnapshot = .{ .files = files };
+    defer snapshot.deinit(alloc);
+
+    const canonical = try snapshot.canonicalBytes(alloc);
+    defer alloc.free(canonical);
+    const compiler = "zig test";
+    const target = "test-target";
+    const version = try integrity.versionId(alloc, canonical, compiler, target);
+    errdefer alloc.free(version);
+
+    const skill_dir = try std.fs.path.join(alloc, &.{ id, versions_dir, version, "package", "skills", "demo" });
+    defer alloc.free(skill_dir);
+    try root.createDirPath(io, skill_dir);
+    const manifest_sub = try std.fs.path.join(alloc, &.{ id, versions_dir, version, "extension.json" });
+    defer alloc.free(manifest_sub);
+    try root.writeFile(io, .{ .sub_path = manifest_sub, .data = manifest_bytes });
+    const skill_sub = try std.fs.path.join(alloc, &.{ skill_dir, "SKILL.md" });
+    defer alloc.free(skill_sub);
+    try root.writeFile(io, .{ .sub_path = skill_sub, .data = body });
+
+    const package_digest = try integrity.packageDigestHex(alloc, snapshot);
+    defer alloc.free(package_digest);
+    const seal = try integrity.sealJson(alloc, package_digest, compiler, target, null);
+    defer alloc.free(seal);
+    const seal_sub = try std.fs.path.join(alloc, &.{ id, versions_dir, version, "seal.json" });
+    defer alloc.free(seal_sub);
+    try root.writeFile(io, .{ .sub_path = seal_sub, .data = seal });
+
+    return version;
 }
 
 fn freeVersions(alloc: std.mem.Allocator, versions: []const []u8) void {
@@ -259,32 +285,34 @@ test "activate and rollback move the current pointer atomically" {
     const store = Store.init(std.testing.io, tmp.dir);
 
     const id = "demo";
-    try writeBuiltVersion(alloc, std.testing.io, tmp.dir, id, "v-aaaa");
-    try writeBuiltVersion(alloc, std.testing.io, tmp.dir, id, "v-bbbb");
+    const first = try writeBuiltVersion(alloc, std.testing.io, tmp.dir, id, "one");
+    defer alloc.free(first);
+    const second = try writeBuiltVersion(alloc, std.testing.io, tmp.dir, id, "two");
+    defer alloc.free(second);
 
     // No current pointer yet.
     try std.testing.expect((try store.activeVersion(alloc, id)) == null);
 
-    try store.activate(alloc, id, "v-aaaa");
+    try store.activate(alloc, id, first);
     {
         const active = (try store.activeVersion(alloc, id)).?;
         defer alloc.free(active);
-        try std.testing.expectEqualStrings("v-aaaa", active);
+        try std.testing.expectEqualStrings(first, active);
     }
 
-    try store.activate(alloc, id, "v-bbbb");
+    try store.activate(alloc, id, second);
     {
         const active = (try store.activeVersion(alloc, id)).?;
         defer alloc.free(active);
-        try std.testing.expectEqualStrings("v-bbbb", active);
+        try std.testing.expectEqualStrings(second, active);
     }
 
     // Rollback is just repointing current at the old version.
-    try store.rollback(alloc, id, "v-aaaa");
+    try store.rollback(alloc, id, first);
     {
         const active = (try store.activeVersion(alloc, id)).?;
         defer alloc.free(active);
-        try std.testing.expectEqualStrings("v-aaaa", active);
+        try std.testing.expectEqualStrings(first, active);
     }
 }
 
@@ -293,7 +321,8 @@ test "activate refuses an unbuilt version" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const store = Store.init(std.testing.io, tmp.dir);
-    try writeBuiltVersion(alloc, std.testing.io, tmp.dir, "demo", "v-aaaa");
+    const built = try writeBuiltVersion(alloc, std.testing.io, tmp.dir, "demo", "one");
+    defer alloc.free(built);
     try std.testing.expectError(error.VersionNotFound, store.activate(alloc, "demo", "v-nope"));
 }
 
@@ -303,7 +332,7 @@ test "activate refuses an incomplete version directory" {
     defer tmp.cleanup();
     const store = Store.init(std.testing.io, tmp.dir);
     try store.ensureVersionDir(alloc, "demo", "v-empty");
-    try std.testing.expectError(error.VersionNotFound, store.activate(alloc, "demo", "v-empty"));
+    try std.testing.expectError(error.VersionSealInvalid, store.activate(alloc, "demo", "v-empty"));
 }
 
 test "activate accepts a runtime-less skill version" {
@@ -313,16 +342,31 @@ test "activate accepts a runtime-less skill version" {
     defer tmp.cleanup();
     const store = Store.init(io, tmp.dir);
 
-    try tmp.dir.createDirPath(io, "skills" ++ std.fs.path.sep_str ++ "versions" ++ std.fs.path.sep_str ++ "v-aaaa" ++ std.fs.path.sep_str ++ "package" ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "demo");
-    try tmp.dir.writeFile(io, .{ .sub_path = "skills" ++ std.fs.path.sep_str ++ "versions" ++ std.fs.path.sep_str ++ "v-aaaa" ++ std.fs.path.sep_str ++ "extension.json", .data =
-        \\{"schema":"nulya.extension/v2","id":"skills","version":"1","contributes":{"skills":["skills/demo"]}}
-    });
-    try tmp.dir.writeFile(io, .{ .sub_path = "skills" ++ std.fs.path.sep_str ++ "versions" ++ std.fs.path.sep_str ++ "v-aaaa" ++ std.fs.path.sep_str ++ "package" ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "demo" ++ std.fs.path.sep_str ++ "SKILL.md", .data = "demo" });
+    const version = try writeSkillVersion(alloc, io, tmp.dir, "skills", "demo");
+    defer alloc.free(version);
 
-    try store.activate(alloc, "skills", "v-aaaa");
+    try store.activate(alloc, "skills", version);
     const active = (try store.activeVersion(alloc, "skills")).?;
     defer alloc.free(active);
-    try std.testing.expectEqualStrings("v-aaaa", active);
+    try std.testing.expectEqualStrings(version, active);
+}
+
+test "activate refuses a sealed version whose binary changed" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const store = Store.init(io, tmp.dir);
+
+    const version = try writeBuiltVersion(alloc, io, tmp.dir, "demo", "original");
+    defer alloc.free(version);
+    const exe_name = try std.fmt.allocPrint(alloc, "demo{s}", .{exe_suffix});
+    defer alloc.free(exe_name);
+    const entry_sub = try std.fs.path.join(alloc, &.{ "demo", versions_dir, version, "bin", exe_name });
+    defer alloc.free(entry_sub);
+    try tmp.dir.writeFile(io, .{ .sub_path = entry_sub, .data = "tampered" });
+
+    try std.testing.expectError(error.VersionSealInvalid, store.activate(alloc, "demo", version));
 }
 
 test "listVersions returns every built version" {

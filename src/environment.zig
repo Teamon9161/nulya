@@ -75,10 +75,10 @@ pub const ExtensionOutcome = struct {
     }
 };
 
-/// The environment handle carried in every tool's `CtxHeader`. `io` is how a
+/// The environment handle carried in every tool's `ToolContext`. `io` is how a
 /// tool reaches its filesystem (host today, sandbox/remote later); the vtable
 /// covers process execution and dialect. Fixed-shape — nothing grows with the
-/// conversation, so it is safe in `CtxHeader` (DESIGN §7.6).
+/// conversation, so it is safe in `ToolContext` (DESIGN §7.6).
 pub const Environment = struct {
     io: std.Io,
     ptr: *anyopaque,

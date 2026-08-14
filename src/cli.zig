@@ -114,6 +114,11 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     };
     defer alloc.free(active);
 
+    if (!st.versionExists(alloc, id, active)) {
+        try printOut(alloc, io, "active version for extension '{s}' failed integrity validation\n", .{id});
+        return 1;
+    }
+
     // The active version's frozen manifest is the runtime truth. The source-tree
     // manifest may already have changed while `current` still points at an older
     // immutable version.

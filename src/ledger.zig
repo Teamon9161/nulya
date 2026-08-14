@@ -40,8 +40,13 @@ pub const Event = union(enum) {
     /// A capability that became available mid-conversation (DESIGN §5.3). It is
     /// an APPEND, never a change to `tools[]`: the prompt prefix stays stable so
     /// the cache keeps hitting, and the model can invoke the new extension via
-    /// `shell` on its next step. Content is the model-facing announcement text.
-    capability_note: []const u8,
+    /// `shell` on its next step. `text` is the model-facing announcement; `id` and
+    /// `version` are structured so reconciliation never parses presentation text.
+    capability_note: struct {
+        id: []const u8,
+        version: []const u8,
+        text: []const u8,
+    },
 };
 
 pub const Ledger = struct {
@@ -89,7 +94,14 @@ fn cloneEvent(alloc: std.mem.Allocator, e: Event) !Event {
             break :blk .{ .assistant = .{ .text = text, .calls = calls } };
         },
         .tool_results => |results| .{ .tool_results = try cloneToolResults(alloc, results) },
-        .capability_note => |text| .{ .capability_note = try alloc.dupe(u8, text) },
+        .capability_note => |note| blk: {
+            const id = try alloc.dupe(u8, note.id);
+            errdefer alloc.free(id);
+            const version = try alloc.dupe(u8, note.version);
+            errdefer alloc.free(version);
+            const text = try alloc.dupe(u8, note.text);
+            break :blk .{ .capability_note = .{ .id = id, .version = version, .text = text } };
+        },
     };
 }
 
@@ -101,7 +113,11 @@ fn freeEvent(alloc: std.mem.Allocator, e: Event) void {
             freeToolCalls(alloc, as.calls);
         },
         .tool_results => |results| freeToolResults(alloc, results),
-        .capability_note => |text| alloc.free(text),
+        .capability_note => |note| {
+            alloc.free(note.id);
+            alloc.free(note.version);
+            alloc.free(note.text);
+        },
     }
 }
 

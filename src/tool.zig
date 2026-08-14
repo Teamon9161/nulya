@@ -12,7 +12,7 @@
 //!
 //! Everything a tool is allowed to touch enters through `ToolRequest`. If a
 //! field would grow unbounded with the dialogue, it does not belong in
-//! `CtxHeader`.
+//! `ToolContext`.
 
 const std = @import("std");
 const emit = @import("emit.zig");
@@ -28,37 +28,23 @@ pub const StepOutputBudget = emit.StepOutputBudget;
 
 /// Constant-size context handed to every tool call.
 ///
-/// INVARIANT: every field here is fixed-shape. Nothing that scales with the
-/// number of turns may be added — no message history, no ledger handle.
-pub const CtxHeader = struct {
-    /// The execution environment (DESIGN §8). A tool reaches its filesystem via
-    /// `environment.io` and runs subprocesses via `environment.runShell` — local
-    /// today, sandbox/remote later, without changing tool code. It also carries
-    /// the dialect and the sanitized child env (DESIGN §9). Fixed-shape, so it
-    /// belongs here.
+/// INVARIANT: every field here is fixed-shape and executor-facing. Loop/session
+/// presentation data such as spill directories, event sequence numbers, and
+/// output budgets stays outside this type.
+pub const ToolContext = struct {
+    /// The execution environment (DESIGN §8). Tools run subprocesses through the
+    /// environment; filesystem operations still use `environment.io` until the
+    /// planned WorkspaceFs vtable lands.
     environment: Environment,
     /// Working directory for filesystem-relative operations.
     cwd: []const u8,
-    /// Directory under which `emit` spills overflowing output.
-    scratch_dir: []const u8,
-    /// Ledger event sequence for the assistant turn that requested this call.
-    /// Feeds deterministic spill filenames so a replayed ledger reproduces
-    /// byte-for-byte (base-tools.md §2.4).
-    event_seq: u64,
-    /// Index of this call within the assistant turn. Unlike packing into one
-    /// integer, this has no hidden per-turn call-count limit.
-    call_index: usize,
-    /// Output discipline constants (base-tools.md §3).
-    budget: OutputBudget = .{},
-    /// Aggregate budget for every tool result in one model step.
-    step_budget: StepOutputBudget = .{},
 };
 
 /// A single tool invocation request. This is the entire input surface.
 pub const ToolRequest = struct {
     /// Raw JSON arguments; each tool parses its own typed shape.
     args: std.json.Value,
-    ctx: CtxHeader,
+    ctx: ToolContext,
 };
 
 /// A single tool invocation result before model-facing output discipline.
@@ -72,8 +58,8 @@ pub const RawToolResult = struct {
 };
 
 pub const ToolExecutor = struct {
-    ptr: *anyopaque,
-    callFn: *const fn (ptr: *anyopaque, alloc: std.mem.Allocator, req: ToolRequest) anyerror!RawToolResult,
+    ptr: ?*anyopaque,
+    callFn: *const fn (ptr: ?*anyopaque, alloc: std.mem.Allocator, req: ToolRequest) anyerror!RawToolResult,
 
     pub fn call(self: ToolExecutor, alloc: std.mem.Allocator, req: ToolRequest) !RawToolResult {
         return self.callFn(self.ptr, alloc, req);
@@ -82,14 +68,12 @@ pub const ToolExecutor = struct {
 
 pub fn functionExecutor(comptime runFn: *const fn (alloc: std.mem.Allocator, req: ToolRequest) anyerror!RawToolResult) ToolExecutor {
     const Adapter = struct {
-        var token: u8 = 0;
-
-        fn call(ptr: *anyopaque, alloc: std.mem.Allocator, req: ToolRequest) anyerror!RawToolResult {
+        fn call(ptr: ?*anyopaque, alloc: std.mem.Allocator, req: ToolRequest) anyerror!RawToolResult {
             _ = ptr;
             return runFn(alloc, req);
         }
     };
-    return .{ .ptr = &Adapter.token, .callFn = Adapter.call };
+    return .{ .ptr = null, .callFn = Adapter.call };
 }
 
 /// Model-facing tool definition. This is the shape provider serialization and

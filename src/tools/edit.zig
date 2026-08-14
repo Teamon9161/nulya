@@ -140,9 +140,6 @@ test "edit preserves executable file permissions" {
         .ctx = .{
             .environment = lenv.environment(),
             .cwd = tmp_path,
-            .scratch_dir = tmp_path,
-            .event_seq = 0,
-            .call_index = 0,
         },
     });
     defer {
