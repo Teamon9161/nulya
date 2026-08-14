@@ -16,6 +16,9 @@
 
 const std = @import("std");
 const emit = @import("emit.zig");
+const environment = @import("environment.zig");
+
+pub const Environment = environment.Environment;
 
 /// Truncation / spill limits. Kernel defaults live here (base-tools.md §3) and
 /// are the primary knob for per-result token cost.
@@ -28,11 +31,12 @@ pub const StepOutputBudget = emit.StepOutputBudget;
 /// INVARIANT: every field here is fixed-shape. Nothing that scales with the
 /// number of turns may be added — no message history, no ledger handle.
 pub const CtxHeader = struct {
-    /// The execution environment's I/O handle (DESIGN §8). In Zig 0.16 all fs
-    /// and process operations are performed through an `Io`; passing it here is
-    /// exactly how a tool reaches its environment — local today, sandbox/remote
-    /// later, without changing tool code. Fixed-shape, so it belongs here.
-    io: std.Io,
+    /// The execution environment (DESIGN §8). A tool reaches its filesystem via
+    /// `environment.io` and runs subprocesses via `environment.runShell` — local
+    /// today, sandbox/remote later, without changing tool code. It also carries
+    /// the dialect and the sanitized child env (DESIGN §9). Fixed-shape, so it
+    /// belongs here.
+    environment: Environment,
     /// Working directory for filesystem-relative operations.
     cwd: []const u8,
     /// Directory under which `emit` spills overflowing output.

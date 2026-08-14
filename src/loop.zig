@@ -7,26 +7,20 @@
 //!      Never one round-trip per tool (DESIGN §0.2).
 //!   2. The ledger is only ever appended to (DESIGN §1).
 //!
-//! The model itself is behind a function pointer. The skeleton ships a scripted
-//! stub; the real provider (request builder + cache breakpoints, DESIGN §13)
-//! drops in here without the loop changing.
+//! The model itself is a provider instance: transport/client/auth/cache policy
+//! live behind `provider.Model`, while the loop only sees normalized turns.
 
 const std = @import("std");
 const ledger = @import("ledger.zig");
 const registry = @import("registry.zig");
 const tool = @import("tool.zig");
 const emit = @import("emit.zig");
+const prompt = @import("prompt.zig");
+const provider = @import("provider.zig");
+const environment = @import("environment.zig");
 
-/// What the model returns for one step.
-pub const ModelTurn = struct {
-    text: []const u8,
-    calls: []const ledger.ToolCall,
-};
-
-/// A model is a function from the current ledger view to one assistant turn.
-pub const Model = struct {
-    step: *const fn (alloc: std.mem.Allocator, view: []const ledger.Event) anyerror!ModelTurn,
-};
+pub const ModelTurn = provider.ModelTurn;
+pub const Model = provider.Model;
 
 /// Run exactly one step against `l`. Appends the assistant turn, and — if it
 /// carried tool calls — the single batched `tool_results` turn.
@@ -36,14 +30,24 @@ pub fn runStep(
     model: Model,
     tool_snapshot: registry.ToolSetSnapshot,
     ctx_base: tool.CtxHeader,
-) !void {
+) !provider.Usage {
     // seq base is the ledger position: deterministic across replays (DESIGN §1).
     const base_seq = l.len();
 
-    const turn = try model.step(alloc, l.view());
-    defer alloc.free(turn.calls);
+    const prompt_ir = try prompt.project(alloc, l.view());
+    defer prompt_ir.deinit(alloc);
+
+    const tool_defs = try tool_snapshot.definitions(alloc);
+    defer alloc.free(tool_defs);
+
+    const turn = try model.step(alloc, .{
+        .prompt_ir = &prompt_ir,
+        .tools = tool_defs,
+        .generation = prompt.currentGeneration(l.view()),
+    });
+    defer turn.deinit(alloc);
     try l.append(.{ .assistant = .{ .text = turn.text, .calls = turn.calls } });
-    if (turn.calls.len == 0) return; // model addressed the user; step complete.
+    if (turn.calls.len == 0) return turn.usage; // model addressed the user; step complete.
 
     const results = try alloc.alloc(ledger.ToolResultEntry, turn.calls.len);
     var initialized_results: usize = 0;
@@ -55,7 +59,7 @@ pub fn runStep(
         alloc.free(results);
     }
 
-    var step_output = emit.StepOutputLimiter.init(ctx_base.io, ctx_base.scratch_dir, base_seq, ctx_base.step_budget);
+    var step_output = emit.StepOutputLimiter.init(ctx_base.environment.io, ctx_base.scratch_dir, base_seq, ctx_base.step_budget);
     for (turn.calls, 0..) |call, i| {
         var ctx = ctx_base;
         ctx.event_seq = base_seq;
@@ -66,6 +70,7 @@ pub fn runStep(
     }
     // ONE user turn carrying the whole batch.
     try l.append(.{ .tool_results = results });
+    return turn.usage;
 }
 
 fn execOne(
@@ -101,13 +106,42 @@ test "one step runs a batch of two shell calls and appends one result turn" {
     const alloc = std.testing.allocator;
 
     const Scripted = struct {
-        fn step(a: std.mem.Allocator, view: []const ledger.Event) anyerror!ModelTurn {
-            _ = view;
-            const calls = try a.alloc(ledger.ToolCall, 2);
-            calls[0] = .{ .id = "c1", .tool = "shell", .args_json = "{\"command\":\"echo one\"}" };
-            calls[1] = .{ .id = "c2", .tool = "shell", .args_json = "{\"command\":\"echo two\"}" };
-            return .{ .text = "running", .calls = calls };
+        fn name(ptr: *anyopaque) []const u8 {
+            _ = ptr;
+            return "scripted";
         }
+
+        fn modelName(ptr: *anyopaque) []const u8 {
+            _ = ptr;
+            return "scripted-test";
+        }
+
+        fn capabilities(ptr: *anyopaque) provider.ProviderCapabilities {
+            _ = ptr;
+            return .{ .parallel_tool_calls = true };
+        }
+
+        fn stream(ptr: *anyopaque, a: std.mem.Allocator, request: provider.Request, sink: provider.EventSink) anyerror!void {
+            _ = ptr;
+            _ = a;
+            try std.testing.expectEqual(@as(usize, 1), request.prompt_ir.stable_blocks.len);
+            try std.testing.expectEqual(@as(usize, 1), request.tools.len);
+            try std.testing.expectEqualStrings("shell", request.tools[0].name);
+            try sink.emit(.started);
+            try sink.emit(.{ .text_delta = "running" });
+            try sink.emit(.{ .tool_use_start = .{ .index = 0, .id = "c1", .name = "shell" } });
+            try sink.emit(.{ .tool_use_input_delta = .{ .index = 0, .fragment = "{\"command\":\"echo one\"}" } });
+            try sink.emit(.{ .tool_use_start = .{ .index = 1, .id = "c2", .name = "shell" } });
+            try sink.emit(.{ .tool_use_input_delta = .{ .index = 1, .fragment = "{\"command\":\"echo two\"}" } });
+            try sink.emit(.{ .done = .tool_use });
+        }
+
+        const vtable: provider.Model.VTable = .{
+            .name = name,
+            .modelName = modelName,
+            .capabilities = capabilities,
+            .stream = stream,
+        };
     };
 
     var threaded: std.Io.Threaded = .init(alloc, .{});
@@ -136,8 +170,12 @@ test "one step runs a batch of two shell calls and appends one result turn" {
     }};
     const tools: registry.ToolSetSnapshot = .{ .tools = &fake_tools };
 
-    try runStep(alloc, &l, .{ .step = Scripted.step }, tools, .{
-        .io = threaded.io(),
+    var lenv = try environment.LocalEnvironment.init(alloc, threaded.io(), .{});
+    defer lenv.deinit();
+
+    var scripted = Scripted{};
+    _ = try runStep(alloc, &l, .{ .ptr = &scripted, .vtable = &Scripted.vtable }, tools, .{
+        .environment = lenv.environment(),
         .cwd = ".",
         .scratch_dir = "/tmp",
         .event_seq = 0,

@@ -8,6 +8,7 @@
 const std = @import("std");
 const tool = @import("../tool.zig");
 const emit = @import("../emit.zig");
+const environment = @import("../environment.zig");
 
 const MAX_FILE_BYTES: usize = 10 * 1024 * 1024;
 
@@ -49,7 +50,7 @@ fn run(alloc: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.ToolResult
     defer alloc.free(path);
 
     const cwd = std.Io.Dir.cwd();
-    const contents = cwd.readFileAlloc(req.ctx.io, path, alloc, .limited(MAX_FILE_BYTES)) catch |err| {
+    const contents = cwd.readFileAlloc(req.ctx.environment.io, path, alloc, .limited(MAX_FILE_BYTES)) catch |err| {
         const msg = try std.fmt.allocPrint(alloc, "cannot read {s}: {s}", .{ path, @errorName(err) });
         defer alloc.free(msg);
         return finish(alloc, req, false, msg);
@@ -68,7 +69,7 @@ fn run(alloc: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.ToolResult
     const updated = try std.mem.replaceOwned(u8, alloc, contents, old_string, new_string);
     defer alloc.free(updated);
 
-    atomicWriteFile(req.ctx.io, path, updated) catch |err| {
+    atomicWriteFile(req.ctx.environment.io, path, updated) catch |err| {
         const msg = try std.fmt.allocPrint(alloc, "cannot atomically write {s}: {s}", .{ path, @errorName(err) });
         defer alloc.free(msg);
         return finish(alloc, req, false, msg);
@@ -102,7 +103,7 @@ fn teach(alloc: std.mem.Allocator, req: tool.ToolRequest, msg: []const u8) !tool
 }
 
 fn finish(alloc: std.mem.Allocator, req: tool.ToolRequest, ok: bool, raw: []const u8) !tool.ToolResult {
-    const out = try emit.emit(alloc, req.ctx.io, raw, "edit", req.ctx.event_seq, req.ctx.call_index, req.ctx.scratch_dir, req.ctx.budget);
+    const out = try emit.emit(alloc, req.ctx.environment.io, raw, "edit", req.ctx.event_seq, req.ctx.call_index, req.ctx.scratch_dir, req.ctx.budget);
     return .{ .ok = ok, .output = out.text, .spill_path = out.spill_path };
 }
 
@@ -130,10 +131,13 @@ test "edit preserves executable file permissions" {
     , .{});
     defer parsed.deinit();
 
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+
     const res = try run(alloc, .{
         .args = parsed.value,
         .ctx = .{
-            .io = io,
+            .environment = lenv.environment(),
             .cwd = tmp_path,
             .scratch_dir = tmp_path,
             .event_seq = 0,

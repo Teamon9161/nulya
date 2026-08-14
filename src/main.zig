@@ -8,18 +8,50 @@
 const std = @import("std");
 const ledger = @import("ledger.zig");
 const loop = @import("loop.zig");
+const provider = @import("provider.zig");
+const openai = @import("providers/openai.zig");
 const registry = @import("registry.zig");
 const tool = @import("tool.zig");
+const environment = @import("environment.zig");
 
-/// Scripted stand-in model: on seeing a pending user turn, it issues two shell
-/// calls in a single assistant turn — demonstrating batched execution.
-fn scriptedModel(alloc: std.mem.Allocator, view: []const ledger.Event) anyerror!loop.ModelTurn {
-    _ = view;
-    const calls = try alloc.alloc(ledger.ToolCall, 2);
-    calls[0] = .{ .id = "c1", .tool = "shell", .args_json = "{\"command\":\"echo hello from nulya\"}" };
-    calls[1] = .{ .id = "c2", .tool = "shell", .args_json = "{\"command\":\"uname -s\"}" };
-    return .{ .text = "Let me probe the environment.", .calls = calls };
-}
+/// Scripted stand-in provider: on seeing a pending user turn, it issues two
+/// shell calls in a single assistant turn — demonstrating batched execution.
+const ScriptedProvider = struct {
+    fn name(ptr: *anyopaque) []const u8 {
+        _ = ptr;
+        return "scripted";
+    }
+
+    fn modelName(ptr: *anyopaque) []const u8 {
+        _ = ptr;
+        return "scripted-demo";
+    }
+
+    fn capabilities(ptr: *anyopaque) provider.ProviderCapabilities {
+        _ = ptr;
+        return .{ .parallel_tool_calls = true };
+    }
+
+    fn stream(ptr: *anyopaque, alloc: std.mem.Allocator, request: provider.Request, sink: provider.EventSink) anyerror!void {
+        _ = ptr;
+        _ = alloc;
+        _ = request;
+        try sink.emit(.started);
+        try sink.emit(.{ .text_delta = "Let me probe the environment." });
+        try sink.emit(.{ .tool_use_start = .{ .index = 0, .id = "c1", .name = "shell" } });
+        try sink.emit(.{ .tool_use_input_delta = .{ .index = 0, .fragment = "{\"command\":\"echo hello-from-nulya\"}" } });
+        try sink.emit(.{ .tool_use_start = .{ .index = 1, .id = "c2", .name = "shell" } });
+        try sink.emit(.{ .tool_use_input_delta = .{ .index = 1, .fragment = "{\"command\":\"pwd\"}" } });
+        try sink.emit(.{ .done = .tool_use });
+    }
+
+    const vtable: provider.Model.VTable = .{
+        .name = name,
+        .modelName = modelName,
+        .capabilities = capabilities,
+        .stream = stream,
+    };
+};
 
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -38,17 +70,76 @@ pub fn main() !void {
     const tools = try registry.snapshot(alloc);
     defer tools.deinit(alloc);
 
-    try loop.runStep(alloc, &l, .{ .step = scriptedModel }, tools, .{
-        .io = io,
+    // Host env: read here to CONFIGURE the provider (the host owns its own keys).
+    var env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    defer env.deinit();
+
+    // Execution env: the sanitized boundary every tool runs behind. Host secrets
+    // in `env` above never cross into it (DESIGN §9).
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+
+    var scripted = ScriptedProvider{};
+    var openai_provider: openai.OpenAiProvider = undefined;
+    var use_openai = false;
+    defer if (use_openai) openai_provider.deinit();
+
+    const model: provider.Model = if (env.get("OPENAI_API_KEY")) |api_key|
+        if (api_key.len != 0) blk: {
+            openai_provider = try openai.OpenAiProvider.init(alloc, io, .{
+                .api_key = api_key,
+                .model = env.get("OPENAI_MODEL") orelse "gpt-4o-mini",
+                .base_url = env.get("OPENAI_BASE_URL") orelse "https://api.openai.com/v1",
+            });
+            use_openai = true;
+            break :blk openai_provider.modelHandle();
+        } else .{ .ptr = &scripted, .vtable = &ScriptedProvider.vtable }
+    else
+        .{ .ptr = &scripted, .vtable = &ScriptedProvider.vtable };
+
+    std.debug.print("provider: {s}/{s} (shell dialect: {s})\n", .{ model.name(), model.modelName(), lenv.dialect_val.label() });
+
+    const ctx: tool.CtxHeader = .{
+        .environment = lenv.environment(),
         .cwd = ".",
         .scratch_dir = ".nulya/scratch",
         .event_seq = 0,
         .call_index = 0,
-    });
+    };
+
+    var total: provider.Usage = .{};
+    if (use_openai) {
+        var steps: usize = 0;
+        while (steps < 4) : (steps += 1) {
+            accumulate(&total, try loop.runStep(alloc, &l, model, tools, ctx));
+            if (lastAssistantDone(&l)) break;
+        }
+    } else {
+        accumulate(&total, try loop.runStep(alloc, &l, model, tools, ctx));
+    }
 
     printLedger(&l);
+    std.debug.print(
+        "=== usage: input={d} cache_read={d} output={d} ===\n",
+        .{ total.input_tokens, total.cache_read_tokens, total.output_tokens },
+    );
 
     // Ledger owns cloned assistant/tool-result payloads and frees them in deinit.
+}
+
+fn accumulate(total: *provider.Usage, step: provider.Usage) void {
+    total.input_tokens += step.input_tokens;
+    total.output_tokens += step.output_tokens;
+    total.cache_read_tokens += step.cache_read_tokens;
+    total.cache_write_tokens += step.cache_write_tokens;
+}
+
+fn lastAssistantDone(l: *const ledger.Ledger) bool {
+    if (l.len() == 0) return false;
+    return switch (l.view()[l.len() - 1]) {
+        .assistant => |as| as.calls.len == 0,
+        else => false,
+    };
 }
 
 fn printLedger(l: *const ledger.Ledger) void {
@@ -78,4 +169,7 @@ test {
     _ = @import("registry.zig");
     _ = @import("loop.zig");
     _ = @import("prompt.zig");
+    _ = @import("provider.zig");
+    _ = @import("providers/openai.zig");
+    _ = @import("environment.zig");
 }

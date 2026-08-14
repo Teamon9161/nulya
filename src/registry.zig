@@ -30,6 +30,15 @@ pub const ToolSetSnapshot = struct {
         }
         return null;
     }
+
+    /// Borrow-free model-facing definitions for provider serialization. The
+    /// returned slice owns only the array; each definition points at the frozen
+    /// snapshot's static/manifest-backed strings.
+    pub fn definitions(self: ToolSetSnapshot, alloc: std.mem.Allocator) ![]tool.ToolDefinition {
+        const defs = try alloc.alloc(tool.ToolDefinition, self.tools.len);
+        for (self.tools, 0..) |t, i| defs[i] = t.definition;
+        return defs;
+    }
 };
 
 pub fn snapshot(alloc: std.mem.Allocator) !ToolSetSnapshot {
@@ -54,4 +63,15 @@ test "snapshot exposes unique model-facing names" {
             try std.testing.expect(!std.mem.eql(u8, a.definition.name, b.definition.name));
         }
     }
+}
+
+test "snapshot exports provider-facing tool definitions without handlers" {
+    const snap = try snapshot(std.testing.allocator);
+    defer snap.deinit(std.testing.allocator);
+
+    const defs = try snap.definitions(std.testing.allocator);
+    defer std.testing.allocator.free(defs);
+
+    try std.testing.expectEqual(snap.tools.len, defs.len);
+    try std.testing.expectEqualStrings(snap.tools[0].definition.name, defs[0].name);
 }
