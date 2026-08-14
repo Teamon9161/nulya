@@ -1,0 +1,12 @@
+.{
+    .name = .nulya,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0x3944cfaa97bc6d9d,
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "docs",
+    },
+}
