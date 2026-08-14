@@ -61,14 +61,36 @@ pub const ToolRequest = struct {
     ctx: CtxHeader,
 };
 
-/// A single tool invocation result, already passed through `emit`.
-pub const ToolResult = struct {
+/// A single tool invocation result before model-facing output discipline.
+pub const RawToolResult = struct {
     ok: bool,
-    /// Text returned to the model (post-`emit`: line-clipped, budget-bounded).
+    /// Raw text produced by the executor, owned by the caller's allocator. The
+    /// kernel applies `emit` after the executor returns, so builtin / extension /
+    /// MCP executors never need to know scratch paths, spill budgets, or
+    /// presentation rules.
     output: []const u8,
-    /// If output overflowed, the full raw text was written here.
-    spill_path: ?[]const u8 = null,
 };
+
+pub const ToolExecutor = struct {
+    ptr: *anyopaque,
+    callFn: *const fn (ptr: *anyopaque, alloc: std.mem.Allocator, req: ToolRequest) anyerror!RawToolResult,
+
+    pub fn call(self: ToolExecutor, alloc: std.mem.Allocator, req: ToolRequest) !RawToolResult {
+        return self.callFn(self.ptr, alloc, req);
+    }
+};
+
+pub fn functionExecutor(comptime runFn: *const fn (alloc: std.mem.Allocator, req: ToolRequest) anyerror!RawToolResult) ToolExecutor {
+    const Adapter = struct {
+        var token: u8 = 0;
+
+        fn call(ptr: *anyopaque, alloc: std.mem.Allocator, req: ToolRequest) anyerror!RawToolResult {
+            _ = ptr;
+            return runFn(alloc, req);
+        }
+    };
+    return .{ .ptr = &Adapter.token, .callFn = Adapter.call };
+}
 
 /// Model-facing tool definition. This is the shape provider serialization and
 /// extension manifests share.
@@ -90,13 +112,10 @@ pub const BatchPolicy = enum {
 
 /// A registered tool: its model-facing definition, scheduling contract, and
 /// execution handler.
-///
-/// Builtins use function pointers. Extensions can later use a different handler
-/// representation without changing provider serialization.
 pub const Tool = struct {
     definition: ToolDefinition,
     batch_policy: BatchPolicy = .sequential,
-    run: *const fn (alloc: std.mem.Allocator, req: ToolRequest) anyerror!ToolResult,
+    executor: ToolExecutor,
 };
 
 /// Helper: fetch a required string field from `args`, with a teaching error.
@@ -126,7 +145,7 @@ test "requireString reports missing field distinctly from wrong type" {
 
 test "tools default to sequential batch policy" {
     const Fake = struct {
-        fn run(alloc: std.mem.Allocator, req: ToolRequest) anyerror!ToolResult {
+        fn run(alloc: std.mem.Allocator, req: ToolRequest) anyerror!RawToolResult {
             _ = req;
             return .{ .ok = true, .output = try alloc.dupe(u8, "ok") };
         }
@@ -139,7 +158,7 @@ test "tools default to sequential batch policy" {
             .description = "fake",
             .input_schema = "{}",
         },
-        .run = Fake.run,
+        .executor = functionExecutor(Fake.run),
     };
     try std.testing.expectEqual(BatchPolicy.sequential, fake.batch_policy);
 }

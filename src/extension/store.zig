@@ -2,7 +2,7 @@
 //! (DESIGN §7.4).
 //!
 //! Nulya never overwrites a running tool's binary. Every build produces an
-//! IMMUTABLE version whose id is `hash(source + zig_version + target + manifest)`;
+//! IMMUTABLE version whose id is `hash(package_snapshot + compiler + target)`;
 //! versions accumulate side by side and a single `current` pointer selects the
 //! active one. Switching is an atomic rename, so rollback is just repointing
 //! `current` at an older version — B breaking never disturbs A.
@@ -13,7 +13,9 @@
 //!     versions/
 //!       v-<hash>/
 //!         extension.json
-//!         bin/<entry>        # only when the manifest declares runtime
+//!         package/src/...       # frozen runtime source, when runtime exists
+//!         package/skills/...    # frozen declared skill directories
+//!         bin/<entry>           # only when the manifest declares runtime
 //!     current              # text file holding "v-<hash>"
 //!
 //! `current` is a plain file, not a symlink: symlinks need privilege on Windows
@@ -43,10 +45,9 @@ pub const Store = struct {
     /// Inputs that make a build reproducible; identical inputs -> identical
     /// version id (DESIGN §7.4, §10).
     pub const VersionInputs = struct {
-        source: []const u8,
-        zig_version: []const u8,
+        snapshot: []const u8,
+        compiler: []const u8,
         target: []const u8,
-        manifest: []const u8,
     };
 
     /// `v-<hex>`. Pure function of the inputs — no I/O. Caller owns the result.
@@ -54,7 +55,7 @@ pub const Store = struct {
         var h = std.crypto.hash.sha2.Sha256.init(.{});
         // Length-prefix each field so no concatenation of two fields can alias
         // another split of the same bytes.
-        inline for (.{ inputs.source, inputs.zig_version, inputs.target, inputs.manifest }) |field| {
+        inline for (.{ inputs.snapshot, inputs.compiler, inputs.target }) |field| {
             var len_le: [8]u8 = undefined;
             std.mem.writeInt(u64, &len_le, field.len, .little);
             h.update(&len_le);
@@ -186,9 +187,19 @@ fn validateBuiltVersion(self: Store, alloc: std.mem.Allocator, id: []const u8, v
     if (!std.mem.eql(u8, m.id, id)) return error.VersionManifestIdMismatch;
 
     if (m.runtime) |rt| {
+        const source_sub = try std.fs.path.join(alloc, &.{ id, versions_dir, version, "package", "src", "main.zig" });
+        defer alloc.free(source_sub);
+        self.root.access(self.io, source_sub, .{}) catch return error.VersionPackageMissing;
+
         const entry_sub = try self.versionEntryPath(alloc, id, version, rt.entry);
         defer alloc.free(entry_sub);
         self.root.access(self.io, entry_sub, .{}) catch return error.VersionEntryNotFound;
+    }
+
+    for (m.skills) |skill_path| {
+        const skill_sub = try std.fs.path.join(alloc, &.{ id, versions_dir, version, "package", skill_path });
+        defer alloc.free(skill_sub);
+        self.root.access(self.io, skill_sub, .{}) catch return error.VersionPackageMissing;
     }
 }
 
@@ -196,6 +207,12 @@ fn writeBuiltVersion(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id:
     const dir = try std.fs.path.join(alloc, &.{ id, versions_dir, version, "bin" });
     defer alloc.free(dir);
     try root.createDirPath(io, dir);
+    const src_dir = try std.fs.path.join(alloc, &.{ id, versions_dir, version, "package", "src" });
+    defer alloc.free(src_dir);
+    try root.createDirPath(io, src_dir);
+    const main_sub = try std.fs.path.join(alloc, &.{ src_dir, "main.zig" });
+    defer alloc.free(main_sub);
+    try root.writeFile(io, .{ .sub_path = main_sub, .data = "pub fn main() void {}" });
 
     const manifest_bytes = try std.fmt.allocPrint(alloc,
         \\{{"schema":"nulya.extension/v2","id":"{s}","version":"0.1.0","runtime":{{"entry":"bin/demo","mode":"oneshot"}},"contributes":{{"tools":[{{"name":"greet","input":{{}}}}],"skills":[]}},"permissions":{{}}}}
@@ -219,7 +236,7 @@ fn freeVersions(alloc: std.mem.Allocator, versions: []const []u8) void {
 
 test "version id is deterministic and inputs-sensitive" {
     const alloc = std.testing.allocator;
-    const base: Store.VersionInputs = .{ .source = "pub fn main() {}", .zig_version = "0.16.0", .target = "x86_64-windows", .manifest = "{}" };
+    const base: Store.VersionInputs = .{ .snapshot = "extension.json\x02{}", .compiler = "zig 0.16.0", .target = "x86_64-windows" };
 
     const a = try Store.versionId(alloc, base);
     defer alloc.free(a);
@@ -229,7 +246,7 @@ test "version id is deterministic and inputs-sensitive" {
     try std.testing.expect(std.mem.startsWith(u8, a, "v-"));
 
     var changed = base;
-    changed.source = "pub fn main() void {}";
+    changed.snapshot = "extension.json\x02{\"changed\":true}";
     const c = try Store.versionId(alloc, changed);
     defer alloc.free(c);
     try std.testing.expect(!std.mem.eql(u8, a, c));
@@ -296,10 +313,11 @@ test "activate accepts a runtime-less skill version" {
     defer tmp.cleanup();
     const store = Store.init(io, tmp.dir);
 
-    try tmp.dir.createDirPath(io, "skills" ++ std.fs.path.sep_str ++ "versions" ++ std.fs.path.sep_str ++ "v-aaaa");
+    try tmp.dir.createDirPath(io, "skills" ++ std.fs.path.sep_str ++ "versions" ++ std.fs.path.sep_str ++ "v-aaaa" ++ std.fs.path.sep_str ++ "package" ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "demo");
     try tmp.dir.writeFile(io, .{ .sub_path = "skills" ++ std.fs.path.sep_str ++ "versions" ++ std.fs.path.sep_str ++ "v-aaaa" ++ std.fs.path.sep_str ++ "extension.json", .data =
         \\{"schema":"nulya.extension/v2","id":"skills","version":"1","contributes":{"skills":["skills/demo"]}}
     });
+    try tmp.dir.writeFile(io, .{ .sub_path = "skills" ++ std.fs.path.sep_str ++ "versions" ++ std.fs.path.sep_str ++ "v-aaaa" ++ std.fs.path.sep_str ++ "package" ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "demo" ++ std.fs.path.sep_str ++ "SKILL.md", .data = "demo" });
 
     try store.activate(alloc, "skills", "v-aaaa");
     const active = (try store.activeVersion(alloc, "skills")).?;

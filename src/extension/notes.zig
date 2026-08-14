@@ -3,11 +3,11 @@
 //! When the agent builds and activates an extension mid-conversation (via
 //! `shell` -> `nulya ext …`), the CLI runs in a subprocess and cannot touch the
 //! in-memory ledger. The core reconciles instead: it scans the active
-//! extensions on disk and, for any that the ledger has not yet announced,
-//! appends ONE `tool_available_note`. Because that is a plain append, the prompt
-//! prefix stays stable (the cache keeps hitting) and the model can invoke the
-//! new tool through `shell` on its next step. Promotion into `tools[]` waits for
-//! the next conversation, at zero cache cost (DESIGN §5.1).
+//! extensions on disk and, for any active version that the ledger has not yet
+//! announced, appends ONE `capability_note`. Because that is a plain append, the
+//! prompt prefix stays stable (the cache keeps hitting) and the model can invoke
+//! the new tool through `shell` on its next step. Promotion into `tools[]` waits
+//! for the next conversation, at zero cache cost (DESIGN §5.1).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -17,28 +17,39 @@ const store = @import("store.zig");
 
 const exe_suffix = if (builtin.os.tag == .windows) ".exe" else "";
 
-/// Model-facing announcement text for one extension. Deterministic: the same
-/// inputs always yield the same bytes, so `containsNoteFor` can detect it.
-pub fn noteText(alloc: std.mem.Allocator, id: []const u8, tool: []const u8) ![]u8 {
-    return std.fmt.allocPrint(alloc,
-        \\New capability available: tool `{s}` from extension `{s}`.
-        \\Invoke it through the shell tool: nulya ext run {s} '<json-args>'
-    , .{ tool, id, id });
+/// Model-facing announcement text for one active extension version.
+/// Deterministic: the same inputs always yield the same bytes, so
+/// `containsNoteFor` can detect it.
+pub fn noteText(alloc: std.mem.Allocator, id: []const u8, version: []const u8, tools: []const manifest.ToolSpec) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+
+    try out.print(alloc, "New capabilities from extension `{s}` version `{s}` are now available:\n\n", .{ id, version });
+    for (tools) |tool| {
+        const description = if (tool.description.len == 0) "No description." else tool.description;
+        try out.print(alloc, "- {s} — {s}\n", .{ tool.name, description });
+    }
+    try out.print(alloc,
+        \\
+        \\Invoke through the shell tool:
+        \\nulya ext run {s} <tool> '<json-args>'
+    , .{id});
+    return out.toOwnedSlice(alloc);
 }
 
-/// True if the ledger already announced `id`. Detection keys on the exact
-/// ``extension `<id>` `` phrase `noteText` emits.
-pub fn containsNoteFor(l: *const ledger.Ledger, alloc: std.mem.Allocator, id: []const u8) !bool {
-    const marker = try std.fmt.allocPrint(alloc, "extension `{s}`", .{id});
+/// True if the ledger already announced `id@version`. Detection keys on the
+/// exact ``extension `<id>` version `<version>` `` phrase `noteText` emits.
+pub fn containsNoteFor(l: *const ledger.Ledger, alloc: std.mem.Allocator, id: []const u8, version: []const u8) !bool {
+    const marker = try std.fmt.allocPrint(alloc, "extension `{s}` version `{s}`", .{ id, version });
     defer alloc.free(marker);
     for (l.view()) |event| switch (event) {
-        .tool_available_note => |text| if (std.mem.indexOf(u8, text, marker) != null) return true,
+        .capability_note => |text| if (std.mem.indexOf(u8, text, marker) != null) return true,
         else => {},
     };
     return false;
 }
 
-/// Append a `tool_available_note` for every active extension under
+/// Append a `capability_note` for every active extension version under
 /// `ext_root_rel` (resolved against `cwd`) that the ledger has not announced yet.
 /// Missing root is a no-op.
 pub fn syncFromActiveExtensions(
@@ -80,7 +91,7 @@ pub fn syncOpen(alloc: std.mem.Allocator, io: std.Io, l: *ledger.Ledger, root: s
         const active = (st.activeVersion(alloc, id) catch continue) orelse continue;
         defer alloc.free(active);
 
-        if (try containsNoteFor(l, alloc, id)) continue;
+        if (try containsNoteFor(l, alloc, id, active)) continue;
 
         const manifest_sub = st.versionManifestPath(alloc, id, active) catch continue;
         defer alloc.free(manifest_sub);
@@ -93,39 +104,44 @@ pub fn syncOpen(alloc: std.mem.Allocator, io: std.Io, l: *ledger.Ledger, root: s
 
         if (m.tools.len == 0) continue;
 
-        const text = try noteText(alloc, m.id, m.tools[0].name);
+        const text = try noteText(alloc, m.id, active, m.tools);
         defer alloc.free(text);
-        try l.append(.{ .tool_available_note = text });
+        try l.append(.{ .capability_note = text });
     }
 }
 
 const test_manifest =
     \\{"schema":"nulya.extension/v2","id":"demo","version":"0.1.0","runtime":{"entry":"bin/demo","mode":"oneshot"},
-    \\ "contributes":{"tools":[{"name":"greet","input":{}}],"skills":[]},"permissions":{}}
+    \\ "contributes":{"tools":[{"name":"greet","description":"Say hello.","input":{}}],"skills":[]},"permissions":{}}
 ;
 
-test "noteText is deterministic and names the invocation" {
+const test_manifest_v2 =
+    \\{"schema":"nulya.extension/v2","id":"demo","version":"0.2.0","runtime":{"entry":"bin/demo","mode":"oneshot"},
+    \\ "contributes":{"tools":[{"name":"greet","description":"Say hello.","input":{}},{"name":"wave","description":"Wave goodbye.","input":{}}],"skills":[]},"permissions":{}}
+;
+
+test "noteText is deterministic and names every invocation" {
     const alloc = std.testing.allocator;
-    const a = try noteText(alloc, "demo", "greet");
+    var m = try manifest.parse(alloc, test_manifest_v2);
+    defer m.deinit();
+    const a = try noteText(alloc, "demo", "v-bbbb", m.tools);
     defer alloc.free(a);
-    const b = try noteText(alloc, "demo", "greet");
+    const b = try noteText(alloc, "demo", "v-bbbb", m.tools);
     defer alloc.free(b);
     try std.testing.expectEqualStrings(a, b);
-    try std.testing.expect(std.mem.indexOf(u8, a, "nulya ext run demo") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a, "extension `demo` version `v-bbbb`") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a, "greet") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a, "wave") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a, "nulya ext run demo <tool>") != null);
 }
 
-test "sync appends one note per active extension and is idempotent" {
+test "sync appends one note per active extension version and is idempotent" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.createDirPath(io, "demo" ++ std.fs.path.sep_str ++ "versions" ++ std.fs.path.sep_str ++ "v-aaaa" ++ std.fs.path.sep_str ++ "bin");
-    try tmp.dir.writeFile(io, .{ .sub_path = "demo" ++ std.fs.path.sep_str ++ "extension.json", .data =
-        \\{"schema":"nulya.extension/v2","id":"demo","version":"0.2.0","runtime":{"entry":"bin/stale","mode":"oneshot"},"contributes":{"tools":[{"name":"stale","input":{}}],"skills":[]},"permissions":{}}
-    });
-    try tmp.dir.writeFile(io, .{ .sub_path = "demo" ++ std.fs.path.sep_str ++ "versions" ++ std.fs.path.sep_str ++ "v-aaaa" ++ std.fs.path.sep_str ++ "extension.json", .data = test_manifest });
-    try tmp.dir.writeFile(io, .{ .sub_path = "demo" ++ std.fs.path.sep_str ++ "versions" ++ std.fs.path.sep_str ++ "v-aaaa" ++ std.fs.path.sep_str ++ "bin" ++ std.fs.path.sep_str ++ "demo" ++ exe_suffix, .data = "" });
+    try writeVersion(alloc, io, tmp.dir, "demo", "v-aaaa", test_manifest);
     var root = try tmp.dir.openDir(io, ".", .{ .iterate = true });
     defer root.close(io);
     try store.Store.init(io, root).activate(alloc, "demo", "v-aaaa");
@@ -135,13 +151,40 @@ test "sync appends one note per active extension and is idempotent" {
 
     try syncOpen(alloc, io, &l, root);
     try std.testing.expectEqual(@as(usize, 1), l.len());
-    try std.testing.expect(l.view()[0] == .tool_available_note);
-    try std.testing.expect(try containsNoteFor(&l, alloc, "demo"));
-    try std.testing.expect(std.mem.indexOf(u8, l.view()[0].tool_available_note, "stale") == null);
+    try std.testing.expect(l.view()[0] == .capability_note);
+    try std.testing.expect(try containsNoteFor(&l, alloc, "demo", "v-aaaa"));
+    try std.testing.expect(std.mem.indexOf(u8, l.view()[0].capability_note, "stale") == null);
 
-    // Running again adds nothing.
+    // Running again adds nothing for the same active version.
     try syncOpen(alloc, io, &l, root);
     try std.testing.expectEqual(@as(usize, 1), l.len());
+}
+
+test "activating a new version appends a new note with all tools" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeVersion(alloc, io, tmp.dir, "demo", "v-aaaa", test_manifest);
+    try writeVersion(alloc, io, tmp.dir, "demo", "v-bbbb", test_manifest_v2);
+    var root = try tmp.dir.openDir(io, ".", .{ .iterate = true });
+    defer root.close(io);
+    const st = store.Store.init(io, root);
+
+    var l = ledger.Ledger.init(alloc);
+    defer l.deinit();
+
+    try st.activate(alloc, "demo", "v-aaaa");
+    try syncOpen(alloc, io, &l, root);
+    try st.activate(alloc, "demo", "v-bbbb");
+    try syncOpen(alloc, io, &l, root);
+
+    try std.testing.expectEqual(@as(usize, 2), l.len());
+    try std.testing.expect(try containsNoteFor(&l, alloc, "demo", "v-aaaa"));
+    try std.testing.expect(try containsNoteFor(&l, alloc, "demo", "v-bbbb"));
+    try std.testing.expect(std.mem.indexOf(u8, l.view()[1].capability_note, "greet") != null);
+    try std.testing.expect(std.mem.indexOf(u8, l.view()[1].capability_note, "wave") != null);
 }
 
 test "an inactive extension is not announced" {
@@ -151,8 +194,7 @@ test "an inactive extension is not announced" {
     defer tmp.cleanup();
 
     // Built but never activated: no `current` pointer.
-    try tmp.dir.createDirPath(io, "demo" ++ std.fs.path.sep_str ++ "versions" ++ std.fs.path.sep_str ++ "v-aaaa");
-    try tmp.dir.writeFile(io, .{ .sub_path = "demo" ++ std.fs.path.sep_str ++ "extension.json", .data = test_manifest });
+    try writeVersion(alloc, io, tmp.dir, "demo", "v-aaaa", test_manifest);
     var root = try tmp.dir.openDir(io, ".", .{ .iterate = true });
     defer root.close(io);
 
@@ -160,4 +202,26 @@ test "an inactive extension is not announced" {
     defer l.deinit();
     try syncOpen(alloc, io, &l, root);
     try std.testing.expectEqual(@as(usize, 0), l.len());
+}
+
+fn writeVersion(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id: []const u8, version: []const u8, manifest_bytes: []const u8) !void {
+    const bin_dir = try std.fs.path.join(alloc, &.{ id, "versions", version, "bin" });
+    defer alloc.free(bin_dir);
+    try root.createDirPath(io, bin_dir);
+
+    const src_dir = try std.fs.path.join(alloc, &.{ id, "versions", version, "package", "src" });
+    defer alloc.free(src_dir);
+    try root.createDirPath(io, src_dir);
+
+    const manifest_sub = try std.fs.path.join(alloc, &.{ id, "versions", version, "extension.json" });
+    defer alloc.free(manifest_sub);
+    try root.writeFile(io, .{ .sub_path = manifest_sub, .data = manifest_bytes });
+
+    const source_sub = try std.fs.path.join(alloc, &.{ id, "versions", version, "package", "src", "main.zig" });
+    defer alloc.free(source_sub);
+    try root.writeFile(io, .{ .sub_path = source_sub, .data = "pub fn main() void {}" });
+
+    const entry_sub = try std.fs.path.join(alloc, &.{ id, "versions", version, "bin", "demo" ++ exe_suffix });
+    defer alloc.free(entry_sub);
+    try root.writeFile(io, .{ .sub_path = entry_sub, .data = "" });
 }

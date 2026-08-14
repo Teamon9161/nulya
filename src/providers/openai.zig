@@ -228,7 +228,7 @@ fn writeMessages(jw: *std.json.Stringify, ir: *const prompt.PromptIR) !void {
             // A capability announcement (DESIGN §5.3): an out-of-band system
             // message the model reads to learn it can now shell out to a new
             // extension. Appended, so it never disturbs the cached prefix.
-            .tool_note => {
+            .capability_note => {
                 try writeRoleContentMessage(jw, "system", block.bytes);
                 i += 1;
             },

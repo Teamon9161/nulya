@@ -42,6 +42,7 @@ pub fn build(b: *std.Build) void {
 
     const tests = b.addTest(.{ .root_module = root });
     const run_tests = b.addRunArtifact(tests);
+    run_tests.setEnvironmentVariable("NULYA_TEST_ZIG", b.graph.zig_exe);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
 

@@ -193,7 +193,7 @@ fn printLedger(l: *const ledger.Ledger) void {
                 p("[{d}] tool_results ({d}):\n", .{ i, rs.len });
                 for (rs) |r| p("      {s} ok={} | {s}\n", .{ r.call_id, r.ok, std.mem.trimEnd(u8, r.output, "\n") });
             },
-            .tool_available_note => |t| p("[{d}] note: {s}\n", .{ i, t }),
+            .capability_note => |t| p("[{d}] note: {s}\n", .{ i, t }),
         }
     }
 }

@@ -99,7 +99,7 @@ Ledger 不是 `Vec<Message>` 加随手 truncate，而是一条 **durable、appen
 
 ```
 user_message | assistant_message | tool_call | tool_result
-| tool_available_note      // 对话中新增能力，见 §5.3
+| capability_note          // 对话中新增能力，见 §5.3
 | registry_selection       // 对话开始时选定的 tools[]
 | extension_build | extension_activate
 | extension_review         // policy hook 结论，见 agents-and-review.md
@@ -178,8 +178,8 @@ Registry 里 `id` 是稳定身份，`name` 是 model-facing 名字；同一个 `
 Agent 在对话中途造出/发现新 extension 时：
 
 - **不修改** `tools[]`（改了就 miss）。
-- **append** 一条 `tool_available_note` 事件，内容形如：
-  > 新能力可用：`web_search`。调用方式：`shell` 执行 `nulya ext run web.search '{"query": "..."}'`。
+- **append** 一条 `capability_note` 事件，内容形如：
+  > Extension `web.search` version `v-a8fc…` is now available：列出该版本贡献的所有可调用 tool，并给出 `nulya ext run web.search <tool> '{...}'` 调用方式。
 - 因为是追加，前缀不动，缓存继续命中；模型下一 step 即可经 shell 调用。
 - 该 extension 会在**下一场对话**的 §5.1 选择里，凭统计有机会被晋升进 `tools[]`（此时零缓存成本）。
 
@@ -318,7 +318,7 @@ method 随 Contribution 自然扩展，协议不用推翻：`tool/call` · `hook
 
 好处的边界要说清：这**不会**让 ACP / MCP / extension 三套业务协议变成同一份代码，但 framing / request-id / error / notification 这些**基础机制**不用反复发明——ACP、MCP 本身也都以 JSON-RPC 为底。oneshot extension 用不到 notification / batching 机制，只借 envelope 形状，transport 仍是 spawn-per-call。
 
-v0.1 runtime **仍不做** daemon / persistent worker / streaming / bidirectional events / host callbacks——只是 envelope 从"`tool` 写死"换成"`method` 通用"。
+v0.1 runtime **仍不做** daemon / persistent worker / streaming / bidirectional events / host callbacks。当前 `tool/call` 请求用专用的 `ToolCallRequest` 类型表达；响应必须包含与请求相同的 `id`，否则视为 invalid response。等真正出现 `skill/get` / `hook/call` 等第二种 runtime 方法时，再抽 `JsonRpcRequest { id, method, params_json }`，不提前制造万能 RPC framework。
 
 **关于"每次 spawn 会不会慢 / 会不会堆一大堆进程"（重要，写清）：**
 
@@ -349,8 +349,10 @@ draft ──build──▶ built ──validate/test──▶ installed ──po
                                                        version
 ```
 
-- 每次 build 产出**不可变版本**，版本 id = `hash(source + zig_version + target + manifest)`。
-- 布局：`foo/{v-a8fc3c, v-b193ab}, current -> v-b193ab`。
+- 每次 build 产出**不可变版本**，版本 id = `hash(canonical PackageSnapshot + compiler_identity + target)`。`PackageSnapshot` 第一版收 `extension.json`、runtime 存在时的 `src/**`、以及 manifest 中声明的每个 `contributes.skills[]` 整棵目录；按 `relative_path + file_length + file_bytes` 排序后 hash。`versions/`、`.zig-cache/`、顶层测试输入不进 snapshot。
+- 版本目录冻结 snapshot：`versions/v-…/extension.json` 是 frozen manifest，`versions/v-…/package/src/**` 和 `versions/v-…/package/skills/**` 是 frozen package 内容，`bin/` 只放编译产物。runtime 编译必须从 frozen `package/src/main.zig` 进行，不能再读 mutable draft。
+- `compiler_identity` 取实际执行的 `zig version`。production 通常是 managed pinned Zig；dev/test override 时，hash 记录 override 编译器的真实身份，而不是假装成 pinned 版本。
+- 布局：`foo/versions/{v-a8fc3c, v-b193ab}/…`，`foo/current -> v-b193ab`。
 - 更新 = build 新版本 → deterministic validate → test → policy hooks → **原子切换 current**；旧版本保留。
 - rollback 本质就是 `current = old_version`，无需复杂逻辑。B 挂了 A 完全不动。
 - **kernel 强制的是机制，不强制某个 LLM reviewer 的品味**：manifest schema、协议往返、hash、权限包含关系、原子 activate/rollback 这些 deterministic validation 是内核不变量；“这个参数是否足够通用”属于 policy。
@@ -663,15 +665,17 @@ image/audio kubernetes ssh jira notion ...
 
 以三分（Package / Runtime / Contribution，§7 脊椎）为主轴。按下面顺序推进——**先修已跑通路径上的正确性问题，再做结构泛化，最后接新能力**：
 
-1. **runExtension 加固（排最前，是正确性 bug 不是架构）**：给 `ExtensionOutcome` 补 `stderr`（当前 [environment.zig] `.stderr = .ignore`，AI 无法自修复）；加 `timeout` + `cancellation`（当前 AI 写出 `while(true){}` 能挂死 host）。这条在"AI 自己造工具"路径上最救命。
-2. **ACP 归位**：从 `EnvironmentBackend` 删 `acp`，落到 Frontend/Transport 层（§2.1、§8）。小而清晰。
-3. **manifest → `contributes{}`**：删 `tools.len>0`（`error.NoTools`）不变量，改成"至少一种 contribution"；解锁纯 Skill 包（§7.2）。schema 升 `v2`。
-4. **`Tool.run fn` → `ToolExecutor { ptr, vtable }`**：与 Model / Environment 同构，给 extension / MCP 留真正执行入口（§7.3、§5）。做完 MCP 就完成一半。
-5. **Wire protocol → JSON-RPC `method`**：envelope 从 `tool` 写死改成 `method` + `params`，解耦 runtime 与 Tool（§7.3）。
-6. **抽 `AgentSession`**：把 `main.zig` 手工组装收进一等对象，为 ACP/TUI/App 提供公共 host API；同时把 loop 里漏出的 extension 逻辑（`ctx.ext_root`、每 step `notes.sync`）挪进 session 的 step preparation，让 loop 重新"不知道 extension 这个词"。**先 refactor，不建 fork/resume/lifecycle**（§2.1）。
-7. **SkillRegistry + Agent Skills 兼容**：`SkillProvider { list, get }`，`nulya skill load` 经 shell，渐进披露（§7.7）。
-8. **组合冻结 + 可撤销注册**：session 开始 resolve + freeze extension composition（含 pinned version），记 ledger 事件当 generation base；activate 产 `Registration[]`，disable 逆序 dispose（§7.4）。
-9. **（其后）接 MCP**：`McpClient` 作为 ToolProvider/ResourceProvider/PromptProvider 进同一 registry，**不伪装成 extension**；同样走 capability catalog → selection → 6~8 native，避免把上百 tool 全塞模型（§5 哲学）。
+1. **runExtension 加固（已部分落地）**：`ExtensionOutcome` 已包含 stderr 和 timeout；真正的 cancellation 链仍待接入 Provider / ToolExecutor / Environment。
+2. **ACP 归位（已落地）**：从 `EnvironmentBackend` 删 `acp`，落到 Frontend/Transport 层（§2.1、§8）。
+3. **manifest → `contributes{}`（已落地）**：删 `tools.len>0` 不变量，改成"至少一种 contribution"；解锁纯 Skill 包（§7.2）。schema 升 `v2`。
+4. **Extension PackageSnapshot（已落地）**：version id 覆盖 manifest、runtime `src/**`、声明 skill 目录和真实 compiler identity；版本目录冻结 `package/`，runtime 从 frozen source 编译（§7.4）。
+5. **Wire protocol → JSON-RPC `method`（已落地）**：envelope 使用 `tool/call`，response id 必须匹配；当前保持专用 `ToolCallRequest`，等第二种 runtime 方法出现再抽通用 request（§7.3）。
+6. **`Tool.run fn` → `ToolExecutor { ptr, callFn }`（已落地）**：与 Model / Environment 同构，executor 只返回 raw output；`emit` 在 loop 中统一执行，给 extension / MCP 留真正执行入口（§7.3、§5）。
+7. **抽 `AgentSession`**：把 `main.zig` 手工组装收进一等对象，为 ACP/TUI/App 提供公共 host API；同时把每 step `notes.sync` 挪进 session 的 step preparation，让 loop 重新"不知道 extension 这个词"。**先 refactor，不建 fork/resume/lifecycle**（§2.1）。
+8. **统一 Cancellation 链**：在 AgentSession 下贯穿 Provider streaming、ToolExecutor call、Environment spawn/run；timeout 不等于 cancellation。
+9. **SkillRegistry + Agent Skills 兼容**：`SkillProvider { list, get }`，`nulya skill load` 经 shell，渐进披露（§7.7）。
+10. **组合冻结 + 可撤销注册**：session 开始 resolve + freeze extension composition（含 pinned version），记 ledger 事件当 generation base；activate 产 `Registration[]`，disable 逆序 dispose（§7.4）。
+11. **（其后）接 MCP**：`McpClient` 作为 ToolProvider/ResourceProvider/PromptProvider 进同一 registry，**不伪装成 extension**；同样走 capability catalog → selection → 6~8 native，避免把上百 tool 全塞模型（§5 哲学）。
 
 **里程碑（项目之魂）：**
 
@@ -681,7 +685,7 @@ image/audio kubernetes ssh jira notion ...
 
 ```
 无 parquet 能力 → nulya ext find parquet → 无 → AI 写 parquet-inspect/src/main.zig
-→ nulya ext build → nulya ext test(真实数据) → policy hooks → append tool_available_note
+→ nulya ext build → nulya ext test(真实数据) → policy hooks → append capability_note
 → 经 shell 处理数据 →（三周后再遇 parquet）已有，直接用
 →（发现慢）改源码 build v2 → benchmark → 原子切 v2 →（regression）rollback v1
 ```

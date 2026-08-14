@@ -7,7 +7,6 @@
 
 const std = @import("std");
 const tool = @import("../tool.zig");
-const emit = @import("../emit.zig");
 const environment = @import("../environment.zig");
 
 const MAX_FILE_BYTES: usize = 10 * 1024 * 1024;
@@ -22,10 +21,10 @@ pub const def: tool.Tool = .{
         ,
     },
     .batch_policy = .sequential,
-    .run = run,
+    .executor = tool.functionExecutor(run),
 };
 
-fn run(alloc: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.ToolResult {
+fn run(alloc: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolResult {
     const rel_path = try tool.requireString(req.args, "path");
     const old_string = try tool.requireString(req.args, "old_string");
     const new_string = try tool.requireString(req.args, "new_string");
@@ -99,13 +98,14 @@ fn resolvePath(alloc: std.mem.Allocator, cwd: []const u8, rel: []const u8) ![]co
     return std.fs.path.join(alloc, &.{ cwd, rel });
 }
 
-fn teach(alloc: std.mem.Allocator, req: tool.ToolRequest, msg: []const u8) !tool.ToolResult {
-    return finish(alloc, req, false, msg);
+fn teach(alloc: std.mem.Allocator, req: tool.ToolRequest, msg: []const u8) !tool.RawToolResult {
+    _ = req;
+    return .{ .ok = false, .output = try alloc.dupe(u8, msg) };
 }
 
-fn finish(alloc: std.mem.Allocator, req: tool.ToolRequest, ok: bool, raw: []const u8) !tool.ToolResult {
-    const out = try emit.emit(alloc, req.ctx.environment.io, raw, "edit", req.ctx.event_seq, req.ctx.call_index, req.ctx.scratch_dir, req.ctx.budget);
-    return .{ .ok = ok, .output = out.text, .spill_path = out.spill_path };
+fn finish(alloc: std.mem.Allocator, req: tool.ToolRequest, ok: bool, raw: []const u8) !tool.RawToolResult {
+    _ = req;
+    return .{ .ok = ok, .output = try alloc.dupe(u8, raw) };
 }
 
 test "edit preserves executable file permissions" {
@@ -147,7 +147,6 @@ test "edit preserves executable file permissions" {
     });
     defer {
         alloc.free(res.output);
-        if (res.spill_path) |p| alloc.free(p);
     }
     try std.testing.expect(res.ok);
 

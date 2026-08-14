@@ -18,10 +18,11 @@ const std = @import("std");
 pub const jsonrpc_version = "2.0";
 pub const method_tool_call = "tool/call";
 
-/// Host -> extension. `arguments_json` stays as raw JSON bytes: the host
-/// forwards exactly what the model produced and never interprets the tool's
-/// argument shape — the manifest schema is the only truth (DESIGN §7.2).
-pub const Request = struct {
+/// Host -> extension for the only v0.1 runtime method. `arguments_json` stays
+/// as raw JSON bytes: the host validates that it is an object, then forwards the
+/// exact bytes the model produced. The manifest schema is the only truth for the
+/// tool-specific argument shape (DESIGN §7.2).
+pub const ToolCallRequest = struct {
     id: []const u8,
     method: []const u8 = method_tool_call,
     name: []const u8,
@@ -29,8 +30,12 @@ pub const Request = struct {
     arguments_json: []const u8,
 
     /// Serialize to one JSON-RPC request. Caller owns the returned bytes.
-    pub fn encode(self: Request, alloc: std.mem.Allocator) ![]u8 {
-        const arguments = if (std.mem.trim(u8, self.arguments_json, " \t\r\n").len == 0) "{}" else self.arguments_json;
+    pub fn encode(self: ToolCallRequest, alloc: std.mem.Allocator) ![]u8 {
+        const arguments = if (std.mem.trim(u8, self.arguments_json, " \t\r\n").len == 0) "{}" else std.mem.trim(u8, self.arguments_json, " \t\r\n");
+        const parsed = std.json.parseFromSlice(std.json.Value, alloc, arguments, .{}) catch
+            return error.InvalidArgumentsJson;
+        defer parsed.deinit();
+        if (parsed.value != .object) return error.ArgumentsNotObject;
 
         var out: std.Io.Writer.Allocating = .init(alloc);
         errdefer out.deinit();
@@ -90,9 +95,10 @@ pub const DecodeError = error{
 } || std.mem.Allocator.Error;
 
 /// Parse and validate a response the extension wrote to stdout. Malformed
-/// output (crash, garbage, wrong version) becomes a typed error the host turns
-/// into a normal failed tool result — a broken extension never crashes the host.
-pub fn decodeResponse(alloc: std.mem.Allocator, bytes: []const u8) DecodeError!DecodedResponse {
+/// output (crash, garbage, wrong version, wrong id) becomes a typed error the
+/// host turns into a normal failed tool result — a broken extension never
+/// crashes the host.
+pub fn decodeResponse(alloc: std.mem.Allocator, expected_id: []const u8, bytes: []const u8) DecodeError!DecodedResponse {
     const parsed = std.json.parseFromSlice(std.json.Value, alloc, bytes, .{}) catch
         return error.InvalidResponse;
     defer parsed.deinit();
@@ -104,6 +110,9 @@ pub fn decodeResponse(alloc: std.mem.Allocator, bytes: []const u8) DecodeError!D
 
     const jsonrpc = stringField(obj, "jsonrpc") orelse return error.InvalidResponse;
     if (!std.mem.eql(u8, jsonrpc, jsonrpc_version)) return error.UnsupportedVersion;
+
+    const id = stringField(obj, "id") orelse return error.InvalidResponse;
+    if (!std.mem.eql(u8, id, expected_id)) return error.InvalidResponse;
 
     const has_result = obj.get("result") != null;
     const has_error = obj.get("error") != null;
@@ -158,9 +167,9 @@ fn compactValue(alloc: std.mem.Allocator, value: std.json.Value) ![]u8 {
     return out.toOwnedSlice();
 }
 
-test "request encodes a JSON-RPC tool/call envelope with verbatim arguments" {
+test "tool call request encodes a JSON-RPC tool/call envelope with verbatim arguments" {
     const alloc = std.testing.allocator;
-    const req: Request = .{ .id = "call-17", .name = "web_search", .arguments_json = "{\"query\":\"zig\"}" };
+    const req: ToolCallRequest = .{ .id = "call-17", .name = "web_search", .arguments_json = "{\"query\":\"zig\"}" };
     const line = try req.encode(alloc);
     defer alloc.free(line);
 
@@ -178,15 +187,21 @@ test "request encodes a JSON-RPC tool/call envelope with verbatim arguments" {
 
 test "empty arguments become an empty object" {
     const alloc = std.testing.allocator;
-    const req: Request = .{ .id = "c1", .name = "t", .arguments_json = "" };
+    const req: ToolCallRequest = .{ .id = "c1", .name = "t", .arguments_json = "" };
     const line = try req.encode(alloc);
     defer alloc.free(line);
     try std.testing.expect(std.mem.indexOf(u8, line, "\"arguments\":{}") != null);
 }
 
+test "arguments must be a valid JSON object" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(error.InvalidArgumentsJson, (ToolCallRequest{ .id = "c1", .name = "t", .arguments_json = "{" }).encode(alloc));
+    try std.testing.expectError(error.ArgumentsNotObject, (ToolCallRequest{ .id = "c1", .name = "t", .arguments_json = "[]" }).encode(alloc));
+}
+
 test "decode accepts a success response and compacts its result" {
     const alloc = std.testing.allocator;
-    const res = try decodeResponse(alloc, "{\"jsonrpc\":\"2.0\",\"id\":\"c1\",\"result\":{\"results\":[]}}");
+    const res = try decodeResponse(alloc, "c1", "{\"jsonrpc\":\"2.0\",\"id\":\"c1\",\"result\":{\"results\":[]}}");
     defer res.deinit(alloc);
     try std.testing.expect(res.ok);
     try std.testing.expect(res.err == null);
@@ -195,7 +210,7 @@ test "decode accepts a success response and compacts its result" {
 
 test "decode accepts an error response" {
     const alloc = std.testing.allocator;
-    const res = try decodeResponse(alloc, "{\"jsonrpc\":\"2.0\",\"id\":\"c1\",\"error\":{\"code\":-32000,\"message\":\"down\",\"data\":{\"retryable\":true}}}");
+    const res = try decodeResponse(alloc, "c1", "{\"jsonrpc\":\"2.0\",\"id\":\"c1\",\"error\":{\"code\":-32000,\"message\":\"down\",\"data\":{\"retryable\":true}}}");
     defer res.deinit(alloc);
     try std.testing.expect(!res.ok);
     try std.testing.expectEqual(@as(i64, -32000), res.err.?.code);
@@ -203,9 +218,11 @@ test "decode accepts an error response" {
     try std.testing.expect(res.err.?.retryable);
 }
 
-test "decode rejects garbage, wrong version, and missing result/error" {
+test "decode rejects garbage, wrong version, missing result/error, and wrong id" {
     const alloc = std.testing.allocator;
-    try std.testing.expectError(error.InvalidResponse, decodeResponse(alloc, "not json"));
-    try std.testing.expectError(error.UnsupportedVersion, decodeResponse(alloc, "{\"jsonrpc\":\"1.0\",\"result\":null}"));
-    try std.testing.expectError(error.InvalidResponse, decodeResponse(alloc, "{\"jsonrpc\":\"2.0\",\"id\":\"c1\"}"));
+    try std.testing.expectError(error.InvalidResponse, decodeResponse(alloc, "c1", "not json"));
+    try std.testing.expectError(error.UnsupportedVersion, decodeResponse(alloc, "c1", "{\"jsonrpc\":\"1.0\",\"id\":\"c1\",\"result\":null}"));
+    try std.testing.expectError(error.InvalidResponse, decodeResponse(alloc, "c1", "{\"jsonrpc\":\"2.0\",\"id\":\"c1\"}"));
+    try std.testing.expectError(error.InvalidResponse, decodeResponse(alloc, "c1", "{\"jsonrpc\":\"2.0\",\"id\":\"other\",\"result\":null}"));
+    try std.testing.expectError(error.InvalidResponse, decodeResponse(alloc, "c1", "{\"jsonrpc\":\"2.0\",\"result\":null}"));
 }

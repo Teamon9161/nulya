@@ -76,7 +76,7 @@ test "closed loop: init -> build -> activate -> run round-trips JSON" {
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
     defer lenv.deinit();
 
-    const req: protocol.Request = .{ .id = "call-1", .name = "greet", .arguments_json = "{}" };
+    const req: protocol.ToolCallRequest = .{ .id = "call-1", .name = "greet", .arguments_json = "{}" };
     const request_json = try req.encode(alloc);
     defer alloc.free(request_json);
 
@@ -89,7 +89,7 @@ test "closed loop: init -> build -> activate -> run round-trips JSON" {
     defer outcome.deinit(alloc);
     try std.testing.expectEqual(@as(u8, 0), outcome.exit_code);
 
-    const decoded = try protocol.decodeResponse(alloc, outcome.stdout);
+    const decoded = try protocol.decodeResponse(alloc, req.id, outcome.stdout);
     defer decoded.deinit(alloc);
     try std.testing.expect(decoded.ok);
     try std.testing.expect(std.mem.indexOf(u8, decoded.value_json, "greeting") != null);

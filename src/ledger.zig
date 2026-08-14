@@ -25,7 +25,7 @@ pub const ToolResultEntry = struct {
 };
 
 /// The event log's alphabet. Kept minimal for the skeleton; DESIGN §3 lists the
-/// full set (tool_available_note, registry_selection, compaction, …).
+/// full set (capability_note, registry_selection, compaction, …).
 pub const Event = union(enum) {
     user_text: []const u8,
     assistant: struct {
@@ -41,7 +41,7 @@ pub const Event = union(enum) {
     /// an APPEND, never a change to `tools[]`: the prompt prefix stays stable so
     /// the cache keeps hitting, and the model can invoke the new extension via
     /// `shell` on its next step. Content is the model-facing announcement text.
-    tool_available_note: []const u8,
+    capability_note: []const u8,
 };
 
 pub const Ledger = struct {
@@ -89,7 +89,7 @@ fn cloneEvent(alloc: std.mem.Allocator, e: Event) !Event {
             break :blk .{ .assistant = .{ .text = text, .calls = calls } };
         },
         .tool_results => |results| .{ .tool_results = try cloneToolResults(alloc, results) },
-        .tool_available_note => |text| .{ .tool_available_note = try alloc.dupe(u8, text) },
+        .capability_note => |text| .{ .capability_note = try alloc.dupe(u8, text) },
     };
 }
 
@@ -101,7 +101,7 @@ fn freeEvent(alloc: std.mem.Allocator, e: Event) void {
             freeToolCalls(alloc, as.calls);
         },
         .tool_results => |results| freeToolResults(alloc, results),
-        .tool_available_note => |text| alloc.free(text),
+        .capability_note => |text| alloc.free(text),
     }
 }
 

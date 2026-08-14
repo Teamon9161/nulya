@@ -2,15 +2,14 @@
 //!
 //! `{ command, cwd? }`. Hands the command to the execution Environment (which
 //! picks the dialect and provides a sanitized child env — DESIGN §8/§9),
-//! captures stdout+stderr, appends the exit code, and passes everything through
-//! `emit` so overflow is spilled — the model never picks an output mode.
+//! captures stdout+stderr, appends the exit code, and returns raw text. The
+//! agent loop applies `emit` uniformly after every executor returns.
 //!
 //! Skeleton scope: synchronous run only. Background tasks / streaming / timeout
 //! enforcement are later work (base-tools.md §4).
 
 const std = @import("std");
 const tool = @import("../tool.zig");
-const emit = @import("../emit.zig");
 
 /// Raise the runner's capture cap well above the emit budget so that `emit` —
 /// not the process runner — is what decides truncation.
@@ -26,10 +25,10 @@ pub const def: tool.Tool = .{
         ,
     },
     .batch_policy = .sequential,
-    .run = run,
+    .executor = tool.functionExecutor(run),
 };
 
-fn run(alloc: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.ToolResult {
+fn run(alloc: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolResult {
     const command = try tool.requireString(req.args, "command");
     const cwd = tool.optionalString(req.args, "cwd") orelse req.ctx.cwd;
 
@@ -55,6 +54,6 @@ fn run(alloc: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.ToolResult
     if (raw.items.len > 0 and raw.items[raw.items.len - 1] != '\n') try raw.append(alloc, '\n');
     try raw.print(alloc, "[exit {d}]", .{outcome.exit_code});
 
-    const out = try emit.emit(alloc, req.ctx.environment.io, raw.items, "shell", req.ctx.event_seq, req.ctx.call_index, req.ctx.scratch_dir, req.ctx.budget);
-    return .{ .ok = outcome.exit_code == 0, .output = out.text, .spill_path = out.spill_path };
+    const out = try raw.toOwnedSlice(alloc);
+    return .{ .ok = outcome.exit_code == 0, .output = out };
 }

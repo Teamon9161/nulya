@@ -145,26 +145,31 @@ fn execOne(
     call: ledger.ToolCall,
     ctx: tool.CtxHeader,
 ) !ledger.ToolResultEntry {
-    const t = tool_snapshot.lookup(call.tool) orelse {
-        const msg = try std.fmt.allocPrint(alloc, "unknown tool '{s}'; builtins are shell, edit", .{call.tool});
-        return .{ .call_id = call.id, .ok = false, .output = msg };
-    };
+    var ok = false;
+    const raw_output = blk: {
+        const t = tool_snapshot.lookup(call.tool) orelse {
+            break :blk try std.fmt.allocPrint(alloc, "unknown tool '{s}'; builtins are shell, edit", .{call.tool});
+        };
 
-    const parsed = std.json.parseFromSlice(std.json.Value, alloc, call.args_json, .{}) catch |err| {
-        const msg = try std.fmt.allocPrint(alloc, "invalid JSON args for '{s}': {s}", .{ call.tool, @errorName(err) });
-        return .{ .call_id = call.id, .ok = false, .output = msg };
-    };
-    defer parsed.deinit();
+        const parsed = std.json.parseFromSlice(std.json.Value, alloc, call.args_json, .{}) catch |err| {
+            break :blk try std.fmt.allocPrint(alloc, "invalid JSON args for '{s}': {s}", .{ call.tool, @errorName(err) });
+        };
+        defer parsed.deinit();
 
-    const res = t.run(alloc, .{ .args = parsed.value, .ctx = ctx }) catch |err| {
-        const msg = try std.fmt.allocPrint(alloc, "{s} failed: {s}", .{ call.tool, @errorName(err) });
-        return .{ .call_id = call.id, .ok = false, .output = msg };
+        const res = t.executor.call(alloc, .{ .args = parsed.value, .ctx = ctx }) catch |err| {
+            break :blk try std.fmt.allocPrint(alloc, "{s} failed: {s}", .{ call.tool, @errorName(err) });
+        };
+        ok = res.ok;
+        break :blk res.output;
     };
+    defer alloc.free(raw_output);
+
+    const emitted = try emit.emit(alloc, ctx.environment.io, raw_output, call.tool, ctx.event_seq, ctx.call_index, ctx.scratch_dir, ctx.budget);
     return .{
         .call_id = call.id,
-        .ok = res.ok,
-        .output = res.output,
-        .spill_path = res.spill_path,
+        .ok = ok,
+        .output = emitted.text,
+        .spill_path = emitted.spill_path,
     };
 }
 
@@ -218,7 +223,7 @@ test "one step runs a batch of two shell calls and appends one result turn" {
     try l.append(.{ .user_text = "go" });
 
     const FakeShell = struct {
-        fn run(a: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.ToolResult {
+        fn run(a: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolResult {
             const command = try tool.requireString(req.args, "command");
             const output = if (std.mem.indexOf(u8, command, "one") != null) "one\n[exit 0]" else "two\n[exit 0]";
             return .{ .ok = true, .output = try a.dupe(u8, output) };
@@ -232,7 +237,7 @@ test "one step runs a batch of two shell calls and appends one result turn" {
             .description = "test shell",
             .input_schema = "{}",
         },
-        .run = FakeShell.run,
+        .executor = tool.functionExecutor(FakeShell.run),
     }};
     const tools: registry.ToolSetSnapshot = .{ .tools = &fake_tools };
 
@@ -333,7 +338,7 @@ test "interrupted tool batch is completed as unknown before next model request" 
 }
 
 
-test "a capability note reaches the provider as a tool_note block" {
+test "a capability note reaches the provider as a capability_note block" {
     const alloc = std.testing.allocator;
 
     const NoteModel = struct {
@@ -355,7 +360,7 @@ test "a capability note reaches the provider as a tool_note block" {
             _ = a;
             const self: *@This() = @ptrCast(@alignCast(ptr));
             for (request.prompt_ir.stable_blocks) |block| {
-                if (block.kind == .tool_note and std.mem.indexOf(u8, block.bytes, "ext run") != null) {
+                if (block.kind == .capability_note and std.mem.indexOf(u8, block.bytes, "ext run") != null) {
                     self.saw_note = true;
                 }
             }
@@ -377,7 +382,7 @@ test "a capability note reaches the provider as a tool_note block" {
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
     try l.append(.{ .user_text = "go" });
-    try l.append(.{ .tool_available_note = "New capability available: tool `greet` from extension `demo`.\nInvoke it through the shell tool: nulya ext run demo '<json-args>'" });
+    try l.append(.{ .capability_note = "New capabilities from extension `demo` version `v-aaaa` are now available:\n\n- greet — Say hello.\n\nInvoke through the shell tool:\nnulya ext run demo <tool> '<json-args>'" });
 
     var lenv = try environment.LocalEnvironment.init(alloc, threaded.io(), .{});
     defer lenv.deinit();
@@ -397,7 +402,7 @@ test "a capability note reaches the provider as a tool_note block" {
 
 test "batch execution policy is parallel only when every call opts in" {
     const Dummy = struct {
-        fn run(alloc: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.ToolResult {
+        fn run(alloc: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolResult {
             _ = req;
             return .{ .ok = true, .output = try alloc.dupe(u8, "ok") };
         }
@@ -407,17 +412,17 @@ test "batch execution policy is parallel only when every call opts in" {
         .{
             .definition = .{ .id = "test.read_a", .name = "read_a", .description = "read", .input_schema = "{}" },
             .batch_policy = .parallel_read_only,
-            .run = Dummy.run,
+            .executor = tool.functionExecutor(Dummy.run),
         },
         .{
             .definition = .{ .id = "test.read_b", .name = "read_b", .description = "read", .input_schema = "{}" },
             .batch_policy = .parallel_read_only,
-            .run = Dummy.run,
+            .executor = tool.functionExecutor(Dummy.run),
         },
         .{
             .definition = .{ .id = "test.shell", .name = "shell", .description = "shell", .input_schema = "{}" },
             .batch_policy = .sequential,
-            .run = Dummy.run,
+            .executor = tool.functionExecutor(Dummy.run),
         },
     };
     const tools: registry.ToolSetSnapshot = .{ .tools = &fake_tools };

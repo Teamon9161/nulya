@@ -162,7 +162,7 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
     defer lenv.deinit();
 
-    const req: protocol.Request = .{ .id = "cli", .name = tool, .arguments_json = args_json };
+    const req: protocol.ToolCallRequest = .{ .id = "cli", .name = tool, .arguments_json = args_json };
     const request_json = try req.encode(alloc);
     defer alloc.free(request_json);
 
@@ -182,7 +182,7 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
         return 1;
     }
 
-    const decoded = protocol.decodeResponse(alloc, outcome.stdout) catch {
+    const decoded = protocol.decodeResponse(alloc, req.id, outcome.stdout) catch {
         try printOut(alloc, io, "extension returned an invalid response (exit {d})\n", .{outcome.exit_code});
         if (outcome.stderr.len > 0) try printOut(alloc, io, "stderr:\n{s}\n", .{outcome.stderr});
         return 1;
