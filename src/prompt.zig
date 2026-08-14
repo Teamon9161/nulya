@@ -12,6 +12,10 @@ pub const BlockKind = enum {
     assistant_text,
     tool_call,
     tool_result,
+    /// A mid-conversation capability announcement (DESIGN §5.3). Just another
+    /// appended block, so it extends the stable prefix without bumping the
+    /// generation — the cache keeps hitting.
+    tool_note,
 };
 
 pub const StableBlock = struct {
@@ -60,6 +64,7 @@ pub fn project(alloc: std.mem.Allocator, events: []const ledger.Event) !PromptIR
                 try blocks.append(alloc, .{ .kind = .tool_result, .bytes = bytes });
             }
         },
+        .tool_available_note => |text| try appendBlock(alloc, &blocks, .tool_note, text),
     };
 
     return .{ .stable_blocks = try blocks.toOwnedSlice(alloc) };
@@ -100,4 +105,27 @@ test "PromptIR stable blocks extend by prefix on append" {
 
     try std.testing.expect(isStablePrefix(p1.stable_blocks, p2.stable_blocks));
     try std.testing.expectEqual(@as(u64, 0), currentGeneration(l.view()));
+}
+
+test "a tool_available_note appends a tool_note block without breaking the prefix or generation" {
+    const alloc = std.testing.allocator;
+    var l = ledger.Ledger.init(alloc);
+    defer l.deinit();
+
+    try l.append(.{ .user_text = "hi" });
+    const before = try project(alloc, l.view());
+    defer before.deinit(alloc);
+    const gen_before = currentGeneration(l.view());
+
+    try l.append(.{ .tool_available_note = "New capability available: `greet`." });
+    const after = try project(alloc, l.view());
+    defer after.deinit(alloc);
+
+    // Prefix-stable: the note only extends the projection (DESIGN §5.3, §1).
+    try std.testing.expect(isStablePrefix(before.stable_blocks, after.stable_blocks));
+    try std.testing.expectEqual(before.stable_blocks.len + 1, after.stable_blocks.len);
+    const last = after.stable_blocks[after.stable_blocks.len - 1];
+    try std.testing.expectEqual(BlockKind.tool_note, last.kind);
+    // A plain append never bumps the generation.
+    try std.testing.expectEqual(gen_before, currentGeneration(l.view()));
 }
