@@ -159,7 +159,7 @@ test "edit reads and writes through workspace fs" {
         }
 
         fn fs(self: *@This()) environment.WorkspaceFs {
-            return .{ .io = io, .ptr = self, .vtable = &vtable };
+            return .{ .ptr = self, .vtable = &vtable };
         }
 
         fn readFileAlloc(ptr: *anyopaque, a: std.mem.Allocator, path: []const u8, max_bytes: usize) anyerror![]u8 {

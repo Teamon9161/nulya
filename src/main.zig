@@ -106,7 +106,6 @@ fn runDemo(alloc: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) 
     std.debug.print("provider: {s}/{s} (shell dialect: {s})\n", .{ model.name(), model.modelName(), lenv.dialect_val.label() });
 
     var sess = try session.AgentSession.init(alloc, .{
-        .io = io,
         .model = model,
         .step_ctx = .{
             .tool_context = .{

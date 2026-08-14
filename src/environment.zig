@@ -80,7 +80,6 @@ pub const ExtensionOutcome = struct {
 /// The local backend is host-backed today; sandbox/remote backends can supply a
 /// different implementation without letting tools reach `std.Io.Dir.cwd()`.
 pub const WorkspaceFs = struct {
-    io: std.Io,
     ptr: *anyopaque,
     vtable: *const VTable,
 
@@ -219,7 +218,7 @@ pub const LocalEnvironment = struct {
     }
 
     pub fn workspaceFs(self: *LocalEnvironment) WorkspaceFs {
-        return .{ .io = self.io, .ptr = self, .vtable = &fs_vtable };
+        return .{ .ptr = self, .vtable = &fs_vtable };
     }
 
     fn dialectImpl(ptr: *anyopaque) Dialect {

@@ -15,22 +15,18 @@ const environment = @import("environment.zig");
 
 pub const AgentSession = struct {
     alloc: std.mem.Allocator,
-    io: std.Io,
     l: ledger.Ledger,
     tools: registry.ToolSetSnapshot,
     model: provider.Model,
     step_ctx: loop.StepContext,
     model_options: provider.Options,
-    cwd: []const u8,
     extension_root: []const u8,
     total_usage: provider.Usage = .{},
 
     pub const Options = struct {
-        io: std.Io,
         model: provider.Model,
         step_ctx: loop.StepContext,
         model_options: provider.Options = .{},
-        cwd: []const u8 = ".",
         extension_root: []const u8 = ".nulya/extensions",
     };
 
@@ -40,13 +36,11 @@ pub const AgentSession = struct {
 
         return .{
             .alloc = alloc,
-            .io = opts.io,
             .l = ledger.Ledger.init(alloc),
             .tools = tools,
             .model = opts.model,
             .step_ctx = opts.step_ctx,
             .model_options = opts.model_options,
-            .cwd = opts.cwd,
             .extension_root = opts.extension_root,
         };
     }
@@ -83,8 +77,9 @@ pub const AgentSession = struct {
     fn prepareStep(self: *AgentSession) !void {
         // Repair before extension note sync so a note append cannot hide an
         // illegal assistant-with-tool-calls tail from the prior process.
+        const tool_ctx = self.step_ctx.tool_context;
         try loop.completeInterruptedToolBatch(self.alloc, &self.l);
-        try notes.syncFromActiveExtensions(self.alloc, self.io, self.cwd, &self.l, self.extension_root);
+        try notes.syncFromActiveExtensions(self.alloc, tool_ctx.environment.io, tool_ctx.cwd, &self.l, self.extension_root);
     }
 };
 
@@ -144,7 +139,6 @@ test "session repairs interrupted tool batch before provider request" {
 
     var model_impl = RecoveringModel{};
     var sess = try AgentSession.init(alloc, .{
-        .io = threaded.io(),
         .model = .{ .ptr = &model_impl, .vtable = &RecoveringModel.vtable },
         .step_ctx = .{
             .tool_context = .{
