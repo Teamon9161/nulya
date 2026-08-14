@@ -13,6 +13,7 @@ const openai = @import("providers/openai.zig");
 const registry = @import("registry.zig");
 const tool = @import("tool.zig");
 const environment = @import("environment.zig");
+const cli = @import("cli.zig");
 
 /// Scripted stand-in provider: on seeing a pending user turn, it issues two
 /// shell calls in a single assistant turn — demonstrating batched execution.
@@ -53,15 +54,23 @@ const ScriptedProvider = struct {
     };
 };
 
-pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const alloc = gpa.allocator();
+pub fn main(init: std.process.Init) !u8 {
+    const alloc = init.gpa;
+    const io = init.io;
 
-    var threaded: std.Io.Threaded = .init(alloc, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    // `nulya <cmd> ...` -> CLI (DESIGN §14); bare `nulya` -> the agent-loop demo.
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len > 1) {
+        const argv = try init.arena.allocator().alloc([]const u8, args.len - 1);
+        for (args[1..], 0..) |a, i| argv[i] = a;
+        return cli.dispatch(alloc, io, argv);
+    }
 
+    try runDemo(alloc, io, init.environ_map);
+    return 0;
+}
+
+fn runDemo(alloc: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) !void {
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
 
@@ -70,12 +79,8 @@ pub fn main() !void {
     const tools = try registry.snapshot(alloc);
     defer tools.deinit(alloc);
 
-    // Host env: read here to CONFIGURE the provider (the host owns its own keys).
-    var env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
-    defer env.deinit();
-
     // Execution env: the sanitized boundary every tool runs behind. Host secrets
-    // in `env` above never cross into it (DESIGN §9).
+    // in the host env never cross into it (DESIGN §9).
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
     defer lenv.deinit();
 
@@ -105,6 +110,8 @@ pub fn main() !void {
         .scratch_dir = ".nulya/scratch",
         .event_seq = 0,
         .call_index = 0,
+        // Announce any extension already active in this workspace (DESIGN §5.3).
+        .ext_root = ".nulya/extensions",
     };
 
     var total: provider.Usage = .{};
@@ -156,6 +163,7 @@ fn printLedger(l: *const ledger.Ledger) void {
                 p("[{d}] tool_results ({d}):\n", .{ i, rs.len });
                 for (rs) |r| p("      {s} ok={} | {s}\n", .{ r.call_id, r.ok, std.mem.trimEnd(u8, r.output, "\n") });
             },
+            .tool_available_note => |t| p("[{d}] note: {s}\n", .{ i, t }),
         }
     }
 }
@@ -172,4 +180,10 @@ test {
     _ = @import("provider.zig");
     _ = @import("providers/openai.zig");
     _ = @import("environment.zig");
+    _ = @import("extension/protocol.zig");
+    _ = @import("extension/manifest.zig");
+    _ = @import("extension/store.zig");
+    _ = @import("extension/build_ext.zig");
+    _ = @import("extension/notes.zig");
+    _ = @import("toolchain.zig");
 }

@@ -1,0 +1,96 @@
+//! Scaffolding templates for `nulya ext init` (DESIGN §7.2, §7.5).
+//!
+//! The generated extension is a real, buildable, runnable oneshot extension: it
+//! reads one wire request on stdin and writes one response on stdout (protocol
+//! v1). This is what makes "the third tool is created by Nulya itself" a running
+//! demonstration rather than a diagram.
+
+const std = @import("std");
+
+/// A minimal but complete extension entry point. Single-file so
+/// `zig build-exe src/main.zig` compiles it with no build.zig (DESIGN §7.3, §10).
+pub const main_zig =
+    \\//! A generated Nulya extension (wire protocol v1, oneshot).
+    \\//! Reads one request JSON on stdin, writes one response JSON on stdout.
+    \\const std = @import("std");
+    \\
+    \\pub fn main() !void {
+    \\    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    \\    defer _ = gpa.deinit();
+    \\    const alloc = gpa.allocator();
+    \\
+    \\    var threaded: std.Io.Threaded = .init(alloc, .{});
+    \\    defer threaded.deinit();
+    \\    const io = threaded.io();
+    \\
+    \\    // Read the whole request from stdin.
+    \\    var in_buf: [4096]u8 = undefined;
+    \\    var reader = std.Io.File.stdin().readerStreaming(io, &in_buf);
+    \\    const request = try reader.interface.allocRemaining(alloc, .limited(1 << 20));
+    \\    defer alloc.free(request);
+    \\
+    \\    // Best-effort: echo back the request id if present.
+    \\    var id: []const u8 = "";
+    \\    const parsed = std.json.parseFromSlice(std.json.Value, alloc, request, .{}) catch null;
+    \\    defer if (parsed) |p| p.deinit();
+    \\    if (parsed) |p| switch (p.value) {
+    \\        .object => |o| if (o.get("id")) |v| switch (v) {
+    \\            .string => |s| {
+    \\                id = s;
+    \\            },
+    \\            else => {},
+    \\        },
+    \\        else => {},
+    \\    };
+    \\
+    \\    // Build the success response.
+    \\    var out: std.Io.Writer.Allocating = .init(alloc);
+    \\    defer out.deinit();
+    \\    var jw: std.json.Stringify = .{ .writer = &out.writer };
+    \\    try jw.beginObject();
+    \\    try jw.objectField("v");
+    \\    try jw.write(1);
+    \\    try jw.objectField("id");
+    \\    try jw.write(id);
+    \\    try jw.objectField("ok");
+    \\    try jw.write(true);
+    \\    try jw.objectField("value");
+    \\    try jw.beginObject();
+    \\    try jw.objectField("greeting");
+    \\    try jw.write("hello from a Nulya-built extension");
+    \\    try jw.endObject();
+    \\    try jw.endObject();
+    \\
+    \\    try std.Io.File.stdout().writeStreamingAll(io, out.writer.buffered());
+    \\}
+    \\
+;
+
+/// A real acceptance case (DESIGN §12): input the model/user can inspect, and
+/// the expected shape of a successful response.
+pub const example_test_json =
+    \\{
+    \\  "request": { "tool": "greet", "args": {} },
+    \\  "expect": { "ok": true }
+    \\}
+    \\
+;
+
+/// Render `extension.json` for `id`/`tool`. Caller owns the returned bytes.
+pub fn manifestJson(alloc: std.mem.Allocator, id: []const u8, tool: []const u8) ![]u8 {
+    return std.fmt.allocPrint(alloc,
+        \\{{
+        \\  "schema": "nulya.extension/v1",
+        \\  "id": "{s}",
+        \\  "version": "0.1.0",
+        \\  "entry": "bin/{s}",
+        \\  "tools": [{{
+        \\    "name": "{s}",
+        \\    "description": "A generated Nulya extension tool.",
+        \\    "input": {{ "type": "object", "properties": {{}} }}
+        \\  }}],
+        \\  "permissions": {{ "fs": [], "network": [], "process": [] }}
+        \\}}
+        \\
+    , .{ id, id, tool });
+}
