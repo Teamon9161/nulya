@@ -3,8 +3,8 @@
 //! The ledger is append-only. Its ENTIRE mutable API is `append`. Reads hand
 //! back a const view. There is deliberately no edit / delete / reorder: a
 //! correction is a new appended event, never an in-place change. This is what
-//! lets the request byte-prefix stay stable within a cache generation, which is
-//! what keeps the prompt cache hitting (DESIGN §1).
+//! lets the PromptIR stable-block prefix stay stable within a cache generation,
+//! which is what keeps the prompt cache hitting (DESIGN §1).
 
 const std = @import("std");
 

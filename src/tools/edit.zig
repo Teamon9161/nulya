@@ -17,7 +17,7 @@ pub const def: tool.Tool = .{
         .name = "edit",
         .description = "Exact-string replace in a file.",
         .input_schema =
-            \\{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean"}},"required":["path","old_string","new_string"]}
+        \\{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean"}},"required":["path","old_string","new_string"]}
         ,
     },
     .run = run,
@@ -81,7 +81,11 @@ fn run(alloc: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.ToolResult
 
 fn atomicWriteFile(io: std.Io, path: []const u8, data: []const u8) !void {
     const cwd = std.Io.Dir.cwd();
-    var atomic = try cwd.createFileAtomic(io, path, .{ .replace = true });
+    var original = try cwd.openFile(io, path, .{});
+    defer original.close(io);
+    const permissions = (try original.stat(io)).permissions;
+
+    var atomic = try cwd.createFileAtomic(io, path, .{ .replace = true, .permissions = permissions });
     defer atomic.deinit(io);
     try atomic.file.writeStreamingAll(io, data);
     try atomic.file.sync(io);
@@ -100,4 +104,50 @@ fn teach(alloc: std.mem.Allocator, req: tool.ToolRequest, msg: []const u8) !tool
 fn finish(alloc: std.mem.Allocator, req: tool.ToolRequest, ok: bool, raw: []const u8) !tool.ToolResult {
     const out = try emit.emit(alloc, req.ctx.io, raw, "edit", req.ctx.event_seq, req.ctx.call_index, req.ctx.scratch_dir, req.ctx.budget);
     return .{ .ok = ok, .output = out.text, .spill_path = out.spill_path };
+}
+
+test "edit preserves executable file permissions" {
+    if (!std.Io.File.Permissions.has_executable_bit) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "script.sh", .data = "echo old\n" });
+    try tmp.dir.setFilePermissions(io, "script.sh", .executable_file, .{});
+
+    var before_file = try tmp.dir.openFile(io, "script.sh", .{});
+    const before = (try before_file.stat(io)).permissions;
+    before_file.close(io);
+
+    const tmp_path = try std.fs.path.join(alloc, &.{ ".zig-cache", "tmp", tmp.sub_path[0..] });
+    defer alloc.free(tmp_path);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc,
+        \\{"path":"script.sh","old_string":"old","new_string":"new"}
+    , .{});
+    defer parsed.deinit();
+
+    const res = try run(alloc, .{
+        .args = parsed.value,
+        .ctx = .{
+            .io = io,
+            .cwd = tmp_path,
+            .scratch_dir = tmp_path,
+            .event_seq = 0,
+            .call_index = 0,
+        },
+    });
+    defer {
+        alloc.free(res.output);
+        if (res.spill_path) |p| alloc.free(p);
+    }
+    try std.testing.expect(res.ok);
+
+    var after_file = try tmp.dir.openFile(io, "script.sh", .{});
+    defer after_file.close(io);
+    const after = (try after_file.stat(io)).permissions;
+    try std.testing.expectEqual(before, after);
 }

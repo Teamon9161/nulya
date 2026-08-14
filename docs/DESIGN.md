@@ -12,7 +12,7 @@
 ## 0. 三条硬约束（一切设计服从于此）
 
 1. **Ledger 从 API 层就不可变**：会话是严格 append-only 的事件日志，没有任何"改历史"的接口。目的是把 prompt-cache 命中率变成一个**可断言的不变式**，而不是一句愿望。
-2. **尽量少与模型交互**：core 默认并发执行同一 turn 内的多个 tool call，全部完成后合成**一条** user turn 回传，绝不一个工具一次请求。
+2. **尽量少与模型交互**：core 允许同一 turn 内有多个 tool call，全部完成后合成**一条** user turn 回传，绝不一个工具一次请求。batch 的核心是不增加模型 round-trip，不要求默认并发执行工具。
 3. **单文件可执行、离线可跑**：Zig 工具链内嵌进二进制（`@embedFile`），拷一个可执行文件过去就能编译/运行 extension，无任何网络下载。
 
 这三条都由 **kernel** 保证，不下放给"让 AI 自己实现"。
@@ -136,7 +136,7 @@ build request (freeze ToolSetSnapshot for this step)   ← 工具集在一个 st
         ↓
 model response  (可能含多个 tool_use A, B, C)
         ↓
-并发执行 A,B,C（相互独立者并行；经 Execution Environment §8）
+按执行策略运行 A,B,C（v0.1 安全默认串行；后续只有明确 parallel_safe 的工具才可有界并行）
         ↓
 等【全部】 resolve —— 绝不提前回传任何单个结果
         ↓
@@ -151,7 +151,7 @@ next step 的请求才反映新工具（通过 append note，不改 tools[]）
 
 > **ToolSetSnapshot = immutable for one model step.** 写进 kernel invariant。
 
-**batch 友好性**：因为低频能力走 shell，模型也可以在**一条** shell 命令里并发多件事（`nulya ext run a & nulya ext run b & wait`），进一步压缩 round-trip。
+**batch 友好性**：batch 的收益是多个 tool call 只产生一次模型回传；是否并行执行是独立的安全策略。因为低频能力走 shell，模型若明确知道命令彼此独立，也可以在**一条** shell 命令里自行并发（`nulya ext run a & nulya ext run b & wait`）。
 
 ---
 
@@ -169,6 +169,8 @@ next step 的请求才反映新工具（通过 append note，不改 tools[]）
 ### 5.2 native 工具的位置稳定性
 
 选入的 native 工具在 `tools[]` 里**按稳定 ID 排序**，不因"刚调用过一次"就前移。位置抖动同样伤缓存与可复现性。
+
+Registry 里 `id` 是稳定身份，`name` 是 model-facing 名字；同一个 `ToolSetSnapshot` 内 `name` 必须唯一。builtin 名字 `shell` / `edit` 永久保留，extension 不能占用。
 
 ### 5.3 对话中新增能力 = append 一条 Note（不改 tools[]）
 
@@ -263,7 +265,7 @@ v1 **不做** daemon / persistent worker / streaming / bidirectional events / ho
 
 **关于"每次 spawn 会不会慢 / 会不会堆一大堆进程"（重要，写清）：**
 
-- **不会堆积**：oneshot 模型是"读请求→干活→写结果→**退出**"，毫秒级消失。一个 turn 内并发 N 个 tool call 就并发 N 个进程，干完全退，任意时刻活着 ≤ N（N=模型这一轮的调用数，很小），然后归零。**会堆积一大堆常驻进程的恰恰是持久化没管好生命周期时**——oneshot 天生不残留。内核再加一个**并发上限**兜底。
+- **不会堆积**：oneshot 模型是"读请求→干活→写结果→**退出**"，毫秒级消失。默认串行执行时任意时刻只多一个 extension 进程；后续若某些 `parallel_safe` 工具 opt in 有界并行，活着的进程数也受内核并发上限约束，干完全退并归零。**会堆积一大堆常驻进程的恰恰是持久化没管好生命周期时**——oneshot 天生不残留。
 - **spawn 本身很便宜**：原生 Zig binary spawn ≈ 1–5ms（Linux；无解释器/VM 预热，不同于 Python/Node），对比模型 round-trip ≈ 秒级、真干活的工具自身几十 ms–秒级 → **spawn 开销对绝大多数工具 <1%**。且**最高频的 shell/edit 是 in-core 内置、根本不 spawn**，extension 是低频长尾。
 - **真正的成本不是进程启动，是某些 extension 每次调用的重初始化**（browser 每次启 Chromium、DB 每次重连、embedding 每次 load 模型）——这跟"是不是子进程"无关，in-process 一样痛。
 
@@ -466,7 +468,7 @@ nulya ext api [protocol|permissions|examples]   # 模型查【本机】真实 AP
 
 ```
 Agent loop / step 状态机 · Ledger append-only 与 PromptIR 前缀不变式 · Cache-generation 投影
-Batch（并发执行 + 单条回传）· ToolSetSnapshot per step · Provider 归一 + cache breakpoint/capabilities
+Batch（多工具单条回传，执行策略独立）· ToolSetSnapshot per step · Provider 归一 + cache breakpoint/capabilities
 Compaction · Tool registry 与对话开始选择 · Extension build/activate deterministic validation · rollback
 Subagent 能力模型（read_only 天花板 / ToolPolicy）· subagent=自调用 · policy hook 机制
 Frontend/Core 分离（headless ledger 引擎 + 薄客户端）

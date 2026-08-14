@@ -117,8 +117,24 @@ test "one step runs a batch of two shell calls and appends one result turn" {
     defer l.deinit();
     try l.append(.{ .user_text = "go" });
 
-    const tools = try registry.snapshot(alloc);
-    defer tools.deinit(alloc);
+    const FakeShell = struct {
+        fn run(a: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.ToolResult {
+            const command = try tool.requireString(req.args, "command");
+            const output = if (std.mem.indexOf(u8, command, "one") != null) "one\n[exit 0]" else "two\n[exit 0]";
+            return .{ .ok = true, .output = try a.dupe(u8, output) };
+        }
+    };
+
+    const fake_tools = [_]tool.Tool{.{
+        .definition = .{
+            .id = "test.shell",
+            .name = "shell",
+            .description = "test shell",
+            .input_schema = "{}",
+        },
+        .run = FakeShell.run,
+    }};
+    const tools: registry.ToolSetSnapshot = .{ .tools = &fake_tools };
 
     try runStep(alloc, &l, .{ .step = Scripted.step }, tools, .{
         .io = threaded.io(),

@@ -10,12 +10,14 @@ const tool = @import("tool.zig");
 const shell = @import("tools/shell.zig");
 const edit = @import("tools/edit.zig");
 
-pub const builtins = [_]tool.Tool{
+const builtins = [_]tool.Tool{
     shell.def,
     edit.def,
 };
 
 pub const ToolSetSnapshot = struct {
+    /// Frozen model-facing tool set for one step. Names must be unique inside
+    /// the snapshot; builtin names `shell` and `edit` are permanently reserved.
     tools: []const tool.Tool,
 
     pub fn deinit(self: ToolSetSnapshot, alloc: std.mem.Allocator) void {
@@ -34,23 +36,22 @@ pub fn snapshot(alloc: std.mem.Allocator) !ToolSetSnapshot {
     return .{ .tools = try alloc.dupe(tool.Tool, &builtins) };
 }
 
-pub fn lookup(name: []const u8) ?tool.Tool {
-    for (builtins) |t| {
-        if (std.mem.eql(u8, t.definition.name, name)) return t;
-    }
-    return null;
-}
-
-test "both builtins resolve, unknown does not" {
-    try std.testing.expect(lookup("shell") != null);
-    try std.testing.expect(lookup("edit") != null);
-    try std.testing.expect(lookup("nope") == null);
-}
-
 test "snapshot freezes builtin table for lookup" {
     const snap = try snapshot(std.testing.allocator);
     defer snap.deinit(std.testing.allocator);
     try std.testing.expect(snap.lookup("shell") != null);
     try std.testing.expect(snap.lookup("edit") != null);
     try std.testing.expect(snap.lookup("nope") == null);
+}
+
+test "snapshot exposes unique model-facing names" {
+    const snap = try snapshot(std.testing.allocator);
+    defer snap.deinit(std.testing.allocator);
+
+    for (snap.tools, 0..) |a, i| {
+        try std.testing.expect(a.definition.name.len != 0);
+        for (snap.tools[i + 1 ..]) |b| {
+            try std.testing.expect(!std.mem.eql(u8, a.definition.name, b.definition.name));
+        }
+    }
 }
