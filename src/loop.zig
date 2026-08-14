@@ -31,6 +31,17 @@ pub fn runStep(
     tool_snapshot: registry.ToolSetSnapshot,
     ctx_base: tool.CtxHeader,
 ) !provider.Usage {
+    return runStepWithOptions(alloc, l, model, tool_snapshot, ctx_base, .{});
+}
+
+pub fn runStepWithOptions(
+    alloc: std.mem.Allocator,
+    l: *ledger.Ledger,
+    model: Model,
+    tool_snapshot: registry.ToolSetSnapshot,
+    ctx_base: tool.CtxHeader,
+    model_options: provider.Options,
+) !provider.Usage {
     // seq base is the ledger position: deterministic across replays (DESIGN §1).
     const base_seq = l.len();
 
@@ -44,6 +55,7 @@ pub fn runStep(
         .prompt_ir = &prompt_ir,
         .tools = tool_defs,
         .generation = prompt.currentGeneration(l.view()),
+        .options = model_options,
     });
     defer turn.deinit(alloc);
     try l.append(.{ .assistant = .{ .text = turn.text, .calls = turn.calls } });

@@ -6,7 +6,9 @@
     .paths = .{
         "build.zig",
         "build.zig.zon",
+        "default.toml",
         "src",
         "docs",
+        "vendor",
     },
 }

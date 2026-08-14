@@ -9,6 +9,15 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const toml = b.createModule(.{
+        .root_source_file = b.path("vendor/zig-toml/src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const config_options = b.addOptions();
+    config_options.addOption([]const u8, "default_toml", @embedFile("default.toml"));
+    root.addImport("toml", toml);
+    root.addOptions("config_options", config_options);
 
     const exe = b.addExecutable(.{
         .name = "nulya",

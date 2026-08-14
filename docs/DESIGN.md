@@ -391,6 +391,46 @@ Environment (interface)
 
 ---
 
+## 9.5 配置解析链 (config resolution chain)
+
+Nulya 读取**自身**配置走一条分层链，优先级 **项目 > 用户 > 系统 > 内置 default**（参考 tcode 的 `default → user → project` 合并，nulya 多预留一个机器级 system 层）：
+
+```
+@embedFile default.toml                                  ← 零配置基座，随二进制走（§10 同哲学）
+      ↓ merge
+system   /etc/nulya/config.toml | %ProgramData%\nulya\   ← 机器级（受管安装/共享机场景；接口预留，v0.1 可不实装）
+      ↓ merge
+user     ~/.config/nulya/config.toml | %AppData%\nulya\  ← 用户级：provider profile、secret 引用、policy 档位、tunable 初值
+      ↓ overlay（过 sanitizeProject）
+project  .nulya/config.toml                              ← 项目级：不可信输入，只能收窄不能放宽
+```
+
+合并语义同 tcode：标量"set 即胜"，列表按 key 合并/拼接；default 是每次 load 的基座，上层只写增量与覆盖。**内置 default 用 `@embedFile("default.toml")`**——零配置即可跑，和 §10 内嵌工具链是同一个"单文件、离线、零网络"（§0.3）信条的又一次体现。（实现代价：Zig 无 std TOML，需 vendored 一个 TOML parser 进构建，无网络下载。）
+
+### 9.5.1 config 承载什么
+
+provider profiles（provider kind / model / base_url / `api_key_env` / effort，§13）· registry 选择（pinned native tools、上限 K、排序权重，§5.1）· policy hook 档位（off/auto/human/AI reviewer，§7.4）· environment backend 选择与参数（local/sandbox/remote/acp，§8）· compaction 触发阈值（§11）· 项目本地 extension 搜索路径（§7.2）。
+
+§17 里"待定初值"的一堆 tunable（K、`uses_recent` vs `success_rate` 权重、compaction 阈值）从此有了确定的安放处：它们是 **default.toml 里的初值 + 上层可覆盖**，不再是散落在代码里的魔数。
+
+### 9.5.2 信任边界：项目层只能收窄（与 §9 同一不变量）
+
+项目 `.nulya/config.toml` 随 repo checkout 而来，**可能不是本机用户写的**，因此是不可信输入。它过一道 `sanitizeProject`：
+
+> **项目层可以"更严"，不能"更松"。** 可设：pin 哪些 native 工具、选 model profile、项目本地 extension 路径、把 policy hook 调到**更严**档位、把 K **调小**。**不可**：关掉 policy hook、把 environment backend 从 `sandbox` **降级**成 `local`、放宽 authority、注入 `api_key_env` 名字去外泄 host env。
+
+这不是新发明——它是 tcode `sanitize_project_config`（剥掉项目层的 `auto_mode` / `tcode_state`）的同构，而在 nulya 里它**和 §9 的 `extension_permissions ⊆ session_authority` 是同一个不变量的另一面**：无论走 extension 注册还是走项目 config，checkout 一个 repo 都不该能拓宽你机器上的权限或削弱安全策略。system 与 user 层是管理员/本机用户所有，视为可信，不过 `sanitizeProject`；只有 project 层过滤。
+
+### 9.5.3 secret 不入文件（§9 净化不动）
+
+config 文件只持 `api_key_env`（一个**名字**，如 `"OPENAI_API_KEY"`），不持真值。真正的密钥仍留在 host env、由 host 进程读取、**绝不下传给 extension/shell 子进程**（§9）。于是现有的裸读 env 做法不作废，而是**降级为 secret 通道**，config 文件接管 selection 通道。允许内联 `api_key`，但同 tcode 一样不鼓励。
+
+### 9.5.4 与 ledger 的关系（本版范围）
+
+config 文件在磁盘上可变，但 §1 反对"第二份 mutable state"。**目标终态**：对话开始时解析出的 effective config 作为一个 ledger 事件记入，驱动 §5.1 的 `registry_selection` 与 provider 选择，使 replay/fork 可复现；磁盘 config 中途变更只在**下一对话边界**生效（同 §5.3 工具晋升）。**本版范围**：先只实现 `default → system → user → project` 的纯函数解析 + `sanitizeProject`，返回 effective config struct；落 ledger 留到 `registry_selection` 真正接线时一起做。
+
+---
+
 ## 10. 内嵌 Zig 工具链
 
 - **`@embedFile` 宿主平台那一份 Zig（pinned，如 0.16.x）压缩包进 nulya 二进制**，首次需要时解压到 `~/.local/share/nulya/toolchains/zig/<ver>/`（Windows 用 AppData）。
@@ -473,6 +513,7 @@ Compaction · Tool registry 与对话开始选择 · Extension build/activate de
 Subagent 能力模型（read_only 天花板 / ToolPolicy）· subagent=自调用 · policy hook 机制
 Frontend/Core 分离（headless ledger 引擎 + 薄客户端）
 Execution Environment 抽象 · Authority / env 净化 · Managed Zig · Telemetry · Crash recovery
+配置解析链（default→system→user→project）· 项目层信任收窄（sanitizeProject，§9 同不变量）
 ```
 
 **可自生长（内核之上皆可学习）：**
@@ -549,7 +590,7 @@ image/audio kubernetes ssh jira notion ...
 ## 17. 开放问题（待定）
 
 - **compaction 触发策略**：token 阈值 vs task 边界 vs 混合；如何最小化 generation bump。
-- **对话开始 tools[] 的上限 K** 与排序权重（`uses_recent` vs `success_rate` 权衡）的初值。
+- **对话开始 tools[] 的上限 K** 与排序权重（`uses_recent` vs `success_rate` 权衡）的初值——安放处已定为 `default.toml`（§9.5.1），待定的是具体初值。
 - **`nulya ext run` 的 JSON 手写负担**：低频工具经 shell 时模型要手写 JSON，是否给一个更宽松的 `--arg k=v` 语法降低出错率。
 - **ACP / remote environment** 的具体协议选型。
 - **cross-conversation 的 extension 复用**在多用户/多 workspace 下的隔离与共享边界。

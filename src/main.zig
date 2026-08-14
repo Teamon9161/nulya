@@ -13,6 +13,7 @@ const openai = @import("providers/openai.zig");
 const registry = @import("registry.zig");
 const tool = @import("tool.zig");
 const environment = @import("environment.zig");
+const config = @import("config.zig");
 
 /// Scripted stand-in provider: on seeing a pending user turn, it issues two
 /// shell calls in a single assistant turn — demonstrating batched execution.
@@ -62,6 +63,19 @@ pub fn main() !void {
     defer threaded.deinit();
     const io = threaded.io();
 
+    // Host env configures Nulya itself and provider credentials. This map is
+    // never handed to tools; `LocalEnvironment` builds its own sanitized child env.
+    var env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    defer env.deinit();
+
+    var cfg = try config.load(alloc, io, &env);
+    defer cfg.deinit();
+
+    if (cfg.environment.backend != .local) {
+        std.debug.print("environment backend '{s}' is parsed but not implemented yet\n", .{@tagName(cfg.environment.backend)});
+        return error.UnsupportedEnvironmentBackend;
+    }
+
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
 
@@ -70,13 +84,9 @@ pub fn main() !void {
     const tools = try registry.snapshot(alloc);
     defer tools.deinit(alloc);
 
-    // Host env: read here to CONFIGURE the provider (the host owns its own keys).
-    var env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
-    defer env.deinit();
-
     // Execution env: the sanitized boundary every tool runs behind. Host secrets
     // in `env` above never cross into it (DESIGN §9).
-    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{ .dialect = cfg.environment.shell.toLocalOption() });
     defer lenv.deinit();
 
     var scripted = ScriptedProvider{};
@@ -84,18 +94,20 @@ pub fn main() !void {
     var use_openai = false;
     defer if (use_openai) openai_provider.deinit();
 
-    const model: provider.Model = if (env.get("OPENAI_API_KEY")) |api_key|
-        if (api_key.len != 0) blk: {
+    const selected_profile = cfg.provider.activeProfile() orelse cfg.provider.findProfile("scripted");
+    const model_options: provider.Options = .{ .effort = if (selected_profile) |profile| profile.effort else null };
+    const model: provider.Model = if (selected_profile) |profile| switch (profile.kind) {
+        .scripted => .{ .ptr = &scripted, .vtable = &ScriptedProvider.vtable },
+        .openai => if (resolveApiKey(profile, &env)) |api_key| blk: {
             openai_provider = try openai.OpenAiProvider.init(alloc, io, .{
                 .api_key = api_key,
-                .model = env.get("OPENAI_MODEL") orelse "gpt-4o-mini",
-                .base_url = env.get("OPENAI_BASE_URL") orelse "https://api.openai.com/v1",
+                .model = nonEmpty(profile.model, "gpt-4o-mini"),
+                .base_url = nonEmpty(profile.base_url, "https://api.openai.com/v1"),
             });
             use_openai = true;
             break :blk openai_provider.modelHandle();
-        } else .{ .ptr = &scripted, .vtable = &ScriptedProvider.vtable }
-    else
-        .{ .ptr = &scripted, .vtable = &ScriptedProvider.vtable };
+        } else .{ .ptr = &scripted, .vtable = &ScriptedProvider.vtable },
+    } else .{ .ptr = &scripted, .vtable = &ScriptedProvider.vtable };
 
     std.debug.print("provider: {s}/{s} (shell dialect: {s})\n", .{ model.name(), model.modelName(), lenv.dialect_val.label() });
 
@@ -111,11 +123,11 @@ pub fn main() !void {
     if (use_openai) {
         var steps: usize = 0;
         while (steps < 4) : (steps += 1) {
-            accumulate(&total, try loop.runStep(alloc, &l, model, tools, ctx));
+            accumulate(&total, try loop.runStepWithOptions(alloc, &l, model, tools, ctx, model_options));
             if (lastAssistantDone(&l)) break;
         }
     } else {
-        accumulate(&total, try loop.runStep(alloc, &l, model, tools, ctx));
+        accumulate(&total, try loop.runStepWithOptions(alloc, &l, model, tools, ctx, model_options));
     }
 
     printLedger(&l);
@@ -125,6 +137,17 @@ pub fn main() !void {
     );
 
     // Ledger owns cloned assistant/tool-result payloads and frees them in deinit.
+}
+
+fn resolveApiKey(profile: config.ProviderProfile, env: *const std.process.Environ.Map) ?[]const u8 {
+    if (profile.api_key) |api_key| if (api_key.len != 0) return api_key;
+    if (profile.api_key_env.len == 0) return null;
+    const api_key = env.get(profile.api_key_env) orelse return null;
+    return if (api_key.len == 0) null else api_key;
+}
+
+fn nonEmpty(value: []const u8, fallback: []const u8) []const u8 {
+    return if (value.len == 0) fallback else value;
 }
 
 fn accumulate(total: *provider.Usage, step: provider.Usage) void {
@@ -172,4 +195,5 @@ test {
     _ = @import("provider.zig");
     _ = @import("providers/openai.zig");
     _ = @import("environment.zig");
+    _ = @import("config.zig");
 }

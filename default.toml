@@ -1,0 +1,38 @@
+[provider]
+active_profile = "openai"
+
+[[provider.profiles]]
+name = "openai"
+kind = "openai"
+model = "gpt-4o-mini"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+
+[[provider.profiles]]
+name = "scripted"
+kind = "scripted"
+model = "scripted-demo"
+
+[registry]
+max_tools = 8
+pinned_native_tools = []
+
+[registry.weights]
+uses_recent = 1.0
+uses_total = 0.25
+last_used = 0.5
+success_rate = 1.0
+
+[policy]
+hook = "auto"
+
+[environment]
+backend = "local"
+shell = "auto"
+
+[compaction]
+max_input_tokens = 80000
+target_input_tokens = 40000
+
+[extensions]
+paths = []
