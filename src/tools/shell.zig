@@ -16,8 +16,14 @@ const emit = @import("../emit.zig");
 const MAX_CAPTURE_BYTES: usize = 8 * 1024 * 1024;
 
 pub const def: tool.Tool = .{
-    .name = "shell",
-    .description = "Run a shell command (`sh -c`). Args: {command, cwd?}.",
+    .definition = .{
+        .id = "builtin.shell",
+        .name = "shell",
+        .description = "Run a shell command (`sh -c`).",
+        .input_schema =
+            \\{"type":"object","properties":{"command":{"type":"string"},"cwd":{"type":"string"}},"required":["command"]}
+        ,
+    },
     .run = run,
 };
 
@@ -54,6 +60,6 @@ fn run(alloc: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.ToolResult
     if (raw.items.len > 0 and raw.items[raw.items.len - 1] != '\n') try raw.append(alloc, '\n');
     try raw.print(alloc, "[exit {d}]", .{exit_code});
 
-    const out = try emit.emit(alloc, req.ctx.io, raw.items, "shell", req.ctx.seq, req.ctx.scratch_dir, req.ctx.budget);
+    const out = try emit.emit(alloc, req.ctx.io, raw.items, "shell", req.ctx.event_seq, req.ctx.call_index, req.ctx.scratch_dir, req.ctx.budget);
     return .{ .ok = exit_code == 0, .output = out.text, .spill_path = out.spill_path };
 }

@@ -4,7 +4,7 @@
 > 工具调用 schema 越来越复杂。需要一个**专职审阅 agent** 把关工具的创建/变动，且能与主 agent 交流。
 >
 > 解法：不为此新造子系统。定义**一个极简 subagent 原语**，通信用 **append-only 事件**（不用 live channel），
-> 审阅做成 DESIGN §7.4 扩展生命周期上的**内核强制门**——工具变动"必须"过审才能 active。
+> 审阅做成 DESIGN §7.4 扩展生命周期上的**policy hook**。Kernel 强制 deterministic validation 与原子 activate/rollback；是否必须由 AI reviewer 过审，是 workspace policy，不是 immutable kernel invariant。
 
 参考来源：`/home/teamon/code/rust/tcode` `crates/tcode-tools/src/agent/{defs.rs, mod.rs, cohort.rs}` 与 `crates/tcode-core/src/agent_roles.rs`。
 tcode 的能力模型是真金；它的 cohort 共享 channel / live 桥接 / worktree 隔离对本场景是**过度**——留能力模型，砍 channel 子系统。
@@ -33,12 +33,13 @@ const ToolPolicy   = union(enum) { allow: []ToolSelector, deny: []ToolSelector }
 
 tcode 的对应（采纳其语义）：`read_only`（`defs.rs:188` 硬天花板）、`ToolPolicy` Allow/Deny（`defs.rs:120`）、`ToolSelector`（`defs.rs:56`）、`max_turns`（round-trip 预算）、`SpawnPolicy`（极简版固定 leaf）、`QuestionPolicy`→`can_ask_parent`。
 
-**四条内核不变式（安全 & 缓存 & 实现）：**
+**五条内核不变式（安全 & 缓存 & 实现）：**
 
 1. **read_only 是硬天花板**：mutating 工具在 allow/deny **之前**就被剥离。审阅者天生 read-only——它能读 diff/源码/manifest、能跑 test，但**永远不能自己** edit/activate。
 2. **独立 ledger = 独立 cache scope**：subagent 在自己的 ledger 里跑，**不碰主 agent 的缓存前缀**（DESIGN §1）。只有最终**结论**作为一条 append-only note 进主 ledger。resume 子 agent 是 append-only、命中自己的前缀缓存（tcode `mod.rs:131` 已验证此性质）。
 3. **子 agent 产出以 fenced data 进父级，不是 instruction**：结论文本被 fence 包裹，主 agent 视其为数据而非命令，防止子 agent 输出注入指令（对齐 DESIGN 的 instruction-boundary）。
 4. **subagent = 自调用（self-invocation）**：subagent **不是** in-process 对象，而是 `nulya` 拿一个子 ledger 经 Environment（DESIGN §8）**再 spawn 自己一遍**——和 extension 子进程走**同一套 spawn 机制**。详见 §6。
+5. **v0.1 read_only 不给 unrestricted shell**：在没有 OS sandbox 的 `local` backend 下，`shell(command)` 无法可靠区分 `cat foo` 与 `rm foo`。read_only reviewer 只能拿 deterministic read-only capability（manifest/diff/source/test result 读取）；等 sandbox backend 能强制 FS RO / network deny / process restriction 后，才允许 reviewer shell。
 
 ---
 
@@ -49,8 +50,8 @@ tcode 用 mpsc+oneshot 桥接（`mod.rs:57` `ParentUserBridge`）是因为它是
 审阅者一次产出三选一：
 
 ```
-approve { reasons }          → 门放行
-reject  { reasons }          → 门拦下，主 agent 据 reasons 迭代
+approve { reasons }          → policy hook 放行
+reject  { reasons }          → policy hook 拦下，主 agent 据 reasons 迭代
 ask     { question }         → 需要澄清
 ```
 
@@ -72,31 +73,33 @@ ask     { question }         → 需要澄清
 
 ---
 
-## 3. 工具审阅门（第一个具体用途）
+## 3. 工具审阅 policy hook（第一个具体用途）
 
-### 3.1 门的位置：内核强制，主 agent 绕不过
+### 3.1 门的位置：kernel 强制机制，policy 决定是否拦截
 
-审阅**不是**主 agent 自选调用的工具（否则它会跳过）。门焊死在 DESIGN §7.4 扩展生命周期的 `installed → active` 这条边上：
+审阅**不是**主 agent 自选调用的工具（否则它会跳过），但 reviewer 的主观判断也不应成为 immutable kernel invariant。生命周期边界是固定的，拦截策略是可配置的：
 
 ```
-draft ─build─▶ built ─validate/test─▶ installed ─┬─[REVIEW GATE]─▶ active
+draft ─build─▶ built ─validate/test─▶ installed ─┬─[POLICY HOOKS]─▶ active
                                                   │
                                           reject/needs-info
                                                   ▼
                                          停在 installed（带 reasons）
 ```
 
-- `nulya ext activate foo` 触发审阅；返回 `approved+active` / `rejected: <reasons>` / `needs-info: <question>`。
-- 变动（`update` 出新不可变版本）同样过门才能原子切换 current。
-- **工具变动必须过审**——这是内核不变式，不是约定。
+- Kernel 固定执行 deterministic validation：manifest schema、entry 可执行、协议往返、declared permissions ⊆ session_authority、不可变版本 hash、atomic activate/rollback。
+- Policy hooks 可选：`off` / `auto` / `human approval` / `AI reviewer` / 组合。Nulya 默认可以启用 reviewer 来专治“为单任务加参数”的工具膨胀，但它是 policy，不是 kernel invariant；低风险 workspace 可以关闭，只保留 deterministic validation。
+- `nulya ext activate foo` 返回 `active` / `rejected: <reasons>` / `needs-info: <question>`；这些 verdict 来自 policy hook，而不是替代 deterministic validation。
 
 ### 3.2 审阅者拿到什么
 
-作为 §1 原语的一个实例（`read_only=true`，工具限 `allow: [shell(只读用途), read]`，`can_ask_parent=true`）：
+作为 §1 原语的一个实例（`read_only=true`，`can_ask_parent=true`）：
 
 - **manifest diff**：新增/改动了哪些 `tools[].input` 参数。
-- **源码**（可读、可跑 test，不可改）。
+- **源码 / 构建制品摘要 / test results**：由 core 以 read-only capability 提供。
 - **主 agent 的 rationale**：为什么加这个参数/工具（主 agent 在 activate 时附上）。
+
+v0.1 reviewer **不拿 unrestricted shell**。在没有 sandbox 的 local backend 下，read_only + shell 不是硬边界；允许 shell 只会把安全性退化成提示词约束。
 
 ### 3.3 审阅者的 mandate（persona，直击你的痛点）
 
@@ -105,10 +108,10 @@ draft ─build─▶ built ─validate/test─▶ installed ─┬─[REVIEW GAT
 1. **这个参数通用吗**，还是只服务当前这一个任务？→ 只服务单任务的参数应拒绝。
 2. **能否用已有能力组合出来**（shell 管道 / 已有 extension / 调用方自己传值）而不必加参数？
 3. **加了它，调用 schema 变复杂多少**？复杂度增量是否配得上通用性？
-4. **这个工具是否还在做一件事**？参数堆积往往是"一个工具想干多件事"的信号 → 建议拆分或退回 scratch。
+4. **这个工具是否还在做一件事**？参数堆积往往是“一个工具想干多件事”的信号 → 建议拆分或退回 scratch。
 5. **命名/语义**是否稳定（工具一旦 active 就进别人的 tools[]，改名/改参会炸缓存 DESIGN §5）。
 
-拒绝时给**可操作的**理由（"参数 `format` 只服务 CSV 导出这一次，建议调用方在 shell 里 `| column -t`，不进工具"），让主 agent 一轮内改对。
+拒绝时给**可操作的**理由（“参数 `format` 只服务 CSV 导出这一次，建议调用方在 shell 里 `| column -t`，不进工具”），让主 agent 一轮内改对。
 
 ### 3.4 结论落 ledger
 
@@ -118,7 +121,7 @@ draft ─build─▶ built ─validate/test─▶ installed ─┬─[REVIEW GAT
 extension_review { ext_id, version, verdict: approve|reject, reasons, rounds }
 ```
 
-approve → 允许 `installed → active`；reject → 保持 installed。整条审阅对话在审阅者自己的 ledger 里，主 ledger 只落这一条结论 note → **主 agent 缓存前缀不受审阅过程影响**。
+approve → policy hook 放行；reject → 保持 installed。整条审阅对话在审阅者自己的 ledger 里，主 ledger 只落这一条结论 note → **主 agent 缓存前缀不受审阅过程影响**。
 
 ---
 
@@ -128,7 +131,7 @@ approve → 允许 `installed → active`；reject → 保持 installed。整条
 |---|---|
 | 缓存不可变（DESIGN §1） | 审阅者独立 ledger/cache scope；主 ledger 只追加一条结论 note；通信全是 append-only 事件 |
 | 少交互（DESIGN §0.2） | 审阅只在**工具创建/变动**时触发（罕见），换取避免"臃肿工具面拖累每一个后续 turn"的巨大长期成本 |
-| 核心简单（base-tools 主题） | 不新造 channel 子系统；复用**一个** subagent 原语；通信=事件。审阅者本身就是一个 read-only AgentDef |
+| 核心简单（base-tools 主题） | 不新造 channel 子系统；复用**一个** subagent 原语；通信=事件。审阅者本身只是一个可选 policy hook |
 
 ---
 
@@ -137,7 +140,7 @@ approve → 允许 `installed → active`；reject → 保持 installed。整条
 **最小版就位（现在设计、内核内置）：**
 - 一个 `AgentDef` 能力模型（§1）
 - append-only Q&A 通信（§2）
-- `installed → active` 审阅门 + 审阅者 persona（§3）
+- `installed → active` policy hook 机制 + 可选审阅者 persona（§3）
 - leaf-only、单反向通道、同步门
 
 **以后（AI 可自造 / 后续里程碑）：**
@@ -197,5 +200,5 @@ approve → 允许 `installed → active`；reject → 保持 installed。整条
 
 ## 7. 一句话
 
-> 复用**一个 read-only subagent 原语**，通信用**两个 ledger 互相追加事件**，subagent **以自调用（re-spawn）实现**、和 extension 同一套 spawn，把审阅焊在**扩展生命周期的 `installed→active` 门**上。
-> 工具变动必须过审，审阅者专治"为单任务加参数"的工具膨胀——而这一切不给主 agent 的缓存和交互预算添任何负担，且天然兼容后续的 live TUI 与 app。
+> 复用**一个 read-only subagent 原语**，通信用**两个 ledger 互相追加事件**，subagent **以自调用（re-spawn）实现**、和 extension 同一套 spawn，把审阅作为**扩展生命周期的 `installed→active` policy hook**。
+> Kernel 强制 deterministic validation 与原子切换；AI reviewer 专治“为单任务加参数”的工具膨胀，但是否强制启用由 policy 决定。

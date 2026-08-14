@@ -15,6 +15,7 @@ const std = @import("std");
 const ledger = @import("ledger.zig");
 const registry = @import("registry.zig");
 const tool = @import("tool.zig");
+const emit = @import("emit.zig");
 
 /// What the model returns for one step.
 pub const ModelTurn = struct {
@@ -33,20 +34,35 @@ pub fn runStep(
     alloc: std.mem.Allocator,
     l: *ledger.Ledger,
     model: Model,
+    tool_snapshot: registry.ToolSetSnapshot,
     ctx_base: tool.CtxHeader,
 ) !void {
     // seq base is the ledger position: deterministic across replays (DESIGN §1).
     const base_seq = l.len();
 
     const turn = try model.step(alloc, l.view());
+    defer alloc.free(turn.calls);
     try l.append(.{ .assistant = .{ .text = turn.text, .calls = turn.calls } });
     if (turn.calls.len == 0) return; // model addressed the user; step complete.
 
     const results = try alloc.alloc(ledger.ToolResultEntry, turn.calls.len);
+    var initialized_results: usize = 0;
+    defer {
+        for (results[0..initialized_results]) |r| {
+            alloc.free(r.output);
+            if (r.spill_path) |p| alloc.free(p);
+        }
+        alloc.free(results);
+    }
+
+    var step_output = emit.StepOutputLimiter.init(ctx_base.io, ctx_base.scratch_dir, base_seq, ctx_base.step_budget);
     for (turn.calls, 0..) |call, i| {
         var ctx = ctx_base;
-        ctx.seq = base_seq * 64 + i; // unique per call -> unique spill filename
-        results[i] = try execOne(alloc, call, ctx);
+        ctx.event_seq = base_seq;
+        ctx.call_index = i;
+        results[i] = try execOne(alloc, tool_snapshot, call, ctx);
+        initialized_results += 1;
+        try step_output.apply(alloc, call.tool, i, &results[i].output, &results[i].spill_path);
     }
     // ONE user turn carrying the whole batch.
     try l.append(.{ .tool_results = results });
@@ -54,10 +70,11 @@ pub fn runStep(
 
 fn execOne(
     alloc: std.mem.Allocator,
+    tool_snapshot: registry.ToolSetSnapshot,
     call: ledger.ToolCall,
     ctx: tool.CtxHeader,
 ) !ledger.ToolResultEntry {
-    const t = registry.lookup(call.tool) orelse {
+    const t = tool_snapshot.lookup(call.tool) orelse {
         const msg = try std.fmt.allocPrint(alloc, "unknown tool '{s}'; builtins are shell, edit", .{call.tool});
         return .{ .call_id = call.id, .ok = false, .output = msg };
     };
@@ -100,11 +117,15 @@ test "one step runs a batch of two shell calls and appends one result turn" {
     defer l.deinit();
     try l.append(.{ .user_text = "go" });
 
-    try runStep(alloc, &l, .{ .step = Scripted.step }, .{
+    const tools = try registry.snapshot(alloc);
+    defer tools.deinit(alloc);
+
+    try runStep(alloc, &l, .{ .step = Scripted.step }, tools, .{
         .io = threaded.io(),
         .cwd = ".",
         .scratch_dir = "/tmp",
-        .seq = 0,
+        .event_seq = 0,
+        .call_index = 0,
     });
 
     // user_text, assistant, tool_results — exactly one batched result turn.
@@ -114,16 +135,5 @@ test "one step runs a batch of two shell calls and appends one result turn" {
     try std.testing.expect(last.tool_results[0].ok);
     try std.testing.expect(std.mem.indexOf(u8, last.tool_results[0].output, "one") != null);
 
-    // free the scripted allocations
-    for (l.view()) |e| switch (e) {
-        .assistant => |as| alloc.free(as.calls),
-        .tool_results => |rs| {
-            for (rs) |r| {
-                alloc.free(r.output);
-                if (r.spill_path) |p| alloc.free(p);
-            }
-            alloc.free(rs);
-        },
-        else => {},
-    };
+    // Ledger owns cloned assistant/tool-result payloads and frees them in deinit.
 }

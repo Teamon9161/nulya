@@ -8,6 +8,7 @@
 const std = @import("std");
 const ledger = @import("ledger.zig");
 const loop = @import("loop.zig");
+const registry = @import("registry.zig");
 const tool = @import("tool.zig");
 
 /// Scripted stand-in model: on seeing a pending user turn, it issues two shell
@@ -34,27 +35,20 @@ pub fn main() !void {
 
     try l.append(.{ .user_text = "What system am I on?" });
 
-    try loop.runStep(alloc, &l, .{ .step = scriptedModel }, .{
+    const tools = try registry.snapshot(alloc);
+    defer tools.deinit(alloc);
+
+    try loop.runStep(alloc, &l, .{ .step = scriptedModel }, tools, .{
         .io = io,
         .cwd = ".",
         .scratch_dir = ".nulya/scratch",
-        .seq = 0,
+        .event_seq = 0,
+        .call_index = 0,
     });
 
     printLedger(&l);
 
-    // Skeleton owns the scripted allocations; free them before gpa checks leaks.
-    for (l.view()) |e| switch (e) {
-        .assistant => |as| alloc.free(as.calls),
-        .tool_results => |rs| {
-            for (rs) |r| {
-                alloc.free(r.output);
-                if (r.spill_path) |p| alloc.free(p);
-            }
-            alloc.free(rs);
-        },
-        else => {},
-    };
+    // Ledger owns cloned assistant/tool-result payloads and frees them in deinit.
 }
 
 fn printLedger(l: *const ledger.Ledger) void {
@@ -83,4 +77,5 @@ test {
     _ = @import("tool.zig");
     _ = @import("registry.zig");
     _ = @import("loop.zig");
+    _ = @import("prompt.zig");
 }

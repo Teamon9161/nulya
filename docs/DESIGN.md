@@ -5,7 +5,7 @@
 > Nulya 不给 AI 一堆工具，而是给 AI 一个足够可靠的"制造工具的底座"。
 > 内核只有两个工具（shell、edit），第三个工具由 Nulya 自己造出来。
 
-本文档是设计基线，不是最终 API。术语：**ledger** = 会话事件日志；**generation** = 缓存世代；**step** = 一次 model 请求-响应。
+本文档是设计基线，不是最终 API。术语：**ledger** = 会话事件日志；**generation** = 缓存世代；**step** = 一次 model 请求-响应；**PromptIR** = provider 无关的 prompt 逻辑块投影。
 
 ---
 
@@ -21,19 +21,34 @@
 
 ## 1. 贯穿全局的主线：缓存世代 (cache generation)
 
-引入一个单调计数器 `generation`。它把三条约束统一成一个不变式：
+缓存世代不是对完整 HTTP/API request bytes 做断言。完整 JSON request 会因为数组/对象闭合字节而天然不满足“上一请求完整字节是下一请求前缀”：`{"messages":[A,B]}` 不可能是 `{"messages":[A,B,C]}` 的逐字节前缀。
 
-> **在同一个 generation 内，第 N+1 次请求发给模型的字节前缀，逐字节 ⊇ 第 N 次的前缀。**
+Kernel 保证的是 provider 无关的逻辑 prompt 块前缀稳定：
 
-于是同一 generation 内每次请求都是"纯前缀延长" → 缓存最大命中。`generation` 只在三件事发生时 +1：
+```
+Ledger
+  ↓ projection
+PromptIR
+  ├── tools
+  ├── system
+  └── message blocks
+       ↓
+Provider serializer/cache policy
+```
+
+> **在同一个 generation 内，`PromptIR[N].stable_blocks` 是 `PromptIR[N+1].stable_blocks` 的前缀。**
+
+Provider runtime 负责把这个逻辑块前缀映射到具体厂商的序列化和 cache 机制：Anthropic 的 tools → system → messages prompt prefix、deferred tools、OpenAI 的 prompt caching/cache breakpoints 等都属于这一层。Nulya 的 kernel 不把某一家 provider 的 JSON bytes 当成架构不变量。
+
+`generation` 是 ledger 事件的投影，而不是第二份可变状态。compaction、system/tool definition 变更、registry selection 等事件自然决定当前 generation；普通 append 只延长当前 generation 的 PromptIR stable blocks。
 
 | 事件 | 为什么会炸缓存 | 设计对策 |
 |---|---|---|
-| 工具集合变化 | `tools[]` 位于缓存前缀最前面（Anthropic 顺序：tools → system → messages），一变全后缀失效 | **对话内绝不改 tools[]**；工具集只在对话开始时选定并冻结（见 §5） |
+| 工具集合变化 | native `tools[]` 通常位于缓存前缀最前面，一变会使下游缓存失效 | **对话内默认不改 tools[]**；工具集只在对话开始时选定并冻结（见 §5）。支持 deferred tools 的 provider 可走 provider-specific 优化，但不能破坏 PromptIR 块级前缀不变量 |
 | Compaction | 它重写历史 = 定义上就是炸前缀 | 让 compaction 罕见、边界明确；compaction 后新摘要成为新的稳定基座（见 §11） |
-| system prompt / 工具定义变化 | 同样在前缀里 | 把易变量（时间戳、随机 id）挤到序列化尾部或排除出缓存区 |
+| system prompt / 工具定义变化 | 同样改变稳定块 | 把易变量（时间戳、随机 id）挤到非缓存区或新 generation 边界之后 |
 
-**可测性**：core 应能在任意两次同 generation 请求上 `assert(bytes[N] is a prefix of bytes[N+1])`。这个断言是 Nulya 缓存正确性的守门员，写进测试。
+**可测性**：core 测试断言 `prompt_blocks[N] is a prefix of prompt_blocks[N+1]`。Provider integration test 再分别检查实际 `cached_tokens` / `cache_read_input_tokens` / cache breakpoint 行为。
 
 ---
 
@@ -44,13 +59,13 @@
                          │      LLM      │
                          └───────┬───────┘
                                  │  immutable ToolSetSnapshot (frozen per step)
-                                 │  request bytes = pure prefix-extension within a generation
+                                 │  PromptIR stable_blocks = prefix-stable within a generation
                   ┌──────────────┴──────────────┐
                   │            KERNEL            │
                   │  ┌────────────────────────┐ │
                   │  │ Agent loop / step m/c   │ │  ← batch, immutable snapshot per step
                   │  │ Ledger (append-only)    │ │  ← the immutable API
-                  │  │ Cache-generation mgr    │ │
+                  │  │ Cache-generation proj   │ │
                   │  │ Provider runtime        │ │  ← normalize + place cache breakpoints
                   │  │ Compaction              │ │
                   │  │ Tool registry           │ │
@@ -86,7 +101,7 @@ user_message | assistant_message | tool_call | tool_result
 | tool_available_note      // 对话中新增能力，见 §5.3
 | registry_selection       // 对话开始时选定的 tools[]
 | extension_build | extension_activate
-| extension_review         // 审阅门结论，见 agents-and-review.md
+| extension_review         // policy hook 结论，见 agents-and-review.md
 | review_question | review_answer   // 主 agent ↔ 审阅者的 append-only 通信
 | compaction               // 见 §11
 ```
@@ -98,7 +113,7 @@ user_message | assistant_message | tool_call | tool_result
 - **没有 `edit_event` / `delete_event` / `reorder`**。API 表面只有 `append(event)` 和只读的 `read/replay/fork`。
 - "纠正"语义 = **append 一条纠正事件**（例如工具结果错了，append 一条新的 tool_result 修正 + 一条说明），或 **fork 一条新 ledger**。
 - **fork 与父 ledger 结构共享前缀**（copy-on-write）；前缀部分的 prompt-cache 依旧有效。"重新生成上一轮"在语义上只能是 fork 出新分支，不能原地改。
-- 发给模型的请求字节，是 `events[0..k]` 的**纯函数**。这保证 §1 的前缀不变式。
+- 发给模型的 `PromptIR.stable_blocks` 是 `events[0..k]` 的**纯函数**。Provider request bytes 是 PromptIR 经 provider serializer/cache policy 的结果；kernel 只断言 §1 的块级前缀不变式。
 
 ### 3.3 派生视图（projection）
 
@@ -262,12 +277,12 @@ v1 **不做** daemon / persistent worker / streaming / bidirectional events / ho
 >
 > 考虑过 WASM in-process（免进程 + 沙箱），**否决**：与"原生 Zig + 内嵌工具链"冲突，要拉入 WASM runtime、削弱语言无关性、WASM 沙箱自带性能/复杂度成本。原生子进程的 crash 隔离与语言无关更值。
 
-### 7.4 生命周期：不可变版本 + 原子切换（采纳 ChatGPT 第 7/22 条）
+### 7.4 生命周期：不可变版本 + 原子切换（deterministic gate + policy hooks）
 
-绝不"改源码直接覆盖正在运行的工具"。状态机：
+绝不“改源码直接覆盖正在运行的工具”。状态机：
 
 ```
-draft ──build──▶ built ──validate/test──▶ installed ──activate──▶ active
+draft ──build──▶ built ──validate/test──▶ installed ──policy hooks──▶ active
                                                                     │
                                                      update│        │disable
                                                            ▼        ▼
@@ -277,9 +292,11 @@ draft ──build──▶ built ──validate/test──▶ installed ──ac
 
 - 每次 build 产出**不可变版本**，版本 id = `hash(source + zig_version + target + manifest)`。
 - 布局：`foo/{v-a8fc3c, v-b193ab}, current -> v-b193ab`。
-- 更新 = build 新版本 → validate → test → **审阅门** → **原子切换 current**；旧版本保留。
+- 更新 = build 新版本 → deterministic validate → test → policy hooks → **原子切换 current**；旧版本保留。
 - rollback 本质就是 `current = old_version`，无需复杂逻辑。B 挂了 A 完全不动。
-- **`installed → active` 之间有一道内核强制的审阅门**：由一个 read-only 审阅 subagent 把关，专治"为单任务加参数"的工具膨胀。工具变动**必须过审**。详见 [agents-and-review.md](agents-and-review.md)。
+- **kernel 强制的是机制，不强制某个 LLM reviewer 的品味**：manifest schema、协议往返、hash、权限包含关系、原子 activate/rollback 这些 deterministic validation 是内核不变量；“这个参数是否足够通用”属于 policy。
+- policy hooks 可配置：`off` / `auto` / `human approval` / `AI reviewer` / 组合。Nulya 默认可以启用 AI reviewer 来抑制工具膨胀，但 reviewer 结论不是 immutable kernel invariant；低风险 workspace 也可以关闭 policy hook，只保留 deterministic validation。详见 [agents-and-review.md](agents-and-review.md)。
+
 
 ### 7.5 能力三级（采纳 ChatGPT 第 8 条，略调整）
 
@@ -405,9 +422,28 @@ ChatGPT 的 validate/test 门是空心的：工具与测试都 AI 写，测试�
 
 ## 13. Provider 抽象与 cache breakpoints
 
-- Provider runtime 归一化不同厂商协议；在**generation-稳定的边界**放置 cache breakpoint：tools 之后、system 之后、最后一条稳定消息之后（append-only 让"最后"这个断点持续前移）。
-- breakpoint 数量、最小可缓存 token 数等是**厂商相关**，实现时对齐各家文档核实（不在本文档写死具体数字）。
-- 目标：把 §1 的前缀不变式翻译成"每次请求命中最长已缓存前缀"。
+Provider runtime 归一化不同厂商协议；在**generation-稳定的 PromptIR 块边界**放置或声明 cache breakpoint：tools 之后、system 之后、最后一条稳定消息之后（append-only 让“最后”这个断点持续前移）。
+
+`Model` 不是裸函数指针，而应是带实例状态的 provider 接口：
+
+```
+Model { ptr, vtable.step(ptr, alloc, prompt_ir, options) }
+```
+
+真实 provider 至少需要 client、model name、endpoint、auth、cache policy、capabilities、request options；没有 `ptr` 最终只能依赖 global state。
+
+Provider capability 以能力位表达，不写死成唯一策略：
+
+```
+ProviderCapabilities {
+    deferred_tools,
+    explicit_cache_breakpoints,
+    mid_conversation_system,
+    cached_token_metrics,
+}
+```
+
+默认 generic strategy 仍是 frozen native tools + shell ext run。若 provider 明确支持 deferred native tools 或显式 cache breakpoint，可以在 provider 层优化，但不能破坏 §1 的 PromptIR stable_blocks 前缀不变量。
 
 ---
 
@@ -429,10 +465,10 @@ nulya ext api [protocol|permissions|examples]   # 模型查【本机】真实 AP
 **kernel（必须内置、保证正确性，绝不"让 AI 写个 extension"）：**
 
 ```
-Agent loop / step 状态机 · Ledger append-only 与前缀不变式 · Cache-generation 管理
-Batch（并发执行 + 单条回传）· ToolSetSnapshot per step · Provider 归一 + cache breakpoint
-Compaction · Tool registry 与对话开始选择 · Extension build/activate 事务 · rollback
-Subagent 能力模型（read_only 天花板 / ToolPolicy）· subagent=自调用 · 工具审阅门（installed→active）
+Agent loop / step 状态机 · Ledger append-only 与 PromptIR 前缀不变式 · Cache-generation 投影
+Batch（并发执行 + 单条回传）· ToolSetSnapshot per step · Provider 归一 + cache breakpoint/capabilities
+Compaction · Tool registry 与对话开始选择 · Extension build/activate deterministic validation · rollback
+Subagent 能力模型（read_only 天花板 / ToolPolicy）· subagent=自调用 · policy hook 机制
 Frontend/Core 分离（headless ledger 引擎 + 薄客户端）
 Execution Environment 抽象 · Authority / env 净化 · Managed Zig · Telemetry · Crash recovery
 ```
@@ -449,30 +485,62 @@ image/audio kubernetes ssh jira notion ...
 
 ---
 
-## 16. Roadmap（先把闭环跑通）
+## 16. Roadmap（先修底座，再跑 extension 闭环）
 
-第一阶段**不碰** browser / subagent / MCP / LSP。先把六样做对：
+当前阶段先暂停 extension/subagent 的继续实现，把会被后续全部依赖的底座不变量修对。优先级按下面 7 组提交推进：
 
-1. `shell` + `edit`
-2. Ledger（append-only 事件日志）+ §1 前缀不变式断言
-3. Tool registry + 对话开始选择 + per-step immutable snapshot + `tool_available_note`
-4. `extension.json` + subprocess JSON protocol + `Environment.local`
-5. `build → 不可变版本 → activate → rollback` 事务
-6. 内嵌 Zig `<pinned>` 工具链 + `nulya ext build/run`
+1. **Ledger owns appended events**
+   - `Ledger.append(event)` 第一版对传入 slice 做 deep copy，append 成功后事件生命周期与调用者彻底无关；如果后续实测 copy 成为瓶颈，再另加 `appendOwned(...)` / ledger allocator builder 作为显式快路径。
+   - `Ledger.deinit()` 释放 nested allocations，消灭 `main.zig` / 测试里手工 free assistant calls、tool_results、output 的泄漏式所有权。
+   - `generation` 从 Ledger mutable field 改为事件投影：compaction/system_change/registry_selection 等事件决定当前 generation。
+
+2. **Introduce PromptIR and cache-prefix invariant**
+   - 新增 `prompt.zig`：`Ledger -> PromptProjection -> PromptIR { tools, system, message blocks }`。
+   - 测试改为断言 `PromptIR[N].stable_blocks` 是 `PromptIR[N+1].stable_blocks` 的前缀，不再断言完整 request bytes 前缀。
+   - Provider integration test 单独检查各家缓存指标。
+
+3. **Freeze registry into ToolSetSnapshot with schemas**
+   - `ToolDefinition { id, name, description, input_schema }` 与 handler 分离。
+   - `runStep(ledger, model, tool_snapshot, ...)` 在 model request 前冻结 snapshot；`execOne(snapshot, call)` 不再查询 live registry。
+   - builtin shell/edit 先用内嵌 raw JSON schema；extension manifest 后续复用同一数据形状。
+
+4. **Make emit budgets actually bounded**
+   - `max_bytes` 成为硬不变量；裁剪改成 head/tail byte budget，并在 newline/UTF-8 boundary 附近截断。
+   - `max_line_chars` 改名 `max_line_bytes`，按 UTF-8 boundary 裁，不生成 invalid UTF-8。
+   - 任意 truncation 都写统一 `[full output: <path>]` footer，模型只看 tool result 文本也能找到完整内容。
+   - 去掉 `base_seq * 64 + i`；spill path 用 content hash 或 `<ledger-id>/<event-seq>-<call-index>`，避免 fork/subagent/call-count collision。
+   - 增加 `StepOutputBudget`：per-tool 预算之外，再限制整轮 batched tool_results 的总 context 体积。
+
+5. **Make edit writes atomic**
+   - `read original -> produce updated -> write sibling temp -> flush/close -> atomic rename`。
+   - 失败时 original untouched。
+   - `replace_all` 类型错误改为明确 schema error，不再静默当 false。
+
+6. **Introduce Environment boundary and provider/model instances**
+   - 新增 `environment.zig`，`shell.run()` 改为 `ctx.environment.runShell(...)`，由 `LocalEnvironment` 统一决定 bash/powershell dialect、cwd、sanitized env。
+   - extension subprocess 后续也走同一 Environment。
+   - `Model` 改成 `ptr + vtable` 或等价 generic，真实 provider 状态不走 global。
+
+7. **Make agent step crash-aware and bounded-concurrent**
+   - assistant tool calls append 后、tool_results append 前 crash 时，pending completion 语义为 `unknown`。
+   - 对可能 side-effecting 的 call 绝不自动重放；resume 时让模型检查现实状态。
+   - tool definition 预留 `replay_safety = read_only | idempotent | mutating`，第一版先按 unknown/unsafe 保守处理。
+   - batch 执行加并发上限，避免“一轮 N 个工具”失控。
+
+这些完成后再进入 extension 闭环：`extension.json`、`ext run`、`ext build`、immutable version、activate、rollback。subagent/reviewer 先作为可关闭、可配置的 policy hook 机制保留，不作为 v0.1 kernel 强制门。
 
 **里程碑（项目之魂）：**
 
 > **Nulya v0.1 自带两个工具。第三个工具由 Nulya 自己创造。**
 
-闭环示例（用户："帮我分析这个 parquet 数据"）：
+闭环示例（用户：“帮我分析这个 parquet 数据”）：
 
 ```
 无 parquet 能力 → nulya ext find parquet → 无 → AI 写 parquet-inspect/src/main.zig
-→ nulya ext build → nulya ext test(真实数据) → append tool_available_note → 经 shell 处理数据
-→（三周后再遇 parquet）已有，直接用 →（发现慢）改源码 build v2 → benchmark → 原子切 v2 →（regression）rollback v1
+→ nulya ext build → nulya ext test(真实数据) → policy hooks → append tool_available_note
+→ 经 shell 处理数据 →（三周后再遇 parquet）已有，直接用
+→（发现慢）改源码 build v2 → benchmark → 原子切 v2 →（regression）rollback v1
 ```
-
-这个闭环跑通，Nulya 的灵魂就立住了。
 
 ---
 
@@ -483,4 +551,5 @@ image/audio kubernetes ssh jira notion ...
 - **`nulya ext run` 的 JSON 手写负担**：低频工具经 shell 时模型要手写 JSON，是否给一个更宽松的 `--arg k=v` 语法降低出错率。
 - **ACP / remote environment** 的具体协议选型。
 - **cross-conversation 的 extension 复用**在多用户/多 workspace 下的隔离与共享边界。
-- **provider cache breakpoint** 的精确放置与各厂商差异核实。
+- **provider cache breakpoint / deferred tools** 的精确放置与各厂商差异核实。
+- **policy hooks 默认值**：默认 AI reviewer、人类确认、还是 auto；不同 workspace 的风险档位如何配置。

@@ -21,6 +21,8 @@ const emit = @import("emit.zig");
 /// are the primary knob for per-result token cost.
 pub const OutputBudget = emit.OutputBudget;
 
+pub const StepOutputBudget = emit.StepOutputBudget;
+
 /// Constant-size context handed to every tool call.
 ///
 /// INVARIANT: every field here is fixed-shape. Nothing that scales with the
@@ -35,11 +37,17 @@ pub const CtxHeader = struct {
     cwd: []const u8,
     /// Directory under which `emit` spills overflowing output.
     scratch_dir: []const u8,
-    /// Monotonic step sequence. Feeds deterministic spill filenames so a
-    /// replayed ledger reproduces byte-for-byte (base-tools.md §2.4).
-    seq: u64,
+    /// Ledger event sequence for the assistant turn that requested this call.
+    /// Feeds deterministic spill filenames so a replayed ledger reproduces
+    /// byte-for-byte (base-tools.md §2.4).
+    event_seq: u64,
+    /// Index of this call within the assistant turn. Unlike packing into one
+    /// integer, this has no hidden per-turn call-count limit.
+    call_index: usize,
     /// Output discipline constants (base-tools.md §3).
     budget: OutputBudget = .{},
+    /// Aggregate budget for every tool result in one model step.
+    step_budget: StepOutputBudget = .{},
 };
 
 /// A single tool invocation request. This is the entire input surface.
@@ -58,14 +66,21 @@ pub const ToolResult = struct {
     spill_path: ?[]const u8 = null,
 };
 
-/// A registered tool: a name, a schema description, and its run function.
-///
-/// We use an explicit function pointer rather than a vtable/interface because
-/// the whole point is that a tool is *just a function of its request*.
-pub const Tool = struct {
+/// Model-facing tool definition. This is the shape provider serialization and
+/// extension manifests share.
+pub const ToolDefinition = struct {
+    id: []const u8,
     name: []const u8,
-    /// One-line description surfaced to the model (and, later, its JSON schema).
     description: []const u8,
+    input_schema: []const u8,
+};
+
+/// A registered tool: its model-facing definition plus its execution handler.
+///
+/// Builtins use function pointers. Extensions can later use a different handler
+/// representation without changing provider serialization.
+pub const Tool = struct {
+    definition: ToolDefinition,
     run: *const fn (alloc: std.mem.Allocator, req: ToolRequest) anyerror!ToolResult,
 };
 
