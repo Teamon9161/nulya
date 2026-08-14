@@ -127,9 +127,30 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     var m = try manifest.parse(alloc, manifest_bytes);
     defer m.deinit();
     try m.validate();
-    const tool = if (args.len >= 3) args[1] else m.tools[0].name;
+    const tool = if (args.len >= 3) args[1] else blk: {
+        if (m.tools.len == 0) {
+            try printOut(alloc, io, "extension '{s}' contributes no runnable tools\n", .{id});
+            return 1;
+        }
+        break :blk m.tools[0].name;
+    };
+    const rt = m.runtime orelse {
+        try printOut(alloc, io, "extension '{s}' has no runtime\n", .{id});
+        return 1;
+    };
+    var declared = false;
+    for (m.tools) |declared_tool| {
+        if (std.mem.eql(u8, declared_tool.name, tool)) {
+            declared = true;
+            break;
+        }
+    }
+    if (!declared) {
+        try printOut(alloc, io, "extension '{s}' does not declare tool '{s}'\n", .{ id, tool });
+        return 1;
+    }
 
-    const entry_rel = try std.fmt.allocPrint(alloc, "{s}{s}", .{ m.entry, build_ext.exe_suffix });
+    const entry_rel = try std.fmt.allocPrint(alloc, "{s}{s}", .{ rt.entry, build_ext.exe_suffix });
     defer alloc.free(entry_rel);
 
     var cwd_real: [std.fs.max_path_bytes]u8 = undefined;
@@ -141,20 +162,29 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
     defer lenv.deinit();
 
-    const req: protocol.Request = .{ .id = "cli", .tool = tool, .args_json = args_json };
+    const req: protocol.Request = .{ .id = "cli", .name = tool, .arguments_json = args_json };
     const request_json = try req.encode(alloc);
     defer alloc.free(request_json);
 
+    const timeout_ms: u32 = 30_000;
     const outcome = try lenv.environment().runExtension(alloc, .{
         .entry_path = entry_abs,
         .cwd = cwd_path,
         .request_json = request_json,
         .max_output_bytes = 1 << 20,
+        .timeout_ms = timeout_ms,
     });
     defer outcome.deinit(alloc);
 
+    if (outcome.timed_out) {
+        try printOut(alloc, io, "extension timed out after {d}ms\n", .{timeout_ms});
+        if (outcome.stderr.len > 0) try printOut(alloc, io, "stderr:\n{s}\n", .{outcome.stderr});
+        return 1;
+    }
+
     const decoded = protocol.decodeResponse(alloc, outcome.stdout) catch {
         try printOut(alloc, io, "extension returned an invalid response (exit {d})\n", .{outcome.exit_code});
+        if (outcome.stderr.len > 0) try printOut(alloc, io, "stderr:\n{s}\n", .{outcome.stderr});
         return 1;
     };
     defer decoded.deinit(alloc);
@@ -163,7 +193,7 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
         try printOut(alloc, io, "{s}\n", .{decoded.value_json});
         return 0;
     }
-    try printOut(alloc, io, "error [{s}]: {s}\n", .{ decoded.err.?.code, decoded.err.?.message });
+    try printOut(alloc, io, "error [{d}]: {s}\n", .{ decoded.err.?.code, decoded.err.?.message });
     return 1;
 }
 
@@ -254,10 +284,10 @@ fn extApi(io: std.Io, args: []const []const u8) !u8 {
         \\  nulya ext run web-search '{"query":"zig"}'
         \\
     else
-        \\Wire protocol v1 (oneshot: spawn -> stdin request -> stdout response -> exit):
-        \\  request  {"v":1,"id":"..","tool":"..","args":{..}}
-        \\  success  {"v":1,"id":"..","ok":true,"value":{..}}
-        \\  error    {"v":1,"id":"..","ok":false,"error":{"code":"..","message":"..","retryable":false}}
+        \\Wire protocol (JSON-RPC 2.0, oneshot: spawn -> stdin request -> stdout response -> exit):
+        \\  request  {"jsonrpc":"2.0","id":"..","method":"tool/call","params":{"name":"..","arguments":{..}}}
+        \\  success  {"jsonrpc":"2.0","id":"..","result":{..}}
+        \\  error    {"jsonrpc":"2.0","id":"..","error":{"code":-32000,"message":"..","data":{"retryable":false}}}
         \\
     ;
     try printRaw(io, text);

@@ -20,15 +20,15 @@ const toolchain = @import("../toolchain.zig");
 /// host nulya runs on, so build and run agree on this.
 pub const exe_suffix = if (builtin.os.tag == .windows) ".exe" else "";
 
-/// Source layout convention: every extension's entry source is `src/main.zig`
-/// (DESIGN §7.2).
+/// Source layout convention for runtime-backed extensions.
 const source_rel = "src" ++ std.fs.path.sep_str ++ "main.zig";
 
 pub const BuildResult = struct {
     /// Content-addressed immutable version id (`v-<hash>`).
     version: []u8,
     /// Built binary path, relative to the version directory (e.g. `bin/demo.exe`).
-    entry_rel: []u8,
+    /// Pure contribution packages without runtime do not have one.
+    entry_rel: ?[]u8,
     /// True when this exact version already existed — an immutable, reproducible
     /// no-op (DESIGN §7.4).
     already_built: bool,
@@ -39,7 +39,7 @@ pub const BuildResult = struct {
 
     pub fn deinit(self: BuildResult, alloc: std.mem.Allocator) void {
         alloc.free(self.version);
-        alloc.free(self.entry_rel);
+        if (self.entry_rel) |entry_rel| alloc.free(entry_rel);
         alloc.free(self.stderr);
     }
 };
@@ -66,10 +66,13 @@ pub fn buildExtension(
     defer m.deinit();
     try m.validate();
 
-    const src_rel = try std.fs.path.join(alloc, &.{ ext_dir_rel, source_rel });
-    defer alloc.free(src_rel);
-    const source_bytes = workspace.readFileAlloc(io, src_rel, alloc, .limited(4 << 20)) catch
-        return error.SourceUnreadable;
+    var src_rel: ?[]u8 = null;
+    defer if (src_rel) |p| alloc.free(p);
+    const source_bytes = if (m.runtime != null) blk: {
+        src_rel = try std.fs.path.join(alloc, &.{ ext_dir_rel, source_rel });
+        break :blk workspace.readFileAlloc(io, src_rel.?, alloc, .limited(4 << 20)) catch
+            return error.SourceUnreadable;
+    } else try alloc.alloc(u8, 0);
     defer alloc.free(source_bytes);
 
     const version = try store.Store.versionId(alloc, .{
@@ -80,16 +83,30 @@ pub fn buildExtension(
     });
     errdefer alloc.free(version);
 
-    const entry_rel = try std.fmt.allocPrint(alloc, "{s}{s}", .{ m.entry, exe_suffix });
-    errdefer alloc.free(entry_rel);
-
     const version_rel = try std.fs.path.join(alloc, &.{ ext_dir_rel, "versions", version });
     defer alloc.free(version_rel);
-    const bin_rel = try std.fs.path.join(alloc, &.{ version_rel, entry_rel });
-    defer alloc.free(bin_rel);
 
     const manifest_dst = try std.fs.path.join(alloc, &.{ version_rel, "extension.json" });
     defer alloc.free(manifest_dst);
+
+    if (m.runtime == null) {
+        const has_manifest = if (workspace.access(io, manifest_dst, .{})) |_| true else |_| false;
+        if (has_manifest) {
+            return .{ .version = version, .entry_rel = null, .already_built = true, .compile_ok = true, .stderr = try alloc.alloc(u8, 0) };
+        }
+
+        workspace.deleteTree(io, version_rel) catch {};
+        try workspace.createDirPath(io, version_rel);
+        try workspace.writeFile(io, .{ .sub_path = manifest_dst, .data = manifest_bytes });
+        return .{ .version = version, .entry_rel = null, .already_built = false, .compile_ok = true, .stderr = try alloc.alloc(u8, 0) };
+    }
+
+    const rt = m.runtime.?;
+    const entry_rel = try std.fmt.allocPrint(alloc, "{s}{s}", .{ rt.entry, exe_suffix });
+    errdefer alloc.free(entry_rel);
+
+    const bin_rel = try std.fs.path.join(alloc, &.{ version_rel, entry_rel });
+    defer alloc.free(bin_rel);
 
     // Immutable + content-addressed: an existing complete version is a reproducible
     // no-op. If a previous run left only part of the version behind, clear it and
@@ -109,7 +126,7 @@ pub fn buildExtension(
 
     // Fixed, reproducible invocation — the AI gets no say in the flags.
     const result = std.process.run(alloc, io, .{
-        .argv = &.{ zig_exe, "build-exe", src_rel, "-O", "ReleaseSafe", emit_arg, "--name", std.fs.path.stem(m.entry) },
+        .argv = &.{ zig_exe, "build-exe", src_rel.?, "-O", "ReleaseSafe", emit_arg, "--name", std.fs.path.stem(rt.entry) },
         .cwd = .{ .dir = workspace },
         .stdout_limit = .limited(1 << 20),
         .stderr_limit = .limited(1 << 20),
@@ -148,4 +165,24 @@ test "missing manifest is a clear error" {
         error.ManifestUnreadable,
         buildExtension(alloc, std.testing.io, tmp.dir, "ext", "zig"),
     );
+}
+
+test "pure skill package builds by freezing only its manifest" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(io, "ext");
+    try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ "extension.json", .data =
+        \\{"schema":"nulya.extension/v2","id":"skills.finance","version":"1","contributes":{"skills":["skills/risk-parity"]}}
+    });
+
+    var result = try buildExtension(alloc, io, tmp.dir, "ext", "zig");
+    defer result.deinit(alloc);
+    try std.testing.expect(result.compile_ok);
+    try std.testing.expect(result.entry_rel == null);
+    const manifest_path = try std.fs.path.join(alloc, &.{ "ext", "versions", result.version, "extension.json" });
+    defer alloc.free(manifest_path);
+    try tmp.dir.access(io, manifest_path, .{});
 }

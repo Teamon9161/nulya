@@ -28,7 +28,6 @@ pub const PolicyHook = enum {
 pub const EnvironmentBackend = enum {
     local,
     remote,
-    acp,
     sandbox,
 };
 
@@ -344,7 +343,6 @@ fn backendStrictness(backend: EnvironmentBackend) u8 {
     return switch (backend) {
         .local => 0,
         .remote => 1,
-        .acp => 1,
         .sandbox => 2,
     };
 }

@@ -91,6 +91,8 @@ pub fn syncOpen(alloc: std.mem.Allocator, io: std.Io, l: *ledger.Ledger, root: s
         defer m.deinit();
         m.validate() catch continue;
 
+        if (m.tools.len == 0) continue;
+
         const text = try noteText(alloc, m.id, m.tools[0].name);
         defer alloc.free(text);
         try l.append(.{ .tool_available_note = text });
@@ -98,8 +100,8 @@ pub fn syncOpen(alloc: std.mem.Allocator, io: std.Io, l: *ledger.Ledger, root: s
 }
 
 const test_manifest =
-    \\{"schema":"nulya.extension/v1","id":"demo","version":"0.1.0","entry":"bin/demo",
-    \\ "tools":[{"name":"greet","input":{}}],"permissions":{}}
+    \\{"schema":"nulya.extension/v2","id":"demo","version":"0.1.0","runtime":{"entry":"bin/demo","mode":"oneshot"},
+    \\ "contributes":{"tools":[{"name":"greet","input":{}}],"skills":[]},"permissions":{}}
 ;
 
 test "noteText is deterministic and names the invocation" {
@@ -120,7 +122,7 @@ test "sync appends one note per active extension and is idempotent" {
 
     try tmp.dir.createDirPath(io, "demo" ++ std.fs.path.sep_str ++ "versions" ++ std.fs.path.sep_str ++ "v-aaaa" ++ std.fs.path.sep_str ++ "bin");
     try tmp.dir.writeFile(io, .{ .sub_path = "demo" ++ std.fs.path.sep_str ++ "extension.json", .data =
-        \\{"schema":"nulya.extension/v1","id":"demo","version":"0.2.0","entry":"bin/stale","tools":[{"name":"stale","input":{}}],"permissions":{}}
+        \\{"schema":"nulya.extension/v2","id":"demo","version":"0.2.0","runtime":{"entry":"bin/stale","mode":"oneshot"},"contributes":{"tools":[{"name":"stale","input":{}}],"skills":[]},"permissions":{}}
     });
     try tmp.dir.writeFile(io, .{ .sub_path = "demo" ++ std.fs.path.sep_str ++ "versions" ++ std.fs.path.sep_str ++ "v-aaaa" ++ std.fs.path.sep_str ++ "extension.json", .data = test_manifest });
     try tmp.dir.writeFile(io, .{ .sub_path = "demo" ++ std.fs.path.sep_str ++ "versions" ++ std.fs.path.sep_str ++ "v-aaaa" ++ std.fs.path.sep_str ++ "bin" ++ std.fs.path.sep_str ++ "demo" ++ exe_suffix, .data = "" });

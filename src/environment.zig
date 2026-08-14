@@ -5,7 +5,7 @@
 //!   1. picks the shell dialect (bash | powershell) — DESIGN §6.1;
 //!   2. sanitizes the child environment so host secrets (API keys, SSH agent,
 //!      cloud creds) never reach an AI-authored subprocess — DESIGN §9;
-//!   3. later swaps `local` execution for sandbox/remote/acp without touching a
+//!   3. later swaps `local` execution for sandbox/remote without touching a
 //!      single line of tool code — DESIGN §8.
 //!
 //! v0.1 ships only the `local` backend. The interface is in place so new
@@ -57,15 +57,21 @@ pub const ExtensionRequest = struct {
     cwd: []const u8,
     request_json: []const u8,
     max_output_bytes: usize,
+    /// Wall-clock cap for the oneshot call. `null` disables the guard; callers
+    /// should only do that in controlled tests.
+    timeout_ms: ?u32 = 30_000,
 };
 
-/// A completed extension run. `stdout` is owned by the caller's allocator.
+/// A completed extension run. `stdout`/`stderr` are owned by the caller's allocator.
 pub const ExtensionOutcome = struct {
     stdout: []u8,
+    stderr: []u8,
     exit_code: u8,
+    timed_out: bool = false,
 
     pub fn deinit(self: ExtensionOutcome, alloc: std.mem.Allocator) void {
         alloc.free(self.stdout);
+        alloc.free(self.stderr);
     }
 };
 
@@ -237,16 +243,15 @@ pub const LocalEnvironment = struct {
         const self: *LocalEnvironment = @ptrCast(@alignCast(ptr));
 
         // Oneshot (DESIGN §7.3): spawn, feed one request, read one response, exit.
-        // stderr is ignored in v1 — the extension reports failure through the
-        // protocol's error response on stdout; a crash surfaces as a non-zero
-        // exit with no valid response, which the decoder turns into an error.
+        // Capture stderr too: when an AI-authored extension crashes before it can
+        // write a protocol error on stdout, stderr is the only repair signal.
         var child = try std.process.spawn(self.io, .{
             .argv = &.{req.entry_path},
             .cwd = .{ .path = req.cwd },
             .environ_map = &self.env,
             .stdin = .pipe,
             .stdout = .pipe,
-            .stderr = .ignore,
+            .stderr = .pipe,
             .create_no_window = true,
         });
         errdefer child.kill(self.io);
@@ -258,17 +263,56 @@ pub const LocalEnvironment = struct {
         child.stdin.?.close(self.io);
         child.stdin = null;
 
-        var read_buf: [4096]u8 = undefined;
-        var reader = child.stdout.?.readerStreaming(self.io, &read_buf);
-        const stdout = try reader.interface.allocRemaining(alloc, .limited(req.max_output_bytes));
-        errdefer alloc.free(stdout);
+        var multi_reader_buffer: std.Io.File.MultiReader.Buffer(2) = undefined;
+        var multi_reader: std.Io.File.MultiReader = undefined;
+        multi_reader.init(alloc, self.io, multi_reader_buffer.toStreams(), &.{ child.stdout.?, child.stderr.? });
+        var multi_reader_live = true;
+        defer if (multi_reader_live) multi_reader.deinit();
+
+        const stdout_reader = multi_reader.reader(0);
+        const stderr_reader = multi_reader.reader(1);
+        const timeout = extensionTimeout(self.io, req.timeout_ms);
+
+        while (multi_reader.fill(64, timeout)) |_| {
+            if (stdout_reader.buffered().len > req.max_output_bytes or stderr_reader.buffered().len > req.max_output_bytes) {
+                return error.StreamTooLong;
+            }
+        } else |err| switch (err) {
+            error.EndOfStream => {},
+            error.Timeout => {
+                const stdout = try alloc.dupe(u8, stdout_reader.buffered());
+                errdefer alloc.free(stdout);
+                const stderr = try alloc.dupe(u8, stderr_reader.buffered());
+                errdefer alloc.free(stderr);
+                multi_reader.deinit();
+                multi_reader_live = false;
+                child.kill(self.io);
+                return .{ .stdout = stdout, .stderr = stderr, .exit_code = 1, .timed_out = true };
+            },
+            else => |e| return e,
+        }
+
+        try multi_reader.checkAnyError();
 
         const term = try child.wait(self.io);
+        const stdout = try multi_reader.toOwnedSlice(0);
+        errdefer alloc.free(stdout);
+        const stderr = try multi_reader.toOwnedSlice(1);
+        errdefer alloc.free(stderr);
+        multi_reader.deinit();
+        multi_reader_live = false;
+
         const exit_code: u8 = switch (term) {
             .exited => |c| c,
             else => 1,
         };
-        return .{ .stdout = stdout, .exit_code = exit_code };
+        return .{ .stdout = stdout, .stderr = stderr, .exit_code = exit_code };
+    }
+
+    fn extensionTimeout(io: std.Io, timeout_ms: ?u32) std.Io.Timeout {
+        const ms = timeout_ms orelse return .none;
+        const duration: std.Io.Clock.Duration = .{ .clock = .awake, .raw = .fromMilliseconds(ms) };
+        return .{ .deadline = std.Io.Clock.Timestamp.fromNow(io, duration) };
     }
 
     const vtable: Environment.VTable = .{
@@ -326,4 +370,46 @@ test "windows bash launcher dirs are not treated as native bash" {
     try std.testing.expect(isWindowsBashLauncherDir("C:\\Windows\\System32"));
     try std.testing.expect(isWindowsBashLauncherDir("C:\\Users\\me\\AppData\\Local\\Microsoft\\WindowsApps"));
     try std.testing.expect(!isWindowsBashLauncherDir("C:\\Program Files\\Git\\bin"));
+}
+
+test "runExtension captures stderr when response is invalid" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const script_name = if (builtin.os.tag == .windows) "bad-extension.cmd" else "bad-extension.sh";
+    const script = if (builtin.os.tag == .windows)
+        "@echo off\r\necho stderr-marker 1>&2\r\necho not-json\r\n"
+    else
+        "#!/bin/sh\necho stderr-marker >&2\necho not-json\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = script_name, .data = script });
+    if (builtin.os.tag != .windows) {
+        var f = try tmp.dir.openFile(io, script_name, .{});
+        defer f.close(io);
+        try f.setPermissions(io, .executable_file);
+    }
+
+    var root_real: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_real);
+    const root_path = root_real[0..root_len];
+    const entry_path = try std.fs.path.join(alloc, &.{ root_path, script_name });
+    defer alloc.free(entry_path);
+
+    var lenv = try LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+
+    const outcome = try lenv.environment().runExtension(alloc, .{
+        .entry_path = entry_path,
+        .cwd = root_path,
+        .request_json = "{}",
+        .max_output_bytes = 1024,
+        .timeout_ms = 1_000,
+    });
+    defer outcome.deinit(alloc);
+
+    try std.testing.expect(!outcome.timed_out);
+    try std.testing.expect(std.mem.indexOf(u8, outcome.stdout, "not-json") != null);
+    try std.testing.expect(std.mem.indexOf(u8, outcome.stderr, "stderr-marker") != null);
 }

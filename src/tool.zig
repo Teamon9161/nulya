@@ -52,10 +52,6 @@ pub const CtxHeader = struct {
     budget: OutputBudget = .{},
     /// Aggregate budget for every tool result in one model step.
     step_budget: StepOutputBudget = .{},
-    /// Extensions root (relative to cwd) the loop reconciles capability notes
-    /// against (DESIGN §5.3). Null disables mid-conversation note syncing — the
-    /// demo and unit tests leave it off. Fixed-shape, so it belongs here.
-    ext_root: ?[]const u8 = null,
 };
 
 /// A single tool invocation request. This is the entire input surface.

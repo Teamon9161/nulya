@@ -1,50 +1,58 @@
 //! Extension wire protocol (DESIGN §7.3).
 //!
-//! v1 is deliberately dumb and oneshot: the host spawns the extension, writes
-//! exactly ONE request JSON to stdin, reads ONE response JSON from stdout, and
-//! the process exits. No daemon, no streaming, no bidirectional events, no host
-//! callbacks. The wire protocol IS the ABI, so extensions need not be written in
-//! Zig (DESIGN §7.1).
+//! The transport is still deliberately dumb and oneshot: the host spawns the
+//! extension, writes exactly ONE JSON-RPC request to stdin, reads ONE JSON-RPC
+//! response from stdout, and the process exits. No daemon, no streaming, no
+//! bidirectional events, no host callbacks. The wire protocol IS the ABI, so
+//! extensions need not be written in Zig (DESIGN §7.1).
 //!
-//!   request   { "v":1, "id":"call-17", "tool":"web_search", "args":{...} }
-//!   success   { "v":1, "id":"call-17", "ok":true,  "value":{...} }
-//!   error     { "v":1, "id":"call-17", "ok":false, "error":{ "code":"..",
-//!                                                    "message":"..", "retryable":true } }
+//!   request   { "jsonrpc":"2.0", "id":"call-17", "method":"tool/call",
+//!               "params":{ "name":"web_search", "arguments":{...} } }
+//!   success   { "jsonrpc":"2.0", "id":"call-17", "result":{...} }
+//!   error     { "jsonrpc":"2.0", "id":"call-17",
+//!               "error":{ "code":-32000, "message":"..",
+//!                          "data":{ "retryable":true } } }
 
 const std = @import("std");
 
-/// Wire protocol version. Bumped only on a breaking envelope change.
-pub const version: u32 = 1;
+pub const jsonrpc_version = "2.0";
+pub const method_tool_call = "tool/call";
 
-/// Host -> extension. `args_json` stays as raw JSON bytes: the host forwards
-/// exactly what the model produced and never interprets the tool's argument
-/// shape — the manifest schema is the only truth (DESIGN §7.2).
+/// Host -> extension. `arguments_json` stays as raw JSON bytes: the host
+/// forwards exactly what the model produced and never interprets the tool's
+/// argument shape — the manifest schema is the only truth (DESIGN §7.2).
 pub const Request = struct {
     id: []const u8,
-    tool: []const u8,
+    method: []const u8 = method_tool_call,
+    name: []const u8,
     /// A raw JSON object (or empty, treated as `{}`).
-    args_json: []const u8,
+    arguments_json: []const u8,
 
-    /// Serialize to a single request line. Caller owns the returned bytes.
+    /// Serialize to one JSON-RPC request. Caller owns the returned bytes.
     pub fn encode(self: Request, alloc: std.mem.Allocator) ![]u8 {
-        const args = if (std.mem.trim(u8, self.args_json, " \t\r\n").len == 0) "{}" else self.args_json;
+        const arguments = if (std.mem.trim(u8, self.arguments_json, " \t\r\n").len == 0) "{}" else self.arguments_json;
 
         var out: std.Io.Writer.Allocating = .init(alloc);
         errdefer out.deinit();
         var jw: std.json.Stringify = .{ .writer = &out.writer };
 
         try jw.beginObject();
-        try jw.objectField("v");
-        try jw.write(version);
+        try jw.objectField("jsonrpc");
+        try jw.write(jsonrpc_version);
         try jw.objectField("id");
         try jw.write(self.id);
-        try jw.objectField("tool");
-        try jw.write(self.tool);
-        try jw.objectField("args");
+        try jw.objectField("method");
+        try jw.write(self.method);
+        try jw.objectField("params");
+        try jw.beginObject();
+        try jw.objectField("name");
+        try jw.write(self.name);
+        try jw.objectField("arguments");
         // Forward the model's JSON verbatim instead of re-parsing/re-emitting it.
         try jw.beginWriteRaw();
-        try out.writer.writeAll(args);
+        try out.writer.writeAll(arguments);
         jw.endWriteRaw();
+        try jw.endObject();
         try jw.endObject();
 
         return out.toOwnedSlice();
@@ -52,33 +60,31 @@ pub const Request = struct {
 };
 
 pub const ErrorBody = struct {
-    code: []const u8,
+    code: i64,
     message: []const u8,
     retryable: bool = false,
 };
 
-/// Extension -> host, already validated against the v1 envelope. All slices are
-/// owned by the allocator passed to `decodeResponse`; free with `deinit`.
+/// Extension -> host, already validated against the JSON-RPC envelope. All
+/// slices are owned by the allocator passed to `decodeResponse`; free with
+/// `deinit`.
 pub const DecodedResponse = struct {
     ok: bool,
-    /// Compact JSON of the `value` field on success; `"null"` when absent.
+    /// Compact JSON of the `result` field on success; `"null"` when absent.
     value_json: []const u8,
     /// Present only when `!ok`.
     err: ?ErrorBody,
 
     pub fn deinit(self: DecodedResponse, alloc: std.mem.Allocator) void {
         alloc.free(self.value_json);
-        if (self.err) |e| {
-            alloc.free(e.code);
-            alloc.free(e.message);
-        }
+        if (self.err) |e| alloc.free(e.message);
     }
 };
 
 pub const DecodeError = error{
     InvalidResponse,
     UnsupportedVersion,
-    /// Surfaced by the allocating JSON writer when compacting `value`; with an
+    /// Surfaced by the allocating JSON writer when compacting `result`; with an
     /// allocating sink this is effectively out-of-memory.
     WriteFailed,
 } || std.mem.Allocator.Error;
@@ -96,41 +102,44 @@ pub fn decodeResponse(alloc: std.mem.Allocator, bytes: []const u8) DecodeError!D
         else => return error.InvalidResponse,
     };
 
-    if (obj.get("v")) |v| {
-        const n = switch (v) {
-            .integer => |i| i,
-            else => return error.InvalidResponse,
-        };
-        if (n != version) return error.UnsupportedVersion;
-    }
+    const jsonrpc = stringField(obj, "jsonrpc") orelse return error.InvalidResponse;
+    if (!std.mem.eql(u8, jsonrpc, jsonrpc_version)) return error.UnsupportedVersion;
 
-    const ok = switch (obj.get("ok") orelse return error.InvalidResponse) {
-        .bool => |b| b,
-        else => return error.InvalidResponse,
-    };
+    const has_result = obj.get("result") != null;
+    const has_error = obj.get("error") != null;
+    if (has_result == has_error) return error.InvalidResponse;
 
-    if (ok) {
-        const value_json = try compactValue(alloc, obj.get("value") orelse std.json.Value{ .null = {} });
+    if (has_result) {
+        const value_json = try compactValue(alloc, obj.get("result").?);
         return .{ .ok = true, .value_json = value_json, .err = null };
     }
 
-    const err_obj = switch (obj.get("error") orelse return error.InvalidResponse) {
+    const err_obj = switch (obj.get("error").?) {
         .object => |o| o,
         else => return error.InvalidResponse,
     };
-    const code = stringField(err_obj, "code") orelse return error.InvalidResponse;
-    const message = stringField(err_obj, "message") orelse "";
-    const retryable = switch (err_obj.get("retryable") orelse std.json.Value{ .bool = false }) {
-        .bool => |b| b,
-        else => false,
+    const code = switch (err_obj.get("code") orelse return error.InvalidResponse) {
+        .integer => |i| i,
+        else => return error.InvalidResponse,
     };
-    const code_owned = try alloc.dupe(u8, code);
-    errdefer alloc.free(code_owned);
+    const message = stringField(err_obj, "message") orelse return error.InvalidResponse;
+    const retryable = retryableFromData(err_obj.get("data"));
     const message_owned = try alloc.dupe(u8, message);
     return .{
         .ok = false,
         .value_json = try alloc.dupe(u8, "null"),
-        .err = .{ .code = code_owned, .message = message_owned, .retryable = retryable },
+        .err = .{ .code = code, .message = message_owned, .retryable = retryable },
+    };
+}
+
+fn retryableFromData(value: ?std.json.Value) bool {
+    const data = switch (value orelse return false) {
+        .object => |o| o,
+        else => return false,
+    };
+    return switch (data.get("retryable") orelse return false) {
+        .bool => |b| b,
+        else => false,
     };
 }
 
@@ -149,9 +158,9 @@ fn compactValue(alloc: std.mem.Allocator, value: std.json.Value) ![]u8 {
     return out.toOwnedSlice();
 }
 
-test "request encodes a valid oneshot envelope with verbatim args" {
+test "request encodes a JSON-RPC tool/call envelope with verbatim arguments" {
     const alloc = std.testing.allocator;
-    const req: Request = .{ .id = "call-17", .tool = "web_search", .args_json = "{\"query\":\"zig\"}" };
+    const req: Request = .{ .id = "call-17", .name = "web_search", .arguments_json = "{\"query\":\"zig\"}" };
     const line = try req.encode(alloc);
     defer alloc.free(line);
 
@@ -159,23 +168,25 @@ test "request encodes a valid oneshot envelope with verbatim args" {
     const parsed = try std.json.parseFromSlice(std.json.Value, alloc, line, .{});
     defer parsed.deinit();
     const obj = parsed.value.object;
-    try std.testing.expectEqual(@as(i64, 1), obj.get("v").?.integer);
+    try std.testing.expectEqualStrings("2.0", obj.get("jsonrpc").?.string);
     try std.testing.expectEqualStrings("call-17", obj.get("id").?.string);
-    try std.testing.expectEqualStrings("web_search", obj.get("tool").?.string);
-    try std.testing.expectEqualStrings("zig", obj.get("args").?.object.get("query").?.string);
+    try std.testing.expectEqualStrings("tool/call", obj.get("method").?.string);
+    const params = obj.get("params").?.object;
+    try std.testing.expectEqualStrings("web_search", params.get("name").?.string);
+    try std.testing.expectEqualStrings("zig", params.get("arguments").?.object.get("query").?.string);
 }
 
-test "empty args become an empty object" {
+test "empty arguments become an empty object" {
     const alloc = std.testing.allocator;
-    const req: Request = .{ .id = "c1", .tool = "t", .args_json = "" };
+    const req: Request = .{ .id = "c1", .name = "t", .arguments_json = "" };
     const line = try req.encode(alloc);
     defer alloc.free(line);
-    try std.testing.expect(std.mem.indexOf(u8, line, "\"args\":{}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, line, "\"arguments\":{}") != null);
 }
 
-test "decode accepts a success response and compacts its value" {
+test "decode accepts a success response and compacts its result" {
     const alloc = std.testing.allocator;
-    const res = try decodeResponse(alloc, "{\"v\":1,\"id\":\"c1\",\"ok\":true,\"value\":{\"results\":[]}}");
+    const res = try decodeResponse(alloc, "{\"jsonrpc\":\"2.0\",\"id\":\"c1\",\"result\":{\"results\":[]}}");
     defer res.deinit(alloc);
     try std.testing.expect(res.ok);
     try std.testing.expect(res.err == null);
@@ -184,17 +195,17 @@ test "decode accepts a success response and compacts its value" {
 
 test "decode accepts an error response" {
     const alloc = std.testing.allocator;
-    const res = try decodeResponse(alloc, "{\"v\":1,\"id\":\"c1\",\"ok\":false,\"error\":{\"code\":\"NETWORK_ERROR\",\"message\":\"down\",\"retryable\":true}}");
+    const res = try decodeResponse(alloc, "{\"jsonrpc\":\"2.0\",\"id\":\"c1\",\"error\":{\"code\":-32000,\"message\":\"down\",\"data\":{\"retryable\":true}}}");
     defer res.deinit(alloc);
     try std.testing.expect(!res.ok);
-    try std.testing.expectEqualStrings("NETWORK_ERROR", res.err.?.code);
+    try std.testing.expectEqual(@as(i64, -32000), res.err.?.code);
     try std.testing.expectEqualStrings("down", res.err.?.message);
     try std.testing.expect(res.err.?.retryable);
 }
 
-test "decode rejects garbage, wrong version, and missing ok" {
+test "decode rejects garbage, wrong version, and missing result/error" {
     const alloc = std.testing.allocator;
     try std.testing.expectError(error.InvalidResponse, decodeResponse(alloc, "not json"));
-    try std.testing.expectError(error.UnsupportedVersion, decodeResponse(alloc, "{\"v\":2,\"ok\":true}"));
-    try std.testing.expectError(error.InvalidResponse, decodeResponse(alloc, "{\"v\":1,\"id\":\"c1\"}"));
+    try std.testing.expectError(error.UnsupportedVersion, decodeResponse(alloc, "{\"jsonrpc\":\"1.0\",\"result\":null}"));
+    try std.testing.expectError(error.InvalidResponse, decodeResponse(alloc, "{\"jsonrpc\":\"2.0\",\"id\":\"c1\"}"));
 }

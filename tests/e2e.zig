@@ -69,13 +69,14 @@ test "closed loop: init -> build -> activate -> run round-trips JSON" {
     const ws_real_len = try ws.realPath(io, &ws_real);
     const ws_path = ws_real[0..ws_real_len];
 
-    const entry_abs = try std.fs.path.join(alloc, &.{ ws_path, ext_dir_rel, "versions", result.version, result.entry_rel });
+    try std.testing.expect(result.entry_rel != null);
+    const entry_abs = try std.fs.path.join(alloc, &.{ ws_path, ext_dir_rel, "versions", result.version, result.entry_rel.? });
     defer alloc.free(entry_abs);
 
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
     defer lenv.deinit();
 
-    const req: protocol.Request = .{ .id = "call-1", .tool = "greet", .args_json = "{}" };
+    const req: protocol.Request = .{ .id = "call-1", .name = "greet", .arguments_json = "{}" };
     const request_json = try req.encode(alloc);
     defer alloc.free(request_json);
 

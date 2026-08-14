@@ -13,7 +13,7 @@
 //!     versions/
 //!       v-<hash>/
 //!         extension.json
-//!         bin/<entry>
+//!         bin/<entry>        # only when the manifest declares runtime
 //!     current              # text file holding "v-<hash>"
 //!
 //! `current` is a plain file, not a symlink: symlinks need privilege on Windows
@@ -185,9 +185,11 @@ fn validateBuiltVersion(self: Store, alloc: std.mem.Allocator, id: []const u8, v
     try m.validate();
     if (!std.mem.eql(u8, m.id, id)) return error.VersionManifestIdMismatch;
 
-    const entry_sub = try self.versionEntryPath(alloc, id, version, m.entry);
-    defer alloc.free(entry_sub);
-    self.root.access(self.io, entry_sub, .{}) catch return error.VersionEntryNotFound;
+    if (m.runtime) |rt| {
+        const entry_sub = try self.versionEntryPath(alloc, id, version, rt.entry);
+        defer alloc.free(entry_sub);
+        self.root.access(self.io, entry_sub, .{}) catch return error.VersionEntryNotFound;
+    }
 }
 
 fn writeBuiltVersion(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id: []const u8, version: []const u8) !void {
@@ -196,7 +198,7 @@ fn writeBuiltVersion(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id:
     try root.createDirPath(io, dir);
 
     const manifest_bytes = try std.fmt.allocPrint(alloc,
-        \\{{"schema":"nulya.extension/v1","id":"{s}","version":"0.1.0","entry":"bin/demo","tools":[{{"name":"greet","input":{{}}}}],"permissions":{{}}}}
+        \\{{"schema":"nulya.extension/v2","id":"{s}","version":"0.1.0","runtime":{{"entry":"bin/demo","mode":"oneshot"}},"contributes":{{"tools":[{{"name":"greet","input":{{}}}}],"skills":[]}},"permissions":{{}}}}
     , .{id});
     defer alloc.free(manifest_bytes);
     const manifest_sub = try std.fs.path.join(alloc, &.{ id, versions_dir, version, "extension.json" });
@@ -285,6 +287,24 @@ test "activate refuses an incomplete version directory" {
     const store = Store.init(std.testing.io, tmp.dir);
     try store.ensureVersionDir(alloc, "demo", "v-empty");
     try std.testing.expectError(error.VersionNotFound, store.activate(alloc, "demo", "v-empty"));
+}
+
+test "activate accepts a runtime-less skill version" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const store = Store.init(io, tmp.dir);
+
+    try tmp.dir.createDirPath(io, "skills" ++ std.fs.path.sep_str ++ "versions" ++ std.fs.path.sep_str ++ "v-aaaa");
+    try tmp.dir.writeFile(io, .{ .sub_path = "skills" ++ std.fs.path.sep_str ++ "versions" ++ std.fs.path.sep_str ++ "v-aaaa" ++ std.fs.path.sep_str ++ "extension.json", .data =
+        \\{"schema":"nulya.extension/v2","id":"skills","version":"1","contributes":{"skills":["skills/demo"]}}
+    });
+
+    try store.activate(alloc, "skills", "v-aaaa");
+    const active = (try store.activeVersion(alloc, "skills")).?;
+    defer alloc.free(active);
+    try std.testing.expectEqualStrings("v-aaaa", active);
 }
 
 test "listVersions returns every built version" {

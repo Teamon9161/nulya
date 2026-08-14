@@ -14,6 +14,7 @@ const registry = @import("registry.zig");
 const tool = @import("tool.zig");
 const environment = @import("environment.zig");
 const config = @import("config.zig");
+const notes = @import("extension/notes.zig");
 const cli = @import("cli.zig");
 
 /// Scripted stand-in provider: on seeing a pending user turn, it issues two
@@ -121,18 +122,18 @@ fn runDemo(alloc: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) 
         .scratch_dir = ".nulya/scratch",
         .event_seq = 0,
         .call_index = 0,
-        // Announce any extension already active in this workspace (DESIGN §5.3).
-        .ext_root = ".nulya/extensions",
     };
 
     var total: provider.Usage = .{};
     if (use_openai) {
         var steps: usize = 0;
         while (steps < 4) : (steps += 1) {
+            try prepareStep(alloc, io, &l, ".", ".nulya/extensions");
             accumulate(&total, try loop.runStepWithOptions(alloc, &l, model, tools, ctx, model_options));
             if (lastAssistantDone(&l)) break;
         }
     } else {
+        try prepareStep(alloc, io, &l, ".", ".nulya/extensions");
         accumulate(&total, try loop.runStepWithOptions(alloc, &l, model, tools, ctx, model_options));
     }
 
@@ -143,6 +144,13 @@ fn runDemo(alloc: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) 
     );
 
     // Ledger owns cloned assistant/tool-result payloads and frees them in deinit.
+}
+
+fn prepareStep(alloc: std.mem.Allocator, io: std.Io, l: *ledger.Ledger, cwd: []const u8, ext_root: []const u8) !void {
+    // Session preparation owns extension reconciliation. Repair any interrupted
+    // tool batch first so a note append cannot hide an illegal assistant tail.
+    try loop.completeInterruptedToolBatch(alloc, l);
+    try notes.syncFromActiveExtensions(alloc, io, cwd, l, ext_root);
 }
 
 fn resolveApiKey(profile: config.ProviderProfile, env: *const std.process.Environ.Map) ?[]const u8 {

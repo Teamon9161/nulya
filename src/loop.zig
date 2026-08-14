@@ -18,7 +18,6 @@ const emit = @import("emit.zig");
 const prompt = @import("prompt.zig");
 const provider = @import("provider.zig");
 const environment = @import("environment.zig");
-const notes = @import("extension/notes.zig");
 
 pub const ModelTurn = provider.ModelTurn;
 pub const Model = provider.Model;
@@ -52,13 +51,6 @@ pub fn runStepWithOptions(
     // before the next provider request. Mutating tools must not be replayed
     // automatically: the workspace may already have changed.
     try completeInterruptedToolBatch(alloc, l);
-
-    // Announce any extension the agent built+activated since the last step, so
-    // the model can invoke it via shell now (DESIGN §5.3). A plain append: the
-    // cached prefix is untouched.
-    if (ctx_base.ext_root) |ext_root| {
-        try notes.syncFromActiveExtensions(alloc, ctx_base.environment.io, ctx_base.cwd, l, ext_root);
-    }
 
     // seq base is the ledger position: deterministic across replays (DESIGN §1).
     const base_seq = l.len();
@@ -105,7 +97,7 @@ pub fn runStepWithOptions(
     return turn.usage;
 }
 
-fn completeInterruptedToolBatch(alloc: std.mem.Allocator, l: *ledger.Ledger) !void {
+pub fn completeInterruptedToolBatch(alloc: std.mem.Allocator, l: *ledger.Ledger) !void {
     const events = l.view();
     if (events.len == 0) return;
 
@@ -397,8 +389,6 @@ test "a capability note reaches the provider as a tool_note block" {
         .scratch_dir = "/tmp",
         .event_seq = 0,
         .call_index = 0,
-        // A missing root makes note-sync a safe no-op; the wiring still runs.
-        .ext_root = "does-not-exist-ext-root",
     });
 
     try std.testing.expect(model_impl.saw_note);
