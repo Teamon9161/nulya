@@ -14,6 +14,7 @@ const registry = @import("registry.zig");
 const tool = @import("tool.zig");
 const environment = @import("environment.zig");
 const config = @import("config.zig");
+const cli = @import("cli.zig");
 
 /// Scripted stand-in provider: on seeing a pending user turn, it issues two
 /// shell calls in a single assistant turn — demonstrating batched execution.
@@ -54,21 +55,24 @@ const ScriptedProvider = struct {
     };
 };
 
-pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const alloc = gpa.allocator();
+pub fn main(init: std.process.Init) !u8 {
+    const alloc = init.gpa;
+    const io = init.io;
 
-    var threaded: std.Io.Threaded = .init(alloc, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    // `nulya <cmd> ...` -> CLI (DESIGN §14); bare `nulya` -> the agent-loop demo.
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len > 1) {
+        const argv = try init.arena.allocator().alloc([]const u8, args.len - 1);
+        for (args[1..], 0..) |a, i| argv[i] = a;
+        return cli.dispatch(alloc, io, argv);
+    }
 
-    // Host env configures Nulya itself and provider credentials. This map is
-    // never handed to tools; `LocalEnvironment` builds its own sanitized child env.
-    var env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
-    defer env.deinit();
+    try runDemo(alloc, io, init.environ_map);
+    return 0;
+}
 
-    var cfg = try config.load(alloc, io, &env);
+fn runDemo(alloc: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) !void {
+    var cfg = try config.load(alloc, io, env);
     defer cfg.deinit();
 
     if (cfg.environment.backend != .local) {
@@ -85,7 +89,7 @@ pub fn main() !void {
     defer tools.deinit(alloc);
 
     // Execution env: the sanitized boundary every tool runs behind. Host secrets
-    // in `env` above never cross into it (DESIGN §9).
+    // in the host env never cross into it (DESIGN §9).
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{ .dialect = cfg.environment.shell.toLocalOption() });
     defer lenv.deinit();
 
@@ -98,7 +102,7 @@ pub fn main() !void {
     const model_options: provider.Options = .{ .effort = if (selected_profile) |profile| profile.effort else null };
     const model: provider.Model = if (selected_profile) |profile| switch (profile.kind) {
         .scripted => .{ .ptr = &scripted, .vtable = &ScriptedProvider.vtable },
-        .openai => if (resolveApiKey(profile, &env)) |api_key| blk: {
+        .openai => if (resolveApiKey(profile, env)) |api_key| blk: {
             openai_provider = try openai.OpenAiProvider.init(alloc, io, .{
                 .api_key = api_key,
                 .model = nonEmpty(profile.model, "gpt-4o-mini"),
@@ -117,6 +121,8 @@ pub fn main() !void {
         .scratch_dir = ".nulya/scratch",
         .event_seq = 0,
         .call_index = 0,
+        // Announce any extension already active in this workspace (DESIGN §5.3).
+        .ext_root = ".nulya/extensions",
     };
 
     var total: provider.Usage = .{};
@@ -179,6 +185,7 @@ fn printLedger(l: *const ledger.Ledger) void {
                 p("[{d}] tool_results ({d}):\n", .{ i, rs.len });
                 for (rs) |r| p("      {s} ok={} | {s}\n", .{ r.call_id, r.ok, std.mem.trimEnd(u8, r.output, "\n") });
             },
+            .tool_available_note => |t| p("[{d}] note: {s}\n", .{ i, t }),
         }
     }
 }
@@ -196,4 +203,10 @@ test {
     _ = @import("providers/openai.zig");
     _ = @import("environment.zig");
     _ = @import("config.zig");
+    _ = @import("extension/protocol.zig");
+    _ = @import("extension/manifest.zig");
+    _ = @import("extension/store.zig");
+    _ = @import("extension/build_ext.zig");
+    _ = @import("extension/notes.zig");
+    _ = @import("toolchain.zig");
 }

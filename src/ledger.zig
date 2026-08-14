@@ -37,6 +37,11 @@ pub const Event = union(enum) {
     /// Exactly ONE user turn carrying every result from a batch. Never split
     /// per-tool — that would be one model round-trip per tool (DESIGN §0.2).
     tool_results: []const ToolResultEntry,
+    /// A capability that became available mid-conversation (DESIGN §5.3). It is
+    /// an APPEND, never a change to `tools[]`: the prompt prefix stays stable so
+    /// the cache keeps hitting, and the model can invoke the new extension via
+    /// `shell` on its next step. Content is the model-facing announcement text.
+    tool_available_note: []const u8,
 };
 
 pub const Ledger = struct {
@@ -84,6 +89,7 @@ fn cloneEvent(alloc: std.mem.Allocator, e: Event) !Event {
             break :blk .{ .assistant = .{ .text = text, .calls = calls } };
         },
         .tool_results => |results| .{ .tool_results = try cloneToolResults(alloc, results) },
+        .tool_available_note => |text| .{ .tool_available_note = try alloc.dupe(u8, text) },
     };
 }
 
@@ -95,6 +101,7 @@ fn freeEvent(alloc: std.mem.Allocator, e: Event) void {
             freeToolCalls(alloc, as.calls);
         },
         .tool_results => |results| freeToolResults(alloc, results),
+        .tool_available_note => |text| alloc.free(text),
     }
 }
 

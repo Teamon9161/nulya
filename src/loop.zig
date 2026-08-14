@@ -18,9 +18,14 @@ const emit = @import("emit.zig");
 const prompt = @import("prompt.zig");
 const provider = @import("provider.zig");
 const environment = @import("environment.zig");
+const notes = @import("extension/notes.zig");
 
 pub const ModelTurn = provider.ModelTurn;
 pub const Model = provider.Model;
+
+const interrupted_tool_output =
+    "previous tool execution was interrupted before Nulya recorded results; " ++
+    "the real-world state is unknown, so inspect the workspace before retrying or assuming effects";
 
 /// Run exactly one step against `l`. Appends the assistant turn, and — if it
 /// carried tool calls — the single batched `tool_results` turn.
@@ -42,6 +47,19 @@ pub fn runStepWithOptions(
     ctx_base: tool.CtxHeader,
     model_options: provider.Options,
 ) !provider.Usage {
+    // If the previous process died after recording tool calls but before
+    // recording the batched results, make the ledger legal and conservative
+    // before the next provider request. Mutating tools must not be replayed
+    // automatically: the workspace may already have changed.
+    try completeInterruptedToolBatch(alloc, l);
+
+    // Announce any extension the agent built+activated since the last step, so
+    // the model can invoke it via shell now (DESIGN §5.3). A plain append: the
+    // cached prefix is untouched.
+    if (ctx_base.ext_root) |ext_root| {
+        try notes.syncFromActiveExtensions(alloc, ctx_base.environment.io, ctx_base.cwd, l, ext_root);
+    }
+
     // seq base is the ledger position: deterministic across replays (DESIGN §1).
     const base_seq = l.len();
 
@@ -72,6 +90,8 @@ pub fn runStepWithOptions(
     }
 
     var step_output = emit.StepOutputLimiter.init(ctx_base.environment.io, ctx_base.scratch_dir, base_seq, ctx_base.step_budget);
+    const max_concurrent_tools = maxConcurrentTools(batchExecutionPolicy(tool_snapshot, turn.calls));
+    std.debug.assert(max_concurrent_tools == 1);
     for (turn.calls, 0..) |call, i| {
         var ctx = ctx_base;
         ctx.event_seq = base_seq;
@@ -83,6 +103,48 @@ pub fn runStepWithOptions(
     // ONE user turn carrying the whole batch.
     try l.append(.{ .tool_results = results });
     return turn.usage;
+}
+
+fn completeInterruptedToolBatch(alloc: std.mem.Allocator, l: *ledger.Ledger) !void {
+    const events = l.view();
+    if (events.len == 0) return;
+
+    const last = events[events.len - 1];
+    if (last != .assistant) return;
+    const assistant = last.assistant;
+    if (assistant.calls.len == 0) return;
+
+    const results = try alloc.alloc(ledger.ToolResultEntry, assistant.calls.len);
+    defer alloc.free(results);
+    for (assistant.calls, 0..) |call, i| {
+        results[i] = .{
+            .call_id = call.id,
+            .ok = false,
+            .output = interrupted_tool_output,
+        };
+    }
+    try l.append(.{ .tool_results = results });
+}
+
+fn batchExecutionPolicy(tool_snapshot: registry.ToolSetSnapshot, calls: []const ledger.ToolCall) tool.BatchPolicy {
+    if (calls.len == 0) return .sequential;
+    for (calls) |call| {
+        const t = tool_snapshot.lookup(call.tool) orelse return .sequential;
+        if (t.batch_policy != .parallel_read_only) return .sequential;
+    }
+    return .parallel_read_only;
+}
+
+fn maxConcurrentTools(policy: tool.BatchPolicy) usize {
+    // v0.1 has no worker executor: every batch runs serially, so the cap is 1
+    // for EVERY policy. The policy is still recorded per call so read-only tools
+    // can raise this once a bounded-parallel dispatcher and arena-per-worker
+    // allocation land — without touching provider serialization. Keeping the cap
+    // here (rather than a tunable const) means there is no knob that looks like
+    // it enables parallelism while execution is still serial.
+    return switch (policy) {
+        .sequential, .parallel_read_only => 1,
+    };
 }
 
 fn execOne(
@@ -202,4 +264,187 @@ test "one step runs a batch of two shell calls and appends one result turn" {
     try std.testing.expect(std.mem.indexOf(u8, last.tool_results[0].output, "one") != null);
 
     // Ledger owns cloned assistant/tool-result payloads and frees them in deinit.
+}
+
+
+test "interrupted tool batch is completed as unknown before next model request" {
+    const alloc = std.testing.allocator;
+
+    const RecoveringModel = struct {
+        saw_unknown_result: bool = false,
+
+        fn name(ptr: *anyopaque) []const u8 {
+            _ = ptr;
+            return "recovering";
+        }
+
+        fn modelName(ptr: *anyopaque) []const u8 {
+            _ = ptr;
+            return "recovering-test";
+        }
+
+        fn capabilities(ptr: *anyopaque) provider.ProviderCapabilities {
+            _ = ptr;
+            return .{};
+        }
+
+        fn stream(ptr: *anyopaque, a: std.mem.Allocator, request: provider.Request, sink: provider.EventSink) anyerror!void {
+            _ = a;
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            try std.testing.expectEqual(@as(usize, 4), request.prompt_ir.stable_blocks.len);
+            try std.testing.expectEqual(prompt.BlockKind.tool_result, request.prompt_ir.stable_blocks[3].kind);
+            try std.testing.expect(std.mem.indexOf(u8, request.prompt_ir.stable_blocks[3].bytes, "state is unknown") != null);
+            self.saw_unknown_result = true;
+            try sink.emit(.started);
+            try sink.emit(.{ .text_delta = "recovered" });
+            try sink.emit(.{ .done = .end_turn });
+        }
+
+        const vtable: provider.Model.VTable = .{
+            .name = name,
+            .modelName = modelName,
+            .capabilities = capabilities,
+            .stream = stream,
+        };
+    };
+
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+
+    var l = ledger.Ledger.init(alloc);
+    defer l.deinit();
+    try l.append(.{ .user_text = "go" });
+    try l.append(.{ .assistant = .{
+        .text = "running",
+        .calls = &.{.{ .id = "c1", .tool = "shell", .args_json = "{\"command\":\"touch marker\"}" }},
+    } });
+
+    var lenv = try environment.LocalEnvironment.init(alloc, threaded.io(), .{});
+    defer lenv.deinit();
+
+    var model_impl = RecoveringModel{};
+    _ = try runStep(alloc, &l, .{ .ptr = &model_impl, .vtable = &RecoveringModel.vtable }, .{ .tools = &.{} }, .{
+        .environment = lenv.environment(),
+        .cwd = ".",
+        .scratch_dir = "/tmp",
+        .event_seq = 0,
+        .call_index = 0,
+    });
+
+    try std.testing.expect(model_impl.saw_unknown_result);
+    try std.testing.expectEqual(@as(usize, 4), l.len());
+    const repaired = l.view()[2].tool_results;
+    try std.testing.expectEqual(@as(usize, 1), repaired.len);
+    try std.testing.expect(!repaired[0].ok);
+    try std.testing.expectEqualStrings("c1", repaired[0].call_id);
+    try std.testing.expect(std.mem.indexOf(u8, repaired[0].output, "state is unknown") != null);
+}
+
+
+test "a capability note reaches the provider as a tool_note block" {
+    const alloc = std.testing.allocator;
+
+    const NoteModel = struct {
+        saw_note: bool = false,
+
+        fn name(ptr: *anyopaque) []const u8 {
+            _ = ptr;
+            return "note";
+        }
+        fn modelName(ptr: *anyopaque) []const u8 {
+            _ = ptr;
+            return "note-test";
+        }
+        fn capabilities(ptr: *anyopaque) provider.ProviderCapabilities {
+            _ = ptr;
+            return .{};
+        }
+        fn stream(ptr: *anyopaque, a: std.mem.Allocator, request: provider.Request, sink: provider.EventSink) anyerror!void {
+            _ = a;
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            for (request.prompt_ir.stable_blocks) |block| {
+                if (block.kind == .tool_note and std.mem.indexOf(u8, block.bytes, "ext run") != null) {
+                    self.saw_note = true;
+                }
+            }
+            try sink.emit(.started);
+            try sink.emit(.{ .text_delta = "ok" });
+            try sink.emit(.{ .done = .end_turn });
+        }
+        const vtable: provider.Model.VTable = .{
+            .name = name,
+            .modelName = modelName,
+            .capabilities = capabilities,
+            .stream = stream,
+        };
+    };
+
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+
+    var l = ledger.Ledger.init(alloc);
+    defer l.deinit();
+    try l.append(.{ .user_text = "go" });
+    try l.append(.{ .tool_available_note = "New capability available: tool `greet` from extension `demo`.\nInvoke it through the shell tool: nulya ext run demo '<json-args>'" });
+
+    var lenv = try environment.LocalEnvironment.init(alloc, threaded.io(), .{});
+    defer lenv.deinit();
+
+    var model_impl = NoteModel{};
+    _ = try runStep(alloc, &l, .{ .ptr = &model_impl, .vtable = &NoteModel.vtable }, .{ .tools = &.{} }, .{
+        .environment = lenv.environment(),
+        .cwd = ".",
+        .scratch_dir = "/tmp",
+        .event_seq = 0,
+        .call_index = 0,
+        // A missing root makes note-sync a safe no-op; the wiring still runs.
+        .ext_root = "does-not-exist-ext-root",
+    });
+
+    try std.testing.expect(model_impl.saw_note);
+    try std.testing.expectEqual(@as(usize, 3), l.len()); // user, note, assistant
+}
+
+test "batch execution policy is parallel only when every call opts in" {
+    const Dummy = struct {
+        fn run(alloc: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.ToolResult {
+            _ = req;
+            return .{ .ok = true, .output = try alloc.dupe(u8, "ok") };
+        }
+    };
+
+    const fake_tools = [_]tool.Tool{
+        .{
+            .definition = .{ .id = "test.read_a", .name = "read_a", .description = "read", .input_schema = "{}" },
+            .batch_policy = .parallel_read_only,
+            .run = Dummy.run,
+        },
+        .{
+            .definition = .{ .id = "test.read_b", .name = "read_b", .description = "read", .input_schema = "{}" },
+            .batch_policy = .parallel_read_only,
+            .run = Dummy.run,
+        },
+        .{
+            .definition = .{ .id = "test.shell", .name = "shell", .description = "shell", .input_schema = "{}" },
+            .batch_policy = .sequential,
+            .run = Dummy.run,
+        },
+    };
+    const tools: registry.ToolSetSnapshot = .{ .tools = &fake_tools };
+
+    const read_calls = [_]ledger.ToolCall{
+        .{ .id = "c1", .tool = "read_a", .args_json = "{}" },
+        .{ .id = "c2", .tool = "read_b", .args_json = "{}" },
+    };
+    try std.testing.expectEqual(tool.BatchPolicy.parallel_read_only, batchExecutionPolicy(tools, &read_calls));
+    try std.testing.expectEqual(@as(usize, 1), maxConcurrentTools(batchExecutionPolicy(tools, &read_calls)));
+
+    const mixed_calls = [_]ledger.ToolCall{
+        .{ .id = "c1", .tool = "read_a", .args_json = "{}" },
+        .{ .id = "c2", .tool = "shell", .args_json = "{}" },
+    };
+    try std.testing.expectEqual(tool.BatchPolicy.sequential, batchExecutionPolicy(tools, &mixed_calls));
+
+    const unknown_calls = [_]ledger.ToolCall{.{ .id = "c1", .tool = "missing", .args_json = "{}" }};
+    try std.testing.expectEqual(tool.BatchPolicy.sequential, batchExecutionPolicy(tools, &unknown_calls));
 }

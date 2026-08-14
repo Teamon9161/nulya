@@ -46,6 +46,29 @@ pub const ShellRequest = struct {
     max_output_bytes: usize,
 };
 
+/// One oneshot extension invocation (DESIGN §7.3). `request_json` is the full
+/// wire request written to the child's stdin; `stdout` on return is the raw
+/// response the child wrote before exiting — the caller decodes it with
+/// `extension/protocol.zig`, so a malformed reply is a decode error, not a host
+/// crash.
+pub const ExtensionRequest = struct {
+    /// Absolute path to the built extension executable (the active version's bin).
+    entry_path: []const u8,
+    cwd: []const u8,
+    request_json: []const u8,
+    max_output_bytes: usize,
+};
+
+/// A completed extension run. `stdout` is owned by the caller's allocator.
+pub const ExtensionOutcome = struct {
+    stdout: []u8,
+    exit_code: u8,
+
+    pub fn deinit(self: ExtensionOutcome, alloc: std.mem.Allocator) void {
+        alloc.free(self.stdout);
+    }
+};
+
 /// The environment handle carried in every tool's `CtxHeader`. `io` is how a
 /// tool reaches its filesystem (host today, sandbox/remote later); the vtable
 /// covers process execution and dialect. Fixed-shape — nothing grows with the
@@ -58,6 +81,7 @@ pub const Environment = struct {
     pub const VTable = struct {
         dialect: *const fn (ptr: *anyopaque) Dialect,
         runShell: *const fn (ptr: *anyopaque, alloc: std.mem.Allocator, req: ShellRequest) anyerror!ShellOutcome,
+        runExtension: *const fn (ptr: *anyopaque, alloc: std.mem.Allocator, req: ExtensionRequest) anyerror!ExtensionOutcome,
     };
 
     pub fn dialect(self: Environment) Dialect {
@@ -66,6 +90,10 @@ pub const Environment = struct {
 
     pub fn runShell(self: Environment, alloc: std.mem.Allocator, req: ShellRequest) !ShellOutcome {
         return self.vtable.runShell(self.ptr, alloc, req);
+    }
+
+    pub fn runExtension(self: Environment, alloc: std.mem.Allocator, req: ExtensionRequest) !ExtensionOutcome {
+        return self.vtable.runExtension(self.ptr, alloc, req);
     }
 };
 
@@ -205,9 +233,48 @@ pub const LocalEnvironment = struct {
         return .{ .stdout = result.stdout, .stderr = result.stderr, .exit_code = exit_code };
     }
 
+    fn runExtensionImpl(ptr: *anyopaque, alloc: std.mem.Allocator, req: ExtensionRequest) anyerror!ExtensionOutcome {
+        const self: *LocalEnvironment = @ptrCast(@alignCast(ptr));
+
+        // Oneshot (DESIGN §7.3): spawn, feed one request, read one response, exit.
+        // stderr is ignored in v1 — the extension reports failure through the
+        // protocol's error response on stdout; a crash surfaces as a non-zero
+        // exit with no valid response, which the decoder turns into an error.
+        var child = try std.process.spawn(self.io, .{
+            .argv = &.{req.entry_path},
+            .cwd = .{ .path = req.cwd },
+            .environ_map = &self.env,
+            .stdin = .pipe,
+            .stdout = .pipe,
+            .stderr = .ignore,
+            .create_no_window = true,
+        });
+        errdefer child.kill(self.io);
+
+        // Write the request, then close stdin so the child sees EOF. v1 requests
+        // are small JSON lines (< pipe buffer), so writing before draining stdout
+        // cannot deadlock.
+        try child.stdin.?.writeStreamingAll(self.io, req.request_json);
+        child.stdin.?.close(self.io);
+        child.stdin = null;
+
+        var read_buf: [4096]u8 = undefined;
+        var reader = child.stdout.?.readerStreaming(self.io, &read_buf);
+        const stdout = try reader.interface.allocRemaining(alloc, .limited(req.max_output_bytes));
+        errdefer alloc.free(stdout);
+
+        const term = try child.wait(self.io);
+        const exit_code: u8 = switch (term) {
+            .exited => |c| c,
+            else => 1,
+        };
+        return .{ .stdout = stdout, .exit_code = exit_code };
+    }
+
     const vtable: Environment.VTable = .{
         .dialect = dialectImpl,
         .runShell = runShellImpl,
+        .runExtension = runExtensionImpl,
     };
 };
 

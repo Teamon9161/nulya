@@ -52,6 +52,10 @@ pub const CtxHeader = struct {
     budget: OutputBudget = .{},
     /// Aggregate budget for every tool result in one model step.
     step_budget: StepOutputBudget = .{},
+    /// Extensions root (relative to cwd) the loop reconciles capability notes
+    /// against (DESIGN §5.3). Null disables mid-conversation note syncing — the
+    /// demo and unit tests leave it off. Fixed-shape, so it belongs here.
+    ext_root: ?[]const u8 = null,
 };
 
 /// A single tool invocation request. This is the entire input surface.
@@ -79,12 +83,23 @@ pub const ToolDefinition = struct {
     input_schema: []const u8,
 };
 
-/// A registered tool: its model-facing definition plus its execution handler.
+/// How the agent loop may schedule several calls emitted in one assistant turn.
+/// The default is the safest boundary: preserve model-call order and make every
+/// side effect visible to later calls. Read-only tools may opt into parallel
+/// execution later without changing provider serialization.
+pub const BatchPolicy = enum {
+    sequential,
+    parallel_read_only,
+};
+
+/// A registered tool: its model-facing definition, scheduling contract, and
+/// execution handler.
 ///
 /// Builtins use function pointers. Extensions can later use a different handler
 /// representation without changing provider serialization.
 pub const Tool = struct {
     definition: ToolDefinition,
+    batch_policy: BatchPolicy = .sequential,
     run: *const fn (alloc: std.mem.Allocator, req: ToolRequest) anyerror!ToolResult,
 };
 
@@ -110,4 +125,25 @@ test "requireString reports missing field distinctly from wrong type" {
     defer parsed.deinit();
     try std.testing.expectEqualStrings("x", try requireString(parsed.value, "a"));
     try std.testing.expectError(error.MissingField, requireString(parsed.value, "b"));
+}
+
+
+test "tools default to sequential batch policy" {
+    const Fake = struct {
+        fn run(alloc: std.mem.Allocator, req: ToolRequest) anyerror!ToolResult {
+            _ = req;
+            return .{ .ok = true, .output = try alloc.dupe(u8, "ok") };
+        }
+    };
+
+    const fake: Tool = .{
+        .definition = .{
+            .id = "test.fake",
+            .name = "fake",
+            .description = "fake",
+            .input_schema = "{}",
+        },
+        .run = Fake.run,
+    };
+    try std.testing.expectEqual(BatchPolicy.sequential, fake.batch_policy);
 }
