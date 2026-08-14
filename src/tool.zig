@@ -19,6 +19,7 @@ const emit = @import("emit.zig");
 const environment = @import("environment.zig");
 
 pub const Environment = environment.Environment;
+pub const WorkspaceFs = environment.WorkspaceFs;
 
 /// Truncation / spill limits. Kernel defaults live here (base-tools.md §3) and
 /// are the primary knob for per-result token cost.
@@ -32,18 +33,19 @@ pub const StepOutputBudget = emit.StepOutputBudget;
 /// presentation data such as spill directories, event sequence numbers, and
 /// output budgets stays outside this type.
 pub const ToolContext = struct {
-    /// The execution environment (DESIGN §8). Tools run subprocesses through the
-    /// environment; filesystem operations still use `environment.io` until the
-    /// planned WorkspaceFs vtable lands.
+    /// The process execution environment (DESIGN §8).
     environment: Environment,
+    /// Filesystem operations scoped to the workspace. Tools must use this rather
+    /// than host cwd APIs so remote/sandbox backends can swap the implementation.
+    fs: WorkspaceFs,
     /// Working directory for filesystem-relative operations.
     cwd: []const u8,
 };
 
 /// A single tool invocation request. This is the entire input surface.
 pub const ToolRequest = struct {
-    /// Raw JSON arguments; each tool parses its own typed shape.
-    args: std.json.Value,
+    /// Raw JSON arguments; executors that need typed values parse locally.
+    args_json: []const u8,
     ctx: ToolContext,
 };
 
@@ -102,7 +104,12 @@ pub const Tool = struct {
     executor: ToolExecutor,
 };
 
-/// Helper: fetch a required string field from `args`, with a teaching error.
+/// Helper: parse raw tool arguments as JSON.
+pub fn parseArgs(alloc: std.mem.Allocator, args_json: []const u8) !std.json.Parsed(std.json.Value) {
+    return std.json.parseFromSlice(std.json.Value, alloc, args_json, .{}) catch error.InvalidArgsJson;
+}
+
+/// Helper: fetch a required string field from parsed args, with a teaching error.
 pub fn requireString(args: std.json.Value, field: []const u8) ![]const u8 {
     if (args != .object) return error.ArgsNotObject;
     const v = args.object.get(field) orelse return error.MissingField;

@@ -7,14 +7,11 @@
 
 const std = @import("std");
 const ledger = @import("ledger.zig");
-const loop = @import("loop.zig");
 const provider = @import("provider.zig");
 const openai = @import("providers/openai.zig");
-const registry = @import("registry.zig");
-const tool = @import("tool.zig");
 const environment = @import("environment.zig");
 const config = @import("config.zig");
-const notes = @import("extension/notes.zig");
+const session = @import("session.zig");
 const cli = @import("cli.zig");
 
 /// Scripted stand-in provider: on seeing a pending user turn, it issues two
@@ -81,14 +78,6 @@ fn runDemo(alloc: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) 
         return error.UnsupportedEnvironmentBackend;
     }
 
-    var l = ledger.Ledger.init(alloc);
-    defer l.deinit();
-
-    try l.append(.{ .user_text = "What system am I on?" });
-
-    const tools = try registry.snapshot(alloc);
-    defer tools.deinit(alloc);
-
     // Execution env: the sanitized boundary every tool runs behind. Host secrets
     // in the host env never cross into it (DESIGN §9).
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{ .dialect = cfg.environment.shell.toLocalOption() });
@@ -116,41 +105,40 @@ fn runDemo(alloc: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) 
 
     std.debug.print("provider: {s}/{s} (shell dialect: {s})\n", .{ model.name(), model.modelName(), lenv.dialect_val.label() });
 
-    const step_ctx: loop.StepContext = .{
-        .tool_context = .{
-            .environment = lenv.environment(),
-            .cwd = ".",
+    var sess = try session.AgentSession.init(alloc, .{
+        .io = io,
+        .model = model,
+        .step_ctx = .{
+            .tool_context = .{
+                .environment = lenv.environment(),
+                .fs = lenv.workspaceFs(),
+                .cwd = ".",
+            },
+            .scratch_dir = ".nulya/scratch",
         },
-        .scratch_dir = ".nulya/scratch",
-    };
+        .model_options = model_options,
+    });
+    defer sess.deinit();
+    try sess.appendUser("What system am I on?");
 
-    var total: provider.Usage = .{};
     if (use_openai) {
         var steps: usize = 0;
         while (steps < 4) : (steps += 1) {
-            try prepareStep(alloc, io, &l, ".", ".nulya/extensions");
-            accumulate(&total, try loop.runStepWithOptions(alloc, &l, model, tools, step_ctx, model_options));
-            if (lastAssistantDone(&l)) break;
+            _ = try sess.step();
+            if (sess.lastAssistantDone()) break;
         }
     } else {
-        try prepareStep(alloc, io, &l, ".", ".nulya/extensions");
-        accumulate(&total, try loop.runStepWithOptions(alloc, &l, model, tools, step_ctx, model_options));
+        _ = try sess.step();
     }
 
-    printLedger(&l);
+    printLedger(&sess.l);
+    const total = sess.usage();
     std.debug.print(
         "=== usage: input={d} cache_read={d} output={d} ===\n",
         .{ total.input_tokens, total.cache_read_tokens, total.output_tokens },
     );
 
     // Ledger owns cloned assistant/tool-result payloads and frees them in deinit.
-}
-
-fn prepareStep(alloc: std.mem.Allocator, io: std.Io, l: *ledger.Ledger, cwd: []const u8, ext_root: []const u8) !void {
-    // Session preparation owns extension reconciliation. Repair any interrupted
-    // tool batch first so a note append cannot hide an illegal assistant tail.
-    try loop.completeInterruptedToolBatch(alloc, l);
-    try notes.syncFromActiveExtensions(alloc, io, cwd, l, ext_root);
 }
 
 fn resolveApiKey(profile: config.ProviderProfile, env: *const std.process.Environ.Map) ?[]const u8 {
@@ -162,21 +150,6 @@ fn resolveApiKey(profile: config.ProviderProfile, env: *const std.process.Enviro
 
 fn nonEmpty(value: []const u8, fallback: []const u8) []const u8 {
     return if (value.len == 0) fallback else value;
-}
-
-fn accumulate(total: *provider.Usage, step: provider.Usage) void {
-    total.input_tokens += step.input_tokens;
-    total.output_tokens += step.output_tokens;
-    total.cache_read_tokens += step.cache_read_tokens;
-    total.cache_write_tokens += step.cache_write_tokens;
-}
-
-fn lastAssistantDone(l: *const ledger.Ledger) bool {
-    if (l.len() == 0) return false;
-    return switch (l.view()[l.len() - 1]) {
-        .assistant => |as| as.calls.len == 0,
-        else => false,
-    };
 }
 
 fn printLedger(l: *const ledger.Ledger) void {
@@ -215,6 +188,6 @@ test {
     _ = @import("extension/manifest.zig");
     _ = @import("extension/store.zig");
     _ = @import("extension/build_ext.zig");
-    _ = @import("extension/notes.zig");
+    _ = @import("session.zig");
     _ = @import("toolchain.zig");
 }

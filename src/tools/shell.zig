@@ -29,8 +29,12 @@ pub const def: tool.Tool = .{
 };
 
 fn run(alloc: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolResult {
-    const command = try tool.requireString(req.args, "command");
-    const cwd = tool.optionalString(req.args, "cwd") orelse req.ctx.cwd;
+    const parsed = try tool.parseArgs(alloc, req.args_json);
+    defer parsed.deinit();
+    const args = parsed.value;
+
+    const command = try tool.requireString(args, "command");
+    const cwd = tool.optionalString(args, "cwd") orelse req.ctx.cwd;
 
     const outcome = req.ctx.environment.runShell(alloc, .{
         .command = command,

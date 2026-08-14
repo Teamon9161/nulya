@@ -75,8 +75,30 @@ pub const ExtensionOutcome = struct {
     }
 };
 
-/// The environment handle carried in every tool's `ToolContext`. `io` is how a
-/// tool reaches its filesystem (host today, sandbox/remote later); the vtable
+/// Filesystem operations available to builtin tools inside the workspace.
+///
+/// The local backend is host-backed today; sandbox/remote backends can supply a
+/// different implementation without letting tools reach `std.Io.Dir.cwd()`.
+pub const WorkspaceFs = struct {
+    io: std.Io,
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        readFileAlloc: *const fn (ptr: *anyopaque, alloc: std.mem.Allocator, path: []const u8, max_bytes: usize) anyerror![]u8,
+        atomicWriteFile: *const fn (ptr: *anyopaque, path: []const u8, data: []const u8) anyerror!void,
+    };
+
+    pub fn readFileAlloc(self: WorkspaceFs, alloc: std.mem.Allocator, path: []const u8, max_bytes: usize) ![]u8 {
+        return self.vtable.readFileAlloc(self.ptr, alloc, path, max_bytes);
+    }
+
+    pub fn atomicWriteFile(self: WorkspaceFs, path: []const u8, data: []const u8) !void {
+        return self.vtable.atomicWriteFile(self.ptr, path, data);
+    }
+};
+
+/// The environment handle carried in every tool's `ToolContext`. The vtable
 /// covers process execution and dialect. Fixed-shape — nothing grows with the
 /// conversation, so it is safe in `ToolContext` (DESIGN §7.6).
 pub const Environment = struct {
@@ -194,6 +216,10 @@ pub const LocalEnvironment = struct {
 
     pub fn environment(self: *LocalEnvironment) Environment {
         return .{ .io = self.io, .ptr = self, .vtable = &vtable };
+    }
+
+    pub fn workspaceFs(self: *LocalEnvironment) WorkspaceFs {
+        return .{ .io = self.io, .ptr = self, .vtable = &fs_vtable };
     }
 
     fn dialectImpl(ptr: *anyopaque) Dialect {
@@ -314,6 +340,30 @@ pub const LocalEnvironment = struct {
         const duration: std.Io.Clock.Duration = .{ .clock = .awake, .raw = .fromMilliseconds(ms) };
         return .{ .deadline = std.Io.Clock.Timestamp.fromNow(io, duration) };
     }
+
+    fn readFileAllocImpl(ptr: *anyopaque, alloc: std.mem.Allocator, path: []const u8, max_bytes: usize) anyerror![]u8 {
+        const self: *LocalEnvironment = @ptrCast(@alignCast(ptr));
+        return std.Io.Dir.cwd().readFileAlloc(self.io, path, alloc, .limited(max_bytes));
+    }
+
+    fn atomicWriteFileImpl(ptr: *anyopaque, path: []const u8, data: []const u8) anyerror!void {
+        const self: *LocalEnvironment = @ptrCast(@alignCast(ptr));
+        const cwd = std.Io.Dir.cwd();
+        var original = try cwd.openFile(self.io, path, .{});
+        defer original.close(self.io);
+        const permissions = (try original.stat(self.io)).permissions;
+
+        var atomic = try cwd.createFileAtomic(self.io, path, .{ .replace = true, .permissions = permissions });
+        defer atomic.deinit(self.io);
+        try atomic.file.writeStreamingAll(self.io, data);
+        try atomic.file.sync(self.io);
+        try atomic.replace(self.io);
+    }
+
+    const fs_vtable: WorkspaceFs.VTable = .{
+        .readFileAlloc = readFileAllocImpl,
+        .atomicWriteFile = atomicWriteFileImpl,
+    };
 
     const vtable: Environment.VTable = .{
         .dialect = dialectImpl,

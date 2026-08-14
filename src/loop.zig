@@ -56,12 +56,6 @@ pub fn runStepWithOptions(
     step_ctx: StepContext,
     model_options: provider.Options,
 ) !provider.Usage {
-    // If the previous process died after recording tool calls but before
-    // recording the batched results, make the ledger legal and conservative
-    // before the next provider request. Mutating tools must not be replayed
-    // automatically: the workspace may already have changed.
-    try completeInterruptedToolBatch(alloc, l);
-
     // seq base is the ledger position: deterministic across replays (DESIGN §1).
     const base_seq = l.len();
 
@@ -160,12 +154,7 @@ fn execOne(
             break :blk try std.fmt.allocPrint(alloc, "unknown tool '{s}'; builtins are shell, edit", .{call.tool});
         };
 
-        const parsed = std.json.parseFromSlice(std.json.Value, alloc, call.args_json, .{}) catch |err| {
-            break :blk try std.fmt.allocPrint(alloc, "invalid JSON args for '{s}': {s}", .{ call.tool, @errorName(err) });
-        };
-        defer parsed.deinit();
-
-        const res = t.executor.call(alloc, .{ .args = parsed.value, .ctx = step_ctx.tool_context }) catch |err| {
+        const res = t.executor.call(alloc, .{ .args_json = call.args_json, .ctx = step_ctx.tool_context }) catch |err| {
             break :blk try std.fmt.allocPrint(alloc, "{s} failed: {s}", .{ call.tool, @errorName(err) });
         };
         ok = res.ok;
@@ -233,7 +222,9 @@ test "one step runs a batch of two shell calls and appends one result turn" {
 
     const FakeShell = struct {
         fn run(a: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolResult {
-            const command = try tool.requireString(req.args, "command");
+            const parsed = try tool.parseArgs(a, req.args_json);
+            defer parsed.deinit();
+            const command = try tool.requireString(parsed.value, "command");
             const output = if (std.mem.indexOf(u8, command, "one") != null) "one\n[exit 0]" else "two\n[exit 0]";
             return .{ .ok = true, .output = try a.dupe(u8, output) };
         }
@@ -257,6 +248,7 @@ test "one step runs a batch of two shell calls and appends one result turn" {
     _ = try runStep(alloc, &l, .{ .ptr = &scripted, .vtable = &Scripted.vtable }, tools, .{
         .tool_context = .{
             .environment = lenv.environment(),
+            .fs = lenv.workspaceFs(),
             .cwd = ".",
         },
         .scratch_dir = "/tmp",
@@ -273,49 +265,8 @@ test "one step runs a batch of two shell calls and appends one result turn" {
 }
 
 
-test "interrupted tool batch is completed as unknown before next model request" {
+test "completeInterruptedToolBatch appends unknown results for an assistant tail" {
     const alloc = std.testing.allocator;
-
-    const RecoveringModel = struct {
-        saw_unknown_result: bool = false,
-
-        fn name(ptr: *anyopaque) []const u8 {
-            _ = ptr;
-            return "recovering";
-        }
-
-        fn modelName(ptr: *anyopaque) []const u8 {
-            _ = ptr;
-            return "recovering-test";
-        }
-
-        fn capabilities(ptr: *anyopaque) provider.ProviderCapabilities {
-            _ = ptr;
-            return .{};
-        }
-
-        fn stream(ptr: *anyopaque, a: std.mem.Allocator, request: provider.Request, sink: provider.EventSink) anyerror!void {
-            _ = a;
-            const self: *@This() = @ptrCast(@alignCast(ptr));
-            try std.testing.expectEqual(@as(usize, 4), request.prompt_ir.stable_blocks.len);
-            try std.testing.expectEqual(prompt.BlockKind.tool_result, request.prompt_ir.stable_blocks[3].kind);
-            try std.testing.expect(std.mem.indexOf(u8, request.prompt_ir.stable_blocks[3].bytes, "state is unknown") != null);
-            self.saw_unknown_result = true;
-            try sink.emit(.started);
-            try sink.emit(.{ .text_delta = "recovered" });
-            try sink.emit(.{ .done = .end_turn });
-        }
-
-        const vtable: provider.Model.VTable = .{
-            .name = name,
-            .modelName = modelName,
-            .capabilities = capabilities,
-            .stream = stream,
-        };
-    };
-
-    var threaded: std.Io.Threaded = .init(alloc, .{});
-    defer threaded.deinit();
 
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
@@ -325,20 +276,9 @@ test "interrupted tool batch is completed as unknown before next model request" 
         .calls = &.{.{ .id = "c1", .tool = "shell", .args_json = "{\"command\":\"touch marker\"}" }},
     } });
 
-    var lenv = try environment.LocalEnvironment.init(alloc, threaded.io(), .{});
-    defer lenv.deinit();
+    try completeInterruptedToolBatch(alloc, &l);
 
-    var model_impl = RecoveringModel{};
-    _ = try runStep(alloc, &l, .{ .ptr = &model_impl, .vtable = &RecoveringModel.vtable }, .{ .tools = &.{} }, .{
-        .tool_context = .{
-            .environment = lenv.environment(),
-            .cwd = ".",
-        },
-        .scratch_dir = "/tmp",
-    });
-
-    try std.testing.expect(model_impl.saw_unknown_result);
-    try std.testing.expectEqual(@as(usize, 4), l.len());
+    try std.testing.expectEqual(@as(usize, 3), l.len());
     const repaired = l.view()[2].tool_results;
     try std.testing.expectEqual(@as(usize, 1), repaired.len);
     try std.testing.expect(!repaired[0].ok);
@@ -400,6 +340,7 @@ test "a capability note reaches the provider as a capability_note block" {
     _ = try runStep(alloc, &l, .{ .ptr = &model_impl, .vtable = &NoteModel.vtable }, .{ .tools = &.{} }, .{
         .tool_context = .{
             .environment = lenv.environment(),
+            .fs = lenv.workspaceFs(),
             .cwd = ".",
         },
         .scratch_dir = "/tmp",
