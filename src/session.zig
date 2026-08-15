@@ -198,6 +198,22 @@ pub const AgentSession = struct {
         return outcome;
     }
 
+    /// Run steps until the assistant ends its turn or `max_steps` is reached —
+    /// whichever comes first. The cap is enforced here in the kernel, not by a
+    /// caller's loop, so a driver that wants "just keep going" still cannot run a
+    /// session past the budget (DESIGN §4, PLAN §3.6). A canceled step stops the
+    /// run. Returns the number of steps actually taken.
+    pub fn run(self: *AgentSession, max_steps: usize) !usize {
+        var taken: usize = 0;
+        while (taken < max_steps) {
+            const outcome = try self.step();
+            taken += 1;
+            if (outcome.status == .canceled) break;
+            if (self.lastAssistantDone()) break;
+        }
+        return taken;
+    }
+
     pub fn usage(self: *const AgentSession) provider.Usage {
         return self.total_usage;
     }

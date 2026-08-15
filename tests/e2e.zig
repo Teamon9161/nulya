@@ -975,3 +975,136 @@ test "durable ledger: a capability_note appended by a separate CLI process is re
     defer reopened.deinit();
     try std.testing.expect(try notes.containsNoteFor(&reopened.l, "demo", version));
 }
+
+// ── M2a: `nulya session *` CLI (PLAN §3.2) ──────────────────────────────────
+
+/// Read a whole session file's bytes. Caller owns them.
+fn readSessionFile(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, id: []const u8) ![]u8 {
+    const path = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{id});
+    defer alloc.free(path);
+    return ws.readFileAlloc(io, path, alloc, .unlimited);
+}
+
+test "session cli: --max-steps is enforced by the kernel even when the driver asks for more" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    // `new` and `append` never invoke the model; only `step` does, so only it
+    // needs the loop-mode env. The loop model never ends its turn.
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--model", "scripted" });
+    defer alloc.free(new.stdout);
+    try std.testing.expectEqual(@as(u8, 0), new.code);
+    const id = std.mem.trim(u8, new.stdout, " \r\n");
+
+    {
+        const ap = try runCli(alloc, io, ws, &.{ exe_abs, "session", "append", id, "go forever" });
+        defer alloc.free(ap.stdout);
+        try std.testing.expectEqual(@as(u8, 0), ap.code);
+    }
+
+    // The driver would happily run forever, but --max-steps 3 caps this one
+    // invocation at exactly three kernel steps.
+    const step = try runCliEnv(alloc, io, ws, &.{ exe_abs, "session", "step", id, "--max-steps", "3" }, "NULYA_SCRIPTED_MODE", "loop");
+    defer alloc.free(step.stdout);
+    try std.testing.expectEqual(@as(u8, 0), step.code);
+
+    const dup_id = try alloc.dupe(u8, id);
+    defer alloc.free(dup_id);
+    const bytes = try readSessionFile(alloc, io, ws, dup_id);
+    defer alloc.free(bytes);
+
+    // Exactly three assistant turns ran — the cap held even though the model
+    // wanted to keep going, and the last event is an unfinished (with-calls) batch.
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, bytes, "\"kind\":\"assistant\""));
+    try std.testing.expect(std.mem.count(u8, bytes, "\"kind\":\"tool_results\"") == 3);
+    // The turn never ended: the loop model always emits a tool call, so there is
+    // no assistant with an empty calls array.
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"calls\":[]") == null);
+}
+
+test "session cli: a shell-script driver runs a goal loop to completion" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    // A real driver script: create a session, then loop step/append until the
+    // model ends its turn (an assistant with an empty calls array). This is the
+    // /goal pattern from PLAN §3.2, expressed as ~10 lines of shell.
+    const ps1_driver =
+        \\$ErrorActionPreference = 'Stop'
+        \\$n = $args[0]
+        \\$id = (& $n session new --model scripted).Trim()
+        \\& $n session append $id 'do the thing' | Out-Null
+        \\for ($i = 0; $i -lt 10; $i++) {
+        \\    $out = & $n session step $id --max-steps 1
+        \\    if ($out -match '"calls":\[\]') { exit 0 }
+        \\    & $n session append $id 'continue' | Out-Null
+        \\}
+        \\exit 3
+        \\
+    ;
+    const sh_driver =
+        \\#!/bin/sh
+        \\set -e
+        \\n="$1"
+        \\id=$("$n" session new --model scripted)
+        \\"$n" session append "$id" 'do the thing' >/dev/null
+        \\i=0
+        \\while [ $i -lt 10 ]; do
+        \\  out=$("$n" session step "$id" --max-steps 1)
+        \\  if printf '%s' "$out" | grep -q '"calls":\[\]'; then exit 0; fi
+        \\  "$n" session append "$id" 'continue' >/dev/null
+        \\  i=$((i+1))
+        \\done
+        \\exit 3
+        \\
+    ;
+
+    const is_windows = @import("builtin").os.tag == .windows;
+    const script_name = if (is_windows) "driver.ps1" else "driver.sh";
+    try ws.writeFile(io, .{ .sub_path = script_name, .data = if (is_windows) ps1_driver else sh_driver });
+
+    var ws_real: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
+    const script_abs = try std.fs.path.join(alloc, &.{ ws_path, script_name });
+    defer alloc.free(script_abs);
+
+    const argv: []const []const u8 = if (is_windows)
+        &.{ "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script_abs, exe_abs }
+    else
+        &.{ "sh", script_abs, exe_abs };
+
+    const result = try std.process.run(alloc, io, .{
+        .argv = argv,
+        .cwd = .{ .dir = ws },
+        .stdout_limit = .limited(1 << 20),
+        .stderr_limit = .limited(1 << 20),
+    });
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+    const code = switch (result.term) {
+        .exited => |c| c,
+        else => 255,
+    };
+    if (code != 0) std.debug.print("driver failed ({d}):\nstdout: {s}\nstderr: {s}\n", .{ code, result.stdout, result.stderr });
+    try std.testing.expectEqual(@as(u8, 0), code); // the driver reached its goal and exited 0
+}

@@ -351,6 +351,17 @@ pub fn openDurable(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: 
     return l;
 }
 
+/// Read and parse only the header line of a session file, without replaying its
+/// events — cheap enough to let a `session step` process resolve its model
+/// profile before opening the whole session. Caller owns the returned header.
+pub fn readHeader(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8) !OwnedHeader {
+    const bytes = try dir.readFileAlloc(io, path, alloc, .unlimited);
+    defer alloc.free(bytes);
+    var it = std.mem.splitScalar(u8, bytes, '\n');
+    const line = firstNonBlank(&it) orelse return error.MissingHeader;
+    return parseHeaderLine(alloc, line);
+}
+
 /// Absolute offset just past the last `\n` in `bytes` (a torn tail after it is
 /// dropped). Equals `bytes.len` when the file ends with a newline.
 fn lastCompleteLineEnd(bytes: []const u8) u64 {

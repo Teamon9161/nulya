@@ -8,51 +8,12 @@
 const std = @import("std");
 const ledger = @import("ledger.zig");
 const provider = @import("provider.zig");
-const openai = @import("providers/openai.zig");
 const environment = @import("environment.zig");
 const config = @import("config.zig");
 const session = @import("session.zig");
 const cli = @import("cli.zig");
 const promotion = @import("promotion.zig");
-
-/// Scripted stand-in provider: on seeing a pending user turn, it issues two
-/// shell calls in a single assistant turn — demonstrating batched execution.
-const ScriptedProvider = struct {
-    fn name(ptr: *anyopaque) []const u8 {
-        _ = ptr;
-        return "scripted";
-    }
-
-    fn modelName(ptr: *anyopaque) []const u8 {
-        _ = ptr;
-        return "scripted-demo";
-    }
-
-    fn capabilities(ptr: *anyopaque) provider.ProviderCapabilities {
-        _ = ptr;
-        return .{ .parallel_tool_calls = true };
-    }
-
-    fn stream(ptr: *anyopaque, alloc: std.mem.Allocator, request: provider.Request, sink: provider.EventSink) anyerror!void {
-        _ = ptr;
-        _ = alloc;
-        _ = request;
-        try sink.emit(.started);
-        try sink.emit(.{ .text_delta = "Let me probe the environment." });
-        try sink.emit(.{ .tool_use_start = .{ .index = 0, .id = "c1", .name = "shell" } });
-        try sink.emit(.{ .tool_use_input_delta = .{ .index = 0, .fragment = "{\"command\":\"echo hello-from-nulya\"}" } });
-        try sink.emit(.{ .tool_use_start = .{ .index = 1, .id = "c2", .name = "shell" } });
-        try sink.emit(.{ .tool_use_input_delta = .{ .index = 1, .fragment = "{\"command\":\"pwd\"}" } });
-        try sink.emit(.{ .done = .tool_use });
-    }
-
-    const vtable: provider.Model.VTable = .{
-        .name = name,
-        .modelName = modelName,
-        .capabilities = capabilities,
-        .stream = stream,
-    };
-};
+const launch = @import("launch.zig");
 
 pub fn main(init: std.process.Init) !u8 {
     const alloc = init.gpa;
@@ -70,6 +31,10 @@ pub fn main(init: std.process.Init) !u8 {
     return 0;
 }
 
+/// Bare `nulya` runs a fixed-prompt demo — now over the same durable session
+/// path the `nulya session *` CLI uses (DESIGN §3.4, §14): it creates a session
+/// file, appends one user turn, and runs to the turn's end, then prints the
+/// ledger. The offline scripted provider stands in when no API key is set.
 fn runDemo(alloc: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) !void {
     var cfg = try config.load(alloc, io, env);
     defer cfg.deinit();
@@ -84,33 +49,18 @@ fn runDemo(alloc: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) 
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{ .dialect = cfg.environment.shell.toLocalOption() });
     defer lenv.deinit();
 
-    var scripted = ScriptedProvider{};
-    var openai_provider: openai.OpenAiProvider = undefined;
-    var use_openai = false;
-    defer if (use_openai) openai_provider.deinit();
-
-    const selected_profile = cfg.provider.activeProfile() orelse cfg.provider.findProfile("scripted");
-    const model_options: provider.Options = .{ .effort = if (selected_profile) |profile| profile.effort else null };
-    const model: provider.Model = if (selected_profile) |profile| switch (profile.kind) {
-        .scripted => .{ .ptr = &scripted, .vtable = &ScriptedProvider.vtable },
-        .openai => if (resolveApiKey(profile, env)) |api_key| blk: {
-            openai_provider = try openai.OpenAiProvider.init(alloc, io, .{
-                .api_key = api_key,
-                .model = nonEmpty(profile.model, "gpt-4o-mini"),
-                .base_url = nonEmpty(profile.base_url, "https://api.openai.com/v1"),
-            });
-            use_openai = true;
-            break :blk openai_provider.modelHandle();
-        } else .{ .ptr = &scripted, .vtable = &ScriptedProvider.vtable },
-    } else .{ .ptr = &scripted, .vtable = &ScriptedProvider.vtable };
+    const profile = if (cfg.provider.active_profile.len != 0) cfg.provider.active_profile else "scripted";
+    var holder = launch.ModelHolder{};
+    try launch.buildModel(alloc, io, cfg.provider, env, profile, &holder);
+    defer holder.deinit();
+    const model = holder.model();
+    const effort = if (cfg.provider.findProfile(profile)) |p| p.effort else null;
 
     std.debug.print("provider: {s}/{s} (shell dialect: {s})\n", .{ model.name(), model.modelName(), lenv.dialect_val.label() });
 
     // Usage-driven automatic native promotion (DESIGN §5.1 rule 3) lives entirely
-    // at this session-setup boundary: read the journal, rank extension stable
-    // ids, and hand the composition a plain best-first id list. The composition
-    // never sees the journal, the weights, or the score model; the ranked ids are
-    // only alive through init, which copies what it selects into owned bindings.
+    // at this session-setup boundary: read the journal, rank extension stable ids,
+    // and hand the composition a plain best-first id list.
     const ranked_ids = try promotion.rankExtensionTools(alloc, io, ".", .{
         .uses_recent = cfg.registry.weights.uses_recent,
         .uses_total = cfg.registry.weights.uses_total,
@@ -119,17 +69,19 @@ fn runDemo(alloc: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) 
     });
     defer promotion.freeRankedIds(alloc, ranked_ids);
 
-    var sess = try session.AgentSession.init(alloc, .{
+    try std.Io.Dir.cwd().createDirPath(io, launch.sessions_dir);
+    const id = try launch.genSessionId(alloc, io);
+    defer alloc.free(id);
+    const spath = try launch.sessionPath(alloc, id);
+    defer alloc.free(spath);
+
+    var sess = try session.AgentSession.createDurable(alloc, .{
         .model = model,
         .step_ctx = .{
-            .tool_context = .{
-                .environment = lenv.environment(),
-                .fs = lenv.workspaceFs(),
-                .cwd = ".",
-            },
-            .scratch_dir = ".nulya/scratch",
+            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = "." },
+            .scratch_dir = launch.scratch_dir,
         },
-        .model_options = model_options,
+        .model_options = .{ .effort = effort },
         // Config lives only at this boundary; the composition receives a narrow,
         // already-resolved selection, never the config itself.
         .registry = .{
@@ -137,19 +89,12 @@ fn runDemo(alloc: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) 
             .ranked_native_tools = ranked_ids,
             .max_tools = cfg.registry.max_tools,
         },
-    });
+    }, .{ .workspace = std.Io.Dir.cwd(), .session_path = spath, .session_id = id, .model_profile = profile });
     defer sess.deinit();
-    try sess.appendUser("What system am I on?");
 
-    if (use_openai) {
-        var steps: usize = 0;
-        while (steps < 4) : (steps += 1) {
-            _ = try sess.step();
-            if (sess.lastAssistantDone()) break;
-        }
-    } else {
-        _ = try sess.step();
-    }
+    std.debug.print("session: {s}\n", .{id});
+    try sess.appendUser("What system am I on?");
+    _ = try sess.run(4);
 
     printLedger(&sess.l);
     const total = sess.usage();
@@ -159,17 +104,6 @@ fn runDemo(alloc: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) 
     );
 
     // Ledger owns cloned assistant/tool-result payloads and frees them in deinit.
-}
-
-fn resolveApiKey(profile: config.ProviderProfile, env: *const std.process.Environ.Map) ?[]const u8 {
-    if (profile.api_key) |api_key| if (api_key.len != 0) return api_key;
-    if (profile.api_key_env.len == 0) return null;
-    const api_key = env.get(profile.api_key_env) orelse return null;
-    return if (api_key.len == 0) null else api_key;
-}
-
-fn nonEmpty(value: []const u8, fallback: []const u8) []const u8 {
-    return if (value.len == 0) fallback else value;
 }
 
 fn printLedger(l: *const ledger.Ledger) void {
@@ -217,5 +151,7 @@ test {
     _ = @import("extension/store.zig");
     _ = @import("extension/build_ext.zig");
     _ = @import("session.zig");
+    _ = @import("launch.zig");
+    _ = @import("cli.zig");
     _ = @import("toolchain.zig");
 }

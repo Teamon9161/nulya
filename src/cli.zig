@@ -14,6 +14,11 @@ const toolchain = @import("toolchain.zig");
 const ext_skills = @import("extension/skills.zig");
 const notes = @import("extension/notes.zig");
 const tool_stats = @import("tool_stats.zig");
+const config = @import("config.zig");
+const ledger = @import("ledger.zig");
+const session = @import("session.zig");
+const promotion = @import("promotion.zig");
+const launch = @import("launch.zig");
 
 const extensions_root = ".nulya" ++ std.fs.path.sep_str ++ "extensions";
 
@@ -24,7 +29,8 @@ pub fn dispatch(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) 
     if (std.mem.eql(u8, args[0], "ext")) return dispatchExt(alloc, io, args[1..]);
     if (std.mem.eql(u8, args[0], "skill")) return dispatchSkill(alloc, io, args[1..]);
     if (std.mem.eql(u8, args[0], "toolchain")) return dispatchToolchain(alloc, io, args[1..]);
-    try printErr(io, "unknown command; try `nulya ext`, `nulya skill`, or `nulya toolchain`\n");
+    if (std.mem.eql(u8, args[0], "session")) return dispatchSession(alloc, io, args[1..]);
+    try printErr(io, "unknown command; try `nulya ext`, `nulya skill`, `nulya session`, or `nulya toolchain`\n");
     return 1;
 }
 
@@ -382,6 +388,351 @@ fn dispatchToolchain(alloc: std.mem.Allocator, io: std.Io, args: []const []const
     };
 }
 
+// ── `nulya session *` (DESIGN §14, PLAN §3.2) ───────────────────────────────
+//
+// The one session driver surface. There is deliberately no setTools / setModel /
+// replaceHistory: changing composition means a new session. Each subcommand is a
+// separate process over the durable session file; `step` streams the events it
+// appends as JSONL, and its `--max-steps` cap is enforced by the kernel.
+
+fn dispatchSession(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+    if (args.len == 0) return sessionUsage(io);
+    const sub = args[0];
+    const rest = args[1..];
+    if (std.mem.eql(u8, sub, "new")) return sessionNew(alloc, io, rest);
+    if (std.mem.eql(u8, sub, "append")) return sessionAppend(alloc, io, rest);
+    if (std.mem.eql(u8, sub, "step")) return sessionStep(alloc, io, rest);
+    if (std.mem.eql(u8, sub, "events")) return sessionEvents(alloc, io, rest);
+    if (std.mem.eql(u8, sub, "cancel")) return sessionCancel(alloc, io, rest);
+    if (std.mem.eql(u8, sub, "close")) return sessionClose(alloc, io, rest);
+    try printErr(io, "unknown `session` subcommand; try new|append|step|events|cancel|close\n");
+    return 1;
+}
+
+/// Find `--flag <value>` in args; returns the value or null.
+fn flagValue(args: []const []const u8, flag: []const u8) ?[]const u8 {
+    var i: usize = 0;
+    while (i + 1 < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], flag)) return args[i + 1];
+    }
+    return null;
+}
+
+fn cwdRealPath(io: std.Io, buf: *[std.fs.max_path_bytes]u8) ![]u8 {
+    const len = try std.Io.Dir.cwd().realPath(io, buf);
+    return buf[0..len];
+}
+
+fn sessionNew(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+    var host = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    defer host.deinit();
+    var cfg = try config.load(alloc, io, &host);
+    defer cfg.deinit();
+
+    const profile = flagValue(args, "--model") orelse
+        (if (cfg.provider.active_profile.len != 0) cfg.provider.active_profile else "scripted");
+
+    var parent: ?ledger.ParentRef = null;
+    if (flagValue(args, "--parent")) |p| parent = parseParent(p) orelse {
+        try printErr(io, "invalid --parent (want <session>:<seq>)\n");
+        return 1;
+    };
+
+    const id = try launch.genSessionId(alloc, io);
+    defer alloc.free(id);
+    const spath = try launch.sessionPath(alloc, id);
+    defer alloc.free(spath);
+
+    try std.Io.Dir.cwd().createDirPath(io, launch.sessions_dir);
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_path = try cwdRealPath(io, &cwd_buf);
+
+    const ranked = try promotion.rankExtensionTools(alloc, io, cwd_path, .{
+        .uses_recent = cfg.registry.weights.uses_recent,
+        .uses_total = cfg.registry.weights.uses_total,
+        .last_used = cfg.registry.weights.last_used,
+        .success_rate = cfg.registry.weights.success_rate,
+    });
+    defer promotion.freeRankedIds(alloc, ranked);
+
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{ .dialect = cfg.environment.shell.toLocalOption() });
+    defer lenv.deinit();
+
+    // The model is only recorded (by profile name) at creation; a placeholder
+    // handle is enough since `new` never steps.
+    var holder = launch.ModelHolder{};
+    var sess = session.AgentSession.createDurable(alloc, .{
+        .model = holder.model(),
+        .step_ctx = .{
+            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd_path },
+            .scratch_dir = launch.scratch_dir,
+        },
+        .registry = .{
+            .pinned_native_tools = cfg.registry.pinned_native_tools,
+            .ranked_native_tools = ranked,
+            .max_tools = cfg.registry.max_tools,
+        },
+    }, .{
+        .workspace = std.Io.Dir.cwd(),
+        .session_path = spath,
+        .session_id = id,
+        .model_profile = profile,
+        .parent = parent,
+    }) catch |err| {
+        try printOut(alloc, io, "session new failed: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    sess.deinit();
+
+    try printOut(alloc, io, "{s}\n", .{id});
+    return 0;
+}
+
+fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+    if (args.len < 1) {
+        try printErr(io, "usage: nulya session append <id> <text> | --file <path>\n");
+        return 1;
+    }
+    const id = args[0];
+    if (!launch.isValidSessionId(id)) {
+        try printErr(io, "invalid session id\n");
+        return 1;
+    }
+
+    const text = if (flagValue(args[1..], "--file")) |path|
+        std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(8 << 20)) catch {
+            try printOut(alloc, io, "cannot read --file '{s}'\n", .{path});
+            return 1;
+        }
+    else if (args.len >= 2)
+        try alloc.dupe(u8, args[1])
+    else {
+        try printErr(io, "usage: nulya session append <id> <text> | --file <path>\n");
+        return 1;
+    };
+    defer alloc.free(text);
+
+    const spath = try launch.sessionPath(alloc, id);
+    defer alloc.free(spath);
+
+    var l = ledger.openDurable(alloc, io, std.Io.Dir.cwd(), spath) catch |err| {
+        try printOut(alloc, io, "session append failed: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer l.deinit();
+    try l.append(.{ .user_text = text });
+    return 0;
+}
+
+fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+    if (args.len < 1) {
+        try printErr(io, "usage: nulya session step <id> [--max-steps N]\n");
+        return 1;
+    }
+    const id = args[0];
+    if (!launch.isValidSessionId(id)) {
+        try printErr(io, "invalid session id\n");
+        return 1;
+    }
+    // Kernel ceiling: a driver can lower it with --max-steps but never raise it.
+    const kernel_ceiling: usize = 50;
+    var max_steps: usize = kernel_ceiling;
+    if (flagValue(args[1..], "--max-steps")) |v| {
+        max_steps = @min(std.fmt.parseInt(usize, v, 10) catch kernel_ceiling, kernel_ceiling);
+    }
+
+    const spath = try launch.sessionPath(alloc, id);
+    defer alloc.free(spath);
+
+    // A pending cancel request is honored at this step boundary: consume it and
+    // do nothing this invocation.
+    if (try consumeCancel(alloc, io, id)) {
+        try printErr(io, "session step canceled by request\n");
+        return 0;
+    }
+
+    var host = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    defer host.deinit();
+
+    var hdr = ledger.readHeader(alloc, io, std.Io.Dir.cwd(), spath) catch |err| {
+        try printOut(alloc, io, "no such session '{s}': {s}\n", .{ id, @errorName(err) });
+        return 1;
+    };
+    defer hdr.deinit();
+
+    var cfg = try config.load(alloc, io, &host);
+    defer cfg.deinit();
+
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{ .dialect = cfg.environment.shell.toLocalOption() });
+    defer lenv.deinit();
+    // Let shell children (e.g. `nulya ext activate`) find the live session so
+    // they can deposit capability notes into its inbox (DESIGN §5.3).
+    try lenv.env.put("NULYA_SESSION", spath);
+
+    var holder = launch.ModelHolder{};
+    try launch.buildModel(alloc, io, cfg.provider, &host, hdr.value.model, &holder);
+    defer holder.deinit();
+
+    const effort = if (cfg.provider.findProfile(hdr.value.model)) |p| p.effort else null;
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_path = try cwdRealPath(io, &cwd_buf);
+
+    var sess = session.AgentSession.openDurable(alloc, .{
+        .model = holder.model(),
+        .step_ctx = .{
+            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd_path },
+            .scratch_dir = launch.scratch_dir,
+        },
+        .model_options = .{ .effort = effort },
+    }, .{ .workspace = std.Io.Dir.cwd(), .session_path = spath }) catch |err| {
+        try printOut(alloc, io, "session open failed: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer sess.deinit();
+
+    const before = sess.l.len();
+    _ = sess.run(max_steps) catch |err| {
+        try printOut(alloc, io, "session step failed: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+
+    // stdout is the events this invocation appended, as one JSONL line each.
+    for (sess.l.view()[before..], before..) |ev, i| {
+        const line = try ledger.encodeEventLine(alloc, ev, i + 1);
+        defer alloc.free(line);
+        try printRaw(io, line);
+    }
+    return 0;
+}
+
+fn sessionEvents(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+    if (args.len < 1) {
+        try printErr(io, "usage: nulya session events <id> [--since N] [--follow]\n");
+        return 1;
+    }
+    const id = args[0];
+    if (!launch.isValidSessionId(id)) {
+        try printErr(io, "invalid session id\n");
+        return 1;
+    }
+    var since: u64 = 0;
+    if (flagValue(args[1..], "--since")) |v| since = std.fmt.parseInt(u64, v, 10) catch 0;
+    const follow = sliceHasFlag(args[1..], "--follow");
+
+    const spath = try launch.sessionPath(alloc, id);
+    defer alloc.free(spath);
+
+    var printed = try dumpEventsSince(alloc, io, spath, since);
+    if (!follow) return 0;
+
+    // Poll for newly appended events (DESIGN §14 / PLAN §3.2: polling is enough).
+    while (true) {
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(200), .awake) catch {};
+        printed = try dumpEventsSince(alloc, io, spath, printed);
+    }
+}
+
+/// Print every event whose seq is greater than `since` as a raw JSONL line.
+/// Returns the highest seq printed (or `since` if none), for follow-mode paging.
+fn dumpEventsSince(alloc: std.mem.Allocator, io: std.Io, spath: []const u8, since: u64) !u64 {
+    var l = ledger.openDurable(alloc, io, std.Io.Dir.cwd(), spath) catch return since;
+    defer l.deinit();
+    var last = since;
+    for (l.view(), 0..) |ev, i| {
+        const seq: u64 = i + 1;
+        if (seq <= since) continue;
+        const line = try ledger.encodeEventLine(alloc, ev, seq);
+        defer alloc.free(line);
+        try printRaw(io, line);
+        last = seq;
+    }
+    return last;
+}
+
+fn sessionCancel(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+    if (args.len < 1) {
+        try printErr(io, "usage: nulya session cancel <id>\n");
+        return 1;
+    }
+    const id = args[0];
+    if (!launch.isValidSessionId(id)) {
+        try printErr(io, "invalid session id\n");
+        return 1;
+    }
+    const marker = try cancelMarkerPath(alloc, id);
+    defer alloc.free(marker);
+    try std.Io.Dir.cwd().createDirPath(io, launch.sessions_dir);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = marker, .data = "" });
+    try printOut(alloc, io, "cancel requested for {s}\n", .{id});
+    return 0;
+}
+
+fn sessionClose(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+    if (args.len < 1) {
+        try printErr(io, "usage: nulya session close <id>\n");
+        return 1;
+    }
+    const id = args[0];
+    if (!launch.isValidSessionId(id)) {
+        try printErr(io, "invalid session id\n");
+        return 1;
+    }
+    const spath = try launch.sessionPath(alloc, id);
+    defer alloc.free(spath);
+    std.Io.Dir.cwd().access(io, spath, .{}) catch {
+        try printOut(alloc, io, "no such session '{s}'\n", .{id});
+        return 1;
+    };
+    // A session IS its file; closing just clears any pending cancel request.
+    _ = try consumeCancel(alloc, io, id);
+    try printOut(alloc, io, "closed {s}\n", .{id});
+    return 0;
+}
+
+fn cancelMarkerPath(alloc: std.mem.Allocator, id: []const u8) ![]u8 {
+    return std.fmt.allocPrint(alloc, "{s}/{s}.cancel", .{ launch.sessions_dir, id });
+}
+
+/// If a cancel marker exists for `id`, delete it and return true.
+fn consumeCancel(alloc: std.mem.Allocator, io: std.Io, id: []const u8) !bool {
+    const marker = try cancelMarkerPath(alloc, id);
+    defer alloc.free(marker);
+    std.Io.Dir.cwd().access(io, marker, .{}) catch return false;
+    std.Io.Dir.cwd().deleteFile(io, marker) catch {};
+    return true;
+}
+
+fn parseParent(s: []const u8) ?ledger.ParentRef {
+    const colon = std.mem.lastIndexOfScalar(u8, s, ':') orelse return null;
+    const session_id = s[0..colon];
+    if (session_id.len == 0) return null;
+    const seq = std.fmt.parseInt(u64, s[colon + 1 ..], 10) catch return null;
+    return .{ .session = session_id, .seq = seq };
+}
+
+fn sliceHasFlag(args: []const []const u8, flag: []const u8) bool {
+    for (args) |a| {
+        if (std.mem.eql(u8, a, flag)) return true;
+    }
+    return false;
+}
+
+fn sessionUsage(io: std.Io) !u8 {
+    try printRaw(io,
+        \\usage:
+        \\  nulya session new [--model profile] [--parent <id>:<seq>]   print a new session id
+        \\  nulya session append <id> <text> | --file <path>           append a user turn
+        \\  nulya session step <id> [--max-steps N]                    run to turn end (or the cap); stdout = event JSONL
+        \\  nulya session events <id> [--since N] [--follow]           print events as JSONL
+        \\  nulya session cancel <id>                                  request cancel at the next step boundary
+        \\  nulya session close <id>                                   clear pending cancel; a session is its file
+        \\
+    );
+    return 0;
+}
+
 /// Resolve a zig executable: `NULYA_ZIG` override (dev), else the embedded
 /// managed toolchain (DESIGN §10). Caller owns the returned path.
 fn resolveZig(alloc: std.mem.Allocator, io: std.Io) ![]u8 {
@@ -428,6 +779,7 @@ fn usage(io: std.Io) !u8 {
         \\  nulya ext list                    list extensions and active versions
         \\  nulya ext inspect <id>            print an extension's manifest
         \\  nulya ext api [protocol|permissions|examples]
+        \\  nulya session new|append|step|events|cancel|close   drive a durable session
         \\  nulya skill list                 list active extension skills
         \\  nulya skill load <pinned-ref>    print a frozen SKILL.md
         \\  nulya toolchain zig <args...>     run the managed zig (scratch)
