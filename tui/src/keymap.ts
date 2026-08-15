@@ -5,7 +5,17 @@
 import type { KeyEvent } from "@opentui/core"
 import type { Settings } from "./state/settings.ts"
 
-export type Action = "cancel" | "fold" | "foldAll" | "quit" | "redraw" | "help"
+export type Action =
+  | "cancel"
+  | "fold"
+  | "foldAll"
+  | "quit"
+  | "redraw"
+  | "help"
+  | "ext"
+  | "sessions"
+  | "nextTab"
+  | "closeTab"
 
 export const default_keys: Record<Action, string> = {
   cancel: "escape",
@@ -14,6 +24,10 @@ export const default_keys: Record<Action, string> = {
   quit: "ctrl+c",
   redraw: "ctrl+l",
   help: "f1",
+  ext: "f2",
+  sessions: "f3",
+  nextTab: "f4",
+  closeTab: "ctrl+w",
 }
 
 export type Keymap = Record<Action, string>

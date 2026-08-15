@@ -102,6 +102,8 @@ export interface SessionState {
   applyEvents(events: LedgerEvent[]): void
   applyEvent(event: LedgerEvent): void
   applyStream(line: StreamLine): void
+  /** Highest ledger seq applied so far — where a follower must resume from. */
+  lastSeq(): number
   /** Optimistic echo of a just-sent turn; promoted when its `user_text` lands. */
   enqueueUser(text: string): void
   pendingCount(): number
@@ -166,7 +168,16 @@ export function createSessionState(id: string): SessionState {
     }))
   }
 
+  // The highest seq already in `items`. A session can be fed from two mouths at
+  // once — the step subprocess we own, and a `session events --follow` tail when
+  // somebody else drives (tui.md §5.6) — and both replay the same lines. Since
+  // seq is monotonic and an event is immutable, "already seen" is exactly
+  // "seq <= applied", so idempotence costs one comparison.
+  let applied = 0
+
   function applyEvent(event: LedgerEvent) {
+    if (event.seq <= applied) return
+    applied = event.seq
     edit((draft) => {
       const seq = event.seq
       switch (event.kind) {
@@ -404,6 +415,7 @@ export function createSessionState(id: string): SessionState {
     },
     applyEvent,
     applyStream,
+    lastSeq: () => applied,
     enqueueUser(text) {
       edit((draft) => {
         draft.items.push({ key: `q:${Date.now()}:${draft.items.length}`, seq: null, kind: "user", text, queued: true })

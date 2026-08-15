@@ -157,6 +157,62 @@ export async function sessionCancel(ws: Workspace, id: string): Promise<void> {
   if (result.code !== 0) fail("session cancel failed", result)
 }
 
+export interface FollowHandle {
+  /** Ledger events as they are appended by whoever holds the writer lease. */
+  events: AsyncGenerator<LedgerEvent>
+  stop(): void
+}
+
+/**
+ * `nulya session events <id> --since N --follow` — the observer's source.
+ *
+ * A session has exactly one writer (DESIGN §3.4). When that writer is somebody
+ * else — a driver script, another TUI, a parent session's shell — this is how we
+ * watch: a read-only tail that never opens a write handle and never blocks the
+ * writer. The granularity is a ledger event, not a delta: deltas exist only on
+ * the driver's own stdout (tui.md §5.6).
+ */
+export function sessionFollow(ws: Workspace, id: string, since = 0): FollowHandle {
+  const args = ["session", "events", id, "--follow"]
+  if (since > 0) args.push("--since", String(since))
+  const proc = Bun.spawn({ cmd: [ws.bin, ...args], cwd: ws.dir, stdout: "pipe", stderr: "pipe" })
+
+  async function* events(): AsyncGenerator<LedgerEvent> {
+    for await (const raw of decodeLines(proc.stdout)) {
+      const event = parseEventLine(raw)
+      if (event) yield event
+    }
+  }
+
+  return {
+    events: events(),
+    stop: () => {
+      try {
+        proc.kill()
+      } catch {
+        // Already gone.
+      }
+    },
+  }
+}
+
+/**
+ * `nulya ext activate|rollback` — a CLI action, not a session event. It moves
+ * the store's `current` pointer (physics #5) and therefore changes nothing about
+ * the session in front of us: composition froze at `session new` (DESIGN §7.5).
+ */
+export async function extSetCurrent(
+  ws: Workspace,
+  verb: "activate" | "rollback",
+  id: string,
+  version: string,
+): Promise<string> {
+  const result = await run(ws, ["ext", verb, id, version])
+  const detail = (result.stdout.trim() || result.stderr.trim() || `exit ${result.code}`).split("\n")[0] ?? ""
+  if (result.code !== 0) throw new Error(`ext ${verb} failed: ${detail}`)
+  return detail
+}
+
 export interface StepHandle {
   /** Parsed stdout lines, in arrival order. Ends when the process exits. */
   lines: AsyncGenerator<StepLine>

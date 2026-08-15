@@ -1,6 +1,6 @@
 # Nulya TUI — 设计与计划
 
-> **状态：T0（内核 `--stream`）已落地 → [DESIGN.md](DESIGN.md) §14；T1（`tui/` 骨架）、T2（卡片与折叠）已落地 → `tui/`（见 §11）；T3–T4 属计划。** 本文是 `tui/` 的设计契约 + 里程碑；落地一块就把"已实现"的部分搬进 DESIGN.md §14 / 新 §18，本文收缩成纯计划。`tui/` 不在内核范围里（另一条工具链、另一个进程），所以它的现状写在本文 §11，不进 DESIGN.md。
+> **状态：T0（内核 `--stream`）已落地 → [DESIGN.md](DESIGN.md) §14；T1（`tui/` 骨架）、T2（卡片与折叠）、T3（nulya 视图：`/sessions`、`/ext`、sub-session tab、observer）已落地 → `tui/`（见 §11）；T4 属计划。** 本文是 `tui/` 的设计契约 + 里程碑；落地一块就把"已实现"的部分搬进 DESIGN.md §14 / 新 §18，本文收缩成纯计划。`tui/` 不在内核范围里（另一条工具链、另一个进程），所以它的现状写在本文 §11，不进 DESIGN.md。
 > 上位原则见 [PLAN.md](PLAN.md) §3.11：前端是 core 之上的薄客户端——**tail ledger 文件 + append user 事件；前端是长期进程，re-spawn 的只是 worker**。
 
 ## 0. 定位（三句话）
@@ -163,7 +163,8 @@ tui/
 - `Enter` 发送；`Shift+Enter` / `Ctrl+J` 换行；`↑` 空 composer 时翻历史；粘贴多行原样。
 - 发送时若 `stepping`：只 append（queued）；不打断。
 - `/` 开头弹一个小补全：`/new [--model p]` `/sessions` `/ext` `/skills` `/usage` `/cancel` `/fold` `/settings` `/help` `/quit`。未知 `/xxx` 原样发给模型（nulya 没有 skill slash；skill 由模型 `nulya skill load`）。
-- 全局：`Esc` cancel（stepping 时）/ browse 模式；`Ctrl+C` 两下退出（stepping 时第一下先 kill）；`Ctrl+L` 重绘；`F2` `/ext`；`F3` `/sessions`。
+- 全局：`Esc` cancel（stepping 时）/ browse 模式；`Ctrl+C` 两下退出（stepping 时第一下先 kill）；`Ctrl+L` 重绘；`F2` `/ext`；`F3` `/sessions`；`F4` 下一个 tab；`Ctrl+W` 关掉当前 tab（最后一个不关）。
+- observer 时空 composer 上的 `Enter` = take over（§5.6）；browse 模式里选中的卡若指名了一个 session，`Enter` 打开它成第二个 tab，`Space` 永远是折叠。
 
 ### 4.5 状态栏
 
@@ -212,7 +213,8 @@ registry 按 shell 命令前缀识别，头行抽关键事实（抽不到就退�
 ### 5.6 Driver / observer 两种角色
 
 - **driver**（默认）：TUI 自己 spawn `step --stream`；`.lock` 由 step 子进程持有。
-- **observer**：打开时发现 `<id>.lock` 被别的进程独占（PLAN §3.6 的 driver 脚本、或另一个 TUI、或父 session 的 shell）→ 不 spawn step，只 `events --follow`（`--since` 续接）+ `append`（queued，等对方的下一 step 边界）。状态栏 `observer · driven elsewhere`。锁释放后弹一行 `press ↵ to take over`。
+- **observer**：`<id>.lock` 被别的进程独占（PLAN §3.6 的 driver 脚本、或另一个 TUI、或父 session 的 shell）→ 不 spawn step，只 `events --follow`（`--since` 续接）+ `append`（queued，等对方的下一 step 边界）。状态栏 `observer · driven elsewhere`。锁看上去持续空闲后弹一行 `press ↵ to take over`（手动，不自动抢）。
+- **角色靠两个信号判定，都不是猜**：①`<id>.lock` 探针（idle 时轮询；Windows 上内核的租约是字节区间锁，读第 0 字节即可无副作用地探到，POSIX 的 `flock` 读不到 → 探针答 `unknown`）；②内核自己的 `SessionBusy`——我们真去 step 时被拒，这一条在所有平台都权威。所以角色是**持续**跟着世界变的，不只是"打开时判一次"。
 - observer 看不到 deltas（deltas 只在 driver 的 stdout）：v1 接受 step 粒度；真正需要时的路径是 kernel 把流也写进 `<id>.live` sidecar，TUI 换 tail 源（`nulya/cli.ts` 内部一处改）。
 
 ## 6. 视觉规范
@@ -263,7 +265,7 @@ fold   = "ctrl+o"
 | ~~**T0 · kernel `--stream`**~~ ✅ | §2.2：`StepContext.observer`、tee、tool begin/end、per-step 刷 ledger 行、`run done/error` 行、诊断 JSON 化；单测 + e2e 冒烟；DESIGN §14 同步 | `zig build test` / `e2e` 绿；`nulya session step <id> --stream` 在 scripted 下按 §2.2 行序输出；不带 `--stream` 行为不变 |
 | ~~**T1 · 骨架**~~ ✅ | `tui/` 包；`nulya/{bin,cli,ledger,files,diff}.ts`；`state/{session,driver,settings}`；App = transcript（User/Assistant 通用卡 + 通用 tool 卡）+ composer + 状态栏；driver 状态机；流式；Esc cancel；`--session` 回放；`bun test` 两条 | 在 nulya 仓库里用它对着真实 provider 完整跑一轮"读源码 → edit → zig build test"；关掉重开 `--session` 一致 |
 | ~~**T2 · 卡片与折叠**~~ ✅ | registry；Shell/Edit(diff)/ExtTool/Thinking/Canceled/spill；EvolveCard 全表；CapabilityBanner；CompositionCard；折叠交互；`tui.toml`；主题 tokens；ascii 降级 | §4.2 表每行一个快照测试；`edit_diff` 设定生效 |
-| **T3 · nulya 视图** | `/sessions`（树 + live 标记 + 打开）；`/ext`（store / 版本线 / 漂移 / usage / 动作键）；SubSessionCard → 第二 tab；observer 模式（锁探测、`events --follow` 续接、take over） | 用 shell 在另一终端跑一个 driver 脚本 loop step，TUI 以 observer 附上并能 append |
+| ~~**T3 · nulya 视图**~~ ✅ | `/sessions`（树 + live 标记 + 打开）；`/ext`（store / 版本线 / 漂移 / usage / 动作键）；SubSessionCard → 第二 tab；observer 模式（锁探测、`events --follow` 续接、take over） | 用 shell 在另一终端跑一个 driver 脚本 loop step，TUI 以 observer 附上并能 append |
 | **T4 · 收尾** | `/help` `/settings` `/usage`；keymap 覆盖；`bun build --compile` 出单文件；README（安装、`NULYA_BIN`、按键）；性能核对（长 session 回放 5k 事件不卡；scrollbox 视口裁剪） | 5k 事件 session 打开 < 1s；README 照做能跑 |
 
 顺序 T0 → T1 → T2 → T3 → T4；**T1 结束就开始用它 dogfood**，T2 起的优先级由用出来的痛点重排。
@@ -469,3 +471,82 @@ bun run src/main.tsx --session s-…           # 手工看一眼
 6. **内核不需要再改**（T0 提醒 5、T1 提醒 6 依然成立）：T2 全程只用了 `session new|append|step --stream|events|cancel`、session 文件首行、以及 `.nulya/extensions/<id>/versions/<v>/extension.json` 的只读读取。§10 那四项一项没动；唯一想加的一行内核修补是 header 的 `created` 实际为空（见"偏离"第 2 条），值得记进 §10 而不是偷偷补在前端。
 
 核验（编排者）：`zig build test` 绿 / `zig build e2e` 绿 / `bun test` 40 pass 0 fail（14 快照，3 文件）。
+
+### T3 · nulya 视图
+
+**状态**：完成。四块都落地：`/sessions`（F3；`.nulya/sessions/` 全表、按 `parent` 缩进成树、`● live` 标记、`Enter` 打开成 tab、`n` 新建）；`/ext`（F2；store 列表 + 版本线 + `current` / 本场冻结双标记 + 漂移行 + per-tool usage + 全量 usage 表 + `a`/`r` 动作键带确认）；**SubSessionCard → 第二 tab**（browse 里 `Enter` 打开卡片指名的 session，顶部出现 tab 行）；**observer 模式**（租约探针 + 内核 `SessionBusy` 双信号、`session events --follow` 续接、`press ↵ to take over`）。**内核一行未改**（硬约束 1；§10 那四项一项没动）。`bun test` 52 条全绿（新增 `files.test.ts` / `observer.test.ts` / `overlays.test.tsx`，16 张快照）；`zig build test` / `zig build e2e` 绿。
+
+**关键决定与理由**
+
+- **角色不是一个模式，是关于世界的事实——所以用两个信号，都不猜。** ①`<id>.lock` 探针：内核的租约在 Windows 上是**字节区间锁**，别的进程读第 0 字节就会 `EBUSY`（实测过：空文件、只读句柄同样成立），这是一次**只读、无副作用**的探测，不碰锁、不写文件；POSIX 上同一个租约是 `flock`，读根本看不见 → 探针诚实地答 `unknown`，绝不谎报 `free`。②内核自己的 `SessionBusy`：真去 step 被拒时，`--stream` 上就是一行 `run error{message:"session open failed: SessionBusy"}`，这条在所有平台都权威。于是 `state/attach.ts` 的角色是**持续**跟着世界走的（idle 时每 700ms 探一次，两个方向都切），不是"打开时判一次"。§5.6 已按此改写（先改文档再改代码）。
+- **`SessionBusy` 不画成红字。** 它不是错误，是"写者是别人"这个事实。`driver.ts` 在流里截住这一行、不喂给 `state`（否则状态栏会变成 `error:`），转而回调 `onBusy` → 切 observer。被拒的那次 step 什么都没写，用户排队的那句话仍在 inbox 里等对方的 step 边界。
+- **take-over 要连续 N 次看见锁空闲（默认 3 × 700ms），且必须手动按 `Enter`。** driver 脚本是 `step → 放锁 → sleep → step` 的循环，单次"锁是空的"只说明我们恰好在两步之间看了一眼。自动抢锁会把别人的循环打断成随机的 `SessionBusy`——谁驱动这场 session 是人的决定，不是探针的。
+- **`applyEvent` 按 seq 幂等。** 同一条 ledger 行现在可能从两张嘴进来（自己 step 的 stdout、follower 的 tail），而 seq 单调且事件不可变，所以"见过"就等于"seq ≤ applied"，一次比较解决。`--since` 仍照传，只是不再是正确性的唯一依赖。
+- **observer 也能 `append`、也能 `cancel`。** append 投 inbox，由对方在 step 边界排干（DESIGN §3.4）——这正是 §5.6 要的"能说话"。cancel 写的是 `<id>.cancel` 标记，由**持锁者**在它的 step 边界消费（physics #7），所以观察者请求取消是有意义的，只是停下来的不是我们的 step。
+- **第二个 tab 不特判 observer。** §5.5 说子 session"自动进 observer 模式"；实现是让它走**同一个** `createAttachment`——父 session 的 shell 正持着子 session 的锁，探针自然给出 observer。少一个特例，多一条一致的路径。
+- **tab 行自绘，不用 `TabSelectRenderable`。** OpenTUI 的 tab-select 是可聚焦控件，会和 composer / overlay 的焦点模型打架（我们的焦点只有三态：composer、browse、overlay）。一行 `<text>` 就能表达"哪些 session 开着、哪个在前"，>1 才出现，行为与 §5.5 一致。
+- **overlay 自己 `useKeyboard`，App 用 `overlay.active()` 门控**（T2 提醒 3 的直接落地）。overlay 打开时 App 只保留 F2/F3 与退出键，`j/k` 不会被两处同时消费。
+- **`/ext` 的 usage 只投影、不排序成"谁会晋升"。** 计数表按 uses 排是显示顺序；`tool_selection.rank` 是 kernel policy，在前端复刻一份必然漂移（§2.1 写死的纪律）。`a`/`r` 的输出留在 overlay 的一行里，**不进 ledger**——它本来就是 CLI 动作，改的是下一场 session 的组成。
+- **`/sessions` 没有删除键。** ledger 只能 append；一个提供"删掉这场"的视图是在假装系统不是这样工作的。要清理用文件系统。
+- **overlay 的帧快照把 id 与时间归一化后再存。** session id 与 mtime 每次跑都不同，原始帧永远对不上；归一化后快照仍然钉住**排版**（列宽、换行、标记位置），而不假装易变的部分是稳定的。
+
+**偏离设计之处**
+
+1. **§5.6 的"打开时发现锁被独占"**：实现是**持续**探测 + `SessionBusy` 兜底，角色双向切换；探针在非 Windows 上只会回答 `unknown`。§5.6 已同步改写（多出"两个信号"一条）。
+2. **§5.5 的"顶部 `tab-select`"**：用自绘的一行 tab bar 替代 OpenTUI 的 `TabSelectRenderable`（理由见上）。
+3. **§5.3 的"本场 ledger 里相关 EvolveCard / CapabilityBanner 时间线（按 seq 跳转）"**：**未做**。它需要 transcript 的 seq→行定位与 scrollbox 的程序化滚动，价值低于其余四块；`/ext` 的漂移行与 usage 已经回答了"这个 ext 现在是什么状态"。留给 T4。
+4. **§4.2 的 browse `Enter`**：含义分叉——选中的卡若指名了一个 session（`presentation.sessionId`）则 `Enter` 打开成 tab，否则折叠；`Space` 永远是折叠。§4.4 已补这一条。
+5. **§4.4 的按键**：新增 `F4`（下一个 tab）、`Ctrl+W`（关 tab）；已补进 §4.4。`/new` `/sessions` `/ext` 三个 slash 命令落地，`/skills` `/usage` `/settings` 仍未做（T4）。
+6. **§3 的模块表**：新增 `state/attach.ts`（角色 + follower）、`state/tabs.ts`、`state/overlay.ts`、`ui/TabBar.tsx`、`ui/overlays/{SessionsView,ExtView}.tsx`、`test/fixtures/driver-loop.ts`；`nulya/files.ts` 补齐了模块表原本就写着的三样（lock 探测 / extensions store / tool-usage 投影）。
+7. **§4.5 的状态栏右半**：observer 时是 `step N · observer · driven elsewhere`（warn 色），左半在可以接管时变成 `press ↵ to take over`。
+8. `header.created` 仍是空串（§10.8 的那一行内核修补仍未做，CompositionCard 照旧省略时间）。
+
+**怎么运行与测试**
+
+```bash
+zig build                                    # TUI 需要一个 nulya 二进制
+cd tui && bun install
+
+bun run typecheck                            # tsc --noEmit
+bun test                                     # 52 条（6 个文件，16 张快照）
+
+bun run src/main.tsx --session s-…           # 手工看一眼；F2 /ext、F3 /sessions
+```
+
+手工重现 observer（两个终端，无需任何 API key）：
+
+```bash
+ID=$(nulya session new --model scripted)
+# 终端 A（driver 脚本）：
+bun tui/test/fixtures/driver-loop.ts "$(which nulya)" . "$ID" ./stop-driver
+# 终端 B：
+cd tui && bun run src/main.tsx --session "$ID"     # 状态栏 observer · driven elsewhere
+# 在 B 里打字发送 → queued，A 的下一步把它排干 → 转正
+touch stop-driver                                   # A 退出后，B 出现 press ↵ to take over
+```
+
+新增测试：
+
+- `tui/test/files.test.ts`（4 条，无渲染器）：`listSessions`（顺序 / header / 事件数 / 标题）、`probeWriterLease`（真的在别人 step 期间看见 `held`，非 Windows 上接受 `unknown`）、`listExtensions`（真的 `ext init --script` → `build` → `activate`，断言 `current`、版本线、`kind == "script"`）、`readToolUsage`（跑一次 scripted step 后 `builtin.shell` 真的在日志里）。
+- `tui/test/observer.test.ts`（2 条，**T3 的完成标准**）：`test/fixtures/driver-loop.ts` 作为"另一个终端的 driver 脚本"被 spawn 起来循环 `nulya session step`，TUI 侧的 `createAttachment` 附上去，逐条断言 ①角色变成 observer ②`lastSeq` 在我们不持任何写句柄时增长 ③observer `send` 的那句话先 `queued`、再被**对方的** step 排干转正 ④脚本退出后 `takeoverReady` 变真而角色仍是 observer（不自动抢）⑤`takeOver()` 后我们自己的 step 真的把事件写进同一个 ledger。第二条把探针关掉（poll 间隔设成比测试还长），只留 `SessionBusy` 一条信号，证明 POSIX 路径也能定角色、且不报 error。
+- `tui/test/overlays.test.tsx`（7 条）：`/sessions` 的帧快照 + `j`/`Enter` 真的回调 `onOpen`；别人持锁时 `● live` 真的出现；`/ext` 的帧快照（版本线、`⚡ current`、`▎ this session`、动作键提示）+ `u` 切到 usage 表看到 `builtin.shell`；漂移行（纯函数 + 真帧）；`F3` 开、`Esc` 关；sub-session 卡 `Esc` → `Enter` 真的开出第二个 tab（tab 行出现两个 id、头行换成子 session）；`a`/`r` 动作键真的移动了 store 的 `current`（build 出第二个版本 → 视图里 `r` + `y` → `listExtensions` 断言指针回到第一个版本）。
+- T1/T2 的四条不变量测试（live == replay、Enter 驱动一次 step、关掉重开逐字相同、`Ctrl+O`/browse）全部保留且仍绿——App 从"一个 session"变成"一组 tab"之后没破。
+
+**已知问题**
+
+- **非 Windows 上没有 `● live`，角色也只能靠 `SessionBusy` 事后知道。** `flock` 对读不可见，探针只会答 `unknown`（`/sessions` 因此不画标记）。真要在 Linux/macOS 上得到同样的即时性，最小改动是内核在 `<id>.lock` 里写一行 owner pid（§10 的 sidecar 讨论的近亲）——但那是内核改动，T3 不做。**本里程碑全部在 Windows 上验证，非 Windows 路径未跑过。**
+- **`/sessions` 每 1.5s 重读一次全部 session 文件**（为了数事件行与刷新 live 标记）。几十场、每场几百事件时无感；5k 事件 × 多场会变贵。T4 的性能项该把它改成"按 size 增量数行"。
+- **observer 看不到 deltas**，只有 step 粒度（§5.6 v1 明确接受）。对方 step 进行中屏幕是静的，直到那一步的 ledger 行落盘。真要 deltas 就是 §10.4 的 `<id>.live` sidecar，届时只改 `attach.ts` 的 `startFollow` 一处。
+- **两个 TUI 抢同一场 session 没有排队**：谁先按 `Enter` take over 谁拿到，另一个下一次 step 时被 `SessionBusy` 弹回 observer。这正是内核语义，只是 UI 上没有"排队等待"的表达。
+- **overlay 里只有键盘**，没接鼠标（transcript 的鼠标折叠是 T2 做的，overlay 没跟）。
+- **`/ext` 的 `a`/`r` 没有 dry-run**，确认行是唯一的护栏；执行后本场 session 不变（正确），视图靠漂移行说明"下一场才换"。
+- **真实 provider 仍未跑：环境里没有任何 API 密钥**（T1/T2 已记，T3 按硬约束 6 本就不跑）。
+- Windows 上 `Ctrl+C` 第一下 kill 的仍只是 step 进程本身（T1 遗留）。
+
+**给下一里程碑（T4 · 收尾）的提醒**
+
+1. **`/help` 要重写**：F2/F3/F4、`Ctrl+W`、browse 里 `Enter` 的两义、observer 的 take-over —— 现在这些只在 README 和状态栏提示里。`/settings` 直接读 `Settings.sources`（已经在收集），`/usage` 直接用 `files.readToolUsage`（已经写好，`/ext` 的第二块就是它）。
+2. **性能三处**：`listSessions` 读全文件数行（见"已知问题"）；transcript 5k 事件的回放；`scrollbox` 视口裁剪。前两处都在 `nulya/files.ts` 与 `state/session.ts`，不涉及内核。
+3. **`bun build --compile` 要排除 `test/`**：`test/fixtures/driver-loop.ts` 是测试件，不是产品的一部分。
+4. **别把"自动继续"塞进 `attach.ts`。** 它现在只有一条自动动作（pending 未转正且队列在缩短时再 step，T1 定的），take-over 是手动的、budget 用尽是手动的 `/step`。"什么时候该继续"仍然是 driver 脚本 / agent 的事（PLAN §3.6、硬约束 2）。
+5. **内核不需要再改**（T0 提醒 5、T1 提醒 6、T2 提醒 6 依然成立）：T3 全程只用了 `session new|append|step --stream|events --follow|cancel`、`ext activate|rollback`、以及 `.nulya/` 下的**只读**读取（session 文件、`<id>.lock` 的一次只读探测、`extensions/**/extension.json`、`current`、`tool-usage.jsonl`）。

@@ -3,6 +3,7 @@ import { useTerminalDimensions } from "@opentui/solid"
 import { useStyle } from "../render/theme.ts"
 import type { SessionSnapshot } from "../state/session.ts"
 import type { DriverStatus } from "../state/driver.ts"
+import type { Role } from "../state/attach.ts"
 
 function compact(n: number): string {
   if (n < 1000) return String(n)
@@ -19,6 +20,9 @@ function compact(n: number): string {
 export function StatusBar(props: {
   snapshot: SessionSnapshot
   status: DriverStatus
+  /** Who holds the writer lease: us, or somebody else (tui.md §5.6). */
+  role: Role
+  takeoverReady: boolean
   spinnerFrame: string
   hint?: string
 }) {
@@ -34,6 +38,13 @@ export function StatusBar(props: {
 
   const activity = createMemo(() => {
     if (props.snapshot.error) return `error: ${props.snapshot.error}`
+    // Observer mode is not idleness: nothing is stuck, we simply are not the
+    // writer. Say which, and say when taking over is possible.
+    if (props.role === "observer") {
+      if (props.takeoverReady) return "press ↵ to take over"
+      if (props.status === "sending") return `${props.spinnerFrame} queued for the other writer`
+      return "following"
+    }
     if (props.status === "canceling") return `${props.spinnerFrame} canceling`
     if (props.status === "stepping") {
       const tool = props.snapshot.activeTool
@@ -56,8 +67,8 @@ export function StatusBar(props: {
         </text>
       </box>
       {dimensions().width >= 60 ? (
-        <text fg={style.theme.dim}>
-          step {props.snapshot.steps} · driver
+        <text fg={props.role === "observer" ? style.theme.warn : style.theme.dim}>
+          step {props.snapshot.steps} · {props.role === "observer" ? "observer · driven elsewhere" : "driver"}
         </text>
       ) : null}
     </box>

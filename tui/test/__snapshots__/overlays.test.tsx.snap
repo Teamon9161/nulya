@@ -1,0 +1,49 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`/sessions lists the store and opens the highlighted session 1`] = `
+" sessions · 2                                                                                                           
+                                                                                                                        
+ ▾ s-<id> <when> · scripted · 0 events                                                             
+   s-<id> <when> · scripted · 4 events · make the budgets configurable                             
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+ j/k move · Enter open · n new · r refresh · Esc close                                                                  
+"
+`;
+
+exports[`/ext shows the version line, the current pointer and the usage counts 1`] = `
+" extensions · 1                                                                                                         
+                                                                                                                        
+ ▾ lint 1v scri                      lint · script · current v-<hash>                                 
+                                     tools lint · skills —                                                              
+                                     permissions fs 0 · net — · proc 0                                                  
+                                                                                                                        
+                                     versions                                                                           
+                                       v-<hash> <built> ⚡ current ▎ this session            
+                                                                                                                        
+                                     usage                                                                              
+                                       lint · 0 uses · —                                                                
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+ j/k move · Tab pane · a activate · r rollback · u usage table · Esc close                                              
+"
+`;

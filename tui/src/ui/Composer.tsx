@@ -21,6 +21,12 @@ export interface ComposerApi {
 
 export function Composer(props: {
   onSubmit: (text: string) => void
+  /**
+   * Enter on an empty composer. Returns true when it meant something — the
+   * take-over gesture of observer mode (tui.md §5.6) — and false when Enter on
+   * nothing should stay nothing.
+   */
+  onEmptySubmit?: () => boolean
   placeholder?: string
   onReady?: (api: ComposerApi) => void
 }) {
@@ -47,7 +53,10 @@ export function Composer(props: {
   const submit = () => {
     const text = area?.plainText ?? ""
     clear()
-    if (text.trim().length === 0) return
+    if (text.trim().length === 0) {
+      props.onEmptySubmit?.()
+      return
+    }
     history.push(text)
     cursor = history.length
     props.onSubmit(text)

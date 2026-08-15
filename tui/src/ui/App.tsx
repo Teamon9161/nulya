@@ -1,15 +1,20 @@
-import { createEffect, createSignal, onCleanup, onMount } from "solid-js"
+import { Show, createEffect, createSignal, onCleanup } from "solid-js"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import { Transcript } from "./Transcript.tsx"
 import { Composer, type ComposerApi } from "./Composer.tsx"
 import { StatusBar } from "./StatusBar.tsx"
+import { TabBar } from "./TabBar.tsx"
+import { SessionsView } from "./overlays/SessionsView.tsx"
+import { ExtView } from "./overlays/ExtView.tsx"
 import { StyleContext, useStyle, type Style } from "../render/theme.ts"
 import { FoldContext, createFoldStore } from "../state/folds.ts"
 import { BrowseContext, createBrowseStore } from "../state/browse.ts"
-import { createDriver, type DriverOptions } from "../state/driver.ts"
-import { sessionEvents } from "../nulya/cli.ts"
-import { readActiveContributions, readHeader, type Contributions } from "../nulya/files.ts"
+import { OverlayContext, createOverlayStore } from "../state/overlay.ts"
+import { createTabStore } from "../state/tabs.ts"
+import { describeTool } from "../render/registry.ts"
+import { sessionNew } from "../nulya/cli.ts"
 import { createKeymap, matches } from "../keymap.ts"
+import type { AttachOptions } from "../state/attach.ts"
 import type { SessionState, TranscriptItem } from "../state/session.ts"
 import type { Workspace } from "../nulya/bin.ts"
 
@@ -18,7 +23,7 @@ export interface AppProps {
   id: string
   state: SessionState
   style: Style
-  driver?: DriverOptions
+  driver?: AttachOptions
 }
 
 /** The cards browse mode walks and Ctrl+O toggles: everything with a body. */
@@ -37,53 +42,47 @@ export function App(props: AppProps) {
   const renderer = useRenderer()
   const folds = createFoldStore()
   const browse = createBrowseStore()
+  const overlay = createOverlayStore()
   const keys = createKeymap(props.style.settings)
-  const driver = createDriver(props.ws, props.id, props.state, props.driver ?? {})
+  const tabs = createTabStore(props.ws, { id: props.id, state: props.state }, props.driver ?? {})
 
   const [notice, setNotice] = createSignal<string | null>(null)
   const [spinnerTick, setSpinnerTick] = createSignal(0)
   const [ctrlCArmed, setCtrlCArmed] = createSignal(false)
-  const [contributions, setContributions] = createSignal<Contributions[]>([])
   const [allOpen, setAllOpen] = createSignal(false)
   let composer: ComposerApi | null = null
 
-  onMount(async () => {
-    const header = await readHeader(props.ws, props.id)
-    props.state.setHeader(header)
-    // The FROZEN versions, not the store's `current`: what this session runs was
-    // decided at `session new` and cannot move (DESIGN §7.5).
-    if (header) setContributions(await readActiveContributions(props.ws, header.composition.active))
-    // Replay before anything else can stream in: `--session <id>` must paint the
-    // same picture the live session left behind (tui.md §3).
-    try {
-      props.state.applyEvents(await sessionEvents(props.ws, props.id))
-    } catch (error) {
-      props.state.setError(error instanceof Error ? error.message : String(error))
-    }
-  })
+  const tab = () => tabs.active()
+  const snapshot = () => tab().state.snapshot
 
   createEffect(() => {
     if (!props.style.motion) return
-    if (driver.status() === "idle") return
+    if (tab().attach.status() === "idle") return
     const timer = setInterval(() => setSpinnerTick((tick) => tick + 1), 90)
     onCleanup(() => clearInterval(timer))
   })
 
-  onCleanup(() => driver.dispose())
+  onCleanup(() => tabs.disposeAll())
 
   const spinnerFrame = () => props.style.spinner[spinnerTick() % props.style.spinner.length]!
 
   const lastFoldable = () => {
-    const cards = foldable(props.state.snapshot.items)
+    const cards = foldable(snapshot().items)
     return cards.length > 0 ? cards[cards.length - 1]! : null
   }
 
+  /** The session a card names, if it names one — the sub-session link (tui.md §5.5). */
+  const sessionOf = (item: TranscriptItem | null): string | null => {
+    if (!item || item.kind !== "tool") return null
+    return describeTool({ tool: item.tool, args: item.args, output: item.output }, props.style.glyphs).sessionId
+  }
+
   const enterBrowse = () => {
-    const cards = foldable(props.state.snapshot.items)
+    const cards = foldable(snapshot().items)
     if (cards.length === 0) return
     composer?.blur()
     browse.enter(cards[cards.length - 1]!.key)
-    setNotice("browse · j/k move · Enter fold · Esc back")
+    setNotice("browse · j/k move · Enter open/fold · Space fold · Esc back")
   }
 
   const leaveBrowse = () => {
@@ -93,37 +92,69 @@ export function App(props: AppProps) {
   }
 
   const moveBrowse = (delta: number) => {
-    const cards = foldable(props.state.snapshot.items)
+    const cards = foldable(snapshot().items)
     if (cards.length === 0) return
     const at = cards.findIndex((item) => item.key === browse.selected())
     const next = Math.min(Math.max((at < 0 ? cards.length - 1 : at) + delta, 0), cards.length - 1)
     browse.select(cards[next]!.key)
   }
 
+  const selectedItem = () => foldable(snapshot().items).find((item) => item.key === browse.selected()) ?? null
+
   const toggleSelected = () => {
     const key = browse.selected()
     if (key) folds.toggle(key, false)
   }
 
+  const openOverlay = (kind: "sessions" | "ext") => {
+    if (browse.active()) leaveBrowse()
+    const opening = overlay.kind() !== kind
+    overlay.toggle(kind)
+    if (opening) composer?.blur()
+    else composer?.focus()
+    setNotice(null)
+  }
+
+  const closeOverlay = () => {
+    overlay.close()
+    composer?.focus()
+  }
+
+  const openSession = (id: string) => {
+    tabs.open(id)
+    closeOverlay()
+    setNotice(`opened ${id}`)
+  }
+
+  const newSession = async (model?: string) => {
+    try {
+      const id = await sessionNew(props.ws, model ? { model } : {})
+      openSession(id)
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error))
+    }
+  }
+
   const quit = () => {
-    driver.dispose()
+    tabs.disposeAll()
     renderer.destroy()
     process.exit(0)
   }
 
   const runCommand = (raw: string): boolean => {
     if (!raw.startsWith("/")) return false
-    const command = raw.trim().split(/\s+/)[0]
+    const words = raw.trim().split(/\s+/)
+    const command = words[0]
     if (command === "/quit") {
       quit()
       return true
     }
     if (command === "/cancel") {
-      void driver.cancel()
+      void tab().attach.cancel()
       return true
     }
     if (command === "/step") {
-      void driver.step()
+      void tab().attach.step()
       return true
     }
     if (command === "/fold") {
@@ -131,9 +162,22 @@ export function App(props: AppProps) {
       setAllOpen(false)
       return true
     }
+    if (command === "/sessions") {
+      openOverlay("sessions")
+      return true
+    }
+    if (command === "/ext") {
+      openOverlay("ext")
+      return true
+    }
+    if (command === "/new") {
+      const at = words.indexOf("--model")
+      void newSession(at >= 0 ? words[at + 1] : undefined)
+      return true
+    }
     if (command === "/help") {
       setNotice(
-        "Enter send · Shift+Enter newline · Esc cancel/browse · Ctrl+O fold · Ctrl+C twice quit · /step /cancel /fold /quit",
+        "Enter send · Esc cancel/browse · Ctrl+O fold · F2 ext · F3 sessions · F4 next tab · /new /sessions /ext /step /cancel /fold /quit",
       )
       return true
     }
@@ -144,10 +188,18 @@ export function App(props: AppProps) {
   const submit = (text: string) => {
     setNotice(null)
     if (runCommand(text)) return
-    void driver.send(text)
+    void tab().attach.send(text)
   }
 
   useKeyboard((key) => {
+    // An overlay owns the keyboard while it is up; only the keys that open or
+    // close one, and the quit key, stay global (tui.md §11, T2 reminder 3).
+    if (overlay.active()) {
+      if (matches(keys.ext, key)) return openOverlay("ext")
+      if (matches(keys.sessions, key)) return openOverlay("sessions")
+      if (matches(keys.quit, key)) quit()
+      return
+    }
     if (browse.active()) {
       // The composer is blurred while browsing, so these keys are ours alone.
       if (matches(keys.cancel, key)) {
@@ -156,11 +208,34 @@ export function App(props: AppProps) {
       }
       if (key.name === "j" || key.name === "down") return moveBrowse(1)
       if (key.name === "k" || key.name === "up") return moveBrowse(-1)
-      if (key.name === "return" || key.name === "space") return toggleSelected()
+      if (key.name === "space") return toggleSelected()
+      if (key.name === "return") {
+        // A card that names a session opens it; every other card folds. The
+        // sub-session link is the one place Enter means something else.
+        const id = sessionOf(selectedItem())
+        if (id) {
+          leaveBrowse()
+          tabs.open(id)
+          setNotice(`opened ${id}`)
+          return
+        }
+        return toggleSelected()
+      }
+      return
+    }
+    if (matches(keys.sessions, key)) return openOverlay("sessions")
+    if (matches(keys.ext, key)) return openOverlay("ext")
+    if (matches(keys.nextTab, key)) {
+      tabs.next()
+      return
+    }
+    if (matches(keys.closeTab, key)) {
+      tabs.close(tab().id)
+      return
     }
     if (matches(keys.cancel, key)) {
-      if (driver.status() === "stepping") {
-        void driver.cancel()
+      if (tab().attach.status() === "stepping") {
+        void tab().attach.cancel()
         return
       }
       // Nothing to stop and nothing typed: Esc means "go read" (tui.md §4.2).
@@ -168,7 +243,7 @@ export function App(props: AppProps) {
       return
     }
     if (matches(keys.fold, key)) {
-      const item = browse.active() ? null : lastFoldable()
+      const item = lastFoldable()
       if (item) folds.toggle(item.key, false)
       return
     }
@@ -185,8 +260,8 @@ export function App(props: AppProps) {
     if (matches(keys.quit, key)) {
       // First press stops the step, second leaves. Two different truths about
       // "stop" (tui.md §1.2 D6): the kernel's, then the process's.
-      if (driver.status() === "stepping" && !ctrlCArmed()) {
-        driver.kill()
+      if (tab().attach.status() === "stepping" && !ctrlCArmed()) {
+        tab().attach.kill()
         setCtrlCArmed(true)
         setNotice("step killed · Ctrl+C again to quit")
         return
@@ -195,41 +270,82 @@ export function App(props: AppProps) {
     }
   })
 
+  /**
+   * Enter on an empty composer is the take-over gesture: the lease has looked
+   * free for a while and this process is willing to drive again (tui.md §5.6).
+   */
+  const takeOverIfOffered = (): boolean => {
+    if (!tab().attach.takeoverReady()) return false
+    tab().attach.takeOver()
+    setNotice("took over · driving this session")
+    return true
+  }
+
   const header = () => {
-    const snapshot = props.state.snapshot
-    const identity = snapshot.header?.model_identity
-    const model = identity && identity.model.length > 0 ? `${identity.provider}/${identity.model}` : (snapshot.header?.model ?? "…")
-    const native = snapshot.header?.composition.native_tools.length ?? 0
-    const skills = contributions().reduce((count, entry) => count + entry.skills.length, 0)
-    return `nulya · ${props.id} · ${model} · tools 2+${native} · skills ${skills}`
+    const current = snapshot()
+    const identity = current.header?.model_identity
+    const model =
+      identity && identity.model.length > 0 ? `${identity.provider}/${identity.model}` : (current.header?.model ?? "…")
+    const native = current.header?.composition.native_tools.length ?? 0
+    const skills = tab()
+      .contributions()
+      .reduce((count, entry) => count + entry.skills.length, 0)
+    return `nulya · ${tab().id} · ${model} · tools 2+${native} · skills ${skills}`
   }
 
   return (
     <StyleContext.Provider value={props.style}>
       <FoldContext.Provider value={folds}>
         <BrowseContext.Provider value={browse}>
-          <box flexDirection="column" width="100%" height="100%">
-            <box flexDirection="row" width="100%" height={1} flexShrink={0} paddingLeft={1} paddingRight={1}>
-              <text fg={props.style.theme.dim}>{header()}</text>
+          <OverlayContext.Provider value={overlay}>
+            <box flexDirection="column" width="100%" height="100%">
+              <box flexDirection="row" width="100%" height={1} flexShrink={0} paddingLeft={1} paddingRight={1}>
+                <text fg={props.style.theme.dim}>{header()}</text>
+              </box>
+              <TabBar tabs={tabs.tabs()} activeIndex={tabs.activeIndex()} />
+              <Hairline />
+
+              <Show
+                when={overlay.kind() === null}
+                fallback={
+                  <Show
+                    when={overlay.kind() === "sessions"}
+                    fallback={<ExtView ws={props.ws} header={snapshot().header} onClose={closeOverlay} />}
+                  >
+                    <SessionsView
+                      ws={props.ws}
+                      currentId={tab().id}
+                      onOpen={openSession}
+                      onNew={() => void newSession()}
+                      onClose={closeOverlay}
+                    />
+                  </Show>
+                }
+              >
+                <Transcript
+                  items={snapshot().items}
+                  header={snapshot().header}
+                  contributions={tab().contributions()}
+                />
+              </Show>
+
+              <Hairline />
+              <Composer
+                onSubmit={submit}
+                onEmptySubmit={takeOverIfOffered}
+                onReady={(api) => (composer = api)}
+              />
+              <Hairline />
+              <StatusBar
+                snapshot={snapshot()}
+                status={tab().attach.status()}
+                role={tab().attach.role()}
+                takeoverReady={tab().attach.takeoverReady()}
+                spinnerFrame={spinnerFrame()}
+                hint={notice() ?? undefined}
+              />
             </box>
-            <Hairline />
-
-            <Transcript
-              items={props.state.snapshot.items}
-              header={props.state.snapshot.header}
-              contributions={contributions()}
-            />
-
-            <Hairline />
-            <Composer onSubmit={submit} onReady={(api) => (composer = api)} />
-            <Hairline />
-            <StatusBar
-              snapshot={props.state.snapshot}
-              status={driver.status()}
-              spinnerFrame={spinnerFrame()}
-              hint={notice() ?? undefined}
-            />
-          </box>
+          </OverlayContext.Provider>
         </BrowseContext.Provider>
       </FoldContext.Provider>
     </StyleContext.Provider>

@@ -32,6 +32,20 @@ export interface DriverOptions {
   maxSteps?: number
   /** Extra child environment (tests set NULYA_SCRIPTED_MODE here). */
   env?: Record<string, string>
+  /**
+   * The session already has a writer: this process is not the driver after all.
+   * The kernel is the authority on that (`SessionBusy`, DESIGN §3.4), so the
+   * role is not guessed here — it is reported when a step is refused.
+   */
+  onBusy?: () => void
+}
+
+/** The kernel's refusal to hand over the writer lease, on the `--stream` wire. */
+function isBusy(line: { kind: string; line?: { stream?: string; event?: string; message?: unknown } }): boolean {
+  if (line.kind !== "stream") return false
+  const stream = line.line
+  if (!stream || stream.stream !== "run" || stream.event !== "error") return false
+  return typeof stream.message === "string" && stream.message.includes("SessionBusy")
 }
 
 export function createDriver(
@@ -54,14 +68,26 @@ export function createDriver(
         const pendingBefore = state.pendingCount()
         const step = sessionStep(ws, id, { maxSteps: options.maxSteps, env: options.env })
         handle = step
+        let busy = false
         try {
           for await (const line of step.lines) {
+            // A refused lease is a role fact, not an error to paint red: the
+            // caller flips to observer and the queued turn stays queued — the
+            // other writer drains the inbox at its own step boundary.
+            if (isBusy(line)) {
+              busy = true
+              continue
+            }
             if (line.kind === "stream") state.applyStream(line.line)
             else state.applyEvent(line.event)
           }
           await step.exited
         } finally {
           handle = null
+        }
+        if (busy) {
+          options.onBusy?.()
+          return
         }
         if (disposed) return
         const pendingAfter = state.pendingCount()
