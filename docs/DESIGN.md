@@ -1,11 +1,23 @@
-# Nulya — 设计文档 (v0.1 draft)
+# Nulya — 设计文档 (v0.1 frozen core + v0.2 evolution draft)
 
 > A minimal immutable kernel + a self-evolving native capability layer.
 >
-> Nulya 不给 AI 一堆工具，而是给 AI 一个足够可靠的"制造工具的底座"。
+> Nulya **不是** extension / plugin system，而是一个让 Agent 能**制造、验证、积累、演化自身能力**的最小内核。
 > 内核只有两个工具（shell、edit），第三个工具由 Nulya 自己造出来。
 
-本文档是设计基线，不是最终 API。术语：**ledger** = 会话事件日志；**generation** = 缓存世代；**step** = 一次 model 请求-响应；**PromptIR** = provider 无关的 prompt 逻辑块投影。
+**三层定位（读全文的地图）：**
+
+```
+Agent              决定学什么 / 造什么              ← 不在 kernel 里，是模型的推理
+  ↓
+Evolution Policy   决定什么值得留下 / 晋升 / 替换   ← kernel 之上，可替换（§15.2）
+  ↓
+Capability Kernel  保证 execute / verify / version / authority / evidence / rollback   ← 不可自生长
+```
+
+一句话：**Agent 决定学什么；Policy 决定什么值得留下；Kernel 保证学出来的东西可信、可追踪、可执行、可回退。** kernel 不负责"聪明地进化"，只负责让进化**安全、可观测、可回退、可学习**（§15.2–§15.3）。这条分界是 Nulya 相对普通 plugin harness 的核心差异，也是抵抗后续 feature creep 的那把尺。
+
+本文档是设计基线，不是最终 API。**v0.1 的能力底座已冻结（§15.1）——它让 Nulya 会"长"能力；v0.2 的主题是能力演化（§18）——让 Nulya 开始判断自己长出来的能力是不是更好**，全部在冻结底座外生长，不改 kernel 骨架。术语：**ledger** = 会话事件日志；**generation** = 缓存世代；**step** = 一次 model 请求-响应；**PromptIR** = provider 无关的 prompt 逻辑块投影；**capability** = 一个逻辑能力（一个 tool / skill / ...），与其具体 implementation version 分开（§18.1）。
 
 ---
 
@@ -136,6 +148,8 @@ durable append-only usage facts { tool_id, ok }
 ```
 
 拆成两条日志是刻意的：usage 事实在没有 conversation 的纯 CLI 调用（`nulya ext run`）里也会产生，把它塞进 conversation ledger 反而会污染 §1 的 prompt 前缀。原则不变——**persist facts, derive stats**；统计口径以后改了可以重算，这也是为什么工具排序（§5）能安全演进。（v0.1 只记 `ok`，没有 `latency`；latency 属 post-v0.1，见 §17。）
+
+> **v0.2 增量（§18.2）**：这条事实里现在缺 `version`——`tool_id` 跨实现版本累计，看不出某版 regression。v0.2 给 fact 加 `version`（journal `v:1→v:2`），再从同一条日志派生出 `VersionStats` 投影服务 rollback/comparison，`ToolStats` 名字与冻结语义不变。
 
 ---
 
@@ -361,7 +375,9 @@ draft ──build──▶ built ──validate/test──▶ installed ──po
                                                        version
 ```
 
-- 每次 build 产出**不可变版本**，版本 id = `hash(canonical PackageSnapshot + compiler_identity + target)`。`PackageSnapshot` 第一版收 `extension.json`、runtime 存在时的 `src/**`、以及 manifest 中声明的每个 `contributes.skills[]` 整棵目录；按 `relative_path + file_length + file_bytes` 排序后 hash。`versions/`、`.zig-cache/`、顶层测试输入不进 snapshot。
+> **v0.2 把 `validate/test` 这段显式拆成 `Validate`（manifest/协议/权限合法，deterministic）与 `Verify`（能力真的符合自己声称的行为，跑 `tests/`/`evals/`）两道门，见 §18.4。** activation（current 指针）与 promotion（native 面，§5）是两条独立状态轴，见 §15.2。
+
+- 每次 build 产出**不可变版本**，版本 id = `hash(canonical PackageSnapshot + compiler_identity + target)`。`PackageSnapshot` 第一版收 `extension.json`、runtime 存在时的 `src/**`、以及 manifest 中声明的每个 `contributes.skills[]` 整棵目录；按 `relative_path + file_length + file_bytes` 排序后 hash。`versions/`、`.zig-cache/`、顶层测试输入不进 snapshot。（v0.1 版本只是 build artifact，无"为什么存在"；**v0.2 给它加 `parent_version? + reason?`，让 version 从 artifact 变成 evolution step，见 §18.3**。）
 - 版本目录冻结 snapshot：`versions/v-…/extension.json` 是 frozen manifest，`versions/v-…/package/src/**` 和 `versions/v-…/package/skills/**` 是 frozen package 内容，`bin/` 只放编译产物。runtime 编译必须从 frozen `package/src/main.zig` 进行，不能再读 mutable draft。
 - `compiler_identity` 取实际执行的 `zig version`。production 通常是 managed pinned Zig；dev/test override 时，hash 记录 override 编译器的真实身份，而不是假装成 pinned 版本。
 - 布局：`foo/versions/{v-a8fc3c, v-b193ab}/…`，`foo/current -> v-b193ab`。
@@ -486,7 +502,7 @@ Environment (interface)
 - **规定 extension 与 shell 共享同一个 `session_authority`**（≈ 当前用户全权限）。像 DeepSeek 对 Cordis 那样**明说**这个边界，不给虚假安全感。
 - **env 净化（必做）**：extension/shell 子进程**默认不继承 host 环境**。`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `AWS_SECRET_ACCESS_KEY` / `SSH_AUTH_SOCK` 等**只存在于 host**，永不下传给 AI 生成的 binary。
 - **同一 authority model 管 shell 和 extension**：permission 只能在 `session_authority` 内**继续收窄**（`extension_permissions ⊆ session_authority`），绝不能因为注册成 extension 就获得 shell 本来没有的权限。
-- **后续里程碑**：`sandbox` backend 上线后，manifest.permissions 才真正被 OS 强制。届时它从"声明"升级为"边界"。
+- **后续里程碑**：`sandbox` backend 上线后，manifest.permissions 才真正被 OS 强制。届时它从"声明"升级为"边界"。这条对应 v0.2 Roadmap Phase F（§18.6）——把结构化 authority 做成系统能力，核心不变量是 **capability 绝不因被生成或被晋升而自动获得 authority**，且始终 `capability authority ⊆ session authority`。
 
 ---
 
@@ -558,6 +574,8 @@ ChatGPT 的 validate/test 门是空心的：工具与测试都 AI 写，测试�
 - 高价值工具支持**对拍**（与已知正确实现 diff）。
 - validate 至少含：manifest schema 合法、entry 可执行、协议往返正常、声明的 permission ⊆ session_authority。
 - **门通过 ≠ 正确**，只是"没有明显坏"。文档里对模型和用户都说清楚这一点。
+
+> **v0.2 把这里的两类检查显式命名分层（§18.4）**：上面第 4 条（manifest/协议/权限合法）是 **Validate**（deterministic kernel 不变量）；前 3 条（真实输入/对拍验收）是 **Verify**（能力符合自己声称的行为）。二者是不同的生命周期门，Verify 让"AI 不能仅凭编译通过就算学会一个能力"成为规则。
 
 ---
 
@@ -671,6 +689,58 @@ registry_selection ledger 事件（把 selection 记进 ledger 当 generation ba
 
 > 到这一步，项目最大的风险已不是"缺东西"，而是"**继续觉得还缺东西**"。后续 ACP / MCP / UI / richer ecosystem 都是往这个稳定核心外挂能力，不是继续改 kernel。
 
+### 15.2 三层演化模型：kernel 是 primitives，policy 是 interpretation
+
+§15 的"kernel vs learnable"二分，进一步锐化成**三层**（顶部地图的展开）。中间那层——**Evolution Policy**——过去散落在 §3.3 / §5.1 / §15.1 里没被单独命名，这里正式立成一等概念。
+
+**Kernel 的职责压成七个动词**（比"支持 Tool/Skill/Prompt/Hook/Agent/MCP…"这种按 Contribution 类型罗列更耐久）：
+
+```
+Execute    能力经受控 substrate 运行（§8 Environment）
+Verify     candidate 满足自己声称的 contract / tests（§18.4）
+Version    每个被接受的 implementation 内容寻址、不可变（§7.4）
+Authorize  生成的代码不能超出被授予的 authority（§9；capability authority ⊆ session authority）
+Observe    记录 durable factual evidence，从不解释它（§3.3、§18.2）
+Rollback   旧的不可变版本永远可恢复（§7.4）
+Compose    session 可见的能力面确定、冻结（§5.1、§7.4）
+```
+
+Kernel 只提供 primitives：`activate(version)` · `rollback(version)` · `evidence(tool/version)` · `lineage(version)`。
+
+**Evolution Policy 在 kernel 之上，消费 primitives 产出判断**：`retain` / `native promote` / `improve` / `rollback recommendation` / `retire`。当前的 `tool_selection.rank()`（§15.1）**就是第一代 Evolution Policy**——它只吃 facts + weights，产出一个偏好排序。
+
+**由此得到本层最重要的不变量：**
+
+> **Facts are durable; policy is replaceable.**
+> Evidence 与不可变 history 永不丢失；解释它们的 policy 可以整个换掉。
+
+推论：§5.1 现在的排序权重（`uses_recent` / `uses_total` / `last_used` / `success_rate`）与上限 K，是 **v0.1 selection policy，不是 kernel invariant**。统计口径、权重、甚至整个排序算法以后都能重算/替换，而底层 usage facts 不动（§3.3 已埋下这条哲学，这里把它提成显式边界）。**Activation（§7.4，当前 implementation 是哪个 version）与 Promotion（§5，逻辑能力要不要进下一 session 的 native 面）是两条完全不同的状态轴**——它们各自消费 evidence 的不同投影（§18.2），永远不该被合并成一个"分数"。
+
+### 15.3 显式 non-goals：intelligence 不进 kernel
+
+以下这些**永远不做成 core subsystem**。它们是 substrate 之上的 *intelligence*，属于 Agent 或 Evolution Policy 层，可学习、可替换：
+
+```
+GapDetector             （"哪里缺能力"由模型推理，不由 kernel 检测）
+WorkflowMiner           （"什么工作流值得沉淀成工具"是模型的判断）
+ToolSynthesisManager    （造工具是 Agent 经 shell 干的，不是 kernel 服务）
+AutomaticRefactorManager
+RewardModel             （kernel 存 evidence，绝不定义 reward，§18.5）
+AutoPromptOptimizer
+SkillPopularityEngine
+```
+
+Kernel **不** hard-code 诸如"shell 命令重复 3 次 → 造工具"这种启发式。`连续多次 parquet → rolling → covariance，值得编译成工具` 这类推理，Agent 自己应当能做——**Everything above the kernel is learnable**（§15）。
+
+每当有人想往 core 塞智能，问一句尺子：
+
+> **这是 substrate，还是 intelligence？** 若属 intelligence，就放到 kernel *之上*。
+
+**收尾原则（放在最显眼处）：**
+
+> **Nulya does not make capability evolution intelligent in the kernel.
+> It makes capability evolution safe, observable, reversible, and learnable.**
+
 ---
 
 ## 16. Roadmap（先修底座，再跑 extension 闭环）
@@ -759,3 +829,97 @@ registry_selection ledger 事件（把 selection 记进 ledger 当 generation ba
 - **policy hooks 默认值**：默认 AI reviewer、人类确认、还是 auto；不同 workspace 的风险档位如何配置。
 - **ProviderContribution（extension 供 model provider）的机制**：它在 loop **上游**，与下游 Tool/Skill/Hook 不同构（直接决定 PromptIR 序列化 / cache breakpoint / streaming）。taxonomy 里先占位，具体机制待定——大概率不是 ToolExecutor 那套 vtable。
 - **Middleware 声明式排序**：v0.1 按稳定 extension id 排序即可（§7 preamble）。后续是否让 extension 声明"排在 X 之后" / 优先级 / 签名来处理特殊次序，以及冲突（环、互斥）如何裁定。
+
+---
+
+## 18. v0.2：能力演化层（capability evolution）
+
+v0.1（§15.1 冻结面）证明了**Nulya 会长能力**：能自造扩展、记 usage、在 session 边界把高频能力晋升成 native。v0.2 的主题是下一句——**Nulya 开始判断自己长出来的能力是不是更好**：哪个 implementation 更强、哪版 regress 了、该不该回退、该不该造后继版本。
+
+它整个长在 §15.1 冻结底座**之外**，遵守 §15.2–§15.3：新增的都是 **evidence（facts）与 primitives**，"聪明"留在 Agent / Policy 层。纪律同 §7 taxonomy：**概念全定义，让数据模型稳定；但只有有近期消费者的先写实，其余显式占位。** 下面每节末尾标 `[写实]` / `[占位]`。
+
+> 一条贯穿本节的原则（承 §1"不统一数据类型"）：**统一生命周期，不统一数据类型。** Tool 进入完整演化闭环；Skill 只需 discovery / catalog；Prompt 更像 configuration，其优化来自 eval/experiment 而非 invocation stats。**不要为了 API 对称造 `ToolStats / SkillStats / PromptStats`。** 本节只谈 Tool。
+
+### 18.1 双身份：logical capability id vs implementation version
+
+现在 `ext:web.search/web_search` 同时承担"逻辑能力身份"与"usage 聚合身份"（§3.3），这没错，但缺一维。v0.2 让每次 invocation 同时携带两个维度：
+
+```
+logical_tool_id   ext:web.search/web_search   ← 这个能力值不值得保留 / native 晋升
+implementation    v-a83f…                      ← 当前这版实现是否比上一版更好
+```
+
+**stable id 的硬语义（新不变量）：**
+
+> **同一个 stable tool id 代表同一个 logical capability contract。**
+> `web_search(query)` 可以从 v1 naive 演进到 v2 pagination / v3 retry / v4 better parser——**implementation 变，stable id 不变**；但如果它从 `web_search(query)` 变成 `database_query(sql)`（语义/契约破坏），**即使名字没变，也必须是新的 stable id**。
+
+初版不做自动 JSON Schema 兼容性检查器，先锁设计规则 `same stable id ≈ compatible semantic contract`；真遇到 migration 再加 contract versioning。`[占位 + 规则]`
+
+### 18.2 Version-aware evidence（Phase A，最先落地）
+
+**现状缺口（已核对 `tool_stats.zig`）**：usage fact 现在是 `{v:1, tool_id, ok}`，且 `tool_id` **跨实现版本累计**（源码注释明说）。于是 `web_search v1: 100 calls / 92 ok` 与 `v2: 20 calls / 8 ok` 会糊成 `120 / 100`——**v2 的 regression 根本看不出来**。
+
+**最小改动**：给 usage fact 加 `version`，journal schema `v:1 → v:2`（`journal_schema_version` 这个字段**就是为此准备的**——旧 journal 会以精确错误拒绝，不会当垃圾读）。仍是 append-only 事实日志，不是 mutable aggregate：
+
+```
+durable append-only fact { tool_id, version, ok }
+        └─ projection ─┬─ LogicalToolStats  { uses_total, uses_recent, last_used, success_rate }   → 服务 native promotion（§5）
+                       └─ VersionStats      { version, uses, successes, … }                        → 服务 retain / compare / rollback（§18.6）
+```
+
+两个投影喂两条状态轴（§15.2）：LogicalToolStats → promotion，VersionStats → activation/rollback。**Stats 只是 evidence 的 projection**，不落盘。`[写实]`
+
+> 命名不改冻结面：`tool_stats.zig` / `ToolStats` 保留原名（§15.1 冻结契约），v0.2 是**在同一条 journal 上加字段 + 加一个 VersionStats 投影**，不是把 ToolStats 翻新成"Capability Evidence"。
+
+### 18.3 Capability lineage（Phase B）
+
+现在 version id = `hash(snapshot + compiler + target)`（§7.4），是个 build artifact，没有"为什么存在"。v0.2 给 version 加最小 metadata，让它从 build artifact 变成 **evolution step**：
+
+```
+version         v-b193…
+parent_version? v-a8fc…              ← 单亲即可，v0.x 不做 DAG
+created_by      agent | human | …
+reason?         "pagination repeatedly failed → add cursor pagination"
+```
+
+于是能力演化成一条可读的链：`v1 → v2 → v3`；rollback = `activate(v2)`。真需要分支时再自然升级成 DAG。`[写实：parent + reason；DAG 占位]`
+
+### 18.4 Verify：独立于 Validate 的生命周期门
+
+§7.4 现在是 `build → validate/test → activate`，其中 validate（manifest/协议/权限合法）与"能力真的符合它声称的行为"混在一起。v0.2 把生命周期显式化：
+
+```
+Scratch → Candidate → Build → Validate → Verify → Seal → Activate → Observe → Retain / Improve / Rollback
+```
+
+- **Build**：能不能编译。
+- **Validate**（deterministic，已是 kernel 不变量，§12）：manifest schema / 协议往返 / integrity / `permission ⊆ session_authority`。
+- **Verify**（新门）：这个 capability 是否真的符合自己声称的行为——跑 package 自带的 `tests/` / `evals/`。初版不需要框架，manifest 声明测试入口 + `nulya ext test <id>` 即可。
+
+核心思想：**AI 不能仅凭"编译通过"就证明自己学会了一个能力。** 这很可能是 Nulya 与"模型随手写插件"真正拉开差距处，且 deterministic test 比 outcome utility 更可靠、更容易先落地。`[写实]`
+
+### 18.5 Evaluation evidence：区分 execution success 与 utility
+
+`ok=true` 只说明**工具正常执行并返回了结果**，不说明**它真的帮到了任务**（web_search 跑通但结果是垃圾、task 最终失败，不该算优秀工具）。所以 evidence 概念上分两层：
+
+```
+InvocationFact   { kind:"invocation", tool_id, version, ok }              ← 工具跑通了吗（§18.2 已写实）
+EvaluationFact   { kind:"evaluation", tool_id, version, source, passed/score }  ← 能力真的有用吗
+```
+
+**关键约束：kernel 存 evidence，绝不定义 reward（§15.3）。** EvaluationFact 是 append-only 事实，source 可来自 `test / benchmark / reviewer / agent self-eval / human / external`；**Evaluator 产出判断、Policy 解释判断，都在 kernel 之上**。v0.2 不做通用 Reward Framework——先把模型设计成"evaluation 是 append-only evidence，kernel 不解释它"。`[占位：EvaluationFact schema 定义，消费者随 Phase D 再接]`
+
+### 18.6 v0.2 Roadmap（按可落地性排序，evidence 先行）
+
+```
+Phase A  Version-aware evidence   usage fact 加 version（journal v1→v2）+ VersionStats 投影   ← 最先，不加任何 utility score（§18.2）
+Phase B  Capability lineage       version 加 parent + reason（§18.3）
+Phase C  Verification gate        candidate → test/eval → accepted version，Verify 成 lifecycle 门（§18.4）
+Phase D  Evaluation evidence      引入 EvaluationFact，kernel 仍不算 reward（§18.5）
+Phase E  Version comparison       用 VersionStats + EvaluationFact 支持 v2 regression 检测 → recommend/perform rollback（真正的 self-improvement 起点）
+Phase F  Authority manifest       evolution loop 稳后，把 §9 的"诚实版"升级成结构化 authority（生成/晋升永不自动获得 authority）
+Phase G  Ecosystem adapters       MCP / ACP / remote —— 作为 evolution kernel 的输入/输出适配器，不是主架构
+```
+
+分界重申（§15.2）：A–E 全是 **facts + primitives + 一层可替换 policy**；没有一步把"智能"写进 kernel。
