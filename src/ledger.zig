@@ -64,7 +64,7 @@ pub const Ledger = struct {
     pub fn deinit(self: *Ledger) void {
         for (self.events.items) |e| freeEvent(self.alloc, e);
         self.events.deinit(self.alloc);
-        if (self.durable) |*d| d.deinit(self.alloc);
+        if (self.durable) |*d| d.deinit();
     }
 
     /// The only mutation. Appends one event to the end. No other write exists.
@@ -102,6 +102,15 @@ pub const Ledger = struct {
 
     pub fn len(self: *const Ledger) usize {
         return self.events.items.len;
+    }
+
+    /// True if the ledger already announced extension `id` at `version`.
+    pub fn containsNote(self: *const Ledger, id: []const u8, version: []const u8) bool {
+        for (self.events.items) |event| switch (event) {
+            .capability_note => |note| if (std.mem.eql(u8, note.id, id) and std.mem.eql(u8, note.version, version)) return true,
+            else => {},
+        };
+        return false;
     }
 };
 
@@ -212,7 +221,7 @@ fn freeToolResult(alloc: std.mem.Allocator, result: ToolResultEntry) void {
     if (result.spill_path) |path| alloc.free(path);
 }
 
-// ── Durable session file (DESIGN §3) ───────────────────────────────────────
+// ── Durable session file (DESIGN §3.4) ──────────────────────────────────────
 //
 // A session is one JSONL file: line 1 is the frozen header, every later line is
 // one `{"seq":n,...}` event. One file = one generation = one cache scope, so the
@@ -220,6 +229,12 @@ fn freeToolResult(alloc: std.mem.Allocator, result: ToolResultEntry) void {
 // grows). The header freezes the session composition (active extension versions
 // + the native tool selection), so any process that reopens the file rebuilds
 // the identical composition without re-scanning `current` or re-ranking usage.
+//
+// The file has exactly ONE writer: the process that holds it open. Every other
+// process — a `nulya ext activate` in the model's shell, a driver's `session
+// append` — PROPOSES events through the sibling inbox directory (below), and
+// the writer appends them at its next step boundary. Readers only ever open the
+// file read-only. `persist` refuses to write if the file grew behind its back.
 
 /// A parent pointer for fork / compaction: the file and cut point a session
 /// branched from. Absent for a root session.
@@ -241,30 +256,25 @@ pub const PinnedExtensionRef = struct {
 pub const FrozenComposition = struct {
     active: []const PinnedExtensionRef = &.{},
     native_tools: []const []const u8 = &.{},
-    max_tools: u32 = 8,
 };
 
-/// The first line of a session file. Everything the model sees is a pure
-/// function of this header plus the appended events.
+/// The first line of a session file. Its JSON shape IS this struct — encoded and
+/// decoded by `std.json` typed (de)serialization — so the wire format and the
+/// type cannot drift. Everything the model sees is a pure function of this
+/// header plus the appended events.
 pub const Header = struct {
+    kind: []const u8 = "header",
     v: u32 = 1,
-    session: []const u8,
+    session: []const u8 = "",
     parent: ?ParentRef = null,
     model: []const u8 = "",
     created: []const u8 = "",
     composition: FrozenComposition = .{},
 };
 
-/// An owning copy of a parsed header (its own arena backs every nested slice).
-pub const OwnedHeader = struct {
-    arena: std.heap.ArenaAllocator,
-    value: Header,
-
-    pub fn deinit(self: *OwnedHeader) void {
-        self.arena.deinit();
-        self.* = undefined;
-    }
-};
+/// A parsed header that owns every nested string (arena-backed). `.value` is
+/// the header; `deinit()` frees it.
+pub const OwnedHeader = std.json.Parsed(Header);
 
 pub const LedgerError = error{
     /// A complete (non-torn) line is not a valid header/event, or a `seq` is out
@@ -272,7 +282,15 @@ pub const LedgerError = error{
     CorruptLedger,
     /// The file's first line is not a `"kind":"header"` record.
     MissingHeader,
+    /// The session file grew behind this ledger's back — a second writer. The
+    /// in-memory append is rewound and the file is left untouched.
+    ConcurrentWriter,
 };
+
+/// Strings are always copied out of the input, so a parsed value never aliases
+/// a line slice the caller frees. Unknown fields are ignored so a newer writer's
+/// extra fields never break an older reader.
+const json_opts: std.json.ParseOptions = .{ .allocate = .alloc_always, .ignore_unknown_fields = true };
 
 const Durable = struct {
     io: std.Io,
@@ -281,8 +299,7 @@ const Durable = struct {
     end: u64,
     owned_header: OwnedHeader,
 
-    fn deinit(self: *Durable, alloc: std.mem.Allocator) void {
-        _ = alloc;
+    fn deinit(self: *Durable) void {
         self.owned_header.deinit();
         self.file.close(self.io);
     }
@@ -290,24 +307,29 @@ const Durable = struct {
     fn persist(self: *Durable, alloc: std.mem.Allocator, e: Event, seq: u64) !void {
         const line = try encodeEventLine(alloc, e, seq);
         defer alloc.free(line);
+        // Single-writer guard: if the file is not exactly where this ledger left
+        // it, another process wrote to it. Refuse rather than overwrite its line
+        // or leave a hole.
+        if (try self.file.length(self.io) != self.end) return error.ConcurrentWriter;
         try self.file.writePositionalAll(self.io, line, self.end);
         self.end += line.len;
     }
 };
 
-/// Create a new session file at `path` (relative to `dir`), writing `header` as
+/// Create a new session file at `path` (relative to `dir`), writing `hdr` as
 /// line 1, and return a durable ledger with no events yet. The parent directory
 /// must already exist. Fails if the file already exists.
 pub fn createDurable(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8, hdr: Header) !Ledger {
     const line = try encodeHeaderLine(alloc, hdr);
     defer alloc.free(line);
+    // The owning copy of the header is the parsed line: create and open share
+    // one codec path, and what is in memory is exactly what is on disk.
+    const owned = try parseHeaderLine(alloc, line);
+    errdefer owned.deinit();
 
     var file = try dir.createFile(io, path, .{ .truncate = true, .read = true, .exclusive = true });
     errdefer file.close(io);
     try file.writePositionalAll(io, line, 0);
-
-    var owned = try dupeHeader(alloc, hdr);
-    errdefer owned.deinit();
 
     return .{
         .alloc = alloc,
@@ -316,12 +338,14 @@ pub fn createDurable(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path
     };
 }
 
-/// Reopen an existing session file: parse the header, replay every complete
-/// event line into memory, and keep the file open for further appends. A torn
-/// final line (an interrupted write) is dropped and the file truncated back to
-/// the last complete line, so appends resume cleanly. An interrupted tool batch
-/// (a complete assistant-with-calls line with no following results) is a legal
-/// tail; the caller repairs it with `loop.completeInterruptedToolBatch`.
+/// Reopen an existing session file AS ITS WRITER: parse the header, replay every
+/// complete event line into memory, and keep the file open for further appends.
+/// A torn final line (an interrupted write by the previous writer) is dropped
+/// and the file truncated back to the last complete line, so appends resume
+/// cleanly. An interrupted tool batch (a complete assistant-with-calls line with
+/// no following results) is a legal tail; the caller repairs it with
+/// `loop.completeInterruptedToolBatch`. Readers must not use this — see
+/// `readHeader` and the raw-line tail in `cli.zig`.
 pub fn openDurable(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8) !Ledger {
     const bytes = try dir.readFileAlloc(io, path, alloc, .unlimited);
     defer alloc.free(bytes);
@@ -331,7 +355,7 @@ pub fn openDurable(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: 
     // First complete line must be the header.
     var it = std.mem.splitScalar(u8, bytes[0..clean_end], '\n');
     const header_line = firstNonBlank(&it) orelse return error.MissingHeader;
-    var owned = try parseHeaderLine(alloc, header_line);
+    const owned = try parseHeaderLine(alloc, header_line);
     errdefer owned.deinit();
 
     var l = Ledger.init(alloc);
@@ -352,8 +376,8 @@ pub fn openDurable(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: 
 }
 
 /// Read and parse only the header line of a session file, without replaying its
-/// events — cheap enough to let a `session step` process resolve its model
-/// profile before opening the whole session. Caller owns the returned header.
+/// events or touching the file — a `session step` process resolves its model
+/// profile from this before opening the whole session. Caller owns the result.
 pub fn readHeader(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8) !OwnedHeader {
     const bytes = try dir.readFileAlloc(io, path, alloc, .unlimited);
     defer alloc.free(bytes);
@@ -364,7 +388,7 @@ pub fn readHeader(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: [
 
 /// Absolute offset just past the last `\n` in `bytes` (a torn tail after it is
 /// dropped). Equals `bytes.len` when the file ends with a newline.
-fn lastCompleteLineEnd(bytes: []const u8) u64 {
+pub fn lastCompleteLineEnd(bytes: []const u8) u64 {
     if (bytes.len == 0) return 0;
     if (bytes[bytes.len - 1] == '\n') return bytes.len;
     var i = bytes.len;
@@ -386,142 +410,35 @@ fn firstNonBlank(it: *std.mem.SplitIterator(u8, .scalar)) ?[]const u8 {
 /// Parse one event line and append it to `l` (in-memory only — the ledger is not
 /// yet durable during replay). Validates that `seq` matches the position.
 fn replayEventLine(l: *Ledger, line: []const u8) !void {
-    const alloc = l.alloc;
-    const parsed = std.json.parseFromSlice(std.json.Value, alloc, line, .{}) catch return error.CorruptLedger;
+    const parsed = try parseEventLine(l.alloc, line);
     defer parsed.deinit();
-    const obj = switch (parsed.value) {
-        .object => |o| o,
-        else => return error.CorruptLedger,
-    };
-
-    const seq = switch (obj.get("seq") orelse return error.CorruptLedger) {
-        .integer => |i| i,
-        else => return error.CorruptLedger,
-    };
-    if (seq < 0 or @as(u64, @intCast(seq)) != l.events.items.len + 1) return error.CorruptLedger;
-
-    const kind = jsonString(obj, "kind") orelse return error.CorruptLedger;
-    if (std.mem.eql(u8, kind, "user_text")) {
-        try l.append(.{ .user_text = jsonString(obj, "text") orelse return error.CorruptLedger });
-    } else if (std.mem.eql(u8, kind, "assistant")) {
-        const text = jsonString(obj, "text") orelse return error.CorruptLedger;
-        const calls = try parseCalls(alloc, obj);
-        defer alloc.free(calls);
-        try l.append(.{ .assistant = .{ .text = text, .calls = calls } });
-    } else if (std.mem.eql(u8, kind, "tool_results")) {
-        const results = try parseResults(alloc, obj);
-        defer alloc.free(results);
-        try l.append(.{ .tool_results = results });
-    } else if (std.mem.eql(u8, kind, "capability_note")) {
-        try l.append(.{ .capability_note = .{
-            .id = jsonString(obj, "id") orelse return error.CorruptLedger,
-            .version = jsonString(obj, "version") orelse return error.CorruptLedger,
-            .text = jsonString(obj, "text") orelse return error.CorruptLedger,
-        } });
-    } else return error.CorruptLedger;
+    if (parsed.value.seq != l.events.items.len + 1) return error.CorruptLedger;
+    try l.append(try toEvent(parsed.arena.allocator(), parsed.value));
 }
 
-fn parseCalls(alloc: std.mem.Allocator, obj: std.json.ObjectMap) ![]ToolCall {
-    const arr = switch (obj.get("calls") orelse return alloc.alloc(ToolCall, 0)) {
-        .array => |a| a,
-        else => return error.CorruptLedger,
-    };
-    const calls = try alloc.alloc(ToolCall, arr.items.len);
-    errdefer alloc.free(calls);
-    for (arr.items, 0..) |cv, i| {
-        const co = switch (cv) {
-            .object => |o| o,
-            else => return error.CorruptLedger,
-        };
-        calls[i] = .{
-            .id = jsonString(co, "id") orelse return error.CorruptLedger,
-            .tool = jsonString(co, "tool") orelse return error.CorruptLedger,
-            .args_json = jsonString(co, "args") orelse return error.CorruptLedger,
-        };
-    }
-    return calls;
-}
-
-fn parseResults(alloc: std.mem.Allocator, obj: std.json.ObjectMap) ![]ToolResultEntry {
-    const arr = switch (obj.get("results") orelse return error.CorruptLedger) {
-        .array => |a| a,
-        else => return error.CorruptLedger,
-    };
-    const results = try alloc.alloc(ToolResultEntry, arr.items.len);
-    errdefer alloc.free(results);
-    for (arr.items, 0..) |rv, i| {
-        const ro = switch (rv) {
-            .object => |o| o,
-            else => return error.CorruptLedger,
-        };
-        const ok = switch (ro.get("ok") orelse return error.CorruptLedger) {
-            .bool => |b| b,
-            else => return error.CorruptLedger,
-        };
-        const spill: ?[]const u8 = switch (ro.get("spill_path") orelse std.json.Value{ .null = {} }) {
-            .string => |s| s,
-            .null => null,
-            else => return error.CorruptLedger,
-        };
-        results[i] = .{
-            .call_id = jsonString(ro, "call_id") orelse return error.CorruptLedger,
-            .ok = ok,
-            .output = jsonString(ro, "output") orelse return error.CorruptLedger,
-            .spill_path = spill,
-        };
-    }
-    return results;
-}
-
-fn jsonString(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
-    return switch (obj.get(key) orelse return null) {
-        .string => |s| s,
-        else => null,
-    };
-}
-
-// ── Header / event encoders ─────────────────────────────────────────────────
+// ── Header / event codec ────────────────────────────────────────────────────
+//
+// The header is a typed round-trip of `Header`. Events keep the flat
+// `{"seq":n,"kind":"…",…}` shape drivers read from `session step` / `events`
+// stdout; encoding is written out by kind, decoding goes through `WireEvent`.
 
 pub fn encodeHeaderLine(alloc: std.mem.Allocator, hdr: Header) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(alloc);
     errdefer out.deinit();
-    var jw: std.json.Stringify = .{ .writer = &out.writer };
-    try jw.beginObject();
-    try writeField(&jw, "kind", "header");
-    try jw.objectField("v");
-    try jw.write(hdr.v);
-    try writeField(&jw, "session", hdr.session);
-    try jw.objectField("parent");
-    if (hdr.parent) |p| {
-        try jw.beginObject();
-        try writeField(&jw, "session", p.session);
-        try jw.objectField("seq");
-        try jw.write(p.seq);
-        try jw.endObject();
-    } else try jw.write(null);
-    try writeField(&jw, "model", hdr.model);
-    try writeField(&jw, "created", hdr.created);
-    try jw.objectField("composition");
-    try jw.beginObject();
-    try jw.objectField("active");
-    try jw.beginArray();
-    for (hdr.composition.active) |a| {
-        try jw.beginObject();
-        try writeField(&jw, "id", a.id);
-        try writeField(&jw, "version", a.version);
-        try jw.endObject();
-    }
-    try jw.endArray();
-    try jw.objectField("native_tools");
-    try jw.beginArray();
-    for (hdr.composition.native_tools) |t| try jw.write(t);
-    try jw.endArray();
-    try jw.objectField("max_tools");
-    try jw.write(hdr.composition.max_tools);
-    try jw.endObject();
-    try jw.endObject();
+    try std.json.Stringify.value(hdr, .{}, &out.writer);
     try out.writer.writeByte('\n');
     return out.toOwnedSlice();
+}
+
+fn parseHeaderLine(gpa: std.mem.Allocator, line: []const u8) !OwnedHeader {
+    const parsed = std.json.parseFromSlice(Header, gpa, std.mem.trim(u8, line, " \t\r\n"), json_opts) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.CorruptLedger,
+    };
+    errdefer parsed.deinit();
+    if (!std.mem.eql(u8, parsed.value.kind, "header")) return error.MissingHeader;
+    if (parsed.value.session.len == 0) return error.CorruptLedger;
+    return parsed;
 }
 
 pub fn encodeEventLine(alloc: std.mem.Allocator, e: Event, seq: u64) ![]u8 {
@@ -538,7 +455,7 @@ pub fn encodeEventLine(alloc: std.mem.Allocator, e: Event, seq: u64) ![]u8 {
 }
 
 /// Encode just the event body (kind + payload), without the `seq` envelope. Used
-/// for cross-process inbox event files, where `seq` is assigned on drain.
+/// for inbox event files, where `seq` is assigned on drain.
 pub fn encodeEventBody(jw: *std.json.Stringify, e: Event) !void {
     try jw.objectField("kind");
     switch (e) {
@@ -590,138 +507,156 @@ fn writeField(jw: *std.json.Stringify, name: []const u8, value: []const u8) !voi
     try jw.write(value);
 }
 
-// ── Header parsing ──────────────────────────────────────────────────────────
+/// The flat wire shape of one event line (`{"seq":n,"kind":"…",…}`) or one inbox
+/// body (same, without `seq`). Kind-specific fields are optional here; `toEvent`
+/// checks the ones its kind requires.
+pub const WireEvent = struct {
+    seq: u64 = 0,
+    kind: []const u8,
+    text: ?[]const u8 = null,
+    calls: ?[]const WireCall = null,
+    results: ?[]const ToolResultEntry = null,
+    id: ?[]const u8 = null,
+    version: ?[]const u8 = null,
+};
 
-fn parseHeaderLine(gpa: std.mem.Allocator, line: []const u8) !OwnedHeader {
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    errdefer arena.deinit();
-    const a = arena.allocator();
+pub const WireCall = struct {
+    id: []const u8,
+    tool: []const u8,
+    args: []const u8,
+};
 
-    const parsed = std.json.parseFromSlice(std.json.Value, gpa, line, .{}) catch return error.CorruptLedger;
-    defer parsed.deinit();
-    const obj = switch (parsed.value) {
-        .object => |o| o,
+/// Parse one event line or inbox body. Caller owns the result.
+pub fn parseEventLine(gpa: std.mem.Allocator, bytes: []const u8) !std.json.Parsed(WireEvent) {
+    return std.json.parseFromSlice(WireEvent, gpa, bytes, json_opts) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
         else => return error.CorruptLedger,
-    };
-    const kind = jsonString(obj, "kind") orelse return error.MissingHeader;
-    if (!std.mem.eql(u8, kind, "header")) return error.MissingHeader;
-
-    const v: u32 = switch (obj.get("v") orelse return error.CorruptLedger) {
-        .integer => |i| std.math.cast(u32, i) orelse return error.CorruptLedger,
-        else => return error.CorruptLedger,
-    };
-    const session = try a.dupe(u8, jsonString(obj, "session") orelse return error.CorruptLedger);
-    const model = try a.dupe(u8, jsonString(obj, "model") orelse "");
-    const created = try a.dupe(u8, jsonString(obj, "created") orelse "");
-
-    const parent: ?ParentRef = switch (obj.get("parent") orelse std.json.Value{ .null = {} }) {
-        .null => null,
-        .object => |po| .{
-            .session = try a.dupe(u8, jsonString(po, "session") orelse return error.CorruptLedger),
-            .seq = switch (po.get("seq") orelse return error.CorruptLedger) {
-                .integer => |i| @intCast(i),
-                else => return error.CorruptLedger,
-            },
-        },
-        else => return error.CorruptLedger,
-    };
-
-    const comp = try parseComposition(a, obj);
-
-    return .{ .arena = arena, .value = .{
-        .v = v,
-        .session = session,
-        .parent = parent,
-        .model = model,
-        .created = created,
-        .composition = comp,
-    } };
-}
-
-fn parseComposition(a: std.mem.Allocator, obj: std.json.ObjectMap) !FrozenComposition {
-    const co = switch (obj.get("composition") orelse return FrozenComposition{}) {
-        .object => |o| o,
-        else => return error.CorruptLedger,
-    };
-    var active: std.ArrayList(PinnedExtensionRef) = .empty;
-    if (co.get("active")) |av| switch (av) {
-        .array => |arr| for (arr.items) |ev| {
-            const eo = switch (ev) {
-                .object => |o| o,
-                else => return error.CorruptLedger,
-            };
-            try active.append(a, .{
-                .id = try a.dupe(u8, jsonString(eo, "id") orelse return error.CorruptLedger),
-                .version = try a.dupe(u8, jsonString(eo, "version") orelse return error.CorruptLedger),
-            });
-        },
-        else => return error.CorruptLedger,
-    };
-    var native: std.ArrayList([]const u8) = .empty;
-    if (co.get("native_tools")) |nv| switch (nv) {
-        .array => |arr| for (arr.items) |tv| {
-            switch (tv) {
-                .string => |s| try native.append(a, try a.dupe(u8, s)),
-                else => return error.CorruptLedger,
-            }
-        },
-        else => return error.CorruptLedger,
-    };
-    const max_tools: u32 = switch (co.get("max_tools") orelse std.json.Value{ .integer = 8 }) {
-        .integer => |i| std.math.cast(u32, i) orelse return error.CorruptLedger,
-        else => return error.CorruptLedger,
-    };
-    return .{
-        .active = try active.toOwnedSlice(a),
-        .native_tools = try native.toOwnedSlice(a),
-        .max_tools = max_tools,
     };
 }
 
-/// Deep-copy a borrowed header into a self-owning `OwnedHeader`.
-fn dupeHeader(gpa: std.mem.Allocator, hdr: Header) !OwnedHeader {
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    errdefer arena.deinit();
-    const a = arena.allocator();
-
-    // Duplicate the (always non-empty) session id first so the arena's first
-    // allocation has a real size; a zero-length `alloc` as an arena's first
-    // request can leak its backing node.
-    const session = try a.dupe(u8, hdr.session);
-
-    const active = try dupeExtensionRefs(a, hdr.composition.active);
-    const native = try dupeStrings(a, hdr.composition.native_tools);
-
-    const parent: ?ParentRef = if (hdr.parent) |p|
-        .{ .session = try a.dupe(u8, p.session), .seq = p.seq }
-    else
-        null;
-
-    return .{ .arena = arena, .value = .{
-        .v = hdr.v,
-        .session = session,
-        .parent = parent,
-        .model = try a.dupe(u8, hdr.model),
-        .created = try a.dupe(u8, hdr.created),
-        .composition = .{ .active = active, .native_tools = native, .max_tools = hdr.composition.max_tools },
-    } };
-}
-
-fn dupeExtensionRefs(a: std.mem.Allocator, refs: []const PinnedExtensionRef) ![]const PinnedExtensionRef {
-    if (refs.len == 0) return &.{};
-    const out = try a.alloc(PinnedExtensionRef, refs.len);
-    for (refs, 0..) |ref, i| {
-        out[i] = .{ .id = try a.dupe(u8, ref.id), .version = try a.dupe(u8, ref.version) };
+/// View a parsed wire event as a ledger `Event`. Strings are borrowed from `w`;
+/// `a` backs only the converted calls array — pass the `Parsed` arena. The
+/// result is meant to be handed straight to `append`, which deep-copies.
+pub fn toEvent(a: std.mem.Allocator, w: WireEvent) !Event {
+    if (std.mem.eql(u8, w.kind, "user_text")) {
+        return .{ .user_text = w.text orelse return error.CorruptLedger };
     }
-    return out;
+    if (std.mem.eql(u8, w.kind, "assistant")) {
+        const wire_calls = w.calls orelse &.{};
+        const calls = try a.alloc(ToolCall, wire_calls.len);
+        for (wire_calls, calls) |wc, *c| c.* = .{ .id = wc.id, .tool = wc.tool, .args_json = wc.args };
+        return .{ .assistant = .{ .text = w.text orelse return error.CorruptLedger, .calls = calls } };
+    }
+    if (std.mem.eql(u8, w.kind, "tool_results")) {
+        return .{ .tool_results = w.results orelse return error.CorruptLedger };
+    }
+    if (std.mem.eql(u8, w.kind, "capability_note")) {
+        return .{ .capability_note = .{
+            .id = w.id orelse return error.CorruptLedger,
+            .version = w.version orelse return error.CorruptLedger,
+            .text = w.text orelse return error.CorruptLedger,
+        } };
+    }
+    return error.CorruptLedger;
 }
 
-fn dupeStrings(a: std.mem.Allocator, strings: []const []const u8) ![]const []const u8 {
-    if (strings.len == 0) return &.{};
-    const out = try a.alloc([]const u8, strings.len);
-    for (strings, 0..) |s, i| out[i] = try a.dupe(u8, s);
-    return out;
+// ── Cross-process inbox (DESIGN §3.4) ───────────────────────────────────────
+//
+// The session file has one writer. Any other process proposes an event by
+// depositing one `<name>.json` file (an event body, no `seq`) into the sibling
+// directory `<stem>.inbox/`; the writer drains the inbox at its next step
+// boundary — after repairing any interrupted batch, before the model runs — so
+// a drained event never lands inside a tool batch and the prompt prefix stays
+// append-only. Deposits are atomic (write `.tmp`, rename), so a drain never
+// reads a half-written body.
+
+/// `<dir>/<stem><suffix>` for a session file path: the naming rule for every
+/// per-session sibling (`.inbox`, `.cancel`). Purely lexical, so it preserves
+/// whether `session_path` is relative or absolute. Caller owns the result.
+pub fn siblingPath(alloc: std.mem.Allocator, session_path: []const u8, suffix: []const u8) ![]u8 {
+    const stem = std.fs.path.stem(std.fs.path.basename(session_path));
+    const name = try std.fmt.allocPrint(alloc, "{s}{s}", .{ stem, suffix });
+    defer alloc.free(name);
+    if (std.fs.path.dirname(session_path)) |dir| return std.fs.path.join(alloc, &.{ dir, name });
+    return alloc.dupe(u8, name);
 }
+
+pub fn inboxPath(alloc: std.mem.Allocator, session_path: []const u8) ![]u8 {
+    return siblingPath(alloc, session_path, ".inbox");
+}
+
+/// Deposit `e` as `<inbox>/<name>.json`, creating the inbox if needed. `base` is
+/// the directory `session_path` is relative to. `name` must be filesystem-safe:
+/// a depositor wanting idempotence picks a deterministic name (capability notes
+/// use `note-<id>-<version>`); one wanting a distinct event every time picks a
+/// fresh one. Two deposits with the same name collapse to one event.
+pub fn depositEvent(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, session_path: []const u8, name: []const u8, e: Event) !void {
+    const inbox = try inboxPath(alloc, session_path);
+    defer alloc.free(inbox);
+    try base.createDirPath(io, inbox);
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    var jw: std.json.Stringify = .{ .writer = &out.writer };
+    try jw.beginObject();
+    try encodeEventBody(&jw, e);
+    try jw.endObject();
+
+    const tmp_rel = try std.fmt.allocPrint(alloc, "{s}{c}{s}.tmp", .{ inbox, std.fs.path.sep, name });
+    defer alloc.free(tmp_rel);
+    const final_rel = try std.fmt.allocPrint(alloc, "{s}{c}{s}.json", .{ inbox, std.fs.path.sep, name });
+    defer alloc.free(final_rel);
+    try base.writeFile(io, .{ .sub_path = tmp_rel, .data = out.written() });
+    try base.rename(tmp_rel, base, final_rel, io);
+}
+
+/// Drain every deposited `.json` in the session inbox into `l`, in filename
+/// order, deleting each file once appended. A missing inbox is a no-op. A
+/// `capability_note` already present in the ledger is skipped (still deleted),
+/// so a crash between append and delete never re-announces a version; other
+/// kinds have no identity to dedupe on and are appended as-is.
+pub fn drainInbox(alloc: std.mem.Allocator, io: std.Io, l: *Ledger, base: std.Io.Dir, session_path: []const u8) !void {
+    const inbox = try inboxPath(alloc, session_path);
+    defer alloc.free(inbox);
+
+    var dir = base.openDir(io, inbox, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer dir.close(io);
+
+    var names: std.ArrayList([]u8) = .empty;
+    defer {
+        for (names.items) |n| alloc.free(n);
+        names.deinit(alloc);
+    }
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".json")) continue;
+        try names.append(alloc, try alloc.dupe(u8, entry.name));
+    }
+    std.mem.sort([]u8, names.items, {}, struct {
+        fn lessThan(_: void, a: []u8, b: []u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lessThan);
+
+    for (names.items) |name| {
+        const bytes = try dir.readFileAlloc(io, name, alloc, .limited(4 << 20));
+        defer alloc.free(bytes);
+        const parsed = try parseEventLine(alloc, bytes);
+        defer parsed.deinit();
+        const e = try toEvent(parsed.arena.allocator(), parsed.value);
+        const already = switch (e) {
+            .capability_note => |n| l.containsNote(n.id, n.version),
+            else => false,
+        };
+        if (!already) try l.append(e);
+        try dir.deleteFile(io, name);
+    }
+}
+
+// ── Tests ───────────────────────────────────────────────────────────────────
 
 test "ledger only grows and preserves order" {
     var l = Ledger.init(std.testing.allocator);
@@ -773,7 +708,6 @@ const sample_header: Header = .{
     .composition = .{
         .active = &.{.{ .id = "web.search", .version = "v-0123456789abcdef01234567" }},
         .native_tools = &.{"ext:web.search/web_search"},
-        .max_tools = 8,
     },
 };
 
@@ -781,8 +715,9 @@ test "header encode/parse round-trips every field" {
     const alloc = std.testing.allocator;
     const line = try encodeHeaderLine(alloc, sample_header);
     defer alloc.free(line);
+    try std.testing.expect(std.mem.startsWith(u8, line, "{\"kind\":\"header\","));
 
-    var owned = try parseHeaderLine(alloc, line);
+    const owned = try parseHeaderLine(alloc, line);
     defer owned.deinit();
     const h = owned.value;
     try std.testing.expectEqual(@as(u32, 1), h.v);
@@ -795,16 +730,20 @@ test "header encode/parse round-trips every field" {
     try std.testing.expectEqualStrings("v-0123456789abcdef01234567", h.composition.active[0].version);
     try std.testing.expectEqual(@as(usize, 1), h.composition.native_tools.len);
     try std.testing.expectEqualStrings("ext:web.search/web_search", h.composition.native_tools[0]);
-    try std.testing.expectEqual(@as(u32, 8), h.composition.max_tools);
 }
 
-test "a root header has a null parent after round-trip" {
+test "a root header has a null parent after round-trip; unknown fields are ignored" {
     const alloc = std.testing.allocator;
     const line = try encodeHeaderLine(alloc, .{ .session = "s-root" });
     defer alloc.free(line);
-    var owned = try parseHeaderLine(alloc, line);
+    const owned = try parseHeaderLine(alloc, line);
     defer owned.deinit();
     try std.testing.expect(owned.value.parent == null);
+
+    // A header written by a newer nulya with an extra field still parses.
+    const newer = try parseHeaderLine(alloc, "{\"kind\":\"header\",\"session\":\"s\",\"composition\":{\"max_tools\":8},\"future\":1}");
+    defer newer.deinit();
+    try std.testing.expectEqualStrings("s", newer.value.session);
 }
 
 fn writeSampleEvents(l: *Ledger) !void {
@@ -836,6 +775,8 @@ test "durable create then open replays a block-identical ledger with monotonic s
     try std.testing.expectEqual(@as(usize, 4), reopened.len());
     try std.testing.expectEqualStrings("s-test", reopened.header().?.session);
     try std.testing.expectEqualStrings("ext:web.search/web_search", reopened.header().?.composition.native_tools[0]);
+    try std.testing.expect(reopened.containsNote("demo", "v-aaaa"));
+    try std.testing.expect(!reopened.containsNote("demo", "v-bbbb"));
 
     // The persisted seqs are strictly 1..N (proven by replay's own seq check).
     const raw = try tmp.dir.readFileAlloc(io, "s.jsonl", alloc, .unlimited);
@@ -920,4 +861,86 @@ test "a file whose first line is not a header is rejected" {
     defer tmp.cleanup();
     try tmp.dir.writeFile(io, .{ .sub_path = "s.jsonl", .data = "{\"seq\":1,\"kind\":\"user_text\",\"text\":\"x\"}\n" });
     try std.testing.expectError(error.MissingHeader, openDurable(alloc, io, tmp.dir, "s.jsonl"));
+}
+
+test "a second writer is refused, and the refused append is rewound" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var a = try createDurable(alloc, io, tmp.dir, "s.jsonl", .{ .session = "s" });
+    defer a.deinit();
+    try a.append(.{ .user_text = "one" });
+
+    // Another process reopens the same file and appends behind `a`'s back.
+    {
+        var b = try openDurable(alloc, io, tmp.dir, "s.jsonl");
+        defer b.deinit();
+        try b.append(.{ .user_text = "two" });
+    }
+
+    // `a` refuses to write over `b`'s line; its memory is rewound too.
+    try std.testing.expectError(error.ConcurrentWriter, a.append(.{ .user_text = "three" }));
+    try std.testing.expectEqual(@as(usize, 1), a.len());
+
+    // The file holds exactly what was legitimately written.
+    var c = try openDurable(alloc, io, tmp.dir, "s.jsonl");
+    defer c.deinit();
+    try std.testing.expectEqual(@as(usize, 2), c.len());
+    try std.testing.expectEqualStrings("two", c.view()[1].user_text);
+}
+
+test "siblingPath names <stem><suffix> next to the session file" {
+    const alloc = std.testing.allocator;
+    const a = try inboxPath(alloc, ".nulya/sessions/s-1.jsonl");
+    defer alloc.free(a);
+    try std.testing.expectEqualStrings(".nulya/sessions" ++ std.fs.path.sep_str ++ "s-1.inbox", a);
+
+    const b = try siblingPath(alloc, "s-2.jsonl", ".cancel");
+    defer alloc.free(b);
+    try std.testing.expectEqualStrings("s-2.cancel", b);
+}
+
+test "inbox: deposits drain in name order, dedupe notes, and never touch the main file" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const spath = "s.jsonl";
+
+    var l = try createDurable(alloc, io, tmp.dir, spath, .{ .session = "s" });
+    defer l.deinit();
+
+    // Two processes deposit: a driver's user text and a note, out of order.
+    try depositEvent(alloc, io, tmp.dir, spath, "note-demo-v-aaaa", .{ .capability_note = .{ .id = "demo", .version = "v-aaaa", .text = "n" } });
+    try depositEvent(alloc, io, tmp.dir, spath, "msg-0001", .{ .user_text = "hello" });
+    // The main file is untouched by deposits.
+    try std.testing.expectEqual(@as(usize, 0), l.len());
+
+    try drainInbox(alloc, io, &l, tmp.dir, spath);
+    try std.testing.expectEqual(@as(usize, 2), l.len());
+    try std.testing.expectEqualStrings("hello", l.view()[0].user_text); // "msg-…" < "note-…"
+    try std.testing.expect(l.view()[1] == .capability_note);
+
+    // Draining an empty inbox adds nothing; a re-deposited note is skipped.
+    try drainInbox(alloc, io, &l, tmp.dir, spath);
+    try depositEvent(alloc, io, tmp.dir, spath, "note-demo-v-aaaa", .{ .capability_note = .{ .id = "demo", .version = "v-aaaa", .text = "n" } });
+    try drainInbox(alloc, io, &l, tmp.dir, spath);
+    try std.testing.expectEqual(@as(usize, 2), l.len());
+
+    // Everything drained is on disk in order.
+    var reopened = try openDurable(alloc, io, tmp.dir, spath);
+    defer reopened.deinit();
+    try expectEventsEqual(l.view(), reopened.view());
+}
+
+test "draining a missing inbox is a no-op" {
+    const alloc = std.testing.allocator;
+    var l = Ledger.init(alloc);
+    defer l.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try drainInbox(alloc, std.testing.io, &l, tmp.dir, "s.jsonl");
+    try std.testing.expectEqual(@as(usize, 0), l.len());
 }

@@ -2,28 +2,54 @@
 //!
 //! `loop.zig` owns one provider turn and batched tool execution. `AgentSession`
 //! owns the conversation-level preparation around those turns: ledger lifetime,
-//! session-scoped capability composition, active extension capability notes,
-//! interrupted tool-batch repair, and cumulative usage accounting.
+//! session-scoped capability composition, the step-boundary drain of the
+//! cross-process inbox and cancel marker, interrupted tool-batch repair, and
+//! cumulative usage accounting.
 
 const std = @import("std");
 const ledger = @import("ledger.zig");
 const loop = @import("loop.zig");
 const registry = @import("registry.zig");
 const provider = @import("provider.zig");
-const notes = @import("extension/notes.zig");
 const environment = @import("environment.zig");
 const prompt = @import("prompt.zig");
 const composition = @import("composition.zig");
 const tool = @import("tool.zig");
 const tool_stats = @import("tool_stats.zig");
 
-/// Where a durable session's file and its cross-process inbox live. The
-/// `workspace` handle is borrowed — the caller keeps it open for the session's
-/// lifetime; `session_path` is owned and relative to `workspace`.
+/// The most kernel steps one `run` may take, whatever the caller asks for
+/// (DESIGN §4, §14). A driver can lower the budget per call, never raise it.
+pub const max_steps_ceiling: usize = 50;
+
+/// Where a durable session's file and its cross-process siblings (`<id>.inbox/`,
+/// `<id>.cancel`) live. The `workspace` handle is borrowed — the caller keeps it
+/// open for the session's lifetime; `session_path` is owned and relative to
+/// `workspace`.
 pub const DurableRef = struct {
     workspace: std.Io.Dir,
     session_path: []const u8,
 };
+
+/// Ask a durable session to stop at its next step boundary, from any process:
+/// drops the `<stem>.cancel` marker next to the session file. The owning
+/// session consumes it in `prepareStep` and reports that step as `.canceled`
+/// without calling the model (DESIGN §4). Requesting twice is one request.
+pub fn requestCancel(alloc: std.mem.Allocator, io: std.Io, workspace: std.Io.Dir, session_path: []const u8) !void {
+    const marker = try ledger.siblingPath(alloc, session_path, ".cancel");
+    defer alloc.free(marker);
+    try workspace.writeFile(io, .{ .sub_path = marker, .data = "" });
+}
+
+/// If a cancel marker exists for the session, delete it and return true.
+fn consumeCancel(alloc: std.mem.Allocator, io: std.Io, workspace: std.Io.Dir, session_path: []const u8) !bool {
+    const marker = try ledger.siblingPath(alloc, session_path, ".cancel");
+    defer alloc.free(marker);
+    workspace.deleteFile(io, marker) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    return true;
+}
 
 pub const AgentSession = struct {
     alloc: std.mem.Allocator,
@@ -104,7 +130,7 @@ pub const AgentSession = struct {
             .parent = d.parent,
             .model = d.model_profile,
             .created = d.created,
-            .composition = .{ .active = active, .native_tools = native, .max_tools = opts.registry.max_tools },
+            .composition = .{ .active = active, .native_tools = native },
         });
         errdefer l.deinit();
 
@@ -159,18 +185,21 @@ pub const AgentSession = struct {
     }
 
     /// Run one step. Cancellation is reported as `StepOutcome.status == .canceled`
-    /// (never an error): the host that owns the running step's `Future` decides
-    /// what to do next. Usage is accumulated for canceled and completed steps
-    /// alike, since the ledger is left in a legal state either way. A canceled
-    /// step does not poison the session — the next `step()` runs normally.
+    /// (never an error), whether it came from the host canceling the running
+    /// step's `Future` or from a `requestCancel` marker consumed at this step's
+    /// boundary; the host decides what to do next. Usage is accumulated for
+    /// canceled and completed steps alike, since the ledger is left in a legal
+    /// state either way. A canceled step does not poison the session — the next
+    /// `step()` runs normally.
     pub fn step(self: *AgentSession) !loop.StepOutcome {
-        // Reconciliation runs cancellable filesystem I/O (extension integrity,
-        // manifest reads). A cancel there is host execution control, not a fault:
-        // no provider/tool execution for this step has started, usage is 0, and
-        // cancellation adds no partial model turn. (prepareStep may still have
-        // appended a repair batch or capability note first — that is legal
-        // history, not a partial turn.) Report it as a canceled outcome, honoring
-        // step()'s contract that cancellation is never an error.
+        // Preparation runs cancellable filesystem I/O (inbox, extension
+        // integrity, manifest reads) and consumes any cancel marker. A cancel
+        // there is host execution control, not a fault: no provider/tool
+        // execution for this step has started, usage is 0, and cancellation adds
+        // no partial model turn. (prepareStep may still have appended a repair
+        // batch or a drained event first — that is legal history, not a partial
+        // turn.) Report it as a canceled outcome, honoring step()'s contract that
+        // cancellation is never an error.
         self.prepareStep() catch |err| switch (err) {
             error.Canceled => return .{ .status = .canceled },
             else => return err,
@@ -198,14 +227,16 @@ pub const AgentSession = struct {
         return outcome;
     }
 
-    /// Run steps until the assistant ends its turn or `max_steps` is reached —
-    /// whichever comes first. The cap is enforced here in the kernel, not by a
-    /// caller's loop, so a driver that wants "just keep going" still cannot run a
-    /// session past the budget (DESIGN §4, PLAN §3.6). A canceled step stops the
-    /// run. Returns the number of steps actually taken.
+    /// Run steps until the assistant ends its turn or the budget is reached —
+    /// whichever comes first. The budget is `min(max_steps, max_steps_ceiling)`
+    /// and is enforced here in the kernel, not by a caller's loop, so a driver
+    /// that wants "just keep going" still cannot run a session past it (DESIGN
+    /// §4, PLAN §3.6). A canceled step (host cancel or a consumed cancel marker)
+    /// stops the run. Returns the number of steps taken.
     pub fn run(self: *AgentSession, max_steps: usize) !usize {
+        const budget = @min(max_steps, max_steps_ceiling);
         var taken: usize = 0;
-        while (taken < max_steps) {
+        while (taken < budget) {
             const outcome = try self.step();
             taken += 1;
             if (outcome.status == .canceled) break;
@@ -226,15 +257,20 @@ pub const AgentSession = struct {
         };
     }
 
+    /// The step boundary (DESIGN §4): repair an interrupted tail, honor a
+    /// pending cancel request, drain the cross-process inbox. Repair comes
+    /// first so a drained event can never land between an
+    /// assistant-with-tool-calls and its matching tool_results batch (the batch
+    /// invariant). A pure in-memory session has no siblings to consult.
     fn prepareStep(self: *AgentSession) !void {
-        // Repair the interrupted tail before draining the inbox, so a drained
-        // note can never land between an assistant-with-tool-calls and its
-        // matching tool_results batch (the batch invariant, DESIGN §4). For a
-        // pure in-memory session there is no inbox to drain.
         try loop.completeInterruptedToolBatch(self.alloc, &self.l);
         if (self.durable) |d| {
             const io = self.step_ctx.tool_context.environment.io;
-            try notes.drainInbox(self.alloc, io, &self.l, d.workspace, d.session_path);
+            // The marker is the cross-process form of the same cancellation the
+            // host expresses in-process by canceling the step's Future: it is
+            // consumed here, at the boundary, and this step reports `.canceled`.
+            if (try consumeCancel(self.alloc, io, d.workspace, d.session_path)) return error.Canceled;
+            try ledger.drainInbox(self.alloc, io, &self.l, d.workspace, d.session_path);
         }
     }
 
@@ -685,6 +721,158 @@ test "a durable session persists across create, close, and reopen" {
     var c = try AgentSession.openDurable(alloc, opts, .{ .workspace = tmp.dir, .session_path = session_path });
     defer c.deinit();
     try std.testing.expectEqual(@as(usize, 4), c.l.len());
+}
+
+test "a cancel marker is consumed at the step boundary: no model call, then the session resumes" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try sessionTmpCwd(alloc, io, tmp);
+    defer alloc.free(cwd);
+    try tmp.dir.createDirPath(io, ".nulya" ++ std.fs.path.sep_str ++ "sessions");
+    const session_path = ".nulya" ++ std.fs.path.sep_str ++ "sessions" ++ std.fs.path.sep_str ++ "s.jsonl";
+
+    const CountingModel = struct {
+        calls: usize = 0,
+        fn name(ptr: *anyopaque) []const u8 {
+            _ = ptr;
+            return "counting";
+        }
+        fn modelName(ptr: *anyopaque) []const u8 {
+            _ = ptr;
+            return "counting";
+        }
+        fn capabilities(ptr: *anyopaque) provider.ProviderCapabilities {
+            _ = ptr;
+            return .{};
+        }
+        fn stream(ptr: *anyopaque, a: std.mem.Allocator, request: provider.Request, sink: provider.EventSink) anyerror!void {
+            _ = a;
+            _ = request;
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.calls += 1;
+            try sink.emit(.started);
+            try sink.emit(.{ .text_delta = "done" });
+            try sink.emit(.{ .done = .end_turn });
+        }
+        const vtable: provider.Model.VTable = .{
+            .name = name,
+            .modelName = modelName,
+            .capabilities = capabilities,
+            .stream = stream,
+        };
+    };
+
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+    var model_impl = CountingModel{};
+    var sess = try AgentSession.createDurable(alloc, .{
+        .model = .{ .ptr = &model_impl, .vtable = &CountingModel.vtable },
+        .step_ctx = .{
+            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd },
+            .scratch_dir = "/tmp",
+        },
+        .extension_root = "nulya-absent-extensions-root",
+    }, .{ .workspace = tmp.dir, .session_path = session_path, .session_id = "s" });
+    defer sess.deinit();
+    try sess.appendUser("go");
+
+    // Another process asks for a cancel; `run` would take up to 5 steps but
+    // stops at the very first boundary without calling the model.
+    try requestCancel(alloc, io, tmp.dir, session_path);
+    const taken = try sess.run(5);
+    try std.testing.expectEqual(@as(usize, 1), taken);
+    try std.testing.expectEqual(@as(usize, 0), model_impl.calls);
+    try std.testing.expectEqual(@as(usize, 1), sess.l.len()); // only the user text
+
+    // The marker was consumed: the next run proceeds normally.
+    _ = try sess.run(5);
+    try std.testing.expectEqual(@as(usize, 1), model_impl.calls);
+    try std.testing.expect(sess.lastAssistantDone());
+}
+
+test "run clamps any requested budget to the kernel ceiling" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try sessionTmpCwd(alloc, io, tmp); // completed steps journal usage under cwd
+    defer alloc.free(cwd);
+
+    // A tool that always succeeds and a model that always calls it: the turn
+    // never ends on its own.
+    const NoopTool = struct {
+        fn call(ptr: ?*anyopaque, a: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolResult {
+            _ = ptr;
+            _ = req;
+            return .{ .ok = true, .output = try a.dupe(u8, "ok") };
+        }
+    };
+    const tools_arr = [_]tool.Tool{
+        .{ .definition = .{ .id = "t.noop", .name = "noop", .description = "n", .input_schema = "{}" }, .executor = .{ .ptr = null, .callFn = NoopTool.call } },
+    };
+    const ForeverModel = struct {
+        fn name(ptr: *anyopaque) []const u8 {
+            _ = ptr;
+            return "forever";
+        }
+        fn modelName(ptr: *anyopaque) []const u8 {
+            _ = ptr;
+            return "forever";
+        }
+        fn capabilities(ptr: *anyopaque) provider.ProviderCapabilities {
+            _ = ptr;
+            return .{};
+        }
+        fn stream(ptr: *anyopaque, a: std.mem.Allocator, request: provider.Request, sink: provider.EventSink) anyerror!void {
+            _ = ptr;
+            _ = a;
+            _ = request;
+            try sink.emit(.started);
+            try sink.emit(.{ .tool_use_start = .{ .index = 0, .id = "c1", .name = "noop" } });
+            try sink.emit(.{ .tool_use_input_delta = .{ .index = 0, .fragment = "{}" } });
+            try sink.emit(.{ .done = .tool_use });
+        }
+        const vtable: provider.Model.VTable = .{
+            .name = name,
+            .modelName = modelName,
+            .capabilities = capabilities,
+            .stream = stream,
+        };
+    };
+
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+    var model_impl = ForeverModel{};
+    var sess: AgentSession = .{
+        .alloc = alloc,
+        .l = ledger.Ledger.init(alloc),
+        .composition = .{
+            .pinned_extensions = &.{},
+            .extension_tool_bindings = &.{},
+            .tools = .{ .tools = &tools_arr },
+            .skills = .{ .skills = &.{} },
+            .system_prompts = .{ .blocks = &.{} },
+        },
+        .model = .{ .ptr = &model_impl, .vtable = &ForeverModel.vtable },
+        .step_ctx = .{
+            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd },
+            .scratch_dir = "/tmp",
+        },
+        .model_options = .{},
+        .extension_root = "nulya-absent-extensions-root",
+    };
+    defer sess.l.deinit();
+    try sess.appendUser("go");
+
+    try std.testing.expectEqual(max_steps_ceiling, try sess.run(max_steps_ceiling + 10));
+    // user + (assistant, tool_results) per step
+    try std.testing.expectEqual(1 + 2 * max_steps_ceiling, sess.l.len());
 }
 
 test "completed step records stable ids, never model names or hallucinated names" {

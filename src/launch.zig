@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const provider = @import("provider.zig");
+const prompt = @import("prompt.zig");
 const openai = @import("providers/openai.zig");
 const config = @import("config.zig");
 
@@ -74,7 +75,7 @@ pub const ScriptedProvider = struct {
     };
 };
 
-fn hasToolResult(blocks: anytype) bool {
+fn hasToolResult(blocks: []const prompt.StableBlock) bool {
     for (blocks) |b| {
         if (b.kind == .tool_result) return true;
     }
@@ -83,46 +84,46 @@ fn hasToolResult(blocks: anytype) bool {
 
 /// Owns whichever concrete provider a session uses; `model()` hands out a stable
 /// handle into it. Caller keeps this as a `var` so the handle stays valid.
-pub const ModelHolder = struct {
-    scripted: ScriptedProvider = .{},
-    openai: openai.OpenAiProvider = undefined,
-    use_openai: bool = false,
+pub const ModelHolder = union(enum) {
+    scripted: ScriptedProvider,
+    openai: openai.OpenAiProvider,
 
     pub fn deinit(self: *ModelHolder) void {
-        if (self.use_openai) self.openai.deinit();
+        switch (self.*) {
+            .scripted => {},
+            .openai => |*p| p.deinit(),
+        }
     }
 
     pub fn model(self: *ModelHolder) provider.Model {
-        if (self.use_openai) return self.openai.modelHandle();
-        return self.scripted.handle();
+        return switch (self.*) {
+            .scripted => |*p| p.handle(),
+            .openai => |*p| p.modelHandle(),
+        };
     }
 };
 
-/// Fill `holder` with the model for `profile_name`. Falls back to the scripted
-/// provider when the profile is scripted, unknown, or an openai profile has no
-/// resolvable key (so an offline session still runs).
+/// Build the model for `profile_name`. Falls back to the scripted provider when
+/// the profile is scripted, unknown, or an openai profile has no resolvable key
+/// (so an offline session still runs). Caller owns the holder (`deinit`).
 pub fn buildModel(
     alloc: std.mem.Allocator,
     io: std.Io,
     prov: config.Provider,
     env: *const std.process.Environ.Map,
     profile_name: []const u8,
-    holder: *ModelHolder,
-) !void {
-    holder.scripted = ScriptedProvider.fromEnv(env);
-    holder.use_openai = false;
-
-    const profile = prov.findProfile(profile_name) orelse return;
+) !ModelHolder {
+    const scripted: ModelHolder = .{ .scripted = ScriptedProvider.fromEnv(env) };
+    const profile = prov.findProfile(profile_name) orelse return scripted;
     switch (profile.kind) {
-        .scripted => {},
+        .scripted => return scripted,
         .openai => {
-            const api_key = resolveApiKey(profile, env) orelse return;
-            holder.openai = try openai.OpenAiProvider.init(alloc, io, .{
+            const api_key = resolveApiKey(profile, env) orelse return scripted;
+            return .{ .openai = try openai.OpenAiProvider.init(alloc, io, .{
                 .api_key = api_key,
                 .model = nonEmpty(profile.model, "gpt-4o-mini"),
                 .base_url = nonEmpty(profile.base_url, "https://api.openai.com/v1"),
-            });
-            holder.use_openai = true;
+            }) };
         },
     }
 }

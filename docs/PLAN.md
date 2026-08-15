@@ -27,7 +27,7 @@ kernel  = ledger 文件格式 + PromptIR 投影 + 一次 step + 工具执行 + c
 | 1 | ledger 落盘 / resume 属"等第二个前端出现再做" | **排第一** | subagent=自调用、resume≡re-spawn、fork、evolution 读轨迹、crash recovery 全站在"ledger 在磁盘上"的假设上；usage journal 已 durable 而对话不 durable 是倒挂 |
 | 2 | generation = 事件投影，compaction 是一种事件 | **generation == ledger 文件**；compaction / fork = 新文件 + parent 指针 | 单文件永远单 generation、只 append，前缀不变量成了文件系统性质；`currentGeneration()` 删掉；fork 免费 |
 | 3 | extension 制造路径 = Zig 源码 → 内嵌工具链编译 | **脚本 extension 默认**（`run.sh` / `run.ps1` / `run.py` 任意可执行）；Zig 是**实测需要时**的优化 | 制造循环发生在 AI 所在机器，摩擦决定尝试次数；多数有价值能力在 Zig 里也只是 wrap 系统命令。与"先测量再持久化"同一纪律 |
-| 4 | SessionDriver = out-of-process JSON-RPC + host-callback 通道 + `driver/*` 方法 | **driver = 脚本 + `nulya session new\|append\|step\|events\|close`** | 黑名单自动成立（CLI 没那些动词）；host callback / 分帧 / 背压全消失；`/goal` 是 20 行 shell |
+| 4 | SessionDriver = out-of-process JSON-RPC + host-callback 通道 + `driver/*` 方法 | **driver = 脚本 + `nulya session new\|append\|step\|events\|cancel`** | 黑名单自动成立（CLI 没那些动词）；host callback / 分帧 / 背压全消失；`/goal` 是 20 行 shell |
 | 5 | Hook 三类：Provider / Middleware / Observer | **删 Middleware**，只留 Observer + propose→append | "拦截、修改"与"extension 永不 rewrite model-visible 内容"矛盾且未定义 |
 | 6 | AI reviewer 倾向默认开，门在 activate | **默认关**；门放在 **promote-to-native** | existence 几乎免费（一个目录）；promote 才有真实成本（cache prefix + 每 session token）。高门槛抑制尝试、诱发 theater |
 | 7 | Tool 是演化旗舰，Skill "不竞争不统计" | 优先级：**Skill / notes > 脚本 tool > native tool > driver**；加 `session_outcome` 事件 | 现在模型最能复利的自演化是知识与方法；driver 演化来源本就是"重复的人类 correction 结晶"；outcome 是评价 Skill / Prompt 的唯一 ground truth |
@@ -45,7 +45,7 @@ kernel  = ledger 文件格式 + PromptIR 投影 + 一次 step + 工具执行 + c
 
 ### M2 · `nulya session *` + 脚本 extension（§3.2、§3.3）
 - 目标：session 可被任何进程驱动；extension 制造无需编译。
-- **M2a ✅ 已落地 → DESIGN §14：** `session new|append|step|events|cancel|close`（`step --max-steps N` kernel 强制上限）；`main.zig` demo 已改走 durable session 路径。e2e：shell 脚本 driver 完成 `/goal` 循环、`--max-steps` 被 kernel 强制。
+- **M2a ✅ 已落地 → DESIGN §14：** `session new|append|step|events|cancel`（`step --max-steps N` 由 kernel 夹到 `session.max_steps_ceiling`）；`main.zig` demo 已改走 durable session 路径。e2e：shell 脚本 driver 完成 `/goal` 循环、`--max-steps` 被 kernel 强制。review 后收紧（DESIGN §3.4/§4/§14）：只有 `step` 写主文件——`append` 走 inbox、`cancel` 是 `<id>.cancel` 标记且由 kernel 在 step 边界消费（mid-run 也能停）、`events` 只读 tail；`close` 因无语义删除；`persist` 加第二写者守卫。
 - **M2b ✅ 已落地 → DESIGN §7.1/§7.4：** `runtime.entry` 前缀区分编译/脚本，脚本不编译、version = hash(snapshot)（不含 compiler）；`nulya ext init --script`；`ext run --arg k=v`。e2e：`run.ps1`/`run.sh` extension 走完 init → build(seal) → activate → run → 晋升为 native 并经 interpreter 执行；version 不含 compiler identity、rebuild 稳定。
 
 ### M3 · `nulya src` + 文档（§3.10）
@@ -91,14 +91,14 @@ kernel  = ledger 文件格式 + PromptIR 投影 + 一次 step + 工具执行 + c
 ✅ **已实现，现状见 [DESIGN §3.4](DESIGN.md)。** 落地形态与原计划一致：`.nulya/sessions/<id>.jsonl`，header 冻结 composition（active 版本 + native tool 选择）+ 每行 `{"seq":n,…}` 事件；`Ledger.createDurable/openDurable/append`，内存 `init` 版保留给测试；`prompt.currentGeneration()` 删除（generation == 文件）；usage journal 仍独立。`session_outcome` 事件属 M5。
 
 **两处实测定的决策（已定，记进 DESIGN §3.4）：**
-- **并发 append = 单写者 + inbox 目录**（不是 O_APPEND）。session 文件只有 session 进程一个写者；CLI 的 `capability_note` 投进 `<id>.inbox/`，session 在 step 边界排干——Windows 上无需文件锁，且 batch 不变量天然成立。
+- **并发 append = 单写者 + inbox 目录**（不是 O_APPEND）。session 文件只有 session 进程一个写者；任何其他进程的事件（CLI 的 `capability_note`、driver 的 `session append`）投进 `<id>.inbox/`，session 在 step 边界排干——Windows 上无需文件锁，且 batch 不变量天然成立。
 - **`NULYA_SESSION` = session 文件相对 workspace 的路径**；CLI 子进程 cwd 就是 workspace，据此定位文件与 inbox。
 
 fork / compaction（新文件 + `parent` 指针，前端沿 parent 链呈现连续对话）仍未实现，见 §3.4。
 
 ### 3.2 `nulya session *` 与 subagent = 自调用 `[CLI 已落地 · M2a → DESIGN §14；subagent 用法待第一个 consumer]`
 
-✅ **`nulya session new|append|step|events|cancel|close` 已实现**，现状见 [DESIGN §14](DESIGN.md)。`step --max-steps N` 由 kernel（`AgentSession.run`）强制、还有一个 kernel 天花板；每次调用是对 durable session 文件的独立进程；`step` stdout = 本次追加的事件 JSONL；`cancel` 用标记在 step 边界消化；bare `nulya` demo 已改走同一 durable 路径。
+✅ **`nulya session new|append|step|events|cancel` 已实现**，现状见 [DESIGN §14](DESIGN.md)。`step --max-steps N` 由 kernel（`AgentSession.run`，`session.max_steps_ceiling`）强制；每次调用是对 durable session 文件的独立进程，且只有 `step` 写主文件（`append` 走 inbox、`cancel` 是标记、`events` 只读 tail）；`step` stdout = 本次追加的事件 JSONL；`cancel` 由 kernel 在 step 边界消费；bare `nulya` demo 已改走同一 durable 路径。
 
 **尚未落地的子项：** `--system-file` / `--skill` / `--pin`（现从 config 取 composition）；`--budget-tokens`；`events --follow` 只做了轮询骨架。下面的 subagent / 编排用法等第一个真实 consumer 出现再写实（它们是**用法**，不改 kernel）：
 
@@ -108,7 +108,6 @@ nulya session append <id> <text|--file>
 nulya session step   <id> [--max-steps N] [--budget-tokens T]     → 跑到 assistant 停或上限；stdout 流式事件 JSONL
 nulya session events <id> [--since seq] [--follow]
 nulya session cancel <id>
-nulya session close  <id>
 ```
 
 - **每次 `step` 是一次进程调用**：load ledger + composition（header）→ 跑 N 步 → append → 退出。TUI 可 in-process 持有 `AgentSession`，语义相同。
@@ -259,7 +258,7 @@ Driver 演化比 Tool 保守，因为**归因难**（任务难度 / model / seed
 
 ## 4. 开放问题
 
-- ledger 文件的并发 append：POSIX O_APPEND vs Windows inbox 目录，实测定。
+- ~~ledger 文件的并发 append：POSIX O_APPEND vs Windows inbox 目录，实测定。~~ 已定：跨平台统一 inbox 目录 + `persist` 长度守卫（DESIGN §3.4）。剩下的边角：`append` 走 inbox 后，`events` 在下一 step 前看不到 pending 的 user turn——前端若要"立即回显"得自己记。
 - session id 与 workspace 的关系；多 workspace / 多用户下 extension 复用与隔离边界。
 - compaction 触发：token 阈值 vs task 边界 vs 混合；summary 由谁生成（agent 自己 vs 专用 session）。
 - `max_tools` K 与排序权重初值（安放处 `default.toml` 已定，值待调）。

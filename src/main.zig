@@ -50,8 +50,7 @@ fn runDemo(alloc: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) 
     defer lenv.deinit();
 
     const profile = if (cfg.provider.active_profile.len != 0) cfg.provider.active_profile else "scripted";
-    var holder = launch.ModelHolder{};
-    try launch.buildModel(alloc, io, cfg.provider, env, profile, &holder);
+    var holder = try launch.buildModel(alloc, io, cfg.provider, env, profile);
     defer holder.deinit();
     const model = holder.model();
     const effort = if (cfg.provider.findProfile(profile)) |p| p.effort else null;

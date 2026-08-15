@@ -112,7 +112,7 @@ UI / trajectory / metrics 是 ledger 的投影，不持久化 mutable 状态。*
 一场 session = 一个 JSONL 文件 `.nulya/sessions/<id>.jsonl`：第一行是冻结的 header，之后每行一个 `{"seq":n,…}` 事件（seq 从 1 单调递增）。
 
 ```jsonl
-{"kind":"header","v":1,"session":"s-…","parent":{"session":"s-…","seq":41}|null,"model":"…","created":"…","composition":{"active":[{"id":"web.search","version":"v-…"}],"native_tools":["ext:web.search/web_search"],"max_tools":8}}
+{"kind":"header","v":1,"session":"s-…","parent":{"session":"s-…","seq":41}|null,"model":"…","created":"…","composition":{"active":[{"id":"web.search","version":"v-…"}],"native_tools":["ext:web.search/web_search"]}}
 {"seq":1,"kind":"user_text","text":"…"}
 {"seq":2,"kind":"assistant","text":"…","calls":[{"id":"…","tool":"…","args":"…"}]}
 {"seq":3,"kind":"tool_results","results":[{"call_id":"…","ok":true,"output":"…","spill_path":null}]}
@@ -120,9 +120,10 @@ UI / trajectory / metrics 是 ledger 的投影，不持久化 mutable 状态。*
 ```
 
 - **一个文件 = 一个 generation = 一个 cache scope。** 文件只 append，所以 PromptIR 的 stable-block 前缀不变量（§1）成了文件系统性质。没有会 bump generation 的事件（§11）。
+- **header 的 JSON 形状就是 `ledger.Header` 结构体**（`std.json` 类型化编解码，`OwnedHeader = std.json.Parsed(Header)`）；读端忽略未知字段，所以新写者多出的字段不破坏旧读者。事件行保持平铺的 `kind` 形状（driver 读起来方便），解码经 `WireEvent`。
 - **composition 冻结进 header。** header 记录本场 active 的每个 extension 的**具体版本**与被选为 native 的 tool 稳定 id。任何进程 `openDurable` 重开时，都用 header 重建 composition（`composition.initFrozen`：读那些冻结版本、把 `native_tools` 当 pin），**绝不重扫 `current`、绝不重排 usage journal**——于是每个 `session step` 进程都看到**同一** composition，中途 `activate` 也移不动它（§5.1、§7.5、physics #2）。replay 时模型看到的一切 = header + events 的纯函数。
 - **resume。** `openDurable` 读回 header + 每条完整事件行；被截断的**最后一行**（写到一半崩溃）丢弃并把文件截回最后一条完整行，坏的**中间**行或乱序 `seq` 则是硬错误（`CorruptLedger`）。崩在 assistant-with-calls 之后（合法但未闭合的 batch）由 `completeInterruptedToolBatch` 在下一步补齐（§4）。
-- **并发 append：单写者 + inbox 目录。** session 文件只有一个写者——拥有它的 session 进程。跨进程事件（CLI 在 `NULYA_SESSION` 存在时产生的 `capability_note`，§5.3）写进兄弟目录 `<id>.inbox/`（一事件一文件，文件名 `note-<id>-<version>.json` 唯一），由 session 在 step 边界排干进主文件。Windows 上无需文件锁，且因为排干只发生在 step 边界，note 绝不插进一条 batch 中间（§4 的 batch 不变量成立）。`parent` 是 fork / compaction 的机制（compaction 本身未实现，见 PLAN §3.4）。
+- **单写者 + inbox 目录 + cancel 标记。** session 文件**只有一个写者**——`openDurable` 打开它的那个进程（CLI 里只有 `session step`）。其他任何进程都不写主文件，只往兄弟路径投递：跨进程**事件**（`ext activate` 在 `NULYA_SESSION` 存在时的 `capability_note`，§5.3；driver 的 `session append` 的 `user_text`）以一事件一文件写进 `<id>.inbox/`（`ledger.depositEvent`：先写 `.tmp` 再 rename，排干端永远读不到半个文件；note 用确定性文件名 `note-<id>-<version>` 幂等，append 用唯一名），由写者在 step 边界（`prepareStep`）按文件名序排干进主文件；**cancel 请求**是 `<id>.cancel` 标记（`session.requestCancel`），同样在 step 边界消费。读者（`session events`）只读原始行、不打开写句柄。兜底：`persist` 写前核对文件长度等于自己记的末尾，不等即 `ConcurrentWriter`（内存回滚、文件不动）——第二个写者是显式失败，不是静默覆盖。Windows 上无需文件锁；因为排干只发生在 step 边界，任何投递事件绝不插进一条 batch 中间（§4 的 batch 不变量成立）。`parent` 是 fork / compaction 的机制（compaction 本身未实现，见 PLAN §3.4）。
 
 ---
 
@@ -148,7 +149,10 @@ model.step(PromptIR, tool_defs)  →  assistant turn（可能含多个 tool_use�
 
 - provider 阶段取消：没有 assistant turn 形成，ledger 不动，返回 `status = .canceled`。
 - 执行阶段取消：**不抛弃这一批**。已跑的 call 标 `tool execution was canceled; side effects may be partial or unknown`；结果落盘阶段取消标 `completed, but result recording was canceled`；未派发的标 `not executed because the step was canceled`。补齐整批后 append **一条** tool_results。
+- 跨进程取消：`session.requestCancel` 在 session 文件旁写 `<id>.cancel`；`prepareStep` 在 step 边界消费它，这一步不调用模型、usage 为 0、返回 `.canceled`，`run` 就此停下。in-process（cancel 步骤的 `Future`）与跨进程（标记）是**同一个** kernel 语义的两种到达方式，都在 step 边界消化。
 - `completeInterruptedToolBatch`：进程上次崩在 assistant-with-calls 之后，下次 `prepareStep` 先补一条"interrupted"批次，再继续。
+- `prepareStep` 的顺序固定：补齐残尾 → 消费 cancel 标记 → 排干 inbox（§3.4）。
+- `AgentSession.run(max_steps)`：预算 = `min(max_steps, session.max_steps_ceiling)`（天花板 50），由 kernel 强制；turn 结束、预算耗尽或任一 step 取消即停。
 
 不变量：**一条 assistant tool-call batch ↔ 恰好一条匹配的 tool_results batch。** `session.recordCompletedToolStats` 直接按这个形状读 suffix 并 assert。
 
@@ -178,7 +182,7 @@ agent 在对话中经 shell `nulya ext build/activate` 造出新 extension 后�
 
 - **不改 `tools[]`**。
 - CLI 子进程（`nulya ext activate`）在 `NULYA_SESSION` 命名了 session 文件时，把一条 `capability_note` **投递**进该 session 的 inbox 目录（`<stem>.inbox/`，一事件一文件；文本确定性，列出 tools + `nulya ext run <id> <tool> '<json>'` 用法 + skills + `nulya skill load <ref>`）。它绝不直接写 session 文件——那是单写者（§3.4）。
-- `session.prepareStep` 每步在 step 边界（补齐残尾之后、下一次 model 调用之前）**排干** inbox：对 ledger 尚未宣告的 `id@version` append 一条 `capability_note`（`extension/notes.zig`）。排干只在 step 边界发生，note 因此绝不插进一条 batch 中间。
+- `session.prepareStep` 每步在 step 边界（补齐残尾之后、下一次 model 调用之前）**排干** inbox（`ledger.drainInbox`，机制通用于任何事件）：对 ledger 尚未宣告的 `id@version` append 一条 `capability_note`（note 文本由 `extension/notes.zig` 生成）。排干只在 step 边界发生，note 因此绝不插进一条 batch 中间。
 - 前缀不动，缓存继续命中；模型下一 step 经 shell 调用。
 - 下一场 session 的 §5.1 第 3 档里凭统计有机会晋升进 `tools[]`。
 
@@ -424,17 +428,17 @@ nulya ext init [--script] <id> [tool] | build <path>
           | activate <id> <version> | rollback <id> <version> | deactivate <id>
           | list | inspect <id> | api [protocol|permissions|examples]
 nulya session new [--model p] [--parent <id>:<seq>]      ← 冻结 composition + 写 header，打印 session id
-          | append <id> <text|--file f>                  ← 追加一条 user turn
-          | step <id> [--max-steps N]                    ← 跑到本 turn 结束或上限；stdout = 本次 append 的事件 JSONL
-          | events <id> [--since N] [--follow]           ← 打印事件 JSONL（follow 轮询）
-          | cancel <id> | close <id>
+          | append <id> <text|--file f>                  ← 把一条 user turn 投进 inbox（下一 step 边界进 ledger）
+          | step <id> [--max-steps N]                    ← 跑到本 turn 结束或预算耗尽；stdout = 本次 append 的事件 JSONL
+          | events <id> [--since N] [--follow]           ← 只读 tail 原始事件行（follow 轮询）
+          | cancel <id>                                  ← 写 cancel 标记，下一 step 边界消化
 nulya skill list | load <pinned-ref>
 nulya toolchain zig <args…>
 nulya                       ← 无参数：固定 prompt demo（现经 durable session 路径跑，§3.4）
 ```
 
 - `nulya ext api`：协议 / 权限 / 示例由当前二进制自己生成——模型永远查本机，不查训练记忆里的旧 API。
-- `nulya session *` 是**唯一**的 session 驱动面：没有 `setTools / setModel / replaceHistory`，换 composition = `session new`。每个子命令是对 durable session 文件（§3.4）的一次独立进程调用；`step` 的 `--max-steps` 上限**由 kernel 在 `AgentSession.run` 强制**（还有一个 kernel 天花板），driver 只能调低不能调高。`cancel` 写一个标记，下一次 `step` 在边界消化；session 就是它的文件，`close` 只清标记。
+- `nulya session *` 是**唯一**的 session 驱动面：没有 `setTools / setModel / replaceHistory`，换 composition = `session new`。每个子命令是对 durable session 文件（§3.4）的一次独立进程调用，其中**只有 `step` 写主文件**：`append` / `cancel` 投递到 `<id>.inbox/` / `<id>.cancel`（所以正在跑的 `step` 会在它的下一个 step 边界拿到 mid-run 的 append 或 cancel），`events` 是只读 tail（不解析、不重编码——文件本身就是 wire format）。`step` 的预算 `min(--max-steps, session.max_steps_ceiling)` **由 kernel 在 `AgentSession.run` 强制**，driver 只能调低不能调高；`--max-steps` 必须是正整数。session 就是它的文件，没有 `close`。
 - `nulya ext activate` 在 `NULYA_SESSION`（相对 workspace 的 session 文件路径）存在时，向该 session 的 inbox 投一条 capability_note（§5.3）。
 - 离线时 provider 回落到确定性的 scripted stand-in（`NULYA_SCRIPTED_MODE=finish|loop`，测试用）。
 

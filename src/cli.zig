@@ -517,8 +517,11 @@ fn dispatchToolchain(alloc: std.mem.Allocator, io: std.Io, args: []const []const
 //
 // The one session driver surface. There is deliberately no setTools / setModel /
 // replaceHistory: changing composition means a new session. Each subcommand is a
-// separate process over the durable session file; `step` streams the events it
-// appends as JSONL, and its `--max-steps` cap is enforced by the kernel.
+// separate process over the durable session file, and only `step` ever WRITES
+// that file: `append` and `cancel` deposit into the session's siblings
+// (`<id>.inbox/`, `<id>.cancel`) for `step` to consume at its next step
+// boundary, and `events` tails the file read-only. `step` streams the events it
+// appends as JSONL; its `--max-steps` budget is enforced by the kernel.
 
 fn dispatchSession(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (args.len == 0) return sessionUsage(io);
@@ -529,8 +532,7 @@ fn dispatchSession(alloc: std.mem.Allocator, io: std.Io, args: []const []const u
     if (std.mem.eql(u8, sub, "step")) return sessionStep(alloc, io, rest);
     if (std.mem.eql(u8, sub, "events")) return sessionEvents(alloc, io, rest);
     if (std.mem.eql(u8, sub, "cancel")) return sessionCancel(alloc, io, rest);
-    if (std.mem.eql(u8, sub, "close")) return sessionClose(alloc, io, rest);
-    try printErr(io, "unknown `session` subcommand; try new|append|step|events|cancel|close\n");
+    try printErr(io, "unknown `session` subcommand; try new|append|step|events|cancel\n");
     return 1;
 }
 
@@ -586,7 +588,7 @@ fn sessionNew(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
 
     // The model is only recorded (by profile name) at creation; a placeholder
     // handle is enough since `new` never steps.
-    var holder = launch.ModelHolder{};
+    var holder: launch.ModelHolder = .{ .scripted = .{} };
     var sess = session.AgentSession.createDurable(alloc, .{
         .model = holder.model(),
         .step_ctx = .{
@@ -640,13 +642,23 @@ fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
 
     const spath = try launch.sessionPath(alloc, id);
     defer alloc.free(spath);
-
-    var l = ledger.openDurable(alloc, io, std.Io.Dir.cwd(), spath) catch |err| {
-        try printOut(alloc, io, "session append failed: {s}\n", .{@errorName(err)});
+    if (!sessionExists(io, spath)) {
+        try printOut(alloc, io, "no such session '{s}'\n", .{id});
         return 1;
-    };
-    defer l.deinit();
-    try l.append(.{ .user_text = text });
+    }
+
+    // `append` never writes the session file (its one writer is `step`): the
+    // user turn is deposited into the session inbox under a fresh name and
+    // appended at the next step boundary — including mid-run, if a step
+    // process is going right now.
+    var nonce: [4]u8 = undefined;
+    io.random(&nonce);
+    const name = try std.fmt.allocPrint(alloc, "msg-{d}-{x}", .{
+        std.Io.Timestamp.now(io, .real).toNanoseconds(),
+        std.mem.readInt(u32, &nonce, .little),
+    });
+    defer alloc.free(name);
+    try ledger.depositEvent(alloc, io, std.Io.Dir.cwd(), spath, name, .{ .user_text = text });
     return 0;
 }
 
@@ -660,22 +672,19 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         try printErr(io, "invalid session id\n");
         return 1;
     }
-    // Kernel ceiling: a driver can lower it with --max-steps but never raise it.
-    const kernel_ceiling: usize = 50;
-    var max_steps: usize = kernel_ceiling;
+    // The kernel clamps this to `session.max_steps_ceiling`: a driver can lower
+    // the budget, never raise it.
+    var max_steps: usize = session.max_steps_ceiling;
     if (flagValue(args[1..], "--max-steps")) |v| {
-        max_steps = @min(std.fmt.parseInt(usize, v, 10) catch kernel_ceiling, kernel_ceiling);
+        max_steps = std.fmt.parseInt(usize, v, 10) catch 0;
+        if (max_steps == 0) {
+            try printErr(io, "--max-steps must be a positive integer\n");
+            return 1;
+        }
     }
 
     const spath = try launch.sessionPath(alloc, id);
     defer alloc.free(spath);
-
-    // A pending cancel request is honored at this step boundary: consume it and
-    // do nothing this invocation.
-    if (try consumeCancel(alloc, io, id)) {
-        try printErr(io, "session step canceled by request\n");
-        return 0;
-    }
 
     var host = try std.process.Environ.createMap(.{ .block = .global }, alloc);
     defer host.deinit();
@@ -695,8 +704,7 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     // they can deposit capability notes into its inbox (DESIGN §5.3).
     try lenv.env.put("NULYA_SESSION", spath);
 
-    var holder = launch.ModelHolder{};
-    try launch.buildModel(alloc, io, cfg.provider, &host, hdr.value.model, &holder);
+    var holder = try launch.buildModel(alloc, io, cfg.provider, &host, hdr.value.model);
     defer holder.deinit();
 
     const effort = if (cfg.provider.findProfile(hdr.value.model)) |p| p.effort else null;
@@ -748,33 +756,61 @@ fn sessionEvents(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
 
     const spath = try launch.sessionPath(alloc, id);
     defer alloc.free(spath);
+    if (!sessionExists(io, spath)) {
+        try printOut(alloc, io, "no such session '{s}'\n", .{id});
+        return 1;
+    }
 
-    var printed = try dumpEventsSince(alloc, io, spath, since);
+    var out_buf: [4096]u8 = undefined;
+    var stdout = std.Io.File.stdout().writerStreaming(io, &out_buf);
+    var tail: EventTail = .{ .since = since };
+    try tail.dump(alloc, io, std.Io.Dir.cwd(), spath, &stdout.interface);
+    try stdout.interface.flush();
     if (!follow) return 0;
 
     // Poll for newly appended events (DESIGN §14 / PLAN §3.2: polling is enough).
     while (true) {
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(200), .awake) catch {};
-        printed = try dumpEventsSince(alloc, io, spath, printed);
+        try tail.dump(alloc, io, std.Io.Dir.cwd(), spath, &stdout.interface);
+        try stdout.interface.flush();
     }
 }
 
-/// Print every event whose seq is greater than `since` as a raw JSONL line.
-/// Returns the highest seq printed (or `since` if none), for follow-mode paging.
-fn dumpEventsSince(alloc: std.mem.Allocator, io: std.Io, spath: []const u8, since: u64) !u64 {
-    var l = ledger.openDurable(alloc, io, std.Io.Dir.cwd(), spath) catch return since;
-    defer l.deinit();
-    var last = since;
-    for (l.view(), 0..) |ev, i| {
-        const seq: u64 = i + 1;
-        if (seq <= since) continue;
-        const line = try ledger.encodeEventLine(alloc, ev, seq);
-        defer alloc.free(line);
-        try printRaw(io, line);
-        last = seq;
+/// A read-only tail over a session file's raw lines. `events` never opens the
+/// file for writing and never parses or re-encodes events: the file IS the wire
+/// format, and its writer already validated that event line k carries seq k, so
+/// selecting by seq is counting complete lines past the header.
+const EventTail = struct {
+    since: u64,
+    /// Byte offset of the first unread line.
+    offset: usize = 0,
+    /// Event lines consumed so far (== the seq of the last one).
+    seq: u64 = 0,
+    header_seen: bool = false,
+
+    /// Write every complete, not-yet-seen event line with seq > `since` to `out`.
+    fn dump(self: *EventTail, alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, spath: []const u8, out: *std.Io.Writer) !void {
+        const bytes = try dir.readFileAlloc(io, spath, alloc, .unlimited);
+        defer alloc.free(bytes);
+        const clean_end: usize = @intCast(ledger.lastCompleteLineEnd(bytes));
+        if (clean_end < self.offset) return error.SessionFileShrank;
+        var pos = self.offset;
+        while (pos < clean_end) {
+            // `clean_end` sits just past a newline, so one exists at or after `pos`.
+            const nl = std.mem.indexOfScalarPos(u8, bytes, pos, '\n').?;
+            const line = bytes[pos .. nl + 1];
+            pos = nl + 1;
+            if (std.mem.trim(u8, line, " \t\r\n").len == 0) continue;
+            if (!self.header_seen) {
+                self.header_seen = true;
+                continue;
+            }
+            self.seq += 1;
+            if (self.seq > self.since) try out.writeAll(line);
+        }
+        self.offset = pos;
     }
-    return last;
-}
+};
 
 fn sessionCancel(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (args.len < 1) {
@@ -786,46 +822,21 @@ fn sessionCancel(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
         try printErr(io, "invalid session id\n");
         return 1;
     }
-    const marker = try cancelMarkerPath(alloc, id);
-    defer alloc.free(marker);
-    try std.Io.Dir.cwd().createDirPath(io, launch.sessions_dir);
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = marker, .data = "" });
+    const spath = try launch.sessionPath(alloc, id);
+    defer alloc.free(spath);
+    if (!sessionExists(io, spath)) {
+        try printOut(alloc, io, "no such session '{s}'\n", .{id});
+        return 1;
+    }
+    // The kernel consumes the marker at the session's next step boundary —
+    // between steps of a run already going, or at the start of the next `step`.
+    try session.requestCancel(alloc, io, std.Io.Dir.cwd(), spath);
     try printOut(alloc, io, "cancel requested for {s}\n", .{id});
     return 0;
 }
 
-fn sessionClose(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
-    if (args.len < 1) {
-        try printErr(io, "usage: nulya session close <id>\n");
-        return 1;
-    }
-    const id = args[0];
-    if (!launch.isValidSessionId(id)) {
-        try printErr(io, "invalid session id\n");
-        return 1;
-    }
-    const spath = try launch.sessionPath(alloc, id);
-    defer alloc.free(spath);
-    std.Io.Dir.cwd().access(io, spath, .{}) catch {
-        try printOut(alloc, io, "no such session '{s}'\n", .{id});
-        return 1;
-    };
-    // A session IS its file; closing just clears any pending cancel request.
-    _ = try consumeCancel(alloc, io, id);
-    try printOut(alloc, io, "closed {s}\n", .{id});
-    return 0;
-}
-
-fn cancelMarkerPath(alloc: std.mem.Allocator, id: []const u8) ![]u8 {
-    return std.fmt.allocPrint(alloc, "{s}/{s}.cancel", .{ launch.sessions_dir, id });
-}
-
-/// If a cancel marker exists for `id`, delete it and return true.
-fn consumeCancel(alloc: std.mem.Allocator, io: std.Io, id: []const u8) !bool {
-    const marker = try cancelMarkerPath(alloc, id);
-    defer alloc.free(marker);
-    std.Io.Dir.cwd().access(io, marker, .{}) catch return false;
-    std.Io.Dir.cwd().deleteFile(io, marker) catch {};
+fn sessionExists(io: std.Io, spath: []const u8) bool {
+    std.Io.Dir.cwd().access(io, spath, .{}) catch return false;
     return true;
 }
 
@@ -848,11 +859,10 @@ fn sessionUsage(io: std.Io) !u8 {
     try printRaw(io,
         \\usage:
         \\  nulya session new [--model profile] [--parent <id>:<seq>]   print a new session id
-        \\  nulya session append <id> <text> | --file <path>           append a user turn
-        \\  nulya session step <id> [--max-steps N]                    run to turn end (or the cap); stdout = event JSONL
-        \\  nulya session events <id> [--since N] [--follow]           print events as JSONL
+        \\  nulya session append <id> <text> | --file <path>           queue a user turn (appended at the next step boundary)
+        \\  nulya session step <id> [--max-steps N]                    run to turn end (or the budget); stdout = event JSONL
+        \\  nulya session events <id> [--since N] [--follow]           print events as JSONL (read-only tail)
         \\  nulya session cancel <id>                                  request cancel at the next step boundary
-        \\  nulya session close <id>                                   clear pending cancel; a session is its file
         \\
     );
     return 0;
@@ -904,7 +914,7 @@ fn usage(io: std.Io) !u8 {
         \\  nulya ext list                    list extensions and active versions
         \\  nulya ext inspect <id>            print an extension's manifest
         \\  nulya ext api [protocol|permissions|examples]
-        \\  nulya session new|append|step|events|cancel|close   drive a durable session
+        \\  nulya session new|append|step|events|cancel   drive a durable session
         \\  nulya skill list                 list active extension skills
         \\  nulya skill load <pinned-ref>    print a frozen SKILL.md
         \\  nulya toolchain zig <args...>     run the managed zig (scratch)
@@ -951,6 +961,45 @@ test "buildArgsJson falls back to string without a schema or for unparseable sca
     const out2 = try buildArgsJson(alloc, &bad, schema);
     defer alloc.free(out2);
     try std.testing.expectEqualStrings("{\"n\":\"notanumber\"}", out2);
+}
+
+test "EventTail prints raw event lines past --since, skips the header and a torn tail, and resumes" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const header = try ledger.encodeHeaderLine(alloc, .{ .session = "s" });
+    defer alloc.free(header);
+    const e1 = try ledger.encodeEventLine(alloc, .{ .user_text = "one" }, 1);
+    defer alloc.free(e1);
+    const e2 = try ledger.encodeEventLine(alloc, .{ .user_text = "two" }, 2);
+    defer alloc.free(e2);
+    const e3 = try ledger.encodeEventLine(alloc, .{ .user_text = "three" }, 3);
+    defer alloc.free(e3);
+
+    // Header, two complete events, and a torn third being written right now.
+    const first = try std.mem.concat(alloc, u8, &.{ header, e1, e2, e3[0 .. e3.len / 2] });
+    defer alloc.free(first);
+    try tmp.dir.writeFile(io, .{ .sub_path = "s.jsonl", .data = first });
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    var tail: EventTail = .{ .since = 1 };
+    try tail.dump(alloc, io, tmp.dir, "s.jsonl", &out.writer);
+    try std.testing.expectEqualStrings(e2, out.written()); // seq 1 filtered, torn 3 withheld
+
+    // The writer finishes the line; a follow-up dump prints only what is new,
+    // and the file was never modified by the reader.
+    const whole = try std.mem.concat(alloc, u8, &.{ header, e1, e2, e3 });
+    defer alloc.free(whole);
+    try tmp.dir.writeFile(io, .{ .sub_path = "s.jsonl", .data = whole });
+    out.clearRetainingCapacity();
+    try tail.dump(alloc, io, tmp.dir, "s.jsonl", &out.writer);
+    try std.testing.expectEqualStrings(e3, out.written());
+    const on_disk = try tmp.dir.readFileAlloc(io, "s.jsonl", alloc, .unlimited);
+    defer alloc.free(on_disk);
+    try std.testing.expectEqualStrings(whole, on_disk);
 }
 
 test "parseParent parses <session>:<seq> and rejects malformed input" {

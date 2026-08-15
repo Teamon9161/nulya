@@ -29,7 +29,6 @@ const composition = support.composition;
 const environment = support.environment;
 const integrity = support.integrity;
 const ledger = support.ledger;
-const notes = support.notes;
 const prompt = support.prompt;
 const promotion = support.promotion;
 const protocol = support.protocol;
@@ -954,7 +953,7 @@ test "durable ledger: a capability_note appended by a separate CLI process is re
     try sess.appendUser("please make a greet tool");
 
     // No note yet.
-    try std.testing.expect(!try notes.containsNoteFor(&sess.l, "demo", version));
+    try std.testing.expect(!sess.l.containsNote("demo", version));
 
     // A separate CLI process activates the extension with NULYA_SESSION set. It
     // deposits a capability note into the session inbox (never touching the
@@ -968,7 +967,7 @@ test "durable ledger: a capability_note appended by a separate CLI process is re
     // The next step drains the inbox at its boundary: the note is now in the
     // ledger and in the projected prompt, before the assistant turn.
     _ = try sess.step();
-    try std.testing.expect(try notes.containsNoteFor(&sess.l, "demo", version));
+    try std.testing.expect(sess.l.containsNote("demo", version));
 
     const ir = try prompt.projectWithSystem(alloc, sess.composition.system_prompts.blocks, sess.l.view());
     defer ir.deinit(alloc);
@@ -981,7 +980,7 @@ test "durable ledger: a capability_note appended by a separate CLI process is re
     // And it is durable: a fresh process resuming the session still sees the note.
     var reopened = try session.AgentSession.openDurable(alloc, opts, .{ .workspace = ws, .session_path = session_file_rel });
     defer reopened.deinit();
-    try std.testing.expect(try notes.containsNoteFor(&reopened.l, "demo", version));
+    try std.testing.expect(reopened.l.containsNote("demo", version));
 }
 
 // ── M2a: `nulya session *` CLI (PLAN §3.2) ──────────────────────────────────
