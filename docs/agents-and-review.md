@@ -1,5 +1,8 @@
 # Nulya — Subagent 原语与工具审阅门 (minimal)
 
+> **状态：全部未实现，属计划。** 落地路径见 [PLAN.md](PLAN.md) §3.2（subagent = `nulya session *` 自调用）与 §3.12（reviewer 作为 read-only session，在 promote-to-native 门上调用，默认不启用）。
+> 本文保留的是**能力模型与通信机制的论证**；其中 `AgentDef` 不再计划进 kernel——一个 agent 就是 `session new` 的一组参数（PLAN §3.6）。
+
 > 问题：AI 为完成某个具体任务，会给工具东加一个参数、西加一个参数，这些参数并不通用，
 > 工具调用 schema 越来越复杂。需要一个**专职审阅 agent** 把关工具的创建/变动，且能与主 agent 交流。
 >
@@ -115,7 +118,7 @@ v0.1 reviewer **不拿 unrestricted shell**。在没有 sandbox 的 local backen
 
 ### 3.4 结论落 ledger
 
-审阅结论是一条 append-only 事件（DESIGN §3.1 事件类型新增）：
+审阅结论是一条 append-only 事件（DESIGN §3 事件类型新增）：
 
 ```
 extension_review { ext_id, version, verdict: approve|reject, reasons, rounds }
@@ -186,7 +189,7 @@ approve → policy hook 放行；reject → 保持 installed。整条审阅对�
 - **持久 ledger 让 live 观察更容易**：TUI 同时 tail 主 ledger 和子 ledger，审阅者进度也能实时流式显示。
 - **token 流式在一轮内照常**（child 那一轮就是活进程）；轮间退出=「等对方回答」的自然停顿，不是卡死。
 - **延迟可忽略**：spawn 一个 nulya ≈ 毫秒，模型一轮 ≈ 秒，人回答更慢，re-spawn 加 <1%。
-- 唯一需要常驻的是"subagent 与真人**持续**流式对话跨多轮"——用 DESIGN §7.3 `process_mode = persistent`，纯后期加法，默认用不到。
+- 唯一需要常驻的是"subagent 与真人**持续**流式对话跨多轮"——用 PLAN §3.3 persistent runtime，纯后期加法，默认用不到。
 
 ### 6.3 成长到 tcode 级别（最小原语不用推倒）
 
@@ -196,7 +199,7 @@ approve → policy hook 放行；reject → 保持 installed。整条审阅对�
 | 并行审阅 / worktree 隔离 | Environment 层（§8）或调度器加，原语不动 |
 | 放开 leaf、多层委派 | 松 leaf 上限 + 加 depth 计数（tcode `MAX_TASK_DEPTH`），spawn policy 字段已预留 |
 | 报告 attach / 后续追问 | resume 同一子 ledger（本就 append-only 命中缓存） |
-| live 交互式子 agent | DESIGN §7.3 persistent mode（唯一需要常驻的轴） |
+| live 交互式子 agent | PLAN §3.3 persistent runtime（唯一需要常驻的轴） |
 
 ## 7. 一句话
 

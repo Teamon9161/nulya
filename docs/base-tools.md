@@ -95,7 +95,7 @@ fn emit(raw: []const u8, tool: []const u8, spill_key: SpillKey, ctx: *Ctx) Emitt
 - Later hardening：候选上下文、`target_line`、回显改动片段时带行号。不要让这些体验增强进入 v0.1 的最小内核。
 
 ### read
-- 经 `shell`（`cat`/`rg`/`sed -n`）即可满足读取——**read 不必是独立基础工具**（DESIGN §6.2）。若为体验保留一个 native `read`，也让它只做：窗口 + `emit`（§2），**不耦合** 图片解码 / vision 角色 / redaction（那些 tcode 的耦合是 accretion 之源）。
+- 经 `shell`（`cat`/`rg`/`sed -n`）即可满足读取——**read 不必是独立基础工具**（DESIGN §6）。若为体验保留一个 native `read`，也让它只做：窗口 + `emit`（§2），**不耦合** 图片解码 / vision 角色 / redaction（那些 tcode 的耦合是 accretion 之源）。
 
 ---
 
