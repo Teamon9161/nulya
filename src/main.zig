@@ -116,6 +116,12 @@ fn runDemo(alloc: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) 
             .scratch_dir = ".nulya/scratch",
         },
         .model_options = model_options,
+        // Config lives only at this boundary; the composition receives a narrow,
+        // already-resolved selection, never the config itself.
+        .registry = .{
+            .pinned_native_tools = cfg.registry.pinned_native_tools,
+            .max_tools = cfg.registry.max_tools,
+        },
     });
     defer sess.deinit();
     try sess.appendUser("What system am I on?");

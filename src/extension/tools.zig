@@ -22,6 +22,47 @@ pub const Binding = struct {
     /// Exact frozen executable path, passed verbatim to `Environment.runExtension`.
     entry_path: []const u8,
 
+    /// Build a binding that owns copies of every string it exposes, so it can
+    /// outlive the transient manifest and version data it was resolved from. The
+    /// session composition holds these on the heap: once its `Binding[]` is
+    /// frozen (`toOwnedSlice`), each binding's address is stable and every
+    /// derived `Tool` may borrow it (see `asTool`).
+    pub fn initOwned(
+        alloc: std.mem.Allocator,
+        definition: tool.ToolDefinition,
+        entry_path: []const u8,
+    ) !Binding {
+        const id = try alloc.dupe(u8, definition.id);
+        errdefer alloc.free(id);
+        const name = try alloc.dupe(u8, definition.name);
+        errdefer alloc.free(name);
+        const description = try alloc.dupe(u8, definition.description);
+        errdefer alloc.free(description);
+        const input_schema = try alloc.dupe(u8, definition.input_schema);
+        errdefer alloc.free(input_schema);
+        const owned_entry = try alloc.dupe(u8, entry_path);
+
+        return .{
+            .definition = .{
+                .id = id,
+                .name = name,
+                .description = description,
+                .input_schema = input_schema,
+            },
+            .entry_path = owned_entry,
+        };
+    }
+
+    /// Release the strings an `initOwned` binding holds. Never call on a binding
+    /// built from static string literals (the tests below).
+    pub fn deinit(self: Binding, alloc: std.mem.Allocator) void {
+        alloc.free(self.definition.id);
+        alloc.free(self.definition.name);
+        alloc.free(self.definition.description);
+        alloc.free(self.definition.input_schema);
+        alloc.free(self.entry_path);
+    }
+
     /// Adapt into a kernel `Tool`. `executor.ptr` is this binding's address.
     pub fn asTool(self: *Binding) tool.Tool {
         return .{
@@ -149,6 +190,52 @@ fn testBinding() Binding {
         },
         .entry_path = "/frozen/v1/bin/web-search",
     };
+}
+
+test "initOwned copies every exposed string and survives the source being freed" {
+    const alloc = testing.allocator;
+
+    // Sources on the heap, freed before use, to prove the binding took copies.
+    const id = try alloc.dupe(u8, "ext:web.search/web_search");
+    const name = try alloc.dupe(u8, "web_search");
+    const description = try alloc.dupe(u8, "Search web");
+    const input_schema = try alloc.dupe(u8, "{\"type\":\"object\"}");
+    const entry_path = try alloc.dupe(u8, "/frozen/v1/bin/web-search");
+
+    const binding = try Binding.initOwned(alloc, .{
+        .id = id,
+        .name = name,
+        .description = description,
+        .input_schema = input_schema,
+    }, entry_path);
+    defer binding.deinit(alloc);
+
+    // Drop the sources; the binding must not alias them.
+    alloc.free(id);
+    alloc.free(name);
+    alloc.free(description);
+    alloc.free(input_schema);
+    alloc.free(entry_path);
+
+    try testing.expectEqualStrings("ext:web.search/web_search", binding.definition.id);
+    try testing.expectEqualStrings("web_search", binding.definition.name);
+    try testing.expectEqualStrings("Search web", binding.definition.description);
+    try testing.expectEqualStrings("{\"type\":\"object\"}", binding.definition.input_schema);
+    try testing.expectEqualStrings("/frozen/v1/bin/web-search", binding.entry_path);
+}
+
+test "initOwned leaks nothing when an interior allocation fails" {
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn run(alloc: std.mem.Allocator) !void {
+            const binding = try Binding.initOwned(alloc, .{
+                .id = "ext:web.search/web_search",
+                .name = "web_search",
+                .description = "Search web",
+                .input_schema = "{\"type\":\"object\"}",
+            }, "/frozen/v1/bin/web-search");
+            binding.deinit(alloc);
+        }
+    }.run, .{});
 }
 
 test "asTool exposes the frozen definition, sequential policy, and binding pointer" {

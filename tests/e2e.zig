@@ -91,6 +91,11 @@ test "closed loop: init -> build -> activate -> run round-trips JSON" {
 
     const decoded = try protocol.decodeResponse(alloc, req.id, outcome.stdout);
     defer decoded.deinit(alloc);
-    try std.testing.expect(decoded.ok);
-    try std.testing.expect(std.mem.indexOf(u8, decoded.value_json, "greeting") != null);
+    switch (decoded) {
+        .result => |json| try std.testing.expect(std.mem.indexOf(u8, json, "greeting") != null),
+        .extension_error => |err| {
+            std.debug.print("unexpected extension error: [{d}] {s}\n", .{ err.code, err.message });
+            return error.TestUnexpectedResult;
+        },
+    }
 }

@@ -203,13 +203,16 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
         return 1;
     }
 
-    const entry_rel = try std.fmt.allocPrint(alloc, "{s}{s}", .{ rt.entry, build_ext.exe_suffix });
+    // Reuse the store's exact entry-path construction (identity check + exe
+    // suffix) so this CLI path and the session composition can never drift on how
+    // a frozen executable is located.
+    const entry_rel = try st.versionEntryPath(alloc, id, active, rt.entry);
     defer alloc.free(entry_rel);
 
     var cwd_real: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_len = try cwd.realPath(io, &cwd_real);
     const cwd_path = cwd_real[0..cwd_len];
-    const entry_abs = try std.fs.path.join(alloc, &.{ cwd_path, extensions_root, id, "versions", active, entry_rel });
+    const entry_abs = try std.fs.path.join(alloc, &.{ cwd_path, extensions_root, entry_rel });
     defer alloc.free(entry_abs);
 
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{});

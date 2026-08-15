@@ -16,6 +16,19 @@ const builtins = [_]tool.Tool{
     edit.def,
 };
 
+/// Permanent model-facing tool slots (shell + edit). The tool budget always
+/// reserves these before any extension tool is promoted (DESIGN §6).
+pub const builtin_count: usize = builtins.len;
+
+/// A snapshot rejects two ways of colliding. Both are logical-identity clashes,
+/// not resource faults, so they stay their own error set.
+pub const SnapshotError = error{
+    /// Two tools share a stable `ToolDefinition.id`.
+    DuplicateToolId,
+    /// Two tools share a model-facing `ToolDefinition.name`.
+    DuplicateToolName,
+};
+
 pub const ToolSetSnapshot = struct {
     /// Frozen model-facing tool set for the session composition. Names must be
     /// unique inside the snapshot; builtin names `shell` and `edit` are
@@ -44,7 +57,37 @@ pub const ToolSetSnapshot = struct {
 };
 
 pub fn snapshot(alloc: std.mem.Allocator) !ToolSetSnapshot {
-    return .{ .tools = try alloc.dupe(tool.Tool, &builtins) };
+    return snapshotWith(alloc, &.{});
+}
+
+/// Freeze the builtin table plus `extras` into one model-facing tool set.
+///
+/// The registry stays ignorant of what `extras` are — extension tools, MCP
+/// tools, anything adapted to `tool.Tool` — and only enforces the two identity
+/// invariants every snapshot must hold: unique stable id and unique model-facing
+/// name. Builtins keep their table order (shell, edit); extras follow, sorted by
+/// stable id so the frozen set is deterministic regardless of caller order.
+pub fn snapshotWith(alloc: std.mem.Allocator, extras: []const tool.Tool) !ToolSetSnapshot {
+    const tools = try alloc.alloc(tool.Tool, builtins.len + extras.len);
+    errdefer alloc.free(tools);
+
+    @memcpy(tools[0..builtins.len], &builtins);
+    @memcpy(tools[builtins.len..], extras);
+    // Only the extras are sorted; builtins keep their reserved leading order.
+    std.mem.sort(tool.Tool, tools[builtins.len..], {}, lessThanById);
+
+    for (tools, 0..) |a, i| {
+        for (tools[i + 1 ..]) |b| {
+            if (std.mem.eql(u8, a.definition.id, b.definition.id)) return error.DuplicateToolId;
+            if (std.mem.eql(u8, a.definition.name, b.definition.name)) return error.DuplicateToolName;
+        }
+    }
+
+    return .{ .tools = tools };
+}
+
+fn lessThanById(_: void, a: tool.Tool, b: tool.Tool) bool {
+    return std.mem.lessThan(u8, a.definition.id, b.definition.id);
 }
 
 test "snapshot freezes builtin table for lookup" {
@@ -85,4 +128,49 @@ test "builtin tools declare conservative sequential scheduling" {
 
     try std.testing.expectEqual(tool.BatchPolicy.sequential, snap.lookup("shell").?.batch_policy);
     try std.testing.expectEqual(tool.BatchPolicy.sequential, snap.lookup("edit").?.batch_policy);
+}
+
+fn stubTool(id: []const u8, name: []const u8) tool.Tool {
+    return .{
+        .definition = .{ .id = id, .name = name, .description = "", .input_schema = "{}" },
+        .executor = .{ .ptr = null, .callFn = undefined },
+    };
+}
+
+test "snapshotWith keeps builtins first and sorts extras by stable id" {
+    const extras = [_]tool.Tool{
+        stubTool("ext:z.pkg/zeta", "zeta"),
+        stubTool("ext:a.pkg/alpha", "alpha"),
+    };
+    const snap = try snapshotWith(std.testing.allocator, &extras);
+    defer snap.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 4), snap.tools.len);
+    // Builtins keep their reserved leading order regardless of extras.
+    try std.testing.expectEqualStrings("shell", snap.tools[0].definition.name);
+    try std.testing.expectEqualStrings("edit", snap.tools[1].definition.name);
+    // Extras follow, ordered by stable id (a before z), not by caller order.
+    try std.testing.expectEqualStrings("ext:a.pkg/alpha", snap.tools[2].definition.id);
+    try std.testing.expectEqualStrings("ext:z.pkg/zeta", snap.tools[3].definition.id);
+}
+
+test "snapshotWith rejects a duplicate stable id" {
+    const extras = [_]tool.Tool{
+        stubTool("ext:dup/one", "one"),
+        stubTool("ext:dup/one", "two"),
+    };
+    try std.testing.expectError(error.DuplicateToolId, snapshotWith(std.testing.allocator, &extras));
+}
+
+test "snapshotWith rejects a model-facing name that collides across extensions" {
+    const extras = [_]tool.Tool{
+        stubTool("ext:a.pkg/search", "search"),
+        stubTool("ext:b.pkg/search", "search"),
+    };
+    try std.testing.expectError(error.DuplicateToolName, snapshotWith(std.testing.allocator, &extras));
+}
+
+test "snapshotWith rejects an extra that shadows a builtin name" {
+    const extras = [_]tool.Tool{stubTool("ext:evil/shell", "shell")};
+    try std.testing.expectError(error.DuplicateToolName, snapshotWith(std.testing.allocator, &extras));
 }

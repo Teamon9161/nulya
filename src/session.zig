@@ -31,11 +31,14 @@ pub const AgentSession = struct {
         step_ctx: loop.StepContext,
         model_options: provider.Options = .{},
         extension_root: []const u8 = ".nulya/extensions",
+        /// Native tool selection and budget, resolved from config at the
+        /// session-setup boundary so this module stays config-agnostic.
+        registry: composition.Options = .{},
     };
 
     pub fn init(alloc: std.mem.Allocator, opts: Options) !AgentSession {
         const tool_ctx = opts.step_ctx.tool_context;
-        const comp = try composition.SessionComposition.init(alloc, tool_ctx.environment.io, tool_ctx.cwd, opts.extension_root);
+        const comp = try composition.SessionComposition.init(alloc, tool_ctx.environment.io, tool_ctx.cwd, opts.extension_root, opts.registry);
         errdefer comp.deinit(alloc);
 
         return .{
@@ -272,6 +275,7 @@ test "a canceled step accumulates its usage and the session runs the next step" 
         .l = ledger.Ledger.init(alloc),
         .composition = .{
             .pinned_extensions = &.{},
+            .extension_tool_bindings = &.{},
             .tools = .{ .tools = &tools_arr },
             .skills = .{ .skills = &.{} },
             .system_prompts = .{ .blocks = &.{} },
