@@ -11,8 +11,10 @@
 
 pub const build_ext = @import("extension/build_ext.zig");
 pub const composition = @import("composition.zig");
+pub const config = @import("config.zig");
 pub const environment = @import("environment.zig");
 pub const integrity = @import("extension/integrity.zig");
+pub const launch = @import("launch.zig");
 pub const ledger = @import("ledger.zig");
 pub const manifest = @import("extension/manifest.zig");
 pub const prompt = @import("prompt.zig");

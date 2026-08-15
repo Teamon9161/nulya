@@ -14,6 +14,13 @@ pub const max_system_prompt_bytes: usize = 2 * 1024 * 1024;
 
 pub const BlockKind = enum {
     user_text,
+    /// An assistant turn's opaque reasoning items (`ledger.Event.assistant
+    /// .reasoning`, verbatim). Always emitted BEFORE that turn's `assistant_text`
+    /// / `tool_call` blocks — every wire that replays reasoning wants it ahead
+    /// of the visible output — and only when non-empty. Providers that cannot
+    /// replay it (`thinking_replay == false`) skip the block; the kernel never
+    /// reads inside.
+    reasoning,
     assistant_text,
     tool_call,
     tool_result,
@@ -69,6 +76,7 @@ pub fn projectWithSystem(alloc: std.mem.Allocator, system_blocks: []const System
     for (events) |event| switch (event) {
         .user_text => |text| try appendBlock(alloc, &blocks, .user_text, text),
         .assistant => |as| {
+            if (as.reasoning.len != 0) try appendBlock(alloc, &blocks, .reasoning, as.reasoning);
             try appendBlock(alloc, &blocks, .assistant_text, as.text);
             for (as.calls) |call| {
                 const bytes = try std.fmt.allocPrint(alloc, "{s}\n{s}\n{s}", .{ call.id, call.tool, call.args_json });
@@ -124,6 +132,34 @@ test "PromptIR stable blocks extend by prefix on append" {
     defer p2.deinit(alloc);
 
     try std.testing.expect(isStablePrefix(p1.stable_blocks, p2.stable_blocks));
+}
+
+test "assistant reasoning projects as one opaque block ahead of the turn's text and calls" {
+    const alloc = std.testing.allocator;
+    var l = ledger.Ledger.init(alloc);
+    defer l.deinit();
+
+    try l.append(.{ .user_text = "hi" });
+    try l.append(.{ .assistant = .{ .text = "plain", .calls = &.{} } });
+    try l.append(.{ .user_text = "go" });
+    try l.append(.{ .assistant = .{
+        .reasoning = "[{\"type\":\"reasoning\",\"encrypted_content\":\"…\"}]",
+        .text = "",
+        .calls = &.{.{ .id = "c1", .tool = "shell", .args_json = "{}" }},
+    } });
+    const p = try project(alloc, l.view());
+    defer p.deinit(alloc);
+
+    // No reasoning → no block (a pre-reasoning ledger projects exactly as before).
+    try std.testing.expectEqual(BlockKind.user_text, p.stable_blocks[0].kind);
+    try std.testing.expectEqual(BlockKind.assistant_text, p.stable_blocks[1].kind);
+    try std.testing.expectEqual(BlockKind.user_text, p.stable_blocks[2].kind);
+    // With reasoning: reasoning, then text, then calls — verbatim bytes.
+    try std.testing.expectEqual(BlockKind.reasoning, p.stable_blocks[3].kind);
+    try std.testing.expectEqualStrings("[{\"type\":\"reasoning\",\"encrypted_content\":\"…\"}]", p.stable_blocks[3].bytes);
+    try std.testing.expectEqual(BlockKind.assistant_text, p.stable_blocks[4].kind);
+    try std.testing.expectEqual(BlockKind.tool_call, p.stable_blocks[5].kind);
+    try std.testing.expectEqual(@as(usize, 6), p.stable_blocks.len);
 }
 
 test "a capability_note appends a capability_note block without breaking the prefix or generation" {

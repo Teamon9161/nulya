@@ -105,7 +105,7 @@ pub fn runStepWithPrompt(
         else => return err,
     };
     defer turn.deinit(alloc);
-    try l.append(.{ .assistant = .{ .text = turn.text, .calls = turn.calls } });
+    try l.append(.{ .assistant = .{ .reasoning = turn.reasoning, .text = turn.text, .calls = turn.calls } });
     if (turn.calls.len == 0) return .{ .usage = turn.usage }; // model addressed the user; step complete.
 
     const results = try alloc.alloc(ledger.ToolResultEntry, turn.calls.len);

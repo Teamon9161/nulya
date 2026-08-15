@@ -52,9 +52,10 @@ kernel  = ledger 文件格式 + PromptIR 投影 + 一次 step + 工具执行 + c
 - 已做：build.zig 把 `src/**/*.zig` `@embedFile` 进二进制（恒开无 gate）；`nulya src [path] [--tests]` 打印（无参数列全树），**默认剥 top-level `test` 块**、`--tests`/`--raw` 原样（`source.zig`）；测试留在文件里，剥离是投影不是存储。`nulya ext api` 的协议 topic 变成 `nulya src extension/protocol.zig` 的特例（零漂移），去掉手抄的 wire shapes。
 - 验收（`tests/e2e.zig` 绿）：`nulya src prompt.zig --raw` 与磁盘 `src/prompt.zig` 逐字节相等；默认视图更短且无第 0 列 `test` 头；`nulya src` 列出含 `extension/protocol.zig`；`ext api` 打印真实 protocol 源码。
 
-### M4 · Anthropic provider + 真实 cache 验证（§3.9）
-- 要做：Messages API，`cache_control` 放在 tools 后 / system 后 / 最后稳定块后；读 `cache_read_input_tokens`。
-- 验收：integration test（需 key，可跳过）——连续三步 `cache_read` 单调不减且 ≥ 前一步 input 的 90%。
+### M4 · Anthropic / Codex provider + 真实 cache 验证（§3.9）✅ 已落地 → DESIGN §13
+- 已做：`providers/wire.zig`（三个 provider 共用的 POST + SSE + PromptIR 块解码，各文件只剩自己的 wire shape）；`anthropic`（Messages API，两个 `cache_control`——冻结 system 尾 + 最后一条 message 的最后一块，后者随 append 前移；同 role 块合并成一条 message；usage 合并而非覆盖；native 用 `output_config.effort`，兼容端点用 `thinking.budget_tokens`）；`codex`（ChatGPT 订阅的 responses 端点，OAuth 走 `~/.codex/auth.json`、401 自动 refresh 回写，prompt cache key 由 **durable session id** 确定性派生 → 跨 `session step` 进程同域）；config `ProviderKind` + `default.toml` 加 anthropic / codex / deepseek / deepseek-anthropic 四个 profile。
+- 验收（`zig build integration`，无 `NULYA_INTEGRATION_PROFILE` 即 skip）：`deepseek`（openai 口）/ `deepseek-anthropic`（anthropic 口）/ `codex` 三条真实链路，连续四步 `cache_read` 单调不减且从第二步起 ≥ 上一步 input 的 90%；批量 tool turn 在三种 wire format 上都跑到 end-turn。
+- **仍未验的一处**：DeepSeek 的 anthropic 口做的是 implicit prefix cache（`cache_creation_input_tokens` 恒 0），所以「`cache_control` breakpoint 被真正采纳」只在 first-party Anthropic key 上才能确认，现在只证明了「这个序列化不破坏缓存」。
 
 ### M5 · `session_outcome` + 第一个 evolution SKILL.md（§3.7）
 - 要做：可选事件 `session_outcome{ verdict, note? }`（前端 / 用户在 session 尾 append）；`skills/evolution/SKILL.md`（读 ledger 目录 + usage journal → 找重复 / regression / 值得沉淀 → 提案）；用户手动 `nulya session new --skill evolution`。
@@ -231,10 +232,13 @@ Driver 演化比 Tool 保守，因为**归因难**（任务难度 / model / seed
 - 与 config 项目层"只能收窄"是同一不变量的两面：checkout 一个 repo 不该能拓宽机器权限。
 - read-only subagent（reviewer）在 sandbox 之前不给 unrestricted shell（`local` 下无法区分 `cat` 与 `rm`）。
 
-### 3.9 Provider：Anthropic + cache breakpoints `[写实 · M4]`
+### 3.9 Provider：Anthropic / Codex + cache breakpoints `[已落地 · M4 → DESIGN §13]`
 
-- Anthropic Messages API：`cache_control` 放 tools 后 / system 后 / 最后稳定块后（append-only 让"最后"持续前移）；`ProviderCapabilities.explicit_cache_breakpoints = true`；读 `cache_read_input_tokens` / `cache_creation_input_tokens`。
+✅ **已实现，现状见 [DESIGN §13](DESIGN.md)。** `anthropic`（含兼容端点）、`codex`（ChatGPT 订阅）与共享的 `providers/wire.zig` 都已落地并经真实端点验收。
+
+仍未做的相邻项：
 - deferred tools 等 provider-specific 优化允许，但不能破坏 PromptIR 块前缀不变量。
+- ~~**thinking 回放**：ledger 四种事件里没有放 CoT 的地方……等有真实证据再说。~~ 已做（DESIGN §3.1、§13）：证据不用等——Anthropic 一方端点在 thinking 开着时**拒绝**丢了 thinking block 的 tool-use turn（Opus 5 默认开、Fable 5 只能开），Responses 端点不带则每步重推。落地形状不是第五种事件，是 `assistant.reasoning` 一个不透明字段 + `reasoning` block + provider 侧的 `reasoning_item`；codex 上已实测回放被接受。**仍未验**：first-party Anthropic key 上的 thinking-on tool 循环（integration 第三条就是为它写的，同 §4 那条 cache_control 未验项一起等 key）。
 - ProviderContribution（extension 供 provider）：在 loop 上游、与下游 Tool 不同构，机制待定，只占位。
 
 ### 3.10 `nulya src` 与文档 `[已落地 · M3 → DESIGN §14]`
@@ -263,5 +267,6 @@ Driver 演化比 Tool 保守，因为**归因难**（任务难度 / model / seed
 - `session_outcome` 的最小 verdict 集合；用户不给 verdict 时的默认（缺失 ≠ 失败）。
 - Verify 套件与 golden 输入数据的 snapshot 边界。
 - Driver episode 的 benchmark suite 如何 version / 防 Goodhart。
-- provider cache breakpoint 各厂商差异核实（Anthropic / OpenAI / 兼容端点）。
+- ~~provider cache breakpoint 各厂商差异核实（Anthropic / OpenAI / 兼容端点）。~~ 已测（M4）：openai / anthropic / codex 三条真实链路都拿到单调不减的 `cache_read`；剩下的是 first-party Anthropic key 上确认 `cache_control` 真被采纳（兼容端点是 implicit cache，看不出来）。
+- ~~codex 的 thinking：不回放 reasoning item 对多轮 tool 使用到底损失多少？~~ 已回放（DESIGN §3.1、§13），不再是问题；剩下的验收项是 first-party Anthropic key 上跑通 integration 第三条。
 - ~~是否给 `nulya src` 剥 test 块 vs 拆文件~~ 已定（M3）：测试留在文件里，`nulya src` 默认剥、`--tests` 保留——剥离是投影层的事，不动存储（DESIGN §14）。

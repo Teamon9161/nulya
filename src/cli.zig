@@ -638,7 +638,7 @@ fn sessionNew(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
     // Freeze the RESOLVED model identity now: config chooses the model at
     // creation, and a later config edit can never change this session's model
     // (DESIGN §3). A placeholder handle is enough since `new` never steps.
-    const identity = launch.resolveDescriptor(cfg.provider, &host, profile);
+    const identity = launch.resolveDescriptor(alloc, io, cfg.provider, &host, profile);
     var holder: launch.ModelHolder = .{ .scripted = .{} };
     var sess = session.AgentSession.createDurable(alloc, .{
         .model = holder.model(),
@@ -758,10 +758,13 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
 
     // Reconstruct the model frozen at creation, re-resolving only the credential.
     // No silent fallback: a real session whose key is gone fails loudly rather
-    // than quietly becoming a scripted session (DESIGN §3).
-    var holder = launch.buildFromDescriptor(alloc, io, hdr.value.model_identity, &host) catch |err| switch (err) {
+    // than quietly becoming a scripted session (DESIGN §3). The session id is
+    // also the prompt-cache scope, so a provider that keys its cache explicitly
+    // keeps hitting it across separate `step` processes.
+    var holder = launch.buildFromDescriptor(alloc, io, hdr.value.model_identity, &host, .{ .cache_key = id }) catch |err| switch (err) {
         error.MissingCredential => {
-            try printOut(alloc, io, "session '{s}' is a '{s}' session but its credential (${s}) is not set; refusing to run (no silent fallback)\n", .{ id, hdr.value.model_identity.provider, hdr.value.model_identity.api_key_env });
+            const credential = if (hdr.value.model_identity.api_key_env.len != 0) hdr.value.model_identity.api_key_env else "codex login";
+            try printOut(alloc, io, "session '{s}' is a '{s}' session but its credential ({s}) is not available; refusing to run (no silent fallback)\n", .{ id, hdr.value.model_identity.provider, credential });
             return 1;
         },
         error.ProviderUnavailable => {

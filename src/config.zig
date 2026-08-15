@@ -16,6 +16,10 @@ pub const default_toml = config_options.default_toml;
 pub const ProviderKind = enum {
     scripted,
     openai,
+    anthropic,
+    /// The ChatGPT-subscription Codex backend. Its credential is the Codex CLI's
+    /// `auth.json`, not an env var, so `api_key_env` is unused for it.
+    codex,
 };
 
 pub const PolicyHook = enum {

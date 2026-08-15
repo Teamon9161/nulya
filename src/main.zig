@@ -50,13 +50,22 @@ fn runDemo(alloc: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) 
     defer lenv.deinit();
 
     const profile = if (cfg.provider.active_profile.len != 0) cfg.provider.active_profile else "scripted";
+    const effort = if (cfg.provider.findProfile(profile)) |p| p.effort else null;
+
+    try std.Io.Dir.cwd().createDirPath(io, launch.sessions_dir);
+    const id = try launch.genSessionId(alloc, io);
+    defer alloc.free(id);
+    const spath = try launch.sessionPath(alloc, id);
+    defer alloc.free(spath);
+
     // One model-resolution decision: resolve the identity, then build the running
     // model from it — so the demo runs exactly what gets frozen into the header.
-    const identity = launch.resolveDescriptor(cfg.provider, env, profile);
-    var holder = try launch.buildFromDescriptor(alloc, io, identity, env);
+    // The session id doubles as the prompt-cache scope for providers that key
+    // their cache explicitly (DESIGN §13).
+    const identity = launch.resolveDescriptor(alloc, io, cfg.provider, env, profile);
+    var holder = try launch.buildFromDescriptor(alloc, io, identity, env, .{ .cache_key = id });
     defer holder.deinit();
     const model = holder.model();
-    const effort = if (cfg.provider.findProfile(profile)) |p| p.effort else null;
 
     std.debug.print("provider: {s}/{s} (shell dialect: {s})\n", .{ model.name(), model.modelName(), lenv.dialect_val.label() });
 
@@ -70,12 +79,6 @@ fn runDemo(alloc: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) 
         .success_rate = cfg.registry.weights.success_rate,
     });
     defer promotion.freeRankedIds(alloc, ranked_ids);
-
-    try std.Io.Dir.cwd().createDirPath(io, launch.sessions_dir);
-    const id = try launch.genSessionId(alloc, io);
-    defer alloc.free(id);
-    const spath = try launch.sessionPath(alloc, id);
-    defer alloc.free(spath);
 
     var sess = try session.AgentSession.createDurable(alloc, .{
         .model = model,
@@ -122,6 +125,7 @@ fn printLedger(l: *const ledger.Ledger) void {
             .user_text => |t| p("[{d}] user: {s}\n", .{ i, t }),
             .assistant => |as| {
                 p("[{d}] assistant: {s}\n", .{ i, as.text });
+                if (as.reasoning.len != 0) p("      reasoning: {d} bytes (opaque, replayed to the model)\n", .{as.reasoning.len});
                 for (as.calls) |c| p("      call {s} -> {s} {s}\n", .{ c.id, c.tool, c.args_json });
             },
             .tool_results => |rs| {
@@ -148,7 +152,10 @@ test {
     _ = @import("loop.zig");
     _ = @import("prompt.zig");
     _ = @import("provider.zig");
+    _ = @import("providers/wire.zig");
     _ = @import("providers/openai.zig");
+    _ = @import("providers/anthropic.zig");
+    _ = @import("providers/codex.zig");
     _ = @import("environment.zig");
     _ = @import("config.zig");
     _ = @import("extension/protocol.zig");

@@ -29,6 +29,15 @@ pub const ToolResultEntry = struct {
 pub const Event = union(enum) {
     user_text: []const u8,
     assistant: struct {
+        /// The turn's reasoning as the provider emitted it: a JSON array of
+        /// opaque, provider-owned items (signed / encrypted chain-of-thought), or
+        /// `""` when there was none. A FACT about the turn, not model-visible
+        /// text: the kernel never reads inside it; the projection hands it back
+        /// to the provider, which replays it verbatim to the same model so the
+        /// model's own reasoning survives across tool steps (DESIGN §13). It is
+        /// model-locked by construction — the session's `model_identity` is
+        /// frozen (§3.4), so nothing else ever sees it.
+        reasoning: []const u8 = "",
         text: []const u8,
         /// Zero or more tool calls. Multiple calls in one assistant turn are the
         /// batch the loop executes together (DESIGN §0.2, §4).
@@ -162,11 +171,13 @@ fn cloneEvent(alloc: std.mem.Allocator, e: Event) !Event {
     return switch (e) {
         .user_text => |text| .{ .user_text = try alloc.dupe(u8, text) },
         .assistant => |as| blk: {
+            const reasoning = try alloc.dupe(u8, as.reasoning);
+            errdefer alloc.free(reasoning);
             const text = try alloc.dupe(u8, as.text);
             errdefer alloc.free(text);
             const calls = try cloneToolCalls(alloc, as.calls);
             errdefer freeToolCalls(alloc, calls);
-            break :blk .{ .assistant = .{ .text = text, .calls = calls } };
+            break :blk .{ .assistant = .{ .reasoning = reasoning, .text = text, .calls = calls } };
         },
         .tool_results => |results| .{ .tool_results = try cloneToolResults(alloc, results) },
         .capability_note => |note| blk: {
@@ -184,6 +195,7 @@ fn freeEvent(alloc: std.mem.Allocator, e: Event) void {
     switch (e) {
         .user_text => |text| alloc.free(text),
         .assistant => |as| {
+            alloc.free(as.reasoning);
             alloc.free(as.text);
             freeToolCalls(alloc, as.calls);
         },
@@ -578,6 +590,10 @@ pub fn encodeEventBody(jw: *std.json.Stringify, e: Event) !void {
         },
         .assistant => |as| {
             try jw.write("assistant");
+            // Written only when present, so lines without reasoning keep their
+            // pre-existing shape byte-for-byte. Carried as a JSON *string* (the
+            // provider's array, escaped): the ledger stores it, never parses it.
+            if (as.reasoning.len != 0) try writeField(jw, "reasoning", as.reasoning);
             try writeField(jw, "text", as.text);
             try jw.objectField("calls");
             try jw.beginArray();
@@ -629,6 +645,9 @@ pub const WireEvent = struct {
     origin: ?[]const u8 = null,
     kind: []const u8,
     text: ?[]const u8 = null,
+    /// Assistant reasoning items (see `Event.assistant.reasoning`); absent on
+    /// lines written before the field existed, and on turns without any.
+    reasoning: ?[]const u8 = null,
     calls: ?[]const WireCall = null,
     results: ?[]const ToolResultEntry = null,
     id: ?[]const u8 = null,
@@ -660,7 +679,11 @@ pub fn toEvent(a: std.mem.Allocator, w: WireEvent) !Event {
         const wire_calls = w.calls orelse &.{};
         const calls = try a.alloc(ToolCall, wire_calls.len);
         for (wire_calls, calls) |wc, *c| c.* = .{ .id = wc.id, .tool = wc.tool, .args_json = wc.args };
-        return .{ .assistant = .{ .text = w.text orelse return error.CorruptLedger, .calls = calls } };
+        return .{ .assistant = .{
+            .reasoning = w.reasoning orelse "",
+            .text = w.text orelse return error.CorruptLedger,
+            .calls = calls,
+        } };
     }
     if (std.mem.eql(u8, w.kind, "tool_results")) {
         return .{ .tool_results = w.results orelse return error.CorruptLedger };
@@ -802,6 +825,7 @@ fn expectEventsEqual(a: []const Event, b: []const Event) !void {
         switch (x) {
             .user_text => |t| try std.testing.expectEqualStrings(t, y.user_text),
             .assistant => |as| {
+                try std.testing.expectEqualStrings(as.reasoning, y.assistant.reasoning);
                 try std.testing.expectEqualStrings(as.text, y.assistant.text);
                 try std.testing.expectEqual(as.calls.len, y.assistant.calls.len);
                 for (as.calls, y.assistant.calls) |c, d| {
@@ -881,11 +905,44 @@ test "a root header has a null parent after round-trip; unknown fields are ignor
 fn writeSampleEvents(l: *Ledger) !void {
     try l.append(.{ .user_text = "hi" });
     try l.append(.{ .assistant = .{
+        .reasoning = "[{\"type\":\"thinking\",\"thinking\":\"plan\",\"signature\":\"sig==\"}]",
         .text = "running",
         .calls = &.{.{ .id = "c1", .tool = "shell", .args_json = "{\"command\":\"echo one\"}" }},
     } });
     try l.append(.{ .tool_results = &.{.{ .call_id = "c1", .ok = true, .output = "one\n[exit 0]" }} });
     try l.append(.{ .capability_note = .{ .id = "demo", .version = "v-aaaa", .text = "note text" } });
+}
+
+test "assistant reasoning is stored opaquely, round-trips, and is optional on the wire" {
+    const alloc = std.testing.allocator;
+    var expected = Ledger.init(alloc);
+    defer expected.deinit();
+    try writeSampleEvents(&expected);
+
+    // Every line encodes and decodes to the same event, reasoning included.
+    for (expected.view(), 1..) |e, seq| {
+        const line = try encodeEventLine(alloc, e, seq);
+        defer alloc.free(line);
+        const parsed = try parseEventLine(alloc, line);
+        defer parsed.deinit();
+        const back = try toEvent(parsed.arena.allocator(), parsed.value);
+        try expectEventsEqual(&.{e}, &.{back});
+    }
+    // The array rides as one escaped JSON string; a turn without reasoning
+    // does not carry the field at all (old readers and old lines agree).
+    const with = try encodeEventLine(alloc, expected.view()[1], 2);
+    defer alloc.free(with);
+    try std.testing.expect(std.mem.indexOf(u8, with, "\"reasoning\":\"[{\\\"type\\\":\\\"thinking\\\"") != null);
+    const without = try encodeEventLine(alloc, .{ .assistant = .{ .text = "t", .calls = &.{} } }, 3);
+    defer alloc.free(without);
+    try std.testing.expect(std.mem.indexOf(u8, without, "reasoning") == null);
+
+    // A pre-reasoning line decodes to an empty reasoning, not an error.
+    const legacy = try parseEventLine(alloc, "{\"seq\":1,\"kind\":\"assistant\",\"text\":\"old\",\"calls\":[]}");
+    defer legacy.deinit();
+    const old = try toEvent(legacy.arena.allocator(), legacy.value);
+    try std.testing.expectEqualStrings("", old.assistant.reasoning);
+    try std.testing.expectEqualStrings("old", old.assistant.text);
 }
 
 test "durable create then open replays a block-identical ledger with monotonic seq" {
@@ -908,6 +965,7 @@ test "durable create then open replays a block-identical ledger with monotonic s
     try std.testing.expectEqualStrings("ext:web.search/web_search", reopened.header().?.composition.native_tools[0]);
     try std.testing.expect(reopened.containsNote("demo", "v-aaaa"));
     try std.testing.expect(!reopened.containsNote("demo", "v-bbbb"));
+    try std.testing.expect(std.mem.startsWith(u8, reopened.view()[1].assistant.reasoning, "[{\"type\":\"thinking\""));
 
     // The persisted seqs are strictly 1..N (proven by replay's own seq check).
     const raw = try tmp.dir.readFileAlloc(io, "s.jsonl", alloc, .unlimited);

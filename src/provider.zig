@@ -57,8 +57,16 @@ pub const ToolUseInputDelta = struct {
 pub const StreamEvent = union(enum) {
     started,
     text_delta: []const u8,
+    /// Human-readable reasoning text as it streams. Display only: the collector
+    /// does not keep it, and it is never replayed.
     thinking_delta: []const u8,
-    thinking_signature: []const u8,
+    /// One COMPLETE reasoning item, as one JSON value in the provider's own wire
+    /// shape (an Anthropic `thinking` / `redacted_thinking` block, a Responses
+    /// `reasoning` item with its `encrypted_content`, …). Emitted once the item
+    /// is whole; the collector keeps every item verbatim so the turn's reasoning
+    /// can be replayed to the same model on later steps (DESIGN §3.1, §13). The
+    /// kernel never looks inside.
+    reasoning_item: []const u8,
     tool_use_start: ToolUseStart,
     tool_use_input_delta: ToolUseInputDelta,
     usage: Usage,
@@ -87,6 +95,11 @@ pub const Request = struct {
 /// All slices are owned by the caller's allocator; `deinit` releases them after
 /// the ledger has cloned the event into append-only storage.
 pub const ModelTurn = struct {
+    /// The turn's reasoning items as one JSON array of opaque provider values,
+    /// in emission order; `""` when the model produced none. Stored on the
+    /// ledger's `assistant` event as-is and handed back to the provider by the
+    /// projection so it can replay them (see `StreamEvent.reasoning_item`).
+    reasoning: []const u8,
     text: []const u8,
     calls: []const ledger.ToolCall,
     /// Token accounting for this turn. Carries the cache-read counter so the loop
@@ -98,6 +111,7 @@ pub const ModelTurn = struct {
     stop_reason: StopReason = .end_turn,
 
     pub fn deinit(self: ModelTurn, alloc: std.mem.Allocator) void {
+        alloc.free(self.reasoning);
         alloc.free(self.text);
         for (self.calls) |call| {
             alloc.free(call.id);
@@ -206,6 +220,8 @@ const ToolCallDraft = struct {
 pub const TurnCollector = struct {
     alloc: std.mem.Allocator,
     text: std.Io.Writer.Allocating,
+    /// Complete reasoning items, verbatim, in emission order.
+    reasoning: std.ArrayList([]u8) = .empty,
     calls: std.ArrayList(ToolCallDraft) = .empty,
     usage: Usage = .{},
     done: ?StopReason = null,
@@ -216,6 +232,8 @@ pub const TurnCollector = struct {
 
     pub fn deinit(self: *TurnCollector) void {
         self.text.deinit();
+        for (self.reasoning.items) |item| self.alloc.free(item);
+        self.reasoning.deinit(self.alloc);
         for (self.calls.items) |*draft| draft.deinit(self.alloc);
         self.calls.deinit(self.alloc);
         self.* = undefined;
@@ -235,7 +253,11 @@ pub const TurnCollector = struct {
             .started => {},
             .text_delta => |delta| try self.text.writer.writeAll(delta),
             .thinking_delta => {},
-            .thinking_signature => {},
+            .reasoning_item => |item| {
+                const owned = try self.alloc.dupe(u8, item);
+                errdefer self.alloc.free(owned);
+                try self.reasoning.append(self.alloc, owned);
+            },
             .usage => |usage| self.usage = usage,
             .done => |reason| self.done = reason,
             .tool_use_start => |start| {
@@ -257,6 +279,9 @@ pub const TurnCollector = struct {
     }
 
     pub fn finish(self: *TurnCollector) !ModelTurn {
+        const reasoning = try joinReasoning(self.alloc, self.reasoning.items);
+        errdefer self.alloc.free(reasoning);
+
         const text = if (self.text.written().len == 0)
             try self.alloc.dupe(u8, "")
         else
@@ -286,6 +311,7 @@ pub const TurnCollector = struct {
         }
 
         return .{
+            .reasoning = reasoning,
             .text = text,
             .calls = calls,
             .usage = self.usage,
@@ -293,6 +319,22 @@ pub const TurnCollector = struct {
         };
     }
 };
+
+/// `[item,item,…]` from already-serialized JSON values, or `""` for none. The
+/// items are spliced, not re-encoded, so a provider gets back exactly the bytes
+/// it emitted.
+fn joinReasoning(alloc: std.mem.Allocator, items: []const []u8) ![]u8 {
+    if (items.len == 0) return alloc.dupe(u8, "");
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    try out.writer.writeByte('[');
+    for (items, 0..) |item, i| {
+        if (i != 0) try out.writer.writeByte(',');
+        try out.writer.writeAll(item);
+    }
+    try out.writer.writeByte(']');
+    return out.toOwnedSlice();
+}
 
 pub fn cloneToolCall(
     alloc: std.mem.Allocator,
@@ -335,6 +377,10 @@ test "model stream is collected into owned turn" {
             try std.testing.expectEqual(@as(usize, 1), request.prompt_ir.stable_blocks.len);
             try std.testing.expectEqual(@as(usize, 0), request.tools.len);
             try sink.emit(.started);
+            // Display-only text is dropped; complete items are kept verbatim.
+            try sink.emit(.{ .thinking_delta = "hmm" });
+            try sink.emit(.{ .reasoning_item = "{\"type\":\"thinking\",\"thinking\":\"hmm\",\"signature\":\"sig\"}" });
+            try sink.emit(.{ .reasoning_item = "{\"type\":\"redacted_thinking\",\"data\":\"xx\"}" });
             try sink.emit(.{ .text_delta = "o" });
             try sink.emit(.{ .text_delta = "k" });
             try sink.emit(.{ .tool_use_start = .{ .index = 0, .id = "c1", .name = "shell" } });
@@ -373,6 +419,10 @@ test "model stream is collected into owned turn" {
     defer turn.deinit(alloc);
 
     try std.testing.expectEqual(@as(u64, 0), fake.seen_generation);
+    try std.testing.expectEqualStrings(
+        "[{\"type\":\"thinking\",\"thinking\":\"hmm\",\"signature\":\"sig\"},{\"type\":\"redacted_thinking\",\"data\":\"xx\"}]",
+        turn.reasoning,
+    );
     try std.testing.expectEqualStrings("ok", turn.text);
     try std.testing.expectEqual(@as(usize, 1), turn.calls.len);
     try std.testing.expectEqualStrings("c1", turn.calls[0].id);

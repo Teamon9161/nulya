@@ -65,6 +65,9 @@ pub fn build(b: *std.Build) void {
     e2e_mod.addAnonymousImport("zig_archive", .{ .root_source_file = zig_archive });
     const e2e_support_mod = b.createModule(.{ .root_source_file = b.path("src/e2e_support.zig"), .target = target, .optimize = optimize });
     e2e_support_mod.addAnonymousImport("zig_archive", .{ .root_source_file = zig_archive });
+    // The facade re-exports config.zig, which reads the baked-in default.toml.
+    e2e_support_mod.addImport("toml", toml);
+    e2e_support_mod.addOptions("config_options", config_options);
     e2e_mod.addImport("support", e2e_support_mod);
     const e2e_tests = b.addTest(.{ .root_module = e2e_mod });
     const run_e2e = b.addRunArtifact(e2e_tests);
@@ -77,6 +80,21 @@ pub fn build(b: *std.Build) void {
     run_e2e.has_side_effects = true; // exercises the filesystem; always run
     const e2e_step = b.step("e2e", "Run the extension closed-loop end-to-end test");
     e2e_step.dependOn(&run_e2e.step);
+
+    // Live-provider checks (PLAN §1 M4 acceptance). Kept out of `test` / `e2e`,
+    // which stay offline: this one talks to a real endpoint and skips itself
+    // unless NULYA_INTEGRATION_PROFILE names a profile with a usable credential.
+    const integration_mod = b.createModule(.{
+        .root_source_file = b.path("tests/integration.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    integration_mod.addImport("support", e2e_support_mod);
+    const integration_tests = b.addTest(.{ .root_module = integration_mod });
+    const run_integration = b.addRunArtifact(integration_tests);
+    run_integration.has_side_effects = true; // network; never cached
+    const integration_step = b.step("integration", "Run live-provider integration tests (needs NULYA_INTEGRATION_PROFILE)");
+    integration_step.dependOn(&run_integration.step);
 }
 
 /// Generate the `src_embed` index module: a WriteFiles tree holding a copy of

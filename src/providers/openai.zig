@@ -9,6 +9,7 @@ const std = @import("std");
 const prompt = @import("../prompt.zig");
 const provider = @import("../provider.zig");
 const tool = @import("../tool.zig");
+const wire = @import("wire.zig");
 
 const DEFAULT_BASE_URL = "https://api.openai.com/v1";
 const DEFAULT_MODEL = "gpt-4o-mini";
@@ -77,6 +78,24 @@ pub const OpenAiProvider = struct {
         };
     }
 
+    /// Per-stream SSE state. Chat Completions has no explicit terminator other
+    /// than `[DONE]`, so the finish reason seen on the last chunk is carried
+    /// here in case the connection ends without one.
+    const StreamState = struct {
+        alloc: std.mem.Allocator,
+        sink: provider.EventSink,
+        finish: ?provider.StopReason = null,
+        started: bool = false,
+
+        fn onData(self: *StreamState, data: []const u8) anyerror!bool {
+            if (!self.started) {
+                self.started = true;
+                try self.sink.emit(.started);
+            }
+            return processSseData(self.alloc, data, self.sink, &self.finish);
+        }
+    };
+
     fn stream(ptr: *anyopaque, alloc: std.mem.Allocator, request: provider.Request, sink: provider.EventSink) anyerror!void {
         const self: *OpenAiProvider = @ptrCast(@alignCast(ptr));
         const body = try buildRequestJson(alloc, self.model, request);
@@ -84,52 +103,19 @@ pub const OpenAiProvider = struct {
 
         const url = try endpointUrl(alloc, self.base_url);
         defer alloc.free(url);
-        const uri = try std.Uri.parse(url);
         const auth = try std.fmt.allocPrint(alloc, "Bearer {s}", .{self.api_key});
         defer alloc.free(auth);
 
-        var req = try self.client.request(.POST, uri, .{
-            .keep_alive = false,
-            .redirect_behavior = .unhandled,
-            .headers = .{
-                .authorization = .{ .override = auth },
-                .content_type = .{ .override = "application/json" },
-                // Avoid gzip/deflate here so the SSE parser can read directly.
-                .accept_encoding = .omit,
-            },
-        });
-        defer req.deinit();
+        var state: StreamState = .{ .alloc = alloc, .sink = sink };
+        try wire.postSse(&self.client, alloc, .{
+            .url = url,
+            .body = body,
+            .authorization = auth,
+        }, &state, StreamState.onData);
 
-        req.transfer_encoding = .{ .content_length = body.len };
-        var body_writer = try req.sendBodyUnflushed(&.{});
-        try body_writer.writer.writeAll(body);
-        try body_writer.end();
-        try req.connection.?.flush();
-
-        var redirect_buffer: [8 * 1024]u8 = undefined;
-        var response = try req.receiveHead(&redirect_buffer);
-        if (response.head.status.class() != .success) {
-            var transfer_buffer: [1024]u8 = undefined;
-            const reader = response.reader(&transfer_buffer);
-            var error_body: std.Io.Writer.Allocating = .init(alloc);
-            defer error_body.deinit();
-            _ = reader.streamRemaining(&error_body.writer) catch {};
-            std.debug.print("OpenAI-compatible API error {d}: {s}\n", .{ @intFromEnum(response.head.status), error_body.written() });
-            return error.OpenAiApiError;
-        }
-
-        try sink.emit(.started);
-        var transfer_buffer: [1024]u8 = undefined;
-        const reader = response.reader(&transfer_buffer);
-        var finish: ?provider.StopReason = null;
-        while (try reader.takeDelimiter('\n')) |raw_line| {
-            const line = std.mem.trimEnd(u8, raw_line, "\r");
-            if (line.len == 0 or line[0] == ':') continue;
-            if (!std.mem.startsWith(u8, line, "data:")) continue;
-            const data = std.mem.trim(u8, line[5..], " ");
-            if (try processSseData(alloc, data, sink, &finish)) return;
-        }
-        if (finish) |reason| {
+        // `[DONE]` already emitted `done` and stopped the loop; reaching here
+        // means the body ended without it.
+        if (state.finish) |reason| {
             try sink.emit(.{ .done = reason });
         } else {
             return error.OpenAiStreamEndedEarly;
@@ -205,6 +191,11 @@ fn writeMessages(jw: *std.json.Stringify, ir: *const prompt.PromptIR) !void {
                 try writeRoleContentMessage(jw, "user", block.bytes);
                 i += 1;
             },
+            // Chat Completions has no replayable reasoning (`reasoning_content`
+            // is output-only on the endpoints that have it), and this provider
+            // never emits `reasoning_item`; a block here comes from a session
+            // whose model did, and it is not for this wire. Skipped, not sent.
+            .reasoning => i += 1,
             .assistant_text => {
                 const start = i + 1;
                 var end = start;
@@ -217,7 +208,7 @@ fn writeMessages(jw: *std.json.Stringify, ir: *const prompt.PromptIR) !void {
             // A tool_call at top level would mean the projection invariant broke.
             .tool_call => unreachable,
             .tool_result => {
-                const result = parseToolResultBlock(block.bytes);
+                const result = wire.parseToolResult(block.bytes);
                 try jw.beginObject();
                 try jw.objectField("role");
                 try jw.write("tool");
@@ -263,7 +254,7 @@ fn writeAssistantMessage(jw: *std.json.Stringify, content: []const u8, calls: []
         try jw.objectField("tool_calls");
         try jw.beginArray();
         for (calls) |call_block| {
-            const call = parseToolCallBlock(call_block.bytes);
+            const call = wire.parseToolCall(call_block.bytes);
             try jw.beginObject();
             try jw.objectField("id");
             try jw.write(call.id);
@@ -296,51 +287,11 @@ fn writeTools(jw: *std.json.Stringify, tools: []const tool.ToolDefinition) !void
         try jw.objectField("description");
         try jw.write(def.description);
         try jw.objectField("parameters");
-        try writeRawJson(jw, def.input_schema);
+        try wire.writeRaw(jw, def.input_schema);
         try jw.endObject();
         try jw.endObject();
     }
     try jw.endArray();
-}
-
-fn writeRawJson(jw: *std.json.Stringify, raw: []const u8) !void {
-    try jw.beginWriteRaw();
-    try jw.writer.writeAll(raw);
-    jw.endWriteRaw();
-}
-
-const ParsedToolCall = struct {
-    id: []const u8,
-    name: []const u8,
-    args_json: []const u8,
-};
-
-fn parseToolCallBlock(bytes: []const u8) ParsedToolCall {
-    const id_end = std.mem.indexOfScalar(u8, bytes, '\n') orelse return .{ .id = bytes, .name = "", .args_json = "{}" };
-    const rest = bytes[id_end + 1 ..];
-    const name_end = std.mem.indexOfScalar(u8, rest, '\n') orelse return .{ .id = bytes[0..id_end], .name = rest, .args_json = "{}" };
-    return .{
-        .id = bytes[0..id_end],
-        .name = rest[0..name_end],
-        .args_json = rest[name_end + 1 ..],
-    };
-}
-
-const ParsedToolResult = struct {
-    id: []const u8,
-    ok: []const u8,
-    output: []const u8,
-};
-
-fn parseToolResultBlock(bytes: []const u8) ParsedToolResult {
-    const id_end = std.mem.indexOfScalar(u8, bytes, '\n') orelse return .{ .id = bytes, .ok = "", .output = "" };
-    const rest = bytes[id_end + 1 ..];
-    const ok_end = std.mem.indexOfScalar(u8, rest, '\n') orelse return .{ .id = bytes[0..id_end], .ok = rest, .output = "" };
-    return .{
-        .id = bytes[0..id_end],
-        .ok = rest[0..ok_end],
-        .output = rest[ok_end + 1 ..],
-    };
 }
 
 pub fn processSseData(
@@ -359,29 +310,29 @@ pub fn processSseData(
     const root = parsed.value;
     if (root != .object) return error.OpenAiBadSse;
 
-    if (valueField(root, "usage")) |usage| {
+    if (wire.field(root, "usage")) |usage| {
         if (usage == .object) try sink.emit(.{ .usage = usageFrom(usage) });
     }
 
-    const choices = valueField(root, "choices") orelse return false;
+    const choices = wire.field(root, "choices") orelse return false;
     if (choices != .array or choices.array.items.len == 0) return false;
     const choice = choices.array.items[0];
     if (choice != .object) return error.OpenAiBadSse;
 
-    if (valueString(choice, "finish_reason")) |reason| {
+    if (wire.string(choice, "finish_reason")) |reason| {
         finish.* = stopReasonFrom(reason);
     }
 
-    const delta = valueField(choice, "delta") orelse return false;
+    const delta = wire.field(choice, "delta") orelse return false;
     if (delta != .object) return error.OpenAiBadSse;
 
-    if (valueString(delta, "content")) |content| {
+    if (wire.string(delta, "content")) |content| {
         if (content.len != 0) try sink.emit(.{ .text_delta = content });
     }
-    if (valueString(delta, "reasoning_content")) |thinking| {
+    if (wire.string(delta, "reasoning_content")) |thinking| {
         if (thinking.len != 0) try sink.emit(.{ .thinking_delta = thinking });
     }
-    if (valueField(delta, "tool_calls")) |calls| {
+    if (wire.field(delta, "tool_calls")) |calls| {
         if (calls != .array) return error.OpenAiBadSse;
         for (calls.array.items) |call| try emitToolCallDelta(call, sink);
     }
@@ -391,20 +342,20 @@ pub fn processSseData(
 
 fn emitToolCallDelta(call: std.json.Value, sink: provider.EventSink) !void {
     if (call != .object) return error.OpenAiBadSse;
-    const index = if (valueField(call, "index")) |v|
+    const index = if (wire.field(call, "index")) |v|
         if (v == .integer and v.integer >= 0) @as(usize, @intCast(v.integer)) else 0
     else
         0;
 
     var id: []const u8 = "";
-    if (valueString(call, "id")) |s| id = s;
+    if (wire.string(call, "id")) |s| id = s;
 
     var name: []const u8 = "";
     var args: []const u8 = "";
-    if (valueField(call, "function")) |function| {
+    if (wire.field(call, "function")) |function| {
         if (function != .object) return error.OpenAiBadSse;
-        if (valueString(function, "name")) |s| name = s;
-        if (valueString(function, "arguments")) |s| args = s;
+        if (wire.string(function, "name")) |s| name = s;
+        if (wire.string(function, "arguments")) |s| args = s;
     }
 
     if (id.len != 0 or name.len != 0) {
@@ -416,13 +367,13 @@ fn emitToolCallDelta(call: std.json.Value, sink: provider.EventSink) !void {
 }
 
 fn usageFrom(v: std.json.Value) provider.Usage {
-    const prompt_tokens = intField(v, "prompt_tokens");
-    const completion_tokens = intField(v, "completion_tokens");
+    const prompt_tokens = wire.uint(v, "prompt_tokens");
+    const completion_tokens = wire.uint(v, "completion_tokens");
     var cached: u64 = 0;
-    if (valueField(v, "prompt_tokens_details")) |details| {
-        if (details == .object) cached = intField(details, "cached_tokens");
+    if (wire.field(v, "prompt_tokens_details")) |details| {
+        if (details == .object) cached = wire.uint(details, "cached_tokens");
     }
-    if (cached == 0) cached = intField(v, "prompt_cache_hit_tokens");
+    if (cached == 0) cached = wire.uint(v, "prompt_cache_hit_tokens");
     return .{
         .input_tokens = prompt_tokens -| cached,
         .output_tokens = completion_tokens,
@@ -436,26 +387,6 @@ fn stopReasonFrom(s: []const u8) provider.StopReason {
     if (std.mem.eql(u8, s, "stop")) return .end_turn;
     if (std.mem.eql(u8, s, "length")) return .max_tokens;
     return .other;
-}
-
-fn intField(v: std.json.Value, field: []const u8) u64 {
-    const child = valueField(v, field) orelse return 0;
-    return switch (child) {
-        .integer => |i| if (i >= 0) @intCast(i) else 0,
-        .float => |f| if (f >= 0) @intFromFloat(f) else 0,
-        else => 0,
-    };
-}
-
-fn valueField(v: std.json.Value, field: []const u8) ?std.json.Value {
-    if (v != .object) return null;
-    return v.object.get(field);
-}
-
-fn valueString(v: std.json.Value, field: []const u8) ?[]const u8 {
-    const child = valueField(v, field) orelse return null;
-    if (child != .string) return null;
-    return child.string;
 }
 
 test "endpoint URL appends chat completions path once" {
@@ -532,7 +463,6 @@ test "SSE parser extracts streamed text tool calls usage and done" {
     try std.testing.expectEqual(@as(u64, 5), turn.usage.output_tokens);
     try std.testing.expectEqual(provider.StopReason.tool_use, turn.stop_reason);
 }
-
 
 test "request JSON serializes system blocks before stable ledger blocks" {
     const alloc = std.testing.allocator;
