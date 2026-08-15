@@ -100,12 +100,18 @@ fn skillLoad(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8
 }
 
 fn extInit(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
-    if (args.len < 1) {
-        try printErr(io, "usage: nulya ext init <id>\n");
+    var is_script = false;
+    var positional: std.ArrayList([]const u8) = .empty;
+    defer positional.deinit(alloc);
+    for (args) |a| {
+        if (std.mem.eql(u8, a, "--script")) is_script = true else try positional.append(alloc, a);
+    }
+    if (positional.items.len < 1) {
+        try printErr(io, "usage: nulya ext init [--script] <id> [tool]\n");
         return 1;
     }
-    const id = args[0];
-    const tool = if (args.len >= 2) args[1] else id;
+    const id = positional.items[0];
+    const tool = if (positional.items.len >= 2) positional.items[1] else id;
 
     const cwd = std.Io.Dir.cwd();
     const dir = try std.fs.path.join(alloc, &.{ extensions_root, id });
@@ -116,6 +122,23 @@ fn extInit(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     defer alloc.free(tests_dir);
     try cwd.createDirPath(io, src_dir);
     try cwd.createDirPath(io, tests_dir);
+
+    if (is_script) {
+        // Scaffold a script extension for the host platform: PowerShell on
+        // Windows, POSIX sh elsewhere. Both are frozen and run as-is (no build).
+        const windows = builtin.os.tag == .windows;
+        const script_name = if (windows) "run.ps1" else "run.sh";
+        const entry = if (windows) "src/run.ps1" else "src/run.sh";
+        const interpreter = if (windows) "powershell" else "sh";
+        const body = if (windows) templates.script_ps1 else templates.script_sh;
+        const manifest_bytes = try templates.scriptManifestJson(alloc, id, tool, entry, interpreter);
+        defer alloc.free(manifest_bytes);
+        try writeInto(alloc, io, cwd, dir, "extension.json", manifest_bytes);
+        try writeInto(alloc, io, cwd, src_dir, script_name, body);
+        try writeInto(alloc, io, cwd, tests_dir, "example.json", templates.example_test_json);
+        try printOut(alloc, io, "initialized script extension '{s}' at {s}\n", .{ id, dir });
+        return 0;
+    }
 
     const manifest_bytes = try templates.manifestJson(alloc, id, tool);
     defer alloc.free(manifest_bytes);
@@ -134,13 +157,19 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
     }
     const ext_dir = args[0];
 
-    const zig_exe = resolveZig(alloc, io) catch |err| {
-        try printOut(alloc, io, "no zig toolchain: {s}\n(set NULYA_ZIG, or build nulya with -Dembed-toolchain)\n", .{@errorName(err)});
-        return 1;
-    };
-    defer alloc.free(zig_exe);
+    // A script extension needs no toolchain; only a compiled one does. Resolve
+    // zig best-effort and let the build decide — it reports ZigVersionUnreadable
+    // only if it actually has to compile.
+    const zig_exe: ?[]u8 = resolveZig(alloc, io) catch null;
+    defer if (zig_exe) |z| alloc.free(z);
 
-    var result = try build_ext.buildExtension(alloc, io, std.Io.Dir.cwd(), ext_dir, zig_exe);
+    var result = build_ext.buildExtension(alloc, io, std.Io.Dir.cwd(), ext_dir, zig_exe orelse "") catch |err| switch (err) {
+        error.ZigVersionUnreadable => {
+            try printOut(alloc, io, "no zig toolchain (needed to compile this extension); set NULYA_ZIG, or build nulya with -Dembed-toolchain\n", .{});
+            return 1;
+        },
+        else => return err,
+    };
     defer result.deinit(alloc);
 
     if (!result.compile_ok) {
@@ -153,12 +182,41 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
 }
 
 fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
-    if (args.len < 2) {
-        try printErr(io, "usage: nulya ext run <id> [tool] <json-args>\n");
+    if (args.len < 1) {
+        try printErr(io, "usage: nulya ext run <id> [tool] <json-args> | --arg k=v ...\n");
         return 1;
     }
-    const id = args[0];
-    const args_json = args[args.len - 1];
+
+    // Split off `--arg k=v` pairs from positional args ([id, tool?, json?]).
+    var pairs: std.ArrayList([]const u8) = .empty;
+    defer pairs.deinit(alloc);
+    var positional: std.ArrayList([]const u8) = .empty;
+    defer positional.deinit(alloc);
+    {
+        var i: usize = 0;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--arg") and i + 1 < args.len) {
+                try pairs.append(alloc, args[i + 1]);
+                i += 1;
+            } else try positional.append(alloc, args[i]);
+        }
+    }
+    if (positional.items.len == 0) {
+        try printErr(io, "usage: nulya ext run <id> [tool] <json-args> | --arg k=v ...\n");
+        return 1;
+    }
+    const id = positional.items[0];
+    const use_args = pairs.items.len > 0;
+    if (!use_args and positional.items.len < 2) {
+        try printErr(io, "usage: nulya ext run <id> [tool] <json-args> | --arg k=v ...\n");
+        return 1;
+    }
+    for (pairs.items) |p| {
+        if (std.mem.indexOfScalar(u8, p, '=') == null) {
+            try printErr(io, "--arg must be of the form k=v\n");
+            return 1;
+        }
+    }
     const cwd = std.Io.Dir.cwd();
 
     var ext_root = try cwd.openDir(io, extensions_root, .{});
@@ -188,7 +246,11 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     var m = try manifest.parse(alloc, manifest_bytes);
     defer m.deinit();
     try m.validate();
-    const tool = if (args.len >= 3) args[1] else blk: {
+
+    // With --arg the only extra positional is an optional tool name; otherwise
+    // the last positional is the JSON and an optional tool name precedes it.
+    const has_explicit_tool = if (use_args) positional.items.len >= 2 else positional.items.len >= 3;
+    const tool = if (has_explicit_tool) positional.items[1] else blk: {
         if (m.tools.len == 0) {
             try printOut(alloc, io, "extension '{s}' contributes no runnable tools\n", .{id});
             return 1;
@@ -199,22 +261,27 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
         try printOut(alloc, io, "extension '{s}' has no runtime\n", .{id});
         return 1;
     };
-    var declared = false;
-    for (m.tools) |declared_tool| {
-        if (std.mem.eql(u8, declared_tool.name, tool)) {
-            declared = true;
-            break;
+    const spec: ?manifest.ToolSpec = blk: {
+        for (m.tools) |declared_tool| {
+            if (std.mem.eql(u8, declared_tool.name, tool)) break :blk declared_tool;
         }
-    }
-    if (!declared) {
+        break :blk null;
+    };
+    if (spec == null) {
         try printOut(alloc, io, "extension '{s}' does not declare tool '{s}'\n", .{ id, tool });
         return 1;
     }
 
-    // Reuse the store's exact entry-path construction (identity check + exe
-    // suffix) so this CLI path and the session composition can never drift on how
-    // a frozen executable is located.
-    const entry_rel = try st.versionEntryPath(alloc, id, active, rt.entry);
+    // Build the arguments JSON: from --arg pairs (typed by the tool's input
+    // schema) when given, otherwise the trailing positional JSON verbatim.
+    const owned_args: ?[]u8 = if (use_args) try buildArgsJson(alloc, pairs.items, spec.?.input_schema) else null;
+    defer if (owned_args) |a| alloc.free(a);
+    const args_json = owned_args orelse positional.items[positional.items.len - 1];
+
+    // A compiled binary lives under `bin/`; a script under `package/`. The store
+    // dispatches on runtime kind so this CLI path and session composition never
+    // drift on how a frozen entry is located.
+    const entry_rel = try st.versionRuntimeEntryPath(alloc, id, active, rt);
     defer alloc.free(entry_rel);
 
     var cwd_real: [std.fs.max_path_bytes]u8 = undefined;
@@ -232,6 +299,7 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     const invocation = try invoke.invokeTool(alloc, lenv.environment(), entry_abs, cwd_path, tool, args_json, .{
         .timeout_ms = 30_000,
         .max_output_bytes = 1 << 20,
+        .interpreter = rt.interpreter,
     });
     defer invocation.deinit(alloc);
 
@@ -245,6 +313,63 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
 
     try printOut(alloc, io, "{s}\n", .{invocation.output});
     return if (invocation.ok) 0 else 1;
+}
+
+/// Build a JSON object from `k=v` pairs, typing each value by the tool's input
+/// schema (`properties.<k>.type`): integer/number/boolean are emitted as JSON
+/// scalars, everything else (and any parse failure, and a missing schema) as a
+/// string. Caller owns the result.
+fn buildArgsJson(alloc: std.mem.Allocator, pairs: []const []const u8, input_schema: []const u8) ![]u8 {
+    const parsed: ?std.json.Parsed(std.json.Value) = std.json.parseFromSlice(std.json.Value, alloc, input_schema, .{}) catch null;
+    defer if (parsed) |p| p.deinit();
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    var jw: std.json.Stringify = .{ .writer = &out.writer };
+    try jw.beginObject();
+    for (pairs) |pair| {
+        const eq = std.mem.indexOfScalar(u8, pair, '=').?; // pre-checked by caller
+        const key = pair[0..eq];
+        const val = pair[eq + 1 ..];
+        try jw.objectField(key);
+        try writeTypedValue(&jw, val, schemaType(parsed, key));
+    }
+    try jw.endObject();
+    return out.toOwnedSlice();
+}
+
+fn schemaType(parsed: ?std.json.Parsed(std.json.Value), key: []const u8) ?[]const u8 {
+    const p = parsed orelse return null;
+    const root = switch (p.value) {
+        .object => |o| o,
+        else => return null,
+    };
+    const props = switch (root.get("properties") orelse return null) {
+        .object => |o| o,
+        else => return null,
+    };
+    const prop = switch (props.get(key) orelse return null) {
+        .object => |o| o,
+        else => return null,
+    };
+    return switch (prop.get("type") orelse return null) {
+        .string => |s| s,
+        else => null,
+    };
+}
+
+fn writeTypedValue(jw: *std.json.Stringify, val: []const u8, ty: ?[]const u8) !void {
+    if (ty) |t| {
+        if (std.mem.eql(u8, t, "integer")) {
+            if (std.fmt.parseInt(i64, val, 10)) |n| return jw.write(n) else |_| {}
+        } else if (std.mem.eql(u8, t, "number")) {
+            if (std.fmt.parseFloat(f64, val)) |n| return jw.write(n) else |_| {}
+        } else if (std.mem.eql(u8, t, "boolean")) {
+            if (std.mem.eql(u8, val, "true")) return jw.write(true);
+            if (std.mem.eql(u8, val, "false")) return jw.write(false);
+        }
+    }
+    return jw.write(val); // string, or an unparseable scalar left as text
 }
 
 const ActivateMode = enum { activate, rollback };
@@ -800,4 +925,39 @@ fn printRaw(io: std.Io, bytes: []const u8) !void {
 
 fn printErr(io: std.Io, bytes: []const u8) !void {
     try std.Io.File.stderr().writeStreamingAll(io, bytes);
+}
+
+test "buildArgsJson types values by the tool input schema" {
+    const alloc = std.testing.allocator;
+    const schema =
+        \\{"type":"object","properties":{"count":{"type":"integer"},"ratio":{"type":"number"},"on":{"type":"boolean"},"q":{"type":"string"}}}
+    ;
+    const pairs = [_][]const u8{ "count=3", "ratio=1.5", "on=true", "q=zig" };
+    const out = try buildArgsJson(alloc, &pairs, schema);
+    defer alloc.free(out);
+    try std.testing.expectEqualStrings("{\"count\":3,\"ratio\":1.5,\"on\":true,\"q\":\"zig\"}", out);
+}
+
+test "buildArgsJson falls back to string without a schema or for unparseable scalars" {
+    const alloc = std.testing.allocator;
+    const pairs = [_][]const u8{ "a=1", "b=hi" };
+    const out = try buildArgsJson(alloc, &pairs, "not a schema");
+    defer alloc.free(out);
+    try std.testing.expectEqualStrings("{\"a\":\"1\",\"b\":\"hi\"}", out);
+
+    // An integer-typed field with a non-integer value stays a string.
+    const schema = "{\"properties\":{\"n\":{\"type\":\"integer\"}}}";
+    const bad = [_][]const u8{"n=notanumber"};
+    const out2 = try buildArgsJson(alloc, &bad, schema);
+    defer alloc.free(out2);
+    try std.testing.expectEqualStrings("{\"n\":\"notanumber\"}", out2);
+}
+
+test "parseParent parses <session>:<seq> and rejects malformed input" {
+    const p = parseParent("s-123:41").?;
+    try std.testing.expectEqualStrings("s-123", p.session);
+    try std.testing.expectEqual(@as(u64, 41), p.seq);
+    try std.testing.expect(parseParent("no-seq") == null);
+    try std.testing.expect(parseParent(":41") == null);
+    try std.testing.expect(parseParent("s:notnum") == null);
 }

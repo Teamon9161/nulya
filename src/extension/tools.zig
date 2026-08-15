@@ -21,6 +21,9 @@ pub const Binding = struct {
     definition: tool.ToolDefinition,
     /// Exact frozen executable path, passed verbatim to `Environment.runExtension`.
     entry_path: []const u8,
+    /// For a script extension, the interpreter to run `entry_path` with; null for
+    /// a compiled (or directly-executable) entry.
+    interpreter: ?[]const u8 = null,
 
     /// Build a binding that owns copies of every string it exposes, so it can
     /// outlive the transient manifest and version data it was resolved from. The
@@ -31,6 +34,7 @@ pub const Binding = struct {
         alloc: std.mem.Allocator,
         definition: tool.ToolDefinition,
         entry_path: []const u8,
+        interpreter: ?[]const u8,
     ) !Binding {
         const id = try alloc.dupe(u8, definition.id);
         errdefer alloc.free(id);
@@ -41,6 +45,8 @@ pub const Binding = struct {
         const input_schema = try alloc.dupe(u8, definition.input_schema);
         errdefer alloc.free(input_schema);
         const owned_entry = try alloc.dupe(u8, entry_path);
+        errdefer alloc.free(owned_entry);
+        const owned_interp: ?[]const u8 = if (interpreter) |i| try alloc.dupe(u8, i) else null;
 
         return .{
             .definition = .{
@@ -50,6 +56,7 @@ pub const Binding = struct {
                 .input_schema = input_schema,
             },
             .entry_path = owned_entry,
+            .interpreter = owned_interp,
         };
     }
 
@@ -61,6 +68,7 @@ pub const Binding = struct {
         alloc.free(self.definition.description);
         alloc.free(self.definition.input_schema);
         alloc.free(self.entry_path);
+        if (self.interpreter) |i| alloc.free(i);
     }
 
     /// Adapt into a kernel `Tool`. `executor.ptr` is this binding's address.
@@ -84,7 +92,7 @@ fn call(ptr: ?*anyopaque, alloc: std.mem.Allocator, req: tool.ToolRequest) anyer
         req.ctx.cwd,
         self.definition.name,
         req.args_json,
-        .{},
+        .{ .interpreter = self.interpreter },
     );
 
     // Ownership transfer: both slices are allocator-owned; returning moves
@@ -207,7 +215,7 @@ test "initOwned copies every exposed string and survives the source being freed"
         .name = name,
         .description = description,
         .input_schema = input_schema,
-    }, entry_path);
+    }, entry_path, null);
     defer binding.deinit(alloc);
 
     // Drop the sources; the binding must not alias them.
@@ -232,7 +240,7 @@ test "initOwned leaks nothing when an interior allocation fails" {
                 .name = "web_search",
                 .description = "Search web",
                 .input_schema = "{\"type\":\"object\"}",
-            }, "/frozen/v1/bin/web-search");
+            }, "/frozen/v1/bin/web-search", null);
             binding.deinit(alloc);
         }
     }.run, .{});

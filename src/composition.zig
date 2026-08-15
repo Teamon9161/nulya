@@ -341,10 +341,11 @@ fn resolveRankedBinding(
     // found tool spec proves the runtime exists. No runtime-less state to defend.
     const rt = r.manifest.runtime.?;
 
-    // Exact, frozen executable path: <root>/<id>/versions/<r.version>/<entry>.
-    // Built from the version frozen at composition time — never `current`, never
-    // a second `activeVersion` lookup — so mid-session activation cannot move it.
-    const entry_rel = try st.versionEntryPath(alloc, r.id, r.version, rt.entry);
+    // Exact, frozen entry path (a compiled binary or a frozen script, per the
+    // runtime kind). Built from the version frozen at composition time — never
+    // `current`, never a second `activeVersion` lookup — so mid-session
+    // activation cannot move it.
+    const entry_rel = try st.versionRuntimeEntryPath(alloc, r.id, r.version, rt);
     defer alloc.free(entry_rel);
     const entry_abs = try std.fs.path.join(alloc, &.{ root_real, entry_rel });
     defer alloc.free(entry_abs);
@@ -356,7 +357,7 @@ fn resolveRankedBinding(
         .name = spec.name,
         .description = spec.description,
         .input_schema = spec.input_schema,
-    }, entry_abs);
+    }, entry_abs, rt.interpreter);
     return binding;
 }
 
@@ -406,10 +407,11 @@ fn resolvePinnedBinding(
     // executable; there is no runtime-less tool state to defend against.
     const rt = r.manifest.runtime.?;
 
-    // Exact, frozen executable path: <root>/<id>/versions/<r.version>/<entry>.
-    // Built from the version pinned at composition time — never `current`, never
-    // a second `activeVersion` lookup — so mid-session activation cannot move it.
-    const entry_rel = try st.versionEntryPath(alloc, r.id, r.version, rt.entry);
+    // Exact, frozen entry path (a compiled binary or a frozen script, per the
+    // runtime kind). Built from the version pinned at composition time — never
+    // `current`, never a second `activeVersion` lookup — so mid-session
+    // activation cannot move it.
+    const entry_rel = try st.versionRuntimeEntryPath(alloc, r.id, r.version, rt);
     defer alloc.free(entry_rel);
     const entry_abs = try std.fs.path.join(alloc, &.{ root_real, entry_rel });
     defer alloc.free(entry_abs);
@@ -421,7 +423,7 @@ fn resolvePinnedBinding(
         .name = spec.name,
         .description = spec.description,
         .input_schema = spec.input_schema,
-    }, entry_abs);
+    }, entry_abs, rt.interpreter);
 }
 
 fn findResolved(resolved: []const ResolvedExtension, id: []const u8) ?ResolvedExtension {
@@ -479,6 +481,7 @@ fn isExtensionFault(err: anyerror) bool {
         error.UnsupportedSchema,
         error.MissingRuntime,
         error.InvalidEntry,
+        error.InvalidInterpreter,
         error.NoContributions,
         error.InvalidToolName,
         error.ReservedToolName,

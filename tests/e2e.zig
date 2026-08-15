@@ -1112,3 +1112,116 @@ test "session cli: a shell-script driver runs a goal loop to completion" {
     if (code != 0) std.debug.print("driver failed ({d}):\nstdout: {s}\nstderr: {s}\n", .{ code, result.stdout, result.stderr });
     try std.testing.expectEqual(@as(u8, 0), code); // the driver reached its goal and exited 0
 }
+
+// ── M2b: script extensions (DESIGN §7.1) ────────────────────────────────────
+
+/// Scaffold a host-appropriate script extension (PowerShell on Windows, POSIX sh
+/// elsewhere) and build it into an immutable version WITHOUT a toolchain. The
+/// `zig_exe` argument is ignored for scripts — passed only to satisfy the shared
+/// build entry point. Returns the built version id; caller frees.
+fn scaffoldAndBuildScript(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, id: []const u8, tool_name: []const u8) ![]u8 {
+    const windows = @import("builtin").os.tag == .windows;
+    const script_name = if (windows) "run.ps1" else "run.sh";
+    const entry = if (windows) "src/run.ps1" else "src/run.sh";
+    const interpreter = if (windows) "powershell" else "sh";
+    const body = if (windows) templates.script_ps1 else templates.script_sh;
+
+    const ext_dir = try std.fs.path.join(alloc, &.{ ".nulya", "extensions", id });
+    defer alloc.free(ext_dir);
+    const src_dir = try std.fs.path.join(alloc, &.{ ext_dir, "src" });
+    defer alloc.free(src_dir);
+    try ws.createDirPath(io, src_dir);
+
+    const manifest_bytes = try templates.scriptManifestJson(alloc, id, tool_name, entry, interpreter);
+    defer alloc.free(manifest_bytes);
+    const manifest_rel = try std.fs.path.join(alloc, &.{ ext_dir, "extension.json" });
+    defer alloc.free(manifest_rel);
+    try ws.writeFile(io, .{ .sub_path = manifest_rel, .data = manifest_bytes });
+    const script_rel = try std.fs.path.join(alloc, &.{ src_dir, script_name });
+    defer alloc.free(script_rel);
+    try ws.writeFile(io, .{ .sub_path = script_rel, .data = body });
+
+    var result = try build_ext.buildExtension(alloc, io, ws, ext_dir, "zig-unused-for-scripts");
+    defer result.deinit(alloc);
+    if (!result.compile_ok) return error.ExtensionBuildFailed;
+    // A script build produces no separate binary artifact.
+    try std.testing.expect(result.entry_rel == null);
+    return try alloc.dupe(u8, result.version);
+}
+
+test "script extension: init(--script) -> build(seal) -> activate -> run -> promoted native in the next session" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io; // runExtension is synchronous; no async shell needed.
+
+    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var ws_real: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
+
+    // build(seal) — no toolchain needed — then activate.
+    const version = try scaffoldAndBuildScript(alloc, io, ws, "greeter", "greet");
+    defer alloc.free(version);
+    {
+        var ext_root = try ws.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
+        defer ext_root.close(io);
+        try store.Store.init(io, ext_root).activate(alloc, "greeter", version);
+    }
+
+    // run: a real CLI invocation drives the frozen script through its interpreter
+    // and records usage — the only thing that makes it a promotion candidate.
+    {
+        const run = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", "greeter", "greet", "{}" });
+        defer alloc.free(run.stdout);
+        try std.testing.expectEqual(@as(u8, 0), run.code);
+        try std.testing.expect(std.mem.indexOf(u8, run.stdout, "hello from a Nulya script extension") != null);
+    }
+
+    // The next session ranks the journal, promotes the script tool to native, and
+    // its ToolExecutor runs the frozen script (via its interpreter) end to end.
+    const ranked = try promotion.rankExtensionTools(alloc, io, ws_path, .{});
+    defer promotion.freeRankedIds(alloc, ranked);
+    try std.testing.expectEqual(@as(usize, 1), ranked.len);
+    try std.testing.expectEqualStrings("ext:greeter/greet", ranked[0]);
+
+    var comp = try composition.SessionComposition.init(alloc, io, ws_path, ".nulya/extensions", .{ .ranked_native_tools = ranked });
+    defer comp.deinit(alloc);
+    const greet = comp.tools.lookup("greet") orelse return error.TestUnexpectedResult;
+    // The frozen script lives under package/, and the binding carries its interpreter.
+    try std.testing.expect(std.mem.indexOf(u8, comp.extension_tool_bindings[0].entry_path, "package") != null);
+    try std.testing.expect(comp.extension_tool_bindings[0].interpreter != null);
+
+    const result = try callNative(alloc, io, greet, ws_path);
+    defer alloc.free(result.output);
+    try std.testing.expect(result.ok);
+    try std.testing.expect(std.mem.indexOf(u8, result.output, "hello from a Nulya script extension") != null);
+}
+
+test "script extension: version id excludes compiler identity and is stable across rebuilds" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const v1 = try scaffoldAndBuildScript(alloc, io, ws, "greeter", "greet");
+    defer alloc.free(v1);
+
+    // Rebuild with a *different* (bogus) toolchain argument: because a script
+    // build never consults the compiler, the version is unchanged. This is
+    // exactly "compiler identity is not in the version hash".
+    const windows = @import("builtin").os.tag == .windows;
+    const ext_dir = if (windows) ".nulya\\extensions\\greeter" else ".nulya/extensions/greeter";
+    var rebuilt = try build_ext.buildExtension(alloc, io, ws, ext_dir, "a-completely-different-zig");
+    defer rebuilt.deinit(alloc);
+    try std.testing.expect(rebuilt.compile_ok);
+    try std.testing.expect(rebuilt.already_built);
+    try std.testing.expectEqualStrings(v1, rebuilt.version);
+}

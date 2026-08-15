@@ -75,13 +75,29 @@ pub const Store = struct {
         return std.fs.path.join(alloc, &.{ id, versions_dir, version, "extension.json" });
     }
 
-    /// Root-relative path of a version's built entry binary. Caller owns the result.
+    /// Root-relative path of a COMPILED version's built entry binary (`bin/<name>`
+    /// plus the platform exe suffix). Caller owns the result.
     pub fn versionEntryPath(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8, entry: []const u8) ![]u8 {
         _ = self;
         try validateIdentity(id, version);
         const entry_rel = try std.fmt.allocPrint(alloc, "{s}{s}", .{ entry, exe_suffix });
         defer alloc.free(entry_rel);
         return std.fs.path.join(alloc, &.{ id, versions_dir, version, entry_rel });
+    }
+
+    /// Root-relative path of a SCRIPT version's frozen entry (inside `package/`,
+    /// no exe suffix). Caller owns the result.
+    pub fn versionScriptEntryPath(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8, entry: []const u8) ![]u8 {
+        _ = self;
+        try validateIdentity(id, version);
+        return std.fs.path.join(alloc, &.{ id, versions_dir, version, integrity.package_dir, entry });
+    }
+
+    /// Root-relative path of the version's entry, dispatching on runtime kind.
+    /// Caller owns the result.
+    pub fn versionRuntimeEntryPath(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8, rt: manifest.Runtime) ![]u8 {
+        if (manifest.isScript(rt)) return self.versionScriptEntryPath(alloc, id, version, rt.entry);
+        return self.versionEntryPath(alloc, id, version, rt.entry);
     }
 
     pub fn versionExists(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8) bool {

@@ -306,14 +306,21 @@ pub fn validateVersionDir(
     if (!std.mem.eql(u8, version, expected_version)) return error.VersionSealInvalid;
 
     if (m.runtime) |rt| {
-        const entry = try std.fmt.allocPrint(alloc, "{s}{s}", .{ rt.entry, exe_suffix });
-        defer alloc.free(entry);
-        const entry_sub = try std.fs.path.join(alloc, &.{ version_rel, entry });
-        defer alloc.free(entry_sub);
-        const binary_digest = try fileDigestHex(alloc, io, root, entry_sub);
-        defer alloc.free(binary_digest);
-        const sealed_binary = seal.binary_digest orelse return error.VersionSealInvalid;
-        if (!std.mem.eql(u8, binary_digest, sealed_binary)) return error.VersionSealInvalid;
+        if (manifest.isScript(rt)) {
+            // A script extension is frozen into `package/` and covered by the
+            // package digest; it has no separately-built binary, so the seal must
+            // record none.
+            if (seal.binary_digest != null) return error.VersionSealInvalid;
+        } else {
+            const entry = try std.fmt.allocPrint(alloc, "{s}{s}", .{ rt.entry, exe_suffix });
+            defer alloc.free(entry);
+            const entry_sub = try std.fs.path.join(alloc, &.{ version_rel, entry });
+            defer alloc.free(entry_sub);
+            const binary_digest = try fileDigestHex(alloc, io, root, entry_sub);
+            defer alloc.free(binary_digest);
+            const sealed_binary = seal.binary_digest orelse return error.VersionSealInvalid;
+            if (!std.mem.eql(u8, binary_digest, sealed_binary)) return error.VersionSealInvalid;
+        }
     } else if (seal.binary_digest != null) {
         return error.VersionSealInvalid;
     }

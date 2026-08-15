@@ -31,6 +31,8 @@ pub const Options = struct {
     timeout_ms: u32 = 30_000,
     /// Runner-level capture cap for the child's stdout/stderr.
     max_output_bytes: usize = 1 << 20,
+    /// For a script extension, the interpreter to run the entry with.
+    interpreter: ?[]const u8 = null,
 };
 
 /// One normalized `tool/call` invocation: compact result JSON on success, a
@@ -69,6 +71,7 @@ pub fn invokeTool(
 
     const outcome = try env.runExtension(alloc, .{
         .entry_path = entry_path,
+        .interpreter = options.interpreter,
         .cwd = cwd,
         .request_json = request_json,
         .max_output_bytes = options.max_output_bytes,

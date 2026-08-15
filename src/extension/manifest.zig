@@ -18,8 +18,24 @@ pub const schema_id = "nulya.extension/v2";
 pub const reserved_tool_names = [_][]const u8{ "shell", "edit" };
 
 pub const Runtime = struct {
+    /// Relative path to the runtime entry within the package. A `bin/<name>`
+    /// entry is a COMPILED Zig extension (built from `src/main.zig`); any other
+    /// entry (e.g. `src/run.ps1`) is a SCRIPT extension frozen as-is — see
+    /// `isScript`.
     entry: []const u8,
+    /// For a script extension, the executable used to run `entry` (e.g. `sh`,
+    /// `powershell`, `python3`). Absent means the entry is directly executable
+    /// (a `.cmd`/`.bat` on Windows, or a shebang script with the exec bit).
+    interpreter: ?[]const u8 = null,
 };
+
+/// A script extension is frozen and run as-is (no compilation); a compiled Zig
+/// extension outputs a binary under `bin/`. The `bin/` prefix is the sole,
+/// purely-syntactic distinguisher, so every consumer decides identically without
+/// probing the filesystem.
+pub fn isScript(rt: Runtime) bool {
+    return !std.mem.startsWith(u8, rt.entry, "bin/");
+}
 
 pub const ToolSpec = struct {
     name: []const u8,
@@ -60,6 +76,14 @@ pub const Manifest = struct {
 
         if (self.runtime) |rt| {
             if (!isSafeRelPath(rt.entry)) return error.InvalidEntry;
+            // A compiled entry lives under `bin/` (the build output); a script
+            // entry lives under `src/` (frozen with the source tree). Anything
+            // else is rejected so every consumer can locate the entry the same way.
+            if (isScript(rt) and !std.mem.startsWith(u8, rt.entry, "src/")) return error.InvalidEntry;
+            if (rt.interpreter) |i| {
+                if (i.len == 0) return error.InvalidInterpreter;
+                for (i) |c| if (c < 0x20) return error.InvalidInterpreter;
+            }
         } else if (self.tools.len != 0) {
             return error.MissingRuntime;
         }
@@ -102,6 +126,7 @@ pub const ValidateError = error{
     InvalidId,
     MissingRuntime,
     InvalidEntry,
+    InvalidInterpreter,
     NoContributions,
     InvalidToolName,
     ReservedToolName,
@@ -184,8 +209,14 @@ fn dupRuntime(a: std.mem.Allocator, obj: std.json.ObjectMap) ParseError!?Runtime
         .object => |o| o,
         else => return error.WrongType,
     };
+    const interpreter: ?[]const u8 = switch (runtime_obj.get("interpreter") orelse std.json.Value{ .null = {} }) {
+        .string => |s| try a.dupe(u8, s),
+        .null => null,
+        else => return error.WrongType,
+    };
     return .{
         .entry = try dupString(a, runtime_obj, "entry"),
+        .interpreter = interpreter,
     };
 }
 
@@ -285,6 +316,47 @@ test "parses and validates a well-formed manifest" {
     try std.testing.expectEqualStrings("skills/search-review", m.skills[0]);
     try std.testing.expectEqual(@as(usize, 1), m.permissions.network.len);
     try std.testing.expectEqualStrings("https", m.permissions.network[0]);
+}
+
+test "parses and validates a script runtime with an interpreter" {
+    const src =
+        \\{"schema":"nulya.extension/v2","id":"greeter","runtime":{"entry":"src/run.ps1","interpreter":"powershell"},"contributes":{"tools":[{"name":"greet","input":{}}]}}
+    ;
+    var m = try parse(std.testing.allocator, src);
+    defer m.deinit();
+    try m.validate();
+    try std.testing.expect(m.runtime != null);
+    try std.testing.expect(isScript(m.runtime.?));
+    try std.testing.expectEqualStrings("powershell", m.runtime.?.interpreter.?);
+}
+
+test "a bin/ entry is a compiled runtime, not a script" {
+    const src =
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"t","input":{}}]}}
+    ;
+    var m = try parse(std.testing.allocator, src);
+    defer m.deinit();
+    try m.validate();
+    try std.testing.expect(!isScript(m.runtime.?));
+    try std.testing.expect(m.runtime.?.interpreter == null);
+}
+
+test "a script entry must live under src/" {
+    const src =
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"run.sh","interpreter":"sh"},"contributes":{"tools":[{"name":"t","input":{}}]}}
+    ;
+    var m = try parse(std.testing.allocator, src);
+    defer m.deinit();
+    try std.testing.expectError(error.InvalidEntry, m.validate());
+}
+
+test "rejects an empty interpreter" {
+    const src =
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"src/run.sh","interpreter":""},"contributes":{"tools":[{"name":"t","input":{}}]}}
+    ;
+    var m = try parse(std.testing.allocator, src);
+    defer m.deinit();
+    try std.testing.expectError(error.InvalidInterpreter, m.validate());
 }
 
 test "validates a pure skill package without runtime" {

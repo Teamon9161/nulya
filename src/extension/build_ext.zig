@@ -72,7 +72,11 @@ pub fn buildExtension(
     const snapshot_bytes = try snapshot.canonicalBytes(alloc);
     defer alloc.free(snapshot_bytes);
 
-    const compiler = try compilerIdentity(alloc, io, workspace, zig_exe);
+    // A script extension is frozen and run as-is: no compilation, so its version
+    // id excludes compiler identity (compiler = "") and is stable across
+    // rebuilds regardless of the local zig (DESIGN §7.1, §7.4).
+    const script = if (m.runtime) |rt| manifest.isScript(rt) else false;
+    const compiler = if (script) try alloc.dupe(u8, "") else try compilerIdentity(alloc, io, workspace, zig_exe);
     defer alloc.free(compiler);
 
     const version = try integrity.versionId(alloc, snapshot_bytes, compiler, toolchain.host_target);
@@ -81,10 +85,12 @@ pub fn buildExtension(
     const version_rel = try std.fs.path.join(alloc, &.{ ext_dir_rel, "versions", version });
     defer alloc.free(version_rel);
 
-    const entry_rel: ?[]u8 = if (m.runtime) |rt|
+    // `entry_rel` is the BUILT binary path — compiled extensions only. A script's
+    // entry is frozen inside `package/` and located via `store.versionScriptEntryPath`.
+    const entry_rel: ?[]u8 = if (!script) (if (m.runtime) |rt|
         try std.fmt.allocPrint(alloc, "{s}{s}", .{ rt.entry, exe_suffix })
     else
-        null;
+        null) else null;
     errdefer if (entry_rel) |entry| alloc.free(entry);
 
     const version_is_valid = if (workspace.access(io, version_rel, .{})) |_| blk: {
@@ -97,10 +103,12 @@ pub fn buildExtension(
     }
     workspace.deleteTree(io, version_rel) catch {};
 
-    if (m.runtime == null) {
+    // Pure contribution (no runtime) or script: freeze the snapshot, seal with no
+    // binary, done — nothing to compile.
+    if (m.runtime == null or script) {
         try integrity.freezeSnapshot(alloc, io, workspace, version_rel, manifest_bytes, snapshot);
         try writeSeal(alloc, io, workspace, version_rel, snapshot, compiler, toolchain.host_target, null);
-        return .{ .version = version, .entry_rel = null, .already_built = false, .compile_ok = true, .stderr = try alloc.alloc(u8, 0) };
+        return .{ .version = version, .entry_rel = entry_rel, .already_built = false, .compile_ok = true, .stderr = try alloc.alloc(u8, 0) };
     }
 
     const rt = m.runtime.?;

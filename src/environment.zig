@@ -52,8 +52,12 @@ pub const ShellRequest = struct {
 /// `extension/protocol.zig`, so a malformed reply is a decode error, not a host
 /// crash.
 pub const ExtensionRequest = struct {
-    /// Absolute path to the built extension executable (the active version's bin).
+    /// Absolute path to the extension entry: a built binary for a compiled
+    /// extension, or a frozen script for a script extension (DESIGN §7.1).
     entry_path: []const u8,
+    /// For a script extension, the interpreter to run `entry_path` with (becomes
+    /// argv[0], with the entry as argv[1]). `null` runs the entry directly.
+    interpreter: ?[]const u8 = null,
     cwd: []const u8,
     request_json: []const u8,
     max_output_bytes: usize,
@@ -356,8 +360,18 @@ pub const LocalEnvironment = struct {
         // Oneshot (DESIGN §7.3): spawn, feed one request, read one response, exit.
         // Capture stderr too: when an AI-authored extension crashes before it can
         // write a protocol error on stdout, stderr is the only repair signal.
+        // A script extension runs through its interpreter (argv = [interpreter,
+        // entry]); a compiled one runs directly (argv = [entry]).
+        var argv_buf: [2][]const u8 = undefined;
+        const argv: []const []const u8 = if (req.interpreter) |interp| blk: {
+            argv_buf = .{ interp, req.entry_path };
+            break :blk argv_buf[0..2];
+        } else blk: {
+            argv_buf[0] = req.entry_path;
+            break :blk argv_buf[0..1];
+        };
         var child = try std.process.spawn(self.io, .{
-            .argv = &.{req.entry_path},
+            .argv = argv,
             .cwd = .{ .path = req.cwd },
             .environ_map = &self.env,
             .stdin = .pipe,

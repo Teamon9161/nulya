@@ -75,6 +75,50 @@ pub const example_test_json =
     \\
 ;
 
+/// A generated PowerShell script extension entry (JSON-RPC 2.0, oneshot): read
+/// one request on stdin, write one response on stdout. Frozen and run as-is — no
+/// compilation (DESIGN §7.1).
+pub const script_ps1 =
+    \\$ErrorActionPreference = 'Stop'
+    \\$in = [Console]::In.ReadToEnd()
+    \\$id = 'call'
+    \\try { $req = $in | ConvertFrom-Json; if ($req.id) { $id = [string]$req.id } } catch {}
+    \\$resp = [ordered]@{ jsonrpc = '2.0'; id = $id; result = [ordered]@{ greeting = 'hello from a Nulya script extension' } }
+    \\[Console]::Out.Write(($resp | ConvertTo-Json -Compress))
+    \\
+;
+
+/// A generated POSIX sh script extension entry (JSON-RPC 2.0, oneshot).
+pub const script_sh =
+    \\#!/bin/sh
+    \\req=$(cat)
+    \\id=$(printf '%s' "$req" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+    \\[ -z "$id" ] && id=call
+    \\printf '{"jsonrpc":"2.0","id":"%s","result":{"greeting":"hello from a Nulya script extension"}}' "$id"
+    \\
+;
+
+/// Render `extension.json` for a SCRIPT extension: a `runtime.entry` under `src/`
+/// plus an interpreter, no build step. Caller owns the returned bytes.
+pub fn scriptManifestJson(alloc: std.mem.Allocator, id: []const u8, tool: []const u8, entry: []const u8, interpreter: []const u8) ![]u8 {
+    return std.fmt.allocPrint(alloc,
+        \\{{
+        \\  "schema": "nulya.extension/v2",
+        \\  "id": "{s}",
+        \\  "runtime": {{ "entry": "{s}", "interpreter": "{s}" }},
+        \\  "contributes": {{
+        \\    "tools": [{{
+        \\      "name": "{s}",
+        \\      "description": "A generated Nulya script extension tool.",
+        \\      "input": {{ "type": "object", "properties": {{}} }}
+        \\    }}]
+        \\  }},
+        \\  "permissions": {{ "fs": [], "network": [], "process": [] }}
+        \\}}
+        \\
+    , .{ id, entry, interpreter, tool });
+}
+
 /// Render `extension.json` for `id`/`tool`. Caller owns the returned bytes.
 pub fn manifestJson(alloc: std.mem.Allocator, id: []const u8, tool: []const u8) ![]u8 {
     return std.fmt.allocPrint(alloc,
