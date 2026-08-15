@@ -151,9 +151,14 @@ pub fn decodeResponse(alloc: std.mem.Allocator, expected_id: []const u8, bytes: 
     const message = stringField(err_obj, "message") orelse return error.InvalidResponse;
     const retryable = retryableFromData(err_obj.get("data"));
     const message_owned = try alloc.dupe(u8, message);
+    // `value_json` is a second, independently owned allocation: if it fails,
+    // `message_owned` must still be released — `DecodedResponse.deinit` frees
+    // both only when called on a complete value.
+    errdefer alloc.free(message_owned);
+    const value_json = try alloc.dupe(u8, "null");
     return .{
         .ok = false,
-        .value_json = try alloc.dupe(u8, "null"),
+        .value_json = value_json,
         .err = .{ .code = code, .message = message_owned, .retryable = retryable },
     };
 }

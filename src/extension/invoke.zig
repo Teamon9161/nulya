@@ -307,17 +307,27 @@ test "no allocation failure is swallowed into a failed invocation" {
     // dupe. Each induced OOM must surface as an error — a host resource fault
     // is never folded into a `.ok = false` invocation, and protocol/application
     // faults never become host errors.
-    try testing.checkAllAllocationFailures(testing.allocator, invokeToolNoSwallow, .{});
+    try testing.checkAllAllocationFailures(testing.allocator, invokeToolAllocSweep, .{
+        "{\"jsonrpc\":\"2.0\",\"id\":\"call\",\"result\":{\"x\":1}}",
+        true,
+    });
+}
+
+test "a JSON-RPC error response leaks nothing under allocation failure" {
+    // The error branch of `decodeResponse` allocates two owned slices
+    // (`message_owned` and the `"null"` value_json) before returning; the
+    // sweep locks the errdefer that releases the first if the second fails.
+    try testing.checkAllAllocationFailures(testing.allocator, invokeToolAllocSweep, .{
+        "{\"jsonrpc\":\"2.0\",\"id\":\"call\",\"error\":{\"code\":-32000,\"message\":\"down\"}}",
+        false,
+    });
 }
 
 /// Wrapper for `checkAllAllocationFailures`: must return `!void`, with the
 /// allocator as the first argument. A fresh fake per invocation, so every
 /// allocation and free lands on the same allocator instance the sweep tracks.
-fn invokeToolNoSwallow(alloc: std.mem.Allocator) !void {
-    var fake = FakeEnv{
-        .io = testing.io,
-        .response = "{\"jsonrpc\":\"2.0\",\"id\":\"call\",\"result\":{\"x\":1}}",
-    };
+fn invokeToolAllocSweep(alloc: std.mem.Allocator, response: []const u8, expect_ok: bool) !void {
+    var fake = FakeEnv{ .io = testing.io, .response = response };
     defer fake.deinit(alloc);
     var invocation = invokeTool(alloc, fake.handle(), "bin", "ws", "t", "{}", .{}) catch |err| switch (err) {
         // The allocating JSON writer reports a denied allocation as WriteFailed
@@ -329,5 +339,10 @@ fn invokeToolNoSwallow(alloc: std.mem.Allocator) !void {
         else => return err,
     };
     defer invocation.deinit(alloc);
-    try testing.expect(invocation.ok);
+    if (expect_ok) {
+        try testing.expect(invocation.ok);
+    } else {
+        try testing.expect(!invocation.ok);
+        try testing.expect(std.mem.indexOf(u8, invocation.output, "-32000") != null);
+    }
 }
