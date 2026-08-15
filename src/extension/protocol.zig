@@ -32,8 +32,13 @@ pub const ToolCallRequest = struct {
     /// Serialize to one JSON-RPC request. Caller owns the returned bytes.
     pub fn encode(self: ToolCallRequest, alloc: std.mem.Allocator) ![]u8 {
         const arguments = if (std.mem.trim(u8, self.arguments_json, " \t\r\n").len == 0) "{}" else std.mem.trim(u8, self.arguments_json, " \t\r\n");
-        const parsed = std.json.parseFromSlice(std.json.Value, alloc, arguments, .{}) catch
-            return error.InvalidArgumentsJson;
+        const parsed = std.json.parseFromSlice(std.json.Value, alloc, arguments, .{}) catch |err| switch (err) {
+            // The parser allocates while validating the arguments object: a host
+            // OOM is a resource fault and must not be misreported as malformed
+            // arguments.
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidArgumentsJson,
+        };
         defer parsed.deinit();
         if (parsed.value != .object) return error.ArgumentsNotObject;
 
@@ -87,20 +92,32 @@ pub const DecodedResponse = struct {
 };
 
 pub const DecodeError = error{
+    /// The extension wrote something that is not a valid JSON-RPC response
+    /// (garbage, wrong shape, wrong id, missing result/error). An extension
+    /// fault: callers fold it into a failed invocation.
     InvalidResponse,
+    /// The response is valid JSON but not JSON-RPC 2.0. An extension fault:
+    /// callers fold it into a failed invocation.
     UnsupportedVersion,
     /// Surfaced by the allocating JSON writer when compacting `result`; with an
-    /// allocating sink this is effectively out-of-memory.
+    /// allocating sink this is effectively out-of-memory. A host resource
+    /// fault, not an extension fault: callers propagate it.
     WriteFailed,
 } || std.mem.Allocator.Error;
 
-/// Parse and validate a response the extension wrote to stdout. Malformed
-/// output (crash, garbage, wrong version, wrong id) becomes a typed error the
-/// host turns into a normal failed tool result — a broken extension never
-/// crashes the host.
+/// Parse and validate a response the extension wrote to stdout. Syntax, shape,
+/// and version violations (`InvalidResponse`, `UnsupportedVersion`) are
+/// extension faults, which the host turns into a normal failed tool result.
+/// `WriteFailed` and `OutOfMemory` are host resource faults and propagate
+/// unchanged — a host OOM is never misreported as a broken extension.
 pub fn decodeResponse(alloc: std.mem.Allocator, expected_id: []const u8, bytes: []const u8) DecodeError!DecodedResponse {
-    const parsed = std.json.parseFromSlice(std.json.Value, alloc, bytes, .{}) catch
-        return error.InvalidResponse;
+    const parsed = std.json.parseFromSlice(std.json.Value, alloc, bytes, .{}) catch |err| switch (err) {
+        // The parser allocates while building the Value tree: running out of
+        // memory is a host resource fault and must not be folded into
+        // InvalidResponse.
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidResponse,
+    };
     defer parsed.deinit();
 
     const obj = switch (parsed.value) {
@@ -199,6 +216,16 @@ test "arguments must be a valid JSON object" {
     try std.testing.expectError(error.ArgumentsNotObject, (ToolCallRequest{ .id = "c1", .name = "t", .arguments_json = "[]" }).encode(alloc));
 }
 
+test "an encode allocation failure surfaces as OutOfMemory, not InvalidArgumentsJson" {
+    // The first allocation inside `encode` is the parser validating the
+    // arguments object. A host OOM there must propagate as error.OutOfMemory —
+    // folding it into InvalidArgumentsJson would misreport a resource fault as
+    // a malformed tool call.
+    const alloc = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, (ToolCallRequest{ .id = "c1", .name = "t", .arguments_json = "{}" }).encode(failing.allocator()));
+}
+
 test "decode accepts a success response and compacts its result" {
     const alloc = std.testing.allocator;
     const res = try decodeResponse(alloc, "c1", "{\"jsonrpc\":\"2.0\",\"id\":\"c1\",\"result\":{\"results\":[]}}");
@@ -225,4 +252,14 @@ test "decode rejects garbage, wrong version, missing result/error, and wrong id"
     try std.testing.expectError(error.InvalidResponse, decodeResponse(alloc, "c1", "{\"jsonrpc\":\"2.0\",\"id\":\"c1\"}"));
     try std.testing.expectError(error.InvalidResponse, decodeResponse(alloc, "c1", "{\"jsonrpc\":\"2.0\",\"id\":\"other\",\"result\":null}"));
     try std.testing.expectError(error.InvalidResponse, decodeResponse(alloc, "c1", "{\"jsonrpc\":\"2.0\",\"result\":null}"));
+}
+
+test "a parser allocation failure surfaces as OutOfMemory, not InvalidResponse" {
+    // The first allocation inside `decodeResponse` is the JSON parser building
+    // the Value tree. A host OOM there is a host resource fault and must
+    // propagate as error.OutOfMemory — folding it into InvalidResponse would
+    // misreport a broken host as a broken extension.
+    const alloc = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, decodeResponse(failing.allocator(), "c1", "{\"jsonrpc\":\"2.0\",\"id\":\"c1\",\"result\":{}}"));
 }

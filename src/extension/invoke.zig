@@ -6,6 +6,12 @@
 //! frozen manifest, verifies the tool is declared, and passes an exact
 //! executable path. `invokeTool` never asks what `current` means.
 //!
+//! Failure classification — the three kinds never merge:
+//!
+//!   extension protocol/application failure → normalized failed invocation
+//!   host execution/resource failure          → error
+//!   cancellation                             → error.Canceled unchanged
+//!
 //! Ownership: the returned `ToolInvocation.output` is owned by the allocator
 //! passed to `invokeTool` and freed with `ToolInvocation.deinit`. Every
 //! intermediate allocation (request JSON, captured stdout/stderr, decoded
@@ -28,9 +34,11 @@ pub const Options = struct {
 /// One normalized `tool/call` invocation.
 ///
 /// `.ok == true`: `output` is the compact JSON of the decoded `result`.
-/// `.ok == false`: `output` is a human-readable diagnostic (timeout, JSON-RPC
-/// error, or malformed response) that preserves the exit code and stderr when
-/// available. A broken extension never surfaces as a host error.
+/// `.ok == false`: `output` is a human-readable diagnostic for a normal failed
+/// invocation (timeout, JSON-RPC application error, or malformed response),
+/// preserving the exit code and stderr when available. Host faults — OOM, I/O,
+/// cancellation — are never folded here; they surface as errors from
+/// `invokeTool`.
 pub const ToolInvocation = struct {
     ok: bool,
     output: []const u8,
@@ -82,17 +90,21 @@ pub fn invokeTool(
         return .{ .ok = false, .output = try diag.toOwnedSlice() };
     }
 
-    const decoded = protocol.decodeResponse(alloc, options.request_id, outcome.stdout) catch {
-        // Garbage stdout, wrong JSON-RPC version, wrong id, or missing
-        // result/error: the runtime wrote something undecodable. A normal
-        // failed invocation — a broken extension never crashes the host.
-        // Cancellation cannot reach this branch: decodeResponse performs no
-        // I/O and its error set contains no error.Canceled.
-        var diag: std.Io.Writer.Allocating = .init(alloc);
-        errdefer diag.deinit();
-        try diag.writer.print("extension returned an invalid response (exit {d})", .{outcome.exit_code});
-        try appendStderr(&diag, outcome.stderr);
-        return .{ .ok = false, .output = try diag.toOwnedSlice() };
+    const decoded = protocol.decodeResponse(alloc, options.request_id, outcome.stdout) catch |err| switch (err) {
+        // The extension wrote a protocol violation (garbage, wrong JSON-RPC
+        // version, wrong id, or missing result/error): an extension fault → a
+        // normal failed invocation; a broken extension never crashes the host.
+        error.InvalidResponse, error.UnsupportedVersion => {
+            var diag: std.Io.Writer.Allocating = .init(alloc);
+            errdefer diag.deinit();
+            try diag.writer.print("extension returned an invalid response (exit {d})", .{outcome.exit_code});
+            try appendStderr(&diag, outcome.stderr);
+            return .{ .ok = false, .output = try diag.toOwnedSlice() };
+        },
+        // Host resource faults (`WriteFailed`, `OutOfMemory`) are host execution
+        // faults: propagate, never fold into a failed invocation. Cancellation
+        // cannot reach this branch — decodeResponse performs no I/O.
+        else => return err,
     };
     defer decoded.deinit(alloc);
 
@@ -126,14 +138,19 @@ const FakeEnv = struct {
     err: ?anyerror = null,
     saw_request_json: []const u8 = "",
     saw_entry_path: []const u8 = "",
+    saw_live: bool = false,
 
     fn runExtension(ptr: *anyopaque, alloc: std.mem.Allocator, req: environment.ExtensionRequest) anyerror!environment.ExtensionOutcome {
         const self: *FakeEnv = @ptrCast(@alignCast(ptr));
         if (self.err) |e| return e;
+        // Reuse-safe: the allocation-failure sweep below drives this fake many
+        // times, so drop any previous recording before overwriting it.
+        self.dropSaw(alloc);
+
         self.saw_request_json = try alloc.dupe(u8, req.request_json);
-        errdefer alloc.free(self.saw_request_json);
+        self.saw_live = true;
+        errdefer self.dropSaw(alloc);
         self.saw_entry_path = try alloc.dupe(u8, req.entry_path);
-        errdefer alloc.free(self.saw_entry_path);
         const stdout = try alloc.dupe(u8, self.response);
         errdefer alloc.free(stdout);
         const stderr = try alloc.dupe(u8, self.stderr);
@@ -170,8 +187,14 @@ const FakeEnv = struct {
     }
 
     fn deinit(self: *FakeEnv, alloc: std.mem.Allocator) void {
+        self.dropSaw(alloc);
+    }
+
+    fn dropSaw(self: *FakeEnv, alloc: std.mem.Allocator) void {
+        if (!self.saw_live) return;
         if (self.saw_request_json.len > 0) alloc.free(self.saw_request_json);
         if (self.saw_entry_path.len > 0) alloc.free(self.saw_entry_path);
+        self.saw_live = false;
     }
 };
 
@@ -276,4 +299,35 @@ test "cancellation from the environment propagates unchanged" {
     defer fake.deinit(alloc);
 
     try testing.expectError(error.Canceled, invokeTool(alloc, fake.handle(), "bin", "ws", "t", "{}", .{}));
+}
+
+test "no allocation failure is swallowed into a failed invocation" {
+    // Sweep every allocation in the success path with a failing allocator:
+    // encode, the environment's captured stdout/stderr, decode, and the result
+    // dupe. Each induced OOM must surface as an error — a host resource fault
+    // is never folded into a `.ok = false` invocation, and protocol/application
+    // faults never become host errors.
+    try testing.checkAllAllocationFailures(testing.allocator, invokeToolNoSwallow, .{});
+}
+
+/// Wrapper for `checkAllAllocationFailures`: must return `!void`, with the
+/// allocator as the first argument. A fresh fake per invocation, so every
+/// allocation and free lands on the same allocator instance the sweep tracks.
+fn invokeToolNoSwallow(alloc: std.mem.Allocator) !void {
+    var fake = FakeEnv{
+        .io = testing.io,
+        .response = "{\"jsonrpc\":\"2.0\",\"id\":\"call\",\"result\":{\"x\":1}}",
+    };
+    defer fake.deinit(alloc);
+    var invocation = invokeTool(alloc, fake.handle(), "bin", "ws", "t", "{}", .{}) catch |err| switch (err) {
+        // The allocating JSON writer reports a denied allocation as WriteFailed
+        // ("effectively out-of-memory" for an allocating sink), while the
+        // sweep only accepts OutOfMemory. Normalize the alias — both are host
+        // resource faults; the point is that neither is folded into a failed
+        // invocation, and any real swallow still trips the check below.
+        error.WriteFailed => return error.OutOfMemory,
+        else => return err,
+    };
+    defer invocation.deinit(alloc);
+    try testing.expect(invocation.ok);
 }
