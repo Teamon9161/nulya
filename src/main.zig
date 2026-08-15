@@ -161,5 +161,6 @@ test {
     _ = @import("session.zig");
     _ = @import("launch.zig");
     _ = @import("cli.zig");
+    _ = @import("source.zig");
     _ = @import("toolchain.zig");
 }

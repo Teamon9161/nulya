@@ -48,9 +48,9 @@ kernel  = ledger 文件格式 + PromptIR 投影 + 一次 step + 工具执行 + c
 - **M2a ✅ 已落地 → DESIGN §14：** `session new|append|step|events|cancel`（`step --max-steps N` 由 kernel 夹到 `session.max_steps_ceiling`）；`main.zig` demo 已改走 durable session 路径。e2e：shell 脚本 driver 完成 `/goal` 循环、`--max-steps` 被 kernel 强制。review 后收紧（DESIGN §3.4/§4/§14）：只有 `step` 写主文件——`append` 走 inbox、`cancel` 是 `<id>.cancel` 标记且由 kernel 在 step 边界消费（mid-run 也能停）、`events` 只读 tail；`close` 因无语义删除；`persist` 加第二写者守卫。
 - **M2b ✅ 已落地 → DESIGN §7.1/§7.4：** `runtime.entry` 前缀区分编译/脚本，脚本不编译、version = hash(snapshot)（不含 compiler）；`nulya ext init --script`；`ext run --arg k=v`。e2e：`run.ps1`/`run.sh` extension 走完 init → build(seal) → activate → run → 晋升为 native 并经 interpreter 执行；version 不含 compiler identity、rebuild 稳定。
 
-### M3 · `nulya src` + 文档（§3.10）
-- 要做：内嵌 `src/**`（剥 `test` 块或拆 `*_test.zig`），`nulya src [path]` 打印；`nulya ext api` 变成它的特例；ARCHITECTURE 内容并入 CLAUDE.md 模块表（已做）。
-- 验收：`nulya src prompt.zig` 输出与仓库一致。
+### M3 · `nulya src` + 文档（§3.10）✅ 已落地 → DESIGN §14
+- 已做：build.zig 把 `src/**/*.zig` `@embedFile` 进二进制（恒开无 gate）；`nulya src [path] [--tests]` 打印（无参数列全树），**默认剥 top-level `test` 块**、`--tests`/`--raw` 原样（`source.zig`）；测试留在文件里，剥离是投影不是存储。`nulya ext api` 的协议 topic 变成 `nulya src extension/protocol.zig` 的特例（零漂移），去掉手抄的 wire shapes。
+- 验收（`tests/e2e.zig` 绿）：`nulya src prompt.zig --raw` 与磁盘 `src/prompt.zig` 逐字节相等；默认视图更短且无第 0 列 `test` 头；`nulya src` 列出含 `extension/protocol.zig`；`ext api` 打印真实 protocol 源码。
 
 ### M4 · Anthropic provider + 真实 cache 验证（§3.9）
 - 要做：Messages API，`cache_control` 放在 tools 后 / system 后 / 最后稳定块后；读 `cache_read_input_tokens`。
@@ -237,11 +237,9 @@ Driver 演化比 Tool 保守，因为**归因难**（任务难度 / model / seed
 - deferred tools 等 provider-specific 优化允许，但不能破坏 PromptIR 块前缀不变量。
 - ProviderContribution（extension 供 provider）：在 loop 上游、与下游 Tool 不同构，机制待定，只占位。
 
-### 3.10 `nulya src` 与文档 `[写实 · M3]`
+### 3.10 `nulya src` 与文档 `[已落地 · M3 → DESIGN §14]`
 
-- 内嵌 `src/**`（已内嵌 50–90MB 工具链，200KB 源码不算什么），`nulya src [path]` 打印。AI 读真实代码 = 零 API 漂移；`nulya ext api` 成为特例。
-- 入口是 CLAUDE.md 的模块表，不是让 AI 通读文档。
-- 测试占源码近半：拆 `*_test.zig` 或 `nulya src` 默认剥 `test` 块。
+✅ **已实现，现状见 [DESIGN §14](DESIGN.md)。** 内嵌 `src/**`，`nulya src [path]` 打印，AI 读真实代码 = 零 API 漂移；`nulya ext api` 成为它的特例。入口仍是 CLAUDE.md 的模块表，不是让 AI 通读。**测试取舍拍板**：不拆 `*_test.zig`——测试留在文件里（Zig 惯例、人可读、给 AI 造扩展时的风格参照），`nulya src` 默认剥 `test` 块解决 AI 读结构时的 token 成本，`--tests` 按需取。存储 vs 投影解耦，`src/` 零改动。
 
 ### 3.11 前端 / ACP / MCP `[占位 · M8]`
 
@@ -266,4 +264,4 @@ Driver 演化比 Tool 保守，因为**归因难**（任务难度 / model / seed
 - Verify 套件与 golden 输入数据的 snapshot 边界。
 - Driver episode 的 benchmark suite 如何 version / 防 Goodhart。
 - provider cache breakpoint 各厂商差异核实（Anthropic / OpenAI / 兼容端点）。
-- 是否给 `nulya src` 剥 test 块 vs 拆文件——取决于对 Zig 同文件测试惯例的取舍。
+- ~~是否给 `nulya src` 剥 test 块 vs 拆文件~~ 已定（M3）：测试留在文件里，`nulya src` 默认剥、`--tests` 保留——剥离是投影层的事，不动存储（DESIGN §14）。
