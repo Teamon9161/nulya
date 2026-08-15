@@ -187,6 +187,7 @@ test {
     _ = @import("config.zig");
     _ = @import("extension/protocol.zig");
     _ = @import("extension/invoke.zig");
+    _ = @import("extension/tools.zig");
     _ = @import("extension/manifest.zig");
     _ = @import("extension/skills.zig");
     _ = @import("extension/store.zig");
