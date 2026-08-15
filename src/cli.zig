@@ -12,6 +12,7 @@ const manifest = @import("extension/manifest.zig");
 const templates = @import("extension/templates.zig");
 const toolchain = @import("toolchain.zig");
 const ext_skills = @import("extension/skills.zig");
+const tool_stats = @import("tool_stats.zig");
 
 const extensions_root = ".nulya" ++ std.fs.path.sep_str ++ "extensions";
 
@@ -226,6 +227,14 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
         .max_output_bytes = 1 << 20,
     });
     defer invocation.deinit(alloc);
+
+    // Resolution already proved both `id` and `tool` against the frozen
+    // manifest, so the durable stats id is exactly `ext:<id>/<tool>` —
+    // version-free on purpose, the same stable identity a natively exposed
+    // ToolDefinition.id carries, so CLI usage accumulates across versions.
+    const stable_id = try std.fmt.allocPrint(alloc, "ext:{s}/{s}", .{ id, tool });
+    defer alloc.free(stable_id);
+    try tool_stats.append(alloc, io, cwd_path, stable_id, invocation.ok);
 
     try printOut(alloc, io, "{s}\n", .{invocation.output});
     return if (invocation.ok) 0 else 1;

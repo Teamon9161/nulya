@@ -48,21 +48,28 @@ pub fn build(b: *std.Build) void {
 
     // End-to-end closed-loop test (DESIGN §16 milestone): init -> build -> run.
     // It uses the host's own zig (no embed needed) via NULYA_TEST_ZIG, so it
-    // actually compiles and runs a real extension.
+    // actually compiles and runs a real extension. Everything reachable from
+    // e2e.zig lives in the single `extension` facade module rooted under src/,
+    // so no file straddles two module graphs (Zig 0.16 forbids that); the
+    // facade's own anonymous `zig_archive` import covers toolchain.zig's
+    // @embedFile.
     const e2e_mod = b.createModule(.{
         .root_source_file = b.path("tests/e2e.zig"),
         .target = target,
         .optimize = optimize,
     });
     e2e_mod.addAnonymousImport("zig_archive", .{ .root_source_file = zig_archive });
-    const e2e_env_mod = b.createModule(.{ .root_source_file = b.path("src/environment.zig"), .target = target, .optimize = optimize });
     const e2e_extension_mod = b.createModule(.{ .root_source_file = b.path("src/extension.zig"), .target = target, .optimize = optimize });
     e2e_extension_mod.addAnonymousImport("zig_archive", .{ .root_source_file = zig_archive });
-    e2e_mod.addImport("environment", e2e_env_mod);
     e2e_mod.addImport("extension", e2e_extension_mod);
     const e2e_tests = b.addTest(.{ .root_module = e2e_mod });
     const run_e2e = b.addRunArtifact(e2e_tests);
     run_e2e.setEnvironmentVariable("NULYA_TEST_ZIG", b.graph.zig_exe);
+    // The CLI tests spawn the real `nulya` binary (the runner's own stdout is
+    // the test protocol, so an in-process `cli.dispatch` would corrupt it).
+    // Point at the installed binary, relative to where `zig build` was run.
+    run_e2e.step.dependOn(b.getInstallStep());
+    run_e2e.setEnvironmentVariable("NULYA_EXE", b.getInstallPath(.bin, exe.out_filename));
     run_e2e.has_side_effects = true; // exercises the filesystem; always run
     const e2e_step = b.step("e2e", "Run the extension closed-loop end-to-end test");
     e2e_step.dependOn(&run_e2e.step);
