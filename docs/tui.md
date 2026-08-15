@@ -398,3 +398,5 @@ NULYA_SCRIPTED_MODE=finish bun run src/main.tsx --model scripted   # 离线
 4. **provisional → committed 的替换只有两处**（`assistant` 事件、`step end`），新卡片别绕开它们自己维护状态，否则 replay 就对不上了。
 5. **`usage` 是每步的增量**（T0 提醒 2 已按此累加），resume 之前的历史未知，状态栏写的是 `since attach`——真出了 CompositionCard / `/usage` 视图时别把它当全量。
 6. **内核不需要再改**（T0 提醒 5 依然成立）：T1 全程只用了 `session new|append|step --stream|events|cancel` 与 session 文件首行。§10 那四项一项没动。
+
+核验（编排者）：`zig build test` 绿 / `zig build e2e` 绿 / `bun test` 20 pass 0 fail（7 快照）。真实 provider 冒烟未跑——环境无任何 API 密钥。
