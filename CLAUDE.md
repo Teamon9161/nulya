@@ -33,7 +33,8 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 ## 现状一句话（2026-08）
 
 - **已跑通**（`tests/e2e.zig` 真实二进制全环）：durable ledger 文件（header 冻结 composition + `seq` JSONL）→ PromptIR → 一次 step（批量 tool call、**一条** tool_results 回传、串行执行、可取消）→ shell / edit → `nulya ext init|build|activate|run|rollback` → usage journal → 下一场 session 边界自动晋升为 native 工具并按冻结版本执行；`createDurable/openDurable` 让 session 落盘、任意进程 resume 出块级相等的 PromptIR、跨进程 capability-note 经 inbox 在 step 边界排干。
-- **还没有**：fork / compaction（header 有 `parent` 字段但流程未接）；交互式前端（bare `nulya` 跑的是固定 prompt 的 demo）；subagent；policy hook（config 能解析 `policy.hook`，无人消费）；sandbox / remote environment；Anthropic provider（只有 OpenAI `chat/completions`）；脚本 extension（`ext build` 硬要求 `src/main.zig` 编译）；`nulya session *` CLI。这些的去向都在 PLAN.md。
+- **也跑通**：`nulya session new|append|step|events|cancel|close`（`step --max-steps` 由 kernel 强制；stdout 事件 JSONL；cancel 标记在 step 边界消化）；bare `nulya` demo 现走 durable session 路径。
+- **还没有**：fork / compaction（header 有 `parent` 字段但流程未接）；交互式前端 / TUI；subagent（= session 自调用，缺第一个 consumer）；policy hook（config 能解析 `policy.hook`，无人消费）；sandbox / remote environment；Anthropic provider（只有 OpenAI `chat/completions`）；脚本 extension（`ext build` 硬要求 `src/main.zig` 编译）；`session new` 的 `--system-file/--skill/--pin`、`--budget-tokens`。这些的去向都在 PLAN.md。
 
 ## 模块表（`src/`，扣掉同文件测试约 6k 行）
 
@@ -59,7 +60,8 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 | `extension/tools.zig` `skills.zig` `notes.zig` | extension → `Tool` binding / skill catalog / mid-session `capability_note`（CLI 投递进 `<id>.inbox`，session 在 step 边界排干） | |
 | `skill.zig` | `SkillSetSnapshot` + `<available_skills>` 渐进披露文本 | Agent Skills 兼容（`SKILL.md` frontmatter） |
 | `tool_stats.zig` `tool_selection.zig` `promotion.zig` | `.nulya/tool-usage.jsonl` `{v:1,tool_id,ok}` → 纯函数排序 → session 边界晋升 | facts durable, policy replaceable |
-| `cli.zig` | `nulya ext …` / `nulya skill list\|load` / `nulya toolchain zig` / `nulya ext api` | 都经 `shell` 被模型调用；不是 LLM tool |
+| `cli.zig` | `nulya ext …` / `nulya session new\|append\|step\|events\|cancel\|close` / `nulya skill list\|load` / `nulya toolchain zig` / `nulya ext api` | `ext/skill/toolchain` 经 `shell` 被模型调用；`session *` 是外部 driver 面；都不是 LLM tool |
+| `launch.zig` | session 启动共享件：确定性 scripted provider（`NULYA_SCRIPTED_MODE`）、`buildModel`、session id/path | CLI 与 demo 共用同一 durable 路径 |
 
 ## 构建与测试
 

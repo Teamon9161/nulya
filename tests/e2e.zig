@@ -12,6 +12,10 @@
 //! resumes it and projects a block-identical PromptIR, a separate CLI process's
 //! `capability_note` deposit is drained on the next step, and a crash-left
 //! assistant-with-calls tail is repaired on resume.
+//!
+//! And the `nulya session *` CLI (PLAN §3.2): a shell-script driver runs a goal
+//! loop to completion, and `--max-steps` is enforced by the kernel even when the
+//! loop-mode model would run forever.
 
 const std = @import("std");
 const support = @import("support");

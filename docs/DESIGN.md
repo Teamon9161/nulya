@@ -417,13 +417,22 @@ ProviderCapabilities { parallel_tool_calls, deferred_tools, explicit_cache_break
 nulya ext init <id> | build <path> | run <id> [tool] <json-args>
           | activate <id> <version> | rollback <id> <version> | deactivate <id>
           | list | inspect <id> | api [protocol|permissions|examples]
+nulya session new [--model p] [--parent <id>:<seq>]      ← 冻结 composition + 写 header，打印 session id
+          | append <id> <text|--file f>                  ← 追加一条 user turn
+          | step <id> [--max-steps N]                    ← 跑到本 turn 结束或上限；stdout = 本次 append 的事件 JSONL
+          | events <id> [--since N] [--follow]           ← 打印事件 JSONL（follow 轮询）
+          | cancel <id> | close <id>
 nulya skill list | load <pinned-ref>
 nulya toolchain zig <args…>
-nulya                       ← 无参数：固定 prompt demo
+nulya                       ← 无参数：固定 prompt demo（现经 durable session 路径跑，§3.4）
 ```
 
-`nulya ext api`：协议 / 权限 / 示例由当前二进制自己生成——模型永远查本机，不查训练记忆里的旧 API。
-（`ext find` / `ext test` / `session *` 未实现。）
+- `nulya ext api`：协议 / 权限 / 示例由当前二进制自己生成——模型永远查本机，不查训练记忆里的旧 API。
+- `nulya session *` 是**唯一**的 session 驱动面：没有 `setTools / setModel / replaceHistory`，换 composition = `session new`。每个子命令是对 durable session 文件（§3.4）的一次独立进程调用；`step` 的 `--max-steps` 上限**由 kernel 在 `AgentSession.run` 强制**（还有一个 kernel 天花板），driver 只能调低不能调高。`cancel` 写一个标记，下一次 `step` 在边界消化；session 就是它的文件，`close` 只清标记。
+- `nulya ext activate` 在 `NULYA_SESSION`（相对 workspace 的 session 文件路径）存在时，向该 session 的 inbox 投一条 capability_note（§5.3）。
+- 离线时 provider 回落到确定性的 scripted stand-in（`NULYA_SCRIPTED_MODE=finish|loop`，测试用）。
+
+（`ext find` / `ext test` 未实现。）
 
 ---
 

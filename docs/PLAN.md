@@ -45,9 +45,8 @@ kernel  = ledger 文件格式 + PromptIR 投影 + 一次 step + 工具执行 + c
 
 ### M2 · `nulya session *` + 脚本 extension（§3.2、§3.3）
 - 目标：session 可被任何进程驱动；extension 制造无需编译。
-- 要做：`session new|append|step|events|close`（`step --max-steps N` kernel 强制上限）；`runtime.entry` 允许任意可执行，无 `src/main.zig` 就不编译，version = hash(snapshot)；`nulya ext init --script`；`ext run --arg k=v`。
-- 验收：e2e — 一个 shell 脚本作为 driver 完成 `/goal` 循环；一个 `run.sh` extension 走完 init → build(seal) → activate → run → 晋升。
-- 进 DESIGN：DESIGN §7.1 / §7.4 / §14 更新；`main.zig` demo 改为调 session CLI。
+- **M2a ✅ 已落地 → DESIGN §14：** `session new|append|step|events|cancel|close`（`step --max-steps N` kernel 强制上限）；`main.zig` demo 已改走 durable session 路径。e2e：shell 脚本 driver 完成 `/goal` 循环、`--max-steps` 被 kernel 强制。
+- **M2b（进行中）：** `runtime.entry` 允许任意可执行，无 `src/main.zig` 就不编译，version = hash(snapshot)；`nulya ext init --script`；`ext run --arg k=v`。验收：一个 `run.ps1`/`run.sh` extension 走完 init → build(seal) → activate → run → 晋升；version 不含 compiler identity、rebuild 稳定。进 DESIGN §7.1 / §7.4。
 
 ### M3 · `nulya src` + 文档（§3.10）
 - 要做：内嵌 `src/**`（剥 `test` 块或拆 `*_test.zig`），`nulya src [path]` 打印；`nulya ext api` 变成它的特例；ARCHITECTURE 内容并入 CLAUDE.md 模块表（已做）。
@@ -97,7 +96,11 @@ kernel  = ledger 文件格式 + PromptIR 投影 + 一次 step + 工具执行 + c
 
 fork / compaction（新文件 + `parent` 指针，前端沿 parent 链呈现连续对话）仍未实现，见 §3.4。
 
-### 3.2 `nulya session *` 与 subagent = 自调用 `[写实 · M2]`
+### 3.2 `nulya session *` 与 subagent = 自调用 `[CLI 已落地 · M2a → DESIGN §14；subagent 用法待第一个 consumer]`
+
+✅ **`nulya session new|append|step|events|cancel|close` 已实现**，现状见 [DESIGN §14](DESIGN.md)。`step --max-steps N` 由 kernel（`AgentSession.run`）强制、还有一个 kernel 天花板；每次调用是对 durable session 文件的独立进程；`step` stdout = 本次追加的事件 JSONL；`cancel` 用标记在 step 边界消化；bare `nulya` demo 已改走同一 durable 路径。
+
+**尚未落地的子项：** `--system-file` / `--skill` / `--pin`（现从 config 取 composition）；`--budget-tokens`；`events --follow` 只做了轮询骨架。下面的 subagent / 编排用法等第一个真实 consumer 出现再写实（它们是**用法**，不改 kernel）：
 
 ```
 nulya session new   [--system-file f] [--skill a,b] [--pin ext:x/y] [--model profile] [--parent s:seq]  → 打印 session-id
