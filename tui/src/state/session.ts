@@ -110,11 +110,19 @@ export interface SessionState {
   setError(message: string | null): void
 }
 
+/**
+ * Where the provisional tail begins.
+ *
+ * Committed items are always a prefix and provisional ones always a suffix —
+ * that is exactly what `insertCommitted` maintains — so this walks back from the
+ * end and touches only the handful of items belonging to the step in flight.
+ * Scanning forward instead costs a pass over the whole store on every event,
+ * which is what made replaying a long session quadratic (tui.md §11, T4).
+ */
 function firstProvisionalIndex(items: TranscriptItem[]): number {
-  for (let i = 0; i < items.length; i++) {
-    if (items[i]!.seq === null) return i
-  }
-  return items.length
+  let at = items.length
+  while (at > 0 && items[at - 1]!.seq === null) at--
+  return at
 }
 
 export function createSessionState(id: string): SessionState {
@@ -144,11 +152,16 @@ export function createSessionState(id: string): SessionState {
   /**
    * Discard the provisional items of the step in flight. Queued user turns are
    * kept: they are waiting for their own `user_text` event, not for this one.
+   *
+   * Only the provisional tail is walked — everything before it is committed and
+   * can never be dropped — so a replay does not re-scan the whole transcript on
+   * every assistant event.
    */
   function dropInFlight(draft: SessionSnapshot) {
     for (let i = draft.items.length - 1; i >= 0; i--) {
       const item = draft.items[i]!
-      if (item.seq === null && item.kind !== "user") draft.items.splice(i, 1)
+      if (item.seq !== null) return
+      if (item.kind !== "user") draft.items.splice(i, 1)
     }
   }
 
@@ -176,9 +189,19 @@ export function createSessionState(id: string): SessionState {
   let applied = 0
 
   function applyEvent(event: LedgerEvent) {
+    edit((draft) => applyInto(draft, event))
+  }
+
+  /**
+   * One event into one draft. Kept separate from `applyEvent` so replaying a
+   * whole tail is a single store transaction instead of one per event — the
+   * difference between opening a 5k-event session in a second and in several
+   * (tui.md §11, T4).
+   */
+  function applyInto(draft: SessionSnapshot, event: LedgerEvent) {
     if (event.seq <= applied) return
     applied = event.seq
-    edit((draft) => {
+    {
       const seq = event.seq
       switch (event.kind) {
         case "user_text": {
@@ -268,7 +291,7 @@ export function createSessionState(id: string): SessionState {
           ])
         }
       }
-    })
+    }
   }
 
   function provisional<T extends TranscriptItem>(draft: SessionSnapshot, key: string): T | null {
@@ -411,7 +434,10 @@ export function createSessionState(id: string): SessionState {
       })
     },
     applyEvents(events) {
-      for (const event of events) applyEvent(event)
+      if (events.length === 0) return
+      edit((draft) => {
+        for (const event of events) applyInto(draft, event)
+      })
     },
     applyEvent,
     applyStream,

@@ -1,0 +1,45 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`/help lists the bindings that are actually in force 1`] = `
+" help · keys and commands                                                                           
+                                                                                                    
+ escape                  cancel the step (kernel stops at its next step boundary) · browse when     
+                         idle                                                                       
+ ctrl+o                  fold / unfold the most recent tool or thinking card                        
+ ctrl+shift+o            expand everything, again to collapse everything                            
+ f2                      /ext — the extension store                                                 
+ f3                      /sessions — the session store                                              
+ f1                      this page                                                                  
+ f4                      next tab (tabs appear once a second session is open)                       
+ ctrl+w                  close the current tab                                                      
+ ctrl+l                  redraw the screen                                                          
+ ctrl+c                  kill the running step; press again to quit                                 
+                                                                                                    
+ Enter                   send · in browse, open a sub-session or fold · as observer on an empty     
+                         composer, take over                                                        
+ Shift+Enter / Ctrl+J    newline                                                                    
+ ↑ / ↓                   previous / next message, on an empty composer                              
+ click a head line       fold / unfold that card                                                    
+ j / k, Space            in browse and in the overlays: move, fold                                  
+ PgUp / PgDn, wheel      scroll the transcript                                                      
+                                                                                                    
+ slash commands                                                                                     
+ /new [--model p]        start a session with a provider profile from the kernel's config           
+ /sessions  /ext         the two stores, as views                                                   
+ /usage  /settings       tokens and tool counts · effective settings and where they came from       
+ /step                   continue after a spent step budget (nothing continues by itself)           
+ /cancel  /fold          cancel this step · collapse every card                                     
+ /help  /quit                                                                                       
+ anything else after /   goes to the model verbatim — nulya has no slash skills                     
+                                                                                                    
+ a session has one writer · when somebody else holds it this window follows as an observer and can  
+ still queue a turn                                                                                 
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+ Esc close                                                                                          
+"
+`;

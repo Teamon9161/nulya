@@ -569,9 +569,16 @@ test "canceling a running shell surfaces cancellation and kills the child" {
         lenv.environment(), alloc, ShellRequest{ .command = command, .cwd = cwd, .max_output_bytes = 1 << 20 },
     });
 
-    // Wait until the child has actually launched (bounded), then cancel.
+    // Wait until the child has actually launched, then cancel. The bound only
+    // exists so a broken spawn fails instead of hanging: it is not a statement
+    // about how fast a shell starts. A loaded machine — another nulya process,
+    // a parallel test run, a virus scanner opening the interpreter — can take
+    // seconds to get there, so give it far more room than it will ever need.
+    // The loop breaks the moment the marker appears, so an idle run pays
+    // nothing for the headroom.
+    const spawn_budget_ticks = 1500; // 30s at 20ms
     var waited: usize = 0;
-    while (waited < 200) : (waited += 1) {
+    while (waited < spawn_budget_ticks) : (waited += 1) {
         if (markerExists(io, tmp.dir, "started")) break;
         testSleepMs(io, 20);
     }
@@ -652,7 +659,11 @@ test "runExtension captures stderr when response is invalid" {
         .cwd = root_path,
         .request_json = "{}",
         .max_output_bytes = 1024,
-        .timeout_ms = 1_000,
+        // This test is about stderr capture, not about the timeout, so it uses
+        // the production default: a one-second budget would turn "the machine
+        // was busy while a script interpreter started" into a failure about
+        // something else entirely.
+        .timeout_ms = 30_000,
     });
     defer outcome.deinit(alloc);
 

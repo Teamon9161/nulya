@@ -21,12 +21,17 @@ interface Args {
   model?: string
   workspace?: string
   maxSteps?: number
+  fresh?: boolean
 }
 
 function parseArgs(argv: string[]): Args {
   const args: Args = {}
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i]
+    if (flag === "--new") {
+      args.fresh = true
+      continue
+    }
     const value = argv[i + 1]
     if (!value) continue
     if (flag === "--session") {
@@ -51,6 +56,10 @@ async function main() {
   const ws = openWorkspace(args.workspace ?? process.cwd())
 
   let id = args.session
+  if (id && args.fresh) {
+    process.stderr.write("--new and --session ask for different sessions; pick one\n")
+    process.exit(1)
+  }
   if (id && !sessionExists(ws, id)) {
     process.stderr.write(`no such session '${id}' in ${ws.dir}\n`)
     process.exit(1)

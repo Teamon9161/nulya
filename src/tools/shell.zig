@@ -96,8 +96,10 @@ test "shell tool reports cancellation as an error, not a failure result" {
 
     var fut = io.async(run, .{ alloc, req });
 
+    // Bounded only so a broken spawn fails instead of hanging; a busy machine is
+    // allowed to take its time getting the child up (see `environment.zig`).
     var waited: usize = 0;
-    while (waited < 200) : (waited += 1) {
+    while (waited < 1500) : (waited += 1) {
         if (blk: {
             tmp.dir.access(io, "started", .{}) catch break :blk false;
             break :blk true;

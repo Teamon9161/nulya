@@ -152,6 +152,59 @@ function firstUserText(lines: string[]): string {
 }
 
 /**
+ * What one scan of a session file learned, plus how far into it we got.
+ *
+ * A ledger is append-only (physics #1), so bytes already read can never change:
+ * a rescan only has to look at what was appended since. That is what keeps
+ * `/sessions` cheap when it re-reads the store every second and a half to
+ * refresh the live markers (tui.md §11, T3 known issue).
+ */
+interface SessionScan {
+  /** Byte offset just past the last COMPLETE line consumed. */
+  consumed: number
+  header: SessionHeader | null
+  events: number
+  title: string
+}
+
+const scans = new Map<string, SessionScan>()
+
+/** Fold newly appended bytes into a scan. Exported for the test, not for use. */
+export function extendScan(scan: SessionScan, chunk: string): SessionScan {
+  const end = chunk.lastIndexOf("\n")
+  if (end < 0) return scan
+  const complete = chunk.slice(0, end)
+  const lines = complete.split("\n").filter((line) => line.trim().length > 0)
+  // Only the very first line of the file is the header (DESIGN §3.4); every
+  // later chunk is events all the way down.
+  let at = 0
+  if (scan.consumed === 0 && lines.length > 0) {
+    scan.header = parseHeaderLine(lines[0]!)
+    at = 1
+  }
+  scan.events += lines.length - at
+  if (scan.title.length === 0) scan.title = firstUserText(lines.slice(at))
+  scan.consumed += Buffer.byteLength(complete, "utf8") + 1
+  return scan
+}
+
+async function scanSession(path: string, size: number): Promise<SessionScan> {
+  const cached = scans.get(path)
+  const scan: SessionScan =
+    cached && cached.consumed <= size ? cached : { consumed: 0, header: null, events: 0, title: "" }
+  if (scan.consumed < size) {
+    try {
+      extendScan(scan, await Bun.file(path).slice(scan.consumed, size).text())
+    } catch {
+      // A session being written right now can still be listed; it just has no
+      // detail yet, and the next refresh picks up where this one stopped.
+    }
+  }
+  scans.set(path, scan)
+  return scan
+}
+
+/**
  * Every durable session in the workspace, newest first. Reads the files
  * directly: `session events` skips the header and would cost a process per
  * session, and the file IS the wire format (DESIGN §3.4).
@@ -165,24 +218,21 @@ export async function listSessions(ws: Workspace): Promise<SessionEntry[]> {
     const id = name.slice(0, -".jsonl".length)
     const path = join(dir, name)
     let mtime = 0
+    let size = 0
     try {
-      mtime = statSync(path).mtimeMs
+      const stat = statSync(path)
+      mtime = stat.mtimeMs
+      size = stat.size
     } catch {
       continue
     }
-    let lines: string[] = []
-    try {
-      lines = (await Bun.file(path).text()).split("\n").filter((line) => line.trim().length > 0)
-    } catch {
-      // A session being written right now can still be listed; it just has no
-      // detail yet.
-    }
+    const scan = await scanSession(path, size)
     entries.push({
       id,
       mtime,
-      header: lines.length > 0 ? parseHeaderLine(lines[0]!) : null,
-      events: Math.max(0, lines.length - 1),
-      title: firstUserText(lines.slice(1)),
+      header: scan.header,
+      events: scan.events,
+      title: scan.title,
       lease: probeWriterLease(ws, id),
     })
   }

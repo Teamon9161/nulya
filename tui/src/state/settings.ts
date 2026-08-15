@@ -19,6 +19,13 @@ export interface Settings {
     thinking: ThinkingDefault
     max_width: number
     ascii: boolean
+    /**
+     * How many transcript items are mounted at once, counting from the newest.
+     * 0 draws everything. The whole session is always in the ledger file; this
+     * only bounds what the renderer has to lay out on every frame, which is what
+     * keeps a long session's typing latency flat (tui.md §11, T4).
+     */
+    history_window: number
   }
   ui: {
     theme: "nulya-dark" | "nulya-light"
@@ -36,6 +43,7 @@ export const default_settings: Settings = {
     thinking: "collapsed",
     max_width: 100,
     ascii: false,
+    history_window: 400,
   },
   ui: { theme: "nulya-dark", motion: true },
   keys: {},
@@ -75,6 +83,9 @@ function mergeLayer(into: Settings, layer: unknown, source: string) {
       into.transcript.max_width = Math.floor(transcript["max_width"])
     }
     if (typeof transcript["ascii"] === "boolean") into.transcript.ascii = transcript["ascii"]
+    if (typeof transcript["history_window"] === "number" && transcript["history_window"] >= 0) {
+      into.transcript.history_window = Math.floor(transcript["history_window"])
+    }
   }
   const ui = record["ui"] as Record<string, unknown> | undefined
   if (ui) {

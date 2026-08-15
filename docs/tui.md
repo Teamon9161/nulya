@@ -1,6 +1,6 @@
 # Nulya TUI — 设计与计划
 
-> **状态：T0（内核 `--stream`）已落地 → [DESIGN.md](DESIGN.md) §14；T1（`tui/` 骨架）、T2（卡片与折叠）、T3（nulya 视图：`/sessions`、`/ext`、sub-session tab、observer）已落地 → `tui/`（见 §11）；T4 属计划。** 本文是 `tui/` 的设计契约 + 里程碑；落地一块就把"已实现"的部分搬进 DESIGN.md §14 / 新 §18，本文收缩成纯计划。`tui/` 不在内核范围里（另一条工具链、另一个进程），所以它的现状写在本文 §11，不进 DESIGN.md。
+> **状态：T0–T4 全部落地。** 内核侧只有 `session step --stream` → [DESIGN.md](DESIGN.md) §14；前端 T1（骨架）、T2（卡片与折叠）、T3（nulya 视图：`/sessions`、`/ext`、sub-session tab、observer）、T4（`/help` `/settings` `/usage`、keymap 覆盖、`bun build --compile`、README、5k 事件性能）都在 `tui/`（见 §11 与 [`../tui/README.md`](../tui/README.md)）。本文是 `tui/` 的设计契约 + 里程碑 + 实施日志；`tui/` 不在内核范围里（另一条工具链、另一个进程），所以它的现状写在本文 §11，不进 DESIGN.md。
 > 上位原则见 [PLAN.md](PLAN.md) §3.11：前端是 core 之上的薄客户端——**tail ledger 文件 + append user 事件；前端是长期进程，re-spawn 的只是 worker**。
 
 ## 0. 定位（三句话）
@@ -234,11 +234,12 @@ registry 按 shell 命令前缀识别，头行抽关键事实（抽不到就退�
 
 ```toml
 [transcript]
-edit_diff   = "expanded"    # expanded | collapsed
-tool_output = "collapsed"   # collapsed | expanded
-thinking    = "collapsed"   # collapsed | hidden | expanded
-max_width   = 100
-ascii       = false
+edit_diff      = "expanded"    # expanded | collapsed
+tool_output    = "collapsed"   # collapsed | expanded
+thinking       = "collapsed"   # collapsed | hidden | expanded
+max_width      = 100
+history_window = 400           # 同时挂载的卡片数（从最新往回数）；0 = 全挂（T4）
+ascii          = false
 
 [ui]
 theme  = "nulya-dark"       # nulya-dark | nulya-light
@@ -266,7 +267,7 @@ fold   = "ctrl+o"
 | ~~**T1 · 骨架**~~ ✅ | `tui/` 包；`nulya/{bin,cli,ledger,files,diff}.ts`；`state/{session,driver,settings}`；App = transcript（User/Assistant 通用卡 + 通用 tool 卡）+ composer + 状态栏；driver 状态机；流式；Esc cancel；`--session` 回放；`bun test` 两条 | 在 nulya 仓库里用它对着真实 provider 完整跑一轮"读源码 → edit → zig build test"；关掉重开 `--session` 一致 |
 | ~~**T2 · 卡片与折叠**~~ ✅ | registry；Shell/Edit(diff)/ExtTool/Thinking/Canceled/spill；EvolveCard 全表；CapabilityBanner；CompositionCard；折叠交互；`tui.toml`；主题 tokens；ascii 降级 | §4.2 表每行一个快照测试；`edit_diff` 设定生效 |
 | ~~**T3 · nulya 视图**~~ ✅ | `/sessions`（树 + live 标记 + 打开）；`/ext`（store / 版本线 / 漂移 / usage / 动作键）；SubSessionCard → 第二 tab；observer 模式（锁探测、`events --follow` 续接、take over） | 用 shell 在另一终端跑一个 driver 脚本 loop step，TUI 以 observer 附上并能 append |
-| **T4 · 收尾** | `/help` `/settings` `/usage`；keymap 覆盖；`bun build --compile` 出单文件；README（安装、`NULYA_BIN`、按键）；性能核对（长 session 回放 5k 事件不卡；scrollbox 视口裁剪） | 5k 事件 session 打开 < 1s；README 照做能跑 |
+| ~~**T4 · 收尾**~~ ✅ | `/help` `/settings` `/usage`；keymap 覆盖；`bun build --compile` 出单文件；README（安装、`NULYA_BIN`、按键）；性能核对（长 session 回放 5k 事件不卡；scrollbox 视口裁剪 + `history_window`） | 5k 事件 session 打开 < 1s（实测 ~0.35s + 首帧 ~0.15s）；README 照做能跑 |
 
 顺序 T0 → T1 → T2 → T3 → T4；**T1 结束就开始用它 dogfood**，T2 起的优先级由用出来的痛点重排。
 
@@ -552,3 +553,99 @@ touch stop-driver                                   # A 退出后，B 出现 pre
 5. **内核不需要再改**（T0 提醒 5、T1 提醒 6、T2 提醒 6 依然成立）：T3 全程只用了 `session new|append|step --stream|events --follow|cancel`、`ext activate|rollback`、以及 `.nulya/` 下的**只读**读取（session 文件、`<id>.lock` 的一次只读探测、`extensions/**/extension.json`、`current`、`tool-usage.jsonl`）。
 
 核验（编排者）：`zig build e2e` 绿 / `bun test` 53 pass 0 fail（16 快照，6 文件）。`zig build test` **首轮出现一次 `232 pass, 1 skip, 1 fail`**，随后无法复现：单测二进制连跑 15 次、`zig build test`（含独立 cache-dir 强制重跑）5 次，全绿；失败当时 T3 的 driver-loop 夹具进程可能尚未退干净、与 durable session 的 `<id>.lock` / 临时目录抢占。**留给 T4 加固**：让涉及锁 / 临时目录的测试对环境里的游离进程免疫（各自独立临时目录、不复用固定 session id），并在 §11 记录结论。
+
+### T4 · 收尾
+
+**状态**：完成。`/help`（F1）、`/settings`、`/usage` 三个 overlay 落地；`[keys]` 覆盖从"能解析"变成"有端到端证据"；`bun run compile` 出单文件 `tui/dist/nulya-tui.exe`（实测 126 MB，能启动、能跑）；`tui/README.md` 重写成 Windows Terminal 上照做能跑的安装 + 一整轮往返；性能三处都动了（回放 O(n²) → O(n)、transcript `history_window`、`listSessions` 增量数行）。**内核语义一行未改**（硬约束 1）——Zig 侧只改了两个测试的等待预算（见下）。`bun test` **60 pass 0 fail**（8 文件，17 快照）；`zig build test` / `zig build e2e` 绿。
+
+**关键决定与理由**
+
+- **`/help` 读活的 keymap，不读一张手写表。** 一份会漂移的按键文档比没有更糟。`HelpView` 拿 `createKeymap(settings)` 的结果画左列，并把与 `default_keys` 不同的那几行标成 `(tui.toml)`——于是"我改了什么键"这个问题在屏幕上有答案，而不是在两个文件之间对账。README 的按键表因此只承诺"这些是默认值，`/help` 才是现况"。
+- **`/settings` 只显示，不写。** §7 就是这么定的，理由值得写下来：设定是用户编辑的文件，TUI 也去写就成了同一份真相的第二个作者，"这个值从哪来"从此没有唯一答案。视图同时列出**两个候选路径**（user 层 / 项目层）及其状态（applied / unreadable / absent），所以"该往哪写"也在屏幕上——不需要先去读文档。
+- **`/usage` 把两种数分开摆。** token 是瞬态的（流里是**每步增量**，attach 之前的历史根本不属于我们，所以标 `since attach`）；tool 计数是耐久的（`.nulya/tool-usage.jsonl`，跨 session）。把它们并排放又不说清区别，就是在鼓励把前者当总量读。`UsageTable` 从 `ExtView` 里提出来成了独立模块——这正是"第二个 consumer 出现之后才抽 abstraction"（CLAUDE.md）。
+- **回放的 O(n²) 是真 bug，不是"5k 太多"。** `firstProvisionalIndex` 从头扫、`dropInFlight` 全表扫，都发生在**每一条**事件上。但 committed 永远是前缀、provisional 永远是后缀（`insertCommitted` 亲手维持的不变量），所以两处都改成从尾部往回走、只碰在飞的那几张卡。再把整条 tail 的回放合并成**一次** store 事务（`applyInto` 与 `applyEvent` 分家）。5k 事件的打开时间 **2119ms → 331ms**，语义一字未变。
+- **`transcript.history_window`（新设定，默认 400）。** `viewportCulling` 省的是**渲染**，不是**布局**：5000 张卡挂在树上，每帧都要为它们算 layout。所以只挂尾部一段，其余在 transcript 顶部留一行 `▸ N earlier items · in the ledger, not on screen`。这不是"丢历史"——ledger 文件永远是全的，`history_window = 0` 就全挂。首帧 **823ms → 148ms**，流式每帧 **17.8ms → 1.8ms**（30fps 的预算是 33ms，前者已经吃掉一半）。
+- **`listSessions` 增量数行。** T3 留下的问题：`/sessions` 每 1.5s 重读**全部** session 文件。ledger 只能 append（physics #1），所以已经读过的字节永远不会变——缓存 `{consumed, header, events, title}`，每次只读新追加的那一段并数完整行。这是 append-only 直接换来的性能，不是缓存技巧。
+- **`--new` 补成真 flag。** §3 写着 `--session | --new [--model p] | --workspace`，T1 只做了前后两个（不给 `--session` 本来就是开新的）。与 `--session` 同时给现在直接报错退出，而不是猜哪个赢。
+
+**偏离设计之处**
+
+1. **§7 的 `[transcript]`**：新增 `history_window`（理由见上）。**已同步补进 §7 的示例**（先改文档再改代码，硬约束 7）。
+2. **§9 的 T4 一行 与 本文顶部状态行**：改成已落地。
+3. **§4.4 的 `/skills`**：仍未做。skill 的进出是模型的事（`nulya skill list|load` 经 shell），一个只读的 skill 列表现在没有第二个消费者；`/ext` 已经把每个 ext 贡献的 skills 显示出来了。**这是 T4 唯一没做的 §4.4 条目。**
+4. **§5.3 的"本场 ledger 里相关 EvolveCard / CapabilityBanner 时间线（按 seq 跳转）"**：T3 记为未做，T4 仍未做（需要 seq→行定位 + scrollbox 程序化滚动；`scrollChildIntoView` 是现成的落点）。
+5. **`/help` 是 overlay 而不是状态栏一行**（T2 时是 `setNotice` 一行）。一行放不下 F1–F4、browse 的两义、observer 的 take-over。
+6. `header.created` 仍是空串（§10.8 那一行内核修补始终未做）。
+
+**怎么运行与测试**
+
+```bash
+zig build                                    # TUI 需要一个 nulya 二进制
+cd tui && bun install
+
+bun run typecheck                            # tsc --noEmit
+bun test                                     # 60 条（8 文件，17 快照）
+bun run compile                              # dist/nulya-tui.exe（单文件，~126 MB）
+
+bun run src/main.tsx --model codex           # 真实 provider
+bun run src/main.tsx --session s-…           # 重开
+```
+
+安装、`NULYA_BIN` 的三条解析规则、provider/model 怎么选、怎么取消、怎么 resume——全在 [`../tui/README.md`](../tui/README.md)，按 Windows Terminal 的实际命令写。
+
+新增测试：
+
+- `tui/test/views.test.tsx`（**新**，5 条）：`/help` 的帧快照（默认键；再用 `keys.fold = "ctrl+b"` 的设定渲染一次，断言出现 `ctrl+b` 与 `(tui.toml)` 标记）；**`[keys]` 覆盖端到端**——临时 workspace 里真写一个 `.nulya/tui.toml`，跑一轮真实 scripted step，然后 `Ctrl+O` **不再**展开、`Ctrl+B` 展开（两个方向都测，证明是重绑不是"全都展开了"）；`/settings` 的纯函数行 + 真帧（项目文件标 `applied`、`keys.fold` 在表里）；`/usage`（构造的 usage 流 → 1200 与 `90% of input`，加上真实 journal 里的 `builtin.shell`）；`F1` 开 help、`Esc` 关、`/usage` 走 slash 同一扇门。
+- `tui/test/perf.test.tsx`（**新**，2 条，**T4 的完成标准**）：夹具往真实 session 文件里追加 5000 条 wire-format 事件行（不付 5000 次真实 step 的代价；文件本身就是 wire format），然后 ①`nulya session events` + `applyEvents` 的**打开**时间 < 1s ②首帧 < 1s、最新一轮在屏幕上、`windowItems` 确实只挂了 400 张且最后一张是最新的、20 帧流式的**每帧**均值 < 33ms。
+
+**5k 事件基准（本机实测，Windows 11 + Bun 1.3.5）**
+
+| 指标 | T3 的实现 | T4 之后 |
+|---|---|---|
+| 打开（spawn `session events` + 解析 5000 行 + 折进 items） | 2119 ms | **331–348 ms** |
+| 首帧（`testRender` + 一次 `renderOnce`，100×30） | 823 ms | **139–148 ms** |
+| 流式每帧（`text_delta` + `renderOnce`，均值） | 17.8 ms | **1.8 ms** |
+
+打开 + 首帧合计约 **0.5s**，完成标准（< 1s）达成。三项都是 `bun test test/perf.test.tsx` 每次跑出来的（`console.log` 打印真值，断言留有余量），不是一次性手测。
+
+**flaky 测试的处理结论**
+
+审完 Zig 侧所有涉及锁与临时目录的测试，结论是 **T3 猜的方向（`<id>.lock` 抢占 / 固定路径）不成立**，但那次失败仍然很可能是"环境里有别的进程"造成的，只是机制不同：
+
+- **锁与临时目录本来就是隔离的。** 每个碰 durable session 的测试都在自己的 `std.testing.tmpDir(.{})`（`.zig-cache/tmp/<随机>`）里，session 文件名与 `<id>.lock` 都是**相对那个目录**的；全部 `Dir.cwd()` 的用法只出现在 CLI 的非测试路径。没有任何测试写仓库的 `.nulya/`、复用固定 session id、或依赖 OS 全局临时路径。所以另一个 nulya 进程**拿不到**同一把锁。
+- **真正对环境敏感的是三处等待预算。** `environment.zig` 的 `"canceling a running shell…"` 先等子进程写出 `started` 标记，上限只有 `200 × 20ms = 4s`，等不到就**硬断言失败**——机器一忙（另一个 nulya 在跑、并行的 bun test、杀毒软件扫 `powershell.exe`）就可能超。同一个文件的 `"runExtension captures stderr…"` 给 `.cmd` 脚本的 `timeout_ms` 只有 **1s**，而它断言的是 `!timed_out`——这条测的是 stderr 捕获，不是超时。`tools/shell.zig` 的同型循环是同样的 4s。
+- **改了什么**：等待上限提到 `1500 × 20ms = 30s`（见到标记立刻 break，空闲时一分钱不多花），`timeout_ms` 改成生产默认 `30_000`。**只改测试，内核语义一字未动。** 改完 `zig build test` / `zig build e2e` 绿。
+- **还有一条无法证伪的可能**：`std.testing.tmpDir` 落在 `.zig-cache/tmp/` 下，与并发的 `zig build` 共享同一棵 cache 目录树。若那次失败时另有 `zig build` 在跑，缓存目录层面的干扰无法排除——但这不是本仓库的测试能加固的，真要根治得让测试用 OS 临时目录（约 100 处 `tmpDir` 的改动，代价远大于收益）。**记在这里，等它再出现一次再动。**
+
+**真实 provider 冒烟（跑了）**
+
+T1/T2/T3 三轮都因"环境无任何 API 密钥"跳过。本轮重新检查：`DEEPSEEK_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` 依然全无（只有一个 `ANTHROPIC_BASE_URL`），但 **`~/.codex/auth.json` 存在**——codex profile 的凭据本来就不是 env。于是用 codex 跑了**一轮**（一次 API 调用，未重试）：
+
+```bash
+nulya session new --model codex
+nulya session append <id> "Reply with exactly: hello from nulya. Do not use any tools."
+nulya session step <id> --stream --max-steps 1
+```
+
+stdout 全是 JSON、退出码 0、stderr 空；行序与 DESIGN §14 完全一致：`model started` → `text_delta` ×4 → `usage{input_tokens:194,output_tokens:8,cache_read_tokens:0,cache_write_tokens:0}` → `done{stop:"end_turn"}` → `seq1 user_text` → `seq2 assistant` → `step end{completed}` → `run done{steps:1,stopped:"end_turn"}`。再把这段真实 stdout 喂回 TUI 的 `parseStepLine` + `createSessionState`：**0 行解析不了**，usage 累加成 `{input:194,output:8,cacheRead:0,cacheWrite:0}`，items 恰好是 user + assistant 两条。
+
+于是 T0 遗留的两条里，**`usage` 流行在真实 provider 上首次被证实**（状态栏与 `/usage` 的 token 累加走的就是这条路）。**`thinking_delta` 仍未见过真数据**：这一轮模型没有产出可显示的 thinking，codex 的 reasoning 是加密 item、按设计根本不进流（DESIGN §14）。要验证 Thinking 卡的流式尾行，得一个开着 thinking 且回传明文 thinking block 的 Anthropic key。
+
+**已知问题**
+
+- **早上那一轮的这些环节仍未被自动验证**（诚实清单）：alt-screen 的实际观感与重绘、鼠标滚轮与 `scrollbox` 滚动后点击的命中、`Shift+Enter`（需要 kitty keyboard 协议，Windows Terminal 支持；不支持时退 `Ctrl+J`）、`Ctrl+C` 两下、真实 provider 下**带工具调用**的完整一轮（本轮冒烟刻意让模型不用工具，只跑了纯文本路径）、以及**真实 provider 下的 `Esc` 取消**（scripted 下测过，真 provider 下没测）。真实 provider 的 resume 也只在纯文本那一场上成立过。
+- **`bun run compile` 出的 exe 不能在 `tui/` 目录里启动**：Bun 会读 cwd 的 `bunfig.toml`，而本包的那份是开发用的 `preload`，编译产物既没有也不需要它 → `preload not found "@opentui/solid/preload"`。在 workspace 里跑就没事（README 已写明）。这是 Bun 的行为，不是我们的状态。
+- **`history_window` 之外的卡片不在树上**，所以 browse 模式（`j`/`k`）走不到它们，`Ctrl+Shift+O` 也只影响挂着的那些。5k 事件时窗口是最近 400 张（约 100 轮），要全挂就把 `history_window` 设成 0——代价见上表。
+- **`/usage` 的 token 只是本进程 attach 之后的**（T0 提醒 2 的必然结果），视图里明说了；真正的全量需要内核在 ledger 里记 usage，那是内核改动，没做。
+- **`/settings` 不显示内核自己的 config**（`default.toml` → system → user → project）。§10.2 的 `nulya config show` 一直没做，前端复刻一份合并逻辑必然漂移。
+- **非 Windows 路径依然没跑过**（T3 遗留）：`● live` 与租约探针在 POSIX 上只会答 `unknown`。
+- Windows 上 `Ctrl+C` 第一下 kill 的仍只是 step 进程本身，它派生的 shell 子进程可能残留（T1 遗留）。
+- T1 的 `settle()` 那条依然成立，而且**在纯文本视图上也会咬人**：`/help` 的帧快照在一次整套跑里抓到过半张画面（单独跑与随后连跑三整套都绿），已把它的 settle 提到 8 遍。新加快照时宁可多睡两轮。
+
+**后续方向（不再有下一个里程碑，写给下一个来动这块的人）**
+
+1. **先 dogfood，再加功能。** T1 起就该在这里面工作了，但真实 provider 的完整一轮（工具调用 + 取消 + resume）到现在只有人能验。用出来的痛点应该压过 §10 里任何一条待议。
+2. **`/ext` 的 seq 跳转**（§5.3 未做的那块）落点是 `scrollbox.scrollChildIntoView(id)` + 给卡片一个稳定 id；这是 OpenTUI 现成的能力，不需要内核。
+3. **observer 的 deltas** 仍是 §10.4 的 `<id>.live` sidecar，改动只落在 `attach.ts` 的 `startFollow` 一处——但它是内核改动，等第一个真正需要它的 driver 脚本。
+4. **内核不需要再改**（T0 提醒 5 起，四个里程碑都成立）：T4 全程只用了 `session new|append|step --stream|events --follow|cancel`、`ext activate|rollback`、以及 `.nulya/` 下的只读读取。§10 那八项一项没动。
+5. **性能的下一个瓶颈不在这三处**：真要更快，测的应该是 `EditCard` 的 diff 高度上限与 markdown 解析（两者都跨真实计时器 tick 落地，见 T1 的 `settle()`），不是 items 数。

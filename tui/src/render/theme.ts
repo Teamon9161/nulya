@@ -128,6 +128,8 @@ export interface Style {
   glyphs: Glyphs
   settings: Settings
   maxWidth: number
+  /** Items mounted at once, newest first; 0 means all of them. */
+  historyWindow: number
   motion: boolean
   spinner: string[]
   /** Derived from the same tokens, so highlighted code cannot drift from the theme. */
@@ -163,6 +165,7 @@ export function createStyle(settings: Settings, env: Record<string, string | und
     glyphs: ascii ? ascii_glyphs : unicode_glyphs,
     settings,
     maxWidth: settings.transcript.max_width,
+    historyWindow: settings.transcript.history_window,
     motion: settings.ui.motion && !no_color,
     spinner: ascii ? ascii_spinner_frames : spinner_frames,
     syntax: syntaxOf(theme),

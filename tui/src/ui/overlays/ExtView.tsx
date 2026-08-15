@@ -20,6 +20,7 @@ import { useKeyboard } from "@opentui/solid"
 import { useStyle } from "../../render/theme.ts"
 import { listExtensions, readToolUsage, type ExtensionEntry, type ToolUsage } from "../../nulya/files.ts"
 import { extSetCurrent } from "../../nulya/cli.ts"
+import { UsageTable } from "./UsageTable.tsx"
 import type { Workspace } from "../../nulya/bin.ts"
 import type { SessionHeader } from "../../nulya/ledger.ts"
 
@@ -232,26 +233,6 @@ export function ExtView(props: {
         <text fg={style.theme.dim}>{notice()}</text>
       </Show>
       <text fg={style.theme.dim}>j/k move · Tab pane · a activate · r rollback · u usage table · Esc close</text>
-    </box>
-  )
-}
-
-function UsageTable(props: { rows: ToolUsage[] }) {
-  const style = useStyle()
-  return (
-    <box flexDirection="column" flexGrow={1}>
-      <text fg={style.theme.dim}>tool usage · .nulya/tool-usage.jsonl · counts only, not the promotion order</text>
-      <box height={1} />
-      <For each={props.rows}>
-        {(row) => (
-          <text fg={style.theme.fg}>
-            {row.toolId} · {row.uses} uses · {row.uses > 0 ? Math.round((row.ok / row.uses) * 100) : 0}% ok
-          </text>
-        )}
-      </For>
-      <Show when={props.rows.length === 0}>
-        <text fg={style.theme.dim}>no tool usage recorded yet</text>
-      </Show>
     </box>
   )
 }

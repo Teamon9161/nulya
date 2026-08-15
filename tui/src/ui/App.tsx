@@ -1,4 +1,4 @@
-import { Show, createEffect, createSignal, onCleanup } from "solid-js"
+import { Match, Switch, createEffect, createSignal, onCleanup } from "solid-js"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import { Transcript } from "./Transcript.tsx"
 import { Composer, type ComposerApi } from "./Composer.tsx"
@@ -6,10 +6,13 @@ import { StatusBar } from "./StatusBar.tsx"
 import { TabBar } from "./TabBar.tsx"
 import { SessionsView } from "./overlays/SessionsView.tsx"
 import { ExtView } from "./overlays/ExtView.tsx"
+import { HelpView } from "./overlays/HelpView.tsx"
+import { SettingsView } from "./overlays/SettingsView.tsx"
+import { UsageView } from "./overlays/UsageView.tsx"
 import { StyleContext, useStyle, type Style } from "../render/theme.ts"
 import { FoldContext, createFoldStore } from "../state/folds.ts"
 import { BrowseContext, createBrowseStore } from "../state/browse.ts"
-import { OverlayContext, createOverlayStore } from "../state/overlay.ts"
+import { OverlayContext, createOverlayStore, type OverlayKind } from "../state/overlay.ts"
 import { createTabStore } from "../state/tabs.ts"
 import { describeTool } from "../render/registry.ts"
 import { sessionNew } from "../nulya/cli.ts"
@@ -106,7 +109,7 @@ export function App(props: AppProps) {
     if (key) folds.toggle(key, false)
   }
 
-  const openOverlay = (kind: "sessions" | "ext") => {
+  const openOverlay = (kind: OverlayKind) => {
     if (browse.active()) leaveBrowse()
     const opening = overlay.kind() !== kind
     overlay.toggle(kind)
@@ -176,9 +179,15 @@ export function App(props: AppProps) {
       return true
     }
     if (command === "/help") {
-      setNotice(
-        "Enter send · Esc cancel/browse · Ctrl+O fold · F2 ext · F3 sessions · F4 next tab · /new /sessions /ext /step /cancel /fold /quit",
-      )
+      openOverlay("help")
+      return true
+    }
+    if (command === "/settings") {
+      openOverlay("settings")
+      return true
+    }
+    if (command === "/usage") {
+      openOverlay("usage")
       return true
     }
     // Unknown slash commands are the model's business, not ours (tui.md §4.4).
@@ -197,6 +206,7 @@ export function App(props: AppProps) {
     if (overlay.active()) {
       if (matches(keys.ext, key)) return openOverlay("ext")
       if (matches(keys.sessions, key)) return openOverlay("sessions")
+      if (matches(keys.help, key)) return openOverlay("help")
       if (matches(keys.quit, key)) quit()
       return
     }
@@ -225,6 +235,7 @@ export function App(props: AppProps) {
     }
     if (matches(keys.sessions, key)) return openOverlay("sessions")
     if (matches(keys.ext, key)) return openOverlay("ext")
+    if (matches(keys.help, key)) return openOverlay("help")
     if (matches(keys.nextTab, key)) {
       tabs.next()
       return
@@ -305,29 +316,37 @@ export function App(props: AppProps) {
               <TabBar tabs={tabs.tabs()} activeIndex={tabs.activeIndex()} />
               <Hairline />
 
-              <Show
-                when={overlay.kind() === null}
+              <Switch
                 fallback={
-                  <Show
-                    when={overlay.kind() === "sessions"}
-                    fallback={<ExtView ws={props.ws} header={snapshot().header} onClose={closeOverlay} />}
-                  >
-                    <SessionsView
-                      ws={props.ws}
-                      currentId={tab().id}
-                      onOpen={openSession}
-                      onNew={() => void newSession()}
-                      onClose={closeOverlay}
-                    />
-                  </Show>
+                  <Transcript
+                    items={snapshot().items}
+                    header={snapshot().header}
+                    contributions={tab().contributions()}
+                  />
                 }
               >
-                <Transcript
-                  items={snapshot().items}
-                  header={snapshot().header}
-                  contributions={tab().contributions()}
-                />
-              </Show>
+                <Match when={overlay.kind() === "sessions"}>
+                  <SessionsView
+                    ws={props.ws}
+                    currentId={tab().id}
+                    onOpen={openSession}
+                    onNew={() => void newSession()}
+                    onClose={closeOverlay}
+                  />
+                </Match>
+                <Match when={overlay.kind() === "ext"}>
+                  <ExtView ws={props.ws} header={snapshot().header} onClose={closeOverlay} />
+                </Match>
+                <Match when={overlay.kind() === "help"}>
+                  <HelpView keys={keys} onClose={closeOverlay} />
+                </Match>
+                <Match when={overlay.kind() === "settings"}>
+                  <SettingsView ws={props.ws} onClose={closeOverlay} />
+                </Match>
+                <Match when={overlay.kind() === "usage"}>
+                  <UsageView ws={props.ws} snapshot={snapshot()} onClose={closeOverlay} />
+                </Match>
+              </Switch>
 
               <Hairline />
               <Composer
