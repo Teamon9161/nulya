@@ -91,7 +91,9 @@ pub fn runStepWithPrompt(
     const turn = model.step(alloc, .{
         .prompt_ir = prompt_ir,
         .tools = tool_defs,
-        .generation = prompt.currentGeneration(l.view()),
+        // generation == ledger file (DESIGN §11): one file is one cache scope, so
+        // within a session the generation is constant.
+        .generation = 0,
         .options = model_options,
     }) catch |err| switch (err) {
         // Provider-phase cancellation: a complete assistant turn never formed.

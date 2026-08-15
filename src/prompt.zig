@@ -55,14 +55,6 @@ pub const PromptIR = struct {
     }
 };
 
-/// Current skeleton has no generation-changing event types yet. Keeping this as
-/// a projection function prevents a second mutable copy of generation state from
-/// living on `Ledger`; compaction/system/tool-selection events can extend it.
-pub fn currentGeneration(events: []const ledger.Event) u64 {
-    _ = events;
-    return 0;
-}
-
 pub fn project(alloc: std.mem.Allocator, events: []const ledger.Event) !PromptIR {
     return projectWithSystem(alloc, &.{}, events);
 }
@@ -132,7 +124,6 @@ test "PromptIR stable blocks extend by prefix on append" {
     defer p2.deinit(alloc);
 
     try std.testing.expect(isStablePrefix(p1.stable_blocks, p2.stable_blocks));
-    try std.testing.expectEqual(@as(u64, 0), currentGeneration(l.view()));
 }
 
 test "a capability_note appends a capability_note block without breaking the prefix or generation" {
@@ -143,7 +134,6 @@ test "a capability_note appends a capability_note block without breaking the pre
     try l.append(.{ .user_text = "hi" });
     const before = try project(alloc, l.view());
     defer before.deinit(alloc);
-    const gen_before = currentGeneration(l.view());
 
     try l.append(.{ .capability_note = .{ .id = "demo", .version = "v-aaaa", .text = "New capability available: `greet`." } });
     const after = try project(alloc, l.view());
@@ -154,8 +144,42 @@ test "a capability_note appends a capability_note block without breaking the pre
     try std.testing.expectEqual(before.stable_blocks.len + 1, after.stable_blocks.len);
     const last = after.stable_blocks[after.stable_blocks.len - 1];
     try std.testing.expectEqual(BlockKind.capability_note, last.kind);
-    // A plain append never bumps the generation.
-    try std.testing.expectEqual(gen_before, currentGeneration(l.view()));
+}
+
+test "reopening a durable ledger projects a block-identical prefix" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Write a couple of turns, project the tail, then close.
+    var before_blocks: usize = 0;
+    {
+        var l = try ledger.createDurable(alloc, io, tmp.dir, "s.jsonl", .{ .session = "s" });
+        defer l.deinit();
+        try l.append(.{ .user_text = "first" });
+        try l.append(.{ .assistant = .{
+            .text = "run",
+            .calls = &.{.{ .id = "c1", .tool = "shell", .args_json = "{\"command\":\"echo hi\"}" }},
+        } });
+        try l.append(.{ .tool_results = &.{.{ .call_id = "c1", .ok = true, .output = "hi" }} });
+        const p = try project(alloc, l.view());
+        defer p.deinit(alloc);
+        before_blocks = p.stable_blocks.len;
+    }
+
+    // A separate process reopening the file projects the same prefix, then
+    // extends it by appending — the cache invariant survives resume.
+    var reopened = try ledger.openDurable(alloc, io, tmp.dir, "s.jsonl");
+    defer reopened.deinit();
+    const before = try project(alloc, reopened.view());
+    defer before.deinit(alloc);
+    try std.testing.expectEqual(before_blocks, before.stable_blocks.len);
+
+    try reopened.append(.{ .user_text = "second" });
+    const after = try project(alloc, reopened.view());
+    defer after.deinit(alloc);
+    try std.testing.expect(isStablePrefix(before.stable_blocks, after.stable_blocks));
 }
 
 test "PromptIR carries immutable system blocks separately from ledger stable blocks" {

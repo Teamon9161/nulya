@@ -368,7 +368,7 @@ test "model stream is collected into owned turn" {
     const turn = try model.step(alloc, .{
         .prompt_ir = &ir,
         .tools = &.{},
-        .generation = prompt.currentGeneration(l.view()),
+        .generation = 0,
     });
     defer turn.deinit(alloc);
 
