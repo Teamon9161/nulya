@@ -81,6 +81,8 @@ export interface Glyphs {
   foldClosed: string
   foldOpen: string
   hairline: string
+  /** The left rule of the composition card — the one framed block (tui.md §4.1). */
+  bar: string
 }
 
 const unicode_glyphs: Glyphs = {
@@ -99,6 +101,7 @@ const unicode_glyphs: Glyphs = {
   foldClosed: "▸",
   foldOpen: "▾",
   hairline: "─",
+  bar: "▎",
 }
 
 const ascii_glyphs: Glyphs = {
@@ -117,6 +120,7 @@ const ascii_glyphs: Glyphs = {
   foldClosed: ">",
   foldOpen: "v",
   hairline: "-",
+  bar: "|",
 }
 
 export interface Style {

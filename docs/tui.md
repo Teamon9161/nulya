@@ -1,6 +1,6 @@
 # Nulya TUI — 设计与计划
 
-> **状态：T0（内核 `--stream`）已落地 → [DESIGN.md](DESIGN.md) §14；T1（`tui/` 骨架）已落地 → `tui/`（见 §11）；T2–T4 属计划。** 本文是 `tui/` 的设计契约 + 里程碑；落地一块就把"已实现"的部分搬进 DESIGN.md §14 / 新 §18，本文收缩成纯计划。`tui/` 不在内核范围里（另一条工具链、另一个进程），所以它的现状写在本文 §11，不进 DESIGN.md。
+> **状态：T0（内核 `--stream`）已落地 → [DESIGN.md](DESIGN.md) §14；T1（`tui/` 骨架）、T2（卡片与折叠）已落地 → `tui/`（见 §11）；T3–T4 属计划。** 本文是 `tui/` 的设计契约 + 里程碑；落地一块就把"已实现"的部分搬进 DESIGN.md §14 / 新 §18，本文收缩成纯计划。`tui/` 不在内核范围里（另一条工具链、另一个进程），所以它的现状写在本文 §11，不进 DESIGN.md。
 > 上位原则见 [PLAN.md](PLAN.md) §3.11：前端是 core 之上的薄客户端——**tail ledger 文件 + append user 事件；前端是长期进程，re-spawn 的只是 worker**。
 
 ## 0. 定位（三句话）
@@ -222,7 +222,7 @@ registry 按 shell 命令前缀识别，头行抽关键事实（抽不到就退�
 - **无边框 transcript**：垂直节奏靠空行——turn 之间一空行、卡片之间不空、卡片体缩进 +2；两条 hairline 分隔三块。
 - **diff 静**：仅前景色的 add/del，无背景块；上下文行 dim。
 - **动效一处**：状态栏一个 braille spinner + 流式末尾 `▍` 光标；不做 shimmer（设定 `motion = false` 全关）。
-- **符号集**（Windows Terminal / 常见等宽字体都有）：`›` user · `●` assistant · `$` shell · `✎` edit · `⌘` ext tool · `⚙` build/init · `⚡` capability/activate · `↺` rollback · `⌕` read kernel · `☰` skill · `⤷` sub-session · `⊘` canceled · `▸ ▾` fold · `⠋` spinner；`ascii = true` 时降级为 `> * $ ~ # + ! < ? = > x`。
+- **符号集**（Windows Terminal / 常见等宽字体都有）：`›` user · `●` assistant · `$` shell · `✎` edit · `⌘` ext tool · `⚙` build/init · `⚡` capability/activate · `↺` rollback · `⌕` read kernel · `☰` skill · `⤷` sub-session · `⊘` canceled · `▎` composition · `▸ ▾` fold · `⠋` spinner；`ascii = true` 时降级为 `> * $ ~ # + ! < ? = > x |`。
 - **主题 tokens**（`render/theme.ts`；`nulya-dark` 默认、`nulya-light`；尊重 `NO_COLOR`）：`fg dim accent.user accent.assistant accent.tool accent.evolve ok err warn diff.add diff.del hairline selection`。语法高亮用 OpenTUI `SyntaxStyle`，同一套 tokens 派生。
 - **宽度**：内容 ≤ `max_width`（默认 100），左对齐；窄于 60 列时隐藏状态栏右半与卡片右侧 chip。
 
@@ -262,7 +262,7 @@ fold   = "ctrl+o"
 |---|---|---|
 | ~~**T0 · kernel `--stream`**~~ ✅ | §2.2：`StepContext.observer`、tee、tool begin/end、per-step 刷 ledger 行、`run done/error` 行、诊断 JSON 化；单测 + e2e 冒烟；DESIGN §14 同步 | `zig build test` / `e2e` 绿；`nulya session step <id> --stream` 在 scripted 下按 §2.2 行序输出；不带 `--stream` 行为不变 |
 | ~~**T1 · 骨架**~~ ✅ | `tui/` 包；`nulya/{bin,cli,ledger,files,diff}.ts`；`state/{session,driver,settings}`；App = transcript（User/Assistant 通用卡 + 通用 tool 卡）+ composer + 状态栏；driver 状态机；流式；Esc cancel；`--session` 回放；`bun test` 两条 | 在 nulya 仓库里用它对着真实 provider 完整跑一轮"读源码 → edit → zig build test"；关掉重开 `--session` 一致 |
-| **T2 · 卡片与折叠** | registry；Shell/Edit(diff)/ExtTool/Thinking/Canceled/spill；EvolveCard 全表；CapabilityBanner；CompositionCard；折叠交互；`tui.toml`；主题 tokens；ascii 降级 | §4.2 表每行一个快照测试；`edit_diff` 设定生效 |
+| ~~**T2 · 卡片与折叠**~~ ✅ | registry；Shell/Edit(diff)/ExtTool/Thinking/Canceled/spill；EvolveCard 全表；CapabilityBanner；CompositionCard；折叠交互；`tui.toml`；主题 tokens；ascii 降级 | §4.2 表每行一个快照测试；`edit_diff` 设定生效 |
 | **T3 · nulya 视图** | `/sessions`（树 + live 标记 + 打开）；`/ext`（store / 版本线 / 漂移 / usage / 动作键）；SubSessionCard → 第二 tab；observer 模式（锁探测、`events --follow` 续接、take over） | 用 shell 在另一终端跑一个 driver 脚本 loop step，TUI 以 observer 附上并能 append |
 | **T4 · 收尾** | `/help` `/settings` `/usage`；keymap 覆盖；`bun build --compile` 出单文件；README（安装、`NULYA_BIN`、按键）；性能核对（长 session 回放 5k 事件不卡；scrollbox 视口裁剪） | 5k 事件 session 打开 < 1s；README 照做能跑 |
 
@@ -277,6 +277,7 @@ fold   = "ctrl+o"
 5. **`nulya composition preview`**：下一场会晋升谁——纯投影 CLI，避免 TUI 复刻 `tool_selection.rank`。
 6. **`split-footer` 模式**作为可选屏幕模式（scrollback 原生复制），与折叠可变历史的取舍。
 7. session `--system-file/--skill/--pin`（PLAN §3.2 未落地）落地后 `/new` 的表单。
+8. **header 的 `created` 现在是空串**：`ledger.Header` 有这个字段、`session new` 不填它，于是 CompositionCard 的"时间"只能省略（T2 §11）。补一行"创建时写 RFC3339"是几行的事，但它是 model-invisible 的 provenance fact，值得和第 1 条（`spawned_by`）一起定，别单独动 frozen core 的 header 形状。
 
 ## 11. 实施日志
 
@@ -400,3 +401,69 @@ NULYA_SCRIPTED_MODE=finish bun run src/main.tsx --model scripted   # 离线
 6. **内核不需要再改**（T0 提醒 5 依然成立）：T1 全程只用了 `session new|append|step --stream|events|cancel` 与 session 文件首行。§10 那四项一项没动。
 
 核验（编排者）：`zig build test` 绿 / `zig build e2e` 绿 / `bun test` 20 pass 0 fail（7 快照）。真实 provider 冒烟未跑——环境无任何 API 密钥。
+
+### T2 · 卡片与折叠
+
+**状态**：完成。`render/registry.ts` 填满 §4.2 / §5.2 全表；卡片拆成 `CardFrame` + `ShellCard` / `EditCard` / `ExtToolCard` / `EvolveCard` / `CanceledCard` / `CompositionCard`（`Thinking` / `CapabilityBanner` / `UserTurn` / `AssistantTurn` 沿用并加强）；折叠交互补齐鼠标点头行与 browse 模式（`state/browse.ts`）；`tui.toml` 的 `edit_diff` / `tool_output` / `thinking` / `ascii` 全部真的生效；主题 tokens 多一个 `bar` 字形并有 ascii 降级。**内核一行未改**（硬约束 1）。`bun test` 40 条全绿（`cli.test.ts` / **新增** `registry.test.ts` / `render.test.tsx`，14 张快照）；`zig build test` / `zig build e2e` 绿。
+
+**关键决定与理由**
+
+- **`describeTool` 现在也拿 `output`。** §5.2 有两行的事实只在 stdout 里：`ext build` 的 `v-<hash>`（内核打 `<dir>: <version> (built)`）、`session new` 的 id。ledger 把参数和结果都存着，所以 live 与 replay 读到的是同一份事实——签名从 `(tool, args, glyphs)` 变成 `({tool, args, output}, glyphs)`，抽取仍然只发生在 registry 一处。
+- **抽不到就退回 ShellCard，不报错。** `nulya toolchain …`、以及任何比本 build 新的子命令，走的是普通 shell 卡。这条是 §5.2 写死的纪律，也是 registry 唯一的失败模式：一张朴素的卡永远是对的。
+- **卡片按 `presentation.kind` 分派，不按工具名。** `ToolCard` 只有一个 `Switch`，读的是 registry 已经做完的决定；六个卡片组件里没有一处 `=== "shell"` 之类的名字比较。`CardFrame` 收走了头行布局、折叠开关、spill 尾行，所以"新加一种卡"不会长出第二套视觉语言。
+- **取消压过工具身份。** 一次被内核收尾的调用，重要的是"它没跑完"，不是"它是个 shell"，所以 `CanceledCard` 在 `Switch` 的最前面，且四种 marker 各有各的措辞（"side effects unknown" 与 "never started" 不是同一个警告）。认的仍然是 marker **文本**（T0 提醒 4）。
+- **CompositionCard 不是 transcript item。** header 不是事件（DESIGN §3.1），把它塞进 items 就是发明第二份真相。它由 `Transcript` 从 `snapshot.header` 直接画在 items 之前，因此 T1 钉死的两条不变量（live == replay、关掉重开逐字相同）完全不受影响。它读的 skills 来自**冻结版本**的 `extension.json`（`files.ts` 新增 `readContributions`），不是 store 的 `current`——本场跑的是什么，就显示什么（DESIGN §7.5）。
+- **CapabilityBanner 的头行自己解析 note 文本。** `extension/notes.zig` 生成的文本是确定性的（`Tools:` / `Skills:` 两段，每条 `- <name> — <desc>`），把名字提到头行正是这张卡存在的理由——"agent 现在会 X 了"不该需要展开。解析放在 `nulya/ledger.ts`（那是唯一认识内核形状的目录），认不出的形状就只是没有名字，全文照旧在下面。
+- **browse 模式让 composer 先 blur。** 不 blur 的话 `j`/`k` 会同时进文本框；blur 之后 App 的 `useKeyboard` 独占这几个键，`Esc` 再把焦点还回去。`Esc` 的三义在一个地方分完：stepping → cancel；idle 且 composer 空 → 进 browse；browse 中 → 退出。
+- **`Ctrl+Shift+O` 改成 toggle。** T1 只会全展开，按第二下没反应；§4.2 写的是"全部展开/折叠"，所以记一个 `allOpen` 信号来回翻。
+- **SubSessionCard 不做独立组件。** 它与 EvolveCard 唯一的差别是 glyph 和"有一个 session id"，而"打开成第二个 tab"是 T3。按 CLAUDE.md「第二个 consumer 出现之前不抽 abstraction」，registry 保留 `kind:"subsession"` + `sessionId` 这两个**事实**，绘制暂时交给 `EvolveCard`；T3 要接的话，落点就是 `ToolCard` 里那个 Match 分支（代码里有注释指着）。第一版曾加过一行 dim 的 `⤷ session <id>`，与头行完全重复，删掉了。
+
+**偏离设计之处**
+
+1. **§4.2 的 SubSessionCard**：没有独立组件（理由见上）；`sessionId` 这个事实在 registry 里，快照测试仍覆盖了这一行。
+2. **§4.2 的 CompositionCard 头行"时间"**：内核实际写的 header 里 `created` 是**空串**（`nulya session new` 不填它），所以有值才显示。没有伪造时间（用 mtime 或从 session id 反推都是第二份真相），也没有为此改内核（硬约束 1）。这是 §10 值得记一笔的一行内核修补。
+3. **§4.2 的 CapabilityBanner 头行**：除 `tools: …` 外也带 `skills: …`——note 本来就宣告两种能力，只显示一半没有理由。
+4. **§4.2 的 CanceledCard**：不可折叠。它的"体"是 `—`，marker 文本已经全在 chip 上，留一个空的折叠开关是假的可交互。
+5. **§4.2 的 `▎` 左侧竖线**：§6 的符号集原本没有列它（§4.1 的示意图里画着），CompositionCard 需要一个"这是一块"的记号，新增 glyph `bar`（ascii 降级为 `|`）。**已同步补进 §6 的符号表**（先改文档再改代码，硬约束 7）。
+6. **§6 的 "diff 静"**：沿用 T1 的偏离（行号 gutter 开着，靠它拿回 `-`/`+` 符号）。
+7. **§4.4 的 `/settings`**：仍未做（§9 归 T4）。`/help` 的提示行更新为包含 browse。
+8. **§7 的 `[keys]`**：`cancel` / `fold` / `foldAll` / `quit` / `redraw` 可覆盖（T1 已有）；browse 内部的 `j`/`k`/`Enter` 是固定键，没有做成可配置——第二个诉求出现再说。
+
+**怎么运行与测试**
+
+```bash
+zig build                                    # TUI 需要一个 nulya 二进制
+cd tui && bun install
+
+bun run typecheck                            # tsc --noEmit
+bun test                                     # 40 条：CLI 协议 + 演化表 + 渲染快照 + 按键/鼠标注入
+
+bun run src/main.tsx --session s-…           # 手工看一眼
+```
+
+新增/改动的测试：
+
+- `tui/test/registry.test.ts`（**新**，11 条，无渲染器）：§5.2 每一行一条——`src` / `ext init`（含 `--script` 不当 id）/ `ext build`（`(built)` 与 `(already built)` 两种 stdout）/ `activate` / `rollback`（两个 glyph 不同）/ `ext run`（`--arg` 与位置 JSON 两种形态）/ `skill load` / `session new`（id 来自 stdout，没打印就是 `null`）/ `session step`；外加"读不懂的 `nulya` 命令退回 shell 卡"和"参数还在流式时显示原始 JSON 而不是瞎猜"。
+- `tui/test/render.test.tsx`：**§4.2 的每一行都有一张快照**——CompositionCard / UserTurn（含 queued）/ AssistantTurn / Thinking / ShellCard / EditCard / ExtToolCard / EvolveCard（§5.2 七种命令一帧）/ SubSession（两种）/ CapabilityBanner / CanceledCard（四种 marker 一帧）/ spill 尾行；另加 ascii 降级两帧（普通卡 + CompositionCard）、窄屏隐藏右侧 chip、`edit_diff=collapsed` / `tool_output=expanded`。
+- **`edit_diff` 设定生效有真文件为证**：`"a project tui.toml flips the edit diff default"` 在临时 workspace 里先断言默认展开，再写一个 `.nulya/tui.toml`（`edit_diff="collapsed"` + `thinking="expanded"`），重新 `loadSettings` 后同一张 edit 卡的 diff 消失、同一张 thinking 卡展开——两个方向都动，证明是设定而不是"全都折了"。
+- **鼠标**：`"clicking a card's head line folds it"` 用 test renderer 的 `mockMouse.click(4, 0)` 点头行，展开→再点收起。
+- **browse 模式**：`"Esc on an empty composer opens browse mode, where Enter folds a card"` 跑真实二进制一轮 scripted step，然后 `Esc` 进 browse（状态栏出现提示）、`Enter` 展开最近一张卡（stdout 出现第二次）、`Esc` 退出。
+- T1 的四条不变量测试（live == replay、Enter 真的驱动一次 step、关掉重开逐字相同、`Ctrl+O`）全部保留且仍绿——CompositionCard 加在 transcript 顶部后也没破。
+
+**已知问题**
+
+- **真实 provider 仍未跑：环境里没有任何 API 密钥**（T1 已记，本里程碑按硬约束 6 本就不跑）。因此 `thinking_delta` / `usage` 流行、以及 Anthropic 形状的 `reasoning` 抽取（`readableThinking`）仍只在构造数据上验证过。
+- **鼠标与 browse 只在 test renderer 里验证过。** 真实终端里鼠标上报由 OpenTUI 打开，但 Windows Terminal 的滚轮/点击、以及 `scrollbox` 里坐标随滚动偏移之后的点击命中，都还没人工确认。
+- **`nulya src` 的行数 chip 数的是 shell 结果的行数**（含 `--- stderr ---` / `[exit N]` 那几行），不是文件行数。真行数只有内核知道；宁可数得诚实也不发明一个数字。
+- **CompositionCard 的 skills 在 store 被删/改名后静默为空。** header 冻结的版本目录不在了，`readContributions` 返回空而不是报错——header 本身已经把版本号写在 `ext lint@v-…` 那一行，所以信息不会全丢。真正的"漂移提示"（冻结版本 vs store `current`）是 §5.3 的 `/ext` 视图，归 T3。
+- `EditCard` 的 diff 高度是补丁行数（上限 40 行）。一次超长 edit 会被截断显示，没有内部滚动——`scrollbox` 已经在外面，嵌套滚动区在终端里更难用。
+- T1 的 `settle()` 那条依然成立：新加需要 markdown/diff 的快照别用单次 `renderOnce()`。
+
+**给下一里程碑（T3 · nulya 视图）的提醒**
+
+1. **`nulya/files.ts` 已经有 `readContributions` / `readActiveContributions`**（读**冻结版本**的 `extension.json`）。`/ext` 视图要的 store 扫描、`current` 指针、`versions/` 时间线、`.nulya/tool-usage.jsonl` 投影都接着加在这个文件里——`nulya/` 之外仍然不许出现 `.nulya/` 路径。
+2. **`presentation.sessionId` 已经是事实**，`ToolCard` 里 `evolve || subsession` 那个 Match 就是 SubSessionCard 的落点（注释指着）。要做"Enter 打开成第二个 tab"时，先想清楚第二个 tab 的 session 是 observer（§5.6），别让两个进程都去抢 `<id>.lock`。
+3. **browse 模式的键在 `App.tsx` 的 `useKeyboard` 里，靠 `browse.active()` 门控。** overlay（`/sessions`、`/ext`）打开时同样要门控，否则 `j/k` 会被两处同时消费；顺手把 overlay 的开关也做成一个 store，别再往 App 里堆信号。
+4. **每加一种卡就加一帧快照，每加一行 §5.2 就先加 `registry.test.ts`**（无渲染器、跑一秒）。live == replay 与关掉重开逐字相同这两条不变量对新卡片同样有效——新卡片不许依赖只有流里才有的信息。
+5. **`usage` 是每步的增量**（T0 提醒 2），状态栏写的是 `since attach`；`/usage` 视图（T4）别把它当全量。
+6. **内核不需要再改**（T0 提醒 5、T1 提醒 6 依然成立）：T2 全程只用了 `session new|append|step --stream|events|cancel`、session 文件首行、以及 `.nulya/extensions/<id>/versions/<v>/extension.json` 的只读读取。§10 那四项一项没动；唯一想加的一行内核修补是 header 的 `created` 实际为空（见"偏离"第 2 条），值得记进 §10 而不是偷偷补在前端。

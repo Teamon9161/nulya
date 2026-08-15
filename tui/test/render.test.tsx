@@ -7,14 +7,19 @@
  * hand, so an unattended run still proves Enter sends and Ctrl+O folds.
  */
 import { afterAll, beforeAll, expect, test } from "bun:test"
-import { For } from "solid-js"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { For, type JSX } from "solid-js"
 import { testRender } from "@opentui/solid"
 import { Card } from "../src/render/cards/index.tsx"
+import { CompositionCard } from "../src/render/cards/CompositionCard.tsx"
 import { App } from "../src/ui/App.tsx"
 import { StyleContext, createStyle, type Style } from "../src/render/theme.ts"
 import { FoldContext, createFoldStore } from "../src/state/folds.ts"
 import { createSessionState, type TranscriptItem } from "../src/state/session.ts"
-import { default_settings } from "../src/state/settings.ts"
+import { default_settings, loadSettings } from "../src/state/settings.ts"
+import type { SessionHeader } from "../src/nulya/ledger.ts"
 import { sessionAppend, sessionEvents, sessionNew, sessionStep } from "../src/nulya/cli.ts"
 import { scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
 
@@ -31,6 +36,40 @@ function Harness(props: { items: TranscriptItem[]; style?: Style }) {
       </FoldContext.Provider>
     </StyleContext.Provider>
   )
+}
+
+/** A card rendered on its own, for the rows of §4.2 that are not ledger events. */
+async function frameOfNode(node: () => JSX.Element, width = 76, height = 16, theme = style): Promise<string> {
+  const setup = await testRender(
+    () => (
+      <StyleContext.Provider value={theme}>
+        <FoldContext.Provider value={createFoldStore()}>{node()}</FoldContext.Provider>
+      </StyleContext.Provider>
+    ),
+    { width, height },
+  )
+  try {
+    return await settle(setup)
+  } finally {
+    setup.renderer.destroy()
+  }
+}
+
+/** One shell call, with only the parts a card reads varied. */
+function shellItem(over: { key: string; command: string; output?: string; ok?: boolean }): TranscriptItem {
+  return {
+    key: over.key,
+    seq: 2,
+    kind: "tool",
+    callId: over.key,
+    tool: "shell",
+    args: JSON.stringify({ command: over.command }),
+    state: "done",
+    ok: over.ok ?? true,
+    output: over.output ?? "[exit 0]",
+    spillPath: null,
+    resolved: true,
+  }
 }
 
 const user_item: TranscriptItem = { key: "e1", seq: 1, kind: "user", text: "make emit budgets configurable", queued: false }
@@ -50,13 +89,38 @@ const shell_item: TranscriptItem = {
   spillPath: null,
   resolved: true,
 }
-const evolve_item: TranscriptItem = {
-  ...(shell_item as Extract<TranscriptItem, { kind: "tool" }>),
+const evolve_item = shellItem({
   key: "e4:c2",
-  callId: "c2",
-  args: JSON.stringify({ command: "nulya ext build .nulya/extensions/lint" }),
+  command: "nulya ext build .nulya/extensions/lint",
+  output: ".nulya/extensions/lint: v-3f2a91 (built)\n[exit 0]",
+})
+const ext_tool_item: TranscriptItem = {
+  key: "e5:c9",
+  seq: 5,
+  kind: "tool",
+  callId: "c9",
+  tool: "lint_zig",
+  args: JSON.stringify({ path: "src/emit.zig" }),
+  state: "done",
   ok: true,
-  output: "sealed lint@v-3f2a91\n[exit 0]",
+  output: "src/emit.zig: 0 findings",
+  spillPath: null,
+  resolved: true,
+}
+const header_fixture: SessionHeader = {
+  kind: "header",
+  v: 1,
+  session: "s-1786815442964-8462dd",
+  parent: { session: "s-1786800870313-bf37ef", seq: 41 },
+  model: "anthropic",
+  model_identity: {
+    provider: "anthropic",
+    model: "claude-sonnet-5",
+    base_url: "https://api.anthropic.com",
+    api_key_env: "ANTHROPIC_API_KEY",
+  },
+  created: "2026-08-16T14:02:11Z",
+  composition: { active: [{ id: "lint", version: "v-3f2a91" }], native_tools: ["ext:lint/lint_zig"] },
 }
 const edit_item: TranscriptItem = {
   key: "e6:c3",
@@ -101,13 +165,25 @@ const spill_item: TranscriptItem = {
   spillPath: ".nulya/scratch/spill-9.txt",
   resolved: true,
 }
+// Verbatim `extension/notes.zig` shape: the banner reads its head line off it.
 const capability_item: TranscriptItem = {
   key: "e10",
   seq: 10,
   kind: "capability",
   id: "lint",
   version: "v-3f2a91",
-  text: "tools: lint_zig\nusage: nulya ext run lint lint_zig '<json>'",
+  text: [
+    "New capabilities from extension `lint` version `v-3f2a91` are now available:",
+    "",
+    "Tools:",
+    "- lint_zig — Lint Zig sources.",
+    "  invoke: nulya ext run lint <tool> '<json-args>'",
+    "",
+    "Skills:",
+    "- zig-style — House Zig style.",
+    "  load: nulya skill load lint/zig-style",
+    "",
+  ].join("\n"),
 }
 
 async function frameOf(items: TranscriptItem[], width = 76, height = 24, theme = style): Promise<string> {
@@ -152,9 +228,81 @@ test("an expanded shell card shows stdout and stderr", async () => {
   expect(frame).toContain("test failure in emit.zig")
 })
 
+test("an extension tool call carries the ⌘ glyph and an argument digest", async () => {
+  const frame = await frameOf([ext_tool_item])
+  expect(frame).toContain("⌘ lint_zig · path=src/emit.zig")
+  expect(frame).toContain("ok")
+  expect(frame).not.toContain("0 findings")
+  expect(frame).toMatchSnapshot()
+})
+
 test("a `nulya …` command reads as an evolution action", async () => {
   const frame = await frameOf([evolve_item])
-  expect(frame).toContain("⚙ nulya ext build")
+  expect(frame).toContain("⚙ ext build · lint → v-3f2a91")
+  expect(frame).toMatchSnapshot()
+})
+
+// One frame per row of the §5.2 evolution table: these head lines are the
+// difference between "the agent ran a command" and "the agent grew".
+test("every evolution action in §5.2 has its own head line", async () => {
+  const frame = await frameOf(
+    [
+      shellItem({ key: "v1", command: "nulya src emit.zig", output: "pub const head_bytes = 4096;\n[exit 0]" }),
+      shellItem({
+        key: "v2",
+        command: "nulya ext init lint",
+        output: "initialized extension 'lint' at .nulya/extensions/lint\n[exit 0]",
+      }),
+      shellItem({
+        key: "v3",
+        command: "nulya ext build .nulya/extensions/lint",
+        output: ".nulya/extensions/lint: v-3f2a91 (built)\n[exit 0]",
+      }),
+      shellItem({ key: "v4", command: "nulya ext activate lint v-3f2a91", output: "lint: current -> v-3f2a91\n[exit 0]" }),
+      shellItem({ key: "v5", command: "nulya ext rollback lint v-0011aa", output: "lint: current -> v-0011aa\n[exit 0]" }),
+      shellItem({ key: "v6", command: "nulya ext run lint lint_zig '{\"path\":\"src\"}'", output: "0 findings\n[exit 0]" }),
+      shellItem({ key: "v7", command: "nulya skill load evolution/zig-style", output: "# Zig style\n[exit 0]" }),
+    ],
+    76,
+    20,
+  )
+  expect(frame).toContain("⌕ read kernel · emit.zig")
+  expect(frame).toContain("⚙ ext init · lint → .nulya/extensions/lint")
+  expect(frame).toContain("⚙ ext build · lint → v-3f2a91")
+  expect(frame).toContain("⚡ activate · lint@v-3f2a91")
+  expect(frame).toContain("↺ rollback · lint@v-0011aa")
+  expect(frame).toContain("⌘ ext run · lint/lint_zig")
+  expect(frame).toContain("☰ skill · evolution/zig-style")
+  expect(frame).toMatchSnapshot()
+})
+
+test("a sub-session names the session it drives", async () => {
+  const frame = await frameOf(
+    [
+      shellItem({ key: "s1", command: "nulya session new --model scripted", output: "s-1786815442964-8462dd\n[exit 0]" }),
+      shellItem({ key: "s2", command: "nulya session step s-1786815442964-8462dd", output: "[exit 0]" }),
+    ],
+    76,
+    12,
+  )
+  expect(frame).toContain("⤷ sub-session · s-1786815442964-8462dd")
+  expect(frame).toContain("⤷ sub-session step · s-1786815442964-8462dd")
+  expect(frame).toMatchSnapshot()
+})
+
+test("the composition card shows what this session froze", async () => {
+  const frame = await frameOfNode(() => (
+    <CompositionCard
+      header={header_fixture}
+      contributions={[{ id: "lint", version: "v-3f2a91", tools: ["lint_zig"], skills: ["skills/zig-style"] }]}
+    />
+  ))
+  expect(frame).toContain("session · 2026-08-16 14:02 · frozen composition")
+  expect(frame).toContain("shell edit ⚡lint_zig")
+  expect(frame).toContain("skills zig-style")
+  expect(frame).toContain("anthropic/claude-sonnet-5 · api.anthropic.com")
+  expect(frame).toContain("lint@v-3f2a91")
+  expect(frame).toContain("parent s-1786800870313-bf37ef:41")
   expect(frame).toMatchSnapshot()
 })
 
@@ -175,6 +323,50 @@ test("edit_diff = collapsed hides the diff", async () => {
   expect(frame).not.toContain("pub const tail_bytes = 2048;")
 })
 
+/**
+ * The whole point of `tui.toml` (tui.md §7): a real file in a real workspace
+ * changes what the transcript looks like. Asserting on a hand-built settings
+ * object would only test the renderer — this walks the actual path.
+ */
+test("a project tui.toml flips the edit diff default", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "nulya-tui-cfg-"))
+  try {
+    const before = await loadSettings(dir, {})
+    expect(before.transcript.edit_diff).toBe("expanded")
+    expect(await frameOf([edit_item], 76, 24, createStyle(before, {}))).toContain("pub const tail_bytes = 2048;")
+
+    mkdirSync(join(dir, ".nulya"), { recursive: true })
+    writeFileSync(join(dir, ".nulya", "tui.toml"), '[transcript]\nedit_diff = "collapsed"\nthinking = "expanded"\n')
+
+    const after = await loadSettings(dir, {})
+    expect(after.transcript.edit_diff).toBe("collapsed")
+    expect(after.transcript.thinking).toBe("expanded")
+    expect(after.sources.some((source) => source.endsWith("tui.toml"))).toBe(true)
+
+    const frame = await frameOf([edit_item, thinking_item], 76, 24, createStyle(after, {}))
+    expect(frame).toContain("✎ src/emit.zig")
+    expect(frame).not.toContain("pub const tail_bytes = 2048;")
+    // The same file moves thinking the other way, so this is the setting and
+    // not just "everything collapsed".
+    expect(frame).toContain("weigh the options")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("clicking a card's head line folds it", async () => {
+  const setup = await testRender(() => <Harness items={[shell_item]} />, { width: 76, height: 12 })
+  try {
+    expect(await settle(setup)).not.toContain("running 12 tests")
+    await setup.mockMouse.click(4, 0)
+    expect(await settle(setup)).toContain("running 12 tests")
+    await setup.mockMouse.click(4, 0)
+    expect(await settle(setup)).not.toContain("running 12 tests")
+  } finally {
+    setup.renderer.destroy()
+  }
+})
+
 test("a canceled call is recognised by its marker, not by any stream line", async () => {
   const frame = await frameOf([canceled_item])
   expect(frame).toContain("⊘ sleep 60")
@@ -182,15 +374,35 @@ test("a canceled call is recognised by its marker, not by any stream line", asyn
   expect(frame).toMatchSnapshot()
 })
 
+test("each cancellation marker says something different about the world", async () => {
+  const frame = await frameOf(
+    [
+      shellItem({ key: "x1", command: "sleep 60", ok: false, output: "tool execution was canceled; side effects may be partial or unknown" }),
+      shellItem({ key: "x2", command: "zig build", ok: false, output: "tool execution completed, but result recording was canceled" }),
+      shellItem({ key: "x3", command: "zig build test", ok: false, output: "not executed because the step was canceled" }),
+      shellItem({ key: "x4", command: "rm -rf tmp", ok: false, output: "previous tool execution was interrupted before Nulya recorded results" }),
+    ],
+    84,
+    12,
+  )
+  expect(frame).toContain("canceled · side effects unknown")
+  expect(frame).toContain("canceled · completed but unrecorded")
+  expect(frame).toContain("canceled · not executed")
+  expect(frame).toContain("interrupted · results unrecorded")
+  expect(frame).toMatchSnapshot()
+})
+
 test("a spilled result points at its file", async () => {
   const frame = await frameOf([spill_item])
   expect(frame).toContain("full output → .nulya/scratch/spill-9.txt")
+  expect(frame).toMatchSnapshot()
 })
 
-test("capability notes are expanded and carry the evolve accent", async () => {
-  const frame = await frameOf([capability_item])
-  expect(frame).toContain("⚡ capability · lint@v-3f2a91")
-  expect(frame).toContain("tools: lint_zig")
+test("capability notes are expanded and name what arrived", async () => {
+  const frame = await frameOf([capability_item], 96)
+  expect(frame).toContain("⚡ capability · lint@v-3f2a91 · tools: lint_zig · skills: zig-style")
+  // The note the model itself was given, verbatim underneath.
+  expect(frame).toContain("- lint_zig — Lint Zig sources.")
   expect(frame).toMatchSnapshot()
 })
 
@@ -202,10 +414,27 @@ test("a narrow viewport drops the right-hand chip", async () => {
 
 test("ascii mode degrades every glyph", async () => {
   const ascii = createStyle({ ...default_settings, transcript: { ...default_settings.transcript, ascii: true } }, {})
-  const frame = await frameOf([user_item, capability_item], 76, 16, ascii)
+  const frame = await frameOf([user_item, capability_item, evolve_item, edit_item], 76, 24, ascii)
   expect(frame).toContain("> make emit budgets configurable")
   expect(frame).toContain("! capability · lint@v-3f2a91")
+  expect(frame).toContain("+ ext build · lint → v-3f2a91")
+  expect(frame).toContain("~ src/emit.zig")
   expect(frame).not.toContain("›")
+  expect(frame).not.toContain("⚙")
+  expect(frame).toMatchSnapshot()
+})
+
+test("the composition card degrades to ascii too", async () => {
+  const ascii = createStyle({ ...default_settings, transcript: { ...default_settings.transcript, ascii: true } }, {})
+  const frame = await frameOfNode(
+    () => <CompositionCard header={header_fixture} contributions={[]} />,
+    76,
+    12,
+    ascii,
+  )
+  expect(frame).toContain("| session · 2026-08-16 14:02 · frozen composition")
+  expect(frame).toContain("shell edit !lint_zig")
+  expect(frame).not.toContain("▎")
 })
 
 // --- live vs replay, and the App under programmatic keys ---------------------
@@ -328,6 +557,36 @@ test("Ctrl+O expands the most recent tool card", async () => {
     setup.mockInput.pressKey("o", { ctrl: true })
     // Expanded: the head line plus the captured stdout.
     expect(occurrences(await settle(setup, 5))).toBe(2)
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 120_000)
+
+test("Esc on an empty composer opens browse mode, where Enter folds a card", async () => {
+  const id = await sessionNew(ws, { model: "scripted" })
+  const state = createSessionState(id)
+  const setup = await testRender(
+    () => <App ws={ws} id={id} state={state} style={style} driver={{ env: scripted_env }} />,
+    { width: 80, height: 24 },
+  )
+  try {
+    await settle(setup, 4)
+    await setup.mockInput.typeText("probe")
+    setup.mockInput.pressEnter()
+    await until(() => state.snapshot.items.some((item) => item.kind === "tool" && item.resolved))
+    const occurrences = (frame: string) => frame.split("hello-from-nulya").length - 1
+    expect(occurrences(await settle(setup, 5))).toBe(1)
+
+    // Nothing is running and nothing is typed, so Esc hands the keyboard to the
+    // transcript rather than canceling (tui.md §4.2).
+    setup.mockInput.pressEscape()
+    expect(await settle(setup, 3)).toContain("browse · j/k move")
+
+    setup.mockInput.pressEnter()
+    expect(occurrences(await settle(setup, 5))).toBe(2)
+
+    setup.mockInput.pressEscape()
+    expect(await settle(setup, 3)).not.toContain("browse · j/k move")
   } finally {
     setup.renderer.destroy()
   }

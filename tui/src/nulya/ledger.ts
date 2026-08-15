@@ -144,6 +144,40 @@ export function cancelMarkerOf(output: string): CancelMarker | null {
   return null
 }
 
+/**
+ * What a `capability_note` announces, read off its text.
+ *
+ * The note body is generated deterministically by `extension/notes.zig` — a
+ * `Tools:` section and a `Skills:` section, one `- <name> — <description>` per
+ * entry. Pulling the names up into the banner's head line is the whole point of
+ * the card (tui.md §4.2): "the agent can now do X" should not need unfolding.
+ * A note in a shape this build does not know simply yields no names, and the
+ * full text is shown underneath either way.
+ */
+export function capabilitySummary(text: string): { tools: string[]; skills: string[] } {
+  const tools: string[] = []
+  const skills: string[] = []
+  let into: string[] | null = null
+  for (const line of text.split("\n")) {
+    const heading = line.trim()
+    if (heading === "Tools:") {
+      into = tools
+      continue
+    }
+    if (heading === "Skills:") {
+      into = skills
+      continue
+    }
+    if (!into) continue
+    // Only top-level bullets name a capability; the indented lines under one are
+    // its `invoke:` / `load:` hint.
+    if (!line.startsWith("- ")) continue
+    const name = line.slice(2).split(" — ", 1)[0]?.trim()
+    if (name) into.push(name)
+  }
+  return { tools, skills }
+}
+
 /** `[exit N]` is the last line of every `shell` result (`tools/shell.zig`). */
 export function shellExitCode(output: string): number | null {
   const match = /\[exit (-?\d+)\]\s*$/.exec(output)

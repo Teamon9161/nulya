@@ -8,13 +8,35 @@ import { useStyle } from "../render/theme.ts"
  * Sending while a step runs is allowed and does not interrupt it — the turn is
  * queued and the kernel drains it at its next step boundary (tui.md §4.4).
  */
-export function Composer(props: { onSubmit: (text: string) => void; placeholder?: string }) {
+/**
+ * What the rest of the screen may do to the composer. Browse mode needs to know
+ * whether the buffer is empty (Esc means "leave the composer" only when there is
+ * nothing to cancel) and needs to hand the keyboard over and take it back.
+ */
+export interface ComposerApi {
+  isEmpty(): boolean
+  focus(): void
+  blur(): void
+}
+
+export function Composer(props: {
+  onSubmit: (text: string) => void
+  placeholder?: string
+  onReady?: (api: ComposerApi) => void
+}) {
   const style = useStyle()
   let area: TextareaRenderable | undefined
   const history: string[] = []
   let cursor = 0
 
-  onMount(() => area?.focus())
+  onMount(() => {
+    area?.focus()
+    props.onReady?.({
+      isEmpty: () => (area?.plainText ?? "").length === 0,
+      focus: () => area?.focus(),
+      blur: () => area?.blur(),
+    })
+  })
 
   const clear = () => {
     if (!area) return

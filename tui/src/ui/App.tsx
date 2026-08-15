@@ -1,15 +1,16 @@
 import { createEffect, createSignal, onCleanup, onMount } from "solid-js"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import { Transcript } from "./Transcript.tsx"
-import { Composer } from "./Composer.tsx"
+import { Composer, type ComposerApi } from "./Composer.tsx"
 import { StatusBar } from "./StatusBar.tsx"
 import { StyleContext, useStyle, type Style } from "../render/theme.ts"
 import { FoldContext, createFoldStore } from "../state/folds.ts"
+import { BrowseContext, createBrowseStore } from "../state/browse.ts"
 import { createDriver, type DriverOptions } from "../state/driver.ts"
 import { sessionEvents } from "../nulya/cli.ts"
-import { readHeader } from "../nulya/files.ts"
+import { readActiveContributions, readHeader, type Contributions } from "../nulya/files.ts"
 import { createKeymap, matches } from "../keymap.ts"
-import type { SessionState } from "../state/session.ts"
+import type { SessionState, TranscriptItem } from "../state/session.ts"
 import type { Workspace } from "../nulya/bin.ts"
 
 export interface AppProps {
@@ -18,6 +19,11 @@ export interface AppProps {
   state: SessionState
   style: Style
   driver?: DriverOptions
+}
+
+/** The cards browse mode walks and Ctrl+O toggles: everything with a body. */
+function foldable(items: readonly TranscriptItem[]): TranscriptItem[] {
+  return items.filter((item) => item.kind === "tool" || item.kind === "thinking")
 }
 
 /**
@@ -30,15 +36,23 @@ export interface AppProps {
 export function App(props: AppProps) {
   const renderer = useRenderer()
   const folds = createFoldStore()
+  const browse = createBrowseStore()
   const keys = createKeymap(props.style.settings)
   const driver = createDriver(props.ws, props.id, props.state, props.driver ?? {})
 
   const [notice, setNotice] = createSignal<string | null>(null)
   const [spinnerTick, setSpinnerTick] = createSignal(0)
   const [ctrlCArmed, setCtrlCArmed] = createSignal(false)
+  const [contributions, setContributions] = createSignal<Contributions[]>([])
+  const [allOpen, setAllOpen] = createSignal(false)
+  let composer: ComposerApi | null = null
 
   onMount(async () => {
-    props.state.setHeader(await readHeader(props.ws, props.id))
+    const header = await readHeader(props.ws, props.id)
+    props.state.setHeader(header)
+    // The FROZEN versions, not the store's `current`: what this session runs was
+    // decided at `session new` and cannot move (DESIGN §7.5).
+    if (header) setContributions(await readActiveContributions(props.ws, header.composition.active))
     // Replay before anything else can stream in: `--session <id>` must paint the
     // same picture the live session left behind (tui.md §3).
     try {
@@ -60,12 +74,35 @@ export function App(props: AppProps) {
   const spinnerFrame = () => props.style.spinner[spinnerTick() % props.style.spinner.length]!
 
   const lastFoldable = () => {
-    const items = props.state.snapshot.items
-    for (let i = items.length - 1; i >= 0; i--) {
-      const item = items[i]!
-      if (item.kind === "tool" || item.kind === "thinking") return item
-    }
-    return null
+    const cards = foldable(props.state.snapshot.items)
+    return cards.length > 0 ? cards[cards.length - 1]! : null
+  }
+
+  const enterBrowse = () => {
+    const cards = foldable(props.state.snapshot.items)
+    if (cards.length === 0) return
+    composer?.blur()
+    browse.enter(cards[cards.length - 1]!.key)
+    setNotice("browse · j/k move · Enter fold · Esc back")
+  }
+
+  const leaveBrowse = () => {
+    browse.exit()
+    composer?.focus()
+    setNotice(null)
+  }
+
+  const moveBrowse = (delta: number) => {
+    const cards = foldable(props.state.snapshot.items)
+    if (cards.length === 0) return
+    const at = cards.findIndex((item) => item.key === browse.selected())
+    const next = Math.min(Math.max((at < 0 ? cards.length - 1 : at) + delta, 0), cards.length - 1)
+    browse.select(cards[next]!.key)
+  }
+
+  const toggleSelected = () => {
+    const key = browse.selected()
+    if (key) folds.toggle(key, false)
   }
 
   const quit = () => {
@@ -91,11 +128,12 @@ export function App(props: AppProps) {
     }
     if (command === "/fold") {
       folds.setAll(false)
+      setAllOpen(false)
       return true
     }
     if (command === "/help") {
       setNotice(
-        "Enter send · Shift+Enter newline · Esc cancel · Ctrl+O fold · Ctrl+C twice quit · /step /cancel /fold /quit",
+        "Enter send · Shift+Enter newline · Esc cancel/browse · Ctrl+O fold · Ctrl+C twice quit · /step /cancel /fold /quit",
       )
       return true
     }
@@ -110,17 +148,34 @@ export function App(props: AppProps) {
   }
 
   useKeyboard((key) => {
+    if (browse.active()) {
+      // The composer is blurred while browsing, so these keys are ours alone.
+      if (matches(keys.cancel, key)) {
+        leaveBrowse()
+        return
+      }
+      if (key.name === "j" || key.name === "down") return moveBrowse(1)
+      if (key.name === "k" || key.name === "up") return moveBrowse(-1)
+      if (key.name === "return" || key.name === "space") return toggleSelected()
+    }
     if (matches(keys.cancel, key)) {
-      if (driver.status() === "stepping") void driver.cancel()
+      if (driver.status() === "stepping") {
+        void driver.cancel()
+        return
+      }
+      // Nothing to stop and nothing typed: Esc means "go read" (tui.md §4.2).
+      if (composer?.isEmpty() ?? true) enterBrowse()
       return
     }
     if (matches(keys.fold, key)) {
-      const item = lastFoldable()
+      const item = browse.active() ? null : lastFoldable()
       if (item) folds.toggle(item.key, false)
       return
     }
     if (matches(keys.foldAll, key)) {
-      folds.setAll(true)
+      const next = !allOpen()
+      setAllOpen(next)
+      folds.setAll(next)
       return
     }
     if (matches(keys.redraw, key)) {
@@ -145,30 +200,37 @@ export function App(props: AppProps) {
     const identity = snapshot.header?.model_identity
     const model = identity && identity.model.length > 0 ? `${identity.provider}/${identity.model}` : (snapshot.header?.model ?? "…")
     const native = snapshot.header?.composition.native_tools.length ?? 0
-    return `nulya · ${props.id} · ${model} · tools 2+${native}`
+    const skills = contributions().reduce((count, entry) => count + entry.skills.length, 0)
+    return `nulya · ${props.id} · ${model} · tools 2+${native} · skills ${skills}`
   }
 
   return (
     <StyleContext.Provider value={props.style}>
       <FoldContext.Provider value={folds}>
-        <box flexDirection="column" width="100%" height="100%">
-          <box flexDirection="row" width="100%" height={1} flexShrink={0} paddingLeft={1} paddingRight={1}>
-            <text fg={props.style.theme.dim}>{header()}</text>
+        <BrowseContext.Provider value={browse}>
+          <box flexDirection="column" width="100%" height="100%">
+            <box flexDirection="row" width="100%" height={1} flexShrink={0} paddingLeft={1} paddingRight={1}>
+              <text fg={props.style.theme.dim}>{header()}</text>
+            </box>
+            <Hairline />
+
+            <Transcript
+              items={props.state.snapshot.items}
+              header={props.state.snapshot.header}
+              contributions={contributions()}
+            />
+
+            <Hairline />
+            <Composer onSubmit={submit} onReady={(api) => (composer = api)} />
+            <Hairline />
+            <StatusBar
+              snapshot={props.state.snapshot}
+              status={driver.status()}
+              spinnerFrame={spinnerFrame()}
+              hint={notice() ?? undefined}
+            />
           </box>
-          <Hairline />
-
-          <Transcript items={props.state.snapshot.items} />
-
-          <Hairline />
-          <Composer onSubmit={submit} />
-          <Hairline />
-          <StatusBar
-            snapshot={props.state.snapshot}
-            status={driver.status()}
-            spinnerFrame={spinnerFrame()}
-            hint={notice() ?? undefined}
-          />
-        </box>
+        </BrowseContext.Provider>
       </FoldContext.Provider>
     </StyleContext.Provider>
   )

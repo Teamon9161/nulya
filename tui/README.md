@@ -6,9 +6,12 @@ and spawns steps — nothing else. Design contract and milestones live in
 [`../docs/DESIGN.md`](../docs/DESIGN.md) §3.4 (session file) and §14 (`session
 step --stream`).
 
-Status: **T1 (skeleton)**. Transcript with user / assistant / generic tool
-cards, streaming, cancel, `--session` replay. The full card table, fold
-interaction, `/sessions`, `/ext` and observer mode are T2–T4.
+Status: **T2 (cards and folding)**. The full card table of `../docs/tui.md`
+§4.2 — composition, shell, edit with a diff, extension tools, evolution actions,
+capability banners, cancellations, spill pointers — plus fold interaction by
+mouse and keyboard, `tui.toml` settings, theme tokens and an ascii fallback.
+`/sessions`, `/ext` and observer mode are T3; `/help`, `/settings` and a
+compiled single file are T4.
 
 ## Run
 
@@ -39,9 +42,11 @@ NULYA_SCRIPTED_MODE=finish bun run src/main.tsx --model scripted
 | `Enter` | send |
 | `Shift+Enter` / `Ctrl+J` | newline |
 | `↑` (empty composer) | previous message |
-| `Esc` | `session cancel` — the kernel stops at its next step boundary |
+| `Esc` (stepping) | `session cancel` — the kernel stops at its next step boundary |
+| `Esc` (idle, empty composer) | browse mode: `j`/`k` move, `Enter` folds, `Esc` returns |
+| click a head line | fold / unfold that card |
 | `Ctrl+O` | fold / unfold the most recent tool or thinking card |
-| `Ctrl+Shift+O` | expand everything |
+| `Ctrl+Shift+O` | expand everything (again to collapse everything) |
 | `Ctrl+C` | kill the running step; press again to quit |
 
 Slash commands: `/step` (continue after a spent step budget), `/cancel`,
@@ -63,9 +68,10 @@ bun test
 
 `test/cli.test.ts` drives the real binary in scripted mode (no API key, no
 network) and asserts the `--stream` line protocol, the cancel path, and that a
-replay lands on the same transcript as the live stream. `test/render.test.tsx`
-snapshots each card through `@opentui/core/testing` and drives the app with
-injected keystrokes.
+replay lands on the same transcript as the live stream. `test/registry.test.ts`
+covers every row of the evolution table without a renderer.
+`test/render.test.tsx` snapshots each card through `@opentui/core/testing` and
+drives the app with injected keys and mouse clicks.
 
 ## Layout
 
