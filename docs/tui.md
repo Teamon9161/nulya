@@ -333,3 +333,5 @@ NULYA_SCRIPTED_MODE=finish nulya session step "$ID" --stream
 3. `run done` 的 `stopped` 是驱动状态机的关键：`budget` 意味着 `--max-steps` 用完但 turn 没结束——D-状态机要么再 spawn 一次 step，要么在 UI 上明确显示"预算用完"，别静默停住。
 4. 取消路径：`Esc` → `session cancel` → 那一步以 `{"stream":"step","event":"end","status":"canceled"}` + `run done{stopped:"canceled"}` 收尾；被取消的工具在 ledger 行里是三种 marker 之一（§2.1），CanceledCard 认 marker 文本而不是认 `stream` 行。
 5. 内核这边 T0 之后**不再需要**任何改动就能做完 T1；再想改内核先回 §10 讨论。
+
+核验（编排者）：`zig build test` 绿 / `zig build e2e` 绿 / `bun test` 尚不适用（`tui/` 未创建）。
