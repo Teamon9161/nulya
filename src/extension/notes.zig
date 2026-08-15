@@ -1,13 +1,20 @@
-//! Bridging the CLI closed loop into a running conversation (DESIGN §5.3).
+//! Bridging the CLI closed loop into a running conversation (DESIGN §5.3, §3).
 //!
 //! When the agent builds and activates an extension mid-conversation (via
 //! `shell` -> `nulya ext …`), the CLI runs in a subprocess and cannot touch the
-//! in-memory ledger. The core reconciles instead: it scans the active
-//! extensions on disk and, for any active version that the ledger has not yet
-//! announced, appends ONE `capability_note`. Because that is a plain append, the
-//! prompt prefix stays stable (the cache keeps hitting) and the model can invoke
-//! new tools through `shell` or load new skills through `nulya skill load` on its
-//! next step. Promotion into `tools[]` waits for the next conversation, at zero
+//! session's in-memory ledger — and it must not append to the session file
+//! directly either, because that file has a single writer (the session process)
+//! and an interleaved write could land a note inside a tool batch. Instead the
+//! CLI, when `NULYA_SESSION` names the session file, DEPOSITS the note as one
+//! uniquely-named file in the sibling `<stem>.inbox/` directory. The session
+//! DRAINS that inbox at each step boundary (`prepareStep`, after any interrupted
+//! batch is repaired), appending one `capability_note` per new active version.
+//!
+//! Because the drain runs only at a step boundary and is a plain append, the
+//! prompt prefix stays stable (the cache keeps hitting), the batch invariant
+//! (assistant-with-calls ↔ one tool_results) is never split, and the model can
+//! invoke new tools through `shell` or load skills through `nulya skill load` on
+//! its next step. Promotion into `tools[]` waits for the next session, at zero
 //! cache cost (DESIGN §5.1).
 
 const std = @import("std");
@@ -55,61 +62,163 @@ pub fn containsNoteFor(l: *const ledger.Ledger, id: []const u8, version: []const
     return false;
 }
 
-/// Append a `capability_note` for every active extension version under
-/// `ext_root_rel` (resolved against `cwd`) that the ledger has not announced yet.
-/// Missing root is a no-op.
-pub fn syncFromActiveExtensions(
+/// The inbox directory path for a session file: a sibling directory named
+/// `<stem>.inbox` (e.g. `.nulya/sessions/s-1.jsonl` → `.nulya/sessions/s-1.inbox`).
+/// Purely lexical, so it preserves whether `session_path` is relative or absolute.
+/// Caller owns the result.
+pub fn inboxPath(alloc: std.mem.Allocator, session_path: []const u8) ![]u8 {
+    const base = std.fs.path.basename(session_path);
+    const stem = std.fs.path.stem(base);
+    const name = try std.fmt.allocPrint(alloc, "{s}.inbox", .{stem});
+    defer alloc.free(name);
+    if (std.fs.path.dirname(session_path)) |dir| {
+        return std.fs.path.join(alloc, &.{ dir, name });
+    }
+    return alloc.dupe(u8, name);
+}
+
+/// Deterministic model-facing announcement for one active extension version, or
+/// null when the version declares nothing to announce (no tools, no skills) or
+/// cannot be read. `root` is the extensions store root. Caller owns the result.
+pub fn buildActiveNoteText(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id: []const u8, version: []const u8) !?[]u8 {
+    const st = store.Store.init(io, root);
+    var m = st.readManifest(alloc, id, version) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return null,
+    };
+    defer m.deinit();
+
+    var descriptors: std.ArrayList(skill.SkillDescriptor) = .empty;
+    defer skill.deinitDescriptorArrayList(alloc, &descriptors);
+    ext_skills.appendFromManifest(alloc, io, root, &descriptors, m.id, version, m) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return null,
+    };
+    skill.sortDescriptors(descriptors.items);
+
+    if (m.tools.len == 0 and descriptors.items.len == 0) return null;
+    return try noteText(alloc, m.id, version, m.tools, descriptors.items);
+}
+
+/// Deposit a capability note for active `id@version` into the session inbox, so
+/// the session process appends it at its next step boundary. `base` is the
+/// directory `session_path` is relative to (or `cwd()` when `session_path` is
+/// absolute); `ext_root` is the extensions store. A version with nothing to
+/// announce deposits nothing. Idempotent per active version (one file per
+/// `id@version`).
+pub fn depositActiveNote(
     alloc: std.mem.Allocator,
     io: std.Io,
-    cwd: []const u8,
-    l: *ledger.Ledger,
-    ext_root_rel: []const u8,
+    base: std.Io.Dir,
+    session_path: []const u8,
+    ext_root: std.Io.Dir,
+    id: []const u8,
+    version: []const u8,
 ) !void {
-    var root = store.openRoot(io, cwd, ext_root_rel) catch |err| switch (err) {
+    const text = (try buildActiveNoteText(alloc, io, ext_root, id, version)) orelse return;
+    defer alloc.free(text);
+
+    const inbox = try inboxPath(alloc, session_path);
+    defer alloc.free(inbox);
+    try base.createDirPath(io, inbox);
+
+    const fname = try std.fmt.allocPrint(alloc, "note-{s}-{s}.json", .{ id, version });
+    defer alloc.free(fname);
+    const rel = try std.fs.path.join(alloc, &.{ inbox, fname });
+    defer alloc.free(rel);
+
+    const line = try encodeNoteBody(alloc, id, version, text);
+    defer alloc.free(line);
+    try base.writeFile(io, .{ .sub_path = rel, .data = line });
+}
+
+/// Drain every deposited note in the session inbox into `l`, in filename order,
+/// deleting each file once appended. A missing inbox is a no-op. Notes already
+/// present in the ledger are skipped (still deleted), so the drain is idempotent
+/// across a crash between append and delete. Runs at a step boundary, so an
+/// appended note never splits a tool batch (DESIGN §3).
+pub fn drainInbox(alloc: std.mem.Allocator, io: std.Io, l: *ledger.Ledger, base: std.Io.Dir, session_path: []const u8) !void {
+    const inbox = try inboxPath(alloc, session_path);
+    defer alloc.free(inbox);
+
+    var dir = base.openDir(io, inbox, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
-    defer root.close(io);
-    try syncOpen(alloc, io, l, root);
+    defer dir.close(io);
+
+    var names: std.ArrayList([]u8) = .empty;
+    defer {
+        for (names.items) |n| alloc.free(n);
+        names.deinit(alloc);
+    }
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        try names.append(alloc, try alloc.dupe(u8, entry.name));
+    }
+    std.mem.sort([]u8, names.items, {}, struct {
+        fn lessThan(_: void, a: []u8, b: []u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lessThan);
+
+    for (names.items) |name| {
+        const bytes = try dir.readFileAlloc(io, name, alloc, .limited(4 << 20));
+        defer alloc.free(bytes);
+        const note = try parseNoteBody(alloc, bytes);
+        defer note.deinit(alloc);
+        if (!try containsNoteFor(l, note.id, note.version)) {
+            try l.append(.{ .capability_note = .{ .id = note.id, .version = note.version, .text = note.text } });
+        }
+        try dir.deleteFile(io, name);
+    }
 }
 
-/// Reconcile against an already-open extensions directory. Idempotent, and
-/// tolerant of malformed extensions (a broken one is skipped, never fatal).
-pub fn syncOpen(alloc: std.mem.Allocator, io: std.Io, l: *ledger.Ledger, root: std.Io.Dir) !void {
-    const st = store.Store.init(io, root);
-    var it = root.iterate();
-    while (try it.next(io)) |entry| {
-        if (entry.kind != .directory) continue;
-        const id = entry.name;
+fn encodeNoteBody(alloc: std.mem.Allocator, id: []const u8, version: []const u8, text: []const u8) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    var jw: std.json.Stringify = .{ .writer = &out.writer };
+    try jw.beginObject();
+    try ledger.encodeEventBody(&jw, .{ .capability_note = .{ .id = id, .version = version, .text = text } });
+    try jw.endObject();
+    return out.toOwnedSlice();
+}
 
-        const active = (st.activeVersion(alloc, id) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            else => continue,
-        }) orelse continue;
-        defer alloc.free(active);
+const ParsedNote = struct {
+    id: []const u8,
+    version: []const u8,
+    text: []const u8,
 
-        if (try containsNoteFor(l, id, active)) continue;
-
-        var m = st.readManifest(alloc, id, active) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            else => continue,
-        };
-        defer m.deinit();
-
-        var descriptors: std.ArrayList(skill.SkillDescriptor) = .empty;
-        defer skill.deinitDescriptorArrayList(alloc, &descriptors);
-        ext_skills.appendFromManifest(alloc, io, root, &descriptors, m.id, active, m) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            else => continue,
-        };
-        skill.sortDescriptors(descriptors.items);
-
-        if (m.tools.len == 0 and descriptors.items.len == 0) continue;
-
-        const text = try noteText(alloc, m.id, active, m.tools, descriptors.items);
-        defer alloc.free(text);
-        try l.append(.{ .capability_note = .{ .id = m.id, .version = active, .text = text } });
+    fn deinit(self: ParsedNote, alloc: std.mem.Allocator) void {
+        alloc.free(self.id);
+        alloc.free(self.version);
+        alloc.free(self.text);
     }
+};
+
+fn parseNoteBody(alloc: std.mem.Allocator, bytes: []const u8) !ParsedNote {
+    const parsed = std.json.parseFromSlice(std.json.Value, alloc, bytes, .{}) catch return error.InvalidInboxNote;
+    defer parsed.deinit();
+    const obj = switch (parsed.value) {
+        .object => |o| o,
+        else => return error.InvalidInboxNote,
+    };
+    const kind = stringField(obj, "kind") orelse return error.InvalidInboxNote;
+    if (!std.mem.eql(u8, kind, "capability_note")) return error.InvalidInboxNote;
+    const id = try alloc.dupe(u8, stringField(obj, "id") orelse return error.InvalidInboxNote);
+    errdefer alloc.free(id);
+    const version = try alloc.dupe(u8, stringField(obj, "version") orelse return error.InvalidInboxNote);
+    errdefer alloc.free(version);
+    const text = try alloc.dupe(u8, stringField(obj, "text") orelse return error.InvalidInboxNote);
+    return .{ .id = id, .version = version, .text = text };
+}
+
+fn stringField(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
+    return switch (obj.get(key) orelse return null) {
+        .string => |s| s,
+        else => null,
+    };
 }
 
 const test_manifest =
@@ -137,7 +246,20 @@ test "noteText is deterministic and names every invocation" {
     try std.testing.expect(std.mem.indexOf(u8, a, "nulya ext run demo <tool>") != null);
 }
 
-test "sync appends one note per active extension version and is idempotent" {
+test "inboxPath is a sibling directory named <stem>.inbox" {
+    const alloc = std.testing.allocator;
+    const a = try inboxPath(alloc, ".nulya/sessions/s-1.jsonl");
+    defer alloc.free(a);
+    try std.testing.expectEqualStrings(".nulya/sessions" ++ std.fs.path.sep_str ++ "s-1.inbox", a);
+
+    const b = try inboxPath(alloc, "s-2.jsonl");
+    defer alloc.free(b);
+    try std.testing.expectEqualStrings("s-2.inbox", b);
+}
+
+const session_rel = ".nulya" ++ std.fs.path.sep_str ++ "sessions" ++ std.fs.path.sep_str ++ "s.jsonl";
+
+test "a deposited note is drained into the ledger and is idempotent" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -152,18 +274,24 @@ test "sync appends one note per active extension version and is idempotent" {
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
 
-    try syncOpen(alloc, io, &l, root);
+    // The CLI deposits; the session drains at its step boundary.
+    try depositActiveNote(alloc, io, tmp.dir, session_rel, root, "demo", version);
+    try drainInbox(alloc, io, &l, tmp.dir, session_rel);
     try std.testing.expectEqual(@as(usize, 1), l.len());
     try std.testing.expect(l.view()[0] == .capability_note);
     try std.testing.expect(try containsNoteFor(&l, "demo", version));
-    try std.testing.expect(std.mem.indexOf(u8, l.view()[0].capability_note.text, "stale") == null);
 
-    // Running again adds nothing for the same active version.
-    try syncOpen(alloc, io, &l, root);
+    // Draining again with an empty inbox adds nothing.
+    try drainInbox(alloc, io, &l, tmp.dir, session_rel);
+    try std.testing.expectEqual(@as(usize, 1), l.len());
+
+    // A re-deposit of the same active version is skipped on drain (already present).
+    try depositActiveNote(alloc, io, tmp.dir, session_rel, root, "demo", version);
+    try drainInbox(alloc, io, &l, tmp.dir, session_rel);
     try std.testing.expectEqual(@as(usize, 1), l.len());
 }
 
-test "activating a new version appends a new note with all tools" {
+test "activating a new version deposits a new note with all tools" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -181,9 +309,11 @@ test "activating a new version appends a new note with all tools" {
     defer l.deinit();
 
     try st.activate(alloc, "demo", first);
-    try syncOpen(alloc, io, &l, root);
+    try depositActiveNote(alloc, io, tmp.dir, session_rel, root, "demo", first);
+    try drainInbox(alloc, io, &l, tmp.dir, session_rel);
     try st.activate(alloc, "demo", second);
-    try syncOpen(alloc, io, &l, root);
+    try depositActiveNote(alloc, io, tmp.dir, session_rel, root, "demo", second);
+    try drainInbox(alloc, io, &l, tmp.dir, session_rel);
 
     try std.testing.expectEqual(@as(usize, 2), l.len());
     try std.testing.expect(try containsNoteFor(&l, "demo", first));
@@ -192,7 +322,7 @@ test "activating a new version appends a new note with all tools" {
     try std.testing.expect(std.mem.indexOf(u8, l.view()[1].capability_note.text, "wave") != null);
 }
 
-test "sync announces skill-only active extensions" {
+test "a deposited skill-only note announces its skills" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -212,7 +342,8 @@ test "sync announces skill-only active extensions" {
 
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
-    try syncOpen(alloc, io, &l, root);
+    try depositActiveNote(alloc, io, tmp.dir, session_rel, root, "finance", version);
+    try drainInbox(alloc, io, &l, tmp.dir, session_rel);
 
     try std.testing.expectEqual(@as(usize, 1), l.len());
     const text = l.view()[0].capability_note.text;
@@ -221,21 +352,15 @@ test "sync announces skill-only active extensions" {
     try std.testing.expect(std.mem.indexOf(u8, text, "risk-parity") != null);
 }
 
-test "an inactive extension is not announced" {
+test "draining a missing inbox is a no-op" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    // Built but never activated: no `current` pointer.
-    const version = try writeVersion(alloc, io, tmp.dir, "demo", test_manifest);
-    defer alloc.free(version);
-    var root = try tmp.dir.openDir(io, ".", .{ .iterate = true });
-    defer root.close(io);
-
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
-    try syncOpen(alloc, io, &l, root);
+    try drainInbox(alloc, io, &l, tmp.dir, session_rel);
     try std.testing.expectEqual(@as(usize, 0), l.len());
 }
 

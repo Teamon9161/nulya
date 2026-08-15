@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const registry = @import("registry.zig");
+const ledger = @import("ledger.zig");
 const prompt = @import("prompt.zig");
 const skill = @import("skill.zig");
 const tool = @import("tool.zig");
@@ -87,23 +88,7 @@ pub const SessionComposition = struct {
                 // unresolvable — fail loudly rather than start a session missing
                 // the tools the operator asked for.
                 if (opts.pinned_native_tools.len != 0) return error.PinnedExtensionNotActive;
-
-                const bindings = try alloc.alloc(ext_tools.Binding, 0);
-                errdefer alloc.free(bindings);
-                const tools = try registry.snapshotWith(alloc, &.{});
-                errdefer tools.deinit(alloc);
-                const pinned = try alloc.alloc(PinnedExtension, 0);
-                errdefer freePinned(alloc, pinned);
-                const skills = skill.SkillSetSnapshot{ .skills = try alloc.alloc(skill.SkillDescriptor, 0) };
-                errdefer skills.deinit(alloc);
-                const system_prompts = try buildSystemPrompts(alloc, null, &.{}, skills);
-                return .{
-                    .pinned_extensions = pinned,
-                    .extension_tool_bindings = bindings,
-                    .tools = tools,
-                    .skills = skills,
-                    .system_prompts = system_prompts,
-                };
+                return emptyComposition(alloc);
             },
             else => return err,
         };
@@ -113,37 +98,35 @@ pub const SessionComposition = struct {
         defer freeResolved(alloc, resolved);
         sortResolved(resolved);
 
-        // Build every owned binding first, then freeze the slice: only after
-        // `toOwnedSlice` are the binding addresses stable enough for `asTool` to
-        // hand out `ToolExecutor.ptr` values into them.
-        const bindings = try resolveBindings(alloc, io, root, resolved, opts.pinned_native_tools, opts.ranked_native_tools, auto_slots);
-        errdefer freeBindings(alloc, bindings);
+        return assemble(alloc, io, root, resolved, opts.pinned_native_tools, opts.ranked_native_tools, auto_slots);
+    }
 
-        const tools = try snapshotFromBindings(alloc, bindings);
-        errdefer tools.deinit(alloc);
-
-        const pinned = try copyPinsFromResolved(alloc, resolved);
-        errdefer freePinned(alloc, pinned);
-
-        var descriptors: std.ArrayList(skill.SkillDescriptor) = .empty;
-        errdefer skill.deinitDescriptorArrayList(alloc, &descriptors);
-        for (resolved) |r| {
-            try ext_skills.appendFromManifest(alloc, io, root, &descriptors, r.id, r.version, r.manifest);
+    /// Rebuild the composition frozen into a session header (DESIGN §3, §7.5):
+    /// resolve exactly the pinned `active` versions (never the live `current`),
+    /// and expose `native_tools` as the model-facing set. This is what every
+    /// `session step` process calls, so all of them see the identical composition
+    /// no matter what `activate` ran meanwhile.
+    pub fn initFrozen(
+        alloc: std.mem.Allocator,
+        io: std.Io,
+        cwd: []const u8,
+        ext_root_rel: []const u8,
+        frozen: ledger.FrozenComposition,
+    ) !SessionComposition {
+        if (frozen.active.len == 0) {
+            if (frozen.native_tools.len != 0) return error.PinnedExtensionNotActive;
+            return emptyComposition(alloc);
         }
-        skill.sortDescriptors(descriptors.items);
-        const skills = skill.SkillSetSnapshot{ .skills = try descriptors.toOwnedSlice(alloc) };
-        errdefer skills.deinit(alloc);
+        var root = try store.openRoot(io, cwd, ext_root_rel);
+        defer root.close(io);
 
-        const system_prompts = try buildSystemPrompts(alloc, .{ .io = io, .root = root }, resolved, skills);
-        errdefer system_prompts.deinit(alloc);
+        const resolved = try resolveFrozenExtensions(alloc, io, root, frozen.active);
+        defer freeResolved(alloc, resolved);
+        sortResolved(resolved);
 
-        return .{
-            .pinned_extensions = pinned,
-            .extension_tool_bindings = bindings,
-            .tools = tools,
-            .skills = skills,
-            .system_prompts = system_prompts,
-        };
+        // The frozen native tools are the exact, already-decided native set, so
+        // they enter as pins (strict); no usage ranking or auto-fill on resume.
+        return assemble(alloc, io, root, resolved, frozen.native_tools, &.{}, 0);
     }
 
     pub fn deinit(self: SessionComposition, alloc: std.mem.Allocator) void {
@@ -155,6 +138,72 @@ pub const SessionComposition = struct {
         freePinned(alloc, self.pinned_extensions);
     }
 };
+
+/// The shared tail of `init` / `initFrozen`: given the resolved (sorted) active
+/// extensions and an already-decided native-tool selection (`pins` strict,
+/// `ranked` best-effort up to `auto_slots`), freeze the tool set, skills, and
+/// system prompts. `resolved` and `root` stay owned by the caller.
+fn assemble(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    root: std.Io.Dir,
+    resolved: []const ResolvedExtension,
+    pins: []const []const u8,
+    ranked: []const []const u8,
+    auto_slots: usize,
+) !SessionComposition {
+    // Build every owned binding first, then freeze the slice: only after
+    // `toOwnedSlice` are the binding addresses stable enough for `asTool` to
+    // hand out `ToolExecutor.ptr` values into them.
+    const bindings = try resolveBindings(alloc, io, root, resolved, pins, ranked, auto_slots);
+    errdefer freeBindings(alloc, bindings);
+
+    const tools = try snapshotFromBindings(alloc, bindings);
+    errdefer tools.deinit(alloc);
+
+    const pinned = try copyPinsFromResolved(alloc, resolved);
+    errdefer freePinned(alloc, pinned);
+
+    var descriptors: std.ArrayList(skill.SkillDescriptor) = .empty;
+    errdefer skill.deinitDescriptorArrayList(alloc, &descriptors);
+    for (resolved) |r| {
+        try ext_skills.appendFromManifest(alloc, io, root, &descriptors, r.id, r.version, r.manifest);
+    }
+    skill.sortDescriptors(descriptors.items);
+    const skills = skill.SkillSetSnapshot{ .skills = try descriptors.toOwnedSlice(alloc) };
+    errdefer skills.deinit(alloc);
+
+    const system_prompts = try buildSystemPrompts(alloc, .{ .io = io, .root = root }, resolved, skills);
+    errdefer system_prompts.deinit(alloc);
+
+    return .{
+        .pinned_extensions = pinned,
+        .extension_tool_bindings = bindings,
+        .tools = tools,
+        .skills = skills,
+        .system_prompts = system_prompts,
+    };
+}
+
+/// A composition with only the two builtins — no active extensions.
+fn emptyComposition(alloc: std.mem.Allocator) !SessionComposition {
+    const bindings = try alloc.alloc(ext_tools.Binding, 0);
+    errdefer alloc.free(bindings);
+    const tools = try registry.snapshotWith(alloc, &.{});
+    errdefer tools.deinit(alloc);
+    const pinned = try alloc.alloc(PinnedExtension, 0);
+    errdefer freePinned(alloc, pinned);
+    const skills = skill.SkillSetSnapshot{ .skills = try alloc.alloc(skill.SkillDescriptor, 0) };
+    errdefer skills.deinit(alloc);
+    const system_prompts = try buildSystemPrompts(alloc, null, &.{}, skills);
+    return .{
+        .pinned_extensions = pinned,
+        .extension_tool_bindings = bindings,
+        .tools = tools,
+        .skills = skills,
+        .system_prompts = system_prompts,
+    };
+}
 
 /// The tool budget is provider-facing and counts the permanent builtins. Reject
 /// impossible budgets up front, before any filesystem work.
@@ -467,6 +516,26 @@ fn resolveActiveExtensions(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Di
         const id = try alloc.dupe(u8, entry.name);
         errdefer alloc.free(id);
         const version = try alloc.dupe(u8, active);
+        errdefer alloc.free(version);
+        try resolved.append(alloc, .{ .id = id, .version = version, .manifest = m });
+    }
+    return resolved.toOwnedSlice(alloc);
+}
+
+/// Resolve exactly the frozen (id, version) pairs from a session header. Unlike
+/// discovery, this never scans `current` and never skips: a pinned version that
+/// no longer validates is a hard error, because resume must reconstruct the same
+/// cache scope or not at all.
+fn resolveFrozenExtensions(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, active: []const ledger.PinnedExtensionRef) ![]ResolvedExtension {
+    const st = store.Store.init(io, root);
+    var resolved: std.ArrayList(ResolvedExtension) = .empty;
+    errdefer freeResolved(alloc, resolved.items);
+    for (active) |ext| {
+        var m = try st.readManifest(alloc, ext.id, ext.version);
+        errdefer m.deinit();
+        const id = try alloc.dupe(u8, ext.id);
+        errdefer alloc.free(id);
+        const version = try alloc.dupe(u8, ext.version);
         errdefer alloc.free(version);
         try resolved.append(alloc, .{ .id = id, .version = version, .manifest = m });
     }
@@ -914,6 +983,56 @@ test "a selected extension tool is provider-visible and freezes to the compositi
     var comp2 = try SessionComposition.init(alloc, io, cwd, ".", .{ .pinned_native_tools = &pins });
     defer comp2.deinit(alloc);
     try std.testing.expect(std.mem.indexOf(u8, comp2.extension_tool_bindings[0].entry_path, v2) != null);
+}
+
+test "initFrozen rebuilds a composition from a header and ignores later activation" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmpPath(alloc, io, tmp.dir);
+    defer alloc.free(cwd);
+
+    const v1 = try writeToolExtension(alloc, io, tmp.dir, "web.search", "web_search", "v1");
+    defer alloc.free(v1);
+    const v2 = try writeToolExtension(alloc, io, tmp.dir, "web.search", "web_search", "v2");
+    defer alloc.free(v2);
+    try testkit.activate(alloc, io, tmp.dir, "web.search", v1);
+
+    // A header frozen at v1 with the tool selected as native.
+    const frozen: ledger.FrozenComposition = .{
+        .active = &.{.{ .id = "web.search", .version = v1 }},
+        .native_tools = &.{"ext:web.search/web_search"},
+    };
+
+    var comp = try SessionComposition.initFrozen(alloc, io, cwd, ".", frozen);
+    defer comp.deinit(alloc);
+    const t = comp.tools.lookup("web_search") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), comp.extension_tool_bindings.len);
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&comp.extension_tool_bindings[0])), t.executor.ptr);
+    try std.testing.expect(std.mem.indexOf(u8, comp.extension_tool_bindings[0].entry_path, v1) != null);
+
+    // Activate v2 live; a fresh initFrozen on the SAME header still rebuilds v1 —
+    // resume is bound to the header, not to `current`.
+    try testkit.activate(alloc, io, tmp.dir, "web.search", v2);
+    var comp2 = try SessionComposition.initFrozen(alloc, io, cwd, ".", frozen);
+    defer comp2.deinit(alloc);
+    try std.testing.expect(std.mem.indexOf(u8, comp2.extension_tool_bindings[0].entry_path, v1) != null);
+    try std.testing.expect(std.mem.indexOf(u8, comp2.extension_tool_bindings[0].entry_path, v2) == null);
+}
+
+test "initFrozen with no active extensions yields the two builtins only" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmpPath(alloc, io, tmp.dir);
+    defer alloc.free(cwd);
+
+    var comp = try SessionComposition.initFrozen(alloc, io, cwd, ".", .{});
+    defer comp.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 0), comp.extension_tool_bindings.len);
+    try std.testing.expectEqual(registry.builtin_count, comp.tools.tools.len);
 }
 
 test "executor calls reach the composition-time frozen entry path" {

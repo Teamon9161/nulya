@@ -17,6 +17,14 @@ const composition = @import("composition.zig");
 const tool = @import("tool.zig");
 const tool_stats = @import("tool_stats.zig");
 
+/// Where a durable session's file and its cross-process inbox live. The
+/// `workspace` handle is borrowed — the caller keeps it open for the session's
+/// lifetime; `session_path` is owned and relative to `workspace`.
+pub const DurableRef = struct {
+    workspace: std.Io.Dir,
+    session_path: []const u8,
+};
+
 pub const AgentSession = struct {
     alloc: std.mem.Allocator,
     l: ledger.Ledger,
@@ -25,6 +33,9 @@ pub const AgentSession = struct {
     step_ctx: loop.StepContext,
     model_options: provider.Options,
     extension_root: []const u8,
+    /// Set for durable sessions: the session file's location, used to drain the
+    /// cross-process capability-note inbox each step (DESIGN §3, §5.3).
+    durable: ?DurableRef = null,
     total_usage: provider.Usage = .{},
 
     pub const Options = struct {
@@ -35,6 +46,25 @@ pub const AgentSession = struct {
         /// Native tool selection and budget, resolved from config at the
         /// session-setup boundary so this module stays config-agnostic.
         registry: composition.Options = .{},
+    };
+
+    /// Create a new durable session (DESIGN §3): resolve the composition fresh
+    /// from `opts.registry`, freeze it into the header, and open the session file
+    /// for appends. Fails if the file already exists.
+    pub const CreateDurableOptions = struct {
+        workspace: std.Io.Dir,
+        session_path: []const u8,
+        session_id: []const u8,
+        model_profile: []const u8 = "",
+        created: []const u8 = "",
+        parent: ?ledger.ParentRef = null,
+    };
+
+    /// Reopen an existing durable session: replay the ledger and rebuild the
+    /// frozen composition from the header, never from the live `current`.
+    pub const OpenDurableOptions = struct {
+        workspace: std.Io.Dir,
+        session_path: []const u8,
     };
 
     pub fn init(alloc: std.mem.Allocator, opts: Options) !AgentSession {
@@ -53,9 +83,74 @@ pub const AgentSession = struct {
         };
     }
 
+    pub fn createDurable(alloc: std.mem.Allocator, opts: Options, d: CreateDurableOptions) !AgentSession {
+        const tool_ctx = opts.step_ctx.tool_context;
+        const io = tool_ctx.environment.io;
+        var comp = try composition.SessionComposition.init(alloc, io, tool_ctx.cwd, opts.extension_root, opts.registry);
+        errdefer comp.deinit(alloc);
+
+        // Freeze the resolved composition into the header: the active pinned
+        // versions and which of their tools are native this session. Any process
+        // reopening the file rebuilds the identical composition.
+        const active = try alloc.alloc(ledger.PinnedExtensionRef, comp.pinned_extensions.len);
+        defer alloc.free(active);
+        for (comp.pinned_extensions, 0..) |p, i| active[i] = .{ .id = p.id, .version = p.version };
+        const native = try alloc.alloc([]const u8, comp.extension_tool_bindings.len);
+        defer alloc.free(native);
+        for (comp.extension_tool_bindings, 0..) |b, i| native[i] = b.definition.id;
+
+        var l = try ledger.createDurable(alloc, io, d.workspace, d.session_path, .{
+            .session = d.session_id,
+            .parent = d.parent,
+            .model = d.model_profile,
+            .created = d.created,
+            .composition = .{ .active = active, .native_tools = native, .max_tools = opts.registry.max_tools },
+        });
+        errdefer l.deinit();
+
+        const owned_path = try alloc.dupe(u8, d.session_path);
+        errdefer alloc.free(owned_path);
+
+        return .{
+            .alloc = alloc,
+            .l = l,
+            .composition = comp,
+            .model = opts.model,
+            .step_ctx = opts.step_ctx,
+            .model_options = opts.model_options,
+            .extension_root = opts.extension_root,
+            .durable = .{ .workspace = d.workspace, .session_path = owned_path },
+        };
+    }
+
+    pub fn openDurable(alloc: std.mem.Allocator, opts: Options, d: OpenDurableOptions) !AgentSession {
+        const tool_ctx = opts.step_ctx.tool_context;
+        const io = tool_ctx.environment.io;
+        var l = try ledger.openDurable(alloc, io, d.workspace, d.session_path);
+        errdefer l.deinit();
+        const hdr = l.header().?;
+        var comp = try composition.SessionComposition.initFrozen(alloc, io, tool_ctx.cwd, opts.extension_root, hdr.composition);
+        errdefer comp.deinit(alloc);
+
+        const owned_path = try alloc.dupe(u8, d.session_path);
+        errdefer alloc.free(owned_path);
+
+        return .{
+            .alloc = alloc,
+            .l = l,
+            .composition = comp,
+            .model = opts.model,
+            .step_ctx = opts.step_ctx,
+            .model_options = opts.model_options,
+            .extension_root = opts.extension_root,
+            .durable = .{ .workspace = d.workspace, .session_path = owned_path },
+        };
+    }
+
     pub fn deinit(self: *AgentSession) void {
         self.l.deinit();
         self.composition.deinit(self.alloc);
+        if (self.durable) |d| self.alloc.free(d.session_path);
         self.* = undefined;
     }
 
@@ -116,11 +211,15 @@ pub const AgentSession = struct {
     }
 
     fn prepareStep(self: *AgentSession) !void {
-        // Repair before extension note sync so a note append cannot hide an
-        // illegal assistant-with-tool-calls tail from the prior process.
-        const tool_ctx = self.step_ctx.tool_context;
+        // Repair the interrupted tail before draining the inbox, so a drained
+        // note can never land between an assistant-with-tool-calls and its
+        // matching tool_results batch (the batch invariant, DESIGN §4). For a
+        // pure in-memory session there is no inbox to drain.
         try loop.completeInterruptedToolBatch(self.alloc, &self.l);
-        try notes.syncFromActiveExtensions(self.alloc, tool_ctx.environment.io, tool_ctx.cwd, &self.l, self.extension_root);
+        if (self.durable) |d| {
+            const io = self.step_ctx.tool_context.environment.io;
+            try notes.drainInbox(self.alloc, io, &self.l, d.workspace, d.session_path);
+        }
     }
 
     /// Append one usage event per completed tool call in this step's ledger
@@ -424,20 +523,29 @@ test "a cancel during prepareStep reconciliation reports canceled with zero usag
         };
     };
 
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try sessionTmpCwd(alloc, io, tmp);
+    defer alloc.free(cwd);
+    // A durable session whose inbox directory exists: prepareStep drains the
+    // inbox each step, and that `openDir` is a real filesystem cancelation point.
+    try tmp.dir.createDirPath(io, ".nulya" ++ std.fs.path.sep_str ++ "sessions" ++ std.fs.path.sep_str ++ "s.inbox");
+
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
     defer lenv.deinit();
 
     var model_impl = CountingModel{};
-    var sess = try AgentSession.init(alloc, .{
+    var sess = try AgentSession.createDurable(alloc, .{
         .model = .{ .ptr = &model_impl, .vtable = &CountingModel.vtable },
         .step_ctx = .{
-            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = "." },
+            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd },
             .scratch_dir = "/tmp",
         },
-        // Nonexistent root: prepareStep's reconciliation still performs real
-        // filesystem I/O (opening the workspace and root) before it can decide
-        // the root is missing, and that open is the cancelation point.
         .extension_root = "nulya-absent-extensions-root",
+    }, .{
+        .workspace = tmp.dir,
+        .session_path = ".nulya" ++ std.fs.path.sep_str ++ "sessions" ++ std.fs.path.sep_str ++ "s.jsonl",
+        .session_id = "s",
     });
     defer sess.deinit();
 
@@ -474,6 +582,93 @@ fn sessionTmpCwd(alloc: std.mem.Allocator, io: std.Io, tmp: std.testing.TmpDir) 
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(io, &buf);
     return alloc.dupe(u8, buf[0..len]);
+}
+
+/// A model that always addresses the user and ends the turn (no tool calls).
+const EndTurnModel = struct {
+    fn name(ptr: *anyopaque) []const u8 {
+        _ = ptr;
+        return "end-turn";
+    }
+    fn modelName(ptr: *anyopaque) []const u8 {
+        _ = ptr;
+        return "end-turn";
+    }
+    fn capabilities(ptr: *anyopaque) provider.ProviderCapabilities {
+        _ = ptr;
+        return .{};
+    }
+    fn stream(ptr: *anyopaque, a: std.mem.Allocator, request: provider.Request, sink: provider.EventSink) anyerror!void {
+        _ = ptr;
+        _ = a;
+        _ = request;
+        try sink.emit(.started);
+        try sink.emit(.{ .text_delta = "done" });
+        try sink.emit(.{ .done = .end_turn });
+    }
+    const vtable: provider.Model.VTable = .{
+        .name = name,
+        .modelName = modelName,
+        .capabilities = capabilities,
+        .stream = stream,
+    };
+};
+
+test "a durable session persists across create, close, and reopen" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try sessionTmpCwd(alloc, io, tmp);
+    defer alloc.free(cwd);
+    try tmp.dir.createDirPath(io, ".nulya" ++ std.fs.path.sep_str ++ "sessions");
+    const session_path = ".nulya" ++ std.fs.path.sep_str ++ "sessions" ++ std.fs.path.sep_str ++ "s.jsonl";
+
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+    var model_impl = EndTurnModel{};
+    const opts: AgentSession.Options = .{
+        .model = .{ .ptr = &model_impl, .vtable = &EndTurnModel.vtable },
+        .step_ctx = .{
+            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd },
+            .scratch_dir = "/tmp",
+        },
+        .extension_root = ".nulya/extensions",
+    };
+
+    // Process A: create, take one turn, then close.
+    {
+        var a = try AgentSession.createDurable(alloc, opts, .{
+            .workspace = tmp.dir,
+            .session_path = session_path,
+            .session_id = "s",
+            .model_profile = "scripted",
+        });
+        defer a.deinit();
+        try a.appendUser("hello");
+        _ = try a.step();
+        try std.testing.expect(a.lastAssistantDone());
+        try std.testing.expectEqual(@as(usize, 2), a.l.len()); // user + assistant
+    }
+
+    // Process B: reopen from the file and see the same history, then continue.
+    var b = try AgentSession.openDurable(alloc, opts, .{ .workspace = tmp.dir, .session_path = session_path });
+    defer b.deinit();
+    try std.testing.expectEqual(@as(usize, 2), b.l.len());
+    try std.testing.expect(b.l.view()[0] == .user_text);
+    try std.testing.expectEqualStrings("hello", b.l.view()[0].user_text);
+    try std.testing.expectEqualStrings("s", b.l.header().?.session);
+
+    try b.appendUser("again");
+    _ = try b.step();
+    try std.testing.expectEqual(@as(usize, 4), b.l.len());
+
+    // A third process sees all four events replayed from disk.
+    var c = try AgentSession.openDurable(alloc, opts, .{ .workspace = tmp.dir, .session_path = session_path });
+    defer c.deinit();
+    try std.testing.expectEqual(@as(usize, 4), c.l.len());
 }
 
 test "completed step records stable ids, never model names or hallucinated names" {

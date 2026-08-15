@@ -16,6 +16,7 @@ pub const integrity = @import("extension/integrity.zig");
 pub const ledger = @import("ledger.zig");
 pub const manifest = @import("extension/manifest.zig");
 pub const notes = @import("extension/notes.zig");
+pub const prompt = @import("prompt.zig");
 pub const promotion = @import("promotion.zig");
 pub const protocol = @import("extension/protocol.zig");
 pub const provider = @import("provider.zig");

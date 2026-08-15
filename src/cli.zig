@@ -12,6 +12,7 @@ const manifest = @import("extension/manifest.zig");
 const templates = @import("extension/templates.zig");
 const toolchain = @import("toolchain.zig");
 const ext_skills = @import("extension/skills.zig");
+const notes = @import("extension/notes.zig");
 const tool_stats = @import("tool_stats.zig");
 
 const extensions_root = ".nulya" ++ std.fs.path.sep_str ++ "extensions";
@@ -260,8 +261,28 @@ fn extActivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8, m
         try printOut(alloc, io, "{s} failed: {s}\n", .{ @tagName(mode), @errorName(err) });
         return 1;
     };
+
+    // If this CLI runs inside a live session (NULYA_SESSION names its file,
+    // relative to the workspace cwd), deposit a capability note into that
+    // session's inbox so the session announces the newly-active version at its
+    // next step boundary (DESIGN §3, §5.3). Best-effort: a note-deposit failure
+    // never fails the activation the model just performed.
+    depositSessionNote(alloc, io, ext_root, id, version) catch {};
+
     try printOut(alloc, io, "{s}: current -> {s}\n", .{ id, version });
     return 0;
+}
+
+/// Deposit a capability note for `id@version` into the current session's inbox
+/// when `NULYA_SESSION` is set. The variable holds the session file path relative
+/// to the workspace cwd, so both the file and its `<stem>.inbox` sibling resolve
+/// against `cwd()`.
+fn depositSessionNote(alloc: std.mem.Allocator, io: std.Io, ext_root: std.Io.Dir, id: []const u8, version: []const u8) !void {
+    var host = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    defer host.deinit();
+    const session_path = host.get("NULYA_SESSION") orelse return;
+    if (session_path.len == 0) return;
+    try notes.depositActiveNote(alloc, io, std.Io.Dir.cwd(), session_path, ext_root, id, version);
 }
 
 fn extDeactivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {

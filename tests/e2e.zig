@@ -15,6 +15,8 @@ const composition = support.composition;
 const environment = support.environment;
 const integrity = support.integrity;
 const ledger = support.ledger;
+const notes = support.notes;
+const prompt = support.prompt;
 const promotion = support.promotion;
 const protocol = support.protocol;
 const provider = support.provider;
@@ -120,6 +122,25 @@ fn buildAndActivate(
     tool_name: []const u8,
     main_src: []const u8,
 ) ![]u8 {
+    const version = try scaffoldAndBuild(alloc, io, ws, zig_exe, id, tool_name, main_src);
+    errdefer alloc.free(version);
+    var ext_root = try ws.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
+    defer ext_root.close(io);
+    try store.Store.init(io, ext_root).activate(alloc, id, version);
+    return version;
+}
+
+/// Scaffold a real single-file extension and build it into an immutable version
+/// WITHOUT activating it. Returns the built version id; caller frees.
+fn scaffoldAndBuild(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    ws: std.Io.Dir,
+    zig_exe: []const u8,
+    id: []const u8,
+    tool_name: []const u8,
+    main_src: []const u8,
+) ![]u8 {
     const ext_dir = try std.fs.path.join(alloc, &.{ ".nulya", "extensions", id });
     defer alloc.free(ext_dir);
     const src_dir = try std.fs.path.join(alloc, &.{ ext_dir, "src" });
@@ -141,9 +162,6 @@ fn buildAndActivate(
         std.debug.print("extension failed to compile:\n{s}\n", .{result.stderr});
         return error.ExtensionBuildFailed;
     }
-    var ext_root = try ws.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
-    defer ext_root.close(io);
-    try store.Store.init(io, ext_root).activate(alloc, id, result.version);
     return try alloc.dupe(u8, result.version);
 }
 
@@ -688,4 +706,266 @@ test "cli ext run failures before invocation write no usage stats" {
         defer tool_stats.freeEvents(alloc, events);
         try std.testing.expectEqual(@as(usize, 0), events.len);
     }
+}
+
+// ── M1: durable ledger (DESIGN §3) ──────────────────────────────────────────
+
+/// A model that always addresses the user and ends the turn (no tool calls).
+const EndTurnModel = struct {
+    fn name(ptr: *anyopaque) []const u8 {
+        _ = ptr;
+        return "end-turn";
+    }
+    fn modelName(ptr: *anyopaque) []const u8 {
+        _ = ptr;
+        return "end-turn";
+    }
+    fn capabilities(ptr: *anyopaque) provider.ProviderCapabilities {
+        _ = ptr;
+        return .{};
+    }
+    fn stream(ptr: *anyopaque, alloc: std.mem.Allocator, request: provider.Request, sink: provider.EventSink) anyerror!void {
+        _ = ptr;
+        _ = alloc;
+        _ = request;
+        try sink.emit(.started);
+        try sink.emit(.{ .text_delta = "done" });
+        try sink.emit(.{ .done = .end_turn });
+    }
+    const vtable: provider.Model.VTable = .{
+        .name = name,
+        .modelName = modelName,
+        .capabilities = capabilities,
+        .stream = stream,
+    };
+};
+
+/// Flatten a PromptIR into a comparable byte string (one line per block, prefixed
+/// with `S|` for a system block or the stable block's kind tag). Two block-level
+/// prefixes are identical iff their flattenings are.
+fn flattenIR(alloc: std.mem.Allocator, ir: prompt.PromptIR) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    for (ir.system_blocks) |b| try out.writer.print("S|{s}\n", .{b.bytes});
+    for (ir.stable_blocks) |b| try out.writer.print("{d}|{s}\n", .{ @intFromEnum(b.kind), b.bytes });
+    return out.toOwnedSlice();
+}
+
+/// One CLI invocation with an extra environment variable set (plus the inherited
+/// host env, so PATH etc. survive). Caller owns `stdout`.
+fn runCliEnv(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    ws: std.Io.Dir,
+    argv: []const []const u8,
+    key: []const u8,
+    value: []const u8,
+) !CliRun {
+    var env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    defer env.deinit();
+    try env.put(key, value);
+    const result = try std.process.run(alloc, io, .{
+        .argv = argv,
+        .cwd = .{ .dir = ws },
+        .environ_map = &env,
+        .stdout_limit = .limited(1 << 20),
+        .stderr_limit = .limited(1 << 20),
+    });
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+    const code = switch (result.term) {
+        .exited => |c| c,
+        else => 255,
+    };
+    return .{ .code = code, .stdout = try alloc.dupe(u8, result.stdout) };
+}
+
+const sessions_dir_rel = ".nulya" ++ std.fs.path.sep_str ++ "sessions";
+const session_file_rel = sessions_dir_rel ++ std.fs.path.sep_str ++ "s.jsonl";
+
+test "durable ledger: process A steps twice and exits; process B resumes and projects a block-identical PromptIR" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var ws_real: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
+    try ws.createDirPath(io, sessions_dir_rel);
+
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+
+    // Step 0 issues one shell call; step 1 ends the turn.
+    var args = [_][]const u8{ try shellCallArgs(alloc, "echo hi"), "" };
+    defer alloc.free(args[0]);
+    var model = SelfBuildModel{ .args_per_step = &args };
+    const opts: session.AgentSession.Options = .{
+        .model = .{ .ptr = &model, .vtable = &SelfBuildModel.vtable },
+        .step_ctx = .{
+            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = ws_path },
+            .scratch_dir = ".nulya/scratch",
+        },
+    };
+
+    // Process A: two real steps, capture its final projection, then exit.
+    var flat_a: []u8 = undefined;
+    {
+        var a = try session.AgentSession.createDurable(alloc, opts, .{
+            .workspace = ws,
+            .session_path = session_file_rel,
+            .session_id = "s",
+        });
+        defer a.deinit();
+        try a.appendUser("go");
+        _ = try a.step(); // shell echo -> assistant(call) + tool_results
+        _ = try a.step(); // end turn -> assistant
+        const ir = try prompt.projectWithSystem(alloc, a.composition.system_prompts.blocks, a.l.view());
+        defer ir.deinit(alloc);
+        flat_a = try flattenIR(alloc, ir);
+    }
+    defer alloc.free(flat_a);
+
+    // Process B: resume from the file and project — block-for-block identical.
+    var b = try session.AgentSession.openDurable(alloc, opts, .{ .workspace = ws, .session_path = session_file_rel });
+    defer b.deinit();
+    const ir_b = try prompt.projectWithSystem(alloc, b.composition.system_prompts.blocks, b.l.view());
+    defer ir_b.deinit(alloc);
+    const flat_b = try flattenIR(alloc, ir_b);
+    defer alloc.free(flat_b);
+
+    try std.testing.expectEqualStrings(flat_a, flat_b);
+    // A real multi-block conversation: user, assistant(call), tool_result, assistant.
+    try std.testing.expect(ir_b.stable_blocks.len >= 4);
+}
+
+test "durable ledger: an assistant-with-calls tail left on disk by a crash is repaired on resume" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io; // EndTurnModel issues no tool calls, so no async shell.
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var ws_real: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
+    try ws.createDirPath(io, sessions_dir_rel);
+
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+    var model = EndTurnModel{};
+    const opts: session.AgentSession.Options = .{
+        .model = .{ .ptr = &model, .vtable = &EndTurnModel.vtable },
+        .step_ctx = .{
+            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = ws_path },
+            .scratch_dir = ".nulya/scratch",
+        },
+    };
+
+    // Process A "crashes" right after appending an assistant-with-calls: the tail
+    // has no matching tool_results, an illegal batch left on disk.
+    {
+        var a = try session.AgentSession.createDurable(alloc, opts, .{
+            .workspace = ws,
+            .session_path = session_file_rel,
+            .session_id = "s",
+        });
+        defer a.deinit();
+        try a.appendUser("go");
+        try a.l.append(.{ .assistant = .{
+            .text = "running",
+            .calls = &.{.{ .id = "c1", .tool = "shell", .args_json = "{\"command\":\"echo hi\"}" }},
+        } });
+    }
+
+    // Process B: on resume the interrupted batch is completed before the next turn.
+    var b = try session.AgentSession.openDurable(alloc, opts, .{ .workspace = ws, .session_path = session_file_rel });
+    defer b.deinit();
+    try std.testing.expectEqual(@as(usize, 2), b.l.len()); // user, assistant(call) — not yet repaired
+    _ = try b.step();
+    // user, assistant(call), tool_results(interrupted), assistant(end)
+    try std.testing.expectEqual(@as(usize, 4), b.l.len());
+    try std.testing.expect(b.l.view()[2] == .tool_results);
+    try std.testing.expect(!b.l.view()[2].tool_results[0].ok);
+    try std.testing.expect(std.mem.indexOf(u8, b.l.view()[2].tool_results[0].output, "state is unknown") != null);
+
+    // The repair persisted: a third process sees the completed batch on disk.
+    var c = try session.AgentSession.openDurable(alloc, opts, .{ .workspace = ws, .session_path = session_file_rel });
+    defer c.deinit();
+    try std.testing.expectEqual(@as(usize, 4), c.l.len());
+}
+
+test "durable ledger: a capability_note appended by a separate CLI process is read on the next step" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io; // EndTurnModel issues no tool calls, so no async shell.
+
+    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    defer host_env.deinit();
+    const zig_exe = host_env.get("NULYA_TEST_ZIG") orelse return error.SkipZigTest;
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var ws_real: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
+    try ws.createDirPath(io, sessions_dir_rel);
+
+    // Build (but do NOT activate) a real extension: activation happens via the CLI
+    // inside the live session, which is what deposits the capability note.
+    const version = try scaffoldAndBuild(alloc, io, ws, zig_exe, "demo", "greet", templates.main_zig);
+    defer alloc.free(version);
+
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+    var model = EndTurnModel{};
+    const opts: session.AgentSession.Options = .{
+        .model = .{ .ptr = &model, .vtable = &EndTurnModel.vtable },
+        .step_ctx = .{
+            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = ws_path },
+            .scratch_dir = ".nulya/scratch",
+        },
+    };
+
+    var sess = try session.AgentSession.createDurable(alloc, opts, .{
+        .workspace = ws,
+        .session_path = session_file_rel,
+        .session_id = "s",
+    });
+    defer sess.deinit();
+    try sess.appendUser("please make a greet tool");
+
+    // No note yet.
+    try std.testing.expect(!try notes.containsNoteFor(&sess.l, "demo", version));
+
+    // A separate CLI process activates the extension with NULYA_SESSION set. It
+    // deposits a capability note into the session inbox (never touching the
+    // single-writer session file).
+    {
+        const run = try runCliEnv(alloc, io, ws, &.{ exe_abs, "ext", "activate", "demo", version }, "NULYA_SESSION", session_file_rel);
+        defer alloc.free(run.stdout);
+        try std.testing.expectEqual(@as(u8, 0), run.code);
+    }
+
+    // The next step drains the inbox at its boundary: the note is now in the
+    // ledger and in the projected prompt, before the assistant turn.
+    _ = try sess.step();
+    try std.testing.expect(try notes.containsNoteFor(&sess.l, "demo", version));
+
+    const ir = try prompt.projectWithSystem(alloc, sess.composition.system_prompts.blocks, sess.l.view());
+    defer ir.deinit(alloc);
+    var saw_note_block = false;
+    for (ir.stable_blocks) |blk| {
+        if (blk.kind == .capability_note and std.mem.indexOf(u8, blk.bytes, "greet") != null) saw_note_block = true;
+    }
+    try std.testing.expect(saw_note_block);
+
+    // And it is durable: a fresh process resuming the session still sees the note.
+    var reopened = try session.AgentSession.openDurable(alloc, opts, .{ .workspace = ws, .session_path = session_file_rel });
+    defer reopened.deinit();
+    try std.testing.expect(try notes.containsNoteFor(&reopened.l, "demo", version));
 }
