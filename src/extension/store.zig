@@ -357,3 +357,47 @@ test "listVersions returns every built version" {
     defer freeVersions(alloc, none);
     try std.testing.expectEqual(@as(usize, 0), none.len);
 }
+
+/// Test-only coordination: consume the first cancelation at a deterministic gate,
+/// re-arm it via `io.recancel()`, then call `readManifest` so the pending
+/// cancelation lands on its first filesystem syscall. `recancel` must never
+/// appear in production control flow, which propagates `error.Canceled` instead.
+fn readManifestAfterRecancel(
+    alloc: std.mem.Allocator,
+    st: Store,
+    id: []const u8,
+    version: []const u8,
+    io: std.Io,
+    ready: *std.Io.Event,
+    release: *std.Io.Event,
+) anyerror!manifest.Manifest {
+    ready.set(io);
+
+    release.wait(io) catch |err| switch (err) {
+        error.Canceled => io.recancel(),
+    };
+
+    return st.readManifest(alloc, id, version);
+}
+
+test "readManifest propagates cancellation instead of folding it into an integrity error" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const version = try writeBuiltVersion(alloc, io, tmp.dir, "demo", "marker");
+    defer alloc.free(version);
+    const st = Store.init(io, tmp.dir);
+
+    var ready: std.Io.Event = .unset;
+    var release: std.Io.Event = .unset;
+    var fut = io.async(readManifestAfterRecancel, .{ alloc, st, "demo", version, io, &ready, &release });
+    ready.waitTimeout(io, .{ .deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromMilliseconds(5000) }) }) catch {};
+
+    // Cancellation is host execution control, not corruption: it must surface as
+    // error.Canceled, never as VersionNotFound/VersionSealInvalid/Version*.
+    try std.testing.expectError(error.Canceled, fut.cancel(io));
+}

@@ -32,6 +32,14 @@ const interrupted_tool_output =
 const tool_canceled_executing_output =
     "tool execution was canceled; side effects may be partial or unknown";
 
+// A tool whose executor had ALREADY returned success when the step was canceled
+// mid-result-recording (a step-budget spill write). The tool may have fully
+// completed, so this is distinct from `tool_canceled_executing_output`: the
+// model must not conclude the side effects never happened.
+const tool_result_recording_canceled_output =
+    "tool execution completed, but result recording was canceled; " ++
+    "side effects may have occurred and the result is unavailable";
+
 // A tool the loop never dispatched because an earlier call in the same batch was
 // canceled. Nulya guarantees this executor never ran, so nothing changed.
 const tool_not_executed_output =
@@ -138,10 +146,11 @@ pub fn runStepWithPrompt(
         // assistant-with-tool-calls tail without its matching batch (DESIGN §4).
         // The executor already finished, so `results[i]` is a real result: allocate
         // the marker first (so an OOM leaves that valid result intact for cleanup),
-        // then replace it and complete the batch like the executing-cancel path.
+        // then replace it and complete the batch like the executing-cancel path —
+        // with the recording-canceled marker, since the tool itself succeeded.
         step_output.apply(alloc, call.tool, i, &results[i].output, &results[i].spill_path) catch |err| switch (err) {
             error.Canceled => {
-                const marker = try alloc.dupe(u8, tool_canceled_executing_output);
+                const marker = try alloc.dupe(u8, tool_result_recording_canceled_output);
                 alloc.free(results[i].output);
                 if (results[i].spill_path) |p| alloc.free(p);
                 results[i] = canceledResult(call.id, marker);
@@ -539,6 +548,29 @@ const RecordingTool = struct {
     }
 };
 
+/// A tool whose executor consumes the first cancelation at a deterministic gate,
+/// re-arms it via `io.recancel()`, then returns SUCCESS. Test-only coordination:
+/// `recancel` must never appear in production control flow, which consumes or
+/// propagates `error.Canceled` at each ownership boundary instead.
+const RecancelAndReturnTool = struct {
+    ready: *std.Io.Event,
+    release: *std.Io.Event,
+
+    fn call(ptr: ?*anyopaque, a: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolResult {
+        const self: *@This() = @ptrCast(@alignCast(ptr.?));
+        const io = req.ctx.environment.io;
+        self.ready.set(io);
+        self.release.wait(io) catch |err| switch (err) {
+            error.Canceled => io.recancel(),
+        };
+        return .{ .ok = true, .output = try a.dupe(u8, "small-but-over-step-budget") };
+    }
+
+    fn executor(self: *@This()) tool.ToolExecutor {
+        return .{ .ptr = self, .callFn = call };
+    }
+};
+
 fn stubSuccess(a: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolResult {
     _ = req;
     return .{ .ok = true, .output = try a.dupe(u8, "first-real-output") };
@@ -785,4 +817,75 @@ test "a successful earlier tool is kept when a later tool is canceled" {
     try std.testing.expectEqualStrings("c2", trs[1].call_id);
     try std.testing.expect(!trs[1].ok);
     try std.testing.expect(std.mem.indexOf(u8, trs[1].output, "side effects may be partial") != null);
+}
+
+test "canceling a step-budget spill keeps the ledger complete and never runs later tools" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // The first tool's executor consumes the cancel at a deterministic gate,
+    // re-arms it, and returns SUCCESS. Its output passes `emit` untouched (the
+    // per-tool budget is the 128 KiB default) but exceeds the tiny step budget,
+    // so the next cancelation point is `writeStepSpill` inside
+    // `StepOutputLimiter.apply` — the regression this locks: a cancel there must
+    // not strand the assistant-with-tool-calls tail without its matching batch.
+    var ready: std.Io.Event = .unset;
+    var release: std.Io.Event = .unset;
+    var spill_tool = RecancelAndReturnTool{ .ready = &ready, .release = &release };
+    var record_tool = RecordingTool{};
+
+    const tools_arr = [_]tool.Tool{
+        .{ .definition = .{ .id = "t.spill", .name = "spill", .description = "s", .input_schema = "{}" }, .executor = spill_tool.executor() },
+        .{ .definition = .{ .id = "t.record", .name = "record", .description = "r", .input_schema = "{}" }, .executor = record_tool.executor() },
+    };
+    const tools: registry.ToolSetSnapshot = .{ .tools = &tools_arr };
+
+    var model_impl = ScriptedCallModel{
+        .calls = &.{ .{ "c1", "spill" }, .{ "c2", "record" } },
+        .usage = .{ .input_tokens = 11, .output_tokens = 4 },
+    };
+
+    var l = ledger.Ledger.init(alloc);
+    defer l.deinit();
+    try l.append(.{ .user_text = "go" });
+
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+
+    const prompt_ir = try prompt.project(alloc, l.view());
+    defer prompt_ir.deinit(alloc);
+
+    const step_ctx: StepContext = .{
+        .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = "." },
+        .scratch_dir = "/tmp",
+        .step_budget = .{ .max_bytes = 4 }, // tiny: any result forces the spill path
+    };
+
+    var fut = io.async(runStepWithPrompt, .{
+        alloc, &l, model_impl.handle(), &prompt_ir, tools, step_ctx, provider.Options{},
+    });
+    ready.waitTimeout(io, testDeadline(io, 5000)) catch {};
+    const outcome = try fut.cancel(io);
+
+    try std.testing.expectEqual(StepStatus.canceled, outcome.status);
+    // The completed assistant turn's usage is preserved through the spill cancel.
+    try std.testing.expectEqual(@as(u64, 11), outcome.usage.input_tokens);
+
+    // user, assistant, and exactly ONE batched tool_results turn.
+    try std.testing.expectEqual(@as(usize, 3), l.len());
+    const trs = l.view()[2].tool_results;
+    try std.testing.expectEqual(@as(usize, 2), trs.len); // result count == call count
+
+    // c1's executor finished successfully; only its result recording was canceled.
+    try std.testing.expectEqualStrings("c1", trs[0].call_id);
+    try std.testing.expect(!trs[0].ok);
+    try std.testing.expect(std.mem.indexOf(u8, trs[0].output, "result recording was canceled") != null);
+
+    // c2 was never handed to its executor.
+    try std.testing.expectEqualStrings("c2", trs[1].call_id);
+    try std.testing.expect(!trs[1].ok);
+    try std.testing.expect(std.mem.indexOf(u8, trs[1].output, "not executed") != null);
+    try std.testing.expect(!record_tool.ran);
 }

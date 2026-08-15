@@ -66,10 +66,12 @@ pub const AgentSession = struct {
     /// step does not poison the session — the next `step()` runs normally.
     pub fn step(self: *AgentSession) !loop.StepOutcome {
         // Reconciliation runs cancellable filesystem I/O (extension integrity,
-        // manifest reads). A cancel there is host execution control, not a fault,
-        // and no provider call has started — so usage is 0 and the ledger prefix is
-        // untouched. Report it as a canceled outcome, honoring step()'s contract
-        // that cancellation is never an error.
+        // manifest reads). A cancel there is host execution control, not a fault:
+        // no provider/tool execution for this step has started, usage is 0, and
+        // cancellation adds no partial model turn. (prepareStep may still have
+        // appended a repair batch or capability note first — that is legal
+        // history, not a partial turn.) Report it as a canceled outcome, honoring
+        // step()'s contract that cancellation is never an error.
         self.prepareStep() catch |err| switch (err) {
             error.Canceled => return .{ .status = .canceled },
             else => return err,
@@ -307,4 +309,107 @@ test "a canceled step accumulates its usage and the session runs the next step" 
     try std.testing.expectEqual(@as(usize, 4), sess.l.len());
     try std.testing.expect(sess.l.view()[2] == .tool_results);
     try std.testing.expect(!sess.l.view()[2].tool_results[0].ok);
+}
+
+/// Test-only coordination: consume the first cancelation at a deterministic gate
+/// (`release.wait`), re-arm it via `io.recancel()`, then run a real step so the
+/// pending cancelation lands inside `prepareStep`'s first filesystem syscall.
+/// `recancel` exists for exactly this kind of test choreography — production
+/// control flow consumes or propagates `error.Canceled` at each boundary instead.
+fn stepAfterRecancel(
+    sess: *AgentSession,
+    io: std.Io,
+    ready: *std.Io.Event,
+    release: *std.Io.Event,
+) anyerror!loop.StepOutcome {
+    ready.set(io);
+
+    release.wait(io) catch |err| switch (err) {
+        error.Canceled => io.recancel(),
+    };
+
+    return sess.step();
+}
+
+test "a cancel during prepareStep reconciliation reports canceled with zero usage and a usable session" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const CountingModel = struct {
+        calls: usize = 0,
+
+        fn name(ptr: *anyopaque) []const u8 {
+            _ = ptr;
+            return "counting";
+        }
+        fn modelName(ptr: *anyopaque) []const u8 {
+            _ = ptr;
+            return "counting";
+        }
+        fn capabilities(ptr: *anyopaque) provider.ProviderCapabilities {
+            _ = ptr;
+            return .{};
+        }
+        fn stream(ptr: *anyopaque, a: std.mem.Allocator, request: provider.Request, sink: provider.EventSink) anyerror!void {
+            _ = a;
+            _ = request;
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.calls += 1;
+            try sink.emit(.started);
+            try sink.emit(.{ .usage = .{ .input_tokens = 3, .output_tokens = 1 } });
+            try sink.emit(.{ .text_delta = "all good" });
+            try sink.emit(.{ .done = .end_turn });
+        }
+        const vtable: provider.Model.VTable = .{
+            .name = name,
+            .modelName = modelName,
+            .capabilities = capabilities,
+            .stream = stream,
+        };
+    };
+
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+
+    var model_impl = CountingModel{};
+    var sess = try AgentSession.init(alloc, .{
+        .model = .{ .ptr = &model_impl, .vtable = &CountingModel.vtable },
+        .step_ctx = .{
+            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = "." },
+            .scratch_dir = "/tmp",
+        },
+        // Nonexistent root: prepareStep's reconciliation still performs real
+        // filesystem I/O (opening the workspace and root) before it can decide
+        // the root is missing, and that open is the cancelation point.
+        .extension_root = "nulya-absent-extensions-root",
+    });
+    defer sess.deinit();
+
+    try sess.appendUser("go");
+
+    var ready: std.Io.Event = .unset;
+    var release: std.Io.Event = .unset;
+    var fut = io.async(stepAfterRecancel, .{ &sess, io, &ready, &release });
+    ready.waitTimeout(io, .{ .deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromMilliseconds(5000) }) }) catch {};
+    const first = try fut.cancel(io);
+
+    // The cancel was consumed at the gate, re-armed, and re-signaled by
+    // prepareStep's first filesystem op — reported as a canceled outcome,
+    // never as an error.
+    try std.testing.expectEqual(loop.StepStatus.canceled, first.status);
+    try std.testing.expectEqual(@as(u64, 0), first.usage.input_tokens);
+    try std.testing.expectEqual(@as(u64, 0), sess.usage().input_tokens);
+    try std.testing.expectEqual(@as(usize, 0), model_impl.calls); // provider never called
+    // No partial assistant or note: only the user text survives.
+    try std.testing.expectEqual(@as(usize, 1), sess.l.len());
+    try std.testing.expect(sess.l.view()[0] == .user_text);
+
+    // The canceled step does not poison the session: the next step runs normally.
+    const second = try sess.step();
+    try std.testing.expectEqual(loop.StepStatus.completed, second.status);
+    try std.testing.expectEqual(@as(usize, 1), model_impl.calls);
+    try std.testing.expect(sess.lastAssistantDone());
+    try std.testing.expectEqual(@as(u64, 3), sess.usage().input_tokens);
 }
