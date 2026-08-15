@@ -550,3 +550,5 @@ touch stop-driver                                   # A 退出后，B 出现 pre
 3. **`bun build --compile` 要排除 `test/`**：`test/fixtures/driver-loop.ts` 是测试件，不是产品的一部分。
 4. **别把"自动继续"塞进 `attach.ts`。** 它现在只有一条自动动作（pending 未转正且队列在缩短时再 step，T1 定的），take-over 是手动的、budget 用尽是手动的 `/step`。"什么时候该继续"仍然是 driver 脚本 / agent 的事（PLAN §3.6、硬约束 2）。
 5. **内核不需要再改**（T0 提醒 5、T1 提醒 6、T2 提醒 6 依然成立）：T3 全程只用了 `session new|append|step --stream|events --follow|cancel`、`ext activate|rollback`、以及 `.nulya/` 下的**只读**读取（session 文件、`<id>.lock` 的一次只读探测、`extensions/**/extension.json`、`current`、`tool-usage.jsonl`）。
+
+核验（编排者）：`zig build e2e` 绿 / `bun test` 53 pass 0 fail（16 快照，6 文件）。`zig build test` **首轮出现一次 `232 pass, 1 skip, 1 fail`**，随后无法复现：单测二进制连跑 15 次、`zig build test`（含独立 cache-dir 强制重跑）5 次，全绿；失败当时 T3 的 driver-loop 夹具进程可能尚未退干净、与 durable session 的 `<id>.lock` / 临时目录抢占。**留给 T4 加固**：让涉及锁 / 临时目录的测试对环境里的游离进程免疫（各自独立临时目录、不复用固定 session id），并在 §11 记录结论。
