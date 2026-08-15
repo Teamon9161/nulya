@@ -95,17 +95,25 @@ Provider runtime 负责把这个逻辑块前缀映射到具体厂商的序列化
 
 ### 3.1 数据模型
 
-Ledger 不是 `Vec<Message>` 加随手 truncate，而是一条 **durable、append-only 的事件日志**。事件类型（初版）：
+Ledger 不是 `Vec<Message>` 加随手 truncate，而是一条 **durable、append-only 的事件日志**。
+
+**目标事件集合**（v0.1 只实现其中 kernel 当前所需的子集）：
 
 ```
-user_message | assistant_message | tool_call | tool_result
-| capability_note          // 对话中新增能力，见 §5.3
-| registry_selection       // 对话开始时选定的 tools[]
-| extension_build | extension_activate
-| extension_review         // policy hook 结论，见 agents-and-review.md
-| review_question | review_answer   // 主 agent ↔ 审阅者的 append-only 通信
-| compaction               // 见 §11
+CURRENT（已实现，`ledger.Event`）：
+  user_text | assistant | tool_results | capability_note
+  —— assistant 内含 tool calls；tool_results 是一条 batch（多个结果合一 turn，见 §4）；
+     capability_note 是对话中新增能力的追加（§5.3）。
+
+POST-v0.1（DESIGN 目标形态，尚未实现）：
+  registry_selection    // 对话开始选定的 tools[] 记进 ledger 当 generation base（§5.1）
+  extension_build | extension_activate
+  extension_review      // policy hook 结论，见 agents-and-review.md
+  review_question | review_answer   // 主 agent ↔ 审阅者的 append-only 通信
+  compaction            // 见 §11
 ```
+
+> 当前 skeleton 刻意只用最小 alphabet：工具使用统计走**独立** usage journal（§3.3），extension build/activate 是文件系统上的不可变版本操作（§7.4）而非 ledger 事件，`registry_selection` 未落地（§5.1、§16.1 第 10 条）。上表 POST-v0.1 是方向，不是已实现清单。
 
 每条事件：`seq`（单调）、`generation`、`parent_seq`、内容、`content_hash`。整条日志内容可寻址。
 
@@ -623,7 +631,12 @@ image/audio kubernetes ssh jira notion ...
 
 ### 15.1 v0.1 self-evolution core：freeze list
 
-self-evolution 闭环已由 `tests/e2e.zig` 全环证明（真实 built binary：CLI usage → usage journal → session-boundary ranking → 自动 native 晋升 → ToolExecutor spawn 冻结版本；mid-session activate v2 后 session native 仍 v1 / CLI live v2 / 新 session native v2）。下列为该核心的**冻结面**——只往外挂能力，不再改 kernel：
+self-evolution 闭环已由 `tests/e2e.zig` 全环证明（真实 built binary，无 mock）：
+
+- **self-manufacture**（里程碑第一句）：一个只暴露 shell + edit 的 session，由 deterministic 模型经这两个 builtin 跑 `nulya ext init/build/activate/run` 亲手造出新扩展并记录 usage，全程该工具不进 native 面；下一个 session 排名这份 usage 后把它自动晋升为 native 工具并执行。
+- **promotion + freeze**：CLI usage → usage journal → session-boundary ranking → 自动 native 晋升 → ToolExecutor spawn 冻结版本；mid-session activate v2 后 session native 仍 v1 / CLI live v2 / 新 session native v2。
+
+下列为该核心的**冻结面**——只往外挂能力，不再改 kernel：
 
 **FROZEN CORE（v0.1，不再改动语义）：**
 

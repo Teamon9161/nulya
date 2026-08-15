@@ -8,18 +8,21 @@
 //! `zig build e2e`.
 
 const std = @import("std");
-const extension = @import("extension");
+const support = @import("support");
 
-const build_ext = extension.build_ext;
-const composition = extension.composition;
-const environment = extension.environment;
-const integrity = extension.integrity;
-const promotion = extension.promotion;
-const protocol = extension.protocol;
-const store = extension.store;
-const templates = extension.templates;
-const tool = extension.tool;
-const tool_stats = extension.tool_stats;
+const build_ext = support.build_ext;
+const composition = support.composition;
+const environment = support.environment;
+const integrity = support.integrity;
+const ledger = support.ledger;
+const promotion = support.promotion;
+const protocol = support.protocol;
+const provider = support.provider;
+const session = support.session;
+const store = support.store;
+const templates = support.templates;
+const tool = support.tool;
+const tool_stats = support.tool_stats;
 
 const ext_dir_rel = ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "demo";
 
@@ -194,9 +197,11 @@ fn callNative(alloc: std.mem.Allocator, io: std.Io, t: tool.Tool, ws_path: []con
     });
 }
 
-test "self-evolution closed loop: CLI usage auto-promotes an extension whose native call executes the frozen version" {
-    // The whole kernel loop the milestone promises, proven end to end with a real
-    // built binary — not a stub, not a FakeEnv:
+test "closed loop: usage-driven promotion executes the frozen version through the tool executor (harness-built extension)" {
+    // The promotion + freeze half of the kernel loop, proven end to end with a
+    // real built binary — not a stub, not a FakeEnv. The extension here is built
+    // by the test harness (`buildAndActivate`); the separate self-manufacture test
+    // below proves a shell/edit-only session can build it itself.
     //
     //   build+activate web.search v1  ->  CLI `nulya ext run` records usage
     //     ->  a new session ranks the journal, auto-promotes web_search to a
@@ -290,6 +295,228 @@ test "self-evolution closed loop: CLI usage auto-promotes an extension whose nat
         try std.testing.expect(std.mem.indexOf(u8, result.output, "greeting-v2") != null);
         try std.testing.expect(std.mem.indexOf(u8, result.output, "greeting-v1") == null);
     }
+}
+
+/// Deterministic model that drives a session through a fixed sequence of `shell`
+/// tool calls — one per step — then ends the turn. `args_per_step[n]` is the JSON
+/// argument for step n's shell call (`{"command":"..."}`); an empty entry means
+/// "address the user and end". The slice is read live each step, so the harness
+/// can fill in a later step (the activate command) once an earlier step's real
+/// output reveals the built version id.
+const SelfBuildModel = struct {
+    args_per_step: []const []const u8,
+    step_no: usize = 0,
+
+    fn name(ptr: *anyopaque) []const u8 {
+        _ = ptr;
+        return "self-build";
+    }
+    fn modelName(ptr: *anyopaque) []const u8 {
+        _ = ptr;
+        return "self-build";
+    }
+    fn capabilities(ptr: *anyopaque) provider.ProviderCapabilities {
+        _ = ptr;
+        return .{};
+    }
+    fn stream(ptr: *anyopaque, alloc: std.mem.Allocator, request: provider.Request, sink: provider.EventSink) anyerror!void {
+        _ = alloc;
+        _ = request;
+        const self: *SelfBuildModel = @ptrCast(@alignCast(ptr));
+        const n = self.step_no;
+        self.step_no += 1;
+        try sink.emit(.started);
+        if (n >= self.args_per_step.len or self.args_per_step[n].len == 0) {
+            try sink.emit(.{ .text_delta = "greet is ready." });
+            try sink.emit(.{ .done = .end_turn });
+            return;
+        }
+        try sink.emit(.{ .tool_use_start = .{ .index = 0, .id = "call", .name = "shell" } });
+        try sink.emit(.{ .tool_use_input_delta = .{ .index = 0, .fragment = self.args_per_step[n] } });
+        try sink.emit(.{ .done = .tool_use });
+    }
+    const vtable: provider.Model.VTable = .{
+        .name = name,
+        .modelName = modelName,
+        .capabilities = capabilities,
+        .stream = stream,
+    };
+};
+
+/// Encode a `shell` builtin argument object `{"command":"..."}`, escaping the
+/// command exactly as a real model's tool call would arrive. Caller owns it.
+fn shellCallArgs(alloc: std.mem.Allocator, command: []const u8) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    var jw: std.json.Stringify = .{ .writer = &out.writer };
+    try jw.beginObject();
+    try jw.objectField("command");
+    try jw.write(command);
+    try jw.endObject();
+    return out.toOwnedSlice();
+}
+
+/// A copy of `s` with `\` turned into `/`, so an absolute Windows exe path is
+/// safe to pass through both Git Bash and PowerShell (both accept `/`). Caller
+/// owns it.
+fn forwardSlashes(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
+    const buf = try alloc.dupe(u8, s);
+    for (buf) |*c| {
+        if (c.* == '\\') c.* = '/';
+    }
+    return buf;
+}
+
+/// The most recent tool-result output in the ledger, or null if none — used to
+/// read the version id the real `nulya ext build` printed into the transcript.
+fn latestToolOutput(l: *const ledger.Ledger) ?[]const u8 {
+    const v = l.view();
+    var i = v.len;
+    while (i > 0) {
+        i -= 1;
+        switch (v[i]) {
+            .tool_results => |rs| if (rs.len > 0) return rs[0].output,
+            else => {},
+        }
+    }
+    return null;
+}
+
+fn isHexLower(c: u8) bool {
+    return (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f');
+}
+
+/// Extract the `v-<24 hex>` version id from `nulya ext build` output. Caller owns it.
+fn extractVersion(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
+    const idx = std.mem.indexOf(u8, text, integrity.version_prefix) orelse return error.TestUnexpectedResult;
+    var end = idx + integrity.version_prefix.len;
+    while (end < text.len and isHexLower(text[end])) end += 1;
+    return alloc.dupe(u8, text[idx..end]);
+}
+
+test "self-manufacture closed loop: a shell/edit-only session builds its own extension, a later session promotes it to native" {
+    // The milestone's first sentence, proven with no harness-built extension:
+    //
+    //   Session A exposes ONLY shell + edit. A deterministic model, through those
+    //   builtins alone (real ToolExecutor -> LocalEnvironment shell spawns), runs
+    //   `nulya ext init/build/activate/run` to manufacture a brand-new capability
+    //   and records its usage. The tool never becomes native mid-session.
+    //     -> Session B ranks that usage, auto-promotes the tool to a native tool,
+    //        and its executor spawns the frozen binary the model just built.
+    //
+    // No real LLM: a scripted provider issues the exact shell commands a model
+    // would. `NULYA_ZIG` is injected into the (non-secret) sanitized child env so
+    // the model's `nulya ext build` finds a toolchain without an embedded one.
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    defer host_env.deinit();
+    const zig_exe = host_env.get("NULYA_TEST_ZIG") orelse return error.SkipZigTest;
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var ws_real: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
+
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+    // NULYA_ZIG is not secret-shaped, so it survives sanitization and reaches the
+    // model's `nulya ext build` grandchild (test -> shell -> nulya -> zig).
+    try lenv.env.put("NULYA_ZIG", zig_exe);
+
+    const exe_fwd = try forwardSlashes(alloc, exe_abs);
+    defer alloc.free(exe_fwd);
+    const call_prefix = if (lenv.dialect_val == .powershell) "& " else "";
+
+    // The model's scripted shell commands. args[2] (activate) is filled after the
+    // real build step reveals the version. args[4] == "" ends the turn.
+    var args: [5][]const u8 = .{ "", "", "", "", "" };
+    defer for (args) |a| if (a.len != 0) alloc.free(a);
+    {
+        const c = try std.fmt.allocPrint(alloc, "{s}'{s}' ext init demo greet", .{ call_prefix, exe_fwd });
+        defer alloc.free(c);
+        args[0] = try shellCallArgs(alloc, c);
+    }
+    {
+        const c = try std.fmt.allocPrint(alloc, "{s}'{s}' ext build .nulya/extensions/demo", .{ call_prefix, exe_fwd });
+        defer alloc.free(c);
+        args[1] = try shellCallArgs(alloc, c);
+    }
+    {
+        const c = try std.fmt.allocPrint(alloc, "{s}'{s}' ext run demo greet '{{}}'", .{ call_prefix, exe_fwd });
+        defer alloc.free(c);
+        args[3] = try shellCallArgs(alloc, c);
+    }
+
+    var model_impl = SelfBuildModel{ .args_per_step = &args };
+    var sess = try session.AgentSession.init(alloc, .{
+        .model = .{ .ptr = &model_impl, .vtable = &SelfBuildModel.vtable },
+        .step_ctx = .{
+            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = ws_path },
+            .scratch_dir = ".nulya/scratch",
+        },
+    });
+    defer sess.deinit();
+
+    // Session A's model face is exactly the two builtins — no extension exists yet.
+    try std.testing.expectEqual(@as(usize, 2), sess.composition.tools.tools.len);
+    try std.testing.expect(sess.composition.tools.lookup("shell") != null);
+    try std.testing.expect(sess.composition.tools.lookup("edit") != null);
+    try std.testing.expect(sess.composition.tools.lookup("greet") == null);
+
+    try sess.appendUser("I need a greet capability.");
+    _ = try sess.step(); // init:  scaffold the extension
+    _ = try sess.step(); // build: compile into an immutable version
+
+    // Read the version the real build printed, then script the activate call.
+    const build_out = latestToolOutput(&sess.l) orelse return error.TestUnexpectedResult;
+    const ver = try extractVersion(alloc, build_out);
+    defer alloc.free(ver);
+    {
+        const c = try std.fmt.allocPrint(alloc, "{s}'{s}' ext activate demo {s}", .{ call_prefix, exe_fwd, ver });
+        defer alloc.free(c);
+        args[2] = try shellCallArgs(alloc, c);
+    }
+    _ = try sess.step(); // activate: point current at the built version
+    _ = try sess.step(); // run:      `nulya ext run` proves CLI works AND records usage
+    _ = try sess.step(); // end turn
+    try std.testing.expect(sess.lastAssistantDone());
+
+    // Session A never promoted the tool: its face is frozen at shell + edit.
+    try std.testing.expectEqual(@as(usize, 2), sess.composition.tools.tools.len);
+    try std.testing.expect(sess.composition.tools.lookup("greet") == null);
+
+    // The model's own `nulya ext run` recorded the durable usage fact.
+    {
+        const events = try tool_stats.readAll(alloc, io, ws_path);
+        defer tool_stats.freeEvents(alloc, events);
+        var saw = false;
+        for (events) |e| {
+            if (std.mem.eql(u8, e.tool_id, "ext:demo/greet")) saw = true;
+        }
+        try std.testing.expect(saw);
+    }
+
+    // --- Session B: the manufactured tool is now auto-promoted to native. ---
+    const ranked = try promotion.rankExtensionTools(alloc, io, ws_path, .{});
+    defer promotion.freeRankedIds(alloc, ranked);
+    try std.testing.expectEqual(@as(usize, 1), ranked.len);
+    try std.testing.expectEqualStrings("ext:demo/greet", ranked[0]);
+
+    var comp_b = try composition.SessionComposition.init(alloc, io, ws_path, ".nulya/extensions", .{ .ranked_native_tools = ranked });
+    defer comp_b.deinit(alloc);
+    const greet = comp_b.tools.lookup("greet") orelse return error.TestUnexpectedResult;
+    const result = try callNative(alloc, io, greet, ws_path);
+    defer alloc.free(result.output);
+    try std.testing.expect(result.ok);
+    try std.testing.expect(std.mem.indexOf(u8, result.output, "hello from a Nulya-built extension") != null);
 }
 
 test "cli ext run records a version-free stable tool id in the usage journal" {

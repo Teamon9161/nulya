@@ -49,19 +49,18 @@ pub fn build(b: *std.Build) void {
     // End-to-end closed-loop test (DESIGN §16 milestone): init -> build -> run.
     // It uses the host's own zig (no embed needed) via NULYA_TEST_ZIG, so it
     // actually compiles and runs a real extension. Everything reachable from
-    // e2e.zig lives in the single `extension` facade module rooted under src/,
-    // so no file straddles two module graphs (Zig 0.16 forbids that); the
-    // facade's own anonymous `zig_archive` import covers toolchain.zig's
-    // @embedFile.
+    // e2e.zig lives in the single `support` facade module rooted under src/, so
+    // no file straddles two module graphs (Zig 0.16 forbids that); the facade's
+    // own anonymous `zig_archive` import covers toolchain.zig's @embedFile.
     const e2e_mod = b.createModule(.{
         .root_source_file = b.path("tests/e2e.zig"),
         .target = target,
         .optimize = optimize,
     });
     e2e_mod.addAnonymousImport("zig_archive", .{ .root_source_file = zig_archive });
-    const e2e_extension_mod = b.createModule(.{ .root_source_file = b.path("src/extension.zig"), .target = target, .optimize = optimize });
-    e2e_extension_mod.addAnonymousImport("zig_archive", .{ .root_source_file = zig_archive });
-    e2e_mod.addImport("extension", e2e_extension_mod);
+    const e2e_support_mod = b.createModule(.{ .root_source_file = b.path("src/e2e_support.zig"), .target = target, .optimize = optimize });
+    e2e_support_mod.addAnonymousImport("zig_archive", .{ .root_source_file = zig_archive });
+    e2e_mod.addImport("support", e2e_support_mod);
     const e2e_tests = b.addTest(.{ .root_module = e2e_mod });
     const run_e2e = b.addRunArtifact(e2e_tests);
     run_e2e.setEnvironmentVariable("NULYA_TEST_ZIG", b.graph.zig_exe);
