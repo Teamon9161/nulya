@@ -72,7 +72,6 @@ pub const ToolCallRequest = struct {
 pub const ErrorBody = struct {
     code: i64,
     message: []const u8,
-    retryable: bool = false,
 };
 
 /// Extension -> host, already validated against the JSON-RPC envelope. The
@@ -147,23 +146,10 @@ pub fn decodeResponse(alloc: std.mem.Allocator, expected_id: []const u8, bytes: 
         else => return error.InvalidResponse,
     };
     const message = stringField(err_obj, "message") orelse return error.InvalidResponse;
-    const retryable = retryableFromData(err_obj.get("data"));
     return .{ .extension_error = .{
         .code = code,
         .message = try alloc.dupe(u8, message),
-        .retryable = retryable,
     } };
-}
-
-fn retryableFromData(value: ?std.json.Value) bool {
-    const data = switch (value orelse return false) {
-        .object => |o| o,
-        else => return false,
-    };
-    return switch (data.get("retryable") orelse return false) {
-        .bool => |b| b,
-        else => false,
-    };
 }
 
 fn stringField(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
@@ -235,14 +221,13 @@ test "decode accepts a success response and compacts its result" {
 
 test "decode accepts an error response" {
     const alloc = std.testing.allocator;
-    const res = try decodeResponse(alloc, "c1", "{\"jsonrpc\":\"2.0\",\"id\":\"c1\",\"error\":{\"code\":-32000,\"message\":\"down\",\"data\":{\"retryable\":true}}}");
+    const res = try decodeResponse(alloc, "c1", "{\"jsonrpc\":\"2.0\",\"id\":\"c1\",\"error\":{\"code\":-32000,\"message\":\"down\"}}");
     defer res.deinit(alloc);
     switch (res) {
         .result => unreachable,
         .extension_error => |err| {
             try std.testing.expectEqual(@as(i64, -32000), err.code);
             try std.testing.expectEqualStrings("down", err.message);
-            try std.testing.expect(err.retryable);
         },
     }
 }

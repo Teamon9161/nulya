@@ -100,11 +100,13 @@ pub fn invokeTool(
         // branch — decodeResponse performs no I/O.
         else => return err,
     };
-    defer decoded.deinit(alloc);
 
     switch (decoded) {
-        .result => |json| return .{ .ok = true, .output = try alloc.dupe(u8, json) },
+        // Ownership transfer: `json` becomes `ToolInvocation.output` — no dupe.
+        .result => |json| return .{ .ok = true, .output = json },
         .extension_error => |err| {
+            defer decoded.deinit(alloc);
+
             var diag: std.Io.Writer.Allocating = .init(alloc);
             errdefer diag.deinit();
             try diag.writer.print("extension error [{d}]: {s}", .{ err.code, err.message });
@@ -299,10 +301,10 @@ test "cancellation from the environment propagates unchanged" {
 
 test "no allocation failure is swallowed into a failed invocation" {
     // Sweep every allocation in the success path with a failing allocator:
-    // encode, the environment's captured stdout/stderr, decode, and the result
-    // dupe. Each induced OOM must surface as an error — a host resource fault
-    // is never folded into a `.ok = false` invocation, and protocol/application
-    // faults never become host errors.
+    // encode, the environment's captured stdout/stderr, and decode. Each
+    // induced OOM must surface as an error — a host resource fault is never
+    // folded into a `.ok = false` invocation, and protocol/application faults
+    // never become host errors.
     try testing.checkAllAllocationFailures(testing.allocator, invokeToolAllocSweep, .{
         "{\"jsonrpc\":\"2.0\",\"id\":\"call\",\"result\":{\"x\":1}}",
         true,
