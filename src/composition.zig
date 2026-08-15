@@ -101,14 +101,13 @@ fn resolveActiveExtensions(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Di
         if (entry.kind != .directory) continue;
         const active = (st.activeVersion(alloc, entry.name) catch continue) orelse continue;
         defer alloc.free(active);
-        if (!st.versionExists(alloc, entry.name, active)) continue;
+        var m = readPinnedManifest(alloc, io, root, entry.name, active) catch continue;
+        errdefer m.deinit();
 
         const id = try alloc.dupe(u8, entry.name);
         errdefer alloc.free(id);
         const version = try alloc.dupe(u8, active);
         errdefer alloc.free(version);
-        var m = try readPinnedManifest(alloc, io, root, id, version);
-        errdefer m.deinit();
         try resolved.append(alloc, .{ .id = id, .version = version, .manifest = m });
     }
     return resolved.toOwnedSlice(alloc);

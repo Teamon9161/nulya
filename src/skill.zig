@@ -103,10 +103,6 @@ pub fn sortDescriptors(descriptors: []SkillDescriptor) void {
     }.lessThan);
 }
 
-pub fn freeDescriptorList(alloc: std.mem.Allocator, descriptors: []SkillDescriptor) void {
-    (SkillSetSnapshot{ .skills = descriptors }).deinit(alloc);
-}
-
 pub fn deinitDescriptorArrayList(alloc: std.mem.Allocator, descriptors: *std.ArrayList(SkillDescriptor)) void {
     for (descriptors.items) |s| {
         alloc.free(s.ref);

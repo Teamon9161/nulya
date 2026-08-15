@@ -22,6 +22,7 @@
 //! and buy nothing here.
 
 const std = @import("std");
+const manifest = @import("manifest.zig");
 const integrity = @import("integrity.zig");
 
 pub const version_prefix = integrity.version_prefix;
@@ -53,6 +54,7 @@ pub const Store = struct {
 
     /// Create `<id>/versions/<version>/bin/` (and parents). Idempotent.
     pub fn ensureVersionDir(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8) !void {
+        try validateIdentity(id, version);
         const sub = try std.fs.path.join(alloc, &.{ id, versions_dir, version, "bin" });
         defer alloc.free(sub);
         try self.root.createDirPath(self.io, sub);
@@ -61,18 +63,21 @@ pub const Store = struct {
     /// Root-relative path of a version directory. Caller owns the result.
     pub fn versionDir(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8) ![]u8 {
         _ = self;
+        try validateIdentity(id, version);
         return std.fs.path.join(alloc, &.{ id, versions_dir, version });
     }
 
     /// Root-relative path of a version's frozen manifest. Caller owns the result.
     pub fn versionManifestPath(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8) ![]u8 {
         _ = self;
+        try validateIdentity(id, version);
         return std.fs.path.join(alloc, &.{ id, versions_dir, version, "extension.json" });
     }
 
     /// Root-relative path of a version's built entry binary. Caller owns the result.
     pub fn versionEntryPath(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8, entry: []const u8) ![]u8 {
         _ = self;
+        try validateIdentity(id, version);
         const entry_rel = try std.fmt.allocPrint(alloc, "{s}{s}", .{ entry, exe_suffix });
         defer alloc.free(entry_rel);
         return std.fs.path.join(alloc, &.{ id, versions_dir, version, entry_rel });
@@ -105,6 +110,7 @@ pub const Store = struct {
     }
 
     pub fn deactivate(self: Store, alloc: std.mem.Allocator, id: []const u8) !void {
+        if (!manifest.isValidId(id)) return error.InvalidId;
         const sub = try std.fs.path.join(alloc, &.{ id, current_file });
         defer alloc.free(sub);
         self.root.deleteFile(self.io, sub) catch |err| switch (err) {
@@ -116,6 +122,7 @@ pub const Store = struct {
     /// The active version id, or null if the extension has none. Caller owns the
     /// returned slice.
     pub fn activeVersion(self: Store, alloc: std.mem.Allocator, id: []const u8) !?[]u8 {
+        if (!manifest.isValidId(id)) return error.InvalidId;
         const sub = try std.fs.path.join(alloc, &.{ id, current_file });
         defer alloc.free(sub);
         const raw = self.root.readFileAlloc(self.io, sub, alloc, .limited(256)) catch |err| switch (err) {
@@ -131,6 +138,7 @@ pub const Store = struct {
     /// All built version ids for `id`, newest-first order not guaranteed. Caller
     /// owns the outer slice and each entry.
     pub fn listVersions(self: Store, alloc: std.mem.Allocator, id: []const u8) ![]const []u8 {
+        if (!manifest.isValidId(id)) return error.InvalidId;
         const sub = try std.fs.path.join(alloc, &.{ id, versions_dir });
         defer alloc.free(sub);
 
@@ -148,14 +156,20 @@ pub const Store = struct {
         var it = dir.iterate();
         while (try it.next(self.io)) |entry| {
             if (entry.kind != .directory) continue;
-            if (!std.mem.startsWith(u8, entry.name, version_prefix)) continue;
+            if (!integrity.isVersionId(entry.name)) continue;
             try out.append(alloc, try alloc.dupe(u8, entry.name));
         }
         return out.toOwnedSlice(alloc);
     }
 };
 
+fn validateIdentity(id: []const u8, version: []const u8) !void {
+    if (!manifest.isValidId(id)) return error.InvalidId;
+    if (!integrity.isVersionId(version)) return error.InvalidVersion;
+}
+
 fn validateBuiltVersion(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8) !void {
+    try validateIdentity(id, version);
     const version_rel = try self.versionDir(alloc, id, version);
     defer alloc.free(version_rel);
     try integrity.validateVersionDir(alloc, self.io, self.root, version_rel, version, id);
@@ -323,7 +337,7 @@ test "activate refuses an unbuilt version" {
     const store = Store.init(std.testing.io, tmp.dir);
     const built = try writeBuiltVersion(alloc, std.testing.io, tmp.dir, "demo", "one");
     defer alloc.free(built);
-    try std.testing.expectError(error.VersionNotFound, store.activate(alloc, "demo", "v-nope"));
+    try std.testing.expectError(error.VersionNotFound, store.activate(alloc, "demo", "v-000000000000000000000000"));
 }
 
 test "activate refuses an incomplete version directory" {
@@ -331,8 +345,8 @@ test "activate refuses an incomplete version directory" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const store = Store.init(std.testing.io, tmp.dir);
-    try store.ensureVersionDir(alloc, "demo", "v-empty");
-    try std.testing.expectError(error.VersionSealInvalid, store.activate(alloc, "demo", "v-empty"));
+    try store.ensureVersionDir(alloc, "demo", "v-111111111111111111111111");
+    try std.testing.expectError(error.VersionSealInvalid, store.activate(alloc, "demo", "v-111111111111111111111111"));
 }
 
 test "activate accepts a runtime-less skill version" {
@@ -375,8 +389,8 @@ test "listVersions returns every built version" {
     defer tmp.cleanup();
     const store = Store.init(std.testing.io, tmp.dir);
 
-    try store.ensureVersionDir(alloc, "demo", "v-aaaa");
-    try store.ensureVersionDir(alloc, "demo", "v-bbbb");
+    try store.ensureVersionDir(alloc, "demo", "v-aaaaaaaaaaaaaaaaaaaaaaaa");
+    try store.ensureVersionDir(alloc, "demo", "v-bbbbbbbbbbbbbbbbbbbbbbbb");
 
     const versions = try store.listVersions(alloc, "demo");
     defer freeVersions(alloc, versions);

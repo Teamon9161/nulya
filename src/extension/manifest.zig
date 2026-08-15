@@ -157,7 +157,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!Manifest {
     };
 }
 
-fn isValidId(s: []const u8) bool {
+pub fn isValidId(s: []const u8) bool {
     if (s.len == 0) return false;
     for (s) |c| {
         const ok = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
@@ -368,7 +368,6 @@ test "missing required field is a parse error" {
     ;
     try std.testing.expectError(error.MissingField, parse(std.testing.allocator, src));
 }
-
 
 test "validates a prompt-only package without runtime" {
     const src =

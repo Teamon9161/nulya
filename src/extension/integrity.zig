@@ -65,6 +65,16 @@ pub const Seal = struct {
     }
 };
 
+pub fn isVersionId(s: []const u8) bool {
+    if (s.len != version_prefix.len + digest_bytes * 2) return false;
+    if (!std.mem.startsWith(u8, s, version_prefix)) return false;
+    for (s[version_prefix.len..]) |c| {
+        const ok = (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f');
+        if (!ok) return false;
+    }
+    return true;
+}
+
 pub fn versionId(alloc: std.mem.Allocator, snapshot_bytes: []const u8, compiler: []const u8, target: []const u8) ![]u8 {
     var h = std.crypto.hash.sha2.Sha256.init(.{});
     inline for (.{ snapshot_bytes, compiler, target }) |field| {
@@ -295,6 +305,13 @@ pub fn validateVersionDir(
     } else if (seal.binary_digest != null) {
         return error.VersionSealInvalid;
     }
+}
+
+test "validates version id shape" {
+    try std.testing.expect(isVersionId("v-0123456789abcdefabcdef01"));
+    try std.testing.expect(!isVersionId("v-0123456789abcdefabcdef0"));
+    try std.testing.expect(!isVersionId("v-0123456789abcdefabcdef0g"));
+    try std.testing.expect(!isVersionId("v-0123456789ABCDEFABCDEF01"));
 }
 
 fn finishSnapshot(alloc: std.mem.Allocator, files: *std.ArrayList(SnapshotFile)) !PackageSnapshot {

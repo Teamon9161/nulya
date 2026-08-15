@@ -50,8 +50,7 @@ pub fn noteText(alloc: std.mem.Allocator, id: []const u8, version: []const u8, t
 }
 
 /// True if the ledger already announced `id@version`.
-pub fn containsNoteFor(l: *const ledger.Ledger, alloc: std.mem.Allocator, id: []const u8, version: []const u8) !bool {
-    _ = alloc;
+pub fn containsNoteFor(l: *const ledger.Ledger, id: []const u8, version: []const u8) !bool {
     for (l.view()) |event| switch (event) {
         .capability_note => |note| if (std.mem.eql(u8, note.id, id) and std.mem.eql(u8, note.version, version)) return true,
         else => {},
@@ -102,7 +101,7 @@ pub fn syncOpen(alloc: std.mem.Allocator, io: std.Io, l: *ledger.Ledger, root: s
         defer alloc.free(active);
 
         if (!st.versionExists(alloc, id, active)) continue;
-        if (try containsNoteFor(l, alloc, id, active)) continue;
+        if (try containsNoteFor(l, id, active)) continue;
 
         const manifest_sub = st.versionManifestPath(alloc, id, active) catch continue;
         defer alloc.free(manifest_sub);
@@ -169,7 +168,7 @@ test "sync appends one note per active extension version and is idempotent" {
     try syncOpen(alloc, io, &l, root);
     try std.testing.expectEqual(@as(usize, 1), l.len());
     try std.testing.expect(l.view()[0] == .capability_note);
-    try std.testing.expect(try containsNoteFor(&l, alloc, "demo", version));
+    try std.testing.expect(try containsNoteFor(&l, "demo", version));
     try std.testing.expect(std.mem.indexOf(u8, l.view()[0].capability_note.text, "stale") == null);
 
     // Running again adds nothing for the same active version.
@@ -200,8 +199,8 @@ test "activating a new version appends a new note with all tools" {
     try syncOpen(alloc, io, &l, root);
 
     try std.testing.expectEqual(@as(usize, 2), l.len());
-    try std.testing.expect(try containsNoteFor(&l, alloc, "demo", first));
-    try std.testing.expect(try containsNoteFor(&l, alloc, "demo", second));
+    try std.testing.expect(try containsNoteFor(&l, "demo", first));
+    try std.testing.expect(try containsNoteFor(&l, "demo", second));
     try std.testing.expect(std.mem.indexOf(u8, l.view()[1].capability_note.text, "greet") != null);
     try std.testing.expect(std.mem.indexOf(u8, l.view()[1].capability_note.text, "wave") != null);
 }

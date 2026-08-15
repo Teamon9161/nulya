@@ -30,6 +30,8 @@ pub fn parseRef(ref: []const u8) !ParsedRef {
     const slash = std.mem.indexOfScalarPos(u8, rest, at + 1, '/') orelse return error.InvalidSkillRef;
     if (at == 0 or slash == at + 1 or slash + 1 >= rest.len) return error.InvalidSkillRef;
     const name = rest[slash + 1 ..];
+    if (!manifest.isValidId(rest[0..at])) return error.InvalidSkillRef;
+    if (!integrity.isVersionId(rest[at + 1 .. slash])) return error.InvalidSkillRef;
     if (!skill.isValidName(name)) return error.InvalidSkillRef;
     return .{
         .extension_id = rest[0..at],
@@ -75,6 +77,29 @@ pub fn appendFromManifest(
     }
 }
 
+pub fn validateSnapshot(alloc: std.mem.Allocator, m: manifest.Manifest, snapshot: integrity.PackageSnapshot) !void {
+    var names: std.ArrayList([]const u8) = .empty;
+    defer names.deinit(alloc);
+
+    for (m.skills) |skill_path| {
+        const expected_name = basename(skill_path) orelse return error.InvalidSkillDirectoryName;
+        if (!skill.isValidName(expected_name)) return error.InvalidSkillDirectoryName;
+
+        const skill_rel = try canonicalRel(alloc, skill_path);
+        defer alloc.free(skill_rel);
+        const skill_md_rel = try joinCanonical(alloc, skill_rel, skill_file);
+        defer alloc.free(skill_md_rel);
+
+        const bytes = findSnapshotFile(snapshot, skill_md_rel) orelse return error.SkillFileMissing;
+        const fm = try skill.parseFrontmatter(bytes);
+        if (!std.mem.eql(u8, fm.name, expected_name)) return error.SkillNameDoesNotMatchDirectory;
+        for (names.items) |existing| {
+            if (std.mem.eql(u8, existing, fm.name)) return error.DuplicateSkillName;
+        }
+        try names.append(alloc, fm.name);
+    }
+}
+
 pub fn listActive(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -89,8 +114,6 @@ pub fn listActive(
         if (entry.kind != .directory) continue;
         const active = (st.activeVersion(alloc, entry.name) catch continue) orelse continue;
         defer alloc.free(active);
-        if (!st.versionExists(alloc, entry.name, active)) continue;
-
         var m = readPinnedManifest(alloc, io, root, entry.name, active) catch continue;
         defer m.deinit();
         try appendFromManifest(alloc, io, root, &descriptors, entry.name, active, m);
@@ -108,9 +131,6 @@ pub fn loadPinned(
     pinned_ref: []const u8,
 ) ![]u8 {
     const parsed = try parseRef(pinned_ref);
-    const st = store.Store.init(io, root);
-    if (!st.versionExists(alloc, parsed.extension_id, parsed.version)) return error.VersionIntegrityInvalid;
-
     var m = try readPinnedManifest(alloc, io, root, parsed.extension_id, parsed.version);
     defer m.deinit();
 
@@ -142,6 +162,34 @@ fn readPinnedManifest(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id
     return m;
 }
 
+fn findSnapshotFile(snapshot: integrity.PackageSnapshot, rel: []const u8) ?[]const u8 {
+    for (snapshot.files) |file| {
+        if (std.mem.eql(u8, file.rel, rel)) return file.bytes;
+    }
+    return null;
+}
+
+fn canonicalRel(alloc: std.mem.Allocator, rel: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    var it = std.mem.splitAny(u8, rel, "/\\");
+    var first = true;
+    while (it.next()) |part| {
+        if (part.len == 0) continue;
+        if (!first) try out.append(alloc, '/');
+        try out.appendSlice(alloc, part);
+        first = false;
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+fn joinCanonical(alloc: std.mem.Allocator, parent: []const u8, child: []const u8) ![]u8 {
+    const child_norm = try canonicalRel(alloc, child);
+    defer alloc.free(child_norm);
+    if (parent.len == 0) return try alloc.dupe(u8, child_norm);
+    return std.fmt.allocPrint(alloc, "{s}/{s}", .{ parent, child_norm });
+}
+
 fn basename(path: []const u8) ?[]const u8 {
     var end = path.len;
     while (end > 0 and (path[end - 1] == '/' or path[end - 1] == '\\')) end -= 1;
@@ -154,16 +202,20 @@ fn basename(path: []const u8) ?[]const u8 {
 
 test "pinned skill refs round-trip" {
     const alloc = std.testing.allocator;
-    const ref = try refFor(alloc, "finance", "v-a83fe2", "risk-parity");
+    const version = "v-a83fe2000000000000000000";
+    const ref = try refFor(alloc, "finance", version, "risk-parity");
     defer alloc.free(ref);
-    try std.testing.expectEqualStrings("ext:finance@v-a83fe2/risk-parity", ref);
+    try std.testing.expectEqualStrings("ext:finance@v-a83fe2000000000000000000/risk-parity", ref);
     const parsed = try parseRef(ref);
     try std.testing.expectEqualStrings("finance", parsed.extension_id);
-    try std.testing.expectEqualStrings("v-a83fe2", parsed.version);
+    try std.testing.expectEqualStrings(version, parsed.version);
     try std.testing.expectEqualStrings("risk-parity", parsed.name);
 }
 
 test "rejects invalid skill refs" {
-    try std.testing.expectError(error.InvalidSkillRef, parseRef("ext:finance@v-a83fe2/RiskParity"));
-    try std.testing.expectError(error.InvalidSkillRef, parseRef("ext:finance@v-a83fe2/risk--parity"));
+    try std.testing.expectError(error.InvalidSkillRef, parseRef("ext:finance@v-a83fe2000000000000000000/RiskParity"));
+    try std.testing.expectError(error.InvalidSkillRef, parseRef("ext:finance@v-a83fe2000000000000000000/risk--parity"));
+    try std.testing.expectError(error.InvalidSkillRef, parseRef("ext:../finance@v-a83fe2000000000000000000/risk-parity"));
+    try std.testing.expectError(error.InvalidSkillRef, parseRef("ext:finance@../v-a83fe2000000000000000000/risk-parity"));
+    try std.testing.expectError(error.InvalidSkillRef, parseRef("ext:finance@v-a83fe2/risk-parity"));
 }

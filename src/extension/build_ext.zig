@@ -13,6 +13,7 @@
 const std = @import("std");
 const manifest = @import("manifest.zig");
 const integrity = @import("integrity.zig");
+const ext_skills = @import("skills.zig");
 const toolchain = @import("../toolchain.zig");
 
 pub const exe_suffix = integrity.exe_suffix;
@@ -65,6 +66,7 @@ pub fn buildExtension(
 
     const snapshot = try integrity.collectPackageSnapshot(alloc, io, workspace, ext_dir_rel, manifest_bytes, m);
     defer snapshot.deinit(alloc);
+    try ext_skills.validateSnapshot(alloc, m, snapshot);
     const snapshot_bytes = try snapshot.canonicalBytes(alloc);
     defer alloc.free(snapshot_bytes);
 
@@ -227,6 +229,50 @@ test "pure skill package freezes its declared skill directory" {
     try tmp.dir.access(io, skill_path, .{});
 }
 
+test "skill package build rejects missing SKILL.md" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(io, "ext" ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "demo");
+    try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ manifest_file, .data =
+        \\{"schema":"nulya.extension/v2","id":"skills","contributes":{"skills":["skills/demo"]}}
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "demo" ++ std.fs.path.sep_str ++ "notes.txt", .data = "not a skill\n" });
+
+    try std.testing.expectError(error.SkillFileMissing, buildExtension(std.testing.allocator, io, tmp.dir, "ext", "zig"));
+}
+
+test "skill package build rejects frontmatter name mismatch" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(io, "ext" ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "demo");
+    try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ manifest_file, .data =
+        \\{"schema":"nulya.extension/v2","id":"skills","contributes":{"skills":["skills/demo"]}}
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "demo" ++ std.fs.path.sep_str ++ "SKILL.md", .data = "---\nname: other\ndescription: demo\n---\nbody\n" });
+
+    try std.testing.expectError(error.SkillNameDoesNotMatchDirectory, buildExtension(std.testing.allocator, io, tmp.dir, "ext", "zig"));
+}
+
+test "skill package build rejects duplicate skill names" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(io, "ext" ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "a" ++ std.fs.path.sep_str ++ "foo");
+    try tmp.dir.createDirPath(io, "ext" ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "b" ++ std.fs.path.sep_str ++ "foo");
+    try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ manifest_file, .data =
+        \\{"schema":"nulya.extension/v2","id":"skills","contributes":{"skills":["skills/a/foo","skills/b/foo"]}}
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "a" ++ std.fs.path.sep_str ++ "foo" ++ std.fs.path.sep_str ++ "SKILL.md", .data = "---\nname: foo\ndescription: first\n---\nbody\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "b" ++ std.fs.path.sep_str ++ "foo" ++ std.fs.path.sep_str ++ "SKILL.md", .data = "---\nname: foo\ndescription: second\n---\nbody\n" });
+
+    try std.testing.expectError(error.DuplicateSkillName, buildExtension(std.testing.allocator, io, tmp.dir, "ext", "zig"));
+}
+
 test "runtime helper source changes the version id" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
@@ -265,20 +311,19 @@ test "skill body changes the version id" {
         \\{"schema":"nulya.extension/v2","id":"skills","contributes":{"skills":["skills/demo"]}}
     });
     const skill_rel = "ext" ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "demo" ++ std.fs.path.sep_str ++ "SKILL.md";
-    try tmp.dir.writeFile(io, .{ .sub_path = skill_rel, .data = "version one\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = skill_rel, .data = "---\nname: demo\ndescription: demo skill\n---\nversion one\n" });
 
     const zig_exe = try testZigExe(alloc);
     defer alloc.free(zig_exe);
     var first = try buildExtension(alloc, io, tmp.dir, "ext", zig_exe);
     defer first.deinit(alloc);
 
-    try tmp.dir.writeFile(io, .{ .sub_path = skill_rel, .data = "version two\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = skill_rel, .data = "---\nname: demo\ndescription: demo skill\n---\nversion two\n" });
     var second = try buildExtension(alloc, io, tmp.dir, "ext", zig_exe);
     defer second.deinit(alloc);
 
     try std.testing.expect(!std.mem.eql(u8, first.version, second.version));
 }
-
 
 test "source tests directory participates in the version id" {
     const alloc = std.testing.allocator;
@@ -307,7 +352,6 @@ test "source tests directory participates in the version id" {
 
     try std.testing.expect(!std.mem.eql(u8, first.version, second.version));
 }
-
 
 test "prompt-only package builds without runtime and freezes prompt files" {
     const alloc = std.testing.allocator;
