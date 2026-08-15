@@ -467,3 +467,5 @@ bun run src/main.tsx --session s-…           # 手工看一眼
 4. **每加一种卡就加一帧快照，每加一行 §5.2 就先加 `registry.test.ts`**（无渲染器、跑一秒）。live == replay 与关掉重开逐字相同这两条不变量对新卡片同样有效——新卡片不许依赖只有流里才有的信息。
 5. **`usage` 是每步的增量**（T0 提醒 2），状态栏写的是 `since attach`；`/usage` 视图（T4）别把它当全量。
 6. **内核不需要再改**（T0 提醒 5、T1 提醒 6 依然成立）：T2 全程只用了 `session new|append|step --stream|events|cancel`、session 文件首行、以及 `.nulya/extensions/<id>/versions/<v>/extension.json` 的只读读取。§10 那四项一项没动；唯一想加的一行内核修补是 header 的 `created` 实际为空（见"偏离"第 2 条），值得记进 §10 而不是偷偷补在前端。
+
+核验（编排者）：`zig build test` 绿 / `zig build e2e` 绿 / `bun test` 40 pass 0 fail（14 快照，3 文件）。
