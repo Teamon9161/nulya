@@ -125,30 +125,34 @@ pub const AgentSession = struct {
 
     /// Append one usage event per completed tool call in this step's ledger
     /// suffix `[before..]`. Stats are an observation after execution, so the
-    /// loop stays generic and no executor knows the journal exists. A call is
-    /// recorded only when its model-facing name resolves to a real exposed
-    /// `ToolDefinition.id`: a hallucinated name has no durable identity, so it
-    /// is skipped rather than saved under a fake id.
+    /// loop stays generic and no executor knows the journal exists. A completed
+    /// step's suffix has a fixed shape the loop guarantees — no calls: exactly
+    /// `[assistant]`; with calls: exactly `[assistant, tool_results]` with one
+    /// result per call — so this reads the shape directly instead of searching
+    /// for possibly-present events, and asserts instead of tolerating a broken
+    /// invariant. A call is recorded only when its model-facing name resolves
+    /// to a real exposed `ToolDefinition.id`: a hallucinated name has no
+    /// durable identity, so it is skipped rather than saved under a fake id.
     fn recordCompletedToolStats(self: *AgentSession, before: usize) !void {
-        var calls: ?[]const ledger.ToolCall = null;
-        var results: ?[]const ledger.ToolResultEntry = null;
-        for (self.l.view()[before..]) |e| {
-            switch (e) {
-                .assistant => |as| {
-                    if (as.calls.len != 0) calls = as.calls;
-                },
-                .tool_results => |rs| results = rs,
-                else => {},
-            }
-        }
-        const cs = calls orelse return; // no tool calls: nothing to record
-        const rs = results orelse return; // defensive; a completed step always appends its batch
+        const suffix = self.l.view()[before..];
+        if (suffix.len == 1) return; // the model addressed the user; nothing to record
+        std.debug.assert(suffix.len == 2);
+        const assistant = switch (suffix[0]) {
+            .assistant => |a| a,
+            else => unreachable, // runStepWithPrompt always appends the assistant first
+        };
+        const results = switch (suffix[1]) {
+            .tool_results => |r| r,
+            else => unreachable, // a completed step with calls always appends its batch
+        };
+        // One tool_results entry per assistant call; the loop fills them in call
+        // order. The multi-prong for panics if the lengths ever disagree.
+        std.debug.assert(assistant.calls.len == results.len);
+
         const ctx = self.step_ctx.tool_context;
-        // The loop fills results in call order, so index i matches call i.
-        const count = @min(cs.len, rs.len);
-        for (cs[0..count], 0..) |call, i| {
+        for (assistant.calls, results) |call, result| {
             const t = self.composition.tools.lookup(call.tool) orelse continue;
-            try tool_stats.append(self.alloc, ctx.environment.io, ctx.cwd, t.definition.id, rs[i].ok);
+            try tool_stats.append(self.alloc, ctx.environment.io, ctx.cwd, t.definition.id, result.ok);
         }
     }
 };

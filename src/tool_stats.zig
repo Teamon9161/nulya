@@ -15,6 +15,12 @@
 //! journals fail with a precise error instead of garbage. `tool_id` is the
 //! durable identity (`ext:<id>/<tool>`, `builtin.shell`, ...), never the
 //! model-facing name, so stats accumulate across implementation versions.
+//!
+//! Only complete events count: an append interrupted by cancel or crash can
+//! leave a partial final line, and the next append first drops that tail back
+//! to the last `\n` so it can never be glued onto a later event into a
+//! permanently malformed middle line. The reader stays strict — a malformed
+//! line read without a prior repairing append is an explicit error.
 
 const std = @import("std");
 
@@ -58,6 +64,9 @@ pub const Stats = struct {
 
 /// Append one event as a complete line. Creates `.nulya` and the journal when
 /// missing; opens an existing journal without truncating and writes at its end.
+/// If a previous append was interrupted (cancel/crash) and left a partial final
+/// line, that tail is dropped back to the last complete line first, so the new
+/// event can never be glued onto it into a permanently malformed middle line.
 /// Host faults (missing workspace, permission, I/O, OOM, cancellation)
 /// propagate — only the *journal file* being absent is a normal "no stats yet",
 /// and that is handled by `readAll`, not here.
@@ -71,7 +80,9 @@ pub fn append(alloc: std.mem.Allocator, io: std.Io, cwd: []const u8, tool_id: []
     var file = try workspace.createFile(io, journal_rel, .{ .truncate = false, .read = true });
     defer file.close(io);
     const size = (try file.stat(io)).size;
-    try file.writePositionalAll(io, line, size);
+    const end = try repairCrashTail(file, io, size);
+    if (end != size) try file.setLength(io, end);
+    try file.writePositionalAll(io, line, end);
 }
 
 /// Read every event in journal order. A missing journal file reads as empty; a
@@ -149,6 +160,35 @@ fn openWorkspace(io: std.Io, cwd: []const u8) !std.Io.Dir {
         return std.Io.Dir.openDirAbsolute(io, cwd, .{});
     }
     return std.Io.Dir.cwd().openDir(io, cwd, .{});
+}
+
+/// If the journal does not end with a complete line (a previous append was
+/// interrupted), return the byte offset just past the last `\n` — where the
+/// next event must be written — dropping the partial trailing bytes. Returns 0
+/// when no line in the file is complete. Events are single-line JSON (a
+/// literal newline can never appear inside one), so `\n` always separates
+/// events. The intact case (last byte `\n`) costs one read; the backward scan
+/// only runs after a truncated tail.
+fn repairCrashTail(file: std.Io.File, io: std.Io, size: u64) !u64 {
+    if (size == 0) return 0;
+    var last: [1]u8 = undefined;
+    const n = try file.readPositionalAll(io, &last, size - 1);
+    if (n == 1 and last[0] == '\n') return size;
+
+    var chunk: [4096]u8 = undefined;
+    var pos = size;
+    while (pos > 0) {
+        const read_len = @min(chunk.len, pos);
+        const start = pos - read_len;
+        const got = try file.readPositionalAll(io, chunk[0..read_len], start);
+        var i = got;
+        while (i > 0) {
+            i -= 1;
+            if (chunk[i] == '\n') return start + i + 1;
+        }
+        pos = start;
+    }
+    return 0; // no complete line anywhere: the whole file is a partial first event
 }
 
 fn encodeEvent(alloc: std.mem.Allocator, tool_id: []const u8, ok: bool) ![]u8 {
@@ -333,6 +373,63 @@ test "malformed journal lines produce an explicit error" {
     // A truncated crash tail is not silently accepted.
     try ws.writeFile(io, .{ .sub_path = journal_rel, .data = "{\"v\":1,\"tool_id\":\"x\",\"ok\":tru" });
     try std.testing.expectError(error.InvalidStatsJournal, readAll(alloc, io, cwd));
+}
+
+test "append repairs a truncated crash tail before writing" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmpCwd(alloc, io, tmp);
+    defer alloc.free(cwd);
+
+    var ws = try std.Io.Dir.openDirAbsolute(io, cwd, .{});
+    defer ws.close(io);
+    try ws.createDirPath(io, journal_dir);
+    // A previous append was interrupted mid-write: the final line is partial.
+    try ws.writeFile(io, .{ .sub_path = journal_rel, .data = "{\"v\":1,\"tool_id\":\"ext:a.pkg/alpha\",\"ok\":true}\n{\"v\":1,\"tool_id\":\"ext:b.pkg/beta\",\"ok\":false}\n{\"v\":1,\"tool_id\":\"ext:c.pkg/gamma\",\"ok\":tru" });
+
+    try append(alloc, io, cwd, "ext:d.pkg/delta", true);
+
+    // The partial line was dropped back to the last '\n'; delta follows the
+    // complete events, and the journal parses cleanly again.
+    const raw = try ws.readFileAlloc(io, journal_rel, alloc, .unlimited);
+    defer alloc.free(raw);
+    try std.testing.expectEqualStrings(
+        "{\"v\":1,\"tool_id\":\"ext:a.pkg/alpha\",\"ok\":true}\n" ++
+            "{\"v\":1,\"tool_id\":\"ext:b.pkg/beta\",\"ok\":false}\n" ++
+            "{\"v\":1,\"tool_id\":\"ext:d.pkg/delta\",\"ok\":true}\n",
+        raw,
+    );
+
+    const events = try readAll(alloc, io, cwd);
+    defer freeEvents(alloc, events);
+    try std.testing.expectEqual(@as(usize, 3), events.len);
+    try std.testing.expectEqualStrings("ext:a.pkg/alpha", events[0].tool_id);
+    try std.testing.expectEqualStrings("ext:b.pkg/beta", events[1].tool_id);
+    try std.testing.expectEqualStrings("ext:d.pkg/delta", events[2].tool_id);
+}
+
+test "append repairs a tail with no complete line at all" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmpCwd(alloc, io, tmp);
+    defer alloc.free(cwd);
+
+    var ws = try std.Io.Dir.openDirAbsolute(io, cwd, .{});
+    defer ws.close(io);
+    try ws.createDirPath(io, journal_dir);
+    // The whole file is a partial first event; appending must not glue onto it.
+    try ws.writeFile(io, .{ .sub_path = journal_rel, .data = "{\"v\":1,\"tool_id\":\"ext:a.pkg/alph" });
+
+    try append(alloc, io, cwd, "ext:d.pkg/delta", true);
+
+    const events = try readAll(alloc, io, cwd);
+    defer freeEvents(alloc, events);
+    try std.testing.expectEqual(@as(usize, 1), events.len);
+    try std.testing.expectEqualStrings("ext:d.pkg/delta", events[0].tool_id);
 }
 
 test "host filesystem faults propagate, never read as empty" {
