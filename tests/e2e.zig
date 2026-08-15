@@ -1176,6 +1176,112 @@ test "session cli: a shell-script driver runs a goal loop to completion" {
     try std.testing.expectEqual(@as(u8, 0), code); // the driver reached its goal and exited 0
 }
 
+test "session cli: --stream emits the transient line protocol and leaves the ledger identical" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--model", "scripted" });
+    defer alloc.free(new.stdout);
+    try std.testing.expectEqual(@as(u8, 0), new.code);
+    const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(id);
+
+    {
+        const ap = try runCli(alloc, io, ws, &.{ exe_abs, "session", "append", id, "probe the box" });
+        defer alloc.free(ap.stdout);
+        try std.testing.expectEqual(@as(u8, 0), ap.code);
+    }
+
+    const step = try runCliEnv(alloc, io, ws, &.{ exe_abs, "session", "step", id, "--stream" }, "NULYA_SCRIPTED_MODE", "finish");
+    defer alloc.free(step.stdout);
+    try std.testing.expectEqual(@as(u8, 0), step.code);
+
+    // Every stdout line is one JSON object — a driver can parse the stream
+    // without ever meeting a bare diagnostic line (tui.md §2.2).
+    var lines = std.mem.tokenizeAny(u8, step.stdout, "\r\n");
+    var first: ?[]const u8 = null;
+    var last: []const u8 = "";
+    var saw_tool_begin = false;
+    var saw_tool_end = false;
+    var saw_ledger_event = false;
+    var step_ends: usize = 0;
+    while (lines.next()) |line| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, line, .{});
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value == .object);
+        if (first == null) first = line;
+        last = line;
+        const obj = parsed.value.object;
+        if (obj.get("stream")) |s| {
+            const kind = s.string;
+            const ev = obj.get("event").?.string;
+            if (std.mem.eql(u8, kind, "tool") and std.mem.eql(u8, ev, "begin")) saw_tool_begin = true;
+            if (std.mem.eql(u8, kind, "tool") and std.mem.eql(u8, ev, "end")) {
+                saw_tool_end = true;
+                try std.testing.expect(obj.get("ok").? == .bool);
+            }
+            if (std.mem.eql(u8, kind, "step") and std.mem.eql(u8, ev, "end")) step_ends += 1;
+        } else {
+            // A line without `stream` is a ledger event, in `session events` shape.
+            try std.testing.expect(obj.get("seq") != null);
+            try std.testing.expect(obj.get("kind") != null);
+            saw_ledger_event = true;
+        }
+    }
+    try std.testing.expectEqualStrings("{\"stream\":\"model\",\"event\":\"started\"}", first.?);
+    try std.testing.expect(saw_tool_begin and saw_tool_end and saw_ledger_event);
+    try std.testing.expectEqual(@as(usize, 2), step_ends); // one tool step, one closing step
+    try std.testing.expectEqualStrings(
+        "{\"stream\":\"run\",\"event\":\"done\",\"steps\":2,\"stopped\":\"end_turn\"}",
+        last,
+    );
+
+    // The ledger a streamed run writes is exactly the ledger a plain run writes:
+    // the observer is pure observation, so the file is the same history.
+    const streamed = try readSessionFile(alloc, io, ws, id);
+    defer alloc.free(streamed);
+
+    var tmp2 = std.testing.tmpDir(.{});
+    defer tmp2.cleanup();
+    const ws2 = tmp2.dir;
+    const new2 = try runCli(alloc, io, ws2, &.{ exe_abs, "session", "new", "--model", "scripted" });
+    defer alloc.free(new2.stdout);
+    const id2 = try alloc.dupe(u8, std.mem.trim(u8, new2.stdout, " \r\n"));
+    defer alloc.free(id2);
+    {
+        const ap = try runCli(alloc, io, ws2, &.{ exe_abs, "session", "append", id2, "probe the box" });
+        defer alloc.free(ap.stdout);
+        try std.testing.expectEqual(@as(u8, 0), ap.code);
+    }
+    const plain = try runCliEnv(alloc, io, ws2, &.{ exe_abs, "session", "step", id2 }, "NULYA_SCRIPTED_MODE", "finish");
+    defer alloc.free(plain.stdout);
+    try std.testing.expectEqual(@as(u8, 0), plain.code);
+    const unstreamed = try readSessionFile(alloc, io, ws2, id2);
+    defer alloc.free(unstreamed);
+
+    // Compare from the assistant turn on: the header differs by session id and
+    // creation time, and seq 1 carries the inbox delivery name it was drained
+    // from. Everything the model and the tools produced must be identical.
+    const streamed_turns = streamed[std.mem.indexOf(u8, streamed, "{\"seq\":2,").?..];
+    const unstreamed_turns = unstreamed[std.mem.indexOf(u8, unstreamed, "{\"seq\":2,").?..];
+    try std.testing.expectEqualStrings(unstreamed_turns, streamed_turns);
+
+    // And a plain `step` still prints exactly its own event lines: the streamed
+    // run's ledger lines appear verbatim in the streamed stdout too.
+    try std.testing.expect(std.mem.indexOf(u8, plain.stdout, "\"kind\":\"tool_results\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plain.stdout, "\"stream\":") == null);
+}
+
 // ── M2b: script extensions (DESIGN §7.1) ────────────────────────────────────
 
 /// Scaffold a host-appropriate script extension (PowerShell on Windows, POSIX sh

@@ -198,6 +198,16 @@ pub const AgentSession = struct {
     /// state either way. A canceled step does not poison the session — the next
     /// `step()` runs normally.
     pub fn step(self: *AgentSession) !loop.StepOutcome {
+        const outcome = try self.stepInner();
+        // The step boundary is the one place where the ledger is guaranteed
+        // legal (tui.md §2.2), so it is where an observer gets a read-only look
+        // at the events this step produced. Pure observation: it cannot change
+        // the outcome, and a step without an observer runs identically.
+        if (self.step_ctx.observer) |obs| obs.stepEnd(self.l.view(), outcome.status);
+        return outcome;
+    }
+
+    fn stepInner(self: *AgentSession) !loop.StepOutcome {
         // Preparation runs cancellable filesystem I/O (inbox, extension
         // integrity, manifest reads) and consumes any cancel marker. A cancel
         // there is host execution control, not a fault: no provider/tool

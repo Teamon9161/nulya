@@ -17,6 +17,8 @@ const tool_stats = @import("tool_stats.zig");
 const config = @import("config.zig");
 const ledger = @import("ledger.zig");
 const session = @import("session.zig");
+const loop = @import("loop.zig");
+const provider = @import("provider.zig");
 const promotion = @import("promotion.zig");
 const launch = @import("launch.zig");
 const source = @import("source.zig");
@@ -714,9 +716,245 @@ fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     return 0;
 }
 
+/// The `session step --stream` line protocol (tui.md §2.2): one JSON object per
+/// line on stdout, written AS the step runs instead of once it is over. Lines
+/// carrying a `stream` field are transient observations; lines without one are
+/// ledger events in exactly the `session events` shape. Under `--stream` stdout
+/// carries nothing else — diagnostics become `{"stream":"run","event":"error"}`.
+///
+/// This is the whole protocol in one place: `loop.StepObserver` hands it facts,
+/// it turns them into lines. It never touches the session, so it stays pure
+/// observation (physics: model-visible state changes only by `append`).
+const StepStream = struct {
+    alloc: std.mem.Allocator,
+    out: *std.Io.Writer,
+    /// Ledger index of the first event not yet flushed as a line.
+    printed: usize = 0,
+    /// How the most recent step ended, for the `run done` line's `stopped`.
+    last_status: loop.StepStatus = .completed,
+    /// First write failure, if any. An observer must not fail the step, so the
+    /// error is parked here and reported by the caller as a non-zero exit.
+    err: ?anyerror = null,
+
+    fn note(self: *StepStream, e: anyerror) void {
+        if (self.err == null) self.err = e;
+    }
+
+    fn observer(self: *StepStream) loop.StepObserver {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable: loop.StepObserver.VTable = .{
+        .modelEvent = onModelEvent,
+        .toolBegin = onToolBegin,
+        .toolEnd = onToolEnd,
+        .stepEnd = onStepEnd,
+    };
+
+    fn onModelEvent(ptr: *anyopaque, event: provider.StreamEvent) void {
+        const self: *StepStream = @ptrCast(@alignCast(ptr));
+        // A complete reasoning item is opaque provider bytes kept for replay, not
+        // something to render; `thinking_delta` is the display channel (§2.2).
+        if (event == .reasoning_item) return;
+        self.modelLine(event) catch |e| self.note(e);
+    }
+
+    fn onToolBegin(ptr: *anyopaque, call: ledger.ToolCall) void {
+        const self: *StepStream = @ptrCast(@alignCast(ptr));
+        self.toolBeginLine(call) catch |e| self.note(e);
+    }
+
+    fn onToolEnd(ptr: *anyopaque, call: ledger.ToolCall, ok: bool) void {
+        const self: *StepStream = @ptrCast(@alignCast(ptr));
+        self.toolEndLine(call, ok) catch |e| self.note(e);
+    }
+
+    fn onStepEnd(ptr: *anyopaque, events: []const ledger.Event, status: loop.StepStatus) void {
+        const self: *StepStream = @ptrCast(@alignCast(ptr));
+        self.last_status = status;
+        // Ledger lines first, then the boundary marker: a reader that has seen
+        // `step end` knows it has every event of that step.
+        self.flushEvents(events) catch |e| self.note(e);
+        self.stepEndLine(status) catch |e| self.note(e);
+    }
+
+    /// Emit every ledger event not yet reported, in `session events` shape. The
+    /// seq of view index i is i+1 — the same numbering the session file uses.
+    fn flushEvents(self: *StepStream, events: []const ledger.Event) !void {
+        while (self.printed < events.len) : (self.printed += 1) {
+            const line = try ledger.encodeEventLine(self.alloc, events[self.printed], self.printed + 1);
+            defer self.alloc.free(line);
+            try self.out.writeAll(line);
+        }
+        try self.out.flush();
+    }
+
+    fn modelLine(self: *StepStream, event: provider.StreamEvent) !void {
+        var jw: std.json.Stringify = .{ .writer = self.out };
+        try jw.beginObject();
+        try jw.objectField("stream");
+        try jw.write("model");
+        try jw.objectField("event");
+        switch (event) {
+            .started => try jw.write("started"),
+            .text_delta => |t| {
+                try jw.write("text_delta");
+                try jw.objectField("text");
+                try jw.write(t);
+            },
+            .thinking_delta => |t| {
+                try jw.write("thinking_delta");
+                try jw.objectField("text");
+                try jw.write(t);
+            },
+            .reasoning_item => unreachable, // filtered in onModelEvent
+            .tool_use_start => |s| {
+                try jw.write("tool_use_start");
+                try jw.objectField("index");
+                try jw.write(s.index);
+                try jw.objectField("id");
+                try jw.write(s.id);
+                try jw.objectField("name");
+                try jw.write(s.name);
+            },
+            .tool_use_input_delta => |d| {
+                try jw.write("tool_use_input_delta");
+                try jw.objectField("index");
+                try jw.write(d.index);
+                try jw.objectField("fragment");
+                try jw.write(d.fragment);
+            },
+            .usage => |u| {
+                try jw.write("usage");
+                try jw.objectField("input_tokens");
+                try jw.write(u.input_tokens);
+                try jw.objectField("output_tokens");
+                try jw.write(u.output_tokens);
+                try jw.objectField("cache_read_tokens");
+                try jw.write(u.cache_read_tokens);
+                try jw.objectField("cache_write_tokens");
+                try jw.write(u.cache_write_tokens);
+            },
+            .done => |stop| {
+                try jw.write("done");
+                try jw.objectField("stop");
+                try jw.write(@tagName(stop));
+            },
+        }
+        try jw.endObject();
+        try self.endLine();
+    }
+
+    fn toolBeginLine(self: *StepStream, call: ledger.ToolCall) !void {
+        var jw: std.json.Stringify = .{ .writer = self.out };
+        try jw.beginObject();
+        try jw.objectField("stream");
+        try jw.write("tool");
+        try jw.objectField("event");
+        try jw.write("begin");
+        try jw.objectField("call_id");
+        try jw.write(call.id);
+        try jw.objectField("tool");
+        try jw.write(call.tool);
+        try jw.endObject();
+        try self.endLine();
+    }
+
+    /// `call_id` alone identifies the call — the reader already learned its tool
+    /// from the matching `begin` (and from `tool_use_start` before that).
+    fn toolEndLine(self: *StepStream, call: ledger.ToolCall, ok: bool) !void {
+        var jw: std.json.Stringify = .{ .writer = self.out };
+        try jw.beginObject();
+        try jw.objectField("stream");
+        try jw.write("tool");
+        try jw.objectField("event");
+        try jw.write("end");
+        try jw.objectField("call_id");
+        try jw.write(call.id);
+        try jw.objectField("ok");
+        try jw.write(ok);
+        try jw.endObject();
+        try self.endLine();
+    }
+
+    fn stepEndLine(self: *StepStream, status: loop.StepStatus) !void {
+        var jw: std.json.Stringify = .{ .writer = self.out };
+        try jw.beginObject();
+        try jw.objectField("stream");
+        try jw.write("step");
+        try jw.objectField("event");
+        try jw.write("end");
+        try jw.objectField("status");
+        try jw.write(@tagName(status));
+        try jw.endObject();
+        try self.endLine();
+    }
+
+    fn runDone(self: *StepStream, steps: usize, stopped: []const u8) !void {
+        var jw: std.json.Stringify = .{ .writer = self.out };
+        try jw.beginObject();
+        try jw.objectField("stream");
+        try jw.write("run");
+        try jw.objectField("event");
+        try jw.write("done");
+        try jw.objectField("steps");
+        try jw.write(steps);
+        try jw.objectField("stopped");
+        try jw.write(stopped);
+        try jw.endObject();
+        try self.endLine();
+    }
+
+    fn runError(self: *StepStream, message: []const u8) !void {
+        var jw: std.json.Stringify = .{ .writer = self.out };
+        try jw.beginObject();
+        try jw.objectField("stream");
+        try jw.write("run");
+        try jw.objectField("event");
+        try jw.write("error");
+        try jw.objectField("message");
+        try jw.write(message);
+        try jw.endObject();
+        try self.endLine();
+    }
+
+    /// One line, flushed: the reader consumes stdout line by line as it arrives.
+    fn endLine(self: *StepStream) !void {
+        try self.out.writeByte('\n');
+        try self.out.flush();
+    }
+};
+
+/// Why the run stopped, from facts the kernel already reports: a canceled step
+/// short-circuits `run`, an assistant turn with no calls ends the turn, and
+/// anything else means the step budget ran out.
+fn stoppedReason(last_status: loop.StepStatus, turn_done: bool) []const u8 {
+    if (last_status == .canceled) return "canceled";
+    return if (turn_done) "end_turn" else "budget";
+}
+
+/// A `session step` diagnostic. Plain text without `--stream` (byte-identical to
+/// what it has always printed); a `run error` line with it.
+fn stepFail(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    stream: ?*StepStream,
+    comptime fmt: []const u8,
+    args: anytype,
+) !u8 {
+    const msg = try std.fmt.allocPrint(alloc, fmt, args);
+    defer alloc.free(msg);
+    if (stream) |s| {
+        try s.runError(msg);
+    } else {
+        try printOut(alloc, io, "{s}\n", .{msg});
+    }
+    return 1;
+}
+
 fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (args.len < 1) {
-        try printErr(io, "usage: nulya session step <id> [--max-steps N]\n");
+        try printErr(io, "usage: nulya session step <id> [--max-steps N] [--stream]\n");
         return 1;
     }
     const id = args[0];
@@ -724,6 +962,11 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         try printErr(io, "invalid session id\n");
         return 1;
     }
+    const streaming = sliceHasFlag(args[1..], "--stream");
+    var out_buf: [4096]u8 = undefined;
+    var stdout = std.Io.File.stdout().writerStreaming(io, &out_buf);
+    var stream_state: StepStream = .{ .alloc = alloc, .out = &stdout.interface };
+    const stream: ?*StepStream = if (streaming) &stream_state else null;
     // The kernel clamps this to `session.max_steps_ceiling`: a driver can lower
     // the budget, never raise it.
     var max_steps: usize = session.max_steps_ceiling;
@@ -742,8 +985,7 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     defer host.deinit();
 
     var hdr = ledger.readHeader(alloc, io, std.Io.Dir.cwd(), spath) catch |err| {
-        try printOut(alloc, io, "no such session '{s}': {s}\n", .{ id, @errorName(err) });
-        return 1;
+        return stepFail(alloc, io, stream, "no such session '{s}': {s}", .{ id, @errorName(err) });
     };
     defer hdr.deinit();
 
@@ -764,12 +1006,10 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     var holder = launch.buildFromDescriptor(alloc, io, hdr.value.model_identity, &host, .{ .cache_key = id }) catch |err| switch (err) {
         error.MissingCredential => {
             const credential = if (hdr.value.model_identity.api_key_env.len != 0) hdr.value.model_identity.api_key_env else "codex login";
-            try printOut(alloc, io, "session '{s}' is a '{s}' session but its credential ({s}) is not available; refusing to run (no silent fallback)\n", .{ id, hdr.value.model_identity.provider, credential });
-            return 1;
+            return stepFail(alloc, io, stream, "session '{s}' is a '{s}' session but its credential ({s}) is not available; refusing to run (no silent fallback)", .{ id, hdr.value.model_identity.provider, credential });
         },
         error.ProviderUnavailable => {
-            try printOut(alloc, io, "session '{s}' was created with provider '{s}', which this build cannot construct\n", .{ id, hdr.value.model_identity.provider });
-            return 1;
+            return stepFail(alloc, io, stream, "session '{s}' was created with provider '{s}', which this build cannot construct", .{ id, hdr.value.model_identity.provider });
         },
         else => return err,
     };
@@ -785,19 +1025,37 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         .step_ctx = .{
             .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd_path },
             .scratch_dir = launch.scratch_dir,
+            .observer = if (stream) |s| s.observer() else null,
         },
         .model_options = .{ .effort = effort },
     }, .{ .workspace = std.Io.Dir.cwd(), .session_path = spath }) catch |err| {
-        try printOut(alloc, io, "session open failed: {s}\n", .{@errorName(err)});
-        return 1;
+        return stepFail(alloc, io, stream, "session open failed: {s}", .{@errorName(err)});
     };
     defer sess.deinit();
 
     const before = sess.l.len();
-    _ = sess.run(max_steps) catch |err| {
-        try printOut(alloc, io, "session step failed: {s}\n", .{@errorName(err)});
-        return 1;
+    if (stream) |s| s.printed = before;
+    const steps = sess.run(max_steps) catch |err| {
+        // Whatever this run did append before it faulted is still fact; report
+        // those lines, then the error.
+        if (stream) |s| s.flushEvents(sess.l.view()) catch {};
+        return stepFail(alloc, io, stream, "session step failed: {s}", .{@errorName(err)});
     };
+
+    if (stream) |s| {
+        // Every event was already flushed at its step boundary; only the run
+        // verdict is left.
+        try s.runDone(steps, stoppedReason(s.last_status, sess.lastAssistantDone()));
+        // A dropped observation is not a broken step, but the reader's picture is
+        // incomplete — say so on stderr (stdout stays pure JSON) and exit non-zero.
+        if (s.err) |e| {
+            try printErr(io, "stream write failed: ");
+            try printErr(io, @errorName(e));
+            try printErr(io, "\n");
+            return 1;
+        }
+        return 0;
+    }
 
     // stdout is the events this invocation appended, as one JSONL line each.
     for (sess.l.view()[before..], before..) |ev, i| {
@@ -928,7 +1186,8 @@ fn sessionUsage(io: std.Io) !u8 {
         \\usage:
         \\  nulya session new [--model profile] [--parent <id>:<seq>]   print a new session id
         \\  nulya session append <id> <text> | --file <path>           queue a user turn (appended at the next step boundary)
-        \\  nulya session step <id> [--max-steps N]                    run to turn end (or the budget); stdout = event JSONL
+        \\  nulya session step <id> [--max-steps N] [--stream]         run to turn end (or the budget); stdout = event JSONL
+        \\                                                             --stream also emits transient model/tool lines as they happen
         \\  nulya session events <id> [--since N] [--follow]           print events as JSONL (read-only tail)
         \\  nulya session cancel <id>                                  request cancel at the next step boundary
         \\
@@ -1078,4 +1337,116 @@ test "parseParent parses <session>:<seq> and rejects malformed input" {
     try std.testing.expect(parseParent("no-seq") == null);
     try std.testing.expect(parseParent(":41") == null);
     try std.testing.expect(parseParent("s:notnum") == null);
+}
+
+test "session step --stream emits the tui.md §2.2 line protocol in order" {
+    const tool = @import("tool.zig");
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_path = cwd_buf[0..try tmp.dir.realPath(io, &cwd_buf)];
+
+    // A stand-in for `shell` so the protocol test never spawns a subprocess; the
+    // scripted provider (the same one `NULYA_SCRIPTED_MODE` selects) drives it.
+    const FakeShell = struct {
+        fn call(ptr: ?*anyopaque, a: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolResult {
+            _ = ptr;
+            _ = req;
+            return .{ .ok = true, .output = try a.dupe(u8, "ok") };
+        }
+    };
+    const tools_arr = [_]tool.Tool{
+        .{
+            .definition = .{ .id = "nulya.shell", .name = "shell", .description = "shell", .input_schema = "{}" },
+            .executor = .{ .ptr = null, .callFn = FakeShell.call },
+        },
+    };
+
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    var stream: StepStream = .{ .alloc = alloc, .out = &out.writer };
+
+    var scripted: launch.ScriptedProvider = .{ .mode = .finish };
+    var sess: session.AgentSession = .{
+        .alloc = alloc,
+        .l = ledger.Ledger.init(alloc),
+        .composition = .{
+            .pinned_extensions = &.{},
+            .extension_tool_bindings = &.{},
+            .tools = .{ .tools = &tools_arr },
+            .skills = .{ .skills = &.{} },
+            .system_prompts = .{ .blocks = &.{} },
+        },
+        .model = scripted.handle(),
+        .step_ctx = .{
+            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd_path },
+            .scratch_dir = "/tmp",
+            .observer = stream.observer(),
+        },
+        .model_options = .{},
+        .extension_root = "nulya-absent-extensions-root",
+    };
+    defer sess.l.deinit();
+
+    try sess.appendUser("go");
+    stream.printed = sess.l.len(); // as `session step` does: only this run's events
+    const steps = try sess.run(5);
+    try stream.runDone(steps, stoppedReason(stream.last_status, sess.lastAssistantDone()));
+    try std.testing.expect(stream.err == null);
+
+    // Step 1 calls a tool, step 2 addresses the user. Per step: model deltas →
+    // tool begin/end → the ledger events that step appended → the step boundary.
+    // Then one run verdict for the whole invocation.
+    const expected =
+        \\{"stream":"model","event":"started"}
+        \\{"stream":"model","event":"text_delta","text":"Let me probe the environment."}
+        \\{"stream":"model","event":"tool_use_start","index":0,"id":"c1","name":"shell"}
+        \\{"stream":"model","event":"tool_use_input_delta","index":0,"fragment":"{\"command\":\"echo hello-from-nulya\"}"}
+        \\{"stream":"model","event":"done","stop":"tool_use"}
+        \\{"stream":"tool","event":"begin","call_id":"c1","tool":"shell"}
+        \\{"stream":"tool","event":"end","call_id":"c1","ok":true}
+        \\{"seq":2,"kind":"assistant","text":"Let me probe the environment.","calls":[{"id":"c1","tool":"shell","args":"{\"command\":\"echo hello-from-nulya\"}"}]}
+        \\{"seq":3,"kind":"tool_results","results":[{"call_id":"c1","ok":true,"output":"ok","spill_path":null}]}
+        \\{"stream":"step","event":"end","status":"completed"}
+        \\{"stream":"model","event":"started"}
+        \\{"stream":"model","event":"text_delta","text":"done"}
+        \\{"stream":"model","event":"done","stop":"end_turn"}
+        \\{"seq":4,"kind":"assistant","text":"done","calls":[]}
+        \\{"stream":"step","event":"end","status":"completed"}
+        \\{"stream":"run","event":"done","steps":2,"stopped":"end_turn"}
+        \\
+    ;
+    try std.testing.expectEqualStrings(expected, out.written());
+}
+
+test "a run stopped by the step budget reports stopped=budget, a canceled step reports canceled" {
+    try std.testing.expectEqualStrings("end_turn", stoppedReason(.completed, true));
+    try std.testing.expectEqualStrings("budget", stoppedReason(.completed, false));
+    try std.testing.expectEqualStrings("canceled", stoppedReason(.canceled, false));
+    // A cancel at the boundary wins even when the last assistant turn was clean.
+    try std.testing.expectEqualStrings("canceled", stoppedReason(.canceled, true));
+}
+
+test "under --stream a diagnostic is a run error line, never a bare text line" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    var stream: StepStream = .{ .alloc = alloc, .out = &out.writer };
+
+    const code = try stepFail(alloc, io, &stream, "session open failed: {s}", .{"SessionBusy"});
+    try std.testing.expectEqual(@as(u8, 1), code);
+    try std.testing.expectEqualStrings(
+        "{\"stream\":\"run\",\"event\":\"error\",\"message\":\"session open failed: SessionBusy\"}\n",
+        out.written(),
+    );
 }

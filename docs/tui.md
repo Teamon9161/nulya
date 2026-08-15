@@ -1,6 +1,6 @@
 # Nulya TUI — 设计与计划
 
-> **状态：未实现，属计划。** 本文是 `tui/` 的设计契约 + 里程碑；落地后把"已实现"的部分搬进 [DESIGN.md](DESIGN.md) §14 / 新 §18，本文收缩成纯计划。
+> **状态：T0（内核 `--stream`）已落地 → [DESIGN.md](DESIGN.md) §14；`tui/` 本身未实现，属计划。** 本文是 `tui/` 的设计契约 + 里程碑；落地一块就把"已实现"的部分搬进 DESIGN.md §14 / 新 §18，本文收缩成纯计划。
 > 上位原则见 [PLAN.md](PLAN.md) §3.11：前端是 core 之上的薄客户端——**tail ledger 文件 + append user 事件；前端是长期进程，re-spawn 的只是 worker**。
 
 ## 0. 定位（三句话）
@@ -56,38 +56,14 @@
 | 取消标记文本 | `loop.zig` 四种 marker（interrupted / canceled executing / recording canceled / not executed）→ 识别成 canceled 卡片 |
 | `emit` 溢出 | `tool_results[].spill_path` → 卡片尾部 "full output → path"，`o` 打开（`$EDITOR` / 展开读文件） |
 
-### 2.2 新增（唯一内核改动）：`nulya session step <id> --stream`
+### 2.2 唯一内核改动：`nulya session step <id> --stream` `[已落地 · T0 → DESIGN §14]`
 
-**语义**：与不带 `--stream` 的 `step` 完全相同（同一 `AgentSession.run`、同一预算夹取、同一 cancel 消化）；区别只是 stdout **在跑的过程中**逐行输出下面的 JSON，而不是跑完一次性输出。不进 ledger、不改 model-visible 状态、不影响 replay——纯观测（physics 之外的"可观测"职责）。
+**协议与机制的真相在 [DESIGN.md](DESIGN.md) §14**（`loop.StepContext.observer` 纯观测钩子 + 行协议）。这里只留 TUI 侧的消费约定：
 
-**机制**（实现自由，约束如下）：`loop.StepContext` 增一个可选 `observer`（`{ptr, vtable}`），回调点：
-- 模型流：`runStepWithPrompt` 把 `provider.StreamEvent` **tee** 一份（collector 照旧收；`reasoning_item` 可不转发）
-- 工具执行：`execOne` 前后各一次（`tool_begin` / `tool_end{ok}`）
-- step 边界：`AgentSession.run` 每个 step 结束后一次（含 canceled）；`cli.zig` 的 observer 在这里把 `sess.l.view()[printed..]` 以 `events` 同形的行刷出
-
-**行协议**（一行一个 JSON；`stream` 字段区分瞬态行，无 `stream` 字段的就是 ledger 事件行）：
-
-```jsonl
-{"stream":"model","event":"started"}
-{"stream":"model","event":"text_delta","text":"…"}
-{"stream":"model","event":"thinking_delta","text":"…"}
-{"stream":"model","event":"tool_use_start","index":0,"id":"call_1","name":"shell"}
-{"stream":"model","event":"tool_use_input_delta","index":0,"fragment":"{\"command\":"}
-{"stream":"model","event":"usage","input_tokens":1200,"output_tokens":80,"cache_read_tokens":1100,"cache_write_tokens":0}
-{"stream":"model","event":"done","stop":"tool_use"}
-{"stream":"tool","event":"begin","call_id":"call_1","tool":"shell"}
-{"stream":"tool","event":"end","call_id":"call_1","ok":true}
-{"seq":7,"kind":"assistant","text":"…","calls":[…]}
-{"seq":8,"kind":"tool_results","results":[…]}
-{"stream":"step","event":"end","status":"completed"}
-{"stream":"run","event":"done","steps":2,"stopped":"end_turn"}
-```
-
-- `stopped ∈ end_turn | budget | canceled`。
-- 任何诊断（原来 `printOut` 的 "session step failed: …" 等）在 `--stream` 下改为 `{"stream":"run","event":"error","message":"…"}` 然后非零退出；**stdout 上没有非 JSON 行**。
-- 每条写完 flush（TUI 逐行读）。
-- 单元测试用 scripted provider 钉住行序：`started → text_delta* → tool_use_* → done → tool begin/end* → ledger 行 → step end → run done`。
-- 同一 commit 更新 DESIGN §14 的 `step` 一行 + 本节搬过去。
+- 一行一个 JSON，写完即 flush；带 `stream` 字段 = 瞬态观测行，不带 = 与 `session events` 同形的 ledger 事件行（同一套 seq，可直接按 seq 入 items）。
+- 行序（每个 step）：`started → text_delta* / thinking_delta* → tool_use_start / tool_use_input_delta* → done → tool begin/end* → 该 step 的 ledger 行 → step end`；整次调用最后一行是 `run done{steps,stopped}`（`stopped ∈ end_turn | budget | canceled`）。见到 `step end` 就知道这一步的事件已全。
+- `reasoning_item` 不出现在流里（不透明、只为回放）；thinking 的可显示文本只有 `thinking_delta`，turn 结束后从 ledger 的 `reasoning` 尽力抽（§4.2）。
+- 诊断也是 JSON（`{"stream":"run","event":"error","message":"…"}` + 非零退出），所以 `nulya/cli.ts` 的解析器**永远**不必处理裸文本行。
 
 **明确不做的内核改动**（放进 §10 待议）：`session new` 自动记 spawned-by；`nulya config show`；`session append` 打印投递回执；`<id>.live` sidecar。
 
@@ -284,7 +260,7 @@ fold   = "ctrl+o"
 
 | 里程碑 | 内容 | 完成标准 |
 |---|---|---|
-| **T0 · kernel `--stream`** | §2.2：`StepContext.observer`、tee、tool begin/end、per-step 刷 ledger 行、`run done/error` 行、诊断 JSON 化；单测 + e2e 冒烟；DESIGN §14 同步 | `zig build test` / `e2e` 绿；`nulya session step <id> --stream` 在 scripted 下按 §2.2 行序输出；不带 `--stream` 行为不变 |
+| ~~**T0 · kernel `--stream`**~~ ✅ | §2.2：`StepContext.observer`、tee、tool begin/end、per-step 刷 ledger 行、`run done/error` 行、诊断 JSON 化；单测 + e2e 冒烟；DESIGN §14 同步 | `zig build test` / `e2e` 绿；`nulya session step <id> --stream` 在 scripted 下按 §2.2 行序输出；不带 `--stream` 行为不变 |
 | **T1 · 骨架** | `tui/` 包；`nulya/{bin,cli,ledger,files,diff}.ts`；`state/{session,driver,settings}`；App = transcript（User/Assistant 通用卡 + 通用 tool 卡）+ composer + 状态栏；driver 状态机；流式；Esc cancel；`--session` 回放；`bun test` 两条 | 在 nulya 仓库里用它对着真实 provider 完整跑一轮"读源码 → edit → zig build test"；关掉重开 `--session` 一致 |
 | **T2 · 卡片与折叠** | registry；Shell/Edit(diff)/ExtTool/Thinking/Canceled/spill；EvolveCard 全表；CapabilityBanner；CompositionCard；折叠交互；`tui.toml`；主题 tokens；ascii 降级 | §4.2 表每行一个快照测试；`edit_diff` 设定生效 |
 | **T3 · nulya 视图** | `/sessions`（树 + live 标记 + 打开）；`/ext`（store / 版本线 / 漂移 / usage / 动作键）；SubSessionCard → 第二 tab；observer 模式（锁探测、`events --follow` 续接、take over） | 用 shell 在另一终端跑一个 driver 脚本 loop step，TUI 以 observer 附上并能 append |
@@ -307,3 +283,53 @@ fold   = "ctrl+o"
 > 每个里程碑追加一小节，只追加不改写。格式：状态 / 关键决定与理由 / 偏离设计之处 / 怎么运行与测试 / 已知问题 / 给下一里程碑的提醒。
 > 主对话（编排者）在每节末尾追加一行 `核验：…` 记录 `zig build test` / `zig build e2e` / `bun test` 的结果。
 
+### T0 · kernel `--stream`
+
+**状态**：完成。`nulya session step <id> --stream` 已落地，行协议搬进 DESIGN §14，§2.2 收缩成 TUI 侧消费约定。`zig build test`、`zig build e2e` 全绿；不带 `--stream` 的 `session step` 一字未变（输出路径与文案原样保留，e2e 有对照断言）。
+
+**关键决定与理由**
+
+- **observer 全部返回 `void`**。§2.2 只说"纯观测"，没说签名。让四个回调都不可失败，是把"纯观测"变成类型上的事实：observer 既不能 append，也不能让一个 step 因为 stdout 断了而失败。写失败停在 `StepStream.err`，run 结束后走 stderr + 非零退出（stdout 仍只有 JSON）。
+- **step 边界回调放在 `AgentSession.step()` 而不是 `run()`**。§2.2 写的是"`run` 每个 step 结束后一次"；放在 `step()` 里对 `run` 完全等价（`run` 只调 `step`），还顺带覆盖了直接调 `step()` 的调用方，且 `prepareStep` 在边界被取消的那一步也能报 `step end{status:"canceled"}`。
+- **tee 在 `loop.zig` 而不是 `provider.zig`**。observer 类型属于 loop（`StepContext` 的一部分），provider 反过来引用会成环。`collectTurn` 在无 observer 时**就是** `Model.step`，有 observer 时才建 collector + `TeeSink`；两条路径的失败语义一致（partial collector 一律丢弃）。
+- **`{"stream":"tool","event":"end"}` 只带 `call_id` + `ok`**，与 §2.2 样例逐字一致（不加 `tool` 字段）；配对信息读者从 `begin` 和 `tool_use_start` 已经拿到了。
+- **未被派发的调用不发 begin/end**。一批被取消后，后面的调用内核保证从未交给 executor，"没有事件"正是这个事实的忠实表达；它们仍会以 `not executed` marker 出现在 ledger 行里。
+- **`stopped` 不改 `run` 的签名**：`canceled` 来自 observer 记下的最后一个 step status，`end_turn` 来自 `sess.lastAssistantDone()`，其余是 `budget`。内核没有多长出一个字段。
+- **一个 step 的 ledger 行在该 step 的 `step end` 之前刷出**，包括边界上从 inbox 排干进来的 `user_text`——所以它出现在模型 delta **之后**。这是 step 粒度的必然结果，不是 bug：TUI 拿 `seq` 入 items，顺序由 seq 决定，不由到达时刻决定。
+
+**偏离设计之处**
+
+- §2.2 原文整节搬进 DESIGN §14（tui.md 的铁律：已落地的写 DESIGN），§2.2 改为"真相在 DESIGN §14 + TUI 侧消费约定"。§9 里程碑表 T0 一行标 ✅。
+- §2.2 样例里 `{"seq":8,"kind":"tool_results",…}` 与 `{"seq":7,"kind":"assistant",…}` 相邻；实际实现两行都在同一个 `step end` 之前刷出，顺序一致，无偏离。
+- 除此之外无偏离。§10 列的四项内核改动一项没做。
+
+**怎么运行与测试**
+
+```bash
+zig build                                        # 出二进制
+zig build test                                   # 单测（含 cli.zig 的三条 --stream 测试）
+zig build e2e                                    # e2e（含 --stream 冒烟）
+
+# 手动看一眼（scripted，无需任何 API key）：
+ID=$(nulya session new --model scripted)
+nulya session append "$ID" "hello"
+NULYA_SCRIPTED_MODE=finish nulya session step "$ID" --stream
+```
+
+新增测试：
+- `src/cli.zig` — `"session step --stream emits the tui.md §2.2 line protocol in order"`：scripted provider + 假 `shell` 工具，对**整段 stdout 逐字**断言（两个 step 的全部 16 行）。另两条覆盖 `stoppedReason` 与"诊断在 `--stream` 下是 `run error` 行"。
+- `tests/e2e.zig` — `"session cli: --stream emits the transient line protocol and leaves the ledger identical"`：跑真实二进制，逐行 `parseFromSlice` 确认 stdout 全是 JSON、首行 `model started`、末行 `run done{steps:2,stopped:"end_turn"}`、两个 `step end`；再跑一遍**不带** `--stream` 的同样 session，断言两份 session 文件从 `seq:2` 起逐字相同（seq 1 带 inbox 投递名 `origin`，天然不同），且 plain stdout 里没有 `"stream":`。
+
+**已知问题**
+
+- observer 的写口是 `std.Io.Writer`（stdout 走 `writerStreaming` + 每行 flush）。如果 step 被 **Future cancel**（进程内取消，CLI 目前不走这条路），`step end` 那次写会以 `error.Canceled` 落进 `StepStream.err`，让退出码变 1。CLI 的取消只走 `<id>.cancel` 标记（无 io 取消），所以现实里碰不到；真要碰到时正确的修法是在 `note()` 里忽略 `error.Canceled`。
+- `src/loop.zig` / `src/session.zig` 在本次改动**之前**就没通过 `zig fmt --check`（已用 `git stash` 核对）。没有顺手 reformat：那会把无关 diff 混进 T0 的 commit。
+- 未测：真实 provider 下的 `thinking_delta` / `usage` 行（scripted provider 不发这两种）。字段名直接来自 `provider.StreamEvent`，风险低；T1 用 deepseek 短冒烟时顺带看一眼。
+
+**给下一里程碑（T1 · 骨架）的提醒**
+
+1. `nulya/cli.ts` 解析 `--stream` 时**只**分两类：有 `stream` 字段 → 瞬态；无 → ledger 事件（直接按 `seq` 入 items）。不要按 `kind` 白名单过滤——新 event kind 出现时应该原样落进 items，由 registry 决定怎么画。
+2. `usage` 行给的是**本次 step 的**四个计数（不是累计）。状态栏要自己累加，且 resume 前的历史未知（§4.5 的 `since attach`）。
+3. `run done` 的 `stopped` 是驱动状态机的关键：`budget` 意味着 `--max-steps` 用完但 turn 没结束——D-状态机要么再 spawn 一次 step，要么在 UI 上明确显示"预算用完"，别静默停住。
+4. 取消路径：`Esc` → `session cancel` → 那一步以 `{"stream":"step","event":"end","status":"canceled"}` + `run done{stopped:"canceled"}` 收尾；被取消的工具在 ledger 行里是三种 marker 之一（§2.1），CanceledCard 认 marker 文本而不是认 `stream` 行。
+5. 内核这边 T0 之后**不再需要**任何改动就能做完 T1；再想改内核先回 §10 讨论。

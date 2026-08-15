@@ -460,7 +460,7 @@ nulya ext init [--script] <id> [tool] | build <path>
           | list | inspect <id> | api [protocol|permissions|examples]
 nulya session new [--model p] [--parent <id>:<seq>]      ← 冻结 composition + 写 header，打印 session id
           | append <id> <text|--file f>                  ← 把一条 user turn 投进 inbox（下一 step 边界进 ledger）
-          | step <id> [--max-steps N]                    ← 跑到本 turn 结束或预算耗尽；stdout = 本次 append 的事件 JSONL
+          | step <id> [--max-steps N] [--stream]         ← 跑到本 turn 结束或预算耗尽；stdout = 本次 append 的事件 JSONL（`--stream` 见下）
           | events <id> [--since N] [--follow]           ← 只读 tail 原始事件行（follow 轮询）
           | cancel <id>                                  ← 写 cancel 标记，下一 step 边界消化
 nulya src [path] [--tests]                               ← 打印本二进制内嵌的 src 源码（无参数 = 列全树）
@@ -472,6 +472,25 @@ nulya                       ← 无参数：固定 prompt demo（现经 durable 
 - `nulya src`：build.zig 把整个 `src/**` `@embedFile` 进二进制（源码 ~200KB，紧挨 ~90MB 工具链，恒开无 gate）；`nulya src <path>` 按 `src/` 相对路径打印（`prompt.zig`、`extension/store.zig`），**默认剥 top-level `test` 块**（读结构/契约时不付测试 token），`--tests`/`--raw` 打印原样（Zig 风格参照）。剥离靠 zig-fmt 不变量：顶层 decl 的收尾 `}` 在第 0 列，无需 tokenizer（`source.zig`）。测试留在文件里（Zig 惯例、人可读、风格参照），改的只是**投影**不是**存储**——`src/` 一字未动。
 - `nulya ext api`：协议 topic 现在**打印真实 `extension/protocol.zig` 源码**（是 `nulya src` 的特例），wire ABI 与实现代码零漂移；`permissions` / `examples` 仍是短说明（策略与 CLI 用法，不随代码漂）。
 - `nulya session *` 是**唯一**的 session 驱动面：没有 `setTools / setModel / replaceHistory`，换 composition = `session new`。每个子命令是对 durable session 文件（§3.4）的一次独立进程调用，其中**只有 `step` 写主文件**：`append` / `cancel` 投递到 `<id>.inbox/` / `<id>.cancel`（所以正在跑的 `step` 会在它的下一个 step 边界拿到 mid-run 的 append 或 cancel），`events` 是只读 tail（不解析、不重编码——文件本身就是 wire format）。`step` 的预算 `min(--max-steps, session.max_steps_ceiling)` **由 kernel 在 `AgentSession.run` 强制**，driver 只能调低不能调高；`--max-steps` 必须是正整数。session 就是它的文件，没有 `close`。
+- **`session step --stream`：纯观测的行协议**（前端唯一需要的内核改动，tui.md §2.2 → 已落地）。语义与不带 `--stream` 完全相同（同一 `AgentSession.run`、同一预算夹取、同一 cancel 消化、**同一 ledger**）；区别只是 stdout **在跑的过程中**逐行输出，而不是跑完一次性输出。
+  - 机制是 `loop.StepContext.observer`（可选 `StepObserver{ptr,vtable}`）。observer **无权力**：四个回调全部返回 `void`、只拿只读视图，所以它不能 append、不能改 model-visible 状态、不能让一个 step 失败——带 observer 的 step 与不带的走同一条路径（physics #1/#3）。回调点：`runStepWithPrompt` 把 provider 流 **tee** 给 observer 再交给 `TurnCollector`；`execOne` 前后各一次（未被派发的尾部调用两个回调都不发）；`AgentSession.step` 在 step 边界一次（含 canceled）。
+  - 行协议（一行一个 JSON，写完即 flush）：带 `stream` 字段的是瞬态观测行，不带的就是与 `session events` **同形**的 ledger 事件行（同一个 `encodeEventLine`、同一套 seq）。
+
+    ```jsonl
+    {"stream":"model","event":"started"}
+    {"stream":"model","event":"text_delta","text":"…"}          # 另有 thinking_delta（展示用）
+    {"stream":"model","event":"tool_use_start","index":0,"id":"call_1","name":"shell"}
+    {"stream":"model","event":"tool_use_input_delta","index":0,"fragment":"{\"command\":"}
+    {"stream":"model","event":"usage","input_tokens":1200,"output_tokens":80,"cache_read_tokens":1100,"cache_write_tokens":0}
+    {"stream":"model","event":"done","stop":"tool_use"}
+    {"stream":"tool","event":"begin","call_id":"call_1","tool":"shell"}
+    {"stream":"tool","event":"end","call_id":"call_1","ok":true}
+    {"seq":7,"kind":"assistant","text":"…","calls":[…]}
+    {"stream":"step","event":"end","status":"completed"}
+    {"stream":"run","event":"done","steps":2,"stopped":"end_turn"}
+    ```
+
+    `reasoning_item`（不透明、只为回放）**不转发**；`stopped ∈ end_turn | budget | canceled`。每个 step 的 ledger 行在该 step 的 `step end` **之前**刷出：读者见到 `step end` 就知道这一步的事件已全。诊断（原来的 "session step failed: …" 等）在 `--stream` 下变成 `{"stream":"run","event":"error","message":"…"}` 后非零退出——**stdout 上没有非 JSON 行**。
 - `nulya ext activate` 在 `NULYA_SESSION`（相对 workspace 的 session 文件路径）存在时，向该 session 的 inbox 投一条 capability_note（§5.3）。
 - 离线时 provider 回落到确定性的 scripted stand-in（`NULYA_SCRIPTED_MODE=finish|loop`，测试用）。
 

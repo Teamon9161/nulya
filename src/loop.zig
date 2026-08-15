@@ -58,6 +58,52 @@ pub const StepOutcome = struct {
     status: StepStatus = .completed,
 };
 
+/// PURE OBSERVATION of one running step (tui.md §2.2). The kernel reports facts
+/// as they happen — provider stream events, tool dispatch, the step boundary —
+/// so a front end can show a step in flight instead of only its result.
+///
+/// An observer is deliberately powerless: every callback returns `void` and
+/// takes only read-only views, so it cannot append to the ledger, cannot touch
+/// model-visible state, and cannot fail a step. A step run WITH an observer
+/// behaves exactly like the same step run without one; whatever an observer's
+/// own I/O does (a closed stdout pipe) stays the observer's problem.
+pub const StepObserver = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        /// Every provider stream event, teed on its way to the turn collector.
+        modelEvent: *const fn (ptr: *anyopaque, event: provider.StreamEvent) void,
+        /// Just before a call is handed to its executor.
+        toolBegin: *const fn (ptr: *anyopaque, call: ledger.ToolCall) void,
+        /// Just after the executor returned; `ok` is the executor's own verdict.
+        /// Calls the loop never dispatched (a canceled batch's tail) get neither
+        /// callback, matching the fact that nothing about them ran.
+        toolEnd: *const fn (ptr: *anyopaque, call: ledger.ToolCall, ok: bool) void,
+        /// One step boundary: the ledger as it now stands (read-only, so the
+        /// observer can flush whatever it has not yet reported) and how the step
+        /// ended. Fired for canceled steps too, including one canceled at its
+        /// boundary before the model ran.
+        stepEnd: *const fn (ptr: *anyopaque, events: []const ledger.Event, status: StepStatus) void,
+    };
+
+    pub fn modelEvent(self: StepObserver, event: provider.StreamEvent) void {
+        self.vtable.modelEvent(self.ptr, event);
+    }
+
+    pub fn toolBegin(self: StepObserver, call: ledger.ToolCall) void {
+        self.vtable.toolBegin(self.ptr, call);
+    }
+
+    pub fn toolEnd(self: StepObserver, call: ledger.ToolCall, ok: bool) void {
+        self.vtable.toolEnd(self.ptr, call, ok);
+    }
+
+    pub fn stepEnd(self: StepObserver, events: []const ledger.Event, status: StepStatus) void {
+        self.vtable.stepEnd(self.ptr, events, status);
+    }
+};
+
 pub const StepContext = struct {
     tool_context: tool.ToolContext,
     /// Directory under which `emit` spills overflowing output.
@@ -66,7 +112,45 @@ pub const StepContext = struct {
     budget: tool.OutputBudget = .{},
     /// Aggregate budget for every tool result in one model step.
     step_budget: tool.StepOutputBudget = .{},
+    /// Optional pure-observation hook (tui.md §2.2). Absent by default: a step
+    /// with no observer runs byte-for-byte the same code path it always has.
+    observer: ?StepObserver = null,
 };
+
+/// Tees the provider stream: the observer sees each event first (so a front end
+/// renders deltas as they arrive), then the collector accumulates the turn as
+/// usual. Only the collector's outcome can fail the step.
+const TeeSink = struct {
+    collector: *provider.TurnCollector,
+    observer: StepObserver,
+
+    fn emitTeed(ptr: *anyopaque, event: provider.StreamEvent) anyerror!void {
+        const self: *TeeSink = @ptrCast(@alignCast(ptr));
+        self.observer.modelEvent(event);
+        return self.collector.onEvent(event);
+    }
+
+    fn sink(self: *TeeSink) provider.EventSink {
+        return .{ .ptr = self, .emitFn = emitTeed };
+    }
+};
+
+/// One assistant turn from the provider. Without an observer this IS
+/// `Model.step`; with one, the same collection happens behind a tee. Both paths
+/// discard a partial collector on error, so a canceled stream leaves nothing.
+fn collectTurn(
+    alloc: std.mem.Allocator,
+    model: Model,
+    request: provider.Request,
+    observer: ?StepObserver,
+) !provider.ModelTurn {
+    const obs = observer orelse return model.step(alloc, request);
+    var collector = provider.TurnCollector.init(alloc);
+    defer collector.deinit();
+    var tee: TeeSink = .{ .collector = &collector, .observer = obs };
+    try model.stream(alloc, request, tee.sink());
+    return collector.finish();
+}
 
 /// Run exactly one step against `l` from an already-projected `prompt_ir`.
 /// Appends the assistant turn, and — if it carried tool calls — the single
@@ -88,14 +172,14 @@ pub fn runStepWithPrompt(
     const tool_defs = try tool_snapshot.definitions(alloc);
     defer alloc.free(tool_defs);
 
-    const turn = model.step(alloc, .{
+    const turn = collectTurn(alloc, model, .{
         .prompt_ir = prompt_ir,
         .tools = tool_defs,
         // generation == ledger file (DESIGN §11): one file is one cache scope, so
         // within a session the generation is constant.
         .generation = 0,
         .options = model_options,
-    }) catch |err| switch (err) {
+    }, step_ctx.observer) catch |err| switch (err) {
         // Provider-phase cancellation: a complete assistant turn never formed.
         // `model.step` already discarded and freed the partial collector, so the
         // ledger prefix is untouched — no partial assistant / tool_call appended.
@@ -132,8 +216,10 @@ pub fn runStepWithPrompt(
     var canceled = false;
     while (i < turn.calls.len) : (i += 1) {
         const call = turn.calls[i];
+        if (step_ctx.observer) |obs| obs.toolBegin(call);
         const res = execOne(alloc, tool_snapshot, call, step_ctx, base_seq, i) catch |err| switch (err) {
             error.Canceled => {
+                if (step_ctx.observer) |obs| obs.toolEnd(call, false);
                 results[i] = canceledResult(call.id, try alloc.dupe(u8, tool_canceled_executing_output));
                 initialized_results += 1;
                 canceled = true;
@@ -141,6 +227,7 @@ pub fn runStepWithPrompt(
             },
             else => return err,
         };
+        if (step_ctx.observer) |obs| obs.toolEnd(call, res.ok);
         results[i] = res;
         initialized_results += 1;
         // The step-budget limiter can spill to disk, a cancelable I/O point. A
