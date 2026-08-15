@@ -649,3 +649,5 @@ stdout 全是 JSON、退出码 0、stderr 空；行序与 DESIGN §14 完全一�
 3. **observer 的 deltas** 仍是 §10.4 的 `<id>.live` sidecar，改动只落在 `attach.ts` 的 `startFollow` 一处——但它是内核改动，等第一个真正需要它的 driver 脚本。
 4. **内核不需要再改**（T0 提醒 5 起，四个里程碑都成立）：T4 全程只用了 `session new|append|step --stream|events --follow|cancel`、`ext activate|rollback`、以及 `.nulya/` 下的只读读取。§10 那八项一项没动。
 5. **性能的下一个瓶颈不在这三处**：真要更快，测的应该是 `EditCard` 的 diff 高度上限与 markdown 解析（两者都跨真实计时器 tick 落地，见 T1 的 `settle()`），不是 items 数。
+
+核验（编排者）：`zig build test` 绿（连跑两轮，T3 那次 flake 未再出现）/ `zig build e2e` 绿 / `bun test` 60 pass 0 fail（17 快照，8 文件）。T0–T4 全部完成。
