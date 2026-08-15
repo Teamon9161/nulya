@@ -37,7 +37,7 @@ Claude 明天出 agents，不去追着改 Nulya——直接让 Nulya 自己长�
 > **now:  Nulya lets an agent manufacture both new capabilities and new ways of using itself.**
 > Kernel 的职责是提供**一组稳定的 primitives**，让 tools / agents / workflows / loops / reviewers / 未来的 harness 功能都能在不改 kernel 的前提下长出来。
 
-本文档是设计基线，不是最终 API。**v0.1 的能力底座已冻结（§15.1）——它让 Nulya 会"长"能力；v0.2 的主题是能力演化（§18）——让 Nulya 开始判断自己长出来的能力是不是更好**，全部在冻结底座外生长，不改 kernel 骨架。术语：**ledger** = 会话事件日志；**generation** = 缓存世代；**step** = 一次 model 请求-响应；**PromptIR** = provider 无关的 prompt 逻辑块投影；**capability** = 一个逻辑能力（一个 tool / skill / ...），与其具体 implementation version 分开（§18.1）。
+本文档是设计基线，不是最终 API。**v0.1 的能力底座已冻结（§15.1）——它让 Nulya 会"长"能力；v0.2 的主题是能力演化（§18）——让 Nulya 开始判断自己长出来的能力是不是更好**，全部在冻结底座外生长，不改 kernel 骨架。**§18 是演化机制，§19 是控制面 substrate，§20 是驱动这一切的慢速回路（Evolution Session）——回答"能改的能力，凭什么动机真的被改进"。**术语：**ledger** = 会话事件日志；**generation** = 缓存世代；**step** = 一次 model 请求-响应；**PromptIR** = provider 无关的 prompt 逻辑块投影；**capability** = 一个逻辑能力（一个 tool / skill / ...），与其具体 implementation version 分开（§18.1）。
 
 ---
 
@@ -757,7 +757,7 @@ SkillPopularityEngine
 
 Kernel **不** hard-code 诸如"shell 命令重复 3 次 → 造工具"这种启发式。`连续多次 parquet → rolling → covariance，值得编译成工具` 这类推理，Agent 自己应当能做——**Everything above the kernel is learnable**（§15）。
 
-> 同理，上表里 `WorkflowMiner` 那类 orchestration"智能"永不进 kernel——但**它们要能长在 kernel 之上**，靠的正是 §19 的 SessionDriver 控制面 seam：`/goal`、plan mode、review workflow、swarm 全部表达成 driver extension，kernel 只多出一个窄 Session Host API，而非把这些 workflow 内建。
+> 同理，上表里 `WorkflowMiner` 那类 orchestration"智能"永不进 kernel——但**它们要能长在 kernel 之上**，靠的正是 §19 的 SessionDriver 控制面 seam：`/goal`、plan mode、review workflow、swarm 全部表达成 driver extension，kernel 只多出一个窄 Session Host API，而非把这些 workflow 内建。（而驱动它们去演化、判断该不该沉淀的动机源——即"能改 ≠ 有动机改"这一问——见 §20 慢速回路。）
 
 每当有人想往 core 塞智能，问一句尺子：
 
@@ -1087,3 +1087,163 @@ loop until objective                         → SessionDriver extension
 Tool / Skill / SessionDriver / MCP adapter / Claude-agent importer / plan workflow / goal loop / swarm —— 全部只能在这套 physics 上**组合**。这才是 **Everything above the kernel is learnable**（§15）的确切含义：不是"extension 什么都能改"，而是"**extension 什么都能组合，物理规则改不了**"。
 
 `[概念全定义；Session Host API + `driver/*` 方法 + host-callback 通道，待第一个真实 driver consumer（大概率 /goal）出现再写实]`
+
+---
+
+## 20. 慢速回路：Evolution Session（能力演化的驱动引擎）
+
+§18 给了演化的**机制**（evidence / version / verify），§19 给了控制面的 **substrate**（SessionDriver）。两节都默认了一件从没被追问的事：**谁、为什么、在什么时候**去改进能力。这一节补这个洞。它是全文最"软"的一节——大量推理属 Agent / Policy，几乎不落 kernel——但不补它，§18 那套 evidence 机器就没有驱动它转动的引擎。
+
+**这一节几乎不新增 kernel。** Evolution Session 是 §18 的 evidence 读取 + §19 的 driver 编排 + §7.4/§18.4 既有 manufacture primitive 的**组合**（§19.5 的品味推到极致）。它唯一可能要的新东西，是一个把"提案 → 后果"记下来的地方，而那也只是 §18.3 lineage 的自然延伸。所以本节通篇 `[占位]`：概念定死，等第一个真实 evolution 触发点出现再写实。
+
+### 20.1 能改 ≠ 有动机改
+
+v0.1 证明了 Agent **能**经 shell 亲手造扩展（§15.1）。但"能"不等于"会"。一个正在干活的 Agent，reward 结构是「完成当前任务」，不是「最大化未来 N 个 session 的累计表现」。造一个 Tool 的成本（设计 / 写 / debug / verify / build）**落在当前 session**，收益却主要**归 future sessions**。只要 shell 够好用，当前 session 的局部最优往往就是"别造 Tool，shell workaround 完事"——而且从它的局部视角，这个判断**是对的**。
+
+> **局部最优（完成此任务）与长期最优（改善未来累计）结构性不一致。这不是模型不够聪明，是目标结构决定的。** 指望干活的 Agent 自发承担长期投资，是设计错位；靠 prompt 喊"记得改进自己"只是掩盖它。
+
+§15.3 已把 `WorkflowMiner` / `ToolSynthesisManager` 这类"智能"钉死在 kernel *之外*。但"放在 kernel 之外"只回答了**不该由谁做**，没回答**该由谁做、凭什么动机做**。这一节回答后半句。
+
+### 20.2 两个时间尺度：fast loop 与 slow loop
+
+把演化的动机拆出来，靠的是承认 Nulya 有**两个学习时间尺度**，各自 reward 结构不同：
+
+```
+FAST LOOP（完成当前任务）
+  User → Agent → Tool / shell / Driver → Result
+  reward: 把现在这件事做完
+        │
+        └── evidence（§18: invocation / version / evaluation；§20.6 的 episode）
+                    │
+                    ▼
+SLOW LOOP（改善未来累计）
+  Evolution Session
+    读 evidence + 失败 + 成本 + 反馈 + 精选 trajectory
+    → 找出「什么反复发生 / 什么贵 / 什么常失败 / 什么值得沉淀」
+    → propose：new Tool | Tool v2 | Driver v2 | Skill 更新
+        │
+        └── verify / scoped trial（§18.4 / §20.7）
+                    │
+                    ▼
+             future sessions
+```
+
+关键分离：**不要求正在干活的 Agent 同时负责长期优化自己。** slow loop 是一个**独立的 session，任务本身就是"改善未来的 Nulya"**——于是它的局部目标与长期目标终于对齐。人也是这样：写代码时不会每五分钟停下来重构整个开发流程，那是 code review / retrospective / postmortem 才专门做的事。
+
+Evolution Session 不是新的一等对象——**它就是一个 §19 driver 编排的 session，capability composition 换成"evidence 只读查询 + manufacture primitives"，instructions 换成"寻找值得沉淀的改进"。** kernel 不需要懂"进化"，只需要懂 session（同 §19.4：kernel 不懂 Agent，只懂 Session）。
+
+### 20.3 动机问题没有被解决——它被搬家了
+
+上面这套很容易被当成终点，但它有个静默的破绽，必须写死在这里：
+
+> **给 Evolution Session 一个"改善未来"的目标，并没有消除动机问题——只是把同一个结构病搬了个家。**
+
+Evolution Session 同样**看不到未来**。它被奖励的是「**产出一个看起来合理的提案**」，不是「**真的改善了未来累计表现**」。于是它系统性地偏向"找到了点什么"：
+
+```
+"最近 8 个任务有 5 次都在 parquet → filter → rolling → covariance，
+ 值得造一个 native tool。"
+```
+
+这句话在**提案当下不可证伪**。而最有价值的输出恰恰是它的反面——那个 **null result**：
+
+```
+"这 5 次表面相似，其实是三件不同的事。别造。"
+```
+
+一个被"找改进"驱动的 session，恰恰最不愿说这句话。LLM 读自己的 trajectory 会**到处看见"重复"**（找模式是它的本能），区分"真值得投钱的复现"和"表面像、其实不同"正是那个不可证伪的判断。放任下去，结果是 **evolution theater**：一条源源不断、没人用的 Tool 流水线，每个都配着一份说得通的 SKILL.md。
+
+> **诊断准了病人，别把同一个病发给医生。** Evolution Session 是更好安放的动机源，不是动机问题的解药。
+
+### 20.4 真正合环的，不是目标，是可证伪 + 负面证据 durable
+
+动机问题的解药不在"给它一个更高尚的目标"，而在于让它的提案**事后被世界打脸，且打脸留疤**。三件事缺一不可：
+
+1. **提案是事后被证伪的，不是当下被证明的。** 造出来的 Tool 扔进世界，fast loop 要么用它、要么绕过它。**"造完之后被不被采纳"才是"值不值得造"的真证据**，slow loop 提案时的推理再漂亮都只是假设。这直接落在 §18 已有的机器上：`VersionCreatedFact` 存在（§18.3）而其后再无 `InvocationFact`（§18.2）= **manufactured but never invoked**，是**可派生的负面信号**——不需要新机制，只需要一条 policy 去读"造了没人用"。
+
+2. **负面证据必须与正面证据一样 durable。** §15.2 说 `facts are durable`，这里要显式补一句：**失败也是 fact。** "这个 candidate 造出来 20 个 session 无人调用"、"这个 Driver trial 输给 baseline"必须和成功一样落进 evidence，否则下一个 Evolution Session 会**重新提同一个坏主意**。§18.5 的 `EvaluationEvidence` 已能容纳 `passed | score`，把"trial 不如从前"如实记下即可——它记的是「某 judge 在某时判了什么」，理所当然包括判"更差"。
+
+3. **slow loop 自己也在被告席上，不是审判台上。** Evolution Session 提出的候选，走的是与普通 Tool **完全相同**的 Seal → Verify → scoped trial → rollback 纪律（§18.4）。它不是站在纪律之上审判别人的法官——它的每个提案都会被同一套 evidence 反过来评判。这样"动机"才真的接上：**不是靠 Evolution Agent 自觉，而是靠它的提案会被证伪、且证伪留疤，下一轮它自己能读到。**
+
+> **把 §19.5 结尾那张两层循环图的反馈箭头加粗成双向。** 现在它只画了成功轨迹从 fast loop 流向 slow loop；补上：slow loop 的**提案**也要顺着同一根箭头，以采纳 / 非采纳 / trial 失败的形式**流回来**，变成下一轮的 evidence。
+>
+> **Kernel 不提改进，也不评判改进的好坏；它只保证改进提得出、验得了、比得了、退得回——包括退回 slow loop 自己提的那些。**
+
+### 20.5 fast loop 不是零角色，是廉价面包屑
+
+§20.2 为了不让干活的 Agent 承担长期投资，把它在演化里的角色降到零，让冷启动的 Evolution Session 去读 trajectory 反推。但冷读有代价：干活的 Agent **当时知道**它为什么第三次用 shell workaround，读 summary 的 Evolution Agent 把这份 know-why 丢了；而它读轨迹又会到处误判"重复"（§20.3）。
+
+折中不是让 fast agent **造 Tool**（那正是 §20.1 的动机陷阱），而是让它**丢面包屑**：一个近乎零成本的标注——
+
+```
+"这一步我绕了一下 / 这类事我做过好几次，以后也许值得看。"
+```
+
+它便宜到 fast agent **愿意**做（不承担长期投资，只是顺手记一句），又给 slow loop 留下了"当时的 know-why"。这和 §15.3 明令**永不进 kernel** 的 `WorkflowMiner` 划得很清：
+
+> **面包屑是 Agent 自己的判断，被廉价地 emit；WorkflowMiner 是 kernel 里的启发式规则。** 前者合法（intelligence 在 kernel 之上），后者违规（"shell 重复 3 次就造工具"这种 heuristic 永不进 kernel）。
+
+形态上，面包屑与 §5.3 的 `capability_note`、§18.3 的 `VersionCreatedFact.reason` 同族——都是 durable 的、供 slow loop 消费的 evidence。**但现在不造它**：等 Evolution Session 真出现（它是这条 evidence 的唯一 consumer），再决定面包屑是一条独立 fact 还是复用 ledger 的 `capability_note`。`[占位：待 slow loop consumer 出现]`
+
+### 20.6 统一生命周期，不统一评价方式
+
+承 §18 的"统一生命周期，不统一数据类型"，slow loop 面对的四类可演化物，**evolution lifecycle 相同、evidence model 不同**——绝不为 API 对称造一排 `XxxStats`：
+
+| | Identity | Candidate | Verify | Evidence 单位 | 评价方式 |
+|---|---|---|---|---|---|
+| **Tool** | stable tool id | ✅ | unit / contract test（§18.4） | **invocation**（§18.2） | deterministic test 起步，可较激进 |
+| **SessionDriver** | stable driver id | ✅ | workflow eval | **episode**（整个任务） | 更像实验，须保守（§20.7） |
+| **Skill / Prompt** | stable id | version 即可 | —— | **仅间接**：采用它的 session 的 outcome | 不竞争、不统计，只经结果间接评价 |
+
+两点写死：
+
+- **Tool 与 Driver 的 evidence 单位根本不同。** Tool 的一次行为很局部（`args → result`），所以有 `execution_ok / latency / usage` 这种 invocation-level 证据。Driver 控制的是**整个任务怎么组织**，`calls=100, success=97` 这种指标对它毫无意义；它的证据单位是一个完整 **episode**：`{ driver_id, driver_version, task_id, outcome, cost, tokens, turns, retries, evaluator evidence… }`。拿 invocation 指标去比 Driver，是范畴错误。
+
+- **Skill 与 Prompt 归成一格：都只被间接评价。** §18 说 Skill 只需 discovery、Prompt 更像 configuration——这里补一刀更准的说法：**它们没有 invocation surface，但有 guidance surface。** `SKILL.md` 里"什么时候该用 X"是会被照做、也会被结果证伪的；reviewer prompt v2 的好坏，最终经"用了它的 Driver episode 的 outcome"间接显现。所以 Skill 和 Prompt 一样，**通过采用了它的 session 的结果被间接评价**，都不需要自己的竞争统计。与其说"Skill 不进证据环"，不如说"**Skill 和 Prompt 都只在证据环的间接位置**"。
+
+### 20.7 Driver 演化必须比 Tool 保守——归因难题与 benchmark 的 Goodhart
+
+Driver 的"评价像实验"，比 §18 想象的更像**实验室**、更不像**田野**，原因是**归因**：
+
+> `PlanReviewDriver v2` 的 episode 数字比 v1 好，你**没法归因给 driver**——任务难度、model、随机 seed、任务分布全在漂。同一个 workflow 今天成功、明天可能失败（stochastic LLM）。
+
+真 A/B 要在**同一任务分布上交错跑**，理想是同一批任务分别在 v1 / v2 下各跑一遍。但真实用户任务往往**不能重跑两遍**。于是 Driver 演化大概率得靠一套**刻意维护的 benchmark suite**——而这引出一个必须提前记下的雷：
+
+> **benchmark suite 本身就是一个会被 Goodhart、会腐坏的 durable artifact。** 它需要和 capability 一样的 version + provenance（§18.3），否则"优化 Driver"会退化成"过拟合这套固定题目"。它属 §17 开放问题里"Driver 的 budget/eval 具体机制"，Phase 上排在 Tool evolution（§18.6 A–E）之后。
+
+因此两类演化的**风险等级**不同（blast radius 决定）：
+
+```
+Tool（blast radius 小：搜索结果差一点）
+    candidate → deterministic test → activate → observe → rollback if regress    ← 可较激进
+
+SessionDriver（blast radius 大：整个任务流程可能报废）
+    candidate → eval suite → scoped trial（某项目 / 某任务类型 / 用户显式试用）
+              → collect episodes → compare → 谨慎 promote                          ← 默认不自动替换全局 DefaultDriver
+```
+
+> **一个坏 Tool 让搜索差一点；一个坏 Driver 能把整个任务流程搞废。** 所以 v0.x 默认：Driver candidate **不自动替换全局 DefaultDriver**，只在 scoped trial 里积累 episode，evidence 足够才升。这与 §19.2"budget / termination 最终权在 kernel"叠成双保险：失控 driver 既越不过 kernel 硬上限，也进不了默认路径。
+
+### 20.8 触发、递归、与地板
+
+**谁触发 slow loop**——三档，逐步来，每档的 threshold 都是**可替换 policy，不是 kernel physics**（§15.2）：
+
+```
+第一档  用户触发     `nulya evolve` / "看看最近的工作，有什么值得沉淀的？"      ← 最先，最简单
+第二档  driver 触发  项目主 Driver 在任务结束时：if enough new evidence → spawn evolution session
+第三档  周期 policy   每 N 个 completed episode 跑一次 evolution review
+```
+
+`enough` / `N` 怎么定，永远住在 replaceable policy，绝不硬进 kernel——同 §5.1 排序权重、§11 compaction 阈值的安放方式（§9.5.1，`default.toml` + 上层可覆盖）。
+
+**递归**：Evolution Session 自己也可能演化——它一开始只是一个普通的 `evolution/SKILL.md`（"读 evidence / 找重复 / 找 regression / 提改进"），日后 Agent 可能发现"我的 evolution review 总漏掉成本 regression"，于是改自己的 evolution skill / driver。`EvolutionPolicy v1 → v2` 完全成立，且**正好复用 Tool/Driver 那套 candidate → verify → trial → rollback**，不需要第三套机制。
+
+但递归必须有**地板**：
+
+> **Kernel physics（§19.6 那八条）不可自改。** slow loop 能重写它读什么 evidence、怎么判断、何时触发、甚至重写自己——但它改不了 ledger append-only、composition 冻结、authority 不隐式增长、cancellation 语义这些底座。**正是这块不可自改的地板，让它上面的一切可以放心地试错。** 有了安全底座，才敢让它递归。
+
+**最后一点，关于 Driver 演化的真实来源**：它往往不是"某 Driver 被用了很多次"，而是**重复的人类 correction 结晶**。比如用户连续十次都说「先写 plan」「找 reviewer 看」「别急着改」「review 完再实现」——Evolution Session 从这串稳定偏好里推断出一个值得沉淀的 `PlanReviewDriver`。这比"随机创新"更像真正的学习：
+
+> **session 组织的自我进化，结晶自重复的人类 workflow 偏好，而不是凭空的花样。**
+
+`[本节整体占位：Evolution Session = §18 evidence 读取 + §19 driver 编排 + 既有 manufacture primitive 的组合；唯一可能的新 evidence 是 §20.5 的面包屑，待第一个真实 evolution 触发点（大概率 `nulya evolve` 用户档）出现再写实。kernel 不新增 physics。]`
