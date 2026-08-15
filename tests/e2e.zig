@@ -16,6 +16,10 @@
 //! And the `nulya session *` CLI (PLAN §3.2): a shell-script driver runs a goal
 //! loop to completion, and `--max-steps` is enforced by the kernel even when the
 //! loop-mode model would run forever.
+//!
+//! And script extensions (DESIGN §7.1): a script extension goes init(--script) →
+//! build (no toolchain) → activate → run → promoted native and executes through
+//! its interpreter; its version excludes compiler identity and is rebuild-stable.
 
 const std = @import("std");
 const support = @import("support");

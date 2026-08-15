@@ -244,7 +244,12 @@ version-aware evidence / lineage / verify 见 PLAN §3.5。
 
 ### 7.1 形态：原生可执行 + stdio JSON-RPC
 
-Extension = 子进程；wire protocol 就是 ABI。不用 `.so/.dll`（ABI / Zig 版本 / crash 带死 host / allocator 所有权），不用 WASM（与原生 + 内嵌工具链冲突，削弱语言无关性）。协议不绑定语言；**当前 `nulya ext build` 只会编译 Zig**（`src/main.zig`），脚本 runtime 见 PLAN §3.3。
+Extension = 子进程；wire protocol 就是 ABI。不用 `.so/.dll`（ABI / Zig 版本 / crash 带死 host / allocator 所有权），不用 WASM（与原生 + 内嵌工具链冲突，削弱语言无关性）。协议不绑定语言，runtime 有两种，由 `runtime.entry` 前缀区分（纯语法、无需探盘）：
+
+- **编译 Zig**：`entry = "bin/<name>"`，`nulya ext build` 从 `src/main.zig` 编译出 `bin/<name><exe>`；version 含 compiler identity。
+- **脚本**：`entry = "src/<file>"`（+ 可选 `runtime.interpreter`，如 `powershell` / `sh` / `python3`），**不编译**，原样冻结进 `package/`，运行时 spawn `[interpreter, <frozen entry>]`（无 interpreter 则直接执行，如 Windows `.cmd` / 带 shebang 的可执行）；version = `hash(snapshot)`**不含** compiler identity，因此跨机器、跨 zig 版本稳定（§7.4）。
+
+`nulya ext init --script` 按宿主平台生成脚本骨架（Windows `run.ps1` + powershell / 其余 `run.sh` + sh）。脚本与编译 extension 共用 seal / integrity / store / activate / rollback / usage，区别只在"是否编译"和 hash 是否含 compiler。
 
 ### 7.2 目录与 manifest（`nulya.extension/v2`）
 
@@ -295,8 +300,8 @@ draft ──build──▶ versions/v-<hash>（immutable）──activate──�
                                           rollback = current 指回旧版本
 ```
 
-- **version id = `hash(canonical PackageSnapshot + compiler_identity + target)`。** snapshot 收 `extension.json`、有 runtime 时的 `src/**`、声明的 skills / system_prompts 目录，按 `relative_path + len + bytes` 排序 hash。`versions/`、`.zig-cache/` 不进。`compiler_identity` = 实际执行的 `zig version`。
-- 版本目录冻结 snapshot：`versions/v-…/{extension.json, package/src/**, package/skills/**, bin/<entry>}` + seal 文件；**编译从 frozen `package/src/main.zig` 进行**，不读 mutable draft。同源码再 build = 同 version，`already_built`。
+- **version id = `hash(canonical PackageSnapshot + compiler_identity + target)`。** snapshot 收 `extension.json`、有 runtime 时的 `src/**`、声明的 skills / system_prompts 目录，按 `relative_path + len + bytes` 排序 hash。`versions/`、`.zig-cache/` 不进。编译 extension 的 `compiler_identity` = 实际执行的 `zig version`；**脚本 extension 的 `compiler_identity` 为空串**，version 因此不含它、跨机器稳定（§7.1）。
+- 版本目录冻结 snapshot：编译 extension 得 `versions/v-…/{extension.json, package/src/**, package/skills/**, bin/<entry><exe>}` + seal（含 `binary_digest`）；**编译从 frozen `package/src/main.zig` 进行**，不读 mutable draft。脚本 extension 得 `versions/v-…/{extension.json, package/src/**, …}` + seal（`binary_digest` = null；脚本已在 `package/src/` 里被 package_digest 覆盖），运行入口 = `package/<entry>`。同源码再 build = 同 version，`already_built`。
 - `current` 是普通文本文件（不是 symlink：Windows 需特权且无收益），原子 rename 切换。
 - 更新 = build 新版本 → activate；rollback = `current = old`。B 挂了 A 完全不动。
 - deterministic validation 是 kernel 不变量（§12）；"这个参数是否通用"属 policy，**policy hook 尚未实现**（config 能解析 `policy.hook`，无人消费；PLAN §3.12）。
@@ -414,7 +419,8 @@ ProviderCapabilities { parallel_tool_calls, deferred_tools, explicit_cache_break
 ## 14. CLI 表面（`cli.zig`；都不是 LLM tool，经 shell 调用）
 
 ```
-nulya ext init <id> | build <path> | run <id> [tool] <json-args>
+nulya ext init [--script] <id> [tool] | build <path>
+          | run <id> [tool] (<json-args> | --arg k=v …)
           | activate <id> <version> | rollback <id> <version> | deactivate <id>
           | list | inspect <id> | api [protocol|permissions|examples]
 nulya session new [--model p] [--parent <id>:<seq>]      ← 冻结 composition + 写 header，打印 session id

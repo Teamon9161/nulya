@@ -46,7 +46,7 @@ kernel  = ledger 文件格式 + PromptIR 投影 + 一次 step + 工具执行 + c
 ### M2 · `nulya session *` + 脚本 extension（§3.2、§3.3）
 - 目标：session 可被任何进程驱动；extension 制造无需编译。
 - **M2a ✅ 已落地 → DESIGN §14：** `session new|append|step|events|cancel|close`（`step --max-steps N` kernel 强制上限）；`main.zig` demo 已改走 durable session 路径。e2e：shell 脚本 driver 完成 `/goal` 循环、`--max-steps` 被 kernel 强制。
-- **M2b（进行中）：** `runtime.entry` 允许任意可执行，无 `src/main.zig` 就不编译，version = hash(snapshot)；`nulya ext init --script`；`ext run --arg k=v`。验收：一个 `run.ps1`/`run.sh` extension 走完 init → build(seal) → activate → run → 晋升；version 不含 compiler identity、rebuild 稳定。进 DESIGN §7.1 / §7.4。
+- **M2b ✅ 已落地 → DESIGN §7.1/§7.4：** `runtime.entry` 前缀区分编译/脚本，脚本不编译、version = hash(snapshot)（不含 compiler）；`nulya ext init --script`；`ext run --arg k=v`。e2e：`run.ps1`/`run.sh` extension 走完 init → build(seal) → activate → run → 晋升为 native 并经 interpreter 执行；version 不含 compiler identity、rebuild 稳定。
 
 ### M3 · `nulya src` + 文档（§3.10）
 - 要做：内嵌 `src/**`（剥 `test` 块或拆 `*_test.zig`），`nulya src [path]` 打印；`nulya ext api` 变成它的特例；ARCHITECTURE 内容并入 CLAUDE.md 模块表（已做）。
@@ -126,12 +126,12 @@ plan → review → 共识 → implement       → 脚本：三个各自冻结 c
 loop until objective / swarm           → 脚本
 ```
 
-### 3.3 脚本 extension `[写实 · M2]`
+### 3.3 脚本 extension `[已落地 · M2b → DESIGN §7.1/§7.4]`
 
-- `runtime.entry` 允许任意可执行；`runtime.interpreter?`（`sh` / `pwsh` / `python3`）供无执行位的平台。没有 `src/main.zig` → 不编译，version = `hash(snapshot)`（无 compiler_identity）。seal / integrity / activate / rollback / usage 完全不变。
-- 能力谱：**shell 一行 → 脚本 extension（`nulya ext init --script`）→（实测有需要）native Zig**。Scratch 与 Extension 是连续谱，唯一区别是"是否存盘 + 给 manifest"。
-- `nulya ext run <id> <tool> --arg k=v …` 从 manifest schema 生成 JSON，降低手写 JSON 出错率；`'<json>'` 仍可用。
-- persistent runtime（warm worker 池、LRU、TTL、同一套 JSON 协议）仍是**先测量再做**的后期加法。
+✅ **已实现，现状见 [DESIGN §7.1 / §7.4](DESIGN.md)。** `runtime.entry` 的前缀区分编译（`bin/`）与脚本（`src/`）；脚本带可选 `runtime.interpreter`（`powershell` / `sh` / `python3` …），无 `src/main.zig` 就不编译，version = `hash(snapshot)`（compiler 为空串、不含 identity、跨机器稳定），seal / integrity / activate / rollback / usage 完全共用。`nulya ext init --script` 按宿主生成骨架；`nulya ext run --arg k=v` 按 manifest schema 类型生成 JSON（`'<json>'` 仍可用）。
+
+- 能力谱：**shell 一行 → 脚本 extension（`ext init --script`）→（实测有需要）native Zig** 成立。
+- persistent runtime（warm worker 池、LRU、TTL）仍是**先测量再做**的后期加法。
 
 ### 3.4 Compaction = 开新 ledger 文件 `[写实 · M1 后]`
 
