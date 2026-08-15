@@ -392,7 +392,9 @@ test "a cancel during prepareStep reconciliation reports canceled with zero usag
     var ready: std.Io.Event = .unset;
     var release: std.Io.Event = .unset;
     var fut = io.async(stepAfterRecancel, .{ &sess, io, &ready, &release });
-    ready.waitTimeout(io, .{ .deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromMilliseconds(5000) }) }) catch {};
+    // Determinism contract: cancel only after the worker is known to sit at the
+    // gate. A timeout here means the worker never arrived — fail, don't proceed.
+    try ready.waitTimeout(io, .{ .deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromMilliseconds(5000) }) });
     const first = try fut.cancel(io);
 
     // The cancel was consumed at the gate, re-armed, and re-signaled by

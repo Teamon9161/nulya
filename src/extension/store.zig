@@ -395,7 +395,9 @@ test "readManifest propagates cancellation instead of folding it into an integri
     var ready: std.Io.Event = .unset;
     var release: std.Io.Event = .unset;
     var fut = io.async(readManifestAfterRecancel, .{ alloc, st, "demo", version, io, &ready, &release });
-    ready.waitTimeout(io, .{ .deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromMilliseconds(5000) }) }) catch {};
+    // Determinism contract: cancel only after the worker is known to sit at the
+    // gate. A timeout here means the worker never arrived — fail, don't proceed.
+    try ready.waitTimeout(io, .{ .deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromMilliseconds(5000) }) });
 
     // Cancellation is host execution control, not corruption: it must surface as
     // error.Canceled, never as VersionNotFound/VersionSealInvalid/Version*.

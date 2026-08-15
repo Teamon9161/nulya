@@ -507,7 +507,10 @@ test "batch execution policy is parallel only when every call opts in" {
 // `io.async`, the test thread waits for the step to reach a cancelation point
 // (signaled through a `std.Io.Event`), then calls `Future.cancel`. No custom
 // cancellation flag exists anywhere — the Threaded backend interrupts the blocked
-// task and its next `Io` cancelation point returns `error.Canceled`.
+// task and its next `Io` cancelation point returns `error.Canceled`. Gate waits
+// are always `try`ed, never swallowed: a timeout means the worker never reached
+// the cancelation point, and canceling from an unknown state would defeat the
+// determinism these tests exist to establish.
 
 fn testDeadline(io: std.Io, ms: u32) std.Io.Timeout {
     return .{ .deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromMilliseconds(ms) }) };
@@ -689,7 +692,7 @@ test "canceling provider streaming appends no partial assistant and leaves the l
         tools,                                                            step_ctx,
         provider.Options{},
     });
-    ready.waitTimeout(io, testDeadline(io, 5000)) catch {};
+    try ready.waitTimeout(io, testDeadline(io, 5000));
     const outcome = try fut.cancel(io);
 
     try std.testing.expectEqual(StepStatus.canceled, outcome.status);
@@ -739,7 +742,7 @@ test "canceling the first executing tool records a complete canceled batch" {
     var fut = io.async(runStepWithPrompt, .{
         alloc, &l, model_impl.handle(), &prompt_ir, tools, step_ctx, provider.Options{},
     });
-    ready.waitTimeout(io, testDeadline(io, 5000)) catch {};
+    try ready.waitTimeout(io, testDeadline(io, 5000));
     const outcome = try fut.cancel(io);
 
     try std.testing.expectEqual(StepStatus.canceled, outcome.status);
@@ -801,7 +804,7 @@ test "a successful earlier tool is kept when a later tool is canceled" {
     });
     // `block` sets `ready` only after `probe` has already returned (serial batch),
     // so the cancel deterministically targets the second call.
-    ready.waitTimeout(io, testDeadline(io, 5000)) catch {};
+    try ready.waitTimeout(io, testDeadline(io, 5000));
     const outcome = try fut.cancel(io);
 
     try std.testing.expectEqual(StepStatus.canceled, outcome.status);
@@ -866,7 +869,9 @@ test "canceling a step-budget spill keeps the ledger complete and never runs lat
     var fut = io.async(runStepWithPrompt, .{
         alloc, &l, model_impl.handle(), &prompt_ir, tools, step_ctx, provider.Options{},
     });
-    ready.waitTimeout(io, testDeadline(io, 5000)) catch {};
+    // Determinism contract: cancel only after the worker is known to sit at the
+    // gate. A timeout here means the worker never arrived — fail, don't proceed.
+    try ready.waitTimeout(io, testDeadline(io, 5000));
     const outcome = try fut.cancel(io);
 
     try std.testing.expectEqual(StepStatus.canceled, outcome.status);
