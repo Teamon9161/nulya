@@ -14,6 +14,7 @@ const notes = @import("extension/notes.zig");
 const environment = @import("environment.zig");
 const prompt = @import("prompt.zig");
 const composition = @import("composition.zig");
+const tool = @import("tool.zig");
 
 pub const AgentSession = struct {
     alloc: std.mem.Allocator,
@@ -58,13 +59,18 @@ pub const AgentSession = struct {
         try self.l.append(.{ .user_text = text });
     }
 
-    pub fn step(self: *AgentSession) !provider.Usage {
+    /// Run one step. Cancellation is reported as `StepOutcome.status == .canceled`
+    /// (never an error): the host that owns the running step's `Future` decides
+    /// what to do next. Usage is accumulated for canceled and completed steps
+    /// alike, since the ledger is left in a legal state either way. A canceled
+    /// step does not poison the session — the next `step()` runs normally.
+    pub fn step(self: *AgentSession) !loop.StepOutcome {
         try self.prepareStep();
         const prompt_ir = try prompt.projectWithSystem(self.alloc, self.composition.system_prompts.blocks, self.l.view());
         defer prompt_ir.deinit(self.alloc);
-        const step_usage = try loop.runStepWithPrompt(self.alloc, &self.l, self.model, &prompt_ir, self.composition.tools, self.step_ctx, self.model_options);
-        accumulate(&self.total_usage, step_usage);
-        return step_usage;
+        const outcome = try loop.runStepWithPrompt(self.alloc, &self.l, self.model, &prompt_ir, self.composition.tools, self.step_ctx, self.model_options);
+        accumulate(&self.total_usage, outcome.usage);
+        return outcome;
     }
 
     pub fn usage(self: *const AgentSession) provider.Usage {
@@ -168,4 +174,129 @@ test "session repairs interrupted tool batch before provider request" {
     try std.testing.expectEqual(@as(usize, 4), sess.l.len());
     try std.testing.expectEqual(@as(u64, 3), sess.usage().input_tokens);
     try std.testing.expectEqual(@as(u64, 2), sess.usage().output_tokens);
+}
+
+fn stepCall(sess: *AgentSession) anyerror!loop.StepOutcome {
+    return sess.step();
+}
+
+test "a canceled step accumulates its usage and the session runs the next step" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // A tool that blocks on `release` (a cancelation point) after announcing `ready`.
+    const BlockTool = struct {
+        ready: *std.Io.Event,
+        release: *std.Io.Event,
+        fn call(ptr: ?*anyopaque, a: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolResult {
+            const self: *@This() = @ptrCast(@alignCast(ptr.?));
+            const io_local = req.ctx.environment.io;
+            self.ready.set(io_local);
+            try self.release.wait(io_local);
+            return .{ .ok = true, .output = try a.dupe(u8, "unreachable") };
+        }
+    };
+
+    // Step 0 issues one blocking tool call (usage 9); step 1 addresses the user
+    // and ends the turn (usage 3). The counter picks the script per step.
+    const StepModel = struct {
+        step_no: usize = 0,
+        fn name(ptr: *anyopaque) []const u8 {
+            _ = ptr;
+            return "stepmodel";
+        }
+        fn modelName(ptr: *anyopaque) []const u8 {
+            _ = ptr;
+            return "stepmodel";
+        }
+        fn capabilities(ptr: *anyopaque) provider.ProviderCapabilities {
+            _ = ptr;
+            return .{};
+        }
+        fn stream(ptr: *anyopaque, a: std.mem.Allocator, request: provider.Request, sink: provider.EventSink) anyerror!void {
+            _ = a;
+            _ = request;
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            const n = self.step_no;
+            self.step_no += 1;
+            try sink.emit(.started);
+            if (n == 0) {
+                try sink.emit(.{ .usage = .{ .input_tokens = 9, .output_tokens = 2 } });
+                try sink.emit(.{ .tool_use_start = .{ .index = 0, .id = "c1", .name = "block" } });
+                try sink.emit(.{ .tool_use_input_delta = .{ .index = 0, .fragment = "{}" } });
+                try sink.emit(.{ .done = .tool_use });
+            } else {
+                try sink.emit(.{ .usage = .{ .input_tokens = 3, .output_tokens = 1 } });
+                try sink.emit(.{ .text_delta = "all done" });
+                try sink.emit(.{ .done = .end_turn });
+            }
+        }
+        const vtable: provider.Model.VTable = .{
+            .name = name,
+            .modelName = modelName,
+            .capabilities = capabilities,
+            .stream = stream,
+        };
+    };
+
+    var ready: std.Io.Event = .unset;
+    var release: std.Io.Event = .unset;
+    var block_tool = BlockTool{ .ready = &ready, .release = &release };
+
+    const tools_arr = [_]tool.Tool{
+        .{ .definition = .{ .id = "t.block", .name = "block", .description = "b", .input_schema = "{}" }, .executor = .{ .ptr = &block_tool, .callFn = BlockTool.call } },
+    };
+
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+
+    var model_impl = StepModel{};
+
+    // Built by hand with a static composition so the blocking tool is in scope;
+    // its slices are static, so only the ledger needs freeing (never `sess.deinit`,
+    // which would try to free the static composition).
+    var sess: AgentSession = .{
+        .alloc = alloc,
+        .l = ledger.Ledger.init(alloc),
+        .composition = .{
+            .pinned_extensions = &.{},
+            .tools = .{ .tools = &tools_arr },
+            .skills = .{ .skills = &.{} },
+            .system_prompts = .{ .blocks = &.{} },
+        },
+        .model = .{ .ptr = &model_impl, .vtable = &StepModel.vtable },
+        .step_ctx = .{
+            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = "." },
+            .scratch_dir = "/tmp",
+        },
+        .model_options = .{},
+        .extension_root = "nulya-absent-extensions-root",
+    };
+    defer sess.l.deinit();
+
+    try sess.appendUser("go");
+
+    // Step 0: cancel it mid-tool.
+    var fut = io.async(stepCall, .{&sess});
+    ready.waitTimeout(io, .{ .deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromMilliseconds(5000) }) }) catch {};
+    const first = try fut.cancel(io);
+    try std.testing.expectEqual(loop.StepStatus.canceled, first.status);
+
+    // The canceled step's usage was accumulated.
+    try std.testing.expectEqual(@as(u64, 9), sess.usage().input_tokens);
+
+    // Step 1: runs normally, addresses the user.
+    const second = try sess.step();
+    try std.testing.expectEqual(loop.StepStatus.completed, second.status);
+    try std.testing.expect(sess.lastAssistantDone());
+
+    // Usage accumulates across the canceled and completed steps.
+    try std.testing.expectEqual(@as(u64, 12), sess.usage().input_tokens);
+
+    // Ledger: user, assistant(step0), canceled tool_results, assistant(step1).
+    try std.testing.expectEqual(@as(usize, 4), sess.l.len());
+    try std.testing.expect(sess.l.view()[2] == .tool_results);
+    try std.testing.expect(!sess.l.view()[2].tool_results[0].ok);
 }

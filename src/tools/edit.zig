@@ -53,10 +53,15 @@ fn run(alloc: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolRes
     const path = try resolvePath(alloc, req.ctx.cwd, rel_path);
     defer alloc.free(path);
 
-    const contents = req.ctx.fs.readFileAlloc(alloc, path, MAX_FILE_BYTES) catch |err| {
-        const msg = try std.fmt.allocPrint(alloc, "cannot read {s}: {s}", .{ path, @errorName(err) });
-        defer alloc.free(msg);
-        return finish(alloc, req, false, msg);
+    const contents = req.ctx.fs.readFileAlloc(alloc, path, MAX_FILE_BYTES) catch |err| switch (err) {
+        // Cancellation propagates to the step boundary; it must never be wrapped
+        // into an ordinary "cannot read" tool failure (DESIGN §4).
+        error.Canceled => return error.Canceled,
+        else => {
+            const msg = try std.fmt.allocPrint(alloc, "cannot read {s}: {s}", .{ path, @errorName(err) });
+            defer alloc.free(msg);
+            return finish(alloc, req, false, msg);
+        },
     };
     defer alloc.free(contents);
 
@@ -72,10 +77,13 @@ fn run(alloc: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolRes
     const updated = try std.mem.replaceOwned(u8, alloc, contents, old_string, new_string);
     defer alloc.free(updated);
 
-    req.ctx.fs.atomicWriteFile(path, updated) catch |err| {
-        const msg = try std.fmt.allocPrint(alloc, "cannot atomically write {s}: {s}", .{ path, @errorName(err) });
-        defer alloc.free(msg);
-        return finish(alloc, req, false, msg);
+    req.ctx.fs.atomicWriteFile(path, updated) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => {
+            const msg = try std.fmt.allocPrint(alloc, "cannot atomically write {s}: {s}", .{ path, @errorName(err) });
+            defer alloc.free(msg);
+            return finish(alloc, req, false, msg);
+        },
     };
 
     const msg = try std.fmt.allocPrint(alloc, "edited {s}: {d} replacement(s)", .{ rel_path, count });

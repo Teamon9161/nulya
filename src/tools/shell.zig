@@ -10,6 +10,7 @@
 
 const std = @import("std");
 const tool = @import("../tool.zig");
+const environment = @import("../environment.zig");
 
 /// Raise the runner's capture cap well above the emit budget so that `emit` —
 /// not the process runner — is what decides truncation.
@@ -40,9 +41,15 @@ fn run(alloc: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolRes
         .command = command,
         .cwd = cwd,
         .max_output_bytes = MAX_CAPTURE_BYTES,
-    }) catch |err| {
-        const msg = try std.fmt.allocPrint(alloc, "failed to spawn shell: {s}", .{@errorName(err)});
-        return .{ .ok = false, .output = msg };
+    }) catch |err| switch (err) {
+        // A canceled step must surface AS cancellation, not as a shell failure
+        // string — the loop consumes it at the step boundary. std.process.run has
+        // already killed the child and closed its pipes on this path.
+        error.Canceled => return error.Canceled,
+        else => {
+            const msg = try std.fmt.allocPrint(alloc, "failed to spawn shell: {s}", .{@errorName(err)});
+            return .{ .ok = false, .output = msg };
+        },
     };
     defer outcome.deinit(alloc);
 
@@ -60,4 +67,45 @@ fn run(alloc: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolRes
 
     const out = try raw.toOwnedSlice(alloc);
     return .{ .ok = outcome.exit_code == 0, .output = out };
+}
+
+test "shell tool reports cancellation as an error, not a failure result" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_real: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_real);
+    const cwd = root_real[0..root_len];
+
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+
+    const args_json = switch (lenv.dialect_val) {
+        .bash => "{\"command\":\"touch started; sleep 5\"}",
+        .powershell => "{\"command\":\"New-Item started -ItemType File -Force > $null; Start-Sleep -Seconds 5\"}",
+    };
+
+    const req: tool.ToolRequest = .{
+        .args_json = args_json,
+        .ctx = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd },
+    };
+
+    var fut = io.async(run, .{ alloc, req });
+
+    var waited: usize = 0;
+    while (waited < 200) : (waited += 1) {
+        if (blk: {
+            tmp.dir.access(io, "started", .{}) catch break :blk false;
+            break :blk true;
+        }) break;
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(20), .awake) catch {};
+    }
+
+    // The special-case in `run` must let error.Canceled through rather than
+    // producing `{ ok=false, output="failed to spawn shell: Canceled" }`.
+    try std.testing.expectError(error.Canceled, fut.cancel(io));
 }

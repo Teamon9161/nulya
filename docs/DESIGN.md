@@ -668,14 +668,14 @@ image/audio kubernetes ssh jira notion ...
 
 以三分（Package / Runtime / Contribution，§7 脊椎）为主轴。按下面顺序推进——**先修已跑通路径上的正确性问题，再做结构泛化，最后接新能力**：
 
-1. **runExtension 加固（已部分落地）**：`ExtensionOutcome` 已包含 stderr 和 timeout；真正的 cancellation 链仍待接入 Provider / ToolExecutor / Environment。
+1. **runExtension 加固（已落地）**：`ExtensionOutcome` 已包含 stderr 和 timeout；统一 cancellation 链已接入 Provider / ToolExecutor / Environment（见 §8）。
 2. **ACP 归位（已落地）**：从 `EnvironmentBackend` 删 `acp`，落到 Frontend/Transport 层（§2.1、§8）。
 3. **manifest → `contributes{}`（已落地）**：删 `tools.len>0` 不变量，改成"至少一种 contribution"；解锁纯 Skill 包（§7.2）。schema 升 `v2`。
 4. **Extension PackageSnapshot（已落地）**：version id 覆盖 manifest、runtime `src/**`、声明 skill 目录和真实 compiler identity；版本目录冻结 `package/`，runtime 从 frozen source 编译（§7.4）。
 5. **Wire protocol → JSON-RPC `method`（已落地）**：envelope 使用 `tool/call`，response id 必须匹配；当前保持专用 `ToolCallRequest`，等第二种 runtime 方法出现再抽通用 request（§7.3）。
 6. **`Tool.run fn` → `ToolExecutor { ptr, callFn }`（已落地）**：与 Model / Environment 同构，executor 只返回 raw output；`emit` 在 loop 中统一执行，给 extension / MCP 留真正执行入口（§7.3、§5）。
 7. **抽 `AgentSession`（已落地）**：`main.zig` 手工组装收进 `AgentSession`（`init/appendUser/step/deinit`）；每 step `notes.sync` 已挪进 `prepareStep`，loop 不再 import `extension/*`——"loop 不知道 extension 这个词"达成。fork/resume/lifecycle 按计划未建（§2.1）。
-8. **统一 Cancellation 链**：在 AgentSession 下贯穿 Provider streaming、ToolExecutor call、Environment spawn/run；timeout 不等于 cancellation。（runExtension 的 timeout 已落地，cancellation 链未接。）
+8. **统一 Cancellation 链（已落地）**：全用 Zig 0.16 原生 `std.Io` cancellation，无自建 token/flag。Host 持有 running step 的 `Future`，`Future.cancel` 传播到 `AgentSession.step → loop → {Model.stream, ToolExecutor.call, Environment}`。step 边界用最小 `StepOutcome{ usage, status: completed|canceled }` 表达；**Provider 阶段取消**（完整 assistant turn 未成形）丢弃 partial collector、ledger 前缀不动、usage=0；**Tool 阶段取消**（assistant 已 append）在同一 step 内补一条完整 `tool_results` batch（执行中的标 side-effects unknown，未执行的标 not executed，数量/顺序与 calls 一致），usage 仍 accumulate。`Canceled` 只在 step 边界被消化，绝不伪装成普通工具失败/协议错误。`completeInterruptedToolBatch` 只管 crash recovery，与 graceful cancel 分离。timeout ≠ cancellation（extension oneshot 的 timeout 保持独立）。**Environment 例外**：`std.process.run` 的阻塞管道读在 Windows 上不可被取消/超时打断（只有 `child.wait` 是 alertable 取消点），故 `runShell` 改为手工 spawn + 分离读端 + 独立 drain task + 以 `child.wait` 为取消点 + 取消时 `child.kill` 直接子进程（测试验证子进程不残留）。未接：ACP/TUI 持有并取消 running step future 的宿主侧（当前只在测试里用 `io.async`+`future.cancel` 驱动，`main.zig` 保持同步）、parallel tool 取消、subagent 取消传播。
 9. **SkillRegistry + Agent Skills 兼容（已落地）**：源无关 `skill.zig` + extension 适配 `skills.zig`，`nulya skill list|load` 经 shell，session 开头 append `<available_skills>` catalog 走渐进披露（§7.7）。独立 `SkillProvider { list, get }` provider 抽象暂未单列，local/remote 多源合并留待有第二个 source 时再抽。
 10. **组合冻结（前半已落地）+ 可撤销注册（未落地）**：`SessionComposition` 已在 session 开始 resolve + freeze（含 pinned version，Tool/Skill/System-prompt 一并）。**未落地**：把 composition selection 记成 ledger 事件当 generation base（需先给 ledger 加 `registry_selection`/composition 事件类型，§3.1），以及 activate 产 `Registration[]` / disable 逆序 dispose 的可撤销注册（§7.4）。
 11. **（其后）接 MCP**：`McpClient` 作为 ToolProvider/ResourceProvider/PromptProvider 进同一 registry，**不伪装成 extension**；同样走 capability catalog → selection → 6~8 native，避免把上百 tool 全塞模型（§5 哲学）。

@@ -26,6 +26,30 @@ const interrupted_tool_output =
     "previous tool execution was interrupted before Nulya recorded results; " ++
     "the real-world state is unknown, so inspect the workspace before retrying or assuming effects";
 
+// A tool that was mid-flight when the step was canceled: its executor ran (or
+// started to), so real side effects may already exist and be only partially
+// applied. Distinct from `tool_not_executed_output` on purpose (DESIGN §4).
+const tool_canceled_executing_output =
+    "tool execution was canceled; side effects may be partial or unknown";
+
+// A tool the loop never dispatched because an earlier call in the same batch was
+// canceled. Nulya guarantees this executor never ran, so nothing changed.
+const tool_not_executed_output =
+    "not executed because the step was canceled";
+
+/// Whether a step ran to completion or was canceled mid-flight. Cancellation is
+/// host *execution control*, not a model stop reason (`provider.StopReason`) and
+/// not a ledger event — the ledger stays a factual history either way.
+pub const StepStatus = enum { completed, canceled };
+
+/// The result of one step. `usage` is always the reliably-known token cost so the
+/// session accumulates it whether the step completed or was canceled. Real faults
+/// (network, protocol, OOM) still surface as errors, never as an outcome.
+pub const StepOutcome = struct {
+    usage: provider.Usage = .{},
+    status: StepStatus = .completed,
+};
+
 pub const StepContext = struct {
     tool_context: tool.ToolContext,
     /// Directory under which `emit` spills overflowing output.
@@ -49,22 +73,30 @@ pub fn runStepWithPrompt(
     tool_snapshot: registry.ToolSetSnapshot,
     step_ctx: StepContext,
     model_options: provider.Options,
-) !provider.Usage {
+) !StepOutcome {
     // seq base is the ledger position: deterministic across replays (DESIGN §1).
     const base_seq = l.len();
 
     const tool_defs = try tool_snapshot.definitions(alloc);
     defer alloc.free(tool_defs);
 
-    const turn = try model.step(alloc, .{
+    const turn = model.step(alloc, .{
         .prompt_ir = prompt_ir,
         .tools = tool_defs,
         .generation = prompt.currentGeneration(l.view()),
         .options = model_options,
-    });
+    }) catch |err| switch (err) {
+        // Provider-phase cancellation: a complete assistant turn never formed.
+        // `model.step` already discarded and freed the partial collector, so the
+        // ledger prefix is untouched — no partial assistant / tool_call appended.
+        // Usage is what is reliably known: the streaming usage chunk arrives at
+        // the very end of the stream, so a mid-stream cancel means 0 (DESIGN §13).
+        error.Canceled => return .{ .usage = .{}, .status = .canceled },
+        else => return err,
+    };
     defer turn.deinit(alloc);
     try l.append(.{ .assistant = .{ .text = turn.text, .calls = turn.calls } });
-    if (turn.calls.len == 0) return turn.usage; // model addressed the user; step complete.
+    if (turn.calls.len == 0) return .{ .usage = turn.usage }; // model addressed the user; step complete.
 
     const results = try alloc.alloc(ledger.ToolResultEntry, turn.calls.len);
     var initialized_results: usize = 0;
@@ -79,14 +111,54 @@ pub fn runStepWithPrompt(
     var step_output = emit.StepOutputLimiter.init(step_ctx.tool_context.environment.io, step_ctx.scratch_dir, base_seq, step_ctx.step_budget);
     const max_concurrent_tools = maxConcurrentTools(batchExecutionPolicy(tool_snapshot, turn.calls));
     std.debug.assert(max_concurrent_tools == 1);
-    for (turn.calls, 0..) |call, i| {
-        results[i] = try execOne(alloc, tool_snapshot, call, step_ctx, base_seq, i);
+
+    // Execute the batch serially. On cancellation the batch is NOT abandoned: the
+    // ledger invariant is "one assistant tool-call batch ↔ exactly one matching
+    // tool_results batch" (DESIGN §4). The task's cancellation is consumed here at
+    // the step boundary — per std.Io, the *next* cancelation point after the first
+    // is what re-signals, so building and appending this batch (pure memory ops)
+    // runs uninterrupted. See §8/§6 of the task brief.
+    var i: usize = 0;
+    var canceled = false;
+    while (i < turn.calls.len) : (i += 1) {
+        const call = turn.calls[i];
+        const res = execOne(alloc, tool_snapshot, call, step_ctx, base_seq, i) catch |err| switch (err) {
+            error.Canceled => {
+                results[i] = canceledResult(call.id, try alloc.dupe(u8, tool_canceled_executing_output));
+                initialized_results += 1;
+                canceled = true;
+                break;
+            },
+            else => return err,
+        };
+        results[i] = res;
         initialized_results += 1;
         try step_output.apply(alloc, call.tool, i, &results[i].output, &results[i].spill_path);
     }
+
+    if (canceled) {
+        // Every call after the canceled one was never handed to any executor, so
+        // Nulya knows for certain nothing about them changed.
+        i += 1; // step past the canceled-while-executing entry filled above.
+        while (i < turn.calls.len) : (i += 1) {
+            results[i] = canceledResult(turn.calls[i].id, try alloc.dupe(u8, tool_not_executed_output));
+            initialized_results += 1;
+        }
+        try l.append(.{ .tool_results = results });
+        return .{ .usage = turn.usage, .status = .canceled };
+    }
+
     // ONE user turn carrying the whole batch.
     try l.append(.{ .tool_results = results });
-    return turn.usage;
+    return .{ .usage = turn.usage };
+}
+
+/// Build a synthetic tool result for a canceled call. `call_id` is borrowed from
+/// the assistant turn (owned there until it is cloned into the ledger), matching
+/// how `execOne` leaves `call_id` unowned; `output` is caller-allocated and freed
+/// by the batch's cleanup path.
+fn canceledResult(call_id: []const u8, output: []const u8) ledger.ToolResultEntry {
+    return .{ .call_id = call_id, .ok = false, .output = output };
 }
 
 pub fn completeInterruptedToolBatch(alloc: std.mem.Allocator, l: *ledger.Ledger) !void {
@@ -140,7 +212,7 @@ fn runStepForTest(
     model: Model,
     tool_snapshot: registry.ToolSetSnapshot,
     step_ctx: StepContext,
-) !provider.Usage {
+) !StepOutcome {
     const prompt_ir = try prompt.project(alloc, l.view());
     defer prompt_ir.deinit(alloc);
     return runStepWithPrompt(alloc, l, model, &prompt_ir, tool_snapshot, step_ctx, .{});
@@ -160,8 +232,12 @@ fn execOne(
             break :blk try std.fmt.allocPrint(alloc, "unknown tool '{s}'; builtins are shell, edit", .{call.tool});
         };
 
-        const res = t.executor.call(alloc, .{ .args_json = call.args_json, .ctx = step_ctx.tool_context }) catch |err| {
-            break :blk try std.fmt.allocPrint(alloc, "{s} failed: {s}", .{ call.tool, @errorName(err) });
+        const res = t.executor.call(alloc, .{ .args_json = call.args_json, .ctx = step_ctx.tool_context }) catch |err| switch (err) {
+            // Cancellation is not a tool failure — it is host execution control.
+            // Propagate it to the step boundary, which records the whole batch as
+            // canceled (DESIGN §4). Ordinary executor errors still teach as text.
+            error.Canceled => return error.Canceled,
+            else => break :blk try std.fmt.allocPrint(alloc, "{s} failed: {s}", .{ call.tool, @errorName(err) }),
         };
         ok = res.ok;
         break :blk res.output;
@@ -398,4 +474,299 @@ test "batch execution policy is parallel only when every call opts in" {
 
     const unknown_calls = [_]ledger.ToolCall{.{ .id = "c1", .tool = "missing", .args_json = "{}" }};
     try std.testing.expectEqual(tool.BatchPolicy.sequential, batchExecutionPolicy(tools, &unknown_calls));
+}
+
+// ── Cancellation test fixtures ──────────────────────────────────────────────
+//
+// These exercise real std.Io cancellation: the step runs on a worker task via
+// `io.async`, the test thread waits for the step to reach a cancelation point
+// (signaled through a `std.Io.Event`), then calls `Future.cancel`. No custom
+// cancellation flag exists anywhere — the Threaded backend interrupts the blocked
+// task and its next `Io` cancelation point returns `error.Canceled`.
+
+fn testDeadline(io: std.Io, ms: u32) std.Io.Timeout {
+    return .{ .deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromMilliseconds(ms) }) };
+}
+
+/// A tool that announces it started (`ready`) then blocks on `release` — a
+/// cancelation point that never resolves except by cancellation.
+const BlockingTool = struct {
+    ready: *std.Io.Event,
+    release: *std.Io.Event,
+
+    fn call(ptr: ?*anyopaque, a: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolResult {
+        const self: *@This() = @ptrCast(@alignCast(ptr.?));
+        const io = req.ctx.environment.io;
+        self.ready.set(io);
+        try self.release.wait(io); // returns error.Canceled once the step is canceled
+        return .{ .ok = true, .output = try a.dupe(u8, "unreachable-after-cancel") };
+    }
+
+    fn executor(self: *@This()) tool.ToolExecutor {
+        return .{ .ptr = self, .callFn = call };
+    }
+};
+
+/// A tool that records whether it was ever dispatched.
+const RecordingTool = struct {
+    ran: bool = false,
+
+    fn call(ptr: ?*anyopaque, a: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolResult {
+        _ = req;
+        const self: *@This() = @ptrCast(@alignCast(ptr.?));
+        self.ran = true;
+        return .{ .ok = true, .output = try a.dupe(u8, "recorded") };
+    }
+
+    fn executor(self: *@This()) tool.ToolExecutor {
+        return .{ .ptr = self, .callFn = call };
+    }
+};
+
+fn stubSuccess(a: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolResult {
+    _ = req;
+    return .{ .ok = true, .output = try a.dupe(u8, "first-real-output") };
+}
+
+/// Model that emits a fixed list of `{id, name}` tool calls (plus one usage
+/// chunk), then stops with `tool_use`. Nothing here blocks — the blocking, and
+/// hence the cancellation, happens in the tools.
+const ScriptedCallModel = struct {
+    calls: []const [2][]const u8,
+    usage: provider.Usage = .{},
+
+    fn name(ptr: *anyopaque) []const u8 {
+        _ = ptr;
+        return "scripted-calls";
+    }
+    fn modelName(ptr: *anyopaque) []const u8 {
+        _ = ptr;
+        return "scripted-calls";
+    }
+    fn capabilities(ptr: *anyopaque) provider.ProviderCapabilities {
+        _ = ptr;
+        return .{};
+    }
+    fn stream(ptr: *anyopaque, a: std.mem.Allocator, request: provider.Request, sink: provider.EventSink) anyerror!void {
+        _ = a;
+        _ = request;
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        try sink.emit(.started);
+        try sink.emit(.{ .usage = self.usage });
+        for (self.calls, 0..) |c, i| {
+            try sink.emit(.{ .tool_use_start = .{ .index = i, .id = c[0], .name = c[1] } });
+            try sink.emit(.{ .tool_use_input_delta = .{ .index = i, .fragment = "{}" } });
+        }
+        try sink.emit(.{ .done = .tool_use });
+    }
+
+    const vtable: provider.Model.VTable = .{
+        .name = name,
+        .modelName = modelName,
+        .capabilities = capabilities,
+        .stream = stream,
+    };
+
+    fn handle(self: *@This()) provider.Model {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+};
+
+test "canceling provider streaming appends no partial assistant and leaves the ledger prefix intact" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // A model that streams a partial assistant turn, signals `ready`, then blocks
+    // on `release` (a cancelation point) before it can finish. Cancellation must
+    // discard the partial turn entirely.
+    const BlockingModel = struct {
+        io: std.Io,
+        ready: *std.Io.Event,
+        release: *std.Io.Event,
+        fn name(ptr: *anyopaque) []const u8 {
+            _ = ptr;
+            return "blocking";
+        }
+        fn modelName(ptr: *anyopaque) []const u8 {
+            _ = ptr;
+            return "blocking";
+        }
+        fn capabilities(ptr: *anyopaque) provider.ProviderCapabilities {
+            _ = ptr;
+            return .{};
+        }
+        fn stream(ptr: *anyopaque, a: std.mem.Allocator, request: provider.Request, sink: provider.EventSink) anyerror!void {
+            _ = a;
+            _ = request;
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            try sink.emit(.started);
+            try sink.emit(.{ .text_delta = "partial thought that must be discarded" });
+            self.ready.set(self.io);
+            try self.release.wait(self.io); // cancelation point; never released
+            try sink.emit(.{ .done = .end_turn });
+        }
+        const vtable: provider.Model.VTable = .{
+            .name = name,
+            .modelName = modelName,
+            .capabilities = capabilities,
+            .stream = stream,
+        };
+    };
+
+    var l = ledger.Ledger.init(alloc);
+    defer l.deinit();
+    try l.append(.{ .user_text = "go" });
+
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+
+    const prompt_ir = try prompt.project(alloc, l.view());
+    defer prompt_ir.deinit(alloc);
+
+    var ready: std.Io.Event = .unset;
+    var release: std.Io.Event = .unset;
+    var model_impl = BlockingModel{ .io = io, .ready = &ready, .release = &release };
+
+    const step_ctx: StepContext = .{
+        .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = "." },
+        .scratch_dir = "/tmp",
+    };
+    const tools: registry.ToolSetSnapshot = .{ .tools = &.{} };
+
+    var fut = io.async(runStepWithPrompt, .{
+        alloc,                                                            &l,
+        provider.Model{ .ptr = &model_impl, .vtable = &BlockingModel.vtable }, &prompt_ir,
+        tools,                                                            step_ctx,
+        provider.Options{},
+    });
+    ready.waitTimeout(io, testDeadline(io, 5000)) catch {};
+    const outcome = try fut.cancel(io);
+
+    try std.testing.expectEqual(StepStatus.canceled, outcome.status);
+    try std.testing.expectEqual(@as(u64, 0), outcome.usage.input_tokens);
+    // Only the original user turn survives — no partial assistant was appended.
+    try std.testing.expectEqual(@as(usize, 1), l.len());
+    try std.testing.expect(l.view()[0] == .user_text);
+}
+
+test "canceling the first executing tool records a complete canceled batch" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ready: std.Io.Event = .unset;
+    var release: std.Io.Event = .unset;
+    var block_tool = BlockingTool{ .ready = &ready, .release = &release };
+    var record_tool = RecordingTool{};
+
+    const tools_arr = [_]tool.Tool{
+        .{ .definition = .{ .id = "t.block", .name = "block", .description = "b", .input_schema = "{}" }, .executor = block_tool.executor() },
+        .{ .definition = .{ .id = "t.record", .name = "record", .description = "r", .input_schema = "{}" }, .executor = record_tool.executor() },
+    };
+    const tools: registry.ToolSetSnapshot = .{ .tools = &tools_arr };
+
+    var model_impl = ScriptedCallModel{
+        .calls = &.{ .{ "c1", "block" }, .{ "c2", "record" } },
+        .usage = .{ .input_tokens = 11, .output_tokens = 4 },
+    };
+
+    var l = ledger.Ledger.init(alloc);
+    defer l.deinit();
+    try l.append(.{ .user_text = "go" });
+
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+
+    const prompt_ir = try prompt.project(alloc, l.view());
+    defer prompt_ir.deinit(alloc);
+
+    const step_ctx: StepContext = .{
+        .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = "." },
+        .scratch_dir = "/tmp",
+    };
+
+    var fut = io.async(runStepWithPrompt, .{
+        alloc, &l, model_impl.handle(), &prompt_ir, tools, step_ctx, provider.Options{},
+    });
+    ready.waitTimeout(io, testDeadline(io, 5000)) catch {};
+    const outcome = try fut.cancel(io);
+
+    try std.testing.expectEqual(StepStatus.canceled, outcome.status);
+    // The completed assistant turn's usage is preserved through the tool-phase cancel.
+    try std.testing.expectEqual(@as(u64, 11), outcome.usage.input_tokens);
+
+    // user, assistant, and exactly ONE batched tool_results turn.
+    try std.testing.expectEqual(@as(usize, 3), l.len());
+    const trs = l.view()[2].tool_results;
+    try std.testing.expectEqual(@as(usize, 2), trs.len); // result count == call count
+
+    try std.testing.expectEqualStrings("c1", trs[0].call_id);
+    try std.testing.expect(!trs[0].ok);
+    try std.testing.expect(std.mem.indexOf(u8, trs[0].output, "side effects may be partial") != null);
+
+    try std.testing.expectEqualStrings("c2", trs[1].call_id);
+    try std.testing.expect(!trs[1].ok);
+    try std.testing.expect(std.mem.indexOf(u8, trs[1].output, "not executed") != null);
+
+    // The second call's executor was never dispatched.
+    try std.testing.expect(!record_tool.ran);
+}
+
+test "a successful earlier tool is kept when a later tool is canceled" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ready: std.Io.Event = .unset;
+    var release: std.Io.Event = .unset;
+    var block_tool = BlockingTool{ .ready = &ready, .release = &release };
+
+    const tools_arr = [_]tool.Tool{
+        .{ .definition = .{ .id = "t.probe", .name = "probe", .description = "p", .input_schema = "{}" }, .executor = tool.functionExecutor(stubSuccess) },
+        .{ .definition = .{ .id = "t.block", .name = "block", .description = "b", .input_schema = "{}" }, .executor = block_tool.executor() },
+    };
+    const tools: registry.ToolSetSnapshot = .{ .tools = &tools_arr };
+
+    var model_impl = ScriptedCallModel{ .calls = &.{ .{ "c1", "probe" }, .{ "c2", "block" } } };
+
+    var l = ledger.Ledger.init(alloc);
+    defer l.deinit();
+    try l.append(.{ .user_text = "go" });
+
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+
+    const prompt_ir = try prompt.project(alloc, l.view());
+    defer prompt_ir.deinit(alloc);
+
+    const step_ctx: StepContext = .{
+        .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = "." },
+        .scratch_dir = "/tmp",
+    };
+
+    var fut = io.async(runStepWithPrompt, .{
+        alloc, &l, model_impl.handle(), &prompt_ir, tools, step_ctx, provider.Options{},
+    });
+    // `block` sets `ready` only after `probe` has already returned (serial batch),
+    // so the cancel deterministically targets the second call.
+    ready.waitTimeout(io, testDeadline(io, 5000)) catch {};
+    const outcome = try fut.cancel(io);
+
+    try std.testing.expectEqual(StepStatus.canceled, outcome.status);
+    const trs = l.view()[2].tool_results;
+    try std.testing.expectEqual(@as(usize, 2), trs.len);
+
+    // First call's real result is retained verbatim.
+    try std.testing.expectEqualStrings("c1", trs[0].call_id);
+    try std.testing.expect(trs[0].ok);
+    try std.testing.expect(std.mem.indexOf(u8, trs[0].output, "first-real-output") != null);
+
+    // Second call was executing when canceled: side effects may be partial.
+    try std.testing.expectEqualStrings("c2", trs[1].call_id);
+    try std.testing.expect(!trs[1].ok);
+    try std.testing.expect(std.mem.indexOf(u8, trs[1].output, "side effects may be partial") != null);
 }
