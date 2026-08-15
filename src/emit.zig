@@ -231,7 +231,10 @@ fn writeStepSpill(
     const dir = try std.fs.path.join(alloc, &.{ scratch_dir, "tool-output" });
     defer alloc.free(dir);
     const cwd = std.Io.Dir.cwd();
-    cwd.createDirPath(io, dir) catch {};
+    // `createDirPath` is idempotent (an existing dir returns `.existed`, not an
+    // error), so `try` only surfaces genuine failures — crucially `error.Canceled`,
+    // which must reach the step boundary instead of being swallowed here.
+    try cwd.createDirPath(io, dir);
     const name = try std.fmt.allocPrint(alloc, "step-{s}-{d}-{d}.txt", .{ tool_name, event_seq, call_index });
     defer alloc.free(name);
     const path = try std.fs.path.join(alloc, &.{ dir, name });
@@ -252,7 +255,10 @@ fn writeSpill(
     const dir = try std.fs.path.join(alloc, &.{ scratch_dir, "tool-output" });
     defer alloc.free(dir);
     const cwd = std.Io.Dir.cwd();
-    cwd.createDirPath(io, dir) catch {};
+    // `createDirPath` is idempotent (an existing dir returns `.existed`, not an
+    // error), so `try` only surfaces genuine failures — crucially `error.Canceled`,
+    // which must reach the step boundary instead of being swallowed here.
+    try cwd.createDirPath(io, dir);
     const name = try spillName(alloc, tool, event_seq, call_index);
     defer alloc.free(name);
     const path = try std.fs.path.join(alloc, &.{ dir, name });

@@ -98,9 +98,17 @@ fn resolveActiveExtensions(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Di
     var it = root.iterate();
     while (try it.next(io)) |entry| {
         if (entry.kind != .directory) continue;
-        const active = (st.activeVersion(alloc, entry.name) catch continue) orelse continue;
+        // A malformed extension is skipped, but a cancellation is host execution
+        // control — it must propagate, never be mistaken for a broken extension.
+        const active = (st.activeVersion(alloc, entry.name) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => continue,
+        }) orelse continue;
         defer alloc.free(active);
-        var m = st.readManifest(alloc, entry.name, active) catch continue;
+        var m = st.readManifest(alloc, entry.name, active) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => continue,
+        };
         errdefer m.deinit();
 
         const id = try alloc.dupe(u8, entry.name);

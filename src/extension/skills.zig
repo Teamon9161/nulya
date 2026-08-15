@@ -114,9 +114,17 @@ pub fn listActive(
     var it = root.iterate();
     while (try it.next(io)) |entry| {
         if (entry.kind != .directory) continue;
-        const active = (st.activeVersion(alloc, entry.name) catch continue) orelse continue;
+        // Skip broken extensions, but let host cancellation propagate rather than
+        // be misread as a malformed extension.
+        const active = (st.activeVersion(alloc, entry.name) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => continue,
+        }) orelse continue;
         defer alloc.free(active);
-        var m = readPinnedManifest(alloc, io, root, entry.name, active) catch continue;
+        var m = readPinnedManifest(alloc, io, root, entry.name, active) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => continue,
+        };
         defer m.deinit();
         try appendFromManifest(alloc, io, root, &descriptors, entry.name, active, m);
     }
@@ -152,16 +160,10 @@ pub fn loadPinned(
 }
 
 fn readPinnedManifest(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id: []const u8, version: []const u8) !manifest.Manifest {
-    const st = store.Store.init(io, root);
-    if (!st.versionExists(alloc, id, version)) return error.VersionIntegrityInvalid;
-    const manifest_rel = try st.versionManifestPath(alloc, id, version);
-    defer alloc.free(manifest_rel);
-    const bytes = try root.readFileAlloc(io, manifest_rel, alloc, .limited(1 << 20));
-    defer alloc.free(bytes);
-    var m = try manifest.parse(alloc, bytes);
-    errdefer m.deinit();
-    try m.validate();
-    return m;
+    // Delegates to `Store.readManifest`, the single validate+parse path. That
+    // keeps integrity validation identical here and preserves `error.Canceled`
+    // instead of collapsing it into a spurious integrity error.
+    return store.Store.init(io, root).readManifest(alloc, id, version);
 }
 
 fn basename(path: []const u8) ?[]const u8 {

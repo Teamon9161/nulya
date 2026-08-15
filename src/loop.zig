@@ -133,7 +133,23 @@ pub fn runStepWithPrompt(
         };
         results[i] = res;
         initialized_results += 1;
-        try step_output.apply(alloc, call.tool, i, &results[i].output, &results[i].spill_path);
+        // The step-budget limiter can spill to disk, a cancelable I/O point. A
+        // cancel here would otherwise escape as an error and strand the
+        // assistant-with-tool-calls tail without its matching batch (DESIGN §4).
+        // The executor already finished, so `results[i]` is a real result: allocate
+        // the marker first (so an OOM leaves that valid result intact for cleanup),
+        // then replace it and complete the batch like the executing-cancel path.
+        step_output.apply(alloc, call.tool, i, &results[i].output, &results[i].spill_path) catch |err| switch (err) {
+            error.Canceled => {
+                const marker = try alloc.dupe(u8, tool_canceled_executing_output);
+                alloc.free(results[i].output);
+                if (results[i].spill_path) |p| alloc.free(p);
+                results[i] = canceledResult(call.id, marker);
+                canceled = true;
+                break;
+            },
+            else => return err,
+        };
     }
 
     if (canceled) {

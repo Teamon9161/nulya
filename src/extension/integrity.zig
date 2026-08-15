@@ -253,6 +253,13 @@ pub fn parseSeal(gpa: std.mem.Allocator, bytes: []const u8) !Seal {
     };
 }
 
+/// Re-raise `error.Canceled` unchanged; fold every other error into `fallback`.
+/// Lets integrity validation keep host cancellation distinct from corruption
+/// while still reporting descriptive `Version*` errors for real faults.
+inline fn cancelable(err: anytype, comptime fallback: anyerror) (error{Canceled} || @TypeOf(fallback)) {
+    return if (err == error.Canceled) error.Canceled else fallback;
+}
+
 pub fn validateVersionDir(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -261,18 +268,23 @@ pub fn validateVersionDir(
     version: []const u8,
     expected_id: []const u8,
 ) !void {
-    root.access(io, version_rel, .{}) catch return error.VersionNotFound;
+    // Integrity checks map I/O failures to descriptive `Version*` errors, but a
+    // cancellation is host execution control, not corruption — it must propagate
+    // as `error.Canceled` so callers on cancellation-sensitive paths (note sync,
+    // manifest reads) can record a canceled step instead of a spurious integrity
+    // failure. `cancelable` re-raises it and folds everything else into `fallback`.
+    root.access(io, version_rel, .{}) catch |err| return cancelable(err, error.VersionNotFound);
 
     const seal_sub = try std.fs.path.join(alloc, &.{ version_rel, seal_file });
     defer alloc.free(seal_sub);
-    const seal_bytes = root.readFileAlloc(io, seal_sub, alloc, .limited(1 << 20)) catch return error.VersionSealInvalid;
+    const seal_bytes = root.readFileAlloc(io, seal_sub, alloc, .limited(1 << 20)) catch |err| return cancelable(err, error.VersionSealInvalid);
     defer alloc.free(seal_bytes);
     var seal = parseSeal(alloc, seal_bytes) catch return error.VersionSealInvalid;
     defer seal.deinit();
 
     const manifest_sub = try std.fs.path.join(alloc, &.{ version_rel, manifest_file });
     defer alloc.free(manifest_sub);
-    const manifest_bytes = root.readFileAlloc(io, manifest_sub, alloc, .limited(1 << 20)) catch return error.VersionNotFound;
+    const manifest_bytes = root.readFileAlloc(io, manifest_sub, alloc, .limited(1 << 20)) catch |err| return cancelable(err, error.VersionNotFound);
     defer alloc.free(manifest_bytes);
 
     var m = try manifest.parse(alloc, manifest_bytes);
@@ -280,7 +292,7 @@ pub fn validateVersionDir(
     try m.validate();
     if (!std.mem.eql(u8, m.id, expected_id)) return error.VersionManifestIdMismatch;
 
-    const snapshot = collectFrozenSnapshot(alloc, io, root, version_rel, manifest_bytes, m) catch return error.VersionPackageMissing;
+    const snapshot = collectFrozenSnapshot(alloc, io, root, version_rel, manifest_bytes, m) catch |err| return cancelable(err, error.VersionPackageMissing);
     defer snapshot.deinit(alloc);
     const canonical = try snapshot.canonicalBytes(alloc);
     defer alloc.free(canonical);

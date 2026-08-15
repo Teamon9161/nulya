@@ -65,7 +65,15 @@ pub const AgentSession = struct {
     /// alike, since the ledger is left in a legal state either way. A canceled
     /// step does not poison the session — the next `step()` runs normally.
     pub fn step(self: *AgentSession) !loop.StepOutcome {
-        try self.prepareStep();
+        // Reconciliation runs cancellable filesystem I/O (extension integrity,
+        // manifest reads). A cancel there is host execution control, not a fault,
+        // and no provider call has started — so usage is 0 and the ledger prefix is
+        // untouched. Report it as a canceled outcome, honoring step()'s contract
+        // that cancellation is never an error.
+        self.prepareStep() catch |err| switch (err) {
+            error.Canceled => return .{ .status = .canceled },
+            else => return err,
+        };
         const prompt_ir = try prompt.projectWithSystem(self.alloc, self.composition.system_prompts.blocks, self.l.view());
         defer prompt_ir.deinit(self.alloc);
         const outcome = try loop.runStepWithPrompt(self.alloc, &self.l, self.model, &prompt_ir, self.composition.tools, self.step_ctx, self.model_options);

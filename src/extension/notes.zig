@@ -82,17 +82,26 @@ pub fn syncOpen(alloc: std.mem.Allocator, io: std.Io, l: *ledger.Ledger, root: s
         if (entry.kind != .directory) continue;
         const id = entry.name;
 
-        const active = (st.activeVersion(alloc, id) catch continue) orelse continue;
+        const active = (st.activeVersion(alloc, id) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => continue,
+        }) orelse continue;
         defer alloc.free(active);
 
         if (try containsNoteFor(l, id, active)) continue;
 
-        var m = st.readManifest(alloc, id, active) catch continue;
+        var m = st.readManifest(alloc, id, active) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => continue,
+        };
         defer m.deinit();
 
         var descriptors: std.ArrayList(skill.SkillDescriptor) = .empty;
         defer skill.deinitDescriptorArrayList(alloc, &descriptors);
-        ext_skills.appendFromManifest(alloc, io, root, &descriptors, m.id, active, m) catch continue;
+        ext_skills.appendFromManifest(alloc, io, root, &descriptors, m.id, active, m) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => continue,
+        };
         skill.sortDescriptors(descriptors.items);
 
         if (m.tools.len == 0 and descriptors.items.len == 0) continue;

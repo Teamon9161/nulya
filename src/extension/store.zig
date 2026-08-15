@@ -123,7 +123,11 @@ pub const Store = struct {
     /// Parse and validate the frozen manifest of a built version. Fails if the
     /// version does not pass integrity validation. Caller owns the manifest.
     pub fn readManifest(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8) !manifest.Manifest {
-        if (!self.versionExists(alloc, id, version)) return error.VersionIntegrityInvalid;
+        // Validate directly rather than through `versionExists`: that boolean
+        // convenience collapses EVERY error to `false`, including `error.Canceled`,
+        // which would then surface as a spurious `VersionIntegrityInvalid`. On a
+        // cancellation-sensitive path the real error must propagate unchanged.
+        try validateBuiltVersion(self, alloc, id, version);
         const manifest_rel = try self.versionManifestPath(alloc, id, version);
         defer alloc.free(manifest_rel);
         const bytes = try self.root.readFileAlloc(self.io, manifest_rel, alloc, .limited(1 << 20));
