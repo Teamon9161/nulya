@@ -589,7 +589,7 @@ fn sessionNew(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
     // Freeze the RESOLVED model identity now: config chooses the model at
     // creation, and a later config edit can never change this session's model
     // (DESIGN §3). A placeholder handle is enough since `new` never steps.
-    const identity = launch.resolveDescriptor(cfg.provider, profile);
+    const identity = launch.resolveDescriptor(cfg.provider, &host, profile);
     var holder: launch.ModelHolder = .{ .scripted = .{} };
     var sess = session.AgentSession.createDurable(alloc, .{
         .model = holder.model(),

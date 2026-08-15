@@ -32,7 +32,7 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 
 ## 现状一句话（2026-08）
 
-- **已跑通**（`tests/e2e.zig` 真实二进制全环）：durable ledger 文件（header 冻结 composition + `seq` JSONL）→ PromptIR → 一次 step（批量 tool call、**一条** tool_results 回传、串行执行、可取消）→ shell / edit → `nulya ext init|build|activate|run|rollback` → usage journal → 下一场 session 边界自动晋升为 native 工具并按冻结版本执行；`createDurable/openDurable` 让 session 落盘、任意进程 resume 出块级相等的 PromptIR、跨进程 capability-note 经 inbox 在 step 边界排干。**durable correctness（M2.1）**：单写者由 `<id>.lock` 排他 advisory 锁强制（第二写者 `SessionBusy`，读者不挡）；inbox 事件带 `origin` 投递去重列 → 应用 exactly-once（崩溃/重投不重复）；模型身份创建时冻结进 header `model_identity`，resume 只重解 credential、无静默 fallback（缺密钥即 `MissingCredential`）。
+- **已跑通**（`tests/e2e.zig` 真实二进制全环）：durable ledger 文件（header 冻结 composition + `seq` JSONL）→ PromptIR → 一次 step（批量 tool call、**一条** tool_results 回传、串行执行、可取消）→ shell / edit → `nulya ext init|build|activate|run|rollback` → usage journal → 下一场 session 边界自动晋升为 native 工具并按冻结版本执行；`createDurable/openDurable` 让 session 落盘、任意进程 resume 出块级相等的 PromptIR、跨进程 capability-note 经 inbox 在 step 边界排干。**durable correctness（M2.1）**：单写者由 `<id>.lock` 排他 advisory 锁强制（第二写者 `SessionBusy`，读者不挡）；inbox 事件带 `origin` 投递去重列 → 应用 exactly-once（崩溃/重投不重复）；模型身份创建时**单处** credential-aware 解析（`resolveDescriptor`）并冻结进 header `model_identity`，运行 handle 只从该 descriptor 建（跑的 == 冻结的），resume 只重解 credential、无静默 fallback（缺密钥即 `MissingCredential`；durable credential 只经 `api_key_env`，inline `api_key` 不参与）。
 - **也跑通**：`nulya session new|append|step|events|cancel`（只有 `step` 写 session 文件：`append` 投 inbox、`cancel` 写标记、`events` 只读 tail；`step --max-steps` 由 kernel 夹到 `session.max_steps_ceiling`；cancel 标记由 kernel 在 step 边界消费，mid-run 也停得下来）；bare `nulya` demo 现走 durable session 路径；**脚本 extension**（`runtime.entry` 前缀区分 `bin/` 编译 vs `src/` 脚本 + `interpreter?`；脚本不编译、data/script version 不含 compiler+target（`manifest.ImplementationKind`，纯 skill/prompt 建时免 zig）；`ext init --script` / `ext run --arg k=v`）。
 - **还没有**：fork / compaction（header 有 `parent` 字段但流程未接）；交互式前端 / TUI；subagent（= session 自调用，缺第一个 consumer）；policy hook（config 能解析 `policy.hook`，无人消费）；sandbox / remote environment；Anthropic provider（只有 OpenAI `chat/completions`）；`session new` 的 `--system-file/--skill/--pin`、`--budget-tokens`；persistent extension runtime。这些的去向都在 PLAN.md。
 
@@ -41,7 +41,7 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 | 文件 | 职责 | 关键不变量 / 备注 |
 |---|---|---|
 | `main.zig` | 入口：有参数 → `cli.dispatch`；无参数 → 固定 prompt demo | 组装 config → env → provider → promotion → `AgentSession` |
-| `ledger.zig` | 4 种事件（`user_text` / `assistant{text,calls}` / `tool_results[]` / `capability_note`），deep-copy 所有权；durable 文件（header 是 `Header` 的 `std.json` 类型化编解码 + `seq` JSONL，header 冻结 composition + `model_identity`）；跨进程 inbox（`depositEvent` 原子投递 / `drainInbox` 排干，事件带 `origin` 投递去重列 → 应用 exactly-once） | 唯一写口 `append`；`init` 纯内存 / `createDurable`+`openDurable` 落盘（一文件=一 generation、**一个写者**由 `<id>.lock` 排他 advisory 锁强制 → `SessionBusy`，`persist` 长度守卫 → `ConcurrentWriter` 为第二层） |
+| `ledger.zig` | 4 种事件（`user_text` / `assistant{text,calls}` / `tool_results[]` / `capability_note`），deep-copy 所有权；durable 文件（header 是 `Header` 的 `std.json` 类型化编解码 + `seq` JSONL，header 冻结 composition + `model_identity`）；跨进程 inbox（`depositEvent` 原子投递 / `drainInbox` 排干，事件带 `origin` 投递去重列 → 应用 exactly-once） | 唯一写口 `append`；`init` 纯内存 / `createDurable`+`openDurable` 落盘（一文件=一 generation、**一个写者**由 `<id>.lock` 排他 advisory 锁独家强制 → `SessionBusy`；ledger corruption 交给 replay/seq/JSON 校验） |
 | `prompt.zig` | `Ledger → PromptIR{system_blocks, stable_blocks}` 纯投影 | `isStablePrefix` 是缓存不变量的可测形式；generation == 文件（`currentGeneration` 已删） |
 | `loop.zig` | 一次 step：freeze snapshot → model.step → 串行执行 batch → 一条 tool_results | 取消时补齐整批（三种 marker）；`completeInterruptedToolBatch` 修复上次残尾 |
 | `session.zig` | `AgentSession`：ledger 生命周期（`init` 内存 / `createDurable`+`openDurable` 落盘，resume 时 composition 从 header 冻结重建）+ step 边界（补残尾 → 消费 `<id>.cancel` → 排干 `<id>.inbox`）+ `run` 预算 + usage 记账 | `max_steps_ceiling` 由 kernel 夹；`requestCancel` 是跨进程取消的唯一入口（durable session 才有 siblings） |
@@ -61,7 +61,7 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 | `skill.zig` | `SkillSetSnapshot` + `<available_skills>` 渐进披露文本 | Agent Skills 兼容（`SKILL.md` frontmatter） |
 | `tool_stats.zig` `tool_selection.zig` `promotion.zig` | `.nulya/tool-usage.jsonl` `{v:1,tool_id,ok}` → 纯函数排序 → session 边界晋升 | facts durable, policy replaceable |
 | `cli.zig` | `nulya ext …` / `nulya session new\|append\|step\|events\|cancel` / `nulya skill list\|load` / `nulya toolchain zig` / `nulya ext api` | `ext/skill/toolchain` 经 `shell` 被模型调用；`session *` 是外部 driver 面（只有 `step` 写 session 文件）；都不是 LLM tool |
-| `launch.zig` | session 启动共享件：确定性 scripted provider（`NULYA_SCRIPTED_MODE`）、`buildModel`、session id/path | CLI 与 demo 共用同一 durable 路径 |
+| `launch.zig` | session 启动共享件：确定性 scripted provider（`NULYA_SCRIPTED_MODE`）、`resolveDescriptor`（创建时唯一一次 credential-aware 模型解析）+ `buildFromDescriptor`（handle 只从 descriptor 建、无静默 fallback）、session id/path | CLI 与 demo 共用同一 durable 路径 |
 
 ## 构建与测试
 

@@ -353,13 +353,9 @@ pub const LedgerError = error{
     /// The file's first line is not a `"kind":"header"` record.
     MissingHeader,
     /// Another process already holds the session's writer lease (its exclusive
-    /// advisory lock). The primary single-writer guarantee: only one writer opens
-    /// the file at a time, so two `session step` runs can never interleave writes.
+    /// advisory lock). The single-writer guarantee: only one writer opens the
+    /// file at a time, so two `session step` runs can never interleave writes.
     SessionBusy,
-    /// The session file grew behind this ledger's back — a second writer slipped
-    /// past the lease (belt-and-suspenders). The in-memory append is rewound and
-    /// the file is left untouched.
-    ConcurrentWriter,
 };
 
 /// Strings are always copied out of the input, so a parsed value never aliases
@@ -390,10 +386,11 @@ const Durable = struct {
     fn persist(self: *Durable, alloc: std.mem.Allocator, e: Event, seq: u64, origin: ?[]const u8) !void {
         const line = try encodeEventLineOrigin(alloc, e, seq, origin);
         defer alloc.free(line);
-        // Single-writer guard: if the file is not exactly where this ledger left
-        // it, another process wrote to it. Refuse rather than overwrite its line
-        // or leave a hole.
-        if (try self.file.length(self.io) != self.end) return error.ConcurrentWriter;
+        // No concurrency check here: the exclusive `<id>.lock` lease is the sole
+        // single-writer primitive, so no other cooperating writer can be at this
+        // offset. A non-cooperating external edit is a corruption concern, caught
+        // by replay / seq / JSON validation on the next open — not something an
+        // extra `length()` syscall per append should half-guard against.
         try self.file.writePositionalAll(self.io, line, self.end);
         self.end += line.len;
     }
@@ -1029,24 +1026,6 @@ test "the writer holds an exclusive lease: a second writer is refused with Sessi
     try std.testing.expectEqual(@as(usize, 1), b.len());
     try b.append(.{ .user_text = "two" });
     try std.testing.expectEqual(@as(usize, 2), b.len());
-}
-
-test "persist's length guard rewinds the in-memory append if the file grew behind its back" {
-    const alloc = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var a = try createDurable(alloc, io, tmp.dir, "s.jsonl", .{ .session = "s" });
-    defer a.deinit();
-    try a.append(.{ .user_text = "one" });
-
-    // Second-layer assertion: the lease makes two writers impossible in practice,
-    // but if `end` ever disagreed with the file length, `persist` refuses to write
-    // and rewinds the in-memory append rather than punching a hole or overwriting.
-    a.durable.?.end -= 1;
-    try std.testing.expectError(error.ConcurrentWriter, a.append(.{ .user_text = "two" }));
-    try std.testing.expectEqual(@as(usize, 1), a.len());
 }
 
 test "siblingPath names <stem><suffix> next to the session file" {

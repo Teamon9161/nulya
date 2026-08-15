@@ -107,42 +107,24 @@ pub const ModelHolder = union(enum) {
     }
 };
 
-/// Build the model for `profile_name`. Falls back to the scripted provider when
-/// the profile is scripted, unknown, or an openai profile has no resolvable key
-/// (so an offline session still runs). Caller owns the holder (`deinit`).
-pub fn buildModel(
-    alloc: std.mem.Allocator,
-    io: std.Io,
-    prov: config.Provider,
-    env: *const std.process.Environ.Map,
-    profile_name: []const u8,
-) !ModelHolder {
-    const scripted: ModelHolder = .{ .scripted = ScriptedProvider.fromEnv(env) };
+/// Resolve `profile_name` into the model IDENTITY frozen at session creation —
+/// the ONE model-resolution decision (DESIGN §3). It is credential-aware, so what
+/// gets frozen is exactly what will run: an openai profile whose durable
+/// credential (`api_key_env`) is not resolvable in `env` falls back to the
+/// scripted identity here, and `buildFromDescriptor` then builds scripted too —
+/// no fork between "what ran" and "what the header says". A durable session only
+/// ever references its credential by env var name; an inline `api_key` cannot be
+/// recovered at resume (that would re-couple the session to mutable config), so
+/// it does not count toward a durable openai identity. Slices borrow the config
+/// profile; the caller freezes copies into the header before config is dropped.
+pub fn resolveDescriptor(prov: config.Provider, env: *const std.process.Environ.Map, profile_name: []const u8) ledger.ModelDescriptor {
+    const scripted: ledger.ModelDescriptor = .{ .provider = "scripted" };
     const profile = prov.findProfile(profile_name) orelse return scripted;
-    switch (profile.kind) {
-        .scripted => return scripted,
-        .openai => {
-            const api_key = resolveApiKey(profile, env) orelse return scripted;
-            return .{ .openai = try openai.OpenAiProvider.init(alloc, io, .{
-                .api_key = api_key,
-                .model = nonEmpty(profile.model, "gpt-4o-mini"),
-                .base_url = nonEmpty(profile.base_url, "https://api.openai.com/v1"),
-            }) };
-        },
-    }
-}
-
-/// Resolve `profile_name` into the model IDENTITY frozen at session creation
-/// (DESIGN §3). This runs only at creation, so a scripted / unknown / keyless
-/// profile is allowed to resolve to the scripted identity (offline sessions must
-/// still start). Once frozen, `buildFromDescriptor` reconstructs exactly this and
-/// never falls back. Slices borrow the config profile; the caller freezes copies
-/// into the header before the config is dropped.
-pub fn resolveDescriptor(prov: config.Provider, profile_name: []const u8) ledger.ModelDescriptor {
-    const profile = prov.findProfile(profile_name) orelse return .{ .provider = "scripted" };
     return switch (profile.kind) {
-        .scripted => .{ .provider = "scripted" },
-        .openai => .{
+        .scripted => scripted,
+        // Only a resolvable env credential yields a durable openai identity;
+        // otherwise this session is (and stays) scripted.
+        .openai => if (envValue(env, profile.api_key_env) == null) scripted else .{
             .provider = "openai",
             .model = nonEmpty(profile.model, default_openai_model),
             .base_url = nonEmpty(profile.base_url, default_openai_base_url),
@@ -153,11 +135,13 @@ pub fn resolveDescriptor(prov: config.Provider, profile_name: []const u8) ledger
 
 pub const BuildIdentityError = error{ MissingCredential, ProviderUnavailable, OutOfMemory };
 
-/// Reconstruct the frozen model on resume (DESIGN §3): build EXACTLY the identity
-/// recorded at creation, re-resolving only the credential from the environment.
-/// There is deliberately NO scripted fallback here — a real session whose key is
-/// gone fails with `MissingCredential` rather than silently degrading to
-/// scripted. An empty/legacy descriptor is treated as scripted.
+/// Build the model from a frozen descriptor — used both at creation (from the
+/// just-resolved descriptor, so the running model == the frozen identity) and on
+/// resume (from the header). It re-resolves only the credential from the
+/// environment and stores no secret. There is deliberately NO scripted fallback:
+/// a session frozen as openai whose key is gone fails with `MissingCredential`
+/// rather than silently degrading to scripted (DESIGN §3). An empty/legacy or
+/// scripted descriptor builds the scripted provider, needing no credential.
 pub fn buildFromDescriptor(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -182,13 +166,6 @@ fn envValue(env: *const std.process.Environ.Map, name: []const u8) ?[]const u8 {
     if (name.len == 0) return null;
     const v = env.get(name) orelse return null;
     return if (v.len == 0) null else v;
-}
-
-pub fn resolveApiKey(profile: config.ProviderProfile, env: *const std.process.Environ.Map) ?[]const u8 {
-    if (profile.api_key) |api_key| if (api_key.len != 0) return api_key;
-    if (profile.api_key_env.len == 0) return null;
-    const api_key = env.get(profile.api_key_env) orelse return null;
-    return if (api_key.len == 0) null else api_key;
 }
 
 pub fn nonEmpty(value: []const u8, fallback: []const u8) []const u8 {
@@ -240,23 +217,37 @@ test "session id validation rejects traversal" {
     try std.testing.expect(!isValidSessionId(".."));
 }
 
-test "resolveDescriptor freezes the resolved model, not the profile alias" {
+test "resolveDescriptor is credential-aware: what it freezes is what will run" {
+    const alloc = std.testing.allocator;
     var profiles = [_]config.ProviderProfile{
         .{ .name = "openai", .kind = .openai, .api_key_env = "OPENAI_API_KEY" },
         .{ .name = "local", .kind = .scripted },
+        .{ .name = "inline", .kind = .openai, .api_key = "sk-inline", .api_key_env = "" },
     };
     const prov: config.Provider = .{ .active_profile = "openai", .profiles = &profiles };
 
-    const d = resolveDescriptor(prov, "openai");
+    var env: std.process.Environ.Map = .init(alloc);
+    defer env.deinit();
+
+    // openai profile, no env credential -> frozen as scripted (== what runs).
+    try std.testing.expectEqualStrings("scripted", resolveDescriptor(prov, &env, "openai").provider);
+
+    // openai profile with the env credential present -> a durable openai identity,
+    // resolved (defaulted) model/base_url, referenced by env var name only.
+    try env.put("OPENAI_API_KEY", "sk-test");
+    const d = resolveDescriptor(prov, &env, "openai");
     try std.testing.expectEqualStrings("openai", d.provider);
     try std.testing.expectEqualStrings("OPENAI_API_KEY", d.api_key_env);
-    try std.testing.expectEqualStrings(default_openai_model, d.model); // concrete model, defaulted
+    try std.testing.expectEqualStrings(default_openai_model, d.model);
     try std.testing.expectEqualStrings(default_openai_base_url, d.base_url);
 
-    // A scripted profile freezes the scripted identity.
-    try std.testing.expectEqualStrings("scripted", resolveDescriptor(prov, "local").provider);
-    // An unknown profile resolves to the scripted identity at creation time.
-    try std.testing.expectEqualStrings("scripted", resolveDescriptor(prov, "nope").provider);
+    // An inline api_key is not usable for a durable session: no api_key_env means
+    // no env-recoverable credential, so it freezes scripted, never openai.
+    try std.testing.expectEqualStrings("scripted", resolveDescriptor(prov, &env, "inline").provider);
+
+    // Scripted and unknown profiles freeze the scripted identity.
+    try std.testing.expectEqualStrings("scripted", resolveDescriptor(prov, &env, "local").provider);
+    try std.testing.expectEqualStrings("scripted", resolveDescriptor(prov, &env, "nope").provider);
 }
 
 test "buildFromDescriptor never falls back: a keyless openai identity fails loudly" {

@@ -50,7 +50,10 @@ fn runDemo(alloc: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) 
     defer lenv.deinit();
 
     const profile = if (cfg.provider.active_profile.len != 0) cfg.provider.active_profile else "scripted";
-    var holder = try launch.buildModel(alloc, io, cfg.provider, env, profile);
+    // One model-resolution decision: resolve the identity, then build the running
+    // model from it — so the demo runs exactly what gets frozen into the header.
+    const identity = launch.resolveDescriptor(cfg.provider, env, profile);
+    var holder = try launch.buildFromDescriptor(alloc, io, identity, env);
     defer holder.deinit();
     const model = holder.model();
     const effort = if (cfg.provider.findProfile(profile)) |p| p.effort else null;
@@ -93,7 +96,7 @@ fn runDemo(alloc: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) 
         .session_path = spath,
         .session_id = id,
         .model_profile = profile,
-        .model_identity = launch.resolveDescriptor(cfg.provider, profile),
+        .model_identity = identity,
     });
     defer sess.deinit();
 
