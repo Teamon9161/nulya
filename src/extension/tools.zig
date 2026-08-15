@@ -1,113 +1,56 @@
 //! Extension tools as ordinary kernel tools (DESIGN §7.3, §5).
 //!
-//! `ExtensionToolBinding` adapts one already-resolved, frozen extension tool
-//! to the kernel's single `tool.Tool` abstraction. The kernel already has
-//! `ToolExecutor { ptr, callFn }`; an extension tool is just one more executor
-//! implementation, exactly like a builtin — there is no second tool
-//! abstraction, and no `ExtensionExecutor` wrapper type.
+//! `Binding` pairs a tool's model-facing `tool.ToolDefinition` with its exact
+//! frozen executable path, then adapts it into the kernel's single `tool.Tool`
+//! through the existing `ToolExecutor` seam — no second tool abstraction.
 //!
-//! The shape is deliberately narrow:
-//!
-//!   binding ──asTool()──▶ tool.Tool (definition + sequential executor)
-//!                              │ executor.call
-//!                              ▼
-//!                       invoke.invokeTool()
-//!                              │
-//!                              ▼
-//!                       Environment.runExtension
-//!
-//! Architecture invariants:
-//!
-//!   - Nothing in this file touches the extension store, `current`, manifests,
-//!     integrity, or discovery. The binding already carries the exact frozen
-//!     `entry_path` and `tool_name`; the executor uses them verbatim.
-//!     Resolving an active version is the caller's job (the CLI today, a
-//!     future SessionComposition).
-//!   - `ToolExecutor.ptr` points at the `ExtensionToolBinding` itself, so the
-//!     binding must not move while any `Tool` built from it is in use. The
-//!     backing strings are borrowed: whoever constructs the binding owns them
-//!     and must keep them alive for the lifetime of every derived `Tool`.
-//!   - `invoke.invokeTool` owns encode/run/decode/timeout/diagnostics and the
-//!     failure classification. The executor is a thin passthrough: it maps
-//!     `ToolInvocation` to `RawToolResult` and propagates host faults
-//!     (`OutOfMemory`, `WriteFailed`, I/O) and `error.Canceled` as errors,
-//!     never folding them into a failed result.
+//! Two invariants hold:
+//!   - The binding never touches the extension store, `current`, manifests, or
+//!     discovery; `entry_path` is already resolved and frozen by the caller.
+//!   - `ToolExecutor.ptr` borrows the binding, so the binding (and its borrowed
+//!     definition strings) must outlive every derived `Tool` and must not move.
 
 const std = @import("std");
 const tool = @import("../tool.zig");
 const invoke = @import("invoke.zig");
 
-/// One frozen, already-resolved extension tool, expressed as an ordinary
-/// `tool.Tool` via `asTool`.
-///
-/// All slices are borrowed: this type never copies or frees them. The owner of
-/// the backing storage (a future SessionComposition) must keep it alive while
-/// any `Tool` derived from this binding is in use, and the binding itself must
-/// not move — `ToolExecutor.ptr` points at its address.
-pub const ExtensionToolBinding = struct {
-    /// Pinned extension identity, e.g. `web.search` (informational; the stable
-    /// logical identity is `tool_id`).
-    extension_id: []const u8,
-    /// Pinned implementation version, e.g. `v-123`. The version selects the
-    /// executable; it is deliberately NOT part of the tool identity.
-    version: []const u8,
-    /// Stable logical capability identity, e.g. `ext:web.search/web_search`.
-    /// Never version-qualified: v1 and v2 of an extension expose the same
-    /// `tool_id`, so usage statistics accumulate to one logical tool.
-    tool_id: []const u8,
-    /// Model-facing invocation name from the manifest (e.g. `web_search`).
-    /// Used as `ToolDefinition.name` and sent as the JSON-RPC `name`.
-    tool_name: []const u8,
-    description: []const u8,
-    input_schema: []const u8,
-    /// Exact frozen executable path. Never resolved, joined, or re-read here.
+/// A frozen extension tool binding. The binding and its borrowed definition
+/// strings must outlive derived Tools.
+pub const Binding = struct {
+    /// Model-facing identity and schema. `definition.id` is the stable logical
+    /// id (never version-qualified); `definition.name` is what the model calls.
+    definition: tool.ToolDefinition,
+    /// Exact frozen executable path, passed verbatim to `Environment.runExtension`.
     entry_path: []const u8,
 
-    /// Adapt this binding into a kernel `Tool`. The returned `Tool` borrows
-    /// this binding: `executor.ptr` is the binding's address, so the binding
-    /// must stay put for the lifetime of the `Tool`.
-    pub fn asTool(self: *ExtensionToolBinding) tool.Tool {
+    /// Adapt into a kernel `Tool`. The returned `Tool` borrows this binding:
+    /// `executor.ptr` is the binding's address.
+    pub fn asTool(self: *Binding) tool.Tool {
         return .{
-            .definition = .{
-                .id = self.tool_id,
-                .name = self.tool_name,
-                .description = self.description,
-                .input_schema = self.input_schema,
-            },
-            .batch_policy = .sequential,
+            .definition = self.definition,
             .executor = .{ .ptr = self, .callFn = call },
         };
     }
 };
 
-/// `ToolExecutor` callback: run the frozen executable once via
-/// `invoke.invokeTool` and transfer the result into a `RawToolResult`.
-///
-/// Failure classification stays with `invokeTool`:
-///   `ok=true`  → `RawToolResult.ok=true`
-///   `ok=false` → `RawToolResult.ok=false` (timeout, JSON-RPC application
-///                error, malformed response — the diagnostic is already
-///                human-readable, never reformatted here)
-///   host faults (`OutOfMemory`, `WriteFailed`, I/O) and `error.Canceled`
-///   propagate as errors unchanged — never folded into a failed result.
+/// `ToolExecutor` callback. Does not interpret the invocation — `invokeTool`
+/// owns encode/run/decode, diagnostics, and the failure taxonomy — it only
+/// binds the executor to it and transfers the output slice.
 fn call(ptr: ?*anyopaque, alloc: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolResult {
-    const self: *ExtensionToolBinding = @ptrCast(@alignCast(ptr));
+    const self: *Binding = @ptrCast(@alignCast(ptr));
 
     const invocation = try invoke.invokeTool(
         alloc,
         req.ctx.environment,
         self.entry_path,
         req.ctx.cwd,
-        self.tool_name,
+        self.definition.name,
         req.args_json,
         .{},
     );
 
-    // Ownership transfer: `invocation.output` is owned by `alloc`, and so is
-    // `RawToolResult.output` (the caller's allocator). `ToolInvocation` holds
-    // no other resources, so returning the struct moves the slice — no copy,
-    // and no `deinit` here, which would free the output out from under the
-    // returned result.
+    // Ownership transfer: `invocation.output` is allocator-owned, as is
+    // `RawToolResult.output`; returning the slice moves it (no `deinit`, no copy).
     return .{ .ok = invocation.ok, .output = invocation.output };
 }
 
@@ -131,13 +74,18 @@ const FakeEnv = struct {
     fn runExtension(ptr: *anyopaque, alloc: std.mem.Allocator, req: environment.ExtensionRequest) anyerror!environment.ExtensionOutcome {
         const self: *FakeEnv = @ptrCast(@alignCast(ptr));
         if (self.err) |e| return e;
-        self.saw_entry_path = try alloc.dupe(u8, req.entry_path);
-        errdefer alloc.free(self.saw_entry_path);
-        self.saw_request_json = try alloc.dupe(u8, req.request_json);
-        errdefer alloc.free(self.saw_request_json);
+        // Allocate everything before publishing to `self`: a mid-way failure
+        // frees the locals via errdefer and leaves the saw fields empty, so
+        // `deinit` never double-frees.
+        const saw_entry_path = try alloc.dupe(u8, req.entry_path);
+        errdefer alloc.free(saw_entry_path);
+        const saw_request_json = try alloc.dupe(u8, req.request_json);
+        errdefer alloc.free(saw_request_json);
         const stdout = try alloc.dupe(u8, self.response);
         errdefer alloc.free(stdout);
         const stderr = try alloc.dupe(u8, "");
+        self.saw_entry_path = saw_entry_path;
+        self.saw_request_json = saw_request_json;
         return .{ .stdout = stdout, .stderr = stderr, .exit_code = 0, .timed_out = self.timed_out };
     }
 
@@ -194,14 +142,14 @@ const DummyFs = struct {
     }
 };
 
-fn testBinding() ExtensionToolBinding {
+fn testBinding() Binding {
     return .{
-        .extension_id = "web.search",
-        .version = "v-123",
-        .tool_id = "ext:web.search/web_search",
-        .tool_name = "web_search",
-        .description = "Search web",
-        .input_schema = "{\"type\":\"object\"}",
+        .definition = .{
+            .id = "ext:web.search/web_search",
+            .name = "web_search",
+            .description = "Search web",
+            .input_schema = "{\"type\":\"object\"}",
+        },
         .entry_path = "/frozen/v1/bin/web-search",
     };
 }
@@ -210,12 +158,12 @@ test "asTool exposes the frozen definition, sequential policy, and binding point
     var binding = testBinding();
     const t = binding.asTool();
 
-    // The definition is the stable logical identity plus the model-facing
-    // invocation name — the version appears nowhere in it.
+    // The id is the stable logical identity; the name is what the model calls.
     try testing.expectEqualStrings("ext:web.search/web_search", t.definition.id);
     try testing.expectEqualStrings("web_search", t.definition.name);
     try testing.expectEqualStrings("Search web", t.definition.description);
     try testing.expectEqualStrings("{\"type\":\"object\"}", t.definition.input_schema);
+    // Extension tools stay on the safe default: sequential execution.
     try testing.expectEqual(tool.BatchPolicy.sequential, t.batch_policy);
 
     // The executor's identity IS the binding: the callback recovers the
@@ -255,7 +203,7 @@ test "executor forwards the model's raw arguments as a tool/call request" {
     });
     defer alloc.free(result.output);
 
-    // The binding's tool_name is the JSON-RPC name; the model's raw arguments
+    // The binding's tool name is the JSON-RPC name; the model's raw arguments
     // ride along untouched inside `arguments`.
     const parsed = try std.json.parseFromSlice(std.json.Value, alloc, fake.saw_request_json, .{});
     defer parsed.deinit();
