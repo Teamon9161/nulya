@@ -14,6 +14,7 @@ const std = @import("std");
 const manifest = @import("manifest.zig");
 const integrity = @import("integrity.zig");
 const ext_skills = @import("skills.zig");
+const prompt = @import("../prompt.zig");
 const toolchain = @import("../toolchain.zig");
 
 pub const exe_suffix = integrity.exe_suffix;
@@ -67,6 +68,7 @@ pub fn buildExtension(
     const snapshot = try integrity.collectPackageSnapshot(alloc, io, workspace, ext_dir_rel, manifest_bytes, m);
     defer snapshot.deinit(alloc);
     try ext_skills.validateSnapshot(alloc, m, snapshot);
+    try validateSystemPrompts(alloc, m, snapshot);
     const snapshot_bytes = try snapshot.canonicalBytes(alloc);
     defer alloc.free(snapshot_bytes);
 
@@ -186,6 +188,40 @@ fn writeSeal(
     const seal_sub = try std.fs.path.join(alloc, &.{ version_rel, seal_file });
     defer alloc.free(seal_sub);
     try workspace.writeFile(io, .{ .sub_path = seal_sub, .data = seal });
+}
+
+/// Static system prompts are plain text contributions; a built version must
+/// stay consumable by session composition, which reads each prompt with the
+/// same byte limit and needs valid UTF-8 for provider JSON serialization.
+fn validateSystemPrompts(alloc: std.mem.Allocator, m: manifest.Manifest, snapshot: integrity.PackageSnapshot) !void {
+    for (m.system_prompts) |prompt_path| {
+        const rel = try canonicalRel(alloc, prompt_path);
+        defer alloc.free(rel);
+        const bytes = findSnapshotFile(snapshot, rel) orelse return error.SystemPromptFileMissing;
+        if (bytes.len > prompt.max_system_prompt_bytes) return error.SystemPromptTooLarge;
+        if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidUtf8;
+    }
+}
+
+fn findSnapshotFile(snapshot: integrity.PackageSnapshot, rel: []const u8) ?[]const u8 {
+    for (snapshot.files) |file| {
+        if (std.mem.eql(u8, file.rel, rel)) return file.bytes;
+    }
+    return null;
+}
+
+fn canonicalRel(alloc: std.mem.Allocator, rel: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    var it = std.mem.splitAny(u8, rel, "/\\");
+    var first = true;
+    while (it.next()) |part| {
+        if (part.len == 0) continue;
+        if (!first) try out.append(alloc, '/');
+        try out.appendSlice(alloc, part);
+        first = false;
+    }
+    return out.toOwnedSlice(alloc);
 }
 
 fn testZigExe(alloc: std.mem.Allocator) ![]u8 {
@@ -424,4 +460,71 @@ test "frozen prompt tampering fails integrity validation" {
     const version_rel = try std.fs.path.join(alloc, &.{ "ext", "versions", result.version });
     defer alloc.free(version_rel);
     try std.testing.expectError(error.VersionSealInvalid, integrity.validateVersionDir(alloc, io, tmp.dir, version_rel, result.version, "prompts"));
+}
+
+test "skill package build rejects oversized SKILL.md" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(io, "ext" ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "demo");
+    try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ manifest_file, .data =
+        \\{"schema":"nulya.extension/v2","id":"skills","contributes":{"skills":["skills/demo"]}}
+    });
+    const prefix = "---\nname: demo\ndescription: demo\n---\n";
+    const body = try alloc.alloc(u8, 2 * 1024 * 1024 + 1);
+    defer alloc.free(body);
+    @memset(body, 'a');
+    const skill_md = try std.mem.concat(alloc, u8, &.{ prefix, body });
+    defer alloc.free(skill_md);
+    try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "demo" ++ std.fs.path.sep_str ++ "SKILL.md", .data = skill_md });
+
+    try std.testing.expectError(error.SkillFileTooLarge, buildExtension(alloc, io, tmp.dir, "ext", "zig"));
+}
+
+test "skill package build rejects invalid UTF-8 SKILL.md" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(io, "ext" ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "demo");
+    try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ manifest_file, .data =
+        \\{"schema":"nulya.extension/v2","id":"skills","contributes":{"skills":["skills/demo"]}}
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "demo" ++ std.fs.path.sep_str ++ "SKILL.md", .data = "---\nname: demo\ndescription: demo\n---\n\xff body\n" });
+
+    try std.testing.expectError(error.InvalidUtf8, buildExtension(std.testing.allocator, io, tmp.dir, "ext", "zig"));
+}
+
+test "prompt package build rejects oversized system prompt" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(io, "ext" ++ std.fs.path.sep_str ++ "prompts");
+    try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ manifest_file, .data =
+        \\{"schema":"nulya.extension/v2","id":"prompts","contributes":{"system_prompts":["prompts/base.md"]}}
+    });
+    const body = try alloc.alloc(u8, 2 * 1024 * 1024 + 1);
+    defer alloc.free(body);
+    @memset(body, 'a');
+    try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ "prompts" ++ std.fs.path.sep_str ++ "base.md", .data = body });
+
+    try std.testing.expectError(error.SystemPromptTooLarge, buildExtension(alloc, io, tmp.dir, "ext", "zig"));
+}
+
+test "prompt package build rejects invalid UTF-8 system prompt" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(io, "ext" ++ std.fs.path.sep_str ++ "prompts");
+    try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ manifest_file, .data =
+        \\{"schema":"nulya.extension/v2","id":"prompts","contributes":{"system_prompts":["prompts/base.md"]}}
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ "prompts" ++ std.fs.path.sep_str ++ "base.md", .data = "\xff\xfe not text\n" });
+
+    try std.testing.expectError(error.InvalidUtf8, buildExtension(std.testing.allocator, io, tmp.dir, "ext", "zig"));
 }

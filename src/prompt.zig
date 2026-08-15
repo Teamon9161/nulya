@@ -7,6 +7,11 @@
 const std = @import("std");
 const ledger = @import("ledger.zig");
 
+/// Upper bound for one static system prompt contribution. Shared by the
+/// extension build-time check and session composition so a built version is
+/// always consumable.
+pub const max_system_prompt_bytes: usize = 2 * 1024 * 1024;
+
 pub const BlockKind = enum {
     user_text,
     assistant_text,

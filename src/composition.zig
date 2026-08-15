@@ -14,8 +14,6 @@ const manifest = @import("extension/manifest.zig");
 const store = @import("extension/store.zig");
 const integrity = @import("extension/integrity.zig");
 
-const max_prompt_bytes: usize = 2 * 1024 * 1024;
-
 const kernel_system_prompt =
     "You are Nulya, a minimal self-evolving agent harness. " ++
     "The model-facing builtin tools are shell and edit; extension capabilities are invoked through the nulya CLI.";
@@ -144,7 +142,7 @@ fn buildSystemPrompts(
                 defer alloc.free(source);
                 const rel = try std.fs.path.join(alloc, &.{ r.id, "versions", r.version, integrity.package_dir, prompt_path });
                 defer alloc.free(rel);
-                const bytes = try opened.root.readFileAlloc(opened.io, rel, alloc, .limited(max_prompt_bytes));
+                const bytes = try opened.root.readFileAlloc(opened.io, rel, alloc, .limited(prompt.max_system_prompt_bytes));
                 defer alloc.free(bytes);
                 try appendSystemBlock(alloc, &blocks, source, bytes);
             }

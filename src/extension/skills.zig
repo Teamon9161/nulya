@@ -10,7 +10,7 @@ const manifest = @import("manifest.zig");
 const store = @import("store.zig");
 const integrity = @import("integrity.zig");
 
-const max_skill_md_bytes: usize = 2 * 1024 * 1024;
+pub const max_skill_md_bytes: usize = 2 * 1024 * 1024;
 const skill_file = "SKILL.md";
 
 pub const ParsedRef = struct {
@@ -91,6 +91,8 @@ pub fn validateSnapshot(alloc: std.mem.Allocator, m: manifest.Manifest, snapshot
         defer alloc.free(skill_md_rel);
 
         const bytes = findSnapshotFile(snapshot, skill_md_rel) orelse return error.SkillFileMissing;
+        if (bytes.len > max_skill_md_bytes) return error.SkillFileTooLarge;
+        if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidUtf8;
         const fm = try skill.parseFrontmatter(bytes);
         if (!std.mem.eql(u8, fm.name, expected_name)) return error.SkillNameDoesNotMatchDirectory;
         for (names.items) |existing| {
