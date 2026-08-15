@@ -182,6 +182,7 @@ test {
     _ = @import("emit.zig");
     _ = @import("ledger.zig");
     _ = @import("tool.zig");
+    _ = @import("tool_stats.zig");
     _ = @import("registry.zig");
     _ = @import("skill.zig");
     _ = @import("composition.zig");

@@ -15,6 +15,7 @@ const environment = @import("environment.zig");
 const prompt = @import("prompt.zig");
 const composition = @import("composition.zig");
 const tool = @import("tool.zig");
+const tool_stats = @import("tool_stats.zig");
 
 pub const AgentSession = struct {
     alloc: std.mem.Allocator,
@@ -81,8 +82,24 @@ pub const AgentSession = struct {
         };
         const prompt_ir = try prompt.projectWithSystem(self.alloc, self.composition.system_prompts.blocks, self.l.view());
         defer prompt_ir.deinit(self.alloc);
+        // Ledger position before this step's turns: everything appended from
+        // here on is this step's assistant turn plus, when it carried tool
+        // calls, the single batched tool_results turn.
+        const before = self.l.len();
         const outcome = try loop.runStepWithPrompt(self.alloc, &self.l, self.model, &prompt_ir, self.composition.tools, self.step_ctx, self.model_options);
         accumulate(&self.total_usage, outcome.usage);
+        if (outcome.status == .completed) {
+            // Tool usage stats are auxiliary durable metadata, not conversation
+            // truth: a recording failure never rewinds the ledger or turns a
+            // completed invocation into a failure. Host faults (OOM, real I/O
+            // errors) propagate; a cancel landing after the step's real work
+            // already finished is host execution control, so the completed
+            // outcome is reported as-is and this step's events go unrecorded.
+            self.recordCompletedToolStats(before) catch |err| switch (err) {
+                error.Canceled => {},
+                else => return err,
+            };
+        }
         return outcome;
     }
 
@@ -104,6 +121,35 @@ pub const AgentSession = struct {
         const tool_ctx = self.step_ctx.tool_context;
         try loop.completeInterruptedToolBatch(self.alloc, &self.l);
         try notes.syncFromActiveExtensions(self.alloc, tool_ctx.environment.io, tool_ctx.cwd, &self.l, self.extension_root);
+    }
+
+    /// Append one usage event per completed tool call in this step's ledger
+    /// suffix `[before..]`. Stats are an observation after execution, so the
+    /// loop stays generic and no executor knows the journal exists. A call is
+    /// recorded only when its model-facing name resolves to a real exposed
+    /// `ToolDefinition.id`: a hallucinated name has no durable identity, so it
+    /// is skipped rather than saved under a fake id.
+    fn recordCompletedToolStats(self: *AgentSession, before: usize) !void {
+        var calls: ?[]const ledger.ToolCall = null;
+        var results: ?[]const ledger.ToolResultEntry = null;
+        for (self.l.view()[before..]) |e| {
+            switch (e) {
+                .assistant => |as| {
+                    if (as.calls.len != 0) calls = as.calls;
+                },
+                .tool_results => |rs| results = rs,
+                else => {},
+            }
+        }
+        const cs = calls orelse return; // no tool calls: nothing to record
+        const rs = results orelse return; // defensive; a completed step always appends its batch
+        const ctx = self.step_ctx.tool_context;
+        // The loop fills results in call order, so index i matches call i.
+        const count = @min(cs.len, rs.len);
+        for (cs[0..count], 0..) |call, i| {
+            const t = self.composition.tools.lookup(call.tool) orelse continue;
+            try tool_stats.append(self.alloc, ctx.environment.io, ctx.cwd, t.definition.id, rs[i].ok);
+        }
     }
 };
 
@@ -418,4 +464,199 @@ test "a cancel during prepareStep reconciliation reports canceled with zero usag
     try std.testing.expectEqual(@as(usize, 1), model_impl.calls);
     try std.testing.expect(sess.lastAssistantDone());
     try std.testing.expectEqual(@as(u64, 3), sess.usage().input_tokens);
+}
+
+fn sessionTmpCwd(alloc: std.mem.Allocator, io: std.Io, tmp: std.testing.TmpDir) ![]u8 {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(io, &buf);
+    return alloc.dupe(u8, buf[0..len]);
+}
+
+test "completed step records stable ids, never model names or hallucinated names" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try sessionTmpCwd(alloc, io, tmp);
+    defer alloc.free(cwd);
+
+    const OkTool = struct {
+        fn call(ptr: ?*anyopaque, a: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolResult {
+            _ = ptr;
+            _ = req;
+            return .{ .ok = true, .output = try a.dupe(u8, "searched") };
+        }
+    };
+    const tools_arr = [_]tool.Tool{
+        .{
+            .definition = .{ .id = "ext:web.search/web_search", .name = "web_search", .description = "search", .input_schema = "{}" },
+            .executor = .{ .ptr = null, .callFn = OkTool.call },
+        },
+    };
+
+    // One real call (web_search) and one name the model invented (ghost): the
+    // real call resolves to its stable id, the hallucinated one is skipped.
+    const MixedModel = struct {
+        fn name(ptr: *anyopaque) []const u8 {
+            _ = ptr;
+            return "mixed";
+        }
+        fn modelName(ptr: *anyopaque) []const u8 {
+            _ = ptr;
+            return "mixed-test";
+        }
+        fn capabilities(ptr: *anyopaque) provider.ProviderCapabilities {
+            _ = ptr;
+            return .{};
+        }
+        fn stream(ptr: *anyopaque, a: std.mem.Allocator, request: provider.Request, sink: provider.EventSink) anyerror!void {
+            _ = ptr;
+            _ = a;
+            _ = request;
+            try sink.emit(.started);
+            try sink.emit(.{ .tool_use_start = .{ .index = 0, .id = "c1", .name = "web_search" } });
+            try sink.emit(.{ .tool_use_input_delta = .{ .index = 0, .fragment = "{}" } });
+            try sink.emit(.{ .tool_use_start = .{ .index = 1, .id = "c2", .name = "ghost" } });
+            try sink.emit(.{ .tool_use_input_delta = .{ .index = 1, .fragment = "{}" } });
+            try sink.emit(.{ .done = .tool_use });
+        }
+        const vtable: provider.Model.VTable = .{
+            .name = name,
+            .modelName = modelName,
+            .capabilities = capabilities,
+            .stream = stream,
+        };
+    };
+
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+    var model_impl = MixedModel{};
+    var sess: AgentSession = .{
+        .alloc = alloc,
+        .l = ledger.Ledger.init(alloc),
+        .composition = .{
+            .pinned_extensions = &.{},
+            .extension_tool_bindings = &.{},
+            .tools = .{ .tools = &tools_arr },
+            .skills = .{ .skills = &.{} },
+            .system_prompts = .{ .blocks = &.{} },
+        },
+        .model = .{ .ptr = &model_impl, .vtable = &MixedModel.vtable },
+        .step_ctx = .{
+            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd },
+            .scratch_dir = "/tmp",
+        },
+        .model_options = .{},
+        .extension_root = "nulya-absent-extensions-root",
+    };
+    defer sess.l.deinit();
+
+    try sess.appendUser("go");
+    const outcome = try sess.step();
+    try std.testing.expectEqual(loop.StepStatus.completed, outcome.status);
+
+    const events = try tool_stats.readAll(alloc, io, cwd);
+    defer tool_stats.freeEvents(alloc, events);
+    try std.testing.expectEqual(@as(usize, 1), events.len);
+    try std.testing.expectEqualStrings("ext:web.search/web_search", events[0].tool_id);
+    try std.testing.expect(events[0].ok);
+}
+
+test "a canceled step records no tool usage stats" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try sessionTmpCwd(alloc, io, tmp);
+    defer alloc.free(cwd);
+
+    var ready: std.Io.Event = .unset;
+    var release: std.Io.Event = .unset;
+    const BlockTool = struct {
+        ready: *std.Io.Event,
+        release: *std.Io.Event,
+        fn call(ptr: ?*anyopaque, a: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolResult {
+            const self: *@This() = @ptrCast(@alignCast(ptr.?));
+            const io_local = req.ctx.environment.io;
+            self.ready.set(io_local);
+            try self.release.wait(io_local);
+            return .{ .ok = true, .output = try a.dupe(u8, "unreachable") };
+        }
+    };
+    var block_tool = BlockTool{ .ready = &ready, .release = &release };
+    const tools_arr = [_]tool.Tool{
+        .{
+            .definition = .{ .id = "ext:web.search/web_search", .name = "web_search", .description = "search", .input_schema = "{}" },
+            .executor = .{ .ptr = &block_tool, .callFn = BlockTool.call },
+        },
+    };
+
+    const OneCallModel = struct {
+        fn name(ptr: *anyopaque) []const u8 {
+            _ = ptr;
+            return "onecall";
+        }
+        fn modelName(ptr: *anyopaque) []const u8 {
+            _ = ptr;
+            return "onecall";
+        }
+        fn capabilities(ptr: *anyopaque) provider.ProviderCapabilities {
+            _ = ptr;
+            return .{};
+        }
+        fn stream(ptr: *anyopaque, a: std.mem.Allocator, request: provider.Request, sink: provider.EventSink) anyerror!void {
+            _ = ptr;
+            _ = a;
+            _ = request;
+            try sink.emit(.started);
+            try sink.emit(.{ .tool_use_start = .{ .index = 0, .id = "c1", .name = "web_search" } });
+            try sink.emit(.{ .tool_use_input_delta = .{ .index = 0, .fragment = "{}" } });
+            try sink.emit(.{ .done = .tool_use });
+        }
+        const vtable: provider.Model.VTable = .{
+            .name = name,
+            .modelName = modelName,
+            .capabilities = capabilities,
+            .stream = stream,
+        };
+    };
+
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+    var model_impl = OneCallModel{};
+    var sess: AgentSession = .{
+        .alloc = alloc,
+        .l = ledger.Ledger.init(alloc),
+        .composition = .{
+            .pinned_extensions = &.{},
+            .extension_tool_bindings = &.{},
+            .tools = .{ .tools = &tools_arr },
+            .skills = .{ .skills = &.{} },
+            .system_prompts = .{ .blocks = &.{} },
+        },
+        .model = .{ .ptr = &model_impl, .vtable = &OneCallModel.vtable },
+        .step_ctx = .{
+            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd },
+            .scratch_dir = "/tmp",
+        },
+        .model_options = .{},
+        .extension_root = "nulya-absent-extensions-root",
+    };
+    defer sess.l.deinit();
+
+    try sess.appendUser("go");
+    var fut = io.async(stepCall, .{ &sess });
+    try ready.waitTimeout(io, .{ .deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromMilliseconds(5000) }) });
+    const outcome = try fut.cancel(io);
+    try std.testing.expectEqual(loop.StepStatus.canceled, outcome.status);
+
+    // A canceled batch is not recorded as a failure (or anything): the journal
+    // stays absent.
+    const events = try tool_stats.readAll(alloc, io, cwd);
+    defer tool_stats.freeEvents(alloc, events);
+    try std.testing.expectEqual(@as(usize, 0), events.len);
 }
