@@ -219,7 +219,6 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     // exact entry path) is the CLI's job; from here on the helper owns encode,
     // run, decode, and diagnostics.
     const invocation = try invoke.invokeTool(alloc, lenv.environment(), entry_abs, cwd_path, tool, args_json, .{
-        .request_id = "cli",
         .timeout_ms = 30_000,
         .max_output_bytes = 1 << 20,
     });

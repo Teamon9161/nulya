@@ -75,19 +75,18 @@ pub const ErrorBody = struct {
     retryable: bool = false,
 };
 
-/// Extension -> host, already validated against the JSON-RPC envelope. All
-/// slices are owned by the allocator passed to `decodeResponse`; free with
-/// `deinit`.
-pub const DecodedResponse = struct {
-    ok: bool,
-    /// Compact JSON of the `result` field on success; `"null"` when absent.
-    value_json: []const u8,
-    /// Present only when `!ok`.
-    err: ?ErrorBody,
+/// Extension -> host, already validated against the JSON-RPC envelope. The
+/// owning slice is freed with `deinit`.
+pub const DecodedResponse = union(enum) {
+    /// Compact JSON of the `result` field.
+    result: []const u8,
+    extension_error: ErrorBody,
 
     pub fn deinit(self: DecodedResponse, alloc: std.mem.Allocator) void {
-        alloc.free(self.value_json);
-        if (self.err) |e| alloc.free(e.message);
+        switch (self) {
+            .result => |bytes| alloc.free(bytes),
+            .extension_error => |err| alloc.free(err.message),
+        }
     }
 };
 
@@ -136,8 +135,7 @@ pub fn decodeResponse(alloc: std.mem.Allocator, expected_id: []const u8, bytes: 
     if (has_result == has_error) return error.InvalidResponse;
 
     if (has_result) {
-        const value_json = try compactValue(alloc, obj.get("result").?);
-        return .{ .ok = true, .value_json = value_json, .err = null };
+        return .{ .result = try compactValue(alloc, obj.get("result").?) };
     }
 
     const err_obj = switch (obj.get("error").?) {
@@ -150,17 +148,11 @@ pub fn decodeResponse(alloc: std.mem.Allocator, expected_id: []const u8, bytes: 
     };
     const message = stringField(err_obj, "message") orelse return error.InvalidResponse;
     const retryable = retryableFromData(err_obj.get("data"));
-    const message_owned = try alloc.dupe(u8, message);
-    // `value_json` is a second, independently owned allocation: if it fails,
-    // `message_owned` must still be released — `DecodedResponse.deinit` frees
-    // both only when called on a complete value.
-    errdefer alloc.free(message_owned);
-    const value_json = try alloc.dupe(u8, "null");
-    return .{
-        .ok = false,
-        .value_json = value_json,
-        .err = .{ .code = code, .message = message_owned, .retryable = retryable },
-    };
+    return .{ .extension_error = .{
+        .code = code,
+        .message = try alloc.dupe(u8, message),
+        .retryable = retryable,
+    } };
 }
 
 fn retryableFromData(value: ?std.json.Value) bool {
@@ -235,19 +227,24 @@ test "decode accepts a success response and compacts its result" {
     const alloc = std.testing.allocator;
     const res = try decodeResponse(alloc, "c1", "{\"jsonrpc\":\"2.0\",\"id\":\"c1\",\"result\":{\"results\":[]}}");
     defer res.deinit(alloc);
-    try std.testing.expect(res.ok);
-    try std.testing.expect(res.err == null);
-    try std.testing.expectEqualStrings("{\"results\":[]}", res.value_json);
+    switch (res) {
+        .result => |json| try std.testing.expectEqualStrings("{\"results\":[]}", json),
+        .extension_error => unreachable,
+    }
 }
 
 test "decode accepts an error response" {
     const alloc = std.testing.allocator;
     const res = try decodeResponse(alloc, "c1", "{\"jsonrpc\":\"2.0\",\"id\":\"c1\",\"error\":{\"code\":-32000,\"message\":\"down\",\"data\":{\"retryable\":true}}}");
     defer res.deinit(alloc);
-    try std.testing.expect(!res.ok);
-    try std.testing.expectEqual(@as(i64, -32000), res.err.?.code);
-    try std.testing.expectEqualStrings("down", res.err.?.message);
-    try std.testing.expect(res.err.?.retryable);
+    switch (res) {
+        .result => unreachable,
+        .extension_error => |err| {
+            try std.testing.expectEqual(@as(i64, -32000), err.code);
+            try std.testing.expectEqualStrings("down", err.message);
+            try std.testing.expect(err.retryable);
+        },
+    }
 }
 
 test "decode rejects garbage, wrong version, missing result/error, and wrong id" {

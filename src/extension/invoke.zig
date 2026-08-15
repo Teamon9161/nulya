@@ -21,24 +21,21 @@ const std = @import("std");
 const environment = @import("../environment.zig");
 const protocol = @import("protocol.zig");
 
+/// Fixed JSON-RPC request id. The runtime is oneshot — one request per process —
+/// so the id has no multiplexing or tracing role: the extension only echoes it
+/// back and the helper verifies it.
+const request_id = "call";
+
 pub const Options = struct {
     /// Wall-clock cap for the oneshot call, forwarded to `Environment.runExtension`.
     timeout_ms: u32 = 30_000,
     /// Runner-level capture cap for the child's stdout/stderr.
     max_output_bytes: usize = 1 << 20,
-    /// JSON-RPC request id echoed back by the extension. The CLI uses "cli";
-    /// future callers (the native ExtensionExecutor) may supply their own.
-    request_id: []const u8 = "call",
 };
 
-/// One normalized `tool/call` invocation.
-///
-/// `.ok == true`: `output` is the compact JSON of the decoded `result`.
-/// `.ok == false`: `output` is a human-readable diagnostic for a normal failed
-/// invocation (timeout, JSON-RPC application error, or malformed response),
-/// preserving the exit code and stderr when available. Host faults — OOM, I/O,
-/// cancellation — are never folded here; they surface as errors from
-/// `invokeTool`.
+/// One normalized `tool/call` invocation: compact result JSON on success, a
+/// human-readable diagnostic (with exit code and stderr when available) on a
+/// normal failure. Host faults and cancellation surface as errors, never here.
 pub const ToolInvocation = struct {
     ok: bool,
     output: []const u8,
@@ -63,7 +60,7 @@ pub fn invokeTool(
     options: Options,
 ) !ToolInvocation {
     const req: protocol.ToolCallRequest = .{
-        .id = options.request_id,
+        .id = request_id,
         .name = tool_name,
         .arguments_json = args_json,
     };
@@ -81,8 +78,7 @@ pub fn invokeTool(
 
     if (outcome.timed_out) {
         // A wall-clock timeout is a normal failed invocation, not an error and
-        // not a cancellation: the host decided the call was too slow. Keep any
-        // stderr the runtime produced before being killed.
+        // not a cancellation: the host decided the call was too slow.
         var diag: std.Io.Writer.Allocating = .init(alloc);
         errdefer diag.deinit();
         try diag.writer.print("extension timed out after {d}ms", .{options.timeout_ms});
@@ -90,10 +86,9 @@ pub fn invokeTool(
         return .{ .ok = false, .output = try diag.toOwnedSlice() };
     }
 
-    const decoded = protocol.decodeResponse(alloc, options.request_id, outcome.stdout) catch |err| switch (err) {
-        // The extension wrote a protocol violation (garbage, wrong JSON-RPC
-        // version, wrong id, or missing result/error): an extension fault → a
-        // normal failed invocation; a broken extension never crashes the host.
+    const decoded = protocol.decodeResponse(alloc, request_id, outcome.stdout) catch |err| switch (err) {
+        // Protocol violations are extension faults → a failed invocation; a
+        // broken extension never crashes the host.
         error.InvalidResponse, error.UnsupportedVersion => {
             var diag: std.Io.Writer.Allocating = .init(alloc);
             errdefer diag.deinit();
@@ -101,20 +96,21 @@ pub fn invokeTool(
             try appendStderr(&diag, outcome.stderr);
             return .{ .ok = false, .output = try diag.toOwnedSlice() };
         },
-        // Host resource faults (`WriteFailed`, `OutOfMemory`) are host execution
-        // faults: propagate, never fold into a failed invocation. Cancellation
-        // cannot reach this branch — decodeResponse performs no I/O.
+        // Host resource faults propagate. Cancellation cannot reach this
+        // branch — decodeResponse performs no I/O.
         else => return err,
     };
     defer decoded.deinit(alloc);
 
-    if (decoded.ok) {
-        return .{ .ok = true, .output = try alloc.dupe(u8, decoded.value_json) };
+    switch (decoded) {
+        .result => |json| return .{ .ok = true, .output = try alloc.dupe(u8, json) },
+        .extension_error => |err| {
+            var diag: std.Io.Writer.Allocating = .init(alloc);
+            errdefer diag.deinit();
+            try diag.writer.print("extension error [{d}]: {s}", .{ err.code, err.message });
+            return .{ .ok = false, .output = try diag.toOwnedSlice() };
+        },
     }
-    var diag: std.Io.Writer.Allocating = .init(alloc);
-    errdefer diag.deinit();
-    try diag.writer.print("extension error [{d}]: {s}", .{ decoded.err.?.code, decoded.err.?.message });
-    return .{ .ok = false, .output = try diag.toOwnedSlice() };
 }
 
 /// Append the runtime's stderr to a diagnostic as its own block, so a failed
@@ -314,9 +310,8 @@ test "no allocation failure is swallowed into a failed invocation" {
 }
 
 test "a JSON-RPC error response leaks nothing under allocation failure" {
-    // The error branch of `decodeResponse` allocates two owned slices
-    // (`message_owned` and the `"null"` value_json) before returning; the
-    // sweep locks the errdefer that releases the first if the second fails.
+    // The error branch of `decodeResponse` owns the message slice; the sweep
+    // locks that every path releases it.
     try testing.checkAllAllocationFailures(testing.allocator, invokeToolAllocSweep, .{
         "{\"jsonrpc\":\"2.0\",\"id\":\"call\",\"error\":{\"code\":-32000,\"message\":\"down\"}}",
         false,

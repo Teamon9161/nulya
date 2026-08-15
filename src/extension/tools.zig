@@ -14,17 +14,15 @@ const std = @import("std");
 const tool = @import("../tool.zig");
 const invoke = @import("invoke.zig");
 
-/// A frozen extension tool binding. The binding and its borrowed definition
-/// strings must outlive derived Tools.
+/// A frozen extension tool binding.
 pub const Binding = struct {
     /// Model-facing identity and schema. `definition.id` is the stable logical
-    /// id (never version-qualified); `definition.name` is what the model calls.
+    /// id (never version-qualified); `definition.name` is the JSON-RPC name.
     definition: tool.ToolDefinition,
     /// Exact frozen executable path, passed verbatim to `Environment.runExtension`.
     entry_path: []const u8,
 
-    /// Adapt into a kernel `Tool`. The returned `Tool` borrows this binding:
-    /// `executor.ptr` is the binding's address.
+    /// Adapt into a kernel `Tool`. `executor.ptr` is this binding's address.
     pub fn asTool(self: *Binding) tool.Tool {
         return .{
             .definition = self.definition,
@@ -33,9 +31,8 @@ pub const Binding = struct {
     }
 };
 
-/// `ToolExecutor` callback. Does not interpret the invocation — `invokeTool`
-/// owns encode/run/decode, diagnostics, and the failure taxonomy — it only
-/// binds the executor to it and transfers the output slice.
+/// `ToolExecutor` callback: a thin passthrough — `invokeTool` owns
+/// encode/run/decode and the failure taxonomy.
 fn call(ptr: ?*anyopaque, alloc: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolResult {
     const self: *Binding = @ptrCast(@alignCast(ptr));
 
@@ -49,8 +46,8 @@ fn call(ptr: ?*anyopaque, alloc: std.mem.Allocator, req: tool.ToolRequest) anyer
         .{},
     );
 
-    // Ownership transfer: `invocation.output` is allocator-owned, as is
-    // `RawToolResult.output`; returning the slice moves it (no `deinit`, no copy).
+    // Ownership transfer: both slices are allocator-owned; returning moves
+    // `invocation.output` (no `deinit`, no copy).
     return .{ .ok = invocation.ok, .output = invocation.output };
 }
 
@@ -158,7 +155,6 @@ test "asTool exposes the frozen definition, sequential policy, and binding point
     var binding = testBinding();
     const t = binding.asTool();
 
-    // The id is the stable logical identity; the name is what the model calls.
     try testing.expectEqualStrings("ext:web.search/web_search", t.definition.id);
     try testing.expectEqualStrings("web_search", t.definition.name);
     try testing.expectEqualStrings("Search web", t.definition.description);
@@ -166,8 +162,8 @@ test "asTool exposes the frozen definition, sequential policy, and binding point
     // Extension tools stay on the safe default: sequential execution.
     try testing.expectEqual(tool.BatchPolicy.sequential, t.batch_policy);
 
-    // The executor's identity IS the binding: the callback recovers the
-    // binding from this pointer, so it must be the binding's own address.
+    // The callback recovers the binding from this pointer, so it must be the
+    // binding's own address.
     const binding_ptr: ?*anyopaque = @ptrCast(&binding);
     try testing.expectEqual(binding_ptr, t.executor.ptr);
 }
@@ -185,8 +181,8 @@ test "executor forwards the exact frozen entry path" {
     });
     defer alloc.free(result.output);
 
-    // The frozen executable path reaches the environment verbatim — the
-    // executor neither resolves `current` nor joins/derives the path.
+    // The frozen executable path reaches the environment verbatim — no
+    // resolution, no joining.
     try testing.expectEqualStrings("/frozen/v1/bin/web-search", fake.saw_entry_path);
 }
 
@@ -203,8 +199,6 @@ test "executor forwards the model's raw arguments as a tool/call request" {
     });
     defer alloc.free(result.output);
 
-    // The binding's tool name is the JSON-RPC name; the model's raw arguments
-    // ride along untouched inside `arguments`.
     const parsed = try std.json.parseFromSlice(std.json.Value, alloc, fake.saw_request_json, .{});
     defer parsed.deinit();
     const obj = parsed.value.object;
@@ -245,8 +239,7 @@ test "application failure maps to a raw failed result without reformatting" {
     defer alloc.free(result.output);
 
     try testing.expect(!result.ok);
-    // invokeTool's diagnostic already carries the extension's message; the
-    // executor must not re-wrap it.
+    // The executor forwards invokeTool's diagnostic — no re-wrapping.
     try testing.expect(std.mem.indexOf(u8, result.output, "down") != null);
 }
 
@@ -274,8 +267,6 @@ test "cancellation propagates unchanged" {
     defer fake.deinit(alloc);
     var fs = DummyFs{};
 
-    // Host execution control surfaces as the same error out of the executor —
-    // never a failed tool result.
     try testing.expectError(error.Canceled, binding.asTool().executor.call(alloc, .{
         .args_json = "{}",
         .ctx = .{ .environment = fake.handle(), .fs = fs.handle(), .cwd = "ws" },
@@ -289,8 +280,6 @@ test "host faults propagate as errors, not failed results" {
     defer fake.deinit(alloc);
     var fs = DummyFs{};
 
-    // A host resource fault is an error out of the executor, never folded into
-    // a `.ok = false` result.
     try testing.expectError(error.OutOfMemory, binding.asTool().executor.call(alloc, .{
         .args_json = "{}",
         .ctx = .{ .environment = fake.handle(), .fs = fs.handle(), .cwd = "ws" },
