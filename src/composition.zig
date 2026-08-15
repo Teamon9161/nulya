@@ -10,6 +10,7 @@ const registry = @import("registry.zig");
 const prompt = @import("prompt.zig");
 const skill = @import("skill.zig");
 const tool = @import("tool.zig");
+const environment = @import("environment.zig");
 const ext_skills = @import("extension/skills.zig");
 const ext_tools = @import("extension/tools.zig");
 const manifest = @import("extension/manifest.zig");
@@ -52,8 +53,6 @@ pub const CompositionError = error{
     PinnedExtensionNotActive,
     /// The pinned extension is active but its frozen manifest declares no such tool.
     PinnedToolNotDeclared,
-    /// The pinned tool's extension declares no runtime, so it has no executable.
-    PinnedToolHasNoRuntime,
 };
 
 pub const SessionComposition = struct {
@@ -225,7 +224,10 @@ fn resolvePinnedBinding(
 
     const r = findResolved(resolved, parsed.ext_id) orelse return error.PinnedExtensionNotActive;
     const spec = findToolSpec(r.manifest, parsed.tool_name) orelse return error.PinnedToolNotDeclared;
-    const rt = r.manifest.runtime orelse return error.PinnedToolHasNoRuntime;
+    // A validated manifest requires `runtime` whenever it declares tools
+    // (manifest.validate -> MissingRuntime), so a found tool spec guarantees an
+    // executable; there is no runtime-less tool state to defend against.
+    const rt = r.manifest.runtime.?;
 
     // Exact, frozen executable path: <root>/<id>/versions/<r.version>/<entry>.
     // Built from the version pinned at composition time — never `current`, never
@@ -235,11 +237,10 @@ fn resolvePinnedBinding(
     const entry_abs = try std.fs.path.join(alloc, &.{ root_real, entry_rel });
     defer alloc.free(entry_abs);
 
-    const stable_id = try std.fmt.allocPrint(alloc, "ext:{s}/{s}", .{ parsed.ext_id, parsed.tool_name });
-    defer alloc.free(stable_id);
-
+    // `pin` already passed parseStableToolId, whose two segments reformat back
+    // to exactly `pin` (ids never contain `/`), so initOwned dupes it directly.
     return ext_tools.Binding.initOwned(alloc, .{
-        .id = stable_id,
+        .id = pin,
         .name = spec.name,
         .description = spec.description,
         .input_schema = spec.input_schema,
@@ -278,6 +279,41 @@ const ResolvedExtension = struct {
     manifest: manifest.Manifest,
 };
 
+/// Store/manifest faults that mean "this directory is not a usable extension"
+/// and are safe to skip during discovery. Anything else — host cancellation,
+/// `OutOfMemory`, real I/O failures — is a host fault and must propagate: an
+/// OOM must never masquerade as "extension skipped" or `PinnedExtensionNotActive`.
+fn isExtensionFault(err: anyerror) bool {
+    return switch (err) {
+        // Invalid extension identity.
+        error.InvalidId,
+        error.InvalidVersion,
+        // Bad `current` pointer or a frozen version failing integrity.
+        error.VersionNotFound,
+        error.VersionSealInvalid,
+        error.VersionManifestIdMismatch,
+        error.VersionPackageMissing,
+        error.VersionEntryNotFound,
+        // Unparseable or invalid manifest.
+        error.InvalidJson,
+        error.NotAnObject,
+        error.MissingField,
+        error.WrongType,
+        error.UnsupportedSchema,
+        error.MissingRuntime,
+        error.InvalidEntry,
+        error.NoContributions,
+        error.InvalidToolName,
+        error.ReservedToolName,
+        error.DuplicateToolName,
+        error.InvalidSkillPath,
+        error.InvalidSystemPromptPath,
+        error.DuplicateSystemPromptPath,
+        => true,
+        else => false,
+    };
+}
+
 fn resolveActiveExtensions(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir) ![]ResolvedExtension {
     const st = store.Store.init(io, root);
     var resolved: std.ArrayList(ResolvedExtension) = .empty;
@@ -286,16 +322,17 @@ fn resolveActiveExtensions(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Di
     var it = root.iterate();
     while (try it.next(io)) |entry| {
         if (entry.kind != .directory) continue;
-        // A malformed extension is skipped, but a cancellation is host execution
-        // control — it must propagate, never be mistaken for a broken extension.
+        // A malformed extension is skipped, but a host fault — cancellation,
+        // OOM, a real I/O failure — must propagate, never be mistaken for a
+        // broken extension (see isExtensionFault).
         const active = (st.activeVersion(alloc, entry.name) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
-            else => continue,
+            else => if (isExtensionFault(err)) continue else return err,
         }) orelse continue;
         defer alloc.free(active);
         var m = st.readManifest(alloc, entry.name, active) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
-            else => continue,
+            else => if (isExtensionFault(err)) continue else return err,
         };
         errdefer m.deinit();
 
@@ -578,6 +615,26 @@ test "parseStableToolId splits ext:<id>/<tool>, rejecting malformed pins" {
     try std.testing.expectError(error.InvalidStableToolId, parseStableToolId("ext:web.search/a/b"));
 }
 
+test "isExtensionFault classifies extension faults vs host faults" {
+    // Extension faults: skipped during discovery.
+    try std.testing.expect(isExtensionFault(error.InvalidId));
+    try std.testing.expect(isExtensionFault(error.InvalidVersion));
+    try std.testing.expect(isExtensionFault(error.VersionNotFound));
+    try std.testing.expect(isExtensionFault(error.VersionSealInvalid));
+    try std.testing.expect(isExtensionFault(error.VersionManifestIdMismatch));
+    try std.testing.expect(isExtensionFault(error.VersionPackageMissing));
+    try std.testing.expect(isExtensionFault(error.VersionEntryNotFound));
+    try std.testing.expect(isExtensionFault(error.InvalidJson));
+    try std.testing.expect(isExtensionFault(error.MissingRuntime));
+    try std.testing.expect(isExtensionFault(error.DuplicateToolName));
+    // Host faults: must propagate, never be read as "broken extension".
+    try std.testing.expect(!isExtensionFault(error.Canceled));
+    try std.testing.expect(!isExtensionFault(error.OutOfMemory));
+    try std.testing.expect(!isExtensionFault(error.AccessDenied));
+    try std.testing.expect(!isExtensionFault(error.FileSystem));
+    try std.testing.expect(!isExtensionFault(error.FileNotFound));
+}
+
 test "budget rejects an impossible tool count before any filesystem work" {
     // Below the permanent builtins.
     try std.testing.expectError(error.ToolBudgetTooSmall, validateBudget(.{ .max_tools = 1 }));
@@ -609,6 +666,84 @@ fn writeToolExtension(
     defer alloc.free(main_src);
     return testkit.writeFrozenVersion(alloc, io, root, id, manifest_bytes, &.{.{ .rel = "src/main.zig", .bytes = main_src }});
 }
+
+/// Scripted environment for the executor-chain test: records the frozen entry
+/// path each `runExtension` call receives and returns a canned success, so the
+/// full Composition -> Binding -> ToolExecutor -> invoke -> Environment chain is
+/// exercised without spawning a real process.
+const FakeEnv = struct {
+    io: std.Io,
+    response: []const u8 = "{\"jsonrpc\":\"2.0\",\"id\":\"call\",\"result\":{\"results\":[]}}",
+    saw_entry_path: []const u8 = "",
+
+    fn runExtension(ptr: *anyopaque, alloc: std.mem.Allocator, req: environment.ExtensionRequest) anyerror!environment.ExtensionOutcome {
+        const self: *FakeEnv = @ptrCast(@alignCast(ptr));
+        // Free the previous observation before allocating the next: the test
+        // calls the same env several times, and deinit frees only the latest.
+        if (self.saw_entry_path.len != 0) alloc.free(self.saw_entry_path);
+        self.saw_entry_path = "";
+        // Allocate everything before publishing to `self` so a mid-way failure
+        // (errdefer) can never leave a dangling `saw_entry_path`.
+        const saw = try alloc.dupe(u8, req.entry_path);
+        errdefer alloc.free(saw);
+        const stdout = try alloc.dupe(u8, self.response);
+        errdefer alloc.free(stdout);
+        const stderr = try alloc.dupe(u8, "");
+        self.saw_entry_path = saw;
+        return .{ .stdout = stdout, .stderr = stderr, .exit_code = 0, .timed_out = false };
+    }
+
+    fn dialect(ptr: *anyopaque) environment.Dialect {
+        _ = ptr;
+        return .bash;
+    }
+
+    fn runShell(ptr: *anyopaque, alloc: std.mem.Allocator, req: environment.ShellRequest) anyerror!environment.ShellOutcome {
+        _ = ptr;
+        _ = alloc;
+        _ = req;
+        return error.NotSupported;
+    }
+
+    fn handle(self: *FakeEnv) environment.Environment {
+        return .{
+            .io = self.io,
+            .ptr = self,
+            .vtable = &.{
+                .dialect = dialect,
+                .runShell = runShell,
+                .runExtension = runExtension,
+            },
+        };
+    }
+
+    fn deinit(self: *FakeEnv, alloc: std.mem.Allocator) void {
+        if (self.saw_entry_path.len != 0) alloc.free(self.saw_entry_path);
+    }
+};
+
+/// The executor never touches `req.ctx.fs`; a stub keeps the `ToolContext`
+/// well-formed without reaching the real filesystem.
+const DummyFs = struct {
+    fn readFileAlloc(ptr: *anyopaque, alloc: std.mem.Allocator, path: []const u8, max_bytes: usize) anyerror![]u8 {
+        _ = ptr;
+        _ = alloc;
+        _ = path;
+        _ = max_bytes;
+        return error.NotSupported;
+    }
+
+    fn atomicWriteFile(ptr: *anyopaque, path: []const u8, data: []const u8) anyerror!void {
+        _ = ptr;
+        _ = path;
+        _ = data;
+        return error.NotSupported;
+    }
+
+    fn handle(self: *DummyFs) environment.WorkspaceFs {
+        return .{ .ptr = self, .vtable = &.{ .readFileAlloc = readFileAlloc, .atomicWriteFile = atomicWriteFile } };
+    }
+};
 
 test "a selected extension tool is provider-visible and freezes to the composition-time version" {
     const alloc = std.testing.allocator;
@@ -651,6 +786,85 @@ test "a selected extension tool is provider-visible and freezes to the compositi
     var comp2 = try SessionComposition.init(alloc, io, cwd, ".", .{ .pinned_native_tools = &pins });
     defer comp2.deinit(alloc);
     try std.testing.expect(std.mem.indexOf(u8, comp2.extension_tool_bindings[0].entry_path, v2) != null);
+}
+
+test "executor calls reach the composition-time frozen entry path" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmpPath(alloc, io, tmp.dir);
+    defer alloc.free(cwd);
+
+    const v1 = try writeToolExtension(alloc, io, tmp.dir, "web.search", "web_search", "v1");
+    defer alloc.free(v1);
+    const v2 = try writeToolExtension(alloc, io, tmp.dir, "web.search", "web_search", "v2");
+    defer alloc.free(v2);
+    try testkit.activate(alloc, io, tmp.dir, "web.search", v1);
+
+    const pins = [_][]const u8{"ext:web.search/web_search"};
+    var session_a = try SessionComposition.init(alloc, io, cwd, ".", .{ .pinned_native_tools = &pins });
+    defer session_a.deinit(alloc);
+    const tool_a = session_a.tools.lookup("web_search") orelse return error.TestUnexpectedResult;
+    var env_a = FakeEnv{ .io = io };
+    defer env_a.deinit(alloc);
+    var fs = DummyFs{};
+    const req_a: tool.ToolRequest = .{ .args_json = "{}", .ctx = .{ .environment = env_a.handle(), .fs = fs.handle(), .cwd = "ws" } };
+
+    // Session A's executor hands the environment the v1 executable.
+    {
+        const result = try tool_a.executor.call(alloc, req_a);
+        defer alloc.free(result.output);
+        try std.testing.expect(std.mem.indexOf(u8, env_a.saw_entry_path, v1) != null);
+        try std.testing.expect(std.mem.indexOf(u8, env_a.saw_entry_path, v2) == null);
+    }
+
+    // Activate v2 mid-session: A's executor still reaches v1...
+    try testkit.activate(alloc, io, tmp.dir, "web.search", v2);
+    {
+        const result = try tool_a.executor.call(alloc, req_a);
+        defer alloc.free(result.output);
+        try std.testing.expect(std.mem.indexOf(u8, env_a.saw_entry_path, v1) != null);
+        try std.testing.expect(std.mem.indexOf(u8, env_a.saw_entry_path, v2) == null);
+    }
+
+    // ...while a fresh session's executor reaches v2.
+    var session_b = try SessionComposition.init(alloc, io, cwd, ".", .{ .pinned_native_tools = &pins });
+    defer session_b.deinit(alloc);
+    const tool_b = session_b.tools.lookup("web_search") orelse return error.TestUnexpectedResult;
+    var env_b = FakeEnv{ .io = io };
+    defer env_b.deinit(alloc);
+    const req_b: tool.ToolRequest = .{ .args_json = "{}", .ctx = .{ .environment = env_b.handle(), .fs = fs.handle(), .cwd = "ws" } };
+    {
+        const result = try tool_b.executor.call(alloc, req_b);
+        defer alloc.free(result.output);
+        try std.testing.expect(std.mem.indexOf(u8, env_b.saw_entry_path, v2) != null);
+        try std.testing.expect(std.mem.indexOf(u8, env_b.saw_entry_path, v1) == null);
+    }
+}
+
+test "a corrupted frozen version is skipped during discovery, not fatal" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmpPath(alloc, io, tmp.dir);
+    defer alloc.free(cwd);
+
+    const v1 = try writeToolExtension(alloc, io, tmp.dir, "web.search", "web_search", "v1");
+    defer alloc.free(v1);
+    try testkit.activate(alloc, io, tmp.dir, "web.search", v1);
+
+    // Break the seal so integrity validation fails for the active version.
+    const seal_sub = try std.fs.path.join(alloc, &.{ "web.search", "versions", v1, integrity.seal_file });
+    defer alloc.free(seal_sub);
+    try tmp.dir.writeFile(io, .{ .sub_path = seal_sub, .data = "{}" });
+
+    // Discovery skips the broken extension rather than aborting the session.
+    var comp = try SessionComposition.init(alloc, io, cwd, ".", .{});
+    defer comp.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 0), comp.pinned_extensions.len);
+    try std.testing.expectEqual(@as(usize, 0), comp.extension_tool_bindings.len);
 }
 
 test "an active but unpinned extension tool is not natively visible" {

@@ -1,10 +1,11 @@
 //! The tool registry.
 //!
 //! In the immutable kernel there are exactly two builtin tools: shell and edit
-//! (DESIGN §6). Everything else the AI grows as an extension and invokes through
-//! `shell -> nulya ext run` (DESIGN §5, §7). A session receives a frozen
-//! `ToolSetSnapshot` through `SessionComposition`; execution never queries a live
-//! registry mid-step.
+//! (DESIGN §6). Everything else the AI grows as an extension: selected tools are
+//! exposed natively this session through `SessionComposition` pins, and every
+//! other extension capability is invoked through `nulya ext run` (DESIGN §5, §7).
+//! A session receives a frozen `ToolSetSnapshot` through `SessionComposition`;
+//! execution never queries a live registry mid-step.
 
 const std = @import("std");
 const tool = @import("tool.zig");
