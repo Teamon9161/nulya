@@ -88,7 +88,13 @@ fn runDemo(alloc: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) 
             .ranked_native_tools = ranked_ids,
             .max_tools = cfg.registry.max_tools,
         },
-    }, .{ .workspace = std.Io.Dir.cwd(), .session_path = spath, .session_id = id, .model_profile = profile });
+    }, .{
+        .workspace = std.Io.Dir.cwd(),
+        .session_path = spath,
+        .session_id = id,
+        .model_profile = profile,
+        .model_identity = launch.resolveDescriptor(cfg.provider, profile),
+    });
     defer sess.deinit();
 
     std.debug.print("session: {s}\n", .{id});

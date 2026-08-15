@@ -56,6 +56,14 @@ pub const Ledger = struct {
     /// session file (DESIGN §3). A ledger created with `init` is pure memory (the
     /// test/in-process shape); `createDurable` / `openDurable` add the backend.
     durable: ?Durable = null,
+    /// Delivery ids of inbox proposals already applied to this ledger (DESIGN
+    /// §3.4). Each drained event persists its inbox filename as `origin` on its
+    /// JSONL line; this set is that column, rebuilt on replay. It makes inbox
+    /// application EXACTLY-once: a crash between "append to ledger" and "delete
+    /// inbox file" leaves the file behind, and the next drain sees the origin
+    /// already here and skips it. Never projected into PromptIR — it is a
+    /// delivery-bookkeeping column, not model-visible state.
+    origins: std.StringHashMapUnmanaged(void) = .empty,
 
     pub fn init(alloc: std.mem.Allocator) Ledger {
         return .{ .alloc = alloc, .events = .empty };
@@ -64,6 +72,9 @@ pub const Ledger = struct {
     pub fn deinit(self: *Ledger) void {
         for (self.events.items) |e| freeEvent(self.alloc, e);
         self.events.deinit(self.alloc);
+        var it = self.origins.keyIterator();
+        while (it.next()) |k| self.alloc.free(k.*);
+        self.origins.deinit(self.alloc);
         if (self.durable) |*d| d.deinit();
     }
 
@@ -76,17 +87,50 @@ pub const Ledger = struct {
     /// returns; a persistence failure rewinds the in-memory append so memory and
     /// file never diverge.
     pub fn append(self: *Ledger, e: Event) !void {
+        return self.appendInternal(e, null);
+    }
+
+    /// Append `e` and record `origin` as its inbox delivery id (persisted on the
+    /// JSONL line so the exactly-once guarantee survives crash + reopen). Only
+    /// `drainInbox` uses this; ordinary appends carry no origin.
+    pub fn appendWithOrigin(self: *Ledger, e: Event, origin: []const u8) !void {
+        return self.appendInternal(e, origin);
+    }
+
+    fn appendInternal(self: *Ledger, e: Event, origin: ?[]const u8) !void {
+        // Prepare origin tracking up front — dupe the key and reserve the map
+        // slot — so that once the durable line is written nothing left can fail
+        // and desync the set from the file. A duplicate origin needs no slot.
+        var origin_key: ?[]u8 = null;
+        if (origin) |o| {
+            if (!self.origins.contains(o)) {
+                origin_key = try self.alloc.dupe(u8, o);
+                self.origins.ensureUnusedCapacity(self.alloc, 1) catch |err| {
+                    self.alloc.free(origin_key.?);
+                    return err;
+                };
+            }
+        }
+        errdefer if (origin_key) |k| self.alloc.free(k);
+
         const owned = try cloneEvent(self.alloc, e);
         errdefer freeEvent(self.alloc, owned);
         try self.events.append(self.alloc, owned);
         if (self.durable) |*d| {
             // seq is the 1-based file position; the just-appended event is at it.
             const seq: u64 = self.events.items.len;
-            d.persist(self.alloc, e, seq) catch |err| {
+            d.persist(self.alloc, e, seq, origin) catch |err| {
                 _ = self.events.pop(); // undo memory append; errdefer frees `owned`
                 return err;
             };
         }
+        // Committed: record the origin (reserved above, so this cannot fail).
+        if (origin_key) |k| self.origins.putAssumeCapacity(k, {});
+    }
+
+    /// True if an inbox proposal with delivery id `origin` was already applied.
+    pub fn containsOrigin(self: *const Ledger, origin: []const u8) bool {
+        return self.origins.contains(origin);
     }
 
     /// The frozen session header, when this ledger is backed by a session file.
@@ -230,11 +274,15 @@ fn freeToolResult(alloc: std.mem.Allocator, result: ToolResultEntry) void {
 // + the native tool selection), so any process that reopens the file rebuilds
 // the identical composition without re-scanning `current` or re-ranking usage.
 //
-// The file has exactly ONE writer: the process that holds it open. Every other
-// process — a `nulya ext activate` in the model's shell, a driver's `session
-// append` — PROPOSES events through the sibling inbox directory (below), and
-// the writer appends them at its next step boundary. Readers only ever open the
-// file read-only. `persist` refuses to write if the file grew behind its back.
+// The file has exactly ONE writer, enforced by an exclusive advisory lock taken
+// atomically when the writer opens the file: a second writer's open fails fast
+// with `error.SessionBusy` rather than racing. The lock is held for the writer's
+// whole lifetime and released by the OS when the handle closes (so a crashed
+// writer leaves no stale lock). Every other process — a `nulya ext activate` in
+// the model's shell, a driver's `session append` — PROPOSES events through the
+// sibling inbox directory (below), and the writer appends them at its next step
+// boundary. Readers open the file read-only (no lock), so the lease never blocks
+// them. `persist`'s length guard stays as a second-layer assertion.
 
 /// A parent pointer for fork / compaction: the file and cut point a session
 /// branched from. Absent for a root session.
@@ -258,6 +306,24 @@ pub const FrozenComposition = struct {
     native_tools: []const []const u8 = &.{},
 };
 
+/// The RESOLVED model identity frozen at session creation (DESIGN §3, physics
+/// §2/§5): config chooses the model when a session is created; config can never
+/// change the model of an existing session. On resume the writer reconstructs
+/// exactly this model, re-resolving only the credential from `api_key_env` in
+/// the environment — no secret is stored, and there is no silent fallback to a
+/// different provider. `provider == ""` marks a legacy header with no frozen
+/// identity (treated as scripted).
+pub const ModelDescriptor = struct {
+    /// `"scripted"` | `"openai"` (the `config.ProviderKind` tag name).
+    provider: []const u8 = "",
+    /// The concrete model name, already defaulted (e.g. `gpt-4o-mini`), not a
+    /// profile alias.
+    model: []const u8 = "",
+    base_url: []const u8 = "",
+    /// The env var the credential is read from on resume (a name, not a secret).
+    api_key_env: []const u8 = "",
+};
+
 /// The first line of a session file. Its JSON shape IS this struct — encoded and
 /// decoded by `std.json` typed (de)serialization — so the wire format and the
 /// type cannot drift. Everything the model sees is a pure function of this
@@ -267,7 +333,11 @@ pub const Header = struct {
     v: u32 = 1,
     session: []const u8 = "",
     parent: ?ParentRef = null,
+    /// The provider PROFILE name selected at creation — kept for display and for
+    /// resolving generation options (e.g. effort). The model IDENTITY is frozen
+    /// separately in `model_identity`, which config changes can never alter.
     model: []const u8 = "",
+    model_identity: ModelDescriptor = .{},
     created: []const u8 = "",
     composition: FrozenComposition = .{},
 };
@@ -282,8 +352,13 @@ pub const LedgerError = error{
     CorruptLedger,
     /// The file's first line is not a `"kind":"header"` record.
     MissingHeader,
-    /// The session file grew behind this ledger's back — a second writer. The
-    /// in-memory append is rewound and the file is left untouched.
+    /// Another process already holds the session's writer lease (its exclusive
+    /// advisory lock). The primary single-writer guarantee: only one writer opens
+    /// the file at a time, so two `session step` runs can never interleave writes.
+    SessionBusy,
+    /// The session file grew behind this ledger's back — a second writer slipped
+    /// past the lease (belt-and-suspenders). The in-memory append is rewound and
+    /// the file is left untouched.
     ConcurrentWriter,
 };
 
@@ -295,6 +370,13 @@ const json_opts: std.json.ParseOptions = .{ .allocate = .alloc_always, .ignore_u
 const Durable = struct {
     io: std.Io,
     file: std.Io.File,
+    /// The writer lease: an exclusive advisory lock on the sibling `<stem>.lock`
+    /// file, held for this writer's whole lifetime and released by the OS when
+    /// the handle closes (so a crash leaves no stale lock). The lock lives on a
+    /// dedicated sidecar, never on the session file itself: on Windows a file's
+    /// own lock is mandatory and would block readers, so locking `<stem>.lock`
+    /// instead keeps `readHeader` / `events` tails unblocked.
+    lock_file: std.Io.File,
     /// Byte offset where the next line is written (end of file).
     end: u64,
     owned_header: OwnedHeader,
@@ -302,10 +384,11 @@ const Durable = struct {
     fn deinit(self: *Durable) void {
         self.owned_header.deinit();
         self.file.close(self.io);
+        self.lock_file.close(self.io);
     }
 
-    fn persist(self: *Durable, alloc: std.mem.Allocator, e: Event, seq: u64) !void {
-        const line = try encodeEventLine(alloc, e, seq);
+    fn persist(self: *Durable, alloc: std.mem.Allocator, e: Event, seq: u64, origin: ?[]const u8) !void {
+        const line = try encodeEventLineOrigin(alloc, e, seq, origin);
         defer alloc.free(line);
         // Single-writer guard: if the file is not exactly where this ledger left
         // it, another process wrote to it. Refuse rather than overwrite its line
@@ -315,6 +398,20 @@ const Durable = struct {
         self.end += line.len;
     }
 };
+
+/// Acquire the exclusive writer lease for the session at `path` (relative to
+/// `dir`): an advisory lock on the sibling `<stem>.lock`, taken non-blocking so a
+/// second writer fails fast with `error.SessionBusy` instead of racing. The
+/// returned handle must stay open for the writer's lifetime; closing it releases
+/// the lease. Caller frees nothing else.
+fn acquireWriterLease(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8) !std.Io.File {
+    const lock_path = try siblingPath(alloc, path, ".lock");
+    defer alloc.free(lock_path);
+    return dir.createFile(io, lock_path, .{ .truncate = false, .read = true, .lock = .exclusive, .lock_nonblocking = true }) catch |err| switch (err) {
+        error.WouldBlock => error.SessionBusy,
+        else => err,
+    };
+}
 
 /// Create a new session file at `path` (relative to `dir`), writing `hdr` as
 /// line 1, and return a durable ledger with no events yet. The parent directory
@@ -327,6 +424,9 @@ pub fn createDurable(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path
     const owned = try parseHeaderLine(alloc, line);
     errdefer owned.deinit();
 
+    var lock_file = try acquireWriterLease(alloc, io, dir, path);
+    errdefer lock_file.close(io);
+
     var file = try dir.createFile(io, path, .{ .truncate = true, .read = true, .exclusive = true });
     errdefer file.close(io);
     try file.writePositionalAll(io, line, 0);
@@ -334,7 +434,7 @@ pub fn createDurable(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path
     return .{
         .alloc = alloc,
         .events = .empty,
-        .durable = .{ .io = io, .file = file, .end = line.len, .owned_header = owned },
+        .durable = .{ .io = io, .file = file, .lock_file = lock_file, .end = line.len, .owned_header = owned },
     };
 }
 
@@ -347,6 +447,11 @@ pub fn createDurable(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path
 /// `loop.completeInterruptedToolBatch`. Readers must not use this — see
 /// `readHeader` and the raw-line tail in `cli.zig`.
 pub fn openDurable(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8) !Ledger {
+    // Take the writer lease FIRST: once held, no other writer is mid-append, so
+    // the bytes read below are a stable snapshot (readers never write).
+    var lock_file = try acquireWriterLease(alloc, io, dir, path);
+    errdefer lock_file.close(io);
+
     const bytes = try dir.readFileAlloc(io, path, alloc, .unlimited);
     defer alloc.free(bytes);
 
@@ -371,7 +476,7 @@ pub fn openDurable(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: 
     errdefer file.close(io);
     if (clean_end != bytes.len) try file.setLength(io, clean_end);
 
-    l.durable = .{ .io = io, .file = file, .end = clean_end, .owned_header = owned };
+    l.durable = .{ .io = io, .file = file, .lock_file = lock_file, .end = clean_end, .owned_header = owned };
     return l;
 }
 
@@ -413,7 +518,10 @@ fn replayEventLine(l: *Ledger, line: []const u8) !void {
     const parsed = try parseEventLine(l.alloc, line);
     defer parsed.deinit();
     if (parsed.value.seq != l.events.items.len + 1) return error.CorruptLedger;
-    try l.append(try toEvent(parsed.arena.allocator(), parsed.value));
+    const e = try toEvent(parsed.arena.allocator(), parsed.value);
+    // Rebuild the delivery-id set from the persisted `origin` column so inbox
+    // application stays exactly-once across a crash + reopen.
+    if (parsed.value.origin) |o| try l.appendWithOrigin(e, o) else try l.append(e);
 }
 
 // ── Header / event codec ────────────────────────────────────────────────────
@@ -442,12 +550,20 @@ fn parseHeaderLine(gpa: std.mem.Allocator, line: []const u8) !OwnedHeader {
 }
 
 pub fn encodeEventLine(alloc: std.mem.Allocator, e: Event, seq: u64) ![]u8 {
+    return encodeEventLineOrigin(alloc, e, seq, null);
+}
+
+/// Like `encodeEventLine`, but also writes an `origin` field (the inbox delivery
+/// id) when present. `origin` is a durable dedup column, never projected to the
+/// model — only `drainInbox`'d events carry it.
+pub fn encodeEventLineOrigin(alloc: std.mem.Allocator, e: Event, seq: u64, origin: ?[]const u8) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(alloc);
     errdefer out.deinit();
     var jw: std.json.Stringify = .{ .writer = &out.writer };
     try jw.beginObject();
     try jw.objectField("seq");
     try jw.write(seq);
+    if (origin) |o| try writeField(&jw, "origin", o);
     try encodeEventBody(&jw, e);
     try jw.endObject();
     try out.writer.writeByte('\n');
@@ -512,6 +628,8 @@ fn writeField(jw: *std.json.Stringify, name: []const u8, value: []const u8) !voi
 /// checks the ones its kind requires.
 pub const WireEvent = struct {
     seq: u64 = 0,
+    /// Inbox delivery id, present only on drained events (see `Ledger.origins`).
+    origin: ?[]const u8 = null,
     kind: []const u8,
     text: ?[]const u8 = null,
     calls: ?[]const WireCall = null,
@@ -611,10 +729,13 @@ pub fn depositEvent(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, sess
 }
 
 /// Drain every deposited `.json` in the session inbox into `l`, in filename
-/// order, deleting each file once appended. A missing inbox is a no-op. A
-/// `capability_note` already present in the ledger is skipped (still deleted),
-/// so a crash between append and delete never re-announces a version; other
-/// kinds have no identity to dedupe on and are appended as-is.
+/// order, deleting each file once appended. A missing inbox is a no-op.
+///
+/// Application is EXACTLY-once even though delivery is at-least-once: each event
+/// records its inbox filename as `origin` on the ledger line, so a crash between
+/// append and delete leaves the file behind and the next drain skips it (its
+/// origin is already in the ledger). Capability notes additionally dedupe on
+/// content (id+version), so re-announcing a version under any name is a no-op.
 pub fn drainInbox(alloc: std.mem.Allocator, io: std.Io, l: *Ledger, base: std.Io.Dir, session_path: []const u8) !void {
     const inbox = try inboxPath(alloc, session_path);
     defer alloc.free(inbox);
@@ -642,16 +763,25 @@ pub fn drainInbox(alloc: std.mem.Allocator, io: std.Io, l: *Ledger, base: std.Io
     }.lessThan);
 
     for (names.items) |name| {
+        // The inbox filename is the proposal's stable delivery id. If it was
+        // already applied (a crash left the file behind after the append), just
+        // delete it — never re-apply.
+        if (l.containsOrigin(name)) {
+            try dir.deleteFile(io, name);
+            continue;
+        }
         const bytes = try dir.readFileAlloc(io, name, alloc, .limited(4 << 20));
         defer alloc.free(bytes);
         const parsed = try parseEventLine(alloc, bytes);
         defer parsed.deinit();
         const e = try toEvent(parsed.arena.allocator(), parsed.value);
-        const already = switch (e) {
+        // Content dedup for notes: never announce the same version twice, even
+        // if re-proposed under a different filename.
+        const already_content = switch (e) {
             .capability_note => |n| l.containsNote(n.id, n.version),
             else => false,
         };
-        if (!already) try l.append(e);
+        if (!already_content) try l.appendWithOrigin(e, name);
         try dir.deleteFile(io, name);
     }
 }
@@ -704,6 +834,7 @@ const sample_header: Header = .{
     .session = "s-test",
     .parent = .{ .session = "s-parent", .seq = 41 },
     .model = "openai",
+    .model_identity = .{ .provider = "openai", .model = "gpt-4o-mini", .base_url = "https://api.openai.com/v1", .api_key_env = "OPENAI_API_KEY" },
     .created = "2026-08-15T00:00:00Z",
     .composition = .{
         .active = &.{.{ .id = "web.search", .version = "v-0123456789abcdef01234567" }},
@@ -725,6 +856,10 @@ test "header encode/parse round-trips every field" {
     try std.testing.expectEqualStrings("s-parent", h.parent.?.session);
     try std.testing.expectEqual(@as(u64, 41), h.parent.?.seq);
     try std.testing.expectEqualStrings("openai", h.model);
+    try std.testing.expectEqualStrings("openai", h.model_identity.provider);
+    try std.testing.expectEqualStrings("gpt-4o-mini", h.model_identity.model);
+    try std.testing.expectEqualStrings("https://api.openai.com/v1", h.model_identity.base_url);
+    try std.testing.expectEqualStrings("OPENAI_API_KEY", h.model_identity.api_key_env);
     try std.testing.expectEqual(@as(usize, 1), h.composition.active.len);
     try std.testing.expectEqualStrings("web.search", h.composition.active[0].id);
     try std.testing.expectEqualStrings("v-0123456789abcdef01234567", h.composition.active[0].version);
@@ -771,7 +906,6 @@ test "durable create then open replays a block-identical ledger with monotonic s
 
     // Reopen in a fresh ledger: header and every event survive verbatim.
     var reopened = try openDurable(alloc, io, tmp.dir, "s.jsonl");
-    defer reopened.deinit();
     try std.testing.expectEqual(@as(usize, 4), reopened.len());
     try std.testing.expectEqualStrings("s-test", reopened.header().?.session);
     try std.testing.expectEqualStrings("ext:web.search/web_search", reopened.header().?.composition.native_tools[0]);
@@ -784,12 +918,17 @@ test "durable create then open replays a block-identical ledger with monotonic s
     try std.testing.expect(std.mem.indexOf(u8, raw, "\"seq\":1,") != null);
     try std.testing.expect(std.mem.indexOf(u8, raw, "\"seq\":4,") != null);
 
-    // Appending after reopen continues the seq sequence and persists.
+    // Appending after reopen continues the seq sequence and persists. Close this
+    // writer before the next opens — the lease permits only one writer at a time.
     try reopened.append(.{ .user_text = "again" });
+    const reopened_events = reopened.len();
+    reopened.deinit();
+
     var third = try openDurable(alloc, io, tmp.dir, "s.jsonl");
     defer third.deinit();
     try std.testing.expectEqual(@as(usize, 5), third.len());
-    try expectEventsEqual(reopened.view(), third.view());
+    try std.testing.expectEqual(reopened_events, third.len());
+    try std.testing.expectEqualStrings("again", third.view()[4].user_text);
 }
 
 test "openDurable drops a torn final line and truncates it" {
@@ -809,12 +948,14 @@ test "openDurable drops a torn final line and truncates it" {
     try tmp.dir.writeFile(io, .{ .sub_path = "s.jsonl", .data = contents });
 
     var l = try openDurable(alloc, io, tmp.dir, "s.jsonl");
-    defer l.deinit();
     try std.testing.expectEqual(@as(usize, 1), l.len());
     try std.testing.expectEqualStrings("kept", l.view()[0].user_text);
 
-    // The torn tail was truncated, so the next append lands cleanly.
+    // The torn tail was truncated, so the next append lands cleanly. Close this
+    // writer before reopening — the lease permits only one writer at a time.
     try l.append(.{ .user_text = "next" });
+    l.deinit();
+
     var reopened = try openDurable(alloc, io, tmp.dir, "s.jsonl");
     defer reopened.deinit();
     try std.testing.expectEqual(@as(usize, 2), reopened.len());
@@ -863,7 +1004,34 @@ test "a file whose first line is not a header is rejected" {
     try std.testing.expectError(error.MissingHeader, openDurable(alloc, io, tmp.dir, "s.jsonl"));
 }
 
-test "a second writer is refused, and the refused append is rewound" {
+test "the writer holds an exclusive lease: a second writer is refused with SessionBusy" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var a = try createDurable(alloc, io, tmp.dir, "s.jsonl", .{ .session = "s" });
+    try a.append(.{ .user_text = "one" });
+
+    // While `a` holds the file open, no other process can open it as a writer:
+    // both create and open fail fast rather than racing on the same offset.
+    try std.testing.expectError(error.SessionBusy, createDurable(alloc, io, tmp.dir, "s.jsonl", .{ .session = "s" }));
+    try std.testing.expectError(error.SessionBusy, openDurable(alloc, io, tmp.dir, "s.jsonl"));
+
+    // A reader (read-only, no lock) is never blocked by the lease.
+    var hdr = try readHeader(alloc, io, tmp.dir, "s.jsonl");
+    hdr.deinit();
+
+    // Once `a` releases the lease, the next writer opens cleanly and continues.
+    a.deinit();
+    var b = try openDurable(alloc, io, tmp.dir, "s.jsonl");
+    defer b.deinit();
+    try std.testing.expectEqual(@as(usize, 1), b.len());
+    try b.append(.{ .user_text = "two" });
+    try std.testing.expectEqual(@as(usize, 2), b.len());
+}
+
+test "persist's length guard rewinds the in-memory append if the file grew behind its back" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -873,22 +1041,12 @@ test "a second writer is refused, and the refused append is rewound" {
     defer a.deinit();
     try a.append(.{ .user_text = "one" });
 
-    // Another process reopens the same file and appends behind `a`'s back.
-    {
-        var b = try openDurable(alloc, io, tmp.dir, "s.jsonl");
-        defer b.deinit();
-        try b.append(.{ .user_text = "two" });
-    }
-
-    // `a` refuses to write over `b`'s line; its memory is rewound too.
-    try std.testing.expectError(error.ConcurrentWriter, a.append(.{ .user_text = "three" }));
+    // Second-layer assertion: the lease makes two writers impossible in practice,
+    // but if `end` ever disagreed with the file length, `persist` refuses to write
+    // and rewinds the in-memory append rather than punching a hole or overwriting.
+    a.durable.?.end -= 1;
+    try std.testing.expectError(error.ConcurrentWriter, a.append(.{ .user_text = "two" }));
     try std.testing.expectEqual(@as(usize, 1), a.len());
-
-    // The file holds exactly what was legitimately written.
-    var c = try openDurable(alloc, io, tmp.dir, "s.jsonl");
-    defer c.deinit();
-    try std.testing.expectEqual(@as(usize, 2), c.len());
-    try std.testing.expectEqualStrings("two", c.view()[1].user_text);
 }
 
 test "siblingPath names <stem><suffix> next to the session file" {
@@ -910,7 +1068,6 @@ test "inbox: deposits drain in name order, dedupe notes, and never touch the mai
     const spath = "s.jsonl";
 
     var l = try createDurable(alloc, io, tmp.dir, spath, .{ .session = "s" });
-    defer l.deinit();
 
     // Two processes deposit: a driver's user text and a note, out of order.
     try depositEvent(alloc, io, tmp.dir, spath, "note-demo-v-aaaa", .{ .capability_note = .{ .id = "demo", .version = "v-aaaa", .text = "n" } });
@@ -929,10 +1086,48 @@ test "inbox: deposits drain in name order, dedupe notes, and never touch the mai
     try drainInbox(alloc, io, &l, tmp.dir, spath);
     try std.testing.expectEqual(@as(usize, 2), l.len());
 
-    // Everything drained is on disk in order.
+    // Everything drained is on disk in order. Close this writer before reopening
+    // — the lease permits only one writer at a time.
+    l.deinit();
+
     var reopened = try openDurable(alloc, io, tmp.dir, spath);
     defer reopened.deinit();
-    try expectEventsEqual(l.view(), reopened.view());
+    try std.testing.expectEqual(@as(usize, 2), reopened.len());
+    try std.testing.expectEqualStrings("hello", reopened.view()[0].user_text);
+    try std.testing.expect(reopened.containsNote("demo", "v-aaaa"));
+}
+
+test "inbox application is exactly-once across a crash between append and delete" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const spath = "s.jsonl";
+
+    // Deposit a user turn, then simulate a drain that appended the event (with its
+    // inbox filename as origin) but CRASHED before deleting the inbox file.
+    {
+        var l = try createDurable(alloc, io, tmp.dir, spath, .{ .session = "s" });
+        defer l.deinit();
+        try depositEvent(alloc, io, tmp.dir, spath, "msg-0001", .{ .user_text = "hello" });
+        try l.appendWithOrigin(.{ .user_text = "hello" }, "msg-0001.json");
+        try std.testing.expectEqual(@as(usize, 1), l.len());
+    }
+
+    // The persisted line carries the origin so a fresh writer can tell it was
+    // already applied.
+    const raw = try tmp.dir.readFileAlloc(io, spath, alloc, .unlimited);
+    defer alloc.free(raw);
+    try std.testing.expect(std.mem.indexOf(u8, raw, "\"origin\":\"msg-0001.json\"") != null);
+
+    // Reopen (replay rebuilds the origin set) and drain: the leftover inbox file
+    // is recognized as already-applied — deleted, never re-appended.
+    var reopened = try openDurable(alloc, io, tmp.dir, spath);
+    defer reopened.deinit();
+    try std.testing.expect(reopened.containsOrigin("msg-0001.json"));
+    try drainInbox(alloc, io, &reopened, tmp.dir, spath);
+    try std.testing.expectEqual(@as(usize, 1), reopened.len());
+    try std.testing.expectEqualStrings("hello", reopened.view()[0].user_text);
 }
 
 test "draining a missing inbox is a no-op" {

@@ -37,6 +37,22 @@ pub fn isScript(rt: Runtime) bool {
     return !std.mem.startsWith(u8, rt.entry, "bin/");
 }
 
+/// How an extension version is materialized — the one axis that decides what
+/// belongs in its content-addressed identity (DESIGN §7.1, §7.4):
+///   - `data`     : no runtime at all (pure skills / system prompts). Identity is
+///                  the package snapshot alone; building needs no compiler.
+///   - `script`   : a runtime entry frozen and run as-is (`src/…`). Same as data
+///                  for identity purposes: no compilation, so no compiler/target.
+///   - `compiled` : a Zig runtime built into `bin/…`. Its binary depends on the
+///                  compiler and host target, so BOTH enter the version id.
+/// Only `compiled` requires a toolchain; `data` and `script` never touch zig.
+pub const ImplementationKind = enum { data, script, compiled };
+
+pub fn implementationKind(m: Manifest) ImplementationKind {
+    const rt = m.runtime orelse return .data;
+    return if (isScript(rt)) .script else .compiled;
+}
+
 pub const ToolSpec = struct {
     name: []const u8,
     description: []const u8,

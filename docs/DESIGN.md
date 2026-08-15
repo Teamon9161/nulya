@@ -112,18 +112,22 @@ UI / trajectory / metrics 是 ledger 的投影，不持久化 mutable 状态。*
 一场 session = 一个 JSONL 文件 `.nulya/sessions/<id>.jsonl`：第一行是冻结的 header，之后每行一个 `{"seq":n,…}` 事件（seq 从 1 单调递增）。
 
 ```jsonl
-{"kind":"header","v":1,"session":"s-…","parent":{"session":"s-…","seq":41}|null,"model":"…","created":"…","composition":{"active":[{"id":"web.search","version":"v-…"}],"native_tools":["ext:web.search/web_search"]}}
-{"seq":1,"kind":"user_text","text":"…"}
+{"kind":"header","v":1,"session":"s-…","parent":{"session":"s-…","seq":41}|null,"model":"openai","model_identity":{"provider":"openai","model":"gpt-4o-mini","base_url":"https://…","api_key_env":"OPENAI_API_KEY"},"created":"…","composition":{"active":[{"id":"web.search","version":"v-…"}],"native_tools":["ext:web.search/web_search"]}}
+{"seq":1,"origin":"msg-….json","kind":"user_text","text":"…"}
 {"seq":2,"kind":"assistant","text":"…","calls":[{"id":"…","tool":"…","args":"…"}]}
 {"seq":3,"kind":"tool_results","results":[{"call_id":"…","ok":true,"output":"…","spill_path":null}]}
-{"seq":4,"kind":"capability_note","id":"…","version":"…","text":"…"}
+{"seq":4,"origin":"note-….json","kind":"capability_note","id":"…","version":"…","text":"…"}
 ```
+
+（`origin` 只出现在经 inbox 排干进来的事件行上，是投递去重列，绝不投影给模型；见"单写者"条。）
 
 - **一个文件 = 一个 generation = 一个 cache scope。** 文件只 append，所以 PromptIR 的 stable-block 前缀不变量（§1）成了文件系统性质。没有会 bump generation 的事件（§11）。
 - **header 的 JSON 形状就是 `ledger.Header` 结构体**（`std.json` 类型化编解码，`OwnedHeader = std.json.Parsed(Header)`）；读端忽略未知字段，所以新写者多出的字段不破坏旧读者。事件行保持平铺的 `kind` 形状（driver 读起来方便），解码经 `WireEvent`。
-- **composition 冻结进 header。** header 记录本场 active 的每个 extension 的**具体版本**与被选为 native 的 tool 稳定 id。任何进程 `openDurable` 重开时，都用 header 重建 composition（`composition.initFrozen`：读那些冻结版本、把 `native_tools` 当 pin），**绝不重扫 `current`、绝不重排 usage journal**——于是每个 `session step` 进程都看到**同一** composition，中途 `activate` 也移不动它（§5.1、§7.5、physics #2）。replay 时模型看到的一切 = header + events 的纯函数。
+- **composition + 模型身份冻结进 header。** header 记录本场 active 的每个 extension 的**具体版本**、被选为 native 的 tool 稳定 id，以及创建时**解析后的模型身份** `model_identity`（`provider` / 具体 `model` / `base_url` / `api_key_env`——`model` 字段本身只是 profile 别名，供显示与 effort 查询）。任何进程 `openDurable` 重开时都用 header 重建 composition（`composition.initFrozen`：读那些冻结版本、把 `native_tools` 当 pin），**绝不重扫 `current`、绝不重排 usage journal**——每个 `session step` 进程都看到**同一** composition，中途 `activate` 也移不动它（§5.1、§7.5、physics #2）。replay 时模型看到的一切 = header + events 的纯函数。
+- **模型身份创建时冻结、resume 不可变（physics #2/#5）。** config 只在**创建**一场 session 时选模型（`launch.resolveDescriptor`），此后 config 改动**永不**改变已有 session 的模型。`session step` 用 header 里的 `model_identity` 重建**恰好那个**模型（`launch.buildFromDescriptor`），只从环境的 `api_key_env` 重新解析 credential——不存密钥。**没有静默 fallback**：真实 openai session 的密钥不在了就 `MissingCredential` 显式拒跑，绝不悄悄降级成 scripted。scripted fallback 只允许发生在**创建**边（`session new` / bare demo）；`provider==""` 的旧 header 当 scripted 处理。
 - **resume。** `openDurable` 读回 header + 每条完整事件行；被截断的**最后一行**（写到一半崩溃）丢弃并把文件截回最后一条完整行，坏的**中间**行或乱序 `seq` 则是硬错误（`CorruptLedger`）。崩在 assistant-with-calls 之后（合法但未闭合的 batch）由 `completeInterruptedToolBatch` 在下一步补齐（§4）。
-- **单写者 + inbox 目录 + cancel 标记。** session 文件**只有一个写者**——`openDurable` 打开它的那个进程（CLI 里只有 `session step`）。其他任何进程都不写主文件，只往兄弟路径投递：跨进程**事件**（`ext activate` 在 `NULYA_SESSION` 存在时的 `capability_note`，§5.3；driver 的 `session append` 的 `user_text`）以一事件一文件写进 `<id>.inbox/`（`ledger.depositEvent`：先写 `.tmp` 再 rename，排干端永远读不到半个文件；note 用确定性文件名 `note-<id>-<version>` 幂等，append 用唯一名），由写者在 step 边界（`prepareStep`）按文件名序排干进主文件；**cancel 请求**是 `<id>.cancel` 标记（`session.requestCancel`），同样在 step 边界消费。读者（`session events`）只读原始行、不打开写句柄。兜底：`persist` 写前核对文件长度等于自己记的末尾，不等即 `ConcurrentWriter`（内存回滚、文件不动）——第二个写者是显式失败，不是静默覆盖。Windows 上无需文件锁；因为排干只发生在 step 边界，任何投递事件绝不插进一条 batch 中间（§4 的 batch 不变量成立）。`parent` 是 fork / compaction 的机制（compaction 本身未实现，见 PLAN §3.4）。
+- **单写者租约 + inbox 目录 + cancel 标记。** session 文件**只有一个写者**：`createDurable` / `openDurable` 打开时**原子获取兄弟 `<id>.lock` 上的排他 advisory 锁**（`lock_nonblocking`），第二个写者的打开立刻 `SessionBusy` 失败，而不是去抢同一 offset；锁随句柄生命周期持有、进程崩溃时由 OS 释放（无 stale 锁）。锁挂在专用 `<id>.lock` 上、**不挂在 session 文件本身**——Windows 上文件自身的锁是强制性的会挡住读者，锁 sidecar 则让 `readHeader` / `session events` 的读永不被挡。其他任何进程都不写主文件，只往兄弟路径投递：跨进程**事件**（`ext activate` 在 `NULYA_SESSION` 存在时的 `capability_note`，§5.3；driver 的 `session append` 的 `user_text`）一事件一文件写进 `<id>.inbox/`（`ledger.depositEvent`：先写 `.tmp` 再 rename，排干端永不读到半个文件），由写者在 step 边界（`prepareStep`）按文件名序排干进主文件；**cancel 请求**是 `<id>.cancel` 标记（`session.requestCancel`），同样在 step 边界消费。
+- **inbox 应用 exactly-once（投递 at-least-once）。** 每条排干进来的事件把它的 inbox 文件名作为 `origin` 落到 ledger 行上，`Ledger.origins` 集合是这一列、replay 时重建。若"append 进 ledger 成功 → 删 inbox 文件"之间崩溃，文件残留，下一次排干发现 `origin` 已在 ledger 里就只删不再 append——因此重复投递（同名文件再现）与崩溃都不会重复应用。`capability_note` 额外按内容（id+version）去重，任何名字下再宣告同一版本都是 no-op。兜底：`persist` 写前核对文件长度等于自己记的末尾，不等即 `ConcurrentWriter`（内存回滚、文件不动）——租约之下这几乎不可能发生，是第二层断言。读者（`session events`）只读原始行、不打开写句柄。排干只在 step 边界发生，任何投递事件绝不插进一条 batch 中间（§4 的 batch 不变量成立）。`parent` 是 fork / compaction 的机制（compaction 本身未实现，见 PLAN §3.4）。
 
 ---
 
@@ -304,7 +308,7 @@ draft ──build──▶ versions/v-<hash>（immutable）──activate──�
                                           rollback = current 指回旧版本
 ```
 
-- **version id = `hash(canonical PackageSnapshot + compiler_identity + target)`。** snapshot 收 `extension.json`、有 runtime 时的 `src/**`、声明的 skills / system_prompts 目录，按 `relative_path + len + bytes` 排序 hash。`versions/`、`.zig-cache/` 不进。编译 extension 的 `compiler_identity` = 实际执行的 `zig version`；**脚本 extension 的 `compiler_identity` 为空串**，version 因此不含它、跨机器稳定（§7.1）。
+- **version id = `hash(canonical PackageSnapshot + compiler_identity + target)`，其中 `compiler_identity` 与 `target` 只对 compiled extension 非空。** 三种 implementation kind（`manifest.ImplementationKind`）决定什么进身份：`data`（无 runtime，纯 skill / system_prompt）与 `script`（`src/…` 冻结即跑、不编译）都是**纯 snapshot 身份**，`compiler_identity = target = ""`，因此跨平台稳定、**建时根本不需要 zig**；只有 `compiled`（`bin/…` 由 Zig 编出，二进制依赖编译器与 host target）才把两者算进 hash。snapshot 收 `extension.json`、有 runtime 时的 `src/**`、声明的 skills / system_prompts 目录，按 `relative_path + len + bytes` 排序 hash；`versions/`、`.zig-cache/` 不进。（seal.json 仍记录 host / compiler / target 作为诊断元数据——metadata ≠ identity。）
 - 版本目录冻结 snapshot：编译 extension 得 `versions/v-…/{extension.json, package/src/**, package/skills/**, bin/<entry><exe>}` + seal（含 `binary_digest`）；**编译从 frozen `package/src/main.zig` 进行**，不读 mutable draft。脚本 extension 得 `versions/v-…/{extension.json, package/src/**, …}` + seal（`binary_digest` = null；脚本已在 `package/src/` 里被 package_digest 覆盖），运行入口 = `package/<entry>`。同源码再 build = 同 version，`already_built`。
 - `current` 是普通文本文件（不是 symlink：Windows 需特权且无收益），原子 rename 切换。
 - 更新 = build 新版本 → activate；rollback = `current = old`。B 挂了 A 完全不动。

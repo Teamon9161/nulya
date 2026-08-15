@@ -72,14 +72,18 @@ pub fn buildExtension(
     const snapshot_bytes = try snapshot.canonicalBytes(alloc);
     defer alloc.free(snapshot_bytes);
 
-    // A script extension is frozen and run as-is: no compilation, so its version
-    // id excludes compiler identity (compiler = "") and is stable across
-    // rebuilds regardless of the local zig (DESIGN §7.1, §7.4).
-    const script = if (m.runtime) |rt| manifest.isScript(rt) else false;
-    const compiler = if (script) try alloc.dupe(u8, "") else try compilerIdentity(alloc, io, workspace, zig_exe);
+    // Only a COMPILED extension's identity depends on the toolchain: its binary
+    // is a function of the compiler and host target. `data` (no runtime) and
+    // `script` (frozen, run as-is) are pure snapshots — compiler = "" and
+    // target = "", so their version id is stable across platforms and needs no
+    // zig at all (DESIGN §7.1, §7.4).
+    const kind = manifest.implementationKind(m);
+    const compiled = kind == .compiled;
+    const compiler = if (compiled) try compilerIdentity(alloc, io, workspace, zig_exe) else try alloc.dupe(u8, "");
     defer alloc.free(compiler);
+    const target = if (compiled) toolchain.host_target else "";
 
-    const version = try integrity.versionId(alloc, snapshot_bytes, compiler, toolchain.host_target);
+    const version = try integrity.versionId(alloc, snapshot_bytes, compiler, target);
     errdefer alloc.free(version);
 
     const version_rel = try std.fs.path.join(alloc, &.{ ext_dir_rel, "versions", version });
@@ -87,10 +91,10 @@ pub fn buildExtension(
 
     // `entry_rel` is the BUILT binary path — compiled extensions only. A script's
     // entry is frozen inside `package/` and located via `store.versionScriptEntryPath`.
-    const entry_rel: ?[]u8 = if (!script) (if (m.runtime) |rt|
-        try std.fmt.allocPrint(alloc, "{s}{s}", .{ rt.entry, exe_suffix })
+    const entry_rel: ?[]u8 = if (compiled)
+        try std.fmt.allocPrint(alloc, "{s}{s}", .{ m.runtime.?.entry, exe_suffix })
     else
-        null) else null;
+        null;
     errdefer if (entry_rel) |entry| alloc.free(entry);
 
     const version_is_valid = if (workspace.access(io, version_rel, .{})) |_| blk: {
@@ -103,11 +107,11 @@ pub fn buildExtension(
     }
     workspace.deleteTree(io, version_rel) catch {};
 
-    // Pure contribution (no runtime) or script: freeze the snapshot, seal with no
-    // binary, done — nothing to compile.
-    if (m.runtime == null or script) {
+    // Data or script: freeze the snapshot, seal with no binary, done — nothing to
+    // compile.
+    if (!compiled) {
         try integrity.freezeSnapshot(alloc, io, workspace, version_rel, manifest_bytes, snapshot);
-        try writeSeal(alloc, io, workspace, version_rel, snapshot, compiler, toolchain.host_target, null);
+        try writeSeal(alloc, io, workspace, version_rel, snapshot, compiler, target, null);
         return .{ .version = version, .entry_rel = entry_rel, .already_built = false, .compile_ok = true, .stderr = try alloc.alloc(u8, 0) };
     }
 
@@ -154,7 +158,7 @@ pub fn buildExtension(
 
     const binary_digest = try integrity.fileDigestHex(alloc, io, workspace, bin_rel);
     defer alloc.free(binary_digest);
-    try writeSeal(alloc, io, workspace, version_rel, snapshot, compiler, toolchain.host_target, binary_digest);
+    try writeSeal(alloc, io, workspace, version_rel, snapshot, compiler, target, binary_digest);
 
     return .{ .version = version, .entry_rel = entry_rel, .already_built = false, .compile_ok = true, .stderr = try alloc.alloc(u8, 0) };
 }
@@ -397,6 +401,58 @@ test "prompt-only package builds without runtime and freezes prompt files" {
     const prompt_path = try std.fs.path.join(alloc, &.{ "ext", "versions", result.version, package_dir, "prompts", "finance.md" });
     defer alloc.free(prompt_path);
     try tmp.dir.access(io, prompt_path, .{});
+}
+
+test "a data extension builds with no compiler and its version ignores compiler identity" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(io, "ext" ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "demo");
+    try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ manifest_file, .data =
+        \\{"schema":"nulya.extension/v2","id":"skills","contributes":{"skills":["skills/demo"]}}
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "demo" ++ std.fs.path.sep_str ++ "SKILL.md", .data = "---\nname: demo\ndescription: demo\n---\nbody\n" });
+
+    // No toolchain at all: a data extension never compiles, so build succeeds.
+    var without = try buildExtension(alloc, io, tmp.dir, "ext", "");
+    defer without.deinit(alloc);
+    try std.testing.expect(without.compile_ok);
+
+    // Building again with a real compiler present yields the SAME version id: the
+    // compiler is not part of a data version's identity.
+    const zig_exe = try testZigExe(alloc);
+    defer alloc.free(zig_exe);
+    var with = try buildExtension(alloc, io, tmp.dir, "ext", zig_exe);
+    defer with.deinit(alloc);
+    try std.testing.expect(with.already_built);
+    try std.testing.expectEqualStrings(without.version, with.version);
+}
+
+test "a script extension builds with no compiler and its version ignores compiler identity" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(io, "ext" ++ std.fs.path.sep_str ++ "src");
+    try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ manifest_file, .data =
+        \\{"schema":"nulya.extension/v2","id":"demo","runtime":{"entry":"src/run.sh","interpreter":"sh"},"contributes":{"tools":[{"name":"greet","input":{}}]}}
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ "src" ++ std.fs.path.sep_str ++ "run.sh", .data = "echo hi\n" });
+
+    var without = try buildExtension(alloc, io, tmp.dir, "ext", "");
+    defer without.deinit(alloc);
+    try std.testing.expect(without.compile_ok);
+    try std.testing.expect(without.entry_rel == null); // a script has no built binary
+
+    const zig_exe = try testZigExe(alloc);
+    defer alloc.free(zig_exe);
+    var with = try buildExtension(alloc, io, tmp.dir, "ext", zig_exe);
+    defer with.deinit(alloc);
+    try std.testing.expect(with.already_built);
+    try std.testing.expectEqualStrings(without.version, with.version);
 }
 
 test "system prompt file changes the version id" {

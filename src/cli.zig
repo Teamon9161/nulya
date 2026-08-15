@@ -586,8 +586,10 @@ fn sessionNew(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{ .dialect = cfg.environment.shell.toLocalOption() });
     defer lenv.deinit();
 
-    // The model is only recorded (by profile name) at creation; a placeholder
-    // handle is enough since `new` never steps.
+    // Freeze the RESOLVED model identity now: config chooses the model at
+    // creation, and a later config edit can never change this session's model
+    // (DESIGN §3). A placeholder handle is enough since `new` never steps.
+    const identity = launch.resolveDescriptor(cfg.provider, profile);
     var holder: launch.ModelHolder = .{ .scripted = .{} };
     var sess = session.AgentSession.createDurable(alloc, .{
         .model = holder.model(),
@@ -605,6 +607,7 @@ fn sessionNew(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
         .session_path = spath,
         .session_id = id,
         .model_profile = profile,
+        .model_identity = identity,
         .parent = parent,
     }) catch |err| {
         try printOut(alloc, io, "session new failed: {s}\n", .{@errorName(err)});
@@ -704,7 +707,20 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     // they can deposit capability notes into its inbox (DESIGN §5.3).
     try lenv.env.put("NULYA_SESSION", spath);
 
-    var holder = try launch.buildModel(alloc, io, cfg.provider, &host, hdr.value.model);
+    // Reconstruct the model frozen at creation, re-resolving only the credential.
+    // No silent fallback: a real session whose key is gone fails loudly rather
+    // than quietly becoming a scripted session (DESIGN §3).
+    var holder = launch.buildFromDescriptor(alloc, io, hdr.value.model_identity, &host) catch |err| switch (err) {
+        error.MissingCredential => {
+            try printOut(alloc, io, "session '{s}' is a '{s}' session but its credential (${s}) is not set; refusing to run (no silent fallback)\n", .{ id, hdr.value.model_identity.provider, hdr.value.model_identity.api_key_env });
+            return 1;
+        },
+        error.ProviderUnavailable => {
+            try printOut(alloc, io, "session '{s}' was created with provider '{s}', which this build cannot construct\n", .{ id, hdr.value.model_identity.provider });
+            return 1;
+        },
+        else => return err,
+    };
     defer holder.deinit();
 
     const effort = if (cfg.provider.findProfile(hdr.value.model)) |p| p.effort else null;

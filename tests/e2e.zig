@@ -893,16 +893,19 @@ test "durable ledger: an assistant-with-calls tail left on disk by a crash is re
         } });
     }
 
-    // Process B: on resume the interrupted batch is completed before the next turn.
-    var b = try session.AgentSession.openDurable(alloc, opts, .{ .workspace = ws, .session_path = session_file_rel });
-    defer b.deinit();
-    try std.testing.expectEqual(@as(usize, 2), b.l.len()); // user, assistant(call) — not yet repaired
-    _ = try b.step();
-    // user, assistant(call), tool_results(interrupted), assistant(end)
-    try std.testing.expectEqual(@as(usize, 4), b.l.len());
-    try std.testing.expect(b.l.view()[2] == .tool_results);
-    try std.testing.expect(!b.l.view()[2].tool_results[0].ok);
-    try std.testing.expect(std.mem.indexOf(u8, b.l.view()[2].tool_results[0].output, "state is unknown") != null);
+    // Process B: on resume the interrupted batch is completed before the next
+    // turn. Close it before process C opens — the writer lease is exclusive.
+    {
+        var b = try session.AgentSession.openDurable(alloc, opts, .{ .workspace = ws, .session_path = session_file_rel });
+        defer b.deinit();
+        try std.testing.expectEqual(@as(usize, 2), b.l.len()); // user, assistant(call) — not yet repaired
+        _ = try b.step();
+        // user, assistant(call), tool_results(interrupted), assistant(end)
+        try std.testing.expectEqual(@as(usize, 4), b.l.len());
+        try std.testing.expect(b.l.view()[2] == .tool_results);
+        try std.testing.expect(!b.l.view()[2].tool_results[0].ok);
+        try std.testing.expect(std.mem.indexOf(u8, b.l.view()[2].tool_results[0].output, "state is unknown") != null);
+    }
 
     // The repair persisted: a third process sees the completed batch on disk.
     var c = try session.AgentSession.openDurable(alloc, opts, .{ .workspace = ws, .session_path = session_file_rel });
@@ -944,38 +947,42 @@ test "durable ledger: a capability_note appended by a separate CLI process is re
         },
     };
 
-    var sess = try session.AgentSession.createDurable(alloc, opts, .{
-        .workspace = ws,
-        .session_path = session_file_rel,
-        .session_id = "s",
-    });
-    defer sess.deinit();
-    try sess.appendUser("please make a greet tool");
-
-    // No note yet.
-    try std.testing.expect(!sess.l.containsNote("demo", version));
-
-    // A separate CLI process activates the extension with NULYA_SESSION set. It
-    // deposits a capability note into the session inbox (never touching the
-    // single-writer session file).
+    // Close this writer before the durable-resume check below — the lease is
+    // exclusive, so only one writer holds the session file at a time.
     {
-        const run = try runCliEnv(alloc, io, ws, &.{ exe_abs, "ext", "activate", "demo", version }, "NULYA_SESSION", session_file_rel);
-        defer alloc.free(run.stdout);
-        try std.testing.expectEqual(@as(u8, 0), run.code);
-    }
+        var sess = try session.AgentSession.createDurable(alloc, opts, .{
+            .workspace = ws,
+            .session_path = session_file_rel,
+            .session_id = "s",
+        });
+        defer sess.deinit();
+        try sess.appendUser("please make a greet tool");
 
-    // The next step drains the inbox at its boundary: the note is now in the
-    // ledger and in the projected prompt, before the assistant turn.
-    _ = try sess.step();
-    try std.testing.expect(sess.l.containsNote("demo", version));
+        // No note yet.
+        try std.testing.expect(!sess.l.containsNote("demo", version));
 
-    const ir = try prompt.projectWithSystem(alloc, sess.composition.system_prompts.blocks, sess.l.view());
-    defer ir.deinit(alloc);
-    var saw_note_block = false;
-    for (ir.stable_blocks) |blk| {
-        if (blk.kind == .capability_note and std.mem.indexOf(u8, blk.bytes, "greet") != null) saw_note_block = true;
+        // A separate CLI process activates the extension with NULYA_SESSION set. It
+        // deposits a capability note into the session inbox (never touching the
+        // single-writer session file).
+        {
+            const run = try runCliEnv(alloc, io, ws, &.{ exe_abs, "ext", "activate", "demo", version }, "NULYA_SESSION", session_file_rel);
+            defer alloc.free(run.stdout);
+            try std.testing.expectEqual(@as(u8, 0), run.code);
+        }
+
+        // The next step drains the inbox at its boundary: the note is now in the
+        // ledger and in the projected prompt, before the assistant turn.
+        _ = try sess.step();
+        try std.testing.expect(sess.l.containsNote("demo", version));
+
+        const ir = try prompt.projectWithSystem(alloc, sess.composition.system_prompts.blocks, sess.l.view());
+        defer ir.deinit(alloc);
+        var saw_note_block = false;
+        for (ir.stable_blocks) |blk| {
+            if (blk.kind == .capability_note and std.mem.indexOf(u8, blk.bytes, "greet") != null) saw_note_block = true;
+        }
+        try std.testing.expect(saw_note_block);
     }
-    try std.testing.expect(saw_note_block);
 
     // And it is durable: a fresh process resuming the session still sees the note.
     var reopened = try session.AgentSession.openDurable(alloc, opts, .{ .workspace = ws, .session_path = session_file_rel });

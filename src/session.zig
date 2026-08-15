@@ -81,7 +81,12 @@ pub const AgentSession = struct {
         workspace: std.Io.Dir,
         session_path: []const u8,
         session_id: []const u8,
+        /// The provider profile NAME (display / effort lookup).
         model_profile: []const u8 = "",
+        /// The RESOLVED model identity to freeze into the header (DESIGN §3). The
+        /// caller resolves this from config at the creation boundary; the kernel
+        /// only stores it. Empty provider = a scripted/legacy session.
+        model_identity: ledger.ModelDescriptor = .{},
         created: []const u8 = "",
         parent: ?ledger.ParentRef = null,
     };
@@ -129,6 +134,7 @@ pub const AgentSession = struct {
             .session = d.session_id,
             .parent = d.parent,
             .model = d.model_profile,
+            .model_identity = d.model_identity,
             .created = d.created,
             .composition = .{ .active = active, .native_tools = native },
         });
@@ -706,16 +712,19 @@ test "a durable session persists across create, close, and reopen" {
     }
 
     // Process B: reopen from the file and see the same history, then continue.
-    var b = try AgentSession.openDurable(alloc, opts, .{ .workspace = tmp.dir, .session_path = session_path });
-    defer b.deinit();
-    try std.testing.expectEqual(@as(usize, 2), b.l.len());
-    try std.testing.expect(b.l.view()[0] == .user_text);
-    try std.testing.expectEqualStrings("hello", b.l.view()[0].user_text);
-    try std.testing.expectEqualStrings("s", b.l.header().?.session);
+    // Close it before process C opens — the writer lease is exclusive.
+    {
+        var b = try AgentSession.openDurable(alloc, opts, .{ .workspace = tmp.dir, .session_path = session_path });
+        defer b.deinit();
+        try std.testing.expectEqual(@as(usize, 2), b.l.len());
+        try std.testing.expect(b.l.view()[0] == .user_text);
+        try std.testing.expectEqualStrings("hello", b.l.view()[0].user_text);
+        try std.testing.expectEqualStrings("s", b.l.header().?.session);
 
-    try b.appendUser("again");
-    _ = try b.step();
-    try std.testing.expectEqual(@as(usize, 4), b.l.len());
+        try b.appendUser("again");
+        _ = try b.step();
+        try std.testing.expectEqual(@as(usize, 4), b.l.len());
+    }
 
     // A third process sees all four events replayed from disk.
     var c = try AgentSession.openDurable(alloc, opts, .{ .workspace = tmp.dir, .session_path = session_path });

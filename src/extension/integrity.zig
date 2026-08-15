@@ -1,9 +1,11 @@
 //! Content-addressed extension identity and at-rest integrity helpers.
 //!
-//! The version id is still the content address of the frozen package snapshot,
-//! compiler identity, and host target. `seal.json` records those reproducibility
-//! inputs plus the built binary digest so activation and `ext run` can detect a
-//! version directory that was modified after build.
+//! The version id is the content address of the frozen package snapshot plus,
+//! for a COMPILED extension only, the compiler identity and host target (a data
+//! or script version records both as ""; see `manifest.ImplementationKind`).
+//! `seal.json` records those reproducibility inputs plus the built binary digest
+//! so activation and `ext run` can detect a version directory that was modified
+//! after build.
 
 const std = @import("std");
 const builtin = @import("builtin");
