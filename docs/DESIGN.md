@@ -12,10 +12,30 @@ Agent              决定学什么 / 造什么              ← 不在 kernel �
   ↓
 Evolution Policy   决定什么值得留下 / 晋升 / 替换   ← kernel 之上，可替换（§15.2）
   ↓
-Capability Kernel  保证 execute / verify / version / authority / evidence / rollback   ← 不可自生长
+Capability Kernel  execute / verify / version / authorize / evidence / rollback / compose   ← 不可自生长
 ```
 
+这七个动词是 **Capability Kernel 的 target contract**，不是"已全部实现"的宣告。诚实分界（§15.2 详列）：**v0.1 已落地 `Execute / Version / Observe(evidence) / Rollback / Compose`（外加大部分 Validate）；`Verify`（正式生命周期门）与 OS 强制的 `Authorize` 是 v0.2 增量**（§18.4、§18.6 Phase C/F）——现在的 authority 仍是 §9 的"env 净化 + 诚实的 session 边界"，还不是 sandbox 强制。
+
 一句话：**Agent 决定学什么；Policy 决定什么值得留下；Kernel 保证学出来的东西可信、可追踪、可执行、可回退。** kernel 不负责"聪明地进化"，只负责让进化**安全、可观测、可回退、可学习**（§15.2–§15.3）。这条分界是 Nulya 相对普通 plugin harness 的核心差异，也是抵抗后续 feature creep 的那把尺。
+
+**产品原则（决定 Nulya 会不会重新陷入 feature race）：**
+
+> **Nulya 不参与内建 Agent 功能的军备竞赛。新的 harness 行为应尽可能由 Agent 基于稳定 Kernel primitives 自行实现为 Extension，而不是修改 Kernel。**
+> Nulya does not compete on built-in agent features. New harness behavior should be expressible as extensions composed from stable kernel primitives.
+
+这把 §15 的"Everything above the kernel is learnable"从**能力（数据面）**推进一层到 **harness 行为（控制面）**。于是能力扩展分成两条对偶的轴：
+
+```
+Tool / Skill / Prompt   数据面 (data plane)     控制世界      给 Agent 长"手"
+SessionDriver           控制面 (control plane)  控制 Agent    给 Agent 长"脑回路 / 工作方式"
+```
+
+Claude 明天出 agents，不去追着改 Nulya——直接让 Nulya 自己长一个 extension 去读现有 agent 定义；想要 `/goal`、想要 `plan → review → 共识 → implement → review`，同理（规范例见 §19）。据此 v0.1 的一句话使命升级：
+
+> **v0.1: Nulya lets an agent manufacture its own tools.**
+> **now:  Nulya lets an agent manufacture both new capabilities and new ways of using itself.**
+> Kernel 的职责是提供**一组稳定的 primitives**，让 tools / agents / workflows / loops / reviewers / 未来的 harness 功能都能在不改 kernel 的前提下长出来。
 
 本文档是设计基线，不是最终 API。**v0.1 的能力底座已冻结（§15.1）——它让 Nulya 会"长"能力；v0.2 的主题是能力演化（§18）——让 Nulya 开始判断自己长出来的能力是不是更好**，全部在冻结底座外生长，不改 kernel 骨架。术语：**ledger** = 会话事件日志；**generation** = 缓存世代；**step** = 一次 model 请求-响应；**PromptIR** = provider 无关的 prompt 逻辑块投影；**capability** = 一个逻辑能力（一个 tool / skill / ...），与其具体 implementation version 分开（§18.1）。
 
@@ -125,7 +145,7 @@ POST-v0.1（DESIGN 目标形态，尚未实现）：
   compaction            // 见 §11
 ```
 
-> 当前 skeleton 刻意只用最小 alphabet：工具使用统计走**独立** usage journal（§3.3），extension build/activate 是文件系统上的不可变版本操作（§7.4）而非 ledger 事件，`registry_selection` 未落地（§5.1、§16.1 第 10 条）。上表 POST-v0.1 是方向，不是已实现清单。
+> 当前 skeleton 刻意只用最小 alphabet：工具使用统计走**独立** usage journal（§3.3），extension build/activate 是文件系统上的不可变版本操作（§7.4）而非 ledger 事件，`registry_selection` 未落地（§5.1；见 §16 Deferred）。上表 POST-v0.1 是方向，不是已实现清单。
 
 每条事件：`seq`（单调）、`generation`、`parent_seq`、内容、`content_hash`。整条日志内容可寻址。
 
@@ -254,6 +274,9 @@ Extension 不再等于"Tool 的打包方式"，而是 Nulya 的**通用能力注
 | Hook | 下游 | 🟡 窄 | 只落 Provider / Middleware / Observer 三类机制，**不做 Pi 那样的 event 洪流** |
 | Command / Prompt | 下游 | ⚪ 命名保留 | schema 占位，v0.1 不实现 |
 | Provider（model） | **上游** | ⚪ 存疑 | model provider 在 loop **上游**，决定 PromptIR 序列化 / cache breakpoint / streaming，机制与下游 Contribution 不同构，**暂不设计**，仅占位（§17） |
+| **SessionDriver（控制面）** | **外层** | ⚪ 占位 | 驱动 session 的**控制流**（何时继续 / 终止、spawn 与编排 child session），经 Session Host API 组合 kernel primitives。是第一个需要 **host callback**（extension→kernel）的 Contribution，与下游"被 kernel 调用"的 Tool 方向相反。完整定义见 §19 |
+
+**数据面 vs 控制面**：上表除 SessionDriver 外全是**数据面**——它们是 kernel *之上/之下* 的能力注入（Tool 被 kernel 调用、Provider 供 kernel 序列化），改变的是"Agent 能对世界做什么"。SessionDriver 是**控制面**——它包在 loop *外层*，改变的是"session 怎么推进"。二者调用方向相反，故不同表、不同 seam（§19）。
 
 **三类机制取代 Pi 的几十个 lifecycle event**：`Provider`（提供能力）/ `Middleware`（拦截、修改）/ `Observer`（只观察）。这比"everything = event"更容易让行为可复现，也天然避免"四个 extension 抢着改 prompt"。
 
@@ -344,7 +367,7 @@ method 随 Contribution 自然扩展，协议不用推翻：`tool/call` · `hook
 
 好处的边界要说清：这**不会**让 ACP / MCP / extension 三套业务协议变成同一份代码，但 framing / request-id / error / notification 这些**基础机制**不用反复发明——ACP、MCP 本身也都以 JSON-RPC 为底。oneshot extension 用不到 notification / batching 机制，只借 envelope 形状，transport 仍是 spawn-per-call。
 
-v0.1 runtime **仍不做** daemon / persistent worker / streaming / bidirectional events / host callbacks。当前 `tool/call` 请求用专用的 `ToolCallRequest` 类型表达；响应必须包含与请求相同的 `id`，否则视为 invalid response。等真正出现 `skill/get` / `hook/call` 等第二种 runtime 方法时，再抽 `JsonRpcRequest { id, method, params_json }`，不提前制造万能 RPC framework。
+v0.1 runtime **仍不做** daemon / persistent worker / streaming / bidirectional events / host callbacks。当前 `tool/call` 请求用专用的 `ToolCallRequest` 类型表达；响应必须包含与请求相同的 `id`，否则视为 invalid response。等真正出现 `skill/get` / `hook/call` / `driver/run`（§19）等第二种 runtime 方法时，再抽 `JsonRpcRequest { id, method, params_json }`，不提前制造万能 RPC framework。其中 **`driver/*` 是目前看最可能率先出现的第二种，且它会一并把上面这条"仍不做 host callbacks"变成真实需求**——driver 要反向调进 kernel（`session/create/step/…`），是第一个非"请求-响应一来一回"的 Contribution（§19.3）。
 
 **关于"每次 spawn 会不会慢 / 会不会堆一大堆进程"（重要，写清）：**
 
@@ -462,7 +485,7 @@ Skill 是拓宽 Extension 后**性价比最高**的新能力：几乎免费—�
 - **直接兼容 Agent Skills 标准，不发明 Nulya 格式**。目录轻：`skill-name/{SKILL.md, scripts/, references/, assets/}`；`SKILL.md` 用 YAML frontmatter，至少 `name` + `description`。
 - **渐进披露正是 Nulya 想要的**：启动只看 `name + description`；需要时读完整 `SKILL.md`；再需要才读 `references/scripts/assets`。
 - **不做第三个 builtin tool**。session 开头 append 一段 `<available_skills>` note（summary 级），模型经 `shell` 调 `nulya skill load <name>` 拉取完整定义。`nulya skill load` 隐藏 provider 与物理路径——比 `cat /some/path/SKILL.md` 干净，且统一了 filesystem / package-bundled / user / remote 各来源。
-- **Skill 也是 Provider 架构**：`SkillProvider { list(cwd), get(name) }`，多个 source 合并进一个 `SkillRegistry`（local / package / remote），先只暴露 summary，需要时再加载完整定义——与 §5 的 shell-first、渐进披露一脉相承。
+- **不提前抽 Provider 抽象**（与 §16 已落地状态一致）：当前 skill 只有 extension 一个来源，`SkillRegistry` 直接吃它的 `list(cwd) / get(name)` 行为即可，先只暴露 summary、需要时再加载完整定义——与 §5 的 shell-first、渐进披露一脉相承。**等第二个真实来源出现（local / user / remote / MCP）**，再从现有 `list/get` 行为提炼 `SkillProvider { list, get }` source 抽象。这正是本设计反复锁定的品味：**第二个 consumer/source 出现之前，不抽 abstraction。**
 
 > Skill 与 Tool 的分工：Tool 是"能执行的能力"，Skill 是"要遵循的方法/知识"。二者都是 Contribution，但走不同 registry，互不侵占模型工具面。
 
@@ -693,17 +716,19 @@ registry_selection ledger 事件（把 selection 记进 ledger 当 generation ba
 
 §15 的"kernel vs learnable"二分，进一步锐化成**三层**（顶部地图的展开）。中间那层——**Evolution Policy**——过去散落在 §3.3 / §5.1 / §15.1 里没被单独命名，这里正式立成一等概念。
 
-**Kernel 的职责压成七个动词**（比"支持 Tool/Skill/Prompt/Hook/Agent/MCP…"这种按 Contribution 类型罗列更耐久）：
+**Kernel 的职责压成七个动词——这是 target contract，不是"已全部实现"的清单**（比"支持 Tool/Skill/Prompt/Hook/Agent/MCP…"这种按 Contribution 类型罗列更耐久）。末尾标 v0.1 已落地 / v0.2 增量：
 
 ```
-Execute    能力经受控 substrate 运行（§8 Environment）
-Verify     candidate 满足自己声称的 contract / tests（§18.4）
-Version    每个被接受的 implementation 内容寻址、不可变（§7.4）
-Authorize  生成的代码不能超出被授予的 authority（§9；capability authority ⊆ session authority）
-Observe    记录 durable factual evidence，从不解释它（§3.3、§18.2）
-Rollback   旧的不可变版本永远可恢复（§7.4）
-Compose    session 可见的能力面确定、冻结（§5.1、§7.4）
+Execute    能力经受控 substrate 运行（§8 Environment）                               [v0.1]
+Version    每个被接受的 implementation 内容寻址、不可变（§7.4）                        [v0.1]
+Observe    记录 durable factual evidence，从不解释它（§3.3、§18.2）                    [v0.1；v0.2 加 version 维度]
+Rollback   旧的不可变版本永远可恢复（§7.4）                                            [v0.1]
+Compose    session 可见的能力面确定、冻结（§5.1、§7.4）                                [v0.1]
+Verify     sealed version 满足自己声称的 contract / tests（§18.4）                     [v0.2 增量]
+Authorize  生成的代码不能超出被授予的 authority（capability authority ⊆ session authority）  [v0.1 是 §9 诚实版：env 净化 + 边界；OS 强制属 v0.2 Phase F]
 ```
+
+（Validate——manifest/协议/权限 deterministic 合法，§12——已在 v0.1 落地大部分，是 Verify 的前置门，二者 v0.2 显式分层，见 §18.4。）
 
 Kernel 只提供 primitives：`activate(version)` · `rollback(version)` · `evidence(tool/version)` · `lineage(version)`。
 
@@ -732,6 +757,8 @@ SkillPopularityEngine
 
 Kernel **不** hard-code 诸如"shell 命令重复 3 次 → 造工具"这种启发式。`连续多次 parquet → rolling → covariance，值得编译成工具` 这类推理，Agent 自己应当能做——**Everything above the kernel is learnable**（§15）。
 
+> 同理，上表里 `WorkflowMiner` 那类 orchestration"智能"永不进 kernel——但**它们要能长在 kernel 之上**，靠的正是 §19 的 SessionDriver 控制面 seam：`/goal`、plan mode、review workflow、swarm 全部表达成 driver extension，kernel 只多出一个窄 Session Host API，而非把这些 workflow 内建。
+
 每当有人想往 core 塞智能，问一句尺子：
 
 > **这是 substrate，还是 intelligence？** 若属 intelligence，就放到 kernel *之上*。
@@ -743,65 +770,28 @@ Kernel **不** hard-code 诸如"shell 命令重复 3 次 → 造工具"这种启
 
 ---
 
-## 16. Roadmap（先修底座，再跑 extension 闭环）
+## 16. v0.1 实现状态（status snapshot）
 
-当前阶段先暂停 extension/subagent 的继续实现，把会被后续全部依赖的底座不变量修对。优先级按下面 7 组提交推进：
+> **完整开发历史已迁出**——底座 7 组提交、Extension 从 Tool-only 拓宽的 11 点落地/未落地清单，见 [history/v0.1.md](history/v0.1.md)。本节只留当前状态快照。规范真相源是 **§15.1 冻结面** + **§18 v0.2 演化层**两条时间轴，读当前架构不必回溯历史。
 
-1. **Ledger owns appended events**
-   - `Ledger.append(event)` 第一版对传入 slice 做 deep copy，append 成功后事件生命周期与调用者彻底无关；如果后续实测 copy 成为瓶颈，再另加 `appendOwned(...)` / ledger allocator builder 作为显式快路径。
-   - `Ledger.deinit()` 释放 nested allocations，消灭 `main.zig` / 测试里手工 free assistant calls、tool_results、output 的泄漏式所有权。
-   - `generation` 从 Ledger mutable field 改为事件投影：compaction/system_change/registry_selection 等事件决定当前 generation。
+**已落地（跑通 E2E，语义见 §15.1）：**
 
-2. **Introduce PromptIR and cache-prefix invariant**
-   - 新增 `prompt.zig`：`Ledger -> PromptProjection -> PromptIR { tools, system, message blocks }`。
-   - 测试改为断言 `PromptIR[N].stable_blocks` 是 `PromptIR[N+1].stable_blocks` 的前缀，不再断言完整 request bytes 前缀。
-   - Provider integration test 单独检查各家缓存指标。
+- Ledger append-only + deep-copy ownership；`generation` 事件投影
+- PromptIR + 块级前缀不变量（`prompt.zig`）
+- ToolSetSnapshot per-step 冻结 + builtin schema
+- bounded emit budget + 大输出落盘留指针；atomic edit
+- Environment 边界（`local`）+ `Model` ptr/vtable 实例
+- crash-aware step + bounded-concurrent batch + 统一 `std.Io` cancellation 链
+- Extension 闭环：`contributes{}` manifest v2 · PackageSnapshot 内容寻址版本 · JSON-RPC `tool/call` · ToolExecutor 同构 · build / activate / rollback
+- AgentSession 编排（loop 不 import extension）
+- SkillRegistry + Agent Skills 兼容 · system-prompt 投影
+- usage journal → ranking → session-boundary 自动晋升 → 版本冻结
 
-3. **Freeze registry into ToolSetSnapshot with schemas**
-   - `ToolDefinition { id, name, description, input_schema }` 与 handler 分离。
-   - `runStep(ledger, model, tool_snapshot, ...)` 在 model request 前冻结 snapshot；`execOne(snapshot, call)` 不再查询 live registry。
-   - builtin shell/edit 先用内嵌 raw JSON schema；extension manifest 后续复用同一数据形状。
+**Deferred（不影响 v0.1 核心成立）：**
 
-4. **Make emit budgets actually bounded**
-   - `max_bytes` 成为硬不变量；裁剪改成 head/tail byte budget，并在 newline/UTF-8 boundary 附近截断。
-   - `max_line_chars` 改名 `max_line_bytes`，按 UTF-8 boundary 裁，不生成 invalid UTF-8。
-   - 任意 truncation 都写统一 `[full output: <path>]` footer，模型只看 tool result 文本也能找到完整内容。
-   - 去掉 `base_seq * 64 + i`；spill path 用 content hash 或 `<ledger-id>/<event-seq>-<call-index>`，避免 fork/subagent/call-count collision。
-   - 增加 `StepOutputBudget`：per-tool 预算之外，再限制整轮 batched tool_results 的总 context 体积。
-
-5. **Make edit writes atomic**
-   - `read original -> produce updated -> write sibling temp -> flush/close -> atomic rename`。
-   - 失败时 original untouched。
-   - `replace_all` 类型错误改为明确 schema error，不再静默当 false。
-
-6. **Introduce Environment boundary and provider/model instances**
-   - 新增 `environment.zig`，`shell.run()` 改为 `ctx.environment.runShell(...)`，由 `LocalEnvironment` 统一决定 bash/powershell dialect、cwd、sanitized env。
-   - extension subprocess 后续也走同一 Environment。
-   - `Model` 改成 `ptr + vtable` 或等价 generic，真实 provider 状态不走 global。
-
-7. **Make agent step crash-aware and bounded-concurrent**
-   - assistant tool calls append 后、tool_results append 前 crash 时，pending completion 语义为 `unknown`。
-   - 对可能 side-effecting 的 call 绝不自动重放；resume 时让模型检查现实状态。
-   - tool definition 预留 `replay_safety = read_only | idempotent | mutating`，第一版先按 unknown/unsafe 保守处理。
-   - batch 执行加并发上限，避免“一轮 N 个工具”失控。
-
-上述 7 组底座与首个 extension 闭环（`extension.json`、`ext run`、`ext build`、immutable version、activate、rollback）已落地并跑通 E2E。subagent/reviewer 先作为可关闭、可配置的 policy hook 机制保留，不作为 v0.1 kernel 强制门。
-
-### 16.1 下一阶段：把 Extension 从 Tool-only 拓宽为通用能力注入（本轮讨论产物）
-
-以三分（Package / Runtime / Contribution，§7 脊椎）为主轴。按下面顺序推进——**先修已跑通路径上的正确性问题，再做结构泛化，最后接新能力**：
-
-1. **runExtension 加固（已落地）**：`ExtensionOutcome` 已包含 stderr 和 timeout；统一 cancellation 链已接入 Provider / ToolExecutor / Environment（见 §8）。
-2. **ACP 归位（已落地）**：从 `EnvironmentBackend` 删 `acp`，落到 Frontend/Transport 层（§2.1、§8）。
-3. **manifest → `contributes{}`（已落地）**：删 `tools.len>0` 不变量，改成"至少一种 contribution"；解锁纯 Skill 包（§7.2）。schema 升 `v2`。
-4. **Extension PackageSnapshot（已落地）**：version id 覆盖 manifest、runtime `src/**`、声明 skill 目录和真实 compiler identity；版本目录冻结 `package/`，runtime 从 frozen source 编译（§7.4）。
-5. **Wire protocol → JSON-RPC `method`（已落地）**：envelope 使用 `tool/call`，response id 必须匹配；当前保持专用 `ToolCallRequest`，等第二种 runtime 方法出现再抽通用 request（§7.3）。
-6. **`Tool.run fn` → `ToolExecutor { ptr, callFn }`（已落地）**：与 Model / Environment 同构，executor 只返回 raw output；`emit` 在 loop 中统一执行，给 extension / MCP 留真正执行入口（§7.3、§5）。
-7. **抽 `AgentSession`（已落地）**：`main.zig` 手工组装收进 `AgentSession`（`init/appendUser/step/deinit`）；每 step `notes.sync` 已挪进 `prepareStep`，loop 不再 import `extension/*`——"loop 不知道 extension 这个词"达成。fork/resume/lifecycle 按计划未建（§2.1）。
-8. **统一 Cancellation 链（已落地）**：全用 Zig 0.16 原生 `std.Io` cancellation，无自建 token/flag。Host 持有 running step 的 `Future`，`Future.cancel` 传播到 `AgentSession.step → loop → {Model.stream, ToolExecutor.call, Environment}`。step 边界用最小 `StepOutcome{ usage, status: completed|canceled }` 表达；**Provider 阶段取消**（完整 assistant turn 未成形）丢弃 partial collector、ledger 前缀不动、usage=0；**Tool 阶段取消**（assistant 已 append）在同一 step 内补一条完整 `tool_results` batch（执行中的标 side-effects unknown，未执行的标 not executed，数量/顺序与 calls 一致），usage 仍 accumulate。`Canceled` 只在 step 边界被消化，绝不伪装成普通工具失败/协议错误。`completeInterruptedToolBatch` 只管 crash recovery，与 graceful cancel 分离。timeout ≠ cancellation（extension oneshot 的 timeout 保持独立）。**Environment 例外**：`std.process.run` 的阻塞管道读在 Windows 上不可被取消/超时打断（只有 `child.wait` 是 alertable 取消点），故 `runShell` 改为手工 spawn + 分离读端 + 独立 drain task + 以 `child.wait` 为取消点 + 取消时 `child.kill` 直接子进程（测试验证子进程不残留）。未接：ACP/TUI 持有并取消 running step future 的宿主侧（当前只在测试里用 `io.async`+`future.cancel` 驱动，`main.zig` 保持同步）、parallel tool 取消、subagent 取消传播。
-9. **SkillRegistry + Agent Skills 兼容（已落地）**：源无关 `skill.zig` + extension 适配 `skills.zig`，`nulya skill list|load` 经 shell，session 开头 append `<available_skills>` catalog 走渐进披露（§7.7）。独立 `SkillProvider { list, get }` provider 抽象暂未单列，local/remote 多源合并留待有第二个 source 时再抽。
-10. **组合冻结（前半已落地）+ 可撤销注册（未落地）**：`SessionComposition` 已在 session 开始 resolve + freeze（含 pinned version，Tool/Skill/System-prompt 一并）。**未落地**：把 composition selection 记成 ledger 事件当 generation base（需先给 ledger 加 `registry_selection`/composition 事件类型，§3.1），以及 activate 产 `Registration[]` / disable 逆序 dispose 的可撤销注册（§7.4）。
-11. **（其后）接 MCP**：`McpClient` 作为 ToolProvider/ResourceProvider/PromptProvider 进同一 registry，**不伪装成 extension**；同样走 capability catalog → selection → 6~8 native，避免把上百 tool 全塞模型（§5 哲学）。
+- registry_selection ledger 事件（composition 记进 ledger 当 generation base）· 可撤销注册 Registration/disposer
+- ACP / MCP transport · persistent runtime / hot reload · parallel / subagent 取消传播 · remote Environment
+- **v0.2 能力演化层整体**（version-aware evidence / lineage / verify gate / evaluation，§18）
 
 **里程碑（项目之魂）：**
 
@@ -829,6 +819,7 @@ Kernel **不** hard-code 诸如"shell 命令重复 3 次 → 造工具"这种启
 - **policy hooks 默认值**：默认 AI reviewer、人类确认、还是 auto；不同 workspace 的风险档位如何配置。
 - **ProviderContribution（extension 供 model provider）的机制**：它在 loop **上游**，与下游 Tool/Skill/Hook 不同构（直接决定 PromptIR 序列化 / cache breakpoint / streaming）。taxonomy 里先占位，具体机制待定——大概率不是 ToolExecutor 那套 vtable。
 - **Middleware 声明式排序**：v0.1 按稳定 extension id 排序即可（§7 preamble）。后续是否让 extension 声明"排在 X 之后" / 优先级 / 签名来处理特殊次序，以及冲突（环、互斥）如何裁定。
+- **SessionDriver / Session Host API 的确切形状**（§19）：`session/*` 的最小方法集（要不要 `fork`）、host callback 通道的分帧与背压、driver 与主 loop 的 cancellation 传播；以及 driver 的 budget/step-ceiling 由 kernel 强制的具体机制（driver 只 propose "继续/停"，硬上限归 kernel）。待第一个真实 driver consumer（大概率是 `/goal`）出现再定。
 
 ---
 
@@ -846,80 +837,253 @@ v0.1（§15.1 冻结面）证明了**Nulya 会长能力**：能自造扩展、�
 
 ```
 logical_tool_id   ext:web.search/web_search   ← 这个能力值不值得保留 / native 晋升
-implementation    v-a83f…                      ← 当前这版实现是否比上一版更好
+implementation    v-a83f… | null              ← 当前这版实现是否比上一版更好
 ```
 
-**stable id 的硬语义（新不变量）：**
+`implementation` 是 **可空** 的：extension tool 有 content-addressed version，`builtin.shell` / `builtin.edit` 没有——它们是 in-core 内置、无 immutable 版本。**version-aware 分析（VersionStats、§18.2）只处理 version-known 的 capability**，builtin 与旧历史留 `null`，避免"builtin version 填什么"这种特殊情况。
 
-> **同一个 stable tool id 代表同一个 logical capability contract。**
-> `web_search(query)` 可以从 v1 naive 演进到 v2 pagination / v3 retry / v4 better parser——**implementation 变，stable id 不变**；但如果它从 `web_search(query)` 变成 `database_query(sql)`（语义/契约破坏），**即使名字没变，也必须是新的 stable id**。
+**stable id 的 identity rule（authoring / verification invariant，不是 kernel-enforced invariant）：**
 
-初版不做自动 JSON Schema 兼容性检查器，先锁设计规则 `same stable id ≈ compatible semantic contract`；真遇到 migration 再加 contract versioning。`[占位 + 规则]`
+> **同一个 stable tool id *声明* 自己属于同一个 logical capability contract。**
+> `web_search(query)` 可以从 v1 naive 演进到 v2 pagination / v3 retry / v4 better parser——**implementation 变，stable id 不变**；但如果它从 `web_search(query)` 变成 `database_query(sql)`（语义/契约破坏），**即使名字没变，也应当是新的 stable id**。
+
+**分层说清楚（这条规则谁来强制）：**
+
+- **Kernel 只强制 identity 的 *语法***——同一个 stable id 指向同一条 usage 聚合线、同一 registry 槽位。它**无法**自动证明 v2 有没有偷换 `web_search(query) → web_search(sql)` 的语义契约。
+- **"没有偷换语义契约"由 candidate 的 Verify / review 保证（§18.4）**，不是 kernel 检测。违反 identity rule = verification / review failure，不是 kernel 报错。
+
+所以这条**不叫 kernel invariant**——初版不做 JSON Schema 兼容性检查器 / contract fingerprint，先锁 authoring 规则 `same stable id ≈ compatible semantic contract`；真需要机器强制时再升成 kernel-enforced（schema compatibility / contract versioning）。`[规则 + 占位]`
 
 ### 18.2 Version-aware evidence（Phase A，最先落地）
 
 **现状缺口（已核对 `tool_stats.zig`）**：usage fact 现在是 `{v:1, tool_id, ok}`，且 `tool_id` **跨实现版本累计**（源码注释明说）。于是 `web_search v1: 100 calls / 92 ok` 与 `v2: 20 calls / 8 ok` 会糊成 `120 / 100`——**v2 的 regression 根本看不出来**。
 
-**最小改动**：给 usage fact 加 `version`，journal schema `v:1 → v:2`（`journal_schema_version` 这个字段**就是为此准备的**——旧 journal 会以精确错误拒绝，不会当垃圾读）。仍是 append-only 事实日志，不是 mutable aggregate：
+**最小改动**：给 usage fact 加**可空** `version`。新写的事件带 `v:2` schema，携带 `version`（extension）或 `null`（builtin）：
 
 ```
-durable append-only fact { tool_id, version, ok }
-        └─ projection ─┬─ LogicalToolStats  { uses_total, uses_recent, last_used, success_rate }   → 服务 native promotion（§5）
-                       └─ VersionStats      { version, uses, successes, … }                        → 服务 retain / compare / rollback（§18.6）
+durable append-only fact { tool_id, version: v-a83… | null, ok }
+        └─ projection ─┬─ LogicalToolStats  { uses_total, uses_recent, last_used, success_rate }   → 服务 native promotion（§5），吃全部历史
+                       └─ VersionStats      { version, uses, successes, … }                        → 只吃 version-known 事实，服务 retain / compare / rollback（§18.6）
 ```
 
-两个投影喂两条状态轴（§15.2）：LogicalToolStats → promotion，VersionStats → activation/rollback。**Stats 只是 evidence 的 projection**，不落盘。`[写实]`
+**关键：schema 升级不能丢历史（否则违反 §15.2 `facts are durable`）。** 现有 `tool_stats.zig` 的 `v` 字段是"遇到不认识的版本就精确报错"的守卫——那对*真正未知的未来格式*仍适用，但 v1→v2 这次**已知的**演化必须**兼容读**，不能让升级后旧 journal 触发 `UnsupportedStatsVersion`、连带 promotion 全停：
 
-> 命名不改冻结面：`tool_stats.zig` / `ToolStats` 保留原名（§15.1 冻结契约），v0.2 是**在同一条 journal 上加字段 + 加一个 VersionStats 投影**，不是把 ToolStats 翻新成"Capability Evidence"。
+```
+reader 同时接受 v1 + v2：
+    v1 event → version = null（过去不知道 exact version，就诚实标 unknown）
+    v2 event → version = exact | null（builtin）
+```
+
+于是 `LogicalToolStats` 用 v1+v2 全部历史，`VersionStats` 只用 version-known 的 v2 事实。这比"bump 后拒绝所有历史"更符合 Nulya 自己的哲学：**过去不知道就标 unknown，而不是丢掉历史。** 等 v1 事件自然消失，再删兼容分支。两个投影喂两条状态轴（§15.2）：LogicalToolStats → promotion，VersionStats → activation/rollback。**Stats 只是 evidence 的 projection**，不落盘。`[写实]`
+
+> 命名不改冻结面：`tool_stats.zig` / `ToolStats` 保留原名（§15.1 冻结契约），v0.2 是**在同一条 journal 上加可空字段 + 加一个 VersionStats 投影 + reader 向后兼容 v1**，不是把 ToolStats 翻新成"Capability Evidence"。
 
 ### 18.3 Capability lineage（Phase B）
 
-现在 version id = `hash(snapshot + compiler + target)`（§7.4），是个 build artifact，没有"为什么存在"。v0.2 给 version 加最小 metadata，让它从 build artifact 变成 **evolution step**：
+现在 version id = `hash(snapshot + compiler + target)`（§7.4），是个 build artifact，没有"为什么存在"。v0.2 给它加 lineage——但**必须与 content-addressed identity 严格分开**，否则埋雷。
+
+**硬规则：provenance 绝不进 version hash。** version 回答"这是什么 implementation"（`= content hash`，同样源码 = 同样 version）；lineage 回答"为什么会出现这个 implementation"。若把 `reason` / `parent` 塞进 hash，同一份源码因 Agent 两次写不同 reason（"fix pagination" vs "retry failed"）就变成两个 version——**content-addressed identity 被 provenance 污染**。所以拆成两层：
 
 ```
-version         v-b193…
-parent_version? v-a8fc…              ← 单亲即可，v0.x 不做 DAG
-created_by      agent | human | …
-reason?         "pagination repeatedly failed → add cursor pagination"
+Implementation identity（content hash，不含 provenance）
+    version = hash(snapshot + compiler + target)          ← §7.4 不动
+
+Evolution provenance（独立的 durable evidence，keyed by version）
+    VersionCreatedFact {
+        version:      v-b193…
+        parent?:      v-a8fc…        ← 单亲即可，v0.x 不做 DAG
+        created_by:   agent | human | …
+        reason?:      "pagination repeatedly failed → add cursor pagination"
+    }
 ```
 
-于是能力演化成一条可读的链：`v1 → v2 → v3`；rollback = `activate(v2)`。真需要分支时再自然升级成 DAG。`[写实：parent + reason；DAG 占位]`
+于是能力演化成一条可读的链：`v1 → v2 → v3`；rollback = `activate(v2)`。真需要分支时再自然升级成 DAG。
+
+> `VersionCreatedFact` 本质也是 evidence——和 `InvocationFact`（§18.2）、`EvaluationEvidence`（§18.5）同族。**但现在不造通用 Evidence union framework**（§15.3 纪律）：先在设计上把 identity 与 provenance 分开即可，三种事实各自最小落地，等真需要统一查询时再抽。`[写实：parent + reason 作独立 fact；DAG / 通用 evidence 框架占位]`
 
 ### 18.4 Verify：独立于 Validate 的生命周期门
 
-§7.4 现在是 `build → validate/test → activate`，其中 validate（manifest/协议/权限合法）与"能力真的符合它声称的行为"混在一起。v0.2 把生命周期显式化：
+§7.4 现在是 `build → validate/test → activate`，其中 validate（manifest/协议/权限合法）与"能力真的符合它声称的行为"混在一起。v0.2 把生命周期显式化——**并且 Verify 必须在 Seal *之后***：
 
 ```
-Scratch → Candidate → Build → Validate → Verify → Seal → Activate → Observe → Retain / Improve / Rollback
+Scratch → Build → Validate → Seal (immutable version) → Verify (sealed artifact) → Activate → Observe → Retain / Improve / Rollback
 ```
 
 - **Build**：能不能编译。
 - **Validate**（deterministic，已是 kernel 不变量，§12）：manifest schema / 协议往返 / integrity / `permission ⊆ session_authority`。
-- **Verify**（新门）：这个 capability 是否真的符合自己声称的行为——跑 package 自带的 `tests/` / `evals/`。初版不需要框架，manifest 声明测试入口 + `nulya ext test <id>` 即可。
+- **Seal**：产出 content-addressed 不可变版本（§7.4 已是 build 期封版）。
+- **Verify**（新门）：跑 package 自带的 `tests/` / `evals/`，证明这个 capability 真的符合自己声称的行为。初版不需要框架，manifest 声明测试入口 + `nulya ext test <id>` 即可。
+
+**为什么 Verify 在 Seal 之后（TOCTOU）**：若先 Verify mutable candidate 再 Seal，验证过的东西和最终 activate 的 immutable artifact 理论上不是同一个。对一个把 `exact / immutable / reproducible` 当命脉的系统，必须**先冻结"要测的到底是什么"，再测它**。推论两条：
+
+- **Verify 失败不删除 version**：该 immutable 版本照样存在，只是标 `sealed but unverified / not active`——留下"AI 曾造过一个失败版本"的可审计证据，而不是抹掉。
+- **验证套件本身参加 seal**：定义"这一版声称能通过什么"的 `tests/` / `evals/` 必须进 package snapshot，否则会出现"version immutable 但它的测试事后可被改松"。这**细化**了 §7.4 现在"顶层测试输入不进 snapshot"那条——外部/大体量 golden *输入数据* 可以留在 snapshot 外，但**定义验收门槛的 verification suite 要随版本冻结**；两者的确切边界在 Phase C 落地时定死。
 
 核心思想：**AI 不能仅凭"编译通过"就证明自己学会了一个能力。** 这很可能是 Nulya 与"模型随手写插件"真正拉开差距处，且 deterministic test 比 outcome utility 更可靠、更容易先落地。`[写实]`
 
 ### 18.5 Evaluation evidence：区分 execution success 与 utility
 
-`ok=true` 只说明**工具正常执行并返回了结果**，不说明**它真的帮到了任务**（web_search 跑通但结果是垃圾、task 最终失败，不该算优秀工具）。所以 evidence 概念上分两层：
+`ok=true` 只说明**工具正常执行并返回了结果**，不说明**它真的帮到了任务**（web_search 跑通但结果是垃圾、task 最终失败，不该算优秀工具）。所以 evidence 分两层——**但要分清"客观观测"与"某人的判断"**：
 
 ```
-InvocationFact   { kind:"invocation", tool_id, version, ok }              ← 工具跑通了吗（§18.2 已写实）
-EvaluationFact   { kind:"evaluation", tool_id, version, source, passed/score }  ← 能力真的有用吗
+InvocationFact       { tool_id, version, ok }                      ← 客观 runtime 观测：工具跑通了吗（§18.2 已写实）
+EvaluationEvidence   { tool_id, version, source, at, passed|score } ← 某个 judge 的判断的 durable 记录
 ```
 
-**关键约束：kernel 存 evidence，绝不定义 reward（§15.3）。** EvaluationFact 是 append-only 事实，source 可来自 `test / benchmark / reviewer / agent self-eval / human / external`；**Evaluator 产出判断、Policy 解释判断，都在 kernel 之上**。v0.2 不做通用 Reward Framework——先把模型设计成"evaluation 是 append-only evidence，kernel 不解释它"。`[占位：EvaluationFact schema 定义，消费者随 Phase D 再接]`
+**为什么不叫 `EvaluationFact`**：`reviewer score = 0.82` **不是**"工具 utility 的客观事实"。客观事实是——"**source X 在上下文/时刻 Y 给出了 0.82**"。kernel 绝不声称 `score 0.82 == 真实 utility 0.82`，只如实记录"某 judge 产出了这个判断"。所以它是 **evidence of a judgment**，不是 fact of utility。
+
+由此天然容纳多 evaluator 冲突，全部合法、都留证：
+
+```
+test:        passed
+AI reviewer: 0.4
+human:       good
+```
+
+**Policy 自己去解释/权衡这些判断**（§15.2）。**关键约束：kernel 存 evidence，绝不定义 reward（§15.3）**；`source` 可来自 `test / benchmark / reviewer / agent self-eval / human / external`；Evaluator 产出判断、Policy 解释判断，都在 kernel 之上。这让 `facts are durable; policy is replaceable` 更严谨：**durable 的是"谁在何时判了什么"，可替换的是"如何据此决策"**。v0.2 不做通用 Reward Framework。`[占位：EvaluationEvidence schema，消费者随 Phase D 再接]`
 
 ### 18.6 v0.2 Roadmap（按可落地性排序，evidence 先行）
 
 ```
-Phase A  Version-aware evidence   usage fact 加 version（journal v1→v2）+ VersionStats 投影   ← 最先，不加任何 utility score（§18.2）
-Phase B  Capability lineage       version 加 parent + reason（§18.3）
-Phase C  Verification gate        candidate → test/eval → accepted version，Verify 成 lifecycle 门（§18.4）
-Phase D  Evaluation evidence      引入 EvaluationFact，kernel 仍不算 reward（§18.5）
-Phase E  Version comparison       用 VersionStats + EvaluationFact 支持 v2 regression 检测 → recommend/perform rollback（真正的 self-improvement 起点）
-Phase F  Authority manifest       evolution loop 稳后，把 §9 的"诚实版"升级成结构化 authority（生成/晋升永不自动获得 authority）
-Phase G  Ecosystem adapters       MCP / ACP / remote —— 作为 evolution kernel 的输入/输出适配器，不是主架构
+Phase A  Invocation evidence 知道 implementation   usage fact 加可空 version（journal v1→v2 兼容读）+ VersionStats 投影   ← 最先，不加任何 utility score（§18.2）
+Phase B  Provenance / lineage                       version 加独立的 VersionCreatedFact（parent + reason，不进 hash）（§18.3）
+Phase C  Verify exact immutable version             Seal → Verify(sealed) 成 lifecycle 门，验证套件随版本冻结（§18.4）
+Phase D  Record external judgments                  引入 EvaluationEvidence，kernel 仍不算 reward（§18.5）
+Phase E  Policy compares implementations            用 VersionStats + EvaluationEvidence 检测 v2 regression → recommend/perform rollback（真正的 self-improvement 起点）
+Phase F  Enforce generated-code authority           把 §9 的"诚实版"升级成结构化、OS 强制的 authority（生成/晋升永不自动获得 authority）
+Phase G  Ecosystem adapters                         MCP / ACP / remote —— 作为 evolution kernel 的输入/输出适配器，不是主架构
 ```
 
-分界重申（§15.2）：A–E 全是 **facts + primitives + 一层可替换 policy**；没有一步把"智能"写进 kernel。
+**`A → C` 是这条路线的分水岭**：做到 C，Nulya 就比"让模型自己写了个 plugin"多出明确的一层——
+
+```
+AI 造出来 → exact artifact immutable（B 之后还带 provenance）→ exact artifact 自证（Verify）→ 观测的是 exact artifact 的真实使用
+```
+
+到 E 才进一步变成"系统能判断后继版本是不是真的更好"。分界重申（§15.2）：A–E 全是 **facts + primitives + 一层可替换 policy**；没有一步把"智能"写进 kernel。
+
+---
+
+## 19. 控制面：SessionDriver（让 Agent 长出新的工作方式）
+
+§7 的 Contribution 全是**数据面**：Tool 给 Agent 一双手，Skill / Prompt 告诉它怎么用手。它们都无法表达"**这个 session 该怎么推进**"——何时该继续 step、何时算完成、要不要 spawn 子 session、多个 session 之间怎么编排。这层是**控制面**，v0.1 里它被硬编码在 `loop.zig` / `session.zig` 的 default 行为里，不可扩展。你举的 `/goal`、`plan → review → 共识 → implement → review`、读 Claude agents，全落在这半——它们要改的是控制流，不是能力。
+
+**为什么 Tool / Skill 都做不到这件事：**
+
+- **Skill 能表达 intent，但 enforce 不了控制流。** "目标没完成前别停"写进 Skill 只是 prompt——模型仍可能一句 "Done." 就让 AgentSession 返回。
+- **Tool 也不行。** 一个 `check_goal()` tool 能算"到没到"，但决定不了 assistant 完成后 kernel 到底 terminate 还是继续 step。这个决定权在 kernel 的循环里，`/goal`、plan-review workflow、swarm 想要的正是**替换这个决定**。
+
+### 19.1 定义
+
+> **Kernel 负责 session 怎么正确运行；SessionDriver 负责 session 为什么、什么时候、以什么顺序运行。**
+
+AgentSession 本已是一台 state machine（§2.1：`prompt() / cancel() / close()`，内部 `appendUser / step / usage`）。Kernel 自带一个隐式 **DefaultDriver**：
+
+```
+DefaultDriver
+  user message → step → (有 tool call? → 再 step : 结束)
+```
+
+SessionDriver 把这个"结束还是继续"的决定权变成可替换的控制面扩展，**完全不改 AgentSession**：
+
+```
+GoalDriver                          PlanReviewDriver
+  goal → step 到 assistant 停         create planner → 取 plan
+       → 评估目标                      → create reviewer → review
+       → 未达成: append 续写 → step     → review 回传 planner，往复到 accept
+       → ...                           → create implementer → execute → reviewer
+```
+
+`plan → review → 共识 → implement → review` 本质是一台小型 agent runtime：一个 Controller 编排 planner / reviewer / implementer 几个 child session，靠 append-only 事件通信直到共识——这**复用 §2.1 的"subagent = 自调用"机制**，不是新造 spawn。Agent 只是 `Session + instructions + model + capability composition`，不是新的一等对象（§19.4）。
+
+### 19.2 Session Host API（kernel 需要新增的唯一 substrate）
+
+Driver 是 **out-of-process** 的（同 §7.1，wire protocol 即 ABI，不绑定 Zig）。它**不拿** `*AgentSession` / `*Ledger` / `*Registry` 这些内部指针，只经一个很窄的 host API 请求 kernel 代它操作 session：
+
+```
+session/create   （instructions + model + capability composition → 一个 child session）
+session/append
+session/step
+session/events
+session/cancel
+session/close
+```
+
+> **一条边界划死 driver 的权力：driver 控制"时间"（何时、哪个 session 运行），不重新定义"已创建的 session"。**
+> Driver can decide *when* and *which* session runs; it cannot redefine a session that already exists.
+
+真需要再加 `session/fork`——**一开始不加**（同 §2.1、§7.3 的克制）。因为只能调合法 primitives，driver 永远**不能**改 session 的内容定义。这条要写成 API 表面就长不出的**显式黑名单**：
+
+```
+禁止的 driver 方法（永不提供）：
+    session/setTools()      session/setSystemPrompt()   session/setModel()
+    session/replaceHistory()  session/setMessages()     session/mutateComposition()
+    provider/rewriteRequest()
+```
+
+想换 model / tools / system / authority？答案统一是 **create another session**。这与 §7"extension 只 propose，kernel append"、§9"`capability authority ⊆ session authority`"是**同一条不变量的控制面投影**：
+
+> **Extension 能组合 kernel primitives，但不能打破 kernel invariants。**
+
+四条必须写进 kernel 侧的硬约束：
+
+- **续写 = append，不是 rewrite。** GoalDriver 的"继续"只能 append 一条续写事件再 step——和 §5.3 append-note 同一个合法路径，前缀不动，§0.1 / §1 缓存不变量**免费继承**。child session 各有独立子 ledger = 独立 cache scope（§2.1），不碰父 session 前缀。要表达"进度 43%"就 `append` 一条 message，绝不去 mutate system prompt（那会让 system block 每轮都变、炸掉稳定前缀——这正是 Pi `before_agent_start` 每轮改 system prompt *合法但危险*的地方，§19.5）。
+- **换 composition = 换 session，绝不原地 mutate。** 一个 `plan(read-only) → implement(shell/edit) → review(read-only)` workflow 的正解是**三个各自 frozen composition 的 session**，而不是在一个 session 里反复 `setTools`。每个 session 的 `system / tools / skills / instructions / authority` 在 `session/create` 时一次决定、之后全冻结——这不是"动态改当前 agent"，是"创建另一个 immutable agent context"，各自独立 cache scope，对缓存极友好。
+- **hidden state 可调度，model-visible state 只能 append。** driver 自己的隐藏状态（`iterations=7` / `phase=review`）随便存，只要它**只影响编排**（`if phase==review: 选 reviewer_session`）；一旦这个 state 要影响**模型看到什么**，就必须显式 `append("进入 review 阶段…")` 或 `session/create` 一个新 session。**Hidden driver state may control scheduling; model-visible driver state must enter through explicit append or session creation.** 这条顺带保住可复现性：replay 时模型看到的一切 = `session/create config + ledger + frozen composition` 的纯函数，没有 `before_provider_request` 那种事后偷改 payload 的黑洞。
+- **budget / termination / cancellation 的最终权在 kernel。** driver 只 propose"继续还是停"；step 上限、token budget、cancellation（`loop.zig`，冻结面 §15.1）是 kernel invariant，driver 越不过——否则一个失控 driver 能把 session 拖进死循环烧 token。
+
+### 19.3 这是 §7.3 预留的"第二个真实 runtime method"
+
+§7.3 曾刻意**不**把 JSON-RPC envelope 泛化，理由是"等第二种 runtime 方法真出现再抽"。SessionDriver 就是那第二种：当前只有 `tool/call`，driver 带来 `driver/run`（或 `driver/start` + `driver/event`）。到这时再从 `ToolCallRequest` 提炼通用 `JsonRpcRequest { id, method, params_json }`，就是**有真实第二用例**，不是预设计——这**回头印证了 §7.3"先别泛化"的决定是对的**。
+
+同时 SessionDriver 是第一个需要 **host callback（extension→kernel）** 的 Contribution：Tool 是被 kernel 调用（kernel→runtime，请求-响应一来一回），driver 反过来要**调进 kernel**（`session/create/step/…`）。§7.3 明说 v0.1 runtime"仍不做 host callbacks"——SessionDriver 正是将来把这条通道做出来的理由，同样遵守"有消费者才建"的纪律，在此之前只占位。
+
+### 19.4 Agent 先不做成独立 Contribution
+
+既然 Claude 有 `agents/`，直觉会想给 manifest 加 `contributes.agents[]`。**先不要**（同 §7.7 skill provider、§18 的克制）。一个 Agent 本质只是 `Session + instructions + model + capability composition`——它可以就是某个 SessionDriver extension 自带的**数据**（`agents/researcher.md` …），由 driver 自己 parse，再 `session/create({ instructions, model, skills, tools })`。等出现三个真实 consumer（Claude agent importer / OpenAI importer / Nulya 原生 agents）都要同一种 Agent 表示时，再抽 `AgentSpec / AgentRegistry`。**第二个 consumer 出现前不抽 abstraction**——这是全文反复锁定的品味。
+
+于是"支持 Claude agents"这件事的正解是：告诉 Nulya → 它长一个 `claude-agents` extension，extension 内 scan `.claude/agents/*.md` → parse → `session/create` 起 child session。**kernel 不需要懂 Agent，只需要懂 Session。**
+
+### 19.5 与非目标（§15.3）的连接，以及现实定位
+
+§15.3 把 `WorkflowMiner` / 各种 orchestration"智能"列为**永不进 kernel 的 non-goal**——它们属于 kernel *之上*。SessionDriver 正是让这些 workflow **能以 extension 形式长在 kernel 之上**的那道 substrate 缝：`/goal`、plan mode、review workflow、swarm 全部变成 driver extension，而 kernel 只多出一个窄 Session Host API。做到这一点，Nulya 的 core 反而可以比 Pi / DeepSeek-TUI **更小**——它们把大量 orchestration 内建，或开一个巨大的 in-process callback API（且 extension 拥有完整系统权限）；Nulya 走"少量稳定 primitive + out-of-process 组合"，更符合本文全程的取舍。
+
+**两种"灵活"要分清（Nulya 与 Pi 的架构分野）：**
+
+```
+Pi:     mutation power    — extension 直接改当前 harness：tools / system prompt / messages / provider payload / UI / session state
+Nulya:  composition power — driver 编排稳定 primitives：Session A / Session B / Tool X / Skill Y / Evidence / Environment，每个 primitive 本身不可被篡改
+```
+
+> **Pi gives extensions mutation power. Nulya gives extensions composition power.**
+
+Pi 的自由度更"强"（能改 kernel 原本的语义——运行时切 active tools、每轮改 system prompt、改 context messages、rewrite provider payload 都合法），代价是 cache stability / 可复现 / security 这些约束要靠 extension **自觉遵守**，core 无法对*任意* extension 保证稳定前缀。Nulya 选择"workflow 可以随便长，但改不了 kernel physics"——用组合自由度换取 kernel 能对*任意* driver 做出的保证。这不是能力弱，是把"什么可变"这件事收进 kernel。
+
+> **诚实定位**：就"让 AI 自己写插件改变 harness 行为"而言，**今天** Pi > DeepSeek-TUI > 当前 Nulya。但差距只是这一道 seam——AgentSession 已是 state machine、extension 已 out-of-process，缺的就是 Session Host API + `driver/*` 方法。补上它，Nulya 不追功能数量也能表达同样的愿景，且控制面天然继承 §0.1 缓存不变量与 §9 authority 收窄——这是 Pi 的 in-process 全权限模型给不了的。
+
+**规范例（写进 DESIGN 当尺子，抵抗 feature race）：**
+
+```
+Claude-style agents                          → extension（driver 自带 agent 数据，§19.4）
+/goal（目标达成前不结束）                     → SessionDriver extension
+plan mode                                    → SessionDriver extension
+plan → review → 共识 → implement → review     → SessionDriver extension
+loop until objective                         → SessionDriver extension
+```
+
+**Kernel physics（所有 Contribution 都在其上运行，改不了）** —— 这不是新规则，是 §0 / §7 / §9 / §15 应用到控制面的**同一套**，汇一处便于当尺子（权威定义仍在各自章节）：
+
+```
+1. Ledger 只能 append                          (§0.1, §3)
+2. SessionComposition 不可变                     (§5.1, §7.4)
+3. model-visible 状态只经 append 改变            (§7 硬约束, §19.2)
+4. 换 composition 必须换 session / generation    (§19.2)
+5. capability version 内容寻址、不可变            (§7.4)
+6. authority 不隐式增长（⊆ session authority）    (§9)
+7. cancellation 只有一个 kernel 定义的语义        (§15.1)
+8. driver 只能调度 primitive，不能 rewrite 它     (§19.2)
+```
+
+Tool / Skill / SessionDriver / MCP adapter / Claude-agent importer / plan workflow / goal loop / swarm —— 全部只能在这套 physics 上**组合**。这才是 **Everything above the kernel is learnable**（§15）的确切含义：不是"extension 什么都能改"，而是"**extension 什么都能组合，物理规则改不了**"。
+
+`[概念全定义；Session Host API + `driver/*` 方法 + host-callback 通道，待第一个真实 driver consumer（大概率 /goal）出现再写实]`
