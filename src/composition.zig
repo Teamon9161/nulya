@@ -1,13 +1,15 @@
 //! Session-scoped capability composition.
 //!
-//! The composition freezes extension-derived capabilities once at
-//! `AgentSession.init()`. The unified part is lifecycle/pinning; Tool, Skill,
-//! and System Prompt snapshots stay strongly typed and keep their own semantics.
+//! The composition freezes all session-scoped capability state at
+//! `AgentSession.init()`, including pinned extension contributions and the
+//! model-facing tool set. Tool, Skill, and System Prompt snapshots stay strongly
+//! typed and keep their own semantics.
 
 const std = @import("std");
 const registry = @import("registry.zig");
 const prompt = @import("prompt.zig");
 const skill = @import("skill.zig");
+const ext_skills = @import("extension/skills.zig");
 const manifest = @import("extension/manifest.zig");
 const store = @import("extension/store.zig");
 const integrity = @import("extension/integrity.zig");
@@ -38,29 +40,36 @@ pub const SessionComposition = struct {
         const tools = try registry.snapshot(alloc);
         errdefer tools.deinit(alloc);
 
-        const pinned = try resolvePinnedExtensions(alloc, io, cwd, ext_root_rel);
-        errdefer freePinned(alloc, pinned);
-        sortPinned(pinned);
-
         var root = openExtRoot(io, cwd, ext_root_rel) catch |err| switch (err) {
             error.FileNotFound => {
+                const pinned = try alloc.alloc(PinnedExtension, 0);
+                errdefer freePinned(alloc, pinned);
                 const skills = skill.SkillSetSnapshot{ .skills = try alloc.alloc(skill.SkillDescriptor, 0) };
                 errdefer skills.deinit(alloc);
-                const system_prompts = try buildSystemPrompts(alloc, null, pinned, skills);
+                const system_prompts = try buildSystemPrompts(alloc, null, &.{}, skills);
                 return .{ .pinned_extensions = pinned, .tools = tools, .skills = skills, .system_prompts = system_prompts };
             },
             else => return err,
         };
         defer root.close(io);
 
+        const resolved = try resolveActiveExtensions(alloc, io, root);
+        defer freeResolved(alloc, resolved);
+        sortResolved(resolved);
+
+        const pinned = try copyPinsFromResolved(alloc, resolved);
+        errdefer freePinned(alloc, pinned);
+
         var descriptors: std.ArrayList(skill.SkillDescriptor) = .empty;
-        errdefer skill.freeDescriptorList(alloc, descriptors.items);
-        try appendSkillsFromPins(alloc, io, root, pinned, &descriptors);
+        errdefer skill.deinitDescriptorArrayList(alloc, &descriptors);
+        for (resolved) |r| {
+            try ext_skills.appendFromManifest(alloc, io, root, &descriptors, r.id, r.version, r.manifest);
+        }
         skill.sortDescriptors(descriptors.items);
         const skills = skill.SkillSetSnapshot{ .skills = try descriptors.toOwnedSlice(alloc) };
         errdefer skills.deinit(alloc);
 
-        const system_prompts = try buildSystemPrompts(alloc, .{ .io = io, .root = root }, pinned, skills);
+        const system_prompts = try buildSystemPrompts(alloc, .{ .io = io, .root = root }, resolved, skills);
         errdefer system_prompts.deinit(alloc);
 
         return .{ .pinned_extensions = pinned, .tools = tools, .skills = skills, .system_prompts = system_prompts };
@@ -76,16 +85,16 @@ pub const SessionComposition = struct {
 
 const OpenRoot = struct { io: std.Io, root: std.Io.Dir };
 
-fn resolvePinnedExtensions(alloc: std.mem.Allocator, io: std.Io, cwd: []const u8, ext_root_rel: []const u8) ![]PinnedExtension {
-    var root = openExtRoot(io, cwd, ext_root_rel) catch |err| switch (err) {
-        error.FileNotFound => return try alloc.alloc(PinnedExtension, 0),
-        else => return err,
-    };
-    defer root.close(io);
-    const st = store.Store.init(io, root);
+const ResolvedExtension = struct {
+    id: []const u8,
+    version: []const u8,
+    manifest: manifest.Manifest,
+};
 
-    var pins: std.ArrayList(PinnedExtension) = .empty;
-    errdefer freePinned(alloc, pins.items);
+fn resolveActiveExtensions(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir) ![]ResolvedExtension {
+    const st = store.Store.init(io, root);
+    var resolved: std.ArrayList(ResolvedExtension) = .empty;
+    errdefer freeResolved(alloc, resolved.items);
 
     var it = root.iterate();
     while (try it.next(io)) |entry| {
@@ -93,33 +102,35 @@ fn resolvePinnedExtensions(alloc: std.mem.Allocator, io: std.Io, cwd: []const u8
         const active = (st.activeVersion(alloc, entry.name) catch continue) orelse continue;
         defer alloc.free(active);
         if (!st.versionExists(alloc, entry.name, active)) continue;
+
         const id = try alloc.dupe(u8, entry.name);
         errdefer alloc.free(id);
         const version = try alloc.dupe(u8, active);
+        errdefer alloc.free(version);
+        var m = try readPinnedManifest(alloc, io, root, id, version);
+        errdefer m.deinit();
+        try resolved.append(alloc, .{ .id = id, .version = version, .manifest = m });
+    }
+    return resolved.toOwnedSlice(alloc);
+}
+
+fn copyPinsFromResolved(alloc: std.mem.Allocator, resolved: []const ResolvedExtension) ![]PinnedExtension {
+    var pins: std.ArrayList(PinnedExtension) = .empty;
+    errdefer freePinned(alloc, pins.items);
+    for (resolved) |r| {
+        const id = try alloc.dupe(u8, r.id);
+        errdefer alloc.free(id);
+        const version = try alloc.dupe(u8, r.version);
         errdefer alloc.free(version);
         try pins.append(alloc, .{ .id = id, .version = version });
     }
     return pins.toOwnedSlice(alloc);
 }
 
-fn appendSkillsFromPins(
-    alloc: std.mem.Allocator,
-    io: std.Io,
-    root: std.Io.Dir,
-    pins: []const PinnedExtension,
-    descriptors: *std.ArrayList(skill.SkillDescriptor),
-) !void {
-    for (pins) |pin| {
-        var m = try readPinnedManifest(alloc, io, root, pin);
-        defer m.deinit();
-        try skill.appendFromManifest(alloc, io, root, descriptors, pin.id, pin.version, m);
-    }
-}
-
 fn buildSystemPrompts(
     alloc: std.mem.Allocator,
     open_root: ?OpenRoot,
-    pins: []const PinnedExtension,
+    resolved: []const ResolvedExtension,
     skills: skill.SkillSetSnapshot,
 ) !prompt.SystemPromptSnapshot {
     var blocks: std.ArrayList(prompt.SystemBlock) = .empty;
@@ -128,13 +139,11 @@ fn buildSystemPrompts(
     try appendSystemBlock(alloc, &blocks, "kernel", kernel_system_prompt);
 
     if (open_root) |opened| {
-        for (pins) |pin| {
-            var m = try readPinnedManifest(alloc, opened.io, opened.root, pin);
-            defer m.deinit();
-            for (m.system_prompts) |prompt_path| {
-                const source = try std.fmt.allocPrint(alloc, "ext:{s}@{s}/{s}", .{ pin.id, pin.version, prompt_path });
+        for (resolved) |r| {
+            for (r.manifest.system_prompts) |prompt_path| {
+                const source = try std.fmt.allocPrint(alloc, "ext:{s}@{s}/{s}", .{ r.id, r.version, prompt_path });
                 defer alloc.free(source);
-                const rel = try std.fs.path.join(alloc, &.{ pin.id, "versions", pin.version, integrity.package_dir, prompt_path });
+                const rel = try std.fs.path.join(alloc, &.{ r.id, "versions", r.version, integrity.package_dir, prompt_path });
                 defer alloc.free(rel);
                 const bytes = try opened.root.readFileAlloc(opened.io, rel, alloc, .limited(max_prompt_bytes));
                 defer alloc.free(bytes);
@@ -159,10 +168,10 @@ fn appendSystemBlock(alloc: std.mem.Allocator, blocks: *std.ArrayList(prompt.Sys
     try blocks.append(alloc, .{ .source = owned_source, .bytes = owned_bytes });
 }
 
-fn readPinnedManifest(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, pin: PinnedExtension) !manifest.Manifest {
+fn readPinnedManifest(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id: []const u8, version: []const u8) !manifest.Manifest {
     const st = store.Store.init(io, root);
-    if (!st.versionExists(alloc, pin.id, pin.version)) return error.VersionIntegrityInvalid;
-    const manifest_rel = try st.versionManifestPath(alloc, pin.id, pin.version);
+    if (!st.versionExists(alloc, id, version)) return error.VersionIntegrityInvalid;
+    const manifest_rel = try st.versionManifestPath(alloc, id, version);
     defer alloc.free(manifest_rel);
     const bytes = try root.readFileAlloc(io, manifest_rel, alloc, .limited(1 << 20));
     defer alloc.free(bytes);
@@ -184,12 +193,22 @@ fn openExtRoot(io: std.Io, cwd: []const u8, ext_root_rel: []const u8) !std.Io.Di
     return workspace.openDir(io, ext_root_rel, .{ .iterate = true });
 }
 
-fn sortPinned(pins: []PinnedExtension) void {
-    std.mem.sort(PinnedExtension, pins, {}, struct {
-        fn lessThan(_: void, a: PinnedExtension, b: PinnedExtension) bool {
+fn sortResolved(resolved: []ResolvedExtension) void {
+    std.mem.sort(ResolvedExtension, resolved, {}, struct {
+        fn lessThan(_: void, a: ResolvedExtension, b: ResolvedExtension) bool {
             return std.mem.lessThan(u8, a.id, b.id);
         }
     }.lessThan);
+}
+
+fn freeResolved(alloc: std.mem.Allocator, resolved: []const ResolvedExtension) void {
+    for (resolved) |*r| {
+        alloc.free(r.id);
+        alloc.free(r.version);
+        var m = r.manifest;
+        m.deinit();
+    }
+    alloc.free(resolved);
 }
 
 fn freePinned(alloc: std.mem.Allocator, pins: []const PinnedExtension) void {
@@ -329,9 +348,48 @@ test "pinned skill load survives current changes and absent draft source" {
     try activateVersion(alloc, io, tmp.dir, "finance", v2);
     var root = try tmp.dir.openDir(io, ".", .{});
     defer root.close(io);
-    const body = try skill.loadPinned(alloc, io, root, ref);
+    const body = try ext_skills.loadPinned(alloc, io, root, ref);
     defer alloc.free(body);
     try std.testing.expect(std.mem.indexOf(u8, body, "v1 body") != null);
+}
+
+test "skill frontmatter name must match the skill directory" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmpPath(alloc, io, tmp.dir);
+    defer alloc.free(cwd);
+
+    const manifest_bytes =
+        \\{"schema":"nulya.extension/v2","id":"finance","contributes":{"skills":["skills/risk-parity"]}}
+    ;
+    const version = try writeStaticVersion(alloc, io, tmp.dir, "finance", manifest_bytes, &.{.{ .rel = "skills/risk-parity/SKILL.md", .bytes = "---\nname: other\ndescription: wrong name\n---\nbody\n" }});
+    defer alloc.free(version);
+    try activateVersion(alloc, io, tmp.dir, "finance", version);
+
+    try std.testing.expectError(error.SkillNameDoesNotMatchDirectory, SessionComposition.init(alloc, io, cwd, "."));
+}
+
+test "duplicate skill names in one extension are rejected" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmpPath(alloc, io, tmp.dir);
+    defer alloc.free(cwd);
+
+    const manifest_bytes =
+        \\{"schema":"nulya.extension/v2","id":"finance","contributes":{"skills":["skills/a/foo","skills/b/foo"]}}
+    ;
+    const version = try writeStaticVersion(alloc, io, tmp.dir, "finance", manifest_bytes, &.{
+        .{ .rel = "skills/a/foo/SKILL.md", .bytes = "---\nname: foo\ndescription: first\n---\nbody\n" },
+        .{ .rel = "skills/b/foo/SKILL.md", .bytes = "---\nname: foo\ndescription: second\n---\nbody\n" },
+    });
+    defer alloc.free(version);
+    try activateVersion(alloc, io, tmp.dir, "finance", version);
+
+    try std.testing.expectError(error.DuplicateSkillName, SessionComposition.init(alloc, io, cwd, "."));
 }
 
 test "inactive extension contributions do not enter composition" {

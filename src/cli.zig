@@ -11,8 +11,7 @@ const protocol = @import("extension/protocol.zig");
 const manifest = @import("extension/manifest.zig");
 const templates = @import("extension/templates.zig");
 const toolchain = @import("toolchain.zig");
-const skill = @import("skill.zig");
-const composition = @import("composition.zig");
+const ext_skills = @import("extension/skills.zig");
 
 const extensions_root = ".nulya" ++ std.fs.path.sep_str ++ "extensions";
 
@@ -55,13 +54,19 @@ fn dispatchSkill(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
 }
 
 fn skillList(alloc: std.mem.Allocator, io: std.Io) !u8 {
-    var comp = try composition.SessionComposition.init(alloc, io, ".", extensions_root);
-    defer comp.deinit(alloc);
-    if (comp.skills.skills.len == 0) {
+    var ext_root = std.Io.Dir.cwd().openDir(io, extensions_root, .{ .iterate = true }) catch {
+        try printOut(alloc, io, "no skills\n", .{});
+        return 0;
+    };
+    defer ext_root.close(io);
+
+    const skills = try ext_skills.listActive(alloc, io, ext_root);
+    defer skills.deinit(alloc);
+    if (skills.skills.len == 0) {
         try printOut(alloc, io, "no skills\n", .{});
         return 0;
     }
-    for (comp.skills.skills) |s| {
+    for (skills.skills) |s| {
         try printOut(alloc, io, "{s}\t{s}\t{s}\n", .{ s.ref, s.name, s.description });
     }
     return 0;
@@ -77,7 +82,7 @@ fn skillLoad(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8
         return 1;
     };
     defer ext_root.close(io);
-    const body = skill.loadPinned(alloc, io, ext_root, args[0]) catch |err| {
+    const body = ext_skills.loadPinned(alloc, io, ext_root, args[0]) catch |err| {
         try printOut(alloc, io, "skill load failed: {s}\n", .{@errorName(err)});
         return 1;
     };

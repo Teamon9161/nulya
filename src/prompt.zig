@@ -45,11 +45,6 @@ pub const PromptIR = struct {
     stable_blocks: []const StableBlock,
 
     pub fn deinit(self: PromptIR, alloc: std.mem.Allocator) void {
-        for (self.system_blocks) |block| {
-            alloc.free(block.source);
-            alloc.free(block.bytes);
-        }
-        alloc.free(self.system_blocks);
         for (self.stable_blocks) |block| alloc.free(block.bytes);
         alloc.free(self.stable_blocks);
     }
@@ -68,16 +63,6 @@ pub fn project(alloc: std.mem.Allocator, events: []const ledger.Event) !PromptIR
 }
 
 pub fn projectWithSystem(alloc: std.mem.Allocator, system_blocks: []const SystemBlock, events: []const ledger.Event) !PromptIR {
-    var owned_system: std.ArrayList(SystemBlock) = .empty;
-    errdefer (SystemPromptSnapshot{ .blocks = owned_system.items }).deinit(alloc);
-    for (system_blocks) |block| {
-        const source = try alloc.dupe(u8, block.source);
-        errdefer alloc.free(source);
-        const bytes = try alloc.dupe(u8, block.bytes);
-        errdefer alloc.free(bytes);
-        try owned_system.append(alloc, .{ .source = source, .bytes = bytes });
-    }
-
     var blocks: std.ArrayList(StableBlock) = .empty;
     errdefer {
         for (blocks.items) |block| alloc.free(block.bytes);
@@ -104,10 +89,8 @@ pub fn projectWithSystem(alloc: std.mem.Allocator, system_blocks: []const System
         .capability_note => |note| try appendBlock(alloc, &blocks, .capability_note, note.text),
     };
 
-    const system_slice = try owned_system.toOwnedSlice(alloc);
-    errdefer (SystemPromptSnapshot{ .blocks = system_slice }).deinit(alloc);
     const stable_slice = try blocks.toOwnedSlice(alloc);
-    return .{ .system_blocks = system_slice, .stable_blocks = stable_slice };
+    return .{ .system_blocks = system_blocks, .stable_blocks = stable_slice };
 }
 
 fn appendBlock(
@@ -169,7 +152,6 @@ test "a capability_note appends a capability_note block without breaking the pre
     // A plain append never bumps the generation.
     try std.testing.expectEqual(gen_before, currentGeneration(l.view()));
 }
-
 
 test "PromptIR carries immutable system blocks separately from ledger stable blocks" {
     const alloc = std.testing.allocator;
