@@ -1,0 +1,197 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`user and assistant turns 1`] = `
+"                                                                            
+› make emit budgets configurable                                            
+                                                                            
+● Reading emit.zig first.                                                   
+                                                                            
+› and write it to default.toml · queued                                     
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+"
+`;
+
+exports[`thinking is collapsed by default and names its size 1`] = `
+"  ▸ thinking · 17 chars                                                     
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+"
+`;
+
+exports[`shell output is collapsed, with an exit chip 1`] = `
+"  $ zig build test                                        ▸ 4 lines · exit 1
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+"
+`;
+
+exports[`a \`nulya …\` command reads as an evolution action 1`] = `
+"  ⚙ nulya ext build .nulya/extensions/lint                ▸ 2 lines · exit 0
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+"
+`;
+
+exports[`edit renders its diff expanded by default 1`] = `
+"  ✎ src/emit.zig                                                ▾ +2 -1 · ok
+     1 - pub const head_bytes = 4096;                                       
+     1 + pub const head_bytes = 4096; // default                            
+     2 + pub const tail_bytes = 2048;                                       
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+"
+`;
+
+exports[`a canceled call is recognised by its marker, not by any stream line 1`] = `
+"  ⊘ sleep 60                               ▸ canceled · side effects unknown
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+"
+`;
+
+exports[`capability notes are expanded and carry the evolve accent 1`] = `
+"                                                                            
+⚡ capability · lint@v-3f2a91                                               
+  tools: lint_zig                                                           
+  usage: nulya ext run lint lint_zig '<json>'                               
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+"
+`;

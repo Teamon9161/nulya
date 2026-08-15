@@ -1,6 +1,6 @@
 # Nulya TUI — 设计与计划
 
-> **状态：T0（内核 `--stream`）已落地 → [DESIGN.md](DESIGN.md) §14；`tui/` 本身未实现，属计划。** 本文是 `tui/` 的设计契约 + 里程碑；落地一块就把"已实现"的部分搬进 DESIGN.md §14 / 新 §18，本文收缩成纯计划。
+> **状态：T0（内核 `--stream`）已落地 → [DESIGN.md](DESIGN.md) §14；T1（`tui/` 骨架）已落地 → `tui/`（见 §11）；T2–T4 属计划。** 本文是 `tui/` 的设计契约 + 里程碑；落地一块就把"已实现"的部分搬进 DESIGN.md §14 / 新 §18，本文收缩成纯计划。`tui/` 不在内核范围里（另一条工具链、另一个进程），所以它的现状写在本文 §11，不进 DESIGN.md。
 > 上位原则见 [PLAN.md](PLAN.md) §3.11：前端是 core 之上的薄客户端——**tail ledger 文件 + append user 事件；前端是长期进程，re-spawn 的只是 worker**。
 
 ## 0. 定位（三句话）
@@ -261,7 +261,7 @@ fold   = "ctrl+o"
 | 里程碑 | 内容 | 完成标准 |
 |---|---|---|
 | ~~**T0 · kernel `--stream`**~~ ✅ | §2.2：`StepContext.observer`、tee、tool begin/end、per-step 刷 ledger 行、`run done/error` 行、诊断 JSON 化；单测 + e2e 冒烟；DESIGN §14 同步 | `zig build test` / `e2e` 绿；`nulya session step <id> --stream` 在 scripted 下按 §2.2 行序输出；不带 `--stream` 行为不变 |
-| **T1 · 骨架** | `tui/` 包；`nulya/{bin,cli,ledger,files,diff}.ts`；`state/{session,driver,settings}`；App = transcript（User/Assistant 通用卡 + 通用 tool 卡）+ composer + 状态栏；driver 状态机；流式；Esc cancel；`--session` 回放；`bun test` 两条 | 在 nulya 仓库里用它对着真实 provider 完整跑一轮"读源码 → edit → zig build test"；关掉重开 `--session` 一致 |
+| ~~**T1 · 骨架**~~ ✅ | `tui/` 包；`nulya/{bin,cli,ledger,files,diff}.ts`；`state/{session,driver,settings}`；App = transcript（User/Assistant 通用卡 + 通用 tool 卡）+ composer + 状态栏；driver 状态机；流式；Esc cancel；`--session` 回放；`bun test` 两条 | 在 nulya 仓库里用它对着真实 provider 完整跑一轮"读源码 → edit → zig build test"；关掉重开 `--session` 一致 |
 | **T2 · 卡片与折叠** | registry；Shell/Edit(diff)/ExtTool/Thinking/Canceled/spill；EvolveCard 全表；CapabilityBanner；CompositionCard；折叠交互；`tui.toml`；主题 tokens；ascii 降级 | §4.2 表每行一个快照测试；`edit_diff` 设定生效 |
 | **T3 · nulya 视图** | `/sessions`（树 + live 标记 + 打开）；`/ext`（store / 版本线 / 漂移 / usage / 动作键）；SubSessionCard → 第二 tab；observer 模式（锁探测、`events --follow` 续接、take over） | 用 shell 在另一终端跑一个 driver 脚本 loop step，TUI 以 observer 附上并能 append |
 | **T4 · 收尾** | `/help` `/settings` `/usage`；keymap 覆盖；`bun build --compile` 出单文件；README（安装、`NULYA_BIN`、按键）；性能核对（长 session 回放 5k 事件不卡；scrollbox 视口裁剪） | 5k 事件 session 打开 < 1s；README 照做能跑 |
@@ -335,3 +335,66 @@ NULYA_SCRIPTED_MODE=finish nulya session step "$ID" --stream
 5. 内核这边 T0 之后**不再需要**任何改动就能做完 T1；再想改内核先回 §10 讨论。
 
 核验（编排者）：`zig build test` 绿 / `zig build e2e` 绿 / `bun test` 尚不适用（`tui/` 未创建）。
+
+### T1 · 骨架
+
+**状态**：完成。`tui/` 包已建（Bun 1.3.5 + `@opentui/core`/`@opentui/solid` 0.5.3 + solid-js 1.9.12）：`nulya/{bin,cli,ledger,files,diff}.ts`、`state/{session,driver,settings,folds}.ts`、`render/{registry,theme,cards/*}`、`ui/{App,Transcript,Composer,StatusBar}`、`keymap.ts`、`main.tsx`。transcript（User / Assistant / 通用 tool / Thinking / CapabilityBanner / Unknown）+ composer + 状态栏跑通；driver 状态机、流式渲染、`Esc` 取消、`--session` 回放都在。**内核一行未改**（硬约束 1）。`bun test` 20 条全绿（`tui/test/{cli.test.ts,render.test.tsx}` + 7 张快照）；`zig build test` / `zig build e2e` 绿。
+
+**关键决定与理由**
+
+- **provisional → committed 的替换点只有两处。** 流式行只造 *provisional* 卡（key `p<turn>:…`），ledger 行造 *committed* 卡（key `e<seq>…`）。committed 项按 seq 插在 provisional 段之前，所以"到达顺序"永远不决定"显示顺序"——step 边界从 inbox 排干进来的 `user_text` 带着小 seq，仍然排回它该在的位置（T0 提醒 1 的直接落地）。丢弃 provisional 只发生在：收到该 step 的 `assistant` 事件时，以及 `step end` 时兜底（provider 阶段被取消的那一步根本没有 assistant 事件，剩下的 provisional 必须清掉，否则屏幕上会留一张 ledger 不背书的卡）。
+- **thinking 卡放在 assistant 文本之前**（§4.1 的示意图里画在之后）。理由：流里 `thinking_delta` 本来就先到，若 committed 时翻成"文本在前"，live 与 replay 就会给出两种画面——而"两条路径同一帧"是本里程碑用测试钉死的不变量，排版好看排在它后面。
+- **`stopped:"budget"` 不自动续跑。** "该不该继续"是 driver 脚本 / agent 的事（PLAN §3.6、硬约束 2），TUI 一行都不写。状态栏明确显示 `step budget spent · /step to continue`，并新增一个 `/step` slash 命令让用户显式续。§4.3 那条"pending 未转正就再 spawn 一次 step"照做了，但加了收敛条件：只有 queued 数**严格下降**才继续循环，否则停下并让用户看见——否则一条永远转不正的 pending 会变成无限 spawn。
+- **diff 打开行号 gutter**（§6 写的是"仅前景色的 add/del"）。OpenTUI 的 `DiffRenderable` 只在 gutter 里画 `-` / `+`；关掉行号后 add/del 之间**只剩颜色**差别，NO_COLOR 下、以及任何纯文本抓帧（包括本里程碑的快照测试）里就完全分不出来。背景块仍按 §6 全部 transparent，只是把符号找回来。
+- **`edit` 的 diff 行号相对片段、不相对文件。** `edit` 参数只有 `{path, old_string, new_string}`，ledger 里没有文件偏移；replay 时文件也早就变了。与其编一个假的行号，不如让 hunk 头老老实实写 `@@ -1,n +1,m @@`——这是那次事务的忠实图像，而不是第二份真相（理由写在 `nulya/diff.ts` 顶部）。
+- **`nulya/files.ts` 现在只有 session 路径 / 存在性 / header。** §3 的模块表还给它派了 lock 探测、extensions store、tool-usage 投影——但那三样的消费者（observer 模式、`/ext` 视图）都在 T3。按 CLAUDE.md「第二个 consumer 出现之前不抽 abstraction」「只写不读的字段是该删的信号」，先不写没人读的代码。
+- **`render/registry.ts` 已经是唯一的 match 点，但表还没填满。** T1 只认 `shell` / `edit` / 其它 extension tool，外加"命令以 `nulya` 开头 → evolve 配色 + 按 `src|skill|session|其它` 选图标"。§5.2 的全表（抽 version、抽 id、SubSessionCard）是 T2 的活，加在 `describeTool` 一个函数里即可，卡片只读 `ToolPresentation`。
+- **测试里的 `settle()`。** `@opentui/core/testing` 的 `renderOnce()` / `waitForFrame()` 单独用时，`markdown` 与 `diff` 画出来是**空的**——它们的解析要跨真实计时器 tick 才落地，只推 render pass 推不动。`test/support.ts` 的 `settle(setup, passes, delayMs)` = 睡一下再 render，重复若干次。踩了半小时，记在这里省得 T2 再踩。
+
+**偏离设计之处**
+
+1. **§4.1 的卡片顺序**：thinking 在 assistant 文本**之前**（理由见上）。
+2. **§4.4 的 slash 列表**：新增 `/step`（budget 用尽后显式续跑）。`/new` `/sessions` `/ext` `/skills` `/usage` `/settings` 未做（T3/T4）。
+3. **§6 的 "diff 静"**：保留"无背景块"，但打开行号 gutter 以拿回 `-`/`+` 符号（理由见上）。
+4. **§4.2 的卡片表**：T1 只有通用 tool 卡（registry 决定图标/头行/chip），ShellCard / EditCard / ExtToolCard / EvolveCard / SubSessionCard / CanceledCard 尚未拆成独立组件——canceled 是通用卡按 marker 文本变形，不是独立卡。CompositionCard 也没做，header 信息压成顶栏一行（`nulya · <id> · provider/model · tools 2+N`）；skills 数要读每个 active 版本的 `extension.json`（§5.1），留给 T2 的 CompositionCard。
+5. **§4.2 的折叠交互**：只有键盘（`Ctrl+O` 切最近一张卡、`Ctrl+Shift+O` 全展开、`/fold` 全折叠）。鼠标点头行、`Esc` 进 browse 模式（`j/k`）是 T2。
+6. **§4.1 的空状态首屏 wordmark** 与 **§4.5 的 `↓ N new`** 未做。
+7. **§3 模块表**：`files.ts` 只实现了 sessions header 那一档（理由见上）；另加了一个模块表上没有的 `state/folds.ts`（折叠覆盖的 store，纯视图状态）。
+8. **本文的状态行与 §9 的 T1 一行**改成已落地（与 T0 同一种记法）。`tui/` 的现状留在本文 §11、**不进 DESIGN.md**——DESIGN.md 是内核的现状，`tui/` 是内核之上的客户端。`CLAUDE.md` 里 `docs/tui.md` 那一行仍写着"未实现，归属 PLAN"：工作区里 `CLAUDE.md` 有别人未提交的改动，本次 commit 按硬约束 7 没碰它，等那些改动落地时一并更新。
+
+**怎么运行与测试**
+
+```bash
+zig build                                    # TUI 需要一个 nulya 二进制
+cd tui && bun install
+
+bun run typecheck                            # tsc --noEmit
+bun test                                     # 20 条：CLI 协议 + 渲染快照 + 按键注入
+
+bun run src/main.tsx                         # 当前目录开一场新 session
+bun run src/main.tsx --session s-…           # 重开
+NULYA_SCRIPTED_MODE=finish bun run src/main.tsx --model scripted   # 离线
+```
+
+二进制发现顺序：`NULYA_BIN` → workspace（或本包）向上找 `zig-out/bin/nulya[.exe]` → `PATH`。
+
+- `tui/test/cli.test.ts`：临时 workspace + **真实二进制**（scripted，无密钥无网络）。`new → append → step --stream` 对**整段行序**逐条断言（17 行的 tag 序列），并做类型化解析（`tool_use_start.name == "shell"`、`run done{steps:2,stopped:"end_turn"}`、seq 1..4）；`--since` 尾巴；cancel 路径用 `NULYA_SCRIPTED_MODE=loop --max-steps 20`，见到第一个 `step end` 就 `session cancel`，断言出现 `status:"canceled"` 且 `run done{stopped:"canceled"}` 且总步数远小于预算；最后一条断言 **events 回放的 items 投影 == live 流的 items 投影**。
+- `tui/test/render.test.tsx`：7 张卡片快照（user/queued、thinking 折叠、shell 折叠+exit chip、evolve、edit diff 展开、canceled marker、capability），外加 `edit_diff=collapsed` / `tool_output=expanded` 设定生效、窄屏隐藏右侧 chip、ascii 降级；然后是三条端到端（真实二进制 + test renderer + `mockInput`）：**同一 session live 与 replay 渲染出同一帧**、**打字 + Enter 真的驱动一次 step**（user turn 从 queued 转正、tool 卡出现、`stopped == "end_turn"`）、**关掉重开 `--session` 的 transcript 逐字相同**（对比两条 hairline 之间的行，避开状态栏计数）、**`Ctrl+O` 展开最近一张 tool 卡**。
+
+**已知问题**
+
+- **真实 provider 冒烟未跑：环境里没有任何密钥**（查过 `DEEPSEEK_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`，只有一个 `ANTHROPIC_BASE_URL`）。按硬约束 6 跳过，全链路验证一律走 scripted。因此 T0 遗留的两条也还没实测：真实 provider 下的 `thinking_delta` 与 `usage` 流行（状态栏的 token 累计、Thinking 卡的流式尾行都还没见过真数据）。**"读源码 → edit → zig build test" 那一轮**必须等有密钥的人手工跑一次。
+- **只能自动验证到"按键 → 状态 → 帧"这一层。** alt-screen 的实际观感、鼠标滚轮、`Shift+Enter`（要 kitty keyboard 协议，Windows Terminal 支持；不支持时退 `Ctrl+J`）、`Ctrl+C` 两下、真实终端里的换行/宽字符，都得早上手工确认一遍。启动路径本身验证过：`bun run src/main.tsx` 在仓库里真的进了 alt-screen 并画出首帧（stderr 干净），只是无法在无人值守下继续操作。
+- `Ctrl+C` 第一下 kill 的是 step 进程本身；Windows 上它派生的 shell 子进程可能残留（`Bun.spawn().kill()` 不杀进程树）。ledger 侧是安全的——下次 open 由内核 `completeInterruptedToolBatch` 补齐。
+- `@opentui/solid` 0.5.3 的 `SpanProps` 类型丢了 `fg`/`bg`（`TextNodeOptions` 运行时是支持的）。没有用类型 hack 绕，改成 row box + 兄弟 `<text>`——顺带得到了悬挂缩进。
+- 退出走 `process.exit(0)`（`renderer.destroy()` 之后）。OpenTUI 不在 `process.exit` 上自动清理，所以顺序不能反。
+- `settle()` 那条（见上）：新加需要 markdown/diff 的快照测试时别用 `renderOnce()` 一把。
+
+**给下一里程碑（T2 · 卡片与折叠）的提醒**
+
+1. **卡片全表加在 `render/registry.ts` 的 `describeTool` 里**，不要在组件里再 match 一次名字。`ToolPresentation` 现在有 `{glyph, head, accent, body, isEdit}`——要抽 `ext build` 的 version、`session new` 的 id，就往这个返回值上加字段，`ToolCard` 只负责摆。
+2. **每加一种卡就加一帧快照**；`render.test.tsx` 里"live 与 replay 同一帧""关掉重开逐字相同"这两条是不变量，任何新卡片都必须继续满足——尤其别让新卡片依赖只有流里才有的信息（`tool begin/end` 在 replay 里根本不存在，canceled 只能认 marker 文本，T0 提醒 4）。
+3. **`tui.toml` 已经能读全**（`state/settings.ts`，user → project 合并，坏文件不致命）。T2 新增的折叠键只要加进 `Settings.transcript` 并从 `Style.settings` 读即可；`createStyle` 是唯一把设定变成 tokens 的地方。
+4. **provisional → committed 的替换只有两处**（`assistant` 事件、`step end`），新卡片别绕开它们自己维护状态，否则 replay 就对不上了。
+5. **`usage` 是每步的增量**（T0 提醒 2 已按此累加），resume 之前的历史未知，状态栏写的是 `since attach`——真出了 CompositionCard / `/usage` 视图时别把它当全量。
+6. **内核不需要再改**（T0 提醒 5 依然成立）：T1 全程只用了 `session new|append|step --stream|events|cancel` 与 session 文件首行。§10 那四项一项没动。

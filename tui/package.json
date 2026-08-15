@@ -1,0 +1,21 @@
+{
+  "name": "nulya-tui",
+  "version": "0.1.0",
+  "module": "src/main.tsx",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "bun run src/main.tsx",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@opentui/core": "0.5.3",
+    "@opentui/solid": "0.5.3",
+    "solid-js": "1.9.12"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  }
+}
