@@ -36,31 +36,11 @@ pub const StepContext = struct {
     step_budget: tool.StepOutputBudget = .{},
 };
 
-/// Run exactly one step against `l`. Appends the assistant turn, and — if it
-/// carried tool calls — the single batched `tool_results` turn.
-pub fn runStep(
-    alloc: std.mem.Allocator,
-    l: *ledger.Ledger,
-    model: Model,
-    tool_snapshot: registry.ToolSetSnapshot,
-    step_ctx: StepContext,
-) !provider.Usage {
-    return runStepWithOptions(alloc, l, model, tool_snapshot, step_ctx, .{});
-}
-
-pub fn runStepWithOptions(
-    alloc: std.mem.Allocator,
-    l: *ledger.Ledger,
-    model: Model,
-    tool_snapshot: registry.ToolSetSnapshot,
-    step_ctx: StepContext,
-    model_options: provider.Options,
-) !provider.Usage {
-    const prompt_ir = try prompt.project(alloc, l.view());
-    defer prompt_ir.deinit(alloc);
-    return runStepWithPrompt(alloc, l, model, &prompt_ir, tool_snapshot, step_ctx, model_options);
-}
-
+/// Run exactly one step against `l` from an already-projected `prompt_ir`.
+/// Appends the assistant turn, and — if it carried tool calls — the single
+/// batched `tool_results` turn. The prompt is projected by the caller
+/// (`AgentSession`), which is what folds in the session's system blocks; the
+/// loop only sees the finished IR.
 pub fn runStepWithPrompt(
     alloc: std.mem.Allocator,
     l: *ledger.Ledger,
@@ -149,6 +129,21 @@ fn maxConcurrentTools(policy: tool.BatchPolicy) usize {
     return switch (policy) {
         .sequential, .parallel_read_only => 1,
     };
+}
+
+/// Test-only convenience: project with no system prompt, then run one step.
+/// Real sessions project through `AgentSession` (which carries system blocks),
+/// so this shortcut is deliberately not part of the public loop API.
+fn runStepForTest(
+    alloc: std.mem.Allocator,
+    l: *ledger.Ledger,
+    model: Model,
+    tool_snapshot: registry.ToolSetSnapshot,
+    step_ctx: StepContext,
+) !provider.Usage {
+    const prompt_ir = try prompt.project(alloc, l.view());
+    defer prompt_ir.deinit(alloc);
+    return runStepWithPrompt(alloc, l, model, &prompt_ir, tool_snapshot, step_ctx, .{});
 }
 
 fn execOne(
@@ -256,7 +251,7 @@ test "one step runs a batch of two shell calls and appends one result turn" {
     defer lenv.deinit();
 
     var scripted = Scripted{};
-    _ = try runStep(alloc, &l, .{ .ptr = &scripted, .vtable = &Scripted.vtable }, tools, .{
+    _ = try runStepForTest(alloc, &l, .{ .ptr = &scripted, .vtable = &Scripted.vtable }, tools, .{
         .tool_context = .{
             .environment = lenv.environment(),
             .fs = lenv.workspaceFs(),
@@ -348,7 +343,7 @@ test "a capability note reaches the provider as a capability_note block" {
     defer lenv.deinit();
 
     var model_impl = NoteModel{};
-    _ = try runStep(alloc, &l, .{ .ptr = &model_impl, .vtable = &NoteModel.vtable }, .{ .tools = &.{} }, .{
+    _ = try runStepForTest(alloc, &l, .{ .ptr = &model_impl, .vtable = &NoteModel.vtable }, .{ .tools = &.{} }, .{
         .tool_context = .{
             .environment = lenv.environment(),
             .fs = lenv.workspaceFs(),

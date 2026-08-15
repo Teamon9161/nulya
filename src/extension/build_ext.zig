@@ -195,33 +195,12 @@ fn writeSeal(
 /// same byte limit and needs valid UTF-8 for provider JSON serialization.
 fn validateSystemPrompts(alloc: std.mem.Allocator, m: manifest.Manifest, snapshot: integrity.PackageSnapshot) !void {
     for (m.system_prompts) |prompt_path| {
-        const rel = try canonicalRel(alloc, prompt_path);
+        const rel = try integrity.canonicalRel(alloc, prompt_path);
         defer alloc.free(rel);
-        const bytes = findSnapshotFile(snapshot, rel) orelse return error.SystemPromptFileMissing;
+        const bytes = integrity.findSnapshotFile(snapshot, rel) orelse return error.SystemPromptFileMissing;
         if (bytes.len > prompt.max_system_prompt_bytes) return error.SystemPromptTooLarge;
         if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidUtf8;
     }
-}
-
-fn findSnapshotFile(snapshot: integrity.PackageSnapshot, rel: []const u8) ?[]const u8 {
-    for (snapshot.files) |file| {
-        if (std.mem.eql(u8, file.rel, rel)) return file.bytes;
-    }
-    return null;
-}
-
-fn canonicalRel(alloc: std.mem.Allocator, rel: []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(alloc);
-    var it = std.mem.splitAny(u8, rel, "/\\");
-    var first = true;
-    while (it.next()) |part| {
-        if (part.len == 0) continue;
-        if (!first) try out.append(alloc, '/');
-        try out.appendSlice(alloc, part);
-        first = false;
-    }
-    return out.toOwnedSlice(alloc);
 }
 
 fn testZigExe(alloc: std.mem.Allocator) ![]u8 {

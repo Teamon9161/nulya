@@ -85,12 +85,12 @@ pub fn validateSnapshot(alloc: std.mem.Allocator, m: manifest.Manifest, snapshot
         const expected_name = basename(skill_path) orelse return error.InvalidSkillDirectoryName;
         if (!skill.isValidName(expected_name)) return error.InvalidSkillDirectoryName;
 
-        const skill_rel = try canonicalRel(alloc, skill_path);
+        const skill_rel = try integrity.canonicalRel(alloc, skill_path);
         defer alloc.free(skill_rel);
-        const skill_md_rel = try joinCanonical(alloc, skill_rel, skill_file);
+        const skill_md_rel = try integrity.joinCanonical(alloc, skill_rel, skill_file);
         defer alloc.free(skill_md_rel);
 
-        const bytes = findSnapshotFile(snapshot, skill_md_rel) orelse return error.SkillFileMissing;
+        const bytes = integrity.findSnapshotFile(snapshot, skill_md_rel) orelse return error.SkillFileMissing;
         if (bytes.len > max_skill_md_bytes) return error.SkillFileTooLarge;
         if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidUtf8;
         const fm = try skill.parseFrontmatter(bytes);
@@ -162,34 +162,6 @@ fn readPinnedManifest(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id
     errdefer m.deinit();
     try m.validate();
     return m;
-}
-
-fn findSnapshotFile(snapshot: integrity.PackageSnapshot, rel: []const u8) ?[]const u8 {
-    for (snapshot.files) |file| {
-        if (std.mem.eql(u8, file.rel, rel)) return file.bytes;
-    }
-    return null;
-}
-
-fn canonicalRel(alloc: std.mem.Allocator, rel: []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(alloc);
-    var it = std.mem.splitAny(u8, rel, "/\\");
-    var first = true;
-    while (it.next()) |part| {
-        if (part.len == 0) continue;
-        if (!first) try out.append(alloc, '/');
-        try out.appendSlice(alloc, part);
-        first = false;
-    }
-    return out.toOwnedSlice(alloc);
-}
-
-fn joinCanonical(alloc: std.mem.Allocator, parent: []const u8, child: []const u8) ![]u8 {
-    const child_norm = try canonicalRel(alloc, child);
-    defer alloc.free(child_norm);
-    if (parent.len == 0) return try alloc.dupe(u8, child_norm);
-    return std.fmt.allocPrint(alloc, "{s}/{s}", .{ parent, child_norm });
 }
 
 fn basename(path: []const u8) ?[]const u8 {

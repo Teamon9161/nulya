@@ -11,15 +11,12 @@
 //! cache cost (DESIGN §5.1).
 
 const std = @import("std");
-const builtin = @import("builtin");
 const ledger = @import("../ledger.zig");
 const manifest = @import("manifest.zig");
 const ext_skills = @import("skills.zig");
 const skill = @import("../skill.zig");
 const store = @import("store.zig");
-const integrity = @import("integrity.zig");
-
-const exe_suffix = if (builtin.os.tag == .windows) ".exe" else "";
+const testkit = @import("testkit.zig");
 
 /// Model-facing announcement text for one active extension version.
 /// Deterministic: the same inputs always yield the same bytes, so
@@ -68,24 +65,12 @@ pub fn syncFromActiveExtensions(
     l: *ledger.Ledger,
     ext_root_rel: []const u8,
 ) !void {
-    var root = openExtRoot(io, cwd, ext_root_rel) catch |err| switch (err) {
+    var root = store.openRoot(io, cwd, ext_root_rel) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
     defer root.close(io);
     try syncOpen(alloc, io, l, root);
-}
-
-fn openExtRoot(io: std.Io, cwd: []const u8, ext_root_rel: []const u8) !std.Io.Dir {
-    if (std.fs.path.isAbsolute(ext_root_rel)) {
-        return std.Io.Dir.openDirAbsolute(io, ext_root_rel, .{ .iterate = true });
-    }
-    var workspace = if (std.fs.path.isAbsolute(cwd))
-        try std.Io.Dir.openDirAbsolute(io, cwd, .{})
-    else
-        try std.Io.Dir.cwd().openDir(io, cwd, .{});
-    defer workspace.close(io);
-    return workspace.openDir(io, ext_root_rel, .{ .iterate = true });
 }
 
 /// Reconcile against an already-open extensions directory. Idempotent, and
@@ -100,17 +85,10 @@ pub fn syncOpen(alloc: std.mem.Allocator, io: std.Io, l: *ledger.Ledger, root: s
         const active = (st.activeVersion(alloc, id) catch continue) orelse continue;
         defer alloc.free(active);
 
-        if (!st.versionExists(alloc, id, active)) continue;
         if (try containsNoteFor(l, id, active)) continue;
 
-        const manifest_sub = st.versionManifestPath(alloc, id, active) catch continue;
-        defer alloc.free(manifest_sub);
-        const bytes = root.readFileAlloc(io, manifest_sub, alloc, .limited(1 << 20)) catch continue;
-        defer alloc.free(bytes);
-
-        var m = manifest.parse(alloc, bytes) catch continue;
+        var m = st.readManifest(alloc, id, active) catch continue;
         defer m.deinit();
-        m.validate() catch continue;
 
         var descriptors: std.ArrayList(skill.SkillDescriptor) = .empty;
         defer skill.deinitDescriptorArrayList(alloc, &descriptors);
@@ -214,7 +192,7 @@ test "sync announces skill-only active extensions" {
     const skill_manifest =
         \\{"schema":"nulya.extension/v2","id":"finance","contributes":{"skills":["skills/risk-parity"]}}
     ;
-    const version = try writeVersionWithFiles(alloc, io, tmp.dir, "finance", skill_manifest, &.{.{
+    const version = try testkit.writeFrozenVersion(alloc, io, tmp.dir, "finance", skill_manifest, &.{.{
         .rel = "skills/risk-parity/SKILL.md",
         .bytes = "---\nname: risk-parity\ndescription: Analyze risk parity portfolios.\n---\nbody\n",
     }});
@@ -252,87 +230,6 @@ test "an inactive extension is not announced" {
     try std.testing.expectEqual(@as(usize, 0), l.len());
 }
 
-const TestFile = struct { rel: []const u8, bytes: []const u8 };
-
 fn writeVersion(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id: []const u8, manifest_bytes: []const u8) ![]u8 {
-    return writeVersionWithFiles(alloc, io, root, id, manifest_bytes, &.{});
-}
-
-fn writeVersionWithFiles(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id: []const u8, manifest_bytes: []const u8, extra_files: []const TestFile) ![]u8 {
-    var m = try manifest.parse(alloc, manifest_bytes);
-    defer m.deinit();
-    try m.validate();
-    const has_runtime = m.runtime != null;
-
-    const source_bytes = "pub fn main() void {}";
-    const file_count = extra_files.len + 1 + @intFromBool(has_runtime);
-    const files = try alloc.alloc(integrity.SnapshotFile, file_count);
-    files[0] = .{ .rel = try alloc.dupe(u8, "extension.json"), .bytes = try alloc.dupe(u8, manifest_bytes) };
-    var next: usize = 1;
-    if (has_runtime) {
-        files[next] = .{ .rel = try alloc.dupe(u8, "src/main.zig"), .bytes = try alloc.dupe(u8, source_bytes) };
-        next += 1;
-    }
-    for (extra_files) |file| {
-        files[next] = .{ .rel = try alloc.dupe(u8, file.rel), .bytes = try alloc.dupe(u8, file.bytes) };
-        next += 1;
-    }
-    std.mem.sort(integrity.SnapshotFile, files, {}, lessSnapshotFileRel);
-    const snapshot: integrity.PackageSnapshot = .{ .files = files };
-    defer snapshot.deinit(alloc);
-
-    const canonical = try snapshot.canonicalBytes(alloc);
-    defer alloc.free(canonical);
-    const compiler = "zig test";
-    const target = "test-target";
-    const version = try integrity.versionId(alloc, canonical, compiler, target);
-    errdefer alloc.free(version);
-
-    const manifest_sub = try std.fs.path.join(alloc, &.{ id, "versions", version, "extension.json" });
-    defer alloc.free(manifest_sub);
-    if (std.fs.path.dirname(manifest_sub)) |dir| try root.createDirPath(io, dir);
-    try root.writeFile(io, .{ .sub_path = manifest_sub, .data = manifest_bytes });
-
-    if (has_runtime) {
-        const src_dir = try std.fs.path.join(alloc, &.{ id, "versions", version, "package", "src" });
-        defer alloc.free(src_dir);
-        try root.createDirPath(io, src_dir);
-        const source_sub = try std.fs.path.join(alloc, &.{ id, "versions", version, "package", "src", "main.zig" });
-        defer alloc.free(source_sub);
-        try root.writeFile(io, .{ .sub_path = source_sub, .data = source_bytes });
-
-        const bin_dir = try std.fs.path.join(alloc, &.{ id, "versions", version, "bin" });
-        defer alloc.free(bin_dir);
-        try root.createDirPath(io, bin_dir);
-        const entry_sub = try std.fs.path.join(alloc, &.{ id, "versions", version, "bin", "demo" ++ exe_suffix });
-        defer alloc.free(entry_sub);
-        try root.writeFile(io, .{ .sub_path = entry_sub, .data = "" });
-    }
-
-    for (extra_files) |file| {
-        const file_sub = try std.fs.path.join(alloc, &.{ id, "versions", version, "package", file.rel });
-        defer alloc.free(file_sub);
-        if (std.fs.path.dirname(file_sub)) |dir| try root.createDirPath(io, dir);
-        try root.writeFile(io, .{ .sub_path = file_sub, .data = file.bytes });
-    }
-
-    const package_digest = try integrity.packageDigestHex(alloc, snapshot);
-    defer alloc.free(package_digest);
-    const binary_digest = if (has_runtime) blk: {
-        const entry_sub = try std.fs.path.join(alloc, &.{ id, "versions", version, "bin", "demo" ++ exe_suffix });
-        defer alloc.free(entry_sub);
-        break :blk try integrity.fileDigestHex(alloc, io, root, entry_sub);
-    } else null;
-    defer if (binary_digest) |digest| alloc.free(digest);
-    const seal = try integrity.sealJson(alloc, package_digest, compiler, target, binary_digest);
-    defer alloc.free(seal);
-    const seal_sub = try std.fs.path.join(alloc, &.{ id, "versions", version, "seal.json" });
-    defer alloc.free(seal_sub);
-    try root.writeFile(io, .{ .sub_path = seal_sub, .data = seal });
-
-    return version;
-}
-
-fn lessSnapshotFileRel(_: void, a: integrity.SnapshotFile, b: integrity.SnapshotFile) bool {
-    return std.mem.lessThan(u8, a.rel, b.rel);
+    return testkit.writeFrozenVersion(alloc, io, root, id, manifest_bytes, &.{});
 }

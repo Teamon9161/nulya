@@ -378,8 +378,17 @@ fn deinitFiles(alloc: std.mem.Allocator, files: []SnapshotFile) void {
     }
 }
 
-fn lessFileRel(_: void, a: SnapshotFile, b: SnapshotFile) bool {
+pub fn lessFileRel(_: void, a: SnapshotFile, b: SnapshotFile) bool {
     return std.mem.lessThan(u8, a.rel, b.rel);
+}
+
+/// The frozen bytes of `rel` inside a collected snapshot, or null. `rel` must be
+/// in canonical (forward-slash) form — see `canonicalRel`.
+pub fn findSnapshotFile(snapshot: PackageSnapshot, rel: []const u8) ?[]const u8 {
+    for (snapshot.files) |file| {
+        if (std.mem.eql(u8, file.rel, rel)) return file.bytes;
+    }
+    return null;
 }
 
 fn appendU64(out: *std.ArrayList(u8), alloc: std.mem.Allocator, value: usize) !void {
@@ -388,7 +397,9 @@ fn appendU64(out: *std.ArrayList(u8), alloc: std.mem.Allocator, value: usize) !v
     try out.appendSlice(alloc, &len_le);
 }
 
-fn canonicalRel(alloc: std.mem.Allocator, rel: []const u8) ![]u8 {
+/// Normalize a relative path to canonical form: forward-slash separators, no
+/// empty segments. The shared spelling used for snapshot file keys.
+pub fn canonicalRel(alloc: std.mem.Allocator, rel: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(alloc);
     var it = std.mem.splitAny(u8, rel, "/\\");
@@ -402,7 +413,7 @@ fn canonicalRel(alloc: std.mem.Allocator, rel: []const u8) ![]u8 {
     return out.toOwnedSlice(alloc);
 }
 
-fn joinCanonical(alloc: std.mem.Allocator, parent: []const u8, child: []const u8) ![]u8 {
+pub fn joinCanonical(alloc: std.mem.Allocator, parent: []const u8, child: []const u8) ![]u8 {
     const child_norm = try canonicalRel(alloc, child);
     defer alloc.free(child_norm);
     if (parent.len == 0) return try alloc.dupe(u8, child_norm);

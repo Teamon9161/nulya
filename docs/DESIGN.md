@@ -225,6 +225,7 @@ Extension 不再等于"Tool 的打包方式"，而是 Nulya 的**通用能力注
 |---|---|---|---|
 | Tool | 下游 | ✅ | 经 executor 进 ToolRegistry；builtin / extension / MCP 同构（§7.3、§5） |
 | Skill | 下游 | ✅ | `SKILL.md` + 渐进披露，经 `nulya skill load` 走 shell（§7.7）；**无需 runtime** |
+| System prompt（静态文本） | 下游 | ✅ | manifest `contributes.system_prompts[]`：纯文本贡献，build 期校验 UTF-8 + 大小上限（`max_system_prompt_bytes`），进 PackageSnapshot 参与 version id；session 组合时按稳定 id 顺序拼进 system blocks（§7.4 组合冻结）。**无需 runtime**，与 Skill 一样是"文件即能力" |
 | Hook | 下游 | 🟡 窄 | 只落 Provider / Middleware / Observer 三类机制，**不做 Pi 那样的 event 洪流** |
 | Command / Prompt | 下游 | ⚪ 命名保留 | schema 占位，v0.1 不实现 |
 | Provider（model） | **上游** | ⚪ 存疑 | model provider 在 loop **上游**，决定 PromptIR 序列化 / cache breakpoint / streaming，机制与下游 Contribution 不同构，**暂不设计**，仅占位（§17） |
@@ -368,6 +369,8 @@ session 开始 → resolve extension composition（含每个 extension 的 pinne
 
 - 冻结意味着：session 中途 AI 就算重写出 `web.search` 的 v-c3d4 并 activate，**当前 session 已 native 注册的仍是 v-a1b2**；新版本只能经 shell `nulya ext run` 显式调用 + note 告知（§5.3），native 组合下一场 session 才换。可复现性极好。
 - 这不是新机制，是把 §5.1 的 frozen snapshot 不变量**延伸到整个 Contribution 层**（Tool / Skill / Hook 版本一并 pin）。
+
+> **当前实现状态**：freeze 已落地——`SessionComposition` 在 `AgentSession.init()` 解析 active extensions 并 pin 住版本（Tool/Skill/System-prompt 一并冻结），组合内**内存**冻结。但"记一条 ledger 事件当 generation base"**尚未接线**：`currentGeneration` 恒为 0，composition selection 还没进 ledger `Event` alphabet（§3.1 列的 `registry_selection` 同属这一档）。所以此刻 = §9.5.4 的"本版范围"：纯函数 freeze，事件化留待 registry_selection 接线时一起做。可撤销注册（§7.4 末 `Registration[]`）同样待做。
 
 **注册是可撤销的 effect（借 DeepSeek，极简版）：** activate 一个 extension = 把它的每个 Contribution 注册进对应 registry，产出 `Registration[]`；卸载 = 逆序 `dispose()` 后再 kill runtime。永不出现"extension 卸载了但 tool 还在 registry / hook 还在触发 / skill 还在 catalog"。注意 Nulya 需要的这套机制比 DeepSeek 轻得多：**immutable snapshot + 对话边界晋升本身就给了干净的隐式 teardown**（下一场 session 从头重组），reversible registration 主要服务于中途 disable / rollback。
 
@@ -671,10 +674,10 @@ image/audio kubernetes ssh jira notion ...
 4. **Extension PackageSnapshot（已落地）**：version id 覆盖 manifest、runtime `src/**`、声明 skill 目录和真实 compiler identity；版本目录冻结 `package/`，runtime 从 frozen source 编译（§7.4）。
 5. **Wire protocol → JSON-RPC `method`（已落地）**：envelope 使用 `tool/call`，response id 必须匹配；当前保持专用 `ToolCallRequest`，等第二种 runtime 方法出现再抽通用 request（§7.3）。
 6. **`Tool.run fn` → `ToolExecutor { ptr, callFn }`（已落地）**：与 Model / Environment 同构，executor 只返回 raw output；`emit` 在 loop 中统一执行，给 extension / MCP 留真正执行入口（§7.3、§5）。
-7. **抽 `AgentSession`**：把 `main.zig` 手工组装收进一等对象，为 ACP/TUI/App 提供公共 host API；同时把每 step `notes.sync` 挪进 session 的 step preparation，让 loop 重新"不知道 extension 这个词"。**先 refactor，不建 fork/resume/lifecycle**（§2.1）。
-8. **统一 Cancellation 链**：在 AgentSession 下贯穿 Provider streaming、ToolExecutor call、Environment spawn/run；timeout 不等于 cancellation。
-9. **SkillRegistry + Agent Skills 兼容**：`SkillProvider { list, get }`，`nulya skill load` 经 shell，渐进披露（§7.7）。
-10. **组合冻结 + 可撤销注册**：session 开始 resolve + freeze extension composition（含 pinned version），记 ledger 事件当 generation base；activate 产 `Registration[]`，disable 逆序 dispose（§7.4）。
+7. **抽 `AgentSession`（已落地）**：`main.zig` 手工组装收进 `AgentSession`（`init/appendUser/step/deinit`）；每 step `notes.sync` 已挪进 `prepareStep`，loop 不再 import `extension/*`——"loop 不知道 extension 这个词"达成。fork/resume/lifecycle 按计划未建（§2.1）。
+8. **统一 Cancellation 链**：在 AgentSession 下贯穿 Provider streaming、ToolExecutor call、Environment spawn/run；timeout 不等于 cancellation。（runExtension 的 timeout 已落地，cancellation 链未接。）
+9. **SkillRegistry + Agent Skills 兼容（已落地）**：源无关 `skill.zig` + extension 适配 `skills.zig`，`nulya skill list|load` 经 shell，session 开头 append `<available_skills>` catalog 走渐进披露（§7.7）。独立 `SkillProvider { list, get }` provider 抽象暂未单列，local/remote 多源合并留待有第二个 source 时再抽。
+10. **组合冻结（前半已落地）+ 可撤销注册（未落地）**：`SessionComposition` 已在 session 开始 resolve + freeze（含 pinned version，Tool/Skill/System-prompt 一并）。**未落地**：把 composition selection 记成 ledger 事件当 generation base（需先给 ledger 加 `registry_selection`/composition 事件类型，§3.1），以及 activate 产 `Registration[]` / disable 逆序 dispose 的可撤销注册（§7.4）。
 11. **（其后）接 MCP**：`McpClient` 作为 ToolProvider/ResourceProvider/PromptProvider 进同一 registry，**不伪装成 extension**；同样走 capability catalog → selection → 6~8 native，避免把上百 tool 全塞模型（§5 哲学）。
 
 **里程碑（项目之魂）：**
