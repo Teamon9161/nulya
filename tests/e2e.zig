@@ -11,11 +11,14 @@ const std = @import("std");
 const extension = @import("extension");
 
 const build_ext = extension.build_ext;
+const composition = extension.composition;
 const environment = extension.environment;
 const integrity = extension.integrity;
+const promotion = extension.promotion;
 const protocol = extension.protocol;
 const store = extension.store;
 const templates = extension.templates;
+const tool = extension.tool;
 const tool_stats = extension.tool_stats;
 
 const ext_dir_rel = ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "demo";
@@ -111,7 +114,7 @@ fn buildAndActivate(
     ws: std.Io.Dir,
     zig_exe: []const u8,
     id: []const u8,
-    tool: []const u8,
+    tool_name: []const u8,
     main_src: []const u8,
 ) ![]u8 {
     const ext_dir = try std.fs.path.join(alloc, &.{ ".nulya", "extensions", id });
@@ -120,7 +123,7 @@ fn buildAndActivate(
     defer alloc.free(src_dir);
     try ws.createDirPath(io, src_dir);
 
-    const manifest_bytes = try templates.manifestJson(alloc, id, tool);
+    const manifest_bytes = try templates.manifestJson(alloc, id, tool_name);
     defer alloc.free(manifest_bytes);
     const manifest_rel = try std.fs.path.join(alloc, &.{ ext_dir, "extension.json" });
     defer alloc.free(manifest_rel);
@@ -165,6 +168,128 @@ fn runCli(
         else => 255,
     };
     return .{ .code = code, .stdout = try alloc.dupe(u8, result.stdout) };
+}
+
+/// The generated `greet` extension with its greeting text swapped, so two builds
+/// differ by observable output (and therefore by content-addressed version). The
+/// source stays a real, compilable single-file extension. Caller owns the bytes.
+fn greetSource(alloc: std.mem.Allocator, greeting: []const u8) ![]u8 {
+    const needle = "hello from a Nulya-built extension";
+    const size = std.mem.replacementSize(u8, templates.main_zig, needle, greeting);
+    const buf = try alloc.alloc(u8, size);
+    errdefer alloc.free(buf);
+    _ = std.mem.replace(u8, templates.main_zig, needle, greeting, buf);
+    return buf;
+}
+
+/// One native tool invocation through the real executor chain: a fresh
+/// `LocalEnvironment` spawns the frozen executable and returns its decoded output.
+/// Caller owns `result.output`.
+fn callNative(alloc: std.mem.Allocator, io: std.Io, t: tool.Tool, ws_path: []const u8) !tool.RawToolResult {
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+    return t.executor.call(alloc, .{
+        .args_json = "{}",
+        .ctx = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = ws_path },
+    });
+}
+
+test "self-evolution closed loop: CLI usage auto-promotes an extension whose native call executes the frozen version" {
+    // The whole kernel loop the milestone promises, proven end to end with a real
+    // built binary — not a stub, not a FakeEnv:
+    //
+    //   build+activate web.search v1  ->  CLI `nulya ext run` records usage
+    //     ->  a new session ranks the journal, auto-promotes web_search to a
+    //         native tool, and its ToolExecutor spawns the frozen v1 executable
+    //     ->  activate v2:  the same session's native call STILL runs v1 (frozen),
+    //         the live CLI runs v2, and a fresh session's native call runs v2.
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    defer host_env.deinit();
+    const zig_exe = host_env.get("NULYA_TEST_ZIG") orelse return error.SkipZigTest;
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var ws_real: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_real_len = try ws.realPath(io, &ws_real);
+    const ws_path = ws_real[0..ws_real_len];
+
+    // v1 of a real extension whose output identifies its version.
+    const src_v1 = try greetSource(alloc, "greeting-v1");
+    defer alloc.free(src_v1);
+    const v1 = try buildAndActivate(alloc, io, ws, zig_exe, "web.search", "web_search", src_v1);
+    defer alloc.free(v1);
+
+    // One real CLI invocation records `ext:web.search/web_search` in the journal —
+    // the only thing that makes the tool an eligible promotion candidate.
+    {
+        const run = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", "web.search", "web_search", "{}" });
+        defer alloc.free(run.stdout);
+        try std.testing.expectEqual(@as(u8, 0), run.code);
+        try std.testing.expect(std.mem.indexOf(u8, run.stdout, "greeting-v1") != null);
+    }
+
+    // --- Session B: rank the journal at the setup boundary, then freeze. ---
+    const ranked_b = try promotion.rankExtensionTools(alloc, io, ws_path, .{});
+    defer promotion.freeRankedIds(alloc, ranked_b);
+    try std.testing.expectEqual(@as(usize, 1), ranked_b.len);
+    try std.testing.expectEqualStrings("ext:web.search/web_search", ranked_b[0]);
+
+    var comp_b = try composition.SessionComposition.init(alloc, io, ws_path, ".nulya/extensions", .{ .ranked_native_tools = ranked_b });
+    defer comp_b.deinit(alloc);
+
+    // The ranked candidate is now a native, model-facing tool, and calling it
+    // through the ToolExecutor actually spawns the frozen v1 binary.
+    const tool_b = comp_b.tools.lookup("web_search") orelse return error.TestUnexpectedResult;
+    {
+        const result = try callNative(alloc, io, tool_b, ws_path);
+        defer alloc.free(result.output);
+        try std.testing.expect(result.ok);
+        try std.testing.expect(std.mem.indexOf(u8, result.output, "greeting-v1") != null);
+    }
+
+    // --- Activate v2: three semantics locked at once. ---
+    const src_v2 = try greetSource(alloc, "greeting-v2");
+    defer alloc.free(src_v2);
+    const v2 = try buildAndActivate(alloc, io, ws, zig_exe, "web.search", "web_search", src_v2);
+    defer alloc.free(v2);
+    try std.testing.expect(!std.mem.eql(u8, v1, v2));
+
+    // 1. Session B's native binding stays frozen on v1 — mid-session activation
+    //    never moves an already-exposed tool.
+    {
+        const result = try callNative(alloc, io, tool_b, ws_path);
+        defer alloc.free(result.output);
+        try std.testing.expect(std.mem.indexOf(u8, result.output, "greeting-v1") != null);
+        try std.testing.expect(std.mem.indexOf(u8, result.output, "greeting-v2") == null);
+    }
+
+    // 2. The live CLI path runs the new current version immediately.
+    {
+        const run = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", "web.search", "web_search", "{}" });
+        defer alloc.free(run.stdout);
+        try std.testing.expectEqual(@as(u8, 0), run.code);
+        try std.testing.expect(std.mem.indexOf(u8, run.stdout, "greeting-v2") != null);
+    }
+
+    // 3. A fresh session opened after the switch promotes and freezes on v2.
+    const ranked_c = try promotion.rankExtensionTools(alloc, io, ws_path, .{});
+    defer promotion.freeRankedIds(alloc, ranked_c);
+    var comp_c = try composition.SessionComposition.init(alloc, io, ws_path, ".nulya/extensions", .{ .ranked_native_tools = ranked_c });
+    defer comp_c.deinit(alloc);
+    const tool_c = comp_c.tools.lookup("web_search") orelse return error.TestUnexpectedResult;
+    {
+        const result = try callNative(alloc, io, tool_c, ws_path);
+        defer alloc.free(result.output);
+        try std.testing.expect(std.mem.indexOf(u8, result.output, "greeting-v2") != null);
+        try std.testing.expect(std.mem.indexOf(u8, result.output, "greeting-v1") == null);
+    }
 }
 
 test "cli ext run records a version-free stable tool id in the usage journal" {

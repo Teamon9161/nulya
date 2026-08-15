@@ -118,13 +118,16 @@ user_message | assistant_message | tool_call | tool_result
 
 ### 3.3 派生视图（projection）
 
-工具统计、UI、trajectory、metrics 全部是 ledger 的**投影**，不持久化 mutable 状态：
+UI、trajectory、metrics 是 conversation ledger 的**投影**，不持久化 mutable 状态。
+
+工具使用统计走的是**同一条哲学、另一条日志**：它不是 conversation ledger 的投影，而是一条**专用的 durable append-only usage ledger** `<workspace>/.nulya/tool-usage.jsonl` 的投影。每条 usage 事件只记原始事实 `{ tool_id, ok }`（`tool_id` 是稳定身份 `ext:<id>/<tool>` / `builtin.shell`，跨实现版本累计），排序 / recency / promotion 全是读时派生，从不落盘：
 
 ```
-immutable events ──projection──▶ ToolStats { uses_total, uses_recent, last_used, success_rate, latency }
+durable append-only usage facts { tool_id, ok }
+        └─ projection ─▶ ToolStats { uses_total, uses_recent, last_used, success_rate }
 ```
 
-统计口径以后改了可以重算。这也是为什么工具排序（§5）能安全演进。
+拆成两条日志是刻意的：usage 事实在没有 conversation 的纯 CLI 调用（`nulya ext run`）里也会产生，把它塞进 conversation ledger 反而会污染 §1 的 prompt 前缀。原则不变——**persist facts, derive stats**；统计口径以后改了可以重算，这也是为什么工具排序（§5）能安全演进。（v0.1 只记 `ok`，没有 `latency`；latency 属 post-v0.1，见 §17。）
 
 ---
 
@@ -161,11 +164,11 @@ next step 的请求才反映新工具（通过 append note，不改 tools[]）
 ### 5.1 对话内 `tools[]` 冻结
 
 - 一场对话**开始时**，按规则选定 `tools[]`，**整场冻结**。对话内 `generation` 不因工具变化而 bump。
-- 选择规则（`registry_selection` 事件记录）：
+- 选择规则（在 session-setup 边界一次算出、冻结进 `SessionComposition`；把这次选择另记成一条 `registry_selection` ledger 事件当 generation base 属 post-v0.1，见 §17）：
   1. builtin：`shell`, `edit`（永远在，位置固定最前）。
-  2. 用户 pin 的 native 工具（配置指定）。
-  3. 自动按使用统计排序补足到上限 K（`uses_recent` + `uses_total` + `last_used` + `success_rate` 的投影排序）。K 是早期默认值（如 6–8），非永久。
-- 排序**只在此刻发生一次**。对话开头本就是新前缀、无缓存可炸，所以"晋升"零成本。**排序绝不在对话中途重排**（那才是缓存杀手）。
+  2. 用户 pin 的 native 工具（配置指定）。pin 是 operator 意图：pin 指向的工具解析不到就**硬失败**，绝不静默跳过。
+  3. 自动按使用统计排序补足到上限 K（`uses_recent` + `uses_total` + `last_used` + `success_rate` 的投影排序）。best-effort：解析不到 / 撞名的候选按 rank 顺序跳过直到填满，从不失败。K 是早期默认值（如 6–8），非永久。
+- 排序**只在此刻发生一次**。对话开头本就是新前缀、无缓存可炸，所以"晋升"零成本。**排序绝不在对话中途重排**（那才是缓存杀手）——由 `SessionComposition` 在 `init` 冻结 membership 保证，`tests/e2e.zig` 全环证明。
 
 ### 5.2 native 工具的位置稳定性
 
@@ -617,6 +620,43 @@ image/audio kubernetes ssh jira notion ...
 
 > 定位差异：Pi = minimal harness + 人/模型写的 TS extension；DeepSeek = microkernel + "Everything is a Plugin" + 运行时自修改。
 > **Nulya = minimal immutable kernel + self-evolving native capability layer**。不是"Everything is a Plugin"，而是"**Everything above the kernel is learnable**"。
+
+### 15.1 v0.1 self-evolution core：freeze list
+
+self-evolution 闭环已由 `tests/e2e.zig` 全环证明（真实 built binary：CLI usage → usage journal → session-boundary ranking → 自动 native 晋升 → ToolExecutor spawn 冻结版本；mid-session activate v2 后 session native 仍 v1 / CLI live v2 / 新 session native v2）。下列为该核心的**冻结面**——只往外挂能力，不再改 kernel：
+
+**FROZEN CORE（v0.1，不再改动语义）：**
+
+```
+Ledger append-only 语义                         (ledger.zig)
+AgentSession 编排 + interrupted-batch repair    (session.zig)
+cancellation 语义（step 边界消化）              (loop.zig / session.zig)
+shell / edit 永久 builtin                        (tools/)
+immutable extension package + 内容寻址版本       (extension/store.zig, integrity.zig)
+build / activate / rollback / integrity          (extension/build_ext.zig, store.zig)
+extension JSON-RPC (tool/call) 调用              (extension/protocol.zig, invoke.zig)
+SessionComposition 版本冻结（pin + auto 同一路径）(composition.zig)
+ToolExecutor / Binding（builtin/extension 同构）  (tool.zig, extension/tools.zig)
+skills + 渐进披露 catalog                         (skill.zig, extension/skills.zig)
+system prompts 投影                               (prompt.zig, composition.zig)
+durable append-only usage journal                (tool_stats.zig, .nulya/tool-usage.jsonl)
+ranking policy（纯函数：facts → 偏好）           (tool_selection.zig)
+session-boundary 自动晋升（一次算出即冻结）      (promotion.zig → composition.zig)
+```
+
+分层不变量（§5 边界，锁进 v0.1）：`facts → ranking preference → composition availability/budget → frozen membership`。`tool_selection.rank` 只吃 facts + weights，绝不碰 active availability / pins / max_tools / Binding 构造；pin = operator intent（硬失败），auto = best effort（跳过）。
+
+**NOT REQUIRED FOR v0.1（缺这些不影响核心成立，属 post-v0.1）：**
+
+```
+ACP / MCP transport            persistent extension runtime / hot reload
+可撤销注册 Registration/disposer  dynamic ToolSet mutation（中途改 tools[]）
+parallel extension scheduling   remote Environment
+stats database / index / latency   ranking threshold 调参框架
+registry_selection ledger 事件（把 selection 记进 ledger 当 generation base）
+```
+
+> 到这一步，项目最大的风险已不是"缺东西"，而是"**继续觉得还缺东西**"。后续 ACP / MCP / UI / richer ecosystem 都是往这个稳定核心外挂能力，不是继续改 kernel。
 
 ---
 

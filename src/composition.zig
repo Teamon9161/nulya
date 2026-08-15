@@ -274,8 +274,8 @@ fn appendRankedBindings(
 
 /// Best-effort single-candidate resolution against the frozen active extensions.
 /// Returns null for a historical id that can no longer be bound: malformed
-/// stable id, extension no longer active, tool removed from the active version,
-/// or a runtime-less manifest. Host faults propagate unchanged.
+/// stable id, extension no longer active, or tool removed from the active
+/// version. Host faults propagate unchanged.
 fn resolveRankedBinding(
     alloc: std.mem.Allocator,
     st: store.Store,
@@ -286,9 +286,11 @@ fn resolveRankedBinding(
     const parsed = parseStableToolId(id) catch return null;
     const r = findResolved(resolved, parsed.ext_id) orelse return null;
     const spec = findToolSpec(r.manifest, parsed.tool_name) orelse return null;
-    // A validated tool manifest always has a runtime; a ranked candidate must
-    // still not panic on a runtime-less historical manifest — skip it instead.
-    const rt = r.manifest.runtime orelse return null;
+    // Same guarantee as the pinned path: `resolved` only holds extensions whose
+    // manifest passed validation during discovery (a tool-declaring manifest with
+    // no runtime fails as MissingRuntime, an isExtensionFault skipped there), so a
+    // found tool spec proves the runtime exists. No runtime-less state to defend.
+    const rt = r.manifest.runtime.?;
 
     // Exact, frozen executable path: <root>/<id>/versions/<r.version>/<entry>.
     // Built from the version frozen at composition time — never `current`, never
