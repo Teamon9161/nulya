@@ -6,6 +6,12 @@
 //! immutable version, then invokes it through the same Environment seam a live
 //! agent would use — and checks the wire response round-trips. Run with
 //! `zig build e2e`.
+//!
+//! It also covers the durable ledger (DESIGN §3.4): a session created with
+//! `createDurable` persists to a JSONL file, a second process `openDurable`
+//! resumes it and projects a block-identical PromptIR, a separate CLI process's
+//! `capability_note` deposit is drained on the next step, and a crash-left
+//! assistant-with-calls tail is repaired on resume.
 
 const std = @import("std");
 const support = @import("support");
