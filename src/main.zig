@@ -177,6 +177,8 @@ test {
     _ = @import("ledger.zig");
     _ = @import("tool.zig");
     _ = @import("registry.zig");
+    _ = @import("skill.zig");
+    _ = @import("composition.zig");
     _ = @import("loop.zig");
     _ = @import("prompt.zig");
     _ = @import("provider.zig");

@@ -109,6 +109,14 @@ pub fn collectPackageSnapshot(
         try collectTree(alloc, io, root, skill_fs, skill_rel, &files);
     }
 
+    for (m.system_prompts) |prompt_path| {
+        const prompt_fs = try std.fs.path.join(alloc, &.{ ext_dir_rel, prompt_path });
+        defer alloc.free(prompt_fs);
+        const prompt_rel = try canonicalRel(alloc, prompt_path);
+        defer alloc.free(prompt_rel);
+        try collectFile(alloc, io, root, prompt_fs, prompt_rel, &files);
+    }
+
     return finishSnapshot(alloc, &files);
 }
 
@@ -137,6 +145,14 @@ pub fn collectFrozenSnapshot(
         const skill_rel = try canonicalRel(alloc, skill_path);
         defer alloc.free(skill_rel);
         try collectTree(alloc, io, root, skill_fs, skill_rel, &files);
+    }
+
+    for (m.system_prompts) |prompt_path| {
+        const prompt_fs = try std.fs.path.join(alloc, &.{ version_rel, package_dir, prompt_path });
+        defer alloc.free(prompt_fs);
+        const prompt_rel = try canonicalRel(alloc, prompt_path);
+        defer alloc.free(prompt_rel);
+        try collectFile(alloc, io, root, prompt_fs, prompt_rel, &files);
     }
 
     return finishSnapshot(alloc, &files);
@@ -287,6 +303,19 @@ fn finishSnapshot(alloc: std.mem.Allocator, files: *std.ArrayList(SnapshotFile))
         if (std.mem.eql(u8, files.items[i - 1].rel, file.rel)) return error.DuplicateSnapshotPath;
     }
     return .{ .files = try files.toOwnedSlice(alloc) };
+}
+
+fn collectFile(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    root: std.Io.Dir,
+    fs_file_rel: []const u8,
+    snapshot_file_rel: []const u8,
+    files: *std.ArrayList(SnapshotFile),
+) !void {
+    const bytes = root.readFileAlloc(io, fs_file_rel, alloc, .limited(max_snapshot_file_bytes)) catch return error.SourceUnreadable;
+    errdefer alloc.free(bytes);
+    try files.append(alloc, .{ .rel = try alloc.dupe(u8, snapshot_file_rel), .bytes = bytes });
 }
 
 fn collectTree(

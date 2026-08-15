@@ -43,6 +43,7 @@ pub const Manifest = struct {
     runtime: ?Runtime,
     tools: []const ToolSpec,
     skills: []const []const u8,
+    system_prompts: []const []const u8,
     permissions: Permissions,
 
     pub fn deinit(self: *Manifest) void {
@@ -55,7 +56,7 @@ pub const Manifest = struct {
     pub fn validate(self: Manifest) ValidateError!void {
         if (!std.mem.eql(u8, self.schema, schema_id)) return error.UnsupportedSchema;
         if (!isValidId(self.id)) return error.InvalidId;
-        if (self.tools.len == 0 and self.skills.len == 0) return error.NoContributions;
+        if (self.tools.len == 0 and self.skills.len == 0 and self.system_prompts.len == 0) return error.NoContributions;
 
         if (self.runtime) |rt| {
             if (!isSafeRelPath(rt.entry)) return error.InvalidEntry;
@@ -79,6 +80,13 @@ pub const Manifest = struct {
                 if (std.mem.eql(u8, skill, other)) return error.DuplicateSkillPath;
             }
         }
+
+        for (self.system_prompts, 0..) |prompt_path, i| {
+            if (!isSafeRelPath(prompt_path)) return error.InvalidSystemPromptPath;
+            for (self.system_prompts[i + 1 ..]) |other| {
+                if (std.mem.eql(u8, prompt_path, other)) return error.DuplicateSystemPromptPath;
+            }
+        }
     }
 };
 
@@ -100,6 +108,8 @@ pub const ValidateError = error{
     DuplicateToolName,
     InvalidSkillPath,
     DuplicateSkillPath,
+    InvalidSystemPromptPath,
+    DuplicateSystemPromptPath,
 };
 
 /// Load `extension.json` into arena-owned memory. Structural only — call
@@ -128,6 +138,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!Manifest {
     const runtime = try dupRuntime(a, obj);
     const tools = try dupTools(a, contributes);
     const skills = try dupStringList(a, contributes, "skills");
+    const system_prompts = try dupStringList(a, contributes, "system_prompts");
     const permissions: Permissions = .{
         .fs = try dupPermissionList(a, obj, "fs"),
         .network = try dupPermissionList(a, obj, "network"),
@@ -141,6 +152,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!Manifest {
         .runtime = runtime,
         .tools = tools,
         .skills = skills,
+        .system_prompts = system_prompts,
         .permissions = permissions,
     };
 }
@@ -355,4 +367,34 @@ test "missing required field is a parse error" {
         \\{"schema":"nulya.extension/v2","contributes":{}}
     ;
     try std.testing.expectError(error.MissingField, parse(std.testing.allocator, src));
+}
+
+
+test "validates a prompt-only package without runtime" {
+    const src =
+        \\{"schema":"nulya.extension/v2","id":"prompts.finance","contributes":{"system_prompts":["prompts/finance.md"]}}
+    ;
+    var m = try parse(std.testing.allocator, src);
+    defer m.deinit();
+    try m.validate();
+    try std.testing.expect(m.runtime == null);
+    try std.testing.expectEqual(@as(usize, 0), m.tools.len);
+    try std.testing.expectEqual(@as(usize, 0), m.skills.len);
+    try std.testing.expectEqualStrings("prompts/finance.md", m.system_prompts[0]);
+}
+
+test "rejects invalid and duplicate system prompt paths" {
+    const invalid =
+        \\{"schema":"nulya.extension/v2","id":"prompts","contributes":{"system_prompts":["../evil.md"]}}
+    ;
+    var a = try parse(std.testing.allocator, invalid);
+    defer a.deinit();
+    try std.testing.expectError(error.InvalidSystemPromptPath, a.validate());
+
+    const dup =
+        \\{"schema":"nulya.extension/v2","id":"prompts","contributes":{"system_prompts":["prompts/a.md","prompts/a.md"]}}
+    ;
+    var b = try parse(std.testing.allocator, dup);
+    defer b.deinit();
+    try std.testing.expectError(error.DuplicateSystemPromptPath, b.validate());
 }

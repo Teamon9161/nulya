@@ -194,6 +194,9 @@ pub fn buildRequestJson(
 
 fn writeMessages(jw: *std.json.Stringify, ir: *const prompt.PromptIR) !void {
     try jw.beginArray();
+    for (ir.system_blocks) |block| {
+        try writeRoleContentMessage(jw, "system", block.bytes);
+    }
     var i: usize = 0;
     while (i < ir.stable_blocks.len) {
         const block = ir.stable_blocks[i];
@@ -528,4 +531,27 @@ test "SSE parser extracts streamed text tool calls usage and done" {
     try std.testing.expectEqual(@as(u64, 80), turn.usage.cache_read_tokens);
     try std.testing.expectEqual(@as(u64, 5), turn.usage.output_tokens);
     try std.testing.expectEqual(provider.StopReason.tool_use, turn.stop_reason);
+}
+
+
+test "request JSON serializes system blocks before stable ledger blocks" {
+    const alloc = std.testing.allocator;
+    var l = @import("../ledger.zig").Ledger.init(alloc);
+    defer l.deinit();
+    try l.append(.{ .user_text = "hello" });
+    const sys = [_]prompt.SystemBlock{.{ .source = "kernel", .bytes = "system base" }};
+    const ir = try prompt.projectWithSystem(alloc, &sys, l.view());
+    defer ir.deinit(alloc);
+
+    const body = try buildRequestJson(alloc, "test-model", .{
+        .prompt_ir = &ir,
+        .tools = &.{},
+        .generation = 0,
+    });
+    defer alloc.free(body);
+
+    const system_pos = std.mem.indexOf(u8, body, "\"role\":\"system\"") orelse return error.MissingSystemMessage;
+    const user_pos = std.mem.indexOf(u8, body, "\"role\":\"user\"") orelse return error.MissingUserMessage;
+    try std.testing.expect(system_pos < user_pos);
+    try std.testing.expect(std.mem.indexOf(u8, body, "system base") != null);
 }

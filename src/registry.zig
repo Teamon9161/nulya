@@ -2,8 +2,9 @@
 //!
 //! In the immutable kernel there are exactly two builtin tools: shell and edit
 //! (DESIGN §6). Everything else the AI grows as an extension and invokes through
-//! `shell -> nulya ext run` (DESIGN §5, §7). A model step receives a frozen
-//! `ToolSetSnapshot`; execution never queries the live registry mid-step.
+//! `shell -> nulya ext run` (DESIGN §5, §7). A session receives a frozen
+//! `ToolSetSnapshot` through `SessionComposition`; execution never queries a live
+//! registry mid-step.
 
 const std = @import("std");
 const tool = @import("tool.zig");
@@ -16,8 +17,9 @@ const builtins = [_]tool.Tool{
 };
 
 pub const ToolSetSnapshot = struct {
-    /// Frozen model-facing tool set for one step. Names must be unique inside
-    /// the snapshot; builtin names `shell` and `edit` are permanently reserved.
+    /// Frozen model-facing tool set for the session composition. Names must be
+    /// unique inside the snapshot; builtin names `shell` and `edit` are
+    /// permanently reserved.
     tools: []const tool.Tool,
 
     pub fn deinit(self: ToolSetSnapshot, alloc: std.mem.Allocator) void {

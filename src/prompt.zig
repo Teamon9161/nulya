@@ -23,10 +23,33 @@ pub const StableBlock = struct {
     bytes: []const u8,
 };
 
+pub const SystemBlock = struct {
+    source: []const u8,
+    bytes: []const u8,
+};
+
+pub const SystemPromptSnapshot = struct {
+    blocks: []const SystemBlock,
+
+    pub fn deinit(self: SystemPromptSnapshot, alloc: std.mem.Allocator) void {
+        for (self.blocks) |block| {
+            alloc.free(block.source);
+            alloc.free(block.bytes);
+        }
+        alloc.free(self.blocks);
+    }
+};
+
 pub const PromptIR = struct {
+    system_blocks: []const SystemBlock,
     stable_blocks: []const StableBlock,
 
     pub fn deinit(self: PromptIR, alloc: std.mem.Allocator) void {
+        for (self.system_blocks) |block| {
+            alloc.free(block.source);
+            alloc.free(block.bytes);
+        }
+        alloc.free(self.system_blocks);
         for (self.stable_blocks) |block| alloc.free(block.bytes);
         alloc.free(self.stable_blocks);
     }
@@ -41,6 +64,20 @@ pub fn currentGeneration(events: []const ledger.Event) u64 {
 }
 
 pub fn project(alloc: std.mem.Allocator, events: []const ledger.Event) !PromptIR {
+    return projectWithSystem(alloc, &.{}, events);
+}
+
+pub fn projectWithSystem(alloc: std.mem.Allocator, system_blocks: []const SystemBlock, events: []const ledger.Event) !PromptIR {
+    var owned_system: std.ArrayList(SystemBlock) = .empty;
+    errdefer (SystemPromptSnapshot{ .blocks = owned_system.items }).deinit(alloc);
+    for (system_blocks) |block| {
+        const source = try alloc.dupe(u8, block.source);
+        errdefer alloc.free(source);
+        const bytes = try alloc.dupe(u8, block.bytes);
+        errdefer alloc.free(bytes);
+        try owned_system.append(alloc, .{ .source = source, .bytes = bytes });
+    }
+
     var blocks: std.ArrayList(StableBlock) = .empty;
     errdefer {
         for (blocks.items) |block| alloc.free(block.bytes);
@@ -67,7 +104,10 @@ pub fn project(alloc: std.mem.Allocator, events: []const ledger.Event) !PromptIR
         .capability_note => |note| try appendBlock(alloc, &blocks, .capability_note, note.text),
     };
 
-    return .{ .stable_blocks = try blocks.toOwnedSlice(alloc) };
+    const system_slice = try owned_system.toOwnedSlice(alloc);
+    errdefer (SystemPromptSnapshot{ .blocks = system_slice }).deinit(alloc);
+    const stable_slice = try blocks.toOwnedSlice(alloc);
+    return .{ .system_blocks = system_slice, .stable_blocks = stable_slice };
 }
 
 fn appendBlock(
@@ -128,4 +168,26 @@ test "a capability_note appends a capability_note block without breaking the pre
     try std.testing.expectEqual(BlockKind.capability_note, last.kind);
     // A plain append never bumps the generation.
     try std.testing.expectEqual(gen_before, currentGeneration(l.view()));
+}
+
+
+test "PromptIR carries immutable system blocks separately from ledger stable blocks" {
+    const alloc = std.testing.allocator;
+    const sys = [_]SystemBlock{.{ .source = "test:system", .bytes = "base system" }};
+    var l = ledger.Ledger.init(alloc);
+    defer l.deinit();
+
+    try l.append(.{ .user_text = "first" });
+    const before = try projectWithSystem(alloc, &sys, l.view());
+    defer before.deinit(alloc);
+
+    try l.append(.{ .assistant = .{ .text = "ok", .calls = &.{} } });
+    const after = try projectWithSystem(alloc, &sys, l.view());
+    defer after.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 1), before.system_blocks.len);
+    try std.testing.expectEqual(@as(usize, 1), after.system_blocks.len);
+    try std.testing.expectEqualStrings(before.system_blocks[0].source, after.system_blocks[0].source);
+    try std.testing.expectEqualStrings(before.system_blocks[0].bytes, after.system_blocks[0].bytes);
+    try std.testing.expect(isStablePrefix(before.stable_blocks, after.stable_blocks));
 }

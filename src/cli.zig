@@ -11,6 +11,8 @@ const protocol = @import("extension/protocol.zig");
 const manifest = @import("extension/manifest.zig");
 const templates = @import("extension/templates.zig");
 const toolchain = @import("toolchain.zig");
+const skill = @import("skill.zig");
+const composition = @import("composition.zig");
 
 const extensions_root = ".nulya" ++ std.fs.path.sep_str ++ "extensions";
 
@@ -19,8 +21,9 @@ const extensions_root = ".nulya" ++ std.fs.path.sep_str ++ "extensions";
 pub fn dispatch(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (args.len == 0) return usage(io);
     if (std.mem.eql(u8, args[0], "ext")) return dispatchExt(alloc, io, args[1..]);
+    if (std.mem.eql(u8, args[0], "skill")) return dispatchSkill(alloc, io, args[1..]);
     if (std.mem.eql(u8, args[0], "toolchain")) return dispatchToolchain(alloc, io, args[1..]);
-    try printErr(io, "unknown command; try `nulya ext` or `nulya toolchain`\n");
+    try printErr(io, "unknown command; try `nulya ext`, `nulya skill`, or `nulya toolchain`\n");
     return 1;
 }
 
@@ -41,6 +44,46 @@ fn dispatchExt(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
 
     try printErr(io, "unknown `ext` subcommand\n");
     return 1;
+}
+
+fn dispatchSkill(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+    if (args.len == 0) return usage(io);
+    if (std.mem.eql(u8, args[0], "list")) return skillList(alloc, io);
+    if (std.mem.eql(u8, args[0], "load")) return skillLoad(alloc, io, args[1..]);
+    try printErr(io, "unknown `skill` subcommand\n");
+    return 1;
+}
+
+fn skillList(alloc: std.mem.Allocator, io: std.Io) !u8 {
+    var comp = try composition.SessionComposition.init(alloc, io, ".", extensions_root);
+    defer comp.deinit(alloc);
+    if (comp.skills.skills.len == 0) {
+        try printOut(alloc, io, "no skills\n", .{});
+        return 0;
+    }
+    for (comp.skills.skills) |s| {
+        try printOut(alloc, io, "{s}\t{s}\t{s}\n", .{ s.ref, s.name, s.description });
+    }
+    return 0;
+}
+
+fn skillLoad(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+    if (args.len < 1) {
+        try printErr(io, "usage: nulya skill load <pinned-ref>\n");
+        return 1;
+    }
+    var ext_root = std.Io.Dir.cwd().openDir(io, extensions_root, .{}) catch {
+        try printOut(alloc, io, "no extensions\n", .{});
+        return 1;
+    };
+    defer ext_root.close(io);
+    const body = skill.loadPinned(alloc, io, ext_root, args[0]) catch |err| {
+        try printOut(alloc, io, "skill load failed: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer alloc.free(body);
+    try printOut(alloc, io, "{s}\n", .{body});
+    return 0;
 }
 
 fn extInit(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
@@ -369,6 +412,8 @@ fn usage(io: std.Io) !u8 {
         \\  nulya ext list                    list extensions and active versions
         \\  nulya ext inspect <id>            print an extension's manifest
         \\  nulya ext api [protocol|permissions|examples]
+        \\  nulya skill list                 list active extension skills
+        \\  nulya skill load <pinned-ref>    print a frozen SKILL.md
         \\  nulya toolchain zig <args...>     run the managed zig (scratch)
         \\
     );

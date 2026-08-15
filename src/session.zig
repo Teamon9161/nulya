@@ -2,8 +2,8 @@
 //!
 //! `loop.zig` owns one provider turn and batched tool execution. `AgentSession`
 //! owns the conversation-level preparation around those turns: ledger lifetime,
-//! active extension capability notes, interrupted tool-batch repair, the frozen
-//! builtin tool snapshot for a step, and cumulative usage accounting.
+//! session-scoped capability composition, active extension capability notes,
+//! interrupted tool-batch repair, and cumulative usage accounting.
 
 const std = @import("std");
 const ledger = @import("ledger.zig");
@@ -12,11 +12,13 @@ const registry = @import("registry.zig");
 const provider = @import("provider.zig");
 const notes = @import("extension/notes.zig");
 const environment = @import("environment.zig");
+const prompt = @import("prompt.zig");
+const composition = @import("composition.zig");
 
 pub const AgentSession = struct {
     alloc: std.mem.Allocator,
     l: ledger.Ledger,
-    tools: registry.ToolSetSnapshot,
+    composition: composition.SessionComposition,
     model: provider.Model,
     step_ctx: loop.StepContext,
     model_options: provider.Options,
@@ -31,13 +33,14 @@ pub const AgentSession = struct {
     };
 
     pub fn init(alloc: std.mem.Allocator, opts: Options) !AgentSession {
-        const tools = try registry.snapshot(alloc);
-        errdefer tools.deinit(alloc);
+        const tool_ctx = opts.step_ctx.tool_context;
+        const comp = try composition.SessionComposition.init(alloc, tool_ctx.environment.io, tool_ctx.cwd, opts.extension_root);
+        errdefer comp.deinit(alloc);
 
         return .{
             .alloc = alloc,
             .l = ledger.Ledger.init(alloc),
-            .tools = tools,
+            .composition = comp,
             .model = opts.model,
             .step_ctx = opts.step_ctx,
             .model_options = opts.model_options,
@@ -47,7 +50,7 @@ pub const AgentSession = struct {
 
     pub fn deinit(self: *AgentSession) void {
         self.l.deinit();
-        self.tools.deinit(self.alloc);
+        self.composition.deinit(self.alloc);
         self.* = undefined;
     }
 
@@ -57,7 +60,9 @@ pub const AgentSession = struct {
 
     pub fn step(self: *AgentSession) !provider.Usage {
         try self.prepareStep();
-        const step_usage = try loop.runStepWithOptions(self.alloc, &self.l, self.model, self.tools, self.step_ctx, self.model_options);
+        const prompt_ir = try prompt.projectWithSystem(self.alloc, self.composition.system_prompts.blocks, self.l.view());
+        defer prompt_ir.deinit(self.alloc);
+        const step_usage = try loop.runStepWithPrompt(self.alloc, &self.l, self.model, &prompt_ir, self.composition.tools, self.step_ctx, self.model_options);
         accumulate(&self.total_usage, step_usage);
         return step_usage;
     }

@@ -307,3 +307,77 @@ test "source tests directory participates in the version id" {
 
     try std.testing.expect(!std.mem.eql(u8, first.version, second.version));
 }
+
+
+test "prompt-only package builds without runtime and freezes prompt files" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(io, "ext" ++ std.fs.path.sep_str ++ "prompts");
+    try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ manifest_file, .data =
+        \\{"schema":"nulya.extension/v2","id":"prompts.finance","contributes":{"system_prompts":["prompts/finance.md"]}}
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ "prompts" ++ std.fs.path.sep_str ++ "finance.md", .data = "finance prompt\n" });
+
+    const zig_exe = try testZigExe(alloc);
+    defer alloc.free(zig_exe);
+    var result = try buildExtension(alloc, io, tmp.dir, "ext", zig_exe);
+    defer result.deinit(alloc);
+    try std.testing.expect(result.compile_ok);
+    try std.testing.expect(result.entry_rel == null);
+    const prompt_path = try std.fs.path.join(alloc, &.{ "ext", "versions", result.version, package_dir, "prompts", "finance.md" });
+    defer alloc.free(prompt_path);
+    try tmp.dir.access(io, prompt_path, .{});
+}
+
+test "system prompt file changes the version id" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(io, "ext" ++ std.fs.path.sep_str ++ "prompts");
+    try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ manifest_file, .data =
+        \\{"schema":"nulya.extension/v2","id":"prompts","contributes":{"system_prompts":["prompts/base.md"]}}
+    });
+    const prompt_rel = "ext" ++ std.fs.path.sep_str ++ "prompts" ++ std.fs.path.sep_str ++ "base.md";
+    try tmp.dir.writeFile(io, .{ .sub_path = prompt_rel, .data = "version one\n" });
+
+    const zig_exe = try testZigExe(alloc);
+    defer alloc.free(zig_exe);
+    var first = try buildExtension(alloc, io, tmp.dir, "ext", zig_exe);
+    defer first.deinit(alloc);
+
+    try tmp.dir.writeFile(io, .{ .sub_path = prompt_rel, .data = "version two\n" });
+    var second = try buildExtension(alloc, io, tmp.dir, "ext", zig_exe);
+    defer second.deinit(alloc);
+
+    try std.testing.expect(!std.mem.eql(u8, first.version, second.version));
+}
+
+test "frozen prompt tampering fails integrity validation" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(io, "ext" ++ std.fs.path.sep_str ++ "prompts");
+    try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ manifest_file, .data =
+        \\{"schema":"nulya.extension/v2","id":"prompts","contributes":{"system_prompts":["prompts/base.md"]}}
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ "prompts" ++ std.fs.path.sep_str ++ "base.md", .data = "original\n" });
+
+    const zig_exe = try testZigExe(alloc);
+    defer alloc.free(zig_exe);
+    var result = try buildExtension(alloc, io, tmp.dir, "ext", zig_exe);
+    defer result.deinit(alloc);
+
+    const prompt_path = try std.fs.path.join(alloc, &.{ "ext", "versions", result.version, package_dir, "prompts", "base.md" });
+    defer alloc.free(prompt_path);
+    try tmp.dir.writeFile(io, .{ .sub_path = prompt_path, .data = "tampered\n" });
+    const version_rel = try std.fs.path.join(alloc, &.{ "ext", "versions", result.version });
+    defer alloc.free(version_rel);
+    try std.testing.expectError(error.VersionSealInvalid, integrity.validateVersionDir(alloc, io, tmp.dir, version_rel, result.version, "prompts"));
+}

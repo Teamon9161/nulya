@@ -56,17 +56,28 @@ pub fn runStepWithOptions(
     step_ctx: StepContext,
     model_options: provider.Options,
 ) !provider.Usage {
-    // seq base is the ledger position: deterministic across replays (DESIGN §1).
-    const base_seq = l.len();
-
     const prompt_ir = try prompt.project(alloc, l.view());
     defer prompt_ir.deinit(alloc);
+    return runStepWithPrompt(alloc, l, model, &prompt_ir, tool_snapshot, step_ctx, model_options);
+}
+
+pub fn runStepWithPrompt(
+    alloc: std.mem.Allocator,
+    l: *ledger.Ledger,
+    model: Model,
+    prompt_ir: *const prompt.PromptIR,
+    tool_snapshot: registry.ToolSetSnapshot,
+    step_ctx: StepContext,
+    model_options: provider.Options,
+) !provider.Usage {
+    // seq base is the ledger position: deterministic across replays (DESIGN §1).
+    const base_seq = l.len();
 
     const tool_defs = try tool_snapshot.definitions(alloc);
     defer alloc.free(tool_defs);
 
     const turn = try model.step(alloc, .{
-        .prompt_ir = &prompt_ir,
+        .prompt_ir = prompt_ir,
         .tools = tool_defs,
         .generation = prompt.currentGeneration(l.view()),
         .options = model_options,
