@@ -7,7 +7,7 @@ const builtin = @import("builtin");
 const environment = @import("environment.zig");
 const build_ext = @import("extension/build_ext.zig");
 const store = @import("extension/store.zig");
-const protocol = @import("extension/protocol.zig");
+const invoke = @import("extension/invoke.zig");
 const manifest = @import("extension/manifest.zig");
 const templates = @import("extension/templates.zig");
 const toolchain = @import("toolchain.zig");
@@ -215,39 +215,18 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
     defer lenv.deinit();
 
-    const req: protocol.ToolCallRequest = .{ .id = "cli", .name = tool, .arguments_json = args_json };
-    const request_json = try req.encode(alloc);
-    defer alloc.free(request_json);
-
-    const timeout_ms: u32 = 30_000;
-    const outcome = try lenv.environment().runExtension(alloc, .{
-        .entry_path = entry_abs,
-        .cwd = cwd_path,
-        .request_json = request_json,
+    // Resolution (active version, integrity, frozen manifest, tool declaration,
+    // exact entry path) is the CLI's job; from here on the helper owns encode,
+    // run, decode, and diagnostics.
+    const invocation = try invoke.invokeTool(alloc, lenv.environment(), entry_abs, cwd_path, tool, args_json, .{
+        .request_id = "cli",
+        .timeout_ms = 30_000,
         .max_output_bytes = 1 << 20,
-        .timeout_ms = timeout_ms,
     });
-    defer outcome.deinit(alloc);
+    defer invocation.deinit(alloc);
 
-    if (outcome.timed_out) {
-        try printOut(alloc, io, "extension timed out after {d}ms\n", .{timeout_ms});
-        if (outcome.stderr.len > 0) try printOut(alloc, io, "stderr:\n{s}\n", .{outcome.stderr});
-        return 1;
-    }
-
-    const decoded = protocol.decodeResponse(alloc, req.id, outcome.stdout) catch {
-        try printOut(alloc, io, "extension returned an invalid response (exit {d})\n", .{outcome.exit_code});
-        if (outcome.stderr.len > 0) try printOut(alloc, io, "stderr:\n{s}\n", .{outcome.stderr});
-        return 1;
-    };
-    defer decoded.deinit(alloc);
-
-    if (decoded.ok) {
-        try printOut(alloc, io, "{s}\n", .{decoded.value_json});
-        return 0;
-    }
-    try printOut(alloc, io, "error [{d}]: {s}\n", .{ decoded.err.?.code, decoded.err.?.message });
-    return 1;
+    try printOut(alloc, io, "{s}\n", .{invocation.output});
+    return if (invocation.ok) 0 else 1;
 }
 
 const ActivateMode = enum { activate, rollback };
