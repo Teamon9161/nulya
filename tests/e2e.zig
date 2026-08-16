@@ -2024,6 +2024,131 @@ test "bundled evolution: ext build extensions/evolution is data kind and needs n
     try std.testing.expect(std.mem.indexOf(u8, loaded.stdout, on_disk) != null);
 }
 
+// ── The bundled compact extension: the fork procedure, outside the kernel ──
+
+test "bundled compact: ext build extensions/compact, then ext run forks the session — request and summary land in the old ledger, the summary is queued in the new one, and the episode holds" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    defer host_env.deinit();
+    const zig_exe = host_env.get("NULYA_TEST_ZIG") orelse return error.SkipZigTest;
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+    const repo = host_env.get("NULYA_REPO") orelse return error.SkipZigTest;
+    const compact_src = try std.fs.path.join(alloc, &.{ repo, "extensions", "compact" });
+    defer alloc.free(compact_src);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    // A compiled extension, built from the repo copy into this workspace's store.
+    const built = try runCliEnv(alloc, io, ws, &.{ exe_abs, "ext", "build", compact_src }, "NULYA_ZIG", zig_exe);
+    defer alloc.free(built.stdout);
+    if (built.code != 0) {
+        std.debug.print("compact extension failed to build:\n{s}\n", .{built.stdout});
+        return error.ExtensionBuildFailed;
+    }
+    const version = try extractVersion(alloc, built.stdout);
+    defer alloc.free(version);
+    const ref = try std.fmt.allocPrint(alloc, "compact@{s}", .{version});
+    defer alloc.free(ref);
+
+    // A session with something in it. The scripted provider makes one shell call
+    // and answers on the next step, so this leaves a completed turn.
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(new.stdout);
+    const old_id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(old_id);
+    {
+        const ap = try runCli(alloc, io, ws, &.{ exe_abs, "session", "append", old_id, "probe the box" });
+        defer alloc.free(ap.stdout);
+        const step = try runCliEnv(alloc, io, ws, &.{ exe_abs, "session", "step", old_id }, "NULYA_SCRIPTED_MODE", "finish");
+        defer alloc.free(step.stdout);
+        try std.testing.expectEqual(@as(u8, 0), step.code);
+    }
+
+    const old_path = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{old_id});
+    defer alloc.free(old_path);
+    const before = try ws.readFileAlloc(io, old_path, alloc, .unlimited);
+    defer alloc.free(before);
+    const lines_before = std.mem.count(u8, before, "\n");
+
+    // The tool: a tool result is already in the transcript, so the scripted
+    // provider answers the compaction request with text and ends the turn —
+    // which is exactly the summary path.
+    const call = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"max_steps\":1}}", .{old_id});
+    defer alloc.free(call);
+    const run = try runCliEnv(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "compact", call }, "NULYA_SCRIPTED_MODE", "finish");
+    defer alloc.free(run.stdout);
+    if (run.code != 0) {
+        std.debug.print("compact failed: {s}\n", .{run.stdout});
+        return error.TestUnexpectedResult;
+    }
+
+    const result = try std.json.parseFromSlice(std.json.Value, alloc, std.mem.trim(u8, run.stdout, " \r\n"), .{});
+    defer result.deinit();
+    const new_id = result.value.object.get("session").?.string;
+    try std.testing.expect(std.mem.startsWith(u8, new_id, "s-"));
+    const parent = result.value.object.get("parent").?.object;
+    try std.testing.expectEqualStrings(old_id, parent.get("session").?.string);
+    try std.testing.expect(result.value.object.get("summary_bytes").?.integer > 0);
+
+    // The old file grew by exactly two lines — the request and the answer — and
+    // everything written before is byte-identical. A compaction never edits.
+    const after = try ws.readFileAlloc(io, old_path, alloc, .unlimited);
+    defer alloc.free(after);
+    try std.testing.expect(std.mem.startsWith(u8, after, before));
+    try std.testing.expectEqual(lines_before + 2, std.mem.count(u8, after, "\n"));
+    try std.testing.expect(std.mem.indexOf(u8, after[before.len..], "<nulya:compact-request>") != null);
+    // The fork point is the old ledger's last seq, i.e. the answer just written.
+    try std.testing.expectEqual(@as(i64, @intCast(lines_before + 1)), parent.get("seq").?.integer);
+
+    // The summary was DEPOSITED into the new session: its ledger is still just a
+    // header, and the first step turns the inbox entry into turn 1.
+    const new_path = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{new_id});
+    defer alloc.free(new_path);
+    {
+        const fresh = try ws.readFileAlloc(io, new_path, alloc, .unlimited);
+        defer alloc.free(fresh);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, fresh, "\n"));
+    }
+    {
+        const step = try runCliEnv(alloc, io, ws, &.{ exe_abs, "session", "step", new_id, "--max-steps", "1" }, "NULYA_SCRIPTED_MODE", "finish");
+        defer alloc.free(step.stdout);
+        try std.testing.expectEqual(@as(u8, 0), step.code);
+        const first_line = step.stdout[0 .. std.mem.indexOfScalar(u8, step.stdout, '\n') orelse step.stdout.len];
+        try std.testing.expect(std.mem.indexOf(u8, first_line, "\"kind\":\"user_text\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, first_line, "<nulya:context-summary>") != null);
+    }
+
+    // One conversation, two files: the kernel's own projection says so.
+    {
+        const listed = try runCli(alloc, io, ws, &.{ exe_abs, "session", "list", "--json" });
+        defer alloc.free(listed.stdout);
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, listed.stdout, .{});
+        defer parsed.deinit();
+        var seen = false;
+        for (parsed.value.object.get("sessions").?.array.items) |entry| {
+            const row = entry.object;
+            if (!std.mem.eql(u8, row.get("id").?.string, new_id)) continue;
+            try std.testing.expectEqualStrings(old_id, row.get("root").?.string);
+            try std.testing.expectEqualStrings(old_id, row.get("parent").?.object.get("session").?.string);
+            seen = true;
+        }
+        try std.testing.expect(seen);
+    }
+
+    // A session that does not exist stops at the first step, with the CLI's own
+    // words carried out through the JSON-RPC error.
+    const missing = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "compact", "{\"session\":\"s-does-not-exist\"}" });
+    defer alloc.free(missing.stdout);
+    try std.testing.expectEqual(@as(u8, 1), missing.code);
+    try std.testing.expect(std.mem.indexOf(u8, missing.stdout, "s-does-not-exist") != null);
+}
+
 // ── M5f: `session list` (read-only projection of .nulya/sessions) ───────────
 
 test "session cli: list --json reports parent, event count, summed usage and the latest outcome" {

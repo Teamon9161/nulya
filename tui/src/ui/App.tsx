@@ -19,7 +19,7 @@ import { createTabStore, type SessionTab } from "../state/tabs.ts"
 import { loadTuiState, rememberModel, type ModelPick } from "../state/tui_state.ts"
 import { describeTool } from "../render/registry.ts"
 import { isVerdict, sessionNew, sessionOutcome, verdicts, type ModelView as ModelParams } from "../nulya/cli.ts"
-import { compactPrompt, openCompacted, summaryFrom, summaryTurn } from "../compact.ts"
+import { runCompact } from "../compact.ts"
 import { buildEvolution, formatWithRef, parseWithRef, withOptions, type WithRef } from "../evolve.ts"
 import { createKeymap, matches } from "../keymap.ts"
 import type { AttachOptions } from "../state/attach.ts"
@@ -317,13 +317,19 @@ export function App(props: AppProps) {
   }
 
   /**
-   * `/compact [focus]` — ask this session to summarise itself, then continue in
-   * a new file that points back at it (PLAN §3.4, `compact.ts`).
+   * `/compact [focus]` — spawn the compaction driver (`extensions/compact`) and
+   * follow it, then move this tab to the session it opened (PLAN §3.4).
    *
-   * Every early return leaves the conversation exactly where it was. That is the
-   * whole safety story: the summary is written before anything moves, and if it
-   * does not arrive the old session is still the live one — a compaction that
-   * half-happened would be a conversation thrown away.
+   * The procedure is the extension's; what belongs here is the three guards and
+   * the tab move. While the tool runs it holds this session's writer lease, so
+   * this tab flips itself to observer and its follower shows the request and the
+   * brief as they land — the observer mode that was already there, no new
+   * mechanism (tui.md §5.6).
+   *
+   * Every failure leaves the conversation exactly where it was: the summary is
+   * produced before anything moves, and if it does not arrive the old session is
+   * still the live one. A compaction that half-happened would be a conversation
+   * thrown away, so the driver refuses rather than approximates.
    */
   const compactNow = async (focus: string | undefined) => {
     const source = tab()
@@ -341,22 +347,15 @@ export function App(props: AppProps) {
     }
     setNotice("compacting · asking this session for a continuation brief…")
     try {
-      // Summarised INSIDE the old session, on its own cached prefix — see the
-      // header comment in `compact.ts` for why this is not a sub-session.
-      await source.attach.send(compactPrompt(focus))
-      const summary = summaryFrom(source.state.snapshot.items)
-      if (summary === null) {
-        setNotice("no summary came back · nothing moved, this session is still the live one")
-        return
-      }
-      const id = await openCompacted(props.ws, source.id, source.state.lastSeq(), summary)
-      const next = tabs.replace(source.id, id, { created: true, effort: source.effort() })
-      // The carried summary is in the new session's inbox, not its ledger yet:
-      // show it the way any typed-but-not-yet-stepped turn is shown.
-      next.state.enqueueUser(summaryTurn(summary))
-      setNotice(`compacted into ${id} · ${source.id} kept on disk`)
+      const result = await runCompact(props.ws, source.id, focus)
+      tabs.replace(source.id, result.session, { created: true, effort: source.effort() })
+      setNotice(`compacted into ${result.session} · ${source.id} kept on disk`)
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error))
+      // The lease was the driver's while it ran, so this tab may have gone to
+      // observer on the way. Nothing is driving it now — take it back rather
+      // than leaving the user to reclaim their own session by hand.
+      if (source.attach.role() === "observer") source.attach.takeOver()
     }
   }
 

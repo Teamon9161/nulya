@@ -382,17 +382,30 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
     // A script extension needs no toolchain; only a compiled one does. Resolve
     // zig best-effort and let the build decide — it reports ZigVersionUnreadable
     // only if it actually has to compile.
-    const zig_exe: ?[]u8 = resolveZig(alloc, io) catch null;
-    defer if (zig_exe) |z| alloc.free(z);
+    const zig_exe: ?ZigExe = resolveZig(alloc, io) catch null;
+    defer if (zig_exe) |z| z.deinit(alloc);
 
-    var result = build_ext.buildExtension(alloc, io, std.Io.Dir.cwd(), ext_dir, dest_root, zig_exe orelse "") catch |err| switch (err) {
+    var result = build_ext.buildExtension(alloc, io, std.Io.Dir.cwd(), ext_dir, dest_root, if (zig_exe) |z| z.path else "") catch |err| switch (err) {
+        // Either nothing answered, or what answered could not say its own
+        // version — and that difference is the whole repair hint, so it is not
+        // flattened into one sentence.
         error.ZigVersionUnreadable => {
-            try printOut(alloc, io, "no zig toolchain (needed to compile this extension); set NULYA_ZIG, or build nulya with -Dembed-toolchain\n", .{});
+            if (zig_exe) |z| {
+                try printOut(alloc, io, "the zig at {s} could not report its version (`zig version` failed), and a compiled extension needs one; set NULYA_ZIG to a working toolchain, or build nulya with -Dembed-toolchain\n", .{z.path});
+            } else {
+                try printOut(alloc, io, "no zig toolchain (needed to compile this extension); set NULYA_ZIG, put zig on PATH, or build nulya with -Dembed-toolchain\n", .{});
+            }
             return 1;
         },
         else => return err,
     };
     defer result.deinit(alloc);
+
+    // `entry_rel` is set only for a COMPILED package, i.e. exactly when the
+    // compiler above was used and its identity entered the version id.
+    if (result.entry_rel != null) {
+        if (zig_exe) |z| try noteUnpinnedZig(alloc, io, z);
+    }
 
     if (!result.compile_ok) {
         try printOut(alloc, io, "build FAILED for {s}:\n{s}\n", .{ ext_dir, result.stderr });
@@ -1012,15 +1025,23 @@ fn dispatchToolchain(alloc: std.mem.Allocator, io: std.Io, args: []const []const
         try printErr(io, "usage: nulya toolchain zig <args...>\n");
         return 1;
     }
-    const zig_exe = resolveZig(alloc, io) catch |err| {
-        try printOut(alloc, io, "no zig toolchain: {s}\n", .{@errorName(err)});
-        return 1;
+    const zig_exe = resolveZig(alloc, io) catch |err| switch (err) {
+        error.NoZigToolchain => {
+            try printOut(alloc, io, "no zig toolchain; set NULYA_ZIG, put zig on PATH, or build nulya with -Dembed-toolchain\n", .{});
+            return 1;
+        },
+        else => {
+            try printOut(alloc, io, "no zig toolchain: {s}\n", .{@errorName(err)});
+            return 1;
+        },
     };
-    defer alloc.free(zig_exe);
+    defer zig_exe.deinit(alloc);
+    // This verb IS the compiler, so which one it is belongs on screen.
+    try noteUnpinnedZig(alloc, io, zig_exe);
 
     var argv = try alloc.alloc([]const u8, args.len);
     defer alloc.free(argv);
-    argv[0] = zig_exe;
+    argv[0] = zig_exe.path;
     for (args[1..], 1..) |a, i| argv[i] = a;
 
     var child = try std.process.spawn(io, .{ .argv = argv });
@@ -2364,22 +2385,90 @@ fn sessionUsage(io: std.Io) !u8 {
     return 0;
 }
 
-/// Resolve a zig executable: `NULYA_ZIG` override (dev), else the embedded
-/// managed toolchain (DESIGN §10). Caller owns the returned path.
-fn resolveZig(alloc: std.mem.Allocator, io: std.Io) ![]u8 {
+/// A resolved compiler and where it came from — the second half matters,
+/// because only one of the three sources is unpinned.
+const ZigExe = struct {
+    path: []u8,
+    source: enum { env, embedded, path },
+
+    fn deinit(self: ZigExe, alloc: std.mem.Allocator) void {
+        alloc.free(self.path);
+    }
+};
+
+/// Resolve a zig executable, in this order: `NULYA_ZIG` (the explicit dev
+/// override), the embedded managed toolchain (DESIGN §10), then a `zig` on
+/// PATH. Caller owns the returned path; `error.NoZigToolchain` means none of
+/// the three answered.
+///
+/// The PATH fallback is for development builds, which carry no toolchain: the
+/// alternative is that `nulya ext build` cannot compile anything on a machine
+/// that plainly has a compiler. It is honest rather than pinned — a compiled
+/// version's id hashes the compiler identity (DESIGN §7.4), so building with a
+/// different zig yields a *different version*, never a silently different
+/// binary under the same id. That is why taking it is allowed, and why callers
+/// that actually compile say so once (`noteUnpinnedZig`).
+fn resolveZig(alloc: std.mem.Allocator, io: std.Io) !ZigExe {
     var host = try std.process.Environ.createMap(.{ .block = .global }, alloc);
     defer host.deinit();
 
     if (host.get("NULYA_ZIG")) |p| {
-        if (p.len != 0) return alloc.dupe(u8, p);
+        if (p.len != 0) return .{ .path = try alloc.dupe(u8, p), .source = .env };
     }
 
-    const data_path = try dataDir(alloc, &host);
-    defer alloc.free(data_path);
-    std.Io.Dir.cwd().createDirPath(io, data_path) catch {};
-    var data = try std.Io.Dir.openDirAbsolute(io, data_path, .{ .iterate = true });
-    defer data.close(io);
-    return toolchain.ensureExtracted(alloc, io, data);
+    const embedded: ?[]u8 = blk: {
+        const data_path = try dataDir(alloc, &host);
+        defer alloc.free(data_path);
+        std.Io.Dir.cwd().createDirPath(io, data_path) catch {};
+        var data = std.Io.Dir.openDirAbsolute(io, data_path, .{ .iterate = true }) catch break :blk null;
+        defer data.close(io);
+        break :blk toolchain.ensureExtracted(alloc, io, data) catch |err| switch (err) {
+            error.Canceled => return err,
+            else => null, // not embedded (the usual case), or unextractable
+        };
+    };
+    if (embedded) |z| return .{ .path = z, .source = .embedded };
+
+    const on_path = (try zigOnPath(alloc, io, &host)) orelse return error.NoZigToolchain;
+    return .{ .path = on_path, .source = .path };
+}
+
+/// One stderr line naming the compiler that is about to define a version id —
+/// only for the unpinned source, and only from a caller that really compiles
+/// (a data or script package never touches zig, so saying it there would be
+/// noise about a decision that was not made).
+fn noteUnpinnedZig(alloc: std.mem.Allocator, io: std.Io, zig: ZigExe) !void {
+    if (zig.source != .path) return;
+    const note = try std.fmt.allocPrint(
+        alloc,
+        "note: using zig from PATH ({s}); set NULYA_ZIG or use an embedded build for a pinned toolchain\n",
+        .{zig.path},
+    );
+    defer alloc.free(note);
+    try printErr(io, note);
+}
+
+/// The first executable `zig` on PATH, as an absolute path, or null. Caller owns
+/// the result.
+fn zigOnPath(alloc: std.mem.Allocator, io: std.Io, host: *const std.process.Environ.Map) !?[]u8 {
+    const path_value = host.get("PATH") orelse return null;
+    const separator: u8 = if (builtin.os.tag == .windows) ';' else ':';
+    const exe_name = if (builtin.os.tag == .windows) "zig.exe" else "zig";
+
+    var dirs = std.mem.splitScalar(u8, path_value, separator);
+    while (dirs.next()) |raw_dir| {
+        const dir = std.mem.trim(u8, raw_dir, " \t\"");
+        if (dir.len == 0 or !std.fs.path.isAbsolute(dir)) continue;
+        const candidate = try std.fs.path.join(alloc, &.{ dir, exe_name });
+        errdefer alloc.free(candidate);
+        // `execute` is what matters: a `zig` directory or a non-executable file
+        // on PATH is not a compiler.
+        if (std.Io.Dir.accessAbsolute(io, candidate, .{ .execute = true })) |_| return candidate else |err| switch (err) {
+            error.Canceled => return err,
+            else => alloc.free(candidate),
+        }
+    }
+    return null;
 }
 
 fn dataDir(alloc: std.mem.Allocator, host: *const std.process.Environ.Map) ![]u8 {

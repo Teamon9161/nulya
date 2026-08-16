@@ -103,7 +103,8 @@ test("readToolUsage projects the journal without ranking it", async () => {
   expect(shell).toBeDefined()
   expect(shell!.uses).toBeGreaterThan(0)
   expect(shell!.ok).toBeGreaterThan(0)
-  // Sorted by count, which is a display order — not `tool_selection.rank`.
+  // Sorted by count, which is a display order — the kernel has no other one:
+  // native slots come from pins, never from this journal.
   const counts = usage.map((row) => row.uses)
   expect([...counts].sort((a, b) => b - a)).toEqual(counts)
 }, 60_000)

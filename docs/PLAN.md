@@ -14,6 +14,7 @@
 kernel  = ledger 文件格式 + PromptIR 投影 + 一次 step + 工具执行 + composition 冻结 + provider
 对外    = nulya session * | nulya ext * | nulya skill *
 其余    = 脚本 + SKILL.md（driver / evolution / review gate / agents 导入 …），AI 可读可改
+          ——要解析内核打印的 JSON 时也可以是 compiled extension（`extensions/compact`，§0.1 #3）
 ```
 
 这比之前的计划**更小**（不需要 host-callback 通道、`driver/*` 方法、Middleware、in-process session lifecycle），也**更可进化**（可进化层全在 AI 的原生媒介里）。缓存不变量按 session 文件天然成立。
@@ -135,9 +136,9 @@ loop until objective / swarm           → 脚本
 - 能力谱：**shell 一行 → 脚本 extension（`ext init --script`）→（实测有需要）native Zig** 成立。
 - persistent runtime（warm worker 池、LRU、TTL）仍是**先测量再做**的后期加法。
 
-### 3.4 Compaction = 开新 ledger 文件 `[已落地 · fork 原语 → DESIGN §11/§14；第一个 driver = TUI /compact]`
+### 3.4 Compaction = 开新 ledger 文件 `[已落地 · fork 原语 → DESIGN §11/§14；第一个 driver = extensions/compact]`
 
-✅ **已实现。** 内核侧只补了 fork 原语的缺口（`session new --parent` 校验父存在 + 不点名模型时继承父的冻结身份，composition 仍现解），现状见 [DESIGN §11](DESIGN.md)。压缩本身**没有进内核**：它是 driver 用 `session append` + `session step` + `session new --parent` 组合出的过程，第一个实现是 TUI 的 `/compact`（[tui.md](tui.md) §11）。
+✅ **已实现。** 内核侧只补了 fork 原语的缺口（`session new --parent` 校验父存在 + 不点名模型时继承父的冻结身份，composition 仍现解）与一个 `NULYA_EXE`（子进程找得到 harness，DESIGN §7.6），现状见 [DESIGN §11](DESIGN.md)。压缩本身**没有进内核**：它是 driver 用 `session append` + `session step` + `session new --parent` 组合出的过程，第一个实现是随仓库带的 **`extensions/compact`**（compiled extension，因为 driver 要解析 `session step` 打印的 JSONL），TUI 的 `/compact` 只是 build 它、run 它、跟着它（[tui.md](tui.md) §11 T9）——前端是客户端，不是过程的所有者。
 
 **一处实测定的决策：摘要在旧 session 内部生成，不开子 session。** 压缩恰好发生在缓存前缀最大的时候，让旧 session 总结自己是一次几乎全命中的请求；开子 session 等于把整份转录当全新 input 再付一次全价——正是要压缩的那个东西。代价是请求与摘要成为旧 ledger 里两条真实事件，这是诚实的：那个文件因此记下了自己为什么结束。
 
@@ -155,7 +156,7 @@ loop until objective / swarm           → 脚本
 | 触发 | driver：用户敲命令 / token 压力 | 模型：阶段边界（/goal 里用户可预设阶段计划） |
 | 信号 | driver append 一条请求 `user_text`，下一条 assistant 文本就是 brief——由构造保证，**文本够用** | 模型调 `handoff` **tool**（下）——模型"发起"靠约定字符串太脆（忘写 / 写在正文中间 / 包进 code fence，driver 只能 regex 猜）；tool call 结构化、可校验、说明书随 tool description 每场可见 |
 | brief 侧重 | 继续这场对话所需的一切 | 上一阶段的**结论** + 下一阶段的**任务**，明确丢掉过程 |
-| 执行 | driver 的 fork 过程 | **同一个** fork 过程 |
+| 执行 | `extensions/compact` 的 fork 过程（DESIGN §11） | **同一个** fork 过程（调同一个 tool，brief 由 handoff 提供） |
 
 **`handoff` tool 的形状（内核零改动）：**
 
@@ -224,7 +225,7 @@ loop {
 }
 ```
 
-"现在 step 哪个文件"永远只有 driver 知道——模型经 `handoff` tool 提议，driver 决定并执行 fork（`session new --parent` 只在这一处调用）。`/goal` 本身多半也是一个 script extension（`ext init --script`，有 version、可 `ext run`），TUI 的 `/goal` 只是 spawn 它并以 observer 跟随（含跟到子 session）；不在 TUI 里内建 goal loop（tui.md）。
+"现在 step 哪个文件"永远只有 driver 知道——模型经 `handoff` tool 提议，driver 决定并执行 fork。**fork 那一段不用再写一遍**：`extensions/compact` 已经是它（DESIGN §11），`/goal` 拿到 handoff 的 brief 后调同一个 tool，`session new --parent` 因此仍然只在一处被调用。`/goal` 本身多半也是一个 extension（先用 `ext init --script` 试；要解析 `session step` 的 JSONL 就走 `compact` 的老路，编译一个），TUI 的 `/goal` 只是 spawn 它并以 observer 跟随（含跟到子 session）；不在 TUI 里内建 goal loop（tui.md）。
 
 **两种"灵活"要分清：** Pi 给 extension **mutation power**（改 tools / system prompt / messages / provider payload），代价是 cache / 可复现 / security 靠 extension 自觉；Nulya 给 **composition power**（编排 Session A / B / Tool X / Skill Y，每个 primitive 不可篡改）。"workflow 可以随便长，但改不了 kernel physics"。
 

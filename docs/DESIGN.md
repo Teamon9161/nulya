@@ -385,7 +385,7 @@ draft ──build──▶ versions/v-<hash>（immutable）──activate──�
 
 不给 ledger 的四条理由：模型是上下文路由器；大对话每次 spawn 序列化开销爆炸；最小权限；`args → result` 纯函数才可复现。
 
-**当前 tool 实际拿到的：** in-core builtin 拿 `ToolContext{ environment, fs, cwd }`；extension 子进程只拿 **JSON-RPC request + 净化后的 env + cwd**（`environment.runExtensionImpl`），没有别的。一个恒定大小的显式 `ctx_header`（os / dialect / scratch / 预算 / 权限描述，经 env var 或 `_ctx` 注入）属 PLAN。
+**当前 tool 实际拿到的：** in-core builtin 拿 `ToolContext{ environment, fs, cwd }`；extension 子进程只拿 **JSON-RPC request + 净化后的 env + cwd**（`environment.runExtensionImpl`），没有别的。那份净化 env 里有两个 kernel 自己放的变量，都不是 secret、也不是 model-visible 状态：**`NULYA_EXE`**（`LocalEnvironment.init` 放的**本进程可执行文件绝对路径**——子进程要调 `nulya …` 时该调的是**正在跑的这个**二进制，而不是 PATH 上碰巧有的某个副本；取不到路径就不设，建 environment 永不因此失败）与 **`NULYA_SESSION`**（只有 `session step` 会放，见 §5.3：让 shell 子进程找得到活着的 session 文件去投 capability note）。前者是 driver 型 extension（`extensions/compact`，§11）能存在的前提；两者都不是权限，`ext:… ⊆ shell ⊆ session` 不变（§9）。一个恒定大小的显式 `ctx_header`（os / dialect / scratch / 预算 / 权限描述，经 env var 或 `_ctx` 注入）属 PLAN。
 
 tool↔tool 共享知识只走两条路：**模型中转**（大结果落盘留指针，指针流动）与**磁盘制品**（`.nulya/cache/`）。禁止 tool 直接互调 / 共享内存态。
 
@@ -416,7 +416,7 @@ Environment { runShell(cmd, dialect) / runExtension(entry, request_json) / diale
 **明确不假装 `manifest.permissions` 是安全边界。** AI 生成的原生 binary = 任意机器码；`"network": []` 在没有 OS 强制时拦不住 `curl`。当前：
 
 - extension 与 shell 共享同一个 session authority（≈ 当前用户全权限）。明说，不给虚假安全感。
-- **env 净化**：子进程 env 过 `isSecretKey` denylist（大小写不敏感子串：`SECRET / TOKEN / PASSWORD / API_KEY / ACCESS_KEY / PRIVATE_KEY / CREDENTIAL / SSH_AUTH_SOCK …`）。非 secret 变量（PATH / HOME）照传，命令才能工作。边界是"无明显 secret 泄漏"，**不是**完全不继承、也不是 fs 隔离。
+- **env 净化**：子进程 env 过 `isSecretKey` denylist（大小写不敏感子串：`SECRET / TOKEN / PASSWORD / API_KEY / ACCESS_KEY / PRIVATE_KEY / CREDENTIAL / SSH_AUTH_SOCK …`）。非 secret 变量（PATH / HOME）照传，命令才能工作。边界是"无明显 secret 泄漏"，**不是**完全不继承、也不是 fs 隔离。kernel 往这份净化 env 里**加**两个非 secret 变量：`NULYA_EXE`（本进程可执行文件的绝对路径，`LocalEnvironment.init`）与 `NULYA_SESSION`（活着的 session 文件路径，只有 `session step` 放）——都是 provenance 型信息，不拓宽任何权限（§7.6）。
 - 不变量：`extension_permissions ⊆ session_authority`；注册成 extension 不获得 shell 没有的权限。
 - OS 强制（sandbox）见 PLAN §3.8。
 
@@ -446,7 +446,8 @@ user 层与 workspace 的 `.nulya/` 同形、每个平台一个好找的位置�
 - 宿主平台那一份 Zig（pinned 0.16.0）`@embedFile` 进二进制，首次需要时解压到 `~/.local/share/nulya/toolchains/zig/<ver>/`（`XDG_DATA_HOME` 优先；Windows: `%LOCALAPPDATA%\nulya\`）。一份宿主 Zig 可交叉编译所有 target。
 - 代价 +50–90MB；换来零网络、零 hash 校验、零版本漂移。
 - 内嵌由 `-Dembed-toolchain -Dzig-archive=<path>` 门控；日常 `zig build test` 不嵌，e2e 用 `NULYA_TEST_ZIG` 指向宿主 zig。
-- AI 不直接 `zig build`，走 `nulya ext build`（nulya 统一 zig 版本 / optimize=ReleaseSafe / target / cache）→ 可复现构建。`nulya toolchain zig <args>` 供 scratch。
+- **`cli.resolveZig` 按三档找编译器**：`NULYA_ZIG`（显式覆盖）→ 内嵌工具链 → **PATH 上的 `zig`**。第三档是给开发版的：一个没内嵌工具链的 build 否则在一台明明装着编译器的机器上也 `ext build` 不了任何 compiled extension。走到第三档时往 stderr 说一句 `note: using zig from PATH (<path>); set NULYA_ZIG or use an embedded build for a pinned toolchain`——**不拦，但不悄悄**：compiled version 的 id 把 compiler identity 算进 hash（§7.4），所以换一个 zig 得到的是**另一个 version**，绝不会是同一个 id 底下不同的二进制。三档都没有才报 "no zig toolchain（set NULYA_ZIG / put zig on PATH / -Dembed-toolchain）"。
+- AI 不直接 `zig build`，走 `nulya ext build`（nulya 统一 optimize=ReleaseSafe / target / cache，zig 版本按上面三档定）→ 可复现构建。`nulya toolchain zig <args>` 供 scratch。
 
 ---
 
@@ -460,7 +461,9 @@ user 层与 workspace 的 `.nulya/` 同形、每个平台一个好找的位置�
 2. **不点名模型时继承父的冻结身份**（`model` profile 名 + `model_identity` 原样）。压缩是同一场对话换个文件，不该因为 `active_profile` 期间漂了就换了说话对象。`--profile` / `--model` 任一给出即按今天的 config 重新解析（分叉到别的模型是合法用法）。
 3. **composition 不继承**（pin 与 `--with` 都要再传一次），照常从 config 现解。新 session 正是今天的 pin 与新 activate 版本该生效的地方（§5.1、§7.5），而 fork 就是一个 session 边界。
 
-**何时压、压成什么，都不在内核里。** 前者是 driver 的 policy（内核没有对应的 config 键——没人消费的键就是死代码，已删），后者是模型的判断。两者都由 driver 用现成的 `session append` / `session step` / `session new --parent` 组合出来——TUI 的 `/compact` 是第一个 consumer（tui.md §11），内核既不知道也不关心发生过一次压缩。
+**何时压、压成什么，都不在内核里。** 前者是 driver 的 policy（内核没有对应的 config 键——没人消费的键就是死代码，已删），后者是模型的判断。两者都由 driver 用现成的 `session append` / `session step` / `session new --parent` 组合出来。
+
+**第一个 consumer 是随仓库带的 `extensions/compact`**（与 `extensions/evolution/` 同层）：一个 **compiled** extension，contribute 一个 `compact{session, focus?, max_steps?}` tool，七步就是上面那条组合——找到 harness（`NULYA_EXE`，§7.6）→ 往**旧** session append 一条带 `<nulya:compact-request>` 标记的请求 → `session step` 它并**解析它打印的事件 JSONL** → 没拿到摘要就什么都不动（JSON-RPC error `-32001`，两条真实事件留在旧 ledger 里说明它为什么停）→ `session new --parent <old>:<seq>` → 往新 session append `<nulya:context-summary>` + 摘要 → 返回 `{session, parent{session,seq}, summary_bytes}`。它是 **compiled** 而不是脚本，只因为要解析 JSONL：`sh` 没有 JSON 读取器（jq 不保证有）、Windows 两者都没有，两份脚本实现同一个过程更糟（PLAN §0.1 #3 给 Zig 留的正是这种情况）。TUI 的 `/compact` 现在只做三件事：`ext build extensions/compact` → `ext run compact@<v>` → 把 tab 换到返回的 session（tui.md §11 T9）；它跑的时候持着旧 session 的写者 lease，所以那个 tab 自己翻成 observer 跟着看。内核既不知道也不关心发生过一次压缩，`src/` 为它加的只有 `NULYA_EXE` 一个变量。
 
 ---
 
@@ -578,7 +581,7 @@ nulya                       ← 无参数：固定 prompt demo（现经 durable 
 
     `reasoning_item`（不透明、只为回放）**不转发**；`stopped ∈ end_turn | budget | canceled | max_tokens`（最后一步的回复被截断即 `max_tokens`，不论 `run` 是因它停的还是因连续两次停的，§4）。每个 step 的 ledger 行在该 step 的 `step end` **之前**刷出：读者见到 `step end` 就知道这一步的事件已全。诊断（原来的 "session step failed: …" 等）在 `--stream` 下变成 `{"stream":"run","event":"error","message":"…"}` 后非零退出——**stdout 上没有非 JSON 行**。
 - `nulya ext init|build|activate|rollback|deactivate` 都接受 `--user`：写端落到 user root（`~/.nulya/extensions`，需要时创建）而不是 workspace；`activate|rollback --user` **在 session 里跑**（`NULYA_SESSION` 存在）时先往 stderr 说一句这件事跨出了本 workspace（§7.2），照做不拦。不给 `--user` 时，`activate|rollback|deactivate` 都作用于**该 id 生效中的那个 root**（`Roots.firstActive`，§7.2）——版本不在那里就失败并指路，只有该 id 无 active 副本时 `activate|rollback` 才落到首个持有该 built 版本的 root；操作后按生效结果决定要不要投 capability_note、要不要打印 `not in effect`。`ext list` 打印 `id / version / root`，有版本的行按冻结 manifest 多打一列 `[tools skills prompt]`（声明了什么就打什么；读不出 manifest 就不打，绝不因此让列表失败）——`prompt` 是承重的那个：activate 了的包，它的 system_prompt 进**每一场**未来 session 的 system blocks（§7.5），从前只能手读 manifest 才看得见。被遮蔽的 active 行标 `(shadowed)`，**既无 `current` 又无任何 built 版本的目录直接跳过**（`<id>/.lock` 的 lease 在校验与编译之前就把 `<id>/` 建出来了，所以一次编译失败的 `ext build` 会留下只装着锁的空壳——那是锁的位置，不是 extension；有版本没 active 的 draft 照常列 `(inactive)`）；`ext run` / `skill list` / `skill load` / session composition 一律按 root 顺序搜索。
-- `nulya ext run <id>[@<version>] [tool] <json> | --arg k=v…`：`<id>` 跑生效中的版本；`<id>@<version>` 跑**恰好那个** built 版本（active 与否无关，按 root 顺序找首个持有者）——这是 `--with <id>@<version>` 带进 session 的 runtime tool 的调用形式：composition 里冻的是那个版本，`current` 可能指向别的甚至没有，所以 CLI 形式必须能点名版本；不让 `ext run` 在 `NULYA_SESSION` 下自动读 header，否则"同 session 内 activate 后 CLI 形式立即用新 current"这条语义就变了。usage 记的仍是 version-free 的 `ext:<id>/<tool>`。
+- `nulya ext run <id>[@<version>] [tool] <json> | --arg k=v…`：`<id>` 跑生效中的版本；`<id>@<version>` 跑**恰好那个** built 版本（active 与否无关，按 root 顺序找首个持有者）——这是 `--with <id>@<version>` 带进 session 的 runtime tool 的调用形式，也是**故意不 activate 的 driver 包**的调用形式（`nulya ext run compact@v-… compact '{"session":"s-…"}'`，§11）：composition 里冻的是那个版本，`current` 可能指向别的甚至没有，所以 CLI 形式必须能点名版本；不让 `ext run` 在 `NULYA_SESSION` 下自动读 header，否则"同 session 内 activate 后 CLI 形式立即用新 current"这条语义就变了。usage 记的仍是 version-free 的 `ext:<id>/<tool>`。
 - `nulya ext activate` 在 `NULYA_SESSION`（相对 workspace 的 session 文件路径）存在时，向该 session 的 inbox 投一条 capability_note（§5.3）。
 - 离线时 provider 回落到确定性的 scripted stand-in（`NULYA_SCRIPTED_MODE=finish|loop|truncate`，测试用；`truncate` 每步都在 tool call 中间被 `max_tokens` 切断）。
 

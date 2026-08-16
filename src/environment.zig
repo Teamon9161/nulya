@@ -332,6 +332,20 @@ pub const LocalEnvironment = struct {
             try sanitized.put(entry.key_ptr.*, entry.value_ptr.*);
         }
 
+        // Children get to find the harness that spawned them. A driver written
+        // as an extension (`extensions/compact`, PLAN §3.6) has to run
+        // `nulya session append|step|new`, and it cannot assume a `nulya` on
+        // PATH — the one that matters is THIS binary, not whichever copy an
+        // installer left behind. Not a secret and not model-visible state: an
+        // absolute path to the running executable, next to `NULYA_SESSION`
+        // (which `session step` puts here to name the live session file).
+        // Unknowable path (a deleted binary, an exotic OS) leaves it unset:
+        // building an environment must never fail over provenance.
+        if (std.process.executablePathAlloc(io, alloc)) |exe_path| {
+            defer alloc.free(exe_path);
+            try sanitized.put("NULYA_EXE", exe_path);
+        } else |_| {}
+
         const bash_exe = if (builtin.os.tag == .windows) findWindowsBash(io, &host) orelse default_bash_exe else default_bash_exe;
 
         return .{
@@ -747,6 +761,26 @@ test "local environment sanitizes its child env map" {
     while (it.next()) |entry| {
         try std.testing.expect(!isSecretKey(entry.key_ptr.*));
     }
+}
+
+test "local environment tells its children where the harness is" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    // What the OS says this process is. If it cannot say (a deleted binary),
+    // the variable is deliberately absent and there is nothing to assert.
+    const exe = std.process.executablePathAlloc(io, alloc) catch return error.SkipZigTest;
+    defer alloc.free(exe);
+
+    var lenv = try LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+
+    try std.testing.expect(lenv.env.get("NULYA_EXE") != null);
+    const seen = lenv.env.get("NULYA_EXE").?;
+    try std.testing.expect(std.fs.path.isAbsolute(seen));
+    try std.testing.expectEqualStrings(exe, seen);
+    // Not secret-shaped, so sanitization keeps it (this is the pairing that
+    // makes the variable reach an extension at all).
+    try std.testing.expect(!isSecretKey("NULYA_EXE"));
 }
 
 test "windows bash launcher dirs are not treated as native bash" {

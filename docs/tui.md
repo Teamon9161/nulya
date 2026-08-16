@@ -1,6 +1,6 @@
 # Nulya TUI — 设计与计划
 
-> **状态：T0–T8 全部落地。** 内核侧只有两处：`session step --stream`（纯观测）与 `session new --parent` 的 fork 语义 → [DESIGN.md](DESIGN.md) §14/§11；前端 T1（骨架）、T2（卡片与折叠）、T3（nulya 视图：`/sessions`、`/ext`、sub-session tab、observer）、T4（`/help` `/settings` `/usage`、keymap 覆盖、`bun build --compile`、README、5k 事件性能）、T5（`/model` `/effort`）、T6（布局与 slash 补全）、T7（`/compact`）、T8（慢速回路：`/outcome` `/evolve` `/mode`、`/sessions` 改读 `session list --json`、成本来自 ledger、`/ext` 认多 root）都在 `tui/`（见 §11 与 [`../tui/README.md`](../tui/README.md)）。本文是 `tui/` 的设计契约 + 里程碑 + 实施日志；`tui/` 不在内核范围里（另一条工具链、另一个进程），所以它的现状写在本文 §11，不进 DESIGN.md。
+> **状态：T0–T9 全部落地。** 内核侧只有三处：`session step --stream`（纯观测）、`session new --parent` 的 fork 语义 → [DESIGN.md](DESIGN.md) §14/§11，与 `NULYA_EXE`（子进程 env 里的本二进制路径，§7.6——`/compact` 的过程搬进 `extensions/compact` 之后它才调得到 harness）；前端 T1（骨架）、T2（卡片与折叠）、T3（nulya 视图：`/sessions`、`/ext`、sub-session tab、observer）、T4（`/help` `/settings` `/usage`、keymap 覆盖、`bun build --compile`、README、5k 事件性能）、T5（`/model` `/effort`）、T6（布局与 slash 补全）、T7（`/compact`）、T8（慢速回路：`/outcome` `/evolve` `/mode`、`/sessions` 改读 `session list --json`、成本来自 ledger、`/ext` 认多 root）、T9（`/compact` 改成 spawn `extensions/compact`）都在 `tui/`（见 §11 与 [`../tui/README.md`](../tui/README.md)）。本文是 `tui/` 的设计契约 + 里程碑 + 实施日志；`tui/` 不在内核范围里（另一条工具链、另一个进程），所以它的现状写在本文 §11，不进 DESIGN.md。
 > 上位原则见 [PLAN.md](PLAN.md) §3.11：前端是 core 之上的薄客户端——**tail ledger 文件 + append user 事件；前端是长期进程，re-spawn 的只是 worker**。
 
 ## 0. 定位（三句话）
@@ -53,7 +53,8 @@
 | `nulya session list [--json]` | `/sessions` 的全部内容（created 倒序、composition / parent / 事件数 / usage / 最新 verdict）；**TUI 不再自己扫 header**（T8） |
 | `nulya session outcome <id> <v> [--note]` | `/outcome`；写 outcome journal、不碰 session 文件也不取锁，所以正在跑的场次、别人在 drive 的场次都能当场评 |
 | `nulya session new --with <id>[@<v>]` | `/evolve`（先 `ext build extensions/evolution`）与 `/mode <id>[@<v>]`：把一个 **built 但不 activate** 的包带进这一场（membership，不是 store 指针） |
-| `nulya ext build <path>` | `/evolve` 的第一步；version 内容寻址，所以每次都 build，未改动就是同一个 version |
+| `nulya ext build <path>` | `/evolve` 与 `/compact` 的第一步；version 内容寻址，所以每次都 build，未改动就是同一个 version |
+| `nulya ext run <id>@<v> <tool> <json>` | `/compact`：过程住在 `extensions/compact` 里（DESIGN §11），前端只 build 它、run 它、把 tab 换到它返回的 session；它持锁的这段时间本 tab 自己翻成 observer 跟随（§5.6） |
 | `nulya ext list` | `/ext` 的目录清单：每个 id 来自哪个 root、谁被 `(shadowed)`——root 顺序与"首个持有者胜"是 kernel policy，TUI 不复刻（T8） |
 | `.nulya/sessions/<id>.lock` | 能否非阻塞独占 → 有无别的写者（§5.6）；`session list` 给不了"此刻谁在写"，所以这条探针留在 TUI |
 | `<root>/<id>/versions/v-*/extension.json` | `/ext` 与 CompositionCard 的明细：`runtime`/`contributes`（tools / skills / **system_prompts**）/`permissions`；root 由 `ext list` 指出 |
@@ -301,7 +302,7 @@ fold   = "ctrl+o"
 2. ~~**`nulya config show [--json]`**：外壳级投影，供 `/new --model` 选择器与 agent 自查；v1 手打 profile 名。~~ **已落地（T5）**：DESIGN §14；`/model` 读它。
 3. **`session append` 打印投递回执**（inbox 文件名）→ TUI 按 `origin` 精确转正而非按序匹配；现在按序够用。
 4. **`<id>.live` sidecar**：observer 模式的 deltas；等第一个 driver 脚本。
-5. **`nulya composition preview`**：下一场会晋升谁——纯投影 CLI，避免 TUI 复刻 `tool_selection.rank`。
+5. **`nulya composition preview`**：下一场的工具面长什么样（config 的 pin + `--pin` + 冻结版本合出来的结果）——纯投影 CLI，省得 TUI 自己拼。
 6. **`split-footer` 模式**作为可选屏幕模式（scrollback 原生复制），与折叠可变历史的取舍。
 7. session `--system-file/--skill/--pin`（PLAN §3.2 未落地）落地后 `/new` 的表单。
 8. ~~**header 的 `created` 现在是空串**~~ **已落地（M5f）**：`session new` 写 RFC3339 UTC，`session list --json` 按它倒序；CompositionCard 可以显示时间了（老 session 仍是空串，退回按 id 排）。
@@ -511,7 +512,7 @@ bun run src/main.tsx --session s-…           # 手工看一眼
 - **第二个 tab 不特判 observer。** §5.5 说子 session"自动进 observer 模式"；实现是让它走**同一个** `createAttachment`——父 session 的 shell 正持着子 session 的锁，探针自然给出 observer。少一个特例，多一条一致的路径。
 - **tab 行自绘，不用 `TabSelectRenderable`。** OpenTUI 的 tab-select 是可聚焦控件，会和 composer / overlay 的焦点模型打架（我们的焦点只有三态：composer、browse、overlay）。一行 `<text>` 就能表达"哪些 session 开着、哪个在前"，>1 才出现，行为与 §5.5 一致。
 - **overlay 自己 `useKeyboard`，App 用 `overlay.active()` 门控**（T2 提醒 3 的直接落地）。overlay 打开时 App 只保留 F2/F3 与退出键，`j/k` 不会被两处同时消费。
-- **`/ext` 的 usage 只投影、不排序成"谁会晋升"。** 计数表按 uses 排是显示顺序；`tool_selection.rank` 是 kernel policy，在前端复刻一份必然漂移（§2.1 写死的纪律）。`a`/`r` 的输出留在 overlay 的一行里，**不进 ledger**——它本来就是 CLI 动作，改的是下一场 session 的组成。
+- **`/ext` 的 usage 只投影、不排序成"谁会晋升"。** 计数表按 uses 排是显示顺序；内核根本没有别的顺序——上模型工具面的唯一途径是**有人写一条 pin**（`registry.pinned_native_tools` / `session new --pin`，DESIGN §5.1/§5.5），usage 是写 pin 的人读的证据，不是队列。前端造一个"下一个是谁"的排名等于凭空发明一条内核没有的语义（§2.1 写死的纪律）。`a`/`r` 的输出留在 overlay 的一行里，**不进 ledger**——它本来就是 CLI 动作，改的是下一场 session 的组成。
 - **`/sessions` 没有删除键。** ledger 只能 append；一个提供"删掉这场"的视图是在假装系统不是这样工作的。要清理用文件系统。
 - **overlay 的帧快照把 id 与时间归一化后再存。** session id 与 mtime 每次跑都不同，原始帧永远对不上；归一化后快照仍然钉住**排版**（列宽、换行、标记位置），而不假装易变的部分是稳定的。
 
@@ -859,3 +860,34 @@ cd tui && bun test
 - 整套并跑时 `driver.test.ts` 的 "killed step" 与 `overlays.test.tsx` 的 live 标记偶发超时——T3 起的老现象（负载敏感），单独跑都是秒过。
 
 核验（编排者）：`bun run typecheck` 绿 / `bun test` 111 pass 0 fail（快照 3 处更新：`/help` 多了三条命令、`/ext` 多了 root 行、CompositionCard 多了 `prompts`）。`src/` 本轮一行未动，所以内核的绿由它自己的 `zig build test` / `e2e` 负责，不在这一条里重复声明。
+
+### T9 · `/compact` 交给 `extensions/compact`（2026-08-17）
+
+**状态**：完成。T7 把压缩过程写在了 TUI 的 TypeScript 里（`compact.ts` 的 `compactPrompt`/`summaryFrom`/`openCompacted` + `App.compactNow`）。PLAN §0 的承诺是"内核之上的一切住在 AI 可读、可版本化的媒介里"，而 §3.6 又要 `/goal` 复用同一条 fork 路径——两条都指向同一个动作：**把过程搬进随仓库带的 extension，前端只 spawn 它并跟着看**。
+
+1. **过程搬家。** `extensions/compact`（compiled，`bin/compact`）contribute 一个 `compact{session, focus?, max_steps?}` tool，七步与 T7 逐字相同（DESIGN §11 列了）。prompt 原文 `@embedFile` 成 `src/compact_prompt.md`，随 version 一起冻结——改 prompt 就是改 version，不再是改前端。
+2. **为什么是 compiled 而不是脚本。** driver 必须**解析 `nulya session step` 打印的 JSONL**：`sh` 没有 JSON 读取器（jq 不保证有）、Windows 连 jq 和 python 都不保证，写两份脚本实现同一个过程更糟。这正是 PLAN §0.1 #3 给 Zig 留的位置（脚本是默认，Zig 是实测需要时的选择）。代价诚实地记在这里：第一次在一台机器上 `/compact` 需要一个 zig（`NULYA_ZIG` / 内嵌 / PATH 三档，DESIGN §10），build 失败时前端把内核那句指路原样显示。
+3. **内核只加了一个变量。** `NULYA_EXE`（`LocalEnvironment.init` 放的本进程绝对路径，DESIGN §7.6/§9）——子进程要调 `nulya` 时该调的是**正在跑的这个**二进制。没有它，driver 型 extension 只能猜 PATH。
+4. **前端剩下什么。** `compact.ts` 只留两个 marker（折叠用；`main.zig` 是它们的源头）、`compactionMarker`/`withoutMarker`，加一个 `runCompact`（`extBuild` → `extRun` → 读结果 JSON）；`compactPrompt`/`summaryTurn`/`summaryFrom`/`openCompacted` 删掉。`App.compactNow` 保留三条早退（observer / 正在 step / 空场）、换 tab、失败时把 notice 换成工具那句话。`cli.ts` 多一个 `extRun`（`nulya/` 之外仍然不认得 flag 名）。
+5. **跟随靠已有的 observer 模式。** 工具跑的时候持着旧 session 的 `<id>.lock`，所以那个 tab 的 attach 探针自己翻成 observer，`session events --follow` 把请求与摘要**作为整条事件**送进 transcript——**没有 delta 了**（deltas 只在自己的 `session step --stream` stdout 上）。取舍是：过程搬出去换来"这段等待期间屏幕上是整条一整条地出现"，而不是逐字。失败路径多做一件事：如果这时还停在 observer，直接 `takeOver()`，不让用户为了拿回自己的 session 去按 Enter。
+6. **新 tab 不再乐观回显摘要。** 前端不知道摘要文本了（它在旧 session 的 ledger 与新 session 的 inbox 里）。第一次 step 之后它就是 turn 1，卡片照旧。
+
+**怎么看一眼**
+
+```bash
+zig build e2e            # "bundled compact: …" 这条钉住整个 fork
+```
+
+```bash
+cd tui && bun test test/compact.test.ts
+```
+
+真跑：聊两句 → `/compact` → 旧 tab 变 observer、两条折叠卡出现 → 新 tab 顶上是新 id。
+
+**已知问题 / 给下一里程碑**
+- **30s 上限。** `ext run` 走 `tool.Timeouts.extension_ms`（DESIGN §7.3），而步骤 2–3 在等一个真实模型。慢 provider 会撞上它：撞上时只有旧 ledger 里那两条事件，什么都没搬，可以再按一次——但这是这一轮最该先解决的事（要么 driver 型调用有自己的预算，要么 `ext run` 能带一个）。
+- `/compact` 现在需要一个 zig（第一次 build）。在别人的 workspace 里没有 `extensions/compact`，和 `/evolve` 同一个洞。
+- 摘要质量仍然测不了；TS 侧只钉两个 marker 的往返，其余交给 `zig build e2e`。
+- T7 的那两条仍在：`/sessions` 不显示 parent 链；上下文占用只有 `--stream` 那条路有 usage。
+
+核验（编排者）：`zig build test` 绿 / `zig build e2e` 绿 / `bun run typecheck` 绿 / `bun test` 110 pass（`files.test.ts` 的 `probeWriterLease` 与 `overlays.test.tsx` 的 live 标记在整套并跑时偶发超时——T3 起的老现象，单文件跑都是秒过）。

@@ -81,7 +81,7 @@ async function* decodeLines(stream: ReadableStream<Uint8Array>): AsyncGenerator<
   }
 }
 
-interface RunResult {
+export interface RunResult {
   code: number
   stdout: string
   stderr: string
@@ -326,6 +326,26 @@ export async function extBuild(ws: Workspace, path: string): Promise<string> {
   const version = /v-[0-9a-zA-Z]+/.exec(result.stdout)?.[0]
   if (result.code !== 0 || !version) fail("ext build failed", result)
   return version
+}
+
+/**
+ * `nulya ext run <id>@<version> <tool> <json>` — one oneshot extension call
+ * (DESIGN §7.3/§14). The version is named rather than implied: a package the
+ * front end builds for a job of its own is deliberately never activated, so
+ * there is no `current` to fall back on.
+ *
+ * The raw result is returned instead of thrown, because a non-zero exit is how
+ * a tool REFUSES — `ext run` prints the extension's own JSON-RPC error on
+ * stdout — and the caller usually wants that sentence, not an exception with
+ * the wrong words in it.
+ */
+export async function extRun(
+  ws: Workspace,
+  ref: string,
+  tool: string,
+  args: unknown,
+): Promise<RunResult> {
+  return run(ws, ["ext", "run", ref, tool, JSON.stringify(args)])
 }
 
 /** One line of `nulya ext list`: an extension directory, in the root that holds it. */

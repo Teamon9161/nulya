@@ -12,8 +12,10 @@
  *    difference is the single most useful sentence in the view:
  *    `pinned v-a · store v-b → next session`.
  *  - the USAGE table, a plain projection of `.nulya/tool-usage.jsonl`. It does
- *    NOT rank: "who gets promoted next session" is `tool_selection.rank`, a
- *    kernel policy, and a second implementation of it here would drift.
+ *    NOT rank: a tool joins the model's tool face only when somebody writes a
+ *    pin (the operator's `registry.pinned_native_tools`, or an evolution
+ *    session's `session new --pin`), so there is no "next" for a table to
+ *    predict — these counts are the evidence for that judgement, not it.
  */
 import { For, Show, createMemo, createSignal, onMount } from "solid-js"
 import { useKeyboard } from "@opentui/solid"

@@ -218,6 +218,15 @@ that ships with nulya and starts a session carrying it; `/mode <id>` does the
 same with any built extension. Neither activates anything: the package is a
 member of that one session's composition, and the next session is untouched.
 
+`/compact` asks this session for a continuation brief and moves the tab to a new
+session that points back at it — the old file stays on disk, whole. The
+procedure lives in `extensions/compact`, another package that ships with nulya;
+the TUI builds it, runs it, and watches. While it works it holds the session's
+writer lease, so the tab shows itself as an observer and the two turns appear as
+they land. Building it the first time needs a Zig toolchain (`NULYA_ZIG`, an
+embedded build, or a `zig` on PATH); if the brief never arrives, nothing moves
+and the notice says so.
+
 Every key in the first table above is rebindable — see `[keys]` below. `/help`
 reads the live keymap, so it shows your bindings, not these defaults.
 

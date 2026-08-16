@@ -392,9 +392,11 @@ export async function listExtensions(ws: Workspace): Promise<ExtensionEntry[]> {
 /**
  * The projection of `.nulya/tool-usage.jsonl` (DESIGN §5.5) — counts only.
  *
- * Deliberately NOT a ranking: which tool gets promoted into the next session is
- * `tool_selection.rank`, a kernel policy, and reimplementing it here would be a
- * second truth that silently drifts (tui.md §2.1).
+ * Deliberately NOT a ranking. Nothing ranks: a tool reaches the model's tool
+ * face because somebody wrote a pin (`registry.pinned_native_tools`, or
+ * `session new --pin`), and this journal is the evidence they read, never the
+ * decision. Sorting it into "who is next" here would invent an order the kernel
+ * does not have (tui.md §2.1).
  */
 export interface ToolUsage {
   toolId: string
