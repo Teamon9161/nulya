@@ -20,6 +20,14 @@ export interface SessionTab {
   attach: Attachment
   contributions: Accessor<Contributions[]>
   /**
+   * The reasoning effort this tab's steps run with (`session step --effort`).
+   * Per tab, not per session file: it is a generation option the driver
+   * chooses each step, never part of the frozen identity (DESIGN §3).
+   * Undefined = whatever the kernel defaults to for the session's model.
+   */
+  effort: Accessor<string | undefined>
+  setEffort(effort: string | undefined): void
+  /**
    * This process ran `session new` for it. Only such a session is un-created
    * again when it closes without ever having recorded anything
    * (`files.discardIfUntouched`); one opened by id, or somebody else's, is
@@ -28,12 +36,24 @@ export interface SessionTab {
   created: boolean
 }
 
+export interface OpenOptions {
+  created?: boolean
+  effort?: string
+}
+
 export interface TabStore {
   tabs: Accessor<SessionTab[]>
   active: Accessor<SessionTab>
   activeIndex: Accessor<number>
   /** Focus the tab for `id`, opening one if it is not already open. */
-  open(id: string, options?: { created?: boolean }): SessionTab
+  open(id: string, options?: OpenOptions): SessionTab
+  /**
+   * Open `id` in place of `oldId`'s tab: same position, the old attachment
+   * released (and the old session un-created if this process made it and it is
+   * still empty). This is what "pick a model" does on a fresh, untouched
+   * session — the session simply becomes that model, no second tab.
+   */
+  replace(oldId: string, id: string, options?: OpenOptions): SessionTab
   select(index: number): void
   next(): void
   /** Close a tab and its attachment; the last remaining tab never closes. */
@@ -66,14 +86,15 @@ async function hydrate(
 
 export function createTabStore(
   ws: Workspace,
-  first: { id: string; state: SessionState; created?: boolean },
+  first: { id: string; state: SessionState; created?: boolean; effort?: string },
   options: AttachOptions = {},
 ): TabStore {
   const [tabs, setTabs] = createSignal<SessionTab[]>([])
   const [activeIndex, setActiveIndex] = createSignal(0)
 
-  function makeTab(id: string, state: SessionState, created: boolean): SessionTab {
+  function makeTab(id: string, state: SessionState, opened: OpenOptions): SessionTab {
     const [contributions, setContributions] = createSignal<Contributions[]>([])
+    const [effort, setEffort] = createSignal<string | undefined>(opened.effort)
     // The attachment exists immediately (so the lease probe and the follower
     // start at once), but its first step waits for the replay: events from a
     // step that ran first would make the tail look "already seen" and the
@@ -83,9 +104,11 @@ export function createTabStore(
     const tab: SessionTab = {
       id,
       state,
-      attach: createAttachment(ws, id, state, { ...options, ready }),
+      attach: createAttachment(ws, id, state, { ...options, ready, effort }),
       contributions,
-      created,
+      effort,
+      setEffort,
+      created: opened.created ?? false,
     }
     void hydrate(ws, id, state, setContributions).then(settle, settle)
     return tab
@@ -97,21 +120,38 @@ export function createTabStore(
     if (tab.created) discardIfUntouched(ws, tab.id)
   }
 
-  setTabs([makeTab(first.id, first.state, first.created ?? false)])
+  setTabs([makeTab(first.id, first.state, { created: first.created, effort: first.effort })])
+
+  function open(id: string, opened: OpenOptions = {}): SessionTab {
+    const at = tabs().findIndex((tab) => tab.id === id)
+    if (at >= 0) {
+      setActiveIndex(at)
+      return tabs()[at]!
+    }
+    const tab = makeTab(id, createSessionState(id), opened)
+    setTabs([...tabs(), tab])
+    setActiveIndex(tabs().length - 1)
+    return tab
+  }
 
   return {
     tabs,
     activeIndex,
     active: () => tabs()[Math.min(activeIndex(), tabs().length - 1)]!,
-    open(id, opened = {}) {
-      const at = tabs().findIndex((tab) => tab.id === id)
-      if (at >= 0) {
-        setActiveIndex(at)
-        return tabs()[at]!
+    open,
+    replace(oldId, id, opened = {}) {
+      const list = tabs()
+      const at = list.findIndex((tab) => tab.id === oldId)
+      if (at < 0) return open(id, opened)
+      const existing = list.findIndex((tab) => tab.id === id)
+      if (existing >= 0) {
+        setActiveIndex(existing)
+        return list[existing]!
       }
-      const tab = makeTab(id, createSessionState(id), opened.created ?? false)
-      setTabs([...tabs(), tab])
-      setActiveIndex(tabs().length - 1)
+      release(list[at]!)
+      const tab = makeTab(id, createSessionState(id), opened)
+      setTabs(list.map((old, index) => (index === at ? tab : old)))
+      setActiveIndex(at)
       return tab
     },
     select(index) {

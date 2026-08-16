@@ -1068,7 +1068,7 @@ test "session cli: --max-steps is enforced by the kernel even when the driver as
 
     // `new` and `append` never invoke the model; only `step` does, so only it
     // needs the loop-mode env. The loop model never ends its turn.
-    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--model", "scripted" });
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
     defer alloc.free(new.stdout);
     try std.testing.expectEqual(@as(u8, 0), new.code);
     const id = std.mem.trim(u8, new.stdout, " \r\n");
@@ -1119,7 +1119,7 @@ test "session cli: a shell-script driver runs a goal loop to completion" {
     const ps1_driver =
         \\$ErrorActionPreference = 'Stop'
         \\$n = $args[0]
-        \\$id = (& $n session new --model scripted).Trim()
+        \\$id = (& $n session new --profile scripted).Trim()
         \\& $n session append $id 'do the thing' | Out-Null
         \\for ($i = 0; $i -lt 10; $i++) {
         \\    $out = & $n session step $id --max-steps 1
@@ -1133,7 +1133,7 @@ test "session cli: a shell-script driver runs a goal loop to completion" {
         \\#!/bin/sh
         \\set -e
         \\n="$1"
-        \\id=$("$n" session new --model scripted)
+        \\id=$("$n" session new --profile scripted)
         \\"$n" session append "$id" 'do the thing' >/dev/null
         \\i=0
         \\while [ $i -lt 10 ]; do
@@ -1190,7 +1190,7 @@ test "session cli: --stream emits the transient line protocol and leaves the led
     defer tmp.cleanup();
     const ws = tmp.dir;
 
-    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--model", "scripted" });
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
     defer alloc.free(new.stdout);
     try std.testing.expectEqual(@as(u8, 0), new.code);
     const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
@@ -1254,7 +1254,7 @@ test "session cli: --stream emits the transient line protocol and leaves the led
     var tmp2 = std.testing.tmpDir(.{});
     defer tmp2.cleanup();
     const ws2 = tmp2.dir;
-    const new2 = try runCli(alloc, io, ws2, &.{ exe_abs, "session", "new", "--model", "scripted" });
+    const new2 = try runCli(alloc, io, ws2, &.{ exe_abs, "session", "new", "--profile", "scripted" });
     defer alloc.free(new2.stdout);
     const id2 = try alloc.dupe(u8, std.mem.trim(u8, new2.stdout, " \r\n"));
     defer alloc.free(id2);

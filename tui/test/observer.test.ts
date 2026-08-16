@@ -35,7 +35,7 @@ function startDriverScript(id: string, stopFile: string) {
 }
 
 test("a session driven by somebody else is observed, appended to, and then taken over", async () => {
-  const id = await sessionNew(ws, { model: "scripted" })
+  const id = await sessionNew(ws, { profile: "scripted" })
   await sessionAppend(ws, id, "start the work")
 
   const stopFile = join(ws.dir, "stop-driver")
@@ -93,7 +93,7 @@ test("a session driven by somebody else is observed, appended to, and then taken
  * signal left is `SessionBusy` on a step we asked for.
  */
 test("a refused step flips the role to observer instead of raising an error", async () => {
-  const id = await sessionNew(ws, { model: "scripted" })
+  const id = await sessionNew(ws, { profile: "scripted" })
   await sessionAppend(ws, id, "hold the lease")
 
   // Somebody else takes the lease and keeps it for the length of the test.

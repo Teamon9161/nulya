@@ -36,10 +36,10 @@ async function drainStep(id: string, env: Record<string, string> = scripted_env,
 }
 
 test("listSessions reads the store: newest first, with header, count and title", async () => {
-  const first = await sessionNew(ws, { model: "scripted" })
+  const first = await sessionNew(ws, { profile: "scripted" })
   await sessionAppend(ws, first, "the first question")
   await drainStep(first)
-  const second = await sessionNew(ws, { model: "scripted" })
+  const second = await sessionNew(ws, { profile: "scripted" })
 
   const sessions = await listSessions(ws)
   const ids = sessions.map((entry) => entry.id)
@@ -65,7 +65,7 @@ test("listSessions reads the store: newest first, with header, count and title",
  * screen claims to be driving something it is not.
  */
 test("probeWriterLease sees the writer lease while a step runs", async () => {
-  const id = await sessionNew(ws, { model: "scripted" })
+  const id = await sessionNew(ws, { profile: "scripted" })
   await sessionAppend(ws, id, "hold the lease for a moment")
   const idle: LeaseState = probeWriterLease(ws, id)
   expect(idle === "free" || idle === "unknown").toBe(true)
@@ -109,7 +109,7 @@ test("listExtensions reads the version line, the current pointer and the manifes
 }, 120_000)
 
 test("readToolUsage projects the journal without ranking it", async () => {
-  const id = await sessionNew(ws, { model: "scripted" })
+  const id = await sessionNew(ws, { profile: "scripted" })
   await sessionAppend(ws, id, "probe")
   await drainStep(id)
 
@@ -129,7 +129,7 @@ test("readToolUsage projects the journal without ranking it", async () => {
  */
 test("discardIfUntouched removes only a session that recorded nothing and holds nothing", async () => {
   // Fresh from `session new`: a header and no events → removed, siblings too.
-  const empty = await sessionNew(ws, { model: "scripted" })
+  const empty = await sessionNew(ws, { profile: "scripted" })
   expect(sessionExists(ws, empty)).toBe(true)
   expect(discardIfUntouched(ws, empty)).toBe(true)
   expect(sessionExists(ws, empty)).toBe(false)
@@ -139,7 +139,7 @@ test("discardIfUntouched removes only a session that recorded nothing and holds 
 
   // A turn waiting in the inbox: the user said something nobody has drained
   // yet. Deleting would lose it → kept.
-  const queued = await sessionNew(ws, { model: "scripted" })
+  const queued = await sessionNew(ws, { profile: "scripted" })
   await sessionAppend(ws, queued, "not yet stepped")
   expect(discardIfUntouched(ws, queued)).toBe(false)
   expect(sessionExists(ws, queued)).toBe(true)
@@ -149,7 +149,7 @@ test("discardIfUntouched removes only a session that recorded nothing and holds 
   expect(sessionExists(ws, queued)).toBe(true)
 
   // A step holding the lease right now → kept, whatever the file says.
-  const held = await sessionNew(ws, { model: "scripted" })
+  const held = await sessionNew(ws, { profile: "scripted" })
   await sessionAppend(ws, held, "hold it")
   const step = sessionStep(ws, held, { env: scripted_loop_env, maxSteps: 200 })
   let holding = false

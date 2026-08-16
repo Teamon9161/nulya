@@ -34,8 +34,149 @@ pub fn dispatch(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) 
     if (std.mem.eql(u8, args[0], "toolchain")) return dispatchToolchain(alloc, io, args[1..]);
     if (std.mem.eql(u8, args[0], "session")) return dispatchSession(alloc, io, args[1..]);
     if (std.mem.eql(u8, args[0], "src")) return dispatchSrc(alloc, io, args[1..]);
-    try printErr(io, "unknown command; try `nulya ext`, `nulya skill`, `nulya session`, `nulya src`, or `nulya toolchain`\n");
+    if (std.mem.eql(u8, args[0], "config")) return dispatchConfig(alloc, io, args[1..]);
+    try printErr(io, "unknown command; try `nulya ext`, `nulya skill`, `nulya session`, `nulya config`, `nulya src`, or `nulya toolchain`\n");
     return 1;
+}
+
+fn dispatchConfig(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+    if (args.len != 0 and std.mem.eql(u8, args[0], "show")) return configShow(alloc, io, sliceHasFlag(args[1..], "--json"));
+    try printErr(io, "usage: nulya config show [--json]\n");
+    return 1;
+}
+
+/// The projection a picker (or the agent, via shell) reads: the EFFECTIVE
+/// provider profiles after the whole config chain, each with whether its
+/// credential is usable right now, plus the model catalog. Never a secret —
+/// only the env var NAME and a boolean. Shell-level, like `session new`: it
+/// decides nothing, it shows what `session new` would see.
+const ConfigView = struct {
+    /// Where the chain reads from, so a front end writes to the same place it
+    /// shows — never a second guess at "where is home".
+    paths: Paths,
+    active_profile: []const u8,
+    profiles: []const ProfileView,
+    models: []const config.ModelParams,
+
+    const Paths = struct {
+        system: []const u8,
+        user: []const u8,
+        project: []const u8,
+    };
+
+    const ProfileView = struct {
+        name: []const u8,
+        kind: []const u8,
+        base_url: []const u8,
+        api_key_env: []const u8,
+        /// Whether `session new --profile <name>` would freeze this provider
+        /// (true) or fall back to scripted (false).
+        credential: bool,
+        /// Where the credential comes from: `config` (the profile's own
+        /// api_key), `env` (api_key_env is set), `login` (codex auth file),
+        /// `builtin` (scripted), `none`.
+        credential_source: []const u8,
+        /// The default model id and the selectable list (never empty for a
+        /// real provider: at least the default).
+        model: []const u8,
+        models: []const []const u8,
+        effort: ?[]const u8,
+    };
+};
+
+fn configShow(alloc: std.mem.Allocator, io: std.Io, as_json: bool) !u8 {
+    var host = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    defer host.deinit();
+    var cfg = try config.load(alloc, io, &host);
+    defer cfg.deinit();
+    var paths = try config.ConfigPaths.init(alloc, &host);
+    defer paths.deinit(alloc);
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const views = try a.alloc(ConfigView.ProfileView, cfg.provider.profiles.len);
+    for (cfg.provider.profiles, 0..) |p, i| {
+        const default_model = p.defaultModel();
+        const models: []const []const u8 = if (p.models.len != 0)
+            p.models
+        else if (default_model.len != 0)
+            try a.dupe([]const u8, &.{default_model})
+        else
+            &.{};
+        const cred = launch.credentialSource(alloc, io, p, &host);
+        views[i] = .{
+            .name = p.name,
+            .kind = @tagName(p.kind),
+            .base_url = p.base_url,
+            .api_key_env = p.api_key_env,
+            .credential = cred != .none,
+            .credential_source = @tagName(cred),
+            .model = default_model,
+            .models = models,
+            .effort = p.effort,
+        };
+    }
+    const view: ConfigView = .{
+        .paths = .{ .system = paths.system, .user = paths.user, .project = config.project_config_path },
+        .active_profile = cfg.provider.active_profile,
+        .profiles = views,
+        .models = cfg.models,
+    };
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    if (as_json) {
+        var jw: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
+        try jw.write(view);
+        try out.writer.writeByte('\n');
+    } else {
+        try writeConfigText(&out.writer, view);
+    }
+    try printRaw(io, out.written());
+    return 0;
+}
+
+fn writeConfigText(w: *std.Io.Writer, view: ConfigView) !void {
+    try w.print("config files (later layers override; only the project one is untrusted):\n  system   {s}\n  user     {s}\n  project  {s}\n\n", .{ view.paths.system, view.paths.user, view.paths.project });
+    try w.print("active profile: {s}\n\nprofiles:\n", .{view.active_profile});
+    for (view.profiles) |p| {
+        try w.print("  {s: <20} {s: <10} {s}", .{ p.name, p.kind, if (p.credential) "ready  " else "no key " });
+        if (std.mem.eql(u8, p.credential_source, "config")) {
+            try w.writeAll(" api_key in config");
+        } else if (p.api_key_env.len != 0) {
+            try w.print(" {s}", .{p.api_key_env});
+        } else if (std.mem.eql(u8, p.kind, "codex")) {
+            try w.writeAll(" ~/.codex/auth.json");
+        }
+        if (p.effort) |e| try w.print(" effort={s}", .{e});
+        try w.print("\n      model: {s}", .{p.model});
+        if (p.models.len > 1) {
+            try w.writeAll("  [");
+            for (p.models, 0..) |m, i| {
+                if (i != 0) try w.writeAll(", ");
+                try w.writeAll(m);
+            }
+            try w.writeAll("]");
+        }
+        if (p.base_url.len != 0) try w.print("\n      {s}", .{p.base_url});
+        try w.writeByte('\n');
+    }
+    try w.writeAll("\nmodels:\n");
+    for (view.models) |m| {
+        try w.print("  {s: <22} {s: <18}", .{ m.id, m.label });
+        if (m.context_window) |c| try w.print("  ctx {d: >7}", .{c});
+        if (m.efforts.len != 0) {
+            try w.writeAll("  effort ");
+            for (m.efforts, 0..) |e, i| {
+                if (i != 0) try w.writeByte('|');
+                try w.writeAll(e);
+            }
+            try w.print(" (default {s})", .{m.default_effort orelse "auto"});
+        }
+        try w.writeByte('\n');
+    }
 }
 
 fn dispatchExt(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
@@ -607,8 +748,27 @@ fn sessionNew(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
     var cfg = try config.load(alloc, io, &host);
     defer cfg.deinit();
 
-    const profile = flagValue(args, "--model") orelse
+    // `--profile` names HOW to reach a provider, `--model` WHICH of its ids to
+    // run (default: the profile's own default). A typo'd profile is refused
+    // rather than silently frozen as scripted; a real profile whose credential
+    // is missing still resolves scripted (the offline stand-in) but says so.
+    const profile = flagValue(args, "--profile") orelse
         (if (cfg.provider.active_profile.len != 0) cfg.provider.active_profile else "scripted");
+    const model_id = flagValue(args, "--model");
+    const profile_cfg = cfg.provider.findProfile(profile) orelse {
+        try printOut(alloc, io, "no such profile '{s}' (see `nulya config show`)\n", .{profile});
+        return 1;
+    };
+    if (!launch.credentialAvailable(alloc, io, profile_cfg, &host)) {
+        var paths = try config.ConfigPaths.init(alloc, &host);
+        defer paths.deinit(alloc);
+        const warn = if (profile_cfg.kind == .codex)
+            try std.fmt.allocPrint(alloc, "warning: profile '{s}' has no credential (run `codex login`); session frozen as scripted\n", .{profile})
+        else
+            try std.fmt.allocPrint(alloc, "warning: profile '{s}' has no credential (put api_key in {s}, or set {s}); session frozen as scripted\n", .{ profile, paths.user, profile_cfg.api_key_env });
+        defer alloc.free(warn);
+        try printErr(io, warn);
+    }
 
     var parent: ?ledger.ParentRef = null;
     if (flagValue(args, "--parent")) |p| parent = parseParent(p) orelse {
@@ -640,7 +800,7 @@ fn sessionNew(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
     // Freeze the RESOLVED model identity now: config chooses the model at
     // creation, and a later config edit can never change this session's model
     // (DESIGN §3). A placeholder handle is enough since `new` never steps.
-    const identity = launch.resolveDescriptor(alloc, io, cfg.provider, &host, profile);
+    const identity = launch.resolveDescriptor(alloc, io, cfg.provider, &host, profile, model_id);
     var holder: launch.ModelHolder = .{ .scripted = .{} };
     var sess = session.AgentSession.createDurable(alloc, .{
         .model = holder.model(),
@@ -954,7 +1114,7 @@ fn stepFail(
 
 fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (args.len < 1) {
-        try printErr(io, "usage: nulya session step <id> [--max-steps N] [--stream]\n");
+        try printErr(io, "usage: nulya session step <id> [--max-steps N] [--effort E] [--stream]\n");
         return 1;
     }
     const id = args[0];
@@ -1003,10 +1163,14 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     // than quietly becoming a scripted session (DESIGN §3). The session id is
     // also the prompt-cache scope, so a provider that keys its cache explicitly
     // keeps hitting it across separate `step` processes.
-    var holder = launch.buildFromDescriptor(alloc, io, hdr.value.model_identity, &host, .{ .cache_key = id }) catch |err| switch (err) {
+    // The credential is re-resolved every step: the profile's own `api_key`
+    // (user config, found by the header's profile name), else the env var the
+    // header names, else the Codex auth file.
+    const inline_key = if (cfg.provider.findProfile(hdr.value.model)) |p| p.api_key else null;
+    var holder = launch.buildFromDescriptor(alloc, io, hdr.value.model_identity, &host, .{ .cache_key = id, .inline_key = inline_key }) catch |err| switch (err) {
         error.MissingCredential => {
             const credential = if (hdr.value.model_identity.api_key_env.len != 0) hdr.value.model_identity.api_key_env else "codex login";
-            return stepFail(alloc, io, stream, "session '{s}' is a '{s}' session but its credential ({s}) is not available; refusing to run (no silent fallback)", .{ id, hdr.value.model_identity.provider, credential });
+            return stepFail(alloc, io, stream, "session '{s}' is a '{s}' session but its credential (profile '{s}' api_key, or {s}) is not available; refusing to run (no silent fallback)", .{ id, hdr.value.model_identity.provider, hdr.value.model, credential });
         },
         error.ProviderUnavailable => {
             return stepFail(alloc, io, stream, "session '{s}' was created with provider '{s}', which this build cannot construct", .{ id, hdr.value.model_identity.provider });
@@ -1015,7 +1179,10 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     };
     defer holder.deinit();
 
-    const effort = if (cfg.provider.findProfile(hdr.value.model)) |p| p.effort else null;
+    // Effort is a generation option, not identity (DESIGN §3): the driver may
+    // set it per step; otherwise the profile / catalog default applies.
+    const effort = flagValue(args[1..], "--effort") orelse
+        cfg.defaultEffort(hdr.value.model, hdr.value.model_identity.model);
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try cwdRealPath(io, &cwd_buf);
@@ -1184,9 +1351,14 @@ fn sliceHasFlag(args: []const []const u8, flag: []const u8) bool {
 fn sessionUsage(io: std.Io) !u8 {
     try printRaw(io,
         \\usage:
-        \\  nulya session new [--model profile] [--parent <id>:<seq>]   print a new session id
+        \\  nulya session new [--profile P] [--model ID] [--parent <id>:<seq>]
+        \\                                                             freeze composition + model, print a new session id
+        \\                                                             (P: a config profile, default active_profile; ID: one of its
+        \\                                                             models, default the profile's — see `nulya config show`)
         \\  nulya session append <id> <text> | --file <path>           queue a user turn (appended at the next step boundary)
-        \\  nulya session step <id> [--max-steps N] [--stream]         run to turn end (or the budget); stdout = event JSONL
+        \\  nulya session step <id> [--max-steps N] [--effort E] [--stream]
+        \\                                                             run to turn end (or the budget); stdout = event JSONL
+        \\                                                             --effort overrides the profile/catalog default for this run
         \\                                                             --stream also emits transient model/tool lines as they happen
         \\  nulya session events <id> [--since N] [--follow]           print events as JSONL (read-only tail)
         \\  nulya session cancel <id>                                  request cancel at the next step boundary
@@ -1242,6 +1414,7 @@ fn usage(io: std.Io) !u8 {
         \\  nulya ext inspect <id>            print an extension's manifest
         \\  nulya ext api [protocol|permissions|examples]
         \\  nulya session new|append|step|events|cancel   drive a durable session
+        \\  nulya config show [--json]        effective provider profiles + model catalog
         \\  nulya src [path] [--tests]        print this binary's own source
         \\  nulya skill list                 list active extension skills
         \\  nulya skill load <pinned-ref>    print a frozen SKILL.md
@@ -1328,6 +1501,92 @@ test "EventTail prints raw event lines past --since, skips the header and a torn
     const on_disk = try tmp.dir.readFileAlloc(io, "s.jsonl", alloc, .unlimited);
     defer alloc.free(on_disk);
     try std.testing.expectEqualStrings(whole, on_disk);
+}
+
+test "config show projects profiles with credential availability and the catalog, never a secret" {
+    const alloc = std.testing.allocator;
+    var cfg = config.Config.init(alloc);
+    defer cfg.deinit();
+    var profiles = [_]config.ProviderProfile{
+        .{ .name = "ds", .kind = .openai, .base_url = "https://api.deepseek.com", .api_key_env = "DS_KEY_FOR_TEST", .model = "deepseek-v4-flash", .models = &.{ "deepseek-v4-flash", "deepseek-v4-pro" } },
+        .{ .name = "inline", .kind = .openai, .api_key = "sk-secret-inline" },
+        .{ .name = "scripted", .kind = .scripted, .model = "scripted-demo" },
+    };
+    cfg.provider = .{ .active_profile = "ds", .profiles = &profiles };
+    var models = [_]config.ModelParams{
+        .{ .id = "deepseek-v4-flash", .label = "DeepSeek V4 Flash", .efforts = &.{ "off", "low", "high", "max" }, .context_window = 1_000_000 },
+    };
+    cfg.models = &models;
+
+    var env: std.process.Environ.Map = .init(alloc);
+    defer env.deinit();
+
+    // Build the view the way configShow does, against a controlled env.
+    const views = try alloc.alloc(ConfigView.ProfileView, profiles.len);
+    defer alloc.free(views);
+    for (profiles, 0..) |p, i| {
+        const cred = launch.credentialSource(alloc, std.testing.io, p, &env);
+        views[i] = .{
+            .name = p.name,
+            .kind = @tagName(p.kind),
+            .base_url = p.base_url,
+            .api_key_env = p.api_key_env,
+            .credential = cred != .none,
+            .credential_source = @tagName(cred),
+            .model = p.defaultModel(),
+            .models = if (p.models.len != 0) p.models else &.{},
+            .effort = p.effort,
+        };
+    }
+    const view: ConfigView = .{
+        .paths = .{ .system = "/etc/nulya/config.toml", .user = "/home/me/.nulya/config.toml", .project = config.project_config_path },
+        .active_profile = "ds",
+        .profiles = views,
+        .models = &models,
+    };
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    var jw: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
+    try jw.write(view);
+    const json = out.written();
+
+    // Round-trips through std.json as the TUI will read it.
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try std.testing.expectEqualStrings("ds", root.get("active_profile").?.string);
+    const ps = root.get("profiles").?.array.items;
+    try std.testing.expectEqual(@as(usize, 3), ps.len);
+    try std.testing.expectEqualStrings("ds", ps[0].object.get("name").?.string);
+    try std.testing.expectEqual(false, ps[0].object.get("credential").?.bool);
+    try std.testing.expectEqualStrings("none", ps[0].object.get("credential_source").?.string);
+    try std.testing.expectEqualStrings("DS_KEY_FOR_TEST", ps[0].object.get("api_key_env").?.string);
+    try std.testing.expectEqual(@as(usize, 2), ps[0].object.get("models").?.array.items.len);
+    // Scripted is always runnable.
+    try std.testing.expectEqual(true, ps[2].object.get("credential").?.bool);
+    try std.testing.expectEqualStrings("builtin", ps[2].object.get("credential_source").?.string);
+    // An inline key IS a credential (source `config`) — but the key itself never
+    // appears; only the fact that the profile has one.
+    try std.testing.expectEqual(true, ps[1].object.get("credential").?.bool);
+    try std.testing.expectEqualStrings("config", ps[1].object.get("credential_source").?.string);
+    try std.testing.expect(std.mem.indexOf(u8, json, "sk-secret-inline") == null);
+    try std.testing.expect(ps[1].object.get("api_key") == null);
+    // The paths ride along so a front end writes where the kernel reads.
+    try std.testing.expectEqualStrings("/home/me/.nulya/config.toml", root.get("paths").?.object.get("user").?.string);
+    // The catalog rides along, typed.
+    const ms = root.get("models").?.array.items;
+    try std.testing.expectEqualStrings("deepseek-v4-flash", ms[0].object.get("id").?.string);
+    try std.testing.expectEqual(@as(usize, 4), ms[0].object.get("efforts").?.array.items.len);
+    try std.testing.expect(ms[0].object.get("default_effort").? == .null);
+
+    // The plain-text form mentions each profile and the model line.
+    var text: std.Io.Writer.Allocating = .init(alloc);
+    defer text.deinit();
+    try writeConfigText(&text.writer, view);
+    try std.testing.expect(std.mem.indexOf(u8, text.written(), "ds ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text.written(), "no key") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text.written(), "effort off|low|high|max (default auto)") != null);
 }
 
 test "parseParent parses <session>:<seq> and rejects malformed input" {

@@ -24,7 +24,7 @@ afterAll(() => {
 })
 
 test("two sends in quick succession start ONE step and both turns land", async () => {
-  const id = await sessionNew(ws, { model: "scripted" })
+  const id = await sessionNew(ws, { profile: "scripted" })
   const state = createSessionState(id)
   // A long poll keeps the lease probe out of this: only the driver's own
   // behaviour is under test.
@@ -52,7 +52,7 @@ test("two sends in quick succession start ONE step and both turns land", async (
 }, 120_000)
 
 test("a killed step is not reported as a failure and is not re-stepped", async () => {
-  const id = await sessionNew(ws, { model: "scripted" })
+  const id = await sessionNew(ws, { profile: "scripted" })
   const state = createSessionState(id)
   const driver = createDriver(ws, id, state, { env: scripted_loop_env, maxSteps: 50 })
   try {
@@ -74,7 +74,7 @@ test("a killed step is not reported as a failure and is not re-stepped", async (
 }, 120_000)
 
 test("a step that dies without a `run error` line still surfaces its stderr", async () => {
-  const id = await sessionNew(ws, { model: "scripted" })
+  const id = await sessionNew(ws, { profile: "scripted" })
   const state = createSessionState(id)
   // Bun itself standing in for the kernel: `bun session step <id> --stream`
   // is not a thing, so it exits non-zero with a diagnostic on stderr and not

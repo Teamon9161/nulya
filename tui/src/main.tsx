@@ -2,23 +2,30 @@
  * Entry point: resolve the workspace and binary, pick or create the session,
  * then hand the whole screen to <App/>.
  *
- *   nulya-tui [--session <id>] [--new] [--model <profile>] [--workspace <dir>]
+ *   nulya-tui [--session <id>] [--new] [--profile <p>] [--model <id>] [--effort <e>] [--workspace <dir>]
  *
  * With no arguments a fresh session is created — the same thing `nulya session
- * new` does, because the TUI is a client of that CLI and nothing more.
+ * new` does, because the TUI is a client of that CLI and nothing more. Which
+ * model it runs on is `launch.planLaunch`: the flags, else the last pick made
+ * in `/model`, else the kernel's default; and if none of those can actually run
+ * here, the picker is the first thing on screen (tui.md §1.2 D8).
  */
 import { render } from "@opentui/solid"
 import { openWorkspace } from "./nulya/bin.ts"
-import { sessionNew } from "./nulya/cli.ts"
+import { configShow, sessionNew } from "./nulya/cli.ts"
 import { sessionExists } from "./nulya/files.ts"
 import { loadSettings } from "./state/settings.ts"
+import { loadTuiState } from "./state/tui_state.ts"
+import { planLaunch } from "./launch.ts"
 import { createStyle } from "./render/theme.ts"
 import { createSessionState } from "./state/session.ts"
 import { App } from "./ui/App.tsx"
 
 interface Args {
   session?: string
+  profile?: string
   model?: string
+  effort?: string
   workspace?: string
   maxSteps?: number
   fresh?: boolean
@@ -37,8 +44,14 @@ function parseArgs(argv: string[]): Args {
     if (flag === "--session") {
       args.session = value
       i++
+    } else if (flag === "--profile") {
+      args.profile = value
+      i++
     } else if (flag === "--model") {
       args.model = value
+      i++
+    } else if (flag === "--effort") {
+      args.effort = value
       i++
     } else if (flag === "--workspace") {
       args.workspace = value
@@ -64,11 +77,23 @@ async function main() {
     process.stderr.write(`no such session '${id}' in ${ws.dir}\n`)
     process.exit(1)
   }
+
   // Created here, not opened by name: if it is still empty when the TUI quits
   // it is un-created again (`files.discardIfUntouched`), so a look-and-leave
   // does not leave a row in `/sessions`.
   const created = id === undefined
-  id ??= await sessionNew(ws, args.model ? { model: args.model } : {})
+  let effort = args.effort
+  let guide: string | undefined
+  if (id === undefined) {
+    const plan = planLaunch(args, loadTuiState().model, await configShow(ws))
+    if (plan.refuse) {
+      process.stderr.write(`${plan.refuse}\n`)
+      process.exit(1)
+    }
+    id = await sessionNew(ws, plan.pick ? { profile: plan.pick.profile, model: plan.pick.model } : {})
+    effort = plan.pick?.effort
+    guide = plan.guide
+  }
 
   const settings = await loadSettings(ws.dir)
   const style = createStyle(settings)
@@ -83,6 +108,8 @@ async function main() {
         style={style}
         driver={args.maxSteps !== undefined ? { maxSteps: args.maxSteps } : {}}
         created={created}
+        effort={effort}
+        guide={guide}
       />
     ),
     { exitOnCtrlC: false, targetFps: 30 },

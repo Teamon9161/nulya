@@ -25,7 +25,7 @@ afterAll(() => {
 })
 
 test("a session this process created and never touched is gone when it closes", async () => {
-  const id = await sessionNew(ws, { model: "scripted" })
+  const id = await sessionNew(ws, { profile: "scripted" })
   const state = createSessionState(id)
   const setup = await testRender(
     () => <App ws={ws} id={id} state={state} style={style} driver={{ env: scripted_env }} created />,
@@ -39,7 +39,7 @@ test("a session this process created and never touched is gone when it closes", 
 }, 60_000)
 
 test("a session this process created and used stays", async () => {
-  const id = await sessionNew(ws, { model: "scripted" })
+  const id = await sessionNew(ws, { profile: "scripted" })
   const state = createSessionState(id)
   const setup = await testRender(
     () => <App ws={ws} id={id} state={state} style={style} driver={{ env: scripted_env }} created />,
@@ -54,7 +54,7 @@ test("a session this process created and used stays", async () => {
 }, 120_000)
 
 test("a session merely opened by id is never a candidate, empty or not", async () => {
-  const id = await sessionNew(ws, { model: "scripted" })
+  const id = await sessionNew(ws, { profile: "scripted" })
   const state = createSessionState(id)
   const setup = await testRender(
     () => <App ws={ws} id={id} state={state} style={style} driver={{ env: scripted_env }} />,

@@ -84,6 +84,11 @@ export interface Glyphs {
   hairline: string
   /** The left rule of the composition card — the one framed block (tui.md §4.1). */
   bar: string
+  /** The effort dial in `/model`: ‹ auto › */
+  dialLeft: string
+  dialRight: string
+  /** "this is the one in force" — the current model row, a passed check. */
+  check: string
 }
 
 const unicode_glyphs: Glyphs = {
@@ -103,6 +108,9 @@ const unicode_glyphs: Glyphs = {
   foldOpen: "▾",
   hairline: "─",
   bar: "▎",
+  dialLeft: "‹",
+  dialRight: "›",
+  check: "✓",
 }
 
 const ascii_glyphs: Glyphs = {
@@ -122,6 +130,9 @@ const ascii_glyphs: Glyphs = {
   foldOpen: "v",
   hairline: "-",
   bar: "|",
+  dialLeft: "<",
+  dialRight: ">",
+  check: "*",
 }
 
 export interface Style {

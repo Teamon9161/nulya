@@ -4,6 +4,14 @@
 //! core `provider.StreamEvent` shape. `provider.Model.step` can still collect
 //! those events into one `ModelTurn`, while a future TUI can subscribe to the
 //! same stream directly.
+//!
+//! DeepSeek's endpoint speaks this wire with two documented differences
+//! (api-docs.deepseek.com, "Thinking Mode"): thinking is on by default and is
+//! switched off with `thinking: {type: "disabled"}` rather than an effort value,
+//! and the `reasoning_content` of a tool-calling assistant turn MUST be sent back
+//! on later requests of the same turn (the API answers 400 without it). Both are
+//! handled here — the reasoning as one opaque `reasoning_item` per turn, exactly
+//! the mechanism the Anthropic and Codex wires use for their replayable thinking.
 
 const std = @import("std");
 const prompt = @import("../prompt.zig");
@@ -20,12 +28,19 @@ pub const Config = struct {
     base_url: []const u8 = DEFAULT_BASE_URL,
 };
 
+/// True for DeepSeek's OpenAI-compatible endpoint, whose thinking switch and
+/// reasoning replay differ from OpenAI's own (see the module doc).
+pub fn isDeepSeek(base_url: []const u8) bool {
+    return std.mem.indexOf(u8, base_url, "deepseek.com") != null;
+}
+
 pub const OpenAiProvider = struct {
     alloc: std.mem.Allocator,
     client: std.http.Client,
     api_key: []const u8,
     model: []const u8,
     base_url: []const u8,
+    deepseek: bool,
 
     pub fn init(alloc: std.mem.Allocator, io: std.Io, cfg: Config) !OpenAiProvider {
         const api_key = try alloc.dupe(u8, cfg.api_key);
@@ -45,6 +60,7 @@ pub const OpenAiProvider = struct {
             .api_key = api_key,
             .model = model,
             .base_url = base_url,
+            .deepseek = isDeepSeek(cfg.base_url),
         };
     }
 
@@ -71,34 +87,17 @@ pub const OpenAiProvider = struct {
     }
 
     fn capabilities(ptr: *anyopaque) provider.ProviderCapabilities {
-        _ = ptr;
+        const self: *OpenAiProvider = @ptrCast(@alignCast(ptr));
         return .{
             .parallel_tool_calls = true,
             .cached_token_metrics = true,
+            .thinking_replay = self.deepseek,
         };
     }
 
-    /// Per-stream SSE state. Chat Completions has no explicit terminator other
-    /// than `[DONE]`, so the finish reason seen on the last chunk is carried
-    /// here in case the connection ends without one.
-    const StreamState = struct {
-        alloc: std.mem.Allocator,
-        sink: provider.EventSink,
-        finish: ?provider.StopReason = null,
-        started: bool = false,
-
-        fn onData(self: *StreamState, data: []const u8) anyerror!bool {
-            if (!self.started) {
-                self.started = true;
-                try self.sink.emit(.started);
-            }
-            return processSseData(self.alloc, data, self.sink, &self.finish);
-        }
-    };
-
     fn stream(ptr: *anyopaque, alloc: std.mem.Allocator, request: provider.Request, sink: provider.EventSink) anyerror!void {
         const self: *OpenAiProvider = @ptrCast(@alignCast(ptr));
-        const body = try buildRequestJson(alloc, self.model, request);
+        const body = try buildRequestJson(alloc, self.model, self.deepseek, request);
         defer alloc.free(body);
 
         const url = try endpointUrl(alloc, self.base_url);
@@ -106,16 +105,18 @@ pub const OpenAiProvider = struct {
         const auth = try std.fmt.allocPrint(alloc, "Bearer {s}", .{self.api_key});
         defer alloc.free(auth);
 
-        var state: StreamState = .{ .alloc = alloc, .sink = sink };
+        var state = SseState.init(alloc, sink);
+        defer state.deinit();
         try wire.postSse(&self.client, alloc, .{
             .url = url,
             .body = body,
             .authorization = auth,
-        }, &state, StreamState.onData);
+        }, &state, SseState.onData);
 
         // `[DONE]` already emitted `done` and stopped the loop; reaching here
         // means the body ended without it.
         if (state.finish) |reason| {
+            try state.flushReasoning();
             try sink.emit(.{ .done = reason });
         } else {
             return error.OpenAiStreamEndedEarly;
@@ -139,6 +140,7 @@ pub fn endpointUrl(alloc: std.mem.Allocator, base_url: []const u8) ![]u8 {
 pub fn buildRequestJson(
     alloc: std.mem.Allocator,
     model: []const u8,
+    deepseek: bool,
     request: provider.Request,
 ) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(alloc);
@@ -158,16 +160,32 @@ pub fn buildRequestJson(
     try jw.objectField("include_usage");
     try jw.write(true);
     try jw.endObject();
+    // No `max_tokens` unless asked: the endpoint's own output limit is the right
+    // default for a chat turn, and on backends that think by default the
+    // reasoning is spent against the same cap.
     if (request.options.max_output_tokens) |max| {
         try jw.objectField("max_tokens");
         try jw.write(max);
     }
+    // `off` is not an effort level on this wire: DeepSeek (thinking on by
+    // default) takes an explicit `thinking` switch, everyone else gets nothing.
+    // Any other level is the standard `reasoning_effort` dial.
     if (request.options.effort) |effort| {
-        try jw.objectField("reasoning_effort");
-        try jw.write(effort);
+        if (std.mem.eql(u8, effort, "off")) {
+            if (deepseek) {
+                try jw.objectField("thinking");
+                try jw.beginObject();
+                try jw.objectField("type");
+                try jw.write("disabled");
+                try jw.endObject();
+            }
+        } else {
+            try jw.objectField("reasoning_effort");
+            try jw.write(effort);
+        }
     }
     try jw.objectField("messages");
-    try writeMessages(&jw, request.prompt_ir);
+    try writeMessages(alloc, &jw, request.prompt_ir);
     if (request.tools.len != 0) {
         try jw.objectField("tools");
         try writeTools(&jw, request.tools);
@@ -178,11 +196,14 @@ pub fn buildRequestJson(
     return out.toOwnedSlice();
 }
 
-fn writeMessages(jw: *std.json.Stringify, ir: *const prompt.PromptIR) !void {
+fn writeMessages(alloc: std.mem.Allocator, jw: *std.json.Stringify, ir: *const prompt.PromptIR) !void {
     try jw.beginArray();
     for (ir.system_blocks) |block| {
         try writeRoleContentMessage(jw, "system", block.bytes);
     }
+    // The projection emits a turn's `reasoning` block right before its
+    // `assistant_text`; carried across so the assistant message can replay it.
+    var pending_reasoning: []const u8 = "";
     var i: usize = 0;
     while (i < ir.stable_blocks.len) {
         const block = ir.stable_blocks[i];
@@ -191,16 +212,16 @@ fn writeMessages(jw: *std.json.Stringify, ir: *const prompt.PromptIR) !void {
                 try writeRoleContentMessage(jw, "user", block.bytes);
                 i += 1;
             },
-            // Chat Completions has no replayable reasoning (`reasoning_content`
-            // is output-only on the endpoints that have it), and this provider
-            // never emits `reasoning_item`; a block here comes from a session
-            // whose model did, and it is not for this wire. Skipped, not sent.
-            .reasoning => i += 1,
+            .reasoning => {
+                pending_reasoning = block.bytes;
+                i += 1;
+            },
             .assistant_text => {
                 const start = i + 1;
                 var end = start;
                 while (end < ir.stable_blocks.len and ir.stable_blocks[end].kind == .tool_call) : (end += 1) {}
-                try writeAssistantMessage(jw, block.bytes, ir.stable_blocks[start..end]);
+                try writeAssistantMessage(alloc, jw, block.bytes, ir.stable_blocks[start..end], pending_reasoning);
+                pending_reasoning = "";
                 i = end;
             },
             // `project()` always emits an assistant_text block before any
@@ -240,7 +261,13 @@ fn writeRoleContentMessage(jw: *std.json.Stringify, role: []const u8, content: [
     try jw.endObject();
 }
 
-fn writeAssistantMessage(jw: *std.json.Stringify, content: []const u8, calls: []const prompt.StableBlock) !void {
+fn writeAssistantMessage(
+    alloc: std.mem.Allocator,
+    jw: *std.json.Stringify,
+    content: []const u8,
+    calls: []const prompt.StableBlock,
+    reasoning: []const u8,
+) !void {
     try jw.beginObject();
     try jw.objectField("role");
     try jw.write("assistant");
@@ -251,6 +278,19 @@ fn writeAssistantMessage(jw: *std.json.Stringify, content: []const u8, calls: []
         try jw.write(content);
     }
     if (calls.len != 0) {
+        // DeepSeek requires the CoT of a tool-calling turn on every later
+        // request of that turn (400 otherwise) and ignores it elsewhere, so it
+        // rides only on messages that carry tool_calls. Only this wire produces
+        // `reasoning_content` items, so a block of another shape (a session
+        // that ran on a different provider) contributes nothing.
+        if (reasoning.len != 0) {
+            const text = try joinReasoningContent(alloc, reasoning);
+            defer alloc.free(text);
+            if (text.len != 0) {
+                try jw.objectField("reasoning_content");
+                try jw.write(text);
+            }
+        }
         try jw.objectField("tool_calls");
         try jw.beginArray();
         for (calls) |call_block| {
@@ -294,14 +334,64 @@ fn writeTools(jw: *std.json.Stringify, tools: []const tool.ToolDefinition) !void
     try jw.endArray();
 }
 
-pub fn processSseData(
+/// The reasoning item this wire keeps for replay: the turn's whole
+/// `reasoning_content` as one object, so `writeAssistantMessage` can hand it
+/// back verbatim under the same field name. Opaque to the kernel like every
+/// other provider's item; only this file reads it.
+const reasoning_field = "reasoning_content";
+
+/// Per-stream SSE state. Chat Completions has no explicit terminator other than
+/// `[DONE]`, so the finish reason seen on the last chunk is carried here in case
+/// the connection ends without one; the turn's `reasoning_content` deltas
+/// accumulate here and leave as ONE `reasoning_item` right before `done`.
+pub const SseState = struct {
     alloc: std.mem.Allocator,
-    data: []const u8,
     sink: provider.EventSink,
-    finish: *?provider.StopReason,
-) !bool {
+    finish: ?provider.StopReason = null,
+    started: bool = false,
+    reasoning: std.Io.Writer.Allocating,
+
+    pub fn init(alloc: std.mem.Allocator, sink: provider.EventSink) SseState {
+        return .{ .alloc = alloc, .sink = sink, .reasoning = .init(alloc) };
+    }
+
+    pub fn deinit(self: *SseState) void {
+        self.reasoning.deinit();
+        self.* = undefined;
+    }
+
+    fn onData(self: *SseState, data: []const u8) anyerror!bool {
+        if (!self.started) {
+            self.started = true;
+            try self.sink.emit(.started);
+        }
+        return processSseData(self, data);
+    }
+
+    /// Emit the accumulated reasoning as one item (and forget it). A no-op when
+    /// the model did not think aloud, so non-reasoning endpoints never produce a
+    /// reasoning block at all.
+    pub fn flushReasoning(self: *SseState) !void {
+        const text = self.reasoning.written();
+        if (text.len == 0) return;
+        var out: std.Io.Writer.Allocating = .init(self.alloc);
+        defer out.deinit();
+        var jw: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
+        try jw.beginObject();
+        try jw.objectField(reasoning_field);
+        try jw.write(text);
+        try jw.endObject();
+        try self.sink.emit(.{ .reasoning_item = out.written() });
+        self.reasoning.clearRetainingCapacity();
+    }
+};
+
+pub fn processSseData(state: *SseState, data: []const u8) !bool {
+    const alloc = state.alloc;
+    const sink = state.sink;
     if (std.mem.eql(u8, data, "[DONE]")) {
-        try sink.emit(.{ .done = finish.* orelse .end_turn });
+        try state.flushReasoning();
+        try sink.emit(.{ .done = state.finish orelse .end_turn });
         return true;
     }
 
@@ -320,7 +410,7 @@ pub fn processSseData(
     if (choice != .object) return error.OpenAiBadSse;
 
     if (wire.string(choice, "finish_reason")) |reason| {
-        finish.* = stopReasonFrom(reason);
+        state.finish = stopReasonFrom(reason);
     }
 
     const delta = wire.field(choice, "delta") orelse return false;
@@ -329,8 +419,12 @@ pub fn processSseData(
     if (wire.string(delta, "content")) |content| {
         if (content.len != 0) try sink.emit(.{ .text_delta = content });
     }
-    if (wire.string(delta, "reasoning_content")) |thinking| {
-        if (thinking.len != 0) try sink.emit(.{ .thinking_delta = thinking });
+    if (wire.string(delta, reasoning_field)) |thinking| {
+        if (thinking.len != 0) {
+            // Display now, and keep for the turn's replayable item.
+            try sink.emit(.{ .thinking_delta = thinking });
+            try state.reasoning.writer.writeAll(thinking);
+        }
     }
     if (wire.field(delta, "tool_calls")) |calls| {
         if (calls != .array) return error.OpenAiBadSse;
@@ -338,6 +432,22 @@ pub fn processSseData(
     }
 
     return false;
+}
+
+/// Concatenate the `reasoning_content` of every item in a turn's reasoning block
+/// (a JSON array; see `SseState.flushReasoning`). Items of another shape — from
+/// a provider that is not this wire — contribute nothing. Caller owns the result.
+fn joinReasoningContent(alloc: std.mem.Allocator, block: []const u8) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    const parsed = std.json.parseFromSlice(std.json.Value, alloc, block, .{}) catch return out.toOwnedSlice();
+    defer parsed.deinit();
+    if (parsed.value != .array) return out.toOwnedSlice();
+    for (parsed.value.array.items) |item| {
+        if (item != .object) continue;
+        if (wire.string(item, reasoning_field)) |text| try out.writer.writeAll(text);
+    }
+    return out.toOwnedSlice();
 }
 
 fn emitToolCallDelta(call: std.json.Value, sink: provider.EventSink) !void {
@@ -414,7 +524,7 @@ test "request JSON serializes streaming prompt blocks and tools" {
         .description = "run shell",
         .input_schema = "{\"type\":\"object\"}",
     }};
-    const body = try buildRequestJson(alloc, "test-model", .{
+    const body = try buildRequestJson(alloc, "test-model", false, .{
         .prompt_ir = &ir,
         .tools = &defs,
         .generation = 0,
@@ -433,26 +543,28 @@ test "SSE parser extracts streamed text tool calls usage and done" {
     const alloc = std.testing.allocator;
     var collector = provider.TurnCollector.init(alloc);
     defer collector.deinit();
-    const sink = collector.sink();
-    var finish: ?provider.StopReason = null;
+    var state = SseState.init(alloc, collector.sink());
+    defer state.deinit();
 
-    try std.testing.expect(!try processSseData(alloc,
+    try std.testing.expect(!try processSseData(&state,
         \\{"choices":[{"delta":{"content":"run"},"finish_reason":null}]}
-    , sink, &finish));
-    try std.testing.expect(!try processSseData(alloc,
+    ));
+    try std.testing.expect(!try processSseData(&state,
         \\{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"shell","arguments":"{\"command\":"}}]},"finish_reason":null}]}
-    , sink, &finish));
-    try std.testing.expect(!try processSseData(alloc,
+    ));
+    try std.testing.expect(!try processSseData(&state,
         \\{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"echo hi\"}"}}]},"finish_reason":"tool_calls"}]}
-    , sink, &finish));
-    try std.testing.expect(!try processSseData(alloc,
+    ));
+    try std.testing.expect(!try processSseData(&state,
         \\{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":80}}}
-    , sink, &finish));
-    try std.testing.expect(try processSseData(alloc, "[DONE]", sink, &finish));
+    ));
+    try std.testing.expect(try processSseData(&state, "[DONE]"));
 
     const turn = try collector.finish();
     defer turn.deinit(alloc);
     try std.testing.expectEqualStrings("run", turn.text);
+    // No reasoning_content on the wire → no reasoning item at all.
+    try std.testing.expectEqualStrings("", turn.reasoning);
     try std.testing.expectEqual(@as(usize, 1), turn.calls.len);
     try std.testing.expectEqualStrings("call_1", turn.calls[0].id);
     try std.testing.expectEqualStrings("shell", turn.calls[0].tool);
@@ -464,6 +576,107 @@ test "SSE parser extracts streamed text tool calls usage and done" {
     try std.testing.expectEqual(provider.StopReason.tool_use, turn.stop_reason);
 }
 
+test "DeepSeek: effort off disables thinking, other levels are reasoning_effort, OpenAI proper gets nothing for off" {
+    const alloc = std.testing.allocator;
+    var l = @import("../ledger.zig").Ledger.init(alloc);
+    defer l.deinit();
+    try l.append(.{ .user_text = "hi" });
+    const ir = try prompt.project(alloc, l.view());
+    defer ir.deinit(alloc);
+
+    const off = try buildRequestJson(alloc, "deepseek-v4-flash", true, .{ .prompt_ir = &ir, .tools = &.{}, .generation = 0, .options = .{ .effort = "off" } });
+    defer alloc.free(off);
+    try std.testing.expect(std.mem.indexOf(u8, off, "\"thinking\":{\"type\":\"disabled\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, off, "reasoning_effort") == null);
+
+    const high = try buildRequestJson(alloc, "deepseek-v4-flash", true, .{ .prompt_ir = &ir, .tools = &.{}, .generation = 0, .options = .{ .effort = "high" } });
+    defer alloc.free(high);
+    try std.testing.expect(std.mem.indexOf(u8, high, "\"reasoning_effort\":\"high\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, high, "\"thinking\"") == null);
+
+    // An absent effort is the server default (thinking on) — nothing is sent.
+    const auto = try buildRequestJson(alloc, "deepseek-v4-flash", true, .{ .prompt_ir = &ir, .tools = &.{}, .generation = 0 });
+    defer alloc.free(auto);
+    try std.testing.expect(std.mem.indexOf(u8, auto, "\"thinking\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, auto, "reasoning_effort") == null);
+
+    // OpenAI's own endpoint has no `thinking` switch: `off` sends nothing.
+    const openai_off = try buildRequestJson(alloc, "gpt-x", false, .{ .prompt_ir = &ir, .tools = &.{}, .generation = 0, .options = .{ .effort = "off" } });
+    defer alloc.free(openai_off);
+    try std.testing.expect(std.mem.indexOf(u8, openai_off, "\"thinking\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, openai_off, "reasoning_effort") == null);
+
+    try std.testing.expect(isDeepSeek("https://api.deepseek.com"));
+    try std.testing.expect(!isDeepSeek("https://api.openai.com/v1"));
+}
+
+test "DeepSeek: a tool-calling turn's reasoning_content is kept as one item and replayed on that assistant message" {
+    const alloc = std.testing.allocator;
+    var collector = provider.TurnCollector.init(alloc);
+    defer collector.deinit();
+    var state = SseState.init(alloc, collector.sink());
+    defer state.deinit();
+
+    // The CoT streams in pieces before the call; the item is emitted whole at [DONE].
+    _ = try processSseData(&state,
+        \\{"choices":[{"delta":{"reasoning_content":"I should "},"finish_reason":null}]}
+    );
+    _ = try processSseData(&state,
+        \\{"choices":[{"delta":{"reasoning_content":"run ls."},"finish_reason":null}]}
+    );
+    _ = try processSseData(&state,
+        \\{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"shell","arguments":"{\"command\":\"ls\"}"}}]},"finish_reason":"tool_calls"}]}
+    );
+    try std.testing.expect(try processSseData(&state, "[DONE]"));
+
+    const turn = try collector.finish();
+    defer turn.deinit(alloc);
+    try std.testing.expectEqualStrings("[{\"reasoning_content\":\"I should run ls.\"}]", turn.reasoning);
+    try std.testing.expectEqual(@as(usize, 1), turn.calls.len);
+
+    // Ledger → projection → request: the assistant message carries it back,
+    // ahead of its tool_calls, and the tool result follows as usual.
+    var l = @import("../ledger.zig").Ledger.init(alloc);
+    defer l.deinit();
+    try l.append(.{ .user_text = "list files" });
+    try l.append(.{ .assistant = .{ .reasoning = turn.reasoning, .text = turn.text, .calls = turn.calls } });
+    try l.append(.{ .tool_results = &.{.{ .call_id = "call_1", .ok = true, .output = "a.txt" }} });
+    const ir = try prompt.project(alloc, l.view());
+    defer ir.deinit(alloc);
+    const body = try buildRequestJson(alloc, "deepseek-v4-flash", true, .{ .prompt_ir = &ir, .tools = &.{}, .generation = 0 });
+    defer alloc.free(body);
+    const reasoning_at = std.mem.indexOf(u8, body, "\"reasoning_content\":\"I should run ls.\"") orelse return error.ReasoningNotReplayed;
+    const calls_at = std.mem.indexOf(u8, body, "\"tool_calls\":[").?;
+    const result_at = std.mem.indexOf(u8, body, "\"role\":\"tool\"").?;
+    try std.testing.expect(reasoning_at < calls_at and calls_at < result_at);
+    // The raw item array never leaks onto the wire.
+    try std.testing.expect(std.mem.indexOf(u8, body, "[{\"reasoning_content\"") == null);
+}
+
+test "reasoning without tool calls, or of another provider's shape, is not replayed" {
+    const alloc = std.testing.allocator;
+    var l = @import("../ledger.zig").Ledger.init(alloc);
+    defer l.deinit();
+    try l.append(.{ .user_text = "q" });
+    // A text-only turn: DeepSeek ignores its CoT on later turns, so it stays home.
+    try l.append(.{ .assistant = .{ .reasoning = "[{\"reasoning_content\":\"private\"}]", .text = "answer", .calls = &.{} } });
+    try l.append(.{ .user_text = "again" });
+    // A tool-calling turn whose reasoning came from an Anthropic-shaped item.
+    try l.append(.{ .assistant = .{
+        .reasoning = "[{\"type\":\"thinking\",\"thinking\":\"plan\",\"signature\":\"sig\"}]",
+        .text = "",
+        .calls = &.{.{ .id = "c1", .tool = "shell", .args_json = "{}" }},
+    } });
+    try l.append(.{ .tool_results = &.{.{ .call_id = "c1", .ok = true, .output = "" }} });
+    const ir = try prompt.project(alloc, l.view());
+    defer ir.deinit(alloc);
+    const body = try buildRequestJson(alloc, "deepseek-v4-flash", true, .{ .prompt_ir = &ir, .tools = &.{}, .generation = 0 });
+    defer alloc.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "private") == null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "reasoning_content") == null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "plan") == null);
+}
+
 test "request JSON serializes system blocks before stable ledger blocks" {
     const alloc = std.testing.allocator;
     var l = @import("../ledger.zig").Ledger.init(alloc);
@@ -473,7 +686,7 @@ test "request JSON serializes system blocks before stable ledger blocks" {
     const ir = try prompt.projectWithSystem(alloc, &sys, l.view());
     defer ir.deinit(alloc);
 
-    const body = try buildRequestJson(alloc, "test-model", .{
+    const body = try buildRequestJson(alloc, "test-model", false, .{
         .prompt_ir = &ir,
         .tools = &.{},
         .generation = 0,

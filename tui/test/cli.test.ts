@@ -32,7 +32,7 @@ function streamTags(lines: StepLine[]): string[] {
 
 describe("session step --stream", () => {
   test("new → append → step emits the DESIGN §14 line protocol in order", async () => {
-    const id = await sessionNew(ws, { model: "scripted" })
+    const id = await sessionNew(ws, { profile: "scripted" })
     expect(id.startsWith("s-")).toBe(true)
 
     await sessionAppend(ws, id, "read the kernel\nthen build")
@@ -89,7 +89,7 @@ describe("session step --stream", () => {
   }, 60_000)
 
   test("events replay lands on the same transcript as watching it live", async () => {
-    const id = await sessionNew(ws, { model: "scripted" })
+    const id = await sessionNew(ws, { profile: "scripted" })
     await sessionAppend(ws, id, "hello")
 
     const live = createSessionState(id)
@@ -110,7 +110,7 @@ describe("session step --stream", () => {
   }, 60_000)
 
   test("--since replays only the tail", async () => {
-    const id = await sessionNew(ws, { model: "scripted" })
+    const id = await sessionNew(ws, { profile: "scripted" })
     await sessionAppend(ws, id, "hi")
     const step = sessionStep(ws, id, { env: scripted_env })
     for await (const _ of step.lines) {
@@ -127,7 +127,7 @@ describe("session step --stream", () => {
 
 describe("cancel", () => {
   test("Esc's CLI path ends the run at a step boundary", async () => {
-    const id = await sessionNew(ws, { model: "scripted" })
+    const id = await sessionNew(ws, { profile: "scripted" })
     await sessionAppend(ws, id, "loop forever")
 
     // `loop` mode never ends its turn, so only the budget or a cancel stops it.

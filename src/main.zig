@@ -50,7 +50,6 @@ fn runDemo(alloc: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) 
     defer lenv.deinit();
 
     const profile = if (cfg.provider.active_profile.len != 0) cfg.provider.active_profile else "scripted";
-    const effort = if (cfg.provider.findProfile(profile)) |p| p.effort else null;
 
     try std.Io.Dir.cwd().createDirPath(io, launch.sessions_dir);
     const id = try launch.genSessionId(alloc, io);
@@ -62,10 +61,12 @@ fn runDemo(alloc: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) 
     // model from it — so the demo runs exactly what gets frozen into the header.
     // The session id doubles as the prompt-cache scope for providers that key
     // their cache explicitly (DESIGN §13).
-    const identity = launch.resolveDescriptor(alloc, io, cfg.provider, env, profile);
-    var holder = try launch.buildFromDescriptor(alloc, io, identity, env, .{ .cache_key = id });
+    const identity = launch.resolveDescriptor(alloc, io, cfg.provider, env, profile, null);
+    const inline_key = if (cfg.provider.findProfile(profile)) |p| p.api_key else null;
+    var holder = try launch.buildFromDescriptor(alloc, io, identity, env, .{ .cache_key = id, .inline_key = inline_key });
     defer holder.deinit();
     const model = holder.model();
+    const effort = cfg.defaultEffort(profile, identity.model);
 
     std.debug.print("provider: {s}/{s} (shell dialect: {s})\n", .{ model.name(), model.modelName(), lenv.dialect_val.label() });
 

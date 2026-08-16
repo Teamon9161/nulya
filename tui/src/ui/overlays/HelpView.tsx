@@ -17,6 +17,7 @@ const actions: Array<[Action, string]> = [
   ["foldAll", "expand everything, again to collapse everything"],
   ["ext", "/ext — the extension store"],
   ["sessions", "/sessions — the session store"],
+  ["model", "/model — pick profile, model and effort; Enter starts a session on it"],
   ["help", "this page"],
   ["nextTab", "next tab (tabs appear once a second session is open)"],
   ["closeTab", "close the current tab"],
@@ -34,7 +35,9 @@ const fixed: Array<[string, string]> = [
 ]
 
 const commands: Array<[string, string]> = [
-  ["/new [--model p]", "start a session with a provider profile from the kernel's config"],
+  ["/model", "the picker: ↑↓ model, ←→ effort, Enter new session on it (a model is frozen per session)"],
+  ["/new [--profile p] [--model id]", "a session on the last pick, or on the named profile / model id"],
+  ["/effort <level|auto>", "change this tab's effort now; the next step runs with it"],
   ["/sessions  /ext", "the two stores, as views"],
   ["/usage  /settings", "tokens and tool counts · effective settings and where they came from"],
   ["/step", "continue after a spent step budget (nothing continues by itself)"],
@@ -51,7 +54,7 @@ export function HelpView(props: { keys: Keymap; onClose: () => void }) {
 
   const Row = (row: { left: string; right: string; changed?: boolean }) => (
     <box flexDirection="row" width="100%">
-      <box width={24} flexShrink={0}>
+      <box width={32} flexShrink={0}>
         <text fg={style.theme.fg}>{row.left}</text>
       </box>
       <box flexGrow={1} flexShrink={1} flexBasis={0}>

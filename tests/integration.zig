@@ -53,7 +53,7 @@ const Live = struct {
         // A profile whose credential is missing resolves to the scripted
         // identity (DESIGN §3) — measuring a canned provider's cache would
         // prove nothing, so skip instead.
-        const identity = launch.resolveDescriptor(alloc, io, cfg.provider, &env, profile);
+        const identity = launch.resolveDescriptor(alloc, io, cfg.provider, &env, profile, null);
         if (std.mem.eql(u8, identity.provider, "scripted")) {
             std.debug.print("integration: profile '{s}' has no usable credential\n", .{profile});
             return null;
@@ -71,7 +71,8 @@ const Live = struct {
         var cache_key: [32]u8 = undefined;
         var key_writer = std.Io.Writer.fixed(&cache_key);
         try key_writer.print("probe-{d:0>20}", .{std.Io.Timestamp.now(io, .real).toNanoseconds()});
-        var holder = try launch.buildFromDescriptor(alloc, io, identity, &env, .{ .cache_key = &cache_key });
+        const inline_key = if (cfg.provider.findProfile(profile)) |p| p.api_key else null;
+        var holder = try launch.buildFromDescriptor(alloc, io, identity, &env, .{ .cache_key = &cache_key, .inline_key = inline_key });
         errdefer holder.deinit();
 
         opened = true;
@@ -83,7 +84,7 @@ const Live = struct {
             .lenv = lenv,
             .tmp = tmp,
             .profile = profile,
-            .effort = if (cfg.provider.findProfile(profile)) |p| p.effort else null,
+            .effort = cfg.defaultEffort(profile, identity.model),
         };
     }
 

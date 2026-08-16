@@ -49,14 +49,49 @@ pub const ShellDialect = enum {
     }
 };
 
+/// A profile says HOW to reach a provider (kind, endpoint, credential name) and
+/// WHICH model ids it serves; the ids' intrinsic properties live in the
+/// `[[models]]` catalog (`ModelParams`), so a model reached through two
+/// endpoints is described once.
 pub const ProviderProfile = struct {
     name: []const u8,
     kind: ProviderKind = .openai,
+    /// The default model id for `session new --profile <name>` without `--model`.
+    /// Empty means the first of `models`, else the provider's built-in default.
     model: []const u8 = "",
+    /// Selectable model ids (a picker's list). Empty means just `model`.
+    models: []const []const u8 = &.{},
     base_url: []const u8 = "",
     api_key_env: []const u8 = "",
     api_key: ?[]const u8 = null,
+    /// Profile-wide effort override; `Config.defaultEffort` prefers it over the
+    /// catalog's `default_effort`.
     effort: ?[]const u8 = null,
+
+    /// The model id a session gets when none is named. `""` means "let the
+    /// provider default" (`launch.resolveDescriptor` fills it in).
+    pub fn defaultModel(self: ProviderProfile) []const u8 {
+        if (self.model.len != 0) return self.model;
+        return if (self.models.len != 0) self.models[0] else "";
+    }
+};
+
+/// Intrinsic properties of one model id, independent of which profile serves
+/// it: a display label, the reasoning-effort dial it accepts, and its context
+/// window. Purely descriptive — the kernel never reads it; `launch`/`cli` use
+/// it to default a session's effort, and `nulya config show` projects it for
+/// pickers.
+pub const ModelParams = struct {
+    id: []const u8,
+    label: []const u8 = "",
+    /// Effort levels the model accepts, lowest → highest. Empty means the model
+    /// has no dial (an absent effort is always legal and means the provider's
+    /// default).
+    efforts: []const []const u8 = &.{},
+    /// Sent when neither the CLI nor the profile names an effort. Null means
+    /// "send nothing" (provider default).
+    default_effort: ?[]const u8 = null,
+    context_window: ?u64 = null,
 };
 
 pub const Provider = struct {
@@ -112,6 +147,8 @@ pub const Extensions = struct {
 pub const Config = struct {
     arena: std.heap.ArenaAllocator,
     provider: Provider = .{},
+    /// The `[[models]]` catalog, merged by `id` across trusted layers.
+    models: []ModelParams = &.{},
     registry: Registry = .{},
     policy: Policy = .{},
     environment: Environment = .{},
@@ -130,10 +167,31 @@ pub const Config = struct {
     fn arenaAlloc(self: *Config) std.mem.Allocator {
         return self.arena.allocator();
     }
+
+    pub fn findModel(self: *const Config, id: []const u8) ?ModelParams {
+        for (self.models) |m| {
+            if (std.mem.eql(u8, m.id, id)) return m;
+        }
+        return null;
+    }
+
+    /// The effort a session runs with when its driver names none: the profile's
+    /// override first, then the catalog default for the model id, else nothing
+    /// (provider default). Both inputs are what a session header carries
+    /// (`model` = profile name, `model_identity.model` = model id), so a step
+    /// can re-derive this without the config being frozen.
+    pub fn defaultEffort(self: *const Config, profile_name: []const u8, model_id: []const u8) ?[]const u8 {
+        if (self.provider.findProfile(profile_name)) |p| {
+            if (p.effort) |e| return e;
+        }
+        if (self.findModel(model_id)) |m| return m.default_effort;
+        return null;
+    }
 };
 
 const RawConfig = struct {
     provider: ?RawProvider = null,
+    models: ?[]const RawModelParams = null,
     registry: ?RawRegistry = null,
     policy: ?RawPolicy = null,
     environment: ?RawEnvironment = null,
@@ -150,10 +208,19 @@ const RawProviderProfile = struct {
     name: ?[]const u8 = null,
     kind: ?ProviderKind = null,
     model: ?[]const u8 = null,
+    models: ?[]const []const u8 = null,
     base_url: ?[]const u8 = null,
     api_key_env: ?[]const u8 = null,
     api_key: ?[]const u8 = null,
     effort: ?[]const u8 = null,
+};
+
+const RawModelParams = struct {
+    id: ?[]const u8 = null,
+    label: ?[]const u8 = null,
+    efforts: ?[]const []const u8 = null,
+    default_effort: ?[]const u8 = null,
+    context_window: ?u64 = null,
 };
 
 const RawRegistry = struct {
@@ -204,12 +271,30 @@ pub fn load(alloc: std.mem.Allocator, io: std.Io, host_env: *const std.process.E
         defer alloc.free(source);
         try mergeToml(&cfg, source, .trusted);
     }
-    if (try readFileMaybe(alloc, io, ".nulya/config.toml")) |source| {
+    if (try readFileMaybe(alloc, io, project_config_path)) |source| {
         defer alloc.free(source);
         try mergeToml(&cfg, source, .project);
     }
 
     return cfg;
+}
+
+test "user config lives at ~/.nulya/config.toml, NULYA_HOME relocates it" {
+    const alloc = std.testing.allocator;
+    var env: std.process.Environ.Map = .init(alloc);
+    defer env.deinit();
+    try env.put("HOME", if (builtin.os.tag == .windows) "C:\\Users\\me" else "/home/me");
+    try env.put("USERPROFILE", "C:\\Users\\me");
+
+    var paths = try ConfigPaths.init(alloc, &env);
+    const expect_user = if (builtin.os.tag == .windows) "C:\\Users\\me\\.nulya\\config.toml" else "/home/me/.nulya/config.toml";
+    try std.testing.expectEqualStrings(expect_user, paths.user);
+    paths.deinit(alloc);
+
+    try env.put("NULYA_HOME", if (builtin.os.tag == .windows) "D:\\alt" else "/alt");
+    paths = try ConfigPaths.init(alloc, &env);
+    try std.testing.expectEqualStrings(if (builtin.os.tag == .windows) "D:\\alt\\config.toml" else "/alt/config.toml", paths.user);
+    paths.deinit(alloc);
 }
 
 const LayerKind = enum { trusted, project };
@@ -234,6 +319,8 @@ fn mergeTrusted(cfg: *Config, raw: RawConfig) !void {
         if (provider.active_profile) |name| cfg.provider.active_profile = try arena.dupe(u8, name);
         if (provider.profiles) |profiles| for (profiles) |profile| try upsertProfile(cfg, profile);
     }
+
+    if (raw.models) |models| for (models) |model| try upsertModel(cfg, model);
 
     if (raw.registry) |registry| {
         if (registry.max_tools) |max_tools| cfg.registry.max_tools = max_tools;
@@ -266,7 +353,9 @@ fn mergeProject(cfg: *Config, raw: RawConfig) !void {
     if (raw.provider) |provider_cfg| {
         // Project config may select a trusted profile, but it may not define or
         // mutate profiles: base_url/api_key_env in a checkout are a secret and
-        // request-routing boundary.
+        // request-routing boundary. The `[[models]]` catalog is likewise trusted
+        // layers only — a checkout should not be able to change what a model id
+        // means to the picker or which effort a session silently defaults to.
         if (provider_cfg.active_profile) |name| {
             if (cfg.provider.findProfile(name) != null) cfg.provider.active_profile = try arena.dupe(u8, name);
         }
@@ -315,10 +404,37 @@ fn upsertProfile(cfg: *Config, raw: RawProviderProfile) !void {
 fn mergeProfileFields(arena: std.mem.Allocator, profile: *ProviderProfile, raw: RawProviderProfile) !void {
     if (raw.kind) |kind| profile.kind = kind;
     if (raw.model) |model| profile.model = try arena.dupe(u8, model);
+    if (raw.models) |models| profile.models = try dupeStringList(arena, models);
     if (raw.base_url) |base_url| profile.base_url = try arena.dupe(u8, base_url);
     if (raw.api_key_env) |api_key_env| profile.api_key_env = try arena.dupe(u8, api_key_env);
     if (raw.api_key) |api_key| profile.api_key = try arena.dupe(u8, api_key);
     if (raw.effort) |effort| profile.effort = try arena.dupe(u8, effort);
+}
+
+/// Merge a `[[models]]` entry by `id`: same id → fields overlay, new id → appended.
+fn upsertModel(cfg: *Config, raw: RawModelParams) !void {
+    const id = raw.id orelse return;
+    const arena = cfg.arenaAlloc();
+
+    for (cfg.models, 0..) |*model, i| {
+        if (std.mem.eql(u8, model.id, id)) {
+            try mergeModelFields(arena, &cfg.models[i], raw);
+            return;
+        }
+    }
+
+    const next = try arena.alloc(ModelParams, cfg.models.len + 1);
+    @memcpy(next[0..cfg.models.len], cfg.models);
+    next[cfg.models.len] = .{ .id = try arena.dupe(u8, id) };
+    try mergeModelFields(arena, &next[cfg.models.len], raw);
+    cfg.models = next;
+}
+
+fn mergeModelFields(arena: std.mem.Allocator, model: *ModelParams, raw: RawModelParams) !void {
+    if (raw.label) |label| model.label = try arena.dupe(u8, label);
+    if (raw.efforts) |efforts| model.efforts = try dupeStringList(arena, efforts);
+    if (raw.default_effort) |effort| model.default_effort = try arena.dupe(u8, effort);
+    if (raw.context_window) |window| model.context_window = window;
 }
 
 fn mergeWeights(weights: *RegistryWeights, raw: RawRegistryWeights) void {
@@ -351,32 +467,48 @@ fn backendStrictness(backend: EnvironmentBackend) u8 {
     };
 }
 
-const ConfigPaths = struct {
+/// The project-layer file, relative to the workspace.
+pub const project_config_path = ".nulya/config.toml";
+
+/// Where the config chain reads from. The user layer is `~/.nulya/config.toml`
+/// on every platform (`%USERPROFILE%\.nulya\config.toml` on Windows) — one
+/// findable place, the same shape as the workspace's own `.nulya/` — and
+/// `NULYA_HOME` relocates that directory wholesale (tests, or a second identity).
+/// The system layer stays where administrators expect it.
+pub const ConfigPaths = struct {
     system: []const u8,
     user: []const u8,
 
-    fn init(alloc: std.mem.Allocator, env: *const std.process.Environ.Map) !ConfigPaths {
-        if (builtin.os.tag == .windows) {
-            const program_data = env.get("ProgramData") orelse "C:\\ProgramData";
-            const app_data = env.get("APPDATA") orelse env.get("AppData") orelse "";
-            return .{
-                .system = try std.fs.path.join(alloc, &.{ program_data, "nulya", "config.toml" }),
-                .user = if (app_data.len == 0) try alloc.dupe(u8, "") else try std.fs.path.join(alloc, &.{ app_data, "nulya", "config.toml" }),
-            };
-        }
-
-        const home = env.get("HOME") orelse "";
+    pub fn init(alloc: std.mem.Allocator, env: *const std.process.Environ.Map) !ConfigPaths {
+        const system = if (builtin.os.tag == .windows)
+            try std.fs.path.join(alloc, &.{ env.get("ProgramData") orelse "C:\\ProgramData", "nulya", "config.toml" })
+        else
+            try alloc.dupe(u8, "/etc/nulya/config.toml");
+        errdefer alloc.free(system);
+        const home = try userHome(alloc, env);
+        defer alloc.free(home);
         return .{
-            .system = try alloc.dupe(u8, "/etc/nulya/config.toml"),
-            .user = if (home.len == 0) try alloc.dupe(u8, "") else try std.fs.path.join(alloc, &.{ home, ".config", "nulya", "config.toml" }),
+            .system = system,
+            .user = if (home.len == 0) try alloc.dupe(u8, "") else try std.fs.path.join(alloc, &.{ home, "config.toml" }),
         };
     }
 
-    fn deinit(self: ConfigPaths, alloc: std.mem.Allocator) void {
+    pub fn deinit(self: ConfigPaths, alloc: std.mem.Allocator) void {
         alloc.free(self.system);
         alloc.free(self.user);
     }
 };
+
+/// `$NULYA_HOME`, else `~/.nulya`. Empty when no home can be found at all.
+/// Caller owns the result.
+pub fn userHome(alloc: std.mem.Allocator, env: *const std.process.Environ.Map) ![]u8 {
+    if (env.get("NULYA_HOME")) |h| {
+        if (h.len != 0) return alloc.dupe(u8, h);
+    }
+    const home = env.get("HOME") orelse env.get("USERPROFILE") orelse "";
+    if (home.len == 0) return alloc.dupe(u8, "");
+    return std.fs.path.join(alloc, &.{ home, ".nulya" });
+}
 
 fn readFileMaybe(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !?[]u8 {
     if (path.len == 0) return null;
@@ -428,6 +560,92 @@ test "default config parses into a usable provider profile" {
     try std.testing.expectEqualStrings("OPENAI_API_KEY", profile.api_key_env);
     try std.testing.expectEqual(@as(u32, 8), cfg.registry.max_tools);
     try std.testing.expectEqual(PolicyHook.auto, cfg.policy.hook);
+}
+
+test "default catalog: every model a built-in profile lists is described, and effort defaults resolve" {
+    var cfg = try loadFromLayers(std.testing.allocator, &.{.{ .source = default_toml }});
+    defer cfg.deinit();
+
+    // A profile's selectable ids all have a catalog entry (a picker never shows
+    // a bare id it cannot describe), and the default is one of them.
+    for (cfg.provider.profiles) |p| {
+        if (p.kind == .scripted) continue;
+        try std.testing.expect(p.defaultModel().len != 0);
+        var default_listed = p.models.len == 0;
+        for (p.models) |id| {
+            try std.testing.expect(cfg.findModel(id) != null);
+            if (std.mem.eql(u8, id, p.defaultModel())) default_listed = true;
+        }
+        try std.testing.expect(default_listed);
+    }
+
+    // DeepSeek thinks by default server-side; the catalog leaves the dial on
+    // "auto" (send nothing) but lists the levels the endpoint accepts.
+    const flash = cfg.findModel("deepseek-v4-flash").?;
+    try std.testing.expect(flash.efforts.len != 0);
+    try std.testing.expectEqualStrings("off", flash.efforts[0]);
+    try std.testing.expect(cfg.defaultEffort("deepseek", "deepseek-v4-flash") == null);
+}
+
+test "[[models]] merge by id and a profile effort overrides the catalog default" {
+    var cfg = try loadFromLayers(std.testing.allocator, &.{
+        .{ .source = default_toml },
+        .{ .source =
+        \\[[models]]
+        \\id = "deepseek-v4-flash"
+        \\default_effort = "high"
+        \\
+        \\[[models]]
+        \\id = "my-local-model"
+        \\label = "Local"
+        \\efforts = ["low", "high"]
+        \\
+        \\[[provider.profiles]]
+        \\name = "deepseek-anthropic"
+        \\effort = "low"
+        \\
+        \\[[provider.profiles]]
+        \\name = "local"
+        \\kind = "openai"
+        \\base_url = "http://localhost:8080/v1"
+        \\api_key_env = "LOCAL_KEY"
+        \\models = ["my-local-model"]
+        },
+    });
+    defer cfg.deinit();
+
+    // Overlay kept the built-in label and added the default effort.
+    const flash = cfg.findModel("deepseek-v4-flash").?;
+    try std.testing.expect(flash.label.len != 0);
+    try std.testing.expectEqualStrings("high", flash.default_effort.?);
+    // Catalog default applies through the profile that lacks its own effort…
+    try std.testing.expectEqualStrings("high", cfg.defaultEffort("deepseek", "deepseek-v4-flash").?);
+    // …and a profile-level effort wins over it.
+    try std.testing.expectEqualStrings("low", cfg.defaultEffort("deepseek-anthropic", "deepseek-v4-flash").?);
+
+    // A new profile with only `models` gets its default from the list.
+    const local = cfg.provider.findProfile("local").?;
+    try std.testing.expectEqualStrings("my-local-model", local.defaultModel());
+    try std.testing.expectEqualStrings("Local", cfg.findModel("my-local-model").?.label);
+    // Unknown ids resolve to "no effort" rather than an error.
+    try std.testing.expect(cfg.defaultEffort("local", "something-else") == null);
+}
+
+test "project layer cannot touch the model catalog" {
+    var cfg = try loadFromLayers(std.testing.allocator, &.{
+        .{ .source = default_toml },
+        .{ .project = true, .source =
+        \\[[models]]
+        \\id = "deepseek-v4-flash"
+        \\default_effort = "max"
+        \\
+        \\[[models]]
+        \\id = "injected"
+        },
+    });
+    defer cfg.deinit();
+    try std.testing.expect(cfg.findModel("deepseek-v4-flash").?.default_effort == null);
+    try std.testing.expect(cfg.findModel("injected") == null);
 }
 
 test "trusted layers override scalars and merge profiles by name" {

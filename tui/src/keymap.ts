@@ -14,6 +14,7 @@ export type Action =
   | "help"
   | "ext"
   | "sessions"
+  | "model"
   | "nextTab"
   | "closeTab"
 
@@ -26,6 +27,7 @@ export const default_keys: Record<Action, string> = {
   help: "f1",
   ext: "f2",
   sessions: "f3",
+  model: "f5",
   nextTab: "f4",
   closeTab: "ctrl+w",
 }

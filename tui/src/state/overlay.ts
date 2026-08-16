@@ -8,7 +8,7 @@
  */
 import { createContext, createSignal, useContext } from "solid-js"
 
-export type OverlayKind = "sessions" | "ext" | "help" | "settings" | "usage"
+export type OverlayKind = "sessions" | "ext" | "help" | "settings" | "usage" | "model"
 
 export interface OverlayStore {
   kind(): OverlayKind | null

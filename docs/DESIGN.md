@@ -375,15 +375,19 @@ Environment { runShell(cmd, dialect) / runExtension(entry, request_json) / diale
 ```
 @embedFile default.toml
   ↓ merge   system   /etc/nulya/config.toml | %ProgramData%\nulya\config.toml
-  ↓ merge   user     ~/.config/nulya/config.toml | %AppData%\nulya\config.toml
+  ↓ merge   user     ~/.nulya/config.toml（Windows：%USERPROFILE%\.nulya\config.toml；`NULYA_HOME` 整体搬走该目录）
   ↓ overlay project  .nulya/config.toml   ← 不可信输入，过 mergeProject 只能收窄
 ```
 
+user 层与 workspace 的 `.nulya/` 同形、每个平台一个好找的位置；`nulya config show` 打印三条路径（JSON `paths`），前端写 key 时写的就是它读的。
+
 标量 set 即胜，列表按 key 合并。project 层**可以更严不能更松**：可 pin 工具、选 profile、调严 policy、调小 K；**不可**关 policy hook、把 backend 从 sandbox 降级 local、注入 `api_key_env` 名字外泄 host env（单测覆盖）。这与 §9 的 `extension_permissions ⊆ session_authority` 是同一个不变量的两面：checkout 一个 repo 不该能拓宽机器权限。
 
-承载：`provider.profiles[]{name, kind=openai|anthropic|codex|scripted, model, base_url, api_key_env, api_key?, effort?}` · `registry{max_tools, pinned_native_tools, weights{uses_recent, uses_total, last_used, success_rate}}` · `policy.hook`（解析、未消费）· `environment{backend, shell}` · `compaction{…}`（解析、未消费）· `extensions.paths`。`default.toml` 自带 `openai` / `anthropic` / `codex` / `deepseek` / `deepseek-anthropic` / `scripted` 六个 profile。
+承载：`provider.profiles[]{name, kind=openai|anthropic|codex|scripted, model, models[]?, base_url, api_key_env, api_key?, effort?}` · `models[]{id, label, efforts[], default_effort?, context_window?}` · `registry{max_tools, pinned_native_tools, weights{uses_recent, uses_total, last_used, success_rate}}` · `policy.hook`（解析、未消费）· `environment{backend, shell}` · `compaction{…}`（解析、未消费）· `extensions.paths`。`default.toml` 自带 `openai` / `anthropic` / `codex` / `deepseek` / `deepseek-anthropic` / `scripted` 六个 profile 与它们列出的每个 model id 的目录条目。
 
-secret 不入文件：config 只持 `api_key_env` 名字，真值留 host env，绝不下传子进程。config 在 session 开始解析成 effective 值一次；磁盘改动下一场生效。`codex` 是唯一例外的形状——它的 credential 不是 env 而是 Codex CLI 的 `auth.json`（`api_key_env` 为空），所以 profile 可用性是**读文件**判断的；secret 同样不进 config、不进 session header。
+**两张表描述模型。** profile 说**怎么连**（kind / base_url / 哪个 env 放 key）和**它服务哪些 model id**（`model` 是默认、`models[]` 是可选列表；`ProviderProfile.defaultModel()`：`model` 非空取它，否则 `models[0]`，否则 provider 内置默认）；`[[models]]` 目录说一个 id **是什么**（label、effort 档位、context window），一个 id 不管经几个端点都只写一次。目录是纯描述：kernel 不读它；`launch` / `cli` 用它给 session 默认 effort（`Config.defaultEffort(profile, model_id)` = profile.effort ?? catalog.default_effort ?? 无），`nulya config show` 把它投影给选择器。`[[models]]` 按 `id` 合并、只认 trusted 层——project 层不能改一个 model id 的含义或让 session 静默换 effort。
+
+**credential 的边界**：secret 不进 session 文件（header 只存 `api_key_env` 的**名字**与 profile 名，每次 step 重新解析）、不进工具子进程的 env（`environment.isSecretKey` 剥掉 `*API_KEY*` 等）、不从 project 层来（checkout 不能定义 profile）。在这三条之内，credential 可以来自两处：profile 自己的 `api_key`（**user 层文件**，`~/.nulya/config.toml`——TUI `/model` 的 `s` 写的就是它）或 `api_key_env` 指的环境变量；`launch.credentialSource` 定顺序 `config > env`（人贴进 nulya 自己文件的 key 应当生效，哪怕还留着一个过期的环境变量）。`codex` 的 credential 是 Codex CLI 的 `auth.json`（读文件判断），与 user 层 `api_key` 同类：本机用户自己的文件。resume 时 `cli.zig` 按 header 的 profile 名从 config 取 `api_key` 交给 `buildFromDescriptor(.inline_key)`，找不到再看 env，都没有 → `MissingCredential`，不静默降级。config 在 session 开始解析成 effective 值一次；磁盘改动下一场生效。**为什么文件里的 key 是必要而不只是方便**：模型自己 `nulya session new`（sub-agent 自调用）时它的 shell env 已被剥掉所有 key，能让子 session 跑起来的只有 kernel 自己读得到的文件。
 
 ---
 
@@ -422,13 +426,13 @@ ProviderCapabilities { parallel_tool_calls, deferred_tools, explicit_cache_break
 
 - Provider 在 generation 稳定的块边界放 / 声明 cache breakpoint（tools 之后、system 之后、最后一条稳定消息之后）。
 - Provider 只能优化序列化，不能破坏 §1 的块前缀不变量。
-- **reasoning 回放是 provider 的事，形状是 provider 的。** `thinking_delta` 只供展示，collector 不留；`reasoning_item` 是一个**完整**的 reasoning item（provider 自家 wire 形状的一个 JSON 值），item 凑齐时才发，`TurnCollector` 原样收进 `ModelTurn.reasoning`（`[item,…]`），loop 落进 `assistant.reasoning`（§3.1）。投影出的 `reasoning` block 只有声明 `thinking_replay` 的 provider 才序列化（`wire.writeReasoningItems` 把数组拆回一个个值，容器由 provider 决定），其余 provider 跳过。`anthropic`：`thinking` block 的文本与 signature 以 delta 到达、`content_block_stop` 时整块发出，`redacted_thinking` 到达即整块发出；回放时放在同一条 assistant message 最前、`tool_use` 之前，breakpoint 不落在 thinking block 上。`codex`：请求带 `include:["reasoning.encrypted_content"]`，`response.output_item.done` 的 `reasoning` item 只在含 `encrypted_content` 时整个发出（没有它的 item 在 `store:false` 下回放不了），回放为 `function_call` 之前的 input item。`openai`（chat/completions）不发也不回放。
+- **reasoning 回放是 provider 的事，形状是 provider 的。** `thinking_delta` 只供展示，collector 不留；`reasoning_item` 是一个**完整**的 reasoning item（provider 自家 wire 形状的一个 JSON 值），item 凑齐时才发，`TurnCollector` 原样收进 `ModelTurn.reasoning`（`[item,…]`），loop 落进 `assistant.reasoning`（§3.1）。投影出的 `reasoning` block 只有声明 `thinking_replay` 的 provider 才序列化（`wire.writeReasoningItems` 把数组拆回一个个值，容器由 provider 决定），其余 provider 跳过。`anthropic`：`thinking` block 的文本与 signature 以 delta 到达、`content_block_stop` 时整块发出，`redacted_thinking` 到达即整块发出；回放时放在同一条 assistant message 最前、`tool_use` 之前，breakpoint 不落在 thinking block 上。`codex`：请求带 `include:["reasoning.encrypted_content"]`，`response.output_item.done` 的 `reasoning` item 只在含 `encrypted_content` 时整个发出（没有它的 item 在 `store:false` 下回放不了），回放为 `function_call` 之前的 input item。`openai`（chat/completions）：OpenAI 自家端点没有可回放的 reasoning，不发不回放；**DeepSeek 端点**（`base_url` 含 `deepseek.com`，`thinking_replay` 为真）把本轮流式到达的 `reasoning_content` 在 `[DONE]` 前拼成**一个** item `{"reasoning_content":"…"}` 发出，回放时只挂在**带 `tool_calls`** 的 assistant message 上（同名字段）——DeepSeek 文档明写：两条 user 之间若有 tool call，其间 assistant 的 `reasoning_content` 必须原样传回，否则 400；无 tool call 的轮次传回也会被忽略，所以不挂。
 
 ### 13.1 四个已实现的 provider
 
 | id | 端点 | cache 机制 | 备注 |
 |---|---|---|---|
-| `openai` | chat/completions（OpenAI / DeepSeek / 任意兼容端点） | implicit prefix | 读 `prompt_tokens_details.cached_tokens` 或 `prompt_cache_hit_tokens` |
+| `openai` | chat/completions（OpenAI / DeepSeek / 任意兼容端点） | implicit prefix | 读 `prompt_tokens_details.cached_tokens` 或 `prompt_cache_hit_tokens`；effort：`off` 在 DeepSeek 发 `thinking:{type:"disabled"}`（它默认开 thinking）、别处什么都不发，其余档位是 `reasoning_effort`；`max_tokens` 不主动发（DeepSeek 的 reasoning 和答案共用这个上限） |
 | `anthropic` | Messages `/v1/messages`（含 DeepSeek `/anthropic`） | **explicit breakpoints** | 读 `cache_read_input_tokens` / `cache_creation_input_tokens` |
 | `codex` | `chatgpt.com/backend-api/codex/responses`（ChatGPT 订阅） | implicit prefix，按 `session_id` 分域 | OAuth 走 `~/.codex/auth.json`，401 自动 refresh 并回写 |
 | `scripted` | 无 | 无 | demo / 测试用的确定性 stand-in |
@@ -458,16 +462,22 @@ nulya ext init [--script] <id> [tool] | build <path>
           | run <id> [tool] (<json-args> | --arg k=v …)
           | activate <id> <version> | rollback <id> <version> | deactivate <id>
           | list | inspect <id> | api [protocol|permissions|examples]
-nulya session new [--model p] [--parent <id>:<seq>]      ← 冻结 composition + 写 header，打印 session id
+nulya session new [--profile P] [--model ID] [--parent <id>:<seq>]
+                                                         ← 冻结 composition + 模型身份、写 header，打印 session id
           | append <id> <text|--file f>                  ← 把一条 user turn 投进 inbox（下一 step 边界进 ledger）
-          | step <id> [--max-steps N] [--stream]         ← 跑到本 turn 结束或预算耗尽；stdout = 本次 append 的事件 JSONL（`--stream` 见下）
+          | step <id> [--max-steps N] [--effort E] [--stream]
+                                                         ← 跑到本 turn 结束或预算耗尽；stdout = 本次 append 的事件 JSONL（`--stream` 见下）
           | events <id> [--since N] [--follow]           ← 只读 tail 原始事件行（follow 轮询）
           | cancel <id>                                  ← 写 cancel 标记，下一 step 边界消化
+nulya config show [--json]                               ← 有效配置链的投影：profiles（含 credential 是否可用）+ 模型目录；无 secret
 nulya src [path] [--tests]                               ← 打印本二进制内嵌的 src 源码（无参数 = 列全树）
 nulya skill list | load <pinned-ref>
 nulya toolchain zig <args…>
 nulya                       ← 无参数：固定 prompt demo（现经 durable session 路径跑，§3.4）
 ```
+
+- `session new --profile P [--model ID]`：`--profile` 是 config 里的 profile 名（默认 `active_profile`），`--model` 是该 profile 服务的一个 model id（默认 `ProviderProfile.defaultModel()`；接受任意 id，选择器只列目录里的）。不存在的 profile 直接拒绝（exit 1，提示 `nulya config show`）；存在但 credential 不可用的 profile 仍冻结为 scripted（离线替身，`resolveDescriptor` 的语义不变），但 stderr 明说。`session step --effort E` 是**每次 step 的 generation option**（不是身份，§3）：不给则用 `Config.defaultEffort(header.model, header.model_identity.model)`。
+- `nulya config show [--json]`：外壳级投影（同 `session new` 看到的东西），供选择器与 agent 自查：`{paths{system, user, project}, active_profile, profiles[]{name, kind, base_url, api_key_env, credential: bool, credential_source: config|env|login|builtin|none, model, models[], effort?}, models[]{id, label, efforts[], default_effort?, context_window?}}`。只报 env var **名字**、来源与布尔，永不报值；`api_key` 的值不出现。
 
 - `nulya src`：build.zig 把整个 `src/**` `@embedFile` 进二进制（源码 ~200KB，紧挨 ~90MB 工具链，恒开无 gate）；`nulya src <path>` 按 `src/` 相对路径打印（`prompt.zig`、`extension/store.zig`），**默认剥 top-level `test` 块**（读结构/契约时不付测试 token），`--tests`/`--raw` 打印原样（Zig 风格参照）。剥离靠 zig-fmt 不变量：顶层 decl 的收尾 `}` 在第 0 列，无需 tokenizer（`source.zig`）。测试留在文件里（Zig 惯例、人可读、风格参照），改的只是**投影**不是**存储**——`src/` 一字未动。
 - `nulya ext api`：协议 topic 现在**打印真实 `extension/protocol.zig` 源码**（是 `nulya src` 的特例），wire ABI 与实现代码零漂移；`permissions` / `examples` 仍是短说明（策略与 CLI 用法，不随代码漂）。
