@@ -90,7 +90,7 @@ Ledger ──projection──▶ PromptIR { system_blocks, stable_blocks }
 
 ```
 user_text        []const u8
-assistant        { reasoning, text, calls: []ToolCall{id, tool, args_json} }
+assistant        { reasoning, text, calls: []ToolCall{id, tool, args_json}, usage? }
 tool_results     []ToolResultEntry{call_id, ok, output, spill_path?}   ← 一条事件 = 一整批
 capability_note  { id, version, text }                                  ← 中途新增能力的宣告（§5.3）
 ```
@@ -98,6 +98,8 @@ capability_note  { id, version, text }                                  ← 中�
 事件字母表**可加不可改**：现有四种保留原字段。`seq` 是文件落盘时的 envelope 字段（§3.4），不属于事件负载。
 
 **`assistant.reasoning` 是不透明字段，不是第五种事件。** 它是 provider 原样吐出的本轮 reasoning item 的 JSON 数组（Anthropic 的带 signature 的 `thinking` / `redacted_thinking` block、Responses 的带 `encrypted_content` 的 `reasoning` item），没有则为 `""`。它是本轮的**事实**（模型确实产出了这段、且下一步要原样带回），不是模型可见文本：kernel 从不解析它，投影成一个 `reasoning` block 交回 provider，provider 只在自己认得（`ProviderCapabilities.thinking_replay`）时按原样回放到**同一个模型**——它天然 model-locked，而 session 的 `model_identity` 已冻结（§3.4），所以别的模型永远看不到它。为什么必须有它：Anthropic 一方端点在 thinking 开着时**拒绝**丢了 thinking block 的 tool-use turn（400，而 Opus 5 默认开、Fable 5 只能开），Responses 端点不带则模型每一步重推上一步的计划——前者是正确性，后者是质量与 token；两者都不是 kernel 该替 provider 决定的，kernel 只负责把这个事实存住、按序交回。落盘时只在非空才写 `reasoning` 字段（老行形状不变，老行读回为 `""`）。
+
+**`assistant.usage` 与 `reasoning` 同地位：本轮的事实，不投影。** `?Usage{input_tokens, output_tokens, cache_read_tokens, cache_write_tokens}`（`ledger.Usage`；`provider.Usage` 就是它的 re-export，provider 本来就 import ledger——一个 struct 贯穿到底，loop 不做转换），由 `loop.zig` 从 `ModelTurn.usage` 写入。落盘只在**非空**时写 `usage` 对象：provider 什么都没报（scripted 替身、流中途取消）时整条不写，老行读回 `null`——"没记录"与"花了 0"是两个不同的事实。**prompt.zig 不投影它**：模型不读自己的账单；它是给慢速回路与前端的成本证据（`session events` / `--stream` 的 ledger 行天然带上，`session list --json` 按它求和）。provider 阶段就被取消的 step 没有 assistant 事件可挂，其 usage 不落盘——诚实接受，不为它造新事件。
 
 ### 3.2 API（硬性）
 
@@ -107,7 +109,14 @@ capability_note  { id, version, text }                                  ← 中�
 
 ### 3.3 派生视图
 
-UI / trajectory / metrics 是 ledger 的投影，不持久化 mutable 状态。**工具使用统计走另一条日志**（`.nulya/tool-usage.jsonl`，§5.5）——`nulya ext run` 在没有对话的纯 CLI 调用里也会产生 usage 事实，塞进 conversation ledger 会污染 prompt 前缀。原则相同：**persist facts, derive stats**。
+UI / trajectory / metrics 是 ledger 的投影，不持久化 mutable 状态。**证据走 ledger 之外的 journal**，共两条，都是 append-only JSONL、都在 `.nulya/` 下、共用同一套文件纪律（`journal.zig`：一行一条、append 前修残尾、文件不存在 = 还没有事实；schema 各自持有）：
+
+| journal | 一行 | 谁写 | 为什么不是 ledger 事件 |
+|---|---|---|---|
+| `.nulya/tool-usage.jsonl`（§5.5） | `{"v":1,"tool_id":…,"ok":…}` | session 每个 completed step；`nulya ext run` | 纯 CLI 调用没有对话，塞进 ledger 会污染 prompt 前缀 |
+| `.nulya/session-outcomes.jsonl` | `{"v":1,"session":"s-…","verdict":"success\|partial\|failure","note":…?,"at":"<RFC3339 UTC>"}` | 人经 `nulya session outcome`（§14） | session 尾往往没有下一个 step 来排干 inbox；verdict 是**关于**这场 session 的判断、不是其中一轮；不给 `prompt.zig` 开"存了但不投影"的事件种类 |
+
+原则相同：**persist facts, derive stats**。outcome 的三条语义：**没有行 = unknown ≠ failure**；同一 session 可多行，**最后一条作数**（纠正也是 append，`outcome.latestFor`）；**不记 `source`**——今天只有人写，将来 driver 自动记时再加字段，届时"无 `source` 的 v1 行 = 人评"。`session outcome` 不碰 session 文件、不拿 `<id>.lock`，所以正在被 `step` 的 session 也能当场评。
 
 ### 3.4 Durable session 文件（generation == 文件）
 
@@ -116,12 +125,12 @@ UI / trajectory / metrics 是 ledger 的投影，不持久化 mutable 状态。*
 ```jsonl
 {"kind":"header","v":1,"session":"s-…","parent":{"session":"s-…","seq":41}|null,"model":"openai","model_identity":{"provider":"openai","model":"gpt-4o-mini","base_url":"https://…","api_key_env":"OPENAI_API_KEY"},"created":"…","composition":{"active":[{"id":"web.search","version":"v-…"}],"native_tools":["ext:web.search/web_search"]}}
 {"seq":1,"origin":"msg-….json","kind":"user_text","text":"…"}
-{"seq":2,"kind":"assistant","reasoning":"[{\"type\":\"thinking\",…}]","text":"…","calls":[{"id":"…","tool":"…","args":"…"}]}
+{"seq":2,"kind":"assistant","reasoning":"[{\"type\":\"thinking\",…}]","text":"…","calls":[{"id":"…","tool":"…","args":"…"}],"usage":{"input_tokens":1200,"output_tokens":80,"cache_read_tokens":1100,"cache_write_tokens":0}}
 {"seq":3,"kind":"tool_results","results":[{"call_id":"…","ok":true,"output":"…","spill_path":null}]}
 {"seq":4,"origin":"note-….json","kind":"capability_note","id":"…","version":"…","text":"…"}
 ```
 
-（`origin` 只出现在经 inbox 排干进来的事件行上，是投递去重列，绝不投影给模型；见"单写者"条。`reasoning` 只在该 turn 有 reasoning 时出现，值是 provider 数组转义成的一个 JSON 字符串——ledger 只存不解析。）
+（`origin` 只出现在经 inbox 排干进来的事件行上，是投递去重列，绝不投影给模型；见"单写者"条。`reasoning` 只在该 turn 有 reasoning 时出现，值是 provider 数组转义成的一个 JSON 字符串——ledger 只存不解析；`usage` 只在 provider 报了成本时出现，两者都不投影。）
 
 - **一个文件 = 一个 generation = 一个 cache scope。** 文件只 append，所以 PromptIR 的 stable-block 前缀不变量（§1）成了文件系统性质。没有会 bump generation 的事件（§11）。
 - **header 的 JSON 形状就是 `ledger.Header` 结构体**（`std.json` 类型化编解码，`OwnedHeader = std.json.Parsed(Header)`）；读端忽略未知字段，所以新写者多出的字段不破坏旧读者。事件行保持平铺的 `kind` 形状（driver 读起来方便），解码经 `WireEvent`。
@@ -261,10 +270,26 @@ Extension = 子进程；wire protocol 就是 ABI。不用 `.so/.dll`（ABI / Zig
 
 `nulya ext init --script` 按宿主平台生成脚本骨架（Windows `run.ps1` + powershell / 其余 `run.sh` + sh）。脚本与编译 extension 共用 seal / integrity / store / activate / rollback / usage，区别只在"是否编译"和 hash 是否含 compiler。
 
-### 7.2 目录与 manifest（`nulya.extension/v2`）
+### 7.2 Store roots：搜索顺序（首个 active 持有者胜）
+
+extension 装在**多个 store root** 里，按固定顺序搜索（`store.Roots`）：
+
+| # | root | 谁写 | 备注 |
+|---|---|---|---|
+| ① | workspace `.nulya/extensions` | 默认 | 一个 checkout 自己的能力 |
+| ② | user `<NULYA_HOME \| ~/.nulya>/extensions` | `--user` | 造一次、每个 workspace 都有 |
+| ③ | `extensions.paths`（**只认 trusted 层**，§9.5） | operator | project 层写了也忽略 |
+
+- **同一个 id 在多个 root → 首个持有 active 版本（有 `current`）的 root 胜**（workspace 遮蔽 user）。"持有"看 `current` 不看目录：一个只有 `<id>/` 目录、没有 `current` 的 root（draft、或已 `deactivate` 的副本）**不参与遮蔽**——否则在 workspace `deactivate` 会静默藏起 user 那份而不是让它生效。同一定义贯穿 `Roots.listActive`（composition / `skill list`）、`Roots.firstActive`（`ext run`、`--with` 不带版本、`ext deactivate` 的落点）与 `ext list` 的 `(shadowed)` 标记；`ext deactivate` 作用于生效的那份，若因此让后面 root 的副本顶上来会打印一行 note。
+- **frozen 版本按 root 顺序找**（`initFrozen`、`skill load` 的 pinned ref、`ext run` 的 entry）：version 是内容寻址的，哪个 root 的副本都是同一字节、integrity 照验，所以顺序只决定"在哪找到"，从不决定"跑什么"。
+- **header 不记 root**（`active` 仍是 `{id, version}`）：记了就等于把一台机器的目录布局冻进会话，而那与"跑的是哪份字节"无关。
+- 不存在的 root 是**缺席**不是错误（多数机器没有 user store）；写端（`ext init --user` / `ext build --user`）需要时才创建。
+- **为什么 project 层不能加 root**：一个 root 决定"这台机器上哪些目录可以供出 `current`"，即哪些代码可以被跑起来——checkout 能加就是拓宽权限，正是 §9.5 "只能收窄"禁止的事。
+
+### 7.2.1 目录与 manifest（`nulya.extension/v2`）
 
 ```
-.nulya/extensions/<id>/          ← draft（可变）
+<store root>/<id>/               ← draft（可变）
 ├── extension.json
 ├── src/main.zig                 ← 有 runtime 时
 └── skills/<name>/SKILL.md       ← 声明的 skill 目录
@@ -311,6 +336,7 @@ draft ──build──▶ versions/v-<hash>（immutable）──activate──�
 ```
 
 - **version id = `hash(canonical PackageSnapshot + compiler_identity + target)`，其中 `compiler_identity` 与 `target` 只对 compiled extension 非空。** 三种 implementation kind（`manifest.ImplementationKind`）决定什么进身份：`data`（无 runtime，纯 skill / system_prompt）与 `script`（`src/…` 冻结即跑、不编译）都是**纯 snapshot 身份**，`compiler_identity = target = ""`，因此跨平台稳定、**建时根本不需要 zig**；只有 `compiled`（`bin/…` 由 Zig 编出，二进制依赖编译器与 host target）才把两者算进 hash。snapshot 收 `extension.json`、有 runtime 时的 `src/**`、声明的 skills / system_prompts 目录，按 `relative_path + len + bytes` 排序 hash；`versions/`、`.zig-cache/` 不进。（seal.json 仍记录 host / compiler / target 作为诊断元数据——metadata ≠ identity。）
+- **落点由 manifest id + store root 决定，不由 draft 路径决定**：`nulya ext build <path> [--user]` 把版本写进 `<store root>/<manifest.id>/versions/<v>`。root 的选择：`--user` → user root；否则 draft 若在某个 store root 之内 → 该 root（所以 `.nulya/extensions/<id>` 的 draft 建出来的位置与从前逐字节相同）；否则 → workspace root。这让 draft 可以待在任意路径（仓库里 git 管着的 `extensions/…`、`modes/…`），建出来的版本 `activate` 找得到，而不是在源码旁留下一个孤儿 `versions/`。编译进程的 cwd 就是 dest root（frozen source 与 `-femit-bin` 都在版本目录内），所以绝对路径的 user root 不需要给 `std.Io.Dir` 传绝对 sub_path。
 - 版本目录冻结 snapshot：编译 extension 得 `versions/v-…/{extension.json, package/src/**, package/skills/**, bin/<entry><exe>}` + seal（含 `binary_digest`）；**编译从 frozen `package/src/main.zig` 进行**，不读 mutable draft。脚本 extension 得 `versions/v-…/{extension.json, package/src/**, …}` + seal（`binary_digest` = null；脚本已在 `package/src/` 里被 package_digest 覆盖），运行入口 = `package/<entry>`。同源码再 build = 同 version，`already_built`。
 - `current` 是普通文本文件（不是 symlink：Windows 需特权且无收益），原子 rename 切换。
 - 更新 = build 新版本 → activate；rollback = `current = old`。B 挂了 A 完全不动。
@@ -375,15 +401,19 @@ Environment { runShell(cmd, dialect) / runExtension(entry, request_json) / diale
 ```
 @embedFile default.toml
   ↓ merge   system   /etc/nulya/config.toml | %ProgramData%\nulya\config.toml
-  ↓ merge   user     ~/.config/nulya/config.toml | %AppData%\nulya\config.toml
+  ↓ merge   user     ~/.nulya/config.toml（Windows：%USERPROFILE%\.nulya\config.toml；`NULYA_HOME` 整体搬走该目录）
   ↓ overlay project  .nulya/config.toml   ← 不可信输入，过 mergeProject 只能收窄
 ```
 
+user 层与 workspace 的 `.nulya/` 同形、每个平台一个好找的位置；`nulya config show` 打印三条路径（JSON `paths`），前端写 key 时写的就是它读的。
+
 标量 set 即胜，列表按 key 合并。project 层**可以更严不能更松**：可 pin 工具、选 profile、调严 policy、调小 K；**不可**关 policy hook、把 backend 从 sandbox 降级 local、注入 `api_key_env` 名字外泄 host env（单测覆盖）。这与 §9 的 `extension_permissions ⊆ session_authority` 是同一个不变量的两面：checkout 一个 repo 不该能拓宽机器权限。
 
-承载：`provider.profiles[]{name, kind=openai|anthropic|codex|scripted, model, base_url, api_key_env, api_key?, effort?}` · `registry{max_tools, pinned_native_tools, weights{uses_recent, uses_total, last_used, success_rate}}` · `policy.hook`（解析、未消费）· `environment{backend, shell}` · `compaction{…}`（解析、未消费）· `extensions.paths`。`default.toml` 自带 `openai` / `anthropic` / `codex` / `deepseek` / `deepseek-anthropic` / `scripted` 六个 profile。
+承载：`provider.profiles[]{name, kind=openai|anthropic|codex|scripted, model, models[]?, base_url, api_key_env, api_key?, effort?}` · `models[]{id, label, efforts[], default_effort?, context_window?}` · `registry{max_tools, pinned_native_tools, weights{uses_recent, uses_total, last_used, success_rate}}` · `policy.hook`（解析、未消费）· `environment{backend, shell}` · `compaction{…}`（解析、未消费）· `extensions.paths`（**已被消费**：§7.2 的第三档 store root，**只认 trusted 层**——project 层写了直接忽略，单测覆盖）。`default.toml` 自带 `openai` / `anthropic` / `codex` / `deepseek` / `deepseek-anthropic` / `scripted` 六个 profile 与它们列出的每个 model id 的目录条目。
 
-secret 不入文件：config 只持 `api_key_env` 名字，真值留 host env，绝不下传子进程。config 在 session 开始解析成 effective 值一次；磁盘改动下一场生效。`codex` 是唯一例外的形状——它的 credential 不是 env 而是 Codex CLI 的 `auth.json`（`api_key_env` 为空），所以 profile 可用性是**读文件**判断的；secret 同样不进 config、不进 session header。
+**两张表描述模型。** profile 说**怎么连**（kind / base_url / 哪个 env 放 key）和**它服务哪些 model id**（`model` 是默认、`models[]` 是可选列表；`ProviderProfile.defaultModel()`：`model` 非空取它，否则 `models[0]`，否则 provider 内置默认）；`[[models]]` 目录说一个 id **是什么**（label、effort 档位、context window），一个 id 不管经几个端点都只写一次。目录是纯描述：kernel 不读它；`launch` / `cli` 用它给 session 默认 effort（`Config.defaultEffort(profile, model_id)` = profile.effort ?? catalog.default_effort ?? 无），`nulya config show` 把它投影给选择器。`[[models]]` 按 `id` 合并、只认 trusted 层——project 层不能改一个 model id 的含义或让 session 静默换 effort。
+
+**credential 的边界**：secret 不进 session 文件（header 只存 `api_key_env` 的**名字**与 profile 名，每次 step 重新解析）、不进工具子进程的 env（`environment.isSecretKey` 剥掉 `*API_KEY*` 等）、不从 project 层来（checkout 不能定义 profile）。在这三条之内，credential 可以来自两处：profile 自己的 `api_key`（**user 层文件**，`~/.nulya/config.toml`——TUI `/model` 的 `s` 写的就是它）或 `api_key_env` 指的环境变量；`launch.credentialSource` 定顺序 `config > env`（人贴进 nulya 自己文件的 key 应当生效，哪怕还留着一个过期的环境变量）。`codex` 的 credential 是 Codex CLI 的 `auth.json`（读文件判断），与 user 层 `api_key` 同类：本机用户自己的文件。resume 时 `cli.zig` 按 header 的 profile 名从 config 取 `api_key` 交给 `buildFromDescriptor(.inline_key)`，找不到再看 env，都没有 → `MissingCredential`，不静默降级。config 在 session 开始解析成 effective 值一次；磁盘改动下一场生效。**为什么文件里的 key 是必要而不只是方便**：模型自己 `nulya session new`（sub-agent 自调用）时它的 shell env 已被剥掉所有 key，能让子 session 跑起来的只有 kernel 自己读得到的文件。
 
 ---
 
@@ -398,7 +428,15 @@ secret 不入文件：config 只持 `api_key_env` 名字，真值留 host env，
 
 ## 11. Compaction 与 generation
 
-**现状：无 compaction。** **generation == ledger 文件**（§3.4）：一个文件只 append、只一个 generation，所以前缀不变量是文件系统性质，没有会 bump generation 的事件，`prompt.currentGeneration()` 已删除（`Request.generation` 处直接传 0）。`compaction.*` config 键能解析但无人消费。compaction = 开新文件（`--parent` 指向旧文件与切分点）见 PLAN §3.4。
+**generation == ledger 文件**（§3.4）：一个文件只 append、只一个 generation，所以前缀不变量是文件系统性质，没有会 bump generation 的事件，`prompt.currentGeneration()` 已删除（`Request.generation` 处直接传 0）。
+
+**内核提供的是 fork，不是 compaction。** 没有"替换历史"的动词，也不会长出一个——ledger 只 append（physics §1），没有东西能 rewrite model-visible 状态（physics §3）。所以压缩不是编辑而是**分叉**：开一个新文件，header 的 `parent` 记下旧文件与切分点，摘要作为新文件的第一条 turn 进去；旧文件原封不动留在盘上。内核在这条路径上只保证三件事（`cli.zig` 的 `session new`，§14）：
+
+1. **parent 必须存在。** 指向虚空的 lineage 不是 provenance——读不到父 header 就 exit 1，不建文件。
+2. **不点名模型时继承父的冻结身份**（`model` profile 名 + `model_identity` 原样）。压缩是同一场对话换个文件，不该因为 `active_profile` 期间漂了就换了说话对象。`--profile` / `--model` 任一给出即按今天的 config 重新解析（分叉到别的模型是合法用法）。
+3. **composition 不继承**，照常从 config 现解。新 session 正是 promotion 与新 activate 版本该生效的地方（§5.5、§7.5），而 fork 就是一个 session 边界。
+
+**何时压、压成什么，都不在内核里。** 前者是 policy（`compaction.max_input_tokens` 等 config 键能解析，内核不消费），后者是模型的判断。两者都由 driver 用现成的 `session append` / `session step` / `session new --parent` 组合出来——TUI 的 `/compact` 是第一个 consumer（tui.md §11），内核既不知道也不关心发生过一次压缩。
 
 ---
 
@@ -422,13 +460,13 @@ ProviderCapabilities { parallel_tool_calls, deferred_tools, explicit_cache_break
 
 - Provider 在 generation 稳定的块边界放 / 声明 cache breakpoint（tools 之后、system 之后、最后一条稳定消息之后）。
 - Provider 只能优化序列化，不能破坏 §1 的块前缀不变量。
-- **reasoning 回放是 provider 的事，形状是 provider 的。** `thinking_delta` 只供展示，collector 不留；`reasoning_item` 是一个**完整**的 reasoning item（provider 自家 wire 形状的一个 JSON 值），item 凑齐时才发，`TurnCollector` 原样收进 `ModelTurn.reasoning`（`[item,…]`），loop 落进 `assistant.reasoning`（§3.1）。投影出的 `reasoning` block 只有声明 `thinking_replay` 的 provider 才序列化（`wire.writeReasoningItems` 把数组拆回一个个值，容器由 provider 决定），其余 provider 跳过。`anthropic`：`thinking` block 的文本与 signature 以 delta 到达、`content_block_stop` 时整块发出，`redacted_thinking` 到达即整块发出；回放时放在同一条 assistant message 最前、`tool_use` 之前，breakpoint 不落在 thinking block 上。`codex`：请求带 `include:["reasoning.encrypted_content"]`，`response.output_item.done` 的 `reasoning` item 只在含 `encrypted_content` 时整个发出（没有它的 item 在 `store:false` 下回放不了），回放为 `function_call` 之前的 input item。`openai`（chat/completions）不发也不回放。
+- **reasoning 回放是 provider 的事，形状是 provider 的。** `thinking_delta` 只供展示，collector 不留；`reasoning_item` 是一个**完整**的 reasoning item（provider 自家 wire 形状的一个 JSON 值），item 凑齐时才发，`TurnCollector` 原样收进 `ModelTurn.reasoning`（`[item,…]`），loop 落进 `assistant.reasoning`（§3.1）。投影出的 `reasoning` block 只有声明 `thinking_replay` 的 provider 才序列化（`wire.writeReasoningItems` 把数组拆回一个个值，容器由 provider 决定），其余 provider 跳过。`anthropic`：`thinking` block 的文本与 signature 以 delta 到达、`content_block_stop` 时整块发出，`redacted_thinking` 到达即整块发出；回放时放在同一条 assistant message 最前、`tool_use` 之前，breakpoint 不落在 thinking block 上。`codex`：请求带 `include:["reasoning.encrypted_content"]`，`response.output_item.done` 的 `reasoning` item 只在含 `encrypted_content` 时整个发出（没有它的 item 在 `store:false` 下回放不了），回放为 `function_call` 之前的 input item。`openai`（chat/completions）：OpenAI 自家端点没有可回放的 reasoning，不发不回放；**DeepSeek 端点**（`base_url` 含 `deepseek.com`，`thinking_replay` 为真）把本轮流式到达的 `reasoning_content` 在 `[DONE]` 前拼成**一个** item `{"reasoning_content":"…"}` 发出，回放时只挂在**带 `tool_calls`** 的 assistant message 上（同名字段）——DeepSeek 文档明写：两条 user 之间若有 tool call，其间 assistant 的 `reasoning_content` 必须原样传回，否则 400；无 tool call 的轮次传回也会被忽略，所以不挂。
 
 ### 13.1 四个已实现的 provider
 
 | id | 端点 | cache 机制 | 备注 |
 |---|---|---|---|
-| `openai` | chat/completions（OpenAI / DeepSeek / 任意兼容端点） | implicit prefix | 读 `prompt_tokens_details.cached_tokens` 或 `prompt_cache_hit_tokens` |
+| `openai` | chat/completions（OpenAI / DeepSeek / 任意兼容端点） | implicit prefix | 读 `prompt_tokens_details.cached_tokens` 或 `prompt_cache_hit_tokens`；effort：`off` 在 DeepSeek 发 `thinking:{type:"disabled"}`（它默认开 thinking）、别处什么都不发，其余档位是 `reasoning_effort`；`max_tokens` 不主动发（DeepSeek 的 reasoning 和答案共用这个上限） |
 | `anthropic` | Messages `/v1/messages`（含 DeepSeek `/anthropic`） | **explicit breakpoints** | 读 `cache_read_input_tokens` / `cache_creation_input_tokens` |
 | `codex` | `chatgpt.com/backend-api/codex/responses`（ChatGPT 订阅） | implicit prefix，按 `session_id` 分域 | OAuth 走 `~/.codex/auth.json`，401 自动 refresh 并回写 |
 | `scripted` | 无 | 无 | demo / 测试用的确定性 stand-in |
@@ -454,23 +492,37 @@ NULYA_INTEGRATION_PROFILE=deepseek-anthropic zig build integration
 ## 14. CLI 表面（`cli.zig`；都不是 LLM tool，经 shell 调用）
 
 ```
-nulya ext init [--script] <id> [tool] | build <path>
+nulya ext init [--script] [--user] <id> [tool] | build <path> [--user]
           | run <id> [tool] (<json-args> | --arg k=v …)
-          | activate <id> <version> | rollback <id> <version> | deactivate <id>
+          | activate [--user] <id> <version> | rollback [--user] <id> <version> | deactivate [--user] <id>
           | list | inspect <id> | api [protocol|permissions|examples]
-nulya session new [--model p] [--parent <id>:<seq>]      ← 冻结 composition + 写 header，打印 session id
+nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--with <id>[@<version>]]…
+                                                         ← 冻结 composition + 模型身份、写 header，打印 session id
           | append <id> <text|--file f>                  ← 把一条 user turn 投进 inbox（下一 step 边界进 ledger）
-          | step <id> [--max-steps N] [--stream]         ← 跑到本 turn 结束或预算耗尽；stdout = 本次 append 的事件 JSONL（`--stream` 见下）
+          | step <id> [--max-steps N] [--effort E] [--stream]
+                                                         ← 跑到本 turn 结束或预算耗尽；stdout = 本次 append 的事件 JSONL（`--stream` 见下）
           | events <id> [--since N] [--follow]           ← 只读 tail 原始事件行（follow 轮询）
           | cancel <id>                                  ← 写 cancel 标记，下一 step 边界消化
+          | outcome <id> <success|partial|failure> [--note <text>]
+                                                         ← 记一条 verdict 进 outcome journal（§3.3）；只写 journal
+          | list [--json]                                ← `.nulya/sessions/` 的只读投影（composition / 事件数 / usage / verdict）
+nulya config show [--json]                               ← 有效配置链的投影：profiles（含 credential 是否可用）+ 模型目录；无 secret
 nulya src [path] [--tests]                               ← 打印本二进制内嵌的 src 源码（无参数 = 列全树）
 nulya skill list | load <pinned-ref>
 nulya toolchain zig <args…>
 nulya                       ← 无参数：固定 prompt demo（现经 durable session 路径跑，§3.4）
 ```
 
+- `session new --profile P [--model ID]`：`--profile` 是 config 里的 profile 名（默认 `active_profile`），`--model` 是该 profile 服务的一个 model id（默认 `ProviderProfile.defaultModel()`；接受任意 id，选择器只列目录里的）。不存在的 profile 直接拒绝（exit 1，提示 `nulya config show`）；存在但 credential 不可用的 profile 仍冻结为 scripted（离线替身，`resolveDescriptor` 的语义不变），但 stderr 明说。
+- `session new --parent <id>:<seq>`：这场 session 续的是谁（fork / compaction 的新文件，§11）。**父必须存在**（读不到 header 即 exit 1，不建文件）。模型分两级继承，因为两个 flag 含义不同：`--profile` 换的是"怎么连"，所以它替掉父的 profile；`--model` 只是在一个 profile 内换 id，所以**父的 profile 仍然生效**（不会掉回 `active_profile`）；两个都不给则**原样继承父 header 的 `model_identity`**，此时不重解 credential、也不打那条降级警告（继承的身份不会降级为 scripted，缺 key 由需要它的那次 `step` 一次性报响）。composition 一律现解，不继承。`session step --effort E` 是**每次 step 的 generation option**（不是身份，§3）：不给则用 `Config.defaultEffort(header.model, header.model_identity.model)`。
+- `nulya config show [--json]`：外壳级投影（同 `session new` 看到的东西），供选择器与 agent 自查：`{paths{system, user, project}, active_profile, profiles[]{name, kind, base_url, api_key_env, credential: bool, credential_source: config|env|login|builtin|none, model, models[], effort?}, models[]{id, label, efforts[], default_effort?, context_window?}}`。只报 env var **名字**、来源与布尔，永不报值；`api_key` 的值不出现。
+
 - `nulya src`：build.zig 把整个 `src/**` `@embedFile` 进二进制（源码 ~200KB，紧挨 ~90MB 工具链，恒开无 gate）；`nulya src <path>` 按 `src/` 相对路径打印（`prompt.zig`、`extension/store.zig`），**默认剥 top-level `test` 块**（读结构/契约时不付测试 token），`--tests`/`--raw` 打印原样（Zig 风格参照）。剥离靠 zig-fmt 不变量：顶层 decl 的收尾 `}` 在第 0 列，无需 tokenizer（`source.zig`）。测试留在文件里（Zig 惯例、人可读、风格参照），改的只是**投影**不是**存储**——`src/` 一字未动。
 - `nulya ext api`：协议 topic 现在**打印真实 `extension/protocol.zig` 源码**（是 `nulya src` 的特例），wire ABI 与实现代码零漂移；`permissions` / `examples` 仍是短说明（策略与 CLI 用法，不随代码漂）。
+- **`session new --with <id>[@<version>]`（可重复）= composition membership，不是 native pin。** 把一个**已 built** 的版本 union 进这一场的 composition：它的 skills 进 catalog、system_prompts 进 system blocks、tools 可经 `nulya ext run` 调用；**tool 要不要占 native 槽仍然是 `registry.pinned_native_tools` / usage ranking 的事**（两根轴分开）。同 id 覆盖 discovery 的结果（这一场说了算），重复 `--with` 同一个 id 后者胜。版本解析：给了 `@version` 就用它，没给就用该 id 的 `current`——**没有 `current` 就 exit 1，内核不猜**（"只有一个 built 版本就用它"这类聪明会让同一条命令在第二次 build 之后含义漂移）。所以一个**故意不 activate** 的包（mode / evolution，activate 了就会进每一场 session 的 system blocks）要按 `--with <id>@<version>` 带入，version 由 `ext build` 打印。落地不需要新机制：`--with` 只改 `SessionComposition.init` 的输入，结果照常冻进 header 的 `active`，所以 `initFrozen` 零改动、resume 自然重建同一份 composition。fork（`--parent`）不继承——composition 一律现解（§11），要就再传一次。
+- **mode = 贡献 system_prompt 的 data extension + `--with`。** 同一个包两种投放：`activate` = 常驻（每场都有）；不 activate、只 `--with` = 按场。不为 mode 造别的机制。
+- `nulya session list [--json]`：`.nulya/sessions/` 的**只读投影**，按 `created` 倒序（老 header 没有 `created`，退回按 id——id 本身时间有序）：`{sessions:[{id, created, parent, model, provider, model_id, events, composition{active:["id@version"], native_tools}, usage（每条 assistant 的 `usage` 求和，§3.1）, first_user_text（截断）, outcome{verdict,note,at}|null}]}`。定位同 `config show`：外壳投影，不决定任何事，也不写任何东西；第一批消费者是 evolution skill（一眼看完很多场而不必逐个读 ledger）与 TUI 的 `/sessions`。一个读不动的 session 文件被跳过而不是让整条命令失败。**`session new` 从此写 header 的 `created`**（RFC3339 UTC）。
+- `nulya session outcome <id> <verdict> [--note …]`：校验 id 形状与 session 文件存在、校验 verdict，然后**只**往 `.nulya/session-outcomes.jsonl` append 一行（§3.3）。它**不打开 session 文件、不拿 `<id>.lock`**——verdict 是关于这场 session 的判断而不是其中一轮，所以正在跑 `step` 的 session 也能当场评；同一 session 可以评多次，最后一条作数。
 - `nulya session *` 是**唯一**的 session 驱动面：没有 `setTools / setModel / replaceHistory`，换 composition = `session new`。每个子命令是对 durable session 文件（§3.4）的一次独立进程调用，其中**只有 `step` 写主文件**：`append` / `cancel` 投递到 `<id>.inbox/` / `<id>.cancel`（所以正在跑的 `step` 会在它的下一个 step 边界拿到 mid-run 的 append 或 cancel），`events` 是只读 tail（不解析、不重编码——文件本身就是 wire format）。`step` 的预算 `min(--max-steps, session.max_steps_ceiling)` **由 kernel 在 `AgentSession.run` 强制**，driver 只能调低不能调高；`--max-steps` 必须是正整数。session 就是它的文件，没有 `close`。
 - **`session step --stream`：纯观测的行协议**（前端唯一需要的内核改动，tui.md §2.2 → 已落地）。语义与不带 `--stream` 完全相同（同一 `AgentSession.run`、同一预算夹取、同一 cancel 消化、**同一 ledger**）；区别只是 stdout **在跑的过程中**逐行输出，而不是跑完一次性输出。
   - 机制是 `loop.StepContext.observer`（可选 `StepObserver{ptr,vtable}`）。observer **无权力**：四个回调全部返回 `void`、只拿只读视图，所以它不能 append、不能改 model-visible 状态、不能让一个 step 失败——带 observer 的 step 与不带的走同一条路径（physics #1/#3）。回调点：`runStepWithPrompt` 把 provider 流 **tee** 给 observer 再交给 `TurnCollector`；`execOne` 前后各一次（未被派发的尾部调用两个回调都不发）；`AgentSession.step` 在 step 边界一次（含 canceled）。
@@ -491,6 +543,7 @@ nulya                       ← 无参数：固定 prompt demo（现经 durable 
     ```
 
     `reasoning_item`（不透明、只为回放）**不转发**；`stopped ∈ end_turn | budget | canceled`。每个 step 的 ledger 行在该 step 的 `step end` **之前**刷出：读者见到 `step end` 就知道这一步的事件已全。诊断（原来的 "session step failed: …" 等）在 `--stream` 下变成 `{"stream":"run","event":"error","message":"…"}` 后非零退出——**stdout 上没有非 JSON 行**。
+- `nulya ext init|build|activate|rollback|deactivate` 都接受 `--user`：写端落到 user root（`~/.nulya/extensions`，需要时创建）而不是 workspace。不给 `--user` 时，`activate|rollback` 作用于**实际持有该 version 的首个 root**，`deactivate` 作用于**该 id 生效中的那个 root**（`Roots.firstActive`，§7.2），不是无脑 workspace；`ext list` 打印 `id / version / root`，被遮蔽的 active 行标 `(shadowed)`；`ext run` / `skill list` / `skill load` / session composition 一律按 root 顺序搜索。
 - `nulya ext activate` 在 `NULYA_SESSION`（相对 workspace 的 session 文件路径）存在时，向该 session 的 inbox 投一条 capability_note（§5.3）。
 - 离线时 provider 回落到确定性的 scripted stand-in（`NULYA_SCRIPTED_MODE=finish|loop`，测试用）。
 

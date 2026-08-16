@@ -6,6 +6,7 @@ import { expect, test } from "bun:test"
 import { testRender } from "@opentui/solid"
 import { useKeyboard } from "@opentui/solid"
 import { Composer } from "../src/ui/Composer.tsx"
+import { completions } from "../src/commands.ts"
 import { StyleContext, createStyle } from "../src/render/theme.ts"
 import { default_settings } from "../src/state/settings.ts"
 import { settle } from "./support.ts"
@@ -63,6 +64,68 @@ test("Up walks the whole history, not just the last message", async () => {
     expect(await settle(setup, 2)).toContain("three!")
     setup.mockInput.pressArrow("up")
     expect(await settle(setup, 2)).toContain("three!")
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 60_000)
+
+test("completions: only the first word, and an exact name still explains itself", () => {
+  expect(completions("")).toEqual([])
+  expect(completions("hello")).toEqual([])
+  expect(completions("/s").map((c) => c.name)).toEqual(["/sessions", "/settings", "/step"])
+  expect(completions("/mo").map((c) => c.name)).toEqual(["/model"])
+  expect(completions("/nope")).toEqual([])
+  // Past the first space it is arguments, not a command being chosen.
+  expect(completions("/effort ").map((c) => c.name)).toEqual(["/effort"])
+  expect(completions("/write me a poem about /model")).toEqual([])
+})
+
+test("a `/` line lists the commands it could still be, and Tab finishes it", async () => {
+  const sent: string[] = []
+  const setup = await testRender(
+    () => (
+      <StyleContext.Provider value={style}>
+        <Composer onSubmit={(text) => sent.push(text)} />
+      </StyleContext.Provider>
+    ),
+    { width: 90, height: 14 },
+  )
+  try {
+    await settle(setup, 3)
+    // Nothing typed: no menu.
+    expect(await settle(setup, 2)).not.toContain("/sessions")
+
+    await setup.mockInput.typeText("/se")
+    let frame = await settle(setup, 3)
+    expect(frame).toContain("/sessions")
+    expect(frame).toContain("/settings")
+    expect(frame).not.toContain("/model")
+
+    // Tab completes to the first match; the menu narrows to it.
+    setup.mockInput.pressTab()
+    frame = await settle(setup, 3)
+    expect(frame).toContain("/sessions")
+    expect(frame).not.toContain("/settings")
+    setup.mockInput.pressEnter()
+    await settle(setup, 2)
+    // Enter sends what is written — the completion is text, not a selection.
+    expect(sent).toEqual(["/sessions"])
+    expect(await settle(setup, 2)).not.toContain("/settings")
+
+    // A command that takes arguments is completed with room for them, and the
+    // menu keeps explaining it while they are typed.
+    await setup.mockInput.typeText("/ef")
+    setup.mockInput.pressTab()
+    await setup.mockInput.typeText("high")
+    frame = await settle(setup, 3)
+    expect(frame).toContain("/effort high")
+    expect(frame).toContain("the next step runs with it")
+
+    // Ordinary prose that happens to contain a slash gets no menu.
+    setup.mockInput.pressEnter()
+    await setup.mockInput.typeText("look at src/main.zig")
+    frame = await settle(setup, 3)
+    expect(frame).not.toContain("Tab completes")
   } finally {
     setup.renderer.destroy()
   }

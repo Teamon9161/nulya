@@ -30,14 +30,14 @@ let version: string
 
 beforeAll(async () => {
   ws = tempWorkspace()
-  first = await sessionNew(ws, { model: "scripted" })
+  first = await sessionNew(ws, { profile: "scripted" })
   await sessionAppend(ws, first, "make the budgets configurable")
   const step = sessionStep(ws, first, { env: scripted_env })
   for await (const _ of step.lines) {
     // Give the first session a real transcript so it has events to count.
   }
   await step.exited
-  second = await sessionNew(ws, { model: "scripted" })
+  second = await sessionNew(ws, { profile: "scripted" })
 
   const run = (args: string[]) => Bun.spawnSync({ cmd: [ws.bin, ...args], cwd: ws.dir })
   run(["ext", "init", "--script", "lint"])
@@ -107,7 +107,7 @@ test("/sessions lists the store and opens the highlighted session", async () => 
 }, 60_000)
 
 test("/sessions marks a session somebody else is driving as live", async () => {
-  const busy = await sessionNew(ws, { model: "scripted" })
+  const busy = await sessionNew(ws, { profile: "scripted" })
   await sessionAppend(ws, busy, "hold the lease")
   const holder = sessionStep(ws, busy, { env: { NULYA_SCRIPTED_MODE: "loop" }, maxSteps: 400 })
   let holding = false
@@ -221,8 +221,8 @@ test("F3 opens the sessions view and Esc closes it", async () => {
 test("Enter on a sub-session card opens it as a second tab, attached as an observer", async () => {
   // A parent with no transcript of its own, so the only cards on screen are the
   // two injected below.
-  const parent = await sessionNew(ws, { model: "scripted" })
-  const child = await sessionNew(ws, { model: "scripted" })
+  const parent = await sessionNew(ws, { profile: "scripted" })
+  const child = await sessionNew(ws, { profile: "scripted" })
   const state = createSessionState(parent)
   // The transcript shape a `nulya session new` inside a step leaves behind: the
   // id is in the tool RESULT, which is why replay can find it too (§5.2).

@@ -43,9 +43,22 @@ pub const BuildResult = struct {
     }
 };
 
-/// Build `ext_dir_rel` (relative to `workspace`) with `zig_exe`. Stops at the
-/// "built" state — activation is a separate, explicit step (DESIGN §7.4). The
-/// error set is inferred: it folds manifest/source unreadability, manifest
+/// Build the draft at `ext_dir_rel` (relative to `workspace`) into an immutable
+/// version under `dest_root`, a store root (DESIGN §7.2). Stops at the "built"
+/// state — activation is a separate, explicit step (DESIGN §7.4).
+///
+/// **Where a version lands is decided by the manifest id and the store root, not
+/// by where the draft happens to sit**: `<dest_root>/<manifest.id>/versions/<v>`.
+/// A draft inside a store root builds exactly where it always did (its directory
+/// IS `<root>/<id>`); a draft anywhere else — a `modes/` or `extensions/`
+/// directory kept in git, say — now produces a version `activate` can actually
+/// find, instead of an orphan `versions/` next to the source.
+///
+/// Everything the compiler touches lives inside the version directory, so the
+/// build runs with `dest_root` as its working directory and never needs an
+/// absolute sub-path (a user root is an absolute path).
+///
+/// The error set is inferred: it folds manifest/source unreadability, manifest
 /// parse/validate errors, compiler identity errors, and filesystem errors from
 /// the version-directory writes.
 pub fn buildExtension(
@@ -53,6 +66,7 @@ pub fn buildExtension(
     io: std.Io,
     workspace: std.Io.Dir,
     ext_dir_rel: []const u8,
+    dest_root: std.Io.Dir,
     zig_exe: []const u8,
 ) !BuildResult {
     const manifest_rel = try std.fs.path.join(alloc, &.{ ext_dir_rel, manifest_file });
@@ -86,7 +100,8 @@ pub fn buildExtension(
     const version = try integrity.versionId(alloc, snapshot_bytes, compiler, target);
     errdefer alloc.free(version);
 
-    const version_rel = try std.fs.path.join(alloc, &.{ ext_dir_rel, "versions", version });
+    // Store layout, not draft layout: `<id>/versions/<v>` under the store root.
+    const version_rel = try std.fs.path.join(alloc, &.{ m.id, "versions", version });
     defer alloc.free(version_rel);
 
     // `entry_rel` is the BUILT binary path — compiled extensions only. A script's
@@ -97,21 +112,21 @@ pub fn buildExtension(
         null;
     errdefer if (entry_rel) |entry| alloc.free(entry);
 
-    const version_is_valid = if (workspace.access(io, version_rel, .{})) |_| blk: {
-        integrity.validateVersionDir(alloc, io, workspace, version_rel, version, m.id) catch break :blk false;
+    const version_is_valid = if (dest_root.access(io, version_rel, .{})) |_| blk: {
+        integrity.validateVersionDir(alloc, io, dest_root, version_rel, version, m.id) catch break :blk false;
         break :blk true;
     } else |_| false;
 
     if (version_is_valid) {
         return .{ .version = version, .entry_rel = entry_rel, .already_built = true, .compile_ok = true, .stderr = try alloc.alloc(u8, 0) };
     }
-    workspace.deleteTree(io, version_rel) catch {};
+    dest_root.deleteTree(io, version_rel) catch {};
 
     // Data or script: freeze the snapshot, seal with no binary, done — nothing to
     // compile.
     if (!compiled) {
-        try integrity.freezeSnapshot(alloc, io, workspace, version_rel, manifest_bytes, snapshot);
-        try writeSeal(alloc, io, workspace, version_rel, snapshot, compiler, target, null);
+        try integrity.freezeSnapshot(alloc, io, dest_root, version_rel, manifest_bytes, snapshot);
+        try writeSeal(alloc, io, dest_root, version_rel, snapshot, compiler, target, null);
         return .{ .version = version, .entry_rel = entry_rel, .already_built = false, .compile_ok = true, .stderr = try alloc.alloc(u8, 0) };
     }
 
@@ -121,8 +136,8 @@ pub fn buildExtension(
     defer alloc.free(bin_rel);
     const bin_dir_rel = std.fs.path.dirname(bin_rel) orelse version_rel;
 
-    try integrity.freezeSnapshot(alloc, io, workspace, version_rel, manifest_bytes, snapshot);
-    try workspace.createDirPath(io, bin_dir_rel);
+    try integrity.freezeSnapshot(alloc, io, dest_root, version_rel, manifest_bytes, snapshot);
+    try dest_root.createDirPath(io, bin_dir_rel);
 
     const frozen_source = try std.fs.path.join(alloc, &.{ version_rel, package_dir, "src", "main.zig" });
     defer alloc.free(frozen_source);
@@ -130,14 +145,15 @@ pub fn buildExtension(
     defer alloc.free(emit_arg);
 
     // Fixed, reproducible invocation — the AI gets no say in the flags. Compile
-    // from the frozen package, never the mutable draft tree.
+    // from the frozen package, never the mutable draft tree. Source and output
+    // are both inside the version directory, so the store root is the cwd.
     const result = std.process.run(alloc, io, .{
         .argv = &.{ zig_exe, "build-exe", frozen_source, "-O", "ReleaseSafe", emit_arg, "--name", std.fs.path.stem(rt.entry) },
-        .cwd = .{ .dir = workspace },
+        .cwd = .{ .dir = dest_root },
         .stdout_limit = .limited(1 << 20),
         .stderr_limit = .limited(1 << 20),
     }) catch |err| {
-        workspace.deleteTree(io, version_rel) catch {};
+        dest_root.deleteTree(io, version_rel) catch {};
         return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             else => error.SourceUnreadable, // spawn/compile plumbing failure
@@ -151,14 +167,14 @@ pub fn buildExtension(
     };
     if (exit_code != 0) {
         // Leave no half-built version behind.
-        workspace.deleteTree(io, version_rel) catch {};
+        dest_root.deleteTree(io, version_rel) catch {};
         return .{ .version = version, .entry_rel = entry_rel, .already_built = false, .compile_ok = false, .stderr = result.stderr };
     }
     alloc.free(result.stderr);
 
-    const binary_digest = try integrity.fileDigestHex(alloc, io, workspace, bin_rel);
+    const binary_digest = try integrity.fileDigestHex(alloc, io, dest_root, bin_rel);
     defer alloc.free(binary_digest);
-    try writeSeal(alloc, io, workspace, version_rel, snapshot, compiler, target, binary_digest);
+    try writeSeal(alloc, io, dest_root, version_rel, snapshot, compiler, target, binary_digest);
 
     return .{ .version = version, .entry_rel = entry_rel, .already_built = false, .compile_ok = true, .stderr = try alloc.alloc(u8, 0) };
 }
@@ -186,7 +202,7 @@ fn compilerIdentity(alloc: std.mem.Allocator, io: std.Io, workspace: std.Io.Dir,
 fn writeSeal(
     alloc: std.mem.Allocator,
     io: std.Io,
-    workspace: std.Io.Dir,
+    dest_root: std.Io.Dir,
     version_rel: []const u8,
     snapshot: integrity.PackageSnapshot,
     compiler: []const u8,
@@ -199,7 +215,7 @@ fn writeSeal(
     defer alloc.free(seal);
     const seal_sub = try std.fs.path.join(alloc, &.{ version_rel, seal_file });
     defer alloc.free(seal_sub);
-    try workspace.writeFile(io, .{ .sub_path = seal_sub, .data = seal });
+    try dest_root.writeFile(io, .{ .sub_path = seal_sub, .data = seal });
 }
 
 /// Static system prompts are plain text contributions; a built version must
@@ -229,7 +245,7 @@ test "missing manifest is a clear error" {
     try tmp.dir.createDirPath(std.testing.io, "ext");
     try std.testing.expectError(
         error.ManifestUnreadable,
-        buildExtension(alloc, std.testing.io, tmp.dir, "ext", "zig"),
+        buildExtension(alloc, std.testing.io, tmp.dir, "ext", tmp.dir, "zig"),
     );
 }
 
@@ -247,11 +263,11 @@ test "pure skill package freezes its declared skill directory" {
 
     const zig_exe = try testZigExe(alloc);
     defer alloc.free(zig_exe);
-    var result = try buildExtension(alloc, io, tmp.dir, "ext", zig_exe);
+    var result = try buildExtension(alloc, io, tmp.dir, "ext", tmp.dir, zig_exe);
     defer result.deinit(alloc);
     try std.testing.expect(result.compile_ok);
     try std.testing.expect(result.entry_rel == null);
-    const skill_path = try std.fs.path.join(alloc, &.{ "ext", "versions", result.version, package_dir, "skills", "risk-parity", "SKILL.md" });
+    const skill_path = try std.fs.path.join(alloc, &.{ "skills.finance", "versions", result.version, package_dir, "skills", "risk-parity", "SKILL.md" });
     defer alloc.free(skill_path);
     try tmp.dir.access(io, skill_path, .{});
 }
@@ -267,7 +283,7 @@ test "skill package build rejects missing SKILL.md" {
     });
     try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "demo" ++ std.fs.path.sep_str ++ "notes.txt", .data = "not a skill\n" });
 
-    try std.testing.expectError(error.SkillFileMissing, buildExtension(std.testing.allocator, io, tmp.dir, "ext", "zig"));
+    try std.testing.expectError(error.SkillFileMissing, buildExtension(std.testing.allocator, io, tmp.dir, "ext", tmp.dir, "zig"));
 }
 
 test "skill package build rejects frontmatter name mismatch" {
@@ -281,7 +297,7 @@ test "skill package build rejects frontmatter name mismatch" {
     });
     try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "demo" ++ std.fs.path.sep_str ++ "SKILL.md", .data = "---\nname: other\ndescription: demo\n---\nbody\n" });
 
-    try std.testing.expectError(error.SkillNameDoesNotMatchDirectory, buildExtension(std.testing.allocator, io, tmp.dir, "ext", "zig"));
+    try std.testing.expectError(error.SkillNameDoesNotMatchDirectory, buildExtension(std.testing.allocator, io, tmp.dir, "ext", tmp.dir, "zig"));
 }
 
 test "skill package build rejects duplicate skill names" {
@@ -297,7 +313,7 @@ test "skill package build rejects duplicate skill names" {
     try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "a" ++ std.fs.path.sep_str ++ "foo" ++ std.fs.path.sep_str ++ "SKILL.md", .data = "---\nname: foo\ndescription: first\n---\nbody\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "b" ++ std.fs.path.sep_str ++ "foo" ++ std.fs.path.sep_str ++ "SKILL.md", .data = "---\nname: foo\ndescription: second\n---\nbody\n" });
 
-    try std.testing.expectError(error.DuplicateSkillName, buildExtension(std.testing.allocator, io, tmp.dir, "ext", "zig"));
+    try std.testing.expectError(error.DuplicateSkillName, buildExtension(std.testing.allocator, io, tmp.dir, "ext", tmp.dir, "zig"));
 }
 
 test "runtime helper source changes the version id" {
@@ -315,12 +331,12 @@ test "runtime helper source changes the version id" {
 
     const zig_exe = try testZigExe(alloc);
     defer alloc.free(zig_exe);
-    var first = try buildExtension(alloc, io, tmp.dir, "ext", zig_exe);
+    var first = try buildExtension(alloc, io, tmp.dir, "ext", tmp.dir, zig_exe);
     defer first.deinit(alloc);
     if (!first.compile_ok) return error.ExtensionBuildFailed;
 
     try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ "src" ++ std.fs.path.sep_str ++ "helper.zig", .data = "pub const value = 2;\n" });
-    var second = try buildExtension(alloc, io, tmp.dir, "ext", zig_exe);
+    var second = try buildExtension(alloc, io, tmp.dir, "ext", tmp.dir, zig_exe);
     defer second.deinit(alloc);
     if (!second.compile_ok) return error.ExtensionBuildFailed;
 
@@ -342,11 +358,11 @@ test "skill body changes the version id" {
 
     const zig_exe = try testZigExe(alloc);
     defer alloc.free(zig_exe);
-    var first = try buildExtension(alloc, io, tmp.dir, "ext", zig_exe);
+    var first = try buildExtension(alloc, io, tmp.dir, "ext", tmp.dir, zig_exe);
     defer first.deinit(alloc);
 
     try tmp.dir.writeFile(io, .{ .sub_path = skill_rel, .data = "---\nname: demo\ndescription: demo skill\n---\nversion two\n" });
-    var second = try buildExtension(alloc, io, tmp.dir, "ext", zig_exe);
+    var second = try buildExtension(alloc, io, tmp.dir, "ext", tmp.dir, zig_exe);
     defer second.deinit(alloc);
 
     try std.testing.expect(!std.mem.eql(u8, first.version, second.version));
@@ -368,12 +384,12 @@ test "source tests directory participates in the version id" {
 
     const zig_exe = try testZigExe(alloc);
     defer alloc.free(zig_exe);
-    var first = try buildExtension(alloc, io, tmp.dir, "ext", zig_exe);
+    var first = try buildExtension(alloc, io, tmp.dir, "ext", tmp.dir, zig_exe);
     defer first.deinit(alloc);
     if (!first.compile_ok) return error.ExtensionBuildFailed;
 
     try tmp.dir.writeFile(io, .{ .sub_path = test_rel, .data = "two\n" });
-    var second = try buildExtension(alloc, io, tmp.dir, "ext", zig_exe);
+    var second = try buildExtension(alloc, io, tmp.dir, "ext", tmp.dir, zig_exe);
     defer second.deinit(alloc);
     if (!second.compile_ok) return error.ExtensionBuildFailed;
 
@@ -394,11 +410,11 @@ test "prompt-only package builds without runtime and freezes prompt files" {
 
     const zig_exe = try testZigExe(alloc);
     defer alloc.free(zig_exe);
-    var result = try buildExtension(alloc, io, tmp.dir, "ext", zig_exe);
+    var result = try buildExtension(alloc, io, tmp.dir, "ext", tmp.dir, zig_exe);
     defer result.deinit(alloc);
     try std.testing.expect(result.compile_ok);
     try std.testing.expect(result.entry_rel == null);
-    const prompt_path = try std.fs.path.join(alloc, &.{ "ext", "versions", result.version, package_dir, "prompts", "finance.md" });
+    const prompt_path = try std.fs.path.join(alloc, &.{ "prompts.finance", "versions", result.version, package_dir, "prompts", "finance.md" });
     defer alloc.free(prompt_path);
     try tmp.dir.access(io, prompt_path, .{});
 }
@@ -416,7 +432,7 @@ test "a data extension builds with no compiler and its version ignores compiler 
     try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "demo" ++ std.fs.path.sep_str ++ "SKILL.md", .data = "---\nname: demo\ndescription: demo\n---\nbody\n" });
 
     // No toolchain at all: a data extension never compiles, so build succeeds.
-    var without = try buildExtension(alloc, io, tmp.dir, "ext", "");
+    var without = try buildExtension(alloc, io, tmp.dir, "ext", tmp.dir, "");
     defer without.deinit(alloc);
     try std.testing.expect(without.compile_ok);
 
@@ -424,7 +440,7 @@ test "a data extension builds with no compiler and its version ignores compiler 
     // compiler is not part of a data version's identity.
     const zig_exe = try testZigExe(alloc);
     defer alloc.free(zig_exe);
-    var with = try buildExtension(alloc, io, tmp.dir, "ext", zig_exe);
+    var with = try buildExtension(alloc, io, tmp.dir, "ext", tmp.dir, zig_exe);
     defer with.deinit(alloc);
     try std.testing.expect(with.already_built);
     try std.testing.expectEqualStrings(without.version, with.version);
@@ -442,14 +458,14 @@ test "a script extension builds with no compiler and its version ignores compile
     });
     try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ "src" ++ std.fs.path.sep_str ++ "run.sh", .data = "echo hi\n" });
 
-    var without = try buildExtension(alloc, io, tmp.dir, "ext", "");
+    var without = try buildExtension(alloc, io, tmp.dir, "ext", tmp.dir, "");
     defer without.deinit(alloc);
     try std.testing.expect(without.compile_ok);
     try std.testing.expect(without.entry_rel == null); // a script has no built binary
 
     const zig_exe = try testZigExe(alloc);
     defer alloc.free(zig_exe);
-    var with = try buildExtension(alloc, io, tmp.dir, "ext", zig_exe);
+    var with = try buildExtension(alloc, io, tmp.dir, "ext", tmp.dir, zig_exe);
     defer with.deinit(alloc);
     try std.testing.expect(with.already_built);
     try std.testing.expectEqualStrings(without.version, with.version);
@@ -470,11 +486,11 @@ test "system prompt file changes the version id" {
 
     const zig_exe = try testZigExe(alloc);
     defer alloc.free(zig_exe);
-    var first = try buildExtension(alloc, io, tmp.dir, "ext", zig_exe);
+    var first = try buildExtension(alloc, io, tmp.dir, "ext", tmp.dir, zig_exe);
     defer first.deinit(alloc);
 
     try tmp.dir.writeFile(io, .{ .sub_path = prompt_rel, .data = "version two\n" });
-    var second = try buildExtension(alloc, io, tmp.dir, "ext", zig_exe);
+    var second = try buildExtension(alloc, io, tmp.dir, "ext", tmp.dir, zig_exe);
     defer second.deinit(alloc);
 
     try std.testing.expect(!std.mem.eql(u8, first.version, second.version));
@@ -494,13 +510,13 @@ test "frozen prompt tampering fails integrity validation" {
 
     const zig_exe = try testZigExe(alloc);
     defer alloc.free(zig_exe);
-    var result = try buildExtension(alloc, io, tmp.dir, "ext", zig_exe);
+    var result = try buildExtension(alloc, io, tmp.dir, "ext", tmp.dir, zig_exe);
     defer result.deinit(alloc);
 
-    const prompt_path = try std.fs.path.join(alloc, &.{ "ext", "versions", result.version, package_dir, "prompts", "base.md" });
+    const prompt_path = try std.fs.path.join(alloc, &.{ "prompts", "versions", result.version, package_dir, "prompts", "base.md" });
     defer alloc.free(prompt_path);
     try tmp.dir.writeFile(io, .{ .sub_path = prompt_path, .data = "tampered\n" });
-    const version_rel = try std.fs.path.join(alloc, &.{ "ext", "versions", result.version });
+    const version_rel = try std.fs.path.join(alloc, &.{ "prompts", "versions", result.version });
     defer alloc.free(version_rel);
     try std.testing.expectError(error.VersionSealInvalid, integrity.validateVersionDir(alloc, io, tmp.dir, version_rel, result.version, "prompts"));
 }
@@ -523,7 +539,7 @@ test "skill package build rejects oversized SKILL.md" {
     defer alloc.free(skill_md);
     try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "demo" ++ std.fs.path.sep_str ++ "SKILL.md", .data = skill_md });
 
-    try std.testing.expectError(error.SkillFileTooLarge, buildExtension(alloc, io, tmp.dir, "ext", "zig"));
+    try std.testing.expectError(error.SkillFileTooLarge, buildExtension(alloc, io, tmp.dir, "ext", tmp.dir, "zig"));
 }
 
 test "skill package build rejects invalid UTF-8 SKILL.md" {
@@ -537,7 +553,7 @@ test "skill package build rejects invalid UTF-8 SKILL.md" {
     });
     try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "demo" ++ std.fs.path.sep_str ++ "SKILL.md", .data = "---\nname: demo\ndescription: demo\n---\n\xff body\n" });
 
-    try std.testing.expectError(error.InvalidUtf8, buildExtension(std.testing.allocator, io, tmp.dir, "ext", "zig"));
+    try std.testing.expectError(error.InvalidUtf8, buildExtension(std.testing.allocator, io, tmp.dir, "ext", tmp.dir, "zig"));
 }
 
 test "prompt package build rejects oversized system prompt" {
@@ -555,7 +571,7 @@ test "prompt package build rejects oversized system prompt" {
     @memset(body, 'a');
     try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ "prompts" ++ std.fs.path.sep_str ++ "base.md", .data = body });
 
-    try std.testing.expectError(error.SystemPromptTooLarge, buildExtension(alloc, io, tmp.dir, "ext", "zig"));
+    try std.testing.expectError(error.SystemPromptTooLarge, buildExtension(alloc, io, tmp.dir, "ext", tmp.dir, "zig"));
 }
 
 test "prompt package build rejects invalid UTF-8 system prompt" {
@@ -569,5 +585,5 @@ test "prompt package build rejects invalid UTF-8 system prompt" {
     });
     try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ "prompts" ++ std.fs.path.sep_str ++ "base.md", .data = "\xff\xfe not text\n" });
 
-    try std.testing.expectError(error.InvalidUtf8, buildExtension(std.testing.allocator, io, tmp.dir, "ext", "zig"));
+    try std.testing.expectError(error.InvalidUtf8, buildExtension(std.testing.allocator, io, tmp.dir, "ext", tmp.dir, "zig"));
 }

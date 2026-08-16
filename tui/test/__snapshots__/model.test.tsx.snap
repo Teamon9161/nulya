@@ -1,0 +1,69 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`/model level 1 is providers — one row each, credential status on the row 1`] = `
+" model · which provider a session runs on                                                                               
+                                                                                                                        
+   openai            openai wire · api.openai.com                                 2 models   no key · s to paste one    
+ ▾ deepseek          openai wire · api.deepseek.com                               2 models   ✓ current                  
+   codex             codex · ChatGPT subscription                                 1 model    run \`codex login\`          
+   scripted          offline · no network                                         1 model    offline stand-in           
+   + add an OpenAI- or Anthropic-compatible provider                                                                    
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+ deepseek · openai wire · https://api.deepseek.com · DEEPSEEK_API_KEY set                                               
+ j/k move · Enter its models · s paste its API key · a add a provider · r reload · Esc close                            
+"
+`;
+
+exports[`/model level 2 is that provider's models: ←→ turns the dial, Enter picks, Esc goes back 1`] = `
+" model · deepseek · 2 models                                                                                            
+                                                                                                                        
+ ▾ DeepSeek V4 Flash       deepseek-v4-flash                      1M ctx   ‹ auto ›            ✓ current                
+   DeepSeek V4 Pro         deepseek-v4-pro                        1M ctx   ‹ auto ›                                     
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+ j/k move · h/l effort · Enter start a session on it · s paste this provider's key · Esc back                           
+"
+`;

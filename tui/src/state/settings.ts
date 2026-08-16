@@ -50,13 +50,15 @@ export const default_settings: Settings = {
   sources: [],
 }
 
-function userConfigDir(env: Record<string, string | undefined> = process.env): string {
-  if (process.platform === "win32") {
-    const appdata = env["APPDATA"]
-    if (appdata) return join(appdata, "nulya")
-  }
-  const xdg = env["XDG_CONFIG_HOME"]
-  return join(xdg && xdg.length > 0 ? xdg : join(homedir(), ".config"), "nulya")
+/**
+ * `$NULYA_HOME`, else `~/.nulya` — the kernel's user config dir
+ * (`config.zig` `userHome`), mirrored so `tui.toml` and `tui-state.json` sit
+ * next to `config.toml`: one findable place on every platform.
+ */
+export function userConfigDir(env: Record<string, string | undefined> = process.env): string {
+  const home = env["NULYA_HOME"]
+  if (home && home.length > 0) return home
+  return join(env["HOME"] ?? env["USERPROFILE"] ?? homedir(), ".nulya")
 }
 
 export function settingsPaths(workspaceDir: string, env: Record<string, string | undefined> = process.env): string[] {

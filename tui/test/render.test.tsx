@@ -450,7 +450,7 @@ afterAll(() => {
 })
 
 test("the same session renders identically live and replayed", async () => {
-  const id = await sessionNew(ws, { model: "scripted" })
+  const id = await sessionNew(ws, { profile: "scripted" })
   await sessionAppend(ws, id, "probe the environment")
 
   const live = createSessionState(id)
@@ -471,7 +471,7 @@ test("the same session renders identically live and replayed", async () => {
 }, 60_000)
 
 test("typing and pressing Enter drives a real step", async () => {
-  const id = await sessionNew(ws, { model: "scripted" })
+  const id = await sessionNew(ws, { profile: "scripted" })
   const state = createSessionState(id)
   const setup = await testRender(
     () => <App ws={ws} id={id} state={state} style={style} driver={{ env: scripted_env }} />,
@@ -507,7 +507,7 @@ function transcriptOf(frame: string): string {
 }
 
 test("closing and reopening with --session paints the same transcript", async () => {
-  const id = await sessionNew(ws, { model: "scripted" })
+  const id = await sessionNew(ws, { profile: "scripted" })
   const first = createSessionState(id)
   const live = await testRender(
     () => <App ws={ws} id={id} state={first} style={style} driver={{ env: scripted_env }} />,
@@ -539,7 +539,7 @@ test("closing and reopening with --session paints the same transcript", async ()
 }, 120_000)
 
 test("Ctrl+O expands the most recent tool card", async () => {
-  const id = await sessionNew(ws, { model: "scripted" })
+  const id = await sessionNew(ws, { profile: "scripted" })
   const state = createSessionState(id)
   const setup = await testRender(
     () => <App ws={ws} id={id} state={state} style={style} driver={{ env: scripted_env }} />,
@@ -563,7 +563,7 @@ test("Ctrl+O expands the most recent tool card", async () => {
 }, 120_000)
 
 test("Esc on an empty composer opens browse mode, where Enter folds a card", async () => {
-  const id = await sessionNew(ws, { model: "scripted" })
+  const id = await sessionNew(ws, { profile: "scripted" })
   const state = createSessionState(id)
   const setup = await testRender(
     () => <App ws={ws} id={id} state={state} style={style} driver={{ env: scripted_env }} />,

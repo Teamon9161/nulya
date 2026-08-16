@@ -24,14 +24,11 @@ pub const Options = struct {
     effort: ?[]const u8 = null,
 };
 
-pub const Usage = struct {
-    /// Non-cached input tokens. Providers whose counters include cached tokens
-    /// must subtract before filling this in.
-    input_tokens: u64 = 0,
-    output_tokens: u64 = 0,
-    cache_read_tokens: u64 = 0,
-    cache_write_tokens: u64 = 0,
-};
+/// What one turn cost. The same struct the ledger records on the assistant
+/// event (DESIGN §3.1) — one shape end to end, no conversion in the loop.
+/// `input_tokens` is NON-cached input: providers whose counters include cached
+/// tokens must subtract before filling this in.
+pub const Usage = ledger.Usage;
 
 pub const StopReason = enum {
     end_turn,

@@ -78,36 +78,67 @@ fails with `preload not found "@opentui/solid/preload"`.
 
 ### Choosing the provider and model
 
-The TUI does not own model configuration — the kernel does. A session freezes
-its model identity when it is created (physics #2), so the choice happens at
-`session new` and never mid-session:
+Start `nulya`, press `F5` (or type `/model`), pick a row, Enter. That is the
+whole procedure — you should never have to open a config file to switch models.
+
+The picker is one flat list: every model of every profile the kernel knows,
+read from `nulya config show --json`. `↑↓` moves, `←→` turns the reasoning
+effort dial of the highlighted row (`auto` = the provider's default, then the
+levels that model accepts), Enter starts a session on it. A session freezes its
+model when it is created (physics #2), so "switch model" always means "new
+session on that model": on a fresh, untouched tab the new session simply takes
+its place; on a tab you have used, a second tab opens. Rows whose profile has no
+usable key stay in the list, dimmed (`no key · s to paste one`); Enter on one
+only tells you why.
+
+**Keys are entered on screen too.** Highlight a row, press `s`, paste the API
+key, Enter. It is written into your user config
+(`~/.nulya/config.toml` — on Windows `C:\Users\<you>\.nulya\config.toml`) as
+that profile's `api_key`, in a small marked block the TUI can find and replace
+later; the rest of the file is never touched, and the row turns
+`ready · key in config`. Setting the profile's env var (`DEEPSEEK_API_KEY`, …)
+works as well; a key in the config wins over the env var. Keys never enter a
+session file or a tool's environment.
+
+What you picked is remembered in `tui-state.json` next to that config, so the
+next `nulya` starts on it. If nothing remembered or configured can run (no key),
+the first screen IS the picker, with the reason under its title, on top of an
+offline session — pick a row marked `ready`, or press `s` on one and paste.
+
+Effort is not frozen: `/effort high` (or `/effort auto`) changes the current
+tab's effort and the next step runs with it (`session step --effort`).
+
+To skip the picker, name it on the command line (a one-off, not remembered):
 
 ```powershell
-bun run tui\src\main.tsx --model codex        # a profile name from default.toml
-bun run tui\src\main.tsx --model anthropic
-bun run tui\src\main.tsx --model deepseek
+bun run tui\src\main.tsx --profile codex
+bun run tui\src\main.tsx --profile deepseek --model deepseek-v4-pro --effort off
 ```
 
-Profiles and their credentials live in `default.toml` at the repo root, merged
-with the system/user/project config chain (`../docs/DESIGN.md` §12): `anthropic`
-needs `ANTHROPIC_API_KEY`, `openai` needs `OPENAI_API_KEY`, `deepseek` and
-`deepseek-anthropic` need `DEEPSEEK_API_KEY`, and `codex` uses whatever
-`codex login` left in `~/.codex/auth.json` — no environment variable at all.
-With no `--model` the config's `active_profile` is used. Inside the TUI,
-`/new --model <profile>` opens a second session with a different one.
+Profiles ("how to reach a provider, and which model ids it serves") and the
+model catalog ("what each id is") live in `default.toml` at the repo root, merged
+with the system/user/project config chain (`../docs/DESIGN.md` §9.5) — `nulya
+config show` prints the three paths and every profile's state. Built in:
+`openai`, `anthropic`, `deepseek`, `deepseek-anthropic`, `openrouter` (each takes
+an API key), `codex` (uses whatever `codex login` left in `~/.codex/auth.json`),
+`scripted` (offline). To add an endpoint that is not built in, put a
+`[[provider.profiles]]` block with `kind`, `base_url`, `models` into
+`~/.nulya/config.toml`; it then shows up in `/model` like the others.
+Inside the TUI, `/new` opens another session on the last pick;
+`/new --profile <p> [--model <id>]` on a named one.
 
 Offline, with no key of any kind:
 
 ```powershell
 $env:NULYA_SCRIPTED_MODE = "finish"
-bun run tui\src\main.tsx --model scripted
+bun run tui\src\main.tsx --profile scripted
 ```
 
 ### Flags
 
 `--session <id>` reopen · `--new` fresh session (the default) ·
-`--model <profile>` · `--workspace <dir>` · `--max-steps <n>` (a per-step budget
-the kernel clamps to its own ceiling).
+`--profile <p>` `--model <id>` `--effort <e>` · `--workspace <dir>` ·
+`--max-steps <n>` (a per-step budget the kernel clamps to its own ceiling).
 
 ## A round trip
 
@@ -115,7 +146,7 @@ Read the kernel, edit it, run the tests, cancel something, come back later:
 
 ```powershell
 cd C:\code\zig\nulya
-bun run tui\src\main.tsx --model codex
+bun run tui\src\main.tsx --profile codex
 ```
 
 1. **Ask.** `read src/emit.zig and make the head/tail budget configurable`,
@@ -163,6 +194,7 @@ bun run tui\src\main.tsx --model codex
 | `F2` | `/ext` — the extension store |
 | `F3` | `/sessions` — the session store |
 | `F4` | next tab (tabs appear once a second session is open) |
+| `F5` | `/model` — pick profile, model and effort; Enter starts a session on it |
 | `Ctrl+W` | close the current tab (with one tab it is the composer's delete-word, as in a shell) |
 
 Inside `/sessions`: `j`/`k` move, `Enter` opens, `n` starts a new session, `r`
@@ -171,7 +203,8 @@ refreshes, `Esc` closes. Inside `/ext`: `j`/`k` move, `Tab` switches pane
 highlighted version (confirm with `y`), `u` jumps to the usage table. Inside
 `/usage`: `r` refreshes.
 
-Slash commands: `/new [--model p]`, `/sessions`, `/ext`, `/usage`, `/settings`,
+Slash commands: `/model` (F5), `/effort <level|auto>`,
+`/new [--profile p] [--model id]`, `/sessions`, `/ext`, `/usage`, `/settings`,
 `/help`, `/step` (continue after a spent step budget), `/cancel`, `/fold`,
 `/quit`. Anything else starting with `/` is sent to the model verbatim.
 

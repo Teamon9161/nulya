@@ -107,20 +107,111 @@ function fail(what: string, result: RunResult): never {
 }
 
 export interface NewSessionOptions {
-  /** Provider profile name; omitted means the config's active profile. */
+  /** Provider profile name (HOW to reach a provider); omitted means the config's active profile. */
+  profile?: string
+  /** Model id within that profile; omitted means the profile's default. */
   model?: string
   parent?: { session: string; seq: number }
 }
 
-/** `nulya session new` — stdout is the session id. */
-export async function sessionNew(ws: Workspace, options: NewSessionOptions = {}): Promise<string> {
+/** `nulya session new` — stdout is the session id. `env` is a test seam (`NULYA_HOME`). */
+export async function sessionNew(
+  ws: Workspace,
+  options: NewSessionOptions = {},
+  env?: Record<string, string>,
+): Promise<string> {
   const args = ["session", "new"]
+  if (options.profile) args.push("--profile", options.profile)
   if (options.model) args.push("--model", options.model)
   if (options.parent) args.push("--parent", `${options.parent.session}:${options.parent.seq}`)
-  const result = await run(ws, args)
+  const result = await run(ws, args, env)
   const id = result.stdout.trim()
   if (result.code !== 0 || !id.startsWith("s-")) fail("session new failed", result)
   return id
+}
+
+/** One row of `nulya config show --json`: a way to reach a provider. */
+export interface ProfileView {
+  name: string
+  kind: string
+  base_url: string
+  /** The env var NAME the key is read from — never the key. Empty for codex/scripted. */
+  api_key_env: string
+  /** Whether `session new --profile <name>` would run this provider right now. */
+  credential: boolean
+  /**
+   * Where the credential comes from: `config` (the profile's own `api_key` in
+   * the user file), `env` (`api_key_env` is set), `login` (codex auth file),
+   * `builtin` (scripted), `none`.
+   */
+  credential_source: "config" | "env" | "login" | "builtin" | "none"
+  /** Default model id and the selectable list (the default is always in it). */
+  model: string
+  models: string[]
+  /** Profile-wide effort override, or null. */
+  effort: string | null
+}
+
+/** Where the kernel's config chain reads from — so we write where it reads. */
+export interface ConfigPaths {
+  system: string
+  user: string
+  project: string
+}
+
+/** One `[[models]]` catalog entry: what a model id IS, whoever serves it. */
+export interface ModelView {
+  id: string
+  label: string
+  /** Effort levels the model accepts, lowest → highest; empty means no dial. */
+  efforts: string[]
+  default_effort: string | null
+  context_window: number | null
+}
+
+export interface ConfigView {
+  paths: ConfigPaths
+  active_profile: string
+  profiles: ProfileView[]
+  models: ModelView[]
+}
+
+/**
+ * `nulya config show --json` — the effective config chain projected once by
+ * the kernel's shell, so the picker never re-derives `default → system → user
+ * → project` (and its project-only-tightens rule) on its own. `env` is for
+ * tests that point `NULYA_HOME` at a scratch directory.
+ */
+export async function configShow(ws: Workspace, env?: Record<string, string>): Promise<ConfigView> {
+  const result = await run(ws, ["config", "show", "--json"], env)
+  if (result.code !== 0) fail("config show failed", result)
+  let value: unknown
+  try {
+    value = JSON.parse(result.stdout)
+  } catch {
+    fail("config show returned no JSON", result)
+  }
+  const record = value as Record<string, unknown>
+  const paths = (record["paths"] ?? {}) as Partial<ConfigPaths>
+  const profiles = Array.isArray(record["profiles"]) ? (record["profiles"] as ProfileView[]) : []
+  const models = Array.isArray(record["models"]) ? (record["models"] as ModelView[]) : []
+  return {
+    paths: { system: paths.system ?? "", user: paths.user ?? "", project: paths.project ?? "" },
+    active_profile: typeof record["active_profile"] === "string" ? record["active_profile"] : "",
+    profiles: profiles.map((p) => ({
+      ...p,
+      credential_source: p.credential_source ?? (p.credential ? "env" : "none"),
+      models: Array.isArray(p.models) ? p.models : [],
+      effort: p.effort ?? null,
+    })),
+    models: models.map((m) => ({
+      ...m,
+      label: m.label ?? "",
+      efforts: Array.isArray(m.efforts) ? m.efforts : [],
+      default_effort: m.default_effort ?? null,
+      context_window: m.context_window ?? null,
+    })),
+  }
 }
 
 /**
@@ -256,6 +347,12 @@ export interface StepHandle {
 
 export interface StepOptions {
   maxSteps?: number
+  /**
+   * Reasoning effort for this run (`--effort`). A generation option, not part
+   * of the frozen identity (DESIGN §3): omitted means the profile / catalog
+   * default the kernel resolves itself.
+   */
+  effort?: string
   /** Extra environment for the child, e.g. NULYA_SCRIPTED_MODE in tests. */
   env?: Record<string, string>
 }
@@ -269,6 +366,7 @@ export interface StepOptions {
 export function sessionStep(ws: Workspace, id: string, options: StepOptions = {}): StepHandle {
   const args = ["session", "step", id, "--stream"]
   if (options.maxSteps !== undefined) args.push("--max-steps", String(options.maxSteps))
+  if (options.effort) args.push("--effort", options.effort)
   const proc = Bun.spawn({
     cmd: [ws.bin, ...args],
     cwd: ws.dir,

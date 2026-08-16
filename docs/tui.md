@@ -1,6 +1,6 @@
 # Nulya TUI — 设计与计划
 
-> **状态：T0–T4 全部落地。** 内核侧只有 `session step --stream` → [DESIGN.md](DESIGN.md) §14；前端 T1（骨架）、T2（卡片与折叠）、T3（nulya 视图：`/sessions`、`/ext`、sub-session tab、observer）、T4（`/help` `/settings` `/usage`、keymap 覆盖、`bun build --compile`、README、5k 事件性能）都在 `tui/`（见 §11 与 [`../tui/README.md`](../tui/README.md)）。本文是 `tui/` 的设计契约 + 里程碑 + 实施日志；`tui/` 不在内核范围里（另一条工具链、另一个进程），所以它的现状写在本文 §11，不进 DESIGN.md。
+> **状态：T0–T7 全部落地（T8 占位：M5 给了它需要的内核面，前端未做）。** 内核侧只有两处：`session step --stream`（纯观测）与 `session new --parent` 的 fork 语义 → [DESIGN.md](DESIGN.md) §14/§11；前端 T1（骨架）、T2（卡片与折叠）、T3（nulya 视图：`/sessions`、`/ext`、sub-session tab、observer）、T4（`/help` `/settings` `/usage`、keymap 覆盖、`bun build --compile`、README、5k 事件性能）、T5（`/model` `/effort`）、T6（布局与 slash 补全）、T7（`/compact`）都在 `tui/`（见 §11 与 [`../tui/README.md`](../tui/README.md)）。本文是 `tui/` 的设计契约 + 里程碑 + 实施日志；`tui/` 不在内核范围里（另一条工具链、另一个进程），所以它的现状写在本文 §11，不进 DESIGN.md。
 > 上位原则见 [PLAN.md](PLAN.md) §3.11：前端是 core 之上的薄客户端——**tail ledger 文件 + append user 事件；前端是长期进程，re-spawn 的只是 worker**。
 
 ## 0. 定位（三句话）
@@ -35,6 +35,7 @@
 | D7 | sub-agent 谱系来源 | v1 从 transcript 推导（`nulya session new` 的输出 id、`session step <id>` 命令）；**不**改 header | `parent` 语义是 fork/compaction 的续接点，不是 spawned-by；等 subagent skill 真写出来再决定要不要 `spawned_by` header 字段（§10） |
 | D8 | 权限 / 审批 | v1 没有 | kernel 没有 policy hook 消费者；TUI 不发明审批 |
 | D9 | 内容宽度 | transcript 内容宽度上限 `max_width = 100` 列，左对齐 | 250 列的 markdown 不可读；设定可改 |
+| D10 | **给人用的：一切在屏幕上完成** | 启动 `nulya` 之后，选模型 / 换 effort / 看哪个 profile 缺 key / **贴 key** 都是屏幕上的交互（`/model` 选择器、`/effort`、选择器里的 `s`），**不能要求人去找 config 文件改**。TUI 记住上次的选择（`tui-state.json`，见 §7）；隐式的选择跑不了（缺 key）时开屏就是选择器 + 原因 + 怎么修。config 文件是**定义**（一个 model id 是什么、profile 怎么连）不是**日常操作面** | 这是 TUI 的关键设计理念，与 D4 分工：`tui.toml` 只有人写、`tui-state.json` 只有程序写；内核 `config.toml` 人写，TUI **只做一种写**——在末尾追加/就地替换一个带标记的 `[[provider.profiles]] name/api_key` 小块（`nulya/credentials.ts`；不重写、不碰人的内容）。内核不学"上次选了谁"（那不是 substrate）；kernel 只提供 `nulya config show --json` 一个投影（含 `paths`），TUI 不复刻配置合并链、不猜 home 在哪 |
 
 ## 2. 与内核的接触面
 
@@ -42,7 +43,9 @@
 
 | 面 | TUI 用法 |
 |---|---|
-| `nulya session new [--model p]` | `/new`；stdout = id |
+| `nulya session new [--profile p] [--model id]` | `/new`、`/model` 的 Enter；stdout = id |
+| `nulya session step <id> --effort e` | 每个 step 按本 tab 的 effort 传（`/model` 选的、`/effort` 改的）；不传 = kernel 默认 |
+| `nulya config show --json` | `/model` 的行、启动时判断隐式选择能不能跑（`launch.planLaunch`）；只报 env var 名与 credential 布尔 |
 | `nulya session append <id> --file f` | 发送：写 `.nulya/scratch/tui-<nonce>.txt` 再 `--file`（多行 / Windows 引号安全）；投进 inbox，**下一 step 边界才进 ledger**（PLAN §4 边角）→ TUI 乐观回显、标 `queued`，见到对应 `user_text` 事件后转正 |
 | `nulya session step <id> --stream` | 每次发送后 spawn 一个；stdout 见 §2.2 |
 | `nulya session events <id> [--since N]` | 打开 / resume 时一次性回放；**不**用 `--follow`（driver 模式下 step 的 stdout 已是全量实时源） |
@@ -73,22 +76,25 @@
 tui/
 ├── package.json  tsconfig.json  bun.lock  README.md
 ├── src/
-│   ├── main.tsx              # 参数解析（--session <id> | --new [--model p] | --workspace dir）→ createCliRenderer → <App/>
+│   ├── main.tsx              # 参数解析（--session <id> | --new [--profile p] [--model id] [--effort e] | --workspace dir）→ launch.planLaunch → createCliRenderer → <App/>
+│   ├── launch.ts             # 启动选择：命令行 > tui-state 上次选择 > 内核 active_profile，每层过 config show 的 credential；都不行 → 离线场 + 开屏选择器（D10）
 │   ├── nulya/                # ★ 唯一知道内核形状的目录
 │   │   ├── bin.ts            #   binary 发现：NULYA_BIN → <repo>/zig-out/bin/nulya[.exe] → PATH；版本探测（`nulya --version` 若有）
-│   │   ├── cli.ts            #   spawn：new / append(--file) / step --stream / events / cancel；--stream 行 → 类型化 StreamLine
+│   │   ├── cli.ts            #   spawn：new(--profile/--model) / append(--file) / step --stream [--effort] / events / cancel / config show --json；--stream 行 → 类型化 StreamLine
 │   │   ├── ledger.ts         #   Header / Event 类型（DESIGN §3.4 形状）；events 行解析；四种 cancel marker 识别
 │   │   ├── files.ts          #   .nulya/ 布局：sessions 列表 / lock 探测 / extensions store / tool-usage 投影
 │   │   └── diff.ts           #   edit args → unified diff 文本
 │   ├── state/
 │   │   ├── session.ts        #   一场 session 的视图状态：items（seq 键）、in-flight turn、pending appends、usage 累计、role（driver|observer）
 │   │   ├── driver.ts         #   状态机 idle→appending→stepping→idle；run done 后若仍有 pending 未转正 → 再 step
-│   │   └── settings.ts       #   tui.toml 加载合并（user → project）
+│   │   ├── settings.ts       #   tui.toml 加载合并（user → project）
+│   │   ├── tui_state.ts      #   tui-state.json：程序唯一写的文件（上次 /model 的 profile/model/effort）
+│   │   └── tabs.ts           #   一 tab 一场：attachment + tab 级 effort；replace() 让空场就地换模型
 │   ├── render/               #   渲染注册表：按 (tool, 命令前缀) 选卡片；这是唯一按名字 match 的地方
 │   │   ├── registry.ts
 │   │   ├── cards/            #   UserTurn / AssistantTurn / Thinking / ShellCard / EditCard / ExtToolCard / EvolveCard / CapabilityBanner / SubSessionCard / CompositionCard / CanceledCard
 │   │   └── theme.ts          #   tokens（§6）
-│   ├── ui/                   #   App / Transcript / Composer / StatusBar / overlays(SessionsPicker, ExtView, Help)
+│   ├── ui/                   #   App / Transcript / Composer / StatusBar / overlays(SessionsView, ExtView, ModelView, Help, Settings, Usage)
 │   └── keymap.ts
 └── test/                     #   bun test：cli.ts 用 NULYA_SCRIPTED_MODE 跑真实二进制；render 用 @opentui/core/testing 快照
 ```
@@ -162,13 +168,15 @@ tui/
 
 - `Enter` 发送；`Shift+Enter` / `Ctrl+J` 换行；`↑` 空 composer 时翻历史；粘贴多行原样。
 - 发送时若 `stepping`：只 append（queued）；不打断。
-- `/` 开头弹一个小补全：`/new [--model p]` `/sessions` `/ext` `/skills` `/usage` `/cancel` `/fold` `/settings` `/help` `/quit`。未知 `/xxx` 原样发给模型（nulya 没有 skill slash；skill 由模型 `nulya skill load`）。
+- `/` 开头弹一个小补全：`/model` `/effort <level|auto>` `/new [--profile p] [--model id]` `/sessions` `/ext` `/skills` `/usage` `/compact [focus]` `/cancel` `/fold` `/settings` `/help` `/quit`。未知 `/xxx` 原样发给模型（nulya 没有 skill slash；skill 由模型 `nulya skill load`）。
 - 全局：`Esc` cancel（stepping 时）/ browse 模式；`Ctrl+C` 两下退出（stepping 时第一下先 kill）；`Ctrl+L` 重绘；`F2` `/ext`；`F3` `/sessions`；`F4` 下一个 tab；`Ctrl+W` 关掉当前 tab（最后一个不关）。
 - observer 时空 composer 上的 `Enter` = take over（§5.6）；browse 模式里选中的卡若指名了一个 session，`Enter` 打开它成第二个 tab，`Space` 永远是折叠。
 
 ### 4.5 状态栏
 
 左：token 累计（本进程内从 `usage` 流事件累加：`↑input ↓output cache%`；resume 前的历史未知，显示 `since attach`）· 当前活动（`⠋ shell 3s` / `⠋ model` / `idle`）· 提示三条。右：`step n` · role（`driver` / `observer` §5.6）。离开底部时插入 `↓ 3 new`。
+
+上下文占用（`ctx 72% · /compact`）只在 ≥60% 时出现、≥80% 转 warn 色。分母是 `[[models]]` 目录的 `context_window`（目录没写就整个不显示，不编分母）；分子是**最后一步**的 `input + cache_read + cache_write`——`provider.Usage.input_tokens` 是扣掉缓存之后的量，只读它会把一个快满的窗口报成几乎空的。它只是显示，不触发任何动作。
 
 ## 5. nulya 独有视图
 
@@ -230,7 +238,7 @@ registry 按 shell 命令前缀识别，头行抽关键事实（抽不到就退�
 
 ## 7. 设定 `tui.toml`
 
-路径：user 层 `%APPDATA%\nulya\tui.toml` / `~/.config/nulya/tui.toml`，项目层 `.nulya/tui.toml`；后者覆盖前者；`Bun.TOML.parse`。
+路径：user 层 `~/.nulya/tui.toml`（Windows `%USERPROFILE%\.nulya\tui.toml`；`NULYA_HOME` 整体搬走，与内核 `config.toml` 同目录同规则），项目层 `.nulya/tui.toml`；后者覆盖前者；`Bun.TOML.parse`。
 
 ```toml
 [transcript]
@@ -252,6 +260,8 @@ fold   = "ctrl+o"
 
 `/settings` 只显示当前生效值与来源文件；不在 TUI 里写配置（编辑器改文件即可，第二个诉求出现再做）。
 
+**`tui-state.json`（D10；T5 起）**：同目录（user 层）下**唯一由程序写**的文件，JSON：`{"model":{"profile":"deepseek","model":"deepseek-v4-flash","effort":"high"}}`——`/model` 的 Enter 与 `/effort` 会更新它；启动无 `--profile` 时的默认选择就是它（`launch.planLaunch`：命令行 > 上次选择 > 内核 `active_profile`；每一层都要 `config show` 说它有 credential 才算数，否则落到离线 scripted 并开屏弹选择器讲原因）。缺失或损坏 = 没记住，永不阻止启动。为什么不放进 `tui.toml`：那是人写的；程序回写人的文件会碰注释与排版（tcode 用 toml_edit 才做到），这里不值得。为什么不进内核 config：内核不需要知道"上次选了谁"（不是 substrate）。
+
 ## 8. 测试
 
 - `tui/test/cli.test.ts`：`NULYA_SCRIPTED_MODE=finish|loop` 跑真实 `nulya` 二进制：new → append → step --stream，断言行序与类型化解析；cancel 路径；events 回放与 live 状态一致（同一 fixture 两条路径渲染出同一帧）。
@@ -268,19 +278,27 @@ fold   = "ctrl+o"
 | ~~**T2 · 卡片与折叠**~~ ✅ | registry；Shell/Edit(diff)/ExtTool/Thinking/Canceled/spill；EvolveCard 全表；CapabilityBanner；CompositionCard；折叠交互；`tui.toml`；主题 tokens；ascii 降级 | §4.2 表每行一个快照测试；`edit_diff` 设定生效 |
 | ~~**T3 · nulya 视图**~~ ✅ | `/sessions`（树 + live 标记 + 打开）；`/ext`（store / 版本线 / 漂移 / usage / 动作键）；SubSessionCard → 第二 tab；observer 模式（锁探测、`events --follow` 续接、take over） | 用 shell 在另一终端跑一个 driver 脚本 loop step，TUI 以 observer 附上并能 append |
 | ~~**T4 · 收尾**~~ ✅ | `/help` `/settings` `/usage`；keymap 覆盖；`bun build --compile` 出单文件；README（安装、`NULYA_BIN`、按键）；性能核对（长 session 回放 5k 事件不卡；scrollbox 视口裁剪 + `history_window`） | 5k 事件 session 打开 < 1s（实测 ~0.35s + 首帧 ~0.15s）；README 照做能跑 |
+| ~~**T5 · 模型选择**~~ ✅ | 内核外壳：`[[models]]` 目录 + profile `models[]`、`session new --profile/--model`、`step --effort`、`nulya config show --json`、DeepSeek `off`/`reasoning_content`；前端：`/model` 选择器（↑↓ ←→ Enter）、`/effort`、`tui-state.json`、无 key 时开屏即选择器（D10） | `zig build test`/`e2e` 绿；`bun test` 新增 `model.test.tsx` 8 条；开 `nulya`（无 key）第一屏就是选择器 + 原因 |
 
-顺序 T0 → T1 → T2 → T3 → T4；**T1 结束就开始用它 dogfood**，T2 起的优先级由用出来的痛点重排。
+| ~~**T6 · 用出来的痛点**~~ ✅ | composer/状态栏永不收缩（真 bug）；`/model` 两级（providers → models）+ `a` 加 compatible provider；空 session 首屏；slash 补全；`PgUp`/`PgDn`/`Shift+End` 回读 | `bun test` 99 pass；30/24/16/10 行终端下 composer 都在 |
+| ~~**T7 · compaction**~~ ✅ | 内核：`session new --parent` 校验父 + 继承冻结身份（DESIGN §11/§14）；前端：`/compact [focus]`、压缩两条 turn 的卡片、状态栏上下文占用 | `zig build e2e` 里 fork 继承一条；`bun test` 100 pass；聊两句 → `/compact` → 新 session 顶上是 summary |
+
+| **T8 · 慢速回路的前端**（占位，内核侧已就绪） | `/outcome <verdict> [note]`（→ `nulya session outcome`，`/quit` 时问一次）；`/sessions` 改读 `nulya session list --json`（含 verdict / usage / parent，不再自己扫 header）；`/evolve`（`ext build extensions/evolution` → `session new --with evolution@<v>` → 跟随子 session）；`/mode <id>[@<v>]`（`--with` 一个贡献 system_prompt 的 data extension） | `bun test` 绿；评一次 verdict 后 `/sessions` 里看得到；`/evolve` 起来的场次带 evolution 的 system block |
+
+顺序 T0 → T1 → T2 → T3 → T4；**T1 结束就开始用它 dogfood**，T2 起的优先级由用出来的痛点重排（T5–T8 就是这么来的）。
+
+**M5 给前端的新面**（内核已落地，TUI 尚未消费，见 T8）：`nulya session list [--json]`（一次拿到每场的 composition / parent / 事件数 / usage / 最新 verdict——`/sessions` 不必再自己解析 header）· `nulya session outcome <id> <verdict> [--note]`（写 outcome journal，不碰 session 文件，所以正在跑的场次也能评）· `session new --with <id>[@<version>]`（把一个 built 但**不 activate** 的包带进这一场——mode / evolution 就是这么投放的）· ledger 里 `assistant.usage`（每步真实成本，状态栏和 `/usage` 可以按步显示而不只是累计）· extension 的 user root `~/.nulya/extensions`（`/ext` 视图要标出每个 id 来自哪个 root、谁被遮蔽）。
 
 ## 10. 开放问题（待议，默认都先不做）
 
 1. **spawned-by 谱系**：subagent 的 `session new` 在 `NULYA_SESSION` 存在时是否自动记一个 header 字段（`spawned_by{session,seq}`，与 `parent` 分开）？是 provenance fact，成本几行；但等 subagent skill 成为第一个 consumer 再定字段名与语义。
-2. **`nulya config show [--json]`**：外壳级投影，供 `/new --model` 选择器与 agent 自查；v1 手打 profile 名。
+2. ~~**`nulya config show [--json]`**：外壳级投影，供 `/new --model` 选择器与 agent 自查；v1 手打 profile 名。~~ **已落地（T5）**：DESIGN §14；`/model` 读它。
 3. **`session append` 打印投递回执**（inbox 文件名）→ TUI 按 `origin` 精确转正而非按序匹配；现在按序够用。
 4. **`<id>.live` sidecar**：observer 模式的 deltas；等第一个 driver 脚本。
 5. **`nulya composition preview`**：下一场会晋升谁——纯投影 CLI，避免 TUI 复刻 `tool_selection.rank`。
 6. **`split-footer` 模式**作为可选屏幕模式（scrollback 原生复制），与折叠可变历史的取舍。
 7. session `--system-file/--skill/--pin`（PLAN §3.2 未落地）落地后 `/new` 的表单。
-8. **header 的 `created` 现在是空串**：`ledger.Header` 有这个字段、`session new` 不填它，于是 CompositionCard 的"时间"只能省略（T2 §11）。补一行"创建时写 RFC3339"是几行的事，但它是 model-invisible 的 provenance fact，值得和第 1 条（`spawned_by`）一起定，别单独动 frozen core 的 header 形状。
+8. ~~**header 的 `created` 现在是空串**~~ **已落地（M5f）**：`session new` 写 RFC3339 UTC，`session list --json` 按它倒序；CompositionCard 可以显示时间了（老 session 仍是空串，退回按 id 排）。
 
 ## 11. 实施日志
 
@@ -680,3 +698,129 @@ stdout 全是 JSON、退出码 0、stderr 空；行序与 DESIGN §14 完全一�
 - 非 Windows 上租约探针仍答 `unknown`（T3 起）。
 
 核验：`bun run typecheck` 绿 / `bun test` 75 pass 0 fail（12 文件，17 快照）。内核未动，`zig build test` / `e2e` 不受影响。
+
+### T5 · `/model` 选择器、effort、`config show`（2026-08-16）
+
+**状态**：完成。这是 T0 之后**第二次**碰内核，全部在外壳层（`config.zig` / `launch.zig` / `cli.zig` / `providers/openai.zig` / `default.toml`），frozen core（§15.1）一字未动：header 形状不变（`model` 仍是 profile 名、`model_identity` 仍是解析后的身份），`resolveDescriptor` 只多了一个可选 model id 参数。`zig build test` / `e2e` 绿；`bun run typecheck` 绿；`bun test` 82 pass（13 文件，18 快照；`files.test.ts` 的租约探针一条在整套并跑时偶发 60s 超时、单跑绿——T3 起的老 flake）。
+
+**关键决定与理由**
+
+1. **模型的两张表（DESIGN §9.5）。** 原来 profile 把"怎么连"和"用哪个 model + effort"捆在一起，一个 endpoint 换个模型就得再抄五行 profile。现在 `[[provider.profiles]]` 只说怎么连 + 服务哪些 `models[]`，`[[models]]` 目录说一个 id 是什么（label / efforts / default_effort / context_window）；同一个 `deepseek-v4-flash` 经 openai 口和 anthropic 口只写一次。目录是**纯描述**（kernel 不读；`Config.defaultEffort` 与 `config show` 读），落在 config 层而不是 TUI，因为它有两个 consumer：选择器和 agent 自己（`nulya session new --profile … --model …` 时该知道有哪些）。**"删掉它八条 physics 哪条失效"→ 一条都不 → 不是 kernel**，所以只到 config/cli 为止。id 与档位按各家文档核过（2026-08）：DeepSeek `reasoning_effort` 只认 low|high|max（medium 折成 high），所以目录列 `off|low|high|max`。
+2. **`session new --profile P [--model ID]`，`--model` 回归字面意思。** 原来 `--model` 吃 profile 名是命名疤痕；小项目直接改、不留兼容（e2e / tui 测试全部同步）。不存在的 profile 现在**拒绝**（exit 1、提示 `config show`），存在但缺 key 的仍冻结 scripted（离线替身语义不变）但 stderr 明说——给人用的入口不该把 typo 变成一场静默的 scripted session。
+3. **effort 是每步的 generation option，不是身份。** 内核本来就在 step 时从 config 读 effort（DESIGN §3），所以 `session step --effort E` 只是把这个决定交给 driver；TUI 里 effort 是 **tab 级**状态（`SessionTab.effort`），`/model` 选的、`/effort` 改的，下一次 spawn step 时带上。header 上显示 `· effort high`。
+4. **`nulya config show --json`（§10.2 落地）。** `{active_profile, profiles[]{…, credential: bool, models[]}, models[]}`；credential 用与 `resolveDescriptor` **同一个**判定（`launch.credentialAvailable`），所以选择器标 ready 的行 `session new` 一定不落 scripted。永不报值、inline `api_key` 不出现（单测钉住）。TUI 因此不复刻配置合并链（D10）。
+5. **`/model` 是一张平表**：每个 (profile, model) 一行，`↑↓` 移动、`←→` 转该行的 effort 档位（`auto` + 目录档位，tcode 同款）、Enter 开新场、Esc 回；缺 key 的行**留在列表里但变暗、行尾写 `set DEEPSEEK_API_KEY`**，Enter 在上面只报原因不动作——"为什么选不了"的答案在行上，不在文件里。当前 tab 的 (profile, model) 标 `✓ current`；列表比屏幕高时按光标开窗（`windowRange`，上下各一行 "N more"）。
+6. **换模型 = 开新场，但空场就地替换。** 一个 TUI 自己造的、0 事件、空闲的 tab 上按 Enter，新 session **取代**这个 tab（旧文件经 `discardIfUntouched` 撤销）而不是并排开第二个——启动 → 选模型 → 开始工作，看不到 tab 增生；用过的 tab 才开第二个（`tabs.replace`）。
+7. **`tui-state.json`（D10）。** 程序唯一写的文件：上次的 (profile, model, effort)。启动顺序 `launch.planLaunch`：命令行 `--profile/--model/--effort` > 上次选择 > 内核 `active_profile`，每层都要 `config show` 说它有 key 才算数；命令行点名的跑不了→直接 stderr 拒绝（不静默换）；隐式的都跑不了 → 起离线 scripted 场并**开屏即选择器**，标题下一行写原因（`openai needs OPENAI_API_KEY · this session is the offline stand-in · pick one marked ready, or set the key and restart`），composer 让出键盘。`/new` 无参 = 上次选择；`/new --profile p` 是一次性的、不记住。
+8. **DeepSeek 两个坑（tcode 踩过、官方文档核实）。** `off` 在 DeepSeek 发 `thinking:{type:"disabled"}`（它默认开 thinking，`reasoning_effort:"off"` 不是一个档位）、别处什么都不发；**带 tool_calls 的 assistant 轮的 `reasoning_content` 必须原样传回**否则 400——现在 openai 口在 DeepSeek 端点上把本轮 `reasoning_content` 拼成一个 `reasoning_item`（`{"reasoning_content":"…"}`）走已有的 reasoning 回放机制（与 anthropic thinking / codex encrypted item 同一条路），只挂在带 `tool_calls` 的 message 上。**未在真实 key 上跑**（本机没有 `DEEPSEEK_API_KEY`），单测钉住 wire 形状；`NULYA_INTEGRATION_PROFILE=deepseek zig build integration` 是下一步该跑的活证据。
+
+**偏离设计之处**
+
+- §3 里 `main.tsx` 的参数由 `--model <profile>` 变成 `--profile <p> [--model <id>] [--effort <e>]`；`/new --model p` 同步改。README 与 §2.1 表已改。
+- default.toml 的 `openai` 默认模型从 `gpt-4o-mini` 换成 `gpt-5.6-sol`（目录里的 id，随 tcode 2026-07 核过的清单）；`launch.default_openai_model` 仍是 profile 未写 model 时的兜底。
+
+**没做 / 给下一里程碑**
+
+- **preset（整套 lineup）没做**：单角色世界里 preset ≡ profile；等 sub-agent 有第一个 consumer、有了角色，preset 落 `tui.toml`/driver 侧、以文字告诉 agent，不进内核。
+- `codex` profile 的 `models` 只有 `gpt-5.5`（tcode 是从本地 runtime 目录填的），要多个再加目录条目。
+- 选择器不做鼠标；`/effort` 不校验档位（打错了 provider 会 4xx，状态栏可见）。
+- `--session <id>` resume 的 tab effort 起于 undefined（kernel 默认），不从 state 找；等真的需要再做。
+
+核验（编排者）：`zig build test` 绿 / `zig build e2e` 绿 / `bun run typecheck` 绿 / `bun test` 82 pass 1 flake（`probeWriterLease` 整套并跑超时、单跑绿）。
+
+### T5 补记 · `~/.nulya`、文件里的 key、选择器里贴 key（同日）
+
+**状态**：完成。`zig build test` / `e2e` 绿；`bun test` model.test.tsx 11 条（新增 credentials 写入/替换、真二进制 `NULYA_HOME` 回路、`s` 贴 key 流程）。
+
+**关键决定与理由**
+
+1. **user 层配置搬到 `~/.nulya/config.toml`**（Windows `%USERPROFILE%\.nulya\config.toml`），`tui.toml` / `tui-state.json` 同目录；`NULYA_HOME` 整体搬走（测试用它隔离）。原来的 `%AppData%\nulya` / `~/.config/nulya` 在 Windows 上难找，且与 workspace 的 `.nulya/` 不同形。`nulya config show` 现在先打印三条路径。
+2. **profile 自己的 `api_key` 真正生效**（原来能解析、不被读——正是 CLAUDE.md 说的"只写不读"信号）。`launch.credentialSource`：`config > env > login`。边界不变：key 不进 session 文件、不进工具子进程 env、不从 project 层来（DESIGN §9.5 改写了这一段）。**它不只是方便**：`environment.isSecretKey` 会把 `*API_KEY*` 从模型 shell 的 env 剥掉，所以 sub-agent 自调用（模型自己 `nulya session new`）唯一能拿到 credential 的路径就是 kernel 自己读文件。
+3. **`/model` 里按 `s` 贴 key**：一行 `<input>`，Enter 写进 `config show` 报的 `paths.user`——`nulya/credentials.ts` 追加/就地替换一个带标记的四行块（`# nulya: api_key for profile "x" …` + `[[provider.profiles]]` + `name` + `api_key`），靠内核"同层同名 profile 按序合并"的语义只覆盖 `api_key`；人的内容一字不动。存完自动 `r`，行变 `ready · key in config`。开屏引导句改成"pick a row marked ready, or press s on one to paste its API key"。
+4. `default.toml` 加 `openrouter`（anthropic 口，`https://openrouter.ai/api`，`OPENROUTER_API_KEY`，`tencent/hy3:free`），与 tcode 同款；`config show` 多 `credential_source`。
+
+**给下一里程碑**：key 输入不做遮罩（本地终端、写完即消失）；`s` 只服务 openai/anthropic 两种 kind（codex 走 `codex login`）；新增一个**不在**内置列表里的 endpoint 仍要手写 5 行 profile——真要"屏幕上加 provider"再做向导。
+
+核验（编排者）：`zig build test` 绿 / `zig build e2e` 绿 / `bun run typecheck` 绿 / `bun test` 86 条：单文件全绿；整套并跑时 1–3 条**进程重**的测试（`probeWriterLease`、driver "killed step"、`discardIfUntouched`）偶发超时，每次不同、单跑都绿、无残留 `nulya` 进程——去掉 model.test.tsx 整套跑同样有 1 条，是本机负载下 T3 起的老现象，不是逻辑回归。
+
+### T6 · 用出来的痛点：composer 塌陷、provider/model 两级、空屏与 slash 补全（2026-08-16）
+
+**状态**：完成。`bun run typecheck` 绿；`bun test` 99 pass（新增 `test/layout.test.tsx` 6 条 + composer 2 条 + model 4 条）；`bun run compile` 出单文件。
+
+来源是一次真实试用给出的三条：①`/model` 配的是"模型"不是"provider"，一个 provider 铺开成好几行、挤满屏幕，而且没有地方填 compatible endpoint；②对话一轮之后 **composer 不见了**；③整体太简陋。
+
+**关键决定与理由**
+
+1. **composer / 状态栏 `flexShrink={0}`（真 bug，②的根因）**。三块布局里 composer 只是普通 flex child：transcript 一长，flex 协商就把它压成 1 行、再压成 0 行——不报错，只是**屏幕上没有能打字的地方了**。`test/layout.test.tsx` 把它钉死：30/24/16/10 行终端 + 80 行的回答，prompt 行与其下两行必须都在。同一类问题在 overlay 上也存在（`/help` 变长后行画在行上），所以 `HelpView` 的正文进 `scrollbox`，`SessionsView` 跟 `ModelView` 一样窗口化（`ui/list.ts` 的 `windowRange` / `visibleRows` 抽出来共用）。**规则**：底部两块永不收缩，中间那块要么滚动要么窗口化。
+
+2. **`/model` 变两级：providers → 它的 models（①）**。原来一行一个 `(profile, model)`：七个内置 profile 变成十四行，其中十三行重复同一句 credential 状态，而且大半是没有 key 的 provider 的模型。现在第一层一行一个 profile（wire + endpoint host + 几个模型 + 能不能跑），Enter 钻进它的模型（effort dial 在这一层）。credential 归 provider，所以 `s` 在两层都是"给当前这个 provider 贴 key"。没有 key 的 provider **仍然可以进去看**——Enter 才说明为什么不能跑，浏览不该被拦。
+
+3. **`a` = 加一个 OpenAI/Anthropic-compatible provider（①的后半句）**。tcode 的 `setup::Setup` 是一个状态机走 name → protocol → base_url → models；这里同形：name → wire（两行菜单，各带一句"谁属于这一类"）→ base URL → 逗号分隔的 model ids → key（可空）。写进 `paths.user` 的**一个**带标记块（`nulya/credentials.ts` 的 `writeProfile`）。`placeBlock` 从"按行数替换"改成"替换到下一个空行"——profile 块的长度随 model 列表变，按行数替换会留下孤儿行。内核一行没改：它本来就说两种 wire，缺的只是"不离开 TUI 就能说出来"的地方。
+   - 每一步的输入框**必须**清空：`<Show keyed>` 在同一帧内 unmount/remount 会复用底下那个 renderable，于是 base URL 前面粘着刚打的 profile 名（`openrouterhttps://…`）。`createEffect` 在每个 text step 开始时清一次。
+   - 全局按键里开输入框的那几处要 `preventDefault()`（`a` / `s` / wire 的 Enter / add 行的 Enter），否则同一次 dispatch 里新挂上来的输入框会把这个键当成自己的第一个字符/一次空提交。
+   - 被拒绝的字段**保留原文**（改比重打便宜）；测试用 `pressBackspace` 擦。
+
+4. **③的三件**：
+   - **空 session 首屏**（§4.1 一直写着、从没做）：`ascii_font` wordmark + 一句话 + 四条 `/` 入口 + 一行"怎么开始"。不是卡片——没有事件支撑它。第一条 turn 落地即消失。model/tools 不重复写，上面那张 CompositionCard 已经说了。
+   - **slash 补全**（§4.4 一直写着、从没做）：`src/commands.ts` 是唯一的命令表，`App.runCommand` 派发它、composer 补全它、`/help` 列它。composer 上方列出还可能是哪几条，`Tab` 补第一条。**没有**可上下选的菜单：Enter 永远发送写着的东西，这是输入框不能破的承诺。只补第一个词——有空格之后是参数，在参数上弹菜单是噪音。
+   - **回读**：`PgUp` / `PgDn` / `Shift+End` 进 keymap（`/help` 原来就在吹这个键、却没人绑）。离开底部时状态栏出 `▾ N more below · Shift+End`，要**连续两次**探测到才显示——长回答排版时 box 会短暂离开自己的 sticky bottom，每条长回答闪一下比不显示更糟。
+
+**偏离设计之处**：§4.1 说空屏是"wordmark + session 信息 + 三条提示"，session 信息那半删了（与 CompositionCard 重复）。§4.4 的补全设计成"小补全弹窗"，实现成不可选的提示列表 + Tab，理由见上。
+
+**怎么看一眼**
+
+```bash
+cd tui && bun test test/layout.test.tsx test/model.test.tsx test/composer.test.tsx
+bun run src/main.tsx --profile scripted   # 空屏 → 打 `/` 看补全 → F5 看两级选择器
+```
+
+**已知问题 / 给下一里程碑**
+- `ExtView` / `UsageView` / `SettingsView` 还没窗口化，条目一多同样会画出界（`ui/list.ts` 已经备好）。
+- `a` 加的 provider 不写 `[[models]]` 目录条目，所以它的模型没有 effort dial、没有 context window——目录是"一个 id 是什么"，等真需要再给表单加一步。
+- `more below` 是 200ms 轮询 + 两次确认，不是事件；鼠标滚轮之后最多晚 400ms 才出现。真嫌慢的话要 OpenTUI 给 scrollbox 一个 scroll 事件。
+- mock 键盘没有 PgUp/PgDn，`test/layout.test.tsx` 直接往 `renderer.stdin` 灌转义序列。
+
+核验（编排者）：`bun run typecheck` 绿 / `bun test` 99 pass 0 fail（`files.test.ts` 的 `probeWriterLease` 在整套并跑时偶发超时、单跑绿——T3 起的老现象）/ `bun run compile` 出 `dist/nulya-tui.exe`。内核 `src/` 一字未改。
+
+### T7 · compaction：同一场对话，换个文件（2026-08-16）
+
+**状态**：完成。内核侧补了 fork 原语的缺口（`session new --parent` 校验父存在 + 继承父的冻结身份，DESIGN §11/§14）；前端新增 `/compact [focus]`、压缩两条 turn 的卡片、状态栏的上下文占用。
+
+来源：内核盘点发现 `compaction.max_input_tokens` 能解析但无人消费、`context_window` 只被 `config show` 打印——也就是说**长 session 撑爆上下文时是硬失败，没有任何降级路径**，而 TUI 已经能让人坐着聊很久了。
+
+**关键决定与理由**
+
+1. **压缩是外挂，不是内核。** 拆成三件事之后归属自明：何时压 = policy（driver）；压成什么 = intelligence（模型）；新文件 + parent 指针 + 身份延续 = substrate（内核）。前两件一行都没进 `src/`；第三件只动了 `cli.zig` 这层外壳，`session.zig` 一字未改。整个 `/compact` 是 `session append` + `session step` + `session new --parent` 的组合，内核既不知道也不关心发生过一次压缩。
+
+2. **摘要在旧 session 内部生成，不开子 session**（参考了 tcode 的 `agent/compact.rs`，但结论不同）。tcode 就地替换历史、共享 cache scope；nulya 不能替换历史（physics §1/§3），所以本来打算开一个子 session 去总结。**那是错的**：压缩恰好发生在缓存前缀最大的时候，子 session 是另一个文件、另一个 cache 域，等于把整份转录当全新 input 再付一次全价——正是要压缩的那个东西。改成在旧 session 里 append 一条压缩请求再 step，走的是已缓存的前缀。代价是请求与摘要成为旧 ledger 里两条真实事件，这反而诚实：那个文件记下了自己为什么结束。
+
+3. **身份继承、composition 不继承。** 两者都是 session 边界上的决定，方向相反：模型身份是"在跟谁说话"，压缩换人是意外，所以 `--parent` 不点名模型时原样继承父 header 的 `model_identity`；而 composition 的冻结点、promotion 的晋升点本来就是 session 边界（DESIGN §5.5/§7.5），fork 是个边界，让它自然吸收新晋升与新版本才一致。
+
+4. **失败必须什么都不动。** `/compact` 的每一条早退（observer、正在 step、空 session、模型没给出文本）都让对话停在原地。摘要先写出来，再动任何东西；拿不到摘要就明说 `nothing moved, this session is still the live one`。半途而废的压缩 = 丢掉一整段对话，这是这个功能唯一真正危险的失败模式。
+
+5. **两个 marker 是前端与自己的约定**，不是内核概念——内核看到的就是两条普通 `user_text`。它们存在只为让 transcript 把"机器写的那两条"折起来（请求默认折叠、摘要默认展开），以及让一条不是人打的摘要看起来不像人打的。
+
+6. **不自动压。** 阈值键仍然无人消费；状态栏只在 ctx ≥60% 时把 `/compact` 显示出来。自动压缩失手的代价是一整段对话，先让人按，等有真实使用证据再说。
+
+**偏离设计之处**：PLAN §3.4 原写"由 agent 或 kernel 生成 summary"，实现只做了前者（kernel 不生成任何东西）；原写"summary 为首条事件"，实际是投进新 session 的 inbox、第一次 step 时才进 ledger——`session append` 本来就是这个语义，没有为它开第二条路。
+
+**怎么看一眼**
+
+```bash
+zig build e2e
+```
+
+```bash
+cd tui && bun test test/compact.test.ts
+```
+
+聊两句之后打 `/compact`，看新 tab 顶上的 summary 卡（`bun run src/main.tsx --profile scripted`）。
+
+**已知问题 / 给下一里程碑**
+- `/sessions` 不显示 parent 链：压缩后父与子是两行，看不出是同一场对话。
+- 压缩请求跑的是这个 tab 的 `--max-steps`，模型若违反"不要调工具"会多跑几步；`summaryFrom` 取请求之后的全部 assistant 文本，够用但不精确。
+- 摘要质量没有测试，也测不了；`test/compact.test.ts` 钉的是"拿不到摘要时什么都不动"这类不会丢东西的性质。
+- 上下文占用取自最后一步的 usage，只有 `--stream` 这条路有 usage，所以 observer 模式下不显示。
+- `/help` 已经满了：加 `/compact` 之后 `/cancel` 以下要滚动才看得到。再加命令之前得先想清楚这一页怎么分组。
+
+核验（编排者）：`zig build test` 绿 / `zig build e2e` 绿 / `bun run typecheck` 绿 / `bun test` 100 pass 0 fail（`driver.test.ts` 的 "killed step" 在整套并跑时偶发超时——干净树上同样复现，T3 起的老现象，非本轮回归）。

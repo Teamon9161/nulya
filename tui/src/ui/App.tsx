@@ -1,7 +1,7 @@
 import { Match, Switch, createEffect, createSignal, onCleanup } from "solid-js"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
-import type { KeyEvent } from "@opentui/core"
-import { Transcript, windowItems } from "./Transcript.tsx"
+import type { KeyEvent, ScrollBoxRenderable } from "@opentui/core"
+import { Transcript, rowsBelow, windowItems } from "./Transcript.tsx"
 import { Composer, type ComposerApi } from "./Composer.tsx"
 import { StatusBar } from "./StatusBar.tsx"
 import { TabBar } from "./TabBar.tsx"
@@ -10,13 +10,16 @@ import { ExtView } from "./overlays/ExtView.tsx"
 import { HelpView } from "./overlays/HelpView.tsx"
 import { SettingsView } from "./overlays/SettingsView.tsx"
 import { UsageView } from "./overlays/UsageView.tsx"
+import { ModelView } from "./overlays/ModelView.tsx"
 import { ScreenContext, StyleContext, useScreen, useStyle, type Style } from "../render/theme.ts"
 import { FoldContext, createFoldStore } from "../state/folds.ts"
 import { BrowseContext, createBrowseStore } from "../state/browse.ts"
 import { OverlayContext, createOverlayStore, type OverlayKind } from "../state/overlay.ts"
-import { createTabStore } from "../state/tabs.ts"
+import { createTabStore, type SessionTab } from "../state/tabs.ts"
+import { loadTuiState, rememberModel, type ModelPick } from "../state/tui_state.ts"
 import { describeTool } from "../render/registry.ts"
-import { sessionNew } from "../nulya/cli.ts"
+import { sessionNew, type ModelView as ModelParams } from "../nulya/cli.ts"
+import { compactPrompt, openCompacted, summaryFrom, summaryTurn } from "../compact.ts"
 import { createKeymap, matches } from "../keymap.ts"
 import type { AttachOptions } from "../state/attach.ts"
 import type { SessionState, TranscriptItem } from "../state/session.ts"
@@ -30,6 +33,22 @@ export interface AppProps {
   driver?: AttachOptions
   /** `id` was created by this process (`session new`), not opened by name. */
   created?: boolean
+  /** The effort the first tab starts with (from the pick that created it). */
+  effort?: string
+  /**
+   * Open on the model picker, with this line under its title. `main` sets it
+   * when the session it had to create is not the one the user meant — no key
+   * for the intended profile — so the first thing on screen is the way out.
+   */
+  guide?: string
+  /** Where the TUI remembers its last pick; tests point it elsewhere. */
+  statePath?: string
+  /**
+   * The `[[models]]` catalog, read once at launch. Only `context_window` is
+   * used, for the status bar's fullness gauge; without it the gauge simply does
+   * not appear, which is why this is optional rather than loaded here.
+   */
+  models?: ModelParams[]
 }
 
 /**
@@ -57,15 +76,18 @@ export function App(props: AppProps) {
   const keys = createKeymap(props.style.settings)
   const tabs = createTabStore(
     props.ws,
-    { id: props.id, state: props.state, created: props.created ?? false },
+    { id: props.id, state: props.state, created: props.created ?? false, effort: props.effort },
     props.driver ?? {},
   )
 
   const [notice, setNotice] = createSignal<string | null>(null)
+  const [guide, setGuide] = createSignal<string | null>(props.guide ?? null)
   const [spinnerTick, setSpinnerTick] = createSignal(0)
   const [ctrlCArmed, setCtrlCArmed] = createSignal(false)
   const [allOpen, setAllOpen] = createSignal(false)
+  const [behind, setBehind] = createSignal(0)
   let composer: ComposerApi | null = null
+  let scroll: ScrollBoxRenderable | null = null
 
   const tab = () => tabs.active()
   const snapshot = () => tab().state.snapshot
@@ -89,6 +111,36 @@ export function App(props: AppProps) {
     const timer = setTimeout(() => setCtrlCArmed(false), 3000)
     onCleanup(() => clearTimeout(timer))
   })
+
+  // How far back the reader has scrolled. Polled rather than derived: the wheel
+  // and the scrollbar move the box without going through us, so the only honest
+  // source is the box itself. One subtraction every 200ms.
+  //
+  // Two polls have to agree before it shows. While a tall turn is being laid
+  // out the box is briefly a screenful away from its own sticky bottom, and a
+  // "16 more below" that flashes on every long answer is worse than none.
+  createEffect(() => {
+    let previous = 0
+    const timer = setInterval(() => {
+      const now = rowsBelow(scroll)
+      setBehind(now > 0 && previous > 0 ? now : 0)
+      previous = now
+    }, 200)
+    onCleanup(() => clearInterval(timer))
+  })
+
+  const scrollBy = (pages: number) => {
+    if (!scroll) return
+    const page = Math.max(1, (scroll.viewport?.height ?? 10) - 2)
+    scroll.scrollBy({ x: 0, y: Math.round(page * pages) })
+    setBehind(rowsBelow(scroll))
+  }
+
+  const scrollToEnd = () => {
+    if (!scroll) return
+    scroll.scrollTo({ x: 0, y: scroll.scrollHeight })
+    setBehind(0)
+  }
 
   onCleanup(() => tabs.disposeAll())
 
@@ -154,13 +206,102 @@ export function App(props: AppProps) {
     setNotice(`opened ${id}`)
   }
 
-  const newSession = async (model?: string) => {
+  /**
+   * A tab this process created and that never recorded anything. Picking a
+   * model on such a tab replaces it (the session simply becomes that model)
+   * instead of leaving an empty session beside the new one.
+   */
+  const untouched = (t: SessionTab) => t.created && t.state.snapshot.items.length === 0 && t.attach.status() === "idle"
+
+  /**
+   * The front tab's context window, when the catalog names one. The session's
+   * frozen model id is the key — not the profile — since a window is a property
+   * of the model, whoever serves it (DESIGN §9.5).
+   */
+  const contextWindow = (): number | null => {
+    const id = snapshot().header?.model_identity.model
+    if (!id) return null
+    return props.models?.find((m) => m.id === id)?.context_window ?? null
+  }
+
+  /** What the front tab runs on, in the picker's terms. */
+  const currentPick = (): ModelPick | null => {
+    const header = snapshot().header
+    if (!header) return null
+    return { profile: header.model, model: header.model_identity.model || undefined, effort: tab().effort() }
+  }
+
+  /**
+   * Start a session on `pick` and remember it as the last one. `pick` undefined
+   * means "the last pick, else the kernel's default" — what a bare `/new` does.
+   */
+  const newSession = async (pick?: ModelPick, remember = pick !== undefined) => {
+    const chosen = pick ?? loadTuiState(props.statePath).model
     try {
-      const id = await sessionNew(props.ws, model ? { model } : {})
-      openSession(id, true)
+      const id = await sessionNew(props.ws, chosen ? { profile: chosen.profile, model: chosen.model } : {})
+      const current = tab()
+      if (untouched(current)) tabs.replace(current.id, id, { created: true, effort: chosen?.effort })
+      else tabs.open(id, { created: true, effort: chosen?.effort })
+      closeOverlay()
+      setGuide(null)
+      setNotice(chosen ? `${id} · ${chosen.profile}${chosen.model ? ` · ${chosen.model}` : ""}` : `opened ${id}`)
+      if (remember && chosen) rememberModel(chosen, props.statePath)
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error))
     }
+  }
+
+  /**
+   * `/compact [focus]` — ask this session to summarise itself, then continue in
+   * a new file that points back at it (PLAN §3.4, `compact.ts`).
+   *
+   * Every early return leaves the conversation exactly where it was. That is the
+   * whole safety story: the summary is written before anything moves, and if it
+   * does not arrive the old session is still the live one — a compaction that
+   * half-happened would be a conversation thrown away.
+   */
+  const compactNow = async (focus: string | undefined) => {
+    const source = tab()
+    if (source.attach.role() === "observer") {
+      setNotice("someone else drives this session · compaction has to run where its steps run")
+      return
+    }
+    if (source.attach.status() !== "idle") {
+      setNotice("a step is running · /compact when it stops")
+      return
+    }
+    if (source.state.snapshot.items.length === 0) {
+      setNotice("nothing to compact yet")
+      return
+    }
+    setNotice("compacting · asking this session for a continuation brief…")
+    try {
+      // Summarised INSIDE the old session, on its own cached prefix — see the
+      // header comment in `compact.ts` for why this is not a sub-session.
+      await source.attach.send(compactPrompt(focus))
+      const summary = summaryFrom(source.state.snapshot.items)
+      if (summary === null) {
+        setNotice("no summary came back · nothing moved, this session is still the live one")
+        return
+      }
+      const id = await openCompacted(props.ws, source.id, source.state.lastSeq(), summary)
+      const next = tabs.replace(source.id, id, { created: true, effort: source.effort() })
+      // The carried summary is in the new session's inbox, not its ledger yet:
+      // show it the way any typed-but-not-yet-stepped turn is shown.
+      next.state.enqueueUser(summaryTurn(summary))
+      setNotice(`compacted into ${id} · ${source.id} kept on disk`)
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  /** `/effort <level|auto>`: this tab's next step runs with it; remembered with the pick. */
+  const setEffort = (raw: string | undefined) => {
+    const level = raw && raw !== "auto" ? raw : undefined
+    tab().setEffort(level)
+    const pick = currentPick()
+    if (pick) rememberModel({ ...pick, effort: level }, props.statePath)
+    setNotice(`effort ${level ?? "auto"} · takes hold at the next step`)
   }
 
   const quit = () => {
@@ -185,6 +326,10 @@ export function App(props: AppProps) {
       void tab().attach.step()
       return true
     }
+    if (command === "/compact") {
+      void compactNow(raw.slice(command.length).trim())
+      return true
+    }
     if (command === "/fold") {
       folds.setAll(false)
       setAllOpen(false)
@@ -199,8 +344,27 @@ export function App(props: AppProps) {
       return true
     }
     if (command === "/new") {
-      const at = words.indexOf("--model")
-      void newSession(at >= 0 ? words[at + 1] : undefined)
+      const flag = (name: string) => {
+        const at = words.indexOf(name)
+        return at >= 0 ? words[at + 1] : undefined
+      }
+      const profile = flag("--profile")
+      const model = flag("--model")
+      // Named on the command line: a one-off, so it is not remembered as the
+      // pick (a bare `/new` keeps returning to what was chosen in `/model`). A
+      // model id alone rides on the last pick's profile, else the kernel's.
+      const last = loadTuiState(props.statePath).model
+      const pick: ModelPick | undefined =
+        profile || model ? { profile: profile ?? last?.profile ?? "", model, effort: last?.effort } : undefined
+      void newSession(pick, false)
+      return true
+    }
+    if (command === "/model") {
+      openOverlay("model")
+      return true
+    }
+    if (command === "/effort") {
+      setEffort(words[1])
       return true
     }
     if (command === "/help") {
@@ -242,6 +406,7 @@ export function App(props: AppProps) {
     if (overlay.active()) {
       if (matches(keys.ext, key)) return consume(key, () => openOverlay("ext"))
       if (matches(keys.sessions, key)) return consume(key, () => openOverlay("sessions"))
+      if (matches(keys.model, key)) return consume(key, () => openOverlay("model"))
       if (matches(keys.help, key)) return consume(key, () => openOverlay("help"))
       if (matches(keys.quit, key)) quit()
       return
@@ -271,7 +436,13 @@ export function App(props: AppProps) {
     }
     if (matches(keys.sessions, key)) return consume(key, () => openOverlay("sessions"))
     if (matches(keys.ext, key)) return consume(key, () => openOverlay("ext"))
+    if (matches(keys.model, key)) return consume(key, () => openOverlay("model"))
     if (matches(keys.help, key)) return consume(key, () => openOverlay("help"))
+    // Reading back. The composer is focused and keeps the keyboard, so these
+    // have to be taken here or they are the textarea's cursor movement.
+    if (matches(keys.scrollUp, key)) return consume(key, () => scrollBy(-1))
+    if (matches(keys.scrollDown, key)) return consume(key, () => scrollBy(1))
+    if (matches(keys.scrollEnd, key)) return consume(key, scrollToEnd)
     if (matches(keys.nextTab, key)) return consume(key, () => tabs.next())
     if (matches(keys.closeTab, key)) {
       // With one tab there is nothing to close, and the composer keeps its own
@@ -329,14 +500,20 @@ export function App(props: AppProps) {
   const header = () => {
     const current = snapshot()
     const identity = current.header?.model_identity
+    // Profile then model id — the two names a person picked, not the wire kind.
+    const profile = current.header?.model ?? "…"
     const model =
-      identity && identity.model.length > 0 ? `${identity.provider}/${identity.model}` : (current.header?.model ?? "…")
+      identity && identity.model.length > 0 && identity.model !== profile ? `${profile} · ${identity.model}` : profile
+    const effort = tab().effort()
     const native = current.header?.composition.native_tools.length ?? 0
     const skills = tab()
       .contributions()
       .reduce((count, entry) => count + entry.skills.length, 0)
-    return `nulya · ${tab().id} · ${model} · tools 2+${native} · skills ${skills}`
+    return `nulya · ${tab().id} · ${model}${effort ? ` · effort ${effort}` : ""} · tools 2+${native} · skills ${skills}`
   }
+
+  // Opened by `main` with a reason: show the picker before anything else.
+  if (props.guide) overlay.open("model")
 
   return (
     <StyleContext.Provider value={props.style}>
@@ -357,6 +534,7 @@ export function App(props: AppProps) {
                       items={snapshot().items}
                       header={snapshot().header}
                       contributions={tab().contributions()}
+                      ref={(box) => (scroll = box)}
                     />
                   }
                 >
@@ -381,13 +559,27 @@ export function App(props: AppProps) {
                   <Match when={overlay.kind() === "usage"}>
                     <UsageView ws={props.ws} snapshot={snapshot()} onClose={closeOverlay} />
                   </Match>
+                  <Match when={overlay.kind() === "model"}>
+                    <ModelView
+                      ws={props.ws}
+                      current={currentPick()}
+                      notice={guide() ?? undefined}
+                      onPick={(pick) => void newSession(pick)}
+                      onNotice={setNotice}
+                      onClose={closeOverlay}
+                    />
+                  </Match>
                 </Switch>
 
                 <Hairline />
                 <Composer
                   onSubmit={submit}
                   onEmptySubmit={takeOverIfOffered}
-                  onReady={(api) => (composer = api)}
+                  onReady={(api) => {
+                    composer = api
+                    // The picker may already be up (`guide`): it owns the keys.
+                    if (overlay.active()) api.blur()
+                  }}
                 />
                 <Hairline />
                 <StatusBar
@@ -397,6 +589,8 @@ export function App(props: AppProps) {
                   takeoverReady={tab().attach.takeoverReady()}
                   spinnerFrame={spinnerFrame()}
                   hint={notice() ?? undefined}
+                  behind={behind()}
+                  contextWindow={contextWindow()}
                 />
               </box>
             </OverlayContext.Provider>

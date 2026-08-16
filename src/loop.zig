@@ -189,7 +189,16 @@ pub fn runStepWithPrompt(
         else => return err,
     };
     defer turn.deinit(alloc);
-    try l.append(.{ .assistant = .{ .reasoning = turn.reasoning, .text = turn.text, .calls = turn.calls } });
+    try l.append(.{ .assistant = .{
+        .reasoning = turn.reasoning,
+        .text = turn.text,
+        .calls = turn.calls,
+        // Recorded only when the provider reported a cost. All-zero means "this
+        // provider does not price turns" (the scripted stand-in), which is not
+        // the same fact as "this step cost zero" — so it is left off the line
+        // entirely, and old ledgers stay byte-identical.
+        .usage = if (turn.usage.isZero()) null else turn.usage,
+    } });
     if (turn.calls.len == 0) return .{ .usage = turn.usage }; // model addressed the user; step complete.
 
     const results = try alloc.alloc(ledger.ToolResultEntry, turn.calls.len);

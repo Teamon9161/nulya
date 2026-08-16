@@ -30,6 +30,11 @@ export interface Driver {
 
 export interface DriverOptions {
   maxSteps?: number
+  /**
+   * The effort to run the NEXT step with, read at each spawn so `/effort` mid-
+   * session takes hold at the next step boundary. Undefined = kernel default.
+   */
+  effort?: () => string | undefined
   /** Extra child environment (tests set NULYA_SCRIPTED_MODE here). */
   env?: Record<string, string>
   /**
@@ -86,7 +91,7 @@ export function createDriver(
       for (;;) {
         if (disposed) return
         const pendingBefore = state.pendingCount()
-        const step = sessionStep(ws, id, { maxSteps: options.maxSteps, env: options.env })
+        const step = sessionStep(ws, id, { maxSteps: options.maxSteps, effort: options.effort?.(), env: options.env })
         handle = step
         killed = false
         let busy = false

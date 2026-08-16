@@ -28,7 +28,7 @@ let id: string
 
 beforeAll(async () => {
   ws = tempWorkspace()
-  id = await sessionNew(ws, { model: "scripted" })
+  id = await sessionNew(ws, { profile: "scripted" })
 
   // One turn is four events: a user line, an assistant line with one call, its
   // results, and a plain assistant reply — the shape a real working session has.

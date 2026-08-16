@@ -1,5 +1,7 @@
 import { Match, Switch } from "solid-js"
 import { UserTurn } from "./UserTurn.tsx"
+import { CompactionCard } from "./CompactionCard.tsx"
+import { compactionMarker } from "../../compact.ts"
 import { AssistantTurn } from "./AssistantTurn.tsx"
 import { Thinking } from "./Thinking.tsx"
 import { ToolCard } from "./ToolCard.tsx"
@@ -14,6 +16,14 @@ import type { TranscriptItem, UnknownItem } from "../../state/session.ts"
 export function Card(props: { item: TranscriptItem }) {
   return (
     <Switch>
+      {/* Compaction's two turns are user turns as far as the ledger is
+          concerned; only their content says otherwise (`compact.ts`). */}
+      <Match when={props.item.kind === "user" && compactionMarker(props.item) !== null}>
+        <CompactionCard
+          item={props.item as Extract<TranscriptItem, { kind: "user" }>}
+          role={compactionMarker(props.item)!}
+        />
+      </Match>
       <Match when={props.item.kind === "user"}>
         <UserTurn item={props.item as Extract<TranscriptItem, { kind: "user" }>} />
       </Match>

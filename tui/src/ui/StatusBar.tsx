@@ -24,6 +24,14 @@ export function StatusBar(props: {
   takeoverReady: boolean
   spinnerFrame: string
   hint?: string
+  /** Rows of transcript below the viewport: >0 means somebody is reading back. */
+  behind?: number
+  /**
+   * The model's context window, from the `[[models]]` catalog. Absent whenever
+   * the catalog does not say — an unlisted model id, a bare endpoint — and then
+   * no fullness is shown at all rather than a made-up denominator.
+   */
+  contextWindow?: number | null
 }) {
   const style = useStyle()
   const screen = useScreen()
@@ -33,6 +41,20 @@ export function StatusBar(props: {
     if (u.input === 0 && u.output === 0) return "no usage yet"
     const cache = u.input > 0 ? Math.round((u.cacheRead / u.input) * 100) : 0
     return `↑${compact(u.input)} ↓${compact(u.output)} cache ${cache}% · since attach`
+  })
+
+  /**
+   * How full the window is, after the last step. Nothing acts on this — nulya
+   * never compacts behind the user's back — but a number that only appears once
+   * it matters is how `/compact` gets found at the moment it is worth running.
+   */
+  const context = createMemo(() => {
+    const window = props.contextWindow ?? 0
+    const used = props.snapshot.usage.lastPrompt
+    if (window <= 0 || used <= 0) return null
+    const percent = Math.round((used / window) * 100)
+    if (percent < 60) return null
+    return { percent, urgent: percent >= 80 }
   })
 
   const activity = createMemo(() => {
@@ -59,12 +81,26 @@ export function StatusBar(props: {
     props.snapshot.error ? style.theme.err : props.snapshot.lastStopped === "budget" ? style.theme.warn : style.theme.dim
 
   return (
-    <box flexDirection="row" width="100%" paddingLeft={1} paddingRight={1}>
+    <box flexDirection="row" width="100%" height={1} flexShrink={0} paddingLeft={1} paddingRight={1}>
       <box flexGrow={1} flexShrink={1}>
         <text fg={color()}>
           {usage()} · {activity()} · {props.hint ?? "Esc cancel · Ctrl+O fold · /help"}
         </text>
       </box>
+      {context() ? (
+        <text fg={context()!.urgent ? style.theme.warn : style.theme.dim}>
+          {" "}
+          ctx {context()!.percent}% · /compact
+        </text>
+      ) : null}
+      {/* Scrolled away from the live end: the newest card is off screen, which
+          is worth saying — otherwise a streaming answer looks like a stall. */}
+      {(props.behind ?? 0) > 0 ? (
+        <text fg={style.theme.accent.evolve}>
+          {" "}
+          {style.glyphs.foldOpen} {props.behind} more below · Shift+End
+        </text>
+      ) : null}
       {screen().width >= 60 ? (
         <text fg={props.role === "observer" ? style.theme.warn : style.theme.dim}>
           step {props.snapshot.steps} · {props.role === "observer" ? "observer · driven elsewhere" : "driver"}

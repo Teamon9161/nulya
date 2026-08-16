@@ -79,7 +79,7 @@ test("a [keys] override in tui.toml really moves the fold key", async () => {
   const settings = await loadSettings(ws.dir, {})
   expect(settings.keys["fold"]).toBe("ctrl+b")
 
-  const id = await sessionNew(ws, { model: "scripted" })
+  const id = await sessionNew(ws, { profile: "scripted" })
   const state = createSessionState(id)
   const setup = await testRender(
     () => <App ws={ws} id={id} state={state} style={createStyle(settings, {})} driver={{ env: scripted_env }} />,
@@ -152,7 +152,7 @@ test("/usage separates this attachment's tokens from the durable tool journal", 
 }, 60_000)
 
 test("F1 opens help and Esc closes it", async () => {
-  const id = await sessionNew(ws, { model: "scripted" })
+  const id = await sessionNew(ws, { profile: "scripted" })
   const state = createSessionState(id)
   const setup = await testRender(
     () => <App ws={ws} id={id} state={state} style={style} driver={{ env: scripted_env }} />,

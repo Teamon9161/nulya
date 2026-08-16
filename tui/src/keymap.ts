@@ -14,8 +14,12 @@ export type Action =
   | "help"
   | "ext"
   | "sessions"
+  | "model"
   | "nextTab"
   | "closeTab"
+  | "scrollUp"
+  | "scrollDown"
+  | "scrollEnd"
 
 export const default_keys: Record<Action, string> = {
   cancel: "escape",
@@ -26,8 +30,13 @@ export const default_keys: Record<Action, string> = {
   help: "f1",
   ext: "f2",
   sessions: "f3",
+  model: "f5",
   nextTab: "f4",
   closeTab: "ctrl+w",
+  scrollUp: "pageup",
+  scrollDown: "pagedown",
+  // Back to the live end of the transcript, wherever reading left off.
+  scrollEnd: "shift+end",
 }
 
 export type Keymap = Record<Action, string>

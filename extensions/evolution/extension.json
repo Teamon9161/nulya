@@ -1,0 +1,9 @@
+{
+  "schema": "nulya.extension/v2",
+  "id": "evolution",
+  "contributes": {
+    "system_prompts": ["prompts/evolution.md"],
+    "skills": ["skills/evolution"]
+  },
+  "permissions": { "fs": [], "network": [], "process": [] }
+}

@@ -102,38 +102,53 @@ pub fn validateSnapshot(alloc: std.mem.Allocator, m: manifest.Manifest, snapshot
     }
 }
 
+/// Every skill of every active extension, across the store roots in search
+/// order (first root holding an id wins, `store.Roots.listActive`).
 pub fn listActive(
     alloc: std.mem.Allocator,
-    io: std.Io,
-    root: std.Io.Dir,
+    roots: *const store.Roots,
 ) !skill.SkillSetSnapshot {
-    const st = store.Store.init(io, root);
     var descriptors: std.ArrayList(skill.SkillDescriptor) = .empty;
     errdefer skill.deinitDescriptorArrayList(alloc, &descriptors);
 
-    var it = root.iterate();
-    while (try it.next(io)) |entry| {
-        if (entry.kind != .directory) continue;
+    const active = try roots.listActive(alloc);
+    defer store.Roots.freeActive(alloc, active);
+
+    for (active) |entry| {
+        const root = roots.entries[entry.root].dir;
         // Skip broken extensions, but let host cancellation propagate rather than
         // be misread as a malformed extension.
-        const active = (st.activeVersion(alloc, entry.name) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            else => continue,
-        }) orelse continue;
-        defer alloc.free(active);
-        var m = readPinnedManifest(alloc, io, root, entry.name, active) catch |err| switch (err) {
+        var m = readPinnedManifest(alloc, roots.io, root, entry.id, entry.version) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => continue,
         };
         defer m.deinit();
-        try appendFromManifest(alloc, io, root, &descriptors, entry.name, active, m);
+        try appendFromManifest(alloc, roots.io, root, &descriptors, entry.id, entry.version, m);
     }
     skill.sortDescriptors(descriptors.items);
     return .{ .skills = try descriptors.toOwnedSlice(alloc) };
 }
 
-/// Load a full SKILL.md body from a pinned ref. This deliberately validates and
-/// reads the named frozen version; it never follows the extension's `current`.
+/// Load a full SKILL.md body from a pinned ref, from whichever store root holds
+/// that frozen version (content-addressed, so any root's copy is the same
+/// bytes). This deliberately validates and reads the NAMED version; it never
+/// follows the extension's `current`.
+pub fn loadPinnedAcross(
+    alloc: std.mem.Allocator,
+    roots: *const store.Roots,
+    pinned_ref: []const u8,
+) ![]u8 {
+    _ = try parseRef(pinned_ref); // a malformed ref fails before any root is touched
+    for (roots.entries, 0..) |entry, i| {
+        const last = i + 1 == roots.entries.len;
+        return loadPinned(alloc, roots.io, entry.dir, pinned_ref) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => if (last) return err else continue,
+        };
+    }
+    return error.SkillNotFound; // no roots at all
+}
+
 pub fn loadPinned(
     alloc: std.mem.Allocator,
     io: std.Io,

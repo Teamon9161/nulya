@@ -79,6 +79,18 @@ export interface UsageTotals {
   output: number
   cacheRead: number
   cacheWrite: number
+  /**
+   * The whole prompt of the most recent step — NOT a total across steps. A step
+   * sends the entire prefix, so what the provider counted last time is roughly
+   * what the next request starts from: this is how full the context window is
+   * right now, and the only honest basis for "should this be compacted".
+   *
+   * It is a SUM of three counters because `provider.Usage.input_tokens` is
+   * normalised to the NON-cached part (provider.zig): a well-cached step reports
+   * a tiny `input_tokens` over an enormous prefix, and reading that one field
+   * alone would say a nearly-full window is nearly empty.
+   */
+  lastPrompt: number
 }
 
 export interface SessionSnapshot {
@@ -130,7 +142,7 @@ export function createSessionState(id: string): SessionState {
     id,
     header: null,
     items: [],
-    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, lastPrompt: 0 },
     steps: 0,
     lastStepStatus: null,
     lastStopped: null,
@@ -377,6 +389,9 @@ export function createSessionState(id: string): SessionState {
             draft.usage.output += usage.output_tokens
             draft.usage.cacheRead += usage.cache_read_tokens
             draft.usage.cacheWrite += usage.cache_write_tokens
+            // Cached or not, the prefix still occupies the window.
+            draft.usage.lastPrompt =
+              usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens
             break
           }
           case "done": {

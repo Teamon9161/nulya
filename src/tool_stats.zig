@@ -19,13 +19,15 @@
 //! Only complete events count: an append interrupted by cancel or crash can
 //! leave a partial final line, and the next append first drops that tail back
 //! to the last `\n` so it can never be glued onto a later event into a
-//! permanently malformed middle line. The reader stays strict — a malformed
-//! line read without a prior repairing append is an explicit error.
+//! permanently malformed middle line (that file discipline is `journal.zig`,
+//! shared with the outcome journal). The reader stays strict — a malformed line
+//! read without a prior repairing append is an explicit error.
 
 const std = @import("std");
+const journal = @import("journal.zig");
 
 /// Directory for the journal, relative to the workspace root.
-pub const journal_dir = ".nulya";
+pub const journal_dir = journal.journal_dir;
 /// Journal path, relative to the workspace root.
 pub const journal_rel = journal_dir ++ std.fs.path.sep_str ++ "tool-usage.jsonl";
 
@@ -73,16 +75,7 @@ pub const Stats = struct {
 pub fn append(alloc: std.mem.Allocator, io: std.Io, cwd: []const u8, tool_id: []const u8, ok: bool) !void {
     const line = try encodeEvent(alloc, tool_id, ok);
     defer alloc.free(line);
-
-    var workspace = try openWorkspace(io, cwd);
-    defer workspace.close(io);
-    try workspace.createDirPath(io, journal_dir);
-    var file = try workspace.createFile(io, journal_rel, .{ .truncate = false, .read = true });
-    defer file.close(io);
-    const size = (try file.stat(io)).size;
-    const end = try repairCrashTail(file, io, size);
-    if (end != size) try file.setLength(io, end);
-    try file.writePositionalAll(io, line, end);
+    try journal.appendLine(io, cwd, journal_rel, line);
 }
 
 /// Read every event in journal order. A missing journal file reads as empty; a
@@ -90,12 +83,7 @@ pub fn append(alloc: std.mem.Allocator, io: std.Io, cwd: []const u8, tool_id: []
 /// any malformed non-empty line — including a truncated crash tail — is an
 /// explicit error, never silently skipped.
 pub fn readAll(alloc: std.mem.Allocator, io: std.Io, cwd: []const u8) ![]UseEvent {
-    var workspace = try openWorkspace(io, cwd);
-    defer workspace.close(io);
-    const bytes = workspace.readFileAlloc(io, journal_rel, alloc, .unlimited) catch |err| switch (err) {
-        error.FileNotFound => return alloc.alloc(UseEvent, 0),
-        else => return err,
-    };
+    const bytes = (try journal.readAll(alloc, io, cwd, journal_rel)) orelse return alloc.alloc(UseEvent, 0);
     defer alloc.free(bytes);
 
     var events: std.ArrayList(UseEvent) = .empty;
@@ -153,42 +141,6 @@ pub fn freeEvents(alloc: std.mem.Allocator, events: []UseEvent) void {
 pub fn freeStats(alloc: std.mem.Allocator, stats: []Stats) void {
     for (stats) |s| alloc.free(s.tool_id);
     alloc.free(stats);
-}
-
-fn openWorkspace(io: std.Io, cwd: []const u8) !std.Io.Dir {
-    if (std.fs.path.isAbsolute(cwd)) {
-        return std.Io.Dir.openDirAbsolute(io, cwd, .{});
-    }
-    return std.Io.Dir.cwd().openDir(io, cwd, .{});
-}
-
-/// If the journal does not end with a complete line (a previous append was
-/// interrupted), return the byte offset just past the last `\n` — where the
-/// next event must be written — dropping the partial trailing bytes. Returns 0
-/// when no line in the file is complete. Events are single-line JSON (a
-/// literal newline can never appear inside one), so `\n` always separates
-/// events. The intact case (last byte `\n`) costs one read; the backward scan
-/// only runs after a truncated tail.
-fn repairCrashTail(file: std.Io.File, io: std.Io, size: u64) !u64 {
-    if (size == 0) return 0;
-    var last: [1]u8 = undefined;
-    const n = try file.readPositionalAll(io, &last, size - 1);
-    if (n == 1 and last[0] == '\n') return size;
-
-    var chunk: [4096]u8 = undefined;
-    var pos = size;
-    while (pos > 0) {
-        const read_len = @min(chunk.len, pos);
-        const start = pos - read_len;
-        const got = try file.readPositionalAll(io, chunk[0..read_len], start);
-        var i = got;
-        while (i > 0) {
-            i -= 1;
-            if (chunk[i] == '\n') return start + i + 1;
-        }
-        pos = start;
-    }
-    return 0; // no complete line anywhere: the whole file is a partial first event
 }
 
 fn encodeEvent(alloc: std.mem.Allocator, tool_id: []const u8, ok: bool) ![]u8 {

@@ -14,16 +14,70 @@ const toolchain = @import("toolchain.zig");
 const ext_skills = @import("extension/skills.zig");
 const notes = @import("extension/notes.zig");
 const tool_stats = @import("tool_stats.zig");
+const outcome = @import("outcome.zig");
 const config = @import("config.zig");
 const ledger = @import("ledger.zig");
 const session = @import("session.zig");
 const loop = @import("loop.zig");
 const provider = @import("provider.zig");
 const promotion = @import("promotion.zig");
+const composition = @import("composition.zig");
 const launch = @import("launch.zig");
 const source = @import("source.zig");
 
-const extensions_root = ".nulya" ++ std.fs.path.sep_str ++ "extensions";
+/// The ordered store roots this invocation searches (DESIGN §7.2), opened once.
+/// Every `ext` / `skill` command goes through this instead of assuming the
+/// workspace store is the only one: an extension may live in the user's
+/// `~/.nulya/extensions` or in a trusted `extensions.paths` entry, and the first
+/// root holding an ACTIVE version of an id wins.
+const RootSearch = struct {
+    specs: []const []const u8,
+    roots: store.Roots,
+
+    fn open(alloc: std.mem.Allocator, io: std.Io, cwd: []const u8) !RootSearch {
+        const specs = try rootSpecs(alloc, io);
+        errdefer launch.freeExtensionRoots(alloc, specs);
+        const roots = try store.Roots.open(alloc, io, cwd, specs);
+        return .{ .specs = specs, .roots = roots };
+    }
+
+    fn deinit(self: *RootSearch, alloc: std.mem.Allocator) void {
+        self.roots.deinit();
+        launch.freeExtensionRoots(alloc, self.specs);
+    }
+};
+
+/// Resolve the ordered root specs from the environment + config chain. Caller
+/// owns the result (`launch.freeExtensionRoots`).
+fn rootSpecs(alloc: std.mem.Allocator, io: std.Io) ![]const []const u8 {
+    var host = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    defer host.deinit();
+    var cfg = try config.load(alloc, io, &host);
+    defer cfg.deinit();
+    return launch.extensionRoots(alloc, &host, &cfg);
+}
+
+/// Where a write-side command puts things: the user store under `--user`, else
+/// the workspace store. Null means `--user` on a machine with no home. Caller
+/// owns the result.
+fn writeRootSpec(alloc: std.mem.Allocator, user: bool) !?[]u8 {
+    if (!user) return try alloc.dupe(u8, store.workspace_root_rel);
+    var host = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    defer host.deinit();
+    return launch.userExtensionsRoot(alloc, &host);
+}
+
+/// Split `args` into `(has --user, everything else)` — the one flag every
+/// write-side `ext` verb shares. Caller owns the returned positionals.
+fn takeUserFlag(alloc: std.mem.Allocator, args: []const []const u8) !struct { user: bool, rest: [][]const u8 } {
+    var rest: std.ArrayList([]const u8) = .empty;
+    errdefer rest.deinit(alloc);
+    var user = false;
+    for (args) |a| {
+        if (std.mem.eql(u8, a, "--user")) user = true else try rest.append(alloc, a);
+    }
+    return .{ .user = user, .rest = try rest.toOwnedSlice(alloc) };
+}
 
 /// Dispatch `args` (everything after the program name). Returns a process exit
 /// code. Errors are printed and turned into a non-zero code by `main`.
@@ -34,8 +88,149 @@ pub fn dispatch(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) 
     if (std.mem.eql(u8, args[0], "toolchain")) return dispatchToolchain(alloc, io, args[1..]);
     if (std.mem.eql(u8, args[0], "session")) return dispatchSession(alloc, io, args[1..]);
     if (std.mem.eql(u8, args[0], "src")) return dispatchSrc(alloc, io, args[1..]);
-    try printErr(io, "unknown command; try `nulya ext`, `nulya skill`, `nulya session`, `nulya src`, or `nulya toolchain`\n");
+    if (std.mem.eql(u8, args[0], "config")) return dispatchConfig(alloc, io, args[1..]);
+    try printErr(io, "unknown command; try `nulya ext`, `nulya skill`, `nulya session`, `nulya config`, `nulya src`, or `nulya toolchain`\n");
     return 1;
+}
+
+fn dispatchConfig(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+    if (args.len != 0 and std.mem.eql(u8, args[0], "show")) return configShow(alloc, io, sliceHasFlag(args[1..], "--json"));
+    try printErr(io, "usage: nulya config show [--json]\n");
+    return 1;
+}
+
+/// The projection a picker (or the agent, via shell) reads: the EFFECTIVE
+/// provider profiles after the whole config chain, each with whether its
+/// credential is usable right now, plus the model catalog. Never a secret —
+/// only the env var NAME and a boolean. Shell-level, like `session new`: it
+/// decides nothing, it shows what `session new` would see.
+const ConfigView = struct {
+    /// Where the chain reads from, so a front end writes to the same place it
+    /// shows — never a second guess at "where is home".
+    paths: Paths,
+    active_profile: []const u8,
+    profiles: []const ProfileView,
+    models: []const config.ModelParams,
+
+    const Paths = struct {
+        system: []const u8,
+        user: []const u8,
+        project: []const u8,
+    };
+
+    const ProfileView = struct {
+        name: []const u8,
+        kind: []const u8,
+        base_url: []const u8,
+        api_key_env: []const u8,
+        /// Whether `session new --profile <name>` would freeze this provider
+        /// (true) or fall back to scripted (false).
+        credential: bool,
+        /// Where the credential comes from: `config` (the profile's own
+        /// api_key), `env` (api_key_env is set), `login` (codex auth file),
+        /// `builtin` (scripted), `none`.
+        credential_source: []const u8,
+        /// The default model id and the selectable list (never empty for a
+        /// real provider: at least the default).
+        model: []const u8,
+        models: []const []const u8,
+        effort: ?[]const u8,
+    };
+};
+
+fn configShow(alloc: std.mem.Allocator, io: std.Io, as_json: bool) !u8 {
+    var host = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    defer host.deinit();
+    var cfg = try config.load(alloc, io, &host);
+    defer cfg.deinit();
+    var paths = try config.ConfigPaths.init(alloc, &host);
+    defer paths.deinit(alloc);
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const views = try a.alloc(ConfigView.ProfileView, cfg.provider.profiles.len);
+    for (cfg.provider.profiles, 0..) |p, i| {
+        const default_model = p.defaultModel();
+        const models: []const []const u8 = if (p.models.len != 0)
+            p.models
+        else if (default_model.len != 0)
+            try a.dupe([]const u8, &.{default_model})
+        else
+            &.{};
+        const cred = launch.credentialSource(alloc, io, p, &host);
+        views[i] = .{
+            .name = p.name,
+            .kind = @tagName(p.kind),
+            .base_url = p.base_url,
+            .api_key_env = p.api_key_env,
+            .credential = cred != .none,
+            .credential_source = @tagName(cred),
+            .model = default_model,
+            .models = models,
+            .effort = p.effort,
+        };
+    }
+    const view: ConfigView = .{
+        .paths = .{ .system = paths.system, .user = paths.user, .project = config.project_config_path },
+        .active_profile = cfg.provider.active_profile,
+        .profiles = views,
+        .models = cfg.models,
+    };
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    if (as_json) {
+        var jw: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
+        try jw.write(view);
+        try out.writer.writeByte('\n');
+    } else {
+        try writeConfigText(&out.writer, view);
+    }
+    try printRaw(io, out.written());
+    return 0;
+}
+
+fn writeConfigText(w: *std.Io.Writer, view: ConfigView) !void {
+    try w.print("config files (later layers override; only the project one is untrusted):\n  system   {s}\n  user     {s}\n  project  {s}\n\n", .{ view.paths.system, view.paths.user, view.paths.project });
+    try w.print("active profile: {s}\n\nprofiles:\n", .{view.active_profile});
+    for (view.profiles) |p| {
+        try w.print("  {s: <20} {s: <10} {s}", .{ p.name, p.kind, if (p.credential) "ready  " else "no key " });
+        if (std.mem.eql(u8, p.credential_source, "config")) {
+            try w.writeAll(" api_key in config");
+        } else if (p.api_key_env.len != 0) {
+            try w.print(" {s}", .{p.api_key_env});
+        } else if (std.mem.eql(u8, p.kind, "codex")) {
+            try w.writeAll(" ~/.codex/auth.json");
+        }
+        if (p.effort) |e| try w.print(" effort={s}", .{e});
+        try w.print("\n      model: {s}", .{p.model});
+        if (p.models.len > 1) {
+            try w.writeAll("  [");
+            for (p.models, 0..) |m, i| {
+                if (i != 0) try w.writeAll(", ");
+                try w.writeAll(m);
+            }
+            try w.writeAll("]");
+        }
+        if (p.base_url.len != 0) try w.print("\n      {s}", .{p.base_url});
+        try w.writeByte('\n');
+    }
+    try w.writeAll("\nmodels:\n");
+    for (view.models) |m| {
+        try w.print("  {s: <22} {s: <18}", .{ m.id, m.label });
+        if (m.context_window) |c| try w.print("  ctx {d: >7}", .{c});
+        if (m.efforts.len != 0) {
+            try w.writeAll("  effort ");
+            for (m.efforts, 0..) |e, i| {
+                if (i != 0) try w.writeByte('|');
+                try w.writeAll(e);
+            }
+            try w.print(" (default {s})", .{m.default_effort orelse "auto"});
+        }
+        try w.writeByte('\n');
+    }
 }
 
 fn dispatchExt(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
@@ -66,13 +261,11 @@ fn dispatchSkill(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
 }
 
 fn skillList(alloc: std.mem.Allocator, io: std.Io) !u8 {
-    var ext_root = std.Io.Dir.cwd().openDir(io, extensions_root, .{ .iterate = true }) catch {
-        try printOut(alloc, io, "no skills\n", .{});
-        return 0;
-    };
-    defer ext_root.close(io);
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var search = try RootSearch.open(alloc, io, try cwdRealPath(io, &cwd_buf));
+    defer search.deinit(alloc);
 
-    const skills = try ext_skills.listActive(alloc, io, ext_root);
+    const skills = try ext_skills.listActive(alloc, &search.roots);
     defer skills.deinit(alloc);
     if (skills.skills.len == 0) {
         try printOut(alloc, io, "no skills\n", .{});
@@ -89,12 +282,10 @@ fn skillLoad(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8
         try printErr(io, "usage: nulya skill load <pinned-ref>\n");
         return 1;
     }
-    var ext_root = std.Io.Dir.cwd().openDir(io, extensions_root, .{}) catch {
-        try printOut(alloc, io, "no extensions\n", .{});
-        return 1;
-    };
-    defer ext_root.close(io);
-    const body = ext_skills.loadPinned(alloc, io, ext_root, args[0]) catch |err| {
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var search = try RootSearch.open(alloc, io, try cwdRealPath(io, &cwd_buf));
+    defer search.deinit(alloc);
+    const body = ext_skills.loadPinnedAcross(alloc, &search.roots, args[0]) catch |err| {
         try printOut(alloc, io, "skill load failed: {s}\n", .{@errorName(err)});
         return 1;
     };
@@ -104,21 +295,34 @@ fn skillLoad(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8
 }
 
 fn extInit(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+    const flags = try takeUserFlag(alloc, args);
+    defer alloc.free(flags.rest);
     var is_script = false;
     var positional: std.ArrayList([]const u8) = .empty;
     defer positional.deinit(alloc);
-    for (args) |a| {
+    for (flags.rest) |a| {
         if (std.mem.eql(u8, a, "--script")) is_script = true else try positional.append(alloc, a);
     }
     if (positional.items.len < 1) {
-        try printErr(io, "usage: nulya ext init [--script] <id> [tool]\n");
+        try printErr(io, "usage: nulya ext init [--script] [--user] <id> [tool]\n");
         return 1;
     }
     const id = positional.items[0];
     const tool = if (positional.items.len >= 2) positional.items[1] else id;
 
-    const cwd = std.Io.Dir.cwd();
-    const dir = try std.fs.path.join(alloc, &.{ extensions_root, id });
+    // The draft goes into the chosen store root (`--user` = the user-level one),
+    // and everything below is written through that root's handle, so an absolute
+    // user root needs no absolute sub-paths.
+    const root_spec = (try writeRootSpec(alloc, flags.user)) orelse {
+        try printErr(io, "no home directory for --user (set NULYA_HOME or HOME)\n");
+        return 1;
+    };
+    defer alloc.free(root_spec);
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var cwd = try store.openOrCreateRoot(io, try cwdRealPath(io, &cwd_buf), root_spec);
+    defer cwd.close(io);
+
+    const dir = try alloc.dupe(u8, id);
     defer alloc.free(dir);
     const src_dir = try std.fs.path.join(alloc, &.{ dir, "src" });
     defer alloc.free(src_dir);
@@ -140,7 +344,7 @@ fn extInit(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
         try writeInto(alloc, io, cwd, dir, "extension.json", manifest_bytes);
         try writeInto(alloc, io, cwd, src_dir, script_name, body);
         try writeInto(alloc, io, cwd, tests_dir, "example.json", templates.example_test_json);
-        try printOut(alloc, io, "initialized script extension '{s}' at {s}\n", .{ id, dir });
+        try printOut(alloc, io, "initialized script extension '{s}' at {s}{c}{s}\n", .{ id, root_spec, std.fs.path.sep, id });
         return 0;
     }
 
@@ -150,16 +354,28 @@ fn extInit(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     try writeInto(alloc, io, cwd, src_dir, "main.zig", templates.main_zig);
     try writeInto(alloc, io, cwd, tests_dir, "example.json", templates.example_test_json);
 
-    try printOut(alloc, io, "initialized extension '{s}' at {s}\n", .{ id, dir });
+    try printOut(alloc, io, "initialized extension '{s}' at {s}{c}{s}\n", .{ id, root_spec, std.fs.path.sep, id });
     return 0;
 }
 
 fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
-    if (args.len < 1) {
-        try printErr(io, "usage: nulya ext build <path>\n");
+    const flags = try takeUserFlag(alloc, args);
+    defer alloc.free(flags.rest);
+    if (flags.rest.len < 1) {
+        try printErr(io, "usage: nulya ext build <path> [--user]\n");
         return 1;
     }
-    const ext_dir = args[0];
+    const ext_dir = flags.rest[0];
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_path = try cwdRealPath(io, &cwd_buf);
+    const dest_spec = (try buildDestRoot(alloc, io, cwd_path, ext_dir, flags.user)) orelse {
+        try printErr(io, "no home directory for --user (set NULYA_HOME or HOME)\n");
+        return 1;
+    };
+    defer alloc.free(dest_spec);
+    var dest_root = try store.openOrCreateRoot(io, cwd_path, dest_spec);
+    defer dest_root.close(io);
 
     // A script extension needs no toolchain; only a compiled one does. Resolve
     // zig best-effort and let the build decide — it reports ZigVersionUnreadable
@@ -167,7 +383,7 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
     const zig_exe: ?[]u8 = resolveZig(alloc, io) catch null;
     defer if (zig_exe) |z| alloc.free(z);
 
-    var result = build_ext.buildExtension(alloc, io, std.Io.Dir.cwd(), ext_dir, zig_exe orelse "") catch |err| switch (err) {
+    var result = build_ext.buildExtension(alloc, io, std.Io.Dir.cwd(), ext_dir, dest_root, zig_exe orelse "") catch |err| switch (err) {
         error.ZigVersionUnreadable => {
             try printOut(alloc, io, "no zig toolchain (needed to compile this extension); set NULYA_ZIG, or build nulya with -Dembed-toolchain\n", .{});
             return 1;
@@ -181,8 +397,44 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
         return 1;
     }
     const state = if (result.already_built) "already built" else "built";
-    try printOut(alloc, io, "{s}: {s} ({s})\n", .{ ext_dir, result.version, state });
+    try printOut(alloc, io, "{s}: {s} ({s}, in {s})\n", .{ ext_dir, result.version, state, dest_spec });
     return 0;
+}
+
+/// Which store root a build lands in: `--user` forces the user store; otherwise
+/// a draft that already lives inside one of the search roots builds into THAT
+/// root (so `.nulya/extensions/<id>` keeps building exactly where it always
+/// did), and a draft anywhere else — one kept in git, say — builds into the
+/// workspace store. Caller owns the result; null means `--user` with no home.
+fn buildDestRoot(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    cwd_path: []const u8,
+    ext_dir: []const u8,
+    user: bool,
+) !?[]u8 {
+    if (user) return writeRootSpec(alloc, true);
+
+    var draft = std.Io.Dir.cwd().openDir(io, ext_dir, .{}) catch
+        return try alloc.dupe(u8, store.workspace_root_rel); // let the build report it
+    defer draft.close(io);
+    var draft_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const draft_real = draft_buf[0..try draft.realPath(io, &draft_buf)];
+
+    var search = try RootSearch.open(alloc, io, cwd_path);
+    defer search.deinit(alloc);
+    for (search.roots.entries) |entry| {
+        if (isInside(entry.real, draft_real)) return try alloc.dupe(u8, entry.spec);
+    }
+    return try alloc.dupe(u8, store.workspace_root_rel);
+}
+
+/// Whether `path` sits under directory `dir` (both already resolved to real
+/// absolute paths).
+fn isInside(dir: []const u8, path: []const u8) bool {
+    if (path.len <= dir.len) return false;
+    if (!std.mem.eql(u8, path[0..dir.len], dir)) return false;
+    return path[dir.len] == std.fs.path.sep or path[dir.len] == '/';
 }
 
 fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
@@ -221,16 +473,20 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             return 1;
         }
     }
-    const cwd = std.Io.Dir.cwd();
+    var cwd_real: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_path = try cwdRealPath(io, &cwd_real);
 
-    var ext_root = try cwd.openDir(io, extensions_root, .{});
-    defer ext_root.close(io);
-    const st = store.Store.init(io, ext_root);
-    const active = (try st.activeVersion(alloc, id)) orelse {
+    // Whichever root holds an active version of this id first (DESIGN §7.2).
+    var search = try RootSearch.open(alloc, io, cwd_path);
+    defer search.deinit(alloc);
+    const found = (try search.roots.firstActive(alloc, id)) orelse {
         try printOut(alloc, io, "extension '{s}' has no active version; run `nulya ext build` then `nulya ext activate`\n", .{id});
         return 1;
     };
+    const active = found.version;
     defer alloc.free(active);
+    const ext_root = search.roots.entries[found.root].dir;
+    const st = search.roots.store(found.root);
 
     if (!st.versionExists(alloc, id, active)) {
         try printOut(alloc, io, "active version for extension '{s}' failed integrity validation\n", .{id});
@@ -287,11 +543,7 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     // drift on how a frozen entry is located.
     const entry_rel = try st.versionRuntimeEntryPath(alloc, id, active, rt);
     defer alloc.free(entry_rel);
-
-    var cwd_real: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_len = try cwd.realPath(io, &cwd_real);
-    const cwd_path = cwd_real[0..cwd_len];
-    const entry_abs = try std.fs.path.join(alloc, &.{ cwd_path, extensions_root, entry_rel });
+    const entry_abs = try std.fs.path.join(alloc, &.{ search.roots.entries[found.root].real, entry_rel });
     defer alloc.free(entry_abs);
 
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
@@ -379,14 +631,21 @@ fn writeTypedValue(jw: *std.json.Stringify, val: []const u8, ty: ?[]const u8) !v
 const ActivateMode = enum { activate, rollback };
 
 fn extActivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8, mode: ActivateMode) !u8 {
-    if (args.len < 2) {
-        try printErr(io, "usage: nulya ext activate|rollback <id> <version>\n");
+    const flags = try takeUserFlag(alloc, args);
+    defer alloc.free(flags.rest);
+    if (flags.rest.len < 2) {
+        try printErr(io, "usage: nulya ext activate|rollback [--user] <id> <version>\n");
         return 1;
     }
-    const id = args[0];
-    const version = args[1];
+    const id = flags.rest[0];
+    const version = flags.rest[1];
 
-    var ext_root = try std.Io.Dir.cwd().openDir(io, extensions_root, .{});
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_path = try cwdRealPath(io, &cwd_buf);
+    var ext_root = (try openTargetRoot(alloc, io, cwd_path, id, version, flags.user)) orelse {
+        try printOut(alloc, io, "no store root holds {s}@{s} (or no home for --user); see `nulya ext list`\n", .{ id, version });
+        return 1;
+    };
     defer ext_root.close(io);
     const st = store.Store.init(io, ext_root);
     (switch (mode) {
@@ -420,35 +679,115 @@ fn depositSessionNote(alloc: std.mem.Allocator, io: std.Io, ext_root: std.Io.Dir
     try notes.depositActiveNote(alloc, io, std.Io.Dir.cwd(), session_path, ext_root, id, version);
 }
 
+/// The root an `activate` / `rollback` / `deactivate` acts on. `--user` names
+/// the user store outright. Otherwise: with a `version`, the first root that
+/// actually holds that built version; without one (`deactivate`), the root whose
+/// `current` for `id` is the one in effect (`Roots.firstActive`, DESIGN §7.2) —
+/// so the operation lands on the copy a session would use, never on a bare
+/// directory that shadows nothing. Null means there is nowhere to act (and, for
+/// `--user`, no home directory).
+fn openTargetRoot(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    cwd_path: []const u8,
+    id: []const u8,
+    version: ?[]const u8,
+    user: bool,
+) !?std.Io.Dir {
+    if (user) {
+        const spec = (try writeRootSpec(alloc, true)) orelse return null;
+        defer alloc.free(spec);
+        return try store.openOrCreateRoot(io, cwd_path, spec);
+    }
+    var search = try RootSearch.open(alloc, io, cwd_path);
+    defer search.deinit(alloc);
+    const index = if (version) |v|
+        search.roots.firstWithVersion(alloc, id, v) orelse return null
+    else blk: {
+        const active = (try search.roots.firstActive(alloc, id)) orelse return null;
+        alloc.free(active.version);
+        break :blk active.root;
+    };
+    // Reopen independently: `search` owns the handles it is about to close.
+    return try store.openOrCreateRoot(io, cwd_path, search.roots.entries[index].spec);
+}
+
 fn extDeactivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
-    if (args.len < 1) {
-        try printErr(io, "usage: nulya ext deactivate <id>\n");
+    const flags = try takeUserFlag(alloc, args);
+    defer alloc.free(flags.rest);
+    if (flags.rest.len < 1) {
+        try printErr(io, "usage: nulya ext deactivate [--user] <id>\n");
         return 1;
     }
-    var ext_root = try std.Io.Dir.cwd().openDir(io, extensions_root, .{});
+    const id = flags.rest[0];
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_path = try cwdRealPath(io, &cwd_buf);
+    var ext_root = (try openTargetRoot(alloc, io, cwd_path, id, null, flags.user)) orelse {
+        try printOut(alloc, io, "extension '{s}' has no active version in any store root\n", .{id});
+        return 1;
+    };
     defer ext_root.close(io);
-    const st = store.Store.init(io, ext_root);
-    try st.deactivate(alloc, args[0]);
-    try printOut(alloc, io, "{s}: deactivated\n", .{args[0]});
+    try store.Store.init(io, ext_root).deactivate(alloc, id);
+    try printOut(alloc, io, "{s}: deactivated\n", .{id});
+
+    // Deactivating the copy in effect can UNSHADOW one in a later root — say so,
+    // or "I deactivated it, why is it still in my session?" is the next question.
+    var search = try RootSearch.open(alloc, io, cwd_path);
+    defer search.deinit(alloc);
+    if (try search.roots.firstActive(alloc, id)) |still| {
+        defer alloc.free(still.version);
+        try printOut(alloc, io, "note: {s}@{s} in {s} is now the active copy\n", .{ id, still.version, search.roots.entries[still.root].spec });
+    }
     return 0;
 }
 
+/// Every extension directory in every root, in search order, with the root it
+/// came from. An ACTIVE id that an earlier root also has active is marked
+/// `(shadowed)`: only the first active copy is ever used (`Roots.listActive`),
+/// and silently hiding the duplicate is how a stale user-level copy becomes a
+/// mystery. A directory without `current` shadows nothing and is listed as
+/// `(inactive)` for its root alone.
 fn extList(alloc: std.mem.Allocator, io: std.Io) !u8 {
-    var ext_root = std.Io.Dir.cwd().openDir(io, extensions_root, .{ .iterate = true }) catch {
-        try printOut(alloc, io, "no extensions\n", .{});
-        return 0;
-    };
-    defer ext_root.close(io);
-    const st = store.Store.init(io, ext_root);
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var search = try RootSearch.open(alloc, io, try cwdRealPath(io, &cwd_buf));
+    defer search.deinit(alloc);
 
-    var it = ext_root.iterate();
-    while (try it.next(io)) |entry| {
-        if (entry.kind != .directory) continue;
-        const active = try st.activeVersion(alloc, entry.name);
-        defer if (active) |a| alloc.free(a);
-        try printOut(alloc, io, "{s}\t{s}\n", .{ entry.name, active orelse "(inactive)" });
+    var seen_active: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (seen_active.items) |s| alloc.free(s);
+        seen_active.deinit(alloc);
     }
+
+    var printed: usize = 0;
+    for (search.roots.entries) |entry| {
+        var it = entry.dir.iterate();
+        while (try it.next(io)) |dir_entry| {
+            if (dir_entry.kind != .directory) continue;
+            const active = (store.Store.init(io, entry.dir).activeVersion(alloc, dir_entry.name) catch |err| switch (err) {
+                error.InvalidId => continue,
+                else => return err,
+            });
+            defer if (active) |a| alloc.free(a);
+            const shadowed = active != null and sliceHasString(seen_active.items, dir_entry.name);
+            if (active != null and !shadowed) try seen_active.append(alloc, try alloc.dupe(u8, dir_entry.name));
+            printed += 1;
+            try printOut(alloc, io, "{s}\t{s}\t{s}{s}\n", .{
+                dir_entry.name,
+                active orelse "(inactive)",
+                entry.spec,
+                if (shadowed) "\t(shadowed)" else "",
+            });
+        }
+    }
+    if (printed == 0) try printOut(alloc, io, "no extensions\n", .{});
     return 0;
+}
+
+fn sliceHasString(list: []const []const u8, needle: []const u8) bool {
+    for (list) |item| {
+        if (std.mem.eql(u8, item, needle)) return true;
+    }
+    return false;
 }
 
 fn extInspect(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
@@ -456,15 +795,20 @@ fn extInspect(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
         try printErr(io, "usage: nulya ext inspect <id>\n");
         return 1;
     }
-    const manifest_rel = try std.fs.path.join(alloc, &.{ extensions_root, args[0], "extension.json" });
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var search = try RootSearch.open(alloc, io, try cwdRealPath(io, &cwd_buf));
+    defer search.deinit(alloc);
+
+    const manifest_rel = try std.fs.path.join(alloc, &.{ args[0], "extension.json" });
     defer alloc.free(manifest_rel);
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, manifest_rel, alloc, .limited(1 << 20)) catch {
-        try printOut(alloc, io, "no such extension '{s}'\n", .{args[0]});
-        return 1;
-    };
-    defer alloc.free(bytes);
-    try printOut(alloc, io, "{s}\n", .{bytes});
-    return 0;
+    for (search.roots.entries) |entry| {
+        const bytes = entry.dir.readFileAlloc(io, manifest_rel, alloc, .limited(1 << 20)) catch continue;
+        defer alloc.free(bytes);
+        try printOut(alloc, io, "{s}\n", .{bytes});
+        return 0;
+    }
+    try printOut(alloc, io, "no such extension '{s}'\n", .{args[0]});
+    return 1;
 }
 
 /// `ext api` is a curated `nulya src` (PLAN §3.10): the wire-protocol topic prints
@@ -583,8 +927,251 @@ fn dispatchSession(alloc: std.mem.Allocator, io: std.Io, args: []const []const u
     if (std.mem.eql(u8, sub, "step")) return sessionStep(alloc, io, rest);
     if (std.mem.eql(u8, sub, "events")) return sessionEvents(alloc, io, rest);
     if (std.mem.eql(u8, sub, "cancel")) return sessionCancel(alloc, io, rest);
-    try printErr(io, "unknown `session` subcommand; try new|append|step|events|cancel\n");
+    if (std.mem.eql(u8, sub, "outcome")) return sessionOutcome(alloc, io, rest);
+    if (std.mem.eql(u8, sub, "list")) return sessionList(alloc, io, sliceHasFlag(rest, "--json"));
+    try printErr(io, "unknown `session` subcommand; try new|append|step|events|cancel|outcome|list\n");
     return 1;
+}
+
+// ── `nulya session list` (DESIGN §14) ───────────────────────────────────────
+//
+// A READ-ONLY projection of `.nulya/sessions/`: what was composed, what it cost,
+// how it turned out. It decides nothing and writes nothing — same standing as
+// `config show`. Its first consumers are the evolution skill (which needs to see
+// many sessions at once without reading every ledger) and the TUI's `/sessions`.
+
+const SessionView = struct {
+    id: []const u8,
+    /// RFC3339 UTC, or empty for a session created before headers carried it.
+    created: []const u8,
+    parent: ?ledger.ParentRef,
+    /// The provider PROFILE name, then the frozen identity behind it.
+    model: []const u8,
+    provider: []const u8,
+    model_id: []const u8,
+    events: usize,
+    composition: Composition,
+    /// Sum of every assistant event's recorded usage (DESIGN §3.1). Steps whose
+    /// provider reported nothing contribute nothing.
+    usage: ledger.Usage,
+    /// The opening user turn, truncated — enough to recognize the session by.
+    first_user_text: []const u8,
+    /// The verdict that stands, or null for "not judged" — which is NOT failure.
+    outcome: ?OutcomeView,
+
+    const Composition = struct {
+        active: []const []const u8,
+        native_tools: []const []const u8,
+    };
+
+    const OutcomeView = struct {
+        verdict: []const u8,
+        note: ?[]const u8,
+        at: []const u8,
+    };
+};
+
+/// How much of the opening user turn `session list` carries. Long enough to tell
+/// two sessions apart, short enough that a hundred of them stay readable.
+const first_text_limit: usize = 120;
+
+fn sessionList(alloc: std.mem.Allocator, io: std.Io, as_json: bool) !u8 {
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_path = try cwdRealPath(io, &cwd_buf);
+
+    const outcomes = try outcome.readAll(a, io, cwd_path);
+
+    var views: std.ArrayList(SessionView) = .empty;
+    var dir = std.Io.Dir.cwd().openDir(io, launch.sessions_dir, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => {
+            try printSessionList(alloc, io, &.{}, as_json);
+            return 0;
+        },
+        else => return err,
+    };
+    defer dir.close(io);
+
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".jsonl")) continue;
+        // The iterator reuses its name buffer, and the view keeps a slice of the
+        // name as the session id — so copy it before the next `next()`.
+        const name = try a.dupe(u8, entry.name);
+        const view = readSessionView(a, io, dir, name, outcomes) catch continue; // a corrupt file is not a reason to hide the rest
+        try views.append(a, view);
+    }
+
+    // Newest first. `created` is the fact to sort on; sessions written before it
+    // existed fall back to their id, which embeds the creation time anyway.
+    std.mem.sort(SessionView, views.items, {}, struct {
+        fn lessThan(_: void, x: SessionView, y: SessionView) bool {
+            const xa = if (x.created.len != 0) x.created else x.id;
+            const ya = if (y.created.len != 0) y.created else y.id;
+            if (!std.mem.eql(u8, xa, ya)) return std.mem.order(u8, xa, ya) == .gt;
+            return std.mem.order(u8, x.id, y.id) == .gt;
+        }
+    }.lessThan);
+
+    try printSessionList(alloc, io, views.items, as_json);
+    return 0;
+}
+
+/// Project one session file. Reads its bytes once: the first line is the header,
+/// the rest are events — counted, summed, and scanned for the opening user turn.
+fn readSessionView(
+    a: std.mem.Allocator,
+    io: std.Io,
+    dir: std.Io.Dir,
+    file_name: []const u8,
+    outcomes: []const outcome.Outcome,
+) !SessionView {
+    const bytes = try dir.readFileAlloc(io, file_name, a, .unlimited);
+    const clean_end: usize = @intCast(ledger.lastCompleteLineEnd(bytes));
+
+    var lines = std.mem.splitScalar(u8, bytes[0..clean_end], '\n');
+    var header: ?ledger.OwnedHeader = null;
+    var events: usize = 0;
+    var total: ledger.Usage = .{};
+    var first_user_text: []const u8 = "";
+
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0) continue;
+        if (header == null) {
+            header = try ledger.parseHeaderLine(a, line);
+            continue;
+        }
+        events += 1;
+        // Only lines that MAY carry what this view needs are parsed; the rest are
+        // just counted, so listing does not cost a full decode of every ledger.
+        // The substring tests are a pre-filter, never the decision: what counts
+        // is the decoded line's own `kind` / `usage`.
+        const may_have_usage = std.mem.indexOf(u8, line, "\"usage\":") != null;
+        const may_be_first_text = first_user_text.len == 0 and std.mem.indexOf(u8, line, "\"kind\":\"user_text\"") != null;
+        if (!may_have_usage and !may_be_first_text) continue;
+        const parsed = ledger.parseEventLine(a, line) catch continue;
+        if (parsed.value.usage) |u| {
+            total.input_tokens += u.input_tokens;
+            total.output_tokens += u.output_tokens;
+            total.cache_read_tokens += u.cache_read_tokens;
+            total.cache_write_tokens += u.cache_write_tokens;
+        }
+        if (first_user_text.len == 0 and std.mem.eql(u8, parsed.value.kind, "user_text")) {
+            if (parsed.value.text) |t| first_user_text = try summarize(a, t);
+        }
+    }
+
+    const h = (header orelse return error.MissingHeader).value;
+    const active = try a.alloc([]const u8, h.composition.active.len);
+    for (h.composition.active, active) |ref, *out| out.* = try std.fmt.allocPrint(a, "{s}@{s}", .{ ref.id, ref.version });
+
+    const id = file_name[0 .. file_name.len - ".jsonl".len];
+    const latest = outcome.latestFor(outcomes, id);
+    return .{
+        .id = id,
+        .created = h.created,
+        .parent = h.parent,
+        .model = h.model,
+        .provider = h.model_identity.provider,
+        .model_id = h.model_identity.model,
+        .events = events,
+        .composition = .{ .active = active, .native_tools = h.composition.native_tools },
+        .usage = total,
+        .first_user_text = first_user_text,
+        .outcome = if (latest) |o| .{ .verdict = @tagName(o.verdict), .note = o.note, .at = o.at } else null,
+    };
+}
+
+/// One line of text, truncated on a UTF-8 boundary, with newlines flattened.
+fn summarize(a: std.mem.Allocator, text: []const u8) ![]const u8 {
+    var end = @min(text.len, first_text_limit);
+    while (end > 0 and end < text.len and (text[end] & 0xC0) == 0x80) end -= 1;
+    const cut = try a.dupe(u8, text[0..end]);
+    for (cut) |*c| {
+        if (c.* == '\n' or c.* == '\r' or c.* == '\t') c.* = ' ';
+    }
+    return cut;
+}
+
+fn printSessionList(alloc: std.mem.Allocator, io: std.Io, views: []const SessionView, as_json: bool) !void {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    if (as_json) {
+        var jw: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
+        try jw.beginObject();
+        try jw.objectField("sessions");
+        try jw.write(views);
+        try jw.endObject();
+        try out.writer.writeByte('\n');
+    } else {
+        for (views) |v| {
+            try out.writer.print("{s}  {s: <20}  {s: <10}  {d: >4} ev  in {d: >7} cache {d: >7} out {d: >6}  {s: <7}", .{
+                v.id,
+                if (v.created.len != 0) v.created else "-",
+                if (v.model.len != 0) v.model else "-",
+                v.events,
+                v.usage.input_tokens,
+                v.usage.cache_read_tokens,
+                v.usage.output_tokens,
+                if (v.outcome) |o| o.verdict else "-",
+            });
+            if (v.parent) |p| try out.writer.print("  <- {s}:{d}", .{ p.session, p.seq });
+            if (v.composition.active.len != 0) {
+                try out.writer.writeAll("  [");
+                for (v.composition.active, 0..) |ref, i| {
+                    if (i != 0) try out.writer.writeAll(", ");
+                    try out.writer.writeAll(ref);
+                }
+                try out.writer.writeAll("]");
+            }
+            if (v.first_user_text.len != 0) try out.writer.print("  {s}", .{v.first_user_text});
+            try out.writer.writeByte('\n');
+        }
+        if (views.len == 0) try out.writer.writeAll("no sessions\n");
+    }
+    try printRaw(io, out.written());
+}
+
+/// `nulya session outcome <id> <verdict> [--note <text>]` — record how a session
+/// turned out (DESIGN §3.3). The verdict is a judgment ABOUT the session, not a
+/// turn IN it, so this writes only the outcome journal: it never opens the
+/// session file and never takes its writer lease, which is what lets a session
+/// still running (or being stepped by another process) be judged right now.
+fn sessionOutcome(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+    if (args.len < 2) {
+        try printErr(io, "usage: nulya session outcome <id> <success|partial|failure> [--note <text>]\n");
+        return 1;
+    }
+    const id = args[0];
+    if (!launch.isValidSessionId(id)) {
+        try printErr(io, "invalid session id\n");
+        return 1;
+    }
+    const verdict = outcome.Verdict.parse(args[1]) orelse {
+        try printOut(alloc, io, "invalid verdict '{s}' (want success|partial|failure)\n", .{args[1]});
+        return 1;
+    };
+    const note = flagValue(args[2..], "--note");
+
+    const spath = try launch.sessionPath(alloc, id);
+    defer alloc.free(spath);
+    if (!sessionExists(io, spath)) {
+        try printOut(alloc, io, "no such session '{s}'\n", .{id});
+        return 1;
+    }
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_path = try cwdRealPath(io, &cwd_buf);
+    const at = try launch.rfc3339Now(alloc, io);
+    defer alloc.free(at);
+    try outcome.append(alloc, io, cwd_path, id, verdict, note, at);
+
+    try printOut(alloc, io, "{s}: {s}\n", .{ id, @tagName(verdict) });
+    return 0;
 }
 
 /// Find `--flag <value>` in args; returns the value or null.
@@ -594,6 +1181,27 @@ fn flagValue(args: []const []const u8, flag: []const u8) ?[]const u8 {
         if (std.mem.eql(u8, args[i], flag)) return args[i + 1];
     }
     return null;
+}
+
+/// Collect every `--with <id>[@<version>]` (the flag is repeatable). Slices
+/// borrow `args`; the caller owns only the returned array.
+fn withRefs(alloc: std.mem.Allocator, args: []const []const u8) ![]composition.WithRef {
+    var out: std.ArrayList(composition.WithRef) = .empty;
+    errdefer out.deinit(alloc);
+    var i: usize = 0;
+    while (i + 1 < args.len) : (i += 1) {
+        if (!std.mem.eql(u8, args[i], "--with")) continue;
+        const spec = args[i + 1];
+        i += 1;
+        // Version ids contain no `@`, extension ids neither, so the last `@`
+        // splits unambiguously.
+        if (std.mem.lastIndexOfScalar(u8, spec, '@')) |at| {
+            try out.append(alloc, .{ .id = spec[0..at], .version = spec[at + 1 ..] });
+        } else {
+            try out.append(alloc, .{ .id = spec, .version = null });
+        }
+    }
+    return out.toOwnedSlice(alloc);
 }
 
 fn cwdRealPath(io: std.Io, buf: *[std.fs.max_path_bytes]u8) ![]u8 {
@@ -607,17 +1215,97 @@ fn sessionNew(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
     var cfg = try config.load(alloc, io, &host);
     defer cfg.deinit();
 
-    const profile = flagValue(args, "--model") orelse
+    // `--parent <id>:<seq>` names the lineage this session continues — a fork,
+    // or the new file a compaction opens (DESIGN §3.4, §11). The parent must
+    // exist: a lineage pointer into nothing is not provenance. Its header is
+    // also where an unnamed model comes from, below.
+    var parent: ?ledger.ParentRef = null;
+    var parent_header: ?ledger.OwnedHeader = null;
+    defer if (parent_header) |*h| h.deinit();
+    if (flagValue(args, "--parent")) |p| {
+        const ref = parseParent(p) orelse {
+            try printErr(io, "invalid --parent (want <session>:<seq>)\n");
+            return 1;
+        };
+        if (!launch.isValidSessionId(ref.session)) {
+            try printErr(io, "invalid --parent session id\n");
+            return 1;
+        }
+        const ppath = try launch.sessionPath(alloc, ref.session);
+        defer alloc.free(ppath);
+        parent_header = ledger.readHeader(alloc, io, std.Io.Dir.cwd(), ppath) catch |err| {
+            try printOut(alloc, io, "cannot read parent session '{s}': {s}\n", .{ ref.session, @errorName(err) });
+            return 1;
+        };
+        parent = ref;
+    }
+
+    // `--profile` names HOW to reach a provider, `--model` WHICH of its ids to
+    // run (default: the profile's own default). A typo'd profile is refused
+    // rather than silently frozen as scripted; a real profile whose credential
+    // is missing still resolves scripted (the offline stand-in) but says so.
+    const named_profile = flagValue(args, "--profile");
+    const model_id = flagValue(args, "--model");
+
+    // A fork continues its parent's model unless told otherwise: a compaction
+    // opens a new file for the same conversation, and who that conversation is
+    // with must not change because `active_profile` moved meanwhile (physics §2
+    // in spirit — the identity was frozen once, at the root). Composition
+    // deliberately does NOT come along: a new session is exactly where promotion
+    // and newly activated versions are meant to take hold (DESIGN §5.5, §7.5),
+    // and a fork is a session boundary like any other.
+    //
+    // Two levels of continuing, because the two flags mean different things:
+    // `--profile` names a different way to reach a provider, so it replaces the
+    // parent's; `--model` only picks another id WITHIN a profile, so the
+    // parent's profile still carries. Naming either re-resolves the identity
+    // against today's config; naming neither takes the parent's frozen
+    // descriptor verbatim, which is the compaction case.
+    // An empty one is a legacy header that never recorded a profile: absent, not
+    // a profile named "".
+    const parent_profile: ?[]const u8 = if (parent_header) |h|
+        (if (h.value.model.len != 0) h.value.model else null)
+    else
+        null;
+    const inherited: ?ledger.ModelDescriptor = if (parent_header) |h| blk: {
+        if (named_profile != null or model_id != null) break :blk null;
+        break :blk if (h.value.model_identity.provider.len != 0) h.value.model_identity else null;
+    } else null;
+
+    const profile = named_profile orelse parent_profile orelse
         (if (cfg.provider.active_profile.len != 0) cfg.provider.active_profile else "scripted");
 
-    var parent: ?ledger.ParentRef = null;
-    if (flagValue(args, "--parent")) |p| parent = parseParent(p) orelse {
-        try printErr(io, "invalid --parent (want <session>:<seq>)\n");
-        return 1;
-    };
+    // An inherited identity needs no resolution — and no credential warning: it
+    // never degrades to scripted, so there is nothing to explain here. A missing
+    // credential is reported, loudly and once, by the `step` that needs it.
+    var identity: ledger.ModelDescriptor = undefined;
+    if (inherited) |d| {
+        identity = d;
+    } else {
+        const profile_cfg = cfg.provider.findProfile(profile) orelse {
+            try printOut(alloc, io, "no such profile '{s}' (see `nulya config show`)\n", .{profile});
+            return 1;
+        };
+        if (!launch.credentialAvailable(alloc, io, profile_cfg, &host)) {
+            var paths = try config.ConfigPaths.init(alloc, &host);
+            defer paths.deinit(alloc);
+            const warn = if (profile_cfg.kind == .codex)
+                try std.fmt.allocPrint(alloc, "warning: profile '{s}' has no credential (run `codex login`); session frozen as scripted\n", .{profile})
+            else
+                try std.fmt.allocPrint(alloc, "warning: profile '{s}' has no credential (put api_key in {s}, or set {s}); session frozen as scripted\n", .{ profile, paths.user, profile_cfg.api_key_env });
+            defer alloc.free(warn);
+            try printErr(io, warn);
+        }
+        // Freeze the RESOLVED model identity now: config chooses the model at
+        // creation, and a later config edit can never change this session's
+        // model (DESIGN §3).
+        identity = launch.resolveDescriptor(alloc, io, cfg.provider, &host, profile, model_id);
+    }
 
     const id = try launch.genSessionId(alloc, io);
     defer alloc.free(id);
+    const created = try launch.rfc3339Now(alloc, io);
+    defer alloc.free(created);
     const spath = try launch.sessionPath(alloc, id);
     defer alloc.free(spath);
 
@@ -637,10 +1325,15 @@ fn sessionNew(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{ .dialect = cfg.environment.shell.toLocalOption() });
     defer lenv.deinit();
 
-    // Freeze the RESOLVED model identity now: config chooses the model at
-    // creation, and a later config edit can never change this session's model
-    // (DESIGN §3). A placeholder handle is enough since `new` never steps.
-    const identity = launch.resolveDescriptor(alloc, io, cfg.provider, &host, profile);
+    const ext_roots = try launch.extensionRoots(alloc, &host, &cfg);
+    defer launch.freeExtensionRoots(alloc, ext_roots);
+
+    // `--with <id>[@<version>]` (repeatable) brings a BUILT version into this
+    // one session's composition without activating it anywhere (DESIGN §14).
+    const with = try withRefs(alloc, args);
+    defer alloc.free(with);
+
+    // A placeholder handle is enough since `new` never steps.
     var holder: launch.ModelHolder = .{ .scripted = .{} };
     var sess = session.AgentSession.createDurable(alloc, .{
         .model = holder.model(),
@@ -648,10 +1341,12 @@ fn sessionNew(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
             .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd_path },
             .scratch_dir = launch.scratch_dir,
         },
+        .extension_roots = ext_roots,
         .registry = .{
             .pinned_native_tools = cfg.registry.pinned_native_tools,
             .ranked_native_tools = ranked,
             .max_tools = cfg.registry.max_tools,
+            .with = with,
         },
     }, .{
         .workspace = std.Io.Dir.cwd(),
@@ -659,10 +1354,18 @@ fn sessionNew(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
         .session_id = id,
         .model_profile = profile,
         .model_identity = identity,
+        .created = created,
         .parent = parent,
-    }) catch |err| {
-        try printOut(alloc, io, "session new failed: {s}\n", .{@errorName(err)});
-        return 1;
+    }) catch |err| switch (err) {
+        // The caller named these extensions, so an unusable one is not a warning.
+        error.WithVersionNotFound => {
+            try printOut(alloc, io, "session new failed: --with names an extension with no such built version (see `nulya ext list`)\n", .{});
+            return 1;
+        },
+        else => {
+            try printOut(alloc, io, "session new failed: {s}\n", .{@errorName(err)});
+            return 1;
+        },
     };
     sess.deinit();
 
@@ -954,7 +1657,7 @@ fn stepFail(
 
 fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (args.len < 1) {
-        try printErr(io, "usage: nulya session step <id> [--max-steps N] [--stream]\n");
+        try printErr(io, "usage: nulya session step <id> [--max-steps N] [--effort E] [--stream]\n");
         return 1;
     }
     const id = args[0];
@@ -1003,10 +1706,14 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     // than quietly becoming a scripted session (DESIGN §3). The session id is
     // also the prompt-cache scope, so a provider that keys its cache explicitly
     // keeps hitting it across separate `step` processes.
-    var holder = launch.buildFromDescriptor(alloc, io, hdr.value.model_identity, &host, .{ .cache_key = id }) catch |err| switch (err) {
+    // The credential is re-resolved every step: the profile's own `api_key`
+    // (user config, found by the header's profile name), else the env var the
+    // header names, else the Codex auth file.
+    const inline_key = if (cfg.provider.findProfile(hdr.value.model)) |p| p.api_key else null;
+    var holder = launch.buildFromDescriptor(alloc, io, hdr.value.model_identity, &host, .{ .cache_key = id, .inline_key = inline_key }) catch |err| switch (err) {
         error.MissingCredential => {
             const credential = if (hdr.value.model_identity.api_key_env.len != 0) hdr.value.model_identity.api_key_env else "codex login";
-            return stepFail(alloc, io, stream, "session '{s}' is a '{s}' session but its credential ({s}) is not available; refusing to run (no silent fallback)", .{ id, hdr.value.model_identity.provider, credential });
+            return stepFail(alloc, io, stream, "session '{s}' is a '{s}' session but its credential (profile '{s}' api_key, or {s}) is not available; refusing to run (no silent fallback)", .{ id, hdr.value.model_identity.provider, hdr.value.model, credential });
         },
         error.ProviderUnavailable => {
             return stepFail(alloc, io, stream, "session '{s}' was created with provider '{s}', which this build cannot construct", .{ id, hdr.value.model_identity.provider });
@@ -1015,10 +1722,16 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     };
     defer holder.deinit();
 
-    const effort = if (cfg.provider.findProfile(hdr.value.model)) |p| p.effort else null;
+    // Effort is a generation option, not identity (DESIGN §3): the driver may
+    // set it per step; otherwise the profile / catalog default applies.
+    const effort = flagValue(args[1..], "--effort") orelse
+        cfg.defaultEffort(hdr.value.model, hdr.value.model_identity.model);
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try cwdRealPath(io, &cwd_buf);
+
+    const ext_roots = try launch.extensionRoots(alloc, &host, &cfg);
+    defer launch.freeExtensionRoots(alloc, ext_roots);
 
     var sess = session.AgentSession.openDurable(alloc, .{
         .model = holder.model(),
@@ -1028,6 +1741,7 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
             .observer = if (stream) |s| s.observer() else null,
         },
         .model_options = .{ .effort = effort },
+        .extension_roots = ext_roots,
     }, .{ .workspace = std.Io.Dir.cwd(), .session_path = spath }) catch |err| {
         return stepFail(alloc, io, stream, "session open failed: {s}", .{@errorName(err)});
     };
@@ -1184,12 +1898,22 @@ fn sliceHasFlag(args: []const []const u8, flag: []const u8) bool {
 fn sessionUsage(io: std.Io) !u8 {
     try printRaw(io,
         \\usage:
-        \\  nulya session new [--model profile] [--parent <id>:<seq>]   print a new session id
+        \\  nulya session new [--profile P] [--model ID] [--parent <id>:<seq>]
+        \\                                                             freeze composition + model, print a new session id
+        \\                                                             (P: a config profile, default active_profile; ID: one of its
+        \\                                                             models, default the profile's — see `nulya config show`)
         \\  nulya session append <id> <text> | --file <path>           queue a user turn (appended at the next step boundary)
-        \\  nulya session step <id> [--max-steps N] [--stream]         run to turn end (or the budget); stdout = event JSONL
+        \\  nulya session step <id> [--max-steps N] [--effort E] [--stream]
+        \\                                                             run to turn end (or the budget); stdout = event JSONL
+        \\                                                             --effort overrides the profile/catalog default for this run
         \\                                                             --stream also emits transient model/tool lines as they happen
         \\  nulya session events <id> [--since N] [--follow]           print events as JSONL (read-only tail)
         \\  nulya session cancel <id>                                  request cancel at the next step boundary
+        \\  nulya session list [--json]                                read-only projection of every session here:
+        \\                                                             composition, event count, summed usage, latest verdict
+        \\  nulya session outcome <id> <success|partial|failure> [--note <text>]
+        \\                                                             record how the session turned out (journal only — never
+        \\                                                             touches the session file, so a running one can be judged)
         \\
     );
     return 0;
@@ -1242,6 +1966,7 @@ fn usage(io: std.Io) !u8 {
         \\  nulya ext inspect <id>            print an extension's manifest
         \\  nulya ext api [protocol|permissions|examples]
         \\  nulya session new|append|step|events|cancel   drive a durable session
+        \\  nulya config show [--json]        effective provider profiles + model catalog
         \\  nulya src [path] [--tests]        print this binary's own source
         \\  nulya skill list                 list active extension skills
         \\  nulya skill load <pinned-ref>    print a frozen SKILL.md
@@ -1330,6 +2055,116 @@ test "EventTail prints raw event lines past --since, skips the header and a torn
     try std.testing.expectEqualStrings(whole, on_disk);
 }
 
+test "config show projects profiles with credential availability and the catalog, never a secret" {
+    const alloc = std.testing.allocator;
+    var cfg = config.Config.init(alloc);
+    defer cfg.deinit();
+    var profiles = [_]config.ProviderProfile{
+        .{ .name = "ds", .kind = .openai, .base_url = "https://api.deepseek.com", .api_key_env = "DS_KEY_FOR_TEST", .model = "deepseek-v4-flash", .models = &.{ "deepseek-v4-flash", "deepseek-v4-pro" } },
+        .{ .name = "inline", .kind = .openai, .api_key = "sk-secret-inline" },
+        .{ .name = "scripted", .kind = .scripted, .model = "scripted-demo" },
+    };
+    cfg.provider = .{ .active_profile = "ds", .profiles = &profiles };
+    var models = [_]config.ModelParams{
+        .{ .id = "deepseek-v4-flash", .label = "DeepSeek V4 Flash", .efforts = &.{ "off", "low", "high", "max" }, .context_window = 1_000_000 },
+    };
+    cfg.models = &models;
+
+    var env: std.process.Environ.Map = .init(alloc);
+    defer env.deinit();
+
+    // Build the view the way configShow does, against a controlled env.
+    const views = try alloc.alloc(ConfigView.ProfileView, profiles.len);
+    defer alloc.free(views);
+    for (profiles, 0..) |p, i| {
+        const cred = launch.credentialSource(alloc, std.testing.io, p, &env);
+        views[i] = .{
+            .name = p.name,
+            .kind = @tagName(p.kind),
+            .base_url = p.base_url,
+            .api_key_env = p.api_key_env,
+            .credential = cred != .none,
+            .credential_source = @tagName(cred),
+            .model = p.defaultModel(),
+            .models = if (p.models.len != 0) p.models else &.{},
+            .effort = p.effort,
+        };
+    }
+    const view: ConfigView = .{
+        .paths = .{ .system = "/etc/nulya/config.toml", .user = "/home/me/.nulya/config.toml", .project = config.project_config_path },
+        .active_profile = "ds",
+        .profiles = views,
+        .models = &models,
+    };
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    var jw: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
+    try jw.write(view);
+    const json = out.written();
+
+    // Round-trips through std.json as the TUI will read it.
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try std.testing.expectEqualStrings("ds", root.get("active_profile").?.string);
+    const ps = root.get("profiles").?.array.items;
+    try std.testing.expectEqual(@as(usize, 3), ps.len);
+    try std.testing.expectEqualStrings("ds", ps[0].object.get("name").?.string);
+    try std.testing.expectEqual(false, ps[0].object.get("credential").?.bool);
+    try std.testing.expectEqualStrings("none", ps[0].object.get("credential_source").?.string);
+    try std.testing.expectEqualStrings("DS_KEY_FOR_TEST", ps[0].object.get("api_key_env").?.string);
+    try std.testing.expectEqual(@as(usize, 2), ps[0].object.get("models").?.array.items.len);
+    // Scripted is always runnable.
+    try std.testing.expectEqual(true, ps[2].object.get("credential").?.bool);
+    try std.testing.expectEqualStrings("builtin", ps[2].object.get("credential_source").?.string);
+    // An inline key IS a credential (source `config`) — but the key itself never
+    // appears; only the fact that the profile has one.
+    try std.testing.expectEqual(true, ps[1].object.get("credential").?.bool);
+    try std.testing.expectEqualStrings("config", ps[1].object.get("credential_source").?.string);
+    try std.testing.expect(std.mem.indexOf(u8, json, "sk-secret-inline") == null);
+    try std.testing.expect(ps[1].object.get("api_key") == null);
+    // The paths ride along so a front end writes where the kernel reads.
+    try std.testing.expectEqualStrings("/home/me/.nulya/config.toml", root.get("paths").?.object.get("user").?.string);
+    // The catalog rides along, typed.
+    const ms = root.get("models").?.array.items;
+    try std.testing.expectEqualStrings("deepseek-v4-flash", ms[0].object.get("id").?.string);
+    try std.testing.expectEqual(@as(usize, 4), ms[0].object.get("efforts").?.array.items.len);
+    try std.testing.expect(ms[0].object.get("default_effort").? == .null);
+
+    // The plain-text form mentions each profile and the model line.
+    var text: std.Io.Writer.Allocating = .init(alloc);
+    defer text.deinit();
+    try writeConfigText(&text.writer, view);
+    try std.testing.expect(std.mem.indexOf(u8, text.written(), "ds ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text.written(), "no key") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text.written(), "effort off|low|high|max (default auto)") != null);
+}
+
+test "--with is repeatable and splits <id>[@<version>]" {
+    const alloc = std.testing.allocator;
+    const args = [_][]const u8{
+        "--profile",       "scripted",
+        "--with",          "evolution",
+        "--with",          "web.search@v-0123456789abcdef01234567",
+        "--parent",        "s-1:4",
+        "--with-nothing",  "ignored",
+        "--with",
+    }; // a trailing --with with no value is not a ref
+    const refs = try withRefs(alloc, &args);
+    defer alloc.free(refs);
+
+    try std.testing.expectEqual(@as(usize, 2), refs.len);
+    try std.testing.expectEqualStrings("evolution", refs[0].id);
+    try std.testing.expect(refs[0].version == null); // no @version = its current
+    try std.testing.expectEqualStrings("web.search", refs[1].id);
+    try std.testing.expectEqualStrings("v-0123456789abcdef01234567", refs[1].version.?);
+
+    const none = try withRefs(alloc, &.{ "--profile", "scripted" });
+    defer alloc.free(none);
+    try std.testing.expectEqual(@as(usize, 0), none.len);
+}
+
 test "parseParent parses <session>:<seq> and rejects malformed input" {
     const p = parseParent("s-123:41").?;
     try std.testing.expectEqualStrings("s-123", p.session);
@@ -1392,7 +2227,7 @@ test "session step --stream emits the tui.md §2.2 line protocol in order" {
             .observer = stream.observer(),
         },
         .model_options = .{},
-        .extension_root = "nulya-absent-extensions-root",
+        .extension_roots = &.{"nulya-absent-extensions-root"},
     };
     defer sess.l.deinit();
 

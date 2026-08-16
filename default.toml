@@ -1,10 +1,27 @@
+# Built-in configuration — the base layer of the chain (DESIGN §9.5). The user
+# file `~/.nulya/config.toml` (Windows: `%USERPROFILE%\.nulya\config.toml`;
+# `NULYA_HOME` relocates the directory) overlays it: scalars are replaced,
+# `[[provider.profiles]]` merge by `name`, `[[models]]` merge by `id`. Project
+# `.nulya/config.toml` may only pick a profile and tighten limits.
+#
+# Two tables describe models. A profile says HOW to reach a provider — kind,
+# endpoint, credential — and WHICH model ids it serves; the `[[models]]` catalog
+# says what each id IS (label, effort dial, context), once, no matter how many
+# endpoints serve it. `nulya config show --json` is the projection pickers read.
+#
+# Credentials: a profile runs when its own `api_key` is set (put it in the user
+# file — the `/model` picker's `s` writes exactly that) or when the env var
+# named by `api_key_env` is set; the config's key wins. Keys never enter a
+# session file or a tool's environment.
+
 [provider]
 active_profile = "openai"
 
 [[provider.profiles]]
 name = "openai"
 kind = "openai"
-model = "gpt-4o-mini"
+model = "gpt-5.6-sol"
+models = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
 
@@ -12,6 +29,7 @@ api_key_env = "OPENAI_API_KEY"
 name = "anthropic"
 kind = "anthropic"
 model = "claude-sonnet-5"
+models = ["claude-fable-5", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"]
 base_url = "https://api.anthropic.com"
 api_key_env = "ANTHROPIC_API_KEY"
 
@@ -21,13 +39,16 @@ api_key_env = "ANTHROPIC_API_KEY"
 name = "codex"
 kind = "codex"
 model = "gpt-5.5"
+models = ["gpt-5.5"]
 
 # DeepSeek serves the same models behind both wire formats, which makes it the
-# cheapest way to exercise either provider end to end.
+# cheapest way to exercise either provider end to end. Its Chat Completions
+# endpoint is the primary one (prefix cache, `thinking` switch, `reasoning_effort`).
 [[provider.profiles]]
 name = "deepseek"
 kind = "openai"
 model = "deepseek-v4-flash"
+models = ["deepseek-v4-flash", "deepseek-v4-pro"]
 base_url = "https://api.deepseek.com"
 api_key_env = "DEEPSEEK_API_KEY"
 
@@ -35,13 +56,104 @@ api_key_env = "DEEPSEEK_API_KEY"
 name = "deepseek-anthropic"
 kind = "anthropic"
 model = "deepseek-v4-flash"
+models = ["deepseek-v4-flash", "deepseek-v4-pro"]
 base_url = "https://api.deepseek.com/anthropic"
 api_key_env = "DEEPSEEK_API_KEY"
+
+# OpenRouter over its Anthropic-compatible Messages endpoint (this base_url +
+# the provider's `/v1/messages`). It takes our `x-api-key`, streams the standard
+# Anthropic SSE shape and passes tool calls through, so no new wire is needed.
+# It fronts hundreds of models; only the free test model ships here — add the
+# ids you use (openrouter.ai/models) to `models` in your user config.
+[[provider.profiles]]
+name = "openrouter"
+kind = "anthropic"
+model = "tencent/hy3:free"
+models = ["tencent/hy3:free"]
+base_url = "https://openrouter.ai/api"
+api_key_env = "OPENROUTER_API_KEY"
 
 [[provider.profiles]]
 name = "scripted"
 kind = "scripted"
 model = "scripted-demo"
+
+# ---- model catalog ---------------------------------------------------------
+# `efforts` lists the dial positions the model accepts, lowest → highest; a
+# picker always offers "auto" (send nothing) besides these. Empty = no dial.
+# `default_effort` is what a session sends when nobody names one; unset means
+# auto. Ids and dials verified 2026-08 against each vendor's docs.
+
+# Fable 5 always thinks; there is no dial.
+[[models]]
+id = "claude-fable-5"
+label = "Claude Fable 5"
+context_window = 1000000
+
+[[models]]
+id = "claude-opus-5"
+label = "Claude Opus 5"
+context_window = 1000000
+efforts = ["off", "low", "medium", "high"]
+
+[[models]]
+id = "claude-sonnet-5"
+label = "Claude Sonnet 5"
+context_window = 1000000
+efforts = ["off", "low", "medium", "high"]
+
+[[models]]
+id = "claude-haiku-4-5"
+label = "Claude Haiku 4.5"
+context_window = 200000
+
+[[models]]
+id = "gpt-5.6-sol"
+label = "GPT-5.6 Sol"
+context_window = 1050000
+efforts = ["low", "medium", "high"]
+default_effort = "medium"
+
+[[models]]
+id = "gpt-5.6-terra"
+label = "GPT-5.6 Terra"
+context_window = 1050000
+efforts = ["low", "medium", "high"]
+default_effort = "medium"
+
+[[models]]
+id = "gpt-5.6-luna"
+label = "GPT-5.6 Luna"
+context_window = 1050000
+efforts = ["low", "medium", "high"]
+default_effort = "medium"
+
+# Codex Responses: `off` is sent as `none`; an absent effort is the server default.
+[[models]]
+id = "gpt-5.5"
+label = "GPT-5.5 (Codex)"
+efforts = ["off", "low", "medium", "high"]
+
+# DeepSeek V4: thinking is ON by default server-side (effort `high`); `off`
+# disables it. Its `reasoning_effort` accepts low | high | max (`medium` is
+# treated as `high`), so the dial lists what the endpoint distinguishes.
+[[models]]
+id = "deepseek-v4-flash"
+label = "DeepSeek V4 Flash"
+context_window = 1000000
+efforts = ["off", "low", "high", "max"]
+
+[[models]]
+id = "deepseek-v4-pro"
+label = "DeepSeek V4 Pro"
+context_window = 1000000
+efforts = ["off", "low", "high", "max"]
+
+# Thinks unconditionally (ignores a disable), so no dial.
+[[models]]
+id = "tencent/hy3:free"
+label = "Tencent Hy3 (free)"
+context_window = 262144
 
 [registry]
 max_tools = 8

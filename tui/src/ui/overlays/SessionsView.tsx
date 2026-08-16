@@ -7,9 +7,10 @@
  * observer mode. There is no delete: a ledger is append-only, and a view that
  * offered to erase one would be lying about what the system is.
  */
-import { For, Show, createEffect, createSignal, onCleanup, onMount } from "solid-js"
+import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import { useKeyboard } from "@opentui/solid"
-import { useStyle } from "../../render/theme.ts"
+import { useScreen, useStyle } from "../../render/theme.ts"
+import { visibleRows, windowRange } from "../list.ts"
 import { listSessions, type SessionEntry } from "../../nulya/files.ts"
 import type { Workspace } from "../../nulya/bin.ts"
 
@@ -61,6 +62,7 @@ export function SessionsView(props: {
   onClose: () => void
 }) {
   const style = useStyle()
+  const screen = useScreen()
   const [entries, setEntries] = createSignal<SessionEntry[]>([])
   const [cursor, setCursor] = createSignal(0)
 
@@ -75,6 +77,9 @@ export function SessionsView(props: {
   })
 
   const rows = () => sessionRows(entries())
+  // A workspace collects sessions; without a window the list draws straight
+  // through the rows below it once there are more than a screenful.
+  const range = createMemo(() => windowRange(rows().length, cursor(), visibleRows(screen().height)))
   createEffect(() => {
     const count = rows().length
     if (cursor() >= count) setCursor(Math.max(0, count - 1))
@@ -102,9 +107,16 @@ export function SessionsView(props: {
     <box flexDirection="column" width="100%" flexGrow={1} paddingLeft={1} paddingRight={1}>
       <text fg={style.theme.accent.evolve}>sessions · {entries().length}</text>
       <box height={1} />
-      <box flexDirection="column" flexGrow={1}>
-        <For each={rows()}>
-          {(row, index) => {
+      <box flexDirection="column" flexGrow={1} flexShrink={1}>
+        <Show when={range().start > 0}>
+          <text fg={style.theme.dim}>
+            {"  "}
+            {style.glyphs.foldClosed} {range().start} newer above
+          </text>
+        </Show>
+        <For each={rows().slice(range().start, range().end)}>
+          {(row, offset) => {
+            const index = () => range().start + offset()
             const selected = () => index() === cursor()
             const live = () => row.entry.lease === "held"
             return (
@@ -132,6 +144,12 @@ export function SessionsView(props: {
             )
           }}
         </For>
+        <Show when={range().end < rows().length}>
+          <text fg={style.theme.dim}>
+            {"  "}
+            {style.glyphs.foldOpen} {rows().length - range().end} older below
+          </text>
+        </Show>
         <Show when={rows().length === 0}>
           <text fg={style.theme.dim}>no sessions yet · n to start one</text>
         </Show>

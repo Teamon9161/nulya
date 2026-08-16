@@ -24,6 +24,24 @@ pub const ToolResultEntry = struct {
     spill_path: ?[]const u8 = null,
 };
 
+/// What one model step cost, as the provider reported it. A FACT about the turn
+/// (like `assistant.reasoning`), never projected into PromptIR: the model does
+/// not read its own bill. Declared here — the ledger depends on nothing — and
+/// re-exported by `provider.zig` as `provider.Usage`, so what a provider reports
+/// and what the ledger records are one struct, not two shapes and a copy.
+pub const Usage = struct {
+    /// Non-cached input tokens.
+    input_tokens: u64 = 0,
+    output_tokens: u64 = 0,
+    cache_read_tokens: u64 = 0,
+    cache_write_tokens: u64 = 0,
+
+    pub fn isZero(self: Usage) bool {
+        return self.input_tokens == 0 and self.output_tokens == 0 and
+            self.cache_read_tokens == 0 and self.cache_write_tokens == 0;
+    }
+};
+
 /// The event log's alphabet. Kept minimal for the skeleton; DESIGN §3 lists the
 /// full set (capability_note, registry_selection, compaction, …).
 pub const Event = union(enum) {
@@ -42,6 +60,14 @@ pub const Event = union(enum) {
         /// Zero or more tool calls. Multiple calls in one assistant turn are the
         /// batch the loop executes together (DESIGN §0.2, §4).
         calls: []const ToolCall,
+        /// What this step cost, when the provider said (null when it reported
+        /// nothing, and for every line written before this field existed). Like
+        /// `reasoning`, it is a fact about the turn and is NOT projected: cost
+        /// is evidence for the slow loop and for front ends, not model-visible
+        /// text. A step canceled during the provider phase has no assistant
+        /// event to hang usage on, so its cost is simply not recorded — honest,
+        /// and not worth a new event kind.
+        usage: ?Usage = null,
     },
     /// Exactly ONE user turn carrying every result from a batch. Never split
     /// per-tool — that would be one model round-trip per tool (DESIGN §0.2).
@@ -177,7 +203,7 @@ fn cloneEvent(alloc: std.mem.Allocator, e: Event) !Event {
             errdefer alloc.free(text);
             const calls = try cloneToolCalls(alloc, as.calls);
             errdefer freeToolCalls(alloc, calls);
-            break :blk .{ .assistant = .{ .reasoning = reasoning, .text = text, .calls = calls } };
+            break :blk .{ .assistant = .{ .reasoning = reasoning, .text = text, .calls = calls, .usage = as.usage } };
         },
         .tool_results => |results| .{ .tool_results = try cloneToolResults(alloc, results) },
         .capability_note => |note| blk: {
@@ -547,7 +573,10 @@ pub fn encodeHeaderLine(alloc: std.mem.Allocator, hdr: Header) ![]u8 {
     return out.toOwnedSlice();
 }
 
-fn parseHeaderLine(gpa: std.mem.Allocator, line: []const u8) !OwnedHeader {
+/// Parse one header LINE (the file's first line). `readHeader` is the usual
+/// entry point; this is public for readers that already hold the file's bytes
+/// and would otherwise read it twice (`nulya session list`).
+pub fn parseHeaderLine(gpa: std.mem.Allocator, line: []const u8) !OwnedHeader {
     const parsed = std.json.parseFromSlice(Header, gpa, std.mem.trim(u8, line, " \t\r\n"), json_opts) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.CorruptLedger,
@@ -605,6 +634,12 @@ pub fn encodeEventBody(jw: *std.json.Stringify, e: Event) !void {
                 try jw.endObject();
             }
             try jw.endArray();
+            // Written only when the provider reported a cost, so a line without
+            // usage keeps its pre-existing shape byte-for-byte.
+            if (as.usage) |u| {
+                try jw.objectField("usage");
+                try jw.write(u);
+            }
         },
         .tool_results => |rs| {
             try jw.write("tool_results");
@@ -648,6 +683,9 @@ pub const WireEvent = struct {
     /// Assistant reasoning items (see `Event.assistant.reasoning`); absent on
     /// lines written before the field existed, and on turns without any.
     reasoning: ?[]const u8 = null,
+    /// What the step cost (see `Event.assistant.usage`); absent on lines written
+    /// before the field existed, and on turns the provider priced at nothing.
+    usage: ?Usage = null,
     calls: ?[]const WireCall = null,
     results: ?[]const ToolResultEntry = null,
     id: ?[]const u8 = null,
@@ -683,6 +721,7 @@ pub fn toEvent(a: std.mem.Allocator, w: WireEvent) !Event {
             .reasoning = w.reasoning orelse "",
             .text = w.text orelse return error.CorruptLedger,
             .calls = calls,
+            .usage = w.usage,
         } };
     }
     if (std.mem.eql(u8, w.kind, "tool_results")) {
@@ -827,6 +866,7 @@ fn expectEventsEqual(a: []const Event, b: []const Event) !void {
             .assistant => |as| {
                 try std.testing.expectEqualStrings(as.reasoning, y.assistant.reasoning);
                 try std.testing.expectEqualStrings(as.text, y.assistant.text);
+                try std.testing.expectEqual(as.usage, y.assistant.usage);
                 try std.testing.expectEqual(as.calls.len, y.assistant.calls.len);
                 for (as.calls, y.assistant.calls) |c, d| {
                     try std.testing.expectEqualStrings(c.id, d.id);
@@ -908,6 +948,7 @@ fn writeSampleEvents(l: *Ledger) !void {
         .reasoning = "[{\"type\":\"thinking\",\"thinking\":\"plan\",\"signature\":\"sig==\"}]",
         .text = "running",
         .calls = &.{.{ .id = "c1", .tool = "shell", .args_json = "{\"command\":\"echo one\"}" }},
+        .usage = .{ .input_tokens = 1200, .output_tokens = 80, .cache_read_tokens = 1100 },
     } });
     try l.append(.{ .tool_results = &.{.{ .call_id = "c1", .ok = true, .output = "one\n[exit 0]" }} });
     try l.append(.{ .capability_note = .{ .id = "demo", .version = "v-aaaa", .text = "note text" } });
@@ -943,6 +984,38 @@ test "assistant reasoning is stored opaquely, round-trips, and is optional on th
     const old = try toEvent(legacy.arena.allocator(), legacy.value);
     try std.testing.expectEqualStrings("", old.assistant.reasoning);
     try std.testing.expectEqualStrings("old", old.assistant.text);
+}
+
+test "assistant usage round-trips as a fact on the line, and legacy lines read as absent" {
+    const alloc = std.testing.allocator;
+
+    // Present: written as one object after `calls`, decoded field for field.
+    const priced: Event = .{ .assistant = .{
+        .text = "t",
+        .calls = &.{},
+        .usage = .{ .input_tokens = 1200, .output_tokens = 80, .cache_read_tokens = 1100, .cache_write_tokens = 7 },
+    } };
+    const line = try encodeEventLine(alloc, priced, 1);
+    defer alloc.free(line);
+    try std.testing.expectEqualStrings(
+        "{\"seq\":1,\"kind\":\"assistant\",\"text\":\"t\",\"calls\":[],\"usage\":{\"input_tokens\":1200,\"output_tokens\":80,\"cache_read_tokens\":1100,\"cache_write_tokens\":7}}\n",
+        line,
+    );
+    const parsed = try parseEventLine(alloc, line);
+    defer parsed.deinit();
+    const back = try toEvent(parsed.arena.allocator(), parsed.value);
+    try expectEventsEqual(&.{priced}, &.{back});
+
+    // Absent: the line keeps the shape it had before the field existed…
+    const unpriced = try encodeEventLine(alloc, .{ .assistant = .{ .text = "t", .calls = &.{} } }, 2);
+    defer alloc.free(unpriced);
+    try std.testing.expectEqualStrings("{\"seq\":2,\"kind\":\"assistant\",\"text\":\"t\",\"calls\":[]}\n", unpriced);
+
+    // …and such a line (every line written before M5b) reads back as null, not
+    // as a zero cost: "not recorded" and "cost nothing" are different facts.
+    const legacy = try parseEventLine(alloc, "{\"seq\":1,\"kind\":\"assistant\",\"text\":\"old\",\"calls\":[]}");
+    defer legacy.deinit();
+    try std.testing.expect((try toEvent(legacy.arena.allocator(), legacy.value)).assistant.usage == null);
 }
 
 test "durable create then open replays a block-identical ledger with monotonic seq" {
