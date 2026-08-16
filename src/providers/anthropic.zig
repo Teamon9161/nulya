@@ -1,7 +1,7 @@
 //! Anthropic Messages API provider (DESIGN §13, PLAN §3.9).
 //!
 //! Unlike Chat Completions, this API caches only where it is told to. The
-//! PromptIR block prefix (DESIGN §1) is what makes that safe here: the prefix
+//! PromptIR turn prefix (DESIGN §1) is what makes that safe here: the prefix
 //! only ever grows, so two `cache_control` breakpoints — one after the frozen
 //! system blocks, one on the last content block of the last message — cover the
 //! whole prefix, and the tail breakpoint moves forward on its own as the ledger
@@ -166,7 +166,7 @@ pub fn buildRequestJson(
     try jw.objectField("system");
     try writeSystem(&jw, request.prompt_ir.system_blocks);
     try jw.objectField("messages");
-    try writeMessages(&jw, alloc, request.prompt_ir.stable_blocks);
+    try writeMessages(&jw, alloc, request.prompt_ir.turns);
     if (request.tools.len != 0) {
         try jw.objectField("tools");
         try writeTools(&jw, request.tools);
@@ -257,119 +257,128 @@ fn writeCacheControl(jw: *std.json.Stringify) !void {
 
 const Role = enum { user, assistant };
 
-/// Which message role a stable block belongs to. Tool results and capability
-/// notes are user-side content on this API — there is no mid-conversation
-/// system role.
-fn roleOf(kind: prompt.BlockKind) Role {
-    return switch (kind) {
-        .user_text, .tool_result, .capability_note => .user,
-        .reasoning, .assistant_text, .tool_call => .assistant,
+/// Which message role a turn belongs to. Tool results and capability notes are
+/// user-side content on this API — there is no mid-conversation system role.
+fn roleOf(turn: prompt.Turn) Role {
+    return switch (turn) {
+        .user_text, .tool_results, .capability_note => .user,
+        .assistant => .assistant,
     };
 }
 
-/// Consecutive same-role blocks become ONE message: that is what a batched
+/// Consecutive same-role turns become ONE message: that is what a batched
 /// `tool_results` turn is on this wire, and it keeps roles alternating.
-fn writeMessages(jw: *std.json.Stringify, alloc: std.mem.Allocator, blocks: []const prompt.StableBlock) !void {
+fn writeMessages(jw: *std.json.Stringify, alloc: std.mem.Allocator, turns: []const prompt.Turn) !void {
     try jw.beginArray();
     var i: usize = 0;
-    while (i < blocks.len) {
-        const role = roleOf(blocks[i].kind);
+    while (i < turns.len) {
+        const role = roleOf(turns[i]);
         var end = i;
-        while (end < blocks.len and roleOf(blocks[end].kind) == role) : (end += 1) {}
-        try writeMessage(jw, alloc, role, blocks[i..end], end == blocks.len);
+        while (end < turns.len and roleOf(turns[end]) == role) : (end += 1) {}
+        try writeMessage(jw, alloc, role, turns[i..end], end == turns.len);
         i = end;
     }
     try jw.endArray();
 }
 
-fn writeMessage(jw: *std.json.Stringify, alloc: std.mem.Allocator, role: Role, run: []const prompt.StableBlock, last: bool) !void {
+fn writeMessage(jw: *std.json.Stringify, alloc: std.mem.Allocator, role: Role, run: []const prompt.Turn, last: bool) !void {
     // The moving cache breakpoint sits on the final content block of the final
     // message, so every request extends the cached prefix by exactly the turns
-    // appended since the last one.
-    const breakpoint = if (last) lastContentIndex(run) else null;
+    // appended since the last one. Counted rather than indexed: one turn writes
+    // as many content blocks as it has parts.
+    const eligible = cacheableBlocks(run);
+    const breakpoint: ?usize = if (last and eligible != 0) eligible - 1 else null;
+    var seen: usize = 0;
 
     try jw.beginObject();
     try jw.objectField("role");
     try jw.write(@tagName(role));
     try jw.objectField("content");
     try jw.beginArray();
-    for (run, 0..) |block, i| {
-        const cached = breakpoint != null and breakpoint.? == i;
-        switch (block.kind) {
-            .user_text, .capability_note => try writeTextBlock(jw, block.bytes, cached),
+    for (run) |turn| switch (turn) {
+        .user_text, .capability_note => |text| try writeTextBlock(jw, text, takes(breakpoint, &seen)),
+        .assistant => |as| {
             // The turn's `thinking` / `redacted_thinking` blocks, exactly as this
             // API streamed them (signature included). They must lead the
             // assistant message that carries the `tool_use` they preceded — with
             // thinking on, the API rejects a tool-use turn whose thinking was
             // dropped — so replaying them is what makes a tool loop legal here,
             // not only what keeps the model's reasoning continuous.
-            .reasoning => try wire.writeReasoningItems(jw, alloc, block.bytes),
+            if (as.reasoning.len != 0) try wire.writeReasoningItems(jw, alloc, as.reasoning);
             // An assistant turn that only issued tool calls has no text block;
             // `content: []` would be rejected, so the calls carry the message.
-            .assistant_text => if (block.bytes.len != 0) try writeTextBlock(jw, block.bytes, cached),
-            .tool_call => {
-                const call = wire.parseToolCall(block.bytes);
+            if (as.text.len != 0) try writeTextBlock(jw, as.text, takes(breakpoint, &seen));
+            for (as.calls) |call| {
+                const cached = takes(breakpoint, &seen);
                 try jw.beginObject();
                 try jw.objectField("type");
                 try jw.write("tool_use");
                 try jw.objectField("id");
                 try jw.write(call.id);
                 try jw.objectField("name");
-                try jw.write(call.name);
+                try jw.write(call.tool);
                 try jw.objectField("input");
                 try wire.writeRaw(jw, call.args_json);
                 if (cached) try writeCacheControl(jw);
                 try jw.endObject();
-            },
-            .tool_result => {
-                const result = wire.parseToolResult(block.bytes);
-                try jw.beginObject();
-                try jw.objectField("type");
-                try jw.write("tool_result");
-                try jw.objectField("tool_use_id");
-                try jw.write(result.id);
-                try jw.objectField("content");
-                try jw.write(result.output);
-                if (!result.ok) {
-                    try jw.objectField("is_error");
-                    try jw.write(true);
-                }
-                if (cached) try writeCacheControl(jw);
-                try jw.endObject();
-            },
-        }
-    }
+            }
+        },
+        .tool_results => |results| for (results) |result| {
+            const cached = takes(breakpoint, &seen);
+            try jw.beginObject();
+            try jw.objectField("type");
+            try jw.write("tool_result");
+            try jw.objectField("tool_use_id");
+            try jw.write(result.call_id);
+            try jw.objectField("content");
+            try jw.write(result.output);
+            if (!result.ok) {
+                try jw.objectField("is_error");
+                try jw.write(true);
+            }
+            if (cached) try writeCacheControl(jw);
+            try jw.endObject();
+        },
+    };
     // A pure-empty assistant turn (no text, no calls) would leave `content: []`,
     // which the API rejects; give it a body rather than dropping the turn, so
     // the projection and the wire history stay one-to-one. Replayed thinking
-    // blocks are a body of their own, so a thinking-only turn needs none.
-    if (emitsNothing(run) and !hasReasoning(run)) try writeTextBlock(jw, "", breakpoint != null);
+    // blocks are a body of their own, so a thinking-only turn needs none. Such a
+    // run has no cacheable block, hence no breakpoint to place here either.
+    if (eligible == 0 and !hasReasoning(run)) try writeTextBlock(jw, "", false);
     try jw.endArray();
     try jw.endObject();
 }
 
-fn hasReasoning(run: []const prompt.StableBlock) bool {
-    for (run) |block| if (block.kind == .reasoning) return true;
+/// Whether the content block about to be written is the one carrying the
+/// breakpoint, advancing the position as it answers.
+fn takes(breakpoint: ?usize, seen: *usize) bool {
+    defer seen.* += 1;
+    return breakpoint != null and breakpoint.? == seen.*;
+}
+
+fn hasReasoning(run: []const prompt.Turn) bool {
+    for (run) |turn| switch (turn) {
+        .assistant => |as| if (as.reasoning.len != 0) return true,
+        else => {},
+    };
     return false;
 }
 
-/// Index of the last block in `run` that can carry the cache breakpoint: an
-/// empty assistant text emits nothing, and thinking blocks are replayed verbatim
-/// (no `cache_control` is spliced into them). A run that is only those falls
-/// back to the empty text block `writeMessage` appends, which takes it.
-fn lastContentIndex(run: []const prompt.StableBlock) ?usize {
-    var i = run.len;
-    while (i > 0) {
-        i -= 1;
-        if (run[i].kind == .reasoning) continue;
-        if (run[i].kind == .assistant_text and run[i].bytes.len == 0) continue;
-        return i;
-    }
-    return null;
-}
-
-fn emitsNothing(run: []const prompt.StableBlock) bool {
-    return lastContentIndex(run) == null;
+/// How many content blocks of `run` can carry the cache breakpoint: an empty
+/// assistant text emits no block at all, and thinking blocks are replayed
+/// verbatim (no `cache_control` is spliced into them), so neither counts.
+fn cacheableBlocks(run: []const prompt.Turn) usize {
+    var n: usize = 0;
+    for (run) |turn| switch (turn) {
+        .user_text, .capability_note => n += 1,
+        .assistant => |as| {
+            if (as.text.len != 0) n += 1;
+            n += as.calls.len;
+        },
+        .tool_results => |results| n += results.len,
+    };
+    return n;
 }
 
 fn writeTools(jw: *std.json.Stringify, tools: []const tool.ToolDefinition) !void {

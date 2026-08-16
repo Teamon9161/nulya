@@ -12,27 +12,40 @@ const ledger = @import("ledger.zig");
 /// always consumable.
 pub const max_system_prompt_bytes: usize = 2 * 1024 * 1024;
 
-pub const BlockKind = enum {
-    user_text,
-    /// An assistant turn's opaque reasoning items (`ledger.Event.assistant
-    /// .reasoning`, verbatim). Always emitted BEFORE that turn's `assistant_text`
-    /// / `tool_call` blocks — every wire that replays reasoning wants it ahead
-    /// of the visible output — and only when non-empty. Providers that cannot
-    /// replay it (`thinking_replay == false`) skip the block; the kernel never
-    /// reads inside.
-    reasoning,
-    assistant_text,
-    tool_call,
-    tool_result,
-    /// A mid-conversation capability announcement (DESIGN §5.3). Just another
-    /// appended block, so it extends the stable prefix without bumping the
-    /// generation — the cache keeps hitting.
-    capability_note,
-};
+/// One projected ledger event: the MODEL-VISIBLE subset of `ledger.Event`, with
+/// the turn kept whole. Every wire we speak needs turn-level structure — an
+/// assistant message carries its text and its calls together, a batch of results
+/// is one user turn — so flattening a turn into stringly blocks would only mean
+/// each provider re-deriving the boundaries it was just handed.
+///
+/// What is NOT here is as load-bearing as what is: `assistant.usage`,
+/// `assistant.truncated` and an event's inbox `origin` are FACTS about the
+/// conversation, not text the model reads (DESIGN §3.1, §3.4). They have no
+/// field in this type, so "not projected" is a fact of the type rather than a
+/// rule someone has to keep following.
+pub const Turn = union(enum) {
+    user_text: []const u8,
+    assistant: Assistant,
+    /// One batch = one turn (DESIGN §0.2, §4); the provider decides how many
+    /// wire messages that is.
+    tool_results: []const ledger.ToolResultEntry,
+    /// The model-facing announcement text only (DESIGN §5.3): a note's `id` /
+    /// `version` are reconciliation bookkeeping, never model-visible. Just
+    /// another appended turn, so it extends the stable prefix — the cache keeps
+    /// hitting.
+    capability_note: []const u8,
 
-pub const StableBlock = struct {
-    kind: BlockKind,
-    bytes: []const u8,
+    pub const Assistant = struct {
+        /// The turn's opaque provider reasoning items (`ledger.Event.assistant
+        /// .reasoning`, verbatim: a JSON array as text), or `""` when there were
+        /// none. A field of the turn rather than a block of its own — it belongs
+        /// to this assistant turn and to no other — and only providers that
+        /// declare `thinking_replay` serialize it, always ahead of the turn's
+        /// text and calls. The kernel never reads inside.
+        reasoning: []const u8,
+        text: []const u8,
+        calls: []const ledger.ToolCall,
+    };
 };
 
 pub const SystemBlock = struct {
@@ -54,11 +67,16 @@ pub const SystemPromptSnapshot = struct {
 
 pub const PromptIR = struct {
     system_blocks: []const SystemBlock,
-    stable_blocks: []const StableBlock,
+    /// One entry per ledger event, in order. Every payload slice BORROWS from
+    /// the ledger's events — which are append-only and never freed or moved
+    /// until the ledger's own `deinit` — so a `PromptIR` must not outlive the
+    /// ledger it was projected from. Every caller projects immediately before a
+    /// step and drops it after.
+    turns: []const Turn,
 
+    /// Frees the array; the payloads are the ledger's.
     pub fn deinit(self: PromptIR, alloc: std.mem.Allocator) void {
-        for (self.stable_blocks) |block| alloc.free(block.bytes);
-        alloc.free(self.stable_blocks);
+        alloc.free(self.turns);
     }
 };
 
@@ -67,58 +85,61 @@ pub fn project(alloc: std.mem.Allocator, events: []const ledger.Event) !PromptIR
 }
 
 pub fn projectWithSystem(alloc: std.mem.Allocator, system_blocks: []const SystemBlock, events: []const ledger.Event) !PromptIR {
-    var blocks: std.ArrayList(StableBlock) = .empty;
-    errdefer {
-        for (blocks.items) |block| alloc.free(block.bytes);
-        blocks.deinit(alloc);
-    }
-
-    for (events) |event| switch (event) {
-        .user_text => |text| try appendBlock(alloc, &blocks, .user_text, text),
-        .assistant => |as| {
-            if (as.reasoning.len != 0) try appendBlock(alloc, &blocks, .reasoning, as.reasoning);
-            try appendBlock(alloc, &blocks, .assistant_text, as.text);
-            for (as.calls) |call| {
-                const bytes = try std.fmt.allocPrint(alloc, "{s}\n{s}\n{s}", .{ call.id, call.tool, call.args_json });
-                errdefer alloc.free(bytes);
-                try blocks.append(alloc, .{ .kind = .tool_call, .bytes = bytes });
-            }
-        },
-        .tool_results => |results| {
-            for (results) |result| {
-                const bytes = try std.fmt.allocPrint(alloc, "{s}\n{}\n{s}", .{ result.call_id, result.ok, result.output });
-                errdefer alloc.free(bytes);
-                try blocks.append(alloc, .{ .kind = .tool_result, .bytes = bytes });
-            }
-        },
-        .capability_note => |note| try appendBlock(alloc, &blocks, .capability_note, note.text),
+    const turns = try alloc.alloc(Turn, events.len);
+    for (events, turns) |event, *turn| turn.* = switch (event) {
+        .user_text => |text| .{ .user_text = text },
+        .assistant => |as| .{ .assistant = .{
+            .reasoning = as.reasoning,
+            .text = as.text,
+            .calls = as.calls,
+        } },
+        .tool_results => |results| .{ .tool_results = results },
+        .capability_note => |note| .{ .capability_note = note.text },
     };
-
-    const stable_slice = try blocks.toOwnedSlice(alloc);
-    return .{ .system_blocks = system_blocks, .stable_blocks = stable_slice };
+    return .{ .system_blocks = system_blocks, .turns = turns };
 }
 
-fn appendBlock(
-    alloc: std.mem.Allocator,
-    blocks: *std.ArrayList(StableBlock),
-    kind: BlockKind,
-    bytes: []const u8,
-) !void {
-    const owned = try alloc.dupe(u8, bytes);
-    errdefer alloc.free(owned);
-    try blocks.append(alloc, .{ .kind = kind, .bytes = owned });
-}
-
-pub fn isStablePrefix(prefix: []const StableBlock, full: []const StableBlock) bool {
+/// The cache invariant of DESIGN §1 in testable form: same tag and equal
+/// payloads, turn by turn.
+pub fn isStablePrefix(prefix: []const Turn, full: []const Turn) bool {
     if (prefix.len > full.len) return false;
     for (prefix, full[0..prefix.len]) |a, b| {
-        if (a.kind != b.kind) return false;
-        if (!std.mem.eql(u8, a.bytes, b.bytes)) return false;
+        if (!turnsEqual(a, b)) return false;
     }
     return true;
 }
 
-test "PromptIR stable blocks extend by prefix on append" {
+fn turnsEqual(a: Turn, b: Turn) bool {
+    if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
+    return switch (a) {
+        .user_text => |text| std.mem.eql(u8, text, b.user_text),
+        .capability_note => |text| std.mem.eql(u8, text, b.capability_note),
+        .assistant => |as| blk: {
+            const other = b.assistant;
+            if (!std.mem.eql(u8, as.reasoning, other.reasoning)) break :blk false;
+            if (!std.mem.eql(u8, as.text, other.text)) break :blk false;
+            if (as.calls.len != other.calls.len) break :blk false;
+            for (as.calls, other.calls) |x, y| {
+                if (!std.mem.eql(u8, x.id, y.id)) break :blk false;
+                if (!std.mem.eql(u8, x.tool, y.tool)) break :blk false;
+                if (!std.mem.eql(u8, x.args_json, y.args_json)) break :blk false;
+            }
+            break :blk true;
+        },
+        .tool_results => |results| blk: {
+            const other = b.tool_results;
+            if (results.len != other.len) break :blk false;
+            for (results, other) |x, y| {
+                if (!std.mem.eql(u8, x.call_id, y.call_id)) break :blk false;
+                if (x.ok != y.ok) break :blk false;
+                if (!std.mem.eql(u8, x.output, y.output)) break :blk false;
+            }
+            break :blk true;
+        },
+    };
+}
+
+test "PromptIR turns extend by prefix on append" {
     const alloc = std.testing.allocator;
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
@@ -131,10 +152,10 @@ test "PromptIR stable blocks extend by prefix on append" {
     const p2 = try project(alloc, l.view());
     defer p2.deinit(alloc);
 
-    try std.testing.expect(isStablePrefix(p1.stable_blocks, p2.stable_blocks));
+    try std.testing.expect(isStablePrefix(p1.turns, p2.turns));
 }
 
-test "assistant reasoning projects as one opaque block ahead of the turn's text and calls" {
+test "assistant reasoning rides on its own turn, ahead of that turn's text and calls" {
     const alloc = std.testing.allocator;
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
@@ -150,19 +171,63 @@ test "assistant reasoning projects as one opaque block ahead of the turn's text 
     const p = try project(alloc, l.view());
     defer p.deinit(alloc);
 
-    // No reasoning → no block (a pre-reasoning ledger projects exactly as before).
-    try std.testing.expectEqual(BlockKind.user_text, p.stable_blocks[0].kind);
-    try std.testing.expectEqual(BlockKind.assistant_text, p.stable_blocks[1].kind);
-    try std.testing.expectEqual(BlockKind.user_text, p.stable_blocks[2].kind);
-    // With reasoning: reasoning, then text, then calls — verbatim bytes.
-    try std.testing.expectEqual(BlockKind.reasoning, p.stable_blocks[3].kind);
-    try std.testing.expectEqualStrings("[{\"type\":\"reasoning\",\"encrypted_content\":\"…\"}]", p.stable_blocks[3].bytes);
-    try std.testing.expectEqual(BlockKind.assistant_text, p.stable_blocks[4].kind);
-    try std.testing.expectEqual(BlockKind.tool_call, p.stable_blocks[5].kind);
-    try std.testing.expectEqual(@as(usize, 6), p.stable_blocks.len);
+    try std.testing.expectEqual(@as(usize, 4), p.turns.len);
+    try std.testing.expectEqualStrings("hi", p.turns[0].user_text);
+    // No reasoning on the turn → the empty string, never a separate turn.
+    try std.testing.expectEqualStrings("", p.turns[1].assistant.reasoning);
+    try std.testing.expectEqualStrings("plain", p.turns[1].assistant.text);
+    try std.testing.expectEqualStrings("go", p.turns[2].user_text);
+    // With reasoning: verbatim bytes on the same turn as the text and calls it
+    // came with, which is the order every wire replays them in.
+    const last = p.turns[3].assistant;
+    try std.testing.expectEqualStrings("[{\"type\":\"reasoning\",\"encrypted_content\":\"…\"}]", last.reasoning);
+    try std.testing.expectEqualStrings("", last.text);
+    try std.testing.expectEqual(@as(usize, 1), last.calls.len);
+    try std.testing.expectEqualStrings("c1", last.calls[0].id);
 }
 
-test "a capability_note appends a capability_note block without breaking the prefix or generation" {
+test "a batch of tool results is ONE turn, and cost is not in the type at all" {
+    const alloc = std.testing.allocator;
+    var l = ledger.Ledger.init(alloc);
+    defer l.deinit();
+
+    try l.append(.{ .user_text = "go" });
+    try l.append(.{ .assistant = .{
+        .text = "",
+        .calls = &.{
+            .{ .id = "c1", .tool = "shell", .args_json = "{}" },
+            .{ .id = "c2", .tool = "shell", .args_json = "{}" },
+        },
+        .usage = .{ .input_tokens = 10, .output_tokens = 2 },
+        .truncated = true,
+    } });
+    try l.append(.{ .tool_results = &.{
+        .{ .call_id = "c1", .ok = true, .output = "A" },
+        .{ .call_id = "c2", .ok = false, .output = "B" },
+    } });
+    const p = try project(alloc, l.view());
+    defer p.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 3), p.turns.len);
+    try std.testing.expectEqual(@as(usize, 2), p.turns[2].tool_results.len);
+    try std.testing.expectEqualStrings("c2", p.turns[2].tool_results[1].call_id);
+    try std.testing.expect(!p.turns[2].tool_results[1].ok);
+
+    // `usage` / `truncated` have no field in `Turn` at all, so the same
+    // conversation without them projects to the very same turns (DESIGN §3.1).
+    var plain = ledger.Ledger.init(alloc);
+    defer plain.deinit();
+    for (l.view()) |e| switch (e) {
+        .assistant => |as| try plain.append(.{ .assistant = .{ .reasoning = as.reasoning, .text = as.text, .calls = as.calls } }),
+        else => try plain.append(e),
+    };
+    const q = try project(alloc, plain.view());
+    defer q.deinit(alloc);
+    try std.testing.expectEqual(p.turns.len, q.turns.len);
+    try std.testing.expect(isStablePrefix(p.turns, q.turns));
+}
+
+test "a capability_note appends a capability_note turn without breaking the prefix or generation" {
     const alloc = std.testing.allocator;
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
@@ -176,20 +241,20 @@ test "a capability_note appends a capability_note block without breaking the pre
     defer after.deinit(alloc);
 
     // Prefix-stable: the note only extends the projection (DESIGN §5.3, §1).
-    try std.testing.expect(isStablePrefix(before.stable_blocks, after.stable_blocks));
-    try std.testing.expectEqual(before.stable_blocks.len + 1, after.stable_blocks.len);
-    const last = after.stable_blocks[after.stable_blocks.len - 1];
-    try std.testing.expectEqual(BlockKind.capability_note, last.kind);
+    try std.testing.expect(isStablePrefix(before.turns, after.turns));
+    try std.testing.expectEqual(before.turns.len + 1, after.turns.len);
+    // Only the announcement text is model-visible; id/version stay behind.
+    try std.testing.expectEqualStrings("New capability available: `greet`.", after.turns[after.turns.len - 1].capability_note);
 }
 
-test "reopening a durable ledger projects a block-identical prefix" {
+test "reopening a durable ledger projects a turn-identical prefix" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
     // Write a couple of turns, project the tail, then close.
-    var before_blocks: usize = 0;
+    var before_turns: usize = 0;
     {
         var l = try ledger.createDurable(alloc, io, tmp.dir, "s.jsonl", .{ .session = "s" });
         defer l.deinit();
@@ -201,7 +266,7 @@ test "reopening a durable ledger projects a block-identical prefix" {
         try l.append(.{ .tool_results = &.{.{ .call_id = "c1", .ok = true, .output = "hi" }} });
         const p = try project(alloc, l.view());
         defer p.deinit(alloc);
-        before_blocks = p.stable_blocks.len;
+        before_turns = p.turns.len;
     }
 
     // A separate process reopening the file projects the same prefix, then
@@ -210,15 +275,15 @@ test "reopening a durable ledger projects a block-identical prefix" {
     defer reopened.deinit();
     const before = try project(alloc, reopened.view());
     defer before.deinit(alloc);
-    try std.testing.expectEqual(before_blocks, before.stable_blocks.len);
+    try std.testing.expectEqual(before_turns, before.turns.len);
 
     try reopened.append(.{ .user_text = "second" });
     const after = try project(alloc, reopened.view());
     defer after.deinit(alloc);
-    try std.testing.expect(isStablePrefix(before.stable_blocks, after.stable_blocks));
+    try std.testing.expect(isStablePrefix(before.turns, after.turns));
 }
 
-test "PromptIR carries immutable system blocks separately from ledger stable blocks" {
+test "PromptIR carries immutable system blocks separately from ledger turns" {
     const alloc = std.testing.allocator;
     const sys = [_]SystemBlock{.{ .source = "test:system", .bytes = "base system" }};
     var l = ledger.Ledger.init(alloc);
@@ -236,5 +301,5 @@ test "PromptIR carries immutable system blocks separately from ledger stable blo
     try std.testing.expectEqual(@as(usize, 1), after.system_blocks.len);
     try std.testing.expectEqualStrings(before.system_blocks[0].source, after.system_blocks[0].source);
     try std.testing.expectEqualStrings(before.system_blocks[0].bytes, after.system_blocks[0].bytes);
-    try std.testing.expect(isStablePrefix(before.stable_blocks, after.stable_blocks));
+    try std.testing.expect(isStablePrefix(before.turns, after.turns));
 }

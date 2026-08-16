@@ -428,8 +428,11 @@ test "session repairs interrupted tool batch before provider request" {
         fn stream(ptr: *anyopaque, a: std.mem.Allocator, request: provider.Request, sink: provider.EventSink) anyerror!void {
             _ = a;
             const self: *@This() = @ptrCast(@alignCast(ptr));
-            try std.testing.expectEqual(@as(usize, 4), request.prompt_ir.stable_blocks.len);
-            try std.testing.expect(std.mem.indexOf(u8, request.prompt_ir.stable_blocks[3].bytes, "state is unknown") != null);
+            // user_text, assistant(call), and the repaired batch as ONE turn.
+            try std.testing.expectEqual(@as(usize, 3), request.prompt_ir.turns.len);
+            const repaired = request.prompt_ir.turns[2].tool_results;
+            try std.testing.expectEqual(@as(usize, 1), repaired.len);
+            try std.testing.expect(std.mem.indexOf(u8, repaired[0].output, "state is unknown") != null);
             self.saw_unknown_result = true;
             try sink.emit(.started);
             try sink.emit(.{ .text_delta = "recovered" });
@@ -1313,8 +1316,8 @@ test "a truncated tail refuses to step in the next process until a message arriv
             self.* += 1;
             // The tail this step was handed must never end on the assistant: that
             // is the prefill the provider rejects with thinking on.
-            const blocks = request.prompt_ir.stable_blocks;
-            if (blocks.len != 0 and blocks[blocks.len - 1].kind == .assistant_text) return error.TestUnexpectedResult;
+            const turns = request.prompt_ir.turns;
+            if (turns.len != 0 and turns[turns.len - 1] == .assistant) return error.TestUnexpectedResult;
             try sink.emit(.started);
             try sink.emit(.{ .text_delta = "the rest, from a fresh message" });
             try sink.emit(.{ .done = .end_turn });

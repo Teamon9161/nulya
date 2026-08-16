@@ -19,7 +19,7 @@ Kernel             execute / version / observe / rollback / compose   ← 不可
 
 **Agent 决定学什么；Policy 决定什么值得留下；Kernel 保证学出来的东西可信、可追踪、可执行、可回退。** 这条分界是 Nulya 相对普通 plugin harness 的核心差异，也是抵抗 feature creep 的那把尺。
 
-术语：**ledger** = 会话事件日志；**step** = 一次 model 请求-响应；**PromptIR** = provider 无关的 prompt 逻辑块投影；**composition** = 一场 session 冻结的能力面；**capability / tool id** = 稳定逻辑身份（`ext:<id>/<tool>`、`builtin.shell`），与具体 implementation version 分开。
+术语：**ledger** = 会话事件日志；**step** = 一次 model 请求-响应；**PromptIR** = provider 无关的 prompt turn 投影；**composition** = 一场 session 冻结的能力面；**capability / tool id** = 稳定逻辑身份（`ext:<id>/<tool>`、`builtin.shell`），与具体 implementation version 分开。
 
 ---
 
@@ -33,18 +33,18 @@ Kernel             execute / version / observe / rollback / compose   ← 不可
 
 ---
 
-## 1. 缓存不变量：PromptIR 块级前缀
+## 1. 缓存不变量：PromptIR turn 级前缀
 
-不对完整 HTTP request bytes 做断言（`{"messages":[A,B]}` 不可能是 `{"messages":[A,B,C]}` 的逐字节前缀）。kernel 保证的是 provider 无关的逻辑块前缀：
+不对完整 HTTP request bytes 做断言（`{"messages":[A,B]}` 不可能是 `{"messages":[A,B,C]}` 的逐字节前缀）。kernel 保证的是 provider 无关的逻辑前缀：
 
 ```
-Ledger ──projection──▶ PromptIR { system_blocks, stable_blocks }
+Ledger ──projection──▶ PromptIR { system_blocks, turns }
                             └──▶ provider serializer / cache policy
 ```
 
-> **`PromptIR[N].stable_blocks` 是 `PromptIR[N+1].stable_blocks` 的前缀。**（`prompt.zig` `isStablePrefix`，单测断言）
+> **`PromptIR[N].turns` 是 `PromptIR[N+1].turns` 的前缀。**（`prompt.zig` `isStablePrefix`，单测断言）
 
-`stable_blocks` 是 ledger 事件的纯函数（`user_text` / `reasoning` / `assistant_text` / `tool_call` / `tool_result` / `capability_note` 六种 block；`reasoning` 只在 assistant 事件带 reasoning 时出现，且排在该 turn 的 `assistant_text` / `tool_call` 之前）。`system_blocks` 来自冻结的 composition（§7.5），整场不变。Provider 负责把块前缀映射到自家 cache 机制（§13）。
+`turns` 是 ledger 事件的纯函数，一个事件一个 turn，四种（`user_text` / `assistant{reasoning, text, calls}` / `tool_results[]` / `capability_note`）——**turn 不拆散**：三个 wire 全都要 turn 级结构（assistant 的文本与 calls 同属一条 message、一批结果是一个 turn），拆成字符串块只会让每个 provider 把刚被丢掉的边界再推一遍。`reasoning` 是 assistant turn 的**字段**（没有就是 `""`，只有声明 `thinking_replay` 的 provider 才序列化，且永远排在该 turn 的 text / calls 之前）。`assistant.usage` / `assistant.truncated` / 事件的 inbox `origin` **在类型里根本没有字段**——"不投影"因此是类型的事实，不是要靠人记住的纪律（§3.1、§3.4）。`turns` 只借 ledger 事件的 slice、自己只拥有那个数组，所以 PromptIR 不会活得比它投影自的 ledger 更久（每个调用方都是 step 前投影、step 后丢掉）。`system_blocks` 来自冻结的 composition（§7.5），整场不变。Provider 负责把这个前缀映射到自家 cache 机制（§13）。
 
 会炸缓存的三件事及对策：
 
@@ -97,9 +97,9 @@ capability_note  { id, version, text }                                  ← 中�
 
 事件字母表**可加不可改**：现有四种保留原字段。`seq` 是文件落盘时的 envelope 字段（§3.4），不属于事件负载。
 
-**`assistant.reasoning` 是不透明字段，不是第五种事件。** 它是 provider 原样吐出的本轮 reasoning item 的 JSON 数组（Anthropic 的带 signature 的 `thinking` / `redacted_thinking` block、Responses 的带 `encrypted_content` 的 `reasoning` item），没有则为 `""`。它是本轮的**事实**（模型确实产出了这段、且下一步要原样带回），不是模型可见文本：kernel 从不解析它，投影成一个 `reasoning` block 交回 provider，provider 只在自己认得（`ProviderCapabilities.thinking_replay`）时按原样回放到**同一个模型**——它天然 model-locked，而 session 的 `model_identity` 已冻结（§3.4），所以别的模型永远看不到它。为什么必须有它：Anthropic 一方端点在 thinking 开着时**拒绝**丢了 thinking block 的 tool-use turn（400，而 Opus 5 默认开、Fable 5 只能开），Responses 端点不带则模型每一步重推上一步的计划——前者是正确性，后者是质量与 token；两者都不是 kernel 该替 provider 决定的，kernel 只负责把这个事实存住、按序交回。落盘时只在非空才写 `reasoning` 字段（老行形状不变，老行读回为 `""`）。
+**`assistant.reasoning` 是不透明字段，不是第五种事件。** 它是 provider 原样吐出的本轮 reasoning item 的 JSON 数组（Anthropic 的带 signature 的 `thinking` / `redacted_thinking` block、Responses 的带 `encrypted_content` 的 `reasoning` item），没有则为 `""`。它是本轮的**事实**（模型确实产出了这段、且下一步要原样带回），不是模型可见文本：kernel 从不解析它，作为 assistant turn 的 `reasoning` 字段交回 provider，provider 只在自己认得（`ProviderCapabilities.thinking_replay`）时按原样回放到**同一个模型**——它天然 model-locked，而 session 的 `model_identity` 已冻结（§3.4），所以别的模型永远看不到它。为什么必须有它：Anthropic 一方端点在 thinking 开着时**拒绝**丢了 thinking block 的 tool-use turn（400，而 Opus 5 默认开、Fable 5 只能开），Responses 端点不带则模型每一步重推上一步的计划——前者是正确性，后者是质量与 token；两者都不是 kernel 该替 provider 决定的，kernel 只负责把这个事实存住、按序交回。落盘时只在非空才写 `reasoning` 字段（老行形状不变，老行读回为 `""`）。
 
-**`assistant.usage` 与 `reasoning` 同地位：本轮的事实，不投影。** `?Usage{input_tokens, output_tokens, cache_read_tokens, cache_write_tokens}`（`ledger.Usage`；`provider.Usage` 就是它的 re-export，provider 本来就 import ledger——一个 struct 贯穿到底，loop 不做转换），由 `loop.zig` 从 `ModelTurn.usage` 写入。落盘只在**非空**时写 `usage` 对象：provider 什么都没报（scripted 替身、流中途取消）时整条不写，老行读回 `null`——"没记录"与"花了 0"是两个不同的事实。**prompt.zig 不投影它**：模型不读自己的账单；它是给慢速回路与前端的成本证据（`session events` / `--stream` 的 ledger 行天然带上，`session list --json` 按它求和）。provider 阶段就被取消的 step 没有 assistant 事件可挂，其 usage 不落盘——诚实接受，不为它造新事件。
+**`assistant.usage` 与 `reasoning` 同地位：本轮的事实，不投影。** `?Usage{input_tokens, output_tokens, cache_read_tokens, cache_write_tokens}`（`ledger.Usage`；`provider.Usage` 就是它的 re-export，provider 本来就 import ledger——一个 struct 贯穿到底，loop 不做转换），由 `loop.zig` 从 `ModelTurn.usage` 写入。落盘只在**非空**时写 `usage` 对象：provider 什么都没报（scripted 替身、流中途取消）时整条不写，老行读回 `null`——"没记录"与"花了 0"是两个不同的事实。**`prompt.Turn` 里没有它的字段**：模型不读自己的账单；它是给慢速回路与前端的成本证据（`session events` / `--stream` 的 ledger 行天然带上，`session list --json` 按它求和）。provider 阶段就被取消的 step 没有 assistant 事件可挂，其 usage 不落盘——诚实接受，不为它造新事件。
 
 ### 3.2 API（硬性）
 
@@ -132,7 +132,7 @@ UI / trajectory / metrics 是 ledger 的投影，不持久化 mutable 状态。*
 
 （`origin` 只出现在经 inbox 排干进来的事件行上，是投递去重列，绝不投影给模型；见"单写者"条。`reasoning` 只在该 turn 有 reasoning 时出现，值是 provider 数组转义成的一个 JSON 字符串——ledger 只存不解析；`usage` 只在 provider 报了成本时出现；`truncated` 只在该 turn 被 `max_tokens` 切断时出现（`true`，见 §4）。三者都不投影。）
 
-- **一个文件 = 一个 generation = 一个 cache scope。** 文件只 append，所以 PromptIR 的 stable-block 前缀不变量（§1）成了文件系统性质。没有会 bump generation 的事件（§11）。
+- **一个文件 = 一个 generation = 一个 cache scope。** 文件只 append，所以 PromptIR 的 turn 前缀不变量（§1）成了文件系统性质。没有会 bump generation 的事件（§11）。
 - **header 的 JSON 形状就是 `ledger.Header` 结构体**（`std.json` 类型化编解码，`OwnedHeader = std.json.Parsed(Header)`）；读端忽略未知字段，所以新写者多出的字段不破坏旧读者。事件行保持平铺的 `kind` 形状（driver 读起来方便），解码经 `WireEvent`。
 - **composition + 模型身份冻结进 header。** header 记录本场 active 的每个 extension 的**具体版本**、被选为 native 的 tool 稳定 id，以及创建时**解析后的模型身份** `model_identity`（`provider` / 具体 `model` / `base_url` / `api_key_env`——`model` 字段本身只是 profile 别名，供显示与 effort 查询）。任何进程 `openDurable` 重开时都用 header 重建 composition（`composition.initFrozen`：读那些冻结版本、把 `native_tools` 当 pin），**绝不重扫 `current`、绝不重排 usage journal**——每个 `session step` 进程都看到**同一** composition，中途 `activate` 也移不动它（§5.1、§7.5、physics #2）。replay 时模型看到的一切 = header + events 的纯函数。
 - **模型身份创建时冻结、resume 不可变（physics #2/#5）。** 模型解析**只有一处决定**：`launch.resolveDescriptor(prov, env, profile)` 在**创建**时把 profile 解析成 `model_identity`，运行用的 handle 也**只从这个 descriptor** 构建（`launch.buildFromDescriptor`）——所以"实际跑的" == "header 冻结的"，不存在 fork。`resolveDescriptor` 是 **credential-aware** 的：openai profile 若 `api_key_env` 在环境里解析不出 credential，创建时就冻结成 scripted（因为那正是会跑的东西）；此后 config 改动**永不**改变已有 session 的模型。resume 时 `session step` 用 header 的 `model_identity` 重建**恰好那个**模型，只从 `api_key_env` 重解 credential——**不存密钥**，也**没有静默 fallback**：openai session 的密钥不在了就 `MissingCredential` 显式拒跑。**durable credential 只以 `api_key_env` 引用**；inline `api_key` 无法在 resume 时从环境恢复（否则又让 session 依赖 mutable config），因此不参与 durable openai 身份。`provider==""` 的旧 header 当 scripted 处理。
@@ -464,9 +464,9 @@ TurnCollector → ModelTurn { reasoning, text, calls, usage, stop_reason }
 ProviderCapabilities { thinking_replay }
 ```
 
-- Provider 在 generation 稳定的块边界放 / 声明 cache breakpoint（tools 之后、system 之后、最后一条稳定消息之后）。
-- Provider 只能优化序列化，不能破坏 §1 的块前缀不变量。
-- **reasoning 回放是 provider 的事，形状是 provider 的。** `thinking_delta` 只供展示，collector 不留；`reasoning_item` 是一个**完整**的 reasoning item（provider 自家 wire 形状的一个 JSON 值），item 凑齐时才发，`TurnCollector` 原样收进 `ModelTurn.reasoning`（`[item,…]`），loop 落进 `assistant.reasoning`（§3.1）。投影出的 `reasoning` block 只有声明 `thinking_replay` 的 provider 才序列化（`wire.writeReasoningItems` 把数组拆回一个个值，容器由 provider 决定），其余 provider 跳过。`anthropic`：`thinking` block 的文本与 signature 以 delta 到达、`content_block_stop` 时整块发出，`redacted_thinking` 到达即整块发出；回放时放在同一条 assistant message 最前、`tool_use` 之前，breakpoint 不落在 thinking block 上。`codex`：请求带 `include:["reasoning.encrypted_content"]`，`response.output_item.done` 的 `reasoning` item 只在含 `encrypted_content` 时整个发出（没有它的 item 在 `store:false` 下回放不了），回放为 `function_call` 之前的 input item。`openai`（chat/completions）：OpenAI 自家端点没有可回放的 reasoning，不发不回放；**DeepSeek 端点**（`base_url` 含 `deepseek.com`，`thinking_replay` 为真）把本轮流式到达的 `reasoning_content` 在 `[DONE]` 前拼成**一个** item `{"reasoning_content":"…"}` 发出，回放时只挂在**带 `tool_calls`** 的 assistant message 上（同名字段）——DeepSeek 文档明写：两条 user 之间若有 tool call，其间 assistant 的 `reasoning_content` 必须原样传回，否则 400；无 tool call 的轮次传回也会被忽略，所以不挂。
+- Provider 在 generation 稳定的 turn 边界放 / 声明 cache breakpoint（tools 之后、system 之后、最后一条稳定消息之后）。
+- Provider 只能优化序列化，不能破坏 §1 的 turn 前缀不变量。
+- **reasoning 回放是 provider 的事，形状是 provider 的。** `thinking_delta` 只供展示，collector 不留；`reasoning_item` 是一个**完整**的 reasoning item（provider 自家 wire 形状的一个 JSON 值），item 凑齐时才发，`TurnCollector` 原样收进 `ModelTurn.reasoning`（`[item,…]`），loop 落进 `assistant.reasoning`（§3.1）。投影出的 assistant turn 的 `reasoning` 字段只有声明 `thinking_replay` 的 provider 才序列化（`wire.writeReasoningItems` 把数组拆回一个个值，容器由 provider 决定），其余 provider 跳过。`anthropic`：`thinking` block 的文本与 signature 以 delta 到达、`content_block_stop` 时整块发出，`redacted_thinking` 到达即整块发出；回放时放在同一条 assistant message 最前、`tool_use` 之前，breakpoint 不落在 thinking block 上。`codex`：请求带 `include:["reasoning.encrypted_content"]`，`response.output_item.done` 的 `reasoning` item 只在含 `encrypted_content` 时整个发出（没有它的 item 在 `store:false` 下回放不了），回放为 `function_call` 之前的 input item。`openai`（chat/completions）：OpenAI 自家端点没有可回放的 reasoning，不发不回放；**DeepSeek 端点**（`base_url` 含 `deepseek.com`，`thinking_replay` 为真）把本轮流式到达的 `reasoning_content` 在 `[DONE]` 前拼成**一个** item `{"reasoning_content":"…"}` 发出，回放时只挂在**带 `tool_calls`** 的 assistant message 上（同名字段）——DeepSeek 文档明写：两条 user 之间若有 tool call，其间 assistant 的 `reasoning_content` 必须原样传回，否则 400；无 tool call 的轮次传回也会被忽略，所以不挂。
 
 ### 13.1 四个已实现的 provider
 
@@ -477,19 +477,19 @@ ProviderCapabilities { thinking_replay }
 | `codex` | `chatgpt.com/backend-api/codex/responses`（ChatGPT 订阅） | implicit prefix，按 `session_id` 分域 | OAuth 走 `~/.codex/auth.json`，401 自动 refresh 并回写 |
 | `scripted` | 无 | 无 | demo / 测试用的确定性 stand-in |
 
-**共享层 `providers/wire.zig`。** 三个真实 provider 都是「一次流式 HTTPS POST，body 是 SSE」，真正共有的东西收在这里：PromptIR 的 `tool_call` / `tool_result` 块解码、JSON 标量读取、`postSse` / `postJson`。SSE 行用可增长缓冲累积（Codex 的 `response.completed` 一行就能装下整个 response 对象），`event:` 行一律忽略——三种方言都把事件名也写在 payload 里。各 provider 文件只剩自己的 wire shape。
+**共享层 `providers/wire.zig`。** 三个真实 provider 都是「一次流式 HTTPS POST，body 是 SSE」，真正共有的东西收在这里：`postSse` / `postJson`、JSON 标量读取、`writeReasoningItems`（唯一到哪儿都一样的那段 PromptIR 序列化）。turn 结构本身不用解码——`prompt.Turn` 直接是带类型的。SSE 行用可增长缓冲累积（Codex 的 `response.completed` 一行就能装下整个 response 对象），`event:` 行一律忽略——三种方言都把事件名也写在 payload 里。各 provider 文件只剩自己的 wire shape。
 
 **瞬态故障与重试（`provider.RetryPolicy` / `isTransient`，`loop.collectTurn`）。** 分工与 tcode 相同：**provider 每次 `stream` 只做一次尝试**并把失败归类，**loop 拥有唯一的重试循环**——连接阶段失败和流中途断掉走同一条路、同一套退避，每次重试对 observer 可见。归类在 wire 出口做：线路本身的任何故障（connect / TLS / 发送 / 收头 / body 读到一半断）由 `wire.transport` 折成一个 `error.Transport`（具体原因打到 stderr），HTTP 状态分成 `Unauthorized`（401，codex 自己 refresh 一次）/ `RateLimited`（429）/ `ServerError`（5xx，含 anthropic 529；流中途到的 `overloaded_error` 事件也算）/ `ApiError`（其余 4xx——请求本身错，重发无用），body 在终结事件之前结束是 `StreamEndedEarly`。`isTransient` = `Transport | StreamEndedEarly | RateLimited | ServerError`，其余（4xx、credential、畸形 payload、`Canceled`、OOM）当场失败。`collectTurn` 每次尝试**新建一个 `TurnCollector`**：中途断掉的尝试什么都不留下，重试也不可能重复已经流出去的事件；observer 会看到失败那次的 delta，随后收到 `modelRetry`（`RetryNotice{attempt, max_retries, delay_ms, err}`），它得自己丢掉这一轮已显示的内容。退避 `initial · 2^(n-1)`、封顶 `max`（默认 5 次、1s、30s，`config.provider.retry`，经 `StepContext.retry` 传入），睡在 `std.Io.sleep` 上所以取消照样打得断。整个循环**不碰 ledger**：同一个 request 原样再发，只有完整的 turn 才返回——这不是智能（没有任何 model-visible 的东西因它改变），只是让 loop 活过线路的抖动。没有 observer 时重试行打到 stderr（与 wire 的原因诊断挨着）。
 
 **Stall watchdog（`wire.Watched`，`RetryPolicy.stall_timeout_ms`，默认 120s）。** 服务器接了连接却一个字节都不回，`std.http` 的读会一直阻塞到 OS 放弃 socket（可以是几十分钟），而 `<id>.cancel` 只在 step 边界消费、打不断它——所以每次 HTTP 交换跑在自己的任务里，旁边一个 watchdog 任务盯着 `Heartbeat`：**任何一行**（响应头、SSE keepalive、我们不解码的事件）都算心跳，静默超过预算就 `Select` 胜出、cancel 交换任务（`std.Io` 的取消打得断阻塞读：POSIX 用信号，Windows 用 `NtCancelIoFileEx`——所以不能用 `SO_RCVTIMEO`，Threaded 在 Windows 走 AFD overlapped）、报 `Transport`（原因 `Stalled`）→ 走上面的重试。度量的是**字节级静默**而不是"首 token 必须 N 秒内到"：tcode 那个 60s connect timeout 在 Codex 上常被慢首字节误伤，而真正的死连接靠字节级也抓得到；120s 是折中——它只防"挂半小时"，不追求秒级发现（切断一个活着的请求只是重新计费一遍 prompt 再等一遍）。io 给不出两个并发单元时交换直接裸跑（没有假 stall，只是没有守卫）；`stall_timeout_ms = 0` 关掉。`stall_ms` 由 loop 经 `Request.stall_ms` 交给 provider、provider 交给 `wire.Post`——它是 transport 参数不是 generation 参数。单测用本机一个"接了不说话"的 TCP 服务验证预算内报 `Transport`、会说话的服务不受影响。
 
-**`anthropic` 的两个 breakpoint。** 这个 API 只在被告知处缓存，而 §1 的块前缀只增不减，所以两个 `cache_control` 就覆盖全部前缀：一个在冻结 system 的最后一块（`tools` 排在 system 之前，同一个 breakpoint 一起罩住），一个在最后一条 message 的最后一个 content block——后者随 append 自动前移。连续的同 role 块合并成一条 message，于是一批 `tool_results` 天然是一条 user message。`message_start` 与 `message_delta` 各报一次 usage，provider 内部**合并**而不是覆盖，否则收尾事件会把 cache 计数清零（§1 的可测性就没了）。first-party 用 `thinking:{adaptive}` + `output_config.effort`，兼容端点用老的 `thinking.budget_tokens`（并把 budget 加进 `max_tokens`）。thinking 开着时这个 API 要求带 `tool_use` 的 assistant message **原样**带回它前面的 `thinking` block（含 signature），否则 400——所以本轮的 thinking block 整块收进 `assistant.reasoning`、回放在该 message 最前（§3.1、上文）；这是 tool 循环在一方端点上合法的前提，不只是思路连续性。
+**`anthropic` 的两个 breakpoint。** 这个 API 只在被告知处缓存，而 §1 的 turn 前缀只增不减，所以两个 `cache_control` 就覆盖全部前缀：一个在冻结 system 的最后一块（`tools` 排在 system 之前，同一个 breakpoint 一起罩住），一个在最后一条 message 的最后一个 content block——后者随 append 自动前移。连续的同 role turn 合并成一条 message，于是一批 `tool_results` 天然是一条 user message。`message_start` 与 `message_delta` 各报一次 usage，provider 内部**合并**而不是覆盖，否则收尾事件会把 cache 计数清零（§1 的可测性就没了）。first-party 用 `thinking:{adaptive}` + `output_config.effort`，兼容端点用老的 `thinking.budget_tokens`（并把 budget 加进 `max_tokens`）。thinking 开着时这个 API 要求带 `tool_use` 的 assistant message **原样**带回它前面的 `thinking` block（含 signature），否则 400——所以本轮的 thinking block 整块收进 `assistant.reasoning`、回放在该 message 最前（§3.1、上文）；这是 tool 循环在一方端点上合法的前提，不只是思路连续性。
 
 **`codex` 的 cache key = session id。** 后端用 `session_id` header 给 prompt cache 分域（并覆盖 body 里的 `prompt_cache_key`）。Nulya 有真正的 durable session id，于是这个 key 由它确定性派生（Blake3 → UUID 形状），**跨 `nulya session step` 进程稳定**——一场对话就是一个 cache 域，不是一个进程一个。credential 不是 env 而是 Codex CLI 的 `auth.json`，所以 `resolveDescriptor` 判断 codex profile 可用性时读文件而非读 env；header 里 `api_key_env` 为空。**reasoning 回放**：`store:false` 下 CoT 是一个加密 item，请求用 `include` 要回它，落进 `assistant.reasoning`（§3.1），下一步原样带回——和 Codex CLI 自己的做法一致；后端虽接受不带的历史，但那样模型每一步都要重推上一步的计划。
 
 ### 13.2 真实端点验收（`zig build integration`）
 
-块前缀不变量是 kernel 保证的；**它是否真的换来 cache 命中**取决于 provider 的序列化与 breakpoint，只能看表。`tests/integration.zig` 是唯一联网的测试，`zig build test` / `zig build e2e` 保持离线；没有 `NULYA_INTEGRATION_PROFILE`（或该 profile 无可用 credential）就整体 skip，不会让没有 key 的机器变红。
+turn 前缀不变量是 kernel 保证的；**它是否真的换来 cache 命中**取决于 provider 的序列化与 breakpoint，只能看表。`tests/integration.zig` 是唯一联网的测试，`zig build test` / `zig build e2e` 保持离线；没有 `NULYA_INTEGRATION_PROFILE`（或该 profile 无可用 credential）就整体 skip，不会让没有 key 的机器变红。
 
 ```bash
 NULYA_INTEGRATION_PROFILE=deepseek-anthropic zig build integration

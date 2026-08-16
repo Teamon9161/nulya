@@ -462,7 +462,7 @@ test "one step runs a batch of two shell calls and appends one result turn" {
         fn stream(ptr: *anyopaque, a: std.mem.Allocator, request: provider.Request, sink: provider.EventSink) anyerror!void {
             _ = ptr;
             _ = a;
-            try std.testing.expectEqual(@as(usize, 1), request.prompt_ir.stable_blocks.len);
+            try std.testing.expectEqual(@as(usize, 1), request.prompt_ir.turns.len);
             try std.testing.expectEqual(@as(usize, 1), request.tools.len);
             try std.testing.expectEqualStrings("shell", request.tools[0].name);
             try sink.emit(.started);
@@ -643,7 +643,7 @@ test "completeInterruptedToolBatch appends unknown results for an assistant tail
 }
 
 
-test "a capability note reaches the provider as a capability_note block" {
+test "a capability note reaches the provider as a capability_note turn" {
     const alloc = std.testing.allocator;
 
     const NoteModel = struct {
@@ -664,11 +664,12 @@ test "a capability note reaches the provider as a capability_note block" {
         fn stream(ptr: *anyopaque, a: std.mem.Allocator, request: provider.Request, sink: provider.EventSink) anyerror!void {
             _ = a;
             const self: *@This() = @ptrCast(@alignCast(ptr));
-            for (request.prompt_ir.stable_blocks) |block| {
-                if (block.kind == .capability_note and std.mem.indexOf(u8, block.bytes, "ext run") != null) {
-                    self.saw_note = true;
-                }
-            }
+            for (request.prompt_ir.turns) |turn| switch (turn) {
+                .capability_note => |text| {
+                    if (std.mem.indexOf(u8, text, "ext run") != null) self.saw_note = true;
+                },
+                else => {},
+            };
             try sink.emit(.started);
             try sink.emit(.{ .text_delta = "ok" });
             try sink.emit(.{ .done = .end_turn });

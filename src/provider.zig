@@ -413,7 +413,7 @@ test "model stream is collected into owned turn" {
             _ = alloc;
             const self: *@This() = @ptrCast(@alignCast(ptr));
             self.streamed = true;
-            try std.testing.expectEqual(@as(usize, 1), request.prompt_ir.stable_blocks.len);
+            try std.testing.expectEqual(@as(usize, 1), request.prompt_ir.turns.len);
             try std.testing.expectEqual(@as(usize, 0), request.tools.len);
             try sink.emit(.started);
             // Display-only text is dropped; complete items are kept verbatim.

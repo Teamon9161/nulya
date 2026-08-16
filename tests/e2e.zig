@@ -821,14 +821,27 @@ const EndTurnModel = struct {
     };
 };
 
-/// Flatten a PromptIR into a comparable byte string (one line per block, prefixed
-/// with `S|` for a system block or the stable block's kind tag). Two block-level
-/// prefixes are identical iff their flattenings are.
+/// Serialize a PromptIR into a comparable byte string: one line per system
+/// block, then one line per part of every turn, tagged by kind. Two projections
+/// are turn-for-turn identical iff their serializations are. A string rather
+/// than a structural `prompt.isStablePrefix` comparison because the two sides
+/// are never alive at once here — the exclusive session lease means process A's
+/// ledger is closed before process B opens the same file.
 fn flattenIR(alloc: std.mem.Allocator, ir: prompt.PromptIR) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(alloc);
     errdefer out.deinit();
     for (ir.system_blocks) |b| try out.writer.print("S|{s}\n", .{b.bytes});
-    for (ir.stable_blocks) |b| try out.writer.print("{d}|{s}\n", .{ @intFromEnum(b.kind), b.bytes });
+    for (ir.turns) |turn| switch (turn) {
+        .user_text => |text| try out.writer.print("U|{s}\n", .{text}),
+        .assistant => |as| {
+            try out.writer.print("R|{s}\nA|{s}\n", .{ as.reasoning, as.text });
+            for (as.calls) |c| try out.writer.print("C|{s}|{s}|{s}\n", .{ c.id, c.tool, c.args_json });
+        },
+        .tool_results => |results| for (results) |r| {
+            try out.writer.print("T|{s}|{}|{s}\n", .{ r.call_id, r.ok, r.output });
+        },
+        .capability_note => |text| try out.writer.print("N|{s}\n", .{text}),
+    };
     return out.toOwnedSlice();
 }
 
@@ -876,7 +889,7 @@ fn runCliEnvs(
 const sessions_dir_rel = ".nulya" ++ std.fs.path.sep_str ++ "sessions";
 const session_file_rel = sessions_dir_rel ++ std.fs.path.sep_str ++ "s.jsonl";
 
-test "durable ledger: process A steps twice and exits; process B resumes and projects a block-identical PromptIR" {
+test "durable ledger: process A steps twice and exits; process B resumes and projects a turn-identical PromptIR" {
     const alloc = std.testing.allocator;
     var threaded: std.Io.Threaded = .init(alloc, .{});
     defer threaded.deinit();
@@ -931,8 +944,8 @@ test "durable ledger: process A steps twice and exits; process B resumes and pro
     defer alloc.free(flat_b);
 
     try std.testing.expectEqualStrings(flat_a, flat_b);
-    // A real multi-block conversation: user, assistant(call), tool_result, assistant.
-    try std.testing.expect(ir_b.stable_blocks.len >= 4);
+    // A real multi-turn conversation: user, assistant(call), tool_results, assistant.
+    try std.testing.expect(ir_b.turns.len >= 4);
 }
 
 test "durable ledger: an assistant-with-calls tail left on disk by a crash is repaired on resume" {
@@ -1057,11 +1070,14 @@ test "durable ledger: a capability_note appended by a separate CLI process is re
 
         const ir = try prompt.projectWithSystem(alloc, sess.composition.system_prompts.blocks, sess.l.view());
         defer ir.deinit(alloc);
-        var saw_note_block = false;
-        for (ir.stable_blocks) |blk| {
-            if (blk.kind == .capability_note and std.mem.indexOf(u8, blk.bytes, "greet") != null) saw_note_block = true;
-        }
-        try std.testing.expect(saw_note_block);
+        var saw_note_turn = false;
+        for (ir.turns) |turn| switch (turn) {
+            .capability_note => |text| {
+                if (std.mem.indexOf(u8, text, "greet") != null) saw_note_turn = true;
+            },
+            else => {},
+        };
+        try std.testing.expect(saw_note_turn);
     }
 
     // And it is durable: a fresh process resuming the session still sees the note.
@@ -2227,7 +2243,7 @@ const PricedModel = struct {
     };
 };
 
-test "durable ledger: assistant events carry per-step usage, legacy lines read as absent, and PromptIR blocks are unchanged" {
+test "durable ledger: assistant events carry per-step usage, legacy lines read as absent, and PromptIR turns are unchanged" {
     const alloc = std.testing.allocator;
     const io = std.testing.io; // PricedModel issues no tool calls, so no async shell.
 
@@ -2280,7 +2296,7 @@ test "durable ledger: assistant events carry per-step usage, legacy lines read a
     try std.testing.expectEqual(@as(u64, 1000), reopened.l.view()[1].assistant.usage.?.input_tokens);
 
     // Cost is a fact about the turn, not model-visible text: the projected
-    // blocks are identical to those of the same conversation with no usage at
+    // turns are identical to those of the same conversation with no usage at
     // all — which is also how every pre-M5b line still reads back.
     var plain = ledger.Ledger.init(alloc);
     defer plain.deinit();

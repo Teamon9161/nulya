@@ -66,7 +66,7 @@ pub const ScriptedProvider = struct {
         const self: *ScriptedProvider = @ptrCast(@alignCast(ptr));
         try sink.emit(.started);
 
-        if (self.mode == .finish and hasToolResult(request.prompt_ir.stable_blocks)) {
+        if (self.mode == .finish and hasToolResult(request.prompt_ir.turns)) {
             try sink.emit(.{ .text_delta = "done" });
             try sink.emit(.{ .done = .end_turn });
             return;
@@ -93,9 +93,9 @@ pub const ScriptedProvider = struct {
     };
 };
 
-fn hasToolResult(blocks: []const prompt.StableBlock) bool {
-    for (blocks) |b| {
-        if (b.kind == .tool_result) return true;
+fn hasToolResult(turns: []const prompt.Turn) bool {
+    for (turns) |turn| {
+        if (turn == .tool_results) return true;
     }
     return false;
 }

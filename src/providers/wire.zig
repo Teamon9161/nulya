@@ -3,65 +3,24 @@
 //! Three providers — `openai` (chat/completions), `anthropic` (messages) and
 //! `codex` (the ChatGPT-subscription responses endpoint) — speak different JSON
 //! dialects over the same transport: one streaming HTTPS POST whose body is SSE.
-//! What all three genuinely share lives here: the PromptIR block decoders, the
-//! JSON scalar readers, and the POST + SSE loop. A provider file is then only
-//! its own wire shape.
+//! What all three genuinely share lives here: the POST + SSE loop, the JSON
+//! scalar readers, and the one piece of PromptIR serialization that is the same
+//! everywhere (`writeReasoningItems`). A provider file is then only its own wire
+//! shape — the turn structure it needs comes typed out of `prompt.Turn`.
 
 const std = @import("std");
 
 // ---------------------------------------------------------------- PromptIR --
 
-/// A `tool_call` block's payload, laid out by `prompt.project` as
-/// `id\nname\nargs_json`. Slices borrow the block.
-pub const ToolCall = struct {
-    id: []const u8,
-    name: []const u8,
-    args_json: []const u8,
-};
-
-pub fn parseToolCall(bytes: []const u8) ToolCall {
-    const id_end = std.mem.indexOfScalar(u8, bytes, '\n') orelse return .{ .id = bytes, .name = "", .args_json = "{}" };
-    const rest = bytes[id_end + 1 ..];
-    const name_end = std.mem.indexOfScalar(u8, rest, '\n') orelse return .{ .id = bytes[0..id_end], .name = rest, .args_json = "{}" };
-    return .{
-        .id = bytes[0..id_end],
-        .name = rest[0..name_end],
-        .args_json = rest[name_end + 1 ..],
-    };
-}
-
-/// A `tool_result` block's payload: `call_id\nok\noutput`, where `ok` is a bool
-/// formatted by `{}`. Slices borrow the block.
-pub const ToolResult = struct {
-    id: []const u8,
-    ok: bool,
-    output: []const u8,
-};
-
-pub fn parseToolResult(bytes: []const u8) ToolResult {
-    const id_end = std.mem.indexOfScalar(u8, bytes, '\n') orelse return .{ .id = bytes, .ok = true, .output = "" };
-    const rest = bytes[id_end + 1 ..];
-    const ok_end = std.mem.indexOfScalar(u8, rest, '\n') orelse return .{ .id = bytes[0..id_end], .ok = isTrue(rest), .output = "" };
-    return .{
-        .id = bytes[0..id_end],
-        .ok = isTrue(rest[0..ok_end]),
-        .output = rest[ok_end + 1 ..],
-    };
-}
-
-fn isTrue(s: []const u8) bool {
-    return std.mem.eql(u8, s, "true");
-}
-
-/// Write every item of a `reasoning` block (the JSON array a `TurnCollector`
+/// Write every item of a turn's `reasoning` (the JSON array a `TurnCollector`
 /// joined from the provider's own `reasoning_item`s) as one JSON value each,
 /// into whatever array `jw` is currently inside. Both wires that replay
 /// reasoning place the items bare — Anthropic as content blocks, Responses as
 /// input items — so the splitting is shared; only the surrounding container is
 /// the provider's. Items are re-serialized from the parsed value, which keeps
 /// key order and is what a signature / encrypted blob is indifferent to.
-pub fn writeReasoningItems(jw: *std.json.Stringify, alloc: std.mem.Allocator, block: []const u8) !void {
-    const parsed = std.json.parseFromSlice(std.json.Value, alloc, block, .{}) catch return error.CorruptReasoning;
+pub fn writeReasoningItems(jw: *std.json.Stringify, alloc: std.mem.Allocator, reasoning: []const u8) !void {
+    const parsed = std.json.parseFromSlice(std.json.Value, alloc, reasoning, .{}) catch return error.CorruptReasoning;
     defer parsed.deinit();
     if (parsed.value != .array) return error.CorruptReasoning;
     for (parsed.value.array.items) |item| try jw.write(item);
@@ -426,21 +385,4 @@ test "reasoning items are spliced back one value each, in order" {
     var jw2: std.json.Stringify = .{ .writer = &junk.writer };
     try jw2.beginArray();
     try std.testing.expectError(error.CorruptReasoning, writeReasoningItems(&jw2, alloc, "{\"not\":\"an array\"}"));
-}
-
-test "tool call and tool result blocks decode back to their fields" {
-    const call = parseToolCall("c1\nshell\n{\"command\":\"echo hi\"}");
-    try std.testing.expectEqualStrings("c1", call.id);
-    try std.testing.expectEqualStrings("shell", call.name);
-    try std.testing.expectEqualStrings("{\"command\":\"echo hi\"}", call.args_json);
-
-    const ok = parseToolResult("c1\ntrue\nhi there");
-    try std.testing.expectEqualStrings("c1", ok.id);
-    try std.testing.expect(ok.ok);
-    try std.testing.expectEqualStrings("hi there", ok.output);
-
-    // A failed call must surface as `is_error` on the providers that have it.
-    const failed = parseToolResult("c2\nfalse\nboom\nsecond line");
-    try std.testing.expect(!failed.ok);
-    try std.testing.expectEqualStrings("boom\nsecond line", failed.output);
 }

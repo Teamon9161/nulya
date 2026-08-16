@@ -308,7 +308,7 @@ pub fn buildRequestJson(
     try jw.objectField("instructions");
     try writeInstructions(&jw, alloc, request.prompt_ir.system_blocks);
     try jw.objectField("input");
-    try writeInput(&jw, alloc, request.prompt_ir.stable_blocks);
+    try writeInput(&jw, alloc, request.prompt_ir.turns);
     try jw.objectField("tools");
     try writeTools(&jw, request.tools);
     try jw.objectField("tool_choice");
@@ -358,36 +358,37 @@ fn writeInstructions(jw: *std.json.Stringify, alloc: std.mem.Allocator, blocks: 
     try jw.write(joined.written());
 }
 
-fn writeInput(jw: *std.json.Stringify, alloc: std.mem.Allocator, blocks: []const prompt.StableBlock) !void {
+/// History is flat here, so a turn simply contributes its items in order.
+fn writeInput(jw: *std.json.Stringify, alloc: std.mem.Allocator, turns: []const prompt.Turn) !void {
     try jw.beginArray();
-    for (blocks) |block| switch (block.kind) {
-        .user_text, .capability_note => try writeMessageItem(jw, "user", "input_text", block.bytes),
-        // The turn's `reasoning` items exactly as they came back — id, summary
-        // and `encrypted_content` — placed before the output they preceded, which
-        // is the position the model produced them in.
-        .reasoning => try wire.writeReasoningItems(jw, alloc, block.bytes),
-        .assistant_text => if (block.bytes.len != 0) try writeMessageItem(jw, "assistant", "output_text", block.bytes),
-        .tool_call => {
-            const call = wire.parseToolCall(block.bytes);
-            try jw.beginObject();
-            try jw.objectField("type");
-            try jw.write("function_call");
-            try jw.objectField("call_id");
-            try jw.write(call.id);
-            try jw.objectField("name");
-            try jw.write(call.name);
-            // Arguments are a JSON *string* on this wire, not an object.
-            try jw.objectField("arguments");
-            try jw.write(call.args_json);
-            try jw.endObject();
+    for (turns) |turn| switch (turn) {
+        .user_text, .capability_note => |text| try writeMessageItem(jw, "user", "input_text", text),
+        .assistant => |as| {
+            // The turn's `reasoning` items exactly as they came back — id,
+            // summary and `encrypted_content` — placed before the output they
+            // preceded, which is the position the model produced them in.
+            if (as.reasoning.len != 0) try wire.writeReasoningItems(jw, alloc, as.reasoning);
+            if (as.text.len != 0) try writeMessageItem(jw, "assistant", "output_text", as.text);
+            for (as.calls) |call| {
+                try jw.beginObject();
+                try jw.objectField("type");
+                try jw.write("function_call");
+                try jw.objectField("call_id");
+                try jw.write(call.id);
+                try jw.objectField("name");
+                try jw.write(call.tool);
+                // Arguments are a JSON *string* on this wire, not an object.
+                try jw.objectField("arguments");
+                try jw.write(call.args_json);
+                try jw.endObject();
+            }
         },
-        .tool_result => {
-            const result = wire.parseToolResult(block.bytes);
+        .tool_results => |results| for (results) |result| {
             try jw.beginObject();
             try jw.objectField("type");
             try jw.write("function_call_output");
             try jw.objectField("call_id");
-            try jw.write(result.id);
+            try jw.write(result.call_id);
             try jw.objectField("output");
             try jw.write(result.output);
             try jw.endObject();

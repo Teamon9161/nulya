@@ -198,54 +198,28 @@ fn writeMessages(alloc: std.mem.Allocator, jw: *std.json.Stringify, ir: *const p
     for (ir.system_blocks) |block| {
         try writeRoleContentMessage(jw, "system", block.bytes);
     }
-    // The projection emits a turn's `reasoning` block right before its
-    // `assistant_text`; carried across so the assistant message can replay it.
-    var pending_reasoning: []const u8 = "";
-    var i: usize = 0;
-    while (i < ir.stable_blocks.len) {
-        const block = ir.stable_blocks[i];
-        switch (block.kind) {
-            .user_text => {
-                try writeRoleContentMessage(jw, "user", block.bytes);
-                i += 1;
-            },
-            .reasoning => {
-                pending_reasoning = block.bytes;
-                i += 1;
-            },
-            .assistant_text => {
-                const start = i + 1;
-                var end = start;
-                while (end < ir.stable_blocks.len and ir.stable_blocks[end].kind == .tool_call) : (end += 1) {}
-                try writeAssistantMessage(alloc, jw, block.bytes, ir.stable_blocks[start..end], pending_reasoning);
-                pending_reasoning = "";
-                i = end;
-            },
-            // `project()` always emits an assistant_text block before any
-            // tool_call blocks, so the `.assistant_text` arm above consumes them.
-            // A tool_call at top level would mean the projection invariant broke.
-            .tool_call => unreachable,
-            .tool_result => {
-                const result = wire.parseToolResult(block.bytes);
-                try jw.beginObject();
-                try jw.objectField("role");
-                try jw.write("tool");
-                try jw.objectField("tool_call_id");
-                try jw.write(result.id);
-                try jw.objectField("content");
-                try jw.write(result.output);
-                try jw.endObject();
-                i += 1;
-            },
-            // A capability announcement (DESIGN §5.3): an out-of-band system
-            // message the model reads to learn it can now shell out to a new
-            // extension. Appended, so it never disturbs the cached prefix.
-            .capability_note => {
-                try writeRoleContentMessage(jw, "system", block.bytes);
-                i += 1;
-            },
-        }
-    }
+    for (ir.turns) |turn| switch (turn) {
+        .user_text => |text| try writeRoleContentMessage(jw, "user", text),
+        // One turn, one assistant message: text, this turn's reasoning and its
+        // calls all belong to it.
+        .assistant => |as| try writeAssistantMessage(alloc, jw, as),
+        // A batch is one turn but one `role: "tool"` message per result — that
+        // is simply how this wire spells it.
+        .tool_results => |results| for (results) |result| {
+            try jw.beginObject();
+            try jw.objectField("role");
+            try jw.write("tool");
+            try jw.objectField("tool_call_id");
+            try jw.write(result.call_id);
+            try jw.objectField("content");
+            try jw.write(result.output);
+            try jw.endObject();
+        },
+        // A capability announcement (DESIGN §5.3): an out-of-band system
+        // message the model reads to learn it can now shell out to a new
+        // extension. Appended, so it never disturbs the cached prefix.
+        .capability_note => |text| try writeRoleContentMessage(jw, "system", text),
+    };
     try jw.endArray();
 }
 
@@ -258,30 +232,24 @@ fn writeRoleContentMessage(jw: *std.json.Stringify, role: []const u8, content: [
     try jw.endObject();
 }
 
-fn writeAssistantMessage(
-    alloc: std.mem.Allocator,
-    jw: *std.json.Stringify,
-    content: []const u8,
-    calls: []const prompt.StableBlock,
-    reasoning: []const u8,
-) !void {
+fn writeAssistantMessage(alloc: std.mem.Allocator, jw: *std.json.Stringify, as: prompt.Turn.Assistant) !void {
     try jw.beginObject();
     try jw.objectField("role");
     try jw.write("assistant");
     try jw.objectField("content");
-    if (content.len == 0 and calls.len != 0) {
+    if (as.text.len == 0 and as.calls.len != 0) {
         try jw.write(null);
     } else {
-        try jw.write(content);
+        try jw.write(as.text);
     }
-    if (calls.len != 0) {
+    if (as.calls.len != 0) {
         // DeepSeek requires the CoT of a tool-calling turn on every later
         // request of that turn (400 otherwise) and ignores it elsewhere, so it
         // rides only on messages that carry tool_calls. Only this wire produces
-        // `reasoning_content` items, so a block of another shape (a session
+        // `reasoning_content` items, so reasoning of another shape (a session
         // that ran on a different provider) contributes nothing.
-        if (reasoning.len != 0) {
-            const text = try joinReasoningContent(alloc, reasoning);
+        if (as.reasoning.len != 0) {
+            const text = try joinReasoningContent(alloc, as.reasoning);
             defer alloc.free(text);
             if (text.len != 0) {
                 try jw.objectField("reasoning_content");
@@ -290,8 +258,7 @@ fn writeAssistantMessage(
         }
         try jw.objectField("tool_calls");
         try jw.beginArray();
-        for (calls) |call_block| {
-            const call = wire.parseToolCall(call_block.bytes);
+        for (as.calls) |call| {
             try jw.beginObject();
             try jw.objectField("id");
             try jw.write(call.id);
@@ -300,7 +267,7 @@ fn writeAssistantMessage(
             try jw.objectField("function");
             try jw.beginObject();
             try jw.objectField("name");
-            try jw.write(call.name);
+            try jw.write(call.tool);
             try jw.objectField("arguments");
             try jw.write(call.args_json);
             try jw.endObject();
@@ -366,8 +333,8 @@ pub const SseState = struct {
     }
 
     /// Emit the accumulated reasoning as one item (and forget it). A no-op when
-    /// the model did not think aloud, so non-reasoning endpoints never produce a
-    /// reasoning block at all.
+    /// the model did not think aloud, so on non-reasoning endpoints the turn's
+    /// `reasoning` stays empty.
     pub fn flushReasoning(self: *SseState) !void {
         const text = self.reasoning.written();
         if (text.len == 0) return;
@@ -431,13 +398,13 @@ pub fn processSseData(state: *SseState, data: []const u8) !bool {
     return false;
 }
 
-/// Concatenate the `reasoning_content` of every item in a turn's reasoning block
+/// Concatenate the `reasoning_content` of every item in a turn's `reasoning`
 /// (a JSON array; see `SseState.flushReasoning`). Items of another shape — from
 /// a provider that is not this wire — contribute nothing. Caller owns the result.
-fn joinReasoningContent(alloc: std.mem.Allocator, block: []const u8) ![]u8 {
+fn joinReasoningContent(alloc: std.mem.Allocator, reasoning: []const u8) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(alloc);
     errdefer out.deinit();
-    const parsed = std.json.parseFromSlice(std.json.Value, alloc, block, .{}) catch return out.toOwnedSlice();
+    const parsed = std.json.parseFromSlice(std.json.Value, alloc, reasoning, .{}) catch return out.toOwnedSlice();
     defer parsed.deinit();
     if (parsed.value != .array) return out.toOwnedSlice();
     for (parsed.value.array.items) |item| {
@@ -507,7 +474,7 @@ test "endpoint URL appends chat completions path once" {
     try std.testing.expectEqualStrings("https://example.test/v1/chat/completions", b);
 }
 
-test "request JSON serializes streaming prompt blocks and tools" {
+test "request JSON serializes streaming prompt turns and tools" {
     const alloc = std.testing.allocator;
     var l = @import("../ledger.zig").Ledger.init(alloc);
     defer l.deinit();
@@ -673,7 +640,7 @@ test "reasoning without tool calls, or of another provider's shape, is not repla
     try std.testing.expect(std.mem.indexOf(u8, body, "plan") == null);
 }
 
-test "request JSON serializes system blocks before stable ledger blocks" {
+test "request JSON serializes system blocks before ledger turns" {
     const alloc = std.testing.allocator;
     var l = @import("../ledger.zig").Ledger.init(alloc);
     defer l.deinit();
