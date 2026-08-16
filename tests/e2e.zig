@@ -1617,6 +1617,110 @@ test "cli: NULYA_HOME extensions are visible to ext list / skill list / ext run,
     }
 }
 
+// ── M5g: the bundled evolution extension (a plain data extension) ──────────
+
+test "bundled evolution: ext build extensions/evolution is data kind and needs no zig; session new --with evolution exposes its system prompt and skill; skill load returns SKILL.md verbatim; version is stable across rebuilds" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+    const repo = host_env.get("NULYA_REPO") orelse return error.SkipZigTest;
+    const evolution_src = try std.fs.path.join(alloc, &.{ repo, "extensions", "evolution" });
+    defer alloc.free(evolution_src);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var ws_real: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
+
+    // It builds straight from the repo — a draft outside every store root — and
+    // lands in this workspace's store under its manifest id. No toolchain: it is
+    // a data extension (prompt + skill, no runtime), so `NULYA_ZIG` pointing at
+    // nothing would still work.
+    const built = try runCliEnv(alloc, io, ws, &.{ exe_abs, "ext", "build", evolution_src }, "NULYA_ZIG", "definitely-not-a-compiler");
+    defer alloc.free(built.stdout);
+    try std.testing.expectEqual(@as(u8, 0), built.code);
+    const version = try extractVersion(alloc, built.stdout);
+    defer alloc.free(version);
+    const in_store = try std.fs.path.join(alloc, &.{ ".nulya", "extensions", "evolution", "versions", version, "extension.json" });
+    defer alloc.free(in_store);
+    try ws.access(io, in_store, .{});
+    // The repo copy is untouched: no orphan `versions/` next to the source.
+    {
+        var src_dir = try std.Io.Dir.openDirAbsolute(io, evolution_src, .{});
+        defer src_dir.close(io);
+        try std.testing.expectError(error.FileNotFound, src_dir.access(io, "versions", .{}));
+    }
+
+    // Data kind means the version id is a pure snapshot hash: a rebuild with a
+    // different (bogus) toolchain is the same version, on any machine.
+    {
+        const again = try runCliEnv(alloc, io, ws, &.{ exe_abs, "ext", "build", evolution_src }, "NULYA_ZIG", "another-fake-compiler");
+        defer alloc.free(again.stdout);
+        try std.testing.expectEqual(@as(u8, 0), again.code);
+        try std.testing.expect(std.mem.indexOf(u8, again.stdout, "already built") != null);
+        const rebuilt_version = try extractVersion(alloc, again.stdout);
+        defer alloc.free(rebuilt_version);
+        try std.testing.expectEqualStrings(version, rebuilt_version);
+    }
+
+    // It is NOT activated — no other session picks up the slow-loop identity —
+    // and a session that asks for it by version gets exactly it.
+    const with_arg = try std.fmt.allocPrint(alloc, "evolution@{s}", .{version});
+    defer alloc.free(with_arg);
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--with", with_arg });
+    defer alloc.free(new.stdout);
+    try std.testing.expectEqual(@as(u8, 0), new.code);
+    const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(id);
+
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+    var model = EndTurnModel{};
+    const spath = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{id});
+    defer alloc.free(spath);
+    var sess = try session.AgentSession.openDurable(alloc, .{
+        .model = .{ .ptr = &model, .vtable = &EndTurnModel.vtable },
+        .step_ctx = .{
+            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = ws_path },
+            .scratch_dir = ".nulya/scratch",
+        },
+    }, .{ .workspace = ws, .session_path = spath });
+    defer sess.deinit();
+
+    // The identity is a system block, and the skill is in the catalog with a
+    // pinned ref the model can load.
+    var identity: ?[]const u8 = null;
+    for (sess.composition.system_prompts.blocks) |b| {
+        if (std.mem.indexOf(u8, b.bytes, "slow loop") != null) identity = b.bytes;
+    }
+    try std.testing.expect(identity != null);
+    try std.testing.expect(std.mem.indexOf(u8, identity.?, "don't build that") != null);
+    try std.testing.expectEqual(@as(usize, 1), sess.composition.skills.skills.len);
+    const descriptor = sess.composition.skills.skills[0];
+    try std.testing.expectEqualStrings("evolution", descriptor.name);
+    // No tools: evolution has no runtime and takes no native slot.
+    try std.testing.expectEqual(@as(usize, 2), sess.composition.tools.tools.len);
+
+    // `skill load <ref>` returns the frozen SKILL.md verbatim — the same bytes
+    // the repo ships.
+    const loaded = try runCli(alloc, io, ws, &.{ exe_abs, "skill", "load", descriptor.ref });
+    defer alloc.free(loaded.stdout);
+    try std.testing.expectEqual(@as(u8, 0), loaded.code);
+    const on_disk = blk: {
+        var src_dir = try std.Io.Dir.openDirAbsolute(io, evolution_src, .{});
+        defer src_dir.close(io);
+        break :blk try src_dir.readFileAlloc(io, "skills" ++ std.fs.path.sep_str ++ "evolution" ++ std.fs.path.sep_str ++ "SKILL.md", alloc, .unlimited);
+    };
+    defer alloc.free(on_disk);
+    try std.testing.expect(std.mem.indexOf(u8, loaded.stdout, on_disk) != null);
+}
+
 // ── M5f: `session list` (read-only projection of .nulya/sessions) ───────────
 
 test "session cli: list --json reports parent, event count, summed usage and the latest outcome" {

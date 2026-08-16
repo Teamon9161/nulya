@@ -77,6 +77,9 @@ pub fn build(b: *std.Build) void {
     // Point at the installed binary, relative to where `zig build` was run.
     run_e2e.step.dependOn(b.getInstallStep());
     run_e2e.setEnvironmentVariable("NULYA_EXE", b.getInstallPath(.bin, exe.out_filename));
+    // The repo root, so a test can build the extensions this repo ships
+    // (`extensions/evolution`) from their real source rather than a copy.
+    run_e2e.setEnvironmentVariable("NULYA_REPO", b.build_root.path orelse ".");
     run_e2e.has_side_effects = true; // exercises the filesystem; always run
     const e2e_step = b.step("e2e", "Run the extension closed-loop end-to-end test");
     e2e_step.dependOn(&run_e2e.step);
