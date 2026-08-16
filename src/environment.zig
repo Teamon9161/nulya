@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const tool = @import("tool.zig");
 
 pub const Dialect = enum {
     bash,
@@ -32,6 +33,10 @@ pub const ShellOutcome = struct {
     stdout: []u8,
     stderr: []u8,
     exit_code: u8,
+    /// The wall-clock budget ran out and the child was killed. `stdout`/`stderr`
+    /// are then whatever had been captured before the kill (base-tools.md §3:
+    /// a timeout still returns the output it already has).
+    timed_out: bool = false,
 
     pub fn deinit(self: ShellOutcome, alloc: std.mem.Allocator) void {
         alloc.free(self.stdout);
@@ -44,6 +49,10 @@ pub const ShellRequest = struct {
     cwd: []const u8,
     /// Runner-level capture cap; the `emit` budget does the model-facing trim.
     max_output_bytes: usize,
+    /// Wall-clock cap for the command (`tool.Timeouts`, base-tools.md §3). The
+    /// `shell` tool always sets one; `null` runs unguarded and is for tests that
+    /// are about something else.
+    timeout_ms: ?u32 = null,
 };
 
 /// One oneshot extension invocation (DESIGN §7.3). `request_json` is the full
@@ -61,9 +70,9 @@ pub const ExtensionRequest = struct {
     cwd: []const u8,
     request_json: []const u8,
     max_output_bytes: usize,
-    /// Wall-clock cap for the oneshot call. `null` disables the guard; callers
-    /// should only do that in controlled tests.
-    timeout_ms: ?u32 = 30_000,
+    /// Wall-clock cap for the oneshot call (`tool.Timeouts`, base-tools.md §3).
+    /// `null` disables the guard; callers should only do that in controlled tests.
+    timeout_ms: ?u32 = tool.Timeouts.extension_ms,
 };
 
 /// A completed extension run. `stdout`/`stderr` are owned by the caller's allocator.
@@ -76,6 +85,127 @@ pub const ExtensionOutcome = struct {
     pub fn deinit(self: ExtensionOutcome, alloc: std.mem.Allocator) void {
         alloc.free(self.stdout);
         alloc.free(self.stderr);
+    }
+};
+
+const windows = std.os.windows;
+
+/// The kernel32 job-object calls `std.os.windows` does not declare (0.16 ships
+/// only `CreateProcessW` there). A job object is the only reliable way to
+/// terminate a process TREE on Windows, so the three calls plus `ResumeThread`
+/// are declared locally. Analyzed lazily — nothing here is referenced off
+/// Windows, so the externs never reach a POSIX link.
+///
+/// The job carries NO limits: it is a handle on the tree for `TerminateJobObject`
+/// and nothing else. In particular not `KILL_ON_JOB_CLOSE`, which would make a
+/// NORMAL return kill the tree (see `Tree`), so `SetInformationJobObject` is not
+/// needed and is not declared.
+const win32 = struct {
+    extern "kernel32" fn CreateJobObjectW(lpJobAttributes: ?*anyopaque, lpName: ?[*:0]const u16) callconv(.winapi) ?windows.HANDLE;
+    extern "kernel32" fn AssignProcessToJobObject(hJob: windows.HANDLE, hProcess: windows.HANDLE) callconv(.winapi) windows.BOOL;
+    extern "kernel32" fn TerminateJobObject(hJob: windows.HANDLE, uExitCode: windows.UINT) callconv(.winapi) windows.BOOL;
+    extern "kernel32" fn ResumeThread(hThread: windows.HANDLE) callconv(.winapi) windows.DWORD;
+};
+
+/// A child process plus whatever the OS needs to terminate its whole TREE.
+///
+/// `std.process.Child.kill` reaches only the direct child, and the direct child
+/// is usually not the process doing the work: `bash -lc "a; b"` forks for the
+/// last command, and Windows Git Bash's `bin\bash.exe` is a launcher that
+/// re-execs the real shell as a grandchild. A survivor keeps the pipe write-ends
+/// open, so the drain never reaches EOF — a timeout would then MARK the result
+/// without ever unblocking the step, and a cancel would wait out the command it
+/// was supposed to interrupt. So both kill a tree:
+///
+///   POSIX:   the child starts its own process group (`pgid = 0`, applied
+///            between fork and exec), and `killAll` signals the negative pid,
+///            which is the whole group.
+///   Windows: the child starts suspended, is assigned to a job object, and only
+///            then resumed — so it cannot fork anything outside the job.
+///            `killAll` terminates the job.
+///
+/// The rule is the same on both, and it is deliberately narrow: **terminating is
+/// what kills the tree; returning normally does not.** The job is created with NO
+/// limits — notably not `KILL_ON_JOB_CLOSE`, which would kill everything the
+/// command started the moment `deinit` closed the handle. That would both diverge
+/// from POSIX (which only ever signals on timeout / cancel) and destroy a
+/// legitimate pattern: `some-server >/dev/null 2>&1 &` in one shell call, used by
+/// the next. Nothing is lost by dropping it — the error paths are already covered
+/// by the callers' `killAll` (`defer if (!child_reaped)` / `errdefer`).
+///
+/// A detached background process must still redirect its stdio, or the call
+/// blocks until it exits: it inherits the pipe write-ends, and the drain reads
+/// both pipes to EOF. That is pre-existing drain behavior, not something the tree
+/// introduced.
+///
+/// If the OS refuses a job object (an older Windows' nested-job restriction, or
+/// nulya itself running inside a restrictive job), this degrades to the plain
+/// single-process kill and says so once: a shell that runs is worth more than a
+/// guarantee about its grandchildren.
+const Tree = struct {
+    child: std.process.Child,
+    /// Windows: the job the child and its descendants belong to, or null when
+    /// the OS refused one. POSIX needs no handle — the group IS the child's pid.
+    job: if (builtin.os.tag == .windows) ?windows.HANDLE else void,
+
+    fn spawn(io: std.Io, options: std.process.SpawnOptions) !Tree {
+        if (builtin.os.tag != .windows) {
+            var opts = options;
+            opts.pgid = 0; // become a group leader, so `killAll` can signal the group
+            return .{ .child = try std.process.spawn(io, opts), .job = {} };
+        }
+
+        // Create the job FIRST: if the OS refuses one, spawn the ordinary way
+        // rather than suspending a child that would then need resuming anyway.
+        const job = win32.CreateJobObjectW(null, null) orelse {
+            std.debug.print("nulya: no job object available; a timed-out or canceled command can only kill its direct child\n", .{});
+            return .{ .child = try std.process.spawn(io, options), .job = null };
+        };
+        errdefer windows.CloseHandle(job);
+
+        var opts = options;
+        opts.start_suspended = true; // assign to the job before it can fork
+        var child = try std.process.spawn(io, opts);
+        errdefer child.kill(io);
+
+        const assigned = win32.AssignProcessToJobObject(job, child.id.?).toBool();
+        // Resume either way — a child left suspended would hang forever.
+        _ = win32.ResumeThread(child.thread_handle);
+        if (!assigned) {
+            windows.CloseHandle(job);
+            std.debug.print("nulya: could not assign the command to a job object; a timed-out or canceled command can only kill its direct child\n", .{});
+            return .{ .child = child, .job = null };
+        }
+        return .{ .child = child, .job = job };
+    }
+
+    /// Terminate the command AND everything it started, then reap the direct
+    /// child so the caller's bookkeeping (`child.id`, the pipe handles) is left
+    /// exactly as `child.kill` alone used to leave it. Idempotent.
+    fn killAll(self: *Tree, io: std.Io) void {
+        if (self.child.id) |id| {
+            if (builtin.os.tag == .windows) {
+                if (self.job) |job| _ = win32.TerminateJobObject(job, 1);
+            } else {
+                // A negative pid signals the whole process group. `child.kill`
+                // signals only the one pid (`Io.Threaded.childKillPosix`), which
+                // is exactly why this extra shot is needed.
+                _ = std.posix.system.kill(-id, .KILL);
+            }
+        }
+        self.child.kill(io); // idempotent; reaps the direct child
+    }
+
+    /// Release the job handle. Nothing is killed here — the job carries no
+    /// limits, so whatever the command deliberately left running keeps running
+    /// (see `Tree`). The job object itself goes away once its last process exits.
+    fn deinit(self: *Tree) void {
+        if (builtin.os.tag == .windows) {
+            if (self.job) |job| {
+                windows.CloseHandle(job);
+                self.job = null;
+            }
+        }
     }
 };
 
@@ -266,11 +396,15 @@ pub const LocalEnvironment = struct {
         // point and drain the pipes on a separate task.
         //
         // The read-ends are detached from `child` up front, so neither `child.wait`
-        // nor `child.kill` ever closes a pipe the drain task is mid-read on
+        // nor the kill ever closes a pipe the drain task is mid-read on
         // (`child.wait` reaps only the process handle). That removes every race
         // between draining and process cleanup; this code owns the read-ends and
         // closes them once the drain has finished (DESIGN §8/§9).
-        var child = try std.process.spawn(self.io, .{
+        //
+        // `Tree` rather than a bare spawn: a shell forks, and killing only the
+        // direct child would leave a grandchild holding these very write-ends, so
+        // the drain below would never reach EOF (see `Tree`).
+        var tree = try Tree.spawn(self.io, .{
             .argv = argv,
             .cwd = .{ .path = req.cwd },
             .environ_map = &self.env,
@@ -279,6 +413,8 @@ pub const LocalEnvironment = struct {
             .stderr = .pipe,
             .create_no_window = true,
         });
+        defer tree.deinit(); // last defer to run: releases the job handle
+        const child = &tree.child;
         const out_file = child.stdout.?;
         const err_file = child.stderr.?;
         child.stdout = null; // detach: process cleanup must not touch the read-ends.
@@ -287,11 +423,11 @@ pub const LocalEnvironment = struct {
         defer err_file.close(self.io);
 
         // `child.wait` reaps the process on the normal path. If we leave this scope
-        // any other way (cancel, StreamTooLong, allocation failure), the process is
+        // any other way (cancel, StreamTooLong, allocation failure), the tree is
         // still running, so terminate+reap it here. `child_reaped` guards against a
         // double reap (a second `kill` after `child.id` was cleared would panic).
         var child_reaped = false;
-        defer if (!child_reaped) child.kill(self.io);
+        defer if (!child_reaped) tree.killAll(self.io);
 
         var multi_reader_buffer: std.Io.File.MultiReader.Buffer(2) = undefined;
         var multi_reader: std.Io.File.MultiReader = undefined;
@@ -304,15 +440,40 @@ pub const LocalEnvironment = struct {
         // `child`, so it cannot race process cleanup.
         var drain = self.io.async(drainShellOutput, .{ &multi_reader, req.max_output_bytes });
 
-        const term = child.wait(self.io) catch |err| {
-            // Cancellation (or a wait failure): the child is still alive. Terminate
-            // it so its write-ends close, which lets the blocked drain reach EOF and
-            // finish; only then is it safe to unwind the MultiReader and read-ends.
-            child.kill(self.io);
+        // The wall-clock budget races the child's own exit (base-tools.md §3).
+        // `child.wait` stays the cancelation point either way — `waitBounded`
+        // just runs it as one of two tasks, exactly the `Select` shape the stall
+        // watchdog uses (`providers/wire.zig` `Watched`). If the io cannot give
+        // the pair their own units of concurrency, the wait runs unguarded: no
+        // false timeout, just no guard.
+        const waited = waitBounded(self.io, child, req.timeout_ms) catch |err| {
+            // Cancellation (or a wait failure): the tree is still alive. Terminate
+            // ALL of it so every write-end closes, which lets the blocked drain
+            // reach EOF and finish; only then is it safe to unwind the MultiReader
+            // and read-ends. Killing just the direct child would leave the drain
+            // blocked on a grandchild for the command's full duration.
+            tree.killAll(self.io);
             child_reaped = true;
             drain.await(self.io) catch {};
             return err;
         };
+
+        if (waited == .timed_out) {
+            // Same unwind as the cancel path, and for the same reason: kill the
+            // whole tree first so the pipes reach EOF, then join the drain, then
+            // take what it got. A timeout returns the output captured before the
+            // kill rather than an empty result (base-tools.md §3).
+            tree.killAll(self.io);
+            child_reaped = true;
+            drain.await(self.io) catch {};
+            const partial_out = try multi_reader.toOwnedSlice(0);
+            errdefer alloc.free(partial_out);
+            const partial_err = try multi_reader.toOwnedSlice(1);
+            errdefer alloc.free(partial_err);
+            multi_reader.deinit();
+            multi_reader_live = false;
+            return .{ .stdout = partial_out, .stderr = partial_err, .exit_code = 1, .timed_out = true };
+        }
         child_reaped = true; // `child.wait` reaped the process handle.
 
         try drain.await(self.io); // propagate StreamTooLong / a real read error.
@@ -324,11 +485,80 @@ pub const LocalEnvironment = struct {
         multi_reader.deinit();
         multi_reader_live = false;
 
-        const exit_code: u8 = switch (term) {
+        const exit_code: u8 = switch (waited.term) {
             .exited => |c| c,
             else => 1,
         };
         return .{ .stdout = stdout, .stderr = stderr, .exit_code = exit_code };
+    }
+
+    /// How a bounded wait ended: the child exited on its own, or the budget did.
+    const Waited = union(enum) {
+        term: std.process.Child.Term,
+        timed_out,
+    };
+
+    /// Runs `child.wait` under a wall-clock budget. `null` waits forever (the
+    /// pre-timeout behavior, still used by tests).
+    ///
+    /// The wait runs as its own task and reports through `Waiter` rather than
+    /// through the `Select` union, because the two answers are not symmetric: on
+    /// a timeout the loser must be asked whether it nevertheless reaped the
+    /// child. It usually did not — the child is still running, which is the whole
+    /// point — but if the process exited in the same instant the budget expired,
+    /// `outcome` holds its `Term` and this reports a normal exit instead of a
+    /// timeout. Cancellation is unchanged: `await` returns `error.Canceled`, the
+    /// tasks are joined, and the caller kills + drains exactly as before.
+    ///
+    /// What the caller does with a timeout is `Tree.killAll` — the command's whole
+    /// process tree, not just the direct child (see `Tree`), which is what makes
+    /// the budget actually end the step rather than only label it.
+    fn waitBounded(io: std.Io, child: *std.process.Child, timeout_ms: ?u32) !Waited {
+        const ms = timeout_ms orelse return .{ .term = try child.wait(io) };
+
+        var waiter: Waiter = .{ .io = io, .child = child };
+        const Race = union(enum) { waited: void, expired: void };
+        var buf: [2]Race = undefined;
+        var sel: std.Io.Select(Race) = .init(io, &buf);
+        sel.concurrent(.expired, sleepMs, .{ io, ms }) catch return .{ .term = try child.wait(io) };
+        sel.concurrent(.waited, Waiter.run, .{&waiter}) catch {
+            sel.cancelDiscard();
+            return .{ .term = try child.wait(io) };
+        };
+        const first = sel.await() catch |err| {
+            sel.cancelDiscard();
+            return err;
+        };
+        sel.cancelDiscard(); // cancels and JOINS the loser, so `waiter` is settled
+        if (waiter.outcome) |outcome| return .{ .term = try outcome };
+        // The wait did not complete. Normally that means the budget expired; if
+        // the wait task is what finished, it finished by being canceled, which is
+        // this whole call being canceled — not a timeout.
+        if (first == .waited) return error.Canceled;
+        return .timed_out;
+    }
+
+    /// Owns the one `child.wait` call so its result survives the task boundary.
+    /// `outcome` stays null exactly when the wait never completed — i.e. it was
+    /// canceled mid-wait and the child is still ours to kill.
+    const Waiter = struct {
+        io: std.Io,
+        child: *std.process.Child,
+        outcome: ?std.process.Child.WaitError!std.process.Child.Term = null,
+
+        fn run(self: *Waiter) void {
+            const result = self.child.wait(self.io);
+            // A canceled wait never reaped, so leave `outcome` null: the child is
+            // still alive and still the caller's to kill.
+            if (result) |_| {} else |err| {
+                if (err == error.Canceled) return;
+            }
+            self.outcome = result;
+        }
+    };
+
+    fn sleepMs(io: std.Io, ms: u32) void {
+        std.Io.sleep(io, .fromMilliseconds(ms), .awake) catch {};
     }
 
     /// Read both of a child's pipes to EOF. Runs on its own task while the caller
@@ -370,7 +600,9 @@ pub const LocalEnvironment = struct {
             argv_buf[0] = req.entry_path;
             break :blk argv_buf[0..1];
         };
-        var child = try std.process.spawn(self.io, .{
+        // Same tree discipline as the shell (see `Tree`): an extension is free to
+        // spawn helpers of its own, and the timeout below has to end all of them.
+        var tree = try Tree.spawn(self.io, .{
             .argv = argv,
             .cwd = .{ .path = req.cwd },
             .environ_map = &self.env,
@@ -379,7 +611,9 @@ pub const LocalEnvironment = struct {
             .stderr = .pipe,
             .create_no_window = true,
         });
-        errdefer child.kill(self.io);
+        defer tree.deinit();
+        const child = &tree.child;
+        errdefer tree.killAll(self.io);
 
         // Write the request, then close stdin so the child sees EOF. v1 requests
         // are small JSON lines (< pipe buffer), so writing before draining stdout
@@ -411,7 +645,7 @@ pub const LocalEnvironment = struct {
                 errdefer alloc.free(stderr);
                 multi_reader.deinit();
                 multi_reader_live = false;
-                child.kill(self.io);
+                tree.killAll(self.io);
                 return .{ .stdout = stdout, .stderr = stderr, .exit_code = 1, .timed_out = true };
             },
             else => |e| return e,
@@ -547,19 +781,15 @@ test "canceling a running shell surfaces cancellation and kills the child" {
     const root_len = try tmp.dir.realPath(io, &root_real);
     const cwd = root_real[0..root_len];
 
-    // Pin the dialect so the marker-writing process IS the direct child (DESIGN
-    // §9 scope). On Windows the default dialect is Git Bash, whose `bin\bash.exe`
-    // is a launcher that re-execs the real shell as a *grandchild* — killing the
-    // direct child would not stop it, which is explicitly out of scope. PowerShell
-    // runs `Start-Sleep` in-process, so it is itself the process cancellation must
-    // terminate; on other platforms `bash` runs the whole line directly.
-    const forced: LocalOptions = if (builtin.os.tag == .windows) .{ .dialect = .powershell } else .{ .dialect = .bash };
-    var lenv = try LocalEnvironment.init(alloc, io, forced);
+    // The DEFAULT dialect: cancellation terminates the command's whole process
+    // tree (`Tree`), so this no longer has to avoid Git Bash's launcher, whose
+    // real shell is a grandchild. That is the point of running it unpinned.
+    var lenv = try LocalEnvironment.init(alloc, io, .{});
     defer lenv.deinit();
 
     // The child announces `started`, sleeps, then would write `done`. Killing the
-    // direct child means the `done` step never runs — the observable proof that
-    // cancellation terminated the process rather than waiting for it to finish.
+    // tree means the `done` step never runs — the observable proof that
+    // cancellation terminated the processes rather than waiting for them.
     const command = switch (lenv.dialect_val) {
         .bash => "touch started; sleep 2; touch done",
         .powershell => "New-Item started -ItemType File -Force > $null; Start-Sleep -Seconds 2; New-Item done -ItemType File -Force > $null",

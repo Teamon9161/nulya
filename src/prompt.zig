@@ -19,7 +19,7 @@ pub const max_system_prompt_bytes: usize = 2 * 1024 * 1024;
 /// each provider re-deriving the boundaries it was just handed.
 ///
 /// What is NOT here is as load-bearing as what is: `assistant.usage`,
-/// `assistant.truncated` and an event's inbox `origin` are FACTS about the
+/// `assistant.stop_reason` and an event's inbox `origin` are FACTS about the
 /// conversation, not text the model reads (DESIGN §3.1, §3.4). They have no
 /// field in this type, so "not projected" is a fact of the type rather than a
 /// rule someone has to keep following.
@@ -199,7 +199,7 @@ test "a batch of tool results is ONE turn, and cost is not in the type at all" {
             .{ .id = "c2", .tool = "shell", .args_json = "{}" },
         },
         .usage = .{ .input_tokens = 10, .output_tokens = 2 },
-        .truncated = true,
+        .stop_reason = .max_tokens,
     } });
     try l.append(.{ .tool_results = &.{
         .{ .call_id = "c1", .ok = true, .output = "A" },
@@ -213,7 +213,7 @@ test "a batch of tool results is ONE turn, and cost is not in the type at all" {
     try std.testing.expectEqualStrings("c2", p.turns[2].tool_results[1].call_id);
     try std.testing.expect(!p.turns[2].tool_results[1].ok);
 
-    // `usage` / `truncated` have no field in `Turn` at all, so the same
+    // `usage` / `stop_reason` have no field in `Turn` at all, so the same
     // conversation without them projects to the very same turns (DESIGN §3.1).
     var plain = ledger.Ledger.init(alloc);
     defer plain.deinit();

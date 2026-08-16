@@ -44,7 +44,7 @@ Ledger ──projection──▶ PromptIR { system_blocks, turns }
 
 > **`PromptIR[N].turns` 是 `PromptIR[N+1].turns` 的前缀。**（`prompt.zig` `isStablePrefix`，单测断言）
 
-`turns` 是 ledger 事件的纯函数，一个事件一个 turn，四种（`user_text` / `assistant{reasoning, text, calls}` / `tool_results[]` / `capability_note`）——**turn 不拆散**：三个 wire 全都要 turn 级结构（assistant 的文本与 calls 同属一条 message、一批结果是一个 turn），拆成字符串块只会让每个 provider 把刚被丢掉的边界再推一遍。`reasoning` 是 assistant turn 的**字段**（没有就是 `""`，只有声明 `thinking_replay` 的 provider 才序列化，且永远排在该 turn 的 text / calls 之前）。`assistant.usage` / `assistant.truncated` / 事件的 inbox `origin` **在类型里根本没有字段**——"不投影"因此是类型的事实，不是要靠人记住的纪律（§3.1、§3.4）。`turns` 只借 ledger 事件的 slice、自己只拥有那个数组，所以 PromptIR 不会活得比它投影自的 ledger 更久（每个调用方都是 step 前投影、step 后丢掉）。`system_blocks` 来自冻结的 composition（§7.5），整场不变。Provider 负责把这个前缀映射到自家 cache 机制（§13）。
+`turns` 是 ledger 事件的纯函数，一个事件一个 turn，四种（`user_text` / `assistant{reasoning, text, calls}` / `tool_results[]` / `capability_note`）——**turn 不拆散**：三个 wire 全都要 turn 级结构（assistant 的文本与 calls 同属一条 message、一批结果是一个 turn），拆成字符串块只会让每个 provider 把刚被丢掉的边界再推一遍。`reasoning` 是 assistant turn 的**字段**（没有就是 `""`，只有声明 `thinking_replay` 的 provider 才序列化，且永远排在该 turn 的 text / calls 之前）。`assistant.usage` / `assistant.stop_reason` / 事件的 inbox `origin` **在类型里根本没有字段**——"不投影"因此是类型的事实，不是要靠人记住的纪律（§3.1、§3.4）。`turns` 只借 ledger 事件的 slice、自己只拥有那个数组，所以 PromptIR 不会活得比它投影自的 ledger 更久（每个调用方都是 step 前投影、step 后丢掉）。`system_blocks` 来自冻结的 composition（§7.5），整场不变。Provider 负责把这个前缀映射到自家 cache 机制（§13）。
 
 会炸缓存的三件事及对策：
 
@@ -90,7 +90,7 @@ Ledger ──projection──▶ PromptIR { system_blocks, turns }
 
 ```
 user_text        []const u8
-assistant        { reasoning, text, calls: []ToolCall{id, tool, args_json}, usage? }
+assistant        { reasoning, text, calls: []ToolCall{id, tool, args_json}, usage?, stop_reason }
 tool_results     []ToolResultEntry{call_id, ok, output, spill_path?}   ← 一条事件 = 一整批
 capability_note  { id, version, text }                                  ← 中途新增能力的宣告（§5.3）
 ```
@@ -100,6 +100,8 @@ capability_note  { id, version, text }                                  ← 中�
 **`assistant.reasoning` 是不透明字段，不是第五种事件。** 它是 provider 原样吐出的本轮 reasoning item 的 JSON 数组（Anthropic 的带 signature 的 `thinking` / `redacted_thinking` block、Responses 的带 `encrypted_content` 的 `reasoning` item），没有则为 `""`。它是本轮的**事实**（模型确实产出了这段、且下一步要原样带回），不是模型可见文本：kernel 从不解析它，作为 assistant turn 的 `reasoning` 字段交回 provider，provider 只在自己认得（`ProviderCapabilities.thinking_replay`）时按原样回放到**同一个模型**——它天然 model-locked，而 session 的 `model_identity` 已冻结（§3.4），所以别的模型永远看不到它。为什么必须有它：Anthropic 一方端点在 thinking 开着时**拒绝**丢了 thinking block 的 tool-use turn（400，而 Opus 5 默认开、Fable 5 只能开），Responses 端点不带则模型每一步重推上一步的计划——前者是正确性，后者是质量与 token；两者都不是 kernel 该替 provider 决定的，kernel 只负责把这个事实存住、按序交回。落盘时只在非空才写 `reasoning` 字段（老行形状不变，老行读回为 `""`）。
 
 **`assistant.usage` 与 `reasoning` 同地位：本轮的事实，不投影。** `?Usage{input_tokens, output_tokens, cache_read_tokens, cache_write_tokens}`（`ledger.Usage`；`provider.Usage` 就是它的 re-export，provider 本来就 import ledger——一个 struct 贯穿到底，loop 不做转换），由 `loop.zig` 从 `ModelTurn.usage` 写入。落盘只在**非空**时写 `usage` 对象：provider 什么都没报（scripted 替身、流中途取消）时整条不写，老行读回 `null`——"没记录"与"花了 0"是两个不同的事实。**`prompt.Turn` 里没有它的字段**：模型不读自己的账单；它是给慢速回路与前端的成本证据（`session events` / `--stream` 的 ledger 行天然带上，`session list --json` 按它求和）。provider 阶段就被取消的 step 没有 assistant 事件可挂，其 usage 不落盘——诚实接受，不为它造新事件。
+
+**`assistant.stop_reason` 同地位：模型为什么停，是本轮的事实，不投影。** `StopReason{end_turn, tool_use, max_tokens, other}` 声明在 `ledger.zig`（`provider.StopReason` 就是它的 re-export，与 `Usage` 同一手法——一个 enum 贯穿到底），由 `loop.zig` 从 `ModelTurn.stop_reason` 原样写入。**落盘只写 shape 说不出来的那两个**：`end_turn` / `tool_use` 就是 `calls` 空 / 非空，读回时按 `calls.len` 推导，所以正常结束的行与这个字段存在之前逐字节相同；`max_tokens` / `other` 推不出来，才写 `"stop_reason":"<tag>"`。`max_tokens` 是承重的那个（§4）：被切断的 text-only 回复与正常结束的回复 shape 完全一样，而后果要跨进程。老行里的 `"truncated":true` 仍读得回来（= `max_tokens`，它当年唯一的含义），但**永不再写**；不认识的 tag 是 `CorruptLedger`，不是静默默认值。
 
 ### 3.2 API（硬性）
 
@@ -123,18 +125,18 @@ UI / trajectory / metrics 是 ledger 的投影，不持久化 mutable 状态。*
 一场 session = 一个 JSONL 文件 `.nulya/sessions/<id>.jsonl`：第一行是冻结的 header，之后每行一个 `{"seq":n,…}` 事件（seq 从 1 单调递增）。
 
 ```jsonl
-{"kind":"header","v":1,"session":"s-…","parent":{"session":"s-…","seq":41}|null,"model":"openai","model_identity":{"provider":"openai","model":"gpt-4o-mini","base_url":"https://…","api_key_env":"OPENAI_API_KEY"},"created":"…","composition":{"active":[{"id":"web.search","version":"v-…"}],"native_tools":["ext:web.search/web_search"]}}
+{"kind":"header","v":1,"session":"s-…","parent":{"session":"s-…","seq":41}|null,"model":"openai","model_identity":{"provider":"openai","model":"gpt-4o-mini","base_url":"https://…","api_key_env":"OPENAI_API_KEY"},"created":"…","nulya":{"version":"0.0.0","kernel_hash":"f49f…"},"composition":{"active":[{"id":"web.search","version":"v-…"}],"native_tools":["ext:web.search/web_search"]}}
 {"seq":1,"origin":"msg-….json","kind":"user_text","text":"…"}
-{"seq":2,"kind":"assistant","reasoning":"[{\"type\":\"thinking\",…}]","text":"…","calls":[{"id":"…","tool":"…","args":"…"}],"usage":{"input_tokens":1200,"output_tokens":80,"cache_read_tokens":1100,"cache_write_tokens":0},"truncated":true}
+{"seq":2,"kind":"assistant","reasoning":"[{\"type\":\"thinking\",…}]","text":"…","calls":[{"id":"…","tool":"…","args":"…"}],"usage":{"input_tokens":1200,"output_tokens":80,"cache_read_tokens":1100,"cache_write_tokens":0},"stop_reason":"max_tokens"}
 {"seq":3,"kind":"tool_results","results":[{"call_id":"…","ok":true,"output":"…","spill_path":null}]}
 {"seq":4,"origin":"note-….json","kind":"capability_note","id":"…","version":"…","text":"…"}
 ```
 
-（`origin` 只出现在经 inbox 排干进来的事件行上，是投递去重列，绝不投影给模型；见"单写者"条。`reasoning` 只在该 turn 有 reasoning 时出现，值是 provider 数组转义成的一个 JSON 字符串——ledger 只存不解析；`usage` 只在 provider 报了成本时出现；`truncated` 只在该 turn 被 `max_tokens` 切断时出现（`true`，见 §4）。三者都不投影。）
+（`origin` 只出现在经 inbox 排干进来的事件行上，是投递去重列，绝不投影给模型；见"单写者"条。`reasoning` 只在该 turn 有 reasoning 时出现，值是 provider 数组转义成的一个 JSON 字符串——ledger 只存不解析；`usage` 只在 provider 报了成本时出现；`stop_reason` 只在 shape 说不出来时出现（`max_tokens` / `other`，见 §3.1、§4）。三者都不投影。）
 
 - **一个文件 = 一个 generation = 一个 cache scope。** 文件只 append，所以 PromptIR 的 turn 前缀不变量（§1）成了文件系统性质。没有会 bump generation 的事件（§11）。
 - **header 的 JSON 形状就是 `ledger.Header` 结构体**（`std.json` 类型化编解码，`OwnedHeader = std.json.Parsed(Header)`）；读端忽略未知字段，所以新写者多出的字段不破坏旧读者。事件行保持平铺的 `kind` 形状（driver 读起来方便），解码经 `WireEvent`。
-- **composition + 模型身份冻结进 header。** header 记录本场 active 的每个 extension 的**具体版本**、被选为 native 的 tool 稳定 id，以及创建时**解析后的模型身份** `model_identity`（`provider` / 具体 `model` / `base_url` / `api_key_env`——`model` 字段本身只是 profile 别名，供显示与 effort 查询）。任何进程 `openDurable` 重开时都用 header 重建 composition（`composition.initFrozen`：读那些冻结版本、把 `native_tools` 当 pin），**绝不重扫 `current`、绝不重排 usage journal**——每个 `session step` 进程都看到**同一** composition，中途 `activate` 也移不动它（§5.1、§7.5、physics #2）。replay 时模型看到的一切 = header + events 的纯函数。
+- **composition + 模型身份冻结进 header。** header 记录本场 active 的每个 extension 的**具体版本**、被选为 native 的 tool 稳定 id，以及创建时**解析后的模型身份** `model_identity`（`provider` / 具体 `model` / `base_url` / `api_key_env`——`model` 字段本身只是 profile 别名，供显示与 effort 查询）。任何进程 `openDurable` 重开时都用 header 重建 composition（`composition.initFrozen`：读那些冻结版本、把 `native_tools` 当 pin），**绝不重扫 `current`、绝不重排 usage journal**——每个 `session step` 进程都看到**同一** composition，中途 `activate` 也移不动它（§5.1、§7.5、physics #2）。replay 时模型看到的一切 = header + events 的纯函数。header 还记 `nulya{version, kernel_hash}`（build 的版本串 + kernel system prompt 与两个 builtin 定义的 hash，`composition.kernelHash`）——**纯 provenance**：这两样是**二进制的**编译期常量却进了本场冻结的 model-visible 状态（§5.1、§7.5），升级 nulya 就会在既有 session 底下换掉它们，而 header 原本无从指认；记下来只是让它可见，resume 时对不上就在 stderr 警告一行照跑（不拒绝、不改任何东西），空 stamp = 这个字段之前写的老 header = unknown，永不警告。
 - **模型身份创建时冻结、resume 不可变（physics #2/#5）。** 模型解析**只有一处决定**：`launch.resolveDescriptor(prov, env, profile)` 在**创建**时把 profile 解析成 `model_identity`，运行用的 handle 也**只从这个 descriptor** 构建（`launch.buildFromDescriptor`）——所以"实际跑的" == "header 冻结的"，不存在 fork。`resolveDescriptor` 是 **credential-aware** 的：openai profile 若 `api_key_env` 在环境里解析不出 credential，创建时就冻结成 scripted（因为那正是会跑的东西）；此后 config 改动**永不**改变已有 session 的模型。resume 时 `session step` 用 header 的 `model_identity` 重建**恰好那个**模型，只从 `api_key_env` 重解 credential——**不存密钥**，也**没有静默 fallback**：openai session 的密钥不在了就 `MissingCredential` 显式拒跑。**durable credential 只以 `api_key_env` 引用**；inline `api_key` 无法在 resume 时从环境恢复（否则又让 session 依赖 mutable config），因此不参与 durable openai 身份。`provider==""` 的旧 header 当 scripted 处理。
 - **resume。** `openDurable` 读回 header + 每条完整事件行；被截断的**最后一行**（写到一半崩溃）丢弃并把文件截回最后一条完整行，坏的**中间**行或乱序 `seq` 则是硬错误（`CorruptLedger`）。崩在 assistant-with-calls 之后（合法但未闭合的 batch）由 `completeInterruptedToolBatch` 在下一步补齐（§4）。
 - **单写者租约 + inbox 目录 + cancel 标记。** session 文件**只有一个写者**：`createDurable` / `openDurable` 打开时**原子获取兄弟 `<id>.lock` 上的排他 advisory 锁**（`lock_nonblocking`），第二个写者的打开立刻 `SessionBusy` 失败，而不是去抢同一 offset；锁随句柄生命周期持有、进程崩溃时由 OS 释放（无 stale 锁）。锁挂在专用 `<id>.lock` 上、**不挂在 session 文件本身**——Windows 上文件自身的锁是强制性的会挡住读者，锁 sidecar 则让 `readHeader` / `session events` 的读永不被挡。其他任何进程都不写主文件，只往兄弟路径投递：跨进程**事件**（`ext activate` 在 `NULYA_SESSION` 存在时的 `capability_note`，§5.3；driver 的 `session append` 的 `user_text`）一事件一文件写进 `<id>.inbox/`（`ledger.depositEvent`：先写 `.tmp` 再 rename，排干端永不读到半个文件），由写者在 step 边界（`prepareStep`）按文件名序排干进主文件；**cancel 请求**是 `<id>.cancel` 标记（`session.requestCancel`），同样在 step 边界消费。
@@ -171,7 +173,7 @@ collectTurn(PromptIR, tool_defs)  →  assistant turn（可能含多个 tool_use
 
 **Truncation（`stop_reason == max_tokens`，模型这一步被输出上限切断）：** 与 cancellation 正交——那是宿主控制，这是模型停止原因（`StepOutcome.stop_reason`）。被截断的回复**不是一个完成的 turn**：它说了的文本与 reasoning 是事实、照记；它开了头的 call 不是模型的本意，参数还可能是半截 JSON——原样回放进 provider 的 `input`（anthropic 用 `writeRaw`）会让这场 session 之后每一步都 400。所以：calls **照记但参数保证可回放**（不是完整 JSON 值的换成 `{}`），**一个都不执行**，用一条 marker 批次关掉（`not executed: the reply hit its output cap (max_tokens) …`，文本同时告诉模型发生了什么、怎么绕过——写短、或一步一步来），返回 `stop_reason = .max_tokens`。没有 call 的截断回复只是 text-only assistant，`run` 因 `lastAssistantDone` 停下，driver 见 `stopped: max_tokens`（TUI 提示"发一条消息继续"——裸再 step 会让 assistant 结尾成 prefill，thinking 开着时 provider 拒绝）。有 call 的截断回复 `run` 会再走一步让模型看到 marker 重试；连续两次即停（`max_truncated_streak`：**只有可重试的、带 call 的截断走得到这个上限**，text-only 那种当场就停），避免装不下上限的东西反复重试、每次计费整个前缀。（tcode 同一问题的做法：keep + 关闭 dangling call + 追加一条 note + 最多重试两次；这里 note 的内容放进 marker result 里，不给 kernel 加"kernel 对模型说话"的事件种类。）内核默认不设 `max_output_tokens`（anthropic 必填故给 32k），调大上限是 config / provider 层的事。
 
-**截断是落盘的事实，不只是运行时的：** assistant 事件带 `truncated: bool = false`（`ledger.Event.assistant`，与 `usage` 同地位——不投影、只在 `true` 时写进行、老行读回 `false`）。理由不是 provenance 而是**上面那条保护跨不过进程边界**：`run` 是在**走完一步之后**才看 `lastAssistantDone`，所以第二次 `nulya session step <id>`（没有新消息）会无条件先走一步，把那条 assistant turn 当 prefill 发出去——正是这里要躲的 400。进程 2 手上只有 ledger，`last_stop_reason` 随进程 1 一起没了，而一条被切断的 text-only 回复与正常 `end_turn` 逐字节相同：`calls` 空、shape 一样。所以 `AgentSession.step` 在 `prepareStep` **之后**（新排干的 inbox 事件正是让它重新可 step 的输入）查 `lastAssistantTruncated()`，是就以 `error.TruncatedTurnNeedsInput` 失败、什么都不 append；`session step` 把它翻译成 "the last reply was cut off at its output cap; append a message before stepping again" 并非零退出。**这不是新的 kernel policy**，是让 `run` 里本来就有的那个判断活过进程边界；追加任何东西（用户消息、排干的 inbox 事件）就自然解除。
+**截断是落盘的事实，不只是运行时的：** assistant 事件带 `stop_reason`（`ledger.Event.assistant`，与 `usage` 同地位——不投影、只在 shape 说不出来时写进行，见 §3.1）。理由不是 provenance 而是**上面那条保护跨不过进程边界**：`run` 是在**走完一步之后**才看 `lastAssistantDone`，所以第二次 `nulya session step <id>`（没有新消息）会无条件先走一步，把那条 assistant turn 当 prefill 发出去——正是这里要躲的 400。进程 2 手上只有 ledger，进程 1 的运行时状态随它一起没了，而一条被切断的 text-only 回复与正常 `end_turn` 逐字节相同：`calls` 空、shape 一样。所以 `lastStopReason()` 本身就是一次 ledger 读（最后一条 assistant 事件的 `stop_reason`，没有就 `end_turn`），跑过这一步的进程与只是 resume 的进程给出同一个答案。所以 `AgentSession.step` 在 `prepareStep` **之后**（新排干的 inbox 事件正是让它重新可 step 的输入）查 `lastAssistantTruncated()`，是就以 `error.TruncatedTurnNeedsInput` 失败、什么都不 append；`session step` 把它翻译成 "the last reply was cut off at its output cap; append a message before stepping again" 并非零退出。**这不是新的 kernel policy**，是让 `run` 里本来就有的那个判断活过进程边界；追加任何东西（用户消息、排干的 inbox 事件）就自然解除。
 
 不变量：**一条 assistant tool-call batch ↔ 恰好一条匹配的 tool_results batch。** `session.recordCompletedToolStats` 直接按这个形状读 suffix 并 assert。**assistant 事件永远可回放**：`calls[].args_json` 是完整 JSON 值。
 
@@ -190,6 +192,8 @@ session 开始时一次选定，整场冻结（`composition.zig` `SessionComposi
 3. 按 usage 统计排序补足到 `max_tools`（含 builtin，默认 8）。best-effort：绑不上 / 撞名的按 rank 顺序跳过。
 
 排序只在此刻发生一次。对话开头本就是新前缀、无缓存可炸，所以晋升零成本；**中途绝不重排**。
+
+第 1 档（两个 builtin 的定义）与 kernel system prompt（§7.5）都是**二进制的编译期常量**，不由 header 冻结——所以它们的 hash 与 build 版本串一起记进 header 的 `nulya` stamp（§3.4），换了二进制 resume 时会警告。
 
 ### 5.2 位置稳定
 
@@ -236,11 +240,19 @@ version-aware evidence / lineage / verify 见 PLAN §3.5。
 
 ### 6.1 shell
 
-单一工具，schema 恒定 `{ "command" }`；系统提示告知 `shell_dialect = bash | powershell`（由 Environment 决定，§8）。所有 `nulya …` CLI 都经它调用 → 模型工具面极小。读文件也交给 shell（`cat` / `rg` / `sed`）：读本就要一个 round-trip，native read 不省，故不单列。
+单一工具，schema 恒定 `{ command, cwd?, timeout_ms? }`；系统提示告知 `shell_dialect = bash | powershell`（由 Environment 决定，§8）。所有 `nulya …` CLI 都经它调用 → 模型工具面极小。读文件也交给 shell（`cat` / `rg` / `sed`）：读本就要一个 round-trip，native read 不省，故不单列。
+
+**超时是内核常量，不是 config**（`tool.Timeouts`，base-tools.md §3）：默认 120s、上限 600s，模型给的 `timeout_ms` 夹进 `[1, 600000]`（非正整数当场教学式拒绝，不替它换个数）。到点 `kill` 子进程，并把**被杀前已捕获的输出**连同 `[timed out after <n> ms; process killed, output above is partial]` 一起返回（`ok=false`、`[exit 1]`）——超时不是丢弃。实现上 `child.wait` 仍是唯一的取消点，只是和一个 sleep 任务放进 `std.Io.Select` 赛跑（与 §13 stall watchdog 同一个形状）；io 给不出两个并发单元就裸跑（没有假超时，只是没有守卫）。
+
+**杀的是整棵进程树**（`environment.Tree`，超时与取消同一条路径）：只杀直接子进程不够——`bash -lc "a; b"` 会为最后一条命令 fork，Windows 的 Git Bash `bin\bash.exe` 更是个 launcher、真正的 shell 是**孙进程**；活下来的那个还攥着管道写端，drain 就永远等不到 EOF，于是"超时"只给结果贴了个标签、并没有真的把这一步放出来。所以 POSIX 让子进程自成 process group（`pgid = 0`，exec 前设好）、`killAll` 对负 pid 发信号；Windows 让子进程挂起启动、先塞进一个 job object 再 resume，`killAll` 终止整个 job。
+
+两边同一条规则，且**只在终止时成立**：**超时 / 取消杀整棵树，正常返回不杀**。Windows 的 job **不带任何 limit**——尤其不带 `KILL_ON_JOB_CLOSE`：那会让句柄一关就杀光这条命令启动的一切，既与 POSIX（只在超时 / 取消时发信号）不一致，也毁掉一个正当用法——一次 shell 调用里 `some-server >/dev/null 2>&1 &`、下一次调用再用它。错误路径本来就由调用方的 `killAll` 兜底，所以这个 flag 什么也没多买。**但后台进程必须重定向 stdio**，否则它继承着管道写端、而 drain 要把两个管道读到 EOF，这次调用就一直等到它退出为止（这是 drain 一贯的行为，不是树引入的）。
+
+OS 不给 job（老 Windows 的嵌套限制、或 nulya 自己跑在受限 job 里）就降级成只杀直接子进程并在 stderr 说一句——**不因此让 spawn 失败**。extension 的 oneshot 调用走同一个 `Tree`、同一张表的 30s（§7.3）。
 
 ### 6.2 edit
 
-精确匹配 + 优质报错：`old_string` 唯一匹配替换 / `replace_all` / 新建 / 删除，原子写。不做 fuzzy patch（apply 失败多一轮 round-trip，违反 §0.2）。apply 失败要给可操作的上下文，让模型一轮纠正。
+精确匹配 + 优质报错：`old_string` 唯一匹配替换 / `replace_all`，原子写。不做 fuzzy patch（apply 失败多一轮 round-trip，违反 §0.2）。apply 失败要给可操作的上下文，让模型一轮纠正。
 
 细节与数字见 [base-tools.md](base-tools.md)。
 
@@ -330,6 +342,7 @@ JSON-RPC 2.0，oneshot：spawn → stdin 一条 request → stdout 一条 respon
 ```
 
 - 响应 `id` 必须与请求相同，否则 invalid response。
+- 一次调用的 wall-clock 上限来自 `tool.Timeouts.extension_ms`（30s，与 shell 同一张表，§6.1 / base-tools.md §3）：到点 kill，并把已捕获的 stderr 一起折成一次**失败的调用**（不是 host error、更不是取消）。
 - 只有 `tool/call` 一个 method，用专用 `ToolCallRequest` 类型；**不提前抽通用 JsonRpcRequest**，等第二个 method 真出现。
 - 不做 daemon / persistent worker / streaming / host callback。spawn 一个原生 binary ≈ 毫秒，对比模型 round-trip 秒级可忽略；最高频的 shell/edit 是 in-core 内置根本不 spawn。真正的成本是某些 extension 每次调用的重初始化（浏览器 / DB 连接）——**先测量再持久化**（PLAN §3.3）。
 
@@ -525,13 +538,14 @@ nulya                       ← 无参数：固定 prompt demo（现经 durable 
 
 - `session new --profile P [--model ID]`：`--profile` 是 config 里的 profile 名（默认 `active_profile`），`--model` 是该 profile 服务的一个 model id（默认 `ProviderProfile.defaultModel()`；接受任意 id，选择器只列目录里的）。不存在的 profile 直接拒绝（exit 1，提示 `nulya config show`）；存在但 credential 不可用的 profile 仍冻结为 scripted（离线替身，`resolveDescriptor` 的语义不变），但 stderr 明说。
 - `session new --parent <id>:<seq>`：这场 session 续的是谁（fork / compaction 的新文件，§11）。**父必须存在**（读不到 header 即 exit 1，不建文件）。模型分两级继承，因为两个 flag 含义不同：`--profile` 换的是"怎么连"，所以它替掉父的 profile；`--model` 只是在一个 profile 内换 id，所以**父的 profile 仍然生效**（不会掉回 `active_profile`）；两个都不给则**原样继承父 header 的 `model_identity`**，此时不重解 credential、也不打那条降级警告（继承的身份不会降级为 scripted，缺 key 由需要它的那次 `step` 一次性报响）。composition 一律现解，不继承。`session step --effort E` 是**每次 step 的 generation option**（不是身份，§3）：不给则用 `Config.defaultEffort(header.model, header.model_identity.model)`。
+- `session step` 读完 header 就核一次 `nulya.kernel_hash`（§3.4）：与本二进制不符就往 **stderr** 打一行 `warning: session <id> was created by nulya <ver> whose kernel prompt/builtins differ from this binary's; its frozen system prompt has changed`，然后照跑（stdout 在 `--stream` 下仍只有 JSON）。空 stamp 的老 session 不警告。
 - `nulya config show [--json]`：外壳级投影（同 `session new` 看到的东西），供选择器与 agent 自查：`{paths{system, user, project}, active_profile, profiles[]{name, kind, base_url, api_key_env, credential: bool, credential_source: config|env|login|builtin|none, model, models[], effort?}, models[]{id, label, efforts[], default_effort?, context_window?}}`。只报 env var **名字**、来源与布尔，永不报值；`api_key` 的值不出现。
 
 - `nulya src`：build.zig 把整个 `src/**` `@embedFile` 进二进制（源码 ~200KB，紧挨 ~90MB 工具链，恒开无 gate）；`nulya src <path>` 按 `src/` 相对路径打印（`prompt.zig`、`extension/store.zig`），**默认剥 top-level `test` 块**（读结构/契约时不付测试 token），`--tests`/`--raw` 打印原样（Zig 风格参照）。剥离靠 zig-fmt 不变量：顶层 decl 的收尾 `}` 在第 0 列，无需 tokenizer（`source.zig`）。测试留在文件里（Zig 惯例、人可读、风格参照），改的只是**投影**不是**存储**——`src/` 一字未动。
 - `nulya ext api`：协议 topic 现在**打印真实 `extension/protocol.zig` 源码**（是 `nulya src` 的特例），wire ABI 与实现代码零漂移；`permissions` / `examples` 仍是短说明（策略与 CLI 用法，不随代码漂）。
 - **`session new --with <id>[@<version>]`（可重复）= composition membership，不是 native pin。** 把一个**已 built** 的版本 union 进这一场的 composition：它的 skills 进 catalog、system_prompts 进 system blocks、tools 可经 `nulya ext run <id>@<version>` 调用（点名冻结的版本，不依赖 `current`）；**tool 要不要占 native 槽仍然是 `registry.pinned_native_tools` / usage ranking 的事**（两根轴分开）。同 id 覆盖 discovery 的结果（这一场说了算），重复 `--with` 同一个 id 后者胜。版本解析：给了 `@version` 就用它，没给就用该 id 的 `current`——**没有 `current` 就 exit 1，内核不猜**（"只有一个 built 版本就用它"这类聪明会让同一条命令在第二次 build 之后含义漂移）。所以一个**故意不 activate** 的包（mode / evolution，activate 了就会进每一场 session 的 system blocks）要按 `--with <id>@<version>` 带入，version 由 `ext build` 打印。落地不需要新机制：`--with` 只改 `SessionComposition.init` 的输入，结果照常冻进 header 的 `active`，所以 `initFrozen` 零改动、resume 自然重建同一份 composition。fork（`--parent`）不继承——composition 一律现解（§11），要就再传一次。
 - **mode = 贡献 system_prompt 的 data extension + `--with`。** 同一个包两种投放：`activate` = 常驻（每场都有）；不 activate、只 `--with` = 按场。不为 mode 造别的机制。
-- `nulya session list [--json]`：`.nulya/sessions/` 的**只读投影**，按 `created` 倒序（老 header 没有 `created`，退回按 id——id 本身时间有序）：`{sessions:[{id, created, parent, model, provider, model_id, events, composition{active:["id@version"], native_tools}, usage（每条 assistant 的 `usage` 求和，§3.1）, first_user_text（截断）, outcome{verdict,note,at}|null}]}`。定位同 `config show`：外壳投影，不决定任何事，也不写任何东西；第一批消费者是 evolution skill（一眼看完很多场而不必逐个读 ledger）与 TUI 的 `/sessions`。一个读不动的 session 文件被跳过而不是让整条命令失败。**`session new` 从此写 header 的 `created`**（RFC3339 UTC）。
+- `nulya session list [--json]`：`.nulya/sessions/` 的**只读投影**，按 `created` 倒序（老 header 没有 `created`，退回按 id——id 本身时间有序）：`{sessions:[{id, created, parent, model, provider, model_id, nulya{version, kernel_hash}（创建它的二进制，§3.4；老 session 两项皆空）, events, composition{active:["id@version"], native_tools}, usage（每条 assistant 的 `usage` 求和，§3.1）, first_user_text（截断）, outcome{verdict,note,at}|null}]}`。定位同 `config show`：外壳投影，不决定任何事，也不写任何东西；第一批消费者是 evolution skill（一眼看完很多场而不必逐个读 ledger）与 TUI 的 `/sessions`。一个读不动的 session 文件被跳过而不是让整条命令失败。**`session new` 从此写 header 的 `created`**（RFC3339 UTC）。
 - `nulya session outcome <id> <verdict> [--note …]`：校验 id 形状与 session 文件存在、校验 verdict，然后**只**往 `.nulya/session-outcomes.jsonl` append 一行（§3.3）。它**不打开 session 文件、不拿 `<id>.lock`**——verdict 是关于这场 session 的判断而不是其中一轮，所以正在跑 `step` 的 session 也能当场评；同一 session 可以评多次，最后一条作数。
 - `nulya session *` 是**唯一**的 session 驱动面：没有 `setTools / setModel / replaceHistory`，换 composition = `session new`。每个子命令是对 durable session 文件（§3.4）的一次独立进程调用，其中**只有 `step` 写主文件**：`append` / `cancel` 投递到 `<id>.inbox/` / `<id>.cancel`（所以正在跑的 `step` 会在它的下一个 step 边界拿到 mid-run 的 append 或 cancel），`events` 是只读 tail（不解析、不重编码——文件本身就是 wire format）。`step` 的预算 `min(--max-steps, session.max_steps_ceiling)` **由 kernel 在 `AgentSession.run` 强制**，driver 只能调低不能调高；`--max-steps` 必须是正整数。session 就是它的文件，没有 `close`。
 - **`session step --stream`：纯观测的行协议**（前端唯一需要的内核改动，tui.md §2.2 → 已落地）。语义与不带 `--stream` 完全相同（同一 `AgentSession.run`、同一预算夹取、同一 cancel 消化、**同一 ledger**）；区别只是 stdout **在跑的过程中**逐行输出，而不是跑完一次性输出。

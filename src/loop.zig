@@ -267,7 +267,7 @@ pub fn runStepWithPrompt(
         // Recorded even when the turn wrote calls (where the marker batch already
         // tells the story): the fact belongs to the turn, and a reader should not
         // have to infer it from the batch that follows.
-        .truncated = truncated,
+        .stop_reason = turn.stop_reason,
     } });
     if (turn.calls.len == 0) return .{ .usage = turn.usage, .stop_reason = turn.stop_reason }; // model addressed the user; step complete.
     if (truncated) {

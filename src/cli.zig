@@ -13,6 +13,9 @@ const templates = @import("extension/templates.zig");
 const toolchain = @import("toolchain.zig");
 const ext_skills = @import("extension/skills.zig");
 const notes = @import("extension/notes.zig");
+// `tool` is a common local name below (a tool NAME), so the module keeps a
+// distinct one rather than forcing every call site to rename.
+const tool_mod = @import("tool.zig");
 const tool_stats = @import("tool_stats.zig");
 const outcome = @import("outcome.zig");
 const config = @import("config.zig");
@@ -561,7 +564,7 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     // exact entry path) is the CLI's job; from here on the helper owns encode,
     // run, decode, and diagnostics.
     const invocation = try invoke.invokeTool(alloc, lenv.environment(), entry_abs, cwd_path, tool, args_json, .{
-        .timeout_ms = 30_000,
+        .timeout_ms = tool_mod.Timeouts.extension_ms,
         .max_output_bytes = 1 << 20,
         .interpreter = rt.interpreter,
     });
@@ -994,6 +997,8 @@ const SessionView = struct {
     model: []const u8,
     provider: []const u8,
     model_id: []const u8,
+    /// Which binary created it (DESIGN §3.4). Empty for a pre-stamp session.
+    nulya: ledger.Stamp,
     events: usize,
     composition: Composition,
     /// Sum of every assistant event's recorded usage (DESIGN §3.1). Steps whose
@@ -1123,6 +1128,7 @@ fn readSessionView(
         .model = h.model,
         .provider = h.model_identity.provider,
         .model_id = h.model_identity.model,
+        .nulya = h.nulya,
         .events = events,
         .composition = .{ .active = active, .native_tools = h.composition.native_tools },
         .usage = total,
@@ -1173,6 +1179,7 @@ fn printSessionList(alloc: std.mem.Allocator, io: std.Io, views: []const Session
                 }
                 try out.writer.writeAll("]");
             }
+            if (v.nulya.version.len != 0) try out.writer.print("  nulya {s}", .{v.nulya.version});
             if (v.first_user_text.len != 0) try out.writer.print("  {s}", .{v.first_user_text});
             try out.writer.writeByte('\n');
         }
@@ -1419,6 +1426,7 @@ pub fn createSession(alloc: std.mem.Allocator, io: std.Io, args: []const []const
         .model_profile = profile,
         .model_identity = identity,
         .created = created,
+        .nulya_version = launch.version,
         .parent = parent,
     }) catch |err| switch (err) {
         // The caller named these extensions, so an unusable one is not a warning.
@@ -1753,6 +1761,29 @@ fn stepFail(
     return 1;
 }
 
+/// Say once, on resume, that this binary's kernel prompt / builtin definitions
+/// are not the ones frozen into the session (DESIGN §3.4). Those constants enter
+/// the session's model-visible state but live in the BINARY, so an upgrade moves
+/// them under an existing session — the stamp is what makes that visible.
+///
+/// It is provenance, not a gate: nothing is refused, and a header with no stamp
+/// (written before this existed) says nothing, so it warns about nothing. The
+/// line goes to stderr, which keeps `--stream` stdout pure JSON (DESIGN §14).
+fn warnKernelDrift(alloc: std.mem.Allocator, io: std.Io, id: []const u8, stamp: ledger.Stamp) !void {
+    if (stamp.kernel_hash.len == 0) return;
+    const mine = try composition.kernelHash(alloc);
+    defer alloc.free(mine);
+    if (std.mem.eql(u8, mine, stamp.kernel_hash)) return;
+    const by = if (stamp.version.len != 0) stamp.version else "unknown";
+    const msg = try std.fmt.allocPrint(
+        alloc,
+        "warning: session {s} was created by nulya {s} whose kernel prompt/builtins differ from this binary's; its frozen system prompt has changed\n",
+        .{ id, by },
+    );
+    defer alloc.free(msg);
+    try printErr(io, msg);
+}
+
 fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (args.len < 1) {
         try printErr(io, "usage: nulya session step <id> [--max-steps N] [--effort E] [--stream]\n");
@@ -1789,6 +1820,7 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         return stepFail(alloc, io, stream, "no such session '{s}': {s}", .{ id, @errorName(err) });
     };
     defer hdr.deinit();
+    try warnKernelDrift(alloc, io, id, hdr.value.nulya);
 
     var cfg = try config.load(alloc, io, &host);
     defer cfg.deinit();

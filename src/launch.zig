@@ -17,6 +17,12 @@ const config = @import("config.zig");
 const ledger = @import("ledger.zig");
 const environment = @import("environment.zig");
 const store = @import("extension/store.zig");
+const build_options = @import("config_options");
+
+/// This build's version string, straight from `build.zig.zon` `.version` (build.zig
+/// passes it through). Stamped into every new session header as provenance
+/// (`ledger.Stamp`, DESIGN §3.4); nothing branches on it.
+pub const version: []const u8 = build_options.version;
 
 pub const default_openai_model = "gpt-4o-mini";
 pub const default_openai_base_url = "https://api.openai.com/v1";

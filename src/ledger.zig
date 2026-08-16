@@ -42,6 +42,18 @@ pub const Usage = struct {
     }
 };
 
+/// Why the model stopped producing a turn, as the provider reported it. A FACT
+/// about the turn (like `Usage`), never projected. Declared here — the ledger
+/// depends on nothing — and re-exported by `provider.zig` as
+/// `provider.StopReason`, so what a provider reports and what the ledger records
+/// are one enum, not two and a conversion.
+pub const StopReason = enum {
+    end_turn,
+    tool_use,
+    max_tokens,
+    other,
+};
+
 /// The event log's alphabet. Kept minimal for the skeleton; DESIGN §3 lists the
 /// full set (capability_note, registry_selection, compaction, …).
 pub const Event = union(enum) {
@@ -68,16 +80,17 @@ pub const Event = union(enum) {
         /// event to hang usage on, so its cost is simply not recorded — honest,
         /// and not worth a new event kind.
         usage: ?Usage = null,
-        /// The provider cut this turn off at its output cap (`max_tokens`). The
-        /// one thing about a turn's ending that its SHAPE cannot say: `end_turn`
-        /// and `tool_use` are both readable off `calls`, but a reply truncated
-        /// before it wrote a call is byte-identical to one that finished. Durable
-        /// because the consequence outlives the process that saw it — replaying a
-        /// truncated tail as the last message asks the provider to continue it as
-        /// a prefill, which is rejected outright when thinking is on (DESIGN §4).
-        /// A fact, like `usage`: not projected, false on every line written
-        /// before the field existed.
-        truncated: bool = false,
+        /// Why the provider stopped this turn. A fact like `usage`, and equally
+        /// NOT projected (`prompt.Turn.Assistant` has no field for it): the model
+        /// does not read its own stop reason. `end_turn` and `tool_use` are both
+        /// readable off the turn's SHAPE (`calls.len`) and so are not written to
+        /// the line; `max_tokens` and `other` are not, and so are. `max_tokens`
+        /// is the load-bearing one: a reply cut before it wrote a call is
+        /// byte-identical to one that finished, and the consequence outlives the
+        /// process that saw it — replaying that tail as the last message asks the
+        /// provider to continue it as a prefill, which is rejected outright when
+        /// thinking is on (DESIGN §4).
+        stop_reason: StopReason = .end_turn,
     },
     /// Exactly ONE user turn carrying every result from a batch. Never split
     /// per-tool — that would be one model round-trip per tool (DESIGN §0.2).
@@ -213,7 +226,7 @@ fn cloneEvent(alloc: std.mem.Allocator, e: Event) !Event {
             errdefer alloc.free(text);
             const calls = try cloneToolCalls(alloc, as.calls);
             errdefer freeToolCalls(alloc, calls);
-            break :blk .{ .assistant = .{ .reasoning = reasoning, .text = text, .calls = calls, .usage = as.usage, .truncated = as.truncated } };
+            break :blk .{ .assistant = .{ .reasoning = reasoning, .text = text, .calls = calls, .usage = as.usage, .stop_reason = as.stop_reason } };
         },
         .tool_results => |results| .{ .tool_results = try cloneToolResults(alloc, results) },
         .capability_note => |note| blk: {
@@ -372,6 +385,23 @@ pub const ModelDescriptor = struct {
     api_key_env: []const u8 = "",
 };
 
+/// Which nulya created a session — PROVENANCE ONLY, never enforcement.
+///
+/// The kernel system prompt and the two builtin tool definitions are compile-time
+/// constants of the BINARY, yet they enter every session's frozen model-visible
+/// state (DESIGN §5.1, §7.5). So upgrading nulya silently changes the frozen
+/// system prompt / `tools[]` of every existing session — the one hole in physics
+/// §2 that freezing composition into the header cannot close, because those
+/// bytes were never in the header. Recording them makes it VISIBLE: `version` is
+/// the build's version string (`build.zig.zon`), `kernel_hash` a digest over the
+/// kernel prompt plus every builtin definition (`composition.kernelHash`). A
+/// resume whose hash differs warns and runs; an empty stamp is a header written
+/// before this existed — unknown, and never a warning.
+pub const Stamp = struct {
+    version: []const u8 = "",
+    kernel_hash: []const u8 = "",
+};
+
 /// The first line of a session file. Its JSON shape IS this struct — encoded and
 /// decoded by `std.json` typed (de)serialization — so the wire format and the
 /// type cannot drift. Everything the model sees is a pure function of this
@@ -387,6 +417,8 @@ pub const Header = struct {
     model: []const u8 = "",
     model_identity: ModelDescriptor = .{},
     created: []const u8 = "",
+    /// Which binary wrote this session (see `Stamp`). Provenance, not a gate.
+    nulya: Stamp = .{},
     composition: FrozenComposition = .{},
 };
 
@@ -650,11 +682,13 @@ pub fn encodeEventBody(jw: *std.json.Stringify, e: Event) !void {
                 try jw.objectField("usage");
                 try jw.write(u);
             }
-            // Same discipline: written only when true, so every line that was not
-            // cut off keeps its pre-existing shape byte-for-byte.
-            if (as.truncated) {
-                try jw.objectField("truncated");
-                try jw.write(true);
+            // Same discipline, one step further: written only when the SHAPE
+            // cannot already say it. `end_turn` / `tool_use` are `calls.len == 0`
+            // / `!= 0`, so every line that ended normally keeps its pre-existing
+            // shape byte-for-byte; only `max_tokens` / `other` need the field.
+            switch (as.stop_reason) {
+                .max_tokens, .other => try writeField(jw, "stop_reason", @tagName(as.stop_reason)),
+                .end_turn, .tool_use => {},
             }
         },
         .tool_results => |rs| {
@@ -702,9 +736,13 @@ pub const WireEvent = struct {
     /// What the step cost (see `Event.assistant.usage`); absent on lines written
     /// before the field existed, and on turns the provider priced at nothing.
     usage: ?Usage = null,
-    /// Whether the reply was cut at its output cap (see `Event.assistant.truncated`);
-    /// absent on lines written before the field existed, and on every turn that
-    /// ended on its own.
+    /// Why the turn stopped (see `Event.assistant.stop_reason`); absent when the
+    /// turn's shape already says it (`end_turn` / `tool_use`) and on lines
+    /// written before the field existed.
+    stop_reason: ?[]const u8 = null,
+    /// LEGACY INPUT ONLY — the boolean `stop_reason` replaced. It is never
+    /// written again; a line carrying `"truncated":true` and no `stop_reason`
+    /// reads back as `.max_tokens`, which is exactly what it meant.
     truncated: bool = false,
     calls: ?[]const WireCall = null,
     results: ?[]const ToolResultEntry = null,
@@ -737,12 +775,22 @@ pub fn toEvent(a: std.mem.Allocator, w: WireEvent) !Event {
         const wire_calls = w.calls orelse &.{};
         const calls = try a.alloc(ToolCall, wire_calls.len);
         for (wire_calls, calls) |wc, *c| c.* = .{ .id = wc.id, .tool = wc.tool, .args_json = wc.args };
+        // Written field first; then the legacy boolean; then the shape, which is
+        // what every line without either one always meant.
+        const stop_reason: StopReason = if (w.stop_reason) |tag|
+            (std.meta.stringToEnum(StopReason, tag) orelse return error.CorruptLedger)
+        else if (w.truncated)
+            .max_tokens
+        else if (calls.len != 0)
+            .tool_use
+        else
+            .end_turn;
         return .{ .assistant = .{
             .reasoning = w.reasoning orelse "",
             .text = w.text orelse return error.CorruptLedger,
             .calls = calls,
             .usage = w.usage,
-            .truncated = w.truncated,
+            .stop_reason = stop_reason,
         } };
     }
     if (std.mem.eql(u8, w.kind, "tool_results")) {
@@ -888,7 +936,7 @@ fn expectEventsEqual(a: []const Event, b: []const Event) !void {
                 try std.testing.expectEqualStrings(as.reasoning, y.assistant.reasoning);
                 try std.testing.expectEqualStrings(as.text, y.assistant.text);
                 try std.testing.expectEqual(as.usage, y.assistant.usage);
-                try std.testing.expectEqual(as.truncated, y.assistant.truncated);
+                try std.testing.expectEqual(as.stop_reason, y.assistant.stop_reason);
                 try std.testing.expectEqual(as.calls.len, y.assistant.calls.len);
                 for (as.calls, y.assistant.calls) |c, d| {
                     try std.testing.expectEqualStrings(c.id, d.id);
@@ -919,6 +967,7 @@ const sample_header: Header = .{
     .model = "openai",
     .model_identity = .{ .provider = "openai", .model = "gpt-4o-mini", .base_url = "https://api.openai.com/v1", .api_key_env = "OPENAI_API_KEY" },
     .created = "2026-08-15T00:00:00Z",
+    .nulya = .{ .version = "0.0.0", .kernel_hash = "abc123" },
     .composition = .{
         .active = &.{.{ .id = "web.search", .version = "v-0123456789abcdef01234567" }},
         .native_tools = &.{"ext:web.search/web_search"},
@@ -943,6 +992,8 @@ test "header encode/parse round-trips every field" {
     try std.testing.expectEqualStrings("gpt-4o-mini", h.model_identity.model);
     try std.testing.expectEqualStrings("https://api.openai.com/v1", h.model_identity.base_url);
     try std.testing.expectEqualStrings("OPENAI_API_KEY", h.model_identity.api_key_env);
+    try std.testing.expectEqualStrings("0.0.0", h.nulya.version);
+    try std.testing.expectEqualStrings("abc123", h.nulya.kernel_hash);
     try std.testing.expectEqual(@as(usize, 1), h.composition.active.len);
     try std.testing.expectEqualStrings("web.search", h.composition.active[0].id);
     try std.testing.expectEqualStrings("v-0123456789abcdef01234567", h.composition.active[0].version);
@@ -962,6 +1013,10 @@ test "a root header has a null parent after round-trip; unknown fields are ignor
     const newer = try parseHeaderLine(alloc, "{\"kind\":\"header\",\"session\":\"s\",\"composition\":{\"max_tools\":8},\"future\":1}");
     defer newer.deinit();
     try std.testing.expectEqualStrings("s", newer.value.session);
+    // …and a header written before the provenance stamp existed reads back as
+    // an EMPTY stamp: unknown, which is never a mismatch to warn about.
+    try std.testing.expectEqualStrings("", newer.value.nulya.version);
+    try std.testing.expectEqualStrings("", newer.value.nulya.kernel_hash);
 }
 
 fn writeSampleEvents(l: *Ledger) !void {
@@ -971,6 +1026,7 @@ fn writeSampleEvents(l: *Ledger) !void {
         .text = "running",
         .calls = &.{.{ .id = "c1", .tool = "shell", .args_json = "{\"command\":\"echo one\"}" }},
         .usage = .{ .input_tokens = 1200, .output_tokens = 80, .cache_read_tokens = 1100 },
+        .stop_reason = .tool_use,
     } });
     try l.append(.{ .tool_results = &.{.{ .call_id = "c1", .ok = true, .output = "one\n[exit 0]" }} });
     try l.append(.{ .capability_note = .{ .id = "demo", .version = "v-aaaa", .text = "note text" } });
@@ -1040,16 +1096,16 @@ test "assistant usage round-trips as a fact on the line, and legacy lines read a
     try std.testing.expect((try toEvent(legacy.arena.allocator(), legacy.value)).assistant.usage == null);
 }
 
-test "a truncated reply says so on its line; every other line keeps its shape" {
+test "a stop reason the shape cannot say is written; the two it can are not" {
     const alloc = std.testing.allocator;
 
     // The whole point of the field: this event and a finished one differ in
     // nothing else. `calls` is empty in both, so the shape cannot tell them apart.
-    const cut: Event = .{ .assistant = .{ .text = "half a sen", .calls = &.{}, .truncated = true } };
+    const cut: Event = .{ .assistant = .{ .text = "half a sen", .calls = &.{}, .stop_reason = .max_tokens } };
     const line = try encodeEventLine(alloc, cut, 1);
     defer alloc.free(line);
     try std.testing.expectEqualStrings(
-        "{\"seq\":1,\"kind\":\"assistant\",\"text\":\"half a sen\",\"calls\":[],\"truncated\":true}\n",
+        "{\"seq\":1,\"kind\":\"assistant\",\"text\":\"half a sen\",\"calls\":[],\"stop_reason\":\"max_tokens\"}\n",
         line,
     );
     const parsed = try parseEventLine(alloc, line);
@@ -1057,16 +1113,42 @@ test "a truncated reply says so on its line; every other line keeps its shape" {
     try expectEventsEqual(&.{cut}, &.{try toEvent(parsed.arena.allocator(), parsed.value)});
 
     // A reply that ended on its own is written exactly as it was before the field
-    // existed — no `"truncated":false` on the overwhelming majority of lines.
+    // existed — no `"stop_reason"` on the overwhelming majority of lines, because
+    // an empty `calls` array already says `end_turn`.
     const whole = try encodeEventLine(alloc, .{ .assistant = .{ .text = "half a sen", .calls = &.{} } }, 1);
     defer alloc.free(whole);
     try std.testing.expectEqualStrings("{\"seq\":1,\"kind\":\"assistant\",\"text\":\"half a sen\",\"calls\":[]}\n", whole);
 
-    // And a line written before the field existed reads back as "ended on its
-    // own", which is what every such line meant.
+    // Same for a turn that stopped to call a tool: `calls` is non-empty, so the
+    // line carries no stop reason and still reads back as `tool_use`.
+    const calling: Event = .{ .assistant = .{
+        .text = "",
+        .calls = &.{.{ .id = "c1", .tool = "shell", .args_json = "{}" }},
+        .stop_reason = .tool_use,
+    } };
+    const call_line = try encodeEventLine(alloc, calling, 2);
+    defer alloc.free(call_line);
+    try std.testing.expect(std.mem.indexOf(u8, call_line, "stop_reason") == null);
+    const call_parsed = try parseEventLine(alloc, call_line);
+    defer call_parsed.deinit();
+    try expectEventsEqual(&.{calling}, &.{try toEvent(call_parsed.arena.allocator(), call_parsed.value)});
+
+    // A line written before the field existed reads back as "ended on its own",
+    // which is what every such line meant.
     const legacy = try parseEventLine(alloc, "{\"seq\":1,\"kind\":\"assistant\",\"text\":\"old\",\"calls\":[]}");
     defer legacy.deinit();
-    try std.testing.expect(!(try toEvent(legacy.arena.allocator(), legacy.value)).assistant.truncated);
+    try std.testing.expectEqual(StopReason.end_turn, (try toEvent(legacy.arena.allocator(), legacy.value)).assistant.stop_reason);
+
+    // And the boolean this field replaced still reads: `truncated:true` is
+    // `max_tokens`, the only thing it ever meant. It is never written again.
+    const old_bool = try parseEventLine(alloc, "{\"seq\":9,\"kind\":\"assistant\",\"text\":\"half a sen\",\"calls\":[],\"truncated\":true}");
+    defer old_bool.deinit();
+    try std.testing.expectEqual(StopReason.max_tokens, (try toEvent(old_bool.arena.allocator(), old_bool.value)).assistant.stop_reason);
+
+    // An unknown tag is corruption, not a silently-defaulted turn.
+    const bogus = try parseEventLine(alloc, "{\"seq\":1,\"kind\":\"assistant\",\"text\":\"x\",\"calls\":[],\"stop_reason\":\"whenever\"}");
+    defer bogus.deinit();
+    try std.testing.expectError(error.CorruptLedger, toEvent(bogus.arena.allocator(), bogus.value));
 }
 
 test "durable create then open replays a block-identical ledger with monotonic seq" {

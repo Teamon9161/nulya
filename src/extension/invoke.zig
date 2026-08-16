@@ -20,6 +20,7 @@
 const std = @import("std");
 const environment = @import("../environment.zig");
 const protocol = @import("protocol.zig");
+const tool = @import("../tool.zig");
 
 /// Fixed JSON-RPC request id. The runtime is oneshot — one request per process —
 /// so the id has no multiplexing or tracing role: the extension only echoes it
@@ -27,8 +28,9 @@ const protocol = @import("protocol.zig");
 const request_id = "call";
 
 pub const Options = struct {
-    /// Wall-clock cap for the oneshot call, forwarded to `Environment.runExtension`.
-    timeout_ms: u32 = 30_000,
+    /// Wall-clock cap for the oneshot call, forwarded to `Environment.runExtension`
+    /// (`tool.Timeouts`, base-tools.md §3).
+    timeout_ms: u32 = tool.Timeouts.extension_ms,
     /// Runner-level capture cap for the child's stdout/stderr.
     max_output_bytes: usize = 1 << 20,
     /// For a script extension, the interpreter to run the entry with.

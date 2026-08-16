@@ -27,6 +27,18 @@ pub const OutputBudget = emit.OutputBudget;
 
 pub const StepOutputBudget = emit.StepOutputBudget;
 
+/// Wall-clock caps for the child processes the kernel spawns (base-tools.md §3).
+/// ONE table, so no call site carries its own literal: `shell` defaults to
+/// `shell_default_ms` and clamps a model-supplied `timeout_ms` into
+/// `[1, shell_max_ms]`; an extension's oneshot `tool/call` gets `extension_ms`
+/// (DESIGN §7.3). Not config: a timeout is a property of the tool contract the
+/// model is taught, not of an operator's deployment.
+pub const Timeouts = struct {
+    pub const shell_default_ms: u32 = 120_000;
+    pub const shell_max_ms: u32 = 600_000;
+    pub const extension_ms: u32 = 30_000;
+};
+
 /// Constant-size context handed to every tool call.
 ///
 /// INVARIANT: every field here is fixed-shape and executor-facing. Loop/session

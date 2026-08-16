@@ -24,6 +24,48 @@ const kernel_system_prompt =
     "shell and edit are permanent builtin tools. Some extension tools may also be exposed to you directly this session; every other extension capability is invoked through the nulya CLI. " ++
     "A directly-exposed extension tool is pinned to the version that was active when this session began. Activating a new version mid-session takes effect immediately through the CLI, but its directly-exposed form changes only in the next session.";
 
+/// A digest over everything the KERNEL ITSELF puts into a session's frozen
+/// model-visible state: the kernel system prompt, then each builtin's id, name,
+/// description and input schema in registry order. Stamped into the session
+/// header at creation (`ledger.Stamp`, DESIGN §3.4) so a resume can SEE that
+/// these compile-time constants moved under an existing session instead of
+/// silently sending it a different system prompt. Deterministic and cheap:
+/// a couple of KB through Blake3, once per `session new` / `session step`.
+pub fn kernelHash(alloc: std.mem.Allocator) ![]u8 {
+    const snap = try registry.snapshot(alloc);
+    defer snap.deinit(alloc);
+    const defs = try snap.definitions(alloc);
+    defer alloc.free(defs);
+    return hashKernel(alloc, kernel_system_prompt, defs);
+}
+
+/// The hash itself, over a canonical concatenation: every part is length-
+/// prefixed, so no two different inputs can produce the same byte stream (a
+/// description ending where the next schema begins cannot masquerade as a
+/// different split). Takes its inputs as parameters so the property is testable.
+fn hashKernel(alloc: std.mem.Allocator, system_prompt: []const u8, defs: []const tool.ToolDefinition) ![]u8 {
+    var h = std.crypto.hash.Blake3.init(.{});
+    hashPart(&h, system_prompt);
+    for (defs) |d| {
+        hashPart(&h, d.id);
+        hashPart(&h, d.name);
+        hashPart(&h, d.description);
+        hashPart(&h, d.input_schema);
+    }
+    var digest: [32]u8 = undefined;
+    h.final(&digest);
+    const out = try alloc.alloc(u8, digest.len * 2);
+    _ = std.fmt.bufPrint(out, "{x}", .{digest[0..]}) catch unreachable;
+    return out;
+}
+
+fn hashPart(h: *std.crypto.hash.Blake3, part: []const u8) void {
+    var len: [8]u8 = undefined;
+    std.mem.writeInt(u64, &len, part.len, .little);
+    h.update(&len);
+    h.update(part);
+}
+
 pub const PinnedExtension = struct {
     id: []const u8,
     version: []const u8,
@@ -620,6 +662,46 @@ fn freePinned(alloc: std.mem.Allocator, pins: []const PinnedExtension) void {
 
 pub fn testingKernelPrompt() []const u8 {
     return kernel_system_prompt;
+}
+
+test "kernelHash is stable across calls and moves when any kernel constant does" {
+    const alloc = std.testing.allocator;
+
+    const a = try kernelHash(alloc);
+    defer alloc.free(a);
+    const b = try kernelHash(alloc);
+    defer alloc.free(b);
+    // Deterministic: the header stamp is only worth anything if two runs of the
+    // same binary agree (DESIGN §3.4).
+    try std.testing.expectEqualStrings(a, b);
+    try std.testing.expectEqual(@as(usize, 64), a.len);
+
+    // …and sensitive: a changed system prompt, or a changed builtin definition,
+    // is exactly the drift the stamp exists to reveal.
+    const defs = [_]tool.ToolDefinition{
+        .{ .id = "builtin.shell", .name = "shell", .description = "d", .input_schema = "{}" },
+    };
+    const base = try hashKernel(alloc, kernel_system_prompt, &defs);
+    defer alloc.free(base);
+    const other_prompt = try hashKernel(alloc, "You are someone else.", &defs);
+    defer alloc.free(other_prompt);
+    try std.testing.expect(!std.mem.eql(u8, base, other_prompt));
+
+    const other_defs = [_]tool.ToolDefinition{
+        .{ .id = "builtin.shell", .name = "shell", .description = "d", .input_schema = "{\"x\":1}" },
+    };
+    const other_schema = try hashKernel(alloc, kernel_system_prompt, &other_defs);
+    defer alloc.free(other_schema);
+    try std.testing.expect(!std.mem.eql(u8, base, other_schema));
+
+    // Length-prefixing, not concatenation: moving a byte across a field boundary
+    // must not collide with the original.
+    const shifted = [_]tool.ToolDefinition{
+        .{ .id = "builtin.shel", .name = "lshell", .description = "d", .input_schema = "{}" },
+    };
+    const shifted_hash = try hashKernel(alloc, kernel_system_prompt, &shifted);
+    defer alloc.free(shifted_hash);
+    try std.testing.expect(!std.mem.eql(u8, base, shifted_hash));
 }
 
 /// Most tests below stand a single store root up in a tmp dir and pass it as

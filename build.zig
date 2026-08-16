@@ -1,5 +1,9 @@
 const std = @import("std");
 
+/// The package manifest, read at configure time so the binary's version string
+/// has exactly one source (DESIGN §3.4: it is stamped into every session header).
+const zon = @import("build.zig.zon");
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -24,6 +28,7 @@ pub fn build(b: *std.Build) void {
     });
     const config_options = b.addOptions();
     config_options.addOption([]const u8, "default_toml", @embedFile("default.toml"));
+    config_options.addOption([]const u8, "version", zon.version);
     root.addImport("toml", toml);
     root.addOptions("config_options", config_options);
     root.addAnonymousImport("zig_archive", .{ .root_source_file = zig_archive });

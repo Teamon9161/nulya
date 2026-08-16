@@ -28,6 +28,10 @@ pub const Options = struct {
 /// tokens must subtract before filling this in.
 pub const Usage = ledger.Usage;
 
+/// Why the model stopped. The same enum the ledger records on the assistant
+/// event (DESIGN §3.1) — one shape end to end, no conversion in the loop.
+pub const StopReason = ledger.StopReason;
+
 /// How the loop treats a wire that fails or falls silent (DESIGN §13). A
 /// provider makes ONE attempt per `stream` and reports a transient fault as one
 /// of the errors `isTransient` names; the loop (`loop.collectTurn`) owns the
@@ -63,13 +67,6 @@ pub fn isTransient(err: anyerror) bool {
         else => false,
     };
 }
-
-pub const StopReason = enum {
-    end_turn,
-    tool_use,
-    max_tokens,
-    other,
-};
 
 pub const ToolUseStart = struct {
     index: usize,

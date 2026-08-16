@@ -74,7 +74,7 @@ fn emit(raw: []const u8, tool: []const u8, spill_key: SpillKey, ctx: *Ctx) Emitt
 | `MIN_READ_WINDOW` | 120 行 | **把过小的 read 请求放大**到这个下限：多读几行很便宜，模型拿 10 行小窗一片片爬文件，每片一个 round-trip 才贵（直接违反"少交互"） |
 | `head_ratio` / `tail_ratio` | 如 25 / 75 | 溢出时头尾 byte budget；shell 结果尾部更重要，故尾 > 头。行数只能是 soft hint，不能突破 byte ceiling |
 | `MAX_STEP_OUTPUT_BYTES` | 256 KB（起点，可调） | 一整轮 batched tool_results 的硬上限；避免 10 个工具各 128KB 把下一轮 prompt 撑到 MB 级 |
-| `DEFAULT_TIMEOUT_MS` / `MAX` | 120s / 600s | shell 超时；超时要把**被杀前已捕获的输出**一并返回（`shell.rs:append_partial_output`） |
+| `DEFAULT_TIMEOUT_MS` / `MAX` | 120s / 600s | shell 超时（**已实现**，`tool.Timeouts`）；模型给的 `timeout_ms` 夹进 `[1, MAX]`，超时 kill 子进程并把**被杀前已捕获的输出**一并返回（`shell.rs:append_partial_output`）。extension 的 oneshot 调用共用这张表（30s，DESIGN §7.3） |
 
 > read 是否给行号：tcode 的结论是 **read 不加行号**（每行 7 字节、长会话累积不划算；edit 用精确串匹配不需要行号，footer 报窗口边界即可），只有 edit/append **回显改动片段**时才加行号。采纳。
 
@@ -83,9 +83,11 @@ fn emit(raw: []const u8, tool: []const u8, spill_key: SpillKey, ctx: *Ctx) Emitt
 ## 4. 三个基础工具各自的形态
 
 ### shell
-- v0.1 skeleton：单工具，`{ command, cwd? }`。**去掉 `output_mode`**——溢出由 §2 `emit` 自动落盘，模型不用选。
+- 单工具，`{ command, cwd?, timeout_ms? }`。**去掉 `output_mode`**——溢出由 §2 `emit` 自动落盘，模型不用选。
 - exit code 追加；stderr 以 `--- stderr ---` 分隔追加。
-- Later hardening：`timeout_ms`、`run_in_background`、静默+非零时的解析提示。不要为了 walking skeleton 提前引入后台任务子系统。
+- `timeout_ms` **已实现**：缺省 §3 的 120s、夹进 `[1, 600000]`，非正整数当场教学式拒绝（不替它换个数）。到点杀掉**整棵进程树**（POSIX process group / Windows job object，取消走同一条路径；OS 拒绝 job 时降级为只杀直接子进程，DESIGN §6.1），输出里 `[exit …]` 之前多一行 `[timed out after <n> ms; process killed, output above is partial]`，`ok=false`。
+- **正常返回不杀树**：`some-server >/dev/null 2>&1 &` 这样的后台进程活得过这次调用（两个平台一致）。但它**必须重定向 stdio**——否则它继承着管道写端，而 §2 的 drain 要读到 EOF，这次调用就会一直等到它退出。
+- Later hardening：`run_in_background`、静默+非零时的解析提示。不要为了 walking skeleton 提前引入后台任务子系统。
 - **不做** per-command 输出过滤子系统。噪声大的命令：要么模型自己 `| tail`/`| rg`，要么 §2 的头尾+落盘通用兜底。
 
 ### edit

@@ -73,7 +73,6 @@ pub const AgentSession = struct {
     /// cross-process capability-note inbox each step (DESIGN §3, §5.3).
     durable: ?DurableRef = null,
     total_usage: provider.Usage = .{},
-    last_stop_reason: provider.StopReason = .end_turn,
 
     pub const Options = struct {
         model: provider.Model,
@@ -102,6 +101,10 @@ pub const AgentSession = struct {
         /// only stores it. Empty provider = a scripted/legacy session.
         model_identity: ledger.ModelDescriptor = .{},
         created: []const u8 = "",
+        /// The creating binary's version string (`launch.version`). The other
+        /// half of the header's provenance stamp — the kernel hash — comes from
+        /// the kernel itself, so a caller can only get it right (DESIGN §3.4).
+        nulya_version: []const u8 = "",
         parent: ?ledger.ParentRef = null,
     };
 
@@ -144,12 +147,19 @@ pub const AgentSession = struct {
         defer alloc.free(native);
         for (comp.extension_tool_bindings, 0..) |b, i| native[i] = b.definition.id;
 
+        // Provenance: which binary froze the model-visible state this header
+        // describes. The kernel prompt and the builtin definitions are the part
+        // of that state the header could not otherwise name (DESIGN §3.4).
+        const kernel_hash = try composition.kernelHash(alloc);
+        defer alloc.free(kernel_hash);
+
         var l = try ledger.createDurable(alloc, io, d.workspace, d.session_path, .{
             .session = d.session_id,
             .parent = d.parent,
             .model = d.model_profile,
             .model_identity = d.model_identity,
             .created = d.created,
+            .nulya = .{ .version = d.nulya_version, .kernel_hash = kernel_hash },
             .composition = .{ .active = active, .native_tools = native },
         });
         errdefer l.deinit();
@@ -251,7 +261,6 @@ pub const AgentSession = struct {
         const before = self.l.len();
         const outcome = try loop.runStepWithPrompt(self.alloc, &self.l, self.model, &prompt_ir, self.composition.tools, self.step_ctx, self.model_options);
         accumulate(&self.total_usage, outcome.usage);
-        self.last_stop_reason = outcome.stop_reason;
         // Stats are an observation AFTER execution (`tool_stats.zig`), so they are
         // recorded only for a step whose tools actually ran. A reply cut by
         // `max_tokens` closes its batch with marker results the loop wrote without
@@ -311,11 +320,23 @@ pub const AgentSession = struct {
         return self.total_usage;
     }
 
-    /// Why the model stopped in the most recent step (`end_turn` before any
-    /// step has run). `max_tokens` means the last reply was truncated — the
-    /// driver's cue that "the assistant is done" is not what happened.
+    /// Why the model stopped in the most recent turn on record — the ledger's
+    /// LAST assistant event, or `end_turn` when there is none yet. Read from the
+    /// durable fact rather than remembered in memory, so a process that only
+    /// resumed the session answers exactly like the process that ran the step
+    /// (DESIGN §3.1). `max_tokens` means that reply was cut off — the driver's
+    /// cue that "the assistant is done" is not what happened.
     pub fn lastStopReason(self: *const AgentSession) provider.StopReason {
-        return self.last_stop_reason;
+        const events = self.l.view();
+        var i = events.len;
+        while (i > 0) {
+            i -= 1;
+            switch (events[i]) {
+                .assistant => |as| return as.stop_reason,
+                else => {},
+            }
+        }
+        return .end_turn;
     }
 
     /// Whether the ledger ends on a reply the provider cut at its output cap. That
@@ -323,13 +344,13 @@ pub const AgentSession = struct {
     /// message, which the provider reads as a prefill to continue and rejects
     /// outright when thinking is on (DESIGN §4). In-process, `run` never reaches
     /// that state — it stops on the truncated step. Across processes the ledger is
-    /// all there is, so the same rule is re-derived here from the durable fact
-    /// rather than from `last_stop_reason`, which resume cannot know. Appending
+    /// all there is, which is exactly why the stop reason is a durable fact on the
+    /// assistant event and not a field that dies with the process. Appending
     /// anything (a user message, a drained inbox event) clears it.
     pub fn lastAssistantTruncated(self: *const AgentSession) bool {
         if (self.l.len() == 0) return false;
         return switch (self.l.view()[self.l.len() - 1]) {
-            .assistant => |as| as.truncated,
+            .assistant => |as| as.stop_reason == .max_tokens,
             else => false,
         };
     }
@@ -1296,7 +1317,7 @@ test "a truncated tail refuses to step in the next process until a message arriv
         try std.testing.expectEqual(@as(usize, 1), try sess.run(5));
     }
 
-    // Process 2 sees only the ledger — `last_stop_reason` died with process 1.
+    // Process 2 sees only the ledger; nothing about process 1's run survives it.
     const RefusingModel = struct {
         fn name(ptr: *anyopaque) []const u8 {
             _ = ptr;
