@@ -1,7 +1,7 @@
 import { Match, Switch, createEffect, createSignal, onCleanup } from "solid-js"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
-import type { KeyEvent } from "@opentui/core"
-import { Transcript, windowItems } from "./Transcript.tsx"
+import type { KeyEvent, ScrollBoxRenderable } from "@opentui/core"
+import { Transcript, rowsBelow, windowItems } from "./Transcript.tsx"
 import { Composer, type ComposerApi } from "./Composer.tsx"
 import { StatusBar } from "./StatusBar.tsx"
 import { TabBar } from "./TabBar.tsx"
@@ -78,7 +78,9 @@ export function App(props: AppProps) {
   const [spinnerTick, setSpinnerTick] = createSignal(0)
   const [ctrlCArmed, setCtrlCArmed] = createSignal(false)
   const [allOpen, setAllOpen] = createSignal(false)
+  const [behind, setBehind] = createSignal(0)
   let composer: ComposerApi | null = null
+  let scroll: ScrollBoxRenderable | null = null
 
   const tab = () => tabs.active()
   const snapshot = () => tab().state.snapshot
@@ -102,6 +104,36 @@ export function App(props: AppProps) {
     const timer = setTimeout(() => setCtrlCArmed(false), 3000)
     onCleanup(() => clearTimeout(timer))
   })
+
+  // How far back the reader has scrolled. Polled rather than derived: the wheel
+  // and the scrollbar move the box without going through us, so the only honest
+  // source is the box itself. One subtraction every 200ms.
+  //
+  // Two polls have to agree before it shows. While a tall turn is being laid
+  // out the box is briefly a screenful away from its own sticky bottom, and a
+  // "16 more below" that flashes on every long answer is worse than none.
+  createEffect(() => {
+    let previous = 0
+    const timer = setInterval(() => {
+      const now = rowsBelow(scroll)
+      setBehind(now > 0 && previous > 0 ? now : 0)
+      previous = now
+    }, 200)
+    onCleanup(() => clearInterval(timer))
+  })
+
+  const scrollBy = (pages: number) => {
+    if (!scroll) return
+    const page = Math.max(1, (scroll.viewport?.height ?? 10) - 2)
+    scroll.scrollBy({ x: 0, y: Math.round(page * pages) })
+    setBehind(rowsBelow(scroll))
+  }
+
+  const scrollToEnd = () => {
+    if (!scroll) return
+    scroll.scrollTo({ x: 0, y: scroll.scrollHeight })
+    setBehind(0)
+  }
 
   onCleanup(() => tabs.disposeAll())
 
@@ -340,6 +372,11 @@ export function App(props: AppProps) {
     if (matches(keys.ext, key)) return consume(key, () => openOverlay("ext"))
     if (matches(keys.model, key)) return consume(key, () => openOverlay("model"))
     if (matches(keys.help, key)) return consume(key, () => openOverlay("help"))
+    // Reading back. The composer is focused and keeps the keyboard, so these
+    // have to be taken here or they are the textarea's cursor movement.
+    if (matches(keys.scrollUp, key)) return consume(key, () => scrollBy(-1))
+    if (matches(keys.scrollDown, key)) return consume(key, () => scrollBy(1))
+    if (matches(keys.scrollEnd, key)) return consume(key, scrollToEnd)
     if (matches(keys.nextTab, key)) return consume(key, () => tabs.next())
     if (matches(keys.closeTab, key)) {
       // With one tab there is nothing to close, and the composer keeps its own
@@ -431,6 +468,7 @@ export function App(props: AppProps) {
                       items={snapshot().items}
                       header={snapshot().header}
                       contributions={tab().contributions()}
+                      ref={(box) => (scroll = box)}
                     />
                   }
                 >
@@ -485,6 +523,7 @@ export function App(props: AppProps) {
                   takeoverReady={tab().attach.takeoverReady()}
                   spinnerFrame={spinnerFrame()}
                   hint={notice() ?? undefined}
+                  behind={behind()}
                 />
               </box>
             </OverlayContext.Provider>

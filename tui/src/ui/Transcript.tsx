@@ -1,6 +1,8 @@
 import { For, Show } from "solid-js"
+import type { ScrollBoxRenderable } from "@opentui/core"
 import { Card } from "../render/cards/index.tsx"
 import { CompositionCard } from "../render/cards/CompositionCard.tsx"
+import { Welcome } from "./Welcome.tsx"
 import { useStyle } from "../render/theme.ts"
 import type { Contributions } from "../nulya/files.ts"
 import type { SessionHeader } from "../nulya/ledger.ts"
@@ -27,17 +29,32 @@ export function windowItems(items: readonly TranscriptItem[], window: number): T
   return items.slice(-window)
 }
 
+/**
+ * How far the scrollbox is from the live end, in rows. Zero means the newest
+ * card is on screen; anything else is "somebody is reading back", which is the
+ * one thing the status bar has to say differently (tui.md §4.5).
+ */
+export function rowsBelow(box: ScrollBoxRenderable | null): number {
+  if (!box) return 0
+  const viewport = box.viewport?.height ?? 0
+  return Math.max(0, Math.round(box.scrollHeight - viewport - box.scrollTop))
+}
+
 export function Transcript(props: {
   items: TranscriptItem[]
   header?: SessionHeader | null
   contributions?: Contributions[]
+  /** Handed to `App` so PgUp/PgDn and the "more below" hint have something to act on. */
+  ref?: (box: ScrollBoxRenderable) => void
 }) {
   const style = useStyle()
   const shown = () => windowItems(props.items, style.historyWindow)
   const hidden = () => props.items.length - shown().length
   return (
     <scrollbox
+      ref={props.ref}
       flexGrow={1}
+      flexShrink={1}
       width="100%"
       stickyScroll
       stickyStart="bottom"
@@ -56,6 +73,11 @@ export function Transcript(props: {
           {style.glyphs.foldClosed} {hidden()} earlier items · in the ledger, not on screen ·
           transcript.history_window
         </text>
+      </Show>
+      {/* An empty session is the one screen with nothing to report; it says
+          what this session is and what to do, rather than a blank rectangle. */}
+      <Show when={props.items.length === 0}>
+        <Welcome />
       </Show>
       <For each={shown()}>{(item) => <Card item={item} />}</For>
     </scrollbox>

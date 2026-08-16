@@ -13,7 +13,7 @@ import { join } from "node:path"
 import { createSignal, type JSX } from "solid-js"
 import { testRender } from "@opentui/solid"
 import { configShow, type ConfigView } from "../src/nulya/cli.ts"
-import { AUTO, ModelView, blockedReason, initialSlot, pickerRows } from "../src/ui/overlays/ModelView.tsx"
+import { AUTO, ModelView, blockedReason, endpointOf, initialSlot, modelRows, pickerRows } from "../src/ui/overlays/ModelView.tsx"
 import { planLaunch } from "../src/launch.ts"
 import { loadTuiState, rememberModel, saveTuiState } from "../src/state/tui_state.ts"
 import { StyleContext, createStyle, type Style } from "../src/render/theme.ts"
@@ -23,6 +23,7 @@ import { listSessions, sessionExists } from "../src/nulya/files.ts"
 import { sessionNew } from "../src/nulya/cli.ts"
 import { App } from "../src/ui/App.tsx"
 import type { ModelPick } from "../src/state/tui_state.ts"
+import type { ProfileDraft } from "../src/nulya/credentials.ts"
 import { scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
 
 const style: Style = createStyle(default_settings, {})
@@ -106,7 +107,56 @@ async function pickerFrame(node: () => JSX.Element, width = 120, height = 30) {
   return testRender(() => <StyleContext.Provider value={style}>{node()}</StyleContext.Provider>, { width, height })
 }
 
-test("/model renders every row, marks the current one, dims the ones without a key, and picks with ←→ + Enter", async () => {
+/** A rejected field keeps its text so it can be fixed; this is "fix it all". */
+function erase(setup: { mockInput: { pressBackspace: () => void } }, count: number) {
+  for (let i = 0; i < count; i++) setup.mockInput.pressBackspace()
+}
+
+test("modelRows / endpointOf: a provider is one row, and it says what it is", () => {
+  expect(modelRows(fake, fake.profiles[1]!).map((row) => row.model)).toEqual([
+    "deepseek-v4-flash",
+    "deepseek-v4-pro",
+  ])
+  // A profile that lists no `models[]` still offers the one it defaults to.
+  const bare = { ...fake.profiles[1]!, models: [] }
+  expect(modelRows(fake, bare).map((row) => row.model)).toEqual(["deepseek-v4-flash"])
+  expect(endpointOf(fake.profiles[0]!)).toBe("openai wire · api.openai.com")
+  expect(endpointOf(fake.profiles[2]!)).toBe("codex · ChatGPT subscription")
+  expect(endpointOf(fake.profiles[3]!)).toBe("offline · no network")
+})
+
+test("/model level 1 is providers — one row each, credential status on the row", async () => {
+  const setup = await pickerFrame(() => (
+    <ModelView
+      ws={ws}
+      current={{ profile: "deepseek", model: "deepseek-v4-flash", effort: undefined }}
+      onPick={() => {}}
+      onNotice={() => {}}
+      onClose={() => {}}
+      load={async () => fake}
+    />
+  ))
+  try {
+    await until(() => setup.captureCharFrame().includes("api.deepseek.com"), 10_000)
+    const frame = await settle(setup, 4)
+    expect(frame).toContain("model · which provider a session runs on")
+    // One row per profile, and the models are NOT on this screen.
+    expect(frame).toContain("2 models")
+    expect(frame).toContain("openai wire · api.openai.com")
+    expect(frame).not.toContain("DeepSeek V4 Flash")
+    expect(frame).not.toContain("GPT-5.6 Sol")
+    expect(frame).toContain("no key · s to paste one")
+    expect(frame).toContain("run `codex login`")
+    expect(frame).toContain("✓ current")
+    expect(frame).toContain("offline stand-in")
+    expect(frame).toContain("+ add an OpenAI- or Anthropic-compatible provider")
+    expect(frame).toMatchSnapshot()
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 60_000)
+
+test("/model level 2 is that provider's models: ←→ turns the dial, Enter picks, Esc goes back", async () => {
   const [picked, setPicked] = createSignal<ModelPick | null>(null)
   const [blocked, setBlocked] = createSignal<string | null>(null)
   const setup = await pickerFrame(() => (
@@ -120,19 +170,18 @@ test("/model renders every row, marks the current one, dims the ones without a k
     />
   ))
   try {
+    // The cursor opens on the provider in force; Enter drills into its models.
+    await until(() => setup.captureCharFrame().includes("api.deepseek.com"), 10_000)
+    setup.mockInput.pressEnter()
     await until(() => setup.captureCharFrame().includes("DeepSeek V4 Pro"), 10_000)
-    const frame = await settle(setup, 4)
-    expect(frame).toContain("model · which profile, model and effort")
-    expect(frame).toContain("GPT-5.6 Sol")
-    expect(frame).toContain("no key · s to paste one")
-    expect(frame).toContain("run `codex login`")
-    expect(frame).toContain("✓ current")
-    expect(frame).toContain("offline stand-in")
+    const frame = await settle(setup, 3)
+    expect(frame).toContain("model · deepseek · 2 models")
     expect(frame).toContain("1M ctx")
+    expect(frame).toContain("✓ current")
     expect(frame).toMatchSnapshot()
 
-    // The cursor opens on the current pick (row 3: deepseek flash). → twice
-    // turns its dial auto → off → low; ↓ then Enter picks pro on ITS dial (auto).
+    // → twice turns flash's dial auto → off → low; ↓ then Enter picks pro on
+    // ITS dial (auto).
     setup.mockInput.pressArrow("right")
     setup.mockInput.pressArrow("right")
     await settle(setup, 2)
@@ -150,10 +199,17 @@ test("/model renders every row, marks the current one, dims the ones without a k
     await until(() => picked()?.effort === "low", 10_000)
     expect(picked()).toEqual({ profile: "deepseek", model: "deepseek-v4-flash", effort: "low" })
 
-    // Enter on a row that cannot run stays open and says why, on screen.
-    setup.mockInput.pressKey("k")
+    // Esc is one level, not the whole picker.
+    setup.mockInput.pressEscape()
+    await until(() => setup.captureCharFrame().includes("which provider"), 10_000)
+
+    // A provider without a key is still browsable — its models carry the
+    // reason, and Enter on one says it rather than starting a session.
     setup.mockInput.pressKey("k")
     await settle(setup, 2)
+    setup.mockInput.pressEnter()
+    await until(() => setup.captureCharFrame().includes("model · openai"), 10_000)
+    expect(setup.captureCharFrame()).toContain("no key · s to paste one")
     setup.mockInput.pressEnter()
     await until(() => blocked() !== null, 10_000)
     expect(blocked()).toContain("openai cannot run yet · no key · s to paste one")
@@ -247,10 +303,14 @@ test("picking in /model on a fresh untouched session replaces it in place; on a 
     // is scripted, or codex if this machine is logged in — pick scripted by name).
     await setup.mockInput.typeText("/model")
     setup.mockInput.pressEnter()
-    await until(() => setup.captureCharFrame().includes("model · which profile"), 15_000)
-    // Move to the last row (scripted, always last in default.toml) and pick it.
-    for (let i = 0; i < 40; i++) setup.mockInput.pressKey("j") // clamps on the last row: scripted
+    await until(() => setup.captureCharFrame().includes("model · which provider"), 15_000)
+    // Down clamps on the "+ add a provider" row; one back up is scripted, the
+    // last profile in default.toml. Enter opens its models, Enter picks.
+    for (let i = 0; i < 40; i++) setup.mockInput.pressKey("j")
+    setup.mockInput.pressKey("k")
     await settle(setup, 2)
+    setup.mockInput.pressEnter()
+    await until(() => setup.captureCharFrame().includes("model · scripted"), 15_000)
     setup.mockInput.pressEnter()
     await until(() => !sessionExists(ws, first), 15_000)
     // The empty first session is gone — replaced, not stacked — and the pick is remembered.
@@ -267,9 +327,12 @@ test("picking in /model on a fresh untouched session replaces it in place; on a 
     await until(() => setup.captureCharFrame().includes("done"), 60_000)
     await setup.mockInput.typeText("/model")
     setup.mockInput.pressEnter()
-    await until(() => setup.captureCharFrame().includes("model · which profile"), 15_000)
-    for (let i = 0; i < 40; i++) setup.mockInput.pressKey("j") // clamps on the last row: scripted
+    await until(() => setup.captureCharFrame().includes("model · which provider"), 15_000)
+    for (let i = 0; i < 40; i++) setup.mockInput.pressKey("j")
+    setup.mockInput.pressKey("k")
     await settle(setup, 2)
+    setup.mockInput.pressEnter()
+    await until(() => setup.captureCharFrame().includes("model · scripted"), 15_000)
     setup.mockInput.pressEnter()
     await until(() => setup.captureCharFrame().includes("2/2") || /\[2\]|tab/.test(setup.captureCharFrame()), 15_000).catch(
       () => {},
@@ -331,9 +394,9 @@ test("a guide opens the picker first, with the reason on screen and the composer
     { width: 120, height: 24 },
   )
   try {
-    await until(() => setup.captureCharFrame().includes("model · which profile"), 15_000)
+    await until(() => setup.captureCharFrame().includes("model · which provider"), 15_000)
     const frame = await settle(setup, 3)
-    expect(frame).toContain("model · which profile")
+    expect(frame).toContain("model · which provider")
     expect(frame).toContain("openai has no API key")
     // j moves the picker; nothing is typed into the composer.
     setup.mockInput.pressKey("j")
@@ -457,3 +520,150 @@ test("/model: s on a keyless row asks for the key, Enter saves it and the row tu
     setup.renderer.destroy()
   }
 }, 60_000)
+
+test("credentials: an added profile is one marked block, replaced whole (not by line count) next time", () => {
+  const dir = mkdtempSync(join(tmpdir(), "nulya-home-"))
+  const path = join(dir, "config.toml")
+  try {
+    const { writeProfile, writeProfileKey } = require("../src/nulya/credentials.ts")
+    require("node:fs").writeFileSync(path, `# mine\n[provider]\nactive_profile = "deepseek"\n`)
+    const first = writeProfile(path, {
+      name: "openrouter",
+      kind: "anthropic",
+      base_url: "https://openrouter.ai/api",
+      models: ["moonshotai/kimi-k3", "qwen/qwen4-max"],
+      key: "sk-or",
+    })
+    expect(first).toContain("# mine")
+    expect(first).toContain('kind = "anthropic"')
+    expect(first).toContain('base_url = "https://openrouter.ai/api"')
+    // The first id is also the profile's default, so `--profile openrouter` runs.
+    expect(first).toContain('model = "moonshotai/kimi-k3"')
+    expect(first).toContain('models = ["moonshotai/kimi-k3", "qwen/qwen4-max"]')
+    expect(first).toContain('api_key = "sk-or"')
+
+    // Something after it stays put, and rewriting with a SHORTER model list
+    // replaces the whole block rather than leaving orphaned lines behind.
+    writeProfileKey(path, "deepseek", "sk-ds")
+    const again = writeProfile(path, {
+      name: "openrouter",
+      kind: "openai",
+      base_url: "https://openrouter.ai/api/v1",
+      models: ["moonshotai/kimi-k3"],
+    })
+    expect(again).toContain('name = "deepseek"\napi_key = "sk-ds"')
+    expect(again).not.toContain("qwen/qwen4-max")
+    expect(again).not.toContain("anthropic")
+    expect(again).not.toContain("sk-or")
+    expect((again.match(/\[\[provider\.profiles\]\]/g) ?? []).length).toBe(2)
+
+    expect(() => writeProfile(path, { name: "bad name", kind: "openai", base_url: "https://x", models: ["m"] })).toThrow()
+    expect(() => writeProfile(path, { name: "ok", kind: "openai", base_url: "", models: ["m"] })).toThrow()
+    expect(() => writeProfile(path, { name: "ok", kind: "openai", base_url: "https://x", models: [] })).toThrow()
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("/model: `a` walks the compatible-provider form and writes one profile", async () => {
+  const written: ProfileDraft[] = []
+  const [notice, setNotice] = createSignal<string | null>(null)
+  const setup = await pickerFrame(() => (
+    <ModelView
+      ws={ws}
+      current={null}
+      onPick={() => {}}
+      onNotice={setNotice}
+      onClose={() => {}}
+      load={async () => fake}
+      writeProfileBlock={(_path, draft) => written.push(draft)}
+    />
+  ))
+  try {
+    await until(() => setup.captureCharFrame().includes("+ add an OpenAI-"), 10_000)
+    setup.mockInput.pressKey("a")
+    await until(() => setup.captureCharFrame().includes("profile name"), 10_000)
+
+    // A name that already exists is refused where it is typed, not on save —
+    // and the text stays put so it can be corrected rather than retyped.
+    await setup.mockInput.typeText("deepseek")
+    setup.mockInput.pressEnter()
+    await until(() => (notice() ?? "").includes("already exists"), 10_000)
+    expect(setup.captureCharFrame()).toContain("profile name")
+    erase(setup, "deepseek".length)
+
+    await setup.mockInput.typeText("openrouter")
+    setup.mockInput.pressEnter()
+    await until(() => setup.captureCharFrame().includes("Chat Completions"), 10_000)
+    expect(setup.captureCharFrame()).toContain("anthropic · Messages")
+    setup.mockInput.pressKey("j")
+    setup.mockInput.pressEnter()
+    await until(() => setup.captureCharFrame().includes("base URL"), 10_000)
+
+    // Nothing typed into a step leaks into the next one, and a URL is checked.
+    await setup.mockInput.typeText("openrouter.ai")
+    setup.mockInput.pressEnter()
+    await until(() => (notice() ?? "").includes("starts with http"), 10_000)
+    erase(setup, "openrouter.ai".length)
+    await setup.mockInput.typeText("https://openrouter.ai/api/")
+    setup.mockInput.pressEnter()
+    await until(() => setup.captureCharFrame().includes("model id(s)"), 10_000)
+    await setup.mockInput.typeText("moonshotai/kimi-k3 , qwen/qwen4-max")
+    setup.mockInput.pressEnter()
+    await until(() => setup.captureCharFrame().includes("API key for openrouter"), 10_000)
+    await setup.mockInput.typeText("sk-or-xxx")
+    setup.mockInput.pressEnter()
+    await until(() => written.length === 1, 10_000)
+
+    expect(written[0]).toEqual({
+      name: "openrouter",
+      kind: "anthropic",
+      // The trailing slash is dropped: the kernel appends the wire's own path.
+      base_url: "https://openrouter.ai/api",
+      models: ["moonshotai/kimi-k3", "qwen/qwen4-max"],
+      key: "sk-or-xxx",
+    })
+    expect(notice()).toContain("openrouter added to /home/me/.nulya/config.toml")
+    // And the picker is back on the provider list, not stuck in the form.
+    await until(() => setup.captureCharFrame().includes("model · which provider"), 10_000)
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 60_000)
+
+test("a provider added in /model is a profile the real kernel resolves (real binary, NULYA_HOME)", async () => {
+  const home = mkdtempSync(join(tmpdir(), "nulya-home-"))
+  const env = { NULYA_HOME: home }
+  try {
+    const { writeProfile } = require("../src/nulya/credentials.ts")
+    const before = await configShow(ws, env)
+    expect(before.profiles.some((p) => p.name === "my-endpoint")).toBe(false)
+    writeProfile(before.paths.user, {
+      name: "my-endpoint",
+      kind: "openai",
+      base_url: "https://example.invalid/v1",
+      models: ["some-model", "other-model"],
+      key: "sk-added-not-real",
+    })
+    const after = await configShow(ws, env)
+    const added = after.profiles.find((p) => p.name === "my-endpoint")!
+    expect(added.kind).toBe("openai")
+    expect(added.base_url).toBe("https://example.invalid/v1")
+    expect(added.models).toEqual(["some-model", "other-model"])
+    // It can run: the key is right there in the file the kernel reads.
+    expect(added.credential).toBe(true)
+    expect(added.credential_source).toBe("config")
+    expect(JSON.stringify(after)).not.toContain("sk-added-not-real")
+    // And a session freezes it, model id and all.
+    const id = await sessionNew(ws, { profile: "my-endpoint", model: "other-model" }, env)
+    const line = require("node:fs")
+      .readFileSync(join(ws.dir, ".nulya", "sessions", `${id}.jsonl`), "utf8")
+      .split("\n")[0]
+    const header = JSON.parse(line)
+    expect(header.model_identity.provider).toBe("openai")
+    expect(header.model_identity.model).toBe("other-model")
+    expect(JSON.stringify(header)).not.toContain("sk-added-not-real")
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+}, 30_000)

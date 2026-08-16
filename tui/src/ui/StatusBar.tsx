@@ -24,6 +24,8 @@ export function StatusBar(props: {
   takeoverReady: boolean
   spinnerFrame: string
   hint?: string
+  /** Rows of transcript below the viewport: >0 means somebody is reading back. */
+  behind?: number
 }) {
   const style = useStyle()
   const screen = useScreen()
@@ -59,12 +61,20 @@ export function StatusBar(props: {
     props.snapshot.error ? style.theme.err : props.snapshot.lastStopped === "budget" ? style.theme.warn : style.theme.dim
 
   return (
-    <box flexDirection="row" width="100%" paddingLeft={1} paddingRight={1}>
+    <box flexDirection="row" width="100%" height={1} flexShrink={0} paddingLeft={1} paddingRight={1}>
       <box flexGrow={1} flexShrink={1}>
         <text fg={color()}>
           {usage()} · {activity()} · {props.hint ?? "Esc cancel · Ctrl+O fold · /help"}
         </text>
       </box>
+      {/* Scrolled away from the live end: the newest card is off screen, which
+          is worth saying — otherwise a streaming answer looks like a stall. */}
+      {(props.behind ?? 0) > 0 ? (
+        <text fg={style.theme.accent.evolve}>
+          {" "}
+          {style.glyphs.foldOpen} {props.behind} more below · Shift+End
+        </text>
+      ) : null}
       {screen().width >= 60 ? (
         <text fg={props.role === "observer" ? style.theme.warn : style.theme.dim}>
           step {props.snapshot.steps} · {props.role === "observer" ? "observer · driven elsewhere" : "driver"}

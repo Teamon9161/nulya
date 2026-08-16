@@ -1,12 +1,19 @@
-import { onMount } from "solid-js"
+import { For, Show, createSignal, onMount } from "solid-js"
 import type { KeyEvent, TextareaRenderable } from "@opentui/core"
 import { useStyle } from "../render/theme.ts"
+import { completions } from "../commands.ts"
 
 /**
  * The composer. Enter sends, Shift+Enter (or Ctrl+J, for terminals without the
  * Kitty protocol) makes a newline, Up on an empty buffer walks the history.
  * Sending while a step runs is allowed and does not interrupt it — the turn is
  * queued and the kernel drains it at its next step boundary (tui.md §4.4).
+ *
+ * A line beginning with `/` puts the matching commands above the box and Tab
+ * completes the first of them. That is the whole of it: no menu to arrow
+ * through, no Enter that means "accept the highlighted thing" instead of
+ * "send". Enter always sends exactly what is written, which is the one promise
+ * an input box must not break.
  */
 /**
  * What the rest of the screen may do to the composer. Browse mode needs to know
@@ -39,6 +46,13 @@ export function Composer(props: {
   // cursor movement the moment the user edits it.
   let shown: string | null = null
 
+  // The buffer, mirrored as a signal so the completion list can react to it.
+  // The textarea owns the text; this only ever follows it.
+  const [line, setLine] = createSignal("")
+  const matches = () => completions(line())
+
+  const sync = () => setLine(area?.plainText ?? "")
+
   onMount(() => {
     area?.focus()
     props.onReady?.({
@@ -52,6 +66,7 @@ export function Composer(props: {
     if (!area) return
     area.selectAll()
     area.deleteSelection()
+    sync()
   }
 
   const submit = () => {
@@ -67,8 +82,27 @@ export function Composer(props: {
     props.onSubmit(text)
   }
 
+  /** Tab on a half-typed command finishes it, with a space ready for arguments. */
+  const complete = (): boolean => {
+    const best = matches()[0]
+    if (!best || best.name === line()) return false
+    clear()
+    area?.insertText(best.args ? `${best.name} ` : best.name)
+    sync()
+    return true
+  }
+
   const onKeyDown = (event: KeyEvent) => {
-    if (event.name !== "up" && event.name !== "down") return
+    if (event.name === "tab") {
+      if (complete()) event.preventDefault()
+      return
+    }
+    if (event.name !== "up" && event.name !== "down") {
+      // Every other key may have changed the text; read it back after the
+      // textarea has handled it.
+      queueMicrotask(sync)
+      return
+    }
     if (!area || history.length === 0) return
     // History only takes over an EMPTY composer, or one still showing the entry
     // it last recalled; otherwise Up/Down are cursor movement, which is what a
@@ -85,31 +119,62 @@ export function Composer(props: {
     clear()
     shown = cursor < history.length ? history[cursor]! : null
     if (shown !== null) area.insertText(shown)
+    sync()
     event.preventDefault()
   }
 
   return (
-    <box flexDirection="row" width="100%" paddingLeft={1} paddingRight={1}>
-      <text fg={style.theme.accent.user}>{style.glyphs.user} </text>
-      <textarea
-        ref={area}
-        flexGrow={1}
-        height={3}
-        wrapMode="word"
-        placeholder={props.placeholder ?? "message nulya"}
-        placeholderColor={style.theme.dim}
-        textColor={style.theme.fg}
-        focusedTextColor={style.theme.fg}
-        cursorColor={style.theme.accent.user}
-        selectionBg={style.theme.selection}
-        onSubmit={submit}
-        onKeyDown={onKeyDown}
-        keyBindings={[
-          { name: "return", action: "submit" },
-          { name: "return", shift: true, action: "newline" },
-          { name: "j", ctrl: true, action: "newline" },
-        ]}
-      />
+    <box flexDirection="column" width="100%" flexShrink={0}>
+      <Show when={matches().length > 0}>
+        <box flexDirection="column" width="100%" paddingLeft={3} paddingRight={1}>
+          <For each={matches().slice(0, 6)}>
+            {(command, index) => (
+              <box flexDirection="row" width="100%">
+                <box width={26} flexShrink={0}>
+                  <text fg={index() === 0 ? style.theme.accent.evolve : style.theme.dim}>
+                    {command.name}
+                    {command.args ? ` ${command.args}` : ""}
+                  </text>
+                </box>
+                <box flexGrow={1} flexShrink={1} flexBasis={0}>
+                  <text fg={style.theme.dim}>{command.what}</text>
+                </box>
+              </box>
+            )}
+          </For>
+          <Show when={matches().length > 1}>
+            <text fg={style.theme.dim}>{"  "}Tab completes · Enter sends what is written</text>
+          </Show>
+        </box>
+      </Show>
+      {/*
+        flexShrink={0}: the composer is the one thing on screen that must never
+        be squeezed. Without it a long transcript (or a long overlay list) wins
+        the flex negotiation and the input box collapses to a line, then to
+        nothing — the screen still works, but there is visibly nowhere to type.
+      */}
+      <box flexDirection="row" width="100%" flexShrink={0} paddingLeft={1} paddingRight={1}>
+        <text fg={style.theme.accent.user}>{style.glyphs.user} </text>
+        <textarea
+          ref={area}
+          flexGrow={1}
+          height={3}
+          wrapMode="word"
+          placeholder={props.placeholder ?? "message nulya  ·  / for commands"}
+          placeholderColor={style.theme.dim}
+          textColor={style.theme.fg}
+          focusedTextColor={style.theme.fg}
+          cursorColor={style.theme.accent.user}
+          selectionBg={style.theme.selection}
+          onSubmit={submit}
+          onKeyDown={onKeyDown}
+          keyBindings={[
+            { name: "return", action: "submit" },
+            { name: "return", shift: true, action: "newline" },
+            { name: "j", ctrl: true, action: "newline" },
+          ]}
+        />
+      </box>
     </box>
   )
 }

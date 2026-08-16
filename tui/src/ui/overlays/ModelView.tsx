@@ -1,31 +1,42 @@
 /**
- * `/model` (F5): pick the profile, model and effort a session runs on.
+ * `/model` (F5): pick the provider, model and effort a session runs on — and,
+ * when the provider you want is not in the list, add it.
  *
- * One flat list — every model of every profile the kernel's config knows —
- * because that is how a person thinks about it ("DeepSeek Flash", not "the
- * openai-kind profile whose base_url is deepseek.com, then its second id").
- * ↑↓ moves, ←→ turns the effort dial of the highlighted row, Enter starts a
- * session on it, Esc backs out. The list is `nulya config show --json`: the
- * kernel's shell projects the effective config chain once, so nothing here
- * re-derives profiles or guesses which key a profile needs.
+ * Two levels, because a provider and a model are two different questions and
+ * flattening them made the screen answer neither. The flat list showed one row
+ * per (profile, model): seven built-in profiles became fourteen rows, thirteen
+ * of which repeated the same credential status, and the list was mostly models
+ * for providers the person has no key for. So:
+ *
+ *   level 1 · providers — one row per profile: wire kind, endpoint, how many
+ *             models it serves, and whether it can run at all. This is where
+ *             credentials live (`s` pastes a key) because a credential belongs
+ *             to the endpoint, not to each of its models.
+ *   level 2 · models — the models of the one provider you chose, with the
+ *             effort dial. Enter starts a session on it.
+ *
+ * `a` on level 1 opens the form for an OpenAI- or Anthropic-compatible endpoint
+ * (OpenRouter, Groq, vLLM, an office box …): name → wire → base URL → model
+ * ids → key, written as one `[[provider.profiles]]` block in the kernel's user
+ * config. The kernel already speaks both wires; what was missing was anywhere
+ * to say so without leaving the TUI to go and find a TOML file.
+ *
+ * The list is `nulya config show --json`: the kernel's shell projects the
+ * effective config chain once, so nothing here re-derives profiles or guesses
+ * which key a profile needs.
  *
  * A model is frozen into a session at creation (physics #2), so "switch model"
  * is always "new session on that model" (`App` decides whether that replaces a
  * fresh untouched tab or opens a second one). Effort is not frozen — it is a
  * per-step generation option — so `/effort` can also change it in place.
- *
- * Rows whose profile has no usable credential stay visible but dim, saying so;
- * `s` on a row asks for its API key right here and writes it into the kernel's
- * user config (`nulya/credentials.ts`), so the answer to "why can't I pick
- * this?" and the way to fix it are both on the row — never in a config file
- * the user has to go and find (tui.md §1.2 D10).
  */
 import { For, Show, createEffect, createMemo, createSignal, onMount } from "solid-js"
 import { useKeyboard } from "@opentui/solid"
 import type { InputRenderable } from "@opentui/core"
 import { useScreen, useStyle } from "../../render/theme.ts"
+import { visibleRows, windowRange } from "../list.ts"
 import { configShow, type ConfigView, type ModelView as ModelParams, type ProfileView } from "../../nulya/cli.ts"
-import { writeProfileKey } from "../../nulya/credentials.ts"
+import { validProfileName, writeProfile, writeProfileKey, type ProfileDraft } from "../../nulya/credentials.ts"
 import type { ModelPick } from "../../state/tui_state.ts"
 import type { Workspace } from "../../nulya/bin.ts"
 
@@ -40,18 +51,23 @@ export interface PickerRow {
   slots: string[]
 }
 
+/** The model ids a profile offers, default first if it named one. */
+export function modelIdsOf(profile: ProfileView): string[] {
+  return profile.models.length > 0 ? profile.models : profile.model ? [profile.model] : []
+}
+
+/** The models of one profile, as rows with their effort dials. */
+export function modelRows(config: ConfigView, profile: ProfileView): PickerRow[] {
+  const byId = new Map(config.models.map((m) => [m.id, m]))
+  return modelIdsOf(profile).map((model) => {
+    const params = byId.get(model) ?? null
+    return { profile, model, params, slots: [AUTO, ...(params?.efforts ?? [])] }
+  })
+}
+
 /** Every (profile, model) the config offers, in config order, with its dial. */
 export function pickerRows(config: ConfigView): PickerRow[] {
-  const byId = new Map(config.models.map((m) => [m.id, m]))
-  const rows: PickerRow[] = []
-  for (const profile of config.profiles) {
-    const ids = profile.models.length > 0 ? profile.models : profile.model ? [profile.model] : []
-    for (const model of ids) {
-      const params = byId.get(model) ?? null
-      rows.push({ profile, model, params, slots: [AUTO, ...(params?.efforts ?? [])] })
-    }
-  }
-  return rows
+  return config.profiles.flatMap((profile) => modelRows(config, profile))
 }
 
 /** Where the dial starts for a row: the live effort for the current pick, the config default elsewhere. */
@@ -96,21 +112,61 @@ export function readyLabel(profile: ProfileView, current: boolean, check: string
   }
 }
 
+/** What a profile IS, in one phrase: the wire it speaks and where it speaks it. */
+export function endpointOf(profile: ProfileView): string {
+  const host = hostOf(profile.base_url)
+  switch (profile.kind) {
+    case "codex":
+      return "codex · ChatGPT subscription"
+    case "scripted":
+      return "offline · no network"
+    default:
+      return host.length > 0 ? `${profile.kind} wire · ${host}` : `${profile.kind} wire`
+  }
+}
+
+function hostOf(url: string): string {
+  if (url.length === 0) return ""
+  try {
+    return new URL(url).host
+  } catch {
+    return url.replace(/^https?:\/\//, "").split("/")[0] ?? url
+  }
+}
+
 function contextOf(params: ModelParams | null): string {
   const window = params?.context_window
   if (!window) return ""
-  return window >= 1_000_000 ? `${(window / 1_000_000).toFixed(window % 1_000_000 === 0 ? 0 : 1)}M ctx` : `${Math.round(window / 1000)}k ctx`
+  return window >= 1_000_000
+    ? `${(window / 1_000_000).toFixed(window % 1_000_000 === 0 ? 0 : 1)}M ctx`
+    : `${Math.round(window / 1000)}k ctx`
 }
 
-/**
- * The slice of `count` rows to draw so that `cursor` is visible in `visible`
- * rows: the window slides only when the cursor leaves it, so a list longer than
- * the screen never overflows into the lines below it.
- */
-export function windowRange(count: number, cursor: number, visible: number): { start: number; end: number } {
-  if (count <= visible) return { start: 0, end: count }
-  const start = Math.min(Math.max(cursor - Math.floor(visible / 2), 0), count - visible)
-  return { start, end: start + visible }
+/** The wires the kernel speaks, as the add-provider form offers them. */
+export const WIRES: Array<{ kind: "openai" | "anthropic"; label: string; hint: string }> = [
+  {
+    kind: "openai",
+    label: "openai · Chat Completions",
+    hint: "OpenAI-compatible: OpenRouter, Groq, Together, vLLM, Ollama, LM Studio …",
+  },
+  {
+    kind: "anthropic",
+    label: "anthropic · Messages",
+    hint: "Anthropic-compatible: Anthropic itself, OpenRouter's /api, DeepSeek's /anthropic …",
+  },
+]
+
+/** Where the keyboard is. Text steps hand every printable key to their input. */
+type Mode = "providers" | "models" | "key" | "add-name" | "add-wire" | "add-url" | "add-models" | "add-key"
+
+const text_steps: ReadonlySet<Mode> = new Set<Mode>(["key", "add-name", "add-url", "add-models", "add-key"])
+
+/** The compatible endpoint being defined, filled step by step. */
+interface Draft {
+  name: string
+  kind: "openai" | "anthropic"
+  base_url: string
+  models: string[]
 }
 
 export function ModelView(props: {
@@ -127,39 +183,60 @@ export function ModelView(props: {
   load?: () => Promise<ConfigView>
   /** Test seam: where a pasted key is written; defaults to the config's user path. */
   writeKey?: (path: string, profile: string, key: string) => void
+  /** Test seam: where an added provider is written. */
+  writeProfileBlock?: (path: string, draft: ProfileDraft) => void
 }) {
   const style = useStyle()
   const screen = useScreen()
   const [config, setConfig] = createSignal<ConfigView | null>(null)
   const [error, setError] = createSignal<string | null>(null)
-  const [cursor, setCursor] = createSignal(0)
+  const [mode, setMode] = createSignal<Mode>("providers")
+  /** Cursor of the provider list, of the model list, and of the wire menu. */
+  const [atProvider, setAtProvider] = createSignal(0)
+  const [atModel, setAtModel] = createSignal(0)
+  const [atWire, setAtWire] = createSignal(0)
   const [slots, setSlots] = createSignal<number[]>([])
+  const [draft, setDraft] = createSignal<Draft>({ name: "", kind: "openai", base_url: "", models: [] })
   /** The profile whose key is being pasted right now, if any. */
   const [entering, setEntering] = createSignal<ProfileView | null>(null)
-  let keyInput: InputRenderable | undefined
+  /** Which level `s` was pressed on, so Esc and a saved key come back to it. */
+  const [keyFrom, setKeyFrom] = createSignal<Mode>("providers")
+  let field: InputRenderable | undefined
 
-  const rows = () => (config() ? pickerRows(config()!) : [])
-  // Everything around the list is fixed: header + hairline above, title,
-  // notice, blank, detail, footer, hairline + composer + hairline + status
-  // below, plus the two "more" markers — about sixteen rows. Never fewer than
-  // three rows of list.
-  const visible = () => Math.max(3, screen().height - 16 - (props.notice ? 1 : 0))
-  const range = createMemo(() => windowRange(rows().length, cursor(), visible()))
-  const shown = () => rows().slice(range().start, range().end)
+  const profiles = () => config()?.profiles ?? []
+  /** One row past the profiles is the "add a provider" row. */
+  const providerCount = () => profiles().length + 1
+  const onAddRow = () => atProvider() >= profiles().length
+  const provider = () => profiles()[atProvider()] ?? null
 
-  const refresh = async () => {
+  const rows = createMemo<PickerRow[]>(() => {
+    const loaded = config()
+    const chosen = provider()
+    return loaded && chosen ? modelRows(loaded, chosen) : []
+  })
+
+  const visible = () => visibleRows(screen().height, props.notice ? 1 : 0)
+  const providerRange = createMemo(() => windowRange(providerCount(), atProvider(), visible()))
+  const modelRange = createMemo(() => windowRange(rows().length, atModel(), visible()))
+
+  /**
+   * Re-read the config. `select` names the provider to land on; without it the
+   * cursor stays on the provider it was already on — a reload after saving a
+   * key must not quietly move somebody who is two levels deep looking at that
+   * provider's models. Only a first load has nobody to keep, and then it opens
+   * on the provider in force, else on the first one that can actually run.
+   */
+  const refresh = async (select?: string) => {
+    const keep = select ?? provider()?.name
     try {
       const loaded = await (props.load ?? (() => configShow(props.ws)))()
       setConfig(loaded)
       setError(null)
-      const list = pickerRows(loaded)
-      setSlots(list.map((row) => initialSlot(row, props.current)))
-      // Open on the current pick, else on the first row that can actually run.
-      const at = list.findIndex(
-        (row) => props.current && row.profile.name === props.current.profile && (props.current.model ?? "") === row.model,
+      const at = loaded.profiles.findIndex((p) =>
+        keep ? p.name === keep : props.current !== null && p.name === props.current.profile,
       )
-      const ready = list.findIndex((row) => row.profile.credential && row.profile.kind !== "scripted")
-      setCursor(at >= 0 ? at : ready >= 0 ? ready : 0)
+      const ready = loaded.profiles.findIndex((p) => p.credential && p.kind !== "scripted")
+      setAtProvider(at >= 0 ? at : ready >= 0 ? ready : 0)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     }
@@ -168,40 +245,56 @@ export function ModelView(props: {
   onMount(() => void refresh())
 
   createEffect(() => {
-    const count = rows().length
-    if (cursor() >= count) setCursor(Math.max(0, count - 1))
+    if (atProvider() >= providerCount()) setAtProvider(Math.max(0, providerCount() - 1))
   })
 
+  /** Entering the model level: dials start where the config (or the live pick) says. */
+  const enterModels = () => {
+    const list = rows()
+    if (list.length === 0) return props.onNotice(`${provider()?.name ?? "this profile"} serves no model ids`)
+    setSlots(list.map((row) => initialSlot(row, props.current)))
+    const at = list.findIndex((row) => props.current && (props.current.model ?? "") === row.model)
+    setAtModel(at >= 0 ? at : 0)
+    setMode("models")
+  }
+
   const move = (delta: number) => {
-    const count = rows().length
-    if (count === 0) return
-    setCursor(Math.min(Math.max(cursor() + delta, 0), count - 1))
+    if (mode() === "providers") {
+      setAtProvider(Math.min(Math.max(atProvider() + delta, 0), providerCount() - 1))
+    } else if (mode() === "models") {
+      setAtModel(Math.min(Math.max(atModel() + delta, 0), Math.max(0, rows().length - 1)))
+    } else if (mode() === "add-wire") {
+      setAtWire(Math.min(Math.max(atWire() + delta, 0), WIRES.length - 1))
+    }
   }
 
   const turn = (delta: number) => {
-    const row = rows()[cursor()]
+    const row = rows()[atModel()]
     if (!row) return
     const next = [...slots()]
     const size = row.slots.length
-    next[cursor()] = (((next[cursor()] ?? 0) + delta) % size + size) % size
+    next[atModel()] = ((((next[atModel()] ?? 0) + delta) % size) + size) % size
     setSlots(next)
   }
 
   const pick = () => {
-    const row = rows()[cursor()]
+    const row = rows()[atModel()]
     if (!row) return
-    if (!row.profile.credential) return props.onNotice(`${row.profile.name} cannot run yet · ${blockedReason(row.profile)}`)
-    const slot = row.slots[slots()[cursor()] ?? 0] ?? AUTO
+    if (!row.profile.credential)
+      return props.onNotice(`${row.profile.name} cannot run yet · ${blockedReason(row.profile)}`)
+    const slot = row.slots[slots()[atModel()] ?? 0] ?? AUTO
     props.onPick({ profile: row.profile.name, model: row.model, effort: slot === AUTO ? undefined : slot })
   }
 
-  /** `s`: ask for this row's API key. Codex has a login instead of a key. */
+  /** `s`: ask for this provider's API key. Codex has a login instead of a key. */
   const startKey = () => {
-    const row = rows()[cursor()]
-    if (!row) return
-    if (row.profile.kind === "codex") return props.onNotice("codex signs in with `codex login`, not a key")
-    if (!keyable(row.profile)) return props.onNotice(`${row.profile.name} takes no API key`)
-    setEntering(row.profile)
+    const chosen = provider()
+    if (!chosen) return
+    if (chosen.kind === "codex") return props.onNotice("codex signs in with `codex login`, not a key")
+    if (!keyable(chosen)) return props.onNotice(`${chosen.name} takes no API key`)
+    setEntering(chosen)
+    setKeyFrom(mode())
+    setMode("key")
   }
 
   const saveKey = (value: string) => {
@@ -213,6 +306,7 @@ export function ModelView(props: {
     try {
       ;(props.writeKey ?? writeProfileKey)(loaded.paths.user, profile.name, key)
       setEntering(null)
+      setMode(keyFrom())
       props.onNotice(`api_key for ${profile.name} saved to ${loaded.paths.user}`)
       void refresh()
     } catch (err) {
@@ -220,147 +314,433 @@ export function ModelView(props: {
     }
   }
 
+  const startAdd = () => {
+    setDraft({ name: "", kind: "openai", base_url: "", models: [] })
+    setAtWire(0)
+    setMode("add-name")
+  }
+
+  /** The add form, one confirmed field at a time. The last one writes. */
+  const confirmField = (value: string) => {
+    const text = value.trim()
+    switch (mode()) {
+      case "add-name": {
+        if (!validProfileName(text)) return props.onNotice("a profile name is letters, digits, `_`, `-` or `.`")
+        if (profiles().some((p) => p.name === text))
+          return props.onNotice(`'${text}' already exists · Esc, then s to give it a key`)
+        setDraft({ ...draft(), name: text })
+        setMode("add-wire")
+        return
+      }
+      case "add-url": {
+        if (!/^https?:\/\//.test(text)) return props.onNotice("the base URL starts with http:// or https://")
+        setDraft({ ...draft(), base_url: text.replace(/\/+$/, "") })
+        setMode("add-models")
+        return
+      }
+      case "add-models": {
+        const ids = text
+          .split(",")
+          .map((id) => id.trim())
+          .filter((id) => id.length > 0)
+        if (ids.length === 0) return props.onNotice("at least one model id, comma-separated")
+        setDraft({ ...draft(), models: ids })
+        setMode("add-key")
+        return
+      }
+      case "add-key":
+        return saveProvider(text)
+    }
+  }
+
+  const saveProvider = (key: string) => {
+    const loaded = config()
+    if (!loaded) return
+    const made = draft()
+    try {
+      ;(props.writeProfileBlock ?? writeProfile)(loaded.paths.user, { ...made, key: key.length > 0 ? key : undefined })
+      setMode("providers")
+      props.onNotice(`${made.name} added to ${loaded.paths.user}`)
+      // Land on what was just added: it is the thing the person came to use.
+      void refresh(made.name)
+    } catch (err) {
+      props.onNotice(`could not add the provider: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  /** Esc: out of a step, back a level, and only then out of the picker. */
+  const back = () => {
+    switch (mode()) {
+      case "providers":
+        return props.onClose()
+      case "models":
+        return setMode("providers")
+      case "key":
+        setEntering(null)
+        return setMode(keyFrom())
+      case "add-name":
+        return setMode("providers")
+      case "add-wire":
+        return setMode("add-name")
+      case "add-url":
+        return setMode("add-wire")
+      case "add-models":
+        return setMode("add-url")
+      case "add-key":
+        return setMode("add-models")
+    }
+  }
+
   useKeyboard((key) => {
-    // While a key is being pasted the input owns every printable key; only
-    // Esc (back out) is ours.
-    if (entering()) {
+    // A text step's input owns every printable key; only Esc is ours.
+    if (text_steps.has(mode())) {
       if (key.name === "escape") {
         key.preventDefault()
-        setEntering(null)
+        back()
       }
       return
     }
-    if (key.name === "escape") return props.onClose()
+    if (key.name === "escape") return back()
     if (key.name === "j" || key.name === "down") return move(1)
     if (key.name === "k" || key.name === "up") return move(-1)
-    if (key.name === "h" || key.name === "left") return turn(-1)
-    if (key.name === "l" || key.name === "right") return turn(1)
-    if (key.name === "r") return void refresh()
-    if (key.name === "s") {
+    if (mode() === "add-wire") {
+      if (key.name === "return") {
+        // Consumed: the base-URL input mounts focused within this same dispatch
+        // and would otherwise take this Enter as an empty submit.
+        key.preventDefault()
+        setDraft({ ...draft(), kind: WIRES[atWire()]!.kind })
+        setMode("add-url")
+      }
+      return
+    }
+    if (key.name === "r") return void refresh(provider()?.name)
+    if (mode() === "models") {
+      if (key.name === "h" || key.name === "left") return turn(-1)
+      if (key.name === "l" || key.name === "right") return turn(1)
+      if (key.name === "s") {
+        // The credential belongs to the provider, so `s` means the same thing
+        // on both levels: fix the row you are looking at.
+        key.preventDefault()
+        return startKey()
+      }
+      if (key.name === "return") return pick()
+      return
+    }
+    // Providers.
+    if (key.name === "a") {
       // Consumed: the input this opens is focused within the same dispatch and
-      // would otherwise receive this very `s` as its first character.
+      // would otherwise receive this very `a` as its first character.
       key.preventDefault()
+      return startAdd()
+    }
+    if (key.name === "s") {
+      key.preventDefault()
+      if (onAddRow()) return startAdd()
       return startKey()
     }
-    if (key.name === "return") return pick()
+    if (key.name === "return") {
+      if (onAddRow()) {
+        key.preventDefault()
+        return startAdd()
+      }
+      return enterModels()
+    }
   })
 
-  const isCurrent = (row: PickerRow) =>
+  const isCurrentProfile = (profile: ProfileView) => props.current !== null && props.current.profile === profile.name
+  const isCurrentModel = (row: PickerRow) =>
     props.current !== null && props.current.profile === row.profile.name && (props.current.model ?? "") === row.model
 
+  const title = () => {
+    switch (mode()) {
+      case "models":
+        return `model · ${provider()?.name ?? ""} · ${rows().length} model${rows().length === 1 ? "" : "s"}`
+      case "key":
+        return `model · a key for ${entering()?.name ?? ""}`
+      case "providers":
+        return "model · which provider a session runs on"
+      default:
+        return "model · add a compatible provider"
+    }
+  }
+
+  /** The text step that is up, as a stable value to key the input on. */
+  const textStep = () => (text_steps.has(mode()) ? mode() : null)
+
+  // Every step starts empty. The renderable behind `<input>` survives the step
+  // change (unmount/remount inside the same frame reuses it), so a base URL
+  // would otherwise arrive with the profile name still in front of it — which
+  // is exactly how a valid URL turned into "openrouterhttps://…".
+  createEffect(() => {
+    if (textStep() === null) return
+    const clear = () => {
+      if (field) field.value = ""
+    }
+    clear()
+    queueMicrotask(clear)
+  })
+
+  /** The prompt, placeholder and hint of whichever text step is up. */
+  const fieldOf = (): { label: string; placeholder: string; hint: string; masked: boolean } | null => {
+    const where = config()?.paths.user ?? "the user config"
+    switch (mode()) {
+      case "key":
+        return {
+          label: `API key for ${entering()?.name ?? ""}`,
+          placeholder: "paste it here",
+          hint: `Enter save to ${where} (as this profile's api_key) · Esc cancel`,
+          masked: false,
+        }
+      case "add-name":
+        return {
+          label: "profile name",
+          placeholder: "openrouter, groq, local …",
+          hint: "the name you will see in this list and pass to --profile · Esc cancel",
+          masked: false,
+        }
+      case "add-url":
+        return {
+          label: "base URL",
+          placeholder: draft().kind === "openai" ? "https://openrouter.ai/api/v1" : "https://openrouter.ai/api",
+          hint:
+            draft().kind === "openai"
+              ? "the endpoint that serves /chat/completions · Esc back"
+              : "the endpoint that serves /v1/messages · Esc back",
+          masked: false,
+        }
+      case "add-models":
+        return {
+          label: "model id(s)",
+          placeholder: "comma-separated, e.g. moonshotai/kimi-k3, qwen/qwen4-max",
+          hint: "exactly as the provider names them; the first becomes this profile's default · Esc back",
+          masked: false,
+        }
+      case "add-key":
+        return {
+          label: `API key for ${draft().name}`,
+          placeholder: "paste it here, or leave empty",
+          hint: `Enter write ${draft().name} to ${where} · empty = no key yet (s on its row later) · Esc back`,
+          masked: false,
+        }
+      default:
+        return null
+    }
+  }
+
   return (
-    <box flexDirection="column" width="100%" flexGrow={1} paddingLeft={1} paddingRight={1}>
-      <text fg={style.theme.accent.evolve}>model · which profile, model and effort a session runs on</text>
+    <box flexDirection="column" width="100%" flexGrow={1} flexShrink={1} paddingLeft={1} paddingRight={1}>
+      <text fg={style.theme.accent.evolve}>{title()}</text>
       <Show when={props.notice}>
         <text fg={style.theme.warn}>{props.notice}</text>
       </Show>
       <box height={1} />
-      <box flexDirection="column" flexGrow={1}>
-        <Show when={range().start > 0}>
-          <text fg={style.theme.dim}>  {style.glyphs.foldClosed} {range().start} more above</text>
-        </Show>
-        <For each={shown()}>
-          {(row, offset) => {
-            const index = () => range().start + offset()
-            const selected = () => index() === cursor()
-            const ready = row.profile.credential
-            const slot = () => row.slots[slots()[index()] ?? 0] ?? AUTO
-            const dial = () =>
-              row.slots.length > 1 ? `${style.glyphs.dialLeft} ${slot()} ${style.glyphs.dialRight}` : "no effort dial"
-            const main = () => (selected() ? style.theme.fg : ready ? style.theme.fg : style.theme.dim)
-            return (
-              <box flexDirection="row" width="100%" backgroundColor={selected() ? style.theme.selection : undefined}>
-                <text fg={selected() ? style.theme.fg : style.theme.dim} flexShrink={0}>
-                  {selected() ? style.glyphs.foldOpen : " "}{" "}
-                </text>
-                <box width={20} flexShrink={0}>
-                  <text fg={isCurrent(row) ? style.theme.accent.user : main()}>{row.profile.name}</text>
-                </box>
-                <box flexDirection="row" flexGrow={1} flexShrink={1} flexBasis={0}>
-                  <text fg={main()} flexShrink={0}>
-                    {labelOf(row)}
+
+      <box flexDirection="column" flexGrow={1} flexShrink={1}>
+        <Show when={mode() === "providers"}>
+          <Show when={providerRange().start > 0}>
+            <text fg={style.theme.dim}>
+              {"  "}
+              {style.glyphs.foldClosed} {providerRange().start} more above
+            </text>
+          </Show>
+          <For each={profiles().slice(providerRange().start, providerRange().end)}>
+            {(profile, offset) => {
+              const index = () => providerRange().start + offset()
+              const selected = () => index() === atProvider()
+              const ready = profile.credential
+              const count = modelIdsOf(profile).length
+              return (
+                <box flexDirection="row" width="100%" backgroundColor={selected() ? style.theme.selection : undefined}>
+                  <text fg={selected() ? style.theme.fg : style.theme.dim} flexShrink={0}>
+                    {selected() ? style.glyphs.foldOpen : " "}{" "}
                   </text>
-                  <Show when={labelOf(row) !== row.model}>
-                    <text fg={style.theme.dim} flexShrink={1}>
-                      {"  "}
-                      {row.model}
+                  <box width={18} flexShrink={0}>
+                    <text fg={isCurrentProfile(profile) ? style.theme.accent.user : ready ? style.theme.fg : style.theme.dim}>
+                      {profile.name}
                     </text>
-                  </Show>
+                  </box>
+                  <box flexGrow={1} flexShrink={1} flexBasis={0}>
+                    <text fg={style.theme.dim}>{endpointOf(profile)}</text>
+                  </box>
+                  <box width={11} flexShrink={0}>
+                    <text fg={style.theme.dim}>
+                      {count} model{count === 1 ? "" : "s"}
+                    </text>
+                  </box>
+                  <box width={26} flexShrink={0}>
+                    <text fg={ready ? style.theme.ok : style.theme.warn}>
+                      {ready ? readyLabel(profile, isCurrentProfile(profile), style.glyphs.check) : blockedReason(profile)}
+                    </text>
+                  </box>
                 </box>
-                <box width={9} flexShrink={0}>
-                  <text fg={style.theme.dim}>{contextOf(row.params)}</text>
+              )
+            }}
+          </For>
+          <Show when={providerRange().end >= profiles().length}>
+            <box
+              flexDirection="row"
+              width="100%"
+              backgroundColor={onAddRow() ? style.theme.selection : undefined}
+            >
+              <text fg={onAddRow() ? style.theme.fg : style.theme.dim} flexShrink={0}>
+                {onAddRow() ? style.glyphs.foldOpen : " "}{" "}
+              </text>
+              <text fg={onAddRow() ? style.theme.accent.evolve : style.theme.dim}>
+                + add an OpenAI- or Anthropic-compatible provider
+              </text>
+            </box>
+          </Show>
+        </Show>
+
+        <Show when={mode() === "models"}>
+          <Show when={modelRange().start > 0}>
+            <text fg={style.theme.dim}>
+              {"  "}
+              {style.glyphs.foldClosed} {modelRange().start} more above
+            </text>
+          </Show>
+          <For each={rows().slice(modelRange().start, modelRange().end)}>
+            {(row, offset) => {
+              const index = () => modelRange().start + offset()
+              const selected = () => index() === atModel()
+              const slot = () => row.slots[slots()[index()] ?? 0] ?? AUTO
+              const dial = () =>
+                row.slots.length > 1 ? `${style.glyphs.dialLeft} ${slot()} ${style.glyphs.dialRight}` : "no effort dial"
+              return (
+                <box flexDirection="row" width="100%" backgroundColor={selected() ? style.theme.selection : undefined}>
+                  <text fg={selected() ? style.theme.fg : style.theme.dim} flexShrink={0}>
+                    {selected() ? style.glyphs.foldOpen : " "}{" "}
+                  </text>
+                  <box width={24} flexShrink={0}>
+                    <text fg={isCurrentModel(row) ? style.theme.accent.user : style.theme.fg}>{labelOf(row)}</text>
+                  </box>
+                  <box flexGrow={1} flexShrink={1} flexBasis={0}>
+                    <Show when={labelOf(row) !== row.model}>
+                      <text fg={style.theme.dim}>{row.model}</text>
+                    </Show>
+                  </box>
+                  <box width={9} flexShrink={0}>
+                    <text fg={style.theme.dim}>{contextOf(row.params)}</text>
+                  </box>
+                  <box width={20} flexShrink={0}>
+                    <text fg={selected() ? style.theme.accent.evolve : style.theme.dim}>{dial()}</text>
+                  </box>
+                  <box width={24} flexShrink={0}>
+                    <text fg={row.profile.credential ? style.theme.ok : style.theme.warn}>
+                      {row.profile.credential
+                        ? isCurrentModel(row)
+                          ? `${style.glyphs.check} current`
+                          : ""
+                        : blockedReason(row.profile)}
+                    </text>
+                  </box>
                 </box>
-                <box width={20} flexShrink={0}>
-                  <text fg={ready ? (selected() ? style.theme.accent.evolve : style.theme.dim) : style.theme.dim}>{dial()}</text>
-                </box>
-                <box width={30} flexShrink={0}>
-                  <text fg={ready ? style.theme.ok : style.theme.warn}>
-                    {ready ? readyLabel(row.profile, isCurrent(row), style.glyphs.check) : blockedReason(row.profile)}
+              )
+            }}
+          </For>
+          <Show when={modelRange().end < rows().length}>
+            <text fg={style.theme.dim}>
+              {"  "}
+              {style.glyphs.foldOpen} {rows().length - modelRange().end} more below
+            </text>
+          </Show>
+        </Show>
+
+        <Show when={mode() === "add-wire"}>
+          <For each={WIRES}>
+            {(wire, index) => {
+              const selected = () => index() === atWire()
+              return (
+                <box flexDirection="column" width="100%">
+                  <box flexDirection="row" width="100%" backgroundColor={selected() ? style.theme.selection : undefined}>
+                    <text fg={selected() ? style.theme.fg : style.theme.dim} flexShrink={0}>
+                      {selected() ? style.glyphs.foldOpen : " "}{" "}
+                    </text>
+                    <text fg={selected() ? style.theme.fg : style.theme.dim}>{wire.label}</text>
+                  </box>
+                  <text fg={style.theme.dim}>
+                    {"    "}
+                    {wire.hint}
                   </text>
                 </box>
-              </box>
-            )
-          }}
-        </For>
-        <Show when={range().end < rows().length}>
-          <text fg={style.theme.dim}>  {style.glyphs.foldOpen} {rows().length - range().end} more below</text>
+              )
+            }}
+          </For>
         </Show>
+
         <Show when={config() === null && error() === null}>
           <text fg={style.theme.dim}>reading the kernel's config…</text>
         </Show>
         <Show when={error()}>
           <text fg={style.theme.err}>could not read config: {error()}</text>
         </Show>
-        <Show when={config() !== null && rows().length === 0}>
-          <text fg={style.theme.dim}>the config has no profiles</text>
+        <Show when={config() !== null && profiles().length === 0}>
+          <text fg={style.theme.dim}>the config has no profiles · a to add one</text>
         </Show>
       </box>
-      <Show
-        when={entering()}
-        fallback={
-          <>
-            <Show when={rows()[cursor()]}>
-              {(row: () => PickerRow) => (
-                <text fg={style.theme.dim}>
-                  {row().profile.name} · {row().profile.kind} wire
-                  {row().profile.base_url.length > 0 ? ` · ${row().profile.base_url}` : ""}
-                  {row().profile.api_key_env.length > 0
-                    ? ` · ${row().profile.api_key_env} ${row().profile.credential_source === "env" ? "set" : "unset"}`
-                    : ""}
-                  {keyable(row().profile) && config() ? ` · key file ${config()!.paths.user}` : ""}
-                  {row().profile.kind === "codex" ? " · ~/.codex/auth.json" : ""}
-                </text>
-              )}
-            </Show>
-            <text fg={style.theme.dim}>
-              j/k move · h/l effort · Enter start a session on it · s paste its API key · r reload · Esc close
-            </text>
-          </>
-        }
-      >
-        {(profile: () => ProfileView) => (
+
+      {/*
+        Keyed on the STEP, not on the spec object: each step of the form gets a
+        fresh, empty input (a base URL must not arrive pre-filled with the name
+        just typed), while the label and hint inside stay ordinary reactive
+        reads. Keying on `fieldOf()` would rebuild the input on every render and
+        eat the keystroke that caused it.
+      */}
+      <Show when={textStep()} keyed>
+        {() => (
           <>
             <box flexDirection="row" width="100%">
               <text fg={style.theme.accent.evolve} flexShrink={0}>
-                API key for {profile().name} {style.glyphs.user}{" "}
+                {fieldOf()?.label} {style.glyphs.user}{" "}
               </text>
               <input
-                ref={(el: InputRenderable) => (keyInput = el)}
+                ref={(el: InputRenderable) => (field = el)}
                 flexGrow={1}
                 focused
-                placeholder="paste it here"
+                placeholder={fieldOf()?.placeholder ?? ""}
                 placeholderColor={style.theme.dim}
                 textColor={style.theme.fg}
                 focusedTextColor={style.theme.fg}
                 cursorColor={style.theme.accent.user}
-                onSubmit={(value: unknown) => saveKey(typeof value === "string" ? value : (keyInput?.value ?? ""))}
+                onSubmit={(value: unknown) =>
+                  mode() === "key"
+                    ? saveKey(typeof value === "string" ? value : (field?.value ?? ""))
+                    : confirmField(typeof value === "string" ? value : (field?.value ?? ""))
+                }
               />
             </box>
-            <text fg={style.theme.dim}>
-              Enter save to {config()?.paths.user ?? "the user config"} (as this profile's api_key) · Esc cancel
-            </text>
+            <text fg={style.theme.dim}>{fieldOf()?.hint}</text>
           </>
         )}
+      </Show>
+
+      <Show when={mode() === "providers"}>
+        <Show when={provider()} keyed>
+          {(chosen: ProfileView) => (
+            <text fg={style.theme.dim}>
+              {chosen.name} · {chosen.kind} wire
+              {chosen.base_url.length > 0 ? ` · ${chosen.base_url}` : ""}
+              {chosen.api_key_env.length > 0
+                ? ` · ${chosen.api_key_env} ${chosen.credential_source === "env" ? "set" : "unset"}`
+                : ""}
+              {chosen.credential_source === "config" ? " · key in the user config" : ""}
+              {chosen.kind === "codex" ? " · ~/.codex/auth.json" : ""}
+            </text>
+          )}
+        </Show>
+        <text fg={style.theme.dim}>
+          j/k move · Enter its models · s paste its API key · a add a provider · r reload · Esc close
+        </text>
+      </Show>
+      <Show when={mode() === "models"}>
+        <text fg={style.theme.dim}>
+          j/k move · h/l effort · Enter start a session on it · s paste this provider's key · Esc back
+        </text>
+      </Show>
+      <Show when={mode() === "add-wire"}>
+        <text fg={style.theme.dim}>
+          j/k move · Enter confirm the wire · Esc back · the kernel speaks both; pick what the endpoint serves
+        </text>
       </Show>
     </box>
   )

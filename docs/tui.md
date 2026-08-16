@@ -733,3 +733,42 @@ stdout 全是 JSON、退出码 0、stderr 空；行序与 DESIGN §14 完全一�
 **给下一里程碑**：key 输入不做遮罩（本地终端、写完即消失）；`s` 只服务 openai/anthropic 两种 kind（codex 走 `codex login`）；新增一个**不在**内置列表里的 endpoint 仍要手写 5 行 profile——真要"屏幕上加 provider"再做向导。
 
 核验（编排者）：`zig build test` 绿 / `zig build e2e` 绿 / `bun run typecheck` 绿 / `bun test` 86 条：单文件全绿；整套并跑时 1–3 条**进程重**的测试（`probeWriterLease`、driver "killed step"、`discardIfUntouched`）偶发超时，每次不同、单跑都绿、无残留 `nulya` 进程——去掉 model.test.tsx 整套跑同样有 1 条，是本机负载下 T3 起的老现象，不是逻辑回归。
+
+### T6 · 用出来的痛点：composer 塌陷、provider/model 两级、空屏与 slash 补全（2026-08-16）
+
+**状态**：完成。`bun run typecheck` 绿；`bun test` 99 pass（新增 `test/layout.test.tsx` 6 条 + composer 2 条 + model 4 条）；`bun run compile` 出单文件。
+
+来源是一次真实试用给出的三条：①`/model` 配的是"模型"不是"provider"，一个 provider 铺开成好几行、挤满屏幕，而且没有地方填 compatible endpoint；②对话一轮之后 **composer 不见了**；③整体太简陋。
+
+**关键决定与理由**
+
+1. **composer / 状态栏 `flexShrink={0}`（真 bug，②的根因）**。三块布局里 composer 只是普通 flex child：transcript 一长，flex 协商就把它压成 1 行、再压成 0 行——不报错，只是**屏幕上没有能打字的地方了**。`test/layout.test.tsx` 把它钉死：30/24/16/10 行终端 + 80 行的回答，prompt 行与其下两行必须都在。同一类问题在 overlay 上也存在（`/help` 变长后行画在行上），所以 `HelpView` 的正文进 `scrollbox`，`SessionsView` 跟 `ModelView` 一样窗口化（`ui/list.ts` 的 `windowRange` / `visibleRows` 抽出来共用）。**规则**：底部两块永不收缩，中间那块要么滚动要么窗口化。
+
+2. **`/model` 变两级：providers → 它的 models（①）**。原来一行一个 `(profile, model)`：七个内置 profile 变成十四行，其中十三行重复同一句 credential 状态，而且大半是没有 key 的 provider 的模型。现在第一层一行一个 profile（wire + endpoint host + 几个模型 + 能不能跑），Enter 钻进它的模型（effort dial 在这一层）。credential 归 provider，所以 `s` 在两层都是"给当前这个 provider 贴 key"。没有 key 的 provider **仍然可以进去看**——Enter 才说明为什么不能跑，浏览不该被拦。
+
+3. **`a` = 加一个 OpenAI/Anthropic-compatible provider（①的后半句）**。tcode 的 `setup::Setup` 是一个状态机走 name → protocol → base_url → models；这里同形：name → wire（两行菜单，各带一句"谁属于这一类"）→ base URL → 逗号分隔的 model ids → key（可空）。写进 `paths.user` 的**一个**带标记块（`nulya/credentials.ts` 的 `writeProfile`）。`placeBlock` 从"按行数替换"改成"替换到下一个空行"——profile 块的长度随 model 列表变，按行数替换会留下孤儿行。内核一行没改：它本来就说两种 wire，缺的只是"不离开 TUI 就能说出来"的地方。
+   - 每一步的输入框**必须**清空：`<Show keyed>` 在同一帧内 unmount/remount 会复用底下那个 renderable，于是 base URL 前面粘着刚打的 profile 名（`openrouterhttps://…`）。`createEffect` 在每个 text step 开始时清一次。
+   - 全局按键里开输入框的那几处要 `preventDefault()`（`a` / `s` / wire 的 Enter / add 行的 Enter），否则同一次 dispatch 里新挂上来的输入框会把这个键当成自己的第一个字符/一次空提交。
+   - 被拒绝的字段**保留原文**（改比重打便宜）；测试用 `pressBackspace` 擦。
+
+4. **③的三件**：
+   - **空 session 首屏**（§4.1 一直写着、从没做）：`ascii_font` wordmark + 一句话 + 四条 `/` 入口 + 一行"怎么开始"。不是卡片——没有事件支撑它。第一条 turn 落地即消失。model/tools 不重复写，上面那张 CompositionCard 已经说了。
+   - **slash 补全**（§4.4 一直写着、从没做）：`src/commands.ts` 是唯一的命令表，`App.runCommand` 派发它、composer 补全它、`/help` 列它。composer 上方列出还可能是哪几条，`Tab` 补第一条。**没有**可上下选的菜单：Enter 永远发送写着的东西，这是输入框不能破的承诺。只补第一个词——有空格之后是参数，在参数上弹菜单是噪音。
+   - **回读**：`PgUp` / `PgDn` / `Shift+End` 进 keymap（`/help` 原来就在吹这个键、却没人绑）。离开底部时状态栏出 `▾ N more below · Shift+End`，要**连续两次**探测到才显示——长回答排版时 box 会短暂离开自己的 sticky bottom，每条长回答闪一下比不显示更糟。
+
+**偏离设计之处**：§4.1 说空屏是"wordmark + session 信息 + 三条提示"，session 信息那半删了（与 CompositionCard 重复）。§4.4 的补全设计成"小补全弹窗"，实现成不可选的提示列表 + Tab，理由见上。
+
+**怎么看一眼**
+
+```bash
+cd tui && bun test test/layout.test.tsx test/model.test.tsx test/composer.test.tsx
+bun run src/main.tsx --profile scripted   # 空屏 → 打 `/` 看补全 → F5 看两级选择器
+```
+
+**已知问题 / 给下一里程碑**
+- `ExtView` / `UsageView` / `SettingsView` 还没窗口化，条目一多同样会画出界（`ui/list.ts` 已经备好）。
+- `a` 加的 provider 不写 `[[models]]` 目录条目，所以它的模型没有 effort dial、没有 context window——目录是"一个 id 是什么"，等真需要再给表单加一步。
+- `more below` 是 200ms 轮询 + 两次确认，不是事件；鼠标滚轮之后最多晚 400ms 才出现。真嫌慢的话要 OpenTUI 给 scrollbox 一个 scroll 事件。
+- mock 键盘没有 PgUp/PgDn，`test/layout.test.tsx` 直接往 `renderer.stdin` 灌转义序列。
+
+核验（编排者）：`bun run typecheck` 绿 / `bun test` 99 pass 0 fail（`files.test.ts` 的 `probeWriterLease` 在整套并跑时偶发超时、单跑绿——T3 起的老现象）/ `bun run compile` 出 `dist/nulya-tui.exe`。内核 `src/` 一字未改。
