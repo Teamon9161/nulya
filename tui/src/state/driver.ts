@@ -38,6 +38,12 @@ export interface DriverOptions {
    * role is not guessed here — it is reported when a step is refused.
    */
   onBusy?: () => void
+  /**
+   * Resolves once the session's existing tail has been replayed into `state`.
+   * A step started before that would land its events first and the replay
+   * would then be dropped as "already seen" — so the first send waits.
+   */
+  ready?: Promise<void>
 }
 
 /** The kernel's refusal to hand over the writer lease, on the `--stream` wire. */
@@ -46,6 +52,10 @@ function isBusy(line: { kind: string; line?: { stream?: string; event?: string; 
   const stream = line.line
   if (!stream || stream.stream !== "run" || stream.event !== "error") return false
   return typeof stream.message === "string" && stream.message.includes("SessionBusy")
+}
+
+function isRunError(line: { kind: string; line?: { stream?: string; event?: string } }): boolean {
+  return line.kind === "stream" && line.line?.stream === "run" && line.line?.event === "error"
 }
 
 export function createDriver(
@@ -57,18 +67,31 @@ export function createDriver(
   const [status, setStatus] = createSignal<DriverStatus>("idle")
   let handle: StepHandle | null = null
   let disposed = false
+  // `drive()` must never run twice at once: two `session step` processes on
+  // one session means the second is refused with `SessionBusy`, which would
+  // read as "somebody else is driving" — a lie about the world caused by us.
+  let driving = false
+  // Set by `kill()`, so a non-zero exit after Ctrl+C is not reported as a
+  // crash: the user asked for exactly that.
+  let killed = false
 
   async function drive(): Promise<void> {
-    if (disposed) return
+    if (disposed || driving) return
+    driving = true
     setStatus("stepping")
     try {
+      await options.ready
       // Re-step only while the queue is actually shrinking: a pending turn that
       // survives a whole step is a real problem to surface, not to spin on.
       for (;;) {
+        if (disposed) return
         const pendingBefore = state.pendingCount()
         const step = sessionStep(ws, id, { maxSteps: options.maxSteps, env: options.env })
         handle = step
+        killed = false
         let busy = false
+        let reported = false
+        let code = 0
         try {
           for await (const line of step.lines) {
             // A refused lease is a role fact, not an error to paint red: the
@@ -78,10 +101,17 @@ export function createDriver(
               busy = true
               continue
             }
+            if (isRunError(line)) reported = true
             if (line.kind === "stream") state.applyStream(line.line)
             else state.applyEvent(line.event)
           }
-          await step.exited
+          code = await step.exited
+        } catch (error) {
+          // The reader failed, not the kernel: do not leave a step running with
+          // nobody draining its stdout — a full pipe would stall it while it
+          // holds the writer lease.
+          step.kill()
+          throw error
         } finally {
           handle = null
         }
@@ -89,13 +119,22 @@ export function createDriver(
           options.onBusy?.()
           return
         }
-        if (disposed) return
+        // The kernel reports every diagnostic it knows about as a `run error`
+        // line (DESIGN §14). Anything else that ends the process non-zero — an
+        // unexpected Zig error, a crash — only exists on stderr; a killed step
+        // is the one non-zero exit the user asked for.
+        if (code !== 0 && !reported && !killed) {
+          const stderr = (await step.stderr).trim().split("\n")[0] ?? ""
+          state.setError(stderr.length > 0 ? `step exited ${code}: ${stderr}` : `step exited ${code}`)
+        }
+        if (disposed || killed) return
         const pendingAfter = state.pendingCount()
         if (pendingAfter === 0 || pendingAfter >= pendingBefore) break
       }
     } catch (error) {
       state.setError(error instanceof Error ? error.message : String(error))
     } finally {
+      driving = false
       if (!disposed) setStatus("idle")
     }
   }
@@ -106,7 +145,11 @@ export function createDriver(
       const trimmed = text.trim()
       if (trimmed.length === 0) return
       state.enqueueUser(trimmed)
-      const running = status() === "stepping"
+      // Anything but idle means a step is running or about to: the turn is
+      // appended and the run in flight (or the one the earlier send is about to
+      // start) drains it at its next step boundary. Starting a second `drive()`
+      // here would spawn a second step process against the same session.
+      const running = status() !== "idle"
       if (!running) setStatus("sending")
       try {
         await sessionAppend(ws, id, trimmed)
@@ -121,7 +164,7 @@ export function createDriver(
       await drive()
     },
     async step() {
-      if (status() === "stepping") return
+      if (status() !== "idle") return
       await drive()
     },
     async cancel() {
@@ -137,7 +180,9 @@ export function createDriver(
       if (status() === "canceling") setStatus("stepping")
     },
     kill() {
-      handle?.kill()
+      if (!handle) return
+      killed = true
+      handle.kill()
     },
     dispose() {
       disposed = true

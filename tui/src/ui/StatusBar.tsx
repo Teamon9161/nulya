@@ -1,6 +1,5 @@
 import { createMemo } from "solid-js"
-import { useTerminalDimensions } from "@opentui/solid"
-import { useStyle } from "../render/theme.ts"
+import { useScreen, useStyle } from "../render/theme.ts"
 import type { SessionSnapshot } from "../state/session.ts"
 import type { DriverStatus } from "../state/driver.ts"
 import type { Role } from "../state/attach.ts"
@@ -27,7 +26,7 @@ export function StatusBar(props: {
   hint?: string
 }) {
   const style = useStyle()
-  const dimensions = useTerminalDimensions()
+  const screen = useScreen()
 
   const usage = createMemo(() => {
     const u = props.snapshot.usage
@@ -66,7 +65,7 @@ export function StatusBar(props: {
           {usage()} · {activity()} · {props.hint ?? "Esc cancel · Ctrl+O fold · /help"}
         </text>
       </box>
-      {dimensions().width >= 60 ? (
+      {screen().width >= 60 ? (
         <text fg={props.role === "observer" ? style.theme.warn : style.theme.dim}>
           step {props.snapshot.steps} · {props.role === "observer" ? "observer · driven elsewhere" : "driver"}
         </text>

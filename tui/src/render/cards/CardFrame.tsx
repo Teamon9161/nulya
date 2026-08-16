@@ -1,6 +1,5 @@
 import { Show, type JSX } from "solid-js"
-import { useTerminalDimensions } from "@opentui/solid"
-import { useStyle } from "../theme.ts"
+import { useScreen, useStyle } from "../theme.ts"
 import { useFolds } from "../../state/folds.ts"
 import { useBrowse } from "../../state/browse.ts"
 
@@ -32,10 +31,10 @@ export function CardFrame(props: {
   const style = useStyle()
   const folds = useFolds()
   const browse = useBrowse()
-  const dimensions = useTerminalDimensions()
+  const screen = useScreen()
 
   const open = () => props.foldable && folds.isOpen(props.itemKey, props.defaultOpen)
-  const wide = () => dimensions().width >= 60
+  const wide = () => screen().width >= 60
   const selected = () => browse.selected() === props.itemKey
   const toggle = () => {
     if (props.foldable) folds.toggle(props.itemKey, props.defaultOpen)

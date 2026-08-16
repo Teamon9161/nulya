@@ -308,6 +308,11 @@ export function createSessionState(id: string): SessionState {
         switch (line.event) {
           case "started":
             draft.activeTool = null
+            // A new model turn is the kernel telling us the previous failure —
+            // a spawn error, a refused credential, a killed step — is behind
+            // us. Without this the status bar stays red for the rest of the
+            // session, which is not a fact about the session.
+            draft.error = null
             break
           case "text_delta": {
             const key = `p${turn}:assistant`

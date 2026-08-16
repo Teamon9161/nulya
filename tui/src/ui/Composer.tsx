@@ -34,6 +34,10 @@ export function Composer(props: {
   let area: TextareaRenderable | undefined
   const history: string[] = []
   let cursor = 0
+  // The history entry currently shown, if the buffer is one. Up/Down keep
+  // walking history while the buffer still IS that entry, and hand back to
+  // cursor movement the moment the user edits it.
+  let shown: string | null = null
 
   onMount(() => {
     area?.focus()
@@ -53,6 +57,7 @@ export function Composer(props: {
   const submit = () => {
     const text = area?.plainText ?? ""
     clear()
+    shown = null
     if (text.trim().length === 0) {
       props.onEmptySubmit?.()
       return
@@ -64,9 +69,12 @@ export function Composer(props: {
 
   const onKeyDown = (event: KeyEvent) => {
     if (event.name !== "up" && event.name !== "down") return
-    // History only takes over an EMPTY composer; otherwise Up/Down are cursor
-    // movement, which is what a multi-line editor owes its user.
-    if (!area || area.plainText.length > 0 || history.length === 0) return
+    if (!area || history.length === 0) return
+    // History only takes over an EMPTY composer, or one still showing the entry
+    // it last recalled; otherwise Up/Down are cursor movement, which is what a
+    // multi-line editor owes its user.
+    const text = area.plainText
+    if (text.length > 0 && text !== shown) return
     if (event.name === "up") {
       if (cursor === 0) return
       cursor -= 1
@@ -75,7 +83,8 @@ export function Composer(props: {
       cursor += 1
     }
     clear()
-    area?.insertText(cursor < history.length ? history[cursor]! : "")
+    shown = cursor < history.length ? history[cursor]! : null
+    if (shown !== null) area.insertText(shown)
     event.preventDefault()
   }
 

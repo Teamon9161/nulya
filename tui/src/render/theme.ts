@@ -4,8 +4,9 @@
  * metadata is `dim`, and success/failure is a short chip rather than a colour
  * wash over a whole card.
  */
-import { createContext, useContext } from "solid-js"
+import { createContext, useContext, type Accessor } from "solid-js"
 import { RGBA, SyntaxStyle } from "@opentui/core"
+import { useTerminalDimensions } from "@opentui/solid"
 import { default_settings, type Settings } from "../state/settings.ts"
 
 export interface Theme {
@@ -185,4 +186,20 @@ export function useStyle(): Style {
   if (provided) return provided
   fallback ??= createStyle(default_settings)
   return fallback
+}
+
+/**
+ * The terminal size, read once at the top of the tree. Every card wants to know
+ * whether the screen is wide enough for its right-hand chip; asking OpenTUI
+ * directly from each of them registers one resize listener per card, which at
+ * a few hundred mounted cards is a listener-leak warning and a resize that
+ * fans out to all of them. A card rendered on its own (tests) still works: it
+ * falls back to asking the renderer itself.
+ */
+export type ScreenSize = { width: number; height: number }
+
+export const ScreenContext = createContext<Accessor<ScreenSize>>()
+
+export function useScreen(): Accessor<ScreenSize> {
+  return useContext(ScreenContext) ?? useTerminalDimensions()
 }

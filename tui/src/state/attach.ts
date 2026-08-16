@@ -179,6 +179,11 @@ export function createAttachment(
       freeProbes = 0
       setTakeoverReady(false)
       setRole("driver")
+      // A turn we queued as observer is still in the inbox if the other writer
+      // left before draining it. Taking over is the user saying "drive", and the
+      // one mechanical re-step tui.md §4.3 allows is exactly this case: our own
+      // pending turn, nobody else to drain it.
+      if (state.pendingCount() > 0) void driver.step()
     },
     dispose() {
       disposed = true

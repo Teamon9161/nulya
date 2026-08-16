@@ -1,11 +1,23 @@
 /**
- * The `.nulya/` directory layout (DESIGN §3.4 / §5.5 / §7.2), read-only.
+ * The `.nulya/` directory layout (DESIGN §3.4 / §5.5 / §7.2), read-only —
+ * with one exception at the bottom of this file: un-creating a session this
+ * process made and never used (`discardIfUntouched`).
  *
- * The TUI never writes into `.nulya/` except through the CLI (`session append`
- * stages its text in `.nulya/scratch/`, see `cli.ts`) — the session file has
- * exactly one writer and it is `session step`.
+ * Otherwise the TUI never writes into `.nulya/` except through the CLI
+ * (`session append` stages its text in `.nulya/scratch/`, see `cli.ts`) — the
+ * session file has exactly one writer and it is `session step`.
  */
-import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs"
+import {
+  closeSync,
+  existsSync,
+  openSync,
+  readFileSync,
+  readSync,
+  readdirSync,
+  rmdirSync,
+  statSync,
+  unlinkSync,
+} from "node:fs"
 import { join } from "node:path"
 import { parseEventLine, parseHeaderLine, type SessionHeader } from "./ledger.ts"
 import type { Workspace } from "./bin.ts"
@@ -237,6 +249,87 @@ export async function listSessions(ws: Workspace): Promise<SessionEntry[]> {
     })
   }
   return entries.sort((a, b) => b.mtime - a.mtime)
+}
+
+// --- un-creating an unused session ------------------------------------------
+
+function siblingPath(ws: Workspace, id: string, suffix: string): string {
+  return join(ws.dir, sessions_dir, `${id}${suffix}`)
+}
+
+/**
+ * Remove a session that has recorded nothing, if — and only if — nothing about
+ * it says somebody still means to use it.
+ *
+ * The TUI creates a session eagerly at start-up (`session new`) so the frozen
+ * composition and the id are on screen before the first word is typed. Quit
+ * without typing and that file is a header and no events: not a ledger, just
+ * a name. Keeping every one of those turns `/sessions` into a list of empty
+ * rows within a week of use. Removing it is not rewriting history — there is
+ * none — but it IS the one write into `.nulya/sessions/` this program makes,
+ * so the guards are strict and every one is a "no":
+ *
+ *   - any event line: it is a ledger now (physics #1) and stays, empty of
+ *     meaning or not;
+ *   - a non-empty inbox: somebody appended and no step drained it yet — a
+ *     turn the user typed is in there, and the next open would drain it;
+ *   - the writer lease held: a step is running this very moment;
+ *   - on POSIX, a `.lock` at all: the probe cannot see `flock`, and the lock
+ *     file only exists once something opened the session for writing, so the
+ *     honest answer is "don't know" and the honest action is to leave it.
+ *
+ * Callers only ever pass ids THIS process created (`session new` from the
+ * TUI); a session opened with `--session`, or somebody else's, is never a
+ * candidate — another TUI sitting idle on its own fresh session looks exactly
+ * like this from the outside, and deleting it under them would break their
+ * next `append`. Returns whether the session was removed.
+ */
+export function discardIfUntouched(ws: Workspace, id: string): boolean {
+  const path = sessionPath(ws, id)
+  if (!existsSync(path)) return false
+  const lock = lockPath(ws, id)
+  if (existsSync(lock)) {
+    if (process.platform !== "win32") return false
+    if (probeWriterLease(ws, id) !== "free") return false
+  }
+  let text: string
+  try {
+    text = readFileSync(path, "utf8")
+  } catch {
+    return false
+  }
+  // The header is the first line; anything after it is an event.
+  const lines = text.split("\n").filter((line) => line.trim().length > 0)
+  if (lines.length > 1) return false
+  const inbox = siblingPath(ws, id, ".inbox")
+  if (existsSync(inbox)) {
+    try {
+      if (readdirSync(inbox).length > 0) return false
+    } catch {
+      return false
+    }
+  }
+  try {
+    unlinkSync(path)
+  } catch {
+    // Somebody opened it between the checks and now (a Windows sharing
+    // violation, say): it is in use after all, and the checks above hold.
+    return false
+  }
+  for (const sibling of [lock, siblingPath(ws, id, ".cancel")]) {
+    try {
+      if (existsSync(sibling)) unlinkSync(sibling)
+    } catch {
+      // A stray marker next to no session is harmless.
+    }
+  }
+  try {
+    if (existsSync(inbox)) rmdirSync(inbox)
+  } catch {
+    // Non-empty after all, or held open; leaving an empty directory is fine.
+  }
+  scans.delete(path)
+  return true
 }
 
 // --- the extension store ----------------------------------------------------

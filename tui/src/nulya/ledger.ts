@@ -178,19 +178,36 @@ export function capabilitySummary(text: string): { tools: string[]; skills: stri
   return { tools, skills }
 }
 
-/** `[exit N]` is the last line of every `shell` result (`tools/shell.zig`). */
-export function shellExitCode(output: string): number | null {
-  const match = /\[exit (-?\d+)\]\s*$/.exec(output)
-  if (!match || match[1] === undefined) return null
-  return Number.parseInt(match[1], 10)
+/**
+ * `[exit N]` is the last line `tools/shell.zig` writes — but not always the
+ * last line of the RESULT: when the output was truncated, `emit.zig` appends
+ * `[full output: <path>]` (or the step-budget clip footer) after it. So the
+ * exit line is the last `[exit N]` anywhere, not one anchored to the end.
+ */
+const exit_line = /\[exit (-?\d+)\]/g
+
+function lastExitMatch(output: string): { code: number; at: number } | null {
+  let found: { code: number; at: number } | null = null
+  exit_line.lastIndex = 0
+  for (let match = exit_line.exec(output); match !== null; match = exit_line.exec(output)) {
+    found = { code: Number.parseInt(match[1]!, 10), at: match.index }
+  }
+  return found
 }
 
-/** Split a shell result into its stdout and stderr sections. */
+export function shellExitCode(output: string): number | null {
+  return lastExitMatch(output)?.code ?? null
+}
+
+/**
+ * Split a shell result into its stdout and stderr sections. Whatever follows
+ * the exit line is emit's footer, and the spill path it names is already a
+ * field of the tool result (`spill_path`), so it is not repeated in the body.
+ */
 export function splitShellOutput(output: string): { stdout: string; stderr: string; exit: number | null } {
-  const exit = shellExitCode(output)
-  let body = output
-  const exit_at = body.lastIndexOf("[exit ")
-  if (exit !== null && exit_at >= 0) body = body.slice(0, exit_at)
+  const found = lastExitMatch(output)
+  const exit = found?.code ?? null
+  const body = found ? output.slice(0, found.at) : output
   const marker = "--- stderr ---\n"
   const at = body.indexOf(marker)
   if (at < 0) return { stdout: body.replace(/\n+$/, ""), stderr: "", exit }

@@ -248,6 +248,7 @@ Driver 演化比 Tool 保守，因为**归因难**（任务难度 / model / seed
 ### 3.11 前端 / ACP / MCP `[占位 · M8]`
 
 - 前端（CLI 交互 / TUI / app / ACP）都是 core 之上的薄客户端：tail ledger 文件 + append user 事件。**前端是长期进程，re-spawn 的只是 worker，UI 状态不丢。**
+- **TUI 已有设计契约与里程碑：[tui.md](tui.md)**（Bun + OpenTUI，仓库顶层 `tui/`；唯一内核改动 `session step --stream`，纯观测）。
 - ACP：`session/new|prompt|cancel` 直接翻译成 `nulya session *`。
 - MCP client：一个 extension，把 MCP tools 适配成 `tool.Tool` 进 ToolSetSnapshot（同构）。
 - 唯一需要常驻进程的是"子 agent 与真人持续流式对话跨多轮"——persistent mode，纯后期加法。

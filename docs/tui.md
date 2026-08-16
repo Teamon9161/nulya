@@ -651,3 +651,32 @@ stdout 全是 JSON、退出码 0、stderr 空；行序与 DESIGN §14 完全一�
 5. **性能的下一个瓶颈不在这三处**：真要更快，测的应该是 `EditCard` 的 diff 高度上限与 markdown 解析（两者都跨真实计时器 tick 落地，见 T1 的 `settle()`），不是 items 数。
 
 核验（编排者）：`zig build test` 绿（连跑两轮，T3 那次 flake 未再出现）/ `zig build e2e` 绿 / `bun test` 60 pass 0 fail（17 快照，8 文件）。T0–T4 全部完成。
+
+### T4 之后 · review 修补（2026-08-16）
+
+**状态**：对 `tui/src` 逐文件 review 后修的一轮，全部是前端；**内核一行未改**。`bun test` 71 pass 0 fail（11 文件，17 快照），`bun run typecheck` 绿。每一条都有回归测试钉住（新增 `test/driver.test.ts` / `test/ledger.test.ts` / `test/composer.test.tsx`）。
+
+**修了什么（按严重程度）**
+
+1. **两次快速发送会开两个 step 进程 → 第二个被内核 `SessionBusy` 拒 → 角色误切成 observer。** `driver.send` 只把 `stepping` 当"在跑"，第一条还在 `sending`（append 中）时第二条又走了一遍 `drive()`。现在 `drive()` 有 `driving` 门闩、`send/step` 把任何非 `idle` 都当在跑；同时 `nulya/cli.ts` 的 `sessionAppend` **按 session 串行**——两个并发的 `session append` 进程在 inbox 里没有定义的先后，实测过 "first, second" 落成 "second, first"。
+2. **`snapshot.error` 从不清除**：一次 spawn 失败 / `run error` 之后状态栏红到进程结束。现在 `model started` 清掉它（一步真的开始，就是上一次失败已经过去的事实）。
+3. **`Ctrl+C` 的"再按一下退出"永远待命**：`ctrlCArmed` 置真后不复位，之后任何时刻的第一下 Ctrl+C 都直接退出而不是先 kill 当前 step。现在新 step 开始时复位，且 3 秒后自动失效。
+4. **被消费的全局键也会打进 composer**：OpenTUI 先跑全局 `useKeyboard` 再跑焦点控件，App 从不 `preventDefault()`，于是 `Ctrl+W` 同时"关 tab"和"删一个词"（textarea 自带 readline 绑定），任何与 textarea 撞的 `[keys]` 覆盖都会双发。现在 App 消费的键一律 `preventDefault()`；`Ctrl+W` 只在 >1 个 tab 时归 App，单 tab 时保留 composer 的删词。
+5. **step 进程非零退出但没打 `run error` 行时静默**（意外的 Zig 错误、崩溃：只在 stderr 上）。现在 exit≠0 且未见 `run error`、且不是我们 kill 的 → 状态栏显示 `step exited N: <stderr 首行>`。被 kill 的 step 有 `killed` 标记，**不**当崩溃报，也不再触发"pending 收缩就再 step"的循环。
+6. **spill 过的 shell 结果丢掉 exit chip**：`emit.zig` 截断时在 `[exit N]` **之后**追加 `[full output: …]`，`shellExitCode` 却锚定行尾。现在取最后一个 `[exit N]`，footer 不进卡片正文（spill 路径已是 `spill_path` 字段，卡片尾行画一次）。
+7. **hydrate 与首个 step 的竞态**：`tabs.ts` 先建 attachment 再异步回放 tail；打开后立刻发送，step 的事件先到、回放到达时全部 `seq ≤ applied` 被当重复丢掉。现在 attachment 带一个 `ready` promise，`drive()` 先等回放完。
+8. **composer 历史只能取回最后一条**：Up 一次后 buffer 非空，再按 Up 变成光标移动。现在记住"当前显示的是哪条历史"，buffer 仍是那条就继续走历史，用户一改就交还光标。
+9. **每张卡一个 resize 监听器**：`CardFrame`/`StatusBar`/`Hairline` 各自 `useTerminalDimensions()`，400 张卡 = 400 个监听器（`MaxListenersExceededWarning` 在 perf 测试里刷屏）。新增 `render/theme.ts` 的 `ScreenContext`/`useScreen()`，App 顶上读一次；单卡测试无 provider 时回退到直接问 renderer。
+10. **`Ctrl+C` 只杀 step 进程本身，Windows 上 shell 子进程残留**（T1 起的已知问题）。`cli.ts` 的 kill 在 win32 上先 `taskkill /pid <pid> /t /f` 再兜底 `proc.kill()`（顺序不能反：先杀父进程会把子树孤儿化，taskkill 就枚举不到了）。
+11. **take-over 后自己排队的那句话没人排干**：observer 时 `append` 进了 inbox，对方退出、我们接管，之后要再发一句或 `/step` 才动。现在 `takeOver()` 若 `pendingCount() > 0` 就 `step()` 一次——这仍是 T1 定的那条唯一的机械 re-step（我们自己的 pending），不是"自动继续"。
+12. browse / `Ctrl+O` 只在**挂着的**卡（`history_window` 内）里走，选到没挂的卡不会再出现"看不见的高亮"。
+13. **空场不留**（同一天补的）。TUI 启动即 `session new`（为了首屏就能画冻结组成与 id），看一眼就退会留下一个"只有 header、0 事件"的文件，dogfood 一周 `/sessions` 就是一列空行。现在 **TUI 自己造的**（无参启动 / `--new` / `/new` / `/sessions` 的 `n`）session 在 tab 关闭或退出时若**从未记录任何东西**就被撤销：`nulya/files.ts` 的 `discardIfUntouched` 是这个程序对 `.nulya/sessions/` 的唯一一处写，四道门任一为"否"就不删——有事件行（那已经是 ledger，physics #1）；inbox 非空（有人 append 了、还没被 step 排干，里头是用户打的字）；租约被持有（此刻正有 step 在跑）；非 Windows 上只要 `.lock` 存在（探针看不见 `flock`，答"不知道"就不动）。`--session <id>` 打开的、别人的，**永远不是候选**——另一个 TUI 空闲地坐在它自己刚建的空场上，从外面看和这个一模一样，删掉会让它的下一次 `append` 报 `no such session`。§5.4 的"`/sessions` 无删除键"仍成立：那是关于有内容的 ledger 的。测试：`files.test.ts` 四道门各一条、`lifecycle.test.tsx` App 级三条（造了没用→没了；造了用了→在；按 id 打开→在）。
+
+**没改、但值得你知道的**
+
+- **模型 / preset 选择器**（tcode 那种）：**没有**。`--model <profile>` / `/new --model <profile>` 手打 profile 名。模型选择器本身不复杂（一个 overlay 列 profile → Enter → `session new --model` 开新 tab；模型冻结在 session 头，"换模型"永远等于"开新场"），卡在 §10.2 的 `nulya config show [--json]`——没有它，前端得自己复刻 `default → system → user → project` 的合并（含 project 层只能收窄）才知道有哪些 profile，必然漂移。那是 `cli.zig` 外壳层几十行，不是内核改动。**preset 选择器**：内核没有 preset 概念，`session new --system-file/--skill/--pin` 都还没落地（§10.7），没有东西可选，现在做是空中楼阁。
+- 不干净的退出（关终端窗口、`kill -9`）留下的空场不会被扫：TUI 无法区分"我上次留下的"和"另一个进程刚建的"，宁可留一行也不删别人的。
+- §4.5 的 `↓ N new`（离开底部时的新内容提示）仍未做。
+- 非 Windows 上租约探针仍答 `unknown`（T3 起）。
+
+核验：`bun run typecheck` 绿 / `bun test` 75 pass 0 fail（12 文件，17 快照）。内核未动，`zig build test` / `e2e` 不受影响。

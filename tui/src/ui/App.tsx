@@ -1,6 +1,7 @@
 import { Match, Switch, createEffect, createSignal, onCleanup } from "solid-js"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
-import { Transcript } from "./Transcript.tsx"
+import type { KeyEvent } from "@opentui/core"
+import { Transcript, windowItems } from "./Transcript.tsx"
 import { Composer, type ComposerApi } from "./Composer.tsx"
 import { StatusBar } from "./StatusBar.tsx"
 import { TabBar } from "./TabBar.tsx"
@@ -9,7 +10,7 @@ import { ExtView } from "./overlays/ExtView.tsx"
 import { HelpView } from "./overlays/HelpView.tsx"
 import { SettingsView } from "./overlays/SettingsView.tsx"
 import { UsageView } from "./overlays/UsageView.tsx"
-import { StyleContext, useStyle, type Style } from "../render/theme.ts"
+import { ScreenContext, StyleContext, useScreen, useStyle, type Style } from "../render/theme.ts"
 import { FoldContext, createFoldStore } from "../state/folds.ts"
 import { BrowseContext, createBrowseStore } from "../state/browse.ts"
 import { OverlayContext, createOverlayStore, type OverlayKind } from "../state/overlay.ts"
@@ -27,11 +28,17 @@ export interface AppProps {
   state: SessionState
   style: Style
   driver?: AttachOptions
+  /** `id` was created by this process (`session new`), not opened by name. */
+  created?: boolean
 }
 
-/** The cards browse mode walks and Ctrl+O toggles: everything with a body. */
-function foldable(items: readonly TranscriptItem[]): TranscriptItem[] {
-  return items.filter((item) => item.kind === "tool" || item.kind === "thinking")
+/**
+ * The cards browse mode walks and Ctrl+O toggles: everything with a body that
+ * is actually on screen. Items outside `history_window` are not mounted, so a
+ * selection there would be invisible.
+ */
+function foldable(items: readonly TranscriptItem[], window: number): TranscriptItem[] {
+  return windowItems(items, window).filter((item) => item.kind === "tool" || item.kind === "thinking")
 }
 
 /**
@@ -43,11 +50,16 @@ function foldable(items: readonly TranscriptItem[]): TranscriptItem[] {
  */
 export function App(props: AppProps) {
   const renderer = useRenderer()
+  const screen = useTerminalDimensions()
   const folds = createFoldStore()
   const browse = createBrowseStore()
   const overlay = createOverlayStore()
   const keys = createKeymap(props.style.settings)
-  const tabs = createTabStore(props.ws, { id: props.id, state: props.state }, props.driver ?? {})
+  const tabs = createTabStore(
+    props.ws,
+    { id: props.id, state: props.state, created: props.created ?? false },
+    props.driver ?? {},
+  )
 
   const [notice, setNotice] = createSignal<string | null>(null)
   const [spinnerTick, setSpinnerTick] = createSignal(0)
@@ -57,6 +69,7 @@ export function App(props: AppProps) {
 
   const tab = () => tabs.active()
   const snapshot = () => tab().state.snapshot
+  const cards = () => foldable(snapshot().items, props.style.historyWindow)
 
   createEffect(() => {
     if (!props.style.motion) return
@@ -65,13 +78,25 @@ export function App(props: AppProps) {
     onCleanup(() => clearInterval(timer))
   })
 
+  // "Ctrl+C again to quit" is an offer about THIS step. It lapses when a new
+  // step starts (the first press must kill again, not quit) and after a short
+  // while regardless, so a press minutes later is never a surprise exit.
+  createEffect(() => {
+    if (tab().attach.status() === "stepping") setCtrlCArmed(false)
+  })
+  createEffect(() => {
+    if (!ctrlCArmed()) return
+    const timer = setTimeout(() => setCtrlCArmed(false), 3000)
+    onCleanup(() => clearTimeout(timer))
+  })
+
   onCleanup(() => tabs.disposeAll())
 
   const spinnerFrame = () => props.style.spinner[spinnerTick() % props.style.spinner.length]!
 
   const lastFoldable = () => {
-    const cards = foldable(snapshot().items)
-    return cards.length > 0 ? cards[cards.length - 1]! : null
+    const list = cards()
+    return list.length > 0 ? list[list.length - 1]! : null
   }
 
   /** The session a card names, if it names one — the sub-session link (tui.md §5.5). */
@@ -81,10 +106,10 @@ export function App(props: AppProps) {
   }
 
   const enterBrowse = () => {
-    const cards = foldable(snapshot().items)
-    if (cards.length === 0) return
+    const list = cards()
+    if (list.length === 0) return
     composer?.blur()
-    browse.enter(cards[cards.length - 1]!.key)
+    browse.enter(list[list.length - 1]!.key)
     setNotice("browse · j/k move · Enter open/fold · Space fold · Esc back")
   }
 
@@ -95,14 +120,14 @@ export function App(props: AppProps) {
   }
 
   const moveBrowse = (delta: number) => {
-    const cards = foldable(snapshot().items)
-    if (cards.length === 0) return
-    const at = cards.findIndex((item) => item.key === browse.selected())
-    const next = Math.min(Math.max((at < 0 ? cards.length - 1 : at) + delta, 0), cards.length - 1)
-    browse.select(cards[next]!.key)
+    const list = cards()
+    if (list.length === 0) return
+    const at = list.findIndex((item) => item.key === browse.selected())
+    const next = Math.min(Math.max((at < 0 ? list.length - 1 : at) + delta, 0), list.length - 1)
+    browse.select(list[next]!.key)
   }
 
-  const selectedItem = () => foldable(snapshot().items).find((item) => item.key === browse.selected()) ?? null
+  const selectedItem = () => cards().find((item) => item.key === browse.selected()) ?? null
 
   const toggleSelected = () => {
     const key = browse.selected()
@@ -123,8 +148,8 @@ export function App(props: AppProps) {
     composer?.focus()
   }
 
-  const openSession = (id: string) => {
-    tabs.open(id)
+  const openSession = (id: string, created = false) => {
+    tabs.open(id, { created })
     closeOverlay()
     setNotice(`opened ${id}`)
   }
@@ -132,7 +157,7 @@ export function App(props: AppProps) {
   const newSession = async (model?: string) => {
     try {
       const id = await sessionNew(props.ws, model ? { model } : {})
-      openSession(id)
+      openSession(id, true)
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error))
     }
@@ -200,13 +225,24 @@ export function App(props: AppProps) {
     void tab().attach.send(text)
   }
 
+  /**
+   * A key this screen acted on must not ALSO reach the focused textarea:
+   * global listeners run before the focused renderable, and the composer has
+   * readline bindings of its own (Ctrl+W deletes a word), so without this a
+   * rebound key would do two things at once.
+   */
+  const consume = (key: KeyEvent, action: () => void) => {
+    key.preventDefault()
+    action()
+  }
+
   useKeyboard((key) => {
     // An overlay owns the keyboard while it is up; only the keys that open or
     // close one, and the quit key, stay global (tui.md §11, T2 reminder 3).
     if (overlay.active()) {
-      if (matches(keys.ext, key)) return openOverlay("ext")
-      if (matches(keys.sessions, key)) return openOverlay("sessions")
-      if (matches(keys.help, key)) return openOverlay("help")
+      if (matches(keys.ext, key)) return consume(key, () => openOverlay("ext"))
+      if (matches(keys.sessions, key)) return consume(key, () => openOverlay("sessions"))
+      if (matches(keys.help, key)) return consume(key, () => openOverlay("help"))
       if (matches(keys.quit, key)) quit()
       return
     }
@@ -233,15 +269,14 @@ export function App(props: AppProps) {
       }
       return
     }
-    if (matches(keys.sessions, key)) return openOverlay("sessions")
-    if (matches(keys.ext, key)) return openOverlay("ext")
-    if (matches(keys.help, key)) return openOverlay("help")
-    if (matches(keys.nextTab, key)) {
-      tabs.next()
-      return
-    }
+    if (matches(keys.sessions, key)) return consume(key, () => openOverlay("sessions"))
+    if (matches(keys.ext, key)) return consume(key, () => openOverlay("ext"))
+    if (matches(keys.help, key)) return consume(key, () => openOverlay("help"))
+    if (matches(keys.nextTab, key)) return consume(key, () => tabs.next())
     if (matches(keys.closeTab, key)) {
-      tabs.close(tab().id)
+      // With one tab there is nothing to close, and the composer keeps its own
+      // meaning for the key (Ctrl+W: delete the word behind the cursor).
+      if (tabs.tabs().length > 1) consume(key, () => tabs.close(tab().id))
       return
     }
     if (matches(keys.cancel, key)) {
@@ -254,20 +289,19 @@ export function App(props: AppProps) {
       return
     }
     if (matches(keys.fold, key)) {
-      const item = lastFoldable()
-      if (item) folds.toggle(item.key, false)
-      return
+      return consume(key, () => {
+        const item = lastFoldable()
+        if (item) folds.toggle(item.key, false)
+      })
     }
     if (matches(keys.foldAll, key)) {
-      const next = !allOpen()
-      setAllOpen(next)
-      folds.setAll(next)
-      return
+      return consume(key, () => {
+        const next = !allOpen()
+        setAllOpen(next)
+        folds.setAll(next)
+      })
     }
-    if (matches(keys.redraw, key)) {
-      renderer.requestRender()
-      return
-    }
+    if (matches(keys.redraw, key)) return consume(key, () => renderer.requestRender())
     if (matches(keys.quit, key)) {
       // First press stops the step, second leaves. Two different truths about
       // "stop" (tui.md §1.2 D6): the kernel's, then the process's.
@@ -306,67 +340,69 @@ export function App(props: AppProps) {
 
   return (
     <StyleContext.Provider value={props.style}>
-      <FoldContext.Provider value={folds}>
-        <BrowseContext.Provider value={browse}>
-          <OverlayContext.Provider value={overlay}>
-            <box flexDirection="column" width="100%" height="100%">
-              <box flexDirection="row" width="100%" height={1} flexShrink={0} paddingLeft={1} paddingRight={1}>
-                <text fg={props.style.theme.dim}>{header()}</text>
+      <ScreenContext.Provider value={screen}>
+        <FoldContext.Provider value={folds}>
+          <BrowseContext.Provider value={browse}>
+            <OverlayContext.Provider value={overlay}>
+              <box flexDirection="column" width="100%" height="100%">
+                <box flexDirection="row" width="100%" height={1} flexShrink={0} paddingLeft={1} paddingRight={1}>
+                  <text fg={props.style.theme.dim}>{header()}</text>
+                </box>
+                <TabBar tabs={tabs.tabs()} activeIndex={tabs.activeIndex()} />
+                <Hairline />
+
+                <Switch
+                  fallback={
+                    <Transcript
+                      items={snapshot().items}
+                      header={snapshot().header}
+                      contributions={tab().contributions()}
+                    />
+                  }
+                >
+                  <Match when={overlay.kind() === "sessions"}>
+                    <SessionsView
+                      ws={props.ws}
+                      currentId={tab().id}
+                      onOpen={openSession}
+                      onNew={() => void newSession()}
+                      onClose={closeOverlay}
+                    />
+                  </Match>
+                  <Match when={overlay.kind() === "ext"}>
+                    <ExtView ws={props.ws} header={snapshot().header} onClose={closeOverlay} />
+                  </Match>
+                  <Match when={overlay.kind() === "help"}>
+                    <HelpView keys={keys} onClose={closeOverlay} />
+                  </Match>
+                  <Match when={overlay.kind() === "settings"}>
+                    <SettingsView ws={props.ws} onClose={closeOverlay} />
+                  </Match>
+                  <Match when={overlay.kind() === "usage"}>
+                    <UsageView ws={props.ws} snapshot={snapshot()} onClose={closeOverlay} />
+                  </Match>
+                </Switch>
+
+                <Hairline />
+                <Composer
+                  onSubmit={submit}
+                  onEmptySubmit={takeOverIfOffered}
+                  onReady={(api) => (composer = api)}
+                />
+                <Hairline />
+                <StatusBar
+                  snapshot={snapshot()}
+                  status={tab().attach.status()}
+                  role={tab().attach.role()}
+                  takeoverReady={tab().attach.takeoverReady()}
+                  spinnerFrame={spinnerFrame()}
+                  hint={notice() ?? undefined}
+                />
               </box>
-              <TabBar tabs={tabs.tabs()} activeIndex={tabs.activeIndex()} />
-              <Hairline />
-
-              <Switch
-                fallback={
-                  <Transcript
-                    items={snapshot().items}
-                    header={snapshot().header}
-                    contributions={tab().contributions()}
-                  />
-                }
-              >
-                <Match when={overlay.kind() === "sessions"}>
-                  <SessionsView
-                    ws={props.ws}
-                    currentId={tab().id}
-                    onOpen={openSession}
-                    onNew={() => void newSession()}
-                    onClose={closeOverlay}
-                  />
-                </Match>
-                <Match when={overlay.kind() === "ext"}>
-                  <ExtView ws={props.ws} header={snapshot().header} onClose={closeOverlay} />
-                </Match>
-                <Match when={overlay.kind() === "help"}>
-                  <HelpView keys={keys} onClose={closeOverlay} />
-                </Match>
-                <Match when={overlay.kind() === "settings"}>
-                  <SettingsView ws={props.ws} onClose={closeOverlay} />
-                </Match>
-                <Match when={overlay.kind() === "usage"}>
-                  <UsageView ws={props.ws} snapshot={snapshot()} onClose={closeOverlay} />
-                </Match>
-              </Switch>
-
-              <Hairline />
-              <Composer
-                onSubmit={submit}
-                onEmptySubmit={takeOverIfOffered}
-                onReady={(api) => (composer = api)}
-              />
-              <Hairline />
-              <StatusBar
-                snapshot={snapshot()}
-                status={tab().attach.status()}
-                role={tab().attach.role()}
-                takeoverReady={tab().attach.takeoverReady()}
-                spinnerFrame={spinnerFrame()}
-                hint={notice() ?? undefined}
-              />
-            </box>
-          </OverlayContext.Provider>
-        </BrowseContext.Provider>
-      </FoldContext.Provider>
+            </OverlayContext.Provider>
+          </BrowseContext.Provider>
+        </FoldContext.Provider>
+      </ScreenContext.Provider>
     </StyleContext.Provider>
   )
 }
@@ -377,10 +413,10 @@ export function App(props: AppProps) {
  */
 function Hairline() {
   const style = useStyle()
-  const dimensions = useTerminalDimensions()
+  const screen = useScreen()
   return (
     <text fg={style.theme.hairline} height={1} flexShrink={0}>
-      {style.glyphs.hairline.repeat(Math.max(0, dimensions().width))}
+      {style.glyphs.hairline.repeat(Math.max(0, screen().width))}
     </text>
   )
 }

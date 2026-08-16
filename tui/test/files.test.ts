@@ -6,10 +6,12 @@
  */
 import { afterAll, beforeAll, expect, test } from "bun:test"
 import {
+  discardIfUntouched,
   listExtensions,
   listSessions,
   probeWriterLease,
   readToolUsage,
+  sessionExists,
   type LeaseState,
 } from "../src/nulya/files.ts"
 import { sessionAppend, sessionNew, sessionStep } from "../src/nulya/cli.ts"
@@ -120,3 +122,47 @@ test("readToolUsage projects the journal without ranking it", async () => {
   const counts = usage.map((row) => row.uses)
   expect([...counts].sort((a, b) => b - a)).toEqual(counts)
 }, 60_000)
+
+/**
+ * Un-creating a session the TUI made and never used. The guards are the test:
+ * every way a session can carry meaning must keep it.
+ */
+test("discardIfUntouched removes only a session that recorded nothing and holds nothing", async () => {
+  // Fresh from `session new`: a header and no events → removed, siblings too.
+  const empty = await sessionNew(ws, { model: "scripted" })
+  expect(sessionExists(ws, empty)).toBe(true)
+  expect(discardIfUntouched(ws, empty)).toBe(true)
+  expect(sessionExists(ws, empty)).toBe(false)
+  expect((await listSessions(ws)).map((entry) => entry.id)).not.toContain(empty)
+  // Twice is a no-op, not an error.
+  expect(discardIfUntouched(ws, empty)).toBe(false)
+
+  // A turn waiting in the inbox: the user said something nobody has drained
+  // yet. Deleting would lose it → kept.
+  const queued = await sessionNew(ws, { model: "scripted" })
+  await sessionAppend(ws, queued, "not yet stepped")
+  expect(discardIfUntouched(ws, queued)).toBe(false)
+  expect(sessionExists(ws, queued)).toBe(true)
+  // …and once it IS drained it is a ledger with events → kept, forever.
+  await drainStep(queued)
+  expect(discardIfUntouched(ws, queued)).toBe(false)
+  expect(sessionExists(ws, queued)).toBe(true)
+
+  // A step holding the lease right now → kept, whatever the file says.
+  const held = await sessionNew(ws, { model: "scripted" })
+  await sessionAppend(ws, held, "hold it")
+  const step = sessionStep(ws, held, { env: scripted_loop_env, maxSteps: 200 })
+  let holding = false
+  const drain = (async () => {
+    for await (const _ of step.lines) holding = true
+  })()
+  try {
+    await until(() => holding, 30_000)
+    expect(discardIfUntouched(ws, held)).toBe(false)
+    expect(sessionExists(ws, held)).toBe(true)
+  } finally {
+    step.kill()
+    await step.exited
+    await drain
+  }
+}, 120_000)

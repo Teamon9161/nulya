@@ -36,7 +36,11 @@ bun run tui\src\main.tsx
 ```
 
 The first frame is an empty transcript with a fresh session id in the header.
-Type, press `Enter`.
+Type, press `Enter`. (Look and leave instead, and that fresh session is
+un-created on the way out: a session the TUI itself made and never recorded
+anything in does not stay behind as an empty row in `/sessions`. Sessions with
+events, sessions with a turn still queued, and sessions opened with `--session`
+are never touched.)
 
 **Which `nulya.exe` gets used**, in order:
 
@@ -123,8 +127,8 @@ bun run tui\src\main.tsx --model codex
    kernel stops at its next step boundary, so the tool that is already running
    finishes and the ledger stays legal. If you need the process gone right now,
    `Ctrl+C` kills the step (press it again to quit the TUI); the next open
-   repairs the interrupted batch. On Windows the killed step's own shell child
-   may survive it — check Task Manager if a `zig build` seems to keep running.
+   repairs the interrupted batch. The kill takes the step's process tree with
+   it (`taskkill /T` on Windows), so a `zig build` the agent started stops too.
 3. **Leave and come back.** `Ctrl+C` twice quits. Reopen exactly where you were:
 
    ```powershell
@@ -146,20 +150,20 @@ bun run tui\src\main.tsx --model codex
 |---|---|
 | `Enter` | send |
 | `Shift+Enter` / `Ctrl+J` | newline |
-| `↑` / `↓` (empty composer) | previous / next message |
+| `↑` / `↓` (empty composer) | walk the message history; keeps walking while the buffer is still the recalled entry |
 | `Esc` (stepping) | `session cancel` — the kernel stops at its next step boundary |
 | `Esc` (idle, empty composer) | browse mode: `j`/`k` move, `Space` folds, `Esc` returns |
 | click a head line | fold / unfold that card |
 | `Ctrl+O` | fold / unfold the most recent tool or thinking card |
 | `Ctrl+Shift+O` | expand everything (again to collapse everything) |
-| `Ctrl+C` | kill the running step; press again to quit |
+| `Ctrl+C` | kill the running step (and, on Windows, its whole process tree); press again within a few seconds to quit. Idle: quit |
 | `Enter` (observer, empty composer) | take over the session once the lease is free |
 | `Enter` (browse, sub-session card) | open that session as a second tab |
 | `F1` | `/help` — every binding, as currently bound |
 | `F2` | `/ext` — the extension store |
 | `F3` | `/sessions` — the session store |
 | `F4` | next tab (tabs appear once a second session is open) |
-| `Ctrl+W` | close the current tab |
+| `Ctrl+W` | close the current tab (with one tab it is the composer's delete-word, as in a shell) |
 
 Inside `/sessions`: `j`/`k` move, `Enter` opens, `n` starts a new session, `r`
 refreshes, `Esc` closes. Inside `/ext`: `j`/`k` move, `Tab` switches pane
@@ -226,7 +230,12 @@ projections. `test/observer.test.ts` runs `test/fixtures/driver-loop.ts` as a
 real second driver and asserts the whole observer path. `test/views.test.tsx`
 covers `/help`, `/settings`, `/usage` and a `[keys]` override end to end.
 `test/perf.test.tsx` builds a 5000-event session and holds the T4 bar: it opens
-in well under a second and streaming stays under a frame.
+in well under a second and streaming stays under a frame. `test/lifecycle.test.tsx`
+pins what a TUI process leaves behind. `test/driver.test.ts`
+pins the driver's honesty (one step at a time, a kill is not a crash, a crash is
+not silence, an old error does not outlive the next step); `test/ledger.test.ts`
+the shell-result parsing; `test/composer.test.tsx` history walking and the
+consumed-key rule.
 
 ## Layout
 

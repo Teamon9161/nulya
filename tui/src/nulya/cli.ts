@@ -124,12 +124,42 @@ export async function sessionNew(ws: Workspace, options: NewSessionOptions = {})
 }
 
 /**
+ * Appends in flight, per session. Two `session append` processes running at
+ * once have no defined order in the inbox — the one that happens to finish
+ * first is drained first — so turns typed as "first, second" could land as
+ * "second, first". Serialising them here keeps the ledger's order the user's.
+ */
+const appends = new Map<string, Promise<void>>()
+
+/**
  * `nulya session append` — the text goes through a scratch file rather than
  * argv: multi-line input and Windows quoting both stop being our problem. The
  * turn lands in the inbox and only enters the ledger at the next step boundary,
  * so the caller must treat it as queued until the matching `user_text` arrives.
+ * Calls for the same session run one after another, in call order.
  */
-export async function sessionAppend(ws: Workspace, id: string, text: string): Promise<void> {
+export function sessionAppend(ws: Workspace, id: string, text: string): Promise<void> {
+  // The id first: it has a fixed alphabet (`s-[A-Za-z0-9._-]+`), so `@` cannot
+  // be part of it and the key is unambiguous whatever the directory contains.
+  const key = `${id}@${ws.dir}`
+  const previous = appends.get(key) ?? Promise.resolve()
+  const mine = previous.then(
+    () => appendNow(ws, id, text),
+    () => appendNow(ws, id, text),
+  )
+  // The chain must never break on one failure; the caller sees its own.
+  const settled = mine.then(
+    () => undefined,
+    () => undefined,
+  )
+  appends.set(key, settled)
+  void settled.then(() => {
+    if (appends.get(key) === settled) appends.delete(key)
+  })
+  return mine
+}
+
+async function appendNow(ws: Workspace, id: string, text: string): Promise<void> {
   const nonce = Math.random().toString(36).slice(2, 10)
   const rel = `.nulya/scratch/tui-${Date.now().toString(36)}-${nonce}.txt`
   await Bun.write(`${ws.dir}/${rel}`, text)
@@ -259,12 +289,42 @@ export function sessionStep(ws: Workspace, id: string, options: StepOptions = {}
     lines: lines(),
     exited: proc.exited,
     stderr,
-    kill: () => {
-      try {
-        proc.kill()
-      } catch {
-        // Already gone; nothing to stop.
-      }
-    },
+    kill: () => killTree(proc),
   }
+}
+
+/**
+ * Kill a step and whatever it spawned. `Bun.spawn().kill()` stops only the
+ * process itself; on Windows the `shell` tool's child (a `zig build test`, say)
+ * would outlive it, still working in the workspace after the user asked for
+ * everything to stop. `taskkill /T` takes the whole tree; POSIX shells put the
+ * child in the same process group, so the plain kill already reaches it there.
+ * The ledger is safe either way: the next open repairs the interrupted batch
+ * (`completeInterruptedToolBatch`).
+ */
+function killTree(proc: ReturnType<typeof Bun.spawn>): void {
+  const plain = () => {
+    try {
+      proc.kill()
+    } catch {
+      // Already gone; nothing to stop.
+    }
+  }
+  if (process.platform === "win32" && proc.pid) {
+    try {
+      // Tree first, then the plain kill as a backstop once taskkill has had its
+      // look: killing the parent first would orphan the children before
+      // taskkill could enumerate them.
+      const sweep = Bun.spawn({
+        cmd: ["taskkill", "/pid", String(proc.pid), "/t", "/f"],
+        stdout: "ignore",
+        stderr: "ignore",
+      })
+      void sweep.exited.then(plain, plain)
+      return
+    } catch {
+      // taskkill unavailable; fall through to the plain kill.
+    }
+  }
+  plain()
 }

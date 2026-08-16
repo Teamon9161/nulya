@@ -64,6 +64,10 @@ async function main() {
     process.stderr.write(`no such session '${id}' in ${ws.dir}\n`)
     process.exit(1)
   }
+  // Created here, not opened by name: if it is still empty when the TUI quits
+  // it is un-created again (`files.discardIfUntouched`), so a look-and-leave
+  // does not leave a row in `/sessions`.
+  const created = id === undefined
   id ??= await sessionNew(ws, args.model ? { model: args.model } : {})
 
   const settings = await loadSettings(ws.dir)
@@ -78,6 +82,7 @@ async function main() {
         state={state}
         style={style}
         driver={args.maxSteps !== undefined ? { maxSteps: args.maxSteps } : {}}
+        created={created}
       />
     ),
     { exitOnCtrlC: false, targetFps: 30 },

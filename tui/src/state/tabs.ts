@@ -10,7 +10,7 @@
 import { createSignal, type Accessor } from "solid-js"
 import { createSessionState, type SessionState } from "./session.ts"
 import { createAttachment, type AttachOptions, type Attachment } from "./attach.ts"
-import { readActiveContributions, readHeader, type Contributions } from "../nulya/files.ts"
+import { discardIfUntouched, readActiveContributions, readHeader, type Contributions } from "../nulya/files.ts"
 import { sessionEvents } from "../nulya/cli.ts"
 import type { Workspace } from "../nulya/bin.ts"
 
@@ -19,6 +19,13 @@ export interface SessionTab {
   state: SessionState
   attach: Attachment
   contributions: Accessor<Contributions[]>
+  /**
+   * This process ran `session new` for it. Only such a session is un-created
+   * again when it closes without ever having recorded anything
+   * (`files.discardIfUntouched`); one opened by id, or somebody else's, is
+   * never touched.
+   */
+  created: boolean
 }
 
 export interface TabStore {
@@ -26,7 +33,7 @@ export interface TabStore {
   active: Accessor<SessionTab>
   activeIndex: Accessor<number>
   /** Focus the tab for `id`, opening one if it is not already open. */
-  open(id: string): SessionTab
+  open(id: string, options?: { created?: boolean }): SessionTab
   select(index: number): void
   next(): void
   /** Close a tab and its attachment; the last remaining tab never closes. */
@@ -59,32 +66,50 @@ async function hydrate(
 
 export function createTabStore(
   ws: Workspace,
-  first: { id: string; state: SessionState },
+  first: { id: string; state: SessionState; created?: boolean },
   options: AttachOptions = {},
 ): TabStore {
   const [tabs, setTabs] = createSignal<SessionTab[]>([])
   const [activeIndex, setActiveIndex] = createSignal(0)
 
-  function makeTab(id: string, state: SessionState): SessionTab {
+  function makeTab(id: string, state: SessionState, created: boolean): SessionTab {
     const [contributions, setContributions] = createSignal<Contributions[]>([])
-    const tab: SessionTab = { id, state, attach: createAttachment(ws, id, state, options), contributions }
-    void hydrate(ws, id, state, setContributions)
+    // The attachment exists immediately (so the lease probe and the follower
+    // start at once), but its first step waits for the replay: events from a
+    // step that ran first would make the tail look "already seen" and the
+    // history would be dropped on arrival.
+    let settle!: () => void
+    const ready = new Promise<void>((resolve) => (settle = resolve))
+    const tab: SessionTab = {
+      id,
+      state,
+      attach: createAttachment(ws, id, state, { ...options, ready }),
+      contributions,
+      created,
+    }
+    void hydrate(ws, id, state, setContributions).then(settle, settle)
     return tab
   }
 
-  setTabs([makeTab(first.id, first.state)])
+  /** Let go of a tab: stop its attachment, and un-create it if it never held anything. */
+  function release(tab: SessionTab) {
+    tab.attach.dispose()
+    if (tab.created) discardIfUntouched(ws, tab.id)
+  }
+
+  setTabs([makeTab(first.id, first.state, first.created ?? false)])
 
   return {
     tabs,
     activeIndex,
     active: () => tabs()[Math.min(activeIndex(), tabs().length - 1)]!,
-    open(id) {
+    open(id, opened = {}) {
       const at = tabs().findIndex((tab) => tab.id === id)
       if (at >= 0) {
         setActiveIndex(at)
         return tabs()[at]!
       }
-      const tab = makeTab(id, createSessionState(id))
+      const tab = makeTab(id, createSessionState(id), opened.created ?? false)
       setTabs([...tabs(), tab])
       setActiveIndex(tabs().length - 1)
       return tab
@@ -100,12 +125,12 @@ export function createTabStore(
       if (list.length <= 1) return
       const at = list.findIndex((tab) => tab.id === id)
       if (at < 0) return
-      list[at]!.attach.dispose()
+      release(list[at]!)
       setTabs(list.filter((_, index) => index !== at))
       setActiveIndex(Math.max(0, Math.min(activeIndex(), tabs().length - 1)))
     },
     disposeAll() {
-      for (const tab of tabs()) tab.attach.dispose()
+      for (const tab of tabs()) release(tab)
     },
   }
 }
