@@ -115,15 +115,15 @@ pub fn listActive(
     defer store.Roots.freeActive(alloc, active);
 
     for (active) |entry| {
-        const root = roots.entries[entry.root].dir;
         // Skip broken extensions, but let host cancellation propagate rather than
-        // be misread as a malformed extension.
-        var m = readPinnedManifest(alloc, roots.io, root, entry.id, entry.version) catch |err| switch (err) {
+        // be misread as a malformed extension. `resolveEntry` takes the root and
+        // version the listing already decided — no second `current` read.
+        const r = roots.resolveEntry(alloc, entry) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => continue,
         };
-        defer m.deinit();
-        try appendFromManifest(alloc, roots.io, root, &descriptors, entry.id, entry.version, m);
+        defer r.deinit(alloc);
+        try appendFromManifest(alloc, roots.io, roots.entries[r.root].dir, &descriptors, r.id, r.version, r.manifest);
     }
     skill.sortDescriptors(descriptors.items);
     return .{ .skills = try descriptors.toOwnedSlice(alloc) };
@@ -138,15 +138,10 @@ pub fn loadPinnedAcross(
     roots: *const store.Roots,
     pinned_ref: []const u8,
 ) ![]u8 {
-    _ = try parseRef(pinned_ref); // a malformed ref fails before any root is touched
-    for (roots.entries, 0..) |entry, i| {
-        const last = i + 1 == roots.entries.len;
-        return loadPinned(alloc, roots.io, entry.dir, pinned_ref) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            else => if (last) return err else continue,
-        };
-    }
-    return error.SkillNotFound; // no roots at all
+    const parsed = try parseRef(pinned_ref); // malformed: fail before touching a root
+    const r = try roots.resolveVersion(alloc, parsed.extension_id, parsed.version);
+    defer r.deinit(alloc);
+    return readSkillBody(alloc, roots.io, roots.entries[r.root].dir, parsed, r.manifest);
 }
 
 pub fn loadPinned(
@@ -158,7 +153,18 @@ pub fn loadPinned(
     const parsed = try parseRef(pinned_ref);
     var m = try readPinnedManifest(alloc, io, root, parsed.extension_id, parsed.version);
     defer m.deinit();
+    return readSkillBody(alloc, io, root, parsed, m);
+}
 
+/// The SKILL.md body a parsed ref names, from an already-resolved version's
+/// manifest and the root holding it. Caller owns the result.
+fn readSkillBody(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    root: std.Io.Dir,
+    parsed: ParsedRef,
+    m: manifest.Manifest,
+) ![]u8 {
     for (m.skills) |skill_path| {
         const expected_name = basename(skill_path) orelse return error.InvalidSkillDirectoryName;
         if (!std.mem.eql(u8, expected_name, parsed.name)) continue;

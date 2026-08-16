@@ -23,13 +23,6 @@ pub const ProviderKind = enum {
     codex,
 };
 
-pub const PolicyHook = enum {
-    off,
-    auto,
-    ai_reviewer,
-    human_approval,
-};
-
 pub const EnvironmentBackend = enum {
     local,
     remote,
@@ -131,18 +124,9 @@ pub const Registry = struct {
     weights: RegistryWeights = .{},
 };
 
-pub const Policy = struct {
-    hook: PolicyHook = .auto,
-};
-
 pub const Environment = struct {
     backend: EnvironmentBackend = .local,
     shell: ShellDialect = .auto,
-};
-
-pub const Compaction = struct {
-    max_input_tokens: u32 = 80_000,
-    target_input_tokens: u32 = 40_000,
 };
 
 pub const Extensions = struct {
@@ -155,9 +139,7 @@ pub const Config = struct {
     /// The `[[models]]` catalog, merged by `id` across trusted layers.
     models: []ModelParams = &.{},
     registry: Registry = .{},
-    policy: Policy = .{},
     environment: Environment = .{},
-    compaction: Compaction = .{},
     extensions: Extensions = .{},
 
     pub fn init(alloc: std.mem.Allocator) Config {
@@ -198,9 +180,7 @@ const RawConfig = struct {
     provider: ?RawProvider = null,
     models: ?[]const RawModelParams = null,
     registry: ?RawRegistry = null,
-    policy: ?RawPolicy = null,
     environment: ?RawEnvironment = null,
-    compaction: ?RawCompaction = null,
     extensions: ?RawExtensions = null,
 };
 
@@ -249,18 +229,9 @@ const RawRegistryWeights = struct {
     success_rate: ?f64 = null,
 };
 
-const RawPolicy = struct {
-    hook: ?PolicyHook = null,
-};
-
 const RawEnvironment = struct {
     backend: ?EnvironmentBackend = null,
     shell: ?ShellDialect = null,
-};
-
-const RawCompaction = struct {
-    max_input_tokens: ?u32 = null,
-    target_input_tokens: ?u32 = null,
 };
 
 const RawExtensions = struct {
@@ -347,18 +318,9 @@ fn mergeTrusted(cfg: *Config, raw: RawConfig) !void {
         if (registry.weights) |weights| mergeWeights(&cfg.registry.weights, weights);
     }
 
-    if (raw.policy) |policy| {
-        if (policy.hook) |hook| cfg.policy.hook = hook;
-    }
-
     if (raw.environment) |env| {
         if (env.backend) |backend| cfg.environment.backend = backend;
         if (env.shell) |shell| cfg.environment.shell = shell;
-    }
-
-    if (raw.compaction) |compaction| {
-        if (compaction.max_input_tokens) |tokens| cfg.compaction.max_input_tokens = tokens;
-        if (compaction.target_input_tokens) |tokens| cfg.compaction.target_input_tokens = tokens;
     }
 
     if (raw.extensions) |extensions| {
@@ -383,12 +345,6 @@ fn mergeProject(cfg: *Config, raw: RawConfig) !void {
     if (raw.registry) |registry| {
         if (registry.max_tools) |max_tools| cfg.registry.max_tools = @min(cfg.registry.max_tools, max_tools);
         if (registry.pinned_native_tools) |tools| cfg.registry.pinned_native_tools = try dupeStringList(arena, tools);
-    }
-
-    if (raw.policy) |policy| {
-        if (policy.hook) |hook| {
-            if (policyStrictness(hook) >= policyStrictness(cfg.policy.hook)) cfg.policy.hook = hook;
-        }
     }
 
     if (raw.environment) |env| {
@@ -469,15 +425,6 @@ fn dupeStringList(arena: std.mem.Allocator, values: []const []const u8) ![]const
     const out = try arena.alloc([]const u8, values.len);
     for (values, 0..) |value, i| out[i] = try arena.dupe(u8, value);
     return out;
-}
-
-fn policyStrictness(hook: PolicyHook) u8 {
-    return switch (hook) {
-        .off => 0,
-        .auto => 1,
-        .ai_reviewer => 2,
-        .human_approval => 3,
-    };
 }
 
 fn backendStrictness(backend: EnvironmentBackend) u8 {
@@ -580,7 +527,6 @@ test "default config parses into a usable provider profile" {
     try std.testing.expectEqual(ProviderKind.openai, profile.kind);
     try std.testing.expectEqualStrings("OPENAI_API_KEY", profile.api_key_env);
     try std.testing.expectEqual(@as(u32, 8), cfg.registry.max_tools);
-    try std.testing.expectEqual(PolicyHook.auto, cfg.policy.hook);
 }
 
 test "default catalog: every model a built-in profile lists is described, and effort defaults resolve" {
@@ -694,20 +640,14 @@ test "trusted layers override scalars and merge profiles by name" {
     try std.testing.expectEqual(@as(u32, 6), cfg.registry.max_tools);
 }
 
-test "project layer may tighten but not loosen trusted policy or authority" {
+test "project layer may tighten but not loosen trusted authority" {
     var cfg = try loadFromLayers(std.testing.allocator, &.{
         .{ .source = default_toml },
         .{ .source =
-        \\[policy]
-        \\hook = "human_approval"
-        \\
         \\[environment]
         \\backend = "sandbox"
         },
         .{ .project = true, .source =
-        \\[policy]
-        \\hook = "off"
-        \\
         \\[environment]
         \\backend = "local"
         \\
@@ -717,7 +657,8 @@ test "project layer may tighten but not loosen trusted policy or authority" {
     });
     defer cfg.deinit();
 
-    try std.testing.expectEqual(PolicyHook.human_approval, cfg.policy.hook);
+    // A checkout may narrow what runs (fewer tools) but never widen it back to a
+    // looser execution backend than a trusted layer chose (DESIGN §9.5).
     try std.testing.expectEqual(EnvironmentBackend.sandbox, cfg.environment.backend);
     try std.testing.expectEqual(@as(u32, 4), cfg.registry.max_tools);
 }

@@ -100,11 +100,7 @@ pub const CodexProvider = struct {
 
     fn capabilities(ptr: *anyopaque) provider.ProviderCapabilities {
         _ = ptr;
-        return .{
-            .parallel_tool_calls = true,
-            .cached_token_metrics = true,
-            .thinking_replay = true,
-        };
+        return .{ .thinking_replay = true };
     }
 
     fn stream(ptr: *anyopaque, alloc: std.mem.Allocator, request: provider.Request, sink: provider.EventSink) anyerror!void {
@@ -565,7 +561,6 @@ test "history serializes to flat Responses items and effort off becomes none" {
     const body = try buildRequestJson(alloc, "gpt-5.5", "cache-1", .{
         .prompt_ir = &ir,
         .tools = &defs,
-        .generation = 0,
         .options = .{ .effort = "off" },
     });
     defer alloc.free(body);
@@ -626,7 +621,7 @@ test "an encrypted reasoning item is kept whole and replayed ahead of its functi
     try l.append(.{ .tool_results = &.{.{ .call_id = "c1", .ok = true, .output = "ok" }} });
     const ir = try prompt.project(alloc, l.view());
     defer ir.deinit(alloc);
-    const body = try buildRequestJson(alloc, "gpt-5.5", "k", .{ .prompt_ir = &ir, .tools = &.{}, .generation = 0 });
+    const body = try buildRequestJson(alloc, "gpt-5.5", "k", .{ .prompt_ir = &ir, .tools = &.{} });
     defer alloc.free(body);
 
     const reasoning = std.mem.indexOf(u8, body, "{\"id\":\"rs_1\",\"type\":\"reasoning\"").?;
@@ -645,7 +640,7 @@ test "an absent effort means the server default, not none" {
     const ir = try prompt.project(alloc, l.view());
     defer ir.deinit(alloc);
 
-    const body = try buildRequestJson(alloc, "gpt-5.5", "k", .{ .prompt_ir = &ir, .tools = &.{}, .generation = 0 });
+    const body = try buildRequestJson(alloc, "gpt-5.5", "k", .{ .prompt_ir = &ir, .tools = &.{} });
     defer alloc.free(body);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"reasoning\":{\"summary\":\"auto\"}") != null);
 }

@@ -149,7 +149,7 @@ freeze ToolSetSnapshot（本 step 不可变）
   ↓
 collectTurn(PromptIR, tool_defs)  →  assistant turn（可能含多个 tool_use）；瞬态线路故障按 §13 原样重发，ledger 不动
   ↓ append assistant
-串行执行 A, B, C（当前 assert max_concurrent == 1）
+串行执行 A, B, C
   ↓
 等全部 resolve —— 绝不提前回传单个结果
   ↓
@@ -346,7 +346,7 @@ draft ──build──▶ versions/v-<hash>（immutable）──activate──�
 - 版本目录冻结 snapshot：编译 extension 得 `versions/v-…/{extension.json, package/src/**, package/skills/**, bin/<entry><exe>}` + seal（含 `binary_digest`）；**编译从 frozen `package/src/main.zig` 进行**，不读 mutable draft。脚本 extension 得 `versions/v-…/{extension.json, package/src/**, …}` + seal（`binary_digest` = null；脚本已在 `package/src/` 里被 package_digest 覆盖），运行入口 = `package/<entry>`。同源码再 build = 同 version，`already_built`。
 - `current` 是普通文本文件（不是 symlink：Windows 需特权且无收益），原子 rename 切换。
 - 更新 = build 新版本 → activate；rollback = `current = old`。B 挂了 A 完全不动。
-- deterministic validation 是 kernel 不变量（§12）；"这个参数是否通用"属 policy，**policy hook 尚未实现**（config 能解析 `policy.hook`，无人消费；PLAN §3.12）。
+- deterministic validation 是 kernel 不变量（§12）；"这个参数是否通用"属 policy，**policy hook 尚未实现**——也没有对应的 config 键（PLAN §3.12）。
 
 ### 7.5 组合在 session 开始冻结（keystone）
 
@@ -389,7 +389,7 @@ Tool 是"能执行的能力"，Skill 是"要遵循的方法 / 知识"；不同 r
 Environment { runShell(cmd, dialect) / runExtension(entry, request_json) / dialect() }
 ```
 
-只有 `local` backend。`sandbox` / `remote` 在 config 里能解析，运行期直接报 `UnsupportedEnvironmentBackend`（PLAN §3.8）。ACP 不是 Environment（那是 editor→agent 的通信协议，方向相反，归前端层）。
+只有 `local` backend。`sandbox` / `remote` 在 config 里能解析，但 `session new` / `session step` 建 environment 时（`launch.localEnvironment`，唯一一处）直接报 `UnsupportedEnvironmentBackend`——不会悄悄按 local 跑一个要求隔离的 config（PLAN §3.8）。ACP 不是 Environment（那是 editor→agent 的通信协议，方向相反，归前端层）。
 
 ---
 
@@ -413,9 +413,9 @@ Environment { runShell(cmd, dialect) / runExtension(entry, request_json) / diale
 
 user 层与 workspace 的 `.nulya/` 同形、每个平台一个好找的位置；`nulya config show` 打印三条路径（JSON `paths`），前端写 key 时写的就是它读的。
 
-标量 set 即胜，列表按 key 合并。project 层**可以更严不能更松**：可 pin 工具、选 profile、调严 policy、调小 K；**不可**关 policy hook、把 backend 从 sandbox 降级 local、注入 `api_key_env` 名字外泄 host env（单测覆盖）。这与 §9 的 `extension_permissions ⊆ session_authority` 是同一个不变量的两面：checkout 一个 repo 不该能拓宽机器权限。
+标量 set 即胜，列表按 key 合并。project 层**可以更严不能更松**：可 pin 工具、选 profile、调小 K、把 backend 从 local 收紧到 sandbox；**不可**把 backend 从 sandbox 降级 local、注入 `api_key_env` 名字外泄 host env、加 store root（单测覆盖）。这与 §9 的 `extension_permissions ⊆ session_authority` 是同一个不变量的两面：checkout 一个 repo 不该能拓宽机器权限。
 
-承载：`provider.profiles[]{name, kind=openai|anthropic|codex|scripted, model, models[]?, base_url, api_key_env, api_key?, effort?}` · `provider.retry{max_retries, initial_backoff_ms, max_backoff_ms, stall_timeout_ms}`（§13 的重试策略与 stall watchdog；描述的是线路不是模型，所以全 profile 一份、只认 trusted 层）· `models[]{id, label, efforts[], default_effort?, context_window?}` · `registry{max_tools, pinned_native_tools, weights{uses_recent, uses_total, last_used, success_rate}}` · `policy.hook`（解析、未消费）· `environment{backend, shell}` · `compaction{…}`（解析、未消费）· `extensions.paths`（**已被消费**：§7.2 的第三档 store root，**只认 trusted 层**——project 层写了直接忽略，单测覆盖）。`default.toml` 自带 `openai` / `anthropic` / `codex` / `deepseek` / `deepseek-anthropic` / `scripted` 六个 profile 与它们列出的每个 model id 的目录条目。
+承载：`provider.profiles[]{name, kind=openai|anthropic|codex|scripted, model, models[]?, base_url, api_key_env, api_key?, effort?}` · `provider.retry{max_retries, initial_backoff_ms, max_backoff_ms, stall_timeout_ms}`（§13 的重试策略与 stall watchdog；描述的是线路不是模型，所以全 profile 一份、只认 trusted 层）· `models[]{id, label, efforts[], default_effort?, context_window?}` · `registry{max_tools, pinned_native_tools, weights{uses_recent, uses_total, last_used, success_rate}}` · `environment{backend, shell}` · `extensions.paths`（**已被消费**：§7.2 的第三档 store root，**只认 trusted 层**——project 层写了直接忽略，单测覆盖）。`default.toml` 自带 `openai` / `anthropic` / `codex` / `deepseek` / `deepseek-anthropic` / `scripted` 六个 profile 与它们列出的每个 model id 的目录条目。
 
 **两张表描述模型。** profile 说**怎么连**（kind / base_url / 哪个 env 放 key）和**它服务哪些 model id**（`model` 是默认、`models[]` 是可选列表；`ProviderProfile.defaultModel()`：`model` 非空取它，否则 `models[0]`，否则 provider 内置默认）；`[[models]]` 目录说一个 id **是什么**（label、effort 档位、context window），一个 id 不管经几个端点都只写一次。目录是纯描述：kernel 不读它；`launch` / `cli` 用它给 session 默认 effort（`Config.defaultEffort(profile, model_id)` = profile.effort ?? catalog.default_effort ?? 无），`nulya config show` 把它投影给选择器。`[[models]]` 按 `id` 合并、只认 trusted 层——project 层不能改一个 model id 的含义或让 session 静默换 effort。
 
@@ -434,7 +434,7 @@ user 层与 workspace 的 `.nulya/` 同形、每个平台一个好找的位置�
 
 ## 11. Compaction 与 generation
 
-**generation == ledger 文件**（§3.4）：一个文件只 append、只一个 generation，所以前缀不变量是文件系统性质，没有会 bump generation 的事件，`prompt.currentGeneration()` 已删除（`Request.generation` 处直接传 0）。
+**generation == ledger 文件**（§3.4）：一个文件只 append、只一个 generation，所以前缀不变量是文件系统性质，没有会 bump generation 的事件——`prompt.currentGeneration()` 与 `Request.generation` 都已删除（一场 session 里恒定的值不是参数）。
 
 **内核提供的是 fork，不是 compaction。** 没有"替换历史"的动词，也不会长出一个——ledger 只 append（physics §1），没有东西能 rewrite model-visible 状态（physics §3）。所以压缩不是编辑而是**分叉**：开一个新文件，header 的 `parent` 记下旧文件与切分点，摘要作为新文件的第一条 turn 进去；旧文件原封不动留在盘上。内核在这条路径上只保证三件事（`cli.zig` 的 `session new`，§14）：
 
@@ -442,7 +442,7 @@ user 层与 workspace 的 `.nulya/` 同形、每个平台一个好找的位置�
 2. **不点名模型时继承父的冻结身份**（`model` profile 名 + `model_identity` 原样）。压缩是同一场对话换个文件，不该因为 `active_profile` 期间漂了就换了说话对象。`--profile` / `--model` 任一给出即按今天的 config 重新解析（分叉到别的模型是合法用法）。
 3. **composition 不继承**，照常从 config 现解。新 session 正是 promotion 与新 activate 版本该生效的地方（§5.5、§7.5），而 fork 就是一个 session 边界。
 
-**何时压、压成什么，都不在内核里。** 前者是 policy（`compaction.max_input_tokens` 等 config 键能解析，内核不消费），后者是模型的判断。两者都由 driver 用现成的 `session append` / `session step` / `session new --parent` 组合出来——TUI 的 `/compact` 是第一个 consumer（tui.md §11），内核既不知道也不关心发生过一次压缩。
+**何时压、压成什么，都不在内核里。** 前者是 driver 的 policy（内核没有对应的 config 键——没人消费的键就是死代码，已删），后者是模型的判断。两者都由 driver 用现成的 `session append` / `session step` / `session new --parent` 组合出来——TUI 的 `/compact` 是第一个 consumer（tui.md §11），内核既不知道也不关心发生过一次压缩。
 
 ---
 
@@ -458,10 +458,10 @@ user 层与 workspace 的 `.nulya/` 同形、每个平台一个好找的位置�
 
 ```
 Model { ptr, vtable { name, modelName, capabilities, stream(request, sink) } }
-Request { prompt_ir, tools, generation, options{max_output_tokens?, effort?}, stall_ms }
+Request { prompt_ir, tools, options{max_output_tokens?, effort?}, stall_ms }
 StreamEvent: started | text_delta | thinking_delta | reasoning_item | tool_use_start | tool_use_input_delta | usage | done(StopReason)
 TurnCollector → ModelTurn { reasoning, text, calls, usage, stop_reason }
-ProviderCapabilities { parallel_tool_calls, deferred_tools, explicit_cache_breakpoints, cached_token_metrics, thinking_replay, vision, tool_result_images }
+ProviderCapabilities { thinking_replay }
 ```
 
 - Provider 在 generation 稳定的块边界放 / 声明 cache breakpoint（tools 之后、system 之后、最后一条稳定消息之后）。

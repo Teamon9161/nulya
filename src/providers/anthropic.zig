@@ -87,12 +87,7 @@ pub const AnthropicProvider = struct {
 
     fn capabilities(ptr: *anyopaque) provider.ProviderCapabilities {
         _ = ptr;
-        return .{
-            .parallel_tool_calls = true,
-            .explicit_cache_breakpoints = true,
-            .cached_token_metrics = true,
-            .thinking_replay = true,
-        };
+        return .{ .thinking_replay = true };
     }
 
     fn stream(ptr: *anyopaque, alloc: std.mem.Allocator, request: provider.Request, sink: provider.EventSink) anyerror!void {
@@ -563,7 +558,6 @@ fn testRequestJson(alloc: std.mem.Allocator, l: *ledger.Ledger, native: bool, ef
     return buildRequestJson(alloc, "test-model", native, .{
         .prompt_ir = &ir,
         .tools = &defs,
-        .generation = 0,
         .options = .{ .effort = effort },
     });
 }

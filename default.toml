@@ -183,16 +183,9 @@ uses_total = 0.25
 last_used = 0.5
 success_rate = 1.0
 
-[policy]
-hook = "auto"
-
 [environment]
 backend = "local"
 shell = "auto"
-
-[compaction]
-max_input_tokens = 80000
-target_input_tokens = 40000
 
 [extensions]
 paths = []

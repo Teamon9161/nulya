@@ -1,9 +1,9 @@
 //! OpenAI-compatible Chat Completions provider.
 //!
 //! The provider speaks streaming SSE on the wire and normalizes deltas into the
-//! core `provider.StreamEvent` shape. `provider.Model.step` can still collect
-//! those events into one `ModelTurn`, while a future TUI can subscribe to the
-//! same stream directly.
+//! core `provider.StreamEvent` shape. A `provider.TurnCollector` accumulates
+//! those events into one `ModelTurn`, while an observer can watch the same
+//! stream as it arrives.
 //!
 //! DeepSeek's endpoint speaks this wire with two documented differences
 //! (api-docs.deepseek.com, "Thinking Mode"): thinking is on by default and is
@@ -88,11 +88,7 @@ pub const OpenAiProvider = struct {
 
     fn capabilities(ptr: *anyopaque) provider.ProviderCapabilities {
         const self: *OpenAiProvider = @ptrCast(@alignCast(ptr));
-        return .{
-            .parallel_tool_calls = true,
-            .cached_token_metrics = true,
-            .thinking_replay = self.deepseek,
-        };
+        return .{ .thinking_replay = self.deepseek };
     }
 
     fn stream(ptr: *anyopaque, alloc: std.mem.Allocator, request: provider.Request, sink: provider.EventSink) anyerror!void {
@@ -528,7 +524,6 @@ test "request JSON serializes streaming prompt blocks and tools" {
     const body = try buildRequestJson(alloc, "test-model", false, .{
         .prompt_ir = &ir,
         .tools = &defs,
-        .generation = 0,
     });
     defer alloc.free(body);
 
@@ -585,24 +580,24 @@ test "DeepSeek: effort off disables thinking, other levels are reasoning_effort,
     const ir = try prompt.project(alloc, l.view());
     defer ir.deinit(alloc);
 
-    const off = try buildRequestJson(alloc, "deepseek-v4-flash", true, .{ .prompt_ir = &ir, .tools = &.{}, .generation = 0, .options = .{ .effort = "off" } });
+    const off = try buildRequestJson(alloc, "deepseek-v4-flash", true, .{ .prompt_ir = &ir, .tools = &.{}, .options = .{ .effort = "off" } });
     defer alloc.free(off);
     try std.testing.expect(std.mem.indexOf(u8, off, "\"thinking\":{\"type\":\"disabled\"}") != null);
     try std.testing.expect(std.mem.indexOf(u8, off, "reasoning_effort") == null);
 
-    const high = try buildRequestJson(alloc, "deepseek-v4-flash", true, .{ .prompt_ir = &ir, .tools = &.{}, .generation = 0, .options = .{ .effort = "high" } });
+    const high = try buildRequestJson(alloc, "deepseek-v4-flash", true, .{ .prompt_ir = &ir, .tools = &.{}, .options = .{ .effort = "high" } });
     defer alloc.free(high);
     try std.testing.expect(std.mem.indexOf(u8, high, "\"reasoning_effort\":\"high\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, high, "\"thinking\"") == null);
 
     // An absent effort is the server default (thinking on) — nothing is sent.
-    const auto = try buildRequestJson(alloc, "deepseek-v4-flash", true, .{ .prompt_ir = &ir, .tools = &.{}, .generation = 0 });
+    const auto = try buildRequestJson(alloc, "deepseek-v4-flash", true, .{ .prompt_ir = &ir, .tools = &.{} });
     defer alloc.free(auto);
     try std.testing.expect(std.mem.indexOf(u8, auto, "\"thinking\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, auto, "reasoning_effort") == null);
 
     // OpenAI's own endpoint has no `thinking` switch: `off` sends nothing.
-    const openai_off = try buildRequestJson(alloc, "gpt-x", false, .{ .prompt_ir = &ir, .tools = &.{}, .generation = 0, .options = .{ .effort = "off" } });
+    const openai_off = try buildRequestJson(alloc, "gpt-x", false, .{ .prompt_ir = &ir, .tools = &.{}, .options = .{ .effort = "off" } });
     defer alloc.free(openai_off);
     try std.testing.expect(std.mem.indexOf(u8, openai_off, "\"thinking\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, openai_off, "reasoning_effort") == null);
@@ -644,7 +639,7 @@ test "DeepSeek: a tool-calling turn's reasoning_content is kept as one item and 
     try l.append(.{ .tool_results = &.{.{ .call_id = "call_1", .ok = true, .output = "a.txt" }} });
     const ir = try prompt.project(alloc, l.view());
     defer ir.deinit(alloc);
-    const body = try buildRequestJson(alloc, "deepseek-v4-flash", true, .{ .prompt_ir = &ir, .tools = &.{}, .generation = 0 });
+    const body = try buildRequestJson(alloc, "deepseek-v4-flash", true, .{ .prompt_ir = &ir, .tools = &.{} });
     defer alloc.free(body);
     const reasoning_at = std.mem.indexOf(u8, body, "\"reasoning_content\":\"I should run ls.\"") orelse return error.ReasoningNotReplayed;
     const calls_at = std.mem.indexOf(u8, body, "\"tool_calls\":[").?;
@@ -671,7 +666,7 @@ test "reasoning without tool calls, or of another provider's shape, is not repla
     try l.append(.{ .tool_results = &.{.{ .call_id = "c1", .ok = true, .output = "" }} });
     const ir = try prompt.project(alloc, l.view());
     defer ir.deinit(alloc);
-    const body = try buildRequestJson(alloc, "deepseek-v4-flash", true, .{ .prompt_ir = &ir, .tools = &.{}, .generation = 0 });
+    const body = try buildRequestJson(alloc, "deepseek-v4-flash", true, .{ .prompt_ir = &ir, .tools = &.{} });
     defer alloc.free(body);
     try std.testing.expect(std.mem.indexOf(u8, body, "private") == null);
     try std.testing.expect(std.mem.indexOf(u8, body, "reasoning_content") == null);
@@ -690,7 +685,6 @@ test "request JSON serializes system blocks before stable ledger blocks" {
     const body = try buildRequestJson(alloc, "test-model", false, .{
         .prompt_ir = &ir,
         .tools = &.{},
-        .generation = 0,
     });
     defer alloc.free(body);
 

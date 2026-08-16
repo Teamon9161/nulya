@@ -271,6 +271,90 @@ pub const Roots = struct {
         version: []const u8,
     };
 
+    /// The single answer to `id[@version] -> root -> manifest -> entry path`.
+    /// Session composition, `nulya ext run`, and the skill loader all ask for it
+    /// through `resolveActive` / `resolveVersion`, so none of them can drift on
+    /// search order (DESIGN §7.2) or on where a frozen entry lives (§7.4).
+    pub const Resolved = struct {
+        /// Owned.
+        id: []const u8,
+        /// Owned.
+        version: []const u8,
+        /// Owned; parsed AND validated, from the integrity-checked version dir.
+        manifest: manifest.Manifest,
+        /// Index into `Roots.entries` of the root this version was taken from.
+        root: usize,
+
+        pub fn deinit(self: Resolved, alloc: std.mem.Allocator) void {
+            alloc.free(self.id);
+            alloc.free(self.version);
+            var m = self.manifest;
+            m.deinit();
+        }
+
+        /// Absolute path of this version's runtime entry — a compiled binary
+        /// under `bin/` or a frozen script under `package/`, per the runtime
+        /// kind. Absolute because an extension is spawned with the WORKSPACE as
+        /// cwd, which is not this process's cwd. Caller owns the result.
+        pub fn entryPathAbs(self: Resolved, alloc: std.mem.Allocator, roots: *const Roots) ![]u8 {
+            const rt = self.manifest.runtime orelse return error.MissingRuntime;
+            const entry_rel = try roots.store(self.root).versionRuntimeEntryPath(alloc, self.id, self.version, rt);
+            defer alloc.free(entry_rel);
+            return std.fs.path.join(alloc, &.{ roots.entries[self.root].real, entry_rel });
+        }
+    };
+
+    /// The version an id's `current` selects, first active root winning
+    /// (`firstActive`), with its validated manifest. Null when no root points at
+    /// one. Host faults — cancellation above all — propagate unchanged: only a
+    /// missing `current` is "not there".
+    pub fn resolveActive(self: *const Roots, alloc: std.mem.Allocator, id: []const u8) !?Resolved {
+        const active = (try self.firstActive(alloc, id)) orelse return null;
+        defer alloc.free(active.version);
+        return try self.resolveAt(alloc, active.root, id, active.version);
+    }
+
+    /// A named built version, taken from the first root that holds a USABLE
+    /// copy (root order, as `firstWithVersion`) — versions are content-addressed,
+    /// so every root's copy is the same bytes and only "where it was found"
+    /// differs. A root whose copy is absent or broken (any `isExtensionFault`:
+    /// a half-written `versions/<v>/` left by a crash, a bad seal) is skipped
+    /// rather than allowed to shadow a good copy further down the search order.
+    /// If no root yields one, the FIRST such fault is returned — the most
+    /// specific thing known about why — or `error.VersionNotFound` when no root
+    /// held it at all. Host faults (cancellation, OOM, real I/O) propagate at
+    /// once and are never softened into "not found".
+    pub fn resolveVersion(self: *const Roots, alloc: std.mem.Allocator, id: []const u8, version: []const u8) !Resolved {
+        var first_fault: ?anyerror = null;
+        for (self.entries, 0..) |_, i| {
+            return self.resolveAt(alloc, i, id, version) catch |err| {
+                if (!isExtensionFault(err)) return err;
+                // "Absent here" is the ordinary case and says nothing; a broken
+                // copy is worth reporting if no later root saves the lookup.
+                if (err != error.VersionNotFound and first_fault == null) first_fault = err;
+                continue;
+            };
+        }
+        return first_fault orelse error.VersionNotFound;
+    }
+
+    /// The `Resolved` for an entry `listActive` already decided, without asking
+    /// the search order a second time: no repeated `current` read, and no window
+    /// in which an activate between listing and lookup swaps the version under
+    /// the caller.
+    pub fn resolveEntry(self: *const Roots, alloc: std.mem.Allocator, entry: ActiveEntry) !Resolved {
+        return self.resolveAt(alloc, entry.root, entry.id, entry.version);
+    }
+
+    fn resolveAt(self: *const Roots, alloc: std.mem.Allocator, root: usize, id: []const u8, version: []const u8) !Resolved {
+        var m = try self.store(root).readManifest(alloc, id, version);
+        errdefer m.deinit();
+        const owned_id = try alloc.dupe(u8, id);
+        errdefer alloc.free(owned_id);
+        const owned_version = try alloc.dupe(u8, version);
+        return .{ .id = owned_id, .version = owned_version, .manifest = m, .root = root };
+    }
+
     /// Open each spec in order, skipping the ones that are not there. `cwd` is
     /// what relative specs resolve against.
     pub fn open(alloc: std.mem.Allocator, io: std.Io, cwd: []const u8, specs: []const []const u8) !Roots {
@@ -378,6 +462,43 @@ pub const Roots = struct {
         return false;
     }
 };
+
+/// Store/manifest faults that mean "this directory is not a usable extension"
+/// and are safe to skip: skip it during discovery, skip that root during a
+/// version lookup (`Roots.resolveVersion`). Anything else — host cancellation,
+/// `OutOfMemory`, real I/O failures — is a host fault and must propagate: an
+/// OOM must never masquerade as "extension skipped" or `PinnedExtensionNotActive`.
+pub fn isExtensionFault(err: anyerror) bool {
+    return switch (err) {
+        // Invalid extension identity.
+        error.InvalidId,
+        error.InvalidVersion,
+        // Bad `current` pointer or a frozen version failing integrity.
+        error.VersionNotFound,
+        error.VersionSealInvalid,
+        error.VersionManifestIdMismatch,
+        error.VersionPackageMissing,
+        error.VersionEntryNotFound,
+        // Unparseable or invalid manifest.
+        error.InvalidJson,
+        error.NotAnObject,
+        error.MissingField,
+        error.WrongType,
+        error.UnsupportedSchema,
+        error.MissingRuntime,
+        error.InvalidEntry,
+        error.InvalidInterpreter,
+        error.NoContributions,
+        error.InvalidToolName,
+        error.ReservedToolName,
+        error.DuplicateToolName,
+        error.InvalidSkillPath,
+        error.InvalidSystemPromptPath,
+        error.DuplicateSystemPromptPath,
+        => true,
+        else => false,
+    };
+}
 
 /// Open a store root, creating it (and its parents) if it is not there yet —
 /// what the WRITE side needs (`ext init`, `ext build`): a machine with no
@@ -652,6 +773,39 @@ test "roots search in order: the first root holding an id wins, a missing root i
         defer alloc.free(found.version);
         try std.testing.expectEqual(@as(usize, 1), found.root);
     }
+
+    // `Resolved` is the same order plus the validated manifest — the one lookup
+    // every caller shares.
+    {
+        const r = (try roots.resolveActive(alloc, "shared")).?;
+        defer r.deinit(alloc);
+        try std.testing.expectEqual(@as(usize, 1), r.root);
+        try std.testing.expectEqualStrings(user_shared, r.version);
+        try std.testing.expectEqualStrings("shared", r.manifest.id);
+    }
+    {
+        // A named version comes from whichever root holds it, active or not.
+        const r = try roots.resolveVersion(alloc, "shared", ws_shared);
+        defer r.deinit(alloc);
+        try std.testing.expectEqual(@as(usize, 0), r.root);
+        try std.testing.expectEqualStrings(ws_shared, r.version);
+    }
+    try std.testing.expect((try roots.resolveActive(alloc, "absent")) == null);
+    try std.testing.expectError(error.VersionNotFound, roots.resolveVersion(alloc, "shared", "v-000000000000000000000000"));
+
+    // A BROKEN copy in an earlier root does not shadow a good one further down:
+    // a crash can leave a half-written `versions/<v>/` (here: no seal at all),
+    // and the content-addressed copy in the next root is the same bytes.
+    try Store.init(io, ws_root).ensureVersionDir(alloc, "shared", user_shared);
+    {
+        const r = try roots.resolveVersion(alloc, "shared", user_shared);
+        defer r.deinit(alloc);
+        try std.testing.expectEqual(@as(usize, 1), r.root);
+    }
+    // When NO root yields a usable copy, the broken one's own fault is what the
+    // caller hears — not a bare "not found".
+    try Store.init(io, ws_root).ensureVersionDir(alloc, "shared", "v-111111111111111111111111");
+    try std.testing.expectError(error.VersionSealInvalid, roots.resolveVersion(alloc, "shared", "v-111111111111111111111111"));
 }
 
 test "openOrCreateRoot creates a missing root, by absolute path as well as relative" {

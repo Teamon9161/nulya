@@ -246,7 +246,7 @@ test "initOwned leaks nothing when an interior allocation fails" {
     }.run, .{});
 }
 
-test "asTool exposes the frozen definition, sequential policy, and binding pointer" {
+test "asTool exposes the frozen definition and binding pointer" {
     var binding = testBinding();
     const t = binding.asTool();
 
@@ -254,8 +254,6 @@ test "asTool exposes the frozen definition, sequential policy, and binding point
     try testing.expectEqualStrings("web_search", t.definition.name);
     try testing.expectEqualStrings("Search web", t.definition.description);
     try testing.expectEqualStrings("{\"type\":\"object\"}", t.definition.input_schema);
-    // Extension tools stay on the safe default: sequential execution.
-    try testing.expectEqual(tool.BatchPolicy.sequential, t.batch_policy);
 
     // The callback recovers the binding from this pointer, so it must be the
     // binding's own address.

@@ -9,14 +9,12 @@ const ledger = @import("ledger.zig");
 const prompt = @import("prompt.zig");
 const tool = @import("tool.zig");
 
+/// What the loop and the projection must know about a provider. One field: a
+/// provider that cannot replay opaque reasoning items gets the `reasoning`
+/// block skipped (DESIGN §13). Anything a provider can decide for itself stays
+/// inside the provider.
 pub const ProviderCapabilities = struct {
-    parallel_tool_calls: bool = false,
-    deferred_tools: bool = false,
-    explicit_cache_breakpoints: bool = false,
-    cached_token_metrics: bool = false,
     thinking_replay: bool = false,
-    vision: bool = false,
-    tool_result_images: bool = false,
 };
 
 pub const Options = struct {
@@ -85,8 +83,8 @@ pub const ToolUseInputDelta = struct {
 };
 
 /// Streaming providers normalize their wire events to this shape. The loop can
-/// either forward these to a UI or let `Model.step` collect them into a complete
-/// assistant turn.
+/// either forward these to a UI or let a `TurnCollector` accumulate them into a
+/// complete assistant turn.
 pub const StreamEvent = union(enum) {
     started,
     text_delta: []const u8,
@@ -120,9 +118,8 @@ pub const EventSink = struct {
 pub const Request = struct {
     prompt_ir: *const prompt.PromptIR,
     tools: []const tool.ToolDefinition,
-    generation: u64,
     options: Options = .{},
-    /// Transport, not generation: the silence budget a wire provider hands to
+    /// Transport, not a generation option: the silence budget a wire provider hands to
     /// `wire.Post.stall_ms` (`RetryPolicy.stall_timeout_ms`; 0 = no watchdog).
     stall_ms: u64 = 0,
 };
@@ -183,13 +180,6 @@ pub const Model = struct {
 
     pub fn stream(self: Model, alloc: std.mem.Allocator, request: Request, sink: EventSink) !void {
         return self.vtable.stream(self.ptr, alloc, request, sink);
-    }
-
-    pub fn step(self: Model, alloc: std.mem.Allocator, request: Request) !ModelTurn {
-        var collector = TurnCollector.init(alloc);
-        defer collector.deinit();
-        try self.stream(alloc, request, collector.sink());
-        return try collector.finish();
     }
 };
 
@@ -402,7 +392,7 @@ test "retry backoff doubles from initial and is capped" {
 
 test "model stream is collected into owned turn" {
     const Fake = struct {
-        seen_generation: u64 = 0,
+        streamed: bool = false,
 
         fn name(ptr: *anyopaque) []const u8 {
             _ = ptr;
@@ -416,13 +406,13 @@ test "model stream is collected into owned turn" {
 
         fn capabilities(ptr: *anyopaque) ProviderCapabilities {
             _ = ptr;
-            return .{ .parallel_tool_calls = true };
+            return .{ .thinking_replay = true };
         }
 
         fn stream(ptr: *anyopaque, alloc: std.mem.Allocator, request: Request, sink: EventSink) anyerror!void {
             _ = alloc;
             const self: *@This() = @ptrCast(@alignCast(ptr));
-            self.seen_generation = request.generation;
+            self.streamed = true;
             try std.testing.expectEqual(@as(usize, 1), request.prompt_ir.stable_blocks.len);
             try std.testing.expectEqual(@as(usize, 0), request.tools.len);
             try sink.emit(.started);
@@ -458,16 +448,17 @@ test "model stream is collected into owned turn" {
     var fake = Fake{};
     const model: Model = .{ .ptr = &fake, .vtable = &Fake.vtable };
     try std.testing.expectEqualStrings("fake", model.name());
-    try std.testing.expect(model.capabilities().parallel_tool_calls);
+    try std.testing.expect(model.capabilities().thinking_replay);
 
-    const turn = try model.step(alloc, .{
-        .prompt_ir = &ir,
-        .tools = &.{},
-        .generation = 0,
-    });
+    // The collector is the only way a stream becomes a turn (the loop drives it
+    // the same way, teeing the events to an observer first).
+    var collector = TurnCollector.init(alloc);
+    defer collector.deinit();
+    try model.stream(alloc, .{ .prompt_ir = &ir, .tools = &.{} }, collector.sink());
+    const turn = try collector.finish();
     defer turn.deinit(alloc);
 
-    try std.testing.expectEqual(@as(u64, 0), fake.seen_generation);
+    try std.testing.expect(fake.streamed);
     try std.testing.expectEqualStrings(
         "[{\"type\":\"thinking\",\"thinking\":\"hmm\",\"signature\":\"sig\"},{\"type\":\"redacted_thinking\",\"data\":\"xx\"}]",
         turn.reasoning,

@@ -116,7 +116,7 @@ pub const SessionComposition = struct {
         defer freeResolved(alloc, resolved);
         sortResolved(resolved);
 
-        return assemble(alloc, io, resolved, opts.pinned_native_tools, opts.ranked_native_tools, auto_slots);
+        return assemble(alloc, io, &roots, resolved, opts.pinned_native_tools, opts.ranked_native_tools, auto_slots);
     }
 
     /// Rebuild the composition frozen into a session header (DESIGN §3, §7.5):
@@ -144,7 +144,7 @@ pub const SessionComposition = struct {
 
         // The frozen native tools are the exact, already-decided native set, so
         // they enter as pins (strict); no usage ranking or auto-fill on resume.
-        return assemble(alloc, io, resolved, frozen.native_tools, &.{}, 0);
+        return assemble(alloc, io, &roots, resolved, frozen.native_tools, &.{}, 0);
     }
 
     pub fn deinit(self: SessionComposition, alloc: std.mem.Allocator) void {
@@ -160,13 +160,14 @@ pub const SessionComposition = struct {
 /// The shared tail of `init` / `initFrozen`: given the resolved (sorted) active
 /// extensions and an already-decided native-tool selection (`pins` strict,
 /// `ranked` best-effort up to `auto_slots`), freeze the tool set, skills, and
-/// system prompts. Each resolved extension carries the root it was found in, so
-/// nothing here needs to know the search order any more. `resolved` (and the
-/// roots it borrows) stay owned by the caller.
+/// system prompts. Each resolved extension names the root index it was found in,
+/// so nothing here re-derives the search order — it just indexes `roots`.
+/// `resolved` and `roots` stay owned by the caller.
 fn assemble(
     alloc: std.mem.Allocator,
     io: std.Io,
-    resolved: []const ResolvedExtension,
+    roots: *const store.Roots,
+    resolved: []const store.Roots.Resolved,
     pins: []const []const u8,
     ranked: []const []const u8,
     auto_slots: usize,
@@ -174,7 +175,7 @@ fn assemble(
     // Build every owned binding first, then freeze the slice: only after
     // `toOwnedSlice` are the binding addresses stable enough for `asTool` to
     // hand out `ToolExecutor.ptr` values into them.
-    const bindings = try resolveBindings(alloc, io, resolved, pins, ranked, auto_slots);
+    const bindings = try resolveBindings(alloc, roots, resolved, pins, ranked, auto_slots);
     errdefer freeBindings(alloc, bindings);
 
     const tools = try snapshotFromBindings(alloc, bindings);
@@ -186,13 +187,13 @@ fn assemble(
     var descriptors: std.ArrayList(skill.SkillDescriptor) = .empty;
     errdefer skill.deinitDescriptorArrayList(alloc, &descriptors);
     for (resolved) |r| {
-        try ext_skills.appendFromManifest(alloc, io, r.root, &descriptors, r.id, r.version, r.manifest);
+        try ext_skills.appendFromManifest(alloc, io, roots.entries[r.root].dir, &descriptors, r.id, r.version, r.manifest);
     }
     skill.sortDescriptors(descriptors.items);
     const skills = skill.SkillSetSnapshot{ .skills = try descriptors.toOwnedSlice(alloc) };
     errdefer skills.deinit(alloc);
 
-    const system_prompts = try buildSystemPrompts(alloc, io, resolved, skills);
+    const system_prompts = try buildSystemPrompts(alloc, io, roots, resolved, skills);
     errdefer system_prompts.deinit(alloc);
 
     return .{
@@ -214,7 +215,10 @@ fn emptyComposition(alloc: std.mem.Allocator, io: std.Io) !SessionComposition {
     errdefer freePinned(alloc, pinned);
     const skills = skill.SkillSetSnapshot{ .skills = try alloc.alloc(skill.SkillDescriptor, 0) };
     errdefer skills.deinit(alloc);
-    const system_prompts = try buildSystemPrompts(alloc, io, &.{}, skills);
+    // Nothing resolved, so the search order is never consulted; an empty `Roots`
+    // keeps `buildSystemPrompts` on one signature.
+    const no_roots: store.Roots = .{ .alloc = alloc, .io = io, .entries = &.{} };
+    const system_prompts = try buildSystemPrompts(alloc, io, &no_roots, &.{}, skills);
     return .{
         .pinned_extensions = pinned,
         .extension_tool_bindings = bindings,
@@ -253,15 +257,16 @@ fn snapshotFromBindings(alloc: std.mem.Allocator, bindings: []ext_tools.Binding)
 /// Resolve the session's extension-tool bindings: explicit pins first (strict —
 /// an unresolvable pin fails the session), then usage-ranked candidates fill the
 /// remaining slots best-effort (an unresolvable or colliding candidate is
-/// skipped, never fatal). Each resolved extension knows its own root and that
-/// root's absolute path: the frozen `entry_path` must be absolute so it survives
-/// being spawned with the workspace as cwd, regardless of the host process's own
-/// working directory. The returned slice is address-stable; on any error every
-/// binding built so far is released and nothing leaks.
+/// skipped, never fatal). The frozen entry path comes from
+/// `store.Roots.Resolved.entryPathAbs`: absolute, so it survives being spawned
+/// with the workspace as cwd, and built from the version frozen at composition
+/// time, so mid-session activation cannot move it. The returned slice is
+/// address-stable; on any error every binding built so far is released and
+/// nothing leaks.
 fn resolveBindings(
     alloc: std.mem.Allocator,
-    io: std.Io,
-    resolved: []const ResolvedExtension,
+    roots: *const store.Roots,
+    resolved: []const store.Roots.Resolved,
     pins: []const []const u8,
     ranked: []const []const u8,
     auto_slots: usize,
@@ -270,26 +275,15 @@ fn resolveBindings(
     errdefer freeBindingsList(alloc, &list);
 
     for (pins) |pin| {
-        const binding = try resolvePinnedBinding(alloc, io, resolved, pin);
+        const binding = try resolvePinnedBinding(alloc, roots, resolved, pin);
         list.append(alloc, binding) catch |err| {
             binding.deinit(alloc);
             return err;
         };
     }
 
-    try appendRankedBindings(alloc, io, resolved, pins, ranked, auto_slots, &list);
+    try appendRankedBindings(alloc, roots, resolved, pins, ranked, auto_slots, &list);
     return list.toOwnedSlice(alloc);
-}
-
-/// The frozen, absolute entry path of one resolved extension's runtime — a
-/// compiled binary or a frozen script, per the runtime kind, under the root that
-/// extension was found in. Built from the version frozen at composition time,
-/// never from `current`, so mid-session activation cannot move it.
-fn frozenEntryPath(alloc: std.mem.Allocator, io: std.Io, r: ResolvedExtension, rt: manifest.Runtime) ![]u8 {
-    const st = store.Store.init(io, r.root);
-    const entry_rel = try st.versionRuntimeEntryPath(alloc, r.id, r.version, rt);
-    defer alloc.free(entry_rel);
-    return std.fs.path.join(alloc, &.{ r.root_real, entry_rel });
 }
 
 /// Best-effort automatic fill (DESIGN §5.1 rule 3). Walk ranked stable ids in
@@ -303,8 +297,8 @@ fn frozenEntryPath(alloc: std.mem.Allocator, io: std.Io, r: ResolvedExtension, r
 /// propagate: they are never "candidate unavailable".
 fn appendRankedBindings(
     alloc: std.mem.Allocator,
-    io: std.Io,
-    resolved: []const ResolvedExtension,
+    roots: *const store.Roots,
+    resolved: []const store.Roots.Resolved,
     pins: []const []const u8,
     ranked: []const []const u8,
     auto_slots: usize,
@@ -330,7 +324,7 @@ fn appendRankedBindings(
         // list is a caller contract violation, not a case to dedupe.
         std.debug.assert(!bindingSliceHas(list.items, id));
 
-        const binding = try resolveRankedBinding(alloc, io, resolved, id) orelse continue;
+        const binding = try resolveRankedBinding(alloc, roots, resolved, id) orelse continue;
         if (sliceHas(taken.items, binding.definition.name)) {
             binding.deinit(alloc);
             continue;
@@ -350,8 +344,8 @@ fn appendRankedBindings(
 /// version. Host faults propagate unchanged.
 fn resolveRankedBinding(
     alloc: std.mem.Allocator,
-    io: std.Io,
-    resolved: []const ResolvedExtension,
+    roots: *const store.Roots,
+    resolved: []const store.Roots.Resolved,
     id: []const u8,
 ) !?ext_tools.Binding {
     const parsed = parseStableToolId(id) catch return null;
@@ -363,7 +357,7 @@ fn resolveRankedBinding(
     // found tool spec proves the runtime exists. No runtime-less state to defend.
     const rt = r.manifest.runtime.?;
 
-    const entry_abs = try frozenEntryPath(alloc, io, r, rt);
+    const entry_abs = try r.entryPathAbs(alloc, roots);
     defer alloc.free(entry_abs);
 
     // `id` already passed parseStableToolId, whose two segments reformat back
@@ -409,8 +403,8 @@ fn parseStableToolId(pin: []const u8) CompositionError!StableToolId {
 
 fn resolvePinnedBinding(
     alloc: std.mem.Allocator,
-    io: std.Io,
-    resolved: []const ResolvedExtension,
+    roots: *const store.Roots,
+    resolved: []const store.Roots.Resolved,
     pin: []const u8,
 ) !ext_tools.Binding {
     const parsed = try parseStableToolId(pin);
@@ -422,7 +416,7 @@ fn resolvePinnedBinding(
     // executable; there is no runtime-less tool state to defend against.
     const rt = r.manifest.runtime.?;
 
-    const entry_abs = try frozenEntryPath(alloc, io, r, rt);
+    const entry_abs = try r.entryPathAbs(alloc, roots);
     defer alloc.free(entry_abs);
 
     // `pin` already passed parseStableToolId, whose two segments reformat back
@@ -435,7 +429,7 @@ fn resolvePinnedBinding(
     }, entry_abs, rt.interpreter);
 }
 
-fn findResolved(resolved: []const ResolvedExtension, id: []const u8) ?ResolvedExtension {
+fn findResolved(resolved: []const store.Roots.Resolved, id: []const u8) ?store.Roots.Resolved {
     for (resolved) |r| {
         if (std.mem.eql(u8, r.id, id)) return r;
     }
@@ -459,58 +453,18 @@ fn freeBindingsList(alloc: std.mem.Allocator, list: *std.ArrayList(ext_tools.Bin
     list.deinit(alloc);
 }
 
-const ResolvedExtension = struct {
-    id: []const u8,
-    version: []const u8,
-    manifest: manifest.Manifest,
-    /// The store root this extension was found in, and its absolute path. Both
-    /// borrow the `store.Roots` the caller keeps open for the whole resolve, so
-    /// nothing downstream re-derives the search order (DESIGN §7.2).
-    root: std.Io.Dir,
-    root_real: []const u8,
-};
-
-/// Store/manifest faults that mean "this directory is not a usable extension"
-/// and are safe to skip during discovery. Anything else — host cancellation,
-/// `OutOfMemory`, real I/O failures — is a host fault and must propagate: an
-/// OOM must never masquerade as "extension skipped" or `PinnedExtensionNotActive`.
-fn isExtensionFault(err: anyerror) bool {
-    return switch (err) {
-        // Invalid extension identity.
-        error.InvalidId,
-        error.InvalidVersion,
-        // Bad `current` pointer or a frozen version failing integrity.
-        error.VersionNotFound,
-        error.VersionSealInvalid,
-        error.VersionManifestIdMismatch,
-        error.VersionPackageMissing,
-        error.VersionEntryNotFound,
-        // Unparseable or invalid manifest.
-        error.InvalidJson,
-        error.NotAnObject,
-        error.MissingField,
-        error.WrongType,
-        error.UnsupportedSchema,
-        error.MissingRuntime,
-        error.InvalidEntry,
-        error.InvalidInterpreter,
-        error.NoContributions,
-        error.InvalidToolName,
-        error.ReservedToolName,
-        error.DuplicateToolName,
-        error.InvalidSkillPath,
-        error.InvalidSystemPromptPath,
-        error.DuplicateSystemPromptPath,
-        => true,
-        else => false,
-    };
-}
+/// Store/manifest faults that mean "this directory is not a usable extension".
+/// Lives in `store.zig` (it classifies store / integrity / manifest errors);
+/// discovery skips them, and anything else — host cancellation, `OutOfMemory`,
+/// real I/O failures — propagates.
+const isExtensionFault = store.isExtensionFault;
 
 /// Discover the active extensions across every store root, in search order:
-/// `Roots.listActive` already applied first-root-wins, so this only has to read
-/// each winner's frozen manifest.
-fn resolveActiveExtensions(alloc: std.mem.Allocator, roots: *const store.Roots) ![]ResolvedExtension {
-    var resolved: std.ArrayList(ResolvedExtension) = .empty;
+/// `Roots.listActive` already applied first-root-wins, so each entry only has
+/// to be turned into a validated `Resolved` — `resolveEntry` takes the root and
+/// version the listing decided rather than asking `current` again.
+fn resolveActiveExtensions(alloc: std.mem.Allocator, roots: *const store.Roots) ![]store.Roots.Resolved {
+    var resolved: std.ArrayList(store.Roots.Resolved) = .empty;
     errdefer freeResolved(alloc, resolved.items);
 
     const active = try roots.listActive(alloc);
@@ -520,12 +474,12 @@ fn resolveActiveExtensions(alloc: std.mem.Allocator, roots: *const store.Roots) 
         // A malformed extension is skipped, but a host fault — cancellation,
         // OOM, a real I/O failure — must propagate, never be mistaken for a
         // broken extension (see isExtensionFault).
-        var m = roots.store(entry.root).readManifest(alloc, entry.id, entry.version) catch |err| switch (err) {
+        const r = roots.resolveEntry(alloc, entry) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => if (isExtensionFault(err)) continue else return err,
         };
-        errdefer m.deinit();
-        try appendResolved(alloc, &resolved, roots.entries[entry.root], entry.id, entry.version, m);
+        errdefer r.deinit(alloc);
+        try resolved.append(alloc, r);
     }
     return resolved.toOwnedSlice(alloc);
 }
@@ -543,36 +497,31 @@ fn resolveActiveExtensions(alloc: std.mem.Allocator, roots: *const store.Roots) 
 fn unionWith(
     alloc: std.mem.Allocator,
     roots: *const store.Roots,
-    base: []ResolvedExtension,
+    base: []store.Roots.Resolved,
     with: []const WithRef,
-) ![]ResolvedExtension {
+) ![]store.Roots.Resolved {
     if (with.len == 0) return base;
-    var list: std.ArrayList(ResolvedExtension) = .{ .items = base, .capacity = base.len };
+    var list: std.ArrayList(store.Roots.Resolved) = .{ .items = base, .capacity = base.len };
     errdefer freeResolved(alloc, list.items);
 
     for (with) |ref| {
-        const owned_version: ?[]const u8 = if (ref.version == null) blk: {
-            const active = (try roots.firstActive(alloc, ref.id)) orelse return error.WithVersionNotFound;
-            break :blk active.version;
-        } else null;
-        defer if (owned_version) |v| alloc.free(v);
-        const version = ref.version orelse owned_version.?;
-
-        const root_index = roots.firstWithVersion(alloc, ref.id, version) orelse return error.WithVersionNotFound;
-        var m = try roots.store(root_index).readManifest(alloc, ref.id, version);
-        errdefer m.deinit();
+        const r = if (ref.version) |v|
+            roots.resolveVersion(alloc, ref.id, v) catch |err| switch (err) {
+                error.VersionNotFound => return error.WithVersionNotFound,
+                else => return err,
+            }
+        else
+            (try roots.resolveActive(alloc, ref.id)) orelse return error.WithVersionNotFound;
+        errdefer r.deinit(alloc);
 
         // Replace an entry for the same id rather than shadowing it: two
         // manifests of one id in one composition would collide on tool names.
         for (list.items, 0..) |existing, i| {
             if (!std.mem.eql(u8, existing.id, ref.id)) continue;
-            var old = list.swapRemove(i);
-            alloc.free(old.id);
-            alloc.free(old.version);
-            old.manifest.deinit();
+            list.swapRemove(i).deinit(alloc);
             break;
         }
-        try appendResolved(alloc, &list, roots.entries[root_index], ref.id, version, m);
+        try list.append(alloc, r);
     }
     return list.toOwnedSlice(alloc);
 }
@@ -584,51 +533,18 @@ fn unionWith(
 /// from whichever root holds it — versions are content-addressed, so every
 /// root's copy is the same bytes and integrity is checked either way; the search
 /// order only decides where it is found, never what runs.
-fn resolveFrozenExtensions(alloc: std.mem.Allocator, roots: *const store.Roots, active: []const ledger.PinnedExtensionRef) ![]ResolvedExtension {
-    var resolved: std.ArrayList(ResolvedExtension) = .empty;
+fn resolveFrozenExtensions(alloc: std.mem.Allocator, roots: *const store.Roots, active: []const ledger.PinnedExtensionRef) ![]store.Roots.Resolved {
+    var resolved: std.ArrayList(store.Roots.Resolved) = .empty;
     errdefer freeResolved(alloc, resolved.items);
     for (active) |ext| {
-        var found = false;
-        for (roots.entries, 0..) |root_entry, i| {
-            var m = roots.store(i).readManifest(alloc, ext.id, ext.version) catch |err| switch (err) {
-                error.Canceled => return error.Canceled,
-                // Not in this root (or broken here): try the next one, and let
-                // the last root's error stand if none has it.
-                else => if (isExtensionFault(err) and i + 1 < roots.entries.len) continue else return err,
-            };
-            errdefer m.deinit();
-            try appendResolved(alloc, &resolved, root_entry, ext.id, ext.version, m);
-            found = true;
-            break;
-        }
-        // No roots at all: the frozen version cannot be reconstructed.
-        if (!found) return error.VersionNotFound;
+        const r = try roots.resolveVersion(alloc, ext.id, ext.version);
+        errdefer r.deinit(alloc);
+        try resolved.append(alloc, r);
     }
     return resolved.toOwnedSlice(alloc);
 }
 
-fn appendResolved(
-    alloc: std.mem.Allocator,
-    resolved: *std.ArrayList(ResolvedExtension),
-    root_entry: store.Roots.Entry,
-    id_text: []const u8,
-    version_text: []const u8,
-    m: manifest.Manifest,
-) !void {
-    const id = try alloc.dupe(u8, id_text);
-    errdefer alloc.free(id);
-    const version = try alloc.dupe(u8, version_text);
-    errdefer alloc.free(version);
-    try resolved.append(alloc, .{
-        .id = id,
-        .version = version,
-        .manifest = m,
-        .root = root_entry.dir,
-        .root_real = root_entry.real,
-    });
-}
-
-fn copyPinsFromResolved(alloc: std.mem.Allocator, resolved: []const ResolvedExtension) ![]PinnedExtension {
+fn copyPinsFromResolved(alloc: std.mem.Allocator, resolved: []const store.Roots.Resolved) ![]PinnedExtension {
     var pins: std.ArrayList(PinnedExtension) = .empty;
     errdefer freePinned(alloc, pins.items);
     for (resolved) |r| {
@@ -644,7 +560,8 @@ fn copyPinsFromResolved(alloc: std.mem.Allocator, resolved: []const ResolvedExte
 fn buildSystemPrompts(
     alloc: std.mem.Allocator,
     io: std.Io,
-    resolved: []const ResolvedExtension,
+    roots: *const store.Roots,
+    resolved: []const store.Roots.Resolved,
     skills: skill.SkillSetSnapshot,
 ) !prompt.SystemPromptSnapshot {
     var blocks: std.ArrayList(prompt.SystemBlock) = .empty;
@@ -658,7 +575,7 @@ fn buildSystemPrompts(
             defer alloc.free(source);
             const rel = try std.fs.path.join(alloc, &.{ r.id, "versions", r.version, integrity.package_dir, prompt_path });
             defer alloc.free(rel);
-            const bytes = try r.root.readFileAlloc(io, rel, alloc, .limited(prompt.max_system_prompt_bytes));
+            const bytes = try roots.entries[r.root].dir.readFileAlloc(io, rel, alloc, .limited(prompt.max_system_prompt_bytes));
             defer alloc.free(bytes);
             try appendSystemBlock(alloc, &blocks, source, bytes);
         }
@@ -680,21 +597,16 @@ fn appendSystemBlock(alloc: std.mem.Allocator, blocks: *std.ArrayList(prompt.Sys
     try blocks.append(alloc, .{ .source = owned_source, .bytes = owned_bytes });
 }
 
-fn sortResolved(resolved: []ResolvedExtension) void {
-    std.mem.sort(ResolvedExtension, resolved, {}, struct {
-        fn lessThan(_: void, a: ResolvedExtension, b: ResolvedExtension) bool {
+fn sortResolved(resolved: []store.Roots.Resolved) void {
+    std.mem.sort(store.Roots.Resolved, resolved, {}, struct {
+        fn lessThan(_: void, a: store.Roots.Resolved, b: store.Roots.Resolved) bool {
             return std.mem.lessThan(u8, a.id, b.id);
         }
     }.lessThan);
 }
 
-fn freeResolved(alloc: std.mem.Allocator, resolved: []const ResolvedExtension) void {
-    for (resolved) |*r| {
-        alloc.free(r.id);
-        alloc.free(r.version);
-        var m = r.manifest;
-        m.deinit();
-    }
+fn freeResolved(alloc: std.mem.Allocator, resolved: []const store.Roots.Resolved) void {
+    for (resolved) |r| r.deinit(alloc);
     alloc.free(resolved);
 }
 
@@ -1588,13 +1500,18 @@ test "an auto candidate whose model-facing name is a reserved builtin is skipped
         \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/run"},"contributes":{"tools":[{"name":"shell","description":"x","input":{"type":"object"}}]}}
     );
     defer m.deinit();
-    const resolved = [_]ResolvedExtension{.{ .id = "a", .version = "v-aaaaaaaaaaaaaaaaaaaaaaaa", .manifest = m, .root = tmp.dir, .root_real = "." }};
+    const cwd = try tmpPath(alloc, io, tmp.dir);
+    defer alloc.free(cwd);
+    var roots = try store.Roots.open(alloc, io, cwd, one_root);
+    defer roots.deinit();
+    // The manifest is owned by this test, so this `Resolved` is never freed.
+    const resolved = [_]store.Roots.Resolved{.{ .id = "a", .version = "v-aaaaaaaaaaaaaaaaaaaaaaaa", .manifest = m, .root = 0 }};
     const pins = [_][]const u8{};
     const ranked = [_][]const u8{"ext:a/shell"};
 
     var list: std.ArrayList(ext_tools.Binding) = .empty;
     defer freeBindingsList(alloc, &list);
-    try appendRankedBindings(alloc, io, &resolved, &pins, &ranked, 1, &list);
+    try appendRankedBindings(alloc, &roots, &resolved, &pins, &ranked, 1, &list);
     // The candidate was resolved but refused: no alias/rename, no binding.
     try std.testing.expectEqual(@as(usize, 0), list.items.len);
 }

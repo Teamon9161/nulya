@@ -233,9 +233,6 @@ pub fn runStepWithPrompt(
     const turn = collectTurn(alloc, model, .{
         .prompt_ir = prompt_ir,
         .tools = tool_defs,
-        // generation == ledger file (DESIGN §11): one file is one cache scope, so
-        // within a session the generation is constant.
-        .generation = 0,
         .options = model_options,
         .stall_ms = step_ctx.retry.stall_timeout_ms,
     }, step_ctx) catch |err| switch (err) {
@@ -289,8 +286,6 @@ pub fn runStepWithPrompt(
     }
 
     var step_output = emit.StepOutputLimiter.init(step_ctx.tool_context.environment.io, step_ctx.scratch_dir, base_seq, step_ctx.step_budget);
-    const max_concurrent_tools = maxConcurrentTools(batchExecutionPolicy(tool_snapshot, turn.calls));
-    std.debug.assert(max_concurrent_tools == 1);
 
     // Execute the batch serially. On cancellation the batch is NOT abandoned: the
     // ledger invariant is "one assistant tool-call batch ↔ exactly one matching
@@ -395,27 +390,6 @@ fn replayableCalls(alloc: std.mem.Allocator, calls: []const ledger.ToolCall) ![]
     return out;
 }
 
-fn batchExecutionPolicy(tool_snapshot: registry.ToolSetSnapshot, calls: []const ledger.ToolCall) tool.BatchPolicy {
-    if (calls.len == 0) return .sequential;
-    for (calls) |call| {
-        const t = tool_snapshot.lookup(call.tool) orelse return .sequential;
-        if (t.batch_policy != .parallel_read_only) return .sequential;
-    }
-    return .parallel_read_only;
-}
-
-fn maxConcurrentTools(policy: tool.BatchPolicy) usize {
-    // v0.1 has no worker executor: every batch runs serially, so the cap is 1
-    // for EVERY policy. The policy is still recorded per call so read-only tools
-    // can raise this once a bounded-parallel dispatcher and arena-per-worker
-    // allocation land — without touching provider serialization. Keeping the cap
-    // here (rather than a tunable const) means there is no knob that looks like
-    // it enables parallelism while execution is still serial.
-    return switch (policy) {
-        .sequential, .parallel_read_only => 1,
-    };
-}
-
 /// Test-only convenience: project with no system prompt, then run one step.
 /// Real sessions project through `AgentSession` (which carries system blocks),
 /// so this shortcut is deliberately not part of the public loop API.
@@ -482,7 +456,7 @@ test "one step runs a batch of two shell calls and appends one result turn" {
 
         fn capabilities(ptr: *anyopaque) provider.ProviderCapabilities {
             _ = ptr;
-            return .{ .parallel_tool_calls = true };
+            return .{};
         }
 
         fn stream(ptr: *anyopaque, a: std.mem.Allocator, request: provider.Request, sink: provider.EventSink) anyerror!void {
@@ -730,50 +704,6 @@ test "a capability note reaches the provider as a capability_note block" {
 
     try std.testing.expect(model_impl.saw_note);
     try std.testing.expectEqual(@as(usize, 3), l.len()); // user, note, assistant
-}
-
-test "batch execution policy is parallel only when every call opts in" {
-    const Dummy = struct {
-        fn run(alloc: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolResult {
-            _ = req;
-            return .{ .ok = true, .output = try alloc.dupe(u8, "ok") };
-        }
-    };
-
-    const fake_tools = [_]tool.Tool{
-        .{
-            .definition = .{ .id = "test.read_a", .name = "read_a", .description = "read", .input_schema = "{}" },
-            .batch_policy = .parallel_read_only,
-            .executor = tool.functionExecutor(Dummy.run),
-        },
-        .{
-            .definition = .{ .id = "test.read_b", .name = "read_b", .description = "read", .input_schema = "{}" },
-            .batch_policy = .parallel_read_only,
-            .executor = tool.functionExecutor(Dummy.run),
-        },
-        .{
-            .definition = .{ .id = "test.shell", .name = "shell", .description = "shell", .input_schema = "{}" },
-            .batch_policy = .sequential,
-            .executor = tool.functionExecutor(Dummy.run),
-        },
-    };
-    const tools: registry.ToolSetSnapshot = .{ .tools = &fake_tools };
-
-    const read_calls = [_]ledger.ToolCall{
-        .{ .id = "c1", .tool = "read_a", .args_json = "{}" },
-        .{ .id = "c2", .tool = "read_b", .args_json = "{}" },
-    };
-    try std.testing.expectEqual(tool.BatchPolicy.parallel_read_only, batchExecutionPolicy(tools, &read_calls));
-    try std.testing.expectEqual(@as(usize, 1), maxConcurrentTools(batchExecutionPolicy(tools, &read_calls)));
-
-    const mixed_calls = [_]ledger.ToolCall{
-        .{ .id = "c1", .tool = "read_a", .args_json = "{}" },
-        .{ .id = "c2", .tool = "shell", .args_json = "{}" },
-    };
-    try std.testing.expectEqual(tool.BatchPolicy.sequential, batchExecutionPolicy(tools, &mixed_calls));
-
-    const unknown_calls = [_]ledger.ToolCall{.{ .id = "c1", .tool = "missing", .args_json = "{}" }};
-    try std.testing.expectEqual(tool.BatchPolicy.sequential, batchExecutionPolicy(tools, &unknown_calls));
 }
 
 // ── Cancellation test fixtures ──────────────────────────────────────────────

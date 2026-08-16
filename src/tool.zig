@@ -87,20 +87,14 @@ pub const ToolDefinition = struct {
     input_schema: []const u8,
 };
 
-/// How the agent loop may schedule several calls emitted in one assistant turn.
-/// The default is the safest boundary: preserve model-call order and make every
-/// side effect visible to later calls. Read-only tools may opt into parallel
-/// execution later without changing provider serialization.
-pub const BatchPolicy = enum {
-    sequential,
-    parallel_read_only,
-};
-
-/// A registered tool: its model-facing definition, scheduling contract, and
-/// execution handler.
+/// A registered tool: its model-facing definition and its execution handler.
+///
+/// Several calls may arrive in one assistant turn; the loop runs them serially
+/// (DESIGN §4), which preserves model-call order and makes every side effect
+/// visible to the calls after it. Batching is about ONE round trip, not about
+/// concurrency, so a tool never has to be concurrency-safe.
 pub const Tool = struct {
     definition: ToolDefinition,
-    batch_policy: BatchPolicy = .sequential,
     executor: ToolExecutor,
 };
 
@@ -131,25 +125,4 @@ test "requireString reports missing field distinctly from wrong type" {
     defer parsed.deinit();
     try std.testing.expectEqualStrings("x", try requireString(parsed.value, "a"));
     try std.testing.expectError(error.MissingField, requireString(parsed.value, "b"));
-}
-
-
-test "tools default to sequential batch policy" {
-    const Fake = struct {
-        fn run(alloc: std.mem.Allocator, req: ToolRequest) anyerror!RawToolResult {
-            _ = req;
-            return .{ .ok = true, .output = try alloc.dupe(u8, "ok") };
-        }
-    };
-
-    const fake: Tool = .{
-        .definition = .{
-            .id = "test.fake",
-            .name = "fake",
-            .description = "fake",
-            .input_schema = "{}",
-        },
-        .executor = functionExecutor(Fake.run),
-    };
-    try std.testing.expectEqual(BatchPolicy.sequential, fake.batch_policy);
 }

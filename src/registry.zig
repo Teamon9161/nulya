@@ -122,15 +122,6 @@ test "snapshot exports provider-facing tool definitions without handlers" {
     try std.testing.expectEqualStrings(snap.tools[0].definition.name, defs[0].name);
 }
 
-
-test "builtin tools declare conservative sequential scheduling" {
-    const snap = try snapshot(std.testing.allocator);
-    defer snap.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(tool.BatchPolicy.sequential, snap.lookup("shell").?.batch_policy);
-    try std.testing.expectEqual(tool.BatchPolicy.sequential, snap.lookup("edit").?.batch_policy);
-}
-
 fn stubTool(id: []const u8, name: []const u8) tool.Tool {
     return .{
         .definition = .{ .id = id, .name = name, .description = "", .input_schema = "{}" },

@@ -15,6 +15,7 @@ const anthropic = @import("providers/anthropic.zig");
 const codex = @import("providers/codex.zig");
 const config = @import("config.zig");
 const ledger = @import("ledger.zig");
+const environment = @import("environment.zig");
 const store = @import("extension/store.zig");
 
 pub const default_openai_model = "gpt-4o-mini";
@@ -285,6 +286,20 @@ fn envValue(env: *const std.process.Environ.Map, name: []const u8) ?[]const u8 {
 
 pub fn nonEmpty(value: []const u8, fallback: []const u8) []const u8 {
     return if (value.len == 0) fallback else value;
+}
+
+/// The execution environment a session runs its tools behind, per config
+/// (DESIGN §8). Only `local` exists: `sandbox` / `remote` parse but have no
+/// implementation, so they are refused HERE — at the one place a session's
+/// environment is built — rather than silently running locally under a config
+/// that asked for isolation.
+pub fn localEnvironment(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    cfg: *const config.Config,
+) !environment.LocalEnvironment {
+    if (cfg.environment.backend != .local) return error.UnsupportedEnvironmentBackend;
+    return environment.LocalEnvironment.init(alloc, io, .{ .dialect = cfg.environment.shell.toLocalOption() });
 }
 
 /// The extension store roots this process searches, in order (DESIGN §7.2):
@@ -573,4 +588,22 @@ test "scripted provider mode comes from the environment" {
     try std.testing.expectEqual(ScriptedProvider.Mode.finish, ScriptedProvider.fromEnv(&env).mode);
     try env.put("NULYA_SCRIPTED_MODE", "loop");
     try std.testing.expectEqual(ScriptedProvider.Mode.loop, ScriptedProvider.fromEnv(&env).mode);
+}
+
+test "only the local environment backend runs; sandbox / remote are refused, not silently localized" {
+    const alloc = std.testing.allocator;
+
+    var cfg = config.Config.init(alloc);
+    defer cfg.deinit();
+
+    // The default backend builds an environment as usual…
+    var local = try localEnvironment(alloc, std.testing.io, &cfg);
+    local.deinit();
+
+    // …and a backend this build cannot honour fails rather than running the
+    // tools locally under a config that asked for isolation (DESIGN §8).
+    cfg.environment.backend = .sandbox;
+    try std.testing.expectError(error.UnsupportedEnvironmentBackend, localEnvironment(alloc, std.testing.io, &cfg));
+    cfg.environment.backend = .remote;
+    try std.testing.expectError(error.UnsupportedEnvironmentBackend, localEnvironment(alloc, std.testing.io, &cfg));
 }

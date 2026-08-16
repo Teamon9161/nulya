@@ -25,7 +25,6 @@ pub const def: tool.Tool = .{
         \\{"type":"object","properties":{"command":{"type":"string"},"cwd":{"type":"string"}},"required":["command"]}
         ,
     },
-    .batch_policy = .sequential,
     .executor = tool.functionExecutor(run),
 };
 

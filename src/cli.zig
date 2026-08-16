@@ -482,42 +482,40 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     const cwd_path = try cwdRealPath(io, &cwd_real);
 
     // Whichever root holds the version — the first active copy of the id, or
-    // the first copy of the pinned version (DESIGN §7.2).
+    // the first copy of the pinned version (DESIGN §7.2). One shared lookup
+    // (`store.Roots.Resolved`) does search order, integrity validation, and the
+    // frozen manifest, so this path cannot drift from session composition.
+    // That frozen manifest is the runtime truth: the source tree's may already
+    // have changed while `current` still points at an older immutable version.
     var search = try RootSearch.open(alloc, io, cwd_path);
     defer search.deinit(alloc);
-    const found: store.Roots.ActiveVersion = if (with_ref.version) |v| .{
-        .root = search.roots.firstWithVersion(alloc, id, v) orelse {
-            try printOut(alloc, io, "no store root holds {s}@{s}; see `nulya ext list`\n", .{ id, v });
+    const resolved: store.Roots.Resolved = if (with_ref.version) |v|
+        search.roots.resolveVersion(alloc, id, v) catch |err| switch (err) {
+            error.Canceled => return err,
+            error.VersionNotFound => {
+                try printOut(alloc, io, "no store root holds {s}@{s}; see `nulya ext list`\n", .{ id, v });
+                return 1;
+            },
+            else => {
+                try printOut(alloc, io, "version {s}@{s} failed integrity validation ({s})\n", .{ id, v, @errorName(err) });
+                return 1;
+            },
+        }
+    else
+        (search.roots.resolveActive(alloc, id) catch |err| switch (err) {
+            error.Canceled => return err,
+            // `current` names a version this root cannot serve. Name the fault;
+            // `nulya ext list` names the version it points at.
+            else => {
+                try printOut(alloc, io, "active version of '{s}' failed integrity validation ({s}); see `nulya ext list`\n", .{ id, @errorName(err) });
+                return 1;
+            },
+        }) orelse {
+            try printOut(alloc, io, "extension '{s}' has no active version; run `nulya ext build` then `nulya ext activate`, or name a built version as {s}@<version>\n", .{ id, id });
             return 1;
-        },
-        .version = try alloc.dupe(u8, v),
-    } else (try search.roots.firstActive(alloc, id)) orelse {
-        try printOut(alloc, io, "extension '{s}' has no active version; run `nulya ext build` then `nulya ext activate`, or name a built version as {s}@<version>\n", .{ id, id });
-        return 1;
-    };
-    const active = found.version;
-    defer alloc.free(active);
-    const ext_root = search.roots.entries[found.root].dir;
-    const st = search.roots.store(found.root);
-
-    if (!st.versionExists(alloc, id, active)) {
-        try printOut(alloc, io, "version {s}@{s} failed integrity validation\n", .{ id, active });
-        return 1;
-    }
-
-    // The frozen manifest of the version being run is the runtime truth. The
-    // source-tree manifest may already have changed while `current` still
-    // points at an older immutable version.
-    const manifest_rel = try st.versionManifestPath(alloc, id, active);
-    defer alloc.free(manifest_rel);
-    const manifest_bytes = ext_root.readFileAlloc(io, manifest_rel, alloc, .limited(1 << 20)) catch {
-        try printOut(alloc, io, "version {s}@{s} is incomplete\n", .{ id, active });
-        return 1;
-    };
-    defer alloc.free(manifest_bytes);
-    var m = try manifest.parse(alloc, manifest_bytes);
-    defer m.deinit();
-    try m.validate();
+        };
+    defer resolved.deinit(alloc);
+    const m = resolved.manifest;
 
     // With --arg the only extra positional is an optional tool name; otherwise
     // the last positional is the JSON and an optional tool name precedes it.
@@ -550,12 +548,10 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     defer if (owned_args) |a| alloc.free(a);
     const args_json = owned_args orelse positional.items[positional.items.len - 1];
 
-    // A compiled binary lives under `bin/`; a script under `package/`. The store
-    // dispatches on runtime kind so this CLI path and session composition never
-    // drift on how a frozen entry is located.
-    const entry_rel = try st.versionRuntimeEntryPath(alloc, id, active, rt);
-    defer alloc.free(entry_rel);
-    const entry_abs = try std.fs.path.join(alloc, &.{ search.roots.entries[found.root].real, entry_rel });
+    // A compiled binary lives under `bin/`; a script under `package/`. The
+    // resolution dispatches on runtime kind so this CLI path and session
+    // composition never drift on how a frozen entry is located.
+    const entry_abs = try resolved.entryPathAbs(alloc, &search.roots);
     defer alloc.free(entry_abs);
 
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
@@ -1260,6 +1256,18 @@ fn cwdRealPath(io: std.Io, buf: *[std.fs.max_path_bytes]u8) ![]u8 {
 }
 
 fn sessionNew(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+    const id = (try createSession(alloc, io, args)) orelse return 1;
+    defer alloc.free(id);
+    try printOut(alloc, io, "{s}\n", .{id});
+    return 0;
+}
+
+/// Create a durable session file from `session new`'s own flags and return its
+/// id (owned by the caller), or null when the request was refused and the
+/// reason has already been printed. `session new` is a thin printer over this;
+/// the bare-`nulya` demo is its other caller, so the two cannot drift on how a
+/// session is composed (DESIGN §14).
+pub fn createSession(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !?[]u8 {
     var host = try std.process.Environ.createMap(.{ .block = .global }, alloc);
     defer host.deinit();
     var cfg = try config.load(alloc, io, &host);
@@ -1275,17 +1283,17 @@ fn sessionNew(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
     if (flagValue(args, "--parent")) |p| {
         const ref = parseParent(p) orelse {
             try printErr(io, "invalid --parent (want <session>:<seq>)\n");
-            return 1;
+            return null;
         };
         if (!launch.isValidSessionId(ref.session)) {
             try printErr(io, "invalid --parent session id\n");
-            return 1;
+            return null;
         }
         const ppath = try launch.sessionPath(alloc, ref.session);
         defer alloc.free(ppath);
         parent_header = ledger.readHeader(alloc, io, std.Io.Dir.cwd(), ppath) catch |err| {
             try printOut(alloc, io, "cannot read parent session '{s}': {s}\n", .{ ref.session, @errorName(err) });
-            return 1;
+            return null;
         };
         parent = ref;
     }
@@ -1334,7 +1342,7 @@ fn sessionNew(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
     } else {
         const profile_cfg = cfg.provider.findProfile(profile) orelse {
             try printOut(alloc, io, "no such profile '{s}' (see `nulya config show`)\n", .{profile});
-            return 1;
+            return null;
         };
         if (!launch.credentialAvailable(alloc, io, profile_cfg, &host)) {
             var paths = try config.ConfigPaths.init(alloc, &host);
@@ -1372,7 +1380,13 @@ fn sessionNew(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
     });
     defer promotion.freeRankedIds(alloc, ranked);
 
-    var lenv = try environment.LocalEnvironment.init(alloc, io, .{ .dialect = cfg.environment.shell.toLocalOption() });
+    var lenv = launch.localEnvironment(alloc, io, &cfg) catch |err| switch (err) {
+        error.UnsupportedEnvironmentBackend => {
+            try printOut(alloc, io, "environment backend '{s}' is not implemented; only local\n", .{@tagName(cfg.environment.backend)});
+            return null;
+        },
+        else => return err,
+    };
     defer lenv.deinit();
 
     const ext_roots = try launch.extensionRoots(alloc, &host, &cfg);
@@ -1410,17 +1424,16 @@ fn sessionNew(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
         // The caller named these extensions, so an unusable one is not a warning.
         error.WithVersionNotFound => {
             try printOut(alloc, io, "session new failed: --with names an extension with no such built version (see `nulya ext list`)\n", .{});
-            return 1;
+            return null;
         },
         else => {
             try printOut(alloc, io, "session new failed: {s}\n", .{@errorName(err)});
-            return 1;
+            return null;
         },
     };
     sess.deinit();
 
-    try printOut(alloc, io, "{s}\n", .{id});
-    return 0;
+    return try alloc.dupe(u8, id);
 }
 
 fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
@@ -1780,7 +1793,12 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     var cfg = try config.load(alloc, io, &host);
     defer cfg.deinit();
 
-    var lenv = try environment.LocalEnvironment.init(alloc, io, .{ .dialect = cfg.environment.shell.toLocalOption() });
+    var lenv = launch.localEnvironment(alloc, io, &cfg) catch |err| switch (err) {
+        error.UnsupportedEnvironmentBackend => {
+            return stepFail(alloc, io, stream, "environment backend '{s}' is not implemented; only local", .{@tagName(cfg.environment.backend)});
+        },
+        else => return err,
+    };
     defer lenv.deinit();
     // Let shell children (e.g. `nulya ext activate`) find the live session so
     // they can deposit capability notes into its inbox (DESIGN §5.3).

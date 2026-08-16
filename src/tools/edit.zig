@@ -20,7 +20,6 @@ pub const def: tool.Tool = .{
         \\{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean"}},"required":["path","old_string","new_string"]}
         ,
     },
-    .batch_policy = .sequential,
     .executor = tool.functionExecutor(run),
 };
 
