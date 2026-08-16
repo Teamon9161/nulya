@@ -270,10 +270,26 @@ Extension = 子进程；wire protocol 就是 ABI。不用 `.so/.dll`（ABI / Zig
 
 `nulya ext init --script` 按宿主平台生成脚本骨架（Windows `run.ps1` + powershell / 其余 `run.sh` + sh）。脚本与编译 extension 共用 seal / integrity / store / activate / rollback / usage，区别只在"是否编译"和 hash 是否含 compiler。
 
-### 7.2 目录与 manifest（`nulya.extension/v2`）
+### 7.2 Store roots：搜索顺序（首个持有者胜）
+
+extension 装在**多个 store root** 里，按固定顺序搜索（`store.Roots`）：
+
+| # | root | 谁写 | 备注 |
+|---|---|---|---|
+| ① | workspace `.nulya/extensions` | 默认 | 一个 checkout 自己的能力 |
+| ② | user `<NULYA_HOME \| ~/.nulya>/extensions` | `--user` | 造一次、每个 workspace 都有 |
+| ③ | `extensions.paths`（**只认 trusted 层**，§9.5） | operator | project 层写了也忽略 |
+
+- **同一个 id 在多个 root → 首个 root 胜**（workspace 遮蔽 user）；`ext list` 把被遮蔽的那行标出来，不静默藏起来。
+- **frozen 版本按 root 顺序找**（`initFrozen`、`skill load` 的 pinned ref、`ext run` 的 entry）：version 是内容寻址的，哪个 root 的副本都是同一字节、integrity 照验，所以顺序只决定"在哪找到"，从不决定"跑什么"。
+- **header 不记 root**（`active` 仍是 `{id, version}`）：记了就等于把一台机器的目录布局冻进会话，而那与"跑的是哪份字节"无关。
+- 不存在的 root 是**缺席**不是错误（多数机器没有 user store）；写端（`ext init --user` / `ext build --user`）需要时才创建。
+- **为什么 project 层不能加 root**：一个 root 决定"这台机器上哪些目录可以供出 `current`"，即哪些代码可以被跑起来——checkout 能加就是拓宽权限，正是 §9.5 "只能收窄"禁止的事。
+
+### 7.2.1 目录与 manifest（`nulya.extension/v2`）
 
 ```
-.nulya/extensions/<id>/          ← draft（可变）
+<store root>/<id>/               ← draft（可变）
 ├── extension.json
 ├── src/main.zig                 ← 有 runtime 时
 └── skills/<name>/SKILL.md       ← 声明的 skill 目录
@@ -392,7 +408,7 @@ user 层与 workspace 的 `.nulya/` 同形、每个平台一个好找的位置�
 
 标量 set 即胜，列表按 key 合并。project 层**可以更严不能更松**：可 pin 工具、选 profile、调严 policy、调小 K；**不可**关 policy hook、把 backend 从 sandbox 降级 local、注入 `api_key_env` 名字外泄 host env（单测覆盖）。这与 §9 的 `extension_permissions ⊆ session_authority` 是同一个不变量的两面：checkout 一个 repo 不该能拓宽机器权限。
 
-承载：`provider.profiles[]{name, kind=openai|anthropic|codex|scripted, model, models[]?, base_url, api_key_env, api_key?, effort?}` · `models[]{id, label, efforts[], default_effort?, context_window?}` · `registry{max_tools, pinned_native_tools, weights{uses_recent, uses_total, last_used, success_rate}}` · `policy.hook`（解析、未消费）· `environment{backend, shell}` · `compaction{…}`（解析、未消费）· `extensions.paths`。`default.toml` 自带 `openai` / `anthropic` / `codex` / `deepseek` / `deepseek-anthropic` / `scripted` 六个 profile 与它们列出的每个 model id 的目录条目。
+承载：`provider.profiles[]{name, kind=openai|anthropic|codex|scripted, model, models[]?, base_url, api_key_env, api_key?, effort?}` · `models[]{id, label, efforts[], default_effort?, context_window?}` · `registry{max_tools, pinned_native_tools, weights{uses_recent, uses_total, last_used, success_rate}}` · `policy.hook`（解析、未消费）· `environment{backend, shell}` · `compaction{…}`（解析、未消费）· `extensions.paths`（**已被消费**：§7.2 的第三档 store root，**只认 trusted 层**——project 层写了直接忽略，单测覆盖）。`default.toml` 自带 `openai` / `anthropic` / `codex` / `deepseek` / `deepseek-anthropic` / `scripted` 六个 profile 与它们列出的每个 model id 的目录条目。
 
 **两张表描述模型。** profile 说**怎么连**（kind / base_url / 哪个 env 放 key）和**它服务哪些 model id**（`model` 是默认、`models[]` 是可选列表；`ProviderProfile.defaultModel()`：`model` 非空取它，否则 `models[0]`，否则 provider 内置默认）；`[[models]]` 目录说一个 id **是什么**（label、effort 档位、context window），一个 id 不管经几个端点都只写一次。目录是纯描述：kernel 不读它；`launch` / `cli` 用它给 session 默认 effort（`Config.defaultEffort(profile, model_id)` = profile.effort ?? catalog.default_effort ?? 无），`nulya config show` 把它投影给选择器。`[[models]]` 按 `id` 合并、只认 trusted 层——project 层不能改一个 model id 的含义或让 session 静默换 effort。
 
@@ -475,9 +491,9 @@ NULYA_INTEGRATION_PROFILE=deepseek-anthropic zig build integration
 ## 14. CLI 表面（`cli.zig`；都不是 LLM tool，经 shell 调用）
 
 ```
-nulya ext init [--script] <id> [tool] | build <path>
+nulya ext init [--script] [--user] <id> [tool] | build <path> [--user]
           | run <id> [tool] (<json-args> | --arg k=v …)
-          | activate <id> <version> | rollback <id> <version> | deactivate <id>
+          | activate [--user] <id> <version> | rollback [--user] <id> <version> | deactivate [--user] <id>
           | list | inspect <id> | api [protocol|permissions|examples]
 nulya session new [--profile P] [--model ID] [--parent <id>:<seq>]
                                                          ← 冻结 composition + 模型身份、写 header，打印 session id
@@ -522,6 +538,7 @@ nulya                       ← 无参数：固定 prompt demo（现经 durable 
     ```
 
     `reasoning_item`（不透明、只为回放）**不转发**；`stopped ∈ end_turn | budget | canceled`。每个 step 的 ledger 行在该 step 的 `step end` **之前**刷出：读者见到 `step end` 就知道这一步的事件已全。诊断（原来的 "session step failed: …" 等）在 `--stream` 下变成 `{"stream":"run","event":"error","message":"…"}` 后非零退出——**stdout 上没有非 JSON 行**。
+- `nulya ext init|build|activate|rollback|deactivate` 都接受 `--user`：写端落到 user root（`~/.nulya/extensions`，需要时创建）而不是 workspace。不给 `--user` 时，`activate|rollback|deactivate` 作用于**实际持有该 id / 该 version 的首个 root**（§7.2），不是无脑 workspace；`ext list` 打印 `id / version / root`，被遮蔽的行标 `(shadowed)`；`ext run` / `skill list` / `skill load` / session composition 一律按 root 顺序搜索。
 - `nulya ext activate` 在 `NULYA_SESSION`（相对 workspace 的 session 文件路径）存在时，向该 session 的 inbox 投一条 capability_note（§5.3）。
 - 离线时 provider 回落到确定性的 scripted stand-in（`NULYA_SCRIPTED_MODE=finish|loop`，测试用）。
 

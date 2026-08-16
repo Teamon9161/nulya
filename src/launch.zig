@@ -15,12 +15,15 @@ const anthropic = @import("providers/anthropic.zig");
 const codex = @import("providers/codex.zig");
 const config = @import("config.zig");
 const ledger = @import("ledger.zig");
+const session = @import("session.zig");
 
 pub const default_openai_model = "gpt-4o-mini";
 pub const default_openai_base_url = "https://api.openai.com/v1";
 
 pub const sessions_dir = ".nulya/sessions";
 pub const scratch_dir = ".nulya/scratch";
+/// The workspace-level extension store — the first root of every search.
+pub const workspace_extensions_root = session.default_extension_root;
 
 /// A deterministic, terminating scripted provider — the offline stand-in for a
 /// real model (DESIGN §13). Two modes, selected by `NULYA_SCRIPTED_MODE`:
@@ -276,6 +279,51 @@ pub fn nonEmpty(value: []const u8, fallback: []const u8) []const u8 {
     return if (value.len == 0) fallback else value;
 }
 
+/// The extension store roots this process searches, in order (DESIGN §7.2):
+///
+///   1. the workspace's `.nulya/extensions` (relative — resolved against cwd);
+///   2. the user's `<NULYA_HOME | ~/.nulya>/extensions`, so a capability built
+///      once is available in every workspace;
+///   3. `extensions.paths` from the config — **trusted layers only**, since a
+///      checkout must not be able to decide which directories on this machine
+///      get to supply `current` versions (the same "project layer can only
+///      narrow" invariant as DESIGN §9.5).
+///
+/// The first root holding an id wins, so a workspace copy shadows a user-wide
+/// one. Roots that do not exist are skipped when opened. Caller owns the slice
+/// and its entries (`freeExtensionRoots`).
+pub fn extensionRoots(
+    alloc: std.mem.Allocator,
+    env: *const std.process.Environ.Map,
+    cfg: *const config.Config,
+) ![]const []const u8 {
+    var roots: std.ArrayList([]const u8) = .empty;
+    errdefer freeExtensionRoots(alloc, roots.items);
+
+    try roots.append(alloc, try alloc.dupe(u8, workspace_extensions_root));
+
+    if (try userExtensionsRoot(alloc, env)) |user| try roots.append(alloc, user);
+
+    for (cfg.extensions.paths) |p| {
+        if (p.len != 0) try roots.append(alloc, try alloc.dupe(u8, p));
+    }
+    return roots.toOwnedSlice(alloc);
+}
+
+/// `<NULYA_HOME | ~/.nulya>/extensions` — the user-level store, where `--user`
+/// writes. Null when this machine has no home directory at all. Caller owns it.
+pub fn userExtensionsRoot(alloc: std.mem.Allocator, env: *const std.process.Environ.Map) !?[]u8 {
+    const home = try config.userHome(alloc, env);
+    defer alloc.free(home);
+    if (home.len == 0) return null;
+    return try std.fs.path.join(alloc, &.{ home, "extensions" });
+}
+
+pub fn freeExtensionRoots(alloc: std.mem.Allocator, roots: []const []const u8) void {
+    for (roots) |r| alloc.free(r);
+    alloc.free(roots);
+}
+
 /// Session file path relative to the workspace: `.nulya/sessions/<id>.jsonl`.
 /// Caller owns the result.
 pub fn sessionPath(alloc: std.mem.Allocator, id: []const u8) ![]u8 {
@@ -336,6 +384,38 @@ test "session id is path-safe and unique-ish" {
     defer alloc.free(a);
     try std.testing.expect(isValidSessionId(a));
     try std.testing.expect(std.mem.startsWith(u8, a, "s-"));
+}
+
+test "extension roots search workspace, then user, then trusted config paths" {
+    const alloc = std.testing.allocator;
+    var env: std.process.Environ.Map = .init(alloc);
+    defer env.deinit();
+    try env.put("NULYA_HOME", if (@import("builtin").os.tag == .windows) "D:\\home\\.nulya" else "/home/me/.nulya");
+
+    var cfg = config.Config.init(alloc);
+    defer cfg.deinit();
+    cfg.extensions = .{ .paths = &.{ "/opt/shared/extensions", "" } };
+
+    const roots = try extensionRoots(alloc, &env, &cfg);
+    defer freeExtensionRoots(alloc, roots);
+    try std.testing.expectEqual(@as(usize, 3), roots.len); // the empty spec is dropped
+    try std.testing.expectEqualStrings(workspace_extensions_root, roots[0]);
+    try std.testing.expectEqualStrings(
+        if (@import("builtin").os.tag == .windows) "D:\\home\\.nulya\\extensions" else "/home/me/.nulya/extensions",
+        roots[1],
+    );
+    try std.testing.expectEqualStrings("/opt/shared/extensions", roots[2]);
+
+    // No home at all: the workspace root is still there, and `--user` has
+    // nowhere to write rather than guessing a path.
+    var homeless: std.process.Environ.Map = .init(alloc);
+    defer homeless.deinit();
+    var bare = config.Config.init(alloc);
+    defer bare.deinit();
+    const only_workspace = try extensionRoots(alloc, &homeless, &bare);
+    defer freeExtensionRoots(alloc, only_workspace);
+    try std.testing.expectEqual(@as(usize, 1), only_workspace.len);
+    try std.testing.expect((try userExtensionsRoot(alloc, &homeless)) == null);
 }
 
 test "rfc3339 renders a UTC instant, and now() is one of them" {

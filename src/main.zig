@@ -81,6 +81,9 @@ fn runDemo(alloc: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) 
     });
     defer promotion.freeRankedIds(alloc, ranked_ids);
 
+    const ext_roots = try launch.extensionRoots(alloc, env, &cfg);
+    defer launch.freeExtensionRoots(alloc, ext_roots);
+
     var sess = try session.AgentSession.createDurable(alloc, .{
         .model = model,
         .step_ctx = .{
@@ -88,6 +91,7 @@ fn runDemo(alloc: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) 
             .scratch_dir = launch.scratch_dir,
         },
         .model_options = .{ .effort = effort },
+        .extension_roots = ext_roots,
         // Config lives only at this boundary; the composition receives a narrow,
         // already-resolved selection, never the config itself.
         .registry = .{

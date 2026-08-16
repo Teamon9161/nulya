@@ -278,7 +278,7 @@ test "closed loop: usage-driven promotion executes the frozen version through th
     try std.testing.expectEqual(@as(usize, 1), ranked_b.len);
     try std.testing.expectEqualStrings("ext:web.search/web_search", ranked_b[0]);
 
-    var comp_b = try composition.SessionComposition.init(alloc, io, ws_path, ".nulya/extensions", .{ .ranked_native_tools = ranked_b });
+    var comp_b = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{ .ranked_native_tools = ranked_b });
     defer comp_b.deinit(alloc);
 
     // The ranked candidate is now a native, model-facing tool, and calling it
@@ -318,7 +318,7 @@ test "closed loop: usage-driven promotion executes the frozen version through th
     // 3. A fresh session opened after the switch promotes and freezes on v2.
     const ranked_c = try promotion.rankExtensionTools(alloc, io, ws_path, .{});
     defer promotion.freeRankedIds(alloc, ranked_c);
-    var comp_c = try composition.SessionComposition.init(alloc, io, ws_path, ".nulya/extensions", .{ .ranked_native_tools = ranked_c });
+    var comp_c = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{ .ranked_native_tools = ranked_c });
     defer comp_c.deinit(alloc);
     const tool_c = comp_c.tools.lookup("web_search") orelse return error.TestUnexpectedResult;
     {
@@ -542,7 +542,7 @@ test "self-manufacture closed loop: a shell/edit-only session builds its own ext
     try std.testing.expectEqual(@as(usize, 1), ranked.len);
     try std.testing.expectEqualStrings("ext:demo/greet", ranked[0]);
 
-    var comp_b = try composition.SessionComposition.init(alloc, io, ws_path, ".nulya/extensions", .{ .ranked_native_tools = ranked });
+    var comp_b = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{ .ranked_native_tools = ranked });
     defer comp_b.deinit(alloc);
     const greet = comp_b.tools.lookup("greet") orelse return error.TestUnexpectedResult;
     const result = try callNative(alloc, io, greet, ws_path);
@@ -1418,6 +1418,198 @@ test "session cli: --stream emits the transient line protocol and leaves the led
     try std.testing.expect(std.mem.indexOf(u8, plain.stdout, "\"stream\":") == null);
 }
 
+// ── M5c: multiple extension store roots (DESIGN §7.2) ───────────────────────
+
+/// Scaffold a pure-skill (data kind) extension in `root_rel` and build it there
+/// — no toolchain involved. Returns the built version id; caller frees.
+fn buildSkillExtensionIn(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    ws: std.Io.Dir,
+    root_rel: []const u8,
+    id: []const u8,
+    body: []const u8,
+) ![]u8 {
+    const skill_dir = try std.fs.path.join(alloc, &.{ root_rel, id, "skills", id });
+    defer alloc.free(skill_dir);
+    try ws.createDirPath(io, skill_dir);
+
+    const manifest_bytes = try std.fmt.allocPrint(alloc,
+        \\{{"schema":"nulya.extension/v2","id":"{s}","contributes":{{"skills":["skills/{s}"]}}}}
+    , .{ id, id });
+    defer alloc.free(manifest_bytes);
+    const manifest_rel = try std.fs.path.join(alloc, &.{ root_rel, id, "extension.json" });
+    defer alloc.free(manifest_rel);
+    try ws.writeFile(io, .{ .sub_path = manifest_rel, .data = manifest_bytes });
+
+    const skill_md = try std.fmt.allocPrint(alloc, "---\nname: {s}\ndescription: {s}\n---\n{s}\n", .{ id, body, body });
+    defer alloc.free(skill_md);
+    const skill_rel = try std.fs.path.join(alloc, &.{ skill_dir, "SKILL.md" });
+    defer alloc.free(skill_rel);
+    try ws.writeFile(io, .{ .sub_path = skill_rel, .data = skill_md });
+
+    const draft = try std.fs.path.join(alloc, &.{ root_rel, id });
+    defer alloc.free(draft);
+    var result = try build_ext.buildExtension(alloc, io, ws, draft, "zig-unused-for-data");
+    defer result.deinit(alloc);
+    if (!result.compile_ok) return error.ExtensionBuildFailed;
+    return alloc.dupe(u8, result.version);
+}
+
+test "extension store: an extension in the user root (NULYA_HOME) is discovered by a workspace session; a workspace extension with the same id shadows it; a frozen version resolves from whichever root holds it" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var ws_real: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
+
+    // A user-level store (what `NULYA_HOME` relocates) and the workspace one.
+    const user_root_rel = "home" ++ std.fs.path.sep_str ++ "extensions";
+    const user_only = try buildSkillExtensionIn(alloc, io, ws, user_root_rel, "user-wide", "from the user root");
+    defer alloc.free(user_only);
+    const user_shared = try buildSkillExtensionIn(alloc, io, ws, user_root_rel, "shared", "user copy");
+    defer alloc.free(user_shared);
+    const ws_shared = try buildSkillExtensionIn(alloc, io, ws, ".nulya/extensions", "shared", "workspace copy");
+    defer alloc.free(ws_shared);
+    try std.testing.expect(!std.mem.eql(u8, user_shared, ws_shared));
+
+    {
+        var user_root = try ws.openDir(io, user_root_rel, .{});
+        defer user_root.close(io);
+        const st = store.Store.init(io, user_root);
+        try st.activate(alloc, "user-wide", user_only);
+        try st.activate(alloc, "shared", user_shared);
+        var ws_root = try ws.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
+        defer ws_root.close(io);
+        try store.Store.init(io, ws_root).activate(alloc, "shared", ws_shared);
+    }
+
+    const user_root_abs = try std.fs.path.join(alloc, &.{ ws_path, user_root_rel });
+    defer alloc.free(user_root_abs);
+    const roots: []const []const u8 = &.{ ".nulya/extensions", user_root_abs };
+
+    // A session in this workspace sees BOTH: the user-wide extension's skill is
+    // in the catalog, and `shared` resolves to the workspace copy — first root
+    // wins, so a workspace version shadows a user-wide one of the same id.
+    var comp = try composition.SessionComposition.init(alloc, io, ws_path, roots, .{});
+    defer comp.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 2), comp.pinned_extensions.len);
+    var saw_user_wide = false;
+    var shared_version: []const u8 = "";
+    for (comp.pinned_extensions) |p| {
+        if (std.mem.eql(u8, p.id, "user-wide")) saw_user_wide = true;
+        if (std.mem.eql(u8, p.id, "shared")) shared_version = p.version;
+    }
+    try std.testing.expect(saw_user_wide);
+    try std.testing.expectEqualStrings(ws_shared, shared_version);
+
+    var saw_user_skill = false;
+    for (comp.skills.skills) |s| {
+        if (std.mem.eql(u8, s.name, "user-wide")) saw_user_skill = true;
+    }
+    try std.testing.expect(saw_user_skill);
+
+    // Resume: a frozen version is found in whichever root holds it. Freeze the
+    // USER root's `shared` version — the one the workspace shadows — and the
+    // composition still rebuilds it, because versions are content-addressed and
+    // the search order only decides where a version is found.
+    const frozen: ledger.FrozenComposition = .{
+        .active = &.{
+            .{ .id = "user-wide", .version = user_only },
+            .{ .id = "shared", .version = user_shared },
+        },
+    };
+    var resumed = try composition.SessionComposition.initFrozen(alloc, io, ws_path, roots, frozen);
+    defer resumed.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 2), resumed.pinned_extensions.len);
+    for (resumed.pinned_extensions) |p| {
+        if (std.mem.eql(u8, p.id, "shared")) try std.testing.expectEqualStrings(user_shared, p.version);
+    }
+
+    // Without the user root in the search order, only the workspace copy exists.
+    var workspace_only = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{});
+    defer workspace_only.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), workspace_only.pinned_extensions.len);
+    try std.testing.expectEqualStrings("shared", workspace_only.pinned_extensions[0].id);
+}
+
+test "cli: NULYA_HOME extensions are visible to ext list / skill list / ext run, with shadowing marked" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var ws_real: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
+    const home_abs = try std.fs.path.join(alloc, &.{ ws_path, "home" });
+    defer alloc.free(home_abs);
+    const env: []const EnvPair = &.{.{ .key = "NULYA_HOME", .value = home_abs }};
+
+    const user_root_rel = "home" ++ std.fs.path.sep_str ++ "extensions";
+    const user_only = try buildSkillExtensionIn(alloc, io, ws, user_root_rel, "user-wide", "from the user root");
+    defer alloc.free(user_only);
+    const user_shared = try buildSkillExtensionIn(alloc, io, ws, user_root_rel, "shared", "user copy");
+    defer alloc.free(user_shared);
+    const ws_shared = try buildSkillExtensionIn(alloc, io, ws, ".nulya/extensions", "shared", "workspace copy");
+    defer alloc.free(ws_shared);
+    {
+        var user_root = try ws.openDir(io, user_root_rel, .{});
+        defer user_root.close(io);
+        try store.Store.init(io, user_root).activate(alloc, "user-wide", user_only);
+        try store.Store.init(io, user_root).activate(alloc, "shared", user_shared);
+        var ws_root = try ws.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
+        defer ws_root.close(io);
+        try store.Store.init(io, ws_root).activate(alloc, "shared", ws_shared);
+    }
+
+    // `ext list` shows every root, and says which copy is shadowed.
+    {
+        const list = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "list" }, env);
+        defer alloc.free(list.stdout);
+        try std.testing.expectEqual(@as(u8, 0), list.code);
+        try std.testing.expect(std.mem.indexOf(u8, list.stdout, "user-wide") != null);
+        try std.testing.expect(std.mem.indexOf(u8, list.stdout, ws_shared) != null);
+        try std.testing.expect(std.mem.indexOf(u8, list.stdout, user_shared) != null);
+        try std.testing.expect(std.mem.indexOf(u8, list.stdout, "(shadowed)") != null);
+    }
+
+    // `skill list` reaches into the user root, and `skill load` reads the frozen
+    // SKILL.md from whichever root holds that version — including the shadowed
+    // user copy, which is named by a pinned ref rather than by id.
+    {
+        const list = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "skill", "list" }, env);
+        defer alloc.free(list.stdout);
+        try std.testing.expectEqual(@as(u8, 0), list.code);
+        try std.testing.expect(std.mem.indexOf(u8, list.stdout, "user-wide") != null);
+
+        const ref = try std.fmt.allocPrint(alloc, "ext:shared@{s}/shared", .{user_shared});
+        defer alloc.free(ref);
+        const load = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "skill", "load", ref }, env);
+        defer alloc.free(load.stdout);
+        try std.testing.expectEqual(@as(u8, 0), load.code);
+        try std.testing.expect(std.mem.indexOf(u8, load.stdout, "user copy") != null);
+    }
+
+    // Without NULYA_HOME pointing here, the user root is simply not in the
+    // search order — the same command sees only the workspace store.
+    {
+        const list = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "list" }, &.{.{ .key = "NULYA_HOME", .value = ws_path }});
+        defer alloc.free(list.stdout);
+        try std.testing.expectEqual(@as(u8, 0), list.code);
+        try std.testing.expect(std.mem.indexOf(u8, list.stdout, "user-wide") == null);
+    }
+}
+
 // ── M5b: per-step usage on the assistant event (DESIGN §3.1) ────────────────
 
 /// A model that prices every turn, so the ledger has a real cost to record.
@@ -1682,7 +1874,7 @@ test "script extension: init(--script) -> build(seal) -> activate -> run -> prom
     try std.testing.expectEqual(@as(usize, 1), ranked.len);
     try std.testing.expectEqualStrings("ext:greeter/greet", ranked[0]);
 
-    var comp = try composition.SessionComposition.init(alloc, io, ws_path, ".nulya/extensions", .{ .ranked_native_tools = ranked });
+    var comp = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{ .ranked_native_tools = ranked });
     defer comp.deinit(alloc);
     const greet = comp.tools.lookup("greet") orelse return error.TestUnexpectedResult;
     // The frozen script lives under package/, and the binding carries its interpreter.

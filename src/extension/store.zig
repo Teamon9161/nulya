@@ -198,6 +198,174 @@ pub const Store = struct {
     }
 };
 
+/// The ordered set of store roots a process searches (DESIGN §7.2): the
+/// workspace's `.nulya/extensions`, then the user's `~/.nulya/extensions`, then
+/// any `extensions.paths` from a TRUSTED config layer. Order is the whole
+/// semantics — **the first root holding an id wins**, so a workspace copy
+/// shadows a user-wide one, and a checkout can never add a root (DESIGN §9.5).
+///
+/// A root that does not exist is simply absent, not an error: having no
+/// user-level store is the normal case. Roots own their opened handles and
+/// resolved absolute paths; every id/version below is content-addressed, so
+/// which root a frozen version came from never changes what runs — only where
+/// it was found.
+pub const Roots = struct {
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    entries: []Entry,
+
+    pub const Entry = struct {
+        /// The configured spec (workspace-relative or absolute), for messages.
+        spec: []const u8,
+        dir: std.Io.Dir,
+        /// Absolute real path — a frozen entry path must survive being spawned
+        /// with the workspace as cwd.
+        real: []const u8,
+    };
+
+    /// One extension as the search order resolves it.
+    pub const ActiveEntry = struct {
+        id: []const u8,
+        /// Index into `entries` of the root that won.
+        root: usize,
+        version: []const u8,
+    };
+
+    /// Open each spec in order, skipping the ones that are not there. `cwd` is
+    /// what relative specs resolve against.
+    pub fn open(alloc: std.mem.Allocator, io: std.Io, cwd: []const u8, specs: []const []const u8) !Roots {
+        var entries: std.ArrayList(Entry) = .empty;
+        errdefer {
+            for (entries.items) |*e| {
+                e.dir.close(io);
+                alloc.free(e.real);
+            }
+            entries.deinit(alloc);
+        }
+        for (specs) |spec| {
+            if (spec.len == 0) continue;
+            var dir = openRoot(io, cwd, spec) catch |err| switch (err) {
+                error.FileNotFound, error.NotDir => continue,
+                else => return err,
+            };
+            errdefer dir.close(io);
+            var buf: [std.fs.max_path_bytes]u8 = undefined;
+            const real = try alloc.dupe(u8, buf[0..try dir.realPath(io, &buf)]);
+            errdefer alloc.free(real);
+            try entries.append(alloc, .{ .spec = spec, .dir = dir, .real = real });
+        }
+        return .{ .alloc = alloc, .io = io, .entries = try entries.toOwnedSlice(alloc) };
+    }
+
+    pub fn deinit(self: *Roots) void {
+        for (self.entries) |*e| {
+            e.dir.close(self.io);
+            self.alloc.free(e.real);
+        }
+        self.alloc.free(self.entries);
+    }
+
+    pub fn store(self: *const Roots, index: usize) Store {
+        return Store.init(self.io, self.entries[index].dir);
+    }
+
+    /// Every extension with an active version, first-root-wins, sorted by id.
+    /// Only `current` is read here (cheap); whether that version is usable is
+    /// the caller's concern. A directory whose name is not a valid extension id
+    /// is not an extension and is skipped; host faults propagate.
+    /// Caller owns the slice and each `id`/`version`.
+    pub fn listActive(self: *const Roots, alloc: std.mem.Allocator) ![]ActiveEntry {
+        var out: std.ArrayList(ActiveEntry) = .empty;
+        errdefer freeActive(alloc, out.items);
+        for (self.entries, 0..) |entry, root_index| {
+            const st = Store.init(self.io, entry.dir);
+            var it = entry.dir.iterate();
+            while (try it.next(self.io)) |dir_entry| {
+                if (dir_entry.kind != .directory) continue;
+                if (hasId(out.items, dir_entry.name)) continue; // an earlier root won
+                const active = (st.activeVersion(alloc, dir_entry.name) catch |err| switch (err) {
+                    error.InvalidId => continue,
+                    else => return err,
+                }) orelse continue;
+                errdefer alloc.free(active);
+                const id = try alloc.dupe(u8, dir_entry.name);
+                errdefer alloc.free(id);
+                try out.append(alloc, .{ .id = id, .root = root_index, .version = active });
+            }
+        }
+        std.mem.sort(ActiveEntry, out.items, {}, struct {
+            fn lessThan(_: void, a: ActiveEntry, b: ActiveEntry) bool {
+                return std.mem.lessThan(u8, a.id, b.id);
+            }
+        }.lessThan);
+        return out.toOwnedSlice(alloc);
+    }
+
+    pub fn freeActive(alloc: std.mem.Allocator, list: []ActiveEntry) void {
+        for (list) |e| {
+            alloc.free(e.id);
+            alloc.free(e.version);
+        }
+        alloc.free(list);
+    }
+
+    /// Index of the first root that has a directory for `id` — where an
+    /// `activate` / `rollback` / `deactivate` naming no root should act.
+    pub fn firstWithId(self: *const Roots, id: []const u8) !?usize {
+        if (!manifest.isValidId(id)) return error.InvalidId;
+        for (self.entries, 0..) |entry, i| {
+            entry.dir.access(self.io, id, .{}) catch continue;
+            return i;
+        }
+        return null;
+    }
+
+    /// Index of the first root holding a BUILT `version` of `id` (integrity
+    /// checked). Content addressing makes every root's copy the same bytes, so
+    /// the first one found is as good as any.
+    pub fn firstWithVersion(self: *const Roots, alloc: std.mem.Allocator, id: []const u8, version: []const u8) ?usize {
+        for (self.entries, 0..) |_, i| {
+            if (self.store(i).versionExists(alloc, id, version)) return i;
+        }
+        return null;
+    }
+
+    /// The active version of `id` under the first root that has one, or null.
+    /// Caller owns `version`.
+    pub fn firstActive(self: *const Roots, alloc: std.mem.Allocator, id: []const u8) !?ActiveEntry {
+        for (self.entries, 0..) |_, i| {
+            const active = try self.store(i).activeVersion(alloc, id) orelse continue;
+            return .{ .id = id, .root = i, .version = active };
+        }
+        return null;
+    }
+
+    fn hasId(list: []const ActiveEntry, id: []const u8) bool {
+        for (list) |e| {
+            if (std.mem.eql(u8, e.id, id)) return true;
+        }
+        return false;
+    }
+};
+
+/// Open a store root, creating it (and its parents) if it is not there yet —
+/// what the WRITE side needs (`ext init`, `ext build`): a machine with no
+/// `~/.nulya/extensions` yet should get one the first time something is built
+/// into it. Read paths use `openRoot` / `Roots.open`, which skip what is absent.
+pub fn openOrCreateRoot(io: std.Io, cwd: []const u8, spec: []const u8) !std.Io.Dir {
+    if (std.fs.path.isAbsolute(spec)) {
+        try std.Io.Dir.cwd().createDirPath(io, spec);
+        return std.Io.Dir.openDirAbsolute(io, spec, .{ .iterate = true });
+    }
+    var workspace = if (std.fs.path.isAbsolute(cwd))
+        try std.Io.Dir.openDirAbsolute(io, cwd, .{})
+    else
+        try std.Io.Dir.cwd().openDir(io, cwd, .{});
+    defer workspace.close(io);
+    try workspace.createDirPath(io, spec);
+    return workspace.openDir(io, spec, .{ .iterate = true });
+}
+
 /// Open the extensions root directory (iterable) resolved against `cwd`. Shared
 /// by session composition and capability-note reconciliation.
 pub fn openRoot(io: std.Io, cwd: []const u8, ext_root_rel: []const u8) !std.Io.Dir {
@@ -354,6 +522,92 @@ test "activate refuses a sealed version whose binary changed" {
     try tmp.dir.writeFile(io, .{ .sub_path = entry_sub, .data = "tampered" });
 
     try std.testing.expectError(error.VersionSealInvalid, store.activate(alloc, "demo", version));
+}
+
+test "roots search in order: the first root holding an id wins, a missing root is simply absent" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Two real store roots plus one that does not exist at all.
+    try tmp.dir.createDirPath(io, "workspace");
+    try tmp.dir.createDirPath(io, "user");
+    var ws_root = try tmp.dir.openDir(io, "workspace", .{ .iterate = true });
+    defer ws_root.close(io);
+    var user_root = try tmp.dir.openDir(io, "user", .{ .iterate = true });
+    defer user_root.close(io);
+
+    // `shared` exists in both roots (different bodies -> different versions);
+    // `only-user` exists in the user root alone.
+    const ws_shared = try writeSkillVersion(alloc, io, ws_root, "shared", "workspace body");
+    defer alloc.free(ws_shared);
+    const user_shared = try writeSkillVersion(alloc, io, user_root, "shared", "user body");
+    defer alloc.free(user_shared);
+    const only_user = try writeSkillVersion(alloc, io, user_root, "only-user", "user only");
+    defer alloc.free(only_user);
+    try Store.init(io, ws_root).activate(alloc, "shared", ws_shared);
+    try Store.init(io, user_root).activate(alloc, "shared", user_shared);
+    try Store.init(io, user_root).activate(alloc, "only-user", only_user);
+    try std.testing.expect(!std.mem.eql(u8, ws_shared, user_shared));
+
+    var tmp_real: [std.fs.max_path_bytes]u8 = undefined;
+    const base = tmp_real[0..try tmp.dir.realPath(io, &tmp_real)];
+    var roots = try Roots.open(alloc, io, base, &.{ "workspace", "nowhere", "user" });
+    defer roots.deinit();
+    try std.testing.expectEqual(@as(usize, 2), roots.entries.len); // the absent one is skipped
+
+    const active = try roots.listActive(alloc);
+    defer Roots.freeActive(alloc, active);
+    try std.testing.expectEqual(@as(usize, 2), active.len);
+    // Sorted by id; `shared` resolves to the WORKSPACE copy (first root wins),
+    // and the user root still contributes what the workspace does not have.
+    try std.testing.expectEqualStrings("only-user", active[0].id);
+    try std.testing.expectEqual(@as(usize, 1), active[0].root);
+    try std.testing.expectEqualStrings("shared", active[1].id);
+    try std.testing.expectEqual(@as(usize, 0), active[1].root);
+    try std.testing.expectEqualStrings(ws_shared, active[1].version);
+
+    // Same order for the single-id lookups.
+    try std.testing.expectEqual(@as(usize, 0), (try roots.firstWithId("shared")).?);
+    try std.testing.expectEqual(@as(usize, 1), (try roots.firstWithId("only-user")).?);
+    try std.testing.expect((try roots.firstWithId("absent")) == null);
+    {
+        const found = (try roots.firstActive(alloc, "shared")).?;
+        defer alloc.free(found.version);
+        try std.testing.expectEqual(@as(usize, 0), found.root);
+        try std.testing.expectEqualStrings(ws_shared, found.version);
+    }
+    // A frozen version resolves from whichever root actually holds it — the
+    // user root's version is found even though the workspace shadows the id.
+    try std.testing.expectEqual(@as(usize, 1), roots.firstWithVersion(alloc, "shared", user_shared).?);
+    try std.testing.expectEqual(@as(usize, 0), roots.firstWithVersion(alloc, "shared", ws_shared).?);
+    try std.testing.expect(roots.firstWithVersion(alloc, "shared", "v-000000000000000000000000") == null);
+}
+
+test "openOrCreateRoot creates a missing root, by absolute path as well as relative" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = buf[0..try tmp.dir.realPath(io, &buf)];
+
+    // Relative to a workspace…
+    {
+        var dir = try openOrCreateRoot(io, base, "nested" ++ std.fs.path.sep_str ++ "extensions");
+        dir.close(io);
+        try tmp.dir.access(io, "nested" ++ std.fs.path.sep_str ++ "extensions", .{});
+    }
+    // …and by absolute path, which is how the user root (`~/.nulya/extensions`)
+    // arrives. Both are idempotent.
+    const abs = try std.fs.path.join(alloc, &.{ base, "home", "extensions" });
+    defer alloc.free(abs);
+    for (0..2) |_| {
+        var dir = try openOrCreateRoot(io, base, abs);
+        dir.close(io);
+    }
+    try tmp.dir.access(io, "home" ++ std.fs.path.sep_str ++ "extensions", .{});
 }
 
 test "listVersions returns every built version" {

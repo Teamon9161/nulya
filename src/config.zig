@@ -378,9 +378,11 @@ fn mergeProject(cfg: *Config, raw: RawConfig) !void {
         }
     }
 
-    if (raw.extensions) |extensions| {
-        if (extensions.paths) |paths| cfg.extensions.paths = try dupeStringList(arena, paths);
-    }
+    // `extensions.paths` is deliberately NOT read here. A store root decides
+    // which directories on this machine get to supply `current` versions — i.e.
+    // which code a session may run — so a checkout adding one would widen
+    // authority, the exact thing the project layer may never do (DESIGN §9.5).
+    // Trusted layers (system / user) still set it.
 }
 
 fn upsertProfile(cfg: *Config, raw: RawProviderProfile) !void {
@@ -699,6 +701,25 @@ test "project layer may tighten but not loosen trusted policy or authority" {
     try std.testing.expectEqual(PolicyHook.human_approval, cfg.policy.hook);
     try std.testing.expectEqual(EnvironmentBackend.sandbox, cfg.environment.backend);
     try std.testing.expectEqual(@as(u32, 4), cfg.registry.max_tools);
+}
+
+test "project layer cannot add an extension store root" {
+    var cfg = try loadFromLayers(std.testing.allocator, &.{
+        .{ .source =
+        \\[extensions]
+        \\paths = ["/opt/trusted/extensions"]
+        },
+        .{ .project = true, .source =
+        \\[extensions]
+        \\paths = ["/opt/trusted/extensions", "./vendored-extensions"]
+        },
+    });
+    defer cfg.deinit();
+
+    // A root is "which code may run on this machine": the trusted list stands,
+    // and the checkout's addition is ignored rather than merged.
+    try std.testing.expectEqual(@as(usize, 1), cfg.extensions.paths.len);
+    try std.testing.expectEqualStrings("/opt/trusted/extensions", cfg.extensions.paths[0]);
 }
 
 test "project layer cannot inject provider secret routing" {

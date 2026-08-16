@@ -24,7 +24,49 @@ const promotion = @import("promotion.zig");
 const launch = @import("launch.zig");
 const source = @import("source.zig");
 
-const extensions_root = ".nulya" ++ std.fs.path.sep_str ++ "extensions";
+const workspace_extensions_root = launch.workspace_extensions_root;
+
+/// The ordered store roots this invocation searches (DESIGN §7.2), opened once.
+/// Every `ext` / `skill` command goes through this instead of assuming the
+/// workspace store is the only one: an extension may live in the user's
+/// `~/.nulya/extensions` or in a trusted `extensions.paths` entry, and the first
+/// root holding an id wins.
+const RootSearch = struct {
+    specs: []const []const u8,
+    roots: store.Roots,
+
+    fn open(alloc: std.mem.Allocator, io: std.Io, cwd: []const u8) !RootSearch {
+        const specs = try rootSpecs(alloc, io);
+        errdefer launch.freeExtensionRoots(alloc, specs);
+        const roots = try store.Roots.open(alloc, io, cwd, specs);
+        return .{ .specs = specs, .roots = roots };
+    }
+
+    fn deinit(self: *RootSearch, alloc: std.mem.Allocator) void {
+        self.roots.deinit();
+        launch.freeExtensionRoots(alloc, self.specs);
+    }
+};
+
+/// Resolve the ordered root specs from the environment + config chain. Caller
+/// owns the result (`launch.freeExtensionRoots`).
+fn rootSpecs(alloc: std.mem.Allocator, io: std.Io) ![]const []const u8 {
+    var host = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    defer host.deinit();
+    var cfg = try config.load(alloc, io, &host);
+    defer cfg.deinit();
+    return launch.extensionRoots(alloc, &host, &cfg);
+}
+
+/// Where a write-side command puts things: the user store under `--user`, else
+/// the workspace store. Caller owns the result.
+fn writeRootSpec(alloc: std.mem.Allocator, io: std.Io, user: bool) !?[]u8 {
+    if (!user) return try alloc.dupe(u8, workspace_extensions_root);
+    var host = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    defer host.deinit();
+    _ = io;
+    return launch.userExtensionsRoot(alloc, &host);
+}
 
 /// Dispatch `args` (everything after the program name). Returns a process exit
 /// code. Errors are printed and turned into a non-zero code by `main`.
@@ -208,13 +250,11 @@ fn dispatchSkill(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
 }
 
 fn skillList(alloc: std.mem.Allocator, io: std.Io) !u8 {
-    var ext_root = std.Io.Dir.cwd().openDir(io, extensions_root, .{ .iterate = true }) catch {
-        try printOut(alloc, io, "no skills\n", .{});
-        return 0;
-    };
-    defer ext_root.close(io);
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var search = try RootSearch.open(alloc, io, try cwdRealPath(io, &cwd_buf));
+    defer search.deinit(alloc);
 
-    const skills = try ext_skills.listActive(alloc, io, ext_root);
+    const skills = try ext_skills.listActive(alloc, &search.roots);
     defer skills.deinit(alloc);
     if (skills.skills.len == 0) {
         try printOut(alloc, io, "no skills\n", .{});
@@ -231,12 +271,10 @@ fn skillLoad(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8
         try printErr(io, "usage: nulya skill load <pinned-ref>\n");
         return 1;
     }
-    var ext_root = std.Io.Dir.cwd().openDir(io, extensions_root, .{}) catch {
-        try printOut(alloc, io, "no extensions\n", .{});
-        return 1;
-    };
-    defer ext_root.close(io);
-    const body = ext_skills.loadPinned(alloc, io, ext_root, args[0]) catch |err| {
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var search = try RootSearch.open(alloc, io, try cwdRealPath(io, &cwd_buf));
+    defer search.deinit(alloc);
+    const body = ext_skills.loadPinnedAcross(alloc, &search.roots, args[0]) catch |err| {
         try printOut(alloc, io, "skill load failed: {s}\n", .{@errorName(err)});
         return 1;
     };
@@ -247,20 +285,32 @@ fn skillLoad(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8
 
 fn extInit(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     var is_script = false;
+    var user = false;
     var positional: std.ArrayList([]const u8) = .empty;
     defer positional.deinit(alloc);
     for (args) |a| {
-        if (std.mem.eql(u8, a, "--script")) is_script = true else try positional.append(alloc, a);
+        if (std.mem.eql(u8, a, "--script")) is_script = true else if (std.mem.eql(u8, a, "--user")) user = true else try positional.append(alloc, a);
     }
     if (positional.items.len < 1) {
-        try printErr(io, "usage: nulya ext init [--script] <id> [tool]\n");
+        try printErr(io, "usage: nulya ext init [--script] [--user] <id> [tool]\n");
         return 1;
     }
     const id = positional.items[0];
     const tool = if (positional.items.len >= 2) positional.items[1] else id;
 
-    const cwd = std.Io.Dir.cwd();
-    const dir = try std.fs.path.join(alloc, &.{ extensions_root, id });
+    // The draft goes into the chosen store root (`--user` = the user-level one),
+    // and everything below is written through that root's handle, so an absolute
+    // user root needs no absolute sub-paths.
+    const root_spec = (try writeRootSpec(alloc, io, user)) orelse {
+        try printErr(io, "no home directory for --user (set NULYA_HOME or HOME)\n");
+        return 1;
+    };
+    defer alloc.free(root_spec);
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var cwd = try store.openOrCreateRoot(io, try cwdRealPath(io, &cwd_buf), root_spec);
+    defer cwd.close(io);
+
+    const dir = try alloc.dupe(u8, id);
     defer alloc.free(dir);
     const src_dir = try std.fs.path.join(alloc, &.{ dir, "src" });
     defer alloc.free(src_dir);
@@ -282,7 +332,7 @@ fn extInit(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
         try writeInto(alloc, io, cwd, dir, "extension.json", manifest_bytes);
         try writeInto(alloc, io, cwd, src_dir, script_name, body);
         try writeInto(alloc, io, cwd, tests_dir, "example.json", templates.example_test_json);
-        try printOut(alloc, io, "initialized script extension '{s}' at {s}\n", .{ id, dir });
+        try printOut(alloc, io, "initialized script extension '{s}' at {s}{c}{s}\n", .{ id, root_spec, std.fs.path.sep, id });
         return 0;
     }
 
@@ -292,7 +342,7 @@ fn extInit(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     try writeInto(alloc, io, cwd, src_dir, "main.zig", templates.main_zig);
     try writeInto(alloc, io, cwd, tests_dir, "example.json", templates.example_test_json);
 
-    try printOut(alloc, io, "initialized extension '{s}' at {s}\n", .{ id, dir });
+    try printOut(alloc, io, "initialized extension '{s}' at {s}{c}{s}\n", .{ id, root_spec, std.fs.path.sep, id });
     return 0;
 }
 
@@ -363,16 +413,20 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             return 1;
         }
     }
-    const cwd = std.Io.Dir.cwd();
+    var cwd_real: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_path = try cwdRealPath(io, &cwd_real);
 
-    var ext_root = try cwd.openDir(io, extensions_root, .{});
-    defer ext_root.close(io);
-    const st = store.Store.init(io, ext_root);
-    const active = (try st.activeVersion(alloc, id)) orelse {
+    // Whichever root holds an active version of this id first (DESIGN §7.2).
+    var search = try RootSearch.open(alloc, io, cwd_path);
+    defer search.deinit(alloc);
+    const found = (try search.roots.firstActive(alloc, id)) orelse {
         try printOut(alloc, io, "extension '{s}' has no active version; run `nulya ext build` then `nulya ext activate`\n", .{id});
         return 1;
     };
+    const active = found.version;
     defer alloc.free(active);
+    const ext_root = search.roots.entries[found.root].dir;
+    const st = search.roots.store(found.root);
 
     if (!st.versionExists(alloc, id, active)) {
         try printOut(alloc, io, "active version for extension '{s}' failed integrity validation\n", .{id});
@@ -429,11 +483,7 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     // drift on how a frozen entry is located.
     const entry_rel = try st.versionRuntimeEntryPath(alloc, id, active, rt);
     defer alloc.free(entry_rel);
-
-    var cwd_real: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_len = try cwd.realPath(io, &cwd_real);
-    const cwd_path = cwd_real[0..cwd_len];
-    const entry_abs = try std.fs.path.join(alloc, &.{ cwd_path, extensions_root, entry_rel });
+    const entry_abs = try std.fs.path.join(alloc, &.{ search.roots.entries[found.root].real, entry_rel });
     defer alloc.free(entry_abs);
 
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
@@ -521,14 +571,25 @@ fn writeTypedValue(jw: *std.json.Stringify, val: []const u8, ty: ?[]const u8) !v
 const ActivateMode = enum { activate, rollback };
 
 fn extActivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8, mode: ActivateMode) !u8 {
-    if (args.len < 2) {
-        try printErr(io, "usage: nulya ext activate|rollback <id> <version>\n");
+    var positional: std.ArrayList([]const u8) = .empty;
+    defer positional.deinit(alloc);
+    var user = false;
+    for (args) |a| {
+        if (std.mem.eql(u8, a, "--user")) user = true else try positional.append(alloc, a);
+    }
+    if (positional.items.len < 2) {
+        try printErr(io, "usage: nulya ext activate|rollback [--user] <id> <version>\n");
         return 1;
     }
-    const id = args[0];
-    const version = args[1];
+    const id = positional.items[0];
+    const version = positional.items[1];
 
-    var ext_root = try std.Io.Dir.cwd().openDir(io, extensions_root, .{});
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_path = try cwdRealPath(io, &cwd_buf);
+    var ext_root = (try openTargetRoot(alloc, io, cwd_path, id, version, user)) orelse {
+        try printOut(alloc, io, "no store root holds extension '{s}' (and no home for --user)\n", .{id});
+        return 1;
+    };
     defer ext_root.close(io);
     const st = store.Store.init(io, ext_root);
     (switch (mode) {
@@ -562,35 +623,104 @@ fn depositSessionNote(alloc: std.mem.Allocator, io: std.Io, ext_root: std.Io.Dir
     try notes.depositActiveNote(alloc, io, std.Io.Dir.cwd(), session_path, ext_root, id, version);
 }
 
+/// The root an `activate` / `rollback` / `deactivate` acts on: the user store
+/// under `--user`, else the first root that actually holds this version, else
+/// the first root that has the extension at all — so the operation lands where
+/// the extension lives rather than always in the workspace. Null means there is
+/// nowhere to act (and, for `--user`, no home directory).
+fn openTargetRoot(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    cwd_path: []const u8,
+    id: []const u8,
+    version: ?[]const u8,
+    user: bool,
+) !?std.Io.Dir {
+    if (user) {
+        const spec = (try writeRootSpec(alloc, io, true)) orelse return null;
+        defer alloc.free(spec);
+        return try store.openOrCreateRoot(io, cwd_path, spec);
+    }
+    var search = try RootSearch.open(alloc, io, cwd_path);
+    defer search.deinit(alloc);
+    const index = blk: {
+        if (version) |v| {
+            if (search.roots.firstWithVersion(alloc, id, v)) |i| break :blk i;
+        }
+        break :blk (search.roots.firstWithId(id) catch null) orelse return null;
+    };
+    // Reopen independently: `search` owns the handles it is about to close.
+    return try store.openOrCreateRoot(io, cwd_path, search.roots.entries[index].spec);
+}
+
 fn extDeactivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
-    if (args.len < 1) {
-        try printErr(io, "usage: nulya ext deactivate <id>\n");
+    var positional: std.ArrayList([]const u8) = .empty;
+    defer positional.deinit(alloc);
+    var user = false;
+    for (args) |a| {
+        if (std.mem.eql(u8, a, "--user")) user = true else try positional.append(alloc, a);
+    }
+    if (positional.items.len < 1) {
+        try printErr(io, "usage: nulya ext deactivate [--user] <id>\n");
         return 1;
     }
-    var ext_root = try std.Io.Dir.cwd().openDir(io, extensions_root, .{});
+    const id = positional.items[0];
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var ext_root = (try openTargetRoot(alloc, io, try cwdRealPath(io, &cwd_buf), id, null, user)) orelse {
+        try printOut(alloc, io, "no store root holds extension '{s}'\n", .{id});
+        return 1;
+    };
     defer ext_root.close(io);
-    const st = store.Store.init(io, ext_root);
-    try st.deactivate(alloc, args[0]);
-    try printOut(alloc, io, "{s}: deactivated\n", .{args[0]});
+    try store.Store.init(io, ext_root).deactivate(alloc, id);
+    try printOut(alloc, io, "{s}: deactivated\n", .{id});
     return 0;
 }
 
+/// Every extension in every root, in search order, with the root it came from.
+/// An id that a later root also has is marked `(shadowed by …)`: only the first
+/// one is ever used, and silently hiding the duplicate is how a stale user-level
+/// copy becomes a mystery.
 fn extList(alloc: std.mem.Allocator, io: std.Io) !u8 {
-    var ext_root = std.Io.Dir.cwd().openDir(io, extensions_root, .{ .iterate = true }) catch {
-        try printOut(alloc, io, "no extensions\n", .{});
-        return 0;
-    };
-    defer ext_root.close(io);
-    const st = store.Store.init(io, ext_root);
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var search = try RootSearch.open(alloc, io, try cwdRealPath(io, &cwd_buf));
+    defer search.deinit(alloc);
 
-    var it = ext_root.iterate();
-    while (try it.next(io)) |entry| {
-        if (entry.kind != .directory) continue;
-        const active = try st.activeVersion(alloc, entry.name);
-        defer if (active) |a| alloc.free(a);
-        try printOut(alloc, io, "{s}\t{s}\n", .{ entry.name, active orelse "(inactive)" });
+    var seen: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (seen.items) |s| alloc.free(s);
+        seen.deinit(alloc);
     }
+
+    var printed: usize = 0;
+    for (search.roots.entries) |entry| {
+        var it = entry.dir.iterate();
+        while (try it.next(io)) |dir_entry| {
+            if (dir_entry.kind != .directory) continue;
+            const active = (store.Store.init(io, entry.dir).activeVersion(alloc, dir_entry.name) catch |err| switch (err) {
+                error.InvalidId => continue,
+                else => return err,
+            });
+            defer if (active) |a| alloc.free(a);
+            const shadowed = sliceHasString(seen.items, dir_entry.name);
+            if (!shadowed) try seen.append(alloc, try alloc.dupe(u8, dir_entry.name));
+            printed += 1;
+            try printOut(alloc, io, "{s}\t{s}\t{s}{s}\n", .{
+                dir_entry.name,
+                active orelse "(inactive)",
+                entry.spec,
+                if (shadowed) "\t(shadowed)" else "",
+            });
+        }
+    }
+    if (printed == 0) try printOut(alloc, io, "no extensions\n", .{});
     return 0;
+}
+
+fn sliceHasString(list: []const []const u8, needle: []const u8) bool {
+    for (list) |item| {
+        if (std.mem.eql(u8, item, needle)) return true;
+    }
+    return false;
 }
 
 fn extInspect(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
@@ -598,15 +728,20 @@ fn extInspect(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
         try printErr(io, "usage: nulya ext inspect <id>\n");
         return 1;
     }
-    const manifest_rel = try std.fs.path.join(alloc, &.{ extensions_root, args[0], "extension.json" });
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var search = try RootSearch.open(alloc, io, try cwdRealPath(io, &cwd_buf));
+    defer search.deinit(alloc);
+
+    const manifest_rel = try std.fs.path.join(alloc, &.{ args[0], "extension.json" });
     defer alloc.free(manifest_rel);
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, manifest_rel, alloc, .limited(1 << 20)) catch {
-        try printOut(alloc, io, "no such extension '{s}'\n", .{args[0]});
-        return 1;
-    };
-    defer alloc.free(bytes);
-    try printOut(alloc, io, "{s}\n", .{bytes});
-    return 0;
+    for (search.roots.entries) |entry| {
+        const bytes = entry.dir.readFileAlloc(io, manifest_rel, alloc, .limited(1 << 20)) catch continue;
+        defer alloc.free(bytes);
+        try printOut(alloc, io, "{s}\n", .{bytes});
+        return 0;
+    }
+    try printOut(alloc, io, "no such extension '{s}'\n", .{args[0]});
+    return 1;
 }
 
 /// `ext api` is a curated `nulya src` (PLAN §3.10): the wire-protocol topic prints
@@ -896,6 +1031,9 @@ fn sessionNew(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{ .dialect = cfg.environment.shell.toLocalOption() });
     defer lenv.deinit();
 
+    const ext_roots = try launch.extensionRoots(alloc, &host, &cfg);
+    defer launch.freeExtensionRoots(alloc, ext_roots);
+
     // A placeholder handle is enough since `new` never steps.
     var holder: launch.ModelHolder = .{ .scripted = .{} };
     var sess = session.AgentSession.createDurable(alloc, .{
@@ -904,6 +1042,7 @@ fn sessionNew(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
             .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd_path },
             .scratch_dir = launch.scratch_dir,
         },
+        .extension_roots = ext_roots,
         .registry = .{
             .pinned_native_tools = cfg.registry.pinned_native_tools,
             .ranked_native_tools = ranked,
@@ -1283,6 +1422,9 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try cwdRealPath(io, &cwd_buf);
 
+    const ext_roots = try launch.extensionRoots(alloc, &host, &cfg);
+    defer launch.freeExtensionRoots(alloc, ext_roots);
+
     var sess = session.AgentSession.openDurable(alloc, .{
         .model = holder.model(),
         .step_ctx = .{
@@ -1291,6 +1433,7 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
             .observer = if (stream) |s| s.observer() else null,
         },
         .model_options = .{ .effort = effort },
+        .extension_roots = ext_roots,
     }, .{ .workspace = std.Io.Dir.cwd(), .session_path = spath }) catch |err| {
         return stepFail(alloc, io, stream, "session open failed: {s}", .{@errorName(err)});
     };
@@ -1750,7 +1893,7 @@ test "session step --stream emits the tui.md §2.2 line protocol in order" {
             .observer = stream.observer(),
         },
         .model_options = .{},
-        .extension_root = "nulya-absent-extensions-root",
+        .extension_roots = &.{"nulya-absent-extensions-root"},
     };
     defer sess.l.deinit();
 
