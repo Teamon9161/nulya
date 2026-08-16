@@ -241,7 +241,14 @@ pub const AgentSession = struct {
         const outcome = try loop.runStepWithPrompt(self.alloc, &self.l, self.model, &prompt_ir, self.composition.tools, self.step_ctx, self.model_options);
         accumulate(&self.total_usage, outcome.usage);
         self.last_stop_reason = outcome.stop_reason;
-        if (outcome.status == .completed) {
+        // Stats are an observation AFTER execution (`tool_stats.zig`), so they are
+        // recorded only for a step whose tools actually ran. A reply cut by
+        // `max_tokens` closes its batch with marker results the loop wrote without
+        // calling any executor: recording those `ok=false` markers would bill the
+        // tools for the model's output cap and skew the very success rates
+        // evolution reads (DESIGN §4).
+        const tools_executed = outcome.status == .completed and outcome.stop_reason != .max_tokens;
+        if (tools_executed) {
             // Tool usage stats are auxiliary durable metadata, not conversation
             // truth: a recording failure never rewinds the ledger or turns a
             // completed invocation into a failure. Host faults (OOM, real I/O
@@ -274,6 +281,16 @@ pub const AgentSession = struct {
             if (outcome.status == .canceled) break;
             truncated = if (outcome.stop_reason == .max_tokens) truncated + 1 else 0;
             if (truncated >= max_truncated_streak) break;
+            // The streak above is reachable only through truncations that carried
+            // tool calls, and that asymmetry is deliberate (DESIGN §4). A truncated
+            // reply WITH calls ends in a marker batch, so stepping again shows the
+            // model what happened and asks it to retry. A truncated reply with NO
+            // calls leaves the ledger ending on an assistant turn — stepping again
+            // would send that back as a prefill for the model to continue, which
+            // providers reject outright when thinking is on. So it stops here,
+            // looking "done" by shape, and `lastStopReason` tells the driver the
+            // turn was cut: continuing is the person's move (a new message), not
+            // the kernel's.
             if (self.lastAssistantDone()) break;
         }
         return taken;
@@ -290,6 +307,10 @@ pub const AgentSession = struct {
         return self.last_stop_reason;
     }
 
+    /// Whether the ledger's last event is an assistant turn with no tool calls.
+    /// Pure ledger SHAPE — it does not know why the model stopped, and a reply cut
+    /// by `max_tokens` before it wrote a call has exactly this shape. Pair it with
+    /// `lastStopReason` when the question is "did the assistant finish?".
     pub fn lastAssistantDone(self: *const AgentSession) bool {
         if (self.l.len() == 0) return false;
         return switch (self.l.view()[self.l.len() - 1]) {
@@ -1103,6 +1124,182 @@ test "a canceled step records no tool usage stats" {
 
     // A canceled batch is not recorded as a failure (or anything): the journal
     // stays absent.
+    const events = try tool_stats.readAll(alloc, io, cwd);
+    defer tool_stats.freeEvents(alloc, events);
+    try std.testing.expectEqual(@as(usize, 0), events.len);
+}
+
+test "a reply cut by max_tokens before it wrote any call stops the run, unlike one that carried calls" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try sessionTmpCwd(alloc, io, tmp);
+    defer alloc.free(cwd);
+
+    // Writes long prose and runs out of cap with no tool call. A second step would
+    // resend that assistant turn as a prefill, so the run must not take one — the
+    // model is asked to fail the test if it is called twice.
+    const TruncatedProseModel = struct {
+        turns: usize = 0,
+
+        fn name(ptr: *anyopaque) []const u8 {
+            _ = ptr;
+            return "truncated-prose";
+        }
+        fn modelName(ptr: *anyopaque) []const u8 {
+            _ = ptr;
+            return "truncated-prose";
+        }
+        fn capabilities(ptr: *anyopaque) provider.ProviderCapabilities {
+            _ = ptr;
+            return .{};
+        }
+        fn stream(ptr: *anyopaque, a: std.mem.Allocator, request: provider.Request, sink: provider.EventSink) anyerror!void {
+            _ = a;
+            _ = request;
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.turns += 1;
+            if (self.turns > 1) return error.TestUnexpectedResult; // no prefill continuation
+            try sink.emit(.started);
+            try sink.emit(.{ .text_delta = "a very long answer that ran out of" });
+            try sink.emit(.{ .done = .max_tokens });
+        }
+        const vtable: provider.Model.VTable = .{
+            .name = name,
+            .modelName = modelName,
+            .capabilities = capabilities,
+            .stream = stream,
+        };
+    };
+
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+    var model_impl = TruncatedProseModel{};
+    var sess: AgentSession = .{
+        .alloc = alloc,
+        .l = ledger.Ledger.init(alloc),
+        .composition = .{
+            .pinned_extensions = &.{},
+            .extension_tool_bindings = &.{},
+            .tools = .{ .tools = &.{} },
+            .skills = .{ .skills = &.{} },
+            .system_prompts = .{ .blocks = &.{} },
+        },
+        .model = .{ .ptr = &model_impl, .vtable = &TruncatedProseModel.vtable },
+        .step_ctx = .{
+            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd },
+            .scratch_dir = "/tmp",
+        },
+        .model_options = .{},
+        .extension_roots = &.{"nulya-absent-extensions-root"},
+    };
+    defer sess.l.deinit();
+
+    try sess.appendUser("go");
+    // One step, well under the budget: `lastAssistantDone` is true by shape, and
+    // the run stops there rather than retrying the way a truncation with calls is
+    // retried (DESIGN §4). What the reply lost is not lost silently — the driver
+    // reads it off `lastStopReason` and asks the person for a new message.
+    try std.testing.expectEqual(@as(usize, 1), try sess.run(5));
+    try std.testing.expectEqual(@as(usize, 1), model_impl.turns);
+    try std.testing.expectEqual(provider.StopReason.max_tokens, sess.lastStopReason());
+    try std.testing.expect(sess.lastAssistantDone());
+    // user + the truncated assistant; no calls, so no batch.
+    try std.testing.expectEqual(@as(usize, 2), sess.l.len());
+}
+
+test "a truncated turn's unexecuted calls are not recorded as tool usage" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try sessionTmpCwd(alloc, io, tmp);
+    defer alloc.free(cwd);
+
+    const Boom = struct {
+        fn call(ptr: ?*anyopaque, a: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolResult {
+            _ = ptr;
+            _ = req;
+            _ = a;
+            return error.TestUnexpectedResult; // a truncated call must never reach its executor
+        }
+    };
+    const tools_arr = [_]tool.Tool{
+        .{
+            .definition = .{ .id = "ext:web.search/web_search", .name = "web_search", .description = "search", .input_schema = "{}" },
+            .executor = .{ .ptr = null, .callFn = Boom.call },
+        },
+    };
+
+    const TruncatedCallModel = struct {
+        fn name(ptr: *anyopaque) []const u8 {
+            _ = ptr;
+            return "truncated-call";
+        }
+        fn modelName(ptr: *anyopaque) []const u8 {
+            _ = ptr;
+            return "truncated-call";
+        }
+        fn capabilities(ptr: *anyopaque) provider.ProviderCapabilities {
+            _ = ptr;
+            return .{};
+        }
+        fn stream(ptr: *anyopaque, a: std.mem.Allocator, request: provider.Request, sink: provider.EventSink) anyerror!void {
+            _ = ptr;
+            _ = a;
+            _ = request;
+            try sink.emit(.started);
+            try sink.emit(.{ .tool_use_start = .{ .index = 0, .id = "c1", .name = "web_search" } });
+            try sink.emit(.{ .tool_use_input_delta = .{ .index = 0, .fragment = "{\"q\": \"unf" } });
+            try sink.emit(.{ .done = .max_tokens });
+        }
+        const vtable: provider.Model.VTable = .{
+            .name = name,
+            .modelName = modelName,
+            .capabilities = capabilities,
+            .stream = stream,
+        };
+    };
+
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+    var model_impl = TruncatedCallModel{};
+    var sess: AgentSession = .{
+        .alloc = alloc,
+        .l = ledger.Ledger.init(alloc),
+        .composition = .{
+            .pinned_extensions = &.{},
+            .extension_tool_bindings = &.{},
+            .tools = .{ .tools = &tools_arr },
+            .skills = .{ .skills = &.{} },
+            .system_prompts = .{ .blocks = &.{} },
+        },
+        .model = .{ .ptr = &model_impl, .vtable = &TruncatedCallModel.vtable },
+        .step_ctx = .{
+            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd },
+            .scratch_dir = "/tmp",
+        },
+        .model_options = .{},
+        .extension_roots = &.{"nulya-absent-extensions-root"},
+    };
+    defer sess.l.deinit();
+
+    try sess.appendUser("go");
+    const outcome = try sess.step();
+    // The step completed as far as the host is concerned — the ledger has its
+    // assistant turn and a matching marker batch...
+    try std.testing.expectEqual(loop.StepStatus.completed, outcome.status);
+    try std.testing.expectEqual(provider.StopReason.max_tokens, outcome.stop_reason);
+    try std.testing.expectEqual(@as(usize, 3), sess.l.len());
+    try std.testing.expect(!sess.l.view()[2].tool_results[0].ok);
+
+    // ...but no executor ran, so the journal has nothing to observe. Recording the
+    // marker would charge web_search a failure it never earned.
     const events = try tool_stats.readAll(alloc, io, cwd);
     defer tool_stats.freeEvents(alloc, events);
     try std.testing.expectEqual(@as(usize, 0), events.len);

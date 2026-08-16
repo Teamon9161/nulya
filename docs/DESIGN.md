@@ -113,7 +113,7 @@ UI / trajectory / metrics 是 ledger 的投影，不持久化 mutable 状态。*
 
 | journal | 一行 | 谁写 | 为什么不是 ledger 事件 |
 |---|---|---|---|
-| `.nulya/tool-usage.jsonl`（§5.5） | `{"v":1,"tool_id":…,"ok":…}` | session 每个 completed step；`nulya ext run` | 纯 CLI 调用没有对话，塞进 ledger 会污染 prompt 前缀 |
+| `.nulya/tool-usage.jsonl`（§5.5） | `{"v":1,"tool_id":…,"ok":…}` | session 每个**真的执行过 tool 的** completed step；`nulya ext run` | 纯 CLI 调用没有对话，塞进 ledger 会污染 prompt 前缀 |
 | `.nulya/session-outcomes.jsonl` | `{"v":1,"session":"s-…","verdict":"success\|partial\|failure","note":…?,"at":"<RFC3339 UTC>"}` | 人经 `nulya session outcome`（§14） | session 尾往往没有下一个 step 来排干 inbox；verdict 是**关于**这场 session 的判断、不是其中一轮；不给 `prompt.zig` 开"存了但不投影"的事件种类 |
 
 原则相同：**persist facts, derive stats**。outcome 的三条语义：**没有行 = unknown ≠ failure**；同一 session 可多行，**最后一条作数**（纠正也是 append，`outcome.latestFor`）；**不记 `source`**——今天只有人写，将来 driver 自动记时再加字段，届时"无 `source` 的 v1 行 = 人评"。`session outcome` 不碰 session 文件、不拿 `<id>.lock`，所以正在被 `step` 的 session 也能当场评。
@@ -220,7 +220,7 @@ agent 在对话中经 shell `nulya ext build/activate` 造出新 extension 后�
         └─ promotion.rankExtensionTools ─▶ ranked ids ─▶ composition 第 3 档补位
 ```
 
-- 写入点：session 每个 completed step 后按 suffix 形状记一次（`session.recordCompletedToolStats`；模型幻觉的名字不记）；CLI `nulya ext run` 成功进入 invocation 后记一次。**`tool_id` 跨实现版本累计**（无 `version` 字段）。
+- 写入点：session 每个 completed step 后按 suffix 形状记一次（`session.recordCompletedToolStats`；模型幻觉的名字不记）；CLI `nulya ext run` 成功进入 invocation 后记一次。**被 `max_tokens` 截断的 step 不记**——它的 tool_results 是 loop 自己写的 marker（没有任何 executor 跑过，§4），记下去等于让 tool 为模型的输出上限背一次失败，直接污染 evolution 读的 `success_rate`。stats 是**执行之后的观测**，"host 认为这一步完成了" 不等于 "tool 跑过了"。**`tool_id` 跨实现版本累计**（无 `version` 字段）。
 - reader：`v` 未知精确报错（`UnsupportedStatsVersion`）；坏行 / 残尾容忍。
 - 分层不变量：`facts → ranking preference → composition availability/budget → frozen membership`。`rank` 只吃 facts + weights，绝不碰 pins / max_tools / Binding。
 

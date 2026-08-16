@@ -120,9 +120,11 @@ pub const Store = struct {
     }
 
     /// Take `<id>/.lock`, the writer lease every mutation of `<id>/` runs under
-    /// (build, activate, rollback, deactivate). Blocking: the critical sections
-    /// are short and a second writer wants the result, not a refusal. Creates
-    /// `<id>/` when missing. Closing the returned handle releases the lease.
+    /// (build, activate, rollback, deactivate). Blocking, and held for the whole
+    /// mutation — for a compiled build that is the entire `zig build-exe`, which
+    /// is deliberate: a second writer wants the result, not a refusal, and waiting
+    /// is simpler and more correct than staging directories. Creates `<id>/` when
+    /// missing. Closing the returned handle releases the lease.
     pub fn lease(self: Store, alloc: std.mem.Allocator, id: []const u8) !std.Io.File {
         if (!manifest.isValidId(id)) return error.InvalidId;
         try self.root.createDirPath(self.io, id);
@@ -135,9 +137,14 @@ pub const Store = struct {
     /// fully built. The write is atomic (temp file + rename in the same directory),
     /// so a crash mid-switch leaves the previous `current` intact.
     pub fn activate(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8) !void {
-        try validateBuiltVersion(self, alloc, id, version);
+        // Lease first, then validate: activate is a writer, and writers of one id
+        // serialize. Validating outside the lease would read a version another
+        // process is still building and report it as missing/unsealed — harmless
+        // to the store, but a refusal where waiting for the build would have
+        // succeeded.
         var held = try self.lease(alloc, id);
         defer held.close(self.io);
+        try validateBuiltVersion(self, alloc, id, version);
 
         const tmp_sub = try std.fs.path.join(alloc, &.{ id, ".current.tmp" });
         defer alloc.free(tmp_sub);
