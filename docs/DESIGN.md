@@ -294,7 +294,7 @@ Extension = 子进程；wire protocol 就是 ABI。不用 `.so/.dll`（ABI / Zig
 
 ### 7.2 Store roots：搜索顺序（首个 active 持有者胜）
 
-extension 装在**多个 store root** 里，按固定顺序搜索（`store.Roots`）：
+extension 装在**多个 store root** 里，按固定顺序搜索（`extension/roots.zig` 的 `Roots`）：
 
 | # | root | 谁写 | 备注 |
 |---|---|---|---|
@@ -355,7 +355,7 @@ JSON-RPC 2.0，oneshot：spawn → stdin 一条 request → stdout 一条 respon
 - 只有 `tool/call` 一个 method，用专用 `ToolCallRequest` 类型；**不提前抽通用 JsonRpcRequest**，等第二个 method 真出现。
 - 不做 daemon / persistent worker / streaming / host callback。spawn 一个原生 binary ≈ 毫秒，对比模型 round-trip 秒级可忽略；最高频的 shell/edit 是 in-core 内置根本不 spawn。真正的成本是某些 extension 每次调用的重初始化（浏览器 / DB 连接）——**先测量再持久化**（PLAN §3.3）。
 
-### 7.4 生命周期：不可变版本 + 原子切换（`store.zig` / `integrity.zig` / `build_ext.zig`）
+### 7.4 生命周期：不可变版本 + 原子切换（`store.zig` / `integrity.zig` / `build/build_ext.zig`）
 
 ```
 draft ──build──▶ versions/v-<hash>（immutable）──activate──▶ current
@@ -405,7 +405,7 @@ Tool 是"能执行的能力"，Skill 是"要遵循的方法 / 知识"；不同 r
 
 ---
 
-## 8. Execution Environment（`environment.zig`）
+## 8. Execution Environment（`environment.zig`；进程树与有界等待在 `environment/tree.zig`）
 
 ```
 Environment { runShell(cmd, dialect) / runExtension(entry, request_json) / dialect() }
@@ -441,11 +441,11 @@ user 层与 workspace 的 `.nulya/` 同形、每个平台一个好找的位置�
 
 **两张表描述模型。** profile 说**怎么连**（kind / base_url / 哪个 env 放 key）和**它服务哪些 model id**（`model` 是默认、`models[]` 是可选列表；`ProviderProfile.defaultModel()`：`model` 非空取它，否则 `models[0]`，否则 provider 内置默认）；`[[models]]` 目录说一个 id **是什么**（label、effort 档位、context window），一个 id 不管经几个端点都只写一次。目录是纯描述：kernel 不读它；`launch` / `cli` 用它给 session 默认 effort（`Config.defaultEffort(profile, model_id)` = profile.effort ?? catalog.default_effort ?? 无），`nulya config show` 把它投影给选择器。`[[models]]` 按 `id` 合并、只认 trusted 层——project 层不能改一个 model id 的含义或让 session 静默换 effort。
 
-**credential 的边界**：secret 不进 session 文件（header 只存 `api_key_env` 的**名字**与 profile 名，每次 step 重新解析）、不进工具子进程的 env（`environment.isSecretKey` 剥掉 `*API_KEY*` 等）、不从 project 层来（checkout 不能定义 profile）。在这三条之内，credential 可以来自两处：profile 自己的 `api_key`（**user 层文件**，`~/.nulya/config.toml`——TUI `/model` 的 `s` 写的就是它）或 `api_key_env` 指的环境变量；`launch.credentialSource` 定顺序 `config > env`（人贴进 nulya 自己文件的 key 应当生效，哪怕还留着一个过期的环境变量）。`codex` 的 credential 是 Codex CLI 的 `auth.json`（读文件判断），与 user 层 `api_key` 同类：本机用户自己的文件。resume 时 `cli.zig` 按 header 的 profile 名从 config 取 `api_key` 交给 `buildFromDescriptor(.inline_key)`，找不到再看 env，都没有 → `MissingCredential`，不静默降级。config 在 session 开始解析成 effective 值一次；磁盘改动下一场生效。**为什么文件里的 key 是必要而不只是方便**：模型自己 `nulya session new`（sub-agent 自调用）时它的 shell env 已被剥掉所有 key，能让子 session 跑起来的只有 kernel 自己读得到的文件。
+**credential 的边界**：secret 不进 session 文件（header 只存 `api_key_env` 的**名字**与 profile 名，每次 step 重新解析）、不进工具子进程的 env（`environment.isSecretKey` 剥掉 `*API_KEY*` 等）、不从 project 层来（checkout 不能定义 profile）。在这三条之内，credential 可以来自两处：profile 自己的 `api_key`（**user 层文件**，`~/.nulya/config.toml`——TUI `/model` 的 `s` 写的就是它）或 `api_key_env` 指的环境变量；`launch.credentialSource` 定顺序 `config > env`（人贴进 nulya 自己文件的 key 应当生效，哪怕还留着一个过期的环境变量）。`codex` 的 credential 是 Codex CLI 的 `auth.json`（读文件判断），与 user 层 `api_key` 同类：本机用户自己的文件。resume 时 `cli/session.zig` 按 header 的 profile 名从 config 取 `api_key` 交给 `buildFromDescriptor(.inline_key)`，找不到再看 env，都没有 → `MissingCredential`，不静默降级。config 在 session 开始解析成 effective 值一次；磁盘改动下一场生效。**为什么文件里的 key 是必要而不只是方便**：模型自己 `nulya session new`（sub-agent 自调用）时它的 shell env 已被剥掉所有 key，能让子 session 跑起来的只有 kernel 自己读得到的文件。
 
 ---
 
-## 10. 内嵌 Zig 工具链（`toolchain.zig`）
+## 10. 内嵌 Zig 工具链（`extension/build/toolchain.zig`）
 
 - 宿主平台那一份 Zig（pinned 0.16.0）`@embedFile` 进二进制，首次需要时解压到 `~/.local/share/nulya/toolchains/zig/<ver>/`（`XDG_DATA_HOME` 优先；Windows: `%LOCALAPPDATA%\nulya\`）。一份宿主 Zig 可交叉编译所有 target。
 - 代价 +50–90MB；换来零网络、零 hash 校验、零版本漂移。
@@ -459,7 +459,7 @@ user 层与 workspace 的 `.nulya/` 同形、每个平台一个好找的位置�
 
 **generation == ledger 文件**（§3.4）：一个文件只 append、只一个 generation，所以前缀不变量是文件系统性质，没有会 bump generation 的事件——`prompt.currentGeneration()` 与 `Request.generation` 都已删除（一场 session 里恒定的值不是参数）。
 
-**内核提供的是 fork，不是 compaction。** 没有"替换历史"的动词，也不会长出一个——ledger 只 append（physics §1），没有东西能 rewrite model-visible 状态（physics §3）。所以压缩不是编辑而是**分叉**：开一个新文件，header 的 `parent` 记下旧文件与切分点，摘要作为新文件的第一条 turn 进去；旧文件原封不动留在盘上。内核在这条路径上只保证三件事（`cli.zig` 的 `session new`，§14）：
+**内核提供的是 fork，不是 compaction。** 没有"替换历史"的动词，也不会长出一个——ledger 只 append（physics §1），没有东西能 rewrite model-visible 状态（physics §3）。所以压缩不是编辑而是**分叉**：开一个新文件，header 的 `parent` 记下旧文件与切分点，摘要作为新文件的第一条 turn 进去；旧文件原封不动留在盘上。内核在这条路径上只保证三件事（`cli/session.zig` 的 `session new`，§14）：
 
 1. **parent 必须存在。** 指向虚空的 lineage 不是 provenance——读不到父 header 就 exit 1，不建文件。
 2. **不点名模型时继承父的冻结身份**（`model` profile 名 + `model_identity` 原样）。压缩是同一场对话换个文件，不该因为 `active_profile` 期间漂了就换了说话对象。`--profile` / `--model` 任一给出即按今天的 config 重新解析（分叉到别的模型是合法用法）。
@@ -475,7 +475,7 @@ user 层与 workspace 的 `.nulya/` 同形、每个平台一个好找的位置�
 
 **现状 = deterministic validation**：manifest schema（§7.2）· seal / integrity 校验（load 时对照 hash）· 协议往返（响应 id 匹配）· 权限形状。这些是 kernel 不变量。
 
-**尚未有 Verify 门**：`nulya ext test` 未实现；`nulya ext init` 的模板会生成 `tests/*.json` 真实验收用例（`templates.zig`），但目前无人跑它。**门通过 ≠ 正确**，只是"没有明显坏"——对模型和用户都要说清。Validate / Verify 分层与 Seal-then-Verify 见 PLAN §3.5.4。
+**尚未有 Verify 门**：`nulya ext test` 未实现；`nulya ext init` 的模板会生成 `tests/*.json` 真实验收用例（`build/templates.zig`），但目前无人跑它。**门通过 ≠ 正确**，只是"没有明显坏"——对模型和用户都要说清。Validate / Verify 分层与 Seal-then-Verify 见 PLAN §3.5.4。
 
 ---
 
@@ -524,7 +524,7 @@ NULYA_INTEGRATION_PROFILE=deepseek-anthropic zig build integration
 
 ---
 
-## 14. CLI 表面（`cli.zig`；都不是 LLM tool，经 shell 调用）
+## 14. CLI 表面（`cli.zig` 只是 dispatcher，每个动词族一个 `cli/<verb>.zig`；都不是 LLM tool，经 shell 调用）
 
 ```
 nulya ext init [--script] [--user] <id> [tool] | build <path> [--user]
@@ -603,7 +603,8 @@ AgentSession 编排 + interrupted-batch repair     session.zig
 cancellation 语义（step 边界消化）               loop.zig / session.zig
 shell / edit 永久 builtin                         tools/
 immutable package + 内容寻址版本                  extension/store.zig, integrity.zig
-build / activate / rollback / integrity           extension/build_ext.zig, store.zig
+store root 搜索顺序（首个 active 持有者胜）        extension/roots.zig
+build / activate / rollback / integrity           extension/build/build_ext.zig, store.zig
 extension JSON-RPC tool/call                      extension/protocol.zig, invoke.zig
 SessionComposition 版本冻结（pin 一条路径）        composition.zig
 ToolExecutor / Binding（builtin/extension 同构）   tool.zig, extension/tools.zig
@@ -633,7 +634,7 @@ GapDetector · WorkflowMiner · ToolSynthesisManager · AutoRefactor · RewardMo
 
 > **Nulya v0.1 自带两个工具。第三个工具由 Nulya 自己创造。**
 
-`tests/e2e.zig`（真实 built binary，无 mock）证明：一个只暴露 shell + edit 的 session，由 deterministic 模型经这两个 builtin 跑 `nulya ext init/build/activate/run` 亲手造出新扩展并记录 usage，全程该工具不进 native 面；**光有 usage 的下一场仍然只有 shell + edit**；给了 pin（`.nulya/config.toml` 的 `registry.pinned_native_tools` 或 `session new --pin`，两种都测）的下一场才把它放上 native 面并按冻结版本执行；mid-session activate v2 后 session native 仍 v1 / CLI live v2 / 新 session native v2。
+`tests/e2e/`（真实 built binary，无 mock；`tests/e2e.zig` 只是聚合器）证明：一个只暴露 shell + edit 的 session，由 deterministic 模型经这两个 builtin 跑 `nulya ext init/build/activate/run` 亲手造出新扩展并记录 usage，全程该工具不进 native 面；**光有 usage 的下一场仍然只有 shell + edit**；给了 pin（`.nulya/config.toml` 的 `registry.pinned_native_tools` 或 `session new --pin`，两种都测）的下一场才把它放上 native 面并按冻结版本执行；mid-session activate v2 后 session native 仍 v1 / CLI live v2 / 新 session native v2。
 
 **已落地 / 未落地的一句话清单在 [CLAUDE.md](../CLAUDE.md)「现状一句话」；去向在 [PLAN.md](PLAN.md) §1 路线图。** 开发历史（底座 7 组提交等）见 `history/v0.1.md`。
 

@@ -11,12 +11,12 @@
 //! ~90MB embed.
 
 const std = @import("std");
-const manifest = @import("manifest.zig");
-const integrity = @import("integrity.zig");
-const ext_skills = @import("skills.zig");
-const store = @import("store.zig");
-const prompt = @import("../prompt.zig");
-const toolchain = @import("../toolchain.zig");
+const manifest = @import("../manifest.zig");
+const integrity = @import("../integrity.zig");
+const ext_skills = @import("../skills.zig");
+const store = @import("../store.zig");
+const prompt = @import("../../prompt.zig");
+const toolchain = @import("toolchain.zig");
 
 pub const exe_suffix = integrity.exe_suffix;
 const manifest_file = integrity.manifest_file;

@@ -8,6 +8,7 @@ const std = @import("std");
 const skill = @import("../skill.zig");
 const manifest = @import("manifest.zig");
 const store = @import("store.zig");
+const roots_mod = @import("roots.zig");
 const integrity = @import("integrity.zig");
 
 pub const max_skill_md_bytes: usize = 2 * 1024 * 1024;
@@ -103,16 +104,16 @@ pub fn validateSnapshot(alloc: std.mem.Allocator, m: manifest.Manifest, snapshot
 }
 
 /// Every skill of every active extension, across the store roots in search
-/// order (first root holding an id wins, `store.Roots.listActive`).
+/// order (first root holding an id wins, `Roots.listActive`).
 pub fn listActive(
     alloc: std.mem.Allocator,
-    roots: *const store.Roots,
+    roots: *const roots_mod.Roots,
 ) !skill.SkillSetSnapshot {
     var descriptors: std.ArrayList(skill.SkillDescriptor) = .empty;
     errdefer skill.deinitDescriptorArrayList(alloc, &descriptors);
 
     const active = try roots.listActive(alloc);
-    defer store.Roots.freeActive(alloc, active);
+    defer roots_mod.Roots.freeActive(alloc, active);
 
     for (active) |entry| {
         // Skip broken extensions, but let host cancellation propagate rather than
@@ -135,7 +136,7 @@ pub fn listActive(
 /// follows the extension's `current`.
 pub fn loadPinnedAcross(
     alloc: std.mem.Allocator,
-    roots: *const store.Roots,
+    roots: *const roots_mod.Roots,
     pinned_ref: []const u8,
 ) ![]u8 {
     const parsed = try parseRef(pinned_ref); // malformed: fail before touching a root

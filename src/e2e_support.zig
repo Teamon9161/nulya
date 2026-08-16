@@ -9,7 +9,7 @@
 //! Keep it a thin re-export surface: add a line when a test genuinely needs a
 //! core module, never any logic.
 
-pub const build_ext = @import("extension/build_ext.zig");
+pub const build_ext = @import("extension/build/build_ext.zig");
 pub const composition = @import("composition.zig");
 pub const config = @import("config.zig");
 pub const environment = @import("environment.zig");
@@ -23,6 +23,6 @@ pub const protocol = @import("extension/protocol.zig");
 pub const provider = @import("provider.zig");
 pub const session = @import("session.zig");
 pub const store = @import("extension/store.zig");
-pub const templates = @import("extension/templates.zig");
+pub const templates = @import("extension/build/templates.zig");
 pub const tool = @import("tool.zig");
 pub const tool_stats = @import("tool_stats.zig");

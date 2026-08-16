@@ -94,6 +94,18 @@ pub fn writeFrozenVersion(
     return version;
 }
 
+/// A frozen contribution-only version of `id` carrying one skill whose body is
+/// `body` — the smallest real version there is (no runtime, so no binary), which
+/// is what makes it the fixture of choice for store / roots tests. Caller owns
+/// the returned version id.
+pub fn writeSkillVersion(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id: []const u8, body: []const u8) ![]u8 {
+    const manifest_bytes = try std.fmt.allocPrint(alloc,
+        \\{{"schema":"nulya.extension/v2","id":"{s}","contributes":{{"skills":["skills/demo"]}}}}
+    , .{id});
+    defer alloc.free(manifest_bytes);
+    return writeFrozenVersion(alloc, io, root, id, manifest_bytes, &.{.{ .rel = "skills/demo/SKILL.md", .bytes = body }});
+}
+
 /// Point `current` at a written version.
 pub fn activate(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id: []const u8, version: []const u8) !void {
     return store.Store.init(io, root).activate(alloc, id, version);

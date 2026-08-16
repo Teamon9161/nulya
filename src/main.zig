@@ -63,6 +63,7 @@ test {
     _ = @import("providers/anthropic.zig");
     _ = @import("providers/codex.zig");
     _ = @import("environment.zig");
+    _ = @import("environment/tree.zig");
     _ = @import("config.zig");
     _ = @import("extension/protocol.zig");
     _ = @import("extension/invoke.zig");
@@ -70,10 +71,18 @@ test {
     _ = @import("extension/manifest.zig");
     _ = @import("extension/skills.zig");
     _ = @import("extension/store.zig");
-    _ = @import("extension/build_ext.zig");
+    _ = @import("extension/roots.zig");
+    _ = @import("extension/build/build_ext.zig");
     _ = @import("session.zig");
     _ = @import("launch.zig");
     _ = @import("cli.zig");
+    _ = @import("cli/common.zig");
+    _ = @import("cli/session.zig");
+    _ = @import("cli/ext.zig");
+    _ = @import("cli/config.zig");
+    _ = @import("cli/skill.zig");
+    _ = @import("cli/src.zig");
+    _ = @import("cli/toolchain.zig");
     _ = @import("source.zig");
-    _ = @import("toolchain.zig");
+    _ = @import("extension/build/toolchain.zig");
 }

@@ -61,7 +61,7 @@ pub fn build(b: *std.Build) void {
     // actually compiles and runs a real extension. Everything reachable from
     // e2e.zig lives in the single `support` facade module rooted under src/, so
     // no file straddles two module graphs (Zig 0.16 forbids that); the facade's
-    // own anonymous `zig_archive` import covers toolchain.zig's @embedFile.
+    // own anonymous `zig_archive` import covers build/toolchain.zig's @embedFile.
     const e2e_mod = b.createModule(.{
         .root_source_file = b.path("tests/e2e.zig"),
         .target = target,

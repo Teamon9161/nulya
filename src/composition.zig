@@ -23,6 +23,7 @@ const ext_skills = @import("extension/skills.zig");
 const ext_tools = @import("extension/tools.zig");
 const manifest = @import("extension/manifest.zig");
 const store = @import("extension/store.zig");
+const roots_mod = @import("extension/roots.zig");
 const integrity = @import("extension/integrity.zig");
 const testkit = @import("extension/testkit.zig");
 
@@ -149,7 +150,7 @@ pub const SessionComposition = struct {
         // nothing, so a pin fails as `PinnedExtensionNotActive` and a `--with`
         // as `WithVersionNotFound` on the ordinary path — the same errors, from
         // the same two places, as when the roots exist but the extension does not.
-        var roots = try store.Roots.open(alloc, io, cwd, ext_roots);
+        var roots = try roots_mod.Roots.open(alloc, io, cwd, ext_roots);
         defer roots.deinit();
 
         const resolved = try resolve(alloc, &roots, .{ .fresh = opts });
@@ -170,7 +171,7 @@ pub const SessionComposition = struct {
         ext_roots: []const []const u8,
         frozen: ledger.FrozenComposition,
     ) !SessionComposition {
-        var roots = try store.Roots.open(alloc, io, cwd, ext_roots);
+        var roots = try roots_mod.Roots.open(alloc, io, cwd, ext_roots);
         defer roots.deinit();
 
         const resolved = try resolve(alloc, &roots, .{ .frozen = frozen });
@@ -204,7 +205,7 @@ const Request = union(enum) {
 /// slot. Everything about WHY — active, `--with`, frozen header; pinned by
 /// config or by the header — has been decided by the time this exists.
 const Resolved = struct {
-    extensions: []store.Roots.Resolved,
+    extensions: []roots_mod.Roots.Resolved,
     /// Owned by whoever holds this value until `assemble` takes them.
     bindings: []ext_tools.Binding,
 };
@@ -215,7 +216,7 @@ const Resolved = struct {
 /// an unresolvable pin fails the session rather than quietly starting without
 /// the tool that was asked for. `roots` stays the caller's; on any error
 /// everything built here is released.
-fn resolve(alloc: std.mem.Allocator, roots: *const store.Roots, request: Request) !Resolved {
+fn resolve(alloc: std.mem.Allocator, roots: *const roots_mod.Roots, request: Request) !Resolved {
     const extensions = switch (request) {
         .fresh => |opts| try unionWith(alloc, roots, try resolveActiveExtensions(alloc, roots), opts.with),
         .frozen => |frozen| try resolveFrozenExtensions(alloc, roots, frozen.active),
@@ -242,7 +243,7 @@ fn resolve(alloc: std.mem.Allocator, roots: *const store.Roots, request: Request
 fn assemble(
     alloc: std.mem.Allocator,
     io: std.Io,
-    roots: *const store.Roots,
+    roots: *const roots_mod.Roots,
     resolved: Resolved,
 ) !SessionComposition {
     // The bindings arrived as one frozen slice, so their addresses are stable
@@ -298,15 +299,15 @@ fn snapshotFromBindings(alloc: std.mem.Allocator, bindings: []ext_tools.Binding)
 /// Resolve the session's extension-tool bindings from the explicit pins — the
 /// whole native selection, and strict: an unresolvable pin fails the session
 /// rather than quietly starting without the tool the operator asked for. The
-/// frozen entry path comes from `store.Roots.Resolved.entryPathAbs`: absolute,
+/// frozen entry path comes from `Roots.Resolved.entryPathAbs`: absolute,
 /// so it survives being spawned with the workspace as cwd, and built from the
 /// version frozen at composition time, so mid-session activation cannot move it.
 /// The returned slice is address-stable; on any error every binding built so far
 /// is released and nothing leaks.
 fn resolveBindings(
     alloc: std.mem.Allocator,
-    roots: *const store.Roots,
-    resolved: []const store.Roots.Resolved,
+    roots: *const roots_mod.Roots,
+    resolved: []const roots_mod.Roots.Resolved,
     pins: []const []const u8,
 ) ![]ext_tools.Binding {
     var list: std.ArrayList(ext_tools.Binding) = .empty;
@@ -340,8 +341,8 @@ fn parseStableToolId(pin: []const u8) CompositionError!StableToolId {
 
 fn resolvePinnedBinding(
     alloc: std.mem.Allocator,
-    roots: *const store.Roots,
-    resolved: []const store.Roots.Resolved,
+    roots: *const roots_mod.Roots,
+    resolved: []const roots_mod.Roots.Resolved,
     pin: []const u8,
 ) !ext_tools.Binding {
     const parsed = try parseStableToolId(pin);
@@ -366,7 +367,7 @@ fn resolvePinnedBinding(
     }, entry_abs, rt.interpreter, spec.timeout_ms);
 }
 
-fn findResolved(resolved: []const store.Roots.Resolved, id: []const u8) ?store.Roots.Resolved {
+fn findResolved(resolved: []const roots_mod.Roots.Resolved, id: []const u8) ?roots_mod.Roots.Resolved {
     for (resolved) |r| {
         if (std.mem.eql(u8, r.id, id)) return r;
     }
@@ -400,12 +401,12 @@ const isExtensionFault = store.isExtensionFault;
 /// `Roots.listActive` already applied first-root-wins, so each entry only has
 /// to be turned into a validated `Resolved` — `resolveEntry` takes the root and
 /// version the listing decided rather than asking `current` again.
-fn resolveActiveExtensions(alloc: std.mem.Allocator, roots: *const store.Roots) ![]store.Roots.Resolved {
-    var resolved: std.ArrayList(store.Roots.Resolved) = .empty;
+fn resolveActiveExtensions(alloc: std.mem.Allocator, roots: *const roots_mod.Roots) ![]roots_mod.Roots.Resolved {
+    var resolved: std.ArrayList(roots_mod.Roots.Resolved) = .empty;
     errdefer freeResolved(alloc, resolved.items);
 
     const active = try roots.listActive(alloc);
-    defer store.Roots.freeActive(alloc, active);
+    defer roots_mod.Roots.freeActive(alloc, active);
 
     for (active) |entry| {
         // A malformed extension is skipped, but a host fault — cancellation,
@@ -433,12 +434,12 @@ fn resolveActiveExtensions(alloc: std.mem.Allocator, roots: *const store.Roots) 
 /// released.
 fn unionWith(
     alloc: std.mem.Allocator,
-    roots: *const store.Roots,
-    base: []store.Roots.Resolved,
+    roots: *const roots_mod.Roots,
+    base: []roots_mod.Roots.Resolved,
     with: []const WithRef,
-) ![]store.Roots.Resolved {
+) ![]roots_mod.Roots.Resolved {
     if (with.len == 0) return base;
-    var list: std.ArrayList(store.Roots.Resolved) = .{ .items = base, .capacity = base.len };
+    var list: std.ArrayList(roots_mod.Roots.Resolved) = .{ .items = base, .capacity = base.len };
     errdefer freeResolved(alloc, list.items);
 
     for (with) |ref| {
@@ -470,8 +471,8 @@ fn unionWith(
 /// from whichever root holds it — versions are content-addressed, so every
 /// root's copy is the same bytes and integrity is checked either way; the search
 /// order only decides where it is found, never what runs.
-fn resolveFrozenExtensions(alloc: std.mem.Allocator, roots: *const store.Roots, active: []const ledger.PinnedExtensionRef) ![]store.Roots.Resolved {
-    var resolved: std.ArrayList(store.Roots.Resolved) = .empty;
+fn resolveFrozenExtensions(alloc: std.mem.Allocator, roots: *const roots_mod.Roots, active: []const ledger.PinnedExtensionRef) ![]roots_mod.Roots.Resolved {
+    var resolved: std.ArrayList(roots_mod.Roots.Resolved) = .empty;
     errdefer freeResolved(alloc, resolved.items);
     for (active) |ext| {
         const r = try roots.resolveVersion(alloc, ext.id, ext.version);
@@ -481,7 +482,7 @@ fn resolveFrozenExtensions(alloc: std.mem.Allocator, roots: *const store.Roots, 
     return resolved.toOwnedSlice(alloc);
 }
 
-fn copyPinsFromResolved(alloc: std.mem.Allocator, resolved: []const store.Roots.Resolved) ![]PinnedExtension {
+fn copyPinsFromResolved(alloc: std.mem.Allocator, resolved: []const roots_mod.Roots.Resolved) ![]PinnedExtension {
     var pins: std.ArrayList(PinnedExtension) = .empty;
     errdefer freePinned(alloc, pins.items);
     for (resolved) |r| {
@@ -497,8 +498,8 @@ fn copyPinsFromResolved(alloc: std.mem.Allocator, resolved: []const store.Roots.
 fn buildSystemPrompts(
     alloc: std.mem.Allocator,
     io: std.Io,
-    roots: *const store.Roots,
-    resolved: []const store.Roots.Resolved,
+    roots: *const roots_mod.Roots,
+    resolved: []const roots_mod.Roots.Resolved,
     skills: skill.SkillSetSnapshot,
 ) !prompt.SystemPromptSnapshot {
     var blocks: std.ArrayList(prompt.SystemBlock) = .empty;
@@ -534,15 +535,15 @@ fn appendSystemBlock(alloc: std.mem.Allocator, blocks: *std.ArrayList(prompt.Sys
     try blocks.append(alloc, .{ .source = owned_source, .bytes = owned_bytes });
 }
 
-fn sortResolved(resolved: []store.Roots.Resolved) void {
-    std.mem.sort(store.Roots.Resolved, resolved, {}, struct {
-        fn lessThan(_: void, a: store.Roots.Resolved, b: store.Roots.Resolved) bool {
+fn sortResolved(resolved: []roots_mod.Roots.Resolved) void {
+    std.mem.sort(roots_mod.Roots.Resolved, resolved, {}, struct {
+        fn lessThan(_: void, a: roots_mod.Roots.Resolved, b: roots_mod.Roots.Resolved) bool {
             return std.mem.lessThan(u8, a.id, b.id);
         }
     }.lessThan);
 }
 
-fn freeResolved(alloc: std.mem.Allocator, resolved: []const store.Roots.Resolved) void {
+fn freeResolved(alloc: std.mem.Allocator, resolved: []const roots_mod.Roots.Resolved) void {
     for (resolved) |r| r.deinit(alloc);
     alloc.free(resolved);
 }
