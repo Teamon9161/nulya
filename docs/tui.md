@@ -1,6 +1,6 @@
 # Nulya TUI — 设计与计划
 
-> **状态：T0–T7 全部落地（T8 占位：M5 给了它需要的内核面，前端未做）。** 内核侧只有两处：`session step --stream`（纯观测）与 `session new --parent` 的 fork 语义 → [DESIGN.md](DESIGN.md) §14/§11；前端 T1（骨架）、T2（卡片与折叠）、T3（nulya 视图：`/sessions`、`/ext`、sub-session tab、observer）、T4（`/help` `/settings` `/usage`、keymap 覆盖、`bun build --compile`、README、5k 事件性能）、T5（`/model` `/effort`）、T6（布局与 slash 补全）、T7（`/compact`）都在 `tui/`（见 §11 与 [`../tui/README.md`](../tui/README.md)）。本文是 `tui/` 的设计契约 + 里程碑 + 实施日志；`tui/` 不在内核范围里（另一条工具链、另一个进程），所以它的现状写在本文 §11，不进 DESIGN.md。
+> **状态：T0–T8 全部落地。** 内核侧只有两处：`session step --stream`（纯观测）与 `session new --parent` 的 fork 语义 → [DESIGN.md](DESIGN.md) §14/§11；前端 T1（骨架）、T2（卡片与折叠）、T3（nulya 视图：`/sessions`、`/ext`、sub-session tab、observer）、T4（`/help` `/settings` `/usage`、keymap 覆盖、`bun build --compile`、README、5k 事件性能）、T5（`/model` `/effort`）、T6（布局与 slash 补全）、T7（`/compact`）、T8（慢速回路：`/outcome` `/evolve` `/mode`、`/sessions` 改读 `session list --json`、成本来自 ledger、`/ext` 认多 root）都在 `tui/`（见 §11 与 [`../tui/README.md`](../tui/README.md)）。本文是 `tui/` 的设计契约 + 里程碑 + 实施日志；`tui/` 不在内核范围里（另一条工具链、另一个进程），所以它的现状写在本文 §11，不进 DESIGN.md。
 > 上位原则见 [PLAN.md](PLAN.md) §3.11：前端是 core 之上的薄客户端——**tail ledger 文件 + append user 事件；前端是长期进程，re-spawn 的只是 worker**。
 
 ## 0. 定位（三句话）
@@ -50,8 +50,13 @@
 | `nulya session step <id> --stream` | 每次发送后 spawn 一个；stdout 见 §2.2 |
 | `nulya session events <id> [--since N]` | 打开 / resume 时一次性回放；**不**用 `--follow`（driver 模式下 step 的 stdout 已是全量实时源） |
 | `nulya session cancel <id>` | `Esc` |
-| `.nulya/sessions/*.jsonl` | `/sessions` 列表（mtime 排序；header 给 model / composition / parent；第一条 `user_text` 当标题）；`<id>.lock` 能否非阻塞独占 → 有无别的写者（§5.6） |
-| `.nulya/extensions/<id>/{current,versions/v-*/extension.json}` | `/ext` 视图：id、current、版本数、`runtime`/`contributes`/`permissions` |
+| `nulya session list [--json]` | `/sessions` 的全部内容（created 倒序、composition / parent / 事件数 / usage / 最新 verdict）；**TUI 不再自己扫 header**（T8） |
+| `nulya session outcome <id> <v> [--note]` | `/outcome`；写 outcome journal、不碰 session 文件也不取锁，所以正在跑的场次、别人在 drive 的场次都能当场评 |
+| `nulya session new --with <id>[@<v>]` | `/evolve`（先 `ext build extensions/evolution`）与 `/mode <id>[@<v>]`：把一个 **built 但不 activate** 的包带进这一场（membership，不是 store 指针） |
+| `nulya ext build <path>` | `/evolve` 的第一步；version 内容寻址，所以每次都 build，未改动就是同一个 version |
+| `nulya ext list` | `/ext` 的目录清单：每个 id 来自哪个 root、谁被 `(shadowed)`——root 顺序与"首个持有者胜"是 kernel policy，TUI 不复刻（T8） |
+| `.nulya/sessions/<id>.lock` | 能否非阻塞独占 → 有无别的写者（§5.6）；`session list` 给不了"此刻谁在写"，所以这条探针留在 TUI |
+| `<root>/<id>/versions/v-*/extension.json` | `/ext` 与 CompositionCard 的明细：`runtime`/`contributes`（tools / skills / **system_prompts**）/`permissions`；root 由 `ext list` 指出 |
 | `.nulya/tool-usage.jsonl` | `/ext` 里的 usage 表：`{v:1,tool_id,ok}` → uses_total / recent / success_rate（**只投影，不重算排序**——排序是 kernel policy，TUI 不复刻） |
 | header `composition.native_tools` / `active[]` | 本场冻结契约（§5.1）；与 store `current` 比对 → "下一场会变"的漂移提示 |
 | shell 结果形状 | `stdout` + `--- stderr ---` + `[exit N]`（`tools/shell.zig`）→ 状态 chip 解析 `[exit N]` |
@@ -64,7 +69,7 @@
 **协议与机制的真相在 [DESIGN.md](DESIGN.md) §14**（`loop.StepContext.observer` 纯观测钩子 + 行协议）。这里只留 TUI 侧的消费约定：
 
 - 一行一个 JSON，写完即 flush；带 `stream` 字段 = 瞬态观测行，不带 = 与 `session events` 同形的 ledger 事件行（同一套 seq，可直接按 seq 入 items）。
-- 行序（每个 step）：`started → text_delta* / thinking_delta* → tool_use_start / tool_use_input_delta* → done → tool begin/end* → 该 step 的 ledger 行 → step end`；整次调用最后一行是 `run done{steps,stopped}`（`stopped ∈ end_turn | budget | canceled`）。见到 `step end` 就知道这一步的事件已全。
+- 行序（每个 step）：`started → text_delta* / thinking_delta* → tool_use_start / tool_use_input_delta* → done → tool begin/end* → 该 step 的 ledger 行 → step end`；整次调用最后一行是 `run done{steps,stopped}`（`stopped ∈ end_turn | budget | canceled | max_tokens`；被 `max_tokens` 截断的 step 的 `step end` 多一列 `"stop":"max_tokens"`，DESIGN §4）。见到 `step end` 就知道这一步的事件已全。
 - `reasoning_item` 不出现在流里（不透明、只为回放）；thinking 的可显示文本只有 `thinking_delta`，turn 结束后从 ledger 的 `reasoning` 尽力抽（§4.2）。
 - 诊断也是 JSON（`{"stream":"run","event":"error","message":"…"}` + 非零退出），所以 `nulya/cli.ts` 的解析器**永远**不必处理裸文本行。
 
@@ -174,7 +179,7 @@ tui/
 
 ### 4.5 状态栏
 
-左：token 累计（本进程内从 `usage` 流事件累加：`↑input ↓output cache%`；resume 前的历史未知，显示 `since attach`）· 当前活动（`⠋ shell 3s` / `⠋ model` / `idle`）· 提示三条。右：`step n` · role（`driver` / `observer` §5.6）。离开底部时插入 `↓ 3 new`。
+左：token 累计（`↑input ↓output cache%`；**来源是 ledger 的 `assistant.usage`**，流事件只是它落盘前的临时值，同一步不会数两遍——所以重开一场也看得见它到今天为止花了多少，T8）· 当前活动（`⠋ shell 3s` / `⠋ model` / `idle`）· 提示三条。右：`step n` · role（`driver` / `observer` §5.6）。离开底部时插入 `↓ 3 new`。
 
 上下文占用（`ctx 72% · /compact`）只在 ≥60% 时出现、≥80% 转 warn 色。分母是 `[[models]]` 目录的 `context_window`（目录没写就整个不显示，不编分母）；分子是**最后一步**的 `input + cache_read + cache_write`——`provider.Usage.input_tokens` 是扣掉缓存之后的量，只读它会把一个快满的窗口报成几乎空的。它只是显示，不触发任何动作。
 
@@ -204,12 +209,13 @@ registry 按 shell 命令前缀识别，头行抽关键事实（抽不到就退�
 
 ### 5.3 `/ext` 演化视图（overlay，`F2`）
 
-左列：extensions（id · current 短 hash · N versions · kind compiled/script/data · 贡献的 tools/skills 数）。右栏（选中项）：manifest 摘要、版本时间线（`versions/v-*` mtime，`current` 标记，本场 header 冻结的版本标记；两者不同 → `pinned v-a · store v-b → next session`）、该 ext 每个 tool 的 usage（uses / recent / success%）、本场 ledger 里与它相关的 EvolveCard / CapabilityBanner 时间线（按 seq 跳转）。
+左列：extensions（id · current 短 hash · N versions · kind compiled/script/data · 贡献的 tools/skills 数 · 被遮蔽的标 `shadowed`）——清单来自 `nulya ext list`，**多个 root** 都在里面（workspace → user `~/.nulya/extensions` → `extensions.paths`），右栏第一行写明它来自哪个 root。没有 `current` 的包（只用 `--with` 穿的 mode / evolution）读最新一次 build 的 manifest，否则它会被显示成空的。右栏（选中项）：manifest 摘要、版本时间线（`versions/v-*` mtime，`current` 标记，本场 header 冻结的版本标记；两者不同 → `pinned v-a · store v-b → next session`）、该 ext 每个 tool 的 usage（uses / recent / success%）、本场 ledger 里与它相关的 EvolveCard / CapabilityBanner 时间线（按 seq 跳转）。
 动作键：`a` activate / `r` rollback（弹确认后 shell out `nulya ext …`，输出进一个临时行；不进 ledger——它本来就是 CLI 动作）。第二块 tab：全部 tool 的 usage 表（只投影 `.nulya/tool-usage.jsonl`；**不**复刻排序算法，"下一场谁晋升"留给未来的 `nulya composition preview` CLI，见 §10）。
 
 ### 5.4 `/sessions`（overlay，`F3`）
 
-`.nulya/sessions/` 按 mtime 倒序：id · 时间 · model · 事件数 · 第一条 user_text（截断）· `parent` 缩进成树 · 有别的写者持锁 → `● live`。`Enter` 打开（events 回放 → 判 role）；`n` 新建；`d` 无（不删，ledger 只 append——想清理用文件系统）。
+`nulya session list --json` 按 `created` 倒序：id · 时间 · model · 事件数 · 花费（`↑prompt ↓output`，没有被计价过的步就不显示）· 带了哪些 `--with` 包 · 第一条 user_text（截断）· `parent` 缩进成树 · 最新 verdict（`+ success` / `~ partial` / `! failure`；**没有行就什么都不画**——unjudged 不是 failure）· 有别的写者持锁 → `● live`。`Enter` 打开（events 回放 → 判 role）；`n` 新建；`r` 刷新；`d` 无（不删，ledger 只 append——想清理用文件系统）。
+列表本身一次进程 + 读全部 session 文件，所以 8s 刷一次；`● live` 只是锁探针（不开进程），1.5s 刷一次。
 
 ### 5.5 Sub-agent
 
@@ -283,11 +289,11 @@ fold   = "ctrl+o"
 | ~~**T6 · 用出来的痛点**~~ ✅ | composer/状态栏永不收缩（真 bug）；`/model` 两级（providers → models）+ `a` 加 compatible provider；空 session 首屏；slash 补全；`PgUp`/`PgDn`/`Shift+End` 回读 | `bun test` 99 pass；30/24/16/10 行终端下 composer 都在 |
 | ~~**T7 · compaction**~~ ✅ | 内核：`session new --parent` 校验父 + 继承冻结身份（DESIGN §11/§14）；前端：`/compact [focus]`、压缩两条 turn 的卡片、状态栏上下文占用 | `zig build e2e` 里 fork 继承一条；`bun test` 100 pass；聊两句 → `/compact` → 新 session 顶上是 summary |
 
-| **T8 · 慢速回路的前端**（占位，内核侧已就绪） | `/outcome <verdict> [note]`（→ `nulya session outcome`，`/quit` 时问一次）；`/sessions` 改读 `nulya session list --json`（含 verdict / usage / parent，不再自己扫 header）；`/evolve`（`ext build extensions/evolution` → `session new --with evolution@<v>` → 跟随子 session）；`/mode <id>[@<v>]`（`--with` 一个贡献 system_prompt 的 data extension） | `bun test` 绿；评一次 verdict 后 `/sessions` 里看得到；`/evolve` 起来的场次带 evolution 的 system block |
+| ~~**T8 · 慢速回路的前端**~~ ✅ | `/outcome <verdict> [note]`（→ `nulya session outcome`，`/quit` 问一次）；`/sessions` 改读 `nulya session list --json`（verdict / usage / parent / composition，不再自己扫 header）；`/evolve`（`ext build extensions/evolution` → `session new --with evolution@<v>`）；`/mode <id>[@<v>]`；token 计数改以 ledger `assistant.usage` 为准；`/ext` 认多 root 与 `shadowed`。**内核零改动** | `bun test` 111 pass；评一次 verdict 后 `/sessions` 里看得到；`/evolve` 起来的场次 composition 里带 `evolution@<v>`、CompositionCard 显示 `prompts 1` |
 
 顺序 T0 → T1 → T2 → T3 → T4；**T1 结束就开始用它 dogfood**，T2 起的优先级由用出来的痛点重排（T5–T8 就是这么来的）。
 
-**M5 给前端的新面**（内核已落地，TUI 尚未消费，见 T8）：`nulya session list [--json]`（一次拿到每场的 composition / parent / 事件数 / usage / 最新 verdict——`/sessions` 不必再自己解析 header）· `nulya session outcome <id> <verdict> [--note]`（写 outcome journal，不碰 session 文件，所以正在跑的场次也能评）· `session new --with <id>[@<version>]`（把一个 built 但**不 activate** 的包带进这一场——mode / evolution 就是这么投放的）· ledger 里 `assistant.usage`（每步真实成本，状态栏和 `/usage` 可以按步显示而不只是累计）· extension 的 user root `~/.nulya/extensions`（`/ext` 视图要标出每个 id 来自哪个 root、谁被遮蔽）。
+**M5 给前端的新面**（内核已落地，T8 已全部消费）：`nulya session list [--json]`（一次拿到每场的 composition / parent / 事件数 / usage / 最新 verdict——`/sessions` 不必再自己解析 header）· `nulya session outcome <id> <verdict> [--note]`（写 outcome journal，不碰 session 文件，所以正在跑的场次也能评）· `session new --with <id>[@<version>]`（把一个 built 但**不 activate** 的包带进这一场——mode / evolution 就是这么投放的）· ledger 里 `assistant.usage`（每步真实成本，状态栏和 `/usage` 可以按步显示而不只是累计）· extension 的 user root `~/.nulya/extensions`（`/ext` 视图要标出每个 id 来自哪个 root、谁被遮蔽）。
 
 ## 10. 开放问题（待议，默认都先不做）
 
@@ -316,7 +322,7 @@ fold   = "ctrl+o"
 - **tee 在 `loop.zig` 而不是 `provider.zig`**。observer 类型属于 loop（`StepContext` 的一部分），provider 反过来引用会成环。`collectTurn` 在无 observer 时**就是** `Model.step`，有 observer 时才建 collector + `TeeSink`；两条路径的失败语义一致（partial collector 一律丢弃）。
 - **`{"stream":"tool","event":"end"}` 只带 `call_id` + `ok`**，与 §2.2 样例逐字一致（不加 `tool` 字段）；配对信息读者从 `begin` 和 `tool_use_start` 已经拿到了。
 - **未被派发的调用不发 begin/end**。一批被取消后，后面的调用内核保证从未交给 executor，"没有事件"正是这个事实的忠实表达；它们仍会以 `not executed` marker 出现在 ledger 行里。
-- **`stopped` 不改 `run` 的签名**：`canceled` 来自 observer 记下的最后一个 step status，`end_turn` 来自 `sess.lastAssistantDone()`，其余是 `budget`。内核没有多长出一个字段。
+- **`stopped` 不改 `run` 的签名**：`canceled` 来自 observer 记下的最后一个 step status，`max_tokens` 来自 `sess.lastStopReason()`（M5.1 加的、最后一步的模型停止原因），`end_turn` 来自 `sess.lastAssistantDone()`，其余是 `budget`。TUI 见 `max_tokens` 提示"发一条消息继续"（裸 `/step` 在 text-only 截断后是 assistant 结尾的 prefill，thinking 开着时 provider 拒绝）。
 - **一个 step 的 ledger 行在该 step 的 `step end` 之前刷出**，包括边界上从 inbox 排干进来的 `user_text`——所以它出现在模型 delta **之后**。这是 step 粒度的必然结果，不是 bug：TUI 拿 `seq` 入 items，顺序由 seq 决定，不由到达时刻决定。
 
 **偏离设计之处**
@@ -824,3 +830,32 @@ cd tui && bun test test/compact.test.ts
 - `/help` 已经满了：加 `/compact` 之后 `/cancel` 以下要滚动才看得到。再加命令之前得先想清楚这一页怎么分组。
 
 核验（编排者）：`zig build test` 绿 / `zig build e2e` 绿 / `bun run typecheck` 绿 / `bun test` 100 pass 0 fail（`driver.test.ts` 的 "killed step" 在整套并跑时偶发超时——干净树上同样复现，T3 起的老现象，非本轮回归）。
+
+### T8 · 慢速回路的前端：判决、穿衣服、成本（2026-08-16）
+
+M5 在内核里放了四个面（outcome journal / per-step usage / 多 store root / `--with`），前端一个都没接。这一轮全部接上，**内核一行没改**。
+
+1. **`/sessions` 改读 `nulya session list --json`。** 原来的实现自己 open 每个 session 文件、增量扫 header 与事件数，是 T3 时内核还没有这个投影的产物。现在 composition / parent / 事件数 / usage / 最新 verdict 一次拿到，`files.ts` 里的 `listSessions` + 扫描缓存整段删掉（-100 行）。**没有全搬**：`● live` 还是本地锁探针——"此刻谁在写"不是文件里的事实，`session list` 也不该假装知道；列表 8s 一刷（一个进程 + 读全部文件），探针 1.5s 一刷（不开进程）。
+2. **`/outcome <verdict> [note]`。** 一行 CLI，判决进 outcome journal 而不是 ledger——它是关于这一场的判断，不是这一场里的一个 turn，所以内核不取 `<id>.lock`，正在 step 的场、别人在 drive 的场都能当场评（测试里断言评完 `events` 没变）。`/quit` 在"这一场干过活且本进程没评过"时问一次、再打一次就走；`Ctrl+C` 是逃生口，永远不问。**没做**：verdict 选择器 UI——三个词打出来比按方向键快。
+3. **`/evolve` 与 `/mode <id>[@<v>]`（`src/evolve.ts`）。** 两个动作同一条路：`ext build` 一个 draft → `session new --with <id>@<version>`。都**不 activate**：`--with` 是这一场的 composition membership，activate 会让此后每一场都冻结它。每次都 build 是故意的——version 是 draft 的 hash，没改就是同一个 version，于是改了 prompt 不用记得重建。composition 在 `session new` 冻结（physics #2），所以两者都开新场，没有"给当前对话换个 system prompt"这种东西，前端也不假装有。
+4. **成本以 ledger 为准。** `assistant.usage` 现在被读进 `UsageTotals`：流里的 `usage` 事件仍然即时显示（否则一步结束前状态栏是空的），但它是 provisional，同一步的 ledger 行落地时把它换掉——一步只算一次。收获是重开一场就能看见它至今花了多少、observer 模式也有成本与 ctx%（以前两者都要"since attach"），代价是 `session.ts` 里多一个一格深的队列（`step end` 时清空孤儿：那一步的 ledger 行早在 marker 之前就刷过了）。`/usage` 的 "steps watched" 变成 "steps priced · N watched here"——provider 没报 usage 的步是**缺席**不是 0。
+5. **`/ext` 认多 root。** 清单改用 `nulya ext list`（root 顺序、`(shadowed)` 都是 kernel policy，TUI 不复刻），右栏写明来自哪个 root、被遮蔽的标红说明"永远不会跑"。顺带修一个 M5 之后才显形的洞：只用 `--with` 穿的包一辈子没有 `current`，原来的 manifest 回退是"current → draft"，store 里没有 draft，于是 evolution 在 `/ext` 里显示成没有任何贡献——改成"current → 最新 build → draft"。`contributes.system_prompts` 也开始显示（`/ext` 的 `prompts N`、CompositionCard 的 `prompts 1`）：一个 mode 包往往**只有**一个 prompt，不显示它等于说这一场什么都没穿。
+
+**新的 CLI 面**（都在 `src/nulya/cli.ts`，别处不认得 flag 名）：`sessionList` / `sessionOutcome` / `extBuild` / `extList` / `sessionNew({with})`。`ledger.Usage` 是内核那一个 struct 的镜像，`StreamUsage` 直接是它的别名——内核 M5 review 刚把两个 Usage 合成一个，这里没有理由再分叉。
+
+**怎么看一眼**
+
+```bash
+cd tui && bun test
+```
+
+真跑：`/evolve` 之后看顶上的 CompositionCard 有没有 `evolution@v-…` 与 `prompts 1`；`/outcome success 试了一轮` 之后 `F3` 看那一行的 `+ success`。
+
+**已知问题 / 给下一里程碑**
+- `/mode` 没有补全也没有列表：打错 id 只会得到内核的一行错误。`/ext` 里加一个"穿上它"的键（比如 `w`）比补全更值。
+- `/evolve` 只认仓库里的 `extensions/evolution`；在别人的 workspace 里就是一句 build 失败。真要在别处用，得先想清楚这个包该住在哪个 root。
+- `/quit` 的"问一次"只记本进程评过谁，不去查 journal：昨天评过的场今天再开还会被问一次。查一次 `session list` 就能不问，但那是启动路径上的一个进程。
+- verdict 只能给**当前 tab**，`/sessions` 里选中一行直接评（`s`/`p`/`f`）会更顺手。
+- 整套并跑时 `driver.test.ts` 的 "killed step" 与 `overlays.test.tsx` 的 live 标记偶发超时——T3 起的老现象（负载敏感），单独跑都是秒过。
+
+核验（编排者）：`bun run typecheck` 绿 / `bun test` 111 pass 0 fail（快照 3 处更新：`/help` 多了三条命令、`/ext` 多了 root 行、CompositionCard 多了 `prompts`）。`src/` 本轮一行未动，所以内核的绿由它自己的 `zig build test` / `e2e` 负责，不在这一条里重复声明。

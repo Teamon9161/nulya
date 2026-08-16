@@ -19,8 +19,8 @@ import { loadTuiState, rememberModel, saveTuiState } from "../src/state/tui_stat
 import { StyleContext, createStyle, type Style } from "../src/render/theme.ts"
 import { default_settings } from "../src/state/settings.ts"
 import { createSessionState } from "../src/state/session.ts"
-import { listSessions, sessionExists } from "../src/nulya/files.ts"
-import { sessionNew } from "../src/nulya/cli.ts"
+import { sessionExists } from "../src/nulya/files.ts"
+import { sessionList, sessionNew } from "../src/nulya/cli.ts"
 import { App } from "../src/ui/App.tsx"
 import type { ModelPick } from "../src/state/tui_state.ts"
 import type { ProfileDraft } from "../src/nulya/credentials.ts"
@@ -317,7 +317,7 @@ test("picking in /model on a fresh untouched session replaces it in place; on a 
     const frame = await settle(setup, 3)
     expect(frame).not.toContain(first)
     expect(loadTuiState(statePath).model).toEqual({ profile: "scripted", model: "scripted-demo", effort: undefined })
-    const sessions = await listSessions(ws)
+    const sessions = await sessionList(ws)
     const mine = sessions.filter((s) => s.id !== first)
     expect(mine.length).toBeGreaterThan(0)
 
@@ -337,7 +337,7 @@ test("picking in /model on a fresh untouched session replaces it in place; on a 
     await until(() => setup.captureCharFrame().includes("2/2") || /\[2\]|tab/.test(setup.captureCharFrame()), 15_000).catch(
       () => {},
     )
-    const after = await listSessions(ws)
+    const after = await sessionList(ws)
     expect(after.length).toBeGreaterThan(sessions.length)
   } finally {
     setup.renderer.destroy()

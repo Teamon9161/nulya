@@ -20,7 +20,7 @@ exports[`/sessions lists the store and opens the highlighted session 1`] = `
                                                                                                                         
                                                                                                                         
                                                                                                                         
- j/k move · Enter open · n new · r refresh · Esc close                                                                  
+ j/k move · Enter open · n new · r refresh · /outcome judges this one · Esc close                                       
 "
 `;
 
@@ -28,7 +28,8 @@ exports[`/ext shows the version line, the current pointer and the usage counts 1
 " extensions · 1                                                                                                         
                                                                                                                         
  ▾ lint 1v scri                      lint · script · current v-<hash>                                 
-                                     tools lint · skills —                                                              
+                                     root .nulya/extensions                                                             
+                                     tools lint · skills — · prompts —                                                  
                                      permissions fs 0 · net — · proc 0                                                  
                                                                                                                         
                                      versions                                                                           
@@ -36,7 +37,6 @@ exports[`/ext shows the version line, the current pointer and the usage counts 1
                                                                                                                         
                                      usage                                                                              
                                        lint · 0 uses · —                                                                
-                                                                                                                        
                                                                                                                         
                                                                                                                         
                                                                                                                         

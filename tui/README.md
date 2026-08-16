@@ -6,9 +6,10 @@ and spawns steps — nothing else. Design contract and milestones live in
 [`../docs/DESIGN.md`](../docs/DESIGN.md) §3.4 (session file) and §14 (`session
 step --stream`).
 
-Status: **T4 — complete**. Cards and folding, `tui.toml` settings and keymap
+Status: **T8 — complete**. Cards and folding, `tui.toml` settings and keymap
 overrides, `/sessions` `/ext` `/usage` `/settings` `/help`, sub-session tabs,
-observer mode, and a single-file build.
+observer mode, a single-file build, `/model` and `/effort`, `/compact`, and the
+slow loop's front end: `/outcome`, `/evolve`, `/mode`.
 
 A session has exactly one writer. When somebody else holds it — a driver script,
 another TUI, a parent session's shell — this one attaches as an **observer**: it
@@ -205,8 +206,17 @@ highlighted version (confirm with `y`), `u` jumps to the usage table. Inside
 
 Slash commands: `/model` (F5), `/effort <level|auto>`,
 `/new [--profile p] [--model id]`, `/sessions`, `/ext`, `/usage`, `/settings`,
-`/help`, `/step` (continue after a spent step budget), `/cancel`, `/fold`,
-`/quit`. Anything else starting with `/` is sent to the model verbatim.
+`/compact [focus]`, `/outcome <success|partial|failure> [note]`, `/evolve`,
+`/mode <id>[@version]`, `/help`, `/step` (continue after a spent step budget),
+`/cancel`, `/fold`, `/quit`. Anything else starting with `/` is sent to the
+model verbatim.
+
+`/outcome` records how a session went in the outcome journal beside the ledger —
+recording nothing means *unjudged*, which is not the same as failure, so nothing
+is written until you say so. `/evolve` builds the `extensions/evolution` package
+that ships with nulya and starts a session carrying it; `/mode <id>` does the
+same with any built extension. Neither activates anything: the package is a
+member of that one session's composition, and the next session is untouched.
 
 Every key in the first table above is rebindable — see `[keys]` below. `/help`
 reads the live keymap, so it shows your bindings, not these defaults.

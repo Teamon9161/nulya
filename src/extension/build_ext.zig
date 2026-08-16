@@ -14,6 +14,7 @@ const std = @import("std");
 const manifest = @import("manifest.zig");
 const integrity = @import("integrity.zig");
 const ext_skills = @import("skills.zig");
+const store = @import("store.zig");
 const prompt = @import("../prompt.zig");
 const toolchain = @import("../toolchain.zig");
 
@@ -103,6 +104,12 @@ pub fn buildExtension(
     // Store layout, not draft layout: `<id>/versions/<v>` under the store root.
     const version_rel = try std.fs.path.join(alloc, &.{ m.id, "versions", version });
     defer alloc.free(version_rel);
+
+    // From here on `<id>/` is mutated (a stale directory deleted, a version
+    // written): hold the id's writer lease so two builds of one id in a shared
+    // root — the user store — serialize instead of tearing each other's tree.
+    var held = try store.Store.init(io, dest_root).lease(alloc, m.id);
+    defer held.close(io);
 
     // `entry_rel` is the BUILT binary path — compiled extensions only. A script's
     // entry is frozen inside `package/` and located via `store.versionScriptEntryPath`.

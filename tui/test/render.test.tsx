@@ -294,12 +294,18 @@ test("the composition card shows what this session froze", async () => {
   const frame = await frameOfNode(() => (
     <CompositionCard
       header={header_fixture}
-      contributions={[{ id: "lint", version: "v-3f2a91", tools: ["lint_zig"], skills: ["skills/zig-style"] }]}
+      contributions={[
+        { id: "lint", version: "v-3f2a91", tools: ["lint_zig"], skills: ["skills/zig-style"], systemPrompts: [] },
+        // A `--with` package: no tool, no skill, one prompt — worn for this
+        // session only, and the card has to say so (DESIGN §7.5).
+        { id: "evolution", version: "v-db04b7", tools: [], skills: [], systemPrompts: ["prompts/evolution.md"] },
+      ]}
     />
   ))
   expect(frame).toContain("session · 2026-08-16 14:02 · frozen composition")
   expect(frame).toContain("shell edit ⚡lint_zig")
   expect(frame).toContain("skills zig-style")
+  expect(frame).toContain("prompts 1")
   expect(frame).toContain("anthropic/claude-sonnet-5 · api.anthropic.com")
   expect(frame).toContain("lint@v-3f2a91")
   expect(frame).toContain("parent s-1786800870313-bf37ef:41")

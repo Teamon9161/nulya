@@ -11,10 +11,10 @@ function compact(n: number): string {
 }
 
 /**
- * One line: what this process has counted, what is happening right now, and the
- * three keys worth knowing. Token totals are `since attach` on purpose — the
- * stream reports per-step usage and history before we attached is unknown
- * (tui.md §4.5).
+ * One line: what this session has cost, what is happening right now, and the
+ * three keys worth knowing. The totals are the ledger's — every step records
+ * what it cost (DESIGN §3.1) — so they survive a reopen and are the same
+ * numbers whoever is driving.
  */
 export function StatusBar(props: {
   snapshot: SessionSnapshot
@@ -40,7 +40,7 @@ export function StatusBar(props: {
     const u = props.snapshot.usage
     if (u.input === 0 && u.output === 0) return "no usage yet"
     const cache = u.input > 0 ? Math.round((u.cacheRead / u.input) * 100) : 0
-    return `↑${compact(u.input)} ↓${compact(u.output)} cache ${cache}% · since attach`
+    return `↑${compact(u.input)} ↓${compact(u.output)} cache ${cache}%`
   })
 
   /**
@@ -73,12 +73,21 @@ export function StatusBar(props: {
     }
     if (props.status === "sending") return `${props.spinnerFrame} sending`
     if (props.snapshot.lastStopped === "budget") return "step budget spent · /step to continue"
+    // The kernel stops after two replies in a row hit max_tokens (DESIGN §4); the
+    // marker results already told the model why. Sending a message continues
+    // whether the cut reply ended in calls (results present) or in text (a bare
+    // /step would prefill the assistant, which thinking-on providers reject).
+    if (props.snapshot.lastStopped === "max_tokens") return "reply cut off (max_tokens) · send a message to continue"
     if (props.snapshot.lastStopped === "canceled") return "canceled"
     return "idle"
   })
 
   const color = () =>
-    props.snapshot.error ? style.theme.err : props.snapshot.lastStopped === "budget" ? style.theme.warn : style.theme.dim
+    props.snapshot.error
+      ? style.theme.err
+      : props.snapshot.lastStopped === "budget" || props.snapshot.lastStopped === "max_tokens"
+        ? style.theme.warn
+        : style.theme.dim
 
   return (
     <box flexDirection="row" width="100%" height={1} flexShrink={0} paddingLeft={1} paddingRight={1}>

@@ -51,7 +51,7 @@ export function ExtView(props: {
   const [confirm, setConfirm] = createSignal<{ verb: "activate" | "rollback"; id: string; version: string } | null>(null)
 
   const refresh = async () => {
-    setExtensions(listExtensions(props.ws))
+    setExtensions(await listExtensions(props.ws))
     setUsage(await readToolUsage(props.ws))
   }
 
@@ -142,13 +142,19 @@ export function ExtView(props: {
                     flexDirection="row"
                     backgroundColor={here() && pane() === "extensions" ? style.theme.selection : undefined}
                   >
-                    <text fg={here() ? style.theme.fg : style.theme.dim}>
+                    <text fg={entry.shadowed ? style.theme.dim : here() ? style.theme.fg : style.theme.dim}>
                       {here() ? style.glyphs.foldOpen : " "} {entry.id}
                     </text>
                     <text fg={style.theme.dim}>
                       {" "}
                       {entry.versions.length}v {entry.kind.slice(0, 4)}
                     </text>
+                    {/* An id an earlier root already has active: this copy never
+                        runs (DESIGN §7.2). Saying so is the whole point — a
+                        silently omitted duplicate is how it becomes a mystery. */}
+                    <Show when={entry.shadowed}>
+                      <text fg={style.theme.warn}> shadowed</text>
+                    </Show>
                   </box>
                 )
               }}
@@ -165,9 +171,14 @@ export function ExtView(props: {
                   <text fg={style.theme.fg}>
                     {entry.id} · {entry.kind} · current {entry.current ?? "(none)"}
                   </text>
+                  <text fg={entry.shadowed ? style.theme.warn : style.theme.dim}>
+                    root {entry.root}
+                    {entry.shadowed ? " · shadowed by an earlier root · never runs" : ""}
+                  </text>
                   <text fg={style.theme.dim}>
                     tools {entry.tools.join(" ") || "—"} · skills{" "}
-                    {entry.skills.map((skill: string) => skill.split("/").pop()).join(" ") || "—"}
+                    {entry.skills.map((skill: string) => skill.split("/").pop()).join(" ") || "—"} · prompts{" "}
+                    {entry.systemPrompts.length || "—"}
                   </text>
                   <text fg={style.theme.dim}>
                     permissions fs {entry.permissions.fs.length} · net {entry.permissions.network.join(",") || "—"} ·

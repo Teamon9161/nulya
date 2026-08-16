@@ -75,8 +75,13 @@ export function HelpView(props: { keys: Keymap; onClose: () => void }) {
 
       <scrollbox
         ref={(box: ScrollBoxRenderable) => (body = box)}
+        // flexBasis 0: size from the remaining space, not from the content
+        // height. Otherwise the box starts out as tall as its content and
+        // shrinks, squeezing the spacer above and the footer below to zero
+        // rows — the footer then draws over the last visible row.
         flexGrow={1}
         flexShrink={1}
+        flexBasis={0}
         width="100%"
         verticalScrollbarOptions={{
           trackOptions: { foregroundColor: style.theme.hairline, backgroundColor: "transparent" },

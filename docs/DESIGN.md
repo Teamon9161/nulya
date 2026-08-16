@@ -109,7 +109,7 @@ capability_note  { id, version, text }                                  ← 中�
 
 ### 3.3 派生视图
 
-UI / trajectory / metrics 是 ledger 的投影，不持久化 mutable 状态。**证据走 ledger 之外的 journal**，共两条，都是 append-only JSONL、都在 `.nulya/` 下、共用同一套文件纪律（`journal.zig`：一行一条、append 前修残尾、文件不存在 = 还没有事实；schema 各自持有）：
+UI / trajectory / metrics 是 ledger 的投影，不持久化 mutable 状态。**证据走 ledger 之外的 journal**，共两条，都是 append-only JSONL、都在 `.nulya/` 下、共用同一套文件纪律（`journal.zig`：一行一条；**多写者**——每个 `session step` / `ext run` / `session outcome` 进程都写同一个文件，所以 append 全程持有旁车 `<journal>.lock` 的排他 lease（阻塞式，临界区只有一次 stat + 一次写），两个 append 不可能落到同一 offset；append 前修残尾；**读端不拿锁、忽略最后一个 `\n` 之后的残尾**（被打断或正在进行的那次 append），完整但畸形的行仍是 consumer 的显式错误——宽恕的是被打断的写、不是坏 journal，所以 `session list` 不会在一次 crash 后到下一次写之前一直失败；文件不存在 = 还没有事实；schema 各自持有）：
 
 | journal | 一行 | 谁写 | 为什么不是 ledger 事件 |
 |---|---|---|---|
@@ -167,9 +167,11 @@ model.step(PromptIR, tool_defs)  →  assistant turn（可能含多个 tool_use�
 - 跨进程取消：`session.requestCancel` 在 session 文件旁写 `<id>.cancel`；`prepareStep` 在 step 边界消费它，这一步不调用模型、usage 为 0、返回 `.canceled`，`run` 就此停下。in-process（cancel 步骤的 `Future`）与跨进程（标记）是**同一个** kernel 语义的两种到达方式，都在 step 边界消化。
 - `completeInterruptedToolBatch`：进程上次崩在 assistant-with-calls 之后，下次 `prepareStep` 先补一条"interrupted"批次，再继续。
 - `prepareStep` 的顺序固定：补齐残尾 → 消费 cancel 标记 → 排干 inbox（§3.4）。
-- `AgentSession.run(max_steps)`：预算 = `min(max_steps, session.max_steps_ceiling)`（天花板 50），由 kernel 强制；turn 结束、预算耗尽或任一 step 取消即停。
+- `AgentSession.run(max_steps)`：预算 = `min(max_steps, session.max_steps_ceiling)`（天花板 50），由 kernel 强制；turn 结束、预算耗尽、任一 step 取消、或**连续 `max_truncated_streak`（2）个 step 被 `max_tokens` 截断**即停。
 
-不变量：**一条 assistant tool-call batch ↔ 恰好一条匹配的 tool_results batch。** `session.recordCompletedToolStats` 直接按这个形状读 suffix 并 assert。
+**Truncation（`stop_reason == max_tokens`，模型这一步被输出上限切断）：** 与 cancellation 正交——那是宿主控制，这是模型停止原因（`StepOutcome.stop_reason`）。被截断的回复**不是一个完成的 turn**：它说了的文本与 reasoning 是事实、照记；它开了头的 call 不是模型的本意，参数还可能是半截 JSON——原样回放进 provider 的 `input`（anthropic 用 `writeRaw`）会让这场 session 之后每一步都 400。所以：calls **照记但参数保证可回放**（不是完整 JSON 值的换成 `{}`），**一个都不执行**，用一条 marker 批次关掉（`not executed: the reply hit its output cap (max_tokens) …`，文本同时告诉模型发生了什么、怎么绕过——写短、或一步一步来），返回 `stop_reason = .max_tokens`。没有 call 的截断回复只是 text-only assistant，`run` 因 `lastAssistantDone` 停下，driver 见 `stopped: max_tokens`（TUI 提示"发一条消息继续"——裸再 step 会让 assistant 结尾成 prefill，thinking 开着时 provider 拒绝）。有 call 的截断回复 `run` 会再走一步让模型看到 marker 重试；连续两次即停，避免装不下上限的东西反复重试、每次计费整个前缀。（tcode 同一问题的做法：keep + 关闭 dangling call + 追加一条 note + 最多重试两次；这里 note 的内容放进 marker result 里，不给 kernel 加"kernel 对模型说话"的事件种类。）内核默认不设 `max_output_tokens`（anthropic 必填故给 32k），调大上限是 config / provider 层的事。
+
+不变量：**一条 assistant tool-call batch ↔ 恰好一条匹配的 tool_results batch。** `session.recordCompletedToolStats` 直接按这个形状读 suffix 并 assert。**assistant 事件永远可回放**：`calls[].args_json` 是完整 JSON 值。
 
 **输出纪律**（`emit.zig`，细节见 [base-tools.md](base-tools.md)）：每个 tool 结果过 head/tail 字节预算（UTF-8 边界截断），超限落盘到 `.nulya/scratch/` 留指针；每 step 另有聚合预算 `StepOutputLimiter`。落盘路径由 ledger seq 决定，replay 一致。
 
@@ -281,7 +283,9 @@ extension 装在**多个 store root** 里，按固定顺序搜索（`store.Roots
 | ③ | `extensions.paths`（**只认 trusted 层**，§9.5） | operator | project 层写了也忽略 |
 
 - **同一个 id 在多个 root → 首个持有 active 版本（有 `current`）的 root 胜**（workspace 遮蔽 user）。"持有"看 `current` 不看目录：一个只有 `<id>/` 目录、没有 `current` 的 root（draft、或已 `deactivate` 的副本）**不参与遮蔽**——否则在 workspace `deactivate` 会静默藏起 user 那份而不是让它生效。同一定义贯穿 `Roots.listActive`（composition / `skill list`）、`Roots.firstActive`（`ext run`、`--with` 不带版本、`ext deactivate` 的落点）与 `ext list` 的 `(shadowed)` 标记；`ext deactivate` 作用于生效的那份，若因此让后面 root 的副本顶上来会打印一行 note。
-- **frozen 版本按 root 顺序找**（`initFrozen`、`skill load` 的 pinned ref、`ext run` 的 entry）：version 是内容寻址的，哪个 root 的副本都是同一字节、integrity 照验，所以顺序只决定"在哪找到"，从不决定"跑什么"。
+- **frozen 版本按 root 顺序找**（`initFrozen`、`skill load` 的 pinned ref、`ext run <id>@<version>` 的 entry）：version 是内容寻址的，integrity 照验，所以顺序只决定"在哪找到"，从不决定"跑什么"。精确地说：data / script 版本的 id 就是 snapshot 的 hash，任意 root 的副本**严格**同字节；compiled 版本的 id 是 `snapshot + compiler + target` 的 hash，二进制 digest 只进 seal 不进 id，所以"两个 root 各自编出的同 id 副本同字节"是**可复现构建不变量**（同源、同编译器、同 target），不是数学保证——不为此重构 build identity，只是别把它当定理。
+- **写端的落点：`activate` / `rollback` 作用于该 id 生效中的那个 root**（`Roots.firstActive`）：在那里激活才真的生效；在被遮蔽的 root 里激活会"成功"却改变不了任何 session 看到的东西。所以要激活的版本若不在生效 root 里 → 明确失败（并指出它建在哪个 root、可用 `--user` 显式打到 user store）；只有当该 id **在任何 root 都没有 active 副本**时才按 `firstWithVersion` 找首个持有该 built 版本的 root。操作完成后重新算一次 `firstActive`：只有生效的 `{root, version}` 真的是目标时才向 live session 投 capability_note（§5.3），否则打印 `note: not in effect — <id>@<v> in <root> shadows it`（`--user` 显式打进被遮蔽的 root 时会遇到）。`deactivate` 同样作用于生效的那份。
+- **每个 `<id>/` 的变更都在 `<root>/<id>/.lock` 下进行**（`Store.lease`：build 写 `versions/<v>`、activate / rollback 改 `current`、deactivate 删 `current`；阻塞式排他 advisory 锁，与 session 的 `<id>.lock` 同一原语）——user store 被这台机器上的每个 workspace 共写，两个进程同时 build / activate 同一个 id 不能互相撕对方的目录树或共用一个 `.current.tmp`。读端不拿锁：`current` 是原子 rename，版本目录靠 seal 校验。
 - **header 不记 root**（`active` 仍是 `{id, version}`）：记了就等于把一台机器的目录布局冻进会话，而那与"跑的是哪份字节"无关。
 - 不存在的 root 是**缺席**不是错误（多数机器没有 user store）；写端（`ext init --user` / `ext build --user`）需要时才创建。
 - **为什么 project 层不能加 root**：一个 root 决定"这台机器上哪些目录可以供出 `current`"，即哪些代码可以被跑起来——checkout 能加就是拓宽权限，正是 §9.5 "只能收窄"禁止的事。
@@ -493,7 +497,7 @@ NULYA_INTEGRATION_PROFILE=deepseek-anthropic zig build integration
 
 ```
 nulya ext init [--script] [--user] <id> [tool] | build <path> [--user]
-          | run <id> [tool] (<json-args> | --arg k=v …)
+          | run <id>[@<version>] [tool] (<json-args> | --arg k=v …)
           | activate [--user] <id> <version> | rollback [--user] <id> <version> | deactivate [--user] <id>
           | list | inspect <id> | api [protocol|permissions|examples]
 nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--with <id>[@<version>]]…
@@ -519,13 +523,13 @@ nulya                       ← 无参数：固定 prompt demo（现经 durable 
 
 - `nulya src`：build.zig 把整个 `src/**` `@embedFile` 进二进制（源码 ~200KB，紧挨 ~90MB 工具链，恒开无 gate）；`nulya src <path>` 按 `src/` 相对路径打印（`prompt.zig`、`extension/store.zig`），**默认剥 top-level `test` 块**（读结构/契约时不付测试 token），`--tests`/`--raw` 打印原样（Zig 风格参照）。剥离靠 zig-fmt 不变量：顶层 decl 的收尾 `}` 在第 0 列，无需 tokenizer（`source.zig`）。测试留在文件里（Zig 惯例、人可读、风格参照），改的只是**投影**不是**存储**——`src/` 一字未动。
 - `nulya ext api`：协议 topic 现在**打印真实 `extension/protocol.zig` 源码**（是 `nulya src` 的特例），wire ABI 与实现代码零漂移；`permissions` / `examples` 仍是短说明（策略与 CLI 用法，不随代码漂）。
-- **`session new --with <id>[@<version>]`（可重复）= composition membership，不是 native pin。** 把一个**已 built** 的版本 union 进这一场的 composition：它的 skills 进 catalog、system_prompts 进 system blocks、tools 可经 `nulya ext run` 调用；**tool 要不要占 native 槽仍然是 `registry.pinned_native_tools` / usage ranking 的事**（两根轴分开）。同 id 覆盖 discovery 的结果（这一场说了算），重复 `--with` 同一个 id 后者胜。版本解析：给了 `@version` 就用它，没给就用该 id 的 `current`——**没有 `current` 就 exit 1，内核不猜**（"只有一个 built 版本就用它"这类聪明会让同一条命令在第二次 build 之后含义漂移）。所以一个**故意不 activate** 的包（mode / evolution，activate 了就会进每一场 session 的 system blocks）要按 `--with <id>@<version>` 带入，version 由 `ext build` 打印。落地不需要新机制：`--with` 只改 `SessionComposition.init` 的输入，结果照常冻进 header 的 `active`，所以 `initFrozen` 零改动、resume 自然重建同一份 composition。fork（`--parent`）不继承——composition 一律现解（§11），要就再传一次。
+- **`session new --with <id>[@<version>]`（可重复）= composition membership，不是 native pin。** 把一个**已 built** 的版本 union 进这一场的 composition：它的 skills 进 catalog、system_prompts 进 system blocks、tools 可经 `nulya ext run <id>@<version>` 调用（点名冻结的版本，不依赖 `current`）；**tool 要不要占 native 槽仍然是 `registry.pinned_native_tools` / usage ranking 的事**（两根轴分开）。同 id 覆盖 discovery 的结果（这一场说了算），重复 `--with` 同一个 id 后者胜。版本解析：给了 `@version` 就用它，没给就用该 id 的 `current`——**没有 `current` 就 exit 1，内核不猜**（"只有一个 built 版本就用它"这类聪明会让同一条命令在第二次 build 之后含义漂移）。所以一个**故意不 activate** 的包（mode / evolution，activate 了就会进每一场 session 的 system blocks）要按 `--with <id>@<version>` 带入，version 由 `ext build` 打印。落地不需要新机制：`--with` 只改 `SessionComposition.init` 的输入，结果照常冻进 header 的 `active`，所以 `initFrozen` 零改动、resume 自然重建同一份 composition。fork（`--parent`）不继承——composition 一律现解（§11），要就再传一次。
 - **mode = 贡献 system_prompt 的 data extension + `--with`。** 同一个包两种投放：`activate` = 常驻（每场都有）；不 activate、只 `--with` = 按场。不为 mode 造别的机制。
 - `nulya session list [--json]`：`.nulya/sessions/` 的**只读投影**，按 `created` 倒序（老 header 没有 `created`，退回按 id——id 本身时间有序）：`{sessions:[{id, created, parent, model, provider, model_id, events, composition{active:["id@version"], native_tools}, usage（每条 assistant 的 `usage` 求和，§3.1）, first_user_text（截断）, outcome{verdict,note,at}|null}]}`。定位同 `config show`：外壳投影，不决定任何事，也不写任何东西；第一批消费者是 evolution skill（一眼看完很多场而不必逐个读 ledger）与 TUI 的 `/sessions`。一个读不动的 session 文件被跳过而不是让整条命令失败。**`session new` 从此写 header 的 `created`**（RFC3339 UTC）。
 - `nulya session outcome <id> <verdict> [--note …]`：校验 id 形状与 session 文件存在、校验 verdict，然后**只**往 `.nulya/session-outcomes.jsonl` append 一行（§3.3）。它**不打开 session 文件、不拿 `<id>.lock`**——verdict 是关于这场 session 的判断而不是其中一轮，所以正在跑 `step` 的 session 也能当场评；同一 session 可以评多次，最后一条作数。
 - `nulya session *` 是**唯一**的 session 驱动面：没有 `setTools / setModel / replaceHistory`，换 composition = `session new`。每个子命令是对 durable session 文件（§3.4）的一次独立进程调用，其中**只有 `step` 写主文件**：`append` / `cancel` 投递到 `<id>.inbox/` / `<id>.cancel`（所以正在跑的 `step` 会在它的下一个 step 边界拿到 mid-run 的 append 或 cancel），`events` 是只读 tail（不解析、不重编码——文件本身就是 wire format）。`step` 的预算 `min(--max-steps, session.max_steps_ceiling)` **由 kernel 在 `AgentSession.run` 强制**，driver 只能调低不能调高；`--max-steps` 必须是正整数。session 就是它的文件，没有 `close`。
 - **`session step --stream`：纯观测的行协议**（前端唯一需要的内核改动，tui.md §2.2 → 已落地）。语义与不带 `--stream` 完全相同（同一 `AgentSession.run`、同一预算夹取、同一 cancel 消化、**同一 ledger**）；区别只是 stdout **在跑的过程中**逐行输出，而不是跑完一次性输出。
-  - 机制是 `loop.StepContext.observer`（可选 `StepObserver{ptr,vtable}`）。observer **无权力**：四个回调全部返回 `void`、只拿只读视图，所以它不能 append、不能改 model-visible 状态、不能让一个 step 失败——带 observer 的 step 与不带的走同一条路径（physics #1/#3）。回调点：`runStepWithPrompt` 把 provider 流 **tee** 给 observer 再交给 `TurnCollector`；`execOne` 前后各一次（未被派发的尾部调用两个回调都不发）；`AgentSession.step` 在 step 边界一次（含 canceled）。
+  - 机制是 `loop.StepContext.observer`（可选 `StepObserver{ptr,vtable}`）。observer **无权力**：四个回调全部返回 `void`、只拿只读视图（`stepEnd` 拿整个 `StepOutcome`），所以它不能 append、不能改 model-visible 状态、不能让一个 step 失败——带 observer 的 step 与不带的走同一条路径（physics #1/#3）。回调点：`runStepWithPrompt` 把 provider 流 **tee** 给 observer 再交给 `TurnCollector`；`execOne` 前后各一次（未被派发的尾部调用两个回调都不发）；`AgentSession.step` 在 step 边界一次（含 canceled）。
   - 行协议（一行一个 JSON，写完即 flush）：带 `stream` 字段的是瞬态观测行，不带的就是与 `session events` **同形**的 ledger 事件行（同一个 `encodeEventLine`、同一套 seq）。
 
     ```jsonl
@@ -538,14 +542,15 @@ nulya                       ← 无参数：固定 prompt demo（现经 durable 
     {"stream":"tool","event":"begin","call_id":"call_1","tool":"shell"}
     {"stream":"tool","event":"end","call_id":"call_1","ok":true}
     {"seq":7,"kind":"assistant","text":"…","calls":[…]}
-    {"stream":"step","event":"end","status":"completed"}
+    {"stream":"step","event":"end","status":"completed"}          ← 被 max_tokens 截断的 step 多一列 "stop":"max_tokens"
     {"stream":"run","event":"done","steps":2,"stopped":"end_turn"}
     ```
 
-    `reasoning_item`（不透明、只为回放）**不转发**；`stopped ∈ end_turn | budget | canceled`。每个 step 的 ledger 行在该 step 的 `step end` **之前**刷出：读者见到 `step end` 就知道这一步的事件已全。诊断（原来的 "session step failed: …" 等）在 `--stream` 下变成 `{"stream":"run","event":"error","message":"…"}` 后非零退出——**stdout 上没有非 JSON 行**。
-- `nulya ext init|build|activate|rollback|deactivate` 都接受 `--user`：写端落到 user root（`~/.nulya/extensions`，需要时创建）而不是 workspace。不给 `--user` 时，`activate|rollback` 作用于**实际持有该 version 的首个 root**，`deactivate` 作用于**该 id 生效中的那个 root**（`Roots.firstActive`，§7.2），不是无脑 workspace；`ext list` 打印 `id / version / root`，被遮蔽的 active 行标 `(shadowed)`；`ext run` / `skill list` / `skill load` / session composition 一律按 root 顺序搜索。
+    `reasoning_item`（不透明、只为回放）**不转发**；`stopped ∈ end_turn | budget | canceled | max_tokens`（最后一步的回复被截断即 `max_tokens`，不论 `run` 是因它停的还是因连续两次停的，§4）。每个 step 的 ledger 行在该 step 的 `step end` **之前**刷出：读者见到 `step end` 就知道这一步的事件已全。诊断（原来的 "session step failed: …" 等）在 `--stream` 下变成 `{"stream":"run","event":"error","message":"…"}` 后非零退出——**stdout 上没有非 JSON 行**。
+- `nulya ext init|build|activate|rollback|deactivate` 都接受 `--user`：写端落到 user root（`~/.nulya/extensions`，需要时创建）而不是 workspace。不给 `--user` 时，`activate|rollback|deactivate` 都作用于**该 id 生效中的那个 root**（`Roots.firstActive`，§7.2）——版本不在那里就失败并指路，只有该 id 无 active 副本时 `activate|rollback` 才落到首个持有该 built 版本的 root；操作后按生效结果决定要不要投 capability_note、要不要打印 `not in effect`。`ext list` 打印 `id / version / root`，被遮蔽的 active 行标 `(shadowed)`；`ext run` / `skill list` / `skill load` / session composition 一律按 root 顺序搜索。
+- `nulya ext run <id>[@<version>] [tool] <json> | --arg k=v…`：`<id>` 跑生效中的版本；`<id>@<version>` 跑**恰好那个** built 版本（active 与否无关，按 root 顺序找首个持有者）——这是 `--with <id>@<version>` 带进 session 的 runtime tool 的调用形式：composition 里冻的是那个版本，`current` 可能指向别的甚至没有，所以 CLI 形式必须能点名版本；不让 `ext run` 在 `NULYA_SESSION` 下自动读 header，否则"同 session 内 activate 后 CLI 形式立即用新 current"这条语义就变了。usage 记的仍是 version-free 的 `ext:<id>/<tool>`。
 - `nulya ext activate` 在 `NULYA_SESSION`（相对 workspace 的 session 文件路径）存在时，向该 session 的 inbox 投一条 capability_note（§5.3）。
-- 离线时 provider 回落到确定性的 scripted stand-in（`NULYA_SCRIPTED_MODE=finish|loop`，测试用）。
+- 离线时 provider 回落到确定性的 scripted stand-in（`NULYA_SCRIPTED_MODE=finish|loop|truncate`，测试用；`truncate` 每步都在 tool call 中间被 `max_tokens` 切断）。
 
 （`ext find` / `ext test` 未实现。）
 

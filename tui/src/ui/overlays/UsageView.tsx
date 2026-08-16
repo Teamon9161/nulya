@@ -1,15 +1,16 @@
 /**
- * `/usage`: what this attachment has spent, and what the workspace has learned.
+ * `/usage`: what this session has spent, and what the workspace has learned.
  *
- * Two different kinds of number, kept apart on purpose:
+ * Two different scopes, kept apart on purpose:
  *
- *  - TOKENS are transient. The stream reports per-step counts (DESIGN §14) and
- *    this process sums the steps it watched; whatever happened before we
- *    attached is genuinely unknown, so the header says `since attach` rather
- *    than pretending to a total.
- *  - TOOL USES are durable. They come from `.nulya/tool-usage.jsonl`, the
- *    journal the kernel appends to across every session (DESIGN §5.5) — counts
- *    only, never a ranking (tui.md §2.1).
+ *  - TOKENS are this session's. Every step's cost is recorded on its assistant
+ *    event (DESIGN §3.1), so opening a session replays its whole price — not
+ *    only the steps this process happened to watch. A step whose provider
+ *    reported nothing is absent rather than zero, which is why the count of
+ *    priced steps is shown next to the number of steps.
+ *  - TOOL USES are the workspace's. They come from `.nulya/tool-usage.jsonl`,
+ *    the journal the kernel appends to across every session (DESIGN §5.5) —
+ *    counts only, never a ranking (tui.md §2.1).
  */
 import { createSignal, onMount } from "solid-js"
 import { useKeyboard } from "@opentui/solid"
@@ -45,17 +46,18 @@ export function UsageView(props: { ws: Workspace; snapshot: SessionSnapshot; onC
 
   return (
     <box flexDirection="column" width="100%" flexGrow={1} paddingLeft={1} paddingRight={1}>
-      <text fg={style.theme.accent.evolve}>usage · tokens since attach · tool counts since the workspace began</text>
+      <text fg={style.theme.accent.evolve}>usage · this session's tokens · tool counts since the workspace began</text>
       <box height={1} />
 
-      <Row left="steps watched" right={String(props.snapshot.steps)} />
+      <Row left="steps priced" right={`${usage().pricedSteps} · ${props.snapshot.steps} watched here`} />
       <Row left="input tokens" right={String(usage().input)} />
       <Row left="output tokens" right={String(usage().output)} />
       <Row left="cache read" right={`${usage().cacheRead} · ${cachePercent()}% of input`} />
       <Row left="cache write" right={String(usage().cacheWrite)} />
+      <Row left="last prompt" right={String(usage().lastPrompt)} />
       <box height={1} />
       <text fg={style.theme.dim}>
-        per-step counts summed by this process · the session's history before we attached is not ours to know
+        summed from the ledger, one step at a time · a step whose provider reported no usage is absent, not zero
       </text>
       <box height={1} />
 

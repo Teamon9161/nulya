@@ -3,18 +3,18 @@
  * `session step --stream` line protocol (DESIGN §14). This is the ONLY module
  * that spawns the binary; nothing above it knows a flag name or a JSON field.
  */
-import { parseEventLine, type LedgerEvent } from "./ledger.ts"
+import { parseEventLine, type LedgerEvent, type ParentRef, type Usage } from "./ledger.ts"
 import type { Workspace } from "./bin.ts"
 
-export type StopReason = "end_turn" | "budget" | "canceled"
+export type StopReason = "end_turn" | "budget" | "canceled" | "max_tokens"
 export type StepStatus = "completed" | "canceled"
 
-export interface StreamUsage {
-  input_tokens: number
-  output_tokens: number
-  cache_read_tokens: number
-  cache_write_tokens: number
-}
+/**
+ * The stream's per-step counts. Deliberately the ledger's `Usage` — the kernel
+ * has one such struct and reports the same four numbers in both places, so a
+ * second shape here would only invite them to drift.
+ */
+export type StreamUsage = Usage
 
 export type StreamLine =
   | { stream: "model"; event: "started" }
@@ -112,6 +112,14 @@ export interface NewSessionOptions {
   /** Model id within that profile; omitted means the profile's default. */
   model?: string
   parent?: { session: string; seq: number }
+  /**
+   * `--with <id>[@<version>]`, repeatable: bring a BUILT extension version into
+   * this session's composition without activating it (DESIGN §7.5). Membership
+   * only — skills land in the catalog, system prompts in the system blocks —
+   * so this is how a mode or the evolution package is put in front of a model
+   * for one session and no other.
+   */
+  with?: readonly string[]
 }
 
 /** `nulya session new` — stdout is the session id. `env` is a test seam (`NULYA_HOME`). */
@@ -124,6 +132,7 @@ export async function sessionNew(
   if (options.profile) args.push("--profile", options.profile)
   if (options.model) args.push("--model", options.model)
   if (options.parent) args.push("--parent", `${options.parent.session}:${options.parent.seq}`)
+  for (const ref of options.with ?? []) args.push("--with", ref)
   const result = await run(ws, args, env)
   const id = result.stdout.trim()
   if (result.code !== 0 || !id.startsWith("s-")) fail("session new failed", result)
@@ -212,6 +221,147 @@ export async function configShow(ws: Workspace, env?: Record<string, string>): P
       context_window: m.context_window ?? null,
     })),
   }
+}
+
+/** How a session turned out, in the kernel's words (`outcome.Verdict`). */
+export type Verdict = "success" | "partial" | "failure"
+
+export const verdicts: Verdict[] = ["success", "partial", "failure"]
+
+export function isVerdict(word: string): word is Verdict {
+  return (verdicts as string[]).includes(word)
+}
+
+export interface OutcomeView {
+  verdict: Verdict
+  note: string | null
+  /** RFC3339 UTC, when the judgment was recorded. */
+  at: string
+}
+
+/** One row of `nulya session list --json`. */
+export interface SessionListEntry {
+  id: string
+  /** RFC3339 UTC, or empty for a session created before headers carried it. */
+  created: string
+  parent: ParentRef | null
+  /** The provider PROFILE name, then the identity frozen behind it. */
+  model: string
+  provider: string
+  model_id: string
+  events: number
+  composition: { active: string[]; native_tools: string[] }
+  /** Every recorded step's cost, summed. Steps the provider never priced add nothing. */
+  usage: Usage
+  first_user_text: string
+  /** The verdict that stands, or null — which means "not judged", NOT failure. */
+  outcome: OutcomeView | null
+}
+
+const no_usage: Usage = { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0 }
+
+/**
+ * `nulya session list --json` — the kernel's own projection of
+ * `.nulya/sessions/`, newest first (DESIGN §14).
+ *
+ * The TUI used to walk those files itself; it no longer does. Composition,
+ * parent, cost and verdict are one read here, and the verdict in particular
+ * lives in a second journal the front end has no business parsing. What stays
+ * ours is the live marker: a lease is a fact about right now, not about the
+ * file, and `probeWriterLease` answers it without spawning anything.
+ */
+export async function sessionList(ws: Workspace, env?: Record<string, string>): Promise<SessionListEntry[]> {
+  const result = await run(ws, ["session", "list", "--json"], env)
+  if (result.code !== 0) fail("session list failed", result)
+  let value: unknown
+  try {
+    value = JSON.parse(result.stdout)
+  } catch {
+    fail("session list returned no JSON", result)
+  }
+  const rows = (value as { sessions?: unknown }).sessions
+  if (!Array.isArray(rows)) return []
+  return (rows as SessionListEntry[]).map((row) => ({
+    ...row,
+    created: row.created ?? "",
+    parent: row.parent ?? null,
+    composition: {
+      active: row.composition?.active ?? [],
+      native_tools: row.composition?.native_tools ?? [],
+    },
+    usage: { ...no_usage, ...(row.usage ?? {}) },
+    first_user_text: row.first_user_text ?? "",
+    outcome: row.outcome ?? null,
+  }))
+}
+
+/**
+ * `nulya session outcome <id> <verdict> [--note]` — how a session turned out.
+ *
+ * A judgment ABOUT a session, not a turn in it: the kernel writes it to the
+ * outcome journal and never opens the session file, which is why this can be
+ * called on the session in front of us while its own step is still running.
+ */
+export async function sessionOutcome(
+  ws: Workspace,
+  id: string,
+  verdict: Verdict,
+  note?: string,
+): Promise<void> {
+  const args = ["session", "outcome", id, verdict]
+  if (note && note.length > 0) args.push("--note", note)
+  const result = await run(ws, args)
+  if (result.code !== 0) fail("session outcome failed", result)
+}
+
+/**
+ * `nulya ext build <path>` — freeze a draft into the store and return the
+ * version it sealed to. Content-addressed, so building an unchanged draft twice
+ * yields the same version and no second copy (physics #5).
+ */
+export async function extBuild(ws: Workspace, path: string): Promise<string> {
+  const result = await run(ws, ["ext", "build", path])
+  const version = /v-[0-9a-zA-Z]+/.exec(result.stdout)?.[0]
+  if (result.code !== 0 || !version) fail("ext build failed", result)
+  return version
+}
+
+/** One line of `nulya ext list`: an extension directory, in the root that holds it. */
+export interface ExtStoreEntry {
+  id: string
+  /** The `current` pointer, or null when the directory has no active version. */
+  current: string | null
+  /** The root spec it came from — `.nulya/extensions`, `~/.nulya/extensions`, … */
+  root: string
+  /** An earlier root already has this id active, so this copy is never used. */
+  shadowed: boolean
+}
+
+/**
+ * `nulya ext list` — every extension directory in every store root, in SEARCH
+ * order, with the shadowing already decided (DESIGN §7.2).
+ *
+ * Root order and "first active holder wins" are kernel policy. The TUI reads
+ * the roots it names rather than re-deriving them from a home directory and a
+ * config chain, so a shadowed copy shows up here as exactly what the next
+ * session will ignore.
+ */
+export async function extList(ws: Workspace): Promise<ExtStoreEntry[]> {
+  const result = await run(ws, ["ext", "list"])
+  if (result.code !== 0) fail("ext list failed", result)
+  const entries: ExtStoreEntry[] = []
+  for (const line of result.stdout.split("\n")) {
+    const fields = line.trimEnd().split("\t")
+    if (fields.length < 3) continue
+    const [id, version, root] = fields as [string, string, string]
+    entries.push({
+      id,
+      current: version === "(inactive)" ? null : version,
+      root,
+      shadowed: fields[3] === "(shadowed)",
+    })
+  }
+  return entries
 }
 
 /**

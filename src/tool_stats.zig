@@ -17,11 +17,12 @@
 //! model-facing name, so stats accumulate across implementation versions.
 //!
 //! Only complete events count: an append interrupted by cancel or crash can
-//! leave a partial final line, and the next append first drops that tail back
-//! to the last `\n` so it can never be glued onto a later event into a
-//! permanently malformed middle line (that file discipline is `journal.zig`,
-//! shared with the outcome journal). The reader stays strict — a malformed line
-//! read without a prior repairing append is an explicit error.
+//! leave a partial final line; the next append first drops that tail back to
+//! the last `\n` so it can never be glued onto a later event into a permanently
+//! malformed middle line, and a read skips it (that file discipline — plus the
+//! per-journal writer lease that serializes concurrent appenders — is
+//! `journal.zig`, shared with the outcome journal). The reader stays strict
+//! about COMPLETE lines: a malformed one is an explicit error.
 
 const std = @import("std");
 const journal = @import("journal.zig");
@@ -35,8 +36,8 @@ pub const journal_rel = journal_dir ++ std.fs.path.sep_str ++ "tool-usage.jsonl"
 pub const journal_schema_version: u8 = 1;
 
 pub const Error = error{
-    /// A non-empty journal line is not a valid event (malformed JSON, missing
-    /// field, wrong type, or a truncated crash tail).
+    /// A complete journal line is not a valid event (malformed JSON, missing
+    /// field, wrong type).
     InvalidStatsJournal,
     /// A journal line carries a schema version this build does not understand.
     UnsupportedStatsVersion,
@@ -79,8 +80,8 @@ pub fn append(alloc: std.mem.Allocator, io: std.Io, cwd: []const u8, tool_id: []
 }
 
 /// Read every event in journal order. A missing journal file reads as empty; a
-/// missing *workspace* is a host fault and propagates. Blank lines are ignored;
-/// any malformed non-empty line — including a truncated crash tail — is an
+/// missing *workspace* is a host fault and propagates. Blank lines and a torn
+/// final line (`journal.readAll`) are ignored; any malformed COMPLETE line is an
 /// explicit error, never silently skipped.
 pub fn readAll(alloc: std.mem.Allocator, io: std.Io, cwd: []const u8) ![]UseEvent {
     const bytes = (try journal.readAll(alloc, io, cwd, journal_rel)) orelse return alloc.alloc(UseEvent, 0);
@@ -322,9 +323,11 @@ test "malformed journal lines produce an explicit error" {
     try ws.writeFile(io, .{ .sub_path = journal_rel, .data = "{\"v\":2,\"tool_id\":\"x\",\"ok\":true}\n" });
     try std.testing.expectError(error.UnsupportedStatsVersion, readAll(alloc, io, cwd));
 
-    // A truncated crash tail is not silently accepted.
-    try ws.writeFile(io, .{ .sub_path = journal_rel, .data = "{\"v\":1,\"tool_id\":\"x\",\"ok\":tru" });
-    try std.testing.expectError(error.InvalidStatsJournal, readAll(alloc, io, cwd));
+    // A torn final line (interrupted or in-flight append) is skipped, not an error.
+    try ws.writeFile(io, .{ .sub_path = journal_rel, .data = "{\"v\":1,\"tool_id\":\"x\",\"ok\":true}\n{\"v\":1,\"tool_id\":\"x\",\"ok\":tru" });
+    const torn = try readAll(alloc, io, cwd);
+    defer freeEvents(alloc, torn);
+    try std.testing.expectEqual(@as(usize, 1), torn.len);
 }
 
 test "append repairs a truncated crash tail before writing" {

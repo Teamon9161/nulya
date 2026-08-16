@@ -273,7 +273,7 @@ test("/ext's action keys move the store's current pointer, with a confirmation",
   const second_version = /v-[0-9a-zA-Z]+/.exec(built.stdout.toString())?.[0] ?? ""
   expect(second_version).not.toBe(version)
   Bun.spawnSync({ cmd: [ws.bin, "ext", "activate", "lint", second_version], cwd: ws.dir })
-  expect(listExtensions(ws).find((entry) => entry.id === "lint")!.current).toBe(second_version)
+  expect((await listExtensions(ws)).find((entry) => entry.id === "lint")!.current).toBe(second_version)
 
   const setup = await overlayFrame(() => <ExtView ws={ws} header={null} onClose={() => {}} />)
   try {
@@ -286,7 +286,7 @@ test("/ext's action keys move the store's current pointer, with a confirmation",
     expect(asked).toContain(`rollback lint ${version}? y / Esc`)
 
     setup.mockInput.pressKey("y")
-    await until(() => listExtensions(ws).find((entry) => entry.id === "lint")!.current === version, 20_000)
+    await until(async () => (await listExtensions(ws)).find((entry) => entry.id === "lint")!.current === version, 20_000)
     expect(await settle(setup, 4)).toContain("current")
   } finally {
     setup.renderer.destroy()

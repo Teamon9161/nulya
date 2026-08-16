@@ -234,6 +234,18 @@ function sessionCard(words: string[], output: string, glyphs: Glyphs): ToolPrese
       sessionId: printed ?? null,
     })
   }
+  // Reading the store and judging a session are not sub-sessions: nothing is
+  // driven, and one of them is the slow loop's only write (DESIGN §3.3). They
+  // still read as evolution — this is the agent looking at its own history.
+  if (verb === "list") return make({ glyph: glyphs.readKernel, head: "sessions", countsLines: true })
+  if (verb === "outcome") {
+    const args = positionals(words.slice(3), ["--note"])
+    return make({
+      glyph: glyphs.capability,
+      head: `outcome · ${args[1] ?? "?"}${args[0] ? ` · ${args[0]}` : ""}`,
+      sessionId: args[0] && session_id.test(args[0]) ? args[0] : null,
+    })
+  }
   if (verb !== "step" && verb !== "append" && verb !== "events" && verb !== "cancel") return null
   const id = positionals(words.slice(3), ["--file", "--since", "--max-steps"])[0] ?? null
   return make({

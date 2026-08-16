@@ -45,6 +45,16 @@ const tool_result_recording_canceled_output =
 const tool_not_executed_output =
     "not executed because the step was canceled";
 
+// A call inside a reply that ran out of `max_tokens`. The reply — and with it
+// this call's arguments — was cut off mid-generation, so the call is not what
+// the model meant and never runs. The text tells the model what happened and
+// how to get past it; the loop only states facts, it does not retry for it.
+const tool_truncated_output =
+    "not executed: the reply hit its output cap (max_tokens) before this call was " ++
+    "complete, so its arguments were cut off and nothing ran. Reasoning tokens count " ++
+    "against the cap too. Continue from where it stopped, keeping the reply short " ++
+    "enough to finish — fewer words, or one step at a time";
+
 /// Whether a step ran to completion or was canceled mid-flight. Cancellation is
 /// host *execution control*, not a model stop reason (`provider.StopReason`) and
 /// not a ledger event — the ledger stays a factual history either way.
@@ -53,9 +63,12 @@ pub const StepStatus = enum { completed, canceled };
 /// The result of one step. `usage` is always the reliably-known token cost so the
 /// session accumulates it whether the step completed or was canceled. Real faults
 /// (network, protocol, OOM) still surface as errors, never as an outcome.
+/// `stop_reason` is why the MODEL stopped this step (`max_tokens` = the reply was
+/// truncated); orthogonal to `status`, which is why the HOST did.
 pub const StepOutcome = struct {
     usage: provider.Usage = .{},
     status: StepStatus = .completed,
+    stop_reason: provider.StopReason = .end_turn,
 };
 
 /// PURE OBSERVATION of one running step (tui.md §2.2). The kernel reports facts
@@ -84,7 +97,7 @@ pub const StepObserver = struct {
         /// observer can flush whatever it has not yet reported) and how the step
         /// ended. Fired for canceled steps too, including one canceled at its
         /// boundary before the model ran.
-        stepEnd: *const fn (ptr: *anyopaque, events: []const ledger.Event, status: StepStatus) void,
+        stepEnd: *const fn (ptr: *anyopaque, events: []const ledger.Event, outcome: StepOutcome) void,
     };
 
     pub fn modelEvent(self: StepObserver, event: provider.StreamEvent) void {
@@ -99,8 +112,8 @@ pub const StepObserver = struct {
         self.vtable.toolEnd(self.ptr, call, ok);
     }
 
-    pub fn stepEnd(self: StepObserver, events: []const ledger.Event, status: StepStatus) void {
-        self.vtable.stepEnd(self.ptr, events, status);
+    pub fn stepEnd(self: StepObserver, events: []const ledger.Event, outcome: StepOutcome) void {
+        self.vtable.stepEnd(self.ptr, events, outcome);
     }
 };
 
@@ -189,17 +202,31 @@ pub fn runStepWithPrompt(
         else => return err,
     };
     defer turn.deinit(alloc);
+    // A reply cut off by `max_tokens` is not a finished turn: what it said is
+    // fact and is kept, but a call it started is not what the model meant, and
+    // its arguments may be a torn JSON prefix — which, replayed verbatim into a
+    // provider's `input`, would poison every later request of this session.
+    // So on a truncated turn every call is recorded with replayable arguments
+    // (torn ones become `{}`), none is executed, and the batch is closed with a
+    // marker result that tells the model what happened (DESIGN §4).
+    const truncated = turn.stop_reason == .max_tokens;
+    const calls = if (truncated) try replayableCalls(alloc, turn.calls) else turn.calls;
+    defer if (truncated) alloc.free(calls);
     try l.append(.{ .assistant = .{
         .reasoning = turn.reasoning,
         .text = turn.text,
-        .calls = turn.calls,
+        .calls = calls,
         // Recorded only when the provider reported a cost. All-zero means "this
         // provider does not price turns" (the scripted stand-in), which is not
         // the same fact as "this step cost zero" — so it is left off the line
         // entirely, and old ledgers stay byte-identical.
         .usage = if (turn.usage.isZero()) null else turn.usage,
     } });
-    if (turn.calls.len == 0) return .{ .usage = turn.usage }; // model addressed the user; step complete.
+    if (turn.calls.len == 0) return .{ .usage = turn.usage, .stop_reason = turn.stop_reason }; // model addressed the user; step complete.
+    if (truncated) {
+        try appendMarkerBatch(alloc, l, calls, tool_truncated_output);
+        return .{ .usage = turn.usage, .stop_reason = .max_tokens };
+    }
 
     const results = try alloc.alloc(ledger.ToolResultEntry, turn.calls.len);
     var initialized_results: usize = 0;
@@ -292,17 +319,30 @@ pub fn completeInterruptedToolBatch(alloc: std.mem.Allocator, l: *ledger.Ledger)
     if (last != .assistant) return;
     const assistant = last.assistant;
     if (assistant.calls.len == 0) return;
+    try appendMarkerBatch(alloc, l, assistant.calls, interrupted_tool_output);
+}
 
-    const results = try alloc.alloc(ledger.ToolResultEntry, assistant.calls.len);
+/// Close a call batch that never ran with one failed result per call, all
+/// carrying the same static `output` — the batch invariant (DESIGN §4) holds
+/// whether the reason is an interrupted process or a truncated reply.
+fn appendMarkerBatch(alloc: std.mem.Allocator, l: *ledger.Ledger, calls: []const ledger.ToolCall, output: []const u8) !void {
+    const results = try alloc.alloc(ledger.ToolResultEntry, calls.len);
     defer alloc.free(results);
-    for (assistant.calls, 0..) |call, i| {
-        results[i] = .{
-            .call_id = call.id,
-            .ok = false,
-            .output = interrupted_tool_output,
-        };
-    }
+    for (calls, 0..) |call, i| results[i] = canceledResult(call.id, output);
     try l.append(.{ .tool_results = results });
+}
+
+/// The calls of a truncated turn, with any torn `args_json` (not a complete
+/// JSON value) replaced by `{}` so the recorded assistant event stays
+/// replayable to every provider. Borrows the calls' strings; caller frees only
+/// the returned slice.
+fn replayableCalls(alloc: std.mem.Allocator, calls: []const ledger.ToolCall) ![]ledger.ToolCall {
+    const out = try alloc.dupe(ledger.ToolCall, calls);
+    errdefer alloc.free(out);
+    for (out) |*call| {
+        if (!try std.json.validate(alloc, call.args_json)) call.args_json = "{}";
+    }
+    return out;
 }
 
 fn batchExecutionPolicy(tool_snapshot: registry.ToolSetSnapshot, calls: []const ledger.ToolCall) tool.BatchPolicy {
@@ -683,6 +723,9 @@ fn stubSuccess(a: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToo
 const ScriptedCallModel = struct {
     calls: []const [2][]const u8,
     usage: provider.Usage = .{},
+    /// Arguments every call streams; a torn prefix simulates a reply cut mid-call.
+    args: []const u8 = "{}",
+    done: provider.StopReason = .tool_use,
 
     fn name(ptr: *anyopaque) []const u8 {
         _ = ptr;
@@ -704,9 +747,9 @@ const ScriptedCallModel = struct {
         try sink.emit(.{ .usage = self.usage });
         for (self.calls, 0..) |c, i| {
             try sink.emit(.{ .tool_use_start = .{ .index = i, .id = c[0], .name = c[1] } });
-            try sink.emit(.{ .tool_use_input_delta = .{ .index = i, .fragment = "{}" } });
+            try sink.emit(.{ .tool_use_input_delta = .{ .index = i, .fragment = self.args } });
         }
-        try sink.emit(.{ .done = .tool_use });
+        try sink.emit(.{ .done = self.done });
     }
 
     const vtable: provider.Model.VTable = .{
@@ -862,6 +905,56 @@ test "canceling the first executing tool records a complete canceled batch" {
 
     // The second call's executor was never dispatched.
     try std.testing.expect(!record_tool.ran);
+}
+
+test "a reply cut by max_tokens records replayable calls, runs nothing, and closes the batch with a truncation marker" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var record_tool = RecordingTool{};
+    const tools_arr = [_]tool.Tool{
+        .{ .definition = .{ .id = "t.record", .name = "record", .description = "r", .input_schema = "{}" }, .executor = record_tool.executor() },
+    };
+    const tools: registry.ToolSetSnapshot = .{ .tools = &tools_arr };
+
+    // Two calls in the cut reply, both with arguments torn mid-JSON — a prefix
+    // that would 400 forever if replayed raw as a provider `input`.
+    var model_impl = ScriptedCallModel{
+        .calls = &.{ .{ "c1", "record" }, .{ "c2", "record" } },
+        .args = "{\"path\":\"a.t",
+        .done = .max_tokens,
+        .usage = .{ .input_tokens = 7, .output_tokens = 3 },
+    };
+
+    var l = ledger.Ledger.init(alloc);
+    defer l.deinit();
+    try l.append(.{ .user_text = "go" });
+
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+    const outcome = try runStepForTest(alloc, &l, model_impl.handle(), tools, .{
+        .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = "." },
+        .scratch_dir = "/tmp",
+    });
+
+    try std.testing.expectEqual(StepStatus.completed, outcome.status);
+    try std.testing.expectEqual(provider.StopReason.max_tokens, outcome.stop_reason);
+    try std.testing.expectEqual(@as(u64, 7), outcome.usage.input_tokens);
+    try std.testing.expect(!record_tool.ran);
+
+    // user, assistant (calls kept, torn args made replayable), one marker batch.
+    try std.testing.expectEqual(@as(usize, 3), l.len());
+    const calls = l.view()[1].assistant.calls;
+    try std.testing.expectEqual(@as(usize, 2), calls.len);
+    try std.testing.expectEqualStrings("{}", calls[0].args_json);
+    try std.testing.expectEqualStrings("{}", calls[1].args_json);
+    const trs = l.view()[2].tool_results;
+    try std.testing.expectEqual(@as(usize, 2), trs.len);
+    try std.testing.expectEqualStrings("c2", trs[1].call_id);
+    try std.testing.expect(!trs[1].ok);
+    try std.testing.expect(std.mem.indexOf(u8, trs[1].output, "max_tokens") != null);
 }
 
 test "a successful earlier tool is kept when a later tool is canceled" {

@@ -1625,6 +1625,24 @@ test "cli: NULYA_HOME extensions are visible to ext list / skill list / ext run,
         try std.testing.expect(std.mem.indexOf(u8, list.stdout, "user-wide") == null);
     }
 
+    // `ext activate` acts on the root whose copy is IN EFFECT. The user copy's
+    // version is not built there, so activating it without `--user` fails
+    // (with a pointer to where it is) instead of flipping a `current` that no
+    // session would see; `--user` does flip it, and says it is not in effect.
+    {
+        const shadowed = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "activate", "shared", user_shared }, env);
+        defer alloc.free(shadowed.stdout);
+        try std.testing.expectEqual(@as(u8, 1), shadowed.code);
+        try std.testing.expect(std.mem.indexOf(u8, shadowed.stdout, "activate failed") != null);
+        try std.testing.expect(std.mem.indexOf(u8, shadowed.stdout, "--user") != null);
+
+        const forced = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "activate", "--user", "shared", user_shared }, env);
+        defer alloc.free(forced.stdout);
+        try std.testing.expectEqual(@as(u8, 0), forced.code);
+        try std.testing.expect(std.mem.indexOf(u8, forced.stdout, "not in effect") != null);
+        try std.testing.expect(std.mem.indexOf(u8, forced.stdout, ws_shared) != null); // "…shadows it"
+    }
+
     // Shadowing is by ACTIVE copy. `ext deactivate shared` (no --user) acts on
     // the copy in effect — the workspace's — and says which copy takes over;
     // afterwards nothing is shadowed and the user copy is what `skill list`
@@ -2351,6 +2369,20 @@ test "script extension: init(--script) -> build(seal) -> activate -> run -> prom
     // build(seal) — no toolchain needed — then activate.
     const version = try scaffoldAndBuildScript(alloc, io, ws, "greeter", "greet");
     defer alloc.free(version);
+    // Built but not active: `<id>` has nothing to run, `<id>@<version>` runs
+    // exactly that frozen version — the CLI path a `--with greeter@<v>` session
+    // takes (DESIGN §14).
+    {
+        const bare = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", "greeter", "greet", "{}" });
+        defer alloc.free(bare.stdout);
+        try std.testing.expectEqual(@as(u8, 1), bare.code);
+        const pinned_spec = try std.fmt.allocPrint(alloc, "greeter@{s}", .{version});
+        defer alloc.free(pinned_spec);
+        const pinned = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", pinned_spec, "greet", "{}" });
+        defer alloc.free(pinned.stdout);
+        try std.testing.expectEqual(@as(u8, 0), pinned.code);
+        try std.testing.expect(std.mem.indexOf(u8, pinned.stdout, "hello from a Nulya script extension") != null);
+    }
     {
         var ext_root = try ws.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
         defer ext_root.close(io);

@@ -24,21 +24,24 @@ pub const sessions_dir = ".nulya/sessions";
 pub const scratch_dir = ".nulya/scratch";
 
 /// A deterministic, terminating scripted provider — the offline stand-in for a
-/// real model (DESIGN §13). Two modes, selected by `NULYA_SCRIPTED_MODE`:
+/// real model (DESIGN §13). Three modes, selected by `NULYA_SCRIPTED_MODE`:
 ///
 ///   finish (default): make one `shell` call, then end the turn once a tool
 ///                     result is already in the transcript. A turn completes in
 ///                     two steps, so a `session step` reaches an end state.
 ///   loop:             always make one `shell` call and never end the turn, so a
 ///                     `--max-steps` cap is the only thing that stops it.
+///   truncate:         every reply is cut by `max_tokens` mid tool call (a torn
+///                     JSON prefix, then `done: max_tokens`), so the loop's
+///                     truncated-turn path and `run`'s streak stop are testable.
 pub const ScriptedProvider = struct {
     mode: Mode = .finish,
 
-    pub const Mode = enum { finish, loop };
+    pub const Mode = enum { finish, loop, truncate };
 
     pub fn fromEnv(env: *const std.process.Environ.Map) ScriptedProvider {
         const m = env.get("NULYA_SCRIPTED_MODE") orelse "";
-        return .{ .mode = if (std.mem.eql(u8, m, "loop")) .loop else .finish };
+        return .{ .mode = std.meta.stringToEnum(Mode, m) orelse .finish };
     }
 
     pub fn handle(self: *ScriptedProvider) provider.Model {
@@ -65,6 +68,13 @@ pub const ScriptedProvider = struct {
         if (self.mode == .finish and hasToolResult(request.prompt_ir.stable_blocks)) {
             try sink.emit(.{ .text_delta = "done" });
             try sink.emit(.{ .done = .end_turn });
+            return;
+        }
+        if (self.mode == .truncate) {
+            try sink.emit(.{ .text_delta = "Let me probe" });
+            try sink.emit(.{ .tool_use_start = .{ .index = 0, .id = "c1", .name = "shell" } });
+            try sink.emit(.{ .tool_use_input_delta = .{ .index = 0, .fragment = "{\"command\":\"echo hel" } });
+            try sink.emit(.{ .done = .max_tokens });
             return;
         }
 

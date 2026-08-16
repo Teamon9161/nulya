@@ -103,3 +103,72 @@ test("the error line clears when the next step actually starts", async () => {
   state.applyStream({ stream: "run", event: "error", message: "boom" })
   expect(state.snapshot.error).toBe("boom")
 })
+
+/**
+ * Cost accounting (T8). Both mouths report the same step: the stream as it
+ * happens, the ledger once the step is written (DESIGN §3.1 / §14). The ledger
+ * is the one that counts — otherwise a step would be paid for twice, and a
+ * session reopened tomorrow would claim to have cost nothing.
+ */
+test("a step's usage is counted once: the stream's number is provisional, the ledger's is the fact", () => {
+  const state = createSessionState("s-x")
+  state.applyStream({ stream: "model", event: "started" })
+  state.applyStream({
+    stream: "model",
+    event: "usage",
+    input_tokens: 100,
+    output_tokens: 10,
+    cache_read_tokens: 900,
+    cache_write_tokens: 0,
+  })
+  // Live, before the ledger line: the status bar has something to show.
+  expect(state.snapshot.usage.input).toBe(100)
+  expect(state.snapshot.usage.lastPrompt).toBe(1000)
+  expect(state.snapshot.usage.pricedSteps).toBe(0)
+
+  // The same step, now written. The provider's final numbers differ slightly —
+  // whatever the ledger says is what this step cost.
+  state.applyEvent({
+    seq: 1,
+    kind: "assistant",
+    text: "done",
+    calls: [],
+    usage: { input_tokens: 120, output_tokens: 12, cache_read_tokens: 900, cache_write_tokens: 5 },
+  })
+  state.applyStream({ stream: "step", event: "end", status: "completed" })
+  expect(state.snapshot.usage.input).toBe(120)
+  expect(state.snapshot.usage.output).toBe(12)
+  expect(state.snapshot.usage.cacheWrite).toBe(5)
+  expect(state.snapshot.usage.lastPrompt).toBe(1025)
+  expect(state.snapshot.usage.pricedSteps).toBe(1)
+})
+
+test("replaying a session recovers what it cost, without ever watching a step", () => {
+  const state = createSessionState("s-x")
+  state.applyEvents([
+    { seq: 1, kind: "user_text", text: "hi" },
+    {
+      seq: 2,
+      kind: "assistant",
+      text: "one",
+      calls: [],
+      usage: { input_tokens: 50, output_tokens: 5, cache_read_tokens: 0, cache_write_tokens: 200 },
+    },
+    // A step the provider never priced adds nothing — absent is not zero.
+    { seq: 3, kind: "assistant", text: "two", calls: [] },
+    {
+      seq: 4,
+      kind: "assistant",
+      text: "three",
+      calls: [],
+      usage: { input_tokens: 30, output_tokens: 8, cache_read_tokens: 220, cache_write_tokens: 0 },
+    },
+  ])
+  expect(state.snapshot.usage.input).toBe(80)
+  expect(state.snapshot.usage.output).toBe(13)
+  expect(state.snapshot.usage.pricedSteps).toBe(2)
+  // The window's fullness is the LAST prompt, not the sum of all of them.
+  expect(state.snapshot.usage.lastPrompt).toBe(250)
+  // Nothing was watched here: steps and priced steps are different facts.
+  expect(state.snapshot.steps).toBe(0)
+})

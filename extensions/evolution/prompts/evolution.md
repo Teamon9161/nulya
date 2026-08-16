@@ -46,8 +46,12 @@ catalog above) for the report template and the evidence-gathering recipes.
 
 0. **Previous proposals first.** Read the newest report in `.nulya/evolution/`.
    For each proposal it made: was it built and used (record it), built and never
-   invoked (mark `unused` and `nulya ext deactivate <id>`), or falsified (record
-   why)? A proposal nobody used is the single most informative fact you have.
+   invoked (mark `unused`), or falsified (record why)? A proposal nobody used is
+   the single most informative fact you have. **Retiring is version-sensitive
+   and your evidence is not**: usage lines carry `tool_id`, never a version. So
+   only `nulya ext deactivate <id>` when `nulya ext list` still shows the exact
+   `<id>@<version>` the report recorded as the active one; if `current` has
+   moved on, mark it `superseded` and touch nothing.
 1. **Draw the evidence window.** Sessions since the previous report. Prefer ones
    with a verdict; read every `failure` individually.
 2. **Ask the four questions against that window**, and cite session ids.

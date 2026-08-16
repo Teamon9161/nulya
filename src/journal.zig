@@ -5,10 +5,18 @@
 //! other's schema — what they genuinely share is the FILE discipline:
 //!
 //!   * one complete JSON line per event, appended at the end, never rewritten;
+//!   * a journal is written by MANY processes (every `session step`, every
+//!     `ext run`, every `session outcome`), so an append holds a short exclusive
+//!     lease on the sidecar `<journal>.lock` while it measures, repairs and
+//!     writes — two appends can never land on the same offset. Readers take no
+//!     lock: they only ever see whole lines plus, at worst, one torn tail;
 //!   * an append interrupted by cancel or crash can leave a partial final line,
 //!     so the next append first drops that tail back to the last `\n` — a
 //!     truncated event can never be glued onto a later one into a permanently
-//!     malformed middle line;
+//!     malformed middle line — and a READ ignores that torn tail as well, so a
+//!     crash between two appends never blocks `session list` until someone
+//!     writes again. A malformed COMPLETE line is still the consumer's error:
+//!     the tail rule forgives an interrupted write, not a bad journal;
 //!   * a missing journal file reads as "no facts yet", while a missing workspace
 //!     (or any other host fault) propagates.
 //!
@@ -23,11 +31,20 @@ pub const journal_dir = ".nulya";
 /// Append `line` (which must already end with `\n`) as a complete line to the
 /// journal at `file_rel` under `cwd`. Creates `.nulya` and the file when
 /// missing; opens an existing journal without truncating and writes at its end,
-/// after repairing any partial trailing line.
+/// after repairing any partial trailing line. Holds the journal's writer lease
+/// (`<file_rel>.lock`, exclusive, blocking — the critical section is a stat and
+/// one write) for the duration, so concurrent appenders serialize instead of
+/// overwriting each other.
 pub fn appendLine(io: std.Io, cwd: []const u8, file_rel: []const u8, line: []const u8) !void {
     var workspace = try openWorkspace(io, cwd);
     defer workspace.close(io);
     try workspace.createDirPath(io, journal_dir);
+
+    var lock_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const lock_rel = try std.fmt.bufPrint(&lock_buf, "{s}.lock", .{file_rel});
+    var lease = try workspace.createFile(io, lock_rel, .{ .truncate = false, .read = true, .lock = .exclusive });
+    defer lease.close(io);
+
     var file = try workspace.createFile(io, file_rel, .{ .truncate = false, .read = true });
     defer file.close(io);
     const size = (try file.stat(io)).size;
@@ -36,16 +53,20 @@ pub fn appendLine(io: std.Io, cwd: []const u8, file_rel: []const u8, line: []con
     try file.writePositionalAll(io, line, end);
 }
 
-/// Read the whole journal at `file_rel` under `cwd`. A missing journal file
-/// returns null ("no facts yet"); a missing workspace is a host fault and
-/// propagates. Caller owns the bytes.
+/// Read the whole journal at `file_rel` under `cwd`, minus a torn final line
+/// (bytes after the last `\n` — an append that was interrupted, or is in flight
+/// right now). A missing journal file returns null ("no facts yet"); a missing
+/// workspace is a host fault and propagates. Caller owns the bytes.
 pub fn readAll(alloc: std.mem.Allocator, io: std.Io, cwd: []const u8, file_rel: []const u8) !?[]u8 {
     var workspace = try openWorkspace(io, cwd);
     defer workspace.close(io);
-    return workspace.readFileAlloc(io, file_rel, alloc, .unlimited) catch |err| switch (err) {
-        error.FileNotFound => null,
-        else => err,
+    const bytes = workspace.readFileAlloc(io, file_rel, alloc, .unlimited) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
     };
+    errdefer alloc.free(bytes);
+    const end = if (std.mem.lastIndexOfScalar(u8, bytes, '\n')) |i| i + 1 else 0;
+    return if (end == bytes.len) bytes else try alloc.realloc(bytes, end);
 }
 
 fn openWorkspace(io: std.Io, cwd: []const u8) !std.Io.Dir {
@@ -108,6 +129,8 @@ test "appendLine creates the journal, appends in order, and readAll returns ever
     const bytes = (try readAll(alloc, io, cwd, test_rel)).?;
     defer alloc.free(bytes);
     try std.testing.expectEqualStrings("{\"a\":1}\n{\"a\":2}\n", bytes);
+    // The lease is a sidecar next to the journal, never inside it.
+    try tmp.dir.access(io, test_rel ++ ".lock", .{});
 }
 
 test "appendLine drops a truncated crash tail instead of gluing onto it" {
@@ -134,6 +157,67 @@ test "appendLine drops a truncated crash tail instead of gluing onto it" {
     const after = (try readAll(alloc, io, cwd, test_rel)).?;
     defer alloc.free(after);
     try std.testing.expectEqualStrings("{\"a\":4}\n", after);
+}
+
+test "readAll ignores a torn final line but returns a malformed complete one for the consumer to judge" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmpCwd(alloc, io, tmp);
+    defer alloc.free(cwd);
+
+    var ws = try std.Io.Dir.openDirAbsolute(io, cwd, .{});
+    defer ws.close(io);
+    try ws.createDirPath(io, journal_dir);
+
+    try ws.writeFile(io, .{ .sub_path = test_rel, .data = "{\"a\":1}\n{\"a\":2" });
+    const torn = (try readAll(alloc, io, cwd, test_rel)).?;
+    defer alloc.free(torn);
+    try std.testing.expectEqualStrings("{\"a\":1}\n", torn);
+
+    // Nothing complete at all reads as an empty journal, not a missing one.
+    try ws.writeFile(io, .{ .sub_path = test_rel, .data = "{\"a\":1" });
+    const only_torn = (try readAll(alloc, io, cwd, test_rel)).?;
+    defer alloc.free(only_torn);
+    try std.testing.expectEqualStrings("", only_torn);
+
+    // A complete but malformed line is not the tail rule's business.
+    try ws.writeFile(io, .{ .sub_path = test_rel, .data = "{\"a\":1}\nnot json\n" });
+    const bad = (try readAll(alloc, io, cwd, test_rel)).?;
+    defer alloc.free(bad);
+    try std.testing.expectEqualStrings("{\"a\":1}\nnot json\n", bad);
+}
+
+test "appendLine takes the journal's writer lease: a held lease blocks a second appender until released" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmpCwd(alloc, io, tmp);
+    defer alloc.free(cwd);
+
+    try appendLine(io, cwd, test_rel, "{\"a\":1}\n");
+
+    // Hold the lease from outside, exactly as another process's append would.
+    var ws = try std.Io.Dir.openDirAbsolute(io, cwd, .{});
+    defer ws.close(io);
+    var held = try ws.createFile(io, test_rel ++ ".lock", .{ .truncate = false, .read = true, .lock = .exclusive });
+
+    var fut = try io.concurrent(appendLine, .{ io, cwd, test_rel, "{\"a\":2}\n" });
+    // While the lease is held, the appender is parked: the journal is unchanged.
+    io.sleep(.fromMilliseconds(50), .awake) catch {};
+    const before = (try readAll(alloc, io, cwd, test_rel)).?;
+    defer alloc.free(before);
+    try std.testing.expectEqualStrings("{\"a\":1}\n", before);
+
+    held.close(io);
+    try fut.await(io);
+    const after = (try readAll(alloc, io, cwd, test_rel)).?;
+    defer alloc.free(after);
+    try std.testing.expectEqualStrings("{\"a\":1}\n{\"a\":2}\n", after);
 }
 
 test "a missing workspace is a host fault, never an empty journal" {

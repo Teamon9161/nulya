@@ -8,14 +8,15 @@ import { afterAll, beforeAll, expect, test } from "bun:test"
 import {
   discardIfUntouched,
   listExtensions,
-  listSessions,
   probeWriterLease,
   readToolUsage,
   sessionExists,
+  storeRoots,
   type LeaseState,
 } from "../src/nulya/files.ts"
-import { sessionAppend, sessionNew, sessionStep } from "../src/nulya/cli.ts"
+import { sessionAppend, sessionList, sessionNew, sessionStep } from "../src/nulya/cli.ts"
 import { scripted_env, scripted_loop_env, tempWorkspace, until, type TempWorkspace } from "./support.ts"
+import { join } from "node:path"
 
 let ws: TempWorkspace
 
@@ -34,28 +35,6 @@ async function drainStep(id: string, env: Record<string, string> = scripted_env,
   }
   await step.exited
 }
-
-test("listSessions reads the store: newest first, with header, count and title", async () => {
-  const first = await sessionNew(ws, { profile: "scripted" })
-  await sessionAppend(ws, first, "the first question")
-  await drainStep(first)
-  const second = await sessionNew(ws, { profile: "scripted" })
-
-  const sessions = await listSessions(ws)
-  const ids = sessions.map((entry) => entry.id)
-  expect(ids).toContain(first)
-  expect(ids).toContain(second)
-
-  const one = sessions.find((entry) => entry.id === first)!
-  expect(one.header?.model_identity.provider).toBe("scripted")
-  expect(one.events).toBeGreaterThan(0)
-  expect(one.title).toBe("the first question")
-  // A session nobody has stepped has a header and no events.
-  expect(sessions.find((entry) => entry.id === second)!.events).toBe(0)
-
-  const mtimes = sessions.map((entry) => entry.mtime)
-  expect([...mtimes].sort((a, b) => b - a)).toEqual(mtimes)
-}, 60_000)
 
 /**
  * The lease probe (tui.md §5.6). On Windows the kernel's exclusive lock is a
@@ -98,7 +77,7 @@ test("listExtensions reads the version line, the current pointer and the manifes
   expect(version).toBeDefined()
   expect(run(["ext", "activate", "lint", version!]).exitCode).toBe(0)
 
-  const extensions = listExtensions(ws)
+  const extensions = await listExtensions(ws)
   const lint = extensions.find((entry) => entry.id === "lint")!
   expect(lint.current).toBe(version!)
   expect(lint.versions.map((entry) => entry.version)).toContain(version!)
@@ -106,6 +85,12 @@ test("listExtensions reads the version line, the current pointer and the manifes
   // compiler-independent (DESIGN §7.4).
   expect(lint.kind).toBe("script")
   expect(lint.tools.length).toBeGreaterThan(0)
+  // Which root it came from is the kernel's answer, not ours (DESIGN §7.2), and
+  // the only copy here is the workspace one, so nothing shadows anything.
+  expect(lint.root).toBe(".nulya/extensions")
+  expect(lint.shadowed).toBe(false)
+  // The workspace root is always first in the search order.
+  expect((await storeRoots(ws))[0]).toBe(join(ws.dir, ".nulya", "extensions"))
 }, 120_000)
 
 test("readToolUsage projects the journal without ranking it", async () => {
@@ -133,7 +118,7 @@ test("discardIfUntouched removes only a session that recorded nothing and holds 
   expect(sessionExists(ws, empty)).toBe(true)
   expect(discardIfUntouched(ws, empty)).toBe(true)
   expect(sessionExists(ws, empty)).toBe(false)
-  expect((await listSessions(ws)).map((entry) => entry.id)).not.toContain(empty)
+  expect((await sessionList(ws)).map((entry) => entry.id)).not.toContain(empty)
   // Twice is a no-op, not an error.
   expect(discardIfUntouched(ws, empty)).toBe(false)
 

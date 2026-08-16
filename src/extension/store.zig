@@ -17,9 +17,18 @@
 //!         package/skills/...    # frozen declared skill directories
 //!         bin/<entry>           # only when the manifest declares runtime
 //!     current              # text file holding "v-<hash>"
+//!     .lock                # writer lease: held while build / activate / deactivate mutate <id>/
 //!
 //! `current` is a plain file, not a symlink: symlinks need privilege on Windows
 //! and buy nothing here.
+//!
+//! A root — the user store above all — is shared by every workspace on the
+//! machine, so two processes can build or activate the same id at once. Every
+//! mutation of `<id>/` (a build writing `versions/<v>`, an activate rewriting
+//! `current` through `.current.tmp`, a deactivate) runs under `<id>/.lock`, an
+//! exclusive advisory lease taken blocking for the mutation's duration — the
+//! same primitive as the session writer's `<id>.lock`. Readers take nothing:
+//! `current` flips atomically and a version directory is validated by its seal.
 
 const std = @import("std");
 const manifest = @import("manifest.zig");
@@ -32,6 +41,7 @@ pub const version_prefix = integrity.version_prefix;
 /// names no others.
 pub const workspace_root_rel = ".nulya/extensions";
 const current_file = "current";
+const lock_file = ".lock";
 const versions_dir = "versions";
 const exe_suffix = integrity.exe_suffix;
 
@@ -109,11 +119,25 @@ pub const Store = struct {
         return true;
     }
 
+    /// Take `<id>/.lock`, the writer lease every mutation of `<id>/` runs under
+    /// (build, activate, rollback, deactivate). Blocking: the critical sections
+    /// are short and a second writer wants the result, not a refusal. Creates
+    /// `<id>/` when missing. Closing the returned handle releases the lease.
+    pub fn lease(self: Store, alloc: std.mem.Allocator, id: []const u8) !std.Io.File {
+        if (!manifest.isValidId(id)) return error.InvalidId;
+        try self.root.createDirPath(self.io, id);
+        const sub = try std.fs.path.join(alloc, &.{ id, lock_file });
+        defer alloc.free(sub);
+        return self.root.createFile(self.io, sub, .{ .truncate = false, .read = true, .lock = .exclusive });
+    }
+
     /// Point `current` at `version`. Refuses to activate a version that was never
     /// fully built. The write is atomic (temp file + rename in the same directory),
     /// so a crash mid-switch leaves the previous `current` intact.
     pub fn activate(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8) !void {
         try validateBuiltVersion(self, alloc, id, version);
+        var held = try self.lease(alloc, id);
+        defer held.close(self.io);
 
         const tmp_sub = try std.fs.path.join(alloc, &.{ id, ".current.tmp" });
         defer alloc.free(tmp_sub);
@@ -131,7 +155,8 @@ pub const Store = struct {
     }
 
     pub fn deactivate(self: Store, alloc: std.mem.Allocator, id: []const u8) !void {
-        if (!manifest.isValidId(id)) return error.InvalidId;
+        var held = try self.lease(alloc, id);
+        defer held.close(self.io);
         const sub = try std.fs.path.join(alloc, &.{ id, current_file });
         defer alloc.free(sub);
         self.root.deleteFile(self.io, sub) catch |err| switch (err) {
@@ -468,6 +493,30 @@ test "activate and rollback move the current pointer atomically" {
         defer alloc.free(active);
         try std.testing.expectEqualStrings(first, active);
     }
+}
+
+test "the id's writer lease serializes mutation: a held lease parks activate until released" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const store = Store.init(io, tmp.dir);
+
+    const version = try writeBuiltVersion(alloc, io, tmp.dir, "demo", "one");
+    defer alloc.free(version);
+
+    var held = try store.lease(alloc, "demo");
+    var fut = try io.concurrent(Store.activate, .{ store, alloc, "demo", version });
+    io.sleep(.fromMilliseconds(50), .awake) catch {};
+    try std.testing.expect((try store.activeVersion(alloc, "demo")) == null); // still parked
+
+    held.close(io);
+    try fut.await(io);
+    const active = (try store.activeVersion(alloc, "demo")).?;
+    defer alloc.free(active);
+    try std.testing.expectEqualStrings(version, active);
 }
 
 test "activate refuses an unbuilt version" {

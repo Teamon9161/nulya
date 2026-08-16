@@ -9,6 +9,19 @@ export interface ParentRef {
   seq: number
 }
 
+/**
+ * What one step cost (`ledger.Usage`, DESIGN §3.1). The kernel records it on the
+ * assistant event and reports the same four numbers on the stream; a step whose
+ * provider said nothing carries none at all, which is why every reader must
+ * treat it as absent rather than zero.
+ */
+export interface Usage {
+  input_tokens: number
+  output_tokens: number
+  cache_read_tokens: number
+  cache_write_tokens: number
+}
+
 export interface PinnedExtensionRef {
   id: string
   version: string
@@ -67,6 +80,8 @@ export type LedgerEvent =
       reasoning?: string
       text: string
       calls: ToolCall[]
+      /** What this step cost. Absent — not zero — when the provider reported nothing. */
+      usage?: Usage
     }
   | { seq: number; origin?: string; kind: "tool_results"; results: ToolResultEntry[] }
   | { seq: number; origin?: string; kind: "capability_note"; id: string; version: string; text: string }

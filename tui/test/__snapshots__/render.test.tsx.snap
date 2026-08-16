@@ -183,7 +183,7 @@ exports[`a sub-session names the session it drives 1`] = `
 exports[`the composition card shows what this session froze 1`] = `
 "                                                                            
 ▎ session · 2026-08-16 14:02 · frozen composition                           
-▎ tools shell edit ⚡lint_zig  skills zig-style                             
+▎ tools shell edit ⚡lint_zig  skills zig-style prompts 1                   
 ▎ model anthropic/claude-sonnet-5 · api.anthropic.com · ext lint@v-3f2a91   
 ▎ parent s-1786800870313-bf37ef:41                                          
                                                                             

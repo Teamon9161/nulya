@@ -73,7 +73,8 @@ test("completions: only the first word, and an exact name still explains itself"
   expect(completions("")).toEqual([])
   expect(completions("hello")).toEqual([])
   expect(completions("/s").map((c) => c.name)).toEqual(["/sessions", "/settings", "/step"])
-  expect(completions("/mo").map((c) => c.name)).toEqual(["/model"])
+  expect(completions("/mo").map((c) => c.name)).toEqual(["/model", "/mode"])
+  expect(completions("/model").map((c) => c.name)).toEqual(["/model"])
   expect(completions("/nope")).toEqual([])
   // Past the first space it is arguments, not a command being chosen.
   expect(completions("/effort ").map((c) => c.name)).toEqual(["/effort"])

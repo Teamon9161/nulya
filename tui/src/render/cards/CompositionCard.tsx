@@ -50,6 +50,10 @@ export function CompositionCard(props: { header: SessionHeader | null; contribut
     ),
   )
 
+  const prompts = createMemo(() =>
+    (props.contributions ?? []).reduce((count, entry) => count + entry.systemPrompts.length, 0),
+  )
+
   const versions = createMemo(() =>
     (props.header?.composition.active ?? []).map((entry) => `${entry.id}@${entry.version}`),
   )
@@ -79,6 +83,13 @@ export function CompositionCard(props: { header: SessionHeader | null; contribut
         <Show when={skills().length > 0}>
           <text fg={style.theme.dim}> skills </text>
           <text fg={style.theme.fg}>{skills().join(" ")}</text>
+        </Show>
+        {/* A `--with` package is often nothing but a system prompt (a mode, an
+            identity): counting them is how the card says this session is
+            wearing something the next one will not. */}
+        <Show when={prompts() > 0}>
+          <text fg={style.theme.dim}> prompts </text>
+          <text fg={style.theme.accent.evolve}>{prompts()}</text>
         </Show>
       </Row>
       <Row bar={style.glyphs.bar} accent={style.theme.accent.evolve}>

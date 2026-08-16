@@ -124,7 +124,7 @@ Sessions examined: <n> (<id>, <id>, …), of which <n> carry a verdict.
 Evidence: .nulya/sessions/, tool-usage.jsonl, session-outcomes.jsonl.
 
 ## Prior proposals
-- <id or title> — adopted | unused (deactivated) | falsified: <one line of evidence>.
+- <id@version or title> — adopted | unused (deactivated) | superseded (current moved on; left alone) | falsified: <one line of evidence>.
 (or: none — first pass)
 
 ## Null results
@@ -134,7 +134,7 @@ Evidence: .nulya/sessions/, tool-usage.jsonl, session-outcomes.jsonl.
 ## Proposals
 - **<name>** (kind: notes | skill entry | script tool | tool v2 | driver)
   - Evidence: <session ids — at least three>.
-  - Smallest form: <what exactly was written or scaffolded>.
+  - Smallest form: <what exactly was written or scaffolded; for an extension, its `<id>@<version>` from `ext build`>.
   - Activated: yes/no — <why>.
   - Falsifier: retire if <N sessions with no invocation | no outcome improvement by …>.
 (or: none this pass)

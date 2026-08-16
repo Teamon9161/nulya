@@ -20,8 +20,9 @@
 //! would be a constant; when a driver starts writing them automatically it adds
 //! `source`, and a v1 line without one still reads as "judged by a person".
 //!
-//! The file discipline (append one complete line, repair a torn crash tail, a
-//! missing file means "no verdicts yet") is shared with `tool_stats.zig` through
+//! The file discipline (append one complete line under the journal's writer
+//! lease, repair a torn crash tail on write and skip it on read, a missing file
+//! means "no verdicts yet") is shared with `tool_stats.zig` through
 //! `journal.zig`; the schema below is this module's alone.
 
 const std = @import("std");
@@ -34,8 +35,8 @@ pub const journal_rel = journal.journal_dir ++ std.fs.path.sep_str ++ "session-o
 pub const journal_schema_version: u8 = 1;
 
 pub const Error = error{
-    /// A non-empty journal line is not a valid outcome (malformed JSON, missing
-    /// field, wrong type, unknown verdict, or a truncated crash tail).
+    /// A complete journal line is not a valid outcome (malformed JSON, missing
+    /// field, wrong type, unknown verdict).
     InvalidOutcomeJournal,
     /// A journal line carries a schema version this build does not understand.
     UnsupportedOutcomeVersion,
@@ -82,8 +83,8 @@ pub fn append(
 }
 
 /// Read every judgment in journal order. A missing journal reads as empty; a
-/// missing *workspace* is a host fault and propagates. Blank lines are ignored;
-/// any malformed non-empty line — including a truncated crash tail — is an
+/// missing *workspace* is a host fault and propagates. Blank lines and a torn
+/// final line (`journal.readAll`) are ignored; any malformed COMPLETE line is an
 /// explicit error, never silently skipped.
 pub fn readAll(alloc: std.mem.Allocator, io: std.Io, cwd: []const u8) ![]Outcome {
     const bytes = (try journal.readAll(alloc, io, cwd, journal_rel)) orelse return alloc.alloc(Outcome, 0);
@@ -271,9 +272,13 @@ test "malformed lines are explicit errors; unknown fields and blank lines are to
     try ws.writeFile(io, .{ .sub_path = journal_rel, .data = "{\"v\":2,\"session\":\"s-1\",\"verdict\":\"success\",\"at\":\"\"}\n" });
     try std.testing.expectError(error.UnsupportedOutcomeVersion, readAll(alloc, io, cwd));
 
-    // A truncated crash tail is not silently accepted by the reader.
-    try ws.writeFile(io, .{ .sub_path = journal_rel, .data = "{\"v\":1,\"session\":\"s-1\",\"verdict\":\"succ" });
-    try std.testing.expectError(error.InvalidOutcomeJournal, readAll(alloc, io, cwd));
+    // A torn final line (an interrupted or in-flight append) is skipped by the
+    // reader — `session list` must not go dark until the next append repairs it.
+    try ws.writeFile(io, .{ .sub_path = journal_rel, .data = "{\"v\":1,\"session\":\"s-0\",\"verdict\":\"success\",\"at\":\"t\"}\n{\"v\":1,\"session\":\"s-1\",\"verdict\":\"succ" });
+    const torn = try readAll(alloc, io, cwd);
+    defer freeAll(alloc, torn);
+    try std.testing.expectEqual(@as(usize, 1), torn.len);
+    try std.testing.expectEqualStrings("s-0", torn[0].session);
 
     // A newer writer's extra column, and blank lines, read cleanly.
     try ws.writeFile(io, .{ .sub_path = journal_rel, .data = "\n{\"v\":1,\"session\":\"s-1\",\"verdict\":\"success\",\"at\":\"t\",\"source\":\"driver\"}\n  \n" });

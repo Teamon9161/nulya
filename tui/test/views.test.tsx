@@ -17,7 +17,7 @@ import { FoldContext, createFoldStore } from "../src/state/folds.ts"
 import { createSessionState } from "../src/state/session.ts"
 import { default_settings, loadSettings } from "../src/state/settings.ts"
 import { createKeymap } from "../src/keymap.ts"
-import { sessionNew } from "../src/nulya/cli.ts"
+import { sessionList, sessionNew } from "../src/nulya/cli.ts"
 import { scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
 
 const style: Style = createStyle(default_settings, {})
@@ -45,7 +45,7 @@ async function overlay(node: () => JSX.Element, theme = style, width = 100, heig
 }
 
 test("/help lists the bindings that are actually in force", async () => {
-  const setup = await overlay(() => <HelpView keys={createKeymap(default_settings)} onClose={() => {}} />)
+  const setup = await overlay(() => <HelpView keys={createKeymap(default_settings)} onClose={() => {}} />, style, 100, 60)
   try {
     // Eight passes, not four: a busy machine captured a half-painted frame once
     // (T1's `settle()` note) and a snapshot that flaky is worse than none.
@@ -54,10 +54,15 @@ test("/help lists the bindings that are actually in force", async () => {
     expect(frame).toContain("escape")
     expect(frame).toContain("ctrl+o")
     expect(frame).toContain("f3")
-    expect(frame).toContain("/step")
     // Nothing was overridden, so nothing claims to be.
     expect(frame).not.toContain("(tui.toml)")
     expect(frame).toMatchSnapshot()
+
+    // Every command has a line here — that is what makes this page the one
+    // place a command cannot exist without being discoverable (`commands.ts`).
+    expect(frame).toContain("/step")
+    expect(frame).toContain("/outcome <verdict> [note]")
+    expect(frame).toContain("/quit")
 
     const rebound = createStyle({ ...default_settings, keys: { fold: "ctrl+b" } }, {})
     const second = await overlay(() => <HelpView keys={createKeymap(rebound.settings)} onClose={() => {}} />)
@@ -124,23 +129,33 @@ test("/settings shows the effective values and which file they came from", async
   }
 }, 60_000)
 
-test("/usage separates this attachment's tokens from the durable tool journal", async () => {
+test("/usage separates this session's tokens from the durable tool journal", async () => {
   const state = createSessionState("s-usage")
+  // A whole step, both mouths: the stream as it happened, then the ledger line
+  // that priced it. What the view shows is the ledger's number, once.
   state.applyStream({
     stream: "model",
     event: "usage",
-    input_tokens: 1200,
+    input_tokens: 1150,
     output_tokens: 80,
     cache_read_tokens: 1080,
     cache_write_tokens: 0,
+  })
+  state.applyEvent({
+    seq: 1,
+    kind: "assistant",
+    text: "done",
+    calls: [],
+    usage: { input_tokens: 1200, output_tokens: 80, cache_read_tokens: 1080, cache_write_tokens: 0 },
   })
   state.applyStream({ stream: "step", event: "end", status: "completed" })
 
   const setup = await overlay(() => <UsageView ws={ws} snapshot={state.snapshot} onClose={() => {}} />)
   try {
     const frame = await settle(setup, 4)
-    expect(frame).toContain("tokens since attach")
-    expect(frame).toContain("steps watched")
+    expect(frame).toContain("this session's tokens")
+    expect(frame).toContain("steps priced")
+    expect(frame).toContain("1 · 1 watched here")
     expect(frame).toContain("1200")
     expect(frame).toContain("90% of input")
     // The journal the kernel keeps across sessions; the step above ran `shell`.
@@ -150,6 +165,35 @@ test("/usage separates this attachment's tokens from the durable tool journal", 
     setup.renderer.destroy()
   }
 }, 60_000)
+
+test("/outcome records how this session went, without touching the session file", async () => {
+  const id = await sessionNew(ws, { profile: "scripted" })
+  const state = createSessionState(id)
+  const setup = await testRender(
+    () => <App ws={ws} id={id} state={state} style={style} driver={{ env: scripted_env }} />,
+    { width: 90, height: 24 },
+  )
+  try {
+    await settle(setup, 4)
+    // A word that is not a verdict explains itself and records nothing.
+    await setup.mockInput.typeText("/outcome sort-of")
+    setup.mockInput.pressEnter()
+    expect(await settle(setup, 4)).toContain("/outcome <success|partial|failure>")
+    expect((await sessionList(ws)).find((row) => row.id === id)!.outcome).toBeNull()
+
+    await setup.mockInput.typeText("/outcome partial the shell call worked")
+    setup.mockInput.pressEnter()
+    await until(async () => (await sessionList(ws)).find((row) => row.id === id)?.outcome !== null, 20_000)
+    const judged = (await sessionList(ws)).find((row) => row.id === id)!
+    expect(judged.outcome?.verdict).toBe("partial")
+    expect(judged.outcome?.note).toBe("the shell call worked")
+    // A judgment is not a turn: the ledger did not grow (DESIGN §3.3).
+    expect(judged.events).toBe(0)
+    expect(await settle(setup, 3)).toContain("partial")
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 120_000)
 
 test("F1 opens help and Esc closes it", async () => {
   const id = await sessionNew(ws, { profile: "scripted" })
@@ -171,7 +215,7 @@ test("F1 opens help and Esc closes it", async () => {
     // The slash command is the same door.
     await setup.mockInput.typeText("/usage")
     setup.mockInput.pressEnter()
-    expect(await settle(setup, 4)).toContain("tokens since attach")
+    expect(await settle(setup, 4)).toContain("this session's tokens")
   } finally {
     setup.renderer.destroy()
   }

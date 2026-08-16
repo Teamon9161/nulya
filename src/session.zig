@@ -22,6 +22,13 @@ const store = @import("extension/store.zig");
 /// (DESIGN §4, §14). A driver can lower the budget per call, never raise it.
 pub const max_steps_ceiling: usize = 50;
 
+/// Consecutive `max_tokens` steps before `run` stops on its own. One truncated
+/// reply is ordinary — the model wrote long, the marker result tells it so, and
+/// the retry usually fits. Two in a row means the cap is genuinely too small for
+/// what is being asked, which no retry fixes and every retry bills a full prefix
+/// for; the driver (and the person) has to hear about it.
+pub const max_truncated_streak: usize = 2;
+
 /// Where a durable session's file and its cross-process siblings (`<id>.inbox/`,
 /// `<id>.cancel`) live. The `workspace` handle is borrowed — the caller keeps it
 /// open for the session's lifetime; `session_path` is owned and relative to
@@ -64,6 +71,7 @@ pub const AgentSession = struct {
     /// cross-process capability-note inbox each step (DESIGN §3, §5.3).
     durable: ?DurableRef = null,
     total_usage: provider.Usage = .{},
+    last_stop_reason: provider.StopReason = .end_turn,
 
     pub const Options = struct {
         model: provider.Model,
@@ -207,7 +215,7 @@ pub const AgentSession = struct {
         // legal (tui.md §2.2), so it is where an observer gets a read-only look
         // at the events this step produced. Pure observation: it cannot change
         // the outcome, and a step without an observer runs identically.
-        if (self.step_ctx.observer) |obs| obs.stepEnd(self.l.view(), outcome.status);
+        if (self.step_ctx.observer) |obs| obs.stepEnd(self.l.view(), outcome);
         return outcome;
     }
 
@@ -232,6 +240,7 @@ pub const AgentSession = struct {
         const before = self.l.len();
         const outcome = try loop.runStepWithPrompt(self.alloc, &self.l, self.model, &prompt_ir, self.composition.tools, self.step_ctx, self.model_options);
         accumulate(&self.total_usage, outcome.usage);
+        self.last_stop_reason = outcome.stop_reason;
         if (outcome.status == .completed) {
             // Tool usage stats are auxiliary durable metadata, not conversation
             // truth: a recording failure never rewinds the ledger or turns a
@@ -252,14 +261,19 @@ pub const AgentSession = struct {
     /// and is enforced here in the kernel, not by a caller's loop, so a driver
     /// that wants "just keep going" still cannot run a session past it (DESIGN
     /// §4, PLAN §3.6). A canceled step (host cancel or a consumed cancel marker)
-    /// stops the run. Returns the number of steps taken.
+    /// stops the run, and so do `max_truncated_streak` truncated replies in a
+    /// row. Returns the number of steps taken; `lastStopReason` says how the
+    /// final step's reply ended.
     pub fn run(self: *AgentSession, max_steps: usize) !usize {
         const budget = @min(max_steps, max_steps_ceiling);
         var taken: usize = 0;
+        var truncated: usize = 0;
         while (taken < budget) {
             const outcome = try self.step();
             taken += 1;
             if (outcome.status == .canceled) break;
+            truncated = if (outcome.stop_reason == .max_tokens) truncated + 1 else 0;
+            if (truncated >= max_truncated_streak) break;
             if (self.lastAssistantDone()) break;
         }
         return taken;
@@ -267,6 +281,13 @@ pub const AgentSession = struct {
 
     pub fn usage(self: *const AgentSession) provider.Usage {
         return self.total_usage;
+    }
+
+    /// Why the model stopped in the most recent step (`end_turn` before any
+    /// step has run). `max_tokens` means the last reply was truncated — the
+    /// driver's cue that "the assistant is done" is not what happened.
+    pub fn lastStopReason(self: *const AgentSession) provider.StopReason {
+        return self.last_stop_reason;
     }
 
     pub fn lastAssistantDone(self: *const AgentSession) bool {

@@ -79,6 +79,21 @@ test("session step takes the id from its arguments", () => {
   expect(card.sessionId).toBe("s-1786815442964-8462dd")
 })
 
+test("the slow loop's two verbs are not sub-sessions", () => {
+  // Reading the store drives nothing…
+  const list = shell("nulya session list --json", '{"sessions":[]}\n[exit 0]')
+  expect(list.kind).toBe("evolve")
+  expect(list.head).toBe("sessions")
+  expect(list.sessionId).toBeNull()
+
+  // …and judging one is a write to the outcome journal, beside the ledger.
+  const judged = shell("nulya session outcome s-1786815442964-8462dd partial --note tried")
+  expect(judged.head).toBe("outcome · partial · s-1786815442964-8462dd")
+  expect(judged.glyph).toBe(glyphs.capability)
+  // The card names a session, so Enter can still open it.
+  expect(judged.sessionId).toBe("s-1786815442964-8462dd")
+})
+
 test("an unreadable nulya command falls back to a shell card instead of failing", () => {
   const card = shell("nulya toolchain zig version")
   expect(card.kind).toBe("shell")

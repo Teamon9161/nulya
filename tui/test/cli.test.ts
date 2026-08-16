@@ -4,7 +4,18 @@
  * protocol moves, these fail.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import { sessionAppend, sessionCancel, sessionEvents, sessionNew, sessionStep, type StepLine } from "../src/nulya/cli.ts"
+import {
+  extBuild,
+  extList,
+  sessionAppend,
+  sessionCancel,
+  sessionEvents,
+  sessionList,
+  sessionNew,
+  sessionOutcome,
+  sessionStep,
+  type StepLine,
+} from "../src/nulya/cli.ts"
 import { createSessionState } from "../src/state/session.ts"
 import { projection, scripted_env, scripted_loop_env, tempWorkspace, type TempWorkspace } from "./support.ts"
 
@@ -122,6 +133,84 @@ describe("session step --stream", () => {
     const tail = await sessionEvents(ws, id, 2)
     expect(all.length).toBe(4)
     expect(tail.map((event) => event.seq)).toEqual([3, 4])
+  }, 60_000)
+})
+
+/**
+ * The surfaces M5 handed the front end (tui.md §9, T8). All three are read or
+ * written through the kernel rather than by walking `.nulya/` — the point being
+ * that composition, cost and verdict have exactly one implementation.
+ */
+describe("the slow loop", () => {
+  test("session list projects the store, and outcome is a judgment beside it", async () => {
+    const id = await sessionNew(ws, { profile: "scripted" })
+    await sessionAppend(ws, id, "the first question")
+    const step = sessionStep(ws, id, { env: scripted_env })
+    for await (const _ of step.lines) {
+      // drain
+    }
+    await step.exited
+    const untouchedId = await sessionNew(ws, { profile: "scripted" })
+
+    const before = await sessionList(ws)
+    const one = before.find((entry) => entry.id === id)!
+    expect(one.provider).toBe("scripted")
+    expect(one.events).toBeGreaterThan(0)
+    expect(one.first_user_text).toBe("the first question")
+    expect(one.created.endsWith("Z")).toBe(true)
+    // No verdict is "not judged" — NOT failure (DESIGN §3.3).
+    expect(one.outcome).toBeNull()
+    // A session nobody stepped is listed too, with nothing in it.
+    expect(before.find((entry) => entry.id === untouchedId)!.events).toBe(0)
+    // Newest first, by the header's `created`.
+    const created = before.map((entry) => entry.created)
+    expect([...created].sort((a, b) => b.localeCompare(a))).toEqual(created)
+
+    await sessionOutcome(ws, id, "partial", "the shell call worked, the rest did not")
+    const after = (await sessionList(ws)).find((entry) => entry.id === id)!
+    expect(after.outcome?.verdict).toBe("partial")
+    expect(after.outcome?.note).toBe("the shell call worked, the rest did not")
+
+    // The journal keeps every line and the last one stands.
+    await sessionOutcome(ws, id, "success")
+    expect((await sessionList(ws)).find((entry) => entry.id === id)!.outcome?.verdict).toBe("success")
+  }, 120_000)
+
+  test("--with brings a built version into one session's composition, activating nothing", async () => {
+    // A data extension: no runtime, so no toolchain is involved (DESIGN §7.4).
+    const draft = `${ws.dir}/mode-draft`
+    await Bun.write(
+      `${draft}/extension.json`,
+      JSON.stringify({
+        schema: "nulya.extension/v2",
+        id: "reviewer",
+        contributes: { system_prompts: ["prompts/reviewer.md"] },
+        permissions: { fs: [], network: [], process: [] },
+      }),
+    )
+    await Bun.write(`${draft}/prompts/reviewer.md`, "You are reviewing, not writing.\n")
+
+    const version = await extBuild(ws, "mode-draft")
+    expect(version.startsWith("v-")).toBe(true)
+    // Built lands in the store under the manifest's id, and stays inactive:
+    // `--with` is membership in one composition, not a store pointer (physics #5).
+    const listed = (await extList(ws)).find((entry) => entry.id === "reviewer")!
+    expect(listed.current).toBeNull()
+    expect(listed.shadowed).toBe(false)
+
+    const id = await sessionNew(ws, { profile: "scripted", with: [`reviewer@${version}`] })
+    const entry = (await sessionList(ws)).find((row) => row.id === id)!
+    expect(entry.composition.active).toContain(`reviewer@${version}`)
+
+    // A session started without it is not carrying it — that is the whole point.
+    const plain = await sessionNew(ws, { profile: "scripted" })
+    expect((await sessionList(ws)).find((row) => row.id === plain)!.composition.active).not.toContain(
+      `reviewer@${version}`,
+    )
+  }, 120_000)
+
+  test("a version that was never built is refused, not silently dropped", async () => {
+    await expect(sessionNew(ws, { profile: "scripted", with: ["reviewer@v-nope"] })).rejects.toThrow()
   }, 60_000)
 })
 

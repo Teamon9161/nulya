@@ -18,8 +18,9 @@ import { OverlayContext, createOverlayStore, type OverlayKind } from "../state/o
 import { createTabStore, type SessionTab } from "../state/tabs.ts"
 import { loadTuiState, rememberModel, type ModelPick } from "../state/tui_state.ts"
 import { describeTool } from "../render/registry.ts"
-import { sessionNew, type ModelView as ModelParams } from "../nulya/cli.ts"
+import { isVerdict, sessionNew, sessionOutcome, verdicts, type ModelView as ModelParams } from "../nulya/cli.ts"
 import { compactPrompt, openCompacted, summaryFrom, summaryTurn } from "../compact.ts"
+import { buildEvolution, formatWithRef, parseWithRef, withOptions, type WithRef } from "../evolve.ts"
 import { createKeymap, matches } from "../keymap.ts"
 import type { AttachOptions } from "../state/attach.ts"
 import type { SessionState, TranscriptItem } from "../state/session.ts"
@@ -82,6 +83,11 @@ export function App(props: AppProps) {
 
   const [notice, setNotice] = createSignal<string | null>(null)
   const [guide, setGuide] = createSignal<string | null>(props.guide ?? null)
+  /**
+   * Sessions this process will not ask about again on the way out: either a
+   * verdict was recorded, or the question was already put once and declined.
+   */
+  const [settled, setSettled] = createSignal<readonly string[]>([])
   const [spinnerTick, setSpinnerTick] = createSignal(0)
   const [ctrlCArmed, setCtrlCArmed] = createSignal(false)
   const [allOpen, setAllOpen] = createSignal(false)
@@ -234,18 +240,77 @@ export function App(props: AppProps) {
   /**
    * Start a session on `pick` and remember it as the last one. `pick` undefined
    * means "the last pick, else the kernel's default" — what a bare `/new` does.
+   * `bring` adds `--with` members: composition membership for this session only,
+   * which is how `/evolve` and `/mode` put a package in front of the model.
    */
-  const newSession = async (pick?: ModelPick, remember = pick !== undefined) => {
+  const newSession = async (pick?: ModelPick, remember = pick !== undefined, bring?: WithRef) => {
     const chosen = pick ?? loadTuiState(props.statePath).model
     try {
-      const id = await sessionNew(props.ws, chosen ? { profile: chosen.profile, model: chosen.model } : {})
+      const id = await sessionNew(props.ws, {
+        ...(chosen ? { profile: chosen.profile, model: chosen.model } : {}),
+        ...(bring ? withOptions(bring) : {}),
+      })
       const current = tab()
       if (untouched(current)) tabs.replace(current.id, id, { created: true, effort: chosen?.effort })
       else tabs.open(id, { created: true, effort: chosen?.effort })
       closeOverlay()
       setGuide(null)
-      setNotice(chosen ? `${id} · ${chosen.profile}${chosen.model ? ` · ${chosen.model}` : ""}` : `opened ${id}`)
+      const what = bring ? ` · with ${formatWithRef(bring)}` : ""
+      setNotice(
+        chosen ? `${id} · ${chosen.profile}${chosen.model ? ` · ${chosen.model}` : ""}${what}` : `opened ${id}${what}`,
+      )
       if (remember && chosen) rememberModel(chosen, props.statePath)
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  /**
+   * `/evolve` — build the evolution package and start a session wearing it
+   * (`evolve.ts`). A fresh session, not this one: composition freezes at
+   * `session new` (physics #2), so there is no way to hand the model a new
+   * system prompt mid-conversation, and pretending otherwise would be the one
+   * lie this front end must never tell.
+   */
+  const evolveNow = async () => {
+    setNotice("building the evolution package…")
+    try {
+      const ref = await buildEvolution(props.ws)
+      await newSession(undefined, false, ref)
+    } catch (error) {
+      // Almost always "there is no extensions/evolution here": the package ships
+      // with nulya's source, and this is somebody else's workspace.
+      setNotice(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  /** `/mode <id>[@<version>]` — the same move with any package that contributes a prompt. */
+  const modeNow = (word: string | undefined) => {
+    const ref = word ? parseWithRef(word) : null
+    if (!ref) {
+      setNotice("/mode <id>[@<version>] · a built extension; no version means the store's current")
+      return
+    }
+    void newSession(undefined, false, ref)
+  }
+
+  /**
+   * `/outcome <verdict> [note]` — how this session turned out (DESIGN §3.3).
+   *
+   * It goes to the outcome journal, never to the ledger: a judgment ABOUT a
+   * session is not a turn IN it, and the kernel takes no lease for it — so this
+   * works on a session whose step is running right now, and on one somebody else
+   * is driving.
+   */
+  const judge = async (word: string | undefined, note: string) => {
+    if (!word || !isVerdict(word)) {
+      setNotice(`/outcome <${verdicts.join("|")}> [note] · nothing recorded is "not judged", not failure`)
+      return
+    }
+    try {
+      await sessionOutcome(props.ws, tab().id, word, note)
+      setSettled([...settled(), tab().id])
+      setNotice(`${tab().id}: ${word}${note ? ` · ${note}` : ""}`)
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error))
     }
@@ -304,7 +369,22 @@ export function App(props: AppProps) {
     setNotice(`effort ${level ?? "auto"} · takes hold at the next step`)
   }
 
-  const quit = () => {
+  /**
+   * `ask` is only for the deliberate `/quit`: a session that did work and was
+   * never judged leaves a hole in the slow loop — no verdict means `unknown`,
+   * which is not failure but is not knowledge either (DESIGN §3.3) — and the
+   * judgment costs a second while the work is still in mind. Asked once per
+   * session and never in the way: type `/quit` again and it lets go. Ctrl+C is
+   * the escape hatch and never asks anything.
+   */
+  const quit = (ask = false) => {
+    const here = tab()
+    const worked = here.state.snapshot.items.some((item) => item.seq !== null)
+    if (ask && worked && !settled().includes(here.id)) {
+      setSettled([...settled(), here.id])
+      setNotice(`how did this session go? /outcome ${verdicts.join("|")} [note] · or /quit again`)
+      return
+    }
     tabs.disposeAll()
     renderer.destroy()
     process.exit(0)
@@ -314,8 +394,22 @@ export function App(props: AppProps) {
     if (!raw.startsWith("/")) return false
     const words = raw.trim().split(/\s+/)
     const command = words[0]
+    /** Everything after the command word, verbatim — a note keeps its spacing. */
+    const rest = raw.slice(raw.indexOf(command!) + command!.length).trim()
     if (command === "/quit") {
-      quit()
+      quit(true)
+      return true
+    }
+    if (command === "/outcome") {
+      void judge(words[1], rest.slice(words[1]?.length ?? 0).trim())
+      return true
+    }
+    if (command === "/evolve") {
+      void evolveNow()
+      return true
+    }
+    if (command === "/mode") {
+      modeNow(words[1])
       return true
     }
     if (command === "/cancel") {
@@ -327,7 +421,7 @@ export function App(props: AppProps) {
       return true
     }
     if (command === "/compact") {
-      void compactNow(raw.slice(command.length).trim())
+      void compactNow(rest)
       return true
     }
     if (command === "/fold") {

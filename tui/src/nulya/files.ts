@@ -18,8 +18,9 @@ import {
   statSync,
   unlinkSync,
 } from "node:fs"
-import { join } from "node:path"
-import { parseEventLine, parseHeaderLine, type SessionHeader } from "./ledger.ts"
+import { isAbsolute, join } from "node:path"
+import { parseHeaderLine, type SessionHeader } from "./ledger.ts"
+import { extList } from "./cli.ts"
 import type { Workspace } from "./bin.ts"
 
 export const sessions_dir = ".nulya/sessions"
@@ -49,6 +50,31 @@ export async function readHeader(ws: Workspace, id: string): Promise<SessionHead
 export const extensions_dir = ".nulya/extensions"
 
 /**
+ * The store roots, in the kernel's search order, as directories on this disk.
+ *
+ * Order and membership are `store.Roots` — workspace, then user, then whatever
+ * `extensions.paths` adds (DESIGN §7.2) — and the kernel already prints them,
+ * one per `ext list` line. Reading them off that output is how the TUI avoids
+ * a second implementation of "where do extensions live", which would drift the
+ * moment a config layer moved.
+ */
+export async function storeRoots(ws: Workspace): Promise<string[]> {
+  const roots: string[] = []
+  try {
+    for (const entry of await extList(ws)) {
+      const dir = isAbsolute(entry.root) ? entry.root : join(ws.dir, entry.root)
+      if (!roots.includes(dir)) roots.push(dir)
+    }
+  } catch {
+    // No binary, no store, a build too old to list roots: the workspace root is
+    // where extensions have always been, and it is still the first one searched.
+  }
+  const workspace = join(ws.dir, extensions_dir)
+  if (!roots.includes(workspace)) roots.unshift(workspace)
+  return roots
+}
+
+/**
  * What one frozen extension version contributes (DESIGN §7.2). Only the parts
  * the transcript shows; the manifest is the schema's single truth, so nothing
  * here ever runs a binary to ask what it has.
@@ -58,34 +84,58 @@ export interface Contributions {
   version: string
   tools: string[]
   skills: string[]
+  /**
+   * Files whose text becomes a system block for any session carrying this
+   * version. A `--with` package is usually nothing BUT these (DESIGN §7.1) —
+   * a mode, an identity — so a view that only counted tools and skills would
+   * show the most deliberate part of a composition as empty.
+   */
+  systemPrompts: string[]
 }
 
 /**
- * Read `<id>/versions/<version>/extension.json` from the store. The version is
- * the one the session FROZE (header `composition.active`), not whatever
- * `current` points at now — a mid-session `activate` moves `current` and must
- * not change what this session says it is running (DESIGN §7.5).
+ * Read `<id>/versions/<version>/extension.json` from the first root that holds
+ * it. The version is the one the session FROZE (header `composition.active`),
+ * not whatever `current` points at now — a mid-session `activate` moves
+ * `current` and must not change what this session says it is running (DESIGN
+ * §7.5). Which root the bytes come from does not matter: a version id is a hash
+ * of its own contents, so two roots holding one version hold the same thing.
  */
-export async function readContributions(ws: Workspace, id: string, version: string): Promise<Contributions> {
-  const empty: Contributions = { id, version, tools: [], skills: [] }
-  const path = join(ws.dir, extensions_dir, id, "versions", version, "extension.json")
-  if (!existsSync(path)) return empty
-  try {
-    const value = JSON.parse(await Bun.file(path).text()) as Record<string, unknown>
-    const contributes = (value["contributes"] ?? {}) as Record<string, unknown>
-    const tools = Array.isArray(contributes["tools"])
+export async function readContributions(
+  ws: Workspace,
+  id: string,
+  version: string,
+  roots?: readonly string[],
+): Promise<Contributions> {
+  const empty: Contributions = { id, version, tools: [], skills: [], systemPrompts: [] }
+  const search = roots ?? (await storeRoots(ws))
+  for (const root of search) {
+    const path = join(root, id, "versions", version, "extension.json")
+    if (!existsSync(path)) continue
+    try {
+      const value = JSON.parse(await Bun.file(path).text()) as Record<string, unknown>
+      return { id, version, ...contributionsOf(value) }
+    } catch {
+      // A store this build cannot parse is not a reason to refuse to draw the
+      // session; the header alone already names the frozen versions.
+      return empty
+    }
+  }
+  return empty
+}
+
+function contributionsOf(
+  manifest: Record<string, unknown> | null,
+): Pick<Contributions, "tools" | "skills" | "systemPrompts"> {
+  const contributes = (manifest?.["contributes"] ?? {}) as Record<string, unknown>
+  return {
+    tools: Array.isArray(contributes["tools"])
       ? (contributes["tools"] as Array<Record<string, unknown>>)
           .map((tool) => (typeof tool?.["name"] === "string" ? (tool["name"] as string) : null))
           .filter((name): name is string => name !== null)
-      : []
-    const skills = Array.isArray(contributes["skills"])
-      ? (contributes["skills"] as unknown[]).filter((skill): skill is string => typeof skill === "string")
-      : []
-    return { id, version, tools, skills }
-  } catch {
-    // A store this build cannot parse is not a reason to refuse to draw the
-    // session; the header alone already names the frozen versions.
-    return empty
+      : [],
+    skills: stringList(contributes["skills"]),
+    systemPrompts: stringList(contributes["system_prompts"]),
   }
 }
 
@@ -93,7 +143,10 @@ export async function readActiveContributions(
   ws: Workspace,
   active: readonly { id: string; version: string }[],
 ): Promise<Contributions[]> {
-  return Promise.all(active.map((entry) => readContributions(ws, entry.id, entry.version)))
+  if (active.length === 0) return []
+  // One root lookup for the whole composition, not one per member.
+  const roots = await storeRoots(ws)
+  return Promise.all(active.map((entry) => readContributions(ws, entry.id, entry.version, roots)))
 }
 
 // --- the writer lease -------------------------------------------------------
@@ -136,119 +189,6 @@ export function probeWriterLease(ws: Workspace, id: string): LeaseState {
   } finally {
     closeSync(fd)
   }
-}
-
-// --- the session store ------------------------------------------------------
-
-export interface SessionEntry {
-  id: string
-  /** Last write to the session FILE — only `session step` writes it. */
-  mtime: number
-  header: SessionHeader | null
-  /** Number of ledger events (lines after the header). */
-  events: number
-  /** First `user_text`, truncated — the closest thing a session has to a title. */
-  title: string
-  lease: LeaseState
-}
-
-function firstUserText(lines: string[]): string {
-  for (const line of lines) {
-    const event = parseEventLine(line)
-    if (event && event.kind === "user_text") {
-      const text = (event as { text?: unknown }).text
-      if (typeof text === "string") return text.split("\n", 1)[0] ?? ""
-    }
-  }
-  return ""
-}
-
-/**
- * What one scan of a session file learned, plus how far into it we got.
- *
- * A ledger is append-only (physics #1), so bytes already read can never change:
- * a rescan only has to look at what was appended since. That is what keeps
- * `/sessions` cheap when it re-reads the store every second and a half to
- * refresh the live markers (tui.md §11, T3 known issue).
- */
-interface SessionScan {
-  /** Byte offset just past the last COMPLETE line consumed. */
-  consumed: number
-  header: SessionHeader | null
-  events: number
-  title: string
-}
-
-const scans = new Map<string, SessionScan>()
-
-/** Fold newly appended bytes into a scan. Exported for the test, not for use. */
-export function extendScan(scan: SessionScan, chunk: string): SessionScan {
-  const end = chunk.lastIndexOf("\n")
-  if (end < 0) return scan
-  const complete = chunk.slice(0, end)
-  const lines = complete.split("\n").filter((line) => line.trim().length > 0)
-  // Only the very first line of the file is the header (DESIGN §3.4); every
-  // later chunk is events all the way down.
-  let at = 0
-  if (scan.consumed === 0 && lines.length > 0) {
-    scan.header = parseHeaderLine(lines[0]!)
-    at = 1
-  }
-  scan.events += lines.length - at
-  if (scan.title.length === 0) scan.title = firstUserText(lines.slice(at))
-  scan.consumed += Buffer.byteLength(complete, "utf8") + 1
-  return scan
-}
-
-async function scanSession(path: string, size: number): Promise<SessionScan> {
-  const cached = scans.get(path)
-  const scan: SessionScan =
-    cached && cached.consumed <= size ? cached : { consumed: 0, header: null, events: 0, title: "" }
-  if (scan.consumed < size) {
-    try {
-      extendScan(scan, await Bun.file(path).slice(scan.consumed, size).text())
-    } catch {
-      // A session being written right now can still be listed; it just has no
-      // detail yet, and the next refresh picks up where this one stopped.
-    }
-  }
-  scans.set(path, scan)
-  return scan
-}
-
-/**
- * Every durable session in the workspace, newest first. Reads the files
- * directly: `session events` skips the header and would cost a process per
- * session, and the file IS the wire format (DESIGN §3.4).
- */
-export async function listSessions(ws: Workspace): Promise<SessionEntry[]> {
-  const dir = join(ws.dir, sessions_dir)
-  if (!existsSync(dir)) return []
-  const entries: SessionEntry[] = []
-  for (const name of readdirSync(dir)) {
-    if (!name.endsWith(".jsonl")) continue
-    const id = name.slice(0, -".jsonl".length)
-    const path = join(dir, name)
-    let mtime = 0
-    let size = 0
-    try {
-      const stat = statSync(path)
-      mtime = stat.mtimeMs
-      size = stat.size
-    } catch {
-      continue
-    }
-    const scan = await scanSession(path, size)
-    entries.push({
-      id,
-      mtime,
-      header: scan.header,
-      events: scan.events,
-      title: scan.title,
-      lease: probeWriterLease(ws, id),
-    })
-  }
-  return entries.sort((a, b) => b.mtime - a.mtime)
 }
 
 // --- un-creating an unused session ------------------------------------------
@@ -328,7 +268,6 @@ export function discardIfUntouched(ws: Workspace, id: string): boolean {
   } catch {
     // Non-empty after all, or held open; leaving an empty directory is fine.
   }
-  scans.delete(path)
   return true
 }
 
@@ -350,7 +289,12 @@ export interface ExtensionEntry {
   kind: ImplementationKind
   tools: string[]
   skills: string[]
+  systemPrompts: string[]
   permissions: { fs: string[]; network: string[]; process: string[] }
+  /** Which store root holds this copy (DESIGN §7.2). */
+  root: string
+  /** An earlier root has the same id active: this copy is never the one that runs. */
+  shadowed: boolean
 }
 
 function readManifest(path: string): Record<string, unknown> | null {
@@ -370,9 +314,8 @@ function stringList(value: unknown): string[] {
 
 function manifestFacts(manifest: Record<string, unknown> | null): Pick<
   ExtensionEntry,
-  "kind" | "tools" | "skills" | "permissions"
+  "kind" | "tools" | "skills" | "systemPrompts" | "permissions"
 > {
-  const contributes = (manifest?.["contributes"] ?? {}) as Record<string, unknown>
   const runtime = manifest?.["runtime"] as Record<string, unknown> | undefined
   const entry = typeof runtime?.["entry"] === "string" ? (runtime["entry"] as string) : null
   const permissions = (manifest?.["permissions"] ?? {}) as Record<string, unknown>
@@ -380,12 +323,7 @@ function manifestFacts(manifest: Record<string, unknown> | null): Pick<
     // `bin/` means the kernel compiles it, anything else is frozen as-is; no
     // runtime at all is a pure skill/prompt package (DESIGN §7.1).
     kind: entry === null ? "data" : entry.startsWith("bin/") ? "compiled" : "script",
-    tools: Array.isArray(contributes["tools"])
-      ? (contributes["tools"] as Array<Record<string, unknown>>)
-          .map((tool) => (typeof tool?.["name"] === "string" ? (tool["name"] as string) : null))
-          .filter((name): name is string => name !== null)
-      : [],
-    skills: stringList(contributes["skills"]),
+    ...contributionsOf(manifest),
     permissions: {
       fs: stringList(permissions["fs"]),
       network: stringList(permissions["network"]),
@@ -395,30 +333,23 @@ function manifestFacts(manifest: Record<string, unknown> | null): Pick<
 }
 
 /**
- * The whole extension store: id, `current`, the immutable version line, and what
- * the current version contributes. Versions are content-addressed and never
- * disappear (physics #5), so the timeline is the extension's history.
+ * Every extension directory in every store root: id, `current`, the immutable
+ * version line, and what the current version contributes. Versions are
+ * content-addressed and never disappear (physics #5), so the timeline is the
+ * extension's history.
+ *
+ * The set of directories and the shadowing come from `ext list` — root order is
+ * kernel policy and "first active holder wins" is its consequence — and the
+ * detail of each one is read from the root the kernel named. An id can appear
+ * twice (a user-level copy behind a workspace one); the second is marked
+ * `shadowed`, because a stale copy that is silently omitted is exactly how it
+ * becomes a mystery.
  */
-export function listExtensions(ws: Workspace): ExtensionEntry[] {
-  const dir = join(ws.dir, extensions_dir)
-  if (!existsSync(dir)) return []
+export async function listExtensions(ws: Workspace): Promise<ExtensionEntry[]> {
   const out: ExtensionEntry[] = []
-  for (const id of readdirSync(dir)) {
-    const home = join(dir, id)
-    try {
-      if (!statSync(home).isDirectory()) continue
-    } catch {
-      continue
-    }
-    let current: string | null = null
-    const currentPath = join(home, "current")
-    if (existsSync(currentPath)) {
-      try {
-        current = readFileSync(currentPath, "utf8").trim() || null
-      } catch {
-        current = null
-      }
-    }
+  for (const entry of await extList(ws)) {
+    const root = isAbsolute(entry.root) ? entry.root : join(ws.dir, entry.root)
+    const home = join(root, entry.id)
     const versions: ExtensionVersion[] = []
     const versionsDir = join(home, "versions")
     if (existsSync(versionsDir)) {
@@ -432,13 +363,27 @@ export function listExtensions(ws: Workspace): ExtensionEntry[] {
       }
     }
     versions.sort((a, b) => a.mtime - b.mtime)
-    // The manifest of the CURRENT version if there is one, else the draft: both
-    // are the schema's single truth, never the binary (DESIGN §7.2).
+    // The manifest of the CURRENT version, else the newest build, else the
+    // draft — all three are the schema's single truth, never the binary (DESIGN
+    // §7.2). The middle one matters: a package meant to be worn with `--with`
+    // rather than activated has no `current` for its whole life, and describing
+    // it as empty would hide exactly the packages M5 made possible.
+    const newest = versions.length > 0 ? versions[versions.length - 1]!.version : null
     const manifest =
-      (current ? readManifest(join(versionsDir, current, "extension.json")) : null) ??
+      (entry.current ? readManifest(join(versionsDir, entry.current, "extension.json")) : null) ??
+      (newest ? readManifest(join(versionsDir, newest, "extension.json")) : null) ??
       readManifest(join(home, "extension.json"))
-    out.push({ id, current, versions, ...manifestFacts(manifest) })
+    out.push({
+      id: entry.id,
+      current: entry.current,
+      versions,
+      root: entry.root,
+      shadowed: entry.shadowed,
+      ...manifestFacts(manifest),
+    })
   }
+  // Alphabetical for the eye; the sort is stable, so a shadowed copy still sits
+  // under the root that wins it.
   return out.sort((a, b) => a.id.localeCompare(b.id))
 }
 

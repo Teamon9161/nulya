@@ -439,7 +439,7 @@ fn isInside(dir: []const u8, path: []const u8) bool {
 
 fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (args.len < 1) {
-        try printErr(io, "usage: nulya ext run <id> [tool] <json-args> | --arg k=v ...\n");
+        try printErr(io, "usage: nulya ext run <id>[@<version>] [tool] <json-args> | --arg k=v ...\n");
         return 1;
     }
 
@@ -458,13 +458,18 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
         }
     }
     if (positional.items.len == 0) {
-        try printErr(io, "usage: nulya ext run <id> [tool] <json-args> | --arg k=v ...\n");
+        try printErr(io, "usage: nulya ext run <id>[@<version>] [tool] <json-args> | --arg k=v ...\n");
         return 1;
     }
-    const id = positional.items[0];
+    // `<id>` runs the version in effect; `<id>@<version>` runs exactly that
+    // built version, active or not — how a session invokes a tool it composed
+    // with `--with <id>@<version>` (DESIGN §14), and how anything else names a
+    // frozen version without touching `current`.
+    const with_ref = withRef(positional.items[0]);
+    const id = with_ref.id;
     const use_args = pairs.items.len > 0;
     if (!use_args and positional.items.len < 2) {
-        try printErr(io, "usage: nulya ext run <id> [tool] <json-args> | --arg k=v ...\n");
+        try printErr(io, "usage: nulya ext run <id>[@<version>] [tool] <json-args> | --arg k=v ...\n");
         return 1;
     }
     for (pairs.items) |p| {
@@ -476,11 +481,18 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     var cwd_real: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try cwdRealPath(io, &cwd_real);
 
-    // Whichever root holds an active version of this id first (DESIGN §7.2).
+    // Whichever root holds the version — the first active copy of the id, or
+    // the first copy of the pinned version (DESIGN §7.2).
     var search = try RootSearch.open(alloc, io, cwd_path);
     defer search.deinit(alloc);
-    const found = (try search.roots.firstActive(alloc, id)) orelse {
-        try printOut(alloc, io, "extension '{s}' has no active version; run `nulya ext build` then `nulya ext activate`\n", .{id});
+    const found: store.Roots.ActiveVersion = if (with_ref.version) |v| .{
+        .root = search.roots.firstWithVersion(alloc, id, v) orelse {
+            try printOut(alloc, io, "no store root holds {s}@{s}; see `nulya ext list`\n", .{ id, v });
+            return 1;
+        },
+        .version = try alloc.dupe(u8, v),
+    } else (try search.roots.firstActive(alloc, id)) orelse {
+        try printOut(alloc, io, "extension '{s}' has no active version; run `nulya ext build` then `nulya ext activate`, or name a built version as {s}@<version>\n", .{ id, id });
         return 1;
     };
     const active = found.version;
@@ -489,17 +501,17 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     const st = search.roots.store(found.root);
 
     if (!st.versionExists(alloc, id, active)) {
-        try printOut(alloc, io, "active version for extension '{s}' failed integrity validation\n", .{id});
+        try printOut(alloc, io, "version {s}@{s} failed integrity validation\n", .{ id, active });
         return 1;
     }
 
-    // The active version's frozen manifest is the runtime truth. The source-tree
-    // manifest may already have changed while `current` still points at an older
-    // immutable version.
+    // The frozen manifest of the version being run is the runtime truth. The
+    // source-tree manifest may already have changed while `current` still
+    // points at an older immutable version.
     const manifest_rel = try st.versionManifestPath(alloc, id, active);
     defer alloc.free(manifest_rel);
     const manifest_bytes = ext_root.readFileAlloc(io, manifest_rel, alloc, .limited(1 << 20)) catch {
-        try printOut(alloc, io, "active version for extension '{s}' is incomplete\n", .{id});
+        try printOut(alloc, io, "version {s}@{s} is incomplete\n", .{ id, active });
         return 1;
     };
     defer alloc.free(manifest_bytes);
@@ -642,28 +654,52 @@ fn extActivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8, m
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try cwdRealPath(io, &cwd_buf);
-    var ext_root = (try openTargetRoot(alloc, io, cwd_path, id, version, flags.user)) orelse {
+    const target = (try targetRootSpec(alloc, io, cwd_path, id, version, flags.user)) orelse {
         try printOut(alloc, io, "no store root holds {s}@{s} (or no home for --user); see `nulya ext list`\n", .{ id, version });
         return 1;
     };
+    defer alloc.free(target);
+    var ext_root = try store.openOrCreateRoot(io, cwd_path, target);
     defer ext_root.close(io);
     const st = store.Store.init(io, ext_root);
     (switch (mode) {
         .activate => st.activate(alloc, id, version),
         .rollback => st.rollback(alloc, id, version),
     }) catch |err| {
-        try printOut(alloc, io, "{s} failed: {s}\n", .{ @tagName(mode), @errorName(err) });
+        try printOut(alloc, io, "{s} failed: {s} ({s}@{s} in {s})\n", .{ @tagName(mode), @errorName(err), id, version, target });
+        if (err == error.VersionNotFound) {
+            // The version exists, just not in the root whose copy is in effect
+            // — say so, or "but I built it" is the next question.
+            var search = try RootSearch.open(alloc, io, cwd_path);
+            defer search.deinit(alloc);
+            if (search.roots.firstWithVersion(alloc, id, version)) |i| {
+                try printOut(alloc, io, "note: {s}@{s} is built in {s}, which {s} shadows; activate a version built in {s}, or `--user` to act on the user store\n", .{ id, version, search.roots.entries[i].spec, target, target });
+            }
+        }
         return 1;
     };
 
-    // If this CLI runs inside a live session (NULYA_SESSION names its file,
-    // relative to the workspace cwd), deposit a capability note into that
-    // session's inbox so the session announces the newly-active version at its
-    // next step boundary (DESIGN §3, §5.3). Best-effort: a note-deposit failure
-    // never fails the activation the model just performed.
-    depositSessionNote(alloc, io, ext_root, id, version) catch {};
+    // What is IN EFFECT now (`Roots.firstActive`, DESIGN §7.2) — not merely
+    // what this root's `current` says: an earlier root's active copy still wins.
+    // Only a version that is actually in effect gets announced to a live session
+    // (NULYA_SESSION names its file) by depositing a capability note into its
+    // inbox for the next step boundary (DESIGN §3, §5.3). Best-effort: a
+    // note-deposit failure never fails the activation the model just performed.
+    var search = try RootSearch.open(alloc, io, cwd_path);
+    defer search.deinit(alloc);
+    const effective = try search.roots.firstActive(alloc, id);
+    defer if (effective) |e| alloc.free(e.version);
+    const shadowed_by: ?store.Roots.ActiveVersion = blk: {
+        const e = effective orelse break :blk null;
+        if (std.mem.eql(u8, e.version, version) and std.mem.eql(u8, search.roots.entries[e.root].spec, target)) break :blk null;
+        break :blk e;
+    };
+    if (shadowed_by == null) depositSessionNote(alloc, io, ext_root, id, version) catch {};
 
-    try printOut(alloc, io, "{s}: current -> {s}\n", .{ id, version });
+    try printOut(alloc, io, "{s}: current -> {s} in {s}\n", .{ id, version, target });
+    if (shadowed_by) |s| {
+        try printOut(alloc, io, "note: not in effect — {s}@{s} in {s} shadows it\n", .{ id, s.version, search.roots.entries[s.root].spec });
+    }
     return 0;
 }
 
@@ -679,37 +715,29 @@ fn depositSessionNote(alloc: std.mem.Allocator, io: std.Io, ext_root: std.Io.Dir
     try notes.depositActiveNote(alloc, io, std.Io.Dir.cwd(), session_path, ext_root, id, version);
 }
 
-/// The root an `activate` / `rollback` / `deactivate` acts on. `--user` names
-/// the user store outright. Otherwise: with a `version`, the first root that
-/// actually holds that built version; without one (`deactivate`), the root whose
-/// `current` for `id` is the one in effect (`Roots.firstActive`, DESIGN §7.2) —
-/// so the operation lands on the copy a session would use, never on a bare
-/// directory that shadows nothing. Null means there is nowhere to act (and, for
-/// `--user`, no home directory).
-fn openTargetRoot(
+/// The root spec an `activate` / `rollback` / `deactivate` acts on. `--user`
+/// names the user store outright. Otherwise the root whose copy of `id` is IN
+/// EFFECT (`Roots.firstActive`, DESIGN §7.2): the operation lands on what a
+/// session would use — an activate there takes effect, an activate anywhere
+/// else would succeed and change nothing. Only when no root has an active copy
+/// does a `version` pick the first root that holds it built. Null means there
+/// is nowhere to act (and, for `--user`, no home directory). Caller owns it.
+fn targetRootSpec(
     alloc: std.mem.Allocator,
     io: std.Io,
     cwd_path: []const u8,
     id: []const u8,
     version: ?[]const u8,
     user: bool,
-) !?std.Io.Dir {
-    if (user) {
-        const spec = (try writeRootSpec(alloc, true)) orelse return null;
-        defer alloc.free(spec);
-        return try store.openOrCreateRoot(io, cwd_path, spec);
-    }
+) !?[]u8 {
+    if (user) return writeRootSpec(alloc, true);
     var search = try RootSearch.open(alloc, io, cwd_path);
     defer search.deinit(alloc);
-    const index = if (version) |v|
-        search.roots.firstWithVersion(alloc, id, v) orelse return null
-    else blk: {
-        const active = (try search.roots.firstActive(alloc, id)) orelse return null;
+    const index = if (try search.roots.firstActive(alloc, id)) |active| blk: {
         alloc.free(active.version);
         break :blk active.root;
-    };
-    // Reopen independently: `search` owns the handles it is about to close.
-    return try store.openOrCreateRoot(io, cwd_path, search.roots.entries[index].spec);
+    } else search.roots.firstWithVersion(alloc, id, version orelse return null) orelse return null;
+    return try alloc.dupe(u8, search.roots.entries[index].spec);
 }
 
 fn extDeactivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
@@ -722,10 +750,12 @@ fn extDeactivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     const id = flags.rest[0];
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try cwdRealPath(io, &cwd_buf);
-    var ext_root = (try openTargetRoot(alloc, io, cwd_path, id, null, flags.user)) orelse {
+    const target = (try targetRootSpec(alloc, io, cwd_path, id, null, flags.user)) orelse {
         try printOut(alloc, io, "extension '{s}' has no active version in any store root\n", .{id});
         return 1;
     };
+    defer alloc.free(target);
+    var ext_root = try store.openOrCreateRoot(io, cwd_path, target);
     defer ext_root.close(io);
     try store.Store.init(io, ext_root).deactivate(alloc, id);
     try printOut(alloc, io, "{s}: deactivated\n", .{id});
@@ -1191,17 +1221,18 @@ fn withRefs(alloc: std.mem.Allocator, args: []const []const u8) ![]composition.W
     var i: usize = 0;
     while (i + 1 < args.len) : (i += 1) {
         if (!std.mem.eql(u8, args[i], "--with")) continue;
-        const spec = args[i + 1];
+        try out.append(alloc, withRef(args[i + 1]));
         i += 1;
-        // Version ids contain no `@`, extension ids neither, so the last `@`
-        // splits unambiguously.
-        if (std.mem.lastIndexOfScalar(u8, spec, '@')) |at| {
-            try out.append(alloc, .{ .id = spec[0..at], .version = spec[at + 1 ..] });
-        } else {
-            try out.append(alloc, .{ .id = spec, .version = null });
-        }
     }
     return out.toOwnedSlice(alloc);
+}
+
+/// `<id>[@<version>]` — the one spelling of "an extension, maybe at an exact
+/// version" shared by `session new --with` and `ext run`. Version ids contain
+/// no `@`, extension ids neither, so the last `@` splits unambiguously.
+fn withRef(spec: []const u8) composition.WithRef {
+    const at = std.mem.lastIndexOfScalar(u8, spec, '@') orelse return .{ .id = spec };
+    return .{ .id = spec[0..at], .version = spec[at + 1 ..] };
 }
 
 fn cwdRealPath(io: std.Io, buf: *[std.fs.max_path_bytes]u8) ![]u8 {
@@ -1472,13 +1503,13 @@ const StepStream = struct {
         self.toolEndLine(call, ok) catch |e| self.note(e);
     }
 
-    fn onStepEnd(ptr: *anyopaque, events: []const ledger.Event, status: loop.StepStatus) void {
+    fn onStepEnd(ptr: *anyopaque, events: []const ledger.Event, step_outcome: loop.StepOutcome) void {
         const self: *StepStream = @ptrCast(@alignCast(ptr));
-        self.last_status = status;
+        self.last_status = step_outcome.status;
         // Ledger lines first, then the boundary marker: a reader that has seen
         // `step end` knows it has every event of that step.
         self.flushEvents(events) catch |e| self.note(e);
-        self.stepEndLine(status) catch |e| self.note(e);
+        self.stepEndLine(step_outcome) catch |e| self.note(e);
     }
 
     /// Emit every ledger event not yet reported, in `session events` shape. The
@@ -1580,7 +1611,7 @@ const StepStream = struct {
         try self.endLine();
     }
 
-    fn stepEndLine(self: *StepStream, status: loop.StepStatus) !void {
+    fn stepEndLine(self: *StepStream, step_outcome: loop.StepOutcome) !void {
         var jw: std.json.Stringify = .{ .writer = self.out };
         try jw.beginObject();
         try jw.objectField("stream");
@@ -1588,7 +1619,13 @@ const StepStream = struct {
         try jw.objectField("event");
         try jw.write("end");
         try jw.objectField("status");
-        try jw.write(@tagName(status));
+        try jw.write(@tagName(step_outcome.status));
+        // Only the reply-was-cut fact is worth a column: end_turn / tool_use are
+        // already visible from the events, and the line stays as it was for them.
+        if (step_outcome.stop_reason == .max_tokens) {
+            try jw.objectField("stop");
+            try jw.write("max_tokens");
+        }
         try jw.endObject();
         try self.endLine();
     }
@@ -1629,10 +1666,12 @@ const StepStream = struct {
 };
 
 /// Why the run stopped, from facts the kernel already reports: a canceled step
-/// short-circuits `run`, an assistant turn with no calls ends the turn, and
-/// anything else means the step budget ran out.
-fn stoppedReason(last_status: loop.StepStatus, turn_done: bool) []const u8 {
+/// short-circuits `run`; a reply cut by `max_tokens` is not a finished turn
+/// (whether it stopped the run alone or as the second in a row); an assistant
+/// turn with no calls ends the turn; anything else means the step budget ran out.
+fn stoppedReason(last_status: loop.StepStatus, last_stop: provider.StopReason, turn_done: bool) []const u8 {
     if (last_status == .canceled) return "canceled";
+    if (last_stop == .max_tokens) return "max_tokens";
     return if (turn_done) "end_turn" else "budget";
 }
 
@@ -1759,7 +1798,7 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     if (stream) |s| {
         // Every event was already flushed at its step boundary; only the run
         // verdict is left.
-        try s.runDone(steps, stoppedReason(s.last_status, sess.lastAssistantDone()));
+        try s.runDone(steps, stoppedReason(s.last_status, sess.lastStopReason(), sess.lastAssistantDone()));
         // A dropped observation is not a broken step, but the reader's picture is
         // incomplete — say so on stderr (stdout stays pure JSON) and exit non-zero.
         if (s.err) |e| {
@@ -1961,7 +2000,7 @@ fn usage(io: std.Io) !u8 {
         \\  nulya ext build <path>            compile into an immutable version
         \\  nulya ext activate <id> <ver>     point `current` at a version
         \\  nulya ext rollback <id> <ver>     repoint `current` at an older version
-        \\  nulya ext run <id> [tool] <json>  invoke the active version
+        \\  nulya ext run <id>[@<ver>] [tool] <json>  invoke the active (or that exact) version
         \\  nulya ext list                    list extensions and active versions
         \\  nulya ext inspect <id>            print an extension's manifest
         \\  nulya ext api [protocol|permissions|examples]
@@ -2234,7 +2273,7 @@ test "session step --stream emits the tui.md §2.2 line protocol in order" {
     try sess.appendUser("go");
     stream.printed = sess.l.len(); // as `session step` does: only this run's events
     const steps = try sess.run(5);
-    try stream.runDone(steps, stoppedReason(stream.last_status, sess.lastAssistantDone()));
+    try stream.runDone(steps, stoppedReason(stream.last_status, sess.lastStopReason(), sess.lastAssistantDone()));
     try std.testing.expect(stream.err == null);
 
     // Step 1 calls a tool, step 2 addresses the user. Per step: model deltas →
@@ -2262,12 +2301,85 @@ test "session step --stream emits the tui.md §2.2 line protocol in order" {
     try std.testing.expectEqualStrings(expected, out.written());
 }
 
-test "a run stopped by the step budget reports stopped=budget, a canceled step reports canceled" {
-    try std.testing.expectEqualStrings("end_turn", stoppedReason(.completed, true));
-    try std.testing.expectEqualStrings("budget", stoppedReason(.completed, false));
-    try std.testing.expectEqualStrings("canceled", stoppedReason(.canceled, false));
+test "a reply cut by max_tokens is recorded replayable, closed with a marker, retried once, and the run stops with stopped=max_tokens" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_path = cwd_buf[0..try tmp.dir.realPath(io, &cwd_buf)];
+    const tool = @import("tool.zig");
+
+    const Boom = struct {
+        fn call(ptr: ?*anyopaque, a: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolResult {
+            _ = ptr;
+            _ = req;
+            _ = a;
+            return error.TestUnexpectedResult; // a truncated call must never reach its executor
+        }
+    };
+    const tools_arr = [_]tool.Tool{
+        .{
+            .definition = .{ .id = "nulya.shell", .name = "shell", .description = "shell", .input_schema = "{}" },
+            .executor = .{ .ptr = null, .callFn = Boom.call },
+        },
+    };
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    var stream: StepStream = .{ .alloc = alloc, .out = &out.writer };
+
+    var scripted: launch.ScriptedProvider = .{ .mode = .truncate };
+    var sess: session.AgentSession = .{
+        .alloc = alloc,
+        .l = ledger.Ledger.init(alloc),
+        .composition = .{
+            .pinned_extensions = &.{},
+            .extension_tool_bindings = &.{},
+            .tools = .{ .tools = &tools_arr },
+            .skills = .{ .skills = &.{} },
+            .system_prompts = .{ .blocks = &.{} },
+        },
+        .model = scripted.handle(),
+        .step_ctx = .{
+            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd_path },
+            .scratch_dir = "/tmp",
+            .observer = stream.observer(),
+        },
+        .model_options = .{},
+        .extension_roots = &.{"nulya-absent-extensions-root"},
+    };
+    defer sess.l.deinit();
+
+    try sess.appendUser("go");
+    stream.printed = sess.l.len();
+    // Budget 5, but two truncated replies in a row stop the run on their own.
+    const steps = try sess.run(5);
+    try stream.runDone(steps, stoppedReason(stream.last_status, sess.lastStopReason(), sess.lastAssistantDone()));
+    try std.testing.expect(stream.err == null);
+    try std.testing.expectEqual(@as(usize, session.max_truncated_streak), steps);
+
+    // Per step: the torn args are recorded as `{}` (replayable), the batch is
+    // closed by a marker result, and the boundary line says the reply was cut.
+    const written = out.written();
+    try std.testing.expect(std.mem.indexOf(u8, written, "\"calls\":[{\"id\":\"c1\",\"tool\":\"shell\",\"args\":\"{}\"}]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "\"ok\":false,\"output\":\"not executed: the reply hit its output cap (max_tokens)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "{\"stream\":\"step\",\"event\":\"end\",\"status\":\"completed\",\"stop\":\"max_tokens\"}") != null);
+    try std.testing.expect(std.mem.endsWith(u8, written, "{\"stream\":\"run\",\"event\":\"done\",\"steps\":2,\"stopped\":\"max_tokens\"}\n"));
+    // user + 2 × (assistant, marker batch): the model never got past its cap.
+    try std.testing.expectEqual(@as(usize, 5), sess.l.len());
+}
+
+test "a run stopped by the step budget reports stopped=budget, a canceled step reports canceled, a truncated reply reports max_tokens" {
+    try std.testing.expectEqualStrings("end_turn", stoppedReason(.completed, .end_turn, true));
+    try std.testing.expectEqualStrings("budget", stoppedReason(.completed, .tool_use, false));
+    try std.testing.expectEqualStrings("canceled", stoppedReason(.canceled, .tool_use, false));
     // A cancel at the boundary wins even when the last assistant turn was clean.
-    try std.testing.expectEqualStrings("canceled", stoppedReason(.canceled, true));
+    try std.testing.expectEqualStrings("canceled", stoppedReason(.canceled, .end_turn, true));
+    // A cut-off reply is not a finished turn, with or without calls in it.
+    try std.testing.expectEqualStrings("max_tokens", stoppedReason(.completed, .max_tokens, true));
+    try std.testing.expectEqualStrings("max_tokens", stoppedReason(.completed, .max_tokens, false));
 }
 
 test "under --stream a diagnostic is a run error line, never a bare text line" {

@@ -13,7 +13,7 @@
  *    and sorts back into place even though it arrived after the model deltas.
  */
 import { createStore, produce } from "solid-js/store"
-import type { LedgerEvent, SessionHeader, ToolCall } from "../nulya/ledger.ts"
+import type { LedgerEvent, SessionHeader, ToolCall, Usage } from "../nulya/ledger.ts"
 import type { StreamLine, StepStatus, StopReason } from "../nulya/cli.ts"
 
 export type ToolRunState = "pending" | "running" | "done"
@@ -79,6 +79,8 @@ export interface UsageTotals {
   output: number
   cacheRead: number
   cacheWrite: number
+  /** Steps whose cost is known: the ledger recorded usage for them (DESIGN §3.1). */
+  pricedSteps: number
   /**
    * The whole prompt of the most recent step — NOT a total across steps. A step
    * sends the entire prefix, so what the provider counted last time is roughly
@@ -142,7 +144,7 @@ export function createSessionState(id: string): SessionState {
     id,
     header: null,
     items: [],
-    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, lastPrompt: 0 },
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, pricedSteps: 0, lastPrompt: 0 },
     steps: 0,
     lastStepStatus: null,
     lastStopped: null,
@@ -200,6 +202,31 @@ export function createSessionState(id: string): SessionState {
   // "seq <= applied", so idempotence costs one comparison.
   let applied = 0
 
+  /**
+   * Per-step usage the stream reported and whose ledger line has not landed yet.
+   *
+   * Both mouths report the same numbers: the stream as it happens, the ledger as
+   * `assistant.usage` once the step is written (DESIGN §3.1 / §14). Adding both
+   * would double every step, and dropping the stream's would leave the status bar
+   * blank until the step ended — so the stream's count is provisional exactly the
+   * way its cards are, and the ledger line replaces it. Ledger lines of a step
+   * are flushed BEFORE its `step end` marker, so the pairing is in order and this
+   * queue is one deep in practice.
+   */
+  const streamed: Usage[] = []
+
+  function addUsage(draft: SessionSnapshot, usage: Usage, sign: 1 | -1) {
+    draft.usage.input += sign * usage.input_tokens
+    draft.usage.output += sign * usage.output_tokens
+    draft.usage.cacheRead += sign * usage.cache_read_tokens
+    draft.usage.cacheWrite += sign * usage.cache_write_tokens
+  }
+
+  /** Cached or not, the whole prefix occupies the window (see `lastPrompt`). */
+  function promptSize(usage: Usage): number {
+    return usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens
+  }
+
   function applyEvent(event: LedgerEvent) {
     edit((draft) => applyInto(draft, event))
   }
@@ -235,6 +262,17 @@ export function createSessionState(id: string): SessionState {
         case "assistant": {
           const assistant = event as Extract<LedgerEvent, { kind: "assistant" }>
           dropInFlight(draft)
+          // What this step cost, from the ledger — the fact, replacing whatever
+          // the stream said about the same step. A step the provider never
+          // priced carries nothing at all; then the stream's number, if there
+          // was one, is all anybody knows and it stays.
+          const provisional = streamed.shift()
+          if (assistant.usage) {
+            if (provisional) addUsage(draft, provisional, -1)
+            addUsage(draft, assistant.usage, 1)
+            draft.usage.pricedSteps += 1
+            draft.usage.lastPrompt = promptSize(assistant.usage)
+          }
           const made: TranscriptItem[] = []
           const thinking = readableThinking(assistant.reasoning)
           if (thinking !== null) {
@@ -378,20 +416,18 @@ export function createSessionState(id: string): SessionState {
             break
           }
           case "usage": {
-            const usage = line as unknown as {
-              input_tokens: number
-              output_tokens: number
-              cache_read_tokens: number
-              cache_write_tokens: number
+            const line_usage = line as unknown as Usage
+            // Per-step counts, not cumulative (tui.md §11, T0 reminder 2), and
+            // provisional until this step's assistant line lands.
+            const usage: Usage = {
+              input_tokens: line_usage.input_tokens,
+              output_tokens: line_usage.output_tokens,
+              cache_read_tokens: line_usage.cache_read_tokens,
+              cache_write_tokens: line_usage.cache_write_tokens,
             }
-            // Per-step counts, not cumulative (tui.md §11, T0 reminder 2).
-            draft.usage.input += usage.input_tokens
-            draft.usage.output += usage.output_tokens
-            draft.usage.cacheRead += usage.cache_read_tokens
-            draft.usage.cacheWrite += usage.cache_write_tokens
-            // Cached or not, the prefix still occupies the window.
-            draft.usage.lastPrompt =
-              usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens
+            streamed.push(usage)
+            addUsage(draft, usage, 1)
+            draft.usage.lastPrompt = promptSize(usage)
             break
           }
           case "done": {
@@ -426,6 +462,11 @@ export function createSessionState(id: string): SessionState {
         // canceled in the provider phase, for instance. Drop it rather than
         // leave a card the session file does not back.
         dropInFlight(draft)
+        // Every ledger line of this step is already applied, so anything still
+        // queued here was never written as an assistant event (a step canceled
+        // in the provider phase). Its tokens were spent and stay counted; what
+        // is dropped is only the expectation of a line that will never come.
+        streamed.length = 0
         draft.steps += 1
         draft.lastStepStatus = ((line as { status?: StepStatus }).status ?? "completed") as StepStatus
         draft.activeTool = null

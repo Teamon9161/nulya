@@ -52,9 +52,9 @@ export async function settle(setup: Settleable, passes = 8, delayMs = 40): Promi
   return setup.captureCharFrame()
 }
 
-export async function until(predicate: () => boolean, timeoutMs = 20_000): Promise<void> {
+export async function until(predicate: () => boolean | Promise<boolean>, timeoutMs = 20_000): Promise<void> {
   const deadline = Date.now() + timeoutMs
-  while (!predicate()) {
+  while (!(await predicate())) {
     if (Date.now() > deadline) throw new Error("timed out waiting for a condition")
     await new Promise((resolve) => setTimeout(resolve, 25))
   }
