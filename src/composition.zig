@@ -1,9 +1,9 @@
 //! Session-scoped capability composition.
 //!
 //! The composition freezes all session-scoped capability state at
-//! `AgentSession.init()`, including pinned and usage-ranked extension
-//! contributions and the model-facing tool set. Tool, Skill, and System Prompt
-//! snapshots stay strongly typed and keep their own semantics.
+//! `AgentSession.init()`: the active extension versions, the pinned
+//! model-facing tool set, skills and system prompts. Tool, Skill, and System
+//! Prompt snapshots stay strongly typed and keep their own semantics.
 
 const std = @import("std");
 const registry = @import("registry.zig");
@@ -77,16 +77,12 @@ pub const PinnedExtension = struct {
 /// session-setup boundary).
 pub const Options = struct {
     /// Stable ids (`ext:<extension-id>/<tool-name>`) to expose natively this
-    /// session. Each must resolve against an active extension; an unknown pin is
-    /// a hard error, never a silent skip.
+    /// session — `registry.pinned_native_tools` plus `session new --pin`
+    /// (DESIGN §5.1). The ONLY way an extension tool reaches the model's tool
+    /// face: usage facts never fill a slot by themselves. Each must resolve
+    /// against an active extension; an unknown pin is a hard error, never a
+    /// silent skip.
     pinned_native_tools: []const []const u8 = &.{},
-    /// Extension stable ids ranked best-first by usage, produced at the
-    /// session-setup boundary (DESIGN §5.1 rule 3). Best-effort: a candidate
-    /// that cannot be bound against the frozen active extensions, or whose
-    /// model-facing name is already taken, is skipped in rank order until the
-    /// budget fills. Ranking decides membership only — the final model-facing
-    /// order still comes from `registry.snapshotWith` (DESIGN §5.2).
-    ranked_native_tools: []const []const u8 = &.{},
     /// Provider-facing total tool count, builtins included. shell + edit always
     /// occupy `registry.builtin_count` of it.
     max_tools: u32 = 8,
@@ -94,9 +90,9 @@ pub const Options = struct {
     /// are activated (`nulya session new --with`, DESIGN §14). Membership only:
     /// their skills enter the catalog, their system prompts enter the system
     /// blocks, and their tools become invocable through the CLI — whether a tool
-    /// takes a native slot is still `pinned_native_tools` / ranking. Same id as
-    /// an active extension overrides it for this session; a later `--with` of
-    /// the same id overrides an earlier one.
+    /// takes a native slot is still `pinned_native_tools`. Same id as an active
+    /// extension overrides it for this session; a later `--with` of the same id
+    /// overrides an earlier one.
     with: []const WithRef = &.{},
 };
 
@@ -141,7 +137,6 @@ pub const SessionComposition = struct {
         opts: Options,
     ) !SessionComposition {
         try validateBudget(opts);
-        const auto_slots = autoFillSlots(opts);
 
         var roots = try store.Roots.open(alloc, io, cwd, ext_roots);
         defer roots.deinit();
@@ -158,7 +153,7 @@ pub const SessionComposition = struct {
         defer freeResolved(alloc, resolved);
         sortResolved(resolved);
 
-        return assemble(alloc, io, &roots, resolved, opts.pinned_native_tools, opts.ranked_native_tools, auto_slots);
+        return assemble(alloc, io, &roots, resolved, opts.pinned_native_tools);
     }
 
     /// Rebuild the composition frozen into a session header (DESIGN §3, §7.5):
@@ -185,8 +180,8 @@ pub const SessionComposition = struct {
         sortResolved(resolved);
 
         // The frozen native tools are the exact, already-decided native set, so
-        // they enter as pins (strict); no usage ranking or auto-fill on resume.
-        return assemble(alloc, io, &roots, resolved, frozen.native_tools, &.{}, 0);
+        // they enter as pins (strict) — the same path `init` took.
+        return assemble(alloc, io, &roots, resolved, frozen.native_tools);
     }
 
     pub fn deinit(self: SessionComposition, alloc: std.mem.Allocator) void {
@@ -200,24 +195,22 @@ pub const SessionComposition = struct {
 };
 
 /// The shared tail of `init` / `initFrozen`: given the resolved (sorted) active
-/// extensions and an already-decided native-tool selection (`pins` strict,
-/// `ranked` best-effort up to `auto_slots`), freeze the tool set, skills, and
-/// system prompts. Each resolved extension names the root index it was found in,
-/// so nothing here re-derives the search order — it just indexes `roots`.
-/// `resolved` and `roots` stay owned by the caller.
+/// extensions and an already-decided native-tool selection (`pins`, strict),
+/// freeze the tool set, skills, and system prompts. Each resolved extension
+/// names the root index it was found in, so nothing here re-derives the search
+/// order — it just indexes `roots`. `resolved` and `roots` stay owned by the
+/// caller.
 fn assemble(
     alloc: std.mem.Allocator,
     io: std.Io,
     roots: *const store.Roots,
     resolved: []const store.Roots.Resolved,
     pins: []const []const u8,
-    ranked: []const []const u8,
-    auto_slots: usize,
 ) !SessionComposition {
     // Build every owned binding first, then freeze the slice: only after
     // `toOwnedSlice` are the binding addresses stable enough for `asTool` to
     // hand out `ToolExecutor.ptr` values into them.
-    const bindings = try resolveBindings(alloc, roots, resolved, pins, ranked, auto_slots);
+    const bindings = try resolveBindings(alloc, roots, resolved, pins);
     errdefer freeBindings(alloc, bindings);
 
     const tools = try snapshotFromBindings(alloc, bindings);
@@ -278,14 +271,6 @@ fn validateBudget(opts: Options) CompositionError!void {
     if (opts.pinned_native_tools.len > room_for_extensions) return error.ToolBudgetExceeded;
 }
 
-/// Extension slots left after the explicit pins. Ranked candidates are
-/// best-effort: exceeding the budget truncates by rank order and is never an
-/// error (unlike pins, which fail loudly).
-fn autoFillSlots(opts: Options) usize {
-    const room: usize = @intCast(opts.max_tools - @as(u32, @intCast(registry.builtin_count)));
-    return room - opts.pinned_native_tools.len;
-}
-
 /// Freeze the builtin table plus the bindings' tools. The extras array is
 /// transient — `snapshotWith` copies it — but each `Tool.executor.ptr` keeps
 /// pointing at the caller-owned, address-stable `bindings`.
@@ -296,22 +281,19 @@ fn snapshotFromBindings(alloc: std.mem.Allocator, bindings: []ext_tools.Binding)
     return registry.snapshotWith(alloc, extras);
 }
 
-/// Resolve the session's extension-tool bindings: explicit pins first (strict —
-/// an unresolvable pin fails the session), then usage-ranked candidates fill the
-/// remaining slots best-effort (an unresolvable or colliding candidate is
-/// skipped, never fatal). The frozen entry path comes from
-/// `store.Roots.Resolved.entryPathAbs`: absolute, so it survives being spawned
-/// with the workspace as cwd, and built from the version frozen at composition
-/// time, so mid-session activation cannot move it. The returned slice is
-/// address-stable; on any error every binding built so far is released and
-/// nothing leaks.
+/// Resolve the session's extension-tool bindings from the explicit pins — the
+/// whole native selection, and strict: an unresolvable pin fails the session
+/// rather than quietly starting without the tool the operator asked for. The
+/// frozen entry path comes from `store.Roots.Resolved.entryPathAbs`: absolute,
+/// so it survives being spawned with the workspace as cwd, and built from the
+/// version frozen at composition time, so mid-session activation cannot move it.
+/// The returned slice is address-stable; on any error every binding built so far
+/// is released and nothing leaks.
 fn resolveBindings(
     alloc: std.mem.Allocator,
     roots: *const store.Roots,
     resolved: []const store.Roots.Resolved,
     pins: []const []const u8,
-    ranked: []const []const u8,
-    auto_slots: usize,
 ) ![]ext_tools.Binding {
     var list: std.ArrayList(ext_tools.Binding) = .empty;
     errdefer freeBindingsList(alloc, &list);
@@ -323,108 +305,7 @@ fn resolveBindings(
             return err;
         };
     }
-
-    try appendRankedBindings(alloc, roots, resolved, pins, ranked, auto_slots, &list);
     return list.toOwnedSlice(alloc);
-}
-
-/// Best-effort automatic fill (DESIGN §5.1 rule 3). Walk ranked stable ids in
-/// rank order and add a binding when the candidate is available, not already
-/// pinned, and its model-facing name is still free, stopping at `auto_slots`.
-/// A historical candidate that can no longer be bound (extension deactivated or
-/// deleted, tool removed from the active version, malformed id) is skipped, as
-/// is a candidate whose model-facing name is already taken by a builtin, a pin,
-/// or an earlier-ranked automatic candidate — a lower-priority automatic
-/// candidate never fails the session. Host faults (OOM, real filesystem errors)
-/// propagate: they are never "candidate unavailable".
-fn appendRankedBindings(
-    alloc: std.mem.Allocator,
-    roots: *const store.Roots,
-    resolved: []const store.Roots.Resolved,
-    pins: []const []const u8,
-    ranked: []const []const u8,
-    auto_slots: usize,
-    list: *std.ArrayList(ext_tools.Binding),
-) !void {
-    if (auto_slots == 0) return;
-
-    // Taken names: builtins first, then the pins already bound. A valid manifest
-    // can never declare a reserved name (manifest.validate rejects it), so the
-    // builtin entries are defensive — the automatic walk still refuses such a
-    // candidate rather than let the snapshot collision checks fail the session.
-    var taken: std.ArrayList([]const u8) = .empty;
-    defer taken.deinit(alloc);
-    for (manifest.reserved_tool_names) |name| try taken.append(alloc, name);
-    for (list.items) |b| try taken.append(alloc, b.definition.name);
-
-    var selected: usize = 0;
-    for (ranked) |id| {
-        if (selected == auto_slots) break;
-        // A pinned id is already bound; pins always win over ranking.
-        if (sliceHas(pins, id)) continue;
-        // rank() rejects duplicate candidates, so a repeat inside the ranked
-        // list is a caller contract violation, not a case to dedupe.
-        std.debug.assert(!bindingSliceHas(list.items, id));
-
-        const binding = try resolveRankedBinding(alloc, roots, resolved, id) orelse continue;
-        if (sliceHas(taken.items, binding.definition.name)) {
-            binding.deinit(alloc);
-            continue;
-        }
-        list.append(alloc, binding) catch |err| {
-            binding.deinit(alloc);
-            return err;
-        };
-        try taken.append(alloc, binding.definition.name);
-        selected += 1;
-    }
-}
-
-/// Best-effort single-candidate resolution against the frozen active extensions.
-/// Returns null for a historical id that can no longer be bound: malformed
-/// stable id, extension no longer active, or tool removed from the active
-/// version. Host faults propagate unchanged.
-fn resolveRankedBinding(
-    alloc: std.mem.Allocator,
-    roots: *const store.Roots,
-    resolved: []const store.Roots.Resolved,
-    id: []const u8,
-) !?ext_tools.Binding {
-    const parsed = parseStableToolId(id) catch return null;
-    const r = findResolved(resolved, parsed.ext_id) orelse return null;
-    const spec = findToolSpec(r.manifest, parsed.tool_name) orelse return null;
-    // Same guarantee as the pinned path: `resolved` only holds extensions whose
-    // manifest passed validation during discovery (a tool-declaring manifest with
-    // no runtime fails as MissingRuntime, an isExtensionFault skipped there), so a
-    // found tool spec proves the runtime exists. No runtime-less state to defend.
-    const rt = r.manifest.runtime.?;
-
-    const entry_abs = try r.entryPathAbs(alloc, roots);
-    defer alloc.free(entry_abs);
-
-    // `id` already passed parseStableToolId, whose two segments reformat back
-    // to exactly `id`, so initOwned dupes it directly.
-    const binding = try ext_tools.Binding.initOwned(alloc, .{
-        .id = id,
-        .name = spec.name,
-        .description = spec.description,
-        .input_schema = spec.input_schema,
-    }, entry_abs, rt.interpreter);
-    return binding;
-}
-
-fn sliceHas(slice: []const []const u8, needle: []const u8) bool {
-    for (slice) |item| {
-        if (std.mem.eql(u8, item, needle)) return true;
-    }
-    return false;
-}
-
-fn bindingSliceHas(list: []const ext_tools.Binding, id: []const u8) bool {
-    for (list) |b| {
-        if (std.mem.eql(u8, b.definition.id, id)) return true;
-    }
-    return false;
 }
 
 const StableToolId = struct { ext_id: []const u8, tool_name: []const u8 };
@@ -1330,6 +1211,12 @@ test "a pin to an inactive extension or undeclared tool is a hard error" {
     try std.testing.expectError(error.PinnedToolNotDeclared, SessionComposition.init(alloc, io, cwd, one_root, .{ .pinned_native_tools = &[_][]const u8{"ext:web.search/nope"} }));
     // Malformed stable id.
     try std.testing.expectError(error.InvalidStableToolId, SessionComposition.init(alloc, io, cwd, one_root, .{ .pinned_native_tools = &[_][]const u8{"web_search"} }));
+    // A resolvable pin with no slot left is refused too: the budget is the cap
+    // on the whole face, and a pin never silently loses to it.
+    try std.testing.expectError(error.ToolBudgetExceeded, SessionComposition.init(alloc, io, cwd, one_root, .{
+        .pinned_native_tools = &[_][]const u8{"ext:web.search/web_search"},
+        .max_tools = registry.builtin_count,
+    }));
 }
 
 test "a pin without any extension store is a hard error, not a silent empty set" {
@@ -1350,7 +1237,7 @@ test "a pin without any extension store is a hard error, not a silent empty set"
     try std.testing.expect(comp.tools.lookup("shell") != null);
 }
 
-test "an active extension with no usage history is not auto-promoted" {
+test "pins decide membership, not the final tool order" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -1358,76 +1245,28 @@ test "an active extension with no usage history is not auto-promoted" {
     const cwd = try tmpPath(alloc, io, tmp.dir);
     defer alloc.free(cwd);
 
-    const v1 = try writeToolExtension(alloc, io, tmp.dir, "web.search", "web_search", "v1");
-    defer alloc.free(v1);
-    try testkit.activate(alloc, io, tmp.dir, "web.search", v1);
+    const va = try writeToolExtension(alloc, io, tmp.dir, "a.pkg", "alpha", "a");
+    defer alloc.free(va);
+    const vb = try writeToolExtension(alloc, io, tmp.dir, "b.pkg", "beta", "b");
+    defer alloc.free(vb);
+    try testkit.activate(alloc, io, tmp.dir, "a.pkg", va);
+    try testkit.activate(alloc, io, tmp.dir, "b.pkg", vb);
 
-    // No ranked candidates (a missing journal is an empty ranking at the
-    // boundary): the extension stays CLI-only; an empty slot is never filled
-    // with a zero-use tool.
-    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .ranked_native_tools = &.{} });
+    // Pinned b first, a second: both are exposed, but the frozen snapshot is
+    // builtins then extras sorted by stable id, so a precedes b regardless of
+    // how the pins were listed (DESIGN §5.2).
+    const pins = [_][]const u8{ "ext:b.pkg/beta", "ext:a.pkg/alpha" };
+    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .pinned_native_tools = &pins, .max_tools = 4 });
     defer comp.deinit(alloc);
-    try std.testing.expectEqual(@as(usize, 0), comp.extension_tool_bindings.len);
-    try std.testing.expect(comp.tools.lookup("web_search") == null);
-    try std.testing.expectEqual(@as(usize, 1), comp.pinned_extensions.len);
-}
-
-test "a used active extension is auto-promoted into the frozen tool set" {
-    const alloc = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const cwd = try tmpPath(alloc, io, tmp.dir);
-    defer alloc.free(cwd);
-
-    const v1 = try writeToolExtension(alloc, io, tmp.dir, "web.search", "web_search", "v1");
-    defer alloc.free(v1);
-    try testkit.activate(alloc, io, tmp.dir, "web.search", v1);
-
-    const ranked = [_][]const u8{"ext:web.search/web_search"};
-    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .ranked_native_tools = &ranked });
-    defer comp.deinit(alloc);
-
-    const t = comp.tools.lookup("web_search") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("ext:web.search/web_search", t.definition.id);
-    try std.testing.expectEqual(@as(usize, 1), comp.extension_tool_bindings.len);
-    // Same owned-binding ownership as a pin: the Tool borrows the binding.
-    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&comp.extension_tool_bindings[0])), t.executor.ptr);
-    // Final order is builtins then extras sorted by stable id: shell, edit, web_search.
-    try std.testing.expectEqual(@as(usize, 3), comp.tools.tools.len);
+    try std.testing.expectEqual(@as(usize, 2), comp.extension_tool_bindings.len);
+    try std.testing.expectEqual(@as(usize, 4), comp.tools.tools.len);
     try std.testing.expectEqualStrings("shell", comp.tools.tools[0].definition.name);
     try std.testing.expectEqualStrings("edit", comp.tools.tools[1].definition.name);
-    try std.testing.expectEqualStrings("web_search", comp.tools.tools[2].definition.name);
-}
-
-test "ranking decides membership, not the final tool order" {
-    const alloc = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const cwd = try tmpPath(alloc, io, tmp.dir);
-    defer alloc.free(cwd);
-
-    const va = try writeToolExtension(alloc, io, tmp.dir, "a.pkg", "alpha", "a");
-    defer alloc.free(va);
-    const vb = try writeToolExtension(alloc, io, tmp.dir, "b.pkg", "beta", "b");
-    defer alloc.free(vb);
-    try testkit.activate(alloc, io, tmp.dir, "a.pkg", va);
-    try testkit.activate(alloc, io, tmp.dir, "b.pkg", vb);
-
-    // Both fit (max_tools=4), b ranked first: both selected, but the frozen
-    // snapshot is sorted by stable id, so a comes before b in tools[].
-    const ranked = [_][]const u8{ "ext:b.pkg/beta", "ext:a.pkg/alpha" };
-    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .ranked_native_tools = &ranked, .max_tools = 4 });
-    defer comp.deinit(alloc);
-    try std.testing.expectEqual(@as(usize, 2), comp.extension_tool_bindings.len);
     try std.testing.expectEqualStrings("ext:a.pkg/alpha", comp.tools.tools[2].definition.id);
     try std.testing.expectEqualStrings("ext:b.pkg/beta", comp.tools.tools[3].definition.id);
-    try std.testing.expect(comp.tools.lookup("alpha") != null);
-    try std.testing.expect(comp.tools.lookup("beta") != null);
 }
 
-test "higher-ranked candidate wins the limited slot" {
+test "the tool set freezes at session creation; a changed pin only reaches the next session" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -1442,280 +1281,19 @@ test "higher-ranked candidate wins the limited slot" {
     try testkit.activate(alloc, io, tmp.dir, "a.pkg", va);
     try testkit.activate(alloc, io, tmp.dir, "b.pkg", vb);
 
-    // max_tools=3 leaves exactly one extension slot; ranking B > A selects B.
-    const ranked = [_][]const u8{ "ext:b.pkg/beta", "ext:a.pkg/alpha" };
-    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .ranked_native_tools = &ranked, .max_tools = 3 });
-    defer comp.deinit(alloc);
-    try std.testing.expectEqual(@as(usize, 1), comp.extension_tool_bindings.len);
-    try std.testing.expectEqualStrings("ext:b.pkg/beta", comp.extension_tool_bindings[0].definition.id);
-    try std.testing.expect(comp.tools.lookup("beta") != null);
-    try std.testing.expect(comp.tools.lookup("alpha") == null);
-}
-
-test "an explicit pin wins the budget over a higher-ranked candidate" {
-    const alloc = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const cwd = try tmpPath(alloc, io, tmp.dir);
-    defer alloc.free(cwd);
-
-    const va = try writeToolExtension(alloc, io, tmp.dir, "a.pkg", "alpha", "a");
-    defer alloc.free(va);
-    const vb = try writeToolExtension(alloc, io, tmp.dir, "b.pkg", "beta", "b");
-    defer alloc.free(vb);
-    try testkit.activate(alloc, io, tmp.dir, "a.pkg", va);
-    try testkit.activate(alloc, io, tmp.dir, "b.pkg", vb);
-
-    // max_tools=3: 2 builtins + pin A fill the budget; ranking B > A cannot
-    // squeeze in.
-    const pins = [_][]const u8{"ext:a.pkg/alpha"};
-    const ranked = [_][]const u8{ "ext:b.pkg/beta", "ext:a.pkg/alpha" };
-    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .pinned_native_tools = &pins, .ranked_native_tools = &ranked, .max_tools = 3 });
-    defer comp.deinit(alloc);
-    try std.testing.expectEqual(@as(usize, 1), comp.extension_tool_bindings.len);
-    try std.testing.expectEqualStrings("ext:a.pkg/alpha", comp.extension_tool_bindings[0].definition.id);
-    try std.testing.expect(comp.tools.lookup("alpha") != null);
-    try std.testing.expect(comp.tools.lookup("beta") == null);
-}
-
-test "pins and ranking fill the budget together without duplicating a pinned id" {
-    const alloc = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const cwd = try tmpPath(alloc, io, tmp.dir);
-    defer alloc.free(cwd);
-
-    const va = try writeToolExtension(alloc, io, tmp.dir, "a.pkg", "alpha", "a");
-    defer alloc.free(va);
-    const vb = try writeToolExtension(alloc, io, tmp.dir, "b.pkg", "beta", "b");
-    defer alloc.free(vb);
-    const vc = try writeToolExtension(alloc, io, tmp.dir, "c.pkg", "gamma", "c");
-    defer alloc.free(vc);
-    try testkit.activate(alloc, io, tmp.dir, "a.pkg", va);
-    try testkit.activate(alloc, io, tmp.dir, "b.pkg", vb);
-    try testkit.activate(alloc, io, tmp.dir, "c.pkg", vc);
-
-    // max_tools=4: pin A plus one auto slot; ranked [A, B, C] -> A skipped as
-    // already pinned, B fills the auto slot, C is beyond the budget.
-    const pins = [_][]const u8{"ext:a.pkg/alpha"};
-    const ranked = [_][]const u8{ "ext:a.pkg/alpha", "ext:b.pkg/beta", "ext:c.pkg/gamma" };
-    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .pinned_native_tools = &pins, .ranked_native_tools = &ranked, .max_tools = 4 });
-    defer comp.deinit(alloc);
-    try std.testing.expectEqual(@as(usize, 2), comp.extension_tool_bindings.len);
-    try std.testing.expect(comp.tools.lookup("alpha") != null);
-    try std.testing.expect(comp.tools.lookup("beta") != null);
-    try std.testing.expect(comp.tools.lookup("gamma") == null);
-    var alpha_count: usize = 0;
-    for (comp.extension_tool_bindings) |b| {
-        if (std.mem.eql(u8, b.definition.id, "ext:a.pkg/alpha")) alpha_count += 1;
-    }
-    try std.testing.expectEqual(@as(usize, 1), alpha_count);
-}
-
-test "a deactivated historical candidate is skipped, the next candidate fills" {
-    const alloc = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const cwd = try tmpPath(alloc, io, tmp.dir);
-    defer alloc.free(cwd);
-
-    const va = try writeToolExtension(alloc, io, tmp.dir, "a.pkg", "alpha", "a");
-    defer alloc.free(va);
-    const vb = try writeToolExtension(alloc, io, tmp.dir, "b.pkg", "beta", "b");
-    defer alloc.free(vb);
-    // Only B is active; A was used historically but is now deactivated.
-    try testkit.activate(alloc, io, tmp.dir, "b.pkg", vb);
-
-    const ranked = [_][]const u8{ "ext:a.pkg/alpha", "ext:b.pkg/beta" };
-    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .ranked_native_tools = &ranked, .max_tools = 3 });
-    defer comp.deinit(alloc);
-    // A is an automatic candidate, not a pin: it is skipped, never an error.
-    try std.testing.expectEqual(@as(usize, 1), comp.extension_tool_bindings.len);
-    try std.testing.expectEqualStrings("ext:b.pkg/beta", comp.extension_tool_bindings[0].definition.id);
-    try std.testing.expect(comp.tools.lookup("beta") != null);
-    try std.testing.expect(comp.tools.lookup("alpha") == null);
-}
-
-test "a tool removed from the active version is skipped, the next candidate fills" {
-    const alloc = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const cwd = try tmpPath(alloc, io, tmp.dir);
-    defer alloc.free(cwd);
-
-    // Extension `a` is active but its current manifest only declares `new_tool`;
-    // the journal still ranks the historical `ext:a/old_tool` first.
-    const manifest_a =
-        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/run"},"contributes":{"tools":[{"name":"new_tool","description":"a tool","input":{"type":"object"}}]}}
-    ;
-    const va = try testkit.writeFrozenVersion(alloc, io, tmp.dir, "a", manifest_a, &.{.{ .rel = "src/main.zig", .bytes = "pub fn main() void {}\n" }});
-    defer alloc.free(va);
-    const vb = try writeToolExtension(alloc, io, tmp.dir, "b.pkg", "beta", "b");
-    defer alloc.free(vb);
-    try testkit.activate(alloc, io, tmp.dir, "a", va);
-    try testkit.activate(alloc, io, tmp.dir, "b.pkg", vb);
-
-    const ranked = [_][]const u8{ "ext:a/old_tool", "ext:b.pkg/beta" };
-    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .ranked_native_tools = &ranked, .max_tools = 3 });
-    defer comp.deinit(alloc);
-    try std.testing.expectEqual(@as(usize, 1), comp.extension_tool_bindings.len);
-    try std.testing.expectEqualStrings("ext:b.pkg/beta", comp.extension_tool_bindings[0].definition.id);
-    try std.testing.expect(comp.tools.lookup("beta") != null);
-    try std.testing.expect(comp.tools.lookup("new_tool") == null); // never ranked
-}
-
-test "an auto candidate whose model-facing name is a reserved builtin is skipped" {
-    const alloc = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    // A hand-parsed, unvalidated manifest lets the walk see a tool named
-    // `shell`; production can never reach this state (manifest.validate rejects
-    // reserved names), so the walk's defensive builtin-name check is exercised
-    // directly.
-    var m = try manifest.parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/run"},"contributes":{"tools":[{"name":"shell","description":"x","input":{"type":"object"}}]}}
-    );
-    defer m.deinit();
-    const cwd = try tmpPath(alloc, io, tmp.dir);
-    defer alloc.free(cwd);
-    var roots = try store.Roots.open(alloc, io, cwd, one_root);
-    defer roots.deinit();
-    // The manifest is owned by this test, so this `Resolved` is never freed.
-    const resolved = [_]store.Roots.Resolved{.{ .id = "a", .version = "v-aaaaaaaaaaaaaaaaaaaaaaaa", .manifest = m, .root = 0 }};
-    const pins = [_][]const u8{};
-    const ranked = [_][]const u8{"ext:a/shell"};
-
-    var list: std.ArrayList(ext_tools.Binding) = .empty;
-    defer freeBindingsList(alloc, &list);
-    try appendRankedBindings(alloc, &roots, &resolved, &pins, &ranked, 1, &list);
-    // The candidate was resolved but refused: no alias/rename, no binding.
-    try std.testing.expectEqual(@as(usize, 0), list.items.len);
-}
-
-test "an auto candidate colliding with an earlier-ranked auto candidate is skipped" {
-    const alloc = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const cwd = try tmpPath(alloc, io, tmp.dir);
-    defer alloc.free(cwd);
-
-    // A and B both expose model-facing `search`; A ranks higher. A is selected,
-    // B is skipped, and C (ranked after B) fills the remaining slot.
-    const va = try writeToolExtension(alloc, io, tmp.dir, "a.pkg", "search", "a");
-    defer alloc.free(va);
-    const vb = try writeToolExtension(alloc, io, tmp.dir, "b.pkg", "search", "b");
-    defer alloc.free(vb);
-    const vc = try writeToolExtension(alloc, io, tmp.dir, "c.pkg", "fetch", "c");
-    defer alloc.free(vc);
-    try testkit.activate(alloc, io, tmp.dir, "a.pkg", va);
-    try testkit.activate(alloc, io, tmp.dir, "b.pkg", vb);
-    try testkit.activate(alloc, io, tmp.dir, "c.pkg", vc);
-
-    const ranked = [_][]const u8{ "ext:a.pkg/search", "ext:b.pkg/search", "ext:c.pkg/fetch" };
-    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .ranked_native_tools = &ranked, .max_tools = 4 });
-    defer comp.deinit(alloc);
-    try std.testing.expectEqual(@as(usize, 2), comp.extension_tool_bindings.len);
-    const t = comp.tools.lookup("search") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("ext:a.pkg/search", t.definition.id);
-    try std.testing.expect(comp.tools.lookup("fetch") != null);
-}
-
-test "auto candidates beyond the budget are truncated by rank, never an error" {
-    const alloc = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const cwd = try tmpPath(alloc, io, tmp.dir);
-    defer alloc.free(cwd);
-
-    const va = try writeToolExtension(alloc, io, tmp.dir, "a.pkg", "alpha", "a");
-    defer alloc.free(va);
-    const vb = try writeToolExtension(alloc, io, tmp.dir, "b.pkg", "beta", "b");
-    defer alloc.free(vb);
-    const vc = try writeToolExtension(alloc, io, tmp.dir, "c.pkg", "gamma", "c");
-    defer alloc.free(vc);
-    const vd = try writeToolExtension(alloc, io, tmp.dir, "d.pkg", "delta", "d");
-    defer alloc.free(vd);
-    try testkit.activate(alloc, io, tmp.dir, "a.pkg", va);
-    try testkit.activate(alloc, io, tmp.dir, "b.pkg", vb);
-    try testkit.activate(alloc, io, tmp.dir, "c.pkg", vc);
-    try testkit.activate(alloc, io, tmp.dir, "d.pkg", vd);
-
-    // max_tools=3 leaves one extension slot; four used candidates => only the
-    // highest-ranked is selected, no error, no alphabetical filler.
-    const ranked = [_][]const u8{ "ext:a.pkg/alpha", "ext:b.pkg/beta", "ext:c.pkg/gamma", "ext:d.pkg/delta" };
-    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .ranked_native_tools = &ranked, .max_tools = 3 });
-    defer comp.deinit(alloc);
-    try std.testing.expectEqual(@as(usize, 1), comp.extension_tool_bindings.len);
-    try std.testing.expectEqualStrings("ext:a.pkg/alpha", comp.extension_tool_bindings[0].definition.id);
-}
-
-test "the tool set freezes at session creation; a later ranking change needs a new session" {
-    const alloc = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const cwd = try tmpPath(alloc, io, tmp.dir);
-    defer alloc.free(cwd);
-
-    const va = try writeToolExtension(alloc, io, tmp.dir, "a.pkg", "alpha", "a");
-    defer alloc.free(va);
-    const vb = try writeToolExtension(alloc, io, tmp.dir, "b.pkg", "beta", "b");
-    defer alloc.free(vb);
-    try testkit.activate(alloc, io, tmp.dir, "a.pkg", va);
-    try testkit.activate(alloc, io, tmp.dir, "b.pkg", vb);
-
-    const ranked_first = [_][]const u8{ "ext:a.pkg/alpha", "ext:b.pkg/beta" };
-    var first = try SessionComposition.init(alloc, io, cwd, one_root, .{ .ranked_native_tools = &ranked_first, .max_tools = 3 });
+    var first = try SessionComposition.init(alloc, io, cwd, one_root, .{ .pinned_native_tools = &[_][]const u8{"ext:a.pkg/alpha"}, .max_tools = 3 });
     defer first.deinit(alloc);
     try std.testing.expect(first.tools.lookup("alpha") != null);
     try std.testing.expect(first.tools.lookup("beta") == null);
 
-    // A later session (new journal => new ranking) selects B instead. The first
-    // composition is untouched: no mid-session mutation, no re-read.
-    const ranked_second = [_][]const u8{ "ext:b.pkg/beta", "ext:a.pkg/alpha" };
-    var second = try SessionComposition.init(alloc, io, cwd, one_root, .{ .ranked_native_tools = &ranked_second, .max_tools = 3 });
+    // A later session with a different pin gets a different face; the first
+    // composition is untouched — a pin takes effect at a session boundary and
+    // nowhere else (physics #2).
+    var second = try SessionComposition.init(alloc, io, cwd, one_root, .{ .pinned_native_tools = &[_][]const u8{"ext:b.pkg/beta"}, .max_tools = 3 });
     defer second.deinit(alloc);
     try std.testing.expect(second.tools.lookup("beta") != null);
     try std.testing.expect(second.tools.lookup("alpha") == null);
 
     try std.testing.expect(first.tools.lookup("alpha") != null);
     try std.testing.expect(first.tools.lookup("beta") == null);
-}
-
-test "an auto-promoted tool freezes to the composition-time version" {
-    const alloc = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const cwd = try tmpPath(alloc, io, tmp.dir);
-    defer alloc.free(cwd);
-
-    const v1 = try writeToolExtension(alloc, io, tmp.dir, "web.search", "web_search", "v1");
-    defer alloc.free(v1);
-    const v2 = try writeToolExtension(alloc, io, tmp.dir, "web.search", "web_search", "v2");
-    defer alloc.free(v2);
-    try testkit.activate(alloc, io, tmp.dir, "web.search", v1);
-
-    const ranked = [_][]const u8{"ext:web.search/web_search"};
-    var first = try SessionComposition.init(alloc, io, cwd, one_root, .{ .ranked_native_tools = &ranked });
-    defer first.deinit(alloc);
-    try std.testing.expect(std.mem.indexOf(u8, first.extension_tool_bindings[0].entry_path, v1) != null);
-
-    // Activate v2 mid-session: the auto-promoted executable stays on v1.
-    try testkit.activate(alloc, io, tmp.dir, "web.search", v2);
-    try std.testing.expect(std.mem.indexOf(u8, first.extension_tool_bindings[0].entry_path, v1) != null);
-    try std.testing.expect(std.mem.indexOf(u8, first.extension_tool_bindings[0].entry_path, v2) == null);
-
-    // A fresh session opened after the switch sees v2.
-    var second = try SessionComposition.init(alloc, io, cwd, one_root, .{ .ranked_native_tools = &ranked });
-    defer second.deinit(alloc);
-    try std.testing.expect(std.mem.indexOf(u8, second.extension_tool_bindings[0].entry_path, v2) != null);
 }

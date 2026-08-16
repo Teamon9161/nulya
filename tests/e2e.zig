@@ -18,7 +18,7 @@
 //! loop-mode model would run forever.
 //!
 //! And script extensions (DESIGN §7.1): a script extension goes init(--script) →
-//! build (no toolchain) → activate → run → promoted native and executes through
+//! build (no toolchain) → activate → run → pinned native and executes through
 //! its interpreter; its version excludes compiler identity and is rebuild-stable.
 //!
 //! And the slow loop's substrate (M5): a verdict recorded while another process
@@ -40,7 +40,6 @@ const integrity = support.integrity;
 const ledger = support.ledger;
 const outcome = support.outcome;
 const prompt = support.prompt;
-const promotion = support.promotion;
 const protocol = support.protocol;
 const provider = support.provider;
 const session = support.session;
@@ -243,17 +242,19 @@ fn callNative(alloc: std.mem.Allocator, io: std.Io, t: tool.Tool, ws_path: []con
     });
 }
 
-test "closed loop: usage-driven promotion executes the frozen version through the tool executor (harness-built extension)" {
-    // The promotion + freeze half of the kernel loop, proven end to end with a
-    // real built binary — not a stub, not a FakeEnv. The extension here is built
-    // by the test harness (`buildAndActivate`); the separate self-manufacture test
+test "closed loop: a pinned tool executes the frozen version through the tool executor (harness-built extension)" {
+    // The pin + freeze half of the kernel loop, proven end to end with a real
+    // built binary — not a stub, not a FakeEnv. The extension here is built by
+    // the test harness (`buildAndActivate`); the separate self-manufacture test
     // below proves a shell/edit-only session can build it itself.
     //
     //   build+activate web.search v1  ->  CLI `nulya ext run` records usage
-    //     ->  a new session ranks the journal, auto-promotes web_search to a
-    //         native tool, and its ToolExecutor spawns the frozen v1 executable
+    //     ->  usage alone changes nothing: a new session's tool face is still
+    //         shell + edit
+    //     ->  a session that PINS ext:web.search/web_search exposes web_search
+    //         natively, and its ToolExecutor spawns the frozen v1 executable
     //     ->  activate v2:  the same session's native call STILL runs v1 (frozen),
-    //         the live CLI runs v2, and a fresh session's native call runs v2.
+    //         the live CLI runs v2, and a fresh pinned session's call runs v2.
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -277,8 +278,7 @@ test "closed loop: usage-driven promotion executes the frozen version through th
     const v1 = try buildAndActivate(alloc, io, ws, zig_exe, "web.search", "web_search", src_v1);
     defer alloc.free(v1);
 
-    // One real CLI invocation records `ext:web.search/web_search` in the journal —
-    // the only thing that makes the tool an eligible promotion candidate.
+    // One real CLI invocation records `ext:web.search/web_search` in the journal.
     {
         const run = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", "web.search", "web_search", "{}" });
         defer alloc.free(run.stdout);
@@ -286,17 +286,26 @@ test "closed loop: usage-driven promotion executes the frozen version through th
         try std.testing.expect(std.mem.indexOf(u8, run.stdout, "greeting-v1") != null);
     }
 
-    // --- Session B: rank the journal at the setup boundary, then freeze. ---
-    const ranked_b = try promotion.rankExtensionTools(alloc, io, ws_path, .{});
-    defer promotion.freeRankedIds(alloc, ranked_b);
-    try std.testing.expectEqual(@as(usize, 1), ranked_b.len);
-    try std.testing.expectEqualStrings("ext:web.search/web_search", ranked_b[0]);
+    // Usage is evidence, not a decision: a session that does not pin the tool
+    // still sees only shell + edit, however many rows the journal holds.
+    {
+        const events = try tool_stats.readAll(alloc, io, ws_path);
+        defer tool_stats.freeEvents(alloc, events);
+        try std.testing.expect(events.len != 0);
 
-    var comp_b = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{ .ranked_native_tools = ranked_b });
+        var unpinned = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{});
+        defer unpinned.deinit(alloc);
+        try std.testing.expectEqual(@as(usize, 2), unpinned.tools.tools.len);
+        try std.testing.expect(unpinned.tools.lookup("web_search") == null);
+    }
+
+    // --- Session B: the pin puts it on the tool face, and freezes it. ---
+    const pins = [_][]const u8{"ext:web.search/web_search"};
+    var comp_b = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{ .pinned_native_tools = &pins });
     defer comp_b.deinit(alloc);
 
-    // The ranked candidate is now a native, model-facing tool, and calling it
-    // through the ToolExecutor actually spawns the frozen v1 binary.
+    // The pinned tool is native and model-facing, and calling it through the
+    // ToolExecutor actually spawns the frozen v1 binary.
     const tool_b = comp_b.tools.lookup("web_search") orelse return error.TestUnexpectedResult;
     {
         const result = try callNative(alloc, io, tool_b, ws_path);
@@ -329,10 +338,8 @@ test "closed loop: usage-driven promotion executes the frozen version through th
         try std.testing.expect(std.mem.indexOf(u8, run.stdout, "greeting-v2") != null);
     }
 
-    // 3. A fresh session opened after the switch promotes and freezes on v2.
-    const ranked_c = try promotion.rankExtensionTools(alloc, io, ws_path, .{});
-    defer promotion.freeRankedIds(alloc, ranked_c);
-    var comp_c = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{ .ranked_native_tools = ranked_c });
+    // 3. A fresh session with the same pin freezes on v2.
+    var comp_c = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{ .pinned_native_tools = &pins });
     defer comp_c.deinit(alloc);
     const tool_c = comp_c.tools.lookup("web_search") orelse return error.TestUnexpectedResult;
     {
@@ -440,15 +447,20 @@ fn extractVersion(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
     return alloc.dupe(u8, text[idx..end]);
 }
 
-test "self-manufacture closed loop: a shell/edit-only session builds its own extension, a later session promotes it to native" {
+test "self-manufacture closed loop: a shell/edit-only session builds its own extension; usage alone never promotes it; a pin — from config or --pin — makes it native in the next session" {
     // The milestone's first sentence, proven with no harness-built extension:
     //
     //   Session A exposes ONLY shell + edit. A deterministic model, through those
     //   builtins alone (real ToolExecutor -> LocalEnvironment shell spawns), runs
     //   `nulya ext init/build/activate/run` to manufacture a brand-new capability
     //   and records its usage. The tool never becomes native mid-session.
-    //     -> Session B ranks that usage, auto-promotes the tool to a native tool,
-    //        and its executor spawns the frozen binary the model just built.
+    //     -> Session B, opened with no pin, STILL sees only shell + edit: the
+    //        usage journal is evidence, never a decision (DESIGN §5.1, §5.5).
+    //     -> Promotion is someone writing a pin. Both spellings are exercised
+    //        through the real CLI: `[registry] pinned_native_tools` in the
+    //        project layer's `.nulya/config.toml`, and `session new --pin`.
+    //        Either way the header records it and the executor spawns the frozen
+    //        binary the model just built.
     //
     // No real LLM: a scripted provider issues the exact shell commands a model
     // would. `NULYA_ZIG` is injected into the (non-secret) sanitized child env so
@@ -550,15 +562,96 @@ test "self-manufacture closed loop: a shell/edit-only session builds its own ext
         try std.testing.expect(saw);
     }
 
-    // --- Session B: the manufactured tool is now auto-promoted to native. ---
-    const ranked = try promotion.rankExtensionTools(alloc, io, ws_path, .{});
-    defer promotion.freeRankedIds(alloc, ranked);
-    try std.testing.expectEqual(@as(usize, 1), ranked.len);
-    try std.testing.expectEqualStrings("ext:demo/greet", ranked[0]);
+    // --- Session B: usage rows exist, and change nothing. ---
+    {
+        const plain = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+        defer alloc.free(plain.stdout);
+        try std.testing.expectEqual(@as(u8, 0), plain.code);
+        const plain_id = try alloc.dupe(u8, std.mem.trim(u8, plain.stdout, " \r\n"));
+        defer alloc.free(plain_id);
+        const plain_header = try readSessionFile(alloc, io, ws, plain_id);
+        defer alloc.free(plain_header);
+        // The extension is active (so the header pins its version), but nothing
+        // put its tool on the model's face.
+        try std.testing.expect(std.mem.indexOf(u8, plain_header, "\"native_tools\":[]") != null);
 
-    var comp_b = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{ .ranked_native_tools = ranked });
-    defer comp_b.deinit(alloc);
-    const greet = comp_b.tools.lookup("greet") orelse return error.TestUnexpectedResult;
+        var comp_plain = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{});
+        defer comp_plain.deinit(alloc);
+        try std.testing.expectEqual(@as(usize, 2), comp_plain.tools.tools.len);
+        try std.testing.expect(comp_plain.tools.lookup("greet") == null);
+    }
+
+    // --- Promotion = a pin. Spelling one: the project layer's config file. ---
+    try ws.writeFile(io, .{ .sub_path = ".nulya/config.toml", .data =
+        \\[registry]
+        \\pinned_native_tools = ["ext:demo/greet"]
+        \\
+    });
+    {
+        const pinned = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+        defer alloc.free(pinned.stdout);
+        try std.testing.expectEqual(@as(u8, 0), pinned.code);
+        const pinned_id = try alloc.dupe(u8, std.mem.trim(u8, pinned.stdout, " \r\n"));
+        defer alloc.free(pinned_id);
+        const pinned_header = try readSessionFile(alloc, io, ws, pinned_id);
+        defer alloc.free(pinned_header);
+        try std.testing.expect(std.mem.indexOf(u8, pinned_header, "\"native_tools\":[\"ext:demo/greet\"]") != null);
+
+        // What a `session step` process rebuilds from that header: the tool is
+        // on the face, at the frozen version, and really runs.
+        try assertGreetRunsFromHeader(alloc, io, ws, ws_path, pinned_id);
+    }
+
+    // --- Spelling two: `session new --pin`, with no config file at all. ---
+    try ws.deleteFile(io, ".nulya/config.toml");
+    {
+        const pinned = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--pin", "ext:demo/greet" });
+        defer alloc.free(pinned.stdout);
+        try std.testing.expectEqual(@as(u8, 0), pinned.code);
+        const pinned_id = try alloc.dupe(u8, std.mem.trim(u8, pinned.stdout, " \r\n"));
+        defer alloc.free(pinned_id);
+        const pinned_header = try readSessionFile(alloc, io, ws, pinned_id);
+        defer alloc.free(pinned_header);
+        try std.testing.expect(std.mem.indexOf(u8, pinned_header, "\"native_tools\":[\"ext:demo/greet\"]") != null);
+        try assertGreetRunsFromHeader(alloc, io, ws, ws_path, pinned_id);
+    }
+
+    // A pin that resolves to nothing fails the session rather than starting one
+    // quietly missing the tool it was asked for.
+    {
+        const bad = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--pin", "ext:demo/absent" });
+        defer alloc.free(bad.stdout);
+        try std.testing.expectEqual(@as(u8, 1), bad.code);
+        try std.testing.expect(std.mem.indexOf(u8, bad.stdout, "ext:demo/absent") != null);
+    }
+}
+
+/// Resume the session `id` the way `session step` does — composition rebuilt
+/// from the frozen header — and prove its pinned `greet` really executes.
+fn assertGreetRunsFromHeader(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    ws: std.Io.Dir,
+    ws_path: []const u8,
+    id: []const u8,
+) !void {
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+    var model = EndTurnModel{};
+    const spath = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{id});
+    defer alloc.free(spath);
+    var resumed = try session.AgentSession.openDurable(alloc, .{
+        .model = .{ .ptr = &model, .vtable = &EndTurnModel.vtable },
+        .step_ctx = .{
+            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = ws_path },
+            .scratch_dir = ".nulya/scratch",
+        },
+    }, .{ .workspace = ws, .session_path = spath });
+    defer resumed.deinit();
+
+    try std.testing.expectEqual(@as(usize, 3), resumed.composition.tools.tools.len);
+    const greet = resumed.composition.tools.lookup("greet") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("ext:demo/greet", greet.definition.id);
     const result = try callNative(alloc, io, greet, ws_path);
     defer alloc.free(result.output);
     try std.testing.expect(result.ok);
@@ -2623,7 +2716,7 @@ fn scaffoldAndBuildScript(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, 
     return try alloc.dupe(u8, result.version);
 }
 
-test "script extension: init(--script) -> build(seal) -> activate -> run -> promoted native in the next session" {
+test "script extension: init(--script) -> build(seal) -> activate -> run -> pinned native in the next session" {
     const alloc = std.testing.allocator;
     const io = std.testing.io; // runExtension is synchronous; no async shell needed.
 
@@ -2663,7 +2756,7 @@ test "script extension: init(--script) -> build(seal) -> activate -> run -> prom
     }
 
     // run: a real CLI invocation drives the frozen script through its interpreter
-    // and records usage — the only thing that makes it a promotion candidate.
+    // and records usage.
     {
         const run = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", "greeter", "greet", "{}" });
         defer alloc.free(run.stdout);
@@ -2671,14 +2764,10 @@ test "script extension: init(--script) -> build(seal) -> activate -> run -> prom
         try std.testing.expect(std.mem.indexOf(u8, run.stdout, "hello from a Nulya script extension") != null);
     }
 
-    // The next session ranks the journal, promotes the script tool to native, and
-    // its ToolExecutor runs the frozen script (via its interpreter) end to end.
-    const ranked = try promotion.rankExtensionTools(alloc, io, ws_path, .{});
-    defer promotion.freeRankedIds(alloc, ranked);
-    try std.testing.expectEqual(@as(usize, 1), ranked.len);
-    try std.testing.expectEqualStrings("ext:greeter/greet", ranked[0]);
-
-    var comp = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{ .ranked_native_tools = ranked });
+    // A session that pins the script tool exposes it natively, and its
+    // ToolExecutor runs the frozen script (via its interpreter) end to end.
+    const pins = [_][]const u8{"ext:greeter/greet"};
+    var comp = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{ .pinned_native_tools = &pins });
     defer comp.deinit(alloc);
     const greet = comp.tools.lookup("greet") orelse return error.TestUnexpectedResult;
     // The frozen script lives under package/, and the binding carries its interpreter.

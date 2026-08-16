@@ -29,8 +29,8 @@ kernel  = ledger 文件格式 + PromptIR 投影 + 一次 step + 工具执行 + c
 | 3 | extension 制造路径 = Zig 源码 → 内嵌工具链编译 | **脚本 extension 默认**（`run.sh` / `run.ps1` / `run.py` 任意可执行）；Zig 是**实测需要时**的优化 | 制造循环发生在 AI 所在机器，摩擦决定尝试次数；多数有价值能力在 Zig 里也只是 wrap 系统命令。与"先测量再持久化"同一纪律 |
 | 4 | SessionDriver = out-of-process JSON-RPC + host-callback 通道 + `driver/*` 方法 | **driver = 脚本 + `nulya session new\|append\|step\|events\|cancel`** | 黑名单自动成立（CLI 没那些动词）；host callback / 分帧 / 背压全消失；`/goal` 是 20 行 shell |
 | 5 | Hook 三类：Provider / Middleware / Observer | **删 Middleware**，只留 Observer + propose→append | "拦截、修改"与"extension 永不 rewrite model-visible 内容"矛盾且未定义 |
-| 6 | AI reviewer 倾向默认开，门在 activate | **默认关**；门放在 **promote-to-native** | existence 几乎免费（一个目录）；promote 才有真实成本（cache prefix + 每 session token）。高门槛抑制尝试、诱发 theater |
-| 7 | Tool 是演化旗舰，Skill "不竞争不统计" | 优先级：**Skill / notes > 脚本 tool > native tool > driver**；加 `session_outcome` 事件 | 现在模型最能复利的自演化是知识与方法；driver 演化来源本就是"重复的人类 correction 结晶"；outcome 是评价 Skill / Prompt 的唯一 ground truth |
+| 6 | AI reviewer 倾向默认开，门在 activate | **默认关**；门放在 **promote-to-native**，而这个门就是"**写一条 pin**"这个动作本身——由人或 evolution session 做，内核只认 pin 不认统计（DESIGN §5.1/§5.5） | existence 几乎免费（一个目录）；promote 才有真实成本（cache prefix + 每 session token）。高门槛抑制尝试、诱发 theater |
+| 7 | Tool 是演化旗舰，Skill "不竞争不统计" | 优先级：**Skill / notes > 脚本 tool > native tool（= 一条 pin） > driver**；加 `session_outcome` 事件 | 现在模型最能复利的自演化是知识与方法；driver 演化来源本就是"重复的人类 correction 结晶"；outcome 是评价 Skill / Prompt 的唯一 ground truth |
 
 ---
 
@@ -46,8 +46,8 @@ kernel  = ledger 文件格式 + PromptIR 投影 + 一次 step + 工具执行 + c
 ### M2 · `nulya session *` + 脚本 extension（§3.2、§3.3）
 - 目标：session 可被任何进程驱动；extension 制造无需编译。
 - **M2a ✅ 已落地 → DESIGN §14：** `session new|append|step|events|cancel`（`step --max-steps N` 由 kernel 夹到 `session.max_steps_ceiling`）；`main.zig` demo 已改走 durable session 路径。e2e：shell 脚本 driver 完成 `/goal` 循环、`--max-steps` 被 kernel 强制。review 后收紧（DESIGN §3.4/§4/§14）：只有 `step` 写主文件——`append` 走 inbox、`cancel` 是 `<id>.cancel` 标记且由 kernel 在 step 边界消费（mid-run 也能停）、`events` 只读 tail；`close` 因无语义删除；`persist` 加第二写者守卫。
-- **M2b ✅ 已落地 → DESIGN §7.1/§7.4：** `runtime.entry` 前缀区分编译/脚本，脚本不编译、version = hash(snapshot)（不含 compiler）；`nulya ext init --script`；`ext run --arg k=v`。e2e：`run.ps1`/`run.sh` extension 走完 init → build(seal) → activate → run → 晋升为 native 并经 interpreter 执行；version 不含 compiler identity、rebuild 稳定。
-- **M2c · Compaction / handoff（§3.4）：** fork 原语 ✅（`session new --parent`：父必须存在、不点名模型即继承父的冻结身份、composition 不继承 → DESIGN §11）；driver 主动的 `/compact [focus]` ✅（TUI，tui.md T7）。**待做——模型主动的 handoff**：随仓库带一个 `handoff` script extension（源码与 M5 的 `extensions/evolution/` 同层；**默认不在 composition 里**，由 `/goal` driver 经 `session new --pin` 带入——`--pin` 的第一个真实 consumer，落地前用 workspace 级 `registry.pinned_native_tools` 过渡）；`/goal` driver 脚本认 step 输出里的 `handoff` call → 同一个 fork 流程；TUI 认同一个 call、observer 跟随子 session。验收（e2e，scripted provider 加一档"发 `handoff` call"）：driver 跑 goal loop → 模型调 `handoff` → driver fork，子 header `parent` 指向 `父:seq`、子 PromptIR 首块是 brief、旧文件字节不变；`handoff` tool 对缺节的 brief 返回错误且不落盘。
+- **M2b ✅ 已落地 → DESIGN §7.1/§7.4：** `runtime.entry` 前缀区分编译/脚本，脚本不编译、version = hash(snapshot)（不含 compiler）；`nulya ext init --script`；`ext run --arg k=v`。e2e：`run.ps1`/`run.sh` extension 走完 init → build(seal) → activate → run → 被 pin 成 native 并经 interpreter 执行；version 不含 compiler identity、rebuild 稳定。
+- **M2c · Compaction / handoff（§3.4）：** fork 原语 ✅（`session new --parent`：父必须存在、不点名模型即继承父的冻结身份、composition 不继承 → DESIGN §11）；driver 主动的 `/compact [focus]` ✅（TUI，tui.md T7）。**待做——模型主动的 handoff**：随仓库带一个 `handoff` script extension（源码与 M5 的 `extensions/evolution/` 同层；**默认不在 composition 里**，由 `/goal` driver 经 `session new --pin` 带入——`--pin` 已落地（DESIGN §5.1/§14），`/goal` 是它的第一个真实 consumer）；`/goal` driver 脚本认 step 输出里的 `handoff` call → 同一个 fork 流程；TUI 认同一个 call、observer 跟随子 session。验收（e2e，scripted provider 加一档"发 `handoff` call"）：driver 跑 goal loop → 模型调 `handoff` → driver fork，子 header `parent` 指向 `父:seq`、子 PromptIR 首块是 brief、旧文件字节不变；`handoff` tool 对缺节的 brief 返回错误且不落盘。
 
 ### M3 · `nulya src` + 文档（§3.10）✅ 已落地 → DESIGN §14
 - 已做：build.zig 把 `src/**/*.zig` `@embedFile` 进二进制（恒开无 gate）；`nulya src [path] [--tests]` 打印（无参数列全树），**默认剥 top-level `test` 块**、`--tests`/`--raw` 原样（`source.zig`）；测试留在文件里，剥离是投影不是存储。`nulya ext api` 的协议 topic 变成 `nulya src extension/protocol.zig` 的特例（零漂移），去掉手抄的 wire shapes。
@@ -179,7 +179,7 @@ loop until objective / swarm           → 脚本
 
 **Identity rule（authoring 规则，非 kernel 强制）：** 同一 stable id 声明自己属于同一 logical contract。`web_search(query)` v1→v4 实现变、id 不变；变成 `database_query(sql)` 就该是新 id。kernel 只强制 identity 的语法；"没偷换语义"由 Verify / review 保证。
 
-**3.5.2 Version-aware evidence（A）。** usage fact 加可空 `version`（`v:2`）。**reader 同时接受 v1 + v2**：v1 → `version = null`（过去不知道就诚实标 unknown，不丢历史）。两个投影喂两条状态轴：`LogicalToolStats`（吃全部历史 → promotion）、`VersionStats`（只吃 version-known → activation / rollback）。`ToolStats` 名字与语义不变。
+**3.5.2 Version-aware evidence（A）。** usage fact 加可空 `version`（`v:2`）。**reader 同时接受 v1 + v2**：v1 → `version = null`（过去不知道就诚实标 unknown，不丢历史）。两个投影喂两个决定：`LogicalToolStats`（吃全部历史 → 要不要为它写一条 pin）、`VersionStats`（只吃 version-known → activation / rollback）。两个决定都在内核之外做。`ToolStats` 名字与语义不变。
 
 **3.5.3 Lineage（B）。** **provenance 绝不进 version hash**（否则同源码因两次不同 reason 变两个 version）。独立 fact：`VersionCreatedFact{ version, parent?, created_by, reason? }`。单亲，v0.x 不做 DAG。
 
@@ -240,7 +240,7 @@ Agent 不做成独立 Contribution：一个 Agent = `session new` 的参数集�
 FAST LOOP   User → Agent → tool/shell → Result        reward: 把现在这件事做完
                 └─ evidence（invocation / version / evaluation / episode / outcome）
 SLOW LOOP   Evolution Session：读 evidence + 失败 + 成本 + 反馈 → 找「什么反复发生 / 什么贵 / 什么常失败 / 什么值得沉淀」
-                → propose: 新 Skill 条目 | 脚本 Tool | Tool v2 | Driver v2
+                → propose: 新 Skill 条目 | 脚本 Tool | pin（把已有 tool 放上 native 面） | Tool v2 | Driver v2
                 └─ verify / scoped trial → future sessions
 ```
 
@@ -304,7 +304,7 @@ Driver 演化比 Tool 保守，因为**归因难**（任务难度 / model / seed
 
 ### 3.12 Policy hooks / reviewer `[占位]`
 
-[agents-and-review.md](agents-and-review.md) 的审阅门设计保留其**能力模型**（read_only 硬天花板、ToolPolicy allow/deny、max_turns、结论以 fenced data 进父 ledger），但实现方式按 §3.2：reviewer = `session new --system-file reviewer.md --pin …` 的一个 read-only session，由 `nulya ext promote`（M6 后）或 evolution 脚本在 **promote-to-native** 门上调用；`policy.hook` 档位 `off / auto / human_approval / ai_reviewer` 决定是否调用。默认 `auto`（不调 reviewer）。不进 kernel。
+[agents-and-review.md](agents-and-review.md) 的审阅门设计保留其**能力模型**（read_only 硬天花板、ToolPolicy allow/deny、max_turns、结论以 fenced data 进父 ledger），但实现方式按 §3.2：reviewer = `session new --with reviewer@<v> [--pin …]` 的一个 read-only session，由人或 evolution 脚本在 **promote-to-native**（= 写一条 pin，§0.1 #6）这个门上调用；`policy.hook` 档位 `off / auto / human_approval / ai_reviewer` 决定是否调用。默认 `auto`（不调 reviewer）。不进 kernel。
 
 ---
 
@@ -313,7 +313,7 @@ Driver 演化比 Tool 保守，因为**归因难**（任务难度 / model / seed
 - ~~ledger 文件的并发 append：POSIX O_APPEND vs Windows inbox 目录，实测定。~~ 已定：跨平台统一 inbox 目录 + `persist` 长度守卫（DESIGN §3.4）。剩下的边角：`append` 走 inbox 后，`events` 在下一 step 前看不到 pending 的 user turn——前端若要"立即回显"得自己记。
 - session id 与 workspace 的关系；多 workspace / 多用户下 extension 复用与隔离边界。
 - ~~compaction 触发：token 阈值 vs task 边界 vs 混合；summary 由谁生成（agent 自己 vs 专用 session）。~~ 已定（§3.4）：混合——边界由模型经 `handoff` tool 主动提、压力由 driver `/compact` 兜底，汇到同一条 fork 路径；summary 一律由旧 session 自己在 cache 前缀上写，不开专用 session。剩下的边角：handoff 的守卫阈值（多小的 context 不值得 fork）、brief schema 分节强制到什么程度，等 /goal 跑起来看。
-- `max_tools` K 与排序权重初值（安放处 `default.toml` 已定，值待调）。
+- `max_tools` 的初值（安放处 `default.toml` 已定，值待调）。~~排序权重初值~~ 不再是问题：排序 policy 已整个移出内核，native 面只由 pin 决定（DESIGN §5.1/§5.5）。
 - ~~`session_outcome` 的最小 verdict 集合；用户不给 verdict 时的默认（缺失 ≠ 失败）。~~ 已定（M5a → DESIGN §3.3）：`success | partial | failure` 三值；**没有行 = unknown ≠ failure**；同一 session 可多行、最后一条作数；不加 `source`（今天只有人写；将来 driver 自动记时再加，届时无 `source` 的 v1 行 = 人评）。
 - Verify 套件与 golden 输入数据的 snapshot 边界。
 - Driver episode 的 benchmark suite 如何 version / 防 Goodhart。

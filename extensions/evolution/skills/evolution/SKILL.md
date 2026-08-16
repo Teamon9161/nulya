@@ -97,10 +97,48 @@ session's own shell, and `"by" == "session"` means that session graded itself.
 Treat those as claims: corroborate with what the ledger shows (did the work land?
 did a later session redo it?) before resting a proposal on one.
 
+### Tool usage → promotion
+
+`tool-usage.jsonl` never promotes anything by itself — the kernel does not read
+it. A tool reaches the model's tool face only because someone wrote a **pin**,
+and that someone can be you (as a proposal, in the report).
+
+Read the rows first — the `sort | uniq -c` line above is the whole input. A pin
+is worth proposing when one stable id is invoked **often, across several
+sessions, and mostly with `"ok":true`**; a handful of calls inside one session is
+a habit of that session, not a capability the tool face should carry. Two rows
+that argue against it: many `"ok":false` (fix the tool, do not pin it) and zero
+rows for an extension that exists (`manufactured but never invoked` — the
+opposite of a pin).
+
+The proposal is one line in the project config:
+
+```bash
+cat .nulya/config.toml 2>/dev/null      # read what is already pinned
+# then, with `edit`, make the file contain:
+#   [registry]
+#   pinned_native_tools = ["ext:my.helper/do_thing"]
+```
+
+```powershell
+Get-Content .nulya\config.toml -EA SilentlyContinue
+# same edit; the file is TOML, one [registry] table, one list
+```
+
+It takes effect at the **next** `session new` (composition freezes at session
+start), and it is not free: each pin costs one of the `max_tools` slots and
+carries the tool's name, description and JSON schema in **every** future
+session's prompt prefix. Say both in the report — the count of usage rows you
+are resting on, and the cost you are asking every future session to pay. That
+price is exactly why the tool face is not filled automatically. Retiring is
+symmetric: delete the entry, and the next session no longer carries it (the
+extension itself stays, still callable through `nulya ext run`).
+
 ## 2. Leaving something behind — smallest form first
 
-The order is: **notes / skill entry → script extension → compiled tool →
-driver**. Go one step down only when the step above provably cannot do it.
+The order is: **notes / skill entry → script extension → pin an existing tool
+native → compiled tool → driver**. Go one step down only when the step above
+provably cannot do it.
 
 A script extension draft, which needs no toolchain:
 
@@ -147,9 +185,9 @@ Evidence: .nulya/sessions/, tool-usage.jsonl, session-outcomes.jsonl.
   ids. **Would change my mind:** <the concrete observation that would>.
 
 ## Proposals
-- **<name>** (kind: notes | skill entry | script tool | tool v2 | driver)
-  - Evidence: <session ids — at least three>.
-  - Smallest form: <what exactly was written or scaffolded; for an extension, its `<id>@<version>` from `ext build`>.
+- **<name>** (kind: notes | skill entry | script tool | pin | tool v2 | driver)
+  - Evidence: <session ids — at least three; for a pin, the usage-row count too>.
+  - Smallest form: <what exactly was written or scaffolded; for an extension, its `<id>@<version>` from `ext build`; for a pin, the stable id and the per-session cost>.
   - Activated: yes/no — <why>.
   - Falsifier: retire if <N sessions with no invocation | no outcome improvement by …>.
 (or: none this pass)
@@ -167,5 +205,6 @@ next pass does not re-walk it.>
 - [ ] At least as much thought in `## Null results` as in `## Proposals`.
 - [ ] All five sections present, empty ones say `none`.
 - [ ] Nothing written outside `.nulya/evolution/` except one minimal-form change.
-- [ ] Nothing promoted, nothing pinned, no journal or session file touched.
+- [ ] Any pin cites its usage rows and states the per-session cost.
+- [ ] No journal and no session file touched.
 - [ ] Final message ≤ 5 lines.

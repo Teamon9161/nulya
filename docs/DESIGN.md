@@ -74,10 +74,10 @@ Ledger ──projection──▶ PromptIR { system_blocks, turns }
         │  provider       Model vtable          │
         │  environment    shell/extension 执行  │
         │  extension/*    manifest/store/build  │
-        │  tool_stats…    usage → rank → promote│
+        │  tool_stats     usage facts（只记不判）│
         └────┬──────────┬───────────┬──────────┘
           shell       edit      Extensions（子进程，JSON-RPC stdio）
-       (builtin)   (builtin)    ← 经 shell `nulya ext run …`，或被晋升为 native
+       (builtin)   (builtin)    ← 经 shell `nulya ext run …`，或被 pin 成 native
 ```
 
 **Core 是 headless、以 ledger 为中心的引擎。** 目前唯一的"前端"是 `main.zig` 的 demo（固定 prompt，最多 4 步）和 `cli.zig`（不经模型）。交互式前端 / TUI / ACP / subagent 见 PLAN §3.2、§3.11。
@@ -194,10 +194,9 @@ collectTurn(PromptIR, tool_defs)  →  assistant turn（可能含多个 tool_use
 session 开始时一次选定，整场冻结（`composition.zig` `SessionComposition.init`）：
 
 1. builtin `shell`、`edit`：永远在，位置最前。
-2. 配置 pin 的 native 工具（`registry.pinned_native_tools`，稳定 id `ext:<ext-id>/<tool>`）。pin 是 operator 意图：解析不到 → **硬失败** `PinnedExtensionNotActive` / `PinnedToolNotDeclared`。
-3. 按 usage 统计排序补足到 `max_tools`（含 builtin，默认 8）。best-effort：绑不上 / 撞名的按 rank 顺序跳过。
+2. **pin 的 native 工具**（稳定 id `ext:<ext-id>/<tool>`），两个来源同义、并集去重：`registry.pinned_native_tools`（config，project 层也可以加——只花自己的槽，§9.5）与 `session new --pin`（driver，按场）。pin 是决定：解析不到 → **硬失败** `PinnedExtensionNotActive` / `PinnedToolNotDeclared` / `InvalidStableToolId`，总数越过 `max_tools`（含 builtin，默认 8）→ `ToolBudgetExceeded`。
 
-排序只在此刻发生一次。对话开头本就是新前缀、无缓存可炸，所以晋升零成本；**中途绝不重排**。
+只有这两档。**usage 自己绝不改 `tools[]`**——journal 是证据，晋升是有人写下一条 pin（§5.5）。
 
 第 1 档（两个 builtin 的定义）与 kernel system prompt（§7.5）都是**二进制的编译期常量**，不由 header 冻结——所以它们的 hash 与 build 版本串一起记进 header 的 `nulya` stamp（§3.4），换了二进制 resume 时会警告。
 
@@ -213,30 +212,29 @@ agent 在对话中经 shell `nulya ext build/activate` 造出新 extension 后�
 - CLI 子进程（`nulya ext activate`）在 `NULYA_SESSION` 命名了 session 文件时，把一条 `capability_note` **投递**进该 session 的 inbox 目录（`<stem>.inbox/`，一事件一文件；文本确定性，列出 tools + `nulya ext run <id> <tool> '<json>'` 用法 + skills + `nulya skill load <ref>`）。它绝不直接写 session 文件——那是单写者（§3.4）。
 - `session.prepareStep` 每步在 step 边界（补齐残尾之后、下一次 model 调用之前）**排干** inbox（`ledger.drainInbox`，机制通用于任何事件）：对 ledger 尚未宣告的 `id@version` append 一条 `capability_note`（note 文本由 `extension/notes.zig` 生成）。排干只在 step 边界发生，note 因此绝不插进一条 batch 中间。
 - 前缀不动，缓存继续命中；模型下一 step 经 shell 调用。
-- 下一场 session 的 §5.1 第 3 档里凭统计有机会晋升进 `tools[]`。
+- 下一场 session **若被 pin** 才进 `tools[]`（§5.1 第 2 档）；没人 pin 就一直是 CLI 形式。
 
-> **晋升发生在对话边界，对话中途只追加 note。**
+> **晋升 = 下一场的 pin，对话中途只追加 note。**
 
 （纯内存 session（`Ledger.init`）没有 inbox 可排；投递/排干只对 durable session 生效。）
 
 ### 5.4 为什么不做动态 promotion / eviction
 
-每次中途 activate / evict 都改 `tools[]` = 全量 cache miss，与头号诉求正面冲突。§5.1–5.3 拿到 stats 驱动增长的全部好处而零缓存代价。
+每次中途 activate / evict 都改 `tools[]` = 全量 cache miss，与头号诉求正面冲突。§5.1–5.3 让能力照常增长而零缓存代价：中途只 append note，工具面的改变一律等下一场——那时改的是一条 pin，而下一场本来就是新前缀。
 
-### 5.5 Usage journal → ranking → promotion（Evolution Policy v1）
+### 5.5 Usage journal（evidence）
 
 ```
 .nulya/tool-usage.jsonl   每行 {"v":1,"tool_id":"ext:web.search/web_search","ok":true}
-        └─ projection ─▶ ToolStats { uses_total, uses_recent, last_used, success_rate }   (tool_stats.zig)
-        └─ tool_selection.rank(facts, weights) ─▶ 排序（纯函数）
-        └─ promotion.rankExtensionTools ─▶ ranked ids ─▶ composition 第 3 档补位
+        └─ projection ─▶ ToolStats { uses_total, successes, last_used_seq }   (tool_stats.zig)
+        └─ 读者：人、或 evolution session（PLAN §3.7）——内核里没有读者
 ```
 
 - 写入点：session 每个 completed step 后按 suffix 形状记一次（`session.recordCompletedToolStats`；模型幻觉的名字不记）；CLI `nulya ext run` 成功进入 invocation 后记一次。**被 `max_tokens` 截断的 step 不记**——它的 tool_results 是 loop 自己写的 marker（没有任何 executor 跑过，§4），记下去等于让 tool 为模型的输出上限背一次失败，直接污染 evolution 读的 `success_rate`。stats 是**执行之后的观测**，"host 认为这一步完成了" 不等于 "tool 跑过了"。**`tool_id` 跨实现版本累计**（无 `version` 字段）。
 - reader：`v` 未知精确报错（`UnsupportedStatsVersion`）；坏行 / 残尾容忍。
-- 分层不变量：`facts → ranking preference → composition availability/budget → frozen membership`。`rank` 只吃 facts + weights，绝不碰 pins / max_tools / Binding。
+- **内核不读这条 journal。** 没有排序、没有权重、没有自动补位：`tool_stats.zig` 只负责把 facts 老老实实写下来、读回来。
 
-> **Facts are durable; policy is replaceable.** 权重、K、算法都是 v0.1 selection policy，不是 kernel invariant；底层 facts 不动就能整个换掉。**Activation**（当前 implementation 是哪个 version）与 **Promotion**（逻辑能力要不要进下一场 native 面）是两条独立状态轴，永不合并成一个分数。
+> **内核只存 facts；晋升是内核之外做的决定**——一个人，或 evolution session（PLAN §3.7），读完 journal 写下一条 pin（`registry.pinned_native_tools` 或 `session new --pin`），下一场生效。它有真实成本（一个 `max_tools` 槽 + 每场的前缀 token），所以该有人为它负责，而不是由一个公式代劳。**Activation**（当前 implementation 是哪个 version）与 **Promotion**（逻辑能力在不在 native 面上）仍是两条独立状态轴：前者是 `current` 指针，后者是一条 pin，永不合并成一个分数。
 
 version-aware evidence / lineage / verify 见 PLAN §3.5。
 
@@ -336,7 +334,7 @@ extension 装在**多个 store root** 里，按固定顺序搜索（`store.Roots
 
 校验（`manifest.zig`）：schema id 精确匹配；`id` 合法；**至少一种 contribution**（`NoContributions`）；有 tool 时必须有 `runtime`（`MissingRuntime`）；tool 名不能是 `shell`/`edit`、不能重复；`entry` / skill / system_prompt 路径不能逃出包目录。**manifest 是 schema 唯一真相**：绝不"启动 binary 再问它有什么"。
 
-`tools[].input` schema 只在该 tool 被晋升进 `tools[]` 时才喂给模型；平时是可发现性元数据。
+`tools[].input` schema 只在该 tool 被 pin 进 `tools[]` 时才喂给模型；平时是可发现性元数据。
 
 ### 7.3 Wire protocol（`protocol.zig` / `invoke.zig`）
 
@@ -370,7 +368,7 @@ draft ──build──▶ versions/v-<hash>（immutable）──activate──�
 
 ### 7.5 组合在 session 开始冻结（keystone）
 
-`SessionComposition.init()` 解析 active extensions，pin 住每个的版本，一次冻结 tools / skills / system prompts。被 pin / 晋升的 native 工具在此刻解析出**绝对 `entry_path`**（基于 pin 时的版本），运行期只按此路径 spawn，**绝不二次读 `current`**。
+`SessionComposition.init()` 解析 active extensions，pin 住每个的版本，一次冻结 tools / skills / system prompts。被 pin 成 native 的工具在此刻解析出**绝对 `entry_path`**（基于 pin 时的版本），运行期只按此路径 spawn，**绝不二次读 `current`**。
 
 推论：session 中途 AI 重写出 `web.search` v2 并 activate，**当前 session 已 native 注册的仍是 v1**；v2 只能经 shell `nulya ext run` + note 告知；下一场 session native 才换。`tests/e2e.zig` 全环证明。
 
@@ -433,9 +431,9 @@ Environment { runShell(cmd, dialect) / runExtension(entry, request_json) / diale
 
 user 层与 workspace 的 `.nulya/` 同形、每个平台一个好找的位置；`nulya config show` 打印三条路径（JSON `paths`），前端写 key 时写的就是它读的。
 
-标量 set 即胜，列表按 key 合并。project 层**可以更严不能更松**：可 pin 工具、选 profile、调小 K、把 backend 从 local 收紧到 sandbox；**不可**把 backend 从 sandbox 降级 local、注入 `api_key_env` 名字外泄 host env、加 store root（单测覆盖）。这与 §9 的 `extension_permissions ⊆ session_authority` 是同一个不变量的两面：checkout 一个 repo 不该能拓宽机器权限。
+标量 set 即胜，列表按 key 合并。project 层**可以更严不能更松**：可 pin 工具（pin 只花自己的 `max_tools` 槽与前缀 token，不拓宽权限）、选 profile、调小 `max_tools`、把 backend 从 local 收紧到 sandbox；**不可**把 backend 从 sandbox 降级 local、注入 `api_key_env` 名字外泄 host env、加 store root（单测覆盖）。这与 §9 的 `extension_permissions ⊆ session_authority` 是同一个不变量的两面：checkout 一个 repo 不该能拓宽机器权限。
 
-承载：`provider.profiles[]{name, kind=openai|anthropic|codex|scripted, model, models[]?, base_url, api_key_env, api_key?, effort?}` · `provider.retry{max_retries, initial_backoff_ms, max_backoff_ms, stall_timeout_ms}`（§13 的重试策略与 stall watchdog；描述的是线路不是模型，所以全 profile 一份、只认 trusted 层）· `models[]{id, label, efforts[], default_effort?, context_window?}` · `registry{max_tools, pinned_native_tools, weights{uses_recent, uses_total, last_used, success_rate}}` · `environment{backend, shell}` · `extensions.paths`（**已被消费**：§7.2 的第三档 store root，**只认 trusted 层**——project 层写了直接忽略，单测覆盖）。`default.toml` 自带 `openai` / `anthropic` / `codex` / `deepseek` / `deepseek-anthropic` / `scripted` 六个 profile 与它们列出的每个 model id 的目录条目。
+承载：`provider.profiles[]{name, kind=openai|anthropic|codex|scripted, model, models[]?, base_url, api_key_env, api_key?, effort?}` · `provider.retry{max_retries, initial_backoff_ms, max_backoff_ms, stall_timeout_ms}`（§13 的重试策略与 stall watchdog；描述的是线路不是模型，所以全 profile 一份、只认 trusted 层）· `models[]{id, label, efforts[], default_effort?, context_window?}` · `registry{max_tools, pinned_native_tools}`（§5.1 的两档工具面；没有排序权重——内核不排序） · `environment{backend, shell}` · `extensions.paths`（**已被消费**：§7.2 的第三档 store root，**只认 trusted 层**——project 层写了直接忽略，单测覆盖）。`default.toml` 自带 `openai` / `anthropic` / `codex` / `deepseek` / `deepseek-anthropic` / `scripted` 六个 profile 与它们列出的每个 model id 的目录条目。
 
 **两张表描述模型。** profile 说**怎么连**（kind / base_url / 哪个 env 放 key）和**它服务哪些 model id**（`model` 是默认、`models[]` 是可选列表；`ProviderProfile.defaultModel()`：`model` 非空取它，否则 `models[0]`，否则 provider 内置默认）；`[[models]]` 目录说一个 id **是什么**（label、effort 档位、context window），一个 id 不管经几个端点都只写一次。目录是纯描述：kernel 不读它；`launch` / `cli` 用它给 session 默认 effort（`Config.defaultEffort(profile, model_id)` = profile.effort ?? catalog.default_effort ?? 无），`nulya config show` 把它投影给选择器。`[[models]]` 按 `id` 合并、只认 trusted 层——project 层不能改一个 model id 的含义或让 session 静默换 effort。
 
@@ -460,7 +458,7 @@ user 层与 workspace 的 `.nulya/` 同形、每个平台一个好找的位置�
 
 1. **parent 必须存在。** 指向虚空的 lineage 不是 provenance——读不到父 header 就 exit 1，不建文件。
 2. **不点名模型时继承父的冻结身份**（`model` profile 名 + `model_identity` 原样）。压缩是同一场对话换个文件，不该因为 `active_profile` 期间漂了就换了说话对象。`--profile` / `--model` 任一给出即按今天的 config 重新解析（分叉到别的模型是合法用法）。
-3. **composition 不继承**，照常从 config 现解。新 session 正是 promotion 与新 activate 版本该生效的地方（§5.5、§7.5），而 fork 就是一个 session 边界。
+3. **composition 不继承**（pin 与 `--with` 都要再传一次），照常从 config 现解。新 session 正是今天的 pin 与新 activate 版本该生效的地方（§5.1、§7.5），而 fork 就是一个 session 边界。
 
 **何时压、压成什么，都不在内核里。** 前者是 driver 的 policy（内核没有对应的 config 键——没人消费的键就是死代码，已删），后者是模型的判断。两者都由 driver 用现成的 `session append` / `session step` / `session new --parent` 组合出来——TUI 的 `/compact` 是第一个 consumer（tui.md §11），内核既不知道也不关心发生过一次压缩。
 
@@ -526,7 +524,7 @@ nulya ext init [--script] [--user] <id> [tool] | build <path> [--user]
           | run <id>[@<version>] [tool] (<json-args> | --arg k=v …)
           | activate [--user] <id> <version> | rollback [--user] <id> <version> | deactivate [--user] <id>
           | list | inspect <id> | api [protocol|permissions|examples]
-nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--with <id>[@<version>]]…
+nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--with <id>[@<version>]]… [--pin ext:<id>/<tool>]…
                                                          ← 冻结 composition + 模型身份、写 header，打印 session id
           | append <id> <text|--file f>                  ← 把一条 user turn 投进 inbox（下一 step 边界进 ledger）
           | step <id> [--max-steps N] [--effort E] [--stream]
@@ -550,7 +548,8 @@ nulya                       ← 无参数：固定 prompt demo（现经 durable 
 
 - `nulya src`：build.zig 把整个 `src/**` `@embedFile` 进二进制（源码 ~200KB，紧挨 ~90MB 工具链，恒开无 gate）；`nulya src <path>` 按 `src/` 相对路径打印（`prompt.zig`、`extension/store.zig`），**默认剥 top-level `test` 块**（读结构/契约时不付测试 token），`--tests`/`--raw` 打印原样（Zig 风格参照）。剥离靠 zig-fmt 不变量：顶层 decl 的收尾 `}` 在第 0 列，无需 tokenizer（`source.zig`）。测试留在文件里（Zig 惯例、人可读、风格参照），改的只是**投影**不是**存储**——`src/` 一字未动。
 - `nulya ext api`：协议 topic 现在**打印真实 `extension/protocol.zig` 源码**（是 `nulya src` 的特例），wire ABI 与实现代码零漂移；`permissions` / `examples` 仍是短说明（策略与 CLI 用法，不随代码漂）。
-- **`session new --with <id>[@<version>]`（可重复）= composition membership，不是 native pin。** 把一个**已 built** 的版本 union 进这一场的 composition：它的 skills 进 catalog、system_prompts 进 system blocks、tools 可经 `nulya ext run <id>@<version>` 调用（点名冻结的版本，不依赖 `current`）；**tool 要不要占 native 槽仍然是 `registry.pinned_native_tools` / usage ranking 的事**（两根轴分开）。同 id 覆盖 discovery 的结果（这一场说了算），重复 `--with` 同一个 id 后者胜。版本解析：给了 `@version` 就用它，没给就用该 id 的 `current`——**没有 `current` 就 exit 1，内核不猜**（"只有一个 built 版本就用它"这类聪明会让同一条命令在第二次 build 之后含义漂移）。所以一个**故意不 activate** 的包（mode / evolution，activate 了就会进每一场 session 的 system blocks）要按 `--with <id>@<version>` 带入，version 由 `ext build` 打印。落地不需要新机制：`--with` 只改 `SessionComposition.init` 的输入，结果照常冻进 header 的 `active`，所以 `initFrozen` 零改动、resume 自然重建同一份 composition。fork（`--parent`）不继承——composition 一律现解（§11），要就再传一次。
+- **`session new --pin ext:<id>/<tool>`（可重复）= 这一场的 native 工具面。** 与 `registry.pinned_native_tools` **同义同严**，两者取并集去重（config 在前，`--pin` 按 argv 顺序在后）：config 说"这个 workspace 一直要"，`--pin` 说"这一场要"。解析不到就 exit 1 并打出这场的 pin 列表（`PinnedExtensionNotActive` / `PinnedToolNotDeclared` / `InvalidStableToolId` / `ToolBudgetExceeded` 各一句），绝不静默少一个工具地开场。结果照常冻进 header 的 `native_tools`，`initFrozen` 零改动。fork（`--parent`）**不继承** pin——composition 一律现解（§11），driver 要就再传一次。这也是"晋升"的全部含义：没有别的机制会把一个工具放上模型的工具面（§5.1、§5.5）。
+- **`session new --with <id>[@<version>]`（可重复）= composition membership，不是 native pin。** 把一个**已 built** 的版本 union 进这一场的 composition：它的 skills 进 catalog、system_prompts 进 system blocks、tools 可经 `nulya ext run <id>@<version>` 调用（点名冻结的版本，不依赖 `current`）；**tool 要不要占 native 槽是 `--pin` / `registry.pinned_native_tools` 的事**（两根轴分开）。同 id 覆盖 discovery 的结果（这一场说了算），重复 `--with` 同一个 id 后者胜。版本解析：给了 `@version` 就用它，没给就用该 id 的 `current`——**没有 `current` 就 exit 1，内核不猜**（"只有一个 built 版本就用它"这类聪明会让同一条命令在第二次 build 之后含义漂移）。所以一个**故意不 activate** 的包（mode / evolution，activate 了就会进每一场 session 的 system blocks）要按 `--with <id>@<version>` 带入，version 由 `ext build` 打印。落地不需要新机制：`--with` 只改 `SessionComposition.init` 的输入，结果照常冻进 header 的 `active`，所以 `initFrozen` 零改动、resume 自然重建同一份 composition。fork（`--parent`）不继承——composition 一律现解（§11），要就再传一次。
 - **mode = 贡献 system_prompt 的 data extension + `--with`。** 同一个包两种投放：`activate` = 常驻（每场都有）；不 activate、只 `--with` = 按场。不为 mode 造别的机制。
 - `nulya session list [--json]`：`.nulya/sessions/` 的**只读投影**，按 `created` 倒序（老 header 没有 `created`，退回按 id——id 本身时间有序）：`{sessions:[{id, created, parent, root, model, provider, model_id, nulya{version, kernel_hash}（创建它的二进制，§3.4；老 session 两项皆空）, events, composition{active:["id@version"], native_tools, system_prompts:["id@version/path"]}, usage（每条 assistant 的 `usage` 求和，§3.1）, episode_usage, first_user_text（截断）, outcome{verdict,note,at,source,by}|null}]}`。定位同 `config show`：外壳投影，不决定任何事，也不写任何东西；第一批消费者是 evolution skill（一眼看完很多场而不必逐个读 ledger）与 TUI 的 `/sessions`。一个读不动的 session 文件被跳过而不是让整条命令失败。**`session new` 从此写 header 的 `created`**（RFC3339 UTC）。三个派生列：
   - **`root` / `episode_usage` = episode 的连接，只发生在这个投影里。** `/compact` 与 handoff 用 `--parent` 分叉（§11），所以一件事常常横跨一串文件；`root` 是沿 `parent` 链在**本次列出的** session 里能走到的最老祖先（走不到的父——别的 workspace、被删掉的文件——就让这个 session 自己当 root，绝不因此让列表失败），`episode_usage` 是同 `root` 的所有 session 的 `usage` 求和。**outcome journal 不参与**：一条 verdict 永远记在被点名的那个 id 上，"按 episode 理解"是消费者的事。文本形态只在 `root != id` 时多打一列 `root <id>`。
@@ -599,20 +598,18 @@ shell / edit 永久 builtin                         tools/
 immutable package + 内容寻址版本                  extension/store.zig, integrity.zig
 build / activate / rollback / integrity           extension/build_ext.zig, store.zig
 extension JSON-RPC tool/call                      extension/protocol.zig, invoke.zig
-SessionComposition 版本冻结（pin + auto 同一路径） composition.zig
+SessionComposition 版本冻结（pin 一条路径）        composition.zig
 ToolExecutor / Binding（builtin/extension 同构）   tool.zig, extension/tools.zig
 skills + 渐进披露 catalog                          skill.zig, extension/skills.zig
 system prompts 投影                                prompt.zig, composition.zig
 durable append-only usage journal                  tool_stats.zig
-ranking policy（纯函数）                           tool_selection.zig
-session-boundary 自动晋升                          promotion.zig → composition.zig
 ```
 
 **可自生长（内核之上皆可学习）：** grep / glob / git / web-search / browser / pdf / excel / db / github / docker / lsp / … 全是 extension，不进 kernel。
 
 ### 15.2 三层：kernel 是 primitives，policy 是 interpretation
 
-Kernel 只提供 primitives（`activate(version)` · `rollback(version)` · usage facts · frozen composition）；**Evolution Policy** 在其上消费 primitives 产出判断（retain / promote / rollback）。当前 `tool_selection.rank()` 就是第一代 Evolution Policy（§5.5）。**Facts are durable; policy is replaceable.**
+Kernel 只提供 primitives（`activate(version)` · `rollback(version)` · usage facts · frozen composition · pin）；**Evolution Policy** 在其上消费 primitives 产出判断（retain / promote / rollback）。第一代 Evolution Policy 不在内核里，是 **evolution session**（`extensions/evolution`，PLAN §3.7）：它读两条 journal 与 `session list`，提议一条 pin，人或它自己写下去。**Facts are durable; policy is replaceable.**
 
 ### 15.3 Non-goals（永不做成 core subsystem，属 Agent / Policy 层）
 
@@ -629,7 +626,7 @@ GapDetector · WorkflowMiner · ToolSynthesisManager · AutoRefactor · RewardMo
 
 > **Nulya v0.1 自带两个工具。第三个工具由 Nulya 自己创造。**
 
-`tests/e2e.zig`（真实 built binary，无 mock）证明：一个只暴露 shell + edit 的 session，由 deterministic 模型经这两个 builtin 跑 `nulya ext init/build/activate/run` 亲手造出新扩展并记录 usage，全程该工具不进 native 面；下一个 session 排名这份 usage 后把它自动晋升为 native 工具并按冻结版本执行；mid-session activate v2 后 session native 仍 v1 / CLI live v2 / 新 session native v2。
+`tests/e2e.zig`（真实 built binary，无 mock）证明：一个只暴露 shell + edit 的 session，由 deterministic 模型经这两个 builtin 跑 `nulya ext init/build/activate/run` 亲手造出新扩展并记录 usage，全程该工具不进 native 面；**光有 usage 的下一场仍然只有 shell + edit**；给了 pin（`.nulya/config.toml` 的 `registry.pinned_native_tools` 或 `session new --pin`，两种都测）的下一场才把它放上 native 面并按冻结版本执行；mid-session activate v2 后 session native 仍 v1 / CLI live v2 / 新 session native v2。
 
 **已落地 / 未落地的一句话清单在 [CLAUDE.md](../CLAUDE.md)「现状一句话」；去向在 [PLAN.md](PLAN.md) §1 路线图。** 开发历史（底座 7 组提交等）见 `history/v0.1.md`。
 

@@ -4,7 +4,7 @@
 //! binary is its own module and can only reach core code through what this facade
 //! re-exports. This file is NOT part of the shipped `nulya` binary — nothing in
 //! the root module graph imports it (it exists purely so the e2e tests can drive
-//! the real session / composition / promotion / extension code paths).
+//! the real session / composition / extension code paths).
 //!
 //! Keep it a thin re-export surface: add a line when a test genuinely needs a
 //! core module, never any logic.
@@ -19,7 +19,6 @@ pub const ledger = @import("ledger.zig");
 pub const manifest = @import("extension/manifest.zig");
 pub const outcome = @import("outcome.zig");
 pub const prompt = @import("prompt.zig");
-pub const promotion = @import("promotion.zig");
 pub const protocol = @import("extension/protocol.zig");
 pub const provider = @import("provider.zig");
 pub const session = @import("session.zig");

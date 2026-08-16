@@ -28,7 +28,7 @@ pub fn main(init: std.process.Init) !u8 {
 /// Bare `nulya` runs a fixed-prompt demo over the same durable session path a
 /// driver uses (DESIGN §3.4, §14). It is a CLIENT of the CLI's own verbs —
 /// `session new`, then `session append`, then `session step` — rather than a
-/// second assembly of config, environment, promotion and session creation; the
+/// second assembly of config, environment and session creation; the
 /// demo can therefore never drift from what `nulya session *` actually does.
 /// The offline scripted provider stands in when no credential is set (`session
 /// new` says so on stderr).
@@ -52,8 +52,6 @@ test {
     _ = @import("journal.zig");
     _ = @import("tool_stats.zig");
     _ = @import("outcome.zig");
-    _ = @import("tool_selection.zig");
-    _ = @import("promotion.zig");
     _ = @import("registry.zig");
     _ = @import("skill.zig");
     _ = @import("composition.zig");

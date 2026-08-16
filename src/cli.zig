@@ -23,7 +23,6 @@ const ledger = @import("ledger.zig");
 const session = @import("session.zig");
 const loop = @import("loop.zig");
 const provider = @import("provider.zig");
-const promotion = @import("promotion.zig");
 const composition = @import("composition.zig");
 const launch = @import("launch.zig");
 const source = @import("source.zig");
@@ -1495,6 +1494,35 @@ fn withRefs(alloc: std.mem.Allocator, args: []const []const u8) ![]composition.W
     return out.toOwnedSlice(alloc);
 }
 
+/// The session's native tool pins: the config's `registry.pinned_native_tools`
+/// first, then every `--pin <ext:id/tool>` in argv order (the flag is
+/// repeatable). Both spellings mean the same thing and are equally strict —
+/// config says "in this workspace, always", `--pin` says "for this session"
+/// (DESIGN §5.1). An id already present is not added twice, so naming a
+/// configured pin again is a no-op rather than a `DuplicateToolId`. Slices
+/// borrow `configured` and `args`; the caller owns only the returned array.
+fn pinRefs(alloc: std.mem.Allocator, configured: []const []const u8, args: []const []const u8) ![][]const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    errdefer out.deinit(alloc);
+    for (configured) |pin| {
+        if (!containsString(out.items, pin)) try out.append(alloc, pin);
+    }
+    var i: usize = 0;
+    while (i + 1 < args.len) : (i += 1) {
+        if (!std.mem.eql(u8, args[i], "--pin")) continue;
+        if (!containsString(out.items, args[i + 1])) try out.append(alloc, args[i + 1]);
+        i += 1;
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+fn containsString(haystack: []const []const u8, needle: []const u8) bool {
+    for (haystack) |item| {
+        if (std.mem.eql(u8, item, needle)) return true;
+    }
+    return false;
+}
+
 /// `<id>[@<version>]` — the one spelling of "an extension, maybe at an exact
 /// version" shared by `session new --with` and `ext run`. Version ids contain
 /// no `@`, extension ids neither, so the last `@` splits unambiguously.
@@ -1562,9 +1590,9 @@ pub fn createSession(alloc: std.mem.Allocator, io: std.Io, args: []const []const
     // opens a new file for the same conversation, and who that conversation is
     // with must not change because `active_profile` moved meanwhile (physics §2
     // in spirit — the identity was frozen once, at the root). Composition
-    // deliberately does NOT come along: a new session is exactly where promotion
-    // and newly activated versions are meant to take hold (DESIGN §5.5, §7.5),
-    // and a fork is a session boundary like any other.
+    // deliberately does NOT come along: a new session is exactly where today's
+    // pins and newly activated versions are meant to take hold (DESIGN §5.1,
+    // §7.5), and a fork is a session boundary like any other.
     //
     // Two levels of continuing, because the two flags mean different things:
     // `--profile` names a different way to reach a provider, so it replaces the
@@ -1625,14 +1653,6 @@ pub fn createSession(alloc: std.mem.Allocator, io: std.Io, args: []const []const
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try cwdRealPath(io, &cwd_buf);
 
-    const ranked = try promotion.rankExtensionTools(alloc, io, cwd_path, .{
-        .uses_recent = cfg.registry.weights.uses_recent,
-        .uses_total = cfg.registry.weights.uses_total,
-        .last_used = cfg.registry.weights.last_used,
-        .success_rate = cfg.registry.weights.success_rate,
-    });
-    defer promotion.freeRankedIds(alloc, ranked);
-
     var lenv = launch.localEnvironment(alloc, io, &cfg) catch |err| switch (err) {
         error.UnsupportedEnvironmentBackend => {
             try printOut(alloc, io, "environment backend '{s}' is not implemented; only local\n", .{@tagName(cfg.environment.backend)});
@@ -1650,6 +1670,12 @@ pub fn createSession(alloc: std.mem.Allocator, io: std.Io, args: []const []const
     const with = try withRefs(alloc, args);
     defer alloc.free(with);
 
+    // `--pin ext:<id>/<tool>` (repeatable), unioned with the configured pins:
+    // the whole native tool selection, and the only one there is — the usage
+    // journal never puts a tool on the model's face by itself (DESIGN §5.1).
+    const pins = try pinRefs(alloc, cfg.registry.pinned_native_tools, args);
+    defer alloc.free(pins);
+
     // A placeholder handle is enough since `new` never steps.
     var holder: launch.ModelHolder = .{ .scripted = .{} };
     var sess = session.AgentSession.createDurable(alloc, .{
@@ -1660,8 +1686,7 @@ pub fn createSession(alloc: std.mem.Allocator, io: std.Io, args: []const []const
         },
         .extension_roots = ext_roots,
         .registry = .{
-            .pinned_native_tools = cfg.registry.pinned_native_tools,
-            .ranked_native_tools = ranked,
+            .pinned_native_tools = pins,
             .max_tools = cfg.registry.max_tools,
             .with = with,
         },
@@ -1680,6 +1705,26 @@ pub fn createSession(alloc: std.mem.Allocator, io: std.Io, args: []const []const
             try printOut(alloc, io, "session new failed: --with names an extension with no such built version (see `nulya ext list`)\n", .{});
             return null;
         },
+        // Same rule for pins: a session missing a tool the operator asked for is
+        // not the session that was asked for. Name the pins so the fix is
+        // obvious — the bad one is in that list, in `.nulya/config.toml` or on
+        // the command line.
+        error.PinnedExtensionNotActive => {
+            try printPinFailure(alloc, io, pins, "names an extension with no active version here (see `nulya ext list`)");
+            return null;
+        },
+        error.PinnedToolNotDeclared => {
+            try printPinFailure(alloc, io, pins, "names a tool its active version does not declare (see `nulya ext inspect <id>`)");
+            return null;
+        },
+        error.InvalidStableToolId => {
+            try printPinFailure(alloc, io, pins, "is not a stable tool id (want ext:<extension-id>/<tool-name>)");
+            return null;
+        },
+        error.ToolBudgetExceeded => {
+            try printPinFailure(alloc, io, pins, "does not fit registry.max_tools (builtins included)");
+            return null;
+        },
         else => {
             try printOut(alloc, io, "session new failed: {s}\n", .{@errorName(err)});
             return null;
@@ -1688,6 +1733,14 @@ pub fn createSession(alloc: std.mem.Allocator, io: std.Io, args: []const []const
     sess.deinit();
 
     return try alloc.dupe(u8, id);
+}
+
+/// One line for a refused pin: what went wrong plus the pins this session asked
+/// for, so the reader does not have to guess which of the two sources carried it.
+fn printPinFailure(alloc: std.mem.Allocator, io: std.Io, pins: []const []const u8, reason: []const u8) !void {
+    const listed = try std.mem.join(alloc, " ", pins);
+    defer alloc.free(listed);
+    try printOut(alloc, io, "session new failed: a pin {s}; pinned: {s}\n", .{ reason, listed });
 }
 
 fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
@@ -2286,10 +2339,13 @@ fn sliceHasFlag(args: []const []const u8, flag: []const u8) bool {
 fn sessionUsage(io: std.Io) !u8 {
     try printRaw(io,
         \\usage:
-        \\  nulya session new [--profile P] [--model ID] [--parent <id>:<seq>]
+        \\  nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--with <id>[@<ver>]]… [--pin ext:<id>/<tool>]…
         \\                                                             freeze composition + model, print a new session id
         \\                                                             (P: a config profile, default active_profile; ID: one of its
         \\                                                             models, default the profile's — see `nulya config show`)
+        \\                                                             --with composes a built version into this session (membership)
+        \\                                                             --pin puts an extension tool on the model's tool face for this
+        \\                                                             session, on top of registry.pinned_native_tools; strict
         \\  nulya session append <id> <text> | --file <path>           queue a user turn (appended at the next step boundary)
         \\  nulya session step <id> [--max-steps N] [--effort E] [--stream]
         \\                                                             run to turn end (or the budget); stdout = event JSONL
@@ -2602,6 +2658,36 @@ test "--with is repeatable and splits <id>[@<version>]" {
     const none = try withRefs(alloc, &.{ "--profile", "scripted" });
     defer alloc.free(none);
     try std.testing.expectEqual(@as(usize, 0), none.len);
+}
+
+test "--pin unions with the configured pins, in order, without duplicating one" {
+    const alloc = std.testing.allocator;
+    const configured = [_][]const u8{ "ext:web.search/web_search", "ext:notes/append" };
+    const args = [_][]const u8{
+        "--profile", "scripted",
+        "--pin",     "ext:demo/greet",
+        // Re-naming a configured pin is a no-op, not a duplicate id.
+        "--pin",     "ext:notes/append",
+        "--pinned",  "ignored",
+        "--pin",
+    }; // a trailing --pin with no value is not a pin
+    const pins = try pinRefs(alloc, &configured, &args);
+    defer alloc.free(pins);
+
+    try std.testing.expectEqual(@as(usize, 3), pins.len);
+    try std.testing.expectEqualStrings("ext:web.search/web_search", pins[0]);
+    try std.testing.expectEqualStrings("ext:notes/append", pins[1]);
+    try std.testing.expectEqualStrings("ext:demo/greet", pins[2]);
+
+    // Neither source: an empty native selection, which is the default face.
+    const none = try pinRefs(alloc, &.{}, &.{ "--profile", "scripted" });
+    defer alloc.free(none);
+    try std.testing.expectEqual(@as(usize, 0), none.len);
+
+    // Config alone is enough; the flag is only the per-session addition.
+    const configured_only = try pinRefs(alloc, &configured, &.{});
+    defer alloc.free(configured_only);
+    try std.testing.expectEqual(@as(usize, 2), configured_only.len);
 }
 
 test "parseParent parses <session>:<seq> and rejects malformed input" {

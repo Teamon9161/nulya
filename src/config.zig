@@ -111,17 +111,12 @@ pub const Provider = struct {
     }
 };
 
-pub const RegistryWeights = struct {
-    uses_recent: f64 = 1.0,
-    uses_total: f64 = 0.25,
-    last_used: f64 = 0.5,
-    success_rate: f64 = 1.0,
-};
-
+/// The model-facing tool face: how many tools a session may expose at all, and
+/// which extension tools take one of those slots. Both are decisions, never
+/// derived — nothing in the kernel reads usage to fill a slot (DESIGN §5.1).
 pub const Registry = struct {
     max_tools: u32 = 8,
     pinned_native_tools: []const []const u8 = &.{},
-    weights: RegistryWeights = .{},
 };
 
 pub const Environment = struct {
@@ -219,14 +214,6 @@ const RawModelParams = struct {
 const RawRegistry = struct {
     max_tools: ?u32 = null,
     pinned_native_tools: ?[]const []const u8 = null,
-    weights: ?RawRegistryWeights = null,
-};
-
-const RawRegistryWeights = struct {
-    uses_recent: ?f64 = null,
-    uses_total: ?f64 = null,
-    last_used: ?f64 = null,
-    success_rate: ?f64 = null,
 };
 
 const RawEnvironment = struct {
@@ -315,7 +302,6 @@ fn mergeTrusted(cfg: *Config, raw: RawConfig) !void {
     if (raw.registry) |registry| {
         if (registry.max_tools) |max_tools| cfg.registry.max_tools = max_tools;
         if (registry.pinned_native_tools) |tools| cfg.registry.pinned_native_tools = try dupeStringList(arena, tools);
-        if (registry.weights) |weights| mergeWeights(&cfg.registry.weights, weights);
     }
 
     if (raw.environment) |env| {
@@ -412,13 +398,6 @@ fn mergeModelFields(arena: std.mem.Allocator, model: *ModelParams, raw: RawModel
     if (raw.efforts) |efforts| model.efforts = try dupeStringList(arena, efforts);
     if (raw.default_effort) |effort| model.default_effort = try arena.dupe(u8, effort);
     if (raw.context_window) |window| model.context_window = window;
-}
-
-fn mergeWeights(weights: *RegistryWeights, raw: RawRegistryWeights) void {
-    if (raw.uses_recent) |value| weights.uses_recent = value;
-    if (raw.uses_total) |value| weights.uses_total = value;
-    if (raw.last_used) |value| weights.last_used = value;
-    if (raw.success_rate) |value| weights.success_rate = value;
 }
 
 fn dupeStringList(arena: std.mem.Allocator, values: []const []const u8) ![]const []const u8 {

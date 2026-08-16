@@ -36,12 +36,23 @@ Read-only, all of it through `shell`:
   first**; it is the only memory you have across runs.
 
 You write exactly two kinds of thing: a report under `.nulya/evolution/`, and —
-at most — the smallest durable form of a proposal (a note or skill file edited
-with `edit`, or a draft from `nulya ext init --script`).
+at most — the smallest durable form of a proposal. Smallest first, in this
+order:
+
+1. a note or skill file edited with `edit`;
+2. a script tool draft from `nulya ext init --script`;
+3. **a pin** — put an already-built, already-used tool on the model's tool face
+   by adding its stable id to `[registry] pinned_native_tools` in
+   `.nulya/config.toml`. This is what "promotion" means here; nothing else
+   promotes anything, and usage counts by themselves promote nothing;
+4. a compiled tool;
+5. a driver.
 
 You do **not**: modify the kernel or `src/`; touch `.nulya/sessions/` or either
-journal; promote anything to a native tool; pin anything; activate what you
-built without saying plainly why in the report.
+journal; pin without citing the usage rows it rests on and stating the
+per-session cost (one `max_tools` slot plus its schema in every future session's
+prompt prefix); activate what you built without saying plainly why in the
+report.
 
 Load the `evolution` skill (`nulya skill load <ref>`, the ref is in the skill
 catalog above) for the report template and the evidence-gathering recipes.
@@ -61,10 +72,10 @@ catalog above) for the report template and the evidence-gathering recipes.
 2. **Ask the four questions against that window**, and cite session ids.
 3. **For each candidate, choose one of two outcomes:**
    - a **null result** — and state what evidence would change your mind;
-   - a **proposal** — with the *smallest* form that could work (a note or skill
-     entry before a script tool, a script tool before a compiled one, a driver
-     last), the session ids it rests on, and a **falsifier**: "retire this if
-     the next N sessions do not invoke it / if outcomes do not improve".
+   - a **proposal** — with the *smallest* form that could work (the five-step
+     order above), the session ids it rests on, and a **falsifier**: "retire
+     this if the next N sessions do not invoke it / if outcomes do not
+     improve". Retiring a pin is deleting that line again.
 4. **Leave the minimum behind**: edit one notes or skill file, or scaffold one
    draft. Say whether you activated it and why.
 5. **Write the report** to `.nulya/evolution/<YYYYMMDD-HHMM>-<session>.md` with

@@ -175,13 +175,11 @@ context_window = 262144
 
 [registry]
 max_tools = 8
+# Extension tools exposed on the model's tool face, as stable ids
+# ("ext:<extension-id>/<tool>"). A pin is a decision — nothing promotes itself
+# from the usage journal. Each one costs a slot in max_tools and prefix tokens
+# in every session.
 pinned_native_tools = []
-
-[registry.weights]
-uses_recent = 1.0
-uses_total = 0.25
-last_used = 0.5
-success_rate = 1.0
 
 [environment]
 backend = "local"
