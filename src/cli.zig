@@ -2583,11 +2583,11 @@ test "config show projects profiles with credential availability and the catalog
 test "--with is repeatable and splits <id>[@<version>]" {
     const alloc = std.testing.allocator;
     const args = [_][]const u8{
-        "--profile",       "scripted",
-        "--with",          "evolution",
-        "--with",          "web.search@v-0123456789abcdef01234567",
-        "--parent",        "s-1:4",
-        "--with-nothing",  "ignored",
+        "--profile",      "scripted",
+        "--with",         "evolution",
+        "--with",         "web.search@v-0123456789abcdef01234567",
+        "--parent",       "s-1:4",
+        "--with-nothing", "ignored",
         "--with",
     }; // a trailing --with with no value is not a ref
     const refs = try withRefs(alloc, &args);

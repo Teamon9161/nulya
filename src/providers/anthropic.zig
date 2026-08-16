@@ -491,7 +491,7 @@ pub const StreamState = struct {
                 // With `display: omitted` the text is empty and the signature is
                 // still what makes the block valid.
                 const item = try std.json.Stringify.valueAlloc(self.alloc, .{
-                    .@"type" = "thinking",
+                    .type = "thinking",
                     .thinking = think.text.written(),
                     .signature = think.signature.written(),
                 }, .{});

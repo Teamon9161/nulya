@@ -255,20 +255,22 @@ pub fn runStepWithPrompt(
     const truncated = turn.stop_reason == .max_tokens;
     const calls = if (truncated) try replayableCalls(alloc, turn.calls) else turn.calls;
     defer if (truncated) alloc.free(calls);
-    try l.append(.{ .assistant = .{
-        .reasoning = turn.reasoning,
-        .text = turn.text,
-        .calls = calls,
-        // Recorded only when the provider reported a cost. All-zero means "this
-        // provider does not price turns" (the scripted stand-in), which is not
-        // the same fact as "this step cost zero" — so it is left off the line
-        // entirely, and old ledgers stay byte-identical.
-        .usage = if (turn.usage.isZero()) null else turn.usage,
-        // Recorded even when the turn wrote calls (where the marker batch already
-        // tells the story): the fact belongs to the turn, and a reader should not
-        // have to infer it from the batch that follows.
-        .stop_reason = turn.stop_reason,
-    } });
+    try l.append(.{
+        .assistant = .{
+            .reasoning = turn.reasoning,
+            .text = turn.text,
+            .calls = calls,
+            // Recorded only when the provider reported a cost. All-zero means "this
+            // provider does not price turns" (the scripted stand-in), which is not
+            // the same fact as "this step cost zero" — so it is left off the line
+            // entirely, and old ledgers stay byte-identical.
+            .usage = if (turn.usage.isZero()) null else turn.usage,
+            // Recorded even when the turn wrote calls (where the marker batch already
+            // tells the story): the fact belongs to the turn, and a reader should not
+            // have to infer it from the batch that follows.
+            .stop_reason = turn.stop_reason,
+        },
+    });
     if (turn.calls.len == 0) return .{ .usage = turn.usage, .stop_reason = turn.stop_reason }; // model addressed the user; step complete.
     if (truncated) {
         try appendMarkerBatch(alloc, l, calls, tool_truncated_output);
@@ -642,7 +644,6 @@ test "completeInterruptedToolBatch appends unknown results for an assistant tail
     try std.testing.expect(std.mem.indexOf(u8, repaired[0].output, "state is unknown") != null);
 }
 
-
 test "a capability note reaches the provider as a capability_note turn" {
     const alloc = std.testing.allocator;
 
@@ -896,9 +897,9 @@ test "canceling provider streaming appends no partial assistant and leaves the l
     const tools: registry.ToolSetSnapshot = .{ .tools = &.{} };
 
     var fut = io.async(runStepWithPrompt, .{
-        alloc,                                                            &l,
+        alloc,                                                                 &l,
         provider.Model{ .ptr = &model_impl, .vtable = &BlockingModel.vtable }, &prompt_ir,
-        tools,                                                            step_ctx,
+        tools,                                                                 step_ctx,
         provider.Options{},
     });
     try ready.waitTimeout(io, testDeadline(io, 5000));

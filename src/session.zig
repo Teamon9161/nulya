@@ -1168,7 +1168,7 @@ test "a canceled step records no tool usage stats" {
     defer sess.l.deinit();
 
     try sess.appendUser("go");
-    var fut = io.async(stepCall, .{ &sess });
+    var fut = io.async(stepCall, .{&sess});
     try ready.waitTimeout(io, .{ .deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromMilliseconds(5000) }) });
     const outcome = try fut.cancel(io);
     try std.testing.expectEqual(loop.StepStatus.canceled, outcome.status);
