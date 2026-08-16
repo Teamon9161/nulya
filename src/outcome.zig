@@ -11,14 +11,32 @@
 //! Format: one JSON object per line in `<workspace>/.nulya/session-outcomes.jsonl`:
 //!
 //!   {"v":1,"session":"s-…","verdict":"success","note":"…","at":"2026-08-16T09:31:00Z"}
+//!   {"v":1,"session":"s-…","verdict":"success","at":"…","source":"agent","by":"s-…"}
+//!   {"v":1,"session":"s-…","verdict":"failure","at":"…","seq":7}
 //!
 //! `note` is optional. A session may be judged more than once — every line is
 //! kept and readers take the LAST one for a session (`latestFor`), because a
 //! correction is an append like everywhere else in Nulya. **No line at all means
-//! UNKNOWN, never failure.** There is deliberately no `source` field: today only
-//! a person writes these (through the CLI or a front end), so recording that
-//! would be a constant; when a driver starts writing them automatically it adds
-//! `source`, and a v1 line without one still reads as "judged by a person".
+//! UNKNOWN, never failure.**
+//!
+//! Three optional columns say WHO judged and WHAT was judged, and each is
+//! written only when it is not the default — so a person's verdict on a whole
+//! session is byte-identical to the line this journal wrote before they existed:
+//!
+//!   * `source` — absent means a person (`human`). `agent` means the line was
+//!     written from inside a session's own shell, which `nulya session outcome`
+//!     detects through `NULYA_SESSION`. The distinction is load-bearing for the
+//!     slow loop: an agent grading the very session it is running is a CLAIM,
+//!     not ground truth, and without this column it was indistinguishable from
+//!     a human verdict. An unrecognized `source` is an error, never coerced to
+//!     `human` — silently reading someone else's verdict as a person's is the
+//!     failure this column exists to prevent.
+//!   * `by` — which session's shell wrote it (only with `source:"agent"`), so
+//!     `by == session` reads at a glance as "this session graded itself".
+//!   * `seq` — a judgment about ONE assistant turn instead of the whole session
+//!     (PLAN §3.7.8). `latestFor` ignores these: the verdict that stands for a
+//!     session is the last WHOLE-SESSION line, and a turn-level correction must
+//!     never silently become the session's grade.
 //!
 //! The file discipline (append one complete line under the journal's writer
 //! lease, repair a torn crash tail on write and skip it on read, a missing file
@@ -55,29 +73,43 @@ pub const Verdict = enum {
     }
 };
 
+/// Who wrote a judgment. Absent on the wire means `human`: a person judging a
+/// finished session through the CLI or a front end. `agent` means the writer was
+/// a session's own shell — evidence with a different standing, never ground
+/// truth about itself.
+pub const Source = enum {
+    human,
+    agent,
+
+    pub fn parse(text: []const u8) ?Source {
+        return std.meta.stringToEnum(Source, text);
+    }
+};
+
 /// One recorded judgment. Strings are owned by whoever received this from
-/// `readAll` (free the slice with `freeAll`).
+/// `readAll` (free the slice with `freeAll`); `append` takes the same struct, so
+/// there is one shape for a judgment rather than a parameter list and a record.
 pub const Outcome = struct {
     session: []const u8,
     verdict: Verdict,
     note: ?[]const u8 = null,
     /// RFC3339 UTC instant the judgment was recorded, as the writer saw it.
     at: []const u8,
+    /// Who judged. Defaults to `human`, which is what an absent column means.
+    source: Source = .human,
+    /// The session whose shell wrote this, when `source == .agent`. Null
+    /// otherwise — and `by == session` is a self-grade.
+    by: ?[]const u8 = null,
+    /// The assistant turn this judges, or null for the whole session. Only
+    /// whole-session lines answer `latestFor`.
+    seq: ?u64 = null,
 };
 
 /// Append one judgment as a complete line. `at` is supplied by the caller (the
 /// CLI passes the current instant; tests pass a fixed one), so this module stays
 /// a pure encoder over the journal file.
-pub fn append(
-    alloc: std.mem.Allocator,
-    io: std.Io,
-    cwd: []const u8,
-    session: []const u8,
-    verdict: Verdict,
-    note: ?[]const u8,
-    at: []const u8,
-) !void {
-    const line = try encodeOutcome(alloc, session, verdict, note, at);
+pub fn append(alloc: std.mem.Allocator, io: std.Io, cwd: []const u8, entry: Outcome) !void {
+    const line = try encodeOutcome(alloc, entry);
     defer alloc.free(line);
     try journal.appendLine(io, cwd, journal_rel, line);
 }
@@ -101,12 +133,15 @@ pub fn readAll(alloc: std.mem.Allocator, io: std.Io, cwd: []const u8) ![]Outcome
     return outcomes.toOwnedSlice(alloc);
 }
 
-/// The judgment that stands for `session`: the LAST line naming it, since a
-/// later append corrects an earlier one. Null means unknown — which is not the
-/// same as failure.
+/// The judgment that stands for `session`: the LAST WHOLE-SESSION line naming
+/// it, since a later append corrects an earlier one. Lines carrying a `seq`
+/// judge one turn and are skipped — they are evidence about a moment, not about
+/// how the session turned out. Null means unknown — which is not the same as
+/// failure.
 pub fn latestFor(outcomes: []const Outcome, session: []const u8) ?Outcome {
     var found: ?Outcome = null;
     for (outcomes) |o| {
+        if (o.seq != null) continue;
         if (std.mem.eql(u8, o.session, session)) found = o;
     }
     return found;
@@ -117,6 +152,7 @@ pub fn freeAll(alloc: std.mem.Allocator, outcomes: []Outcome) void {
         alloc.free(o.session);
         if (o.note) |n| alloc.free(n);
         alloc.free(o.at);
+        if (o.by) |b| alloc.free(b);
     }
     alloc.free(outcomes);
 }
@@ -129,15 +165,12 @@ const WireOutcome = struct {
     verdict: []const u8,
     note: ?[]const u8 = null,
     at: []const u8 = "",
+    source: ?[]const u8 = null,
+    by: ?[]const u8 = null,
+    seq: ?u64 = null,
 };
 
-fn encodeOutcome(
-    alloc: std.mem.Allocator,
-    session: []const u8,
-    verdict: Verdict,
-    note: ?[]const u8,
-    at: []const u8,
-) ![]u8 {
+fn encodeOutcome(alloc: std.mem.Allocator, entry: Outcome) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(alloc);
     errdefer out.deinit();
     var jw: std.json.Stringify = .{ .writer = &out.writer };
@@ -145,15 +178,30 @@ fn encodeOutcome(
     try jw.objectField("v");
     try jw.write(journal_schema_version);
     try jw.objectField("session");
-    try jw.write(session);
+    try jw.write(entry.session);
     try jw.objectField("verdict");
-    try jw.write(@tagName(verdict));
-    if (note) |n| {
+    try jw.write(@tagName(entry.verdict));
+    if (entry.note) |n| {
         try jw.objectField("note");
         try jw.write(n);
     }
     try jw.objectField("at");
-    try jw.write(at);
+    try jw.write(entry.at);
+    // A default is written by ABSENCE, so the common line — a person judging a
+    // whole session — is exactly the line this journal has always written, and
+    // no schema version has to move.
+    if (entry.source != .human) {
+        try jw.objectField("source");
+        try jw.write(@tagName(entry.source));
+        if (entry.by) |b| {
+            try jw.objectField("by");
+            try jw.write(b);
+        }
+    }
+    if (entry.seq) |s| {
+        try jw.objectField("seq");
+        try jw.write(s);
+    }
     try jw.endObject();
     try out.writer.writeByte('\n');
     return out.toOwnedSlice();
@@ -170,6 +218,12 @@ fn appendParsed(alloc: std.mem.Allocator, outcomes: *std.ArrayList(Outcome), lin
     if (parsed.value.v != journal_schema_version) return error.UnsupportedOutcomeVersion;
     if (parsed.value.session.len == 0) return error.InvalidOutcomeJournal;
     const verdict = Verdict.parse(parsed.value.verdict) orelse return error.InvalidOutcomeJournal;
+    // Absent means human (the rule DESIGN §3.3 reserved for this column); an
+    // unknown value is refused rather than read as one, exactly like a verdict.
+    const source = if (parsed.value.source) |s|
+        Source.parse(s) orelse return error.InvalidOutcomeJournal
+    else
+        .human;
 
     const session = try alloc.dupe(u8, parsed.value.session);
     errdefer alloc.free(session);
@@ -177,7 +231,17 @@ fn appendParsed(alloc: std.mem.Allocator, outcomes: *std.ArrayList(Outcome), lin
     errdefer if (note) |n| alloc.free(n);
     const at = try alloc.dupe(u8, parsed.value.at);
     errdefer alloc.free(at);
-    try outcomes.append(alloc, .{ .session = session, .verdict = verdict, .note = note, .at = at });
+    const by: ?[]const u8 = if (parsed.value.by) |b| try alloc.dupe(u8, b) else null;
+    errdefer if (by) |b| alloc.free(b);
+    try outcomes.append(alloc, .{
+        .session = session,
+        .verdict = verdict,
+        .note = note,
+        .at = at,
+        .source = source,
+        .by = by,
+        .seq = parsed.value.seq,
+    });
 }
 
 fn tmpCwd(alloc: std.mem.Allocator, io: std.Io, tmp: std.testing.TmpDir) ![]u8 {
@@ -194,10 +258,10 @@ test "append and read round-trip preserves order, the optional note, and the exa
     const cwd = try tmpCwd(alloc, io, tmp);
     defer alloc.free(cwd);
 
-    try append(alloc, io, cwd, "s-1", .success, "went fine", "2026-08-16T09:00:00Z");
-    try append(alloc, io, cwd, "s-2", .failure, null, "2026-08-16T09:05:00Z");
+    try append(alloc, io, cwd, .{ .session = "s-1", .verdict = .success, .note = "went fine", .at = "2026-08-16T09:00:00Z" });
+    try append(alloc, io, cwd, .{ .session = "s-2", .verdict = .failure, .at = "2026-08-16T09:05:00Z" });
     // A session may be judged twice; both lines survive.
-    try append(alloc, io, cwd, "s-1", .partial, "on reflection", "2026-08-16T09:10:00Z");
+    try append(alloc, io, cwd, .{ .session = "s-1", .verdict = .partial, .note = "on reflection", .at = "2026-08-16T09:10:00Z" });
 
     const outcomes = try readAll(alloc, io, cwd);
     defer freeAll(alloc, outcomes);
@@ -207,6 +271,10 @@ test "append and read round-trip preserves order, the optional note, and the exa
     try std.testing.expectEqualStrings("went fine", outcomes[0].note.?);
     try std.testing.expectEqualStrings("2026-08-16T09:00:00Z", outcomes[0].at);
     try std.testing.expect(outcomes[1].note == null);
+    // Nothing said means a person judged the whole session.
+    try std.testing.expectEqual(Source.human, outcomes[0].source);
+    try std.testing.expect(outcomes[0].by == null);
+    try std.testing.expect(outcomes[0].seq == null);
 
     // The later judgment stands; an unjudged session is unknown, not a failure.
     try std.testing.expectEqual(Verdict.partial, latestFor(outcomes, "s-1").?.verdict);
@@ -223,6 +291,46 @@ test "append and read round-trip preserves order, the optional note, and the exa
             "{\"v\":1,\"session\":\"s-1\",\"verdict\":\"partial\",\"note\":\"on reflection\",\"at\":\"2026-08-16T09:10:00Z\"}\n",
         raw,
     );
+}
+
+test "who judged and what: an agent line names its session, a seq line judges one turn and never stands for the session" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmpCwd(alloc, io, tmp);
+    defer alloc.free(cwd);
+
+    // A person judges the session; then the session's OWN shell judges it too.
+    try append(alloc, io, cwd, .{ .session = "s-1", .verdict = .partial, .at = "t0" });
+    try append(alloc, io, cwd, .{ .session = "s-1", .verdict = .success, .at = "t1", .source = .agent, .by = "s-1" });
+    // A turn-level signal: one step went wrong, the session as a whole did not.
+    try append(alloc, io, cwd, .{ .session = "s-1", .verdict = .failure, .at = "t2", .seq = 7, .note = "wrong file" });
+
+    var ws = try std.Io.Dir.openDirAbsolute(io, cwd, .{});
+    defer ws.close(io);
+    const raw = try ws.readFileAlloc(io, journal_rel, alloc, .unlimited);
+    defer alloc.free(raw);
+    try std.testing.expectEqualStrings(
+        "{\"v\":1,\"session\":\"s-1\",\"verdict\":\"partial\",\"at\":\"t0\"}\n" ++
+            "{\"v\":1,\"session\":\"s-1\",\"verdict\":\"success\",\"at\":\"t1\",\"source\":\"agent\",\"by\":\"s-1\"}\n" ++
+            "{\"v\":1,\"session\":\"s-1\",\"verdict\":\"failure\",\"note\":\"wrong file\",\"at\":\"t2\",\"seq\":7}\n",
+        raw,
+    );
+
+    const outcomes = try readAll(alloc, io, cwd);
+    defer freeAll(alloc, outcomes);
+    try std.testing.expectEqual(@as(usize, 3), outcomes.len);
+    try std.testing.expectEqual(Source.human, outcomes[0].source);
+    try std.testing.expectEqual(Source.agent, outcomes[1].source);
+    try std.testing.expectEqualStrings("s-1", outcomes[1].by.?); // by == session: a self-grade
+    try std.testing.expectEqual(@as(u64, 7), outcomes[2].seq.?);
+
+    // The self-grade is the last WHOLE-SESSION line, so it stands (readers weigh
+    // it themselves); the turn-level line never does.
+    const latest = latestFor(outcomes, "s-1").?;
+    try std.testing.expectEqual(Verdict.success, latest.verdict);
+    try std.testing.expectEqual(Source.agent, latest.source);
 }
 
 test "a missing journal reads as empty" {
@@ -280,8 +388,12 @@ test "malformed lines are explicit errors; unknown fields and blank lines are to
     try std.testing.expectEqual(@as(usize, 1), torn.len);
     try std.testing.expectEqualStrings("s-0", torn[0].session);
 
+    // An unknown `source` is refused, not read as a person's verdict.
+    try ws.writeFile(io, .{ .sub_path = journal_rel, .data = "{\"v\":1,\"session\":\"s-1\",\"verdict\":\"success\",\"at\":\"t\",\"source\":\"driver\"}\n" });
+    try std.testing.expectError(error.InvalidOutcomeJournal, readAll(alloc, io, cwd));
+
     // A newer writer's extra column, and blank lines, read cleanly.
-    try ws.writeFile(io, .{ .sub_path = journal_rel, .data = "\n{\"v\":1,\"session\":\"s-1\",\"verdict\":\"success\",\"at\":\"t\",\"source\":\"driver\"}\n  \n" });
+    try ws.writeFile(io, .{ .sub_path = journal_rel, .data = "\n{\"v\":1,\"session\":\"s-1\",\"verdict\":\"success\",\"at\":\"t\",\"reviewed_by\":\"nobody\"}\n  \n" });
     const outcomes = try readAll(alloc, io, cwd);
     defer freeAll(alloc, outcomes);
     try std.testing.expectEqual(@as(usize, 1), outcomes.len);
@@ -301,7 +413,7 @@ test "append repairs a truncated crash tail before writing" {
     try ws.createDirPath(io, journal.journal_dir);
     try ws.writeFile(io, .{ .sub_path = journal_rel, .data = "{\"v\":1,\"session\":\"s-1\",\"verdict\":\"success\",\"at\":\"t\"}\n{\"v\":1,\"session\":\"s-2\",\"verd" });
 
-    try append(alloc, io, cwd, "s-3", .partial, null, "t");
+    try append(alloc, io, cwd, .{ .session = "s-3", .verdict = .partial, .at = "t" });
 
     const outcomes = try readAll(alloc, io, cwd);
     defer freeAll(alloc, outcomes);

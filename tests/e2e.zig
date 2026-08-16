@@ -886,6 +886,31 @@ fn runCliEnvs(
     return .{ .code = code, .stdout = try alloc.dupe(u8, result.stdout) };
 }
 
+/// One CLI invocation, keeping STDERR instead of stdout: notes and warnings are
+/// written there precisely so stdout stays the machine-readable surface. Caller
+/// owns the result.
+fn runCliStderr(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    ws: std.Io.Dir,
+    argv: []const []const u8,
+    pairs: []const EnvPair,
+) ![]u8 {
+    var env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    defer env.deinit();
+    for (pairs) |p| try env.put(p.key, p.value);
+    const result = try std.process.run(alloc, io, .{
+        .argv = argv,
+        .cwd = .{ .dir = ws },
+        .environ_map = &env,
+        .stdout_limit = .limited(1 << 20),
+        .stderr_limit = .limited(1 << 20),
+    });
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+    return alloc.dupe(u8, result.stderr);
+}
+
 const sessions_dir_rel = ".nulya" ++ std.fs.path.sep_str ++ "sessions";
 const session_file_rel = sessions_dir_rel ++ std.fs.path.sep_str ++ "s.jsonl";
 
@@ -1682,6 +1707,66 @@ test "cli: NULYA_HOME extensions are visible to ext list / skill list / ext run,
     }
 }
 
+test "cli: activating into the user store from inside a session says so on stderr, and names the system prompt that will enter every future session" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var ws_real: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
+    const home_abs = try std.fs.path.join(alloc, &.{ ws_path, "home" });
+    defer alloc.free(home_abs);
+    const home_env: EnvPair = .{ .key = "NULYA_HOME", .value = home_abs };
+
+    // A data package (no runtime, no toolchain) whose only contribution is a
+    // system prompt — the contribution with the widest blast radius there is.
+    const draft = ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "prompts.demo";
+    try ws.createDirPath(io, draft ++ std.fs.path.sep_str ++ "prompts");
+    try ws.writeFile(io, .{ .sub_path = draft ++ std.fs.path.sep_str ++ "extension.json", .data =
+        \\{"schema":"nulya.extension/v2","id":"prompts.demo","contributes":{"system_prompts":["prompts/tone.md"]}}
+    });
+    try ws.writeFile(io, .{ .sub_path = draft ++ std.fs.path.sep_str ++ "prompts" ++ std.fs.path.sep_str ++ "tone.md", .data = "Answer tersely.\n" });
+
+    const built = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "build", "--user", ".nulya/extensions/prompts.demo" }, &.{home_env});
+    defer alloc.free(built.stdout);
+    try std.testing.expectEqual(@as(u8, 0), built.code);
+    const version = try extractVersion(alloc, built.stdout);
+    defer alloc.free(version);
+
+    // From inside a session, `--user` reaches out of this workspace: the model is
+    // allowed to do it, but not invisibly.
+    {
+        const stderr = try runCliStderr(alloc, io, ws, &.{ exe_abs, "ext", "activate", "--user", "prompts.demo", version }, &.{
+            home_env,
+            .{ .key = "NULYA_SESSION", .value = ".nulya/sessions/s-probe.jsonl" },
+        });
+        defer alloc.free(stderr);
+        const expected = try std.fmt.allocPrint(alloc, "note: activating prompts.demo@{s} in the user store from inside session s-probe: it becomes active for every workspace on this machine and its system prompt enters every future session", .{version});
+        defer alloc.free(expected);
+        try std.testing.expect(std.mem.indexOf(u8, stderr, expected) != null);
+    }
+
+    // Outside a session there is nobody to tell, so nothing is said.
+    {
+        const stderr = try runCliStderr(alloc, io, ws, &.{ exe_abs, "ext", "activate", "--user", "prompts.demo", version }, &.{home_env});
+        defer alloc.free(stderr);
+        try std.testing.expect(std.mem.indexOf(u8, stderr, "note: activating") == null);
+    }
+
+    // And the listing marks the package as one that contributes a system prompt.
+    const list = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "list" }, &.{home_env});
+    defer alloc.free(list.stdout);
+    try std.testing.expect(std.mem.indexOf(u8, list.stdout, "[prompt]") != null);
+}
+
 test "cli: a build that fails to compile leaves no ghost extension in ext list" {
     // `<id>/.lock` is the writer lease, and `Store.lease` creates `<id>/` to hold
     // it — before the compile that may still fail. A failed compile deletes its
@@ -1896,6 +1981,25 @@ test "session cli: list --json reports parent, event count, summed usage and the
     const child_id = try alloc.dupe(u8, std.mem.trim(u8, fork.stdout, " \r\n"));
     defer alloc.free(child_id);
 
+    // Give the fork a priced turn, so the episode total is something the parent's
+    // own file cannot account for. (The scripted provider reports no cost, so the
+    // line is written the way the kernel writes it — the real encoder, no mock.)
+    {
+        const line = try ledger.encodeEventLine(alloc, .{ .assistant = .{
+            .text = "forked and priced",
+            .calls = &.{},
+            .usage = .{ .input_tokens = 900, .output_tokens = 40, .cache_read_tokens = 800 },
+        } }, 1);
+        defer alloc.free(line);
+        const child_path = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{child_id});
+        defer alloc.free(child_path);
+        const before = try ws.readFileAlloc(io, child_path, alloc, .unlimited);
+        defer alloc.free(before);
+        const after = try std.mem.concat(alloc, u8, &.{ before, line });
+        defer alloc.free(after);
+        try ws.writeFile(io, .{ .sub_path = child_path, .data = after });
+    }
+
     const listed = try runCli(alloc, io, ws, &.{ exe_abs, "session", "list", "--json" });
     defer alloc.free(listed.stdout);
     try std.testing.expectEqual(@as(u8, 0), listed.code);
@@ -1910,13 +2014,25 @@ test "session cli: list --json reports parent, event count, summed usage and the
     try std.testing.expectEqualStrings(child_id, child.get("id").?.string);
     try std.testing.expectEqualStrings(parent_id, child.get("parent").?.object.get("session").?.string);
     try std.testing.expectEqual(@as(i64, 3), child.get("parent").?.object.get("seq").?.integer);
-    try std.testing.expectEqual(@as(i64, 0), child.get("events").?.integer);
+    try std.testing.expectEqual(@as(i64, 1), child.get("events").?.integer);
     try std.testing.expect(child.get("outcome").? == .null); // unjudged is not failure
     try std.testing.expect(child.get("created").?.string.len == 20);
 
     const parent = sessions[1].object;
     try std.testing.expectEqualStrings(parent_id, parent.get("id").?.string);
     try std.testing.expect(parent.get("parent").? == .null);
+
+    // One task, two files: both name the same episode root, and both report the
+    // episode's total — the parent's own usage is 0, but the episode's is not.
+    try std.testing.expectEqualStrings(parent_id, child.get("root").?.string);
+    try std.testing.expectEqualStrings(parent_id, parent.get("root").?.string);
+    try std.testing.expectEqual(@as(i64, 900), child.get("usage").?.object.get("input_tokens").?.integer);
+    for ([_]std.json.ObjectMap{ parent, child }) |v| {
+        const ep = v.get("episode_usage").?.object;
+        try std.testing.expectEqual(@as(i64, 900), ep.get("input_tokens").?.integer);
+        try std.testing.expectEqual(@as(i64, 40), ep.get("output_tokens").?.integer);
+        try std.testing.expectEqual(@as(i64, 800), ep.get("cache_read_tokens").?.integer);
+    }
     // user_text + assistant(call) + tool_results + assistant(end).
     try std.testing.expectEqual(@as(i64, 4), parent.get("events").?.integer);
     try std.testing.expect(std.mem.indexOf(u8, parent.get("first_user_text").?.string, "probe the box") != null);
@@ -1927,12 +2043,15 @@ test "session cli: list --json reports parent, event count, summed usage and the
     try std.testing.expectEqual(@as(i64, 0), parent.get("usage").?.object.get("input_tokens").?.integer);
     try std.testing.expect(parent.get("composition").?.object.get("active") != null);
 
-    // The human form names both sessions and the verdict.
+    // The human form names both sessions, the verdict, and the fork's episode.
     const text = try runCli(alloc, io, ws, &.{ exe_abs, "session", "list" });
     defer alloc.free(text.stdout);
     try std.testing.expect(std.mem.indexOf(u8, text.stdout, parent_id) != null);
     try std.testing.expect(std.mem.indexOf(u8, text.stdout, child_id) != null);
     try std.testing.expect(std.mem.indexOf(u8, text.stdout, "success") != null);
+    const root_marker = try std.fmt.allocPrint(alloc, "root {s}", .{parent_id});
+    defer alloc.free(root_marker);
+    try std.testing.expect(std.mem.indexOf(u8, text.stdout, root_marker) != null);
 }
 
 // ── M5e: `session new --with` (composition membership, not a native pin) ────
@@ -2024,6 +2143,22 @@ test "session cli: --with pins a built-but-not-activated version into one sessio
         try std.testing.expectEqual(@as(usize, 2), resumed.composition.tools.tools.len); // shell + edit only
     }
 
+    // The listing says which frozen package rewrites the system blocks of the
+    // sessions that carry it — a package with that power should be readable
+    // without opening a manifest by hand.
+    {
+        const listed = try runCli(alloc, io, ws, &.{ exe_abs, "session", "list", "--json" });
+        defer alloc.free(listed.stdout);
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, listed.stdout, .{});
+        defer parsed.deinit();
+        const composed = parsed.value.object.get("sessions").?.array.items[0].object.get("composition").?.object;
+        const prompts = composed.get("system_prompts").?.array.items;
+        try std.testing.expectEqual(@as(usize, 1), prompts.len);
+        const expected = try std.fmt.allocPrint(alloc, "mode.demo@{s}/prompts/mode.md", .{version});
+        defer alloc.free(expected);
+        try std.testing.expectEqualStrings(expected, prompts[0].string);
+    }
+
     // A later session that does NOT ask for it sees nothing of it: `--with` is
     // per-session membership, and it does not leak into the next session.
     {
@@ -2056,6 +2191,13 @@ test "session cli: --with pins a built-but-not-activated version into one sessio
         const activated = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "activate", "mode.demo", version });
         defer alloc.free(activated.stdout);
         try std.testing.expectEqual(@as(u8, 0), activated.code);
+
+        // Now that it is active it enters EVERY future session's system blocks
+        // (DESIGN §7.5), and the listing says so out loud.
+        const list = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "list" });
+        defer alloc.free(list.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, list.stdout, "[skills prompt]") != null);
+
         const bare = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--with", "mode.demo" });
         defer alloc.free(bare.stdout);
         try std.testing.expectEqual(@as(u8, 0), bare.code);
@@ -2380,6 +2522,61 @@ test "session cli: outcome appends a verdict to the outcomes journal, rejects a 
     const latest = outcome.latestFor(outcomes, id).?;
     try std.testing.expectEqual(outcome.Verdict.success, latest.verdict);
     try std.testing.expectEqual(@as(usize, 20), latest.at.len);
+    // Nothing said about the writer means a person judged it.
+    try std.testing.expectEqual(outcome.Source.human, latest.source);
+    try std.testing.expect(latest.by == null);
+
+    // The model reaches this command through `shell`, whose env names the live
+    // session (NULYA_SESSION) — so the journal can record that the session graded
+    // ITSELF instead of leaving the slow loop unable to tell.
+    {
+        const spath_rel = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{id});
+        defer alloc.free(spath_rel);
+        const self_graded = try runCliEnv(alloc, io, ws, &.{ exe_abs, "session", "outcome", id, "success", "--note", "went great, if I say so myself" }, "NULYA_SESSION", spath_rel);
+        defer alloc.free(self_graded.stdout);
+        try std.testing.expectEqual(@as(u8, 0), self_graded.code);
+
+        // `--seq` judges ONE assistant turn; it is evidence, never the session's
+        // verdict. The number is validated but not bounds-checked: this command
+        // stays a journal append and never opens the session file.
+        const turn = try runCliEnv(alloc, io, ws, &.{ exe_abs, "session", "outcome", id, "failure", "--seq", "2", "--note", "wrong file" }, "NULYA_SESSION", spath_rel);
+        defer alloc.free(turn.stdout);
+        try std.testing.expectEqual(@as(u8, 0), turn.code);
+
+        const bad_seq = try runCli(alloc, io, ws, &.{ exe_abs, "session", "outcome", id, "success", "--seq", "0" });
+        defer alloc.free(bad_seq.stdout);
+        try std.testing.expectEqual(@as(u8, 1), bad_seq.code);
+    }
+
+    const judged = try outcome.readAll(alloc, io, ws_path);
+    defer outcome.freeAll(alloc, judged);
+    try std.testing.expectEqual(@as(usize, 4), judged.len);
+    try std.testing.expectEqual(outcome.Source.agent, judged[2].source);
+    try std.testing.expectEqualStrings(id, judged[2].by.?); // by == session: a self-grade
+    try std.testing.expect(judged[2].seq == null);
+    try std.testing.expectEqual(@as(u64, 2), judged[3].seq.?);
+    try std.testing.expectEqual(outcome.Verdict.failure, judged[3].verdict);
+
+    // The verdict that stands is the last WHOLE-SESSION line — the self-grade —
+    // and the turn-level failure never becomes the session's grade.
+    const stands = outcome.latestFor(judged, id).?;
+    try std.testing.expectEqual(outcome.Verdict.success, stands.verdict);
+    try std.testing.expectEqual(outcome.Source.agent, stands.source);
+
+    // `session list` carries who judged, so a self-grade is visible at a glance.
+    {
+        const listed = try runCli(alloc, io, ws, &.{ exe_abs, "session", "list", "--json" });
+        defer alloc.free(listed.stdout);
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, listed.stdout, .{});
+        defer parsed.deinit();
+        const view = parsed.value.object.get("sessions").?.array.items[0].object.get("outcome").?.object;
+        try std.testing.expectEqualStrings("agent", view.get("source").?.string);
+        try std.testing.expectEqualStrings(id, view.get("by").?.string);
+
+        const text = try runCli(alloc, io, ws, &.{ exe_abs, "session", "list" });
+        defer alloc.free(text.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, text.stdout, "(self)") != null);
+    }
 
     // The session file itself was never touched by any of this.
     const bytes = try readSessionFile(alloc, io, ws, id);

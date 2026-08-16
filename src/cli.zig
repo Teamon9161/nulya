@@ -661,6 +661,7 @@ fn extActivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8, m
     var ext_root = try store.openOrCreateRoot(io, cwd_path, target);
     defer ext_root.close(io);
     const st = store.Store.init(io, ext_root);
+    try warnUserScope(alloc, io, st, id, version, flags.user);
     (switch (mode) {
         .activate => st.activate(alloc, id, version),
         .rollback => st.rollback(alloc, id, version),
@@ -700,6 +701,41 @@ fn extActivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8, m
         try printOut(alloc, io, "note: not in effect — {s}@{s} in {s} shadows it\n", .{ id, s.version, search.roots.entries[s.root].spec });
     }
     return 0;
+}
+
+/// Say, on stderr, when a model running inside a session reaches OUT of that
+/// session's workspace: `--user` puts the version in the user store, where it is
+/// active for every workspace on this machine (DESIGN §7.2), and if it
+/// contributes a system prompt that text joins the system blocks of every future
+/// session (DESIGN §7.5). Neither is refused — the model is allowed to do this,
+/// and a refusal here would be a policy in the kernel's shell. What is not
+/// allowed is doing it INVISIBLY. Silent outside `--user`, and silent when no
+/// session is running.
+fn warnUserScope(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    st: store.Store,
+    id: []const u8,
+    version: []const u8,
+    user: bool,
+) !void {
+    if (!user) return;
+    const sid = (try envSessionId(alloc)) orelse return;
+    defer alloc.free(sid);
+
+    // Best effort: an unreadable manifest only costs the extra clause.
+    const prompts: bool = blk: {
+        var m = st.readManifest(alloc, id, version) catch break :blk false;
+        defer m.deinit();
+        break :blk m.system_prompts.len != 0;
+    };
+    const line = try std.fmt.allocPrint(
+        alloc,
+        "note: activating {s}@{s} in the user store from inside session {s}: it becomes active for every workspace on this machine{s}\n",
+        .{ id, version, sid, if (prompts) " and its system prompt enters every future session" else "" },
+    );
+    defer alloc.free(line);
+    try printErr(io, line);
 }
 
 /// Deposit a capability note for `id@version` into the current session's inbox
@@ -777,6 +813,13 @@ fn extDeactivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
 /// mystery. A directory without `current` shadows nothing and is listed as
 /// `(inactive)` for its root alone — unless it holds no built version either, in
 /// which case it is a bare writer lease, not an extension, and is skipped.
+///
+/// A listed version also says what it CONTRIBUTES (`[tools skills prompt]`, from
+/// its frozen manifest). `prompt` is the one that earns the column: an activated
+/// package's `system_prompts` enter the system blocks of every future session
+/// (DESIGN §7.5) with no gate anywhere, and until now the only way to see that
+/// was to read the manifest by hand. Unreadable manifest → no marker, never a
+/// failed listing.
 fn extList(alloc: std.mem.Allocator, io: std.Io) !u8 {
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     var search = try RootSearch.open(alloc, io, try cwdRealPath(io, &cwd_buf));
@@ -789,7 +832,7 @@ fn extList(alloc: std.mem.Allocator, io: std.Io) !u8 {
     }
 
     var printed: usize = 0;
-    for (search.roots.entries) |entry| {
+    for (search.roots.entries, 0..) |entry, root_index| {
         var it = entry.dir.iterate();
         while (try it.next(io)) |dir_entry| {
             if (dir_entry.kind != .directory) continue;
@@ -818,17 +861,50 @@ fn extList(alloc: std.mem.Allocator, io: std.Io) !u8 {
             }
             const shadowed = active != null and sliceHasString(seen_active.items, dir_entry.name);
             if (active != null and !shadowed) try seen_active.append(alloc, try alloc.dupe(u8, dir_entry.name));
+            const contributes = if (active) |v|
+                try contributionMarker(alloc, &search.roots, .{ .id = dir_entry.name, .root = root_index, .version = v })
+            else
+                try alloc.dupe(u8, "");
+            defer alloc.free(contributes);
             printed += 1;
-            try printOut(alloc, io, "{s}\t{s}\t{s}{s}\n", .{
+            try printOut(alloc, io, "{s}\t{s}\t{s}{s}{s}\n", .{
                 dir_entry.name,
                 active orelse "(inactive)",
                 entry.spec,
+                contributes,
                 if (shadowed) "\t(shadowed)" else "",
             });
         }
     }
     if (printed == 0) try printOut(alloc, io, "no extensions\n", .{});
     return 0;
+}
+
+/// `\t[tools skills prompt]` for what this frozen version contributes, or an
+/// empty string when it contributes nothing nameable or cannot be read. Caller
+/// owns the result.
+fn contributionMarker(alloc: std.mem.Allocator, roots: *const store.Roots, entry: store.Roots.ActiveEntry) ![]u8 {
+    const resolved = roots.resolveEntry(alloc, entry) catch return alloc.dupe(u8, "");
+    defer resolved.deinit(alloc);
+    const m = resolved.manifest;
+    if (m.tools.len == 0 and m.skills.len == 0 and m.system_prompts.len == 0) return alloc.dupe(u8, "");
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    try out.writer.writeAll("\t[");
+    var first = true;
+    for ([_]struct { on: bool, word: []const u8 }{
+        .{ .on = m.tools.len != 0, .word = "tools" },
+        .{ .on = m.skills.len != 0, .word = "skills" },
+        .{ .on = m.system_prompts.len != 0, .word = "prompt" },
+    }) |part| {
+        if (!part.on) continue;
+        if (!first) try out.writer.writeByte(' ');
+        try out.writer.writeAll(part.word);
+        first = false;
+    }
+    try out.writer.writeByte(']');
+    return out.toOwnedSlice();
 }
 
 fn sliceHasString(list: []const []const u8, needle: []const u8) bool {
@@ -993,6 +1069,9 @@ const SessionView = struct {
     /// RFC3339 UTC, or empty for a session created before headers carried it.
     created: []const u8,
     parent: ?ledger.ParentRef,
+    /// The oldest ancestor reachable through `parent` among the LISTED sessions
+    /// — the episode this file belongs to (`id` itself when it forks nothing).
+    root: []const u8,
     /// The provider PROFILE name, then the frozen identity behind it.
     model: []const u8,
     provider: []const u8,
@@ -1004,6 +1083,9 @@ const SessionView = struct {
     /// Sum of every assistant event's recorded usage (DESIGN §3.1). Steps whose
     /// provider reported nothing contribute nothing.
     usage: ledger.Usage,
+    /// The same sum over every listed session sharing this `root`: what the whole
+    /// episode cost, which is the number a compacted task actually spent.
+    episode_usage: ledger.Usage,
     /// The opening user turn, truncated — enough to recognize the session by.
     first_user_text: []const u8,
     /// The verdict that stands, or null for "not judged" — which is NOT failure.
@@ -1012,12 +1094,21 @@ const SessionView = struct {
     const Composition = struct {
         active: []const []const u8,
         native_tools: []const []const u8,
+        /// Every system prompt those frozen versions contribute, as
+        /// `<id>@<version>/<path>` (DESIGN §7.5). A package that rewrites the
+        /// system blocks of every session it is in should be readable from the
+        /// listing, not only from the manifest.
+        system_prompts: []const []const u8,
     };
 
     const OutcomeView = struct {
         verdict: []const u8,
         note: ?[]const u8,
         at: []const u8,
+        /// `human` or `agent` (DESIGN §3.3) — an agent's verdict is a claim.
+        source: []const u8,
+        /// The session whose shell wrote it; equal to `id` means a self-grade.
+        by: ?[]const u8,
     };
 };
 
@@ -1035,6 +1126,14 @@ fn sessionList(alloc: std.mem.Allocator, io: std.Io, as_json: bool) !u8 {
 
     const outcomes = try outcome.readAll(a, io, cwd_path);
 
+    // The store roots are opened once for the whole listing: a session's frozen
+    // `active` versions are content-addressed, so their manifests are read here
+    // only to say what they contribute (best effort — see `PromptIndex`).
+    var search = RootSearch.open(a, io, cwd_path) catch null;
+    defer if (search) |*s| s.deinit(a);
+    var prompts: PromptIndex = .{ .roots = if (search) |*s| &s.roots else null, .cache = .init(a) };
+    defer prompts.cache.deinit();
+
     var views: std.ArrayList(SessionView) = .empty;
     var dir = std.Io.Dir.cwd().openDir(io, launch.sessions_dir, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => {
@@ -1051,9 +1150,14 @@ fn sessionList(alloc: std.mem.Allocator, io: std.Io, as_json: bool) !u8 {
         // The iterator reuses its name buffer, and the view keeps a slice of the
         // name as the session id — so copy it before the next `next()`.
         const name = try a.dupe(u8, entry.name);
-        const view = readSessionView(a, io, dir, name, outcomes) catch continue; // a corrupt file is not a reason to hide the rest
+        const view = readSessionView(a, io, dir, name, outcomes, &prompts) catch continue; // a corrupt file is not a reason to hide the rest
         try views.append(a, view);
     }
+
+    // Sessions fork (`session new --parent`, DESIGN §11), so one task can span
+    // several files; the episode is joined HERE, in the projection, and nowhere
+    // else — an outcome stays recorded against the id it was given.
+    try resolveEpisodes(a, views.items);
 
     // Newest first. `created` is the fact to sort on; sessions written before it
     // existed fall back to their id, which embeds the creation time anyway.
@@ -1078,6 +1182,7 @@ fn readSessionView(
     dir: std.Io.Dir,
     file_name: []const u8,
     outcomes: []const outcome.Outcome,
+    prompts: *PromptIndex,
 ) !SessionView {
     const bytes = try dir.readFileAlloc(io, file_name, a, .unlimited);
     const clean_end: usize = @intCast(ledger.lastCompleteLineEnd(bytes));
@@ -1104,12 +1209,7 @@ fn readSessionView(
         const may_be_first_text = first_user_text.len == 0 and std.mem.indexOf(u8, line, "\"kind\":\"user_text\"") != null;
         if (!may_have_usage and !may_be_first_text) continue;
         const parsed = ledger.parseEventLine(a, line) catch continue;
-        if (parsed.value.usage) |u| {
-            total.input_tokens += u.input_tokens;
-            total.output_tokens += u.output_tokens;
-            total.cache_read_tokens += u.cache_read_tokens;
-            total.cache_write_tokens += u.cache_write_tokens;
-        }
+        if (parsed.value.usage) |u| addUsage(&total, u);
         if (first_user_text.len == 0 and std.mem.eql(u8, parsed.value.kind, "user_text")) {
             if (parsed.value.text) |t| first_user_text = try summarize(a, t);
         }
@@ -1125,16 +1225,111 @@ fn readSessionView(
         .id = id,
         .created = h.created,
         .parent = h.parent,
+        // The episode is resolved once the whole listing is known; until then a
+        // session is its own root, which is also the final answer for most.
+        .root = id,
         .model = h.model,
         .provider = h.model_identity.provider,
         .model_id = h.model_identity.model,
         .nulya = h.nulya,
         .events = events,
-        .composition = .{ .active = active, .native_tools = h.composition.native_tools },
+        .composition = .{
+            .active = active,
+            .native_tools = h.composition.native_tools,
+            .system_prompts = try prompts.forActive(a, h.composition.active),
+        },
         .usage = total,
+        .episode_usage = total,
         .first_user_text = first_user_text,
-        .outcome = if (latest) |o| .{ .verdict = @tagName(o.verdict), .note = o.note, .at = o.at } else null,
+        .outcome = if (latest) |o| .{
+            .verdict = @tagName(o.verdict),
+            .note = o.note,
+            .at = o.at,
+            .source = @tagName(o.source),
+            .by = o.by,
+        } else null,
     };
+}
+
+fn addUsage(total: *ledger.Usage, u: ledger.Usage) void {
+    total.input_tokens += u.input_tokens;
+    total.output_tokens += u.output_tokens;
+    total.cache_read_tokens += u.cache_read_tokens;
+    total.cache_write_tokens += u.cache_write_tokens;
+}
+
+/// Which system prompts a frozen `id@version` contributes (DESIGN §7.5), read
+/// from its manifest and memoized by `id@version` — versions are
+/// content-addressed, so one read answers for every session pinning it.
+///
+/// Best effort throughout: a version this machine no longer holds (built in
+/// another checkout, deactivated and pruned) contributes nothing rather than
+/// failing the listing. Absence here means "unknown", not "none".
+const PromptIndex = struct {
+    roots: ?*const store.Roots,
+    cache: std.StringHashMap([]const []const u8),
+
+    fn forActive(self: *PromptIndex, a: std.mem.Allocator, active: []const ledger.PinnedExtensionRef) ![]const []const u8 {
+        var out: std.ArrayList([]const u8) = .empty;
+        for (active) |ref| {
+            for (try self.forOne(a, ref)) |p| try out.append(a, p);
+        }
+        return out.toOwnedSlice(a);
+    }
+
+    fn forOne(self: *PromptIndex, a: std.mem.Allocator, ref: ledger.PinnedExtensionRef) ![]const []const u8 {
+        const roots = self.roots orelse return &.{};
+        const key = try std.fmt.allocPrint(a, "{s}@{s}", .{ ref.id, ref.version });
+        const gop = try self.cache.getOrPut(key);
+        if (gop.found_existing) return gop.value_ptr.*;
+        gop.value_ptr.* = &.{};
+
+        const resolved = roots.resolveVersion(a, ref.id, ref.version) catch return gop.value_ptr.*;
+        defer resolved.deinit(a);
+        const paths = try a.alloc([]const u8, resolved.manifest.system_prompts.len);
+        // The manifest owns its strings; the listing outlives it, so copy while
+        // stamping each one with the version it came from.
+        for (resolved.manifest.system_prompts, paths) |p, *slot| {
+            slot.* = try std.fmt.allocPrint(a, "{s}/{s}", .{ key, p });
+        }
+        gop.value_ptr.* = paths;
+        return paths;
+    }
+};
+
+/// Fill in each view's `root` (the oldest listed ancestor through `parent`) and
+/// `episode_usage` (that episode's total). Sessions fork for compaction and
+/// handoff, so the cost of a task is spread over a chain of files; joining them
+/// is a projection, never a change to what any journal recorded.
+///
+/// A parent that is not in the listing (another workspace, a deleted file) makes
+/// its child the root of its own episode: a listing must not fail because a file
+/// it cannot see is gone.
+fn resolveEpisodes(a: std.mem.Allocator, views: []SessionView) !void {
+    var index: std.StringHashMap(usize) = .init(a);
+    defer index.deinit();
+    for (views, 0..) |v, i| try index.put(v.id, i);
+
+    for (views, 0..) |*v, i| {
+        var at = i;
+        var hops: usize = 0;
+        while (views[at].parent) |p| {
+            const next = index.get(p.session) orelse break;
+            at = next;
+            hops += 1;
+            if (hops > views.len) break; // a cycle can only come from a hand-edited header
+        }
+        v.root = views[at].id;
+    }
+
+    var totals: std.StringHashMap(ledger.Usage) = .init(a);
+    defer totals.deinit();
+    for (views) |v| {
+        const gop = try totals.getOrPut(v.root);
+        if (!gop.found_existing) gop.value_ptr.* = .{};
+        addUsage(gop.value_ptr, v.usage);
+    }
+    for (views) |*v| v.episode_usage = totals.get(v.root) orelse v.usage;
 }
 
 /// One line of text, truncated on a UTF-8 boundary, with newlines flattened.
@@ -1170,7 +1365,17 @@ fn printSessionList(alloc: std.mem.Allocator, io: std.Io, views: []const Session
                 v.usage.output_tokens,
                 if (v.outcome) |o| o.verdict else "-",
             });
+            // Who judged belongs next to the verdict: a session that graded
+            // itself must not read like someone else's assessment of it.
+            if (v.outcome) |o| {
+                if (o.source.len != 0 and !std.mem.eql(u8, o.source, "human")) {
+                    const self_graded = if (o.by) |b| std.mem.eql(u8, b, v.id) else false;
+                    try out.writer.writeAll(if (self_graded) " (self)" else " (by agent)");
+                }
+            }
             if (v.parent) |p| try out.writer.print("  <- {s}:{d}", .{ p.session, p.seq });
+            // Only a fork says anything here; for everyone else root == id.
+            if (!std.mem.eql(u8, v.root, v.id)) try out.writer.print("  root {s}", .{v.root});
             if (v.composition.active.len != 0) {
                 try out.writer.writeAll("  [");
                 for (v.composition.active, 0..) |ref, i| {
@@ -1188,14 +1393,19 @@ fn printSessionList(alloc: std.mem.Allocator, io: std.Io, views: []const Session
     try printRaw(io, out.written());
 }
 
-/// `nulya session outcome <id> <verdict> [--note <text>]` — record how a session
-/// turned out (DESIGN §3.3). The verdict is a judgment ABOUT the session, not a
-/// turn IN it, so this writes only the outcome journal: it never opens the
-/// session file and never takes its writer lease, which is what lets a session
-/// still running (or being stepped by another process) be judged right now.
+/// `nulya session outcome <id> <verdict> [--note <text>] [--seq N]` — record how
+/// a session turned out (DESIGN §3.3). The verdict is a judgment ABOUT the
+/// session, not a turn IN it, so this writes only the outcome journal: it never
+/// opens the session file and never takes its writer lease, which is what lets a
+/// session still running (or being stepped by another process) be judged right
+/// now. `--seq` narrows a line to one assistant turn; it stays a projection, so
+/// the number is validated as a positive integer and NOT checked against the
+/// session's length — reading the ledger to bounds-check it would trade the one
+/// property that makes this command safe on a live session for a fact the reader
+/// can derive itself.
 fn sessionOutcome(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (args.len < 2) {
-        try printErr(io, "usage: nulya session outcome <id> <success|partial|failure> [--note <text>]\n");
+        try printErr(io, "usage: nulya session outcome <id> <success|partial|failure> [--note <text>] [--seq N]\n");
         return 1;
     }
     const id = args[0];
@@ -1208,6 +1418,15 @@ fn sessionOutcome(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8
         return 1;
     };
     const note = flagValue(args[2..], "--note");
+    var seq: ?u64 = null;
+    if (flagValue(args[2..], "--seq")) |v| {
+        const n = std.fmt.parseInt(u64, v, 10) catch 0;
+        if (n == 0) {
+            try printErr(io, "--seq must be a positive integer\n");
+            return 1;
+        }
+        seq = n;
+    }
 
     const spath = try launch.sessionPath(alloc, id);
     defer alloc.free(spath);
@@ -1216,14 +1435,41 @@ fn sessionOutcome(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8
         return 1;
     }
 
+    // Who is judging. This command reaches the model through `shell`, whose env
+    // names the live session — so a session grading itself is a fact the journal
+    // can record instead of a fact the slow loop has to guess (DESIGN §3.3).
+    const by = try envSessionId(alloc);
+    defer if (by) |b| alloc.free(b);
+
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try cwdRealPath(io, &cwd_buf);
     const at = try launch.rfc3339Now(alloc, io);
     defer alloc.free(at);
-    try outcome.append(alloc, io, cwd_path, id, verdict, note, at);
+    try outcome.append(alloc, io, cwd_path, .{
+        .session = id,
+        .verdict = verdict,
+        .note = note,
+        .at = at,
+        .source = if (by != null) .agent else .human,
+        .by = by,
+        .seq = seq,
+    });
 
     try printOut(alloc, io, "{s}: {s}\n", .{ id, @tagName(verdict) });
     return 0;
+}
+
+/// The id of the session this process is running INSIDE, or null when it is not.
+/// `session step` puts the live session's file path in `NULYA_SESSION` for its
+/// shell children (DESIGN §5.3), so anything the model runs can name the session
+/// it is in without being told. Caller owns the result.
+fn envSessionId(alloc: std.mem.Allocator) !?[]u8 {
+    var host = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    defer host.deinit();
+    const path = host.get("NULYA_SESSION") orelse return null;
+    const stem = std.fs.path.stem(path);
+    if (stem.len == 0) return null;
+    return try alloc.dupe(u8, stem);
 }
 
 /// Find `--flag <value>` in args; returns the value or null.
@@ -2051,11 +2297,12 @@ fn sessionUsage(io: std.Io) !u8 {
         \\                                                             --stream also emits transient model/tool lines as they happen
         \\  nulya session events <id> [--since N] [--follow]           print events as JSONL (read-only tail)
         \\  nulya session cancel <id>                                  request cancel at the next step boundary
-        \\  nulya session list [--json]                                read-only projection of every session here:
-        \\                                                             composition, event count, summed usage, latest verdict
-        \\  nulya session outcome <id> <success|partial|failure> [--note <text>]
+        \\  nulya session list [--json]                                read-only projection of every session here: composition,
+        \\                                                             event count, usage (own + episode), latest verdict
+        \\  nulya session outcome <id> <success|partial|failure> [--note <text>] [--seq N]
         \\                                                             record how the session turned out (journal only — never
         \\                                                             touches the session file, so a running one can be judged)
+        \\                                                             --seq judges ONE assistant turn instead of the session
         \\
     );
     return 0;
@@ -2130,6 +2377,56 @@ fn printRaw(io: std.Io, bytes: []const u8) !void {
 
 fn printErr(io: std.Io, bytes: []const u8) !void {
     try std.Io.File.stderr().writeStreamingAll(io, bytes);
+}
+
+test "resolveEpisodes walks a fork chain to its root and totals the episode's usage" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const mk = struct {
+        fn v(id: []const u8, parent: ?ledger.ParentRef, input: u64) SessionView {
+            return .{
+                .id = id,
+                .created = "",
+                .parent = parent,
+                .root = id,
+                .model = "",
+                .provider = "",
+                .model_id = "",
+                .nulya = .{},
+                .events = 0,
+                .composition = .{ .active = &.{}, .native_tools = &.{}, .system_prompts = &.{} },
+                .usage = .{ .input_tokens = input },
+                .episode_usage = .{},
+                .first_user_text = "",
+                .outcome = null,
+            };
+        }
+    };
+
+    var views = [_]SessionView{
+        mk.v("a", null, 1),
+        mk.v("b", .{ .session = "a", .seq = 3 }, 2),
+        mk.v("c", .{ .session = "b", .seq = 4 }, 4),
+        // A parent nobody here can see (another workspace, a deleted file): its
+        // child is the root of its own episode rather than a broken listing.
+        mk.v("orphan", .{ .session = "gone", .seq = 1 }, 8),
+        // Only a hand-edited header can say this; it must terminate, not hang.
+        mk.v("loop", .{ .session = "loop", .seq = 1 }, 16),
+    };
+    try resolveEpisodes(arena.allocator(), &views);
+
+    try std.testing.expectEqualStrings("a", views[0].root);
+    try std.testing.expectEqualStrings("a", views[1].root);
+    try std.testing.expectEqualStrings("a", views[2].root); // two hops up the chain
+    try std.testing.expectEqualStrings("orphan", views[3].root);
+    try std.testing.expectEqualStrings("loop", views[4].root);
+
+    // Every session in an episode reports the episode's total, not just its own.
+    for (views[0..3]) |v| try std.testing.expectEqual(@as(u64, 7), v.episode_usage.input_tokens);
+    try std.testing.expectEqual(@as(u64, 1), views[0].usage.input_tokens);
+    try std.testing.expectEqual(@as(u64, 8), views[3].episode_usage.input_tokens);
+    try std.testing.expectEqual(@as(u64, 16), views[4].episode_usage.input_tokens);
 }
 
 test "buildArgsJson types values by the tool input schema" {

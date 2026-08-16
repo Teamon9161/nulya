@@ -36,6 +36,8 @@ grep -ho '"ok":false,"output":"[^"]\{0,120\}' .nulya/sessions/*.jsonl | sort | u
 sort .nulya/tool-usage.jsonl | uniq -c | sort -rn | head -20
 
 # Outcomes, and the sessions that have none (unknown is not failure).
+# A line with "source":"agent" was written from a session's own shell — and one
+# whose "by" equals its "session" is a self-grade: a claim, not ground truth.
 cat .nulya/session-outcomes.jsonl 2>/dev/null
 
 # Capability notes: what got built mid-conversation.
@@ -68,7 +70,7 @@ Select-String -Path .nulya\sessions\*.jsonl -Pattern '"ok":false,"output":"(.{0,
 # Tool usage.
 Get-Content .nulya\tool-usage.jsonl | Group-Object | Sort-Object Count -Descending | Select-Object Count, Name -First 20
 
-# Outcomes.
+# Outcomes. ("source":"agent" is a claim; "by" == "session" is a self-grade.)
 Get-Content .nulya\session-outcomes.jsonl -EA SilentlyContinue
 
 # What exists but is never invoked.
@@ -81,6 +83,19 @@ An extension with built versions and **zero lines** in `tool-usage.jsonl` is
 `manufactured but never invoked` — negative evidence, and the strongest kind you
 have. A skill in the catalog that no session ever loaded (`nulya skill load`
 never appears in any `"command"`) is the same fact for knowledge.
+
+**Sessions sharing a `root` are one episode.** Compaction and handoff fork a
+session, so one task is often several files; `session list --json` gives each
+session a `root` (the file its chain starts at) and an `episode_usage` (the whole
+chain's cost). **Judge the episode, cite the root**: "3 sessions" that are one
+forked task is one piece of evidence, not three, and the cost of that task is
+`episode_usage`, not the last file's `usage`. A verdict, though, stays recorded
+against the single session id it was given — join it to the episode yourself.
+
+**Who wrote a verdict matters.** `"source":"agent"` means the line came from a
+session's own shell, and `"by" == "session"` means that session graded itself.
+Treat those as claims: corroborate with what the ledger shows (did the work land?
+did a later session redo it?) before resting a proposal on one.
 
 ## 2. Leaving something behind — smallest form first
 

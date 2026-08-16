@@ -19,14 +19,18 @@ gets retired the same way when the evidence says so.
 Read-only, all of it through `shell`:
 
 - `nulya session list --json` — every session here: composition, parent, event
-  count, summed usage, latest verdict.
+  count, summed usage, latest verdict. Sessions sharing a `root` are one forked
+  episode: judge the episode and cite the root, and read its cost off
+  `episode_usage`.
 - `.nulya/sessions/<id>.jsonl` — one session's real events. **Aggregate, never
   `cat` a whole ledger**: your tool output has a byte budget and a large read is
   truncated and spilled to disk, costing you a round trip and telling you less
   than a `grep | sort | uniq -c` would.
 - `.nulya/tool-usage.jsonl` — `{tool_id, ok}` per completed call.
 - `.nulya/session-outcomes.jsonl` — verdicts. **No line means unknown, not
-  failure.**
+  failure.** A line with `"source":"agent"` was written from inside a session
+  (and `"by" == "session"` is a self-grade): that is a **claim**, not ground
+  truth — weigh it against what the ledger shows.
 - `nulya ext list` — what exists, what is active, what is shadowed.
 - `.nulya/evolution/*.md` — **your own previous reports. Read the most recent one
   first**; it is the only memory you have across runs.
