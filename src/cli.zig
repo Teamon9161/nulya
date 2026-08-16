@@ -21,6 +21,7 @@ const session = @import("session.zig");
 const loop = @import("loop.zig");
 const provider = @import("provider.zig");
 const promotion = @import("promotion.zig");
+const composition = @import("composition.zig");
 const launch = @import("launch.zig");
 const source = @import("source.zig");
 
@@ -964,6 +965,27 @@ fn flagValue(args: []const []const u8, flag: []const u8) ?[]const u8 {
     return null;
 }
 
+/// Collect every `--with <id>[@<version>]` (the flag is repeatable). Slices
+/// borrow `args`; the caller owns only the returned array.
+fn withRefs(alloc: std.mem.Allocator, args: []const []const u8) ![]composition.WithRef {
+    var out: std.ArrayList(composition.WithRef) = .empty;
+    errdefer out.deinit(alloc);
+    var i: usize = 0;
+    while (i + 1 < args.len) : (i += 1) {
+        if (!std.mem.eql(u8, args[i], "--with")) continue;
+        const spec = args[i + 1];
+        i += 1;
+        // Version ids contain no `@`, extension ids neither, so the last `@`
+        // splits unambiguously.
+        if (std.mem.lastIndexOfScalar(u8, spec, '@')) |at| {
+            try out.append(alloc, .{ .id = spec[0..at], .version = spec[at + 1 ..] });
+        } else {
+            try out.append(alloc, .{ .id = spec, .version = null });
+        }
+    }
+    return out.toOwnedSlice(alloc);
+}
+
 fn cwdRealPath(io: std.Io, buf: *[std.fs.max_path_bytes]u8) ![]u8 {
     const len = try std.Io.Dir.cwd().realPath(io, buf);
     return buf[0..len];
@@ -1086,6 +1108,11 @@ fn sessionNew(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
     const ext_roots = try launch.extensionRoots(alloc, &host, &cfg);
     defer launch.freeExtensionRoots(alloc, ext_roots);
 
+    // `--with <id>[@<version>]` (repeatable) brings a BUILT version into this
+    // one session's composition without activating it anywhere (DESIGN §14).
+    const with = try withRefs(alloc, args);
+    defer alloc.free(with);
+
     // A placeholder handle is enough since `new` never steps.
     var holder: launch.ModelHolder = .{ .scripted = .{} };
     var sess = session.AgentSession.createDurable(alloc, .{
@@ -1099,6 +1126,7 @@ fn sessionNew(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
             .pinned_native_tools = cfg.registry.pinned_native_tools,
             .ranked_native_tools = ranked,
             .max_tools = cfg.registry.max_tools,
+            .with = with,
         },
     }, .{
         .workspace = std.Io.Dir.cwd(),
@@ -1107,9 +1135,16 @@ fn sessionNew(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
         .model_profile = profile,
         .model_identity = identity,
         .parent = parent,
-    }) catch |err| {
-        try printOut(alloc, io, "session new failed: {s}\n", .{@errorName(err)});
-        return 1;
+    }) catch |err| switch (err) {
+        // The caller named these extensions, so an unusable one is not a warning.
+        error.WithVersionNotFound => {
+            try printOut(alloc, io, "session new failed: --with names an extension with no such built version (see `nulya ext list`)\n", .{});
+            return 1;
+        },
+        else => {
+            try printOut(alloc, io, "session new failed: {s}\n", .{@errorName(err)});
+            return 1;
+        },
     };
     sess.deinit();
 
@@ -1881,6 +1916,30 @@ test "config show projects profiles with credential availability and the catalog
     try std.testing.expect(std.mem.indexOf(u8, text.written(), "ds ") != null);
     try std.testing.expect(std.mem.indexOf(u8, text.written(), "no key") != null);
     try std.testing.expect(std.mem.indexOf(u8, text.written(), "effort off|low|high|max (default auto)") != null);
+}
+
+test "--with is repeatable and splits <id>[@<version>]" {
+    const alloc = std.testing.allocator;
+    const args = [_][]const u8{
+        "--profile",       "scripted",
+        "--with",          "evolution",
+        "--with",          "web.search@v-0123456789abcdef01234567",
+        "--parent",        "s-1:4",
+        "--with-nothing",  "ignored",
+        "--with",
+    }; // a trailing --with with no value is not a ref
+    const refs = try withRefs(alloc, &args);
+    defer alloc.free(refs);
+
+    try std.testing.expectEqual(@as(usize, 2), refs.len);
+    try std.testing.expectEqualStrings("evolution", refs[0].id);
+    try std.testing.expect(refs[0].version == null); // no @version = its current
+    try std.testing.expectEqualStrings("web.search", refs[1].id);
+    try std.testing.expectEqualStrings("v-0123456789abcdef01234567", refs[1].version.?);
+
+    const none = try withRefs(alloc, &.{ "--profile", "scripted" });
+    defer alloc.free(none);
+    try std.testing.expectEqual(@as(usize, 0), none.len);
 }
 
 test "parseParent parses <session>:<seq> and rejects malformed input" {

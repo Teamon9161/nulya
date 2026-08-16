@@ -1617,6 +1617,155 @@ test "cli: NULYA_HOME extensions are visible to ext list / skill list / ext run,
     }
 }
 
+// ── M5e: `session new --with` (composition membership, not a native pin) ────
+
+test "session cli: --with pins a built-but-not-activated version into one session (system prompt in system blocks, skill in the catalog); a later plain session does not see it; resume rebuilds the same composition" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var ws_real: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
+
+    // A mode package: one system prompt + one skill, built but NEVER activated.
+    const mode_dir = ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "mode.demo";
+    try ws.createDirPath(io, mode_dir ++ std.fs.path.sep_str ++ "prompts");
+    try ws.createDirPath(io, mode_dir ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "mode-recipes");
+    try ws.writeFile(io, .{ .sub_path = mode_dir ++ std.fs.path.sep_str ++ "extension.json", .data =
+        \\{"schema":"nulya.extension/v2","id":"mode.demo","contributes":{"system_prompts":["prompts/mode.md"],"skills":["skills/mode-recipes"]}}
+    });
+    try ws.writeFile(io, .{ .sub_path = mode_dir ++ std.fs.path.sep_str ++ "prompts" ++ std.fs.path.sep_str ++ "mode.md", .data = "You are running in demo mode.\n" });
+    try ws.writeFile(io, .{ .sub_path = mode_dir ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "mode-recipes" ++ std.fs.path.sep_str ++ "SKILL.md", .data = "---\nname: mode-recipes\ndescription: recipes for demo mode\n---\nthe recipes\n" });
+
+    const built = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "build", ".nulya/extensions/mode.demo" });
+    defer alloc.free(built.stdout);
+    try std.testing.expectEqual(@as(u8, 0), built.code);
+    const version = try extractVersion(alloc, built.stdout);
+    defer alloc.free(version);
+
+    // Not activated: `ext list` shows it inactive, so no other session gets it.
+    {
+        const list = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "list" });
+        defer alloc.free(list.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, list.stdout, "(inactive)") != null);
+    }
+
+    // A session started `--with mode.demo@<version>` composes it in: the header
+    // records the exact version, so this is ordinary frozen composition, not a
+    // special case. Naming the version is what "not activated" means — there is
+    // no `current` to fall back to, and the kernel does not guess one.
+    const with_arg = try std.fmt.allocPrint(alloc, "mode.demo@{s}", .{version});
+    defer alloc.free(with_arg);
+    const with = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--with", with_arg });
+    defer alloc.free(with.stdout);
+    try std.testing.expectEqual(@as(u8, 0), with.code);
+    const with_id = try alloc.dupe(u8, std.mem.trim(u8, with.stdout, " \r\n"));
+    defer alloc.free(with_id);
+
+    const header = try readSessionFile(alloc, io, ws, with_id);
+    defer alloc.free(header);
+    const active_ref = try std.fmt.allocPrint(alloc, "\"id\":\"mode.demo\",\"version\":\"{s}\"", .{version});
+    defer alloc.free(active_ref);
+    try std.testing.expect(std.mem.indexOf(u8, header, active_ref) != null);
+    // Membership, not a native pin: the tool face is untouched.
+    try std.testing.expect(std.mem.indexOf(u8, header, "\"native_tools\":[]") != null);
+
+    // What the model actually sees: the mode's system prompt is a system block
+    // and its skill is in the catalog — rebuilt from the header, the way every
+    // `session step` process does it.
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+    var model = EndTurnModel{};
+    const opts: session.AgentSession.Options = .{
+        .model = .{ .ptr = &model, .vtable = &EndTurnModel.vtable },
+        .step_ctx = .{
+            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = ws_path },
+            .scratch_dir = ".nulya/scratch",
+        },
+    };
+    const spath = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{with_id});
+    defer alloc.free(spath);
+    {
+        var resumed = try session.AgentSession.openDurable(alloc, opts, .{ .workspace = ws, .session_path = spath });
+        defer resumed.deinit();
+        var saw_prompt = false;
+        for (resumed.composition.system_prompts.blocks) |b| {
+            if (std.mem.indexOf(u8, b.bytes, "demo mode") != null) saw_prompt = true;
+        }
+        try std.testing.expect(saw_prompt);
+        try std.testing.expectEqual(@as(usize, 1), resumed.composition.skills.skills.len);
+        try std.testing.expectEqualStrings("mode-recipes", resumed.composition.skills.skills[0].name);
+        try std.testing.expectEqual(@as(usize, 2), resumed.composition.tools.tools.len); // shell + edit only
+    }
+
+    // A later session that does NOT ask for it sees nothing of it: `--with` is
+    // per-session membership, and it does not leak into the next session.
+    {
+        const plain = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+        defer alloc.free(plain.stdout);
+        const plain_id = try alloc.dupe(u8, std.mem.trim(u8, plain.stdout, " \r\n"));
+        defer alloc.free(plain_id);
+        const plain_header = try readSessionFile(alloc, io, ws, plain_id);
+        defer alloc.free(plain_header);
+        try std.testing.expect(std.mem.indexOf(u8, plain_header, "mode.demo") == null);
+    }
+
+    // A fork does not inherit it either — composition is always resolved fresh.
+    {
+        const parent_ref = try std.fmt.allocPrint(alloc, "{s}:0", .{with_id});
+        defer alloc.free(parent_ref);
+        const fork = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--parent", parent_ref });
+        defer alloc.free(fork.stdout);
+        try std.testing.expectEqual(@as(u8, 0), fork.code);
+        const fork_id = try alloc.dupe(u8, std.mem.trim(u8, fork.stdout, " \r\n"));
+        defer alloc.free(fork_id);
+        const fork_header = try readSessionFile(alloc, io, ws, fork_id);
+        defer alloc.free(fork_header);
+        try std.testing.expect(std.mem.indexOf(u8, fork_header, "mode.demo") == null);
+    }
+
+    // Once activated, the bare id resolves to `current` — the same composition,
+    // named the other way.
+    {
+        const activated = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "activate", "mode.demo", version });
+        defer alloc.free(activated.stdout);
+        try std.testing.expectEqual(@as(u8, 0), activated.code);
+        const bare = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--with", "mode.demo" });
+        defer alloc.free(bare.stdout);
+        try std.testing.expectEqual(@as(u8, 0), bare.code);
+        const bare_id = try alloc.dupe(u8, std.mem.trim(u8, bare.stdout, " \r\n"));
+        defer alloc.free(bare_id);
+        const bare_header = try readSessionFile(alloc, io, ws, bare_id);
+        defer alloc.free(bare_header);
+        try std.testing.expect(std.mem.indexOf(u8, bare_header, active_ref) != null);
+        const deactivated = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "deactivate", "mode.demo" });
+        defer alloc.free(deactivated.stdout);
+        try std.testing.expectEqual(@as(u8, 0), deactivated.code);
+    }
+
+    // An id with no built version — and a bare id with nothing activated — are
+    // refused rather than silently dropped: the caller named them.
+    {
+        const bad = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--with", "nope" });
+        defer alloc.free(bad.stdout);
+        try std.testing.expectEqual(@as(u8, 1), bad.code);
+        const bare_inactive = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--with", "mode.demo" });
+        defer alloc.free(bare_inactive.stdout);
+        try std.testing.expectEqual(@as(u8, 1), bare_inactive.code);
+        const bad_version = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--with", "mode.demo@v-000000000000000000000000" });
+        defer alloc.free(bad_version.stdout);
+        try std.testing.expectEqual(@as(u8, 1), bad_version.code);
+    }
+}
+
 // ── M5d: `ext build` lands under the store root, by manifest id ─────────────
 
 test "cli ext build: a draft outside any store lands in the workspace store under its manifest id; --user lands in the user store; a draft inside a store lands in that store; in-store builds are byte-identical to before" {

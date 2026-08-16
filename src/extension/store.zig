@@ -330,12 +330,14 @@ pub const Roots = struct {
         return null;
     }
 
-    /// The active version of `id` under the first root that has one, or null.
-    /// Caller owns `version`.
-    pub fn firstActive(self: *const Roots, alloc: std.mem.Allocator, id: []const u8) !?ActiveEntry {
+    /// Which root and version an id's `current` resolves to, or null if no root
+    /// has one. Caller owns `version`.
+    pub const ActiveVersion = struct { root: usize, version: []const u8 };
+
+    pub fn firstActive(self: *const Roots, alloc: std.mem.Allocator, id: []const u8) !?ActiveVersion {
         for (self.entries, 0..) |_, i| {
             const active = try self.store(i).activeVersion(alloc, id) orelse continue;
-            return .{ .id = id, .root = i, .version = active };
+            return .{ .root = i, .version = active };
         }
         return null;
     }

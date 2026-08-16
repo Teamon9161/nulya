@@ -48,6 +48,22 @@ pub const Options = struct {
     /// Provider-facing total tool count, builtins included. shell + edit always
     /// occupy `registry.builtin_count` of it.
     max_tools: u32 = 8,
+    /// Extensions to bring into THIS session's composition whether or not they
+    /// are activated (`nulya session new --with`, DESIGN §14). Membership only:
+    /// their skills enter the catalog, their system prompts enter the system
+    /// blocks, and their tools become invocable through the CLI — whether a tool
+    /// takes a native slot is still `pinned_native_tools` / ranking. Same id as
+    /// an active extension overrides it for this session; a later `--with` of
+    /// the same id overrides an earlier one.
+    with: []const WithRef = &.{},
+};
+
+/// One `--with` request: an extension id, optionally at an exact version.
+/// Without a version, the id's `current` is used — but unlike discovery, an id
+/// that resolves to nothing is a hard error, because the caller named it.
+pub const WithRef = struct {
+    id: []const u8,
+    version: ?[]const u8 = null,
 };
 
 pub const CompositionError = error{
@@ -61,6 +77,9 @@ pub const CompositionError = error{
     PinnedExtensionNotActive,
     /// The pinned extension is active but its frozen manifest declares no such tool.
     PinnedToolNotDeclared,
+    /// A `--with` extension has no built version to use: either no `current` at
+    /// all, or the named version is in none of the store roots.
+    WithVersionNotFound,
 };
 
 pub const SessionComposition = struct {
@@ -89,10 +108,11 @@ pub const SessionComposition = struct {
             // unresolvable — fail loudly rather than start a session missing
             // the tools the operator asked for.
             if (opts.pinned_native_tools.len != 0) return error.PinnedExtensionNotActive;
+            if (opts.with.len != 0) return error.WithVersionNotFound;
             return emptyComposition(alloc, io);
         }
 
-        const resolved = try resolveActiveExtensions(alloc, &roots);
+        const resolved = try unionWith(alloc, &roots, try resolveActiveExtensions(alloc, &roots), opts.with);
         defer freeResolved(alloc, resolved);
         sortResolved(resolved);
 
@@ -510,6 +530,53 @@ fn resolveActiveExtensions(alloc: std.mem.Allocator, roots: *const store.Roots) 
     return resolved.toOwnedSlice(alloc);
 }
 
+/// Union the `--with` extensions into the discovered set (DESIGN §14): each one
+/// enters this session's composition whether or not it is activated, at the
+/// named version or at its `current`. Same id as a discovered extension REPLACES
+/// it (this session says which version it means), and a repeated `--with` of one
+/// id keeps the last — the request is an override, so the last override wins.
+///
+/// Unlike discovery, nothing here is best-effort: the caller named these, so an
+/// id with no built version, or a version no root holds, fails the session.
+/// Takes ownership of `base`; on any error it and everything built so far is
+/// released.
+fn unionWith(
+    alloc: std.mem.Allocator,
+    roots: *const store.Roots,
+    base: []ResolvedExtension,
+    with: []const WithRef,
+) ![]ResolvedExtension {
+    if (with.len == 0) return base;
+    var list: std.ArrayList(ResolvedExtension) = .{ .items = base, .capacity = base.len };
+    errdefer freeResolved(alloc, list.items);
+
+    for (with) |ref| {
+        const owned_version: ?[]const u8 = if (ref.version == null) blk: {
+            const active = (try roots.firstActive(alloc, ref.id)) orelse return error.WithVersionNotFound;
+            break :blk active.version;
+        } else null;
+        defer if (owned_version) |v| alloc.free(v);
+        const version = ref.version orelse owned_version.?;
+
+        const root_index = roots.firstWithVersion(alloc, ref.id, version) orelse return error.WithVersionNotFound;
+        var m = try roots.store(root_index).readManifest(alloc, ref.id, version);
+        errdefer m.deinit();
+
+        // Replace an entry for the same id rather than shadowing it: two
+        // manifests of one id in one composition would collide on tool names.
+        for (list.items, 0..) |existing, i| {
+            if (!std.mem.eql(u8, existing.id, ref.id)) continue;
+            var old = list.swapRemove(i);
+            alloc.free(old.id);
+            alloc.free(old.version);
+            old.manifest.deinit();
+            break;
+        }
+        try appendResolved(alloc, &list, roots.entries[root_index], ref.id, version, m);
+    }
+    return list.toOwnedSlice(alloc);
+}
+
 /// Resolve exactly the frozen (id, version) pairs from a session header. Unlike
 /// discovery, this never scans `current` and never skips: a pinned version that
 /// no longer validates is a hard error, because resume must reconstruct the same
@@ -785,6 +852,66 @@ test "inactive extension contributions do not enter composition" {
     try std.testing.expectEqual(@as(usize, 0), comp.pinned_extensions.len);
     try std.testing.expectEqual(@as(usize, 0), comp.skills.skills.len);
     try std.testing.expectEqual(@as(usize, 1), comp.system_prompts.blocks.len); // kernel only
+}
+
+test "--with brings a built-but-inactive version into one session, overrides an active one, and refuses what does not exist" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmpPath(alloc, io, tmp.dir);
+    defer alloc.free(cwd);
+
+    const manifest_bytes =
+        \\{"schema":"nulya.extension/v2","id":"mode","contributes":{"system_prompts":["prompts/base.md"]}}
+    ;
+    const v1 = try testkit.writeFrozenVersion(alloc, io, tmp.dir, "mode", manifest_bytes, &.{.{ .rel = "prompts/base.md", .bytes = "V1" }});
+    defer alloc.free(v1);
+    const v2 = try testkit.writeFrozenVersion(alloc, io, tmp.dir, "mode", manifest_bytes, &.{.{ .rel = "prompts/base.md", .bytes = "V2" }});
+    defer alloc.free(v2);
+
+    // Nothing is activated: a plain session sees only the kernel prompt…
+    {
+        var plain = try SessionComposition.init(alloc, io, cwd, one_root, .{});
+        defer plain.deinit(alloc);
+        try std.testing.expectEqual(@as(usize, 1), plain.system_prompts.blocks.len);
+    }
+    // …while `--with mode@v2` composes that exact version into this session.
+    {
+        var with = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "mode", .version = v2 }} });
+        defer with.deinit(alloc);
+        try std.testing.expectEqual(@as(usize, 2), with.system_prompts.blocks.len);
+        try std.testing.expectEqualStrings("V2", with.system_prompts.blocks[1].bytes);
+        // It is in the frozen set, so the header records it and a resume rebuilds it.
+        try std.testing.expectEqual(@as(usize, 1), with.pinned_extensions.len);
+        try std.testing.expectEqualStrings(v2, with.pinned_extensions[0].version);
+    }
+
+    // With v1 activated, a bare `--with mode` takes `current`…
+    try testkit.activate(alloc, io, tmp.dir, "mode", v1);
+    {
+        var current = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "mode" }} });
+        defer current.deinit(alloc);
+        try std.testing.expectEqualStrings("V1", current.system_prompts.blocks[1].bytes);
+    }
+    // …and naming a version OVERRIDES the active one for this session only,
+    // exactly once — the same id is replaced, never composed twice.
+    {
+        var override = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{
+            .{ .id = "mode", .version = v2 },
+            .{ .id = "mode", .version = v1 },
+            .{ .id = "mode", .version = v2 },
+        } });
+        defer override.deinit(alloc);
+        try std.testing.expectEqual(@as(usize, 1), override.pinned_extensions.len);
+        try std.testing.expectEqual(@as(usize, 2), override.system_prompts.blocks.len);
+        try std.testing.expectEqualStrings("V2", override.system_prompts.blocks[1].bytes); // the last --with wins
+    }
+
+    // The caller named these, so an unknown id or version fails the session.
+    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "absent" }} }));
+    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "mode", .version = "v-000000000000000000000000" }} }));
+    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, &.{"nulya-absent-root"}, .{ .with = &.{.{ .id = "mode" }} }));
 }
 
 test "system prompt ordering is deterministic by pinned extension id and manifest order" {
