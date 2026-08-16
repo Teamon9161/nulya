@@ -4,6 +4,13 @@
 //! `AgentSession.init()`: the active extension versions, the pinned
 //! model-facing tool set, skills and system prompts. Tool, Skill, and System
 //! Prompt snapshots stay strongly typed and keep their own semantics.
+//!
+//! Two phases, one intermediate value. `resolve` answers the request — a fresh
+//! session's discovery plus `--with`, or a session header's frozen versions —
+//! and resolves the pins into bindings; `assemble` builds the frozen session
+//! state out of that answer alone. Everything about WHY an extension or a tool
+//! is here is decided in the first phase and unrepresentable in the second, so
+//! `init` and `initFrozen` differ only in what they hand to `resolve`.
 
 const std = @import("std");
 const registry = @import("registry.zig");
@@ -138,22 +145,17 @@ pub const SessionComposition = struct {
     ) !SessionComposition {
         try validateBudget(opts);
 
+        // No store root existing anywhere needs no special case: discovery finds
+        // nothing, so a pin fails as `PinnedExtensionNotActive` and a `--with`
+        // as `WithVersionNotFound` on the ordinary path — the same errors, from
+        // the same two places, as when the roots exist but the extension does not.
         var roots = try store.Roots.open(alloc, io, cwd, ext_roots);
         defer roots.deinit();
-        if (roots.entries.len == 0) {
-            // No store anywhere: nothing can be active, so any explicit pin is
-            // unresolvable — fail loudly rather than start a session missing
-            // the tools the operator asked for.
-            if (opts.pinned_native_tools.len != 0) return error.PinnedExtensionNotActive;
-            if (opts.with.len != 0) return error.WithVersionNotFound;
-            return emptyComposition(alloc, io);
-        }
 
-        const resolved = try unionWith(alloc, &roots, try resolveActiveExtensions(alloc, &roots), opts.with);
-        defer freeResolved(alloc, resolved);
-        sortResolved(resolved);
+        const resolved = try resolve(alloc, &roots, .{ .fresh = opts });
+        defer freeResolved(alloc, resolved.extensions);
 
-        return assemble(alloc, io, &roots, resolved, opts.pinned_native_tools);
+        return assemble(alloc, io, &roots, resolved);
     }
 
     /// Rebuild the composition frozen into a session header (DESIGN §3, §7.5):
@@ -168,20 +170,13 @@ pub const SessionComposition = struct {
         ext_roots: []const []const u8,
         frozen: ledger.FrozenComposition,
     ) !SessionComposition {
-        if (frozen.active.len == 0) {
-            if (frozen.native_tools.len != 0) return error.PinnedExtensionNotActive;
-            return emptyComposition(alloc, io);
-        }
         var roots = try store.Roots.open(alloc, io, cwd, ext_roots);
         defer roots.deinit();
 
-        const resolved = try resolveFrozenExtensions(alloc, &roots, frozen.active);
-        defer freeResolved(alloc, resolved);
-        sortResolved(resolved);
+        const resolved = try resolve(alloc, &roots, .{ .frozen = frozen });
+        defer freeResolved(alloc, resolved.extensions);
 
-        // The frozen native tools are the exact, already-decided native set, so
-        // they enter as pins (strict) — the same path `init` took.
-        return assemble(alloc, io, &roots, resolved, frozen.native_tools);
+        return assemble(alloc, io, &roots, resolved);
     }
 
     pub fn deinit(self: SessionComposition, alloc: std.mem.Allocator) void {
@@ -194,66 +189,85 @@ pub const SessionComposition = struct {
     }
 };
 
-/// The shared tail of `init` / `initFrozen`: given the resolved (sorted) active
-/// extensions and an already-decided native-tool selection (`pins`, strict),
-/// freeze the tool set, skills, and system prompts. Each resolved extension
-/// names the root index it was found in, so nothing here re-derives the search
-/// order — it just indexes `roots`. `resolved` and `roots` stay owned by the
-/// caller.
+/// What a session's composition was ASKED for, in the only two shapes that
+/// exist: a fresh session (whatever is active, plus `--with`, with pins named
+/// by config / `--pin`) or the frozen record in a session header. The
+/// difference lives here and dies here — `resolve` turns either into the same
+/// `Resolved`.
+const Request = union(enum) {
+    fresh: Options,
+    frozen: ledger.FrozenComposition,
+};
+
+/// A composition request, answered: which extension versions are in this
+/// session (sorted by id) and the bindings for the tools that take a native
+/// slot. Everything about WHY — active, `--with`, frozen header; pinned by
+/// config or by the header — has been decided by the time this exists.
+const Resolved = struct {
+    extensions: []store.Roots.Resolved,
+    /// Owned by whoever holds this value until `assemble` takes them.
+    bindings: []ext_tools.Binding,
+};
+
+/// Phase one: decide membership. Discovery (best effort) and `--with` /
+/// frozen versions (named, so strict) differ only in how the extension list is
+/// obtained; pin resolution is the same for both, and is strict either way —
+/// an unresolvable pin fails the session rather than quietly starting without
+/// the tool that was asked for. `roots` stays the caller's; on any error
+/// everything built here is released.
+fn resolve(alloc: std.mem.Allocator, roots: *const store.Roots, request: Request) !Resolved {
+    const extensions = switch (request) {
+        .fresh => |opts| try unionWith(alloc, roots, try resolveActiveExtensions(alloc, roots), opts.with),
+        .frozen => |frozen| try resolveFrozenExtensions(alloc, roots, frozen.active),
+    };
+    errdefer freeResolved(alloc, extensions);
+    sortResolved(extensions);
+
+    const pins = switch (request) {
+        .fresh => |opts| opts.pinned_native_tools,
+        .frozen => |frozen| frozen.native_tools,
+    };
+    return .{ .extensions = extensions, .bindings = try resolveBindings(alloc, roots, extensions, pins) };
+}
+
+/// Phase two: build the frozen session state out of what phase one decided —
+/// the tool set, the skill catalog, the system blocks, the pinned versions —
+/// and nothing else. It cannot tell an active extension from a `--with` one, or
+/// a config pin from a header's: by the time anything reaches here those
+/// questions have no representation left. Each resolved extension names the
+/// root index it was found in, so the search order is never re-derived either.
+///
+/// Takes ownership of `resolved.bindings` (released on any failure here);
+/// `resolved.extensions` and `roots` stay the caller's.
 fn assemble(
     alloc: std.mem.Allocator,
     io: std.Io,
     roots: *const store.Roots,
-    resolved: []const store.Roots.Resolved,
-    pins: []const []const u8,
+    resolved: Resolved,
 ) !SessionComposition {
-    // Build every owned binding first, then freeze the slice: only after
-    // `toOwnedSlice` are the binding addresses stable enough for `asTool` to
-    // hand out `ToolExecutor.ptr` values into them.
-    const bindings = try resolveBindings(alloc, roots, resolved, pins);
+    // The bindings arrived as one frozen slice, so their addresses are stable
+    // enough for `asTool` to hand out `ToolExecutor.ptr` values into them.
+    const bindings = resolved.bindings;
     errdefer freeBindings(alloc, bindings);
 
     const tools = try snapshotFromBindings(alloc, bindings);
     errdefer tools.deinit(alloc);
 
-    const pinned = try copyPinsFromResolved(alloc, resolved);
+    const pinned = try copyPinsFromResolved(alloc, resolved.extensions);
     errdefer freePinned(alloc, pinned);
 
     var descriptors: std.ArrayList(skill.SkillDescriptor) = .empty;
     errdefer skill.deinitDescriptorArrayList(alloc, &descriptors);
-    for (resolved) |r| {
+    for (resolved.extensions) |r| {
         try ext_skills.appendFromManifest(alloc, io, roots.entries[r.root].dir, &descriptors, r.id, r.version, r.manifest);
     }
     skill.sortDescriptors(descriptors.items);
     const skills = skill.SkillSetSnapshot{ .skills = try descriptors.toOwnedSlice(alloc) };
     errdefer skills.deinit(alloc);
 
-    const system_prompts = try buildSystemPrompts(alloc, io, roots, resolved, skills);
+    const system_prompts = try buildSystemPrompts(alloc, io, roots, resolved.extensions, skills);
     errdefer system_prompts.deinit(alloc);
 
-    return .{
-        .pinned_extensions = pinned,
-        .extension_tool_bindings = bindings,
-        .tools = tools,
-        .skills = skills,
-        .system_prompts = system_prompts,
-    };
-}
-
-/// A composition with only the two builtins — no active extensions.
-fn emptyComposition(alloc: std.mem.Allocator, io: std.Io) !SessionComposition {
-    const bindings = try alloc.alloc(ext_tools.Binding, 0);
-    errdefer alloc.free(bindings);
-    const tools = try registry.snapshotWith(alloc, &.{});
-    errdefer tools.deinit(alloc);
-    const pinned = try alloc.alloc(PinnedExtension, 0);
-    errdefer freePinned(alloc, pinned);
-    const skills = skill.SkillSetSnapshot{ .skills = try alloc.alloc(skill.SkillDescriptor, 0) };
-    errdefer skills.deinit(alloc);
-    // Nothing resolved, so the search order is never consulted; an empty `Roots`
-    // keeps `buildSystemPrompts` on one signature.
-    const no_roots: store.Roots = .{ .alloc = alloc, .io = io, .entries = &.{} };
-    const system_prompts = try buildSystemPrompts(alloc, io, &no_roots, &.{}, skills);
     return .{
         .pinned_extensions = pinned,
         .extension_tool_bindings = bindings,
@@ -349,7 +363,7 @@ fn resolvePinnedBinding(
         .name = spec.name,
         .description = spec.description,
         .input_schema = spec.input_schema,
-    }, entry_abs, rt.interpreter);
+    }, entry_abs, rt.interpreter, spec.timeout_ms);
 }
 
 fn findResolved(resolved: []const store.Roots.Resolved, id: []const u8) ?store.Roots.Resolved {

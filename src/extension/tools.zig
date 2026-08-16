@@ -24,6 +24,10 @@ pub const Binding = struct {
     /// For a script extension, the interpreter to run `entry_path` with; null for
     /// a compiled (or directly-executable) entry.
     interpreter: ?[]const u8 = null,
+    /// The wall-clock cap this tool's frozen manifest declared for one call, or
+    /// null to take the host default (`invoke.Options.timeout_ms`). Frozen with
+    /// the version like everything else the manifest says.
+    timeout_ms: ?u32 = null,
 
     /// Build a binding that owns copies of every string it exposes, so it can
     /// outlive the transient manifest and version data it was resolved from. The
@@ -35,6 +39,7 @@ pub const Binding = struct {
         definition: tool.ToolDefinition,
         entry_path: []const u8,
         interpreter: ?[]const u8,
+        timeout_ms: ?u32,
     ) !Binding {
         const id = try alloc.dupe(u8, definition.id);
         errdefer alloc.free(id);
@@ -57,6 +62,7 @@ pub const Binding = struct {
             },
             .entry_path = owned_entry,
             .interpreter = owned_interp,
+            .timeout_ms = timeout_ms,
         };
     }
 
@@ -92,7 +98,10 @@ fn call(ptr: ?*anyopaque, alloc: std.mem.Allocator, req: tool.ToolRequest) anyer
         req.ctx.cwd,
         self.definition.name,
         req.args_json,
-        .{ .interpreter = self.interpreter },
+        .{
+            .interpreter = self.interpreter,
+            .timeout_ms = self.timeout_ms orelse invoke.Options.default_timeout_ms,
+        },
     );
 
     // Ownership transfer: both slices are allocator-owned; returning moves
@@ -116,10 +125,12 @@ const FakeEnv = struct {
     err: ?anyerror = null,
     saw_entry_path: []const u8 = "",
     saw_request_json: []const u8 = "",
+    saw_timeout_ms: ?u32 = null,
 
     fn runExtension(ptr: *anyopaque, alloc: std.mem.Allocator, req: environment.ExtensionRequest) anyerror!environment.ExtensionOutcome {
         const self: *FakeEnv = @ptrCast(@alignCast(ptr));
         if (self.err) |e| return e;
+        self.saw_timeout_ms = req.timeout_ms;
         // Allocate everything before publishing to `self`: a mid-way failure
         // frees the locals via errdefer and leaves the saw fields empty, so
         // `deinit` never double-frees.
@@ -215,7 +226,7 @@ test "initOwned copies every exposed string and survives the source being freed"
         .name = name,
         .description = description,
         .input_schema = input_schema,
-    }, entry_path, null);
+    }, entry_path, null, null);
     defer binding.deinit(alloc);
 
     // Drop the sources; the binding must not alias them.
@@ -240,7 +251,7 @@ test "initOwned leaks nothing when an interior allocation fails" {
                 .name = "web_search",
                 .description = "Search web",
                 .input_schema = "{\"type\":\"object\"}",
-            }, "/frozen/v1/bin/web-search", null);
+            }, "/frozen/v1/bin/web-search", null, null);
             binding.deinit(alloc);
         }
     }.run, .{});
@@ -277,6 +288,34 @@ test "executor forwards the exact frozen entry path" {
     // The frozen executable path reaches the environment verbatim — no
     // resolution, no joining.
     try testing.expectEqualStrings("/frozen/v1/bin/web-search", fake.saw_entry_path);
+}
+
+test "a binding's declared timeout reaches the environment; without one the host default does" {
+    const alloc = testing.allocator;
+    var fs = DummyFs{};
+
+    var default_binding = testBinding();
+    var default_env = FakeEnv{ .io = testing.io, .response = success_response };
+    defer default_env.deinit(alloc);
+    const default_result = try default_binding.asTool().executor.call(alloc, .{
+        .args_json = "{}",
+        .ctx = .{ .environment = default_env.handle(), .fs = fs.handle(), .cwd = "ws" },
+    });
+    defer alloc.free(default_result.output);
+    try testing.expectEqual(@as(?u32, invoke.Options.default_timeout_ms), default_env.saw_timeout_ms);
+
+    // A tool that knows it is slow said so in its manifest (DESIGN §7.3); the
+    // binding carries that verbatim to the child.
+    var slow_binding = testBinding();
+    slow_binding.timeout_ms = 600_000;
+    var slow_env = FakeEnv{ .io = testing.io, .response = success_response };
+    defer slow_env.deinit(alloc);
+    const slow_result = try slow_binding.asTool().executor.call(alloc, .{
+        .args_json = "{}",
+        .ctx = .{ .environment = slow_env.handle(), .fs = fs.handle(), .cwd = "ws" },
+    });
+    defer alloc.free(slow_result.output);
+    try testing.expectEqual(@as(?u32, 600_000), slow_env.saw_timeout_ms);
 }
 
 test "executor forwards the model's raw arguments as a tool/call request" {

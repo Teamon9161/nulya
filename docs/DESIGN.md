@@ -44,7 +44,7 @@ Ledger ──projection──▶ PromptIR { system_blocks, turns }
 
 > **`PromptIR[N].turns` 是 `PromptIR[N+1].turns` 的前缀。**（`prompt.zig` `isStablePrefix`，单测断言）
 
-`turns` 是 ledger 事件的纯函数，一个事件一个 turn，四种（`user_text` / `assistant{reasoning, text, calls}` / `tool_results[]` / `capability_note`）——**turn 不拆散**：三个 wire 全都要 turn 级结构（assistant 的文本与 calls 同属一条 message、一批结果是一个 turn），拆成字符串块只会让每个 provider 把刚被丢掉的边界再推一遍。`reasoning` 是 assistant turn 的**字段**（没有就是 `""`，只有声明 `thinking_replay` 的 provider 才序列化，且永远排在该 turn 的 text / calls 之前）。`assistant.usage` / `assistant.stop_reason` / 事件的 inbox `origin` **在类型里根本没有字段**——"不投影"因此是类型的事实，不是要靠人记住的纪律（§3.1、§3.4）。`turns` 只借 ledger 事件的 slice、自己只拥有那个数组，所以 PromptIR 不会活得比它投影自的 ledger 更久（每个调用方都是 step 前投影、step 后丢掉）。`system_blocks` 来自冻结的 composition（§7.5），整场不变。Provider 负责把这个前缀映射到自家 cache 机制（§13）。
+`turns` 是 ledger 事件的纯函数，一个事件一个 turn，四种（`user_text` / `assistant{reasoning, text, calls: []prompt.ToolCall{id, tool, args_json}}` / `tool_results: []prompt.ToolResult{call_id, ok, output}` / `capability_note`）——**turn 不拆散**：三个 wire 全都要 turn 级结构（assistant 的文本与 calls 同属一条 message、一批结果是一个 turn），拆成字符串块只会让每个 provider 把刚被丢掉的边界再推一遍。`reasoning` 是 assistant turn 的**字段**（没有就是 `""`，只有声明 `thinking_replay` 的 provider 才序列化，且永远排在该 turn 的 text / calls 之前）。`assistant.usage` / `assistant.stop_reason` / 结果的 `spill_path` / 事件的 inbox `origin` **在类型里根本没有字段**——"不投影"因此是类型的事实，不是要靠人记住的纪律（§3.1、§3.4）。call / result 因此是 PromptIR **自己的**类型（`prompt.ToolCall` / `prompt.ToolResult`，字符串仍借 ledger 的）而不是复用 `ledger.*`：两者回答的问题不同——ledger 记**模型产出了什么**，PromptIR 记**什么可以发给 provider**，两者只在被 `max_tokens` 切断的那一 turn 上分岔（§4）。`turns` 只借 ledger 事件的 slice、自己只拥有那个数组，所以 PromptIR 不会活得比它投影自的 ledger 更久（每个调用方都是 step 前投影、step 后丢掉）。`system_blocks` 来自冻结的 composition（§7.5），整场不变。Provider 负责把这个前缀映射到自家 cache 机制（§13）。
 
 会炸缓存的三件事及对策：
 
@@ -97,6 +97,8 @@ capability_note  { id, version, text }                                  ← 中�
 
 事件字母表**可加不可改**：现有四种保留原字段。`seq` 是文件落盘时的 envelope 字段（§3.4），不属于事件负载。
 
+**`calls[].args_json` 是模型实际产出的那些字节**，包括被 `max_tokens` 切断时的半截 JSON 前缀——ledger 记事实，不记"应该是什么"。把它变成可发给 provider 的东西是投影的事（`prompt.ToolCall`，§4）。
+
 **`assistant.reasoning` 是不透明字段，不是第五种事件。** 它是 provider 原样吐出的本轮 reasoning item 的 JSON 数组（Anthropic 的带 signature 的 `thinking` / `redacted_thinking` block、Responses 的带 `encrypted_content` 的 `reasoning` item），没有则为 `""`。它是本轮的**事实**（模型确实产出了这段、且下一步要原样带回），不是模型可见文本：kernel 从不解析它，作为 assistant turn 的 `reasoning` 字段交回 provider，provider 只在自己认得（`ProviderCapabilities.thinking_replay`）时按原样回放到**同一个模型**——它天然 model-locked，而 session 的 `model_identity` 已冻结（§3.4），所以别的模型永远看不到它。为什么必须有它：Anthropic 一方端点在 thinking 开着时**拒绝**丢了 thinking block 的 tool-use turn（400，而 Opus 5 默认开、Fable 5 只能开），Responses 端点不带则模型每一步重推上一步的计划——前者是正确性，后者是质量与 token；两者都不是 kernel 该替 provider 决定的，kernel 只负责把这个事实存住、按序交回。落盘时只在非空才写 `reasoning` 字段（老行形状不变，老行读回为 `""`）。
 
 **`assistant.usage` 与 `reasoning` 同地位：本轮的事实，不投影。** `?Usage{input_tokens, output_tokens, cache_read_tokens, cache_write_tokens}`（`ledger.Usage`；`provider.Usage` 就是它的 re-export，provider 本来就 import ledger——一个 struct 贯穿到底，loop 不做转换），由 `loop.zig` 从 `ModelTurn.usage` 写入。落盘只在**非空**时写 `usage` 对象：provider 什么都没报（scripted 替身、流中途取消）时整条不写，老行读回 `null`——"没记录"与"花了 0"是两个不同的事实。**`prompt.Turn` 里没有它的字段**：模型不读自己的账单；它是给慢速回路与前端的成本证据（`session events` / `--stream` 的 ledger 行天然带上，`session list --json` 按它求和）。provider 阶段就被取消的 step 没有 assistant 事件可挂，其 usage 不落盘——诚实接受，不为它造新事件。
@@ -141,7 +143,7 @@ UI / trajectory / metrics 是 ledger 的投影，不持久化 mutable 状态。*
 （`origin` 只出现在经 inbox 排干进来的事件行上，是投递去重列，绝不投影给模型；见"单写者"条。`reasoning` 只在该 turn 有 reasoning 时出现，值是 provider 数组转义成的一个 JSON 字符串——ledger 只存不解析；`usage` 只在 provider 报了成本时出现；`stop_reason` 只在 shape 说不出来时出现（`max_tokens` / `other`，见 §3.1、§4）。三者都不投影。）
 
 - **一个文件 = 一个 generation = 一个 cache scope。** 文件只 append，所以 PromptIR 的 turn 前缀不变量（§1）成了文件系统性质。没有会 bump generation 的事件（§11）。
-- **header 的 JSON 形状就是 `ledger.Header` 结构体**（`std.json` 类型化编解码，`OwnedHeader = std.json.Parsed(Header)`）；读端忽略未知字段，所以新写者多出的字段不破坏旧读者。事件行保持平铺的 `kind` 形状（driver 读起来方便），解码经 `WireEvent`。
+- **header 的 JSON 形状就是 `ledger.Header` 结构体**（`std.json` 类型化编解码，`OwnedHeader = std.json.Parsed(Header)`）；读端忽略未知字段，所以新写者多出的字段不破坏旧读者；**但 `v` 不同就拒绝**（`ledger.format_version` = 1，别的值一律 `UnsupportedLedgerVersion`）——多出的字段不改变已有字段的含义，换了版本号则正是在宣告"改了"，把未来格式当 v1 读只会读出一个像是对的答案。`session step` / `session new --parent` 把它翻成"这个文件由更新的 nulya 写的，本二进制读 ledger v1"并退出 1，`session list` 跳过该文件（它本来就跳过读不了的）。事件行保持平铺的 `kind` 形状（driver 读起来方便），解码经 `WireEvent`。
 - **composition + 模型身份冻结进 header。** header 记录本场 active 的每个 extension 的**具体版本**、被选为 native 的 tool 稳定 id，以及创建时**解析后的模型身份** `model_identity`（`provider` / 具体 `model` / `base_url` / `api_key_env`——`model` 字段本身只是 profile 别名，供显示与 effort 查询）。任何进程 `openDurable` 重开时都用 header 重建 composition（`composition.initFrozen`：读那些冻结版本、把 `native_tools` 当 pin），**绝不重扫 `current`、绝不重排 usage journal**——每个 `session step` 进程都看到**同一** composition，中途 `activate` 也移不动它（§5.1、§7.5、physics #2）。replay 时模型看到的一切 = header + events 的纯函数。header 还记 `nulya{version, kernel_hash}`（build 的版本串 + kernel system prompt 与两个 builtin 定义的 hash，`composition.kernelHash`）——**纯 provenance**：这两样是**二进制的**编译期常量却进了本场冻结的 model-visible 状态（§5.1、§7.5），升级 nulya 就会在既有 session 底下换掉它们，而 header 原本无从指认；记下来只是让它可见，resume 时对不上就在 stderr 警告一行照跑（不拒绝、不改任何东西），空 stamp = 这个字段之前写的老 header = unknown，永不警告。
 - **模型身份创建时冻结、resume 不可变（physics #2/#5）。** 模型解析**只有一处决定**：`launch.resolveDescriptor(prov, env, profile)` 在**创建**时把 profile 解析成 `model_identity`，运行用的 handle 也**只从这个 descriptor** 构建（`launch.buildFromDescriptor`）——所以"实际跑的" == "header 冻结的"，不存在 fork。`resolveDescriptor` 是 **credential-aware** 的：openai profile 若 `api_key_env` 在环境里解析不出 credential，创建时就冻结成 scripted（因为那正是会跑的东西）；此后 config 改动**永不**改变已有 session 的模型。resume 时 `session step` 用 header 的 `model_identity` 重建**恰好那个**模型，只从 `api_key_env` 重解 credential——**不存密钥**，也**没有静默 fallback**：openai session 的密钥不在了就 `MissingCredential` 显式拒跑。**durable credential 只以 `api_key_env` 引用**；inline `api_key` 无法在 resume 时从环境恢复（否则又让 session 依赖 mutable config），因此不参与 durable openai 身份。`provider==""` 的旧 header 当 scripted 处理。
 - **resume。** `openDurable` 读回 header + 每条完整事件行；被截断的**最后一行**（写到一半崩溃）丢弃并把文件截回最后一条完整行，坏的**中间**行或乱序 `seq` 则是硬错误（`CorruptLedger`）。崩在 assistant-with-calls 之后（合法但未闭合的 batch）由 `completeInterruptedToolBatch` 在下一步补齐（§4）。
@@ -177,11 +179,11 @@ collectTurn(PromptIR, tool_defs)  →  assistant turn（可能含多个 tool_use
 - `prepareStep` 的顺序固定：补齐残尾 → 消费 cancel 标记 → 排干 inbox（§3.4）。
 - `AgentSession.run(max_steps)`：预算 = `min(max_steps, session.max_steps_ceiling)`（天花板 50），由 kernel 强制；turn 结束、预算耗尽、任一 step 取消、或**连续 `max_truncated_streak`（2）个 step 被 `max_tokens` 截断**即停。
 
-**Truncation（`stop_reason == max_tokens`，模型这一步被输出上限切断）：** 与 cancellation 正交——那是宿主控制，这是模型停止原因（`StepOutcome.stop_reason`）。被截断的回复**不是一个完成的 turn**：它说了的文本与 reasoning 是事实、照记；它开了头的 call 不是模型的本意，参数还可能是半截 JSON——原样回放进 provider 的 `input`（anthropic 用 `writeRaw`）会让这场 session 之后每一步都 400。所以：calls **照记但参数保证可回放**（不是完整 JSON 值的换成 `{}`），**一个都不执行**，用一条 marker 批次关掉（`not executed: the reply hit its output cap (max_tokens) …`，文本同时告诉模型发生了什么、怎么绕过——写短、或一步一步来），返回 `stop_reason = .max_tokens`。没有 call 的截断回复只是 text-only assistant，`run` 因 `lastAssistantDone` 停下，driver 见 `stopped: max_tokens`（TUI 提示"发一条消息继续"——裸再 step 会让 assistant 结尾成 prefill，thinking 开着时 provider 拒绝）。有 call 的截断回复 `run` 会再走一步让模型看到 marker 重试；连续两次即停（`max_truncated_streak`：**只有可重试的、带 call 的截断走得到这个上限**，text-only 那种当场就停），避免装不下上限的东西反复重试、每次计费整个前缀。（tcode 同一问题的做法：keep + 关闭 dangling call + 追加一条 note + 最多重试两次；这里 note 的内容放进 marker result 里，不给 kernel 加"kernel 对模型说话"的事件种类。）内核默认不设 `max_output_tokens`（anthropic 必填故给 32k），调大上限是 config / provider 层的事。
+**Truncation（`stop_reason == max_tokens`，模型这一步被输出上限切断）：** 与 cancellation 正交——那是宿主控制，这是模型停止原因（`StepOutcome.stop_reason`）。被截断的回复**不是一个完成的 turn**：它说了的文本与 reasoning 是事实、照记；它开了头的 call 不是模型的本意，参数还可能是半截 JSON——原样回放进 provider 的 `input`（anthropic 用 `writeRaw`）会让这场 session 之后每一步都 400。所以：calls **照记原样**（连半截 JSON 一起，ledger 存的是事实），**一个都不执行**，而"可回放"由**投影**保证——`prompt.projectWithSystem` 在这一 turn 上把不是完整 JSON 值的 `args_json` 换成 `{}`（`std.json.validate`，只对 `stop_reason == max_tokens` 的 turn 做，别的 turn 上同样的字节是模型自己的输出、一字不动）。两条性质因此同时成立：行还说得出模型产出了什么，而没有任何发不出去的东西到得了 wire。用一条 marker 批次关掉（`not executed: the reply hit its output cap (max_tokens) …`，文本同时告诉模型发生了什么、怎么绕过——写短、或一步一步来），返回 `stop_reason = .max_tokens`。没有 call 的截断回复只是 text-only assistant，`run` 因 `lastAssistantDone` 停下，driver 见 `stopped: max_tokens`（TUI 提示"发一条消息继续"——裸再 step 会让 assistant 结尾成 prefill，thinking 开着时 provider 拒绝）。有 call 的截断回复 `run` 会再走一步让模型看到 marker 重试；连续两次即停（`max_truncated_streak`：**只有可重试的、带 call 的截断走得到这个上限**，text-only 那种当场就停），避免装不下上限的东西反复重试、每次计费整个前缀。（tcode 同一问题的做法：keep + 关闭 dangling call + 追加一条 note + 最多重试两次；这里 note 的内容放进 marker result 里，不给 kernel 加"kernel 对模型说话"的事件种类。）内核默认不设 `max_output_tokens`（anthropic 必填故给 32k），调大上限是 config / provider 层的事。
 
 **截断是落盘的事实，不只是运行时的：** assistant 事件带 `stop_reason`（`ledger.Event.assistant`，与 `usage` 同地位——不投影、只在 shape 说不出来时写进行，见 §3.1）。理由不是 provenance 而是**上面那条保护跨不过进程边界**：`run` 是在**走完一步之后**才看 `lastAssistantDone`，所以第二次 `nulya session step <id>`（没有新消息）会无条件先走一步，把那条 assistant turn 当 prefill 发出去——正是这里要躲的 400。进程 2 手上只有 ledger，进程 1 的运行时状态随它一起没了，而一条被切断的 text-only 回复与正常 `end_turn` 逐字节相同：`calls` 空、shape 一样。所以 `lastStopReason()` 本身就是一次 ledger 读（最后一条 assistant 事件的 `stop_reason`，没有就 `end_turn`），跑过这一步的进程与只是 resume 的进程给出同一个答案。所以 `AgentSession.step` 在 `prepareStep` **之后**（新排干的 inbox 事件正是让它重新可 step 的输入）查 `lastAssistantTruncated()`，是就以 `error.TruncatedTurnNeedsInput` 失败、什么都不 append；`session step` 把它翻译成 "the last reply was cut off at its output cap; append a message before stepping again" 并非零退出。**这不是新的 kernel policy**，是让 `run` 里本来就有的那个判断活过进程边界；追加任何东西（用户消息、排干的 inbox 事件）就自然解除。
 
-不变量：**一条 assistant tool-call batch ↔ 恰好一条匹配的 tool_results batch。** `session.recordCompletedToolStats` 直接按这个形状读 suffix 并 assert。**assistant 事件永远可回放**：`calls[].args_json` 是完整 JSON 值。
+不变量：**一条 assistant tool-call batch ↔ 恰好一条匹配的 tool_results batch。** `session.recordCompletedToolStats` 直接按这个形状读 suffix 并 assert。**PromptIR 永远可回放，ledger 存事实**：`prompt.ToolCall.args_json` 一定是完整 JSON 值，`ledger.ToolCall.args_json` 是模型写出来的那些字节。
 
 **输出纪律**（`emit.zig`，细节见 [base-tools.md](base-tools.md)）：每个 tool 结果过 head/tail 字节预算（UTF-8 边界截断），超限落盘到 `.nulya/scratch/` 留指针；每 step 另有聚合预算 `StepOutputLimiter`。落盘路径由 ledger seq 决定，replay 一致。
 
@@ -324,7 +326,7 @@ extension 装在**多个 store root** 里，按固定顺序搜索（`store.Roots
   "id": "web.search",
   "runtime": { "entry": "bin/web-search" },
   "contributes": {
-    "tools": [{ "name": "web_search", "description": "…", "input": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] } }],
+    "tools": [{ "name": "web_search", "description": "…", "input": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] }, "timeout_ms": 60000 }],
     "skills": ["skills/risk-parity"],
     "system_prompts": ["prompts/finance.md"]
   },
@@ -332,9 +334,11 @@ extension 装在**多个 store root** 里，按固定顺序搜索（`store.Roots
 }
 ```
 
-校验（`manifest.zig`）：schema id 精确匹配；`id` 合法；**至少一种 contribution**（`NoContributions`）；有 tool 时必须有 `runtime`（`MissingRuntime`）；tool 名不能是 `shell`/`edit`、不能重复；`entry` / skill / system_prompt 路径不能逃出包目录。**manifest 是 schema 唯一真相**：绝不"启动 binary 再问它有什么"。
+校验（`manifest.zig`）：schema id 精确匹配；`id` 合法；**至少一种 contribution**（`NoContributions`）；有 tool 时必须有 `runtime`（`MissingRuntime`）；tool 名不能是 `shell`/`edit`、不能重复；`timeout_ms` 若写了必须是正数且 ≤ `tool.Timeouts.extension_max_ms`（600s），否则 `InvalidTimeout`；`entry` / skill / system_prompt 路径不能逃出包目录。**manifest 是 schema 唯一真相**：绝不"启动 binary 再问它有什么"。
 
 `tools[].input` schema 只在该 tool 被 pin 进 `tools[]` 时才喂给模型；平时是可发现性元数据。
+
+`tools[].timeout_ms?` 是**这个 tool 自己**的 wall-clock 上限（缺省 = host 的 30s，§7.3）：知道自己慢的 tool 在 manifest 里说出来，因为 manifest 就是关于一个 tool 的唯一真相。第一个用它的是随仓库带的 `extensions/compact`——它要等一次真实的 model step，30s 一定不够。
 
 ### 7.3 Wire protocol（`protocol.zig` / `invoke.zig`）
 
@@ -347,7 +351,7 @@ JSON-RPC 2.0，oneshot：spawn → stdin 一条 request → stdout 一条 respon
 ```
 
 - 响应 `id` 必须与请求相同，否则 invalid response。
-- 一次调用的 wall-clock 上限来自 `tool.Timeouts.extension_ms`（30s，与 shell 同一张表，§6.1 / base-tools.md §3）：到点 kill，并把已捕获的 stderr 一起折成一次**失败的调用**（不是 host error、更不是取消）。
+- 一次调用的 wall-clock 上限来自 `tool.Timeouts.extension_ms`（30s，与 shell 同一张表，§6.1 / base-tools.md §3），**除非该 tool 的冻结 manifest 自己声明了 `timeout_ms`**（§7.2.1，上限 `extension_max_ms` = 600s，与 shell 的上限同值）：到点 kill，并把已捕获的 stderr 一起折成一次**失败的调用**（不是 host error、更不是取消）。native pin 的路径（`ext_tools.Binding`）与 CLI 的路径（`nulya ext run`）读的是同一个 manifest 字段，所以两边不会分岔。
 - 只有 `tool/call` 一个 method，用专用 `ToolCallRequest` 类型；**不提前抽通用 JsonRpcRequest**，等第二个 method 真出现。
 - 不做 daemon / persistent worker / streaming / host callback。spawn 一个原生 binary ≈ 毫秒，对比模型 round-trip 秒级可忽略；最高频的 shell/edit 是 in-core 内置根本不 spawn。真正的成本是某些 extension 每次调用的重初始化（浏览器 / DB 连接）——**先测量再持久化**（PLAN §3.3）。
 

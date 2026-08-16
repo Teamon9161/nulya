@@ -28,9 +28,13 @@ const tool = @import("../tool.zig");
 const request_id = "call";
 
 pub const Options = struct {
+    /// The cap a caller that has nothing better to say uses. A tool whose
+    /// manifest declares its own passes that instead (DESIGN §7.3).
+    pub const default_timeout_ms: u32 = tool.Timeouts.extension_ms;
+
     /// Wall-clock cap for the oneshot call, forwarded to `Environment.runExtension`
     /// (`tool.Timeouts`, base-tools.md §3).
-    timeout_ms: u32 = tool.Timeouts.extension_ms,
+    timeout_ms: u32 = default_timeout_ms,
     /// Runner-level capture cap for the child's stdout/stderr.
     max_output_bytes: usize = 1 << 20,
     /// For a script extension, the interpreter to run the entry with.

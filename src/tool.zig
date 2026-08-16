@@ -31,12 +31,18 @@ pub const StepOutputBudget = emit.StepOutputBudget;
 /// ONE table, so no call site carries its own literal: `shell` defaults to
 /// `shell_default_ms` and clamps a model-supplied `timeout_ms` into
 /// `[1, shell_max_ms]`; an extension's oneshot `tool/call` gets `extension_ms`
+/// unless its manifest declares its own, which may reach `extension_max_ms`
 /// (DESIGN §7.3). Not config: a timeout is a property of the tool contract the
 /// model is taught, not of an operator's deployment.
 pub const Timeouts = struct {
     pub const shell_default_ms: u32 = 120_000;
     pub const shell_max_ms: u32 = 600_000;
     pub const extension_ms: u32 = 30_000;
+    /// Ceiling for a manifest-declared `contributes.tools[].timeout_ms`, the
+    /// same ten minutes `shell` may be asked for: a tool that knows it is slow
+    /// (one that steps a real model, say) says so, but no manifest may hand the
+    /// host an unbounded wait.
+    pub const extension_max_ms: u32 = 600_000;
 };
 
 /// Constant-size context handed to every tool call.

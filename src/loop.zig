@@ -247,19 +247,18 @@ pub fn runStepWithPrompt(
     defer turn.deinit(alloc);
     // A reply cut off by `max_tokens` is not a finished turn: what it said is
     // fact and is kept, but a call it started is not what the model meant, and
-    // its arguments may be a torn JSON prefix — which, replayed verbatim into a
-    // provider's `input`, would poison every later request of this session.
-    // So on a truncated turn every call is recorded with replayable arguments
-    // (torn ones become `{}`), none is executed, and the batch is closed with a
-    // marker result that tells the model what happened (DESIGN §4).
+    // its arguments may be a torn JSON prefix. Every call is recorded EXACTLY as
+    // the model produced it — the ledger's job is the fact — and none is
+    // executed; the batch is closed with a marker result that tells the model
+    // what happened. Making those torn bytes safe to send again belongs to the
+    // projection, which substitutes `{}` for any argument that is not a complete
+    // JSON value (`prompt.projectWithSystem`, DESIGN §4).
     const truncated = turn.stop_reason == .max_tokens;
-    const calls = if (truncated) try replayableCalls(alloc, turn.calls) else turn.calls;
-    defer if (truncated) alloc.free(calls);
     try l.append(.{
         .assistant = .{
             .reasoning = turn.reasoning,
             .text = turn.text,
-            .calls = calls,
+            .calls = turn.calls,
             // Recorded only when the provider reported a cost. All-zero means "this
             // provider does not price turns" (the scripted stand-in), which is not
             // the same fact as "this step cost zero" — so it is left off the line
@@ -273,7 +272,7 @@ pub fn runStepWithPrompt(
     });
     if (turn.calls.len == 0) return .{ .usage = turn.usage, .stop_reason = turn.stop_reason }; // model addressed the user; step complete.
     if (truncated) {
-        try appendMarkerBatch(alloc, l, calls, tool_truncated_output);
+        try appendMarkerBatch(alloc, l, turn.calls, tool_truncated_output);
         return .{ .usage = turn.usage, .stop_reason = .max_tokens };
     }
 
@@ -379,19 +378,6 @@ fn appendMarkerBatch(alloc: std.mem.Allocator, l: *ledger.Ledger, calls: []const
     try l.append(.{ .tool_results = results });
 }
 
-/// The calls of a truncated turn, with any torn `args_json` (not a complete
-/// JSON value) replaced by `{}` so the recorded assistant event stays
-/// replayable to every provider. Borrows the calls' strings; caller frees only
-/// the returned slice.
-fn replayableCalls(alloc: std.mem.Allocator, calls: []const ledger.ToolCall) ![]ledger.ToolCall {
-    const out = try alloc.dupe(ledger.ToolCall, calls);
-    errdefer alloc.free(out);
-    for (out) |*call| {
-        if (!try std.json.validate(alloc, call.args_json)) call.args_json = "{}";
-    }
-    return out;
-}
-
 /// Test-only convenience: project with no system prompt, then run one step.
 /// Real sessions project through `AgentSession` (which carries system blocks),
 /// so this shortcut is deliberately not part of the public loop API.
@@ -407,6 +393,22 @@ fn runStepForTest(
     return runStepWithPrompt(alloc, l, model, &prompt_ir, tool_snapshot, step_ctx, .{});
 }
 
+/// A call to a name this session does not have. The tool face is frozen for the
+/// whole session (DESIGN §5.1), so naming what IS on it is the entire
+/// correction: the model sees at once whether it invented a name, misspelled
+/// one, or reached for a capability that only exists through the CLI. Caller
+/// owns the result.
+fn unknownToolMessage(alloc: std.mem.Allocator, tool_snapshot: registry.ToolSetSnapshot, name: []const u8) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    try out.writer.print("unknown tool '{s}'; this session's tools are: ", .{name});
+    for (tool_snapshot.tools, 0..) |t, i| {
+        if (i != 0) try out.writer.writeAll(", ");
+        try out.writer.writeAll(t.definition.name);
+    }
+    return out.toOwnedSlice();
+}
+
 fn execOne(
     alloc: std.mem.Allocator,
     tool_snapshot: registry.ToolSetSnapshot,
@@ -418,7 +420,7 @@ fn execOne(
     var ok = false;
     const raw_output = blk: {
         const t = tool_snapshot.lookup(call.tool) orelse {
-            break :blk try std.fmt.allocPrint(alloc, "unknown tool '{s}'; builtins are shell, edit", .{call.tool});
+            break :blk try unknownToolMessage(alloc, tool_snapshot, call.tool);
         };
 
         const res = t.executor.call(alloc, .{ .args_json = call.args_json, .ctx = step_ctx.tool_context }) catch |err| switch (err) {
@@ -976,7 +978,7 @@ test "canceling the first executing tool records a complete canceled batch" {
     try std.testing.expect(!record_tool.ran);
 }
 
-test "a reply cut by max_tokens records replayable calls, runs nothing, and closes the batch with a truncation marker" {
+test "a reply cut by max_tokens records the calls verbatim, runs nothing, and closes the batch with a truncation marker" {
     const alloc = std.testing.allocator;
     var threaded: std.Io.Threaded = .init(alloc, .{});
     defer threaded.deinit();
@@ -1013,12 +1015,19 @@ test "a reply cut by max_tokens records replayable calls, runs nothing, and clos
     try std.testing.expectEqual(@as(u64, 7), outcome.usage.input_tokens);
     try std.testing.expect(!record_tool.ran);
 
-    // user, assistant (calls kept, torn args made replayable), one marker batch.
+    // user, assistant (calls kept as produced), one marker batch.
     try std.testing.expectEqual(@as(usize, 3), l.len());
     const calls = l.view()[1].assistant.calls;
     try std.testing.expectEqual(@as(usize, 2), calls.len);
-    try std.testing.expectEqualStrings("{}", calls[0].args_json);
-    try std.testing.expectEqualStrings("{}", calls[1].args_json);
+    // The LEDGER records what the model emitted — torn JSON and all.
+    try std.testing.expectEqualStrings("{\"path\":\"a.t", calls[0].args_json);
+    try std.testing.expectEqualStrings("{\"path\":\"a.t", calls[1].args_json);
+    // The PROJECTION is what a provider may be sent, so there the torn
+    // arguments are complete JSON values (DESIGN §4).
+    const ir = try prompt.project(alloc, l.view());
+    defer ir.deinit(alloc);
+    try std.testing.expectEqualStrings("{}", ir.turns[1].assistant.calls[0].args_json);
+    try std.testing.expectEqualStrings("{}", ir.turns[1].assistant.calls[1].args_json);
     const trs = l.view()[2].tool_results;
     try std.testing.expectEqual(@as(usize, 2), trs.len);
     try std.testing.expectEqualStrings("c2", trs[1].call_id);

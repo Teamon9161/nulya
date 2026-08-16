@@ -41,9 +41,11 @@
 //!   6. `session append` the summary into the new session;
 //!   7. report `{session, parent, summary_bytes}`.
 //!
-//! Wall clock: the host kills an extension call at `tool.Timeouts.extension_ms`
-//! (30s, DESIGN §7.3), and steps 2-3 wait for a real model. A slow provider will
-//! therefore hit that ceiling; when it does, nothing has moved except the two
+//! Wall clock: steps 2-3 wait for a real model, which the host's 30s default for
+//! an extension call (`tool.Timeouts.extension_ms`) does not cover. A tool that
+//! knows it is slow says so in its manifest, so `contributes.tools[].timeout_ms`
+//! here asks for the ceiling (600000 ms, `tool.Timeouts.extension_max_ms`,
+//! DESIGN §7.3). If even that runs out, nothing has moved except the two
 //! appended turns in the old ledger, and the compaction can simply be asked for
 //! again.
 

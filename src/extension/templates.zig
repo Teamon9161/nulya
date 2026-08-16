@@ -14,14 +14,15 @@ pub const main_zig =
     \\//! Reads one request JSON on stdin, writes one response JSON on stdout.
     \\const std = @import("std");
     \\
-    \\pub fn main() !void {
-    \\    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    \\    defer _ = gpa.deinit();
-    \\    const alloc = gpa.allocator();
-    \\
-    \\    var threaded: std.Io.Threaded = .init(alloc, .{});
-    \\    defer threaded.deinit();
-    \\    const io = threaded.io();
+    \\/// `std.process.Init` rather than a bare `main()`: the io it hands over
+    \\/// carries the REAL process environment, so any child this extension spawns
+    \\/// inherits it. A hand-rolled `std.Io.Threaded.init(gpa, .{})` defaults its
+    \\/// environ to EMPTY — no PATH, no HOME, no API key — and that failure stays
+    \\/// invisible until something is actually spawned. `init.environ_map` is the
+    \\/// environment itself, when a child needs it named.
+    \\pub fn main(init: std.process.Init) !void {
+    \\    const alloc = init.gpa;
+    \\    const io = init.io;
     \\
     \\    // Read the whole request from stdin.
     \\    var in_buf: [4096]u8 = undefined;

@@ -402,13 +402,20 @@ pub const Stamp = struct {
     kernel_hash: []const u8 = "",
 };
 
+/// The session file format this binary reads and writes. Unknown FIELDS are
+/// tolerated (a newer writer may add some without changing what the old ones
+/// mean), but a different `v` is not: it announces that the old meanings no
+/// longer hold, so `parseHeaderLine` refuses the file rather than reading a
+/// future format as if it were this one.
+pub const format_version: u32 = 1;
+
 /// The first line of a session file. Its JSON shape IS this struct — encoded and
 /// decoded by `std.json` typed (de)serialization — so the wire format and the
 /// type cannot drift. Everything the model sees is a pure function of this
 /// header plus the appended events.
 pub const Header = struct {
     kind: []const u8 = "header",
-    v: u32 = 1,
+    v: u32 = format_version,
     session: []const u8 = "",
     parent: ?ParentRef = null,
     /// The provider PROFILE name selected at creation — kept for display and for
@@ -432,6 +439,10 @@ pub const LedgerError = error{
     CorruptLedger,
     /// The file's first line is not a `"kind":"header"` record.
     MissingHeader,
+    /// The header declares a `v` this binary does not implement — the file was
+    /// written by a newer nulya. Refused rather than read as `format_version`:
+    /// a future format may keep the same field names and mean other things.
+    UnsupportedLedgerVersion,
     /// Another process already holds the session's writer lease (its exclusive
     /// advisory lock). The single-writer guarantee: only one writer opens the
     /// file at a time, so two `session step` runs can never interleave writes.
@@ -625,6 +636,9 @@ pub fn parseHeaderLine(gpa: std.mem.Allocator, line: []const u8) !OwnedHeader {
     };
     errdefer parsed.deinit();
     if (!std.mem.eql(u8, parsed.value.kind, "header")) return error.MissingHeader;
+    // Unknown fields were ignored above (a same-version writer may add some);
+    // a different `v` is the one thing that cannot be ignored.
+    if (parsed.value.v != format_version) return error.UnsupportedLedgerVersion;
     if (parsed.value.session.len == 0) return error.CorruptLedger;
     return parsed;
 }
@@ -1017,6 +1031,24 @@ test "a root header has a null parent after round-trip; unknown fields are ignor
     // an EMPTY stamp: unknown, which is never a mismatch to warn about.
     try std.testing.expectEqualStrings("", newer.value.nulya.version);
     try std.testing.expectEqualStrings("", newer.value.nulya.kernel_hash);
+}
+
+test "a header from a future ledger version is refused, not read as v1" {
+    const alloc = std.testing.allocator;
+    // Extra fields are forgiven; a different `v` is not — the same field names
+    // may mean something else in a format this binary never implemented.
+    try std.testing.expectError(
+        error.UnsupportedLedgerVersion,
+        parseHeaderLine(alloc, "{\"kind\":\"header\",\"v\":2,\"session\":\"s\"}"),
+    );
+    // The check is on the exact version, so an older one is refused too.
+    try std.testing.expectError(
+        error.UnsupportedLedgerVersion,
+        parseHeaderLine(alloc, "{\"kind\":\"header\",\"v\":0,\"session\":\"s\"}"),
+    );
+    const ours = try parseHeaderLine(alloc, "{\"kind\":\"header\",\"v\":1,\"session\":\"s\"}");
+    defer ours.deinit();
+    try std.testing.expectEqual(format_version, ours.value.v);
 }
 
 fn writeSampleEvents(l: *Ledger) !void {

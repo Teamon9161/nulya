@@ -576,7 +576,10 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     // exact entry path) is the CLI's job; from here on the helper owns encode,
     // run, decode, and diagnostics.
     const invocation = try invoke.invokeTool(alloc, lenv.environment(), entry_abs, cwd_path, tool, args_json, .{
-        .timeout_ms = tool_mod.Timeouts.extension_ms,
+        // The frozen manifest may say this tool needs longer than the host
+        // default (DESIGN §7.3) — the same declaration a natively pinned tool
+        // carries into its binding, read from the same place.
+        .timeout_ms = spec.?.timeout_ms orelse tool_mod.Timeouts.extension_ms,
         .max_output_bytes = 1 << 20,
         .interpreter = rt.interpreter,
     });
@@ -1594,7 +1597,11 @@ pub fn createSession(alloc: std.mem.Allocator, io: std.Io, args: []const []const
         const ppath = try launch.sessionPath(alloc, ref.session);
         defer alloc.free(ppath);
         parent_header = ledger.readHeader(alloc, io, std.Io.Dir.cwd(), ppath) catch |err| {
-            try printOut(alloc, io, "cannot read parent session '{s}': {s}\n", .{ ref.session, @errorName(err) });
+            if (err == error.UnsupportedLedgerVersion) {
+                try printOut(alloc, io, "session '{s}' was written by a newer nulya; this binary reads ledger v{d}\n", .{ ref.session, ledger.format_version });
+            } else {
+                try printOut(alloc, io, "cannot read parent session '{s}': {s}\n", .{ ref.session, @errorName(err) });
+            }
             return null;
         };
         parent = ref;
@@ -2137,6 +2144,11 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     defer host.deinit();
 
     var hdr = ledger.readHeader(alloc, io, std.Io.Dir.cwd(), spath) catch |err| {
+        // A file this binary is too old to read is not a missing session: say
+        // which format it reads, so upgrading is the obvious answer.
+        if (err == error.UnsupportedLedgerVersion) {
+            return stepFail(alloc, io, stream, "session '{s}' was written by a newer nulya; this binary reads ledger v{d}", .{ id, ledger.format_version });
+        }
         return stepFail(alloc, io, stream, "no such session '{s}': {s}", .{ id, @errorName(err) });
     };
     defer hdr.deinit();
@@ -2935,10 +2947,17 @@ test "a reply cut by max_tokens is recorded replayable, closed with a marker, re
     try std.testing.expect(stream.err == null);
     try std.testing.expectEqual(@as(usize, session.max_truncated_streak), steps);
 
-    // Per step: the torn args are recorded as `{}` (replayable), the batch is
-    // closed by a marker result, and the boundary line says the reply was cut.
+    // Per step: the ledger line records the torn args exactly as the model
+    // produced them, the batch is closed by a marker result, and the boundary
+    // line says the reply was cut.
     const written = out.written();
-    try std.testing.expect(std.mem.indexOf(u8, written, "\"calls\":[{\"id\":\"c1\",\"tool\":\"shell\",\"args\":\"{}\"}]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "\"calls\":[{\"id\":\"c1\",\"tool\":\"shell\",\"args\":\"{\\\"command\\\":\\\"echo hel\"}]") != null);
+    // …and the projection — what a provider would be sent — carries a complete
+    // JSON value in their place (DESIGN §4).
+    const prompt = @import("prompt.zig");
+    const ir = try prompt.project(alloc, sess.l.view());
+    defer ir.deinit(alloc);
+    try std.testing.expectEqualStrings("{}", ir.turns[1].assistant.calls[0].args_json);
     try std.testing.expect(std.mem.indexOf(u8, written, "\"ok\":false,\"output\":\"not executed: the reply hit its output cap (max_tokens)") != null);
     try std.testing.expect(std.mem.indexOf(u8, written, "{\"stream\":\"step\",\"event\":\"end\",\"status\":\"completed\",\"stop\":\"max_tokens\"}") != null);
     try std.testing.expect(std.mem.endsWith(u8, written, "{\"stream\":\"run\",\"event\":\"done\",\"steps\":2,\"stopped\":\"max_tokens\"}\n"));

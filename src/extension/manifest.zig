@@ -10,6 +10,7 @@
 //! (DESIGN §7.4, §12). Whether a tool is "good taste" is policy, not validation.
 
 const std = @import("std");
+const tool = @import("../tool.zig");
 
 pub const schema_id = "nulya.extension/v2";
 
@@ -60,6 +61,13 @@ pub const ToolSpec = struct {
     /// extension is promoted into `tools[]`; otherwise pure discoverability
     /// metadata (DESIGN §7.2 note).
     input_schema: []const u8,
+    /// Wall-clock cap for one call of THIS tool, when it knows the host default
+    /// (`tool.Timeouts.extension_ms`, 30s) is not enough — a driver tool that
+    /// steps a real model is the case that exists (`extensions/compact`). Absent
+    /// means the default; the ceiling is `tool.Timeouts.extension_max_ms`. The
+    /// manifest is the one place this can be said, because the manifest is the
+    /// single source of truth about a tool (DESIGN §7.2.1).
+    timeout_ms: ?u32 = null,
 };
 
 pub const Permissions = struct {
@@ -109,6 +117,9 @@ pub const Manifest = struct {
             for (reserved_tool_names) |r| {
                 if (std.mem.eql(u8, t.name, r)) return error.ReservedToolName;
             }
+            if (t.timeout_ms) |ms| {
+                if (ms == 0 or ms > tool.Timeouts.extension_max_ms) return error.InvalidTimeout;
+            }
             for (self.tools[i + 1 ..]) |other| {
                 if (std.mem.eql(u8, t.name, other.name)) return error.DuplicateToolName;
             }
@@ -147,6 +158,8 @@ pub const ValidateError = error{
     InvalidToolName,
     ReservedToolName,
     DuplicateToolName,
+    /// A tool's `timeout_ms` is zero or above `tool.Timeouts.extension_max_ms`.
+    InvalidTimeout,
     InvalidSkillPath,
     DuplicateSkillPath,
     InvalidSystemPromptPath,
@@ -251,9 +264,20 @@ fn dupTools(a: std.mem.Allocator, contributes: std.json.ObjectMap) ParseError![]
             .name = try dupString(a, to, "name"),
             .description = try dupStringOr(a, to, "description", ""),
             .input_schema = if (to.get("input")) |iv| try compact(a, iv) else try a.dupe(u8, "{}"),
+            .timeout_ms = try optionalU32(to, "timeout_ms"),
         };
     }
     return tools;
+}
+
+/// Read an optional non-negative integer field. A value that is not an integer,
+/// or does not fit, is a WrongType — never a silently dropped field, because
+/// a mistyped timeout would otherwise read as "use the default".
+fn optionalU32(obj: std.json.ObjectMap, key: []const u8) ParseError!?u32 {
+    return switch (obj.get(key) orelse return null) {
+        .integer => |n| std.math.cast(u32, n) orelse error.WrongType,
+        else => error.WrongType,
+    };
 }
 
 fn dupString(a: std.mem.Allocator, obj: std.json.ObjectMap, key: []const u8) ParseError![]const u8 {
@@ -430,6 +454,44 @@ test "rejects duplicate tool names" {
     var m = try parse(std.testing.allocator, src);
     defer m.deinit();
     try std.testing.expectError(error.DuplicateToolName, m.validate());
+}
+
+test "a tool may declare its own timeout, within the host ceiling" {
+    const alloc = std.testing.allocator;
+    const with_timeout =
+        \\{"schema":"nulya.extension/v2","id":"slow","runtime":{"entry":"bin/slow"},"contributes":{"tools":[{"name":"t","input":{},"timeout_ms":60000}]}}
+    ;
+    var ok = try parse(alloc, with_timeout);
+    defer ok.deinit();
+    try ok.validate();
+    try std.testing.expectEqual(@as(?u32, 60000), ok.tools[0].timeout_ms);
+
+    // Absent means the host default; the field is optional and nothing else changes.
+    var plain = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"t","input":{}}]}}
+    );
+    defer plain.deinit();
+    try plain.validate();
+    try std.testing.expect(plain.tools[0].timeout_ms == null);
+
+    // Zero is not "no timeout", and no manifest may exceed the host ceiling.
+    var zero = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"t","input":{},"timeout_ms":0}]}}
+    );
+    defer zero.deinit();
+    try std.testing.expectError(error.InvalidTimeout, zero.validate());
+
+    var huge = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"t","input":{},"timeout_ms":700000}]}}
+    );
+    defer huge.deinit();
+    try std.testing.expectError(error.InvalidTimeout, huge.validate());
+    try std.testing.expectEqual(@as(u32, 600_000), tool.Timeouts.extension_max_ms);
+
+    // A mistyped timeout is a parse error, not a silently defaulted one.
+    try std.testing.expectError(error.WrongType, parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"t","input":{},"timeout_ms":"60s"}]}}
+    ));
 }
 
 test "rejects entry that escapes the extension dir" {
