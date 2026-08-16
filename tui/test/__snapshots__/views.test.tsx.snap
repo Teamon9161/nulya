@@ -38,8 +38,8 @@ exports[`/help lists the bindings that are actually in force 1`] = `
  /ext                            extensions: versions, what is active, what it is used for          
  /usage                          tokens counted since attach, and the tool-usage journal            
  /settings                       the effective tui.toml values and which file each came from        
+ /compact [focus]                summarise this session and continue in a new one; this file stays  
  /step                           continue after a spent step budget (nothing continues by itself)   
- /cancel                         stop the running step at the kernel's next step boundary           
  j/k · PgUp/PgDn scroll · Esc close                                                                 
 "
 `;

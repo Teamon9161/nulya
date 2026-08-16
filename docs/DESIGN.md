@@ -402,7 +402,15 @@ user 层与 workspace 的 `.nulya/` 同形、每个平台一个好找的位置�
 
 ## 11. Compaction 与 generation
 
-**现状：无 compaction。** **generation == ledger 文件**（§3.4）：一个文件只 append、只一个 generation，所以前缀不变量是文件系统性质，没有会 bump generation 的事件，`prompt.currentGeneration()` 已删除（`Request.generation` 处直接传 0）。`compaction.*` config 键能解析但无人消费。compaction = 开新文件（`--parent` 指向旧文件与切分点）见 PLAN §3.4。
+**generation == ledger 文件**（§3.4）：一个文件只 append、只一个 generation，所以前缀不变量是文件系统性质，没有会 bump generation 的事件，`prompt.currentGeneration()` 已删除（`Request.generation` 处直接传 0）。
+
+**内核提供的是 fork，不是 compaction。** 没有"替换历史"的动词，也不会长出一个——ledger 只 append（physics §1），没有东西能 rewrite model-visible 状态（physics §3）。所以压缩不是编辑而是**分叉**：开一个新文件，header 的 `parent` 记下旧文件与切分点，摘要作为新文件的第一条 turn 进去；旧文件原封不动留在盘上。内核在这条路径上只保证三件事（`cli.zig` 的 `session new`，§14）：
+
+1. **parent 必须存在。** 指向虚空的 lineage 不是 provenance——读不到父 header 就 exit 1，不建文件。
+2. **不点名模型时继承父的冻结身份**（`model` profile 名 + `model_identity` 原样）。压缩是同一场对话换个文件，不该因为 `active_profile` 期间漂了就换了说话对象。`--profile` / `--model` 任一给出即按今天的 config 重新解析（分叉到别的模型是合法用法）。
+3. **composition 不继承**，照常从 config 现解。新 session 正是 promotion 与新 activate 版本该生效的地方（§5.5、§7.5），而 fork 就是一个 session 边界。
+
+**何时压、压成什么，都不在内核里。** 前者是 policy（`compaction.max_input_tokens` 等 config 键能解析，内核不消费），后者是模型的判断。两者都由 driver 用现成的 `session append` / `session step` / `session new --parent` 组合出来——TUI 的 `/compact` 是第一个 consumer（tui.md §11），内核既不知道也不关心发生过一次压缩。
 
 ---
 
@@ -476,7 +484,8 @@ nulya toolchain zig <args…>
 nulya                       ← 无参数：固定 prompt demo（现经 durable session 路径跑，§3.4）
 ```
 
-- `session new --profile P [--model ID]`：`--profile` 是 config 里的 profile 名（默认 `active_profile`），`--model` 是该 profile 服务的一个 model id（默认 `ProviderProfile.defaultModel()`；接受任意 id，选择器只列目录里的）。不存在的 profile 直接拒绝（exit 1，提示 `nulya config show`）；存在但 credential 不可用的 profile 仍冻结为 scripted（离线替身，`resolveDescriptor` 的语义不变），但 stderr 明说。`session step --effort E` 是**每次 step 的 generation option**（不是身份，§3）：不给则用 `Config.defaultEffort(header.model, header.model_identity.model)`。
+- `session new --profile P [--model ID]`：`--profile` 是 config 里的 profile 名（默认 `active_profile`），`--model` 是该 profile 服务的一个 model id（默认 `ProviderProfile.defaultModel()`；接受任意 id，选择器只列目录里的）。不存在的 profile 直接拒绝（exit 1，提示 `nulya config show`）；存在但 credential 不可用的 profile 仍冻结为 scripted（离线替身，`resolveDescriptor` 的语义不变），但 stderr 明说。
+- `session new --parent <id>:<seq>`：这场 session 续的是谁（fork / compaction 的新文件，§11）。**父必须存在**（读不到 header 即 exit 1，不建文件）。模型分两级继承，因为两个 flag 含义不同：`--profile` 换的是"怎么连"，所以它替掉父的 profile；`--model` 只是在一个 profile 内换 id，所以**父的 profile 仍然生效**（不会掉回 `active_profile`）；两个都不给则**原样继承父 header 的 `model_identity`**，此时不重解 credential、也不打那条降级警告（继承的身份不会降级为 scripted，缺 key 由需要它的那次 `step` 一次性报响）。composition 一律现解，不继承。`session step --effort E` 是**每次 step 的 generation option**（不是身份，§3）：不给则用 `Config.defaultEffort(header.model, header.model_identity.model)`。
 - `nulya config show [--json]`：外壳级投影（同 `session new` 看到的东西），供选择器与 agent 自查：`{paths{system, user, project}, active_profile, profiles[]{name, kind, base_url, api_key_env, credential: bool, credential_source: config|env|login|builtin|none, model, models[], effort?}, models[]{id, label, efforts[], default_effort?, context_window?}}`。只报 env var **名字**、来源与布尔，永不报值；`api_key` 的值不出现。
 
 - `nulya src`：build.zig 把整个 `src/**` `@embedFile` 进二进制（源码 ~200KB，紧挨 ~90MB 工具链，恒开无 gate）；`nulya src <path>` 按 `src/` 相对路径打印（`prompt.zig`、`extension/store.zig`），**默认剥 top-level `test` 块**（读结构/契约时不付测试 token），`--tests`/`--raw` 打印原样（Zig 风格参照）。剥离靠 zig-fmt 不变量：顶层 decl 的收尾 `}` 在第 0 列，无需 tokenizer（`source.zig`）。测试留在文件里（Zig 惯例、人可读、风格参照），改的只是**投影**不是**存储**——`src/` 一字未动。

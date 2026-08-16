@@ -748,33 +748,92 @@ fn sessionNew(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
     var cfg = try config.load(alloc, io, &host);
     defer cfg.deinit();
 
+    // `--parent <id>:<seq>` names the lineage this session continues — a fork,
+    // or the new file a compaction opens (DESIGN §3.4, §11). The parent must
+    // exist: a lineage pointer into nothing is not provenance. Its header is
+    // also where an unnamed model comes from, below.
+    var parent: ?ledger.ParentRef = null;
+    var parent_header: ?ledger.OwnedHeader = null;
+    defer if (parent_header) |*h| h.deinit();
+    if (flagValue(args, "--parent")) |p| {
+        const ref = parseParent(p) orelse {
+            try printErr(io, "invalid --parent (want <session>:<seq>)\n");
+            return 1;
+        };
+        if (!launch.isValidSessionId(ref.session)) {
+            try printErr(io, "invalid --parent session id\n");
+            return 1;
+        }
+        const ppath = try launch.sessionPath(alloc, ref.session);
+        defer alloc.free(ppath);
+        parent_header = ledger.readHeader(alloc, io, std.Io.Dir.cwd(), ppath) catch |err| {
+            try printOut(alloc, io, "cannot read parent session '{s}': {s}\n", .{ ref.session, @errorName(err) });
+            return 1;
+        };
+        parent = ref;
+    }
+
     // `--profile` names HOW to reach a provider, `--model` WHICH of its ids to
     // run (default: the profile's own default). A typo'd profile is refused
     // rather than silently frozen as scripted; a real profile whose credential
     // is missing still resolves scripted (the offline stand-in) but says so.
-    const profile = flagValue(args, "--profile") orelse
-        (if (cfg.provider.active_profile.len != 0) cfg.provider.active_profile else "scripted");
+    const named_profile = flagValue(args, "--profile");
     const model_id = flagValue(args, "--model");
-    const profile_cfg = cfg.provider.findProfile(profile) orelse {
-        try printOut(alloc, io, "no such profile '{s}' (see `nulya config show`)\n", .{profile});
-        return 1;
-    };
-    if (!launch.credentialAvailable(alloc, io, profile_cfg, &host)) {
-        var paths = try config.ConfigPaths.init(alloc, &host);
-        defer paths.deinit(alloc);
-        const warn = if (profile_cfg.kind == .codex)
-            try std.fmt.allocPrint(alloc, "warning: profile '{s}' has no credential (run `codex login`); session frozen as scripted\n", .{profile})
-        else
-            try std.fmt.allocPrint(alloc, "warning: profile '{s}' has no credential (put api_key in {s}, or set {s}); session frozen as scripted\n", .{ profile, paths.user, profile_cfg.api_key_env });
-        defer alloc.free(warn);
-        try printErr(io, warn);
-    }
 
-    var parent: ?ledger.ParentRef = null;
-    if (flagValue(args, "--parent")) |p| parent = parseParent(p) orelse {
-        try printErr(io, "invalid --parent (want <session>:<seq>)\n");
-        return 1;
-    };
+    // A fork continues its parent's model unless told otherwise: a compaction
+    // opens a new file for the same conversation, and who that conversation is
+    // with must not change because `active_profile` moved meanwhile (physics §2
+    // in spirit — the identity was frozen once, at the root). Composition
+    // deliberately does NOT come along: a new session is exactly where promotion
+    // and newly activated versions are meant to take hold (DESIGN §5.5, §7.5),
+    // and a fork is a session boundary like any other.
+    //
+    // Two levels of continuing, because the two flags mean different things:
+    // `--profile` names a different way to reach a provider, so it replaces the
+    // parent's; `--model` only picks another id WITHIN a profile, so the
+    // parent's profile still carries. Naming either re-resolves the identity
+    // against today's config; naming neither takes the parent's frozen
+    // descriptor verbatim, which is the compaction case.
+    // An empty one is a legacy header that never recorded a profile: absent, not
+    // a profile named "".
+    const parent_profile: ?[]const u8 = if (parent_header) |h|
+        (if (h.value.model.len != 0) h.value.model else null)
+    else
+        null;
+    const inherited: ?ledger.ModelDescriptor = if (parent_header) |h| blk: {
+        if (named_profile != null or model_id != null) break :blk null;
+        break :blk if (h.value.model_identity.provider.len != 0) h.value.model_identity else null;
+    } else null;
+
+    const profile = named_profile orelse parent_profile orelse
+        (if (cfg.provider.active_profile.len != 0) cfg.provider.active_profile else "scripted");
+
+    // An inherited identity needs no resolution — and no credential warning: it
+    // never degrades to scripted, so there is nothing to explain here. A missing
+    // credential is reported, loudly and once, by the `step` that needs it.
+    var identity: ledger.ModelDescriptor = undefined;
+    if (inherited) |d| {
+        identity = d;
+    } else {
+        const profile_cfg = cfg.provider.findProfile(profile) orelse {
+            try printOut(alloc, io, "no such profile '{s}' (see `nulya config show`)\n", .{profile});
+            return 1;
+        };
+        if (!launch.credentialAvailable(alloc, io, profile_cfg, &host)) {
+            var paths = try config.ConfigPaths.init(alloc, &host);
+            defer paths.deinit(alloc);
+            const warn = if (profile_cfg.kind == .codex)
+                try std.fmt.allocPrint(alloc, "warning: profile '{s}' has no credential (run `codex login`); session frozen as scripted\n", .{profile})
+            else
+                try std.fmt.allocPrint(alloc, "warning: profile '{s}' has no credential (put api_key in {s}, or set {s}); session frozen as scripted\n", .{ profile, paths.user, profile_cfg.api_key_env });
+            defer alloc.free(warn);
+            try printErr(io, warn);
+        }
+        // Freeze the RESOLVED model identity now: config chooses the model at
+        // creation, and a later config edit can never change this session's
+        // model (DESIGN §3).
+        identity = launch.resolveDescriptor(alloc, io, cfg.provider, &host, profile, model_id);
+    }
 
     const id = try launch.genSessionId(alloc, io);
     defer alloc.free(id);
@@ -797,10 +856,7 @@ fn sessionNew(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{ .dialect = cfg.environment.shell.toLocalOption() });
     defer lenv.deinit();
 
-    // Freeze the RESOLVED model identity now: config chooses the model at
-    // creation, and a later config edit can never change this session's model
-    // (DESIGN §3). A placeholder handle is enough since `new` never steps.
-    const identity = launch.resolveDescriptor(alloc, io, cfg.provider, &host, profile, model_id);
+    // A placeholder handle is enough since `new` never steps.
     var holder: launch.ModelHolder = .{ .scripted = .{} };
     var sess = session.AgentSession.createDurable(alloc, .{
         .model = holder.model(),

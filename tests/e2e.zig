@@ -827,9 +827,21 @@ fn runCliEnv(
     key: []const u8,
     value: []const u8,
 ) !CliRun {
+    return runCliEnvs(alloc, io, ws, argv, &.{.{ .key = key, .value = value }});
+}
+
+const EnvPair = struct { key: []const u8, value: []const u8 };
+
+fn runCliEnvs(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    ws: std.Io.Dir,
+    argv: []const []const u8,
+    pairs: []const EnvPair,
+) !CliRun {
     var env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
     defer env.deinit();
-    try env.put(key, value);
+    for (pairs) |p| try env.put(p.key, p.value);
     const result = try std.process.run(alloc, io, .{
         .argv = argv,
         .cwd = .{ .dir = ws },
@@ -1097,6 +1109,129 @@ test "session cli: --max-steps is enforced by the kernel even when the driver as
     // The turn never ended: the loop model always emits a tool call, so there is
     // no assistant with an empty calls array.
     try std.testing.expect(std.mem.indexOf(u8, bytes, "\"calls\":[]") == null);
+}
+
+/// A hermetic user-config layer: `NULYA_HOME` relocates `~/.nulya`, so the CLI
+/// under test reads these profiles instead of whatever the machine running the
+/// suite happens to have configured. Both profiles carry an inline `api_key`,
+/// which is a credential in its own right — no environment variable needed for
+/// `resolveDescriptor` to freeze a real (non-scripted) identity.
+const fork_config =
+    \\[provider]
+    \\active_profile = "beta"
+    \\
+    \\[[provider.profiles]]
+    \\name = "alpha"
+    \\kind = "openai"
+    \\model = "alpha-1"
+    \\base_url = "https://alpha.example/v1"
+    \\api_key = "sk-alpha"
+    \\
+    \\[[provider.profiles]]
+    \\name = "beta"
+    \\kind = "openai"
+    \\model = "beta-1"
+    \\base_url = "https://beta.example/v1"
+    \\api_key = "sk-beta"
+    \\
+;
+
+test "session cli: a fork continues its parent's frozen model identity, and names one to change it" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    try ws.createDirPath(io, "home");
+    try ws.writeFile(io, .{ .sub_path = "home/config.toml", .data = fork_config });
+    var ws_real: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
+    const home_abs = try std.fs.path.join(alloc, &.{ ws_path, "home" });
+    defer alloc.free(home_abs);
+    const env: []const EnvPair = &.{.{ .key = "NULYA_HOME", .value = home_abs }};
+
+    // The parent runs on `alpha`, which is NOT the config's active profile.
+    const new = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "alpha" }, env);
+    defer alloc.free(new.stdout);
+    try std.testing.expectEqual(@as(u8, 0), new.code);
+    const parent_id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(parent_id);
+
+    const parent_ref = try std.fmt.allocPrint(alloc, "{s}:0", .{parent_id});
+    defer alloc.free(parent_ref);
+
+    // A fork naming no model continues the parent's identity: `alpha-1`, even
+    // though creating a root session right now would resolve `beta-1`. This is
+    // the property compaction depends on — the conversation does not change who
+    // it is talking to because it moved to a new file.
+    {
+        const fork = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "new", "--parent", parent_ref }, env);
+        defer alloc.free(fork.stdout);
+        try std.testing.expectEqual(@as(u8, 0), fork.code);
+        const id = try alloc.dupe(u8, std.mem.trim(u8, fork.stdout, " \r\n"));
+        defer alloc.free(id);
+
+        const bytes = try readSessionFile(alloc, io, ws, id);
+        defer alloc.free(bytes);
+        try std.testing.expect(std.mem.indexOf(u8, bytes, "\"model\":\"alpha\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, bytes, "\"model\":\"alpha-1\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, bytes, "beta") == null);
+        // The lineage pointer is recorded verbatim.
+        const lineage = try std.fmt.allocPrint(alloc, "\"parent\":{{\"session\":\"{s}\",\"seq\":0}}", .{parent_id});
+        defer alloc.free(lineage);
+        try std.testing.expect(std.mem.indexOf(u8, bytes, lineage) != null);
+    }
+
+    // Naming a profile forks onto that provider instead — inheritance is the
+    // default, not a lock.
+    {
+        const fork = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "new", "--parent", parent_ref, "--profile", "beta" }, env);
+        defer alloc.free(fork.stdout);
+        try std.testing.expectEqual(@as(u8, 0), fork.code);
+        const id = try alloc.dupe(u8, std.mem.trim(u8, fork.stdout, " \r\n"));
+        defer alloc.free(id);
+
+        const bytes = try readSessionFile(alloc, io, ws, id);
+        defer alloc.free(bytes);
+        try std.testing.expect(std.mem.indexOf(u8, bytes, "\"model\":\"beta-1\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, bytes, "alpha") == null);
+    }
+
+    // `--model` picks another id WITHIN a profile, so the parent's profile still
+    // carries — a fork onto `alpha-2` stays on `alpha`, it does not fall back to
+    // the config's active `beta`.
+    {
+        const fork = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "new", "--parent", parent_ref, "--model", "alpha-2" }, env);
+        defer alloc.free(fork.stdout);
+        try std.testing.expectEqual(@as(u8, 0), fork.code);
+        const id = try alloc.dupe(u8, std.mem.trim(u8, fork.stdout, " \r\n"));
+        defer alloc.free(id);
+
+        const bytes = try readSessionFile(alloc, io, ws, id);
+        defer alloc.free(bytes);
+        try std.testing.expect(std.mem.indexOf(u8, bytes, "\"model\":\"alpha\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, bytes, "\"model\":\"alpha-2\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, bytes, "alpha.example") != null);
+        try std.testing.expect(std.mem.indexOf(u8, bytes, "beta") == null);
+    }
+
+    // A lineage pointer into nothing is not provenance: refused, and no session
+    // file is left behind.
+    {
+        const fork = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "new", "--parent", "s-nope:0" }, env);
+        defer alloc.free(fork.stdout);
+        try std.testing.expectEqual(@as(u8, 1), fork.code);
+        try std.testing.expect(std.mem.indexOf(u8, fork.stdout, "s-") == null or
+            std.mem.indexOf(u8, fork.stdout, "cannot read parent") != null);
+    }
 }
 
 test "session cli: a shell-script driver runs a goal loop to completion" {

@@ -18,7 +18,8 @@ import { OverlayContext, createOverlayStore, type OverlayKind } from "../state/o
 import { createTabStore, type SessionTab } from "../state/tabs.ts"
 import { loadTuiState, rememberModel, type ModelPick } from "../state/tui_state.ts"
 import { describeTool } from "../render/registry.ts"
-import { sessionNew } from "../nulya/cli.ts"
+import { sessionNew, type ModelView as ModelParams } from "../nulya/cli.ts"
+import { compactPrompt, openCompacted, summaryFrom, summaryTurn } from "../compact.ts"
 import { createKeymap, matches } from "../keymap.ts"
 import type { AttachOptions } from "../state/attach.ts"
 import type { SessionState, TranscriptItem } from "../state/session.ts"
@@ -42,6 +43,12 @@ export interface AppProps {
   guide?: string
   /** Where the TUI remembers its last pick; tests point it elsewhere. */
   statePath?: string
+  /**
+   * The `[[models]]` catalog, read once at launch. Only `context_window` is
+   * used, for the status bar's fullness gauge; without it the gauge simply does
+   * not appear, which is why this is optional rather than loaded here.
+   */
+  models?: ModelParams[]
 }
 
 /**
@@ -206,6 +213,17 @@ export function App(props: AppProps) {
    */
   const untouched = (t: SessionTab) => t.created && t.state.snapshot.items.length === 0 && t.attach.status() === "idle"
 
+  /**
+   * The front tab's context window, when the catalog names one. The session's
+   * frozen model id is the key — not the profile — since a window is a property
+   * of the model, whoever serves it (DESIGN §9.5).
+   */
+  const contextWindow = (): number | null => {
+    const id = snapshot().header?.model_identity.model
+    if (!id) return null
+    return props.models?.find((m) => m.id === id)?.context_window ?? null
+  }
+
   /** What the front tab runs on, in the picker's terms. */
   const currentPick = (): ModelPick | null => {
     const header = snapshot().header
@@ -228,6 +246,50 @@ export function App(props: AppProps) {
       setGuide(null)
       setNotice(chosen ? `${id} · ${chosen.profile}${chosen.model ? ` · ${chosen.model}` : ""}` : `opened ${id}`)
       if (remember && chosen) rememberModel(chosen, props.statePath)
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  /**
+   * `/compact [focus]` — ask this session to summarise itself, then continue in
+   * a new file that points back at it (PLAN §3.4, `compact.ts`).
+   *
+   * Every early return leaves the conversation exactly where it was. That is the
+   * whole safety story: the summary is written before anything moves, and if it
+   * does not arrive the old session is still the live one — a compaction that
+   * half-happened would be a conversation thrown away.
+   */
+  const compactNow = async (focus: string | undefined) => {
+    const source = tab()
+    if (source.attach.role() === "observer") {
+      setNotice("someone else drives this session · compaction has to run where its steps run")
+      return
+    }
+    if (source.attach.status() !== "idle") {
+      setNotice("a step is running · /compact when it stops")
+      return
+    }
+    if (source.state.snapshot.items.length === 0) {
+      setNotice("nothing to compact yet")
+      return
+    }
+    setNotice("compacting · asking this session for a continuation brief…")
+    try {
+      // Summarised INSIDE the old session, on its own cached prefix — see the
+      // header comment in `compact.ts` for why this is not a sub-session.
+      await source.attach.send(compactPrompt(focus))
+      const summary = summaryFrom(source.state.snapshot.items)
+      if (summary === null) {
+        setNotice("no summary came back · nothing moved, this session is still the live one")
+        return
+      }
+      const id = await openCompacted(props.ws, source.id, source.state.lastSeq(), summary)
+      const next = tabs.replace(source.id, id, { created: true, effort: source.effort() })
+      // The carried summary is in the new session's inbox, not its ledger yet:
+      // show it the way any typed-but-not-yet-stepped turn is shown.
+      next.state.enqueueUser(summaryTurn(summary))
+      setNotice(`compacted into ${id} · ${source.id} kept on disk`)
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error))
     }
@@ -262,6 +324,10 @@ export function App(props: AppProps) {
     }
     if (command === "/step") {
       void tab().attach.step()
+      return true
+    }
+    if (command === "/compact") {
+      void compactNow(raw.slice(command.length).trim())
       return true
     }
     if (command === "/fold") {
@@ -524,6 +590,7 @@ export function App(props: AppProps) {
                   spinnerFrame={spinnerFrame()}
                   hint={notice() ?? undefined}
                   behind={behind()}
+                  contextWindow={contextWindow()}
                 />
               </box>
             </OverlayContext.Provider>

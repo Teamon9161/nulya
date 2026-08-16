@@ -24,6 +24,7 @@ export const commands: Command[] = [
   { name: "/ext", what: "extensions: versions, what is active, what it is used for" },
   { name: "/usage", what: "tokens counted since attach, and the tool-usage journal" },
   { name: "/settings", what: "the effective tui.toml values and which file each came from" },
+  { name: "/compact", args: "[focus]", what: "summarise this session and continue in a new one; this file stays" },
   { name: "/step", what: "continue after a spent step budget (nothing continues by itself)" },
   { name: "/cancel", what: "stop the running step at the kernel's next step boundary" },
   { name: "/fold", what: "collapse every card" },

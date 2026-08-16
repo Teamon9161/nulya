@@ -1,6 +1,6 @@
 # Nulya TUI — 设计与计划
 
-> **状态：T0–T4 全部落地。** 内核侧只有 `session step --stream` → [DESIGN.md](DESIGN.md) §14；前端 T1（骨架）、T2（卡片与折叠）、T3（nulya 视图：`/sessions`、`/ext`、sub-session tab、observer）、T4（`/help` `/settings` `/usage`、keymap 覆盖、`bun build --compile`、README、5k 事件性能）都在 `tui/`（见 §11 与 [`../tui/README.md`](../tui/README.md)）。本文是 `tui/` 的设计契约 + 里程碑 + 实施日志；`tui/` 不在内核范围里（另一条工具链、另一个进程），所以它的现状写在本文 §11，不进 DESIGN.md。
+> **状态：T0–T7 全部落地。** 内核侧只有两处：`session step --stream`（纯观测）与 `session new --parent` 的 fork 语义 → [DESIGN.md](DESIGN.md) §14/§11；前端 T1（骨架）、T2（卡片与折叠）、T3（nulya 视图：`/sessions`、`/ext`、sub-session tab、observer）、T4（`/help` `/settings` `/usage`、keymap 覆盖、`bun build --compile`、README、5k 事件性能）、T5（`/model` `/effort`）、T6（布局与 slash 补全）、T7（`/compact`）都在 `tui/`（见 §11 与 [`../tui/README.md`](../tui/README.md)）。本文是 `tui/` 的设计契约 + 里程碑 + 实施日志；`tui/` 不在内核范围里（另一条工具链、另一个进程），所以它的现状写在本文 §11，不进 DESIGN.md。
 > 上位原则见 [PLAN.md](PLAN.md) §3.11：前端是 core 之上的薄客户端——**tail ledger 文件 + append user 事件；前端是长期进程，re-spawn 的只是 worker**。
 
 ## 0. 定位（三句话）
@@ -168,13 +168,15 @@ tui/
 
 - `Enter` 发送；`Shift+Enter` / `Ctrl+J` 换行；`↑` 空 composer 时翻历史；粘贴多行原样。
 - 发送时若 `stepping`：只 append（queued）；不打断。
-- `/` 开头弹一个小补全：`/model` `/effort <level|auto>` `/new [--profile p] [--model id]` `/sessions` `/ext` `/skills` `/usage` `/cancel` `/fold` `/settings` `/help` `/quit`。未知 `/xxx` 原样发给模型（nulya 没有 skill slash；skill 由模型 `nulya skill load`）。
+- `/` 开头弹一个小补全：`/model` `/effort <level|auto>` `/new [--profile p] [--model id]` `/sessions` `/ext` `/skills` `/usage` `/compact [focus]` `/cancel` `/fold` `/settings` `/help` `/quit`。未知 `/xxx` 原样发给模型（nulya 没有 skill slash；skill 由模型 `nulya skill load`）。
 - 全局：`Esc` cancel（stepping 时）/ browse 模式；`Ctrl+C` 两下退出（stepping 时第一下先 kill）；`Ctrl+L` 重绘；`F2` `/ext`；`F3` `/sessions`；`F4` 下一个 tab；`Ctrl+W` 关掉当前 tab（最后一个不关）。
 - observer 时空 composer 上的 `Enter` = take over（§5.6）；browse 模式里选中的卡若指名了一个 session，`Enter` 打开它成第二个 tab，`Space` 永远是折叠。
 
 ### 4.5 状态栏
 
 左：token 累计（本进程内从 `usage` 流事件累加：`↑input ↓output cache%`；resume 前的历史未知，显示 `since attach`）· 当前活动（`⠋ shell 3s` / `⠋ model` / `idle`）· 提示三条。右：`step n` · role（`driver` / `observer` §5.6）。离开底部时插入 `↓ 3 new`。
+
+上下文占用（`ctx 72% · /compact`）只在 ≥60% 时出现、≥80% 转 warn 色。分母是 `[[models]]` 目录的 `context_window`（目录没写就整个不显示，不编分母）；分子是**最后一步**的 `input + cache_read + cache_write`——`provider.Usage.input_tokens` 是扣掉缓存之后的量，只读它会把一个快满的窗口报成几乎空的。它只是显示，不触发任何动作。
 
 ## 5. nulya 独有视图
 
@@ -278,7 +280,10 @@ fold   = "ctrl+o"
 | ~~**T4 · 收尾**~~ ✅ | `/help` `/settings` `/usage`；keymap 覆盖；`bun build --compile` 出单文件；README（安装、`NULYA_BIN`、按键）；性能核对（长 session 回放 5k 事件不卡；scrollbox 视口裁剪 + `history_window`） | 5k 事件 session 打开 < 1s（实测 ~0.35s + 首帧 ~0.15s）；README 照做能跑 |
 | ~~**T5 · 模型选择**~~ ✅ | 内核外壳：`[[models]]` 目录 + profile `models[]`、`session new --profile/--model`、`step --effort`、`nulya config show --json`、DeepSeek `off`/`reasoning_content`；前端：`/model` 选择器（↑↓ ←→ Enter）、`/effort`、`tui-state.json`、无 key 时开屏即选择器（D10） | `zig build test`/`e2e` 绿；`bun test` 新增 `model.test.tsx` 8 条；开 `nulya`（无 key）第一屏就是选择器 + 原因 |
 
-顺序 T0 → T1 → T2 → T3 → T4；**T1 结束就开始用它 dogfood**，T2 起的优先级由用出来的痛点重排。
+| ~~**T6 · 用出来的痛点**~~ ✅ | composer/状态栏永不收缩（真 bug）；`/model` 两级（providers → models）+ `a` 加 compatible provider；空 session 首屏；slash 补全；`PgUp`/`PgDn`/`Shift+End` 回读 | `bun test` 99 pass；30/24/16/10 行终端下 composer 都在 |
+| ~~**T7 · compaction**~~ ✅ | 内核：`session new --parent` 校验父 + 继承冻结身份（DESIGN §11/§14）；前端：`/compact [focus]`、压缩两条 turn 的卡片、状态栏上下文占用 | `zig build e2e` 里 fork 继承一条；`bun test` 100 pass；聊两句 → `/compact` → 新 session 顶上是 summary |
+
+顺序 T0 → T1 → T2 → T3 → T4；**T1 结束就开始用它 dogfood**，T2 起的优先级由用出来的痛点重排（T5–T7 就是这么来的）。
 
 ## 10. 开放问题（待议，默认都先不做）
 
@@ -772,3 +777,46 @@ bun run src/main.tsx --profile scripted   # 空屏 → 打 `/` 看补全 → F5 
 - mock 键盘没有 PgUp/PgDn，`test/layout.test.tsx` 直接往 `renderer.stdin` 灌转义序列。
 
 核验（编排者）：`bun run typecheck` 绿 / `bun test` 99 pass 0 fail（`files.test.ts` 的 `probeWriterLease` 在整套并跑时偶发超时、单跑绿——T3 起的老现象）/ `bun run compile` 出 `dist/nulya-tui.exe`。内核 `src/` 一字未改。
+
+### T7 · compaction：同一场对话，换个文件（2026-08-16）
+
+**状态**：完成。内核侧补了 fork 原语的缺口（`session new --parent` 校验父存在 + 继承父的冻结身份，DESIGN §11/§14）；前端新增 `/compact [focus]`、压缩两条 turn 的卡片、状态栏的上下文占用。
+
+来源：内核盘点发现 `compaction.max_input_tokens` 能解析但无人消费、`context_window` 只被 `config show` 打印——也就是说**长 session 撑爆上下文时是硬失败，没有任何降级路径**，而 TUI 已经能让人坐着聊很久了。
+
+**关键决定与理由**
+
+1. **压缩是外挂，不是内核。** 拆成三件事之后归属自明：何时压 = policy（driver）；压成什么 = intelligence（模型）；新文件 + parent 指针 + 身份延续 = substrate（内核）。前两件一行都没进 `src/`；第三件只动了 `cli.zig` 这层外壳，`session.zig` 一字未改。整个 `/compact` 是 `session append` + `session step` + `session new --parent` 的组合，内核既不知道也不关心发生过一次压缩。
+
+2. **摘要在旧 session 内部生成，不开子 session**（参考了 tcode 的 `agent/compact.rs`，但结论不同）。tcode 就地替换历史、共享 cache scope；nulya 不能替换历史（physics §1/§3），所以本来打算开一个子 session 去总结。**那是错的**：压缩恰好发生在缓存前缀最大的时候，子 session 是另一个文件、另一个 cache 域，等于把整份转录当全新 input 再付一次全价——正是要压缩的那个东西。改成在旧 session 里 append 一条压缩请求再 step，走的是已缓存的前缀。代价是请求与摘要成为旧 ledger 里两条真实事件，这反而诚实：那个文件记下了自己为什么结束。
+
+3. **身份继承、composition 不继承。** 两者都是 session 边界上的决定，方向相反：模型身份是"在跟谁说话"，压缩换人是意外，所以 `--parent` 不点名模型时原样继承父 header 的 `model_identity`；而 composition 的冻结点、promotion 的晋升点本来就是 session 边界（DESIGN §5.5/§7.5），fork 是个边界，让它自然吸收新晋升与新版本才一致。
+
+4. **失败必须什么都不动。** `/compact` 的每一条早退（observer、正在 step、空 session、模型没给出文本）都让对话停在原地。摘要先写出来，再动任何东西；拿不到摘要就明说 `nothing moved, this session is still the live one`。半途而废的压缩 = 丢掉一整段对话，这是这个功能唯一真正危险的失败模式。
+
+5. **两个 marker 是前端与自己的约定**，不是内核概念——内核看到的就是两条普通 `user_text`。它们存在只为让 transcript 把"机器写的那两条"折起来（请求默认折叠、摘要默认展开），以及让一条不是人打的摘要看起来不像人打的。
+
+6. **不自动压。** 阈值键仍然无人消费；状态栏只在 ctx ≥60% 时把 `/compact` 显示出来。自动压缩失手的代价是一整段对话，先让人按，等有真实使用证据再说。
+
+**偏离设计之处**：PLAN §3.4 原写"由 agent 或 kernel 生成 summary"，实现只做了前者（kernel 不生成任何东西）；原写"summary 为首条事件"，实际是投进新 session 的 inbox、第一次 step 时才进 ledger——`session append` 本来就是这个语义，没有为它开第二条路。
+
+**怎么看一眼**
+
+```bash
+zig build e2e
+```
+
+```bash
+cd tui && bun test test/compact.test.ts
+```
+
+聊两句之后打 `/compact`，看新 tab 顶上的 summary 卡（`bun run src/main.tsx --profile scripted`）。
+
+**已知问题 / 给下一里程碑**
+- `/sessions` 不显示 parent 链：压缩后父与子是两行，看不出是同一场对话。
+- 压缩请求跑的是这个 tab 的 `--max-steps`，模型若违反"不要调工具"会多跑几步；`summaryFrom` 取请求之后的全部 assistant 文本，够用但不精确。
+- 摘要质量没有测试，也测不了；`test/compact.test.ts` 钉的是"拿不到摘要时什么都不动"这类不会丢东西的性质。
+- 上下文占用取自最后一步的 usage，只有 `--stream` 这条路有 usage，所以 observer 模式下不显示。
+- `/help` 已经满了：加 `/compact` 之后 `/cancel` 以下要滚动才看得到。再加命令之前得先想清楚这一页怎么分组。
+
+核验（编排者）：`zig build test` 绿 / `zig build e2e` 绿 / `bun run typecheck` 绿 / `bun test` 100 pass 0 fail（`driver.test.ts` 的 "killed step" 在整套并跑时偶发超时——干净树上同样复现，T3 起的老现象，非本轮回归）。

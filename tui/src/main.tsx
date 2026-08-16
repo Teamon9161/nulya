@@ -84,8 +84,11 @@ async function main() {
   const created = id === undefined
   let effort = args.effort
   let guide: string | undefined
+  // Read once, for two readers: the launch plan below, and the status bar's
+  // context gauge (only `context_window` is taken from the catalog).
+  const config = await configShow(ws)
   if (id === undefined) {
-    const plan = planLaunch(args, loadTuiState().model, await configShow(ws))
+    const plan = planLaunch(args, loadTuiState().model, config)
     if (plan.refuse) {
       process.stderr.write(`${plan.refuse}\n`)
       process.exit(1)
@@ -110,6 +113,7 @@ async function main() {
         created={created}
         effort={effort}
         guide={guide}
+        models={config.models}
       />
     ),
     { exitOnCtrlC: false, targetFps: 30 },
