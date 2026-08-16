@@ -1624,6 +1624,28 @@ test "cli: NULYA_HOME extensions are visible to ext list / skill list / ext run,
         try std.testing.expectEqual(@as(u8, 0), list.code);
         try std.testing.expect(std.mem.indexOf(u8, list.stdout, "user-wide") == null);
     }
+
+    // Shadowing is by ACTIVE copy. `ext deactivate shared` (no --user) acts on
+    // the copy in effect — the workspace's — and says which copy takes over;
+    // afterwards nothing is shadowed and the user copy is what `skill list`
+    // resolves, even though the workspace still has a `shared/` directory.
+    {
+        const off = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "deactivate", "shared" }, env);
+        defer alloc.free(off.stdout);
+        try std.testing.expectEqual(@as(u8, 0), off.code);
+        try std.testing.expect(std.mem.indexOf(u8, off.stdout, "shared: deactivated") != null);
+        try std.testing.expect(std.mem.indexOf(u8, off.stdout, user_shared) != null); // "…is now the active copy"
+
+        const list = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "list" }, env);
+        defer alloc.free(list.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, list.stdout, "(shadowed)") == null);
+        try std.testing.expect(std.mem.indexOf(u8, list.stdout, "(inactive)") != null);
+
+        const skills = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "skill", "list" }, env);
+        defer alloc.free(skills.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, skills.stdout, user_shared) != null);
+        try std.testing.expect(std.mem.indexOf(u8, skills.stdout, ws_shared) == null);
+    }
 }
 
 // ── M5g: the bundled evolution extension (a plain data extension) ──────────

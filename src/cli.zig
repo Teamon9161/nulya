@@ -25,13 +25,11 @@ const composition = @import("composition.zig");
 const launch = @import("launch.zig");
 const source = @import("source.zig");
 
-const workspace_extensions_root = launch.workspace_extensions_root;
-
 /// The ordered store roots this invocation searches (DESIGN §7.2), opened once.
 /// Every `ext` / `skill` command goes through this instead of assuming the
 /// workspace store is the only one: an extension may live in the user's
 /// `~/.nulya/extensions` or in a trusted `extensions.paths` entry, and the first
-/// root holding an id wins.
+/// root holding an ACTIVE version of an id wins.
 const RootSearch = struct {
     specs: []const []const u8,
     roots: store.Roots,
@@ -60,13 +58,25 @@ fn rootSpecs(alloc: std.mem.Allocator, io: std.Io) ![]const []const u8 {
 }
 
 /// Where a write-side command puts things: the user store under `--user`, else
-/// the workspace store. Caller owns the result.
-fn writeRootSpec(alloc: std.mem.Allocator, io: std.Io, user: bool) !?[]u8 {
-    if (!user) return try alloc.dupe(u8, workspace_extensions_root);
+/// the workspace store. Null means `--user` on a machine with no home. Caller
+/// owns the result.
+fn writeRootSpec(alloc: std.mem.Allocator, user: bool) !?[]u8 {
+    if (!user) return try alloc.dupe(u8, store.workspace_root_rel);
     var host = try std.process.Environ.createMap(.{ .block = .global }, alloc);
     defer host.deinit();
-    _ = io;
     return launch.userExtensionsRoot(alloc, &host);
+}
+
+/// Split `args` into `(has --user, everything else)` — the one flag every
+/// write-side `ext` verb shares. Caller owns the returned positionals.
+fn takeUserFlag(alloc: std.mem.Allocator, args: []const []const u8) !struct { user: bool, rest: [][]const u8 } {
+    var rest: std.ArrayList([]const u8) = .empty;
+    errdefer rest.deinit(alloc);
+    var user = false;
+    for (args) |a| {
+        if (std.mem.eql(u8, a, "--user")) user = true else try rest.append(alloc, a);
+    }
+    return .{ .user = user, .rest = try rest.toOwnedSlice(alloc) };
 }
 
 /// Dispatch `args` (everything after the program name). Returns a process exit
@@ -285,12 +295,13 @@ fn skillLoad(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8
 }
 
 fn extInit(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+    const flags = try takeUserFlag(alloc, args);
+    defer alloc.free(flags.rest);
     var is_script = false;
-    var user = false;
     var positional: std.ArrayList([]const u8) = .empty;
     defer positional.deinit(alloc);
-    for (args) |a| {
-        if (std.mem.eql(u8, a, "--script")) is_script = true else if (std.mem.eql(u8, a, "--user")) user = true else try positional.append(alloc, a);
+    for (flags.rest) |a| {
+        if (std.mem.eql(u8, a, "--script")) is_script = true else try positional.append(alloc, a);
     }
     if (positional.items.len < 1) {
         try printErr(io, "usage: nulya ext init [--script] [--user] <id> [tool]\n");
@@ -302,7 +313,7 @@ fn extInit(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     // The draft goes into the chosen store root (`--user` = the user-level one),
     // and everything below is written through that root's handle, so an absolute
     // user root needs no absolute sub-paths.
-    const root_spec = (try writeRootSpec(alloc, io, user)) orelse {
+    const root_spec = (try writeRootSpec(alloc, flags.user)) orelse {
         try printErr(io, "no home directory for --user (set NULYA_HOME or HOME)\n");
         return 1;
     };
@@ -348,21 +359,17 @@ fn extInit(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
 }
 
 fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
-    var positional: std.ArrayList([]const u8) = .empty;
-    defer positional.deinit(alloc);
-    var user = false;
-    for (args) |a| {
-        if (std.mem.eql(u8, a, "--user")) user = true else try positional.append(alloc, a);
-    }
-    if (positional.items.len < 1) {
+    const flags = try takeUserFlag(alloc, args);
+    defer alloc.free(flags.rest);
+    if (flags.rest.len < 1) {
         try printErr(io, "usage: nulya ext build <path> [--user]\n");
         return 1;
     }
-    const ext_dir = positional.items[0];
+    const ext_dir = flags.rest[0];
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try cwdRealPath(io, &cwd_buf);
-    const dest_spec = (try buildDestRoot(alloc, io, cwd_path, ext_dir, user)) orelse {
+    const dest_spec = (try buildDestRoot(alloc, io, cwd_path, ext_dir, flags.user)) orelse {
         try printErr(io, "no home directory for --user (set NULYA_HOME or HOME)\n");
         return 1;
     };
@@ -406,10 +413,10 @@ fn buildDestRoot(
     ext_dir: []const u8,
     user: bool,
 ) !?[]u8 {
-    if (user) return writeRootSpec(alloc, io, true);
+    if (user) return writeRootSpec(alloc, true);
 
     var draft = std.Io.Dir.cwd().openDir(io, ext_dir, .{}) catch
-        return try alloc.dupe(u8, workspace_extensions_root); // let the build report it
+        return try alloc.dupe(u8, store.workspace_root_rel); // let the build report it
     defer draft.close(io);
     var draft_buf: [std.fs.max_path_bytes]u8 = undefined;
     const draft_real = draft_buf[0..try draft.realPath(io, &draft_buf)];
@@ -419,7 +426,7 @@ fn buildDestRoot(
     for (search.roots.entries) |entry| {
         if (isInside(entry.real, draft_real)) return try alloc.dupe(u8, entry.spec);
     }
-    return try alloc.dupe(u8, workspace_extensions_root);
+    return try alloc.dupe(u8, store.workspace_root_rel);
 }
 
 /// Whether `path` sits under directory `dir` (both already resolved to real
@@ -624,23 +631,19 @@ fn writeTypedValue(jw: *std.json.Stringify, val: []const u8, ty: ?[]const u8) !v
 const ActivateMode = enum { activate, rollback };
 
 fn extActivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8, mode: ActivateMode) !u8 {
-    var positional: std.ArrayList([]const u8) = .empty;
-    defer positional.deinit(alloc);
-    var user = false;
-    for (args) |a| {
-        if (std.mem.eql(u8, a, "--user")) user = true else try positional.append(alloc, a);
-    }
-    if (positional.items.len < 2) {
+    const flags = try takeUserFlag(alloc, args);
+    defer alloc.free(flags.rest);
+    if (flags.rest.len < 2) {
         try printErr(io, "usage: nulya ext activate|rollback [--user] <id> <version>\n");
         return 1;
     }
-    const id = positional.items[0];
-    const version = positional.items[1];
+    const id = flags.rest[0];
+    const version = flags.rest[1];
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try cwdRealPath(io, &cwd_buf);
-    var ext_root = (try openTargetRoot(alloc, io, cwd_path, id, version, user)) orelse {
-        try printOut(alloc, io, "no store root holds extension '{s}' (and no home for --user)\n", .{id});
+    var ext_root = (try openTargetRoot(alloc, io, cwd_path, id, version, flags.user)) orelse {
+        try printOut(alloc, io, "no store root holds {s}@{s} (or no home for --user); see `nulya ext list`\n", .{ id, version });
         return 1;
     };
     defer ext_root.close(io);
@@ -676,11 +679,13 @@ fn depositSessionNote(alloc: std.mem.Allocator, io: std.Io, ext_root: std.Io.Dir
     try notes.depositActiveNote(alloc, io, std.Io.Dir.cwd(), session_path, ext_root, id, version);
 }
 
-/// The root an `activate` / `rollback` / `deactivate` acts on: the user store
-/// under `--user`, else the first root that actually holds this version, else
-/// the first root that has the extension at all — so the operation lands where
-/// the extension lives rather than always in the workspace. Null means there is
-/// nowhere to act (and, for `--user`, no home directory).
+/// The root an `activate` / `rollback` / `deactivate` acts on. `--user` names
+/// the user store outright. Otherwise: with a `version`, the first root that
+/// actually holds that built version; without one (`deactivate`), the root whose
+/// `current` for `id` is the one in effect (`Roots.firstActive`, DESIGN §7.2) —
+/// so the operation lands on the copy a session would use, never on a bare
+/// directory that shadows nothing. Null means there is nowhere to act (and, for
+/// `--user`, no home directory).
 fn openTargetRoot(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -690,58 +695,67 @@ fn openTargetRoot(
     user: bool,
 ) !?std.Io.Dir {
     if (user) {
-        const spec = (try writeRootSpec(alloc, io, true)) orelse return null;
+        const spec = (try writeRootSpec(alloc, true)) orelse return null;
         defer alloc.free(spec);
         return try store.openOrCreateRoot(io, cwd_path, spec);
     }
     var search = try RootSearch.open(alloc, io, cwd_path);
     defer search.deinit(alloc);
-    const index = blk: {
-        if (version) |v| {
-            if (search.roots.firstWithVersion(alloc, id, v)) |i| break :blk i;
-        }
-        break :blk (search.roots.firstWithId(id) catch null) orelse return null;
+    const index = if (version) |v|
+        search.roots.firstWithVersion(alloc, id, v) orelse return null
+    else blk: {
+        const active = (try search.roots.firstActive(alloc, id)) orelse return null;
+        alloc.free(active.version);
+        break :blk active.root;
     };
     // Reopen independently: `search` owns the handles it is about to close.
     return try store.openOrCreateRoot(io, cwd_path, search.roots.entries[index].spec);
 }
 
 fn extDeactivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
-    var positional: std.ArrayList([]const u8) = .empty;
-    defer positional.deinit(alloc);
-    var user = false;
-    for (args) |a| {
-        if (std.mem.eql(u8, a, "--user")) user = true else try positional.append(alloc, a);
-    }
-    if (positional.items.len < 1) {
+    const flags = try takeUserFlag(alloc, args);
+    defer alloc.free(flags.rest);
+    if (flags.rest.len < 1) {
         try printErr(io, "usage: nulya ext deactivate [--user] <id>\n");
         return 1;
     }
-    const id = positional.items[0];
+    const id = flags.rest[0];
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var ext_root = (try openTargetRoot(alloc, io, try cwdRealPath(io, &cwd_buf), id, null, user)) orelse {
-        try printOut(alloc, io, "no store root holds extension '{s}'\n", .{id});
+    const cwd_path = try cwdRealPath(io, &cwd_buf);
+    var ext_root = (try openTargetRoot(alloc, io, cwd_path, id, null, flags.user)) orelse {
+        try printOut(alloc, io, "extension '{s}' has no active version in any store root\n", .{id});
         return 1;
     };
     defer ext_root.close(io);
     try store.Store.init(io, ext_root).deactivate(alloc, id);
     try printOut(alloc, io, "{s}: deactivated\n", .{id});
+
+    // Deactivating the copy in effect can UNSHADOW one in a later root — say so,
+    // or "I deactivated it, why is it still in my session?" is the next question.
+    var search = try RootSearch.open(alloc, io, cwd_path);
+    defer search.deinit(alloc);
+    if (try search.roots.firstActive(alloc, id)) |still| {
+        defer alloc.free(still.version);
+        try printOut(alloc, io, "note: {s}@{s} in {s} is now the active copy\n", .{ id, still.version, search.roots.entries[still.root].spec });
+    }
     return 0;
 }
 
-/// Every extension in every root, in search order, with the root it came from.
-/// An id that a later root also has is marked `(shadowed by …)`: only the first
-/// one is ever used, and silently hiding the duplicate is how a stale user-level
-/// copy becomes a mystery.
+/// Every extension directory in every root, in search order, with the root it
+/// came from. An ACTIVE id that an earlier root also has active is marked
+/// `(shadowed)`: only the first active copy is ever used (`Roots.listActive`),
+/// and silently hiding the duplicate is how a stale user-level copy becomes a
+/// mystery. A directory without `current` shadows nothing and is listed as
+/// `(inactive)` for its root alone.
 fn extList(alloc: std.mem.Allocator, io: std.Io) !u8 {
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     var search = try RootSearch.open(alloc, io, try cwdRealPath(io, &cwd_buf));
     defer search.deinit(alloc);
 
-    var seen: std.ArrayList([]const u8) = .empty;
+    var seen_active: std.ArrayList([]const u8) = .empty;
     defer {
-        for (seen.items) |s| alloc.free(s);
-        seen.deinit(alloc);
+        for (seen_active.items) |s| alloc.free(s);
+        seen_active.deinit(alloc);
     }
 
     var printed: usize = 0;
@@ -754,8 +768,8 @@ fn extList(alloc: std.mem.Allocator, io: std.Io) !u8 {
                 else => return err,
             });
             defer if (active) |a| alloc.free(a);
-            const shadowed = sliceHasString(seen.items, dir_entry.name);
-            if (!shadowed) try seen.append(alloc, try alloc.dupe(u8, dir_entry.name));
+            const shadowed = active != null and sliceHasString(seen_active.items, dir_entry.name);
+            if (active != null and !shadowed) try seen_active.append(alloc, try alloc.dupe(u8, dir_entry.name));
             printed += 1;
             try printOut(alloc, io, "{s}\t{s}\t{s}{s}\n", .{
                 dir_entry.name,
@@ -1032,11 +1046,13 @@ fn readSessionView(
             continue;
         }
         events += 1;
-        // Only lines that can carry what this view needs are parsed; the rest are
+        // Only lines that MAY carry what this view needs are parsed; the rest are
         // just counted, so listing does not cost a full decode of every ledger.
-        const needs_usage = std.mem.indexOf(u8, line, "\"usage\":") != null;
-        const needs_text = first_user_text.len == 0 and std.mem.indexOf(u8, line, "\"kind\":\"user_text\"") != null;
-        if (!needs_usage and !needs_text) continue;
+        // The substring tests are a pre-filter, never the decision: what counts
+        // is the decoded line's own `kind` / `usage`.
+        const may_have_usage = std.mem.indexOf(u8, line, "\"usage\":") != null;
+        const may_be_first_text = first_user_text.len == 0 and std.mem.indexOf(u8, line, "\"kind\":\"user_text\"") != null;
+        if (!may_have_usage and !may_be_first_text) continue;
         const parsed = ledger.parseEventLine(a, line) catch continue;
         if (parsed.value.usage) |u| {
             total.input_tokens += u.input_tokens;
@@ -1044,7 +1060,7 @@ fn readSessionView(
             total.cache_read_tokens += u.cache_read_tokens;
             total.cache_write_tokens += u.cache_write_tokens;
         }
-        if (needs_text) {
+        if (first_user_text.len == 0 and std.mem.eql(u8, parsed.value.kind, "user_text")) {
             if (parsed.value.text) |t| first_user_text = try summarize(a, t);
         }
     }

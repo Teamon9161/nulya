@@ -16,14 +16,11 @@ const prompt = @import("prompt.zig");
 const composition = @import("composition.zig");
 const tool = @import("tool.zig");
 const tool_stats = @import("tool_stats.zig");
+const store = @import("extension/store.zig");
 
 /// The most kernel steps one `run` may take, whatever the caller asks for
 /// (DESIGN §4, §14). A driver can lower the budget per call, never raise it.
 pub const max_steps_ceiling: usize = 50;
-
-/// The workspace-level extension store, relative to the workspace root — the
-/// first root every search consults (DESIGN §7.2).
-pub const default_extension_root = ".nulya/extensions";
 
 /// Where a durable session's file and its cross-process siblings (`<id>.inbox/`,
 /// `<id>.cancel`) live. The `workspace` handle is borrowed — the caller keeps it
@@ -75,7 +72,7 @@ pub const AgentSession = struct {
         /// Store roots to search, in order (DESIGN §7.2). The default is the
         /// workspace root alone; a CLI adds the user root and any trusted
         /// `extensions.paths` at the session-setup boundary.
-        extension_roots: []const []const u8 = &.{default_extension_root},
+        extension_roots: []const []const u8 = &.{store.workspace_root_rel},
         /// Native tool selection and budget, resolved from config at the
         /// session-setup boundary so this module stays config-agnostic.
         registry: composition.Options = .{},
@@ -710,7 +707,7 @@ test "a durable session persists across create, close, and reopen" {
             .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd },
             .scratch_dir = "/tmp",
         },
-        .extension_roots = &.{default_extension_root},
+        .extension_roots = &.{store.workspace_root_rel},
     };
 
     // Process A: create, take one turn, then close.

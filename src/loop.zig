@@ -135,21 +135,6 @@ const TeeSink = struct {
     }
 };
 
-/// What to record on the assistant event: the provider's reported cost, or
-/// nothing at all when it reported nothing. An all-zero `Usage` means "this
-/// provider does not price turns" (the scripted stand-in, a mid-stream cancel),
-/// which is not the same fact as "this step cost zero" — so it is left off the
-/// line entirely, and old ledgers stay byte-identical.
-fn stepUsage(u: provider.Usage) ?ledger.Usage {
-    const recorded: ledger.Usage = .{
-        .input_tokens = u.input_tokens,
-        .output_tokens = u.output_tokens,
-        .cache_read_tokens = u.cache_read_tokens,
-        .cache_write_tokens = u.cache_write_tokens,
-    };
-    return if (recorded.isZero()) null else recorded;
-}
-
 /// One assistant turn from the provider. Without an observer this IS
 /// `Model.step`; with one, the same collection happens behind a tee. Both paths
 /// discard a partial collector on error, so a canceled stream leaves nothing.
@@ -208,7 +193,11 @@ pub fn runStepWithPrompt(
         .reasoning = turn.reasoning,
         .text = turn.text,
         .calls = turn.calls,
-        .usage = stepUsage(turn.usage),
+        // Recorded only when the provider reported a cost. All-zero means "this
+        // provider does not price turns" (the scripted stand-in), which is not
+        // the same fact as "this step cost zero" — so it is left off the line
+        // entirely, and old ledgers stay byte-identical.
+        .usage = if (turn.usage.isZero()) null else turn.usage,
     } });
     if (turn.calls.len == 0) return .{ .usage = turn.usage }; // model addressed the user; step complete.
 

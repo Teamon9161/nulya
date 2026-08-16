@@ -26,10 +26,11 @@ pub const ToolResultEntry = struct {
 
 /// What one model step cost, as the provider reported it. A FACT about the turn
 /// (like `assistant.reasoning`), never projected into PromptIR: the model does
-/// not read its own bill. Declared here rather than reused from `provider.zig`
-/// so the ledger keeps depending on nothing — `provider` → `prompt` → `ledger`
-/// already runs the other way.
+/// not read its own bill. Declared here — the ledger depends on nothing — and
+/// re-exported by `provider.zig` as `provider.Usage`, so what a provider reports
+/// and what the ledger records are one struct, not two shapes and a copy.
 pub const Usage = struct {
+    /// Non-cached input tokens.
     input_tokens: u64 = 0,
     output_tokens: u64 = 0,
     cache_read_tokens: u64 = 0,

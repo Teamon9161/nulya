@@ -15,15 +15,13 @@ const anthropic = @import("providers/anthropic.zig");
 const codex = @import("providers/codex.zig");
 const config = @import("config.zig");
 const ledger = @import("ledger.zig");
-const session = @import("session.zig");
+const store = @import("extension/store.zig");
 
 pub const default_openai_model = "gpt-4o-mini";
 pub const default_openai_base_url = "https://api.openai.com/v1";
 
 pub const sessions_dir = ".nulya/sessions";
 pub const scratch_dir = ".nulya/scratch";
-/// The workspace-level extension store — the first root of every search.
-pub const workspace_extensions_root = session.default_extension_root;
 
 /// A deterministic, terminating scripted provider — the offline stand-in for a
 /// real model (DESIGN §13). Two modes, selected by `NULYA_SCRIPTED_MODE`:
@@ -300,7 +298,7 @@ pub fn extensionRoots(
     var roots: std.ArrayList([]const u8) = .empty;
     errdefer freeExtensionRoots(alloc, roots.items);
 
-    try roots.append(alloc, try alloc.dupe(u8, workspace_extensions_root));
+    try roots.append(alloc, try alloc.dupe(u8, store.workspace_root_rel));
 
     if (try userExtensionsRoot(alloc, env)) |user| try roots.append(alloc, user);
 
@@ -399,7 +397,7 @@ test "extension roots search workspace, then user, then trusted config paths" {
     const roots = try extensionRoots(alloc, &env, &cfg);
     defer freeExtensionRoots(alloc, roots);
     try std.testing.expectEqual(@as(usize, 3), roots.len); // the empty spec is dropped
-    try std.testing.expectEqualStrings(workspace_extensions_root, roots[0]);
+    try std.testing.expectEqualStrings(store.workspace_root_rel, roots[0]);
     try std.testing.expectEqualStrings(
         if (@import("builtin").os.tag == .windows) "D:\\home\\.nulya\\extensions" else "/home/me/.nulya/extensions",
         roots[1],

@@ -99,7 +99,7 @@ capability_note  { id, version, text }                                  ← 中�
 
 **`assistant.reasoning` 是不透明字段，不是第五种事件。** 它是 provider 原样吐出的本轮 reasoning item 的 JSON 数组（Anthropic 的带 signature 的 `thinking` / `redacted_thinking` block、Responses 的带 `encrypted_content` 的 `reasoning` item），没有则为 `""`。它是本轮的**事实**（模型确实产出了这段、且下一步要原样带回），不是模型可见文本：kernel 从不解析它，投影成一个 `reasoning` block 交回 provider，provider 只在自己认得（`ProviderCapabilities.thinking_replay`）时按原样回放到**同一个模型**——它天然 model-locked，而 session 的 `model_identity` 已冻结（§3.4），所以别的模型永远看不到它。为什么必须有它：Anthropic 一方端点在 thinking 开着时**拒绝**丢了 thinking block 的 tool-use turn（400，而 Opus 5 默认开、Fable 5 只能开），Responses 端点不带则模型每一步重推上一步的计划——前者是正确性，后者是质量与 token；两者都不是 kernel 该替 provider 决定的，kernel 只负责把这个事实存住、按序交回。落盘时只在非空才写 `reasoning` 字段（老行形状不变，老行读回为 `""`）。
 
-**`assistant.usage` 与 `reasoning` 同地位：本轮的事实，不投影。** `?Usage{input_tokens, output_tokens, cache_read_tokens, cache_write_tokens}`（`ledger.Usage`，ledger 不 import `provider.zig`——依赖方向反过来），由 `loop.zig` 从 `ModelTurn.usage` 写入。落盘只在**非空**时写 `usage` 对象：provider 什么都没报（scripted 替身、流中途取消）时整条不写，老行读回 `null`——"没记录"与"花了 0"是两个不同的事实。**prompt.zig 不投影它**：模型不读自己的账单；它是给慢速回路与前端的成本证据（`session events` / `--stream` 的 ledger 行天然带上，`session list --json` 按它求和）。provider 阶段就被取消的 step 没有 assistant 事件可挂，其 usage 不落盘——诚实接受，不为它造新事件。
+**`assistant.usage` 与 `reasoning` 同地位：本轮的事实，不投影。** `?Usage{input_tokens, output_tokens, cache_read_tokens, cache_write_tokens}`（`ledger.Usage`；`provider.Usage` 就是它的 re-export，provider 本来就 import ledger——一个 struct 贯穿到底，loop 不做转换），由 `loop.zig` 从 `ModelTurn.usage` 写入。落盘只在**非空**时写 `usage` 对象：provider 什么都没报（scripted 替身、流中途取消）时整条不写，老行读回 `null`——"没记录"与"花了 0"是两个不同的事实。**prompt.zig 不投影它**：模型不读自己的账单；它是给慢速回路与前端的成本证据（`session events` / `--stream` 的 ledger 行天然带上，`session list --json` 按它求和）。provider 阶段就被取消的 step 没有 assistant 事件可挂，其 usage 不落盘——诚实接受，不为它造新事件。
 
 ### 3.2 API（硬性）
 
@@ -270,7 +270,7 @@ Extension = 子进程；wire protocol 就是 ABI。不用 `.so/.dll`（ABI / Zig
 
 `nulya ext init --script` 按宿主平台生成脚本骨架（Windows `run.ps1` + powershell / 其余 `run.sh` + sh）。脚本与编译 extension 共用 seal / integrity / store / activate / rollback / usage，区别只在"是否编译"和 hash 是否含 compiler。
 
-### 7.2 Store roots：搜索顺序（首个持有者胜）
+### 7.2 Store roots：搜索顺序（首个 active 持有者胜）
 
 extension 装在**多个 store root** 里，按固定顺序搜索（`store.Roots`）：
 
@@ -280,7 +280,7 @@ extension 装在**多个 store root** 里，按固定顺序搜索（`store.Roots
 | ② | user `<NULYA_HOME \| ~/.nulya>/extensions` | `--user` | 造一次、每个 workspace 都有 |
 | ③ | `extensions.paths`（**只认 trusted 层**，§9.5） | operator | project 层写了也忽略 |
 
-- **同一个 id 在多个 root → 首个 root 胜**（workspace 遮蔽 user）；`ext list` 把被遮蔽的那行标出来，不静默藏起来。
+- **同一个 id 在多个 root → 首个持有 active 版本（有 `current`）的 root 胜**（workspace 遮蔽 user）。"持有"看 `current` 不看目录：一个只有 `<id>/` 目录、没有 `current` 的 root（draft、或已 `deactivate` 的副本）**不参与遮蔽**——否则在 workspace `deactivate` 会静默藏起 user 那份而不是让它生效。同一定义贯穿 `Roots.listActive`（composition / `skill list`）、`Roots.firstActive`（`ext run`、`--with` 不带版本、`ext deactivate` 的落点）与 `ext list` 的 `(shadowed)` 标记；`ext deactivate` 作用于生效的那份，若因此让后面 root 的副本顶上来会打印一行 note。
 - **frozen 版本按 root 顺序找**（`initFrozen`、`skill load` 的 pinned ref、`ext run` 的 entry）：version 是内容寻址的，哪个 root 的副本都是同一字节、integrity 照验，所以顺序只决定"在哪找到"，从不决定"跑什么"。
 - **header 不记 root**（`active` 仍是 `{id, version}`）：记了就等于把一台机器的目录布局冻进会话，而那与"跑的是哪份字节"无关。
 - 不存在的 root 是**缺席**不是错误（多数机器没有 user store）；写端（`ext init --user` / `ext build --user`）需要时才创建。
@@ -543,7 +543,7 @@ nulya                       ← 无参数：固定 prompt demo（现经 durable 
     ```
 
     `reasoning_item`（不透明、只为回放）**不转发**；`stopped ∈ end_turn | budget | canceled`。每个 step 的 ledger 行在该 step 的 `step end` **之前**刷出：读者见到 `step end` 就知道这一步的事件已全。诊断（原来的 "session step failed: …" 等）在 `--stream` 下变成 `{"stream":"run","event":"error","message":"…"}` 后非零退出——**stdout 上没有非 JSON 行**。
-- `nulya ext init|build|activate|rollback|deactivate` 都接受 `--user`：写端落到 user root（`~/.nulya/extensions`，需要时创建）而不是 workspace。不给 `--user` 时，`activate|rollback|deactivate` 作用于**实际持有该 id / 该 version 的首个 root**（§7.2），不是无脑 workspace；`ext list` 打印 `id / version / root`，被遮蔽的行标 `(shadowed)`；`ext run` / `skill list` / `skill load` / session composition 一律按 root 顺序搜索。
+- `nulya ext init|build|activate|rollback|deactivate` 都接受 `--user`：写端落到 user root（`~/.nulya/extensions`，需要时创建）而不是 workspace。不给 `--user` 时，`activate|rollback` 作用于**实际持有该 version 的首个 root**，`deactivate` 作用于**该 id 生效中的那个 root**（`Roots.firstActive`，§7.2），不是无脑 workspace；`ext list` 打印 `id / version / root`，被遮蔽的 active 行标 `(shadowed)`；`ext run` / `skill list` / `skill load` / session composition 一律按 root 顺序搜索。
 - `nulya ext activate` 在 `NULYA_SESSION`（相对 workspace 的 session 文件路径）存在时，向该 session 的 inbox 投一条 capability_note（§5.3）。
 - 离线时 provider 回落到确定性的 scripted stand-in（`NULYA_SCRIPTED_MODE=finish|loop`，测试用）。
 

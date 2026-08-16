@@ -27,6 +27,10 @@ const integrity = @import("integrity.zig");
 const testkit = @import("testkit.zig");
 
 pub const version_prefix = integrity.version_prefix;
+/// The workspace-level store root, relative to the workspace — the first root
+/// of every search (`Roots`, DESIGN §7.2) and the default for a session that
+/// names no others.
+pub const workspace_root_rel = ".nulya/extensions";
 const current_file = "current";
 const versions_dir = "versions";
 const exe_suffix = integrity.exe_suffix;
@@ -201,8 +205,12 @@ pub const Store = struct {
 /// The ordered set of store roots a process searches (DESIGN §7.2): the
 /// workspace's `.nulya/extensions`, then the user's `~/.nulya/extensions`, then
 /// any `extensions.paths` from a TRUSTED config layer. Order is the whole
-/// semantics — **the first root holding an id wins**, so a workspace copy
-/// shadows a user-wide one, and a checkout can never add a root (DESIGN §9.5).
+/// semantics — **the first root holding an ACTIVE version of an id wins**, so a
+/// workspace copy shadows a user-wide one, and a checkout can never add a root
+/// (DESIGN §9.5). "Holding" means a `current` pointer: a bare `<id>/` directory
+/// with no `current` (a draft, a deactivated copy) shadows nothing — otherwise
+/// deactivating in the workspace would silently hide, not reveal, the copy in
+/// the next root.
 ///
 /// A root that does not exist is simply absent, not an error: having no
 /// user-level store is the normal case. Roots own their opened handles and
@@ -307,17 +315,6 @@ pub const Roots = struct {
             alloc.free(e.version);
         }
         alloc.free(list);
-    }
-
-    /// Index of the first root that has a directory for `id` — where an
-    /// `activate` / `rollback` / `deactivate` naming no root should act.
-    pub fn firstWithId(self: *const Roots, id: []const u8) !?usize {
-        if (!manifest.isValidId(id)) return error.InvalidId;
-        for (self.entries, 0..) |entry, i| {
-            entry.dir.access(self.io, id, .{}) catch continue;
-            return i;
-        }
-        return null;
     }
 
     /// Index of the first root holding a BUILT `version` of `id` (integrity
@@ -570,21 +567,35 @@ test "roots search in order: the first root holding an id wins, a missing root i
     try std.testing.expectEqual(@as(usize, 0), active[1].root);
     try std.testing.expectEqualStrings(ws_shared, active[1].version);
 
-    // Same order for the single-id lookups.
-    try std.testing.expectEqual(@as(usize, 0), (try roots.firstWithId("shared")).?);
-    try std.testing.expectEqual(@as(usize, 1), (try roots.firstWithId("only-user")).?);
-    try std.testing.expect((try roots.firstWithId("absent")) == null);
+    // Same order for the single-id lookup.
     {
         const found = (try roots.firstActive(alloc, "shared")).?;
         defer alloc.free(found.version);
         try std.testing.expectEqual(@as(usize, 0), found.root);
         try std.testing.expectEqualStrings(ws_shared, found.version);
     }
+    try std.testing.expect((try roots.firstActive(alloc, "absent")) == null);
     // A frozen version resolves from whichever root actually holds it — the
     // user root's version is found even though the workspace shadows the id.
     try std.testing.expectEqual(@as(usize, 1), roots.firstWithVersion(alloc, "shared", user_shared).?);
     try std.testing.expectEqual(@as(usize, 0), roots.firstWithVersion(alloc, "shared", ws_shared).?);
     try std.testing.expect(roots.firstWithVersion(alloc, "shared", "v-000000000000000000000000") == null);
+
+    // Shadowing is by ACTIVE copy, not by directory: deactivate the workspace's
+    // `shared` (its `<id>/` and versions stay) and the user root's active copy
+    // is the one in effect — for the whole listing and for the single lookup.
+    try Store.init(io, ws_root).deactivate(alloc, "shared");
+    const after = try roots.listActive(alloc);
+    defer Roots.freeActive(alloc, after);
+    try std.testing.expectEqual(@as(usize, 2), after.len);
+    try std.testing.expectEqualStrings("shared", after[1].id);
+    try std.testing.expectEqual(@as(usize, 1), after[1].root);
+    try std.testing.expectEqualStrings(user_shared, after[1].version);
+    {
+        const found = (try roots.firstActive(alloc, "shared")).?;
+        defer alloc.free(found.version);
+        try std.testing.expectEqual(@as(usize, 1), found.root);
+    }
 }
 
 test "openOrCreateRoot creates a missing root, by absolute path as well as relative" {
