@@ -69,7 +69,7 @@
 **协议与机制的真相在 [DESIGN.md](DESIGN.md) §14**（`loop.StepContext.observer` 纯观测钩子 + 行协议）。这里只留 TUI 侧的消费约定：
 
 - 一行一个 JSON，写完即 flush；带 `stream` 字段 = 瞬态观测行，不带 = 与 `session events` 同形的 ledger 事件行（同一套 seq，可直接按 seq 入 items）。
-- 行序（每个 step）：`started → text_delta* / thinking_delta* → tool_use_start / tool_use_input_delta* → done → tool begin/end* → 该 step 的 ledger 行 → step end`；整次调用最后一行是 `run done{steps,stopped}`（`stopped ∈ end_turn | budget | canceled | max_tokens`；被 `max_tokens` 截断的 step 的 `step end` 多一列 `"stop":"max_tokens"`，DESIGN §4）。见到 `step end` 就知道这一步的事件已全。
+- 行序（每个 step）：`started → text_delta* / thinking_delta* → tool_use_start / tool_use_input_delta* → done → tool begin/end* → 该 step 的 ledger 行 → step end`；整次调用最后一行是 `run done{steps,stopped}`（`stopped ∈ end_turn | budget | canceled | max_tokens`；被 `max_tokens` 截断的 step 的 `step end` 多一列 `"stop":"max_tokens"`，DESIGN §4）。见到 `step end` 就知道这一步的事件已全。**瞬态失败**（DESIGN §13）：一次尝试中途可能冒出 `{"stream":"model","event":"retry","attempt","max_retries","delay_ms","error"}`——这次尝试的 delta / usage 全部作废，内核退避后原样重发、再从 `started` 开始；`session.ts` 收到它就 `dropInFlight` + 回退 provisional usage，并把 "retry n/m in Xs" 放进 `error` 供状态栏显示，下一个 `started` 清掉。
 - `reasoning_item` 不出现在流里（不透明、只为回放）；thinking 的可显示文本只有 `thinking_delta`，turn 结束后从 ledger 的 `reasoning` 尽力抽（§4.2）。
 - 诊断也是 JSON（`{"stream":"run","event":"error","message":"…"}` + 非零退出），所以 `nulya/cli.ts` 的解析器**永远**不必处理裸文本行。
 

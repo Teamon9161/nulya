@@ -87,6 +87,11 @@ pub const StepObserver = struct {
     pub const VTable = struct {
         /// Every provider stream event, teed on its way to the turn collector.
         modelEvent: *const fn (ptr: *anyopaque, event: provider.StreamEvent) void,
+        /// The model request failed transiently and will be sent again after
+        /// `delay_ms`. Whatever `modelEvent` reported since the last `started`
+        /// belonged to the failed attempt and is discarded — the next attempt
+        /// streams from scratch.
+        modelRetry: *const fn (ptr: *anyopaque, retry: RetryNotice) void,
         /// Just before a call is handed to its executor.
         toolBegin: *const fn (ptr: *anyopaque, call: ledger.ToolCall) void,
         /// Just after the executor returned; `ok` is the executor's own verdict.
@@ -104,6 +109,10 @@ pub const StepObserver = struct {
         self.vtable.modelEvent(self.ptr, event);
     }
 
+    pub fn modelRetry(self: StepObserver, retry: RetryNotice) void {
+        self.vtable.modelRetry(self.ptr, retry);
+    }
+
     pub fn toolBegin(self: StepObserver, call: ledger.ToolCall) void {
         self.vtable.toolBegin(self.ptr, call);
     }
@@ -117,6 +126,16 @@ pub const StepObserver = struct {
     }
 };
 
+/// One retry, as reported to an observer: which attempt is about to be made
+/// (1-based), the policy's ceiling, how long the loop waits first, and the
+/// transient error that caused it.
+pub const RetryNotice = struct {
+    attempt: u32,
+    max_retries: u32,
+    delay_ms: u64,
+    err: anyerror,
+};
+
 pub const StepContext = struct {
     tool_context: tool.ToolContext,
     /// Directory under which `emit` spills overflowing output.
@@ -125,21 +144,23 @@ pub const StepContext = struct {
     budget: tool.OutputBudget = .{},
     /// Aggregate budget for every tool result in one model step.
     step_budget: tool.StepOutputBudget = .{},
+    /// How a transient model-request failure is retried (`config.provider.retry`).
+    retry: provider.RetryPolicy = .{},
     /// Optional pure-observation hook (tui.md §2.2). Absent by default: a step
     /// with no observer runs byte-for-byte the same code path it always has.
     observer: ?StepObserver = null,
 };
 
-/// Tees the provider stream: the observer sees each event first (so a front end
-/// renders deltas as they arrive), then the collector accumulates the turn as
-/// usual. Only the collector's outcome can fail the step.
+/// Tees the provider stream: the observer (if any) sees each event first (so a
+/// front end renders deltas as they arrive), then the collector accumulates the
+/// turn as usual. Only the collector's outcome can fail the step.
 const TeeSink = struct {
     collector: *provider.TurnCollector,
-    observer: StepObserver,
+    observer: ?StepObserver,
 
     fn emitTeed(ptr: *anyopaque, event: provider.StreamEvent) anyerror!void {
         const self: *TeeSink = @ptrCast(@alignCast(ptr));
-        self.observer.modelEvent(event);
+        if (self.observer) |obs| obs.modelEvent(event);
         return self.collector.onEvent(event);
     }
 
@@ -148,21 +169,45 @@ const TeeSink = struct {
     }
 };
 
-/// One assistant turn from the provider. Without an observer this IS
-/// `Model.step`; with one, the same collection happens behind a tee. Both paths
-/// discard a partial collector on error, so a canceled stream leaves nothing.
+/// One assistant turn from the provider, retrying transient faults
+/// (`provider.isTransient`) per `step_ctx.retry`. Each attempt collects into a
+/// fresh collector, so a request that dropped mid-stream leaves nothing behind
+/// and the retry cannot duplicate what the failed attempt already streamed; an
+/// observer is told about the retry (and saw the failed attempt's deltas, which
+/// it must now discard). The backoff sleep is a cancellation point like any
+/// other provider I/O. Nothing here touches the ledger: the same request goes
+/// out again unchanged, and only a complete turn is ever returned.
 fn collectTurn(
     alloc: std.mem.Allocator,
     model: Model,
     request: provider.Request,
-    observer: ?StepObserver,
+    step_ctx: StepContext,
 ) !provider.ModelTurn {
-    const obs = observer orelse return model.step(alloc, request);
-    var collector = provider.TurnCollector.init(alloc);
-    defer collector.deinit();
-    var tee: TeeSink = .{ .collector = &collector, .observer = obs };
-    try model.stream(alloc, request, tee.sink());
-    return collector.finish();
+    var attempt: u32 = 0;
+    while (true) {
+        var collector = provider.TurnCollector.init(alloc);
+        defer collector.deinit();
+        var tee: TeeSink = .{ .collector = &collector, .observer = step_ctx.observer };
+        model.stream(alloc, request, tee.sink()) catch |err| {
+            if (!provider.isTransient(err) or attempt >= step_ctx.retry.max_retries) return err;
+            attempt += 1;
+            const notice: RetryNotice = .{
+                .attempt = attempt,
+                .max_retries = step_ctx.retry.max_retries,
+                .delay_ms = step_ctx.retry.backoffMs(attempt),
+                .err = err,
+            };
+            // The observer is the reporting channel when there is one; otherwise
+            // stderr, next to the wire's own diagnostic for the cause.
+            if (step_ctx.observer) |obs| obs.modelRetry(notice) else std.debug.print(
+                "model request failed ({s}); retry {d}/{d} in {d} ms\n",
+                .{ @errorName(err), notice.attempt, notice.max_retries, notice.delay_ms },
+            );
+            try std.Io.sleep(step_ctx.tool_context.environment.io, .fromMilliseconds(@intCast(notice.delay_ms)), .awake);
+            continue;
+        };
+        return collector.finish();
+    }
 }
 
 /// Run exactly one step against `l` from an already-projected `prompt_ir`.
@@ -192,9 +237,10 @@ pub fn runStepWithPrompt(
         // within a session the generation is constant.
         .generation = 0,
         .options = model_options,
-    }, step_ctx.observer) catch |err| switch (err) {
+        .stall_ms = step_ctx.retry.stall_timeout_ms,
+    }, step_ctx) catch |err| switch (err) {
         // Provider-phase cancellation: a complete assistant turn never formed.
-        // `model.step` already discarded and freed the partial collector, so the
+        // `collectTurn` already discarded and freed the partial collector, so the
         // ledger prefix is untouched — no partial assistant / tool_call appended.
         // Usage is what is reliably known: the streaming usage chunk arrives at
         // the very end of the stream, so a mid-stream cancel means 0 (DESIGN §13).
@@ -221,6 +267,10 @@ pub fn runStepWithPrompt(
         // the same fact as "this step cost zero" — so it is left off the line
         // entirely, and old ledgers stay byte-identical.
         .usage = if (turn.usage.isZero()) null else turn.usage,
+        // Recorded even when the turn wrote calls (where the marker batch already
+        // tells the story): the fact belongs to the turn, and a reader should not
+        // have to infer it from the batch that follows.
+        .truncated = truncated,
     } });
     if (turn.calls.len == 0) return .{ .usage = turn.usage, .stop_reason = turn.stop_reason }; // model addressed the user; step complete.
     if (truncated) {
@@ -509,6 +559,93 @@ test "one step runs a batch of two shell calls and appends one result turn" {
     // Ledger owns cloned assistant/tool-result payloads and frees them in deinit.
 }
 
+test "a transient model failure is retried with a fresh collector; a permanent one is not" {
+    const alloc = std.testing.allocator;
+
+    // Streams half a reply, drops the connection twice, then succeeds.
+    const Flaky = struct {
+        failures_left: u32,
+        attempts: u32 = 0,
+        fail_with: anyerror,
+
+        fn name(_: *anyopaque) []const u8 {
+            return "flaky";
+        }
+        fn modelName(_: *anyopaque) []const u8 {
+            return "flaky";
+        }
+        fn capabilities(_: *anyopaque) provider.ProviderCapabilities {
+            return .{};
+        }
+        fn stream(ptr: *anyopaque, _: std.mem.Allocator, _: provider.Request, sink: provider.EventSink) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.attempts += 1;
+            try sink.emit(.started);
+            try sink.emit(.{ .text_delta = "partial " });
+            if (self.failures_left != 0) {
+                self.failures_left -= 1;
+                return self.fail_with;
+            }
+            try sink.emit(.{ .text_delta = "done" });
+            try sink.emit(.{ .done = .end_turn });
+        }
+        const vtable: provider.Model.VTable = .{ .name = name, .modelName = modelName, .capabilities = capabilities, .stream = stream };
+    };
+
+    // Counts retries the loop reports; every other callback is noise here.
+    const Watch = struct {
+        retries: u32 = 0,
+        last_delay_ms: u64 = 0,
+        fn modelEvent(_: *anyopaque, _: provider.StreamEvent) void {}
+        fn modelRetry(ptr: *anyopaque, r: RetryNotice) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.retries += 1;
+            self.last_delay_ms = r.delay_ms;
+        }
+        fn toolBegin(_: *anyopaque, _: ledger.ToolCall) void {}
+        fn toolEnd(_: *anyopaque, _: ledger.ToolCall, _: bool) void {}
+        fn stepEnd(_: *anyopaque, _: []const ledger.Event, _: StepOutcome) void {}
+        const vtable: StepObserver.VTable = .{ .modelEvent = modelEvent, .modelRetry = modelRetry, .toolBegin = toolBegin, .toolEnd = toolEnd, .stepEnd = stepEnd };
+    };
+
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    var lenv = try environment.LocalEnvironment.init(alloc, threaded.io(), .{});
+    defer lenv.deinit();
+    const tools: registry.ToolSetSnapshot = .{ .tools = &.{} };
+
+    var l = ledger.Ledger.init(alloc);
+    defer l.deinit();
+    try l.append(.{ .user_text = "go" });
+
+    var watch = Watch{};
+    var flaky = Flaky{ .failures_left = 2, .fail_with = error.Transport };
+    const ctx: StepContext = .{
+        .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = "." },
+        .scratch_dir = "/tmp",
+        .retry = .{ .max_retries = 3, .initial_backoff_ms = 1, .max_backoff_ms = 2 },
+        .observer = .{ .ptr = &watch, .vtable = &Watch.vtable },
+    };
+    _ = try runStepForTest(alloc, &l, .{ .ptr = &flaky, .vtable = &Flaky.vtable }, tools, ctx);
+    try std.testing.expectEqual(@as(u32, 3), flaky.attempts);
+    try std.testing.expectEqual(@as(u32, 2), watch.retries);
+    try std.testing.expectEqual(@as(u64, 2), watch.last_delay_ms); // 1 → 2, capped
+    // Only the successful attempt's text made it into the ledger.
+    try std.testing.expectEqual(@as(usize, 2), l.len());
+    try std.testing.expectEqualStrings("partial done", l.view()[1].assistant.text);
+
+    // The policy's ceiling: one more failure than retries surfaces the error.
+    var worn = Flaky{ .failures_left = 4, .fail_with = error.ServerError };
+    try std.testing.expectError(error.ServerError, runStepForTest(alloc, &l, .{ .ptr = &worn, .vtable = &Flaky.vtable }, tools, ctx));
+    try std.testing.expectEqual(@as(u32, 4), worn.attempts);
+    try std.testing.expectEqual(@as(usize, 2), l.len());
+
+    // A permanent fault (the request itself is wrong) is not retried at all.
+    var broken = Flaky{ .failures_left = 1, .fail_with = error.ApiError };
+    try std.testing.expectError(error.ApiError, runStepForTest(alloc, &l, .{ .ptr = &broken, .vtable = &Flaky.vtable }, tools, ctx));
+    try std.testing.expectEqual(@as(u32, 1), broken.attempts);
+    try std.testing.expectEqual(@as(usize, 2), l.len());
+}
 
 test "completeInterruptedToolBatch appends unknown results for an assistant tail" {
     const alloc = std.testing.allocator;

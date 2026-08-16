@@ -68,6 +68,16 @@ pub const Event = union(enum) {
         /// event to hang usage on, so its cost is simply not recorded — honest,
         /// and not worth a new event kind.
         usage: ?Usage = null,
+        /// The provider cut this turn off at its output cap (`max_tokens`). The
+        /// one thing about a turn's ending that its SHAPE cannot say: `end_turn`
+        /// and `tool_use` are both readable off `calls`, but a reply truncated
+        /// before it wrote a call is byte-identical to one that finished. Durable
+        /// because the consequence outlives the process that saw it — replaying a
+        /// truncated tail as the last message asks the provider to continue it as
+        /// a prefill, which is rejected outright when thinking is on (DESIGN §4).
+        /// A fact, like `usage`: not projected, false on every line written
+        /// before the field existed.
+        truncated: bool = false,
     },
     /// Exactly ONE user turn carrying every result from a batch. Never split
     /// per-tool — that would be one model round-trip per tool (DESIGN §0.2).
@@ -203,7 +213,7 @@ fn cloneEvent(alloc: std.mem.Allocator, e: Event) !Event {
             errdefer alloc.free(text);
             const calls = try cloneToolCalls(alloc, as.calls);
             errdefer freeToolCalls(alloc, calls);
-            break :blk .{ .assistant = .{ .reasoning = reasoning, .text = text, .calls = calls, .usage = as.usage } };
+            break :blk .{ .assistant = .{ .reasoning = reasoning, .text = text, .calls = calls, .usage = as.usage, .truncated = as.truncated } };
         },
         .tool_results => |results| .{ .tool_results = try cloneToolResults(alloc, results) },
         .capability_note => |note| blk: {
@@ -640,6 +650,12 @@ pub fn encodeEventBody(jw: *std.json.Stringify, e: Event) !void {
                 try jw.objectField("usage");
                 try jw.write(u);
             }
+            // Same discipline: written only when true, so every line that was not
+            // cut off keeps its pre-existing shape byte-for-byte.
+            if (as.truncated) {
+                try jw.objectField("truncated");
+                try jw.write(true);
+            }
         },
         .tool_results => |rs| {
             try jw.write("tool_results");
@@ -686,6 +702,10 @@ pub const WireEvent = struct {
     /// What the step cost (see `Event.assistant.usage`); absent on lines written
     /// before the field existed, and on turns the provider priced at nothing.
     usage: ?Usage = null,
+    /// Whether the reply was cut at its output cap (see `Event.assistant.truncated`);
+    /// absent on lines written before the field existed, and on every turn that
+    /// ended on its own.
+    truncated: bool = false,
     calls: ?[]const WireCall = null,
     results: ?[]const ToolResultEntry = null,
     id: ?[]const u8 = null,
@@ -722,6 +742,7 @@ pub fn toEvent(a: std.mem.Allocator, w: WireEvent) !Event {
             .text = w.text orelse return error.CorruptLedger,
             .calls = calls,
             .usage = w.usage,
+            .truncated = w.truncated,
         } };
     }
     if (std.mem.eql(u8, w.kind, "tool_results")) {
@@ -867,6 +888,7 @@ fn expectEventsEqual(a: []const Event, b: []const Event) !void {
                 try std.testing.expectEqualStrings(as.reasoning, y.assistant.reasoning);
                 try std.testing.expectEqualStrings(as.text, y.assistant.text);
                 try std.testing.expectEqual(as.usage, y.assistant.usage);
+                try std.testing.expectEqual(as.truncated, y.assistant.truncated);
                 try std.testing.expectEqual(as.calls.len, y.assistant.calls.len);
                 for (as.calls, y.assistant.calls) |c, d| {
                     try std.testing.expectEqualStrings(c.id, d.id);
@@ -1016,6 +1038,35 @@ test "assistant usage round-trips as a fact on the line, and legacy lines read a
     const legacy = try parseEventLine(alloc, "{\"seq\":1,\"kind\":\"assistant\",\"text\":\"old\",\"calls\":[]}");
     defer legacy.deinit();
     try std.testing.expect((try toEvent(legacy.arena.allocator(), legacy.value)).assistant.usage == null);
+}
+
+test "a truncated reply says so on its line; every other line keeps its shape" {
+    const alloc = std.testing.allocator;
+
+    // The whole point of the field: this event and a finished one differ in
+    // nothing else. `calls` is empty in both, so the shape cannot tell them apart.
+    const cut: Event = .{ .assistant = .{ .text = "half a sen", .calls = &.{}, .truncated = true } };
+    const line = try encodeEventLine(alloc, cut, 1);
+    defer alloc.free(line);
+    try std.testing.expectEqualStrings(
+        "{\"seq\":1,\"kind\":\"assistant\",\"text\":\"half a sen\",\"calls\":[],\"truncated\":true}\n",
+        line,
+    );
+    const parsed = try parseEventLine(alloc, line);
+    defer parsed.deinit();
+    try expectEventsEqual(&.{cut}, &.{try toEvent(parsed.arena.allocator(), parsed.value)});
+
+    // A reply that ended on its own is written exactly as it was before the field
+    // existed — no `"truncated":false` on the overwhelming majority of lines.
+    const whole = try encodeEventLine(alloc, .{ .assistant = .{ .text = "half a sen", .calls = &.{} } }, 1);
+    defer alloc.free(whole);
+    try std.testing.expectEqualStrings("{\"seq\":1,\"kind\":\"assistant\",\"text\":\"half a sen\",\"calls\":[]}\n", whole);
+
+    // And a line written before the field existed reads back as "ended on its
+    // own", which is what every such line meant.
+    const legacy = try parseEventLine(alloc, "{\"seq\":1,\"kind\":\"assistant\",\"text\":\"old\",\"calls\":[]}");
+    defer legacy.deinit();
+    try std.testing.expect(!(try toEvent(legacy.arena.allocator(), legacy.value)).assistant.truncated);
 }
 
 test "durable create then open replays a block-identical ledger with monotonic seq" {

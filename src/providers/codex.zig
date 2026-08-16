@@ -116,24 +116,25 @@ pub const CodexProvider = struct {
         // One retry, and only for 401: the access token is short-lived, so an
         // expired one is routine rather than a fault. A 401 arrives before any
         // SSE data, so the retry cannot duplicate emitted events.
-        self.send(alloc, body, &state) catch |err| switch (err) {
+        self.send(alloc, body, &state, request.stall_ms) catch |err| switch (err) {
             error.Unauthorized => {
-                try self.refresh(alloc);
-                try self.send(alloc, body, &state);
+                try self.refresh(alloc, request.stall_ms);
+                try self.send(alloc, body, &state, request.stall_ms);
             },
             else => return err,
         };
 
-        if (!state.done) return error.CodexStreamEndedEarly;
+        if (!state.done) return error.StreamEndedEarly;
     }
 
-    fn send(self: *CodexProvider, alloc: std.mem.Allocator, body: []const u8, state: *StreamState) !void {
+    fn send(self: *CodexProvider, alloc: std.mem.Allocator, body: []const u8, state: *StreamState, stall_ms: u64) !void {
         const auth = try std.fmt.allocPrint(alloc, "Bearer {s}", .{self.auth.access_token});
         defer alloc.free(auth);
         return wire.postSse(&self.client, alloc, .{
             .url = backend_url,
             .body = body,
             .authorization = auth,
+            .stall_ms = stall_ms,
             .extra_headers = &.{
                 .{ .name = "chatgpt-account-id", .value = self.auth.account_id },
                 .{ .name = "OpenAI-Beta", .value = "responses=experimental" },
@@ -146,7 +147,7 @@ pub const CodexProvider = struct {
 
     /// Exchange the refresh token for fresh credentials and write them back to
     /// auth.json, exactly as the Codex CLI does, so the two stay interchangeable.
-    fn refresh(self: *CodexProvider, alloc: std.mem.Allocator) !void {
+    fn refresh(self: *CodexProvider, alloc: std.mem.Allocator, stall_ms: u64) !void {
         if (self.auth.refresh_token.len == 0) return error.MissingCredential;
         // `{f}` on a byte slice emits a complete JSON string, quotes included.
         const body = try std.fmt.allocPrint(alloc,
@@ -154,7 +155,7 @@ pub const CodexProvider = struct {
         , .{ client_id, std.json.fmt(self.auth.refresh_token, .{}) });
         defer alloc.free(body);
 
-        const response = try wire.postJson(&self.client, alloc, .{ .url = token_url, .body = body });
+        const response = try wire.postJson(&self.client, alloc, .{ .url = token_url, .body = body, .stall_ms = stall_ms });
         defer alloc.free(response);
         const parsed = try std.json.parseFromSlice(std.json.Value, alloc, response, .{});
         defer parsed.deinit();

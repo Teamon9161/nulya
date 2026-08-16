@@ -776,7 +776,8 @@ fn extDeactivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
 /// `(shadowed)`: only the first active copy is ever used (`Roots.listActive`),
 /// and silently hiding the duplicate is how a stale user-level copy becomes a
 /// mystery. A directory without `current` shadows nothing and is listed as
-/// `(inactive)` for its root alone.
+/// `(inactive)` for its root alone — unless it holds no built version either, in
+/// which case it is a bare writer lease, not an extension, and is skipped.
 fn extList(alloc: std.mem.Allocator, io: std.Io) !u8 {
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     var search = try RootSearch.open(alloc, io, try cwdRealPath(io, &cwd_buf));
@@ -793,11 +794,29 @@ fn extList(alloc: std.mem.Allocator, io: std.Io) !u8 {
         var it = entry.dir.iterate();
         while (try it.next(io)) |dir_entry| {
             if (dir_entry.kind != .directory) continue;
-            const active = (store.Store.init(io, entry.dir).activeVersion(alloc, dir_entry.name) catch |err| switch (err) {
+            const st = store.Store.init(io, entry.dir);
+            const active = (st.activeVersion(alloc, dir_entry.name) catch |err| switch (err) {
                 error.InvalidId => continue,
                 else => return err,
             });
             defer if (active) |a| alloc.free(a);
+            // A directory with neither an active pointer nor a built version is
+            // not an extension — it is where `<id>/.lock` lives. Both `ext build`
+            // and `ext activate` take that lease before they validate anything, so
+            // a typo'd id or a manifest that failed to parse leaves an empty shell
+            // behind; listing it invents an extension nobody made. A directory
+            // holding versions is real whether or not one is active (a draft, a
+            // deactivated copy), and so is one with a `current` pointer even if
+            // its versions are gone — that one is broken, and saying so beats
+            // hiding it.
+            if (active == null) {
+                const versions = try st.listVersions(alloc, dir_entry.name);
+                defer {
+                    for (versions) |v| alloc.free(v);
+                    alloc.free(versions);
+                }
+                if (versions.len == 0) continue;
+            }
             const shadowed = active != null and sliceHasString(seen_active.items, dir_entry.name);
             if (active != null and !shadowed) try seen_active.append(alloc, try alloc.dupe(u8, dir_entry.name));
             printed += 1;
@@ -1480,6 +1499,7 @@ const StepStream = struct {
 
     const vtable: loop.StepObserver.VTable = .{
         .modelEvent = onModelEvent,
+        .modelRetry = onModelRetry,
         .toolBegin = onToolBegin,
         .toolEnd = onToolEnd,
         .stepEnd = onStepEnd,
@@ -1491,6 +1511,11 @@ const StepStream = struct {
         // something to render; `thinking_delta` is the display channel (§2.2).
         if (event == .reasoning_item) return;
         self.modelLine(event) catch |e| self.note(e);
+    }
+
+    fn onModelRetry(ptr: *anyopaque, retry: loop.RetryNotice) void {
+        const self: *StepStream = @ptrCast(@alignCast(ptr));
+        self.retryLine(retry) catch |e| self.note(e);
     }
 
     fn onToolBegin(ptr: *anyopaque, call: ledger.ToolCall) void {
@@ -1575,6 +1600,27 @@ const StepStream = struct {
                 try jw.write(@tagName(stop));
             },
         }
+        try jw.endObject();
+        try self.endLine();
+    }
+
+    /// The model request failed transiently; the loop is about to send it again.
+    /// A reader drops whatever this turn streamed so far — the retry starts over.
+    fn retryLine(self: *StepStream, retry: loop.RetryNotice) !void {
+        var jw: std.json.Stringify = .{ .writer = self.out };
+        try jw.beginObject();
+        try jw.objectField("stream");
+        try jw.write("model");
+        try jw.objectField("event");
+        try jw.write("retry");
+        try jw.objectField("attempt");
+        try jw.write(retry.attempt);
+        try jw.objectField("max_retries");
+        try jw.write(retry.max_retries);
+        try jw.objectField("delay_ms");
+        try jw.write(retry.delay_ms);
+        try jw.objectField("error");
+        try jw.write(@errorName(retry.err));
         try jw.endObject();
         try self.endLine();
     }
@@ -1777,6 +1823,7 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         .step_ctx = .{
             .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd_path },
             .scratch_dir = launch.scratch_dir,
+            .retry = cfg.provider.retry,
             .observer = if (stream) |s| s.observer() else null,
         },
         .model_options = .{ .effort = effort },
@@ -1792,6 +1839,12 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         // Whatever this run did append before it faulted is still fact; report
         // those lines, then the error.
         if (stream) |s| s.flushEvents(sess.l.view()) catch {};
+        // Not a fault but a state: the last reply was cut off, and stepping it
+        // again would send it back as a prefill (DESIGN §4). Say what to do
+        // instead of naming an error code the caller has to look up.
+        if (err == error.TruncatedTurnNeedsInput) {
+            return stepFail(alloc, io, stream, "the last reply was cut off at its output cap; append a message before stepping again", .{});
+        }
         return stepFail(alloc, io, stream, "session step failed: {s}", .{@errorName(err)});
     };
 

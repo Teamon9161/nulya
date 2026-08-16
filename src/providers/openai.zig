@@ -111,6 +111,7 @@ pub const OpenAiProvider = struct {
             .url = url,
             .body = body,
             .authorization = auth,
+            .stall_ms = request.stall_ms,
         }, &state, SseState.onData);
 
         // `[DONE]` already emitted `done` and stopped the loop; reaching here
@@ -119,7 +120,7 @@ pub const OpenAiProvider = struct {
             try state.flushReasoning();
             try sink.emit(.{ .done = reason });
         } else {
-            return error.OpenAiStreamEndedEarly;
+            return error.StreamEndedEarly;
         }
     }
 

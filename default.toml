@@ -17,6 +17,24 @@
 [provider]
 active_profile = "openai"
 
+# A model request that fails transiently — the connection itself (connect, TLS,
+# reset, body cut off), or a 429 / 5xx — is sent again unchanged, up to
+# `max_retries` times, waiting `initial_backoff_ms · 2^(n-1)` (capped at
+# `max_backoff_ms`) before the n-th retry. A 4xx, a bad credential or a
+# malformed reply is not retried. One policy for every profile.
+#
+# `stall_timeout_ms` bounds a server that accepts the request and then sends
+# nothing: after that much TRUE silence (any line, keepalives included, resets
+# it) the request is canceled and retried as a transport fault, instead of the
+# step hanging until the OS gives up on the socket. It is deliberately generous
+# — a reasoning model may legitimately say nothing for a while, and cutting a
+# live request only re-bills the prompt and waits again. 0 disables.
+[provider.retry]
+max_retries = 5
+initial_backoff_ms = 1000
+max_backoff_ms = 30000
+stall_timeout_ms = 120000
+
 [[provider.profiles]]
 name = "openai"
 kind = "openai"

@@ -22,11 +22,13 @@ const store = @import("extension/store.zig");
 /// (DESIGN §4, §14). A driver can lower the budget per call, never raise it.
 pub const max_steps_ceiling: usize = 50;
 
-/// Consecutive `max_tokens` steps before `run` stops on its own. One truncated
-/// reply is ordinary — the model wrote long, the marker result tells it so, and
-/// the retry usually fits. Two in a row means the cap is genuinely too small for
-/// what is being asked, which no retry fixes and every retry bills a full prefix
-/// for; the driver (and the person) has to hear about it.
+/// Consecutive RETRIABLE `max_tokens` steps before `run` stops on its own. Only a
+/// truncation that carried tool calls is retriable: it ends in a marker batch, so
+/// stepping again shows the model what happened and one retry usually fits. A
+/// text-only truncation is not retried at all — see `run` — so this bound is never
+/// reached through those. Two retries in a row mean the cap is genuinely too small
+/// for what is being asked, which no retry fixes and every retry bills a full
+/// prefix for; the driver (and the person) has to hear about it.
 pub const max_truncated_streak: usize = 2;
 
 /// Where a durable session's file and its cross-process siblings (`<id>.inbox/`,
@@ -209,6 +211,11 @@ pub const AgentSession = struct {
     /// canceled and completed steps alike, since the ledger is left in a legal
     /// state either way. A canceled step does not poison the session — the next
     /// `step()` runs normally.
+    ///
+    /// Fails with `error.TruncatedTurnNeedsInput` when the ledger ends on a reply
+    /// the provider cut off (`lastAssistantTruncated`): stepping it would ask the
+    /// provider to continue its own message as a prefill. Nothing is appended, so
+    /// the session is fine — it wants a message, not a retry.
     pub fn step(self: *AgentSession) !loop.StepOutcome {
         const outcome = try self.stepInner();
         // The step boundary is the one place where the ledger is guaranteed
@@ -232,6 +239,10 @@ pub const AgentSession = struct {
             error.Canceled => return .{ .status = .canceled },
             else => return err,
         };
+        // Checked AFTER prepareStep: a drained inbox event is exactly the new
+        // input that makes the ledger steppable again, so a `session append` racing
+        // with this step must be seen first.
+        if (self.lastAssistantTruncated()) return error.TruncatedTurnNeedsInput;
         const prompt_ir = try prompt.projectWithSystem(self.alloc, self.composition.system_prompts.blocks, self.l.view());
         defer prompt_ir.deinit(self.alloc);
         // Ledger position before this step's turns: everything appended from
@@ -305,6 +316,22 @@ pub const AgentSession = struct {
     /// driver's cue that "the assistant is done" is not what happened.
     pub fn lastStopReason(self: *const AgentSession) provider.StopReason {
         return self.last_stop_reason;
+    }
+
+    /// Whether the ledger ends on a reply the provider cut at its output cap. That
+    /// tail is not steppable: projected as-is it becomes a trailing assistant
+    /// message, which the provider reads as a prefill to continue and rejects
+    /// outright when thinking is on (DESIGN §4). In-process, `run` never reaches
+    /// that state — it stops on the truncated step. Across processes the ledger is
+    /// all there is, so the same rule is re-derived here from the durable fact
+    /// rather than from `last_stop_reason`, which resume cannot know. Appending
+    /// anything (a user message, a drained inbox event) clears it.
+    pub fn lastAssistantTruncated(self: *const AgentSession) bool {
+        if (self.l.len() == 0) return false;
+        return switch (self.l.view()[self.l.len() - 1]) {
+            .assistant => |as| as.truncated,
+            else => false,
+        };
     }
 
     /// Whether the ledger's last event is an assistant turn with no tool calls.
@@ -1209,6 +1236,116 @@ test "a reply cut by max_tokens before it wrote any call stops the run, unlike o
     try std.testing.expect(sess.lastAssistantDone());
     // user + the truncated assistant; no calls, so no batch.
     try std.testing.expectEqual(@as(usize, 2), sess.l.len());
+}
+
+test "a truncated tail refuses to step in the next process until a message arrives" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try sessionTmpCwd(alloc, io, tmp);
+    defer alloc.free(cwd);
+    try tmp.dir.createDirPath(io, ".nulya" ++ std.fs.path.sep_str ++ "sessions");
+    const session_path = ".nulya" ++ std.fs.path.sep_str ++ "sessions" ++ std.fs.path.sep_str ++ "s.jsonl";
+
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+
+    // Process 1: one step, cut at the output cap before it wrote any call. `run`
+    // stops there, and the fact goes to disk with the turn.
+    {
+        const TruncatingModel = struct {
+            fn name(ptr: *anyopaque) []const u8 {
+                _ = ptr;
+                return "cut";
+            }
+            fn modelName(ptr: *anyopaque) []const u8 {
+                _ = ptr;
+                return "cut";
+            }
+            fn capabilities(ptr: *anyopaque) provider.ProviderCapabilities {
+                _ = ptr;
+                return .{};
+            }
+            fn stream(ptr: *anyopaque, a: std.mem.Allocator, request: provider.Request, sink: provider.EventSink) anyerror!void {
+                _ = ptr;
+                _ = a;
+                _ = request;
+                try sink.emit(.started);
+                try sink.emit(.{ .text_delta = "half a sen" });
+                try sink.emit(.{ .done = .max_tokens });
+            }
+            const vtable: provider.Model.VTable = .{ .name = name, .modelName = modelName, .capabilities = capabilities, .stream = stream };
+        };
+        var model_impl = TruncatingModel{};
+        var sess = try AgentSession.createDurable(alloc, .{
+            .model = .{ .ptr = &model_impl, .vtable = &TruncatingModel.vtable },
+            .step_ctx = .{
+                .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd },
+                .scratch_dir = "/tmp",
+            },
+            .extension_roots = &.{"nulya-absent-extensions-root"},
+        }, .{ .workspace = tmp.dir, .session_path = session_path, .session_id = "s" });
+        defer sess.deinit();
+        try sess.appendUser("go");
+        try std.testing.expectEqual(@as(usize, 1), try sess.run(5));
+    }
+
+    // Process 2 sees only the ledger — `last_stop_reason` died with process 1.
+    const RefusingModel = struct {
+        fn name(ptr: *anyopaque) []const u8 {
+            _ = ptr;
+            return "refusing";
+        }
+        fn modelName(ptr: *anyopaque) []const u8 {
+            _ = ptr;
+            return "refusing";
+        }
+        fn capabilities(ptr: *anyopaque) provider.ProviderCapabilities {
+            _ = ptr;
+            return .{};
+        }
+        fn stream(ptr: *anyopaque, a: std.mem.Allocator, request: provider.Request, sink: provider.EventSink) anyerror!void {
+            _ = a;
+            const self: *usize = @ptrCast(@alignCast(ptr));
+            self.* += 1;
+            // The tail this step was handed must never end on the assistant: that
+            // is the prefill the provider rejects with thinking on.
+            const blocks = request.prompt_ir.stable_blocks;
+            if (blocks.len != 0 and blocks[blocks.len - 1].kind == .assistant_text) return error.TestUnexpectedResult;
+            try sink.emit(.started);
+            try sink.emit(.{ .text_delta = "the rest, from a fresh message" });
+            try sink.emit(.{ .done = .end_turn });
+        }
+        const vtable: provider.Model.VTable = .{ .name = name, .modelName = modelName, .capabilities = capabilities, .stream = stream };
+    };
+    var calls: usize = 0;
+    var sess = try AgentSession.openDurable(alloc, .{
+        .model = .{ .ptr = &calls, .vtable = &RefusingModel.vtable },
+        .step_ctx = .{
+            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd },
+            .scratch_dir = "/tmp",
+        },
+        .extension_roots = &.{"nulya-absent-extensions-root"},
+    }, .{ .workspace = tmp.dir, .session_path = session_path });
+    defer sess.deinit();
+
+    try std.testing.expect(sess.lastAssistantTruncated());
+    // The refusal is the whole point: without it this step sends the truncated
+    // assistant turn back as a prefill for the model to continue.
+    try std.testing.expectError(error.TruncatedTurnNeedsInput, sess.step());
+    try std.testing.expectEqual(@as(usize, 0), calls); // provider never called
+    try std.testing.expectEqual(@as(usize, 2), sess.l.len()); // and nothing appended
+
+    // A message is what the session wants, not a retry: it clears the tail and
+    // the session steps normally again.
+    try sess.appendUser("continue please");
+    const outcome = try sess.step();
+    try std.testing.expectEqual(loop.StepStatus.completed, outcome.status);
+    try std.testing.expectEqual(@as(usize, 1), calls);
+    try std.testing.expect(!sess.lastAssistantTruncated());
 }
 
 test "a truncated turn's unexecuted calls are not recorded as tool usage" {

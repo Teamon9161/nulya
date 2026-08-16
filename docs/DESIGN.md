@@ -125,12 +125,12 @@ UI / trajectory / metrics 是 ledger 的投影，不持久化 mutable 状态。*
 ```jsonl
 {"kind":"header","v":1,"session":"s-…","parent":{"session":"s-…","seq":41}|null,"model":"openai","model_identity":{"provider":"openai","model":"gpt-4o-mini","base_url":"https://…","api_key_env":"OPENAI_API_KEY"},"created":"…","composition":{"active":[{"id":"web.search","version":"v-…"}],"native_tools":["ext:web.search/web_search"]}}
 {"seq":1,"origin":"msg-….json","kind":"user_text","text":"…"}
-{"seq":2,"kind":"assistant","reasoning":"[{\"type\":\"thinking\",…}]","text":"…","calls":[{"id":"…","tool":"…","args":"…"}],"usage":{"input_tokens":1200,"output_tokens":80,"cache_read_tokens":1100,"cache_write_tokens":0}}
+{"seq":2,"kind":"assistant","reasoning":"[{\"type\":\"thinking\",…}]","text":"…","calls":[{"id":"…","tool":"…","args":"…"}],"usage":{"input_tokens":1200,"output_tokens":80,"cache_read_tokens":1100,"cache_write_tokens":0},"truncated":true}
 {"seq":3,"kind":"tool_results","results":[{"call_id":"…","ok":true,"output":"…","spill_path":null}]}
 {"seq":4,"origin":"note-….json","kind":"capability_note","id":"…","version":"…","text":"…"}
 ```
 
-（`origin` 只出现在经 inbox 排干进来的事件行上，是投递去重列，绝不投影给模型；见"单写者"条。`reasoning` 只在该 turn 有 reasoning 时出现，值是 provider 数组转义成的一个 JSON 字符串——ledger 只存不解析；`usage` 只在 provider 报了成本时出现，两者都不投影。）
+（`origin` 只出现在经 inbox 排干进来的事件行上，是投递去重列，绝不投影给模型；见"单写者"条。`reasoning` 只在该 turn 有 reasoning 时出现，值是 provider 数组转义成的一个 JSON 字符串——ledger 只存不解析；`usage` 只在 provider 报了成本时出现；`truncated` 只在该 turn 被 `max_tokens` 切断时出现（`true`，见 §4）。三者都不投影。）
 
 - **一个文件 = 一个 generation = 一个 cache scope。** 文件只 append，所以 PromptIR 的 stable-block 前缀不变量（§1）成了文件系统性质。没有会 bump generation 的事件（§11）。
 - **header 的 JSON 形状就是 `ledger.Header` 结构体**（`std.json` 类型化编解码，`OwnedHeader = std.json.Parsed(Header)`）；读端忽略未知字段，所以新写者多出的字段不破坏旧读者。事件行保持平铺的 `kind` 形状（driver 读起来方便），解码经 `WireEvent`。
@@ -147,7 +147,7 @@ UI / trajectory / metrics 是 ledger 的投影，不持久化 mutable 状态。*
 ```
 freeze ToolSetSnapshot（本 step 不可变）
   ↓
-model.step(PromptIR, tool_defs)  →  assistant turn（可能含多个 tool_use）
+collectTurn(PromptIR, tool_defs)  →  assistant turn（可能含多个 tool_use）；瞬态线路故障按 §13 原样重发，ledger 不动
   ↓ append assistant
 串行执行 A, B, C（当前 assert max_concurrent == 1）
   ↓
@@ -169,7 +169,9 @@ model.step(PromptIR, tool_defs)  →  assistant turn（可能含多个 tool_use�
 - `prepareStep` 的顺序固定：补齐残尾 → 消费 cancel 标记 → 排干 inbox（§3.4）。
 - `AgentSession.run(max_steps)`：预算 = `min(max_steps, session.max_steps_ceiling)`（天花板 50），由 kernel 强制；turn 结束、预算耗尽、任一 step 取消、或**连续 `max_truncated_streak`（2）个 step 被 `max_tokens` 截断**即停。
 
-**Truncation（`stop_reason == max_tokens`，模型这一步被输出上限切断）：** 与 cancellation 正交——那是宿主控制，这是模型停止原因（`StepOutcome.stop_reason`）。被截断的回复**不是一个完成的 turn**：它说了的文本与 reasoning 是事实、照记；它开了头的 call 不是模型的本意，参数还可能是半截 JSON——原样回放进 provider 的 `input`（anthropic 用 `writeRaw`）会让这场 session 之后每一步都 400。所以：calls **照记但参数保证可回放**（不是完整 JSON 值的换成 `{}`），**一个都不执行**，用一条 marker 批次关掉（`not executed: the reply hit its output cap (max_tokens) …`，文本同时告诉模型发生了什么、怎么绕过——写短、或一步一步来），返回 `stop_reason = .max_tokens`。没有 call 的截断回复只是 text-only assistant，`run` 因 `lastAssistantDone` 停下，driver 见 `stopped: max_tokens`（TUI 提示"发一条消息继续"——裸再 step 会让 assistant 结尾成 prefill，thinking 开着时 provider 拒绝）。有 call 的截断回复 `run` 会再走一步让模型看到 marker 重试；连续两次即停，避免装不下上限的东西反复重试、每次计费整个前缀。（tcode 同一问题的做法：keep + 关闭 dangling call + 追加一条 note + 最多重试两次；这里 note 的内容放进 marker result 里，不给 kernel 加"kernel 对模型说话"的事件种类。）内核默认不设 `max_output_tokens`（anthropic 必填故给 32k），调大上限是 config / provider 层的事。
+**Truncation（`stop_reason == max_tokens`，模型这一步被输出上限切断）：** 与 cancellation 正交——那是宿主控制，这是模型停止原因（`StepOutcome.stop_reason`）。被截断的回复**不是一个完成的 turn**：它说了的文本与 reasoning 是事实、照记；它开了头的 call 不是模型的本意，参数还可能是半截 JSON——原样回放进 provider 的 `input`（anthropic 用 `writeRaw`）会让这场 session 之后每一步都 400。所以：calls **照记但参数保证可回放**（不是完整 JSON 值的换成 `{}`），**一个都不执行**，用一条 marker 批次关掉（`not executed: the reply hit its output cap (max_tokens) …`，文本同时告诉模型发生了什么、怎么绕过——写短、或一步一步来），返回 `stop_reason = .max_tokens`。没有 call 的截断回复只是 text-only assistant，`run` 因 `lastAssistantDone` 停下，driver 见 `stopped: max_tokens`（TUI 提示"发一条消息继续"——裸再 step 会让 assistant 结尾成 prefill，thinking 开着时 provider 拒绝）。有 call 的截断回复 `run` 会再走一步让模型看到 marker 重试；连续两次即停（`max_truncated_streak`：**只有可重试的、带 call 的截断走得到这个上限**，text-only 那种当场就停），避免装不下上限的东西反复重试、每次计费整个前缀。（tcode 同一问题的做法：keep + 关闭 dangling call + 追加一条 note + 最多重试两次；这里 note 的内容放进 marker result 里，不给 kernel 加"kernel 对模型说话"的事件种类。）内核默认不设 `max_output_tokens`（anthropic 必填故给 32k），调大上限是 config / provider 层的事。
+
+**截断是落盘的事实，不只是运行时的：** assistant 事件带 `truncated: bool = false`（`ledger.Event.assistant`，与 `usage` 同地位——不投影、只在 `true` 时写进行、老行读回 `false`）。理由不是 provenance 而是**上面那条保护跨不过进程边界**：`run` 是在**走完一步之后**才看 `lastAssistantDone`，所以第二次 `nulya session step <id>`（没有新消息）会无条件先走一步，把那条 assistant turn 当 prefill 发出去——正是这里要躲的 400。进程 2 手上只有 ledger，`last_stop_reason` 随进程 1 一起没了，而一条被切断的 text-only 回复与正常 `end_turn` 逐字节相同：`calls` 空、shape 一样。所以 `AgentSession.step` 在 `prepareStep` **之后**（新排干的 inbox 事件正是让它重新可 step 的输入）查 `lastAssistantTruncated()`，是就以 `error.TruncatedTurnNeedsInput` 失败、什么都不 append；`session step` 把它翻译成 "the last reply was cut off at its output cap; append a message before stepping again" 并非零退出。**这不是新的 kernel policy**，是让 `run` 里本来就有的那个判断活过进程边界；追加任何东西（用户消息、排干的 inbox 事件）就自然解除。
 
 不变量：**一条 assistant tool-call batch ↔ 恰好一条匹配的 tool_results batch。** `session.recordCompletedToolStats` 直接按这个形状读 suffix 并 assert。**assistant 事件永远可回放**：`calls[].args_json` 是完整 JSON 值。
 
@@ -413,7 +415,7 @@ user 层与 workspace 的 `.nulya/` 同形、每个平台一个好找的位置�
 
 标量 set 即胜，列表按 key 合并。project 层**可以更严不能更松**：可 pin 工具、选 profile、调严 policy、调小 K；**不可**关 policy hook、把 backend 从 sandbox 降级 local、注入 `api_key_env` 名字外泄 host env（单测覆盖）。这与 §9 的 `extension_permissions ⊆ session_authority` 是同一个不变量的两面：checkout 一个 repo 不该能拓宽机器权限。
 
-承载：`provider.profiles[]{name, kind=openai|anthropic|codex|scripted, model, models[]?, base_url, api_key_env, api_key?, effort?}` · `models[]{id, label, efforts[], default_effort?, context_window?}` · `registry{max_tools, pinned_native_tools, weights{uses_recent, uses_total, last_used, success_rate}}` · `policy.hook`（解析、未消费）· `environment{backend, shell}` · `compaction{…}`（解析、未消费）· `extensions.paths`（**已被消费**：§7.2 的第三档 store root，**只认 trusted 层**——project 层写了直接忽略，单测覆盖）。`default.toml` 自带 `openai` / `anthropic` / `codex` / `deepseek` / `deepseek-anthropic` / `scripted` 六个 profile 与它们列出的每个 model id 的目录条目。
+承载：`provider.profiles[]{name, kind=openai|anthropic|codex|scripted, model, models[]?, base_url, api_key_env, api_key?, effort?}` · `provider.retry{max_retries, initial_backoff_ms, max_backoff_ms, stall_timeout_ms}`（§13 的重试策略与 stall watchdog；描述的是线路不是模型，所以全 profile 一份、只认 trusted 层）· `models[]{id, label, efforts[], default_effort?, context_window?}` · `registry{max_tools, pinned_native_tools, weights{uses_recent, uses_total, last_used, success_rate}}` · `policy.hook`（解析、未消费）· `environment{backend, shell}` · `compaction{…}`（解析、未消费）· `extensions.paths`（**已被消费**：§7.2 的第三档 store root，**只认 trusted 层**——project 层写了直接忽略，单测覆盖）。`default.toml` 自带 `openai` / `anthropic` / `codex` / `deepseek` / `deepseek-anthropic` / `scripted` 六个 profile 与它们列出的每个 model id 的目录条目。
 
 **两张表描述模型。** profile 说**怎么连**（kind / base_url / 哪个 env 放 key）和**它服务哪些 model id**（`model` 是默认、`models[]` 是可选列表；`ProviderProfile.defaultModel()`：`model` 非空取它，否则 `models[0]`，否则 provider 内置默认）；`[[models]]` 目录说一个 id **是什么**（label、effort 档位、context window），一个 id 不管经几个端点都只写一次。目录是纯描述：kernel 不读它；`launch` / `cli` 用它给 session 默认 effort（`Config.defaultEffort(profile, model_id)` = profile.effort ?? catalog.default_effort ?? 无），`nulya config show` 把它投影给选择器。`[[models]]` 按 `id` 合并、只认 trusted 层——project 层不能改一个 model id 的含义或让 session 静默换 effort。
 
@@ -456,7 +458,7 @@ user 层与 workspace 的 `.nulya/` 同形、每个平台一个好找的位置�
 
 ```
 Model { ptr, vtable { name, modelName, capabilities, stream(request, sink) } }
-Request { prompt_ir, tools, generation, options{max_output_tokens?, effort?} }
+Request { prompt_ir, tools, generation, options{max_output_tokens?, effort?}, stall_ms }
 StreamEvent: started | text_delta | thinking_delta | reasoning_item | tool_use_start | tool_use_input_delta | usage | done(StopReason)
 TurnCollector → ModelTurn { reasoning, text, calls, usage, stop_reason }
 ProviderCapabilities { parallel_tool_calls, deferred_tools, explicit_cache_breakpoints, cached_token_metrics, thinking_replay, vision, tool_result_images }
@@ -476,6 +478,10 @@ ProviderCapabilities { parallel_tool_calls, deferred_tools, explicit_cache_break
 | `scripted` | 无 | 无 | demo / 测试用的确定性 stand-in |
 
 **共享层 `providers/wire.zig`。** 三个真实 provider 都是「一次流式 HTTPS POST，body 是 SSE」，真正共有的东西收在这里：PromptIR 的 `tool_call` / `tool_result` 块解码、JSON 标量读取、`postSse` / `postJson`。SSE 行用可增长缓冲累积（Codex 的 `response.completed` 一行就能装下整个 response 对象），`event:` 行一律忽略——三种方言都把事件名也写在 payload 里。各 provider 文件只剩自己的 wire shape。
+
+**瞬态故障与重试（`provider.RetryPolicy` / `isTransient`，`loop.collectTurn`）。** 分工与 tcode 相同：**provider 每次 `stream` 只做一次尝试**并把失败归类，**loop 拥有唯一的重试循环**——连接阶段失败和流中途断掉走同一条路、同一套退避，每次重试对 observer 可见。归类在 wire 出口做：线路本身的任何故障（connect / TLS / 发送 / 收头 / body 读到一半断）由 `wire.transport` 折成一个 `error.Transport`（具体原因打到 stderr），HTTP 状态分成 `Unauthorized`（401，codex 自己 refresh 一次）/ `RateLimited`（429）/ `ServerError`（5xx，含 anthropic 529；流中途到的 `overloaded_error` 事件也算）/ `ApiError`（其余 4xx——请求本身错，重发无用），body 在终结事件之前结束是 `StreamEndedEarly`。`isTransient` = `Transport | StreamEndedEarly | RateLimited | ServerError`，其余（4xx、credential、畸形 payload、`Canceled`、OOM）当场失败。`collectTurn` 每次尝试**新建一个 `TurnCollector`**：中途断掉的尝试什么都不留下，重试也不可能重复已经流出去的事件；observer 会看到失败那次的 delta，随后收到 `modelRetry`（`RetryNotice{attempt, max_retries, delay_ms, err}`），它得自己丢掉这一轮已显示的内容。退避 `initial · 2^(n-1)`、封顶 `max`（默认 5 次、1s、30s，`config.provider.retry`，经 `StepContext.retry` 传入），睡在 `std.Io.sleep` 上所以取消照样打得断。整个循环**不碰 ledger**：同一个 request 原样再发，只有完整的 turn 才返回——这不是智能（没有任何 model-visible 的东西因它改变），只是让 loop 活过线路的抖动。没有 observer 时重试行打到 stderr（与 wire 的原因诊断挨着）。
+
+**Stall watchdog（`wire.Watched`，`RetryPolicy.stall_timeout_ms`，默认 120s）。** 服务器接了连接却一个字节都不回，`std.http` 的读会一直阻塞到 OS 放弃 socket（可以是几十分钟），而 `<id>.cancel` 只在 step 边界消费、打不断它——所以每次 HTTP 交换跑在自己的任务里，旁边一个 watchdog 任务盯着 `Heartbeat`：**任何一行**（响应头、SSE keepalive、我们不解码的事件）都算心跳，静默超过预算就 `Select` 胜出、cancel 交换任务（`std.Io` 的取消打得断阻塞读：POSIX 用信号，Windows 用 `NtCancelIoFileEx`——所以不能用 `SO_RCVTIMEO`，Threaded 在 Windows 走 AFD overlapped）、报 `Transport`（原因 `Stalled`）→ 走上面的重试。度量的是**字节级静默**而不是"首 token 必须 N 秒内到"：tcode 那个 60s connect timeout 在 Codex 上常被慢首字节误伤，而真正的死连接靠字节级也抓得到；120s 是折中——它只防"挂半小时"，不追求秒级发现（切断一个活着的请求只是重新计费一遍 prompt 再等一遍）。io 给不出两个并发单元时交换直接裸跑（没有假 stall，只是没有守卫）；`stall_timeout_ms = 0` 关掉。`stall_ms` 由 loop 经 `Request.stall_ms` 交给 provider、provider 交给 `wire.Post`——它是 transport 参数不是 generation 参数。单测用本机一个"接了不说话"的 TCP 服务验证预算内报 `Transport`、会说话的服务不受影响。
 
 **`anthropic` 的两个 breakpoint。** 这个 API 只在被告知处缓存，而 §1 的块前缀只增不减，所以两个 `cache_control` 就覆盖全部前缀：一个在冻结 system 的最后一块（`tools` 排在 system 之前，同一个 breakpoint 一起罩住），一个在最后一条 message 的最后一个 content block——后者随 append 自动前移。连续的同 role 块合并成一条 message，于是一批 `tool_results` 天然是一条 user message。`message_start` 与 `message_delta` 各报一次 usage，provider 内部**合并**而不是覆盖，否则收尾事件会把 cache 计数清零（§1 的可测性就没了）。first-party 用 `thinking:{adaptive}` + `output_config.effort`，兼容端点用老的 `thinking.budget_tokens`（并把 budget 加进 `max_tokens`）。thinking 开着时这个 API 要求带 `tool_use` 的 assistant message **原样**带回它前面的 `thinking` block（含 signature），否则 400——所以本轮的 thinking block 整块收进 `assistant.reasoning`、回放在该 message 最前（§3.1、上文）；这是 tool 循环在一方端点上合法的前提，不只是思路连续性。
 
@@ -529,7 +535,7 @@ nulya                       ← 无参数：固定 prompt demo（现经 durable 
 - `nulya session outcome <id> <verdict> [--note …]`：校验 id 形状与 session 文件存在、校验 verdict，然后**只**往 `.nulya/session-outcomes.jsonl` append 一行（§3.3）。它**不打开 session 文件、不拿 `<id>.lock`**——verdict 是关于这场 session 的判断而不是其中一轮，所以正在跑 `step` 的 session 也能当场评；同一 session 可以评多次，最后一条作数。
 - `nulya session *` 是**唯一**的 session 驱动面：没有 `setTools / setModel / replaceHistory`，换 composition = `session new`。每个子命令是对 durable session 文件（§3.4）的一次独立进程调用，其中**只有 `step` 写主文件**：`append` / `cancel` 投递到 `<id>.inbox/` / `<id>.cancel`（所以正在跑的 `step` 会在它的下一个 step 边界拿到 mid-run 的 append 或 cancel），`events` 是只读 tail（不解析、不重编码——文件本身就是 wire format）。`step` 的预算 `min(--max-steps, session.max_steps_ceiling)` **由 kernel 在 `AgentSession.run` 强制**，driver 只能调低不能调高；`--max-steps` 必须是正整数。session 就是它的文件，没有 `close`。
 - **`session step --stream`：纯观测的行协议**（前端唯一需要的内核改动，tui.md §2.2 → 已落地）。语义与不带 `--stream` 完全相同（同一 `AgentSession.run`、同一预算夹取、同一 cancel 消化、**同一 ledger**）；区别只是 stdout **在跑的过程中**逐行输出，而不是跑完一次性输出。
-  - 机制是 `loop.StepContext.observer`（可选 `StepObserver{ptr,vtable}`）。observer **无权力**：四个回调全部返回 `void`、只拿只读视图（`stepEnd` 拿整个 `StepOutcome`），所以它不能 append、不能改 model-visible 状态、不能让一个 step 失败——带 observer 的 step 与不带的走同一条路径（physics #1/#3）。回调点：`runStepWithPrompt` 把 provider 流 **tee** 给 observer 再交给 `TurnCollector`；`execOne` 前后各一次（未被派发的尾部调用两个回调都不发）；`AgentSession.step` 在 step 边界一次（含 canceled）。
+  - 机制是 `loop.StepContext.observer`（可选 `StepObserver{ptr,vtable}`）。observer **无权力**：五个回调全部返回 `void`、只拿只读视图（`stepEnd` 拿整个 `StepOutcome`），所以它不能 append、不能改 model-visible 状态、不能让一个 step 失败——带 observer 的 step 与不带的走同一条路径（physics #1/#3）。回调点：`collectTurn` 把 provider 流 **tee** 给 observer 再交给 `TurnCollector`，瞬态失败重发前一次 `modelRetry`（§13）；`execOne` 前后各一次（未被派发的尾部调用两个回调都不发）；`AgentSession.step` 在 step 边界一次（含 canceled）。
   - 行协议（一行一个 JSON，写完即 flush）：带 `stream` 字段的是瞬态观测行，不带的就是与 `session events` **同形**的 ledger 事件行（同一个 `encodeEventLine`、同一套 seq）。
 
     ```jsonl
@@ -539,6 +545,7 @@ nulya                       ← 无参数：固定 prompt demo（现经 durable 
     {"stream":"model","event":"tool_use_input_delta","index":0,"fragment":"{\"command\":"}
     {"stream":"model","event":"usage","input_tokens":1200,"output_tokens":80,"cache_read_tokens":1100,"cache_write_tokens":0}
     {"stream":"model","event":"done","stop":"tool_use"}
+    {"stream":"model","event":"retry","attempt":1,"max_retries":5,"delay_ms":1000,"error":"Transport"}   # 瞬态失败、将重发（§13）：读者丢掉本轮自上一个 started 起的 delta
     {"stream":"tool","event":"begin","call_id":"call_1","tool":"shell"}
     {"stream":"tool","event":"end","call_id":"call_1","ok":true}
     {"seq":7,"kind":"assistant","text":"…","calls":[…]}
@@ -547,7 +554,7 @@ nulya                       ← 无参数：固定 prompt demo（现经 durable 
     ```
 
     `reasoning_item`（不透明、只为回放）**不转发**；`stopped ∈ end_turn | budget | canceled | max_tokens`（最后一步的回复被截断即 `max_tokens`，不论 `run` 是因它停的还是因连续两次停的，§4）。每个 step 的 ledger 行在该 step 的 `step end` **之前**刷出：读者见到 `step end` 就知道这一步的事件已全。诊断（原来的 "session step failed: …" 等）在 `--stream` 下变成 `{"stream":"run","event":"error","message":"…"}` 后非零退出——**stdout 上没有非 JSON 行**。
-- `nulya ext init|build|activate|rollback|deactivate` 都接受 `--user`：写端落到 user root（`~/.nulya/extensions`，需要时创建）而不是 workspace。不给 `--user` 时，`activate|rollback|deactivate` 都作用于**该 id 生效中的那个 root**（`Roots.firstActive`，§7.2）——版本不在那里就失败并指路，只有该 id 无 active 副本时 `activate|rollback` 才落到首个持有该 built 版本的 root；操作后按生效结果决定要不要投 capability_note、要不要打印 `not in effect`。`ext list` 打印 `id / version / root`，被遮蔽的 active 行标 `(shadowed)`；`ext run` / `skill list` / `skill load` / session composition 一律按 root 顺序搜索。
+- `nulya ext init|build|activate|rollback|deactivate` 都接受 `--user`：写端落到 user root（`~/.nulya/extensions`，需要时创建）而不是 workspace。不给 `--user` 时，`activate|rollback|deactivate` 都作用于**该 id 生效中的那个 root**（`Roots.firstActive`，§7.2）——版本不在那里就失败并指路，只有该 id 无 active 副本时 `activate|rollback` 才落到首个持有该 built 版本的 root；操作后按生效结果决定要不要投 capability_note、要不要打印 `not in effect`。`ext list` 打印 `id / version / root`，被遮蔽的 active 行标 `(shadowed)`，**既无 `current` 又无任何 built 版本的目录直接跳过**（`<id>/.lock` 的 lease 在校验与编译之前就把 `<id>/` 建出来了，所以一次编译失败的 `ext build` 会留下只装着锁的空壳——那是锁的位置，不是 extension；有版本没 active 的 draft 照常列 `(inactive)`）；`ext run` / `skill list` / `skill load` / session composition 一律按 root 顺序搜索。
 - `nulya ext run <id>[@<version>] [tool] <json> | --arg k=v…`：`<id>` 跑生效中的版本；`<id>@<version>` 跑**恰好那个** built 版本（active 与否无关，按 root 顺序找首个持有者）——这是 `--with <id>@<version>` 带进 session 的 runtime tool 的调用形式：composition 里冻的是那个版本，`current` 可能指向别的甚至没有，所以 CLI 形式必须能点名版本；不让 `ext run` 在 `NULYA_SESSION` 下自动读 header，否则"同 session 内 activate 后 CLI 形式立即用新 current"这条语义就变了。usage 记的仍是 version-free 的 `ext:<id>/<tool>`。
 - `nulya ext activate` 在 `NULYA_SESSION`（相对 workspace 的 session 文件路径）存在时，向该 session 的 inbox 投一条 capability_note（§5.3）。
 - 离线时 provider 回落到确定性的 scripted stand-in（`NULYA_SCRIPTED_MODE=finish|loop|truncate`，测试用；`truncate` 每步都在 tool call 中间被 `max_tokens` 切断）。

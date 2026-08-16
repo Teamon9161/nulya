@@ -115,13 +115,14 @@ pub const AnthropicProvider = struct {
             .url = url,
             .body = body,
             .authorization = auth,
+            .stall_ms = request.stall_ms,
             .extra_headers = &.{
                 .{ .name = "x-api-key", .value = self.api_key },
                 .{ .name = "anthropic-version", .value = API_VERSION },
             },
         }, &state, StreamState.onData);
 
-        if (!state.done) return error.AnthropicStreamEndedEarly;
+        if (!state.done) return error.StreamEndedEarly;
     }
 
     const vtable: provider.Model.VTable = .{
@@ -505,6 +506,9 @@ pub const StreamState = struct {
         } else if (std.mem.eql(u8, kind, "error")) {
             const err = wire.field(root, "error") orelse root;
             std.debug.print("anthropic stream error: {s}\n", .{wire.string(err, "message") orelse data});
+            // A 529 that arrives after the head is already 200 comes as an
+            // in-stream `overloaded_error`; it is the same transient fault.
+            if (std.mem.eql(u8, wire.string(err, "type") orelse "", "overloaded_error")) return error.ServerError;
             return error.AnthropicStreamError;
         }
         return false;

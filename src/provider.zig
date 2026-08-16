@@ -30,6 +30,42 @@ pub const Options = struct {
 /// tokens must subtract before filling this in.
 pub const Usage = ledger.Usage;
 
+/// How the loop treats a wire that fails or falls silent (DESIGN §13). A
+/// provider makes ONE attempt per `stream` and reports a transient fault as one
+/// of the errors `isTransient` names; the loop (`loop.collectTurn`) owns the
+/// single retry loop, so connect failures and mid-stream drops back off the same
+/// way and every attempt is visible to an observer. Backoff before the n-th
+/// retry is `initial · 2^(n-1)`, capped at `max`.
+pub const RetryPolicy = struct {
+    max_retries: u32 = 5,
+    initial_backoff_ms: u64 = 1_000,
+    max_backoff_ms: u64 = 30_000,
+    /// How long the server may send nothing at all before the request counts as
+    /// stalled (a `Transport` fault, retried like one). Byte-level: any line,
+    /// keepalives included, resets it — so this bounds a dead-but-open socket
+    /// without a fixed "first token within N seconds" that a slow reasoning
+    /// model would trip. Generous on purpose; 0 disables. (`Request.stall_ms`
+    /// → `wire.Post.stall_ms`.)
+    stall_timeout_ms: u64 = 120_000,
+
+    pub fn backoffMs(self: RetryPolicy, attempt: u32) u64 {
+        const shift: u6 = @intCast(@min(attempt -| 1, 20));
+        return @min(self.initial_backoff_ms *| (@as(u64, 1) << shift), self.max_backoff_ms);
+    }
+};
+
+/// The faults an identical request may cure: the connection itself failed
+/// (`wire.zig` folds every connect / TLS / send / read fault into `Transport`),
+/// the body ended before the stream's own terminator, or the server said 429 /
+/// 5xx. Anything else — a 4xx, a refused credential, a malformed payload,
+/// cancellation — fails the step at once.
+pub fn isTransient(err: anyerror) bool {
+    return switch (err) {
+        error.Transport, error.StreamEndedEarly, error.RateLimited, error.ServerError => true,
+        else => false,
+    };
+}
+
 pub const StopReason = enum {
     end_turn,
     tool_use,
@@ -86,6 +122,9 @@ pub const Request = struct {
     tools: []const tool.ToolDefinition,
     generation: u64,
     options: Options = .{},
+    /// Transport, not generation: the silence budget a wire provider hands to
+    /// `wire.Post.stall_ms` (`RetryPolicy.stall_timeout_ms`; 0 = no watchdog).
+    stall_ms: u64 = 0,
 };
 
 /// One fully assembled assistant turn returned by the provider boundary.
@@ -346,6 +385,19 @@ pub fn cloneToolCall(
     const owned_args = try alloc.dupe(u8, args_json);
     errdefer alloc.free(owned_args);
     return .{ .id = owned_id, .tool = owned_name, .args_json = owned_args };
+}
+
+test "retry backoff doubles from initial and is capped" {
+    const p: RetryPolicy = .{ .initial_backoff_ms = 1000, .max_backoff_ms = 5000 };
+    try std.testing.expectEqual(@as(u64, 1000), p.backoffMs(1));
+    try std.testing.expectEqual(@as(u64, 2000), p.backoffMs(2));
+    try std.testing.expectEqual(@as(u64, 4000), p.backoffMs(3));
+    try std.testing.expectEqual(@as(u64, 5000), p.backoffMs(4));
+    try std.testing.expectEqual(@as(u64, 5000), p.backoffMs(200)); // no overflow past the cap
+    try std.testing.expect(isTransient(error.Transport));
+    try std.testing.expect(isTransient(error.RateLimited));
+    try std.testing.expect(!isTransient(error.ApiError));
+    try std.testing.expect(!isTransient(error.Canceled));
 }
 
 test "model stream is collected into owned turn" {

@@ -104,6 +104,28 @@ test("the error line clears when the next step actually starts", async () => {
   expect(state.snapshot.error).toBe("boom")
 })
 
+test("a retry line drops the failed attempt's cards and usage; the next started clears the notice", () => {
+  const state = createSessionState("s-x")
+  state.applyStream({ stream: "model", event: "started" })
+  state.applyStream({ stream: "model", event: "text_delta", text: "half a rep" })
+  state.applyStream({ stream: "model", event: "tool_use_start", index: 0, id: "c1", name: "shell" })
+  state.applyStream({ stream: "model", event: "usage", input_tokens: 100, output_tokens: 5, cache_read_tokens: 0, cache_write_tokens: 0 })
+  expect(state.snapshot.items.length).toBe(2)
+  expect(state.snapshot.usage.input).toBe(100)
+
+  state.applyStream({ stream: "model", event: "retry", attempt: 1, max_retries: 5, delay_ms: 1000, error: "Transport" })
+  expect(state.snapshot.items.length).toBe(0)
+  expect(state.snapshot.usage.input).toBe(0)
+  expect(state.snapshot.error).toBe("model request failed (Transport); retry 1/5 in 1s")
+
+  // The re-sent attempt streams from scratch: no leftover prefix, notice gone.
+  state.applyStream({ stream: "model", event: "started" })
+  expect(state.snapshot.error).toBeNull()
+  state.applyStream({ stream: "model", event: "text_delta", text: "a whole reply" })
+  expect(state.snapshot.items.length).toBe(1)
+  expect((state.snapshot.items[0] as { text: string }).text).toBe("a whole reply")
+})
+
 /**
  * Cost accounting (T8). Both mouths report the same step: the stream as it
  * happens, the ledger once the step is written (DESIGN §3.1 / §14). The ledger

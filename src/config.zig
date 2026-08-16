@@ -10,6 +10,7 @@ const builtin = @import("builtin");
 const toml = @import("toml");
 const config_options = @import("config_options");
 const environment = @import("environment.zig");
+const provider = @import("provider.zig");
 
 pub const default_toml = config_options.default_toml;
 
@@ -97,6 +98,10 @@ pub const ModelParams = struct {
 pub const Provider = struct {
     active_profile: []const u8 = "",
     profiles: []ProviderProfile = &.{},
+    /// How a transient model-request failure is retried (`provider.RetryPolicy`,
+    /// DESIGN §13). One policy for every profile: it describes the wire, not a
+    /// model. Trusted layers only.
+    retry: provider.RetryPolicy = .{},
 
     pub fn activeProfile(self: Provider) ?ProviderProfile {
         for (self.profiles) |profile| {
@@ -202,6 +207,14 @@ const RawConfig = struct {
 const RawProvider = struct {
     active_profile: ?[]const u8 = null,
     profiles: ?[]const RawProviderProfile = null,
+    retry: ?RawRetry = null,
+};
+
+const RawRetry = struct {
+    max_retries: ?u32 = null,
+    initial_backoff_ms: ?u64 = null,
+    max_backoff_ms: ?u64 = null,
+    stall_timeout_ms: ?u64 = null,
 };
 
 const RawProviderProfile = struct {
@@ -315,9 +328,15 @@ fn mergeToml(cfg: *Config, source: []const u8, kind: LayerKind) !void {
 fn mergeTrusted(cfg: *Config, raw: RawConfig) !void {
     const arena = cfg.arenaAlloc();
 
-    if (raw.provider) |provider| {
-        if (provider.active_profile) |name| cfg.provider.active_profile = try arena.dupe(u8, name);
-        if (provider.profiles) |profiles| for (profiles) |profile| try upsertProfile(cfg, profile);
+    if (raw.provider) |p| {
+        if (p.active_profile) |name| cfg.provider.active_profile = try arena.dupe(u8, name);
+        if (p.profiles) |profiles| for (profiles) |profile| try upsertProfile(cfg, profile);
+        if (p.retry) |retry| {
+            if (retry.max_retries) |n| cfg.provider.retry.max_retries = n;
+            if (retry.initial_backoff_ms) |ms| cfg.provider.retry.initial_backoff_ms = ms;
+            if (retry.max_backoff_ms) |ms| cfg.provider.retry.max_backoff_ms = ms;
+            if (retry.stall_timeout_ms) |ms| cfg.provider.retry.stall_timeout_ms = ms;
+        }
     }
 
     if (raw.models) |models| for (models) |model| try upsertModel(cfg, model);

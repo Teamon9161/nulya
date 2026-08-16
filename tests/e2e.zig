@@ -1666,6 +1666,66 @@ test "cli: NULYA_HOME extensions are visible to ext list / skill list / ext run,
     }
 }
 
+test "cli: a build that fails to compile leaves no ghost extension in ext list" {
+    // `<id>/.lock` is the writer lease, and `Store.lease` creates `<id>/` to hold
+    // it — before the compile that may still fail. A failed compile deletes its
+    // half-built version but not that directory, so the very first build of an
+    // extension whose source does not compile (routine while an agent is writing
+    // one) leaves a directory containing nothing but the lock. It is a lock
+    // location, not an extension, and `ext list` must not invent one from it.
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    defer host_env.deinit();
+    const zig_exe = host_env.get("NULYA_TEST_ZIG") orelse return error.SkipZigTest;
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const ext_dir = ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "broken.tool";
+    try ws.createDirPath(io, ext_dir ++ std.fs.path.sep_str ++ "src");
+    const manifest_bytes = try templates.manifestJson(alloc, "broken.tool", "do_thing");
+    defer alloc.free(manifest_bytes);
+    try ws.writeFile(io, .{ .sub_path = ext_dir ++ std.fs.path.sep_str ++ "extension.json", .data = manifest_bytes });
+    try ws.writeFile(io, .{ .sub_path = ext_dir ++ std.fs.path.sep_str ++ "src" ++ std.fs.path.sep_str ++ "main.zig", .data = "this is not zig\n" });
+
+    {
+        const built = try runCliEnv(alloc, io, ws, &.{ exe_abs, "ext", "build", ext_dir }, "NULYA_ZIG", zig_exe);
+        defer alloc.free(built.stdout);
+        try std.testing.expectEqual(@as(u8, 1), built.code);
+    }
+
+    // The lease directory really is on disk — this is not a test of a case that
+    // cannot happen.
+    var store_root = try ws.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
+    defer store_root.close(io);
+    try store_root.access(io, "broken.tool" ++ std.fs.path.sep_str ++ ".lock", .{});
+
+    // But it holds no built version and no `current`, so it is not listed.
+    const list = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "list" });
+    defer alloc.free(list.stdout);
+    try std.testing.expectEqual(@as(u8, 0), list.code);
+    try std.testing.expect(std.mem.indexOf(u8, list.stdout, "broken.tool") == null);
+    try std.testing.expect(std.mem.indexOf(u8, list.stdout, "no extensions") != null);
+
+    // A directory WITH a built version is a real extension even before it is
+    // activated: the skip is about emptiness, not about being inactive.
+    const good_src = try greetSource(alloc, "greeting");
+    defer alloc.free(good_src);
+    const good = try scaffoldAndBuild(alloc, io, ws, zig_exe, "real.tool", "do_thing", good_src);
+    defer alloc.free(good);
+    const list2 = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "list" });
+    defer alloc.free(list2.stdout);
+    try std.testing.expect(std.mem.indexOf(u8, list2.stdout, "real.tool") != null);
+    try std.testing.expect(std.mem.indexOf(u8, list2.stdout, "(inactive)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, list2.stdout, "broken.tool") == null);
+}
+
 // ── M5g: the bundled evolution extension (a plain data extension) ──────────
 
 test "bundled evolution: ext build extensions/evolution is data kind and needs no zig; session new --with evolution exposes its system prompt and skill; skill load returns SKILL.md verbatim; version is stable across rebuilds" {

@@ -435,6 +435,18 @@ export function createSessionState(id: string): SessionState {
             if (item) item.streaming = false
             break
           }
+          case "retry": {
+            // The attempt that just streamed failed and is re-sent from scratch
+            // (DESIGN §13): its cards and any usage it reported never become
+            // ledger facts, so they go the way of a canceled step's. The next
+            // `started` clears the notice.
+            const retry = line as unknown as { attempt: number; max_retries: number; delay_ms: number; error: string }
+            dropInFlight(draft)
+            for (const usage of streamed.splice(0)) addUsage(draft, usage, -1)
+            draft.activeTool = null
+            draft.error = `model request failed (${retry.error}); retry ${retry.attempt}/${retry.max_retries} in ${Math.round(retry.delay_ms / 1000)}s`
+            break
+          }
         }
         return
       }

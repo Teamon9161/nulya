@@ -24,6 +24,8 @@ export type StreamLine =
   | { stream: "model"; event: "tool_use_input_delta"; index: number; fragment: string }
   | ({ stream: "model"; event: "usage" } & StreamUsage)
   | { stream: "model"; event: "done"; stop: string }
+  /** A transient failure; the kernel re-sends after `delay_ms` (DESIGN §13). */
+  | { stream: "model"; event: "retry"; attempt: number; max_retries: number; delay_ms: number; error: string }
   | { stream: "tool"; event: "begin"; call_id: string; tool: string }
   | { stream: "tool"; event: "end"; call_id: string; ok: boolean }
   | { stream: "step"; event: "end"; status: StepStatus }

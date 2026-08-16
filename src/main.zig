@@ -89,6 +89,7 @@ fn runDemo(alloc: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) 
         .step_ctx = .{
             .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = "." },
             .scratch_dir = launch.scratch_dir,
+            .retry = cfg.provider.retry,
         },
         .model_options = .{ .effort = effort },
         .extension_roots = ext_roots,
