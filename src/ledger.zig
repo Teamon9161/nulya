@@ -572,7 +572,10 @@ pub fn encodeHeaderLine(alloc: std.mem.Allocator, hdr: Header) ![]u8 {
     return out.toOwnedSlice();
 }
 
-fn parseHeaderLine(gpa: std.mem.Allocator, line: []const u8) !OwnedHeader {
+/// Parse one header LINE (the file's first line). `readHeader` is the usual
+/// entry point; this is public for readers that already hold the file's bytes
+/// and would otherwise read it twice (`nulya session list`).
+pub fn parseHeaderLine(gpa: std.mem.Allocator, line: []const u8) !OwnedHeader {
     const parsed = std.json.parseFromSlice(Header, gpa, std.mem.trim(u8, line, " \t\r\n"), json_opts) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.CorruptLedger,

@@ -914,8 +914,210 @@ fn dispatchSession(alloc: std.mem.Allocator, io: std.Io, args: []const []const u
     if (std.mem.eql(u8, sub, "events")) return sessionEvents(alloc, io, rest);
     if (std.mem.eql(u8, sub, "cancel")) return sessionCancel(alloc, io, rest);
     if (std.mem.eql(u8, sub, "outcome")) return sessionOutcome(alloc, io, rest);
-    try printErr(io, "unknown `session` subcommand; try new|append|step|events|cancel|outcome\n");
+    if (std.mem.eql(u8, sub, "list")) return sessionList(alloc, io, sliceHasFlag(rest, "--json"));
+    try printErr(io, "unknown `session` subcommand; try new|append|step|events|cancel|outcome|list\n");
     return 1;
+}
+
+// ── `nulya session list` (DESIGN §14) ───────────────────────────────────────
+//
+// A READ-ONLY projection of `.nulya/sessions/`: what was composed, what it cost,
+// how it turned out. It decides nothing and writes nothing — same standing as
+// `config show`. Its first consumers are the evolution skill (which needs to see
+// many sessions at once without reading every ledger) and the TUI's `/sessions`.
+
+const SessionView = struct {
+    id: []const u8,
+    /// RFC3339 UTC, or empty for a session created before headers carried it.
+    created: []const u8,
+    parent: ?ledger.ParentRef,
+    /// The provider PROFILE name, then the frozen identity behind it.
+    model: []const u8,
+    provider: []const u8,
+    model_id: []const u8,
+    events: usize,
+    composition: Composition,
+    /// Sum of every assistant event's recorded usage (DESIGN §3.1). Steps whose
+    /// provider reported nothing contribute nothing.
+    usage: ledger.Usage,
+    /// The opening user turn, truncated — enough to recognize the session by.
+    first_user_text: []const u8,
+    /// The verdict that stands, or null for "not judged" — which is NOT failure.
+    outcome: ?OutcomeView,
+
+    const Composition = struct {
+        active: []const []const u8,
+        native_tools: []const []const u8,
+    };
+
+    const OutcomeView = struct {
+        verdict: []const u8,
+        note: ?[]const u8,
+        at: []const u8,
+    };
+};
+
+/// How much of the opening user turn `session list` carries. Long enough to tell
+/// two sessions apart, short enough that a hundred of them stay readable.
+const first_text_limit: usize = 120;
+
+fn sessionList(alloc: std.mem.Allocator, io: std.Io, as_json: bool) !u8 {
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_path = try cwdRealPath(io, &cwd_buf);
+
+    const outcomes = try outcome.readAll(a, io, cwd_path);
+
+    var views: std.ArrayList(SessionView) = .empty;
+    var dir = std.Io.Dir.cwd().openDir(io, launch.sessions_dir, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => {
+            try printSessionList(alloc, io, &.{}, as_json);
+            return 0;
+        },
+        else => return err,
+    };
+    defer dir.close(io);
+
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".jsonl")) continue;
+        // The iterator reuses its name buffer, and the view keeps a slice of the
+        // name as the session id — so copy it before the next `next()`.
+        const name = try a.dupe(u8, entry.name);
+        const view = readSessionView(a, io, dir, name, outcomes) catch continue; // a corrupt file is not a reason to hide the rest
+        try views.append(a, view);
+    }
+
+    // Newest first. `created` is the fact to sort on; sessions written before it
+    // existed fall back to their id, which embeds the creation time anyway.
+    std.mem.sort(SessionView, views.items, {}, struct {
+        fn lessThan(_: void, x: SessionView, y: SessionView) bool {
+            const xa = if (x.created.len != 0) x.created else x.id;
+            const ya = if (y.created.len != 0) y.created else y.id;
+            if (!std.mem.eql(u8, xa, ya)) return std.mem.order(u8, xa, ya) == .gt;
+            return std.mem.order(u8, x.id, y.id) == .gt;
+        }
+    }.lessThan);
+
+    try printSessionList(alloc, io, views.items, as_json);
+    return 0;
+}
+
+/// Project one session file. Reads its bytes once: the first line is the header,
+/// the rest are events — counted, summed, and scanned for the opening user turn.
+fn readSessionView(
+    a: std.mem.Allocator,
+    io: std.Io,
+    dir: std.Io.Dir,
+    file_name: []const u8,
+    outcomes: []const outcome.Outcome,
+) !SessionView {
+    const bytes = try dir.readFileAlloc(io, file_name, a, .unlimited);
+    const clean_end: usize = @intCast(ledger.lastCompleteLineEnd(bytes));
+
+    var lines = std.mem.splitScalar(u8, bytes[0..clean_end], '\n');
+    var header: ?ledger.OwnedHeader = null;
+    var events: usize = 0;
+    var total: ledger.Usage = .{};
+    var first_user_text: []const u8 = "";
+
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0) continue;
+        if (header == null) {
+            header = try ledger.parseHeaderLine(a, line);
+            continue;
+        }
+        events += 1;
+        // Only lines that can carry what this view needs are parsed; the rest are
+        // just counted, so listing does not cost a full decode of every ledger.
+        const needs_usage = std.mem.indexOf(u8, line, "\"usage\":") != null;
+        const needs_text = first_user_text.len == 0 and std.mem.indexOf(u8, line, "\"kind\":\"user_text\"") != null;
+        if (!needs_usage and !needs_text) continue;
+        const parsed = ledger.parseEventLine(a, line) catch continue;
+        if (parsed.value.usage) |u| {
+            total.input_tokens += u.input_tokens;
+            total.output_tokens += u.output_tokens;
+            total.cache_read_tokens += u.cache_read_tokens;
+            total.cache_write_tokens += u.cache_write_tokens;
+        }
+        if (needs_text) {
+            if (parsed.value.text) |t| first_user_text = try summarize(a, t);
+        }
+    }
+
+    const h = (header orelse return error.MissingHeader).value;
+    const active = try a.alloc([]const u8, h.composition.active.len);
+    for (h.composition.active, active) |ref, *out| out.* = try std.fmt.allocPrint(a, "{s}@{s}", .{ ref.id, ref.version });
+
+    const id = file_name[0 .. file_name.len - ".jsonl".len];
+    const latest = outcome.latestFor(outcomes, id);
+    return .{
+        .id = id,
+        .created = h.created,
+        .parent = h.parent,
+        .model = h.model,
+        .provider = h.model_identity.provider,
+        .model_id = h.model_identity.model,
+        .events = events,
+        .composition = .{ .active = active, .native_tools = h.composition.native_tools },
+        .usage = total,
+        .first_user_text = first_user_text,
+        .outcome = if (latest) |o| .{ .verdict = @tagName(o.verdict), .note = o.note, .at = o.at } else null,
+    };
+}
+
+/// One line of text, truncated on a UTF-8 boundary, with newlines flattened.
+fn summarize(a: std.mem.Allocator, text: []const u8) ![]const u8 {
+    var end = @min(text.len, first_text_limit);
+    while (end > 0 and end < text.len and (text[end] & 0xC0) == 0x80) end -= 1;
+    const cut = try a.dupe(u8, text[0..end]);
+    for (cut) |*c| {
+        if (c.* == '\n' or c.* == '\r' or c.* == '\t') c.* = ' ';
+    }
+    return cut;
+}
+
+fn printSessionList(alloc: std.mem.Allocator, io: std.Io, views: []const SessionView, as_json: bool) !void {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    if (as_json) {
+        var jw: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
+        try jw.beginObject();
+        try jw.objectField("sessions");
+        try jw.write(views);
+        try jw.endObject();
+        try out.writer.writeByte('\n');
+    } else {
+        for (views) |v| {
+            try out.writer.print("{s}  {s: <20}  {s: <10}  {d: >4} ev  in {d: >7} cache {d: >7} out {d: >6}  {s: <7}", .{
+                v.id,
+                if (v.created.len != 0) v.created else "-",
+                if (v.model.len != 0) v.model else "-",
+                v.events,
+                v.usage.input_tokens,
+                v.usage.cache_read_tokens,
+                v.usage.output_tokens,
+                if (v.outcome) |o| o.verdict else "-",
+            });
+            if (v.parent) |p| try out.writer.print("  <- {s}:{d}", .{ p.session, p.seq });
+            if (v.composition.active.len != 0) {
+                try out.writer.writeAll("  [");
+                for (v.composition.active, 0..) |ref, i| {
+                    if (i != 0) try out.writer.writeAll(", ");
+                    try out.writer.writeAll(ref);
+                }
+                try out.writer.writeAll("]");
+            }
+            if (v.first_user_text.len != 0) try out.writer.print("  {s}", .{v.first_user_text});
+            try out.writer.writeByte('\n');
+        }
+        if (views.len == 0) try out.writer.writeAll("no sessions\n");
+    }
+    try printRaw(io, out.written());
 }
 
 /// `nulya session outcome <id> <verdict> [--note <text>]` — record how a session
@@ -1086,6 +1288,8 @@ fn sessionNew(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
 
     const id = try launch.genSessionId(alloc, io);
     defer alloc.free(id);
+    const created = try launch.rfc3339Now(alloc, io);
+    defer alloc.free(created);
     const spath = try launch.sessionPath(alloc, id);
     defer alloc.free(spath);
 
@@ -1134,6 +1338,7 @@ fn sessionNew(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
         .session_id = id,
         .model_profile = profile,
         .model_identity = identity,
+        .created = created,
         .parent = parent,
     }) catch |err| switch (err) {
         // The caller named these extensions, so an unusable one is not a warning.
@@ -1688,6 +1893,8 @@ fn sessionUsage(io: std.Io) !u8 {
         \\                                                             --stream also emits transient model/tool lines as they happen
         \\  nulya session events <id> [--since N] [--follow]           print events as JSONL (read-only tail)
         \\  nulya session cancel <id>                                  request cancel at the next step boundary
+        \\  nulya session list [--json]                                read-only projection of every session here:
+        \\                                                             composition, event count, summed usage, latest verdict
         \\  nulya session outcome <id> <success|partial|failure> [--note <text>]
         \\                                                             record how the session turned out (journal only — never
         \\                                                             touches the session file, so a running one can be judged)

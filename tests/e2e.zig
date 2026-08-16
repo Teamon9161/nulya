@@ -1617,6 +1617,95 @@ test "cli: NULYA_HOME extensions are visible to ext list / skill list / ext run,
     }
 }
 
+// ── M5f: `session list` (read-only projection of .nulya/sessions) ───────────
+
+test "session cli: list --json reports parent, event count, summed usage and the latest outcome" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    // An empty workspace lists nothing rather than failing.
+    {
+        const empty = try runCli(alloc, io, ws, &.{ exe_abs, "session", "list", "--json" });
+        defer alloc.free(empty.stdout);
+        try std.testing.expectEqual(@as(u8, 0), empty.code);
+        try std.testing.expect(std.mem.indexOf(u8, empty.stdout, "\"sessions\":[]") != null);
+    }
+
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(new.stdout);
+    const parent_id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(parent_id);
+    {
+        const ap = try runCli(alloc, io, ws, &.{ exe_abs, "session", "append", parent_id, "probe the box" });
+        defer alloc.free(ap.stdout);
+        const step = try runCliEnv(alloc, io, ws, &.{ exe_abs, "session", "step", parent_id }, "NULYA_SCRIPTED_MODE", "finish");
+        defer alloc.free(step.stdout);
+        try std.testing.expectEqual(@as(u8, 0), step.code);
+        const verdict = try runCli(alloc, io, ws, &.{ exe_abs, "session", "outcome", parent_id, "partial", "--note", "first pass" });
+        defer alloc.free(verdict.stdout);
+        // A later verdict corrects it; the listing reports the one that stands.
+        const revised = try runCli(alloc, io, ws, &.{ exe_abs, "session", "outcome", parent_id, "success" });
+        defer alloc.free(revised.stdout);
+        try std.testing.expectEqual(@as(u8, 0), revised.code);
+    }
+
+    const parent_ref = try std.fmt.allocPrint(alloc, "{s}:3", .{parent_id});
+    defer alloc.free(parent_ref);
+    const fork = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--parent", parent_ref });
+    defer alloc.free(fork.stdout);
+    try std.testing.expectEqual(@as(u8, 0), fork.code);
+    const child_id = try alloc.dupe(u8, std.mem.trim(u8, fork.stdout, " \r\n"));
+    defer alloc.free(child_id);
+
+    const listed = try runCli(alloc, io, ws, &.{ exe_abs, "session", "list", "--json" });
+    defer alloc.free(listed.stdout);
+    try std.testing.expectEqual(@as(u8, 0), listed.code);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, listed.stdout, .{});
+    defer parsed.deinit();
+    const sessions = parsed.value.object.get("sessions").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), sessions.len);
+
+    // Newest first: the fork was created last.
+    const child = sessions[0].object;
+    try std.testing.expectEqualStrings(child_id, child.get("id").?.string);
+    try std.testing.expectEqualStrings(parent_id, child.get("parent").?.object.get("session").?.string);
+    try std.testing.expectEqual(@as(i64, 3), child.get("parent").?.object.get("seq").?.integer);
+    try std.testing.expectEqual(@as(i64, 0), child.get("events").?.integer);
+    try std.testing.expect(child.get("outcome").? == .null); // unjudged is not failure
+    try std.testing.expect(child.get("created").?.string.len == 20);
+
+    const parent = sessions[1].object;
+    try std.testing.expectEqualStrings(parent_id, parent.get("id").?.string);
+    try std.testing.expect(parent.get("parent").? == .null);
+    // user_text + assistant(call) + tool_results + assistant(end).
+    try std.testing.expectEqual(@as(i64, 4), parent.get("events").?.integer);
+    try std.testing.expect(std.mem.indexOf(u8, parent.get("first_user_text").?.string, "probe the box") != null);
+    try std.testing.expectEqualStrings("scripted", parent.get("model").?.string);
+    try std.testing.expectEqualStrings("success", parent.get("outcome").?.object.get("verdict").?.string);
+    try std.testing.expect(parent.get("outcome").?.object.get("note").? == .null); // the correcting line had none
+    // The scripted provider prices nothing, so the sum is honestly zero.
+    try std.testing.expectEqual(@as(i64, 0), parent.get("usage").?.object.get("input_tokens").?.integer);
+    try std.testing.expect(parent.get("composition").?.object.get("active") != null);
+
+    // The human form names both sessions and the verdict.
+    const text = try runCli(alloc, io, ws, &.{ exe_abs, "session", "list" });
+    defer alloc.free(text.stdout);
+    try std.testing.expect(std.mem.indexOf(u8, text.stdout, parent_id) != null);
+    try std.testing.expect(std.mem.indexOf(u8, text.stdout, child_id) != null);
+    try std.testing.expect(std.mem.indexOf(u8, text.stdout, "success") != null);
+}
+
 // ── M5e: `session new --with` (composition membership, not a native pin) ────
 
 test "session cli: --with pins a built-but-not-activated version into one session (system prompt in system blocks, skill in the catalog); a later plain session does not see it; resume rebuilds the same composition" {
