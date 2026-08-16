@@ -1,6 +1,6 @@
 # Nulya TUI — 设计与计划
 
-> **状态：T0–T7 全部落地。** 内核侧只有两处：`session step --stream`（纯观测）与 `session new --parent` 的 fork 语义 → [DESIGN.md](DESIGN.md) §14/§11；前端 T1（骨架）、T2（卡片与折叠）、T3（nulya 视图：`/sessions`、`/ext`、sub-session tab、observer）、T4（`/help` `/settings` `/usage`、keymap 覆盖、`bun build --compile`、README、5k 事件性能）、T5（`/model` `/effort`）、T6（布局与 slash 补全）、T7（`/compact`）都在 `tui/`（见 §11 与 [`../tui/README.md`](../tui/README.md)）。本文是 `tui/` 的设计契约 + 里程碑 + 实施日志；`tui/` 不在内核范围里（另一条工具链、另一个进程），所以它的现状写在本文 §11，不进 DESIGN.md。
+> **状态：T0–T7 全部落地（T8 占位：M5 给了它需要的内核面，前端未做）。** 内核侧只有两处：`session step --stream`（纯观测）与 `session new --parent` 的 fork 语义 → [DESIGN.md](DESIGN.md) §14/§11；前端 T1（骨架）、T2（卡片与折叠）、T3（nulya 视图：`/sessions`、`/ext`、sub-session tab、observer）、T4（`/help` `/settings` `/usage`、keymap 覆盖、`bun build --compile`、README、5k 事件性能）、T5（`/model` `/effort`）、T6（布局与 slash 补全）、T7（`/compact`）都在 `tui/`（见 §11 与 [`../tui/README.md`](../tui/README.md)）。本文是 `tui/` 的设计契约 + 里程碑 + 实施日志；`tui/` 不在内核范围里（另一条工具链、另一个进程），所以它的现状写在本文 §11，不进 DESIGN.md。
 > 上位原则见 [PLAN.md](PLAN.md) §3.11：前端是 core 之上的薄客户端——**tail ledger 文件 + append user 事件；前端是长期进程，re-spawn 的只是 worker**。
 
 ## 0. 定位（三句话）
@@ -283,7 +283,11 @@ fold   = "ctrl+o"
 | ~~**T6 · 用出来的痛点**~~ ✅ | composer/状态栏永不收缩（真 bug）；`/model` 两级（providers → models）+ `a` 加 compatible provider；空 session 首屏；slash 补全；`PgUp`/`PgDn`/`Shift+End` 回读 | `bun test` 99 pass；30/24/16/10 行终端下 composer 都在 |
 | ~~**T7 · compaction**~~ ✅ | 内核：`session new --parent` 校验父 + 继承冻结身份（DESIGN §11/§14）；前端：`/compact [focus]`、压缩两条 turn 的卡片、状态栏上下文占用 | `zig build e2e` 里 fork 继承一条；`bun test` 100 pass；聊两句 → `/compact` → 新 session 顶上是 summary |
 
-顺序 T0 → T1 → T2 → T3 → T4；**T1 结束就开始用它 dogfood**，T2 起的优先级由用出来的痛点重排（T5–T7 就是这么来的）。
+| **T8 · 慢速回路的前端**（占位，内核侧已就绪） | `/outcome <verdict> [note]`（→ `nulya session outcome`，`/quit` 时问一次）；`/sessions` 改读 `nulya session list --json`（含 verdict / usage / parent，不再自己扫 header）；`/evolve`（`ext build extensions/evolution` → `session new --with evolution@<v>` → 跟随子 session）；`/mode <id>[@<v>]`（`--with` 一个贡献 system_prompt 的 data extension） | `bun test` 绿；评一次 verdict 后 `/sessions` 里看得到；`/evolve` 起来的场次带 evolution 的 system block |
+
+顺序 T0 → T1 → T2 → T3 → T4；**T1 结束就开始用它 dogfood**，T2 起的优先级由用出来的痛点重排（T5–T8 就是这么来的）。
+
+**M5 给前端的新面**（内核已落地，TUI 尚未消费，见 T8）：`nulya session list [--json]`（一次拿到每场的 composition / parent / 事件数 / usage / 最新 verdict——`/sessions` 不必再自己解析 header）· `nulya session outcome <id> <verdict> [--note]`（写 outcome journal，不碰 session 文件，所以正在跑的场次也能评）· `session new --with <id>[@<version>]`（把一个 built 但**不 activate** 的包带进这一场——mode / evolution 就是这么投放的）· ledger 里 `assistant.usage`（每步真实成本，状态栏和 `/usage` 可以按步显示而不只是累计）· extension 的 user root `~/.nulya/extensions`（`/ext` 视图要标出每个 id 来自哪个 root、谁被遮蔽）。
 
 ## 10. 开放问题（待议，默认都先不做）
 
@@ -294,7 +298,7 @@ fold   = "ctrl+o"
 5. **`nulya composition preview`**：下一场会晋升谁——纯投影 CLI，避免 TUI 复刻 `tool_selection.rank`。
 6. **`split-footer` 模式**作为可选屏幕模式（scrollback 原生复制），与折叠可变历史的取舍。
 7. session `--system-file/--skill/--pin`（PLAN §3.2 未落地）落地后 `/new` 的表单。
-8. **header 的 `created` 现在是空串**：`ledger.Header` 有这个字段、`session new` 不填它，于是 CompositionCard 的"时间"只能省略（T2 §11）。补一行"创建时写 RFC3339"是几行的事，但它是 model-invisible 的 provenance fact，值得和第 1 条（`spawned_by`）一起定，别单独动 frozen core 的 header 形状。
+8. ~~**header 的 `created` 现在是空串**~~ **已落地（M5f）**：`session new` 写 RFC3339 UTC，`session list --json` 按它倒序；CompositionCard 可以显示时间了（老 session 仍是空串，退回按 id 排）。
 
 ## 11. 实施日志
 

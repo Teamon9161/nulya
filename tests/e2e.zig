@@ -20,6 +20,15 @@
 //! And script extensions (DESIGN §7.1): a script extension goes init(--script) →
 //! build (no toolchain) → activate → run → promoted native and executes through
 //! its interpreter; its version excludes compiler identity and is rebuild-stable.
+//!
+//! And the slow loop's substrate (M5): a verdict recorded while another process
+//! holds the session lease (DESIGN §3.3); per-step usage on the assistant event,
+//! not projected (§3.1); extensions discovered across workspace and user store
+//! roots with first-root-wins shadowing, and a frozen version resolved from
+//! whichever root holds it (§7.2); `ext build` landing under the store root by
+//! manifest id; `session new --with` composing a built-but-inactive version into
+//! one session; `session list --json`; and the repo's own `extensions/evolution`
+//! going through exactly that path with no special casing.
 
 const std = @import("std");
 const support = @import("support");
