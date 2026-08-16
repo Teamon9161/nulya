@@ -347,11 +347,27 @@ fn extInit(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
 }
 
 fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
-    if (args.len < 1) {
-        try printErr(io, "usage: nulya ext build <path>\n");
+    var positional: std.ArrayList([]const u8) = .empty;
+    defer positional.deinit(alloc);
+    var user = false;
+    for (args) |a| {
+        if (std.mem.eql(u8, a, "--user")) user = true else try positional.append(alloc, a);
+    }
+    if (positional.items.len < 1) {
+        try printErr(io, "usage: nulya ext build <path> [--user]\n");
         return 1;
     }
-    const ext_dir = args[0];
+    const ext_dir = positional.items[0];
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_path = try cwdRealPath(io, &cwd_buf);
+    const dest_spec = (try buildDestRoot(alloc, io, cwd_path, ext_dir, user)) orelse {
+        try printErr(io, "no home directory for --user (set NULYA_HOME or HOME)\n");
+        return 1;
+    };
+    defer alloc.free(dest_spec);
+    var dest_root = try store.openOrCreateRoot(io, cwd_path, dest_spec);
+    defer dest_root.close(io);
 
     // A script extension needs no toolchain; only a compiled one does. Resolve
     // zig best-effort and let the build decide — it reports ZigVersionUnreadable
@@ -359,7 +375,7 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
     const zig_exe: ?[]u8 = resolveZig(alloc, io) catch null;
     defer if (zig_exe) |z| alloc.free(z);
 
-    var result = build_ext.buildExtension(alloc, io, std.Io.Dir.cwd(), ext_dir, zig_exe orelse "") catch |err| switch (err) {
+    var result = build_ext.buildExtension(alloc, io, std.Io.Dir.cwd(), ext_dir, dest_root, zig_exe orelse "") catch |err| switch (err) {
         error.ZigVersionUnreadable => {
             try printOut(alloc, io, "no zig toolchain (needed to compile this extension); set NULYA_ZIG, or build nulya with -Dembed-toolchain\n", .{});
             return 1;
@@ -373,8 +389,44 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
         return 1;
     }
     const state = if (result.already_built) "already built" else "built";
-    try printOut(alloc, io, "{s}: {s} ({s})\n", .{ ext_dir, result.version, state });
+    try printOut(alloc, io, "{s}: {s} ({s}, in {s})\n", .{ ext_dir, result.version, state, dest_spec });
     return 0;
+}
+
+/// Which store root a build lands in: `--user` forces the user store; otherwise
+/// a draft that already lives inside one of the search roots builds into THAT
+/// root (so `.nulya/extensions/<id>` keeps building exactly where it always
+/// did), and a draft anywhere else — one kept in git, say — builds into the
+/// workspace store. Caller owns the result; null means `--user` with no home.
+fn buildDestRoot(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    cwd_path: []const u8,
+    ext_dir: []const u8,
+    user: bool,
+) !?[]u8 {
+    if (user) return writeRootSpec(alloc, io, true);
+
+    var draft = std.Io.Dir.cwd().openDir(io, ext_dir, .{}) catch
+        return try alloc.dupe(u8, workspace_extensions_root); // let the build report it
+    defer draft.close(io);
+    var draft_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const draft_real = draft_buf[0..try draft.realPath(io, &draft_buf)];
+
+    var search = try RootSearch.open(alloc, io, cwd_path);
+    defer search.deinit(alloc);
+    for (search.roots.entries) |entry| {
+        if (isInside(entry.real, draft_real)) return try alloc.dupe(u8, entry.spec);
+    }
+    return try alloc.dupe(u8, workspace_extensions_root);
+}
+
+/// Whether `path` sits under directory `dir` (both already resolved to real
+/// absolute paths).
+fn isInside(dir: []const u8, path: []const u8) bool {
+    if (path.len <= dir.len) return false;
+    if (!std.mem.eql(u8, path[0..dir.len], dir)) return false;
+    return path[dir.len] == std.fs.path.sep or path[dir.len] == '/';
 }
 
 fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {

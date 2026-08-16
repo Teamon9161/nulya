@@ -61,8 +61,11 @@ test "closed loop: init -> build -> activate -> run round-trips JSON" {
     try ws.writeFile(io, .{ .sub_path = ext_dir_rel ++ std.fs.path.sep_str ++ "extension.json", .data = manifest_bytes });
     try ws.writeFile(io, .{ .sub_path = ext_dir_rel ++ std.fs.path.sep_str ++ "src" ++ std.fs.path.sep_str ++ "main.zig", .data = templates.main_zig });
 
-    // 2. `ext build`: compile into an immutable, content-addressed version.
-    var result = try build_ext.buildExtension(alloc, io, ws, ext_dir_rel, zig_exe);
+    // 2. `ext build`: compile into an immutable, content-addressed version, into
+    //    the workspace store root under the manifest's own id.
+    var ws_ext_root = try ws.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
+    defer ws_ext_root.close(io);
+    var result = try build_ext.buildExtension(alloc, io, ws, ext_dir_rel, ws_ext_root, zig_exe);
     defer result.deinit(alloc);
     if (!result.compile_ok) {
         std.debug.print("extension failed to compile:\n{s}\n", .{result.stderr});
@@ -71,7 +74,7 @@ test "closed loop: init -> build -> activate -> run round-trips JSON" {
     try std.testing.expect(std.mem.startsWith(u8, result.version, "v-"));
 
     // Building again is a reproducible no-op on the same version.
-    var again = try build_ext.buildExtension(alloc, io, ws, ext_dir_rel, zig_exe);
+    var again = try build_ext.buildExtension(alloc, io, ws, ext_dir_rel, ws_ext_root, zig_exe);
     defer again.deinit(alloc);
     try std.testing.expect(again.already_built);
     try std.testing.expectEqualStrings(result.version, again.version);
@@ -170,7 +173,9 @@ fn scaffoldAndBuild(
     defer alloc.free(main_rel);
     try ws.writeFile(io, .{ .sub_path = main_rel, .data = main_src });
 
-    var result = try build_ext.buildExtension(alloc, io, ws, ext_dir, zig_exe);
+    var dest = try ws.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
+    defer dest.close(io);
+    var result = try build_ext.buildExtension(alloc, io, ws, ext_dir, dest, zig_exe);
     defer result.deinit(alloc);
     if (!result.compile_ok) {
         std.debug.print("extension failed to compile:\n{s}\n", .{result.stderr});
@@ -1450,7 +1455,9 @@ fn buildSkillExtensionIn(
 
     const draft = try std.fs.path.join(alloc, &.{ root_rel, id });
     defer alloc.free(draft);
-    var result = try build_ext.buildExtension(alloc, io, ws, draft, "zig-unused-for-data");
+    var dest = try ws.openDir(io, root_rel, .{});
+    defer dest.close(io);
+    var result = try build_ext.buildExtension(alloc, io, ws, draft, dest, "zig-unused-for-data");
     defer result.deinit(alloc);
     if (!result.compile_ok) return error.ExtensionBuildFailed;
     return alloc.dupe(u8, result.version);
@@ -1608,6 +1615,123 @@ test "cli: NULYA_HOME extensions are visible to ext list / skill list / ext run,
         try std.testing.expectEqual(@as(u8, 0), list.code);
         try std.testing.expect(std.mem.indexOf(u8, list.stdout, "user-wide") == null);
     }
+}
+
+// ── M5d: `ext build` lands under the store root, by manifest id ─────────────
+
+test "cli ext build: a draft outside any store lands in the workspace store under its manifest id; --user lands in the user store; a draft inside a store lands in that store; in-store builds are byte-identical to before" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var ws_real: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
+    const home_abs = try std.fs.path.join(alloc, &.{ ws_path, "home" });
+    defer alloc.free(home_abs);
+    const env: []const EnvPair = &.{.{ .key = "NULYA_HOME", .value = home_abs }};
+
+    // A draft kept in the repo, outside every store root — the shape the bundled
+    // evolution extension has.
+    try writeSkillDraft(alloc, io, ws, "modes" ++ std.fs.path.sep_str ++ "outside", "outside.mode", "kept in git");
+
+    const built = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "build", "modes/outside" }, env);
+    defer alloc.free(built.stdout);
+    try std.testing.expectEqual(@as(u8, 0), built.code);
+    const version = try extractVersion(alloc, built.stdout);
+    defer alloc.free(version);
+
+    // It landed in the WORKSPACE store under the manifest id — so `activate`
+    // finds it — and not next to the draft.
+    const in_store = try std.fs.path.join(alloc, &.{ ".nulya", "extensions", "outside.mode", "versions", version, "extension.json" });
+    defer alloc.free(in_store);
+    try ws.access(io, in_store, .{});
+    try std.testing.expectError(error.FileNotFound, ws.access(io, "modes" ++ std.fs.path.sep_str ++ "outside" ++ std.fs.path.sep_str ++ "versions", .{}));
+    {
+        const activated = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "activate", "outside.mode", version }, env);
+        defer alloc.free(activated.stdout);
+        try std.testing.expectEqual(@as(u8, 0), activated.code);
+    }
+
+    // `--user` puts the same draft's version in the user store instead.
+    {
+        const user_built = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "build", "modes/outside", "--user" }, env);
+        defer alloc.free(user_built.stdout);
+        try std.testing.expectEqual(@as(u8, 0), user_built.code);
+        const user_path = try std.fs.path.join(alloc, &.{ "home", "extensions", "outside.mode", "versions", version, "extension.json" });
+        defer alloc.free(user_path);
+        try ws.access(io, user_path, .{});
+        // Data kind: the version id is a pure snapshot hash, so both stores hold
+        // the same version — which is exactly why either copy may serve it.
+        const user_version = try extractVersion(alloc, user_built.stdout);
+        defer alloc.free(user_version);
+        try std.testing.expectEqualStrings(version, user_version);
+    }
+
+    // A draft that already lives in a store root builds into THAT root — the
+    // pre-M5d behavior, byte for byte: `.nulya/extensions/<id>/versions/<v>`.
+    try writeSkillDraft(alloc, io, ws, ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "inside.mode", "inside.mode", "already in the store");
+    {
+        const inside = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "build", ".nulya/extensions/inside.mode" }, env);
+        defer alloc.free(inside.stdout);
+        try std.testing.expectEqual(@as(u8, 0), inside.code);
+        const inside_version = try extractVersion(alloc, inside.stdout);
+        defer alloc.free(inside_version);
+        const path = try std.fs.path.join(alloc, &.{ ".nulya", "extensions", "inside.mode", "versions", inside_version, "extension.json" });
+        defer alloc.free(path);
+        try ws.access(io, path, .{});
+    }
+
+    // And a draft inside the USER root builds into the user root, without --user.
+    try writeSkillDraft(alloc, io, ws, "home" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "user.mode", "user.mode", "lives in the user store");
+    {
+        const user_side = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "build", "home/extensions/user.mode" }, env);
+        defer alloc.free(user_side.stdout);
+        try std.testing.expectEqual(@as(u8, 0), user_side.code);
+        const v = try extractVersion(alloc, user_side.stdout);
+        defer alloc.free(v);
+        const path = try std.fs.path.join(alloc, &.{ "home", "extensions", "user.mode", "versions", v, "extension.json" });
+        defer alloc.free(path);
+        try ws.access(io, path, .{});
+        const not_in_workspace = try std.fs.path.join(alloc, &.{ ".nulya", "extensions", "user.mode" });
+        defer alloc.free(not_in_workspace);
+        try std.testing.expectError(error.FileNotFound, ws.access(io, not_in_workspace, .{}));
+    }
+}
+
+/// Write a pure-skill (data kind) extension DRAFT at `dir_rel`; no build.
+fn writeSkillDraft(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    ws: std.Io.Dir,
+    dir_rel: []const u8,
+    id: []const u8,
+    body: []const u8,
+) !void {
+    const skill_dir = try std.fs.path.join(alloc, &.{ dir_rel, "skills", "demo" });
+    defer alloc.free(skill_dir);
+    try ws.createDirPath(io, skill_dir);
+
+    const manifest_bytes = try std.fmt.allocPrint(alloc,
+        \\{{"schema":"nulya.extension/v2","id":"{s}","contributes":{{"skills":["skills/demo"]}}}}
+    , .{id});
+    defer alloc.free(manifest_bytes);
+    const manifest_rel = try std.fs.path.join(alloc, &.{ dir_rel, "extension.json" });
+    defer alloc.free(manifest_rel);
+    try ws.writeFile(io, .{ .sub_path = manifest_rel, .data = manifest_bytes });
+
+    const skill_md = try std.fmt.allocPrint(alloc, "---\nname: demo\ndescription: {s}\n---\n{s}\n", .{ body, body });
+    defer alloc.free(skill_md);
+    const skill_rel = try std.fs.path.join(alloc, &.{ skill_dir, "SKILL.md" });
+    defer alloc.free(skill_rel);
+    try ws.writeFile(io, .{ .sub_path = skill_rel, .data = skill_md });
 }
 
 // ── M5b: per-step usage on the assistant event (DESIGN §3.1) ────────────────
@@ -1825,7 +1949,9 @@ fn scaffoldAndBuildScript(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, 
     defer alloc.free(script_rel);
     try ws.writeFile(io, .{ .sub_path = script_rel, .data = body });
 
-    var result = try build_ext.buildExtension(alloc, io, ws, ext_dir, "zig-unused-for-scripts");
+    var dest = try ws.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
+    defer dest.close(io);
+    var result = try build_ext.buildExtension(alloc, io, ws, ext_dir, dest, "zig-unused-for-scripts");
     defer result.deinit(alloc);
     if (!result.compile_ok) return error.ExtensionBuildFailed;
     // A script build produces no separate binary artifact.
@@ -1903,7 +2029,9 @@ test "script extension: version id excludes compiler identity and is stable acro
     // exactly "compiler identity is not in the version hash".
     const windows = @import("builtin").os.tag == .windows;
     const ext_dir = if (windows) ".nulya\\extensions\\greeter" else ".nulya/extensions/greeter";
-    var rebuilt = try build_ext.buildExtension(alloc, io, ws, ext_dir, "a-completely-different-zig");
+    var dest = try ws.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
+    defer dest.close(io);
+    var rebuilt = try build_ext.buildExtension(alloc, io, ws, ext_dir, dest, "a-completely-different-zig");
     defer rebuilt.deinit(alloc);
     try std.testing.expect(rebuilt.compile_ok);
     try std.testing.expect(rebuilt.already_built);
