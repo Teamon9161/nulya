@@ -14,6 +14,7 @@ const toolchain = @import("toolchain.zig");
 const ext_skills = @import("extension/skills.zig");
 const notes = @import("extension/notes.zig");
 const tool_stats = @import("tool_stats.zig");
+const outcome = @import("outcome.zig");
 const config = @import("config.zig");
 const ledger = @import("ledger.zig");
 const session = @import("session.zig");
@@ -724,8 +725,47 @@ fn dispatchSession(alloc: std.mem.Allocator, io: std.Io, args: []const []const u
     if (std.mem.eql(u8, sub, "step")) return sessionStep(alloc, io, rest);
     if (std.mem.eql(u8, sub, "events")) return sessionEvents(alloc, io, rest);
     if (std.mem.eql(u8, sub, "cancel")) return sessionCancel(alloc, io, rest);
-    try printErr(io, "unknown `session` subcommand; try new|append|step|events|cancel\n");
+    if (std.mem.eql(u8, sub, "outcome")) return sessionOutcome(alloc, io, rest);
+    try printErr(io, "unknown `session` subcommand; try new|append|step|events|cancel|outcome\n");
     return 1;
+}
+
+/// `nulya session outcome <id> <verdict> [--note <text>]` — record how a session
+/// turned out (DESIGN §3.3). The verdict is a judgment ABOUT the session, not a
+/// turn IN it, so this writes only the outcome journal: it never opens the
+/// session file and never takes its writer lease, which is what lets a session
+/// still running (or being stepped by another process) be judged right now.
+fn sessionOutcome(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+    if (args.len < 2) {
+        try printErr(io, "usage: nulya session outcome <id> <success|partial|failure> [--note <text>]\n");
+        return 1;
+    }
+    const id = args[0];
+    if (!launch.isValidSessionId(id)) {
+        try printErr(io, "invalid session id\n");
+        return 1;
+    }
+    const verdict = outcome.Verdict.parse(args[1]) orelse {
+        try printOut(alloc, io, "invalid verdict '{s}' (want success|partial|failure)\n", .{args[1]});
+        return 1;
+    };
+    const note = flagValue(args[2..], "--note");
+
+    const spath = try launch.sessionPath(alloc, id);
+    defer alloc.free(spath);
+    if (!sessionExists(io, spath)) {
+        try printOut(alloc, io, "no such session '{s}'\n", .{id});
+        return 1;
+    }
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_path = try cwdRealPath(io, &cwd_buf);
+    const at = try launch.rfc3339Now(alloc, io);
+    defer alloc.free(at);
+    try outcome.append(alloc, io, cwd_path, id, verdict, note, at);
+
+    try printOut(alloc, io, "{s}: {s}\n", .{ id, @tagName(verdict) });
+    return 0;
 }
 
 /// Find `--flag <value>` in args; returns the value or null.
@@ -1418,6 +1458,9 @@ fn sessionUsage(io: std.Io) !u8 {
         \\                                                             --stream also emits transient model/tool lines as they happen
         \\  nulya session events <id> [--since N] [--follow]           print events as JSONL (read-only tail)
         \\  nulya session cancel <id>                                  request cancel at the next step boundary
+        \\  nulya session outcome <id> <success|partial|failure> [--note <text>]
+        \\                                                             record how the session turned out (journal only — never
+        \\                                                             touches the session file, so a running one can be judged)
         \\
     );
     return 0;

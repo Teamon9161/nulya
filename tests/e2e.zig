@@ -29,6 +29,7 @@ const composition = support.composition;
 const environment = support.environment;
 const integrity = support.integrity;
 const ledger = support.ledger;
+const outcome = support.outcome;
 const prompt = support.prompt;
 const promotion = support.promotion;
 const protocol = support.protocol;
@@ -103,16 +104,16 @@ test "closed loop: init -> build -> activate -> run round-trips JSON" {
     const request_json = try req.encode(alloc);
     defer alloc.free(request_json);
 
-    const outcome = try lenv.environment().runExtension(alloc, .{
+    const invocation = try lenv.environment().runExtension(alloc, .{
         .entry_path = entry_abs,
         .cwd = ws_path,
         .request_json = request_json,
         .max_output_bytes = 1 << 20,
     });
-    defer outcome.deinit(alloc);
-    try std.testing.expectEqual(@as(u8, 0), outcome.exit_code);
+    defer invocation.deinit(alloc);
+    try std.testing.expectEqual(@as(u8, 0), invocation.exit_code);
 
-    const decoded = try protocol.decodeResponse(alloc, req.id, outcome.stdout);
+    const decoded = try protocol.decodeResponse(alloc, req.id, invocation.stdout);
     defer decoded.deinit(alloc);
     switch (decoded) {
         .result => |json| try std.testing.expect(std.mem.indexOf(u8, json, "greeting") != null),
@@ -1415,6 +1416,82 @@ test "session cli: --stream emits the transient line protocol and leaves the led
     // run's ledger lines appear verbatim in the streamed stdout too.
     try std.testing.expect(std.mem.indexOf(u8, plain.stdout, "\"kind\":\"tool_results\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, plain.stdout, "\"stream\":") == null);
+}
+
+// ── M5a: the session-outcome journal (DESIGN §3.3) ──────────────────────────
+
+test "session cli: outcome appends a verdict to the outcomes journal, rejects a bad verdict and an unknown session, and works while another process holds the session lock" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var ws_real: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
+
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(new.stdout);
+    try std.testing.expectEqual(@as(u8, 0), new.code);
+    const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(id);
+
+    // A verdict is a judgment about the session, not a turn in it: recording one
+    // takes no writer lease, so it works even while another process holds the
+    // session file open as its writer.
+    {
+        const spath = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{id});
+        defer alloc.free(spath);
+        var held = try ledger.openDurable(alloc, io, ws, spath);
+        defer held.deinit();
+        // The lease really is held: a second writer is refused right now.
+        try std.testing.expectError(error.SessionBusy, ledger.openDurable(alloc, io, ws, spath));
+
+        const rec = try runCli(alloc, io, ws, &.{ exe_abs, "session", "outcome", id, "partial", "--note", "tool loop was slow" });
+        defer alloc.free(rec.stdout);
+        try std.testing.expectEqual(@as(u8, 0), rec.code);
+    }
+
+    // A later judgment corrects an earlier one; both lines stay.
+    {
+        const rec = try runCli(alloc, io, ws, &.{ exe_abs, "session", "outcome", id, "success" });
+        defer alloc.free(rec.stdout);
+        try std.testing.expectEqual(@as(u8, 0), rec.code);
+    }
+
+    // A bad verdict and an unknown session are refused without writing anything.
+    {
+        const bad = try runCli(alloc, io, ws, &.{ exe_abs, "session", "outcome", id, "great" });
+        defer alloc.free(bad.stdout);
+        try std.testing.expectEqual(@as(u8, 1), bad.code);
+        const missing = try runCli(alloc, io, ws, &.{ exe_abs, "session", "outcome", "s-nope", "success" });
+        defer alloc.free(missing.stdout);
+        try std.testing.expectEqual(@as(u8, 1), missing.code);
+    }
+
+    const outcomes = try outcome.readAll(alloc, io, ws_path);
+    defer outcome.freeAll(alloc, outcomes);
+    try std.testing.expectEqual(@as(usize, 2), outcomes.len);
+    try std.testing.expectEqualStrings(id, outcomes[0].session);
+    try std.testing.expectEqual(outcome.Verdict.partial, outcomes[0].verdict);
+    try std.testing.expectEqualStrings("tool loop was slow", outcomes[0].note.?);
+    try std.testing.expect(outcomes[1].note == null);
+    // The verdict that stands is the last one, and it is timestamped.
+    const latest = outcome.latestFor(outcomes, id).?;
+    try std.testing.expectEqual(outcome.Verdict.success, latest.verdict);
+    try std.testing.expectEqual(@as(usize, 20), latest.at.len);
+
+    // The session file itself was never touched by any of this.
+    const bytes = try readSessionFile(alloc, io, ws, id);
+    defer alloc.free(bytes);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "outcome") == null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "partial") == null);
 }
 
 // ── M2b: script extensions (DESIGN §7.1) ────────────────────────────────────

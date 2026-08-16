@@ -61,6 +61,7 @@ kernel  = ledger 文件格式 + PromptIR 投影 + 一次 step + 工具执行 + c
 ### M5 · `session_outcome` + 第一个 evolution SKILL.md（§3.7）
 - 要做：可选事件 `session_outcome{ verdict, note? }`（前端 / 用户在 session 尾 append）；`skills/evolution/SKILL.md`（读 ledger 目录 + usage journal → 找重复 / regression / 值得沉淀 → 提案）；用户手动 `nulya session new --skill evolution`。
 - 验收：跑一次真实 evolution session，产出至少一条"别造"的 null result 与一条提案。
+- **执行契约（2026-08-16 定稿，以它为准）：[goals/M5.md](goals/M5.md)。** 相对上面两行的修正：outcome 是第二条 journal（`.nulya/session-outcomes.jsonl`）而非 ledger 事件；`--skill` 由通用的 `session new --with <id>[@<version>]`（把 built 版本钉进一场的 composition，不要求 `current`）吸收；顺带落 per-step usage 进 `assistant` 事件、user 级 store root `~/.nulya/extensions/`、`ext build` 按 manifest id 落 store、`session list --json`；evolution 是仓库带的 data extension（system_prompt + skill），无特权、不 activate、`--with` 带入。
 
 ### M6 · Version-aware evidence（§3.5，原 v0.2 Phase A–E）
 - A usage fact 加可空 `version`（journal v1→v2 兼容读）+ `VersionStats` 投影 → B `VersionCreatedFact{parent, reason}` → C Seal → Verify(sealed) 门 → D `EvaluationEvidence` → E policy 比较 implementation、建议 rollback。

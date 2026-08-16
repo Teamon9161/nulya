@@ -144,7 +144,9 @@ test {
     _ = @import("emit.zig");
     _ = @import("ledger.zig");
     _ = @import("tool.zig");
+    _ = @import("journal.zig");
     _ = @import("tool_stats.zig");
+    _ = @import("outcome.zig");
     _ = @import("tool_selection.zig");
     _ = @import("promotion.zig");
     _ = @import("registry.zig");

@@ -291,6 +291,31 @@ pub fn genSessionId(alloc: std.mem.Allocator, io: std.Io) ![]u8 {
     return std.fmt.allocPrint(alloc, "s-{d}-{x}", .{ now.toMilliseconds(), suffix });
 }
 
+/// The current instant as RFC3339 UTC (`2026-08-16T09:31:00Z`) — what a session
+/// header's `created` and an outcome journal line's `at` record. Second
+/// granularity: these are human-facing timestamps for ordering and reading, not
+/// a measurement. Caller owns the result.
+pub fn rfc3339Now(alloc: std.mem.Allocator, io: std.Io) ![]u8 {
+    const ms = std.Io.Timestamp.now(io, .real).toMilliseconds();
+    return rfc3339FromUnixSeconds(alloc, if (ms < 0) 0 else @intCast(@divFloor(ms, 1000)));
+}
+
+fn rfc3339FromUnixSeconds(alloc: std.mem.Allocator, secs: u64) ![]u8 {
+    const epoch: std.time.epoch.EpochSeconds = .{ .secs = secs };
+    const day = epoch.getEpochDay();
+    const year_day = day.calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const time = epoch.getDaySeconds();
+    return std.fmt.allocPrint(alloc, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
+        year_day.year,
+        month_day.month.numeric(),
+        month_day.day_index + 1,
+        time.getHoursIntoDay(),
+        time.getMinutesIntoHour(),
+        time.getSecondsIntoMinute(),
+    });
+}
+
 /// A valid session id contains only path-safe characters (never `/`, `\`, `..`),
 /// so a caller-supplied id cannot escape the sessions directory.
 pub fn isValidSessionId(id: []const u8) bool {
@@ -311,6 +336,27 @@ test "session id is path-safe and unique-ish" {
     defer alloc.free(a);
     try std.testing.expect(isValidSessionId(a));
     try std.testing.expect(std.mem.startsWith(u8, a, "s-"));
+}
+
+test "rfc3339 renders a UTC instant, and now() is one of them" {
+    const alloc = std.testing.allocator;
+    const zero = try rfc3339FromUnixSeconds(alloc, 0);
+    defer alloc.free(zero);
+    try std.testing.expectEqualStrings("1970-01-01T00:00:00Z", zero);
+
+    const day = try rfc3339FromUnixSeconds(alloc, 1_786_872_667);
+    defer alloc.free(day);
+    try std.testing.expectEqualStrings("2026-08-16T09:31:07Z", day);
+
+    // A leap day is not off by one.
+    const leap = try rfc3339FromUnixSeconds(alloc, 1_709_251_199);
+    defer alloc.free(leap);
+    try std.testing.expectEqualStrings("2024-02-29T23:59:59Z", leap);
+
+    const now = try rfc3339Now(alloc, std.testing.io);
+    defer alloc.free(now);
+    try std.testing.expectEqual(@as(usize, 20), now.len);
+    try std.testing.expectEqual(@as(u8, 'Z'), now[19]);
 }
 
 test "session id validation rejects traversal" {

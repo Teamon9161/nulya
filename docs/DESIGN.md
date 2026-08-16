@@ -107,7 +107,14 @@ capability_note  { id, version, text }                                  ← 中�
 
 ### 3.3 派生视图
 
-UI / trajectory / metrics 是 ledger 的投影，不持久化 mutable 状态。**工具使用统计走另一条日志**（`.nulya/tool-usage.jsonl`，§5.5）——`nulya ext run` 在没有对话的纯 CLI 调用里也会产生 usage 事实，塞进 conversation ledger 会污染 prompt 前缀。原则相同：**persist facts, derive stats**。
+UI / trajectory / metrics 是 ledger 的投影，不持久化 mutable 状态。**证据走 ledger 之外的 journal**，共两条，都是 append-only JSONL、都在 `.nulya/` 下、共用同一套文件纪律（`journal.zig`：一行一条、append 前修残尾、文件不存在 = 还没有事实；schema 各自持有）：
+
+| journal | 一行 | 谁写 | 为什么不是 ledger 事件 |
+|---|---|---|---|
+| `.nulya/tool-usage.jsonl`（§5.5） | `{"v":1,"tool_id":…,"ok":…}` | session 每个 completed step；`nulya ext run` | 纯 CLI 调用没有对话，塞进 ledger 会污染 prompt 前缀 |
+| `.nulya/session-outcomes.jsonl` | `{"v":1,"session":"s-…","verdict":"success\|partial\|failure","note":…?,"at":"<RFC3339 UTC>"}` | 人经 `nulya session outcome`（§14） | session 尾往往没有下一个 step 来排干 inbox；verdict 是**关于**这场 session 的判断、不是其中一轮；不给 `prompt.zig` 开"存了但不投影"的事件种类 |
+
+原则相同：**persist facts, derive stats**。outcome 的三条语义：**没有行 = unknown ≠ failure**；同一 session 可多行，**最后一条作数**（纠正也是 append，`outcome.latestFor`）；**不记 `source`**——今天只有人写，将来 driver 自动记时再加字段，届时"无 `source` 的 v1 行 = 人评"。`session outcome` 不碰 session 文件、不拿 `<id>.lock`，所以正在被 `step` 的 session 也能当场评。
 
 ### 3.4 Durable session 文件（generation == 文件）
 
@@ -477,6 +484,8 @@ nulya session new [--profile P] [--model ID] [--parent <id>:<seq>]
                                                          ← 跑到本 turn 结束或预算耗尽；stdout = 本次 append 的事件 JSONL（`--stream` 见下）
           | events <id> [--since N] [--follow]           ← 只读 tail 原始事件行（follow 轮询）
           | cancel <id>                                  ← 写 cancel 标记，下一 step 边界消化
+          | outcome <id> <success|partial|failure> [--note <text>]
+                                                         ← 记一条 verdict 进 outcome journal（§3.3）；只写 journal
 nulya config show [--json]                               ← 有效配置链的投影：profiles（含 credential 是否可用）+ 模型目录；无 secret
 nulya src [path] [--tests]                               ← 打印本二进制内嵌的 src 源码（无参数 = 列全树）
 nulya skill list | load <pinned-ref>
@@ -490,6 +499,7 @@ nulya                       ← 无参数：固定 prompt demo（现经 durable 
 
 - `nulya src`：build.zig 把整个 `src/**` `@embedFile` 进二进制（源码 ~200KB，紧挨 ~90MB 工具链，恒开无 gate）；`nulya src <path>` 按 `src/` 相对路径打印（`prompt.zig`、`extension/store.zig`），**默认剥 top-level `test` 块**（读结构/契约时不付测试 token），`--tests`/`--raw` 打印原样（Zig 风格参照）。剥离靠 zig-fmt 不变量：顶层 decl 的收尾 `}` 在第 0 列，无需 tokenizer（`source.zig`）。测试留在文件里（Zig 惯例、人可读、风格参照），改的只是**投影**不是**存储**——`src/` 一字未动。
 - `nulya ext api`：协议 topic 现在**打印真实 `extension/protocol.zig` 源码**（是 `nulya src` 的特例），wire ABI 与实现代码零漂移；`permissions` / `examples` 仍是短说明（策略与 CLI 用法，不随代码漂）。
+- `nulya session outcome <id> <verdict> [--note …]`：校验 id 形状与 session 文件存在、校验 verdict，然后**只**往 `.nulya/session-outcomes.jsonl` append 一行（§3.3）。它**不打开 session 文件、不拿 `<id>.lock`**——verdict 是关于这场 session 的判断而不是其中一轮，所以正在跑 `step` 的 session 也能当场评；同一 session 可以评多次，最后一条作数。
 - `nulya session *` 是**唯一**的 session 驱动面：没有 `setTools / setModel / replaceHistory`，换 composition = `session new`。每个子命令是对 durable session 文件（§3.4）的一次独立进程调用，其中**只有 `step` 写主文件**：`append` / `cancel` 投递到 `<id>.inbox/` / `<id>.cancel`（所以正在跑的 `step` 会在它的下一个 step 边界拿到 mid-run 的 append 或 cancel），`events` 是只读 tail（不解析、不重编码——文件本身就是 wire format）。`step` 的预算 `min(--max-steps, session.max_steps_ceiling)` **由 kernel 在 `AgentSession.run` 强制**，driver 只能调低不能调高；`--max-steps` 必须是正整数。session 就是它的文件，没有 `close`。
 - **`session step --stream`：纯观测的行协议**（前端唯一需要的内核改动，tui.md §2.2 → 已落地）。语义与不带 `--stream` 完全相同（同一 `AgentSession.run`、同一预算夹取、同一 cancel 消化、**同一 ledger**）；区别只是 stdout **在跑的过程中**逐行输出，而不是跑完一次性输出。
   - 机制是 `loop.StepContext.observer`（可选 `StepObserver{ptr,vtable}`）。observer **无权力**：四个回调全部返回 `void`、只拿只读视图，所以它不能 append、不能改 model-visible 状态、不能让一个 step 失败——带 observer 的 step 与不带的走同一条路径（physics #1/#3）。回调点：`runStepWithPrompt` 把 provider 流 **tee** 给 observer 再交给 `TurnCollector`；`execOne` 前后各一次（未被派发的尾部调用两个回调都不发）；`AgentSession.step` 在 step 边界一次（含 canceled）。
