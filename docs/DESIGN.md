@@ -90,7 +90,7 @@ Ledger ──projection──▶ PromptIR { system_blocks, stable_blocks }
 
 ```
 user_text        []const u8
-assistant        { reasoning, text, calls: []ToolCall{id, tool, args_json} }
+assistant        { reasoning, text, calls: []ToolCall{id, tool, args_json}, usage? }
 tool_results     []ToolResultEntry{call_id, ok, output, spill_path?}   ← 一条事件 = 一整批
 capability_note  { id, version, text }                                  ← 中途新增能力的宣告（§5.3）
 ```
@@ -98,6 +98,8 @@ capability_note  { id, version, text }                                  ← 中�
 事件字母表**可加不可改**：现有四种保留原字段。`seq` 是文件落盘时的 envelope 字段（§3.4），不属于事件负载。
 
 **`assistant.reasoning` 是不透明字段，不是第五种事件。** 它是 provider 原样吐出的本轮 reasoning item 的 JSON 数组（Anthropic 的带 signature 的 `thinking` / `redacted_thinking` block、Responses 的带 `encrypted_content` 的 `reasoning` item），没有则为 `""`。它是本轮的**事实**（模型确实产出了这段、且下一步要原样带回），不是模型可见文本：kernel 从不解析它，投影成一个 `reasoning` block 交回 provider，provider 只在自己认得（`ProviderCapabilities.thinking_replay`）时按原样回放到**同一个模型**——它天然 model-locked，而 session 的 `model_identity` 已冻结（§3.4），所以别的模型永远看不到它。为什么必须有它：Anthropic 一方端点在 thinking 开着时**拒绝**丢了 thinking block 的 tool-use turn（400，而 Opus 5 默认开、Fable 5 只能开），Responses 端点不带则模型每一步重推上一步的计划——前者是正确性，后者是质量与 token；两者都不是 kernel 该替 provider 决定的，kernel 只负责把这个事实存住、按序交回。落盘时只在非空才写 `reasoning` 字段（老行形状不变，老行读回为 `""`）。
+
+**`assistant.usage` 与 `reasoning` 同地位：本轮的事实，不投影。** `?Usage{input_tokens, output_tokens, cache_read_tokens, cache_write_tokens}`（`ledger.Usage`，ledger 不 import `provider.zig`——依赖方向反过来），由 `loop.zig` 从 `ModelTurn.usage` 写入。落盘只在**非空**时写 `usage` 对象：provider 什么都没报（scripted 替身、流中途取消）时整条不写，老行读回 `null`——"没记录"与"花了 0"是两个不同的事实。**prompt.zig 不投影它**：模型不读自己的账单；它是给慢速回路与前端的成本证据（`session events` / `--stream` 的 ledger 行天然带上，`session list --json` 按它求和）。provider 阶段就被取消的 step 没有 assistant 事件可挂，其 usage 不落盘——诚实接受，不为它造新事件。
 
 ### 3.2 API（硬性）
 
@@ -123,12 +125,12 @@ UI / trajectory / metrics 是 ledger 的投影，不持久化 mutable 状态。*
 ```jsonl
 {"kind":"header","v":1,"session":"s-…","parent":{"session":"s-…","seq":41}|null,"model":"openai","model_identity":{"provider":"openai","model":"gpt-4o-mini","base_url":"https://…","api_key_env":"OPENAI_API_KEY"},"created":"…","composition":{"active":[{"id":"web.search","version":"v-…"}],"native_tools":["ext:web.search/web_search"]}}
 {"seq":1,"origin":"msg-….json","kind":"user_text","text":"…"}
-{"seq":2,"kind":"assistant","reasoning":"[{\"type\":\"thinking\",…}]","text":"…","calls":[{"id":"…","tool":"…","args":"…"}]}
+{"seq":2,"kind":"assistant","reasoning":"[{\"type\":\"thinking\",…}]","text":"…","calls":[{"id":"…","tool":"…","args":"…"}],"usage":{"input_tokens":1200,"output_tokens":80,"cache_read_tokens":1100,"cache_write_tokens":0}}
 {"seq":3,"kind":"tool_results","results":[{"call_id":"…","ok":true,"output":"…","spill_path":null}]}
 {"seq":4,"origin":"note-….json","kind":"capability_note","id":"…","version":"…","text":"…"}
 ```
 
-（`origin` 只出现在经 inbox 排干进来的事件行上，是投递去重列，绝不投影给模型；见"单写者"条。`reasoning` 只在该 turn 有 reasoning 时出现，值是 provider 数组转义成的一个 JSON 字符串——ledger 只存不解析。）
+（`origin` 只出现在经 inbox 排干进来的事件行上，是投递去重列，绝不投影给模型；见"单写者"条。`reasoning` 只在该 turn 有 reasoning 时出现，值是 provider 数组转义成的一个 JSON 字符串——ledger 只存不解析；`usage` 只在 provider 报了成本时出现，两者都不投影。）
 
 - **一个文件 = 一个 generation = 一个 cache scope。** 文件只 append，所以 PromptIR 的 stable-block 前缀不变量（§1）成了文件系统性质。没有会 bump generation 的事件（§11）。
 - **header 的 JSON 形状就是 `ledger.Header` 结构体**（`std.json` 类型化编解码，`OwnedHeader = std.json.Parsed(Header)`）；读端忽略未知字段，所以新写者多出的字段不破坏旧读者。事件行保持平铺的 `kind` 形状（driver 读起来方便），解码经 `WireEvent`。

@@ -1418,6 +1418,117 @@ test "session cli: --stream emits the transient line protocol and leaves the led
     try std.testing.expect(std.mem.indexOf(u8, plain.stdout, "\"stream\":") == null);
 }
 
+// ── M5b: per-step usage on the assistant event (DESIGN §3.1) ────────────────
+
+/// A model that prices every turn, so the ledger has a real cost to record.
+const PricedModel = struct {
+    step_no: usize = 0,
+
+    fn name(ptr: *anyopaque) []const u8 {
+        _ = ptr;
+        return "priced";
+    }
+    fn modelName(ptr: *anyopaque) []const u8 {
+        _ = ptr;
+        return "priced";
+    }
+    fn capabilities(ptr: *anyopaque) provider.ProviderCapabilities {
+        _ = ptr;
+        return .{};
+    }
+    fn stream(ptr: *anyopaque, alloc: std.mem.Allocator, request: provider.Request, sink: provider.EventSink) anyerror!void {
+        _ = alloc;
+        _ = request;
+        const self: *PricedModel = @ptrCast(@alignCast(ptr));
+        const n = self.step_no;
+        self.step_no += 1;
+        try sink.emit(.started);
+        try sink.emit(.{ .text_delta = "priced turn" });
+        try sink.emit(.{ .usage = .{
+            .input_tokens = 1000 + n,
+            .output_tokens = 10 + n,
+            .cache_read_tokens = 900,
+            .cache_write_tokens = 0,
+        } });
+        try sink.emit(.{ .done = .end_turn });
+    }
+    const vtable: provider.Model.VTable = .{
+        .name = name,
+        .modelName = modelName,
+        .capabilities = capabilities,
+        .stream = stream,
+    };
+};
+
+test "durable ledger: assistant events carry per-step usage, legacy lines read as absent, and PromptIR blocks are unchanged" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io; // PricedModel issues no tool calls, so no async shell.
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var ws_real: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
+    try ws.createDirPath(io, sessions_dir_rel);
+
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+    var model = PricedModel{};
+    const opts: session.AgentSession.Options = .{
+        .model = .{ .ptr = &model, .vtable = &PricedModel.vtable },
+        .step_ctx = .{
+            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = ws_path },
+            .scratch_dir = ".nulya/scratch",
+        },
+    };
+
+    var flat_priced: []u8 = undefined;
+    {
+        var sess = try session.AgentSession.createDurable(alloc, opts, .{
+            .workspace = ws,
+            .session_path = session_file_rel,
+            .session_id = "s",
+        });
+        defer sess.deinit();
+        try sess.appendUser("go");
+        _ = try sess.step();
+
+        const priced = sess.l.view()[1].assistant.usage.?;
+        try std.testing.expectEqual(@as(u64, 1000), priced.input_tokens);
+        try std.testing.expectEqual(@as(u64, 900), priced.cache_read_tokens);
+
+        const ir = try prompt.projectWithSystem(alloc, sess.composition.system_prompts.blocks, sess.l.view());
+        defer ir.deinit(alloc);
+        flat_priced = try flattenIR(alloc, ir);
+    }
+    defer alloc.free(flat_priced);
+
+    // It is on the line, and it survives a reopen by another process.
+    const bytes = try readSessionFile(alloc, io, ws, "s");
+    defer alloc.free(bytes);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"usage\":{\"input_tokens\":1000,\"output_tokens\":10,\"cache_read_tokens\":900,\"cache_write_tokens\":0}") != null);
+
+    var reopened = try session.AgentSession.openDurable(alloc, opts, .{ .workspace = ws, .session_path = session_file_rel });
+    defer reopened.deinit();
+    try std.testing.expectEqual(@as(u64, 1000), reopened.l.view()[1].assistant.usage.?.input_tokens);
+
+    // Cost is a fact about the turn, not model-visible text: the projected
+    // blocks are identical to those of the same conversation with no usage at
+    // all — which is also how every pre-M5b line still reads back.
+    var plain = ledger.Ledger.init(alloc);
+    defer plain.deinit();
+    for (reopened.l.view()) |e| switch (e) {
+        .assistant => |as| try plain.append(.{ .assistant = .{ .reasoning = as.reasoning, .text = as.text, .calls = as.calls } }),
+        else => try plain.append(e),
+    };
+    const ir_plain = try prompt.projectWithSystem(alloc, reopened.composition.system_prompts.blocks, plain.view());
+    defer ir_plain.deinit(alloc);
+    const flat_plain = try flattenIR(alloc, ir_plain);
+    defer alloc.free(flat_plain);
+    try std.testing.expectEqualStrings(flat_plain, flat_priced);
+    try std.testing.expect(plain.view()[1].assistant.usage == null);
+}
+
 // ── M5a: the session-outcome journal (DESIGN §3.3) ──────────────────────────
 
 test "session cli: outcome appends a verdict to the outcomes journal, rejects a bad verdict and an unknown session, and works while another process holds the session lock" {
