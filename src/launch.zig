@@ -42,7 +42,7 @@ pub fn sessionScratchDir(alloc: std.mem.Allocator, id: []const u8) ![]u8 {
 }
 
 /// A deterministic, terminating scripted provider — the offline stand-in for a
-/// real model (DESIGN §13). Three modes, selected by `NULYA_SCRIPTED_MODE`:
+/// real model (DESIGN §13). Four modes, selected by `NULYA_SCRIPTED_MODE`:
 ///
 ///   finish (default): make one `shell` call, then end the turn once a tool
 ///                     result is already in the transcript. A turn completes in
@@ -52,10 +52,30 @@ pub fn sessionScratchDir(alloc: std.mem.Allocator, id: []const u8) ![]u8 {
 ///   truncate:         every reply is cut by `max_tokens` mid tool call (a torn
 ///                     JSON prefix, then `done: max_tokens`), so the loop's
 ///                     truncated-turn path and `run`'s streak stop are testable.
+///   handoff:          play a two-phase goal: call the `handoff` tool once (a
+///                     complete brief), and end the turn in the session that
+///                     was forked from it. That makes the whole /goal loop —
+///                     model proposes, driver forks, work continues in the child
+///                     — testable with no network and no real model.
 pub const ScriptedProvider = struct {
     mode: Mode = .finish,
 
-    pub const Mode = enum { finish, loop, truncate };
+    pub const Mode = enum { finish, loop, truncate, handoff };
+
+    /// The fixed brief the `handoff` mode proposes. Three complete sections, so
+    /// the real bundled tool accepts it, with a sentinel a test can follow all
+    /// the way from this call to the child session's first turn.
+    pub const handoff_sentinel = "PHASE-2-SENTINEL";
+    const handoff_args =
+        \\{"done":"Phase 1 is finished: read the map and listed what matters.","next_task":"Phase 2: PHASE-2-SENTINEL — write the note and stop.","keep":"The sentinel PHASE-2-SENTINEL identifies this handover."}
+    ;
+
+    /// The marker a carried brief starts with. Seeing it means this session was
+    /// forked from another one — the second phase — so the scripted model has
+    /// nothing left to hand off and simply answers. Spelled out here rather than
+    /// imported: the marker's source is `extensions/compact`, which is a
+    /// separate artifact that this offline stand-in only has to agree with.
+    const summary_marker = "<nulya:context-summary>";
 
     pub fn fromEnv(env: *const std.process.Environ.Map) ScriptedProvider {
         const m = env.get("NULYA_SCRIPTED_MODE") orelse "";
@@ -95,6 +115,27 @@ pub const ScriptedProvider = struct {
             try sink.emit(.{ .done = .max_tokens });
             return;
         }
+        if (self.mode == .handoff) {
+            // The handoff already happened this turn (its result is in the
+            // transcript): say so and stop, so a parent that gets stepped again
+            // still terminates instead of proposing a second handover.
+            if (hasToolResult(request.prompt_ir.turns)) {
+                try sink.emit(.{ .text_delta = "handoff proposed" });
+                try sink.emit(.{ .done = .end_turn });
+                return;
+            }
+            // A carried brief means this IS the next phase. Do the work (there
+            // is none to script) and end — the goal is complete in the child.
+            if (hasCarriedBrief(request.prompt_ir.turns)) {
+                try sink.emit(.{ .text_delta = "done" });
+                try sink.emit(.{ .done = .end_turn });
+                return;
+            }
+            try sink.emit(.{ .tool_use_start = .{ .index = 0, .id = "h1", .name = "handoff" } });
+            try sink.emit(.{ .tool_use_input_delta = .{ .index = 0, .fragment = handoff_args } });
+            try sink.emit(.{ .done = .tool_use });
+            return;
+        }
 
         try sink.emit(.{ .text_delta = "Let me probe the environment." });
         try sink.emit(.{ .tool_use_start = .{ .index = 0, .id = "c1", .name = "shell" } });
@@ -114,6 +155,17 @@ fn hasToolResult(turns: []const prompt.Turn) bool {
     for (turns) |turn| {
         if (turn == .tool_results) return true;
     }
+    return false;
+}
+
+/// Does this transcript open on a brief carried in from another session? A fork
+/// deposits it as an ordinary `user_text`, so "which phase am I in" is a
+/// property of the projection, exactly as it is for a real model.
+fn hasCarriedBrief(turns: []const prompt.Turn) bool {
+    for (turns) |turn| switch (turn) {
+        .user_text => |text| if (std.mem.startsWith(u8, text, ScriptedProvider.summary_marker)) return true,
+        else => {},
+    };
     return false;
 }
 
@@ -728,6 +780,65 @@ test "scripted provider mode comes from the environment" {
     try std.testing.expectEqual(ScriptedProvider.Mode.finish, ScriptedProvider.fromEnv(&env).mode);
     try env.put("NULYA_SCRIPTED_MODE", "loop");
     try std.testing.expectEqual(ScriptedProvider.Mode.loop, ScriptedProvider.fromEnv(&env).mode);
+    try env.put("NULYA_SCRIPTED_MODE", "handoff");
+    try std.testing.expectEqual(ScriptedProvider.Mode.handoff, ScriptedProvider.fromEnv(&env).mode);
+}
+
+/// Collect one scripted turn against a hand-built transcript, exactly as the
+/// loop does. Caller owns the result (`ModelTurn.deinit`).
+fn scriptedTurn(alloc: std.mem.Allocator, mode: ScriptedProvider.Mode, turns: []const prompt.Turn) !provider.ModelTurn {
+    var scripted: ScriptedProvider = .{ .mode = mode };
+    var collector: provider.TurnCollector = .init(alloc);
+    defer collector.deinit();
+    const ir: prompt.PromptIR = .{ .system_blocks = &.{}, .turns = turns };
+    try scripted.handle().stream(alloc, .{ .prompt_ir = &ir, .tools = &.{} }, collector.sink());
+    return collector.finish();
+}
+
+test "the scripted handoff mode plays a two-phase goal: propose, then stop, then work in the child" {
+    const alloc = std.testing.allocator;
+
+    // Phase 1, first step: nothing in the transcript but the goal — propose the
+    // handover, with a brief the real bundled tool would accept.
+    {
+        const turn = try scriptedTurn(alloc, .handoff, &.{.{ .user_text = "reach the goal" }});
+        defer turn.deinit(alloc);
+        try std.testing.expectEqual(@as(usize, 1), turn.calls.len);
+        try std.testing.expectEqualStrings("handoff", turn.calls[0].tool);
+        try std.testing.expect(std.mem.indexOf(u8, turn.calls[0].args_json, ScriptedProvider.handoff_sentinel) != null);
+        // The brief is complete, so the real bundled tool would accept it.
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, turn.calls[0].args_json, .{});
+        defer parsed.deinit();
+        for ([_][]const u8{ "done", "next_task", "keep" }) |field| {
+            try std.testing.expect(parsed.value.object.get(field).?.string.len > 0);
+        }
+    }
+
+    // Phase 1, stepped again (the driver did not fork): the tool result is in
+    // the transcript, so it says so and ends rather than handing off twice.
+    {
+        const results = [_]prompt.ToolResult{.{ .call_id = "h1", .ok = true, .output = "{}" }};
+        const turn = try scriptedTurn(alloc, .handoff, &.{
+            .{ .user_text = "reach the goal" },
+            .{ .tool_results = &results },
+        });
+        defer turn.deinit(alloc);
+        try std.testing.expectEqual(@as(usize, 0), turn.calls.len);
+        try std.testing.expectEqualStrings("handoff proposed", turn.text);
+        try std.testing.expectEqual(provider.StopReason.end_turn, turn.stop_reason);
+    }
+
+    // Phase 2: the forked child opens on the carried brief, so there is nothing
+    // left to hand off — it answers and the goal is done.
+    {
+        const turn = try scriptedTurn(alloc, .handoff, &.{
+            .{ .user_text = ScriptedProvider.summary_marker ++ "\ncarry on" },
+        });
+        defer turn.deinit(alloc);
+        try std.testing.expectEqual(@as(usize, 0), turn.calls.len);
+        try std.testing.expectEqualStrings("done", turn.text);
+        try std.testing.expectEqual(provider.StopReason.end_turn, turn.stop_reason);
+    }
 }
 
 test "only the local environment backend runs; sandbox / remote are refused, not silently localized" {
