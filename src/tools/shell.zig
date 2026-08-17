@@ -118,9 +118,21 @@ test "a command that outruns its timeout_ms is killed and reported, not waited o
 
     // Print first, then sleep far past the budget: the output above the kill must
     // come back with the result (base-tools.md §3), not be thrown away.
+    //
+    // The budget has to clear the INTERPRETER's own startup, not just the
+    // command's: nothing is written until the shell is up, and the kill does not
+    // wait for that. Measured on this project's development machine, `bash -lc
+    // "echo …; sleep 5"` through the Git Bash launcher takes 268-425 ms (n=15,
+    // mean 309) to put its first byte in the pipe — so the 300 ms this test used
+    // to allow sat inside that spread, and roughly one run in eight killed the
+    // child before `echo` had run at all. That was the test asserting an ordering
+    // the OS never promised it, not output being lost after the write: with the
+    // budget clear of startup the marker is there every time. Keep it well above
+    // interpreter startup and well below the command's own sleep — both bounds
+    // are what the assertions below read.
     const args_json = switch (lenv.dialect_val) {
-        .bash => "{\"command\":\"echo before-the-wait; sleep 5\",\"timeout_ms\":300}",
-        .powershell => "{\"command\":\"Write-Output before-the-wait; Start-Sleep -Seconds 5\",\"timeout_ms\":300}",
+        .bash => "{\"command\":\"echo before-the-wait; sleep 5\",\"timeout_ms\":1500}",
+        .powershell => "{\"command\":\"Write-Output before-the-wait; Start-Sleep -Seconds 5\",\"timeout_ms\":1500}",
     };
 
     const started = std.Io.Timestamp.now(io, .awake);
@@ -131,12 +143,12 @@ test "a command that outruns its timeout_ms is killed and reported, not waited o
     defer alloc.free(res.output);
     const elapsed_ms = started.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds();
 
-    // The budget is what ended it, not the command: well under the 5s sleep.
-    // Measured at ~304ms for a 300ms budget under Git Bash; it was ~5000ms
-    // before the tree kill, which is exactly the regression this pins.
+    // The budget is what ended it, not the command: startup plus 1500ms lands
+    // around 1.8s, well under the 5s sleep. It was ~5000ms before the tree kill,
+    // which is exactly the regression this pins.
     try std.testing.expect(elapsed_ms >= 0 and elapsed_ms < 4000);
     try std.testing.expect(!res.ok);
-    try std.testing.expect(std.mem.indexOf(u8, res.output, "timed out after 300 ms") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.output, "timed out after 1500 ms") != null);
     try std.testing.expect(std.mem.indexOf(u8, res.output, "output above is partial") != null);
     try std.testing.expect(std.mem.indexOf(u8, res.output, "before-the-wait") != null);
     try std.testing.expect(std.mem.indexOf(u8, res.output, "[exit 1]") != null);
