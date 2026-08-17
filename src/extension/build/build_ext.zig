@@ -245,6 +245,39 @@ fn testZigExe(alloc: std.mem.Allocator) ![]u8 {
     return try alloc.dupe(u8, "zig");
 }
 
+/// Fail a test on a rejected compile with the compiler's own diagnostics. A bare
+/// `error.ExtensionBuildFailed` says only that `zig build-exe` exited non-zero,
+/// which is unactionable when the failure is intermittent (a locked output file,
+/// a toolchain that is not there) rather than a real source error.
+fn expectCompiled(label: []const u8, result: BuildResult) !void {
+    if (result.compile_ok) return;
+    std.debug.print("{s} build did not compile:\n{s}\n", .{ label, result.stderr });
+    return error.ExtensionBuildFailed;
+}
+
+/// A destination store the two COMPILING tests below share across runs. Their
+/// subject is the version id, not the compile: both need two real builds of a
+/// trivial program to compare, and a real build is a real `zig build-exe`
+/// (~7s each, four of them in this file).
+///
+/// A version is content-addressed and immutable, so pointing them at a store
+/// that outlives the process costs the compiles exactly once per snapshot: the
+/// next run finds the same version already built and `buildExtension` answers
+/// `already_built` without spending a compiler. Nothing is assumed about what is
+/// in there — a version that no longer validates is deleted and rebuilt by the
+/// same code path any user's store takes, a toolchain change gives every version
+/// a new id, and deleting `.zig-cache` is the reset.
+///
+/// The DRAFT still lives in each test's own fresh tmp dir; only the store the
+/// frozen version lands in is shared, and neither test looks inside it. Caller
+/// closes the handle.
+fn sharedVersionStore(io: std.Io) !std.Io.Dir {
+    const rel = ".zig-cache" ++ std.fs.path.sep_str ++ "nulya-unit-versions";
+    const cwd = std.Io.Dir.cwd();
+    try cwd.createDirPath(io, rel);
+    return cwd.openDir(io, rel, .{});
+}
+
 test "missing manifest is a clear error" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -338,14 +371,16 @@ test "runtime helper source changes the version id" {
 
     const zig_exe = try testZigExe(alloc);
     defer alloc.free(zig_exe);
-    var first = try buildExtension(alloc, io, tmp.dir, "ext", tmp.dir, zig_exe);
+    var dest = try sharedVersionStore(io);
+    defer dest.close(io);
+    var first = try buildExtension(alloc, io, tmp.dir, "ext", dest, zig_exe);
     defer first.deinit(alloc);
-    if (!first.compile_ok) return error.ExtensionBuildFailed;
+    try expectCompiled("first", first);
 
     try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ "src" ++ std.fs.path.sep_str ++ "helper.zig", .data = "pub const value = 2;\n" });
-    var second = try buildExtension(alloc, io, tmp.dir, "ext", tmp.dir, zig_exe);
+    var second = try buildExtension(alloc, io, tmp.dir, "ext", dest, zig_exe);
     defer second.deinit(alloc);
-    if (!second.compile_ok) return error.ExtensionBuildFailed;
+    try expectCompiled("second", second);
 
     try std.testing.expect(!std.mem.eql(u8, first.version, second.version));
 }
@@ -391,14 +426,16 @@ test "source tests directory participates in the version id" {
 
     const zig_exe = try testZigExe(alloc);
     defer alloc.free(zig_exe);
-    var first = try buildExtension(alloc, io, tmp.dir, "ext", tmp.dir, zig_exe);
+    var dest = try sharedVersionStore(io);
+    defer dest.close(io);
+    var first = try buildExtension(alloc, io, tmp.dir, "ext", dest, zig_exe);
     defer first.deinit(alloc);
-    if (!first.compile_ok) return error.ExtensionBuildFailed;
+    try expectCompiled("first", first);
 
     try tmp.dir.writeFile(io, .{ .sub_path = test_rel, .data = "two\n" });
-    var second = try buildExtension(alloc, io, tmp.dir, "ext", tmp.dir, zig_exe);
+    var second = try buildExtension(alloc, io, tmp.dir, "ext", dest, zig_exe);
     defer second.deinit(alloc);
-    if (!second.compile_ok) return error.ExtensionBuildFailed;
+    try expectCompiled("second", second);
 
     try std.testing.expect(!std.mem.eql(u8, first.version, second.version));
 }
