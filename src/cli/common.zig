@@ -11,6 +11,7 @@ const roots_mod = @import("../extension/roots.zig");
 const config = @import("../config.zig");
 const composition = @import("../composition.zig");
 const launch = @import("../launch.zig");
+const environment = @import("../environment.zig");
 
 /// The ordered store roots this invocation searches (DESIGN §7.2), opened once.
 /// Every `ext` / `skill` command goes through this instead of assuming the
@@ -37,7 +38,7 @@ pub const RootSearch = struct {
 /// Resolve the ordered root specs from the environment + config chain. Caller
 /// owns the result (`launch.freeExtensionRoots`).
 pub fn rootSpecs(alloc: std.mem.Allocator, io: std.Io) ![]const []const u8 {
-    var host = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    var host = try environment.hostEnvironMap(alloc);
     defer host.deinit();
     var cfg = try config.load(alloc, io, &host);
     defer cfg.deinit();
@@ -49,7 +50,7 @@ pub fn rootSpecs(alloc: std.mem.Allocator, io: std.Io) ![]const []const u8 {
 /// owns the result.
 pub fn writeRootSpec(alloc: std.mem.Allocator, user: bool) !?[]u8 {
     if (!user) return try alloc.dupe(u8, store.workspace_root_rel);
-    var host = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    var host = try environment.hostEnvironMap(alloc);
     defer host.deinit();
     return launch.userExtensionsRoot(alloc, &host);
 }
@@ -96,7 +97,7 @@ pub fn targetRootSpec(
 /// shell children (DESIGN §5.3), so anything the model runs can name the session
 /// it is in without being told. Caller owns the result.
 pub fn envSessionId(alloc: std.mem.Allocator) !?[]u8 {
-    var host = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    var host = try environment.hostEnvironMap(alloc);
     defer host.deinit();
     const path = host.get("NULYA_SESSION") orelse return null;
     const stem = std.fs.path.stem(path);
@@ -122,7 +123,10 @@ pub fn withRef(spec: []const u8) composition.WithRef {
 }
 
 pub fn cwdRealPath(io: std.Io, buf: *[std.fs.max_path_bytes]u8) ![]u8 {
-    const len = try std.Io.Dir.cwd().realPath(io, buf);
+    // Not `Dir.cwd().realPath`: that resolves the handle through
+    // /proc/self/fd/<fd>, and cwd()'s handle is the AT_FDCWD sentinel, which
+    // is not an fd (std 0.16 turns it into FileNotFound).
+    const len = try std.process.currentPath(io, buf);
     return buf[0..len];
 }
 

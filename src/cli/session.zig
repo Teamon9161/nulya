@@ -508,7 +508,7 @@ fn sessionNew(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
 /// the bare-`nulya` demo is its other caller, so the two cannot drift on how a
 /// session is composed (DESIGN §14).
 pub fn createSession(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !?[]u8 {
-    var host = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    var host = try environment.hostEnvironMap(alloc);
     defer host.deinit();
     var cfg = try config.load(alloc, io, &host);
     defer cfg.deinit();
@@ -641,11 +641,13 @@ pub fn createSession(alloc: std.mem.Allocator, io: std.Io, args: []const []const
 
     // A placeholder handle is enough since `new` never steps.
     var holder: launch.ModelHolder = .{ .scripted = .{} };
+    const scratch = try launch.sessionScratchDir(alloc, id);
+    defer alloc.free(scratch);
     var sess = session.AgentSession.createDurable(alloc, .{
         .model = holder.model(),
         .step_ctx = .{
             .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd_path },
-            .scratch_dir = launch.scratch_dir,
+            .scratch_dir = scratch,
         },
         .extension_roots = ext_roots,
         .registry = .{
@@ -1075,7 +1077,7 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     const spath = try launch.sessionPath(alloc, id);
     defer alloc.free(spath);
 
-    var host = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    var host = try environment.hostEnvironMap(alloc);
     defer host.deinit();
 
     var hdr = ledger.readHeader(alloc, io, std.Io.Dir.cwd(), spath) catch |err| {
@@ -1135,11 +1137,13 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     const ext_roots = try launch.extensionRoots(alloc, &host, &cfg);
     defer launch.freeExtensionRoots(alloc, ext_roots);
 
+    const scratch = try launch.sessionScratchDir(alloc, id);
+    defer alloc.free(scratch);
     var sess = session.AgentSession.openDurable(alloc, .{
         .model = holder.model(),
         .step_ctx = .{
             .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd_path },
-            .scratch_dir = launch.scratch_dir,
+            .scratch_dir = scratch,
             .retry = cfg.provider.retry,
             .observer = if (stream) |s| s.observer() else null,
         },

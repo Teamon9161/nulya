@@ -172,6 +172,14 @@ pub const StepOutputLimiter = struct {
         };
     }
 
+    /// Charge one result against the step budget, in batch order. The budget
+    /// bounds result BODIES; it never decides which results the model gets to
+    /// see — a batch's most important error may be its last. A result that no
+    /// longer fits keeps, whichever is smaller, its own text verbatim or a head
+    /// prefix ending in a COMPLETE pointer to the full bytes on disk. The
+    /// footer is the per-result floor and is not charged to the budget, so one
+    /// step's visible tool text is bounded by `max_bytes` plus at most one
+    /// footer per call.
     pub fn apply(
         self: *StepOutputLimiter,
         alloc: std.mem.Allocator,
@@ -180,67 +188,66 @@ pub const StepOutputLimiter = struct {
         output: *[]const u8,
         spill_path: *?[]const u8,
     ) !void {
-        const max = self.budget.max_bytes;
-        if (self.used >= max) {
-            if (spill_path.* == null) spill_path.* = try writeStepSpill(alloc, self.io, output.*, tool_name, self.event_seq, call_index, self.scratch_dir);
-            alloc.free(output.*);
-            output.* = try alloc.dupe(u8, "");
-            return;
-        }
-
-        const remaining = max - self.used;
+        const remaining = self.budget.max_bytes -| self.used;
         if (output.*.len <= remaining) {
             self.used += output.*.len;
             return;
         }
 
-        const path = if (spill_path.*) |path| path else blk: {
-            const path = try writeStepSpill(alloc, self.io, output.*, tool_name, self.event_seq, call_index, self.scratch_dir);
-            spill_path.* = path;
-            break :blk path;
-        };
-
+        // Point the footer at the per-call spill when `emit` already wrote one
+        // (it holds the raw bytes); otherwise at a step spill written below.
+        var path_owned = spill_path.* == null;
+        const path = spill_path.* orelse try stepSpillPath(alloc, self.scratch_dir, tool_name, self.event_seq, call_index);
+        errdefer if (path_owned) alloc.free(path);
         const footer = try std.fmt.allocPrint(alloc, "\n[tool result clipped by step output budget; full output: {s}]", .{path});
         defer alloc.free(footer);
 
-        const replacement = if (footer.len >= remaining) blk: {
-            break :blk try alloc.dupe(u8, validUtf8Prefix(footer, remaining));
-        } else blk: {
-            const prefix = validUtf8Prefix(output.*, remaining - footer.len);
-            const out = try alloc.alloc(u8, prefix.len + footer.len);
-            @memcpy(out[0..prefix.len], prefix);
-            @memcpy(out[prefix.len..], footer);
-            break :blk out;
-        };
+        // A replacement must never cost more than what it replaces: a result
+        // no longer than its would-be prefix+footer stays verbatim — same
+        // bound, nothing hidden behind an indirection, no spill file.
+        if (output.*.len <= remaining + footer.len) {
+            if (path_owned) alloc.free(path);
+            self.used += output.*.len;
+            return;
+        }
 
+        if (path_owned) {
+            try writeStepSpill(self.io, path, output.*);
+            spill_path.* = path;
+            path_owned = false;
+        }
+
+        const prefix = validUtf8Prefix(output.*, remaining);
+        const replacement = try alloc.alloc(u8, prefix.len + footer.len);
+        @memcpy(replacement[0..prefix.len], prefix);
+        @memcpy(replacement[prefix.len..], footer);
         alloc.free(output.*);
         output.* = replacement;
-        self.used = max;
+        self.used += prefix.len;
     }
 };
 
-fn writeStepSpill(
+/// Deterministic step-spill location, mirroring `spillName`'s scheme:
+/// `<scratch>/tool-output/step-<tool>-<seq>-<index>.txt`. Caller owns the path.
+fn stepSpillPath(
     alloc: std.mem.Allocator,
-    io: std.Io,
-    output: []const u8,
+    scratch_dir: []const u8,
     tool_name: []const u8,
     event_seq: u64,
     call_index: usize,
-    scratch_dir: []const u8,
 ) ![]const u8 {
-    const dir = try std.fs.path.join(alloc, &.{ scratch_dir, "tool-output" });
-    defer alloc.free(dir);
+    const name = try std.fmt.allocPrint(alloc, "step-{s}-{d}-{d}.txt", .{ tool_name, event_seq, call_index });
+    defer alloc.free(name);
+    return std.fs.path.join(alloc, &.{ scratch_dir, "tool-output", name });
+}
+
+fn writeStepSpill(io: std.Io, path: []const u8, data: []const u8) !void {
     const cwd = std.Io.Dir.cwd();
     // `createDirPath` is idempotent (an existing dir returns `.existed`, not an
     // error), so `try` only surfaces genuine failures — crucially `error.Canceled`,
     // which must reach the step boundary instead of being swallowed here.
-    try cwd.createDirPath(io, dir);
-    const name = try std.fmt.allocPrint(alloc, "step-{s}-{d}-{d}.txt", .{ tool_name, event_seq, call_index });
-    defer alloc.free(name);
-    const path = try std.fs.path.join(alloc, &.{ dir, name });
-    errdefer alloc.free(path);
-    try cwd.writeFile(io, .{ .sub_path = path, .data = output });
-    return path;
+    if (std.fs.path.dirname(path)) |dir| try cwd.createDirPath(io, dir);
+    try cwd.writeFile(io, .{ .sub_path = path, .data = data });
 }
 
 fn writeSpill(
@@ -349,7 +356,7 @@ test "emit does not split utf-8 while clipping a line" {
 test "step output limiter clips an oversized aggregate result and spills it" {
     const alloc = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
-    const long = "x" ** 300;
+    const long = "x" ** 600;
     var output: []const u8 = try alloc.dupe(u8, long);
     var spill_path: ?[]const u8 = null;
     defer {
@@ -363,7 +370,66 @@ test "step output limiter clips an oversized aggregate result and spills it" {
     var limiter = StepOutputLimiter.init(io, ".", 7, .{ .max_bytes = 160 });
     try limiter.apply(alloc, "shell", 2, &output, &spill_path);
 
-    try std.testing.expect(output.len <= 160);
+    // The body is clipped to the budget; the pointer footer rides on top of it
+    // (the floor is not charged), always complete, never truncated.
+    try std.testing.expect(std.mem.startsWith(u8, output, "x" ** 160));
+    try std.testing.expect(!std.mem.startsWith(u8, output, "x" ** 161));
+    try std.testing.expect(std.mem.indexOf(u8, output, "clipped by step output budget; full output: ") != null);
+    try std.testing.expect(std.mem.endsWith(u8, output, "]"));
     try std.testing.expectEqual(@as(usize, 160), limiter.used);
     try std.testing.expect(spill_path != null);
+}
+
+test "step budget exhaustion never blanks a later result: the pointer floor survives" {
+    const alloc = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var limiter = StepOutputLimiter.init(io, ".", 9, .{ .max_bytes = 8 });
+
+    var first: []const u8 = try alloc.dupe(u8, "aaaaaaaa"); // exactly the budget
+    defer alloc.free(first);
+    var first_spill: ?[]const u8 = null;
+    try limiter.apply(alloc, "shell", 0, &first, &first_spill);
+    try std.testing.expectEqualStrings("aaaaaaaa", first);
+    try std.testing.expect(first_spill == null);
+
+    // The second result finds the budget spent. Before the floor existed it
+    // became the empty string — order decided what the model got to see.
+    var second: []const u8 = try alloc.dupe(u8, "e" ** 600);
+    var second_spill: ?[]const u8 = null;
+    defer {
+        alloc.free(second);
+        if (second_spill) |p| {
+            std.Io.Dir.cwd().deleteFile(io, p) catch {};
+            alloc.free(p);
+        }
+    }
+    try limiter.apply(alloc, "shell", 1, &second, &second_spill);
+
+    try std.testing.expect(second.len != 0);
+    try std.testing.expect(std.mem.indexOf(u8, second, "clipped by step output budget; full output: ") != null);
+    try std.testing.expect(std.mem.endsWith(u8, second, "]"));
+    try std.testing.expect(second_spill != null);
+}
+
+test "a short result over the spent budget stays verbatim instead of becoming a longer pointer" {
+    const alloc = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var limiter = StepOutputLimiter.init(io, ".", 9, .{ .max_bytes = 8 });
+
+    var first: []const u8 = try alloc.dupe(u8, "aaaaaaaa");
+    defer alloc.free(first);
+    var first_spill: ?[]const u8 = null;
+    try limiter.apply(alloc, "shell", 0, &first, &first_spill);
+
+    // Shorter than the footer that would replace it: keeping the real status
+    // line beats pointing at a file holding the same eleven bytes.
+    var second: []const u8 = try alloc.dupe(u8, "ok [exit 0]");
+    defer alloc.free(second);
+    var second_spill: ?[]const u8 = null;
+    try limiter.apply(alloc, "shell", 1, &second, &second_spill);
+
+    try std.testing.expectEqualStrings("ok [exit 0]", second);
+    try std.testing.expect(second_spill == null);
 }

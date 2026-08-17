@@ -292,7 +292,7 @@ pub fn runCliEnvs(
     argv: []const []const u8,
     pairs: []const EnvPair,
 ) !CliRun {
-    var env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    var env = try std.testing.environ.createMap(alloc);
     defer env.deinit();
     for (pairs) |p| try env.put(p.key, p.value);
     const result = try std.process.run(alloc, io, .{
@@ -321,7 +321,7 @@ pub fn runCliStderr(
     argv: []const []const u8,
     pairs: []const EnvPair,
 ) ![]u8 {
-    var env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    var env = try std.testing.environ.createMap(alloc);
     defer env.deinit();
     for (pairs) |p| try env.put(p.key, p.value);
     const result = try std.process.run(alloc, io, .{

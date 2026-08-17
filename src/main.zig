@@ -7,12 +7,18 @@
 
 const std = @import("std");
 const cli = @import("cli.zig");
+const environment = @import("environment.zig");
 
 const demo_prompt = "What system am I on?";
 
 pub fn main(init: std.process.Init) !u8 {
     const alloc = init.gpa;
     const io = init.io;
+
+    // std 0.16 hands the OS environ only to `main`; register it once so the
+    // layers that read host env (config chain, NULYA_* vars, child-env
+    // sanitization) see the real environment (environment.hostEnvironMap).
+    environment.registerHostEnviron(init.minimal.environ);
 
     // `nulya <cmd> ...` -> CLI (DESIGN §14); bare `nulya` -> the agent-loop demo.
     const args = try init.minimal.args.toSlice(init.arena.allocator());

@@ -185,7 +185,7 @@ collectTurn(PromptIR, tool_defs)  →  assistant turn（可能含多个 tool_use
 
 不变量：**一条 assistant tool-call batch ↔ 恰好一条匹配的 tool_results batch。** `session.recordCompletedToolStats` 直接按这个形状读 suffix 并 assert。**PromptIR 永远可回放，ledger 存事实**：`prompt.ToolCall.args_json` 一定是完整 JSON 值，`ledger.ToolCall.args_json` 是模型写出来的那些字节。
 
-**输出纪律**（`emit.zig`，细节见 [base-tools.md](base-tools.md)）：每个 tool 结果过 head/tail 字节预算（UTF-8 边界截断），超限落盘到 `.nulya/scratch/` 留指针；每 step 另有聚合预算 `StepOutputLimiter`。落盘路径由 ledger seq 决定，replay 一致。
+**输出纪律**（`emit.zig`，细节见 [base-tools.md](base-tools.md)）：每个 tool 结果过 head/tail 字节预算（UTF-8 边界截断），超限落盘留指针；每 step 另有聚合预算 `StepOutputLimiter`——预算约束的是**正文**，不约束可见性：装不下的结果保留 prefix + 一条**完整**的落盘指针 footer（footer 是每个结果的保底、不计入预算；比 footer 还短的结果直接保留原文、不落盘），所以 batch 里的执行顺序不决定模型能看到哪个结果，一个 step 的可见工具文本 ≤ `max_bytes` + 每 call 一条 footer。落盘在 `.nulya/scratch/<session-id>/tool-output/`：文件名由 ledger seq + call index 决定（session 内 replay 一致），session id 这一层让并发 session（fork 的父子、compact driver 与 observer）不会写同一个文件。
 
 ---
 
@@ -420,7 +420,7 @@ Environment { runShell(cmd, dialect) / runExtension(entry, request_json) / diale
 **明确不假装 `manifest.permissions` 是安全边界。** AI 生成的原生 binary = 任意机器码；`"network": []` 在没有 OS 强制时拦不住 `curl`。当前：
 
 - extension 与 shell 共享同一个 session authority（≈ 当前用户全权限）。明说，不给虚假安全感。
-- **env 净化**：子进程 env 过 `isSecretKey` denylist（大小写不敏感子串：`SECRET / TOKEN / PASSWORD / API_KEY / ACCESS_KEY / PRIVATE_KEY / CREDENTIAL / SSH_AUTH_SOCK …`）。非 secret 变量（PATH / HOME）照传，命令才能工作。边界是"无明显 secret 泄漏"，**不是**完全不继承、也不是 fs 隔离。kernel 往这份净化 env 里**加**两个非 secret 变量：`NULYA_EXE`（本进程可执行文件的绝对路径，`LocalEnvironment.init`）与 `NULYA_SESSION`（活着的 session 文件路径，只有 `session step` 放）——都是 provenance 型信息，不拓宽任何权限（§7.6）。
+- **env 净化**：子进程 env 过 `isSecretKey` denylist（大小写不敏感子串：`SECRET / TOKEN / PASSWORD / API_KEY / ACCESS_KEY / PRIVATE_KEY / CREDENTIAL / SSH_AUTH_SOCK …`）。非 secret 变量（PATH / HOME）照传，命令才能工作。host env 的**来源**是 `environment.registerHostEnviron`：std 0.16 删掉了全局 environ（OS block 只交给 `main` 的 `std.process.Init` 与 test runner 的 `std.testing.environ`），`main` 启动时注册一次，所有读 host env 的层（config 链、`NULYA_*`、净化）都走 `environment.hostEnvironMap`；测试构建缺省落回 test runner 的 environ。边界是"无明显 secret 泄漏"，**不是**完全不继承、也不是 fs 隔离。kernel 往这份净化 env 里**加**两个非 secret 变量：`NULYA_EXE`（本进程可执行文件的绝对路径，`LocalEnvironment.init`）与 `NULYA_SESSION`（活着的 session 文件路径，只有 `session step` 放）——都是 provenance 型信息，不拓宽任何权限（§7.6）。
 - 不变量：`extension_permissions ⊆ session_authority`；注册成 extension 不获得 shell 没有的权限。
 - OS 强制（sandbox）见 PLAN §3.8。
 

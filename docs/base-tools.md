@@ -55,7 +55,7 @@ fn emit(raw: []const u8, tool: []const u8, spill_key: SpillKey, ctx: *Ctx) Emitt
    → 这**取代 tcode 的 `full`/`final` 双模式**：只有一种行为，模型永不丢数据、永不需要提前预测输出多大，也不依赖额外 metadata 才知道完整内容在哪里。
 4. **确定性且不碰撞**：落盘文件名不要用运行时自增计数器，也不要用 `base_seq * 64 + i` 这类隐藏上限。用 content hash（如 BLAKE3(raw)）或 `<ledger-id>/<event-seq>-<call-index>` 派生，保证 replay/fork/subagent 下路径稳定且不碰撞。
 
-**批量输出再过一层 StepOutputBudget**：同一 assistant turn 可能返回 N 个 tool call。每个工具 `<= 128KB` 仍可能让一整轮膨胀到 MB 级，所以 batched `tool_results` 合成前还要有 `max_step_bytes`。v0.1 采用简单的顺序预算：前面的结果先保留，超预算结果被裁剪/落盘；如果真实使用证明需要，再升级为公平分配。
+**批量输出再过一层 StepOutputBudget**：同一 assistant turn 可能返回 N 个 tool call。每个工具 `<= 128KB` 仍可能让一整轮膨胀到 MB 级，所以 batched `tool_results` 合成前还要有 `max_step_bytes`。顺序预算，但**有保底**：预算约束正文、不约束可见性——装不下的结果落盘后保留 prefix + 一条完整的 `[… full output: <path>]` footer（footer 不计入预算；比 footer 还短的结果直接保留原文、不落盘），所以最后一个 call 的报错和第一个一样可见，执行顺序不决定谁进 context。可见总量 ≤ `max_step_bytes` + 每 call 一条 footer。
 
 **收益**：`shell`、`edit` 回显、以及未来任何 native 工具，截断/落盘/裁剪逻辑**只有一份**，在一个文件里，可单测，AI 一眼看懂。不再有 per-command 的 `shell_filter/` 子系统。
 

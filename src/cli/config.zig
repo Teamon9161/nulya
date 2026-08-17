@@ -7,6 +7,7 @@ const std = @import("std");
 const config = @import("../config.zig");
 const launch = @import("../launch.zig");
 const common = @import("common.zig");
+const environment = @import("../environment.zig");
 const printRaw = common.printRaw;
 const printErr = common.printErr;
 const sliceHasFlag = common.sliceHasFlag;
@@ -57,7 +58,7 @@ const ConfigView = struct {
 };
 
 fn configShow(alloc: std.mem.Allocator, io: std.Io, as_json: bool) !u8 {
-    var host = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    var host = try environment.hostEnvironMap(alloc);
     defer host.deinit();
     var cfg = try config.load(alloc, io, &host);
     defer cfg.deinit();

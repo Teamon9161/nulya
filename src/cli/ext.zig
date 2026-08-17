@@ -516,7 +516,7 @@ fn warnUserScope(
 /// to the workspace cwd, so both the file and its `<stem>.inbox` sibling resolve
 /// against `cwd()`.
 fn depositSessionNote(alloc: std.mem.Allocator, io: std.Io, ext_root: std.Io.Dir, id: []const u8, version: []const u8) !void {
-    var host = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    var host = try environment.hostEnvironMap(alloc);
     defer host.deinit();
     const session_path = host.get("NULYA_SESSION") orelse return;
     if (session_path.len == 0) return;

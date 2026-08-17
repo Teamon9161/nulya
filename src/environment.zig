@@ -21,6 +21,30 @@ const process_tree = @import("environment/tree.zig");
 const Tree = process_tree.Tree;
 const waitBounded = process_tree.waitBounded;
 
+/// The host process environment. std 0.16 removed the ambient global environ
+/// (`.{ .block = .global }`): the OS block is handed to `main` via
+/// `std.process.Init` and to the test runner via `std.testing.environ`, and
+/// nowhere else. `main` registers its copy here once at startup; this module is
+/// the keeper because sanitizing that environment is already its job (§9).
+var host_environ: std.process.Environ = .empty;
+var host_environ_registered = false;
+
+pub fn registerHostEnviron(env: std.process.Environ) void {
+    host_environ = env;
+    host_environ_registered = true;
+}
+
+/// The host environment as a fresh `Map` (caller deinits) — what
+/// `createMap(.{ .block = .global })` returned before the global was removed.
+/// Test builds fall back to the test runner's environ, so in-process tests see
+/// the real environment exactly as they used to; a production process whose
+/// main never registered gets the empty environment, never a hidden global.
+pub fn hostEnvironMap(alloc: std.mem.Allocator) !std.process.Environ.Map {
+    if (host_environ_registered) return host_environ.createMap(alloc);
+    if (builtin.is_test) return std.testing.environ.createMap(alloc);
+    return host_environ.createMap(alloc);
+}
+
 pub const Dialect = enum {
     bash,
     powershell,
@@ -205,7 +229,7 @@ pub const LocalEnvironment = struct {
     env: std.process.Environ.Map,
 
     pub fn init(alloc: std.mem.Allocator, io: std.Io, opts: LocalOptions) !LocalEnvironment {
-        var host = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+        var host = try hostEnvironMap(alloc);
         defer host.deinit();
 
         var sanitized: std.process.Environ.Map = .init(alloc);
@@ -517,6 +541,10 @@ pub const LocalEnvironment = struct {
 
         var atomic = try cwd.createFileAtomic(self.io, path, .{ .replace = true, .permissions = permissions });
         defer atomic.deinit(self.io);
+        // The create-time permissions pass through open(2) and get masked by
+        // the process umask (0777 becomes 0755); fchmod on the handle does not.
+        // Without this, editing a script silently drops permission bits.
+        try atomic.file.setPermissions(self.io, permissions);
         try atomic.file.writeStreamingAll(self.io, data);
         try atomic.file.sync(self.io);
         try atomic.replace(self.io);

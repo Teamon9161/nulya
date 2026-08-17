@@ -7,6 +7,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const toolchain = @import("../extension/build/toolchain.zig");
 const common = @import("common.zig");
+const environment = @import("../environment.zig");
 const dataDir = common.dataDir;
 const printOut = common.printOut;
 const printErr = common.printErr;
@@ -67,7 +68,7 @@ pub const ZigExe = struct {
 /// binary under the same id. That is why taking it is allowed, and why callers
 /// that actually compile say so once (`noteUnpinnedZig`).
 pub fn resolveZig(alloc: std.mem.Allocator, io: std.Io) !ZigExe {
-    var host = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    var host = try environment.hostEnvironMap(alloc);
     defer host.deinit();
 
     if (host.get("NULYA_ZIG")) |p| {

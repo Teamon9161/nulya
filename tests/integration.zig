@@ -38,7 +38,7 @@ const Live = struct {
         // Every early exit here is a skip, not an error, so ownership is handed
         // over only on the one path that actually builds a Live.
         var opened = false;
-        var env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+        var env = try std.testing.environ.createMap(alloc);
         defer if (!opened) env.deinit();
         const profile = env.get("NULYA_INTEGRATION_PROFILE") orelse return null;
         if (profile.len == 0) return null;

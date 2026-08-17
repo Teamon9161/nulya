@@ -60,7 +60,7 @@ test "self-manufacture closed loop: a shell/edit-only session builds its own ext
     defer threaded.deinit();
     const io = threaded.io();
 
-    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    var host_env = try std.testing.environ.createMap(alloc);
     defer host_env.deinit();
     const zig_exe = host_env.get("NULYA_TEST_ZIG") orelse return error.SkipZigTest;
     const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;

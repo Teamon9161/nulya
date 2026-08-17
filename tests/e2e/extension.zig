@@ -38,7 +38,7 @@ test "closed loop: init -> build -> activate -> run round-trips JSON" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
-    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    var host_env = try std.testing.environ.createMap(alloc);
     defer host_env.deinit();
     const zig_exe = host_env.get("NULYA_TEST_ZIG") orelse return error.SkipZigTest;
 
@@ -135,7 +135,7 @@ test "closed loop: a pinned tool executes the frozen version through the tool ex
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
-    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    var host_env = try std.testing.environ.createMap(alloc);
     defer host_env.deinit();
     const zig_exe = host_env.get("NULYA_TEST_ZIG") orelse return error.SkipZigTest;
     const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
@@ -231,7 +231,7 @@ test "cli ext run records a version-free stable tool id in the usage journal" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
-    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    var host_env = try std.testing.environ.createMap(alloc);
     defer host_env.deinit();
     const zig_exe = host_env.get("NULYA_TEST_ZIG") orelse return error.SkipZigTest;
     const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
@@ -286,7 +286,7 @@ test "cli ext run records ok=false for a failed invocation" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
-    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    var host_env = try std.testing.environ.createMap(alloc);
     defer host_env.deinit();
     const zig_exe = host_env.get("NULYA_TEST_ZIG") orelse return error.SkipZigTest;
     const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
@@ -342,7 +342,7 @@ test "cli ext run failures before invocation write no usage stats" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
-    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    var host_env = try std.testing.environ.createMap(alloc);
     defer host_env.deinit();
     const zig_exe = host_env.get("NULYA_TEST_ZIG") orelse return error.SkipZigTest;
     const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
@@ -520,7 +520,7 @@ test "cli: NULYA_HOME extensions are visible to ext list / skill list / ext run,
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
-    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    var host_env = try std.testing.environ.createMap(alloc);
     defer host_env.deinit();
     const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
     const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
@@ -634,7 +634,7 @@ test "cli: activating into the user store from inside a session says so on stder
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
-    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    var host_env = try std.testing.environ.createMap(alloc);
     defer host_env.deinit();
     const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
     const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
@@ -700,7 +700,7 @@ test "cli: a build that fails to compile leaves no ghost extension in ext list" 
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
-    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    var host_env = try std.testing.environ.createMap(alloc);
     defer host_env.deinit();
     const zig_exe = host_env.get("NULYA_TEST_ZIG") orelse return error.SkipZigTest;
     const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
@@ -756,7 +756,7 @@ test "bundled evolution: ext build extensions/evolution is data kind and needs n
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
-    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    var host_env = try std.testing.environ.createMap(alloc);
     defer host_env.deinit();
     const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
     const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
@@ -860,7 +860,7 @@ test "bundled compact: ext build extensions/compact, then ext run forks the sess
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
-    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    var host_env = try std.testing.environ.createMap(alloc);
     defer host_env.deinit();
     const zig_exe = host_env.get("NULYA_TEST_ZIG") orelse return error.SkipZigTest;
     const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
@@ -985,7 +985,7 @@ test "cli ext build: a draft outside any store lands in the workspace store unde
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
-    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    var host_env = try std.testing.environ.createMap(alloc);
     defer host_env.deinit();
     const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
     const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
@@ -1138,7 +1138,7 @@ test "script extension: init(--script) -> build(seal) -> activate -> run -> pinn
     const alloc = std.testing.allocator;
     const io = std.testing.io; // runExtension is synchronous; no async shell needed.
 
-    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    var host_env = try std.testing.environ.createMap(alloc);
     defer host_env.deinit();
     const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
     const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});

@@ -66,6 +66,15 @@ const win32 = struct {
 /// guarantee about its grandchildren.
 pub const Tree = struct {
     child: std.process.Child,
+    /// POSIX: the direct child's pid — which is also the group id — kept here
+    /// because `child.id` does not survive a canceled `wait` (std 0.16 runs the
+    /// same cleanup on cancel as on success: `id` nulled, stdio closed, but the
+    /// child NOT reaped), and `killAll` must work exactly then, right after a
+    /// timeout or cancellation interrupted the wait.
+    pid: if (builtin.os.tag == .windows) void else std.posix.pid_t,
+    /// POSIX: set once `killAll` reaped a wait-canceled child, so a second call
+    /// (defer + explicit) cannot wait on a pid the OS may have reused.
+    reaped: if (builtin.os.tag == .windows) void else bool,
     /// Windows: the job the child and its descendants belong to, or null when
     /// the OS refused one. POSIX needs no handle — the group IS the child's pid.
     job: if (builtin.os.tag == .windows) ?windows.HANDLE else void,
@@ -74,14 +83,15 @@ pub const Tree = struct {
         if (builtin.os.tag != .windows) {
             var opts = options;
             opts.pgid = 0; // become a group leader, so `killAll` can signal the group
-            return .{ .child = try std.process.spawn(io, opts), .job = {} };
+            const child = try std.process.spawn(io, opts);
+            return .{ .child = child, .pid = child.id.?, .reaped = false, .job = {} };
         }
 
         // Create the job FIRST: if the OS refuses one, spawn the ordinary way
         // rather than suspending a child that would then need resuming anyway.
         const job = win32.CreateJobObjectW(null, null) orelse {
             std.debug.print("nulya: no job object available; a timed-out or canceled command can only kill its direct child\n", .{});
-            return .{ .child = try std.process.spawn(io, options), .job = null };
+            return .{ .child = try std.process.spawn(io, options), .pid = {}, .reaped = {}, .job = null };
         };
         errdefer windows.CloseHandle(job);
 
@@ -96,26 +106,51 @@ pub const Tree = struct {
         if (!assigned) {
             windows.CloseHandle(job);
             std.debug.print("nulya: could not assign the command to a job object; a timed-out or canceled command can only kill its direct child\n", .{});
-            return .{ .child = child, .job = null };
+            return .{ .child = child, .pid = {}, .reaped = {}, .job = null };
         }
-        return .{ .child = child, .job = job };
+        return .{ .child = child, .pid = {}, .reaped = {}, .job = job };
     }
 
     /// Terminate the command AND everything it started, then reap the direct
-    /// child so the caller's bookkeeping (`child.id`, the pipe handles) is left
-    /// exactly as `child.kill` alone used to leave it. Idempotent.
+    /// child. Idempotent. Works whether or not a `wait` on the child was
+    /// canceled first — the situation every caller is in when it calls this.
     pub fn killAll(self: *Tree, io: std.Io) void {
-        if (self.child.id) |id| {
-            if (builtin.os.tag == .windows) {
-                if (self.job) |job| _ = win32.TerminateJobObject(job, 1);
-            } else {
-                // A negative pid signals the whole process group. `child.kill`
-                // signals only the one pid (`Io.Threaded.childKillPosix`), which
-                // is exactly why this extra shot is needed.
-                _ = std.posix.system.kill(-id, .KILL);
-            }
+        if (builtin.os.tag == .windows) {
+            // The job handle names the tree independently of `child.id`, and
+            // terminating an already-empty job is harmless.
+            if (self.job) |job| _ = win32.TerminateJobObject(job, 1);
+            self.child.kill(io); // no-op after a completed (or canceled) wait
+            return;
         }
-        self.child.kill(io); // idempotent; reaps the direct child
+        if (self.reaped) return;
+        // A negative pid signals the whole process group. `child.kill` signals
+        // only the one pid (`Io.Threaded.childKillPosix`), which is exactly why
+        // this extra shot is needed.
+        _ = std.posix.system.kill(-self.pid, .KILL);
+        if (self.child.id != null) {
+            self.child.kill(io); // reaps the direct child
+        } else {
+            // A canceled `wait` got here first: std already nulled `child.id`
+            // and closed the handles without reaping, so `child.kill` would
+            // no-op and the child just killed would sit as a zombie for the
+            // life of this process. Reap it ourselves; SIGKILL guarantees the
+            // wait returns promptly.
+            reapDirectChild(self.pid);
+        }
+        self.reaped = true;
+    }
+
+    /// Reap a child whose `wait` was canceled before it could (std 0.16 cancel
+    /// cleanup nulls `child.id` without reaping). Only ever called after the
+    /// group SIGKILL, so the wait cannot block. EINTR (the io's own SIG.IO
+    /// wakeups) is the one errno worth retrying; anything else means there is
+    /// nothing left to reap.
+    fn reapDirectChild(pid: std.posix.pid_t) void {
+        var status: if (builtin.link_libc) c_int else u32 = undefined;
+        while (true) switch (std.posix.errno(std.posix.system.wait4(pid, &status, 0, null))) {
+            .INTR => continue,
+            else => return,
+        };
     }
 
     /// Release the job handle. Nothing is killed here — the job carries no

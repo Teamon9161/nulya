@@ -156,7 +156,7 @@ test "durable ledger: a capability_note appended by a separate CLI process is re
     const alloc = std.testing.allocator;
     const io = std.testing.io; // EndTurnModel issues no tool calls, so no async shell.
 
-    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    var host_env = try std.testing.environ.createMap(alloc);
     defer host_env.deinit();
     const zig_exe = host_env.get("NULYA_TEST_ZIG") orelse return error.SkipZigTest;
     const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
@@ -238,7 +238,7 @@ test "session cli: --max-steps is enforced by the kernel even when the driver as
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
-    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    var host_env = try std.testing.environ.createMap(alloc);
     defer host_env.deinit();
     const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
     const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
@@ -310,7 +310,7 @@ test "session cli: a fork continues its parent's frozen model identity, and name
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
-    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    var host_env = try std.testing.environ.createMap(alloc);
     defer host_env.deinit();
     const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
     const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
@@ -408,7 +408,7 @@ test "session cli: a shell-script driver runs a goal loop to completion" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
-    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    var host_env = try std.testing.environ.createMap(alloc);
     defer host_env.deinit();
     const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
     const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
@@ -485,7 +485,7 @@ test "session cli: --stream emits the transient line protocol and leaves the led
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
-    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    var host_env = try std.testing.environ.createMap(alloc);
     defer host_env.deinit();
     const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
     const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
@@ -593,7 +593,7 @@ test "session cli: list --json reports parent, event count, summed usage and the
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
-    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    var host_env = try std.testing.environ.createMap(alloc);
     defer host_env.deinit();
     const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
     const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
@@ -716,7 +716,7 @@ test "session cli: --with pins a built-but-not-activated version into one sessio
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
-    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    var host_env = try std.testing.environ.createMap(alloc);
     defer host_env.deinit();
     const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
     const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
@@ -999,7 +999,7 @@ test "session cli: outcome appends a verdict to the outcomes journal, rejects a 
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
-    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    var host_env = try std.testing.environ.createMap(alloc);
     defer host_env.deinit();
     const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
     const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});

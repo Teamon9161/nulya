@@ -775,7 +775,10 @@ const RecancelAndReturnTool = struct {
         self.release.wait(io) catch |err| switch (err) {
             error.Canceled => io.recancel(),
         };
-        return .{ .ok = true, .output = try a.dupe(u8, "small-but-over-step-budget") };
+        // Long enough to overflow the tiny step budget PLUS the pointer-footer
+        // floor, so `StepOutputLimiter.apply` reaches its spill write — the
+        // cancellation point the test below depends on.
+        return .{ .ok = true, .output = try a.dupe(u8, "over-step-budget " ** 20) };
     }
 
     fn executor(self: *@This()) tool.ToolExecutor {

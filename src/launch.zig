@@ -30,6 +30,15 @@ pub const default_openai_base_url = "https://api.openai.com/v1";
 pub const sessions_dir = ".nulya/sessions";
 pub const scratch_dir = ".nulya/scratch";
 
+/// Scratch owned by exactly ONE session: `.nulya/scratch/<session-id>`. Spill
+/// filenames inside are deterministic (ledger seq + call index, `emit.zig`), so
+/// the session id is the only thing keeping two concurrent sessions — a fork's
+/// parent and child, a compact driver and its observer — from writing the same
+/// file (base-tools.md §2). Caller owns the result.
+pub fn sessionScratchDir(alloc: std.mem.Allocator, id: []const u8) ![]u8 {
+    return std.fs.path.join(alloc, &.{ scratch_dir, id });
+}
+
 /// A deterministic, terminating scripted provider — the offline stand-in for a
 /// real model (DESIGN §13). Three modes, selected by `NULYA_SCRIPTED_MODE`:
 ///

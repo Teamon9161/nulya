@@ -11,7 +11,7 @@ test "cli src: --raw matches the on-disk source; default strips tests; ext api r
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
-    var host_env = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    var host_env = try std.testing.environ.createMap(alloc);
     defer host_env.deinit();
     const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
     const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});

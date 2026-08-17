@@ -239,7 +239,7 @@ fn validateSystemPrompts(alloc: std.mem.Allocator, m: manifest.Manifest, snapsho
 }
 
 fn testZigExe(alloc: std.mem.Allocator) ![]u8 {
-    var host = try std.process.Environ.createMap(.{ .block = .global }, alloc);
+    var host = try std.testing.environ.createMap(alloc);
     defer host.deinit();
     if (host.get("NULYA_TEST_ZIG")) |zig_exe| if (zig_exe.len != 0) return try alloc.dupe(u8, zig_exe);
     return try alloc.dupe(u8, "zig");
