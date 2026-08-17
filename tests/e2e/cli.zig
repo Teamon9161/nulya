@@ -275,3 +275,56 @@ test "bundled guide: ext build extensions/guide is data kind and needs no zig; s
     defer alloc.free(on_disk);
     try std.testing.expect(std.mem.indexOf(u8, loaded.stdout, on_disk) != null);
 }
+
+test "cli config show: both forms project the effective [registry], so today's pins are readable without opening a config file that may hold a key" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_abs = try nulyaExe(alloc, &host_env);
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    // A project layer that only narrows (what that layer is allowed to do):
+    // it lowers the tool budget and names one pin. Both are decisions a reader
+    // has to be able to see before opening a session.
+    try ws.createDirPath(io, ".nulya");
+    try ws.writeFile(io, .{
+        .sub_path = ".nulya/config.toml",
+        .data =
+        \\[registry]
+        \\max_tools = 5
+        \\pinned_native_tools = ["ext:date.now/print_date"]
+        \\
+        ,
+    });
+
+    const json = try runCli(alloc, io, ws, &.{ exe_abs, "config", "show", "--json" });
+    defer alloc.free(json.stdout);
+    try std.testing.expectEqual(@as(u8, 0), json.code);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json.stdout, .{});
+    defer parsed.deinit();
+    const registry = parsed.value.object.get("registry").?.object;
+    try std.testing.expectEqual(@as(i64, 5), registry.get("max_tools").?.integer);
+    const pins = registry.get("pinned_native_tools").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), pins.len);
+    try std.testing.expectEqualStrings("ext:date.now/print_date", pins[0].string);
+
+    // The text form answers the same question, under the keys a reader writes
+    // back — this is the command that replaces reading the config files, one of
+    // which may carry an inline api_key.
+    const text = try runCli(alloc, io, ws, &.{ exe_abs, "config", "show" });
+    defer alloc.free(text.stdout);
+    try std.testing.expectEqual(@as(u8, 0), text.code);
+    for ([_][]const u8{ "registry:", "max_tools", "pinned_native_tools", "ext:date.now/print_date" }) |needle| {
+        std.testing.expect(std.mem.indexOf(u8, text.stdout, needle) != null) catch |err| {
+            std.debug.print("`config show` never mentions '{s}'\n", .{needle});
+            return err;
+        };
+    }
+}

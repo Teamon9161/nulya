@@ -192,7 +192,7 @@ pub const session_usage =
 ;
 
 pub const config_usage =
-    \\  nulya config show [--json]                        effective provider profiles + model catalog; never a secret
+    \\  nulya config show [--json]                        effective profiles, model catalog and pins; never a secret
     \\
 ;
 

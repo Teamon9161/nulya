@@ -39,8 +39,8 @@ help` in PowerShell. Below, `nulya` means whichever of the two applies.
 - `nulya ext api` prints the real tool wire-protocol source; `nulya ext api
   permissions` the authority model; `nulya ext api examples` worked sequences.
 - `nulya config show` (add `--json`) — effective profiles, whether each
-  credential is usable right now, the model catalog, and the config paths in
-  use. Never a secret.
+  credential is usable right now, the model catalog, the pinned tools and
+  `max_tools`, and the config paths in use. Never a secret.
 - `nulya session list` (add `--json`) — every session here: composition, event
   count, cost, fork root, latest verdict.
 - `nulya skill list` — the catalog; `nulya skill load <ref>` prints one frozen
@@ -64,8 +64,8 @@ help` in PowerShell. Below, `nulya` means whichever of the two applies.
   session's prompt. Pin a workspace-local tool in the **project** file: a pin
   that no store root can resolve makes every `session new` under that layer
   refuse to start, so a user-layer pin for a tool built in one workspace breaks
-  every other workspace on the machine. `nulya config show` does not project
-  this section — read the file itself.
+  every other workspace on the machine. `nulya config show` prints the merged
+  list — that is how to see today's pins.
 - Config files can hold credentials. Read the key you need, never print a whole
   config into a transcript.
 - Per session: `nulya session new --profile <name> --model <id>`. Per step:

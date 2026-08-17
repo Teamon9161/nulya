@@ -31,6 +31,13 @@ const ConfigView = struct {
     active_profile: []const u8,
     profiles: []const ProfileView,
     models: []const config.ModelParams,
+    /// The merged `[registry]` — the tool face this workspace opens a session
+    /// with. Effective values only, not which layer contributed them: the
+    /// question a reader has is "what are today's pins", and answering it here
+    /// is what keeps them from reading the config files themselves, one of
+    /// which may hold an inline `api_key`. Typed as `config.Registry`, so the
+    /// two names printed are the two keys to write back.
+    registry: config.Registry,
 
     const Paths = struct {
         system: []const u8,
@@ -97,6 +104,7 @@ fn configShow(alloc: std.mem.Allocator, io: std.Io, as_json: bool) !u8 {
         .active_profile = cfg.provider.active_profile,
         .profiles = views,
         .models = cfg.models,
+        .registry = cfg.registry,
     };
 
     var out: std.Io.Writer.Allocating = .init(alloc);
@@ -151,6 +159,19 @@ fn writeConfigText(w: *std.Io.Writer, view: ConfigView) !void {
         }
         try w.writeByte('\n');
     }
+    // The tool face, under the exact key names a reader writes back into a
+    // config file. An empty pin list is printed as such rather than omitted:
+    // "no extension tool is native here" is the answer, not a missing section.
+    try w.print("\nregistry:\n  max_tools            {d}\n  pinned_native_tools  ", .{view.registry.max_tools});
+    if (view.registry.pinned_native_tools.len == 0) {
+        try w.writeAll("(none)");
+    } else {
+        for (view.registry.pinned_native_tools, 0..) |pin, i| {
+            if (i != 0) try w.writeAll(", ");
+            try w.writeAll(pin);
+        }
+    }
+    try w.writeByte('\n');
 }
 
 test "config show projects profiles with credential availability and the catalog, never a secret" {
@@ -167,6 +188,8 @@ test "config show projects profiles with credential availability and the catalog
         .{ .id = "deepseek-v4-flash", .label = "DeepSeek V4 Flash", .efforts = &.{ "off", "low", "high", "max" }, .context_window = 1_000_000 },
     };
     cfg.models = &models;
+    var pins = [_][]const u8{ "ext:date.now/print_date", "ext:notes/append" };
+    cfg.registry = .{ .max_tools = 6, .pinned_native_tools = &pins };
 
     var env: std.process.Environ.Map = .init(alloc);
     defer env.deinit();
@@ -193,6 +216,7 @@ test "config show projects profiles with credential availability and the catalog
         .active_profile = "ds",
         .profiles = views,
         .models = &models,
+        .registry = cfg.registry,
     };
 
     var out: std.Io.Writer.Allocating = .init(alloc);
@@ -230,6 +254,15 @@ test "config show projects profiles with credential availability and the catalog
     try std.testing.expectEqual(@as(usize, 4), ms[0].object.get("efforts").?.array.items.len);
     try std.testing.expect(ms[0].object.get("default_effort").? == .null);
 
+    // The tool face rides along too. Without it the only way to see today's
+    // pins is to read the config files, and one of those layers may hold an
+    // inline `api_key` — which is how this section came to be projected.
+    const registry = root.get("registry").?.object;
+    try std.testing.expectEqual(@as(i64, 6), registry.get("max_tools").?.integer);
+    const projected_pins = registry.get("pinned_native_tools").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), projected_pins.len);
+    try std.testing.expectEqualStrings("ext:date.now/print_date", projected_pins[0].string);
+
     // The plain-text form mentions each profile and the model line.
     var text: std.Io.Writer.Allocating = .init(alloc);
     defer text.deinit();
@@ -237,4 +270,23 @@ test "config show projects profiles with credential availability and the catalog
     try std.testing.expect(std.mem.indexOf(u8, text.written(), "ds ") != null);
     try std.testing.expect(std.mem.indexOf(u8, text.written(), "no key") != null);
     try std.testing.expect(std.mem.indexOf(u8, text.written(), "effort off|low|high|max (default auto)") != null);
+    // Under the same key names the config file uses, so reading is enough to write.
+    try std.testing.expect(std.mem.indexOf(u8, text.written(), "max_tools            6") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text.written(), "pinned_native_tools  ext:date.now/print_date, ext:notes/append") != null);
+}
+
+test "config show prints an empty pin list as such, never as a missing section" {
+    const alloc = std.testing.allocator;
+    var text: std.Io.Writer.Allocating = .init(alloc);
+    defer text.deinit();
+    try writeConfigText(&text.writer, .{
+        .paths = .{ .system = "s", .user = "u", .project = config.project_config_path },
+        .active_profile = "scripted",
+        .profiles = &.{},
+        .models = &.{},
+        .registry = .{},
+    });
+    // "no extension tool is native here" is an answer; a silent section is not.
+    try std.testing.expect(std.mem.indexOf(u8, text.written(), "pinned_native_tools  (none)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text.written(), "max_tools            8") != null);
 }
