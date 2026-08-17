@@ -1,0 +1,81 @@
+{
+  "schema": "nulya.extension/v2",
+  "id": "std",
+  "runtime": { "entry": "bin/std" },
+  "contributes": {
+    "tools": [
+      {
+        "name": "read",
+        "description": "Read a text file. Content comes back verbatim, without a line-number gutter: when you need to cite a line, count from the first line of the range the footer reports. Use offset/limit for large files; limits under 120 lines are widened to 120, so read generous windows instead of many small slices. If the tool reports the file unchanged since your last read, the content is already in your context — do not re-read; pass force=true only if you have a specific reason. Directories, binary files and files over 10 MB are refused with a hint.",
+        "input": {
+          "type": "object",
+          "properties": {
+            "path": { "type": "string", "description": "File path (absolute or relative to cwd)" },
+            "offset": { "type": "integer", "description": "1-based first line to read" },
+            "limit": { "type": "integer", "description": "Max lines to read (default 2000, minimum 120)" },
+            "force": { "type": "boolean", "description": "Bypass the unchanged-file check" }
+          },
+          "required": ["path"]
+        }
+      },
+      {
+        "name": "write",
+        "description": "Create or overwrite a file. Prefer `edit` for modifying existing files. Overwriting an existing file requires having read its current version in full with `read` in this session; a file you have not read, have only partly read, or that changed on disk since you read it is refused with the reason.",
+        "input": {
+          "type": "object",
+          "properties": {
+            "path": { "type": "string" },
+            "content": { "type": "string" }
+          },
+          "required": ["path", "content"]
+        }
+      },
+      {
+        "name": "append",
+        "description": "Append text to the end of a UTF-8 file, written exactly as given — no newline is added for you, so start with '\\n' if the file's last line must remain intact. Appending to an existing file requires having read its current version (a partial read counts); a missing file is created. For insertion in the middle of a file use `edit`.",
+        "input": {
+          "type": "object",
+          "properties": {
+            "path": { "type": "string" },
+            "content": { "type": "string" }
+          },
+          "required": ["path", "content"]
+        }
+      },
+      {
+        "name": "grep",
+        "description": "Search file contents with a regex (respects .gitignore). Look for several symbols in one call with alternation — `foo|bar|baz` beats three searches. An all-lowercase pattern matches case-insensitively; any uppercase in it makes the match exact. Pull surrounding code with `context` (both sides), `before` or `after` — one search with context often gives you enough to edit without a follow-up read. Filter files with `glob`; cap matches with head_limit (default 200) and page with offset. The regex is byte-level: classes, alternation, groups, quantifiers and anchors work; lookaround and backreferences do not. Skips directory-scanned files over 512 KiB (an explicit file path may be up to 10 MiB), skips built/cache directories, and reports oversized skips when they explain an empty result.",
+        "input": {
+          "type": "object",
+          "properties": {
+            "pattern": { "type": "string", "description": "Regex to search for" },
+            "path": { "type": "string", "description": "Directory or file to search (default: cwd)" },
+            "glob": { "type": "string", "description": "Filter files, e.g. *.zig or src/**/*.toml" },
+            "case_insensitive": { "type": "boolean", "description": "Force case-insensitive; only needed to widen a pattern that contains uppercase" },
+            "context": { "type": "integer", "description": "Context lines on both sides of each match" },
+            "before": { "type": "integer", "description": "Context lines before each match; overrides context" },
+            "after": { "type": "integer", "description": "Context lines after each match; overrides context" },
+            "head_limit": { "type": "integer", "description": "Max matches to return (default 200)" },
+            "offset": { "type": "integer", "description": "Skip this many matches before head_limit (for paging)" }
+          },
+          "required": ["pattern"]
+        }
+      },
+      {
+        "name": "glob",
+        "description": "Find files by name pattern, e.g. **/*.zig or src/**/build.zig. Respects .gitignore and skips built/cache directories. Directory symlinks are skipped by default; set follow_symlinks=true to search their targets. Results sorted by modification time (newest first), capped at 200; page with offset.",
+        "input": {
+          "type": "object",
+          "properties": {
+            "pattern": { "type": "string" },
+            "path": { "type": "string", "description": "Base directory (default: cwd)" },
+            "follow_symlinks": { "type": "boolean", "description": "Follow directory symlinks while walking (default false)" },
+            "offset": { "type": "integer", "description": "Skip this many results before the 200 cap (for paging)" }
+          },
+          "required": ["pattern"]
+        }
+      }
+    ]
+  },
+  "permissions": { "fs": [".nulya/scratch"], "network": [], "process": [] }
+}

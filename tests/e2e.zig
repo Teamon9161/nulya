@@ -60,6 +60,9 @@
 //!   e2e/source.zig       `nulya src` / `ext api`
 //!   e2e/cli.zig          the self-description entry: `nulya help`, `ext api`
 //!                        topics, the kernel prompt's bootstrap sentence, guide
+//!   e2e/std.zig          the bundled `std` extension: fixtures + smoke;
+//!   e2e/std_fs.zig       … its read / write / append + freshness;
+//!   e2e/std_search.zig   … its grep / glob
 
 comptime {
     _ = @import("e2e/support.zig");
@@ -68,4 +71,7 @@ comptime {
     _ = @import("e2e/manufacture.zig");
     _ = @import("e2e/source.zig");
     _ = @import("e2e/cli.zig");
+    _ = @import("e2e/std.zig");
+    _ = @import("e2e/std_fs.zig");
+    _ = @import("e2e/std_search.zig");
 }

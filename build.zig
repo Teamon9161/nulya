@@ -56,6 +56,19 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
 
+    // The bundled `std` extension is the one shipped package with pure logic
+    // worth unit-testing (glob / gitignore matching, freshness, output shaping,
+    // a vendored regex engine). Its tests ride the same `test` step; `nulya ext
+    // build` compiles the very same sources with `zig build-exe`, which ignores
+    // test blocks, so the version id is unaffected.
+    const std_ext_mod = b.createModule(.{
+        .root_source_file = b.path("extensions/std/src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const std_ext_tests = b.addTest(.{ .root_module = std_ext_mod });
+    test_step.dependOn(&b.addRunArtifact(std_ext_tests).step);
+
     // End-to-end closed-loop test (DESIGN §16 milestone): init -> build -> run.
     // It uses the host's own zig (no embed needed) via NULYA_TEST_ZIG, so it
     // actually compiles and runs a real extension. Everything reachable from
