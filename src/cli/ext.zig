@@ -50,6 +50,7 @@ pub fn dispatchExt(alloc: std.mem.Allocator, io: std.Io, args: []const []const u
     if (std.mem.eql(u8, sub, "rollback")) return extActivate(alloc, io, rest, .rollback);
     if (std.mem.eql(u8, sub, "deactivate")) return extDeactivate(alloc, io, rest);
     if (std.mem.eql(u8, sub, "sync")) return extSync(alloc, io, rest);
+    if (std.mem.eql(u8, sub, "prune")) return extPrune(alloc, io, rest);
     if (std.mem.eql(u8, sub, "list")) return extList(alloc, io);
     if (std.mem.eql(u8, sub, "inspect")) return extInspect(alloc, io, rest);
     if (std.mem.eql(u8, sub, "trust")) return extTrust(alloc, io);
@@ -538,6 +539,176 @@ fn appendActivation(
     try st.activate(alloc, result.id, result.version);
     depositSessionNote(alloc, io, root_dir, result.id, result.version) catch {};
     try out.writeAll(" -> current");
+}
+
+/// `nulya ext prune [--user] [<id>] [--dry-run]` — drop the version directories a
+/// store root keeps that `current` does not name (DESIGN §7.4).
+///
+/// Versions accumulate on purpose: every build of a changed draft is a new
+/// immutable directory, and that is what makes rollback a pointer move. The cost
+/// is disk, and after a few dozen iterations of one compiled tool it is real. So
+/// this is the counterweight, and it is deliberately narrow: only `current` is
+/// safe to keep by rule, so an id whose `current` is missing keeps EVERYTHING —
+/// with no pointer there is nothing to preserve it BY, and guessing (newest?
+/// biggest?) would delete the one somebody meant to roll back to.
+///
+/// What it costs is printed rather than assumed: a session frozen on a deleted
+/// version can no longer resume, and the way back is the draft — building the
+/// same source yields the same version id.
+fn extPrune(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+    const flags = try takeUserFlag(alloc, args);
+    defer alloc.free(flags.rest);
+    var dry_run = false;
+    var only_id: ?[]const u8 = null;
+    for (flags.rest) |a| {
+        if (std.mem.eql(u8, a, "--dry-run")) {
+            dry_run = true;
+        } else if (only_id == null and !std.mem.startsWith(u8, a, "-")) {
+            only_id = a;
+        } else {
+            try printErr(io, "usage: nulya ext prune [--user] [<id>] [--dry-run]\n");
+            return 1;
+        }
+    }
+
+    if (only_id) |id| {
+        if (!manifest.isValidId(id)) {
+            try printErrFmt(alloc, io, "not an extension id: '{s}'; see `nulya ext list`\n", .{id});
+            return 1;
+        }
+    }
+
+    const root_spec = (try writeRootSpec(alloc, flags.user)) orelse {
+        try printErr(io, "no home directory for --user (set NULYA_HOME or HOME)\n");
+        return 1;
+    };
+    defer alloc.free(root_spec);
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_path = try cwdRealPath(io, &cwd_buf);
+    var root_dir = store.openRoot(io, cwd_path, root_spec) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => {
+            try printOut(alloc, io, "nothing to prune in {s}\n", .{root_spec});
+            return 0;
+        },
+        else => return err,
+    };
+    defer root_dir.close(io);
+
+    const ids = try pruneTargets(alloc, io, root_dir, only_id);
+    defer {
+        for (ids) |i| alloc.free(i);
+        alloc.free(ids);
+    }
+
+    const st = store.Store.init(io, root_dir);
+    var removed: usize = 0;
+    var kept: usize = 0;
+    var bytes_freed: u64 = 0;
+    for (ids) |id| {
+        // Look before leasing: an id with nothing built is nothing to prune, and
+        // taking the writer lease would CREATE `<id>/` — a mistyped id would then
+        // leave a directory behind instead of doing nothing.
+        {
+            const versions = try st.listVersions(alloc, id);
+            defer {
+                for (versions) |v| alloc.free(v);
+                alloc.free(versions);
+            }
+            if (versions.len == 0) continue;
+        }
+        // The same writer lease every mutation of `<id>/` runs under, so a prune
+        // cannot delete a directory another process is building or activating.
+        var held: ?std.Io.File = if (dry_run) null else try st.lease(alloc, id);
+        defer if (held) |*h| h.close(io);
+
+        const current = try st.activeVersion(alloc, id);
+        defer if (current) |c| alloc.free(c);
+        const versions = try st.listVersions(alloc, id);
+        defer {
+            for (versions) |v| alloc.free(v);
+            alloc.free(versions);
+        }
+        if (versions.len == 0) continue;
+        if (current == null) {
+            kept += versions.len;
+            try printOut(alloc, io, "{s}: no current — nothing pruned (a deactivated id keeps every version; delete by hand if you mean it)\n", .{id});
+            continue;
+        }
+        for (versions) |v| {
+            if (std.mem.eql(u8, v, current.?)) {
+                kept += 1;
+                continue;
+            }
+            const version_rel = try std.fs.path.join(alloc, &.{ id, "versions", v });
+            defer alloc.free(version_rel);
+            const size = try treeSize(alloc, io, root_dir, version_rel);
+            if (!dry_run) try root_dir.deleteTree(io, version_rel);
+            removed += 1;
+            bytes_freed += size;
+            try printOut(alloc, io, "{s}@{s} {s} ({d} KB)\n", .{ id, v, if (dry_run) "would be removed" else "removed", (size + 1023) / 1024 });
+        }
+    }
+
+    if (removed == 0) {
+        try printOut(alloc, io, "nothing to prune in {s}\n", .{root_spec});
+        return 0;
+    }
+    try printOut(alloc, io, "{d} version(s) {s}, {d} kept, {d} KB\n", .{
+        removed,
+        if (dry_run) "would be removed" else "removed",
+        kept,
+        (bytes_freed + 1023) / 1024,
+    });
+    // Said plainly, because it is the one thing a pruner cannot undo by rerunning
+    // this command — and the one thing that IS recoverable, from the draft.
+    try printOut(alloc, io, "note: a session frozen on a removed version can no longer resume; rebuilding the same source restores the same version id\n", .{});
+    return 0;
+}
+
+/// Which ids a prune touches: the one named, or every directory in the root that
+/// holds built versions. Caller owns the result.
+fn pruneTargets(alloc: std.mem.Allocator, io: std.Io, root_dir: std.Io.Dir, only_id: ?[]const u8) ![][]u8 {
+    var out: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (out.items) |i| alloc.free(i);
+        out.deinit(alloc);
+    }
+    if (only_id) |id| {
+        try out.append(alloc, try alloc.dupe(u8, id));
+        return out.toOwnedSlice(alloc);
+    }
+    var it = root_dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .directory) continue;
+        if (!manifest.isValidId(entry.name)) continue;
+        try out.append(alloc, try alloc.dupe(u8, entry.name));
+    }
+    const items = try out.toOwnedSlice(alloc);
+    std.mem.sort([]u8, items, {}, struct {
+        fn lessThan(_: void, a: []u8, b: []u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lessThan);
+    return items;
+}
+
+/// Total bytes of the files under `sub_path`. Best-effort: a file that cannot be
+/// stated contributes nothing rather than failing the prune.
+fn treeSize(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, sub_path: []const u8) !u64 {
+    var dir = root.openDir(io, sub_path, .{ .iterate = true }) catch return 0;
+    defer dir.close(io);
+    var walker = try dir.walk(alloc);
+    defer walker.deinit();
+    var total: u64 = 0;
+    while (try walker.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        var file = dir.openFile(io, entry.path, .{}) catch continue;
+        defer file.close(io);
+        const stat = file.stat(io) catch continue;
+        total += stat.size;
+    }
+    return total;
 }
 
 /// Every draft directly under a store root: `<root>/<id>/extension.json` is the

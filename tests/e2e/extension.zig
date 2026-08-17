@@ -1767,6 +1767,95 @@ test "cli ext sync: a compiled draft with no toolchain and nowhere to copy from 
     try std.testing.expectError(error.FileNotFound, ws.access(io, compact_versions, .{}));
 }
 
+test "cli ext prune: every version but `current` goes, an id without one keeps all of them, and --dry-run only says what it would do" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    const ws_store = ".nulya" ++ std.fs.path.sep_str ++ "extensions";
+    const draft = ws_store ++ std.fs.path.sep_str ++ "data.mode";
+
+    // Three versions of one id, `current` on the middle one; and a second id with
+    // versions but no `current` at all.
+    var versions: [3][]u8 = undefined;
+    for ([_][]const u8{ "one", "two", "three" }, 0..) |body, i| {
+        try writeSkillDraft(alloc, io, ws, draft, "data.mode", body);
+        const built = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "build", draft });
+        defer alloc.free(built.stdout);
+        try std.testing.expectEqual(@as(u8, 0), built.code);
+        versions[i] = try extractVersion(alloc, built.stdout);
+    }
+    defer for (versions) |v| alloc.free(v);
+
+    try writeSkillDraft(alloc, io, ws, ws_store ++ std.fs.path.sep_str ++ "loose.mode", "loose.mode", "never activated");
+    {
+        const built = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "build", ws_store ++ std.fs.path.sep_str ++ "loose.mode" });
+        defer alloc.free(built.stdout);
+        try std.testing.expectEqual(@as(u8, 0), built.code);
+    }
+    {
+        const activated = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "activate", "data.mode", versions[1] });
+        defer alloc.free(activated.stdout);
+        try std.testing.expectEqual(@as(u8, 0), activated.code);
+    }
+
+    // A plan removes nothing.
+    {
+        const dry = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "prune", "--dry-run" });
+        defer alloc.free(dry.stdout);
+        try std.testing.expectEqual(@as(u8, 0), dry.code);
+        try std.testing.expect(std.mem.indexOf(u8, dry.stdout, "would be removed") != null);
+        for (versions) |v| {
+            const rel = try std.fs.path.join(alloc, &.{ draft, "versions", v });
+            defer alloc.free(rel);
+            try ws.access(io, rel, .{});
+        }
+    }
+
+    const pruned = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "prune" });
+    defer alloc.free(pruned.stdout);
+    try std.testing.expectEqual(@as(u8, 0), pruned.code);
+    // The cost of the deletion is stated where the deletion is reported.
+    try std.testing.expect(std.mem.indexOf(u8, pruned.stdout, "can no longer resume") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pruned.stdout, "loose.mode: no current") != null);
+
+    for (versions, 0..) |v, i| {
+        const rel = try std.fs.path.join(alloc, &.{ ws_store, "data.mode", "versions", v });
+        defer alloc.free(rel);
+        if (i == 1) {
+            try ws.access(io, rel, .{}); // current survives
+        } else {
+            try std.testing.expectError(error.FileNotFound, ws.access(io, rel, .{}));
+        }
+    }
+    // An id with no `current` is untouched: nothing there says which one to keep.
+    {
+        const listed = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "list" });
+        defer alloc.free(listed.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, listed.stdout, "loose.mode") != null);
+        try std.testing.expect(std.mem.indexOf(u8, listed.stdout, versions[1]) != null);
+    }
+
+    // Rebuilding the draft that is still there restores the pruned version id —
+    // the recovery path the note points at.
+    try writeSkillDraft(alloc, io, ws, draft, "data.mode", "three");
+    {
+        const rebuilt = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "build", draft });
+        defer alloc.free(rebuilt.stdout);
+        const v = try extractVersion(alloc, rebuilt.stdout);
+        defer alloc.free(v);
+        try std.testing.expectEqualStrings(versions[2], v);
+    }
+}
+
 /// The `current` pointer of `id` in a store root under `ws`. Caller owns it.
 fn readActive(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, root_rel: []const u8, id: []const u8) ![]u8 {
     const rel = try std.fs.path.join(alloc, &.{ root_rel, id, "current" });
