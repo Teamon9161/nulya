@@ -13,8 +13,9 @@ const printErr = common.printErr;
 const sliceHasFlag = common.sliceHasFlag;
 
 pub fn dispatchConfig(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
-    if (args.len != 0 and std.mem.eql(u8, args[0], "show")) return configShow(alloc, io, sliceHasFlag(args[1..], "--json"));
-    try printErr(io, "usage: nulya config show [--json]\n");
+    if (args.len == 0) return common.usageSection(io, common.config_usage);
+    if (std.mem.eql(u8, args[0], "show")) return configShow(alloc, io, sliceHasFlag(args[1..], "--json"));
+    try printErr(io, "unknown `config` subcommand; usage: nulya config show [--json]\n");
     return 1;
 }
 

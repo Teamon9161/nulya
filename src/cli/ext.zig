@@ -39,7 +39,7 @@ const printRaw = common.printRaw;
 const printErr = common.printErr;
 
 pub fn dispatchExt(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
-    if (args.len == 0) return common.usage(io);
+    if (args.len == 0) return common.usageSection(io, common.ext_usage);
     const sub = args[0];
     const rest = args[1..];
 
@@ -54,7 +54,7 @@ pub fn dispatchExt(alloc: std.mem.Allocator, io: std.Io, args: []const []const u
     if (std.mem.eql(u8, sub, "trust")) return extTrust(alloc, io);
     if (std.mem.eql(u8, sub, "api")) return extApi(alloc, io, rest);
 
-    try printErr(io, "unknown `ext` subcommand\n");
+    try printErrFmt(alloc, io, "unknown `ext` subcommand '{s}'; run `nulya help`\n", .{sub});
     return 1;
 }
 
@@ -850,21 +850,59 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     const topic = if (args.len >= 1) args[0] else "protocol";
     if (std.mem.eql(u8, topic, "permissions")) {
         try printRaw(io,
-            \\Authority (DESIGN §9, v0.1 honest version):
-            \\  extension and shell share one session_authority (~ current user).
-            \\  host secrets (API keys, SSH agent, cloud creds) are stripped from the
-            \\  child environment. manifest.permissions is declarative until the
-            \\  sandbox backend enforces it.
+            \\Authority — what an extension tool may do, honestly:
+            \\
+            \\  An extension runs with the same authority as `shell`: this user account,
+            \\  this machine, no sandbox. Building one grants nothing new; it packages
+            \\  what you could already do.
+            \\
+            \\  A child process gets a sanitized environment: secret-shaped host
+            \\  variables (API keys, tokens, cloud and SSH credentials) are removed.
+            \\  NULYA_EXE, the absolute path of this binary, is added; inside a session
+            \\  NULYA_SESSION names that session's file.
+            \\
+            \\  A tool gets args, a working directory and that environment — never the
+            \\  conversation. It cannot read or append to the session.
+            \\
+            \\  `permissions` in a manifest is a declaration for readers and review.
+            \\  Nothing enforces it yet, so do not treat it as a boundary.
+            \\
+            \\  Wall clock is enforced: an extension tool is killed at 30s unless its
+            \\  manifest sets `timeout_ms` (600s maximum); `shell` defaults to 120s and
+            \\  accepts `timeout_ms` up to 600s. A timeout kills the whole process tree
+            \\  and returns whatever was captured.
+            \\
+            \\  A workspace store (.nulya/extensions) that arrived with a checkout takes
+            \\  part in no session until `nulya ext trust` records it once on this
+            \\  machine. A store this machine built into is trusted by birth.
             \\
         );
         return 0;
     }
     if (std.mem.eql(u8, topic, "examples")) {
         try printRaw(io,
-            \\  nulya ext init web-search greet
-            \\  nulya ext build .nulya/extensions/web-search
-            \\  nulya ext activate web-search <version>
-            \\  nulya ext run web-search '{"query":"zig"}'
+            \\  # A script tool, from nothing to the model's tool face.
+            \\  nulya ext init --script my.helper do_thing     # draft in .nulya/extensions/my.helper
+            \\  # edit src/run.sh (or src/run.ps1): one JSON-RPC request in on stdin,
+            \\  # one response out on stdout — `nulya ext api protocol` is the exact shape
+            \\  nulya ext build .nulya/extensions/my.helper    # prints v-<hash>; the version is immutable
+            \\  nulya ext run my.helper@v-<hash> do_thing --arg name=world    # try it before anything else sees it
+            \\  nulya ext activate my.helper v-<hash>         # `current` points at it; CLI callers need nothing more
+            \\  nulya session new --pin ext:my.helper/do_thing  # the NEXT session carries it as a native tool
+            \\  nulya ext rollback my.helper v-<older>        # going back is a pointer move, never a rebuild
+            \\
+            \\  # A package you do not want in every session (a mode, a driver): build it,
+            \\  # do not activate it, and name the version for one session.
+            \\  nulya ext build extensions/evolution          # prints v-<hash>
+            \\  nulya session new --with evolution@v-<hash>   # its skills and system prompts, this session only
+            \\
+            \\  # Every workspace on this machine, and the one-time trust of a store.
+            \\  nulya ext build extensions/guide --user
+            \\  nulya ext activate --user guide v-<hash>
+            \\  nulya ext trust                               # a .nulya/extensions that came with a checkout
+            \\
+            \\  # Afterwards: say how it went, so later passes have evidence.
+            \\  nulya session outcome <session-id> success --note "the helper did it"
             \\
         );
         return 0;

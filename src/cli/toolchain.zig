@@ -13,8 +13,9 @@ const printOut = common.printOut;
 const printErr = common.printErr;
 
 pub fn dispatchToolchain(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
-    if (args.len < 1 or !std.mem.eql(u8, args[0], "zig")) {
-        try printErr(io, "usage: nulya toolchain zig <args...>\n");
+    if (args.len == 0) return common.usageSection(io, common.toolchain_usage);
+    if (!std.mem.eql(u8, args[0], "zig")) {
+        try printErr(io, "unknown `toolchain` subcommand; usage: nulya toolchain zig <args...>\n");
         return 1;
     }
     const zig_exe = resolveZig(alloc, io) catch |err| switch (err) {

@@ -26,12 +26,16 @@ pub const usage = common.usage;
 /// code. Errors are printed and turned into a non-zero code by `main`.
 pub fn dispatch(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (args.len == 0) return usage(io);
+    // `help` is a verb like any other so that a model which reached this binary
+    // through `shell` can ask it what it can do without guessing a flag; the two
+    // flag spellings are here because everything else on a terminal accepts them.
+    if (std.mem.eql(u8, args[0], "help") or std.mem.eql(u8, args[0], "--help") or std.mem.eql(u8, args[0], "-h")) return usage(io);
     if (std.mem.eql(u8, args[0], "ext")) return ext.dispatchExt(alloc, io, args[1..]);
     if (std.mem.eql(u8, args[0], "skill")) return skill.dispatchSkill(alloc, io, args[1..]);
     if (std.mem.eql(u8, args[0], "toolchain")) return cli_toolchain.dispatchToolchain(alloc, io, args[1..]);
     if (std.mem.eql(u8, args[0], "session")) return cli_session.dispatchSession(alloc, io, args[1..]);
     if (std.mem.eql(u8, args[0], "src")) return cli_src.dispatchSrc(alloc, io, args[1..]);
     if (std.mem.eql(u8, args[0], "config")) return cli_config.dispatchConfig(alloc, io, args[1..]);
-    try common.printErr(io, "unknown command; try `nulya ext`, `nulya skill`, `nulya session`, `nulya config`, `nulya src`, or `nulya toolchain`\n");
+    try common.printErrFmt(alloc, io, "unknown command '{s}'; run `nulya help`\n", .{args[0]});
     return 1;
 }
