@@ -40,6 +40,17 @@ pub const Usage = struct {
         return self.input_tokens == 0 and self.output_tokens == 0 and
             self.cache_read_tokens == 0 and self.cache_write_tokens == 0;
     }
+
+    /// Add `other` in place. Summing usage is field-wise everywhere it happens
+    /// — a session's running total, a listing's per-session and per-episode
+    /// totals — so it is one method here rather than the same four lines in
+    /// each of them.
+    pub fn add(self: *Usage, other: Usage) void {
+        self.input_tokens += other.input_tokens;
+        self.output_tokens += other.output_tokens;
+        self.cache_read_tokens += other.cache_read_tokens;
+        self.cache_write_tokens += other.cache_write_tokens;
+    }
 };
 
 /// Why the model stopped producing a turn, as the provider reported it. A FACT
@@ -109,6 +120,12 @@ pub const Event = union(enum) {
 
 pub const Ledger = struct {
     alloc: std.mem.Allocator,
+    /// Every byte an appended event owns. A ledger is append-only and released
+    /// whole, so its payloads have exactly one lifetime — the ledger's — and one
+    /// arena expresses that directly instead of a clone/free chain per event
+    /// shape. `append`'s snapshot contract is unchanged: what goes in is copied
+    /// here, and the caller's slices are free the moment it returns.
+    arena: std.heap.ArenaAllocator,
     events: std.ArrayList(Event),
     /// When set, every appended event is also persisted as one JSONL line to the
     /// session file (DESIGN §3). A ledger created with `init` is pure memory (the
@@ -124,14 +141,15 @@ pub const Ledger = struct {
     origins: std.StringHashMapUnmanaged(void) = .empty,
 
     pub fn init(alloc: std.mem.Allocator) Ledger {
-        return .{ .alloc = alloc, .events = .empty };
+        return .{ .alloc = alloc, .arena = .init(alloc), .events = .empty };
     }
 
     pub fn deinit(self: *Ledger) void {
-        for (self.events.items) |e| freeEvent(self.alloc, e);
+        // One release for every event payload and every origin key. The two
+        // containers themselves stay on the backing allocator: an ArrayList and a
+        // hash map grow by reallocating, which an arena cannot reuse.
+        self.arena.deinit();
         self.events.deinit(self.alloc);
-        var it = self.origins.keyIterator();
-        while (it.next()) |k| self.alloc.free(k.*);
         self.origins.deinit(self.alloc);
         if (self.durable) |*d| d.deinit();
     }
@@ -156,29 +174,31 @@ pub const Ledger = struct {
     }
 
     fn appendInternal(self: *Ledger, e: Event, origin: ?[]const u8) !void {
+        const owner = self.arena.allocator();
         // Prepare origin tracking up front — dupe the key and reserve the map
         // slot — so that once the durable line is written nothing left can fail
         // and desync the set from the file. A duplicate origin needs no slot.
         var origin_key: ?[]u8 = null;
         if (origin) |o| {
             if (!self.origins.contains(o)) {
-                origin_key = try self.alloc.dupe(u8, o);
-                self.origins.ensureUnusedCapacity(self.alloc, 1) catch |err| {
-                    self.alloc.free(origin_key.?);
-                    return err;
-                };
+                origin_key = try owner.dupe(u8, o);
+                try self.origins.ensureUnusedCapacity(self.alloc, 1);
             }
         }
-        errdefer if (origin_key) |k| self.alloc.free(k);
 
-        const owned = try cloneEvent(self.alloc, e);
-        errdefer freeEvent(self.alloc, owned);
+        const owned = try cloneEvent(owner, e);
         try self.events.append(self.alloc, owned);
         if (self.durable) |*d| {
             // seq is the 1-based file position; the just-appended event is at it.
             const seq: u64 = self.events.items.len;
             d.persist(self.alloc, e, seq, origin) catch |err| {
-                _ = self.events.pop(); // undo memory append; errdefer frees `owned`
+                // Undo the memory append so memory and file cannot diverge. The
+                // event's bytes stay in the arena until `deinit` — deliberate:
+                // an append-only ledger's memory grows with history anyway, and
+                // a failed append is a few bytes of that, not a leak to chase.
+                // The same holds for `origin_key` and for a clone abandoned by a
+                // failing `events.append` above.
+                _ = self.events.pop();
                 return err;
             };
         }
@@ -216,114 +236,47 @@ pub const Ledger = struct {
     }
 };
 
-fn cloneEvent(alloc: std.mem.Allocator, e: Event) !Event {
+/// Deep-copy `e` into the ledger's arena. `a` is always `Ledger.arena`, which is
+/// why there is no unwind path here: a copy that fails half way leaves its
+/// finished pieces in the arena, and the arena is released as one.
+fn cloneEvent(a: std.mem.Allocator, e: Event) !Event {
     return switch (e) {
-        .user_text => |text| .{ .user_text = try alloc.dupe(u8, text) },
-        .assistant => |as| blk: {
-            const reasoning = try alloc.dupe(u8, as.reasoning);
-            errdefer alloc.free(reasoning);
-            const text = try alloc.dupe(u8, as.text);
-            errdefer alloc.free(text);
-            const calls = try cloneToolCalls(alloc, as.calls);
-            errdefer freeToolCalls(alloc, calls);
-            break :blk .{ .assistant = .{ .reasoning = reasoning, .text = text, .calls = calls, .usage = as.usage, .stop_reason = as.stop_reason } };
-        },
-        .tool_results => |results| .{ .tool_results = try cloneToolResults(alloc, results) },
-        .capability_note => |note| blk: {
-            const id = try alloc.dupe(u8, note.id);
-            errdefer alloc.free(id);
-            const version = try alloc.dupe(u8, note.version);
-            errdefer alloc.free(version);
-            const text = try alloc.dupe(u8, note.text);
-            break :blk .{ .capability_note = .{ .id = id, .version = version, .text = text } };
-        },
+        .user_text => |text| .{ .user_text = try a.dupe(u8, text) },
+        .assistant => |as| .{ .assistant = .{
+            .reasoning = try a.dupe(u8, as.reasoning),
+            .text = try a.dupe(u8, as.text),
+            .calls = try cloneToolCalls(a, as.calls),
+            .usage = as.usage,
+            .stop_reason = as.stop_reason,
+        } },
+        .tool_results => |results| .{ .tool_results = try cloneToolResults(a, results) },
+        .capability_note => |note| .{ .capability_note = .{
+            .id = try a.dupe(u8, note.id),
+            .version = try a.dupe(u8, note.version),
+            .text = try a.dupe(u8, note.text),
+        } },
     };
 }
 
-fn freeEvent(alloc: std.mem.Allocator, e: Event) void {
-    switch (e) {
-        .user_text => |text| alloc.free(text),
-        .assistant => |as| {
-            alloc.free(as.reasoning);
-            alloc.free(as.text);
-            freeToolCalls(alloc, as.calls);
-        },
-        .tool_results => |results| freeToolResults(alloc, results),
-        .capability_note => |note| {
-            alloc.free(note.id);
-            alloc.free(note.version);
-            alloc.free(note.text);
-        },
-    }
-}
-
-fn cloneToolCalls(alloc: std.mem.Allocator, calls: []const ToolCall) ![]const ToolCall {
-    const owned = try alloc.alloc(ToolCall, calls.len);
-    errdefer alloc.free(owned);
-    var initialized: usize = 0;
-    errdefer {
-        for (owned[0..initialized]) |call| freeToolCall(alloc, call);
-    }
-
-    for (calls, 0..) |call, i| {
-        owned[i] = .{
-            .id = try alloc.dupe(u8, call.id),
-            .tool = &.{},
-            .args_json = &.{},
-        };
-        errdefer alloc.free(owned[i].id);
-        owned[i].tool = try alloc.dupe(u8, call.tool);
-        errdefer alloc.free(owned[i].tool);
-        owned[i].args_json = try alloc.dupe(u8, call.args_json);
-        initialized += 1;
-    }
+fn cloneToolCalls(a: std.mem.Allocator, calls: []const ToolCall) ![]const ToolCall {
+    const owned = try a.alloc(ToolCall, calls.len);
+    for (calls, owned) |call, *out| out.* = .{
+        .id = try a.dupe(u8, call.id),
+        .tool = try a.dupe(u8, call.tool),
+        .args_json = try a.dupe(u8, call.args_json),
+    };
     return owned;
 }
 
-fn freeToolCalls(alloc: std.mem.Allocator, calls: []const ToolCall) void {
-    for (calls) |call| freeToolCall(alloc, call);
-    alloc.free(calls);
-}
-
-fn freeToolCall(alloc: std.mem.Allocator, call: ToolCall) void {
-    alloc.free(call.id);
-    alloc.free(call.tool);
-    alloc.free(call.args_json);
-}
-
-fn cloneToolResults(alloc: std.mem.Allocator, results: []const ToolResultEntry) ![]const ToolResultEntry {
-    const owned = try alloc.alloc(ToolResultEntry, results.len);
-    errdefer alloc.free(owned);
-    var initialized: usize = 0;
-    errdefer {
-        for (owned[0..initialized]) |result| freeToolResult(alloc, result);
-    }
-
-    for (results, 0..) |result, i| {
-        owned[i] = .{
-            .call_id = try alloc.dupe(u8, result.call_id),
-            .ok = result.ok,
-            .output = &.{},
-            .spill_path = null,
-        };
-        errdefer alloc.free(owned[i].call_id);
-        owned[i].output = try alloc.dupe(u8, result.output);
-        errdefer alloc.free(owned[i].output);
-        if (result.spill_path) |path| owned[i].spill_path = try alloc.dupe(u8, path);
-        initialized += 1;
-    }
+fn cloneToolResults(a: std.mem.Allocator, results: []const ToolResultEntry) ![]const ToolResultEntry {
+    const owned = try a.alloc(ToolResultEntry, results.len);
+    for (results, owned) |result, *out| out.* = .{
+        .call_id = try a.dupe(u8, result.call_id),
+        .ok = result.ok,
+        .output = try a.dupe(u8, result.output),
+        .spill_path = if (result.spill_path) |path| try a.dupe(u8, path) else null,
+    };
     return owned;
-}
-
-fn freeToolResults(alloc: std.mem.Allocator, results: []const ToolResultEntry) void {
-    for (results) |result| freeToolResult(alloc, result);
-    alloc.free(results);
-}
-
-fn freeToolResult(alloc: std.mem.Allocator, result: ToolResultEntry) void {
-    alloc.free(result.call_id);
-    alloc.free(result.output);
-    if (result.spill_path) |path| alloc.free(path);
 }
 
 // ── Durable session file (DESIGN §3.4) ──────────────────────────────────────
@@ -532,6 +485,7 @@ pub fn createDurable(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path
 
     return .{
         .alloc = alloc,
+        .arena = .init(alloc),
         .events = .empty,
         .durable = .{ .io = io, .file = file, .lock_file = lock_file, .end = line.len, .owned_header = owned },
     };
@@ -940,6 +894,21 @@ pub fn drainInbox(alloc: std.mem.Allocator, io: std.Io, l: *Ledger, base: std.Io
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
+
+test "Usage.add sums every field in place and treats zero as the identity" {
+    var total: Usage = .{};
+    try std.testing.expect(total.isZero());
+    total.add(.{ .input_tokens = 1, .output_tokens = 2, .cache_read_tokens = 3, .cache_write_tokens = 4 });
+    total.add(.{ .input_tokens = 10, .output_tokens = 20, .cache_read_tokens = 30, .cache_write_tokens = 40 });
+    // A step whose provider reported nothing contributes nothing.
+    total.add(.{});
+    try std.testing.expectEqual(Usage{
+        .input_tokens = 11,
+        .output_tokens = 22,
+        .cache_read_tokens = 33,
+        .cache_write_tokens = 44,
+    }, total);
+}
 
 test "ledger only grows and preserves order" {
     var l = Ledger.init(std.testing.allocator);

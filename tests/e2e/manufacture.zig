@@ -20,6 +20,7 @@ const extractVersion = support.extractVersion;
 const forwardSlashes = support.forwardSlashes;
 const readSessionFile = support.readSessionFile;
 const runCli = support.runCli;
+const runCliStderr = support.runCliStderr;
 const shellCallArgs = support.shellCallArgs;
 
 /// The most recent tool-result output in the ledger, or null if none — used to
@@ -78,6 +79,13 @@ test "self-manufacture closed loop: a shell/edit-only session builds its own ext
     // NULYA_ZIG is not secret-shaped, so it survives sanitization and reaches the
     // model's `nulya ext build` grandchild (test -> shell -> nulya -> zig).
     try lenv.env.put("NULYA_ZIG", zig_exe);
+    // The model's `ext build` records this workspace store as trusted (DESIGN §9)
+    // in the USER layer, so it must see the same isolated home `runCli` gives the
+    // `session new` below — otherwise the store the model just built is trusted in
+    // one home and refused from the other, which is the developer's real `~`.
+    const test_home = try support.testHome(alloc, io, ws);
+    defer alloc.free(test_home);
+    try lenv.env.put("NULYA_HOME", test_home);
 
     const exe_fwd = try forwardSlashes(alloc, exe_abs);
     defer alloc.free(exe_fwd);
@@ -141,15 +149,28 @@ test "self-manufacture closed loop: a shell/edit-only session builds its own ext
     try std.testing.expectEqual(@as(usize, 2), sess.composition.tools.tools.len);
     try std.testing.expect(sess.composition.tools.lookup("greet") == null);
 
-    // The model's own `nulya ext run` recorded the durable usage fact.
+    // The model's own `nulya ext run` recorded the durable usage fact — written
+    // by a SEPARATE process (the CLI in the model's shell) into the same journal
+    // this session's own `shell` rows go to.
     {
         const events = try tool_stats.readAll(alloc, io, ws_path);
         defer tool_stats.freeEvents(alloc, events);
-        var saw = false;
+        var saw_ext = false;
+        var saw_measured_shell = false;
         for (events) |e| {
-            if (std.mem.eql(u8, e.tool_id, "ext:demo/greet")) saw = true;
+            // Every writer stamps every line, whichever process it came from.
+            try std.testing.expect(e.at != null);
+            if (std.mem.eql(u8, e.tool_id, "ext:demo/greet")) saw_ext = true;
+            // The kernel measures the calls it dispatches itself. This session is
+            // in-memory, so no row names a session — there is no id to name.
+            if (std.mem.eql(u8, e.tool_id, "builtin.shell")) {
+                try std.testing.expect(e.duration_ms != null);
+                try std.testing.expect(e.session == null);
+                saw_measured_shell = true;
+            }
         }
-        try std.testing.expect(saw);
+        try std.testing.expect(saw_ext);
+        try std.testing.expect(saw_measured_shell);
     }
 
     // --- Session B: usage rows exist, and change nothing. ---
@@ -207,12 +228,17 @@ test "self-manufacture closed loop: a shell/edit-only session builds its own ext
     }
 
     // A pin that resolves to nothing fails the session rather than starting one
-    // quietly missing the tool it was asked for.
+    // quietly missing the tool it was asked for. The refusal names the pin — on
+    // stderr, because `session new`'s stdout is the id and nothing else.
     {
-        const bad = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--pin", "ext:demo/absent" });
+        const argv = [_][]const u8{ exe_abs, "session", "new", "--profile", "scripted", "--pin", "ext:demo/absent" };
+        const bad = try runCli(alloc, io, ws, &argv);
         defer alloc.free(bad.stdout);
         try std.testing.expectEqual(@as(u8, 1), bad.code);
-        try std.testing.expect(std.mem.indexOf(u8, bad.stdout, "ext:demo/absent") != null);
+        try std.testing.expectEqualStrings("", std.mem.trim(u8, bad.stdout, " \r\n"));
+        const said = try runCliStderr(alloc, io, ws, &argv, &.{});
+        defer alloc.free(said);
+        try std.testing.expect(std.mem.indexOf(u8, said, "ext:demo/absent") != null);
     }
 }
 

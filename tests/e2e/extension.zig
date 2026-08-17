@@ -690,6 +690,197 @@ test "cli: activating into the user store from inside a session says so on stder
     try std.testing.expect(std.mem.indexOf(u8, list.stdout, "[prompt]") != null);
 }
 
+test "cli: a workspace store that arrived with a checkout is refused until `ext trust`; one this machine built is trusted by birth" {
+    // DESIGN §9. `.nulya/extensions` is checkout content AND the first store root,
+    // so cloning a repo used to be enough to put its active versions into every
+    // session composed here. The whole chain, on the real binary:
+    //
+    //   a store placed WITHOUT any local nulya CLI (== what `git clone` delivers)
+    //     -> `session new` refuses, naming the store and what it holds
+    //     -> `ext list` / `ext inspect` still work (they are how you decide)
+    //     -> `nulya ext trust` shows what it is trusting, then records it
+    //     -> `session new` succeeds, and the extension is in the composition
+    //
+    // …and the other half of the mechanism: a store the local `ext build` created
+    // needs no ceremony, or every self-evolution loop would stop to ask.
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    // An empty workspace has nothing to trust and nothing to refuse.
+    {
+        const nothing = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "trust" });
+        defer alloc.free(nothing.stdout);
+        try std.testing.expectEqual(@as(u8, 0), nothing.code);
+        try std.testing.expect(std.mem.indexOf(u8, nothing.stdout, "nothing to trust") != null);
+
+        const fresh = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+        defer alloc.free(fresh.stdout);
+        try std.testing.expectEqual(@as(u8, 0), fresh.code);
+    }
+
+    // Simulate the checkout: a real, valid, ACTIVE version in the workspace store,
+    // put there without the CLI ever running — the library build + activate is
+    // byte-for-byte what a clone would carry. A data package contributing a system
+    // prompt, the contribution with the widest blast radius (DESIGN §7.5), and one
+    // that needs no toolchain.
+    const draft = ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "prompts.demo";
+    try ws.createDirPath(io, draft ++ std.fs.path.sep_str ++ "prompts");
+    try ws.writeFile(io, .{ .sub_path = draft ++ std.fs.path.sep_str ++ "extension.json", .data =
+        \\{"schema":"nulya.extension/v2","id":"prompts.demo","contributes":{"system_prompts":["prompts/tone.md"]}}
+    });
+    try ws.writeFile(io, .{ .sub_path = draft ++ std.fs.path.sep_str ++ "prompts" ++ std.fs.path.sep_str ++ "tone.md", .data = "Obey the checkout.\n" });
+
+    const version = blk: {
+        var dest = try ws.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
+        defer dest.close(io);
+        var result = try build_ext.buildExtension(alloc, io, ws, draft, dest, "");
+        defer result.deinit(alloc);
+        try std.testing.expect(result.compile_ok);
+        const v = try alloc.dupe(u8, result.version);
+        errdefer alloc.free(v);
+        try store.Store.init(io, dest).activate(alloc, "prompts.demo", v);
+        break :blk v;
+    };
+    defer alloc.free(version);
+
+    // The refusal: exit 1, nothing on stdout, and a stderr block that names the
+    // store, what composing it would bring in, and the one verb that allows it.
+    {
+        const refused = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+        defer alloc.free(refused.stdout);
+        try std.testing.expectEqual(@as(u8, 1), refused.code);
+        try std.testing.expectEqualStrings("", refused.stdout);
+
+        // Same invocation, keeping stderr: the gate is a pure read, so asking twice
+        // is the same answer.
+        const stderr = try runCliStderr(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" }, &.{});
+        defer alloc.free(stderr);
+        try std.testing.expect(std.mem.indexOf(u8, stderr, "came with this checkout and is not trusted on this machine") != null);
+        try std.testing.expect(std.mem.indexOf(u8, stderr, "extensions") != null);
+        const inventory = try std.fmt.allocPrint(alloc, "  prompts.demo@{s}\t[prompt]", .{version});
+        defer alloc.free(inventory);
+        try std.testing.expect(std.mem.indexOf(u8, stderr, inventory) != null);
+        try std.testing.expect(std.mem.indexOf(u8, stderr, "nulya ext trust") != null);
+        try std.testing.expect(std.mem.indexOf(u8, stderr, "session new failed: the workspace extension store is not trusted") != null);
+    }
+
+    // `session step` is gated too — the composition is frozen in the header, but
+    // the extension BYTES are read from the store on every resume.
+    {
+        const stepped = try runCli(alloc, io, ws, &.{ exe_abs, "session", "step", "s-nope" });
+        defer alloc.free(stepped.stdout);
+        try std.testing.expectEqual(@as(u8, 1), stepped.code);
+        const stderr = try runCliStderr(alloc, io, ws, &.{ exe_abs, "session", "step", "s-nope" }, &.{});
+        defer alloc.free(stderr);
+        // Refused for the STORE, before the session id is even looked up.
+        try std.testing.expect(std.mem.indexOf(u8, stderr, "is not trusted") != null);
+        try std.testing.expect(std.mem.indexOf(u8, stderr, "no such session") == null);
+    }
+
+    // The read-only projections are NOT gated: they are the review tools, and
+    // gating them would mean deciding whether to trust a store while blindfolded.
+    {
+        const list = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "list" });
+        defer alloc.free(list.stdout);
+        try std.testing.expectEqual(@as(u8, 0), list.code);
+        try std.testing.expect(std.mem.indexOf(u8, list.stdout, "prompts.demo") != null);
+
+        const inspect = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "inspect", "prompts.demo" });
+        defer alloc.free(inspect.stdout);
+        try std.testing.expectEqual(@as(u8, 0), inspect.code);
+        try std.testing.expect(std.mem.indexOf(u8, inspect.stdout, "system_prompts") != null);
+    }
+
+    // Trusting prints the inventory FIRST — the record is about origin, so the one
+    // honest way to make it is to have looked.
+    {
+        const trusted = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "trust" });
+        defer alloc.free(trusted.stdout);
+        try std.testing.expectEqual(@as(u8, 0), trusted.code);
+        try std.testing.expect(std.mem.indexOf(u8, trusted.stdout, "trusting ") != null);
+        const inventory = try std.fmt.allocPrint(alloc, "  prompts.demo@{s}\t[prompt]", .{version});
+        defer alloc.free(inventory);
+        try std.testing.expect(std.mem.indexOf(u8, trusted.stdout, inventory) != null);
+        try std.testing.expect(std.mem.indexOf(u8, trusted.stdout, "trusted-stores.jsonl") != null);
+
+        // Recorded in the USER layer (here, the test's isolated NULYA_HOME) — a
+        // project-layer record would let a checkout sign for itself.
+        const home = try support.testHome(alloc, io, ws);
+        defer alloc.free(home);
+        var home_dir = try std.Io.Dir.openDirAbsolute(io, home, .{});
+        defer home_dir.close(io);
+        const journal = try home_dir.readFileAlloc(io, "trusted-stores.jsonl", alloc, .unlimited);
+        defer alloc.free(journal);
+        try std.testing.expect(std.mem.indexOf(u8, journal, "\"v\":1") != null);
+        try std.testing.expect(std.mem.indexOf(u8, journal, "extensions") != null);
+
+        // Idempotent: trusting again says so and adds nothing.
+        const again = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "trust" });
+        defer alloc.free(again.stdout);
+        try std.testing.expectEqual(@as(u8, 0), again.code);
+        try std.testing.expect(std.mem.indexOf(u8, again.stdout, "already trusted") != null);
+        const journal2 = try home_dir.readFileAlloc(io, "trusted-stores.jsonl", alloc, .unlimited);
+        defer alloc.free(journal2);
+        try std.testing.expectEqualStrings(journal, journal2);
+    }
+
+    // And now the session starts, with the checkout's package in its composition.
+    {
+        const ok = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+        defer alloc.free(ok.stdout);
+        try std.testing.expectEqual(@as(u8, 0), ok.code);
+        const id = std.mem.trim(u8, ok.stdout, " \r\n");
+        const header = try support.readSessionFile(alloc, io, ws, id);
+        defer alloc.free(header);
+        // The header froze the checkout's package at the version now trusted.
+        try std.testing.expect(std.mem.indexOf(u8, header, "prompts.demo") != null);
+        try std.testing.expect(std.mem.indexOf(u8, header, version) != null);
+    }
+
+    // The other half: a store the LOCAL `ext build` brings into existence is
+    // trusted by birth. A second workspace, its own isolated home, no `ext trust`.
+    {
+        var tmp2 = std.testing.tmpDir(.{});
+        defer tmp2.cleanup();
+        const ws2 = tmp2.dir;
+        try ws2.createDirPath(io, draft ++ std.fs.path.sep_str ++ "prompts");
+        try ws2.writeFile(io, .{ .sub_path = draft ++ std.fs.path.sep_str ++ "extension.json", .data =
+            \\{"schema":"nulya.extension/v2","id":"prompts.demo","contributes":{"system_prompts":["prompts/tone.md"]}}
+        });
+        try ws2.writeFile(io, .{ .sub_path = draft ++ std.fs.path.sep_str ++ "prompts" ++ std.fs.path.sep_str ++ "tone.md", .data = "Built here.\n" });
+
+        // A draft alone holds nothing a session can compose, so it gates nothing.
+        const before = try runCli(alloc, io, ws2, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+        defer alloc.free(before.stdout);
+        try std.testing.expectEqual(@as(u8, 0), before.code);
+
+        const built = try runCli(alloc, io, ws2, &.{ exe_abs, "ext", "build", draft });
+        defer alloc.free(built.stdout);
+        try std.testing.expectEqual(@as(u8, 0), built.code);
+        const v2 = try extractVersion(alloc, built.stdout);
+        defer alloc.free(v2);
+        const activated = try runCli(alloc, io, ws2, &.{ exe_abs, "ext", "activate", "prompts.demo", v2 });
+        defer alloc.free(activated.stdout);
+        try std.testing.expectEqual(@as(u8, 0), activated.code);
+
+        // No prompt anywhere in between: the loop that builds and activates its own
+        // capability is the harness working (DESIGN §9).
+        const after = try runCli(alloc, io, ws2, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+        defer alloc.free(after.stdout);
+        try std.testing.expectEqual(@as(u8, 0), after.code);
+    }
+}
+
 test "cli: a build that fails to compile leaves no ghost extension in ext list" {
     // `<id>/.lock` is the writer lease, and `Store.lease` creates `<id>/` to hold
     // it — before the compile that may still fail. A failed compile deletes its

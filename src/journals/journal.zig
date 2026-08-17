@@ -1,8 +1,10 @@
 //! The shared file layer under Nulya's durable JSONL journals (DESIGN §3.3).
 //!
-//! Two journals live in `.nulya/`: tool usage (`tool_stats.zig`) and session
-//! outcomes (`outcome.zig`). They record different facts and neither knows the
-//! other's schema — what they genuinely share is the FILE discipline:
+//! Two journals live in the workspace's `.nulya/`: tool usage (`tool_stats.zig`)
+//! and session outcomes (`outcome.zig`); a third, trusted stores (`trust.zig`),
+//! lives in the USER's `~/.nulya/` because a checkout must not be able to sign
+//! for itself. They record different facts and none knows another's schema —
+//! what they genuinely share is the FILE discipline:
 //!
 //!   * one complete JSON line per event, appended at the end, never rewritten;
 //!   * a journal is written by MANY processes (every `session step`, every
@@ -18,27 +20,61 @@
 //!     writes again. A malformed COMPLETE line is still the consumer's error:
 //!     the tail rule forgives an interrupted write, not a bad journal;
 //!   * a missing journal file reads as "no facts yet", while a missing workspace
-//!     (or any other host fault) propagates.
+//!     (or any other host fault) propagates. What a missing *directory* means is
+//!     the journal's own call, not this layer's: for a workspace journal it is a
+//!     host fault (the workspace is supposed to be there), for the user-level
+//!     trust journal it is simply "nothing recorded yet".
 //!
-//! Only that I/O is shared. There is deliberately no `Journal(T)`: each journal
-//! owns its own encode/parse, its own schema version, and its own error set.
+//! That I/O and the CLOCK are what is shared. There is deliberately no
+//! `Journal(T)`: each journal owns its own encode/parse, its own schema version,
+//! and its own error set.
 
 const std = @import("std");
 
-/// Directory holding every journal, relative to the workspace root.
+/// Directory holding the workspace journals, relative to the workspace root.
+/// (The user-level trust journal sits directly in `<NULYA_HOME | ~/.nulya>`, so
+/// it does not use this.)
 pub const journal_dir = ".nulya";
 
+/// The current instant as RFC3339 UTC (`2026-08-16T09:31:00Z`) — how every
+/// journal line, and a session header's `created`, stamp WHEN. Second
+/// granularity: these are human-facing timestamps for ordering and reading, not
+/// a measurement (a duration is measured on a monotonic clock, at its source).
+/// Caller owns the result.
+pub fn rfc3339Now(alloc: std.mem.Allocator, io: std.Io) ![]u8 {
+    const ms = std.Io.Timestamp.now(io, .real).toMilliseconds();
+    return rfc3339FromUnixSeconds(alloc, if (ms < 0) 0 else @intCast(@divFloor(ms, 1000)));
+}
+
+fn rfc3339FromUnixSeconds(alloc: std.mem.Allocator, secs: u64) ![]u8 {
+    const epoch: std.time.epoch.EpochSeconds = .{ .secs = secs };
+    const day = epoch.getEpochDay();
+    const year_day = day.calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const time = epoch.getDaySeconds();
+    return std.fmt.allocPrint(alloc, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
+        year_day.year,
+        month_day.month.numeric(),
+        month_day.day_index + 1,
+        time.getHoursIntoDay(),
+        time.getMinutesIntoHour(),
+        time.getSecondsIntoMinute(),
+    });
+}
+
 /// Append `line` (which must already end with `\n`) as a complete line to the
-/// journal at `file_rel` under `cwd`. Creates `.nulya` and the file when
-/// missing; opens an existing journal without truncating and writes at its end,
-/// after repairing any partial trailing line. Holds the journal's writer lease
+/// journal at `file_rel` under `cwd`. Creates the journal's own parent directory
+/// (whatever `file_rel` names — `.nulya` for a workspace journal, nothing for one
+/// that sits directly in `cwd`) and the file when missing; opens an existing
+/// journal without truncating and writes at its end, after repairing any partial
+/// trailing line. Holds the journal's writer lease
 /// (`<file_rel>.lock`, exclusive, blocking — the critical section is a stat and
 /// one write) for the duration, so concurrent appenders serialize instead of
 /// overwriting each other.
 pub fn appendLine(io: std.Io, cwd: []const u8, file_rel: []const u8, line: []const u8) !void {
     var workspace = try openWorkspace(io, cwd);
     defer workspace.close(io);
-    try workspace.createDirPath(io, journal_dir);
+    if (std.fs.path.dirname(file_rel)) |parent| try workspace.createDirPath(io, parent);
 
     var lock_buf: [std.fs.max_path_bytes]u8 = undefined;
     const lock_rel = try std.fmt.bufPrint(&lock_buf, "{s}.lock", .{file_rel});
@@ -133,6 +169,23 @@ test "appendLine creates the journal, appends in order, and readAll returns ever
     try tmp.dir.access(io, test_rel ++ ".lock", .{});
 }
 
+test "a journal that sits directly in its directory creates no subdirectory" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmpCwd(alloc, io, tmp);
+    defer alloc.free(cwd);
+
+    // The user-level trust journal's shape: a bare file name, so the only
+    // directory involved is the one already passed in.
+    try appendLine(io, cwd, "trusted-stores.jsonl", "{\"v\":1}\n");
+    const bytes = (try readAll(alloc, io, cwd, "trusted-stores.jsonl")).?;
+    defer alloc.free(bytes);
+    try std.testing.expectEqualStrings("{\"v\":1}\n", bytes);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, journal_dir, .{}));
+}
+
 test "appendLine drops a truncated crash tail instead of gluing onto it" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
@@ -218,6 +271,27 @@ test "appendLine takes the journal's writer lease: a held lease blocks a second 
     const after = (try readAll(alloc, io, cwd, test_rel)).?;
     defer alloc.free(after);
     try std.testing.expectEqualStrings("{\"a\":1}\n{\"a\":2}\n", after);
+}
+
+test "rfc3339 renders a UTC instant, and now() is one of them" {
+    const alloc = std.testing.allocator;
+    const zero = try rfc3339FromUnixSeconds(alloc, 0);
+    defer alloc.free(zero);
+    try std.testing.expectEqualStrings("1970-01-01T00:00:00Z", zero);
+
+    const day = try rfc3339FromUnixSeconds(alloc, 1_786_872_667);
+    defer alloc.free(day);
+    try std.testing.expectEqualStrings("2026-08-16T09:31:07Z", day);
+
+    // A leap day is not off by one.
+    const leap = try rfc3339FromUnixSeconds(alloc, 1_709_251_199);
+    defer alloc.free(leap);
+    try std.testing.expectEqualStrings("2024-02-29T23:59:59Z", leap);
+
+    const now = try rfc3339Now(alloc, std.testing.io);
+    defer alloc.free(now);
+    try std.testing.expectEqual(@as(usize, 20), now.len);
+    try std.testing.expectEqual(@as(u8, 'Z'), now[19]);
 }
 
 test "a missing workspace is a host fault, never an empty journal" {

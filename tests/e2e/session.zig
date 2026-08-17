@@ -27,6 +27,7 @@ const readSessionFile = support.readSessionFile;
 const runCli = support.runCli;
 const runCliEnv = support.runCliEnv;
 const runCliEnvs = support.runCliEnvs;
+const runCliStderr = support.runCliStderr;
 const scaffoldAndBuild = support.scaffoldAndBuild;
 const shellCallArgs = support.shellCallArgs;
 
@@ -396,11 +397,15 @@ test "session cli: a fork continues its parent's frozen model identity, and name
     // A lineage pointer into nothing is not provenance: refused, and no session
     // file is left behind.
     {
-        const fork = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "new", "--parent", "s-nope:0" }, env);
+        const argv = [_][]const u8{ exe_abs, "session", "new", "--parent", "s-nope:0" };
+        const fork = try runCliEnvs(alloc, io, ws, &argv, env);
         defer alloc.free(fork.stdout);
         try std.testing.expectEqual(@as(u8, 1), fork.code);
-        try std.testing.expect(std.mem.indexOf(u8, fork.stdout, "s-") == null or
-            std.mem.indexOf(u8, fork.stdout, "cannot read parent") != null);
+        // Nothing on stdout: no id was printed, and the refusal is a diagnostic.
+        try std.testing.expectEqualStrings("", std.mem.trim(u8, fork.stdout, " \r\n"));
+        const said = try runCliStderr(alloc, io, ws, &argv, env);
+        defer alloc.free(said);
+        try std.testing.expect(std.mem.indexOf(u8, said, "cannot read parent") != null);
     }
 }
 

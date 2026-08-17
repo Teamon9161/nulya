@@ -17,6 +17,8 @@ const config = @import("config.zig");
 const ledger = @import("ledger.zig");
 const environment = @import("environment.zig");
 const store = @import("extension/store.zig");
+const ext_manifest = @import("extension/manifest.zig");
+const trust = @import("journals/trust.zig");
 const build_options = @import("config_options");
 
 /// This build's version string, straight from `build.zig.zon` `.version` (build.zig
@@ -351,10 +353,93 @@ pub fn extensionRoots(
 /// `<NULYA_HOME | ~/.nulya>/extensions` — the user-level store, where `--user`
 /// writes. Null when this machine has no home directory at all. Caller owns it.
 pub fn userExtensionsRoot(alloc: std.mem.Allocator, env: *const std.process.Environ.Map) !?[]u8 {
-    const home = try config.userHome(alloc, env);
+    const home = (try userHomeDir(alloc, env)) orelse return null;
     defer alloc.free(home);
-    if (home.len == 0) return null;
     return try std.fs.path.join(alloc, &.{ home, "extensions" });
+}
+
+/// `<NULYA_HOME | ~/.nulya>` — the user layer: the user config, the user store,
+/// the trust journal. Null when this machine has no home directory at all, which
+/// is the one case where nothing user-level can be read or written. Caller owns it.
+pub fn userHomeDir(alloc: std.mem.Allocator, env: *const std.process.Environ.Map) !?[]u8 {
+    const home = try config.userHome(alloc, env);
+    if (home.len == 0) {
+        alloc.free(home);
+        return null;
+    }
+    return home;
+}
+
+/// Refuse to start a session composed against a workspace extension store that
+/// arrived with a checkout and has never been trusted on this machine
+/// (DESIGN §9). Returns `error.WorkspaceStoreUntrusted`; the CLI turns that into
+/// the message and the exit code, so nothing in the kernel — not
+/// `SessionComposition`, not `AgentSession` — knows trust exists.
+///
+/// The gate covers the WORKSPACE root only. The user store and `extensions.paths`
+/// are trusted by construction (a checkout can reach neither: DESIGN §7.2/§9.5),
+/// and the read-only projections (`ext list`, `ext inspect`, `skill list`) are
+/// deliberately ungated — they are the tools for deciding whether to trust.
+pub fn ensureWorkspaceStoreTrusted(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    env: *const std.process.Environ.Map,
+    cwd: []const u8,
+) !void {
+    const path = (try occupiedWorkspaceStore(alloc, io, cwd)) orelse return;
+    defer alloc.free(path);
+    // No home at all means there is nowhere a trust could have been recorded —
+    // and nowhere to record one. Refusing is the honest answer; `ext trust` is
+    // where the missing home gets named.
+    const home = (try userHomeDir(alloc, env)) orelse return error.WorkspaceStoreUntrusted;
+    defer alloc.free(home);
+    if (try trust.isTrusted(alloc, io, home, path)) return;
+    return error.WorkspaceStoreUntrusted;
+}
+
+/// The workspace store's absolute real path when it HOLDS extensions — when
+/// trusting it therefore means something — else null. ONE predicate answers both
+/// halves of the mechanism, so the gate, `ext trust` and `ext build`'s
+/// auto-trust cannot disagree about whether a store is occupied.
+///
+/// "Holds" means an id with a `current` pointer or with at least one built
+/// version: exactly the things a session can compose (`Roots.listActive`,
+/// `--with`) or a CLI can execute (`ext run <id>@<version>`). A bare `<id>/`
+/// directory with neither — a draft, or the empty shell a failed `ext build`
+/// leaves behind around its `<id>/.lock` — holds nothing: it is inert source
+/// until something local builds it, and that local build is what records trust.
+/// Caller owns the result.
+pub fn occupiedWorkspaceStore(alloc: std.mem.Allocator, io: std.Io, cwd: []const u8) !?[]u8 {
+    var root = store.openRoot(io, cwd, store.workspace_root_rel) catch |err| switch (err) {
+        // No workspace store at all: nothing to gate.
+        error.FileNotFound, error.NotDir => return null,
+        else => return err,
+    };
+    defer root.close(io);
+    if (!try storeHoldsExtensions(alloc, io, root)) return null;
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    return try alloc.dupe(u8, buf[0..try root.realPath(io, &buf)]);
+}
+
+fn storeHoldsExtensions(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir) !bool {
+    const st = store.Store.init(io, root);
+    var it = root.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .directory) continue;
+        if (!ext_manifest.isValidId(entry.name)) continue;
+        if (try st.activeVersion(alloc, entry.name)) |active| {
+            alloc.free(active);
+            return true;
+        }
+        const versions = try st.listVersions(alloc, entry.name);
+        defer {
+            for (versions) |v| alloc.free(v);
+            alloc.free(versions);
+        }
+        if (versions.len != 0) return true;
+    }
+    return false;
 }
 
 pub fn freeExtensionRoots(alloc: std.mem.Allocator, roots: []const []const u8) void {
@@ -368,38 +453,15 @@ pub fn sessionPath(alloc: std.mem.Allocator, id: []const u8) ![]u8 {
     return std.fmt.allocPrint(alloc, "{s}/{s}.jsonl", .{ sessions_dir, id });
 }
 
-/// A time-ordered, collision-resistant session id: `s-<unix-ms>-<hex>`.
-/// Caller owns the result.
+/// A time-ordered, collision-resistant session id: `s-<unix-ms>-<hex>`. The
+/// suffix is real randomness from `io`, not a PRNG seeded by the clock: two
+/// processes creating a session in the same millisecond would seed identically
+/// and draw the same "random" suffix. Caller owns the result.
 pub fn genSessionId(alloc: std.mem.Allocator, io: std.Io) ![]u8 {
     const now = std.Io.Timestamp.now(io, .real);
-    var prng = std.Random.DefaultPrng.init(@bitCast(@as(i64, @truncate(now.toNanoseconds()))));
-    const suffix = prng.random().int(u24);
-    return std.fmt.allocPrint(alloc, "s-{d}-{x}", .{ now.toMilliseconds(), suffix });
-}
-
-/// The current instant as RFC3339 UTC (`2026-08-16T09:31:00Z`) — what a session
-/// header's `created` and an outcome journal line's `at` record. Second
-/// granularity: these are human-facing timestamps for ordering and reading, not
-/// a measurement. Caller owns the result.
-pub fn rfc3339Now(alloc: std.mem.Allocator, io: std.Io) ![]u8 {
-    const ms = std.Io.Timestamp.now(io, .real).toMilliseconds();
-    return rfc3339FromUnixSeconds(alloc, if (ms < 0) 0 else @intCast(@divFloor(ms, 1000)));
-}
-
-fn rfc3339FromUnixSeconds(alloc: std.mem.Allocator, secs: u64) ![]u8 {
-    const epoch: std.time.epoch.EpochSeconds = .{ .secs = secs };
-    const day = epoch.getEpochDay();
-    const year_day = day.calculateYearDay();
-    const month_day = year_day.calculateMonthDay();
-    const time = epoch.getDaySeconds();
-    return std.fmt.allocPrint(alloc, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
-        year_day.year,
-        month_day.month.numeric(),
-        month_day.day_index + 1,
-        time.getHoursIntoDay(),
-        time.getMinutesIntoHour(),
-        time.getSecondsIntoMinute(),
-    });
+    var suffix: [3]u8 = undefined;
+    io.random(&suffix);
+    return std.fmt.allocPrint(alloc, "s-{d}-{x}", .{ now.toMilliseconds(), std.mem.readInt(u24, &suffix, .little) });
 }
 
 /// A valid session id contains only path-safe characters (never `/`, `\`, `..`),
@@ -456,25 +518,88 @@ test "extension roots search workspace, then user, then trusted config paths" {
     try std.testing.expect((try userExtensionsRoot(alloc, &homeless)) == null);
 }
 
-test "rfc3339 renders a UTC instant, and now() is one of them" {
+const fake_version = "v-0123456789abcdef01234567";
+
+/// What a seeded store entry holds, in the terms the gate reads: a `draft` is a
+/// bare `<id>/`, `built` adds a version DIRECTORY (all `listVersions` counts),
+/// `active` adds the `current` pointer `activeVersion` reads. Real contents are
+/// beside the point here — the predicate under test is what a store HOLDS, not
+/// whether its bytes validate (that is `store.zig`'s).
+const SeedKind = enum { draft, built, active };
+
+fn seedStoreEntry(io: std.Io, ws: std.Io.Dir, id: []const u8, kind: SeedKind) !void {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = try std.fmt.bufPrint(&buf, store.workspace_root_rel ++ "/{s}", .{id});
+    try ws.createDirPath(io, base);
+    if (kind == .draft) return;
+
+    var vbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const vdir = try std.fmt.bufPrint(&vbuf, "{s}/versions/" ++ fake_version, .{base});
+    try ws.createDirPath(io, vdir);
+    if (kind == .built) return;
+
+    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const current = try std.fmt.bufPrint(&cbuf, "{s}/current", .{base});
+    try ws.writeFile(io, .{ .sub_path = current, .data = fake_version ++ "\n" });
+}
+
+test "the workspace store gate: only a store that HOLDS something needs trust, and only the user layer can grant it" {
     const alloc = std.testing.allocator;
-    const zero = try rfc3339FromUnixSeconds(alloc, 0);
-    defer alloc.free(zero);
-    try std.testing.expectEqualStrings("1970-01-01T00:00:00Z", zero);
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_path = try alloc.dupe(u8, buf[0..try tmp.dir.realPath(io, &buf)]);
+    defer alloc.free(ws_path);
 
-    const day = try rfc3339FromUnixSeconds(alloc, 1_786_872_667);
-    defer alloc.free(day);
-    try std.testing.expectEqualStrings("2026-08-16T09:31:07Z", day);
+    var env: std.process.Environ.Map = .init(alloc);
+    defer env.deinit();
+    const home = try std.fs.path.join(alloc, &.{ ws_path, "home" });
+    defer alloc.free(home);
+    try env.put("NULYA_HOME", home);
 
-    // A leap day is not off by one.
-    const leap = try rfc3339FromUnixSeconds(alloc, 1_709_251_199);
-    defer alloc.free(leap);
-    try std.testing.expectEqualStrings("2024-02-29T23:59:59Z", leap);
+    // No store at all: nothing to gate, and no path to key a trust on.
+    try std.testing.expect((try occupiedWorkspaceStore(alloc, io, ws_path)) == null);
+    try ensureWorkspaceStoreTrusted(alloc, io, &env, ws_path);
 
-    const now = try rfc3339Now(alloc, std.testing.io);
-    defer alloc.free(now);
-    try std.testing.expectEqual(@as(usize, 20), now.len);
-    try std.testing.expectEqual(@as(u8, 'Z'), now[19]);
+    // An empty store, and one holding only a draft or only the empty shell a
+    // failed build leaves around its lease: still nothing a session can compose.
+    try tmp.dir.createDirPath(io, store.workspace_root_rel);
+    try seedStoreEntry(io, tmp.dir, "drafted", .draft);
+    try tmp.dir.createDirPath(io, store.workspace_root_rel ++ "/shell/versions");
+    try std.testing.expect((try occupiedWorkspaceStore(alloc, io, ws_path)) == null);
+    try ensureWorkspaceStoreTrusted(alloc, io, &env, ws_path);
+
+    // A BUILT version is enough: `--with <id>@<version>` and `ext run <id>@<v>`
+    // reach it without any `current`.
+    try seedStoreEntry(io, tmp.dir, "built", .built);
+    const occupied = (try occupiedWorkspaceStore(alloc, io, ws_path)).?;
+    defer alloc.free(occupied);
+    // The trust key is the store's own absolute real path, not the workspace's.
+    try std.testing.expect(std.fs.path.isAbsolute(occupied));
+    try std.testing.expectEqualStrings("extensions", std.fs.path.basename(occupied));
+    try std.testing.expectError(error.WorkspaceStoreUntrusted, ensureWorkspaceStoreTrusted(alloc, io, &env, ws_path));
+
+    // An active version too, and trust is what lifts the refusal.
+    try seedStoreEntry(io, tmp.dir, "active", .active);
+    try std.testing.expectError(error.WorkspaceStoreUntrusted, ensureWorkspaceStoreTrusted(alloc, io, &env, ws_path));
+    try trust.append(alloc, io, home, occupied);
+    try ensureWorkspaceStoreTrusted(alloc, io, &env, ws_path);
+
+    // Trust is recorded in the USER layer, so pointing `NULYA_HOME` elsewhere —
+    // another identity, another test — does not inherit it, and a machine with no
+    // home at all has nowhere a trust could have been recorded.
+    var elsewhere: std.process.Environ.Map = .init(alloc);
+    defer elsewhere.deinit();
+    const other_home = try std.fs.path.join(alloc, &.{ ws_path, "other-home" });
+    defer alloc.free(other_home);
+    try elsewhere.put("NULYA_HOME", other_home);
+    try std.testing.expectError(error.WorkspaceStoreUntrusted, ensureWorkspaceStoreTrusted(alloc, io, &elsewhere, ws_path));
+
+    var homeless: std.process.Environ.Map = .init(alloc);
+    defer homeless.deinit();
+    try std.testing.expect((try userHomeDir(alloc, &homeless)) == null);
+    try std.testing.expectError(error.WorkspaceStoreUntrusted, ensureWorkspaceStoreTrusted(alloc, io, &homeless, ws_path));
 }
 
 test "session id validation rejects traversal" {

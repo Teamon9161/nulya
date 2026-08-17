@@ -15,7 +15,7 @@ const environment = @import("environment.zig");
 const prompt = @import("prompt.zig");
 const composition = @import("composition.zig");
 const tool = @import("tool.zig");
-const tool_stats = @import("tool_stats.zig");
+const tool_stats = @import("journals/tool_stats.zig");
 const store = @import("extension/store.zig");
 
 /// The most kernel steps one `run` may take, whatever the caller asks for
@@ -260,8 +260,14 @@ pub const AgentSession = struct {
         // here on is this step's assistant turn plus, when it carried tool
         // calls, the single batched tool_results turn.
         const before = self.l.len();
-        const outcome = try loop.runStepWithPrompt(self.alloc, &self.l, self.model, &prompt_ir, self.composition.tools, self.step_ctx, self.model_options);
-        accumulate(&self.total_usage, outcome.usage);
+        // How long each call took, for the usage journal below. A step-local
+        // buffer, so a duration cannot outlive the step that measured it: it is
+        // journal evidence, and neither the ledger nor `StepOutcome` — which
+        // every caller of `step()` receives — has any business carrying it.
+        var durations_ms: std.ArrayList(u64) = .empty;
+        defer durations_ms.deinit(self.alloc);
+        const outcome = try loop.runStepWithPrompt(self.alloc, &self.l, self.model, &prompt_ir, self.composition.tools, self.step_ctx, self.model_options, &durations_ms);
+        self.total_usage.add(outcome.usage);
         // Stats are an observation AFTER execution (`tool_stats.zig`), so they are
         // recorded only for a step whose tools actually ran. A reply cut by
         // `max_tokens` closes its batch with marker results the loop wrote without
@@ -276,7 +282,7 @@ pub const AgentSession = struct {
             // errors) propagate; a cancel landing after the step's real work
             // already finished is host execution control, so the completed
             // outcome is reported as-is and this step's events go unrecorded.
-            self.recordCompletedToolStats(before) catch |err| switch (err) {
+            self.recordCompletedToolStats(before, durations_ms.items) catch |err| switch (err) {
                 error.Canceled => {},
                 else => return err,
             };
@@ -395,7 +401,12 @@ pub const AgentSession = struct {
     /// invariant. A call is recorded only when its model-facing name resolves
     /// to a real exposed `ToolDefinition.id`: a hallucinated name has no
     /// durable identity, so it is skipped rather than saved under a fake id.
-    fn recordCompletedToolStats(self: *AgentSession, before: usize) !void {
+    ///
+    /// Each line also carries WHICH SESSION the call served, so the slow loop
+    /// can join it against `session-outcomes.jsonl` instead of seeing an
+    /// undifferentiated pile of calls. An in-memory session has no durable id
+    /// and simply omits it.
+    fn recordCompletedToolStats(self: *AgentSession, before: usize, durations_ms: []const u64) !void {
         const suffix = self.l.view()[before..];
         if (suffix.len == 1) return; // the model addressed the user; nothing to record
         std.debug.assert(suffix.len == 2);
@@ -407,24 +418,29 @@ pub const AgentSession = struct {
             .tool_results => |r| r,
             else => unreachable, // a completed step with calls always appends its batch
         };
-        // One tool_results entry per assistant call; the loop fills them in call
-        // order. The multi-prong for panics if the lengths ever disagree.
+        // One tool_results entry per assistant call, and one measurement per
+        // call: a completed step dispatched every one of them, and the loop
+        // filled all three in call order. The multi-prong for below panics if
+        // the lengths ever disagree.
         std.debug.assert(assistant.calls.len == results.len);
+        std.debug.assert(assistant.calls.len == durations_ms.len);
 
         const ctx = self.step_ctx.tool_context;
-        for (assistant.calls, results) |call, result| {
+        const session_id: ?[]const u8 = if (self.durable) |d|
+            std.fs.path.stem(std.fs.path.basename(d.session_path))
+        else
+            null;
+        for (assistant.calls, results, durations_ms) |call, result, duration_ms| {
             const t = self.composition.tools.lookup(call.tool) orelse continue;
-            try tool_stats.append(self.alloc, ctx.environment.io, ctx.cwd, t.definition.id, result.ok);
+            try tool_stats.append(self.alloc, ctx.environment.io, ctx.cwd, .{
+                .tool_id = t.definition.id,
+                .ok = result.ok,
+                .session = session_id,
+                .duration_ms = duration_ms,
+            });
         }
     }
 };
-
-fn accumulate(total: *provider.Usage, step: provider.Usage) void {
-    total.input_tokens += step.input_tokens;
-    total.output_tokens += step.output_tokens;
-    total.cache_read_tokens += step.cache_read_tokens;
-    total.cache_write_tokens += step.cache_write_tokens;
-}
 
 test "session repairs interrupted tool batch before provider request" {
     const alloc = std.testing.allocator;
@@ -1082,6 +1098,109 @@ test "completed step records stable ids, never model names or hallucinated names
     try std.testing.expectEqual(@as(usize, 1), events.len);
     try std.testing.expectEqualStrings("ext:web.search/web_search", events[0].tool_id);
     try std.testing.expect(events[0].ok);
+    // Every recorded call carries a stamp and a measurement…
+    try std.testing.expect(events[0].at != null);
+    try std.testing.expect(events[0].duration_ms != null);
+    // …and no session, because this one is pure memory: there is no id to join
+    // an outcome to, and inventing one would be a lie.
+    try std.testing.expect(events[0].session == null);
+}
+
+test "a durable session's usage rows name the session, so outcomes can be joined to them" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try sessionTmpCwd(alloc, io, tmp);
+    defer alloc.free(cwd);
+    const session_path = ".nulya" ++ std.fs.path.sep_str ++ "sessions" ++ std.fs.path.sep_str ++ "s-42.jsonl";
+
+    const SlowTool = struct {
+        fn call(ptr: ?*anyopaque, a: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolResult {
+            _ = ptr;
+            // A real wait, so the measurement is of something rather than of
+            // nothing: the clock is monotonic, so this cannot come back as 0.
+            try std.Io.sleep(req.ctx.environment.io, .fromMilliseconds(12), .awake);
+            return .{ .ok = true, .output = try a.dupe(u8, "searched") };
+        }
+    };
+    const tools_arr = [_]tool.Tool{
+        .{
+            .definition = .{ .id = "ext:web.search/web_search", .name = "web_search", .description = "search", .input_schema = "{}" },
+            .executor = .{ .ptr = null, .callFn = SlowTool.call },
+        },
+    };
+
+    const OneCallModel = struct {
+        fn name(ptr: *anyopaque) []const u8 {
+            _ = ptr;
+            return "one-call";
+        }
+        fn modelName(ptr: *anyopaque) []const u8 {
+            _ = ptr;
+            return "one-call-test";
+        }
+        fn capabilities(ptr: *anyopaque) provider.ProviderCapabilities {
+            _ = ptr;
+            return .{};
+        }
+        fn stream(ptr: *anyopaque, a: std.mem.Allocator, request: provider.Request, sink: provider.EventSink) anyerror!void {
+            _ = ptr;
+            _ = a;
+            _ = request;
+            try sink.emit(.started);
+            try sink.emit(.{ .tool_use_start = .{ .index = 0, .id = "c1", .name = "web_search" } });
+            try sink.emit(.{ .tool_use_input_delta = .{ .index = 0, .fragment = "{}" } });
+            try sink.emit(.{ .done = .tool_use });
+        }
+        const vtable: provider.Model.VTable = .{
+            .name = name,
+            .modelName = modelName,
+            .capabilities = capabilities,
+            .stream = stream,
+        };
+    };
+
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+    var model_impl = OneCallModel{};
+    var sess: AgentSession = .{
+        .alloc = alloc,
+        .l = ledger.Ledger.init(alloc),
+        .composition = .{
+            .extensions = &.{},
+            .extension_tool_bindings = &.{},
+            .tools = .{ .tools = &tools_arr },
+            .skills = .{ .skills = &.{} },
+            .system_prompts = .{ .blocks = &.{} },
+        },
+        .model = .{ .ptr = &model_impl, .vtable = &OneCallModel.vtable },
+        .step_ctx = .{
+            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd },
+            .scratch_dir = "/tmp",
+        },
+        .model_options = .{},
+        .extension_roots = &.{"nulya-absent-extensions-root"},
+        // What makes this session identifiable: the id the journal records is
+        // the session FILE's stem, exactly as `session outcome <id>` spells it.
+        .durable = .{ .workspace = tmp.dir, .session_path = session_path },
+    };
+    defer sess.l.deinit();
+
+    try sess.appendUser("go");
+    _ = try sess.step();
+
+    const events = try tool_stats.readAll(alloc, io, cwd);
+    defer tool_stats.freeEvents(alloc, events);
+    try std.testing.expectEqual(@as(usize, 1), events.len);
+    try std.testing.expectEqualStrings("ext:web.search/web_search", events[0].tool_id);
+    // The session id is the file's stem — the same id `session outcome` writes,
+    // which is the whole point of recording it.
+    try std.testing.expectEqualStrings("s-42", events[0].session.?);
+    // A call that really waited is measured as having taken time.
+    try std.testing.expect(events[0].duration_ms.? >= 10);
 }
 
 test "a canceled step records no tool usage stats" {

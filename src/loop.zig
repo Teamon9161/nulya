@@ -215,6 +215,15 @@ fn collectTurn(
 /// batched `tool_results` turn. The prompt is projected by the caller
 /// (`AgentSession`), which is what folds in the session's system blocks; the
 /// loop only sees the finished IR.
+///
+/// `durations_ms`, when given, is filled with one wall-clock measurement per
+/// DISPATCHED call, in batch order — so on a completed step it is index-aligned
+/// with the assistant turn's `calls` and with the appended `tool_results`. It is
+/// an out-parameter rather than a field of `StepOutcome` deliberately: how long
+/// a tool took is journal evidence, not conversation fact, so it belongs in
+/// neither the ledger nor a value every caller of `step()` would then have to
+/// free. The caller owns the buffer; a caller that does not want the numbers
+/// passes null and no clock is read at all.
 pub fn runStepWithPrompt(
     alloc: std.mem.Allocator,
     l: *ledger.Ledger,
@@ -223,9 +232,13 @@ pub fn runStepWithPrompt(
     tool_snapshot: registry.ToolSetSnapshot,
     step_ctx: StepContext,
     model_options: provider.Options,
+    durations_ms: ?*std.ArrayList(u64),
 ) !StepOutcome {
     // seq base is the ledger position: deterministic across replays (DESIGN §1).
     const base_seq = l.len();
+    // Emptied whatever this step turns out to be, so the sink never carries a
+    // previous step's measurements into a step that dispatched nothing.
+    if (durations_ms) |d| d.clearRetainingCapacity();
 
     const tool_defs = try tool_snapshot.definitions(alloc);
     defer alloc.free(tool_defs);
@@ -299,7 +312,7 @@ pub fn runStepWithPrompt(
     while (i < turn.calls.len) : (i += 1) {
         const call = turn.calls[i];
         if (step_ctx.observer) |obs| obs.toolBegin(call);
-        const res = execOne(alloc, tool_snapshot, call, step_ctx, base_seq, i) catch |err| switch (err) {
+        const executed = execOne(alloc, tool_snapshot, call, step_ctx, base_seq, i) catch |err| switch (err) {
             error.Canceled => {
                 if (step_ctx.observer) |obs| obs.toolEnd(call, false);
                 results[i] = canceledResult(call.id, try alloc.dupe(u8, tool_canceled_executing_output));
@@ -309,9 +322,10 @@ pub fn runStepWithPrompt(
             },
             else => return err,
         };
-        if (step_ctx.observer) |obs| obs.toolEnd(call, res.ok);
-        results[i] = res;
+        if (step_ctx.observer) |obs| obs.toolEnd(call, executed.entry.ok);
+        results[i] = executed.entry;
         initialized_results += 1;
+        if (durations_ms) |d| try d.append(alloc, executed.duration_ms);
         // The step-budget limiter can spill to disk, a cancelable I/O point. A
         // cancel here would otherwise escape as an error and strand the
         // assistant-with-tool-calls tail without its matching batch (DESIGN §4).
@@ -390,7 +404,7 @@ fn runStepForTest(
 ) !StepOutcome {
     const prompt_ir = try prompt.project(alloc, l.view());
     defer prompt_ir.deinit(alloc);
-    return runStepWithPrompt(alloc, l, model, &prompt_ir, tool_snapshot, step_ctx, .{});
+    return runStepWithPrompt(alloc, l, model, &prompt_ir, tool_snapshot, step_ctx, .{}, null);
 }
 
 /// A call to a name this session does not have. The tool face is frozen for the
@@ -409,6 +423,15 @@ fn unknownToolMessage(alloc: std.mem.Allocator, tool_snapshot: registry.ToolSetS
     return out.toOwnedSlice();
 }
 
+/// One dispatched call: the batch entry the ledger will record, plus how long
+/// the EXECUTOR ran. The two are separate on purpose — the entry is what the
+/// conversation saw, the duration is evidence for the tool-usage journal, and
+/// `ledger.ToolResultEntry` has no field it could hide in.
+const Executed = struct {
+    entry: ledger.ToolResultEntry,
+    duration_ms: u64,
+};
+
 fn execOne(
     alloc: std.mem.Allocator,
     tool_snapshot: registry.ToolSetSnapshot,
@@ -416,13 +439,21 @@ fn execOne(
     step_ctx: StepContext,
     event_seq: u64,
     call_index: usize,
-) !ledger.ToolResultEntry {
+) !Executed {
+    const io = step_ctx.tool_context.environment.io;
     var ok = false;
+    // Zero when nothing ran: a name this session does not have never reaches an
+    // executor, and never reaches the journal either (`AgentSession` skips it).
+    var duration_ms: u64 = 0;
     const raw_output = blk: {
         const t = tool_snapshot.lookup(call.tool) orelse {
             break :blk try unknownToolMessage(alloc, tool_snapshot, call.tool);
         };
 
+        const started: std.Io.Timestamp = .now(io, .awake);
+        // Measured on the failure path too: a call that errored still spent the
+        // time, and the journal records failures as readily as successes.
+        defer duration_ms = elapsedMs(io, started);
         const res = t.executor.call(alloc, .{ .args_json = call.args_json, .ctx = step_ctx.tool_context }) catch |err| switch (err) {
             // Cancellation is not a tool failure — it is host execution control.
             // Propagate it to the step boundary, which records the whole batch as
@@ -435,13 +466,24 @@ fn execOne(
     };
     defer alloc.free(raw_output);
 
-    const emitted = try emit.emit(alloc, step_ctx.tool_context.environment.io, raw_output, call.tool, event_seq, call_index, step_ctx.scratch_dir, step_ctx.budget);
+    const emitted = try emit.emit(alloc, io, raw_output, call.tool, event_seq, call_index, step_ctx.scratch_dir, step_ctx.budget);
     return .{
-        .call_id = call.id,
-        .ok = ok,
-        .output = emitted.text,
-        .spill_path = emitted.spill_path,
+        .entry = .{
+            .call_id = call.id,
+            .ok = ok,
+            .output = emitted.text,
+            .spill_path = emitted.spill_path,
+        },
+        .duration_ms = duration_ms,
     };
+}
+
+/// Milliseconds elapsed since `started` on the monotonic clock — never the wall
+/// clock, which an NTP step can move under a running tool. Clamped at zero:
+/// `.awake` does not go backwards, and a duration is a count either way.
+fn elapsedMs(io: std.Io, started: std.Io.Timestamp) u64 {
+    const ms = started.durationTo(.now(io, .awake)).toMilliseconds();
+    return if (ms < 0) 0 else @intCast(ms);
 }
 
 test "one step runs a batch of two shell calls and appends one result turn" {
@@ -905,7 +947,7 @@ test "canceling provider streaming appends no partial assistant and leaves the l
         alloc,                                                                 &l,
         provider.Model{ .ptr = &model_impl, .vtable = &BlockingModel.vtable }, &prompt_ir,
         tools,                                                                 step_ctx,
-        provider.Options{},
+        provider.Options{},                                                    null,
     });
     try ready.waitTimeout(io, testDeadline(io, 5000));
     const outcome = try fut.cancel(io);
@@ -955,7 +997,7 @@ test "canceling the first executing tool records a complete canceled batch" {
     };
 
     var fut = io.async(runStepWithPrompt, .{
-        alloc, &l, model_impl.handle(), &prompt_ir, tools, step_ctx, provider.Options{},
+        alloc, &l, model_impl.handle(), &prompt_ir, tools, step_ctx, provider.Options{}, null,
     });
     try ready.waitTimeout(io, testDeadline(io, 5000));
     const outcome = try fut.cancel(io);
@@ -1072,7 +1114,7 @@ test "a successful earlier tool is kept when a later tool is canceled" {
     };
 
     var fut = io.async(runStepWithPrompt, .{
-        alloc, &l, model_impl.handle(), &prompt_ir, tools, step_ctx, provider.Options{},
+        alloc, &l, model_impl.handle(), &prompt_ir, tools, step_ctx, provider.Options{}, null,
     });
     // `block` sets `ready` only after `probe` has already returned (serial batch),
     // so the cancel deterministically targets the second call.
@@ -1139,7 +1181,7 @@ test "canceling a step-budget spill keeps the ledger complete and never runs lat
     };
 
     var fut = io.async(runStepWithPrompt, .{
-        alloc, &l, model_impl.handle(), &prompt_ir, tools, step_ctx, provider.Options{},
+        alloc, &l, model_impl.handle(), &prompt_ir, tools, step_ctx, provider.Options{}, null,
     });
     // Determinism contract: cancel only after the worker is known to sit at the
     // gate. A timeout here means the worker never arrived — fail, don't proceed.

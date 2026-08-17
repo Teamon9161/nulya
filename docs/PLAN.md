@@ -279,7 +279,7 @@ Driver 演化比 Tool 保守，因为**归因难**（任务难度 / model / seed
 
 - `sandbox` backend 上线后 `manifest.permissions` 才被 OS 强制，从"声明"升级为"边界"。
 - 不变量：**capability 绝不因被生成或被晋升而自动获得 authority**；始终 `capability authority ⊆ session authority`。
-- 与 config 项目层"只能收窄"是同一不变量的两面：checkout 一个 repo 不该能拓宽机器权限。
+- 与 config 项目层"只能收窄"是同一不变量的两面：checkout 一个 repo 不该能拓宽机器权限。第三面已落地：**workspace store 的 trust gate**（DESIGN §9）——`.nulya/extensions` 也在 checkout 里，所以随 clone 到达的 store 要被人信任一次才进 composition。
 - read-only subagent（reviewer）在 sandbox 之前不给 unrestricted shell（`local` 下无法区分 `cat` 与 `rm`）。
 
 ### 3.9 Provider：Anthropic / Codex + cache breakpoints `[已落地 · M4 → DESIGN §13]`
@@ -321,3 +321,7 @@ Driver 演化比 Tool 保守，因为**归因难**（任务难度 / model / seed
 - ~~provider cache breakpoint 各厂商差异核实（Anthropic / OpenAI / 兼容端点）。~~ 已测（M4）：openai / anthropic / codex 三条真实链路都拿到单调不减的 `cache_read`；剩下的是 first-party Anthropic key 上确认 `cache_control` 真被采纳（兼容端点是 implicit cache，看不出来）。
 - ~~codex 的 thinking：不回放 reasoning item 对多轮 tool 使用到底损失多少？~~ 已回放（DESIGN §3.1、§13），不再是问题；剩下的验收项是 first-party Anthropic key 上跑通 integration 第三条。
 - ~~是否给 `nulya src` 剥 test 块 vs 拆文件~~ 已定（M3）：测试留在文件里，`nulya src` 默认剥、`--tests` 保留——剥离是投影层的事，不动存储（DESIGN §14）。
+- ~~**workspace store 的首用 ack**：`.nulya/extensions` 在 checkout 里、又是第一优先 root，clone 一个 repo 就等于让它的 active 版本无声进 composition。候选方案是 direnv 式的内容 hash 确认。~~ **已定并已落地 → DESIGN §9 的 trust gate。** 两处待定项都拍板了，而且都不是当初设想的答案：
+  - **粒度：整个 store 一条，key 是 store 路径，不含任何内容 hash。** hash 是错的抽象——agent 每造一个能力、每 activate 一次都会改它，一道每轮都重问的门会把自演化循环卡死。判据换成**出生地**：本机 `ext build` 填满一个空 store 就自动记信任（生于本地），已有内容却无记录就是随 checkout 到达。
+  - **拒绝时的行为：硬拒整场**，不跳过该 root。理由正是这条问题自己提示的那个对照——"少一个能力的 session"不是它被要求的那一场（§7.5 对坏 active 版本的硬失败同理）。
+  - 落地形状：`journals/trust.zig`（user 层 `<NULYA_HOME | ~/.nulya>/trusted-stores.jsonl`）+ `launch.ensureWorkspaceStoreTrusted`（门在壳层，内核不知道）+ `nulya ext trust`（显式信任，先打印要信任的东西）。只读投影与 `ext run` 不过门。

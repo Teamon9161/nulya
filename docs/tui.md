@@ -58,7 +58,7 @@
 | `nulya ext list` | `/ext` 的目录清单：每个 id 来自哪个 root、谁被 `(shadowed)`——root 顺序与"首个持有者胜"是 kernel policy，TUI 不复刻（T8） |
 | `.nulya/sessions/<id>.lock` | 能否非阻塞独占 → 有无别的写者（§5.6）；`session list` 给不了"此刻谁在写"，所以这条探针留在 TUI |
 | `<root>/<id>/versions/v-*/extension.json` | `/ext` 与 CompositionCard 的明细：`runtime`/`contributes`（tools / skills / **system_prompts**）/`permissions`；root 由 `ext list` 指出 |
-| `.nulya/tool-usage.jsonl` | `/ext` 里的 usage 表：`{v:1,tool_id,ok}` → uses_total / recent / success_rate（**只投影，不重算排序**——排序是 kernel policy，TUI 不复刻） |
+| `.nulya/tool-usage.jsonl` | `/ext` 里的 usage 表：一行取 `tool_id` + `ok` → uses_total / recent / success_rate（**只投影，不重算排序**——排序是 kernel policy，TUI 不复刻）。行上还有 `at` / `session?` / `duration_ms?`（DESIGN §5.5），TUI 只挑它要的两列、其余原样忽略 |
 | header `composition.native_tools` / `active[]` | 本场冻结契约（§5.1）；与 store `current` 比对 → "下一场会变"的漂移提示 |
 | shell 结果形状 | `stdout` + `--- stderr ---` + `[exit N]`（`tools/shell.zig`）→ 状态 chip 解析 `[exit N]` |
 | `edit` 参数 | `{path, old_string, new_string, replace_all?}` → TUI 端 old→new 生成 unified diff 喂 OpenTUI `diff` 组件 |
@@ -336,7 +336,7 @@ fold   = "ctrl+o"
 
 ```bash
 zig build                                        # 出二进制
-zig build test                                   # 单测（含 cli/session.zig 的三条 --stream 测试）
+zig build test                                   # 单测（含 cli/step_stream.zig 的两条行协议测试）
 zig build e2e                                    # e2e（含 --stream 冒烟）
 
 # 手动看一眼（scripted，无需任何 API key）：
@@ -346,7 +346,7 @@ NULYA_SCRIPTED_MODE=finish nulya session step "$ID" --stream
 ```
 
 新增测试：
-- `src/cli/session.zig` — `"session step --stream emits the tui.md §2.2 line protocol in order"`：scripted provider + 假 `shell` 工具，对**整段 stdout 逐字**断言（两个 step 的全部 16 行）。另两条覆盖 `stoppedReason` 与"诊断在 `--stream` 下是 `run error` 行"。
+- `src/cli/step_stream.zig` — `"session step --stream emits the tui.md §2.2 line protocol in order"`：scripted provider + 假 `shell` 工具，对**整段 stdout 逐字**断言（两个 step 的全部 16 行）。`src/cli/session.zig` 另有两条覆盖 `stoppedReason` 与"诊断在 `--stream` 下是 `run error` 行"。
 - `tests/e2e.zig` — `"session cli: --stream emits the transient line protocol and leaves the ledger identical"`：跑真实二进制，逐行 `parseFromSlice` 确认 stdout 全是 JSON、首行 `model started`、末行 `run done{steps:2,stopped:"end_turn"}`、两个 `step end`；再跑一遍**不带** `--stream` 的同样 session，断言两份 session 文件从 `seq:2` 起逐字相同（seq 1 带 inbox 投递名 `origin`，天然不同），且 plain stdout 里没有 `"stream":`。
 
 **已知问题**

@@ -55,9 +55,10 @@ test {
     _ = @import("emit.zig");
     _ = @import("ledger.zig");
     _ = @import("tool.zig");
-    _ = @import("journal.zig");
-    _ = @import("tool_stats.zig");
-    _ = @import("outcome.zig");
+    _ = @import("journals/journal.zig");
+    _ = @import("journals/tool_stats.zig");
+    _ = @import("journals/outcome.zig");
+    _ = @import("journals/trust.zig");
     _ = @import("registry.zig");
     _ = @import("skill.zig");
     _ = @import("composition.zig");
@@ -84,6 +85,8 @@ test {
     _ = @import("cli.zig");
     _ = @import("cli/common.zig");
     _ = @import("cli/session.zig");
+    _ = @import("cli/session_list.zig");
+    _ = @import("cli/step_stream.zig");
     _ = @import("cli/ext.zig");
     _ = @import("cli/config.zig");
     _ = @import("cli/skill.zig");

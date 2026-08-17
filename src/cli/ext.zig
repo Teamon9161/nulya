@@ -16,7 +16,9 @@ const notes = @import("../extension/notes.zig");
 // `tool` is a common local name below (a tool NAME), so the module keeps a
 // distinct one rather than forcing every call site to rename.
 const tool_mod = @import("../tool.zig");
-const tool_stats = @import("../tool_stats.zig");
+const tool_stats = @import("../journals/tool_stats.zig");
+const trust = @import("../journals/trust.zig");
+const launch = @import("../launch.zig");
 const cli_src = @import("src.zig");
 const cli_toolchain = @import("toolchain.zig");
 const ZigExe = cli_toolchain.ZigExe;
@@ -32,6 +34,7 @@ const cwdRealPath = common.cwdRealPath;
 const withRef = common.withRef;
 const writeInto = common.writeInto;
 const printOut = common.printOut;
+const printErrFmt = common.printErrFmt;
 const printRaw = common.printRaw;
 const printErr = common.printErr;
 
@@ -48,6 +51,7 @@ pub fn dispatchExt(alloc: std.mem.Allocator, io: std.Io, args: []const []const u
     if (std.mem.eql(u8, sub, "deactivate")) return extDeactivate(alloc, io, rest);
     if (std.mem.eql(u8, sub, "list")) return extList(alloc, io);
     if (std.mem.eql(u8, sub, "inspect")) return extInspect(alloc, io, rest);
+    if (std.mem.eql(u8, sub, "trust")) return extTrust(alloc, io);
     if (std.mem.eql(u8, sub, "api")) return extApi(alloc, io, rest);
 
     try printErr(io, "unknown `ext` subcommand\n");
@@ -134,6 +138,16 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
         return 1;
     };
     defer alloc.free(dest_spec);
+
+    // Was the workspace store empty BEFORE this build? If so, and if this build
+    // fills it, the store was born here — see `recordBirthTrust` below. Asked now
+    // because after the build the answer is always "occupied".
+    const workspace_store_was_empty = blk: {
+        const occupied = (try launch.occupiedWorkspaceStore(alloc, io, cwd_path)) orelse break :blk true;
+        alloc.free(occupied);
+        break :blk false;
+    };
+
     var dest_root = try store.openOrCreateRoot(io, cwd_path, dest_spec);
     defer dest_root.close(io);
 
@@ -171,7 +185,37 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
     }
     const state = if (result.already_built) "already built" else "built";
     try printOut(alloc, io, "{s}: {s} ({s}, in {s})\n", .{ ext_dir, result.version, state, dest_spec });
+
+    if (workspace_store_was_empty and std.mem.eql(u8, dest_spec, store.workspace_root_rel)) {
+        try recordBirthTrust(alloc, io, cwd_path);
+    }
     return 0;
+}
+
+/// Trust a workspace store this build just BROUGHT INTO EXISTENCE (DESIGN §9).
+///
+/// The gate on `.nulya/extensions` distinguishes "born on this machine" from
+/// "arrived with a checkout", and the only thing that can tell them apart is
+/// where the store came from — so the moment a local `ext build` puts the first
+/// version into an empty (or absent) workspace store, that store is by
+/// construction local, and saying so here is what keeps the self-evolution loop
+/// free of prompts: an agent building and activating its own capability is the
+/// harness working, not an event to confirm. A store that ALREADY held something
+/// is deliberately not trusted by this path — that is exactly the case a person
+/// has to look at, through `nulya ext trust`.
+///
+/// Best-effort in one direction only: a machine with no home has nowhere to
+/// record trust, and failing the build the model just did would be worse than
+/// leaving the gate to explain itself at `session new`. Real I/O faults propagate.
+fn recordBirthTrust(alloc: std.mem.Allocator, io: std.Io, cwd_path: []const u8) !void {
+    const occupied = (try launch.occupiedWorkspaceStore(alloc, io, cwd_path)) orelse return;
+    defer alloc.free(occupied);
+    var host = try environment.hostEnvironMap(alloc);
+    defer host.deinit();
+    const home = (try launch.userHomeDir(alloc, &host)) orelse return;
+    defer alloc.free(home);
+    if (try trust.isTrusted(alloc, io, home, occupied)) return;
+    try trust.append(alloc, io, home, occupied);
 }
 
 /// Which store root a build lands in: `--user` forces the user store; otherwise
@@ -349,7 +393,17 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     // ToolDefinition.id carries, so CLI usage accumulates across versions.
     const stable_id = try std.fmt.allocPrint(alloc, "ext:{s}/{s}", .{ id, tool });
     defer alloc.free(stable_id);
-    try tool_stats.append(alloc, io, cwd_path, stable_id, invocation.ok);
+    // This command reaches the model through `shell`, whose env names the live
+    // session (DESIGN §5.3) — so a tool invoked through the CLI, which is how
+    // every UNPINNED extension tool is used, lands in the journal attributed to
+    // the same session a natively pinned one would be.
+    const in_session = try envSessionId(alloc);
+    defer if (in_session) |s| alloc.free(s);
+    try tool_stats.append(alloc, io, cwd_path, .{
+        .tool_id = stable_id,
+        .ok = invocation.ok,
+        .session = in_session,
+    });
 
     try printOut(alloc, io, "{s}\n", .{invocation.output});
     return if (invocation.ok) 0 else 1;
@@ -660,6 +714,111 @@ fn sliceHasString(list: []const []const u8, needle: []const u8) bool {
         if (std.mem.eql(u8, item, needle)) return true;
     }
     return false;
+}
+
+/// `nulya ext trust` — say, once and explicitly, that this workspace's extension
+/// store may take part in sessions (DESIGN §9).
+///
+/// What gets recorded is the STORE, not a hash of what is in it: an agent that
+/// builds and activates its own tools would otherwise invalidate the record every
+/// loop. So this is a judgement about origin, and the only honest way to make it
+/// is to look — which is why the inventory is printed BEFORE the record is
+/// written, and why `ext list` / `ext inspect` are never gated.
+///
+/// There is no `untrust`: withdrawing means deleting the line from
+/// `~/.nulya/trusted-stores.jsonl` by hand. A verb for it can wait for someone
+/// who needs one.
+fn extTrust(alloc: std.mem.Allocator, io: std.Io) !u8 {
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_path = try cwdRealPath(io, &cwd_buf);
+
+    const occupied = (try launch.occupiedWorkspaceStore(alloc, io, cwd_path)) orelse {
+        try printOut(alloc, io, "nothing to trust: {s} holds no extensions\n", .{store.workspace_root_rel});
+        return 0;
+    };
+    defer alloc.free(occupied);
+
+    var host = try environment.hostEnvironMap(alloc);
+    defer host.deinit();
+    const home = (try launch.userHomeDir(alloc, &host)) orelse {
+        try printErr(io, "no home directory to record trust in (set NULYA_HOME or HOME)\n");
+        return 1;
+    };
+    defer alloc.free(home);
+
+    if (try trust.isTrusted(alloc, io, home, occupied)) {
+        try printOut(alloc, io, "already trusted: {s}\n", .{occupied});
+        return 0;
+    }
+
+    try printOut(alloc, io, "trusting {s}, which holds:\n", .{occupied});
+    try printStoreInventory(alloc, io, cwd_path, false);
+    try trust.append(alloc, io, home, occupied);
+    try printOut(alloc, io, "recorded in {s}{c}{s}\n", .{ home, std.fs.path.sep, trust.journal_name });
+    return 0;
+}
+
+/// The stderr block a session prints when it refuses an untrusted workspace store
+/// (DESIGN §9). It names the store, shows what composing it would bring in, and
+/// points at the two read-only verbs plus `ext trust` — everything a person needs
+/// to decide, without having to trust anything first. The caller adds its own
+/// one-line verdict, the same shape `ActiveExtensionBroken` uses.
+///
+/// Best-effort about the inventory: a store this machine cannot fully read is
+/// still refused, and a half-listed refusal beats a failed one.
+pub fn printUntrustedStoreRefusal(alloc: std.mem.Allocator, io: std.Io, cwd_path: []const u8) !void {
+    const occupied = (try launch.occupiedWorkspaceStore(alloc, io, cwd_path)) orelse return;
+    defer alloc.free(occupied);
+    try printErrFmt(alloc, io, "the extension store {s} came with this checkout and is not trusted on this machine; it holds:\n", .{occupied});
+    printStoreInventory(alloc, io, cwd_path, true) catch {};
+    try printErr(io, "review it (`nulya ext list`, `nulya ext inspect <id>`), then `nulya ext trust` to allow it — or delete the store\n");
+}
+
+/// One indented line per extension the WORKSPACE store holds: `<id>@<version>`
+/// with the contribution marker `ext list` uses (`prompt` is the load-bearing
+/// one — an active version's system prompt enters every session's system
+/// blocks), and the ids that hold built versions without activating one, since
+/// `--with` and `ext run <id>@<version>` reach those too. Written to stderr when
+/// `to_err`, else stdout.
+fn printStoreInventory(alloc: std.mem.Allocator, io: std.Io, cwd_path: []const u8, to_err: bool) !void {
+    var roots = try roots_mod.Roots.open(alloc, io, cwd_path, &.{store.workspace_root_rel});
+    defer roots.deinit();
+    if (roots.entries.len == 0) return;
+
+    const active = try roots.listActive(alloc);
+    defer roots_mod.Roots.freeActive(alloc, active);
+    for (active) |entry| {
+        const contributes = try contributionMarker(alloc, &roots, entry);
+        defer alloc.free(contributes);
+        try printLine(alloc, io, to_err, "  {s}@{s}{s}\n", .{ entry.id, entry.version, contributes });
+    }
+
+    // Built but not active: not in composition by discovery, still nameable.
+    const st = store.Store.init(io, roots.entries[0].dir);
+    var it = roots.entries[0].dir.iterate();
+    while (try it.next(io)) |dir_entry| {
+        if (dir_entry.kind != .directory) continue;
+        if (hasActiveId(active, dir_entry.name)) continue;
+        const versions = st.listVersions(alloc, dir_entry.name) catch continue;
+        defer {
+            for (versions) |v| alloc.free(v);
+            alloc.free(versions);
+        }
+        if (versions.len == 0) continue;
+        try printLine(alloc, io, to_err, "  {s} ({d} built version(s), none active)\n", .{ dir_entry.name, versions.len });
+    }
+}
+
+fn hasActiveId(active: []const roots_mod.Roots.ActiveEntry, id: []const u8) bool {
+    for (active) |e| {
+        if (std.mem.eql(u8, e.id, id)) return true;
+    }
+    return false;
+}
+
+fn printLine(alloc: std.mem.Allocator, io: std.Io, to_err: bool, comptime fmt: []const u8, args: anytype) !void {
+    if (to_err) return printErrFmt(alloc, io, fmt, args);
+    return printOut(alloc, io, fmt, args);
 }
 
 fn extInspect(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {

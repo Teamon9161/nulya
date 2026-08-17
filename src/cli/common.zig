@@ -164,6 +164,7 @@ pub fn usage(io: std.Io) !u8 {
         \\  nulya ext run <id>[@<ver>] [tool] <json>  invoke the active (or that exact) version
         \\  nulya ext list                    list extensions and active versions
         \\  nulya ext inspect <id>            print an extension's manifest
+        \\  nulya ext trust                   allow this workspace's store (needed once, if it came with a checkout)
         \\  nulya ext api [protocol|permissions|examples]
         \\  nulya session new|append|step|events|cancel   drive a durable session
         \\  nulya config show [--json]        effective provider profiles + model catalog
@@ -180,6 +181,15 @@ pub fn printOut(alloc: std.mem.Allocator, io: std.Io, comptime fmt: []const u8, 
     const s = try std.fmt.allocPrint(alloc, fmt, args);
     defer alloc.free(s);
     try printRaw(io, s);
+}
+
+/// `printOut`'s counterpart on stderr, for the diagnostics that need a value in
+/// them. Refusals and warnings go here so stdout stays what a caller can parse:
+/// ids, event JSONL, listings.
+pub fn printErrFmt(alloc: std.mem.Allocator, io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    const s = try std.fmt.allocPrint(alloc, fmt, args);
+    defer alloc.free(s);
+    try printErr(io, s);
 }
 
 pub fn printRaw(io: std.Io, bytes: []const u8) !void {

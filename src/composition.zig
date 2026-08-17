@@ -16,8 +16,14 @@
 //! state out of that answer alone. Everything about WHY an extension or a tool
 //! is here is decided in the first phase and unrepresentable in the second, so
 //! `init` and `initFrozen` differ only in what they hand to `resolve`.
+//!
+//! Both phases allocate into ONE arena owned by the finished composition: the
+//! whole thing is frozen at `init` and released at `deinit`, so its pieces have
+//! a single lifetime and say so, rather than each carrying its own copy/free
+//! chain that the others have to be released in the right order against.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const registry = @import("registry.zig");
 const ledger = @import("ledger.zig");
 const prompt = @import("prompt.zig");
@@ -143,6 +149,15 @@ pub const CompositionError = error{
 };
 
 pub const SessionComposition = struct {
+    /// Backs every byte the fields below own. A composition is frozen at `init`
+    /// and released whole — one lifetime for the member versions, the bindings,
+    /// the tool set, the skill catalog and the system blocks — so one arena says
+    /// that directly instead of five ownership chains that must agree.
+    ///
+    /// Null for a composition BUILT BY HAND out of static slices (the session
+    /// tests do this to stand up a fixed tool face): it owns nothing, so it
+    /// needs no arena and is correct never to be `deinit`ed.
+    arena: ?std.heap.ArenaAllocator = null,
     /// Every member extension of this session at its frozen version, sorted by
     /// id — what the header records as `active` (`ledger.FrozenComposition`).
     extensions: []const FrozenExtension,
@@ -169,10 +184,7 @@ pub const SessionComposition = struct {
         var roots = try roots_mod.Roots.open(alloc, io, cwd, ext_roots);
         defer roots.deinit();
 
-        const resolved = try resolve(alloc, &roots, .{ .fresh = opts });
-        defer freeResolved(alloc, resolved.extensions);
-
-        return assemble(alloc, io, &roots, resolved);
+        return build(alloc, io, &roots, .{ .fresh = opts });
     }
 
     /// Rebuild the composition frozen into a session header (DESIGN §3, §7.5):
@@ -190,21 +202,41 @@ pub const SessionComposition = struct {
         var roots = try roots_mod.Roots.open(alloc, io, cwd, ext_roots);
         defer roots.deinit();
 
-        const resolved = try resolve(alloc, &roots, .{ .frozen = frozen });
-        defer freeResolved(alloc, resolved.extensions);
-
-        return assemble(alloc, io, &roots, resolved);
+        return build(alloc, io, &roots, .{ .frozen = frozen });
     }
 
+    /// Release everything this composition owns. One arena release covers all of
+    /// it, so the order the pieces borrow from each other (`tools` points into
+    /// `extension_tool_bindings`) stops being something a reader has to check.
+    /// `alloc` is unused — it is the arena's own child allocator — but stays in
+    /// the signature: every caller already holds it, and a session composition
+    /// that stopped asking for it would only look like it had become borrowed.
     pub fn deinit(self: SessionComposition, alloc: std.mem.Allocator) void {
-        // `tools` borrows the bindings, so it must go first.
-        self.tools.deinit(alloc);
-        freeBindings(alloc, self.extension_tool_bindings);
-        self.skills.deinit(alloc);
-        self.system_prompts.deinit(alloc);
-        freeFrozenExtensions(alloc, self.extensions);
+        _ = alloc;
+        if (self.arena) |arena| arena.deinit();
     }
 };
+
+/// Own the composition arena across both phases: created here, handed to
+/// everything the session KEEPS, and either moved into the finished composition
+/// or released whole when anything fails — which is why neither phase below
+/// carries an unwind path of its own.
+///
+/// `gpa` still backs phase one's `Roots.Resolved` values: each holds a parsed
+/// manifest with its own arena, so they are released explicitly whatever
+/// happens. They are transient either way — nothing in the finished composition
+/// points at them.
+fn build(gpa: std.mem.Allocator, io: std.Io, roots: *const roots_mod.Roots, request: Request) !SessionComposition {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    errdefer arena.deinit();
+
+    const resolved = try resolve(gpa, arena.allocator(), roots, request);
+    defer freeResolved(gpa, resolved.extensions);
+
+    var comp = try assemble(arena.allocator(), io, roots, resolved);
+    comp.arena = arena; // moved in last: nothing holds an allocator into the local
+    return comp;
+}
 
 /// What a session's composition was ASKED for, in the only two shapes that
 /// exist: a fresh session (whatever is active, plus `--with`, with pins named
@@ -221,8 +253,9 @@ const Request = union(enum) {
 /// slot. Everything about WHY — active, `--with`, frozen header; pinned by
 /// config or by the header — has been decided by the time this exists.
 const Resolved = struct {
+    /// `gpa`-owned (each carries a parsed manifest), released by `build`.
     extensions: []roots_mod.Roots.Resolved,
-    /// Owned by whoever holds this value until `assemble` takes them.
+    /// Already arena-owned: the composition keeps these verbatim.
     bindings: []ext_tools.Binding,
 };
 
@@ -231,20 +264,21 @@ const Resolved = struct {
 /// them is strict, and so is pin resolution: an extension someone activated, or
 /// named, or froze, that cannot be composed fails the session rather than
 /// letting it quietly start without a capability it was asked for. `roots`
-/// stays the caller's; on any error everything built here is released.
-fn resolve(alloc: std.mem.Allocator, roots: *const roots_mod.Roots, request: Request) !Resolved {
+/// stays the caller's; `a` is the composition arena (the bindings survive this
+/// phase), `gpa` backs the resolved manifests (they do not).
+fn resolve(gpa: std.mem.Allocator, a: std.mem.Allocator, roots: *const roots_mod.Roots, request: Request) !Resolved {
     const extensions = switch (request) {
-        .fresh => |opts| try unionWith(alloc, roots, try resolveActiveExtensions(alloc, roots), opts.with),
-        .frozen => |frozen| try resolveFrozenExtensions(alloc, roots, frozen.active),
+        .fresh => |opts| try unionWith(gpa, roots, try resolveActiveExtensions(gpa, roots), opts.with),
+        .frozen => |frozen| try resolveFrozenExtensions(gpa, roots, frozen.active),
     };
-    errdefer freeResolved(alloc, extensions);
+    errdefer freeResolved(gpa, extensions);
     sortResolved(extensions);
 
     const pins = switch (request) {
         .fresh => |opts| opts.pinned_native_tools,
         .frozen => |frozen| frozen.native_tools,
     };
-    return .{ .extensions = extensions, .bindings = try resolveBindings(alloc, roots, extensions, pins) };
+    return .{ .extensions = extensions, .bindings = try resolveBindings(a, roots, extensions, pins) };
 }
 
 /// Phase two: build the frozen session state out of what phase one decided —
@@ -254,10 +288,12 @@ fn resolve(alloc: std.mem.Allocator, roots: *const roots_mod.Roots, request: Req
 /// questions have no representation left. Each resolved extension names the
 /// root index it was found in, so the search order is never re-derived either.
 ///
-/// Takes ownership of `resolved.bindings` (released on any failure here);
-/// `resolved.extensions` and `roots` stay the caller's.
+/// `a` is the composition arena, so everything built here already has the
+/// session's lifetime and nothing needs an unwind path; `resolved.extensions`
+/// and `roots` stay the caller's. The returned composition has no arena yet —
+/// `build` moves it in.
 fn assemble(
-    alloc: std.mem.Allocator,
+    a: std.mem.Allocator,
     io: std.Io,
     roots: *const roots_mod.Roots,
     resolved: Resolved,
@@ -265,32 +301,20 @@ fn assemble(
     // The bindings arrived as one frozen slice, so their addresses are stable
     // enough for `asTool` to hand out `ToolExecutor.ptr` values into them.
     const bindings = resolved.bindings;
-    errdefer freeBindings(alloc, bindings);
-
-    const tools = try snapshotFromBindings(alloc, bindings);
-    errdefer tools.deinit(alloc);
-
-    const frozen_extensions = try copyFrozenExtensions(alloc, resolved.extensions);
-    errdefer freeFrozenExtensions(alloc, frozen_extensions);
 
     var descriptors: std.ArrayList(skill.SkillDescriptor) = .empty;
-    errdefer skill.deinitDescriptorArrayList(alloc, &descriptors);
     for (resolved.extensions) |r| {
-        try ext_skills.appendFromManifest(alloc, io, roots.entries[r.root].dir, &descriptors, r.id, r.version, r.manifest);
+        try ext_skills.appendFromManifest(a, io, roots.entries[r.root].dir, &descriptors, r.id, r.version, r.manifest);
     }
     skill.sortDescriptors(descriptors.items);
-    const skills = skill.SkillSetSnapshot{ .skills = try descriptors.toOwnedSlice(alloc) };
-    errdefer skills.deinit(alloc);
-
-    const system_prompts = try buildSystemPrompts(alloc, io, roots, resolved.extensions, skills);
-    errdefer system_prompts.deinit(alloc);
+    const skills = skill.SkillSetSnapshot{ .skills = try descriptors.toOwnedSlice(a) };
 
     return .{
-        .extensions = frozen_extensions,
+        .extensions = try copyFrozenExtensions(a, resolved.extensions),
         .extension_tool_bindings = bindings,
-        .tools = tools,
+        .tools = try snapshotFromBindings(a, bindings),
         .skills = skills,
-        .system_prompts = system_prompts,
+        .system_prompts = try buildSystemPrompts(a, io, roots, resolved.extensions, skills),
     };
 }
 
@@ -304,12 +328,12 @@ fn validateBudget(opts: Options) CompositionError!void {
 
 /// Freeze the builtin table plus the bindings' tools. The extras array is
 /// transient — `snapshotWith` copies it — but each `Tool.executor.ptr` keeps
-/// pointing at the caller-owned, address-stable `bindings`.
-fn snapshotFromBindings(alloc: std.mem.Allocator, bindings: []ext_tools.Binding) !registry.ToolSetSnapshot {
-    const extras = try alloc.alloc(tool.Tool, bindings.len);
-    defer alloc.free(extras);
-    for (bindings, 0..) |*b, i| extras[i] = b.asTool();
-    return registry.snapshotWith(alloc, extras);
+/// pointing at the arena-owned, address-stable `bindings`.
+fn snapshotFromBindings(a: std.mem.Allocator, bindings: []ext_tools.Binding) !registry.ToolSetSnapshot {
+    const extras = try a.alloc(tool.Tool, bindings.len);
+    defer a.free(extras);
+    for (bindings, extras) |*b, *slot| slot.* = b.asTool();
+    return registry.snapshotWith(a, extras);
 }
 
 /// Resolve the session's extension-tool bindings from the explicit pins — the
@@ -318,25 +342,17 @@ fn snapshotFromBindings(alloc: std.mem.Allocator, bindings: []ext_tools.Binding)
 /// frozen entry path comes from `Roots.Resolved.entryPathAbs`: absolute,
 /// so it survives being spawned with the workspace as cwd, and built from the
 /// version frozen at composition time, so mid-session activation cannot move it.
-/// The returned slice is address-stable; on any error every binding built so far
-/// is released and nothing leaks.
+/// One pin, one binding, in pin order: the slice is allocated whole up front, so
+/// it is address-stable from the first binding on.
 fn resolveBindings(
-    alloc: std.mem.Allocator,
+    a: std.mem.Allocator,
     roots: *const roots_mod.Roots,
     resolved: []const roots_mod.Roots.Resolved,
     pins: []const []const u8,
 ) ![]ext_tools.Binding {
-    var list: std.ArrayList(ext_tools.Binding) = .empty;
-    errdefer freeBindingsList(alloc, &list);
-
-    for (pins) |pin| {
-        const binding = try resolvePinnedBinding(alloc, roots, resolved, pin);
-        list.append(alloc, binding) catch |err| {
-            binding.deinit(alloc);
-            return err;
-        };
-    }
-    return list.toOwnedSlice(alloc);
+    const bindings = try a.alloc(ext_tools.Binding, pins.len);
+    for (pins, bindings) |pin, *b| b.* = try resolvePinnedBinding(a, roots, resolved, pin);
+    return bindings;
 }
 
 const StableToolId = struct { ext_id: []const u8, tool_name: []const u8 };
@@ -356,7 +372,7 @@ fn parseStableToolId(pin: []const u8) CompositionError!StableToolId {
 }
 
 fn resolvePinnedBinding(
-    alloc: std.mem.Allocator,
+    a: std.mem.Allocator,
     roots: *const roots_mod.Roots,
     resolved: []const roots_mod.Roots.Resolved,
     pin: []const u8,
@@ -370,12 +386,14 @@ fn resolvePinnedBinding(
     // executable; there is no runtime-less tool state to defend against.
     const rt = r.manifest.runtime.?;
 
-    const entry_abs = try r.entryPathAbs(alloc, roots);
-    defer alloc.free(entry_abs);
+    const entry_abs = try r.entryPathAbs(a, roots);
+    defer a.free(entry_abs);
 
     // `pin` already passed parseStableToolId, whose two segments reformat back
     // to exactly `pin` (ids never contain `/`), so initOwned dupes it directly.
-    return ext_tools.Binding.initOwned(alloc, .{
+    // The binding's strings are the arena's; `Binding.deinit` is for callers who
+    // allocated it themselves, and the composition never needs it.
+    return ext_tools.Binding.initOwned(a, .{
         .id = pin,
         .name = spec.name,
         .description = spec.description,
@@ -395,16 +413,6 @@ fn findToolSpec(m: manifest.Manifest, name: []const u8) ?manifest.ToolSpec {
         if (std.mem.eql(u8, spec.name, name)) return spec;
     }
     return null;
-}
-
-fn freeBindings(alloc: std.mem.Allocator, bindings: []ext_tools.Binding) void {
-    for (bindings) |b| b.deinit(alloc);
-    alloc.free(bindings);
-}
-
-fn freeBindingsList(alloc: std.mem.Allocator, list: *std.ArrayList(ext_tools.Binding)) void {
-    for (list.items) |b| b.deinit(alloc);
-    list.deinit(alloc);
 }
 
 /// Store/manifest faults that mean "this directory is not a usable extension".
@@ -462,6 +470,11 @@ fn reportBrokenActive(
     entry: roots_mod.Roots.ActiveEntry,
     err: anyerror,
 ) !void {
+    // Unit tests build broken actives on purpose and assert only the error
+    // code; this advice line names ids from their tmp stores, so leaked into
+    // the test runner's stderr it reads as real repair advice for a workspace
+    // that is fine. The real binary (e2e included) always prints it.
+    if (builtin.is_test) return;
     const line = try std.fmt.allocPrint(
         alloc,
         "active extension {s}@{s} is broken ({s}); run 'nulya ext deactivate {s}' or 'nulya ext rollback {s}' to recover\n",
@@ -530,57 +543,44 @@ fn resolveFrozenExtensions(alloc: std.mem.Allocator, roots: *const roots_mod.Roo
     return resolved.toOwnedSlice(alloc);
 }
 
-fn copyFrozenExtensions(alloc: std.mem.Allocator, resolved: []const roots_mod.Roots.Resolved) ![]FrozenExtension {
-    var out: std.ArrayList(FrozenExtension) = .empty;
-    errdefer freeFrozenExtensions(alloc, out.items);
-    for (resolved) |r| {
-        const id = try alloc.dupe(u8, r.id);
-        errdefer alloc.free(id);
-        const version = try alloc.dupe(u8, r.version);
-        errdefer alloc.free(version);
-        try out.append(alloc, .{ .id = id, .version = version });
-    }
-    return out.toOwnedSlice(alloc);
+fn copyFrozenExtensions(a: std.mem.Allocator, resolved: []const roots_mod.Roots.Resolved) ![]FrozenExtension {
+    const out = try a.alloc(FrozenExtension, resolved.len);
+    for (resolved, out) |r, *e| e.* = .{
+        .id = try a.dupe(u8, r.id),
+        .version = try a.dupe(u8, r.version),
+    };
+    return out;
 }
 
+/// Every block BORROWS its two strings, which is safe precisely because they all
+/// come from the composition arena (or, for the kernel prompt, from the binary):
+/// one lifetime, so a defensive copy would only move arena bytes into the same
+/// arena.
 fn buildSystemPrompts(
-    alloc: std.mem.Allocator,
+    a: std.mem.Allocator,
     io: std.Io,
     roots: *const roots_mod.Roots,
     resolved: []const roots_mod.Roots.Resolved,
     skills: skill.SkillSetSnapshot,
 ) !prompt.SystemPromptSnapshot {
     var blocks: std.ArrayList(prompt.SystemBlock) = .empty;
-    errdefer (prompt.SystemPromptSnapshot{ .blocks = blocks.items }).deinit(alloc);
-
-    try appendSystemBlock(alloc, &blocks, "kernel", kernel_system_prompt);
+    try blocks.append(a, .{ .source = "kernel", .bytes = kernel_system_prompt });
 
     for (resolved) |r| {
         for (r.manifest.system_prompts) |prompt_path| {
-            const source = try std.fmt.allocPrint(alloc, "ext:{s}@{s}/{s}", .{ r.id, r.version, prompt_path });
-            defer alloc.free(source);
-            const rel = try std.fs.path.join(alloc, &.{ r.id, "versions", r.version, integrity.package_dir, prompt_path });
-            defer alloc.free(rel);
-            const bytes = try roots.entries[r.root].dir.readFileAlloc(io, rel, alloc, .limited(prompt.max_system_prompt_bytes));
-            defer alloc.free(bytes);
-            try appendSystemBlock(alloc, &blocks, source, bytes);
+            const source = try std.fmt.allocPrint(a, "ext:{s}@{s}/{s}", .{ r.id, r.version, prompt_path });
+            const rel = try std.fs.path.join(a, &.{ r.id, "versions", r.version, integrity.package_dir, prompt_path });
+            defer a.free(rel);
+            const bytes = try roots.entries[r.root].dir.readFileAlloc(io, rel, a, .limited(prompt.max_system_prompt_bytes));
+            try blocks.append(a, .{ .source = source, .bytes = bytes });
         }
     }
 
-    if (try skills.catalogText(alloc)) |catalog| {
-        defer alloc.free(catalog);
-        try appendSystemBlock(alloc, &blocks, "skills:catalog", catalog);
+    if (try skills.catalogText(a)) |catalog| {
+        try blocks.append(a, .{ .source = "skills:catalog", .bytes = catalog });
     }
 
-    return .{ .blocks = try blocks.toOwnedSlice(alloc) };
-}
-
-fn appendSystemBlock(alloc: std.mem.Allocator, blocks: *std.ArrayList(prompt.SystemBlock), source: []const u8, bytes: []const u8) !void {
-    const owned_source = try alloc.dupe(u8, source);
-    errdefer alloc.free(owned_source);
-    const owned_bytes = try alloc.dupe(u8, bytes);
-    errdefer alloc.free(owned_bytes);
-    try blocks.append(alloc, .{ .source = owned_source, .bytes = owned_bytes });
+    return .{ .blocks = try blocks.toOwnedSlice(a) };
 }
 
 fn sortResolved(resolved: []roots_mod.Roots.Resolved) void {
@@ -594,14 +594,6 @@ fn sortResolved(resolved: []roots_mod.Roots.Resolved) void {
 fn freeResolved(alloc: std.mem.Allocator, resolved: []const roots_mod.Roots.Resolved) void {
     for (resolved) |r| r.deinit(alloc);
     alloc.free(resolved);
-}
-
-fn freeFrozenExtensions(alloc: std.mem.Allocator, list: []const FrozenExtension) void {
-    for (list) |e| {
-        alloc.free(e.id);
-        alloc.free(e.version);
-    }
-    alloc.free(list);
 }
 
 pub fn testingKernelPrompt() []const u8 {

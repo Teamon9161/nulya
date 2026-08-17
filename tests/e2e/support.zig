@@ -95,19 +95,7 @@ pub fn runCli(
     ws: std.Io.Dir,
     argv: []const []const u8,
 ) !CliRun {
-    const result = try std.process.run(alloc, io, .{
-        .argv = argv,
-        .cwd = .{ .dir = ws },
-        .stdout_limit = .limited(1 << 20),
-        .stderr_limit = .limited(1 << 20),
-    });
-    defer alloc.free(result.stdout);
-    defer alloc.free(result.stderr);
-    const code = switch (result.term) {
-        .exited => |c| c,
-        else => 255,
-    };
-    return .{ .code = code, .stdout = try alloc.dupe(u8, result.stdout) };
+    return runCliEnvs(alloc, io, ws, argv, &.{});
 }
 
 /// The generated `greet` extension with its greeting text swapped, so two builds
@@ -285,6 +273,28 @@ pub fn runCliEnv(
 
 pub const EnvPair = struct { key: []const u8, value: []const u8 };
 
+/// The child's user layer, defaulted into the workspace so no e2e run ever reads
+/// or writes the developer's real `~/.nulya`: the user store `--user` writes to,
+/// the user config, and the trusted-stores journal `ext build` / `ext trust`
+/// append to (DESIGN §9) all live under `NULYA_HOME`. A test that cares about the
+/// user layer passes its own `NULYA_HOME` pair, which wins — the pairs are applied
+/// after this.
+const home_subdir = ".nulya-test-home";
+
+/// That same user layer, for a test that spawns `nulya` some other way than
+/// `runCli` — an in-process session whose `shell` runs the CLI has to point its
+/// own tool environment here, or the two halves of the test disagree about which
+/// home they read. Caller owns the result.
+pub fn testHome(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir) ![]u8 {
+    return defaultHome(alloc, io, ws);
+}
+
+fn defaultHome(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir) ![]u8 {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_path = buf[0..try ws.realPath(io, &buf)];
+    return std.fs.path.join(alloc, &.{ ws_path, home_subdir });
+}
+
 pub fn runCliEnvs(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -294,6 +304,9 @@ pub fn runCliEnvs(
 ) !CliRun {
     var env = try std.testing.environ.createMap(alloc);
     defer env.deinit();
+    const home = try defaultHome(alloc, io, ws);
+    defer alloc.free(home);
+    try env.put("NULYA_HOME", home);
     for (pairs) |p| try env.put(p.key, p.value);
     const result = try std.process.run(alloc, io, .{
         .argv = argv,
@@ -323,6 +336,9 @@ pub fn runCliStderr(
 ) ![]u8 {
     var env = try std.testing.environ.createMap(alloc);
     defer env.deinit();
+    const home = try defaultHome(alloc, io, ws);
+    defer alloc.free(home);
+    try env.put("NULYA_HOME", home);
     for (pairs) |p| try env.put(p.key, p.value);
     const result = try std.process.run(alloc, io, .{
         .argv = argv,

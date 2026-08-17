@@ -107,17 +107,17 @@ capability_note  { id, version, text }                                  ← 中�
 
 ### 3.2 API（硬性）
 
-唯一写口 `append(event)`（deep copy，调用方之后可释放一切 slice）；读只有 `view()` / `len()`。没有 edit / delete / reorder。"纠正" = 再 append。
+唯一写口 `append(event)`（deep copy，调用方之后可释放一切 slice）；读只有 `view()` / `len()`。没有 edit / delete / reorder。"纠正" = 再 append。快照落在 ledger 自己的 arena 里——append-only 加整体释放就是一个生命周期，所以事件负载不需要每种形状各自的 clone/free 链；一次失败的 append 弹掉内存那一条、字节留在 arena 到 `deinit`（append-only 的内存本来就随历史增长）。
 
 `Ledger` 有两种后端：`init(alloc)` 纯内存（测试与不落盘路径）；`createDurable` / `openDurable` 加一个 session 文件后端（§3.4），此时每条 `append` 在返回前把事件作为一行 JSONL 落盘，落盘失败会回滚内存那一条，内存与文件永不背离。`view()` / `len()` 语义两种后端一致。
 
 ### 3.3 派生视图
 
-UI / trajectory / metrics 是 ledger 的投影，不持久化 mutable 状态。**证据走 ledger 之外的 journal**，共两条，都是 append-only JSONL、都在 `.nulya/` 下、共用同一套文件纪律（`journal.zig`：一行一条；**多写者**——每个 `session step` / `ext run` / `session outcome` 进程都写同一个文件，所以 append 全程持有旁车 `<journal>.lock` 的排他 lease（阻塞式，临界区只有一次 stat + 一次写），两个 append 不可能落到同一 offset；append 前修残尾；**读端不拿锁、忽略最后一个 `\n` 之后的残尾**（被打断或正在进行的那次 append），完整但畸形的行仍是 consumer 的显式错误——宽恕的是被打断的写、不是坏 journal，所以 `session list` 不会在一次 crash 后到下一次写之前一直失败；文件不存在 = 还没有事实；schema 各自持有）：
+UI / trajectory / metrics 是 ledger 的投影，不持久化 mutable 状态。**证据走 ledger 之外的 journal**，本节这两条都是 append-only JSONL、都在 workspace 的 `.nulya/` 下（第三条 `trusted-stores.jsonl` 记的不是证据而是一次授权，因此在 **user** 层，§9），共用同一套文件纪律（`journals/journal.zig`：一行一条；**多写者**——每个 `session step` / `ext run` / `session outcome` 进程都写同一个文件，所以 append 全程持有旁车 `<journal>.lock` 的排他 lease（阻塞式，临界区只有一次 stat + 一次写），两个 append 不可能落到同一 offset；append 前修残尾；**读端不拿锁、忽略最后一个 `\n` 之后的残尾**（被打断或正在进行的那次 append），完整但畸形的行仍是 consumer 的显式错误——宽恕的是被打断的写、不是坏 journal，所以 `session list` 不会在一次 crash 后到下一次写之前一直失败；文件不存在 = 还没有事实；schema 各自持有；目录不存在意味着什么由各 journal 自己定——workspace journal 当 host fault，user 层的 trust journal 当"还没有记过"）**与同一个时钟**（`journal.rfc3339Now`：三条 journal 的 `at` 与 session header 的 `created` 是同一个格式的同一个函数，所以它们读得进同一条时间轴）：
 
 | journal | 一行 | 谁写 | 为什么不是 ledger 事件 |
 |---|---|---|---|
-| `.nulya/tool-usage.jsonl`（§5.5） | `{"v":1,"tool_id":…,"ok":…}` | session 每个**真的执行过 tool 的** completed step；`nulya ext run` | 纯 CLI 调用没有对话，塞进 ledger 会污染 prompt 前缀 |
+| `.nulya/tool-usage.jsonl`（§5.5） | `{"v":1,"at":"<RFC3339 UTC>","session":"s-…"?,"tool_id":…,"ok":…,"duration_ms":N?}` | session 每个**真的执行过 tool 的** completed step；`nulya ext run` | 纯 CLI 调用没有对话，塞进 ledger 会污染 prompt 前缀 |
 | `.nulya/session-outcomes.jsonl` | `{"v":1,"session":"s-…","verdict":"success\|partial\|failure","note":…?,"at":"<RFC3339 UTC>","source":"agent"?,"by":"s-…"?,"seq":N?}` | 人或 agent 经 `nulya session outcome`（§14） | session 尾往往没有下一个 step 来排干 inbox；verdict 是**关于**这场 session 的判断、不是其中一轮；不给 `prompt.zig` 开"存了但不投影"的事件种类 |
 
 原则相同：**persist facts, derive stats**。outcome 的三条语义：**没有行 = unknown ≠ failure**；同一 session 可多行，**最后一条作数**（纠正也是 append，`outcome.latestFor`）；三个可选列说明**谁在评**与**评的是什么**，且**只在非默认时写**——所以人评整场的行与这三列存在之前逐字节相同，schema 版本不动：
@@ -227,14 +227,17 @@ agent 在对话中经 shell `nulya ext build/activate` 造出新 extension 后�
 ### 5.5 Usage journal（evidence）
 
 ```
-.nulya/tool-usage.jsonl   每行 {"v":1,"tool_id":"ext:web.search/web_search","ok":true}
-        └─ projection ─▶ ToolStats { uses_total, successes, last_used_seq }   (tool_stats.zig)
+.nulya/tool-usage.jsonl   每行 {"v":1,"at":"2026-08-17T09:31:07Z","session":"s-1786-3f",
+                                "tool_id":"ext:web.search/web_search","ok":true,"duration_ms":812}
+        └─ projection ─▶ ToolStats { uses_total, successes, last_used_seq }   (journals/tool_stats.zig)
         └─ 读者：人、或 evolution session（PLAN §3.7）——内核里没有读者
 ```
 
 - 写入点：session 每个 completed step 后按 suffix 形状记一次（`session.recordCompletedToolStats`；模型幻觉的名字不记）；CLI `nulya ext run` 成功进入 invocation 后记一次。**被 `max_tokens` 截断的 step 不记**——它的 tool_results 是 loop 自己写的 marker（没有任何 executor 跑过，§4），记下去等于让 tool 为模型的输出上限背一次失败，直接污染 evolution 读的 `success_rate`。stats 是**执行之后的观测**，"host 认为这一步完成了" 不等于 "tool 跑过了"。**`tool_id` 跨实现版本累计**（无 `version` 字段）。
-- reader：`v` 未知精确报错（`UnsupportedStatsVersion`）；坏行 / 残尾容忍。
-- **内核不读这条 journal。** 没有排序、没有权重、没有自动补位：`tool_stats.zig` 只负责把 facts 老老实实写下来、读回来。
+- `ok` 之外的三列是让这堆调用变成慢速回路读得懂的证据：**`at`** 把一次调用放上时间轴（`append` 自己盖，没有调用方能忘）；**`session`** 让它 join 到 `session-outcomes.jsonl`（这次调用服务的那场 session 成了吗）——durable session 是文件 stem，`nulya ext run` 从 `NULYA_SESSION` 认（§5.3），所以**未 pin 的 extension tool 走 CLI 那条路也认得出场次**；**`duration_ms`** 是 `ok` 说不出的成本维度（能用但要一分钟的 tool 与能用的 tool 不是同一个事实），只由 loop 在 executor 两端用**单调时钟**量（不进 ledger：耗时是 journal 的事实，不是对话的事实；也不出 `AgentSession.step()` 的返回值），所以 `nulya ext run` 那条路没有这一列。
+- **三列都是可选、`v` 仍是 1**：加宽之前写下的每一行原样读回，缺的列是 null = "没记录"，绝不是 0；内存 session 没有 id、`ext run` 没量耗时，也照样缺。完整的行读端仍然严格。
+- reader：`v` 未知精确报错（`UnsupportedStatsVersion`）；坏行 / 残尾容忍；同一 `v` 下未知列忽略。
+- **内核不读这条 journal。** 没有排序、没有权重、没有自动补位：`journals/tool_stats.zig` 只负责把 facts 老老实实写下来、读回来。
 
 > **内核只存 facts；晋升是内核之外做的决定**——一个人，或 evolution session（PLAN §3.7），读完 journal 写下一条 pin（`registry.pinned_native_tools` 或 `session new --pin`），下一场生效。它有真实成本（一个 `max_tools` 槽 + 每场的前缀 token），所以该有人为它负责，而不是由一个公式代劳。**Activation**（当前 implementation 是哪个 version）与 **Promotion**（逻辑能力在不在 native 面上）仍是两条独立状态轴：前者是 `current` 指针，后者是一条 pin，永不合并成一个分数。
 
@@ -309,7 +312,7 @@ extension 装在**多个 store root** 里，按固定顺序搜索（`extension/r
 - **每个 `<id>/` 的变更都在 `<root>/<id>/.lock` 下进行**（`Store.lease`：build 写 `versions/<v>`、activate / rollback 改 `current`、deactivate 删 `current`；阻塞式排他 advisory 锁，与 session 的 `<id>.lock` 同一原语）——user store 被这台机器上的每个 workspace 共写，两个进程同时 build / activate 同一个 id 不能互相撕对方的目录树或共用一个 `.current.tmp`。读端不拿锁：`current` 是原子 rename，版本目录靠 seal 校验。
 - **header 不记 root**（`active` 仍是 `{id, version}`）：记了就等于把一台机器的目录布局冻进会话，而那与"跑的是哪份字节"无关。
 - 不存在的 root 是**缺席**不是错误（多数机器没有 user store）；写端（`ext init --user` / `ext build --user`）需要时才创建。
-- **为什么 project 层不能加 root**：一个 root 决定"这台机器上哪些目录可以供出 `current`"，即哪些代码可以被跑起来——checkout 能加就是拓宽权限，正是 §9.5 "只能收窄"禁止的事。
+- **为什么 project 层不能加 root**：一个 root 决定"这台机器上哪些目录可以供出 `current`"，即哪些代码可以被跑起来——checkout 能加就是拓宽权限，正是 §9.5 "只能收窄"禁止的事。同一条理由的另一面是 **workspace root 自己就在 checkout 里**，所以它有一道一次性的 trust gate（§9）：随 clone 到达的 store 要被人信任一次（`nulya ext trust`）才进 composition，本机 `ext build` 建出来的则自动可信。只读投影不过门。
 
 ### 7.2.1 目录与 manifest（`nulya.extension/v2`）
 
@@ -430,6 +433,18 @@ Environment { runShell(cmd, dialect) / runExtension(entry, request_json) / diale
 - extension 与 shell 共享同一个 session authority（≈ 当前用户全权限）。明说，不给虚假安全感。
 - **env 净化**：子进程 env 过 `isSecretKey` denylist（大小写不敏感子串：`SECRET / TOKEN / PASSWORD / API_KEY / ACCESS_KEY / PRIVATE_KEY / CREDENTIAL / SSH_AUTH_SOCK …`）。非 secret 变量（PATH / HOME）照传，命令才能工作。host env 的**来源**是 `environment.registerHostEnviron`：std 0.16 删掉了全局 environ（OS block 只交给 `main` 的 `std.process.Init` 与 test runner 的 `std.testing.environ`），`main` 启动时注册一次，所有读 host env 的层（config 链、`NULYA_*`、净化）都走 `environment.hostEnvironMap`；测试构建缺省落回 test runner 的 environ。边界是"无明显 secret 泄漏"，**不是**完全不继承、也不是 fs 隔离。kernel 往这份净化 env 里**加**两个非 secret 变量：`NULYA_EXE`（本进程可执行文件的绝对路径，`LocalEnvironment.init`）与 `NULYA_SESSION`（活着的 session 文件路径，只有 `session step` 放）——都是 provenance 型信息，不拓宽任何权限（§7.6）。
 - 不变量：`extension_permissions ⊆ session_authority`；注册成 extension 不获得 shell 没有的权限。
+- **workspace store 是 checkout 内容，却是第一优先 root——所以它要被信任一次（trust gate）。** §9.5 把 project 层的 `extensions.paths` 挡在门外，理由是 checkout 不该决定哪些目录供给 `current`；但 `.nulya/extensions` 本身就在 checkout 里，且首个持有者胜（§7.2）。clone 一个带 store 的 repo，从前 `session new` 会机械地把其中 active 版本合进 composition——system_prompts 进 system blocks、tools 经 CLI 可调、配合 project 层允许的 pin 还能上 native 面——中间没有任何人的确认。现在有一道门：
+
+  - **信任的对象是 store 本身，不是它内容的 hash。** 内容 hash 是错的抽象：agent 每造一个能力、每 activate 一次新版本都会改它，一道每轮都重问的门会把自演化循环卡死——而那正是这个 harness 存在的理由，不是边角情况。要判的是**出生地**：这个 store 是在本机长出来的，还是随 checkout 到达的。
+  - **本机 `ext build` 填满一个空 store = 生于本地，自动记一条信任**（`cli/ext.zig` 的 `recordBirthTrust`；只对非 `--user` 且落点是 workspace root 的成功 build，且只在 build **之前**该 store 什么都没有时）。所以 `ext init → ext build → ext activate` 这条自演化主路一句提示都没有。已经有内容的 store 走不到这条路——那恰恰是需要人看一眼的情形。
+  - **"持有"的定义**：某个 `<id>/` 有 `current` 或有至少一个 built 版本——即 session 能 compose（discovery / `--with`）或 CLI 能执行（`ext run <id>@<version>`）的东西。光有 draft、或一次失败 build 在 `<id>/.lock` 周围留下的空壳，**不算持有**：它是惰性源码，直到本机把它 build 出来（而那次 build 就是记信任的时刻）。判据只有一处实现（`launch.occupiedWorkspaceStore`），所以门、`ext trust`、auto-trust 三方不可能互相矛盾。
+  - **有内容却无信任记录 = 随 checkout 到达 → 硬拒。** `session new` 与 `session step` 启动时过门（`launch.ensureWorkspaceStoreTrusted`）：stderr 点名 store 绝对路径、列出它持有的 `id@version` 及 `[tools skills prompt]` 标注（与 `ext list` 同一份逻辑）、指路 `nulya ext trust`，exit 1。**硬拒而不是静默剔除该 root**——"少一个能力地开场"不是被要求的那一场，与 §7.5 对坏 active 版本的处理同一条规矩。`step` 也过门（不只创建时）：composition 冻在 header 里，但 extension 的**字节**每次 resume 都从 store 读。
+  - **`nulya ext trust`** = 显式信任本 workspace 的 store：先把要信任的东西打印出来（判据是出生地，唯一诚实的做法就是真看过），再记录。store 不存在或什么都不持有 → `nothing to trust`，不记录。已信任 → `already trusted`，幂等。**没有 `untrust`**：撤销 = 手删那一行，等有人真需要再给动词。
+  - **记录在 user 层**：`<NULYA_HOME | ~/.nulya>/trusted-stores.jsonl`，一行 `{"v":1,"store":"<绝对 realpath>","at":"<RFC3339>"}`（`journals/trust.zig`，与两条 workspace journal 共用 `journal.zig` 的文件纪律）。project 层记不算数——否则 checkout 自己给自己签名，与 §9.5 "只认 trusted 层"同一个理由。key 是 store 目录的 realpath（从打开的句柄解析，不是拼字符串）；重复行无害，读端只问"这个路径出现过吗"。整条 journal 读不动（完整行 malformed）就**拒**而不是答，corrupt 不该悄悄变成 trusted 或 untrusted。
+  - **范围**：只门 workspace root。user root 与 `extensions.paths` 定义上可信（checkout 都碰不到，§7.2/§9.5）。**只读投影一律不门**（`ext list` / `ext inspect` / `skill list` / `skill load`）——它们正是"决定要不要信任"所需的工具，蒙着眼决定才是错的；`ext run` 也不门（人或已过门的 session 里的模型显式点名）。
+  - **门在壳层，不在内核**：`composition.zig` / `session.zig` 不知道 trust 存在，`AgentSession.init` 这条库路径也不过门（trust 是 CLI 的 policy，不是 physics）。
+  - 仍然诚实的剩余面：checkout 里的一个 **draft**，一旦有人在本机 `ext build` 它，就既进了 store 又带来了信任——那与 `shell` 已有的权限同级（`extension ⊆ shell ⊆ session`），门管的是"**预先建好**的版本随 clone 到达、无声进 composition"这一件事，不是"checkout 里的源码永远不可信"。
+
 - OS 强制（sandbox）见 PLAN §3.8。
 
 ### 9.5 配置链（`config.zig` / `default.toml`）
@@ -538,7 +553,7 @@ NULYA_INTEGRATION_PROFILE=deepseek-anthropic zig build integration
 nulya ext init [--script] [--user] <id> [tool] | build <path> [--user]
           | run <id>[@<version>] [tool] (<json-args> | --arg k=v …)
           | activate [--user] <id> <version> | rollback [--user] <id> <version> | deactivate [--user] <id>
-          | list | inspect <id> | api [protocol|permissions|examples]
+          | list | inspect <id> | trust | api [protocol|permissions|examples]
 nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--with <id>[@<version>]]… [--pin ext:<id>/<tool>]…
                                                          ← 冻结 composition + 模型身份、写 header，打印 session id
           | append <id> <text|--file f>                  ← 把一条 user turn 投进 inbox（下一 step 边界进 ledger）
@@ -571,7 +586,7 @@ nulya                       ← 无参数：固定 prompt demo（现经 durable 
   - **`composition.system_prompts`** = 每个冻结 active 版本的 manifest 声明的 system prompt，写成 `<id>@<version>/<path>`（§7.5）。best-effort：这台机器读不出的版本就不列（"没列"= 不知道，不是"没有"），版本内容寻址故按 `id@version` 记一次读一次。会改写每一场 system blocks 的包，应该在列表里看得见。
   - **`outcome.source` / `outcome.by`**（§3.3）：`agent` 的 verdict 是**主张**不是 ground truth，文本形态在 verdict 后面直接标 `(self)`（`by == id`）或 `(by agent)`。
 - `nulya session outcome <id> <verdict> [--note …] [--seq N]`：校验 id 形状与 session 文件存在、校验 verdict（`--seq` 只校验是正整数），然后**只**往 `.nulya/session-outcomes.jsonl` append 一行（§3.3）。它**不打开 session 文件、不拿 `<id>.lock`**——verdict 是关于这场 session 的判断而不是其中一轮，所以正在跑 `step` 的 session 也能当场评；同一 session 可以评多次，最后一条作数。`NULYA_SESSION` 在环境里（即这条命令是模型经 `shell` 从某场 session 里调的）就记 `source:"agent"` + `by:<那场的 id>`；`--seq N` 把这条收窄成对第 N 轮的判断，不参与 `latestFor`。
-- `nulya session *` 是**唯一**的 session 驱动面：没有 `setTools / setModel / replaceHistory`，换 composition = `session new`。每个子命令是对 durable session 文件（§3.4）的一次独立进程调用，其中**只有 `step` 写主文件**：`append` / `cancel` 投递到 `<id>.inbox/` / `<id>.cancel`（所以正在跑的 `step` 会在它的下一个 step 边界拿到 mid-run 的 append 或 cancel），`events` 是只读 tail（不解析、不重编码——文件本身就是 wire format）。`step` 的预算 `min(--max-steps, session.max_steps_ceiling)` **由 kernel 在 `AgentSession.run` 强制**，driver 只能调低不能调高；`--max-steps` 必须是正整数。session 就是它的文件，没有 `close`。
+- `nulya session *` 是**唯一**的 session 驱动面：没有 `setTools / setModel / replaceHistory`，换 composition = `session new`。每个子命令是对 durable session 文件（§3.4）的一次独立进程调用，其中**只有 `step` 写主文件**：`append` / `cancel` 投递到 `<id>.inbox/` / `<id>.cancel`（所以正在跑的 `step` 会在它的下一个 step 边界拿到 mid-run 的 append 或 cancel），`events` 是只读 tail（不解析、不重编码——文件本身就是 wire format）。`step` 的预算 `min(--max-steps, session.max_steps_ceiling)` **由 kernel 在 `AgentSession.run` 强制**，driver 只能调低不能调高；`--max-steps` 必须是正整数。session 就是它的文件，没有 `close`。**stdout 只放数据与成功输出**（新 session 的 id、事件 JSONL、`list` 的两种形态、`<id>: <verdict>`、`cancel requested for <id>`）：所有拒绝与警告——不认识的 verdict、`no such session`、`session new failed: …`、`session step failed: …`——一律走 stderr，所以一个 driver 拿到的 stdout 要么是它要的东西要么什么都没有。唯一的例外是 `--stream`，那里诊断是协议的一部分（`{"stream":"run","event":"error"}` 行，见下）。
 - **`session step --stream`：纯观测的行协议**（前端唯一需要的内核改动，tui.md §2.2 → 已落地）。语义与不带 `--stream` 完全相同（同一 `AgentSession.run`、同一预算夹取、同一 cancel 消化、**同一 ledger**）；区别只是 stdout **在跑的过程中**逐行输出，而不是跑完一次性输出。
   - 机制是 `loop.StepContext.observer`（可选 `StepObserver{ptr,vtable}`）。observer **无权力**：五个回调全部返回 `void`、只拿只读视图（`stepEnd` 拿整个 `StepOutcome`），所以它不能 append、不能改 model-visible 状态、不能让一个 step 失败——带 observer 的 step 与不带的走同一条路径（physics #1/#3）。回调点：`collectTurn` 把 provider 流 **tee** 给 observer 再交给 `TurnCollector`，瞬态失败重发前一次 `modelRetry`（§13）；`execOne` 前后各一次（未被派发的尾部调用两个回调都不发）；`AgentSession.step` 在 step 边界一次（含 canceled）。
   - 行协议（一行一个 JSON，写完即 flush）：带 `stream` 字段的是瞬态观测行，不带的就是与 `session events` **同形**的 ledger 事件行（同一个 `encodeEventLine`、同一套 seq）。
@@ -595,6 +610,7 @@ nulya                       ← 无参数：固定 prompt demo（现经 durable 
 - `nulya ext init|build|activate|rollback|deactivate` 都接受 `--user`：写端落到 user root（`~/.nulya/extensions`，需要时创建）而不是 workspace；`activate|rollback --user` **在 session 里跑**（`NULYA_SESSION` 存在）时先往 stderr 说一句这件事跨出了本 workspace（§7.2），照做不拦。不给 `--user` 时，`activate|rollback|deactivate` 都作用于**该 id 生效中的那个 root**（`Roots.firstActive`，§7.2）——版本不在那里就失败并指路，只有该 id 无 active 副本时 `activate|rollback` 才落到首个持有该 built 版本的 root；操作后按生效结果决定要不要投 capability_note、要不要打印 `not in effect`。`ext list` 打印 `id / version / root`，有版本的行按冻结 manifest 多打一列 `[tools skills prompt]`（声明了什么就打什么；读不出 manifest 就不打，绝不因此让列表失败）——`prompt` 是承重的那个：activate 了的包，它的 system_prompt 进**每一场**未来 session 的 system blocks（§7.5），从前只能手读 manifest 才看得见。被遮蔽的 active 行标 `(shadowed)`，**既无 `current` 又无任何 built 版本的目录直接跳过**（`<id>/.lock` 的 lease 在校验与编译之前就把 `<id>/` 建出来了，所以一次编译失败的 `ext build` 会留下只装着锁的空壳——那是锁的位置，不是 extension；有版本没 active 的 draft 照常列 `(inactive)`）；`ext run` / `skill list` / `skill load` / session composition 一律按 root 顺序搜索。
 - `nulya ext run <id>[@<version>] [tool] <json> | --arg k=v…`：`<id>` 跑生效中的版本；`<id>@<version>` 跑**恰好那个** built 版本（active 与否无关，按 root 顺序找首个持有者）——这是 `--with <id>@<version>` 带进 session 的 runtime tool 的调用形式，也是**故意不 activate 的 driver 包**的调用形式（`nulya ext run compact@v-… compact '{"session":"s-…"}'`，§11）：composition 里冻的是那个版本，`current` 可能指向别的甚至没有，所以 CLI 形式必须能点名版本；不让 `ext run` 在 `NULYA_SESSION` 下自动读 header，否则"同 session 内 activate 后 CLI 形式立即用新 current"这条语义就变了。usage 记的仍是 version-free 的 `ext:<id>/<tool>`。
 - `nulya ext activate` 在 `NULYA_SESSION`（相对 workspace 的 session 文件路径）存在时，向该 session 的 inbox 投一条 capability_note（§5.3）。
+- **`nulya ext trust` = workspace store 的一次性信任（§9 的 trust gate）**：打印本 workspace store 持有的 `id@version`（带 `[tools skills prompt]` 标注）再往 `<NULYA_HOME | ~/.nulya>/trusted-stores.jsonl` 记一行。什么都不持有就 `nothing to trust`（不记录），已信任就 `already trusted`（幂等），没有 home 就 exit 1 说没地方记。没有 `untrust`。与它成对的是：`ext build`（非 `--user`、落 workspace root、build 前该 store 为空）成功后**自动**记一条——生于本地不必问；而 `session new` / `session step` 在启动时过门，持有内容却无记录就 stderr 列出它持有什么 + 指路 `ext trust` 并 exit 1。**只读投影（`ext list` / `ext inspect` / `skill list` / `skill load`）与 `ext run` 都不过门。**
 - 离线时 provider 回落到确定性的 scripted stand-in（`NULYA_SCRIPTED_MODE=finish|loop|truncate`，测试用；`truncate` 每步都在 tool call 中间被 `max_tokens` 切断）。
 
 （`ext find` / `ext test` 未实现。）
@@ -618,7 +634,7 @@ SessionComposition 版本冻结（成员解析一律硬失败）    composition.
 ToolExecutor / Binding（builtin/extension 同构）   tool.zig, extension/tools.zig
 skills + 渐进披露 catalog                          skill.zig, extension/skills.zig
 system prompts 投影                                prompt.zig, composition.zig
-durable append-only usage journal                  tool_stats.zig
+durable append-only usage journal                  journals/tool_stats.zig
 ```
 
 **可自生长（内核之上皆可学习）：** grep / glob / git / web-search / browser / pdf / excel / db / github / docker / lsp / … 全是 extension，不进 kernel。
