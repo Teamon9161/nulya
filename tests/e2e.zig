@@ -39,6 +39,13 @@
 //! model hands off, the driver forks through compact, the goal completes in the
 //! child, control lines on stdout and the step's `--stream` protocol on stderr.
 //!
+//! And the self-description entry (guide): `nulya help` printing one screen
+//! that every bare verb family is a strict substring of, `ext api permissions`
+//! / `examples` stating today's authority and a worked path with no document
+//! citations anywhere the model can read, a fresh session's kernel system block
+//! naming NULYA_EXE / `nulya help` / `nulya src`, and the repo's own
+//! `extensions/guide` composing in as one skill and no system prompt.
+//!
 //! Compiling an extension is a real `zig build-exe`, so `support.zig` keeps a
 //! compile-once cache of built versions under `.zig-cache/` and copies frozen
 //! version directories into each test's store; the tests where the BUILD is the
@@ -51,6 +58,8 @@
 //!   e2e/session.zig      the durable ledger and the `nulya session *` surface
 //!   e2e/manufacture.zig  the flagship self-manufacture + pin proof
 //!   e2e/source.zig       `nulya src` / `ext api`
+//!   e2e/cli.zig          the self-description entry: `nulya help`, `ext api`
+//!                        topics, the kernel prompt's bootstrap sentence, guide
 
 comptime {
     _ = @import("e2e/support.zig");
@@ -58,4 +67,5 @@ comptime {
     _ = @import("e2e/session.zig");
     _ = @import("e2e/manufacture.zig");
     _ = @import("e2e/source.zig");
+    _ = @import("e2e/cli.zig");
 }

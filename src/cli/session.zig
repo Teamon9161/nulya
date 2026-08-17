@@ -782,32 +782,10 @@ fn parseParent(s: []const u8) ?ledger.ParentRef {
     return .{ .session = session_id, .seq = seq };
 }
 
+/// Bare `nulya session` prints this family's block from the one CLI map, rather
+/// than a second description of the same verbs that would drift from it.
 fn sessionUsage(io: std.Io) !u8 {
-    try printRaw(io,
-        \\usage:
-        \\  nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--with <id>[@<ver>]]… [--pin ext:<id>/<tool>]…
-        \\                                                             freeze composition + model, print a new session id
-        \\                                                             (P: a config profile, default active_profile; ID: one of its
-        \\                                                             models, default the profile's — see `nulya config show`)
-        \\                                                             --with composes a built version into this session (membership)
-        \\                                                             --pin puts an extension tool on the model's tool face for this
-        \\                                                             session, on top of registry.pinned_native_tools; strict
-        \\  nulya session append <id> <text> | --file <path>           queue a user turn (appended at the next step boundary)
-        \\  nulya session step <id> [--max-steps N] [--effort E] [--stream]
-        \\                                                             run to turn end (or the budget); stdout = event JSONL
-        \\                                                             --effort overrides the profile/catalog default for this run
-        \\                                                             --stream also emits transient model/tool lines as they happen
-        \\  nulya session events <id> [--since N] [--follow]           print events as JSONL (read-only tail)
-        \\  nulya session cancel <id>                                  request cancel at the next step boundary
-        \\  nulya session list [--json]                                read-only projection of every session here: composition,
-        \\                                                             event count, usage (own + episode), latest verdict
-        \\  nulya session outcome <id> <success|partial|failure> [--note <text>] [--seq N]
-        \\                                                             record how the session turned out (journal only — never
-        \\                                                             touches the session file, so a running one can be judged)
-        \\                                                             --seq judges ONE assistant turn instead of the session
-        \\
-    );
-    return 0;
+    return common.usageSection(io, common.session_usage);
 }
 
 test "EventTail prints raw event lines past --since, skips the header and a torn tail, and resumes" {

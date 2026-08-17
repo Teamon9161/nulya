@@ -153,27 +153,92 @@ pub fn writeInto(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, sub_dir:
     try dir.writeFile(io, .{ .sub_path = path, .data = data });
 }
 
+// ── The one-screen CLI map ──────────────────────────────────────────────────
+//
+// One block per verb family, so a bare `nulya ext` prints exactly its own lines
+// and `nulya help` prints all of them in order: one text, so the two can never
+// disagree about what a verb takes. Model-facing (it arrives through `shell`),
+// so every line states behaviour and usage and cites no document.
+
+pub const ext_usage =
+    \\  nulya ext init [--script] [--user] <id> [tool]    scaffold a draft (--script needs no compiler)
+    \\  nulya ext build <path> [--user]                   freeze a draft into an immutable version, print its id
+    \\  nulya ext run <id>[@<ver>] [tool] <json> | --arg k=v …   run the version in effect, or exactly that one
+    \\  nulya ext activate|rollback [--user] <id> <ver>   point `current` at a version; older ones are kept
+    \\  nulya ext deactivate [--user] <id>                drop `current`; the versions stay
+    \\  nulya ext list                                    every extension: active version, store root, contributions
+    \\  nulya ext inspect <id>                            print the frozen manifest
+    \\  nulya ext trust                                   allow this workspace's store once, if it came with a checkout
+    \\  nulya ext api [protocol|permissions|examples]     the tool wire protocol, the authority model, worked commands
+    \\  --user acts on the user store, which every workspace on this machine sees
+    \\
+;
+
+pub const session_usage =
+    \\  nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--with <id>[@<ver>]]… [--pin ext:<id>/<tool>]…
+    \\                                                    freeze composition + model, print a new session id; --with composes
+    \\                                                    a built version in, --pin puts one of its tools on the model's tool
+    \\                                                    face, --parent continues that session as a fork
+    \\  nulya session append <id> <text> | --file <path>  queue a user turn for the next step boundary
+    \\  nulya session step <id> [--max-steps N] [--effort E] [--stream]
+    \\                                                    run to end of turn or budget; stdout = event JSONL, --stream adds
+    \\                                                    live model/tool lines as they happen
+    \\  nulya session events <id> [--since N] [--follow]  read-only tail of the event log
+    \\  nulya session cancel <id>                         request cancel at the next step boundary
+    \\  nulya session outcome <id> <success|partial|failure> [--note <text>] [--seq N]
+    \\                                                    record how a session turned out (a journal, never the session file)
+    \\  nulya session list [--json]                       every session here: composition, cost, latest verdict
+    \\
+;
+
+pub const config_usage =
+    \\  nulya config show [--json]                        effective provider profiles + model catalog; never a secret
+    \\
+;
+
+pub const skill_usage =
+    \\  nulya skill list                                  the skill catalog: one line per skill available here
+    \\  nulya skill load <skill-ref>                      print one frozen SKILL.md in full
+    \\
+;
+
+pub const src_usage =
+    \\  nulya src [path] [--tests]                        this binary's own source; no path lists the tree
+    \\
+;
+
+pub const toolchain_usage =
+    \\  nulya toolchain zig <args…>                       run the managed zig toolchain
+    \\
+;
+
 pub fn usage(io: std.Io) !u8 {
     try printRaw(io,
         \\nulya — minimal self-evolving agent harness
         \\
-        \\  nulya ext init <id> <tool>        scaffold a new extension
-        \\  nulya ext build <path>            compile into an immutable version
-        \\  nulya ext activate <id> <ver>     point `current` at a version
-        \\  nulya ext rollback <id> <ver>     repoint `current` at an older version
-        \\  nulya ext run <id>[@<ver>] [tool] <json>  invoke the active (or that exact) version
-        \\  nulya ext list                    list extensions and active versions
-        \\  nulya ext inspect <id>            print an extension's manifest
-        \\  nulya ext trust                   allow this workspace's store (needed once, if it came with a checkout)
-        \\  nulya ext api [protocol|permissions|examples]
-        \\  nulya session new|append|step|events|cancel   drive a durable session
-        \\  nulya config show [--json]        effective provider profiles + model catalog
-        \\  nulya src [path] [--tests]        print this binary's own source
-        \\  nulya skill list                 list active extension skills
-        \\  nulya skill load <skill-ref>     print a frozen SKILL.md
-        \\  nulya toolchain zig <args...>     run the managed zig (scratch)
+        \\extensions — the tools, skills and system prompts you build; versions are immutable
+        \\
+    ++ ext_usage ++
+        \\
+        \\sessions — composition freezes at `new` and never changes; only `step` writes the file
+        \\
+    ++ session_usage ++
+        \\
+        \\reading this harness
+        \\
+    ++ config_usage ++ skill_usage ++ src_usage ++ toolchain_usage ++
+        \\  nulya help                                        this text; a bare `nulya` runs the built-in demo prompt
+        \\
+        \\a fuller reference ships with the nulya repo, as an extension you install once:
+        \\  nulya ext build extensions/guide --user     then     nulya ext activate --user guide <version>
         \\
     );
+    return 0;
+}
+
+/// Print one verb family's block — what a bare `nulya ext` / `nulya skill` says.
+pub fn usageSection(io: std.Io, section: []const u8) !u8 {
+    try printRaw(io, section);
     return 0;
 }
 

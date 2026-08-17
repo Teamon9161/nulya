@@ -38,9 +38,16 @@ const roots_mod = @import("extension/roots.zig");
 const integrity = @import("extension/integrity.zig");
 const testkit = @import("extension/testkit.zig");
 
+/// What the KERNEL itself says to the model, and the whole of it: the two
+/// permanent tools, how an extension capability is reached, where this binary
+/// is, and that extensions / skills / system prompts / drivers are writable.
+/// Facts only — no encouragement to evolve. Whether building something is worth
+/// it is a judgement, and judgement belongs above the kernel (a mode's system
+/// prompt, a skill), not in a prefix every session pays for.
 const kernel_system_prompt =
     "You are Nulya, a minimal self-evolving agent harness. " ++
     "shell and edit are permanent builtin tools. Some extension tools may also be exposed to you directly this session; every other extension capability is invoked through the nulya CLI. " ++
+    "The nulya executable's path is in the NULYA_EXE environment variable, named nulya where it is installed. nulya help lists what it can do; nulya src prints this harness's own source. Nulya is extensible: extensions (tools you build, script or compiled), skills, system prompts and session drivers are things you can write when a task calls for one. " ++
     "A directly-exposed extension tool is pinned to the version that was active when this session began. Activating a new version mid-session takes effect immediately through the CLI, but its directly-exposed form changes only in the next session.";
 
 /// A digest over everything the KERNEL ITSELF puts into a session's frozen
@@ -598,6 +605,29 @@ fn freeResolved(alloc: std.mem.Allocator, resolved: []const roots_mod.Roots.Reso
 
 pub fn testingKernelPrompt() []const u8 {
     return kernel_system_prompt;
+}
+
+test "the kernel prompt names the harness binary, the help verb and the source verb, and states extensibility without urging it" {
+    const p = kernel_system_prompt;
+
+    // A session that composes nothing still knows where this binary is and how
+    // to ask it what it can do — the bootstrap the rest of the entry layer
+    // (`nulya help`, the guide skill) hangs off.
+    try std.testing.expect(std.mem.indexOf(u8, p, "NULYA_EXE") != null);
+    try std.testing.expect(std.mem.indexOf(u8, p, "nulya help") != null);
+    try std.testing.expect(std.mem.indexOf(u8, p, "nulya src") != null);
+    // The four things a task may call for are named, so "can I write one?" is
+    // never a guess.
+    for ([_][]const u8{ "extensions", "skills", "system prompts", "session drivers" }) |word| {
+        try std.testing.expect(std.mem.indexOf(u8, p, word) != null);
+    }
+
+    // Statements of fact, not motivation: every session pays for these tokens,
+    // and a harness that tells the model to improve itself has moved a judgement
+    // into the kernel.
+    for ([_][]const u8{ "should", "remember", "try to", "make sure" }) |urging| {
+        try std.testing.expect(std.mem.indexOf(u8, p, urging) == null);
+    }
 }
 
 test "kernelHash is stable across calls and moves when any kernel constant does" {

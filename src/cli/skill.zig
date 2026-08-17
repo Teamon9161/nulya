@@ -12,10 +12,10 @@ const printOut = common.printOut;
 const printErr = common.printErr;
 
 pub fn dispatchSkill(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
-    if (args.len == 0) return common.usage(io);
+    if (args.len == 0) return common.usageSection(io, common.skill_usage);
     if (std.mem.eql(u8, args[0], "list")) return skillList(alloc, io);
     if (std.mem.eql(u8, args[0], "load")) return skillLoad(alloc, io, args[1..]);
-    try printErr(io, "unknown `skill` subcommand\n");
+    try common.printErrFmt(alloc, io, "unknown `skill` subcommand '{s}'; run `nulya help`\n", .{args[0]});
     return 1;
 }
 

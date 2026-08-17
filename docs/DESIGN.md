@@ -389,6 +389,9 @@ active extension <id>@<version> is broken (<err>); run 'nulya ext deactivate <id
 
 这不是新机制，是 §5.1 的 frozen snapshot 延伸到整个 Contribution 层。
 
+**kernel system prompt 说什么、为什么只说这些。** 每场 session 的第一个 system block 是编译进二进制的常量（`composition.kernel_system_prompt`，进 `kernel_hash`，§3.4），四句话全是**事实**：① 你是 Nulya；② shell / edit 是永久 builtin，别的 extension 能力经 nulya CLI 调用；③ 那个 CLI 在哪（`NULYA_EXE` 给出本二进制路径，安装后叫 `nulya`）、`nulya help` 列出它能做什么、`nulya src` 打印本 harness 的源码，以及 **Nulya 可扩展——extension（脚本或编译的 tool）、skill、system prompt、session driver 都是模型在任务需要时可以写的东西**；④ native 暴露的 extension tool 冻在开场那个版本，中途 activate 只对 CLI 与下一场生效。第 ③ 句是 2026-08 加的**入口**：没有它，一场只有 shell + edit 的 session 不知道这些命令存在、也不知道二进制在哪（实测撞到过 "nulya not on PATH"）。
+**没有一个字是"你应该进化 / 记得改进自己"**，这是刻意的：该不该造工具是判断（physics §8），判断住在 kernel 之上——mode 的 system prompt（`extensions/evolution`）或按需 load 的 skill（`extensions/guide`），而不是每场都在付 token 的前缀。同理，这句只**指路**不复制内容：真相在 `nulya help` / `ext api` / `nulya src` 里，它们与代码同源，不会漂。改这个常量会改 `kernel_hash`，老 session resume 时 stderr 警告一行照跑（§3.4），无需迁移。
+
 ### 7.6 工具的上下文模型：tool 拿不到 ledger
 
 **tool 是无状态纯函数 `f(args, environment, ctx) → result`。**
@@ -576,8 +579,13 @@ nulya config show [--json]                               ← 有效配置链的�
 nulya src [path] [--tests]                               ← 打印本二进制内嵌的 src 源码（无参数 = 列全树）
 nulya skill list | load <skill-ref>
 nulya toolchain zig <args…>
+nulya help                                               ← 也认 `--help` / `-h`：整屏 usage（39 行）
 nulya                       ← 无参数：固定 prompt demo（现经 durable session 路径跑，§3.4）
 ```
+
+- **`nulya help` = 自描述入口，`usage` 与上面这张表逐动词对齐是约定。** `cli/common.zig` 把 usage 拆成**按动词族**的常量（`ext_usage` / `session_usage` / `config_usage` / `skill_usage` / `src_usage` / `toolchain_usage`），`help` 拼成一屏，**bare `nulya ext` / `nulya session` / `nulya skill` / `nulya config` / `nulya toolchain` 各印自己那块**（`common.usageSection`）——同一份文本，两处不可能对同一个动词说两样话（原来 `cli/session.zig` 里那份独立的 session usage 已删）。加动词/加 flag 就同时改这张表和那几个常量。未知命令 → stderr `unknown command '<x>'; run \`nulya help\`` + exit 1（stdout 保持空）。bare `nulya` 仍是 demo，bare `nulya src` 仍是列全树。整屏 **≤ 40 行**是硬约束（模型每次读都在付 token），e2e 断言它。
+- **`nulya ext api` 三个 topic 的现状**：`protocol`（缺省）= 真实 `extension/protocol.zig` 源码；`permissions` = 今天的 authority（与 shell 同权、无 sandbox；子进程 env 净化后**加** `NULYA_EXE` / session 内 `NULYA_SESSION`；tool 拿不到对话；`manifest.permissions` 仅声明、无强制；extension tool 默认 30s / `timeout_ms` 上限 600s、`shell` 默认 120s / 上限 600s；workspace store 的 trust gate）；`examples` = 一条完整路径（`ext init --script` → `build` → `run <id>@<v> --arg k=v` → `activate` → `session new --pin` → 故意不 activate 的包用 `--with <id>@<v>` → `--user` → `ext trust` → `session outcome`）。
+- **model-facing 文本零文档引用**：kernel prompt（§7.5）、`usage`、`ext api` 的 `permissions` / `examples`、随仓库带的 `SKILL.md`——模型读得到的字只写行为与用法，**不出现 `DESIGN §x` / `PLAN §x` / 文件名**（模型读不到 docs，extension 还可能装到别的 workspace）。文档引用只待在代码注释与 docs 里；e2e 断言这几处不含 `DESIGN` / `PLAN`。
 
 - `session new --profile P [--model ID]`：`--profile` 是 config 里的 profile 名（默认 `active_profile`），`--model` 是该 profile 服务的一个 model id（默认 `ProviderProfile.defaultModel()`；接受任意 id，选择器只列目录里的）。不存在的 profile 直接拒绝（exit 1，提示 `nulya config show`）；存在但 credential 不可用的 profile 仍冻结为 scripted（离线替身，`resolveDescriptor` 的语义不变），但 stderr 明说。
 - `session new --parent <id>:<seq>`：这场 session 续的是谁（fork / compaction 的新文件，§11）。**父必须存在**（读不到 header 即 exit 1，不建文件）。模型分两级继承，因为两个 flag 含义不同：`--profile` 换的是"怎么连"，所以它替掉父的 profile；`--model` 只是在一个 profile 内换 id，所以**父的 profile 仍然生效**（不会掉回 `active_profile`）；两个都不给则**原样继承父 header 的 `model_identity`**，此时不重解 credential、也不打那条降级警告（继承的身份不会降级为 scripted，缺 key 由需要它的那次 `step` 一次性报响）。composition 一律现解，不继承。`session step --effort E` 是**每次 step 的 generation option**（不是身份，§3）：不给则用 `Config.defaultEffort(header.model, header.model_identity.model)`。
@@ -585,7 +593,7 @@ nulya                       ← 无参数：固定 prompt demo（现经 durable 
 - `nulya config show [--json]`：外壳级投影（同 `session new` 看到的东西），供选择器与 agent 自查：`{paths{system, user, project}, active_profile, profiles[]{name, kind, base_url, api_key_env, credential: bool, credential_source: config|env|login|builtin|none, model, models[], effort?}, models[]{id, label, efforts[], default_effort?, context_window?}}`。只报 env var **名字**、来源与布尔，永不报值；`api_key` 的值不出现。
 
 - `nulya src`：build.zig 把整个 `src/**` `@embedFile` 进二进制（源码 ~200KB，紧挨 ~90MB 工具链，恒开无 gate）；`nulya src <path>` 按 `src/` 相对路径打印（`prompt.zig`、`extension/store.zig`），**默认剥 top-level `test` 块**（读结构/契约时不付测试 token），`--tests`/`--raw` 打印原样（Zig 风格参照）。剥离靠 zig-fmt 不变量：顶层 decl 的收尾 `}` 在第 0 列，无需 tokenizer（`source.zig`）。测试留在文件里（Zig 惯例、人可读、风格参照），改的只是**投影**不是**存储**——`src/` 一字未动。
-- `nulya ext api`：协议 topic 现在**打印真实 `extension/protocol.zig` 源码**（是 `nulya src` 的特例），wire ABI 与实现代码零漂移；`permissions` / `examples` 仍是短说明（策略与 CLI 用法，不随代码漂）。
+- `nulya ext api`：协议 topic 现在**打印真实 `extension/protocol.zig` 源码**（是 `nulya src` 的特例），wire ABI 与实现代码零漂移；`permissions` / `examples` 仍是短说明（策略与 CLI 用法，不随代码漂），内容见本节开头那条。
 - **`session new --pin ext:<id>/<tool>`（可重复）= 这一场的 native 工具面。** 与 `registry.pinned_native_tools` **同义同严**，两者取并集去重（config 在前，`--pin` 按 argv 顺序在后）：config 说"这个 workspace 一直要"，`--pin` 说"这一场要"。解析不到就 exit 1 并打出这场的 pin 列表（`PinNamesUnknownExtension` / `PinToolNotDeclared` / `InvalidStableToolId` / `ToolBudgetExceeded` 各一句），绝不静默少一个工具地开场。结果照常冻进 header 的 `native_tools`，`initFrozen` 零改动。fork（`--parent`）**不继承** pin——composition 一律现解（§11），driver 要就再传一次。这也是"晋升"的全部含义：没有别的机制会把一个工具放上模型的工具面（§5.1、§5.5）。
 - **`session new --with <id>[@<version>]`（可重复）= composition membership，不是 native pin。** 把一个**已 built** 的版本 union 进这一场的 composition：它的 skills 进 catalog、system_prompts 进 system blocks、tools 可经 `nulya ext run <id>@<version>` 调用（点名冻结的版本，不依赖 `current`）；**tool 要不要占 native 槽是 `--pin` / `registry.pinned_native_tools` 的事**（两根轴分开）。同 id 覆盖 discovery 的结果（这一场说了算），重复 `--with` 同一个 id 后者胜。版本解析：给了 `@version` 就用它，没给就用该 id 的 `current`——**没有 `current` 就 exit 1，内核不猜**（"只有一个 built 版本就用它"这类聪明会让同一条命令在第二次 build 之后含义漂移）。所以一个**故意不 activate** 的包（mode / evolution，activate 了就会进每一场 session 的 system blocks）要按 `--with <id>@<version>` 带入，version 由 `ext build` 打印。落地不需要新机制：`--with` 只改 `SessionComposition.init` 的输入，结果照常冻进 header 的 `active`，所以 `initFrozen` 零改动、resume 自然重建同一份 composition。fork（`--parent`）不继承——composition 一律现解（§11），要就再传一次。
 - **mode = 贡献 system_prompt 的 data extension + `--with`。** 同一个包两种投放：`activate` = 常驻（每场都有）；不 activate、只 `--with` = 按场。不为 mode 造别的机制。
