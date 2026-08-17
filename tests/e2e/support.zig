@@ -26,6 +26,7 @@ pub const store = support.store;
 pub const templates = support.templates;
 pub const tool = support.tool;
 pub const tool_stats = support.tool_stats;
+pub const trust = support.trust;
 
 /// Scaffold a real, buildable extension (`id`/`tool`, single-file entry source),
 /// compile it with the host zig into an immutable version, and activate it.
@@ -47,8 +48,13 @@ pub fn buildAndActivate(
     return version;
 }
 
-/// Scaffold a real single-file extension and build it into an immutable version
-/// WITHOUT activating it. Returns the built version id; caller frees.
+/// Scaffold a real single-file extension into the workspace and put its built,
+/// immutable version in the workspace store WITHOUT activating it. Returns the
+/// built version id; caller frees.
+///
+/// The compile itself is shared through the prebuilt cache below — the draft is
+/// written here exactly as before, but the frozen version is copied in rather
+/// than compiled again for every test that needs one to exist.
 pub fn scaffoldAndBuild(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -58,30 +64,35 @@ pub fn scaffoldAndBuild(
     tool_name: []const u8,
     main_src: []const u8,
 ) ![]u8 {
-    const ext_dir = try std.fs.path.join(alloc, &.{ ".nulya", "extensions", id });
+    const manifest_bytes = try templates.manifestJson(alloc, id, tool_name);
+    defer alloc.free(manifest_bytes);
+    try writeSingleFileDraft(alloc, io, ws, ".nulya" ++ std.fs.path.sep_str ++ "extensions", id, manifest_bytes, main_src);
+    return installPrebuilt(alloc, io, ws, zig_exe, id, manifest_bytes, main_src);
+}
+
+/// Write the draft `scaffoldAndBuild` builds: `<root_rel>/<id>/extension.json`
+/// plus `<root_rel>/<id>/src/main.zig`.
+fn writeSingleFileDraft(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    root: std.Io.Dir,
+    root_rel: []const u8,
+    id: []const u8,
+    manifest_bytes: []const u8,
+    main_src: []const u8,
+) !void {
+    const ext_dir = try std.fs.path.join(alloc, &.{ root_rel, id });
     defer alloc.free(ext_dir);
     const src_dir = try std.fs.path.join(alloc, &.{ ext_dir, "src" });
     defer alloc.free(src_dir);
-    try ws.createDirPath(io, src_dir);
+    try root.createDirPath(io, src_dir);
 
-    const manifest_bytes = try templates.manifestJson(alloc, id, tool_name);
-    defer alloc.free(manifest_bytes);
     const manifest_rel = try std.fs.path.join(alloc, &.{ ext_dir, "extension.json" });
     defer alloc.free(manifest_rel);
-    try ws.writeFile(io, .{ .sub_path = manifest_rel, .data = manifest_bytes });
+    try root.writeFile(io, .{ .sub_path = manifest_rel, .data = manifest_bytes });
     const main_rel = try std.fs.path.join(alloc, &.{ src_dir, "main.zig" });
     defer alloc.free(main_rel);
-    try ws.writeFile(io, .{ .sub_path = main_rel, .data = main_src });
-
-    var dest = try ws.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
-    defer dest.close(io);
-    var result = try build_ext.buildExtension(alloc, io, ws, ext_dir, dest, zig_exe);
-    defer result.deinit(alloc);
-    if (!result.compile_ok) {
-        std.debug.print("extension failed to compile:\n{s}\n", .{result.stderr});
-        return error.ExtensionBuildFailed;
-    }
-    return try alloc.dupe(u8, result.version);
+    try root.writeFile(io, .{ .sub_path = main_rel, .data = main_src });
 }
 
 /// One real `nulya` CLI invocation against the workspace. The test binary's own
@@ -357,4 +368,207 @@ pub fn readSessionFile(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, id:
     const path = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{id});
     defer alloc.free(path);
     return ws.readFileAlloc(io, path, alloc, .unlimited);
+}
+
+// ── Compile once, install everywhere ────────────────────────────────────────
+//
+// Building a COMPILED extension really runs `zig build-exe -O ReleaseSafe`, and
+// DESIGN §7.4 fixes that invocation: no `--enable-cache`, and a fresh
+// content-addressed store path every time. So it costs a full compile (~7s on a
+// developer machine) that no zig cache can shorten — and this suite wants a
+// built version of the same handful of packages in a dozen fresh workspaces.
+//
+// Most of those tests are not about building. They need a frozen version to
+// EXIST in their store so they can activate it, pin it, run it, resume a header
+// that names it. So each distinct package is built exactly once, into a store
+// this file owns, and every other test receives a byte-identical copy of the
+// version directory. A version is content-addressed, so the copy IS the same
+// version and `integrity.validateVersionDir` accepts it unchanged.
+//
+// The tests where the BUILD is the subject still compile for real: the
+// init→build→activate→run closed loop, the self-manufacture proof, the build
+// that must fail to compile, and every version-id-stability check.
+//
+// The cache sits under `.zig-cache/` and deliberately outlives the process: a
+// compiled version id includes the compiler identity, so a toolchain change
+// invalidates it by construction, and deleting `.zig-cache` is the reset.
+
+/// Cache root, relative to the repo `NULYA_REPO` names.
+const prebuilt_rel = ".zig-cache" ++ std.fs.path.sep_str ++ "nulya-e2e-prebuilt";
+
+/// Cache key -> built version id, for this process. Zig's test runner runs a
+/// binary's tests one at a time, so no lock is needed here; two `zig build`
+/// steps running at once are two processes, and the store's own `<id>/.lock`
+/// serializes those.
+var prebuilt_memo: std.StringHashMapUnmanaged([]const u8) = .empty;
+var prebuilt_arena: ?std.heap.ArenaAllocator = null;
+
+/// The cache's own allocator: never freed, and outlives every test's arena.
+fn prebuiltAlloc() std.mem.Allocator {
+    if (prebuilt_arena == null) prebuilt_arena = .init(std.heap.page_allocator);
+    return prebuilt_arena.?.allocator();
+}
+
+/// `NULYA_REPO`, the repo root build.zig hands the test binary. Caller owns it.
+fn repoRoot(alloc: std.mem.Allocator) ![]u8 {
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const repo = host_env.get("NULYA_REPO") orelse return error.SkipZigTest;
+    return alloc.dupe(u8, repo);
+}
+
+/// Open `<repo>/.zig-cache/nulya-e2e-prebuilt/<sub>`, creating it when missing.
+/// Caller closes it.
+fn openPrebuiltDir(alloc: std.mem.Allocator, io: std.Io, sub: []const u8) !std.Io.Dir {
+    const repo = try repoRoot(alloc);
+    defer alloc.free(repo);
+    const path = try std.fs.path.join(alloc, &.{ repo, prebuilt_rel, sub });
+    defer alloc.free(path);
+    try std.Io.Dir.cwd().createDirPath(io, path);
+    return std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true });
+}
+
+/// A filesystem-safe, collision-resistant name for one package's cache slot.
+/// Caller owns it.
+fn prebuiltKey(alloc: std.mem.Allocator, parts: []const []const u8) ![]u8 {
+    var hasher: std.crypto.hash.sha2.Sha256 = .init(.{});
+    for (parts) |p| {
+        hasher.update(p);
+        hasher.update(&.{0});
+    }
+    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    hasher.final(&digest);
+    return std.fmt.allocPrint(alloc, "{x}", .{digest[0..8]});
+}
+
+/// Build `draft_rel` (relative to `draft_root`) into the shared cache store,
+/// unless this process — or an earlier run — already has that version. Returns
+/// the version id, owned by the cache.
+fn prebuiltVersion(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    key: []const u8,
+    draft_root: std.Io.Dir,
+    draft_rel: []const u8,
+    zig_exe: []const u8,
+) ![]const u8 {
+    if (prebuilt_memo.get(key)) |version| return version;
+
+    var store_dir = try openPrebuiltDir(alloc, io, "store");
+    defer store_dir.close(io);
+    var result = try build_ext.buildExtension(alloc, io, draft_root, draft_rel, store_dir, zig_exe);
+    defer result.deinit(alloc);
+    if (!result.compile_ok) {
+        std.debug.print("prebuilt extension failed to compile:\n{s}\n", .{result.stderr});
+        return error.ExtensionBuildFailed;
+    }
+
+    const cache = prebuiltAlloc();
+    const version = try cache.dupe(u8, result.version);
+    try prebuilt_memo.put(cache, try cache.dupe(u8, key), version);
+    return version;
+}
+
+/// Copy the frozen `<id>/versions/<version>` out of the shared cache into `ws`'s
+/// workspace store, byte for byte, and record that store as trusted.
+///
+/// The copy is what makes this cheap AND what makes it honest: a version is
+/// content-addressed, so identical bytes are the same version. What a copy
+/// cannot reproduce is the store's BIRTH — DESIGN §9 trusts a workspace store
+/// because a local `ext build` filled it, and nothing local filled this one. So
+/// the trust is recorded here explicitly: the harness standing in for the person
+/// who would have run `nulya ext trust`, in the same isolated home `runCli` uses.
+fn installVersion(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, id: []const u8, version: []const u8) !void {
+    var cache_store = try openPrebuiltDir(alloc, io, "store");
+    defer cache_store.close(io);
+
+    const version_rel = try std.fs.path.join(alloc, &.{ id, "versions", version });
+    defer alloc.free(version_rel);
+    var src = try cache_store.openDir(io, version_rel, .{ .iterate = true });
+    defer src.close(io);
+
+    const dest_rel = try std.fs.path.join(alloc, &.{ ".nulya", "extensions", id, "versions", version });
+    defer alloc.free(dest_rel);
+    try ws.createDirPath(io, dest_rel);
+    var dest = try ws.openDir(io, dest_rel, .{});
+    defer dest.close(io);
+    try copyTree(alloc, io, src, dest);
+
+    try trustWorkspaceStore(alloc, io, ws);
+}
+
+fn copyTree(alloc: std.mem.Allocator, io: std.Io, src: std.Io.Dir, dest: std.Io.Dir) !void {
+    var walker = try src.walk(alloc);
+    defer walker.deinit();
+    while (try walker.next(io)) |entry| switch (entry.kind) {
+        .directory => try dest.createDirPath(io, entry.path),
+        // Permissions come from the source, so a frozen binary stays executable.
+        .file => try src.copyFile(entry.path, dest, entry.path, io, .{ .make_path = true }),
+        else => {},
+    };
+}
+
+/// Record `ws`'s workspace extension store in the test home's trust journal, the
+/// way `nulya ext trust` would (DESIGN §9). Idempotent.
+fn trustWorkspaceStore(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir) !void {
+    var store_dir = try ws.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
+    defer store_dir.close(io);
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const store_path = buf[0..try store_dir.realPath(io, &buf)];
+
+    const home = try defaultHome(alloc, io, ws);
+    defer alloc.free(home);
+    if (try trust.isTrusted(alloc, io, home, store_path)) return;
+    try trust.append(alloc, io, home, store_path);
+}
+
+/// Put a built version of the single-file extension `<id>`/`<tool>` in `ws`'s
+/// workspace store, compiling it at most once per repo checkout. Returns the
+/// version id; caller frees.
+pub fn installPrebuilt(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    ws: std.Io.Dir,
+    zig_exe: []const u8,
+    id: []const u8,
+    manifest_bytes: []const u8,
+    main_src: []const u8,
+) ![]u8 {
+    const key = try prebuiltKey(alloc, &.{ manifest_bytes, main_src });
+    defer alloc.free(key);
+
+    var drafts = try openPrebuiltDir(alloc, io, "drafts");
+    defer drafts.close(io);
+    try writeSingleFileDraft(alloc, io, drafts, key, id, manifest_bytes, main_src);
+    const draft_rel = try std.fs.path.join(alloc, &.{ key, id });
+    defer alloc.free(draft_rel);
+
+    const version = try prebuiltVersion(alloc, io, key, drafts, draft_rel, zig_exe);
+    try installVersion(alloc, io, ws, id, version);
+    return alloc.dupe(u8, version);
+}
+
+/// Put a built version of the repo's OWN `extensions/<id>` in `ws`'s workspace
+/// store, so the `nulya ext build` a test — or a driver script it spawns — is
+/// about to run finds it and answers "already built" instead of compiling it
+/// again. The CLI path under test is unchanged; only its cost is. Returns the
+/// version id; caller frees.
+pub fn stageBundled(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, id: []const u8) ![]u8 {
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const zig_exe = host_env.get("NULYA_TEST_ZIG") orelse return error.SkipZigTest;
+
+    const repo = try repoRoot(alloc);
+    defer alloc.free(repo);
+    var repo_dir = try std.Io.Dir.openDirAbsolute(io, repo, .{});
+    defer repo_dir.close(io);
+
+    const key = try std.fmt.allocPrint(alloc, "bundled-{s}", .{id});
+    defer alloc.free(key);
+    const draft_rel = try std.fs.path.join(alloc, &.{ "extensions", id });
+    defer alloc.free(draft_rel);
+
+    const version = try prebuiltVersion(alloc, io, key, repo_dir, draft_rel, zig_exe);
+    try installVersion(alloc, io, ws, id, version);
+    return alloc.dupe(u8, version);
 }

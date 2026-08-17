@@ -39,6 +39,11 @@
 //! model hands off, the driver forks through compact, the goal completes in the
 //! child, control lines on stdout and the step's `--stream` protocol on stderr.
 //!
+//! Compiling an extension is a real `zig build-exe`, so `support.zig` keeps a
+//! compile-once cache of built versions under `.zig-cache/` and copies frozen
+//! version directories into each test's store; the tests where the BUILD is the
+//! subject still compile for real. Delete `.zig-cache` to reset it.
+//!
 //! The tests live in `tests/e2e/`, grouped by what they prove:
 //!
 //!   e2e/support.zig      shared fixtures — CLI runners, scaffolds, fake models
