@@ -470,9 +470,19 @@ test "session cli: a shell-script driver runs a goal loop to completion" {
     else
         &.{ "sh", script_abs, exe_abs };
 
+    // The same isolated user layer every other CLI call in this file gets: without
+    // it the spawned driver inherits the developer's real `~/.nulya`, so their own
+    // user config would be merged into a session this test is asserting about.
+    var env = try std.testing.environ.createMap(alloc);
+    defer env.deinit();
+    const home = try support.testHome(alloc, io, ws);
+    defer alloc.free(home);
+    try env.put("NULYA_HOME", home);
+
     const result = try std.process.run(alloc, io, .{
         .argv = argv,
         .cwd = .{ .dir = ws },
+        .environ_map = &env,
         .stdout_limit = .limited(1 << 20),
         .stderr_limit = .limited(1 << 20),
     });
@@ -514,8 +524,14 @@ test "session cli: drivers/goal runs the bundled driver — the model hands off,
     defer tmp.cleanup();
     const ws = tmp.dir;
 
-    // The real script, from the repo, with the real binary — the driver builds
-    // both bundled extensions itself, so nothing here is staged for it.
+    // The real script, from the repo, with the real binary: the driver still runs
+    // its own `ext build` for both bundled extensions, but the compiles are shared
+    // with the rest of the suite, so those builds answer "already built". Staging
+    // them fills the workspace store, which is exactly the case `ext build` does
+    // NOT auto-trust — so `stageBundled` records the trust itself (DESIGN §9).
+    alloc.free(try support.stageBundled(alloc, io, ws, "handoff"));
+    alloc.free(try support.stageBundled(alloc, io, ws, "compact"));
+
     const is_windows = @import("builtin").os.tag == .windows;
     const script = try std.fs.path.join(alloc, &.{ repo, "drivers", if (is_windows) "goal.ps1" else "goal.sh" });
     defer alloc.free(script);
