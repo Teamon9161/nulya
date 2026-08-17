@@ -61,7 +61,13 @@ help` in PowerShell. Below, `nulya` means whichever of the two applies.
 - `[registry] pinned_native_tools = ["ext:<id>/<tool>"]` is the standing list of
   extension tools on the model's tool face. Each one costs a slot of
   `max_tools` and carries its name, description and schema in every future
-  session's prompt.
+  session's prompt. Pin a workspace-local tool in the **project** file: a pin
+  that no store root can resolve makes every `session new` under that layer
+  refuse to start, so a user-layer pin for a tool built in one workspace breaks
+  every other workspace on the machine. `nulya config show` does not project
+  this section — read the file itself.
+- Config files can hold credentials. Read the key you need, never print a whole
+  config into a transcript.
 - Per session: `nulya session new --profile <name> --model <id>`. Per step:
   `nulya session step <id> --effort <low|medium|high|…>`.
 
