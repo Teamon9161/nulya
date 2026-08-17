@@ -521,6 +521,26 @@ fn copyTree(alloc: std.mem.Allocator, io: std.Io, src: std.Io.Dir, dest: std.Io.
     };
 }
 
+/// Copy the repo's own `extensions/<id>` DRAFT (source only — the repo carries no
+/// built versions) into a store root under `ws`. For a verb that acts on drafts
+/// where they sit (`ext sync`), which needs a real compiled package in the root
+/// rather than a path to build.
+pub fn copyBundledDraft(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, root_rel: []const u8, id: []const u8) !void {
+    const repo = try repoRoot(alloc);
+    defer alloc.free(repo);
+    const src_path = try std.fs.path.join(alloc, &.{ repo, "extensions", id });
+    defer alloc.free(src_path);
+    var src = try std.Io.Dir.openDirAbsolute(io, src_path, .{ .iterate = true });
+    defer src.close(io);
+
+    const dest_rel = try std.fs.path.join(alloc, &.{ root_rel, id });
+    defer alloc.free(dest_rel);
+    try ws.createDirPath(io, dest_rel);
+    var dest = try ws.openDir(io, dest_rel, .{});
+    defer dest.close(io);
+    try copyTree(alloc, io, src, dest);
+}
+
 /// Assert two directory trees hold the same files with the same bytes — the
 /// checkable form of "a version is content-addressed, so a copy of it IS it".
 pub fn expectSameTree(alloc: std.mem.Allocator, io: std.Io, a: std.Io.Dir, b: std.Io.Dir) !void {

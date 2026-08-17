@@ -49,6 +49,7 @@ pub fn dispatchExt(alloc: std.mem.Allocator, io: std.Io, args: []const []const u
     if (std.mem.eql(u8, sub, "activate")) return extActivate(alloc, io, rest, .activate);
     if (std.mem.eql(u8, sub, "rollback")) return extActivate(alloc, io, rest, .rollback);
     if (std.mem.eql(u8, sub, "deactivate")) return extDeactivate(alloc, io, rest);
+    if (std.mem.eql(u8, sub, "sync")) return extSync(alloc, io, rest);
     if (std.mem.eql(u8, sub, "list")) return extList(alloc, io);
     if (std.mem.eql(u8, sub, "inspect")) return extInspect(alloc, io, rest);
     if (std.mem.eql(u8, sub, "trust")) return extTrust(alloc, io);
@@ -323,6 +324,247 @@ fn isInside(dir: []const u8, path: []const u8) bool {
     if (path.len <= dir.len) return false;
     if (!std.mem.eql(u8, path[0..dir.len], dir)) return false;
     return path[dir.len] == std.fs.path.sep or path[dir.len] == '/';
+}
+
+/// Errors that are a fault in the DRAFT rather than in this machine: everything
+/// `ext build` answers with one line about a source tree — the manifest's own
+/// rules plus what freezing the package can find wrong with the files it names.
+/// A host fault (out of memory, a failed read of a directory that is there) is
+/// deliberately absent, so `ext sync` keeps going past a bad draft but not past
+/// a broken machine.
+fn isDraftFault(err: anyerror) bool {
+    if (isManifestFault(err)) return true;
+    return switch (err) {
+        error.ManifestUnreadable,
+        error.SourceUnreadable,
+        error.DuplicateSnapshotPath,
+        error.SkillFileMissing,
+        error.SkillFileTooLarge,
+        error.InvalidSkillDirectoryName,
+        error.SkillNameDoesNotMatchDirectory,
+        error.DuplicateSkillName,
+        error.MissingSkillFrontmatter,
+        error.MissingSkillFrontmatterEnd,
+        error.MissingSkillName,
+        error.MissingSkillDescription,
+        error.InvalidSkillName,
+        error.InvalidSkillDescription,
+        error.SystemPromptFileMissing,
+        error.SystemPromptTooLarge,
+        error.InvalidUtf8,
+        => true,
+        else => false,
+    };
+}
+
+/// `nulya ext sync [--user] [--activate] [--dry-run]` — build every draft a store
+/// root holds (DESIGN §7.2, §7.4).
+///
+/// The layout has always been that a draft lives at `<root>/<id>/` with its
+/// frozen versions beside it. What was missing was the verb for "make what is in
+/// this directory usable", so installing an extension meant knowing to run
+/// `ext build` on each one by name. With this, putting the source in
+/// `<root>/<id>/` and running this once IS the installation — and on a machine
+/// with no toolchain it still works for anything another root already holds,
+/// because a build adopts such a copy rather than compiling (§7.4).
+///
+/// One draft failing never stops the others: a root is a directory of
+/// independent things, and stopping at the first bad manifest would hide every
+/// id after it. Building is mechanical, so it is the default; `--activate` is
+/// separate because pointing `current` somewhere is a decision (§7.4).
+fn extSync(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+    const flags = try takeUserFlag(alloc, args);
+    defer alloc.free(flags.rest);
+    var activate = false;
+    var dry_run = false;
+    for (flags.rest) |a| {
+        if (std.mem.eql(u8, a, "--activate")) {
+            activate = true;
+        } else if (std.mem.eql(u8, a, "--dry-run")) {
+            dry_run = true;
+        } else {
+            try printErr(io, "usage: nulya ext sync [--user] [--activate] [--dry-run]\n");
+            return 1;
+        }
+    }
+
+    const root_spec = (try writeRootSpec(alloc, flags.user)) orelse {
+        try printErr(io, "no home directory for --user (set NULYA_HOME or HOME)\n");
+        return 1;
+    };
+    defer alloc.free(root_spec);
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_path = try cwdRealPath(io, &cwd_buf);
+
+    // Asked before anything is built, because after a successful sync the answer
+    // is always "occupied" — the same birth-trust question `ext build` asks.
+    const workspace_store_was_empty = blk: {
+        const occupied = (try launch.occupiedWorkspaceStore(alloc, io, cwd_path)) orelse break :blk true;
+        alloc.free(occupied);
+        break :blk false;
+    };
+
+    var root_dir = store.openRoot(io, cwd_path, root_spec) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => {
+            try printOut(alloc, io, "no drafts in {s}\n", .{root_spec});
+            return 0;
+        },
+        else => return err,
+    };
+    defer root_dir.close(io);
+
+    const drafts = try draftIds(alloc, io, root_dir);
+    defer {
+        for (drafts) |d| alloc.free(d);
+        alloc.free(drafts);
+    }
+    if (drafts.len == 0) {
+        try printOut(alloc, io, "no drafts in {s}\n", .{root_spec});
+        return 0;
+    }
+
+    var search = try RootSearch.open(alloc, io, cwd_path);
+    defer search.deinit(alloc);
+    var donors = try donorRoots(alloc, &search, root_spec);
+    defer donors.deinit(alloc);
+
+    const zig_exe: ?ZigExe = resolveZig(alloc, io) catch null;
+    defer if (zig_exe) |z| z.deinit(alloc);
+    const zig_path = if (zig_exe) |z| z.path else "";
+
+    var produced: usize = 0;
+    var already: usize = 0;
+    var failed: usize = 0;
+    for (drafts) |draft| {
+        // The draft is inside this root, so the root is both the tree the build
+        // reads from and the store it writes into — no absolute sub-path anywhere,
+        // which is what makes an absolute user root work the same as `.nulya/…`.
+        var result = (if (dry_run)
+            build_ext.planExtension(alloc, io, root_dir, draft, root_dir, zig_path, donors.dirs.items)
+        else
+            build_ext.buildExtensionReusing(alloc, io, root_dir, draft, root_dir, zig_path, donors.dirs.items)) catch |err| switch (err) {
+            error.ZigVersionUnreadable => {
+                failed += 1;
+                try printOut(alloc, io, "{s}: needs zig (compiled draft; set NULYA_ZIG or use the embedded toolchain)\n", .{draft});
+                continue;
+            },
+            else => {
+                if (!isDraftFault(err)) return err;
+                failed += 1;
+                try printOut(alloc, io, "{s}: failed: {s}\n", .{ draft, @errorName(err) });
+                continue;
+            },
+        };
+        defer result.deinit(alloc);
+
+        if (!result.compile_ok) {
+            failed += 1;
+            try printOut(alloc, io, "{s}: failed: does not compile (`nulya ext build {s}` prints the diagnostics)\n", .{ result.id, draft });
+            continue;
+        }
+        if (result.already_built) {
+            already += 1;
+        } else {
+            produced += 1;
+        }
+
+        const state = if (result.already_built)
+            "already built"
+        else if (dry_run)
+            "not built"
+        else
+            "built";
+        var line: std.Io.Writer.Allocating = .init(alloc);
+        defer line.deinit();
+        try line.writer.print("{s}: {s} {s}", .{ result.id, result.version, state });
+        if (result.copied_from) |i| {
+            // A plan can only report where the copy would come from; a real sync
+            // has already taken it.
+            if (dry_run) {
+                try line.writer.print(" (available from {s})", .{donors.specs.items[i]});
+            } else {
+                try line.writer.print(" (copied from {s})", .{donors.specs.items[i]});
+            }
+        }
+        try appendActivation(alloc, io, &line.writer, root_dir, result, .{ .activate = activate, .dry_run = dry_run, .user = flags.user });
+        try line.writer.writeByte('\n');
+        try printRaw(io, line.written());
+    }
+
+    try printOut(alloc, io, "{d} {s}, {d} already built, {d} failed\n", .{
+        produced,
+        if (dry_run) "not built" else "built",
+        already,
+        failed,
+    });
+
+    if (!dry_run and produced != 0 and workspace_store_was_empty and std.mem.eql(u8, root_spec, store.workspace_root_rel)) {
+        try recordBirthTrust(alloc, io, cwd_path);
+    }
+    return if (failed != 0) 1 else 0;
+}
+
+const SyncMode = struct { activate: bool, dry_run: bool, user: bool };
+
+/// The tail of a sync line: what `current` says about this version, and what
+/// `--activate` did about it.
+///
+/// The rule is one sentence (DESIGN §7.4): sync points `current` at a version it
+/// just brought into this root, and at a draft's version for an id that has no
+/// `current` at all — but never over a `current` that names something else. That
+/// pointer was somebody's decision (a rollback, an activate), and a sync that
+/// silently undid it would make rollback survive only until the next start-up.
+fn appendActivation(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    out: *std.Io.Writer,
+    root_dir: std.Io.Dir,
+    result: build_ext.BuildResult,
+    mode: SyncMode,
+) !void {
+    const st = store.Store.init(io, root_dir);
+    const current = try st.activeVersion(alloc, result.id);
+    defer if (current) |c| alloc.free(c);
+
+    if (current) |c| {
+        if (std.mem.eql(u8, c, result.version)) return out.writeAll(" (active)");
+    }
+    if (!mode.activate or mode.dry_run) return;
+    if (result.already_built and current != null) {
+        return out.print(" (current stays {s})", .{current.?});
+    }
+    try warnUserScope(alloc, io, st, result.id, result.version, mode.user);
+    try st.activate(alloc, result.id, result.version);
+    depositSessionNote(alloc, io, root_dir, result.id, result.version) catch {};
+    try out.writeAll(" -> current");
+}
+
+/// Every draft directly under a store root: `<root>/<id>/extension.json` is the
+/// file `ext init` writes, so its presence IS the definition of a draft. Sorted,
+/// so a sync reads the same way twice. One level only — a version's frozen
+/// manifest lives further down and is not a draft. Caller owns the result.
+fn draftIds(alloc: std.mem.Allocator, io: std.Io, root_dir: std.Io.Dir) ![][]u8 {
+    var out: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (out.items) |d| alloc.free(d);
+        out.deinit(alloc);
+    }
+    var it = root_dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .directory) continue;
+        const manifest_rel = try std.fs.path.join(alloc, &.{ entry.name, "extension.json" });
+        defer alloc.free(manifest_rel);
+        root_dir.access(io, manifest_rel, .{}) catch continue;
+        try out.append(alloc, try alloc.dupe(u8, entry.name));
+    }
+    const items = try out.toOwnedSlice(alloc);
+    std.mem.sort([]u8, items, {}, struct {
+        fn lessThan(_: void, a: []u8, b: []u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lessThan);
+    return items;
 }
 
 fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {

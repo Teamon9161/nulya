@@ -24,6 +24,11 @@ const package_dir = integrity.package_dir;
 const seal_file = integrity.seal_file;
 
 pub const BuildResult = struct {
+    /// The manifest's id — which `<id>/` under the store root this landed in.
+    /// The draft's directory name does not have to be it (DESIGN §7.4), and a
+    /// caller that has to name what it just built (`activate`, a listing) needs
+    /// the id the store actually used.
+    id: []u8,
     /// Content-addressed immutable version id (`v-<hash>`).
     version: []u8,
     /// Built binary path, relative to the version directory (e.g. `bin/demo.exe`).
@@ -42,11 +47,18 @@ pub const BuildResult = struct {
     stderr: []u8,
 
     pub fn deinit(self: BuildResult, alloc: std.mem.Allocator) void {
+        alloc.free(self.id);
         alloc.free(self.version);
         if (self.entry_rel) |entry_rel| alloc.free(entry_rel);
         alloc.free(self.stderr);
     }
 };
+
+/// Whether a call is allowed to WRITE. `plan` answers the same question every
+/// other way — which version this draft is, whether the destination root already
+/// has it, which other root could supply it — and then stops, so `ext sync
+/// --dry-run` and `ext sync` cannot disagree about what a build would do.
+pub const Mode = enum { build, plan };
 
 /// Build the draft at `ext_dir_rel` (relative to `workspace`) into an immutable
 /// version under `dest_root`, a store root (DESIGN §7.2). Stops at the "built"
@@ -77,6 +89,24 @@ pub fn buildExtension(
     return buildExtensionReusing(alloc, io, workspace, ext_dir_rel, dest_root, zig_exe, &.{});
 }
 
+/// What `buildExtensionReusing` WOULD do, without doing any of it: the same
+/// manifest, the same snapshot, the same searches, no writes. `already_built`
+/// then means "the destination root already holds it", `copied_from` "that donor
+/// could supply it", and neither set means "this would be produced here".
+/// `error.ZigVersionUnreadable` still means what it means at build time — a
+/// compiled draft this machine can neither name nor adopt.
+pub fn planExtension(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    workspace: std.Io.Dir,
+    ext_dir_rel: []const u8,
+    dest_root: std.Io.Dir,
+    zig_exe: []const u8,
+    donors: []const std.Io.Dir,
+) !BuildResult {
+    return build(alloc, io, workspace, ext_dir_rel, dest_root, zig_exe, donors, .plan);
+}
+
 /// `buildExtension`, plus the OTHER store roots this machine searches — in that
 /// order — as places the version may already exist (DESIGN §7.2, §7.4).
 ///
@@ -99,6 +129,19 @@ pub fn buildExtensionReusing(
     dest_root: std.Io.Dir,
     zig_exe: []const u8,
     donors: []const std.Io.Dir,
+) !BuildResult {
+    return build(alloc, io, workspace, ext_dir_rel, dest_root, zig_exe, donors, .build);
+}
+
+fn build(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    workspace: std.Io.Dir,
+    ext_dir_rel: []const u8,
+    dest_root: std.Io.Dir,
+    zig_exe: []const u8,
+    donors: []const std.Io.Dir,
+    mode: Mode,
 ) !BuildResult {
     const manifest_rel = try std.fs.path.join(alloc, &.{ ext_dir_rel, manifest_file });
     defer alloc.free(manifest_rel);
@@ -144,8 +187,9 @@ pub fn buildExtensionReusing(
     // From here on `<id>/` is mutated (a stale directory deleted, a version
     // written): hold the id's writer lease so two builds of one id in a shared
     // root — the user store — serialize instead of tearing each other's tree.
-    var held = try store.Store.init(io, dest_root).lease(alloc, m.id);
-    defer held.close(io);
+    // A plan writes nothing, and taking the lease would itself create `<id>/`.
+    var held: ?std.Io.File = if (mode == .build) try store.Store.init(io, dest_root).lease(alloc, m.id) else null;
+    defer if (held) |*h| h.close(io);
 
     // `entry_rel` is the BUILT binary path — compiled extensions only. A script's
     // entry is frozen inside `package/` and located via `store.versionScriptEntryPath`.
@@ -156,16 +200,17 @@ pub fn buildExtensionReusing(
     errdefer if (entry_rel) |entry| alloc.free(entry);
 
     if (try findMatchingVersion(alloc, io, dest_root, m.id, package_digest, target, compiler)) |found| {
-        return .{ .version = found, .entry_rel = entry_rel, .already_built = true, .compile_ok = true, .stderr = try alloc.alloc(u8, 0) };
+        return sealed(alloc, m.id, found, entry_rel, true, null);
     }
     for (donors, 0..) |donor, donor_index| {
         const found = (try findMatchingVersion(alloc, io, donor, m.id, package_digest, target, compiler)) orelse continue;
         errdefer alloc.free(found);
+        if (mode == .plan) return sealed(alloc, m.id, found, entry_rel, false, donor_index);
         if (!try adoptVersionDir(alloc, io, donor, dest_root, m.id, found)) {
             alloc.free(found);
             continue;
         }
-        return .{ .version = found, .entry_rel = entry_rel, .already_built = false, .copied_from = donor_index, .compile_ok = true, .stderr = try alloc.alloc(u8, 0) };
+        return sealed(alloc, m.id, found, entry_rel, false, donor_index);
     }
 
     // Nothing to adopt: this build has to produce the version itself, which for a
@@ -173,6 +218,7 @@ pub fn buildExtensionReusing(
     const compiler_id = compiler orelse return error.ZigVersionUnreadable;
     const version = try integrity.versionId(alloc, snapshot_bytes, compiler_id, target);
     errdefer alloc.free(version);
+    if (mode == .plan) return sealed(alloc, m.id, version, entry_rel, false, null);
 
     // Store layout, not draft layout: `<id>/versions/<v>` under the store root.
     const version_rel = try std.fs.path.join(alloc, &.{ m.id, "versions", version });
@@ -184,7 +230,7 @@ pub fn buildExtensionReusing(
     if (!compiled) {
         try integrity.freezeSnapshot(alloc, io, dest_root, version_rel, manifest_bytes, snapshot);
         try writeSeal(alloc, io, dest_root, version_rel, package_digest, compiler_id, target, null);
-        return .{ .version = version, .entry_rel = entry_rel, .already_built = false, .compile_ok = true, .stderr = try alloc.alloc(u8, 0) };
+        return sealed(alloc, m.id, version, entry_rel, false, null);
     }
 
     const rt = m.runtime.?;
@@ -225,7 +271,9 @@ pub fn buildExtensionReusing(
     if (exit_code != 0) {
         // Leave no half-built version behind.
         dest_root.deleteTree(io, version_rel) catch {};
-        return .{ .version = version, .entry_rel = entry_rel, .already_built = false, .compile_ok = false, .stderr = result.stderr };
+        const owned_id = try alloc.dupe(u8, m.id);
+        errdefer alloc.free(owned_id);
+        return .{ .id = owned_id, .version = version, .entry_rel = entry_rel, .already_built = false, .compile_ok = false, .stderr = result.stderr };
     }
     alloc.free(result.stderr);
 
@@ -233,7 +281,29 @@ pub fn buildExtensionReusing(
     defer alloc.free(binary_digest);
     try writeSeal(alloc, io, dest_root, version_rel, package_digest, compiler_id, target, binary_digest);
 
-    return .{ .version = version, .entry_rel = entry_rel, .already_built = false, .compile_ok = true, .stderr = try alloc.alloc(u8, 0) };
+    return sealed(alloc, m.id, version, entry_rel, false, null);
+}
+
+/// A successful result, taking ownership of `version` and `entry_rel`.
+fn sealed(
+    alloc: std.mem.Allocator,
+    id: []const u8,
+    version: []u8,
+    entry_rel: ?[]u8,
+    already_built: bool,
+    copied_from: ?usize,
+) !BuildResult {
+    const owned_id = try alloc.dupe(u8, id);
+    errdefer alloc.free(owned_id);
+    return .{
+        .id = owned_id,
+        .version = version,
+        .entry_rel = entry_rel,
+        .already_built = already_built,
+        .copied_from = copied_from,
+        .compile_ok = true,
+        .stderr = try alloc.alloc(u8, 0),
+    };
 }
 
 fn compilerIdentity(alloc: std.mem.Allocator, io: std.Io, workspace: std.Io.Dir, zig_exe: []const u8) ![]u8 {

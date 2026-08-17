@@ -67,4 +67,6 @@
 
 ## 6. 进度区（执行时更新）
 
-（空——执行者按子项追加）
+- **sync-a**（`2e1a33c`）：`ext build` 编译前先在别的 root 找同一版本，找到就整树复制 + 再验一次 integrity，stdout 打 `(built, copied from <root spec>, in <dest>)`。
+  **一处偏离契约字面**：匹配键不是"已经算出来的 `v`"，而是 **seal 的 `(package_digest, target)` +（能问出编译器时）`compiler`**——因为 compiled 版本的 id 含 compiler identity，而契约要求的 e2e（`NULYA_ZIG` 指向不存在的路径仍成功）意味着**没有编译器时算不出 `v`**。所以 `compilerIdentity` 不再提前失败：问得到就是精确匹配（等价于按 `v` 找，D5 原样），问不到就放宽成"这份 snapshot 在这个 target 上的任意一次 build"，候选按 version id 排序取第一个（不依赖目录顺序）。真要编译时仍报 `ZigVersionUnreadable`。落点 `extension/build/build_ext.zig`（新增 `buildExtensionReusing`，旧签名成为 `donors = &.{}` 的包装，28 个调用点不动）+ `cli/ext.zig`（`donorRoots` / `buildState`）。
+  e2e：`cli ext build: a compiled version another store root already holds is copied in rather than compiled …`（user root 里放 bundled `compact`，workspace build 在 `NULYA_ZIG=definitely-not-a-compiler` 下成功、版本目录逐字节相同、再 build 是 `already built`、activate + run 真跑得起来）。support 加 `stageBundledIn` / `expectSameTree`。
