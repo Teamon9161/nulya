@@ -470,9 +470,19 @@ test "session cli: a shell-script driver runs a goal loop to completion" {
     else
         &.{ "sh", script_abs, exe_abs };
 
+    // The same isolated user layer every other CLI call in this file gets: without
+    // it the spawned driver inherits the developer's real `~/.nulya`, so their own
+    // user config would be merged into a session this test is asserting about.
+    var env = try std.testing.environ.createMap(alloc);
+    defer env.deinit();
+    const home = try support.testHome(alloc, io, ws);
+    defer alloc.free(home);
+    try env.put("NULYA_HOME", home);
+
     const result = try std.process.run(alloc, io, .{
         .argv = argv,
         .cwd = .{ .dir = ws },
+        .environ_map = &env,
         .stdout_limit = .limited(1 << 20),
         .stderr_limit = .limited(1 << 20),
     });

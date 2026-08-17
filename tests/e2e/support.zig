@@ -29,7 +29,7 @@ pub const tool_stats = support.tool_stats;
 pub const trust = support.trust;
 
 /// Scaffold a real, buildable extension (`id`/`tool`, single-file entry source),
-/// compile it with the host zig into an immutable version, and activate it.
+/// put its immutable built version in the workspace store, and activate it.
 /// Returns the activated version id; caller frees.
 pub fn buildAndActivate(
     alloc: std.mem.Allocator,
