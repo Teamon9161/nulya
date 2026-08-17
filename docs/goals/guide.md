@@ -83,3 +83,22 @@ Nulya 的自描述面早就都在（`nulya src` 打印内核源码、`nulya ext 
 - **guide-c** `8b68083` — `extensions/guide/`（data extension，只 contribute `skills/guide`，**不** contribute system prompt）。`SKILL.md` **187 行**（≤ 250）、description **174 字符**（≤ 200）、英文、八个固定分节齐全、零文档引用。scratch workspace 实测：无 toolchain 建得起来、两次 build 同一版本 `v-7391db6bc23ec8041b733fc8`、`session new --with guide@<v>` 的 `composition.system_prompts` 为空、`skill list` 出一行 `ext:guide@<v>/guide`。**不 activate**（安装是用户的决定）。无偏离。
 - **guide-d** `edeff09` — 新文件 `tests/e2e/cli.zig`（不动既有分组，便于与并行分支合并）四条全绿：`cli help …` / `cli ext api …` / `kernel prompt: a fresh session's first system block names NULYA_EXE, nulya help and nulya src` / `bundled guide …`。help 那条额外断言"一屏 ≤ 40 行"与"bare `nulya ext` 的输出是整屏的真子串"。**一处按实测改了文本**：断言要求 usage 里出现 `skill load` 字面量，原来的 `nulya skill list | load <skill-ref>` 不含它 → 拆成两行，并把 bare `nulya` 那行并进 `nulya help` 行，仍是 39 行。既有 e2e 35 条全部继续通过，断言一条未减。
 - **guide-e** `878bb17` — DESIGN §14 加 `nulya help` 一行 + 三条说明（usage 按动词族拆常量、与命令表逐动词对齐是约定、≤ 40 行硬约束、未知命令行为；`ext api` 三 topic 现状；model-facing 文本零文档引用）；§7.5 那段在 guide-b 已加。PLAN §3.10 加"入口已补"一段、§4 加**打包**开放问题（bundled extension 只在 checkout 里拿得到，候选是内嵌 `extensions/**` + `ext build` 的 bundled 来源，等第一个非 checkout 用户）。CLAUDE.md 加"也跑通（guide）"一条 + 模块表 `cli.zig` 行补 `help` 与 usage 拆分。`tests/e2e.zig` 头注释加一段。tui.md 未动（无 TUI 改动）。
+- **guide-f** `4d41a13` — 真实跑完之后回头改 `SKILL.md` 两处（见下面第 6 步的第 ④ 条）：pin 该写在**哪一层**、解析不到的 pin 会让那一层下**每一场** `session new` 拒绝开场、`config show` 不投影这一节、config 文件里可能有 credential 别整份打印。193 行，仍在预算内。
+
+### 步骤 6 · 真实运行（deepseek，2026-08-17）
+
+**跑在哪：** 仓库根目录仍被 workspace store 的 trust gate 硬拒（`.nulya/extensions` 持有 compact / demo / evolution / handoff，本机无信任记录），与 M2c 一样**我没有代为 `ext trust`**。改在 `.nulya/scratch/guide-run/`（空 store → `ext build` 出生即可信，自动记一条到 user 层 journal）。
+
+`ext build extensions/guide` → `v-7391db6bc23ec8041b733fc8`；`session new --profile deepseek --with guide@<v>` → `s-1786981901209-f39db6`；append 契约里那句话；`step --max-steps 12` 跑了三批（12 / 12 / 8，因为 12 步只走到一半）。**66 个事件，input 27746 / output 7220 / cache_read 331648。**
+
+**① 入口那句话当场生效。** 第一条命令就是 `nulya skill load ext:guide@…/guide` → `bash: nulya: command not found`。**下一步**它就去读 `$NULYA_EXE` 并从此一直用它——正是这条契约要修的那个失败（M5 报告里模型撞死在这儿）。
+
+**② 它 load 了 guide，并且答对了那个关键问题。** 第 8 条事件的 assistant 文本原样：
+
+> The guide's recipe for a script extension is: `ext init --script` → edit `src/run.sh` → `ext build` → `ext run my.helper@v-<hash> …` → `ext activate` ……and the key step for "appears on my tool list next session": only a **pin** puts it on the model's tool face, and only from the next session onward — `nulya session new --pin ext:<id>/<tool>`, or the standing `[registry] pinned_native_tools` list. `--with` or plain `activate` alone grants no native slot.
+
+**③ 然后它照着配方做完了，没有瞎猜。** 命令序列（33 条 shell/edit，节选）：`ext list` + `help | head -30` → `ext init --script date.now print_date` → 发现脚手架给的是 `run.ps1`（Windows），删掉、读 `ext api protocol`、改写成 `run.sh` 并 `edit` manifest 的 `runtime` → `ext build`（`v-dc094b…`）→ `ext run date.now@v-dc094b… print_date '{}'` → 修输出里的多余空格 → 重 build（`v-18ff2837…`）→ `ext run` 验证 → `ext activate` → 写 pin → `session new` 验证。**新 session 的 header 冻的是 `native_tools:["ext:date.now/print_date"]`——回路真的闭合了。**
+
+**④ 一个真问题，我改了 guide 也在这里记下（guide-f）。** 它把 pin 写进了 **user 层** `~/.nulya/config.toml`，而 `date.now` 只存在于那个 scratch workspace 的 store 里。pin 是严格解析的，所以这一行会让**本机每一个别的 workspace** 的 `session new` 直接 exit 1。**我已手工撤回该行并验证 `session new` 恢复正常**（只删这一行，profile / api_key 未动）。它走到这一步的原因链也值得记：`nulya config show`（含 `--json`）**不投影 `[registry]`**，所以它先 `config show`、再 `config show --json | …['registry']`（`KeyError`）、再 `cat` 三层 config 文件（**于是把 user config 里的 api_key 打进了转录**）、再 `nulya src registry.zig` / `src config.zig` 才找到字段名。三个观察：`config show` 少一节投影；guide 没说 pin 该落哪一层；guide 没提醒 config 文件里有 credential。后两条已写进 SKILL.md（guide-f），第一条是内核外壳的改动，**不在本契约范围**，留给后续。
+
+**⑤ 另一处摩擦（未改）：** `ext run <id>@<v> <tool>` 不带 JSON 时，CLI 没有当成用法错误，而是走到深处报 `error: InvalidArgumentsJson` 并打出一段 Zig 堆栈到 stderr。模型自己一步就补上了 `'{}'`，但这条错误信息对读者没用。同样属于外壳改动，记在这里。
