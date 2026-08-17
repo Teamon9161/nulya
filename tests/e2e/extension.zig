@@ -1531,6 +1531,86 @@ test "cli ext build: a draft outside any store lands in the workspace store unde
     }
 }
 
+test "cli ext build: a compiled version another store root already holds is copied in rather than compiled — byte for byte, with no toolchain on this machine at all" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+    const repo = host_env.get("NULYA_REPO") orelse return error.SkipZigTest;
+    const draft = try std.fs.path.join(alloc, &.{ repo, "extensions", "compact" });
+    defer alloc.free(draft);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var ws_real: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
+    const home_abs = try std.fs.path.join(alloc, &.{ ws_path, "home" });
+    defer alloc.free(home_abs);
+
+    // The user store already carries a built `compact` — the ordinary case after
+    // `ext build --user` once, or after another workspace built it.
+    const user_root = "home" ++ std.fs.path.sep_str ++ "extensions";
+    const version = try support.stageBundledIn(alloc, io, ws, user_root, "compact");
+    defer alloc.free(version);
+
+    // Now build the same draft here, with NULYA_ZIG naming something that is not
+    // a compiler: `compact` is a COMPILED extension, so this build can only
+    // succeed by adopting the copy the user root holds.
+    const built = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "build", draft }, &.{
+        .{ .key = "NULYA_HOME", .value = home_abs },
+        .{ .key = "NULYA_ZIG", .value = "definitely-not-a-compiler" },
+    });
+    defer alloc.free(built.stdout);
+    try std.testing.expectEqual(@as(u8, 0), built.code);
+    try std.testing.expect(std.mem.indexOf(u8, built.stdout, "copied from") != null);
+    const copied_version = try extractVersion(alloc, built.stdout);
+    defer alloc.free(copied_version);
+    try std.testing.expectEqualStrings(version, copied_version);
+
+    // Same version id, same bytes: the copy IS the version, so everything that
+    // validates a frozen version — activate, `--with`, a pinned tool — accepts it.
+    {
+        const rel = try std.fs.path.join(alloc, &.{ "compact", "versions", version });
+        defer alloc.free(rel);
+        const user_version_rel = try std.fs.path.join(alloc, &.{ user_root, rel });
+        defer alloc.free(user_version_rel);
+        const ws_version_rel = try std.fs.path.join(alloc, &.{ ".nulya", "extensions", rel });
+        defer alloc.free(ws_version_rel);
+        var from_user = try ws.openDir(io, user_version_rel, .{ .iterate = true });
+        defer from_user.close(io);
+        var in_workspace = try ws.openDir(io, ws_version_rel, .{ .iterate = true });
+        defer in_workspace.close(io);
+        try support.expectSameTree(alloc, io, from_user, in_workspace);
+    }
+
+    // A second build finds it in the destination root and says so — the copy did
+    // not invent a version that only half exists.
+    const again = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "build", draft }, &.{
+        .{ .key = "NULYA_HOME", .value = home_abs },
+        .{ .key = "NULYA_ZIG", .value = "definitely-not-a-compiler" },
+    });
+    defer alloc.free(again.stdout);
+    try std.testing.expectEqual(@as(u8, 0), again.code);
+    try std.testing.expect(std.mem.indexOf(u8, again.stdout, "already built") != null);
+
+    // And the adopted version really runs: activate it and call its tool with no
+    // arguments, which the frozen binary refuses by protocol rather than by
+    // failing to start.
+    {
+        const activated = try runCliEnv(alloc, io, ws, &.{ exe_abs, "ext", "activate", "compact", version }, "NULYA_HOME", home_abs);
+        defer alloc.free(activated.stdout);
+        try std.testing.expectEqual(@as(u8, 0), activated.code);
+        const ran = try runCliEnv(alloc, io, ws, &.{ exe_abs, "ext", "run", "compact", "{}" }, "NULYA_HOME", home_abs);
+        defer alloc.free(ran.stdout);
+        try std.testing.expect(ran.stdout.len != 0);
+    }
+}
+
 /// Write a pure-skill (data kind) extension DRAFT at `dir_rel`; no build.
 fn writeSkillDraft(
     alloc: std.mem.Allocator,

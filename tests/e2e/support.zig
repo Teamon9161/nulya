@@ -479,6 +479,21 @@ fn prebuiltVersion(
 /// the trust is recorded here explicitly: the harness standing in for the person
 /// who would have run `nulya ext trust`, in the same isolated home `runCli` uses.
 fn installVersion(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, id: []const u8, version: []const u8) !void {
+    try installVersionInto(alloc, io, ws, ".nulya" ++ std.fs.path.sep_str ++ "extensions", id, version);
+    try trustWorkspaceStore(alloc, io, ws);
+}
+
+/// The copy itself, into any store root under `ws` — the workspace store, or a
+/// user root a test points `NULYA_HOME` at. Trust is the caller's business: it
+/// is the WORKSPACE store alone that a session gates on (DESIGN §9).
+fn installVersionInto(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    ws: std.Io.Dir,
+    root_rel: []const u8,
+    id: []const u8,
+    version: []const u8,
+) !void {
     var cache_store = try openPrebuiltDir(alloc, io, "store");
     defer cache_store.close(io);
 
@@ -487,14 +502,12 @@ fn installVersion(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, id: []co
     var src = try cache_store.openDir(io, version_rel, .{ .iterate = true });
     defer src.close(io);
 
-    const dest_rel = try std.fs.path.join(alloc, &.{ ".nulya", "extensions", id, "versions", version });
+    const dest_rel = try std.fs.path.join(alloc, &.{ root_rel, id, "versions", version });
     defer alloc.free(dest_rel);
     try ws.createDirPath(io, dest_rel);
     var dest = try ws.openDir(io, dest_rel, .{});
     defer dest.close(io);
     try copyTree(alloc, io, src, dest);
-
-    try trustWorkspaceStore(alloc, io, ws);
 }
 
 fn copyTree(alloc: std.mem.Allocator, io: std.Io, src: std.Io.Dir, dest: std.Io.Dir) !void {
@@ -506,6 +519,32 @@ fn copyTree(alloc: std.mem.Allocator, io: std.Io, src: std.Io.Dir, dest: std.Io.
         .file => try src.copyFile(entry.path, dest, entry.path, io, .{ .make_path = true }),
         else => {},
     };
+}
+
+/// Assert two directory trees hold the same files with the same bytes — the
+/// checkable form of "a version is content-addressed, so a copy of it IS it".
+pub fn expectSameTree(alloc: std.mem.Allocator, io: std.Io, a: std.Io.Dir, b: std.Io.Dir) !void {
+    try expectTreeSubset(alloc, io, a, b);
+    try expectTreeSubset(alloc, io, b, a);
+}
+
+fn expectTreeSubset(alloc: std.mem.Allocator, io: std.Io, from: std.Io.Dir, to: std.Io.Dir) !void {
+    var walker = try from.walk(alloc);
+    defer walker.deinit();
+    while (try walker.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        const mine = try from.readFileAlloc(io, entry.path, alloc, .unlimited);
+        defer alloc.free(mine);
+        const theirs = to.readFileAlloc(io, entry.path, alloc, .unlimited) catch |err| {
+            std.debug.print("missing in the other tree: {s} ({s})\n", .{ entry.path, @errorName(err) });
+            return error.TestUnexpectedResult;
+        };
+        defer alloc.free(theirs);
+        std.testing.expectEqualSlices(u8, mine, theirs) catch |err| {
+            std.debug.print("differs: {s}\n", .{entry.path});
+            return err;
+        };
+    }
 }
 
 /// Record `ws`'s workspace extension store in the test home's trust journal, the
@@ -554,6 +593,16 @@ pub fn installPrebuilt(
 /// again. The CLI path under test is unchanged; only its cost is. Returns the
 /// version id; caller frees.
 pub fn stageBundled(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, id: []const u8) ![]u8 {
+    const version = try stageBundledIn(alloc, io, ws, ".nulya" ++ std.fs.path.sep_str ++ "extensions", id);
+    errdefer alloc.free(version);
+    try trustWorkspaceStore(alloc, io, ws);
+    return version;
+}
+
+/// `stageBundled` into a named store root under `ws` — for a test that needs the
+/// repo's own extension to sit in a root OTHER than the workspace store (a user
+/// root the test points `NULYA_HOME` at, say). Returns the version id; caller frees.
+pub fn stageBundledIn(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, root_rel: []const u8, id: []const u8) ![]u8 {
     var host_env = try std.testing.environ.createMap(alloc);
     defer host_env.deinit();
     const zig_exe = host_env.get("NULYA_TEST_ZIG") orelse return error.SkipZigTest;
@@ -569,6 +618,6 @@ pub fn stageBundled(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, id: []
     defer alloc.free(draft_rel);
 
     const version = try prebuiltVersion(alloc, io, key, repo_dir, draft_rel, zig_exe);
-    try installVersion(alloc, io, ws, id, version);
+    try installVersionInto(alloc, io, ws, root_rel, id, version);
     return alloc.dupe(u8, version);
 }

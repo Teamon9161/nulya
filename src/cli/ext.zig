@@ -133,7 +133,9 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try cwdRealPath(io, &cwd_buf);
-    const dest_spec = (try buildDestRoot(alloc, io, cwd_path, ext_dir, flags.user)) orelse {
+    var search = try RootSearch.open(alloc, io, cwd_path);
+    defer search.deinit(alloc);
+    const dest_spec = (try buildDestRoot(alloc, io, &search, ext_dir, flags.user)) orelse {
         try printErr(io, "no home directory for --user (set NULYA_HOME or HOME)\n");
         return 1;
     };
@@ -151,13 +153,19 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
     var dest_root = try store.openOrCreateRoot(io, cwd_path, dest_spec);
     defer dest_root.close(io);
 
+    // The other roots this machine searches, in that order: a version is content
+    // addressed, so one of them already holding these exact bytes means this
+    // build is a copy rather than a compile (DESIGN §7.4).
+    var donors = try donorRoots(alloc, &search, dest_spec);
+    defer donors.deinit(alloc);
+
     // A script extension needs no toolchain; only a compiled one does. Resolve
     // zig best-effort and let the build decide — it reports ZigVersionUnreadable
     // only if it actually has to compile.
     const zig_exe: ?ZigExe = resolveZig(alloc, io) catch null;
     defer if (zig_exe) |z| z.deinit(alloc);
 
-    var result = build_ext.buildExtension(alloc, io, std.Io.Dir.cwd(), ext_dir, dest_root, if (zig_exe) |z| z.path else "") catch |err| switch (err) {
+    var result = build_ext.buildExtensionReusing(alloc, io, std.Io.Dir.cwd(), ext_dir, dest_root, if (zig_exe) |z| z.path else "", donors.dirs.items) catch |err| switch (err) {
         // Either nothing answered, or what answered could not say its own
         // version — and that difference is the whole repair hint, so it is not
         // flattened into one sentence.
@@ -199,7 +207,8 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
         try printOut(alloc, io, "build FAILED for {s}:\n{s}\n", .{ ext_dir, result.stderr });
         return 1;
     }
-    const state = if (result.already_built) "already built" else "built";
+    const state = try buildState(alloc, result, donors.specs.items);
+    defer alloc.free(state);
     try printOut(alloc, io, "{s}: {s} ({s}, in {s})\n", .{ ext_dir, result.version, state, dest_spec });
 
     if (workspace_store_was_empty and std.mem.eql(u8, dest_spec, store.workspace_root_rel)) {
@@ -256,7 +265,7 @@ fn recordBirthTrust(alloc: std.mem.Allocator, io: std.Io, cwd_path: []const u8) 
 fn buildDestRoot(
     alloc: std.mem.Allocator,
     io: std.Io,
-    cwd_path: []const u8,
+    search: *const RootSearch,
     ext_dir: []const u8,
     user: bool,
 ) !?[]u8 {
@@ -268,12 +277,44 @@ fn buildDestRoot(
     var draft_buf: [std.fs.max_path_bytes]u8 = undefined;
     const draft_real = draft_buf[0..try draft.realPath(io, &draft_buf)];
 
-    var search = try RootSearch.open(alloc, io, cwd_path);
-    defer search.deinit(alloc);
     for (search.roots.entries) |entry| {
         if (isInside(entry.real, draft_real)) return try alloc.dupe(u8, entry.spec);
     }
     return try alloc.dupe(u8, store.workspace_root_rel);
+}
+
+/// The roots a build may take a copy FROM: every searched root except the one it
+/// is building into, in search order. The handles belong to `search`; only the
+/// two parallel lists are owned here.
+const DonorRoots = struct {
+    dirs: std.ArrayList(std.Io.Dir),
+    specs: std.ArrayList([]const u8),
+
+    fn deinit(self: *DonorRoots, alloc: std.mem.Allocator) void {
+        self.dirs.deinit(alloc);
+        self.specs.deinit(alloc);
+    }
+};
+
+fn donorRoots(alloc: std.mem.Allocator, search: *const RootSearch, dest_spec: []const u8) !DonorRoots {
+    var out: DonorRoots = .{ .dirs = .empty, .specs = .empty };
+    errdefer out.deinit(alloc);
+    for (search.roots.entries) |entry| {
+        if (std.mem.eql(u8, entry.spec, dest_spec)) continue;
+        try out.dirs.append(alloc, entry.dir);
+        try out.specs.append(alloc, entry.spec);
+    }
+    return out;
+}
+
+/// The parenthesised state in a build line: what happened, and — when the
+/// version came from another root rather than a compiler — which root supplied
+/// it. Caller owns the result.
+fn buildState(alloc: std.mem.Allocator, result: build_ext.BuildResult, donor_specs: []const []const u8) ![]u8 {
+    if (result.copied_from) |i| {
+        return std.fmt.allocPrint(alloc, "built, copied from {s}", .{donor_specs[i]});
+    }
+    return alloc.dupe(u8, if (result.already_built) "already built" else "built");
 }
 
 /// Whether `path` sits under directory `dir` (both already resolved to real

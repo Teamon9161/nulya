@@ -32,6 +32,10 @@ pub const BuildResult = struct {
     /// True when this exact version already existed — an immutable, reproducible
     /// no-op (DESIGN §7.4).
     already_built: bool,
+    /// Index into the caller's `donors` when this version was COPIED from another
+    /// store root rather than produced here (DESIGN §7.4). Null otherwise, so a
+    /// caller that passed no donors never has to look at it.
+    copied_from: ?usize = null,
     /// False when the compiler rejected the source; `stderr` then holds the
     /// diagnostics for the model to correct against (DESIGN §6.2 spirit).
     compile_ok: bool,
@@ -70,6 +74,32 @@ pub fn buildExtension(
     dest_root: std.Io.Dir,
     zig_exe: []const u8,
 ) !BuildResult {
+    return buildExtensionReusing(alloc, io, workspace, ext_dir_rel, dest_root, zig_exe, &.{});
+}
+
+/// `buildExtension`, plus the OTHER store roots this machine searches — in that
+/// order — as places the version may already exist (DESIGN §7.2, §7.4).
+///
+/// A version is content-addressed, so a root that holds this exact package
+/// snapshot (same digest, same target and, when this machine can name its
+/// compiler, the same compiler identity) holds the bytes a local build would
+/// produce. Copying that tree in and validating it again is therefore the same
+/// version by construction — and it is what makes a second workspace, or a
+/// machine with no toolchain at all, able to use a capability the user store
+/// already carries without spending a compile.
+///
+/// Which roots those are is the caller's decision (nothing here knows about
+/// search order); the destination root is searched first regardless, since a
+/// copy already there is `already_built`.
+pub fn buildExtensionReusing(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    workspace: std.Io.Dir,
+    ext_dir_rel: []const u8,
+    dest_root: std.Io.Dir,
+    zig_exe: []const u8,
+    donors: []const std.Io.Dir,
+) !BuildResult {
     const manifest_rel = try std.fs.path.join(alloc, &.{ ext_dir_rel, manifest_file });
     defer alloc.free(manifest_rel);
     const manifest_bytes = workspace.readFileAlloc(io, manifest_rel, alloc, .limited(1 << 20)) catch
@@ -87,6 +117,9 @@ pub fn buildExtension(
     const snapshot_bytes = try snapshot.canonicalBytes(alloc);
     defer alloc.free(snapshot_bytes);
 
+    const package_digest = try integrity.packageDigestHex(alloc, snapshot);
+    defer alloc.free(package_digest);
+
     // Only a COMPILED extension's identity depends on the toolchain: its binary
     // is a function of the compiler and host target. `data` (no runtime) and
     // `script` (frozen, run as-is) are pure snapshots — compiler = "" and
@@ -94,16 +127,19 @@ pub fn buildExtension(
     // zig at all (DESIGN §7.1, §7.4).
     const kind = manifest.implementationKind(m);
     const compiled = kind == .compiled;
-    const compiler = if (compiled) try compilerIdentity(alloc, io, workspace, zig_exe) else try alloc.dupe(u8, "");
-    defer alloc.free(compiler);
     const target = if (compiled) toolchain.host_target else "";
-
-    const version = try integrity.versionId(alloc, snapshot_bytes, compiler, target);
-    errdefer alloc.free(version);
-
-    // Store layout, not draft layout: `<id>/versions/<v>` under the store root.
-    const version_rel = try std.fs.path.join(alloc, &.{ m.id, "versions", version });
-    defer alloc.free(version_rel);
+    // Ask for the compiler identity, but do not fail on its absence yet: a
+    // machine with no toolchain cannot COMPILE this package, and can still adopt
+    // a copy some other root already holds. Not knowing it only widens the search
+    // below, from one version id to "any build of these bytes for this target".
+    const compiler: ?[]u8 = if (compiled)
+        (compilerIdentity(alloc, io, workspace, zig_exe) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => null,
+        })
+    else
+        try alloc.dupe(u8, "");
+    defer if (compiler) |c| alloc.free(c);
 
     // From here on `<id>/` is mutated (a stale directory deleted, a version
     // written): hold the id's writer lease so two builds of one id in a shared
@@ -119,21 +155,35 @@ pub fn buildExtension(
         null;
     errdefer if (entry_rel) |entry| alloc.free(entry);
 
-    const version_is_valid = if (dest_root.access(io, version_rel, .{})) |_| blk: {
-        integrity.validateVersionDir(alloc, io, dest_root, version_rel, version, m.id) catch break :blk false;
-        break :blk true;
-    } else |_| false;
-
-    if (version_is_valid) {
-        return .{ .version = version, .entry_rel = entry_rel, .already_built = true, .compile_ok = true, .stderr = try alloc.alloc(u8, 0) };
+    if (try findMatchingVersion(alloc, io, dest_root, m.id, package_digest, target, compiler)) |found| {
+        return .{ .version = found, .entry_rel = entry_rel, .already_built = true, .compile_ok = true, .stderr = try alloc.alloc(u8, 0) };
     }
+    for (donors, 0..) |donor, donor_index| {
+        const found = (try findMatchingVersion(alloc, io, donor, m.id, package_digest, target, compiler)) orelse continue;
+        errdefer alloc.free(found);
+        if (!try adoptVersionDir(alloc, io, donor, dest_root, m.id, found)) {
+            alloc.free(found);
+            continue;
+        }
+        return .{ .version = found, .entry_rel = entry_rel, .already_built = false, .copied_from = donor_index, .compile_ok = true, .stderr = try alloc.alloc(u8, 0) };
+    }
+
+    // Nothing to adopt: this build has to produce the version itself, which for a
+    // compiled package is precisely where a toolchain stops being optional.
+    const compiler_id = compiler orelse return error.ZigVersionUnreadable;
+    const version = try integrity.versionId(alloc, snapshot_bytes, compiler_id, target);
+    errdefer alloc.free(version);
+
+    // Store layout, not draft layout: `<id>/versions/<v>` under the store root.
+    const version_rel = try std.fs.path.join(alloc, &.{ m.id, "versions", version });
+    defer alloc.free(version_rel);
     dest_root.deleteTree(io, version_rel) catch {};
 
     // Data or script: freeze the snapshot, seal with no binary, done — nothing to
     // compile.
     if (!compiled) {
         try integrity.freezeSnapshot(alloc, io, dest_root, version_rel, manifest_bytes, snapshot);
-        try writeSeal(alloc, io, dest_root, version_rel, snapshot, compiler, target, null);
+        try writeSeal(alloc, io, dest_root, version_rel, package_digest, compiler_id, target, null);
         return .{ .version = version, .entry_rel = entry_rel, .already_built = false, .compile_ok = true, .stderr = try alloc.alloc(u8, 0) };
     }
 
@@ -181,7 +231,7 @@ pub fn buildExtension(
 
     const binary_digest = try integrity.fileDigestHex(alloc, io, dest_root, bin_rel);
     defer alloc.free(binary_digest);
-    try writeSeal(alloc, io, dest_root, version_rel, snapshot, compiler, target, binary_digest);
+    try writeSeal(alloc, io, dest_root, version_rel, package_digest, compiler_id, target, binary_digest);
 
     return .{ .version = version, .entry_rel = entry_rel, .already_built = false, .compile_ok = true, .stderr = try alloc.alloc(u8, 0) };
 }
@@ -206,18 +256,121 @@ fn compilerIdentity(alloc: std.mem.Allocator, io: std.Io, workspace: std.Io.Dir,
     return try std.fmt.allocPrint(alloc, "zig {s}", .{trimmed});
 }
 
+/// Find a built version of `id` in `root` that IS what this build would produce:
+/// the same package snapshot (by digest) for the same target and, when this
+/// machine can name its compiler, from that same compiler. Such a version is
+/// this build's output by content addressing (DESIGN §7.4) — in the destination
+/// root that makes the build a no-op, and in another root it makes the version
+/// copyable. Null when the root holds no such version; a broken copy is skipped
+/// rather than reported, host faults propagate. Caller owns the result.
+///
+/// Without a compiler identity (a compiled package on a machine with no
+/// toolchain) several builds of one source can match — one per compiler that
+/// ever produced it — so the search runs over sorted version ids: which copy is
+/// adopted must not depend on the order a directory listing happens to arrive in.
+fn findMatchingVersion(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    root: std.Io.Dir,
+    id: []const u8,
+    package_digest: []const u8,
+    target: []const u8,
+    compiler: ?[]const u8,
+) !?[]u8 {
+    const versions = store.Store.init(io, root).listVersions(alloc, id) catch |err| switch (err) {
+        error.InvalidId => return null,
+        else => return err,
+    };
+    defer {
+        for (versions) |v| alloc.free(v);
+        alloc.free(versions);
+    }
+    const sorted = try alloc.alloc([]const u8, versions.len);
+    defer alloc.free(sorted);
+    @memcpy(sorted, versions);
+    std.mem.sort([]const u8, sorted, {}, lessThanVersion);
+
+    for (sorted) |v| {
+        const version_rel = try std.fs.path.join(alloc, &.{ id, "versions", v });
+        defer alloc.free(version_rel);
+        const seal_sub = try std.fs.path.join(alloc, &.{ version_rel, seal_file });
+        defer alloc.free(seal_sub);
+        const bytes = root.readFileAlloc(io, seal_sub, alloc, .limited(1 << 20)) catch |err| switch (err) {
+            error.Canceled, error.OutOfMemory => return err,
+            else => continue, // half-written version directory: not a candidate
+        };
+        defer alloc.free(bytes);
+        var seal = integrity.parseSeal(alloc, bytes) catch continue;
+        defer seal.deinit();
+        if (!std.mem.eql(u8, seal.package_digest, package_digest)) continue;
+        if (!std.mem.eql(u8, seal.target, target)) continue;
+        if (compiler) |c| {
+            if (!std.mem.eql(u8, seal.compiler, c)) continue;
+        }
+        // The seal only claims; validation checks the frozen bytes against it.
+        integrity.validateVersionDir(alloc, io, root, version_rel, v, id) catch |err| {
+            if (!store.isExtensionFault(err)) return err;
+            continue;
+        };
+        return try alloc.dupe(u8, v);
+    }
+    return null;
+}
+
+fn lessThanVersion(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
+}
+
+/// Copy `<id>/versions/<version>` from one store root into another, byte for
+/// byte, and validate the copy where it landed. False when the copy does not
+/// validate there (it is removed again, and the caller falls back to building) —
+/// a defensive answer, since a validated source and a plain file copy should not
+/// disagree.
+fn adoptVersionDir(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    src_root: std.Io.Dir,
+    dest_root: std.Io.Dir,
+    id: []const u8,
+    version: []const u8,
+) !bool {
+    const version_rel = try std.fs.path.join(alloc, &.{ id, "versions", version });
+    defer alloc.free(version_rel);
+
+    var src = try src_root.openDir(io, version_rel, .{ .iterate = true });
+    defer src.close(io);
+    dest_root.deleteTree(io, version_rel) catch {};
+    try dest_root.createDirPath(io, version_rel);
+    var dest = try dest_root.openDir(io, version_rel, .{});
+    defer dest.close(io);
+
+    var walker = try src.walk(alloc);
+    defer walker.deinit();
+    while (try walker.next(io)) |entry| switch (entry.kind) {
+        .directory => try dest.createDirPath(io, entry.path),
+        // Permissions come from the source, so a frozen binary stays executable.
+        .file => try src.copyFile(entry.path, dest, entry.path, io, .{ .make_path = true }),
+        else => {},
+    };
+
+    integrity.validateVersionDir(alloc, io, dest_root, version_rel, version, id) catch |err| {
+        if (!store.isExtensionFault(err)) return err;
+        dest_root.deleteTree(io, version_rel) catch {};
+        return false;
+    };
+    return true;
+}
+
 fn writeSeal(
     alloc: std.mem.Allocator,
     io: std.Io,
     dest_root: std.Io.Dir,
     version_rel: []const u8,
-    snapshot: integrity.PackageSnapshot,
+    package_digest: []const u8,
     compiler: []const u8,
     target: []const u8,
     binary_digest: ?[]const u8,
 ) !void {
-    const package_digest = try integrity.packageDigestHex(alloc, snapshot);
-    defer alloc.free(package_digest);
     const seal = try integrity.sealJson(alloc, package_digest, compiler, target, binary_digest);
     defer alloc.free(seal);
     const seal_sub = try std.fs.path.join(alloc, &.{ version_rel, seal_file });
