@@ -21,12 +21,25 @@ import { For, Show, createMemo, createSignal, onMount } from "solid-js"
 import { useKeyboard } from "@opentui/solid"
 import { useStyle } from "../../render/theme.ts"
 import { listExtensions, readToolUsage, type ExtensionEntry, type ToolUsage } from "../../nulya/files.ts"
-import { extSetCurrent } from "../../nulya/cli.ts"
+import { extPrune, extSetCurrent, type SyncLine } from "../../nulya/cli.ts"
+import { draftColumn, planStore } from "../../extensions.ts"
 import { UsageTable } from "./UsageTable.tsx"
 import type { Workspace } from "../../nulya/bin.ts"
 import type { SessionHeader } from "../../nulya/ledger.ts"
 
 type Pane = "extensions" | "versions" | "usage"
+
+/** An action waiting for `y`: pointer moves, and the one deletion. */
+type Pending =
+  | { kind: "activate" | "rollback"; id: string; version: string }
+  | { kind: "prune"; id: string; version: string; count: number }
+
+function confirmLine(pending: Pending): string {
+  if (pending.kind === "prune") {
+    return `prune ${pending.id}: delete ${pending.count} version(s), keep ${pending.version}? y / Esc`
+  }
+  return `${pending.kind} ${pending.id} ${pending.version}? y / Esc`
+}
 
 /** What the running session froze for this extension, if anything. */
 export function frozenVersion(header: SessionHeader | null | undefined, id: string): string | null {
@@ -50,11 +63,21 @@ export function ExtView(props: {
   const [versionCursor, setVersionCursor] = createSignal(0)
   const [pane, setPane] = createSignal<Pane>("extensions")
   const [notice, setNotice] = createSignal<string | null>(null)
-  const [confirm, setConfirm] = createSignal<{ verb: "activate" | "rollback"; id: string; version: string } | null>(null)
+  const [drafts, setDrafts] = createSignal<SyncLine[]>([])
+  const [confirm, setConfirm] = createSignal<Pending | null>(null)
 
   const refresh = async () => {
     setExtensions(await listExtensions(props.ws))
     setUsage(await readToolUsage(props.ws))
+    // What the SOURCE in each store directory would build to, versus what is
+    // there — the one thing the store's own listing cannot say. A plan, so this
+    // view never writes anything by opening.
+    try {
+      const [ws_plan, user_plan] = await Promise.all([planStore(props.ws, false), planStore(props.ws, true)])
+      setDrafts([...ws_plan.lines, ...user_plan.lines])
+    } catch {
+      setDrafts([]) // no plan is "unknown", never a wrong column
+    }
   }
 
   onMount(() => void refresh())
@@ -68,6 +91,8 @@ export function ExtView(props: {
   })
   const usageOf = (entry: ExtensionEntry, tool: string) =>
     usage().find((row) => row.toolId === `ext:${entry.id}/${tool}`) ?? null
+  /** The sync plan's line for an id, when that id still has a draft. */
+  const draftOf = (id: string) => drafts().find((line) => line.id === id) ?? null
 
   const move = (delta: number) => {
     if (pane() === "extensions") {
@@ -86,12 +111,31 @@ export function ExtView(props: {
 
   const act = (verb: "activate" | "rollback") => {
     const entry = selected()
-    const version = selectedVersion()
-    if (!entry || !version) {
-      setNotice("no version selected · Tab to the version line first")
+    if (!entry) return
+    // On the version line the selection IS the answer; on the id list the
+    // draft's own version is — which is what makes an id just built by a sync
+    // one key away from being the current one.
+    const version = pane() === "versions" ? selectedVersion()?.version : draftOf(entry.id)?.version
+    if (!version) {
+      setNotice("no version to point at · Tab to the version line and pick one")
       return
     }
-    setConfirm({ verb, id: entry.id, version: version.version })
+    setConfirm({ kind: verb, id: entry.id, version })
+  }
+
+  const prune = () => {
+    const entry = selected()
+    if (!entry) return
+    if (!entry.current) {
+      setNotice(`${entry.id} has no current version · nothing can say which one to keep`)
+      return
+    }
+    const others = entry.versions.length - 1
+    if (others <= 0) {
+      setNotice(`${entry.id} has only the current version`)
+      return
+    }
+    setConfirm({ kind: "prune", id: entry.id, version: entry.current, count: others })
   }
 
   const runConfirmed = async () => {
@@ -99,11 +143,18 @@ export function ExtView(props: {
     setConfirm(null)
     if (!pending) return
     try {
-      const line = await extSetCurrent(props.ws, pending.verb, pending.id, pending.version)
-      // A store action, not a session event: it changes what the NEXT session
-      // freezes and nothing about this one (DESIGN §7.5), so it never touches
-      // the ledger and its output stays here.
-      setNotice(line)
+      if (pending.kind === "prune") {
+        // Deleting a version is the one action here that cannot be undone by
+        // moving a pointer, so the kernel's own sentence about the cost is what
+        // gets shown rather than a cheerful count of freed bytes.
+        const output = await extPrune(props.ws, { id: pending.id })
+        setNotice(output.split("\n").slice(-2).join(" · "))
+      } else {
+        // A store action, not a session event: it changes what the NEXT session
+        // freezes and nothing about this one (DESIGN §7.5), so it never touches
+        // the ledger and its output stays here.
+        setNotice(await extSetCurrent(props.ws, pending.kind, pending.id, pending.version))
+      }
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error))
     }
@@ -125,6 +176,7 @@ export function ExtView(props: {
     if (key.name === "k" || key.name === "up") return move(-1)
     if (key.name === "a") return act("activate")
     if (key.name === "r") return act("rollback")
+    if (key.name === "p") return prune()
     if (key.name === "u") return setPane(pane() === "usage" ? "extensions" : "usage")
   })
 
@@ -151,6 +203,16 @@ export function ExtView(props: {
                       {" "}
                       {entry.versions.length}v {entry.kind.slice(0, 4)}
                     </text>
+                    {/* What the SOURCE beside those versions would build to. An
+                        id whose draft has moved on shows `not built` here while
+                        its old version is still current — the difference `ext
+                        sync` is for. */}
+                    <Show when={draftColumn(draftOf(entry.id))}>
+                      <text fg={draftColumn(draftOf(entry.id)) === "active" ? style.theme.dim : style.theme.warn}>
+                        {" "}
+                        {draftColumn(draftOf(entry.id))}
+                      </text>
+                    </Show>
                     {/* An id an earlier root already has active: this copy never
                         runs (DESIGN §7.2). Saying so is the whole point — a
                         silently omitted duplicate is how it becomes a mystery. */}
@@ -236,16 +298,14 @@ export function ExtView(props: {
       </Show>
 
       <Show when={confirm()} keyed>
-        {(pending: { verb: "activate" | "rollback"; id: string; version: string }) => (
-          <text fg={style.theme.warn}>
-            {pending.verb} {pending.id} {pending.version}? y / Esc
-          </text>
-        )}
+        {(pending: Pending) => <text fg={style.theme.warn}>{confirmLine(pending)}</text>}
       </Show>
       <Show when={notice() && !confirm()}>
         <text fg={style.theme.dim}>{notice()}</text>
       </Show>
-      <text fg={style.theme.dim}>j/k move · Tab pane · a activate · r rollback · u usage table · Esc close</text>
+      <text fg={style.theme.dim}>
+        j/k move · Tab pane · a activate · r rollback · p prune old versions · u usage · Esc close
+      </text>
     </box>
   )
 }

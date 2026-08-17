@@ -328,6 +328,172 @@ export async function extBuild(ws: Workspace, path: string): Promise<string> {
   return version
 }
 
+/** One `<id>: …` line of `nulya ext sync` (DESIGN §7.2). */
+export interface SyncLine {
+  id: string
+  /** The version that is (or would be) this draft's, or null when unknown. */
+  version: string | null
+  /**
+   * `built` / `already built` are facts; `not built` only appears under
+   * `--dry-run` and means "this pass would produce it". `needs zig` is a
+   * compiled draft this machine can neither compile nor copy; `failed` is a
+   * fault in the draft itself.
+   */
+  state: "built" | "already built" | "not built" | "needs zig" | "failed"
+  /** The store root the version came from (or would come from), if any. */
+  copiedFrom: string | null
+  /**
+   * What `current` says about this version: `active` (it is the pointer),
+   * `activated` (this pass moved it), `kept` (`--activate` left an existing
+   * pointer alone — someone's rollback stands), or null.
+   */
+  activation: "active" | "activated" | "kept" | null
+  /** The failure reason, or the version a `kept` pointer names. */
+  detail: string | null
+}
+
+export interface SyncReport {
+  lines: SyncLine[]
+  built: number
+  already: number
+  failed: number
+  /** Everything the command printed, for a view that wants the raw text. */
+  text: string
+}
+
+const empty_report: SyncReport = { lines: [], built: 0, already: 0, failed: 0, text: "" }
+
+/**
+ * Parse `ext sync` output. The kernel prints one line per draft plus a summary;
+ * the shapes are fixed (DESIGN §14) and everything the front end shows about a
+ * draft comes from here, so nothing re-derives a version or a state on its own.
+ */
+export function parseSyncReport(text: string): SyncReport {
+  const report: SyncReport = { ...empty_report, lines: [], text }
+  for (const raw of text.split("\n")) {
+    const line = raw.trim()
+    if (line.length === 0) continue
+    const summary = /^(\d+) (?:built|not built), (\d+) already built, (\d+) failed$/.exec(line)
+    if (summary) {
+      report.built = Number(summary[1])
+      report.already = Number(summary[2])
+      report.failed = Number(summary[3])
+      continue
+    }
+    const parsed = parseSyncLine(line)
+    if (parsed) report.lines.push(parsed)
+  }
+  return report
+}
+
+export function parseSyncLine(line: string): SyncLine | null {
+  const at = line.indexOf(": ")
+  if (at <= 0) return null
+  const id = line.slice(0, at)
+  if (id.includes(" ")) return null // "no drafts in <root>", a summary, a note
+  const rest = line.slice(at + 2)
+
+  if (rest.startsWith("needs zig")) {
+    return { id, version: null, state: "needs zig", copiedFrom: null, activation: null, detail: rest }
+  }
+  if (rest.startsWith("failed:")) {
+    return { id, version: null, state: "failed", copiedFrom: null, activation: null, detail: rest.slice(7).trim() }
+  }
+  const version = /^(v-[0-9a-f]+)/.exec(rest)?.[1] ?? null
+  if (!version) return null
+  const tail = rest.slice(version.length)
+  const state = tail.includes("already built") ? "already built" : tail.includes("not built") ? "not built" : "built"
+  const from = /\((?:copied|available) from ([^)]+)\)/.exec(tail)?.[1] ?? null
+  const stays = /\(current stays (v-[0-9a-f]+)\)/.exec(tail)?.[1] ?? null
+  const activation = tail.includes("(active)")
+    ? "active"
+    : tail.includes("-> current")
+      ? "activated"
+      : stays
+        ? "kept"
+        : null
+  return { id, version, state, copiedFrom: from, activation, detail: stays }
+}
+
+export interface SyncOptions {
+  /** The user store (`~/.nulya/extensions`) instead of this workspace's. */
+  user?: boolean
+  /** Move `current` onto what this pass brought in (never over another pointer). */
+  activate?: boolean
+  /** Compute and report; write nothing. */
+  dryRun?: boolean
+  env?: Record<string, string>
+}
+
+/**
+ * `nulya ext sync` — build every draft in a store root (DESIGN §7.2).
+ *
+ * A non-zero exit means at least one draft did not end up with a version, which
+ * is per-draft news rather than a failure of the command, so this returns the
+ * report instead of throwing: the caller shows the lines and decides.
+ * `onLine` fires as each draft finishes, which is what makes progress visible
+ * while a compiled draft takes its seconds.
+ */
+export async function extSync(
+  ws: Workspace,
+  options: SyncOptions = {},
+  onLine?: (line: SyncLine) => void,
+): Promise<SyncReport> {
+  const args = ["ext", "sync"]
+  if (options.user) args.push("--user")
+  if (options.activate) args.push("--activate")
+  if (options.dryRun) args.push("--dry-run")
+  const proc = Bun.spawn({
+    cmd: [ws.bin, ...args],
+    cwd: ws.dir,
+    env: options.env ? { ...process.env, ...options.env } : process.env,
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  // Drained concurrently, not after: a child blocked writing to a pipe nobody
+  // reads never exits, and this one warns on stderr (a `--user` action inside a
+  // session, say).
+  const stderr = new Response(proc.stderr).text()
+  let text = ""
+  for await (const raw of decodeLines(proc.stdout)) {
+    text += `${raw}\n`
+    if (onLine) {
+      const parsed = parseSyncLine(raw.trim())
+      if (parsed) onLine(parsed)
+    }
+  }
+  await Promise.all([proc.exited, stderr])
+  return parseSyncReport(text)
+}
+
+/**
+ * `nulya ext prune` — drop the versions `current` does not name. Returns what it
+ * printed, including the line about what the deletion costs.
+ */
+export async function extPrune(
+  ws: Workspace,
+  options: { id?: string; user?: boolean; dryRun?: boolean } = {},
+): Promise<string> {
+  const args = ["ext", "prune"]
+  if (options.user) args.push("--user")
+  if (options.id) args.push(options.id)
+  if (options.dryRun) args.push("--dry-run")
+  const result = await run(ws, args)
+  if (result.code !== 0) fail("ext prune failed", result)
+  return result.stdout.trim()
+}
+
+/**
+ * `nulya ext trust` — record, once, that this workspace's store may take part in
+ * sessions (DESIGN §9). Only ever called after a person has been shown what the
+ * store holds and pressed the key.
+ */
+export async function extTrust(ws: Workspace): Promise<string> {
+  const result = await run(ws, ["ext", "trust"])
+  if (result.code !== 0) fail("ext trust failed", result)
+  return result.stdout.trim()
+}
+
 /**
  * `nulya ext run <id>@<version> <tool> <json>` — one oneshot extension call
  * (DESIGN §7.3/§14). The version is named rather than implied: a package the
@@ -380,7 +546,9 @@ export async function extList(ws: Workspace): Promise<ExtStoreEntry[]> {
       id,
       current: version === "(inactive)" ? null : version,
       root,
-      shadowed: fields[3] === "(shadowed)",
+      // A trailing column, not a fixed one: an active row also carries
+      // `[tools skills prompt]`, so position would be the wrong test.
+      shadowed: fields.includes("(shadowed)"),
     })
   }
   return entries

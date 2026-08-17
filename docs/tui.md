@@ -1,6 +1,6 @@
 # Nulya TUI — 设计与计划
 
-> **状态：T0–T9 全部落地。** 内核侧只有三处：`session step --stream`（纯观测）、`session new --parent` 的 fork 语义 → [DESIGN.md](DESIGN.md) §14/§11，与 `NULYA_EXE`（子进程 env 里的本二进制路径，§7.6——`/compact` 的过程搬进 `extensions/compact` 之后它才调得到 harness）；前端 T1（骨架）、T2（卡片与折叠）、T3（nulya 视图：`/sessions`、`/ext`、sub-session tab、observer）、T4（`/help` `/settings` `/usage`、keymap 覆盖、`bun build --compile`、README、5k 事件性能）、T5（`/model` `/effort`）、T6（布局与 slash 补全）、T7（`/compact`）、T8（慢速回路：`/outcome` `/evolve` `/mode`、`/sessions` 改读 `session list --json`、成本来自 ledger、`/ext` 认多 root）、T9（`/compact` 改成 spawn `extensions/compact`）都在 `tui/`（见 §11 与 [`../tui/README.md`](../tui/README.md)）。本文是 `tui/` 的设计契约 + 里程碑 + 实施日志；`tui/` 不在内核范围里（另一条工具链、另一个进程），所以它的现状写在本文 §11，不进 DESIGN.md。
+> **状态：T0–T9 与 T11 全部落地。** 内核侧只有三处：`session step --stream`（纯观测）、`session new --parent` 的 fork 语义 → [DESIGN.md](DESIGN.md) §14/§11，与 `NULYA_EXE`（子进程 env 里的本二进制路径，§7.6——`/compact` 的过程搬进 `extensions/compact` 之后它才调得到 harness）；前端 T1（骨架）、T2（卡片与折叠）、T3（nulya 视图：`/sessions`、`/ext`、sub-session tab、observer）、T4（`/help` `/settings` `/usage`、keymap 覆盖、`bun build --compile`、README、5k 事件性能）、T5（`/model` `/effort`）、T6（布局与 slash 补全）、T7（`/compact`）、T8（慢速回路：`/outcome` `/evolve` `/mode`、`/sessions` 改读 `session list --json`、成本来自 ledger、`/ext` 认多 root）、T9（`/compact` 改成 spawn `extensions/compact`）、T11（启动即安装：`ext sync` 的时机、project store 的 trust 问句、`/ext` 的 draft 列与 `p`）都在 `tui/`（见 §11 与 [`../tui/README.md`](../tui/README.md)）。本文是 `tui/` 的设计契约 + 里程碑 + 实施日志；`tui/` 不在内核范围里（另一条工具链、另一个进程），所以它的现状写在本文 §11，不进 DESIGN.md。
 > 上位原则见 [PLAN.md](PLAN.md) §3.11：前端是 core 之上的薄客户端——**tail ledger 文件 + append user 事件；前端是长期进程，re-spawn 的只是 worker**。
 
 ## 0. 定位（三句话）
@@ -260,10 +260,16 @@ ascii          = false
 theme  = "nulya-dark"       # nulya-dark | nulya-light
 motion = true
 
+[extensions]                # T11
+sync_on_start = true        # 开屏时后台 build 各 store root 下的 draft（`nulya ext sync`）
+auto_activate = true        # 让那一趟把 `current` 指到它刚建出来的版本上
+
 [keys]                      # 覆盖默认键；名字表见 keymap.ts
 cancel = "escape"
 fold   = "ctrl+o"
 ```
+
+`[extensions]` 两个键都只作用于**这一趟 sync**：`auto_activate` 永远不会盖掉指着别处的 `current`（那是 DESIGN §7.2 的规则，前端无从违反），所以一次 rollback 活得过下一次启动。project store 的那道 trust 问句**不受这两个键管**——它是 DESIGN §9 的边界，只有按键能推动。
 
 `/settings` 只显示当前生效值与来源文件；不在 TUI 里写配置（编辑器改文件即可，第二个诉求出现再做）。
 
@@ -291,6 +297,8 @@ fold   = "ctrl+o"
 | ~~**T7 · compaction**~~ ✅ | 内核：`session new --parent` 校验父 + 继承冻结身份（DESIGN §11/§14）；前端：`/compact [focus]`、压缩两条 turn 的卡片、状态栏上下文占用 | `zig build e2e` 里 fork 继承一条；`bun test` 100 pass；聊两句 → `/compact` → 新 session 顶上是 summary |
 
 | ~~**T8 · 慢速回路的前端**~~ ✅ | `/outcome <verdict> [note]`（→ `nulya session outcome`，`/quit` 问一次）；`/sessions` 改读 `nulya session list --json`（verdict / usage / parent / composition，不再自己扫 header）；`/evolve`（`ext build extensions/evolution` → `session new --with evolution@<v>`）；`/mode <id>[@<v>]`；token 计数改以 ledger `assistant.usage` 为准；`/ext` 认多 root 与 `shadowed`。**内核零改动** | `bun test` 111 pass；评一次 verdict 后 `/sessions` 里看得到；`/evolve` 起来的场次 composition 里带 `evolution@<v>`、CompositionCard 显示 `prompts 1` |
+
+| ~~**T11 · 启动即安装**~~ ✅ | 内核给了 `nulya ext sync`（build 一个 root 下的每个 draft）与 `ext prune`（DESIGN §7.2）；前端只决定**什么时候跑**：`tui.toml` `[extensions] sync_on_start/auto_activate`；user store 后台跑（状态栏 `syncing extensions… 2/3` + 一行汇总）；**project store 先问**（未信任且有 draft → 开屏前一句问话 + `t`/`s`/`n`，只问一次，记在 `tui-state.json`）；`/ext` 每个 id 多一列 draft 状态（`ext sync --dry-run`），`a` 在 id 列表上指向 draft 的版本，`p` 删非 current 版本（先确认）。**内核零改动** | `bun test` 新增 `extensions.test.ts` 6 条（真二进制的 plan/sync/`--activate` 三种答案 + 纯策略）；在本仓库 checkout 里开一次看得到 trust 问句 |
 
 | **T10 · `/goal`（占位，未开工）** | spawn 随仓库带的 driver 脚本（`win32` → `powershell -NoProfile -ExecutionPolicy Bypass -File drivers/goal.ps1`，否则 `sh drivers/goal.sh`），把它的 **stderr 喂给已有的 `--stream` 解析器**（token delta / tool begin-end / usage 全在里面），把它的 **stdout 当控制通道**：`session <id>` 开 tab、`handoff <old> -> <new>` 换 tab（原 tab 留着可回看）、`done <id>` 收尾并提示 `/outcome`。跟随中的 tab 是 **observer**（driver 持着写者 lease）。**内核零改动**，也不需要 §10.4 的 `<id>.live` sidecar | 起一个两阶段目标：token 实时可见；handoff 时自动切到子 session；`Esc` 停得下来（`session cancel` 或杀脚本）|
 
@@ -917,3 +925,17 @@ cd tui && bun test test/compact.test.ts
 跟随中的 tab 天然是 **observer**（driver 进程持着写者 lease，§5.6 的两个信号照旧适用）；`Esc` 的语义是 `nulya session cancel <当前 id>`，driver 会在下一个 step 边界看到。选脚本按平台：`process.platform === "win32"` → `powershell -NoProfile -ExecutionPolicy Bypass -File drivers/goal.ps1`，否则 `sh drivers/goal.sh`；两份脚本逐行对齐，行为相同。
 
 **不做**：把 goal loop 内建进 TUI（PLAN §3.6 的整条论证——driver 是可替换的脚本，前端是客户端不是过程的所有者）；也不做 handoff 的守卫阈值（那是 driver policy，等真实使用证据，PLAN §3.4.1）。
+
+### T11 · 启动即安装（2026-08-18）
+
+**动机**：理想用法是"把 extension 源码放进 `~/.nulya/extensions/<id>/`，开 TUI 就能用"。内核这一轮给了动词（`nulya ext sync` / `ext prune`，DESIGN §7.2/§7.4），**前端只决定什么时候跑**——而"什么时候"恰好落在内核已经画好的那条线上（physics #6 / DESIGN §9）：user store 是你自己的目录，project store 是别人 clone 给你的。
+
+1. **两条路，两种待遇。** user root（`ext sync --user`）在 **App 的 `onMount` 后台**跑：compiled draft 一次要好几秒，绝不能挡开屏；状态栏借用已有的 `hint` 位显示 `syncing extensions… 2/3`（分母来自先跑的一次 `--dry-run`，那次 plan 同时也是 `/ext` 的 draft 列数据），完成后一行 `user store: 2 built · 1 already`。project root **在 `main.tsx` 里、`session new` 之前**问：它必须早于 session 创建，因为未信任的 store 正是让 `session new` 硬拒的那件事（DESIGN §9），而那时 OpenTUI 的备用屏还没进，普通终端问句就够。
+2. **问句只有一句，三个键。** `t` = `ext trust` + `ext sync --activate`；`s` = 只 `ext sync`（不 trust、不 activate）；`n`/`Esc`/`Enter` = 什么都不做（并说一句 `nulya ext trust` 随时可用）。**只问一次**：答案无关，问过就记进 `tui-state.json` 的 `asked_stores`。判据不在前端重实现——"有哪些 draft" 是 `ext sync --dry-run` 的输出，"信不信任" 是读内核自己的 `<user dir>/trusted-stores.jsonl`（只读，从不写；写 trust 的永远是 `nulya ext trust`，它会先把要信任的东西打印出来）。
+3. **`s` 为什么不是半吊子。** 一个只带 draft 的 checkout，按 `s` 之后 store 从空变成有内容，而**本机 build 填满空 store 就是信任**（DESIGN §9 的出生地规则），所以 session 照常能开。真正需要 `t` 的是"checkout 里已经躺着 built 版本"那种——那时按 `s` 之后 `session new` 仍会被拒，而那正是诚实的结果：没人看过它。
+4. **`/ext` 多一列。** 每个 id 的 draft 状态 `not built | built | active | needs zig | fails`，来自 `ext sync --dry-run`（workspace + user 两个 root 各一次），所以"源码改了但没 build"第一次在界面上看得见。`a` 在 id 列表上指向 **draft 的那个版本**（在版本线上仍是选中项，两种选择各自成立），`p` = `ext prune <id>`，先弹一行确认（`delete N version(s), keep <current>?`），成功后显示的是内核自己那句代价说明而不是省了多少字节。
+5. **测试**：`test/extensions.test.ts` 6 条——真二进制上的 plan/sync/幂等、`--activate` 的三种答案（moved / already there / left alone，含真的 rollback 一次）、行解析的全部形状、纯策略（问不问、三个键映射到哪条命令）。`/ext` 快照更新了两行（draft 列 + 按键行）。
+
+**已知**：`bun test` 全量跑在这台机器上偶发超时（涉及真二进制持写者租约的那几条，跑单文件全绿，且与本条改动无关——同样的偶发在改动前后各出现一次，失败集合还不同）。
+
+**没做**：`/ext` 的 pin 键（写 project 层 `registry.pinned_native_tools`）——pin 是第三个决定，且它属于人或 evolution session，等真实需要；`/goal`（T10 仍占位）。

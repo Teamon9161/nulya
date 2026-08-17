@@ -26,6 +26,13 @@ export interface ModelPick {
 
 export interface TuiState {
   model?: ModelPick
+  /**
+   * Workspace extension stores the trust question has already been put for, by
+   * absolute path. "Only ask once" is the whole point of remembering: a person
+   * who said "not now" to a checkout should not be asked again every time they
+   * open it — they can still run `nulya ext trust` whenever they mean to.
+   */
+  asked_stores?: string[]
 }
 
 export function tuiStatePath(env: Record<string, string | undefined> = process.env): string {
@@ -48,8 +55,11 @@ export function loadTuiState(path = tuiStatePath()): TuiState {
     const parsed: unknown = JSON.parse(readFileSync(path, "utf8"))
     if (typeof parsed !== "object" || parsed === null) return {}
     const state: TuiState = {}
-    const model = pickFrom((parsed as Record<string, unknown>)["model"])
+    const record = parsed as Record<string, unknown>
+    const model = pickFrom(record["model"])
     if (model) state.model = model
+    const asked = record["asked_stores"]
+    if (Array.isArray(asked)) state.asked_stores = asked.filter((s): s is string => typeof s === "string")
     return state
   } catch {
     return {}
@@ -70,5 +80,14 @@ export function saveTuiState(state: TuiState, path = tuiStatePath()): void {
 export function rememberModel(pick: ModelPick, path = tuiStatePath()): void {
   const state = loadTuiState(path)
   state.model = pick
+  saveTuiState(state, path)
+}
+
+/** Remember that the trust question was put for this store, whatever the answer. */
+export function rememberStoreAsked(store: string, path = tuiStatePath()): void {
+  const state = loadTuiState(path)
+  const asked = state.asked_stores ?? []
+  if (asked.includes(store)) return
+  state.asked_stores = [...asked, store]
   saveTuiState(state, path)
 }

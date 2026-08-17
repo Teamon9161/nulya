@@ -27,7 +27,7 @@ exports[`/sessions lists the store and opens the highlighted session 1`] = `
 exports[`/ext shows the version line, the current pointer and the usage counts 1`] = `
 " extensions · 1                                                                                                         
                                                                                                                         
- ▾ lint 1v scri                      lint · script · current v-<hash>                                 
+ ▾ lint 1v scri active               lint · script · current v-<hash>                                 
                                      root .nulya/extensions                                                             
                                      tools lint · skills — · prompts —                                                  
                                      permissions fs 0 · net — · proc 0                                                  
@@ -44,6 +44,6 @@ exports[`/ext shows the version line, the current pointer and the usage counts 1
                                                                                                                         
                                                                                                                         
                                                                                                                         
- j/k move · Tab pane · a activate · r rollback · u usage table · Esc close                                              
+ j/k move · Tab pane · a activate · r rollback · p prune old versions · u usage · Esc close                             
 "
 `;
