@@ -39,6 +39,13 @@
 //! model hands off, the driver forks through compact, the goal completes in the
 //! child, control lines on stdout and the step's `--stream` protocol on stderr.
 //!
+//! And the self-description entry (guide): `nulya help` printing one screen
+//! that every bare verb family is a strict substring of, `ext api permissions`
+//! / `examples` stating today's authority and a worked path with no document
+//! citations anywhere the model can read, a fresh session's kernel system block
+//! naming NULYA_EXE / `nulya help` / `nulya src`, and the repo's own
+//! `extensions/guide` composing in as one skill and no system prompt.
+//!
 //! The tests live in `tests/e2e/`, grouped by what they prove:
 //!
 //!   e2e/support.zig      shared fixtures — CLI runners, scaffolds, fake models

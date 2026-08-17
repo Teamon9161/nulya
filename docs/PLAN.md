@@ -295,7 +295,9 @@ Driver 演化比 Tool 保守，因为**归因难**（任务难度 / model / seed
 
 ### 3.10 `nulya src` 与文档 `[已落地 · M3 → DESIGN §14]`
 
-✅ **已实现，现状见 [DESIGN §14](DESIGN.md)。** 内嵌 `src/**`，`nulya src [path]` 打印，AI 读真实代码 = 零 API 漂移；`nulya ext api` 成为它的特例。入口仍是 CLAUDE.md 的模块表，不是让 AI 通读。**测试取舍拍板**：不拆 `*_test.zig`——测试留在文件里（Zig 惯例、人可读、给 AI 造扩展时的风格参照），`nulya src` 默认剥 `test` 块解决 AI 读结构时的 token 成本，`--tests` 按需取。存储 vs 投影解耦，`src/` 零改动。
+✅ **已实现，现状见 [DESIGN §14](DESIGN.md)。** 内嵌 `src/**`，`nulya src [path]` 打印，AI 读真实代码 = 零 API 漂移；`nulya ext api` 成为它的特例。入口仍是 CLAUDE.md 的模块表，不是让 AI 通读。
+
+**入口已补（2026-08，DESIGN §7.5/§14）。** 自描述面齐全，缺的是"模型怎么知道这些命令存在"：现在 kernel prompt 一句事实（`NULYA_EXE` / `nulya help` / `nulya src` / 可写 extension·skill·prompt·driver）+ `nulya help`（与命令表逐动词对齐、bare 动词族印自己那块）+ 随仓库带的 `extensions/guide`（只贡献 skill，按需 load，不自动装）。三层都**只指路不复制**——真相留在与代码同源的命令里，所以不会漂；且**没有一句劝进化**（§3.7.1：喊话不解决动机结构，造工具的场合是 evolution mode）。**测试取舍拍板**：不拆 `*_test.zig`——测试留在文件里（Zig 惯例、人可读、给 AI 造扩展时的风格参照），`nulya src` 默认剥 `test` 块解决 AI 读结构时的 token 成本，`--tests` 按需取。存储 vs 投影解耦，`src/` 零改动。
 
 ### 3.11 前端 / ACP / MCP `[占位 · M8]`
 
@@ -318,6 +320,7 @@ Driver 演化比 Tool 保守，因为**归因难**（任务难度 / model / seed
 - ~~compaction 触发：token 阈值 vs task 边界 vs 混合；summary 由谁生成（agent 自己 vs 专用 session）。~~ 已定（§3.4）：混合——边界由模型经 `handoff` tool 主动提、压力由 driver `/compact` 兜底，汇到同一条 fork 路径；summary 一律由旧 session 自己在 cache 前缀上写，不开专用 session。剩下的边角：handoff 的守卫阈值（多小的 context 不值得 fork）、brief schema 分节强制到什么程度——两者第一版 driver 都**故意没做**（§3.4.1），等 `drivers/goal.*` 有真实使用证据再定，不靠想象拍阈值。
 - `max_tools` 的初值（安放处 `default.toml` 已定，值待调）。~~排序权重初值~~ 不再是问题：排序 policy 已整个移出内核，native 面只由 pin 决定（DESIGN §5.1/§5.5）。
 - ~~`session_outcome` 的最小 verdict 集合；用户不给 verdict 时的默认（缺失 ≠ 失败）。~~ 已定（M5a → DESIGN §3.3）：`success | partial | failure` 三值；**没有行 = unknown ≠ failure**；同一 session 可多行、最后一条作数；不加 `source`（今天只有人写；将来 driver 自动记时再加，届时无 `source` 的 v1 行 = 人评）。
+- **随仓库带的 extension 怎么打包？** `extensions/compact` / `handoff` / `evolution` / `guide` 今天只有**在 checkout 里**才 `ext build` 得到——发布二进制的用户拿不到 `/compact`、拿不到 handoff、也装不了 guide skill。候选是像 `src/**` 那样把 `extensions/**` 也 `@embedFile` 进二进制，并给 `ext build` 一个 bundled 来源（`nulya ext build bundled:guide` 之类），代价是二进制变大 + 多一条"draft 从哪来"的路径。**先不做**：等第一个非 checkout 用户出现再定形状（M8 / 发布），在那之前 checkout 就是安装介质。
 - Verify 套件与 golden 输入数据的 snapshot 边界。
 - Driver episode 的 benchmark suite 如何 version / 防 Goodhart。
 - ~~provider cache breakpoint 各厂商差异核实（Anthropic / OpenAI / 兼容端点）。~~ 已测（M4）：openai / anthropic / codex 三条真实链路都拿到单调不减的 `cache_read`；剩下的是 first-party Anthropic key 上确认 `cache_control` 真被采纳（兼容端点是 implicit cache，看不出来）。
