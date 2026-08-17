@@ -1067,6 +1067,9 @@ test "bundled compact: ext build extensions/compact, then ext run forks the sess
     const ws = tmp.dir;
 
     // A compiled extension, built from the repo copy into this workspace's store.
+    // The compile is shared (support.stageBundled), so this is a real `ext build`
+    // that finds the version already there.
+    alloc.free(try support.stageBundled(alloc, io, ws, "compact"));
     const built = try runCliEnv(alloc, io, ws, &.{ exe_abs, "ext", "build", compact_src }, "NULYA_ZIG", zig_exe);
     defer alloc.free(built.stdout);
     if (built.code != 0) {
@@ -1180,6 +1183,11 @@ fn buildBundled(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, exe_abs: [
     defer host_env.deinit();
     const zig_exe = host_env.get("NULYA_TEST_ZIG") orelse return error.SkipZigTest;
     const repo = host_env.get("NULYA_REPO") orelse return error.SkipZigTest;
+
+    // The compile is shared with every other test that wants this package
+    // (support.stageBundled); the real `ext build` below then answers "already
+    // built" — the same CLI path, without a second seven-second compile.
+    alloc.free(try support.stageBundled(alloc, io, ws, id));
 
     const src = try std.fs.path.join(alloc, &.{ repo, "extensions", id });
     defer alloc.free(src);

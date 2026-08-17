@@ -514,8 +514,14 @@ test "session cli: drivers/goal runs the bundled driver — the model hands off,
     defer tmp.cleanup();
     const ws = tmp.dir;
 
-    // The real script, from the repo, with the real binary — the driver builds
-    // both bundled extensions itself, so nothing here is staged for it.
+    // The real script, from the repo, with the real binary: the driver still runs
+    // its own `ext build` for both bundled extensions, but the compiles are shared
+    // with the rest of the suite, so those builds answer "already built". Staging
+    // them fills the workspace store, which is exactly the case `ext build` does
+    // NOT auto-trust — so `stageBundled` records the trust itself (DESIGN §9).
+    alloc.free(try support.stageBundled(alloc, io, ws, "handoff"));
+    alloc.free(try support.stageBundled(alloc, io, ws, "compact"));
+
     const is_windows = @import("builtin").os.tag == .windows;
     const script = try std.fs.path.join(alloc, &.{ repo, "drivers", if (is_windows) "goal.ps1" else "goal.sh" });
     defer alloc.free(script);
