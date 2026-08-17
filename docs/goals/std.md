@@ -83,4 +83,5 @@
 
 ## 6. 进度区（执行时更新）
 
-（空）
+- **std-a** `f5fef81` — `protocol.decodeResponse`：`result` 为 JSON string → 原文字节（`alloc.dupe`），其它值仍 compact JSON；模块头注释 + `DecodedResponse.result` doc + 一条新单测（换行 / 引号 / 非 ASCII 原样，嵌套对象里的字符串仍 JSON，标量仍 JSON）；DESIGN §7.3 加一句。`zig build test` 272 pass、`zig build e2e` 38/38（既有 `round-trips JSON` 那条不受影响）。无偏离。
+- **std-b** `4360979` — `extensions/std/{extension.json, src/main.zig, src/rpc.zig, src/vendor/mvzr.zig}` + 五个 tool 与 `freshness/text/walk/regex/vendor/{globpat,ignore}` 的 **STUB**（每个文件头写明归属 std-c / std-d，整文件替换）；`build.zig` 给 `extensions/std/src/main.zig` 加 `addTest` 挂进 `test` step；`tests/e2e/std.zig`（`buildStd` / `nulyaExe` / `runStd` 三个 pub 夹具 + smoke：build → activate → `ext list` 标 `[tools]` → `ext run … read` 到达 tool（`-32000`）→ 未声明的 tool 名被 CLI 拒 → 两次 build 同 version）、`std_fs.zig` / `std_search.zig` 空壳、`tests/e2e.zig` 注册。**踩到的两处、后面的人别再踩**：① `std.json.ObjectMap` 空值是 `.empty` 不是 `.init(alloc)`；`main` 在 test build 里不被引用，所以 `readRequest` 那个错**只在 `nulya ext build` 时才炸**——两处 test 块都加了 `std.testing.refAllDecls(@This())`，新模块照做；② 本机 `zig` 是 anyzig shim，直接 `zig test <file>` 要写 `zig 0.16.0 test <file>`（`zig build …` 不用）；`zig fmt` 只对自己的文件跑——对整个目录跑会把别人文件的 CRLF 改掉造成无关 diff。`zig build test` 307 pass（其中 std 35 = mvzr 31 + rpc 3 + main）、`e2e` 39/39。无偏离。
