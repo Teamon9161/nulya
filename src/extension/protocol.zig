@@ -9,9 +9,16 @@
 //!   request   { "jsonrpc":"2.0", "id":"call-17", "method":"tool/call",
 //!               "params":{ "name":"web_search", "arguments":{...} } }
 //!   success   { "jsonrpc":"2.0", "id":"call-17", "result":{...} }
+//!             { "jsonrpc":"2.0", "id":"call-17", "result":"plain text…" }
 //!   error     { "jsonrpc":"2.0", "id":"call-17",
 //!               "error":{ "code":-32000, "message":"..",
 //!                          "data":{ "retryable":true } } }
+//!
+//! `result` is any JSON value. A STRING result is the tool's text output and
+//! reaches the model verbatim (a file's contents, a search listing) — exactly as
+//! a builtin's output would; anything else is structured data and is handed on
+//! as compact JSON. Without this a tool that returns text would show the model
+//! an escaped JSON string, paid for on every call.
 
 const std = @import("std");
 
@@ -77,7 +84,8 @@ pub const ErrorBody = struct {
 /// Extension -> host, already validated against the JSON-RPC envelope. The
 /// owning slice is freed with `deinit`.
 pub const DecodedResponse = union(enum) {
-    /// Compact JSON of the `result` field.
+    /// The `result` field as the model will see it: a string result is that
+    /// string's bytes verbatim; any other JSON value is compacted to JSON.
     result: []const u8,
     extension_error: ErrorBody,
 
@@ -134,7 +142,14 @@ pub fn decodeResponse(alloc: std.mem.Allocator, expected_id: []const u8, bytes: 
     if (has_result == has_error) return error.InvalidResponse;
 
     if (has_result) {
-        return .{ .result = try compactValue(alloc, obj.get("result").?) };
+        return .{
+            .result = switch (obj.get("result").?) {
+                // Text output: the bytes themselves, not a quoted-and-escaped JSON
+                // string literal (see the module doc).
+                .string => |text| try alloc.dupe(u8, text),
+                else => |value| try compactValue(alloc, value),
+            },
+        };
     }
 
     const err_obj = switch (obj.get("error").?) {
@@ -217,6 +232,24 @@ test "decode accepts a success response and compacts its result" {
         .result => |json| try std.testing.expectEqualStrings("{\"results\":[]}", json),
         .extension_error => unreachable,
     }
+}
+
+test "decode hands a string result over verbatim — newlines, quotes and non-ASCII unescaped, no surrounding quotes" {
+    const alloc = std.testing.allocator;
+    const res = try decodeResponse(alloc, "c1", "{\"jsonrpc\":\"2.0\",\"id\":\"c1\",\"result\":\"line 1\\nsay \\\"hi\\\" \\u2014 done\\n\"}");
+    defer res.deinit(alloc);
+    switch (res) {
+        .result => |text| try std.testing.expectEqualStrings("line 1\nsay \"hi\" \u{2014} done\n", text),
+        .extension_error => unreachable,
+    }
+    // Only a top-level string is text; a string nested in an object stays JSON.
+    const nested = try decodeResponse(alloc, "c1", "{\"jsonrpc\":\"2.0\",\"id\":\"c1\",\"result\":{\"text\":\"a\\nb\"}}");
+    defer nested.deinit(alloc);
+    try std.testing.expectEqualStrings("{\"text\":\"a\\nb\"}", nested.result);
+    // And the other scalars are still JSON, so `null` / numbers round-trip as such.
+    const scalar = try decodeResponse(alloc, "c1", "{\"jsonrpc\":\"2.0\",\"id\":\"c1\",\"result\":42}");
+    defer scalar.deinit(alloc);
+    try std.testing.expectEqualStrings("42", scalar.result);
 }
 
 test "decode accepts an error response" {

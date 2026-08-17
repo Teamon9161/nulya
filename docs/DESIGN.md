@@ -354,6 +354,7 @@ JSON-RPC 2.0，oneshot：spawn → stdin 一条 request → stdout 一条 respon
 ```
 
 - 响应 `id` 必须与请求相同，否则 invalid response。
+- **`result` 是任意 JSON 值，按形状交给模型：字符串 = 这个 tool 的文本输出，原样进 `emit`（与 builtin 的输出同地位，模型看到的就是那段文字）；其它值 = 结构化数据，compact JSON。** 不做这一分，返回文本的 tool（读文件、搜索列表）每次都让模型读一个转义过的 JSON 字符串。extension 的 JSON-RPC error 一律折成 `ok=false` 的 `extension error [<code>]: <message>`。
 - 一次调用的 wall-clock 上限来自 `tool.Timeouts.extension_ms`（30s，与 shell 同一张表，§6.1 / base-tools.md §3），**除非该 tool 的冻结 manifest 自己声明了 `timeout_ms`**（§7.2.1，上限 `extension_max_ms` = 600s，与 shell 的上限同值）：到点 kill，并把已捕获的 stderr 一起折成一次**失败的调用**（不是 host error、更不是取消）。native pin 的路径（`ext_tools.Binding`）与 CLI 的路径（`nulya ext run`）读的是同一个 manifest 字段，所以两边不会分岔。
 - 只有 `tool/call` 一个 method，用专用 `ToolCallRequest` 类型；**不提前抽通用 JsonRpcRequest**，等第二个 method 真出现。
 - 不做 daemon / persistent worker / streaming / host callback。spawn 一个原生 binary ≈ 毫秒，对比模型 round-trip 秒级可忽略；最高频的 shell/edit 是 in-core 内置根本不 spawn。真正的成本是某些 extension 每次调用的重初始化（浏览器 / DB 连接）——**先测量再持久化**（PLAN §3.3）。
