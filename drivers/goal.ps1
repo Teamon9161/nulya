@@ -40,7 +40,7 @@ that brief in a fresh context. A goal small enough to simply finish needs none.
 Goal:
 $goal
 "@ | Out-Null
-$log = '.nulya/goal-last-step.jsonl'
+$log = ".nulya/scratch/goal-$id.jsonl"; New-Item -ItemType Directory -Force (Split-Path $log) | Out-Null   # per goal run (the root id), so two goals never share it
 $i = 0
 while ($i -lt $max) {
     $i++

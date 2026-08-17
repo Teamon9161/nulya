@@ -172,3 +172,4 @@ Parent session: s-1786972293255-fd097b (forked at seq 5). The full transcript is
 - 仓库根目录的 store 需要一次 `nulya ext trust` 才能跑 driver / TUI——这是门的正常行为，但每个新 clone 都会撞一次；`ext trust` 的提示已经指路，暂不动。
 - TUI 的 `/goal`（tui.md T10）：内核与 driver 都就绪，前端未开工。
 - handoff 的 driver 守卫（context 太小时忽略提议、brief 太短退回 `/compact`）：PLAN §3.4.1 列着，等真实使用证据。
+- ~~driver 每步的流日志 `.nulya/goal-last-step.jsonl` 是全局单文件，两个 goal 并发会互踩。~~ 已改（合并后在 main 上顺手改的）：`.nulya/scratch/goal-<root session id>.jsonl`——按这次 goal 的根 session 命名，handoff 换 id 后文件不变，两个 goal 各写各的；两份脚本仍 67 / 70 行、离线 `handoff` 档实跑两平台都通。

@@ -38,7 +38,7 @@ that brief in a fresh context. A goal small enough to simply finish needs none.
 
 Goal:
 $goal" >/dev/null
-log=.nulya/goal-last-step.jsonl
+log=".nulya/scratch/goal-$id.jsonl"; mkdir -p "${log%/*}"   # per goal run (the root id), so two goals never share it
 i=0
 while [ "$i" -lt "$max" ]; do
   i=$((i + 1))
