@@ -157,10 +157,16 @@ export async function readActiveContributions(
  * `unknown` is a first-class answer. The kernel takes an exclusive advisory lock
  * on the sibling `<id>.lock` (DESIGN §3.4); on Windows that is a byte-range lock,
  * so a read of byte 0 from any other handle fails while it is held — a probe
- * that touches nothing. On POSIX the same lease is `flock`, which reads cannot
- * see at all, so this returns `unknown` there rather than lying about it: the
- * authoritative answer in that case is the kernel's own `SessionBusy`, which a
- * `session step` reports the moment we try to drive (see `state/attach.ts`).
+ * that touches nothing. On POSIX the same lease is `flock(2)` (Zig's std takes
+ * it wherever `O_EXLOCK` is not an open flag), which reads cannot see — but on
+ * Linux the kernel publishes every flock in `/proc/locks`, so matching the lock
+ * file's device and inode against that table is an equally read-only probe.
+ * Trying to *acquire* the lock instead would be a probe that touches: for the
+ * moment it holds the lease, a real writer's non-blocking `flock` turns into a
+ * spurious `SessionBusy`. Where neither works (macOS has no `/proc`), this
+ * returns `unknown` rather than lying: the authoritative answer there is the
+ * kernel's own `SessionBusy`, which a `session step` reports the moment we try
+ * to drive (see `state/attach.ts`).
  */
 export type LeaseState = "free" | "held" | "unknown"
 
@@ -172,7 +178,12 @@ export function probeWriterLease(ws: Workspace, id: string): LeaseState {
   const path = lockPath(ws, id)
   // No lock file at all: nobody has ever opened this session for writing.
   if (!existsSync(path)) return "free"
-  if (process.platform !== "win32") return "unknown"
+  if (process.platform === "win32") return probeByteRangeRead(path)
+  return probeProcLocks(path)
+}
+
+/** Windows: the lease is a mandatory byte-range lock, so a read of byte 0 is denied while it is held. */
+function probeByteRangeRead(path: string): LeaseState {
   let fd: number
   try {
     fd = openSync(path, "r")
@@ -189,6 +200,48 @@ export function probeWriterLease(ws: Workspace, id: string): LeaseState {
   } finally {
     closeSync(fd)
   }
+}
+
+/**
+ * POSIX: look the lock file up in `/proc/locks` by device and inode. Any lock
+ * on that inode counts as held — the kernel only ever takes `flock`, but if a
+ * future std switched lock flavors, "held" is the direction that keeps a live
+ * session's file safe from `discardIfUntouched`.
+ */
+function probeProcLocks(path: string): LeaseState {
+  let dev: bigint
+  let ino: bigint
+  try {
+    const stat = statSync(path, { bigint: true })
+    dev = stat.dev
+    ino = stat.ino
+  } catch {
+    // Present a moment ago (existsSync) and gone now: somebody is mid-cleanup;
+    // with the lock file gone there is nothing left to hold.
+    return "free"
+  }
+  let table: string
+  try {
+    table = readFileSync("/proc/locks", "utf8")
+  } catch {
+    // No /proc (macOS, BSDs): flock stays invisible here, and the honest
+    // answer is "don't know", never "free".
+    return "unknown"
+  }
+  // Split st_dev the way glibc's gnu_dev_major/minor do; /proc/locks prints
+  // `... <pid> <maj>:<min>:<ino> <start> <end>` with maj/min in hex.
+  const major = ((dev >> 8n) & 0xfffn) | ((dev >> 32n) & 0xfffff000n)
+  const minor = (dev & 0xffn) | ((dev >> 12n) & 0xffffff00n)
+  for (const line of table.split("\n")) {
+    for (const field of line.split(/\s+/)) {
+      const match = /^([0-9a-f]+):([0-9a-f]+):([0-9]+)$/.exec(field)
+      if (!match) continue
+      if (BigInt(parseInt(match[1]!, 16)) === major && BigInt(parseInt(match[2]!, 16)) === minor && BigInt(match[3]!) === ino) {
+        return "held"
+      }
+    }
+  }
+  return "free"
 }
 
 // --- un-creating an unused session ------------------------------------------
@@ -214,9 +267,9 @@ function siblingPath(ws: Workspace, id: string, suffix: string): string {
  *   - a non-empty inbox: somebody appended and no step drained it yet — a
  *     turn the user typed is in there, and the next open would drain it;
  *   - the writer lease held: a step is running this very moment;
- *   - on POSIX, a `.lock` at all: the probe cannot see `flock`, and the lock
- *     file only exists once something opened the session for writing, so the
- *     honest answer is "don't know" and the honest action is to leave it.
+ *   - the lease probe answering `unknown` (a POSIX without `/proc/locks`): the
+ *     lock file only exists once something opened the session for writing, so
+ *     when the probe cannot see who, the honest action is to leave it.
  *
  * Callers only ever pass ids THIS process created (`session new` from the
  * TUI); a session opened with `--session`, or somebody else's, is never a
@@ -227,11 +280,8 @@ function siblingPath(ws: Workspace, id: string, suffix: string): string {
 export function discardIfUntouched(ws: Workspace, id: string): boolean {
   const path = sessionPath(ws, id)
   if (!existsSync(path)) return false
+  if (probeWriterLease(ws, id) !== "free") return false
   const lock = lockPath(ws, id)
-  if (existsSync(lock)) {
-    if (process.platform !== "win32") return false
-    if (probeWriterLease(ws, id) !== "free") return false
-  }
   let text: string
   try {
     text = readFileSync(path, "utf8")

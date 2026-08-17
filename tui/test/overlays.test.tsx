@@ -120,9 +120,10 @@ test("/sessions marks a session somebody else is driving as live", async () => {
     <SessionsView ws={ws} currentId={first} onOpen={() => {}} onNew={() => {}} onClose={() => {}} />
   ))
   try {
-    // The marker comes from the lease probe, which cannot see a POSIX flock;
-    // there the honest answer is "unknown" and no marker is drawn.
-    if (process.platform === "win32") {
+    // The marker comes from the lease probe — a byte-range read on Windows, a
+    // /proc/locks lookup on Linux. Where neither exists (macOS) the honest
+    // answer is "unknown" and no marker is drawn.
+    if (process.platform === "win32" || process.platform === "linux") {
       await until(() => setup.captureCharFrame().includes("live"), 15_000)
       expect(setup.captureCharFrame()).toContain("live")
     }

@@ -39,15 +39,19 @@ async function drainStep(id: string, env: Record<string, string> = scripted_env,
 /**
  * The lease probe (tui.md §5.6). On Windows the kernel's exclusive lock is a
  * byte-range lock, so a read of the lock file is a faithful, non-mutating probe.
- * Elsewhere the same lease is `flock`, invisible to reads — the probe must then
- * say `unknown` rather than "free", because the difference decides whether the
- * screen claims to be driving something it is not.
+ * On Linux the same lease is `flock`, invisible to reads but published in
+ * `/proc/locks` — an equally non-mutating probe. Where neither exists the probe
+ * must say `unknown` rather than "free", because the difference decides whether
+ * the screen claims to be driving something it is not.
  */
+const probe_answers = process.platform === "win32" || process.platform === "linux"
+
 test("probeWriterLease sees the writer lease while a step runs", async () => {
   const id = await sessionNew(ws, { profile: "scripted" })
   await sessionAppend(ws, id, "hold the lease for a moment")
   const idle: LeaseState = probeWriterLease(ws, id)
-  expect(idle === "free" || idle === "unknown").toBe(true)
+  if (probe_answers) expect(idle).toBe("free")
+  else expect(idle === "free" || idle === "unknown").toBe(true)
 
   const step = sessionStep(ws, id, { env: scripted_loop_env, maxSteps: 400 })
   const seen: LeaseState[] = []
@@ -61,7 +65,7 @@ test("probeWriterLease sees the writer lease while a step runs", async () => {
   await step.exited
   await reader
 
-  if (process.platform === "win32") {
+  if (probe_answers) {
     expect(seen).toContain("held")
   } else {
     expect(seen.every((state) => state === "unknown" || state === "held")).toBe(true)

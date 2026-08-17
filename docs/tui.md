@@ -229,7 +229,7 @@ registry 按 shell 命令前缀识别，头行抽关键事实（抽不到就退�
 
 - **driver**（默认）：TUI 自己 spawn `step --stream`；`.lock` 由 step 子进程持有。
 - **observer**：`<id>.lock` 被别的进程独占（PLAN §3.6 的 driver 脚本、或另一个 TUI、或父 session 的 shell）→ 不 spawn step，只 `events --follow`（`--since` 续接）+ `append`（queued，等对方的下一 step 边界）。状态栏 `observer · driven elsewhere`。锁看上去持续空闲后弹一行 `press ↵ to take over`（手动，不自动抢）。
-- **角色靠两个信号判定，都不是猜**：①`<id>.lock` 探针（idle 时轮询；Windows 上内核的租约是字节区间锁，读第 0 字节即可无副作用地探到，POSIX 的 `flock` 读不到 → 探针答 `unknown`）；②内核自己的 `SessionBusy`——我们真去 step 时被拒，这一条在所有平台都权威。所以角色是**持续**跟着世界变的，不只是"打开时判一次"。
+- **角色靠两个信号判定，都不是猜**：①`<id>.lock` 探针（idle 时轮询，且必须**无副作用**——去"试着拿一下锁"的探法在持锁瞬间会把真 writer 的非阻塞 `flock` 挤成假 `SessionBusy`，不算探针。Windows 上内核的租约是字节区间锁，读第 0 字节即可探到；Linux 上同一租约是 `flock(2)`，读不到但内核在 `/proc/locks` 里公示，按锁文件的 dev:inode 查表即可；两者都没有的 POSIX（macOS）→ 探针诚实地答 `unknown`）；②内核自己的 `SessionBusy`——我们真去 step 时被拒，这一条在所有平台都权威。所以角色是**持续**跟着世界变的，不只是"打开时判一次"。
 - observer 看不到 deltas（deltas 只在 driver 的 stdout）：v1 接受 step 粒度；真正需要时的路径是 kernel 把流也写进 `<id>.live` sidecar，TUI 换 tail 源（`nulya/cli.ts` 内部一处改）。
 
 ## 6. 视觉规范
@@ -891,3 +891,14 @@ cd tui && bun test test/compact.test.ts
 - T7 的那两条仍在：`/sessions` 不显示 parent 链；上下文占用只有 `--stream` 那条路有 usage。
 
 核验（编排者）：`zig build test` 绿 / `zig build e2e` 绿 / `bun run typecheck` 绿 / `bun test` 110 pass（`files.test.ts` 的 `probeWriterLease` 与 `overlays.test.tsx` 的 live 标记在整套并跑时偶发超时——T3 起的老现象，单文件跑都是秒过）。
+
+### T9 之后 · Linux 的租约探针（2026-08-17）
+
+**状态**：完成。T3 的第一条已知问题（"非 Windows 上没有 `● live`，角色只能靠 `SessionBusy` 事后知道"）在 Linux 上解除；内核零改动。
+
+1. **根因。** 内核的租约（`ledger.acquireWriterLease`）在 Linux 上是 `flock(2)`——Zig std 在 `posix.O` 没有 `EXLOCK` 的平台走 `flock` 路径（0.16 的 `Io/Threaded.zig`）。锁随句柄关闭释放，但锁**文件**永不删除（POSIX 惯例，unlink 有竞态），而 `files.ts` 的非 win32 分支把"锁文件存在"直接当 held/unknown → `discardIfUntouched` 在 Linux 上恒 false（每个看一眼就关的 session 都留下空文件）、探针恒 `unknown`（observer 只能等 `SessionBusy`）。
+2. **探法：查 `/proc/locks`，不去碰锁。** 内核把每个 flock 公示在 `/proc/locks`（`FLOCK ADVISORY WRITE <pid> <maj>:<min>:<ino> …`）；`stat` 锁文件拿 dev:inode、按 glibc 的 `gnu_dev_major/minor` 拆 `st_dev`、在表里找同 inode 的行——**纯读**，与 Windows 的字节区间探针同一性质。曾考虑 `flock -n <file> -c true` 子进程：语义匹配（同为 flock(2)），但它是 try-acquire——探针持锁的那一瞬，真 writer 的 `LOCK_NB` 会被挤成假 `SessionBusy`（attach 每 700ms 探一次、driver 脚本循环抢锁，撞得上），故弃。匹配放宽到"该 inode 上任何锁都算 held"：内核只拿 flock，但万一将来 std 换锁种，错向 held 是保住活 session 文件的方向。
+3. **`discardIfUntouched` 收敛成一条。** 平台分支删掉，守卫统一为 `probeWriterLease(...) !== "free"`：win32 走字节探针（行为不变）、Linux 走 `/proc/locks`、没有 `/proc` 的 POSIX（macOS）照旧 `unknown` → 保守留下。
+4. **测试收紧。** `files.test.ts` 的探针断言在 Linux 与 Windows 同级（idle 必须 `free`、别人 step 期间必须见到 `held`）；`overlays.test.tsx` 的 `● live` 标记断言扩到 Linux。`bun test` 110 条在 Linux 全绿——T3 那句"非 Windows 路径未跑过"也一并作废。
+
+**已知问题**：macOS 仍是 `unknown`（没有 `/proc/locks`；`fcntl F_GETLK` 看不见 flock）。真要即时性，路径仍是 T3 记过的那条：内核往 `<id>.lock` 里写 owner pid——内核改动，等需要它的人出现。
