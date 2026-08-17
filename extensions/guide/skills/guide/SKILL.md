@@ -166,6 +166,22 @@ Store and scope:
 - Handover is the model's half of that: a tool that writes a brief and stops,
   leaving the driver to decide whether to act on it. The shape is the same in
   any workspace even where those particular files are not.
+- Write your own driver in whatever runs here. Where Python is available it is
+  the simplest: one file for every platform, `subprocess` for the verbs, `json`
+  for the event lines (the bundled pair is sh + PowerShell only because a nulya
+  checkout assumes nothing beyond its own binary). The skeleton is always:
+
+  ```python
+  import json, os, subprocess
+  N = os.environ.get("NULYA_EXE", "nulya")
+  run = lambda *a: subprocess.run([N, *a], capture_output=True, text=True, check=True).stdout
+  sid = run("session", "new").strip()
+  run("session", "append", sid, "the goal, and how you want it worked")
+  while True:
+      events = [json.loads(l) for l in run("session", "step", sid, "--max-steps", "1").splitlines() if l]
+      last = [e for e in events if e.get("kind") == "assistant"]
+      if last and not last[-1].get("calls"): break     # end of turn: decide, append, or stop
+  ```
 
 ## Evidence
 
