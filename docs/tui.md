@@ -292,6 +292,8 @@ fold   = "ctrl+o"
 
 | ~~**T8 · 慢速回路的前端**~~ ✅ | `/outcome <verdict> [note]`（→ `nulya session outcome`，`/quit` 问一次）；`/sessions` 改读 `nulya session list --json`（verdict / usage / parent / composition，不再自己扫 header）；`/evolve`（`ext build extensions/evolution` → `session new --with evolution@<v>`）；`/mode <id>[@<v>]`；token 计数改以 ledger `assistant.usage` 为准；`/ext` 认多 root 与 `shadowed`。**内核零改动** | `bun test` 111 pass；评一次 verdict 后 `/sessions` 里看得到；`/evolve` 起来的场次 composition 里带 `evolution@<v>`、CompositionCard 显示 `prompts 1` |
 
+| **T10 · `/goal`（占位，未开工）** | spawn 随仓库带的 driver 脚本（`win32` → `powershell -NoProfile -ExecutionPolicy Bypass -File drivers/goal.ps1`，否则 `sh drivers/goal.sh`），把它的 **stderr 喂给已有的 `--stream` 解析器**（token delta / tool begin-end / usage 全在里面），把它的 **stdout 当控制通道**：`session <id>` 开 tab、`handoff <old> -> <new>` 换 tab（原 tab 留着可回看）、`done <id>` 收尾并提示 `/outcome`。跟随中的 tab 是 **observer**（driver 持着写者 lease）。**内核零改动**，也不需要 §10.4 的 `<id>.live` sidecar | 起一个两阶段目标：token 实时可见；handoff 时自动切到子 session；`Esc` 停得下来（`session cancel` 或杀脚本）|
+
 顺序 T0 → T1 → T2 → T3 → T4；**T1 结束就开始用它 dogfood**，T2 起的优先级由用出来的痛点重排（T5–T8 就是这么来的）。
 
 **M5 给前端的新面**（内核已落地，T8 已全部消费）：`nulya session list [--json]`（一次拿到每场的 composition / parent / 事件数 / usage / 最新 verdict——`/sessions` 不必再自己解析 header）· `nulya session outcome <id> <verdict> [--note]`（写 outcome journal，不碰 session 文件，所以正在跑的场次也能评）· `session new --with <id>[@<version>]`（把一个 built 但**不 activate** 的包带进这一场——mode / evolution 就是这么投放的）· ledger 里 `assistant.usage`（每步真实成本，状态栏和 `/usage` 可以按步显示而不只是累计）· extension 的 user root `~/.nulya/extensions`（`/ext` 视图要标出每个 id 来自哪个 root、谁被遮蔽）。
@@ -301,7 +303,7 @@ fold   = "ctrl+o"
 1. **spawned-by 谱系**：subagent 的 `session new` 在 `NULYA_SESSION` 存在时是否自动记一个 header 字段（`spawned_by{session,seq}`，与 `parent` 分开）？是 provenance fact，成本几行；但等 subagent skill 成为第一个 consumer 再定字段名与语义。
 2. ~~**`nulya config show [--json]`**：外壳级投影，供 `/new --model` 选择器与 agent 自查；v1 手打 profile 名。~~ **已落地（T5）**：DESIGN §14；`/model` 读它。
 3. **`session append` 打印投递回执**（inbox 文件名）→ TUI 按 `origin` 精确转正而非按序匹配；现在按序够用。
-4. **`<id>.live` sidecar**：observer 模式的 deltas；等第一个 driver 脚本。
+4. ~~**`<id>.live` sidecar**：observer 模式的 deltas；等第一个 driver 脚本。~~ **不需要了（M2c）**：第一个 driver（`drivers/goal.*`）把 `session step --stream` 的行协议**原样透传到自己的 stderr**，stdout 只留控制行——spawn 它的前端直接拿到 deltas，既不用 sidecar 文件也不用内核改动（DESIGN §11）。仍未解的只有"别人跑的 driver"（不是我 spawn 的那种）：那条路还是只有 `events --follow` 的 turn 级粒度。
 5. **`nulya composition preview`**：下一场的工具面长什么样（config 的 pin + `--pin` + 冻结版本合出来的结果）——纯投影 CLI，省得 TUI 自己拼。
 6. **`split-footer` 模式**作为可选屏幕模式（scrollback 原生复制），与折叠可变历史的取舍。
 7. session `--system-file/--skill/--pin`（PLAN §3.2 未落地）落地后 `/new` 的表单。
@@ -902,3 +904,16 @@ cd tui && bun test test/compact.test.ts
 4. **测试收紧。** `files.test.ts` 的探针断言在 Linux 与 Windows 同级（idle 必须 `free`、别人 step 期间必须见到 `held`）；`overlays.test.tsx` 的 `● live` 标记断言扩到 Linux。`bun test` 110 条在 Linux 全绿——T3 那句"非 Windows 路径未跑过"也一并作废。
 
 **已知问题**：macOS 仍是 `unknown`（没有 `/proc/locks`；`fcntl F_GETLK` 看不见 flock）。真要即时性，路径仍是 T3 记过的那条：内核往 `<id>.lock` 里写 owner pid——内核改动，等需要它的人出现。
+
+### T10 · `/goal`（占位，未开工）
+
+**状态**：设计已定、内核侧全部就绪，TUI 代码一行未写。写在这里是为了不把它忘掉，也为了说清"为什么这一条不需要内核再长东西"。
+
+内核侧 M2c 已经落地（DESIGN §11）：随仓库带的 `extensions/handoff`（模型在阶段边界提议）、`compact` 的 `brief_file` 分支（只 fork、旧文件逐字节不变）、以及 `drivers/goal.sh` / `drivers/goal.ps1`——**第一个 driver**。前端要做的只是 spawn 它并读两个流：
+
+- **stdout = 控制通道**，只有四种行：`session <id>`（开 tab 并跟随）、`handoff <old> -> <new>`（换到子 session 的 tab；父 tab 留着，`/sessions` 里它们同 `root`）、`done <id>`、`evaluate: …`（提示 `/outcome`）。一行 JSON 都不会混进来，e2e 钉住了这一点。
+- **stderr = `session step --stream` 的行协议原样透传**，正是 `tui/src/nulya/cli.ts` 已经在解析的东西（T0 定的 §2.2）。所以 `/goal` 里的 token delta、tool begin/end、usage 与手打一条消息时走的是同一个渲染路径。
+
+跟随中的 tab 天然是 **observer**（driver 进程持着写者 lease，§5.6 的两个信号照旧适用）；`Esc` 的语义是 `nulya session cancel <当前 id>`，driver 会在下一个 step 边界看到。选脚本按平台：`process.platform === "win32"` → `powershell -NoProfile -ExecutionPolicy Bypass -File drivers/goal.ps1`，否则 `sh drivers/goal.sh`；两份脚本逐行对齐，行为相同。
+
+**不做**：把 goal loop 内建进 TUI（PLAN §3.6 的整条论证——driver 是可替换的脚本，前端是客户端不是过程的所有者）；也不做 handoff 的守卫阈值（那是 driver policy，等真实使用证据，PLAN §3.4.1）。
