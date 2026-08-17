@@ -48,7 +48,8 @@ kernel  = ledger 文件格式 + PromptIR 投影 + 一次 step + 工具执行 + c
 - 目标：session 可被任何进程驱动；extension 制造无需编译。
 - **M2a ✅ 已落地 → DESIGN §14：** `session new|append|step|events|cancel`（`step --max-steps N` 由 kernel 夹到 `session.max_steps_ceiling`）；`main.zig` demo 已改走 durable session 路径。e2e：shell 脚本 driver 完成 `/goal` 循环、`--max-steps` 被 kernel 强制。review 后收紧（DESIGN §3.4/§4/§14）：只有 `step` 写主文件——`append` 走 inbox、`cancel` 是 `<id>.cancel` 标记且由 kernel 在 step 边界消费（mid-run 也能停）、`events` 只读 tail；`close` 因无语义删除；`persist` 加第二写者守卫。
 - **M2b ✅ 已落地 → DESIGN §7.1/§7.4：** `runtime.entry` 前缀区分编译/脚本，脚本不编译、version = hash(snapshot)（不含 compiler）；`nulya ext init --script`；`ext run --arg k=v`。e2e：`run.ps1`/`run.sh` extension 走完 init → build(seal) → activate → run → 被 pin 成 native 并经 interpreter 执行；version 不含 compiler identity、rebuild 稳定。
-- **M2c · Compaction / handoff（§3.4）：** fork 原语 ✅（`session new --parent`：父必须存在、不点名模型即继承父的冻结身份、composition 不继承 → DESIGN §11）；driver 主动的 `/compact [focus]` ✅（TUI，tui.md T7）。**待做——模型主动的 handoff**：随仓库带一个 `handoff` script extension（源码与 M5 的 `extensions/evolution/` 同层；**默认不在 composition 里**，由 `/goal` driver 经 `session new --pin` 带入——`--pin` 已落地（DESIGN §5.1/§14），`/goal` 是它的第一个真实 consumer）；`/goal` driver 脚本认 step 输出里的 `handoff` call → 同一个 fork 流程；TUI 认同一个 call、observer 跟随子 session。验收（e2e，scripted provider 加一档"发 `handoff` call"）：driver 跑 goal loop → 模型调 `handoff` → driver fork，子 header `parent` 指向 `父:seq`、子 PromptIR 首块是 brief、旧文件字节不变；`handoff` tool 对缺节的 brief 返回错误且不落盘。
+- **M2c · Compaction / handoff（§3.4）✅ 已落地 → DESIGN §11：** fork 原语（`session new --parent`）+ driver 主动的 `/compact [focus]`（TUI，tui.md T7）+ **模型主动的 handoff**：随仓库带的 `extensions/handoff`（只 propose、落盘 `.nulya/handoffs/<session>-<n>.md`、缺节 / 不在 session 里都不落盘）· `compact` 的 `brief_file` 分支（只 fork，旧文件逐字节不变）+ 两条路径都由代码追加父指针 footer · `drivers/goal.sh` / `goal.ps1`（第一个 driver，`--pin` 的第一个真实 consumer；stdout 只有控制行、stderr 原样透传 `session step --stream`）。**内核零改动**，只给 `launch.ScriptedProvider` 加了第四档离线替身（DESIGN §13）。验收：`zig build test` / `e2e` 在 Windows 全绿，e2e 新增四条（compact 的 `brief_file`、handoff 的拒绝与落盘、`--with` + `--pin` 的 native 执行、真实 driver 脚本跑完两阶段）。
+  - **落地时改了三处措辞**（理由已在 DESIGN §11 / goals/M2c.md §3）：① `handoff` 是 **compiled** extension 而不是 §3.4.1 说的 script——tool 要读 JSON-RPC、回同一个 `id`、校验分节，而一个 manifest 只有一个 `interpreter`，随仓库带的东西没法 ps1 + sh 各一份还共用一个 version（PLAN §0.1 #3 给 Zig 留的正是这种情况）；② 父指针 footer 由 **compact 的代码**追加，不靠模型记得写（driver 经 `session append` 投一条 user turn，仍是 propose→append 的正统用法）；③ `/goal` 是**脚本对**而不是 extension——一个 driver 一跑几十分钟，而 `ext run` 强制 manifest 的 `timeout_ms`（上限 600s），driver 不是一次 tool call；信号因此走文件与行协议，两份脚本都不解析 JSON（这也是它们各能压在 70 行内的原因）。
 
 ### M3 · `nulya src` + 文档（§3.10）✅ 已落地 → DESIGN §14
 - 已做：build.zig 把 `src/**/*.zig` `@embedFile` 进二进制（恒开无 gate）；`nulya src [path] [--tests]` 打印（无参数列全树），**默认剥 top-level `test` 块**、`--tests`/`--raw` 原样（`source.zig`）；测试留在文件里，剥离是投影不是存储。`nulya ext api` 的协议 topic 变成 `nulya src extension/protocol.zig` 的特例（零漂移），去掉手抄的 wire shapes。
@@ -104,7 +105,7 @@ fork / compaction（新文件 + `parent` 指针，前端沿 parent 链呈现连�
 
 ✅ **`nulya session new|append|step|events|cancel` 已实现**，现状见 [DESIGN §14](DESIGN.md)。`step --max-steps N` 由 kernel（`AgentSession.run`，`session.max_steps_ceiling`）强制；每次调用是对 durable session 文件的独立进程，且只有 `step` 写主文件（`append` 走 inbox、`cancel` 是标记、`events` 只读 tail）；`step` stdout = 本次追加的事件 JSONL；`cancel` 由 kernel 在 step 边界消费；bare `nulya` demo 已改走同一 durable 路径。
 
-**尚未落地的子项：** `--pin`（现从 config 取 composition；第一个真实 consumer = `/goal` driver 带入 `handoff`，§3.4.1）；`--budget-tokens`；`events --follow` 只做了轮询骨架。`--system-file` / `--skill` **已被 `session new --with <id>[@<version>]` 吸收**（M5e → DESIGN §14）：把一个 built 的 data extension 带进这一场，system_prompt 与 skill 一起进——比两个各管一半的 flag 更小，也让 mode 这件事不需要新机制。下面的 subagent / 编排用法等第一个真实 consumer 出现再写实（它们是**用法**，不改 kernel）：
+**尚未落地的子项：** `--budget-tokens`；`events --follow` 只做了轮询骨架。`--pin` 已落地并有了第一个真实 consumer（`drivers/goal.*` 带入 `handoff`，§3.4.1 → DESIGN §11）。`--system-file` / `--skill` **已被 `session new --with <id>[@<version>]` 吸收**（M5e → DESIGN §14）：把一个 built 的 data extension 带进这一场，system_prompt 与 skill 一起进——比两个各管一半的 flag 更小，也让 mode 这件事不需要新机制。下面的 subagent / 编排用法等第一个真实 consumer 出现再写实（它们是**用法**，不改 kernel）：
 
 ```
 nulya session new   [--system-file f] [--skill a,b] [--pin ext:x/y] [--model profile] [--parent s:seq]  → 打印 session-id
@@ -144,14 +145,15 @@ loop until objective / swarm           → 脚本
 
 仍未做的相邻项：
 - **自动触发**。没有对应的 config 键；TUI 只在 ctx ≥60% 时把 `/compact` 显示出来，不代替人按。自动压缩失手的代价是一整段对话，所以先让人按，等有真实使用证据再说。
-- **沿 parent 链呈现连续对话**。`/sessions` 目前把父与子列成两行，不显示它们是同一场。
-- **模型主动的 handoff**（原"让压缩落在自然断点而不是 token 阈值上"）——设计已定，见下，落地归 M2c。
+- **沿 parent 链呈现连续对话**。`/sessions` 目前把父与子列成两行，不显示它们是同一场（`session list --json` 的 `root` 已经算好了，前端还没用它连起来）。
 
-#### 3.4.1 Handoff：同一个 fork，换个触发者 `[写实 · M2c]`
+#### 3.4.1 Handoff：同一个 fork，换个触发者 `[已落地 · M2c → DESIGN §11]`
+
+✅ **已实现**（`extensions/handoff` + `compact` 的 `brief_file` 分支 + `drivers/goal.*`，现状见 [DESIGN §11](DESIGN.md)）。下面保留的是设计本身；三处措辞在落地时改了，记在 §1 M2c 里。
 
 `/compact` 是 driver 因为"满了"发起；handoff 是**模型**因为"一个阶段做完了、剩余工作不再需要过程细节"发起。动作完全相同——旧 session 写 brief → `session new --parent` → brief 作首条 turn → 旧文件不动；只有触发者、信号、brief 侧重三处不同：
 
-| | `/compact`（已落地） | `handoff`（待做） |
+| | `/compact` | `handoff` |
 |---|---|---|
 | 触发 | driver：用户敲命令 / token 压力 | 模型：阶段边界（/goal 里用户可预设阶段计划） |
 | 信号 | driver append 一条请求 `user_text`，下一条 assistant 文本就是 brief——由构造保证，**文本够用** | 模型调 `handoff` **tool**（下）——模型"发起"靠约定字符串太脆（忘写 / 写在正文中间 / 包进 code fence，driver 只能 regex 猜）；tool call 结构化、可校验、说明书随 tool description 每场可见 |
@@ -160,19 +162,19 @@ loop until objective / swarm           → 脚本
 
 **`handoff` tool 的形状（内核零改动）：**
 
-- **不是第三个 builtin**，是一个 **script extension**（`ext init --script`，data/script kind、免 zig）contribute 的 tool，随仓库带（与 M5 的 `extensions/evolution/` 同层）。落点就是 extension > cli > kernel 的正统位置。nulya **没有 "std tool" 层**——一个"永远在模型面前"的标准工具集只是第三、第四个 builtin 换了名字；随仓库带的一方 skill / extension 是**默认可得、按需可见**。
-- **默认不在任何 composition 里；由需要它的 driver 在 `session new` 时 pin。** 极简 / 交互模式（人坐在 TUI 前，只有 shell + edit）不给：那时 driver 是人、人有 `/compact`，模型替人决定"这场对话该换文件"是越位；没人消费的 tool 是对模型撒谎（result 说"已记录"而什么都不发生）；每场白占一个 `max_tools` 槽和前缀 token，常驻的逃生口诱发不当使用。physics 上两边都合法，所以这是 composition 的选择，归组 session 的人——`/goal` 的 `session new --pin ext:handoff/…` 才带上它。这使 handoff 成为 `--pin`（§3.2 待落地）的**第一个真实 consumer**；`--pin` 落地前用 workspace 级 `registry.pinned_native_tools` 过渡。这是 tool 方案唯一比文本多出的依赖——tool 必须在冻结的 composition 里。
-- schema 分节（`done` / `next_task` / `keep` / `drop?` 之类，随第一版 prompt 定）。extension **校验**（缺节 → 返回错误让模型重来）→ **落盘** `.nulya/handoffs/<session>-<seq>.md`（诚实的实际效果，人可看）→ 返回"handoff 已记录，不要再调工具，结束本轮"。
-- **tool 只 propose、不 fork。** driver 是唯一决定"现在 step 哪个文件"的人：tool 自己 `session new --parent` 会留下 driver 没跟上的孤儿子 session，且 fork 代码会有两处。driver 看到 step 输出 JSONL 里 `calls[].name == "handoff"` → 取 arguments 为 brief → 走 `/compact` 同一个 fork 过程 → 切到子 id。TUI 作为 in-process driver 认同一个 call。这与 physics §3 同构：模型 propose，driver 决定。
+- **不是第三个 builtin**，是一个随仓库带的 extension contribute 的 tool（与 `extensions/evolution/` 同层；落地为 **compiled**，理由见 §1 M2c ①）。落点就是 extension > cli > kernel 的正统位置。nulya **没有 "std tool" 层**——一个"永远在模型面前"的标准工具集只是第三、第四个 builtin 换了名字；随仓库带的一方 skill / extension 是**默认可得、按需可见**。
+- **默认不在任何 composition 里；由需要它的 driver 在 `session new` 时 pin。** 极简 / 交互模式（人坐在 TUI 前，只有 shell + edit）不给：那时 driver 是人、人有 `/compact`，模型替人决定"这场对话该换文件"是越位；没人消费的 tool 是对模型撒谎（result 说"已记录"而什么都不发生）；每场白占一个 `max_tools` 槽和前缀 token，常驻的逃生口诱发不当使用。physics 上两边都合法，所以这是 composition 的选择，归组 session 的人——`/goal` 的 `session new --pin ext:handoff/…` 才带上它。这使 handoff 成为 `--pin` 的**第一个真实 consumer**。这是 tool 方案唯一比文本多出的依赖——tool 必须在冻结的 composition 里。
+- schema 分节 `done` / `next_task` / `keep` / `drop?`。extension **校验**（缺节 → 返回错误让模型重来）→ **落盘** `.nulya/handoffs/<session>-<n>.md`（诚实的实际效果，人可看；`n` 是 per-session 计数，不是 ledger seq——tool 拿不到 ledger）→ 返回"handoff 已记录，不要再调工具，结束本轮"。
+- **tool 只 propose、不 fork。** driver 是唯一决定"现在 step 哪个文件"的人：tool 自己 `session new --parent` 会留下 driver 没跟上的孤儿子 session，且 fork 代码会有两处。driver 看到**新落盘的那个文件** → 走 `/compact` 同一个 fork 过程（`compact --arg brief_file=<它>`）→ 切到子 id。落地时信号从"解析 step 输出里的 call"换成了文件，因为文件让两份 driver 脚本都不必解析 JSON（§1 M2c ③）。这与 physics §3 同构：模型 propose，driver 决定。
 - **不加** `session transfer` CLI 动词，**不加** `<id>.handoff` 标记文件（`<id>.cancel` 是 kernel 消费的；driver 语义的文件混进内核布局就越界）。physics §8："何时该继续"是 policy。
 
-**brief 的一条硬约定：带上父 session id。** 旧 ledger 还在盘上，新 session 有 shell——brief 末尾写"父 session `<id>`，细节 `nulya session events <id> --since N`"，lossy 压缩就变成 lazy 检索，模型判断失误也有救。`/compact` 的 prompt 也该补这句。
+**brief 的一条硬约定：带上父 session id。** 旧 ledger 还在盘上，新 session 有 shell——carried 文本末尾写"父 session `<id>`，细节 `nulya session events <id>`"，lossy 压缩就变成 lazy 检索，模型判断失误也有救。落地时这段由 **compact 的代码**追加、两条路径都加，不靠模型记得写（§1 M2c ②）。
 
 **关于省 token，诚实地说：** 有 prefix cache 后（DESIGN §13 实测 cache_read ≥ 90%），长 context 每步的边际成本 ≈ cache_read 价（约 0.1×）× 前缀长度，handoff 的节省约是朴素估算的 1/10——长时 /goal 里 phase 1 探索产生的大量 tool 输出被 phase 2 每步重读、cache TTL 过期后的重写，仍然可观，但**更大的收益是质量**：context 越长模型越糊，阶段性换到干净 context 常比省钱更值。真正的成本是信息丢失（转述游戏），靠"父 session 可回查"与边界选择缓解。
 
-**守卫（都是 driver policy，不进内核）：** 模型判断"阶段完了"不可靠、也可能拿 handoff 逃避难题——/goal 让用户给阶段计划（"explore → design → implement → verify，阶段间 handoff"）；context 太小时忽略 handoff call（fork 没意义）；brief 缺失或太短退回 `/compact` 流程再要一次；两种触发共存——边界优先 handoff、压力兜底 compact，一条代码路径。
+**守卫（都是 driver policy，不进内核；第一版 driver 一条都没做，等真实使用证据）：** 模型判断"阶段完了"不可靠、也可能拿 handoff 逃避难题——`/goal` 已经让用户给阶段计划（"explore → design → implement → verify，阶段间 handoff"，缺省也是这四段）；还没做的是 context 太小时忽略提议（fork 没意义）、brief 太短退回 `/compact` 再要一次。两种触发共存——边界优先 handoff、压力兜底 compact——已经是一条代码路径了。
 
-**前端跟随（归 tui.md）：** /goal 作为脚本跑时 TUI 是 observer，driver handoff 后 tab 要切到子 session；`/sessions` 已按 parent 分组，"跟随最新子节点"可做，得记着做。
+**前端跟随（归 tui.md T10，未做）：** `/goal` 作为脚本跑时 TUI 是 observer，driver handoff 后 tab 要切到子 session。落地后前端不必猜：driver 的 stdout 就是控制行（`session` / `handoff <old> -> <new>` / `done`），stderr 是 `--stream` 行协议原样透传，喂给已有的解析器即可。
 
 ### 3.5 能力演化 evidence（原 v0.2 Phase A–E）`[写实 · M6]`
 
@@ -201,7 +203,7 @@ Scratch → Build → Validate → Seal → Verify(sealed) → Activate → Obse
 
 `A → C` 是分水岭：AI 造出来 → exact artifact immutable → exact artifact 自证 → 观测的是 exact artifact 的真实使用。
 
-### 3.6 SessionDriver 作为脚本 `[写实 · M2 后，第一个 consumer = /goal]`
+### 3.6 SessionDriver 作为脚本 `[已落地 · M2c → DESIGN §11；第一个 consumer = drivers/goal.*]`
 
 > **Kernel 负责 session 怎么正确运行；driver 负责 session 为什么、什么时候、以什么顺序运行。**
 
@@ -214,7 +216,7 @@ Kernel 自带隐式 DefaultDriver：`user message → step → (有 tool call? �
 3. **hidden state 可调度，model-visible state 只能 append。** driver 自己的 `iterations=7` 随便存；一旦要影响模型看到什么，必须显式 append 或 `session new`。
 4. **budget / termination / cancellation 最终权在 kernel。** driver 只 propose；`--max-steps` 越不过。
 
-**第一个真实 driver = `/goal`，长这样**（`tests/e2e.zig` 的 goal loop 加一个分支；`id` 是 driver 的 hidden state）：
+**第一个真实 driver = `/goal`，✅ 已落地为 `drivers/goal.sh` + `drivers/goal.ps1`**（各 ≤ 70 行、逐行对齐，现状见 DESIGN §11）。设计当初长这样，落地形状只在"信号怎么读"上不同（`id` 是 driver 的 hidden state）：
 
 ```
 id = session new …；append id <目标 + 阶段计划 + "阶段做完就调 handoff">
@@ -225,7 +227,7 @@ loop {
 }
 ```
 
-"现在 step 哪个文件"永远只有 driver 知道——模型经 `handoff` tool 提议，driver 决定并执行 fork。**fork 那一段不用再写一遍**：`extensions/compact` 已经是它（DESIGN §11），`/goal` 拿到 handoff 的 brief 后调同一个 tool，`session new --parent` 因此仍然只在一处被调用。`/goal` 本身多半也是一个 extension（先用 `ext init --script` 试；要解析 `session step` 的 JSONL 就走 `compact` 的老路，编译一个），TUI 的 `/goal` 只是 spawn 它并以 observer 跟随（含跟到子 session）；不在 TUI 里内建 goal loop（tui.md）。
+"现在 step 哪个文件"永远只有 driver 知道——模型经 `handoff` tool 提议，driver 决定并执行 fork。**fork 那一段没有写第二遍**：`extensions/compact` 已经是它（DESIGN §11），`/goal` 拿到 brief 后调同一个 tool 的 `brief_file` 分支，`session new --parent` 因此仍然只在一处被调用。落地时 `/goal` **没有**做成 extension 而是一对脚本：`ext run` 对 extension tool 强制 manifest 的 `timeout_ms`（上限 600s），而一个 driver 一跑几十分钟——driver 不是一次 tool call；且 script extension 一个 manifest 一个 interpreter，跨平台就得两个包。信号因此走文件（handoff 落盘的那个 md）与行协议（`"stopped":"end_turn"`），两份脚本都不解析 JSON。TUI 的 `/goal` 只是 spawn 它并以 observer 跟随（含跟到子 session）；不在 TUI 里内建 goal loop（tui.md T10，未做）。
 
 **两种"灵活"要分清：** Pi 给 extension **mutation power**（改 tools / system prompt / messages / provider payload），代价是 cache / 可复现 / security 靠 extension 自觉；Nulya 给 **composition power**（编排 Session A / B / Tool X / Skill Y，每个 primitive 不可篡改）。"workflow 可以随便长，但改不了 kernel physics"。
 
@@ -313,7 +315,7 @@ Driver 演化比 Tool 保守，因为**归因难**（任务难度 / model / seed
 
 - ~~ledger 文件的并发 append：POSIX O_APPEND vs Windows inbox 目录，实测定。~~ 已定：跨平台统一 inbox 目录 + `persist` 长度守卫（DESIGN §3.4）。剩下的边角：`append` 走 inbox 后，`events` 在下一 step 前看不到 pending 的 user turn——前端若要"立即回显"得自己记。
 - session id 与 workspace 的关系；多 workspace / 多用户下 extension 复用与隔离边界。
-- ~~compaction 触发：token 阈值 vs task 边界 vs 混合；summary 由谁生成（agent 自己 vs 专用 session）。~~ 已定（§3.4）：混合——边界由模型经 `handoff` tool 主动提、压力由 driver `/compact` 兜底，汇到同一条 fork 路径；summary 一律由旧 session 自己在 cache 前缀上写，不开专用 session。剩下的边角：handoff 的守卫阈值（多小的 context 不值得 fork）、brief schema 分节强制到什么程度，等 /goal 跑起来看。
+- ~~compaction 触发：token 阈值 vs task 边界 vs 混合；summary 由谁生成（agent 自己 vs 专用 session）。~~ 已定（§3.4）：混合——边界由模型经 `handoff` tool 主动提、压力由 driver `/compact` 兜底，汇到同一条 fork 路径；summary 一律由旧 session 自己在 cache 前缀上写，不开专用 session。剩下的边角：handoff 的守卫阈值（多小的 context 不值得 fork）、brief schema 分节强制到什么程度——两者第一版 driver 都**故意没做**（§3.4.1），等 `drivers/goal.*` 有真实使用证据再定，不靠想象拍阈值。
 - `max_tools` 的初值（安放处 `default.toml` 已定，值待调）。~~排序权重初值~~ 不再是问题：排序 policy 已整个移出内核，native 面只由 pin 决定（DESIGN §5.1/§5.5）。
 - ~~`session_outcome` 的最小 verdict 集合；用户不给 verdict 时的默认（缺失 ≠ 失败）。~~ 已定（M5a → DESIGN §3.3）：`success | partial | failure` 三值；**没有行 = unknown ≠ failure**；同一 session 可多行、最后一条作数；不加 `source`（今天只有人写；将来 driver 自动记时再加，届时无 `source` 的 v1 行 = 人评）。
 - Verify 套件与 golden 输入数据的 snapshot 边界。

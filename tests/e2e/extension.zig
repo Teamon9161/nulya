@@ -10,6 +10,7 @@ const build_ext = support.build_ext;
 const composition = support.composition;
 const environment = support.environment;
 const integrity = support.integrity;
+const launch = support.launch;
 const ledger = support.ledger;
 const prompt = support.prompt;
 const protocol = support.protocol;
@@ -1168,6 +1169,269 @@ test "bundled compact: ext build extensions/compact, then ext run forks the sess
     defer alloc.free(missing.stdout);
     try std.testing.expectEqual(@as(u8, 1), missing.code);
     try std.testing.expect(std.mem.indexOf(u8, missing.stdout, "s-does-not-exist") != null);
+}
+
+/// The repo's own copy of a bundled extension, built into this workspace's store.
+/// Returns `<id>@<version>` — the ref every caller here runs it by, since a
+/// bundled extension is never activated. Caller frees. Skips the test when the
+/// harness did not name a repo or a toolchain.
+fn buildBundled(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, exe_abs: []const u8, id: []const u8) ![]u8 {
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const zig_exe = host_env.get("NULYA_TEST_ZIG") orelse return error.SkipZigTest;
+    const repo = host_env.get("NULYA_REPO") orelse return error.SkipZigTest;
+
+    const src = try std.fs.path.join(alloc, &.{ repo, "extensions", id });
+    defer alloc.free(src);
+    const built = try runCliEnv(alloc, io, ws, &.{ exe_abs, "ext", "build", src }, "NULYA_ZIG", zig_exe);
+    defer alloc.free(built.stdout);
+    if (built.code != 0) {
+        std.debug.print("{s} extension failed to build:\n{s}\n", .{ id, built.stdout });
+        return error.ExtensionBuildFailed;
+    }
+    const version = try extractVersion(alloc, built.stdout);
+    defer alloc.free(version);
+    return std.fmt.allocPrint(alloc, "{s}@{s}", .{ id, version });
+}
+
+test "bundled compact: brief_file forks at the tail without touching the parent — the parent file is byte-identical, the child queues the brief plus a parent pointer, and an empty parent or a missing file is refused" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const ref = try buildBundled(alloc, io, ws, exe_abs, "compact");
+    defer alloc.free(ref);
+
+    // A parent with a completed turn in it, and a brief the caller already has —
+    // the shape a driver is in the moment the model hands off.
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(new.stdout);
+    const old_id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(old_id);
+    {
+        const ap = try runCli(alloc, io, ws, &.{ exe_abs, "session", "append", old_id, "probe the box" });
+        defer alloc.free(ap.stdout);
+        const step = try runCliEnv(alloc, io, ws, &.{ exe_abs, "session", "step", old_id }, "NULYA_SCRIPTED_MODE", "finish");
+        defer alloc.free(step.stdout);
+        try std.testing.expectEqual(@as(u8, 0), step.code);
+    }
+    try ws.writeFile(io, .{ .sub_path = "brief.md", .data = "Phase 1 done. Next: BRIEF-SENTINEL.\n" });
+
+    const old_path = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{old_id});
+    defer alloc.free(old_path);
+    const before = try ws.readFileAlloc(io, old_path, alloc, .unlimited);
+    defer alloc.free(before);
+    const tail_seq: i64 = @intCast(std.mem.count(u8, before, "\n") - 1); // minus the header
+
+    const session_arg = try std.fmt.allocPrint(alloc, "session={s}", .{old_id});
+    defer alloc.free(session_arg);
+    const run = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "compact", "--arg", session_arg, "--arg", "brief_file=brief.md" });
+    defer alloc.free(run.stdout);
+    if (run.code != 0) {
+        std.debug.print("compact --arg brief_file failed: {s}\n", .{run.stdout});
+        return error.TestUnexpectedResult;
+    }
+    const result = try std.json.parseFromSlice(std.json.Value, alloc, std.mem.trim(u8, run.stdout, " \r\n"), .{});
+    defer result.deinit();
+    const new_id = result.value.object.get("session").?.string;
+    const parent = result.value.object.get("parent").?.object;
+    try std.testing.expectEqualStrings(old_id, parent.get("session").?.string);
+    // The fork point is the parent's CURRENT tail: nothing was asked of it, so
+    // nothing was added to it either.
+    try std.testing.expectEqual(tail_seq, parent.get("seq").?.integer);
+
+    // The whole point of this branch: the parent file is byte-identical. The
+    // summary path grows it by two turns; this one must not touch it at all.
+    {
+        const after = try ws.readFileAlloc(io, old_path, alloc, .unlimited);
+        defer alloc.free(after);
+        try std.testing.expectEqualStrings(before, after);
+    }
+
+    // The child got the brief AND the parent pointer the code appends, so a
+    // lossy handover is still one shell command away from the whole transcript.
+    {
+        const step = try runCliEnv(alloc, io, ws, &.{ exe_abs, "session", "step", new_id, "--max-steps", "1" }, "NULYA_SCRIPTED_MODE", "finish");
+        defer alloc.free(step.stdout);
+        try std.testing.expectEqual(@as(u8, 0), step.code);
+        const first = step.stdout[0 .. std.mem.indexOfScalar(u8, step.stdout, '\n') orelse step.stdout.len];
+        const pointer = try std.fmt.allocPrint(alloc, "nulya session events {s}", .{old_id});
+        defer alloc.free(pointer);
+        for ([_][]const u8{ "\"kind\":\"user_text\"", "<nulya:context-summary>", "BRIEF-SENTINEL", pointer }) |needle| {
+            try std.testing.expect(std.mem.indexOf(u8, first, needle) != null);
+        }
+    }
+
+    // A brief that is not there is not a brief: refused, and no session opened.
+    const listed_before = try runCli(alloc, io, ws, &.{ exe_abs, "session", "list" });
+    defer alloc.free(listed_before.stdout);
+    {
+        const gone = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "compact", "--arg", session_arg, "--arg", "brief_file=no-such-brief.md" });
+        defer alloc.free(gone.stdout);
+        try std.testing.expectEqual(@as(u8, 1), gone.code);
+        try std.testing.expect(std.mem.indexOf(u8, gone.stdout, "no-such-brief.md") != null);
+    }
+    // Neither is a parent with nothing in it: there is no tail to fork at, and a
+    // child carrying a brief but no lineage would be a conversation invented.
+    {
+        const fresh = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+        defer alloc.free(fresh.stdout);
+        const empty_arg = try std.fmt.allocPrint(alloc, "session={s}", .{std.mem.trim(u8, fresh.stdout, " \r\n")});
+        defer alloc.free(empty_arg);
+        const refused = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "compact", "--arg", empty_arg, "--arg", "brief_file=brief.md" });
+        defer alloc.free(refused.stdout);
+        try std.testing.expectEqual(@as(u8, 1), refused.code);
+        try std.testing.expect(std.mem.indexOf(u8, refused.stdout, "no events") != null);
+    }
+    // Exactly one session was created by all of the above: the one legitimate fork.
+    const listed_after = try runCli(alloc, io, ws, &.{ exe_abs, "session", "list" });
+    defer alloc.free(listed_after.stdout);
+    try std.testing.expectEqual(
+        std.mem.count(u8, listed_before.stdout, "\n") + 1, // the empty parent just created
+        std.mem.count(u8, listed_after.stdout, "\n"),
+    );
+}
+
+test "bundled handoff: a brief missing sections is refused and nothing is written; a full brief is recorded under .nulya/handoffs/<session>-* and answers \"end this turn\"; outside a session it is refused" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const ref = try buildBundled(alloc, io, ws, exe_abs, "handoff");
+    defer alloc.free(ref);
+
+    // `session step` sets this for everything it runs; `ext run` is how the same
+    // tool is reached from outside, so the test says which session it is in.
+    const in_session: []const EnvPair = &.{.{ .key = "NULYA_SESSION", .value = ".nulya/sessions/s-probe.jsonl" }};
+
+    // A brief missing two of the three required sections names BOTH of them —
+    // one retry, not two — and writes nothing at all.
+    {
+        const refused = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "handoff", "{\"done\":\"phase one\"}" }, in_session);
+        defer alloc.free(refused.stdout);
+        try std.testing.expectEqual(@as(u8, 1), refused.code);
+        try std.testing.expect(std.mem.indexOf(u8, refused.stdout, "next_task") != null);
+        try std.testing.expect(std.mem.indexOf(u8, refused.stdout, "keep") != null);
+        try std.testing.expectError(error.FileNotFound, ws.access(io, ".nulya/handoffs", .{}));
+    }
+
+    // Nor is whitespace an answer.
+    {
+        const blank = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "handoff", "{\"done\":\"a\",\"next_task\":\"  \",\"keep\":\"c\"}" }, in_session);
+        defer alloc.free(blank.stdout);
+        try std.testing.expectEqual(@as(u8, 1), blank.code);
+        try std.testing.expectError(error.FileNotFound, ws.access(io, ".nulya/handoffs", .{}));
+    }
+
+    // Outside a session there is nobody to hand off from, so a complete brief is
+    // refused too — and, again, nothing lands on disk.
+    {
+        const nowhere = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "handoff", "{\"done\":\"a\",\"next_task\":\"b\",\"keep\":\"c\"}" });
+        defer alloc.free(nowhere.stdout);
+        try std.testing.expectEqual(@as(u8, 1), nowhere.code);
+        try std.testing.expect(std.mem.indexOf(u8, nowhere.stdout, "inside a session") != null);
+        try std.testing.expectError(error.FileNotFound, ws.access(io, ".nulya/handoffs", .{}));
+    }
+
+    // The complete brief: recorded, human-readable, and the answer tells the
+    // model the turn is over — the tool's whole contract with the driver.
+    {
+        const ok = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "handoff", "{\"done\":\"read the map\",\"next_task\":\"HANDOFF-SENTINEL\",\"keep\":\"docs/base-tools.md\",\"drop\":\"the false starts\"}" }, in_session);
+        defer alloc.free(ok.stdout);
+        try std.testing.expectEqual(@as(u8, 0), ok.code);
+        const result = try std.json.parseFromSlice(std.json.Value, alloc, std.mem.trim(u8, ok.stdout, " \r\n"), .{});
+        defer result.deinit();
+        try std.testing.expectEqualStrings(".nulya/handoffs/s-probe-1.md", result.value.object.get("recorded").?.string);
+        try std.testing.expect(std.mem.indexOf(u8, result.value.object.get("message").?.string, "end this turn") != null);
+
+        const written = try ws.readFileAlloc(io, ".nulya/handoffs/s-probe-1.md", alloc, .unlimited);
+        defer alloc.free(written);
+        for ([_][]const u8{ "# Handoff", "session: s-probe", "## Done", "## Next task", "## Keep", "## Dropped", "HANDOFF-SENTINEL" }) |needle| {
+            try std.testing.expect(std.mem.indexOf(u8, written, needle) != null);
+        }
+    }
+
+    // A second handoff in the same session takes the next number: proposals are
+    // evidence, and evidence is never overwritten.
+    {
+        const again = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "handoff", "{\"done\":\"d2\",\"next_task\":\"n2\",\"keep\":\"k2\"}" }, in_session);
+        defer alloc.free(again.stdout);
+        try std.testing.expectEqual(@as(u8, 0), again.code);
+        try std.testing.expect(std.mem.indexOf(u8, again.stdout, "s-probe-2.md") != null);
+        const first = try ws.readFileAlloc(io, ".nulya/handoffs/s-probe-1.md", alloc, .unlimited);
+        defer alloc.free(first);
+        try std.testing.expect(std.mem.indexOf(u8, first, "HANDOFF-SENTINEL") != null);
+    }
+}
+
+test "bundled handoff: a session that pins ext:handoff/handoff exposes it natively and the scripted provider's handoff call executes the frozen version" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const ref = try buildBundled(alloc, io, ws, exe_abs, "handoff");
+    defer alloc.free(ref);
+
+    // Built, never activated: `--with` makes it a member of THIS session and
+    // `--pin` is the separate decision that gives it a native tool slot. Both
+    // axes at once, which is exactly how a driver composes it.
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--with", ref, "--pin", "ext:handoff/handoff" });
+    defer alloc.free(new.stdout);
+    try std.testing.expectEqual(@as(u8, 0), new.code);
+    const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(id);
+
+    // The header froze both: the exact version, and the pin.
+    {
+        const header = try support.readSessionFile(alloc, io, ws, id);
+        defer alloc.free(header);
+        try std.testing.expect(std.mem.indexOf(u8, header, "\"native_tools\":[\"ext:handoff/handoff\"]") != null);
+        try std.testing.expect(std.mem.indexOf(u8, header, ref["handoff@".len..]) != null);
+    }
+
+    const ap = try runCli(alloc, io, ws, &.{ exe_abs, "session", "append", id, "reach the goal" });
+    defer alloc.free(ap.stdout);
+    const step = try runCliEnv(alloc, io, ws, &.{ exe_abs, "session", "step", id, "--max-steps", "1" }, "NULYA_SCRIPTED_MODE", "handoff");
+    defer alloc.free(step.stdout);
+    try std.testing.expectEqual(@as(u8, 0), step.code);
+
+    // The model called it by NAME (no `nulya ext run` in sight) and the frozen
+    // binary answered — including the `NULYA_SESSION` the kernel gave it, which
+    // is the only reason it knew which session to file the proposal under.
+    try std.testing.expect(std.mem.indexOf(u8, step.stdout, "\"tool\":\"handoff\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, step.stdout, "end this turn") != null);
+    const recorded = try std.fmt.allocPrint(alloc, ".nulya/handoffs/{s}-1.md", .{id});
+    defer alloc.free(recorded);
+    const written = try ws.readFileAlloc(io, recorded, alloc, .unlimited);
+    defer alloc.free(written);
+    try std.testing.expect(std.mem.indexOf(u8, written, launch.ScriptedProvider.handoff_sentinel) != null);
 }
 
 // ── M5f: `session list` (read-only projection of .nulya/sessions) ───────────

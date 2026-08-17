@@ -486,6 +486,143 @@ test "session cli: a shell-script driver runs a goal loop to completion" {
     try std.testing.expectEqual(@as(u8, 0), code); // the driver reached its goal and exited 0
 }
 
+/// The first line of `text` that starts with `prefix`, minus the prefix. The
+/// driver's stdout is its contract with whoever ran it — three lines, each one a
+/// verb and the session it happened to — so the test reads it exactly that way.
+fn lineAfter(text: []const u8, prefix: []const u8) ?[]const u8 {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (std.mem.startsWith(u8, line, prefix)) return line[prefix.len..];
+    }
+    return null;
+}
+
+test "session cli: drivers/goal runs the bundled driver — the model hands off, the driver forks through compact, and the goal completes in the child" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+    const zig_exe = host_env.get("NULYA_TEST_ZIG") orelse return error.SkipZigTest;
+    const repo = host_env.get("NULYA_REPO") orelse return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    // The real script, from the repo, with the real binary — the driver builds
+    // both bundled extensions itself, so nothing here is staged for it.
+    const is_windows = @import("builtin").os.tag == .windows;
+    const script = try std.fs.path.join(alloc, &.{ repo, "drivers", if (is_windows) "goal.ps1" else "goal.sh" });
+    defer alloc.free(script);
+    const argv: []const []const u8 = if (is_windows)
+        &.{ "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "--profile", "scripted", "summarise the map" }
+    else
+        &.{ "sh", script, "--profile", "scripted", "summarise the map" };
+
+    var env = try std.testing.environ.createMap(alloc);
+    defer env.deinit();
+    // The same user layer every other CLI call in this file uses, so the trust
+    // record the driver's first `ext build` writes lands in the test's home and
+    // never in the developer's.
+    const home = try support.testHome(alloc, io, ws);
+    defer alloc.free(home);
+    try env.put("NULYA_HOME", home);
+    try env.put("NULYA", exe_abs);
+    try env.put("NULYA_ZIG", zig_exe);
+    try env.put("NULYA_SCRIPTED_MODE", "handoff");
+
+    const result = try std.process.run(alloc, io, .{
+        .argv = argv,
+        .cwd = .{ .dir = ws },
+        .environ_map = &env,
+        .stdout_limit = .limited(1 << 20),
+        .stderr_limit = .limited(1 << 20),
+    });
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+    const code = switch (result.term) {
+        .exited => |c| c,
+        else => 255,
+    };
+    if (code != 0) std.debug.print("goal driver failed ({d}):\nstdout: {s}\nstderr: {s}\n", .{ code, result.stdout, result.stderr });
+    try std.testing.expectEqual(@as(u8, 0), code);
+
+    // Two streams, two audiences. stdout is control and only control — a front
+    // end reads it to open and switch tabs, so a single protocol line leaking
+    // into it would be a line it has to learn to ignore.
+    {
+        var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+        while (lines.next()) |raw| {
+            const line = std.mem.trim(u8, raw, " \t\r");
+            if (line.len == 0) continue;
+            try std.testing.expect(line[0] != '{');
+        }
+    }
+    // stderr is the kernel's own `--stream` protocol, passed through verbatim:
+    // the model's deltas AND the run verdict, which is what makes a spawned
+    // driver renderable without a sidecar file or a kernel change.
+    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "\"stream\":\"model\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "\"stream\":\"run\"") != null);
+
+    // Three lines, in order: the session it opened, the fork it performed, the
+    // session the goal finished in.
+    const parent_id = lineAfter(result.stdout, "session ") orelse return error.TestUnexpectedResult;
+    const handed = lineAfter(result.stdout, "handoff ") orelse return error.TestUnexpectedResult;
+    const arrow = std.mem.indexOf(u8, handed, " -> ") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(parent_id, handed[0..arrow]);
+    const child_id = handed[arrow + 4 ..];
+    try std.testing.expectEqualStrings(child_id, lineAfter(result.stdout, "done ") orelse return error.TestUnexpectedResult);
+
+    // The parent stopped growing at the fork: its last event is the seq the
+    // child's lineage points at. The handoff path never writes to the parent.
+    const events = try runCli(alloc, io, ws, &.{ exe_abs, "session", "events", parent_id });
+    defer alloc.free(events.stdout);
+    const tail_seq = std.mem.count(u8, events.stdout, "\n");
+    const lineage = try std.fmt.allocPrint(alloc, "\"parent\":{{\"session\":\"{s}\",\"seq\":{d}}}", .{ parent_id, tail_seq });
+    defer alloc.free(lineage);
+    const child_file = try readSessionFile(alloc, io, ws, child_id);
+    defer alloc.free(child_file);
+    try std.testing.expect(std.mem.indexOf(u8, child_file, lineage) != null);
+
+    // The child opened on the carried brief: the fold marker, the sentinel the
+    // scripted model put in its handoff, and the way back to the whole transcript.
+    const first_event = blk: {
+        var lines = std.mem.splitScalar(u8, child_file, '\n');
+        _ = lines.next(); // header
+        break :blk lines.next() orelse return error.TestUnexpectedResult;
+    };
+    const pointer = try std.fmt.allocPrint(alloc, "nulya session events {s}", .{parent_id});
+    defer alloc.free(pointer);
+    for ([_][]const u8{ "\"kind\":\"user_text\"", "<nulya:context-summary>", support.launch.ScriptedProvider.handoff_sentinel, pointer }) |needle| {
+        try std.testing.expect(std.mem.indexOf(u8, first_event, needle) != null);
+    }
+
+    // The proposal itself is still on disk, filed under the session that made it.
+    const proposal = try std.fmt.allocPrint(alloc, ".nulya/handoffs/{s}-1.md", .{parent_id});
+    defer alloc.free(proposal);
+    const written = try ws.readFileAlloc(io, proposal, alloc, .unlimited);
+    defer alloc.free(written);
+    try std.testing.expect(std.mem.indexOf(u8, written, support.launch.ScriptedProvider.handoff_sentinel) != null);
+
+    // Two files, one conversation — the kernel's own projection agrees.
+    const listed = try runCli(alloc, io, ws, &.{ exe_abs, "session", "list", "--json" });
+    defer alloc.free(listed.stdout);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, listed.stdout, .{});
+    defer parsed.deinit();
+    var seen = false;
+    for (parsed.value.object.get("sessions").?.array.items) |entry| {
+        if (!std.mem.eql(u8, entry.object.get("id").?.string, child_id)) continue;
+        try std.testing.expectEqualStrings(parent_id, entry.object.get("root").?.string);
+        seen = true;
+    }
+    try std.testing.expect(seen);
+}
+
 test "session cli: --stream emits the transient line protocol and leaves the ledger identical" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;

@@ -5,13 +5,14 @@
   "contributes": {
     "tools": [{
       "name": "compact",
-      "description": "Ask a session to summarise itself, then continue it in a new session file that points back at it (fork, DESIGN §11). The old file is never changed except by the two turns this writes into it. Returns the new session id.",
+      "description": "Ask a session to summarise itself, then continue it in a new session file that points back at it. The old file is never changed except by the two turns this writes into it. With `brief_file` the brief is taken from that file instead, the old session is not asked and not written to at all, and the fork happens at its current tail — the path a driver takes when the model already handed off. Either way the carried text ends with a pointer back to the parent session. Returns the new session id.",
       "input": {
         "type": "object",
         "properties": {
           "session": { "type": "string", "description": "The session to compact; it must not be running a step." },
-          "focus": { "type": "string", "description": "Extra emphasis for the brief. Supplements the required sections, never replaces them." },
-          "max_steps": { "type": "integer", "description": "Steps the summarising run may take (1-3, default 1)." }
+          "focus": { "type": "string", "description": "Extra emphasis for the brief. Supplements the required sections, never replaces them. Ignored with brief_file." },
+          "max_steps": { "type": "integer", "description": "Steps the summarising run may take (1-3, default 1). Ignored with brief_file." },
+          "brief_file": { "type": "string", "description": "Path (workspace-relative or absolute) to a brief that already exists. Given, the old session is left byte-identical and only the fork happens." }
         },
         "required": ["session"]
       },

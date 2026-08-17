@@ -30,6 +30,15 @@
 //! one session; `session list --json`; and the repo's own `extensions/evolution`
 //! going through exactly that path with no special casing.
 //!
+//! And the model-driven handoff (M2c, DESIGN §11): `compact`'s `brief_file`
+//! branch forking at the parent's tail while leaving the parent file
+//! byte-identical; the bundled `handoff` tool refusing an incomplete brief and a
+//! call from outside a session without writing anything, and recording a complete
+//! one; a session that pins `ext:handoff/handoff` reaching the frozen version
+//! natively; and the real `drivers/goal` script running the whole loop — the
+//! model hands off, the driver forks through compact, the goal completes in the
+//! child, control lines on stdout and the step's `--stream` protocol on stderr.
+//!
 //! The tests live in `tests/e2e/`, grouped by what they prove:
 //!
 //!   e2e/support.zig      shared fixtures — CLI runners, scaffolds, fake models
