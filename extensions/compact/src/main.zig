@@ -41,6 +41,21 @@
 //!   6. `session append` the summary into the new session;
 //!   7. report `{session, parent, summary_bytes}`.
 //!
+//! **The `brief_file` branch: fork only.** When the caller already HAS the brief
+//! — a `/goal` driver holding the handoff the model just wrote (PLAN §3.4.1) —
+//! steps 2-4 are skipped outright: no request is appended, the old session is not
+//! stepped, and its file is left byte-identical. The fork point is then the old
+//! ledger's current tail (`session events <old>`, last line's `seq`), which is
+//! the same place the summary path forks at — the difference is only who
+//! produced the brief. A parent with no events at all, an unreadable file, or an
+//! empty one is refused without forking: a fork that carries nothing forward is
+//! a conversation thrown away.
+//!
+//! Both branches append the SAME parent-pointer footer to the carried text, in
+//! code rather than by asking the model to remember it (PLAN §3.4.1): the old
+//! ledger is still on disk and the new session has a shell, so lossy compaction
+//! degrades into lazy retrieval.
+//!
 //! Wall clock: steps 2-3 wait for a real model, which the host's 30s default for
 //! an extension call (`tool.Timeouts.extension_ms`) does not cover. A tool that
 //! knows it is slow says so in its manifest, so `contributes.tools[].timeout_ms`
@@ -66,6 +81,12 @@ const prompt_body = @embedFile("compact_prompt.md");
 /// "focus on the API design" would quietly drop the file list.
 const focus_intro = "\nAdditional focus the user asked for (this supplements, and never replaces, the sections above):\n";
 const prompt_closing = "\nAnswer with the summary text and nothing else — do not call any tool.";
+
+/// Appended to every carried brief, by code. The child session inherits no
+/// history, but the parent file is still whole on disk and the child has a
+/// shell — so naming the parent turns "the brief lost it" into "go and read it".
+const parent_footer =
+    "\n\n---\nParent session: {s} (forked at seq {d}). The full transcript is still on disk — read it with: nulya session events {s}\n";
 
 /// Capture cap for a child's stdout/stderr. A step's output carries whole tool
 /// results, so this is generous; it exists only so a runaway child cannot eat
@@ -95,6 +116,10 @@ const Args = struct {
     focus: []const u8 = "",
     /// Steps the summarising run may take, clamped to 1..3.
     max_steps: u32 = 1,
+    /// A brief the caller already has, as a path (workspace-relative or
+    /// absolute). Empty means "ask the old session for one" — the seven-step
+    /// path. Non-empty means fork only: the old session is never touched.
+    brief_file: []const u8 = "",
 };
 
 /// `std.process.Init` rather than a bare `main()`, and that is load-bearing:
@@ -153,6 +178,82 @@ fn compact(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ
         .message = "compact needs NULYA_EXE (the nulya kernel sets it for its children)",
     } };
 
+    // 1b. A caller holding the brief already (the `/goal` driver with a handoff
+    //     in hand) skips straight to the fork: steps 2-4 exist only to OBTAIN a
+    //     brief, and running them anyway would append two turns to a file this
+    //     branch promises not to touch.
+    const found = if (args.brief_file.len != 0)
+        switch (try briefFromFile(alloc, io, exe, args)) {
+            .failed => |f| return .{ .failed = f },
+            .harvested => |h| h,
+        }
+    else switch (try briefFromSession(alloc, io, exe, args)) {
+        .failed => |f| return .{ .failed = f },
+        .harvested => |h| h,
+    };
+
+    // 5. The fork. The kernel checks the parent exists and carries its frozen
+    //    model identity over (a compaction must not change who the conversation
+    //    is with); composition is resolved fresh, because a new session is
+    //    exactly where new pins and newly activated versions take hold
+    //    (DESIGN §11) — so no `--with` / `--pin` here.
+    const parent_ref = try std.fmt.allocPrint(alloc, "{s}:{d}", .{ args.session, found.seq });
+    const forked = try runNulya(alloc, io, exe, &.{ "session", "new", "--parent", parent_ref });
+    const new_id = std.mem.trim(u8, forked.stdout, " \t\r\n");
+    if (forked.code != 0 or !std.mem.startsWith(u8, new_id, "s-")) {
+        return .{ .failed = try fail(alloc, -32000, "cannot open the continuing session: {s}", .{detail(forked)}) };
+    }
+
+    // 6. Carry the brief over, with the parent pointer written by code (see
+    //    `parent_footer`). It is deposited, not stepped: it waits in the new
+    //    session's inbox exactly like a turn typed before a step runs.
+    const footer = try std.fmt.allocPrint(alloc, parent_footer, .{ args.session, found.seq, args.session });
+    const carried = try std.fmt.allocPrint(alloc, "{s}\n{s}{s}", .{ summary_marker, found.summary, footer });
+    const handed = try runNulya(alloc, io, exe, &.{ "session", "append", new_id, carried });
+    if (handed.code != 0) {
+        return .{ .failed = try fail(alloc, -32000, "{s} was created but the summary could not be carried into it: {s}", .{ new_id, detail(handed) }) };
+    }
+
+    // 7. The caller decides what to do with the new session; this tool only
+    //    reports what it did.
+    return .{ .done = .{
+        .session = new_id,
+        .parent_session = args.session,
+        .parent_seq = found.seq,
+        .summary_bytes = found.summary.len,
+    } };
+}
+
+/// A brief, or the reason there is none. Every way of NOT getting one leaves the
+/// conversation exactly where it was, so both branches answer in this shape and
+/// the fork happens in one place.
+const Brief = union(enum) { harvested: Harvest, failed: Fail };
+
+/// The `brief_file` branch: read the brief the caller already has, and fork at
+/// the old ledger's current tail. Nothing is written to the old session.
+fn briefFromFile(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args: Args) !Brief {
+    const raw = readFileMaybe(alloc, io, args.brief_file) catch |err| return Brief{
+        .failed = try fail(alloc, -32602, "cannot read brief_file '{s}': {s}", .{ args.brief_file, @errorName(err) }),
+    };
+    const summary = std.mem.trim(u8, raw orelse "", " \t\r\n");
+    if (summary.len == 0) {
+        return .{ .failed = try fail(alloc, -32602, "brief_file '{s}' is missing or empty; nothing moved", .{args.brief_file}) };
+    }
+
+    // The fork point is where the old ledger stands right now. `session events`
+    // is a read-only tail (DESIGN §14), so asking costs the old file nothing.
+    const listed = try runNulya(alloc, io, exe, &.{ "session", "events", args.session });
+    if (listed.code != 0) {
+        return .{ .failed = try fail(alloc, -32000, "cannot read the events of {s}: {s}", .{ args.session, detail(listed) }) };
+    }
+    const seq = lastSeq(alloc, listed.stdout) orelse return Brief{
+        .failed = try fail(alloc, -32001, "{s} has no events yet; there is nothing to fork from", .{args.session}),
+    };
+    return .{ .harvested = .{ .summary = summary, .seq = seq } };
+}
+
+/// The seven-step path: ask the OLD session to summarise itself (steps 2-4).
+fn briefFromSession(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args: Args) !Brief {
     // 2. Ask the old session for the brief. It goes in as a plain user turn,
     //    marked so a front end can fold it — the kernel sees nothing special.
     const focus_block = if (args.focus.len == 0)
@@ -166,53 +267,25 @@ fn compact(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ
     );
     const asked = try runNulya(alloc, io, exe, &.{ "session", "append", args.session, request_text });
     if (asked.code != 0) {
-        return failf(alloc, -32000, "cannot append the compaction request to {s}: {s}", .{ args.session, detail(asked) });
+        return .{ .failed = try fail(alloc, -32000, "cannot append the compaction request to {s}: {s}", .{ args.session, detail(asked) }) };
     }
 
     // 3. Step the OLD session, on its own cached prefix, and read what it wrote.
     const budget = try std.fmt.allocPrint(alloc, "{d}", .{args.max_steps});
     const stepped = try runNulya(alloc, io, exe, &.{ "session", "step", args.session, "--max-steps", budget });
     if (stepped.code != 0) {
-        return failf(alloc, -32000, "the summarising step failed: {s}", .{detail(stepped)});
+        return .{ .failed = try fail(alloc, -32000, "the summarising step failed: {s}", .{detail(stepped)}) };
     }
 
     // 4. No brief is a legitimate outcome, not an accident to paper over: a
     //    cancelled step, or a model that answered with tool calls, leaves the
     //    window exactly as full as it was. The two turns from steps 2-3 stay in
     //    the old ledger — that file records why the attempt happened.
-    const found = (try harvest(alloc, stepped.stdout)) orelse return Outcome{ .failed = .{
+    const found = (try harvest(alloc, stepped.stdout)) orelse return Brief{ .failed = .{
         .code = -32001,
         .message = "no summary came back; nothing moved — the old session is still the live one",
     } };
-
-    // 5. The fork. The kernel checks the parent exists and carries its frozen
-    //    model identity over (a compaction must not change who the conversation
-    //    is with); composition is resolved fresh, because a new session is
-    //    exactly where new pins and newly activated versions take hold
-    //    (DESIGN §11) — so no `--with` / `--pin` here.
-    const parent_ref = try std.fmt.allocPrint(alloc, "{s}:{d}", .{ args.session, found.seq });
-    const forked = try runNulya(alloc, io, exe, &.{ "session", "new", "--parent", parent_ref });
-    const new_id = std.mem.trim(u8, forked.stdout, " \t\r\n");
-    if (forked.code != 0 or !std.mem.startsWith(u8, new_id, "s-")) {
-        return failf(alloc, -32000, "cannot open the continuing session: {s}", .{detail(forked)});
-    }
-
-    // 6. Carry the brief over. It is deposited, not stepped: it waits in the new
-    //    session's inbox exactly like a turn typed before a step runs.
-    const carried = try std.fmt.allocPrint(alloc, "{s}\n{s}", .{ summary_marker, found.summary });
-    const handed = try runNulya(alloc, io, exe, &.{ "session", "append", new_id, carried });
-    if (handed.code != 0) {
-        return failf(alloc, -32000, "{s} was created but the summary could not be carried into it: {s}", .{ new_id, detail(handed) });
-    }
-
-    // 7. The caller decides what to do with the new session; this tool only
-    //    reports what it did.
-    return .{ .done = .{
-        .session = new_id,
-        .parent_session = args.session,
-        .parent_seq = found.seq,
-        .summary_bytes = found.summary.len,
-    } };
+    return .{ .harvested = found };
 }
 
 const Harvest = struct { summary: []const u8, seq: u64 };
@@ -266,6 +339,51 @@ fn harvest(alloc: std.mem.Allocator, stdout: []const u8) !?Harvest {
     return .{ .summary = summary, .seq = seq };
 }
 
+/// The highest `seq` in a `session events` dump — the fork point when the caller
+/// brought its own brief. Null means the parent has no events at all. The lines
+/// are the ledger's own bytes (DESIGN §14), so this reads them the same
+/// forgiving way `harvest` does: a shape this build does not know is skipped
+/// rather than fatal.
+fn lastSeq(alloc: std.mem.Allocator, stdout: []const u8) ?u64 {
+    var seq: u64 = 0;
+    var lines = std.mem.splitScalar(u8, stdout, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0) continue;
+        const parsed = std.json.parseFromSlice(std.json.Value, alloc, line, .{}) catch continue;
+        if (parsed.value != .object) continue;
+        switch (parsed.value.object.get("seq") orelse continue) {
+            .integer => |n| if (n > 0 and @as(u64, @intCast(n)) > seq) {
+                seq = @intCast(n);
+            },
+            else => {},
+        }
+    }
+    return if (seq == 0) null else seq;
+}
+
+/// Read a file named by the caller, workspace-relative or absolute (this
+/// process's cwd IS the workspace, DESIGN §7.6). Null means it is not there;
+/// anything else is the real I/O error, because "cannot read the brief" and
+/// "there is no brief" deserve different messages.
+fn readFileMaybe(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !?[]u8 {
+    const file = if (std.fs.path.isAbsolute(path))
+        std.Io.Dir.openFileAbsolute(io, path, .{}) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir => return null,
+            else => return err,
+        }
+    else
+        std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir => return null,
+            else => return err,
+        };
+    defer file.close(io);
+
+    var buf: [4096]u8 = undefined;
+    var reader = file.reader(io, &buf);
+    return try reader.interface.allocRemaining(alloc, .limited(max_child_output));
+}
+
 const Run = struct { code: u8, stdout: []u8, stderr: []u8 };
 
 /// One `nulya <args…>` invocation, in this process's working directory — which
@@ -300,8 +418,10 @@ fn detail(run: Run) []const u8 {
     return said[said.len -| max_detail_bytes..];
 }
 
-fn failf(alloc: std.mem.Allocator, code: i64, comptime fmt: []const u8, fmt_args: anytype) !Outcome {
-    return .{ .failed = .{ .code = code, .message = try std.fmt.allocPrint(alloc, fmt, fmt_args) } };
+/// A `Fail` with a formatted message. Both `Outcome` and `Brief` carry one, so
+/// the reason is built here and the caller says which shape it is returning.
+fn fail(alloc: std.mem.Allocator, code: i64, comptime fmt: []const u8, fmt_args: anytype) !Fail {
+    return .{ .code = code, .message = try std.fmt.allocPrint(alloc, fmt, fmt_args) };
 }
 
 /// `params.arguments` of a `tool/call`, or null when it does not name a session.
@@ -319,6 +439,7 @@ fn readArgs(request: std.json.ObjectMap) ?Args {
 
     var args: Args = .{ .session = session };
     if (stringField(arguments, "focus")) |focus| args.focus = std.mem.trim(u8, focus, " \t\r\n");
+    if (stringField(arguments, "brief_file")) |path| args.brief_file = std.mem.trim(u8, path, " \t\r\n");
     // A budget the caller cannot blow up with: the request says "answer, do not
     // call tools", so more than a few steps means the model is doing something
     // else entirely.
