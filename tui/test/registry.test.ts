@@ -60,7 +60,7 @@ test("ext run names the extension and the tool, past any --arg pairs", () => {
   expect(shell("nulya ext run lint lint_zig --arg path=src").head).toBe("ext run · lint/lint_zig")
 })
 
-test("skill load shows the pinned ref", () => {
+test("skill load shows the frozen ref", () => {
   expect(shell("nulya skill load evolution/zig-style").head).toBe("skill · evolution/zig-style")
 })
 

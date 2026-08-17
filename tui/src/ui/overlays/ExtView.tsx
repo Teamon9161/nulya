@@ -10,7 +10,7 @@
  *  - the DRIFT. This session froze specific versions at `session new` and cannot
  *    change them mid-flight (DESIGN §7.5). When `current` has moved since, that
  *    difference is the single most useful sentence in the view:
- *    `pinned v-a · store v-b → next session`.
+ *    `frozen v-a · store v-b → next session`.
  *  - the USAGE table, a plain projection of `.nulya/tool-usage.jsonl`. It does
  *    NOT rank: a tool joins the model's tool face only when somebody writes a
  *    pin (the operator's `registry.pinned_native_tools`, or an evolution
@@ -35,7 +35,7 @@ export function frozenVersion(header: SessionHeader | null | undefined, id: stri
 
 export function driftLine(frozen: string | null, current: string | null): string | null {
   if (!frozen || !current || frozen === current) return null
-  return `pinned ${frozen} · store ${current} → next session`
+  return `frozen ${frozen} · store ${current} → next session`
 }
 
 export function ExtView(props: {

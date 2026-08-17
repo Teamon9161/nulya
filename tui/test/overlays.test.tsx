@@ -182,14 +182,14 @@ test("/ext names the drift between what this session froze and what the store po
   }
   expect(frozenVersion(header, "lint")).toBe("v-old")
   expect(frozenVersion(header, "other")).toBeNull()
-  expect(driftLine("v-old", "v-new")).toBe("pinned v-old · store v-new → next session")
+  expect(driftLine("v-old", "v-new")).toBe("frozen v-old · store v-new → next session")
   expect(driftLine("v-same", "v-same")).toBeNull()
   expect(driftLine(null, "v-new")).toBeNull()
 
   const setup = await overlayFrame(() => <ExtView ws={ws} header={header} onClose={() => {}} />)
   try {
     const frame = await settle(setup, 6)
-    expect(frame).toContain(`pinned v-old · store ${version}`)
+    expect(frame).toContain(`frozen v-old · store ${version}`)
   } finally {
     setup.renderer.destroy()
   }
