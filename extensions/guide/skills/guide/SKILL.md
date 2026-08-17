@@ -113,7 +113,10 @@ form changes only in the next session.
 
 Compile (Zig, a `bin/` entry) when the tool must parse JSON or behave
 identically under both shells. In a nulya checkout, `extensions/compact` and
-`extensions/handoff` are the worked examples.
+`extensions/handoff` are the worked examples, and `extensions/std` (read /
+write / append / grep / glob as one package — build it `--user`, activate it,
+pin `ext:std/<tool>` for the ones you want) is the one to copy for a tool that
+returns text: a string `result` reaches the model verbatim.
 
 Store and scope:
 

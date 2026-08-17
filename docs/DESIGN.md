@@ -418,6 +418,20 @@ tool↔tool 共享知识只走两条路：**模型中转**（大结果落盘留�
 
 Tool 是"能执行的能力"，Skill 是"要遵循的方法 / 知识"；不同 registry，互不侵占模型工具面。
 
+### 7.8 随仓库带的 extension（顶层 `extensions/`）
+
+都是普通 extension，走 §7.4 同一条 build → activate 路，**没有一个是内核层**：默认不在任何 composition 里（`--with` 成员 / pin 进 native 面 / `activate` 全是用户或 driver 的决定），随 checkout 到达的 store 照过 §9 的 trust gate。
+
+| id | kind | contribute | 谁消费 / 怎么进 session |
+|---|---|---|---|
+| `compact` | compiled | `compact` tool（§11） | TUI `/compact` 与 `drivers/goal.*` 经 `ext run` |
+| `handoff` | compiled | `handoff` tool（§11） | `drivers/goal.*` 的 `session new --with handoff@<v> --pin ext:handoff/handoff` |
+| `evolution` | data | system prompt + skill | `session new --with evolution@<v>`（mode） |
+| `guide` | data | skill | 用户 `--user` 装一次，每场 `<available_skills>` 多一行 |
+| `std` | compiled | `read` / `write` / `append` / `grep` / `glob` 五个 tool | 用户 `ext build extensions/std --user` → `activate --user` → user config `[registry] pinned_native_tools`（builtin 2 + 5 = 7 ≤ `max_tools` 8） |
+
+**`std` 不是 "std tool 层"**（PLAN §3.4.1 那句话仍成立）：叫 std 只因它装的是一场编码 session 最先伸手的五样东西。行为逐条移植自 tcode（零猜测的错误文案、`read` 放大小读 + 自分页 + 无行号、`write` 不覆盖没读过的文件、`grep` smart-case + per-file 上限 + gitignore、`glob` 按 mtime）；它是 §7.3 "string result 原文进 emit" 的第一个 consumer；每个结果自守在 `emit` 预算之下（read ≤ 120 KB、grep ≤ 100 KB），所以 spill 对它们不触发。它唯一跨调用的状态——模型读过哪些文件、看到哪些行——按 §7.6 走**磁盘制品**：`.nulya/scratch/<session-id>/std-freshness.jsonl`（append-only，从 `NULYA_SESSION` 取 id，fork 之后自然是新文件；不在 session 里就没有去重也没有门）。内核 `edit` 不登记它，所以 edit 之后 write / append 同一文件会被拦一次要求重读——已知代价，e2e 钉住。regex 引擎是 vendored 的 mvzr（字节级、无 lookaround / backreference，smart-case 由 wrapper 补）；gitignore / glob 匹配移植自 zeegrep 的两个 core 模块；walker 单线程 + 10 s deadline。契约与进度在 `docs/goals/std.md`。
+
 ---
 
 ## 8. Execution Environment（`environment.zig`；进程树与有界等待在 `environment/tree.zig`）

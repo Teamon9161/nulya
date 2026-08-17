@@ -46,6 +46,14 @@
 //! naming NULYA_EXE / `nulya help` / `nulya src`, and the repo's own
 //! `extensions/guide` composing in as one skill and no system prompt.
 //!
+//! And the bundled `std` extension (docs/goals/std.md): five file/search tools
+//! in one compiled package — built, activated, reached by `ext run`; `read`'s
+//! self-pagination and freshness stubs, `write` / `append` refusing to touch a
+//! file the session has not read (state on disk under the session's scratch
+//! dir, none outside a session), `grep`'s smart-case / per-file cap / paging /
+//! gitignore, `glob`'s mtime order — and a string JSON-RPC `result` reaching the
+//! caller verbatim (DESIGN §7.3).
+//!
 //! Compiling an extension is a real `zig build-exe`, so `support.zig` keeps a
 //! compile-once cache of built versions under `.zig-cache/` and copies frozen
 //! version directories into each test's store; the tests where the BUILD is the
