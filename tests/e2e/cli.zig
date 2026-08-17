@@ -328,3 +328,79 @@ test "cli config show: both forms project the effective [registry], so today's p
         };
     }
 }
+
+test "cli ext run/build: missing or malformed JSON arguments and an unbuildable draft are one line on stderr and exit 1, never a Zig stack trace" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_abs = try nulyaExe(alloc, &host_env);
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    // A script extension: no toolchain involved, so this test is about the CLI's
+    // answers and nothing else.
+    const init = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "init", "--script", "my.helper", "do_thing" });
+    defer alloc.free(init.stdout);
+    try std.testing.expectEqual(@as(u8, 0), init.code);
+    const draft = ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "my.helper";
+    const built = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "build", draft });
+    defer alloc.free(built.stdout);
+    try std.testing.expectEqual(@as(u8, 0), built.code);
+    const version = try extractVersion(alloc, built.stdout);
+    defer alloc.free(version);
+    const ref = try std.fmt.allocPrint(alloc, "my.helper@{s}", .{version});
+    defer alloc.free(ref);
+
+    // The three shapes a caller actually arrives with: no JSON at all (the tool
+    // name is then read as the arguments), JSON that does not parse, and JSON
+    // that parses but is not an object.
+    for ([_][]const []const u8{
+        &.{ exe_abs, "ext", "run", ref, "do_thing" },
+        &.{ exe_abs, "ext", "run", ref, "do_thing", "{bad" },
+        &.{ exe_abs, "ext", "run", ref, "do_thing", "[]" },
+    }) |argv| {
+        const run = try runCli(alloc, io, ws, argv);
+        defer alloc.free(run.stdout);
+        try std.testing.expectEqual(@as(u8, 1), run.code);
+        // stdout is for data; a refusal leaves it empty for whoever was parsing.
+        try std.testing.expectEqualStrings("", run.stdout);
+        const err_text = try runCliStderr(alloc, io, ws, argv, &.{});
+        defer alloc.free(err_text);
+        try std.testing.expect(std.mem.indexOf(u8, err_text, "JSON object") != null);
+        try std.testing.expect(std.mem.indexOf(u8, err_text, "--arg") != null);
+        // One line, and not a Zig error report: no `error: <Name>` banner and no
+        // source-location frames.
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, err_text, "\n"));
+        try std.testing.expect(std.mem.indexOf(u8, err_text, "error: InvalidArgumentsJson") == null);
+        try std.testing.expect(std.mem.indexOf(u8, err_text, ".zig:") == null);
+    }
+
+    // A valid invocation is untouched.
+    const ok = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "do_thing", "{}" });
+    defer alloc.free(ok.stdout);
+    try std.testing.expectEqual(@as(u8, 0), ok.code);
+    try std.testing.expect(ok.stdout.len != 0);
+
+    // Same class, same treatment: a build pointed at a directory with no
+    // manifest, and one whose manifest the author has just broken.
+    const no_manifest = try runCliStderr(alloc, io, ws, &.{ exe_abs, "ext", "build", "no-such-draft" }, &.{});
+    defer alloc.free(no_manifest);
+    try std.testing.expect(std.mem.indexOf(u8, no_manifest, "extension.json") != null);
+    try std.testing.expect(std.mem.indexOf(u8, no_manifest, ".zig:") == null);
+
+    try ws.createDirPath(io, "broken");
+    try ws.writeFile(io, .{ .sub_path = "broken" ++ std.fs.path.sep_str ++ "extension.json", .data = "{not json" });
+    const bad_build = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "build", "broken" });
+    defer alloc.free(bad_build.stdout);
+    try std.testing.expectEqual(@as(u8, 1), bad_build.code);
+    try std.testing.expectEqualStrings("", bad_build.stdout);
+    const bad_err = try runCliStderr(alloc, io, ws, &.{ exe_abs, "ext", "build", "broken" }, &.{});
+    defer alloc.free(bad_err);
+    try std.testing.expect(std.mem.indexOf(u8, bad_err, "InvalidJson") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bad_err, ".zig:") == null);
+}

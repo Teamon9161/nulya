@@ -169,7 +169,23 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
             }
             return 1;
         },
-        else => return err,
+        // A path that holds no `extension.json` is a mistyped positional, not a
+        // broken host: `ext build` takes a draft directory, and pointing at the
+        // wrong one is the commonest way to get here.
+        error.ManifestUnreadable => {
+            try printErrFmt(alloc, io, "ext build: no readable extension.json in '{s}'; `nulya ext init <id>` scaffolds one\n", .{ext_dir});
+            return 1;
+        },
+        else => {
+            // Everything the manifest itself can refuse is a fault in the draft
+            // being built — the author's own file, edited seconds ago. A host
+            // fault (allocation, a failed write) still propagates.
+            if (isManifestFault(err)) {
+                try printErrFmt(alloc, io, "ext build: {s}/extension.json is not a valid manifest ({s}); `nulya ext api` prints the wire contract and `nulya ext init` a working manifest\n", .{ ext_dir, @errorName(err) });
+                return 1;
+            }
+            return err;
+        },
     };
     defer result.deinit(alloc);
 
@@ -190,6 +206,20 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
         try recordBirthTrust(alloc, io, cwd_path);
     }
     return 0;
+}
+
+/// Whether `err` is one of the manifest's own structural or rule errors — a
+/// fault in the `extension.json` being built, never in the host. Derived from
+/// the error sets `manifest.zig` declares, so a new rule there needs no edit
+/// here; `OutOfMemory` is deliberately left out of the union, because reporting
+/// a resource fault as a bad manifest would send the author editing a file that
+/// is fine.
+fn isManifestFault(err: anyerror) bool {
+    const Faults = manifest.ValidateError || error{ InvalidJson, NotAnObject, MissingField, WrongType };
+    inline for (@typeInfo(Faults).error_set.?) |candidate| {
+        if (err == @field(anyerror, candidate.name)) return true;
+    }
+    return false;
 }
 
 /// Trust a workspace store this build just BROUGHT INTO EXISTENCE (DESIGN §9).
@@ -377,14 +407,24 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     // Resolution (active version, integrity, frozen manifest, tool declaration,
     // exact entry path) is the CLI's job; from here on the helper owns encode,
     // run, decode, and diagnostics.
-    const invocation = try invoke.invokeTool(alloc, lenv.environment(), entry_abs, cwd_path, tool, args_json, .{
+    const invocation = invoke.invokeTool(alloc, lenv.environment(), entry_abs, cwd_path, tool, args_json, .{
         // The frozen manifest may say this tool needs longer than the host
         // default (DESIGN §7.3) — the same declaration a natively pinned tool
         // carries into its binding, read from the same place.
         .timeout_ms = spec.?.timeout_ms orelse tool_mod.Timeouts.extension_ms,
         .max_output_bytes = 1 << 20,
         .interpreter = rt.interpreter,
-    });
+    }) catch |err| switch (err) {
+        // The trailing positional IS the arguments, so a malformed one is a
+        // usage error rather than a host fault — and `ext run <id> <tool>` with
+        // no JSON at all arrives here too, its tool name having been read as the
+        // arguments. Either way the reader needs a sentence, not a stack trace.
+        error.InvalidArgumentsJson, error.ArgumentsNotObject => {
+            try printErr(io, "ext run: the last argument must be a JSON object (use '{}' for no arguments), or pass --arg k=v instead\n");
+            return 1;
+        },
+        else => return err,
+    };
     defer invocation.deinit(alloc);
 
     // Resolution already proved both `id` and `tool` against the frozen
@@ -908,6 +948,29 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
         return 0;
     }
     return cli_src.printSource(alloc, io, "extension/protocol.zig", false);
+}
+
+test "every manifest parse/validate error is a draft fault; a host fault is not" {
+    // The whole surface `manifest.parse` and `Manifest.validate` can produce,
+    // so `ext build` answers with a sentence rather than a stack trace.
+    for ([_]anyerror{
+        error.InvalidJson,        error.NotAnObject,             error.MissingField,
+        error.WrongType,          error.UnsupportedSchema,       error.InvalidId,
+        error.MissingRuntime,     error.InvalidEntry,            error.InvalidInterpreter,
+        error.NoContributions,    error.InvalidToolName,         error.ReservedToolName,
+        error.DuplicateToolName,  error.InvalidTimeout,          error.InvalidSkillPath,
+        error.DuplicateSkillPath, error.InvalidSystemPromptPath, error.DuplicateSystemPromptPath,
+    }) |err| {
+        std.testing.expect(isManifestFault(err)) catch |e| {
+            std.debug.print("{s} should be reported as a bad manifest\n", .{@errorName(err)});
+            return e;
+        };
+    }
+    // A resource or host fault must keep propagating: telling the author their
+    // manifest is wrong when the machine ran out of memory sends them nowhere.
+    for ([_]anyerror{ error.OutOfMemory, error.AccessDenied, error.Canceled, error.ManifestUnreadable }) |err| {
+        try std.testing.expect(!isManifestFault(err));
+    }
 }
 
 test "buildArgsJson types values by the tool input schema" {
