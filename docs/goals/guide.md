@@ -78,4 +78,4 @@ Nulya 的自描述面早就都在（`nulya src` 打印内核源码、`nulya ext 
 
 ## 6. 进度区（执行时更新）
 
-（空——执行者按子项追加）
+- **guide-a** `fe9f022` — `help` / `--help` / `-h` 成为动词；未知命令 → `unknown command '<x>'; run \`nulya help\``（stderr, exit 1）。`common.usage` 拆成六个按动词族的常量再拼成一屏（**39 行**），与 DESIGN §14 命令表逐动词对齐；bare `nulya ext|skill|session|config|toolchain` 各印自己那块，`cli/session.zig` 里那份**重复的** session usage 删掉改为引用同一块（一处偏离契约字面："检查 session/config/src 一致"落地成"消除第二份文本"）。bare `nulya` 仍跑 demo、`nulya src` 无参数仍列树。`ext api permissions` 重写成今天的事实（同 shell 权限 / 净化 env + `NULYA_EXE` + `NULYA_SESSION` / tool 拿不到对话 / permissions 仅声明 / 三个超时 / store trust gate），`examples` 覆盖 script init → build → run `--arg` → activate → `--pin` → `--with` → `--user` → `ext trust` → `session outcome`。两处文本零文档引用。

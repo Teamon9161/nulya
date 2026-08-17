@@ -389,6 +389,9 @@ active extension <id>@<version> is broken (<err>); run 'nulya ext deactivate <id
 
 这不是新机制，是 §5.1 的 frozen snapshot 延伸到整个 Contribution 层。
 
+**kernel system prompt 说什么、为什么只说这些。** 每场 session 的第一个 system block 是编译进二进制的常量（`composition.kernel_system_prompt`，进 `kernel_hash`，§3.4），四句话全是**事实**：① 你是 Nulya；② shell / edit 是永久 builtin，别的 extension 能力经 nulya CLI 调用；③ 那个 CLI 在哪（`NULYA_EXE` 给出本二进制路径，安装后叫 `nulya`）、`nulya help` 列出它能做什么、`nulya src` 打印本 harness 的源码，以及 **Nulya 可扩展——extension（脚本或编译的 tool）、skill、system prompt、session driver 都是模型在任务需要时可以写的东西**；④ native 暴露的 extension tool 冻在开场那个版本，中途 activate 只对 CLI 与下一场生效。第 ③ 句是 2026-08 加的**入口**：没有它，一场只有 shell + edit 的 session 不知道这些命令存在、也不知道二进制在哪（实测撞到过 "nulya not on PATH"）。
+**没有一个字是"你应该进化 / 记得改进自己"**，这是刻意的：该不该造工具是判断（physics §8），判断住在 kernel 之上——mode 的 system prompt（`extensions/evolution`）或按需 load 的 skill（`extensions/guide`），而不是每场都在付 token 的前缀。同理，这句只**指路**不复制内容：真相在 `nulya help` / `ext api` / `nulya src` 里，它们与代码同源，不会漂。改这个常量会改 `kernel_hash`，老 session resume 时 stderr 警告一行照跑（§3.4），无需迁移。
+
 ### 7.6 工具的上下文模型：tool 拿不到 ledger
 
 **tool 是无状态纯函数 `f(args, environment, ctx) → result`。**
