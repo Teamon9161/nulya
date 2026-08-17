@@ -169,7 +169,7 @@ pub fn usage(io: std.Io) !u8 {
         \\  nulya config show [--json]        effective provider profiles + model catalog
         \\  nulya src [path] [--tests]        print this binary's own source
         \\  nulya skill list                 list active extension skills
-        \\  nulya skill load <pinned-ref>    print a frozen SKILL.md
+        \\  nulya skill load <skill-ref>     print a frozen SKILL.md
         \\  nulya toolchain zig <args...>     run the managed zig (scratch)
         \\
     );

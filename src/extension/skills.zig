@@ -119,6 +119,11 @@ pub fn listActive(
         // Skip broken extensions, but let host cancellation propagate rather than
         // be misread as a malformed extension. `resolveEntry` takes the root and
         // version the listing already decided — no second `current` read.
+        //
+        // Deliberately softer than `composition.resolveActiveExtensions`, which
+        // fails the session on the same fault: this is a READ-ONLY listing, and
+        // showing the catalog it can beats refusing to show any of it. Nothing
+        // downstream of a listing is silently missing a capability.
         const r = roots.resolveEntry(alloc, entry) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => continue,
@@ -130,29 +135,29 @@ pub fn listActive(
     return .{ .skills = try descriptors.toOwnedSlice(alloc) };
 }
 
-/// Load a full SKILL.md body from a pinned ref, from whichever store root holds
+/// Load a full SKILL.md body from a frozen skill ref, from whichever store root holds
 /// that frozen version (content-addressed, so any root's copy is the same
 /// bytes). This deliberately validates and reads the NAMED version; it never
 /// follows the extension's `current`.
-pub fn loadPinnedAcross(
+pub fn loadFrozenAcross(
     alloc: std.mem.Allocator,
     roots: *const roots_mod.Roots,
-    pinned_ref: []const u8,
+    frozen_ref: []const u8,
 ) ![]u8 {
-    const parsed = try parseRef(pinned_ref); // malformed: fail before touching a root
+    const parsed = try parseRef(frozen_ref); // malformed: fail before touching a root
     const r = try roots.resolveVersion(alloc, parsed.extension_id, parsed.version);
     defer r.deinit(alloc);
     return readSkillBody(alloc, roots.io, roots.entries[r.root].dir, parsed, r.manifest);
 }
 
-pub fn loadPinned(
+pub fn loadFrozen(
     alloc: std.mem.Allocator,
     io: std.Io,
     root: std.Io.Dir,
-    pinned_ref: []const u8,
+    frozen_ref: []const u8,
 ) ![]u8 {
-    const parsed = try parseRef(pinned_ref);
-    var m = try readPinnedManifest(alloc, io, root, parsed.extension_id, parsed.version);
+    const parsed = try parseRef(frozen_ref);
+    var m = try readFrozenManifest(alloc, io, root, parsed.extension_id, parsed.version);
     defer m.deinit();
     return readSkillBody(alloc, io, root, parsed, m);
 }
@@ -181,7 +186,7 @@ fn readSkillBody(
     return error.SkillNotFound;
 }
 
-fn readPinnedManifest(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id: []const u8, version: []const u8) !manifest.Manifest {
+fn readFrozenManifest(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id: []const u8, version: []const u8) !manifest.Manifest {
     // Delegates to `Store.readManifest`, the single validate+parse path. That
     // keeps integrity validation identical here and preserves `error.Canceled`
     // instead of collapsing it into a spurious integrity error.
@@ -198,7 +203,7 @@ fn basename(path: []const u8) ?[]const u8 {
     return path[start..end];
 }
 
-test "pinned skill refs round-trip" {
+test "frozen skill refs round-trip" {
     const alloc = std.testing.allocator;
     const version = "v-a83fe2000000000000000000";
     const ref = try refFor(alloc, "finance", version, "risk-parity");

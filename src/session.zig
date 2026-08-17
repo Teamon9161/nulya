@@ -137,12 +137,13 @@ pub const AgentSession = struct {
         var comp = try composition.SessionComposition.init(alloc, io, tool_ctx.cwd, opts.extension_roots, opts.registry);
         errdefer comp.deinit(alloc);
 
-        // Freeze the resolved composition into the header: the active pinned
-        // versions and which of their tools are native this session. Any process
-        // reopening the file rebuilds the identical composition.
-        const active = try alloc.alloc(ledger.PinnedExtensionRef, comp.pinned_extensions.len);
+        // Freeze the resolved composition into the header: the member extensions
+        // at their frozen versions and which of their tools are native this
+        // session. Any process reopening the file rebuilds the identical
+        // composition.
+        const active = try alloc.alloc(ledger.ExtensionRef, comp.extensions.len);
         defer alloc.free(active);
-        for (comp.pinned_extensions, 0..) |p, i| active[i] = .{ .id = p.id, .version = p.version };
+        for (comp.extensions, 0..) |e, i| active[i] = .{ .id = e.id, .version = e.version };
         const native = try alloc.alloc([]const u8, comp.extension_tool_bindings.len);
         defer alloc.free(native);
         for (comp.extension_tool_bindings, 0..) |b, i| native[i] = b.definition.id;
@@ -588,7 +589,7 @@ test "a canceled step accumulates its usage and the session runs the next step" 
         .alloc = alloc,
         .l = ledger.Ledger.init(alloc),
         .composition = .{
-            .pinned_extensions = &.{},
+            .extensions = &.{},
             .extension_tool_bindings = &.{},
             .tools = .{ .tools = &tools_arr },
             .skills = .{ .skills = &.{} },
@@ -969,7 +970,7 @@ test "run clamps any requested budget to the kernel ceiling" {
         .alloc = alloc,
         .l = ledger.Ledger.init(alloc),
         .composition = .{
-            .pinned_extensions = &.{},
+            .extensions = &.{},
             .extension_tool_bindings = &.{},
             .tools = .{ .tools = &tools_arr },
             .skills = .{ .skills = &.{} },
@@ -1056,7 +1057,7 @@ test "completed step records stable ids, never model names or hallucinated names
         .alloc = alloc,
         .l = ledger.Ledger.init(alloc),
         .composition = .{
-            .pinned_extensions = &.{},
+            .extensions = &.{},
             .extension_tool_bindings = &.{},
             .tools = .{ .tools = &tools_arr },
             .skills = .{ .skills = &.{} },
@@ -1151,7 +1152,7 @@ test "a canceled step records no tool usage stats" {
         .alloc = alloc,
         .l = ledger.Ledger.init(alloc),
         .composition = .{
-            .pinned_extensions = &.{},
+            .extensions = &.{},
             .extension_tool_bindings = &.{},
             .tools = .{ .tools = &tools_arr },
             .skills = .{ .skills = &.{} },
@@ -1233,7 +1234,7 @@ test "a reply cut by max_tokens before it wrote any call stops the run, unlike o
         .alloc = alloc,
         .l = ledger.Ledger.init(alloc),
         .composition = .{
-            .pinned_extensions = &.{},
+            .extensions = &.{},
             .extension_tool_bindings = &.{},
             .tools = .{ .tools = &.{} },
             .skills = .{ .skills = &.{} },
@@ -1434,7 +1435,7 @@ test "a truncated turn's unexecuted calls are not recorded as tool usage" {
         .alloc = alloc,
         .l = ledger.Ledger.init(alloc),
         .composition = .{
-            .pinned_extensions = &.{},
+            .extensions = &.{},
             .extension_tool_bindings = &.{},
             .tools = .{ .tools = &tools_arr },
             .skills = .{ .skills = &.{} },

@@ -352,18 +352,29 @@ pub const ParentRef = struct {
     seq: u64,
 };
 
-/// One frozen active extension: which immutable version was pinned at session
-/// start. Reopening reads this exact version, never the live `current`.
-pub const PinnedExtensionRef = struct {
+/// One member extension of a session, frozen: which immutable version this
+/// session composed. Reopening reads this exact version, never the live
+/// `current`. "Frozen" here is about the VERSION — it says nothing about whether
+/// any of the extension's tools take a native slot (that is `native_tools`).
+pub const ExtensionRef = struct {
     id: []const u8,
     version: []const u8,
 };
 
-/// The session composition frozen into the header. `active` is every extension
-/// pinned for the session; `native_tools` is the subset of stable tool ids
-/// exposed directly to the model this session (DESIGN §5.1).
+/// The session composition frozen into the header.
+///
+/// `active` is every MEMBER extension of this session at its frozen version —
+/// what was activated when the session began PLUS whatever `session new --with`
+/// brought in unactivated (DESIGN §14). The key name is a v1 wire leftover from
+/// when membership could only come from activation; it is the struct field name,
+/// so it is also the JSON key (`Header` is `std.json`-typed both ways), and
+/// renaming it would break every existing session file. Rename it when the
+/// header schema next changes version, not before.
+///
+/// `native_tools` is the subset of stable tool ids exposed directly to the
+/// model this session (DESIGN §5.1).
 pub const FrozenComposition = struct {
-    active: []const PinnedExtensionRef = &.{},
+    active: []const ExtensionRef = &.{},
     native_tools: []const []const u8 = &.{},
 };
 

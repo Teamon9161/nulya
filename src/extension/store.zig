@@ -234,11 +234,13 @@ pub const Store = struct {
     }
 };
 
-/// Store/manifest faults that mean "this directory is not a usable extension"
-/// and are safe to skip: skip it during discovery, skip that root during a
-/// version lookup (`Roots.resolveVersion`). Anything else — host cancellation,
-/// `OutOfMemory`, real I/O failures — is a host fault and must propagate: an
-/// OOM must never masquerade as "extension skipped" or `PinnedExtensionNotActive`.
+/// Store/manifest faults that mean "this directory is not a usable extension".
+/// What a caller does with one is the caller's rule: a read-only listing skips
+/// it, `composition.resolveActiveExtensions` fails the session on it, and a
+/// version lookup (`Roots.resolveVersion`) skips that root and keeps searching.
+/// Anything else — host cancellation, `OutOfMemory`, real I/O failures — is a
+/// host fault and must propagate: an OOM must never masquerade as a broken
+/// extension or as `PinNamesUnknownExtension`.
 pub fn isExtensionFault(err: anyerror) bool {
     return switch (err) {
         // Invalid extension identity.

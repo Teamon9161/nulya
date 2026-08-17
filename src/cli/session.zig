@@ -262,7 +262,7 @@ const PromptIndex = struct {
     roots: ?*const roots_mod.Roots,
     cache: std.StringHashMap([]const []const u8),
 
-    fn forActive(self: *PromptIndex, a: std.mem.Allocator, active: []const ledger.PinnedExtensionRef) ![]const []const u8 {
+    fn forActive(self: *PromptIndex, a: std.mem.Allocator, active: []const ledger.ExtensionRef) ![]const []const u8 {
         var out: std.ArrayList([]const u8) = .empty;
         for (active) |ref| {
             for (try self.forOne(a, ref)) |p| try out.append(a, p);
@@ -270,7 +270,7 @@ const PromptIndex = struct {
         return out.toOwnedSlice(a);
     }
 
-    fn forOne(self: *PromptIndex, a: std.mem.Allocator, ref: ledger.PinnedExtensionRef) ![]const []const u8 {
+    fn forOne(self: *PromptIndex, a: std.mem.Allocator, ref: ledger.ExtensionRef) ![]const []const u8 {
         const roots = self.roots orelse return &.{};
         const key = try std.fmt.allocPrint(a, "{s}@{s}", .{ ref.id, ref.version });
         const gop = try self.cache.getOrPut(key);
@@ -670,15 +670,23 @@ pub fn createSession(alloc: std.mem.Allocator, io: std.Io, args: []const []const
             try printOut(alloc, io, "session new failed: --with names an extension with no such built version (see `nulya ext list`)\n", .{});
             return null;
         },
+        // Activation is a statement of intent too, so a broken active version
+        // stops the session instead of vanishing from it. `resolveActiveExtensions`
+        // already named the offending `id@version` and the two repair verbs on
+        // stderr; this line only says what it cost.
+        error.ActiveExtensionBroken => {
+            try printOut(alloc, io, "session new failed: an activated extension does not validate (see the line above)\n", .{});
+            return null;
+        },
         // Same rule for pins: a session missing a tool the operator asked for is
         // not the session that was asked for. Name the pins so the fix is
         // obvious — the bad one is in that list, in `.nulya/config.toml` or on
         // the command line.
-        error.PinnedExtensionNotActive => {
+        error.PinNamesUnknownExtension => {
             try printPinFailure(alloc, io, pins, "names an extension with no active version here (see `nulya ext list`)");
             return null;
         },
-        error.PinnedToolNotDeclared => {
+        error.PinToolNotDeclared => {
             try printPinFailure(alloc, io, pins, "names a tool its active version does not declare (see `nulya ext inspect <id>`)");
             return null;
         },
@@ -1521,7 +1529,7 @@ test "session step --stream emits the tui.md §2.2 line protocol in order" {
         .alloc = alloc,
         .l = ledger.Ledger.init(alloc),
         .composition = .{
-            .pinned_extensions = &.{},
+            .extensions = &.{},
             .extension_tool_bindings = &.{},
             .tools = .{ .tools = &tools_arr },
             .skills = .{ .skills = &.{} },
@@ -1603,7 +1611,7 @@ test "a reply cut by max_tokens is recorded replayable, closed with a marker, re
         .alloc = alloc,
         .l = ledger.Ledger.init(alloc),
         .composition = .{
-            .pinned_extensions = &.{},
+            .extensions = &.{},
             .extension_tool_bindings = &.{},
             .tools = .{ .tools = &tools_arr },
             .skills = .{ .skills = &.{} },

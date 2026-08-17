@@ -1,6 +1,6 @@
 //! `nulya skill list|load` (DESIGN §14): the skill catalog contributed by the
 //! extensions active across the store roots, and the frozen `SKILL.md` behind a
-//! pinned ref. Both are shell-level reads — the model reaches them through
+//! frozen ref. Both are shell-level reads — the model reaches them through
 //! `shell`, and neither is a model-facing tool.
 
 const std = @import("std");
@@ -38,13 +38,13 @@ fn skillList(alloc: std.mem.Allocator, io: std.Io) !u8 {
 
 fn skillLoad(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (args.len < 1) {
-        try printErr(io, "usage: nulya skill load <pinned-ref>\n");
+        try printErr(io, "usage: nulya skill load <skill-ref>\n");
         return 1;
     }
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     var search = try RootSearch.open(alloc, io, try cwdRealPath(io, &cwd_buf));
     defer search.deinit(alloc);
-    const body = ext_skills.loadPinnedAcross(alloc, &search.roots, args[0]) catch |err| {
+    const body = ext_skills.loadFrozenAcross(alloc, &search.roots, args[0]) catch |err| {
         try printOut(alloc, io, "skill load failed: {s}\n", .{@errorName(err)});
         return 1;
     };

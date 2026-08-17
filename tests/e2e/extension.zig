@@ -476,10 +476,10 @@ test "extension store: an extension in the user root (NULYA_HOME) is discovered 
     // wins, so a workspace version shadows a user-wide one of the same id.
     var comp = try composition.SessionComposition.init(alloc, io, ws_path, roots, .{});
     defer comp.deinit(alloc);
-    try std.testing.expectEqual(@as(usize, 2), comp.pinned_extensions.len);
+    try std.testing.expectEqual(@as(usize, 2), comp.extensions.len);
     var saw_user_wide = false;
     var shared_version: []const u8 = "";
-    for (comp.pinned_extensions) |p| {
+    for (comp.extensions) |p| {
         if (std.mem.eql(u8, p.id, "user-wide")) saw_user_wide = true;
         if (std.mem.eql(u8, p.id, "shared")) shared_version = p.version;
     }
@@ -504,16 +504,16 @@ test "extension store: an extension in the user root (NULYA_HOME) is discovered 
     };
     var resumed = try composition.SessionComposition.initFrozen(alloc, io, ws_path, roots, frozen);
     defer resumed.deinit(alloc);
-    try std.testing.expectEqual(@as(usize, 2), resumed.pinned_extensions.len);
-    for (resumed.pinned_extensions) |p| {
+    try std.testing.expectEqual(@as(usize, 2), resumed.extensions.len);
+    for (resumed.extensions) |p| {
         if (std.mem.eql(u8, p.id, "shared")) try std.testing.expectEqualStrings(user_shared, p.version);
     }
 
     // Without the user root in the search order, only the workspace copy exists.
     var workspace_only = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{});
     defer workspace_only.deinit(alloc);
-    try std.testing.expectEqual(@as(usize, 1), workspace_only.pinned_extensions.len);
-    try std.testing.expectEqualStrings("shared", workspace_only.pinned_extensions[0].id);
+    try std.testing.expectEqual(@as(usize, 1), workspace_only.extensions.len);
+    try std.testing.expectEqualStrings("shared", workspace_only.extensions[0].id);
 }
 
 test "cli: NULYA_HOME extensions are visible to ext list / skill list / ext run, with shadowing marked" {
@@ -565,7 +565,7 @@ test "cli: NULYA_HOME extensions are visible to ext list / skill list / ext run,
 
     // `skill list` reaches into the user root, and `skill load` reads the frozen
     // SKILL.md from whichever root holds that version — including the shadowed
-    // user copy, which is named by a pinned ref rather than by id.
+    // user copy, which is named by a frozen skill ref rather than by id.
     {
         const list = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "skill", "list" }, env);
         defer alloc.free(list.stdout);
@@ -827,7 +827,7 @@ test "bundled evolution: ext build extensions/evolution is data kind and needs n
     defer sess.deinit();
 
     // The identity is a system block, and the skill is in the catalog with a
-    // pinned ref the model can load.
+    // frozen skill ref the model can load.
     var identity: ?[]const u8 = null;
     for (sess.composition.system_prompts.blocks) |b| {
         if (std.mem.indexOf(u8, b.bytes, "slow loop") != null) identity = b.bytes;

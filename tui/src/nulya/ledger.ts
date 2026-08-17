@@ -22,13 +22,13 @@ export interface Usage {
   cache_write_tokens: number
 }
 
-export interface PinnedExtensionRef {
+export interface ExtensionRef {
   id: string
   version: string
 }
 
 export interface FrozenComposition {
-  active: PinnedExtensionRef[]
+  active: ExtensionRef[]
   native_tools: string[]
 }
 

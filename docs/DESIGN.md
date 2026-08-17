@@ -144,7 +144,7 @@ UI / trajectory / metrics 是 ledger 的投影，不持久化 mutable 状态。*
 
 - **一个文件 = 一个 generation = 一个 cache scope。** 文件只 append，所以 PromptIR 的 turn 前缀不变量（§1）成了文件系统性质。没有会 bump generation 的事件（§11）。
 - **header 的 JSON 形状就是 `ledger.Header` 结构体**（`std.json` 类型化编解码，`OwnedHeader = std.json.Parsed(Header)`）；读端忽略未知字段，所以新写者多出的字段不破坏旧读者；**但 `v` 不同就拒绝**（`ledger.format_version` = 1，别的值一律 `UnsupportedLedgerVersion`）——多出的字段不改变已有字段的含义，换了版本号则正是在宣告"改了"，把未来格式当 v1 读只会读出一个像是对的答案。`session step` / `session new --parent` 把它翻成"这个文件由更新的 nulya 写的，本二进制读 ledger v1"并退出 1，`session list` 跳过该文件（它本来就跳过读不了的）。事件行保持平铺的 `kind` 形状（driver 读起来方便），解码经 `WireEvent`。
-- **composition + 模型身份冻结进 header。** header 记录本场 active 的每个 extension 的**具体版本**、被选为 native 的 tool 稳定 id，以及创建时**解析后的模型身份** `model_identity`（`provider` / 具体 `model` / `base_url` / `api_key_env`——`model` 字段本身只是 profile 别名，供显示与 effort 查询）。任何进程 `openDurable` 重开时都用 header 重建 composition（`composition.initFrozen`：读那些冻结版本、把 `native_tools` 当 pin），**绝不重扫 `current`、绝不重排 usage journal**——每个 `session step` 进程都看到**同一** composition，中途 `activate` 也移不动它（§5.1、§7.5、physics #2）。replay 时模型看到的一切 = header + events 的纯函数。header 还记 `nulya{version, kernel_hash}`（build 的版本串 + kernel system prompt 与两个 builtin 定义的 hash，`composition.kernelHash`）——**纯 provenance**：这两样是**二进制的**编译期常量却进了本场冻结的 model-visible 状态（§5.1、§7.5），升级 nulya 就会在既有 session 底下换掉它们，而 header 原本无从指认；记下来只是让它可见，resume 时对不上就在 stderr 警告一行照跑（不拒绝、不改任何东西），空 stamp = 这个字段之前写的老 header = unknown，永不警告。
+- **composition + 模型身份冻结进 header。** header 的 `composition.active` 记录本场**每个成员 extension** 的具体版本——activate 来的**和** `session new --with` 带进来的（§14），键名 `active` 是 v1 wire 遗留（那时成员只能来自 activate），下次升 header schema 版本时一起改名；`native_tools` 是被选为 native 的 tool 稳定 id（两根轴分开：冻结版本 ≠ 进模型工具面）。还有创建时**解析后的模型身份** `model_identity`（`provider` / 具体 `model` / `base_url` / `api_key_env`——`model` 字段本身只是 profile 别名，供显示与 effort 查询）。任何进程 `openDurable` 重开时都用 header 重建 composition（`composition.initFrozen`：读那些冻结版本、把 `native_tools` 当 pin），**绝不重扫 `current`、绝不重排 usage journal**——每个 `session step` 进程都看到**同一** composition，中途 `activate` 也移不动它（§5.1、§7.5、physics #2）。replay 时模型看到的一切 = header + events 的纯函数。header 还记 `nulya{version, kernel_hash}`（build 的版本串 + kernel system prompt 与两个 builtin 定义的 hash，`composition.kernelHash`）——**纯 provenance**：这两样是**二进制的**编译期常量却进了本场冻结的 model-visible 状态（§5.1、§7.5），升级 nulya 就会在既有 session 底下换掉它们，而 header 原本无从指认；记下来只是让它可见，resume 时对不上就在 stderr 警告一行照跑（不拒绝、不改任何东西），空 stamp = 这个字段之前写的老 header = unknown，永不警告。
 - **模型身份创建时冻结、resume 不可变（physics #2/#5）。** 模型解析**只有一处决定**：`launch.resolveDescriptor(prov, env, profile)` 在**创建**时把 profile 解析成 `model_identity`，运行用的 handle 也**只从这个 descriptor** 构建（`launch.buildFromDescriptor`）——所以"实际跑的" == "header 冻结的"，不存在 fork。`resolveDescriptor` 是 **credential-aware** 的：openai profile 若 `api_key_env` 在环境里解析不出 credential，创建时就冻结成 scripted（因为那正是会跑的东西）；此后 config 改动**永不**改变已有 session 的模型。resume 时 `session step` 用 header 的 `model_identity` 重建**恰好那个**模型，只从 `api_key_env` 重解 credential——**不存密钥**，也**没有静默 fallback**：openai session 的密钥不在了就 `MissingCredential` 显式拒跑。**durable credential 只以 `api_key_env` 引用**；inline `api_key` 无法在 resume 时从环境恢复（否则又让 session 依赖 mutable config），因此不参与 durable openai 身份。`provider==""` 的旧 header 当 scripted 处理。
 - **resume。** `openDurable` 读回 header + 每条完整事件行；被截断的**最后一行**（写到一半崩溃）丢弃并把文件截回最后一条完整行，坏的**中间**行或乱序 `seq` 则是硬错误（`CorruptLedger`）。崩在 assistant-with-calls 之后（合法但未闭合的 batch）由 `completeInterruptedToolBatch` 在下一步补齐（§4）。
 - **单写者租约 + inbox 目录 + cancel 标记。** session 文件**只有一个写者**：`createDurable` / `openDurable` 打开时**原子获取兄弟 `<id>.lock` 上的排他 advisory 锁**（`lock_nonblocking`），第二个写者的打开立刻 `SessionBusy` 失败，而不是去抢同一 offset；锁随句柄生命周期持有、进程崩溃时由 OS 释放（无 stale 锁）。锁挂在专用 `<id>.lock` 上、**不挂在 session 文件本身**——Windows 上文件自身的锁是强制性的会挡住读者，锁 sidecar 则让 `readHeader` / `session events` 的读永不被挡。其他任何进程都不写主文件，只往兄弟路径投递：跨进程**事件**（`ext activate` 在 `NULYA_SESSION` 存在时的 `capability_note`，§5.3；driver 的 `session append` 的 `user_text`）一事件一文件写进 `<id>.inbox/`（`ledger.depositEvent`：先写 `.tmp` 再 rename，排干端永不读到半个文件），由写者在 step 边界（`prepareStep`）按文件名序排干进主文件；**cancel 请求**是 `<id>.cancel` 标记（`session.requestCancel`），同样在 step 边界消费。
@@ -196,7 +196,7 @@ collectTurn(PromptIR, tool_defs)  →  assistant turn（可能含多个 tool_use
 session 开始时一次选定，整场冻结（`composition.zig` `SessionComposition.init`）：
 
 1. builtin `shell`、`edit`：永远在，位置最前。
-2. **pin 的 native 工具**（稳定 id `ext:<ext-id>/<tool>`），两个来源同义、并集去重：`registry.pinned_native_tools`（config，project 层也可以加——只花自己的槽，§9.5）与 `session new --pin`（driver，按场）。pin 是决定：解析不到 → **硬失败** `PinnedExtensionNotActive` / `PinnedToolNotDeclared` / `InvalidStableToolId`，总数越过 `max_tools`（含 builtin，默认 8）→ `ToolBudgetExceeded`。
+2. **pin 的 native 工具**（稳定 id `ext:<ext-id>/<tool>`），两个来源同义、并集去重：`registry.pinned_native_tools`（config，project 层也可以加——只花自己的槽，§9.5）与 `session new --pin`（driver，按场）。pin 是决定：解析不到 → **硬失败** `PinNamesUnknownExtension` / `PinToolNotDeclared` / `InvalidStableToolId`，总数越过 `max_tools`（含 builtin，默认 8）→ `ToolBudgetExceeded`。
 
 只有这两档。**usage 自己绝不改 `tools[]`**——journal 是证据，晋升是有人写下一条 pin（§5.5）。
 
@@ -303,7 +303,7 @@ extension 装在**多个 store root** 里，按固定顺序搜索（`extension/r
 | ③ | `extensions.paths`（**只认 trusted 层**，§9.5） | operator | project 层写了也忽略 |
 
 - **同一个 id 在多个 root → 首个持有 active 版本（有 `current`）的 root 胜**（workspace 遮蔽 user）。"持有"看 `current` 不看目录：一个只有 `<id>/` 目录、没有 `current` 的 root（draft、或已 `deactivate` 的副本）**不参与遮蔽**——否则在 workspace `deactivate` 会静默藏起 user 那份而不是让它生效。同一定义贯穿 `Roots.listActive`（composition / `skill list`）、`Roots.firstActive`（`ext run`、`--with` 不带版本、`ext deactivate` 的落点）与 `ext list` 的 `(shadowed)` 标记；`ext deactivate` 作用于生效的那份，若因此让后面 root 的副本顶上来会打印一行 note。
-- **frozen 版本按 root 顺序找**（`initFrozen`、`skill load` 的 pinned ref、`ext run <id>@<version>` 的 entry）：version 是内容寻址的，integrity 照验，所以顺序只决定"在哪找到"，从不决定"跑什么"。精确地说：data / script 版本的 id 就是 snapshot 的 hash，任意 root 的副本**严格**同字节；compiled 版本的 id 是 `snapshot + compiler + target` 的 hash，二进制 digest 只进 seal 不进 id，所以"两个 root 各自编出的同 id 副本同字节"是**可复现构建不变量**（同源、同编译器、同 target），不是数学保证——不为此重构 build identity，只是别把它当定理。
+- **frozen 版本按 root 顺序找**（`initFrozen`、`skill load` 的 frozen ref、`ext run <id>@<version>` 的 entry）：version 是内容寻址的，integrity 照验，所以顺序只决定"在哪找到"，从不决定"跑什么"。精确地说：data / script 版本的 id 就是 snapshot 的 hash，任意 root 的副本**严格**同字节；compiled 版本的 id 是 `snapshot + compiler + target` 的 hash，二进制 digest 只进 seal 不进 id，所以"两个 root 各自编出的同 id 副本同字节"是**可复现构建不变量**（同源、同编译器、同 target），不是数学保证——不为此重构 build identity，只是别把它当定理。
 - **`--user` 从 session 里跑会说一句。** `ext activate|rollback --user` 在 `NULYA_SESSION` 存在时（= 模型经 `shell` 调的），动手前往 **stderr** 打一行 `note: activating <id>@<version> in the user store from inside session <sid>: it becomes active for every workspace on this machine`，该版本若声明了 system_prompts 再接 ` and its system prompt enters every future session`。**照做，不拦**：模型有权这么做，在内核的外壳里长出一条 policy 才是错的；不许的是**悄悄**这么做。不带 `--user`、或不在 session 里，一个字不说。
 - **写端的落点：`activate` / `rollback` 作用于该 id 生效中的那个 root**（`Roots.firstActive`）：在那里激活才真的生效；在被遮蔽的 root 里激活会"成功"却改变不了任何 session 看到的东西。所以要激活的版本若不在生效 root 里 → 明确失败（并指出它建在哪个 root、可用 `--user` 显式打到 user store）；只有当该 id **在任何 root 都没有 active 副本**时才按 `firstWithVersion` 找首个持有该 built 版本的 root。操作完成后重新算一次 `firstActive`：只有生效的 `{root, version}` 真的是目标时才向 live session 投 capability_note（§5.3），否则打印 `note: not in effect — <id>@<v> in <root> shadows it`（`--user` 显式打进被遮蔽的 root 时会遇到）。`deactivate` 同样作用于生效的那份。
 - **每个 `<id>/` 的变更都在 `<root>/<id>/.lock` 下进行**（`Store.lease`：build 写 `versions/<v>`、activate / rollback 改 `current`、deactivate 删 `current`；阻塞式排他 advisory 锁，与 session 的 `<id>.lock` 同一原语）——user store 被这台机器上的每个 workspace 共写，两个进程同时 build / activate 同一个 id 不能互相撕对方的目录树或共用一个 `.current.tmp`。读端不拿锁：`current` 是原子 rename，版本目录靠 seal 校验。
@@ -372,7 +372,15 @@ draft ──build──▶ versions/v-<hash>（immutable）──activate──�
 
 ### 7.5 组合在 session 开始冻结（keystone）
 
-`SessionComposition.init()` 解析 active extensions，pin 住每个的版本，一次冻结 tools / skills / system prompts。被 pin 成 native 的工具在此刻解析出**绝对 `entry_path`**（基于 pin 时的版本），运行期只按此路径 spawn，**绝不二次读 `current`**。
+`SessionComposition.init()` 解析 active extensions，冻住每个的版本，一次冻结 tools / skills / system prompts。被 pin 成 native 的工具在此刻解析出**绝对 `entry_path`**（基于冻结的版本），运行期只按此路径 spawn，**绝不二次读 `current`**。
+
+**成员解析三条路，一样严。** 一个 extension 进这一场 composition 只有三种来路——discovery（`current` 指着它）、`session new --with`、resume 时 header 里冻的 `active`——三条都是**硬失败**：解析不出来就开不了这一场，绝不静默少一个能力地开场。discovery 从前是唯一的例外（`isExtensionFault` 就 `continue`），而它恰恰是意图最明确的那条：`activate` 是有人明说"这个要生效"。加重的是 §7.2 的首个 active 持有者胜——workspace 那份坏了，静默跳过会让整个 extension 消失，哪怕 user root 里有完好的 active 版本。所以 discovery 里坏掉的 active 版本返回 `ActiveExtensionBroken`，并在**内核里**往 stderr 打一行指名道姓的话（Zig 的 error 不带 payload，光一个错误名说不出是哪个包）：
+
+```
+active extension <id>@<version> is broken (<err>); run 'nulya ext deactivate <id>' or 'nulya ext rollback <id>' to recover
+```
+
+`session new` 再补一句 `session new failed: an activated extension does not validate (see the line above)` 并 exit 1。**host fault 不在此列**：cancellation / OOM / 真的 I/O 错误照原样传播，绝不被当成"坏 extension"（`store.isExtensionFault` 是这条线）。与之无关的是 `Roots.resolveVersion` 对坏 root 的跳过（§7.2）——那是内容寻址的同一版本换个 root 找同一份字节，不是"少一个能力"。
 
 推论：session 中途 AI 重写出 `web.search` v2 并 activate，**当前 session 已 native 注册的仍是 v1**；v2 只能经 shell `nulya ext run` + note 告知；下一场 session native 才换。`tests/e2e.zig` 全环证明。
 
@@ -543,7 +551,7 @@ nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--with <id>[
           | list [--json]                                ← `.nulya/sessions/` 的只读投影（composition / 事件数 / usage / episode / verdict）
 nulya config show [--json]                               ← 有效配置链的投影：profiles（含 credential 是否可用）+ 模型目录；无 secret
 nulya src [path] [--tests]                               ← 打印本二进制内嵌的 src 源码（无参数 = 列全树）
-nulya skill list | load <pinned-ref>
+nulya skill list | load <skill-ref>
 nulya toolchain zig <args…>
 nulya                       ← 无参数：固定 prompt demo（现经 durable session 路径跑，§3.4）
 ```
@@ -555,7 +563,7 @@ nulya                       ← 无参数：固定 prompt demo（现经 durable 
 
 - `nulya src`：build.zig 把整个 `src/**` `@embedFile` 进二进制（源码 ~200KB，紧挨 ~90MB 工具链，恒开无 gate）；`nulya src <path>` 按 `src/` 相对路径打印（`prompt.zig`、`extension/store.zig`），**默认剥 top-level `test` 块**（读结构/契约时不付测试 token），`--tests`/`--raw` 打印原样（Zig 风格参照）。剥离靠 zig-fmt 不变量：顶层 decl 的收尾 `}` 在第 0 列，无需 tokenizer（`source.zig`）。测试留在文件里（Zig 惯例、人可读、风格参照），改的只是**投影**不是**存储**——`src/` 一字未动。
 - `nulya ext api`：协议 topic 现在**打印真实 `extension/protocol.zig` 源码**（是 `nulya src` 的特例），wire ABI 与实现代码零漂移；`permissions` / `examples` 仍是短说明（策略与 CLI 用法，不随代码漂）。
-- **`session new --pin ext:<id>/<tool>`（可重复）= 这一场的 native 工具面。** 与 `registry.pinned_native_tools` **同义同严**，两者取并集去重（config 在前，`--pin` 按 argv 顺序在后）：config 说"这个 workspace 一直要"，`--pin` 说"这一场要"。解析不到就 exit 1 并打出这场的 pin 列表（`PinnedExtensionNotActive` / `PinnedToolNotDeclared` / `InvalidStableToolId` / `ToolBudgetExceeded` 各一句），绝不静默少一个工具地开场。结果照常冻进 header 的 `native_tools`，`initFrozen` 零改动。fork（`--parent`）**不继承** pin——composition 一律现解（§11），driver 要就再传一次。这也是"晋升"的全部含义：没有别的机制会把一个工具放上模型的工具面（§5.1、§5.5）。
+- **`session new --pin ext:<id>/<tool>`（可重复）= 这一场的 native 工具面。** 与 `registry.pinned_native_tools` **同义同严**，两者取并集去重（config 在前，`--pin` 按 argv 顺序在后）：config 说"这个 workspace 一直要"，`--pin` 说"这一场要"。解析不到就 exit 1 并打出这场的 pin 列表（`PinNamesUnknownExtension` / `PinToolNotDeclared` / `InvalidStableToolId` / `ToolBudgetExceeded` 各一句），绝不静默少一个工具地开场。结果照常冻进 header 的 `native_tools`，`initFrozen` 零改动。fork（`--parent`）**不继承** pin——composition 一律现解（§11），driver 要就再传一次。这也是"晋升"的全部含义：没有别的机制会把一个工具放上模型的工具面（§5.1、§5.5）。
 - **`session new --with <id>[@<version>]`（可重复）= composition membership，不是 native pin。** 把一个**已 built** 的版本 union 进这一场的 composition：它的 skills 进 catalog、system_prompts 进 system blocks、tools 可经 `nulya ext run <id>@<version>` 调用（点名冻结的版本，不依赖 `current`）；**tool 要不要占 native 槽是 `--pin` / `registry.pinned_native_tools` 的事**（两根轴分开）。同 id 覆盖 discovery 的结果（这一场说了算），重复 `--with` 同一个 id 后者胜。版本解析：给了 `@version` 就用它，没给就用该 id 的 `current`——**没有 `current` 就 exit 1，内核不猜**（"只有一个 built 版本就用它"这类聪明会让同一条命令在第二次 build 之后含义漂移）。所以一个**故意不 activate** 的包（mode / evolution，activate 了就会进每一场 session 的 system blocks）要按 `--with <id>@<version>` 带入，version 由 `ext build` 打印。落地不需要新机制：`--with` 只改 `SessionComposition.init` 的输入，结果照常冻进 header 的 `active`，所以 `initFrozen` 零改动、resume 自然重建同一份 composition。fork（`--parent`）不继承——composition 一律现解（§11），要就再传一次。
 - **mode = 贡献 system_prompt 的 data extension + `--with`。** 同一个包两种投放：`activate` = 常驻（每场都有）；不 activate、只 `--with` = 按场。不为 mode 造别的机制。
 - `nulya session list [--json]`：`.nulya/sessions/` 的**只读投影**，按 `created` 倒序（老 header 没有 `created`，退回按 id——id 本身时间有序）：`{sessions:[{id, created, parent, root, model, provider, model_id, nulya{version, kernel_hash}（创建它的二进制，§3.4；老 session 两项皆空）, events, composition{active:["id@version"], native_tools, system_prompts:["id@version/path"]}, usage（每条 assistant 的 `usage` 求和，§3.1）, episode_usage, first_user_text（截断）, outcome{verdict,note,at,source,by}|null}]}`。定位同 `config show`：外壳投影，不决定任何事，也不写任何东西；第一批消费者是 evolution skill（一眼看完很多场而不必逐个读 ledger）与 TUI 的 `/sessions`。一个读不动的 session 文件被跳过而不是让整条命令失败。**`session new` 从此写 header 的 `created`**（RFC3339 UTC）。三个派生列：
@@ -606,7 +614,7 @@ immutable package + 内容寻址版本                  extension/store.zig, int
 store root 搜索顺序（首个 active 持有者胜）        extension/roots.zig
 build / activate / rollback / integrity           extension/build/build_ext.zig, store.zig
 extension JSON-RPC tool/call                      extension/protocol.zig, invoke.zig
-SessionComposition 版本冻结（pin 一条路径）        composition.zig
+SessionComposition 版本冻结（成员解析一律硬失败）    composition.zig
 ToolExecutor / Binding（builtin/extension 同构）   tool.zig, extension/tools.zig
 skills + 渐进披露 catalog                          skill.zig, extension/skills.zig
 system prompts 投影                                prompt.zig, composition.zig
