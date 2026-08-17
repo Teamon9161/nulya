@@ -80,3 +80,95 @@
 - **M2c-d** `ff71b26` — `drivers/goal.sh`（59 行）+ `drivers/goal.ps1`（60 行），逐行对齐、都不解析 JSON。实测两边都跑通（scripted `handoff` 档：`session <p>` / `handoff <p> -> <c>` / `done <c>`，exit 0；`loop` 档 exit 3；缺 goal exit 2；`--file` 生效）。两处落地时改的细节：① 取新 session id 必须取**第一个** `"session":"s-…"`（compact 先写 `session` 再写 `parent`）——初版 sh 用贪婪 `sed` 取到了**父** id，于是每轮都 fork 回自己、跑满 50 轮，实跑发现并改成 `grep -o | head -1 | cut`；② ps1 里 `Write-Error` 在 `$ErrorActionPreference='Stop'` 下是终止性错误、会吃掉 `exit <n>` 并打出堆栈，三处诊断改成 `[Console]::Error.WriteLine` + `exit`，退出码这才与 sh 一致；native exe 的非零退出在 PowerShell 里不抛，所以 `session new` 后加了一句显式空值检查（sh 那边 `set -e` 已覆盖）。
 - **M2c-d2** `d16284f` — 按 §1.4b：两份脚本改走 `session step --max-steps 1 --stream`，逐行原样透传到 driver 自己的 **stderr**（sh `| tee "$log" >&2`；ps1 `| Tee-Object -FilePath $log | ForEach-Object { [Console]::Error.WriteLine($_) }`，`$log` = `.nulya/goal-last-step.jsonl`，每轮覆盖），**stdout 只剩控制行**；结束信号从 grep `"calls":[]` 换成协议自己的 `"stopped":"end_turn"`，`"stream":"run","event":"error"` 显式 `exit 1`（管道左侧的失败 `set -e` / `$ErrorActionPreference` 都看不见）。行数 67 / 70（≤ 70）。**手测发现并修掉一个真 bug**：PowerShell 5.1 用控制台代码页解码 native 命令的 stdout、再按同一编码写出去，于是模型产出的每个非 ASCII 字节到达 spawner 时都被毁掉（em dash `e2 80 94` → `e2 80 3f`）——加一行 `[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)`，实测两平台 stderr 里的 em dash 都是 `e2 80 94`。（`Tee-Object -FilePath` 在 5.1 无 `-Encoding`，所以 `$log` 落盘是 UTF-16LE；它只被 driver 自己读回，不是交付物。）
 - **M2c-e** `0eeee3f` — 四条 e2e 全绿（`tests/e2e/extension.zig` 三条 + `tests/e2e/session.zig` 一条），无 `NULYA_TEST_ZIG` / `NULYA_REPO` / `NULYA_EXE` 时 skip。driver 那条跑真实脚本（按平台选 ps1/sh），并按 §1.4b 加了两条断言：driver stdout **没有**以 `{` 开头的行；stderr 含 `"stream":"model"` 与 `"stream":"run"`。driver 的 spawn env 显式设 `NULYA_HOME` 指向测试 home，否则第一次 `ext build` 的信任记录会写进开发者真实的 `~/.nulya`。既有 e2e 断言一条未减。`tests/e2e.zig` 头注释同步（属 M2c-f）。
+- **M2c-f** `fbd2de0` — DESIGN §11 加了一整段 handoff（bundled `extensions/handoff` + `brief_file` 分支 + 父指针 footer + `drivers/goal.*` 是第一个 driver 与 `--pin` 的第一个 consumer + 两个流两个受众，明说内核零改动）；§13 四档 scripted（M2c-c 时已改）；§14 核对：**无 CLI 变化**（`--pin` / `--with` / `--stream` / `--parent` 都是既有条目，一条没动）。PLAN：§1 M2c 标 ✅ 并把 D1/D3/D4 写成"落地时改了三处措辞"；§3.2 的"尚未落地"删掉 `--pin`；§3.4 "仍未做"删 handoff 一条；§3.4.1 / §3.6 标 ✅（设计文字保留，"待做"改成落地形状与差异）；§4 handoff 守卫阈值改成"第一版 driver 故意没做，等真实使用证据"。CLAUDE.md 现状加一条 M2c、「还没有」删 handoff / `/goal`、模块表 `launch.zig` 补第四档。tui.md：§9 加 T10 行、§10.4 的 `<id>.live` sidecar 划掉（driver 的 stderr 就是它）、§11 追加 T10 占位小节。
+
+### 步骤 7 · 真实运行（deepseek，两阶段，2026-08-17）
+
+**先说一处没做的事：仓库根目录跑不了，我没有代为解除。** 在 `C:\code\zig\nulya` 直接跑 `drivers/goal.ps1`，`session new` 被 **workspace store 的 trust gate**（DESIGN §9）硬拒：
+
+```
+the extension store C:\code\zig\nulya\.nulya\extensions came with this checkout and is not trusted on this machine; it holds:
+  compact (3 built version(s), none active) / demo / evolution / handoff (1 built version(s), none active)
+review it (`nulya ext list`, `nulya ext inspect <id>`), then `nulya ext trust` to allow it — or delete the store
+session new failed: the workspace extension store is not trusted (see the lines above)
+```
+
+这是门在正常工作（那些版本是更早建的，`~/.nulya/trusted-stores.jsonl` 里没有本机记录）。解法是 `nulya ext trust`——**一次授权，写进 user 层**，既超出本步"只往 `.nulya/` 写"的范围，也是该由人按下的那个按钮，所以我没有替你按。**改为在 `.nulya/scratch/m2c-run/`（空 store → `ext build` 出生即可信）跑，仓库只被读**。要在仓库根目录跑，先自己 `./zig-out/bin/nulya.exe ext trust`。
+
+**driver stdout（exit 0，`--profile deepseek --max-iterations 12`）：**
+
+```
+session s-1786972293255-fd097b
+handoff s-1786972293255-fd097b -> s-1786972304901-31c619
+done s-1786972304901-31c619
+evaluate: …/nulya.exe session outcome s-1786972304901-31c619 <success|partial|failure>
+```
+
+stdout 里以 `{` 开头的行 **0** 条；stderr 里 `"stream":"model"` **1929** 行（含 `thinking_delta`，DeepSeek 的 reasoning 实时可见）、`"stream":"run"` 5 行。两个流的分工在真实 provider 上成立。
+
+**父 session（`s-…fd097b`）**：header `composition` = `{active:[handoff@v-3e81022b2a3612cf7c804217], native_tools:["ext:handoff/handoff"]}`；5 条事件——`user_text`（前言+目标）→ `assistant[shell]` → `tool_results`（读到 `docs/base-tools.md`）→ `assistant[handoff]` → `tool_results`（`{"recorded":".nulya/handoffs/…-1.md",…}`），**之后再没长过**。
+
+**生成的 handoff 文件**（`.nulya/handoffs/s-1786972293255-fd097b-1.md`，节选——`## Keep` 是模型自己从文档里抽的，不是模板）：
+
+```markdown
+# Handoff
+
+session: s-1786972293255-fd097b
+
+## Done
+
+Phase 1 complete. Read C:/code/zig/nulya/docs/base-tools.md (a spec in Chinese for Nulya's base
+tools) and extracted the output discipline that the built-in shell tool follows. No files were
+written in this phase.
+
+## Next task
+
+Phase 2: write AT MOST 10 lines to the file base-tools-note.md in your working directory …
+
+## Keep
+
+The shell tool's output discipline (from §2/§3 of docs/base-tools.md):
+- ALL tool output passes through one unified primitive `emit` … 1. Per-line clip: any line >
+  MAX_LINE_BYTES (16384) is truncated at a UTF-8 boundary with `…[+N bytes]` … 2. Whole-output
+  hard budget (128 KB, head/tail 25/75) … 3. Auto spill-to-disk … footer `[full output: <path>]`
+  … 4. Spill filenames are deterministic and collision-free …
+- Batch layer: StepOutputBudget caps a whole turn of N tool calls at max_step_bytes (256 KB) …
+
+## Dropped
+
+The document's editorial background (comparisons to the tcode project, accretion criticism,
+design rationales, table of constants, future hardening items …).
+```
+
+**子 session（`s-…31c619`）**：header `parent = {"session":"s-1786972293255-fd097b","seq":5}`、`composition` 为空（fork 不继承 `--with`/`--pin`，DESIGN §11 第 3 条）。首条 turn 就是上面那份 brief，前面 `<nulya:context-summary>`、末尾是代码追加的父指针：
+
+```
+---
+Parent session: s-1786972293255-fd097b (forked at seq 5). The full transcript is still on disk — read it with: nulya session events s-1786972293255-fd097b
+```
+
+子 session 只凭这条 brief（**没有**父的任何 transcript）跑完了阶段 2：`shell` 看一眼工作目录 → 写 `base-tools-note.md` → end_turn。产出（4 行，模型自己压到 10 行以内）：
+
+```markdown
+# Shell output discipline vs. naive "return everything"
+
+- Shell output passes through a unified `emit` primitive: per-line byte ceiling (16384) with
+  UTF-8-safe truncation + `…[+N bytes]`, and a whole-output budget (128 KB) that keeps head/tail
+  (25/75) and cuts the middle with a marker.
+- Any truncation auto-spills the FULL raw output to scratch/tool-output/ (content-hashed,
+  deterministic filename) and appends a `[full output: <path>]` footer — the model never loses
+  data and never predicts sizes.
+- Batch layer caps a whole turn at 256 KB, spilling overflow with prefix + footer; short results
+  pass verbatim; exit code, stderr, and timeout-partial markers ride along.
+- A naive tool returns everything verbatim: no byte ceiling, no budget, no spill. One oversized
+  result can blow the context window, silently dropping data or forcing the model to guess —
+  exactly the data loss and unpredictability the discipline exists to prevent.
+```
+
+运行现场保留在 `.nulya/scratch/m2c-run/`（`out.txt` / `err.txt` / 两个 session 文件 / handoff 文件 / 产出）。
+
+### 后续（不做，记下来）
+
+- 仓库根目录的 store 需要一次 `nulya ext trust` 才能跑 driver / TUI——这是门的正常行为，但每个新 clone 都会撞一次；`ext trust` 的提示已经指路，暂不动。
+- TUI 的 `/goal`（tui.md T10）：内核与 driver 都就绪，前端未开工。
+- handoff 的 driver 守卫（context 太小时忽略提议、brief 太短退回 `/compact`）：PLAN §3.4.1 列着，等真实使用证据。
