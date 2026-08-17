@@ -20,7 +20,7 @@
       },
       {
         "name": "write",
-        "description": "Create or overwrite a file. Prefer `edit` for modifying existing files. Overwriting an existing file requires having read its current version in full with `read` in this session; a file you have not read, have only partly read, or that changed on disk since you read it is refused with the reason.",
+        "description": "Create or overwrite a file. Prefer `edit` for modifying existing files. Overwriting an existing file requires having read its current version in full with `read` in this session (a file you wrote or appended to in this session already counts as read — no re-read needed); a file you have not read, have only partly read, or that changed on disk since you read it is refused with the reason.",
         "input": {
           "type": "object",
           "properties": {
@@ -32,7 +32,7 @@
       },
       {
         "name": "append",
-        "description": "Append text to the end of a UTF-8 file, written exactly as given — no newline is added for you, so start with '\\n' if the file's last line must remain intact. Appending to an existing file requires having read its current version (a partial read counts); a missing file is created. For insertion in the middle of a file use `edit`.",
+        "description": "Append text to the end of a UTF-8 file, written exactly as given — no newline is added for you, so start with '\\n' if the file's last line must remain intact. Appending to an existing file requires having read its current version (a partial read counts, and so does having written or appended to it in this session); a missing file is created. For insertion in the middle of a file use `edit`.",
         "input": {
           "type": "object",
           "properties": {
