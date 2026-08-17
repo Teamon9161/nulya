@@ -45,12 +45,12 @@ test "cli help: help / --help / -h print the same usage covering every verb fami
     // omits them sends the model guessing at exactly the two decisions it has to
     // make (compose a version in, put a tool on the tool face).
     for ([_][]const u8{
-        "ext init",     "--script",    "ext build",      "ext run",        "--arg",
-        "ext activate", "--user",      "ext trust",      "ext api",        "session new",
-        "--with",       "--pin",       "--parent",       "session step",   "--max-steps",
-        "--effort",     "--stream",    "session events", "session cancel", "outcome",
-        "session list", "config show", "skill load",     "src",            "toolchain",
-        "help",
+        "ext init",     "--script",       "ext build",      "ext run",     "--arg",
+        "ext activate", "--user",         "ext trust",      "ext api",     "ext sync",
+        "ext prune",    "--dry-run",      "--activate",     "session new", "--with",
+        "--pin",        "--parent",       "session step",   "--max-steps", "--effort",
+        "--stream",     "session events", "session cancel", "outcome",     "session list",
+        "config show",  "skill load",     "src",            "toolchain",   "help",
     }) |needle| {
         std.testing.expect(std.mem.indexOf(u8, help.stdout, needle) != null) catch |err| {
             std.debug.print("`nulya help` never mentions '{s}'\n", .{needle});
@@ -123,9 +123,9 @@ test "cli ext api: permissions and examples carry no document citations and walk
     defer alloc.free(examples.stdout);
     try std.testing.expectEqual(@as(u8, 0), examples.code);
     for ([_][]const u8{
-        "ext init --script", "ext build",       "ext run", "--arg",
-        "ext activate",      "--pin",           "--with",  "--user",
-        "ext trust",         "session outcome",
+        "ext init --script", "ext build",       "ext run",  "--arg",
+        "ext activate",      "--pin",           "--with",   "--user",
+        "ext trust",         "session outcome", "ext sync", "ext prune",
     }) |needle| {
         std.testing.expect(std.mem.indexOf(u8, examples.stdout, needle) != null) catch |err| {
             std.debug.print("`ext api examples` never shows '{s}'\n", .{needle});

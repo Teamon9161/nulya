@@ -1395,6 +1395,14 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             \\  nulya ext activate --user guide v-<hash>
             \\  nulya ext trust                               # a .nulya/extensions that came with a checkout
             \\
+            \\  # A whole store root at once: put the source in <root>/<id>/, then one verb.
+            \\  cp -r some.tool ~/.nulya/extensions/           # or write it there in the first place
+            \\  nulya ext sync --user --activate               # builds every draft there; a version another root
+            \\                                                # already holds is copied, not compiled
+            \\  nulya ext sync --dry-run                       # what it would do, touching nothing
+            \\  nulya ext prune --user                         # drop versions `current` does not name; the draft
+            \\                                                # can always rebuild the same version id
+            \\
             \\  # Afterwards: say how it went, so later passes have evidence.
             \\  nulya session outcome <session-id> success --note "the helper did it"
             \\
