@@ -197,7 +197,8 @@ pub const config_usage =
 ;
 
 pub const skill_usage =
-    \\  nulya skill list | load <skill-ref>               the skill catalog, and one frozen SKILL.md by its ref
+    \\  nulya skill list                                  the skill catalog: one line per skill available here
+    \\  nulya skill load <skill-ref>                      print one frozen SKILL.md in full
     \\
 ;
 
@@ -226,8 +227,7 @@ pub fn usage(io: std.Io) !u8 {
         \\reading this harness
         \\
     ++ config_usage ++ skill_usage ++ src_usage ++ toolchain_usage ++
-        \\  nulya help                                        this text
-        \\  nulya                                             run the built-in demo prompt
+        \\  nulya help                                        this text; a bare `nulya` runs the built-in demo prompt
         \\
         \\a fuller reference ships with the nulya repo, as an extension you install once:
         \\  nulya ext build extensions/guide --user     then     nulya ext activate --user guide <version>
