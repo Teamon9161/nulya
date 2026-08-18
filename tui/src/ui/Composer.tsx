@@ -51,6 +51,13 @@ export interface ComposerApi {
   isEmpty(): boolean
   focus(): void
   blur(): void
+  /**
+   * Put a submitted line back in the box, when the send could not happen at all
+   * — a session that would not start (tui.md §11, T22). Never for a turn the
+   * kernel accepted: that one is in the ledger, and a second copy in the
+   * composer would invite it to be sent twice.
+   */
+  restore(text: string): void
 }
 
 export function Composer(props: {
@@ -245,6 +252,13 @@ export function Composer(props: {
       isEmpty: () => (area?.plainText ?? "").length === 0,
       focus: () => area?.focus(),
       blur: () => area?.blur(),
+      restore: (text: string) => {
+        // Only into a box the user has not started refilling: they typed the
+        // next thing while the refusal was in flight, and that is theirs.
+        if (!area || area.plainText.length > 0) return
+        area.insertText(text)
+        sync()
+      },
     })
   })
 

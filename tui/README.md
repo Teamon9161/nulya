@@ -36,12 +36,13 @@ cd C:\code\zig\nulya
 bun run tui\src\main.tsx
 ```
 
-The first frame is an empty transcript with a fresh session id in the header.
-Type, press `Enter`. (Look and leave instead, and that fresh session is
-un-created on the way out: a session the TUI itself made and never recorded
-anything in does not stay behind as an empty row in `/sessions`. Sessions with
-events, sessions with a turn still queued, and sessions opened with `--session`
-are never touched.)
+The first frame is an empty transcript over a draft: no session exists yet. The
+line under the composer names the model the next session will run on
+(`gpt-5.6-luna (medium) · tools 2+5 · …`; click it for `/model`), and anything
+you change in `/ext` or `/model` before typing goes into that session. The
+session is created the moment you send the first message — look and leave
+instead, and nothing was ever written to `.nulya/sessions/`. (Sessions opened
+with `--session <id>` are real from the start and are never touched.)
 
 **Which `nulya.exe` gets used**, in order:
 
@@ -185,14 +186,16 @@ bun run tui\src\main.tsx --profile codex
    bun run tui\src\main.tsx --session s-1786820965784-617765
    ```
 
-   The id is in the header line, and `F3` lists every session in the workspace
-   (newest first, `● live` when another process holds the writer lease).
+   `F3` lists every session in the workspace with its id (newest first,
+   `● live` when another process holds the writer lease).
    A replayed session draws the same transcript the live stream did — that
    equality is pinned by a test.
 4. **Watch the evolution.** When the agent builds an extension and activates it,
-   a `⚡ capability` banner appears mid-transcript. `F2` shows the store: version
-   line, which version this session froze, which one the *next* session will
-   pick up, and the tool-usage counts behind promotion.
+   a `⚡ capability` banner appears mid-transcript. `F2` shows the store: every
+   id in every root (source that never built included, with the kernel's own
+   sentence about why), an `●`/`○` switch per extension (`Enter` turns it on
+   for the next session — activate + pin its tools — or off), the version line,
+   which version this session froze, and the tool-usage counts behind promotion.
 
 ## Keys
 
@@ -213,15 +216,19 @@ bun run tui\src\main.tsx --profile codex
 | `F2` | `/ext` — the extension store |
 | `F3` | `/sessions` — the session store |
 | `F4` | next tab (tabs appear once a second session is open) |
-| `F5` | `/model` — the models that can run, with effort; Enter starts a session on one |
+| `F5` | `/model` — the models that can run, with effort; Enter picks what the next session runs on (a draft tab just changes its pick; a started tab gets a new draft beside it) |
 | `F6` | `/provider` — endpoints and their keys; `s` pastes a key, `a` adds a compatible endpoint, Enter on a ready one goes to its models |
 | `Ctrl+W` | close the current tab (with one tab it is the composer's delete-word, as in a shell) |
+| click the model under the composer | `/model` |
 
 Inside `/sessions`: `j`/`k` move, `Enter` opens, `n` starts a new session, `r`
 refreshes, `Esc` closes. Inside `/ext`: `j`/`k` move, `Tab` switches pane
-(extensions → versions → usage table), `a` activates and `r` rolls back the
-highlighted version (confirm with `y`), `u` jumps to the usage table. Inside
-`/usage`: `r` refreshes.
+(extensions → versions → tools → usage table), `Enter` (or a click on the
+`●`/`○`) turns the highlighted extension on or off for the next session,
+`b` builds the source in its store directory, `Space` in the tools pane pins
+one tool and `A` makes that pin permanent, `a` activates / `r` rolls back the
+highlighted version on the version line (confirm with `y`), `p` prunes old
+versions, `u` jumps to the usage table. Inside `/usage`: `r` refreshes.
 
 Slash commands: `/model` (F5), `/provider` (F6), `/effort <level|auto>`,
 `/new [--profile p] [--model id]`, `/sessions`, `/ext`, `/usage`, `/settings`,

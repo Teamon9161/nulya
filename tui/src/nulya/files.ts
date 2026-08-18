@@ -254,13 +254,14 @@ function siblingPath(ws: Workspace, id: string, suffix: string): string {
  * Remove a session that has recorded nothing, if — and only if — nothing about
  * it says somebody still means to use it.
  *
- * The TUI creates a session eagerly at start-up (`session new`) so the frozen
- * composition and the id are on screen before the first word is typed. Quit
- * without typing and that file is a header and no events: not a ledger, just
- * a name. Keeping every one of those turns `/sessions` into a list of empty
- * rows within a week of use. Removing it is not rewriting history — there is
- * none — but it IS the one write into `.nulya/sessions/` this program makes,
- * so the guards are strict and every one is a "no":
+ * The common way to get one of these is gone since T22: a TUI tab starts as a
+ * draft and runs `session new` at the first message, so looking and leaving
+ * creates nothing at all. What is left are the paths that DO create a session
+ * before anything is recorded — a compaction whose driver never returned, a
+ * `--session` this process made — and for those the file is a header and no
+ * events: not a ledger, just a name. Removing it is not rewriting history —
+ * there is none — but it IS the one write into `.nulya/sessions/` this program
+ * makes, so the guards are strict and every one is a "no":
  *
  *   - any event line: it is a ledger now (physics #1) and stays, empty of
  *     meaning or not;
@@ -435,6 +436,44 @@ export async function listExtensions(ws: Workspace): Promise<ExtensionEntry[]> {
   // Alphabetical for the eye; the sort is stable, so a shadowed copy still sits
   // under the root that wins it.
   return out.sort((a, b) => a.id.localeCompare(b.id))
+}
+
+/**
+ * The ids that exist only as SOURCE (tui.md §11, T22).
+ *
+ * `ext list` lists what a root holds — a directory with a built version — so a
+ * draft that has never built is not in it. That is right for the kernel and
+ * wrong for a panel: `std` sitting in the user store, unbuildable on a machine
+ * with no usable zig, was invisible in `/ext` and the only trace was a status
+ * line saying `3 failed` as it scrolled past.
+ *
+ * So the panel unions `ext list` with `ext sync --dry-run`, and this reads the
+ * manifest of each id the listing did not name. No versions and no `current`:
+ * that is exactly what such an id is.
+ */
+export async function draftEntries(ws: Workspace, ids: readonly string[]): Promise<ExtensionEntry[]> {
+  if (ids.length === 0) return []
+  const roots = await storeRoots(ws)
+  const workspace = join(ws.dir, extensions_dir)
+  const out: ExtensionEntry[] = []
+  for (const id of ids) {
+    for (const root of roots) {
+      const manifest = readManifest(join(root, id, "extension.json"))
+      if (!manifest) continue
+      out.push({
+        id,
+        current: null,
+        versions: [],
+        // The same spec `ext list` prints, so two rows of one table do not name
+        // the same directory two different ways.
+        root: root === workspace ? extensions_dir : root,
+        shadowed: false,
+        ...manifestFacts(manifest),
+      })
+      break
+    }
+  }
+  return out
 }
 
 // --- the usage journal ------------------------------------------------------

@@ -28,22 +28,22 @@ exports[`/ext shows the version line, the current pointer and the usage counts 1
 " extensions · 1 · tools 2+0/8
  extensions  versions  tools  usage
 
- ▾ lint    1v scri  active    lint · script · current v-<hash>
-                              root .nulya/extensions
-                              tools lint · skills — · prompts —
-                              permissions fs 0 · net — · proc 0
+ ▾ ● lint    1v scri  0/1 tools  active    lint · script · active · tools 0/1 pinned
+                                           current v-<hash>
+                                           root .nulya/extensions
+                                           tools lint · skills — · prompts —
+                                           permissions fs 0 · net — · proc 0
 
-                              versions
-                                v-<hash>  <built>  ⚡ current  ▎ this session
+                                           versions
+                                             v-<hash>  <built>  ⚡ current  ▎ this session
 
-                              usage
-                                lint · 0 uses · —
-
+                                           usage
+                                             lint · 0 uses · —
 
 
 
 
  changes apply to the NEXT session — this one froze its tools at start
- j/k move · Tab pane · Space pin · Esc close · ? keys
+ Enter on/off · j/k move · Tab pane · Esc close · ? keys
 "
 `;

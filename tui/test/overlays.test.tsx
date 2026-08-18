@@ -165,13 +165,16 @@ test("/ext shows the version line, the current pointer and the usage counts", as
   try {
     const frame = await settle(setup, 6)
     expect(frame).toContain("extensions · 1")
-    expect(frame).toContain("lint · script · current")
+    // The switch, in words and as a marker: active, and how much of its tool
+    // face is pinned (tui.md §11, T22).
+    expect(frame).toContain("lint · script · active · tools 0/1 pinned")
+    expect(frame).toContain("● lint")
     expect(frame).toContain(version)
     expect(frame).toContain("current")
     expect(frame).toContain("▎ this session")
     // The four panes name themselves; the store actions are one `?` away.
     expect(frame).toContain("extensions  versions  tools  usage")
-    expect(frame).toContain("j/k move · Tab pane · Space pin · Esc close · ? keys")
+    expect(frame).toContain("Enter on/off · j/k move · Tab pane · Esc close · ? keys")
     expect(frame).not.toContain("a activate · r rollback")
     expect(stable(frame)).toMatchSnapshot()
 
@@ -361,16 +364,20 @@ test("Enter on a sub-session card opens it as a second tab, attached as an obser
     await settle(setup, 4)
     expect(setup.captureCharFrame()).toContain(`sub-session · ${child}`)
     // One session open: no tab bar at all.
-    expect(setup.captureCharFrame()).not.toContain(`⤷ ${parent}`)
+    expect(setup.captureCharFrame()).not.toContain("⤷ scripted-demo")
 
     setup.mockInput.pressEscape()
     await settle(setup, 3)
     setup.mockInput.pressEnter()
     const frame = await settle(setup, 6)
-    expect(frame).toContain(`⤷ ${parent}`)
-    expect(frame).toContain(`⤷ ${child}`)
-    // The tab that opened is the one in front.
-    expect(frame).toContain(`nulya · ${child}`)
+    // Two tabs, named by what they run on — the same model, so the `#n` that
+    // tells them apart (tui.md §11, T22). Neither shows a session id.
+    expect(frame).toContain("⤷ scripted-demo #1")
+    expect(frame).toContain("⤷ scripted-demo #2")
+    expect(frame.split("\n")[0]).not.toContain(parent)
+    // The tab that opened is the one in front: its transcript is the one drawn,
+    // and the child has no cards of its own.
+    expect(frame).not.toContain(`sub-session · ${child}`)
   } finally {
     setup.renderer.destroy()
   }
@@ -405,5 +412,84 @@ test("/ext's action keys move the store's current pointer, with a confirmation",
     expect(await settle(setup, 4)).toContain("current")
   } finally {
     setup.renderer.destroy()
+  }
+}, 120_000)
+
+/**
+ * The half of the store `ext list` cannot see (tui.md §11, T22). An id with
+ * source and no version is not in the kernel's listing — rightly, it holds
+ * nothing — and before this it was invisible here too, which is how `std` sat
+ * unbuilt in a user store for a week with no trace but a status line.
+ */
+test("/ext lists an id that is only source, says what is missing, and refuses to turn it on", async () => {
+  const only_source = "source-only"
+  const run = (args: string[]) => Bun.spawnSync({ cmd: [ws.bin, ...args], cwd: ws.dir, env: process.env })
+  run(["ext", "init", "--script", only_source])
+  // The kernel's own listing does not have it: no version, nothing held.
+  expect((await listExtensions(ws)).some((entry) => entry.id === only_source)).toBe(false)
+
+  const setup = await overlayFrame(() => <ExtView ws={ws} header={null} onClose={() => {}} />, 120, 26)
+  try {
+    await until(() => setup.captureCharFrame().includes(only_source), 20_000)
+    const frame = await settle(setup, 4)
+    // No versions, and the draft column says why there are none.
+    expect(frame).toContain(`${only_source}`)
+    expect(frame).toContain("0v scri")
+    expect(frame).toContain("not built")
+
+    // The cursor starts on the first row; `lint` sorts before `source-only`.
+    setup.mockInput.pressKey("j")
+    await until(() => setup.captureCharFrame().includes("never been built"), 10_000)
+    // Enter cannot turn on what has no version, and says which key does.
+    setup.mockInput.pressEnter()
+    await until(() => setup.captureCharFrame().includes("has no built version"), 10_000)
+    expect((await listExtensions(ws)).some((entry) => entry.id === only_source)).toBe(false)
+
+    // `b` builds that one id, in the root its source lives in.
+    setup.mockInput.pressKey("b")
+    await until(async () => (await listExtensions(ws)).some((entry) => entry.id === only_source), 60_000)
+    expect(await settle(setup, 4)).toContain("built · Enter turns it on")
+  } finally {
+    setup.renderer.destroy()
+    rmSync(join(ws.dir, ".nulya", "extensions", only_source), { recursive: true, force: true })
+  }
+}, 120_000)
+
+/**
+ * The switch (tui.md §11, T22). One key, both axes: `current` moves and the
+ * package's tools go on this TUI's pin list, and off again together — so the
+ * pin list can never name an extension no session could resolve.
+ */
+test("/ext: Enter turns an extension on and off, and both axes move together", async () => {
+  const statePath = join(ws.dir, "switch-state.json")
+  const before = (await listExtensions(ws)).find((entry) => entry.id === "lint")!.current
+  const setup = await overlayFrame(() => (
+    <ExtView ws={ws} header={null} statePath={statePath} onClose={() => {}} />
+  ))
+  try {
+    await until(() => setup.captureCharFrame().includes("lint"), 20_000)
+    await settle(setup, 4)
+    // Active but nothing pinned: half on, and the row says which half.
+    expect(setup.captureCharFrame()).toContain("0/1 tools")
+
+    setup.mockInput.pressEnter()
+    await until(() => sessionPins(statePath).includes("ext:lint/lint"), 20_000)
+    const on = await settle(setup, 4)
+    expect(on).toContain("lint · script · active · tools 1/1 pinned")
+    expect(on).not.toContain("0/1 tools")
+    expect((await listExtensions(ws)).find((entry) => entry.id === "lint")!.current).not.toBeNull()
+
+    // And back: the pin goes first, then the pointer — so no moment of this
+    // leaves a pin that `session new` would refuse.
+    setup.mockInput.pressEnter()
+    await until(async () => (await listExtensions(ws)).find((entry) => entry.id === "lint")!.current === null, 20_000)
+    expect(sessionPins(statePath)).not.toContain("ext:lint/lint")
+    expect(await settle(setup, 4)).toContain("lint · script · inactive")
+  } finally {
+    setup.renderer.destroy()
+    if (before) {
+      Bun.spawnSync({ cmd: [ws.bin, "ext", "activate", "lint", before], cwd: ws.dir, env: process.env })
+    }
+    rmSync(statePath, { force: true })
   }
 }, 120_000)

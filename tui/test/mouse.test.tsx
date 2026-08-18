@@ -228,8 +228,16 @@ test("/ext: clicking a pane name goes to it, clicking [x] pins the tool", async 
 
 test("the tab bar answers to a click, with the same select F4 uses", async () => {
   const [active, setActive] = createSignal(0)
-  const tab = (id: string) => ({ id, attach: { role: () => "driver" } }) as unknown as SessionTab
-  const tabs = [tab("s-aaa"), tab("s-bbb")]
+  // A tab is named by what it runs on, not by its session id (tui.md §11, T22).
+  const tab = (model: string) =>
+    ({
+      kind: "session",
+      key: model,
+      id: `s-${model}`,
+      attach: { role: () => "driver" },
+      state: { snapshot: { header: { model, model_identity: { model } } } },
+    }) as unknown as SessionTab
+  const tabs = [tab("alpha-1"), tab("beta-2")]
   const setup = await mount(
     () => <TabBar tabs={tabs} activeIndex={active()} onSelect={setActive} />,
     60,
@@ -237,10 +245,11 @@ test("the tab bar answers to a click, with the same select F4 uses", async () =>
   )
   try {
     const line = (await settle(setup, 4)).split("\n")[0]!
-    expect(line).toContain("s-aaa")
-    await setup.mockMouse.click(line.indexOf("s-bbb") + 1, 0)
+    expect(line).toContain("alpha-1")
+    expect(line).not.toContain("s-alpha-1")
+    await setup.mockMouse.click(line.indexOf("beta-2") + 1, 0)
     await until(() => active() === 1, 5_000)
-    await setup.mockMouse.click(line.indexOf("s-aaa") + 1, 0)
+    await setup.mockMouse.click(line.indexOf("alpha-1") + 1, 0)
     await until(() => active() === 0, 5_000)
   } finally {
     setup.renderer.destroy()
@@ -332,7 +341,7 @@ test("clicking the input box leaves browse mode", async () => {
   }
 }, 120_000)
 
-test("the model is a click target wherever it is written: title line, composition card — and the welcome rows and /help", async () => {
+test("the model is a click target wherever it is written: the line under the composer, the composition card — and the welcome rows and /help", async () => {
   const id = await sessionNew(ws, { profile: "scripted" })
   const state = createSessionState(id)
   const setup = await testRender(
@@ -345,11 +354,14 @@ test("the model is a click target wherever it is written: title line, compositio
     const frame = await settle(setup, 4)
     const rows = frame.split("\n")
 
-    // The title line: `nulya · <id> · scripted · scripted-demo …` — the model
-    // half is the target. Its detail no longer wraps into a lone ` ·`.
-    expect(rows[0]).toContain("scripted · scripted-demo")
-    expect(rows[0]).toContain("tools 2+0")
-    await setup.mockMouse.click(rows[0]!.indexOf("scripted-demo") + 2, 0)
+    // The bottom line, where tcode puts it (tui.md §11, T22): the model leads
+    // it, and the model is the target. No session id, no provider name.
+    // The frame ends with a newline, so the last row is the blank after it.
+    const bar = rows.length - 2
+    expect(rows[bar]).toContain("scripted-demo · tools 2+0")
+    expect(rows[bar]).not.toContain(id)
+    expect(rows[bar]).toContain("Esc cancel · Ctrl+O fold · /help")
+    await setup.mockMouse.click(rows[bar]!.indexOf("scripted-demo") + 2, bar)
     expect(await settle(setup, 4)).toContain(picker)
     setup.mockInput.pressEscape()
     expect(await settle(setup, 4)).toContain("frozen composition")
@@ -375,10 +387,8 @@ test("the model is a click target wherever it is written: title line, compositio
     setup.mockInput.pressEscape()
     expect(await settle(setup, 4)).toContain("frozen composition")
 
-    // And `/help` on the status bar is the last thing on screen that reads
+    // And `/help` on that same line is the last thing on screen that reads
     // like a command, so it too answers to a click.
-    const bar = rows.findIndex((row) => row.includes("Esc cancel · Ctrl+O fold · /help"))
-    expect(bar).toBeGreaterThan(0)
     const help = rows[bar]!.indexOf("/help")
     await setup.mockMouse.click(help + 1, bar)
     expect(await settle(setup, 4)).toContain("help · keys and commands")

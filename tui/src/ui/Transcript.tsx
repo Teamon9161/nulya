@@ -1,7 +1,7 @@
 import { For, Show } from "solid-js"
 import type { ScrollBoxRenderable } from "@opentui/core"
 import { Card } from "../render/cards/index.tsx"
-import { CompositionCard } from "../render/cards/CompositionCard.tsx"
+import { CompositionCard, type NextSession } from "../render/cards/CompositionCard.tsx"
 import { Welcome } from "./Welcome.tsx"
 import { useStyle } from "../render/theme.ts"
 import type { Contributions } from "../nulya/files.ts"
@@ -44,6 +44,8 @@ export function Transcript(props: {
   items: TranscriptItem[]
   header?: SessionHeader | null
   contributions?: Contributions[]
+  /** On a tab with no session yet: what the first message will freeze (T22). */
+  plan?: NextSession
   /** The workspace this session's `.nulya/` lives in — the welcome screen says so. */
   cwd?: string
   /** The model line of the composition card was clicked: open `/model`. */
@@ -70,10 +72,11 @@ export function Transcript(props: {
       }}
       contentOptions={{ flexDirection: "column", width: "100%", maxWidth: style.maxWidth, paddingRight: 1 }}
     >
-      <Show when={props.header}>
+      <Show when={props.header || props.plan}>
         <CompositionCard
           header={props.header ?? null}
           contributions={props.contributions}
+          plan={props.plan}
           onPickModel={props.onPickModel}
         />
       </Show>

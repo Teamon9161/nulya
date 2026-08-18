@@ -124,6 +124,13 @@ export interface Glyphs {
   dialRight: string
   /** "this is the one in force" — the current model row, a passed check. */
   check: string
+  /**
+   * The `/ext` switch: is this extension on for the next session (T22)? Two
+   * shapes, not two colours — a terminal with no colour still has to say which
+   * one it is, the same reason cursor and pointer have two glyphs.
+   */
+  switchOn: string
+  switchOff: string
 }
 
 const unicode_glyphs: Glyphs = {
@@ -147,6 +154,8 @@ const unicode_glyphs: Glyphs = {
   dialLeft: "‹",
   dialRight: "›",
   check: "✓",
+  switchOn: "●",
+  switchOff: "○",
 }
 
 const ascii_glyphs: Glyphs = {
@@ -170,6 +179,8 @@ const ascii_glyphs: Glyphs = {
   dialLeft: "<",
   dialRight: ">",
   check: "*",
+  switchOn: "*",
+  switchOff: "-",
 }
 
 export interface Style {

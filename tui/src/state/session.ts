@@ -125,6 +125,26 @@ export interface SessionState {
 }
 
 /**
+ * What a tab that has no session yet shows (tui.md §11, T22).
+ *
+ * Not a placeholder for missing data: a draft tab genuinely has no header, no
+ * items, no cost and no steps, because nothing has happened. So the readers
+ * that only paint — the transcript, the bottom row — need no branch for it, and
+ * the branches that stay are the ones that would DO something to a session.
+ */
+export const no_snapshot: SessionSnapshot = {
+  id: "",
+  header: null,
+  items: [],
+  usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, pricedSteps: 0, lastPrompt: 0 },
+  steps: 0,
+  lastStepStatus: null,
+  lastStopped: null,
+  activeTool: null,
+  error: null,
+}
+
+/**
  * Where the provisional tail begins.
  *
  * Committed items are always a prefix and provisional ones always a suffix —

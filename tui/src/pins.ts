@@ -127,26 +127,58 @@ export function promote(id: string, sources: PinSources): PinChange {
   }
 }
 
-/** `Space` on an extension row: all of its tools together, off if any is on. */
-export function toggleAll(ids: readonly string[], sources: PinSources): PinChange {
-  const mine = ids.filter((id) => pinState(id, sources) !== "other")
-  if (mine.length === 0) return unchanged("every tool here is pinned by another config layer")
-  const anyOn = mine.some((id) => pinState(id, sources) !== "off")
+/**
+ * Every tool of an extension onto this TUI's list, in one move — the pin half
+ * of the `/ext` switch (tui.md §11, T22). Only ever adds: turning an extension
+ * ON must not silently take a pin off something else.
+ */
+export function pinAll(ids: readonly string[], sources: PinSources): PinChange {
+  const mine = ids.filter((id) => pinState(id, sources) === "off")
+  if (mine.length === 0) return unchanged("")
+  let session = sources.session
+  for (const id of mine) session = with_(session, id)
+  return { user: null, session: [...session], notice: "" }
+}
+
+/**
+ * The other half: take an extension's tools off both lists this panel writes.
+ *
+ * A pin left behind by a deactivation is not harmless — the next `session new`
+ * refuses by name (`PinNamesUnknownExtension`) and the session simply does not
+ * start — so OFF has to clear `always` too, which is the one case where this
+ * module writes the config file without being asked for `A`. A pin some other
+ * layer wrote still cannot be touched (D3), so it is named instead.
+ */
+export function unpinAll(ids: readonly string[], sources: PinSources): PinChange {
   let user = sources.user
   let session = sources.session
-  for (const id of mine) {
-    if (anyOn) {
-      user = without(user, id)
-      session = without(session, id)
-    } else {
-      session = with_(session, id)
+  const stuck: string[] = []
+  for (const id of ids) {
+    if (pinState(id, sources) === "other") {
+      stuck.push(id)
+      continue
     }
+    user = without(user, id)
+    session = without(session, id)
   }
   return {
     user: user === sources.user ? null : [...user],
     session: session === sources.session ? null : [...session],
-    notice: anyOn ? `${mine.length} tool(s) off · next session` : `${mine.length} tool(s) · this TUI · next session`,
+    notice: stuck.length > 0 ? `${stuck.join(" ")} stays: another config layer pins it` : "",
   }
+}
+
+/**
+ * Session pins that name a tool nothing on offer declares.
+ *
+ * `session new --pin` is resolved against the composition, so a pin whose
+ * extension was rolled back or deactivated does not degrade — it refuses, and
+ * the session does not start at all. The list is this TUI's own program state,
+ * so the honest repair is to drop the line rather than to keep offering a
+ * session that cannot open.
+ */
+export function orphanPins(pins: readonly string[], available: readonly string[]): string[] {
+  return pins.filter((pin) => !available.includes(pin))
 }
 
 /**

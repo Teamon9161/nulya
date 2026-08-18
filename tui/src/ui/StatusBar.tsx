@@ -13,10 +13,17 @@ function compact(n: number): string {
 }
 
 /**
- * One line: what this session has cost, what is happening right now, and the
- * three keys worth knowing. The totals are the ledger's — every step records
- * what it cost (DESIGN §3.1) — so they survive a reopen and are the same
- * numbers whoever is driving.
+ * The one line under the composer (tui.md §4.1, §4.5, §11 T22): what this
+ * session runs on, what its face carries, what it has cost, what is happening
+ * right now, and the way to everything else.
+ *
+ * It replaced a header line whose subject was the session id — a string a
+ * person never reads and cannot use — and it sits under the input box for the
+ * same reason tcode's does: the model is the answer to "what am I talking to",
+ * which is a question you ask while typing, not while scrolling.
+ *
+ * The totals are the ledger's — every step records what it cost (DESIGN §3.1) —
+ * so they survive a reopen and are the same numbers whoever is driving.
  */
 export function StatusBar(props: {
   snapshot: SessionSnapshot
@@ -25,6 +32,15 @@ export function StatusBar(props: {
   role: Role
   takeoverReady: boolean
   spinnerFrame: string
+  /**
+   * The model this tab talks to: the session's frozen identity, or — on a tab
+   * that is still a draft — what the next `session new` will name.
+   */
+  model: string
+  /** `session step --effort`, when this tab names one; absent = the kernel's default. */
+  effort?: string
+  /** Extension tools on the face beside the two builtins (`tools 2+N`). */
+  tools: number
   hint?: string
   /** Rows of transcript below the viewport: >0 means somebody is reading back. */
   behind?: number
@@ -34,6 +50,8 @@ export function StatusBar(props: {
    * no fullness is shown at all rather than a made-up denominator.
    */
   contextWindow?: number | null
+  /** Clicking the model: the mouse half of `/model` (tui.md §11, T20). */
+  onPickModel?: () => void
   /** Clicking the "N more below" marker: the mouse half of Shift+End. */
   onScrollEnd?: () => void
   /** Clicking `/help` in the default hint: the mouse half of typing it. */
@@ -43,8 +61,10 @@ export function StatusBar(props: {
   const screen = useScreen()
   const [overBehind, setOverBehind] = createSignal(false)
   const [overHelp, setOverHelp] = createSignal(false)
+  const [overModel, setOverModel] = createSignal(false)
   const behindClick = onClick(() => props.onScrollEnd?.())
   const helpClick = onClick(() => props.onHelp?.())
+  const modelClick = onClick(() => props.onPickModel?.())
 
   const usage = createMemo(() => {
     const u = props.snapshot.usage
@@ -94,8 +114,9 @@ export function StatusBar(props: {
 
   /**
    * The activity is the one live fact on this line, so it is the one thing here
-   * drawn at full brightness — and only while something is actually happening.
-   * An idle bar has nothing to shout about and drops back a level.
+   * drawn at full brightness besides the model — and only while something is
+   * actually happening. An idle bar has nothing to shout about and drops back a
+   * level.
    */
   const color = () => {
     if (props.snapshot.error) return style.theme.err
@@ -104,7 +125,14 @@ export function StatusBar(props: {
     return style.theme.muted
   }
 
-  /** The right-hand chips, as strings first, so the hint can be cut to what they leave. */
+  /**
+   * The model, and the effort only when this tab has chosen one — `auto` is the
+   * kernel's default for that model and saying so costs seven columns of the
+   * one line that has none to spare.
+   */
+  const modelText = () => `${props.model || "…"}${props.effort ? ` (${props.effort})` : ""}`
+
+  /** The right-hand chips, as strings first, so the middle can be cut to what they leave. */
   const contextChip = () => (context() ? ` ctx ${context()!.percent}% · /compact` : "")
   const behindChip = () =>
     (props.behind ?? 0) > 0 ? ` ${style.glyphs.foldOpen} ${props.behind} more below · Shift+End` : ""
@@ -114,38 +142,84 @@ export function StatusBar(props: {
       : ""
 
   /**
-   * The hint, cut to the room the line actually has. It is the one part of
-   * this bar with no fixed width, and a `<text>` that runs out of box does not
-   * stop at the last whole word — the screenshot that motivated this ended in
-   * `Ctrl+O fold · /` with `help` gone. When the default hint is up, `/help` is
-   * its own box so it can be clicked; a notice replaces the whole hint.
+   * Who gives up columns first, when there are not enough.
+   *
+   * A `<text>` that runs out of box does not stop at the last whole word, so
+   * every segment on this line is measured and cut by us (`ui/columns.ts`). The
+   * order is a judgement about what this line is FOR: the model (what you are
+   * talking to), what is happening, and the way to the rest of the keys must
+   * survive every width; the running cost gives up next; `tools 2+N` first,
+   * because the composition card above says the same thing at length.
+   */
+  const layout = createMemo(() => {
+    const budget = Math.max(0, screen().width - 2)
+    const right = displayWidth(contextChip()) + displayWidth(behindChip()) + displayWidth(roleChip())
+    const activity_chip = ` · ${activity()}`
+    const model = fit(modelText(), Math.max(8, budget - right - displayWidth(activity_chip)))
+    let room = Math.max(0, budget - displayWidth(model) - displayWidth(activity_chip) - right)
+    // What the tail insists on before the ambient chips get anything. A NOTICE
+    // is news — what just happened, or why something did not — and it outranks
+    // both of them; the default hint only insists on ` · /help`, because an
+    // overlay nobody can reach is worse than a chip nobody can see.
+    const floor =
+      props.hint !== undefined
+        ? Math.min(displayWidth(` · ${props.hint}`), room)
+        : displayWidth(" · /help")
+    const usage_chip = ` · ${usage()}`
+    const keepUsage = room - displayWidth(usage_chip) >= floor
+    if (keepUsage) room -= displayWidth(usage_chip)
+    const tools_chip = ` · tools 2+${props.tools}`
+    const keepTools = room - displayWidth(tools_chip) >= floor
+    if (keepTools) room -= displayWidth(tools_chip)
+    return {
+      model,
+      tools: keepTools ? tools_chip : "",
+      usage: keepUsage ? usage_chip : "",
+      activity: activity_chip,
+      room,
+    }
+  })
+
+  /**
+   * The hint, in the room the line actually has: the whole reminder, then a
+   * shorter one, then just the way to `/help`. A notice replaces it entirely —
+   * whatever just happened outranks a reminder of which key folds a card.
    */
   const hint = () => {
-    const taken =
-      displayWidth(usage()) +
-      displayWidth(` · ${activity()}`) +
-      displayWidth(contextChip()) +
-      displayWidth(behindChip()) +
-      displayWidth(roleChip())
-    const room = Math.max(0, screen().width - 2 - taken)
+    const room = layout().room
     if (props.hint !== undefined) return { text: fit(` · ${props.hint}`, room), help: false }
-    const lead = " · Esc cancel · Ctrl+O fold · "
-    if (room >= displayWidth(lead) + 5) return { text: lead, help: true }
-    return { text: fit(" · Esc cancel · Ctrl+O fold", room), help: false }
+    for (const lead of [" · Esc cancel · Ctrl+O fold · ", " · Ctrl+O fold · ", " · "]) {
+      if (room >= displayWidth(lead) + 5) return { text: lead, help: true }
+    }
+    return { text: "", help: false }
   }
 
   return (
     <box flexDirection="row" width="100%" height={1} flexShrink={0} paddingLeft={1} paddingRight={1}>
-      {/* Three tiers on one line: what it cost (secondary), what is happening
-          (the subject), which keys (a caption). One `<text>` in one colour was
-          the whole bar reading as a single grey sentence. */}
       <box flexDirection="row" flexGrow={1} flexShrink={1} flexBasis={0}>
+        {/* The model is the subject of this line and the one thing on it that
+            answers to a click — it opens `/model`, the way tcode's model line
+            does. The same tint every clickable thing takes under the pointer
+            (`ui/rows.ts`). */}
+        <box
+          flexShrink={0}
+          height={1}
+          backgroundColor={props.onPickModel && overModel() ? style.theme.hover : undefined}
+          onMouseDown={props.onPickModel ? modelClick.onMouseDown : undefined}
+          onMouseUp={props.onPickModel ? modelClick.onMouseUp : undefined}
+          onMouseOver={() => setOverModel(true)}
+          onMouseOut={() => setOverModel(false)}
+        >
+          <text fg={style.theme.fg}>{layout().model}</text>
+        </box>
+        <text fg={style.theme.dim} flexShrink={0}>
+          {layout().tools}
+        </text>
         <text fg={style.theme.muted} flexShrink={0}>
-          {usage()}
+          {layout().usage}
         </text>
         <text fg={color()} flexShrink={0}>
-          {" · "}
-          {activity()}
+          {layout().activity}
         </text>
         <text fg={style.theme.dim} flexShrink={0}>
           {hint().text}
@@ -170,9 +244,7 @@ export function StatusBar(props: {
         </text>
       ) : null}
       {/* Scrolled away from the live end: the newest card is off screen, which
-          is worth saying — otherwise a streaming answer looks like a stall. It
-          is also the only thing on this line worth clicking, so it is the only
-          thing on this line that lights up under the pointer. */}
+          is worth saying — otherwise a streaming answer looks like a stall. */}
       {(props.behind ?? 0) > 0 ? (
         <box
           flexShrink={0}

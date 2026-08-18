@@ -1,4 +1,4 @@
-import { Match, Switch, createEffect, createSignal, onCleanup, onMount } from "solid-js"
+import { Match, Switch, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import type { KeyEvent, ScrollBoxRenderable, Selection } from "@opentui/core"
 import { Transcript, rowsBelow, windowItems } from "./Transcript.tsx"
@@ -16,35 +16,42 @@ import { ScreenContext, StyleContext, useScreen, useStyle, type Style } from "..
 import { FoldContext, createFoldStore } from "../state/folds.ts"
 import { BrowseContext, createBrowseStore } from "../state/browse.ts"
 import { OverlayContext, createOverlayStore, type OverlayKind } from "../state/overlay.ts"
-import { createTabStore, type SessionTab } from "../state/tabs.ts"
+import { createTabStore, type DraftTab, type FirstTab, type SessionTab } from "../state/tabs.ts"
 import { loadTuiState, rememberModel, sessionPins, type ModelPick } from "../state/tui_state.ts"
 import { sessions_dir } from "../nulya/files.ts"
 import { createProjectIndex } from "../references.ts"
 import { createSkillTable, skillTurn } from "../skills.ts"
 import { describeTool } from "../render/registry.ts"
+import { no_snapshot } from "../state/session.ts"
+import type { NextSession } from "../render/cards/CompositionCard.tsx"
 import {
   extSetCurrent,
   extSync,
   isVerdict,
-  sessionNew,
   sessionOutcome,
   verdicts,
   type ModelView as ModelParams,
+  type ProfileView,
 } from "../nulya/cli.ts"
-import { planStore, summarize } from "../extensions.ts"
+import { failedIds, planStore, summarize } from "../extensions.ts"
 import { runCompact } from "../compact.ts"
-import { buildEvolution, formatWithRef, parseWithRef, withOptions, type WithRef } from "../evolve.ts"
+import { buildEvolution, formatWithRef, parseWithRef, type WithRef } from "../evolve.ts"
 import { createKeymap, matches } from "../keymap.ts"
-import { displayWidth, fit, wrapWords } from "./columns.ts"
-import { onClick } from "./rows.ts"
 import type { AttachOptions } from "../state/attach.ts"
 import type { SessionState, TranscriptItem } from "../state/session.ts"
 import type { Workspace } from "../nulya/bin.ts"
 
 export interface AppProps {
   ws: Workspace
-  id: string
-  state: SessionState
+  /**
+   * An existing session to open (`nulya-tui --session <id>`), or absent — and
+   * then the screen starts on a DRAFT: no session, nothing on disk, until the
+   * first message (tui.md §11, T22).
+   */
+  id?: string
+  state?: SessionState
+  /** What a draft would start on: `launch.planLaunch`, or the remembered pick. */
+  pick?: ModelPick
   style: Style
   driver?: AttachOptions
   /** `id` was created by this process (`session new`), not opened by name. */
@@ -73,6 +80,18 @@ export interface AppProps {
    */
   models?: ModelParams[]
   /**
+   * The profiles, as `config show --json` projects them. Only one field is read:
+   * a profile's default model id, so a draft that names a profile and no model
+   * can still say which model the session will actually run on.
+   */
+  profiles?: ProfileView[]
+  /**
+   * `registry.pinned_native_tools` as the config chain merges it, read once at
+   * launch. Unioned with this TUI's own `session_pins` it is the face the next
+   * session would carry — which is what a draft has instead of a frozen one.
+   */
+  pinnedTools?: string[]
+  /**
    * Which store roots to build on the way in, and whether to let that pass move
    * `current` (tui.md §11, T11). The user root needs no permission; the project
    * root is only here when `main` found it already trusted — the question, when
@@ -91,8 +110,10 @@ function foldable(items: readonly TranscriptItem[], window: number): TranscriptI
 }
 
 /**
- * The whole screen: header, transcript, composer, status bar — three blocks
- * separated by hairlines, no borders (tui.md §4.1, §6).
+ * The whole screen: transcript, composer, status line — three blocks separated
+ * by hairlines, no borders (tui.md §4.1, §6). The title line above them is gone
+ * since T22: what it said that mattered — the model — is under the composer,
+ * and what it said that did not — a session id — is in `/sessions`.
  *
  * There is no intelligence above the driver here. Slash commands map one to one
  * onto CLI verbs; anything else the user types goes to the model verbatim.
@@ -104,11 +125,14 @@ export function App(props: AppProps) {
   const browse = createBrowseStore()
   const overlay = createOverlayStore()
   const keys = createKeymap(props.style.settings)
-  const tabs = createTabStore(
-    props.ws,
-    { id: props.id, state: props.state, created: props.created ?? false, effort: props.effort },
-    props.driver ?? {},
-  )
+  // Opened by name, or a draft. Nothing else creates a session on the way in:
+  // composition freezes at `session new` (physics #2), so a session made before
+  // the first word is one whose tools, pins and model were decided by nobody.
+  const first: FirstTab =
+    props.id && props.state
+      ? { kind: "session", id: props.id, state: props.state, created: props.created ?? false, effort: props.effort }
+      : { kind: "draft", pick: props.pick, effort: props.effort }
+  const tabs = createTabStore(props.ws, first, { ...(props.driver ?? {}), statePath: props.statePath })
 
   // The workspace's paths, for `@` completion (tui.md §11, T13). Built in the
   // background from the moment the screen exists: the first `@` before it
@@ -135,16 +159,37 @@ export function App(props: AppProps) {
   const [ctrlCArmed, setCtrlCArmed] = createSignal(false)
   const [allOpen, setAllOpen] = createSignal(false)
   const [behind, setBehind] = createSignal(0)
+  /**
+   * Bumped whenever the pin list on disk may have moved (an overlay closed, a
+   * session was created). The draft card's tool face is read from files, and a
+   * signal is what tells this screen to look again.
+   */
+  const [planTick, setPlanTick] = createSignal(0)
   let composer: ComposerApi | null = null
   let scroll: ScrollBoxRenderable | null = null
 
   const tab = () => tabs.active()
-  const snapshot = () => tab().state.snapshot
+  /**
+   * The front tab's session, or null while it is still a draft. Everything that
+   * would DO something to a session goes through this; everything that only
+   * paints reads `snapshot()`, which is honestly empty on a draft.
+   */
+  const live = (): SessionTab | null => {
+    const here = tab()
+    return here.kind === "session" ? here : null
+  }
+  const draft = (): DraftTab | null => {
+    const here = tab()
+    return here.kind === "draft" ? here : null
+  }
+  const snapshot = () => live()?.state.snapshot ?? no_snapshot
+  const status = () => live()?.attach.status() ?? "idle"
+  const role = () => live()?.attach.role() ?? "driver"
   const cards = () => foldable(snapshot().items, props.style.historyWindow)
 
   createEffect(() => {
     if (!props.style.motion) return
-    if (tab().attach.status() === "idle") return
+    if (status() === "idle") return
     const timer = setInterval(() => setSpinnerTick((tick) => tick + 1), 90)
     onCleanup(() => clearInterval(timer))
   })
@@ -193,7 +238,14 @@ export function App(props: AppProps) {
             }
           }
         }
-        setNotice(summarize(root.label, report) + (activated > 0 ? ` · ${activated} activated` : ""))
+        // A count of failures is not news anybody can act on. Name them, and
+        // point at the one screen that says why and offers the way out.
+        const failed = failedIds(report)
+        setNotice(
+          summarize(root.label, report) +
+            (activated > 0 ? ` · ${activated} activated` : "") +
+            (failed.length > 0 ? ` · ${failed.join(" ")} not built · /ext` : ""),
+        )
       } catch (error) {
         setNotice(`extension sync: ${error instanceof Error ? error.message : String(error)}`)
       }
@@ -206,7 +258,7 @@ export function App(props: AppProps) {
   // step starts (the first press must kill again, not quit) and after a short
   // while regardless, so a press minutes later is never a surprise exit.
   createEffect(() => {
-    if (tab().attach.status() === "stepping") setCtrlCArmed(false)
+    if (status() === "stepping") setCtrlCArmed(false)
   })
   createEffect(() => {
     if (!ctrlCArmed()) return
@@ -348,6 +400,9 @@ export function App(props: AppProps) {
   const closeOverlay = () => {
     overlay.close()
     composer?.focus()
+    // `/ext` may have moved a pin or an activation while it was up, and the
+    // draft card's tool face is read off those files.
+    setPlanTick((tick) => tick + 1)
   }
 
   const openSession = (id: string, created = false) => {
@@ -357,16 +412,63 @@ export function App(props: AppProps) {
   }
 
   /**
-   * A tab this process created and that never recorded anything. Picking a
-   * model on such a tab replaces it (the session simply becomes that model)
-   * instead of leaving an empty session beside the new one.
+   * The model id a pick will actually run on. A pick may name only a profile
+   * (`/new --profile p`, the kernel's active profile at launch), and then the
+   * model is that profile's default — which `config show` already says, so the
+   * draft can name it rather than showing a provider where a model belongs.
    */
-  const untouched = (t: SessionTab) => t.created && t.state.snapshot.items.length === 0 && t.attach.status() === "idle"
+  const modelOf = (pick: ModelPick | undefined): string => {
+    if (!pick) return ""
+    if (pick.model) return pick.model
+    return props.profiles?.find((profile) => profile.name === pick.profile)?.model || pick.profile
+  }
+
+  /** The model the front tab talks to: frozen on a session, chosen on a draft. */
+  const modelName = (): string => {
+    const here = tab()
+    if (here.kind === "draft") return modelOf(here.pick())
+    const header = snapshot().header
+    return header?.model_identity.model || header?.model || ""
+  }
 
   /**
-   * The front tab's context window, when the catalog names one. The session's
-   * frozen model id is the key — not the profile — since a window is a property
-   * of the model, whoever serves it (DESIGN §9.5).
+   * What the next `session new` from this TUI would put on the model's face:
+   * the merged config pins plus this TUI's own list, read from disk. The same
+   * two sources `/ext`'s quota line adds up — there is no third answer here.
+   */
+  // A memo, because reading it is a file read: it is asked for once per frame by
+  // both the status line and the draft card, and it can only change when
+  // something wrote that file — which is what `planTick` says.
+  const plannedPins = createMemo((): string[] => {
+    planTick()
+    const face = [...(props.pinnedTools ?? [])]
+    for (const pin of sessionPins(props.statePath)) if (!face.includes(pin)) face.push(pin)
+    return face
+  })
+
+  /** The tool face this tab shows beside the two builtins. */
+  const faceSize = (): number => {
+    const here = tab()
+    if (here.kind === "draft") return plannedPins().length
+    return snapshot().header?.composition.native_tools.length ?? 0
+  }
+
+  /** A draft's composition card: the same three rows, in the future tense. */
+  const plan = (): NextSession | undefined => {
+    const here = draft()
+    if (!here) return undefined
+    const bring = here.bring()
+    return {
+      model: modelOf(here.pick()),
+      tools: plannedPins(),
+      ...(bring ? { bring: formatWithRef(bring) } : {}),
+    }
+  }
+
+  /**
+   * The front tab's context window, when the catalog names one. The model id is
+   * the key — not the profile — since a window is a property of the model,
+   * whoever serves it (DESIGN §9.5).
    */
   const contextWindow = (): number | null => {
     const id = snapshot().header?.model_identity.model
@@ -376,57 +478,81 @@ export function App(props: AppProps) {
 
   /** What the front tab runs on, in the picker's terms. */
   const currentPick = (): ModelPick | null => {
+    const here = tab()
+    if (here.kind === "draft") {
+      const pick = here.pick()
+      return pick ? { ...pick, effort: here.effort() } : null
+    }
     const header = snapshot().header
     if (!header) return null
-    return { profile: header.model, model: header.model_identity.model || undefined, effort: tab().effort() }
+    return { profile: header.model, model: header.model_identity.model || undefined, effort: here.effort() }
   }
 
   /**
-   * Start a session on `pick` and remember it as the last one. `pick` undefined
-   * means "the last pick, else the kernel's default" — what a bare `/new` does.
-   * `bring` adds `--with` members: composition membership for this session only,
-   * which is how `/evolve` and `/mode` put a package in front of the model.
+   * Choose what the next session runs on, and remember it as the last pick.
+   *
+   * Nothing is created here. On a draft this only rewrites the draft — no
+   * process, no file — and on a started session it opens a NEW draft beside it,
+   * because a session's model is frozen (physics #2) and the honest way to
+   * "switch model" has always been a new session. Which now costs nothing until
+   * there is something to say.
+   *
+   * `pick` undefined means "the last pick, else the kernel's default" — what a
+   * bare `/new` does. `bring` is the `--with` member `/evolve` and `/mode` put
+   * on the session: membership in that one composition and no other.
    */
-  const newSession = async (pick?: ModelPick, remember = pick !== undefined, bring?: WithRef) => {
+  const startDraft = (pick?: ModelPick, remember = pick !== undefined, bring?: WithRef) => {
     const chosen = pick ?? loadTuiState(props.statePath).model
+    const here = draft()
+    if (here) {
+      if (chosen) here.setPick(chosen)
+      if (chosen?.effort !== undefined) here.setEffort(chosen.effort)
+      if (bring) here.setBring(bring)
+    } else {
+      tabs.draft({ ...(chosen ? { pick: chosen } : {}), ...(bring ? { bring } : {}), ...(chosen?.effort ? { effort: chosen.effort } : {}) })
+    }
+    closeOverlay()
+    setGuide(null)
+    const what = bring ? ` · with ${formatWithRef(bring)}` : ""
+    const who = chosen ? `${modelOf(chosen)}` : "the default model"
+    setNotice(`next session · ${who}${what} · starts when you send a message`)
+    if (remember && chosen) rememberModel(chosen, props.statePath)
+  }
+
+  /**
+   * The session this tab is about to have. A draft becomes one here and nowhere
+   * else, so this is the single moment the composition of a TUI session is
+   * decided — with whatever `/ext` and `/model` have been told by then.
+   *
+   * A refusal (no credential, an untrusted store, a pin naming nothing) leaves
+   * the draft exactly as it was: the kernel's own sentence goes to the notice
+   * and the caller keeps the user's text.
+   */
+  const ensureSession = async (): Promise<SessionTab | null> => {
+    const here = tab()
+    if (here.kind === "session") return here
     try {
-      // `--pin` from the panel's `this TUI` list, read at the moment the session
-      // is created rather than held in a signal: the pins are program state on
-      // disk, and a second TUI (or a `/ext` toggle a minute ago) must be the
-      // truth here, not whatever this process saw at launch.
-      const pins = sessionPins(props.statePath)
-      const id = await sessionNew(props.ws, {
-        ...(chosen ? { profile: chosen.profile, model: chosen.model } : {}),
-        ...(bring ? withOptions(bring) : {}),
-        ...(pins.length > 0 ? { pin: pins } : {}),
-      })
-      const current = tab()
-      if (untouched(current)) tabs.replace(current.id, id, { created: true, effort: chosen?.effort })
-      else tabs.open(id, { created: true, effort: chosen?.effort })
-      closeOverlay()
-      setGuide(null)
-      const what = bring ? ` · with ${formatWithRef(bring)}` : ""
-      setNotice(
-        chosen ? `${id} · ${chosen.profile}${chosen.model ? ` · ${chosen.model}` : ""}${what}` : `opened ${id}${what}`,
-      )
-      if (remember && chosen) rememberModel(chosen, props.statePath)
+      const tab = await tabs.materialize(here)
+      setPlanTick((tick) => tick + 1)
+      return tab
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error))
+      return null
     }
   }
 
   /**
-   * `/evolve` — build the evolution package and start a session wearing it
-   * (`evolve.ts`). A fresh session, not this one: composition freezes at
-   * `session new` (physics #2), so there is no way to hand the model a new
-   * system prompt mid-conversation, and pretending otherwise would be the one
-   * lie this front end must never tell.
+   * `/evolve` — build the evolution package and put it on the next session
+   * (`evolve.ts`). Not on this one: composition freezes at `session new`
+   * (physics #2), so there is no way to hand the model a new system prompt
+   * mid-conversation, and pretending otherwise would be the one lie this front
+   * end must never tell.
    */
   const evolveNow = async () => {
     setNotice("building the evolution package…")
     try {
       const ref = await buildEvolution(props.ws)
-      await newSession(undefined, false, ref)
+      startDraft(undefined, false, ref)
     } catch (error) {
       // Almost always "there is no extensions/evolution here": the package ships
       // with nulya's source, and this is somebody else's workspace.
@@ -441,7 +567,7 @@ export function App(props: AppProps) {
       setNotice("/mode <id>[@<version>] · a built extension; no version means the store's current")
       return
     }
-    void newSession(undefined, false, ref)
+    startDraft(undefined, false, ref)
   }
 
   /**
@@ -453,14 +579,19 @@ export function App(props: AppProps) {
    * is driving.
    */
   const judge = async (word: string | undefined, note: string) => {
+    const here = live()
+    if (!here) {
+      setNotice("this tab has no session yet · send a message and there will be one to judge")
+      return
+    }
     if (!word || !isVerdict(word)) {
       setNotice(`/outcome <${verdicts.join("|")}> [note] · nothing recorded is "not judged", not failure`)
       return
     }
     try {
-      await sessionOutcome(props.ws, tab().id, word, note)
-      setSettled([...settled(), tab().id])
-      setNotice(`${tab().id}: ${word}${note ? ` · ${note}` : ""}`)
+      await sessionOutcome(props.ws, here.id, word, note)
+      setSettled([...settled(), here.id])
+      setNotice(`${here.id}: ${word}${note ? ` · ${note}` : ""}`)
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error))
     }
@@ -482,7 +613,11 @@ export function App(props: AppProps) {
    * thrown away, so the driver refuses rather than approximates.
    */
   const compactNow = async (focus: string | undefined) => {
-    const source = tab()
+    const source = live()
+    if (!source) {
+      setNotice("nothing to compact yet · this tab has no session")
+      return
+    }
     if (source.attach.role() === "observer") {
       setNotice("someone else drives this session · compaction has to run where its steps run")
       return
@@ -527,9 +662,9 @@ export function App(props: AppProps) {
    * the escape hatch and never asks anything.
    */
   const quit = (ask = false) => {
-    const here = tab()
-    const worked = here.state.snapshot.items.some((item) => item.seq !== null)
-    if (ask && worked && !settled().includes(here.id)) {
+    const here = live()
+    const worked = here?.state.snapshot.items.some((item) => item.seq !== null) ?? false
+    if (here && ask && worked && !settled().includes(here.id)) {
       setSettled([...settled(), here.id])
       setNotice(`how did this session go? /outcome ${verdicts.join("|")} [note] · or /quit again`)
       return
@@ -562,11 +697,15 @@ export function App(props: AppProps) {
       return true
     }
     if (command === "/cancel") {
-      void tab().attach.cancel()
+      const here = live()
+      if (here) void here.attach.cancel()
+      else setNotice("nothing is running · this tab has no session yet")
       return true
     }
     if (command === "/step") {
-      void tab().attach.step()
+      const here = live()
+      if (here) void here.attach.step()
+      else setNotice("nothing to continue · send a message to start this session")
       return true
     }
     if (command === "/compact") {
@@ -599,7 +738,7 @@ export function App(props: AppProps) {
       const last = loadTuiState(props.statePath).model
       const pick: ModelPick | undefined =
         profile || model ? { profile: profile ?? last?.profile ?? "", model, effort: last?.effort } : undefined
-      void newSession(pick, false)
+      startDraft(pick, false)
       return true
     }
     if (command === "/model") {
@@ -631,29 +770,42 @@ export function App(props: AppProps) {
   }
 
   /**
-   * `/name args` that no built-in claimed. If a skill has that name, its body
-   * becomes an ordinary user turn wrapped in the echo sentinel (`skills.ts`);
-   * otherwise the line goes to the model exactly as typed, which is what it has
-   * always done.
+   * The one path a message takes, and the one place a session comes into
+   * existence (tui.md §11, T22).
    *
-   * Asynchronous, so this is the one dispatch that cannot answer synchronously:
-   * the send happens after `skill load` returns, and a failure to load says so
-   * instead of quietly sending `/name` as prose.
+   * A `/name` no built-in claimed is offered to the skill catalog first: if a
+   * skill has that name, its body becomes an ordinary user turn wrapped in the
+   * echo sentinel (`skills.ts`), and a failure to load says so rather than
+   * quietly sending `/name` as prose. Only then — with something real to say —
+   * is the draft turned into a session.
+   *
+   * The order matters both ways: a skill that will not load must not create a
+   * session, and a session that will not start must not lose the text. The
+   * composer has already cleared itself by the time this runs, so a refusal puts
+   * the typed line back in the box.
    */
-  const submitSlash = async (text: string) => {
-    try {
-      const turn = await skillTurn(props.ws, skills.entries(), text)
-      await tab().attach.send(turn ?? text)
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error))
+  const sendTurn = async (text: string) => {
+    let turn = text
+    if (text.startsWith("/")) {
+      try {
+        turn = (await skillTurn(props.ws, skills.entries(), text)) ?? text
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : String(error))
+        return
+      }
     }
+    const here = await ensureSession()
+    if (!here) {
+      composer?.restore(text)
+      return
+    }
+    await here.attach.send(turn)
   }
 
   const submit = (text: string) => {
     setNotice(null)
     if (runCommand(text)) return
-    if (text.startsWith("/")) return void submitSlash(text)
-    void tab().attach.send(text)
+    void sendTurn(text)
   }
 
   /**
@@ -716,12 +868,13 @@ export function App(props: AppProps) {
     if (matches(keys.closeTab, key)) {
       // With one tab there is nothing to close, and the composer keeps its own
       // meaning for the key (Ctrl+W: delete the word behind the cursor).
-      if (tabs.tabs().length > 1) consume(key, () => tabs.close(tab().id))
+      if (tabs.tabs().length > 1) consume(key, () => tabs.close(tab().key))
       return
     }
     if (matches(keys.cancel, key)) {
-      if (tab().attach.status() === "stepping") {
-        void tab().attach.cancel()
+      const here = live()
+      if (here && here.attach.status() === "stepping") {
+        void here.attach.cancel()
         return
       }
       // Nothing to stop and nothing typed: Esc means "go read" (tui.md §4.2).
@@ -745,8 +898,9 @@ export function App(props: AppProps) {
     if (matches(keys.quit, key)) {
       // First press stops the step, second leaves. Two different truths about
       // "stop" (tui.md §1.2 D6): the kernel's, then the process's.
-      if (tab().attach.status() === "stepping" && !ctrlCArmed()) {
-        tab().attach.kill()
+      const here = live()
+      if (here && here.attach.status() === "stepping" && !ctrlCArmed()) {
+        here.attach.kill()
         setCtrlCArmed(true)
         setNotice("step killed · Ctrl+C again to quit")
         return
@@ -760,49 +914,12 @@ export function App(props: AppProps) {
    * free for a while and this process is willing to drive again (tui.md §5.6).
    */
   const takeOverIfOffered = (): boolean => {
-    if (!tab().attach.takeoverReady()) return false
-    tab().attach.takeOver()
+    const here = live()
+    if (!here?.attach.takeoverReady()) return false
+    here.attach.takeOver()
     setNotice("took over · driving this session")
     return true
   }
-
-  /**
-   * The title line, in two tiers: WHICH session on WHICH model is the answer to
-   * "where am I", and the shape of its frozen composition is a detail about it.
-   * One flat grey sentence made the two impossible to tell apart at a glance.
-   *
-   * The model is the one thing on this line that answers to a click — it opens
-   * `/model`, the way tcode's model line does — so it is its own box. Every
-   * part is cut to the line by us: a `<text>` that overflows a one-row box wraps
-   * into a second row that is then clipped, which is how the detail used to end
-   * in a lone ` ·` on an 80-column terminal.
-   */
-  const header = () => {
-    const current = snapshot()
-    const identity = current.header?.model_identity
-    // Profile then model id — the two names a person picked, not the wire kind.
-    const profile = current.header?.model ?? "…"
-    const model =
-      identity && identity.model.length > 0 && identity.model !== profile ? `${profile} · ${identity.model}` : profile
-    const effort = tab().effort()
-    const native = current.header?.composition.native_tools.length ?? 0
-    const skills = tab()
-      .contributions()
-      .reduce((count, entry) => count + entry.skills.length, 0)
-    const width = Math.max(0, screen().width - 2)
-    const subject = `nulya · ${tab().id} · `
-    // The model gets what the subject leaves; the detail gets what the model
-    // leaves, whole segments only — `wrapWords` breaks at the ` · ` joints, and
-    // its first line is what fits — so a narrow line ends in `tools 2+0`, not
-    // in `skill…` or a lone `·`.
-    const modelText = fit(model, Math.max(0, width - displayWidth(subject)))
-    const room = width - displayWidth(subject) - displayWidth(modelText)
-    const detail = `${effort ? `effort ${effort} · ` : ""}tools 2+${native} · skills ${skills}`
-    const shown = room >= 8 ? (wrapWords(detail, room - 3)[0] ?? "") : ""
-    return { subject, model: modelText, detail: shown.length > 0 ? ` · ${shown}` : "" }
-  }
-  const [overModel, setOverModel] = createSignal(false)
-  const modelClick = onClick(() => openOverlay("model"))
 
   // Opened by `main` with a reason: show that screen before anything else.
   if (props.guide) overlay.open(props.guideOn ?? "model")
@@ -813,29 +930,11 @@ export function App(props: AppProps) {
         <FoldContext.Provider value={folds}>
           <BrowseContext.Provider value={browse}>
             <OverlayContext.Provider value={overlay}>
+              {/* Three blocks, two hairlines (tui.md §4.1). There is no title
+                  line: what a person needs to know about the session — what it
+                  runs on — is under the composer where they are looking, and the
+                  id it used to lead with was a string nobody reads (T22). */}
               <box flexDirection="column" width="100%" height="100%">
-                <box flexDirection="row" width="100%" height={1} flexShrink={0} paddingLeft={1} paddingRight={1}>
-                  <text fg={props.style.theme.muted} flexShrink={0}>
-                    {header().subject}
-                  </text>
-                  {/* The model: click for /model. The same tint every clickable
-                      thing takes under the pointer (`ui/rows.ts`), and nothing
-                      else on this line takes it, because nothing else answers. */}
-                  <box
-                    flexShrink={0}
-                    height={1}
-                    backgroundColor={overModel() ? props.style.theme.hover : undefined}
-                    onMouseDown={modelClick.onMouseDown}
-                    onMouseUp={modelClick.onMouseUp}
-                    onMouseOver={() => setOverModel(true)}
-                    onMouseOut={() => setOverModel(false)}
-                  >
-                    <text fg={props.style.theme.muted}>{header().model}</text>
-                  </box>
-                  <text fg={props.style.theme.dim} flexShrink={0}>
-                    {header().detail}
-                  </text>
-                </box>
                 <TabBar tabs={tabs.tabs()} activeIndex={tabs.activeIndex()} onSelect={(index) => tabs.select(index)} />
                 <Hairline />
 
@@ -844,7 +943,8 @@ export function App(props: AppProps) {
                     <Transcript
                       items={snapshot().items}
                       header={snapshot().header}
-                      contributions={tab().contributions()}
+                      contributions={live()?.contributions() ?? []}
+                      plan={plan()}
                       cwd={props.ws.dir}
                       onPickModel={() => openOverlay("model")}
                       onCommand={submit}
@@ -855,9 +955,9 @@ export function App(props: AppProps) {
                   <Match when={overlay.kind() === "sessions"}>
                     <SessionsView
                       ws={props.ws}
-                      currentId={tab().id}
+                      currentId={live()?.id ?? ""}
                       onOpen={openSession}
-                      onNew={() => void newSession()}
+                      onNew={() => startDraft()}
                       onClose={closeOverlay}
                     />
                   </Match>
@@ -865,7 +965,10 @@ export function App(props: AppProps) {
                     <ExtView
                       ws={props.ws}
                       header={snapshot().header}
-                      sessionFile={`${sessions_dir}/${tab().id}.jsonl`}
+                      // A draft has no session for the kernel to deposit a
+                      // capability note into — and no frozen tool face to warn
+                      // about either, which the null header already says.
+                      sessionFile={live() ? `${sessions_dir}/${live()!.id}.jsonl` : undefined}
                       statePath={props.statePath}
                       onMembershipChanged={skills.invalidate}
                       onClose={closeOverlay}
@@ -886,7 +989,7 @@ export function App(props: AppProps) {
                       current={currentPick()}
                       notice={guide() ?? undefined}
                       focusProfile={focusProfile()}
-                      onPick={(pick) => void newSession(pick)}
+                      onPick={(pick) => startDraft(pick)}
                       onNotice={setNotice}
                       onOpenProviders={() => openOverlay("provider")}
                       onClose={closeOverlay}
@@ -924,13 +1027,17 @@ export function App(props: AppProps) {
                 <Hairline />
                 <StatusBar
                   snapshot={snapshot()}
-                  status={tab().attach.status()}
-                  role={tab().attach.role()}
-                  takeoverReady={tab().attach.takeoverReady()}
+                  status={status()}
+                  role={role()}
+                  takeoverReady={live()?.attach.takeoverReady() ?? false}
                   spinnerFrame={spinnerFrame()}
+                  model={modelName()}
+                  effort={tab().effort()}
+                  tools={faceSize()}
                   hint={notice() ?? undefined}
                   behind={behind()}
                   contextWindow={contextWindow()}
+                  onPickModel={() => openOverlay("model")}
                   onScrollEnd={scrollToEnd}
                   onHelp={() => openOverlay("help")}
                 />

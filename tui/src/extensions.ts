@@ -153,6 +153,15 @@ export function summarize(where: string, report: SyncReport): string {
   return `${where}: ${parts.join(" · ")}`
 }
 
+/**
+ * The ids a pass could not build. `3 failed` scrolling past in the status bar
+ * is how `std` stayed invisible for a week (tui.md §11, T22): a count says
+ * something went wrong, a name says what to go and look at.
+ */
+export function failedIds(report: SyncReport): string[] {
+  return report.lines.filter((line) => line.state === "failed" || line.state === "needs zig").map((line) => line.id)
+}
+
 /** What a draft line says in `/ext`'s draft column. */
 export function draftColumn(line: SyncLine | null | undefined): string {
   if (!line) return ""

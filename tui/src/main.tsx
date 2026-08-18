@@ -1,21 +1,25 @@
 /**
- * Entry point: resolve the workspace and binary, pick or create the session,
+ * Entry point: resolve the workspace and binary, decide what the first tab is,
  * then hand the whole screen to <App/>.
  *
  *   nulya-tui [--session <id>] [--new] [--profile <p>] [--model <id>] [--effort <e>] [--workspace <dir>]
  *
- * With no arguments a fresh session is created — the same thing `nulya session
- * new` does, because the TUI is a client of that CLI and nothing more. Which
- * model it runs on is `launch.planLaunch`: the flags, else the last pick made
- * in `/model`, else the kernel's default; and if none of those can actually run
- * here, the picker is the first thing on screen (tui.md §1.2 D8).
+ * With no arguments NOTHING is created (tui.md §11, T22): the screen opens on a
+ * draft, and `session new` runs at the first message. Composition freezes when a
+ * session is created (physics #2), so creating one here would decide this tab's
+ * tools, pins and model before the person has touched anything — and everything
+ * they then did in `/ext` or `/model` would land on some later session instead.
+ *
+ * What the draft will run on is `launch.planLaunch`: the flags, else the last
+ * pick made in `/model`, else the kernel's default; and if none of those can
+ * actually run here, the picker is the first thing on screen (tui.md §1.2 D8).
  */
 import { render } from "@opentui/solid"
 import { openWorkspace, type Workspace } from "./nulya/bin.ts"
-import { configShow, sessionNew } from "./nulya/cli.ts"
+import { configShow } from "./nulya/cli.ts"
 import { sessionExists } from "./nulya/files.ts"
 import { loadSettings } from "./state/settings.ts"
-import { loadTuiState, rememberBundledAsked, rememberStoreAsked, sessionPins } from "./state/tui_state.ts"
+import { loadTuiState, rememberBundledAsked, rememberStoreAsked } from "./state/tui_state.ts"
 import { planLaunch } from "./launch.ts"
 import {
   answerFor,
@@ -34,6 +38,7 @@ import {
 import { createStyle } from "./render/theme.ts"
 import { createSessionState } from "./state/session.ts"
 import { App } from "./ui/App.tsx"
+import type { ModelPick } from "./state/tui_state.ts"
 
 interface Args {
   session?: string
@@ -82,7 +87,7 @@ async function main() {
   const args = parseArgs(process.argv.slice(2))
   const ws = openWorkspace(args.workspace ?? process.cwd())
 
-  let id = args.session
+  const id = args.session
   if (id && args.fresh) {
     process.stderr.write("--new and --session ask for different sessions; pick one\n")
     process.exit(1)
@@ -92,11 +97,8 @@ async function main() {
     process.exit(1)
   }
 
-  // Created here, not opened by name: if it is still empty when the TUI quits
-  // it is un-created again (`files.discardIfUntouched`), so a look-and-leave
-  // does not leave a row in `/sessions`.
-  const created = id === undefined
   let effort = args.effort
+  let pick: ModelPick | undefined
   let guide: string | undefined
   let guideOn: "model" | "provider" | undefined
   const settings = await loadSettings(ws.dir)
@@ -121,36 +123,18 @@ async function main() {
       process.stderr.write(`${plan.refuse}\n`)
       process.exit(1)
     }
-    // A refusal here is an answer, not a crash: the commonest one is the store
-    // gate — a checkout whose extensions nobody has vouched for, possibly the
-    // question just declined above. It deserves the kernel's sentence, not a
-    // stack trace through the spawn helper.
-    try {
-      // The pin panel's `this TUI` list rides on every session this front end
-      // starts, including the first one (tui.md §11, T12).
-      const pins = sessionPins()
-      id = await sessionNew(ws, {
-        ...(plan.pick ? { profile: plan.pick.profile, model: plan.pick.model } : {}),
-        ...(pins.length > 0 ? { pin: pins } : {}),
-      })
-    } catch (error) {
-      // The kernel's refusal is several lines; only its first reaches here, and
-      // it is the one that names the store. A dangling ":" from the list header
-      // it introduced is noise once the list is not coming.
-      const message = (error instanceof Error ? error.message : String(error)).replace(/:\s*$/, "")
-      process.stderr.write(`${message}\n`)
-      if (message.includes("not trusted")) {
-        process.stderr.write("look with `nulya ext list`, then `nulya ext trust` to allow it\n")
-      }
-      process.exit(1)
-    }
-    effort = plan.pick?.effort
+    // Nothing is created here any more, so nothing here can be refused: the
+    // kernel's gates — a missing credential, an untrusted checkout store, a pin
+    // that names nothing — are met at the first message, on screen, where the
+    // way out is one key away instead of an exit code in a dead terminal.
+    pick = plan.pick
+    effort = plan.pick?.effort ?? effort
     guide = plan.guide
     guideOn = plan.guideOn
   }
 
   const style = createStyle(settings)
-  const state = createSessionState(id)
+  const state = id === undefined ? undefined : createSessionState(id)
 
   await render(
     () => (
@@ -158,13 +142,15 @@ async function main() {
         ws={ws}
         id={id}
         state={state}
+        pick={pick}
         style={style}
         driver={args.maxSteps !== undefined ? { maxSteps: args.maxSteps } : {}}
-        created={created}
         effort={effort}
         guide={guide}
         guideOn={guideOn}
         models={config.models}
+        profiles={config.profiles}
+        pinnedTools={config.registry.pinned_native_tools}
         sync={{
           user: settings.extensions.sync_on_start,
           // The project store is only the background pass's business when it was

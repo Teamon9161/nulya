@@ -18,10 +18,12 @@ import {
   bundledPromptText,
   describeDrafts,
   draftColumn,
+  failedIds,
   planProjectStore,
   promptText,
   summarize,
 } from "../src/extensions.ts"
+import { draftHelp } from "../src/ui/overlays/ExtView.tsx"
 import { tempWorkspace, type TempWorkspace } from "./support.ts"
 
 let ws: TempWorkspace
@@ -188,9 +190,51 @@ test("the three keys map to what actually runs, and anything else installs nothi
   expect(answerFor("\0")).toBeNull()
 })
 
-test("a finished pass leaves one line worth reading", () => {
+test("a finished pass leaves one line worth reading, and names what it could not build", () => {
   expect(summarize("user store", report(["3 built, 1 already built, 0 failed"]))).toBe("user store: 3 built · 1 already")
   expect(summarize("this checkout", report(["0 built, 0 already built, 2 failed"]))).toBe("this checkout: 0 built · 2 failed")
+
+  // A count is not news anybody can act on. `std: needs zig` scrolling past as
+  // "3 failed" is how it stayed invisible (tui.md §11, T22).
+  const failed = report([
+    "std: needs zig (compiled draft; set NULYA_ZIG or use the embedded toolchain)",
+    "guide: v-abc123456789 already built",
+    "broken: failed: ManifestUnreadable",
+    "1 built, 1 already built, 2 failed",
+  ])
+  expect(failedIds(failed)).toEqual(["std", "broken"])
+  expect(failedIds(report(["1 built, 0 already built, 0 failed"]))).toEqual([])
+})
+
+test("a draft with no version says what stopped it, in the kernel's own words", () => {
+  expect(draftHelp(null)).toEqual([])
+  expect(draftHelp(parseSyncLine("guide: v-abc123456789 already built"))).toEqual([])
+
+  // The shape the kernel prints today: the repair, with the absolute directory
+  // a toolchain can be unpacked into, is IN that sentence — so it is relayed
+  // whole and nothing here rewrites it.
+  const shim = draftHelp(
+    parseSyncLine(
+      "std: needs zig (compiled draft; the zig at C:\\Users\\me\\bin\\zig.exe could not report its version from the store root — set NULYA_ZIG to a zig 0.16.0 executable, or unpack zig 0.16.0 into C:\\Users\\me\\AppData\\Local\\nulya\\toolchains\\zig\\0.16.0 (a nulya built with -Dembed-toolchain needs neither))",
+    ),
+  )
+  expect(shim.length).toBe(2)
+  expect(shim[0]).toContain("could not report its version from the store root")
+  expect(shim[0]).toContain("toolchains\\zig\\0.16.0")
+  // The one thing the kernel cannot know from where it stands.
+  expect(shim[1]).toContain("build.zig.zon")
+
+  const none = draftHelp(
+    parseSyncLine("std: needs zig (compiled draft; put zig on PATH, set NULYA_ZIG to a zig 0.16.0 executable, or unpack zig 0.16.0 into /home/me/.local/share/nulya/toolchains/zig/0.16.0 (a nulya built with -Dembed-toolchain needs neither))"),
+  )
+  expect(none[0]).toContain("put zig on PATH")
+  // An older binary's shorter sentence still parses and is still relayed.
+  expect(draftHelp(parseSyncLine("std: needs zig (compiled draft; set NULYA_ZIG or use the embedded toolchain)"))[0]).toContain(
+    "set NULYA_ZIG",
+  )
+
+  expect(draftHelp(parseSyncLine("broken: failed: ManifestUnreadable"))[0]).toContain("ManifestUnreadable")
+  expect(draftHelp(parseSyncLine("new: v-abc123456789 not built"))[0]).toContain("never been built")
 })
 
 test("the binary's bundled drafts seed into a store — dry-run counts them, a second pass leaves them alone", async () => {

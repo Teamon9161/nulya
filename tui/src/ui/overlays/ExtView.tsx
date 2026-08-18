@@ -16,11 +16,14 @@
  *    pin (the operator's `registry.pinned_native_tools`, or an evolution
  *    session's `session new --pin`), so there is no "next" for a table to
  *    predict — these counts are the evidence for that judgement, not it.
- *  - the TOOLS pane, where that pin is written (tui.md §11, T12). It manages the
- *    two axes separately (D4) and never merges them into one switch: pins decide
- *    which tools the model can call, membership (activate / deactivate) decides
- *    whose skills and system prompts are in the composition. Both take effect at
- *    the next `session new` and neither can touch this one.
+ *  - the SWITCH. `Enter` on an id turns the extension on or off for the next
+ *    session: on = point `current` at a built version AND pin every tool it
+ *    declares; off = take those pins back and clear `current`. T12 §5 held the
+ *    two axes apart on principle and refused to merge them — that principle is
+ *    right about the kernel and was wrong about the screen, where both keys were
+ *    invisible and the state they moved was drawn nowhere (tui.md §11, T22). The
+ *    axes are still two: the TOOLS pane is where one tool is pinned on its own,
+ *    and the version line is where one specific build is pointed at.
  *
  * An extension id, a tool name and a store root are all as long as somebody
  * chose to make them, so every cell here is cut to its column and every sentence
@@ -28,23 +31,27 @@
  * wraps in a list is garbled rather than merely untidy.
  */
 import { For, Index, Show, createMemo, createSignal, onMount } from "solid-js"
+import { join } from "node:path"
 import { useKeyboard } from "@opentui/solid"
 import { useScreen, useStyle } from "../../render/theme.ts"
 import { columnWidth, fit, squeeze, wrapWords } from "../columns.ts"
 import { createHover, onClick, rowBackground, rowGutter } from "../rows.ts"
 import { OverlayFooter, createKeyHelp } from "./Footer.tsx"
-import { listExtensions, readToolUsage, type ExtensionEntry, type ToolUsage } from "../../nulya/files.ts"
-import { configShow, extDeactivate, extPrune, extSetCurrent, type SyncLine } from "../../nulya/cli.ts"
+import { draftEntries, listExtensions, readToolUsage, type ExtensionEntry, type ToolUsage } from "../../nulya/files.ts"
+import { configShow, extBuild, extDeactivate, extPrune, extSetCurrent, type SyncLine } from "../../nulya/cli.ts"
 import { draftColumn, planStore } from "../../extensions.ts"
 import {
+  builtin_tools,
+  orphanPins,
+  pinAll,
   pinState,
   promote,
   quotaLine,
   readUserPins,
   stateLabel,
   toggle,
-  toggleAll,
   toolId,
+  unpinAll,
   writeUserPins,
   type PinChange,
   type PinSources,
@@ -65,21 +72,43 @@ type Pane = "extensions" | "versions" | "tools" | "usage"
  */
 const panes: Pane[] = ["extensions", "versions", "tools", "usage"]
 
-/** An action waiting for `y`: pointer moves, and the two that take something away. */
+/**
+ * An action waiting for `y`. Only two are left, and both name a VERSION: moving
+ * the pointer along the timeline by hand, and the one action here that deletes
+ * something. The on/off switch asks nothing — it moves a pointer and a pin list,
+ * both of which the same key puts back (tui.md §11, T22).
+ */
 type Pending =
   | { kind: "activate" | "rollback"; id: string; version: string }
   | { kind: "prune"; id: string; version: string; count: number }
-  | { kind: "deactivate"; id: string }
 
 function confirmLine(pending: Pending): string {
   if (pending.kind === "prune") {
     return `prune ${pending.id}: delete ${pending.count} version(s), keep ${pending.version}? y / Esc`
   }
-  if (pending.kind === "deactivate") {
-    return `deactivate ${pending.id}: its skills and prompts leave the NEXT session; versions all stay? y / Esc`
-  }
   return `${pending.kind} ${pending.id} ${pending.version}? y / Esc`
 }
+
+/**
+ * Whether an extension is ON for the next session, and — when the answer is
+ * "half" — which half is missing.
+ *
+ * `on` means both axes agree: an active version, and every tool it declares on
+ * the face. `partial` is the honest name for the states the kernel can be left
+ * in — pinned but no longer active (a rollback), active with only some of its
+ * tools pinned (`Space` on one row) — and it is warn-coloured because the first
+ * of those is what makes `session new` refuse.
+ */
+export type SwitchState = "on" | "partial" | "off"
+
+export function switchState(active: boolean, tools: number, pinned: number): SwitchState {
+  if (active && pinned === tools) return "on"
+  if (!active && pinned === 0) return "off"
+  return "partial"
+}
+
+/** The marker and its space: one glyph, always two columns, so ids line up. */
+const switch_width = 2
 
 /** One row of the tools pane: a pinnable tool, its state, and its evidence. */
 export interface ToolRow {
@@ -142,6 +171,33 @@ export function driftLine(frozen: string | null, current: string | null): string
 /** How many versions an id has, and what kind it is: one short cell. */
 function metaOf(entry: ExtensionEntry): string {
   return `${entry.versions.length}v ${entry.kind.slice(0, 4)}`
+}
+
+/**
+ * Why the source in a store directory is not a version, and what to do about it
+ * (tui.md §11, T22).
+ *
+ * The kernel's own sentence is the first line and carries the repair — including
+ * the absolute directory a zig 0.16.0 can be unpacked into — so it is relayed
+ * verbatim rather than paraphrased. The only thing added is the part the kernel
+ * cannot know from where it stands: a `zig` on PATH that is a version SHIM reads
+ * its version out of a `build.zig.zon` in the current directory, and a store
+ * root has none, so it answers "no build.zig" and the draft looks unbuildable
+ * while a perfectly good toolchain sits on the disk.
+ */
+export function draftHelp(line: SyncLine | null): string[] {
+  if (!line) return []
+  if (line.state === "needs zig") {
+    return [
+      line.detail ?? "needs zig",
+      "if that zig is a version shim, it takes its version from a build.zig.zon in the current directory and a store root has none",
+    ]
+  }
+  if (line.state === "failed") {
+    return [`does not build · ${line.detail ?? "?"}`, "fix the source in the store directory, then `b` builds it again"]
+  }
+  if (line.state === "not built") return ["the source here has never been built · `b` builds it"]
+  return []
 }
 
 /** When a version was built, to the minute — enough to order two of them. */
@@ -227,18 +283,46 @@ export function ExtView(props: {
   }
 
   const refresh = async () => {
-    setExtensions(await listExtensions(props.ws))
-    setUsage(await readToolUsage(props.ws))
-    await refreshPins()
     // What the SOURCE in each store directory would build to, versus what is
     // there — the one thing the store's own listing cannot say. A plan, so this
-    // view never writes anything by opening.
-    try {
-      const [ws_plan, user_plan] = await Promise.all([planStore(props.ws, false), planStore(props.ws, true)])
-      setDrafts([...ws_plan.lines, ...user_plan.lines])
-    } catch {
-      setDrafts([]) // no plan is "unknown", never a wrong column
+    // view never writes anything by opening; and since T22 it is also half the
+    // LIST, because an id that has never built is not in `ext list` at all.
+    const plansOf = async (): Promise<SyncLine[]> => {
+      try {
+        const [ws_plan, user_plan] = await Promise.all([planStore(props.ws, false), planStore(props.ws, true)])
+        return [...ws_plan.lines, ...user_plan.lines]
+      } catch {
+        return [] // no plan is "unknown", never a wrong column
+      }
     }
+    // Three subprocesses that do not need each other's answers.
+    const [plans, listed] = await Promise.all([plansOf(), listExtensions(props.ws)])
+    setDrafts(plans)
+    const unlisted = plans.filter((line) => !listed.some((entry) => entry.id === line.id)).map((line) => line.id)
+    const entries = [...listed, ...(await draftEntries(props.ws, unlisted))].sort((a, b) => a.id.localeCompare(b.id))
+    setExtensions(entries)
+    setUsage(await readToolUsage(props.ws))
+    await refreshPins()
+    dropOrphanPins(entries)
+  }
+
+  /**
+   * Pins on this TUI's list that no active extension can resolve any more.
+   *
+   * A `session new --pin` naming an inactive extension is refused outright
+   * (`PinNamesUnknownExtension`), so a stale line here does not cost a tool — it
+   * costs the whole session. This list is our own program state, so the honest
+   * repair is to drop it, out loud, rather than to keep offering a session that
+   * will not open.
+   */
+  const dropOrphanPins = (entries: readonly ExtensionEntry[]) => {
+    const available = toolRows(entries, sources(), []).map((row) => row.id)
+    const orphans = orphanPins(tuiPins(), available)
+    if (orphans.length === 0) return
+    const kept = tuiPins().filter((pin) => !orphans.includes(pin))
+    rememberSessionPins(kept, props.statePath)
+    setTuiPins(kept)
+    setNotice(`${orphans.join(" ")} unpinned · nothing active declares them any more`)
   }
 
   onMount(() => void refresh())
@@ -259,6 +343,23 @@ export function ExtView(props: {
   const selectedTool = createMemo(() => tools()[Math.min(toolCursor(), Math.max(0, tools().length - 1))] ?? null)
   const quota = createMemo(() => quotaLine(maxTools(), nextFace(sources()).length))
 
+  /** An extension takes part in the next session: an active version, not shadowed. */
+  const isActive = (entry: ExtensionEntry) => entry.current !== null && !entry.shadowed
+  /** Its declared tools, as the stable ids a pin names. */
+  const toolIdsOf = (entry: ExtensionEntry) => entry.tools.map((tool) => toolId(entry.id, tool))
+  const pinnedCount = (entry: ExtensionEntry) =>
+    toolIdsOf(entry).filter((id) => pinState(id, sources()) !== "off").length
+  const stateOf = (entry: ExtensionEntry): SwitchState =>
+    switchState(isActive(entry), entry.tools.length, pinnedCount(entry))
+  /** The short cell beside a half-on package: which half. */
+  const switchCell = (entry: ExtensionEntry): string => {
+    if (stateOf(entry) !== "partial") return ""
+    if (!isActive(entry)) return "pins only"
+    return `${pinnedCount(entry)}/${entry.tools.length} tools`
+  }
+  const switchColor = (state: SwitchState) =>
+    state === "on" ? style.theme.ok : state === "partial" ? style.theme.warn : style.theme.faint
+
   /** The columns this overlay may draw in: the box pads one on each side. */
   const inner = () => Math.max(24, screen().width - 2)
 
@@ -269,20 +370,22 @@ export function ExtView(props: {
    */
   const idCols = createMemo(() => {
     const list = extensions()
-    const [id, meta, draft, shadow] = squeeze(
+    const [id, meta, on, draft, shadow] = squeeze(
       [
         columnWidth(list.map((entry) => entry.id), 2, 24),
         columnWidth(list.map(metaOf), 2, 12),
+        columnWidth(list.map(switchCell), 2, 12),
         columnWidth(list.map((entry) => draftColumn(draftOf(entry.id))), 2, 11),
         columnWidth(list.map((entry) => (entry.shadowed ? "shadowed" : "")), 0, 9),
       ],
-      [8, 0, 0, 0],
+      [8, 0, 0, 0, 0],
       Math.max(16, Math.floor(inner() / 2)) - 2,
     )
-    return { id: id!, meta: meta!, draft: draft!, shadow: shadow! }
+    return { id: id!, meta: meta!, on: on!, draft: draft!, shadow: shadow! }
   })
-  /** The whole left pane: the cursor gutter plus its four columns. */
-  const idWidth = () => 2 + idCols().id + idCols().meta + idCols().draft + idCols().shadow
+  /** The whole left pane: the cursor gutter, the switch, and the four columns. */
+  const idWidth = () =>
+    2 + switch_width + idCols().id + idCols().meta + idCols().on + idCols().draft + idCols().shadow
   /** What is left for the detail beside it, less its own two-column pad. */
   const detailWidth = () => Math.max(16, inner() - idWidth() - 2)
 
@@ -387,21 +490,12 @@ export function ExtView(props: {
     await refreshPins()
   }
 
-  /** `Space` / `A`: on a tool row it is that tool, on an id row the whole package. */
+  /** `Space` on a tool row: that one tool. `A`: promote it to the config file. */
   const pinKey = (verb: "toggle" | "promote") => {
     if (pane() === "tools") {
       const row = selectedTool()
       if (!row) return
       return void applyPin(verb === "toggle" ? toggle(row.id, sources()) : promote(row.id, sources()))
-    }
-    const entry = selected()
-    if (!entry) return
-    const ids = tools()
-      .filter((row) => row.extension === entry.id)
-      .map((row) => row.id)
-    if (ids.length === 0) {
-      setNotice(`${entry.id} declares no tools · nothing to pin (its skills and prompts are the membership axis)`)
-      return
     }
     if (verb === "promote") {
       // Deliberately one at a time: `always` costs a slot and prefix tokens in
@@ -410,18 +504,132 @@ export function ExtView(props: {
       setNotice("A promotes one tool · Tab to the tools pane and pick it")
       return
     }
-    void applyPin(toggleAll(ids, sources()))
+    setNotice("Enter turns the whole extension on or off · Space pins one tool, in the tools pane")
+  }
+
+  /**
+   * The switch: `Enter` on an id, or a click on its marker (tui.md §11, T22).
+   *
+   * ON is both axes at once — point `current` at a built version so its skills
+   * and system prompts join the composition, and pin every tool it declares so
+   * the model can call them. OFF is both back. Nothing here is irreversible and
+   * nothing here reaches the session already on screen (physics #2), which is
+   * why neither direction asks for a `y`.
+   *
+   * The quota is checked BEFORE anything is written: `session new` refuses a
+   * face wider than `registry.max_tools`, and an extension left half-on by a
+   * refusal that arrived after the activation would be the worst of both.
+   */
+  const toggleExtension = async () => {
+    const entry = selected()
+    if (!entry) return
+    const ids = toolIdsOf(entry)
+    if (entry.shadowed) {
+      setNotice(`${entry.id} is shadowed by an earlier root · that copy is the one that runs`)
+      return
+    }
+    if (stateOf(entry) === "on") {
+      await switchOff(entry, ids)
+      return
+    }
+    await switchOn(entry, ids)
+  }
+
+  const switchOn = async (entry: ExtensionEntry, ids: string[]) => {
+    // The version to point at: what the draft would build to when the plan says
+    // it is there, else the newest build in the store. `not built` names a
+    // version that does not exist yet, which is what `b` is for.
+    const planned = draftOf(entry.id)
+    const fromDraft =
+      planned && (planned.state === "built" || planned.state === "already built") ? planned.version : null
+    const version = entry.current ?? fromDraft ?? entry.versions[entry.versions.length - 1]?.version ?? null
+    if (!version) {
+      const why = draftColumn(planned)
+      setNotice(`${entry.id} has no built version${why ? ` · ${why}` : ""} · b builds the source in its store directory`)
+      return
+    }
+    const face = nextFace(sources())
+    const added = ids.filter((id) => !face.includes(id))
+    if (builtin_tools + face.length + added.length > maxTools()) {
+      setNotice(`${quotaLine(maxTools(), face.length + added.length)} · nothing changed`)
+      return
+    }
+    try {
+      if (entry.current !== version) {
+        // The one change in this panel a running model can act on: with the
+        // session named, the kernel deposits a capability note and the model
+        // learns at its next step boundary that `ext run` reaches a new version
+        // (DESIGN §5.3). A draft tab has no session to tell.
+        await extSetCurrent(props.ws, "activate", entry.id, version, { session: props.sessionFile })
+      }
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error))
+      return
+    }
+    if (ids.length > 0) await applyPin(pinAll(ids, sources()))
+    props.onMembershipChanged?.()
+    await refresh()
+    setNotice(`${entry.id} on · ${version}${ids.length > 0 ? ` · ${ids.length} tool(s) pinned` : ""}`)
+  }
+
+  const switchOff = async (entry: ExtensionEntry, ids: string[]) => {
+    // Pins first. A pin naming an extension with no `current` is refused by
+    // `session new` outright, so the order that leaves a legal world at every
+    // point is: take the pins away, then the pointer.
+    let stuck = ""
+    if (ids.length > 0) {
+      const change = unpinAll(ids, sources())
+      if (change.user || change.session) await applyPin(change)
+      stuck = change.notice
+    }
+    try {
+      if (entry.current) await extDeactivate(props.ws, entry.id)
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error))
+      return
+    }
+    props.onMembershipChanged?.()
+    await refresh()
+    setNotice(`${entry.id} off · its skills and prompts leave the composition · versions all stay${stuck ? ` · ${stuck}` : ""}`)
+  }
+
+  /**
+   * `b` — build the source sitting in this id's store directory.
+   *
+   * `ext build <root>/<id>` lands in the root that holds the draft (the kernel
+   * picks the destination from the path), so this is the same command `ext sync`
+   * runs for that one id, and the refusal it prints is the kernel's own.
+   */
+  const buildDraft = async () => {
+    const entry = selected()
+    if (!entry) return
+    if (!draftOf(entry.id)) {
+      setNotice(`${entry.id} has no source in ${entry.root} · nothing to build`)
+      return
+    }
+    setNotice(`building ${entry.id}…`)
+    try {
+      const version = await extBuild(props.ws, join(entry.root, entry.id))
+      await refresh()
+      setNotice(`${entry.id} ${version} built · Enter turns it on`)
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error))
+      await refresh()
+    }
   }
 
   const act = (verb: "activate" | "rollback") => {
     const entry = selected()
     if (!entry) return
-    // On the version line the selection IS the answer; on the id list the
-    // draft's own version is — which is what makes an id just built by a sync
-    // one key away from being the current one.
-    const version = pane() === "versions" ? selectedVersion()?.version : draftOf(entry.id)?.version
+    // The timeline's own keys: they name ONE build. Turning an extension on is
+    // Enter's job and picks the version itself.
+    if (pane() !== "versions") {
+      setNotice("Enter turns this extension on or off · Tab to the version line to point at one build")
+      return
+    }
+    const version = selectedVersion()?.version
     if (!version) {
-      setNotice("no version to point at · Tab to the version line and pick one")
+      setNotice("no version to point at · this id has never been built")
       return
     }
     setConfirm({ kind: verb, id: entry.id, version })
@@ -442,30 +650,12 @@ export function ExtView(props: {
     setConfirm({ kind: "prune", id: entry.id, version: entry.current, count: others })
   }
 
-  /**
-   * `d` — the membership axis (D4). Deactivating takes an extension's skills and
-   * system prompts out of the next composition; its tools leave the face with
-   * them, because a pin can only resolve through an active version. Nothing is
-   * deleted and nothing about this session moves.
-   */
-  const deactivate = () => {
-    const entry = selected()
-    if (!entry) return
-    if (!entry.current) {
-      setNotice(`${entry.id} has no current version · it is already out of every composition`)
-      return
-    }
-    setConfirm({ kind: "deactivate", id: entry.id })
-  }
-
   const runConfirmed = async () => {
     const pending = confirm()
     setConfirm(null)
     if (!pending) return
     try {
-      if (pending.kind === "deactivate") {
-        setNotice(await extDeactivate(props.ws, pending.id))
-      } else if (pending.kind === "prune") {
+      if (pending.kind === "prune") {
         // Deleting a version is the one action here that cannot be undone by
         // moving a pointer, so the kernel's own sentence about the cost is what
         // gets shown rather than a cheerful count of freed bytes.
@@ -515,14 +705,21 @@ export function ExtView(props: {
     }
     if (key.name === "j" || key.name === "down") return move(1)
     if (key.name === "k" || key.name === "up") return move(-1)
+    // Enter is the row's action, the same one a second click performs (T18): on
+    // an id it is the switch, on a tool row it is that tool's pin.
+    if (key.name === "return") {
+      if (pane() === "tools") return pinKey("toggle")
+      if (pane() === "extensions") return void toggleExtension()
+      return
+    }
     if (key.name === "space") return pinKey("toggle")
     // Shift+A, not `a`: promotion writes a config file, and it must not be one
     // keystroke away from the activate that sits beside it.
     if (key.name === "a" && key.shift) return pinKey("promote")
     if (key.name === "a") return act("activate")
     if (key.name === "r") return act("rollback")
+    if (key.name === "b") return void buildDraft()
     if (key.name === "p") return prune()
-    if (key.name === "d") return deactivate()
     if (key.name === "t") return setPane(pane() === "tools" ? "extensions" : "tools")
     if (key.name === "u") return setPane(pane() === "usage" ? "extensions" : "usage")
   })
@@ -587,10 +784,23 @@ export function ExtView(props: {
                 onMouseDown={check.onMouseDown}
                 onMouseUp={check.onMouseUp}
               >
-                <text fg={on() ? style.theme.accent.evolve : style.theme.faint}>{on() ? "[x] " : "[ ] "}</text>
+                {/* The same three colours the id list's switch uses: `ok` for on
+                    and ours, `warn` for on but written somewhere we may not
+                    edit, `faint` for off. One meaning, one colour (tui.md §6). */}
+                <text
+                  fg={
+                    row().state === "other"
+                      ? style.theme.warn
+                      : on()
+                        ? style.theme.ok
+                        : style.theme.faint
+                  }
+                >
+                  {on() ? "[x] " : "[ ] "}
+                </text>
               </box>
               <box width={toolCols().id} flexShrink={0}>
-                <text fg={on() ? style.theme.accent.evolve : here() ? style.theme.fg : style.theme.muted}>
+                <text fg={on() || here() ? style.theme.fg : style.theme.muted}>
                   {fit(row().id, toolCols().id - 2)}
                 </text>
               </box>
@@ -614,7 +824,7 @@ export function ExtView(props: {
           text="nothing can be pinned yet · a tool reaches the model only through an extension with an active version"
           fg={style.theme.muted}
         />
-        <Lines text="build one with `nulya ext build <path>`, then `a` on its row here to make it current" />
+        <Lines text="put its source in a store directory, then `b` builds it and Enter turns it on" />
       </Show>
     </box>
   )
@@ -682,6 +892,7 @@ export function ExtView(props: {
                   hovered: idHover.at() === index(),
                 })
                 const gutter = () => rowGutter(style, tone())
+                const on = () => stateOf(entry)
                 // Clicking an id both moves the cursor and says which pane the
                 // cursor is in — the same two facts `Tab` and `j/k` set apart.
                 const click = onClick(() => {
@@ -689,6 +900,15 @@ export function ExtView(props: {
                   setCursor(index())
                   setVersionCursor(0)
                 })
+                // The marker is its own target inside the row, like the tools
+                // pane's `[x]`: a click on it is Enter, a click anywhere else on
+                // the row only moves the cursor.
+                const flip = onClick(() => {
+                  setPane("extensions")
+                  setCursor(index())
+                  setVersionCursor(0)
+                  void toggleExtension()
+                }, true)
                 return (
                   <box
                     flexDirection="row"
@@ -703,13 +923,40 @@ export function ExtView(props: {
                     <text fg={gutter().fg} flexShrink={0}>
                       {gutter().text}
                     </text>
+                    {/* Is this extension on for the next session? Two shapes and
+                        three colours, so the answer survives a terminal with no
+                        colour at all (tui.md §11, T22). */}
+                    <box
+                      width={switch_width}
+                      height={1}
+                      flexShrink={0}
+                      onMouseDown={flip.onMouseDown}
+                      onMouseUp={flip.onMouseUp}
+                    >
+                      <text fg={switchColor(on())}>
+                        {on() === "off" ? style.glyphs.switchOff : style.glyphs.switchOn}{" "}
+                      </text>
+                    </box>
                     <box width={idCols().id} flexShrink={0}>
-                      <text fg={entry.shadowed ? style.theme.dim : here() ? style.theme.fg : style.theme.muted}>
+                      <text
+                        fg={
+                          entry.shadowed
+                            ? style.theme.dim
+                            : on() === "on" || here()
+                              ? style.theme.fg
+                              : style.theme.muted
+                        }
+                      >
                         {fit(entry.id, idCols().id - 2)}
                       </text>
                     </box>
                     <box width={idCols().meta} flexShrink={0}>
                       <text fg={style.theme.dim}>{fit(metaOf(entry), idCols().meta - 2)}</text>
+                    </box>
+                    {/* Half on: which half. `3/5 tools` and `pins only` are the
+                        two ways the kernel's two axes come apart. */}
+                    <box width={idCols().on} flexShrink={0}>
+                      <text fg={style.theme.warn}>{fit(switchCell(entry), Math.max(0, idCols().on - 2))}</text>
                     </box>
                     {/* What the SOURCE beside those versions would build to. An
                         id whose draft has moved on shows `not built` here while
@@ -749,11 +996,20 @@ export function ExtView(props: {
             <Show when={selected()} keyed>
               {(entry: ExtensionEntry) => (
                 <box flexDirection="column" width="100%">
+                  {/* The switch, in words. Its first fact is the one the row's
+                      marker draws, so the two can never disagree. */}
                   <Lines
-                    text={`${entry.id} · ${entry.kind} · current ${entry.current ?? "(none)"}`}
+                    text={`${entry.id} · ${entry.kind} · ${isActive(entry) ? "active" : "inactive"}${
+                      entry.tools.length > 0 ? ` · tools ${pinnedCount(entry)}/${entry.tools.length} pinned` : ""
+                    } · current ${entry.current ?? "(none)"}`}
                     width={detailWidth()}
                     fg={style.theme.fg}
                   />
+                  {/* An id with source and no version: what stopped it, in the
+                      kernel's own words, and the two ways out. */}
+                  <For each={draftHelp(draftOf(entry.id))}>
+                    {(line) => <Lines text={line} width={detailWidth()} fg={style.theme.warn} />}
+                  </For>
                   <Lines
                     text={`root ${entry.root}${entry.shadowed ? " · shadowed by an earlier root · never runs" : ""}`}
                     width={detailWidth()}
@@ -854,19 +1110,25 @@ export function ExtView(props: {
         {(pending: Pending) => <Lines text={confirmLine(pending)} fg={style.theme.warn} />}
       </Show>
       {/* The sister sentence of the drift line: every key in this view moves a
-          pointer or a pin, and physics #2 says none of them can reach the
-          session already on screen. Said once, permanently, rather than after
-          each action — and it stays even while the key list is folded away,
-          because it is not a key. */}
+          pointer or a pin, and physics #2 says none of them can reach a session
+          that has already started. On a tab that has NOT started one, the very
+          same fact is good news and reads the other way round (T22). */}
       <OverlayFooter
         width={inner()}
         help={help}
         notice={confirm() ? null : notice()}
-        warning="changes apply to the NEXT session — this one froze its tools at start"
-        brief="j/k move · Tab pane · Space pin · Esc close"
+        warning={
+          // A frozen header IS a started session; without one this tab is still
+          // a draft, and then the very same fact reads the other way round.
+          props.header
+            ? "changes apply to the NEXT session — this one froze its tools at start"
+            : "changes apply to the session this tab is about to start"
+        }
+        brief="Enter on/off · j/k move · Tab pane · Esc close"
         more={[
-          "a activate · r rollback · d deactivate · p prune old versions",
-          "A promote a pin to always · t tools · u usage · click a pane name or a row",
+          "Enter activates the extension and pins its tools, again turns both off",
+          "Space pin one tool · A promote it to always · b build the source · p prune old versions",
+          "a activate · r rollback: one named version, on the version line · t tools · u usage",
         ]}
       />
     </box>

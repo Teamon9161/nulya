@@ -35,6 +35,8 @@
 | D7 | sub-agent 谱系来源 | v1 从 transcript 推导（`nulya session new` 的输出 id、`session step <id>` 命令）；**不**改 header | `parent` 语义是 fork/compaction 的续接点，不是 spawned-by；等 subagent skill 真写出来再决定要不要 `spawned_by` header 字段（§10） |
 | D8 | 权限 / 审批 | v1 没有 | kernel 没有 policy hook 消费者；TUI 不发明审批 |
 | D9 | 内容宽度 | transcript 内容宽度上限 `max_width = 100` 列，左对齐 | 250 列的 markdown 不可读；设定可改 |
+| D11 | **session 懒创建：第一条消息才 `session new`** | 开屏是一个 **draft tab**（无 id、磁盘上什么都没有），它只捏着 `session new` 要的东西（pick / `--with`）；pin 在 materialize 那一刻现读 `tui-state.json`。`--session <id>` 仍是真 tab；`/compact` 仍产真 tab | composition 在 `session new` 冻结（physics #2）——开屏就建，等于替人把 tools / pin / model 决定了，随后在 `/ext` `/model` 里做的一切要么落到**下一场**、要么靠"偷偷替换空 session"糊过去。懒创建让"改完再开"变成默认，`discardIfUntouched` 从常规路径退回成边角（T22） |
+| D12 | **`/ext` 的 Enter 是一个开关：activate + pin 一起动** | ON = `ext activate` +（声明了 tool 的话）把它的 tool 全进本 TUI 的 pin 列；OFF = 先撤 pin（含 user config 的 `always`）再 `ext deactivate`。两根轴在内核里仍是两根：单个 tool 仍在 tools pane 用 `Space`，单个版本仍在版本线用 `a`/`r` | **推翻 T12 §5 的"永不合成一个总开关"**。那条原则对内核是对的、对屏幕是错的：两个键（`Space` 批量 pin / `d` deactivate）都藏在 `?` 后面，而它们移动的状态**一格都没画**——截图里 `evolution` `guide` 是 `built` 但 `current (none)`，人按 Enter 没反应、也看不出差别。一个画出来的开关 + 底下写清两根轴，胜过两个没人找得到的键（T22） |
 | D10 | **给人用的：一切在屏幕上完成** | 启动 `nulya` 之后，选模型 / 换 effort / 看哪个 profile 缺 key / **贴 key** 都是屏幕上的交互（`/model` 选择器、`/effort`、选择器里的 `s`），**不能要求人去找 config 文件改**。TUI 记住上次的选择（`tui-state.json`，见 §7）；隐式的选择跑不了（缺 key）时开屏就是选择器 + 原因 + 怎么修。config 文件是**定义**（一个 model id 是什么、profile 怎么连）不是**日常操作面** | 这是 TUI 的关键设计理念，与 D4 分工：`tui.toml` 只有人写、`tui-state.json` 只有程序写；内核 `config.toml` 人写，TUI **只做一种写**——在末尾追加/就地替换一个带标记的 `[[provider.profiles]] name/api_key` 小块（`nulya/credentials.ts`；不重写、不碰人的内容）。内核不学"上次选了谁"（那不是 substrate）；kernel 只提供 `nulya config show --json` 一个投影（含 `paths`），TUI 不复刻配置合并链、不猜 home 在哪 |
 
 ## 2. 与内核的接触面
@@ -43,9 +45,9 @@
 
 | 面 | TUI 用法 |
 |---|---|
-| `nulya session new [--profile p] [--model id]` | `/new`、`/model` 的 Enter；stdout = id |
+| `nulya session new [--profile p] [--model id] [--pin] [--with]` | **一场 session 唯一的出生点，只在 draft tab 收到第一条消息时跑**（`tabs.materialize`，D11）；`/new` `/model` 的 Enter 只改 draft，不 spawn。stdout = id |
 | `nulya session step <id> --effort e` | 每个 step 按本 tab 的 effort 传（`/model` 选的、`/effort` 改的）；不传 = kernel 默认 |
-| `nulya config show --json` | `/model` 的行、启动时判断隐式选择能不能跑（`launch.planLaunch`）；只报 env var 名与 credential 布尔 |
+| `nulya config show --json` | `/model` 的行、启动时判断隐式选择能不能跑（`launch.planLaunch`）、draft 的 model id（profile 只给了名字时取它的默认 model）与 `registry`（`max_tools` / 合并后的 pin，draft 的工具面 = 它 ∪ `tui-state.json` 的 `session_pins`）；只报 env var 名与 credential 布尔 |
 | `nulya session append <id> --file f` | 发送：写 `.nulya/scratch/tui-<nonce>.txt` 再 `--file`（多行 / Windows 引号安全）；投进 inbox，**下一 step 边界才进 ledger**（PLAN §4 边角）→ TUI 乐观回显、标 `queued`，见到对应 `user_text` 事件后转正 |
 | `nulya session step <id> --stream` | 每次发送后 spawn 一个；stdout 见 §2.2 |
 | `nulya session events <id> [--since N]` | 打开 / resume 时一次性回放；**不**用 `--follow`（driver 模式下 step 的 stdout 已是全量实时源） |
@@ -115,7 +117,6 @@ tui/
 ### 4.1 主屏
 
 ```
- nulya · s-8f2a…c1 · anthropic/claude-sonnet-5 · tools 2+3 · skills 2                    step 4 · driver
 ─────────────────────────────────────────────────────────────────────────────────────────────────────
   ▎ session · 2026-08-16 14:02 · frozen composition
   ▎ tools  shell edit ⚡web_search ⚡fetch ⚡summarize      skills  evolution zig-style
@@ -139,10 +140,12 @@ tui/
 ─────────────────────────────────────────────────────────────────────────────────────────────────────
  › 好，写进去_                                                                            (Composer)
 ─────────────────────────────────────────────────────────────────────────────────────────────────────
- ↑12.4k ↓3.1k cache 89% · ⠋ shell 3s · Esc cancel · Ctrl+O fold · /help                  (StatusBar)
+ claude-sonnet-5 (high) · tools 2+3 · ↑12.4k ↓3.1k cache 89% · ⠋ shell 3s · Esc cancel …  step 4 · driver
 ```
 
-三块：transcript（`scrollbox`，sticky bottom，鼠标滚轮 / PgUp / PgDn；离开底部时状态栏出现 `↓ new` 提示）、composer（`textarea`）、状态栏（1 行）。没有边框，用两条 hairline 分隔；空状态首屏是一个小 wordmark（`ascii-font`）+ session 信息 + 三条提示。
+三块：transcript（`scrollbox`，sticky bottom，鼠标滚轮 / PgUp / PgDn；离开底部时状态栏出现 `↓ new` 提示）、composer（`textarea`）、**输入框下面那一行**（1 行，§4.5）。没有边框，用两条 hairline 分隔；空状态首屏是一个小 wordmark（`ascii-font`）+ cwd + 几条 `/` 命令。
+
+**没有标题行**（T22）。原来那行是 `nulya · <session id> · <profile> · <model> · effort · tools · skills`：给程序看的，不是给人看的——session id 人读不出也用不上（要它就去 `/sessions`），`nulya` 是废话，provider 名字紧挨着 model id 也是。它说的唯一有用的东西是**模型**，而模型该在人打字时看得见的地方——输入框底下，tcode 就是这么放的。TabBar 仍在（>1 个 tab 时），但 tab 名是**模型 + 需要时 `#n`**、draft 标 `(new)`，不是 session id。
 
 ### 4.2 Transcript 项与卡片
 
@@ -178,16 +181,21 @@ tui/
 - `@` 开头（前一字符非字母数字下划线）弹文件补全：`↑↓` 选、`Tab` 上屏成 `@path`；已知引用在输入框里 accent。**上屏的是路径，不是文件内容**（T13）。
 - 粘贴：> 1000 字符或 > 15 行折叠成 `[Pasted text #N]`，提交时展开回原文；`Backspace` 落在占位尾部整条删掉（T14）。
 - 全局：`Esc` cancel（stepping 时）/ browse 模式；`Ctrl+C` 两下退出（stepping 时第一下先 kill）；`Ctrl+L` 重绘；`F2` `/ext`；`F3` `/sessions`；`F4` 下一个 tab；`Ctrl+W` 关掉当前 tab（最后一个不关）。
-- 鼠标（T18）：列表行点一下落光标、点已选中的行执行它的 Enter；`/ext` 的 pane 条与 `[x]`、TabBar、状态栏的 `↓ N more below`、输入框都可点（点输入框也会退出 browse 模式）；拖过文本是选取，松手复制（OSC 52）。**模型这一行处处可点**（T20）：标题行的 `profile · model` 段、CompositionCard 的 `model` 值都开 `/model`；Welcome 的那几条 `/` 命令行、状态栏的 `/help` 也是按钮。所有可点的东西悬停都是同一个 `hover` 底色。
+- 鼠标（T18）：列表行点一下落光标、点已选中的行执行它的 Enter；`/ext` 的 pane 条、`[x]` 与 id 行的开关记号、TabBar、状态栏的 `↓ N more below`、输入框都可点（点输入框也会退出 browse 模式）；拖过文本是选取，松手复制（OSC 52）。**模型这一行处处可点**（T20 → T22）：**输入框下面那一行开头的 `<model-id> [(effort)]`**、CompositionCard 的 `model` 值都开 `/model`；Welcome 的那几条 `/` 命令行、那一行末尾的 `/help` 也是按钮。所有可点的东西悬停都是同一个 `hover` 底色。
+- **第一条消息才建 session**（T22，D11）：开屏是 draft，`Enter` 发送时先解 skill（`/name`）、再 `session new`、再 append+step。内核在这一步的拒绝（缺 key / store 未信任 / pin 认不出）**留在屏幕上**：notice 是内核原话，tab 仍是 draft，**打的字回到输入框**（`ComposerApi.restore`，只在框还空着时放回去——人在等的时候又打了别的，那是人的）。draft 上 `/outcome` `/compact` `/step` `/cancel` `Esc` 各回一句"这个 tab 还没有 session"，一个都不炸。
 - `/model`（F5）与 `/provider`（F6）是**两个命令、两个问题**（T5 → T6 → T20 → T21，与 tcode 的 `/model` ÷ `/provider` 同一刀）：
   - `/model` **只有模型**：每个能跑的 provider 的每个 model 一行（`provider · label · id · ctx · ‹ effort › · ✓ current`），`h/l` 拨 effort、Enter 开新场；跑不了的 provider 不出模型行（这才是让表变短的东西），`provider` 那一列保证"这是谁家的模型"一眼可读。一个 model 的 ctx / effort 档位**先读该 profile 自己的 catalog**、没有才回落全局 `[[models]]`——同一个 id 在订阅口与公共 API 口是两个东西。一个 provider 都跑不了时只有一行 `no provider can run yet · /provider …`，Enter / `p` 就是过去。
   - `/provider` 是 **key 与 endpoint 的家**：一行一个 profile（`name · wire/endpoint · N models · 状态`），detail 行列出它的 model id（浏览不拦，拦的只是开一场），`s` 贴 key、`a` 加 compatible endpoint，codex 说 `codex login`；**Enter 在能跑的 provider 上 = 回 `/model` 并落在它的第一个模型上**——"先选 provider 再选它的模型"就是这两步。
   - 开屏没得跑时：还有别的 provider 能跑 → 开 `/model`；一个都跑不了 → 开 `/provider`（`launch.LaunchPlan.guideOn`）。
 - observer 时空 composer 上的 `Enter` = take over（§5.6）；browse 模式里选中的卡若指名了一个 session，`Enter` 打开它成第二个 tab，`Space` 永远是折叠。
 
-### 4.5 状态栏
+### 4.5 输入框下面那一行
 
-左：token 累计（`↑input ↓output cache%`；**来源是 ledger 的 `assistant.usage`**，流事件只是它落盘前的临时值，同一步不会数两遍——所以重开一场也看得见它到今天为止花了多少，T8）· 当前活动（`⠋ shell 3s` / `⠋ model` / `idle`）· 提示三条。右：`step n` · role（`driver` / `observer` §5.6）。离开底部时插入 `↓ 3 new`。
+一行，五段（T22 起，标题行取消后它同时是"我在跟谁说话"和"现在在发生什么"）：
+
+`<model-id> [(effort)]`（**主语**，`fg`，可点 → `/model`；effort 只在本 tab 明确选过时才写括号——`auto` 就是内核默认，为它花七列不值） · `tools 2+N`（`dim`；draft 上 N = 合并 config pin ∪ `tui-state.json` 的 `session_pins`） · token 累计（`muted`；`↑input ↓output cache%`，**来源是 ledger 的 `assistant.usage`**，流事件只是它落盘前的临时值，同一步不会数两遍——所以重开一场也看得见它到今天为止花了多少，T8） · 当前活动（**只在真的在动时**才 `fg`，否则退一档 `muted`） · hint / notice（`dim`，`/help` 单独一个可点的 box）。右：`step n` · role（`driver` / `observer` §5.6）。离开底部时插入 `↓ 3 new`。
+
+**窄屏让位的顺序是一句判断，不是平均分**：model / 当前活动 / 通向 `/help` 的那三格**永不让**；notice 排第二（它是新闻——刚发生了什么、或者为什么没发生——所以一有 notice 就把 `tools` 与 token 挤掉，宁可让人读完那句话）；默认 hint 只坚持 ` · /help`，于是 `tools` 与 token 平时都在；再窄就先丢 `tools`（上面的 CompositionCard 已经把工具面写全了）、再丢 token。80 列实测：model、活动、`/help` 全在。
 
 上下文占用（`ctx 72% · /compact`）只在 ≥60% 时出现、≥80% 转 warn 色。分母是 `[[models]]` 目录的 `context_window`（目录没写就整个不显示，不编分母）；分子是**最后一步**的 `input + cache_read + cache_write`——`provider.Usage.input_tokens` 是扣掉缓存之后的量，只读它会把一个快满的窗口报成几乎空的。它只是显示，不触发任何动作。
 
@@ -196,6 +204,8 @@ tui/
 ### 5.1 CompositionCard（每场 session 的冻结契约）
 
 来自 header：model identity（provider/model/base_url 主机）、`active[]`（ext id@version 短 hash）、`native_tools`、skills（从各 active 版本的 `extension.json` `contributes.skills` 读）、`parent`。这是"这一场模型看到什么"的一眼版本；打开两场对比就是演化的差分。
+
+**draft 变体**（T22）：还没有 session 的 tab 上，同一张卡换个时态——标题是 `next session · set when you send the first message`，三行同序（tools = `shell edit` + 计划中的 pin、model = draft 的 pick 解出来的 model id、`--with` 写在 model 那行右边）。数据只来自 `config show --json`、`tui-state.json` 与 `ext list` 已经说过的东西，**没有第二个 composition 解析器**——真正的解析永远是内核在 `session new` 里做的那一次。
 
 ### 5.2 EvolveCard（演化动作在对话里的形状）
 
@@ -217,8 +227,15 @@ registry 按 shell 命令前缀识别，头行抽关键事实（抽不到就退�
 
 ### 5.3 `/ext` 演化视图（overlay，`F2`）
 
-左列：extensions（id · current 短 hash · N versions · kind compiled/script/data · 贡献的 tools/skills 数 · 被遮蔽的标 `shadowed`）——清单来自 `nulya ext list`，**多个 root** 都在里面（workspace → user `~/.nulya/extensions` → `extensions.paths`），右栏第一行写明它来自哪个 root。没有 `current` 的包（只用 `--with` 穿的 mode / evolution）读最新一次 build 的 manifest，否则它会被显示成空的。右栏（选中项）：manifest 摘要、版本时间线（`versions/v-*` mtime，`current` 标记，本场 header 冻结的版本标记；两者不同 → `pinned v-a · store v-b → next session`）、该 ext 每个 tool 的 usage（uses / recent / success%）、本场 ledger 里与它相关的 EvolveCard / CapabilityBanner 时间线（按 seq 跳转）。
-动作键：`a` activate / `r` rollback（弹确认后 shell out `nulya ext …`，输出进一个临时行；不进 ledger——它本来就是 CLI 动作）。第二块 tab：全部 tool 的 usage 表（只投影 `.nulya/tool-usage.jsonl`；**不**复刻排序算法，"下一场谁晋升"留给未来的 `nulya composition preview` CLI，见 §10）。
+左列：extensions（**开关记号** · id · `Nv kind` · 半开时那半格 · draft 状态 · 被遮蔽的标 `shadowed`）——清单是 `nulya ext list` **∪ `ext sync --dry-run`（两个 root）**：`ext list` 只列"持有版本"的 id，所以**只有源码、一次都没 build 过的 id 在它里面根本不存在**（T22 的起因：`std` 躺在 user store 里 build 不出来，`/ext` 一个字都不提，唯一的痕迹是状态栏一句 `3 failed` 滚过去）。这样的行显示 `0v <kind>` + draft 状态（`not built` / `needs zig` / `fails`，warn 色），右栏把**内核那句话原样转述**（它现在自带绝对路径的修法），再加至多一行我们自己的（anyzig 那种 version shim 从 cwd 读 `build.zig.zon`，而 store root 里没有）。没有 `current` 的包（只用 `--with` 穿的 mode / evolution）读最新一次 build 的 manifest，否则它会被显示成空的。右栏（选中项）：第一行是**开关的文字版**（`id · kind · active|inactive · tools N/M pinned · current v-…`）、manifest 摘要、版本时间线（`versions/v-*` mtime，`current` 标记，本场 header 冻结的版本标记；两者不同 → `frozen v-a · store v-b → next session`）、该 ext 每个 tool 的 usage。
+
+**`Enter`（或点开关记号）= 这个 extension 对下一场的总开关**（T22，D12）：
+- **ON** = `ext activate <id> <version>`（版本取 sync plan 说 built 的那个，否则 store 里最新的 build；一个都没有就拒绝并指向 `b`）**+** 把它声明的 tool 全进本 TUI 的 pin 列。**先验配额**（`2 + face > max_tools` 就一个字节都不写，贴内核那句 `session new will refuse`）。
+- **OFF** = 先把它的 tool 从本 TUI 列**和 user config 的 `always`** 里撤掉（别的 config 层写的撤不了，点名说出来），再 `ext deactivate`。顺序是有意的：pin 指着一个没有 `current` 的 extension，`session new` 是**整场拒绝**（`PinNamesUnknownExtension`）而不是少一个工具。同理每次 refresh 都会把"指着已经不 active 的东西"的本 TUI pin 丢掉并说一句。
+- **看得见**：`●`/`○`（ascii `*`/`-`）+ 三档色——`ok` 全开、`warn` 半开（另配一格 `3/5 tools` 或 `pins only`）、`faint` 关。tools pane 的 `[x]` 用同一套色（一处颜色一个含义，§6）。**两个方向都不要 `y` 确认**：都是指针 + pin 的移动，同一个键就能放回去，且够不着已经开跑的那一场（physics #2）。
+- 两根轴仍然在：单个 tool 用 tools pane 的 `Space`（`A` 升 `always`），单个版本用版本线的 `a` / `r`（仍带确认——它们点名一个 build，是时间线上的动作）；`d` **删掉了**（它就是 OFF 的一半，两个键做一件事正是被修的那个毛病）。
+
+其它动作键：`b` build 选中 id 在它 store 目录里的源码（`ext build <root>/<id>`，落哪个 root 由内核按路径决定）；`p` = `ext prune <id>`（带确认，成功后显示内核自己那句代价说明）。底部常驻句按 tab 有没有 session 分两种：有 → `changes apply to the NEXT session — this one froze its tools at start`；draft → `changes apply to the session this tab is about to start`。第四块 pane：全部 tool 的 usage 表（只投影 `.nulya/tool-usage.jsonl`；**不**复刻排序算法，"下一场谁晋升"留给未来的 `nulya composition preview` CLI，见 §10）。
 
 ### 5.4 `/sessions`（overlay，`F3`）
 
@@ -962,7 +979,7 @@ cd tui && bun test test/compact.test.ts
 2. **不对称照说不绕。** `session new` 的 pin 是 union（config ∪ argv），所以**没有**"不动 config 的前提下给某一场做减法"这件事。面板不假装有：`always` 的唯一关法就是从 user config 里删掉它，而那句 notice 就这么写。`session new --no-pin` 是这条约束的最小内核动词，本轮**没做**，等真实证据（契约 D2）。
 3. **写 config 是文本手术，不是重序列化。** `pins.ts` 的 `setPinnedTools` 只替换（或追加）`pinned_native_tools` 那一段：按 table header 定位 `[registry]`，按引号外的方括号配平吃掉可能跨行的数组，其余字节一个不动。理由很直白——配置文件是人写的文本，一个只管一个 key 的程序没资格重排它的注释和顺序。写完**重读 + `Bun.TOML.parse` 校验**，不一致就把原字节写回去并报错：文本手术如果悄悄产出内核读法不同的东西，界面会显示一个从没进过任何 session 的 pin。
 4. **配额行说的是内核的算法，不是我们的预判。** `tools 2+N/8`：`max_tools` 含 builtin（DESIGN §5.1），把 2 显出来是因为"我明明只 pin 了 6 个为什么被拒"只有这一个答案。超了**不拦**——拒绝是 `session new` 的事，面板超了只多一句 `session new will refuse`，真被拒时贴内核原话。
-5. **两根轴分开（契约 D4）。** `d` = `ext deactivate`，动的是 membership（skills / system prompts 进不进 composition），与 pins 并排而不是合成一个假总开关。tools-only 的包（std）"整体开关" ≈ 在 id 行上 `Space` 批量 pin；data 包（evolution / guide）的开关就是 activate / deactivate。
+5. **两根轴分开（契约 D4）。** `d` = `ext deactivate`，动的是 membership（skills / system prompts 进不进 composition），与 pins 并排而不是合成一个假总开关。tools-only 的包（std）"整体开关" ≈ 在 id 行上 `Space` 批量 pin；data 包（evolution / guide）的开关就是 activate / deactivate。—— **本条已被 T22 推翻**（原则对内核是对的、对屏幕是错的：两个键都藏着，它们移动的状态一格没画）。今天 `Enter` 就是那个总开关，两根轴仍分别可及（tools pane 的 `Space` / 版本线的 `a`·`r`），`d` 删掉了。理由见 §11 T22 第 4 条与 §1.2 D12。
 6. **唯一会通知在跑的 session 的动作是 activate。** 面板 spawn `ext activate` 时给子进程带 `NULYA_SESSION=<当前 session 文件>`，借内核现成的 `depositSessionNote`（DESIGN §5.3）——模型下个 step 边界就知道有新版本可以 `ext run`。deactivate 与 pin 改动**一条通知都不补**：本场工具面在 `session new` 冻死了（physics #2），对它们没有可行动信息，往 ledger 里塞 UI 旁白是噪音。底部常驻一句 `changes apply to the NEXT session — this one froze its tools at start`，是 drift line 的姊妹句。
 7. **测试**：`test/pins.test.ts` 8 条——三态与 another-layer 只读、off→`this TUI`→`A`→`always` 的全链、整包 toggle、配额行、行来源（只列有 `current` 且没被 shadow 的包，因为别的 pin 会被 `session new` 拒）、config 写回（保注释 / 跨行数组 / 缺 key 缺 table 三种落点 / round-trip）、以及**真二进制的闭环**：`session_pins` → `--pin` → header `native_tools` 里就是它，没 pin 的那个 tool 是对照组，pin 一个不存在的 tool 拿到内核自己的拒绝。`test/overlays.test.tsx` 再加一条走真键盘：`t` 进 pane、`Space` 打开、状态文件与新 session 的 header 都跟着变、再 `Space` 关掉又都退回去。
 
@@ -1132,3 +1149,17 @@ cd tui && bun test test/compact.test.ts
 **没做**：`/provider` 不写 `[[models]]` 目录条目（`a` 加进来的 endpoint 的模型仍没有 effort dial 与 context window——目录是"一个 id 是什么"，等真需要再给表单加一步，T6 起就挂在这里）；两块屏幕仍是全屏 overlay 不是浮框（T20 同一条）；没有 `/provider` 的删除/禁用动作（配置文件是人的，TUI 只做"加"与"改 key"这两种写）；`catalog` 里的 `vision` 列没读（前端没有消费者）。
 
 **测试隔离（同日补）**：上面"改动前就红"的三条 `/ext` 的原因找到了——测试从没设 `NULYA_HOME`，内核把开发者真实的 `~/.nulya/extensions`（T19 seed 进去的 `evolution` / `guide`）也列进了 `/ext`，断言的版本 hash 落到了别的包上；同一个口子还让每次 `bun test` 往真实的 `trusted-stores.jsonl` 里追加临时 workspace 的信任行。修法与内核 e2e 同一招（`NULYA_HOME=<ws>/.nulya-test-home`）：`test/isolate.ts` 作为 bunfig `[test] preload`，整趟测试把 `NULYA_HOME` 指到一个 mkdtemp 目录，任何测试都看不到（也写不到）真实的 home。**Bun 的一个坑**：`Bun.spawn` / `spawnSync` 不传 `env` 时用的是进程**启动时**的 environ，不是运行期改过的 `process.env`——所以测试里裸的 `Bun.spawnSync({ cmd, cwd })` 与 `src/nulya/cli.ts` 的 `sessionFollow` 都补了 `env: process.env`（否则 `ext build` 记的信任写进真实 home、`session new` 却在临时 home 里找，同一趟里两把 home）。`bun test` **187/187 pass**（性能计时那条在无干扰时也过）。
+
+### T22 · 第一条消息才开场；标题行下沉；`/ext` 列全并给一个开关（2026-08-18）
+
+来源是拿着运行中的截图给的四句话：①"session 应该等用户发第一个消息再创建吧，在此之前 tool 什么的都应该可以改"；②"上面的 session id 对用户没意义，nulya 也是，模型名不需要显示提供商——参考 tcode 放 composer 下面，配色配好"；③"std extension 为什么不显示"；④"按 Enter pin 没 pin 也看不出来，UI 要有区别，最好有颜色或者 toggle，而且叫 activate 更好懂"。四件事一起做，**TUI 侧全部落地；内核只动了一处、且不是 TUI 要的**（见第 3 条末尾）。
+
+1. **session 第一条消息才建（§1.2 D11）。** 以前 `main.tsx` 在 `render()` 之前就 `session new`，靠退出时 `discardIfUntouched` 把没用过的空场删掉，靠 `untouched()` 在 `/model` 选完时**偷偷替换**空场——两个补丁都是同一个病的症状：composition 在 `session new` 冻结（physics #2），开屏就建等于替人把 tools / pin / model 决定了，人随后在 `/ext` `/model` 做的一切要么落到"下一场"、要么靠替换糊过去，`/ext` 底下那句 `changes apply to the NEXT session` 对一场根本没开始的 session 就是这么荒唐地成立的。现在 `state/tabs.ts` 的 tab 是 `DraftTab | SessionTab` 的 union：draft **没有 id、磁盘上什么都没有**，只捏着 `session new` 要的东西（`pick`、`--with` 的 `bring`、effort），pin **不**存在 draft 里而是 `materialize` 那一刻现读 `tui-state.json`——`/ext` 里一秒前拨的开关就由这一场带走。`materialize` 是 draft 变 session 的**唯一**一处，发生在第一条消息：`sendTurn` 先解 skill（`/name` 装不上就不开场）、再 `session new`、再 append + step；内核的拒绝（缺 key / store 未信任 / pin 认不出）**留在屏幕上**——notice 是内核原话、tab 仍是 draft、打的字回到输入框（`ComposerApi.restore`，只在框还空着时放回去）。`/model` 在 draft 上只改 pick（不起进程、不写文件），在已开场的 tab 上开一个**新 draft**（换模型本来就是换场，现在换场不再花任何东西）；`/evolve` `/mode` 也是 draft + `bring`；`--session <id>` 与 `/compact` 的产物仍是真 tab。draft 上 `/outcome` `/compact` `/step` `/cancel` `Esc` 各回一句"这个 tab 还没有 session"。`discardIfUntouched` 与 `created` 留着——compaction 失败等边角仍会产生"建了没用"的 session——但常规路径不再产生，`files.ts` 头上那段"TUI 开屏即建"的注释改掉了。tab 的 store 键从 `id` 改成 `key`（draft 是 `draft-<n>`），`replace` / `close` 认 key。
+2. **标题行取消，模型下沉到输入框下面（§4.1 / §4.5）。** 原来那行 `nulya · <session id> · <profile> · <model> · effort · tools · skills` 给程序看的成分居多：session id 人读不出也用不上（要它去 `/sessions`），`nulya` 是废话，provider 紧挨 model id 也是重复（`/model` 那张表里 provider 列还在，那是它该在的地方）。它唯一有用的是**模型**，而模型该在人打字时看得见的位置——tcode 就是把 `mode · model (effort) · cache · /help` 放在 input 底下（`app/draw.rs` `idle_hint`）。现在 `StatusBar` 是那一行：`<model-id> [(effort)]`（主语，`fg`，可点 → `/model`，与 T20 的其它模型可点处同一套 `onClick` + `hover`）· `tools 2+N`（`dim`）· token 累计（`muted`）· 当前活动（只在真的在动时 `fg`）· hint / notice（`dim`），右侧 `step n · driver/observer` 照旧。effort 只在本 tab 明确选过时才写括号（`auto` 是内核默认，七列不值）。**窄屏让位是一句判断不是平均分**（`layout()`）：model / 活动 / 通向 `/help` 的三格永不让，notice 其次（它是新闻），再丢 `tools`（上面的 CompositionCard 说全了）、再丢 token；80 列实测三样都在。draft 上同一行：model 来自 pick、`tools 2+N` 来自合并 config pin ∪ `session_pins`。TabBar 仍只在 >1 个 tab 时出现，但 tab 名从 session id 改成 **model id（同名加 `#n`）**、draft 标 `(new)`（`tabLabels`）。CompositionCard 多一个 **draft 变体**（§5.1）：`next session · set when you send the first message`，三行同序，数据只来自 `config show --json` / `tui-state.json` / `ext list`——**没有第二个 composition 解析器**，真的解析永远是内核在 `session new` 里那一次。
+3. **`/ext` 列出只有源码的 id（§5.3）。** 真因两层。屏幕这层：`/ext` 的清单来自 `ext list`，而 `ext list` 只列**持有版本**的 id——`~/.nulya/extensions/std|compact|handoff` 三个 compiled draft 一次都没 build 成，于是**整个不存在**，唯一痕迹是开屏 sync 在状态栏滚过一句 `user store: 0 built · 2 already · 3 failed`。现在清单 = `ext list` ∪ `ext sync --dry-run`（两个 root，本来就为 draft 列取过的那两份 plan），只有源码的 id 显示 `0v <kind>` + draft 状态（`not built` / `needs zig` / `fails`，warn 色），右栏说清怎么办：`needs zig` 把**内核那句话原样转述**（`wrapWords` 折）+ 至多一行我们自己知道而内核不知道的（PATH 上的 zig 若是 anyzig 那类 version shim，它从 cwd 往上找 `build.zig.zon` 定版本，而 store root 里没有——所以 `nulya toolchain zig version` 在仓库里能答、在 store 里不能）；`b` 就地 `ext build <root>/<id>`（落哪个 root 由内核按路径定）；开屏 sync 有失败时 notice **点名失败的 id 并指路 `/ext`**，不再只报个数。机器这层：这台机器上 build 不出来的原因正是那个 shim。**内核唯一改动**在这里、并且是用户自己给的方向（"到时候不是要随包带 zig 0.16 吗，就在同样的位置装一个"）：`resolveZig` 第二档从"内嵌工具链"改成 **managed 目录** `<data>/toolchains/zig/0.16.0/`（DESIGN §10）——内嵌了就往里解压，没内嵌也认里面已有的（扁平 / `zig-<target>-<ver>/` 两种布局），目录是 nulya 自己的、版本钉死的，谁放的字节不改变它是什么；`ext build` / `ext sync` 撞墙那句 `needs zig (…)` 现在**自带这个目录的绝对路径**（`cli_toolchain.noZigHint`），并区分"根本没有 zig"与"有 zig 但它在 store root 里答不出版本"（后者点名那个路径）。TUI 转述的就是这句，所以 `/ext` 里的修法与内核永远是同一句话。
+4. **`Enter` = 一个开关，两根轴一起动（§1.2 D12，推翻 T12 §5）。** 以前 extensions pane 上 Enter 无绑定；`Space` 是 pin（data 包答 "declares no tools · nothing to pin"）；`a` 要先 Tab 到版本线选版本；`d` deactivate——两根轴（membership / pin）在内核里是真的，但屏幕上**一格状态都没画**：截图里 `evolution` `guide` 是 `built` 却 `current (none)`，人按 Enter 没反应、也看不出与别的行有何不同。T12 §5 那句"永不合成一个假总开关"对内核是对的、对屏幕是错的——一个画出来的开关 + 底下写清两根轴，胜过两个藏在 `?` 后面没人找得到的键。现在每个 id 行开头一格 `●`/`○`（ascii `*`/`-`，`theme.glyphs.switchOn/Off`）：`ok` 全开、`warn` 半开（旁边一格 `3/5 tools` 或 `pins only`）、`faint` 关；`Enter`（或点那一格）切换。**ON** = `ext activate <id> <version>`（版本取 sync plan 说 built 的，否则 store 里最新的 build；一个都没有就拒绝并指向 `b`）+ 把它声明的 tool 全进本 TUI 的 pin 列，**先验配额**（`2 + face > max_tools` 一个字节都不写，贴内核那句 `session new will refuse`）；**OFF** = 先撤 pin（本 TUI 列 + user config 的 `always`；别的 config 层写的撤不了，点名说出来）再 `ext deactivate`——顺序有意：pin 指着一个没 `current` 的 extension 是 `session new` **整场拒绝**（`PinNamesUnknownExtension`），所以每一步之间的世界都得合法；同理每次 refresh 把指着已不 active 的东西的本 TUI pin 丢掉并说一句（`orphanPins`），修掉了 `d` 之后 pin 留在 `tui-state.json` 里让下一场开不了的旧坑。**两个方向都不要 `y`**：都是指针 + pin 的移动，同一个键放得回去，且够不着已开跑的那一场（physics #2）；`p` prune 仍确认。tools pane 的 `[x]` 换成同一套色（一处颜色一个含义）。两根轴仍分别可及：单个 tool 用 tools pane 的 `Space` / `A`，单个版本用版本线的 `a` / `r`（仍带确认——它们点名一个 build，是时间线上的动作）；`d` **删掉**（它就是 OFF 的一半，两个键做一件事正是被修的那个毛病）。底部常驻句按 tab 有没有 session 分两种：有 → `changes apply to the NEXT session — this one froze its tools at start`；draft → `changes apply to the session this tab is about to start`。用词跟着用户走：这个开关叫 activate（footer `Enter on/off · …`，`?` 展开 `Enter activates the extension and pins its tools, again turns both off`），"pin" 只在 tools pane 里说单个 tool。
+5. **措辞与入口**：`commands.ts` / Welcome 里 `/model` 早就是"pick what the next session runs on"（T20），现在它字面成真；README 开头那段"first frame 有 session id in the header"改成 draft 的真相，`/model` 那行说清 draft 上只改 pick、开过场的 tab 旁边开新 draft，`/ext` 的键表按上面重写，多一行"点输入框下面的模型 = `/model`"。
+
+**测试**：`bun test` 187 → **193 pass**、`tsc` 干净。新增 / 改写：`lifecycle.test.tsx` 的两条 eager-create 测试改成"draft 在磁盘上什么都不建、屏幕与 store 一致"与"第一条消息**恰好**建一场，且带着那一刻的 pin"（真二进制、scripted provider）；`overlays.test.tsx` +2（`/ext` 列出只有源码的 id、说清缺什么、拒绝打开；Enter 开 → `current` 指过去 + pin 写下，再 Enter 关 → pin 没了 + deactivate）；`pins.test.ts` 的整包 toggle 改成 `pinAll` / `unpinAll` + 开关三态（`partial` 就叫 partial）；`extensions.test.ts` +1（`needs zig` 的 draft 转述内核原话）并让 sync 汇总点名失败 id；`model.test.tsx` 那条"fresh session 被替换"改成"写 draft，不建 session；已开场的 tab 上开第二个 draft"；`mouse.test.tsx` 的模型可点从标题行改到输入框下面那一行；`/ext` 快照按预期更新（开关一列、`0v` 行）。内核侧：`zig build test` 399 pass / 2 skip（`toolchain.zig` +1：managed 目录里已有的 zig 没内嵌也认，扁平与嵌套两种布局）、`zig build e2e` 54 pass（sync 那条只断 `needs zig` 前缀，句子变长不影响）。
+
+**没做**：draft 的 CompositionCard 不解析 `--with` 包的 skills / prompts（只写 `with <id>@<v>`——那要读版本目录的 manifest，等真需要）；`needs zig` 不自动 `b`（修法要人做一次，做完 `b` 一键）；开屏 sync 的失败仍只是一句 notice（不弹面板）；两块选择器仍是全屏 overlay（T20 同一条）；`d` 若有人肌肉记忆抗议再作为 OFF 的别名放回。

@@ -19,11 +19,12 @@ export function windowRange(count: number, cursor: number, visible: number): { s
 }
 
 /**
- * What the App itself costs an overlay, in rows: the header line, the tab bar,
- * the hairline above, and below it the hairline, the three-row composer, a
- * hairline and the status bar.
+ * What the App itself costs an overlay, in rows: the tab bar, the hairline
+ * above, and below it the hairline, the three-row composer, a hairline and the
+ * status line. (There is no title line since T22 — the model moved under the
+ * composer, into the status line that was already there.)
  */
-export const app_chrome = 9
+export const app_chrome = 8
 
 /**
  * How many rows are left for a list when the overlay knows exactly what it

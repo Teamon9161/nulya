@@ -447,15 +447,12 @@ test("tui-state remembers the last pick, tolerates absence and garbage, and is o
   }
 })
 
-test("picking in /model on a fresh untouched session replaces it in place; on a used one it opens a second tab", async () => {
+test("picking in /model writes the draft, not a session; on a started tab it opens a second draft", async () => {
   const dir = mkdtempSync(join(tmpdir(), "nulya-tui-state-"))
   const statePath = join(dir, "tui-state.json")
-  const first = await sessionNew(ws, { profile: "scripted" })
-  const state = createSessionState(first)
+  const before = (await sessionList(ws)).length
   const setup = await testRender(
-    () => (
-      <App ws={ws} id={first} state={state} style={style} driver={{ env: scripted_env }} created statePath={statePath} />
-    ),
+    () => <App ws={ws} style={style} driver={{ env: scripted_env }} statePath={statePath} />,
     { width: 120, height: 24 },
   )
   try {
@@ -470,30 +467,25 @@ test("picking in /model on a fresh untouched session replaces it in place; on a 
     await settle(setup, 2)
     expect(setup.captureCharFrame()).toMatch(/▾ scripted/)
     setup.mockInput.pressEnter()
-    await until(() => !sessionExists(ws, first), 15_000)
-    // The empty first session is gone — replaced, not stacked — and the pick is remembered.
-    const frame = await settle(setup, 3)
-    expect(frame).not.toContain(first)
+    // Enter on a draft spawns no process and writes no file: it says what the
+    // first message will start, and the pick is remembered (tui.md §11, T22).
+    await until(() => setup.captureCharFrame().includes("starts when you send a message"), 15_000)
     expect(loadTuiState(statePath).model).toEqual({ profile: "scripted", model: "scripted-demo", effort: undefined })
-    const sessions = await sessionList(ws)
-    const mine = sessions.filter((s) => s.id !== first)
-    expect(mine.length).toBeGreaterThan(0)
+    expect((await sessionList(ws)).length).toBe(before)
 
-    // Use the (new) session, then pick again: this time a second tab appears.
+    // Now start it, and pick again: this time a SECOND tab appears — still a
+    // draft, so the store has exactly the one session the message created.
     await setup.mockInput.typeText("probe")
     setup.mockInput.pressEnter()
-    await until(() => setup.captureCharFrame().includes("done"), 60_000)
+    await until(async () => (await sessionList(ws)).length === before + 1, 60_000)
     await setup.mockInput.typeText("/model")
     setup.mockInput.pressEnter()
     await until(() => setup.captureCharFrame().includes("model · what the next session"), 15_000)
     for (let i = 0; i < 40; i++) setup.mockInput.pressKey("j")
     await settle(setup, 2)
     setup.mockInput.pressEnter()
-    await until(() => setup.captureCharFrame().includes("2/2") || /\[2\]|tab/.test(setup.captureCharFrame()), 15_000).catch(
-      () => {},
-    )
-    const after = await sessionList(ws)
-    expect(after.length).toBeGreaterThan(sessions.length)
+    await until(() => setup.captureCharFrame().includes("⤷ scripted-demo (new)"), 15_000)
+    expect((await sessionList(ws)).length).toBe(before + 1)
   } finally {
     setup.renderer.destroy()
     rmSync(dir, { recursive: true, force: true })
@@ -514,7 +506,8 @@ test("/effort sets this tab's effort: the header shows it and the next step is s
     await setup.mockInput.typeText("/effort high")
     setup.mockInput.pressEnter()
     await until(() => setup.captureCharFrame().includes("effort high"), 10_000)
-    expect(setup.captureCharFrame()).toContain("· effort high ·")
+    // The effort rides with the model, as tcode writes it: `id (effort)`.
+    expect(setup.captureCharFrame()).toContain("scripted-demo (high)")
     expect(loadTuiState(statePath).model?.effort).toBe("high")
     // The scripted provider ignores effort, but the flag must not break the
     // step: the run still completes.
@@ -524,7 +517,7 @@ test("/effort sets this tab's effort: the header shows it and the next step is s
     expect(state.snapshot.error).toBeNull()
     await setup.mockInput.typeText("/effort auto")
     setup.mockInput.pressEnter()
-    await until(() => !setup.captureCharFrame().includes("· effort high ·"), 10_000)
+    await until(() => !setup.captureCharFrame().includes("scripted-demo (high)"), 10_000)
   } finally {
     setup.renderer.destroy()
     rmSync(dir, { recursive: true, force: true })

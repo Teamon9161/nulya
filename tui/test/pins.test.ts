@@ -15,6 +15,8 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import {
   builtin_tools,
+  orphanPins,
+  pinAll,
   pinState,
   promote,
   quotaLine,
@@ -22,12 +24,12 @@ import {
   setPinnedTools,
   stateLabel,
   toggle,
-  toggleAll,
   toolId,
+  unpinAll,
   writeUserPins,
   type PinSources,
 } from "../src/pins.ts"
-import { nextFace, toolRows } from "../src/ui/overlays/ExtView.tsx"
+import { nextFace, switchState, toolRows } from "../src/ui/overlays/ExtView.tsx"
 import { readHeader } from "../src/nulya/files.ts"
 import { sessionNew } from "../src/nulya/cli.ts"
 import type { ExtensionEntry } from "../src/nulya/files.ts"
@@ -97,19 +99,44 @@ test("on goes to `this TUI` first; `A` is the second key that writes a config fi
   expect(toggle(glob, sources({ user: [glob], merged: [glob] })).user).toEqual([])
 })
 
-test("a package toggles together, off if any of it is on", () => {
+test("the switch moves a whole package: on only adds, off clears both lists it owns", () => {
   const ids = [toolId("std", "read"), toolId("std", "grep")]
-  const on = toggleAll(ids, sources())
-  expect(on.session).toEqual(ids)
 
-  // One on is enough to make the whole gesture mean "off".
-  const off = toggleAll(ids, sources({ session: [ids[0]!] }))
+  // ON only ever adds. Turning an extension on must not take a pin off
+  // something else, and a tool already on stays exactly where it was written.
+  expect(pinAll(ids, sources()).session).toEqual(ids)
+  const half = pinAll(ids, sources({ user: [ids[0]!] }))
+  expect(half.session).toEqual([ids[1]!])
+  expect(half.user).toBeNull()
+  expect(pinAll(ids, sources({ session: ids })).session).toBeNull()
+
+  // OFF clears BOTH lists this panel writes — including `always`, which no
+  // other key here subtracts: a pin left behind by a deactivation does not cost
+  // a tool, it makes `session new` refuse outright.
+  const off = unpinAll(ids, sources({ user: [ids[0]!], session: [ids[1]!] }))
+  expect(off.user).toEqual([])
   expect(off.session).toEqual([])
 
-  // A package whose tools all belong to another layer: nothing to do, said out loud.
-  const theirs = toggleAll(ids, sources({ merged: ids }))
+  // A pin some other layer wrote still cannot be touched, and is named.
+  const theirs = unpinAll(ids, sources({ merged: ids }))
+  expect(theirs.user).toBeNull()
   expect(theirs.session).toBeNull()
   expect(theirs.notice).toContain("another config layer")
+})
+
+test("the switch state is the two axes read together, and `partial` is what it is called", () => {
+  // Both axes agree.
+  expect(switchState(true, 2, 2)).toBe("on")
+  expect(switchState(true, 0, 0)).toBe("on") // a data package: no tools to pin
+  expect(switchState(false, 2, 0)).toBe("off")
+  // Active, half its face pinned — the state the panel used to draw nowhere.
+  expect(switchState(true, 5, 3)).toBe("partial")
+  // Pinned but no longer active: the one that makes `session new` refuse.
+  expect(switchState(false, 1, 1)).toBe("partial")
+
+  // Which is why those pins are dropped rather than kept.
+  expect(orphanPins(["ext:std/read", "ext:gone/x"], ["ext:std/read"])).toEqual(["ext:gone/x"])
+  expect(orphanPins([], ["ext:std/read"])).toEqual([])
 })
 
 test("the quota counts the builtins, because max_tools does", () => {
