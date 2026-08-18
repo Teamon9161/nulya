@@ -1,6 +1,7 @@
-import { createMemo, createSignal } from "solid-js"
+import { Show, createMemo, createSignal } from "solid-js"
 import { useScreen, useStyle } from "../render/theme.ts"
 import { onClick } from "./rows.ts"
+import { displayWidth, fit } from "./columns.ts"
 import type { SessionSnapshot } from "../state/session.ts"
 import type { DriverStatus } from "../state/driver.ts"
 import type { Role } from "../state/attach.ts"
@@ -35,11 +36,15 @@ export function StatusBar(props: {
   contextWindow?: number | null
   /** Clicking the "N more below" marker: the mouse half of Shift+End. */
   onScrollEnd?: () => void
+  /** Clicking `/help` in the default hint: the mouse half of typing it. */
+  onHelp?: () => void
 }) {
   const style = useStyle()
   const screen = useScreen()
   const [overBehind, setOverBehind] = createSignal(false)
+  const [overHelp, setOverHelp] = createSignal(false)
   const behindClick = onClick(() => props.onScrollEnd?.())
+  const helpClick = onClick(() => props.onHelp?.())
 
   const usage = createMemo(() => {
     const u = props.snapshot.usage
@@ -99,6 +104,36 @@ export function StatusBar(props: {
     return style.theme.muted
   }
 
+  /** The right-hand chips, as strings first, so the hint can be cut to what they leave. */
+  const contextChip = () => (context() ? ` ctx ${context()!.percent}% · /compact` : "")
+  const behindChip = () =>
+    (props.behind ?? 0) > 0 ? ` ${style.glyphs.foldOpen} ${props.behind} more below · Shift+End` : ""
+  const roleChip = () =>
+    screen().width >= 60
+      ? ` step ${props.snapshot.steps} · ${props.role === "observer" ? "observer · driven elsewhere" : "driver"}`
+      : ""
+
+  /**
+   * The hint, cut to the room the line actually has. It is the one part of
+   * this bar with no fixed width, and a `<text>` that runs out of box does not
+   * stop at the last whole word — the screenshot that motivated this ended in
+   * `Ctrl+O fold · /` with `help` gone. When the default hint is up, `/help` is
+   * its own box so it can be clicked; a notice replaces the whole hint.
+   */
+  const hint = () => {
+    const taken =
+      displayWidth(usage()) +
+      displayWidth(` · ${activity()}`) +
+      displayWidth(contextChip()) +
+      displayWidth(behindChip()) +
+      displayWidth(roleChip())
+    const room = Math.max(0, screen().width - 2 - taken)
+    if (props.hint !== undefined) return { text: fit(` · ${props.hint}`, room), help: false }
+    const lead = " · Esc cancel · Ctrl+O fold · "
+    if (room >= displayWidth(lead) + 5) return { text: lead, help: true }
+    return { text: fit(" · Esc cancel · Ctrl+O fold", room), help: false }
+  }
+
   return (
     <box flexDirection="row" width="100%" height={1} flexShrink={0} paddingLeft={1} paddingRight={1}>
       {/* Three tiers on one line: what it cost (secondary), what is happening
@@ -112,17 +147,26 @@ export function StatusBar(props: {
           {" · "}
           {activity()}
         </text>
-        <box flexGrow={1} flexShrink={1} flexBasis={0}>
-          <text fg={style.theme.dim}>
-            {" · "}
-            {props.hint ?? "Esc cancel · Ctrl+O fold · /help"}
-          </text>
-        </box>
+        <text fg={style.theme.dim} flexShrink={0}>
+          {hint().text}
+        </text>
+        <Show when={hint().help}>
+          <box
+            flexShrink={0}
+            height={1}
+            backgroundColor={overHelp() ? style.theme.hover : undefined}
+            onMouseDown={helpClick.onMouseDown}
+            onMouseUp={helpClick.onMouseUp}
+            onMouseOver={() => setOverHelp(true)}
+            onMouseOut={() => setOverHelp(false)}
+          >
+            <text fg={style.theme.dim}>/help</text>
+          </box>
+        </Show>
       </box>
       {context() ? (
         <text fg={context()!.urgent ? style.theme.warn : style.theme.dim} flexShrink={0}>
-          {" "}
-          ctx {context()!.percent}% · /compact
+          {contextChip()}
         </text>
       ) : null}
       {/* Scrolled away from the live end: the newest card is off screen, which
@@ -139,16 +183,12 @@ export function StatusBar(props: {
           onMouseOver={() => setOverBehind(true)}
           onMouseOut={() => setOverBehind(false)}
         >
-          <text fg={style.theme.accent.evolve}>
-            {" "}
-            {style.glyphs.foldOpen} {props.behind} more below · Shift+End
-          </text>
+          <text fg={style.theme.accent.evolve}>{behindChip()}</text>
         </box>
       ) : null}
       {screen().width >= 60 ? (
         <text fg={props.role === "observer" ? style.theme.warn : style.theme.dim} flexShrink={0}>
-          {" "}
-          step {props.snapshot.steps} · {props.role === "observer" ? "observer · driven elsewhere" : "driver"}
+          {roleChip()}
         </text>
       ) : null}
     </box>

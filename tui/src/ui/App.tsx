@@ -11,6 +11,7 @@ import { HelpView } from "./overlays/HelpView.tsx"
 import { SettingsView } from "./overlays/SettingsView.tsx"
 import { UsageView } from "./overlays/UsageView.tsx"
 import { ModelView } from "./overlays/ModelView.tsx"
+import { ProviderView } from "./overlays/ProviderView.tsx"
 import { ScreenContext, StyleContext, useScreen, useStyle, type Style } from "../render/theme.ts"
 import { FoldContext, createFoldStore } from "../state/folds.ts"
 import { BrowseContext, createBrowseStore } from "../state/browse.ts"
@@ -34,6 +35,8 @@ import { planStore, summarize } from "../extensions.ts"
 import { runCompact } from "../compact.ts"
 import { buildEvolution, formatWithRef, parseWithRef, withOptions, type WithRef } from "../evolve.ts"
 import { createKeymap, matches } from "../keymap.ts"
+import { displayWidth, fit, wrapWords } from "./columns.ts"
+import { onClick } from "./rows.ts"
 import type { AttachOptions } from "../state/attach.ts"
 import type { SessionState, TranscriptItem } from "../state/session.ts"
 import type { Workspace } from "../nulya/bin.ts"
@@ -54,6 +57,13 @@ export interface AppProps {
    * for the intended profile — so the first thing on screen is the way out.
    */
   guide?: string
+  /**
+   * Which screen the guide opens (tui.md §11, T21). `/model` when something can
+   * run and the remembered pick simply cannot; `/provider` when NO provider can
+   * run at all, because then a list of models has nothing to offer and the
+   * missing key is the whole of the problem.
+   */
+  guideOn?: "model" | "provider"
   /** Where the TUI remembers its last pick; tests point it elsewhere. */
   statePath?: string
   /**
@@ -114,6 +124,8 @@ export function App(props: AppProps) {
 
   const [notice, setNotice] = createSignal<string | null>(null)
   const [guide, setGuide] = createSignal<string | null>(props.guide ?? null)
+  /** Which provider `/model` should open on, when `/provider` sent it there. */
+  const [focusProfile, setFocusProfile] = createSignal<string | undefined>(undefined)
   /**
    * Sessions this process will not ask about again on the way out: either a
    * verdict was recorded, or the question was already put once and declined.
@@ -313,6 +325,23 @@ export function App(props: AppProps) {
     overlay.toggle(kind)
     if (opening) composer?.blur()
     else composer?.focus()
+    // Opening `/model` any other way is about the whole list again, so the
+    // provider `/provider` handed over is not still selecting rows for it.
+    setFocusProfile(undefined)
+    setNotice(null)
+  }
+
+  /**
+   * `/provider` chose a provider: `/model`, landed on its first model (tui.md
+   * §11, T21). This is the second step of "pick a provider, then its model" —
+   * two screens, as in tcode, rather than two levels of one. The guide goes
+   * with it: whatever sent the person to the providers has been dealt with by
+   * the time they are choosing among models.
+   */
+  const showModelsOf = (profile: string) => {
+    setFocusProfile(profile)
+    setGuide(null)
+    overlay.open("model")
     setNotice(null)
   }
 
@@ -577,6 +606,10 @@ export function App(props: AppProps) {
       openOverlay("model")
       return true
     }
+    if (command === "/provider") {
+      openOverlay("provider")
+      return true
+    }
     if (command === "/effort") {
       setEffort(words[1])
       return true
@@ -641,6 +674,7 @@ export function App(props: AppProps) {
       if (matches(keys.ext, key)) return consume(key, () => openOverlay("ext"))
       if (matches(keys.sessions, key)) return consume(key, () => openOverlay("sessions"))
       if (matches(keys.model, key)) return consume(key, () => openOverlay("model"))
+      if (matches(keys.provider, key)) return consume(key, () => openOverlay("provider"))
       if (matches(keys.help, key)) return consume(key, () => openOverlay("help"))
       if (matches(keys.quit, key)) quit()
       return
@@ -671,6 +705,7 @@ export function App(props: AppProps) {
     if (matches(keys.sessions, key)) return consume(key, () => openOverlay("sessions"))
     if (matches(keys.ext, key)) return consume(key, () => openOverlay("ext"))
     if (matches(keys.model, key)) return consume(key, () => openOverlay("model"))
+    if (matches(keys.provider, key)) return consume(key, () => openOverlay("provider"))
     if (matches(keys.help, key)) return consume(key, () => openOverlay("help"))
     // Reading back. The composer is focused and keeps the keyboard, so these
     // have to be taken here or they are the textarea's cursor movement.
@@ -735,6 +770,12 @@ export function App(props: AppProps) {
    * The title line, in two tiers: WHICH session on WHICH model is the answer to
    * "where am I", and the shape of its frozen composition is a detail about it.
    * One flat grey sentence made the two impossible to tell apart at a glance.
+   *
+   * The model is the one thing on this line that answers to a click — it opens
+   * `/model`, the way tcode's model line does — so it is its own box. Every
+   * part is cut to the line by us: a `<text>` that overflows a one-row box wraps
+   * into a second row that is then clipped, which is how the detail used to end
+   * in a lone ` ·` on an 80-column terminal.
    */
   const header = () => {
     const current = snapshot()
@@ -748,14 +789,23 @@ export function App(props: AppProps) {
     const skills = tab()
       .contributions()
       .reduce((count, entry) => count + entry.skills.length, 0)
-    return {
-      subject: `nulya · ${tab().id} · ${model}`,
-      detail: `${effort ? ` · effort ${effort}` : ""} · tools 2+${native} · skills ${skills}`,
-    }
+    const width = Math.max(0, screen().width - 2)
+    const subject = `nulya · ${tab().id} · `
+    // The model gets what the subject leaves; the detail gets what the model
+    // leaves, whole segments only — `wrapWords` breaks at the ` · ` joints, and
+    // its first line is what fits — so a narrow line ends in `tools 2+0`, not
+    // in `skill…` or a lone `·`.
+    const modelText = fit(model, Math.max(0, width - displayWidth(subject)))
+    const room = width - displayWidth(subject) - displayWidth(modelText)
+    const detail = `${effort ? `effort ${effort} · ` : ""}tools 2+${native} · skills ${skills}`
+    const shown = room >= 8 ? (wrapWords(detail, room - 3)[0] ?? "") : ""
+    return { subject, model: modelText, detail: shown.length > 0 ? ` · ${shown}` : "" }
   }
+  const [overModel, setOverModel] = createSignal(false)
+  const modelClick = onClick(() => openOverlay("model"))
 
-  // Opened by `main` with a reason: show the picker before anything else.
-  if (props.guide) overlay.open("model")
+  // Opened by `main` with a reason: show that screen before anything else.
+  if (props.guide) overlay.open(props.guideOn ?? "model")
 
   return (
     <StyleContext.Provider value={props.style}>
@@ -768,7 +818,23 @@ export function App(props: AppProps) {
                   <text fg={props.style.theme.muted} flexShrink={0}>
                     {header().subject}
                   </text>
-                  <text fg={props.style.theme.dim}>{header().detail}</text>
+                  {/* The model: click for /model. The same tint every clickable
+                      thing takes under the pointer (`ui/rows.ts`), and nothing
+                      else on this line takes it, because nothing else answers. */}
+                  <box
+                    flexShrink={0}
+                    height={1}
+                    backgroundColor={overModel() ? props.style.theme.hover : undefined}
+                    onMouseDown={modelClick.onMouseDown}
+                    onMouseUp={modelClick.onMouseUp}
+                    onMouseOver={() => setOverModel(true)}
+                    onMouseOut={() => setOverModel(false)}
+                  >
+                    <text fg={props.style.theme.muted}>{header().model}</text>
+                  </box>
+                  <text fg={props.style.theme.dim} flexShrink={0}>
+                    {header().detail}
+                  </text>
                 </box>
                 <TabBar tabs={tabs.tabs()} activeIndex={tabs.activeIndex()} onSelect={(index) => tabs.select(index)} />
                 <Hairline />
@@ -779,6 +845,9 @@ export function App(props: AppProps) {
                       items={snapshot().items}
                       header={snapshot().header}
                       contributions={tab().contributions()}
+                      cwd={props.ws.dir}
+                      onPickModel={() => openOverlay("model")}
+                      onCommand={submit}
                       ref={(box) => (scroll = box)}
                     />
                   }
@@ -816,7 +885,19 @@ export function App(props: AppProps) {
                       ws={props.ws}
                       current={currentPick()}
                       notice={guide() ?? undefined}
+                      focusProfile={focusProfile()}
                       onPick={(pick) => void newSession(pick)}
+                      onNotice={setNotice}
+                      onOpenProviders={() => openOverlay("provider")}
+                      onClose={closeOverlay}
+                    />
+                  </Match>
+                  <Match when={overlay.kind() === "provider"}>
+                    <ProviderView
+                      ws={props.ws}
+                      current={currentPick()}
+                      notice={guide() ?? undefined}
+                      onShowModels={showModelsOf}
                       onNotice={setNotice}
                       onClose={closeOverlay}
                     />
@@ -851,6 +932,7 @@ export function App(props: AppProps) {
                   behind={behind()}
                   contextWindow={contextWindow()}
                   onScrollEnd={scrollToEnd}
+                  onHelp={() => openOverlay("help")}
                 />
               </box>
             </OverlayContext.Provider>

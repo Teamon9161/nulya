@@ -44,6 +44,12 @@ export function Transcript(props: {
   items: TranscriptItem[]
   header?: SessionHeader | null
   contributions?: Contributions[]
+  /** The workspace this session's `.nulya/` lives in — the welcome screen says so. */
+  cwd?: string
+  /** The model line of the composition card was clicked: open `/model`. */
+  onPickModel?: () => void
+  /** A `/command` on the welcome screen was clicked: run it as if typed. */
+  onCommand?: (command: string) => void
   /** Handed to `App` so PgUp/PgDn and the "more below" hint have something to act on. */
   ref?: (box: ScrollBoxRenderable) => void
 }) {
@@ -65,7 +71,11 @@ export function Transcript(props: {
       contentOptions={{ flexDirection: "column", width: "100%", maxWidth: style.maxWidth, paddingRight: 1 }}
     >
       <Show when={props.header}>
-        <CompositionCard header={props.header ?? null} contributions={props.contributions} />
+        <CompositionCard
+          header={props.header ?? null}
+          contributions={props.contributions}
+          onPickModel={props.onPickModel}
+        />
       </Show>
       <Show when={hidden() > 0}>
         <text fg={style.theme.faint}>
@@ -77,7 +87,7 @@ export function Transcript(props: {
       {/* An empty session is the one screen with nothing to report; it says
           what this session is and what to do, rather than a blank rectangle. */}
       <Show when={props.items.length === 0}>
-        <Welcome />
+        <Welcome cwd={props.cwd} onCommand={props.onCommand} />
       </Show>
       <For each={shown()}>{(item) => <Card item={item} />}</For>
     </scrollbox>

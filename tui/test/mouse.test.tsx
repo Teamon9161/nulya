@@ -331,3 +331,58 @@ test("clicking the input box leaves browse mode", async () => {
     setup.renderer.destroy()
   }
 }, 120_000)
+
+test("the model is a click target wherever it is written: title line, composition card — and the welcome rows and /help", async () => {
+  const id = await sessionNew(ws, { profile: "scripted" })
+  const state = createSessionState(id)
+  const setup = await testRender(
+    () => <App ws={ws} id={id} state={state} style={style} driver={{ env: scripted_env }} created />,
+    { width: 100, height: 30 },
+  )
+  const picker = "model · what the next session runs on"
+  try {
+    await until(() => setup.captureCharFrame().includes("frozen composition"), 15_000)
+    const frame = await settle(setup, 4)
+    const rows = frame.split("\n")
+
+    // The title line: `nulya · <id> · scripted · scripted-demo …` — the model
+    // half is the target. Its detail no longer wraps into a lone ` ·`.
+    expect(rows[0]).toContain("scripted · scripted-demo")
+    expect(rows[0]).toContain("tools 2+0")
+    await setup.mockMouse.click(rows[0]!.indexOf("scripted-demo") + 2, 0)
+    expect(await settle(setup, 4)).toContain(picker)
+    setup.mockInput.pressEscape()
+    expect(await settle(setup, 4)).toContain("frozen composition")
+
+    // The composition card's `model` row: the same overlay, the same way in
+    // (`openOverlay`, which also takes the keyboard from the composer).
+    const card = rows.findIndex((row) => /model\s+scripted/.test(row))
+    expect(card).toBeGreaterThan(0)
+    await setup.mockMouse.click(rows[card]!.indexOf("scripted") + 3, card)
+    expect(await settle(setup, 4)).toContain(picker)
+    // The picker owns the keys now: `j` moves it, nothing lands in the composer.
+    setup.mockInput.pressKey("j")
+    await settle(setup, 2)
+    expect(setup.captureCharFrame()).not.toMatch(/›\s*j\s*$/m)
+    setup.mockInput.pressEscape()
+    expect(await settle(setup, 4)).toContain("frozen composition")
+
+    // A welcome row runs its command exactly as typing it would.
+    const sessionsRow = rows.findIndex((row) => row.includes("/sessions") && row.includes("everything in .nulya/sessions"))
+    expect(sessionsRow).toBeGreaterThan(0)
+    await setup.mockMouse.click(4, sessionsRow)
+    await until(() => setup.captureCharFrame().includes("sessions ·"), 10_000)
+    setup.mockInput.pressEscape()
+    expect(await settle(setup, 4)).toContain("frozen composition")
+
+    // And `/help` on the status bar is the last thing on screen that reads
+    // like a command, so it too answers to a click.
+    const bar = rows.findIndex((row) => row.includes("Esc cancel · Ctrl+O fold · /help"))
+    expect(bar).toBeGreaterThan(0)
+    const help = rows[bar]!.indexOf("/help")
+    await setup.mockMouse.click(help + 1, bar)
+    expect(await settle(setup, 4)).toContain("help · keys and commands")
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 120_000)

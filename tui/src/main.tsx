@@ -29,6 +29,7 @@ import {
   storeTrusted,
   summarize,
   workspaceStorePath,
+  type StoreAnswer,
 } from "./extensions.ts"
 import { createStyle } from "./render/theme.ts"
 import { createSessionState } from "./state/session.ts"
@@ -97,6 +98,7 @@ async function main() {
   const created = id === undefined
   let effort = args.effort
   let guide: string | undefined
+  let guideOn: "model" | "provider" | undefined
   const settings = await loadSettings(ws.dir)
 
   // Before any session exists, because this is the one thing that can stop one
@@ -144,6 +146,7 @@ async function main() {
     }
     effort = plan.pick?.effort
     guide = plan.guide
+    guideOn = plan.guideOn
   }
 
   const style = createStyle(settings)
@@ -160,6 +163,7 @@ async function main() {
         created={created}
         effort={effort}
         guide={guide}
+        guideOn={guideOn}
         models={config.models}
         sync={{
           user: settings.extensions.sync_on_start,
@@ -194,9 +198,9 @@ async function askAboutProjectStore(ws: Workspace): Promise<"none" | "ready" | "
   if (plan.kind !== "ask") return plan.kind === "ready" ? "ready" : "none"
 
   process.stdout.write(promptText(plan))
-  const answer = answerFor(await readKey())
+  const answer = await readAnswer()
   rememberStoreAsked(store)
-  if (!answer || answer === "skip") {
+  if (answer === "skip") {
     process.stdout.write("left alone · `nulya ext trust` whenever you mean to\n")
     return "answered"
   }
@@ -224,9 +228,9 @@ async function askAboutBundled(ws: Workspace): Promise<void> {
   if (plan.seeded === 0) return
 
   process.stdout.write(bundledPromptText(plan))
-  const answer = answerFor(await readKey())
+  const answer = await readAnswer()
   rememberBundledAsked()
-  if (!answer || answer === "skip") {
+  if (answer === "skip") {
     process.stdout.write("left alone · `nulya ext seed --user` whenever you mean to\n")
     return
   }
@@ -239,7 +243,33 @@ async function askAboutBundled(ws: Workspace): Promise<void> {
   }
 }
 
-/** One keypress from the terminal, lowercased. `escape` and `return` by name. */
+/**
+ * The answer to a `choicesText` question: keys until one of them IS an answer,
+ * then that key echoed on the `› ` line with a newline after it.
+ *
+ * Both halves matter. Raw mode swallows the echo, so without ours the keypress
+ * is invisible — the screen shows the same bare cursor before and after, and a
+ * `t` followed by a minute of zig building the std extension looks exactly like
+ * a hang. And a byte that is not one of the three keys is not a "no": a
+ * terminal's reply to a query, a focus event, an IME's partial sequence, an
+ * empty first chunk all arrive on the same stream, and every one of them used to
+ * be read as "not now" — silently, once, never to be asked again.
+ */
+async function readAnswer(): Promise<StoreAnswer> {
+  for (;;) {
+    const key = await readKey()
+    const answer = answerFor(key)
+    if (!answer) continue
+    process.stdout.write(`${key === "return" ? "" : key === "escape" ? "esc" : key}\n`)
+    return answer
+  }
+}
+
+/**
+ * One keypress from the terminal, lowercased. `escape` and `return` by name;
+ * an escape SEQUENCE (a cursor key, a terminal reply) is `sequence`, which no
+ * question accepts, rather than a lone Esc that every question takes as no.
+ */
 async function readKey(): Promise<string> {
   const stdin = process.stdin
   if (!stdin.isTTY) return "n" // not a person: never install on nobody's word
@@ -248,7 +278,7 @@ async function readKey(): Promise<string> {
   try {
     const chunk: Buffer = await new Promise((resolve) => stdin.once("data", resolve))
     const byte = chunk[0] ?? 0
-    if (byte === 27) return "escape"
+    if (byte === 27) return chunk.length === 1 ? "escape" : "sequence"
     if (byte === 13 || byte === 10) return "return"
     if (byte === 3) process.exit(130) // Ctrl+C means Ctrl+C, even here
     return String.fromCharCode(byte).toLowerCase()

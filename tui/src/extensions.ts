@@ -203,13 +203,25 @@ export function planProjectStore(
   return { kind: "ask", store, drafts: describeDrafts(what) }
 }
 
+/**
+ * The question and its three keys, one per line — the same shape as the list
+ * of packages above it, so the eye reads one column of items and one column of
+ * choices instead of a list and then a sentence. It ends without a newline
+ * after the `›`: the answer is typed on that line and echoed there
+ * (`main.tsx` `readAnswer`), so the screen never shows a bare cursor on an
+ * empty row waiting for nobody knows what.
+ */
+export function choicesText(question: string, choices: ReadonlyArray<[key: string, what: string]>): string {
+  return `${[question, ...choices.map(([key, what]) => `  ${key}  ${what}`)].join("\n")}\n› `
+}
+
 export function promptText(plan: ProjectStoreAsk): string {
-  const lines = [
-    `this checkout ships extensions in ${plan.store}:`,
-    ...plan.drafts.map((line) => `  ${line}`),
-    "trust & install? (t) trust + build + activate   (s) build only   (n) not now",
-  ]
-  return `${lines.join("\n")}\n`
+  const lines = [`this checkout ships extensions in ${plan.store}:`, ...plan.drafts.map((line) => `  ${line}`)]
+  return `${lines.join("\n")}\n${choicesText("trust & install?", [
+    ["t", "trust + build + activate"],
+    ["s", "build only"],
+    ["n", "not now"],
+  ])}`
 }
 
 /**
@@ -252,15 +264,29 @@ export function planBundled(ws: Workspace): Promise<SeedReport> {
 /** One sentence per missing id, for the question. */
 export function bundledPromptText(plan: SeedReport): string {
   const line = (id: string): string => {
-    if (id === "std") return "std · read/write/append/grep/glob on the model's tool face"
-    if (id === "guide") return "guide · a reference skill for working this harness"
-    return `${id} · built on demand (/compact, /evolve, the goal driver)`
+    switch (id) {
+      case "std":
+        return "std · read/write/append/grep/glob on the model's tool face"
+      case "guide":
+        return "guide · a reference skill for working this harness"
+      case "compact":
+        return "compact · behind /compact, built on demand"
+      case "evolution":
+        return "evolution · behind /evolve, built on demand"
+      case "handoff":
+        return "handoff · the goal driver's handoff tool, built on demand"
+      default:
+        return `${id} · built on demand`
+    }
   }
   return `${[
     `this nulya ships ${plan.seeded} bundled extension${plan.seeded === 1 ? "" : "s"} not yet in your user store:`,
     ...plan.ids.map((id) => `  ${line(id)}`),
-    "install? (t) install + activate std & guide   (s) install only   (n) not now",
-  ].join("\n")}\n`
+  ].join("\n")}\n${choicesText("install?", [
+    ["t", "install + activate std & guide"],
+    ["s", "install only"],
+    ["n", "not now"],
+  ])}`
 }
 
 /**

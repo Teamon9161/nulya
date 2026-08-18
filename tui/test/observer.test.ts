@@ -11,6 +11,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test"
 import { join } from "node:path"
 import { createAttachment } from "../src/state/attach.ts"
+import { parseMidTask } from "../src/midtask.ts"
 import { createSessionState } from "../src/state/session.ts"
 import { sessionAppend, sessionEvents, sessionNew, sessionStep } from "../src/nulya/cli.ts"
 import { scripted_loop_env, tempWorkspace, until, type TempWorkspace } from "./support.ts"
@@ -55,12 +56,18 @@ test("a session driven by somebody else is observed, appended to, and then taken
 
     // 3. An observer may still speak: the turn is deposited in the inbox and
     //    the OTHER writer drains it at its next step boundary (DESIGN §3.4).
+    //    When the probe has already confirmed the lease as held, the turn goes
+    //    out wrapped as a mid-task message (tui.md §11, T17) — so it is matched
+    //    through the same parser the cards use, not by its raw text.
     await attach.send("a word from the observer")
     expect(state.snapshot.items.some((item) => item.kind === "user" && item.queued)).toBe(true)
     await until(
       () =>
         state.snapshot.items.some(
-          (item) => item.kind === "user" && !item.queued && item.text === "a word from the observer",
+          (item) =>
+            item.kind === "user" &&
+            !item.queued &&
+            (parseMidTask(item.text)?.text ?? item.text) === "a word from the observer",
         ),
       60_000,
     )

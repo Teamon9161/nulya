@@ -152,9 +152,10 @@ test("a project store is asked about once, and only when it holds something", ()
   const text = promptText(ask)
   expect(text).toContain(store)
   expect(text).toContain("a.mode")
-  expect(text).toContain("(t)")
-  expect(text).toContain("(s)")
-  expect(text).toContain("(n)")
+  // The three keys are one per line, like the packages above them, and the
+  // text ends on the answer line itself: the key is typed after the `›`.
+  expect(text).toContain("\n  t  trust + build + activate\n  s  build only\n  n  not now\n› ")
+  expect(text.endsWith("› ")).toBe(true)
   expect(describeDrafts(drafts)[0]).toContain("not built")
 })
 
@@ -179,7 +180,12 @@ test("the three keys map to what actually runs, and anything else installs nothi
   // Esc and Enter are "not now": a person who did not choose has not consented.
   expect(answerFor("escape")).toBe("skip")
   expect(answerFor("return")).toBe("skip")
+  // Anything else is not an answer at all — the question stays open. A stray
+  // byte (a terminal reply, an escape SEQUENCE, an IME chunk) must not be read
+  // as a quiet "no" that is then remembered as asked-and-declined.
   expect(answerFor("q")).toBeNull()
+  expect(answerFor("sequence")).toBeNull()
+  expect(answerFor("\0")).toBeNull()
 })
 
 test("a finished pass leaves one line worth reading", () => {
@@ -213,6 +219,7 @@ test("the bundled question names what is missing and what installing does", () =
   expect(text).toContain("3 bundled extensions")
   expect(text).toContain("std · read/write/append/grep/glob")
   expect(text).toContain("guide · a reference skill")
-  expect(text).toContain("compact · built on demand")
-  expect(text).toContain("(t) install + activate std & guide")
+  expect(text).toContain("compact · behind /compact, built on demand")
+  expect(text).toContain("\ninstall?\n  t  install + activate std & guide\n  s  install only\n  n  not now\n› ")
+  expect(text.endsWith("› ")).toBe(true)
 })

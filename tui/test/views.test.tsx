@@ -46,7 +46,10 @@ async function overlay(node: () => JSX.Element, theme = style, width = 100, heig
 }
 
 test("/help lists the bindings that are actually in force", async () => {
-  const setup = await overlay(() => <HelpView keys={createKeymap(default_settings)} onClose={() => {}} />, style, 100, 60)
+  // Tall enough for the whole page: this test's point is that EVERY command is
+  // on it, and the page is a scrollbox, so a viewport that cuts the last two
+  // rows would turn "not discoverable" into "not scrolled to".
+  const setup = await overlay(() => <HelpView keys={createKeymap(default_settings)} onClose={() => {}} />, style, 100, 66)
   try {
     // Eight passes, not four: a busy machine captured a half-painted frame once
     // (T1's `settle()` note) and a snapshot that flaky is worse than none.
@@ -128,8 +131,11 @@ test("/settings at eighty columns: a path too long for its column is cut, the cl
     for (const line of lines) expect(displayWidth(line)).toBeLessThanOrEqual(76)
     expect(frame).toContain("…")
 
-    // The two tables keep their gutters: the state column, then the path.
-    const path = lines.find((line) => line.includes("a-very-long-directory-name"))!
+    // The two tables keep their gutters: the state column, then the path. The
+    // project row is found by its cut, not by the long name: on Windows the
+    // temp prefix alone (`C:\Users\…\AppData\Local\Temp\nulya-tui-…`) can use
+    // up the column before the repeated segment ever appears.
+    const path = lines.find((line) => /absent {2,}\S/.test(line) && line.includes("…"))!
     expect(path).toMatch(/absent {2,}\S/)
     const key = lines.find((line) => line.includes("transcript.history_window"))!
     expect(key).toMatch(/transcript\.history_window {2,}\S/)

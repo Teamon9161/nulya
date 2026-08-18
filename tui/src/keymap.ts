@@ -15,6 +15,7 @@ export type Action =
   | "ext"
   | "sessions"
   | "model"
+  | "provider"
   | "nextTab"
   | "closeTab"
   | "scrollUp"
@@ -31,6 +32,9 @@ export const default_keys: Record<Action, string> = {
   ext: "f2",
   sessions: "f3",
   model: "f5",
+  // The other half of the model question (tui.md §11, T21). Next to F5 because
+  // the two are read together: what runs, and what could serve it.
+  provider: "f6",
   nextTab: "f4",
   closeTab: "ctrl+w",
   scrollUp: "pageup",

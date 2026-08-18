@@ -7,6 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { openWorkspace, type Workspace } from "../src/nulya/bin.ts"
+import type { ConfigView } from "../src/nulya/cli.ts"
 import type { TranscriptItem } from "../src/state/session.ts"
 
 export interface TempWorkspace extends Workspace {
@@ -37,6 +38,53 @@ export function tempWorkspace(): TempWorkspace {
 /** The deterministic offline provider, so no test ever needs an API key. */
 export const scripted_env = { NULYA_SCRIPTED_MODE: "finish" }
 export const scripted_loop_env = { NULYA_SCRIPTED_MODE: "loop" }
+
+/**
+ * A config the way `nulya config show --json` prints it, with one key present.
+ *
+ * Here rather than in either test file because `/model` and `/provider` are two
+ * screens over these same rows (tui.md §11, T21) and both need them; a test
+ * file importing another test file would register that file's tests twice.
+ */
+export const fake_config: ConfigView = {
+  paths: { system: "/etc/nulya/config.toml", user: "/home/me/.nulya/config.toml", project: ".nulya/config.toml" },
+  active_profile: "openai",
+  registry: { max_tools: 8, pinned_native_tools: [] },
+  profiles: [
+    {
+      name: "openai",
+      kind: "openai",
+      base_url: "https://api.openai.com/v1",
+      api_key_env: "OPENAI_API_KEY",
+      credential: false,
+      credential_source: "none",
+      model: "gpt-5.6-sol",
+      models: ["gpt-5.6-sol", "gpt-5.6-luna"],
+      effort: null,
+      catalog: null,
+    },
+    {
+      name: "deepseek",
+      kind: "openai",
+      base_url: "https://api.deepseek.com",
+      api_key_env: "DEEPSEEK_API_KEY",
+      credential: true,
+      credential_source: "env",
+      model: "deepseek-v4-flash",
+      models: ["deepseek-v4-flash", "deepseek-v4-pro"],
+      effort: null,
+      catalog: null,
+    },
+    { name: "codex", kind: "codex", base_url: "", api_key_env: "", credential: false, credential_source: "none", model: "gpt-5.5", models: ["gpt-5.5"], effort: "low", catalog: null },
+    { name: "scripted", kind: "scripted", base_url: "", api_key_env: "", credential: true, credential_source: "builtin", model: "scripted-demo", models: ["scripted-demo"], effort: null, catalog: null },
+  ],
+  models: [
+    { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", efforts: ["low", "medium", "high"], default_effort: "medium", context_window: 1_050_000 },
+    { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", efforts: ["off", "low", "high", "max"], default_effort: null, context_window: 1_000_000 },
+    { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", efforts: ["off", "low", "high", "max"], default_effort: null, context_window: 1_000_000 },
+    { id: "gpt-5.5", label: "GPT-5.5 (Codex)", efforts: ["off", "low", "medium", "high"], default_effort: null, context_window: null },
+  ],
+}
 
 interface Settleable {
   renderOnce(): Promise<unknown>

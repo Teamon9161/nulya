@@ -178,7 +178,11 @@ tui/
 - `@` 开头（前一字符非字母数字下划线）弹文件补全：`↑↓` 选、`Tab` 上屏成 `@path`；已知引用在输入框里 accent。**上屏的是路径，不是文件内容**（T13）。
 - 粘贴：> 1000 字符或 > 15 行折叠成 `[Pasted text #N]`，提交时展开回原文；`Backspace` 落在占位尾部整条删掉（T14）。
 - 全局：`Esc` cancel（stepping 时）/ browse 模式；`Ctrl+C` 两下退出（stepping 时第一下先 kill）；`Ctrl+L` 重绘；`F2` `/ext`；`F3` `/sessions`；`F4` 下一个 tab；`Ctrl+W` 关掉当前 tab（最后一个不关）。
-- 鼠标（T18）：列表行点一下落光标、点已选中的行执行它的 Enter；`/ext` 的 pane 条与 `[x]`、TabBar、状态栏的 `↓ N more below`、输入框都可点（点输入框也会退出 browse 模式）；拖过文本是选取，松手复制（OSC 52）。
+- 鼠标（T18）：列表行点一下落光标、点已选中的行执行它的 Enter；`/ext` 的 pane 条与 `[x]`、TabBar、状态栏的 `↓ N more below`、输入框都可点（点输入框也会退出 browse 模式）；拖过文本是选取，松手复制（OSC 52）。**模型这一行处处可点**（T20）：标题行的 `profile · model` 段、CompositionCard 的 `model` 值都开 `/model`；Welcome 的那几条 `/` 命令行、状态栏的 `/help` 也是按钮。所有可点的东西悬停都是同一个 `hover` 底色。
+- `/model`（F5）与 `/provider`（F6）是**两个命令、两个问题**（T5 → T6 → T20 → T21，与 tcode 的 `/model` ÷ `/provider` 同一刀）：
+  - `/model` **只有模型**：每个能跑的 provider 的每个 model 一行（`provider · label · id · ctx · ‹ effort › · ✓ current`），`h/l` 拨 effort、Enter 开新场；跑不了的 provider 不出模型行（这才是让表变短的东西），`provider` 那一列保证"这是谁家的模型"一眼可读。一个 model 的 ctx / effort 档位**先读该 profile 自己的 catalog**、没有才回落全局 `[[models]]`——同一个 id 在订阅口与公共 API 口是两个东西。一个 provider 都跑不了时只有一行 `no provider can run yet · /provider …`，Enter / `p` 就是过去。
+  - `/provider` 是 **key 与 endpoint 的家**：一行一个 profile（`name · wire/endpoint · N models · 状态`），detail 行列出它的 model id（浏览不拦，拦的只是开一场），`s` 贴 key、`a` 加 compatible endpoint，codex 说 `codex login`；**Enter 在能跑的 provider 上 = 回 `/model` 并落在它的第一个模型上**——"先选 provider 再选它的模型"就是这两步。
+  - 开屏没得跑时：还有别的 provider 能跑 → 开 `/model`；一个都跑不了 → 开 `/provider`（`launch.LaunchPlan.guideOn`）。
 - observer 时空 composer 上的 `Enter` = take over（§5.6）；browse 模式里选中的卡若指名了一个 session，`Enter` 打开它成第二个 tab，`Space` 永远是折叠。
 
 ### 4.5 状态栏
@@ -1086,3 +1090,43 @@ cd tui && bun test test/compact.test.ts
 **测试**：`extensions.test.ts` +2（真二进制的 seed 往返：dry-run 计数、点名子集、二次 seed 不覆盖；问句文案）；内核侧 e2e +1（seed → sync 闭环、`--dry-run` 零落盘、已有 draft 字节不动）。`bun test` 176 pass、`tsc` 干净、`zig build test` / `zig build e2e` 绿。
 
 **没做**：`/ext` 里没有单独的"bundled"分区——seed 过之后它们就是普通 draft + 版本，现有列表如实显示；`auto_activate` 打开时"以前 build 过但从未激活"的 id 不再被启动补激活（`/ext` 的 `a` 一键即达，这正是"激活是决定"）。
+
+### T20 · `/model` 以模型为主语；模型这一行处处可点（2026-08-18）
+
+**内核零改动**（只动 `tui/`）。来源是拿 tcode 并排一看给出的三条：①`/model` 打开是一张 provider 表，"选模型"藏在第二层——它长成了 provider 配置器；②tcode 的 model 行**能点**开选择器、可点的东西鼠标过去都有同一种高亮，nulya 只有 overlay 里的行有；③整体仍简陋——截图里就有两处：标题行尾巴上一个孤零零的 ` ·`、状态栏 `Ctrl+O fold · /` 把 `help` 吃掉了。
+
+#### `/model`：第一层是模型
+
+1. **T5 → T6 → T20 是同一个问题的三次回答。** T5 一张平表：每个 (profile, model) 一行，七个 profile 摊成十四行、十三行都在重复"没 key"；T6 改成 providers → models 两级，行数下来了，但把要选的东西藏进了第二层。真正让表变短的不是嵌套，是 tcode `build_menu` 的那个过滤：**跑不了的 provider 不出模型行**（`pickableRows`：`credential` 为真的 profile 的每个 model，加上正在生效的那个 pick 的 profile——不管它此刻能不能跑，`✓ current` 得有一行可落，Enter 在上面只说原因）。所以现在第一层一行一个能跑的 (provider, model)：`provider · label · id · ctx · ‹ effort › · ✓ current / offline`，`h/l` 拨 effort、Enter 开新场，光标开在生效中的那行。
+2. **providers 退到后面，但没有消失。** 最后一行 `providers · 2 ready · 4 need a key · manage keys · add an endpoint`（`p` 或 Enter/点它）进第二层——原来的 provider 表原封不动（wire、endpoint、几个模型、状态），credential 仍归 provider（`s` 贴 key 在两层都指"当前这行的 provider"），`a` 加 compatible endpoint 两层都能按。**Enter 在 provider 上按它的状态办事**：能跑 → 回模型层并落在它的第一个模型上；缺 key 的 openai/anthropic 口 → 直接进贴 key；codex → 说 `codex login`。跑不了的 provider 的模型 id 现在写在它的 detail 行里（`… · models gpt-5.6-sol, gpt-5.6-luna`）——T6 说的"浏览不该被拦"仍然成立，拦的只是"开一场"。
+3. **effort 拨盘按行 key 记，不按下标**（`dials: Map<"profile/model", slot>`）：贴完 key 一 reload，上面多出几行，原来的那行不能把自己的 effort 交给别人；两个光标也按名字保住（provider 按 name、model 按 key），`r` / 存 key / 加 provider 之后没有人被静默挪走。
+4. **列宽的优先级**：模型层六列由内容算、窄屏 `squeeze`；label 有 20 列的下限而 id 没有——80 列下两者同宽时"widest first"会切出 `DeepSeek V4 Fla…` 而它旁边的 id 完好，label 才是命名模型的那一列，id 先让。
+5. 措辞跟着走：`commands.ts` / `/help` / Welcome 的 `/model` 一句、`launch.ts` 的开屏 guide（"pick a model, or Enter on providers to paste a key"）与 `--profile` 被拒时的指路。
+
+#### 可点与层次
+
+6. **模型这一行处处可点，同一处开**：标题行的 `profile · model` 段、CompositionCard 的 `model` 值、Welcome 的四条 `/` 命令行、状态栏默认 hint 里的 `/help`——四处都走 `ui/rows.ts` 的 `onClick`（按下松开同格）、指针悬停时同一个 `theme.hover` 底色，点击调的是键盘调的同一个函数（`openOverlay("model")` / `submit("/sessions")`——不是 `overlay.open`，那样 composer 不会让出键盘，`j` 会同时打进输入框和移动选择器）。CompositionCard / Welcome 没拿到回调时（测试里单独渲染）行是**惰性的、不亮**——T18 的规矩：给一个按下去什么都不发生的高亮是骗人。
+7. **两处溢出**：标题行三段（`nulya · <id> · ` / model / detail）都由我们裁——model `fit` 到 subject 剩下的宽度，detail 取 `wrapWords` 的**第一行**（按 ` · ` 关节整段丢），所以 80 列下结尾是 `tools 2+0` 而不是 `skill…` 或孤 `·`；状态栏先把右侧三个 chip（ctx / more below / role）算成字符串，hint 拿剩下的宽度 `fit`——默认 hint 里 `/help` 单独一个 box 才点得到，notice 整条替换 hint。
+8. Welcome 多一行 `cwd`（CompositionCard 说了 model 与 tools，没说是哪个 workspace——两个终端唯一分得开的事实）；四条命令的说明与结尾那句都过 `fit` / `wrapWords`（一个 `height={1}` 的行会把折出来的第二行剪掉）。
+
+9. **开屏问句（T11 / T19）的两处小修**：三个选项从一行改成一行一个（与上面的包列表同形），问句以 `› ` 收尾、答案**回显在同一行**并换行——raw mode 吞掉了终端回显，原来按下 `t` 之后屏幕与按之前一模一样，接着 zig 编译 std 那一分钟看起来就是挂了；`readAnswer` 只认 t/s/n/Esc/Enter，其它字节（终端对查询的应答、focus 事件、IME 半截序列、空 chunk）**不再算 "not now"**——原来一个杂散字节就把问题静默答成拒绝并记成"问过了"。
+
+**测试**：`model.test.tsx` 重写四条（模型层开屏 + `p` 进 providers 两张快照；76 列两张表都不折；拨盘 / Enter / providers 上的三种 Enter；`s` 从 providers 贴 key 后回模型层多出 openai 的行；`a` 从模型层直接进表单）+1（`pickableRows` / `providersSummary`）；`mouse.test.tsx` +1（标题行 model → 选择器、CompositionCard model → 选择器且 `j` 不进 composer、Welcome 行 → `/sessions`、状态栏 `/help` → `/help`）；`/help` 快照按预期更新。顺手修两条**与本轮无关、换上新二进制才现形**的测试：`views.test.tsx` 的 `/settings` 76 列那条按 `…` 找行而不按长名（Windows 的 temp 前缀就把列用完了）；`observer.test.ts` 第 3 步用 `parseMidTask` 比原文（T17 之后 observer 在探针确证 `held` 时会包 mid-task sentinel，原断言比裸文本只是在赛跑里侥幸过）。`bun test` 176 → **178 pass**、`tsc` 干净。
+
+**没做**：selector 仍是全屏 overlay，不是 tcode 那种浮在 transcript 上的带框弹窗（overlay 起来时 transcript 根本没挂载，T18 第 5 条——浮框要先有"盖住而不是替换"这个概念）；状态栏不常驻 context 占用（§4.5 的 ≥60% 才出现照旧）；preset / sub-agent 段（T5 就说过：单角色世界里 preset ≡ profile）。
+
+### T21 · `/model` 与 `/provider` 分家：两个问题，两个命令（2026-08-18）
+
+**内核零改动**（只动 `tui/`）。来源是 T20 上手后的一句反馈——"现在 provider 可以选，但是怎么选 provider 的模型呢，这俩个功能得分开吧，不行的话就参考 tcode 吧"。T20 把模型提到第一层是对的，错的是**没把 provider 送走**：provider 表、贴 key、加 endpoint 全塞在同一块屏幕的第二层，于是"选 provider"与"选模型"缠成一件事，`s` / `a` / `p` 三个键长在一列模型中间。tcode 从来就是两条命令（`model_picker.rs` 一张平的模型表 ÷ `setup.rs` 的 provider 配置器，命令表在 `app/mod.rs`），这一轮照着那条缝切。
+
+1. **`/model`（F5）只剩模型。** T20 的模型层原样留下（`pickableRows` = 每个能跑的 provider 的每个 model + 生效中那个 pick 的 provider；六列内容定宽 + `squeeze`；`h/l` 按行 key 记拨盘；Enter 开新场；两次点击才开场），**删掉**尾行 `providers · …`、`p`、`s`、`a` 与 providers / key / add-form 五个 mode——`ModelView.tsx` 从 1108 行掉到 ~400。`provider` 那一列留着：不分层之后，它就是"这是谁家的模型"唯一的读法。Enter 落在一个失去 key 的 `✓ current` 行上仍只说原因，措辞改成指路 `/provider`。
+2. **`/provider`（F6，新 overlay `ProviderView.tsx`）拿走剩下的一切**：一行一个 profile（`name · wire/endpoint · N models · 状态`）、detail 行照旧列出它的 model id（浏览不拦，拦的只是开一场）、`s` 贴 key（`writeProfileKey`）、`a` / 尾行进 compatible endpoint 表单（`writeProfile`）、codex 说 `codex login`、`r` reload。**跑不了的 provider 的状态里才写 `· s to paste one`**——`blockedReason` 现在只给事实（`no key`），补救办法由"此刻哪块屏幕在显示它"来加，因为一个不在这块屏幕上的键比不给建议更糟。
+3. **Enter 在能跑的 provider 上 = 关掉 `/provider`、开 `/model` 并落在它的第一个模型上**（`onShowModels` → `App` 的 `focusProfile` 信号 → `ModelView` 首次 load 时优先落在这个 profile）。用户问的"怎么选 provider 的模型"就是这两步，而它们是两块屏幕不是两层。`focusProfile` 只在 `openOverlay` 之外的这一条路上被设，别的方式开 `/model` 一律清掉——否则上一次交接会静默替下一次选行。
+4. **只搬两边都用的东西**（"第二个 consumer 出现之前不抽 abstraction"，出现了才抽）：`ui/overlays/providers.ts` 只有三个函数——`modelIdsOf` / `keyable` / `blockedReason`，即两块屏幕都要问的那三个问题。`endpointOf` / `readyLabel` / `WIRES` / 表单只有 `/provider` 用，就留在 `/provider`；`providersSummary` 随尾行一起删（计数现在读行就有）。
+5. **开屏没得跑时去哪**（`launch.LaunchPlan.guideOn` + `App.guideOn`）：还有别的 provider 能跑 → 开 `/model`（"pick a model that can run"）；一个真 provider 都跑不了 → 开 `/provider`（"paste a key, or add a compatible endpoint"）——那时一张模型表没有任何东西可给，缺的那把 key 就是问题本身，tcode 的首次运行同样是 provider 向导。`scripted` 不算 provider（没人配置它）。`/model` 自己空表时也只有一行 `no provider can run yet · /provider …`，Enter / `p` 过去。
+6. **顺带消费内核这一轮的 `profiles[].catalog`**（另一条线在改壳层，TUI 侧只是读）：`ProfileView.catalog: ModelView[] | null` 防御式解析（缺列 / 非数组 = null，老二进制照跑），`modelRows` **先查该 profile 自己的 catalog、再回落全局 `[[models]]`**——`gpt-5.6-sol` 在 ChatGPT 订阅口是 258k ctx + 多一档 `xhigh`，在公共 API 口是 1.05M ctx 且到 `high` 为止，两个都对，只是对的不是同一个端点。codex 列的是订阅真给的那几个（读 Codex CLI 的 models cache，`nulya config show --refresh` 重取）。
+7. 措辞与入口跟着走：`commands.ts` 多一条 `/provider`、`keymap.ts` 多一个 `provider: "f6"`（F1–F5 已占满，F6 是空的且与 F5 相邻）、`state/overlay.ts` 的 `OverlayKind` 多一个 `"provider"`、`/help` 的动作表与命令表各多一行、Welcome 多一行、`launch.ts` 里"press s on it under /model → providers"改成 `/provider`、README 的选择模型一节与键表重写。
+
+**测试**：`model.test.tsx` 重写成"只有模型"（模型层快照里不再有 `providers ·` / `s paste a key` / `no key`；76 列一张表不折；拨盘与 Enter；`focusProfile` 落在交接过来的 provider 第一行；空表那一行 + Enter/`p` 都调 `onOpenProviders`；失去 key 的 current 行 Enter 的文案；`planLaunch` 的 `guideOn` 两支；`App` 的 `guideOn="provider"` 真开 `/provider`）+ 新的 **`provider.test.tsx`**（provider 表快照 + 76 列不折；三种 Enter——ready 交接到 `/model` 第一行、缺 key 进贴 key、codex 说 login；`s` 贴完 key 后 reload，Enter 过去 `/model` 就多出 openai 的行；`a` 走完表单写一条 profile；两条 credentials 单测与两条真二进制 `NULYA_HOME` 测试从 model 搬过来）+ 一条 fixture 测 profile 自带 catalog 压过全局同 id。两块屏幕共用的 `fake_config` 搬进 `test/support.ts`（**测试文件不能 import 另一个测试文件**，那会把它的 test 注册两遍）。`/help` 快照按预期更新，并把它的渲染高度 60 → 66：页面长了 4 行，原来的视口把 `/quit` 挤出屏幕，而这条测试的全部意义就是"每条命令都在这一页上"。`bun test` 178 → **187 个测试、183 pass**、`tsc` 干净；4 条 fail 全是**改动前就红的**（三条 `/ext` + 一条 5k 事件性能计时；另有一条 `probeWriterLease` 60s 超时在基线红、这次绿，是机器负载）。
+
+**没做**：`/provider` 不写 `[[models]]` 目录条目（`a` 加进来的 endpoint 的模型仍没有 effort dial 与 context window——目录是"一个 id 是什么"，等真需要再给表单加一步，T6 起就挂在这里）；两块屏幕仍是全屏 overlay 不是浮框（T20 同一条）；没有 `/provider` 的删除/禁用动作（配置文件是人的，TUI 只做"加"与"改 key"这两种写）；`catalog` 里的 `vision` 列没读（前端没有消费者）。

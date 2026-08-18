@@ -1,5 +1,6 @@
-import { For, Show, createMemo } from "solid-js"
+import { For, Show, createMemo, createSignal } from "solid-js"
 import { useStyle } from "../theme.ts"
+import { onClick } from "../../ui/rows.ts"
 import type { Contributions } from "../../nulya/files.ts"
 import type { SessionHeader } from "../../nulya/ledger.ts"
 
@@ -12,9 +13,22 @@ import type { SessionHeader } from "../../nulya/ledger.ts"
  * the header is not an event (DESIGN §3.1) — so it is drawn from the header
  * rather than pushed into the transcript's item list, and it says nothing that
  * is not in that header plus the frozen manifests it names.
+ *
+ * The model row answers to a click when `onPickModel` is given: it opens
+ * `/model`. Not "change this session's model" — that is frozen (physics #2) —
+ * but the place where the next session's is chosen, which is what a person
+ * reaching for the model line means. Rendered without the callback (a test, a
+ * card on its own) the row is inert and does not light up: a highlight on a row
+ * that does nothing when pressed would be a lie (tui.md §11, T18).
  */
-export function CompositionCard(props: { header: SessionHeader | null; contributions?: Contributions[] }) {
+export function CompositionCard(props: {
+  header: SessionHeader | null
+  contributions?: Contributions[]
+  onPickModel?: () => void
+}) {
   const style = useStyle()
+  const [overModel, setOverModel] = createSignal(false)
+  const modelClick = onClick(() => props.onPickModel?.())
 
   const model = createMemo(() => {
     const identity = props.header?.model_identity
@@ -95,7 +109,19 @@ export function CompositionCard(props: { header: SessionHeader | null; contribut
       </Row>
       <Row bar={style.glyphs.bar} accent={style.theme.accent.evolve}>
         <text fg={style.theme.dim}>model </text>
-        <text fg={style.theme.fg}>{model()}</text>
+        {/* Only the model itself is the target, not the whole row: the ext
+            versions beside it are frozen facts with nothing to open. */}
+        <box
+          height={1}
+          flexShrink={0}
+          backgroundColor={props.onPickModel && overModel() ? style.theme.hover : undefined}
+          onMouseDown={props.onPickModel ? modelClick.onMouseDown : undefined}
+          onMouseUp={props.onPickModel ? modelClick.onMouseUp : undefined}
+          onMouseOver={() => setOverModel(true)}
+          onMouseOut={() => setOverModel(false)}
+        >
+          <text fg={style.theme.fg}>{model()}</text>
+        </box>
         <Show when={versions().length > 0}>
           <text fg={style.theme.dim}> · ext </text>
           <text fg={style.theme.fg}>{versions().join(" ")}</text>

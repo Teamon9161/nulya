@@ -1,15 +1,13 @@
 // Bun Snapshot v1, https://bun.sh/docs/test/snapshots
 
-exports[`/model is models and only models: one row per runnable (provider, model), nothing about keys 1`] = `
-" model · what the next session runs on                                                                                  
+exports[`/provider lists every endpoint, runnable or not, with what each one is and what it needs 1`] = `
+" providers · keys and endpoints                                                                                         
                                                                                                                         
- ▾ deepseek  DeepSeek V4 Flash  deepseek-v4-flash  1M ctx  ‹ auto ›  ✓ current                                          
-   deepseek  DeepSeek V4 Pro    deepseek-v4-pro    1M ctx  ‹ auto ›                                                     
-   scripted  scripted-demo                                 no dial   offline                                            
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
+   openai    openai wire · api.openai.com    2 models  no key · s to paste one                                          
+ ▾ deepseek  openai wire · api.deepseek.com  2 models  ✓ current                                                        
+   codex     codex · ChatGPT subscription    1 model   run \`codex login\`                                                
+   scripted  offline · no network            1 model   offline stand-in                                                 
+   + add an OpenAI- or Anthropic-compatible provider                                                                    
                                                                                                                         
                                                                                                                         
                                                                                                                         
@@ -29,23 +27,24 @@ exports[`/model is models and only models: one row per runnable (provider, model
                                                                                                                         
                                                                                                                         
                                                                                                                         
- deepseek · openai wire · https://api.deepseek.com · DEEPSEEK_API_KEY set                                               
- j/k move · h/l effort · Enter starts a session · Esc close · ? keys                                                    
+                                                                                                                        
+                                                                                                                        
+ deepseek · openai wire · https://api.deepseek.com · DEEPSEEK_API_KEY set · models deepseek-v4-flash, deepseek-v4-pro   
+ j/k move · s paste a key · Enter its models · Esc close · ? keys                                                       
 "
 `;
 
-exports[`the model table is cut to its columns at 76: one row each, a gutter that survives, nothing wraps 1`] = `
-" model · what the next session runs on                                      
+exports[`the provider table is cut to its columns at 76: one row each, a gutter that survives, nothing wraps 1`] = `
+" providers · keys and endpoints                                             
  openai has no API key · this session is the offline stand-in               
- pick a model that can run                                                  
+ paste a key, or add a compatible endpoint                                  
                                                                             
- ▾ deepseek  DeepSeek V4 Flash  deepseek-v4-fla…  1M ctx  ‹ auto ›          
-   deepseek  DeepSeek V4 Pro    deepseek-v4-pro   1M ctx  ‹ auto ›          
-   scripted  scripted-demo                                no dial   offline 
-                                                                            
-                                                                            
-                                                                            
-                                                                            
+   openai              openai wire · api.…  2 models  no key · s to paste … 
+ ▾ deepseek            openai wire · api.…  2 models  ready · DEEPSEEK_API… 
+   codex               codex · ChatGPT su…  1 model   run \`codex login\`     
+   scripted            offline · no netwo…  1 model   offline stand-in      
+   deepseek-anthropic  anthropic wire · a…  1 model   no key · s to paste … 
+   + add an OpenAI- or Anthropic-compatible provider                        
                                                                             
                                                                             
                                                                             
@@ -64,6 +63,7 @@ exports[`the model table is cut to its columns at 76: one row each, a gutter tha
                                                                             
                                                                             
  deepseek · openai wire · https://api.deepseek.com · DEEPSEEK_API_KEY set   
- j/k move · h/l effort · Enter starts a session · Esc close · ? keys        
+ models deepseek-v4-flash, deepseek-v4-pro                                  
+ j/k move · s paste a key · Enter its models · Esc close · ? keys           
 "
 `;

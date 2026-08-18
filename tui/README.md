@@ -8,7 +8,7 @@ step --stream`).
 
 Status: **T8 — complete**. Cards and folding, `tui.toml` settings and keymap
 overrides, `/sessions` `/ext` `/usage` `/settings` `/help`, sub-session tabs,
-observer mode, a single-file build, `/model` and `/effort`, `/compact`, and the
+observer mode, a single-file build, `/model` `/provider` `/effort`, `/compact`, and the
 slow loop's front end: `/outcome`, `/evolve`, `/mode`.
 
 A session has exactly one writer. When somebody else holds it — a driver script,
@@ -79,32 +79,49 @@ fails with `preload not found "@opentui/solid/preload"`.
 
 ### Choosing the provider and model
 
-Start `nulya`, press `F5` (or type `/model`), pick a row, Enter. That is the
-whole procedure — you should never have to open a config file to switch models.
+Two screens, two questions. `F5` (or `/model`) picks **what the next session
+runs on**; `F6` (or `/provider`) is where **endpoints and their keys** live.
+Either way you should never have to open a config file to switch models.
 
-The picker is one flat list: every model of every profile the kernel knows,
-read from `nulya config show --json`. `↑↓` moves, `←→` turns the reasoning
-effort dial of the highlighted row (`auto` = the provider's default, then the
-levels that model accepts), Enter starts a session on it. A session freezes its
-model when it is created (physics #2), so "switch model" always means "new
-session on that model": on a fresh, untouched tab the new session simply takes
-its place; on a tab you have used, a second tab opens. Rows whose profile has no
-usable key stay in the list, dimmed (`no key · s to paste one`); Enter on one
-only tells you why.
+`/model` is one row per model of every profile that can run right now, read from
+`nulya config show --json` — `provider · label · id · context · ‹ effort › ·
+✓ current`. `↑↓` moves, `←→` turns the reasoning effort dial of the highlighted
+row (`auto` = the provider's default, then the levels that model accepts), Enter
+starts a session on it. A session freezes its model when it is created
+(physics #2), so "switch model" always means "new session on that model": on a
+fresh, untouched tab the new session simply takes its place; on a tab you have
+used, a second tab opens. Profiles without a usable key are not in this list at
+all — that is what keeps it short. The model line in the title bar and in the
+composition card is a click target for the same screen.
 
-**Keys are entered on screen too.** Highlight a row, press `s`, paste the API
-key, Enter. It is written into your user config
+A row's context window and effort levels come from the profile's own endpoint
+when that endpoint reports them, and only otherwise from the shared `[[models]]`
+catalog: `codex` lists what your ChatGPT subscription actually serves, read from
+the Codex CLI's model cache, and `nulya config show --refresh` re-fetches it. So
+the same id can honestly show different numbers under two different providers.
+
+`/provider` lists every profile, runnable or not: `name · wire · endpoint ·
+N models · state`, with its model ids on the detail line under the list
+(browsing is never gated — only starting a session is). Enter on a provider that
+can run goes to `/model` landed on its first model — that is "pick a provider,
+then its model". Enter on a keyless OpenAI/Anthropic endpoint goes straight to
+pasting its key; `codex` says it signs in with `codex login` instead.
+
+**Keys are entered on screen too.** In `/provider`, highlight a row, press `s`,
+paste the API key, Enter. It is written into your user config
 (`~/.nulya/config.toml` — on Windows `C:\Users\<you>\.nulya\config.toml`) as
 that profile's `api_key`, in a small marked block the TUI can find and replace
 later; the rest of the file is never touched, and the row turns
 `ready · key in config`. Setting the profile's env var (`DEEPSEEK_API_KEY`, …)
 works as well; a key in the config wins over the env var. Keys never enter a
-session file or a tool's environment.
+session file or a tool's environment. `a` (or the last row) adds an OpenAI- or
+Anthropic-compatible endpoint: name → wire → base URL → model ids → key.
 
 What you picked is remembered in `tui-state.json` next to that config, so the
 next `nulya` starts on it. If nothing remembered or configured can run (no key),
-the first screen IS the picker, with the reason under its title, on top of an
-offline session — pick a row marked `ready`, or press `s` on one and paste.
+the first screen is the one that can fix it, with the reason under its title, on
+top of an offline session: `/model` when something else could have run, and
+`/provider` when no provider works at all.
 
 Effort is not frozen: `/effort high` (or `/effort auto`) changes the current
 tab's effort and the next step runs with it (`session step --effort`).
@@ -124,7 +141,8 @@ config show` prints the three paths and every profile's state. Built in:
 an API key), `codex` (uses whatever `codex login` left in `~/.codex/auth.json`),
 `scripted` (offline). To add an endpoint that is not built in, put a
 `[[provider.profiles]]` block with `kind`, `base_url`, `models` into
-`~/.nulya/config.toml`; it then shows up in `/model` like the others.
+`~/.nulya/config.toml` (or let `/provider`'s `a` write it for you); it then shows
+up in `/model` like the others.
 Inside the TUI, `/new` opens another session on the last pick;
 `/new --profile <p> [--model <id>]` on a named one.
 
@@ -195,7 +213,8 @@ bun run tui\src\main.tsx --profile codex
 | `F2` | `/ext` — the extension store |
 | `F3` | `/sessions` — the session store |
 | `F4` | next tab (tabs appear once a second session is open) |
-| `F5` | `/model` — pick profile, model and effort; Enter starts a session on it |
+| `F5` | `/model` — the models that can run, with effort; Enter starts a session on one |
+| `F6` | `/provider` — endpoints and their keys; `s` pastes a key, `a` adds a compatible endpoint, Enter on a ready one goes to its models |
 | `Ctrl+W` | close the current tab (with one tab it is the composer's delete-word, as in a shell) |
 
 Inside `/sessions`: `j`/`k` move, `Enter` opens, `n` starts a new session, `r`
@@ -204,7 +223,7 @@ refreshes, `Esc` closes. Inside `/ext`: `j`/`k` move, `Tab` switches pane
 highlighted version (confirm with `y`), `u` jumps to the usage table. Inside
 `/usage`: `r` refreshes.
 
-Slash commands: `/model` (F5), `/effort <level|auto>`,
+Slash commands: `/model` (F5), `/provider` (F6), `/effort <level|auto>`,
 `/new [--profile p] [--model id]`, `/sessions`, `/ext`, `/usage`, `/settings`,
 `/compact [focus]`, `/outcome <success|partial|failure> [note]`, `/evolve`,
 `/mode <id>[@version]`, `/help`, `/step` (continue after a spent step budget),

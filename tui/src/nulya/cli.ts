@@ -169,6 +169,18 @@ export interface ProfileView {
   models: string[]
   /** Profile-wide effort override, or null. */
   effort: string | null
+  /**
+   * What THIS endpoint reports about the models it serves, when it reports
+   * anything — today only `codex`, from the Codex CLI's own model cache. Null
+   * everywhere else, and null from any binary that predates the field.
+   *
+   * It exists because one id can mean two different things: `gpt-5.6-sol` on a
+   * ChatGPT subscription is a different context window and a different effort
+   * ladder from `gpt-5.6-sol` on the public API, and the global `[[models]]`
+   * catalog can only describe one of them. So a row prefers its own profile's
+   * entry and falls back to the catalog (`ModelView.modelRows`).
+   */
+  catalog: ModelView[] | null
 }
 
 /** Where the kernel's config chain reads from — so we write where it reads. */
@@ -239,14 +251,23 @@ export async function configShow(ws: Workspace, env?: Record<string, string>): P
       credential_source: p.credential_source ?? (p.credential ? "env" : "none"),
       models: Array.isArray(p.models) ? p.models : [],
       effort: p.effort ?? null,
+      // Absent (an older binary) or malformed is "this endpoint says nothing",
+      // which is exactly what every non-codex profile means by it.
+      catalog: Array.isArray(p.catalog) ? p.catalog.map(model) : null,
     })),
-    models: models.map((m) => ({
-      ...m,
-      label: m.label ?? "",
-      efforts: Array.isArray(m.efforts) ? m.efforts : [],
-      default_effort: m.default_effort ?? null,
-      context_window: m.context_window ?? null,
-    })),
+    models: models.map(model),
+  }
+}
+
+/** One catalog entry, with the optional columns filled in. Two callers: the
+ * global `[[models]]` list and a profile's own `catalog`. */
+function model(m: ModelView): ModelView {
+  return {
+    ...m,
+    label: m.label ?? "",
+    efforts: Array.isArray(m.efforts) ? m.efforts : [],
+    default_effort: m.default_effort ?? null,
+    context_window: m.context_window ?? null,
   }
 }
 

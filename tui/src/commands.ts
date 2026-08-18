@@ -24,7 +24,8 @@ export interface Command {
 }
 
 export const commands: Command[] = [
-  { name: "/model", what: "pick a provider and model · add a compatible one · Enter starts a session on it" },
+  { name: "/model", what: "pick the model the next session runs on" },
+  { name: "/provider", what: "endpoints and their keys · add an OpenAI- or Anthropic-compatible one" },
   { name: "/effort", args: "<level|auto>", what: "change this tab's effort now; the next step runs with it" },
   { name: "/new", args: "[--profile p] [--model id]", what: "a session on the last pick, or on the named profile" },
   { name: "/sessions", what: "everything in .nulya/sessions · Enter opens one" },
