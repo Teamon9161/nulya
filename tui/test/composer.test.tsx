@@ -7,10 +7,12 @@ import { testRender } from "@opentui/solid"
 import { useKeyboard } from "@opentui/solid"
 import { Composer } from "../src/ui/Composer.tsx"
 import { completions } from "../src/commands.ts"
+import { displayWidth } from "../src/ui/columns.ts"
 import { StyleContext, createStyle } from "../src/render/theme.ts"
 import { default_settings } from "../src/state/settings.ts"
-import { settle } from "./support.ts"
+import { frameLines, settle } from "./support.ts"
 import type { ProjectIndex } from "../src/references.ts"
+import type { SkillTable } from "../src/skills.ts"
 
 const style = createStyle(default_settings, {})
 
@@ -128,6 +130,74 @@ test("a `/` line lists the commands it could still be, and Tab finishes it", asy
     await setup.mockInput.typeText("look at src/main.zig")
     frame = await settle(setup, 3)
     expect(frame).not.toContain("Tab completes")
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 60_000)
+
+test("both completion menus at eighty columns: one row a candidate, cut, nothing wrapped", async () => {
+  // Two things nobody sizes a fixed column for: a skill's description (clipped
+  // at a hundred characters, which is still wider than this screen) and a path
+  // out of somebody else's repository.
+  const skills: SkillTable = {
+    entries: () => [
+      {
+        ref: "ext:a-package@v-1/settle",
+        name: "settle",
+        description:
+          "settle a long-running argument about layout by measuring every cell twice and writing the answer down where the next reader will find it",
+      },
+    ],
+    invalidate: () => {},
+    ready: async () => [],
+  }
+  // Two files of the same name: the menu then labels both with their whole
+  // path, which is where a `@` row grows past any column.
+  const index: ProjectIndex = {
+    candidates: () => [
+      { path: "src/settle.ts", kind: "file" },
+      { path: "src/very/deep/nesting/that/nobody/planned/for/settle.ts", kind: "file" },
+    ],
+    touch: () => {},
+    size: () => 4096,
+  }
+  const setup = await testRender(
+    () => (
+      <StyleContext.Provider value={style}>
+        <Composer onSubmit={() => {}} references={index} skills={skills} />
+      </StyleContext.Provider>
+    ),
+    { width: 76, height: 16 },
+  )
+  const fits = (frame: string) => {
+    for (const line of frameLines(frame)) expect(displayWidth(line)).toBeLessThanOrEqual(76)
+    return frame
+  }
+  try {
+    await settle(setup, 3)
+
+    // The `/` menu: the built-in verb and the skill under it, each one row.
+    await setup.mockInput.typeText("/se")
+    const slash = fits(await settle(setup, 4))
+    expect(slash).toContain("/sessions")
+    expect(slash).toContain("/settle")
+    expect(slash).toContain("…")
+    expect(slash).not.toContain("where the next reader will find it")
+    const rows = frameLines(slash)
+    const sessions = rows.find((line) => line.includes("/sessions"))!
+    const settle_row = rows.find((line) => line.includes("/settle"))!
+    // One offset for the description column, and a gutter in front of it.
+    expect(sessions.indexOf("everything in")).toBe(settle_row.indexOf("settle a long"))
+    expect(sessions).toMatch(/\/sessions {2,}everything in/)
+
+    // The `@` menu: a path longer than the screen is cut, not wrapped.
+    setup.mockInput.pressEnter()
+    await setup.mockInput.typeText("read @settle")
+    const at = fits(await settle(setup, 4))
+    expect(at).toContain("@src/settle.ts")
+    expect(at).toContain("…")
+    expect(at).not.toContain("nobody/planned/for/settle.ts")
+    expect(at).toMatch(/@src\/settle\.ts {2,}file · 4/)
   } finally {
     setup.renderer.destroy()
   }

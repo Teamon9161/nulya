@@ -12,13 +12,14 @@ import { App } from "../src/ui/App.tsx"
 import { HelpView } from "../src/ui/overlays/HelpView.tsx"
 import { SettingsView, settingRows } from "../src/ui/overlays/SettingsView.tsx"
 import { UsageView } from "../src/ui/overlays/UsageView.tsx"
+import { displayWidth } from "../src/ui/columns.ts"
 import { StyleContext, createStyle, type Style } from "../src/render/theme.ts"
 import { FoldContext, createFoldStore } from "../src/state/folds.ts"
 import { createSessionState } from "../src/state/session.ts"
 import { default_settings, loadSettings } from "../src/state/settings.ts"
 import { createKeymap } from "../src/keymap.ts"
 import { sessionList, sessionNew } from "../src/nulya/cli.ts"
-import { scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
+import { frameLines, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
 
 const style: Style = createStyle(default_settings, {})
 
@@ -75,6 +76,121 @@ test("/help lists the bindings that are actually in force", async () => {
     }
   } finally {
     setup.renderer.destroy()
+  }
+}, 60_000)
+
+test("/help at eighty columns: every description broken by us, the key column cut, nothing wrapped", async () => {
+  // A binding wider than the key column can ever be — a `[keys]` line in
+  // tui.toml is somebody else's string, and this page has to print it beside a
+  // description rather than let it push one around.
+  const keys = { ...createKeymap(default_settings), quit: "ctrl+alt+shift+super+backspace+f12" }
+  const setup = await overlay(() => <HelpView keys={keys} onClose={() => {}} />, style, 76, 60)
+  try {
+    const frame = await settle(setup, 8)
+    const lines = frameLines(frame)
+    for (const line of lines) expect(displayWidth(line)).toBeLessThanOrEqual(76)
+
+    // The over-long binding is cut with `…` rather than allowed to reflow the
+    // row, and its description is still on the same line as what is left of it.
+    expect(frame).toContain("…")
+    expect(frame).not.toContain("ctrl+alt+shift+super+backspace+f12")
+
+    // The gutter is a column, not a coincidence: two rows put their description
+    // at exactly the same offset, with at least two blanks in front of it.
+    const quit = lines.find((line) => line.includes("kill the running step"))!
+    const fold = lines.find((line) => line.includes("fold / unfold the most recent"))!
+    expect(quit.indexOf("kill the running step")).toBe(fold.indexOf("fold / unfold the most recent"))
+    expect(fold).toMatch(/ctrl\+o {2,}fold \/ unfold the most recent/)
+
+    // A description too long for its column costs a second ROW, indented under
+    // the text column — never a wrap, and never a line over the width. The
+    // scrollbar gets a column of its own: it used to paint over the last
+    // character of every row (`…stops at its nex█`).
+    const first = lines.findIndex((line) => line.includes("cancel the step"))
+    expect(first).toBeGreaterThan(0)
+    const rest = lines[first + 1]!
+    expect(rest).toContain("next step boundary) · browse when idle")
+    expect(rest.indexOf("next step")).toBe(fold.indexOf("fold / unfold the most recent"))
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 60_000)
+
+test("/settings at eighty columns: a path too long for its column is cut, the closing sentence is broken", async () => {
+  // A workspace whose path alone is wider than the screen: `settingsPaths`
+  // derives from it, so this is the row with no natural limit.
+  const deep = { ...ws, dir: join(ws.dir, "a-very-long-directory-name".repeat(4)) }
+  const settings = await loadSettings(ws.dir, {})
+  const setup = await overlay(() => <SettingsView ws={deep} onClose={() => {}} />, createStyle(settings, {}), 76, 40)
+  try {
+    const frame = await settle(setup, 6)
+    const lines = frameLines(frame)
+    for (const line of lines) expect(displayWidth(line)).toBeLessThanOrEqual(76)
+    expect(frame).toContain("…")
+
+    // The two tables keep their gutters: the state column, then the path.
+    const path = lines.find((line) => line.includes("a-very-long-directory-name"))!
+    expect(path).toMatch(/absent {2,}\S/)
+    const key = lines.find((line) => line.includes("transcript.history_window"))!
+    expect(key).toMatch(/transcript\.history_window {2,}\S/)
+
+    // The closing sentence is broken at its joints by us, one `<text>` a line.
+    expect(frame).toContain("the kernel's own config is a different chain")
+    expect(frame).toContain("Esc close")
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 60_000)
+
+test("/usage at eighty columns: the label column holds, the caveat is broken, a long tool id is cut", async () => {
+  // A workspace of its own: the tool journal is what the table reads, and this
+  // one needs a tool id longer than any column can be.
+  const narrow = tempWorkspace()
+  try {
+    mkdirSync(join(narrow.dir, ".nulya"), { recursive: true })
+    writeFileSync(
+      join(narrow.dir, ".nulya", "tool-usage.jsonl"),
+      [
+        `{"v":1,"at":"2026-08-18T10:00:00Z","tool_id":"ext:a-package-with-a-very-long-name/a-tool-with-a-very-long-name","ok":true}`,
+        `{"v":1,"at":"2026-08-18T10:00:01Z","tool_id":"builtin.shell","ok":true}`,
+        "",
+      ].join("\n"),
+    )
+    const state = createSessionState("s-narrow")
+    state.applyEvent({
+      seq: 1,
+      kind: "assistant",
+      text: "done",
+      calls: [],
+      usage: { input_tokens: 1200, output_tokens: 80, cache_read_tokens: 1080, cache_write_tokens: 0 },
+    })
+
+    const setup = await overlay(() => <UsageView ws={narrow} snapshot={state.snapshot} onClose={() => {}} />, style, 76, 30)
+    try {
+      const frame = await settle(setup, 6)
+      const lines = frameLines(frame)
+      for (const line of lines) expect(displayWidth(line)).toBeLessThanOrEqual(76)
+
+      // The token block is a table: two labels put their value at one offset.
+      const input = lines.find((line) => line.includes("input tokens"))!
+      const output = lines.find((line) => line.includes("output tokens"))!
+      expect(input.indexOf("1200")).toBe(output.indexOf("80"))
+      expect(input).toMatch(/input tokens {2,}1200/)
+
+      // The caveat is two lines broken at a joint, not one wrapped line.
+      expect(frame).toContain("summed from the ledger, one step at a time")
+      expect(frame).toContain("a step whose provider reported no usage is absent, not zero")
+
+      // And the journal's long id is cut rather than allowed to reflow its row.
+      expect(frame).toContain("…")
+      expect(frame).not.toContain("a-tool-with-a-very-long-name")
+      const shell = lines.find((line) => line.includes("builtin.shell"))!
+      expect(shell).toMatch(/builtin\.shell {2,}1 uses {2,}100% ok/)
+    } finally {
+      setup.renderer.destroy()
+    }
+  } finally {
+    narrow.cleanup()
   }
 }, 60_000)
 

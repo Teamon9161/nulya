@@ -7,11 +7,16 @@
  * does this value come from" would stop having one answer. The candidate paths
  * are listed either way, so the answer to "where do I put it" is on screen even
  * when no file exists yet.
+ *
+ * A path is the one thing on this screen with no length limit, so both tables
+ * are cut to their columns and the closing sentence is broken at its joints
+ * rather than wrapped by the terminal (`ui/columns.ts`).
  */
-import { For, Show } from "solid-js"
+import { For, Show, createMemo } from "solid-js"
 import { existsSync } from "node:fs"
 import { useKeyboard } from "@opentui/solid"
-import { useStyle } from "../../render/theme.ts"
+import { useScreen, useStyle } from "../../render/theme.ts"
+import { columnWidth, fit, wrapWords } from "../columns.ts"
 import { settingsPaths, default_settings, type Settings } from "../../state/settings.ts"
 import type { Workspace } from "../../nulya/bin.ts"
 
@@ -38,6 +43,7 @@ export function settingRows(settings: Settings): Array<{ key: string; value: str
 
 export function SettingsView(props: { ws: Workspace; onClose: () => void }) {
   const style = useStyle()
+  const screen = useScreen()
   const settings = style.settings
   useKeyboard((key) => {
     if (key.name === "escape") props.onClose()
@@ -50,44 +56,66 @@ export function SettingsView(props: { ws: Workspace; onClose: () => void }) {
       present: existsSync(path),
     }))
 
+  /** The columns this overlay may draw in: the box pads one on each side. */
+  const inner = () => Math.max(20, screen().width - 2)
+  const rows = createMemo(() => settingRows(settings))
+  const stateCol = createMemo(() => columnWidth(["applied", "unreadable", "absent"], 2, 12))
+  /** A `keys.*` name is the widest thing here, and a path is the least bounded. */
+  const keyCol = createMemo(() =>
+    Math.min(columnWidth(rows().map((row) => row.key), 2, 30), Math.max(10, inner() - 16)),
+  )
+  const valueCol = createMemo(() => columnWidth(rows().map((row) => row.value), 2, 20))
+
   return (
     <box flexDirection="column" width="100%" flexGrow={1} paddingLeft={1} paddingRight={1}>
-      <text fg={style.theme.accent.evolve}>settings · tui.toml · read-only here, edit the file</text>
+      <text fg={style.theme.accent.evolve} height={1}>
+        {fit("settings · tui.toml · read-only here, edit the file", inner())}
+      </text>
       <box height={1} />
 
       <For each={candidates()}>
         {(entry) => (
-          <box flexDirection="row" width="100%">
-            <box width={12} flexShrink={0}>
+          <box flexDirection="row" width="100%" height={1} flexShrink={0}>
+            <box width={stateCol()} flexShrink={0}>
               <text fg={entry.applied ? style.theme.ok : style.theme.dim}>
-                {entry.applied ? "applied" : entry.present ? "unreadable" : "absent"}
+                {fit(entry.applied ? "applied" : entry.present ? "unreadable" : "absent", stateCol() - 2)}
               </text>
             </box>
-            <text fg={style.theme.dim}>{entry.path}</text>
+            <text fg={style.theme.dim}>{fit(entry.path, inner() - stateCol())}</text>
           </box>
         )}
       </For>
       <box height={1} />
 
-      <For each={settingRows(settings)}>
+      <For each={rows()}>
         {(row) => (
-          <box flexDirection="row" width="100%">
-            <box width={28} flexShrink={0}>
-              <text fg={style.theme.dim}>{row.key}</text>
+          <box flexDirection="row" width="100%" height={1} flexShrink={0}>
+            <box width={keyCol()} flexShrink={0}>
+              <text fg={style.theme.dim}>{fit(row.key, keyCol() - 2)}</text>
             </box>
-            <text fg={row.changed ? style.theme.fg : style.theme.dim}>{row.value}</text>
+            <box width={valueCol()} flexShrink={0}>
+              <text fg={row.changed ? style.theme.fg : style.theme.dim}>{fit(row.value, valueCol() - 2)}</text>
+            </box>
             <Show when={row.changed}>
-              <text fg={style.theme.dim}> · not the default</text>
+              <text fg={style.theme.dim}>{fit("· not the default", inner() - keyCol() - valueCol())}</text>
             </Show>
           </box>
         )}
       </For>
 
       <box flexGrow={1} />
-      <text fg={style.theme.dim}>
-        the kernel's own config is a different chain (`default.toml` → system → user → project) and the TUI does not
-        read it · Esc close
-      </text>
+      <For
+        each={wrapWords(
+          "the kernel's own config is a different chain (`default.toml` → system → user → project) and the TUI does not read it · Esc close",
+          inner(),
+        )}
+      >
+        {(line) => (
+          <text fg={style.theme.dim} height={1}>
+            {line}
+          </text>
+        )}
+      </For>
     </box>
   )
 }

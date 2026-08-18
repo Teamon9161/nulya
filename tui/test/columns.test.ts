@@ -22,6 +22,12 @@ test("displayWidth counts columns, not characters and not bytes", () => {
   expect(charWidth("a".codePointAt(0)!)).toBe(1)
   expect(charWidth("中".codePointAt(0)!)).toBe(2)
   expect(charWidth(0x0301)).toBe(0)
+  // A symbol that is emoji by default is two columns even though its
+  // neighbours in the block are one. `⚡` is the capability glyph, and counting
+  // it as one is what left `⚡ current` a column short of its own gutter.
+  expect(charWidth("⚡".codePointAt(0)!)).toBe(2)
+  expect(displayWidth("⚡ current")).toBe(10)
+  for (const glyph of "●✎⌘⚙↺⌕☰⤷⊘▸▾─▎‹›✓") expect(charWidth(glyph.codePointAt(0)!)).toBe(1)
 })
 
 test("fit cuts to the column and never one past it", () => {

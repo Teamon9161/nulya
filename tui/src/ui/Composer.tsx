@@ -1,7 +1,8 @@
-import { For, Show, createSignal, onMount } from "solid-js"
+import { For, Show, createMemo, createSignal, onMount } from "solid-js"
 import type { KeyEvent, PasteEvent, TextareaRenderable } from "@opentui/core"
 import { SyntaxStyle } from "@opentui/core"
-import { useStyle } from "../render/theme.ts"
+import { useScreen, useStyle } from "../render/theme.ts"
+import { columnWidth, fit, squeeze, wrapWords } from "./columns.ts"
 import { completions } from "../commands.ts"
 import {
   activeReference,
@@ -35,6 +36,11 @@ import { skillCompletions, type SkillTable } from "../skills.ts"
  * and `Tab` accepts. Enter always sends exactly what is written, which is the
  * one promise an input box must not break — a menu that stole Enter would make
  * every message a gamble on what was highlighted.
+ *
+ * Both menus are tables, so both obey the list discipline: a path and a skill
+ * description are as long as somebody else made them, and a menu row that wraps
+ * repaints the transcript line above it through its own blanks
+ * (`ui/columns.ts`). One row per candidate, cut to its column.
  */
 /**
  * What the rest of the screen may do to the composer. Browse mode needs to know
@@ -63,6 +69,7 @@ export function Composer(props: {
   onReady?: (api: ComposerApi) => void
 }) {
   const style = useStyle()
+  const screen = useScreen()
   let area: TextareaRenderable | undefined
   const history: string[] = []
   let cursor = 0
@@ -111,6 +118,39 @@ export function Composer(props: {
     index.touch()
     const found = referenceCompletions(index.candidates(), token.query, 8, (candidate) => index.size(candidate))
     return found.length > 0 ? { token, found } : null
+  }
+
+  /** The columns a menu may draw in: its box pads three left and one right. */
+  const menu = () => Math.max(20, screen().width - 4)
+
+  /** How a command names itself in the menu: the verb and its arguments. */
+  const commandLabel = (command: { name: string; args?: string }) =>
+    command.args ? `${command.name} ${command.args}` : command.name
+
+  /**
+   * The `/` menu's two columns. The name column is sized from the verbs it
+   * lists — a skill's `/name` is whatever the package called it — and capped so
+   * that the description beside it keeps something to say. The description is
+   * one line, cut: a menu is a table, and a second row for one candidate is how
+   * `↑↓` stops meaning "one candidate".
+   */
+  const commandCols = createMemo(() => {
+    const [name, what] = squeeze(
+      [columnWidth(matches().slice(0, 6).map(commandLabel), 2, 30), menu()],
+      [10, 12],
+      menu(),
+    )
+    return { name: name!, what: what! }
+  })
+
+  /** The same for `@`: a path is the column with no natural limit. */
+  const referenceCols = (found: readonly ReferenceMatch[]) => {
+    const [label, description] = squeeze(
+      [columnWidth(found.map((match) => match.label), 2, 44), menu()],
+      [10, 10],
+      menu(),
+    )
+    return { label: label!, description: description! }
   }
 
   // The accent for a resolved `@path`, made on first use: a SyntaxStyle is a
@@ -301,43 +341,57 @@ export function Composer(props: {
   return (
     <box flexDirection="column" width="100%" flexShrink={0}>
       <Show when={reference()} keyed>
-        {(open: NonNullable<ReturnType<typeof reference>>) => (
-          <box flexDirection="column" width="100%" paddingLeft={3} paddingRight={1}>
-            <For each={open.found}>
-              {(match, index) => (
-                <box flexDirection="row" width="100%">
-                  <box width={40} flexShrink={0}>
-                    <text fg={index() === pick() ? style.theme.accent.user : style.theme.dim}>{match.label}</text>
+        {(open: NonNullable<ReturnType<typeof reference>>) => {
+          const cols = () => referenceCols(open.found)
+          return (
+            <box flexDirection="column" width="100%" paddingLeft={3} paddingRight={1}>
+              <For each={open.found}>
+                {(match, index) => (
+                  <box flexDirection="row" width="100%" height={1} flexShrink={0}>
+                    <box width={cols().label} flexShrink={0}>
+                      <text fg={index() === pick() ? style.theme.accent.user : style.theme.dim}>
+                        {fit(match.label, cols().label - 2)}
+                      </text>
+                    </box>
+                    <text fg={style.theme.dim}>{fit(match.description, cols().description)}</text>
                   </box>
-                  <box flexGrow={1} flexShrink={1} flexBasis={0}>
-                    <text fg={style.theme.dim}>{match.description}</text>
-                  </box>
-                </box>
-              )}
-            </For>
-            <text fg={style.theme.dim}>{"  "}↑↓ pick · Tab inserts the path · Enter sends what is written</text>
-          </box>
-        )}
+                )}
+              </For>
+              <For each={wrapWords("↑↓ pick · Tab inserts the path · Enter sends what is written", menu() - 2)}>
+                {(line) => (
+                  <text fg={style.theme.dim} height={1}>
+                    {"  "}
+                    {line}
+                  </text>
+                )}
+              </For>
+            </box>
+          )
+        }}
       </Show>
       <Show when={!reference() && matches().length > 0}>
         <box flexDirection="column" width="100%" paddingLeft={3} paddingRight={1}>
           <For each={matches().slice(0, 6)}>
             {(command, index) => (
-              <box flexDirection="row" width="100%">
-                <box width={26} flexShrink={0}>
+              <box flexDirection="row" width="100%" height={1} flexShrink={0}>
+                <box width={commandCols().name} flexShrink={0}>
                   <text fg={index() === 0 ? style.theme.accent.evolve : style.theme.dim}>
-                    {command.name}
-                    {command.args ? ` ${command.args}` : ""}
+                    {fit(commandLabel(command), commandCols().name - 2)}
                   </text>
                 </box>
-                <box flexGrow={1} flexShrink={1} flexBasis={0}>
-                  <text fg={style.theme.dim}>{command.what}</text>
-                </box>
+                <text fg={style.theme.dim}>{fit(command.what, commandCols().what)}</text>
               </box>
             )}
           </For>
           <Show when={matches().length > 1}>
-            <text fg={style.theme.dim}>{"  "}Tab completes · Enter sends what is written</text>
+            <For each={wrapWords("Tab completes · Enter sends what is written", menu() - 2)}>
+              {(line) => (
+                <text fg={style.theme.dim} height={1}>
+                  {"  "}
+                  {line}
+                </text>
+              )}
+            </For>
           </Show>
         </box>
       </Show>

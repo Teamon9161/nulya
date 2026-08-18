@@ -34,6 +34,55 @@ export function charWidth(cp: number): number {
     (cp >= 0xfe00 && cp <= 0xfe0f)
   )
     return 0
+  // Symbols that are emoji by default and therefore two columns wide, even
+  // though the block around them is one. `⚡` (the capability glyph) is the one
+  // this project draws, and it was one column short of what the renderer gave
+  // it — a cell that "fits" by our count and overflows by the terminal's.
+  if (
+    cp === 0x231a ||
+    cp === 0x231b ||
+    (cp >= 0x23e9 && cp <= 0x23ec) ||
+    cp === 0x23f0 ||
+    cp === 0x23f3 ||
+    cp === 0x25fd ||
+    cp === 0x25fe ||
+    cp === 0x2614 ||
+    cp === 0x2615 ||
+    (cp >= 0x2648 && cp <= 0x2653) ||
+    cp === 0x267f ||
+    cp === 0x2693 ||
+    cp === 0x26a1 ||
+    cp === 0x26aa ||
+    cp === 0x26ab ||
+    cp === 0x26bd ||
+    cp === 0x26be ||
+    cp === 0x26c4 ||
+    cp === 0x26c5 ||
+    cp === 0x26ce ||
+    cp === 0x26d4 ||
+    cp === 0x26ea ||
+    cp === 0x26f2 ||
+    cp === 0x26f3 ||
+    cp === 0x26f5 ||
+    cp === 0x26fa ||
+    cp === 0x26fd ||
+    cp === 0x2705 ||
+    cp === 0x270a ||
+    cp === 0x270b ||
+    cp === 0x2728 ||
+    cp === 0x274c ||
+    cp === 0x274e ||
+    (cp >= 0x2753 && cp <= 0x2755) ||
+    cp === 0x2757 ||
+    (cp >= 0x2795 && cp <= 0x2797) ||
+    cp === 0x27b0 ||
+    cp === 0x27bf ||
+    cp === 0x2b1b ||
+    cp === 0x2b1c ||
+    cp === 0x2b50 ||
+    cp === 0x2b55
+  )
+    return 2
   // The East Asian Wide / Fullwidth blocks, plus the emoji planes.
   if (
     (cp >= 0x1100 && cp <= 0x115f) ||

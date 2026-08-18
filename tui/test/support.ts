@@ -52,6 +52,15 @@ export async function settle(setup: Settleable, passes = 8, delayMs = 40): Promi
   return setup.captureCharFrame()
 }
 
+/**
+ * A captured frame as lines with their trailing blanks removed — what a "no row
+ * wraps" assertion needs. The renderer pads every row out to the full width, so
+ * the raw split says nothing; what matters is where the last glyph sits.
+ */
+export function frameLines(frame: string): string[] {
+  return frame.split("\n").map((line) => line.replace(/\s+$/, ""))
+}
+
 export async function until(predicate: () => boolean | Promise<boolean>, timeoutMs = 20_000): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (!(await predicate())) {

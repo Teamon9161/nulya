@@ -21,10 +21,16 @@
  *    which tools the model can call, membership (activate / deactivate) decides
  *    whose skills and system prompts are in the composition. Both take effect at
  *    the next `session new` and neither can touch this one.
+ *
+ * An extension id, a tool name and a store root are all as long as somebody
+ * chose to make them, so every cell here is cut to its column and every sentence
+ * is broken at its ` · ` joints by us. `ui/columns.ts` says why a line that
+ * wraps in a list is garbled rather than merely untidy.
  */
 import { For, Show, createMemo, createSignal, onMount } from "solid-js"
 import { useKeyboard } from "@opentui/solid"
-import { useStyle } from "../../render/theme.ts"
+import { useScreen, useStyle } from "../../render/theme.ts"
+import { columnWidth, fit, squeeze, wrapWords } from "../columns.ts"
 import { listExtensions, readToolUsage, type ExtensionEntry, type ToolUsage } from "../../nulya/files.ts"
 import { configShow, extDeactivate, extPrune, extSetCurrent, type SyncLine } from "../../nulya/cli.ts"
 import { draftColumn, planStore } from "../../extensions.ts"
@@ -123,6 +129,25 @@ export function driftLine(frozen: string | null, current: string | null): string
   return `frozen ${frozen} · store ${current} → next session`
 }
 
+/** How many versions an id has, and what kind it is: one short cell. */
+function metaOf(entry: ExtensionEntry): string {
+  return `${entry.versions.length}v ${entry.kind.slice(0, 4)}`
+}
+
+/** When a version was built, to the minute — enough to order two of them. */
+function stamp(mtime: number): string {
+  return new Date(mtime).toISOString().slice(0, 16)
+}
+
+/** Uses and success rate, as the two cells of the evidence column. */
+function usesOf(row: { uses: number } | null): string {
+  return `${row?.uses ?? 0} uses`
+}
+
+function okOf(row: { uses: number; ok: number } | null): string {
+  return row && row.uses > 0 ? `${Math.round((row.ok / row.uses) * 100)}% ok` : "—"
+}
+
 export function ExtView(props: {
   ws: Workspace
   header: SessionHeader | null
@@ -144,6 +169,7 @@ export function ExtView(props: {
   onClose: () => void
 }) {
   const style = useStyle()
+  const screen = useScreen()
   const [extensions, setExtensions] = createSignal<ExtensionEntry[]>([])
   const [usage, setUsage] = createSignal<ToolUsage[]>([])
   const [cursor, setCursor] = createSignal(0)
@@ -214,6 +240,86 @@ export function ExtView(props: {
   const tools = createMemo(() => toolRows(extensions(), sources(), usage()))
   const selectedTool = createMemo(() => tools()[Math.min(toolCursor(), Math.max(0, tools().length - 1))] ?? null)
   const quota = createMemo(() => quotaLine(maxTools(), nextFace(sources()).length))
+
+  /** The columns this overlay may draw in: the box pads one on each side. */
+  const inner = () => Math.max(24, screen().width - 2)
+
+  /**
+   * The id list, sized from the ids it actually holds rather than from the 34
+   * it used to be fixed at — and never allowed past half the screen, because
+   * the detail beside it is the half that explains what the cursor is on.
+   */
+  const idCols = createMemo(() => {
+    const list = extensions()
+    const [id, meta, draft, shadow] = squeeze(
+      [
+        columnWidth(list.map((entry) => entry.id), 2, 24),
+        columnWidth(list.map(metaOf), 2, 12),
+        columnWidth(list.map((entry) => draftColumn(draftOf(entry.id))), 2, 11),
+        columnWidth(list.map((entry) => (entry.shadowed ? "shadowed" : "")), 0, 9),
+      ],
+      [8, 0, 0, 0],
+      Math.max(16, Math.floor(inner() / 2)) - 2,
+    )
+    return { id: id!, meta: meta!, draft: draft!, shadow: shadow! }
+  })
+  /** The whole left pane: the cursor gutter plus its four columns. */
+  const idWidth = () => 2 + idCols().id + idCols().meta + idCols().draft + idCols().shadow
+  /** What is left for the detail beside it, less its own two-column pad. */
+  const detailWidth = () => Math.max(16, inner() - idWidth() - 2)
+
+  /**
+   * The version line, allocated by priority rather than evenly. A version id is
+   * `v-` and 24 hex digits and it is what somebody reads off this line to pass
+   * to `ext activate`, so it is never cut; the two markers say which build runs
+   * and which one this session froze; and the timestamp only orders builds that
+   * the list already shows in order — so it takes what is left, and on a pane
+   * with nothing left it takes no room at all.
+   */
+  const versionCols = createMemo(() => {
+    const list = versions()
+    const frozen = props.header ? frozenVersion(props.header, selected()?.id ?? "") : null
+    const budget = Math.max(8, detailWidth() - 2)
+    const version = Math.min(columnWidth(list.map((entry) => entry.version), 2, 28), budget)
+    const [current, mine] = squeeze(
+      [
+        columnWidth([selected()?.current ? `${style.glyphs.capability} current` : ""], 2, 12),
+        columnWidth([frozen ? `${style.glyphs.bar} this session` : ""], 0, 15),
+      ],
+      [0, 0],
+      Math.max(0, budget - version),
+    )
+    const spare = budget - version - current! - mine!
+    const when = spare >= 8 ? Math.min(columnWidth(list.map((entry) => stamp(entry.mtime)), 2, 18), spare) : 0
+    return { version, when, current: current!, mine: mine! }
+  })
+
+  /** The pin panel's rows: a checkbox, the tool id, its state, its evidence. */
+  const toolCols = createMemo(() => {
+    const list = tools()
+    const [id, state, uses, ok] = squeeze(
+      [
+        columnWidth(list.map((row) => row.id), 2, 34),
+        columnWidth(list.map((row) => stateLabel(row.state)), 2, 26),
+        columnWidth(list.map(usesOf), 2, 12),
+        columnWidth(list.map(okOf), 0, 8),
+      ],
+      [10, 0, 0, 0],
+      inner() - 4,
+    )
+    return { id: id!, state: state!, uses: uses!, ok: ok! }
+  })
+
+  /** A sentence we break ourselves, one `<text>` per line. */
+  const Lines = (line: { text: string; width?: number; fg?: string }) => (
+    <For each={wrapWords(line.text, line.width ?? inner())}>
+      {(part) => (
+        <text fg={line.fg ?? style.theme.dim} height={1}>
+          {part}
+        </text>
+      )}
+    </For>
+  )
 
   const move = (delta: number) => {
     if (pane() === "extensions") {
@@ -406,9 +512,11 @@ export function ExtView(props: {
    */
   const ToolsPane = () => (
     <box flexDirection="column" width="100%" flexGrow={1}>
-      <text fg={style.theme.fg}>{quota()}</text>
-      <text fg={style.theme.dim}>
-        user config {userPath() || "(unknown)"}
+      <text fg={style.theme.fg} height={1}>
+        {fit(quota(), inner())}
+      </text>
+      <text fg={style.theme.dim} height={1}>
+        {fit(`user config ${userPath() || "(unknown)"}`, inner())}
       </text>
       <box height={1} />
       <For each={tools()}>
@@ -416,35 +524,44 @@ export function ExtView(props: {
           const here = () => index() === toolCursor()
           const on = () => row.state !== "off"
           return (
-            <box flexDirection="row" backgroundColor={here() ? style.theme.selection : undefined}>
-              <text fg={on() ? style.theme.accent.evolve : style.theme.dim}>
-                {on() ? "[x]" : "[ ]"} {row.id}
+            <box
+              flexDirection="row"
+              width="100%"
+              height={1}
+              flexShrink={0}
+              backgroundColor={here() ? style.theme.selection : undefined}
+            >
+              <text fg={on() ? style.theme.accent.evolve : style.theme.dim} flexShrink={0}>
+                {on() ? "[x] " : "[ ] "}
               </text>
-              <text fg={row.state === "other" ? style.theme.warn : style.theme.dim}>
-                {" "}
-                {stateLabel(row.state)}
-              </text>
-              <text fg={style.theme.dim}>
-                {"  "}
-                {row.uses} uses
-                {row.uses > 0 ? ` · ${Math.round((row.ok / row.uses) * 100)}% ok` : ""}
-              </text>
+              <box width={toolCols().id} flexShrink={0}>
+                <text fg={on() ? style.theme.accent.evolve : style.theme.dim}>{fit(row.id, toolCols().id - 2)}</text>
+              </box>
+              <box width={toolCols().state} flexShrink={0}>
+                <text fg={row.state === "other" ? style.theme.warn : style.theme.dim}>
+                  {fit(stateLabel(row.state), toolCols().state - 2)}
+                </text>
+              </box>
+              <box width={toolCols().uses} flexShrink={0}>
+                <text fg={style.theme.dim}>{fit(usesOf(row), toolCols().uses - 2)}</text>
+              </box>
+              <box width={toolCols().ok} flexShrink={0}>
+                <text fg={style.theme.dim}>{fit(okOf(row), toolCols().ok)}</text>
+              </box>
             </box>
           )
         }}
       </For>
       <Show when={tools().length === 0}>
-        <text fg={style.theme.dim}>
-          no extension has an active version · `a` on the id list points `current` at one
-        </text>
+        <Lines text="no extension has an active version · `a` on the id list points `current` at one" />
       </Show>
     </box>
   )
 
   return (
     <box flexDirection="column" width="100%" flexGrow={1} paddingLeft={1} paddingRight={1}>
-      <text fg={style.theme.accent.evolve}>
-        extensions · {extensions().length} · {quota()}
+      <text fg={style.theme.accent.evolve} height={1}>
+        {fit(`extensions · ${extensions().length} · ${quota()}`, inner())}
       </text>
       <box height={1} />
 
@@ -452,111 +569,146 @@ export function ExtView(props: {
           are whole-width tables of their own. */}
       <Show
         when={pane() === "extensions" || pane() === "versions"}
-        fallback={pane() === "tools" ? <ToolsPane /> : <UsageTable rows={usage()} />}
+        fallback={pane() === "tools" ? <ToolsPane /> : <UsageTable rows={usage()} width={inner()} />}
       >
         <box flexDirection="row" width="100%" flexGrow={1}>
-          <box flexDirection="column" width={34} flexShrink={0}>
+          <box flexDirection="column" width={idWidth()} flexShrink={0}>
             <For each={extensions()}>
               {(entry, index) => {
                 const here = () => index() === cursor()
+                const draft = () => draftColumn(draftOf(entry.id))
                 return (
                   <box
                     flexDirection="row"
+                    width="100%"
+                    height={1}
+                    flexShrink={0}
                     backgroundColor={here() && pane() === "extensions" ? style.theme.selection : undefined}
                   >
-                    <text fg={entry.shadowed ? style.theme.dim : here() ? style.theme.fg : style.theme.dim}>
-                      {here() ? style.glyphs.foldOpen : " "} {entry.id}
+                    <text fg={here() ? style.theme.fg : style.theme.dim} flexShrink={0}>
+                      {here() ? style.glyphs.foldOpen : " "}{" "}
                     </text>
-                    <text fg={style.theme.dim}>
-                      {" "}
-                      {entry.versions.length}v {entry.kind.slice(0, 4)}
-                    </text>
+                    <box width={idCols().id} flexShrink={0}>
+                      <text fg={entry.shadowed ? style.theme.dim : here() ? style.theme.fg : style.theme.dim}>
+                        {fit(entry.id, idCols().id - 2)}
+                      </text>
+                    </box>
+                    <box width={idCols().meta} flexShrink={0}>
+                      <text fg={style.theme.dim}>{fit(metaOf(entry), idCols().meta - 2)}</text>
+                    </box>
                     {/* What the SOURCE beside those versions would build to. An
                         id whose draft has moved on shows `not built` here while
                         its old version is still current — the difference `ext
                         sync` is for. */}
-                    <Show when={draftColumn(draftOf(entry.id))}>
-                      <text fg={draftColumn(draftOf(entry.id)) === "active" ? style.theme.dim : style.theme.warn}>
-                        {" "}
-                        {draftColumn(draftOf(entry.id))}
+                    <box width={idCols().draft} flexShrink={0}>
+                      <text fg={draft() === "active" ? style.theme.dim : style.theme.warn}>
+                        {fit(draft(), idCols().draft - 2)}
                       </text>
-                    </Show>
+                    </box>
                     {/* An id an earlier root already has active: this copy never
                         runs (DESIGN §7.2). Saying so is the whole point — a
                         silently omitted duplicate is how it becomes a mystery. */}
-                    <Show when={entry.shadowed}>
-                      <text fg={style.theme.warn}> shadowed</text>
-                    </Show>
+                    <box width={idCols().shadow} flexShrink={0}>
+                      <text fg={style.theme.warn}>{entry.shadowed ? fit("shadowed", idCols().shadow) : ""}</text>
+                    </box>
                   </box>
                 )
               }}
             </For>
             <Show when={extensions().length === 0}>
-              <text fg={style.theme.dim}>no extensions built yet</text>
+              <text fg={style.theme.dim} height={1}>
+                {fit("no extensions built yet", idWidth())}
+              </text>
             </Show>
           </box>
 
-          <box flexDirection="column" flexGrow={1} flexShrink={1} flexBasis={0} paddingLeft={2}>
+          <box flexDirection="column" width={detailWidth() + 2} flexShrink={0} paddingLeft={2}>
             <Show when={selected()} keyed>
               {(entry: ExtensionEntry) => (
-                <box flexDirection="column">
-                  <text fg={style.theme.fg}>
-                    {entry.id} · {entry.kind} · current {entry.current ?? "(none)"}
-                  </text>
-                  <text fg={entry.shadowed ? style.theme.warn : style.theme.dim}>
-                    root {entry.root}
-                    {entry.shadowed ? " · shadowed by an earlier root · never runs" : ""}
-                  </text>
-                  <text fg={style.theme.dim}>
-                    tools {entry.tools.join(" ") || "—"} · skills{" "}
-                    {entry.skills.map((skill: string) => skill.split("/").pop()).join(" ") || "—"} · prompts{" "}
-                    {entry.systemPrompts.length || "—"}
-                  </text>
-                  <text fg={style.theme.dim}>
-                    permissions fs {entry.permissions.fs.length} · net {entry.permissions.network.join(",") || "—"} ·
-                    proc {entry.permissions.process.length}
-                  </text>
+                <box flexDirection="column" width="100%">
+                  <Lines
+                    text={`${entry.id} · ${entry.kind} · current ${entry.current ?? "(none)"}`}
+                    width={detailWidth()}
+                    fg={style.theme.fg}
+                  />
+                  <Lines
+                    text={`root ${entry.root}${entry.shadowed ? " · shadowed by an earlier root · never runs" : ""}`}
+                    width={detailWidth()}
+                    fg={entry.shadowed ? style.theme.warn : style.theme.dim}
+                  />
+                  <Lines
+                    text={`tools ${entry.tools.join(" ") || "—"} · skills ${
+                      entry.skills.map((skill: string) => skill.split("/").pop()).join(" ") || "—"
+                    } · prompts ${entry.systemPrompts.length || "—"}`}
+                    width={detailWidth()}
+                  />
+                  <Lines
+                    text={`permissions fs ${entry.permissions.fs.length} · net ${
+                      entry.permissions.network.join(",") || "—"
+                    } · proc ${entry.permissions.process.length}`}
+                    width={detailWidth()}
+                  />
                   <Show when={drift()}>
-                    <text fg={style.theme.warn}>{drift()}</text>
+                    <Lines text={drift()!} width={detailWidth()} fg={style.theme.warn} />
                   </Show>
                   <box height={1} />
 
-                  <text fg={style.theme.dim}>versions</text>
+                  <text fg={style.theme.dim} height={1}>
+                    versions
+                  </text>
                   <For each={entry.versions}>
                     {(version, index) => {
                       const here = () => index() === versionCursor() && pane() === "versions"
                       const isCurrent = () => version.version === entry.current
                       const isFrozen = () => version.version === frozenVersion(props.header, entry.id)
                       return (
-                        <box flexDirection="row" backgroundColor={here() ? style.theme.selection : undefined}>
-                          <text fg={isCurrent() ? style.theme.accent.evolve : style.theme.dim}>
-                            {here() ? style.glyphs.foldOpen : " "} {version.version}
+                        <box
+                          flexDirection="row"
+                          width="100%"
+                          height={1}
+                          flexShrink={0}
+                          backgroundColor={here() ? style.theme.selection : undefined}
+                        >
+                          <text fg={here() ? style.theme.fg : style.theme.dim} flexShrink={0}>
+                            {here() ? style.glyphs.foldOpen : " "}{" "}
                           </text>
-                          <text fg={style.theme.dim}> {new Date(version.mtime).toISOString().slice(0, 16)}</text>
-                          <Show when={isCurrent()}>
-                            <text fg={style.theme.accent.evolve}> {style.glyphs.capability} current</text>
-                          </Show>
-                          <Show when={isFrozen()}>
-                            <text fg={style.theme.accent.user}> {style.glyphs.bar} this session</text>
-                          </Show>
+                          <box width={versionCols().version} flexShrink={0}>
+                            <text fg={isCurrent() ? style.theme.accent.evolve : style.theme.dim}>
+                              {fit(version.version, versionCols().version - 2)}
+                            </text>
+                          </box>
+                          <box width={versionCols().when} flexShrink={0}>
+                            <text fg={style.theme.dim}>{fit(stamp(version.mtime), versionCols().when - 2)}</text>
+                          </box>
+                          <box width={versionCols().current} flexShrink={0}>
+                            <text fg={style.theme.accent.evolve}>
+                              {isCurrent() ? fit(`${style.glyphs.capability} current`, versionCols().current - 2) : ""}
+                            </text>
+                          </box>
+                          <box width={versionCols().mine} flexShrink={0}>
+                            <text fg={style.theme.accent.user}>
+                              {isFrozen() ? fit(`${style.glyphs.bar} this session`, versionCols().mine) : ""}
+                            </text>
+                          </box>
                         </box>
                       )
                     }}
                   </For>
                   <box height={1} />
 
-                  <text fg={style.theme.dim}>usage</text>
+                  <text fg={style.theme.dim} height={1}>
+                    usage
+                  </text>
                   <For each={entry.tools}>
-                    {(tool) => {
-                      const row = () => usageOf(entry, tool)
-                      return (
-                        <text fg={style.theme.dim}>
-                          {"  "}
-                          {tool} · {row()?.uses ?? 0} uses ·{" "}
-                          {row() && row()!.uses > 0 ? `${Math.round((row()!.ok / row()!.uses) * 100)}% ok` : "—"}
-                        </text>
-                      )
-                    }}
+                    {(tool) => (
+                      <text fg={style.theme.dim} height={1}>
+                        {"  "}
+                        {fit(
+                          `${tool} · ${usesOf(usageOf(entry, tool))} · ${okOf(usageOf(entry, tool))}`,
+                          detailWidth() - 2,
+                        )}
+                      </text>
+                    )}
                   </For>
                 </box>
               )}
@@ -566,20 +718,21 @@ export function ExtView(props: {
       </Show>
 
       <Show when={confirm()} keyed>
-        {(pending: Pending) => <text fg={style.theme.warn}>{confirmLine(pending)}</text>}
+        {(pending: Pending) => <Lines text={confirmLine(pending)} fg={style.theme.warn} />}
       </Show>
       <Show when={notice() && !confirm()}>
-        <text fg={style.theme.dim}>{notice()}</text>
+        <Lines text={notice()!} />
       </Show>
       {/* The sister sentence of the drift line: every key in this view moves a
           pointer or a pin, and physics #2 says none of them can reach the
           session already on screen. Said once, permanently, rather than after
           each action. */}
-      <text fg={style.theme.warn}>changes apply to the NEXT session — this one froze its tools at start</text>
-      <text fg={style.theme.dim}>
-        j/k move · Tab pane · t tools · u usage · Space pin · A always · Esc close
-      </text>
-      <text fg={style.theme.dim}>a activate · r rollback · d deactivate · p prune old versions</text>
+      <Lines
+        text="changes apply to the NEXT session — this one froze its tools at start"
+        fg={style.theme.warn}
+      />
+      <Lines text="j/k move · Tab pane · t tools · u usage · Space pin · A always · Esc close" />
+      <Lines text="a activate · r rollback · d deactivate · p prune old versions" />
     </box>
   )
 }

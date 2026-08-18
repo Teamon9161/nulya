@@ -6,11 +6,13 @@
  * from files a real `nulya` binary wrote.
  */
 import { afterAll, beforeAll, expect, test } from "bun:test"
+import { rmSync } from "node:fs"
 import { join } from "node:path"
 import { createSignal, type JSX } from "solid-js"
 import { testRender } from "@opentui/solid"
 import { SessionsView } from "../src/ui/overlays/SessionsView.tsx"
 import { ExtView, driftLine, frozenVersion } from "../src/ui/overlays/ExtView.tsx"
+import { displayWidth } from "../src/ui/columns.ts"
 import { listExtensions, readHeader } from "../src/nulya/files.ts"
 import { sessionPins } from "../src/state/tui_state.ts"
 import { App } from "../src/ui/App.tsx"
@@ -20,7 +22,7 @@ import { createSessionState } from "../src/state/session.ts"
 import { default_settings } from "../src/state/settings.ts"
 import { sessionAppend, sessionNew, sessionStep } from "../src/nulya/cli.ts"
 import type { SessionHeader } from "../src/nulya/ledger.ts"
-import { scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
+import { frameLines, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
 
 const style: Style = createStyle(default_settings, {})
 
@@ -167,6 +169,60 @@ test("/ext shows the version line, the current pointer and the usage counts", as
     setup.renderer.destroy()
   }
 }, 60_000)
+
+test("/ext at eighty columns: all four panes cut to their columns, the version id never", async () => {
+  // An id nobody sized a fixed column for. It is also its own tool's name, so
+  // one package gives the id list, the detail pane and the pin panel each a
+  // cell that no reasonable column can hold.
+  const long_id = "a-lint-with-a-very-long-extension-id"
+  const run = (args: string[]) => Bun.spawnSync({ cmd: [ws.bin, ...args], cwd: ws.dir })
+  run(["ext", "init", "--script", long_id])
+  const built = run(["ext", "build", join(".nulya", "extensions", long_id)])
+  const long_version = /v-[0-9a-zA-Z]+/.exec(built.stdout.toString())?.[0] ?? ""
+  expect(long_version).not.toBe("")
+  run(["ext", "activate", long_id, long_version])
+
+  const setup = await overlayFrame(() => <ExtView ws={ws} header={null} onClose={() => {}} />, 76, 30)
+  const fits = (frame: string) => {
+    for (const line of frameLines(frame)) expect(displayWidth(line)).toBeLessThanOrEqual(76)
+    return frame
+  }
+  try {
+    await until(() => setup.captureCharFrame().includes("extensions ·"), 20_000)
+
+    // Pane 1 — the id list. The long id is cut and the short one beside it still
+    // reaches its `1v scri` at the same offset: a gutter, not a coincidence.
+    const ids = fits(await settle(setup, 6))
+    expect(ids).toContain("…")
+    expect(ids).not.toContain(long_id)
+    const lines = frameLines(ids)
+    const short = lines.find((line) => /▾? ?lint {2,}\dv scri/.test(line))
+    expect(short).toBeDefined()
+
+    // Pane 2 — the version line. Everything else on it gives up cells first: a
+    // version id is what somebody types into `ext activate`, whole or useless.
+    setup.mockInput.pressTab()
+    const versions = fits(await settle(setup, 4))
+    expect(versions).toContain(long_version)
+
+    // Pane 3 — the pin panel. The checkbox keeps its place while the tool id
+    // beside it is cut.
+    setup.mockInput.pressKey("t")
+    const tools = fits(await settle(setup, 4))
+    expect(tools).toContain("[ ] ext:lint/lint")
+    expect(tools).not.toContain(`ext:${long_id}/${long_id}`)
+    expect(tools).toContain("…")
+
+    // Pane 4 — the usage journal, counts in their own columns.
+    setup.mockInput.pressKey("u")
+    const usage = fits(await settle(setup, 4))
+    expect(usage).toContain("tool usage · .nulya/tool-usage.jsonl")
+  } finally {
+    setup.renderer.destroy()
+    // The other tests in this file count on `lint` being the only extension.
+    rmSync(join(ws.dir, ".nulya", "extensions", long_id), { recursive: true, force: true })
+  }
+}, 120_000)
 
 test("/ext's tools pane pins with a keypress, and the pin is what the next session carries", async () => {
   // The `this TUI` list lives in tui-state.json, so a scratch path here is the

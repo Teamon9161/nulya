@@ -1011,3 +1011,20 @@ cd tui && bun test test/compact.test.ts
 4. providers 列表补了缺的 "N more below"。
 
 **同病未修**（不在本轮范围，记在这里）：`ExtView`（`width={34}` 的左栏 + 版本行）、`UsageView`（`width={20}`）、`HelpView`（`width={32}`）、`SettingsView`（`width={12}` / `{28}`）、`Composer` 的补全菜单（`width={40}` / `{26}`）都仍是写死列宽 + 未截断的文本，窄屏或长 id 下会犯同一个错；改法就是上面这套 helper。
+
+#### T16b · 其余五个面迁到同一套纪律（2026-08-18）
+
+上一条点名的五个面全部迁完，**行为与键位一字未改，只改呈现**：单元格一律过 `fit`、行 `height={1}`、列宽由 `columnWidth` + `squeeze` 按内容算出并带 2 空格 gutter、成句的说明 / hint 用 `wrapWords` 自己折成一行一个 `<text>`。
+
+- **`ExtView`**（四个 pane）：左栏 `width={34}` → 由 id / `Nv kind` / draft / `shadowed` 四列的内容算出，且封顶在半屏（右边详情是解释光标在什么上的那一半）。版本行**按优先级分配而不是平均让步**：version id 是 `v-` + 24 hex、是人抄去喂 `ext activate` 的东西，**永不截断**；两个 marker（`⚡ current` / `▎ this session`）其次；时间戳只是给一个本来就有序的列表排序，所以它先缩、缩不动就整列消失（`columnWidth` 全空的列一列都不占）。详情四句与 pin 面板的空态改 `wrapWords`，pin 行拆成 `[x] ` + id + state + uses + ok% 五格，footer 三句也折。
+- **`UsageTable`**（被 `/usage` 与 `/ext` 的 usage pane 共用）：多一个 `width` 必填 prop——同一张表画在两个不同宽度的盒子里，按错的盒子算列宽就是必然折行。行改成 toolId / `N uses` / `X% ok` 三列。
+- **`UsageView`**：左标签列由六个标签的内容算出（原写死 20），标题与那句 105 字的 caveat（八十列必折）改 `wrapWords`。
+- **`HelpView`**：说明列改成"**一行一个 `<text>`，续行缩进到说明列**"——它在 scrollbox 里，折行点会随滚动偏移变，是最坏的犯病位置。key 列由**实际绑定**算出（`/new [--profile p] [--model id]` 是 31 列，原写死 32 只剩一个空格 gutter，与 `deepseek-anthropic` 同款）并封顶 34。**还修了一个真的被吃字符**：scrollbox 的滚动条画在内容区**最后一列**上，按 `width-2` 排版的行每一行都被啃掉最后一个字（截图证据 `…stops at its nex█`），所以这一面的 `inner()` 是 `width-3`。
+- **`SettingsView`**：状态列 / key 列 / value 列都内容驱动，路径过 `fit`（`settingsPaths` 从 workspace 路径派生，长度没有上界），结尾那句 130 字改 `wrapWords`。
+- **`Composer` 的补全菜单**：两个菜单都是表，所以都守表的纪律——`/` 菜单的 name 列由候选（含 skill 的 `/name`）算出、说明**截断成一行**（菜单里一个候选占两行，`↑↓` 就不再是"一个候选"了）；`@` 菜单的 label 列同理（同名文件会让 label 变成整条路径）。两条 hint 折。
+
+**`columns.ts` 的一处修正**：`charWidth` 把默认 emoji 呈现的符号（`231A`…`2B55` 那批，含本项目在用的 `⚡`）从 1 列改成 2 列。证据就是 `/ext` 快照——`⚡ current` 后面本该有两格 gutter 只剩一格，说明渲染器认它 2 列而我们认 1 列；"我们算得下、终端画不下"正是溢出的定义。其余 16 个主题 glyph 实测都是 1 列，有断言钉住。
+
+**测试**：五条窄宽度（76 列）frame 测试，每条都断言"没有任何一行超过 76 列"+ gutter 完好（两行把同一列的内容放在同一个 offset）+ 超长内容出现 `…`；`/ext` 那条现造一个 36 字符的 extension id（它同时也是自己 tool 的名字），四个 pane 逐个走一遍并断言 version id **整条**都在。`columns.test.ts` 加一条 emoji 宽度。`bun test` 152 → **157 pass**；两个既有快照（`/help`、`/ext`）按预期版面更新，逐行看过 diff——变化只有 gutter 补齐、列宽由内容决定、长句断在 ` · ` 关节上。
+
+**仍未迁**：`SessionsView`（不在 T16 点名的清单里；它的行是 `flexGrow` 的一段拼接文本，长 `first_user_text` 已经切到 40，但窄屏下仍可能折）。

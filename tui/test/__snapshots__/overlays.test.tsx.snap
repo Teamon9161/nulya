@@ -27,16 +27,16 @@ exports[`/sessions lists the store and opens the highlighted session 1`] = `
 exports[`/ext shows the version line, the current pointer and the usage counts 1`] = `
 " extensions · 1 · tools 2+0/8                                                                                           
                                                                                                                         
- ▾ lint 1v scri active               lint · script · current v-<hash>                                 
-                                     root .nulya/extensions                                                             
-                                     tools lint · skills — · prompts —                                                  
-                                     permissions fs 0 · net — · proc 0                                                  
+ ▾ lint    1v scri  active    lint · script · current v-<hash>                                        
+                              root .nulya/extensions                                                                    
+                              tools lint · skills — · prompts —                                                         
+                              permissions fs 0 · net — · proc 0                                                         
                                                                                                                         
-                                     versions                                                                           
-                                       v-<hash> <built> ⚡ current ▎ this session            
+                              versions                                                                                  
+                                v-<hash>  <built>  ⚡ current  ▎ this session                
                                                                                                                         
-                                     usage                                                                              
-                                       lint · 0 uses · —                                                                
+                              usage                                                                                     
+                                lint · 0 uses · —                                                                       
                                                                                                                         
                                                                                                                         
                                                                                                                         
