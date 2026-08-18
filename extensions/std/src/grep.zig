@@ -126,7 +126,13 @@ fn answer(ctx: *const rpc.Ctx, args: std.json.ObjectMap) anyerror!rpc.Outcome {
 
     var report: walk.Report = .{};
     if (explicit_file) {
-        try search.searchFile(std.Io.Dir.cwd(), base, search.base_display);
+        // The glob filters an explicit file too, on its basename: relative to
+        // itself the file's path is empty, so only the name can match. A
+        // rejected file is never opened and never counted, so the answer is
+        // the ordinary "no matches ... (0 files scanned, glob g)". (tcode
+        // `glob_matches`, which the walk applies to a single-file base alike.)
+        const admitted = if (glob_arg) |g| globpat.matchPath(g, std.fs.path.basename(base)) else true;
+        if (admitted) try search.searchFile(std.Io.Dir.cwd(), base, search.base_display);
     } else {
         report = try walk.walk(alloc, io, base, .{
             .follow_symlinks = false,
@@ -722,6 +728,16 @@ test "grep run: no matches / oversized / explicit file / invalid regex / missing
 
     // Named explicitly, the same file is searched under the larger cap.
     try std.testing.expectEqualStrings("large.rs:\n2: TARGET", try t.grep("{\"pattern\":\"TARGET\",\"path\":\"large.rs\"}"));
+
+    // A glob filters the explicit file too, by basename: rejected means it is
+    // never opened, so it is not among the files scanned.
+    const filtered = try t.grep("{\"pattern\":\"TARGET\",\"path\":\"large.rs\",\"glob\":\"*.zig\"}");
+    try std.testing.expect(std.mem.startsWith(u8, filtered, "no matches for /TARGET/"));
+    try std.testing.expect(std.mem.indexOf(u8, filtered, ", glob *.zig") != null);
+    try std.testing.expect(std.mem.indexOf(u8, filtered, "(0 files scanned") != null);
+    try std.testing.expect(std.mem.indexOf(u8, filtered, "over 512 KiB skipped") == null);
+    // A glob it does match leaves the search alone.
+    try std.testing.expectEqualStrings("large.rs:\n2: TARGET", try t.grep("{\"pattern\":\"TARGET\",\"path\":\"large.rs\",\"glob\":\"*.rs\"}"));
 
     std.testing.log_level = .err; // mvzr warns about the pattern it rejects; expected here
     const bad = try t.grep("{\"pattern\":\"foo(bar\"}");
