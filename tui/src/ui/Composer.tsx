@@ -1,5 +1,5 @@
 import { For, Show, createSignal, onMount } from "solid-js"
-import type { KeyEvent, TextareaRenderable } from "@opentui/core"
+import type { KeyEvent, PasteEvent, TextareaRenderable } from "@opentui/core"
 import { SyntaxStyle } from "@opentui/core"
 import { useStyle } from "../render/theme.ts"
 import { completions } from "../commands.ts"
@@ -10,6 +10,17 @@ import {
   type ProjectIndex,
   type ReferenceMatch,
 } from "../references.ts"
+import {
+  describeAttachment,
+  expandPastes,
+  measure,
+  pasteShouldFold,
+  placeholderBefore,
+  placeholderFor,
+  placeholderRanges,
+  referenced,
+  type PasteAttachment,
+} from "../paste.ts"
 
 /**
  * The composer. Enter sends, Shift+Enter (or Ctrl+J, for terminals without the
@@ -65,6 +76,19 @@ export function Composer(props: {
   const matches = () => completions(line())
 
   /**
+   * Folded pastes, by the number in their placeholder (tui.md §11, T14).
+   *
+   * Kept for the life of the composer rather than drained on submit, for the
+   * same reason the message history is: a recalled draft has to still mean what
+   * it said. An attachment leaves only when its token does — one Backspace on
+   * the token drops both.
+   */
+  const [attachments, setAttachments] = createSignal<PasteAttachment[]>([])
+  let nextAttachment = 1
+  /** The ones the draft currently refers to — what the line under the box shows. */
+  const drafted = () => referenced(line(), attachments())
+
+  /**
    * The `@` menu. Recomputed from the buffer and the cursor on every change
    * rather than kept as state: a menu that outlives the token it belongs to is
    * how a completion lands in the wrong place.
@@ -91,21 +115,25 @@ export function Composer(props: {
   }
 
   /**
-   * Accent the `@markers` that name something real. Redrawn from scratch on
-   * every change: the ranges are character offsets into a buffer that just
-   * moved, so keeping the old ones would light up the wrong words. An `@` in
+   * Accent the tokens that stand for something: `@markers` that resolve to a
+   * real path, and folded-paste placeholders. Redrawn from scratch on every
+   * change, because the ranges are character offsets into a buffer that just
+   * moved and keeping the old ones would light up the wrong words. An `@` in
    * front of an unrecognised word stays ordinary prose — that is what makes the
    * accent mean "this one resolves" rather than "you typed an at-sign".
    */
-  const paintReferences = () => {
-    const index = props.references
-    if (!area || !index) return
+  const paintTokens = () => {
+    if (!area) return
     area.clearAllHighlights()
-    const known = knownReferenceRanges(area.plainText, index.candidates())
-    if (known.length === 0) return
+    const text = area.plainText
+    const spans = [
+      ...(props.references ? knownReferenceRanges(text, props.references.candidates()) : []),
+      ...placeholderRanges(text),
+    ]
+    if (spans.length === 0) return
     const paint = referenceAccent()
     if (!area.syntaxStyle) area.syntaxStyle = paint.style
-    for (const range of known) {
+    for (const range of spans) {
       area.addHighlightByCharRange({ start: range.start, end: range.end, styleId: paint.id })
     }
   }
@@ -114,7 +142,44 @@ export function Composer(props: {
     setLine(area?.plainText ?? "")
     setAt(area?.cursorOffset ?? 0)
     setPick(0)
-    paintReferences()
+    paintTokens()
+  }
+
+  /**
+   * A bracketed paste. Short ones go in as they always did; a long one becomes
+   * `[Pasted text #N]` and the text is kept beside the draft, so a thousand-line
+   * stack trace does not bury the screen and the draft stays editable.
+   *
+   * `preventDefault()` is what stops the textarea from inserting the bytes
+   * itself: this listener runs first, and the default insert is skipped once
+   * the event is claimed.
+   */
+  const onPaste = (event: PasteEvent) => {
+    const text = new TextDecoder().decode(event.bytes)
+    const size = measure(text)
+    if (!pasteShouldFold(size.chars, size.lines)) return
+    event.preventDefault()
+    const attachment: PasteAttachment = { id: nextAttachment++, text, ...size }
+    setAttachments([...attachments(), attachment])
+    area?.insertText(placeholderFor(attachment.id))
+    sync()
+  }
+
+  /**
+   * Backspace right after a placeholder takes the whole token. Without this it
+   * would chew the `]` off and leave a shape that no longer stands for
+   * anything — visibly text, silently still an attachment.
+   */
+  const backspaceAttachment = (): boolean => {
+    if (!area) return false
+    const found = placeholderBefore(area.plainText, area.cursorOffset, attachments())
+    if (!found) return false
+    const token = placeholderFor(found.id)
+    area.setSelection(area.cursorOffset - [...token].length, area.cursorOffset)
+    area.deleteSelection()
+    setAttachments(attachments().filter((entry) => entry.id !== found.id))
+    sync()
+    return true
   }
 
   onMount(() => {
@@ -141,9 +206,12 @@ export function Composer(props: {
       props.onEmptySubmit?.()
       return
     }
+    // The history keeps the draft as it was on screen — placeholders and all —
+    // so recalling it shows what was typed rather than the thousand lines it
+    // stood for. The expansion happens only on the way out.
     history.push(text)
     cursor = history.length
-    props.onSubmit(text)
+    props.onSubmit(expandPastes(text, attachments()))
   }
 
   /**
@@ -178,6 +246,11 @@ export function Composer(props: {
   const onKeyDown = (event: KeyEvent) => {
     if (event.name === "tab") {
       if (complete()) event.preventDefault()
+      return
+    }
+    if (event.name === "backspace") {
+      if (backspaceAttachment()) event.preventDefault()
+      else queueMicrotask(sync)
       return
     }
     // While the `@` menu is up, Up/Down move the selection — and only then. On
@@ -258,6 +331,15 @@ export function Composer(props: {
           </Show>
         </box>
       </Show>
+      {/* What each placeholder in the draft stands for. A fold that did not say
+          how much it folded would be a fold that hid something. */}
+      <Show when={drafted().length > 0}>
+        <box flexDirection="column" width="100%" paddingLeft={3} paddingRight={1}>
+          <For each={drafted()}>
+            {(attachment) => <text fg={style.theme.dim}>{describeAttachment(attachment)}</text>}
+          </For>
+        </box>
+      </Show>
       {/*
         flexShrink={0}: the composer is the one thing on screen that must never
         be squeezed. Without it a long transcript (or a long overlay list) wins
@@ -279,6 +361,7 @@ export function Composer(props: {
           selectionBg={style.theme.selection}
           onSubmit={submit}
           onKeyDown={onKeyDown}
+          onPaste={onPaste}
           keyBindings={[
             { name: "return", action: "submit" },
             { name: "return", shift: true, action: "newline" },

@@ -302,6 +302,7 @@ fold   = "ctrl+o"
 
 | ~~**T12 · `/ext` 的 pin 面板**~~ ✅ | `/ext` 第四个 pane **tools**：每个 tool 一行、三态 `always`（user config `registry.pinned_native_tools`，managed 只替换那一行、保注释、写后重读校验）/ `this TUI`（`tui-state.json` 的 `session_pins` → 每场 `session new` 自动 `--pin`）/ off，project/system 层写的 pin 只读显示；配额行 `tools 2+N/8`；`Space` toggle（id 行 = 整包）、`A` 升格、`d` = `ext deactivate`；`ext activate` 带 `NULYA_SESSION` 让内核投 capability_note。**内核零改动**（契约 [goals/tui-panel.md](goals/tui-panel.md)） | `bun test` 126 pass（新增 `pins.test.ts` 8 条 + `/ext` tools pane 一条交互）；面板里 `Space` 打开一个 tool → `session new` 的 header `native_tools` 里就有它，关掉就没有 |
 | ~~**T13 · composer 的 `@` 文件补全**~~ ✅ | 触发边界 / token 字符表 / 评分（basename 前缀 0 < path 前缀 1 < 子序列 10+gaps，根文件优先）/ 菜单标签规则全部逐条移植自 tcode `composer.rs`；索引 = `git ls-files --cached --others --exclude-standard`（非 git 退化成带 prune 表的小 walk），上限 20000，后台建、30s 陈旧后台刷；`↑↓` 选、`Tab` 上屏成 `@path`，已知引用在输入框里 accent。**提交时 `@path` 原文进 ledger，不注入文件内容**（契约 D5）。**内核零改动** | `bun test` 135 pass（新增 `references.test.ts` 8 条，其中四条与 tcode 的测试逐条同形 + `composer.test.tsx` 一条交互）；本仓库上 `@comp` 补出 `@src/composition.zig`，`node_modules` 一条不漏进来 |
+| ~~**T14 · 长文本粘贴折叠**~~ ✅ | OpenTUI 的 bracketed paste 事件（`onPaste` + `PasteEvent.preventDefault()`）是现成的；阈值照 tcode（> 1000 字符或 > 15 行）→ 折叠成 `[Pasted text #N]` 占位（accent 高亮、下面一行说明它装了多少、`Backspace` 整体删除），提交时展开回原文。短粘贴一字未变。**图片不做**（内核 vision track，契约 D7）。**内核零改动** | `bun test` 140 pass（新增 `paste.test.ts` 4 条 + `composer.test.tsx` 一条走真 bracketed paste 的往返）|
 | **T10 · `/goal`（占位，未开工）** | spawn 随仓库带的 driver 脚本（`win32` → `powershell -NoProfile -ExecutionPolicy Bypass -File drivers/goal.ps1`，否则 `sh drivers/goal.sh`），把它的 **stderr 喂给已有的 `--stream` 解析器**（token delta / tool begin-end / usage 全在里面），把它的 **stdout 当控制通道**：`session <id>` 开 tab、`handoff <old> -> <new>` 换 tab（原 tab 留着可回看）、`done <id>` 收尾并提示 `/outcome`。跟随中的 tab 是 **observer**（driver 持着写者 lease）。**内核零改动**，也不需要 §10.4 的 `<id>.live` sidecar | 起一个两阶段目标：token 实时可见；handoff 时自动切到子 session；`Esc` 停得下来（`session cancel` 或杀脚本）|
 
 顺序 T0 → T1 → T2 → T3 → T4；**T1 结束就开始用它 dogfood**，T2 起的优先级由用出来的痛点重排（T5–T8 就是这么来的）。
@@ -969,3 +970,15 @@ cd tui && bun test test/compact.test.ts
 **偏离**：菜单里文件的大小只在**显示的那 8 条**上 `statSync`（`git ls-files` 不给 metadata，为 20000 条各 stat 一次不值），tcode 是 walk 时顺手拿到的；显示形状（`file · 1.2 KiB`）一致。
 
 **已知 / 没做**：`@目录` 不展开（契约 §5）；索引不监听文件系统（30s 陈旧 + `@` 时触发，够用）。
+
+### T14 · 长文本粘贴折叠（2026-08-18）
+
+**先探明的那件事**：契约说"OpenTUI 若不透出 paste 事件就是 BLOCKED，不做按键洪流启发式"——**透得出**。`Renderable` 有 `onPaste`（`PasteEvent{bytes}`），它在 renderable 自己的 `handlePaste` 之前跑，`preventDefault()` 就能把默认插入拿掉；测试侧 `mockInput.pasteBracketedText` 走的是同一条路。所以整条回路（真 bracketed paste → 折叠 → 提交展开）是自动化测出来的，不是手测出来的。
+
+1. **阈值与占位形状照抄**（契约 D6）：`> 1000 字符 || > 15 行`（tcode `PASTE_FOLD_CHARS` / `PASTE_FOLD_LINES`），占位 `[Pasted text #N]`，`Backspace` 落在占位尾部就整条删掉（否则啃掉一个 `]`，剩下一个看着像文字、其实还挂着 attachment 的形状）。边界测试也照抄：**恰好等于阈值不折叠**。
+2. **折叠是草稿的显示，不是对草稿的修改。** 提交时 `expandPastes` 把占位换回原文，落进 ledger 的就是粘贴的那些字节、在粘贴的那个位置。占位对应的 attachment 被删掉之后仍留在文字里的 `[Pasted text #1]` **原样发出去**——那时它就是人打的字，替它编内容比露出方括号更糟。
+3. **attachment 不在提交时清空**（与 tcode 的 `drain` 不同）：只有它的占位被删才走。理由是 history——composer 的历史存的是**屏幕上那份**（带占位），`↑` 召回时看到的是当初打的那行而不是它代表的四十行；召回后再发，占位仍然解析得出来。生命周期与 `history` 一致（进程内），所以不是新增一类泄漏。
+4. **accent 与 `@` 共用一套**：`paintTokens` 把已知 `@引用`（T13）与占位一起画；占位按**形状**匹配（tcode `input_token_ranges` 也是），因为眼睛读的是那个 token。`[Pasted text #]`（没数字）与 `[Image #3]` 都不亮——后者是 vision track 的事。
+5. **图片整体不做**（契约 D7 / §5）：ledger 没有图片内容块，三个 provider 的序列化也没有；先造"看不见图"的占位再返工不值。剪贴板探测与 `[Image #N]` 的形状等 vision 内核面落地后照抄 tcode `input.rs`。
+
+**已知**：Linux 上的真终端手测未做（自动化已覆盖同一条 bracketed paste 路径，`pasteBracketedText` 与终端送出的字节序列是同一份解析）。

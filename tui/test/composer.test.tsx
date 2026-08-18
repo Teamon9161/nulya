@@ -187,6 +187,51 @@ test("an `@` lists project paths, ↑↓ picks one and Tab writes the path in", 
   }
 }, 60_000)
 
+test("a long paste folds into a placeholder and comes back whole on submit", async () => {
+  const sent: string[] = []
+  const setup = await testRender(
+    () => (
+      <StyleContext.Provider value={style}>
+        <Composer onSubmit={(text) => sent.push(text)} />
+      </StyleContext.Provider>
+    ),
+    { width: 90, height: 14 },
+  )
+  try {
+    await settle(setup, 3)
+    // Short pastes are unchanged: this is the behaviour that must not regress.
+    await setup.mockInput.pasteBracketedText("a short one")
+    expect(await settle(setup, 3)).toContain("a short one")
+    setup.mockInput.pressEnter()
+    await settle(setup, 2)
+    expect(sent).toEqual(["a short one"])
+
+    const long = Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\n")
+    await setup.mockInput.typeText("look at ")
+    await setup.mockInput.pasteBracketedText(long)
+    let frame = await settle(setup, 4)
+    // The box shows a token, not forty lines, and says what the token holds.
+    expect(frame).toContain("[Pasted text #1]")
+    expect(frame).toContain("40 lines")
+    expect(frame).not.toContain("line 39")
+
+    setup.mockInput.pressEnter()
+    await settle(setup, 3)
+    // What reaches the caller is exactly what was pasted, where it was pasted.
+    expect(sent[1]).toBe(`look at ${long}`)
+
+    // One Backspace takes the whole token rather than chewing the `]` off it.
+    await setup.mockInput.pasteBracketedText(long)
+    expect(await settle(setup, 3)).toContain("[Pasted text #2]")
+    setup.mockInput.pressBackspace()
+    frame = await settle(setup, 3)
+    expect(frame).not.toContain("[Pasted text #2]")
+    expect(frame).not.toContain("40 lines")
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 60_000)
+
 test("a key the screen consumed does not also edit the buffer", async () => {
   // The screen's global listener runs before the focused textarea; without
   // `preventDefault()` a consumed key (say Ctrl+W bound to close-tab) would ALSO
