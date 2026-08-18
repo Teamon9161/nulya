@@ -45,13 +45,13 @@ test "cli help: help / --help / -h print the same usage covering every verb fami
     // omits them sends the model guessing at exactly the two decisions it has to
     // make (compose a version in, put a tool on the tool face).
     for ([_][]const u8{
-        "ext init",     "--script",       "ext build",      "ext run",     "--arg",
-        "ext activate", "--user",         "ext trust",      "ext api",     "ext sync",
-        "ext prune",    "--dry-run",      "--activate",     "session new", "--with",
-        "--pin",        "--parent",       "session step",   "--max-steps", "--effort",
-        "--stream",     "session events", "session cancel", "outcome",     "session list",
-        "--image",
-        "config show",  "skill load",     "src",            "toolchain",   "help",
+        "ext init",     "--script",  "ext build",      "ext run",        "--arg",
+        "ext activate", "--user",    "ext trust",      "ext api",        "ext sync",
+        "ext seed",     "ext prune", "--dry-run",      "--activate",     "session new",
+        "--with",       "--pin",     "--parent",       "session step",   "--max-steps",
+        "--effort",     "--stream",  "session events", "session cancel", "outcome",
+        "session list", "--image",   "config show",    "skill load",     "src",
+        "toolchain",    "help",
     }) |needle| {
         std.testing.expect(std.mem.indexOf(u8, help.stdout, needle) != null) catch |err| {
             std.debug.print("`nulya help` never mentions '{s}'\n", .{needle});
@@ -60,8 +60,9 @@ test "cli help: help / --help / -h print the same usage covering every verb fami
     }
 
     // One screen: this is read by a model that pays for every line of it. The
-    // budget moves only when a real capability arrives (`--image`, +2).
-    try std.testing.expect(std.mem.count(u8, help.stdout, "\n") <= 42);
+    // budget moves only when a real capability arrives (`--image`, +2; `ext
+    // seed`, +1).
+    try std.testing.expect(std.mem.count(u8, help.stdout, "\n") <= 43);
 
     // The two flag spellings a terminal user reaches for reach the same text.
     for ([_][]const u8{ "--help", "-h" }) |flag| {

@@ -2042,3 +2042,78 @@ test "script extension: version id excludes compiler identity and is stable acro
     try std.testing.expect(rebuilt.already_built);
     try std.testing.expectEqualStrings(v1, rebuilt.version);
 }
+
+test "cli ext seed: the binary's own drafts land in a store root — never over an existing draft, --dry-run writes nothing, and sync builds what was seeded" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    // No toolchain anywhere in this test: seeding writes source, and the two
+    // ids synced below are data kind, which build without a compiler.
+    const env: []const EnvPair = &.{.{ .key = "NULYA_ZIG", .value = "definitely-not-a-compiler" }};
+    const ws_store = ".nulya" ++ std.fs.path.sep_str ++ "extensions";
+
+    // An id the binary does not ship is refused by name, with the real list.
+    {
+        const err = try runCliStderr(alloc, io, ws, &.{ exe_abs, "ext", "seed", "nope" }, env);
+        defer alloc.free(err);
+        try std.testing.expect(std.mem.indexOf(u8, err, "ships no draft 'nope'") != null);
+        try std.testing.expect(std.mem.indexOf(u8, err, "std") != null);
+    }
+
+    // A plan writes nothing — not even the store root directory.
+    {
+        const dry = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "seed", "--dry-run" }, env);
+        defer alloc.free(dry.stdout);
+        try std.testing.expectEqual(@as(u8, 0), dry.code);
+        try std.testing.expect(std.mem.indexOf(u8, dry.stdout, "std: would seed") != null);
+        try std.testing.expect(std.mem.indexOf(u8, dry.stdout, "5 would seed, 0 already there") != null);
+        try std.testing.expectError(error.FileNotFound, ws.access(io, ws_store, .{}));
+    }
+
+    // A named subset into the user store, and the ordinary sync path builds it:
+    // seeding is only how the source arrives.
+    {
+        const seeded = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "seed", "--user", "guide", "evolution" }, env);
+        defer alloc.free(seeded.stdout);
+        try std.testing.expectEqual(@as(u8, 0), seeded.code);
+        try std.testing.expect(std.mem.indexOf(u8, seeded.stdout, "2 seeded, 0 already there") != null);
+        try std.testing.expect(std.mem.indexOf(u8, seeded.stdout, "`nulya ext sync --user` builds them") != null);
+        try std.testing.expect(std.mem.indexOf(u8, seeded.stdout, "compact") == null);
+
+        const synced = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "sync", "--user" }, env);
+        defer alloc.free(synced.stdout);
+        try std.testing.expectEqual(@as(u8, 0), synced.code);
+        try std.testing.expect(std.mem.indexOf(u8, synced.stdout, "2 built, 0 already built, 0 failed") != null);
+    }
+
+    // The default root is the workspace store, and an id that already holds a
+    // draft there keeps it byte for byte — seeding is not an update channel.
+    {
+        const guide_dir = ws_store ++ std.fs.path.sep_str ++ "guide";
+        try ws.createDirPath(io, guide_dir);
+        const mine = "{\"mine\": true}";
+        try ws.writeFile(io, .{ .sub_path = guide_dir ++ std.fs.path.sep_str ++ "extension.json", .data = mine });
+
+        const seeded = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "seed" }, env);
+        defer alloc.free(seeded.stdout);
+        try std.testing.expectEqual(@as(u8, 0), seeded.code);
+        try std.testing.expect(std.mem.indexOf(u8, seeded.stdout, "guide: draft already in") != null);
+        try std.testing.expect(std.mem.indexOf(u8, seeded.stdout, "4 seeded, 1 already there") != null);
+
+        const kept = try ws.readFileAlloc(io, guide_dir ++ std.fs.path.sep_str ++ "extension.json", alloc, .limited(1 << 16));
+        defer alloc.free(kept);
+        try std.testing.expectEqualStrings(mine, kept);
+        // The others really arrived, manifest and all.
+        try ws.access(io, ws_store ++ std.fs.path.sep_str ++ "std" ++ std.fs.path.sep_str ++ "extension.json", .{});
+        try ws.access(io, ws_store ++ std.fs.path.sep_str ++ "std" ++ std.fs.path.sep_str ++ "src" ++ std.fs.path.sep_str ++ "vendor" ++ std.fs.path.sep_str ++ "mvzr.zig", .{});
+    }
+}

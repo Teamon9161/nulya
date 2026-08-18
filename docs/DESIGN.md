@@ -315,7 +315,8 @@ extension 装在**多个 store root** 里，按固定顺序搜索（`extension/r
 - **header 不记 root**（`active` 仍是 `{id, version}`）：记了就等于把一台机器的目录布局冻进会话，而那与"跑的是哪份字节"无关。
 - 不存在的 root 是**缺席**不是错误（多数机器没有 user store）；写端（`ext init --user` / `ext build --user`）需要时才创建。
 - **为什么 project 层不能加 root**：一个 root 决定"这台机器上哪些目录可以供出 `current`"，即哪些代码可以被跑起来——checkout 能加就是拓宽权限，正是 §9.5 "只能收窄"禁止的事。同一条理由的另一面是 **workspace root 自己就在 checkout 里**，所以它有一道一次性的 trust gate（§9）：随 clone 到达的 store 要被人信任一次（`nulya ext trust`）才进 composition，本机 `ext build` 建出来的则自动可信。只读投影不过门。
-- **两个作用于整个 root 的壳层动词**（`cli/ext.zig`，都不改任何语义，只是"逐个 `<id>/` 做同一件事"）：
+- **三个作用于整个 root 的壳层动词**（`cli/ext.zig`，都不改任何语义）：`sync` / `prune` 逐个 `<id>/` 做同一件事，`seed` 把二进制自带的 draft 落进来：
+  - **`nulya ext seed [--user] [<id>…] [--dry-run]`** = 把**这个二进制内嵌的自带 draft**（build.zig 把仓库自己的 `extensions/**` 按 `src_embed` 同一先例 `@embedFile` 进来，`src/bundled.zig` 投影；§7.8 的五个）写进该 root——**分发就是二进制本身**，一台从没见过这个 checkout 的机器也拿得到。只写**源码**：build 归 `ext sync`，trust / activate / pin 的每道门原样不动。**该 root 已有 draft 的 id 一律不动**（它可能带着别人的编辑；seed 不是更新通道，要重播先手删 `<root>/<id>/`），版本目录更不碰（physics #5）。点名不存在的 id → 报错并列出内嵌清单，exit 1。`--dry-run` 不写盘，连 root 目录都不建。
   - **`nulya ext sync [--user] [--activate] [--dry-run]`** = 把这个 root 下的每个 **draft**（判据：`<root>/<id>/extension.json` 存在，就是 `ext init` 写 manifest 的位置；只认一层）走一遍 `ext build`。**装一个 extension 从此就是"把源码放进 `<root>/<id>/` 再 sync 一次"**——目录布局本来就是这样，缺的只是这个动词。drafts 之间彼此独立，所以**一个失败不中断其它**（每个 id 一行，坏 manifest 只报它自己；host fault 仍照原样传播），有任何一个没拿到版本就 exit 1。`--activate` 单独一档，因为 **build 是机械的、activate 是决定**（§7.4）：它只把 `current` 指向**这一趟新拿进来的版本**、以及**根本没有 `current` 的 id**；`current` 已经指着别处的一律不动（那是有人 rollback / activate 过）——所以一次 rollback 活得过下一次 sync。`--dry-run` 走同一条计算（`build_ext` 的 `Mode.plan`：同一份 manifest / snapshot / 搜索，写之前停手、也不拿 lease），因此它与真跑不可能对同一个 draft 说两样话。填满一个空 workspace store 时同样按 §9 记一条 birth trust——它就是本机 build。
   - **`nulya ext prune [--user] [<id>] [--dry-run]`** = 删这个 root 下**不是 `current`** 的版本目录（持同一个 `<id>/.lock`）。版本堆积是故意的（rollback 才只是移指针），代价是磁盘；**`current` 缺失的 id 一个都不删**——没有指针就没有"该留哪个"的依据，猜（最新？最大？）会删掉别人正要回滚到的那个。代价直说：冻在被删版本上的旧 session 无法 resume；恢复路径是 draft 还在（同源码重 build 得同一个 version id）。**不扫 session header 保护被引用的版本**（等真实需要）。
 
@@ -428,6 +429,8 @@ Tool 是"能执行的能力"，Skill 是"要遵循的方法 / 知识"；不同 r
 ### 7.8 随仓库带的 extension（顶层 `extensions/`）
 
 都是普通 extension，走 §7.4 同一条 build → activate 路，**没有一个是内核层**：默认不在任何 composition 里（`--with` 成员 / pin 进 native 面 / `activate` 全是用户或 driver 的决定），随 checkout 到达的 store 照过 §9 的 trust gate。
+
+**分发**：这五个 draft 的源码被 build.zig `@embedFile` 进二进制（`src_embed` 的同一先例，`src/bundled.zig` 投影），`nulya ext seed` 把它们写进任一 store root（§7.2）——所以拿到二进制就拿到了它们，不需要这个 checkout 在场；seed 之后走的路与手放源码毫无区别。
 
 | id | kind | contribute | 谁消费 / 怎么进 session |
 |---|---|---|---|
@@ -587,6 +590,7 @@ NULYA_INTEGRATION_PROFILE=deepseek-anthropic zig build integration
 ```
 nulya ext init [--script] [--user] <id> [tool] | build <path> [--user]
           | sync [--user] [--activate] [--dry-run]        ← build 这个 root 下的每个 draft（§7.2）
+          | seed [--user] [<id>…] [--dry-run]             ← 把二进制内嵌的自带 draft 写进该 root（§7.2/§7.8）
           | run <id>[@<version>] [tool] (<json-args> | --arg k=v …)
           | activate [--user] <id> <version> | rollback [--user] <id> <version> | deactivate [--user] <id>
           | prune [--user] [<id>] [--dry-run]             ← 删非 `current` 的版本目录（§7.2）
@@ -606,11 +610,11 @@ nulya config show [--json]                               ← 有效配置链的�
 nulya src [path] [--tests]                               ← 打印本二进制内嵌的 src 源码（无参数 = 列全树）
 nulya skill list | load <skill-ref>
 nulya toolchain zig <args…>
-nulya help                                               ← 也认 `--help` / `-h`：整屏 usage（39 行）
+nulya help                                               ← 也认 `--help` / `-h`：整屏 usage（43 行）
 nulya                       ← 无参数：固定 prompt demo（现经 durable session 路径跑，§3.4）
 ```
 
-- **`nulya help` = 自描述入口，`usage` 与上面这张表逐动词对齐是约定。** `cli/common.zig` 把 usage 拆成**按动词族**的常量（`ext_usage` / `session_usage` / `config_usage` / `skill_usage` / `src_usage` / `toolchain_usage`），`help` 拼成一屏，**bare `nulya ext` / `nulya session` / `nulya skill` / `nulya config` / `nulya toolchain` 各印自己那块**（`common.usageSection`）——同一份文本，两处不可能对同一个动词说两样话（原来 `cli/session.zig` 里那份独立的 session usage 已删）。加动词/加 flag 就同时改这张表和那几个常量。未知命令 → stderr `unknown command '<x>'; run \`nulya help\`` + exit 1（stdout 保持空）。bare `nulya` 仍是 demo，bare `nulya src` 仍是列全树。整屏 **≤ 40 行**是硬约束（模型每次读都在付 token），e2e 断言它。
+- **`nulya help` = 自描述入口，`usage` 与上面这张表逐动词对齐是约定。** `cli/common.zig` 把 usage 拆成**按动词族**的常量（`ext_usage` / `session_usage` / `config_usage` / `skill_usage` / `src_usage` / `toolchain_usage`），`help` 拼成一屏，**bare `nulya ext` / `nulya session` / `nulya skill` / `nulya config` / `nulya toolchain` 各印自己那块**（`common.usageSection`）——同一份文本，两处不可能对同一个动词说两样话（原来 `cli/session.zig` 里那份独立的 session usage 已删）。加动词/加 flag 就同时改这张表和那几个常量。未知命令 → stderr `unknown command '<x>'; run \`nulya help\`` + exit 1（stdout 保持空）。bare `nulya` 仍是 demo，bare `nulya src` 仍是列全树。整屏**一屏以内**是硬约束（模型每次读都在付 token；当前 43 行，e2e 钉预算，动它要有真能力到场——`--image` +2、`ext seed` +1 是先例）。
 - **`nulya ext api` 三个 topic 的现状**：`protocol`（缺省）= 真实 `extension/protocol.zig` 源码；`permissions` = 今天的 authority（与 shell 同权、无 sandbox；子进程 env 净化后**加** `NULYA_EXE` / session 内 `NULYA_SESSION`；tool 拿不到对话；`manifest.permissions` 仅声明、无强制；extension tool 默认 30s / `timeout_ms` 上限 600s、`shell` 默认 120s / 上限 600s；workspace store 的 trust gate）；`examples` = 一条完整路径（`ext init --script` → `build` → `run <id>@<v> --arg k=v` → `activate` → `session new --pin` → 故意不 activate 的包用 `--with <id>@<v>` → `--user` → `ext trust` → `session outcome`）。
 - **model-facing 文本零文档引用**：kernel prompt（§7.5）、`usage`、`ext api` 的 `permissions` / `examples`、随仓库带的 `SKILL.md`——模型读得到的字只写行为与用法，**不出现 `DESIGN §x` / `PLAN §x` / 文件名**（模型读不到 docs，extension 还可能装到别的 workspace）。文档引用只待在代码注释与 docs 里；e2e 断言这几处不含 `DESIGN` / `PLAN`。
 
@@ -651,7 +655,7 @@ nulya                       ← 无参数：固定 prompt demo（现经 durable 
     ```
 
     `reasoning_item`（不透明、只为回放）**不转发**；`stopped ∈ end_turn | budget | canceled | max_tokens`（最后一步的回复被截断即 `max_tokens`，不论 `run` 是因它停的还是因连续两次停的，§4）。每个 step 的 ledger 行在该 step 的 `step end` **之前**刷出：读者见到 `step end` 就知道这一步的事件已全。诊断（原来的 "session step failed: …" 等）在 `--stream` 下变成 `{"stream":"run","event":"error","message":"…"}` 后非零退出——**stdout 上没有非 JSON 行**。
-- **`nulya ext sync` / `ext prune` 的输出形态**（语义在 §7.2）。`sync` 每个 draft 一行 `<id>: <version> <state>[ (copied from <root>)][ <激活尾巴>]`：`state ∈ built | already built | not built`（`not built` 只出现在 `--dry-run`，那时 `copied from` 改说 `available from`），激活尾巴 ∈ `(active)`（`current` 就是它）| `-> current`（这一趟指过去的）| `(current stays <v-old>)`（`--activate` 但不动它）；拿不到版本的两种写法是 `<id>: needs zig (compiled draft; set NULYA_ZIG or use the embedded toolchain)` 与 `<id>: failed: <一句原因>`，两者都计进 failed → exit 1。结尾一行 `N built, M already built, K failed`（dry-run 首列作 `not built`）。`prune` 每删一个打 `<id>@<v> removed (<N> KB)`（`--dry-run` 作 `would be removed`），无 `current` 的 id 打一行说明它为什么一个都不删，结尾除汇总外固定再打一行代价（旧 session 无法 resume / 重 build 同源码得同 id）。行按 id 排序，所以两次 sync 读起来一样。
+- **`nulya ext sync` / `ext seed` / `ext prune` 的输出形态**（语义在 §7.2）。`seed` 每个 id 一行：`<id>: seeded (<N> files) into <root>`（dry-run 作 `would seed`）或 `<id>: draft already in <root> (left alone)`，结尾 `N seeded, M already there`，有新 seed 再补一行指路 `` `nulya ext sync[ --user]` builds them ``；点名不存在的 id → stderr 列内嵌清单，exit 1。`sync` 每个 draft 一行 `<id>: <version> <state>[ (copied from <root>)][ <激活尾巴>]`：`state ∈ built | already built | not built`（`not built` 只出现在 `--dry-run`，那时 `copied from` 改说 `available from`），激活尾巴 ∈ `(active)`（`current` 就是它）| `-> current`（这一趟指过去的）| `(current stays <v-old>)`（`--activate` 但不动它）；拿不到版本的两种写法是 `<id>: needs zig (compiled draft; set NULYA_ZIG or use the embedded toolchain)` 与 `<id>: failed: <一句原因>`，两者都计进 failed → exit 1。结尾一行 `N built, M already built, K failed`（dry-run 首列作 `not built`）。`prune` 每删一个打 `<id>@<v> removed (<N> KB)`（`--dry-run` 作 `would be removed`），无 `current` 的 id 打一行说明它为什么一个都不删，结尾除汇总外固定再打一行代价（旧 session 无法 resume / 重 build 同源码得同 id）。行按 id 排序，所以两次 sync 读起来一样。
 - `nulya ext init|build|sync|prune|activate|rollback|deactivate` 都接受 `--user`：写端落到 user root（`~/.nulya/extensions`，需要时创建）而不是 workspace；`activate|rollback --user` **在 session 里跑**（`NULYA_SESSION` 存在）时先往 stderr 说一句这件事跨出了本 workspace（§7.2），照做不拦。不给 `--user` 时，`activate|rollback|deactivate` 都作用于**该 id 生效中的那个 root**（`Roots.firstActive`，§7.2）——版本不在那里就失败并指路，只有该 id 无 active 副本时 `activate|rollback` 才落到首个持有该 built 版本的 root；操作后按生效结果决定要不要投 capability_note、要不要打印 `not in effect`。`ext list` 打印 `id / version / root`，有版本的行按冻结 manifest 多打一列 `[tools skills prompt]`（声明了什么就打什么；读不出 manifest 就不打，绝不因此让列表失败）——`prompt` 是承重的那个：activate 了的包，它的 system_prompt 进**每一场**未来 session 的 system blocks（§7.5），从前只能手读 manifest 才看得见。被遮蔽的 active 行标 `(shadowed)`，**既无 `current` 又无任何 built 版本的目录直接跳过**（`<id>/.lock` 的 lease 在校验与编译之前就把 `<id>/` 建出来了，所以一次编译失败的 `ext build` 会留下只装着锁的空壳——那是锁的位置，不是 extension；有版本没 active 的 draft 照常列 `(inactive)`）；`ext run` / `skill list` / `skill load` / session composition 一律按 root 顺序搜索。
 - `nulya ext run <id>[@<version>] [tool] <json> | --arg k=v…`：`<id>` 跑生效中的版本；`<id>@<version>` 跑**恰好那个** built 版本（active 与否无关，按 root 顺序找首个持有者）——这是 `--with <id>@<version>` 带进 session 的 runtime tool 的调用形式，也是**故意不 activate 的 driver 包**的调用形式（`nulya ext run compact@v-… compact '{"session":"s-…"}'`，§11）：composition 里冻的是那个版本，`current` 可能指向别的甚至没有，所以 CLI 形式必须能点名版本；不让 `ext run` 在 `NULYA_SESSION` 下自动读 header，否则"同 session 内 activate 后 CLI 形式立即用新 current"这条语义就变了。usage 记的仍是 version-free 的 `ext:<id>/<tool>`。
 - `nulya ext activate` 在 `NULYA_SESSION`（相对 workspace 的 session 文件路径）存在时，向该 session 的 inbox 投一条 capability_note（§5.3）。

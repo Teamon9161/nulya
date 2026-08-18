@@ -93,5 +93,6 @@ test {
     _ = @import("cli/src.zig");
     _ = @import("cli/toolchain.zig");
     _ = @import("source.zig");
+    _ = @import("bundled.zig");
     _ = @import("extension/build/toolchain.zig");
 }
