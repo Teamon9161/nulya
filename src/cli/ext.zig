@@ -49,6 +49,8 @@ pub fn dispatchExt(alloc: std.mem.Allocator, io: std.Io, args: []const []const u
     if (std.mem.eql(u8, sub, "activate")) return extActivate(alloc, io, rest, .activate);
     if (std.mem.eql(u8, sub, "rollback")) return extActivate(alloc, io, rest, .rollback);
     if (std.mem.eql(u8, sub, "deactivate")) return extDeactivate(alloc, io, rest);
+    if (std.mem.eql(u8, sub, "sync")) return extSync(alloc, io, rest);
+    if (std.mem.eql(u8, sub, "prune")) return extPrune(alloc, io, rest);
     if (std.mem.eql(u8, sub, "list")) return extList(alloc, io);
     if (std.mem.eql(u8, sub, "inspect")) return extInspect(alloc, io, rest);
     if (std.mem.eql(u8, sub, "trust")) return extTrust(alloc, io);
@@ -133,7 +135,9 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try cwdRealPath(io, &cwd_buf);
-    const dest_spec = (try buildDestRoot(alloc, io, cwd_path, ext_dir, flags.user)) orelse {
+    var search = try RootSearch.open(alloc, io, cwd_path);
+    defer search.deinit(alloc);
+    const dest_spec = (try buildDestRoot(alloc, io, &search, ext_dir, flags.user)) orelse {
         try printErr(io, "no home directory for --user (set NULYA_HOME or HOME)\n");
         return 1;
     };
@@ -151,13 +155,19 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
     var dest_root = try store.openOrCreateRoot(io, cwd_path, dest_spec);
     defer dest_root.close(io);
 
+    // The other roots this machine searches, in that order: a version is content
+    // addressed, so one of them already holding these exact bytes means this
+    // build is a copy rather than a compile (DESIGN §7.4).
+    var donors = try donorRoots(alloc, &search, dest_spec);
+    defer donors.deinit(alloc);
+
     // A script extension needs no toolchain; only a compiled one does. Resolve
     // zig best-effort and let the build decide — it reports ZigVersionUnreadable
     // only if it actually has to compile.
     const zig_exe: ?ZigExe = resolveZig(alloc, io) catch null;
     defer if (zig_exe) |z| z.deinit(alloc);
 
-    var result = build_ext.buildExtension(alloc, io, std.Io.Dir.cwd(), ext_dir, dest_root, if (zig_exe) |z| z.path else "") catch |err| switch (err) {
+    var result = build_ext.buildExtensionReusing(alloc, io, std.Io.Dir.cwd(), ext_dir, dest_root, if (zig_exe) |z| z.path else "", donors.dirs.items) catch |err| switch (err) {
         // Either nothing answered, or what answered could not say its own
         // version — and that difference is the whole repair hint, so it is not
         // flattened into one sentence.
@@ -199,7 +209,8 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
         try printOut(alloc, io, "build FAILED for {s}:\n{s}\n", .{ ext_dir, result.stderr });
         return 1;
     }
-    const state = if (result.already_built) "already built" else "built";
+    const state = try buildState(alloc, result, donors.specs.items);
+    defer alloc.free(state);
     try printOut(alloc, io, "{s}: {s} ({s}, in {s})\n", .{ ext_dir, result.version, state, dest_spec });
 
     if (workspace_store_was_empty and std.mem.eql(u8, dest_spec, store.workspace_root_rel)) {
@@ -256,7 +267,7 @@ fn recordBirthTrust(alloc: std.mem.Allocator, io: std.Io, cwd_path: []const u8) 
 fn buildDestRoot(
     alloc: std.mem.Allocator,
     io: std.Io,
-    cwd_path: []const u8,
+    search: *const RootSearch,
     ext_dir: []const u8,
     user: bool,
 ) !?[]u8 {
@@ -268,12 +279,44 @@ fn buildDestRoot(
     var draft_buf: [std.fs.max_path_bytes]u8 = undefined;
     const draft_real = draft_buf[0..try draft.realPath(io, &draft_buf)];
 
-    var search = try RootSearch.open(alloc, io, cwd_path);
-    defer search.deinit(alloc);
     for (search.roots.entries) |entry| {
         if (isInside(entry.real, draft_real)) return try alloc.dupe(u8, entry.spec);
     }
     return try alloc.dupe(u8, store.workspace_root_rel);
+}
+
+/// The roots a build may take a copy FROM: every searched root except the one it
+/// is building into, in search order. The handles belong to `search`; only the
+/// two parallel lists are owned here.
+const DonorRoots = struct {
+    dirs: std.ArrayList(std.Io.Dir),
+    specs: std.ArrayList([]const u8),
+
+    fn deinit(self: *DonorRoots, alloc: std.mem.Allocator) void {
+        self.dirs.deinit(alloc);
+        self.specs.deinit(alloc);
+    }
+};
+
+fn donorRoots(alloc: std.mem.Allocator, search: *const RootSearch, dest_spec: []const u8) !DonorRoots {
+    var out: DonorRoots = .{ .dirs = .empty, .specs = .empty };
+    errdefer out.deinit(alloc);
+    for (search.roots.entries) |entry| {
+        if (std.mem.eql(u8, entry.spec, dest_spec)) continue;
+        try out.dirs.append(alloc, entry.dir);
+        try out.specs.append(alloc, entry.spec);
+    }
+    return out;
+}
+
+/// The parenthesised state in a build line: what happened, and — when the
+/// version came from another root rather than a compiler — which root supplied
+/// it. Caller owns the result.
+fn buildState(alloc: std.mem.Allocator, result: build_ext.BuildResult, donor_specs: []const []const u8) ![]u8 {
+    if (result.copied_from) |i| {
+        return std.fmt.allocPrint(alloc, "built, copied from {s}", .{donor_specs[i]});
+    }
+    return alloc.dupe(u8, if (result.already_built) "already built" else "built");
 }
 
 /// Whether `path` sits under directory `dir` (both already resolved to real
@@ -282,6 +325,417 @@ fn isInside(dir: []const u8, path: []const u8) bool {
     if (path.len <= dir.len) return false;
     if (!std.mem.eql(u8, path[0..dir.len], dir)) return false;
     return path[dir.len] == std.fs.path.sep or path[dir.len] == '/';
+}
+
+/// Errors that are a fault in the DRAFT rather than in this machine: everything
+/// `ext build` answers with one line about a source tree — the manifest's own
+/// rules plus what freezing the package can find wrong with the files it names.
+/// A host fault (out of memory, a failed read of a directory that is there) is
+/// deliberately absent, so `ext sync` keeps going past a bad draft but not past
+/// a broken machine.
+fn isDraftFault(err: anyerror) bool {
+    if (isManifestFault(err)) return true;
+    return switch (err) {
+        error.ManifestUnreadable,
+        error.SourceUnreadable,
+        error.DuplicateSnapshotPath,
+        error.SkillFileMissing,
+        error.SkillFileTooLarge,
+        error.InvalidSkillDirectoryName,
+        error.SkillNameDoesNotMatchDirectory,
+        error.DuplicateSkillName,
+        error.MissingSkillFrontmatter,
+        error.MissingSkillFrontmatterEnd,
+        error.MissingSkillName,
+        error.MissingSkillDescription,
+        error.InvalidSkillName,
+        error.InvalidSkillDescription,
+        error.SystemPromptFileMissing,
+        error.SystemPromptTooLarge,
+        error.InvalidUtf8,
+        => true,
+        else => false,
+    };
+}
+
+/// `nulya ext sync [--user] [--activate] [--dry-run]` — build every draft a store
+/// root holds (DESIGN §7.2, §7.4).
+///
+/// The layout has always been that a draft lives at `<root>/<id>/` with its
+/// frozen versions beside it. What was missing was the verb for "make what is in
+/// this directory usable", so installing an extension meant knowing to run
+/// `ext build` on each one by name. With this, putting the source in
+/// `<root>/<id>/` and running this once IS the installation — and on a machine
+/// with no toolchain it still works for anything another root already holds,
+/// because a build adopts such a copy rather than compiling (§7.4).
+///
+/// One draft failing never stops the others: a root is a directory of
+/// independent things, and stopping at the first bad manifest would hide every
+/// id after it. Building is mechanical, so it is the default; `--activate` is
+/// separate because pointing `current` somewhere is a decision (§7.4).
+fn extSync(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+    const flags = try takeUserFlag(alloc, args);
+    defer alloc.free(flags.rest);
+    var activate = false;
+    var dry_run = false;
+    for (flags.rest) |a| {
+        if (std.mem.eql(u8, a, "--activate")) {
+            activate = true;
+        } else if (std.mem.eql(u8, a, "--dry-run")) {
+            dry_run = true;
+        } else {
+            try printErr(io, "usage: nulya ext sync [--user] [--activate] [--dry-run]\n");
+            return 1;
+        }
+    }
+
+    const root_spec = (try writeRootSpec(alloc, flags.user)) orelse {
+        try printErr(io, "no home directory for --user (set NULYA_HOME or HOME)\n");
+        return 1;
+    };
+    defer alloc.free(root_spec);
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_path = try cwdRealPath(io, &cwd_buf);
+
+    // Asked before anything is built, because after a successful sync the answer
+    // is always "occupied" — the same birth-trust question `ext build` asks.
+    const workspace_store_was_empty = blk: {
+        const occupied = (try launch.occupiedWorkspaceStore(alloc, io, cwd_path)) orelse break :blk true;
+        alloc.free(occupied);
+        break :blk false;
+    };
+
+    var root_dir = store.openRoot(io, cwd_path, root_spec) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => {
+            try printOut(alloc, io, "no drafts in {s}\n", .{root_spec});
+            return 0;
+        },
+        else => return err,
+    };
+    defer root_dir.close(io);
+
+    const drafts = try draftIds(alloc, io, root_dir);
+    defer {
+        for (drafts) |d| alloc.free(d);
+        alloc.free(drafts);
+    }
+    if (drafts.len == 0) {
+        try printOut(alloc, io, "no drafts in {s}\n", .{root_spec});
+        return 0;
+    }
+
+    var search = try RootSearch.open(alloc, io, cwd_path);
+    defer search.deinit(alloc);
+    var donors = try donorRoots(alloc, &search, root_spec);
+    defer donors.deinit(alloc);
+
+    const zig_exe: ?ZigExe = resolveZig(alloc, io) catch null;
+    defer if (zig_exe) |z| z.deinit(alloc);
+    const zig_path = if (zig_exe) |z| z.path else "";
+
+    var produced: usize = 0;
+    var already: usize = 0;
+    var failed: usize = 0;
+    for (drafts) |draft| {
+        // The draft is inside this root, so the root is both the tree the build
+        // reads from and the store it writes into — no absolute sub-path anywhere,
+        // which is what makes an absolute user root work the same as `.nulya/…`.
+        var result = (if (dry_run)
+            build_ext.planExtension(alloc, io, root_dir, draft, root_dir, zig_path, donors.dirs.items)
+        else
+            build_ext.buildExtensionReusing(alloc, io, root_dir, draft, root_dir, zig_path, donors.dirs.items)) catch |err| switch (err) {
+            error.ZigVersionUnreadable => {
+                failed += 1;
+                try printOut(alloc, io, "{s}: needs zig (compiled draft; set NULYA_ZIG or use the embedded toolchain)\n", .{draft});
+                continue;
+            },
+            else => {
+                if (!isDraftFault(err)) return err;
+                failed += 1;
+                try printOut(alloc, io, "{s}: failed: {s}\n", .{ draft, @errorName(err) });
+                continue;
+            },
+        };
+        defer result.deinit(alloc);
+
+        if (!result.compile_ok) {
+            failed += 1;
+            try printOut(alloc, io, "{s}: failed: does not compile (`nulya ext build {s}` prints the diagnostics)\n", .{ result.id, draft });
+            continue;
+        }
+        if (result.already_built) {
+            already += 1;
+        } else {
+            produced += 1;
+        }
+
+        const state = if (result.already_built)
+            "already built"
+        else if (dry_run)
+            "not built"
+        else
+            "built";
+        var line: std.Io.Writer.Allocating = .init(alloc);
+        defer line.deinit();
+        try line.writer.print("{s}: {s} {s}", .{ result.id, result.version, state });
+        if (result.copied_from) |i| {
+            // A plan can only report where the copy would come from; a real sync
+            // has already taken it.
+            if (dry_run) {
+                try line.writer.print(" (available from {s})", .{donors.specs.items[i]});
+            } else {
+                try line.writer.print(" (copied from {s})", .{donors.specs.items[i]});
+            }
+        }
+        try appendActivation(alloc, io, &line.writer, root_dir, result, .{ .activate = activate, .dry_run = dry_run, .user = flags.user });
+        try line.writer.writeByte('\n');
+        try printRaw(io, line.written());
+    }
+
+    try printOut(alloc, io, "{d} {s}, {d} already built, {d} failed\n", .{
+        produced,
+        if (dry_run) "not built" else "built",
+        already,
+        failed,
+    });
+
+    if (!dry_run and produced != 0 and workspace_store_was_empty and std.mem.eql(u8, root_spec, store.workspace_root_rel)) {
+        try recordBirthTrust(alloc, io, cwd_path);
+    }
+    return if (failed != 0) 1 else 0;
+}
+
+const SyncMode = struct { activate: bool, dry_run: bool, user: bool };
+
+/// The tail of a sync line: what `current` says about this version, and what
+/// `--activate` did about it.
+///
+/// The rule is one sentence (DESIGN §7.4): sync points `current` at a version it
+/// just brought into this root, and at a draft's version for an id that has no
+/// `current` at all — but never over a `current` that names something else. That
+/// pointer was somebody's decision (a rollback, an activate), and a sync that
+/// silently undid it would make rollback survive only until the next start-up.
+fn appendActivation(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    out: *std.Io.Writer,
+    root_dir: std.Io.Dir,
+    result: build_ext.BuildResult,
+    mode: SyncMode,
+) !void {
+    const st = store.Store.init(io, root_dir);
+    const current = try st.activeVersion(alloc, result.id);
+    defer if (current) |c| alloc.free(c);
+
+    if (current) |c| {
+        if (std.mem.eql(u8, c, result.version)) return out.writeAll(" (active)");
+    }
+    if (!mode.activate or mode.dry_run) return;
+    if (result.already_built and current != null) {
+        return out.print(" (current stays {s})", .{current.?});
+    }
+    try warnUserScope(alloc, io, st, result.id, result.version, mode.user);
+    try st.activate(alloc, result.id, result.version);
+    depositSessionNote(alloc, io, root_dir, result.id, result.version) catch {};
+    try out.writeAll(" -> current");
+}
+
+/// `nulya ext prune [--user] [<id>] [--dry-run]` — drop the version directories a
+/// store root keeps that `current` does not name (DESIGN §7.4).
+///
+/// Versions accumulate on purpose: every build of a changed draft is a new
+/// immutable directory, and that is what makes rollback a pointer move. The cost
+/// is disk, and after a few dozen iterations of one compiled tool it is real. So
+/// this is the counterweight, and it is deliberately narrow: only `current` is
+/// safe to keep by rule, so an id whose `current` is missing keeps EVERYTHING —
+/// with no pointer there is nothing to preserve it BY, and guessing (newest?
+/// biggest?) would delete the one somebody meant to roll back to.
+///
+/// What it costs is printed rather than assumed: a session frozen on a deleted
+/// version can no longer resume, and the way back is the draft — building the
+/// same source yields the same version id.
+fn extPrune(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+    const flags = try takeUserFlag(alloc, args);
+    defer alloc.free(flags.rest);
+    var dry_run = false;
+    var only_id: ?[]const u8 = null;
+    for (flags.rest) |a| {
+        if (std.mem.eql(u8, a, "--dry-run")) {
+            dry_run = true;
+        } else if (only_id == null and !std.mem.startsWith(u8, a, "-")) {
+            only_id = a;
+        } else {
+            try printErr(io, "usage: nulya ext prune [--user] [<id>] [--dry-run]\n");
+            return 1;
+        }
+    }
+
+    if (only_id) |id| {
+        if (!manifest.isValidId(id)) {
+            try printErrFmt(alloc, io, "not an extension id: '{s}'; see `nulya ext list`\n", .{id});
+            return 1;
+        }
+    }
+
+    const root_spec = (try writeRootSpec(alloc, flags.user)) orelse {
+        try printErr(io, "no home directory for --user (set NULYA_HOME or HOME)\n");
+        return 1;
+    };
+    defer alloc.free(root_spec);
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_path = try cwdRealPath(io, &cwd_buf);
+    var root_dir = store.openRoot(io, cwd_path, root_spec) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => {
+            try printOut(alloc, io, "nothing to prune in {s}\n", .{root_spec});
+            return 0;
+        },
+        else => return err,
+    };
+    defer root_dir.close(io);
+
+    const ids = try pruneTargets(alloc, io, root_dir, only_id);
+    defer {
+        for (ids) |i| alloc.free(i);
+        alloc.free(ids);
+    }
+
+    const st = store.Store.init(io, root_dir);
+    var removed: usize = 0;
+    var kept: usize = 0;
+    var bytes_freed: u64 = 0;
+    for (ids) |id| {
+        // Look before leasing: an id with nothing built is nothing to prune, and
+        // taking the writer lease would CREATE `<id>/` — a mistyped id would then
+        // leave a directory behind instead of doing nothing.
+        {
+            const versions = try st.listVersions(alloc, id);
+            defer {
+                for (versions) |v| alloc.free(v);
+                alloc.free(versions);
+            }
+            if (versions.len == 0) continue;
+        }
+        // The same writer lease every mutation of `<id>/` runs under, so a prune
+        // cannot delete a directory another process is building or activating.
+        var held: ?std.Io.File = if (dry_run) null else try st.lease(alloc, id);
+        defer if (held) |*h| h.close(io);
+
+        const current = try st.activeVersion(alloc, id);
+        defer if (current) |c| alloc.free(c);
+        const versions = try st.listVersions(alloc, id);
+        defer {
+            for (versions) |v| alloc.free(v);
+            alloc.free(versions);
+        }
+        if (versions.len == 0) continue;
+        if (current == null) {
+            kept += versions.len;
+            try printOut(alloc, io, "{s}: no current — nothing pruned (a deactivated id keeps every version; delete by hand if you mean it)\n", .{id});
+            continue;
+        }
+        for (versions) |v| {
+            if (std.mem.eql(u8, v, current.?)) {
+                kept += 1;
+                continue;
+            }
+            const version_rel = try std.fs.path.join(alloc, &.{ id, "versions", v });
+            defer alloc.free(version_rel);
+            const size = try treeSize(alloc, io, root_dir, version_rel);
+            if (!dry_run) try root_dir.deleteTree(io, version_rel);
+            removed += 1;
+            bytes_freed += size;
+            try printOut(alloc, io, "{s}@{s} {s} ({d} KB)\n", .{ id, v, if (dry_run) "would be removed" else "removed", (size + 1023) / 1024 });
+        }
+    }
+
+    if (removed == 0) {
+        try printOut(alloc, io, "nothing to prune in {s}\n", .{root_spec});
+        return 0;
+    }
+    try printOut(alloc, io, "{d} version(s) {s}, {d} kept, {d} KB\n", .{
+        removed,
+        if (dry_run) "would be removed" else "removed",
+        kept,
+        (bytes_freed + 1023) / 1024,
+    });
+    // Said plainly, because it is the one thing a pruner cannot undo by rerunning
+    // this command — and the one thing that IS recoverable, from the draft.
+    try printOut(alloc, io, "note: a session frozen on a removed version can no longer resume; rebuilding the same source restores the same version id\n", .{});
+    return 0;
+}
+
+/// Which ids a prune touches: the one named, or every directory in the root that
+/// holds built versions. Caller owns the result.
+fn pruneTargets(alloc: std.mem.Allocator, io: std.Io, root_dir: std.Io.Dir, only_id: ?[]const u8) ![][]u8 {
+    var out: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (out.items) |i| alloc.free(i);
+        out.deinit(alloc);
+    }
+    if (only_id) |id| {
+        try out.append(alloc, try alloc.dupe(u8, id));
+        return out.toOwnedSlice(alloc);
+    }
+    var it = root_dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .directory) continue;
+        if (!manifest.isValidId(entry.name)) continue;
+        try out.append(alloc, try alloc.dupe(u8, entry.name));
+    }
+    const items = try out.toOwnedSlice(alloc);
+    std.mem.sort([]u8, items, {}, struct {
+        fn lessThan(_: void, a: []u8, b: []u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lessThan);
+    return items;
+}
+
+/// Total bytes of the files under `sub_path`. Best-effort: a file that cannot be
+/// stated contributes nothing rather than failing the prune.
+fn treeSize(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, sub_path: []const u8) !u64 {
+    var dir = root.openDir(io, sub_path, .{ .iterate = true }) catch return 0;
+    defer dir.close(io);
+    var walker = try dir.walk(alloc);
+    defer walker.deinit();
+    var total: u64 = 0;
+    while (try walker.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        var file = dir.openFile(io, entry.path, .{}) catch continue;
+        defer file.close(io);
+        const stat = file.stat(io) catch continue;
+        total += stat.size;
+    }
+    return total;
+}
+
+/// Every draft directly under a store root: `<root>/<id>/extension.json` is the
+/// file `ext init` writes, so its presence IS the definition of a draft. Sorted,
+/// so a sync reads the same way twice. One level only — a version's frozen
+/// manifest lives further down and is not a draft. Caller owns the result.
+fn draftIds(alloc: std.mem.Allocator, io: std.Io, root_dir: std.Io.Dir) ![][]u8 {
+    var out: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (out.items) |d| alloc.free(d);
+        out.deinit(alloc);
+    }
+    var it = root_dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .directory) continue;
+        const manifest_rel = try std.fs.path.join(alloc, &.{ entry.name, "extension.json" });
+        defer alloc.free(manifest_rel);
+        root_dir.access(io, manifest_rel, .{}) catch continue;
+        try out.append(alloc, try alloc.dupe(u8, entry.name));
+    }
+    const items = try out.toOwnedSlice(alloc);
+    std.mem.sort([]u8, items, {}, struct {
+        fn lessThan(_: void, a: []u8, b: []u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lessThan);
+    return items;
 }
 
 fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
@@ -940,6 +1394,14 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             \\  nulya ext build extensions/guide --user
             \\  nulya ext activate --user guide v-<hash>
             \\  nulya ext trust                               # a .nulya/extensions that came with a checkout
+            \\
+            \\  # A whole store root at once: put the source in <root>/<id>/, then one verb.
+            \\  cp -r some.tool ~/.nulya/extensions/           # or write it there in the first place
+            \\  nulya ext sync --user --activate               # builds every draft there; a version another root
+            \\                                                # already holds is copied, not compiled
+            \\  nulya ext sync --dry-run                       # what it would do, touching nothing
+            \\  nulya ext prune --user                         # drop versions `current` does not name; the draft
+            \\                                                # can always rebuild the same version id
             \\
             \\  # Afterwards: say how it went, so later passes have evidence.
             \\  nulya session outcome <session-id> success --note "the helper did it"

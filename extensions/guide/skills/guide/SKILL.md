@@ -122,8 +122,22 @@ Store and scope:
 
 - `nulya ext build <path>` freezes whatever directory you point at — the draft
   may live anywhere — and files the result under the store by its manifest id.
-- `--user` on `init` / `build` / `activate` / `rollback` / `deactivate` uses the
-  user store, which every workspace on this machine sees.
+- `--user` on `init` / `build` / `sync` / `prune` / `activate` / `rollback` /
+  `deactivate` uses the user store, which every workspace on this machine sees.
+  **A tool you want everywhere belongs there.**
+- **The least-effort install: put the source in `<root>/<id>/` and run `nulya ext
+  sync [--user]`.** It builds every draft in that root, one line each, and one
+  bad manifest does not stop the rest. Add `--activate` to point `current` at
+  what it just built (and at ids that have none) — it never moves a `current`
+  that names something else, so a rollback survives. `--dry-run` says what it
+  would do and writes nothing.
+- A build takes a copy instead of compiling when another root already holds that
+  exact version, which is what lets a machine with no toolchain install a
+  compiled tool the user store already carries.
+- `nulya ext prune [--user] [<id>]` deletes the versions `current` does not
+  name. The cost: a session frozen on a deleted version can no longer resume.
+  The way back: the draft is still there, and the same source rebuilds to the
+  same version id. An id with no `current` is left entirely alone.
 - Search order is workspace `.nulya/extensions`, then the user store, then
   configured paths. The first root with an active copy of an id wins; `nulya ext
   list` marks the losers `(shadowed)` and shows what each version contributes.

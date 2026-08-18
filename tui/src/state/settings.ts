@@ -31,6 +31,21 @@ export interface Settings {
     theme: "nulya-dark" | "nulya-light"
     motion: boolean
   }
+  extensions: {
+    /**
+     * Build the drafts in the store roots when the TUI opens (tui.md §11, T11).
+     * On by default because "the source is there and nothing built it" is never
+     * what anyone wanted; the user store runs in the background, and the
+     * project store is gated by the trust question, which no setting can skip.
+     */
+    sync_on_start: boolean
+    /**
+     * Let that pass move `current` onto what it just built. It never moves a
+     * pointer that names something else (DESIGN §7.2), so a rollback survives
+     * this being on.
+     */
+    auto_activate: boolean
+  }
   keys: Record<string, string>
   /** Files that actually contributed, nearest last (`/settings` shows these). */
   sources: string[]
@@ -46,6 +61,7 @@ export const default_settings: Settings = {
     history_window: 400,
   },
   ui: { theme: "nulya-dark", motion: true },
+  extensions: { sync_on_start: true, auto_activate: true },
   keys: {},
   sources: [],
 }
@@ -93,6 +109,11 @@ function mergeLayer(into: Settings, layer: unknown, source: string) {
   if (ui) {
     into.ui.theme = pick(ui["theme"], ["nulya-dark", "nulya-light"], into.ui.theme)
     if (typeof ui["motion"] === "boolean") into.ui.motion = ui["motion"]
+  }
+  const extensions = record["extensions"] as Record<string, unknown> | undefined
+  if (extensions) {
+    if (typeof extensions["sync_on_start"] === "boolean") into.extensions.sync_on_start = extensions["sync_on_start"]
+    if (typeof extensions["auto_activate"] === "boolean") into.extensions.auto_activate = extensions["auto_activate"]
   }
   const keys = record["keys"] as Record<string, unknown> | undefined
   if (keys) {

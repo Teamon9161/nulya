@@ -163,11 +163,12 @@ pub fn writeInto(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, sub_dir:
 pub const ext_usage =
     \\  nulya ext init [--script] [--user] <id> [tool]    scaffold a draft (--script needs no compiler)
     \\  nulya ext build <path> [--user]                   freeze a draft into an immutable version, print its id
+    \\  nulya ext sync [--user] [--activate] [--dry-run]  build every draft in that root: source in <root>/<id>/ installs
     \\  nulya ext run <id>[@<ver>] [tool] <json> | --arg k=v …   run the version in effect, or exactly that one
     \\  nulya ext activate|rollback [--user] <id> <ver>   point `current` at a version; older ones are kept
     \\  nulya ext deactivate [--user] <id>                drop `current`; the versions stay
-    \\  nulya ext list                                    every extension: active version, store root, contributions
-    \\  nulya ext inspect <id>                            print the frozen manifest
+    \\  nulya ext prune [--user] [<id>] [--dry-run]       delete the versions `current` does not name
+    \\  nulya ext list | inspect <id>                     every extension (version, root, contributions), or one manifest
     \\  nulya ext trust                                   allow this workspace's store once, if it came with a checkout
     \\  nulya ext api [protocol|permissions|examples]     the tool wire protocol, the authority model, worked commands
     \\  --user acts on the user store, which every workspace on this machine sees

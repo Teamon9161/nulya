@@ -1531,6 +1531,363 @@ test "cli ext build: a draft outside any store lands in the workspace store unde
     }
 }
 
+test "cli ext build: a compiled version another store root already holds is copied in rather than compiled — byte for byte, with no toolchain on this machine at all" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+    const repo = host_env.get("NULYA_REPO") orelse return error.SkipZigTest;
+    const draft = try std.fs.path.join(alloc, &.{ repo, "extensions", "compact" });
+    defer alloc.free(draft);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var ws_real: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
+    const home_abs = try std.fs.path.join(alloc, &.{ ws_path, "home" });
+    defer alloc.free(home_abs);
+
+    // The user store already carries a built `compact` — the ordinary case after
+    // `ext build --user` once, or after another workspace built it.
+    const user_root = "home" ++ std.fs.path.sep_str ++ "extensions";
+    const version = try support.stageBundledIn(alloc, io, ws, user_root, "compact");
+    defer alloc.free(version);
+
+    // Now build the same draft here, with NULYA_ZIG naming something that is not
+    // a compiler: `compact` is a COMPILED extension, so this build can only
+    // succeed by adopting the copy the user root holds.
+    const built = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "build", draft }, &.{
+        .{ .key = "NULYA_HOME", .value = home_abs },
+        .{ .key = "NULYA_ZIG", .value = "definitely-not-a-compiler" },
+    });
+    defer alloc.free(built.stdout);
+    try std.testing.expectEqual(@as(u8, 0), built.code);
+    try std.testing.expect(std.mem.indexOf(u8, built.stdout, "copied from") != null);
+    const copied_version = try extractVersion(alloc, built.stdout);
+    defer alloc.free(copied_version);
+    try std.testing.expectEqualStrings(version, copied_version);
+
+    // Same version id, same bytes: the copy IS the version, so everything that
+    // validates a frozen version — activate, `--with`, a pinned tool — accepts it.
+    {
+        const rel = try std.fs.path.join(alloc, &.{ "compact", "versions", version });
+        defer alloc.free(rel);
+        const user_version_rel = try std.fs.path.join(alloc, &.{ user_root, rel });
+        defer alloc.free(user_version_rel);
+        const ws_version_rel = try std.fs.path.join(alloc, &.{ ".nulya", "extensions", rel });
+        defer alloc.free(ws_version_rel);
+        var from_user = try ws.openDir(io, user_version_rel, .{ .iterate = true });
+        defer from_user.close(io);
+        var in_workspace = try ws.openDir(io, ws_version_rel, .{ .iterate = true });
+        defer in_workspace.close(io);
+        try support.expectSameTree(alloc, io, from_user, in_workspace);
+    }
+
+    // A second build finds it in the destination root and says so — the copy did
+    // not invent a version that only half exists.
+    const again = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "build", draft }, &.{
+        .{ .key = "NULYA_HOME", .value = home_abs },
+        .{ .key = "NULYA_ZIG", .value = "definitely-not-a-compiler" },
+    });
+    defer alloc.free(again.stdout);
+    try std.testing.expectEqual(@as(u8, 0), again.code);
+    try std.testing.expect(std.mem.indexOf(u8, again.stdout, "already built") != null);
+
+    // And the adopted version really runs: activate it and call its tool with no
+    // arguments, which the frozen binary refuses by protocol rather than by
+    // failing to start.
+    {
+        const activated = try runCliEnv(alloc, io, ws, &.{ exe_abs, "ext", "activate", "compact", version }, "NULYA_HOME", home_abs);
+        defer alloc.free(activated.stdout);
+        try std.testing.expectEqual(@as(u8, 0), activated.code);
+        const ran = try runCliEnv(alloc, io, ws, &.{ exe_abs, "ext", "run", "compact", "{}" }, "NULYA_HOME", home_abs);
+        defer alloc.free(ran.stdout);
+        try std.testing.expect(ran.stdout.len != 0);
+    }
+}
+
+test "cli ext sync: every draft in a root is built in one pass — data, script and a compiled one adopted from the user store — a broken manifest fails alone, and --dry-run writes nothing" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var ws_real: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
+    const home_abs = try std.fs.path.join(alloc, &.{ ws_path, "home" });
+    defer alloc.free(home_abs);
+    // No toolchain at all for the whole test: the compiled draft below can only
+    // be installed by adopting the copy the user store carries.
+    const env: []const EnvPair = &.{
+        .{ .key = "NULYA_HOME", .value = home_abs },
+        .{ .key = "NULYA_ZIG", .value = "definitely-not-a-compiler" },
+    };
+    const ws_store = ".nulya" ++ std.fs.path.sep_str ++ "extensions";
+
+    // Four drafts dropped into the workspace store, which is all "installing an
+    // extension" is meant to take.
+    try writeSkillDraft(alloc, io, ws, ws_store ++ std.fs.path.sep_str ++ "data.mode", "data.mode", "a mode kept as source");
+    try writeScriptDraft(alloc, io, ws, ws_store, "my.helper");
+    try support.copyBundledDraft(alloc, io, ws, ws_store, "compact");
+    try ws.createDirPath(io, ws_store ++ std.fs.path.sep_str ++ "bad");
+    try ws.writeFile(io, .{ .sub_path = ws_store ++ std.fs.path.sep_str ++ "bad" ++ std.fs.path.sep_str ++ "extension.json", .data = "{not json" });
+
+    const staged = try support.stageBundledIn(alloc, io, ws, "home" ++ std.fs.path.sep_str ++ "extensions", "compact");
+    defer alloc.free(staged);
+
+    // A plan first: it says what each draft is and what would happen, and leaves
+    // the store exactly as it found it.
+    {
+        const dry = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "sync", "--dry-run" }, env);
+        defer alloc.free(dry.stdout);
+        try std.testing.expectEqual(@as(u8, 1), dry.code); // the broken manifest
+        try std.testing.expect(std.mem.indexOf(u8, dry.stdout, "not built") != null);
+        try std.testing.expect(std.mem.indexOf(u8, dry.stdout, "bad: failed") != null);
+        try std.testing.expect(std.mem.indexOf(u8, dry.stdout, "3 not built, 0 already built, 1 failed") != null);
+        // The compiled one is not "would build" — it is available for the taking.
+        try std.testing.expect(std.mem.indexOf(u8, dry.stdout, "available from") != null);
+        const versions_rel = ws_store ++ std.fs.path.sep_str ++ "data.mode" ++ std.fs.path.sep_str ++ "versions";
+        try std.testing.expectError(error.FileNotFound, ws.access(io, versions_rel, .{}));
+    }
+
+    const first = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "sync" }, env);
+    defer alloc.free(first.stdout);
+    try std.testing.expectEqual(@as(u8, 1), first.code);
+    for ([_][]const u8{ "data.mode", "my.helper", "compact", "copied from", "bad: failed", "3 built, 0 already built, 1 failed" }) |needle| {
+        std.testing.expect(std.mem.indexOf(u8, first.stdout, needle) != null) catch |err| {
+            std.debug.print("`ext sync` never said '{s}':\n{s}\n", .{ needle, first.stdout });
+            return err;
+        };
+    }
+
+    // Nothing was activated: building is mechanical, pointing `current` is a
+    // decision.
+    {
+        const listed = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "list" }, env);
+        defer alloc.free(listed.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, listed.stdout, "(inactive)") != null);
+    }
+
+    // Idempotent: a second pass finds every version already there.
+    {
+        const again = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "sync" }, env);
+        defer alloc.free(again.stdout);
+        try std.testing.expectEqual(@as(u8, 1), again.code);
+        try std.testing.expect(std.mem.indexOf(u8, again.stdout, "0 built, 3 already built, 1 failed") != null);
+    }
+
+    // --activate, case 1: an id with no `current` gets one.
+    const data_version = blk: {
+        const activated = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "sync", "--activate" }, env);
+        defer alloc.free(activated.stdout);
+        try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, activated.stdout, "-> current"));
+        break :blk try readActive(alloc, io, ws, ws_store, "data.mode");
+    };
+    defer alloc.free(data_version);
+
+    // --activate, case 2: a draft edited since — the new version becomes current.
+    try writeSkillDraft(alloc, io, ws, ws_store ++ std.fs.path.sep_str ++ "data.mode", "data.mode", "edited since");
+    const second_version = blk: {
+        const activated = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "sync", "--activate" }, env);
+        defer alloc.free(activated.stdout);
+        try std.testing.expectEqual(@as(u8, 1), activated.code);
+        try std.testing.expect(std.mem.indexOf(u8, activated.stdout, "built") != null);
+        const now = try readActive(alloc, io, ws, ws_store, "data.mode");
+        try std.testing.expect(!std.mem.eql(u8, now, data_version));
+        break :blk now;
+    };
+    defer alloc.free(second_version);
+
+    // --activate, case 3: someone rolled back, and the draft's version is already
+    // built — the rollback stands. A decision outlives the next sync.
+    {
+        const rolled = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "rollback", "data.mode", data_version }, env);
+        defer alloc.free(rolled.stdout);
+        try std.testing.expectEqual(@as(u8, 0), rolled.code);
+
+        const activated = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "sync", "--activate" }, env);
+        defer alloc.free(activated.stdout);
+        const stays = try std.fmt.allocPrint(alloc, "(current stays {s})", .{data_version});
+        defer alloc.free(stays);
+        try std.testing.expect(std.mem.indexOf(u8, activated.stdout, stays) != null);
+        const now = try readActive(alloc, io, ws, ws_store, "data.mode");
+        defer alloc.free(now);
+        try std.testing.expectEqualStrings(data_version, now);
+    }
+
+    // What sync produced is an ordinary version: composable by name.
+    {
+        const with_arg = try std.fmt.allocPrint(alloc, "data.mode@{s}", .{second_version});
+        defer alloc.free(with_arg);
+        const new = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--with", with_arg }, env);
+        defer alloc.free(new.stdout);
+        try std.testing.expectEqual(@as(u8, 0), new.code);
+    }
+}
+
+test "cli ext sync: a compiled draft with no toolchain and nowhere to copy from says it needs zig, alone, and writes no version" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    const ws_store = ".nulya" ++ std.fs.path.sep_str ++ "extensions";
+    const env: []const EnvPair = &.{.{ .key = "NULYA_ZIG", .value = "definitely-not-a-compiler" }};
+
+    try support.copyBundledDraft(alloc, io, ws, ws_store, "compact");
+    try writeScriptDraft(alloc, io, ws, ws_store, "my.helper");
+
+    const synced = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "sync" }, env);
+    defer alloc.free(synced.stdout);
+    try std.testing.expectEqual(@as(u8, 1), synced.code);
+    try std.testing.expect(std.mem.indexOf(u8, synced.stdout, "compact: needs zig") != null);
+    try std.testing.expect(std.mem.indexOf(u8, synced.stdout, "NULYA_ZIG") != null);
+    // The script draft beside it is unaffected: one draft's problem is its own.
+    try std.testing.expect(std.mem.indexOf(u8, synced.stdout, "1 built, 0 already built, 1 failed") != null);
+    const compact_versions = ws_store ++ std.fs.path.sep_str ++ "compact" ++ std.fs.path.sep_str ++ "versions";
+    try std.testing.expectError(error.FileNotFound, ws.access(io, compact_versions, .{}));
+}
+
+test "cli ext prune: every version but `current` goes, an id without one keeps all of them, and --dry-run only says what it would do" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    const ws_store = ".nulya" ++ std.fs.path.sep_str ++ "extensions";
+    const draft = ws_store ++ std.fs.path.sep_str ++ "data.mode";
+
+    // Three versions of one id, `current` on the middle one; and a second id with
+    // versions but no `current` at all.
+    var versions: [3][]u8 = undefined;
+    for ([_][]const u8{ "one", "two", "three" }, 0..) |body, i| {
+        try writeSkillDraft(alloc, io, ws, draft, "data.mode", body);
+        const built = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "build", draft });
+        defer alloc.free(built.stdout);
+        try std.testing.expectEqual(@as(u8, 0), built.code);
+        versions[i] = try extractVersion(alloc, built.stdout);
+    }
+    defer for (versions) |v| alloc.free(v);
+
+    try writeSkillDraft(alloc, io, ws, ws_store ++ std.fs.path.sep_str ++ "loose.mode", "loose.mode", "never activated");
+    {
+        const built = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "build", ws_store ++ std.fs.path.sep_str ++ "loose.mode" });
+        defer alloc.free(built.stdout);
+        try std.testing.expectEqual(@as(u8, 0), built.code);
+    }
+    {
+        const activated = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "activate", "data.mode", versions[1] });
+        defer alloc.free(activated.stdout);
+        try std.testing.expectEqual(@as(u8, 0), activated.code);
+    }
+
+    // A plan removes nothing.
+    {
+        const dry = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "prune", "--dry-run" });
+        defer alloc.free(dry.stdout);
+        try std.testing.expectEqual(@as(u8, 0), dry.code);
+        try std.testing.expect(std.mem.indexOf(u8, dry.stdout, "would be removed") != null);
+        for (versions) |v| {
+            const rel = try std.fs.path.join(alloc, &.{ draft, "versions", v });
+            defer alloc.free(rel);
+            try ws.access(io, rel, .{});
+        }
+    }
+
+    const pruned = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "prune" });
+    defer alloc.free(pruned.stdout);
+    try std.testing.expectEqual(@as(u8, 0), pruned.code);
+    // The cost of the deletion is stated where the deletion is reported.
+    try std.testing.expect(std.mem.indexOf(u8, pruned.stdout, "can no longer resume") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pruned.stdout, "loose.mode: no current") != null);
+
+    for (versions, 0..) |v, i| {
+        const rel = try std.fs.path.join(alloc, &.{ ws_store, "data.mode", "versions", v });
+        defer alloc.free(rel);
+        if (i == 1) {
+            try ws.access(io, rel, .{}); // current survives
+        } else {
+            try std.testing.expectError(error.FileNotFound, ws.access(io, rel, .{}));
+        }
+    }
+    // An id with no `current` is untouched: nothing there says which one to keep.
+    {
+        const listed = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "list" });
+        defer alloc.free(listed.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, listed.stdout, "loose.mode") != null);
+        try std.testing.expect(std.mem.indexOf(u8, listed.stdout, versions[1]) != null);
+    }
+
+    // Rebuilding the draft that is still there restores the pruned version id —
+    // the recovery path the note points at.
+    try writeSkillDraft(alloc, io, ws, draft, "data.mode", "three");
+    {
+        const rebuilt = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "build", draft });
+        defer alloc.free(rebuilt.stdout);
+        const v = try extractVersion(alloc, rebuilt.stdout);
+        defer alloc.free(v);
+        try std.testing.expectEqualStrings(versions[2], v);
+    }
+}
+
+/// The `current` pointer of `id` in a store root under `ws`. Caller owns it.
+fn readActive(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, root_rel: []const u8, id: []const u8) ![]u8 {
+    const rel = try std.fs.path.join(alloc, &.{ root_rel, id, "current" });
+    defer alloc.free(rel);
+    const raw = try ws.readFileAlloc(io, rel, alloc, .limited(256));
+    defer alloc.free(raw);
+    return alloc.dupe(u8, std.mem.trim(u8, raw, " \t\r\n"));
+}
+
+/// Write a host-appropriate script extension DRAFT under `root_rel`; no build.
+fn writeScriptDraft(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, root_rel: []const u8, id: []const u8) !void {
+    const windows = @import("builtin").os.tag == .windows;
+    const script_name = if (windows) "run.ps1" else "run.sh";
+    const entry = if (windows) "src/run.ps1" else "src/run.sh";
+    const interpreter = if (windows) "powershell" else "sh";
+
+    const ext_dir = try std.fs.path.join(alloc, &.{ root_rel, id });
+    defer alloc.free(ext_dir);
+    const src_dir = try std.fs.path.join(alloc, &.{ ext_dir, "src" });
+    defer alloc.free(src_dir);
+    try ws.createDirPath(io, src_dir);
+
+    const manifest_bytes = try templates.scriptManifestJson(alloc, id, "do_thing", entry, interpreter);
+    defer alloc.free(manifest_bytes);
+    const manifest_rel = try std.fs.path.join(alloc, &.{ ext_dir, "extension.json" });
+    defer alloc.free(manifest_rel);
+    try ws.writeFile(io, .{ .sub_path = manifest_rel, .data = manifest_bytes });
+    const script_rel = try std.fs.path.join(alloc, &.{ src_dir, script_name });
+    defer alloc.free(script_rel);
+    try ws.writeFile(io, .{ .sub_path = script_rel, .data = if (windows) templates.script_ps1 else templates.script_sh });
+}
+
 /// Write a pure-skill (data kind) extension DRAFT at `dir_rel`; no build.
 fn writeSkillDraft(
     alloc: std.mem.Allocator,

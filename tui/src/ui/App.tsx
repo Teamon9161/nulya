@@ -1,4 +1,4 @@
-import { Match, Switch, createEffect, createSignal, onCleanup } from "solid-js"
+import { Match, Switch, createEffect, createSignal, onCleanup, onMount } from "solid-js"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import type { KeyEvent, ScrollBoxRenderable } from "@opentui/core"
 import { Transcript, rowsBelow, windowItems } from "./Transcript.tsx"
@@ -18,7 +18,8 @@ import { OverlayContext, createOverlayStore, type OverlayKind } from "../state/o
 import { createTabStore, type SessionTab } from "../state/tabs.ts"
 import { loadTuiState, rememberModel, type ModelPick } from "../state/tui_state.ts"
 import { describeTool } from "../render/registry.ts"
-import { isVerdict, sessionNew, sessionOutcome, verdicts, type ModelView as ModelParams } from "../nulya/cli.ts"
+import { extSync, isVerdict, sessionNew, sessionOutcome, verdicts, type ModelView as ModelParams } from "../nulya/cli.ts"
+import { planStore, summarize } from "../extensions.ts"
 import { runCompact } from "../compact.ts"
 import { buildEvolution, formatWithRef, parseWithRef, withOptions, type WithRef } from "../evolve.ts"
 import { createKeymap, matches } from "../keymap.ts"
@@ -50,6 +51,13 @@ export interface AppProps {
    * not appear, which is why this is optional rather than loaded here.
    */
   models?: ModelParams[]
+  /**
+   * Which store roots to build on the way in, and whether to let that pass move
+   * `current` (tui.md §11, T11). The user root needs no permission; the project
+   * root is only here when `main` found it already trusted — the question, when
+   * there is one, is asked before this screen exists.
+   */
+  sync?: { user: boolean; project: boolean; activate: boolean }
 }
 
 /**
@@ -105,6 +113,39 @@ export function App(props: AppProps) {
     const timer = setInterval(() => setSpinnerTick((tick) => tick + 1), 90)
     onCleanup(() => clearInterval(timer))
   })
+
+  /**
+   * Build the drafts sitting in the store roots, in the background (tui.md §11,
+   * T11). A compiled draft takes seconds, so this must never be on the way in —
+   * the transcript is usable throughout and the status line says what is going
+   * on. Nothing here decides what a draft is or which version it becomes: the
+   * plan and the pass are both `nulya ext sync`.
+   */
+  const syncStores = async () => {
+    const plan = props.sync
+    if (!plan) return
+    const roots = [
+      ...(plan.user ? [{ label: "user store", user: true }] : []),
+      ...(plan.project ? [{ label: "this checkout", user: false }] : []),
+    ]
+    for (const root of roots) {
+      try {
+        const total = (await planStore(props.ws, root.user)).lines.length
+        if (total === 0) continue
+        let done = 0
+        setNotice(`syncing extensions… 0/${total}`)
+        const report = await extSync(props.ws, { user: root.user, activate: plan.activate }, () => {
+          done += 1
+          setNotice(`syncing extensions… ${done}/${total}`)
+        })
+        setNotice(summarize(root.label, report))
+      } catch (error) {
+        setNotice(`extension sync: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+  }
+
+  onMount(() => void syncStores())
 
   // "Ctrl+C again to quit" is an offer about THIS step. It lapses when a new
   // step starts (the first press must kill again, not quit) and after a short
