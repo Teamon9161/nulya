@@ -537,7 +537,7 @@ fn filesOnly(alloc: std.mem.Allocator, groups: []const Group, offset: usize, lim
     if (offset >= total_files) {
         return .{ .text = try std.fmt.allocPrint(alloc, "offset={d} is past the last of {d} matching files for /{s}/{s} — lower offset or drop it", .{ offset, total_files, pattern, glob_note }) };
     }
-    const page = files.items[offset..@min(total_files, offset + limit)];
+    const page = files.items[offset..@min(total_files, offset +| limit)];
     var out: std.Io.Writer.Allocating = .init(alloc);
     for (page, 0..) |f, i| {
         if (i > 0) try out.writer.writeAll("\n");
