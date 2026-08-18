@@ -36,7 +36,9 @@ export function Welcome() {
         <ascii_font text="nulya" font="tiny" color={style.theme.accent.user} />
       </Show>
       <box height={1} />
-      <text fg={style.theme.dim}>an immutable kernel with two tools, and everything else it builds for itself</text>
+      {/* The one sentence that says what this is: a level above the key list
+          under it, which is a caption on the way out. */}
+      <text fg={style.theme.muted}>an immutable kernel with two tools, and everything else it builds for itself</text>
       <box height={1} />
 
       {/* What this session is frozen onto is already the card above; saying it

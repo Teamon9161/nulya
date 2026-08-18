@@ -28,6 +28,34 @@ exports[`user and assistant turns 1`] = `
 "
 `;
 
+exports[`a skill echo folds back to the \`/name args\` that was typed 1`] = `
+"  › /guide how do extensions work · 3 lines                          ▸ skill
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+"
+`;
+
 exports[`thinking is collapsed by default and names its size 1`] = `
 "  ▸ thinking · 17 chars                                                     
                                                                             
@@ -349,34 +377,6 @@ exports[`ascii mode degrades every glyph 1`] = `
      1 - pub const head_bytes = 4096;                                       
      1 + pub const head_bytes = 4096; // default                            
      2 + pub const tail_bytes = 2048;                                       
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-"
-`;
-
-exports[`a skill echo folds back to the \`/name args\` that was typed 1`] = `
-"  › /guide how do extensions work · 3 lines                          ▸ skill
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
                                                                             
                                                                             
                                                                             

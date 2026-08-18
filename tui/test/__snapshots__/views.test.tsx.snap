@@ -3,31 +3,38 @@
 exports[`/help lists the bindings that are actually in force 1`] = `
 " help · keys and commands                                                                           
                                                                                                     
- escape                           cancel the step (kernel stops at its next step boundary)          
-                                  browse when idle                                                  
- ctrl+o                           fold / unfold the most recent tool or thinking card               
- ctrl+shift+o                     expand everything, again to collapse everything                   
- f2                               /ext — the extension store                                        
- f3                               /sessions — the session store                                     
- f5                               /model — providers, then their models; Enter starts a session on  
-                                  one                                                               
- f1                               this page                                                         
- pageup                           scroll the transcript back a page                                 
- pagedown                         scroll it forward a page                                          
- shift+end                        back to the live end of the transcript                            
- f4                               next tab (tabs appear once a second session is open)              
- ctrl+w                           close the current tab                                             
- ctrl+l                           redraw the screen                                                 
- ctrl+c                           kill the running step; press again to quit                        
-                                                                                                    
- Enter                            send · in browse, open a sub-session or fold                      
-                                  as observer on an empty composer, take over                       
- Shift+Enter / Ctrl+J             newline                                                           
- / then Tab                       complete a slash command; Enter always sends what is written      
- ↑ / ↓                            previous / next message, on an empty composer                     
- click a head line                fold / unfold that card                                           
- j / k, Space                     in browse and in the overlays: move, fold                         
- wheel                            scroll the transcript                                             
+ escape                           cancel the step (kernel stops at its next step boundary)        █ 
+                                  browse when idle                                                █ 
+ ctrl+o                           fold / unfold the most recent tool or thinking card             █ 
+ ctrl+shift+o                     expand everything, again to collapse everything                 █ 
+ f2                               /ext — the extension store                                      █ 
+ f3                               /sessions — the session store                                   █ 
+ f5                               /model — providers, then their models; Enter starts a session   █ 
+                                  on one                                                          █ 
+ f1                               this page                                                       █ 
+ pageup                           scroll the transcript back a page                               █ 
+ pagedown                         scroll it forward a page                                        █ 
+ shift+end                        back to the live end of the transcript                          █ 
+ f4                               next tab (tabs appear once a second session is open)            █ 
+ ctrl+w                           close the current tab                                           █ 
+ ctrl+l                           redraw the screen                                               █ 
+ ctrl+c                           kill the running step; press again to quit                      █ 
+                                                                                                  █ 
+ Enter                            send · in browse, open a sub-session or fold                    █ 
+                                  as observer on an empty composer, take over                     █ 
+ Shift+Enter / Ctrl+J             newline                                                         █ 
+ / then Tab                       complete a slash command; Enter always sends what is written    █ 
+ ↑ / ↓                            previous / next message, on an empty composer                   █ 
+ j / k, Space                     in browse and in the overlays: move, fold                       █ 
+ ?                                in an overlay: the rest of its keys                             █ 
+                                                                                                  █ 
+ mouse                                                                                            █ 
+ wheel                            scroll the transcript                                           █ 
+ click a head line                fold / unfold that card                                         █ 
+ click a row                      move the cursor there · click it again for what Enter does      █ 
+ click a tab / a pane             go to it                                                        █ 
+ click [x]                        in /ext's tools pane: pin or unpin that tool                    █ 
+ drag over text                   select it; releasing copies it to the clipboard                 ▀ 
                                                                                                     
  slash commands                                                                                     
  /model                           pick a provider and model · add a compatible one                  
@@ -40,26 +47,19 @@ exports[`/help lists the bindings that are actually in force 1`] = `
  /settings                        the effective tui.toml values and which file each came from       
  /compact [focus]                 summarise this session and continue in a new one; this file       
                                   stays                                                             
- /outcome <verdict> [note]        success | partial | failure — unjudged is not the same as failed  
+ /outcome <verdict> [note]        success | partial | failure — unjudged is not the same as         
+                                  failed                                                            
  /evolve                          build the evolution package and start a session wearing it        
  /mode <id>[@version]             a session carrying a built extension's prompt and skills;         
                                   nothing is activated                                              
- /step                            continue after a spent step budget (nothing continues by itself)  
+ /step                            continue after a spent step budget (nothing continues by          
+                                  itself)                                                           
  /cancel                          stop the running step at the kernel's next step boundary          
  /fold                            collapse every card                                               
  /help                            every key and every command                                       
  /quit                            leave                                                             
  /<skill> [args]                  load an active skill's body as a user turn                        
                                   \`nulya skill list\` names them                                     
- anything else after /            goes to the model verbatim                                        
-                                                                                                    
- a session has one writer                                                                           
- when somebody else holds it this window follows as an observer and can still queue a turn          
-                                                                                                    
-                                                                                                    
-                                                                                                    
-                                                                                                    
-                                                                                                    
  j/k · PgUp/PgDn scroll · Esc close                                                                 
 "
 `;

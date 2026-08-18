@@ -17,6 +17,7 @@
  * them as `pub const`; these two strings mirror it, and it is the source.
  */
 import { extBuild, extRun } from "./nulya/cli.ts"
+import { bundledDraftPath } from "./extensions.ts"
 import type { Workspace } from "./nulya/bin.ts"
 import type { TranscriptItem } from "./state/session.ts"
 
@@ -24,9 +25,10 @@ export const compact_request_marker = "<nulya:compact-request>"
 export const compact_summary_marker = "<nulya:context-summary>"
 
 /**
- * The compaction driver's draft, relative to the workspace — like
- * `evolution_draft`, it ships with nulya's source, so `/compact` works where
- * that source is.
+ * The compaction driver's draft, relative to the workspace, when that is
+ * nulya's own source tree — anywhere else the binary's embedded copy is seeded
+ * into the user store and built from there (`bundledDraftPath`), so `/compact`
+ * works wherever the binary goes.
  */
 export const compact_draft = "extensions/compact"
 
@@ -71,7 +73,7 @@ export async function runCompact(
   sessionId: string,
   focus?: string,
 ): Promise<CompactResult> {
-  const version = await extBuild(ws, compact_draft)
+  const version = await extBuild(ws, await bundledDraftPath(ws, compact_id, compact_draft))
   const trimmed = focus?.trim()
   const call = await extRun(ws, `${compact_id}@${version}`, compact_id, {
     session: sessionId,

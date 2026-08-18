@@ -19,8 +19,19 @@
  */
 import { existsSync, readFileSync, realpathSync } from "node:fs"
 import { join } from "node:path"
-import { extList, extSync, extTrust, type SyncLine, type SyncReport } from "./nulya/cli.ts"
+import {
+  configShow,
+  extList,
+  extSeed,
+  extSetCurrent,
+  extSync,
+  extTrust,
+  type SeedReport,
+  type SyncLine,
+  type SyncReport,
+} from "./nulya/cli.ts"
 import { userConfigDir } from "./state/settings.ts"
+import { loadTuiState, rememberSessionPins } from "./state/tui_state.ts"
 import type { Workspace } from "./nulya/bin.ts"
 
 /** What the answer to the trust question does. */
@@ -215,4 +226,104 @@ export async function applyAnswer(ws: Workspace, answer: StoreAnswer): Promise<S
 /** A store root's drafts, without writing anything. */
 export function planStore(ws: Workspace, user: boolean): Promise<SyncReport> {
   return extSync(ws, { user, dryRun: true })
+}
+
+// ── The bundled extensions (DESIGN §7.8) ────────────────────────────────────
+//
+// The binary embeds the five drafts nulya's own repo ships, and `ext seed`
+// writes them into a store root — so they are installable in ANY workspace,
+// not just a nulya checkout. What is policy here is only which of them mean
+// "active everywhere" when someone says install: `std` and `guide` are the two
+// whose documented install is activate-and-use; `compact` / `evolution` /
+// `handoff` are built on demand by /compact, /evolve and the goal driver, and
+// deliberately stay out of every composition until one of those brings them in.
+
+/** The five std tools, as the stable ids `session new --pin` takes. */
+export const std_pins = ["ext:std/read", "ext:std/write", "ext:std/append", "ext:std/grep", "ext:std/glob"]
+
+/** The bundled ids whose install means "active in every next session". */
+export const bundled_active = ["std", "guide"]
+
+/** What `ext seed --user --dry-run` says is missing from the user store. */
+export function planBundled(ws: Workspace): Promise<SeedReport> {
+  return extSeed(ws, { user: true, dryRun: true })
+}
+
+/** One sentence per missing id, for the question. */
+export function bundledPromptText(plan: SeedReport): string {
+  const line = (id: string): string => {
+    if (id === "std") return "std · read/write/append/grep/glob on the model's tool face"
+    if (id === "guide") return "guide · a reference skill for working this harness"
+    return `${id} · built on demand (/compact, /evolve, the goal driver)`
+  }
+  return `${[
+    `this nulya ships ${plan.seeded} bundled extension${plan.seeded === 1 ? "" : "s"} not yet in your user store:`,
+    ...plan.ids.map((id) => `  ${line(id)}`),
+    "install? (t) install + activate std & guide   (s) install only   (n) not now",
+  ].join("\n")}\n`
+}
+
+/**
+ * Run one answer to the bundled question. Both installing answers seed and
+ * build; only `trust` activates — and only `std` and `guide`, never the three
+ * on-demand packages — then puts the std tools on this TUI's `--pin` list
+ * (tui-state's `session_pins`, the axis that costs nothing to undo in `/ext`).
+ * Returns the sentence to print, or null for `skip`.
+ */
+export async function installBundled(ws: Workspace, answer: StoreAnswer, statePath?: string): Promise<string | null> {
+  const action = actionFor(answer)
+  if (!action.sync) return null
+  await extSeed(ws, { user: true })
+  const report = await extSync(ws, { user: true })
+  const parts = [summarize("bundled", report)]
+  if (action.activate) {
+    for (const id of bundled_active) {
+      const line = report.lines.find((l) => l.id === id)
+      if (!line?.version || line.state === "failed" || line.state === "needs zig") continue
+      if (line.activation !== "active") await extSetCurrent(ws, "activate", id, line.version, { user: true })
+    }
+    parts.push("std & guide active")
+    const pinned = await pinStdTools(ws, statePath)
+    parts.push(pinned ? "std tools pinned for this TUI" : "std tools not pinned (tool face full — `/ext` t to choose)")
+  }
+  for (const line of report.lines) {
+    if (line.state === "needs zig" || line.state === "failed") parts.push(`${line.id}: ${line.state}`)
+  }
+  return parts.join(" · ")
+}
+
+/**
+ * Put the five std tools on this TUI's session pin list, unless that would
+ * blow the kernel's `max_tools` quota at the next `session new` — a session
+ * that refuses to start is worse than an unpinned tool.
+ */
+async function pinStdTools(ws: Workspace, statePath?: string): Promise<boolean> {
+  const current = loadTuiState(statePath).session_pins ?? []
+  let merged_config: string[] = []
+  let max_tools = 8
+  try {
+    const view = await configShow(ws)
+    merged_config = view.registry.pinned_native_tools
+    max_tools = view.registry.max_tools
+  } catch {
+    // No projection is "unknown": assume the defaults and let `session new`
+    // have the last word.
+  }
+  const face = new Set([...merged_config, ...current, ...std_pins])
+  if (2 + face.size > max_tools) return false
+  const mine = new Set([...current, ...std_pins])
+  rememberSessionPins([...mine], statePath)
+  return true
+}
+
+/**
+ * Where a bundled draft is on THIS machine: the workspace's own copy when the
+ * workspace is nulya's source tree, else the user store's — seeded first if it
+ * has to be (a no-op when already there). This is what lets `/compact` and
+ * `/evolve` work outside the nulya repository.
+ */
+export async function bundledDraftPath(ws: Workspace, id: string, repoRel: string): Promise<string> {
+  if (existsSync(join(ws.dir, repoRel, "extension.json"))) return repoRel
+  await extSeed(ws, { user: true, ids: [id] })
+  return join(userConfigDir(), "extensions", id)
 }

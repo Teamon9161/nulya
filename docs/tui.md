@@ -100,7 +100,7 @@ tui/
 │   │   ├── registry.ts
 │   │   ├── cards/            #   UserTurn / AssistantTurn / Thinking / ShellCard / EditCard / ExtToolCard / EvolveCard / CapabilityBanner / SubSessionCard / CompositionCard / CanceledCard
 │   │   └── theme.ts          #   tokens（§6）
-│   ├── ui/                   #   App / Transcript / Composer / StatusBar / overlays(SessionsView, ExtView, ModelView, Help, Settings, Usage)
+│   ├── ui/                   #   App / Transcript / Composer / StatusBar / TabBar / columns.ts / list.ts / rows.ts（点击与 hover 的共享判断，T18）/ overlays(SessionsView, ExtView, ModelView, Help, Settings, Usage, Footer)
 │   └── keymap.ts
 └── test/                     #   bun test：cli.ts 用 NULYA_SCRIPTED_MODE 跑真实二进制；render 用 @opentui/core/testing 快照
 ```
@@ -160,7 +160,7 @@ tui/
 | canceled marker | CanceledCard | `⊘ tool · canceled (side effects unknown)` 三种文案对应三种 marker | — | 展开 |
 | `spill_path` | 卡片尾行 | `full output → .nulya/scratch/…` | — | — |
 
-折叠交互：鼠标点头行切换；键盘 `Ctrl+O` 切换最近一张卡；`Esc` 空 composer 时进 browse 模式（`j/k` 移动高亮卡、`Enter`/`Space` 切换、`Esc` 回 composer）；`Ctrl+Shift+O` 全部展开/折叠。
+折叠交互：鼠标在头行**按下与松开落在同一格**才切换（拖过去的是选取文本，不是点击，T18）；键盘 `Ctrl+O` 切换最近一张卡；`Esc` 空 composer 时进 browse 模式（`j/k` 移动高亮卡、`Enter`/`Space` 切换、`Esc` 回 composer）；`Ctrl+Shift+O` 全部展开/折叠。
 
 ### 4.3 流式与状态机（provisional → authoritative）
 
@@ -178,6 +178,7 @@ tui/
 - `@` 开头（前一字符非字母数字下划线）弹文件补全：`↑↓` 选、`Tab` 上屏成 `@path`；已知引用在输入框里 accent。**上屏的是路径，不是文件内容**（T13）。
 - 粘贴：> 1000 字符或 > 15 行折叠成 `[Pasted text #N]`，提交时展开回原文；`Backspace` 落在占位尾部整条删掉（T14）。
 - 全局：`Esc` cancel（stepping 时）/ browse 模式；`Ctrl+C` 两下退出（stepping 时第一下先 kill）；`Ctrl+L` 重绘；`F2` `/ext`；`F3` `/sessions`；`F4` 下一个 tab；`Ctrl+W` 关掉当前 tab（最后一个不关）。
+- 鼠标（T18）：列表行点一下落光标、点已选中的行执行它的 Enter；`/ext` 的 pane 条与 `[x]`、TabBar、状态栏的 `↓ N more below`、输入框都可点（点输入框也会退出 browse 模式）；拖过文本是选取，松手复制（OSC 52）。
 - observer 时空 composer 上的 `Enter` = take over（§5.6）；browse 模式里选中的卡若指名了一个 session，`Enter` 打开它成第二个 tab，`Space` 永远是折叠。
 
 ### 4.5 状态栏
@@ -237,12 +238,15 @@ registry 按 shell 命令前缀识别，头行抽关键事实（抽不到就退�
 ## 6. 视觉规范
 
 克制是终端里的美观。规则：
-- **一处颜色一个含义**：角色色只用于左侧 glyph 和卡片头行；正文默认 fg；元数据 dim；成功/失败是短 chip（`ok` / `exit 1`）不是整行变色。
+- **一处颜色一个含义**：角色色只用于左侧 glyph 和卡片头行；成功/失败是短 chip（`ok` / `exit 1`）不是整行变色。
+- **四档明度是一个层级，不是一块调色板**（T18）：一段文字用哪一档由它**是什么**决定，不由它该多显眼决定——`fg` 这个东西本身（卡片头行、选中行、值）· `muted` 它由什么构成（id 旁的 label、计数、状态）· `dim` 关于它写的话（说明、hint、footer、列名）· `faint` 家具（hover 记号、空 gutter、失效格）。
 - **无边框 transcript**：垂直节奏靠空行——turn 之间一空行、卡片之间不空、卡片体缩进 +2；两条 hairline 分隔三块。
 - **diff 静**：仅前景色的 add/del，无背景块；上下文行 dim。
 - **动效一处**：状态栏一个 braille spinner + 流式末尾 `▍` 光标；不做 shimmer（设定 `motion = false` 全关）。
-- **符号集**（Windows Terminal / 常见等宽字体都有）：`›` user · `●` assistant · `$` shell · `✎` edit · `⌘` ext tool · `⚙` build/init · `⚡` capability/activate · `↺` rollback · `⌕` read kernel · `☰` skill · `⤷` sub-session · `⊘` canceled · `▎` composition · `▸ ▾` fold · `⠋` spinner；`ascii = true` 时降级为 `> * $ ~ # + ! < ? = > x |`。
-- **主题 tokens**（`render/theme.ts`；`nulya-dark` 默认、`nulya-light`；尊重 `NO_COLOR`）：`fg dim accent.user accent.assistant accent.tool accent.evolve ok err warn diff.add diff.del hairline selection`。语法高亮用 OpenTUI `SyntaxStyle`，同一套 tokens 派生。
+- **符号集**（Windows Terminal / 常见等宽字体都有）：`›` user · `●` assistant · `$` shell · `✎` edit · `⌘` ext tool · `⚙` build/init · `⚡` capability/activate · `↺` rollback · `⌕` read kernel · `☰` skill · `⤷` sub-session · `⊘` canceled · `▎` composition · `▸ ▾` fold · `·` pointer（鼠标所在的行）· `⠋` spinner；`ascii = true` 时降级为 `> * $ ~ # + ! < ? = > x . |`。
+- **主题 tokens**（`render/theme.ts`；`nulya-dark` 默认、`nulya-light`；尊重 `NO_COLOR`）：`fg muted dim faint accent.user accent.assistant accent.tool accent.evolve ok err warn diff.add diff.del hairline selection hover`。语法高亮用 OpenTUI `SyntaxStyle`，同一套 tokens 派生。
+- **光标与指针是两套记号**：光标行 `▾` + `selection` 底色，指针行 `·` + 更淡的 `hover` 底色。形状不同，所以没有颜色时也分得开。
+- **overlay 的底部只有一行键**（T18）：常驻两三个重点 + `? keys`，`?` 展开其余；没有更多键的面板不写 `? keys`。
 - **宽度**：内容 ≤ `max_width`（默认 100），左对齐；窄于 60 列时隐藏状态栏右半与卡片右侧 chip。
 
 ## 7. 设定 `tui.toml`
@@ -1039,3 +1043,46 @@ cd tui && bun test test/compact.test.ts
 4. **note 一轮一份，"合并"不需要**：tcode 的 TUI 把排在一个 turn 后面的多条 prompt 合成一条再开下一轮（`turn.rs` `merge`——否则模型只回答第一条）；nulya 靠结构免疫这个病——运行中的多条各自进 inbox、内核在下个边界**一次排干**，赛跑漏掉的由 `drive()` 的 `pendingCount()` 检查**再起一轮**（不是一条一轮）送达,消息在 ledger 里保持独立事件（三条消息就是三个事实）。真正对应 tcode"一批一条 note"的是：同一轮 run 里只有**第一条**中途消息带完整 contract,后续只带 sentinel（tag 说明身份,contract 一遍就够）,run 结束复位。
 5. **测试**：`midtask.test.ts` 7 条纯函数（round-trip、note 措辞无关性、无 note 的裸 sentinel、正文引 sentinel、误判、多行）+ `driver.test.ts` 一条真二进制（scripted loop 跑着时连发两条 → 第一条带 note、第二条只有 sentinel、都折回原话、rest 那条原样）。`bun test` 157 → **165 pass**。
 5. **顺手更新一个滞后快照**：`/sessions` 的行从 `scripted` 变 `scripted/scripted-demo`——不是本轮改的,是 vision V3 把 scripted 选中的 model id 冻进 header（goals/vision.md §6）的诚实呈现,TUI 测试用的新内核二进制把它带了出来。
+
+### T18 · 鼠标与层次：让"能点"看得见，让"主次"分得开（2026-08-18）
+
+**内核零改动**（只动 `tui/`）。两件事其实是同一件：一个界面如果所有文本都是同一档灰、所有可点的东西都没有反馈，那它既读不出主次，也猜不出哪儿能按。
+
+#### 鼠标
+
+覆盖面：**overlay 列表行**（`/sessions` 的每一行、`/ext` 四个 pane 的 id 行 / 版本行 / tool 行、`/model` 的 provider / model / wire 行与 "+ add a provider" 行）· **`/ext` 的 pane 条**（新增的 `extensions  versions  tools  usage` 一行，点哪个去哪个）· **`/ext` tools pane 的 `[x]`**（等价 `Space`）· **TabBar**（点 tab 切换）· **状态栏的 `↓ N more below`**（等价 `Shift+End`）· **composer**（点输入区回到输入，即使正在 browse 模式）· **卡片头行**（本来就有，改了触发时机）· **拖拽选中 + 复制**。`SettingsView` / `UsageView` **没有**行点击——它们没有光标、没有行动作，给一个亮起来但按下去什么都不发生的高亮是骗人。
+
+1. **一次点击的定义：按下与松开落在同一个格子**（`ui/rows.ts` 的 `onClick`）。这不是洁癖：OpenTUI 在任何 selectable 文本上按下就开始一个选区，所以"按下即触发"意味着**在卡片头行上拉选文本会把卡片折起来**——复制转录的动作会重排转录。改成按下记坐标、松开比坐标，`mockMouse.drag(4,0,12,0)` 的测试就是这条的证据。
+2. **不造全局 dispatcher**：每个组件自己的 JSX props，`ui/rows.ts` 只提供三个共享判断（什么是点击、指针在哪一行、一行长什么样）。**点击调的是键盘调的同一个函数**——`/sessions` 的第二次点击走 `open()`（Enter 的那个）、`/model` 走 `enterModels()` / `pick()`、`[x]` 走 `toggle(...)`（`Space` 的那个）。行为只有一份。
+3. **两次点击而不是一次**：一次点击落光标，落在已选中的行上再点才执行。开一个 session、起一场对话都不该是划过鼠标时的意外。
+4. **hover 是两套记号，不是一套**：光标行 = `▾` + `selection` 底色，指针行 = 新 glyph `·`（ascii `.`）+ 更淡的 `hover` 底色。故意不同形——NO_COLOR 或者一块惨白的终端下，颜色没了还要分得出"键盘在这儿"和"鼠标路过"。`onMouseOut` 只在自己仍然占着那个槽位时才清（同一行跨列移动会先 out 后 over）。
+5. **overlay 打开时点不穿**：`App` 的 `<Switch>` 让 overlay 起来时 transcript **根本没挂载**，所以不是"盖住"而是"不存在"。一条测试钉住它（开 `/help` → 点原来卡片头行的位置 → 什么都没折）。
+6. **滚动之后的命中**：tui.md 一直记着这块没人确认过。现在有测试：十张卡片塞进 6 行的 scrollbox，读出屏幕第 N 行画的是哪张卡，点它，展开的正是那张。前端**没有任何**屏幕行 → item 的换算，命中是 OpenTUI 对真正画在那里的 renderable 做的 hit-test——这条测试说的就是这件事。
+7. **两个真 bug，都是这轮才看得见的**：① `<text>` 上挂鼠标 props **不生效**，得挂在 `<box>` 上（`[x]` 因此是一个 `width={4}` 的盒子）；② `<For each={tools()}>` 在每次 `refreshPins()` 之后重建**每一行**（`toolRows` 每次造新对象），而一个在按下与松开之间被销毁的 renderable 会把这次点击一起带走——连点两下 `[x]` 第二下丢失。两处列表（`/ext` tools、`/sessions`，后者每 8 秒重读一次）改成 `<Index>`：一个位置一个 renderable，只换它说的话。顺带 `applyPin` 写完就地更新 `tuiPins`（`config show` 是个子进程，等它回话期间屏幕不该落后于已经写下去的文件）。
+8. **文本选取做了**（契约里问过成本）：OpenTUI 0.5.3 的选区是现成的——按下 selectable 文本即 `startSelection`、拖拽 `updateSelection`、松开 `finishSelection` 并 emit `CliRenderEvents.SELECTION`，`Selection.getSelectedText()` 把选中的 renderable 拼回文本。`App` 只加了一个监听：非空就 `renderer.copyToClipboardOSC52(text)` 并在状态栏说复制了多少字符。选 **OSC 52** 而不是 host clipboard（`createHostClipboard` 也在库里）的理由是它只是一条发给已经连着本进程的终端的转义序列——过 ssh 也照样管用、不用装东西；终端不认就是没复制，所以那句提示只在真复制了才出现。空选区（每次普通点击都会产生一个）直接返回。
+
+#### 层次与减法
+
+9. **四档明度取代两档**（`render/theme.ts`）：`fg`（这个东西本身：卡片头行、选中行、值）· **`muted`**（它由什么构成：id 旁边的 label、计数、状态）· `dim`（关于它写的话：说明、提示、footer、列名）· **`faint`**（家具：hover 记号、空 gutter、失效格）。再加一个 `hover` 底色（永远比 `selection` 安静）。token 加在主题里，三套主题（dark / light / NO_COLOR）各一份，散落的硬编码颜色一个没加。**快照没有因为颜色变化而变**——`captureCharFrame()` 只有字符，这也是为什么颜色这一档可以放心改。
+10. **overlay 底部收成一行**（`ui/overlays/Footer.tsx`）：`OverlayFooter` + `createKeyHelp()`，常驻只有"这个面板的重点两三个键 · ? keys"，`?` 展开其余，再按 `?` 或 `Esc` 收起。`/ext` 因此从"两行键 + 一行警告"变成"一行警告 + 一行键"。**只有真有更多键的面板才写 `? keys`**（`/usage` 就两个键，宣传一个按了没反应的入口是撒谎）。`?` 由各 overlay 在自己的 `useKeyboard` 里 `help.consume(key)`，因为 `/model` 的表单步骤里 `?` 必须还是一个普通字符——那里 consume 放在 text-step 提前 return 之后。
+11. **`/ext` 多一行 pane 条**：四个 pane 原本只能靠"知道 Tab 会轮、`t`/`u` 会跳"找到，usage 表和 pin 面板等于是隐藏功能。一行四个词，既是目录也是按钮。
+12. **`/sessions` 迁进 T16 的排版纪律**（T16b 记的"仍未迁"）：行不再交给终端折——`fit` 到算出来的中段宽度，id 与两个 chip 是固定两端。顺带分三档：id 是主语、`when · model · events · cost · with` 是 `muted`、第一句 user text 是 `dim`。
+13. **空状态给指路**：`/ext` 的 "no extensions built yet" 后面补两句（extension 是什么、`ext init` → `ext build`）；tools pane 空态说明"要先有 active 版本"；`/sessions` 空态说 `n` 开一场 + 出生即冻结 + 从不删除；usage 表空态说"每跑一次工具内核就 append 一行，shell 和 edit 也算"。
+14. **状态栏与标题行分层**：状态栏一条 `<text>` 拆成三段（花费 `muted` / 当前活动 `fg`，且只在真的在动时才 `fg` / 键提示 `dim`）；标题行拆成"哪一场、什么模型"（`muted`）与"冻了什么"（`dim`）。
+15. **`/help` 多一块 mouse**，并把 `inner()` 从 `width-3` 改成 `width-4`——内容变长之后滚动条真的出现了，而按 `width-3` 排版的行会紧贴着轨道一格不留（T16b 修的是"被吃掉一个字"，这次修的是"一格留白也没有"）。
+
+**测试**：新增 `test/mouse.test.tsx` 8 条（拖拽不折叠 + 选区文本、滚动后的命中、`/sessions` 一点选中二点打开、hover 记号来去、`/ext` 点 pane 与点 `[x]` 的开关往返、TabBar 点击、overlay 不透传、点输入框退出 browse），`layout.test.tsx` 加一条（点状态栏的 `more below` 回到底部），`views.test.tsx` / `overlays.test.tsx` 各改成"先断言一行、按 `?` 再断言其余"。`overlays.test.tsx` 的 `stable()` 顺手把行尾空格抹平——T12 记的那个"偶发尾空格差异"就是 session id 的 hash 长度不定，尾部留白不是版面。四个快照按预期更新，逐帧看过。`bun test` 165 → **176 pass**。
+
+**没做**：`/model` 的 effort 拨盘 `‹ ›` 不接点击（它是一个横向的三态转盘，点左右箭头需要把两个字符各做成一个目标，收益不抵复杂度，`h/l` 与 `←→` 都在）；overlay 里的滚轮（`/help` 的 scrollbox 本来就吃滚轮，其余几个是窗口化的定长列表，滚轮要先有"列表自己的滚动位置"这个概念）；右键菜单、双击（终端里两者都不可靠，且没有第二个语义要挂）。
+
+### T19 · 自带扩展随二进制走：`ext seed` 的消费者（2026-08-18）
+
+**内核改动只有 `nulya ext seed` 本身**（DESIGN §7.2/§7.8：build.zig 把仓库的 `extensions/**` 按 `src_embed` 同一先例嵌进二进制，seed 把这些 draft 写进 store root，已有 draft 一律不动）。TUI 侧是它的第一个消费者，接了三处：
+
+1. **开屏问一次**（`main.tsx` `askAboutBundled`，与 project-store 的问句同地、同纪律）：user store 缺自带扩展、这台机器还没问过、且有人在键盘前，才问。`(t)` seed 全部 → `ext sync --user` build → **只激活 `std` 与 `guide`**（`extensions.ts` 的 `bundled_active`——compact / evolution / handoff 是 `/compact` `/evolve` / driver 按需带入的，装 ≠ 激活）→ 把 `ext:std/*` 五个 pin 并进 `tui-state.json` 的 `session_pins`（先按 `config show` 的 `max_tools` 验配额，2+5≤8 放不下就不写并明说）；`(s)` 只 seed + build；`(n)` 不动。答案记在 `asked_bundled`（机器级布尔——user store 是机器级的，不是 per-store 列表）。
+2. **`/compact` `/evolve` 出了 nulya 仓库也能用**（`extensions.ts` 的 `bundledDraftPath`）：repo 相对路径下没有 draft 时，`ext seed --user <id>`（已有即 no-op）再从 user store 的 draft build。`compact.ts` / `evolve.ts` 各改一行调用。
+3. **启动 sync 的激活收窄**（`App.tsx` `syncStores`）：不再用内核的 `--activate`（它还会把"没有 `current` 的 id"一并激活——seed 之后 user store 里合法地住着故意不激活的包,evolution 的 system prompt 会因此进每一场 session），改为 sync 不带 flag、然后**只激活本趟 `built` 出来的版本**（逐个 `ext activate`）。手放的新 draft 第一趟就是 `built`，行为不变；故意留着不激活的包从此真的留得住。状态栏汇总多一节 `· N activated`。
+
+**测试**：`extensions.test.ts` +2（真二进制的 seed 往返：dry-run 计数、点名子集、二次 seed 不覆盖；问句文案）；内核侧 e2e +1（seed → sync 闭环、`--dry-run` 零落盘、已有 draft 字节不动）。`bun test` 176 pass、`tsc` 干净、`zig build test` / `zig build e2e` 绿。
+
+**没做**：`/ext` 里没有单独的"bundled"分区——seed 过之后它们就是普通 draft + 版本，现有列表如实显示；`auto_activate` 打开时"以前 build 过但从未激活"的 id 不再被启动补激活（`/ext` 的 `a` 一键即达，这正是"激活是决定"）。

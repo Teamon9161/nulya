@@ -1,6 +1,6 @@
 import { Match, Switch, createEffect, createSignal, onCleanup, onMount } from "solid-js"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
-import type { KeyEvent, ScrollBoxRenderable } from "@opentui/core"
+import type { KeyEvent, ScrollBoxRenderable, Selection } from "@opentui/core"
 import { Transcript, rowsBelow, windowItems } from "./Transcript.tsx"
 import { Composer, type ComposerApi } from "./Composer.tsx"
 import { StatusBar } from "./StatusBar.tsx"
@@ -21,7 +21,15 @@ import { sessions_dir } from "../nulya/files.ts"
 import { createProjectIndex } from "../references.ts"
 import { createSkillTable, skillTurn } from "../skills.ts"
 import { describeTool } from "../render/registry.ts"
-import { extSync, isVerdict, sessionNew, sessionOutcome, verdicts, type ModelView as ModelParams } from "../nulya/cli.ts"
+import {
+  extSetCurrent,
+  extSync,
+  isVerdict,
+  sessionNew,
+  sessionOutcome,
+  verdicts,
+  type ModelView as ModelParams,
+} from "../nulya/cli.ts"
 import { planStore, summarize } from "../extensions.ts"
 import { runCompact } from "../compact.ts"
 import { buildEvolution, formatWithRef, parseWithRef, withOptions, type WithRef } from "../evolve.ts"
@@ -135,6 +143,13 @@ export function App(props: AppProps) {
    * the transcript is usable throughout and the status line says what is going
    * on. Nothing here decides what a draft is or which version it becomes: the
    * plan and the pass are both `nulya ext sync`.
+   *
+   * Activation is narrower than the kernel's `--activate`, which also points
+   * `current` at any id that has none at all. Since `ext seed` (tui.md §11,
+   * T19) the user store legitimately holds built-but-inactive packages —
+   * evolution, whose system prompt must NOT enter every session — so this pass
+   * only activates versions it produced itself: a draft somebody just dropped
+   * in gets picked up, a package left inactive on purpose stays that way.
    */
   const syncStores = async () => {
     const plan = props.sync
@@ -149,11 +164,24 @@ export function App(props: AppProps) {
         if (total === 0) continue
         let done = 0
         setNotice(`syncing extensions… 0/${total}`)
-        const report = await extSync(props.ws, { user: root.user, activate: plan.activate }, () => {
+        const report = await extSync(props.ws, { user: root.user }, () => {
           done += 1
           setNotice(`syncing extensions… ${done}/${total}`)
         })
-        setNotice(summarize(root.label, report))
+        let activated = 0
+        if (plan.activate) {
+          for (const line of report.lines) {
+            if (line.state !== "built" || !line.version || line.activation === "active") continue
+            try {
+              await extSetCurrent(props.ws, "activate", line.id, line.version, { user: root.user })
+              activated += 1
+            } catch {
+              // The version is built either way; `/ext`'s `a` can still point
+              // `current` at it, and a failed pointer move is not sync news.
+            }
+          }
+        }
+        setNotice(summarize(root.label, report) + (activated > 0 ? ` · ${activated} activated` : ""))
       } catch (error) {
         setNotice(`extension sync: ${error instanceof Error ? error.message : String(error)}`)
       }
@@ -203,6 +231,37 @@ export function App(props: AppProps) {
     scroll.scrollTo({ x: 0, y: scroll.scrollHeight })
     setBehind(0)
   }
+
+  /**
+   * Dragging across the screen selects text, and letting go copies it
+   * (tui.md §11, T18).
+   *
+   * All the machinery is OpenTUI's: a press on selectable text starts a
+   * selection, the drag extends it, the release emits it, and `getSelectedText`
+   * assembles what the selected renderables actually drew. The only decision
+   * here is what "let go" means — and it means the clipboard, because a
+   * terminal front end that draws over the scrollback has taken away the
+   * terminal's own selection and owes one back.
+   *
+   * OSC 52 rather than a host clipboard helper: it is one escape sequence to
+   * the terminal already attached to this process, so it works over ssh and
+   * needs nothing installed. Terminals that refuse it simply do not copy, which
+   * is why the notice reports the copy rather than assuming it.
+   */
+  onMount(() => {
+    const copy = (selection: Selection | null) => {
+      const text = selection?.getSelectedText() ?? ""
+      // Every plain click ends a zero-width selection; only a real one is news.
+      if (text.length === 0) return
+      try {
+        if (renderer.copyToClipboardOSC52(text)) setNotice(`copied ${text.length} characters`)
+      } catch {
+        // No clipboard is not an error: the selection stands, it just stays here.
+      }
+    }
+    renderer.on("selection", copy)
+    onCleanup(() => renderer.off("selection", copy))
+  })
 
   onCleanup(() => tabs.disposeAll())
 
@@ -672,6 +731,11 @@ export function App(props: AppProps) {
     return true
   }
 
+  /**
+   * The title line, in two tiers: WHICH session on WHICH model is the answer to
+   * "where am I", and the shape of its frozen composition is a detail about it.
+   * One flat grey sentence made the two impossible to tell apart at a glance.
+   */
   const header = () => {
     const current = snapshot()
     const identity = current.header?.model_identity
@@ -684,7 +748,10 @@ export function App(props: AppProps) {
     const skills = tab()
       .contributions()
       .reduce((count, entry) => count + entry.skills.length, 0)
-    return `nulya · ${tab().id} · ${model}${effort ? ` · effort ${effort}` : ""} · tools 2+${native} · skills ${skills}`
+    return {
+      subject: `nulya · ${tab().id} · ${model}`,
+      detail: `${effort ? ` · effort ${effort}` : ""} · tools 2+${native} · skills ${skills}`,
+    }
   }
 
   // Opened by `main` with a reason: show the picker before anything else.
@@ -698,9 +765,12 @@ export function App(props: AppProps) {
             <OverlayContext.Provider value={overlay}>
               <box flexDirection="column" width="100%" height="100%">
                 <box flexDirection="row" width="100%" height={1} flexShrink={0} paddingLeft={1} paddingRight={1}>
-                  <text fg={props.style.theme.dim}>{header()}</text>
+                  <text fg={props.style.theme.muted} flexShrink={0}>
+                    {header().subject}
+                  </text>
+                  <text fg={props.style.theme.dim}>{header().detail}</text>
                 </box>
-                <TabBar tabs={tabs.tabs()} activeIndex={tabs.activeIndex()} />
+                <TabBar tabs={tabs.tabs()} activeIndex={tabs.activeIndex()} onSelect={(index) => tabs.select(index)} />
                 <Hairline />
 
                 <Switch
@@ -757,6 +827,11 @@ export function App(props: AppProps) {
                 <Composer
                   onSubmit={submit}
                   onEmptySubmit={takeOverIfOffered}
+                  // Clicking the input box means "type here": browse mode holds
+                  // the keyboard and the textarea cannot let itself out of it.
+                  onActivate={() => {
+                    if (browse.active()) leaveBrowse()
+                  }}
                   references={references}
                   skills={skills}
                   onReady={(api) => {
@@ -775,6 +850,7 @@ export function App(props: AppProps) {
                   hint={notice() ?? undefined}
                   behind={behind()}
                   contextWindow={contextWindow()}
+                  onScrollEnd={scrollToEnd}
                 />
               </box>
             </OverlayContext.Provider>

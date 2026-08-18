@@ -30,7 +30,7 @@ exports[`/model level 1 is providers — one row each, credential status on the 
                                                                                                                         
                                                                                                                         
  deepseek · openai wire · https://api.deepseek.com · DEEPSEEK_API_KEY set                                               
- j/k move · Enter its models · s paste a key · a add a provider · r reload · Esc close                                  
+ j/k move · Enter its models · Esc close · ? keys                                                                       
 "
 `;
 
@@ -62,9 +62,9 @@ exports[`the provider table is cut to its columns: one row each, a gutter that s
                                                                             
                                                                             
                                                                             
+                                                                            
  deepseek · openai wire · https://api.deepseek.com · DEEPSEEK_API_KEY set   
- j/k move · Enter its models · s paste a key · a add a provider · r reload  
- Esc close                                                                  
+ j/k move · Enter its models · Esc close · ? keys                           
 "
 `;
 
@@ -98,6 +98,6 @@ exports[`/model level 2 is that provider's models: ←→ turns the dial, Enter 
                                                                                                                         
                                                                                                                         
                                                                                                                         
- j/k move · h/l effort · Enter start a session on it · s paste a key · Esc back                                         
+ j/k move · h/l effort · Enter starts a session · Esc back · ? keys                                                     
 "
 `;

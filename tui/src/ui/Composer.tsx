@@ -61,6 +61,13 @@ export function Composer(props: {
    * nothing should stay nothing.
    */
   onEmptySubmit?: () => boolean
+  /**
+   * The pointer landed in the input box. The textarea focuses itself (OpenTUI
+   * walks up from the click for the first focusable renderable), but the screen
+   * around it may be in a mode that owns the keyboard — browse — and only the
+   * screen can leave it. Clicking where you type has to mean "type here".
+   */
+  onActivate?: () => void
   placeholder?: string
   /** The workspace's paths, for `@` completion. Absent means no `@` menu. */
   references?: ProjectIndex
@@ -349,7 +356,7 @@ export function Composer(props: {
                 {(match, index) => (
                   <box flexDirection="row" width="100%" height={1} flexShrink={0}>
                     <box width={cols().label} flexShrink={0}>
-                      <text fg={index() === pick() ? style.theme.accent.user : style.theme.dim}>
+                      <text fg={index() === pick() ? style.theme.accent.user : style.theme.muted}>
                         {fit(match.label, cols().label - 2)}
                       </text>
                     </box>
@@ -375,7 +382,7 @@ export function Composer(props: {
             {(command, index) => (
               <box flexDirection="row" width="100%" height={1} flexShrink={0}>
                 <box width={commandCols().name} flexShrink={0}>
-                  <text fg={index() === 0 ? style.theme.accent.evolve : style.theme.dim}>
+                  <text fg={index() === 0 ? style.theme.accent.evolve : style.theme.muted}>
                     {fit(commandLabel(command), commandCols().name - 2)}
                   </text>
                 </box>
@@ -410,7 +417,14 @@ export function Composer(props: {
         the flex negotiation and the input box collapses to a line, then to
         nothing — the screen still works, but there is visibly nowhere to type.
       */}
-      <box flexDirection="row" width="100%" flexShrink={0} paddingLeft={1} paddingRight={1}>
+      <box
+        flexDirection="row"
+        width="100%"
+        flexShrink={0}
+        paddingLeft={1}
+        paddingRight={1}
+        onMouseDown={() => props.onActivate?.()}
+      >
         <text fg={style.theme.accent.user}>{style.glyphs.user} </text>
         <textarea
           ref={area}

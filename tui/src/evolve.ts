@@ -16,13 +16,14 @@
  * (physics #8).
  */
 import { extBuild, type NewSessionOptions } from "./nulya/cli.ts"
+import { bundledDraftPath } from "./extensions.ts"
 import type { Workspace } from "./nulya/bin.ts"
 
 /**
- * The evolution package's draft, relative to the workspace. It ships in the
- * repository next to `src/` and `tui/` rather than in `.nulya/extensions`, so
- * `/evolve` only works where nulya's own source is — which is exactly where
- * evolving nulya makes sense.
+ * The evolution package's draft, relative to the workspace, when the workspace
+ * is nulya's own source tree. Anywhere else the binary's embedded copy is
+ * seeded into the user store and built from there (`bundledDraftPath`), so
+ * `/evolve` works wherever the binary goes.
  */
 export const evolution_draft = "extensions/evolution"
 
@@ -59,7 +60,8 @@ export function formatWithRef(ref: WithRef): string {
  * next run without anybody remembering to rebuild.
  */
 export async function buildEvolution(ws: Workspace): Promise<WithRef> {
-  return { id: evolution_id, version: await extBuild(ws, evolution_draft) }
+  const draft = await bundledDraftPath(ws, evolution_id, evolution_draft)
+  return { id: evolution_id, version: await extBuild(ws, draft) }
 }
 
 /** `session new` options that carry one `--with` member. */

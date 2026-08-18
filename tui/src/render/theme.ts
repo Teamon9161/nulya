@@ -3,6 +3,19 @@
  * role colour only ever touches a glyph or a head line, body text stays `fg`,
  * metadata is `dim`, and success/failure is a short chip rather than a colour
  * wash over a whole card.
+ *
+ * FOUR levels of brightness, because two were not enough to read a table by
+ * (tui.md §11, T18). They are a hierarchy, not a palette — a token is chosen by
+ * what a piece of text IS, never by how it should look:
+ *
+ *   fg     the thing itself: a card's head line, a selected row, a value
+ *   muted  what the thing is made of: an id beside its label, a count, a state
+ *   dim    what is written about it: captions, hints, footers, labels
+ *   faint  furniture: the hover marker, an empty gutter, a disabled cell
+ *
+ * `selection` and `hover` are the two row backgrounds, and hover is always the
+ * quieter of the two: one says where the keyboard is, the other only that the
+ * mouse is passing through.
  */
 import { createContext, useContext, type Accessor } from "solid-js"
 import { RGBA, SyntaxStyle } from "@opentui/core"
@@ -11,7 +24,11 @@ import { default_settings, type Settings } from "../state/settings.ts"
 
 export interface Theme {
   fg: string
+  /** One step down from `fg`: the parts of a row that are not its subject. */
+  muted: string
   dim: string
+  /** Furniture — visible only when you look for it. */
+  faint: string
   accent: {
     user: string
     assistant: string
@@ -24,11 +41,15 @@ export interface Theme {
   diff: { add: string; del: string }
   hairline: string
   selection: string
+  /** The quieter of the two row backgrounds: the pointer is merely here. */
+  hover: string
 }
 
 const nulya_dark: Theme = {
   fg: "#d6dae4",
+  muted: "#9aa2b2",
   dim: "#6a7180",
+  faint: "#4b5263",
   accent: { user: "#8fb3ff", assistant: "#9ad5b0", tool: "#c8cdd8", evolve: "#e0b978" },
   ok: "#7fbf8a",
   err: "#e08a86",
@@ -36,11 +57,14 @@ const nulya_dark: Theme = {
   diff: { add: "#7fbf8a", del: "#e08a86" },
   hairline: "#2c3140",
   selection: "#2f3550",
+  hover: "#242937",
 }
 
 const nulya_light: Theme = {
   fg: "#22262e",
+  muted: "#4d5462",
   dim: "#767d8b",
+  faint: "#a2a8b4",
   accent: { user: "#2f5fb8", assistant: "#1f7a45", tool: "#3d434f", evolve: "#9a6b12" },
   ok: "#1f7a45",
   err: "#b03a35",
@@ -48,6 +72,7 @@ const nulya_light: Theme = {
   diff: { add: "#1f7a45", del: "#b03a35" },
   hairline: "#d3d7de",
   selection: "#dfe4f0",
+  hover: "#eef1f7",
 }
 
 /** NO_COLOR: every token collapses to the terminal's own foreground. */
@@ -55,7 +80,9 @@ function monochrome(): Theme {
   const fg = "#ffffff"
   return {
     fg,
+    muted: fg,
     dim: fg,
+    faint: fg,
     accent: { user: fg, assistant: fg, tool: fg, evolve: fg },
     ok: fg,
     err: fg,
@@ -63,6 +90,7 @@ function monochrome(): Theme {
     diff: { add: fg, del: fg },
     hairline: fg,
     selection: fg,
+    hover: fg,
   }
 }
 
@@ -81,6 +109,13 @@ export interface Glyphs {
   canceled: string
   foldClosed: string
   foldOpen: string
+  /**
+   * The gutter mark of a row the pointer is over. Deliberately not the same
+   * shape as the cursor's: hover says "this row answers to a click", the cursor
+   * says "this row answers to Enter", and one glyph for both would make the two
+   * indistinguishable the moment a colour is lost (NO_COLOR, a pale terminal).
+   */
+  pointer: string
   hairline: string
   /** The left rule of the composition card — the one framed block (tui.md §4.1). */
   bar: string
@@ -106,6 +141,7 @@ const unicode_glyphs: Glyphs = {
   canceled: "⊘",
   foldClosed: "▸",
   foldOpen: "▾",
+  pointer: "·",
   hairline: "─",
   bar: "▎",
   dialLeft: "‹",
@@ -128,6 +164,7 @@ const ascii_glyphs: Glyphs = {
   canceled: "x",
   foldClosed: ">",
   foldOpen: "v",
+  pointer: ".",
   hairline: "-",
   bar: "|",
   dialLeft: "<",

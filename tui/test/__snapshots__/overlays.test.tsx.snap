@@ -1,49 +1,49 @@
 // Bun Snapshot v1, https://bun.sh/docs/test/snapshots
 
 exports[`/sessions lists the store and opens the highlighted session 1`] = `
-" sessions · 2                                                                                                           
-                                                                                                                        
- ▾ s-<id> <when> · scripted/scripted-demo · 0 events                                               
-   s-<id> <when> · scripted/scripted-demo · 4 events · make the budgets configurable               
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
- j/k move · Enter open · n new · r refresh · /outcome judges this one · Esc close                                       
+" sessions · 2
+
+ ▾ s-<id> <when> · scripted/scripted-demo · 0 events
+   s-<id> <when> · scripted/scripted-demo · 4 events · make the budgets configurable
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ j/k move · Enter open · Esc close · ? keys
 "
 `;
 
 exports[`/ext shows the version line, the current pointer and the usage counts 1`] = `
-" extensions · 1 · tools 2+0/8                                                                                           
-                                                                                                                        
- ▾ lint    1v scri  active    lint · script · current v-<hash>                                        
-                              root .nulya/extensions                                                                    
-                              tools lint · skills — · prompts —                                                         
-                              permissions fs 0 · net — · proc 0                                                         
-                                                                                                                        
-                              versions                                                                                  
-                                v-<hash>  <built>  ⚡ current  ▎ this session                
-                                                                                                                        
-                              usage                                                                                     
-                                lint · 0 uses · —                                                                       
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
- changes apply to the NEXT session — this one froze its tools at start                                                  
- j/k move · Tab pane · t tools · u usage · Space pin · A always · Esc close                                             
- a activate · r rollback · d deactivate · p prune old versions                                                          
+" extensions · 1 · tools 2+0/8
+ extensions  versions  tools  usage
+
+ ▾ lint    1v scri  active    lint · script · current v-<hash>
+                              root .nulya/extensions
+                              tools lint · skills — · prompts —
+                              permissions fs 0 · net — · proc 0
+
+                              versions
+                                v-<hash>  <built>  ⚡ current  ▎ this session
+
+                              usage
+                                lint · 0 uses · —
+
+
+
+
+
+ changes apply to the NEXT session — this one froze its tools at start
+ j/k move · Tab pane · Space pin · Esc close · ? keys
 "
 `;

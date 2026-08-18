@@ -21,6 +21,7 @@ import { For, createMemo, createSignal, onMount } from "solid-js"
 import { useKeyboard } from "@opentui/solid"
 import { useScreen, useStyle } from "../../render/theme.ts"
 import { columnWidth, fit, wrapWords } from "../columns.ts"
+import { OverlayFooter, createKeyHelp } from "./Footer.tsx"
 import { readToolUsage, type ToolUsage } from "../../nulya/files.ts"
 import { UsageTable } from "./UsageTable.tsx"
 import type { Workspace } from "../../nulya/bin.ts"
@@ -37,11 +38,13 @@ export function UsageView(props: { ws: Workspace; snapshot: SessionSnapshot; onC
   const style = useStyle()
   const screen = useScreen()
   const [rows, setRows] = createSignal<ToolUsage[]>([])
+  const help = createKeyHelp()
 
   const refresh = async () => setRows(await readToolUsage(props.ws))
   onMount(() => void refresh())
 
   useKeyboard((key) => {
+    if (help.consume(key)) return
     if (key.name === "escape") return props.onClose()
     if (key.name === "r") return void refresh()
   })
@@ -94,9 +97,8 @@ export function UsageView(props: { ws: Workspace; snapshot: SessionSnapshot; onC
       <box height={1} />
 
       <UsageTable rows={rows()} width={inner()} />
-      <text fg={style.theme.dim} height={1}>
-        r refresh · Esc close
-      </text>
+      <box flexGrow={1} />
+      <OverlayFooter width={inner()} help={help} brief="r refresh · Esc close" />
     </box>
   )
 }

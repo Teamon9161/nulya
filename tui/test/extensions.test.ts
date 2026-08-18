@@ -11,10 +11,11 @@
 import { afterAll, beforeAll, expect, test } from "bun:test"
 import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { extSync, parseSyncLine, parseSyncReport, type SyncReport } from "../src/nulya/cli.ts"
+import { extSeed, extSync, parseSyncLine, parseSyncReport, type SyncReport } from "../src/nulya/cli.ts"
 import {
   actionFor,
   answerFor,
+  bundledPromptText,
   describeDrafts,
   draftColumn,
   planProjectStore,
@@ -184,4 +185,34 @@ test("the three keys map to what actually runs, and anything else installs nothi
 test("a finished pass leaves one line worth reading", () => {
   expect(summarize("user store", report(["3 built, 1 already built, 0 failed"]))).toBe("user store: 3 built · 1 already")
   expect(summarize("this checkout", report(["0 built, 0 already built, 2 failed"]))).toBe("this checkout: 0 built · 2 failed")
+})
+
+test("the binary's bundled drafts seed into a store — dry-run counts them, a second pass leaves them alone", async () => {
+  const ws = tempWorkspace()
+  const home = join(ws.dir, "home")
+  const env = { NULYA_HOME: home }
+  try {
+    const plan = await extSeed(ws, { user: true, dryRun: true, env })
+    expect(plan.seeded).toBe(5)
+    expect(plan.already).toBe(0)
+    expect(plan.ids).toEqual(["compact", "evolution", "guide", "handoff", "std"])
+
+    const first = await extSeed(ws, { user: true, ids: ["guide"], env })
+    expect(first.seeded).toBe(1)
+    const again = await extSeed(ws, { user: true, ids: ["guide"], env })
+    expect(again.seeded).toBe(0)
+    expect(again.already).toBe(1)
+  } finally {
+    ws.cleanup()
+  }
+})
+
+test("the bundled question names what is missing and what installing does", () => {
+  const plan = { seeded: 3, already: 2, ids: ["std", "guide", "compact"], text: "" }
+  const text = bundledPromptText(plan)
+  expect(text).toContain("3 bundled extensions")
+  expect(text).toContain("std · read/write/append/grep/glob")
+  expect(text).toContain("guide · a reference skill")
+  expect(text).toContain("compact · built on demand")
+  expect(text).toContain("(t) install + activate std & guide")
 })

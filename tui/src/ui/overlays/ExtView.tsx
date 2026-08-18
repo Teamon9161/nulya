@@ -27,10 +27,12 @@
  * is broken at its ` · ` joints by us. `ui/columns.ts` says why a line that
  * wraps in a list is garbled rather than merely untidy.
  */
-import { For, Show, createMemo, createSignal, onMount } from "solid-js"
+import { For, Index, Show, createMemo, createSignal, onMount } from "solid-js"
 import { useKeyboard } from "@opentui/solid"
 import { useScreen, useStyle } from "../../render/theme.ts"
 import { columnWidth, fit, squeeze, wrapWords } from "../columns.ts"
+import { createHover, onClick, rowBackground, rowGutter } from "../rows.ts"
+import { OverlayFooter, createKeyHelp } from "./Footer.tsx"
 import { listExtensions, readToolUsage, type ExtensionEntry, type ToolUsage } from "../../nulya/files.ts"
 import { configShow, extDeactivate, extPrune, extSetCurrent, type SyncLine } from "../../nulya/cli.ts"
 import { draftColumn, planStore } from "../../extensions.ts"
@@ -54,6 +56,14 @@ import type { Workspace } from "../../nulya/bin.ts"
 import type { SessionHeader } from "../../nulya/ledger.ts"
 
 type Pane = "extensions" | "versions" | "tools" | "usage"
+
+/**
+ * The four panes, in Tab order. They used to be reachable only by knowing that
+ * `Tab` cycles and that `t` and `u` jump — which meant the usage table and the
+ * pin panel were invisible until somebody read the footer. One strip of four
+ * words costs a row and makes the whole view's shape legible (and clickable).
+ */
+const panes: Pane[] = ["extensions", "versions", "tools", "usage"]
 
 /** An action waiting for `y`: pointer moves, and the two that take something away. */
 type Pending =
@@ -186,6 +196,14 @@ export function ExtView(props: {
   const [userPath, setUserPath] = createSignal("")
   const [userPins, setUserPins] = createSignal<string[]>([])
   const [tuiPins, setTuiPins] = createSignal<string[]>(sessionPins(props.statePath))
+  // One hover slot per list: the four panes are never on screen together, so
+  // sharing one would be a highlight that follows the pointer into the wrong
+  // column.
+  const idHover = createHover()
+  const versionHover = createHover()
+  const toolHover = createHover()
+  const paneHover = createHover()
+  const help = createKeyHelp()
 
   const sources = createMemo<PinSources>(() => ({
     user: userPins(),
@@ -359,6 +377,13 @@ export function ExtView(props: {
       return
     }
     setNotice(change.notice)
+    // Take the write as read straight away. `refreshPins` spawns `config show`,
+    // and until it answers `sources()` would still describe the world before
+    // this change — so a second toggle arriving in that window (two clicks in a
+    // row) would compute itself from a stale state and undo nothing. The file
+    // is already written; this only stops the screen from lagging behind it.
+    if (change.session) setTuiPins(change.session)
+    if (change.user) setUserPins(change.user)
     await refreshPins()
   }
 
@@ -476,6 +501,7 @@ export function ExtView(props: {
       setConfirm(null)
       return
     }
+    if (help.consume(key)) return
     if (key.name === "escape") return props.onClose()
     if (key.name === "tab") {
       const next: Record<Pane, Pane> = {
@@ -519,50 +545,124 @@ export function ExtView(props: {
         {fit(`user config ${userPath() || "(unknown)"}`, inner())}
       </text>
       <box height={1} />
-      <For each={tools()}>
+      {/*
+        `Index`, not `For`: `toolRows` builds fresh objects on every refresh, so
+        `For` would tear down and rebuild every row each time the pin state is
+        re-read — and a renderable destroyed between a press and its release
+        takes the click with it. `Index` keeps one renderable per POSITION and
+        only updates what it says, which is both cheaper and the reason a second
+        click on a checkbox lands while `config show` is still in flight.
+      */}
+      <Index each={tools()}>
         {(row, index) => {
-          const here = () => index() === toolCursor()
-          const on = () => row.state !== "off"
+          const here = () => index === toolCursor()
+          const tone = () => ({ selected: here(), hovered: toolHover.at() === index })
+          const on = () => row().state !== "off"
+          const click = onClick(() => setToolCursor(index))
+          // The checkbox is its own target inside the row: a click on it is the
+          // Space key, a click anywhere else on the row is only the cursor.
+          // Nested targets, so it has to claim the event or the row acts too.
+          const check = onClick(() => {
+            setToolCursor(index)
+            void applyPin(toggle(row().id, sources()))
+          }, true)
           return (
             <box
               flexDirection="row"
               width="100%"
               height={1}
               flexShrink={0}
-              backgroundColor={here() ? style.theme.selection : undefined}
+              backgroundColor={rowBackground(style, tone())}
+              onMouseDown={click.onMouseDown}
+              onMouseUp={click.onMouseUp}
+              {...toolHover.row(index)}
             >
-              <text fg={on() ? style.theme.accent.evolve : style.theme.dim} flexShrink={0}>
-                {on() ? "[x] " : "[ ] "}
-              </text>
+              {/* A box, not the `<text>` itself: mouse props on a text node do
+                  not reach the renderable, so the target has to be a box that
+                  is exactly as wide as the checkbox it holds. */}
+              <box
+                width={4}
+                height={1}
+                flexShrink={0}
+                onMouseDown={check.onMouseDown}
+                onMouseUp={check.onMouseUp}
+              >
+                <text fg={on() ? style.theme.accent.evolve : style.theme.faint}>{on() ? "[x] " : "[ ] "}</text>
+              </box>
               <box width={toolCols().id} flexShrink={0}>
-                <text fg={on() ? style.theme.accent.evolve : style.theme.dim}>{fit(row.id, toolCols().id - 2)}</text>
+                <text fg={on() ? style.theme.accent.evolve : here() ? style.theme.fg : style.theme.muted}>
+                  {fit(row().id, toolCols().id - 2)}
+                </text>
               </box>
               <box width={toolCols().state} flexShrink={0}>
-                <text fg={row.state === "other" ? style.theme.warn : style.theme.dim}>
-                  {fit(stateLabel(row.state), toolCols().state - 2)}
+                <text fg={row().state === "other" ? style.theme.warn : style.theme.dim}>
+                  {fit(stateLabel(row().state), toolCols().state - 2)}
                 </text>
               </box>
               <box width={toolCols().uses} flexShrink={0}>
-                <text fg={style.theme.dim}>{fit(usesOf(row), toolCols().uses - 2)}</text>
+                <text fg={style.theme.dim}>{fit(usesOf(row()), toolCols().uses - 2)}</text>
               </box>
               <box width={toolCols().ok} flexShrink={0}>
-                <text fg={style.theme.dim}>{fit(okOf(row), toolCols().ok)}</text>
+                <text fg={style.theme.dim}>{fit(okOf(row()), toolCols().ok)}</text>
               </box>
             </box>
           )
         }}
-      </For>
+      </Index>
       <Show when={tools().length === 0}>
-        <Lines text="no extension has an active version · `a` on the id list points `current` at one" />
+        <Lines
+          text="nothing can be pinned yet · a tool reaches the model only through an extension with an active version"
+          fg={style.theme.muted}
+        />
+        <Lines text="build one with `nulya ext build <path>`, then `a` on its row here to make it current" />
       </Show>
+    </box>
+  )
+
+  /**
+   * The four panes as a strip. It is the view's own table of contents: which
+   * pane is up, which others exist, and — since each word answers to a click —
+   * how to get to them without knowing that `Tab` cycles.
+   */
+  const PaneStrip = () => (
+    <box flexDirection="row" width="100%" height={1} flexShrink={0}>
+      <For each={panes}>
+        {(name, index) => {
+          const here = () => pane() === name
+          const click = onClick(() => setPane(name))
+          return (
+            <>
+              <Show when={index() > 0}>
+                <text fg={style.theme.faint}>{"  "}</text>
+              </Show>
+              <box
+                flexShrink={0}
+                height={1}
+                backgroundColor={
+                  here() ? style.theme.selection : paneHover.at() === index() ? style.theme.hover : undefined
+                }
+                onMouseDown={click.onMouseDown}
+                onMouseUp={click.onMouseUp}
+                {...paneHover.row(index())}
+              >
+                <text fg={here() ? style.theme.accent.evolve : style.theme.dim}>{name}</text>
+              </box>
+            </>
+          )
+        }}
+      </For>
     </box>
   )
 
   return (
     <box flexDirection="column" width="100%" flexGrow={1} paddingLeft={1} paddingRight={1}>
-      <text fg={style.theme.accent.evolve} height={1}>
-        {fit(`extensions · ${extensions().length} · ${quota()}`, inner())}
-      </text>
+      <box flexDirection="row" width="100%" height={1} flexShrink={0}>
+        <text fg={style.theme.accent.evolve} flexShrink={0}>
+          {fit(`extensions · ${extensions().length}`, inner())}
+        </text>
+        <text fg={style.theme.dim}>{fit(` · ${quota()}`, Math.max(0, inner() - 20))}</text>
+      </box>
+      <PaneStrip />
       <box height={1} />
 
       {/* Two of the four panes share the id list / detail split; the other two
@@ -577,19 +677,34 @@ export function ExtView(props: {
               {(entry, index) => {
                 const here = () => index() === cursor()
                 const draft = () => draftColumn(draftOf(entry.id))
+                const tone = () => ({
+                  selected: here() && pane() === "extensions",
+                  hovered: idHover.at() === index(),
+                })
+                const gutter = () => rowGutter(style, tone())
+                // Clicking an id both moves the cursor and says which pane the
+                // cursor is in — the same two facts `Tab` and `j/k` set apart.
+                const click = onClick(() => {
+                  setPane("extensions")
+                  setCursor(index())
+                  setVersionCursor(0)
+                })
                 return (
                   <box
                     flexDirection="row"
                     width="100%"
                     height={1}
                     flexShrink={0}
-                    backgroundColor={here() && pane() === "extensions" ? style.theme.selection : undefined}
+                    backgroundColor={rowBackground(style, tone())}
+                    onMouseDown={click.onMouseDown}
+                    onMouseUp={click.onMouseUp}
+                    {...idHover.row(index())}
                   >
-                    <text fg={here() ? style.theme.fg : style.theme.dim} flexShrink={0}>
-                      {here() ? style.glyphs.foldOpen : " "}{" "}
+                    <text fg={gutter().fg} flexShrink={0}>
+                      {gutter().text}
                     </text>
                     <box width={idCols().id} flexShrink={0}>
-                      <text fg={entry.shadowed ? style.theme.dim : here() ? style.theme.fg : style.theme.dim}>
+                      <text fg={entry.shadowed ? style.theme.dim : here() ? style.theme.fg : style.theme.muted}>
                         {fit(entry.id, idCols().id - 2)}
                       </text>
                     </box>
@@ -615,10 +730,18 @@ export function ExtView(props: {
                 )
               }}
             </For>
+            {/* An empty store is normal — nulya ships two builtins and nothing
+                else — so this says what an extension is FOR and the one command
+                that makes one, rather than reporting a count of zero. */}
             <Show when={extensions().length === 0}>
-              <text fg={style.theme.dim} height={1}>
+              <text fg={style.theme.muted} height={1}>
                 {fit("no extensions built yet", idWidth())}
               </text>
+              <Lines
+                text="an extension is how the agent adds a tool, a skill or a system prompt to a later session"
+                width={idWidth()}
+              />
+              <Lines text="`nulya ext init <id>` writes a draft · `ext build <path>` freezes a version" width={idWidth()} />
             </Show>
           </box>
 
@@ -641,6 +764,7 @@ export function ExtView(props: {
                       entry.skills.map((skill: string) => skill.split("/").pop()).join(" ") || "—"
                     } · prompts ${entry.systemPrompts.length || "—"}`}
                     width={detailWidth()}
+                    fg={style.theme.muted}
                   />
                   <Lines
                     text={`permissions fs ${entry.permissions.fs.length} · net ${
@@ -661,19 +785,28 @@ export function ExtView(props: {
                       const here = () => index() === versionCursor() && pane() === "versions"
                       const isCurrent = () => version.version === entry.current
                       const isFrozen = () => version.version === frozenVersion(props.header, entry.id)
+                      const tone = () => ({ selected: here(), hovered: versionHover.at() === index() })
+                      const gutter = () => rowGutter(style, tone())
+                      const click = onClick(() => {
+                        setPane("versions")
+                        setVersionCursor(index())
+                      })
                       return (
                         <box
                           flexDirection="row"
                           width="100%"
                           height={1}
                           flexShrink={0}
-                          backgroundColor={here() ? style.theme.selection : undefined}
+                          backgroundColor={rowBackground(style, tone())}
+                          onMouseDown={click.onMouseDown}
+                          onMouseUp={click.onMouseUp}
+                          {...versionHover.row(index())}
                         >
-                          <text fg={here() ? style.theme.fg : style.theme.dim} flexShrink={0}>
-                            {here() ? style.glyphs.foldOpen : " "}{" "}
+                          <text fg={gutter().fg} flexShrink={0}>
+                            {gutter().text}
                           </text>
                           <box width={versionCols().version} flexShrink={0}>
-                            <text fg={isCurrent() ? style.theme.accent.evolve : style.theme.dim}>
+                            <text fg={isCurrent() ? style.theme.accent.evolve : here() ? style.theme.fg : style.theme.muted}>
                               {fit(version.version, versionCols().version - 2)}
                             </text>
                           </box>
@@ -720,19 +853,22 @@ export function ExtView(props: {
       <Show when={confirm()} keyed>
         {(pending: Pending) => <Lines text={confirmLine(pending)} fg={style.theme.warn} />}
       </Show>
-      <Show when={notice() && !confirm()}>
-        <Lines text={notice()!} />
-      </Show>
       {/* The sister sentence of the drift line: every key in this view moves a
           pointer or a pin, and physics #2 says none of them can reach the
           session already on screen. Said once, permanently, rather than after
-          each action. */}
-      <Lines
-        text="changes apply to the NEXT session — this one froze its tools at start"
-        fg={style.theme.warn}
+          each action — and it stays even while the key list is folded away,
+          because it is not a key. */}
+      <OverlayFooter
+        width={inner()}
+        help={help}
+        notice={confirm() ? null : notice()}
+        warning="changes apply to the NEXT session — this one froze its tools at start"
+        brief="j/k move · Tab pane · Space pin · Esc close"
+        more={[
+          "a activate · r rollback · d deactivate · p prune old versions",
+          "A promote a pin to always · t tools · u usage · click a pane name or a row",
+        ]}
       />
-      <Lines text="j/k move · Tab pane · t tools · u usage · Space pin · A always · Esc close" />
-      <Lines text="a activate · r rollback · d deactivate · p prune old versions" />
     </box>
   )
 }

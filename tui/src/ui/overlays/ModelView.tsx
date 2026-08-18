@@ -42,6 +42,8 @@ import type { InputRenderable } from "@opentui/core"
 import { useScreen, useStyle } from "../../render/theme.ts"
 import { listBudget, windowRange } from "../list.ts"
 import { columnWidth, fit, squeeze, wrapWords } from "../columns.ts"
+import { createHover, onClick, rowBackground, rowGutter } from "../rows.ts"
+import { OverlayFooter, createKeyHelp } from "./Footer.tsx"
 import { configShow, type ConfigView, type ModelView as ModelParams, type ProfileView } from "../../nulya/cli.ts"
 import { validProfileName, writeProfile, writeProfileKey, type ProfileDraft } from "../../nulya/credentials.ts"
 import type { ModelPick } from "../../state/tui_state.ts"
@@ -208,6 +210,11 @@ export function ModelView(props: {
   const [entering, setEntering] = createSignal<ProfileView | null>(null)
   /** Which level `s` was pressed on, so Esc and a saved key come back to it. */
   const [keyFrom, setKeyFrom] = createSignal<Mode>("providers")
+  // One hover slot per level; the three lists are never on screen together.
+  const providerHover = createHover()
+  const modelHover = createHover()
+  const wireHover = createHover()
+  const help = createKeyHelp()
   let field: InputRenderable | undefined
 
   const profiles = () => config()?.profiles ?? []
@@ -259,19 +266,30 @@ export function ModelView(props: {
     return parts.join(" · ")
   }
 
-  /** The keys of the level that is up. A text step's hint lives on its field. */
-  const hintOf = () => {
+  /**
+   * The keys of the level that is up, in two parts: the two or three that are
+   * the point, and the rest behind `?` (tui.md §11, T18). A text step's hint
+   * lives on its field instead — there the question is what to type.
+   */
+  const footer = (): { brief: string; more: string[] } => {
     switch (mode()) {
-      // Short enough to stand on one line at eighty columns: a hint that wraps
-      // is a hint whose last joint ends up alone on a line of its own.
       case "providers":
-        return "j/k move · Enter its models · s paste a key · a add a provider · r reload · Esc close"
+        return {
+          brief: "j/k move · Enter its models · Esc close",
+          more: ["s paste a key · a add a provider · r reload", "click a row to select it, again to open it"],
+        }
       case "models":
-        return "j/k move · h/l effort · Enter start a session on it · s paste a key · Esc back"
+        return {
+          brief: "j/k move · h/l effort · Enter starts a session · Esc back",
+          more: ["s paste a key for this provider · the effort dial is per step, not frozen"],
+        }
       case "add-wire":
-        return "j/k move · Enter confirm the wire · Esc back · the kernel speaks both; pick what the endpoint serves"
+        return {
+          brief: "j/k move · Enter confirm the wire · Esc back",
+          more: ["the kernel speaks both; pick what the endpoint serves"],
+        }
       default:
-        return ""
+        return { brief: "", more: [] }
     }
   }
 
@@ -282,7 +300,13 @@ export function ModelView(props: {
   // a `<text>` that wraps reflows, and a reflow leaves the line underneath it
   // showing through its blanks (`ui/columns.ts`).
   const noticeLines = () => (props.notice ? wrapWords(props.notice, inner()) : [])
-  const hintLines = () => wrapWords(hintOf(), inner())
+  /** What the footer will actually draw, so the list can reserve exactly that. */
+  const hintLines = () => {
+    const { brief, more } = footer()
+    if (brief.length === 0) return []
+    if (help.open() && more.length > 0) return [brief, ...more].flatMap((line) => wrapWords(line, inner()))
+    return wrapWords(more.length > 0 ? `${brief} · ? keys` : brief, inner())
+  }
   const detailLines = () => {
     const chosen = mode() === "providers" ? provider() : null
     return chosen ? wrapWords(detailOf(chosen), inner()) : []
@@ -525,6 +549,7 @@ export function ModelView(props: {
       }
       return
     }
+    if (help.consume(key)) return
     if (key.name === "escape") return back()
     if (key.name === "j" || key.name === "down") return move(1)
     if (key.name === "k" || key.name === "up") return move(-1)
@@ -674,17 +699,25 @@ export function ModelView(props: {
             {(profile, offset) => {
               const index = () => providerRange().start + offset()
               const selected = () => index() === atProvider()
+              const tone = () => ({ selected: selected(), hovered: providerHover.at() === index() })
+              const gutter = () => rowGutter(style, tone())
               const ready = profile.credential
+              // Land on it, or — if it is already the row — go into its models.
+              // The same `enterModels` Enter calls, never a second path.
+              const click = onClick(() => (selected() ? enterModels() : setAtProvider(index())))
               return (
                 <box
                   flexDirection="row"
                   width="100%"
                   height={1}
                   flexShrink={0}
-                  backgroundColor={selected() ? style.theme.selection : undefined}
+                  backgroundColor={rowBackground(style, tone())}
+                  onMouseDown={click.onMouseDown}
+                  onMouseUp={click.onMouseUp}
+                  {...providerHover.row(index())}
                 >
-                  <text fg={selected() ? style.theme.fg : style.theme.dim} flexShrink={0}>
-                    {selected() ? style.glyphs.foldOpen : " "}{" "}
+                  <text fg={gutter().fg} flexShrink={0}>
+                    {gutter().text}
                   </text>
                   <box width={providerCols().name} flexShrink={0}>
                     <text fg={isCurrentProfile(profile) ? style.theme.accent.user : ready ? style.theme.fg : style.theme.dim}>
@@ -692,7 +725,7 @@ export function ModelView(props: {
                     </text>
                   </box>
                   <box width={providerCols().endpoint} flexShrink={0}>
-                    <text fg={style.theme.dim}>{fit(endpointOf(profile), providerCols().endpoint - 2)}</text>
+                    <text fg={style.theme.muted}>{fit(endpointOf(profile), providerCols().endpoint - 2)}</text>
                   </box>
                   <box width={providerCols().count} flexShrink={0}>
                     <text fg={style.theme.dim}>{fit(countOf(profile), providerCols().count - 2)}</text>
@@ -707,20 +740,31 @@ export function ModelView(props: {
             }}
           </For>
           <Show when={providerRange().end >= profiles().length}>
-            <box
-              flexDirection="row"
-              width="100%"
-              height={1}
-              flexShrink={0}
-              backgroundColor={onAddRow() ? style.theme.selection : undefined}
-            >
-              <text fg={onAddRow() ? style.theme.fg : style.theme.dim} flexShrink={0}>
-                {onAddRow() ? style.glyphs.foldOpen : " "}{" "}
-              </text>
-              <text fg={onAddRow() ? style.theme.accent.evolve : style.theme.dim}>
-                {fit("+ add an OpenAI- or Anthropic-compatible provider", inner() - 2)}
-              </text>
-            </box>
+            {(() => {
+              const index = () => profiles().length
+              const tone = () => ({ selected: onAddRow(), hovered: providerHover.at() === index() })
+              const gutter = () => rowGutter(style, tone())
+              const click = onClick(() => (onAddRow() ? startAdd() : setAtProvider(index())))
+              return (
+                <box
+                  flexDirection="row"
+                  width="100%"
+                  height={1}
+                  flexShrink={0}
+                  backgroundColor={rowBackground(style, tone())}
+                  onMouseDown={click.onMouseDown}
+                  onMouseUp={click.onMouseUp}
+                  {...providerHover.row(index())}
+                >
+                  <text fg={gutter().fg} flexShrink={0}>
+                    {gutter().text}
+                  </text>
+                  <text fg={onAddRow() ? style.theme.accent.evolve : style.theme.dim}>
+                    {fit("+ add an OpenAI- or Anthropic-compatible provider", inner() - 2)}
+                  </text>
+                </box>
+              )
+            })()}
           </Show>
           <Show when={providerRange().end < providerCount()}>
             <text fg={style.theme.dim} height={1}>
@@ -741,17 +785,25 @@ export function ModelView(props: {
             {(row, offset) => {
               const index = () => modelRange().start + offset()
               const selected = () => index() === atModel()
+              const tone = () => ({ selected: selected(), hovered: modelHover.at() === index() })
+              const gutter = () => rowGutter(style, tone())
               const slot = () => row.slots[slots()[index()] ?? 0] ?? AUTO
+              // Starting a session is the one action in this view that spends
+              // money, so it takes two clicks: land, then confirm on the row.
+              const click = onClick(() => (selected() ? pick() : setAtModel(index())))
               return (
                 <box
                   flexDirection="row"
                   width="100%"
                   height={1}
                   flexShrink={0}
-                  backgroundColor={selected() ? style.theme.selection : undefined}
+                  backgroundColor={rowBackground(style, tone())}
+                  onMouseDown={click.onMouseDown}
+                  onMouseUp={click.onMouseUp}
+                  {...modelHover.row(index())}
                 >
-                  <text fg={selected() ? style.theme.fg : style.theme.dim} flexShrink={0}>
-                    {selected() ? style.glyphs.foldOpen : " "}{" "}
+                  <text fg={gutter().fg} flexShrink={0}>
+                    {gutter().text}
                   </text>
                   <box width={modelCols().label} flexShrink={0}>
                     <text fg={isCurrentModel(row) ? style.theme.accent.user : style.theme.fg}>
@@ -759,7 +811,7 @@ export function ModelView(props: {
                     </text>
                   </box>
                   <box width={modelCols().id} flexShrink={0}>
-                    <text fg={style.theme.dim}>
+                    <text fg={style.theme.muted}>
                       {labelOf(row) === row.model ? "" : fit(row.model, modelCols().id - 2)}
                     </text>
                   </box>
@@ -792,6 +844,13 @@ export function ModelView(props: {
           <For each={WIRES}>
             {(wire, index) => {
               const selected = () => index() === atWire()
+              const tone = () => ({ selected: selected(), hovered: wireHover.at() === index() })
+              const gutter = () => rowGutter(style, tone())
+              const click = onClick(() => {
+                if (!selected()) return setAtWire(index())
+                setDraft({ ...draft(), kind: wire.kind })
+                setMode("add-url")
+              })
               return (
                 <box flexDirection="column" width="100%">
                   <box
@@ -799,12 +858,15 @@ export function ModelView(props: {
                     width="100%"
                     height={1}
                     flexShrink={0}
-                    backgroundColor={selected() ? style.theme.selection : undefined}
+                    backgroundColor={rowBackground(style, tone())}
+                    onMouseDown={click.onMouseDown}
+                    onMouseUp={click.onMouseUp}
+                    {...wireHover.row(index())}
                   >
-                    <text fg={selected() ? style.theme.fg : style.theme.dim} flexShrink={0}>
-                      {selected() ? style.glyphs.foldOpen : " "}{" "}
+                    <text fg={gutter().fg} flexShrink={0}>
+                      {gutter().text}
                     </text>
-                    <text fg={selected() ? style.theme.fg : style.theme.dim}>{fit(wire.label, inner() - 2)}</text>
+                    <text fg={selected() ? style.theme.fg : style.theme.muted}>{fit(wire.label, inner() - 2)}</text>
                   </box>
                   <For each={wrapWords(wire.hint, inner() - 4)}>
                     {(line) => (
@@ -884,18 +946,14 @@ export function ModelView(props: {
           their ` · ` joints, so neither can wrap into the composer below. */}
       <For each={detailLines()}>
         {(line) => (
-          <text fg={style.theme.dim} height={1}>
+          <text fg={style.theme.muted} height={1}>
             {line}
           </text>
         )}
       </For>
-      <For each={hintLines()}>
-        {(line) => (
-          <text fg={style.theme.dim} height={1}>
-            {line}
-          </text>
-        )}
-      </For>
+      <Show when={footer().brief.length > 0}>
+        <OverlayFooter width={inner()} help={help} brief={footer().brief} more={footer().more} />
+      </Show>
     </box>
   )
 }

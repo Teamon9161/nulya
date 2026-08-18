@@ -134,9 +134,15 @@ test("/settings at eighty columns: a path too long for its column is cut, the cl
     const key = lines.find((line) => line.includes("transcript.history_window"))!
     expect(key).toMatch(/transcript\.history_window {2,}\S/)
 
+    // The footer is one line until `?` asks for the rest (tui.md §11, T18).
+    expect(frame).toContain("Esc close · ? keys")
+    expect(frame).not.toContain("the kernel's own config is a different chain")
+
+    setup.mockInput.pressKey("?")
+    const opened = await settle(setup, 4)
+    for (const line of frameLines(opened)) expect(displayWidth(line)).toBeLessThanOrEqual(76)
     // The closing sentence is broken at its joints by us, one `<text>` a line.
-    expect(frame).toContain("the kernel's own config is a different chain")
-    expect(frame).toContain("Esc close")
+    expect(opened).toContain("the kernel's own config is a different chain")
   } finally {
     setup.renderer.destroy()
   }

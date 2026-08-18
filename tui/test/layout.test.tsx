@@ -109,6 +109,26 @@ test("scrolling back says how far back it is, and one key comes home", async () 
   }
 }, 120_000)
 
+test("the 'more below' marker is the one clickable thing on the status bar", async () => {
+  const { setup } = await crowded(24)
+  try {
+    await settle(setup, 6)
+    press(setup, page_up)
+    press(setup, page_up)
+    await untilFrame(setup, (frame) => frame.includes("more below"))
+
+    // Click the marker itself rather than pressing Shift+End: same scrollToEnd,
+    // reached the other way (tui.md §11, T18).
+    const rows = setup.captureCharFrame().split("\n")
+    const at = rows.findIndex((row) => row.includes("more below"))
+    expect(at).toBeGreaterThanOrEqual(0)
+    await setup.mockMouse.click(rows[at]!.indexOf("more below"), at)
+    await untilFrame(setup, (frame) => !frame.includes("more below"))
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 120_000)
+
 test("rowsBelow is zero for a box that does not exist yet", () => {
   expect(rowsBelow(null)).toBe(0)
 })

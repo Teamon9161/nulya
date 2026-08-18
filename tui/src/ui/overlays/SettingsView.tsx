@@ -16,7 +16,8 @@ import { For, Show, createMemo } from "solid-js"
 import { existsSync } from "node:fs"
 import { useKeyboard } from "@opentui/solid"
 import { useScreen, useStyle } from "../../render/theme.ts"
-import { columnWidth, fit, wrapWords } from "../columns.ts"
+import { columnWidth, fit } from "../columns.ts"
+import { OverlayFooter, createKeyHelp } from "./Footer.tsx"
 import { settingsPaths, default_settings, type Settings } from "../../state/settings.ts"
 import type { Workspace } from "../../nulya/bin.ts"
 
@@ -45,7 +46,9 @@ export function SettingsView(props: { ws: Workspace; onClose: () => void }) {
   const style = useStyle()
   const screen = useScreen()
   const settings = style.settings
+  const help = createKeyHelp()
   useKeyboard((key) => {
+    if (help.consume(key)) return
     if (key.name === "escape") props.onClose()
   })
 
@@ -81,7 +84,9 @@ export function SettingsView(props: { ws: Workspace; onClose: () => void }) {
                 {fit(entry.applied ? "applied" : entry.present ? "unreadable" : "absent", stateCol() - 2)}
               </text>
             </box>
-            <text fg={style.theme.dim}>{fit(entry.path, inner() - stateCol())}</text>
+            <text fg={entry.applied ? style.theme.muted : style.theme.dim}>
+              {fit(entry.path, inner() - stateCol())}
+            </text>
           </box>
         )}
       </For>
@@ -94,7 +99,7 @@ export function SettingsView(props: { ws: Workspace; onClose: () => void }) {
               <text fg={style.theme.dim}>{fit(row.key, keyCol() - 2)}</text>
             </box>
             <box width={valueCol()} flexShrink={0}>
-              <text fg={row.changed ? style.theme.fg : style.theme.dim}>{fit(row.value, valueCol() - 2)}</text>
+              <text fg={row.changed ? style.theme.fg : style.theme.muted}>{fit(row.value, valueCol() - 2)}</text>
             </box>
             <Show when={row.changed}>
               <text fg={style.theme.dim}>{fit("· not the default", inner() - keyCol() - valueCol())}</text>
@@ -104,18 +109,15 @@ export function SettingsView(props: { ws: Workspace; onClose: () => void }) {
       </For>
 
       <box flexGrow={1} />
-      <For
-        each={wrapWords(
-          "the kernel's own config is a different chain (`default.toml` → system → user → project) and the TUI does not read it · Esc close",
-          inner(),
-        )}
-      >
-        {(line) => (
-          <text fg={style.theme.dim} height={1}>
-            {line}
-          </text>
-        )}
-      </For>
+      <OverlayFooter
+        width={inner()}
+        help={help}
+        brief="Esc close"
+        more={[
+          "settings are read from the files above · edit one and reopen",
+          "the kernel's own config is a different chain (`default.toml` → system → user → project) and the TUI does not read it",
+        ]}
+      />
     </box>
   )
 }

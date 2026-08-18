@@ -41,9 +41,18 @@ const fixed: Array<[string, string]> = [
   ["Shift+Enter / Ctrl+J", "newline"],
   ["/ then Tab", "complete a slash command; Enter always sends what is written"],
   ["↑ / ↓", "previous / next message, on an empty composer"],
-  ["click a head line", "fold / unfold that card"],
   ["j / k, Space", "in browse and in the overlays: move, fold"],
+  ["?", "in an overlay: the rest of its keys"],
+]
+
+/** What the pointer does. It is worth its own block: none of it is discoverable. */
+const mouse: Array<[string, string]> = [
   ["wheel", "scroll the transcript"],
+  ["click a head line", "fold / unfold that card"],
+  ["click a row", "move the cursor there · click it again for what Enter does"],
+  ["click a tab / a pane", "go to it"],
+  ["click [x]", "in /ext's tools pane: pin or unpin that tool"],
+  ["drag over text", "select it; releasing copies it to the clipboard"],
 ]
 
 /** The two slash lines that are not commands: a skill, and everything else. */
@@ -76,12 +85,13 @@ export function HelpView(props: { keys: Keymap; onClose: () => void }) {
   })
 
   /**
-   * The columns this page may draw in: one of padding on each side, and one
-   * more for the scrollbar — its track is painted over the LAST column of the
+   * The columns this page may draw in: one of padding on each side, one more
+   * for the scrollbar — its track is painted over the LAST column of the
    * scrollbox, so a row sized to the full width loses its final character to
-   * it (`…stops at its nex█`).
+   * it (`…stops at its nex█`) — and one more so a full-width line does not sit
+   * against the track with no gap at all.
    */
-  const inner = () => Math.max(24, screen().width - 3)
+  const inner = () => Math.max(24, screen().width - 4)
   /**
    * The key column is as wide as the widest binding it has to show — `/new
    * [--profile p] [--model id]` is the one that decides it — but never so wide
@@ -93,6 +103,7 @@ export function HelpView(props: { keys: Keymap; onClose: () => void }) {
         [
           ...actions.map(([action]) => props.keys[action]),
           ...fixed.map(([key]) => key),
+          ...mouse.map(([key]) => key),
           ...commands.map(commandLabel),
           ...slashes.map(([key]) => key),
         ],
@@ -159,7 +170,13 @@ export function HelpView(props: { keys: Keymap; onClose: () => void }) {
         <For each={fixed}>{([key, what]) => <Row left={key} right={what} />}</For>
         <box height={1} />
 
-        <text fg={style.theme.dim} height={1}>
+        <text fg={style.theme.muted} height={1}>
+          mouse
+        </text>
+        <For each={mouse}>{([key, what]) => <Row left={key} right={what} />}</For>
+        <box height={1} />
+
+        <text fg={style.theme.muted} height={1}>
           slash commands
         </text>
         <For each={commands}>{(command) => <Row left={commandLabel(command)} right={command.what} />}</For>

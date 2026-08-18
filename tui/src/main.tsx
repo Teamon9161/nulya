@@ -15,12 +15,15 @@ import { openWorkspace, type Workspace } from "./nulya/bin.ts"
 import { configShow, sessionNew } from "./nulya/cli.ts"
 import { sessionExists } from "./nulya/files.ts"
 import { loadSettings } from "./state/settings.ts"
-import { loadTuiState, rememberStoreAsked, sessionPins } from "./state/tui_state.ts"
+import { loadTuiState, rememberBundledAsked, rememberStoreAsked, sessionPins } from "./state/tui_state.ts"
 import { planLaunch } from "./launch.ts"
 import {
   answerFor,
   applyAnswer,
+  bundledPromptText,
+  installBundled,
   inventory,
+  planBundled,
   planProjectStore,
   promptText,
   storeTrusted,
@@ -101,6 +104,11 @@ async function main() {
   // session until someone has looked at it once (DESIGN §9). Asked here, in the
   // plain terminal, since the alternate screen has not been entered yet.
   const projectStore = settings.extensions.sync_on_start ? await askAboutProjectStore(ws) : "none"
+
+  // The drafts the BINARY ships (`ext seed`, DESIGN §7.8), same place and same
+  // reason: the user store is the person's own directory, so nothing lands in
+  // it on nobody's word — one keypress, once per machine.
+  if (settings.extensions.sync_on_start) await askAboutBundled(ws)
 
   // Read once, for two readers: the launch plan below, and the status bar's
   // context gauge (only `context_window` is taken from the catalog).
@@ -196,6 +204,39 @@ async function askAboutProjectStore(ws: Workspace): Promise<"none" | "ready" | "
   const report = await applyAnswer(ws, answer)
   if (report) process.stdout.write(`${summarize("this checkout", report)}\n`)
   return "answered"
+}
+
+/**
+ * The bundled extensions, before the screen exists. Nothing to do when the
+ * question was already put on this machine, when everything is already in the
+ * user store, or when no person is at the keyboard. An old `nulya` binary that
+ * lacks `ext seed` answers with an error — treated as "nothing to offer".
+ */
+async function askAboutBundled(ws: Workspace): Promise<void> {
+  if (loadTuiState().asked_bundled) return
+  if (!process.stdin.isTTY) return
+  let plan
+  try {
+    plan = await planBundled(ws)
+  } catch {
+    return
+  }
+  if (plan.seeded === 0) return
+
+  process.stdout.write(bundledPromptText(plan))
+  const answer = answerFor(await readKey())
+  rememberBundledAsked()
+  if (!answer || answer === "skip") {
+    process.stdout.write("left alone · `nulya ext seed --user` whenever you mean to\n")
+    return
+  }
+  process.stdout.write("installing…\n")
+  try {
+    const summary = await installBundled(ws, answer)
+    if (summary) process.stdout.write(`${summary}\n`)
+  } catch (error) {
+    process.stdout.write(`${error instanceof Error ? error.message : String(error)}\n`)
+  }
 }
 
 /** One keypress from the terminal, lowercased. `escape` and `return` by name. */

@@ -1,5 +1,6 @@
-import { createMemo } from "solid-js"
+import { createMemo, createSignal } from "solid-js"
 import { useScreen, useStyle } from "../render/theme.ts"
+import { onClick } from "./rows.ts"
 import type { SessionSnapshot } from "../state/session.ts"
 import type { DriverStatus } from "../state/driver.ts"
 import type { Role } from "../state/attach.ts"
@@ -32,9 +33,13 @@ export function StatusBar(props: {
    * no fullness is shown at all rather than a made-up denominator.
    */
   contextWindow?: number | null
+  /** Clicking the "N more below" marker: the mouse half of Shift+End. */
+  onScrollEnd?: () => void
 }) {
   const style = useStyle()
   const screen = useScreen()
+  const [overBehind, setOverBehind] = createSignal(false)
+  const behindClick = onClick(() => props.onScrollEnd?.())
 
   const usage = createMemo(() => {
     const u = props.snapshot.usage
@@ -82,36 +87,67 @@ export function StatusBar(props: {
     return "idle"
   })
 
-  const color = () =>
-    props.snapshot.error
-      ? style.theme.err
-      : props.snapshot.lastStopped === "budget" || props.snapshot.lastStopped === "max_tokens"
-        ? style.theme.warn
-        : style.theme.dim
+  /**
+   * The activity is the one live fact on this line, so it is the one thing here
+   * drawn at full brightness — and only while something is actually happening.
+   * An idle bar has nothing to shout about and drops back a level.
+   */
+  const color = () => {
+    if (props.snapshot.error) return style.theme.err
+    if (props.snapshot.lastStopped === "budget" || props.snapshot.lastStopped === "max_tokens") return style.theme.warn
+    if (props.status !== "idle" || props.takeoverReady) return style.theme.fg
+    return style.theme.muted
+  }
 
   return (
     <box flexDirection="row" width="100%" height={1} flexShrink={0} paddingLeft={1} paddingRight={1}>
-      <box flexGrow={1} flexShrink={1}>
-        <text fg={color()}>
-          {usage()} · {activity()} · {props.hint ?? "Esc cancel · Ctrl+O fold · /help"}
+      {/* Three tiers on one line: what it cost (secondary), what is happening
+          (the subject), which keys (a caption). One `<text>` in one colour was
+          the whole bar reading as a single grey sentence. */}
+      <box flexDirection="row" flexGrow={1} flexShrink={1} flexBasis={0}>
+        <text fg={style.theme.muted} flexShrink={0}>
+          {usage()}
         </text>
+        <text fg={color()} flexShrink={0}>
+          {" · "}
+          {activity()}
+        </text>
+        <box flexGrow={1} flexShrink={1} flexBasis={0}>
+          <text fg={style.theme.dim}>
+            {" · "}
+            {props.hint ?? "Esc cancel · Ctrl+O fold · /help"}
+          </text>
+        </box>
       </box>
       {context() ? (
-        <text fg={context()!.urgent ? style.theme.warn : style.theme.dim}>
+        <text fg={context()!.urgent ? style.theme.warn : style.theme.dim} flexShrink={0}>
           {" "}
           ctx {context()!.percent}% · /compact
         </text>
       ) : null}
       {/* Scrolled away from the live end: the newest card is off screen, which
-          is worth saying — otherwise a streaming answer looks like a stall. */}
+          is worth saying — otherwise a streaming answer looks like a stall. It
+          is also the only thing on this line worth clicking, so it is the only
+          thing on this line that lights up under the pointer. */}
       {(props.behind ?? 0) > 0 ? (
-        <text fg={style.theme.accent.evolve}>
-          {" "}
-          {style.glyphs.foldOpen} {props.behind} more below · Shift+End
-        </text>
+        <box
+          flexShrink={0}
+          height={1}
+          backgroundColor={overBehind() ? style.theme.hover : undefined}
+          onMouseDown={behindClick.onMouseDown}
+          onMouseUp={behindClick.onMouseUp}
+          onMouseOver={() => setOverBehind(true)}
+          onMouseOut={() => setOverBehind(false)}
+        >
+          <text fg={style.theme.accent.evolve}>
+            {" "}
+            {style.glyphs.foldOpen} {props.behind} more below · Shift+End
+          </text>
+        </box>
       ) : null}
       {screen().width >= 60 ? (
-        <text fg={props.role === "observer" ? style.theme.warn : style.theme.dim}>
+        <text fg={props.role === "observer" ? style.theme.warn : style.theme.dim} flexShrink={0}>
+          {" "}
           step {props.snapshot.steps} · {props.role === "observer" ? "observer · driven elsewhere" : "driver"}
         </text>
       ) : null}

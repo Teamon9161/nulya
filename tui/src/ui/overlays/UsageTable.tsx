@@ -56,7 +56,7 @@ export function UsageTable(props: { rows: ToolUsage[]; width: number }) {
               <text fg={style.theme.fg}>{fit(row.toolId, cols().id - 2)}</text>
             </box>
             <box width={cols().uses} flexShrink={0}>
-              <text fg={style.theme.dim}>{fit(usesOf(row), cols().uses - 2)}</text>
+              <text fg={style.theme.muted}>{fit(usesOf(row), cols().uses - 2)}</text>
             </box>
             <box width={cols().ok} flexShrink={0}>
               <text fg={style.theme.dim}>{fit(okOf(row), cols().ok)}</text>
@@ -64,10 +64,20 @@ export function UsageTable(props: { rows: ToolUsage[]; width: number }) {
           </box>
         )}
       </For>
+      {/* Zero rows is the ordinary state of a fresh workspace, and the journal
+          only ever grows from tools actually running — so say what would put a
+          line in it rather than reporting the absence. */}
       <Show when={props.rows.length === 0}>
-        <text fg={style.theme.dim} height={1}>
+        <text fg={style.theme.muted} height={1}>
           {fit("no tool usage recorded yet", props.width)}
         </text>
+        <For each={wrapWords("the kernel appends a line each time a tool runs · shell and edit count too", props.width)}>
+          {(line) => (
+            <text fg={style.theme.dim} height={1}>
+              {line}
+            </text>
+          )}
+        </For>
       </Show>
     </box>
   )

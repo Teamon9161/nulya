@@ -66,7 +66,8 @@ export function CompositionCard(props: { header: SessionHeader | null; contribut
   return (
     <box flexDirection="column" width="100%" marginTop={1}>
       <Row bar={style.glyphs.bar} accent={style.theme.accent.evolve}>
-        <text fg={style.theme.dim}>
+        {/* The card's own title, so it sits a level above the labels below it. */}
+        <text fg={style.theme.muted}>
           session{created()} · frozen composition
         </text>
       </Row>

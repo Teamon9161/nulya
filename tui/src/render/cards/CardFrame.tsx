@@ -1,5 +1,6 @@
-import { Show, type JSX } from "solid-js"
+import { Show, createSignal, type JSX } from "solid-js"
 import { useScreen, useStyle } from "../theme.ts"
+import { onClick } from "../../ui/rows.ts"
 import { useFolds } from "../../state/folds.ts"
 import { useBrowse } from "../../state/browse.ts"
 
@@ -32,6 +33,7 @@ export function CardFrame(props: {
   const folds = useFolds()
   const browse = useBrowse()
   const screen = useScreen()
+  const [hovered, setHovered] = createSignal(false)
 
   const open = () => props.foldable && folds.isOpen(props.itemKey, props.defaultOpen)
   const wide = () => screen().width >= 60
@@ -39,6 +41,11 @@ export function CardFrame(props: {
   const toggle = () => {
     if (props.foldable) folds.toggle(props.itemKey, props.defaultOpen)
   }
+  // Press and release on the same cell. A press that travelled was a drag over
+  // the text, which OpenTUI turns into a selection — and a card that folded
+  // itself because somebody selected its head line would make copying text out
+  // of the transcript rearrange the transcript (`ui/rows.ts`).
+  const click = onClick(toggle)
 
   const chipColor = () => {
     switch (props.chipTone ?? "dim") {
@@ -58,10 +65,17 @@ export function CardFrame(props: {
       <box
         flexDirection="row"
         width="100%"
-        backgroundColor={selected() ? style.theme.selection : undefined}
+        backgroundColor={
+          selected() ? style.theme.selection : props.foldable && hovered() ? style.theme.hover : undefined
+        }
         // Clicking the head line is the mouse half of the fold interaction
-        // (tui.md §4.2); the keyboard half is Ctrl+O and browse mode.
-        onMouseDown={toggle}
+        // (tui.md §4.2); the keyboard half is Ctrl+O and browse mode. The tint
+        // under the pointer is the only thing that says a head line answers to
+        // a click at all — a card has no button to look like.
+        onMouseDown={click.onMouseDown}
+        onMouseUp={click.onMouseUp}
+        onMouseOver={() => setHovered(true)}
+        onMouseOut={() => setHovered(false)}
       >
         <text fg={props.accent} flexShrink={0}>
           {props.glyph}{" "}

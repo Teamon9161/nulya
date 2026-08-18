@@ -60,6 +60,11 @@ afterAll(() => {
  */
 function stable(frame: string): string {
   return frame
+    // Trailing blanks are not layout: a session id's hash is not a fixed length,
+    // so the row's last cell moves and the padding after it moves with it. That
+    // was a snapshot that failed on the shape of a random number (tui.md §11,
+    // T12 "偶发一个尾空格差异").
+    .replace(/[ ]+$/gm, "")
     .replace(/s-\d+-[0-9a-f]+/g, "s-<id>")
     .replace(/v-[0-9a-z]{8,}/g, "v-<hash>")
     .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/g, "<built>")
@@ -94,8 +99,15 @@ test("/sessions lists the store and opens the highlighted session", async () => 
     expect(frame).toContain(first)
     expect(frame).toContain(second)
     expect(frame).toContain("events")
-    expect(frame).toContain("j/k move · Enter open · n new")
+    // One line of keys, the rest behind `?` (tui.md §11, T18).
+    expect(frame).toContain("j/k move · Enter open · Esc close · ? keys")
+    expect(frame).not.toContain("n new")
     expect(stable(frame)).toMatchSnapshot()
+
+    setup.mockInput.pressKey("?")
+    expect(await settle(setup, 3)).toContain("n new")
+    setup.mockInput.pressKey("?")
+    expect(await settle(setup, 3)).not.toContain("n new")
 
     // Newest first, so the second (untouched) session leads; j then Enter opens
     // the one below it.
@@ -157,8 +169,16 @@ test("/ext shows the version line, the current pointer and the usage counts", as
     expect(frame).toContain(version)
     expect(frame).toContain("current")
     expect(frame).toContain("▎ this session")
-    expect(frame).toContain("a activate · r rollback")
+    // The four panes name themselves; the store actions are one `?` away.
+    expect(frame).toContain("extensions  versions  tools  usage")
+    expect(frame).toContain("j/k move · Tab pane · Space pin · Esc close · ? keys")
+    expect(frame).not.toContain("a activate · r rollback")
     expect(stable(frame)).toMatchSnapshot()
+
+    setup.mockInput.pressKey("?")
+    expect(await settle(setup, 3)).toContain("a activate · r rollback")
+    setup.mockInput.pressKey("?")
+    await settle(setup, 3)
 
     // The second block: the whole usage journal, counts only.
     setup.mockInput.pressKey("u")

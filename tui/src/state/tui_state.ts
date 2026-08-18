@@ -42,6 +42,12 @@ export interface TuiState {
    * kernel's own `registry.pinned_native_tools` instead.
    */
   session_pins?: string[]
+  /**
+   * The "install the bundled extensions?" question has been put once on this
+   * machine (the user store is machine-wide, so this is a boolean rather than a
+   * per-store list). Whatever the answer, `nulya ext seed --user` remains.
+   */
+  asked_bundled?: boolean
 }
 
 export function tuiStatePath(env: Record<string, string | undefined> = process.env): string {
@@ -71,6 +77,7 @@ export function loadTuiState(path = tuiStatePath()): TuiState {
     if (Array.isArray(asked)) state.asked_stores = asked.filter((s): s is string => typeof s === "string")
     const pins = record["session_pins"]
     if (Array.isArray(pins)) state.session_pins = pins.filter((s): s is string => typeof s === "string")
+    if (record["asked_bundled"] === true) state.asked_bundled = true
     return state
   } catch {
     return {}
@@ -102,6 +109,13 @@ export function sessionPins(path = tuiStatePath()): string[] {
 export function rememberSessionPins(pins: readonly string[], path = tuiStatePath()): void {
   const state = loadTuiState(path)
   state.session_pins = [...pins]
+  saveTuiState(state, path)
+}
+
+/** Remember that the bundled-extensions question was put, whatever the answer. */
+export function rememberBundledAsked(path = tuiStatePath()): void {
+  const state = loadTuiState(path)
+  state.asked_bundled = true
   saveTuiState(state, path)
 }
 

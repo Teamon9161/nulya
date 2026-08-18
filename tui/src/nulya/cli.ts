@@ -353,6 +353,47 @@ export async function extBuild(ws: Workspace, path: string): Promise<string> {
   return version
 }
 
+/** What `nulya ext seed` reports: how many bundled drafts arrived. */
+export interface SeedReport {
+  /** Drafts written (or, under `--dry-run`, that would be). */
+  seeded: number
+  /** Ids left alone because the root already holds a draft of them. */
+  already: number
+  /** The ids counted in `seeded`, in the order the kernel printed them. */
+  ids: string[]
+  text: string
+}
+
+/**
+ * `nulya ext seed` — write the extension drafts the BINARY ships into a store
+ * root (DESIGN §7.8). Source only: building stays `ext sync`'s job, and an id
+ * that already has a draft in that root is left alone, so this is safe to call
+ * on every start and as a fallback before an on-demand `ext build`.
+ */
+export async function extSeed(
+  ws: Workspace,
+  options: { user?: boolean; ids?: string[]; dryRun?: boolean; env?: Record<string, string> } = {},
+): Promise<SeedReport> {
+  const args = ["ext", "seed"]
+  if (options.user) args.push("--user")
+  if (options.ids) args.push(...options.ids)
+  if (options.dryRun) args.push("--dry-run")
+  const result = await run(ws, args, options.env)
+  if (result.code !== 0) fail("ext seed failed", result)
+  const summary = /(\d+) (?:seeded|would seed), (\d+) already there/.exec(result.stdout)
+  const ids: string[] = []
+  for (const line of result.stdout.split("\n")) {
+    const seeded = /^([^\s:]+): (?:seeded|would seed) /.exec(line.trim())
+    if (seeded) ids.push(seeded[1]!)
+  }
+  return {
+    seeded: summary ? Number.parseInt(summary[1]!, 10) : 0,
+    already: summary ? Number.parseInt(summary[2]!, 10) : 0,
+    ids,
+    text: result.stdout,
+  }
+}
+
 /** One `<id>: …` line of `nulya ext sync` (DESIGN §7.2). */
 export interface SyncLine {
   id: string

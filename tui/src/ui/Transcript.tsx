@@ -68,7 +68,7 @@ export function Transcript(props: {
         <CompositionCard header={props.header ?? null} contributions={props.contributions} />
       </Show>
       <Show when={hidden() > 0}>
-        <text fg={style.theme.dim}>
+        <text fg={style.theme.faint}>
           {"  "}
           {style.glyphs.foldClosed} {hidden()} earlier items · in the ledger, not on screen ·
           transcript.history_window
