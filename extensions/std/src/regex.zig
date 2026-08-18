@@ -34,14 +34,21 @@ const mvzr = @import("vendor/mvzr.zig");
 pub const Regex = mvzr.SizedRegex(256, 32);
 
 pub const Compiled = struct {
-    regex: Regex,
+    matcher: union(enum) {
+        regex: Regex,
+        /// A fixed needle (`fixed=true`), already lowered when `fold_case`.
+        literal: []const u8,
+    },
     /// True when the search is case-insensitive. The caller must then hand
     /// `isMatch` an already-lowercased line (`lowerInto`); the pattern side
     /// was lowered at compile time.
     fold_case: bool,
 
     pub fn isMatch(self: *const Compiled, line: []const u8) bool {
-        return self.regex.isMatch(line);
+        return switch (self.matcher) {
+            .regex => |*r| r.isMatch(line),
+            .literal => |needle| std.mem.indexOf(u8, line, needle) != null,
+        };
     }
 };
 
@@ -51,7 +58,7 @@ pub const Compiled = struct {
 pub fn invalidMessage(alloc: std.mem.Allocator, pattern: []const u8) ![]const u8 {
     return std.fmt.allocPrint(
         alloc,
-        "invalid regex: /{s}/ did not compile (byte-level regex: classes, alternation, groups, quantifiers, anchors and \\b work; lookaround and backreferences do not)\nRemember this is regex syntax — escape literal ( ) [ ] {{ }} . * + ? with a backslash.",
+        "invalid regex: /{s}/ did not compile (byte-level regex: classes, alternation, groups, quantifiers, anchors and \\b work; lookaround and backreferences do not)\nRemember this is regex syntax — escape literal ( ) [ ] {{ }} . * + ? with a backslash, or pass fixed=true to search the text literally.",
         .{pattern},
     );
 }
@@ -67,7 +74,24 @@ pub fn compile(alloc: std.mem.Allocator, pattern: []const u8, case_insensitive: 
     const fold = case_insensitive or !hasUppercaseLiteral(plain);
     const source = if (fold) try lowerPattern(alloc, plain) else plain;
     const regex = Regex.compile(source) orelse return null;
-    return .{ .regex = regex, .fold_case = fold };
+    return .{ .matcher = .{ .regex = regex }, .fold_case = fold };
+}
+
+/// A `fixed=true` pattern: the pattern IS the needle — no compilation, nothing
+/// to escape, and it cannot fail. Smart case works as for a regex: an
+/// all-lowercase needle folds (the caller lowers each haystack line),
+/// `case_insensitive` forces it, and folding lowers the needle here.
+pub fn compileLiteral(alloc: std.mem.Allocator, pattern: []const u8, case_insensitive: bool) !Compiled {
+    var has_upper = false;
+    for (pattern) |c| {
+        if (std.ascii.isUpper(c)) {
+            has_upper = true;
+            break;
+        }
+    }
+    const fold = case_insensitive or !has_upper;
+    const needle = if (fold) std.ascii.lowerString(try alloc.alloc(u8, pattern.len), pattern) else pattern;
+    return .{ .matcher = .{ .literal = needle }, .fold_case = fold };
 }
 
 /// Does the pattern contain a `(?…` construct other than non-capturing `(?:`?
@@ -233,6 +257,28 @@ test "lowering the pattern leaves backslash classes alone: \\D survives, and is 
     try std.testing.expect(!exact.isMatch("abc"));
     const folded = (try compile(alloc, "[A-Z]{3}", true)).?;
     try std.testing.expect(folded.isMatch(lowerInto(&buf, "abc")));
+}
+
+test "a fixed literal needle: no compilation, smart case folds it, metacharacters are plain text" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var buf: [64]u8 = undefined;
+
+    const folded = try compileLiteral(alloc, "foo(bar", false);
+    try std.testing.expect(folded.fold_case);
+    try std.testing.expect(folded.isMatch(lowerInto(&buf, "call FOO(BAR) now")));
+    try std.testing.expect(!folded.isMatch(lowerInto(&buf, "foobar")));
+
+    const exact = try compileLiteral(alloc, "Foo.bar", false);
+    try std.testing.expect(!exact.fold_case);
+    try std.testing.expect(exact.isMatch("a Foo.bar b"));
+    try std.testing.expect(!exact.isMatch("a foo.bar b"));
+    try std.testing.expect(!exact.isMatch("a FooXbar b")); // `.` is not a wildcard here
+
+    const forced = try compileLiteral(alloc, "Foo.bar", true);
+    try std.testing.expect(forced.fold_case);
+    try std.testing.expect(forced.isMatch(lowerInto(&buf, "A FOO.BAR B")));
 }
 
 test "the (?... family: non-capturing groups are rewritten and work, everything else is refused before mvzr" {

@@ -89,6 +89,8 @@ fn answer(ctx: *const rpc.Ctx, args: std.json.ObjectMap) anyerror!rpc.Outcome {
     const path_arg = optionalString(args, "path") catch return rpc.invalidParams(alloc, "path must be a string", .{});
     const glob_arg = optionalString(args, "glob") catch return rpc.invalidParams(alloc, "glob must be a string", .{});
     const case_insensitive = rpc.optionalBool(args, "case_insensitive", false) catch return rpc.invalidParams(alloc, "case_insensitive must be a boolean", .{});
+    const fixed = rpc.optionalBool(args, "fixed", false) catch return rpc.invalidParams(alloc, "fixed must be a boolean", .{});
+    const files_only = rpc.optionalBool(args, "files_only", false) catch return rpc.invalidParams(alloc, "files_only must be a boolean", .{});
     const limit = @max((rpc.optionalUnsigned(args, "head_limit") catch return rpc.invalidParams(alloc, "head_limit must be a non-negative integer", .{})) orelse default_match_limit, 1);
     const offset = (rpc.optionalUnsigned(args, "offset") catch return rpc.invalidParams(alloc, "offset must be a non-negative integer", .{})) orelse 0;
     // -C sets both sides; -A/-B override it. Capped so context can't blow up
@@ -103,17 +105,22 @@ fn answer(ctx: *const rpc.Ctx, args: std.json.ObjectMap) anyerror!rpc.Outcome {
         else => return rpc.refuse(alloc, "search path could not be read: {s} ({s})", .{ base, @errorName(err) }),
     };
 
-    // The `(?…` family never reaches mvzr: it would misparse inline flags and
-    // lookaround into a pattern that compiles and silently matches the wrong
-    // text. `(?:` is rewritten inside `compile`; the rest is refused here with
-    // the message that names the way out.
-    if (regex.hasInlineConstruct(pattern)) {
-        return rpc.refuse(alloc, "{s}", .{try regex.inlineMessage(alloc, pattern)});
-    }
-    // Smart case: an all-lowercase pattern searches case-insensitively, an
-    // uppercase-bearing one stays exact; `case_insensitive` wins outright.
-    const compiled = (try regex.compile(alloc, pattern, case_insensitive)) orelse
-        return rpc.refuse(alloc, "{s}", .{try regex.invalidMessage(alloc, pattern)});
+    // `fixed` skips regex entirely: the pattern is the needle and cannot fail.
+    // Otherwise the `(?…` family never reaches mvzr: it would misparse inline
+    // flags and lookaround into a pattern that compiles and silently matches
+    // the wrong text. `(?:` is rewritten inside `compile`; the rest is refused
+    // here with the message that names the way out. Smart case either way: an
+    // all-lowercase pattern searches case-insensitively, an uppercase-bearing
+    // one stays exact; `case_insensitive` wins outright.
+    const compiled = if (fixed)
+        try regex.compileLiteral(alloc, pattern, case_insensitive)
+    else blk: {
+        if (regex.hasInlineConstruct(pattern)) {
+            return rpc.refuse(alloc, "{s}", .{try regex.inlineMessage(alloc, pattern)});
+        }
+        break :blk (try regex.compile(alloc, pattern, case_insensitive)) orelse
+            return rpc.refuse(alloc, "{s}", .{try regex.invalidMessage(alloc, pattern)});
+    };
 
     const glob_note = if (glob_arg) |g| try std.fmt.allocPrint(alloc, ", glob {s}", .{g}) else "";
     const explicit_file = base_stat.kind == .file;
@@ -150,6 +157,15 @@ fn answer(ctx: *const rpc.Ctx, args: std.json.ObjectMap) anyerror!rpc.Outcome {
     var groups = search.groups;
     // Files arrive in walk order; sort for stable output by file then line.
     std.mem.sort(Group, groups.items, {}, groupLess);
+    const prune_note = try report.pruned.note(alloc);
+
+    // Survey mode: one line per matching file with its TRUE match count — no
+    // per-file cap (nothing is rendered, so nothing can crowd anything out)
+    // and no matched lines. head_limit / offset page FILES here. An empty
+    // result falls through to the ordinary no-matches answer and its notes.
+    if (files_only and groups.items.len != 0) {
+        return filesOnly(alloc, groups.items, offset, limit, pattern, glob_note, prune_note, report.timed_out);
+    }
 
     // Apply the per-file cap before paging, so head_limit/offset count the
     // matches actually reachable through this tool and paging stays
@@ -157,7 +173,6 @@ fn answer(ctx: *const rpc.Ctx, args: std.json.ObjectMap) anyerror!rpc.Outcome {
     // out, and a search aimed at one file should page rather than lose its tail.
     const cap = try applyPerFileCap(alloc, &groups);
     const total: usize = countMatches(groups.items);
-    const prune_note = try report.pruned.note(alloc);
 
     // Page by MATCHES, cutting the groups that straddle a window edge instead
     // of keeping them whole (with no context lines a file's every match merges
@@ -506,6 +521,37 @@ fn renderPage(alloc: std.mem.Allocator, selected: *std.ArrayList(Group), before:
     return .{ .body = try out.toOwnedSlice(), .shown = shown };
 }
 
+/// The `files_only=true` answer over the sorted groups. Counts are the true
+/// totals per file; paging is by files with the same head_limit / offset.
+fn filesOnly(alloc: std.mem.Allocator, groups: []const Group, offset: usize, limit: usize, pattern: []const u8, glob_note: []const u8, prune_note: ?[]const u8, timed_out: bool) !rpc.Outcome {
+    const FileCount = struct { file: []const u8, count: usize };
+    var files: std.ArrayList(FileCount) = .empty;
+    for (groups) |g| {
+        if (files.items.len > 0 and std.mem.eql(u8, files.items[files.items.len - 1].file, g.file)) {
+            files.items[files.items.len - 1].count += g.matches;
+        } else {
+            try files.append(alloc, .{ .file = g.file, .count = g.matches });
+        }
+    }
+    const total_files = files.items.len;
+    if (offset >= total_files) {
+        return .{ .text = try std.fmt.allocPrint(alloc, "offset={d} is past the last of {d} matching files for /{s}/{s} — lower offset or drop it", .{ offset, total_files, pattern, glob_note }) };
+    }
+    const page = files.items[offset..@min(total_files, offset + limit)];
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    for (page, 0..) |f, i| {
+        if (i > 0) try out.writer.writeAll("\n");
+        try out.writer.print("{s} ({d})", .{ f.file, f.count });
+    }
+    if (timed_out) {
+        try out.writer.print("\n[search timed out after {d}s — partial results; narrow the path or glob]", .{walk.deadline_seconds});
+    } else if (total_files > offset + page.len) {
+        try out.writer.print("\n[{d} files match; showing {d}-{d} — set offset={d} for more]", .{ total_files, offset + 1, offset + page.len, offset + page.len });
+    }
+    if (prune_note) |note| try out.writer.print("\n{s}", .{note});
+    return .{ .text = try out.toOwnedSlice() };
+}
+
 fn writeGroup(w: *std.Io.Writer, g: *const Group, same_file: bool, leading: bool, with_context: bool) !void {
     if (!leading) {
         if (same_file and with_context) {
@@ -805,6 +851,33 @@ test "grep run: per-file cap across files, single file exempt, binary and CRLF f
     const alone = try t.grep("{\"pattern\":\"TARGET\"}");
     try std.testing.expect(std.mem.indexOf(u8, alone, "not shown") == null);
     try std.testing.expect(std.mem.indexOf(u8, alone, "35: TARGET 34") != null);
+}
+
+test "grep run: fixed searches the pattern literally under smart case; files_only surveys true counts and pages by files" {
+    var t: TestCtx = undefined;
+    try t.init();
+    defer t.deinit();
+    const alloc = t.arena.allocator();
+
+    // `fixed`: metacharacters are plain text, smart case still decides folding.
+    try t.write("lit.zig", "call foo(bar) here\nFOO(BAR) upper\n");
+    try std.testing.expectEqualStrings("lit.zig:\n1: call foo(bar) here\n2: FOO(BAR) upper", try t.grep("{\"pattern\":\"foo(bar\",\"fixed\":true}"));
+    try std.testing.expectEqualStrings("lit.zig:\n2: FOO(BAR) upper", try t.grep("{\"pattern\":\"FOO(BAR\",\"fixed\":true}"));
+    const none_fixed = try t.grep("{\"pattern\":\"foo(baz\",\"fixed\":true}");
+    try std.testing.expect(std.mem.startsWith(u8, none_fixed, "no matches for /foo(baz/"));
+
+    // `files_only`: true counts (35 > the per-file cap of 30), paged by files.
+    var crowded: std.Io.Writer.Allocating = .init(alloc);
+    for (0..35) |i| try crowded.writer.print("TARGET {d}\n", .{i});
+    try t.write("many.txt", crowded.written());
+    try t.write("one.txt", "TARGET once\n");
+    try std.testing.expectEqualStrings("many.txt (35)\none.txt (1)", try t.grep("{\"pattern\":\"TARGET\",\"files_only\":true}"));
+    try std.testing.expectEqualStrings("many.txt (35)\n[2 files match; showing 1-1 — set offset=1 for more]", try t.grep("{\"pattern\":\"TARGET\",\"files_only\":true,\"head_limit\":1}"));
+    try std.testing.expectEqualStrings("one.txt (1)", try t.grep("{\"pattern\":\"TARGET\",\"files_only\":true,\"offset\":1}"));
+    const past = try t.grep("{\"pattern\":\"TARGET\",\"files_only\":true,\"offset\":9}");
+    try std.testing.expect(std.mem.startsWith(u8, past, "offset=9 is past the last of 2 matching files for /TARGET/"));
+    const none = try t.grep("{\"pattern\":\"NOPE_XYZ\",\"files_only\":true}");
+    try std.testing.expect(std.mem.startsWith(u8, none, "no matches for /NOPE_XYZ/"));
 }
 
 test "grep run: the whole answer stays under the output budget and pages by matches" {

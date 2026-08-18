@@ -44,7 +44,7 @@
       },
       {
         "name": "grep",
-        "description": "Search file contents with a regex (respects .gitignore). Look for several symbols in one call with alternation — `foo|bar|baz` beats three searches. An all-lowercase pattern matches case-insensitively; any uppercase in it makes the match exact. Pull surrounding code with `context` (both sides), `before` or `after` — one search with context often gives you enough to edit without a follow-up read. Filter files with `glob`; cap matches with head_limit (default 200) and page with offset. The regex is byte-level: classes, alternation, groups (including (?:)), quantifiers and anchors work; lookaround, backreferences and inline flags like (?i) do not — pass case_insensitive=true instead. Skips directory-scanned files over 512 KiB (an explicit file path may be up to 10 MiB), skips built/cache directories, and reports oversized skips when they explain an empty result.",
+        "description": "Search file contents with a regex (respects .gitignore). Look for several symbols in one call with alternation — `foo|bar|baz` beats three searches. An all-lowercase pattern matches case-insensitively; any uppercase in it makes the match exact. Pass fixed=true to search the pattern as a literal string (nothing to escape). Set files_only=true to list just the matching files with their match counts — the cheap first pass of a broad survey. Pull surrounding code with `context` (both sides), `before` or `after` — one search with context often gives you enough to edit without a follow-up read. Filter files with `glob`; cap matches with head_limit (default 200) and page with offset. The regex is byte-level: classes, alternation, groups (including (?:)), quantifiers and anchors work; lookaround, backreferences and inline flags like (?i) do not — pass case_insensitive=true instead. Skips directory-scanned files over 512 KiB (an explicit file path may be up to 10 MiB), skips built/cache directories, and reports oversized skips when they explain an empty result.",
         "input": {
           "type": "object",
           "properties": {
@@ -52,6 +52,8 @@
             "path": { "type": "string", "description": "Directory or file to search (default: cwd)" },
             "glob": { "type": "string", "description": "Filter files, e.g. *.zig or src/**/*.toml" },
             "case_insensitive": { "type": "boolean", "description": "Force case-insensitive; only needed to widen a pattern that contains uppercase" },
+            "fixed": { "type": "boolean", "description": "Treat pattern as a literal string, not a regex (nothing to escape)" },
+            "files_only": { "type": "boolean", "description": "List matching files with their match counts instead of matched lines" },
             "context": { "type": "integer", "description": "Context lines on both sides of each match" },
             "before": { "type": "integer", "description": "Context lines before each match; overrides context" },
             "after": { "type": "integer", "description": "Context lines after each match; overrides context" },
