@@ -15,7 +15,7 @@ import { openWorkspace, type Workspace } from "./nulya/bin.ts"
 import { configShow, sessionNew } from "./nulya/cli.ts"
 import { sessionExists } from "./nulya/files.ts"
 import { loadSettings } from "./state/settings.ts"
-import { loadTuiState, rememberStoreAsked } from "./state/tui_state.ts"
+import { loadTuiState, rememberStoreAsked, sessionPins } from "./state/tui_state.ts"
 import { planLaunch } from "./launch.ts"
 import {
   answerFor,
@@ -116,7 +116,13 @@ async function main() {
     // question just declined above. It deserves the kernel's sentence, not a
     // stack trace through the spawn helper.
     try {
-      id = await sessionNew(ws, plan.pick ? { profile: plan.pick.profile, model: plan.pick.model } : {})
+      // The pin panel's `this TUI` list rides on every session this front end
+      // starts, including the first one (tui.md §11, T12).
+      const pins = sessionPins()
+      id = await sessionNew(ws, {
+        ...(plan.pick ? { profile: plan.pick.profile, model: plan.pick.model } : {}),
+        ...(pins.length > 0 ? { pin: pins } : {}),
+      })
     } catch (error) {
       // The kernel's refusal is several lines; only its first reaches here, and
       // it is the one that names the store. A dangling ":" from the list header

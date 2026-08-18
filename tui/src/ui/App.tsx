@@ -16,7 +16,8 @@ import { FoldContext, createFoldStore } from "../state/folds.ts"
 import { BrowseContext, createBrowseStore } from "../state/browse.ts"
 import { OverlayContext, createOverlayStore, type OverlayKind } from "../state/overlay.ts"
 import { createTabStore, type SessionTab } from "../state/tabs.ts"
-import { loadTuiState, rememberModel, type ModelPick } from "../state/tui_state.ts"
+import { loadTuiState, rememberModel, sessionPins, type ModelPick } from "../state/tui_state.ts"
+import { sessions_dir } from "../nulya/files.ts"
 import { describeTool } from "../render/registry.ts"
 import { extSync, isVerdict, sessionNew, sessionOutcome, verdicts, type ModelView as ModelParams } from "../nulya/cli.ts"
 import { planStore, summarize } from "../extensions.ts"
@@ -287,9 +288,15 @@ export function App(props: AppProps) {
   const newSession = async (pick?: ModelPick, remember = pick !== undefined, bring?: WithRef) => {
     const chosen = pick ?? loadTuiState(props.statePath).model
     try {
+      // `--pin` from the panel's `this TUI` list, read at the moment the session
+      // is created rather than held in a signal: the pins are program state on
+      // disk, and a second TUI (or a `/ext` toggle a minute ago) must be the
+      // truth here, not whatever this process saw at launch.
+      const pins = sessionPins(props.statePath)
       const id = await sessionNew(props.ws, {
         ...(chosen ? { profile: chosen.profile, model: chosen.model } : {}),
         ...(bring ? withOptions(bring) : {}),
+        ...(pins.length > 0 ? { pin: pins } : {}),
       })
       const current = tab()
       if (untouched(current)) tabs.replace(current.id, id, { created: true, effort: chosen?.effort })
@@ -682,7 +689,13 @@ export function App(props: AppProps) {
                     />
                   </Match>
                   <Match when={overlay.kind() === "ext"}>
-                    <ExtView ws={props.ws} header={snapshot().header} onClose={closeOverlay} />
+                    <ExtView
+                      ws={props.ws}
+                      header={snapshot().header}
+                      sessionFile={`${sessions_dir}/${tab().id}.jsonl`}
+                      statePath={props.statePath}
+                      onClose={closeOverlay}
+                    />
                   </Match>
                   <Match when={overlay.kind() === "help"}>
                     <HelpView keys={keys} onClose={closeOverlay} />

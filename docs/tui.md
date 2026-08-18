@@ -300,6 +300,7 @@ fold   = "ctrl+o"
 
 | ~~**T11 · 启动即安装**~~ ✅ | 内核给了 `nulya ext sync`（build 一个 root 下的每个 draft）与 `ext prune`（DESIGN §7.2）；前端只决定**什么时候跑**：`tui.toml` `[extensions] sync_on_start/auto_activate`；user store 后台跑（状态栏 `syncing extensions… 2/3` + 一行汇总）；**project store 先问**（未信任且有 draft → 开屏前一句问话 + `t`/`s`/`n`，只问一次，记在 `tui-state.json`）；`/ext` 每个 id 多一列 draft 状态（`ext sync --dry-run`），`a` 在 id 列表上指向 draft 的版本，`p` 删非 current 版本（先确认）。**内核零改动** | `bun test` 新增 `extensions.test.ts` 6 条（真二进制的 plan/sync/`--activate` 三种答案 + 纯策略）；在本仓库 checkout 里开一次看得到 trust 问句 |
 
+| ~~**T12 · `/ext` 的 pin 面板**~~ ✅ | `/ext` 第四个 pane **tools**：每个 tool 一行、三态 `always`（user config `registry.pinned_native_tools`，managed 只替换那一行、保注释、写后重读校验）/ `this TUI`（`tui-state.json` 的 `session_pins` → 每场 `session new` 自动 `--pin`）/ off，project/system 层写的 pin 只读显示；配额行 `tools 2+N/8`；`Space` toggle（id 行 = 整包）、`A` 升格、`d` = `ext deactivate`；`ext activate` 带 `NULYA_SESSION` 让内核投 capability_note。**内核零改动**（契约 [goals/tui-panel.md](goals/tui-panel.md)） | `bun test` 126 pass（新增 `pins.test.ts` 8 条 + `/ext` tools pane 一条交互）；面板里 `Space` 打开一个 tool → `session new` 的 header `native_tools` 里就有它，关掉就没有 |
 | **T10 · `/goal`（占位，未开工）** | spawn 随仓库带的 driver 脚本（`win32` → `powershell -NoProfile -ExecutionPolicy Bypass -File drivers/goal.ps1`，否则 `sh drivers/goal.sh`），把它的 **stderr 喂给已有的 `--stream` 解析器**（token delta / tool begin-end / usage 全在里面），把它的 **stdout 当控制通道**：`session <id>` 开 tab、`handoff <old> -> <new>` 换 tab（原 tab 留着可回看）、`done <id>` 收尾并提示 `/outcome`。跟随中的 tab 是 **observer**（driver 持着写者 lease）。**内核零改动**，也不需要 §10.4 的 `<id>.live` sidecar | 起一个两阶段目标：token 实时可见；handoff 时自动切到子 session；`Esc` 停得下来（`session cancel` 或杀脚本）|
 
 顺序 T0 → T1 → T2 → T3 → T4；**T1 结束就开始用它 dogfood**，T2 起的优先级由用出来的痛点重排（T5–T8 就是这么来的）。
@@ -939,3 +940,17 @@ cd tui && bun test test/compact.test.ts
 **已知**：`bun test` 全量跑在这台机器上偶发超时（涉及真二进制持写者租约的那几条，跑单文件全绿，且与本条改动无关——同样的偶发在改动前后各出现一次，失败集合还不同）。
 
 **没做**：`/ext` 的 pin 键（写 project 层 `registry.pinned_native_tools`）——pin 是第三个决定，且它属于人或 evolution session，等真实需要；`/goal`（T10 仍占位）。
+
+### T12 · `/ext` 的 pin 面板（2026-08-18）
+
+**动机**：`/ext` 一直只能"看"——版本线、漂移、usage 都在，但把一个 tool 放上模型工具面这件事，得去手写 `~/.nulya/config.toml`。而 pin 恰好是内核已经画好的两根轴之一（DESIGN §5.1），前端要做的只是把两个写口（config 的 `registry.pinned_native_tools` 与 argv 的 `session new --pin`）变成两个键。
+
+1. **三态，因为写口有两个半。** `always` = user config 文件里有它（每场都付一个槽位 + 前缀 token）；`this TUI` = `tui-state.json` 的 `session_pins`，本 TUI 起的每场 `session new` 自动带 `--pin`；`off`。第四个不是状态而是一句事实：合并投影里有、user 文件里没有 = project/system 层写的，**只读显示 `from another config layer`**，因为本面板只写一个 key、一个文件（契约 D3）。`Space` 打开永远先进 `this TUI`（试用零成本、不碰任何配置文件），`A`（Shift+A，与旁边的 `a` activate 隔开）才升格为 `always` 并同时删掉 session 那份——内核 union 会去重，但屏幕上一个 pin 两行状态是谎话。
+2. **不对称照说不绕。** `session new` 的 pin 是 union（config ∪ argv），所以**没有**"不动 config 的前提下给某一场做减法"这件事。面板不假装有：`always` 的唯一关法就是从 user config 里删掉它，而那句 notice 就这么写。`session new --no-pin` 是这条约束的最小内核动词，本轮**没做**，等真实证据（契约 D2）。
+3. **写 config 是文本手术，不是重序列化。** `pins.ts` 的 `setPinnedTools` 只替换（或追加）`pinned_native_tools` 那一段：按 table header 定位 `[registry]`，按引号外的方括号配平吃掉可能跨行的数组，其余字节一个不动。理由很直白——配置文件是人写的文本，一个只管一个 key 的程序没资格重排它的注释和顺序。写完**重读 + `Bun.TOML.parse` 校验**，不一致就把原字节写回去并报错：文本手术如果悄悄产出内核读法不同的东西，界面会显示一个从没进过任何 session 的 pin。
+4. **配额行说的是内核的算法，不是我们的预判。** `tools 2+N/8`：`max_tools` 含 builtin（DESIGN §5.1），把 2 显出来是因为"我明明只 pin 了 6 个为什么被拒"只有这一个答案。超了**不拦**——拒绝是 `session new` 的事，面板超了只多一句 `session new will refuse`，真被拒时贴内核原话。
+5. **两根轴分开（契约 D4）。** `d` = `ext deactivate`，动的是 membership（skills / system prompts 进不进 composition），与 pins 并排而不是合成一个假总开关。tools-only 的包（std）"整体开关" ≈ 在 id 行上 `Space` 批量 pin；data 包（evolution / guide）的开关就是 activate / deactivate。
+6. **唯一会通知在跑的 session 的动作是 activate。** 面板 spawn `ext activate` 时给子进程带 `NULYA_SESSION=<当前 session 文件>`，借内核现成的 `depositSessionNote`（DESIGN §5.3）——模型下个 step 边界就知道有新版本可以 `ext run`。deactivate 与 pin 改动**一条通知都不补**：本场工具面在 `session new` 冻死了（physics #2），对它们没有可行动信息，往 ledger 里塞 UI 旁白是噪音。底部常驻一句 `changes apply to the NEXT session — this one froze its tools at start`，是 drift line 的姊妹句。
+7. **测试**：`test/pins.test.ts` 8 条——三态与 another-layer 只读、off→`this TUI`→`A`→`always` 的全链、整包 toggle、配额行、行来源（只列有 `current` 且没被 shadow 的包，因为别的 pin 会被 `session new` 拒）、config 写回（保注释 / 跨行数组 / 缺 key 缺 table 三种落点 / round-trip）、以及**真二进制的闭环**：`session_pins` → `--pin` → header `native_tools` 里就是它，没 pin 的那个 tool 是对照组，pin 一个不存在的 tool 拿到内核自己的拒绝。`test/overlays.test.tsx` 再加一条走真键盘：`t` 进 pane、`Space` 打开、状态文件与新 session 的 header 都跟着变、再 `Space` 关掉又都退回去。
+
+**已知 / 没做**：`A` 升格是逐个 tool 的（整包写 user config 不是谁按住一个键会做的决定）；`/ext` 的 `/sessions` 快照在本机偶发一个尾空格差异（session id 的 hash 长度不定，先于本轮存在）；`session new --no-pin`（见 2）。

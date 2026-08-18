@@ -33,6 +33,15 @@ export interface TuiState {
    * open it — they can still run `nulya ext trust` whenever they mean to.
    */
   asked_stores?: string[]
+  /**
+   * Extension tools this TUI puts on the face of every session it starts, as
+   * stable ids (`ext:<id>/<tool>`) — the `this TUI` state of the pin panel
+   * (tui.md §11, T12). Program state rather than config on purpose: trying a
+   * tool out should cost nothing and leave nothing in a file somebody else
+   * reads. `A` in the panel is what makes one permanent, and that writes the
+   * kernel's own `registry.pinned_native_tools` instead.
+   */
+  session_pins?: string[]
 }
 
 export function tuiStatePath(env: Record<string, string | undefined> = process.env): string {
@@ -60,6 +69,8 @@ export function loadTuiState(path = tuiStatePath()): TuiState {
     if (model) state.model = model
     const asked = record["asked_stores"]
     if (Array.isArray(asked)) state.asked_stores = asked.filter((s): s is string => typeof s === "string")
+    const pins = record["session_pins"]
+    if (Array.isArray(pins)) state.session_pins = pins.filter((s): s is string => typeof s === "string")
     return state
   } catch {
     return {}
@@ -80,6 +91,17 @@ export function saveTuiState(state: TuiState, path = tuiStatePath()): void {
 export function rememberModel(pick: ModelPick, path = tuiStatePath()): void {
   const state = loadTuiState(path)
   state.model = pick
+  saveTuiState(state, path)
+}
+
+/** The `--pin` list every `session new` from this TUI carries (tui.md §11, T12). */
+export function sessionPins(path = tuiStatePath()): string[] {
+  return loadTuiState(path).session_pins ?? []
+}
+
+export function rememberSessionPins(pins: readonly string[], path = tuiStatePath()): void {
+  const state = loadTuiState(path)
+  state.session_pins = [...pins]
   saveTuiState(state, path)
 }
 

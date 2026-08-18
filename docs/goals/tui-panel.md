@@ -95,4 +95,4 @@
 
 ## 6. 进度区(执行时更新)
 
-(空)
+- **T12 · pin 面板** ✅(2026-08-18)。`tui/src/pins.ts`(纯策略 + user config 的 managed 写回)、`/ext` 第四个 pane `tools`、`tui-state.json` 的 `session_pins` → 每场 `session new --pin`、`cli.ts` 的 `extDeactivate` / `ConfigView.registry` / `extSetCurrent` 的 `NULYA_SESSION`。`bun test` **126 pass**(新增 `pins.test.ts` 8 条 + `overlays.test.tsx` 一条真键盘交互),`zig build test` 绿,`src/` 零改动。三态、another-layer 只读、配额行、config round-trip 保注释全部有测试;"面板关掉某 tool → 新场 native tools 里没有它"由 `overlays.test.tsx` 自动跑通(断言的是新 session 的 header `composition.native_tools`,即 CompositionCard 的数据源);**待手测**:真终端里 `A` 升格写 `~/.nulya/config.toml` 与 `d` 的 deactivate 确认框(逻辑与 CLI 调用都有测试,没测的只有真终端的按键往返)。无 BLOCKED。

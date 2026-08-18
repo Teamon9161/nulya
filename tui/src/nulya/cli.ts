@@ -122,6 +122,13 @@ export interface NewSessionOptions {
    * for one session and no other.
    */
   with?: readonly string[]
+  /**
+   * `--pin ext:<id>/<tool>`, repeatable: put an extension tool on THIS session's
+   * native tool face. Unioned with `registry.pinned_native_tools` by the kernel
+   * (DESIGN §5.1) — a union only adds, so this can never take a configured pin
+   * away. The TUI's own pin panel writes these from `tui-state.json`.
+   */
+  pin?: readonly string[]
 }
 
 /** `nulya session new` — stdout is the session id. `env` is a test seam (`NULYA_HOME`). */
@@ -135,6 +142,7 @@ export async function sessionNew(
   if (options.model) args.push("--model", options.model)
   if (options.parent) args.push("--parent", `${options.parent.session}:${options.parent.seq}`)
   for (const ref of options.with ?? []) args.push("--with", ref)
+  for (const pin of options.pin ?? []) args.push("--pin", pin)
   const result = await run(ws, args, env)
   const id = result.stdout.trim()
   if (result.code !== 0 || !id.startsWith("s-")) fail("session new failed", result)
@@ -180,11 +188,23 @@ export interface ModelView {
   context_window: number | null
 }
 
+/**
+ * The merged `[registry]`: the tool face this workspace opens a session with.
+ * Effective values, not layers — the projection deliberately does not say which
+ * config file contributed a pin, so a panel that needs to know reads the user
+ * file itself (`pins.ts`), which is the one file it may write.
+ */
+export interface RegistryView {
+  max_tools: number
+  pinned_native_tools: string[]
+}
+
 export interface ConfigView {
   paths: ConfigPaths
   active_profile: string
   profiles: ProfileView[]
   models: ModelView[]
+  registry: RegistryView
 }
 
 /**
@@ -206,7 +226,12 @@ export async function configShow(ws: Workspace, env?: Record<string, string>): P
   const paths = (record["paths"] ?? {}) as Partial<ConfigPaths>
   const profiles = Array.isArray(record["profiles"]) ? (record["profiles"] as ProfileView[]) : []
   const models = Array.isArray(record["models"]) ? (record["models"] as ModelView[]) : []
+  const registry = (record["registry"] ?? {}) as Partial<RegistryView>
   return {
+    registry: {
+      max_tools: typeof registry.max_tools === "number" ? registry.max_tools : 8,
+      pinned_native_tools: Array.isArray(registry.pinned_native_tools) ? registry.pinned_native_tools : [],
+    },
     paths: { system: paths.system ?? "", user: paths.user ?? "", project: paths.project ?? "" },
     active_profile: typeof record["active_profile"] === "string" ? record["active_profile"] : "",
     profiles: profiles.map((p) => ({
@@ -661,17 +686,48 @@ export function sessionFollow(ws: Workspace, id: string, since = 0): FollowHandl
  * `nulya ext activate|rollback` — a CLI action, not a session event. It moves
  * the store's `current` pointer (physics #5) and therefore changes nothing about
  * the session in front of us: composition froze at `session new` (DESIGN §7.5).
+ *
+ * `session` names a live session's FILE (relative to the workspace), and it is
+ * the one thing here that reaches the running conversation: with `NULYA_SESSION`
+ * set the kernel deposits a capability note into that session's inbox when the
+ * activation takes effect (DESIGN §5.3), so the model learns at its next step
+ * boundary that a new version is there to run via `ext run`. Nothing else in
+ * this panel gets a note — a pin or a deactivation carries no information this
+ * session could act on, since its tool face froze at the start.
  */
 export async function extSetCurrent(
   ws: Workspace,
   verb: "activate" | "rollback",
   id: string,
   version: string,
+  options: { user?: boolean; session?: string } = {},
 ): Promise<string> {
-  const result = await run(ws, ["ext", verb, id, version])
+  const args = ["ext", verb]
+  if (options.user) args.push("--user")
+  args.push(id, version)
+  const result = await run(ws, args, options.session ? { NULYA_SESSION: options.session } : undefined)
   const detail = (result.stdout.trim() || result.stderr.trim() || `exit ${result.code}`).split("\n")[0] ?? ""
   if (result.code !== 0) throw new Error(`ext ${verb} failed: ${detail}`)
   return detail
+}
+
+/**
+ * `nulya ext deactivate [--user] <id>` — clear the `current` pointer, so the
+ * NEXT session composes without this extension's skills and system prompts
+ * (DESIGN §7.2). The versions all stay; deactivating is a pointer move like
+ * every other one here (physics #5).
+ *
+ * Membership, not pins: an extension can be deactivated while a pin still names
+ * one of its tools, and then `session new` refuses by name — which is the honest
+ * outcome, and the panel shows the kernel's sentence for it.
+ */
+export async function extDeactivate(ws: Workspace, id: string, options: { user?: boolean } = {}): Promise<string> {
+  const args = ["ext", "deactivate"]
+  if (options.user) args.push("--user")
+  args.push(id)
+  const result = await run(ws, args)
+  if (result.code !== 0) fail("ext deactivate failed", result)
+  return result.stdout.trim()
 }
 
 export interface StepHandle {

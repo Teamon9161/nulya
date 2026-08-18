@@ -11,7 +11,8 @@ import { createSignal, type JSX } from "solid-js"
 import { testRender } from "@opentui/solid"
 import { SessionsView } from "../src/ui/overlays/SessionsView.tsx"
 import { ExtView, driftLine, frozenVersion } from "../src/ui/overlays/ExtView.tsx"
-import { listExtensions } from "../src/nulya/files.ts"
+import { listExtensions, readHeader } from "../src/nulya/files.ts"
+import { sessionPins } from "../src/state/tui_state.ts"
 import { App } from "../src/ui/App.tsx"
 import { StyleContext, createStyle, type Style } from "../src/render/theme.ts"
 import { FoldContext, createFoldStore } from "../src/state/folds.ts"
@@ -162,6 +163,43 @@ test("/ext shows the version line, the current pointer and the usage counts", as
     const usage = await settle(setup, 4)
     expect(usage).toContain("tool usage · .nulya/tool-usage.jsonl")
     expect(usage).toContain("builtin.shell")
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 60_000)
+
+test("/ext's tools pane pins with a keypress, and the pin is what the next session carries", async () => {
+  // The `this TUI` list lives in tui-state.json, so a scratch path here is the
+  // whole isolation this needs: nothing else in the panel writes anything
+  // without a confirmation key.
+  const statePath = join(ws.dir, "pin-state.json")
+  const setup = await overlayFrame(() => (
+    <ExtView ws={ws} header={null} statePath={statePath} onClose={() => {}} />
+  ))
+  try {
+    await settle(setup, 6)
+    setup.mockInput.pressKey("t")
+    const pane = await settle(setup, 4)
+    expect(pane).toContain("tools 2+0/8")
+    expect(pane).toContain("[ ] ext:lint/lint")
+
+    setup.mockInput.pressKey(" ")
+    const pinned = await settle(setup, 4)
+    // On goes to `this TUI` first: a config file is one more key away (`A`).
+    expect(pinned).toContain("[x] ext:lint/lint")
+    expect(pinned).toContain("this TUI")
+    expect(pinned).toContain("tools 2+1/8")
+    expect(sessionPins(statePath)).toEqual(["ext:lint/lint"])
+
+    // And that list is the argv: the kernel freezes exactly it (physics #2).
+    const pinnedSession = await sessionNew(ws, { profile: "scripted", pin: sessionPins(statePath) })
+    expect((await readHeader(ws, pinnedSession))!.composition.native_tools).toContain("ext:lint/lint")
+
+    setup.mockInput.pressKey(" ")
+    await settle(setup, 4)
+    expect(sessionPins(statePath)).toEqual([])
+    const plain = await sessionNew(ws, { profile: "scripted", pin: sessionPins(statePath) })
+    expect((await readHeader(ws, plain))!.composition.native_tools).not.toContain("ext:lint/lint")
   } finally {
     setup.renderer.destroy()
   }

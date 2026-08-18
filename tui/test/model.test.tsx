@@ -32,6 +32,7 @@ const style: Style = createStyle(default_settings, {})
 const fake: ConfigView = {
   paths: { system: "/etc/nulya/config.toml", user: "/home/me/.nulya/config.toml", project: ".nulya/config.toml" },
   active_profile: "openai",
+  registry: { max_tools: 8, pinned_native_tools: [] },
   profiles: [
     {
       name: "openai",
