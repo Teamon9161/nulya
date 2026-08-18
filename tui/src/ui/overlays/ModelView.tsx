@@ -29,12 +29,19 @@
  * is always "new session on that model" (`App` decides whether that replaces a
  * fresh untouched tab or opens a second one). Effort is not frozen — it is a
  * per-step generation option — so `/effort` can also change it in place.
+ *
+ * Every line on this screen is laid out by us and never by the terminal: cells
+ * are cut to their column, sentences are broken at their ` · ` joints, and the
+ * columns are sized from the content rather than from a number that the next
+ * provider name outgrows. `ui/columns.ts` says why a wrapped line here is not
+ * merely untidy but garbled.
  */
 import { For, Show, createEffect, createMemo, createSignal, onMount } from "solid-js"
 import { useKeyboard } from "@opentui/solid"
 import type { InputRenderable } from "@opentui/core"
 import { useScreen, useStyle } from "../../render/theme.ts"
-import { visibleRows, windowRange } from "../list.ts"
+import { listBudget, windowRange } from "../list.ts"
+import { columnWidth, fit, squeeze, wrapWords } from "../columns.ts"
 import { configShow, type ConfigView, type ModelView as ModelParams, type ProfileView } from "../../nulya/cli.ts"
 import { validProfileName, writeProfile, writeProfileKey, type ProfileDraft } from "../../nulya/credentials.ts"
 import type { ModelPick } from "../../state/tui_state.ts"
@@ -215,9 +222,127 @@ export function ModelView(props: {
     return loaded && chosen ? modelRows(loaded, chosen) : []
   })
 
-  const visible = () => visibleRows(screen().height, props.notice ? 1 : 0)
-  const providerRange = createMemo(() => windowRange(providerCount(), atProvider(), visible()))
-  const modelRange = createMemo(() => windowRange(rows().length, atModel(), visible()))
+  const isCurrentProfile = (profile: ProfileView) => props.current !== null && props.current.profile === profile.name
+  const isCurrentModel = (row: PickerRow) =>
+    props.current !== null && props.current.profile === row.profile.name && (props.current.model ?? "") === row.model
+
+  /** What each cell of a row says, so the columns can be sized from it. */
+  const statusOf = (profile: ProfileView) =>
+    profile.credential ? readyLabel(profile, isCurrentProfile(profile), style.glyphs.check) : blockedReason(profile)
+  const countOf = (profile: ProfileView) => {
+    const n = modelIdsOf(profile).length
+    return `${n} model${n === 1 ? "" : "s"}`
+  }
+  const dialOf = (row: PickerRow, slot: string) =>
+    row.slots.length > 1 ? `${style.glyphs.dialLeft} ${slot} ${style.glyphs.dialRight}` : "no dial"
+  /** The dial at its widest position: a column that fits every turn of it. */
+  const widestDial = (row: PickerRow) =>
+    dialOf(
+      row,
+      row.slots.reduce((a, b) => (b.length > a.length ? b : a), ""),
+    )
+  const modelStatus = (row: PickerRow) =>
+    row.profile.credential
+      ? isCurrentModel(row)
+        ? `${style.glyphs.check} current`
+        : ""
+      : blockedReason(row.profile)
+
+  /** What the highlighted provider is, in full — its row above was cut to fit. */
+  const detailOf = (chosen: ProfileView) => {
+    const parts = [chosen.name, `${chosen.kind} wire`]
+    if (chosen.base_url.length > 0) parts.push(chosen.base_url)
+    if (chosen.api_key_env.length > 0)
+      parts.push(`${chosen.api_key_env} ${chosen.credential_source === "env" ? "set" : "unset"}`)
+    if (chosen.credential_source === "config") parts.push("key in the user config")
+    if (chosen.kind === "codex") parts.push("~/.codex/auth.json")
+    return parts.join(" · ")
+  }
+
+  /** The keys of the level that is up. A text step's hint lives on its field. */
+  const hintOf = () => {
+    switch (mode()) {
+      // Short enough to stand on one line at eighty columns: a hint that wraps
+      // is a hint whose last joint ends up alone on a line of its own.
+      case "providers":
+        return "j/k move · Enter its models · s paste a key · a add a provider · r reload · Esc close"
+      case "models":
+        return "j/k move · h/l effort · Enter start a session on it · s paste a key · Esc back"
+      case "add-wire":
+        return "j/k move · Enter confirm the wire · Esc back · the kernel speaks both; pick what the endpoint serves"
+      default:
+        return ""
+    }
+  }
+
+  /** The columns this overlay may draw in: the box pads one on each side. */
+  const inner = () => Math.max(24, screen().width - 2)
+
+  // Every line long enough to wrap is broken here instead, one `<text>` each:
+  // a `<text>` that wraps reflows, and a reflow leaves the line underneath it
+  // showing through its blanks (`ui/columns.ts`).
+  const noticeLines = () => (props.notice ? wrapWords(props.notice, inner()) : [])
+  const hintLines = () => wrapWords(hintOf(), inner())
+  const detailLines = () => {
+    const chosen = mode() === "providers" ? provider() : null
+    return chosen ? wrapWords(detailOf(chosen), inner()) : []
+  }
+
+  /**
+   * The list gets what the chrome leaves — title, the notice as it actually
+   * wrapped, the blank, the detail and the hint. Reserving one flat row for a
+   * notice that took two is how the list claimed "2 more above" with a screen
+   * full of blank rows under it.
+   */
+  const space = () =>
+    listBudget(screen().height, 1 + noticeLines().length + 1 + detailLines().length + hintLines().length)
+
+  /** A window that leaves room for the "N more" lines it may need to draw. */
+  const windowOf = (count: number, cursor: number) => {
+    const budget = space()
+    return count <= budget ? { start: 0, end: count } : windowRange(count, cursor, Math.max(3, budget - 2))
+  }
+
+  const providerRange = createMemo(() => windowOf(providerCount(), atProvider()))
+  const modelRange = createMemo(() => windowOf(rows().length, atModel()))
+
+  /**
+   * Provider columns sized from the content: a name column as wide as the
+   * longest name — a fixed 18 was exactly `deepseek-anthropic`, which ran
+   * straight into the endpoint beside it — and, when the screen is narrow, the
+   * widest column giving up cells rather than any of them overflowing.
+   */
+  const providerCols = createMemo(() => {
+    const list = profiles()
+    const [name, endpoint, count, status] = squeeze(
+      [
+        columnWidth(list.map((p) => p.name), 2, 24),
+        columnWidth(list.map(endpointOf), 2, 40),
+        columnWidth(list.map(countOf), 2, 11),
+        columnWidth(list.map(statusOf), 0, 26),
+      ],
+      [8, 6, 4, 8],
+      inner() - 2,
+    )
+    return { name: name!, endpoint: endpoint!, count: count!, status: status! }
+  })
+
+  /** The same, one level down: the id column is the one that may vanish. */
+  const modelCols = createMemo(() => {
+    const list = rows()
+    const [label, id, ctx, dial, status] = squeeze(
+      [
+        columnWidth(list.map(labelOf), 2, 26),
+        columnWidth(list.map((row) => (labelOf(row) === row.model ? "" : row.model)), 2, 30),
+        columnWidth(list.map((row) => contextOf(row.params)), 2, 10),
+        columnWidth(list.map(widestDial), 2, 16),
+        columnWidth(list.map(modelStatus), 0, 24),
+      ],
+      [10, 0, 0, 6, 0],
+      inner() - 2,
+    )
+    return { label: label!, id: id!, ctx: ctx!, dial: dial!, status: status! }
+  })
 
   /**
    * Re-read the config. `select` names the provider to land on; without it the
@@ -447,10 +572,6 @@ export function ModelView(props: {
     }
   })
 
-  const isCurrentProfile = (profile: ProfileView) => props.current !== null && props.current.profile === profile.name
-  const isCurrentModel = (row: PickerRow) =>
-    props.current !== null && props.current.profile === row.profile.name && (props.current.model ?? "") === row.model
-
   const title = () => {
     switch (mode()) {
       case "models":
@@ -529,16 +650,22 @@ export function ModelView(props: {
 
   return (
     <box flexDirection="column" width="100%" flexGrow={1} flexShrink={1} paddingLeft={1} paddingRight={1}>
-      <text fg={style.theme.accent.evolve}>{title()}</text>
-      <Show when={props.notice}>
-        <text fg={style.theme.warn}>{props.notice}</text>
-      </Show>
+      <text fg={style.theme.accent.evolve} height={1}>
+        {fit(title(), inner())}
+      </text>
+      <For each={noticeLines()}>
+        {(line) => (
+          <text fg={style.theme.warn} height={1}>
+            {line}
+          </text>
+        )}
+      </For>
       <box height={1} />
 
       <box flexDirection="column" flexGrow={1} flexShrink={1}>
         <Show when={mode() === "providers"}>
           <Show when={providerRange().start > 0}>
-            <text fg={style.theme.dim}>
+            <text fg={style.theme.dim} height={1}>
               {"  "}
               {style.glyphs.foldClosed} {providerRange().start} more above
             </text>
@@ -548,28 +675,31 @@ export function ModelView(props: {
               const index = () => providerRange().start + offset()
               const selected = () => index() === atProvider()
               const ready = profile.credential
-              const count = modelIdsOf(profile).length
               return (
-                <box flexDirection="row" width="100%" backgroundColor={selected() ? style.theme.selection : undefined}>
+                <box
+                  flexDirection="row"
+                  width="100%"
+                  height={1}
+                  flexShrink={0}
+                  backgroundColor={selected() ? style.theme.selection : undefined}
+                >
                   <text fg={selected() ? style.theme.fg : style.theme.dim} flexShrink={0}>
                     {selected() ? style.glyphs.foldOpen : " "}{" "}
                   </text>
-                  <box width={18} flexShrink={0}>
+                  <box width={providerCols().name} flexShrink={0}>
                     <text fg={isCurrentProfile(profile) ? style.theme.accent.user : ready ? style.theme.fg : style.theme.dim}>
-                      {profile.name}
+                      {fit(profile.name, providerCols().name - 2)}
                     </text>
                   </box>
-                  <box flexGrow={1} flexShrink={1} flexBasis={0}>
-                    <text fg={style.theme.dim}>{endpointOf(profile)}</text>
+                  <box width={providerCols().endpoint} flexShrink={0}>
+                    <text fg={style.theme.dim}>{fit(endpointOf(profile), providerCols().endpoint - 2)}</text>
                   </box>
-                  <box width={11} flexShrink={0}>
-                    <text fg={style.theme.dim}>
-                      {count} model{count === 1 ? "" : "s"}
-                    </text>
+                  <box width={providerCols().count} flexShrink={0}>
+                    <text fg={style.theme.dim}>{fit(countOf(profile), providerCols().count - 2)}</text>
                   </box>
-                  <box width={26} flexShrink={0}>
+                  <box width={providerCols().status} flexShrink={0}>
                     <text fg={ready ? style.theme.ok : style.theme.warn}>
-                      {ready ? readyLabel(profile, isCurrentProfile(profile), style.glyphs.check) : blockedReason(profile)}
+                      {fit(statusOf(profile), providerCols().status)}
                     </text>
                   </box>
                 </box>
@@ -580,21 +710,29 @@ export function ModelView(props: {
             <box
               flexDirection="row"
               width="100%"
+              height={1}
+              flexShrink={0}
               backgroundColor={onAddRow() ? style.theme.selection : undefined}
             >
               <text fg={onAddRow() ? style.theme.fg : style.theme.dim} flexShrink={0}>
                 {onAddRow() ? style.glyphs.foldOpen : " "}{" "}
               </text>
               <text fg={onAddRow() ? style.theme.accent.evolve : style.theme.dim}>
-                + add an OpenAI- or Anthropic-compatible provider
+                {fit("+ add an OpenAI- or Anthropic-compatible provider", inner() - 2)}
               </text>
             </box>
+          </Show>
+          <Show when={providerRange().end < providerCount()}>
+            <text fg={style.theme.dim} height={1}>
+              {"  "}
+              {style.glyphs.foldOpen} {providerCount() - providerRange().end} more below
+            </text>
           </Show>
         </Show>
 
         <Show when={mode() === "models"}>
           <Show when={modelRange().start > 0}>
-            <text fg={style.theme.dim}>
+            <text fg={style.theme.dim} height={1}>
               {"  "}
               {style.glyphs.foldClosed} {modelRange().start} more above
             </text>
@@ -604,34 +742,38 @@ export function ModelView(props: {
               const index = () => modelRange().start + offset()
               const selected = () => index() === atModel()
               const slot = () => row.slots[slots()[index()] ?? 0] ?? AUTO
-              const dial = () =>
-                row.slots.length > 1 ? `${style.glyphs.dialLeft} ${slot()} ${style.glyphs.dialRight}` : "no effort dial"
               return (
-                <box flexDirection="row" width="100%" backgroundColor={selected() ? style.theme.selection : undefined}>
+                <box
+                  flexDirection="row"
+                  width="100%"
+                  height={1}
+                  flexShrink={0}
+                  backgroundColor={selected() ? style.theme.selection : undefined}
+                >
                   <text fg={selected() ? style.theme.fg : style.theme.dim} flexShrink={0}>
                     {selected() ? style.glyphs.foldOpen : " "}{" "}
                   </text>
-                  <box width={24} flexShrink={0}>
-                    <text fg={isCurrentModel(row) ? style.theme.accent.user : style.theme.fg}>{labelOf(row)}</text>
+                  <box width={modelCols().label} flexShrink={0}>
+                    <text fg={isCurrentModel(row) ? style.theme.accent.user : style.theme.fg}>
+                      {fit(labelOf(row), modelCols().label - 2)}
+                    </text>
                   </box>
-                  <box flexGrow={1} flexShrink={1} flexBasis={0}>
-                    <Show when={labelOf(row) !== row.model}>
-                      <text fg={style.theme.dim}>{row.model}</text>
-                    </Show>
+                  <box width={modelCols().id} flexShrink={0}>
+                    <text fg={style.theme.dim}>
+                      {labelOf(row) === row.model ? "" : fit(row.model, modelCols().id - 2)}
+                    </text>
                   </box>
-                  <box width={9} flexShrink={0}>
-                    <text fg={style.theme.dim}>{contextOf(row.params)}</text>
+                  <box width={modelCols().ctx} flexShrink={0}>
+                    <text fg={style.theme.dim}>{fit(contextOf(row.params), modelCols().ctx - 2)}</text>
                   </box>
-                  <box width={20} flexShrink={0}>
-                    <text fg={selected() ? style.theme.accent.evolve : style.theme.dim}>{dial()}</text>
+                  <box width={modelCols().dial} flexShrink={0}>
+                    <text fg={selected() ? style.theme.accent.evolve : style.theme.dim}>
+                      {fit(dialOf(row, slot()), modelCols().dial - 2)}
+                    </text>
                   </box>
-                  <box width={24} flexShrink={0}>
+                  <box width={modelCols().status} flexShrink={0}>
                     <text fg={row.profile.credential ? style.theme.ok : style.theme.warn}>
-                      {row.profile.credential
-                        ? isCurrentModel(row)
-                          ? `${style.glyphs.check} current`
-                          : ""
-                        : blockedReason(row.profile)}
+                      {fit(modelStatus(row), modelCols().status)}
                     </text>
                   </box>
                 </box>
@@ -639,7 +781,7 @@ export function ModelView(props: {
             }}
           </For>
           <Show when={modelRange().end < rows().length}>
-            <text fg={style.theme.dim}>
+            <text fg={style.theme.dim} height={1}>
               {"  "}
               {style.glyphs.foldOpen} {rows().length - modelRange().end} more below
             </text>
@@ -652,16 +794,26 @@ export function ModelView(props: {
               const selected = () => index() === atWire()
               return (
                 <box flexDirection="column" width="100%">
-                  <box flexDirection="row" width="100%" backgroundColor={selected() ? style.theme.selection : undefined}>
+                  <box
+                    flexDirection="row"
+                    width="100%"
+                    height={1}
+                    flexShrink={0}
+                    backgroundColor={selected() ? style.theme.selection : undefined}
+                  >
                     <text fg={selected() ? style.theme.fg : style.theme.dim} flexShrink={0}>
                       {selected() ? style.glyphs.foldOpen : " "}{" "}
                     </text>
-                    <text fg={selected() ? style.theme.fg : style.theme.dim}>{wire.label}</text>
+                    <text fg={selected() ? style.theme.fg : style.theme.dim}>{fit(wire.label, inner() - 2)}</text>
                   </box>
-                  <text fg={style.theme.dim}>
-                    {"    "}
-                    {wire.hint}
-                  </text>
+                  <For each={wrapWords(wire.hint, inner() - 4)}>
+                    {(line) => (
+                      <text fg={style.theme.dim} height={1}>
+                        {"    "}
+                        {line}
+                      </text>
+                    )}
+                  </For>
                 </box>
               )
             }}
@@ -669,13 +821,21 @@ export function ModelView(props: {
         </Show>
 
         <Show when={config() === null && error() === null}>
-          <text fg={style.theme.dim}>reading the kernel's config…</text>
+          <text fg={style.theme.dim} height={1}>
+            reading the kernel's config…
+          </text>
         </Show>
-        <Show when={error()}>
-          <text fg={style.theme.err}>could not read config: {error()}</text>
-        </Show>
+        <For each={error() ? wrapWords(`could not read config: ${error()}`, inner()) : []}>
+          {(line) => (
+            <text fg={style.theme.err} height={1}>
+              {line}
+            </text>
+          )}
+        </For>
         <Show when={config() !== null && profiles().length === 0}>
-          <text fg={style.theme.dim}>the config has no profiles · a to add one</text>
+          <text fg={style.theme.dim} height={1}>
+            the config has no profiles · a to add one
+          </text>
         </Show>
       </box>
 
@@ -709,39 +869,33 @@ export function ModelView(props: {
                 }
               />
             </box>
-            <text fg={style.theme.dim}>{fieldOf()?.hint}</text>
+            <For each={wrapWords(fieldOf()?.hint ?? "", inner())}>
+              {(line) => (
+                <text fg={style.theme.dim} height={1}>
+                  {line}
+                </text>
+              )}
+            </For>
           </>
         )}
       </Show>
 
-      <Show when={mode() === "providers"}>
-        <Show when={provider()} keyed>
-          {(chosen: ProfileView) => (
-            <text fg={style.theme.dim}>
-              {chosen.name} · {chosen.kind} wire
-              {chosen.base_url.length > 0 ? ` · ${chosen.base_url}` : ""}
-              {chosen.api_key_env.length > 0
-                ? ` · ${chosen.api_key_env} ${chosen.credential_source === "env" ? "set" : "unset"}`
-                : ""}
-              {chosen.credential_source === "config" ? " · key in the user config" : ""}
-              {chosen.kind === "codex" ? " · ~/.codex/auth.json" : ""}
-            </text>
-          )}
-        </Show>
-        <text fg={style.theme.dim}>
-          j/k move · Enter its models · s paste its API key · a add a provider · r reload · Esc close
-        </text>
-      </Show>
-      <Show when={mode() === "models"}>
-        <text fg={style.theme.dim}>
-          j/k move · h/l effort · Enter start a session on it · s paste this provider's key · Esc back
-        </text>
-      </Show>
-      <Show when={mode() === "add-wire"}>
-        <text fg={style.theme.dim}>
-          j/k move · Enter confirm the wire · Esc back · the kernel speaks both; pick what the endpoint serves
-        </text>
-      </Show>
+      {/* The detail of the highlighted row, then the keys — both broken at
+          their ` · ` joints, so neither can wrap into the composer below. */}
+      <For each={detailLines()}>
+        {(line) => (
+          <text fg={style.theme.dim} height={1}>
+            {line}
+          </text>
+        )}
+      </For>
+      <For each={hintLines()}>
+        {(line) => (
+          <text fg={style.theme.dim} height={1}>
+            {line}
+          </text>
+        )}
+      </For>
     </box>
   )
 }

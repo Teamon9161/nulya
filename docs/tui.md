@@ -997,3 +997,17 @@ cd tui && bun test test/compact.test.ts
 5. **测试**：`skills.test.ts` 5 条——tcode 的两条 sentinel 测试逐条同形（特殊字符 round-trip、普通文本不误判）、内建优先、`/name args` 的切分、以及**真二进制闭环**（真的 draft → `ext sync --activate` → `skill list` 的 TSV 与 ref 形状 → `skill load` 的字节 → 包好的 turn 里有 body、折叠成一行、未命中返回 null）。`render.test.tsx` 加一条折叠快照。
 
 **已知 / 没做**：skill echo 卡片不进 browse 模式的可选列表（`foldable()` 只收 tool / thinking，CompactionCard 同样如此——鼠标点头行仍能折叠）；per-project 的 slash alias、前端自动触发 skill 都在契约 §5 的"不做"里。
+
+### T16 · `/model` 的排版修补（2026-08-18）
+
+**乱码的根因**（截图先拿到、再在测试渲染器里复现的那半）：一条 `<text>` 只画自己的字形落到的格子，**空格覆盖的格子原样留着**；所以一行的折行位置在两帧之间变了，上一帧的字就从新文本的每一个空格里透出来。截图里 notice 渲染成 `openai·hasino APIvkeyr·athisssessionsisnthe offline stand-in`——把它与上一行标题 `model · which provider a session runs on` 逐格对齐，**插进去的每个字符都正是标题在该列的那个字符**（第 6 列 `·`、第 10 列 `i`、第 13 列空格、第 17 列 `v`、第 21 列 `r`…）。所以不是宽度测量错、也不是 `·` 的双字节，是**重排**：只要一行会折，它迟早会花。宽度测量只是导火索——单元格超宽 → 折行 → 重排。
+
+因此对策不在 OpenTUI 而在**布局纪律**：**列表里的任何一行都不许折**。新增 `tui/src/ui/columns.ts`（纯函数，5 条测试）：`displayWidth`/`charWidth`（按显示宽度，不是字符数也不是字节数）、`fit`（超宽截断加 `…`，落在宽字符里就少占一列而不是多占一列）、`wrapWords`（**我们自己**按 ` · ` 关节折，断点丢掉分隔符，所以不会有以 `·` 开头的孤行；一个短语比整行还宽就退到空格，一个词比整行还宽就动刀）、`columnWidth`（内容 + gutter，封顶；全空的列**一列都不占**）、`squeeze`（窄屏时最宽的列先让格子，不低于各自下限）。
+
+`ModelView` 的四处对应修补：
+1. **列宽来自内容**：name 列原本写死 18，而 `deepseek-anthropic` 正好 18 → 与右邻居粘成 `deepseek-anthropicanthropic wire · api.`。现在 name/endpoint/models/status（二级是 label/id/ctx/dial/status）都由 `columnWidth` + `squeeze` 算出来，每格文本过 `fit`，行 `height={1}`，gutter 恒 2。
+2. **notice 与 hint 手动折**：一行一个 `<text>`，断在 ` · ` 上；`launch.ts` 的 guide 与两级 hint 顺手收短（八十列一行装得下的 hint 就不会折出孤行）。
+3. **窗口预留按真实渲染行数**：`list.ts` 拆出 `listBudget(height, own)`（App 自己的 chrome = 9 行是唯一的常数，`visibleRows` 现在就是 `listBudget(h, 7 + extra)`，`/sessions` 逐格不变），`ModelView` 数的是它**真的画出来的**标题 + notice 折后行数 + 空行 + 详情 + hint；溢出时再留两行给 "N more" 标记。原先按"notice 恒 1 行"预留，是屏幕下方一片空白却说"上面还有 2 行"的原因之一。
+4. providers 列表补了缺的 "N more below"。
+
+**同病未修**（不在本轮范围，记在这里）：`ExtView`（`width={34}` 的左栏 + 版本行）、`UsageView`（`width={20}`）、`HelpView`（`width={32}`）、`SettingsView`（`width={12}` / `{28}`）、`Composer` 的补全菜单（`width={40}` / `{26}`）都仍是写死列宽 + 未截断的文本，窄屏或长 id 下会犯同一个错；改法就是上面这套 helper。

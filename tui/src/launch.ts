@@ -63,6 +63,6 @@ export function planLaunch(args: LaunchArgs, last: ModelPick | undefined, config
   const why = last && !runnable(config, last.profile) ? reason(config, last.profile) : reason(config, active || "?")
   return {
     pick: { profile: "scripted" },
-    guide: `${why} · this session is the offline stand-in · pick a row marked ready, or press s on one to paste its API key`,
+    guide: `${why} · this session is the offline stand-in · pick a ready row, or press s on one to paste a key`,
   }
 }

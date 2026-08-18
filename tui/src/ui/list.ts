@@ -19,11 +19,27 @@ export function windowRange(count: number, cursor: number, visible: number): { s
 }
 
 /**
- * How many rows an overlay list may draw at `height` terminal rows. The chrome
- * around it — header, hairline, title, blank, detail, footer, hairline,
- * composer, hairline, status bar — is about sixteen rows, and `extra` accounts
- * for anything a particular overlay adds. Never fewer than three.
+ * What the App itself costs an overlay, in rows: the header line, the tab bar,
+ * the hairline above, and below it the hairline, the three-row composer, a
+ * hairline and the status bar.
+ */
+export const app_chrome = 9
+
+/**
+ * How many rows are left for a list when the overlay knows exactly what it
+ * draws around it — `own` is its title, its blank, its detail and hint lines,
+ * counted as they are actually rendered rather than guessed at. Never fewer
+ * than three: a list with no room is still a list.
+ */
+export function listBudget(height: number, own: number): number {
+  return Math.max(3, height - app_chrome - own)
+}
+
+/**
+ * How many rows an overlay list may draw at `height` terminal rows when it has
+ * not counted its own chrome: title, blank, detail and footer come to about
+ * seven, and `extra` accounts for anything a particular overlay adds.
  */
 export function visibleRows(height: number, extra = 0): number {
-  return Math.max(3, height - 16 - extra)
+  return listBudget(height, 7 + extra)
 }

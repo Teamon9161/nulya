@@ -14,6 +14,7 @@ import { createSignal, type JSX } from "solid-js"
 import { testRender } from "@opentui/solid"
 import { configShow, type ConfigView } from "../src/nulya/cli.ts"
 import { AUTO, ModelView, blockedReason, endpointOf, initialSlot, modelRows, pickerRows } from "../src/ui/overlays/ModelView.tsx"
+import { displayWidth } from "../src/ui/columns.ts"
 import { planLaunch } from "../src/launch.ts"
 import { loadTuiState, rememberModel, saveTuiState } from "../src/state/tui_state.ts"
 import { StyleContext, createStyle, type Style } from "../src/render/theme.ts"
@@ -151,6 +152,71 @@ test("/model level 1 is providers — one row each, credential status on the row
     expect(frame).toContain("✓ current")
     expect(frame).toContain("offline stand-in")
     expect(frame).toContain("+ add an OpenAI- or Anthropic-compatible provider")
+    expect(frame).toMatchSnapshot()
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 60_000)
+
+test("the provider table is cut to its columns: one row each, a gutter that survives, nothing wraps", async () => {
+  // `deepseek-anthropic` is exactly the 18 columns the name column used to be
+  // fixed at, so it is the row that used to run straight into the endpoint
+  // beside it ("deepseek-anthropicanthropic wire · api.").
+  const crowded: ConfigView = {
+    ...fake,
+    profiles: [
+      ...fake.profiles,
+      {
+        name: "deepseek-anthropic",
+        kind: "anthropic",
+        base_url: "https://api.deepseek.com/anthropic",
+        api_key_env: "DEEPSEEK_API_KEY",
+        credential: false,
+        credential_source: "none",
+        model: "deepseek-v4-flash",
+        models: ["deepseek-v4-flash"],
+        effort: null,
+      },
+    ],
+  }
+  const notice = "openai has no API key · this session is the offline stand-in · pick a ready row, or press s on one to paste a key"
+  const setup = await pickerFrame(
+    () => (
+      <ModelView
+        ws={ws}
+        current={null}
+        notice={notice}
+        onPick={() => {}}
+        onNotice={() => {}}
+        onClose={() => {}}
+        load={async () => crowded}
+      />
+    ),
+    76,
+    30,
+  )
+  try {
+    await until(() => setup.captureCharFrame().includes("deepseek-anthropic"), 10_000)
+    const frame = await settle(setup, 4)
+    const lines = frame.split("\n").map((line) => line.replace(/\s+$/, ""))
+    for (const line of lines) expect(displayWidth(line)).toBeLessThanOrEqual(76)
+
+    // One line per profile, each carrying its whole row: a cell that overflowed
+    // its column would take a second line and leave the count alone, so the
+    // rows are counted by the chip that only a complete row has.
+    const rows = lines.filter((line) => /\d model(s)? /.test(line))
+    expect(rows.length).toBe(crowded.profiles.length)
+    for (const row of rows) expect(row).toMatch(/(no key · s|codex login|stand-in|ready)/)
+
+    // The gutter is not negotiable, and what does not fit is cut with `…`
+    // rather than wrapped into the row below.
+    expect(frame).toContain("deepseek-anthropic  anthropic wire")
+    expect(frame).toContain("…")
+    expect(frame).not.toContain("deepseek-anthropicanthropic")
+
+    // The notice is broken at its joints, by us, one `<text>` per line.
+    expect(frame).toContain("openai has no API key · this session is the offline stand-in")
+    expect(frame).toContain("pick a ready row, or press s on one to paste a key")
     expect(frame).toMatchSnapshot()
   } finally {
     setup.renderer.destroy()

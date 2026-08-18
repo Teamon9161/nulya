@@ -3,10 +3,10 @@
 exports[`/model level 1 is providers — one row each, credential status on the row 1`] = `
 " model · which provider a session runs on                                                                               
                                                                                                                         
-   openai            openai wire · api.openai.com                                 2 models   no key · s to paste one    
- ▾ deepseek          openai wire · api.deepseek.com                               2 models   ✓ current                  
-   codex             codex · ChatGPT subscription                                 1 model    run \`codex login\`          
-   scripted          offline · no network                                         1 model    offline stand-in           
+   openai    openai wire · api.openai.com    2 models  no key · s to paste one                                          
+ ▾ deepseek  openai wire · api.deepseek.com  2 models  ✓ current                                                        
+   codex     codex · ChatGPT subscription    1 model   run \`codex login\`                                                
+   scripted  offline · no network            1 model   offline stand-in                                                 
    + add an OpenAI- or Anthropic-compatible provider                                                                    
                                                                                                                         
                                                                                                                         
@@ -30,15 +30,49 @@ exports[`/model level 1 is providers — one row each, credential status on the 
                                                                                                                         
                                                                                                                         
  deepseek · openai wire · https://api.deepseek.com · DEEPSEEK_API_KEY set                                               
- j/k move · Enter its models · s paste its API key · a add a provider · r reload · Esc close                            
+ j/k move · Enter its models · s paste a key · a add a provider · r reload · Esc close                                  
+"
+`;
+
+exports[`the provider table is cut to its columns: one row each, a gutter that survives, nothing wraps 1`] = `
+" model · which provider a session runs on                                   
+ openai has no API key · this session is the offline stand-in               
+ pick a ready row, or press s on one to paste a key                         
+                                                                            
+   openai              openai wire · api.…  2 models  no key · s to paste … 
+ ▾ deepseek            openai wire · api.…  2 models  ready · DEEPSEEK_API… 
+   codex               codex · ChatGPT su…  1 model   run \`codex login\`     
+   scripted            offline · no netwo…  1 model   offline stand-in      
+   deepseek-anthropic  anthropic wire · a…  1 model   no key · s to paste … 
+   + add an OpenAI- or Anthropic-compatible provider                        
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+ deepseek · openai wire · https://api.deepseek.com · DEEPSEEK_API_KEY set   
+ j/k move · Enter its models · s paste a key · a add a provider · r reload  
+ Esc close                                                                  
 "
 `;
 
 exports[`/model level 2 is that provider's models: ←→ turns the dial, Enter picks, Esc goes back 1`] = `
 " model · deepseek · 2 models                                                                                            
                                                                                                                         
- ▾ DeepSeek V4 Flash       deepseek-v4-flash                      1M ctx   ‹ auto ›            ✓ current                
-   DeepSeek V4 Pro         deepseek-v4-pro                        1M ctx   ‹ auto ›                                     
+ ▾ DeepSeek V4 Flash  deepseek-v4-flash  1M ctx  ‹ auto ›  ✓ current                                                    
+   DeepSeek V4 Pro    deepseek-v4-pro    1M ctx  ‹ auto ›                                                               
                                                                                                                         
                                                                                                                         
                                                                                                                         
@@ -64,6 +98,6 @@ exports[`/model level 2 is that provider's models: ←→ turns the dial, Enter 
                                                                                                                         
                                                                                                                         
                                                                                                                         
- j/k move · h/l effort · Enter start a session on it · s paste this provider's key · Esc back                           
+ j/k move · h/l effort · Enter start a session on it · s paste a key · Esc back                                         
 "
 `;
