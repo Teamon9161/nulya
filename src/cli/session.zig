@@ -423,9 +423,11 @@ fn printPinFailure(alloc: std.mem.Allocator, io: std.Io, pins: []const []const u
     try printErrFmt(alloc, io, "session new failed: a pin {s}; pinned: {s}\n", .{ reason, listed });
 }
 
+const append_usage = "usage: nulya session append <id> [<text> | --file <path>] [--image <path>]…\n";
+
 fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (args.len < 1) {
-        try printErr(io, "usage: nulya session append <id> <text> | --file <path>\n");
+        try printErr(io, append_usage);
         return 1;
     }
     const id = args[0];
@@ -434,15 +436,44 @@ fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
         return 1;
     }
 
-    const text = if (flagValue(args[1..], "--file")) |path|
+    // One pass over the tail: `--file` / `--image` (repeatable) take the next
+    // argument, and the first thing left over is the turn's text.
+    var text_arg: ?[]const u8 = null;
+    var file_arg: ?[]const u8 = null;
+    var image_args: std.ArrayList([]const u8) = .empty;
+    defer image_args.deinit(alloc);
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        const is_file = std.mem.eql(u8, arg, "--file");
+        if (is_file or std.mem.eql(u8, arg, "--image")) {
+            if (i + 1 >= args.len) {
+                try printErrFmt(alloc, io, "{s} takes a path\n", .{arg});
+                return 1;
+            }
+            if (is_file) file_arg = args[i + 1] else try image_args.append(alloc, args[i + 1]);
+            i += 1;
+            continue;
+        }
+        if (text_arg != null) {
+            try printErr(io, append_usage);
+            return 1;
+        }
+        text_arg = arg;
+    }
+
+    const text = if (file_arg) |path|
         std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(8 << 20)) catch {
             try printErrFmt(alloc, io, "cannot read --file '{s}'\n", .{path});
             return 1;
         }
-    else if (args.len >= 2)
-        try alloc.dupe(u8, args[1])
+    else if (text_arg) |t|
+        try alloc.dupe(u8, t)
+    else if (image_args.items.len != 0)
+        // An image with nothing said about it is a turn ("look at this").
+        try alloc.dupe(u8, "")
     else {
-        try printErr(io, "usage: nulya session append <id> <text> | --file <path>\n");
+        try printErr(io, append_usage);
         return 1;
     };
     defer alloc.free(text);
@@ -452,6 +483,26 @@ fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     if (!sessionExists(io, spath)) {
         try printErrFmt(alloc, io, "no such session '{s}'\n", .{id});
         return 1;
+    }
+
+    // Images: the gates (DESIGN §9's "decisions live in the shell") — can this
+    // session's frozen model see an image at all, is this file even an image,
+    // is it small enough. Every one of them refuses BEFORE anything is
+    // deposited, so a refused append leaves the session exactly as it was.
+    var images: std.ArrayList(ledger.Image) = .empty;
+    defer {
+        for (images.items) |img| alloc.free(img.data);
+        images.deinit(alloc);
+    }
+    if (image_args.items.len != 0) {
+        if (!try visionAccepted(alloc, io, spath)) return 1;
+        for (image_args.items) |path| {
+            const img = loadImage(alloc, io, path) catch |err| {
+                try printImageRefusal(alloc, io, path, err);
+                return 1;
+            };
+            try images.append(alloc, img);
+        }
     }
 
     // `append` never writes the session file (its one writer is `step`): the
@@ -465,8 +516,122 @@ fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
         std.mem.readInt(u32, &nonce, .little),
     });
     defer alloc.free(name);
-    try ledger.depositEvent(alloc, io, std.Io.Dir.cwd(), spath, name, .{ .user_text = .{ .text = text } });
+    try ledger.depositEvent(alloc, io, std.Io.Dir.cwd(), spath, name, .{
+        .user_text = .{ .text = text, .images = images.items },
+    });
     return 0;
+}
+
+/// The largest image one turn may carry, raw bytes before base64 (the tightest
+/// per-image limit among the providers we speak, DESIGN §13). Refusing here is
+/// the honest place: nulya does not silently rescale a user's picture.
+const max_image_bytes: u64 = 5 << 20;
+
+const ImageError = error{ UnreadableImage, UnsupportedImageType, ImageTooLarge };
+
+/// Read one image file and inline it as base64. The type comes from the file's
+/// MAGIC, never its extension — the bytes are the fact, and a provider that
+/// rejects a mislabeled `.png` would do it mid-run, one step later.
+fn loadImage(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !ledger.Image {
+    var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return ImageError.UnreadableImage;
+    defer file.close(io);
+    const size = (file.stat(io) catch return ImageError.UnreadableImage).size;
+    if (size > max_image_bytes) return ImageError.ImageTooLarge;
+
+    const raw = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(max_image_bytes)) catch
+        return ImageError.UnreadableImage;
+    defer alloc.free(raw);
+    const media_type = sniffMediaType(raw) orelse return ImageError.UnsupportedImageType;
+
+    const encoder = std.base64.standard.Encoder;
+    const data = try alloc.alloc(u8, encoder.calcSize(raw.len));
+    errdefer alloc.free(data);
+    return .{ .media_type = media_type, .data = encoder.encode(data, raw) };
+}
+
+/// png / jpeg, by magic. Two types is the whole v1 list; a third is a decision
+/// about what the wires accept, not a parser.
+fn sniffMediaType(bytes: []const u8) ?[]const u8 {
+    if (std.mem.startsWith(u8, bytes, "\x89PNG")) return "image/png";
+    if (std.mem.startsWith(u8, bytes, "\xFF\xD8\xFF")) return "image/jpeg";
+    return null;
+}
+
+fn printImageRefusal(alloc: std.mem.Allocator, io: std.Io, path: []const u8, err: anyerror) !void {
+    switch (err) {
+        ImageError.UnreadableImage => try printErrFmt(alloc, io, "cannot read --image '{s}'\n", .{path}),
+        ImageError.UnsupportedImageType => try printErrFmt(
+            alloc,
+            io,
+            "--image '{s}': not a PNG or JPEG (nulya reads the file's magic, not its extension); supported: image/png, image/jpeg\n",
+            .{path},
+        ),
+        ImageError.ImageTooLarge => {
+            const size = imageSize(io, path) orelse 0;
+            try printErrFmt(
+                alloc,
+                io,
+                "--image '{s}': {d} bytes exceeds the {d} byte per-image limit; send a smaller image\n",
+                .{ path, size, max_image_bytes },
+            );
+        },
+        else => return err,
+    }
+}
+
+fn imageSize(io: std.Io, path: []const u8) ?u64 {
+    var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
+    defer file.close(io);
+    return (file.stat(io) catch return null).size;
+}
+
+/// The vision gate (DESIGN §14): may THIS session be handed an image?
+///
+/// It asks the session's FROZEN identity (§3.4) — not today's active profile —
+/// and looks the model id up in the `[[models]]` catalog, which is descriptive
+/// and trusted-layer only (§9.5). No entry, or an entry that does not say
+/// `vision = true`, is a refusal: the catalog is an explicit claim, and nothing
+/// here guesses on the model's behalf. Prints its own refusal (stderr) and
+/// returns false; the kernel never learns this gate exists.
+fn visionAccepted(alloc: std.mem.Allocator, io: std.Io, spath: []const u8) !bool {
+    var header = ledger.readHeader(alloc, io, std.Io.Dir.cwd(), spath) catch {
+        try printErr(io, "session append failed: cannot read this session's header\n");
+        return false;
+    };
+    defer header.deinit();
+    const model_id = header.value.model_identity.model;
+
+    var host = try environment.hostEnvironMap(alloc);
+    defer host.deinit();
+    var cfg = try config.load(alloc, io, &host);
+    defer cfg.deinit();
+    var paths = try config.ConfigPaths.init(alloc, &host);
+    defer paths.deinit(alloc);
+
+    for (cfg.models) |m| {
+        if (!std.mem.eql(u8, m.id, model_id)) continue;
+        if (m.vision) return true;
+        try printErrFmt(alloc, io, "session append refused: model '{s}' is not marked as accepting images\n", .{model_id});
+        try printVisionHint(alloc, io, model_id, paths.user);
+        return false;
+    }
+    try printErrFmt(
+        alloc,
+        io,
+        "session append refused: no [[models]] entry for '{s}', so nothing claims it accepts images\n",
+        .{if (model_id.len != 0) model_id else "(unnamed model)"},
+    );
+    try printVisionHint(alloc, io, model_id, paths.user);
+    return false;
+}
+
+fn printVisionHint(alloc: std.mem.Allocator, io: std.Io, model_id: []const u8, user_config: []const u8) !void {
+    try printErrFmt(
+        alloc,
+        io,
+        "  add to your user config ({s}):\n    [[models]]\n    id = \"{s}\"\n    vision = true\n  then check it with `nulya config show`\n",
+        .{ user_config, model_id },
+    );
 }
 
 /// Why the run stopped, from facts the kernel already reports: a canceled step

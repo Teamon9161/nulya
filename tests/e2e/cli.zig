@@ -50,6 +50,7 @@ test "cli help: help / --help / -h print the same usage covering every verb fami
         "ext prune",    "--dry-run",      "--activate",     "session new", "--with",
         "--pin",        "--parent",       "session step",   "--max-steps", "--effort",
         "--stream",     "session events", "session cancel", "outcome",     "session list",
+        "--image",
         "config show",  "skill load",     "src",            "toolchain",   "help",
     }) |needle| {
         std.testing.expect(std.mem.indexOf(u8, help.stdout, needle) != null) catch |err| {
@@ -58,8 +59,9 @@ test "cli help: help / --help / -h print the same usage covering every verb fami
         };
     }
 
-    // One screen: this is read by a model that pays for every line of it.
-    try std.testing.expect(std.mem.count(u8, help.stdout, "\n") <= 40);
+    // One screen: this is read by a model that pays for every line of it. The
+    // budget moves only when a real capability arrives (`--image`, +2).
+    try std.testing.expect(std.mem.count(u8, help.stdout, "\n") <= 42);
 
     // The two flag spellings a terminal user reaches for reach the same text.
     for ([_][]const u8{ "--help", "-h" }) |flag| {

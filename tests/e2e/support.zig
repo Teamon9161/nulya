@@ -295,7 +295,7 @@ pub const EnvPair = struct { key: []const u8, value: []const u8 };
 /// append to (DESIGN §9) all live under `NULYA_HOME`. A test that cares about the
 /// user layer passes its own `NULYA_HOME` pair, which wins — the pairs are applied
 /// after this.
-const home_subdir = ".nulya-test-home";
+pub const home_subdir = ".nulya-test-home";
 
 /// That same user layer, for a test that spawns `nulya` some other way than
 /// `runCli` — an in-process session whose `shell` runs the CLI has to point its

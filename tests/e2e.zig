@@ -64,6 +64,7 @@
 //!   e2e/support.zig      shared fixtures — CLI runners, scaffolds, fake models
 //!   e2e/extension.zig    the extension lifecycle, store roots, bundled packages
 //!   e2e/session.zig      the durable ledger and the `nulya session *` surface
+//!   e2e/vision.zig       images in a user turn: the catalog gate, the line, events
 //!   e2e/manufacture.zig  the flagship self-manufacture + pin proof
 //!   e2e/source.zig       `nulya src` / `ext api`
 //!   e2e/cli.zig          the self-description entry: `nulya help`, `ext api`
@@ -76,6 +77,7 @@ comptime {
     _ = @import("e2e/support.zig");
     _ = @import("e2e/extension.zig");
     _ = @import("e2e/session.zig");
+    _ = @import("e2e/vision.zig");
     _ = @import("e2e/manufacture.zig");
     _ = @import("e2e/source.zig");
     _ = @import("e2e/cli.zig");

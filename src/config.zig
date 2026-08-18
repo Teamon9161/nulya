@@ -86,6 +86,12 @@ pub const ModelParams = struct {
     /// "send nothing" (provider default).
     default_effort: ?[]const u8 = null,
     context_window: ?u64 = null,
+    /// Whether this model accepts images in a user turn. Explicit opt-in: an id
+    /// with no catalog entry, or an entry that does not say so, does not accept
+    /// them — `session append --image` refuses rather than guessing and letting
+    /// the provider 400 mid-run (DESIGN §3.1, §14). Descriptive like every other
+    /// field here; the kernel never reads it, the shell does.
+    vision: bool = false,
 };
 
 pub const Provider = struct {
@@ -209,6 +215,7 @@ const RawModelParams = struct {
     efforts: ?[]const []const u8 = null,
     default_effort: ?[]const u8 = null,
     context_window: ?u64 = null,
+    vision: ?bool = null,
 };
 
 const RawRegistry = struct {
@@ -398,6 +405,7 @@ fn mergeModelFields(arena: std.mem.Allocator, model: *ModelParams, raw: RawModel
     if (raw.efforts) |efforts| model.efforts = try dupeStringList(arena, efforts);
     if (raw.default_effort) |effort| model.default_effort = try arena.dupe(u8, effort);
     if (raw.context_window) |window| model.context_window = window;
+    if (raw.vision) |vision| model.vision = vision;
 }
 
 fn dupeStringList(arena: std.mem.Allocator, values: []const []const u8) ![]const []const u8 {

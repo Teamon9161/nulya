@@ -149,6 +149,9 @@ fn writeConfigText(w: *std.Io.Writer, view: ConfigView) !void {
     for (view.models) |m| {
         try w.print("  {s: <22} {s: <18}", .{ m.id, m.label });
         if (m.context_window) |c| try w.print("  ctx {d: >7}", .{c});
+        // Only when true: the absence of the word is the absence of the claim,
+        // which is exactly what the `--image` gate reads it as.
+        if (m.vision) try w.writeAll("  vision");
         if (m.efforts.len != 0) {
             try w.writeAll("  effort ");
             for (m.efforts, 0..) |e, i| {

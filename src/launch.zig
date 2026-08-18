@@ -228,7 +228,13 @@ pub fn resolveDescriptor(
     const chosen = nonEmpty(model_id orelse "", profile.defaultModel());
     const keyed = credentialSource(alloc, io, profile, env) != .none;
     return switch (profile.kind) {
-        .scripted => scripted,
+        // A scripted PROFILE freezes the id it was asked for. The stand-in
+        // ignores it — but the id is what the session was created as, and the
+        // shell's catalog lookups (`[[models]]`, e.g. the `--image` gate in
+        // §14) ask the frozen identity what model this is. The keyless
+        // fallbacks below deliberately keep the bare identity: there the id the
+        // caller asked for is precisely what did NOT happen.
+        .scripted => .{ .provider = "scripted", .model = chosen },
         // Only a resolvable credential yields a durable API identity; otherwise
         // this session is (and stays) scripted.
         .openai => if (!keyed) scripted else .{

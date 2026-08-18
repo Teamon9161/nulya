@@ -180,7 +180,9 @@ pub const session_usage =
     \\                                                    freeze composition + model, print a new session id; --with composes
     \\                                                    a built version in, --pin puts one of its tools on the model's tool
     \\                                                    face, --parent continues that session as a fork
-    \\  nulya session append <id> <text> | --file <path>  queue a user turn for the next step boundary
+    \\  nulya session append <id> [<text> | --file <p>] [--image <p>]…
+    \\                                                    queue a user turn for the next step boundary; --image inlines a
+    \\                                                    png/jpeg ≤5 MB, if the model's catalog entry says vision = true
     \\  nulya session step <id> [--max-steps N] [--effort E] [--stream]
     \\                                                    run to end of turn or budget; stdout = event JSONL, --stream adds
     \\                                                    live model/tool lines as they happen
