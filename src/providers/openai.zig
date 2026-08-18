@@ -478,7 +478,7 @@ test "request JSON serializes streaming prompt turns and tools" {
     const alloc = std.testing.allocator;
     var l = @import("../ledger.zig").Ledger.init(alloc);
     defer l.deinit();
-    try l.append(.{ .user_text = "hello" });
+    try l.append(.{ .user_text = .{ .text = "hello" } });
     const ir = try prompt.project(alloc, l.view());
     defer ir.deinit(alloc);
 
@@ -543,7 +543,7 @@ test "DeepSeek: effort off disables thinking, other levels are reasoning_effort,
     const alloc = std.testing.allocator;
     var l = @import("../ledger.zig").Ledger.init(alloc);
     defer l.deinit();
-    try l.append(.{ .user_text = "hi" });
+    try l.append(.{ .user_text = .{ .text = "hi" } });
     const ir = try prompt.project(alloc, l.view());
     defer ir.deinit(alloc);
 
@@ -601,7 +601,7 @@ test "DeepSeek: a tool-calling turn's reasoning_content is kept as one item and 
     // ahead of its tool_calls, and the tool result follows as usual.
     var l = @import("../ledger.zig").Ledger.init(alloc);
     defer l.deinit();
-    try l.append(.{ .user_text = "list files" });
+    try l.append(.{ .user_text = .{ .text = "list files" } });
     try l.append(.{ .assistant = .{ .reasoning = turn.reasoning, .text = turn.text, .calls = turn.calls } });
     try l.append(.{ .tool_results = &.{.{ .call_id = "call_1", .ok = true, .output = "a.txt" }} });
     const ir = try prompt.project(alloc, l.view());
@@ -620,10 +620,10 @@ test "reasoning without tool calls, or of another provider's shape, is not repla
     const alloc = std.testing.allocator;
     var l = @import("../ledger.zig").Ledger.init(alloc);
     defer l.deinit();
-    try l.append(.{ .user_text = "q" });
+    try l.append(.{ .user_text = .{ .text = "q" } });
     // A text-only turn: DeepSeek ignores its CoT on later turns, so it stays home.
     try l.append(.{ .assistant = .{ .reasoning = "[{\"reasoning_content\":\"private\"}]", .text = "answer", .calls = &.{} } });
-    try l.append(.{ .user_text = "again" });
+    try l.append(.{ .user_text = .{ .text = "again" } });
     // A tool-calling turn whose reasoning came from an Anthropic-shaped item.
     try l.append(.{ .assistant = .{
         .reasoning = "[{\"type\":\"thinking\",\"thinking\":\"plan\",\"signature\":\"sig\"}]",
@@ -644,7 +644,7 @@ test "request JSON serializes system blocks before ledger turns" {
     const alloc = std.testing.allocator;
     var l = @import("../ledger.zig").Ledger.init(alloc);
     defer l.deinit();
-    try l.append(.{ .user_text = "hello" });
+    try l.append(.{ .user_text = .{ .text = "hello" } });
     const sys = [_]prompt.SystemBlock{.{ .source = "kernel", .bytes = "system base" }};
     const ir = try prompt.projectWithSystem(alloc, &sys, l.view());
     defer ir.deinit(alloc);

@@ -65,10 +65,30 @@ pub const StopReason = enum {
     other,
 };
 
+/// One image inlined into a user turn (DESIGN §3.1). `data` is base64 TEXT —
+/// what goes on the wire and what sits in the line — and the ledger neither
+/// decodes nor validates it: storing the fact is this type's whole job. Which
+/// media types are acceptable, how big an image may be and whether the session's
+/// frozen model can even see one are decisions, and decisions live in the shell
+/// (`cli/session.zig`, DESIGN §9) — a file that already holds an odd value still
+/// reads back.
+pub const Image = struct {
+    media_type: []const u8,
+    data: []const u8,
+};
+
+/// A user turn: text, plus zero or more images inlined with it. Both are
+/// model-visible, so both are projected (unlike `assistant.usage`, which is a
+/// fact about the turn and has no field in the projection).
+pub const UserText = struct {
+    text: []const u8,
+    images: []const Image = &.{},
+};
+
 /// The event log's alphabet. Kept minimal for the skeleton; DESIGN §3 lists the
 /// full set (capability_note, registry_selection, compaction, …).
 pub const Event = union(enum) {
-    user_text: []const u8,
+    user_text: UserText,
     assistant: struct {
         /// The turn's reasoning as the provider emitted it: a JSON array of
         /// opaque, provider-owned items (signed / encrypted chain-of-thought), or
@@ -241,7 +261,10 @@ pub const Ledger = struct {
 /// finished pieces in the arena, and the arena is released as one.
 fn cloneEvent(a: std.mem.Allocator, e: Event) !Event {
     return switch (e) {
-        .user_text => |text| .{ .user_text = try a.dupe(u8, text) },
+        .user_text => |u| .{ .user_text = .{
+            .text = try a.dupe(u8, u.text),
+            .images = try cloneImages(a, u.images),
+        } },
         .assistant => |as| .{ .assistant = .{
             .reasoning = try a.dupe(u8, as.reasoning),
             .text = try a.dupe(u8, as.text),
@@ -256,6 +279,16 @@ fn cloneEvent(a: std.mem.Allocator, e: Event) !Event {
             .text = try a.dupe(u8, note.text),
         } },
     };
+}
+
+fn cloneImages(a: std.mem.Allocator, images: []const Image) ![]const Image {
+    if (images.len == 0) return &.{};
+    const owned = try a.alloc(Image, images.len);
+    for (images, owned) |img, *out| out.* = .{
+        .media_type = try a.dupe(u8, img.media_type),
+        .data = try a.dupe(u8, img.data),
+    };
+    return owned;
 }
 
 fn cloneToolCalls(a: std.mem.Allocator, calls: []const ToolCall) ![]const ToolCall {
@@ -634,9 +667,16 @@ pub fn encodeEventLineOrigin(alloc: std.mem.Allocator, e: Event, seq: u64, origi
 pub fn encodeEventBody(jw: *std.json.Stringify, e: Event) !void {
     try jw.objectField("kind");
     switch (e) {
-        .user_text => |t| {
+        .user_text => |u| {
             try jw.write("user_text");
-            try writeField(jw, "text", t);
+            try writeField(jw, "text", u.text);
+            // Written only when the turn carries images, so a text-only line
+            // keeps its pre-existing shape byte-for-byte (the `usage`
+            // discipline, one column further).
+            if (u.images.len != 0) {
+                try jw.objectField("images");
+                try jw.write(u.images);
+            }
         },
         .assistant => |as| {
             try jw.write("assistant");
@@ -709,6 +749,11 @@ pub const WireEvent = struct {
     origin: ?[]const u8 = null,
     kind: []const u8,
     text: ?[]const u8 = null,
+    /// Images inlined with a user turn (see `Event.user_text`); absent on lines
+    /// written before the field existed, and on turns without any. The domain
+    /// type is the wire type — its two field names ARE the JSON keys — exactly
+    /// as `usage` is.
+    images: ?[]const Image = null,
     /// Assistant reasoning items (see `Event.assistant.reasoning`); absent on
     /// lines written before the field existed, and on turns without any.
     reasoning: ?[]const u8 = null,
@@ -748,7 +793,10 @@ pub fn parseEventLine(gpa: std.mem.Allocator, bytes: []const u8) !std.json.Parse
 /// result is meant to be handed straight to `append`, which deep-copies.
 pub fn toEvent(a: std.mem.Allocator, w: WireEvent) !Event {
     if (std.mem.eql(u8, w.kind, "user_text")) {
-        return .{ .user_text = w.text orelse return error.CorruptLedger };
+        return .{ .user_text = .{
+            .text = w.text orelse return error.CorruptLedger,
+            .images = w.images orelse &.{},
+        } };
     }
     if (std.mem.eql(u8, w.kind, "assistant")) {
         const wire_calls = w.calls orelse &.{};
@@ -913,11 +961,11 @@ test "Usage.add sums every field in place and treats zero as the identity" {
 test "ledger only grows and preserves order" {
     var l = Ledger.init(std.testing.allocator);
     defer l.deinit();
-    try l.append(.{ .user_text = "a" });
-    try l.append(.{ .user_text = "b" });
+    try l.append(.{ .user_text = .{ .text = "a" } });
+    try l.append(.{ .user_text = .{ .text = "b" } });
     try std.testing.expectEqual(@as(usize, 2), l.len());
-    try std.testing.expectEqualStrings("a", l.view()[0].user_text);
-    try std.testing.expectEqualStrings("b", l.view()[1].user_text);
+    try std.testing.expectEqualStrings("a", l.view()[0].user_text.text);
+    try std.testing.expectEqualStrings("b", l.view()[1].user_text.text);
 }
 
 fn expectEventsEqual(a: []const Event, b: []const Event) !void {
@@ -925,7 +973,14 @@ fn expectEventsEqual(a: []const Event, b: []const Event) !void {
     for (a, b) |x, y| {
         try std.testing.expectEqual(std.meta.activeTag(x), std.meta.activeTag(y));
         switch (x) {
-            .user_text => |t| try std.testing.expectEqualStrings(t, y.user_text),
+            .user_text => |t| {
+                try std.testing.expectEqualStrings(t.text, y.user_text.text);
+                try std.testing.expectEqual(t.images.len, y.user_text.images.len);
+                for (t.images, y.user_text.images) |i, j| {
+                    try std.testing.expectEqualStrings(i.media_type, j.media_type);
+                    try std.testing.expectEqualStrings(i.data, j.data);
+                }
+            },
             .assistant => |as| {
                 try std.testing.expectEqualStrings(as.reasoning, y.assistant.reasoning);
                 try std.testing.expectEqualStrings(as.text, y.assistant.text);
@@ -1032,7 +1087,7 @@ test "a header from a future ledger version is refused, not read as v1" {
 }
 
 fn writeSampleEvents(l: *Ledger) !void {
-    try l.append(.{ .user_text = "hi" });
+    try l.append(.{ .user_text = .{ .text = "hi" } });
     try l.append(.{ .assistant = .{
         .reasoning = "[{\"type\":\"thinking\",\"thinking\":\"plan\",\"signature\":\"sig==\"}]",
         .text = "running",
@@ -1106,6 +1161,74 @@ test "assistant usage round-trips as a fact on the line, and legacy lines read a
     const legacy = try parseEventLine(alloc, "{\"seq\":1,\"kind\":\"assistant\",\"text\":\"old\",\"calls\":[]}");
     defer legacy.deinit();
     try std.testing.expect((try toEvent(legacy.arena.allocator(), legacy.value)).assistant.usage == null);
+}
+
+test "user images round-trip on the line, and a text-only turn keeps its pre-image shape" {
+    const alloc = std.testing.allocator;
+
+    // Present: one column after `text`, decoded image for image.
+    const shot: Event = .{ .user_text = .{
+        .text = "what is this",
+        .images = &.{
+            .{ .media_type = "image/png", .data = "iVBORw0=" },
+            .{ .media_type = "image/jpeg", .data = "/9j/4AAQ" },
+        },
+    } };
+    const line = try encodeEventLine(alloc, shot, 1);
+    defer alloc.free(line);
+    try std.testing.expectEqualStrings(
+        "{\"seq\":1,\"kind\":\"user_text\",\"text\":\"what is this\"," ++
+            "\"images\":[{\"media_type\":\"image/png\",\"data\":\"iVBORw0=\"}," ++
+            "{\"media_type\":\"image/jpeg\",\"data\":\"/9j/4AAQ\"}]}\n",
+        line,
+    );
+    const parsed = try parseEventLine(alloc, line);
+    defer parsed.deinit();
+    const back = try toEvent(parsed.arena.allocator(), parsed.value);
+    try expectEventsEqual(&.{shot}, &.{back});
+
+    // Absent: byte-for-byte the line every writer before images produced.
+    const plain = try encodeEventLine(alloc, .{ .user_text = .{ .text = "hi" } }, 2);
+    defer alloc.free(plain);
+    try std.testing.expectEqualStrings("{\"seq\":2,\"kind\":\"user_text\",\"text\":\"hi\"}\n", plain);
+
+    // …and such a line reads back with no images, not an error: the column is
+    // optional in exactly the way `usage` is.
+    const legacy = try parseEventLine(alloc, "{\"seq\":1,\"kind\":\"user_text\",\"text\":\"old\"}");
+    defer legacy.deinit();
+    const old = try toEvent(legacy.arena.allocator(), legacy.value);
+    try std.testing.expectEqualStrings("old", old.user_text.text);
+    try std.testing.expectEqual(@as(usize, 0), old.user_text.images.len);
+}
+
+test "an image deposited into the inbox is applied exactly once, images and all" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const spath = "s.jsonl";
+
+    const shot: Event = .{ .user_text = .{
+        .text = "look",
+        .images = &.{.{ .media_type = "image/png", .data = "iVBORw0=" }},
+    } };
+    {
+        var l = try createDurable(alloc, io, tmp.dir, spath, .{ .session = "s" });
+        defer l.deinit();
+        try depositEvent(alloc, io, tmp.dir, spath, "msg-0001", shot);
+        try drainInbox(alloc, io, &l, tmp.dir, spath);
+        // A second deposit under the SAME name is the same delivery, and the
+        // origin column makes applying it twice impossible.
+        try depositEvent(alloc, io, tmp.dir, spath, "msg-0001", shot);
+        try drainInbox(alloc, io, &l, tmp.dir, spath);
+        try std.testing.expectEqual(@as(usize, 1), l.len());
+        try expectEventsEqual(&.{shot}, l.view());
+    }
+
+    // The image survives the file: a reopened ledger replays it verbatim.
+    var reopened = try openDurable(alloc, io, tmp.dir, spath);
+    defer reopened.deinit();
+    try expectEventsEqual(&.{shot}, reopened.view());
 }
 
 test "a stop reason the shape cannot say is written; the two it can are not" {
@@ -1193,7 +1316,7 @@ test "durable create then open replays a block-identical ledger with monotonic s
 
     // Appending after reopen continues the seq sequence and persists. Close this
     // writer before the next opens — the lease permits only one writer at a time.
-    try reopened.append(.{ .user_text = "again" });
+    try reopened.append(.{ .user_text = .{ .text = "again" } });
     const reopened_events = reopened.len();
     reopened.deinit();
 
@@ -1201,7 +1324,7 @@ test "durable create then open replays a block-identical ledger with monotonic s
     defer third.deinit();
     try std.testing.expectEqual(@as(usize, 5), third.len());
     try std.testing.expectEqual(reopened_events, third.len());
-    try std.testing.expectEqualStrings("again", third.view()[4].user_text);
+    try std.testing.expectEqualStrings("again", third.view()[4].user_text.text);
 }
 
 test "openDurable drops a torn final line and truncates it" {
@@ -1212,7 +1335,7 @@ test "openDurable drops a torn final line and truncates it" {
 
     const header_line = try encodeHeaderLine(alloc, .{ .session = "s-torn" });
     defer alloc.free(header_line);
-    const good = try encodeEventLine(alloc, .{ .user_text = "kept" }, 1);
+    const good = try encodeEventLine(alloc, .{ .user_text = .{ .text = "kept" } }, 1);
     defer alloc.free(good);
     // A partial second event with no trailing newline: an interrupted write.
     const torn = "{\"seq\":2,\"kind\":\"user_te";
@@ -1222,17 +1345,17 @@ test "openDurable drops a torn final line and truncates it" {
 
     var l = try openDurable(alloc, io, tmp.dir, "s.jsonl");
     try std.testing.expectEqual(@as(usize, 1), l.len());
-    try std.testing.expectEqualStrings("kept", l.view()[0].user_text);
+    try std.testing.expectEqualStrings("kept", l.view()[0].user_text.text);
 
     // The torn tail was truncated, so the next append lands cleanly. Close this
     // writer before reopening — the lease permits only one writer at a time.
-    try l.append(.{ .user_text = "next" });
+    try l.append(.{ .user_text = .{ .text = "next" } });
     l.deinit();
 
     var reopened = try openDurable(alloc, io, tmp.dir, "s.jsonl");
     defer reopened.deinit();
     try std.testing.expectEqual(@as(usize, 2), reopened.len());
-    try std.testing.expectEqualStrings("next", reopened.view()[1].user_text);
+    try std.testing.expectEqualStrings("next", reopened.view()[1].user_text.text);
 }
 
 test "a complete but malformed middle line is a corruption error" {
@@ -1259,7 +1382,7 @@ test "a seq that skips is rejected" {
 
     const header_line = try encodeHeaderLine(alloc, .{ .session = "s-seq" });
     defer alloc.free(header_line);
-    const skipped = try encodeEventLine(alloc, .{ .user_text = "x" }, 2); // should be 1
+    const skipped = try encodeEventLine(alloc, .{ .user_text = .{ .text = "x" } }, 2); // should be 1
     defer alloc.free(skipped);
     const contents = try std.mem.concat(alloc, u8, &.{ header_line, skipped });
     defer alloc.free(contents);
@@ -1284,7 +1407,7 @@ test "the writer holds an exclusive lease: a second writer is refused with Sessi
     defer tmp.cleanup();
 
     var a = try createDurable(alloc, io, tmp.dir, "s.jsonl", .{ .session = "s" });
-    try a.append(.{ .user_text = "one" });
+    try a.append(.{ .user_text = .{ .text = "one" } });
 
     // While `a` holds the file open, no other process can open it as a writer:
     // both create and open fail fast rather than racing on the same offset.
@@ -1300,7 +1423,7 @@ test "the writer holds an exclusive lease: a second writer is refused with Sessi
     var b = try openDurable(alloc, io, tmp.dir, "s.jsonl");
     defer b.deinit();
     try std.testing.expectEqual(@as(usize, 1), b.len());
-    try b.append(.{ .user_text = "two" });
+    try b.append(.{ .user_text = .{ .text = "two" } });
     try std.testing.expectEqual(@as(usize, 2), b.len());
 }
 
@@ -1326,13 +1449,13 @@ test "inbox: deposits drain in name order, dedupe notes, and never touch the mai
 
     // Two processes deposit: a driver's user text and a note, out of order.
     try depositEvent(alloc, io, tmp.dir, spath, "note-demo-v-aaaa", .{ .capability_note = .{ .id = "demo", .version = "v-aaaa", .text = "n" } });
-    try depositEvent(alloc, io, tmp.dir, spath, "msg-0001", .{ .user_text = "hello" });
+    try depositEvent(alloc, io, tmp.dir, spath, "msg-0001", .{ .user_text = .{ .text = "hello" } });
     // The main file is untouched by deposits.
     try std.testing.expectEqual(@as(usize, 0), l.len());
 
     try drainInbox(alloc, io, &l, tmp.dir, spath);
     try std.testing.expectEqual(@as(usize, 2), l.len());
-    try std.testing.expectEqualStrings("hello", l.view()[0].user_text); // "msg-…" < "note-…"
+    try std.testing.expectEqualStrings("hello", l.view()[0].user_text.text); // "msg-…" < "note-…"
     try std.testing.expect(l.view()[1] == .capability_note);
 
     // Draining an empty inbox adds nothing; a re-deposited note is skipped.
@@ -1348,7 +1471,7 @@ test "inbox: deposits drain in name order, dedupe notes, and never touch the mai
     var reopened = try openDurable(alloc, io, tmp.dir, spath);
     defer reopened.deinit();
     try std.testing.expectEqual(@as(usize, 2), reopened.len());
-    try std.testing.expectEqualStrings("hello", reopened.view()[0].user_text);
+    try std.testing.expectEqualStrings("hello", reopened.view()[0].user_text.text);
     try std.testing.expect(reopened.containsNote("demo", "v-aaaa"));
 }
 
@@ -1364,8 +1487,8 @@ test "inbox application is exactly-once across a crash between append and delete
     {
         var l = try createDurable(alloc, io, tmp.dir, spath, .{ .session = "s" });
         defer l.deinit();
-        try depositEvent(alloc, io, tmp.dir, spath, "msg-0001", .{ .user_text = "hello" });
-        try l.appendWithOrigin(.{ .user_text = "hello" }, "msg-0001.json");
+        try depositEvent(alloc, io, tmp.dir, spath, "msg-0001", .{ .user_text = .{ .text = "hello" } });
+        try l.appendWithOrigin(.{ .user_text = .{ .text = "hello" } }, "msg-0001.json");
         try std.testing.expectEqual(@as(usize, 1), l.len());
     }
 
@@ -1382,7 +1505,7 @@ test "inbox application is exactly-once across a crash between append and delete
     try std.testing.expect(reopened.containsOrigin("msg-0001.json"));
     try drainInbox(alloc, io, &reopened, tmp.dir, spath);
     try std.testing.expectEqual(@as(usize, 1), reopened.len());
-    try std.testing.expectEqualStrings("hello", reopened.view()[0].user_text);
+    try std.testing.expectEqualStrings("hello", reopened.view()[0].user_text.text);
 }
 
 test "draining a missing inbox is a no-op" {

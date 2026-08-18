@@ -89,7 +89,7 @@ Ledger ──projection──▶ PromptIR { system_blocks, turns }
 ### 3.1 数据模型（当前 alphabet，仅 4 种）
 
 ```
-user_text        []const u8
+user_text        { text, images: []Image{media_type, data} }            ← images 为空 = 纯文本 turn
 assistant        { reasoning, text, calls: []ToolCall{id, tool, args_json}, usage?, stop_reason }
 tool_results     []ToolResultEntry{call_id, ok, output, spill_path?}   ← 一条事件 = 一整批
 capability_note  { id, version, text }                                  ← 中途新增能力的宣告（§5.3）
@@ -98,6 +98,8 @@ capability_note  { id, version, text }                                  ← 中�
 事件字母表**可加不可改**：现有四种保留原字段。`seq` 是文件落盘时的 envelope 字段（§3.4），不属于事件负载。
 
 **`calls[].args_json` 是模型实际产出的那些字节**，包括被 `max_tokens` 切断时的半截 JSON 前缀——ledger 记事实，不记"应该是什么"。把它变成可发给 provider 的东西是投影的事（`prompt.ToolCall`，§4）。
+
+**`user_text.images` 是 model-visible 的，所以它与 `usage` / `reasoning` 相反：投影。** 一张图 = `{media_type, data}`，`data` 是 **base64 文本**（wire 上就是这个形状，ledger 既不解码也不校验——存事实）。落盘只在**非空**时写 `images` 列：纯文本 turn 的行与这一列存在之前逐字节相同，老行读回空 slice（`usage?` 的同一套纪律，`v` 仍是 1——多出的列不改变已有列的含义，§3.4）。**只做 user 输入**：assistant / tool_results 里没有图。哪些 media type 能进、单张多大、本场冻结的模型看不看得懂图，**全是决定，住在壳层**（`cli/session.zig` 的 `session append --image`，§9 / §14）；ledger 与投影不知道有这道门，绕过它的后果是 provider 的 400 原样浮出——诚实。图片**不跨 fork**，因为 fork 本来就不复制任何 history（§11）；完整回放的路径是 resume。
 
 **`assistant.reasoning` 是不透明字段，不是第五种事件。** 它是 provider 原样吐出的本轮 reasoning item 的 JSON 数组（Anthropic 的带 signature 的 `thinking` / `redacted_thinking` block、Responses 的带 `encrypted_content` 的 `reasoning` item），没有则为 `""`。它是本轮的**事实**（模型确实产出了这段、且下一步要原样带回），不是模型可见文本：kernel 从不解析它，作为 assistant turn 的 `reasoning` 字段交回 provider，provider 只在自己认得（`ProviderCapabilities.thinking_replay`）时按原样回放到**同一个模型**——它天然 model-locked，而 session 的 `model_identity` 已冻结（§3.4），所以别的模型永远看不到它。为什么必须有它：Anthropic 一方端点在 thinking 开着时**拒绝**丢了 thinking block 的 tool-use turn（400，而 Opus 5 默认开、Fable 5 只能开），Responses 端点不带则模型每一步重推上一步的计划——前者是正确性，后者是质量与 token；两者都不是 kernel 该替 provider 决定的，kernel 只负责把这个事实存住、按序交回。落盘时只在非空才写 `reasoning` 字段（老行形状不变，老行读回为 `""`）。
 
@@ -134,13 +136,13 @@ UI / trajectory / metrics 是 ledger 的投影，不持久化 mutable 状态。*
 
 ```jsonl
 {"kind":"header","v":1,"session":"s-…","parent":{"session":"s-…","seq":41}|null,"model":"openai","model_identity":{"provider":"openai","model":"gpt-4o-mini","base_url":"https://…","api_key_env":"OPENAI_API_KEY"},"created":"…","nulya":{"version":"0.0.0","kernel_hash":"f49f…"},"composition":{"active":[{"id":"web.search","version":"v-…"}],"native_tools":["ext:web.search/web_search"]}}
-{"seq":1,"origin":"msg-….json","kind":"user_text","text":"…"}
+{"seq":1,"origin":"msg-….json","kind":"user_text","text":"…","images":[{"media_type":"image/png","data":"<base64>"}]}
 {"seq":2,"kind":"assistant","reasoning":"[{\"type\":\"thinking\",…}]","text":"…","calls":[{"id":"…","tool":"…","args":"…"}],"usage":{"input_tokens":1200,"output_tokens":80,"cache_read_tokens":1100,"cache_write_tokens":0},"stop_reason":"max_tokens"}
 {"seq":3,"kind":"tool_results","results":[{"call_id":"…","ok":true,"output":"…","spill_path":null}]}
 {"seq":4,"origin":"note-….json","kind":"capability_note","id":"…","version":"…","text":"…"}
 ```
 
-（`origin` 只出现在经 inbox 排干进来的事件行上，是投递去重列，绝不投影给模型；见"单写者"条。`reasoning` 只在该 turn 有 reasoning 时出现，值是 provider 数组转义成的一个 JSON 字符串——ledger 只存不解析；`usage` 只在 provider 报了成本时出现；`stop_reason` 只在 shape 说不出来时出现（`max_tokens` / `other`，见 §3.1、§4）。三者都不投影。）
+（`origin` 只出现在经 inbox 排干进来的事件行上，是投递去重列，绝不投影给模型；见"单写者"条。`reasoning` 只在该 turn 有 reasoning 时出现，值是 provider 数组转义成的一个 JSON 字符串——ledger 只存不解析；`usage` 只在 provider 报了成本时出现；`stop_reason` 只在 shape 说不出来时出现（`max_tokens` / `other`，见 §3.1、§4）。三者都不投影。`images` 只在该 user turn 真带了图时出现，与它们相反——是模型看得见的，所以投影，见 §3.1。）
 
 - **一个文件 = 一个 generation = 一个 cache scope。** 文件只 append，所以 PromptIR 的 turn 前缀不变量（§1）成了文件系统性质。没有会 bump generation 的事件（§11）。
 - **header 的 JSON 形状就是 `ledger.Header` 结构体**（`std.json` 类型化编解码，`OwnedHeader = std.json.Parsed(Header)`）；读端忽略未知字段，所以新写者多出的字段不破坏旧读者；**但 `v` 不同就拒绝**（`ledger.format_version` = 1，别的值一律 `UnsupportedLedgerVersion`）——多出的字段不改变已有字段的含义，换了版本号则正是在宣告"改了"，把未来格式当 v1 读只会读出一个像是对的答案。`session step` / `session new --parent` 把它翻成"这个文件由更新的 nulya 写的，本二进制读 ledger v1"并退出 1，`session list` 跳过该文件（它本来就跳过读不了的）。事件行保持平铺的 `kind` 形状（driver 读起来方便），解码经 `WireEvent`。
@@ -624,7 +626,7 @@ nulya                       ← 无参数：固定 prompt demo（现经 durable 
   - **`composition.system_prompts`** = 每个冻结 active 版本的 manifest 声明的 system prompt，写成 `<id>@<version>/<path>`（§7.5）。best-effort：这台机器读不出的版本就不列（"没列"= 不知道，不是"没有"），版本内容寻址故按 `id@version` 记一次读一次。会改写每一场 system blocks 的包，应该在列表里看得见。
   - **`outcome.source` / `outcome.by`**（§3.3）：`agent` 的 verdict 是**主张**不是 ground truth，文本形态在 verdict 后面直接标 `(self)`（`by == id`）或 `(by agent)`。
 - `nulya session outcome <id> <verdict> [--note …] [--seq N]`：校验 id 形状与 session 文件存在、校验 verdict（`--seq` 只校验是正整数），然后**只**往 `.nulya/session-outcomes.jsonl` append 一行（§3.3）。它**不打开 session 文件、不拿 `<id>.lock`**——verdict 是关于这场 session 的判断而不是其中一轮，所以正在跑 `step` 的 session 也能当场评；同一 session 可以评多次，最后一条作数。`NULYA_SESSION` 在环境里（即这条命令是模型经 `shell` 从某场 session 里调的）就记 `source:"agent"` + `by:<那场的 id>`；`--seq N` 把这条收窄成对第 N 轮的判断，不参与 `latestFor`。
-- `nulya session *` 是**唯一**的 session 驱动面：没有 `setTools / setModel / replaceHistory`，换 composition = `session new`。每个子命令是对 durable session 文件（§3.4）的一次独立进程调用，其中**只有 `step` 写主文件**：`append` / `cancel` 投递到 `<id>.inbox/` / `<id>.cancel`（所以正在跑的 `step` 会在它的下一个 step 边界拿到 mid-run 的 append 或 cancel），`events` 是只读 tail（不解析、不重编码——文件本身就是 wire format）。`step` 的预算 `min(--max-steps, session.max_steps_ceiling)` **由 kernel 在 `AgentSession.run` 强制**，driver 只能调低不能调高；`--max-steps` 必须是正整数。session 就是它的文件，没有 `close`。**stdout 只放数据与成功输出**（新 session 的 id、事件 JSONL、`list` 的两种形态、`<id>: <verdict>`、`cancel requested for <id>`）：所有拒绝与警告——不认识的 verdict、`no such session`、`session new failed: …`、`session step failed: …`——一律走 stderr，所以一个 driver 拿到的 stdout 要么是它要的东西要么什么都没有。唯一的例外是 `--stream`，那里诊断是协议的一部分（`{"stream":"run","event":"error"}` 行，见下）。
+- `nulya session *` 是**唯一**的 session 驱动面：没有 `setTools / setModel / replaceHistory`，换 composition = `session new`。每个子命令是对 durable session 文件（§3.4）的一次独立进程调用，其中**只有 `step` 写主文件**：`append` / `cancel` 投递到 `<id>.inbox/` / `<id>.cancel`（所以正在跑的 `step` 会在它的下一个 step 边界拿到 mid-run 的 append 或 cancel），`events` 是只读 tail（文件本身就是 wire format，行原样打印——**唯一的例外**是带 `images` 的 `user_text` 行：每张图的 base64 换成 `[image <media_type>, N base64 bytes]` 再重编码，`seq` / `origin` / 其它列一字不动，解析不了的行照旧原样打印。ledger 存事实、投影选择呈现，几百 KB 的截图没有一个转录读者想要它；原始字节仍在文件里，而 `--stream` 的 ledger 行**不**省略——那是 driver 面，要与文件同形，前端自己折叠）。`step` 的预算 `min(--max-steps, session.max_steps_ceiling)` **由 kernel 在 `AgentSession.run` 强制**，driver 只能调低不能调高；`--max-steps` 必须是正整数。session 就是它的文件，没有 `close`。**stdout 只放数据与成功输出**（新 session 的 id、事件 JSONL、`list` 的两种形态、`<id>: <verdict>`、`cancel requested for <id>`）：所有拒绝与警告——不认识的 verdict、`no such session`、`session new failed: …`、`session step failed: …`——一律走 stderr，所以一个 driver 拿到的 stdout 要么是它要的东西要么什么都没有。唯一的例外是 `--stream`，那里诊断是协议的一部分（`{"stream":"run","event":"error"}` 行，见下）。
 - **`session step --stream`：纯观测的行协议**（前端唯一需要的内核改动，tui.md §2.2 → 已落地）。语义与不带 `--stream` 完全相同（同一 `AgentSession.run`、同一预算夹取、同一 cancel 消化、**同一 ledger**）；区别只是 stdout **在跑的过程中**逐行输出，而不是跑完一次性输出。
   - 机制是 `loop.StepContext.observer`（可选 `StepObserver{ptr,vtable}`）。observer **无权力**：五个回调全部返回 `void`、只拿只读视图（`stepEnd` 拿整个 `StepOutcome`），所以它不能 append、不能改 model-visible 状态、不能让一个 step 失败——带 observer 的 step 与不带的走同一条路径（physics #1/#3）。回调点：`collectTurn` 把 provider 流 **tee** 给 observer 再交给 `TurnCollector`，瞬态失败重发前一次 `modelRetry`（§13）；`execOne` 前后各一次（未被派发的尾部调用两个回调都不发）；`AgentSession.step` 在 step 边界一次（含 canceled）。
   - 行协议（一行一个 JSON，写完即 flush）：带 `stream` 字段的是瞬态观测行，不带的就是与 `session events` **同形**的 ledger 事件行（同一个 `encodeEventLine`、同一套 seq）。

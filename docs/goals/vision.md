@@ -90,4 +90,4 @@
 
 ## 6. 进度区（执行时更新）
 
-（空）
+- **V1 done**（`zig build test` + `zig build e2e` 绿）。`ledger.Image{media_type,data}` + `ledger.UserText{text,images=&.{}}`，`Event.user_text` 变 struct；`cloneImages` 走既有 arena。wire：`encodeEventBody` 只在 `images` 非空时写该列，`WireEvent.images: ?[]const Image = null`（**微调**：契约写的是新造一个 `WireImage`，实际直接复用 `Image`——它两个字段名就是 JSON 键名，与契约自己援引的 `usage: ?Usage` 先例完全同形，多一个类型只会多一次手抄），`toEvent` 把 null 映成空 slice。`session events` 只对带 `images` 的 `user_text` 行重编码（`cli/session.zig` 的 `redactImages`：先按 `"images"` 子串廉价拒绝，再解析；解析不了 / 不是 user_text / 图数为 0 一律回落原样打印），占位选 **base64 长度**并在文案里说明（`[image image/png, 16 base64 bytes]`），`seq` 与 `origin` 保留。全仓库 `.user_text = "…"` 机械迁移（`prompt.Turn` 本步仍是裸字符串，V2 才动）。新单测 2 条（ledger：带图行 round-trip + 纯文本行逐字节等于旧形状 + 老行读回空；inbox 带图 exactly-once + resume 回放）+ 1 条（cli：events 占位、文件未被改动、"images" 字样的诱饵行原样）；`expectEventsEqual` 补图片比较。DESIGN §3.1（事件表 + 新增一段 `user_text.images`）/ §3.4（示例 JSONL + 括号注）/ §14（`events` 那句"不解析、不重编码"改准）同 commit。

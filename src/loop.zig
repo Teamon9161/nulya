@@ -533,7 +533,7 @@ test "one step runs a batch of two shell calls and appends one result turn" {
 
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
-    try l.append(.{ .user_text = "go" });
+    try l.append(.{ .user_text = .{ .text = "go" } });
 
     const FakeShell = struct {
         fn run(a: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolResult {
@@ -636,7 +636,7 @@ test "a transient model failure is retried with a fresh collector; a permanent o
 
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
-    try l.append(.{ .user_text = "go" });
+    try l.append(.{ .user_text = .{ .text = "go" } });
 
     var watch = Watch{};
     var flaky = Flaky{ .failures_left = 2, .fail_with = error.Transport };
@@ -672,7 +672,7 @@ test "completeInterruptedToolBatch appends unknown results for an assistant tail
 
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
-    try l.append(.{ .user_text = "go" });
+    try l.append(.{ .user_text = .{ .text = "go" } });
     try l.append(.{ .assistant = .{
         .text = "running",
         .calls = &.{.{ .id = "c1", .tool = "shell", .args_json = "{\"command\":\"touch marker\"}" }},
@@ -732,7 +732,7 @@ test "a capability note reaches the provider as a capability_note turn" {
 
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
-    try l.append(.{ .user_text = "go" });
+    try l.append(.{ .user_text = .{ .text = "go" } });
     try l.append(.{ .capability_note = .{ .id = "demo", .version = "v-aaaa", .text = "New capabilities from extension `demo` version `v-aaaa` are now available:\n\n- greet — Say hello.\n\nInvoke through the shell tool:\nnulya ext run demo <tool> '<json-args>'" } });
 
     var lenv = try environment.LocalEnvironment.init(alloc, threaded.io(), .{});
@@ -925,7 +925,7 @@ test "canceling provider streaming appends no partial assistant and leaves the l
 
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
-    try l.append(.{ .user_text = "go" });
+    try l.append(.{ .user_text = .{ .text = "go" } });
 
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
     defer lenv.deinit();
@@ -983,7 +983,7 @@ test "canceling the first executing tool records a complete canceled batch" {
 
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
-    try l.append(.{ .user_text = "go" });
+    try l.append(.{ .user_text = .{ .text = "go" } });
 
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
     defer lenv.deinit();
@@ -1046,7 +1046,7 @@ test "a reply cut by max_tokens records the calls verbatim, runs nothing, and cl
 
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
-    try l.append(.{ .user_text = "go" });
+    try l.append(.{ .user_text = .{ .text = "go" } });
 
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
     defer lenv.deinit();
@@ -1100,7 +1100,7 @@ test "a successful earlier tool is kept when a later tool is canceled" {
 
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
-    try l.append(.{ .user_text = "go" });
+    try l.append(.{ .user_text = .{ .text = "go" } });
 
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
     defer lenv.deinit();
@@ -1166,7 +1166,7 @@ test "canceling a step-budget spill keeps the ledger complete and never runs lat
 
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
-    try l.append(.{ .user_text = "go" });
+    try l.append(.{ .user_text = .{ .text = "go" } });
 
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
     defer lenv.deinit();

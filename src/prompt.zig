@@ -143,7 +143,7 @@ pub fn projectWithSystem(alloc: std.mem.Allocator, system_blocks: []const System
     var call_at: usize = 0;
     var result_at: usize = 0;
     for (events, turns) |event, *turn| switch (event) {
-        .user_text => |text| turn.* = .{ .user_text = text },
+        .user_text => |u| turn.* = .{ .user_text = u.text },
         .assistant => |as| {
             const calls = call_storage[call_at..][0..as.calls.len];
             call_at += calls.len;
@@ -216,7 +216,7 @@ test "PromptIR turns extend by prefix on append" {
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
 
-    try l.append(.{ .user_text = "first" });
+    try l.append(.{ .user_text = .{ .text = "first" } });
     const p1 = try project(alloc, l.view());
     defer p1.deinit(alloc);
 
@@ -232,9 +232,9 @@ test "assistant reasoning rides on its own turn, ahead of that turn's text and c
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
 
-    try l.append(.{ .user_text = "hi" });
+    try l.append(.{ .user_text = .{ .text = "hi" } });
     try l.append(.{ .assistant = .{ .text = "plain", .calls = &.{} } });
-    try l.append(.{ .user_text = "go" });
+    try l.append(.{ .user_text = .{ .text = "go" } });
     try l.append(.{ .assistant = .{
         .reasoning = "[{\"type\":\"reasoning\",\"encrypted_content\":\"…\"}]",
         .text = "",
@@ -263,7 +263,7 @@ test "a batch of tool results is ONE turn, and cost is not in the type at all" {
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
 
-    try l.append(.{ .user_text = "go" });
+    try l.append(.{ .user_text = .{ .text = "go" } });
     try l.append(.{ .assistant = .{
         .text = "",
         .calls = &.{
@@ -304,7 +304,7 @@ test "a truncated turn's torn arguments are replayable in the projection; the le
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
 
-    try l.append(.{ .user_text = "go" });
+    try l.append(.{ .user_text = .{ .text = "go" } });
     try l.append(.{
         .assistant = .{
             .text = "let me",
@@ -345,7 +345,7 @@ test "a capability_note appends a capability_note turn without breaking the pref
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
 
-    try l.append(.{ .user_text = "hi" });
+    try l.append(.{ .user_text = .{ .text = "hi" } });
     const before = try project(alloc, l.view());
     defer before.deinit(alloc);
 
@@ -371,7 +371,7 @@ test "reopening a durable ledger projects a turn-identical prefix" {
     {
         var l = try ledger.createDurable(alloc, io, tmp.dir, "s.jsonl", .{ .session = "s" });
         defer l.deinit();
-        try l.append(.{ .user_text = "first" });
+        try l.append(.{ .user_text = .{ .text = "first" } });
         try l.append(.{ .assistant = .{
             .text = "run",
             .calls = &.{.{ .id = "c1", .tool = "shell", .args_json = "{\"command\":\"echo hi\"}" }},
@@ -390,7 +390,7 @@ test "reopening a durable ledger projects a turn-identical prefix" {
     defer before.deinit(alloc);
     try std.testing.expectEqual(before_turns, before.turns.len);
 
-    try reopened.append(.{ .user_text = "second" });
+    try reopened.append(.{ .user_text = .{ .text = "second" } });
     const after = try project(alloc, reopened.view());
     defer after.deinit(alloc);
     try std.testing.expect(isStablePrefix(before.turns, after.turns));
@@ -402,7 +402,7 @@ test "PromptIR carries immutable system blocks separately from ledger turns" {
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
 
-    try l.append(.{ .user_text = "first" });
+    try l.append(.{ .user_text = .{ .text = "first" } });
     const before = try projectWithSystem(alloc, &sys, l.view());
     defer before.deinit(alloc);
 

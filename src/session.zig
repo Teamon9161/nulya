@@ -212,7 +212,7 @@ pub const AgentSession = struct {
     }
 
     pub fn appendUser(self: *AgentSession, text: []const u8) !void {
-        try self.l.append(.{ .user_text = text });
+        try self.l.append(.{ .user_text = .{ .text = text } });
     }
 
     /// Run one step. Cancellation is reported as `StepOutcome.status == .canceled`
@@ -842,7 +842,7 @@ test "a durable session persists across create, close, and reopen" {
         defer b.deinit();
         try std.testing.expectEqual(@as(usize, 2), b.l.len());
         try std.testing.expect(b.l.view()[0] == .user_text);
-        try std.testing.expectEqualStrings("hello", b.l.view()[0].user_text);
+        try std.testing.expectEqualStrings("hello", b.l.view()[0].user_text.text);
         try std.testing.expectEqualStrings("s", b.l.header().?.session);
 
         try b.appendUser("again");

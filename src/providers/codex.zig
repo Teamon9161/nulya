@@ -540,7 +540,7 @@ test "history serializes to flat Responses items and effort off becomes none" {
     const alloc = std.testing.allocator;
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
-    try l.append(.{ .user_text = "hello" });
+    try l.append(.{ .user_text = .{ .text = "hello" } });
     try l.append(.{ .assistant = .{ .text = "probing", .calls = &.{
         .{ .id = "c1", .tool = "shell", .args_json = "{\"command\":\"echo hi\"}" },
     } } });
@@ -617,7 +617,7 @@ test "an encrypted reasoning item is kept whole and replayed ahead of its functi
 
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
-    try l.append(.{ .user_text = "hello" });
+    try l.append(.{ .user_text = .{ .text = "hello" } });
     try l.append(.{ .assistant = .{ .reasoning = turn.reasoning, .text = turn.text, .calls = turn.calls } });
     try l.append(.{ .tool_results = &.{.{ .call_id = "c1", .ok = true, .output = "ok" }} });
     const ir = try prompt.project(alloc, l.view());
@@ -637,7 +637,7 @@ test "an absent effort means the server default, not none" {
     const alloc = std.testing.allocator;
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
-    try l.append(.{ .user_text = "hi" });
+    try l.append(.{ .user_text = .{ .text = "hi" } });
     const ir = try prompt.project(alloc, l.view());
     defer ir.deinit(alloc);
 

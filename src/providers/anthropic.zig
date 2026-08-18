@@ -589,7 +589,7 @@ test "cache breakpoints sit after system and on the last content block" {
     const alloc = std.testing.allocator;
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
-    try l.append(.{ .user_text = "hello" });
+    try l.append(.{ .user_text = .{ .text = "hello" } });
 
     const body = try testRequestJson(alloc, &l, true, null);
     defer alloc.free(body);
@@ -607,7 +607,7 @@ test "the tail breakpoint follows the appended turn, and a batch is one user mes
     const alloc = std.testing.allocator;
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
-    try l.append(.{ .user_text = "hello" });
+    try l.append(.{ .user_text = .{ .text = "hello" } });
     try l.append(.{ .assistant = .{ .text = "", .calls = &.{
         .{ .id = "c1", .tool = "shell", .args_json = "{\"command\":\"a\"}" },
         .{ .id = "c2", .tool = "shell", .args_json = "{\"command\":\"b\"}" },
@@ -636,7 +636,7 @@ test "effort maps to adaptive thinking natively and to a budget on compatible ba
     const alloc = std.testing.allocator;
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
-    try l.append(.{ .user_text = "hi" });
+    try l.append(.{ .user_text = .{ .text = "hi" } });
 
     const none = try testRequestJson(alloc, &l, true, null);
     defer alloc.free(none);
@@ -753,7 +753,7 @@ test "thinking blocks are collected whole and replayed verbatim ahead of the tur
     // the last real content block, never on a thinking block.
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
-    try l.append(.{ .user_text = "hello" });
+    try l.append(.{ .user_text = .{ .text = "hello" } });
     try l.append(.{ .assistant = .{ .reasoning = turn.reasoning, .text = turn.text, .calls = turn.calls } });
     try l.append(.{ .tool_results = &.{.{ .call_id = "c1", .ok = true, .output = "a b" }} });
     const body = try testRequestJson(alloc, &l, true, "high");

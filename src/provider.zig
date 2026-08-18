@@ -437,7 +437,7 @@ test "model stream is collected into owned turn" {
     const alloc = std.testing.allocator;
     var l = ledger.Ledger.init(alloc);
     defer l.deinit();
-    try l.append(.{ .user_text = "hello" });
+    try l.append(.{ .user_text = .{ .text = "hello" } });
 
     const ir = try prompt.project(alloc, l.view());
     defer ir.deinit(alloc);

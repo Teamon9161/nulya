@@ -465,7 +465,7 @@ fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
         std.mem.readInt(u32, &nonce, .little),
     });
     defer alloc.free(name);
-    try ledger.depositEvent(alloc, io, std.Io.Dir.cwd(), spath, name, .{ .user_text = text });
+    try ledger.depositEvent(alloc, io, std.Io.Dir.cwd(), spath, name, .{ .user_text = .{ .text = text } });
     return 0;
 }
 
@@ -711,9 +711,19 @@ fn sessionEvents(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
 }
 
 /// A read-only tail over a session file's raw lines. `events` never opens the
-/// file for writing and never parses or re-encodes events: the file IS the wire
-/// format, and its writer already validated that event line k carries seq k, so
-/// selecting by seq is counting complete lines past the header.
+/// file for writing, and every line it prints is the file's own bytes — the file
+/// IS the wire format, and its writer already validated that event line k
+/// carries seq k, so selecting by seq is counting complete lines past the
+/// header.
+///
+/// ONE line shape is not passed through verbatim: a `user_text` carrying images
+/// is re-encoded with each image's base64 replaced by `[image <media_type>, N
+/// base64 bytes]`, because a screenshot is hundreds of kilobytes of payload that
+/// no reader of a transcript wants (DESIGN §14). It is a presentation choice on
+/// top of the stored fact — `seq`, `origin` and every other column survive it,
+/// and a line that will not parse is printed raw rather than dropped. The
+/// unredacted bytes stay one `cat` away, and `session step --stream` (the driver
+/// surface) prints ledger lines unredacted so a front end sees the file's shape.
 const EventTail = struct {
     since: u64,
     /// Byte offset of the first unread line.
@@ -740,11 +750,43 @@ const EventTail = struct {
                 continue;
             }
             self.seq += 1;
-            if (self.seq > self.since) try out.writeAll(line);
+            if (self.seq <= self.since) continue;
+            if (try redactImages(alloc, line, self.seq)) |redacted| {
+                defer alloc.free(redacted);
+                try out.writeAll(redacted);
+            } else try out.writeAll(line);
         }
         self.offset = pos;
     }
 };
+
+/// The one re-encoding `events` does: a `user_text` line carrying images, with
+/// every image's base64 swapped for a placeholder. Returns null for every other
+/// line — including one that does not parse — so the caller prints the file's
+/// own bytes. Caller owns the result.
+fn redactImages(alloc: std.mem.Allocator, line: []const u8, seq: u64) !?[]u8 {
+    // Cheap reject first: the overwhelming majority of lines carry no images,
+    // and they must not pay a JSON parse for it.
+    if (std.mem.indexOf(u8, line, "\"images\"") == null) return null;
+    var parsed = ledger.parseEventLine(alloc, line) catch return null;
+    defer parsed.deinit();
+    const images = parsed.value.images orelse return null;
+    if (images.len == 0) return null;
+    const event = ledger.toEvent(parsed.arena.allocator(), parsed.value) catch return null;
+    if (event != .user_text) return null;
+
+    const placeholders = try parsed.arena.allocator().alloc(ledger.Image, images.len);
+    for (images, placeholders) |img, *out| out.* = .{
+        .media_type = img.media_type,
+        .data = try std.fmt.allocPrint(parsed.arena.allocator(), "[image {s}, {d} base64 bytes]", .{ img.media_type, img.data.len }),
+    };
+    return try ledger.encodeEventLineOrigin(
+        alloc,
+        .{ .user_text = .{ .text = event.user_text.text, .images = placeholders } },
+        seq,
+        parsed.value.origin,
+    );
+}
 
 fn sessionCancel(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (args.len < 1) {
@@ -796,11 +838,11 @@ test "EventTail prints raw event lines past --since, skips the header and a torn
 
     const header = try ledger.encodeHeaderLine(alloc, .{ .session = "s" });
     defer alloc.free(header);
-    const e1 = try ledger.encodeEventLine(alloc, .{ .user_text = "one" }, 1);
+    const e1 = try ledger.encodeEventLine(alloc, .{ .user_text = .{ .text = "one" } }, 1);
     defer alloc.free(e1);
-    const e2 = try ledger.encodeEventLine(alloc, .{ .user_text = "two" }, 2);
+    const e2 = try ledger.encodeEventLine(alloc, .{ .user_text = .{ .text = "two" } }, 2);
     defer alloc.free(e2);
-    const e3 = try ledger.encodeEventLine(alloc, .{ .user_text = "three" }, 3);
+    const e3 = try ledger.encodeEventLine(alloc, .{ .user_text = .{ .text = "three" } }, 3);
     defer alloc.free(e3);
 
     // Header, two complete events, and a torn third being written right now.
@@ -825,6 +867,50 @@ test "EventTail prints raw event lines past --since, skips the header and a torn
     const on_disk = try tmp.dir.readFileAlloc(io, "s.jsonl", alloc, .unlimited);
     defer alloc.free(on_disk);
     try std.testing.expectEqualStrings(whole, on_disk);
+}
+
+test "events prints an image turn with the base64 replaced, and every other line raw" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const header = try ledger.encodeHeaderLine(alloc, .{ .session = "s" });
+    defer alloc.free(header);
+    const shot = try ledger.encodeEventLine(alloc, .{ .user_text = .{
+        .text = "what is this",
+        .images = &.{.{ .media_type = "image/png", .data = "iVBORw0KGgoAAAA=" }},
+    } }, 1);
+    defer alloc.free(shot);
+    const plain = try ledger.encodeEventLine(alloc, .{ .assistant = .{ .text = "a screenshot", .calls = &.{} } }, 2);
+    defer alloc.free(plain);
+
+    const file = try std.mem.concat(alloc, u8, &.{ header, shot, plain });
+    defer alloc.free(file);
+    try tmp.dir.writeFile(io, .{ .sub_path = "s.jsonl", .data = file });
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    var tail: EventTail = .{ .since = 0 };
+    try tail.dump(alloc, io, tmp.dir, "s.jsonl", &out.writer);
+
+    // The image line keeps its seq, kind and text; only the payload is gone.
+    const expected = try std.mem.concat(alloc, u8, &.{
+        "{\"seq\":1,\"kind\":\"user_text\",\"text\":\"what is this\"," ++
+            "\"images\":[{\"media_type\":\"image/png\",\"data\":\"[image image/png, 16 base64 bytes]\"}]}\n",
+        plain,
+    });
+    defer alloc.free(expected);
+    try std.testing.expectEqualStrings(expected, out.written());
+    // Presentation only: the file still holds the base64 it always did.
+    const on_disk = try tmp.dir.readFileAlloc(io, "s.jsonl", alloc, .unlimited);
+    defer alloc.free(on_disk);
+    try std.testing.expectEqualStrings(file, on_disk);
+
+    // A line that merely mentions the word survives the cheap reject unharmed.
+    const decoy = try ledger.encodeEventLine(alloc, .{ .user_text = .{ .text = "no \"images\" here" } }, 1);
+    defer alloc.free(decoy);
+    try std.testing.expect(try redactImages(alloc, decoy, 1) == null);
 }
 
 test "--with is repeatable and splits <id>[@<version>]" {
