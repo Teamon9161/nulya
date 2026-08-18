@@ -9,6 +9,14 @@
 //! 64 ops / 8 character sets, which a model's `foo|bar|baz|...` alternation
 //! outgrows quickly, so this compiles into `SizedRegex(256, 32)`.
 //!
+//! The whole `(?…` family needs handling BEFORE mvzr sees it: mvzr does not
+//! know the syntax, and worse than rejecting it, it misparses it into a
+//! pattern that compiles and silently matches the wrong text (`(?i)AAA`
+//! matched the literal `iAAA`). So a non-capturing `(?:` — the one member a
+//! match-only wrapper can honor, since it never asks which group captured
+//! what — is rewritten to a plain `(`, and every other `(?…` (inline flags,
+//! lookaround) is refused up front with a message that names the way out.
+//!
 //! Case handling is tcode's smart case (tcode search.rs: `case_smart(true)` +
 //! `case_insensitive(...)`): a pattern with no uppercase LITERAL letter searches
 //! case-insensitively, any uppercase literal makes it exact, and
@@ -49,12 +57,83 @@ pub fn invalidMessage(alloc: std.mem.Allocator, pattern: []const u8) ![]const u8
 }
 
 /// Compile `pattern` under smart case, or null when mvzr rejects it. The lowered
-/// pattern, when one is needed, is allocated from `alloc`.
+/// pattern, when one is needed, is allocated from `alloc`. A pattern with an
+/// inline `(?…` construct is null too — the caller checks `hasInlineConstruct`
+/// first for the message that names the way out; this is the backstop that
+/// keeps mvzr's silent misparse unreachable.
 pub fn compile(alloc: std.mem.Allocator, pattern: []const u8, case_insensitive: bool) !?Compiled {
-    const fold = case_insensitive or !hasUppercaseLiteral(pattern);
-    const source = if (fold) try lowerPattern(alloc, pattern) else pattern;
+    if (hasInlineConstruct(pattern)) return null;
+    const plain = try stripNonCapturing(alloc, pattern);
+    const fold = case_insensitive or !hasUppercaseLiteral(plain);
+    const source = if (fold) try lowerPattern(alloc, plain) else plain;
     const regex = Regex.compile(source) orelse return null;
     return .{ .regex = regex, .fold_case = fold };
+}
+
+/// Does the pattern contain a `(?…` construct other than non-capturing `(?:`?
+/// Inline flags (`(?i)`), lookaround (`(?=`, `(?!`, `(?<`) and the rest of the
+/// family. An escaped `\(` and a `(` inside a `[...]` class are literals and do
+/// not count.
+pub fn hasInlineConstruct(pattern: []const u8) bool {
+    var in_class = false;
+    var i: usize = 0;
+    while (i < pattern.len) : (i += 1) {
+        const c = pattern[i];
+        if (c == '\\') {
+            i += 1;
+            continue;
+        }
+        if (in_class) {
+            if (c == ']') in_class = false;
+            continue;
+        }
+        if (c == '[') {
+            in_class = true;
+            continue;
+        }
+        if (c == '(' and i + 1 < pattern.len and pattern[i + 1] == '?') {
+            if (i + 2 >= pattern.len or pattern[i + 2] != ':') return true;
+        }
+    }
+    return false;
+}
+
+/// The teaching text for an inline `(?…)` construct the engine does not have.
+pub fn inlineMessage(alloc: std.mem.Allocator, pattern: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(
+        alloc,
+        "unsupported (?...) construct in /{s}/: this byte-level engine has no inline flags or lookaround. For case-insensitive matching pass case_insensitive=true; for grouping use ( ) or (?: ).",
+        .{pattern},
+    );
+}
+
+/// `(?:` rewritten to `(`: this wrapper only ever asks whether a line matches,
+/// never which group captured what, so a non-capturing group and a plain group
+/// are indistinguishable here — and models write `(?:` by reflex.
+fn stripNonCapturing(alloc: std.mem.Allocator, pattern: []const u8) ![]const u8 {
+    if (std.mem.indexOf(u8, pattern, "(?:") == null) return pattern;
+    var out: std.ArrayList(u8) = .empty;
+    var in_class = false;
+    var i: usize = 0;
+    while (i < pattern.len) : (i += 1) {
+        const c = pattern[i];
+        try out.append(alloc, c);
+        if (c == '\\' and i + 1 < pattern.len) {
+            try out.append(alloc, pattern[i + 1]);
+            i += 1;
+            continue;
+        }
+        if (in_class) {
+            if (c == ']') in_class = false;
+            continue;
+        }
+        if (c == '[') {
+            in_class = true;
+            continue;
+        }
+        if (c == '(' and i + 2 < pattern.len and pattern[i + 1] == '?' and pattern[i + 2] == ':') i += 2;
+    }
+    return out.toOwnedSlice(alloc);
 }
 
 /// Does the pattern contain an uppercase ASCII letter that is a literal — not
@@ -154,6 +233,31 @@ test "lowering the pattern leaves backslash classes alone: \\D survives, and is 
     try std.testing.expect(!exact.isMatch("abc"));
     const folded = (try compile(alloc, "[A-Z]{3}", true)).?;
     try std.testing.expect(folded.isMatch(lowerInto(&buf, "abc")));
+}
+
+test "the (?... family: non-capturing groups are rewritten and work, everything else is refused before mvzr" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var buf: [128]u8 = undefined;
+
+    try std.testing.expect(hasInlineConstruct("(?i)foo"));
+    try std.testing.expect(hasInlineConstruct("a(?=b)"));
+    try std.testing.expect(hasInlineConstruct("x(?")); // trailing, still not a group
+    try std.testing.expect(!hasInlineConstruct("(?:foo)"));
+    try std.testing.expect(!hasInlineConstruct("\\(?i")); // escaped paren: `?` quantifies a literal `(`
+    try std.testing.expect(!hasInlineConstruct("[(?]a")); // class members are literals
+    try std.testing.expect((try compile(alloc, "(?i)foo", false)) == null);
+
+    const r = (try compile(alloc, "(?:abc)+x", false)).?;
+    try std.testing.expect(r.fold_case);
+    try std.testing.expect(r.isMatch(lowerInto(&buf, "ABCabcX")));
+    try std.testing.expect(!r.isMatch(lowerInto(&buf, "abx")));
+    const nested = (try compile(alloc, "(?:a(?:b|c))d", false)).?;
+    try std.testing.expect(nested.isMatch(lowerInto(&buf, "acd")));
+
+    const msg = try inlineMessage(alloc, "(?i)foo");
+    try std.testing.expect(std.mem.indexOf(u8, msg, "case_insensitive=true") != null);
 }
 
 test "an invalid pattern is null and its message teaches escaping; a long alternation fits" {

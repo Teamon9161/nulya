@@ -103,6 +103,13 @@ fn answer(ctx: *const rpc.Ctx, args: std.json.ObjectMap) anyerror!rpc.Outcome {
         else => return rpc.refuse(alloc, "search path could not be read: {s} ({s})", .{ base, @errorName(err) }),
     };
 
+    // The `(?…` family never reaches mvzr: it would misparse inline flags and
+    // lookaround into a pattern that compiles and silently matches the wrong
+    // text. `(?:` is rewritten inside `compile`; the rest is refused here with
+    // the message that names the way out.
+    if (regex.hasInlineConstruct(pattern)) {
+        return rpc.refuse(alloc, "{s}", .{try regex.inlineMessage(alloc, pattern)});
+    }
     // Smart case: an all-lowercase pattern searches case-insensitively, an
     // uppercase-bearing one stays exact; `case_insensitive` wins outright.
     const compiled = (try regex.compile(alloc, pattern, case_insensitive)) orelse
@@ -743,6 +750,13 @@ test "grep run: no matches / oversized / explicit file / invalid regex / missing
     const bad = try t.grep("{\"pattern\":\"foo(bar\"}");
     try std.testing.expect(std.mem.startsWith(u8, bad, "invalid regex:"));
     try std.testing.expect(std.mem.indexOf(u8, bad, "escape literal ( ) [ ] { } . * + ? with a backslash") != null);
+
+    // An inline flag is refused with the way out, before mvzr can misparse it
+    // into a silent wrong match; a non-capturing group simply works.
+    const inline_flag = try t.grep("{\"pattern\":\"(?i)TARGET\",\"path\":\"large.rs\"}");
+    try std.testing.expect(std.mem.startsWith(u8, inline_flag, "unsupported (?...) construct"));
+    try std.testing.expect(std.mem.indexOf(u8, inline_flag, "case_insensitive=true") != null);
+    try std.testing.expectEqualStrings("large.rs:\n2: TARGET", try t.grep("{\"pattern\":\"(?:TAR)GET\",\"path\":\"large.rs\"}"));
 
     const missing = try t.grep("{\"pattern\":\"x\",\"path\":\"nowhere\"}");
     try std.testing.expect(std.mem.startsWith(u8, missing, "search path does not exist: "));
