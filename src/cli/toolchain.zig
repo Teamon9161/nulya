@@ -20,7 +20,9 @@ pub fn dispatchToolchain(alloc: std.mem.Allocator, io: std.Io, args: []const []c
     }
     const zig_exe = resolveZig(alloc, io) catch |err| switch (err) {
         error.NoZigToolchain => {
-            try printOut(alloc, io, "no zig toolchain; set NULYA_ZIG, put zig on PATH, or build nulya with -Dembed-toolchain\n", .{});
+            const hint = try noZigHint(alloc);
+            defer alloc.free(hint);
+            try printOut(alloc, io, "no zig toolchain; put zig on PATH, {s}\n", .{hint});
             return 1;
         },
         else => {
@@ -49,7 +51,9 @@ pub fn dispatchToolchain(alloc: std.mem.Allocator, io: std.Io, args: []const []c
 /// because only one of the three sources is unpinned.
 pub const ZigExe = struct {
     path: []u8,
-    source: enum { env, embedded, path },
+    /// `managed` = nulya's own toolchain directory, whether this binary
+    /// extracted the compiler into it or found it already there (DESIGN §10).
+    source: enum { env, managed, path },
 
     pub fn deinit(self: ZigExe, alloc: std.mem.Allocator) void {
         alloc.free(self.path);
@@ -57,9 +61,10 @@ pub const ZigExe = struct {
 };
 
 /// Resolve a zig executable, in this order: `NULYA_ZIG` (the explicit dev
-/// override), the embedded managed toolchain (DESIGN §10), then a `zig` on
-/// PATH. Caller owns the returned path; `error.NoZigToolchain` means none of
-/// the three answered.
+/// override), the managed toolchain directory (extracted from the embedded
+/// archive when there is one, else whatever pinned zig is already unpacked
+/// there — DESIGN §10), then a `zig` on PATH. Caller owns the returned path;
+/// `error.NoZigToolchain` means none of the three answered.
 ///
 /// The PATH fallback is for development builds, which carry no toolchain: the
 /// alternative is that `nulya ext build` cannot compile anything on a machine
@@ -76,7 +81,7 @@ pub fn resolveZig(alloc: std.mem.Allocator, io: std.Io) !ZigExe {
         if (p.len != 0) return .{ .path = try alloc.dupe(u8, p), .source = .env };
     }
 
-    const embedded: ?[]u8 = blk: {
+    const managed: ?[]u8 = blk: {
         const data_path = try dataDir(alloc, &host);
         defer alloc.free(data_path);
         std.Io.Dir.cwd().createDirPath(io, data_path) catch {};
@@ -84,13 +89,38 @@ pub fn resolveZig(alloc: std.mem.Allocator, io: std.Io) !ZigExe {
         defer data.close(io);
         break :blk toolchain.ensureExtracted(alloc, io, data) catch |err| switch (err) {
             error.Canceled => return err,
-            else => null, // not embedded (the usual case), or unextractable
+            else => null, // neither embedded nor unpacked there (the usual dev case), or unextractable
         };
     };
-    if (embedded) |z| return .{ .path = z, .source = .embedded };
+    if (managed) |z| return .{ .path = z, .source = .managed };
 
     const on_path = (try zigOnPath(alloc, io, &host)) orelse return error.NoZigToolchain;
     return .{ .path = on_path, .source = .path };
+}
+
+/// The managed toolchain directory on this machine, absolute — the one place a
+/// person can put a zig 0.16.0 so that every nulya (embedded or not) finds it
+/// before falling back to PATH. Caller owns the result.
+pub fn managedDirPath(alloc: std.mem.Allocator) ![]u8 {
+    var host = try environment.hostEnvironMap(alloc);
+    defer host.deinit();
+    const data_path = try dataDir(alloc, &host);
+    defer alloc.free(data_path);
+    return std.fs.path.join(alloc, &.{ data_path, toolchain.managed_rel });
+}
+
+/// The two pinned ways out of "no usable compiler", with the directory spelled
+/// out — every verb that can hit the wall prints this same sentence, so the
+/// repair is never described two ways. (PATH is the third, unpinned way; a
+/// caller adds it only when no zig answered at all.) Caller owns the result.
+pub fn noZigHint(alloc: std.mem.Allocator) ![]u8 {
+    const dir = try managedDirPath(alloc);
+    defer alloc.free(dir);
+    return std.fmt.allocPrint(
+        alloc,
+        "set NULYA_ZIG to a zig {s} executable, or unpack zig {s} into {s} (a nulya built with -Dembed-toolchain needs neither)",
+        .{ toolchain.pinned_version, toolchain.pinned_version, dir },
+    );
 }
 
 /// One stderr line naming the compiler that is about to define a version id —

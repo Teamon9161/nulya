@@ -6,7 +6,7 @@
 //! to the same content-addressed version id and the build is reproducible.
 //!
 //! The Zig executable is injected rather than resolved here: production wires in
-//! `toolchain.ensureExtracted` (the embedded toolchain), while tests can wire in
+//! `toolchain.ensureExtracted` (the managed toolchain), while tests can wire in
 //! the host's own zig — so the whole close-the-loop path is testable without the
 //! ~90MB embed.
 

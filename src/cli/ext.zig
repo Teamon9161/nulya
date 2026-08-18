@@ -174,10 +174,12 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
         // version — and that difference is the whole repair hint, so it is not
         // flattened into one sentence.
         error.ZigVersionUnreadable => {
+            const hint = try cli_toolchain.noZigHint(alloc);
+            defer alloc.free(hint);
             if (zig_exe) |z| {
-                try printOut(alloc, io, "the zig at {s} could not report its version (`zig version` failed), and a compiled extension needs one; set NULYA_ZIG to a working toolchain, or build nulya with -Dembed-toolchain\n", .{z.path});
+                try printOut(alloc, io, "the zig at {s} could not report its version (`zig version` failed here), and a compiled extension needs one; {s}\n", .{ z.path, hint });
             } else {
-                try printOut(alloc, io, "no zig toolchain (needed to compile this extension); set NULYA_ZIG, put zig on PATH, or build nulya with -Dembed-toolchain\n", .{});
+                try printOut(alloc, io, "no zig toolchain (needed to compile this extension); put zig on PATH, {s}\n", .{hint});
             }
             return 1;
         },
@@ -435,6 +437,10 @@ fn extSync(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     const zig_exe: ?ZigExe = resolveZig(alloc, io) catch null;
     defer if (zig_exe) |z| z.deinit(alloc);
     const zig_path = if (zig_exe) |z| z.path else "";
+    // The same three ways out `ext build` names, spelled once for the whole
+    // pass: a front end relays this line as-is, so the directory has to be in it.
+    const no_zig_hint = try cli_toolchain.noZigHint(alloc);
+    defer alloc.free(no_zig_hint);
 
     var produced: usize = 0;
     var already: usize = 0;
@@ -449,7 +455,15 @@ fn extSync(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             build_ext.buildExtensionReusing(alloc, io, root_dir, draft, root_dir, zig_path, donors.dirs.items)) catch |err| switch (err) {
             error.ZigVersionUnreadable => {
                 failed += 1;
-                try printOut(alloc, io, "{s}: needs zig (compiled draft; set NULYA_ZIG or use the embedded toolchain)\n", .{draft});
+                // Two different walls behind one word: no compiler at all, or one
+                // that answered `zig version` with a failure from this directory
+                // (a version-manager shim that reads a build.zig.zon from the
+                // cwd does exactly that in a store root). Name which.
+                if (zig_exe) |z| {
+                    try printOut(alloc, io, "{s}: needs zig (compiled draft; the zig at {s} could not report its version from the store root — {s})\n", .{ draft, z.path, no_zig_hint });
+                } else {
+                    try printOut(alloc, io, "{s}: needs zig (compiled draft; put zig on PATH, {s})\n", .{ draft, no_zig_hint });
+                }
                 continue;
             },
             else => {
