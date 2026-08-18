@@ -1028,3 +1028,13 @@ cd tui && bun test test/compact.test.ts
 **测试**：五条窄宽度（76 列）frame 测试，每条都断言"没有任何一行超过 76 列"+ gutter 完好（两行把同一列的内容放在同一个 offset）+ 超长内容出现 `…`；`/ext` 那条现造一个 36 字符的 extension id（它同时也是自己 tool 的名字），四个 pane 逐个走一遍并断言 version id **整条**都在。`columns.test.ts` 加一条 emoji 宽度。`bun test` 152 → **157 pass**；两个既有快照（`/help`、`/ext`）按预期版面更新，逐行看过 diff——变化只有 gutter 补齐、列宽由内容决定、长句断在 ` · ` 关节上。
 
 **仍未迁**：`SessionsView`（不在 T16 点名的清单里；它的行是 `flexGrow` 的一段拼接文本，长 `first_user_text` 已经切到 40，但窄屏下仍可能折）。
+
+### T17 · mid-task 消息带上自己的说明（2026-08-18）
+
+**通路早就在，缺的只是措辞。** 内核侧：`session append` 不拿写者锁、投 inbox、内核在**每个** step 之前排干（DESIGN §3.4）；TUI 侧：driver 运行中 `send()` 直接 append，落在最后一步流式期间的消息由 `drive()` 结束时的 `pendingCount()` 检查再起一轮送达（§4.3 允许的那一次机械 re-step）。但模型看到的只是 tool_results 之后凭空出现的一条 user turn——和"停下来听新指令"在字面上无法区分，模型往往就真的停了。tcode 的答案是投一条机器署名的 `Entry::Note`（interrupt contract：用户**没有**打断你，回应后继续原任务，别把中途消息当隐式停工信号）。
+
+1. **note 是 prompt，不进内核。** nulya 不为此新增 ledger 事件类型：措辞是 policy（physics #8），而"何时输入的"这个事实 TUI 自己最清楚。落法是 T15 skill echo 的同款 sentinel（`midtask.ts`：`<user-mid-task-message>\n<原文>\n</user-mid-task-message>\n<note>`），wrap 与 parse 同一模块，live 与回放共用一个读法,卡片折回用户原话 + `sent mid-task` 小标。note 逐字照抄 tcode（`agent/mod.rs`），只把复数改单数;它有个经得起赛跑的性质——说的是**输入时刻**（"typed while you were working"），所以 append 与 run 结束赛跑、实际下一轮开头才排干时,这句话仍然为真。
+2. **parse 只认 sentinel、不认 note 措辞**：旧 TUI 写的 turn 在新 TUI 里照样折（note 将来可以重写而不搁浅已落盘的 turn）；close 标签取**最后**一次出现,正文引用 sentinel 也能 round-trip。
+3. **包不包，按"模型是否真的在干活"**：driver 侧只在 `stepping` / `canceling` 包（`sending` 不包——那一场还没开跑,消息只是加入开场批次）；observer 侧只在 lease 探针**确证** `held` 时包（`free` / `unknown` 不主张没核实过的事）。
+4. **测试**：`midtask.test.ts` 6 条纯函数（round-trip、note 措辞无关性、正文引 sentinel、误判、多行）+ `driver.test.ts` 一条真二进制（scripted loop 跑着时 send → ledger 第二条 user_text 带 sentinel 与 note、transcript 折回原话、rest 时那条原样）。`bun test` 157 → **164 pass**。
+5. **顺手更新一个滞后快照**：`/sessions` 的行从 `scripted` 变 `scripted/scripted-demo`——不是本轮改的,是 vision V3 把 scripted 选中的 model id 冻进 header（goals/vision.md §6）的诚实呈现,TUI 测试用的新内核二进制把它带了出来。

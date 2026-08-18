@@ -4,6 +4,7 @@ import { CompactionCard } from "./CompactionCard.tsx"
 import { compactionMarker } from "../../compact.ts"
 import { SkillEchoCard } from "./SkillEchoCard.tsx"
 import { skillEchoOf } from "../../skills.ts"
+import { midTaskOf } from "../../midtask.ts"
 import { AssistantTurn } from "./AssistantTurn.tsx"
 import { Thinking } from "./Thinking.tsx"
 import { ToolCard } from "./ToolCard.tsx"
@@ -32,6 +33,15 @@ export function Card(props: { item: TranscriptItem }) {
         <SkillEchoCard
           item={props.item as Extract<TranscriptItem, { kind: "user" }>}
           echo={skillEchoOf(props.item)!}
+        />
+      </Match>
+      {/* Typed while a run was in flight: the ledger keeps the sentinel and the
+          interrupt contract; the person reads their own words (`midtask.ts`). */}
+      <Match when={midTaskOf(props.item) !== null}>
+        <UserTurn
+          item={props.item as Extract<TranscriptItem, { kind: "user" }>}
+          text={midTaskOf(props.item)!.text}
+          badge="sent mid-task"
         />
       </Match>
       <Match when={props.item.kind === "user"}>

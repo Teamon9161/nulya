@@ -9,6 +9,7 @@
  * spoke while a run was ending, so their turn is still queued in the inbox.
  */
 import { createSignal, type Accessor } from "solid-js"
+import { wrapMidTask } from "../midtask.ts"
 import { sessionAppend, sessionCancel, sessionStep, type StepHandle } from "../nulya/cli.ts"
 import type { Workspace } from "../nulya/bin.ts"
 import type { SessionState } from "./session.ts"
@@ -149,7 +150,12 @@ export function createDriver(
     async send(text) {
       const trimmed = text.trim()
       if (trimmed.length === 0) return
-      state.enqueueUser(trimmed)
+      // A step in flight means the model is mid-task, and a bare user turn
+      // after tool results reads like a stop signal — so the turn carries its
+      // own framing (midtask.ts). "sending" is not mid-task: that run has not
+      // started yet, the turn just joins its opening batch unwrapped.
+      const wire = status() === "stepping" || status() === "canceling" ? wrapMidTask(trimmed) : trimmed
+      state.enqueueUser(wire)
       // Anything but idle means a step is running or about to: the turn is
       // appended and the run in flight (or the one the earlier send is about to
       // start) drains it at its next step boundary. Starting a second `drive()`
@@ -157,7 +163,7 @@ export function createDriver(
       const running = status() !== "idle"
       if (!running) setStatus("sending")
       try {
-        await sessionAppend(ws, id, trimmed)
+        await sessionAppend(ws, id, wire)
       } catch (error) {
         state.setError(error instanceof Error ? error.message : String(error))
         if (!running) setStatus("idle")

@@ -3,8 +3,8 @@
 exports[`/sessions lists the store and opens the highlighted session 1`] = `
 " sessions · 2                                                                                                           
                                                                                                                         
- ▾ s-<id> <when> · scripted · 0 events                                                             
-   s-<id> <when> · scripted · 4 events · make the budgets configurable                             
+ ▾ s-<id> <when> · scripted/scripted-demo · 0 events                                               
+   s-<id> <when> · scripted/scripted-demo · 4 events · make the budgets configurable               
                                                                                                                         
                                                                                                                         
                                                                                                                         

@@ -10,6 +10,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test"
 import { createAttachment } from "../src/state/attach.ts"
 import { createDriver } from "../src/state/driver.ts"
 import { createSessionState } from "../src/state/session.ts"
+import { midTaskOf, mid_task_note, mid_task_open } from "../src/midtask.ts"
 import { sessionEvents, sessionNew } from "../src/nulya/cli.ts"
 import { scripted_env, scripted_loop_env, tempWorkspace, until, type TempWorkspace } from "./support.ts"
 
@@ -48,6 +49,35 @@ test("two sends in quick succession start ONE step and both turns land", async (
     expect(events.filter((event) => event.kind === "user_text").length).toBe(2)
   } finally {
     attach.dispose()
+  }
+}, 120_000)
+
+test("a send during a step in flight lands wrapped as mid-task; one at rest does not", async () => {
+  const id = await sessionNew(ws, { profile: "scripted" })
+  const state = createSessionState(id)
+  const driver = createDriver(ws, id, state, { env: scripted_loop_env, maxSteps: 12 })
+  try {
+    void driver.send("keep going")
+    // The run is demonstrably under way: a tool call has resolved and the
+    // scripted loop still has steps to spend.
+    await until(() => state.snapshot.items.some((item) => item.kind === "tool" && item.resolved), 60_000)
+    expect(driver.status()).toBe("stepping")
+    await driver.send("also check the docs")
+    await until(() => driver.status() === "idle", 60_000)
+
+    const events = await sessionEvents(ws, id)
+    const users = events.filter((event) => event.kind === "user_text") as Array<{ kind: "user_text"; text: string }>
+    expect(users.length).toBe(2)
+    // At rest: verbatim. Mid-task: the sentinel plus tcode's note, and the
+    // transcript folds it back to the words alone.
+    expect(users[0]!.text).toBe("keep going")
+    expect(users[1]!.text.startsWith(mid_task_open)).toBe(true)
+    expect(users[1]!.text).toContain(mid_task_note)
+    const item = state.snapshot.items.find((i) => i.kind === "user" && i.text === users[1]!.text)
+    expect(item !== undefined && midTaskOf(item)).toEqual({ text: "also check the docs" })
+    expect(state.pendingCount()).toBe(0)
+  } finally {
+    driver.dispose()
   }
 }, 120_000)
 

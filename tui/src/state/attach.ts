@@ -23,6 +23,7 @@
  *      everywhere, which is why the probe is allowed to answer "unknown".
  */
 import { createSignal, type Accessor } from "solid-js"
+import { wrapMidTask } from "../midtask.ts"
 import { sessionAppend, sessionCancel, sessionFollow, type FollowHandle } from "../nulya/cli.ts"
 import { probeWriterLease } from "../nulya/files.ts"
 import { createDriver, type Driver, type DriverOptions, type DriverStatus } from "./driver.ts"
@@ -142,11 +143,15 @@ export function createAttachment(
       }
       // Observer: append only. The turn is deposited in the inbox and the other
       // writer drains it at its next step boundary (DESIGN §3.4) — we must not
-      // start a step of our own, and we could not if we tried.
-      state.enqueueUser(trimmed)
+      // start a step of our own, and we could not if we tried. When the probe
+      // can see that writer actually holding the lease, its run is in flight
+      // and the turn carries the mid-task framing (midtask.ts); "free" and
+      // "unknown" claim nothing, so they wrap nothing.
+      const wire = probeWriterLease(ws, id) === "held" ? wrapMidTask(trimmed) : trimmed
+      state.enqueueUser(wire)
       setSending(true)
       try {
-        await sessionAppend(ws, id, trimmed)
+        await sessionAppend(ws, id, wire)
       } catch (error) {
         state.setError(error instanceof Error ? error.message : String(error))
       } finally {
