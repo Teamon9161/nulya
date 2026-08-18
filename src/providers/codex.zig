@@ -362,7 +362,7 @@ fn writeInstructions(jw: *std.json.Stringify, alloc: std.mem.Allocator, blocks: 
 fn writeInput(jw: *std.json.Stringify, alloc: std.mem.Allocator, turns: []const prompt.Turn) !void {
     try jw.beginArray();
     for (turns) |turn| switch (turn) {
-        .user_text => |u| try writeMessageItem(jw, "user", "input_text", u.text),
+        .user_text => |u| try writeUserItem(jw, alloc, u),
         .capability_note => |text| try writeMessageItem(jw, "user", "input_text", text),
         .assistant => |as| {
             // The turn's `reasoning` items exactly as they came back — id,
@@ -396,6 +396,41 @@ fn writeInput(jw: *std.json.Stringify, alloc: std.mem.Allocator, turns: []const 
         },
     };
     try jw.endArray();
+}
+
+/// A user turn: its text and the images inlined with it, as parts of ONE
+/// message item. This wire is already a parts array, so an image is one more
+/// part — an `input_image` carrying the data URI. An image-only turn writes no
+/// text part rather than an empty one.
+fn writeUserItem(jw: *std.json.Stringify, alloc: std.mem.Allocator, u: prompt.Turn.UserText) !void {
+    if (u.images.len == 0) return writeMessageItem(jw, "user", "input_text", u.text);
+    try jw.beginObject();
+    try jw.objectField("type");
+    try jw.write("message");
+    try jw.objectField("role");
+    try jw.write("user");
+    try jw.objectField("content");
+    try jw.beginArray();
+    if (u.text.len != 0) {
+        try jw.beginObject();
+        try jw.objectField("type");
+        try jw.write("input_text");
+        try jw.objectField("text");
+        try jw.write(u.text);
+        try jw.endObject();
+    }
+    for (u.images) |img| {
+        const uri = try wire.dataUri(alloc, img.media_type, img.data);
+        defer alloc.free(uri);
+        try jw.beginObject();
+        try jw.objectField("type");
+        try jw.write("input_image");
+        try jw.objectField("image_url");
+        try jw.write(uri);
+        try jw.endObject();
+    }
+    try jw.endArray();
+    try jw.endObject();
 }
 
 fn writeMessageItem(jw: *std.json.Stringify, role: []const u8, part_type: []const u8, text: []const u8) !void {
@@ -677,4 +712,34 @@ test "SSE events collect into a turn with cache-adjusted usage" {
     try std.testing.expectEqual(@as(u64, 100), turn.usage.input_tokens);
     try std.testing.expectEqual(@as(u64, 900), turn.usage.cache_read_tokens);
     try std.testing.expectEqual(provider.StopReason.tool_use, turn.stop_reason);
+}
+
+test "an image rides as an input_image part; a turn without one keeps its pre-image item byte for byte" {
+    const alloc = std.testing.allocator;
+
+    var plain = ledger.Ledger.init(alloc);
+    defer plain.deinit();
+    try plain.append(.{ .user_text = .{ .text = "hello" } });
+    const plain_ir = try prompt.project(alloc, plain.view());
+    defer plain_ir.deinit(alloc);
+    const plain_body = try buildRequestJson(alloc, "gpt-5.5", "cache-1", .{ .prompt_ir = &plain_ir, .tools = &.{} });
+    defer alloc.free(plain_body);
+    try std.testing.expect(std.mem.indexOf(u8, plain_body,
+        "{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello\"}]}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plain_body, "input_image") == null);
+
+    var shot = ledger.Ledger.init(alloc);
+    defer shot.deinit();
+    try shot.append(.{ .user_text = .{
+        .text = "what is this",
+        .images = &.{.{ .media_type = "image/png", .data = "iVBORw0=" }},
+    } });
+    const shot_ir = try prompt.project(alloc, shot.view());
+    defer shot_ir.deinit(alloc);
+    const shot_body = try buildRequestJson(alloc, "gpt-5.5", "cache-1", .{ .prompt_ir = &shot_ir, .tools = &.{} });
+    defer alloc.free(shot_body);
+    // One message item, two parts, in the order the turn holds them.
+    try std.testing.expect(std.mem.indexOf(u8, shot_body,
+        "{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"what is this\"}," ++
+            "{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,iVBORw0=\"}]}") != null);
 }

@@ -31,6 +31,9 @@ const Live = struct {
     lenv: environment.LocalEnvironment,
     tmp: std.testing.TmpDir,
     profile: []const u8,
+    /// The frozen model id, so a test can ask the catalog what this model is
+    /// (`[[models]] vision`) — the same claim `session append --image` reads.
+    model_id: []const u8,
     effort: ?[]const u8,
     cache_key: [32]u8,
 
@@ -84,6 +87,7 @@ const Live = struct {
             .lenv = lenv,
             .tmp = tmp,
             .profile = profile,
+            .model_id = identity.model,
             .effort = cfg.defaultEffort(profile, identity.model),
         };
     }
@@ -110,7 +114,24 @@ const Live = struct {
             .model_options = .{ .effort = effort },
         });
     }
+
+    /// Does this machine's catalog say the live model accepts images? The claim
+    /// is the user's to make (DESIGN §9.5), so an unmarked model means "not
+    /// asked to be tested with images", not "broken".
+    fn claimsVision(self: *const Live) bool {
+        for (self.cfg.models) |m| {
+            if (std.mem.eql(u8, m.id, self.model_id)) return m.vision;
+        }
+        return false;
+    }
 };
+
+/// A real 64x64 solid-red PNG, already base64 — which is exactly the form the
+/// ledger stores an image in (DESIGN §3.1), so the test needs no encoder and
+/// nothing here has to be trusted to produce valid PNG bytes at run time.
+const red_square_png_b64 =
+    "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAT0lEQVR42u3PQQkAAAgEsItw/VMZyQi+hcEKLNO+FgEBAQEBAQEB" ++
+    "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQGBywJmTwDiulNVfwAAAABJRU5ErkJggg==";
 
 /// A first user turn comfortably past every provider's minimum cacheable
 /// prefix, ending in real work for the model to do. Caller owns the result.
@@ -287,5 +308,54 @@ test "live provider: a thinking model's tool loop replays its reasoning and stil
         // look before trusting the replay path.
         std.debug.print("no assistant turn carried reasoning; nothing was replayed\n", .{});
         return error.NoReasoningRecorded;
+    }
+}
+
+test "live provider: an image in a user turn reaches the model and it describes what it sees" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var live = (try Live.open(alloc, io)) orelse return error.SkipZigTest;
+    defer live.deinit();
+
+    // Only a model the catalog claims can see images (DESIGN §3.1, §14). Today
+    // that is the codex profile's `gpt-5.5` and Anthropic's own models — but the
+    // claim is written in the user's config, never guessed here, exactly as
+    // `session append --image` reads it. DeepSeek's endpoints do not take
+    // images, so the two cheap profiles skip.
+    if (!live.claimsVision()) {
+        std.debug.print(
+            "integration: '{s}' is not marked `vision = true` in [[models]]; skipping the image turn\n",
+            .{live.model_id},
+        );
+        return error.SkipZigTest;
+    }
+
+    var sess = try live.newSession(alloc);
+    defer sess.deinit();
+
+    // The library path, not `session append --image`: the CLI gate has already
+    // been proven offline, and what a live endpoint alone can prove is that the
+    // bytes we serialize are bytes the model actually sees.
+    try sess.l.append(.{ .user_text = .{
+        .text = "What single colour fills this image? Answer with the colour word only.",
+        .images = &.{.{ .media_type = "image/png", .data = red_square_png_b64 }},
+    } });
+    _ = try sess.run(2);
+
+    var said: []const u8 = "";
+    for (sess.l.view()) |event| switch (event) {
+        .assistant => |a| if (a.text.len != 0) {
+            said = a.text;
+        },
+        else => {},
+    };
+    std.debug.print("  model saw: {s}\n", .{said});
+
+    const lowered = try std.ascii.allocLowerString(alloc, said);
+    defer alloc.free(lowered);
+    if (std.mem.indexOf(u8, lowered, "red") == null) {
+        std.debug.print("the reply never mentions the image's colour: {s}\n", .{said});
+        return error.ImageNotSeen;
     }
 }

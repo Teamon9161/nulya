@@ -13,6 +13,7 @@
 //! take the classic `thinking.budget_tokens`.
 
 const std = @import("std");
+const ledger = @import("../ledger.zig");
 const prompt = @import("../prompt.zig");
 const provider = @import("../provider.zig");
 const tool = @import("../tool.zig");
@@ -247,6 +248,26 @@ fn writeTextBlock(jw: *std.json.Stringify, text: []const u8, cached: bool) !void
     try jw.endObject();
 }
 
+/// An inline image as a content block: this API takes the media type and the
+/// base64 as separate fields of a `source`, which is why it does not share the
+/// data-URI helper the other two dialects do.
+fn writeImageBlock(jw: *std.json.Stringify, img: ledger.Image, cached: bool) !void {
+    try jw.beginObject();
+    try jw.objectField("type");
+    try jw.write("image");
+    try jw.objectField("source");
+    try jw.beginObject();
+    try jw.objectField("type");
+    try jw.write("base64");
+    try jw.objectField("media_type");
+    try jw.write(img.media_type);
+    try jw.objectField("data");
+    try jw.write(img.data);
+    try jw.endObject();
+    if (cached) try writeCacheControl(jw);
+    try jw.endObject();
+}
+
 fn writeCacheControl(jw: *std.json.Stringify) !void {
     try jw.objectField("cache_control");
     try jw.beginObject();
@@ -296,7 +317,15 @@ fn writeMessage(jw: *std.json.Stringify, alloc: std.mem.Allocator, role: Role, r
     try jw.objectField("content");
     try jw.beginArray();
     for (run) |turn| switch (turn) {
-        .user_text => |u| try writeTextBlock(jw, u.text, takes(breakpoint, &seen)),
+        .user_text => |u| {
+            // Text first, then the images inlined with it. An image-only turn
+            // writes NO text block: this API rejects an empty one, and
+            // `session append --image` with nothing said is a legal turn
+            // (DESIGN §14). `cacheableBlocks` counts by the same rule — the two
+            // must agree or the moving breakpoint lands on the wrong block.
+            if (u.text.len != 0 or u.images.len == 0) try writeTextBlock(jw, u.text, takes(breakpoint, &seen));
+            for (u.images) |img| try writeImageBlock(jw, img, takes(breakpoint, &seen));
+        },
         .capability_note => |text| try writeTextBlock(jw, text, takes(breakpoint, &seen)),
         .assistant => |as| {
             // The turn's `thinking` / `redacted_thinking` blocks, exactly as this
@@ -372,7 +401,13 @@ fn hasReasoning(run: []const prompt.Turn) bool {
 fn cacheableBlocks(run: []const prompt.Turn) usize {
     var n: usize = 0;
     for (run) |turn| switch (turn) {
-        .user_text, .capability_note => n += 1,
+        // Same rule as `writeMessage`: no text block for an image-only turn,
+        // one cacheable block per image (an image block takes `cache_control`).
+        .user_text => |u| {
+            if (u.text.len != 0 or u.images.len == 0) n += 1;
+            n += u.images.len;
+        },
+        .capability_note => n += 1,
         .assistant => |as| {
             if (as.text.len != 0) n += 1;
             n += as.calls.len;
@@ -552,8 +587,6 @@ fn stopReasonFrom(s: []const u8) provider.StopReason {
 }
 
 // ------------------------------------------------------------------- tests --
-
-const ledger = @import("../ledger.zig");
 
 fn testRequestJson(alloc: std.mem.Allocator, l: *ledger.Ledger, native: bool, effort: ?[]const u8) ![]u8 {
     const sys = [_]prompt.SystemBlock{.{ .source = "kernel", .bytes = "system base" }};
@@ -768,4 +801,53 @@ test "thinking blocks are collected whole and replayed verbatim ahead of the tur
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, body, "\"cache_control\""));
     // No empty text block was invented: the thinking blocks and the call are the body.
     try std.testing.expect(std.mem.indexOf(u8, body, "\"text\":\"\"") == null);
+}
+
+test "an image is a source block that can take the moving breakpoint; a turn without one is unchanged" {
+    const alloc = std.testing.allocator;
+
+    var plain = ledger.Ledger.init(alloc);
+    defer plain.deinit();
+    try plain.append(.{ .user_text = .{ .text = "hello" } });
+    const plain_body = try testRequestJson(alloc, &plain, true, null);
+    defer alloc.free(plain_body);
+    // The whole user message, byte for byte as it was before images existed.
+    try std.testing.expect(std.mem.indexOf(u8, plain_body,
+        "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hello\",\"cache_control\":{\"type\":\"ephemeral\"}}]}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plain_body, "\"type\":\"image\"") == null);
+
+    var shot = ledger.Ledger.init(alloc);
+    defer shot.deinit();
+    try shot.append(.{ .user_text = .{
+        .text = "what is this",
+        .images = &.{.{ .media_type = "image/png", .data = "iVBORw0=" }},
+    } });
+    const body = try testRequestJson(alloc, &shot, true, null);
+    defer alloc.free(body);
+
+    // Text block, then the image as a base64 source block — and the turn is
+    // still ONE message.
+    const text_at = std.mem.indexOf(u8, body, "\"type\":\"text\",\"text\":\"what is this\"").?;
+    const image_at = std.mem.indexOf(u8, body,
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"iVBORw0=\"}").?;
+    try std.testing.expect(text_at < image_at);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, body, "\"role\":\"user\""));
+
+    // `cacheableBlocks` and `writeMessage` agree: the turn grew from one block
+    // to two, so the moving breakpoint is on the IMAGE, the last block of the
+    // last message — still exactly two breakpoints in the request.
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, body, "\"cache_control\""));
+    try std.testing.expect(std.mem.lastIndexOf(u8, body, "\"cache_control\"").? > image_at);
+
+    // An image-only turn writes no text block at all (this API rejects an empty
+    // one), and the breakpoint still lands on the last block written.
+    var bare = ledger.Ledger.init(alloc);
+    defer bare.deinit();
+    try bare.append(.{ .user_text = .{ .text = "", .images = &.{.{ .media_type = "image/jpeg", .data = "/9j/" }} } });
+    const bare_body = try testRequestJson(alloc, &bare, true, null);
+    defer alloc.free(bare_body);
+    try std.testing.expect(std.mem.indexOf(u8, bare_body, "\"type\":\"text\",\"text\":\"\"") == null);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, bare_body, "\"cache_control\""));
+    const bare_image_at = std.mem.indexOf(u8, bare_body, "\"type\":\"image\"").?;
+    try std.testing.expect(std.mem.lastIndexOf(u8, bare_body, "\"cache_control\"").? > bare_image_at);
 }

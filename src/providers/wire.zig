@@ -26,6 +26,17 @@ pub fn writeReasoningItems(jw: *std.json.Stringify, alloc: std.mem.Allocator, re
     for (parsed.value.array.items) |item| try jw.write(item);
 }
 
+/// The `data:<media_type>;base64,<data>` URI an inline image travels as on BOTH
+/// JSON dialects that take one as a URL (chat/completions' `image_url`, the
+/// responses endpoint's `input_image`). Anthropic's block carries the two parts
+/// separately, so it does not come through here — two consumers, not three.
+/// Built as a string rather than spliced raw so the JSON writer still escapes
+/// it: the ledger stores whatever it was handed (DESIGN §3.1), and this is the
+/// wire, not the place to trust it. Caller owns the result.
+pub fn dataUri(alloc: std.mem.Allocator, media_type: []const u8, data: []const u8) ![]u8 {
+    return std.fmt.allocPrint(alloc, "data:{s};base64,{s}", .{ media_type, data });
+}
+
 // ------------------------------------------------------------------- JSON --
 
 pub fn field(v: std.json.Value, name: []const u8) ?std.json.Value {

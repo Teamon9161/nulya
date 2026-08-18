@@ -199,7 +199,7 @@ fn writeMessages(alloc: std.mem.Allocator, jw: *std.json.Stringify, ir: *const p
         try writeRoleContentMessage(jw, "system", block.bytes);
     }
     for (ir.turns) |turn| switch (turn) {
-        .user_text => |u| try writeRoleContentMessage(jw, "user", u.text),
+        .user_text => |u| try writeUserMessage(alloc, jw, u),
         // One turn, one assistant message: text, this turn's reasoning and its
         // calls all belong to it.
         .assistant => |as| try writeAssistantMessage(alloc, jw, as),
@@ -221,6 +221,44 @@ fn writeMessages(alloc: std.mem.Allocator, jw: *std.json.Stringify, ir: *const p
         .capability_note => |text| try writeRoleContentMessage(jw, "system", text),
     };
     try jw.endArray();
+}
+
+/// A user turn. WITHOUT images it is the plain-string form this endpoint has
+/// always been sent — byte for byte, because that string is the implicit prefix
+/// cache's key material and a turn that carries no picture must not move it.
+/// With images it becomes the parts array, which is the only shape that can
+/// carry one.
+fn writeUserMessage(alloc: std.mem.Allocator, jw: *std.json.Stringify, u: prompt.Turn.UserText) !void {
+    if (u.images.len == 0) return writeRoleContentMessage(jw, "user", u.text);
+    try jw.beginObject();
+    try jw.objectField("role");
+    try jw.write("user");
+    try jw.objectField("content");
+    try jw.beginArray();
+    // An image-only turn writes no text part rather than an empty one.
+    if (u.text.len != 0) {
+        try jw.beginObject();
+        try jw.objectField("type");
+        try jw.write("text");
+        try jw.objectField("text");
+        try jw.write(u.text);
+        try jw.endObject();
+    }
+    for (u.images) |img| {
+        const uri = try wire.dataUri(alloc, img.media_type, img.data);
+        defer alloc.free(uri);
+        try jw.beginObject();
+        try jw.objectField("type");
+        try jw.write("image_url");
+        try jw.objectField("image_url");
+        try jw.beginObject();
+        try jw.objectField("url");
+        try jw.write(uri);
+        try jw.endObject();
+        try jw.endObject();
+    }
+    try jw.endArray();
+    try jw.endObject();
 }
 
 fn writeRoleContentMessage(jw: *std.json.Stringify, role: []const u8, content: []const u8) !void {
@@ -659,4 +697,49 @@ test "request JSON serializes system blocks before ledger turns" {
     const user_pos = std.mem.indexOf(u8, body, "\"role\":\"user\"") orelse return error.MissingUserMessage;
     try std.testing.expect(system_pos < user_pos);
     try std.testing.expect(std.mem.indexOf(u8, body, "system base") != null);
+}
+
+test "an image turn becomes a parts array; a turn without one keeps the plain-string body byte for byte" {
+    const alloc = std.testing.allocator;
+    const L = @import("../ledger.zig").Ledger;
+
+    // The shape this endpoint has always been sent, captured from a ledger that
+    // knows nothing about images.
+    var plain = L.init(alloc);
+    defer plain.deinit();
+    try plain.append(.{ .user_text = .{ .text = "hello" } });
+    const plain_ir = try prompt.project(alloc, plain.view());
+    defer plain_ir.deinit(alloc);
+    const plain_body = try buildRequestJson(alloc, "test-model", false, .{ .prompt_ir = &plain_ir, .tools = &.{} });
+    defer alloc.free(plain_body);
+    // Not merely "contains": the whole user message is the pre-image bytes, so
+    // the implicit prefix cache sees the same key material it always did.
+    try std.testing.expect(std.mem.indexOf(u8, plain_body, "{\"role\":\"user\",\"content\":\"hello\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plain_body, "image_url") == null);
+
+    var shot = L.init(alloc);
+    defer shot.deinit();
+    try shot.append(.{ .user_text = .{
+        .text = "what is this",
+        .images = &.{.{ .media_type = "image/png", .data = "iVBORw0=" }},
+    } });
+    const shot_ir = try prompt.project(alloc, shot.view());
+    defer shot_ir.deinit(alloc);
+    const shot_body = try buildRequestJson(alloc, "test-model", false, .{ .prompt_ir = &shot_ir, .tools = &.{} });
+    defer alloc.free(shot_body);
+    try std.testing.expect(std.mem.indexOf(u8, shot_body,
+        "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"what is this\"}," ++
+            "{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,iVBORw0=\"}}]}") != null);
+
+    // An image with nothing said about it writes no empty text part.
+    var bare = L.init(alloc);
+    defer bare.deinit();
+    try bare.append(.{ .user_text = .{ .text = "", .images = &.{.{ .media_type = "image/jpeg", .data = "/9j/" }} } });
+    const bare_ir = try prompt.project(alloc, bare.view());
+    defer bare_ir.deinit(alloc);
+    const bare_body = try buildRequestJson(alloc, "test-model", false, .{ .prompt_ir = &bare_ir, .tools = &.{} });
+    defer alloc.free(bare_body);
+    try std.testing.expect(std.mem.indexOf(u8, bare_body,
+        "{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/jpeg;base64,/9j/\"}}]}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bare_body, "\"type\":\"text\"") == null);
 }
