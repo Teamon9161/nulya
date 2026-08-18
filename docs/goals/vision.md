@@ -75,6 +75,10 @@
 - `src/providers/anthropic.zig` —— `writeMessage`（:284）与 `cacheableBlocks`（:371）这对必须同步的函数；`src/providers/openai.zig` `writeRoleContentMessage`（:226）；`src/providers/codex.zig` `writeMessageItem`（:400）；`src/providers/wire.zig`（共享件的家）。
 - `tests/e2e/session.zig` / `tests/e2e/support.zig` —— e2e 夹具与 scripted provider 用法；`tests/integration.zig`（`zig build integration` 的现有几条，DESIGN §13.2）。
 - DESIGN §3.1 / §3.4 / §9 / §11 / §13 / §14；CLAUDE.md 八条 physics。
+- **tcode 对照**（本机 `~/code/rust/tcode/crates/`，2026-08-18 核对；核心选择互相印证：catalog 的 `vision` 标注（`tcode-core/src/config.rs:68`）、用户图片 base64 内联进会话存储、魔数 sniff 不信扩展名、5 MB 上限，与本契约 D1/D2/D6 同构）。它多做的两块**都不进内核**，落地后各有归宿：
+  - **归一化管线**（`tcode-core/src/images.rs`）：长边 > 1568 等比缩放（Anthropic 文档的最优上限，省大量 token）、带透明重编 PNG / 不透明重编 JPEG q80、≤ 2 MB 且尺寸合规的原字节直通（保 freshness hash 语义）。需要 raster 编解码库，归 **TUI 图片粘贴里程碑**（前端在 `session append --image` 之前归一化）；照抄它的常量。
+  - **`view_image`**（`tcode-tools/src/view_image/mod.rs`）：模型要看盘上的图时，不进主 ledger——把图 + 问题发给 vision 模型做一次**隔离请求**，只有文本答案回来；纯文本主模型也因此能"看图"。在 nulya 里天然是一个 **extension**（一次性起一场 vision profile 的 session），内核零改动；是 §5"assistant / tool_results 图片另立项"的现成形状。
+  - 一处维持原判的分歧：tcode 靠重编码兜底收 gif / webp；nulya 无编解码库压不平 animated gif（openai 口有拒收边缘），v1 保持 png / jpeg，扩类型是一行 sniff 的事、等真实证据。
 
 ## 5. 不做（明确越界）
 
