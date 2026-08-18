@@ -199,7 +199,7 @@ fn writeMessages(alloc: std.mem.Allocator, jw: *std.json.Stringify, ir: *const p
         try writeRoleContentMessage(jw, "system", block.bytes);
     }
     for (ir.turns) |turn| switch (turn) {
-        .user_text => |text| try writeRoleContentMessage(jw, "user", text),
+        .user_text => |u| try writeRoleContentMessage(jw, "user", u.text),
         // One turn, one assistant message: text, this turn's reasoning and its
         // calls all belong to it.
         .assistant => |as| try writeAssistantMessage(alloc, jw, as),

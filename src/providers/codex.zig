@@ -362,7 +362,8 @@ fn writeInstructions(jw: *std.json.Stringify, alloc: std.mem.Allocator, blocks: 
 fn writeInput(jw: *std.json.Stringify, alloc: std.mem.Allocator, turns: []const prompt.Turn) !void {
     try jw.beginArray();
     for (turns) |turn| switch (turn) {
-        .user_text, .capability_note => |text| try writeMessageItem(jw, "user", "input_text", text),
+        .user_text => |u| try writeMessageItem(jw, "user", "input_text", u.text),
+        .capability_note => |text| try writeMessageItem(jw, "user", "input_text", text),
         .assistant => |as| {
             // The turn's `reasoning` items exactly as they came back — id,
             // summary and `encrypted_content` — placed before the output they

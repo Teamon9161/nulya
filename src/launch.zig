@@ -163,7 +163,7 @@ fn hasToolResult(turns: []const prompt.Turn) bool {
 /// property of the projection, exactly as it is for a real model.
 fn hasCarriedBrief(turns: []const prompt.Turn) bool {
     for (turns) |turn| switch (turn) {
-        .user_text => |text| if (std.mem.startsWith(u8, text, ScriptedProvider.summary_marker)) return true,
+        .user_text => |u| if (std.mem.startsWith(u8, u.text, ScriptedProvider.summary_marker)) return true,
         else => {},
     };
     return false;
@@ -801,7 +801,7 @@ test "the scripted handoff mode plays a two-phase goal: propose, then stop, then
     // Phase 1, first step: nothing in the transcript but the goal — propose the
     // handover, with a brief the real bundled tool would accept.
     {
-        const turn = try scriptedTurn(alloc, .handoff, &.{.{ .user_text = "reach the goal" }});
+        const turn = try scriptedTurn(alloc, .handoff, &.{.{ .user_text = .{ .text = "reach the goal" } }});
         defer turn.deinit(alloc);
         try std.testing.expectEqual(@as(usize, 1), turn.calls.len);
         try std.testing.expectEqualStrings("handoff", turn.calls[0].tool);
@@ -819,7 +819,7 @@ test "the scripted handoff mode plays a two-phase goal: propose, then stop, then
     {
         const results = [_]prompt.ToolResult{.{ .call_id = "h1", .ok = true, .output = "{}" }};
         const turn = try scriptedTurn(alloc, .handoff, &.{
-            .{ .user_text = "reach the goal" },
+            .{ .user_text = .{ .text = "reach the goal" } },
             .{ .tool_results = &results },
         });
         defer turn.deinit(alloc);
@@ -832,7 +832,7 @@ test "the scripted handoff mode plays a two-phase goal: propose, then stop, then
     // left to hand off — it answers and the goal is done.
     {
         const turn = try scriptedTurn(alloc, .handoff, &.{
-            .{ .user_text = ScriptedProvider.summary_marker ++ "\ncarry on" },
+            .{ .user_text = .{ .text = ScriptedProvider.summary_marker ++ "\ncarry on" } },
         });
         defer turn.deinit(alloc);
         try std.testing.expectEqual(@as(usize, 0), turn.calls.len);

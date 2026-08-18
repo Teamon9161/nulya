@@ -256,7 +256,12 @@ pub fn flattenIR(alloc: std.mem.Allocator, ir: prompt.PromptIR) ![]u8 {
     errdefer out.deinit();
     for (ir.system_blocks) |b| try out.writer.print("S|{s}\n", .{b.bytes});
     for (ir.turns) |turn| switch (turn) {
-        .user_text => |text| try out.writer.print("U|{s}\n", .{text}),
+        .user_text => |u| {
+            try out.writer.print("U|{s}\n", .{u.text});
+            // Images are model-visible, so two projections that differ only in
+            // them are NOT turn-identical.
+            for (u.images) |img| try out.writer.print("I|{s}|{s}\n", .{ img.media_type, img.data });
+        },
         .assistant => |as| {
             try out.writer.print("R|{s}\nA|{s}\n", .{ as.reasoning, as.text });
             for (as.calls) |c| try out.writer.print("C|{s}|{s}|{s}\n", .{ c.id, c.tool, c.args_json });

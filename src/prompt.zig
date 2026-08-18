@@ -46,7 +46,7 @@ pub const ToolResult = struct {
 /// §3.1, §3.4). They have no field in this type, so "not projected" is a fact of
 /// the type rather than a rule someone has to keep following.
 pub const Turn = union(enum) {
-    user_text: []const u8,
+    user_text: UserText,
     assistant: Assistant,
     /// One batch = one turn (DESIGN §0.2, §4); the provider decides how many
     /// wire messages that is.
@@ -56,6 +56,16 @@ pub const Turn = union(enum) {
     /// another appended turn, so it extends the stable prefix — the cache keeps
     /// hitting.
     capability_note: []const u8,
+
+    /// A user turn's model-visible content: its text and the images inlined
+    /// with it. Unlike `ToolCall` / `ToolResult`, this is not a narrowing of
+    /// what the ledger holds — every field of `ledger.UserText` is model-visible
+    /// — so the images are the LEDGER's slice, borrowed whole. Nothing to copy
+    /// means no per-projection storage for them, the way `calls` needs.
+    pub const UserText = struct {
+        text: []const u8,
+        images: []const ledger.Image = &.{},
+    };
 
     pub const Assistant = struct {
         /// The turn's opaque provider reasoning items (`ledger.Event.assistant
@@ -143,7 +153,7 @@ pub fn projectWithSystem(alloc: std.mem.Allocator, system_blocks: []const System
     var call_at: usize = 0;
     var result_at: usize = 0;
     for (events, turns) |event, *turn| switch (event) {
-        .user_text => |u| turn.* = .{ .user_text = u.text },
+        .user_text => |u| turn.* = .{ .user_text = .{ .text = u.text, .images = u.images } },
         .assistant => |as| {
             const calls = call_storage[call_at..][0..as.calls.len];
             call_at += calls.len;
@@ -184,7 +194,16 @@ pub fn isStablePrefix(prefix: []const Turn, full: []const Turn) bool {
 fn turnsEqual(a: Turn, b: Turn) bool {
     if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
     return switch (a) {
-        .user_text => |text| std.mem.eql(u8, text, b.user_text),
+                .user_text => |u| blk: {
+            const other = b.user_text;
+            if (!std.mem.eql(u8, u.text, other.text)) break :blk false;
+            if (u.images.len != other.images.len) break :blk false;
+            for (u.images, other.images) |x, y| {
+                if (!std.mem.eql(u8, x.media_type, y.media_type)) break :blk false;
+                if (!std.mem.eql(u8, x.data, y.data)) break :blk false;
+            }
+            break :blk true;
+        },
         .capability_note => |text| std.mem.eql(u8, text, b.capability_note),
         .assistant => |as| blk: {
             const other = b.assistant;
@@ -244,11 +263,11 @@ test "assistant reasoning rides on its own turn, ahead of that turn's text and c
     defer p.deinit(alloc);
 
     try std.testing.expectEqual(@as(usize, 4), p.turns.len);
-    try std.testing.expectEqualStrings("hi", p.turns[0].user_text);
+    try std.testing.expectEqualStrings("hi", p.turns[0].user_text.text);
     // No reasoning on the turn → the empty string, never a separate turn.
     try std.testing.expectEqualStrings("", p.turns[1].assistant.reasoning);
     try std.testing.expectEqualStrings("plain", p.turns[1].assistant.text);
-    try std.testing.expectEqualStrings("go", p.turns[2].user_text);
+    try std.testing.expectEqualStrings("go", p.turns[2].user_text.text);
     // With reasoning: verbatim bytes on the same turn as the text and calls it
     // came with, which is the order every wire replays them in.
     const last = p.turns[3].assistant;
@@ -338,6 +357,55 @@ test "a truncated turn's torn arguments are replayable in the projection; the le
     const q = try project(alloc, whole.view());
     defer q.deinit(alloc);
     try std.testing.expectEqualStrings("{\"path\":\"a.t", q.turns[0].assistant.calls[0].args_json);
+}
+
+test "a user turn's images are projected, and a turn carrying them still extends the prefix" {
+    const alloc = std.testing.allocator;
+    var l = ledger.Ledger.init(alloc);
+    defer l.deinit();
+
+    try l.append(.{ .user_text = .{
+        .text = "what is this",
+        .images = &.{.{ .media_type = "image/png", .data = "iVBORw0=" }},
+    } });
+    const before = try project(alloc, l.view());
+    defer before.deinit(alloc);
+
+    // Model-visible, so unlike `usage` it HAS a field here — and it is the
+    // ledger's own bytes, not a copy.
+    const shot = before.turns[0].user_text;
+    try std.testing.expectEqualStrings("what is this", shot.text);
+    try std.testing.expectEqual(@as(usize, 1), shot.images.len);
+    try std.testing.expectEqualStrings("image/png", shot.images[0].media_type);
+    try std.testing.expectEqualStrings("iVBORw0=", shot.images[0].data);
+    try std.testing.expectEqual(l.view()[0].user_text.images.ptr, shot.images.ptr);
+
+    // Appending after an image turn leaves the image turn where it was: the
+    // cached prefix survives a screenshot exactly as it survives text.
+    try l.append(.{ .assistant = .{ .text = "a diagram", .calls = &.{} } });
+    const after = try project(alloc, l.view());
+    defer after.deinit(alloc);
+    try std.testing.expect(isStablePrefix(before.turns, after.turns));
+
+    // …and the comparison really looks at the images: the same text with a
+    // different picture is a different turn, not a prefix.
+    var other = ledger.Ledger.init(alloc);
+    defer other.deinit();
+    try other.append(.{ .user_text = .{
+        .text = "what is this",
+        .images = &.{.{ .media_type = "image/png", .data = "OTHER===" }},
+    } });
+    const q = try project(alloc, other.view());
+    defer q.deinit(alloc);
+    try std.testing.expect(!isStablePrefix(q.turns, after.turns));
+
+    // Dropping the image is likewise a different turn.
+    var plain = ledger.Ledger.init(alloc);
+    defer plain.deinit();
+    try plain.append(.{ .user_text = .{ .text = "what is this" } });
+    const r = try project(alloc, plain.view());
+    defer r.deinit(alloc);
+    try std.testing.expect(!isStablePrefix(r.turns, after.turns));
 }
 
 test "a capability_note appends a capability_note turn without breaking the prefix or generation" {

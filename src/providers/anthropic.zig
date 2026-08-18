@@ -296,7 +296,8 @@ fn writeMessage(jw: *std.json.Stringify, alloc: std.mem.Allocator, role: Role, r
     try jw.objectField("content");
     try jw.beginArray();
     for (run) |turn| switch (turn) {
-        .user_text, .capability_note => |text| try writeTextBlock(jw, text, takes(breakpoint, &seen)),
+        .user_text => |u| try writeTextBlock(jw, u.text, takes(breakpoint, &seen)),
+        .capability_note => |text| try writeTextBlock(jw, text, takes(breakpoint, &seen)),
         .assistant => |as| {
             // The turn's `thinking` / `redacted_thinking` blocks, exactly as this
             // API streamed them (signature included). They must lead the
