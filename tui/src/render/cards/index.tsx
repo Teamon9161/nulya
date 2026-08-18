@@ -2,6 +2,8 @@ import { Match, Switch } from "solid-js"
 import { UserTurn } from "./UserTurn.tsx"
 import { CompactionCard } from "./CompactionCard.tsx"
 import { compactionMarker } from "../../compact.ts"
+import { SkillEchoCard } from "./SkillEchoCard.tsx"
+import { skillEchoOf } from "../../skills.ts"
 import { AssistantTurn } from "./AssistantTurn.tsx"
 import { Thinking } from "./Thinking.tsx"
 import { ToolCard } from "./ToolCard.tsx"
@@ -22,6 +24,14 @@ export function Card(props: { item: TranscriptItem }) {
         <CompactionCard
           item={props.item as Extract<TranscriptItem, { kind: "user" }>}
           role={compactionMarker(props.item)!}
+        />
+      </Match>
+      {/* A `/name` that loaded a skill: also an ordinary user turn, folded back
+          down from its sentinel alone (`skills.ts`). */}
+      <Match when={skillEchoOf(props.item) !== null}>
+        <SkillEchoCard
+          item={props.item as Extract<TranscriptItem, { kind: "user" }>}
+          echo={skillEchoOf(props.item)!}
         />
       </Match>
       <Match when={props.item.kind === "user"}>

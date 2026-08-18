@@ -39,8 +39,14 @@ export function describeAttachment(attachment: PasteAttachment): string {
   return `${placeholderFor(attachment.id)} · ${attachment.chars} chars · ${attachment.lines} lines`
 }
 
+/**
+ * Characters and lines of a paste. Characters, not UTF-16 units, so a paste of
+ * emoji is not counted double; lines the way Rust's `str::lines()` counts them
+ * (tcode's measurement), so a trailing newline does not add a phantom line.
+ */
 export function measure(text: string): { chars: number; lines: number } {
-  return { chars: [...text].length, lines: Math.max(1, text.split("\n").length) }
+  const body = text.replace(/\n$/, "")
+  return { chars: [...text].length, lines: Math.max(1, body.length === 0 ? 0 : body.split("\n").length) }
 }
 
 /**

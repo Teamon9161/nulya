@@ -579,6 +579,42 @@ export async function extList(ws: Workspace): Promise<ExtStoreEntry[]> {
   return entries
 }
 
+/** One row of `nulya skill list` (TSV): a frozen skill in the active catalog. */
+export interface SkillEntry {
+  /** `ext:<id>@<version>/<name>` — the frozen ref `skill load` takes. */
+  ref: string
+  name: string
+  description: string
+}
+
+/**
+ * `nulya skill list` — the skills contributed by the extensions ACTIVE across
+ * the store roots (DESIGN §14). Not this session's catalog: composition froze
+ * at `session new`, and what a `/name` typed now becomes is a turn in whatever
+ * session it lands in, so the store's answer is the right one.
+ */
+export async function skillList(ws: Workspace): Promise<SkillEntry[]> {
+  const result = await run(ws, ["skill", "list"])
+  if (result.code !== 0) fail("skill list failed", result)
+  const entries: SkillEntry[] = []
+  for (const line of result.stdout.split("\n")) {
+    const fields = line.trimEnd().split("\t")
+    if (fields.length < 3) continue // "no skills", a blank tail
+    const [ref, name, description] = fields as [string, string, string]
+    entries.push({ ref, name, description })
+  }
+  return entries
+}
+
+/** `nulya skill load <ref>` — the frozen `SKILL.md` body behind a frozen ref. */
+export async function skillLoad(ws: Workspace, ref: string): Promise<string> {
+  const result = await run(ws, ["skill", "load", ref])
+  // The kernel reports a failed load on stdout with exit 1, so the code is the
+  // test and its own sentence is the message.
+  if (result.code !== 0) fail("skill load failed", result)
+  return result.stdout.replace(/\n$/, "")
+}
+
 /**
  * Appends in flight, per session. Two `session append` processes running at
  * once have no defined order in the inbox — the one that happens to finish

@@ -5,9 +5,16 @@
  * lists them; all three read this table, so a command cannot exist without
  * being discoverable, and the help cannot describe one that is gone.
  *
- * Anything typed after `/` that is not here goes to the model verbatim — nulya
- * has no slash skills, and pretending otherwise would put intelligence in the
- * front end.
+ * Anything typed after `/` that is not here is offered to the skill catalog
+ * next (`skills.ts`), and only then goes to the model verbatim. A `/name` that
+ * names a skill loads that skill's body as a user turn — the same thing the
+ * model can already do with `nulya skill load`, one round trip cheaper, with a
+ * person as the one who decided. That is prompt sugar, not front-end
+ * intelligence: nothing here chooses a skill, rewrites one, or triggers one on
+ * its own (goals/tui-panel.md D8; this table's earlier "nulya has no slash
+ * skills" mistook "who triggers" for "who judges").
+ *
+ * The built-ins are tried first, so a skill can never take `/model` away.
  */
 export interface Command {
   name: string

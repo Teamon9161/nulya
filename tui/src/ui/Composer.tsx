@@ -21,6 +21,7 @@ import {
   referenced,
   type PasteAttachment,
 } from "../paste.ts"
+import { skillCompletions, type SkillTable } from "../skills.ts"
 
 /**
  * The composer. Enter sends, Shift+Enter (or Ctrl+J, for terminals without the
@@ -57,6 +58,8 @@ export function Composer(props: {
   placeholder?: string
   /** The workspace's paths, for `@` completion. Absent means no `@` menu. */
   references?: ProjectIndex
+  /** The skill catalog, listed after the built-in commands. */
+  skills?: SkillTable
   onReady?: (api: ComposerApi) => void
 }) {
   const style = useStyle()
@@ -73,7 +76,14 @@ export function Composer(props: {
   const [line, setLine] = createSignal("")
   const [at, setAt] = createSignal(0)
   const [pick, setPick] = createSignal(0)
-  const matches = () => completions(line())
+  /**
+   * Built-in commands first, then skills (tui.md §11, T15) — the same order
+   * dispatch uses, so what the menu offers first is what Enter would run.
+   */
+  const matches = (): { name: string; args?: string; what: string }[] => [
+    ...completions(line()),
+    ...skillCompletions(props.skills?.entries() ?? [], line()),
+  ]
 
   /**
    * Folded pastes, by the number in their placeholder (tui.md §11, T14).

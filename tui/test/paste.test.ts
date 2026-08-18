@@ -44,7 +44,7 @@ test("the placeholder stands for the text, and submitting puts it back", () => {
   const one = attachment(1, "line\n".repeat(40))
   const two = attachment(2, "x".repeat(2000))
   expect(placeholderFor(1)).toBe("[Pasted text #1]")
-  expect(describeAttachment(one)).toBe("[Pasted text #1] · 200 chars · 41 lines")
+  expect(describeAttachment(one)).toBe("[Pasted text #1] · 200 chars · 40 lines")
 
   const draft = "look at [Pasted text #1] and then [Pasted text #2] please"
   const sent = expandPastes(draft, [one, two])

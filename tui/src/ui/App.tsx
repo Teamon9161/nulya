@@ -19,6 +19,7 @@ import { createTabStore, type SessionTab } from "../state/tabs.ts"
 import { loadTuiState, rememberModel, sessionPins, type ModelPick } from "../state/tui_state.ts"
 import { sessions_dir } from "../nulya/files.ts"
 import { createProjectIndex } from "../references.ts"
+import { createSkillTable, skillTurn } from "../skills.ts"
 import { describeTool } from "../render/registry.ts"
 import { extSync, isVerdict, sessionNew, sessionOutcome, verdicts, type ModelView as ModelParams } from "../nulya/cli.ts"
 import { planStore, summarize } from "../extensions.ts"
@@ -96,6 +97,12 @@ export function App(props: AppProps) {
   // finishes shows nothing and the next one shows everything, which beats a
   // composer that stops accepting characters while git walks a monorepo.
   const references = createProjectIndex(props.ws.dir)
+  /**
+   * The skill catalog behind `/name` (tui.md §11, T15). It goes stale exactly
+   * when an extension is activated or deactivated, which is why `/ext` hands
+   * back `invalidate` rather than this polling for it.
+   */
+  const skills = createSkillTable(props.ws)
 
   const [notice, setNotice] = createSignal<string | null>(null)
   const [guide, setGuide] = createSignal<string | null>(props.guide ?? null)
@@ -527,13 +534,33 @@ export function App(props: AppProps) {
       openOverlay("usage")
       return true
     }
-    // Unknown slash commands are the model's business, not ours (tui.md §4.4).
+    // Not a built-in: the skill catalog gets it next, and only then the model.
     return false
+  }
+
+  /**
+   * `/name args` that no built-in claimed. If a skill has that name, its body
+   * becomes an ordinary user turn wrapped in the echo sentinel (`skills.ts`);
+   * otherwise the line goes to the model exactly as typed, which is what it has
+   * always done.
+   *
+   * Asynchronous, so this is the one dispatch that cannot answer synchronously:
+   * the send happens after `skill load` returns, and a failure to load says so
+   * instead of quietly sending `/name` as prose.
+   */
+  const submitSlash = async (text: string) => {
+    try {
+      const turn = await skillTurn(props.ws, skills.entries(), text)
+      await tab().attach.send(turn ?? text)
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error))
+    }
   }
 
   const submit = (text: string) => {
     setNotice(null)
     if (runCommand(text)) return
+    if (text.startsWith("/")) return void submitSlash(text)
     void tab().attach.send(text)
   }
 
@@ -701,6 +728,7 @@ export function App(props: AppProps) {
                       header={snapshot().header}
                       sessionFile={`${sessions_dir}/${tab().id}.jsonl`}
                       statePath={props.statePath}
+                      onMembershipChanged={skills.invalidate}
                       onClose={closeOverlay}
                     />
                   </Match>
@@ -730,6 +758,7 @@ export function App(props: AppProps) {
                   onSubmit={submit}
                   onEmptySubmit={takeOverIfOffered}
                   references={references}
+                  skills={skills}
                   onReady={(api) => {
                     composer = api
                     // The picker may already be up (`guide`): it owns the keys.

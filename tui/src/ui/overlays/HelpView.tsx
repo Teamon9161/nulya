@@ -101,7 +101,8 @@ export function HelpView(props: { keys: Keymap; onClose: () => void }) {
         <For each={commands}>
           {(command) => <Row left={`${command.name}${command.args ? ` ${command.args}` : ""}`} right={command.what} />}
         </For>
-        <Row left="anything else after /" right="goes to the model verbatim — nulya has no slash skills" />
+        <Row left="/<skill> [args]" right="load an active skill's body as a user turn · `nulya skill list` names them" />
+        <Row left="anything else after /" right="goes to the model verbatim" />
         <box height={1} />
 
         <text fg={style.theme.dim}>

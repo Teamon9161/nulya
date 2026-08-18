@@ -22,6 +22,7 @@ import { default_settings, loadSettings } from "../src/state/settings.ts"
 import type { SessionHeader } from "../src/nulya/ledger.ts"
 import { sessionAppend, sessionEvents, sessionNew, sessionStep } from "../src/nulya/cli.ts"
 import { scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
+import { wrapSkillEcho } from "../src/skills.ts"
 
 const style: Style = createStyle(default_settings, {})
 const narrow: Style = createStyle({ ...default_settings, transcript: { ...default_settings.transcript, max_width: 40 } }, {})
@@ -200,6 +201,23 @@ test("user and assistant turns", async () => {
   expect(frame).toContain("› make emit budgets configurable")
   expect(frame).toContain("● Reading")
   expect(frame).toContain("· queued")
+  expect(frame).toMatchSnapshot()
+})
+
+test("a skill echo folds back to the `/name args` that was typed", async () => {
+  // What lands in the ledger is the whole body, wrapped; what the transcript
+  // shows is the line the person typed. Both readings come from the same bytes,
+  // which is why replay and live agree without either being told.
+  const item: TranscriptItem = {
+    kind: "user",
+    key: "skill-1",
+    seq: 4,
+    queued: false,
+    text: wrapSkillEcho("guide", "how do extensions work", "First.\nSecond.\nThird."),
+  }
+  const frame = await frameOf([item])
+  expect(frame).toContain("/guide how do extensions work · 3 lines")
+  expect(frame).not.toContain("Second.")
   expect(frame).toMatchSnapshot()
 })
 

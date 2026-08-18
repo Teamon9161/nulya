@@ -48,12 +48,12 @@ exports[`/help lists the bindings that are actually in force 1`] = `
  /fold                           collapse every card                                                
  /help                           every key and every command                                        
  /quit                           leave                                                              
- anything else after /           goes to the model verbatim — nulya has no slash skills             
+ /<skill> [args]                 load an active skill's body as a user turn · \`nulya skill list\`    
+                                 names them                                                         
+ anything else after /           goes to the model verbatim                                         
                                                                                                     
  a session has one writer · when somebody else holds it this window follows as an observer and can  
  still queue a turn                                                                                 
-                                                                                                    
-                                                                                                    
                                                                                                     
                                                                                                     
                                                                                                     

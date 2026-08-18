@@ -174,7 +174,9 @@ tui/
 
 - `Enter` 发送；`Shift+Enter` / `Ctrl+J` 换行；`↑` 空 composer 时翻历史；粘贴多行原样。
 - 发送时若 `stepping`：只 append（queued）；不打断。
-- `/` 开头弹一个小补全：`/model` `/effort <level|auto>` `/new [--profile p] [--model id]` `/sessions` `/ext` `/skills` `/usage` `/compact [focus]` `/cancel` `/fold` `/settings` `/help` `/quit`。未知 `/xxx` 原样发给模型（nulya 没有 skill slash；skill 由模型 `nulya skill load`）。
+- `/` 开头弹一个小补全：内建命令（`/model` `/effort <level|auto>` `/new [--profile p] [--model id]` `/sessions` `/ext` `/usage` `/compact [focus]` `/outcome` `/evolve` `/mode` `/cancel` `/fold` `/settings` `/help` `/quit`）在前，**activate 了的 skill 在后**（`nulya skill list`，描述截 100 字符）。分发同序：内建 → skill → 原样发给模型。`/<skill> [args]` = `nulya skill load <ref>` 拿到 body、包一层 sentinel 后作为**普通 user turn** append（T15；旧文本写的"nulya 没有 skill slash"已翻案——它把"谁触发"误当成了"谁判断"，理由见 goals/tui-panel.md D8）。
+- `@` 开头（前一字符非字母数字下划线）弹文件补全：`↑↓` 选、`Tab` 上屏成 `@path`；已知引用在输入框里 accent。**上屏的是路径，不是文件内容**（T13）。
+- 粘贴：> 1000 字符或 > 15 行折叠成 `[Pasted text #N]`，提交时展开回原文；`Backspace` 落在占位尾部整条删掉（T14）。
 - 全局：`Esc` cancel（stepping 时）/ browse 模式；`Ctrl+C` 两下退出（stepping 时第一下先 kill）；`Ctrl+L` 重绘；`F2` `/ext`；`F3` `/sessions`；`F4` 下一个 tab；`Ctrl+W` 关掉当前 tab（最后一个不关）。
 - observer 时空 composer 上的 `Enter` = take over（§5.6）；browse 模式里选中的卡若指名了一个 session，`Enter` 打开它成第二个 tab，`Space` 永远是折叠。
 
@@ -303,6 +305,7 @@ fold   = "ctrl+o"
 | ~~**T12 · `/ext` 的 pin 面板**~~ ✅ | `/ext` 第四个 pane **tools**：每个 tool 一行、三态 `always`（user config `registry.pinned_native_tools`，managed 只替换那一行、保注释、写后重读校验）/ `this TUI`（`tui-state.json` 的 `session_pins` → 每场 `session new` 自动 `--pin`）/ off，project/system 层写的 pin 只读显示；配额行 `tools 2+N/8`；`Space` toggle（id 行 = 整包）、`A` 升格、`d` = `ext deactivate`；`ext activate` 带 `NULYA_SESSION` 让内核投 capability_note。**内核零改动**（契约 [goals/tui-panel.md](goals/tui-panel.md)） | `bun test` 126 pass（新增 `pins.test.ts` 8 条 + `/ext` tools pane 一条交互）；面板里 `Space` 打开一个 tool → `session new` 的 header `native_tools` 里就有它，关掉就没有 |
 | ~~**T13 · composer 的 `@` 文件补全**~~ ✅ | 触发边界 / token 字符表 / 评分（basename 前缀 0 < path 前缀 1 < 子序列 10+gaps，根文件优先）/ 菜单标签规则全部逐条移植自 tcode `composer.rs`；索引 = `git ls-files --cached --others --exclude-standard`（非 git 退化成带 prune 表的小 walk），上限 20000，后台建、30s 陈旧后台刷；`↑↓` 选、`Tab` 上屏成 `@path`，已知引用在输入框里 accent。**提交时 `@path` 原文进 ledger，不注入文件内容**（契约 D5）。**内核零改动** | `bun test` 135 pass（新增 `references.test.ts` 8 条，其中四条与 tcode 的测试逐条同形 + `composer.test.tsx` 一条交互）；本仓库上 `@comp` 补出 `@src/composition.zig`，`node_modules` 一条不漏进来 |
 | ~~**T14 · 长文本粘贴折叠**~~ ✅ | OpenTUI 的 bracketed paste 事件（`onPaste` + `PasteEvent.preventDefault()`）是现成的；阈值照 tcode（> 1000 字符或 > 15 行）→ 折叠成 `[Pasted text #N]` 占位（accent 高亮、下面一行说明它装了多少、`Backspace` 整体删除），提交时展开回原文。短粘贴一字未变。**图片不做**（内核 vision track，契约 D7）。**内核零改动** | `bun test` 140 pass（新增 `paste.test.ts` 4 条 + `composer.test.tsx` 一条走真 bracketed paste 的往返）|
+| ~~**T15 · skill 作为 slash command**~~ ✅ | `/` 补全内建命令在前、`nulya skill list` 的 skill 在后（描述截 100 字符）；分发同序，`/xyz` 命中 skill → `skill load <ref>` 拿 body、包 tcode 的 `<user-skill …>` sentinel 后作为**普通 user turn** append，未命中原样发给模型；transcript 靠同一个 `parseSkillEcho` 把它折成 `/name args · N lines`（live 与回放共用）；`/ext` 的 activate/rollback/deactivate 让 skill 表失效重取。翻案了 `commands.ts` 头注释与 §4.4 的"nulya 没有 skill slash"（契约 D8）。**内核零改动** | `bun test` 146 pass（新增 `skills.test.ts` 5 条——含 tcode 两条 sentinel 测试同形与一条真二进制闭环——加 `render.test.tsx` 一条折叠快照）；把仓库的 `extensions/guide` 装进一个 store 后 `/g` 补出 `/guide`、`/guide <args>` 变成一条 226 行的 user turn、transcript 折成一行 |
 | **T10 · `/goal`（占位，未开工）** | spawn 随仓库带的 driver 脚本（`win32` → `powershell -NoProfile -ExecutionPolicy Bypass -File drivers/goal.ps1`，否则 `sh drivers/goal.sh`），把它的 **stderr 喂给已有的 `--stream` 解析器**（token delta / tool begin-end / usage 全在里面），把它的 **stdout 当控制通道**：`session <id>` 开 tab、`handoff <old> -> <new>` 换 tab（原 tab 留着可回看）、`done <id>` 收尾并提示 `/outcome`。跟随中的 tab 是 **observer**（driver 持着写者 lease）。**内核零改动**，也不需要 §10.4 的 `<id>.live` sidecar | 起一个两阶段目标：token 实时可见；handoff 时自动切到子 session；`Esc` 停得下来（`session cancel` 或杀脚本）|
 
 顺序 T0 → T1 → T2 → T3 → T4；**T1 结束就开始用它 dogfood**，T2 起的优先级由用出来的痛点重排（T5–T8 就是这么来的）。
@@ -982,3 +985,15 @@ cd tui && bun test test/compact.test.ts
 5. **图片整体不做**（契约 D7 / §5）：ledger 没有图片内容块，三个 provider 的序列化也没有；先造"看不见图"的占位再返工不值。剪贴板探测与 `[Image #N]` 的形状等 vision 内核面落地后照抄 tcode `input.rs`。
 
 **已知**：Linux 上的真终端手测未做（自动化已覆盖同一条 bracketed paste 路径，`pasteBracketedText` 与终端送出的字节序列是同一份解析）。
+
+### T15 · skill 作为 slash command（2026-08-18）
+
+**翻案的那句话**：`commands.ts` 的头注释与 §4.4 原本写着"nulya 没有 skill slash；skill 由模型 `nulya skill load`——否则就是把智能放进前端"。这句判断把**谁触发**误当成了**谁判断**。skill 本来就是渐进披露的 prompt，内核给了 `skill list` / `skill load` 两个只读面，模型经 `shell` 走的就是这条路；`/name` 只是把触发者换成人，省掉那一轮往返。前端**不选择、不改写、不自动触发**任何 skill——这条没变，变的只是承认"人也可以触发"（契约 D8）。两处旧文本本轮都改了。
+
+1. **顺序就是优先级。** 补全：内建命令在前、skill 在后；分发同序（内建 → skill → 原样发给模型）。所以装一个包**永远拿不走** `/model`；一个叫 `model` 的 skill 会出现在菜单第二行，但 Enter 走的是内建那条。
+2. **sentinel 照抄 tcode 的 `wrap_skill_echo`**（`<user-skill name="…" args="…">\n<body>\n</user-skill>`，属性 `&`/`"` 转义）。它挣了两次位置：① transcript 只凭**ledger 文本**就能把这一条折回 `/name args · N lines`——live 与回放调的是同一个 `parseSkillEcho`，格式只有一处知道；② 它说明 body 是"穿着 user message 衣服的仓库文件"。今天 nulya 没有任何东西读这个区分，但这条 turn 是永久的（physics #1），事后再加标记够不着已经写下去的那些。行数按 Rust `str::lines()` 的算法（末尾换行结束最后一行，而不是开一个空行）——`paste.ts` 的行计数同步对齐了。
+3. **它就是一条普通 user turn。** 走 `session append`，内核对"skill turn"一无所知也不会有；卡片是**对内容的读法**，与 compaction 那两条一个路子（`skillEchoOf` 之于 `compactionMarker`）。默认折叠：人做的事是打了 `/name args`，那两百行是真的、永久的、一个键就能展开的，但不是发生的那件事。
+4. **缓存什么时候失效有唯一答案。** `nulya skill list` 列的是**activate 了的** extension 的 catalog，所以只有 activate / rollback / deactivate 能改变它——`/ext` 确认执行后回调 `invalidate()`，而不是这边轮询。pin 不触发（那是另一根轴）；开新场、跑一步都不触发。
+5. **测试**：`skills.test.ts` 5 条——tcode 的两条 sentinel 测试逐条同形（特殊字符 round-trip、普通文本不误判）、内建优先、`/name args` 的切分、以及**真二进制闭环**（真的 draft → `ext sync --activate` → `skill list` 的 TSV 与 ref 形状 → `skill load` 的字节 → 包好的 turn 里有 body、折叠成一行、未命中返回 null）。`render.test.tsx` 加一条折叠快照。
+
+**已知 / 没做**：skill echo 卡片不进 browse 模式的可选列表（`foldable()` 只收 tool / thinking，CompactionCard 同样如此——鼠标点头行仍能折叠）；per-project 的 slash alias、前端自动触发 skill 都在契约 §5 的"不做"里。

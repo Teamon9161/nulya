@@ -135,6 +135,12 @@ export function ExtView(props: {
   sessionFile?: string
   /** Where `session_pins` is remembered; tests point it elsewhere. */
   statePath?: string
+  /**
+   * An activate / rollback / deactivate landed: what the skill catalog holds
+   * may have changed (`nulya skill list` lists ACTIVE extensions), and the
+   * `/name` menu reads that. Pins never fire it — they are the other axis.
+   */
+  onMembershipChanged?: () => void
   onClose: () => void
 }) {
   const style = useStyle()
@@ -354,6 +360,7 @@ export function ExtView(props: {
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error))
     }
+    if (pending.kind !== "prune") props.onMembershipChanged?.()
     await refresh()
   }
 

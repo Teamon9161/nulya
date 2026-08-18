@@ -355,3 +355,31 @@ exports[`ascii mode degrades every glyph 1`] = `
                                                                             
 "
 `;
+
+exports[`a skill echo folds back to the \`/name args\` that was typed 1`] = `
+"  › /guide how do extensions work · 3 lines                          ▸ skill
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+"
+`;
