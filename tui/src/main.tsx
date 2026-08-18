@@ -20,8 +20,8 @@ import { planLaunch } from "./launch.ts"
 import {
   answerFor,
   applyAnswer,
+  inventory,
   planProjectStore,
-  planStore,
   promptText,
   storeTrusted,
   summarize,
@@ -111,7 +111,23 @@ async function main() {
       process.stderr.write(`${plan.refuse}\n`)
       process.exit(1)
     }
-    id = await sessionNew(ws, plan.pick ? { profile: plan.pick.profile, model: plan.pick.model } : {})
+    // A refusal here is an answer, not a crash: the commonest one is the store
+    // gate — a checkout whose extensions nobody has vouched for, possibly the
+    // question just declined above. It deserves the kernel's sentence, not a
+    // stack trace through the spawn helper.
+    try {
+      id = await sessionNew(ws, plan.pick ? { profile: plan.pick.profile, model: plan.pick.model } : {})
+    } catch (error) {
+      // The kernel's refusal is several lines; only its first reaches here, and
+      // it is the one that names the store. A dangling ":" from the list header
+      // it introduced is noise once the list is not coming.
+      const message = (error instanceof Error ? error.message : String(error)).replace(/:\s*$/, "")
+      process.stderr.write(`${message}\n`)
+      if (message.includes("not trusted")) {
+        process.stderr.write("look with `nulya ext list`, then `nulya ext trust` to allow it\n")
+      }
+      process.exit(1)
+    }
     effort = plan.pick?.effort
     guide = plan.guide
   }
@@ -157,7 +173,7 @@ async function askAboutProjectStore(ws: Workspace): Promise<"none" | "ready" | "
   const store = workspaceStorePath(ws)
   let plan
   try {
-    plan = planProjectStore(store, await planStore(ws, false), storeTrusted(store), loadTuiState().asked_stores ?? [])
+    plan = planProjectStore(store, await inventory(ws, false), storeTrusted(store), loadTuiState().asked_stores ?? [])
   } catch {
     return "none" // no store, no binary answer — the session's own gate still speaks
   }

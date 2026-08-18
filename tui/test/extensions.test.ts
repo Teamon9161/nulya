@@ -130,12 +130,16 @@ function report(lines: string[]): SyncReport {
   return parseSyncReport(lines.join("\n"))
 }
 
+function inventoryOf(lines: string[], holds: string[] = []) {
+  return { drafts: report(lines), holds }
+}
+
 test("a project store is asked about once, and only when it holds something", () => {
   const store = "/repo/.nulya/extensions"
-  const drafts = report(["a.mode: v-a1 not built", "b.mode: v-b1 already built"])
+  const drafts = inventoryOf(["a.mode: v-a1 not built", "b.mode: v-b1 already built"])
 
   // Nothing there: no question, nothing to install.
-  expect(planProjectStore(store, report([]), false, []).kind).toBe("none")
+  expect(planProjectStore(store, inventoryOf([]), false, []).kind).toBe("none")
   // Trusted already: build it, no question.
   expect(planProjectStore(store, drafts, true, []).kind).toBe("ready")
   // Untrusted: ask — once. Declining is remembered, not repeated.
@@ -151,6 +155,20 @@ test("a project store is asked about once, and only when it holds something", ()
   expect(text).toContain("(s)")
   expect(text).toContain("(n)")
   expect(describeDrafts(drafts)[0]).toContain("not built")
+})
+
+test("a checkout that ships BUILT versions and no source is the case the question exists for", () => {
+  const store = "/repo/.nulya/extensions"
+  const shipped = inventoryOf([], ["compact", "handoff"])
+  const ask = planProjectStore(store, shipped, false, [])
+  expect(ask.kind).toBe("ask")
+  if (ask.kind !== "ask") throw new Error("unreachable")
+  // Named, because a person deciding whether to trust a store has to see what
+  // is in it — and these have no draft line to appear on.
+  expect(ask.drafts.join(" ")).toContain("compact")
+  expect(ask.drafts.join(" ")).toContain("already built here")
+  // Trusted, it is simply usable; nothing needs building.
+  expect(planProjectStore(store, shipped, true, []).kind).toBe("ready")
 })
 
 test("the three keys map to what actually runs, and anything else installs nothing", () => {

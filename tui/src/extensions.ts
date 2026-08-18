@@ -19,7 +19,7 @@
  */
 import { existsSync, readFileSync, realpathSync } from "node:fs"
 import { join } from "node:path"
-import { extSync, extTrust, type SyncLine, type SyncReport } from "./nulya/cli.ts"
+import { extList, extSync, extTrust, type SyncLine, type SyncReport } from "./nulya/cli.ts"
 import { userConfigDir } from "./state/settings.ts"
 import type { Workspace } from "./nulya/bin.ts"
 
@@ -95,15 +95,43 @@ function samePath(a: string, b: string): boolean {
   return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right
 }
 
-/** One line per draft, for the prompt: `id v-… not built` / `id needs zig`. */
-export function describeDrafts(report: SyncReport): string[] {
-  return report.lines.map((line) => {
+/**
+ * What a store root has in it, in the two forms that matter: source waiting to
+ * be built, and versions already there.
+ *
+ * The second is the one the trust gate is about (DESIGN §9) — a checkout that
+ * ships BUILT extensions is what the kernel refuses to compose until somebody
+ * has looked. Both come from the kernel's own commands rather than a directory
+ * walk here: `ext sync --dry-run` decides what a draft is, `ext list` decides
+ * what "holding" means.
+ */
+export interface StoreInventory {
+  drafts: SyncReport
+  holds: string[]
+}
+
+const workspace_root_spec = ".nulya/extensions"
+
+export async function inventory(ws: Workspace, user: boolean): Promise<StoreInventory> {
+  const [drafts, listed] = await Promise.all([planStore(ws, user), user ? Promise.resolve([]) : extList(ws)])
+  const root = user ? "" : workspace_root_spec
+  return { drafts, holds: listed.filter((entry) => entry.root === root).map((entry) => entry.id) }
+}
+
+/** One line per thing the store holds, for the prompt. */
+export function describeDrafts(store: StoreInventory): string[] {
+  const lines = store.drafts.lines.map((line) => {
     if (line.state === "failed") return `${line.id} · does not build (${line.detail ?? "?"})`
     if (line.state === "needs zig") return `${line.id} · needs a toolchain`
     if (line.state === "already built") return `${line.id} · ${line.version} built`
     if (line.copiedFrom) return `${line.id} · ${line.version} ready to copy`
     return `${line.id} · ${line.version ?? "?"} not built yet`
   })
+  const drafted = new Set(store.drafts.lines.map((line) => line.id))
+  for (const id of store.holds) {
+    if (!drafted.has(id)) lines.push(`${id} · already built here, no source`)
+  }
+  return lines
 }
 
 /** The one-line summary a finished pass leaves behind. */
@@ -133,34 +161,35 @@ export interface ProjectStoreAsk {
   kind: "ask"
   store: string
   drafts: string[]
-  report: SyncReport
 }
 
 export interface ProjectStoreReady {
   kind: "ready"
   store: string
-  report: SyncReport
 }
 
 export type ProjectStorePlan = ProjectStoreDecision | ProjectStoreAsk | ProjectStoreReady
 
 /**
- * What to do about the workspace store, from a plan of its drafts and whether
- * this machine trusts it. Pure, so the decision is testable without a store:
- * no drafts means there is nothing to install and nothing to ask; a trusted
- * store may simply be built; an untrusted one is asked about unless the
- * question has already been put once.
+ * What to do about the workspace store, from what it holds and whether this
+ * machine trusts it. Pure, so the decision is readable without a filesystem.
+ *
+ * An empty store is nothing at all — no question, nothing to install. Anything
+ * else needs trust before it can take part in a session, so an untrusted one is
+ * asked about, once; a trusted one is simply built. Note that BOTH halves of
+ * the inventory can trigger the question: source to build, and versions that
+ * arrived already built — the second is the case the kernel's gate exists for.
  */
 export function planProjectStore(
   store: string,
-  report: SyncReport,
+  what: StoreInventory,
   trusted: boolean,
   alreadyAsked: readonly string[],
 ): ProjectStorePlan {
-  if (report.lines.length === 0) return { kind: "none" }
-  if (trusted) return { kind: "ready", store, report }
+  if (what.drafts.lines.length === 0 && what.holds.length === 0) return { kind: "none" }
+  if (trusted) return { kind: "ready", store }
   if (alreadyAsked.some((asked) => samePath(asked, store))) return { kind: "none" }
-  return { kind: "ask", store, drafts: describeDrafts(report), report }
+  return { kind: "ask", store, drafts: describeDrafts(what) }
 }
 
 export function promptText(plan: ProjectStoreAsk): string {
