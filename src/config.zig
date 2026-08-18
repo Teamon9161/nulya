@@ -171,6 +171,13 @@ pub const Config = struct {
     pub fn defaultEffort(self: *const Config, profile_name: []const u8, model_id: []const u8) ?[]const u8 {
         if (self.provider.findProfile(profile_name)) |p| {
             if (p.effort) |e| return e;
+            // A codex profile stops here. The catalog describes an id as the
+            // public API serves it, and the subscription serves several of the
+            // same ids with a different dial and its own per-model default —
+            // which the backend applies when nothing is sent. Sending the
+            // catalog's default instead would silently overrule it; "auto" here
+            // has to mean the subscription's auto (DESIGN §9.5).
+            if (p.kind == .codex) return null;
         }
         if (self.findModel(model_id)) |m| return m.default_effort;
         return null;
@@ -583,6 +590,29 @@ test "[[models]] merge by id and a profile effort overrides the catalog default"
     try std.testing.expectEqualStrings("Local", cfg.findModel("my-local-model").?.label);
     // Unknown ids resolve to "no effort" rather than an error.
     try std.testing.expect(cfg.defaultEffort("local", "something-else") == null);
+}
+
+test "a codex profile defaults its effort to the subscription's, never the catalog's" {
+    var cfg = try loadFromLayers(std.testing.allocator, &.{
+        .{ .source = default_toml },
+        .{ .source =
+        \\[[provider.profiles]]
+        \\name = "codex-high"
+        \\kind = "codex"
+        \\model = "gpt-5.6-sol"
+        \\effort = "high"
+        },
+    });
+    defer cfg.deinit();
+
+    // `gpt-5.6-sol` is in the catalog with default_effort = "medium" because
+    // that is what OpenAI's own API does with it. The subscription serves the
+    // same id with its own default, so nothing is sent and the backend decides.
+    try std.testing.expectEqualStrings("medium", cfg.findModel("gpt-5.6-sol").?.default_effort.?);
+    try std.testing.expectEqualStrings("medium", cfg.defaultEffort("openai", "gpt-5.6-sol").?);
+    try std.testing.expect(cfg.defaultEffort("codex", "gpt-5.6-sol") == null);
+    // An explicit profile effort is a decision, and still wins.
+    try std.testing.expectEqualStrings("high", cfg.defaultEffort("codex-high", "gpt-5.6-sol").?);
 }
 
 test "project layer cannot touch the model catalog" {

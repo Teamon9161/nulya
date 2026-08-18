@@ -196,7 +196,8 @@ pub const session_usage =
 ;
 
 pub const config_usage =
-    \\  nulya config show [--json]                        effective profiles, model catalog and pins; never a secret
+    \\  nulya config show [--json] [--refresh]            effective profiles, model catalog and pins; never a secret
+    \\                                                    --refresh asks a subscription endpoint for today's models
     \\
 ;
 

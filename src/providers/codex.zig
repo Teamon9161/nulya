@@ -24,6 +24,7 @@
 //! whole tool loop, the way the Codex CLI itself replays it.
 
 const std = @import("std");
+const config = @import("../config.zig");
 const prompt = @import("../prompt.zig");
 const provider = @import("../provider.zig");
 const tool = @import("../tool.zig");
@@ -31,6 +32,9 @@ const wire = @import("wire.zig");
 
 const backend_url = "https://chatgpt.com/backend-api/codex/responses";
 const token_url = "https://auth.openai.com/oauth/token";
+/// The subscription's model catalogue — the same endpoint the Codex CLI polls to
+/// fill `models_cache.json`, authenticated exactly like `/responses`.
+const models_url = "https://chatgpt.com/backend-api/codex/models";
 /// The Codex CLI's public OAuth client id. Reusing it means the tokens refreshed
 /// here are the same ones a `codex login` produces, so both tools share the file.
 const client_id = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -114,7 +118,7 @@ pub const CodexProvider = struct {
         // SSE data, so the retry cannot duplicate emitted events.
         self.send(alloc, body, &state, request.stall_ms) catch |err| switch (err) {
             error.Unauthorized => {
-                try self.refresh(alloc, request.stall_ms);
+                try self.auth.refresh(alloc, self.io, self.env, &self.client, request.stall_ms);
                 try self.send(alloc, body, &state, request.stall_ms);
             },
             else => return err,
@@ -139,28 +143,6 @@ pub const CodexProvider = struct {
                 .{ .name = "session_id", .value = &self.session_uuid },
             },
         }, state, StreamState.onData);
-    }
-
-    /// Exchange the refresh token for fresh credentials and write them back to
-    /// auth.json, exactly as the Codex CLI does, so the two stay interchangeable.
-    fn refresh(self: *CodexProvider, alloc: std.mem.Allocator, stall_ms: u64) !void {
-        if (self.auth.refresh_token.len == 0) return error.MissingCredential;
-        // `{f}` on a byte slice emits a complete JSON string, quotes included.
-        const body = try std.fmt.allocPrint(alloc,
-            \\{{"client_id":"{s}","grant_type":"refresh_token","refresh_token":{f},"scope":"openid profile email"}}
-        , .{ client_id, std.json.fmt(self.auth.refresh_token, .{}) });
-        defer alloc.free(body);
-
-        const response = try wire.postJson(&self.client, alloc, .{ .url = token_url, .body = body, .stall_ms = stall_ms });
-        defer alloc.free(response);
-        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, response, .{});
-        defer parsed.deinit();
-
-        const access = wire.string(parsed.value, "access_token") orelse return error.CodexRefreshFailed;
-        if (access.len == 0) return error.CodexRefreshFailed;
-        const refresh_token = wire.string(parsed.value, "refresh_token") orelse "";
-        try self.auth.replaceTokens(alloc, access, refresh_token);
-        self.auth.save(alloc, self.io, self.env, wire.string(parsed.value, "id_token")) catch {};
     }
 
     const vtable: provider.Model.VTable = .{
@@ -218,6 +200,38 @@ pub const Auth = struct {
         return true;
     }
 
+    /// Exchange the refresh token for fresh credentials and write them back to
+    /// auth.json, exactly as the Codex CLI does, so the two stay interchangeable.
+    /// It lives on `Auth` rather than on the provider because the tokens and the
+    /// file are `Auth`'s: a 401 on the model stream and a 401 on the catalogue
+    /// fetch (`refreshCatalog`) are the same repair.
+    pub fn refresh(
+        self: *Auth,
+        alloc: std.mem.Allocator,
+        io: std.Io,
+        env: *const std.process.Environ.Map,
+        client: *std.http.Client,
+        stall_ms: u64,
+    ) !void {
+        if (self.refresh_token.len == 0) return error.MissingCredential;
+        // `{f}` on a byte slice emits a complete JSON string, quotes included.
+        const body = try std.fmt.allocPrint(alloc,
+            \\{{"client_id":"{s}","grant_type":"refresh_token","refresh_token":{f},"scope":"openid profile email"}}
+        , .{ client_id, std.json.fmt(self.refresh_token, .{}) });
+        defer alloc.free(body);
+
+        const response = try wire.postJson(client, alloc, .{ .url = token_url, .body = body, .stall_ms = stall_ms });
+        defer alloc.free(response);
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, response, .{});
+        defer parsed.deinit();
+
+        const access = wire.string(parsed.value, "access_token") orelse return error.CodexRefreshFailed;
+        if (access.len == 0) return error.CodexRefreshFailed;
+        const refresh_token = wire.string(parsed.value, "refresh_token") orelse "";
+        try self.replaceTokens(alloc, access, refresh_token);
+        self.save(alloc, io, env, wire.string(parsed.value, "id_token")) catch {};
+    }
+
     fn replaceTokens(self: *Auth, alloc: std.mem.Allocator, access: []const u8, refresh_token: []const u8) !void {
         const new_access = try alloc.dupe(u8, access);
         alloc.free(self.access_token);
@@ -263,6 +277,221 @@ fn homePath(alloc: std.mem.Allocator, env: *const std.process.Environ.Map, sub: 
     const home = env.get("USERPROFILE") orelse env.get("HOME") orelse return null;
     if (home.len == 0) return null;
     return try std.fs.path.join(alloc, &.{ home, ".codex", sub });
+}
+
+// ----------------------------------------------------------------- models --
+
+/// The subscription's own model line-up, read from the file the Codex CLI keeps
+/// it in (`$CODEX_HOME/models_cache.json`, else `~/.codex/models_cache.json`).
+///
+/// A ChatGPT subscription decides which models it serves and with what dial;
+/// that is not something a person should have to restate in `config.toml`, and
+/// a hardcoded list is wrong the week after it is written. So the catalogue is
+/// read, never configured — `nulya config show` projects it for a picker
+/// (DESIGN §9.5) and `nulya config show --refresh` refills the file.
+///
+/// The numbers are the subscription's, not the public API's: the same id is
+/// served here with a smaller window (`effective_context_window_percent` of the
+/// raw one — the budget Codex advertises to its own clients), an extra effort
+/// level, and its own default. That is precisely why this cannot be folded into
+/// the id-keyed `[[models]]` catalog, which describes an id once for every
+/// endpoint that serves it.
+pub const Catalog = struct {
+    arena: std.heap.ArenaAllocator,
+    /// In the order the file lists them; never empty (no listable model is null).
+    models: []const config.ModelParams,
+
+    pub fn deinit(self: *Catalog) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+
+    /// Null when there is nothing usable: no home, no file, unreadable JSON, or
+    /// not one listable model. Null is "this machine cannot say", never an
+    /// assertion that the subscription serves nothing.
+    pub fn load(
+        alloc: std.mem.Allocator,
+        io: std.Io,
+        env: *const std.process.Environ.Map,
+    ) error{OutOfMemory}!?Catalog {
+        var arena = std.heap.ArenaAllocator.init(alloc);
+        errdefer arena.deinit();
+        const a = arena.allocator();
+
+        const models = read: {
+            const path = (try homePath(a, env, "models_cache.json")) orelse break :read null;
+            const text = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20)) catch break :read null;
+            break :read try parse(a, text);
+        };
+        if (models) |m| return .{ .arena = arena, .models = m };
+        arena.deinit();
+        return null;
+    }
+};
+
+/// One cache document → the model parameters it states. Everything the file
+/// carries beyond these (base instructions, tool policies, service tiers) is the
+/// Codex CLI's business, not a description of the id.
+///
+/// Both shapes are accepted — the file is always `{"models":[…]}`, but the
+/// endpoint may answer with a bare array — so one function validates what is
+/// fetched and reads what is on disk. Everything is allocated in `arena`, which
+/// must also outlive `text` (JSON strings without escapes alias it).
+fn parse(arena: std.mem.Allocator, text: []const u8) error{OutOfMemory}!?[]const config.ModelParams {
+    const doc = std.json.parseFromSliceLeaky(std.json.Value, arena, text, .{}) catch return null;
+    const listed = switch (wire.field(doc, "models") orelse doc) {
+        .array => |a| a.items,
+        else => return null,
+    };
+
+    var out: std.ArrayList(config.ModelParams) = .empty;
+    for (listed) |m| {
+        // `hide` is how the catalogue carries models that exist but are not
+        // offered (an internal review model, say): listing them would put a
+        // choice in a picker that is not the user's to make.
+        if (!eqlString(wire.string(m, "visibility"), "list")) continue;
+        const slug = wire.string(m, "slug") orelse continue;
+        if (slug.len == 0) continue;
+
+        var efforts: std.ArrayList([]const u8) = .empty;
+        if (wire.field(m, "supported_reasoning_levels")) |levels| {
+            if (levels == .array) {
+                for (levels.array.items) |level| {
+                    if (wire.string(level, "effort")) |e| try efforts.append(arena, e);
+                }
+            }
+        }
+        try out.append(arena, .{
+            .id = slug,
+            .label = wire.string(m, "display_name") orelse "",
+            .efforts = try efforts.toOwnedSlice(arena),
+            .default_effort = nonEmptyString(wire.string(m, "default_reasoning_level")),
+            .context_window = effectiveWindow(m),
+            // Deliberately not claimed here even though the entry says whether
+            // it takes images: the `session append --image` gate reads the
+            // id-keyed `[[models]]` catalog (DESIGN §3.1/§9.5), so a claim in
+            // this projection is one nothing honours.
+            .vision = false,
+        });
+    }
+    if (out.items.len == 0) return null;
+    return try out.toOwnedSlice(arena);
+}
+
+/// The window the subscription actually gives you: the raw one, times the
+/// percentage it reserves for its own clients. A model that states no window is
+/// kept without one (`?u64` already means "not stated") rather than dropped —
+/// a listed model is selectable whether or not it says how big it is.
+fn effectiveWindow(m: std.json.Value) ?u64 {
+    const raw = wire.field(m, "context_window") orelse return null;
+    if (raw != .integer and raw != .float) return null;
+    const window = wire.uint(m, "context_window");
+    const percent = if (wire.field(m, "effective_context_window_percent") != null)
+        @min(wire.uint(m, "effective_context_window_percent"), 100)
+    else
+        100;
+    return window * percent / 100;
+}
+
+fn nonEmptyString(value: ?[]const u8) ?[]const u8 {
+    const v = value orelse return null;
+    return if (v.len == 0) null else v;
+}
+
+/// Fetch the live catalogue and write it into the Codex CLI's own cache file, so
+/// every later read — this binary's and the CLI's — sees today's line-up. There
+/// is no `codex login` in nulya, so nothing refreshes this on its own: the only
+/// trigger is `nulya config show --refresh` (DESIGN §14).
+///
+/// `client_version` is this binary's version string (the endpoint takes it as a
+/// query parameter, as the CLI does). A 401 means the short-lived access token
+/// expired, which is routine: refresh once and retry, exactly as the model
+/// stream does.
+pub fn refreshCatalog(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    env: *const std.process.Environ.Map,
+    client_version: []const u8,
+) !void {
+    var auth = (try Auth.load(alloc, io, env)) orelse return error.MissingCredential;
+    defer auth.deinit(alloc);
+    var client: std.http.Client = .{ .allocator = alloc, .io = io };
+    defer client.deinit();
+
+    const url = try std.fmt.allocPrint(alloc, "{s}?client_version={s}", .{ models_url, client_version });
+    defer alloc.free(url);
+
+    const body = fetchCatalog(alloc, &client, &auth, url) catch |err| switch (err) {
+        error.Unauthorized => blk: {
+            try auth.refresh(alloc, io, env, &client, catalog_stall_ms);
+            break :blk try fetchCatalog(alloc, &client, &auth, url);
+        },
+        else => return err,
+    };
+    defer alloc.free(body);
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const response = std.json.parseFromSliceLeaky(std.json.Value, a, body, .{}) catch return error.CodexCatalogUnreadable;
+    // Refuse to overwrite a good cache with an answer that describes no model:
+    // the same predicate the reader applies, so what is written is what will be
+    // read back.
+    if ((try parse(a, body)) == null) return error.CodexCatalogEmpty;
+    try saveCatalog(alloc, io, env, a, response);
+}
+
+/// A projection is not a step: a catalogue that goes quiet should fail in
+/// seconds and leave the file alone, not hold `config show` for two minutes the
+/// way a reasoning model legitimately may (`provider.RetryPolicy.stall_timeout_ms`).
+const catalog_stall_ms = 15_000;
+
+fn fetchCatalog(alloc: std.mem.Allocator, client: *std.http.Client, auth: *const Auth, url: []const u8) ![]u8 {
+    const authorization = try std.fmt.allocPrint(alloc, "Bearer {s}", .{auth.access_token});
+    defer alloc.free(authorization);
+    return wire.getJson(client, alloc, .{
+        .url = url,
+        .body = "",
+        .authorization = authorization,
+        .stall_ms = catalog_stall_ms,
+        .extra_headers = &.{
+            .{ .name = "chatgpt-account-id", .value = auth.account_id },
+            .{ .name = "OpenAI-Beta", .value = "responses=experimental" },
+            .{ .name = "originator", .value = "codex_cli_rs" },
+        },
+    });
+}
+
+/// Write the fetched models into `models_cache.json`. The file belongs to the
+/// Codex CLI, so only `models` is replaced and every other key it keeps there
+/// (`fetched_at`, `etag`, `client_version`) is written back untouched — the same
+/// discipline as `Auth.save`, and the reason nothing here invents that
+/// metadata: a stale etag costs the CLI one conditional request, a fabricated
+/// one could cost it the truth.
+fn saveCatalog(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    env: *const std.process.Environ.Map,
+    arena: std.mem.Allocator,
+    response: std.json.Value,
+) !void {
+    const path = (try homePath(alloc, env, "models_cache.json")) orelse return error.NoCodexHome;
+    defer alloc.free(path);
+
+    // The endpoint may answer with a bare array; the cache is always the object
+    // form, because that is the shape the CLI reads.
+    const models = wire.field(response, "models") orelse response;
+    var doc: std.json.Value = .{ .object = .empty };
+    if (std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(16 << 20))) |existing| {
+        if (std.json.parseFromSliceLeaky(std.json.Value, arena, existing, .{})) |old| {
+            if (old == .object) doc = old;
+        } else |_| {}
+    } else |_| {}
+    try doc.object.put(arena, "models", models);
+
+    const encoded = try std.fmt.allocPrint(alloc, "{f}", .{std.json.fmt(doc, .{ .whitespace = .indent_2 })});
+    defer alloc.free(encoded);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = encoded });
 }
 
 /// A UUID-shaped, deterministic name hash. The backend wants UUID syntax; what
@@ -572,6 +801,56 @@ test "the prompt cache key is derived from the session id, so it is stable acros
     }
 }
 
+test "the subscription's catalogue is read, not configured: listable models only, the effective window, its own dial" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const models = (try parse(a,
+        \\{"fetched_at":"2026-07-15T10:42:23Z","etag":"W/\"abc\"","models":[
+        \\  {"slug":"gpt-5.6-sol","display_name":"GPT-5.6-Sol","visibility":"list",
+        \\   "context_window":272000,"effective_context_window_percent":95,
+        \\   "supported_reasoning_levels":[{"effort":"low","description":"…"},{"effort":"medium"},{"effort":"xhigh"}],
+        \\   "default_reasoning_level":"low","base_instructions":"(the CLI's, not ours)"},
+        \\  {"slug":"codex-auto-review","display_name":"Codex Auto Review","visibility":"hide",
+        \\   "context_window":272000,"effective_context_window_percent":95},
+        \\  {"slug":"bare","visibility":"list"}
+        \\]}
+    )).?;
+
+    // The hidden model is not a choice anyone is offered.
+    try std.testing.expectEqual(@as(usize, 2), models.len);
+    try std.testing.expectEqualStrings("gpt-5.6-sol", models[0].id);
+    try std.testing.expectEqualStrings("GPT-5.6-Sol", models[0].label);
+    // The window the subscription gives, not the raw one the public API states.
+    try std.testing.expectEqual(@as(u64, 258_400), models[0].context_window.?);
+    try std.testing.expectEqual(@as(usize, 3), models[0].efforts.len);
+    try std.testing.expectEqualStrings("low", models[0].efforts[0]);
+    try std.testing.expectEqualStrings("xhigh", models[0].efforts[2]);
+    try std.testing.expectEqualStrings("low", models[0].default_effort.?);
+    // An id with nothing stated is still selectable; it just claims nothing.
+    try std.testing.expectEqualStrings("bare", models[1].id);
+    try std.testing.expectEqualStrings("", models[1].label);
+    try std.testing.expectEqual(@as(usize, 0), models[1].efforts.len);
+    try std.testing.expect(models[1].default_effort == null);
+    try std.testing.expect(models[1].context_window == null);
+    // Vision is claimed by the id-keyed catalog the `--image` gate reads, never here.
+    try std.testing.expect(!models[0].vision);
+
+    // A missing percentage is 100 %, and the endpoint's bare-array answer reads
+    // through the same function that reads the file.
+    const bare = (try parse(a,
+        \\[{"slug":"gpt-5.5","visibility":"list","context_window":272000}]
+    )).?;
+    try std.testing.expectEqual(@as(u64, 272_000), bare[0].context_window.?);
+
+    // Nothing usable is null — "this machine cannot say", not "there are none".
+    try std.testing.expect((try parse(a, "not json")) == null);
+    try std.testing.expect((try parse(a, "{\"models\":[]}")) == null);
+    try std.testing.expect((try parse(a, "{\"models\":[{\"slug\":\"x\",\"visibility\":\"hide\"}]}")) == null);
+    try std.testing.expect((try parse(a, "{\"error\":\"unauthorized\"}")) == null);
+}
+
 test "history serializes to flat Responses items and effort off becomes none" {
     const alloc = std.testing.allocator;
     var l = ledger.Ledger.init(alloc);
@@ -724,8 +1003,7 @@ test "an image rides as an input_image part; a turn without one keeps its pre-im
     defer plain_ir.deinit(alloc);
     const plain_body = try buildRequestJson(alloc, "gpt-5.5", "cache-1", .{ .prompt_ir = &plain_ir, .tools = &.{} });
     defer alloc.free(plain_body);
-    try std.testing.expect(std.mem.indexOf(u8, plain_body,
-        "{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello\"}]}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plain_body, "{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello\"}]}") != null);
     try std.testing.expect(std.mem.indexOf(u8, plain_body, "input_image") == null);
 
     var shot = ledger.Ledger.init(alloc);
@@ -739,7 +1017,6 @@ test "an image rides as an input_image part; a turn without one keeps its pre-im
     const shot_body = try buildRequestJson(alloc, "gpt-5.5", "cache-1", .{ .prompt_ir = &shot_ir, .tools = &.{} });
     defer alloc.free(shot_body);
     // One message item, two parts, in the order the turn holds them.
-    try std.testing.expect(std.mem.indexOf(u8, shot_body,
-        "{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"what is this\"}," ++
-            "{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,iVBORw0=\"}]}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, shot_body, "{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"what is this\"}," ++
+        "{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,iVBORw0=\"}]}") != null);
 }

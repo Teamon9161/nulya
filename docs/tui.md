@@ -753,7 +753,7 @@ stdout 全是 JSON、退出码 0、stderr 空；行序与 DESIGN §14 完全一�
 **没做 / 给下一里程碑**
 
 - **preset（整套 lineup）没做**：单角色世界里 preset ≡ profile；等 sub-agent 有第一个 consumer、有了角色，preset 落 `tui.toml`/driver 侧、以文字告诉 agent，不进内核。
-- `codex` profile 的 `models` 只有 `gpt-5.5`（tcode 是从本地 runtime 目录填的），要多个再加目录条目。
+- `codex` profile 的 `models` 只有 `gpt-5.5`（tcode 是从本地 runtime 目录填的），要多个再加目录条目。→ **已改**（2026-08-18）：内核 `config show` 现在为没写 `models` 的 codex profile 读 Codex CLI 的 `~/.codex/models_cache.json`，并在 `profiles[].catalog` 里给出该端点自己报的参数（DESIGN §9.5）；TUI 的消费见 T21。
 - 选择器不做鼠标；`/effort` 不校验档位（打错了 provider 会 4xx，状态栏可见）。
 - `--session <id>` resume 的 tab effort 起于 undefined（kernel 默认），不从 state 找；等真的需要再做。
 

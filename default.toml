@@ -53,11 +53,15 @@ api_key_env = "ANTHROPIC_API_KEY"
 
 # ChatGPT subscription (Codex backend). The credential is whatever
 # `codex login` left in ~/.codex/auth.json, so there is no api_key_env.
+# No `models` list on purpose: a subscription states its own line-up, so
+# `nulya config show` reads it (with each model's window, dial and default)
+# from the Codex CLI's ~/.codex/models_cache.json, and `--refresh` refills that
+# file. Listing `models` here would override that — put one in your user config
+# only if you want a fixed list. `model` stays a decision: which one you open on.
 [[provider.profiles]]
 name = "codex"
 kind = "codex"
 model = "gpt-5.5"
-models = ["gpt-5.5"]
 
 # DeepSeek serves the same models behind both wire formats, which makes it the
 # cheapest way to exercise either provider end to end. Its Chat Completions
@@ -146,7 +150,9 @@ context_window = 1050000
 efforts = ["low", "medium", "high"]
 default_effort = "medium"
 
-# Codex Responses: `off` is sent as `none`; an absent effort is the server default.
+# Codex Responses: `off` is sent as `none`; an absent effort is the server
+# default. Kept as the description of last resort — when the Codex CLI's model
+# cache is missing, `config show` falls back to this one id.
 [[models]]
 id = "gpt-5.5"
 label = "GPT-5.5 (Codex)"

@@ -72,6 +72,11 @@ pub fn writeRaw(jw: *std.json.Stringify, raw: []const u8) !void {
 pub const Post = struct {
     url: []const u8,
     body: []const u8,
+    /// The HTTP method. Every model request is a POST; the one exception is the
+    /// Codex subscription's model catalogue, a plain GET that is otherwise the
+    /// same exchange — same auth headers, same status classification, same stall
+    /// guard — so it rides here rather than in a second transport (`getJson`).
+    method: std.http.Method = .POST,
     /// Full `Authorization` header value (e.g. `Bearer sk-…`); null omits it.
     authorization: ?[]const u8 = null,
     /// Provider-specific headers (`x-api-key`, `anthropic-version`, …).
@@ -190,12 +195,13 @@ fn transport(err: anyerror, hb: *const Heartbeat) anyerror {
 
 fn open(client: *std.http.Client, p: Post, hb: *const Heartbeat) !std.http.Client.Request {
     const uri = try std.Uri.parse(p.url);
-    return client.request(.POST, uri, .{
+    return client.request(p.method, uri, .{
         .keep_alive = false,
         .redirect_behavior = .unhandled,
         .headers = .{
             .authorization = if (p.authorization) |a| .{ .override = a } else .default,
-            .content_type = .{ .override = "application/json" },
+            // A bodiless request has no content type to declare.
+            .content_type = if (p.method.requestHasBody()) .{ .override = "application/json" } else .default,
             // Avoid gzip/deflate here so the SSE parser can read directly.
             .accept_encoding = .omit,
         },
@@ -209,6 +215,10 @@ fn send(req: *std.http.Client.Request, body: []const u8, redirect_buffer: []u8, 
 }
 
 fn sendInner(req: *std.http.Client.Request, body: []const u8, redirect_buffer: []u8) !std.http.Client.Response {
+    if (!req.method.requestHasBody()) {
+        try req.sendBodiless();
+        return req.receiveHead(redirect_buffer);
+    }
     req.transfer_encoding = .{ .content_length = body.len };
     var body_writer = try req.sendBodyUnflushed(&.{});
     try body_writer.writer.writeAll(body);
@@ -282,6 +292,21 @@ fn exchangeSse(
 /// non-streaming calls a provider needs around its stream, such as the Codex
 /// OAuth token refresh.
 pub fn postJson(client: *std.http.Client, alloc: std.mem.Allocator, p: Post) ![]u8 {
+    return jsonExchange(client, alloc, p);
+}
+
+/// GET `p.url` and return the whole response body (caller owns) — the same
+/// exchange minus a body. Its one caller is the Codex subscription's model
+/// catalogue, which is a projection rather than a model request; `p.body` and
+/// `p.method` are ignored.
+pub fn getJson(client: *std.http.Client, alloc: std.mem.Allocator, p: Post) ![]u8 {
+    var get = p;
+    get.method = .GET;
+    get.body = "";
+    return jsonExchange(client, alloc, get);
+}
+
+fn jsonExchange(client: *std.http.Client, alloc: std.mem.Allocator, p: Post) ![]u8 {
     return Watched(anyerror![]u8).run(client.io, p.stall_ms, exchangeJson, .{ client, alloc, p });
 }
 
@@ -374,6 +399,64 @@ test "the stall watchdog: a silent server is a Transport fault within the budget
         defer alloc.free(body);
         try std.testing.expectEqualStrings("ok", body);
     }
+}
+
+test "getJson is the same exchange minus a body: a bodiless GET, no content-type, response returned whole" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // What the server actually received, so the request shape is checked where
+    // it is made rather than trusted.
+    const Capture = struct { buf: [1024]u8 = undefined, len: usize = 0 };
+    const Peer = struct {
+        fn serve(server: *std.Io.net.Server, io_: std.Io, seen: *Capture) void {
+            const stream = server.accept(io_) catch return;
+            defer stream.close(io_);
+            var rbuf: [4096]u8 = undefined;
+            var r = stream.reader(io_, &rbuf);
+            // A GET ends at the blank line: there is no body to wait for.
+            while (std.mem.indexOf(u8, r.interface.buffered(), "\r\n\r\n") == null) r.interface.fillMore() catch return;
+            const head = r.interface.buffered();
+            seen.len = @min(head.len, seen.buf.len);
+            @memcpy(seen.buf[0..seen.len], head[0..seen.len]);
+            var buf: [256]u8 = undefined;
+            var w = stream.writer(io_, &buf);
+            w.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\n{\"models\":[]}") catch return;
+            w.interface.flush() catch return;
+        }
+    };
+
+    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var client: std.http.Client = .{ .allocator = alloc, .io = io };
+    defer client.deinit();
+    var server = try addr.listen(io, .{});
+    defer server.deinit(io);
+    var seen: Capture = .{};
+    var peer = io.async(Peer.serve, .{ &server, io, &seen });
+    const url = try std.fmt.allocPrint(alloc, "http://127.0.0.1:{d}/models?client_version=1", .{server.socket.address.getPort()});
+    defer alloc.free(url);
+
+    const body = try getJson(&client, alloc, .{
+        .url = url,
+        .body = "ignored",
+        .authorization = "Bearer t",
+        .extra_headers = &.{.{ .name = "originator", .value = "codex_cli_rs" }},
+        .stall_ms = 5_000,
+    });
+    defer alloc.free(body);
+    _ = peer.cancel(io);
+
+    try std.testing.expectEqualStrings("{\"models\":[]}", body);
+    const request = seen.buf[0..seen.len];
+    try std.testing.expect(std.mem.startsWith(u8, request, "GET /models?client_version=1 HTTP/1.1"));
+    try std.testing.expect(std.mem.indexOf(u8, request, "authorization: Bearer t") != null);
+    try std.testing.expect(std.mem.indexOf(u8, request, "originator: codex_cli_rs") != null);
+    // Nothing was sent that a bodiless request cannot have.
+    try std.testing.expect(std.mem.indexOf(u8, request, "content-type") == null);
+    try std.testing.expect(std.mem.indexOf(u8, request, "content-length") == null);
+    try std.testing.expect(std.mem.indexOf(u8, request, "ignored") == null);
 }
 
 test "reasoning items are spliced back one value each, in order" {

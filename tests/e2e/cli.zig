@@ -61,8 +61,8 @@ test "cli help: help / --help / -h print the same usage covering every verb fami
 
     // One screen: this is read by a model that pays for every line of it. The
     // budget moves only when a real capability arrives (`--image`, +2; `ext
-    // seed`, +1).
-    try std.testing.expect(std.mem.count(u8, help.stdout, "\n") <= 43);
+    // seed`, +1; `config show --refresh`, +1).
+    try std.testing.expect(std.mem.count(u8, help.stdout, "\n") <= 44);
 
     // The two flag spellings a terminal user reaches for reach the same text.
     for ([_][]const u8{ "--help", "-h" }) |flag| {
@@ -330,6 +330,123 @@ test "cli config show: both forms project the effective [registry], so today's p
             return err;
         };
     }
+}
+
+/// A `models_cache.json` the way the Codex CLI leaves one: the profile's default
+/// model listed second, one model hidden, and a window that is a percentage of
+/// the raw one.
+const codex_models_cache =
+    \\{"fetched_at":"2026-07-15T10:42:23Z","client_version":"0.144.1","models":[
+    \\ {"slug":"gpt-5.6-sol","display_name":"GPT-5.6-Sol","visibility":"list",
+    \\  "context_window":272000,"effective_context_window_percent":95,
+    \\  "supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"}],
+    \\  "default_reasoning_level":"low"},
+    \\ {"slug":"gpt-5.5","display_name":"GPT-5.5","visibility":"list",
+    \\  "context_window":272000,"effective_context_window_percent":95,
+    \\  "supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"}],
+    \\  "default_reasoning_level":"medium"},
+    \\ {"slug":"codex-auto-review","display_name":"Codex Auto Review","visibility":"hide","context_window":272000}
+    \\]}
+;
+
+fn findProfile(root: std.json.Value, name: []const u8) std.json.Value {
+    for (root.object.get("profiles").?.array.items) |p| {
+        if (std.mem.eql(u8, p.object.get("name").?.string, name)) return p;
+    }
+    return .null;
+}
+
+test "cli config show: a codex profile's models and their parameters come from the subscription's own cache, with the shared catalog as the fallback" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_abs = try nulyaExe(alloc, &host_env);
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_path = buf[0..try ws.realPath(io, &buf)];
+
+    // A Codex home holding only the model cache: no auth.json, so the profile is
+    // NOT usable — the line-up is a fact about the subscription, readable
+    // whether or not a credential is present right now.
+    try ws.createDirPath(io, "codex-home");
+    try ws.writeFile(io, .{ .sub_path = "codex-home/models_cache.json", .data = codex_models_cache });
+    const codex_home = try std.fs.path.join(alloc, &.{ ws_path, "codex-home" });
+    defer alloc.free(codex_home);
+
+    const json = try support.runCliEnvs(alloc, io, ws, &.{ exe_abs, "config", "show", "--json" }, &.{
+        .{ .key = "CODEX_HOME", .value = codex_home },
+    });
+    defer alloc.free(json.stdout);
+    try std.testing.expectEqual(@as(u8, 0), json.code);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json.stdout, .{});
+    defer parsed.deinit();
+    const codex = findProfile(parsed.value, "codex").object;
+    try std.testing.expectEqual(false, codex.get("credential").?.bool);
+
+    // The default model opens the list even though the file lists it second, and
+    // the hidden model is nowhere in the projection.
+    const models = codex.get("models").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), models.len);
+    try std.testing.expectEqualStrings("gpt-5.5", models[0].string);
+    try std.testing.expectEqualStrings("gpt-5.6-sol", models[1].string);
+    try std.testing.expect(std.mem.indexOf(u8, json.stdout, "codex-auto-review") == null);
+
+    // `catalog[i]` describes `models[i]` with the subscription's own numbers —
+    // 95 % of the raw window, an `xhigh` level the public API does not offer,
+    // and its own per-model default.
+    const catalog = codex.get("catalog").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), catalog.len);
+    try std.testing.expectEqualStrings("gpt-5.6-sol", catalog[1].object.get("id").?.string);
+    try std.testing.expectEqualStrings("GPT-5.6-Sol", catalog[1].object.get("label").?.string);
+    try std.testing.expectEqual(@as(i64, 258_400), catalog[1].object.get("context_window").?.integer);
+    try std.testing.expectEqualStrings("low", catalog[1].object.get("default_effort").?.string);
+    const efforts = catalog[1].object.get("efforts").?.array.items;
+    try std.testing.expectEqualStrings("xhigh", efforts[efforts.len - 1].string);
+    try std.testing.expectEqualStrings("medium", catalog[0].object.get("default_effort").?.string);
+
+    // Every other profile says "look the id up in the shared catalog".
+    try std.testing.expect(findProfile(parsed.value, "openai").object.get("catalog").? == .null);
+    try std.testing.expect(findProfile(parsed.value, "deepseek").object.get("catalog").? == .null);
+
+    // The text form says where the list came from.
+    const text = try support.runCliEnvs(alloc, io, ws, &.{ exe_abs, "config", "show" }, &.{
+        .{ .key = "CODEX_HOME", .value = codex_home },
+    });
+    defer alloc.free(text.stdout);
+    try std.testing.expectEqual(@as(u8, 0), text.code);
+    for ([_][]const u8{ "models from ~/.codex/models_cache.json", "gpt-5.6-sol", "258400", "xhigh" }) |needle| {
+        std.testing.expect(std.mem.indexOf(u8, text.stdout, needle) != null) catch |err| {
+            std.debug.print("`config show` never mentions '{s}'\n", .{needle});
+            return err;
+        };
+    }
+
+    // No cache on this machine: the profile falls back to its configured default
+    // model, described by the shared `[[models]]` catalog (so `catalog` is null).
+    try ws.createDirPath(io, "empty-codex-home");
+    const empty_home = try std.fs.path.join(alloc, &.{ ws_path, "empty-codex-home" });
+    defer alloc.free(empty_home);
+    const fallback = try support.runCliEnvs(alloc, io, ws, &.{ exe_abs, "config", "show", "--json" }, &.{
+        .{ .key = "CODEX_HOME", .value = empty_home },
+    });
+    defer alloc.free(fallback.stdout);
+    try std.testing.expectEqual(@as(u8, 0), fallback.code);
+
+    const bare = try std.json.parseFromSlice(std.json.Value, alloc, fallback.stdout, .{});
+    defer bare.deinit();
+    const offline = findProfile(bare.value, "codex").object;
+    try std.testing.expect(offline.get("catalog").? == .null);
+    const only = offline.get("models").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), only.len);
+    try std.testing.expectEqualStrings("gpt-5.5", only[0].string);
+    try std.testing.expectEqualStrings("gpt-5.5", offline.get("model").?.string);
 }
 
 test "cli ext run/build: missing or malformed JSON arguments and an unbuildable draft are one line on stderr and exit 1, never a Zig stack trace" {
