@@ -42,7 +42,7 @@ beforeAll(async () => {
   await step.exited
   second = await sessionNew(ws, { profile: "scripted" })
 
-  const run = (args: string[]) => Bun.spawnSync({ cmd: [ws.bin, ...args], cwd: ws.dir })
+  const run = (args: string[]) => Bun.spawnSync({ cmd: [ws.bin, ...args], cwd: ws.dir, env: process.env })
   run(["ext", "init", "--script", "lint"])
   const built = run(["ext", "build", ".nulya/extensions/lint"])
   version = /v-[0-9a-zA-Z]+/.exec(built.stdout.toString())?.[0] ?? ""
@@ -195,7 +195,7 @@ test("/ext at eighty columns: all four panes cut to their columns, the version i
   // one package gives the id list, the detail pane and the pin panel each a
   // cell that no reasonable column can hold.
   const long_id = "a-lint-with-a-very-long-extension-id"
-  const run = (args: string[]) => Bun.spawnSync({ cmd: [ws.bin, ...args], cwd: ws.dir })
+  const run = (args: string[]) => Bun.spawnSync({ cmd: [ws.bin, ...args], cwd: ws.dir, env: process.env })
   run(["ext", "init", "--script", long_id])
   const built = run(["ext", "build", join(".nulya", "extensions", long_id)])
   const long_version = /v-[0-9a-zA-Z]+/.exec(built.stdout.toString())?.[0] ?? ""
@@ -384,10 +384,10 @@ test("/ext's action keys move the store's current pointer, with a confirmation",
   const contributes = manifest["contributes"] as { tools: Array<Record<string, unknown>> }
   contributes.tools[0]!["description"] = "Lint Zig sources, second cut."
   await Bun.write(draft, JSON.stringify(manifest, null, 2))
-  const built = Bun.spawnSync({ cmd: [ws.bin, "ext", "build", ".nulya/extensions/lint"], cwd: ws.dir })
+  const built = Bun.spawnSync({ cmd: [ws.bin, "ext", "build", ".nulya/extensions/lint"], cwd: ws.dir, env: process.env })
   const second_version = /v-[0-9a-zA-Z]+/.exec(built.stdout.toString())?.[0] ?? ""
   expect(second_version).not.toBe(version)
-  Bun.spawnSync({ cmd: [ws.bin, "ext", "activate", "lint", second_version], cwd: ws.dir })
+  Bun.spawnSync({ cmd: [ws.bin, "ext", "activate", "lint", second_version], cwd: ws.dir, env: process.env })
   expect((await listExtensions(ws)).find((entry) => entry.id === "lint")!.current).toBe(second_version)
 
   const setup = await overlayFrame(() => <ExtView ws={ws} header={null} onClose={() => {}} />)

@@ -759,7 +759,7 @@ export interface FollowHandle {
 export function sessionFollow(ws: Workspace, id: string, since = 0): FollowHandle {
   const args = ["session", "events", id, "--follow"]
   if (since > 0) args.push("--since", String(since))
-  const proc = Bun.spawn({ cmd: [ws.bin, ...args], cwd: ws.dir, stdout: "pipe", stderr: "pipe" })
+  const proc = Bun.spawn({ cmd: [ws.bin, ...args], cwd: ws.dir, env: process.env, stdout: "pipe", stderr: "pipe" })
 
   async function* events(): AsyncGenerator<LedgerEvent> {
     for await (const raw of decodeLines(proc.stdout)) {

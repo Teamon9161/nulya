@@ -73,7 +73,7 @@ test("probeWriterLease sees the writer lease while a step runs", async () => {
 }, 60_000)
 
 test("listExtensions reads the version line, the current pointer and the manifest", async () => {
-  const run = (args: string[]) => Bun.spawnSync({ cmd: [ws.bin, ...args], cwd: ws.dir })
+  const run = (args: string[]) => Bun.spawnSync({ cmd: [ws.bin, ...args], cwd: ws.dir, env: process.env })
   expect(run(["ext", "init", "--script", "lint"]).exitCode).toBe(0)
   const built = run(["ext", "build", ".nulya/extensions/lint"])
   expect(built.exitCode).toBe(0)

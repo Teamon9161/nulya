@@ -48,7 +48,7 @@ beforeAll(() => {
     }),
   )
   writeFileSync(join(skill, "SKILL.md"), body)
-  Bun.spawnSync({ cmd: [ws.bin, "ext", "sync", "--activate"], cwd: ws.dir })
+  Bun.spawnSync({ cmd: [ws.bin, "ext", "sync", "--activate"], cwd: ws.dir, env: process.env })
 })
 
 afterAll(() => {

@@ -44,7 +44,7 @@ beforeAll(async () => {
   await step.exited
   second = await sessionNew(ws, { profile: "scripted" })
 
-  const run = (args: string[]) => Bun.spawnSync({ cmd: [ws.bin, ...args], cwd: ws.dir })
+  const run = (args: string[]) => Bun.spawnSync({ cmd: [ws.bin, ...args], cwd: ws.dir, env: process.env })
   run(["ext", "init", "--script", "lint"])
   const built = run(["ext", "build", ".nulya/extensions/lint"])
   const version = /v-[0-9a-zA-Z]+/.exec(built.stdout.toString())?.[0] ?? ""

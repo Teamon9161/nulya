@@ -223,7 +223,7 @@ test("the `this TUI` list becomes --pin, and the kernel freezes exactly it", asy
   )
   writeFileSync(join(home, "src", "main.sh"), "#!/bin/sh\ncat >/dev/null\n")
 
-  const built = Bun.spawnSync({ cmd: [ws.bin, "ext", "sync", "--activate"], cwd: ws.dir })
+  const built = Bun.spawnSync({ cmd: [ws.bin, "ext", "sync", "--activate"], cwd: ws.dir, env: process.env })
   expect(new TextDecoder().decode(built.stdout)).toContain("notes")
 
   const pins = [toolId("notes", "append")]

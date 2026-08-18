@@ -94,7 +94,7 @@ test("--activate reports the three answers a pointer can have: moved, already th
   expect(fresh.version).not.toBe(old)
   expect(fresh.activation).toBe("activated")
 
-  await Bun.spawn({ cmd: [ws.bin, "ext", "rollback", "one.mode", old], cwd: ws.dir }).exited
+  await Bun.spawn({ cmd: [ws.bin, "ext", "rollback", "one.mode", old], cwd: ws.dir, env: process.env }).exited
   const kept = await extSync(ws, { activate: true })
   const held = kept.lines.find((line) => line.id === "one.mode")!
   expect(held.activation).toBe("kept")

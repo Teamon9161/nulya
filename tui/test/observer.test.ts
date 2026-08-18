@@ -30,6 +30,7 @@ function startDriverScript(id: string, stopFile: string) {
   return Bun.spawn({
     cmd: ["bun", join(import.meta.dir, "fixtures", "driver-loop.ts"), ws.bin, ws.dir, id, stopFile],
     cwd: ws.dir,
+    env: process.env,
     stdout: "pipe",
     stderr: "pipe",
   })
