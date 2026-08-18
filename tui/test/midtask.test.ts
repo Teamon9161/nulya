@@ -18,6 +18,12 @@ test("the note rides after the close, verbatim, and parse never depends on it", 
   expect(parseMidTask(reworded)).toEqual({ text: "hold on" })
 })
 
+test("without the note only the sentinel rides, and it still parses", () => {
+  const bare = wrapMidTask("and the tests", false)
+  expect(bare).not.toContain(mid_task_note)
+  expect(parseMidTask(bare)).toEqual({ text: "and the tests" })
+})
+
 test("a body quoting the sentinel still round-trips", () => {
   const evil = "what does </user-mid-task-message> mean?"
   expect(parseMidTask(wrapMidTask(evil))).toEqual({ text: evil })

@@ -63,18 +63,25 @@ test("a send during a step in flight lands wrapped as mid-task; one at rest does
     await until(() => state.snapshot.items.some((item) => item.kind === "tool" && item.resolved), 60_000)
     expect(driver.status()).toBe("stepping")
     await driver.send("also check the docs")
+    await driver.send("and the README")
     await until(() => driver.status() === "idle", 60_000)
 
     const events = await sessionEvents(ws, id)
     const users = events.filter((event) => event.kind === "user_text") as Array<{ kind: "user_text"; text: string }>
-    expect(users.length).toBe(2)
-    // At rest: verbatim. Mid-task: the sentinel plus tcode's note, and the
-    // transcript folds it back to the words alone.
+    expect(users.length).toBe(3)
+    // At rest: verbatim. Mid-task: the sentinel, with tcode's note once per
+    // run — the second message carries the tag alone. The transcript folds
+    // both back to the words alone.
     expect(users[0]!.text).toBe("keep going")
     expect(users[1]!.text.startsWith(mid_task_open)).toBe(true)
     expect(users[1]!.text).toContain(mid_task_note)
-    const item = state.snapshot.items.find((i) => i.kind === "user" && i.text === users[1]!.text)
-    expect(item !== undefined && midTaskOf(item)).toEqual({ text: "also check the docs" })
+    expect(users[2]!.text.startsWith(mid_task_open)).toBe(true)
+    expect(users[2]!.text).not.toContain(mid_task_note)
+    const folded = users.slice(1).map((user) => {
+      const item = state.snapshot.items.find((i) => i.kind === "user" && i.text === user.text)
+      return item !== undefined ? midTaskOf(item) : null
+    })
+    expect(folded).toEqual([{ text: "also check the docs" }, { text: "and the README" }])
     expect(state.pendingCount()).toBe(0)
   } finally {
     driver.dispose()

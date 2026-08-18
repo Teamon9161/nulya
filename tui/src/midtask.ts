@@ -36,8 +36,15 @@ export const mid_task_note =
   "their new instruction instead. Do not treat a mid-turn message as an " +
   "implicit signal to stop working."
 
-export function wrapMidTask(text: string): string {
-  return `${mid_task_open}\n${text}\n${mid_task_close}\n${mid_task_note}`
+/**
+ * The note explains the sentinel, so it rides once per run (tcode appends one
+ * note per delivered batch, for the same reason): the first mid-task message a
+ * run receives carries the contract, later ones in the same run carry the tag
+ * alone and inherit its meaning.
+ */
+export function wrapMidTask(text: string, withNote = true): string {
+  const wrapped = `${mid_task_open}\n${text}\n${mid_task_close}`
+  return withNote ? `${wrapped}\n${mid_task_note}` : wrapped
 }
 
 /** The user's own words, folded back out of the sentinel. */

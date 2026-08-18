@@ -80,6 +80,10 @@ export function createDriver(
   // Set by `kill()`, so a non-zero exit after Ctrl+C is not reported as a
   // crash: the user asked for exactly that.
   let killed = false
+  // Whether the run in flight already received a mid-task message with the
+  // interrupt contract attached: later ones carry the sentinel alone
+  // (midtask.ts). Reset when the run ends — the next run explains itself anew.
+  let noted = false
 
   async function drive(): Promise<void> {
     if (disposed || driving) return
@@ -141,6 +145,7 @@ export function createDriver(
       state.setError(error instanceof Error ? error.message : String(error))
     } finally {
       driving = false
+      noted = false
       if (!disposed) setStatus("idle")
     }
   }
@@ -153,8 +158,11 @@ export function createDriver(
       // A step in flight means the model is mid-task, and a bare user turn
       // after tool results reads like a stop signal — so the turn carries its
       // own framing (midtask.ts). "sending" is not mid-task: that run has not
-      // started yet, the turn just joins its opening batch unwrapped.
-      const wire = status() === "stepping" || status() === "canceling" ? wrapMidTask(trimmed) : trimmed
+      // started yet, the turn just joins its opening batch unwrapped. The
+      // contract rides once per run; later messages carry the tag alone.
+      const midTask = status() === "stepping" || status() === "canceling"
+      const wire = midTask ? wrapMidTask(trimmed, !noted) : trimmed
+      if (midTask) noted = true
       state.enqueueUser(wire)
       // Anything but idle means a step is running or about to: the turn is
       // appended and the run in flight (or the one the earlier send is about to
