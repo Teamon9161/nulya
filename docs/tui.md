@@ -301,6 +301,7 @@ fold   = "ctrl+o"
 | ~~**T11 · 启动即安装**~~ ✅ | 内核给了 `nulya ext sync`（build 一个 root 下的每个 draft）与 `ext prune`（DESIGN §7.2）；前端只决定**什么时候跑**：`tui.toml` `[extensions] sync_on_start/auto_activate`；user store 后台跑（状态栏 `syncing extensions… 2/3` + 一行汇总）；**project store 先问**（未信任且有 draft → 开屏前一句问话 + `t`/`s`/`n`，只问一次，记在 `tui-state.json`）；`/ext` 每个 id 多一列 draft 状态（`ext sync --dry-run`），`a` 在 id 列表上指向 draft 的版本，`p` 删非 current 版本（先确认）。**内核零改动** | `bun test` 新增 `extensions.test.ts` 6 条（真二进制的 plan/sync/`--activate` 三种答案 + 纯策略）；在本仓库 checkout 里开一次看得到 trust 问句 |
 
 | ~~**T12 · `/ext` 的 pin 面板**~~ ✅ | `/ext` 第四个 pane **tools**：每个 tool 一行、三态 `always`（user config `registry.pinned_native_tools`，managed 只替换那一行、保注释、写后重读校验）/ `this TUI`（`tui-state.json` 的 `session_pins` → 每场 `session new` 自动 `--pin`）/ off，project/system 层写的 pin 只读显示；配额行 `tools 2+N/8`；`Space` toggle（id 行 = 整包）、`A` 升格、`d` = `ext deactivate`；`ext activate` 带 `NULYA_SESSION` 让内核投 capability_note。**内核零改动**（契约 [goals/tui-panel.md](goals/tui-panel.md)） | `bun test` 126 pass（新增 `pins.test.ts` 8 条 + `/ext` tools pane 一条交互）；面板里 `Space` 打开一个 tool → `session new` 的 header `native_tools` 里就有它，关掉就没有 |
+| ~~**T13 · composer 的 `@` 文件补全**~~ ✅ | 触发边界 / token 字符表 / 评分（basename 前缀 0 < path 前缀 1 < 子序列 10+gaps，根文件优先）/ 菜单标签规则全部逐条移植自 tcode `composer.rs`；索引 = `git ls-files --cached --others --exclude-standard`（非 git 退化成带 prune 表的小 walk），上限 20000，后台建、30s 陈旧后台刷；`↑↓` 选、`Tab` 上屏成 `@path`，已知引用在输入框里 accent。**提交时 `@path` 原文进 ledger，不注入文件内容**（契约 D5）。**内核零改动** | `bun test` 135 pass（新增 `references.test.ts` 8 条，其中四条与 tcode 的测试逐条同形 + `composer.test.tsx` 一条交互）；本仓库上 `@comp` 补出 `@src/composition.zig`，`node_modules` 一条不漏进来 |
 | **T10 · `/goal`（占位，未开工）** | spawn 随仓库带的 driver 脚本（`win32` → `powershell -NoProfile -ExecutionPolicy Bypass -File drivers/goal.ps1`，否则 `sh drivers/goal.sh`），把它的 **stderr 喂给已有的 `--stream` 解析器**（token delta / tool begin-end / usage 全在里面），把它的 **stdout 当控制通道**：`session <id>` 开 tab、`handoff <old> -> <new>` 换 tab（原 tab 留着可回看）、`done <id>` 收尾并提示 `/outcome`。跟随中的 tab 是 **observer**（driver 持着写者 lease）。**内核零改动**，也不需要 §10.4 的 `<id>.live` sidecar | 起一个两阶段目标：token 实时可见；handoff 时自动切到子 session；`Esc` 停得下来（`session cancel` 或杀脚本）|
 
 顺序 T0 → T1 → T2 → T3 → T4；**T1 结束就开始用它 dogfood**，T2 起的优先级由用出来的痛点重排（T5–T8 就是这么来的）。
@@ -954,3 +955,17 @@ cd tui && bun test test/compact.test.ts
 7. **测试**：`test/pins.test.ts` 8 条——三态与 another-layer 只读、off→`this TUI`→`A`→`always` 的全链、整包 toggle、配额行、行来源（只列有 `current` 且没被 shadow 的包，因为别的 pin 会被 `session new` 拒）、config 写回（保注释 / 跨行数组 / 缺 key 缺 table 三种落点 / round-trip）、以及**真二进制的闭环**：`session_pins` → `--pin` → header `native_tools` 里就是它，没 pin 的那个 tool 是对照组，pin 一个不存在的 tool 拿到内核自己的拒绝。`test/overlays.test.tsx` 再加一条走真键盘：`t` 进 pane、`Space` 打开、状态文件与新 session 的 header 都跟着变、再 `Space` 关掉又都退回去。
 
 **已知 / 没做**：`A` 升格是逐个 tool 的（整包写 user config 不是谁按住一个键会做的决定）；`/ext` 的 `/sessions` 快照在本机偶发一个尾空格差异（session id 的 hash 长度不定，先于本轮存在）；`session new --no-pin`（见 2）。
+
+### T13 · composer 的 `@` 文件补全（2026-08-18）
+
+**动机**：把路径读给模型是每天做几十遍的动作，而它一直是手打全路径。tcode 那套 `@` 交互被用了很久，边界情况（邮箱不是引用、根文件优先、basename 前缀胜过 path 前缀）都是**用出来的**而不是设计出来的——所以本轮的判断只有一个：**照抄**（契约 D6）。
+
+1. **纯函数逐条移植。** `references.ts` 的 `referenceBoundary` / `referenceTokenChar` / `referenceScore` / `referenceMatchOrder` / `referenceMarker` / `formatBytes` 一一对应 tcode `composer.rs` 的同名函数，常量（三档评分 0 / 1 / 10+gaps、菜单 8 行、`MAX_INDEX_ENTRIES = 20_000`）原样。测试也照抄了四条（`reference_token_avoids_email_addresses` / `..._prefers_basenames_then_fuzzy_paths` / `..._prioritizes_root_files` / `reference_labels_use_basenames_unless_they_conflict`）——行为是移植的，失败也该是移植的。
+2. **索引就是 git 的清单。** `git ls-files --cached --others --exclude-standard -z`：gitignore 语义**白得**，这里不再有第二份 `.gitignore` 实现。目录不在 git 的输出里，是从文件路径**推**出来的——顺带得到一条好性质：只有装着东西的目录才会出现在菜单里。非 git 目录退化成一个带 prune 表（借 `extensions/std/src/walk.zig` 那张，它本身也是 tcode 的）的小 walk，那不是正确性所在的地方。索引在 App 挂载时后台建，`@` 激活时 `touch()`，超过 30s 才后台重建——**永远不 await 一次按键**：第一个 `@` 在建完之前是空菜单，下一个就全有了，这比"git 走 monorepo 时输入框不收字符"划算得多。
+3. **`@` 与 `/` 两个菜单，都不抢 Enter。** `@` 菜单在时 `↑↓` 是选择、`Tab` 上屏；Enter 永远发送**写着的东西**。这是输入框唯一不能破的承诺——一个偷走 Enter 的菜单会让每条消息变成"赌高亮在哪儿"。触发点用 textarea 的 `cursorOffset` 从光标往回找边界 `@`，往前吃到 token 尾，光标必须落在已打出的那段里：所以 `@src/app.ts and more` 后面接着打字不会再弹菜单。
+4. **高亮只给解析得出来的引用。** `knownReferenceRanges` + `addHighlightByCharRange`（一次性的 `SyntaxStyle.fromStyles`）；`@` 后面跟着不认识的词就是普通散文。这样 accent 才有意义——它说的是"这个能解析"，不是"你打了个 at 号"。
+5. **上屏的是路径，不是内容（契约 D5，与 tcode 的有意识分歧）。** tcode 的 `expand_references` 把文件内容展开成独立 block，省一轮往返——那是真收益，先承认。nulya 不这么做，理由是 nulya 自己的：append-only ledger + fork/compaction 的长寿谱系意味着注入的快照**永久**待在前缀里、每步付费且会陈旧；今天 `user_text` 是纯文本，注入需要内容块结构，本身就是内核改动。模型有 `read`，freshness 去重让重复读很便宜，路径本身就是它需要的那一部分。代价是每个引用多一轮往返，若真疼再议。
+
+**偏离**：菜单里文件的大小只在**显示的那 8 条**上 `statSync`（`git ls-files` 不给 metadata，为 20000 条各 stat 一次不值），tcode 是 walk 时顺手拿到的；显示形状（`file · 1.2 KiB`）一致。
+
+**已知 / 没做**：`@目录` 不展开（契约 §5）；索引不监听文件系统（30s 陈旧 + `@` 时触发，够用）。

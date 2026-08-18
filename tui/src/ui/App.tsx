@@ -18,6 +18,7 @@ import { OverlayContext, createOverlayStore, type OverlayKind } from "../state/o
 import { createTabStore, type SessionTab } from "../state/tabs.ts"
 import { loadTuiState, rememberModel, sessionPins, type ModelPick } from "../state/tui_state.ts"
 import { sessions_dir } from "../nulya/files.ts"
+import { createProjectIndex } from "../references.ts"
 import { describeTool } from "../render/registry.ts"
 import { extSync, isVerdict, sessionNew, sessionOutcome, verdicts, type ModelView as ModelParams } from "../nulya/cli.ts"
 import { planStore, summarize } from "../extensions.ts"
@@ -89,6 +90,12 @@ export function App(props: AppProps) {
     { id: props.id, state: props.state, created: props.created ?? false, effort: props.effort },
     props.driver ?? {},
   )
+
+  // The workspace's paths, for `@` completion (tui.md §11, T13). Built in the
+  // background from the moment the screen exists: the first `@` before it
+  // finishes shows nothing and the next one shows everything, which beats a
+  // composer that stops accepting characters while git walks a monorepo.
+  const references = createProjectIndex(props.ws.dir)
 
   const [notice, setNotice] = createSignal<string | null>(null)
   const [guide, setGuide] = createSignal<string | null>(props.guide ?? null)
@@ -722,6 +729,7 @@ export function App(props: AppProps) {
                 <Composer
                   onSubmit={submit}
                   onEmptySubmit={takeOverIfOffered}
+                  references={references}
                   onReady={(api) => {
                     composer = api
                     // The picker may already be up (`guide`): it owns the keys.

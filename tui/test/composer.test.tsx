@@ -10,6 +10,7 @@ import { completions } from "../src/commands.ts"
 import { StyleContext, createStyle } from "../src/render/theme.ts"
 import { default_settings } from "../src/state/settings.ts"
 import { settle } from "./support.ts"
+import type { ProjectIndex } from "../src/references.ts"
 
 const style = createStyle(default_settings, {})
 
@@ -127,6 +128,60 @@ test("a `/` line lists the commands it could still be, and Tab finishes it", asy
     await setup.mockInput.typeText("look at src/main.zig")
     frame = await settle(setup, 3)
     expect(frame).not.toContain("Tab completes")
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 60_000)
+
+test("an `@` lists project paths, ↑↓ picks one and Tab writes the path in", async () => {
+  const sent: string[] = []
+  // A fixed index rather than a real repository: what is under test here is the
+  // interaction, and `references.test.ts` is where the index comes from a real
+  // `git ls-files`.
+  const index: ProjectIndex = {
+    candidates: () => [
+      { path: "src/composition.zig", kind: "file" },
+      { path: "src/compact.ts", kind: "file" },
+      { path: "README.md", kind: "file" },
+    ],
+    touch: () => {},
+    size: () => 120,
+  }
+  const setup = await testRender(
+    () => (
+      <StyleContext.Provider value={style}>
+        <Composer onSubmit={(text) => sent.push(text)} references={index} />
+      </StyleContext.Provider>
+    ),
+    { width: 90, height: 14 },
+  )
+  try {
+    await settle(setup, 3)
+    await setup.mockInput.typeText("read @comp")
+    let frame = await settle(setup, 3)
+    expect(frame).toContain("@compact.ts")
+    expect(frame).toContain("@composition.zig")
+    expect(frame).not.toContain("README")
+    expect(frame).toContain("120 B")
+
+    // ↑↓ move the menu's selection and nothing else while it is up.
+    setup.mockInput.pressArrow("down")
+    await settle(setup, 2)
+    setup.mockInput.pressTab()
+    frame = await settle(setup, 3)
+    expect(frame).toContain("read @src/composition.zig")
+    // The token is gone, so the menu is too.
+    expect(frame).not.toContain("Tab inserts the path")
+
+    setup.mockInput.pressEnter()
+    await settle(setup, 2)
+    // The path goes in as TEXT; the file's contents are the model's to fetch (D5).
+    expect(sent).toEqual(["read @src/composition.zig "])
+
+    // An email address is prose, not a half-typed reference.
+    await setup.mockInput.typeText("write to me@example.com")
+    frame = await settle(setup, 3)
+    expect(frame).not.toContain("Tab inserts the path")
   } finally {
     setup.renderer.destroy()
   }
