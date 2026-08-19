@@ -15,6 +15,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const tool = @import("tool.zig");
+const emit = @import("emit.zig");
 const process_tree = @import("environment/tree.zig");
 // Aliased so the two run paths keep naming the primitives they use, not the
 // module they now live in.
@@ -666,7 +667,8 @@ pub const LocalEnvironment = struct {
         while (slot <= max_tasks_per_session) : (slot += 1) {
             const name = try std.fmt.allocPrint(alloc, "t{d}", .{slot});
             defer alloc.free(name);
-            const candidate = try std.fs.path.join(alloc, &.{ tasks_dir, name });
+            // `/` on every OS: this path ends up in the model's receipt (`emit.joinRel`).
+            const candidate = try emit.joinRel(alloc, &.{ tasks_dir, name });
             if (cwd.createDir(self.io, candidate, .default_dir)) |_| {
                 task_dir = candidate;
                 break;
@@ -679,7 +681,7 @@ pub const LocalEnvironment = struct {
 
         const task_id = try std.fmt.allocPrint(alloc, "{s}/t{d}", .{ session_id, slot });
         errdefer alloc.free(task_id);
-        const log_path = try std.fs.path.join(alloc, &.{ dir_rel, task_log_name });
+        const log_path = try emit.joinRel(alloc, &.{ dir_rel, task_log_name });
         errdefer alloc.free(log_path);
 
         var timeout_buf: [16]u8 = undefined;

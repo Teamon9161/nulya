@@ -54,6 +54,7 @@ fn emit(raw: []const u8, tool: []const u8, spill_key: SpillKey, ctx: *Ctx) Emitt
 3. **自动落盘（不是 opt-in 模式）**：一旦发生任何 truncation（单行裁剪或整体裁剪），**总是**把完整原文写到 `scratch/tool-output/...`，并在返回给模型的正文末尾统一追加 footer：`[full output: <path>]`。
    → 这**取代 tcode 的 `full`/`final` 双模式**：只有一种行为，模型永不丢数据、永不需要提前预测输出多大，也不依赖额外 metadata 才知道完整内容在哪里。
 4. **确定性且不碰撞**：落盘文件名不要用运行时自增计数器，也不要用 `base_seq * 64 + i` 这类隐藏上限。用 content hash（如 BLAKE3(raw)）或 `<ledger-id>/<event-seq>-<call-index>` 派生，保证 replay/fork/subagent 下路径稳定且不碰撞。
+5. **给模型看的相对路径一律用 `/` 拼**（`emit.joinRel`；spill footer、后台任务的 log 路径与目录、`.nulya/scratch/<id>` 前缀都经它）：Windows 的文件 API 本来就认 `/`，而一条反斜杠路径被模型贴进 bash 命令的那一刻就坏了（`\t` 是 tab）；harness 其它地方的相对路径（`.nulya/sessions/…`、`.nulya/handoffs/…`）本来就是 `/`，同一个地方不该在一份转录里有两种写法。绝对的宿主路径（store 根、config 文件）照 OS 的写法——那是给人看、也本来就带盘符的。
 
 **批量输出再过一层 StepOutputBudget**：同一 assistant turn 可能返回 N 个 tool call。每个工具 `<= 128KB` 仍可能让一整轮膨胀到 MB 级，所以 batched `tool_results` 合成前还要有 `max_step_bytes`。顺序预算，但**有保底**：预算约束正文、不约束可见性——装不下的结果落盘后保留 prefix + 一条完整的 `[… full output: <path>]` footer（footer 不计入预算；比 footer 还短的结果直接保留原文、不落盘），所以最后一个 call 的报错和第一个一样可见，执行顺序不决定谁进 context。可见总量 ≤ `max_step_bytes` + 每 call 一条 footer。
 

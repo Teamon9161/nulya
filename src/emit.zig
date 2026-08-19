@@ -174,6 +174,19 @@ fn spillName(alloc: std.mem.Allocator, tool: []const u8, event_seq: u64, call_in
     return std.fmt.allocPrint(alloc, "{s}-{d}-{d}.txt", .{ tool, event_seq, call_index });
 }
 
+/// Join the parts of a workspace-relative path the MODEL will read — a spill
+/// footer, a background task's log — with `/` on every OS, never the native
+/// separator (base-tools.md §2.4). Two reasons, both about the reader rather
+/// than the file system (which accepts `/` on Windows just the same): a
+/// backslash path pasted into a bash command is mangled the moment it is read
+/// (`\t` is a tab), and every other relative path the harness shows is already
+/// spelled with `/` (`.nulya/sessions/…`, `.nulya/handoffs/…`) — one spelling,
+/// so the same place is never written two ways in one transcript. Callers pass
+/// parts without separators of their own; this does no normalisation.
+pub fn joinRel(alloc: std.mem.Allocator, parts: []const []const u8) ![]u8 {
+    return std.mem.join(alloc, "/", parts);
+}
+
 pub const StepOutputLimiter = struct {
     io: std.Io,
     scratch_dir: []const u8,
@@ -256,7 +269,7 @@ fn stepSpillPath(
 ) ![]const u8 {
     const name = try std.fmt.allocPrint(alloc, "step-{s}-{d}-{d}.txt", .{ tool_name, event_seq, call_index });
     defer alloc.free(name);
-    return std.fs.path.join(alloc, &.{ scratch_dir, "tool-output", name });
+    return joinRel(alloc, &.{ scratch_dir, "tool-output", name });
 }
 
 fn writeStepSpill(io: std.Io, path: []const u8, data: []const u8) !void {
@@ -277,7 +290,7 @@ fn writeSpill(
     call_index: usize,
     scratch_dir: []const u8,
 ) ![]const u8 {
-    const dir = try std.fs.path.join(alloc, &.{ scratch_dir, "tool-output" });
+    const dir = try joinRel(alloc, &.{ scratch_dir, "tool-output" });
     defer alloc.free(dir);
     const cwd = std.Io.Dir.cwd();
     // `createDirPath` is idempotent (an existing dir returns `.existed`, not an
@@ -286,7 +299,7 @@ fn writeSpill(
     try cwd.createDirPath(io, dir);
     const name = try spillName(alloc, tool, event_seq, call_index);
     defer alloc.free(name);
-    const path = try std.fs.path.join(alloc, &.{ dir, name });
+    const path = try joinRel(alloc, &.{ dir, name });
     errdefer alloc.free(path);
     try cwd.writeFile(io, .{ .sub_path = path, .data = raw });
     return path;
@@ -343,6 +356,9 @@ test "emit clips an over-long line with a self-describing marker and footer" {
     const long = "x" ** 40;
     const out = try emit(alloc, io, long, "shell", 2, 0, ".", .{ .max_line_bytes = 10 });
     defer out.deinit(alloc);
+    // The path the model reads is spelled with `/` on every OS (`joinRel`): a
+    // relative scratch dir yields no native separator anywhere in it.
+    try std.testing.expectEqualStrings("./tool-output/shell-2-0.txt", out.spill_path.?);
     try std.testing.expect(std.mem.startsWith(u8, out.text, "xxxxxxxxxx\u{2026}[+30 bytes]"));
     try std.testing.expect(std.mem.indexOf(u8, out.text, "[full output: ") != null);
     try std.testing.expect(out.spill_path != null);

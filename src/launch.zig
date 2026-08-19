@@ -15,6 +15,7 @@ const anthropic = @import("providers/anthropic.zig");
 const codex = @import("providers/codex.zig");
 const config = @import("config.zig");
 const ledger = @import("ledger.zig");
+const emit = @import("emit.zig");
 const environment = @import("environment.zig");
 const store = @import("extension/store.zig");
 const ext_manifest = @import("extension/manifest.zig");
@@ -38,7 +39,9 @@ pub const scratch_dir = ".nulya/scratch";
 /// parent and child, a compact driver and its observer — from writing the same
 /// file (base-tools.md §2). Caller owns the result.
 pub fn sessionScratchDir(alloc: std.mem.Allocator, id: []const u8) ![]u8 {
-    return std.fs.path.join(alloc, &.{ scratch_dir, id });
+    // `/` on every OS (`emit.joinRel`): this prefix reaches the model in every
+    // spill footer and task receipt, and the rest of it is already spelled so.
+    return emit.joinRel(alloc, &.{ scratch_dir, id });
 }
 
 /// Where that session's background tasks live: `<scratch>/<id>/tasks`, one
@@ -48,7 +51,7 @@ pub fn sessionScratchDir(alloc: std.mem.Allocator, id: []const u8) ![]u8 {
 pub fn sessionTasksDir(alloc: std.mem.Allocator, id: []const u8) ![]u8 {
     const scratch = try sessionScratchDir(alloc, id);
     defer alloc.free(scratch);
-    return std.fs.path.join(alloc, &.{ scratch, tasks_subdir });
+    return emit.joinRel(alloc, &.{ scratch, tasks_subdir });
 }
 
 pub const tasks_subdir = "tasks";
@@ -956,4 +959,8 @@ test "a session's tasks live beside its spills, under one removable subtree" {
     defer alloc.free(tasks);
     try std.testing.expect(std.mem.startsWith(u8, tasks, scratch));
     try std.testing.expect(std.mem.endsWith(u8, tasks, tasks_subdir));
+    // Both reach the model (spill footers, task receipts), so both are spelled
+    // with `/` whatever the OS — no native separator anywhere in them.
+    try std.testing.expectEqualStrings(".nulya/scratch/s-1", scratch);
+    try std.testing.expectEqualStrings(".nulya/scratch/s-1/tasks", tasks);
 }

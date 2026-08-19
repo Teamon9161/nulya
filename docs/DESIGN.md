@@ -196,7 +196,7 @@ collectTurn(PromptIR, tool_defs)  →  assistant turn（可能含多个 tool_use
 
 不变量：**一条 assistant tool-call batch ↔ 恰好一条匹配的 tool_results batch。** `session.recordCompletedToolStats` 直接按这个形状读 suffix 并 assert。**PromptIR 永远可回放，ledger 存事实**：`prompt.ToolCall.args_json` 一定是完整 JSON 值，`ledger.ToolCall.args_json` 是模型写出来的那些字节。
 
-**输出纪律**（`emit.zig`，细节见 [base-tools.md](base-tools.md)）：每个 tool 结果过 head/tail 字节预算（UTF-8 边界截断），超限落盘留指针；每 step 另有聚合预算 `StepOutputLimiter`——预算约束的是**正文**，不约束可见性：装不下的结果保留 prefix + 一条**完整**的落盘指针 footer（footer 是每个结果的保底、不计入预算；比 footer 还短的结果直接保留原文、不落盘），所以 batch 里的执行顺序不决定模型能看到哪个结果，一个 step 的可见工具文本 ≤ `max_bytes` + 每 call 一条 footer。落盘在 `.nulya/scratch/<session-id>/tool-output/`：文件名由 ledger seq + call index 决定（session 内 replay 一致），session id 这一层让并发 session（fork 的父子、compact driver 与 observer）不会写同一个文件。
+**输出纪律**（`emit.zig`，细节见 [base-tools.md](base-tools.md)）：每个 tool 结果过 head/tail 字节预算（UTF-8 边界截断），超限落盘留指针；每 step 另有聚合预算 `StepOutputLimiter`——预算约束的是**正文**，不约束可见性：装不下的结果保留 prefix + 一条**完整**的落盘指针 footer（footer 是每个结果的保底、不计入预算；比 footer 还短的结果直接保留原文、不落盘），所以 batch 里的执行顺序不决定模型能看到哪个结果，一个 step 的可见工具文本 ≤ `max_bytes` + 每 call 一条 footer。落盘在 `.nulya/scratch/<session-id>/tool-output/`：文件名由 ledger seq + call index 决定（session 内 replay 一致），session id 这一层让并发 session（fork 的父子、compact driver 与 observer）不会写同一个文件。**模型读到的这些相对路径在每个 OS 上都用 `/` 拼**（`emit.joinRel`，base-tools.md §2 第 5 条；后台任务的 log 路径同一条规矩，§6.1）——反斜杠路径贴进 bash 就碎，而 harness 别处的相对路径本来就是 `/`。
 
 ---
 

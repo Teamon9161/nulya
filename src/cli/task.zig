@@ -149,7 +149,8 @@ fn parseRef(alloc: std.mem.Allocator, name: []const u8, default_session: ?[]cons
 fn makeRef(alloc: std.mem.Allocator, session: []const u8, slot: []const u8) !Ref {
     const tasks = try launch.sessionTasksDir(alloc, session);
     defer alloc.free(tasks);
-    const dir = try std.fs.path.join(alloc, &.{ tasks, slot });
+    // `/` on every OS (`emit.joinRel`): this directory names the log the model reads.
+    const dir = try emit.joinRel(alloc, &.{ tasks, slot });
     errdefer alloc.free(dir);
     const full = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ session, slot });
     errdefer alloc.free(full);
@@ -319,7 +320,7 @@ fn taskSupervise(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     };
     try writeStatus(alloc, io, dir, status);
 
-    const log_path = try std.fs.path.join(alloc, &.{ dir, environment.task_log_name });
+    const log_path = try emit.joinRel(alloc, &.{ dir, environment.task_log_name });
     defer alloc.free(log_path);
 
     const began = std.Io.Timestamp.now(io, .awake);
@@ -886,7 +887,7 @@ fn collectRows(arena: std.mem.Allocator, io: std.Io, only: ?[]const u8) ![]Row {
         var slots = tasks.iterate();
         while (try slots.next(io)) |slot_entry| {
             if (slot_entry.kind != .directory or !isSlot(slot_entry.name)) continue;
-            const dir = try std.fs.path.join(arena, &.{ tasks_dir, slot_entry.name });
+            const dir = try emit.joinRel(arena, &.{ tasks_dir, slot_entry.name });
             const notify = try readNotify(arena, io, dir);
 
             if (only) |want| {
@@ -1049,7 +1050,7 @@ fn unixSeconds(s: []const u8) ?i64 {
 
 fn writeRowJson(jw: *std.json.Stringify, io: std.Io, row: Row) !void {
     var log_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const log = std.fmt.bufPrint(&log_buf, "{s}{c}{s}", .{ row.dir, std.fs.path.sep, environment.task_log_name }) catch row.dir;
+    const log = std.fmt.bufPrint(&log_buf, "{s}/{s}", .{ row.dir, environment.task_log_name }) catch row.dir;
     try jw.beginObject();
     try jw.objectField("task");
     try jw.write(row.full);
@@ -1134,7 +1135,7 @@ fn taskStatus(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
         if (s.duration_ms) |d| try printOut(alloc, io, "duration_ms: {d}\n", .{d});
     }
     if (row.notify) |n| try printOut(alloc, io, "notify: {s}\n", .{n});
-    try printOut(alloc, io, "log: {s}{c}{s}\n", .{ row.dir, std.fs.path.sep, environment.task_log_name });
+    try printOut(alloc, io, "log: {s}/{s}\n", .{ row.dir, environment.task_log_name });
     return 0;
 }
 
