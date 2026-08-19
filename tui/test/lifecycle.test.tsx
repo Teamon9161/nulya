@@ -73,6 +73,48 @@ test("a draft creates nothing on disk; the screen says so and the store agrees",
   }
 }, 60_000)
 
+/**
+ * Ctrl+C narrows from the nearest thing to stop to the furthest, and never
+ * quits on the first press (tui.md §1.2 D6).
+ *
+ * The third press is not exercised here for the obvious reason — it is
+ * `process.exit(0)`, and this test runs in the process it would take with it.
+ * What matters is that the two before it are not that.
+ */
+test("Ctrl+C clears a draft first, then warns — it never quits on the first press", async () => {
+  const setup = await testRender(
+    () => (
+      <App
+        ws={ws}
+        pick={{ profile: "scripted", model: "scripted-demo" }}
+        style={style}
+        driver={{ env: scripted_env }}
+      />
+    ),
+    // As `main.tsx` builds the real renderer: without this the harness's own
+    // Ctrl+C handler tears the screen down before the screen sees the key.
+    { width: 100, height: 24, exitOnCtrlC: false },
+  )
+  try {
+    await settle(setup, 3)
+    await setup.mockInput.typeText("half a thought nobody wants to lose")
+    expect(await settle(setup, 2)).toContain("half a thought")
+
+    setup.mockInput.pressKey("c", { ctrl: true })
+    let frame = await settle(setup, 3)
+    expect(frame).not.toContain("half a thought")
+    expect(frame).toContain("input cleared")
+
+    // Empty box, nothing running: now it is about the process, and it says so
+    // instead of doing it.
+    setup.mockInput.pressKey("c", { ctrl: true })
+    frame = await settle(setup, 3)
+    expect(frame).toContain("Ctrl+C again to quit")
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 60_000)
+
 test("the first message creates exactly one session, carrying the pins as they stand at that moment", async () => {
   const dir = mkdtempSync(join(tmpdir(), "nulya-tui-state-"))
   const statePath = join(dir, "tui-state.json")

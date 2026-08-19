@@ -3,6 +3,7 @@ import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import type { KeyEvent, ScrollBoxRenderable, Selection } from "@opentui/core"
 import { Transcript, rowsBelow, windowItems } from "./Transcript.tsx"
 import { Composer, type ComposerApi } from "./Composer.tsx"
+import { ApprovalPanel, type ApprovalChoice } from "./ApprovalPanel.tsx"
 import { StatusBar } from "./StatusBar.tsx"
 import { TabBar } from "./TabBar.tsx"
 import { SessionsView } from "./overlays/SessionsView.tsx"
@@ -220,8 +221,25 @@ export function App(props: AppProps) {
    * durable form of the same statement is `[approvals] allow` in `tui.toml`.
    */
   const [always, setAlways] = createSignal<ReadonlySet<string>>(new Set())
-  /** The call the kernel is holding open, and the promise it is holding it on. */
-  const [pending, setPending] = createSignal<Approval | null>(null)
+  /**
+   * The calls the kernel is holding open, oldest first — the head is the one on
+   * screen. A queue rather than one slot because this process can drive more
+   * than one tab: two sessions stepping at once can each stop on a call, and a
+   * second request that overwrote the first would leave that step waiting on a
+   * promise nobody can resolve, holding its writer lease forever.
+   */
+  const [pendingQueue, setPendingQueue] = createSignal<readonly Approval[]>([])
+  const pending = (): Approval | null => pendingQueue()[0] ?? null
+  /**
+   * Calls `A` has waved through: the rest of the batch the person was looking
+   * at when they pressed it (tui.md §5.7).
+   *
+   * Ids, not a flag, and that is the whole point. A run can contain several
+   * steps, so "allow the rest" as a boolean would quietly cover a batch nobody
+   * has seen yet; the ids are exactly the calls that were on screen — every one
+   * of them already drawn as a card — and nothing else can join the set.
+   */
+  const [batchAllowed, setBatchAllowed] = createSignal<ReadonlySet<string>>(new Set())
   /** The denied call whose reason is being typed (the `N` key). */
   const [noteFor, setNoteFor] = createSignal<string | null>(null)
   /** A handover the model proposed and nobody has answered yet (tui.md §5.8). */
@@ -700,31 +718,57 @@ export function App(props: AppProps) {
     })
 
   /**
+   * The calls of the batch the given session is in the middle of: every tool
+   * card the current turn drew, and of those, the ones that have not run yet.
+   *
+   * The kernel emits a whole turn's calls before executing any of them and
+   * resolves them together in one `tool_results` (physics: one batch, one
+   * event), so "not resolved" is this turn and "not done" is what is still
+   * ahead — which is exactly what "allow the rest of this batch" has to mean.
+   */
+  const batchOf = (session: string) => {
+    const items = tabOf(session)?.state.snapshot.items ?? []
+    const turn = items.filter((item): item is Extract<TranscriptItem, { kind: "tool" }> =>
+      item.kind === "tool" && !item.resolved,
+    )
+    return { turn, ahead: turn.filter((item) => item.state !== "done") }
+  }
+
+  /**
    * Answer one gate request (`nulya session step --gate`, DESIGN §14).
    *
    * Rules and mode decide first (`approvals.ts`); only what neither settles
-   * reaches a person, as a line under the card that already shows the call. The
-   * kernel is blocked on this promise, which is exactly why it is safe to wait:
-   * the model's connection closed before the batch began.
+   * reaches a person, above the composer (`ui/ApprovalPanel.tsx`). The kernel is
+   * blocked on this promise, which is exactly why it is safe to wait: the
+   * model's connection closed before the batch began.
    */
   const approve = (request: GateRequest, session: string): Promise<GateVerdict> => {
     const asked = tabOf(session)
     const verdict = decideNow(request, asked)
-    if (verdict === "allow") return Promise.resolve<GateVerdict>({ allow: true })
     if (verdict === "deny") {
       const what = describeCall(request)
       setNotice(`denied by a rule · ${request.tool}${what ? ` · ${what}` : ""}`)
       return Promise.resolve<GateVerdict>({ allow: false, note: "denied by a standing rule in this workspace" })
     }
+    // Waved through with the rest of its batch. After the standing `deny` table
+    // and nothing else: a rule that says never must still say never, and one
+    // keypress about six calls cannot outrank it.
+    if (batchAllowed().has(request.call_id)) {
+      setBatchAllowed(new Set([...batchAllowed()].filter((id) => id !== request.call_id)))
+      return Promise.resolve<GateVerdict>({ allow: true })
+    }
+    if (verdict === "allow") return Promise.resolve<GateVerdict>({ allow: true })
     asked?.state.setAwaitingApproval(request.call_id)
-    return new Promise<GateVerdict>((resolve) => setPending({ request, session, resolve }))
+    return new Promise<GateVerdict>((resolve) =>
+      setPendingQueue([...pendingQueue(), { request, session, resolve }]),
+    )
   }
 
-  /** Answer the card that is up, and let the kernel go on. */
+  /** Answer the call that is up, and let the kernel go on. */
   const settleApproval = (verdict: GateVerdict) => {
     const asked = pending()
     if (!asked) return
-    setPending(null)
+    setPendingQueue(pendingQueue().slice(1))
     setNoteFor(null)
     tabOf(asked.session)?.state.setAwaitingApproval(null)
     asked.resolve(verdict)
@@ -741,6 +785,24 @@ export function App(props: AppProps) {
     const key = alwaysKey(asked.request, (tool) => toolId(tabOf(asked.session), tool))
     setAlways(new Set([...always(), key]))
     setNotice(`always allowing ${describeKey(key)} this session · /mode for the rest`)
+    settleApproval({ allow: true })
+  }
+
+  /**
+   * `A` — allow this call and the rest of the batch it belongs to.
+   *
+   * tcode reviews a batch as one prompt where the tool's own policy says that is
+   * safe; nulya's gate is serial by construction (the kernel offers call N only
+   * once call N-1 has run), so the equivalent here is a person deciding for the
+   * calls THEY CAN SEE: the whole turn is already on screen as cards, and this
+   * answers the remaining ones with the one keypress instead of six.
+   */
+  const allowBatch = () => {
+    const asked = pending()
+    if (!asked) return
+    const ahead = batchOf(asked.session).ahead.filter((item) => item.callId !== asked.request.call_id)
+    setBatchAllowed(new Set([...batchAllowed(), ...ahead.map((item) => item.callId)]))
+    setNotice(`allowing the remaining ${ahead.length} call${ahead.length === 1 ? "" : "s"} of this batch`)
     settleApproval({ allow: true })
   }
 
@@ -766,6 +828,58 @@ export function App(props: AppProps) {
   }
 
   const toggleMode = () => chooseMode(mode() === "ask" ? "auto" : "ask")
+
+  /** Where the call being asked about sits in its batch, for the panel's heading. */
+  const batchPlace = createMemo(() => {
+    const asked = pending()
+    if (!asked) return { position: 1, batch: 1, ahead: 0 }
+    const { turn, ahead } = batchOf(asked.session)
+    return { position: Math.max(1, turn.length - ahead.length + 1), batch: Math.max(1, turn.length), ahead: ahead.length - 1 }
+  })
+  /** How many calls `A` would cover besides this one. */
+  const batchAhead = () => Math.max(0, batchPlace().ahead)
+
+  /**
+   * The answers, in the order a person weighs them: yes, yes-and-stop-asking,
+   * no. Each is its own row on the panel and each is what its key does, so the
+   * keyboard and the mouse are two ways to the same list rather than two
+   * interfaces (tui.md §5.7).
+   */
+  const approvalChoices = createMemo((): ApprovalChoice[] => {
+    const asked = pending()
+    if (!asked) return []
+    const kind = describeKey(alwaysKey(asked.request, (tool) => toolId(tabOf(asked.session), tool)))
+    const ahead = batchAhead()
+    return [
+      { key: "y", label: "allow this call", tone: "ok", run: () => settleApproval({ allow: true }) },
+      ...(ahead > 0
+        ? [
+            {
+              key: "A",
+              label: `allow it and the ${ahead} call${ahead === 1 ? "" : "s"} left in this batch`,
+              tone: "ok" as const,
+              run: allowBatch,
+            },
+          ]
+        : []),
+      { key: "a", label: `always allow ${kind} this session`, tone: "warn", run: allowAlways },
+      {
+        key: "n",
+        label: "deny · nothing runs, the model is told",
+        tone: "err",
+        run: () => {
+          settleApproval({ allow: false })
+          setNotice("denied · nothing ran · N next time to say why")
+        },
+      },
+      {
+        key: "N",
+        label: "deny, and type a reason for the model",
+        tone: "err",
+        run: () => setNoteFor(pending()!.request.call_id),
+      },
+    ]
+  })
 
   // ── The model's handover proposal (tui.md §5.8) ───────────────────────────
 
@@ -795,14 +909,23 @@ export function App(props: AppProps) {
   /** A step just ended: that is when a handoff file can have appeared. */
   createEffect(() => {
     if (status() !== "idle") return
-    // …and the one case where a card outlives the question: Ctrl+C killed the
+    // …and the one case where a question outlives its step: Ctrl+C killed the
     // step that was waiting for it. Nobody is listening for the answer now, so
-    // the card comes down rather than sitting there holding nothing.
-    const asked = pending()
-    if (asked && tabOf(asked.session)?.attach.status() === "idle") {
-      settleApproval({ allow: false })
+    // the panel comes down rather than sitting there holding nothing. Only the
+    // entries whose OWN session has stopped — another tab may still be running.
+    const orphaned = pendingQueue().filter((asked) => tabOf(asked.session)?.attach.status() === "idle")
+    if (orphaned.length > 0) {
+      setPendingQueue(pendingQueue().filter((asked) => !orphaned.includes(asked)))
+      for (const asked of orphaned) {
+        tabOf(asked.session)?.state.setAwaitingApproval(null)
+        asked.resolve({ allow: false })
+      }
+      setNoteFor(null)
       setNotice("the step ended before that call was answered · nothing ran")
     }
+    // A batch nobody is executing any more cannot have calls left to wave
+    // through; the ids would be dead weight until the process ends.
+    if (batchAllowed().size > 0) setBatchAllowed(new Set<string>())
     checkHandoff()
   })
 
@@ -1157,7 +1280,13 @@ export function App(props: AppProps) {
     // rule Esc follows for browse mode).
     if (pending() && noteFor() === null && (composer?.isEmpty() ?? true)) {
       if (key.name === "y") return consume(key, () => settleApproval({ allow: true }))
-      if (key.name === "a") return consume(key, allowAlways)
+      if (key.name === "a") {
+        // Same pair as `n`/`N`: the lower-case key is the narrow answer, the
+        // shifted one the wider. `a` is wider in KIND (every call like this one,
+        // for the rest of the run), `A` in NUMBER (this batch, and nothing else).
+        if (key.shift) return batchAhead() > 0 ? consume(key, allowBatch) : undefined
+        return consume(key, allowAlways)
+      }
       if (key.name === "n") {
         // Shift is the difference between "no" and "no, because": one key for
         // the answer that needs no words, one for the one that does.
@@ -1249,13 +1378,29 @@ export function App(props: AppProps) {
     }
     if (matches(keys.redraw, key)) return consume(key, () => renderer.requestRender())
     if (matches(keys.quit, key)) {
-      // First press stops the step, second leaves. Two different truths about
-      // "stop" (tui.md §1.2 D6): the kernel's, then the process's.
+      // Ctrl+C narrows from the nearest thing to stop to the furthest, and
+      // NEVER quits on its first press (tui.md §1.2 D6). Three truths about
+      // "stop", in the order a person means them: the draft in the box, the
+      // kernel's step, and last — only ever after having said so — this process.
+      // Losing a half-written message to a reflex, or the whole screen, is not
+      // something a second keystroke can undo.
+      if (!(composer?.isEmpty() ?? true)) {
+        return consume(key, () => {
+          composer?.clear()
+          setCtrlCArmed(false)
+          setNotice("input cleared · Ctrl+C twice to quit")
+        })
+      }
       const here = live()
       if (here && here.attach.status() === "stepping" && !ctrlCArmed()) {
         here.attach.kill()
         setCtrlCArmed(true)
         setNotice("step killed · Ctrl+C again to quit")
+        return
+      }
+      if (!ctrlCArmed()) {
+        setCtrlCArmed(true)
+        setNotice("Ctrl+C again to quit")
         return
       }
       quit()
@@ -1306,7 +1451,6 @@ export function App(props: AppProps) {
                       contributions={live()?.contributions() ?? []}
                       plan={plan()}
                       cwd={props.ws.dir}
-                      noteWanted={noteFor()}
                       onPickModel={() => openOverlay("model")}
                       onCommand={submit}
                       ref={(box) => (scroll = box)}
@@ -1374,6 +1518,20 @@ export function App(props: AppProps) {
                     event, and this front end shows only what the ledger holds. */}
                 <Show when={handoff()}>
                   <HandoffPanel file={handoff()!} />
+                </Show>
+                {/* The call the kernel is stopped on, asked where the answer is
+                    given (tui.md §5.7). Above the composer for the same reason
+                    the handover proposal is: it is a question about what happens
+                    next, not a thing that happened. */}
+                <Show when={pending()}>
+                  <ApprovalPanel
+                    tool={pending()!.request.tool}
+                    summary={describeCall(pending()!.request)}
+                    position={batchPlace().position}
+                    batch={batchPlace().batch}
+                    choices={approvalChoices()}
+                    note={noteFor() !== null}
+                  />
                 </Show>
                 <Composer
                   onSubmit={submit}

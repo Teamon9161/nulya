@@ -39,6 +39,8 @@ export function tempWorkspace(): TempWorkspace {
 /** The deterministic offline provider, so no test ever needs an API key. */
 export const scripted_env = { NULYA_SCRIPTED_MODE: "finish" }
 export const scripted_loop_env = { NULYA_SCRIPTED_MODE: "loop" }
+/** Three shell calls in one turn: what a serial gate looks like from a driver. */
+export const scripted_batch_env = { NULYA_SCRIPTED_MODE: "batch" }
 
 /**
  * Settings for a test that wants tool calls to RUN (tui.md §5.7).

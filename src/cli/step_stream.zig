@@ -24,6 +24,16 @@ pub const StepStream = struct {
     out: *std.Io.Writer,
     /// Ledger index of the first event not yet flushed as a line.
     printed: usize = 0,
+    /// A read-only handle on the session's ledger, so events can be reported the
+    /// moment they EXIST rather than only when the step is over.
+    ///
+    /// The one event that exists before the model is asked anything is a
+    /// `user_text` the step boundary drained from the inbox (DESIGN §3.4), and a
+    /// front end that shows a turn optimistically has no way to learn it landed
+    /// until the line arrives: for a whole step it goes on saying "queued" about
+    /// a message the model is visibly already answering. Absent, this behaves
+    /// exactly as before — every line at `stepEnd`.
+    ledger_view: ?*const ledger.Ledger = null,
     /// How the most recent step ended, for the `run done` line's `stopped`.
     last_status: loop.StepStatus = .completed,
     /// First write failure, if any. An observer must not fail the step, so the
@@ -51,6 +61,13 @@ pub const StepStream = struct {
         // A complete reasoning item is opaque provider bytes kept for replay, not
         // something to render; `thinking_delta` is the display channel (§2.2).
         if (event == .reasoning_item) return;
+        // The turn is under way, so the step boundary is behind us and whatever
+        // it drained is already a ledger fact. Report it before the first delta:
+        // the ORDER a reader sees is then "the message landed, and here is the
+        // answer to it", which is the order it actually happened in.
+        if (event == .started) {
+            if (self.ledger_view) |l| self.flushEvents(l.view()) catch |e| self.note(e);
+        }
         self.modelLine(event) catch |e| self.note(e);
     }
 

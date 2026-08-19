@@ -99,7 +99,10 @@ export function StatusBar(props: {
   const activity = createMemo(() => {
     // A call waiting for a verdict is the only thing happening: the kernel is
     // stopped on it, and the keys that move it are on the card (tui.md §5.7).
-    if (props.awaiting) return "waiting for you · y allow · n deny · a always"
+    // The keys are on the panel right above this line now, spelled out one per
+    // row; repeating them here in a line that has to fit whatever is left over
+    // is how they ended up as `y allow · nasknstep` on a narrow window.
+    if (props.awaiting) return "waiting for your answer"
     if (props.snapshot.error) return `error: ${props.snapshot.error}`
     // Observer mode is not idleness: nothing is stuck, we simply are not the
     // writer. Say which, and say when taking over is possible.
@@ -170,8 +173,13 @@ export function StatusBar(props: {
     const budget = Math.max(0, screen().width - 2)
     const right =
       displayWidth(contextChip()) + displayWidth(behindChip()) + displayWidth(modeChip()) + displayWidth(roleChip())
-    const activity_chip = ` · ${activity()}`
-    const model = fit(modelText(), Math.max(8, budget - right - displayWidth(activity_chip)))
+    const wanted = ` · ${activity()}`
+    const model = fit(modelText(), Math.max(8, budget - right - displayWidth(wanted)))
+    // Cut too, not just measured. An error message or a long tool name is as
+    // long as somebody else made it, and a segment that overflows its row does
+    // not stop at the edge — it runs into the chips beside it and both become
+    // one unreadable word (`nasknstep 1`, T27).
+    const activity_chip = fit(wanted, Math.max(0, budget - right - displayWidth(model)))
     let room = Math.max(0, budget - displayWidth(model) - displayWidth(activity_chip) - right)
     // What the tail insists on before the ambient chips get anything. A NOTICE
     // is news — what just happened, or why something did not — and it outranks

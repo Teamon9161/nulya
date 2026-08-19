@@ -829,7 +829,14 @@ test "session cli: --stream emits the transient line protocol and leaves the led
             saw_ledger_event = true;
         }
     }
-    try std.testing.expectEqualStrings("{\"stream\":\"model\",\"event\":\"started\"}", first.?);
+    // The turn the step boundary drained out of the inbox is a fact BEFORE the
+    // model is asked anything, and it is reported when it becomes one: a driver
+    // showing an appended turn optimistically learns it landed at the top of the
+    // step it opened, not at the end of it (step_stream.zig).
+    try std.testing.expectEqualStrings(
+        "{\"seq\":1,\"kind\":\"user_text\",\"text\":\"probe the box\"}",
+        std.mem.trim(u8, first.?, " \r\n"),
+    );
     try std.testing.expect(saw_tool_begin and saw_tool_end and saw_ledger_event);
     try std.testing.expectEqual(@as(usize, 2), step_ends); // one tool step, one closing step
     try std.testing.expectEqualStrings(

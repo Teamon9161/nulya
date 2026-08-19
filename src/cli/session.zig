@@ -819,7 +819,12 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     defer sess.deinit();
 
     const before = sess.l.len();
-    if (stream) |s| s.printed = before;
+    if (stream) |s| {
+        s.printed = before;
+        // Read-only, and only so a drained inbox turn reaches the reader when it
+        // lands rather than at the end of the step it opened (step_stream.zig).
+        s.ledger_view = &sess.l;
+    }
     const steps = sess.run(max_steps) catch |err| {
         // Whatever this run did append before it faulted is still fact; report
         // those lines, then the error.

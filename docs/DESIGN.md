@@ -658,6 +658,7 @@ nulya                       ← 无参数：同 `nulya help`（跑一个二进�
   - 行协议（一行一个 JSON，写完即 flush）：带 `stream` 字段的是瞬态观测行，不带的就是与 `session events` **同形**的 ledger 事件行（同一个 `encodeEventLine`、同一套 seq）。
 
     ```jsonl
+    {"seq":6,"kind":"user_text","text":"…"}                     ← 这一步的边界从 inbox 排干的（§3.4），在 started 之前
     {"stream":"model","event":"started"}
     {"stream":"model","event":"text_delta","text":"…"}          # 另有 thinking_delta（展示用）
     {"stream":"model","event":"tool_use_start","index":0,"id":"call_1","name":"shell"}
@@ -672,7 +673,7 @@ nulya                       ← 无参数：同 `nulya help`（跑一个二进�
     {"stream":"run","event":"done","steps":2,"stopped":"end_turn"}
     ```
 
-    `reasoning_item`（不透明、只为回放）**不转发**；`stopped ∈ end_turn | budget | canceled | max_tokens`（最后一步的回复被截断即 `max_tokens`，不论 `run` 是因它停的还是因连续两次停的，§4）。每个 step 的 ledger 行在该 step 的 `step end` **之前**刷出：读者见到 `step end` 就知道这一步的事件已全。诊断（原来的 "session step failed: …" 等）在 `--stream` 下变成 `{"stream":"run","event":"error","message":"…"}` 后非零退出——**stdout 上没有非 JSON 行**。
+    `reasoning_item`（不透明、只为回放）**不转发**；`stopped ∈ end_turn | budget | canceled | max_tokens`（最后一步的回复被截断即 `max_tokens`，不论 `run` 是因它停的还是因连续两次停的，§4）。每个 step 的 ledger 行在该 step 的 `step end` **之前**刷出：读者见到 `step end` 就知道这一步的事件已全。**已经是事实的行不等到 step 末尾**：`started` 一到就先把尚未报告的 ledger 行刷出去——那一刻唯一可能存在的就是这一步边界从 inbox 排干的 `user_text`，于是"消息落地了 / 这是对它的回答"按真实发生的顺序到达读者。（不然乐观回显的前端要等整整一个 step 才知道那条消息进了 ledger，而模型明明已经在答它——TUI 的 `queued` 标就是这么挂住的。）诊断（原来的 "session step failed: …" 等）在 `--stream` 下变成 `{"stream":"run","event":"error","message":"…"}` 后非零退出——**stdout 上没有非 JSON 行**。
 - **`session step --gate`：谁来批准**（§4 的 `loop.ToolGate` 接到一条管道上）。**要求与 `--stream` 同用**（单独给 `--gate` → stderr 一句 usage + exit 1）：请求本身就是那个协议的一行，没有那条线就没有地方问，而一个"悄悄没问就跑了"的 step 正是这个 flag 存在要防的事。
   - 每个 tool call 执行前，stdout 多一行 `{"stream":"gate","event":"request","call_id":"c1","tool":"shell","args":"{\"command\":\"…\"}"}`（`args` 是模型写的原文——shell 的 command 就在里面，怎么读是 driver 的事），然后**阻塞读 stdin 一行**：`allow` / `deny` / `deny <note>`。note 原样进那个 call 的 marker 结果，模型看得见。
   - **fail closed**：认不出的答案、读失败、以及最要紧的 **EOF**（答的人走了）→ 一律 deny，EOF 之后的每个 call 不再问、直接 deny；每种情况在 stderr 说一句（stdout 保持纯协议）。写失败记下来、收尾 exit 1（与 `--stream` 丢观测同一条）。

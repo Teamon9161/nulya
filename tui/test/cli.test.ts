@@ -53,11 +53,15 @@ describe("session step --stream", () => {
     expect(await step.exited).toBe(0)
 
     const tags = streamTags(lines)
-    expect(tags[0]).toBe("model:started")
+    // The turn the step boundary drained comes first — before the answer to it,
+    // which is the order it happened in (DESIGN §14).
+    expect(tags[0]).toBe("event:user_text")
     expect(tags[tags.length - 1]).toBe("run:done")
 
-    // Step 1: model deltas → tool begin/end → this step's ledger lines → step end.
+    // Step 1: the drained turn → model deltas → tool begin/end → the rest of
+    // this step's ledger lines → step end.
     expect(tags).toEqual([
+      "event:user_text",
       "model:started",
       "model:text_delta",
       "model:tool_use_start",
@@ -65,7 +69,6 @@ describe("session step --stream", () => {
       "model:done",
       "tool:begin",
       "tool:end",
-      "event:user_text",
       "event:assistant",
       "event:tool_results",
       "step:end",
@@ -78,7 +81,7 @@ describe("session step --stream", () => {
     ])
 
     // Typed parsing, not string matching: every line is a real object.
-    const started = lines[0]!
+    const started = lines.find((l) => l.kind === "stream" && l.line.event === "started")!
     expect(started.kind).toBe("stream")
 
     const toolStart = lines.find((l) => l.kind === "stream" && l.line.event === "tool_use_start")!

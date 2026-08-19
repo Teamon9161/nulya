@@ -18,7 +18,15 @@ import { default_settings } from "../src/state/settings.ts"
 import { sessionList, sessionNew } from "../src/nulya/cli.ts"
 import { handoffsFor, headline, nextHandoff } from "../src/handoff.ts"
 import { verdictLine } from "../src/nulya/cli.ts"
-import { auto_settings, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
+import {
+  auto_settings,
+  scripted_batch_env,
+  scripted_env,
+  settle,
+  tempWorkspace,
+  until,
+  type TempWorkspace,
+} from "./support.ts"
 
 /** The default: a person answers. `auto_settings` is the other half of the pair. */
 const ask_style = createStyle(default_settings, {})
@@ -34,29 +42,43 @@ afterAll(() => {
 })
 
 /** The scripted provider's one call is `shell echo hello-from-nulya`. */
-async function stepUntilAsked(width = 100, height = 24) {
+async function stepUntilAsked(width = 100, height = 24, env: Record<string, string> = scripted_env) {
   const id = await sessionNew(ws, { profile: "scripted" })
   const state = createSessionState(id)
   const setup = await testRender(
-    () => <App ws={ws} id={id} state={state} style={ask_style} driver={{ env: scripted_env }} created />,
+    // A state file of this call's own. `/mode` REMEMBERS the choice (tui.md
+    // §7), so one test that switches to auto would otherwise decide the mode
+    // every later test in this file starts in.
+    () => (
+      <App
+        ws={ws}
+        id={id}
+        state={state}
+        style={ask_style}
+        driver={{ env }}
+        statePath={join(ws.dir, `tui-state-${id}.json`)}
+        created
+      />
+    ),
     { width, height },
   )
   await settle(setup, 3)
   await setup.mockInput.typeText("probe")
   setup.mockInput.pressEnter()
-  await until(() => setup.captureCharFrame().includes("run this?"), 30_000)
+  await until(() => setup.captureCharFrame().includes("approve this call"), 30_000)
   return { id, state, setup }
 }
 
-test("in ask mode a tool call waits under its own card, and `y` runs it", async () => {
+test("in ask mode a tool call waits, marked on its card and asked above the box", async () => {
   const { state, setup } = await stepUntilAsked()
   try {
-    // The card above the prompt is the ordinary tool card: the command is
-    // already on screen, which is the whole reason the prompt is one line.
+    // Two halves of one question (tui.md §5.7): the card says WHICH call, the
+    // panel above the composer says what the answers are and where to give one.
     const frame = setup.captureCharFrame()
     expect(frame).toContain("echo hello-from-nulya")
-    expect(frame).toContain("y allow")
     expect(frame).toContain("waiting for you")
+    expect(frame).toContain("allow this call")
+    expect(frame).toContain("deny")
     // Nothing ran while it waited.
     expect(state.snapshot.items.some((item) => item.kind === "tool" && item.resolved)).toBe(false)
 
@@ -73,7 +95,7 @@ test("`N` denies with a typed reason, and the model is told exactly that", async
   const { state, setup } = await stepUntilAsked()
   try {
     setup.mockInput.pressKey("N", { shift: true })
-    await until(() => setup.captureCharFrame().includes("type a reason"), 10_000)
+    await until(() => setup.captureCharFrame().includes("type the reason"), 10_000)
     await setup.mockInput.typeText("not on this machine")
     setup.mockInput.pressEnter()
 
@@ -120,6 +142,7 @@ test("in auto mode the same call just runs, and the mode is on the status line",
         state={state}
         style={createStyle(auto_settings, {})}
         driver={{ env: scripted_env }}
+        statePath={join(ws.dir, `tui-state-${id}.json`)}
         created
       />
     ),
@@ -133,6 +156,48 @@ test("in auto mode the same call just runs, and the mode is on the status line",
     const call = state.snapshot.items.find((item) => item.kind === "tool" && item.resolved)!
     expect(call.kind === "tool" && call.output).toContain("hello-from-nulya")
     expect(setup.captureCharFrame()).toContain("auto")
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 120_000)
+
+/**
+ * A turn with three calls in it (tui.md §5.7). The kernel offers them one at a
+ * time — call N only once N-1 has run — so `A` is a decision about the calls a
+ * person can SEE, all three already on screen as cards, rather than a promise
+ * about anything the model has not written yet.
+ */
+test("`A` answers the rest of the batch, and the batch says how many are left", async () => {
+  const { state, setup } = await stepUntilAsked(100, 30, scripted_batch_env)
+  try {
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("1 of 3 in this batch")
+    expect(frame).toContain("2 calls left in this batch")
+
+    setup.mockInput.pressKey("A", { shift: true })
+    // One keypress, three calls: nothing else is ever asked about, and all
+    // three ran.
+    await until(() => state.snapshot.items.filter((item) => item.kind === "tool" && item.resolved).length === 3, 60_000)
+    expect(setup.captureCharFrame()).not.toContain("approve this call")
+    const outputs = state.snapshot.items
+      .filter((item) => item.kind === "tool" && item.resolved)
+      .map((item) => (item.kind === "tool" ? item.output : ""))
+      .join("\n")
+    expect(outputs).toContain("batch-one")
+    expect(outputs).toContain("batch-two")
+    expect(outputs).toContain("batch-three")
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 120_000)
+
+/** With one call in the turn there is no rest of the batch to offer. */
+test("a lone call is not a batch", async () => {
+  const { setup } = await stepUntilAsked()
+  try {
+    const frame = setup.captureCharFrame()
+    expect(frame).not.toContain("in this batch")
+    expect(frame).toContain("allow this call")
   } finally {
     setup.renderer.destroy()
   }

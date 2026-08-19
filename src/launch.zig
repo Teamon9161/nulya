@@ -60,7 +60,7 @@ pub fn sessionScratchDir(alloc: std.mem.Allocator, id: []const u8) ![]u8 {
 pub const ScriptedProvider = struct {
     mode: Mode = .finish,
 
-    pub const Mode = enum { finish, loop, truncate, handoff };
+    pub const Mode = enum { finish, loop, truncate, handoff, batch };
 
     /// The fixed brief the `handoff` mode proposes. Three complete sections, so
     /// the real bundled tool accepts it, with a sentinel a test can follow all
@@ -113,6 +113,26 @@ pub const ScriptedProvider = struct {
             try sink.emit(.{ .tool_use_start = .{ .index = 0, .id = "c1", .name = "shell" } });
             try sink.emit(.{ .tool_use_input_delta = .{ .index = 0, .fragment = "{\"command\":\"echo hel" } });
             try sink.emit(.{ .done = .max_tokens });
+            return;
+        }
+        // Three calls in ONE turn: the shape a serial gate is actually asked
+        // about (DESIGN §4 — the kernel offers call N only once N-1 has run), so
+        // a driver's batch policy has something offline to be tested against.
+        if (self.mode == .batch) {
+            if (hasToolResult(request.prompt_ir.turns)) {
+                try sink.emit(.{ .text_delta = "done" });
+                try sink.emit(.{ .done = .end_turn });
+                return;
+            }
+            try sink.emit(.{ .text_delta = "Let me look around." });
+            inline for (.{ "one", "two", "three" }, 0..) |word, i| {
+                try sink.emit(.{ .tool_use_start = .{ .index = i, .id = "b" ++ word, .name = "shell" } });
+                try sink.emit(.{ .tool_use_input_delta = .{
+                    .index = i,
+                    .fragment = "{\"command\":\"echo batch-" ++ word ++ "\"}",
+                } });
+            }
+            try sink.emit(.{ .done = .tool_use });
             return;
         }
         if (self.mode == .handoff) {

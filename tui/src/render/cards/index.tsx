@@ -17,11 +17,7 @@ import type { TranscriptItem, UnknownItem } from "../../state/session.ts"
  * One transcript item → one card. Live and replay both come through here, so a
  * card can never depend on having seen the stream (tui.md §3).
  */
-export function Card(props: {
-  item: TranscriptItem
-  /** The call whose denial is waiting for a typed reason, if any (tui.md §5.7). */
-  noteWanted?: string | null
-}) {
+export function Card(props: { item: TranscriptItem }) {
   return (
     <Switch>
       {/* Compaction's two turns are user turns as far as the ledger is
@@ -59,15 +55,13 @@ export function Card(props: {
         <Thinking item={props.item as Extract<TranscriptItem, { kind: "thinking" }>} />
       </Match>
       {/* A call the kernel is holding open for a verdict (tui.md §5.7): the card
-          as usual, plus the one line that says the keys. */}
+          as usual, plus the mark that says this is the one being asked about.
+          The keys are above the composer, where the answer is given. */}
       <Match when={props.item.kind === "tool"}>
         <box flexDirection="column" width="100%">
           <ToolCard item={props.item as Extract<TranscriptItem, { kind: "tool" }>} />
           <Show when={(props.item as Extract<TranscriptItem, { kind: "tool" }>).awaiting}>
-            <ApprovalPrompt
-              item={props.item as Extract<TranscriptItem, { kind: "tool" }>}
-              note={props.noteWanted === (props.item as Extract<TranscriptItem, { kind: "tool" }>).callId}
-            />
+            <ApprovalPrompt />
           </Show>
         </box>
       </Match>

@@ -97,6 +97,12 @@ export interface ComposerApi {
   focus(): void
   blur(): void
   /**
+   * Throw away what is in the box. Ctrl+C's first meaning (tui.md §4.4): a
+   * draft the user has decided against is a thing to cancel, and cancelling it
+   * must not also be the thing that quits the program.
+   */
+  clear(): void
+  /**
    * Put a submitted line back in the box, when the send could not happen at all
    * — a session that would not start (tui.md §11, T22). Never for a turn the
    * kernel accepted: that one is in the ledger, and a second copy in the
@@ -330,6 +336,14 @@ export function Composer(props: {
       blur: () => {
         area?.blur()
         setFocused(false)
+      },
+      clear: () => {
+        clear()
+        // The draft is gone, so the attachments it referred to are nobody's:
+        // leaving them would keep a thousand folded lines alive behind an empty
+        // box, and the next `[Pasted text #1]` would stand for the old one.
+        setAttachments([])
+        shown = null
       },
       restore: (text: string) => {
         // Only into a box the user has not started refilling: they typed the

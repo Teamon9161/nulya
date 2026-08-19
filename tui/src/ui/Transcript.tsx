@@ -78,8 +78,6 @@ export function Transcript(props: {
   onPickModel?: () => void
   /** A `/command` on the welcome screen was clicked: run it as if typed. */
   onCommand?: (command: string) => void
-  /** The denied call whose reason is being typed right now (tui.md §5.7). */
-  noteWanted?: string | null
   /** Handed to `App` so PgUp/PgDn and the "more below" hint have something to act on. */
   ref?: (box: ScrollBoxRenderable) => void
 }) {
@@ -127,7 +125,7 @@ export function Transcript(props: {
       <Index each={shown()}>
         {(item, index) => (
           <box flexDirection="column" width="100%" marginTop={gapBefore(shown()[index - 1], item())}>
-            <Card item={item()} noteWanted={props.noteWanted} />
+            <Card item={item()} />
           </box>
         )}
       </Index>
