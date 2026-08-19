@@ -995,7 +995,7 @@ export function ExtView(props: {
 
   /**
    * The pin panel. One row per tool, three states, and the quota above them —
-   * `2+N/8`, because the builtins count and a refused pin is otherwise a
+   * `1+N/8`, because the builtin counts and a refused pin is otherwise a
    * mystery (DESIGN §5.1).
    *
    * A pin written by a project or system config layer is shown and not touched:
@@ -1267,7 +1267,7 @@ export function ExtView(props: {
                 )
               }}
             </Index>
-            {/* An empty store is normal — nulya ships two builtins and nothing
+            {/* An empty store is normal — nulya ships one builtin and nothing
                 else — so this says what an extension is FOR and the one command
                 that makes one, rather than reporting a count of zero. */}
             <Show when={extensions().length === 0}>

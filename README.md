@@ -5,7 +5,7 @@ A minimal, self-evolving AI agent harness in Zig.
 The kernel is intentionally tiny and immutable: an **append-only conversation
 ledger** (for a stable prompt-cache prefix), a **batched agent loop** (many tool
 calls per turn, one result turn back), one **output-discipline primitive**
-(`emit`), and exactly **two builtin tools** — `shell` and `edit`. Every other
+(`emit`), and exactly **one builtin tool** — `shell`. Every other
 capability is meant to be grown by the model itself as an extension, versioned
 immutably, and promoted into the model-facing tool set at session boundaries
 based on real usage — not baked into the core.
@@ -26,7 +26,7 @@ based on real usage — not baked into the core.
 ## Status
 
 v0.1 self-evolution core is frozen and proven end-to-end (`tests/e2e.zig`, real
-binaries, no mocks): a session exposing only `shell` + `edit` builds and activates
+binaries, no mocks): a session exposing only `shell` builds and activates
 its own extension via the `nulya` CLI, usage is journaled, and the next session
 promotes that extension into the native tool set at zero cache cost.
 

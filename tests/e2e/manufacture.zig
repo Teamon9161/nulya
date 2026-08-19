@@ -1,7 +1,7 @@
-//! The milestone's first sentence (DESIGN §16): "Nulya v0.1 ships two tools. The
-//! third is created by Nulya itself." A shell/edit-only session manufactures a
-//! real extension through the real CLI, usage alone never promotes it, and a pin
-//! — from config or `--pin` — puts it on the next session's tool face.
+//! The milestone's first sentence (DESIGN §16): "Nulya ships one tool. The
+//! second is created by Nulya itself." A shell-only session manufactures a real
+//! extension through the real CLI, usage alone never promotes it, and a pin —
+//! from config or `--pin` — puts it on the next session's tool face.
 
 const std = @import("std");
 const support = @import("support.zig");
@@ -38,14 +38,14 @@ fn latestToolOutput(l: *const ledger.Ledger) ?[]const u8 {
     return null;
 }
 
-test "self-manufacture closed loop: a shell/edit-only session builds its own extension; usage alone never promotes it; a pin — from config or --pin — makes it native in the next session" {
+test "self-manufacture closed loop: a shell-only session builds its own extension; usage alone never promotes it; a pin — from config or --pin — makes it native in the next session" {
     // The milestone's first sentence, proven with no harness-built extension:
     //
-    //   Session A exposes ONLY shell + edit. A deterministic model, through those
-    //   builtins alone (real ToolExecutor -> LocalEnvironment shell spawns), runs
+    //   Session A exposes ONLY shell. A deterministic model, through that one
+    //   builtin (real ToolExecutor -> LocalEnvironment shell spawns), runs
     //   `nulya ext init/build/activate/run` to manufacture a brand-new capability
     //   and records its usage. The tool never becomes native mid-session.
-    //     -> Session B, opened with no pin, STILL sees only shell + edit: the
+    //     -> Session B, opened with no pin, STILL sees only shell: the
     //        usage journal is evidence, never a decision (DESIGN §5.1, §5.5).
     //     -> Promotion is someone writing a pin. Both spellings are exercised
     //        through the real CLI: `[registry] pinned_native_tools` in the
@@ -115,16 +115,15 @@ test "self-manufacture closed loop: a shell/edit-only session builds its own ext
     var sess = try session.AgentSession.init(alloc, .{
         .model = .{ .ptr = &model_impl, .vtable = &SelfBuildModel.vtable },
         .step_ctx = .{
-            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = ws_path },
+            .tool_context = .{ .environment = lenv.environment(), .cwd = ws_path },
             .scratch_dir = ".nulya/scratch",
         },
     });
     defer sess.deinit();
 
-    // Session A's model face is exactly the two builtins — no extension exists yet.
-    try std.testing.expectEqual(@as(usize, 2), sess.composition.tools.tools.len);
+    // Session A's model face is exactly the one builtin — no extension exists yet.
+    try std.testing.expectEqual(@as(usize, 1), sess.composition.tools.tools.len);
     try std.testing.expect(sess.composition.tools.lookup("shell") != null);
-    try std.testing.expect(sess.composition.tools.lookup("edit") != null);
     try std.testing.expect(sess.composition.tools.lookup("greet") == null);
 
     try sess.appendUser("I need a greet capability.");
@@ -145,8 +144,8 @@ test "self-manufacture closed loop: a shell/edit-only session builds its own ext
     _ = try sess.step(); // end turn
     try std.testing.expect(sess.lastAssistantDone());
 
-    // Session A never promoted the tool: its face is frozen at shell + edit.
-    try std.testing.expectEqual(@as(usize, 2), sess.composition.tools.tools.len);
+    // Session A never promoted the tool: its face is frozen at shell alone.
+    try std.testing.expectEqual(@as(usize, 1), sess.composition.tools.tools.len);
     try std.testing.expect(sess.composition.tools.lookup("greet") == null);
 
     // The model's own `nulya ext run` recorded the durable usage fact — written
@@ -188,7 +187,7 @@ test "self-manufacture closed loop: a shell/edit-only session builds its own ext
 
         var comp_plain = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{});
         defer comp_plain.deinit(alloc);
-        try std.testing.expectEqual(@as(usize, 2), comp_plain.tools.tools.len);
+        try std.testing.expectEqual(@as(usize, 1), comp_plain.tools.tools.len);
         try std.testing.expect(comp_plain.tools.lookup("greet") == null);
     }
 
@@ -259,13 +258,13 @@ fn assertGreetRunsFromHeader(
     var resumed = try session.AgentSession.openDurable(alloc, .{
         .model = .{ .ptr = &model, .vtable = &EndTurnModel.vtable },
         .step_ctx = .{
-            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = ws_path },
+            .tool_context = .{ .environment = lenv.environment(), .cwd = ws_path },
             .scratch_dir = ".nulya/scratch",
         },
     }, .{ .workspace = ws, .session_path = spath });
     defer resumed.deinit();
 
-    try std.testing.expectEqual(@as(usize, 3), resumed.composition.tools.tools.len);
+    try std.testing.expectEqual(@as(usize, 2), resumed.composition.tools.tools.len);
     const greet = resumed.composition.tools.lookup("greet") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("ext:demo/greet", greet.definition.id);
     const result = try callNative(alloc, io, greet, ws_path);

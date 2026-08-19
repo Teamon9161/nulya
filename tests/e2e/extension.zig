@@ -127,11 +127,11 @@ test "closed loop: a pinned tool executes the frozen version through the tool ex
     // The pin + freeze half of the kernel loop, proven end to end with a real
     // built binary — not a stub, not a FakeEnv. The extension here is built by
     // the test harness (`buildAndActivate`); the separate self-manufacture test
-    // below proves a shell/edit-only session can build it itself.
+    // below proves a shell-only session can build it itself.
     //
     //   build+activate web.search v1  ->  CLI `nulya ext run` records usage
     //     ->  usage alone changes nothing: a new session's tool face is still
-    //         shell + edit
+    //         shell alone
     //     ->  a session that PINS ext:web.search/web_search exposes web_search
     //         natively, and its ToolExecutor spawns the frozen v1 executable
     //     ->  activate v2:  the same session's native call STILL runs v1 (frozen),
@@ -168,7 +168,7 @@ test "closed loop: a pinned tool executes the frozen version through the tool ex
     }
 
     // Usage is evidence, not a decision: a session that does not pin the tool
-    // still sees only shell + edit, however many rows the journal holds.
+    // still sees only shell, however many rows the journal holds.
     {
         const events = try tool_stats.readAll(alloc, io, ws_path);
         defer tool_stats.freeEvents(alloc, events);
@@ -176,7 +176,7 @@ test "closed loop: a pinned tool executes the frozen version through the tool ex
 
         var unpinned = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{});
         defer unpinned.deinit(alloc);
-        try std.testing.expectEqual(@as(usize, 2), unpinned.tools.tools.len);
+        try std.testing.expectEqual(@as(usize, 1), unpinned.tools.tools.len);
         try std.testing.expect(unpinned.tools.lookup("web_search") == null);
     }
 
@@ -1019,7 +1019,7 @@ test "bundled evolution: ext build extensions/evolution is data kind and needs n
     var sess = try session.AgentSession.openDurable(alloc, .{
         .model = .{ .ptr = &model, .vtable = &EndTurnModel.vtable },
         .step_ctx = .{
-            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = ws_path },
+            .tool_context = .{ .environment = lenv.environment(), .cwd = ws_path },
             .scratch_dir = ".nulya/scratch",
         },
     }, .{ .workspace = ws, .session_path = spath });
@@ -1037,7 +1037,7 @@ test "bundled evolution: ext build extensions/evolution is data kind and needs n
     const descriptor = sess.composition.skills.skills[0];
     try std.testing.expectEqualStrings("evolution", descriptor.name);
     // No tools: evolution has no runtime and takes no native slot.
-    try std.testing.expectEqual(@as(usize, 2), sess.composition.tools.tools.len);
+    try std.testing.expectEqual(@as(usize, 1), sess.composition.tools.tools.len);
 
     // `skill load <ref>` returns the frozen SKILL.md verbatim — the same bytes
     // the repo ships.

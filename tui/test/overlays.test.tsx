@@ -204,7 +204,7 @@ test("/ext shows the version line, the current pointer and the usage counts", as
     // The strip is a row of four, so sideways keys walk it — and they wrap both
     // ways, which is the half `Tab` alone never had (T24).
     setup.mockInput.pressKey("h")
-    expect(await settle(setup, 4)).toMatch(/tools 2\+0\/\d+/)
+    expect(await settle(setup, 4)).toMatch(/tools 1\+0\/\d+/)
     setup.mockInput.pressKey("l")
     await settle(setup, 4)
     setup.mockInput.pressKey("l")
@@ -286,8 +286,8 @@ test("/ext's tools pane pins with a keypress, and the pin is what the next sessi
     setup.mockInput.pressKey("t")
     const pane = await settle(setup, 4)
     // The quota's denominator is the kernel's `registry.max_tools` and this test
-    // is about the numerator: the two builtins, and what this panel adds to them.
-    expect(pane).toMatch(/tools 2\+0\/\d+/)
+    // is about the numerator: the builtin, and what this panel adds to it.
+    expect(pane).toMatch(/tools 1\+0\/\d+/)
     expect(pane).toContain("[ ] ext:lint/lint")
 
     setup.mockInput.pressKey(" ")
@@ -295,7 +295,7 @@ test("/ext's tools pane pins with a keypress, and the pin is what the next sessi
     // On goes to `this TUI` first: a config file is one more key away (`A`).
     expect(pinned).toContain("[x] ext:lint/lint")
     expect(pinned).toContain("this TUI")
-    expect(pinned).toMatch(/tools 2\+1\/\d+/)
+    expect(pinned).toMatch(/tools 1\+1\/\d+/)
     expect(sessionPins(statePath)).toEqual(["ext:lint/lint"])
 
     // And that list is the argv: the kernel freezes exactly it (physics #2).
@@ -604,8 +604,8 @@ test("/ext: a full tool face leaves the extension half on rather than refusing i
     run(["ext", "init", "--script", "lint"])
     const built = run(["ext", "build", join(".nulya", "extensions", "lint")])
     expect(/v-[0-9a-zA-Z]+/.exec(built.stdout.toString())?.[0]).toBeDefined()
-    // A face with no room in it at all: the two builtins fill it.
-    writeFileSync(join(full.dir, ".nulya", "config.toml"), "[registry]\nmax_tools = 2\n")
+    // A face with no room in it at all: the builtin fills it.
+    writeFileSync(join(full.dir, ".nulya", "config.toml"), "[registry]\nmax_tools = 1\n")
 
     const statePath = join(full.dir, "full-face.json")
     const setup = await overlayFrame(() => (

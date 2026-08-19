@@ -2,6 +2,7 @@ import { Show, createMemo, createSignal } from "solid-js"
 import { useScreen, useStyle } from "../render/theme.ts"
 import { onClick } from "./rows.ts"
 import { displayWidth, fit } from "./columns.ts"
+import { builtin_tools } from "../pins.ts"
 import type { SessionSnapshot } from "../state/session.ts"
 import type { DriverStatus } from "../state/driver.ts"
 import type { Role } from "../state/attach.ts"
@@ -40,7 +41,7 @@ export function StatusBar(props: {
   model: string
   /** `session step --effort`, when this tab names one; absent = the kernel's default. */
   effort?: string
-  /** Extension tools on the face beside the two builtins (`tools 2+N`). */
+  /** Extension tools on the face beside the builtin (`tools 1+N`). */
   tools: number
   /** The permission mode this TUI answers the kernel's gate with (tui.md §5.7). */
   mode?: PermissionMode
@@ -190,7 +191,7 @@ export function StatusBar(props: {
    * every segment on this line is measured and cut by us (`ui/columns.ts`). The
    * order is a judgement about what this line is FOR: the model (what you are
    * talking to), what is happening, and the way to the rest of the keys must
-   * survive every width; the running cost gives up next; `tools 2+N` first,
+   * survive every width; the running cost gives up next; `tools 1+N` first,
    * because the composition card above says the same thing at length.
    */
   const layout = createMemo(() => {
@@ -216,7 +217,7 @@ export function StatusBar(props: {
     const usage_chip = ` · ${usage()}`
     const keepUsage = room - displayWidth(usage_chip) >= floor
     if (keepUsage) room -= displayWidth(usage_chip)
-    const tools_chip = ` · tools 2+${props.tools}`
+    const tools_chip = ` · tools ${builtin_tools}+${props.tools}`
     const keepTools = room - displayWidth(tools_chip) >= floor
     if (keepTools) room -= displayWidth(tools_chip)
     return {

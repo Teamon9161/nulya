@@ -70,7 +70,7 @@ export interface ApprovalContext {
   always: ReadonlySet<string>
   /**
    * The stable id of a tool name on this session's face (`ext:<id>/<tool>`), or
-   * undefined for a builtin and for a name this process cannot resolve. Rules
+   * undefined for the builtin and for a name this process cannot resolve. Rules
    * may name either; the id is what a person writes in a config file, because it
    * is the same string whatever a session happens to call the tool.
    */

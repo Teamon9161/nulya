@@ -17,7 +17,7 @@
  *    down, where the eye already is while typing. One fact, one place — and the
  *    status bar is the place that survives the first message.
  *  - the TOOLS row was a flex row of names, so a face of seven collapsed to
- *    `tools 2+5` — the same counts the status bar was already showing. Here it
+ *    `tools 1+6` — the same counts the status bar was already showing. Here it
  *    is a label column and the names WRAP, so a growing face grows downward
  *    instead of turning back into a number.
  *
@@ -74,14 +74,14 @@ export function Welcome(props: {
   const valueWidth = () => Math.max(8, screen().width - 2 - label_width - 1)
 
   /**
-   * The face the next session would carry. The two builtins are always there
-   * and always first (DESIGN §5.1/§5.2); the pinned ones are the interesting
-   * half, so only those carry the ⚡. A pin is a stable id (`ext:<ext>/<tool>`)
-   * and the tool NAME is what the model calls, so that is what is drawn.
+   * The face the next session would carry. The one builtin is always there and
+   * always first (DESIGN §5.1/§5.2); the pinned ones are the interesting half,
+   * so only those carry the ⚡. A pin is a stable id (`ext:<ext>/<tool>`) and
+   * the tool NAME is what the model calls, so that is what is drawn.
    */
   const tools = () => {
     const pinned = (props.plan?.tools ?? []).map((id) => `${style.glyphs.capability}${id.split("/").pop() ?? id}`)
-    return ["shell", "edit", ...pinned].join(" ")
+    return ["shell", ...pinned].join(" ")
   }
 
   return (
@@ -95,7 +95,7 @@ export function Welcome(props: {
       <box height={1} />
       {/* The one sentence that says what this is: a level above the key list
           under it, which is a caption on the way out. */}
-      <text fg={style.theme.muted}>an immutable kernel with two tools, and everything else it builds for itself</text>
+      <text fg={style.theme.muted}>an immutable kernel with one tool, and everything else it builds for itself</text>
       <box height={1} />
 
       {/* Where, and what with. The model is under the composer and stays there

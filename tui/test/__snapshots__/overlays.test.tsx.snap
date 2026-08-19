@@ -25,7 +25,7 @@ exports[`/sessions lists the store and opens the highlighted session 1`] = `
 `;
 
 exports[`/ext shows the version line, the current pointer and the usage counts 1`] = `
-" extensions · 1 · tools 2+0/<max>
+" extensions · 1 · tools 1+0/<max>
  extensions  versions  tools  usage
 
  ▾ ● lint    0/1 tools  active    lint · script · active · tools 0/1 pinned · current v-<hash>

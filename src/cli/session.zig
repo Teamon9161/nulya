@@ -330,7 +330,7 @@ pub fn createSession(alloc: std.mem.Allocator, io: std.Io, args: []const []const
     var sess = session.AgentSession.createDurable(alloc, .{
         .model = holder.model(),
         .step_ctx = .{
-            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd_path },
+            .tool_context = .{ .environment = lenv.environment(), .cwd = cwd_path },
             .scratch_dir = scratch,
         },
         .extension_roots = ext_roots,
@@ -815,7 +815,7 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     var sess = session.AgentSession.openDurable(alloc, .{
         .model = holder.model(),
         .step_ctx = .{
-            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd_path },
+            .tool_context = .{ .environment = lenv.environment(), .cwd = cwd_path },
             .scratch_dir = scratch,
             .retry = cfg.provider.retry,
             .observer = if (stream) |s| s.observer() else null,

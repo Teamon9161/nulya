@@ -17,9 +17,9 @@ pub const max_line_bytes: usize = 16384;
 /// longest marker a ≤ 10 MB file can need (`…[+NNNNNNNN bytes]` = 20 bytes).
 pub const clip_keep_bytes: usize = max_line_bytes - 20;
 
-/// The clip marker's opening — tcode `redact.rs` `read_marker`, and what the
-/// kernel's `edit` refuses in an `old_string`. Assembled rather than written
-/// literally so this file can itself be edited by the tools it describes.
+/// The clip marker's opening — tcode `redact.rs` `read_marker`, and what
+/// `edit` refuses in an `old_string`. Assembled rather than written literally
+/// so this file can itself be edited by the tools it describes.
 pub const marker_open = "\u{2026}[+";
 
 /// Rust `str::lines()`: split at `\n`, drop one trailing `\r` from each line, a
@@ -210,8 +210,8 @@ pub fn clipNote(alloc: std.mem.Allocator, clipped: []const ClippedLine) !?[]cons
 }
 
 /// Does `s` carry a clip marker (`…[+`)? A `write` of such content would put
-/// the marker into the file as if it were text. Same test the kernel's `edit`
-/// applies to an `old_string`.
+/// the marker into the file as if it were text. Same test `edit` applies to
+/// an `old_string`.
 pub fn hasReadMarker(s: []const u8) bool {
     return std.mem.indexOf(u8, s, marker_open) != null;
 }

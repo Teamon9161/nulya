@@ -1,9 +1,9 @@
 //! The self-description entry points: `nulya help`, the `ext api` topics, the
 //! kernel prompt's one bootstrap sentence, and the bundled `guide` skill.
 //!
-//! These four are what a session with nothing but `shell` and `edit` can find
-//! out about the harness it is running in, so each is checked as the model
-//! would meet it — a real process, its real output.
+//! These four are what a session with nothing but `shell` can find out about
+//! the harness it is running in, so each is checked as the model would meet it
+//! — a real process, its real output.
 
 const std = @import("std");
 const support = @import("support.zig");
@@ -181,7 +181,7 @@ test "kernel prompt: a fresh session's first system block names NULYA_EXE, nulya
     var sess = try session.AgentSession.openDurable(alloc, .{
         .model = .{ .ptr = &model, .vtable = &EndTurnModel.vtable },
         .step_ctx = .{
-            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = ws_path },
+            .tool_context = .{ .environment = lenv.environment(), .cwd = ws_path },
             .scratch_dir = ".nulya/scratch",
         },
     }, .{ .workspace = ws, .session_path = spath });
@@ -253,7 +253,7 @@ test "bundled guide: ext build extensions/guide is data kind and needs no zig; s
     var sess = try session.AgentSession.openDurable(alloc, .{
         .model = .{ .ptr = &model, .vtable = &EndTurnModel.vtable },
         .step_ctx = .{
-            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = ws_path },
+            .tool_context = .{ .environment = lenv.environment(), .cwd = ws_path },
             .scratch_dir = ".nulya/scratch",
         },
     }, .{ .workspace = ws, .session_path = spath });
@@ -265,7 +265,7 @@ test "bundled guide: ext build extensions/guide is data kind and needs no zig; s
     try std.testing.expectEqual(@as(usize, 1), sess.composition.skills.skills.len);
     const descriptor = sess.composition.skills.skills[0];
     try std.testing.expectEqualStrings("guide", descriptor.name);
-    try std.testing.expectEqual(@as(usize, 2), sess.composition.tools.tools.len);
+    try std.testing.expectEqual(@as(usize, 1), sess.composition.tools.tools.len);
     for (sess.composition.system_prompts.blocks) |b| {
         try std.testing.expect(!std.mem.startsWith(u8, b.source, "ext:"));
     }

@@ -44,6 +44,21 @@
         }
       },
       {
+        "name": "edit",
+        "description": "Exact string replacement in a UTF-8 text file. `old_string` must match the current content exactly (whitespace included; LF and CRLF are reconciled with the file's own line endings) and must be unique unless replace_all is set — add surrounding context to make it unique rather than guessing. `target_line` selects one otherwise-ambiguous match by its 1-based starting line, taken from a previous ambiguous-match error; it cannot be combined with replace_all. Only edit text you have actually seen in this session — read or grep output both count — and whose surroundings you understand; if you are unsure of the exact content or of the impact of the change, read the file first. A separate read is not required when grep already showed you the exact text with enough context around it. The result echoes the edited region with line numbers, so there is no need to re-read the file afterwards.",
+        "input": {
+          "type": "object",
+          "properties": {
+            "path": { "type": "string" },
+            "old_string": { "type": "string" },
+            "new_string": { "type": "string" },
+            "replace_all": { "type": "boolean", "description": "Replace every occurrence instead of requiring a unique one" },
+            "target_line": { "type": "integer", "description": "1-based start line of the one occurrence to replace; use a line reported by a prior ambiguous-match error. Cannot be combined with replace_all." }
+          },
+          "required": ["path", "old_string", "new_string"]
+        }
+      },
+      {
         "name": "grep",
         "readonly": true,
         "description": "Search file contents with a regex (respects .gitignore). Look for several symbols in one call with alternation — `foo|bar|baz` beats three searches. An all-lowercase pattern matches case-insensitively; any uppercase in it makes the match exact. Pass fixed=true to search the pattern as a literal string (nothing to escape). Set files_only=true to list just the matching files with their match counts — the cheap first pass of a broad survey. Pull surrounding code with `context` (both sides), `before` or `after` — one search with context often gives you enough to edit without a follow-up read. Filter files with `glob`; cap matches with head_limit (default 200) and page with offset. The regex is byte-level: classes, alternation, groups (including (?:)), quantifiers and anchors work; lookaround, backreferences and inline flags like (?i) do not — pass case_insensitive=true instead. Skips directory-scanned files over 512 KiB (an explicit file path may be up to 10 MiB), skips built/cache directories, and reports oversized skips when they explain an empty result.",

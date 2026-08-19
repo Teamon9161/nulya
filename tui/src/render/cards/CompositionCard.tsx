@@ -4,6 +4,7 @@ import { onClick } from "../../ui/rows.ts"
 import { Fact } from "../../ui/Fact.tsx"
 import { displayWidth, fit } from "../../ui/columns.ts"
 import { useFolds } from "../../state/folds.ts"
+import { builtin_tools } from "../../pins.ts"
 import type { Contributions } from "../../nulya/files.ts"
 import type { SessionHeader } from "../../nulya/ledger.ts"
 
@@ -90,7 +91,7 @@ export function CompositionCard(props: {
     (props.header?.composition.native_tools ?? []).map((id) => id.split("/").pop() ?? id),
   )
 
-  const tools = () => ["shell", "edit", ...promoted().map((name) => `${style.glyphs.capability}${name}`)].join(" ")
+  const tools = () => ["shell", ...promoted().map((name) => `${style.glyphs.capability}${name}`)].join(" ")
 
   const skills = createMemo(() =>
     (props.contributions ?? []).flatMap((entry) =>
@@ -118,7 +119,7 @@ export function CompositionCard(props: {
    * the fold is right there for the rest.
    */
   const summary = (room: number) => {
-    const parts = [`tools 2+${promoted().length}`]
+    const parts = [`tools ${builtin_tools}+${promoted().length}`]
     if (skills().length > 0) parts.push(`skills ${skills().length}`)
     if (prompts().length > 0) parts.push(`prompts ${prompts().length}`)
     if (versions().length > 0) parts.push(`ext ${versions().length}`)

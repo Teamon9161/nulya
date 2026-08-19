@@ -218,7 +218,7 @@ test "a command that outruns its timeout_ms is killed and reported, not waited o
     const started = std.Io.Timestamp.now(io, .awake);
     const res = try run(alloc, .{
         .args_json = args_json,
-        .ctx = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd },
+        .ctx = .{ .environment = lenv.environment(), .cwd = cwd },
     });
     defer alloc.free(res.output);
     const elapsed_ms = started.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds();
@@ -276,7 +276,7 @@ test "background:true outside a durable session teaches instead of starting anyt
     // caller. There is nowhere to deposit a `task_finished`, so nothing starts.
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
     defer lenv.deinit();
-    const ctx: tool.ToolContext = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd };
+    const ctx: tool.ToolContext = .{ .environment = lenv.environment(), .cwd = cwd };
 
     const res = try run(alloc, .{
         .args_json = "{\"command\":\"echo never\",\"background\":true}",
@@ -344,7 +344,7 @@ test "shell tool reports cancellation as an error, not a failure result" {
 
     const req: tool.ToolRequest = .{
         .args_json = args_json,
-        .ctx = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd },
+        .ctx = .{ .environment = lenv.environment(), .cwd = cwd },
     };
 
     var fut = io.async(run, .{ alloc, req });

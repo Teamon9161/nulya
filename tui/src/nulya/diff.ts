@@ -1,12 +1,13 @@
 /**
  * `edit` tool arguments → a unified diff string for OpenTUI's `diff` component.
  *
- * The kernel's `edit` is an exact-string transaction (`{path, old_string,
- * new_string, replace_all?}`, DESIGN §6.2), so the only thing the ledger knows
- * about the change is those two strings. The line numbers in the hunk header
- * are therefore relative to the replaced fragment, not to the file: the diff is
- * a faithful picture of the transaction, and inventing file offsets would be a
- * second source of truth the TUI is not allowed to have.
+ * `edit` — a tool of the bundled `std` extension since the kernel stopped
+ * carrying one (DESIGN §7.8) — is an exact-string transaction (`{path,
+ * old_string, new_string, replace_all?, target_line?}`), so the only thing the
+ * ledger knows about the change is those two strings. The line numbers in the
+ * hunk header are therefore relative to the replaced fragment, not to the file:
+ * the diff is a faithful picture of the transaction, and inventing file offsets
+ * would be a second source of truth the TUI is not allowed to have.
  */
 
 export interface EditArgs {

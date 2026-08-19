@@ -1,8 +1,12 @@
 # Nulya — 基础工具与输出纪律 (base tools)
 
-> 基础工具（shell / edit / read-via-shell）**AI 无法自我迭代**，所以它们必须从第一天就稳健；
+> 基础工具（当年是 shell / edit / read-via-shell）**AI 无法自我迭代**，所以它们必须从第一天就稳健；
 > 但内核又必须简单到 AI 一眼看懂。矛盾的解法：**把所有"脏细节"收敛成 kernel 里一个统一的输出原语**，
 > 基础工具本身保持薄，稳健性沉淀在那一个可测的原语里。
+>
+> **2026-08 的更正**：这段话是对**稳健性**的论证，不是对 **builtin 身份**的论证。`edit` 已经搬进
+> `extensions/std`（DESIGN §6 / §7.8），内核只剩 `shell` 一个 builtin——下面每一条纪律照旧成立，
+> 只是 §4 的 `edit` 那节现在是 std 那个 tool 的要求：它由 AI 迭代，而"报错即教学"因此更要写死在测试里。
 
 参考来源：`/home/teamon/code/rust/tcode`（`crates/tcode-tools/src/{shell.rs, fs/mod.rs, fs/read.rs, fs/edit.rs}`）。
 tcode 的数字和教训是真金；它的**问题是 accretion**（per-command 过滤子系统、output-mode 动物园、read 里耦合 vision/redaction）。下面**留教训、砍子系统**。
@@ -16,7 +20,7 @@ tcode 的数字和教训是真金；它的**问题是 accretion**（per-command 
 | 场景 | tcode 的做法（采纳） | 出处 |
 |---|---|---|
 | 文件不存在 | 列出父目录实际内容（截 20 条），模型无需再探一轮 | `fs/mod.rs:not_found_help` |
-| edit 匹配不到/有歧义 | v0.1 至少返回明确原因和匹配次数；later hardening 再返回最多 5 个候选上下文 | `fs/edit.rs` MAX_EDIT_CANDIDATES=5 |
+| edit 匹配不到/有歧义 | 明确原因 + 匹配次数 + 最多 5 个候选上下文（**已落地**，在 std 里） | `fs/edit.rs` MAX_EDIT_CANDIDATES=5 |
 | old_string 里含裁剪标记 | 匹配前就拒绝，把“为啥匹配不上”变成一行诊断 | `fs/edit.rs:124` |
 | 裁剪标记 | 用自描述的 `…[+N bytes]`，不用裸 `…`（裸省略号会被模型抄进 edit 再匹配失败） | `fs/mod.rs:clip` |
 | shell 静默失败 | later hardening：附 “did you mean” 解析提示 | `shell.rs:resolution_hint` |
@@ -81,7 +85,7 @@ fn emit(raw: []const u8, tool: []const u8, spill_key: SpillKey, ctx: *Ctx) Emitt
 
 ---
 
-## 4. 三个基础工具各自的形态
+## 4. 三个基础工具各自的形态（`edit` 已搬进 `extensions/std`，DESIGN §7.8）
 
 ### shell
 - 单工具，`{ command, cwd?, timeout_ms?, background? }`。**去掉 `output_mode`**——溢出由 §2 `emit` 自动落盘，模型不用选。
@@ -92,11 +96,11 @@ fn emit(raw: []const u8, tool: []const u8, spill_key: SpillKey, ctx: *Ctx) Emitt
 - Later hardening：静默+非零时的解析提示。
 - **不做** per-command 输出过滤子系统。噪声大的命令：要么模型自己 `| tail`/`| rg`，要么 §2 的头尾+落盘通用兜底。
 
-### edit
-- v0.1 skeleton：精确串替换，`{ path, old_string, new_string, replace_all? }`。
-- old_string 唯一匹配才动手；歧义→返回匹配次数，让模型补充上下文或显式 `replace_all:true`。**匹配本身就是校验**，不设 read-before-edit 门。
-- 空 old / old==new / old 含裁剪标记 / 非 bool `replace_all` → 匹配前直接拒绝。
-- Later hardening：候选上下文、`target_line`、回显改动片段时带行号。不要让这些体验增强进入 v0.1 的最小内核。
+### edit（**不再是 builtin**：`extensions/std` 的一个 tool，DESIGN §6 / §7.8）
+- 精确串替换，`{ path, old_string, new_string, replace_all?, target_line? }`。
+- old_string 唯一匹配才动手；歧义→返回匹配次数**与最多 5 个带行号的候选窗口**，让模型补充上下文、给 `target_line`，或显式 `replace_all:true`。**匹配本身就是校验**，不设 read-before-edit 门。
+- 空 old / old==new / old 或 new 含裁剪标记 / 非 bool `replace_all` / 非正 `target_line` → 匹配前直接拒绝。
+- 当年记的 later hardening **已经全部落地**（候选上下文、`target_line`、回显改动片段带行号、CRLF 与标点/空白的归一回退）——正是因为它不在内核里了：这些体验增强现在是一次普通的 extension 版本 bump，不动 `kernel_hash`。这条纪律因此换了个方向：**它们进 std，不进内核。**
 
 ### read
 - 经 `shell`（`cat`/`rg`/`sed -n`）即可满足读取——**read 不必是独立基础工具**（DESIGN §6）。若为体验保留一个 native `read`，也让它只做：窗口 + `emit`（§2），**不耦合** 图片解码 / vision 角色 / redaction（那些 tcode 的耦合是 accretion 之源）。

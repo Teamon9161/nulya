@@ -124,7 +124,7 @@ tui/
 ```
 ─────────────────────────────────────────────────────────────────────────────────────────────────────
   ▎ session · 2026-08-16 14:02 · frozen composition
-  ▎ tools  shell edit ⚡web_search ⚡fetch ⚡summarize      skills  evolution zig-style
+  ▎ tools  shell ⚡read ⚡edit ⚡grep      skills  evolution zig-style
                                                                                         (CompositionCard)
   › 把 emit.zig 的 head/tail 预算改成可配置                                              (UserTurn)
 
@@ -145,7 +145,7 @@ tui/
 ─────────────────────────────────────────────────────────────────────────────────────────────────────
  › 好，写进去_                                                                            (Composer)
 ─────────────────────────────────────────────────────────────────────────────────────────────────────
- claude-sonnet-5 (high) · tools 2+3 · ↑12.4k ↓3.1k cache 89% · ⠋ shell 3s · Esc cancel …  step 4 · driver
+ claude-sonnet-5 (high) · tools 1+3 · ↑12.4k ↓3.1k cache 89% · ⠋ shell 3s · Esc cancel …  step 4 · driver
 ```
 
 三块：transcript（`scrollbox`，sticky bottom，鼠标滚轮 / PgUp / PgDn；离开底部时状态栏出现 `↓ new` 提示）、composer（`textarea`）、**输入框下面那一行**（1 行，§4.5）。没有边框，用两条 hairline 分隔；空状态首屏是一个小 wordmark（`ascii-font`）+ cwd + 几条 `/` 命令。
@@ -201,7 +201,7 @@ tui/
 
 一行，五段（T22 起，标题行取消后它同时是"我在跟谁说话"和"现在在发生什么"）：
 
-`<model-id> [(effort)]`（**主语**，`fg`，可点 → `/model`；effort 只在本 tab 明确选过时才写括号——`auto` 就是内核默认，为它花七列不值） · `tools 2+N`（`dim`；draft 上 N = 合并 config pin ∪ `tui-state.json` 的 `session_pins`） · token 累计（`muted`；`↑input ↓output cache%`，**来源是 ledger 的 `assistant.usage`**，流事件只是它落盘前的临时值，同一步不会数两遍——所以重开一场也看得见它到今天为止花了多少，T8） · 当前活动（**只在真的在动时**才 `fg`，否则退一档 `muted`） · hint / notice（`dim`，`/help` 单独一个可点的 box）。右：`step n` · role（`driver` / `observer` §5.6）。离开底部时插入 `↓ 3 new`。
+`<model-id> [(effort)]`（**主语**，`fg`，可点 → `/model`；effort 只在本 tab 明确选过时才写括号——`auto` 就是内核默认，为它花七列不值） · `tools 1+N`（`dim`；1 = 那一个 builtin `shell`，DESIGN §5.1；draft 上 N = 合并 config pin ∪ `tui-state.json` 的 `session_pins`） · token 累计（`muted`；`↑input ↓output cache%`，**来源是 ledger 的 `assistant.usage`**，流事件只是它落盘前的临时值，同一步不会数两遍——所以重开一场也看得见它到今天为止花了多少，T8） · 当前活动（**只在真的在动时**才 `fg`，否则退一档 `muted`） · hint / notice（`dim`，`/help` 单独一个可点的 box）。右：`step n` · role（`driver` / `observer` §5.6）。离开底部时插入 `↓ 3 new`。
 
 **窄屏让位的顺序是一句判断，不是平均分**：model / 当前活动 / 通向 `/help` 的那三格**永不让**；notice 排第二（它是新闻——刚发生了什么、或者为什么没发生——所以一有 notice 就把 `tools` 与 token 挤掉，宁可让人读完那句话）；默认 hint 只坚持 ` · /help`，于是 `tools` 与 token 平时都在；再窄就先丢 `tools`（上面的 CompositionCard 已经把工具面写全了）、再丢 token。80 列实测：model、活动、`/help` 全在。
 
@@ -213,11 +213,11 @@ tui/
 
 来自 header：model identity（provider/model/base_url 主机）、`active[]`（ext id@version 短 hash）、`native_tools`、skills（从各 active 版本的 `extension.json` `contributes.skills` 读）、`parent`。这是"这一场模型看到什么"的一眼版本；打开两场对比就是演化的差分。
 
-**它会折，且默认折着**（T25，设定 `transcript.composition`）：静息只有两行——标题（`session · <时间> · frozen composition`，右端一个折叠记号，与每张 tool 卡同一列）与 model 行（`model  <provider/model> · tools 2+N · skills n · prompts n · ext n`，模型本身仍是 `/model` 的点击目标，点击不冒泡到折叠）。展开后每根轴一行：`model`（这一行的右半换成 endpoint 主机）· `tools` · `skills` · `prompts`（贡献 system prompt 的包名）· `ext`（`id@v-` + 8 位）· `parent`。**版本哈希是 provenance，不是每场都值一屏的东西**——五个自带扩展的全串曾经在第一句话之前占掉八行。
+**它会折，且默认折着**（T25，设定 `transcript.composition`）：静息只有两行——标题（`session · <时间> · frozen composition`，右端一个折叠记号，与每张 tool 卡同一列）与 model 行（`model  <provider/model> · tools 1+N · skills n · prompts n · ext n`，模型本身仍是 `/model` 的点击目标，点击不冒泡到折叠）。展开后每根轴一行：`model`（这一行的右半换成 endpoint 主机）· `tools` · `skills` · `prompts`（贡献 system prompt 的包名）· `ext`（`id@v-` + 8 位）· `parent`。**版本哈希是 provenance，不是每场都值一屏的东西**——五个自带扩展的全串曾经在第一句话之前占掉八行。
 
 **每一行都是"标签列 + 会换行的值"（`ui/Fact`），不是 flex 行。** OpenTUI 对超宽的 flex 行不换行而是**压缩**：名字从中间被切、标签与值之间的空格被吞，`model` 于是显示成 `mode`。所以窄屏的处理写死在两处纯函数里——值按 ` · ` 关节折到下一行（`wrapWords`），标题按整段短语退让（完整 → 去掉 `frozen composition` → 只剩 `session`），model 行的计数从最不紧要的一端整格丢弃而不是把 `ext 5` 切成 `e…`。
 
-**draft 变体**（T22）：还没有 session 的 tab 上，同一张卡换个时态——标题是 `next session · set when you send the first message`，三行同序（tools = `shell edit` + 计划中的 pin、model = draft 的 pick 解出来的 model id、`--with` 写在 model 那行右边）。数据只来自 `config show --json`、`tui-state.json` 与 `ext list` 已经说过的东西，**没有第二个 composition 解析器**——真正的解析永远是内核在 `session new` 里做的那一次。
+**draft 变体**（T22）：还没有 session 的 tab 上，同一张卡换个时态——标题是 `next session · set when you send the first message`，三行同序（tools = `shell` + 计划中的 pin、model = draft 的 pick 解出来的 model id、`--with` 写在 model 那行右边）。数据只来自 `config show --json`、`tui-state.json` 与 `ext list` 已经说过的东西，**没有第二个 composition 解析器**——真正的解析永远是内核在 `session new` 里做的那一次。
 
 ### 5.2 EvolveCard（演化动作在对话里的形状）
 
@@ -1338,3 +1338,15 @@ T27 已经把问句从卡片挪到了输入框上面、把每个答案拆成自�
 **测试**：`cd tui && bun test` 227 → **244 pass**、`tsc` 干净、`bun build --compile` 仍出单文件。新增 `tasks.test.ts` 9 条：真二进制的 `background` 档全环（起任务 → 本步以 waiting 收尾 → 谁都不碰它 → 报告进 ledger → 模型说 `background done` → 卡片记下 exit → **inbox 空了就不再自己 step**）· 空 inbox 上 `wake()` 两次一个事件都不多 · 持锁的另一个写者在时 observer 一步都不走（step 的二进制换成 `bun`，真走了会在状态栏留一句，沉默就是断言）· `task list --json` 的每一列 · 回执与报告的解析四条（命令里带 ` · `、killed、timed out、无输出、读不懂就返回 null）· 一条报告只认自己那张卡。`render.test.tsx` 加三条（后台变体的 running / 报告到了 / TaskFinishedCard 折叠与展开，三张快照），`overlays.test.tsx` 加两条 `/tasks` 的帧，`registry.test.ts` 加一条“后台的 `nulya …` 不是演化卡”。
 
 **没做**：跨 tab 的任务汇总（`/tasks` 只看当前 tab 的 session，整个 workspace 用终端里的 `nulya task list`）；后台输出实时进 transcript；退出时自动杀；`/tasks` 里没有"再跑一次"（重跑是一句话，让模型说）。
+
+### T30 · `edit` 不再是 builtin：TUI 侧只有计数与 pin 列表要改（2026-08-20）
+
+**内核那一侧的改动是删东西**（DESIGN §6：内核只剩 `shell` 一个 builtin，`edit` 成了 `extensions/std` 的第六个 tool，§7.8）。前端因此只有三处，全是把已经变了的事实说对：
+
+1. **`builtin_tools` 从 2 变成 1**（`pins.ts`），于是 `tools 1+N`、配额行 `1+N/<max>`、`faceFullLine` 都跟着对——这个数字本来就只有一个来源，改一处就够了；`StatusBar` / `CompositionCard` 原来各自写死 `2+`，一并改成读它。
+2. **`std_pins` 六个**（`extensions.ts` 多 `ext:std/edit`），所以开屏那次后台安装把 `edit` 也 pin 上；`CompositionCard` / `Welcome` 的 tools 行不再手写 `shell edit`，只写 `shell` + 那些 ⚡。
+3. **一次性迁移**（`adoptStdEditPin`，`main.tsx` 在读 config 之前调一次）：`tui-state.json` 里已经有旧的五个 std pin 而没有 `ext:std/edit` → 补上。**只做一次**，marker 记在同一个文件（`adopted_std_edit_pin`），所以之后在 `/ext` 里故意关掉 `edit` 不会被下次启动又打开——"帮你补一个你显然想要的" 与 "每次启动都替你决定" 只差这一个布尔。没有状态文件就什么都不做。**但要等这台机器上生效中的 `std` 真的声明了 `edit` 才补**（`stdEditPinDecision` 三态 `done` / `adopt` / `wait`：`ext list` 找 `std` 的 `current`、读那个冻结 manifest 的 `contributes.tools`）——user store 里的 std draft 是老源码时（`ext seed` 不刷新已有 draft，DESIGN §7.8），一个内核解析不到的 pin 会让下一场 `session new` 直接 `PinToolNotDeclared`，所以那时什么都不写、下次启动再看；fresh 的状态文件（没有 std pin）直接标 done，不为它多跑一次 `ext list`。
+
+EditCard 一个字没改：它按 `view.tool === "edit"` 选卡，而 extension tool 的 model-visible 名字就是 manifest 里的 `name`，仍然是 `edit`；diff 仍从 `old_string` / `new_string` 画（成功时不显示 tool 输出，所以新增的回显片段不会重复出现），失败时显示的就是 std 的教学文案。
+
+**测试**：`cd tui && bun test` **244 pass**（三条快照与四条断言里的 `2+` / `shell edit` 改数）、`tsc` 干净。

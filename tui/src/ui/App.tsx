@@ -587,7 +587,7 @@ export function App(props: AppProps) {
     return face
   })
 
-  /** The tool face this tab shows beside the two builtins. */
+  /** The tool face this tab shows beside the builtin. */
   const faceSize = (): number => {
     const here = tab()
     if (here.kind === "draft") return plannedPins().length

@@ -502,7 +502,6 @@ test "session repairs interrupted tool batch before provider request" {
         .step_ctx = .{
             .tool_context = .{
                 .environment = lenv.environment(),
-                .fs = lenv.workspaceFs(),
                 .cwd = ".",
             },
             .scratch_dir = "/tmp",
@@ -617,7 +616,7 @@ test "a canceled step accumulates its usage and the session runs the next step" 
         },
         .model = .{ .ptr = &model_impl, .vtable = &StepModel.vtable },
         .step_ctx = .{
-            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = "." },
+            .tool_context = .{ .environment = lenv.environment(), .cwd = "." },
             .scratch_dir = "/tmp",
         },
         .model_options = .{},
@@ -724,7 +723,7 @@ test "a cancel during prepareStep reconciliation reports canceled with zero usag
     var sess = try AgentSession.createDurable(alloc, .{
         .model = .{ .ptr = &model_impl, .vtable = &CountingModel.vtable },
         .step_ctx = .{
-            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd },
+            .tool_context = .{ .environment = lenv.environment(), .cwd = cwd },
             .scratch_dir = "/tmp",
         },
         .extension_roots = &.{"nulya-absent-extensions-root"},
@@ -818,7 +817,7 @@ test "a durable session persists across create, close, and reopen" {
     const opts: AgentSession.Options = .{
         .model = .{ .ptr = &model_impl, .vtable = &EndTurnModel.vtable },
         .step_ctx = .{
-            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd },
+            .tool_context = .{ .environment = lenv.environment(), .cwd = cwd },
             .scratch_dir = "/tmp",
         },
         .extension_roots = &.{store.workspace_root_rel},
@@ -909,7 +908,7 @@ test "a cancel marker is consumed at the step boundary: no model call, then the 
     var sess = try AgentSession.createDurable(alloc, .{
         .model = .{ .ptr = &model_impl, .vtable = &CountingModel.vtable },
         .step_ctx = .{
-            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd },
+            .tool_context = .{ .environment = lenv.environment(), .cwd = cwd },
             .scratch_dir = "/tmp",
         },
         .extension_roots = &.{"nulya-absent-extensions-root"},
@@ -998,7 +997,7 @@ test "run clamps any requested budget to the kernel ceiling" {
         },
         .model = .{ .ptr = &model_impl, .vtable = &ForeverModel.vtable },
         .step_ctx = .{
-            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd },
+            .tool_context = .{ .environment = lenv.environment(), .cwd = cwd },
             .scratch_dir = "/tmp",
         },
         .model_options = .{},
@@ -1085,7 +1084,7 @@ test "completed step records stable ids, never model names or hallucinated names
         },
         .model = .{ .ptr = &model_impl, .vtable = &MixedModel.vtable },
         .step_ctx = .{
-            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd },
+            .tool_context = .{ .environment = lenv.environment(), .cwd = cwd },
             .scratch_dir = "/tmp",
         },
         .model_options = .{},
@@ -1182,7 +1181,7 @@ test "a durable session's usage rows name the session, so outcomes can be joined
         },
         .model = .{ .ptr = &model_impl, .vtable = &OneCallModel.vtable },
         .step_ctx = .{
-            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd },
+            .tool_context = .{ .environment = lenv.environment(), .cwd = cwd },
             .scratch_dir = "/tmp",
         },
         .model_options = .{},
@@ -1283,7 +1282,7 @@ test "a canceled step records no tool usage stats" {
         },
         .model = .{ .ptr = &model_impl, .vtable = &OneCallModel.vtable },
         .step_ctx = .{
-            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd },
+            .tool_context = .{ .environment = lenv.environment(), .cwd = cwd },
             .scratch_dir = "/tmp",
         },
         .model_options = .{},
@@ -1365,7 +1364,7 @@ test "a reply cut by max_tokens before it wrote any call stops the run, unlike o
         },
         .model = .{ .ptr = &model_impl, .vtable = &TruncatedProseModel.vtable },
         .step_ctx = .{
-            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd },
+            .tool_context = .{ .environment = lenv.environment(), .cwd = cwd },
             .scratch_dir = "/tmp",
         },
         .model_options = .{},
@@ -1431,7 +1430,7 @@ test "a truncated tail refuses to step in the next process until a message arriv
         var sess = try AgentSession.createDurable(alloc, .{
             .model = .{ .ptr = &model_impl, .vtable = &TruncatingModel.vtable },
             .step_ctx = .{
-                .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd },
+                .tool_context = .{ .environment = lenv.environment(), .cwd = cwd },
                 .scratch_dir = "/tmp",
             },
             .extension_roots = &.{"nulya-absent-extensions-root"},
@@ -1473,7 +1472,7 @@ test "a truncated tail refuses to step in the next process until a message arriv
     var sess = try AgentSession.openDurable(alloc, .{
         .model = .{ .ptr = &calls, .vtable = &RefusingModel.vtable },
         .step_ctx = .{
-            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd },
+            .tool_context = .{ .environment = lenv.environment(), .cwd = cwd },
             .scratch_dir = "/tmp",
         },
         .extension_roots = &.{"nulya-absent-extensions-root"},
@@ -1566,7 +1565,7 @@ test "a truncated turn's unexecuted calls are not recorded as tool usage" {
         },
         .model = .{ .ptr = &model_impl, .vtable = &TruncatedCallModel.vtable },
         .step_ctx = .{
-            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd },
+            .tool_context = .{ .environment = lenv.environment(), .cwd = cwd },
             .scratch_dir = "/tmp",
         },
         .model_options = .{},

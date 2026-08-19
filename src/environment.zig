@@ -118,28 +118,6 @@ pub const ExtensionOutcome = struct {
     }
 };
 
-/// Filesystem operations available to builtin tools inside the workspace.
-///
-/// The local backend is host-backed today; sandbox/remote backends can supply a
-/// different implementation without letting tools reach `std.Io.Dir.cwd()`.
-pub const WorkspaceFs = struct {
-    ptr: *anyopaque,
-    vtable: *const VTable,
-
-    pub const VTable = struct {
-        readFileAlloc: *const fn (ptr: *anyopaque, alloc: std.mem.Allocator, path: []const u8, max_bytes: usize) anyerror![]u8,
-        atomicWriteFile: *const fn (ptr: *anyopaque, path: []const u8, data: []const u8) anyerror!void,
-    };
-
-    pub fn readFileAlloc(self: WorkspaceFs, alloc: std.mem.Allocator, path: []const u8, max_bytes: usize) ![]u8 {
-        return self.vtable.readFileAlloc(self.ptr, alloc, path, max_bytes);
-    }
-
-    pub fn atomicWriteFile(self: WorkspaceFs, path: []const u8, data: []const u8) !void {
-        return self.vtable.atomicWriteFile(self.ptr, path, data);
-    }
-};
-
 /// A command to run DETACHED, outliving the step process that asked for it
 /// (DESIGN §6.1). Deliberately unlike `ShellRequest`: there is no capture cap
 /// (the whole of the output goes to the task's log file), and `timeout_ms` has
@@ -361,10 +339,6 @@ pub const LocalEnvironment = struct {
 
     pub fn environment(self: *LocalEnvironment) Environment {
         return .{ .io = self.io, .ptr = self, .vtable = &vtable };
-    }
-
-    pub fn workspaceFs(self: *LocalEnvironment) WorkspaceFs {
-        return .{ .ptr = self, .vtable = &fs_vtable };
     }
 
     fn dialectImpl(ptr: *anyopaque) Dialect {
@@ -726,34 +700,6 @@ pub const LocalEnvironment = struct {
         task_dir = null;
         return .{ .task_id = task_id, .log_path = log_path };
     }
-
-    fn readFileAllocImpl(ptr: *anyopaque, alloc: std.mem.Allocator, path: []const u8, max_bytes: usize) anyerror![]u8 {
-        const self: *LocalEnvironment = @ptrCast(@alignCast(ptr));
-        return std.Io.Dir.cwd().readFileAlloc(self.io, path, alloc, .limited(max_bytes));
-    }
-
-    fn atomicWriteFileImpl(ptr: *anyopaque, path: []const u8, data: []const u8) anyerror!void {
-        const self: *LocalEnvironment = @ptrCast(@alignCast(ptr));
-        const cwd = std.Io.Dir.cwd();
-        var original = try cwd.openFile(self.io, path, .{});
-        defer original.close(self.io);
-        const permissions = (try original.stat(self.io)).permissions;
-
-        var atomic = try cwd.createFileAtomic(self.io, path, .{ .replace = true, .permissions = permissions });
-        defer atomic.deinit(self.io);
-        // The create-time permissions pass through open(2) and get masked by
-        // the process umask (0777 becomes 0755); fchmod on the handle does not.
-        // Without this, editing a script silently drops permission bits.
-        try atomic.file.setPermissions(self.io, permissions);
-        try atomic.file.writeStreamingAll(self.io, data);
-        try atomic.file.sync(self.io);
-        try atomic.replace(self.io);
-    }
-
-    const fs_vtable: WorkspaceFs.VTable = .{
-        .readFileAlloc = readFileAllocImpl,
-        .atomicWriteFile = atomicWriteFileImpl,
-    };
 
     const vtable: Environment.VTable = .{
         .dialect = dialectImpl,

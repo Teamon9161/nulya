@@ -129,7 +129,7 @@ pub fn callNative(alloc: std.mem.Allocator, io: std.Io, t: tool.Tool, ws_path: [
     defer lenv.deinit();
     return t.executor.call(alloc, .{
         .args_json = "{}",
-        .ctx = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = ws_path },
+        .ctx = .{ .environment = lenv.environment(), .cwd = ws_path },
     });
 }
 

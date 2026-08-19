@@ -108,7 +108,7 @@ const Live = struct {
         return session.AgentSession.init(alloc, .{
             .model = self.holder.model(),
             .step_ctx = .{
-                .tool_context = .{ .environment = self.lenv.environment(), .fs = self.lenv.workspaceFs(), .cwd = "." },
+                .tool_context = .{ .environment = self.lenv.environment(), .cwd = "." },
                 .scratch_dir = ".nulya/scratch",
             },
             .model_options = .{ .effort = effort },

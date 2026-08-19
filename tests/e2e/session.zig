@@ -60,7 +60,7 @@ test "durable ledger: process A steps twice and exits; process B resumes and pro
     const opts: session.AgentSession.Options = .{
         .model = .{ .ptr = &model, .vtable = &SelfBuildModel.vtable },
         .step_ctx = .{
-            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = ws_path },
+            .tool_context = .{ .environment = lenv.environment(), .cwd = ws_path },
             .scratch_dir = ".nulya/scratch",
         },
     };
@@ -113,7 +113,7 @@ test "durable ledger: an assistant-with-calls tail left on disk by a crash is re
     const opts: session.AgentSession.Options = .{
         .model = .{ .ptr = &model, .vtable = &EndTurnModel.vtable },
         .step_ctx = .{
-            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = ws_path },
+            .tool_context = .{ .environment = lenv.environment(), .cwd = ws_path },
             .scratch_dir = ".nulya/scratch",
         },
     };
@@ -183,7 +183,7 @@ test "durable ledger: a capability_note appended by a separate CLI process is re
     const opts: session.AgentSession.Options = .{
         .model = .{ .ptr = &model, .vtable = &EndTurnModel.vtable },
         .step_ctx = .{
-            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = ws_path },
+            .tool_context = .{ .environment = lenv.environment(), .cwd = ws_path },
             .scratch_dir = ".nulya/scratch",
         },
     };
@@ -1073,7 +1073,7 @@ test "session cli: --with pins a built-but-not-activated version into one sessio
     const opts: session.AgentSession.Options = .{
         .model = .{ .ptr = &model, .vtable = &EndTurnModel.vtable },
         .step_ctx = .{
-            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = ws_path },
+            .tool_context = .{ .environment = lenv.environment(), .cwd = ws_path },
             .scratch_dir = ".nulya/scratch",
         },
     };
@@ -1089,7 +1089,7 @@ test "session cli: --with pins a built-but-not-activated version into one sessio
         try std.testing.expect(saw_prompt);
         try std.testing.expectEqual(@as(usize, 1), resumed.composition.skills.skills.len);
         try std.testing.expectEqualStrings("mode-recipes", resumed.composition.skills.skills[0].name);
-        try std.testing.expectEqual(@as(usize, 2), resumed.composition.tools.tools.len); // shell + edit only
+        try std.testing.expectEqual(@as(usize, 1), resumed.composition.tools.tools.len); // the builtin only
     }
 
     // The listing says which frozen package rewrites the system blocks of the
@@ -1234,7 +1234,7 @@ test "durable ledger: assistant events carry per-step usage, legacy lines read a
     const opts: session.AgentSession.Options = .{
         .model = .{ .ptr = &model, .vtable = &PricedModel.vtable },
         .step_ctx = .{
-            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = ws_path },
+            .tool_context = .{ .environment = lenv.environment(), .cwd = ws_path },
             .scratch_dir = ".nulya/scratch",
         },
     };

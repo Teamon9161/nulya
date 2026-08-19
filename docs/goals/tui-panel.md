@@ -13,7 +13,7 @@
 1. **composition 在 `session new` 冻结,中途不能变**(physics #2/#4)。一切"插拔"都只影响**下一场**;面板的每个改动都要像 `/ext` 现在的 drift line 一样,把"这场冻结的 vs 下一场会是的"说成一句话。
 2. **pin 的合成是 union**:`registry.pinned_native_tools`(config)∪ `session new --pin`(argv,`cli/session.zig` `pinRefs`)。语义是"config 说这个 workspace 永远要,`--pin` 说这一场要"——**只能加,不能减**。注意这条只约束 `session new` 组装工具面的那一刻:面板管理的是**下一场**,config 与 argv 都是它写的,所以增删都自由;唯一不存在的是"不动 config 的前提下给某一场做减法"(见 D2)。
 3. **config 层**:user 层 `~/.nulya/config.toml`(`NULYA_HOME` 可重定位)是 trusted 层;合并结果由 `nulya config show --json` 投影(`registry.max_tools` / `pinned_native_tools`)。投影是**合并后**的,不带每层来源——面板要知道某个 pin 是不是 user 层写的,就直接读 user config 文件比对(它本来就是面板唯一会写的文件)。
-4. **`max_tools` 含 builtin**(缺省 8:shell + edit 占 2)。超配额是内核在 `session new` 时拒(`composition.zig`),面板只显示配额(`tools 2+5/8`)并把内核的拒绝原样转述,不自己预判。
+4. **`max_tools` 含 builtin**(缺省 8:`shell` 占 1——写这份契约时是 2,`edit` 后来搬进了 `extensions/std`,DESIGN §6)。超配额是内核在 `session new` 时拒(`composition.zig`),面板只显示配额(`tools 1+5/8`)并把内核的拒绝原样转述,不自己预判。
 5. **"整体开关"有两根轴**:membership(`ext activate|deactivate [--user]` = 之后每场;`session new --with` = 只这一场)管 skills / system prompts 进不进 composition;**pins** 管 tools 进不进模型工具面。std 这类 tools-only 包,"开关"≈ pins 全开全关;evolution / guide 这类 data 包,"开关"= activate / deactivate / `--with`。面板把两根轴分开呈现,不合成一个假的总开关。
 6. **每个 extension 声明了哪些 tool**,冻结 manifest 里就有;TUI 的 `files.ts` 已经直读 store 解析 `contributes.tools`(T8 起),不需要新内核面。usage 计数 join `.nulya/tool-usage.jsonl`(`/ext` 的 UsageTable 已在读)。
 7. **ledger 没有 image 内容块**,三个 provider 的序列化也没有。真 vision 是**内核 track**,**已立项、另立契约**(ledger 内容块 + PromptIR + 三 provider 序列化 + `[[models]]` 目录的能力标注与壳层门,见 §5);因此本契约的 T14 **只做文本粘贴**,图片粘贴是 vision 落地后的 TUI 后续里程碑——不先造"cannot see images yet"占位再返工。
@@ -34,7 +34,7 @@
   - pin 在合并结果里、但不在 user config 文件里(project / system 层写的)→ 只读显示 `from another config layer`,指路文件,不试图编辑。
 - **extension 行的整体动作**:`Space` = 该包全部 tools 一起 toggle;`d` = `ext deactivate`(membership 轴,先确认,与现有 `a`(activate)/`r`(rollback)/`p`(prune)并排;`cli.ts` 加 `extDeactivate`)。
 - **通知在跑的 session**(内核事实 #9):面板 spawn `ext activate` 时,给子进程 env 带 `NULYA_SESSION=<当前跟随 session 的文件路径>`,借内核现成的 capability_note 让模型在下个 step 边界得知新版本可用——零内核改动(副作用:`--user` 时内核会多一行"acting from inside session"的 stderr 提示,TUI 吞掉即可)。deactivate 与 pin 改动**不补任何通知**,也不 `session append` 注释:本场无可行动信息,往 ledger 塞 UI 旁白是噪音。
-- **配额行**:`tools 2+N/8`(读 `config show --json` 的 `max_tools`);超了不拦,`session new` 失败时把内核的 stderr 原样贴出(内核事实 #4)。
+- **配额行**:`tools 1+N/8`(读 `config show --json` 的 `max_tools`);超了不拦,`session new` 失败时把内核的 stderr 原样贴出(内核事实 #4)。
 - **生效提示**:面板底部一句常驻:`changes apply to the NEXT session — this one froze its tools at start`(drift line 的姊妹句)。
 - **完成标准**:`bun test` 纯策略测试 ≥ 6 条(三态 toggle → 下一场 argv 的 `--pin` 列表;config 写回 round-trip 保注释;another-layer pin 只读;配额行);真跑一遍:面板关掉 `ext:std/grep` → `/new` → 新场 CompositionCard 的 native tools 里没有它。
 

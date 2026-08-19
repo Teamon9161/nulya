@@ -46,7 +46,7 @@ const testkit = @import("extension/testkit.zig");
 /// prompt, a skill), not in a prefix every session pays for.
 const kernel_system_prompt =
     "You are Nulya, a minimal self-evolving agent harness. " ++
-    "shell and edit are permanent builtin tools. Some extension tools may also be exposed to you directly this session; every other extension capability is invoked through the nulya CLI. " ++
+    "shell is the one permanent builtin tool. Some extension tools may also be exposed to you directly this session; every other extension capability is invoked through the nulya CLI. " ++
     "The nulya executable's path is in the NULYA_EXE environment variable, named nulya where it is installed. nulya help lists what it can do; nulya src prints this harness's own source. Nulya is extensible: extensions (tools you build, script or compiled), skills, system prompts and session drivers are things you can write when a task calls for one. " ++
     "A directly-exposed extension tool is pinned to the version that was active when this session began. Activating a new version mid-session takes effect immediately through the CLI, but its directly-exposed form changes only in the next session. " ++
     // One fact about the ledger's roles, not a warning and not a promise of
@@ -120,8 +120,8 @@ pub const Options = struct {
     /// against an active extension; an unknown pin is a hard error, never a
     /// silent skip.
     pinned_native_tools: []const []const u8 = &.{},
-    /// Provider-facing total tool count, builtins included. shell + edit always
-    /// occupy `registry.builtin_count` of it.
+    /// Provider-facing total tool count, the builtin included. `shell` always
+    /// occupies `registry.builtin_count` of it.
     max_tools: u32 = 20,
     /// Extensions to bring into THIS session's composition whether or not they
     /// are activated (`nulya session new --with`, DESIGN §14). Membership only:
@@ -947,8 +947,8 @@ test "isExtensionFault classifies extension faults vs host faults" {
 }
 
 test "budget rejects an impossible tool count before any filesystem work" {
-    // Below the permanent builtins.
-    try std.testing.expectError(error.ToolBudgetTooSmall, validateBudget(.{ .max_tools = 1 }));
+    // Below the permanent builtin.
+    try std.testing.expectError(error.ToolBudgetTooSmall, validateBudget(.{ .max_tools = registry.builtin_count - 1 }));
     // Room for zero extensions, but one pin requested.
     try std.testing.expectError(error.ToolBudgetExceeded, validateBudget(.{
         .max_tools = registry.builtin_count,
@@ -1041,29 +1041,6 @@ const FakeEnv = struct {
     }
 };
 
-/// The executor never touches `req.ctx.fs`; a stub keeps the `ToolContext`
-/// well-formed without reaching the real filesystem.
-const DummyFs = struct {
-    fn readFileAlloc(ptr: *anyopaque, alloc: std.mem.Allocator, path: []const u8, max_bytes: usize) anyerror![]u8 {
-        _ = ptr;
-        _ = alloc;
-        _ = path;
-        _ = max_bytes;
-        return error.NotSupported;
-    }
-
-    fn atomicWriteFile(ptr: *anyopaque, path: []const u8, data: []const u8) anyerror!void {
-        _ = ptr;
-        _ = path;
-        _ = data;
-        return error.NotSupported;
-    }
-
-    fn handle(self: *DummyFs) environment.WorkspaceFs {
-        return .{ .ptr = self, .vtable = &.{ .readFileAlloc = readFileAlloc, .atomicWriteFile = atomicWriteFile } };
-    }
-};
-
 test "a selected extension tool is provider-visible and freezes to the composition-time version" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
@@ -1143,7 +1120,7 @@ test "initFrozen rebuilds a composition from a header and ignores later activati
     try std.testing.expect(std.mem.indexOf(u8, comp2.extension_tool_bindings[0].entry_path, v2) == null);
 }
 
-test "initFrozen with no active extensions yields the two builtins only" {
+test "initFrozen with no active extensions yields the builtin only" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -1177,8 +1154,7 @@ test "executor calls reach the composition-time frozen entry path" {
     const tool_a = session_a.tools.lookup("web_search") orelse return error.TestUnexpectedResult;
     var env_a = FakeEnv{ .io = io };
     defer env_a.deinit(alloc);
-    var fs = DummyFs{};
-    const req_a: tool.ToolRequest = .{ .args_json = "{}", .ctx = .{ .environment = env_a.handle(), .fs = fs.handle(), .cwd = "ws" } };
+    const req_a: tool.ToolRequest = .{ .args_json = "{}", .ctx = .{ .environment = env_a.handle(), .cwd = "ws" } };
 
     // Session A's executor hands the environment the v1 executable.
     {
@@ -1203,7 +1179,7 @@ test "executor calls reach the composition-time frozen entry path" {
     const tool_b = session_b.tools.lookup("web_search") orelse return error.TestUnexpectedResult;
     var env_b = FakeEnv{ .io = io };
     defer env_b.deinit(alloc);
-    const req_b: tool.ToolRequest = .{ .args_json = "{}", .ctx = .{ .environment = env_b.handle(), .fs = fs.handle(), .cwd = "ws" } };
+    const req_b: tool.ToolRequest = .{ .args_json = "{}", .ctx = .{ .environment = env_b.handle(), .cwd = "ws" } };
     {
         const result = try tool_b.executor.call(alloc, req_b);
         defer alloc.free(result.output);
@@ -1408,17 +1384,16 @@ test "pins decide membership, not the final tool order" {
     try testkit.activate(alloc, io, tmp.dir, "b.pkg", vb);
 
     // Pinned b first, a second: both are exposed, but the frozen snapshot is
-    // builtins then extras sorted by stable id, so a precedes b regardless of
-    // how the pins were listed (DESIGN §5.2).
+    // the builtin then extras sorted by stable id, so a precedes b regardless
+    // of how the pins were listed (DESIGN §5.2).
     const pins = [_][]const u8{ "ext:b.pkg/beta", "ext:a.pkg/alpha" };
     var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .pinned_native_tools = &pins, .max_tools = 4 });
     defer comp.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 2), comp.extension_tool_bindings.len);
-    try std.testing.expectEqual(@as(usize, 4), comp.tools.tools.len);
+    try std.testing.expectEqual(@as(usize, 3), comp.tools.tools.len);
     try std.testing.expectEqualStrings("shell", comp.tools.tools[0].definition.name);
-    try std.testing.expectEqualStrings("edit", comp.tools.tools[1].definition.name);
-    try std.testing.expectEqualStrings("ext:a.pkg/alpha", comp.tools.tools[2].definition.id);
-    try std.testing.expectEqualStrings("ext:b.pkg/beta", comp.tools.tools[3].definition.id);
+    try std.testing.expectEqualStrings("ext:a.pkg/alpha", comp.tools.tools[1].definition.id);
+    try std.testing.expectEqualStrings("ext:b.pkg/beta", comp.tools.tools[2].definition.id);
 }
 
 test "the tool set freezes at session creation; a changed pin only reaches the next session" {

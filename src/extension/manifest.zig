@@ -14,9 +14,10 @@ const tool = @import("../tool.zig");
 
 pub const schema_id = "nulya.extension/v2";
 
-/// Builtin names are permanently reserved; an extension may not shadow them
-/// (DESIGN §5.2, §6).
-pub const reserved_tool_names = [_][]const u8{ "shell", "edit" };
+/// The builtin name is permanently reserved; an extension may not shadow it
+/// (DESIGN §5.2, §6). One name, because there is one builtin — `edit` left this
+/// list when it became a tool of the bundled `std` extension (DESIGN §7.8).
+pub const reserved_tool_names = [_][]const u8{"shell"};
 
 pub const Runtime = struct {
     /// Relative path to the runtime entry within the package. A `bin/<name>`
@@ -459,13 +460,22 @@ test "rejects manifest with no contributions" {
     try std.testing.expectError(error.NoContributions, m.validate());
 }
 
-test "rejects reserved tool name" {
+test "rejects the one reserved tool name, and only that one" {
     const src =
         \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"shell","input":{}}]}}
     ;
     var m = try parse(std.testing.allocator, src);
     defer m.deinit();
     try std.testing.expectError(error.ReservedToolName, m.validate());
+
+    // `edit` is an extension tool now (the bundled `std` package declares it),
+    // so the manifest layer must let a package claim that name.
+    const editing =
+        \\{"schema":"nulya.extension/v2","id":"b","runtime":{"entry":"bin/b"},"contributes":{"tools":[{"name":"edit","input":{}}]}}
+    ;
+    var e = try parse(std.testing.allocator, editing);
+    defer e.deinit();
+    try e.validate();
 }
 
 test "rejects duplicate tool names" {

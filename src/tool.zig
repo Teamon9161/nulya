@@ -7,8 +7,9 @@
 //!   - `ctx_header`: *constant-size* context. It must NOT grow with the
 //!                   conversation — that is what keeps the cache prefix stable
 //!                   (DESIGN §1) and keeps tools least-privilege (DESIGN §7.6).
-//!   - factual data (files, command output) is reached through `fs`/`cwd`, not
-//!     passed in. "Needs the whole conversation" -> it is a subagent, not a tool.
+//!   - factual data (files, command output) is reached through the environment
+//!     and `cwd`, not passed in. "Needs the whole conversation" -> it is a
+//!     subagent, not a tool.
 //!
 //! Everything a tool is allowed to touch enters through `ToolRequest`. If a
 //! field would grow unbounded with the dialogue, it does not belong in
@@ -19,7 +20,6 @@ const emit = @import("emit.zig");
 const environment = @import("environment.zig");
 
 pub const Environment = environment.Environment;
-pub const WorkspaceFs = environment.WorkspaceFs;
 
 /// Truncation / spill limits. Kernel defaults live here (base-tools.md §3) and
 /// are the primary knob for per-result token cost.
@@ -53,9 +53,6 @@ pub const Timeouts = struct {
 pub const ToolContext = struct {
     /// The process execution environment (DESIGN §8).
     environment: Environment,
-    /// Filesystem operations scoped to the workspace. Tools must use this rather
-    /// than host cwd APIs so remote/sandbox backends can swap the implementation.
-    fs: WorkspaceFs,
     /// Working directory for filesystem-relative operations.
     cwd: []const u8,
 };

@@ -411,7 +411,7 @@ pub const ModelDescriptor = struct {
 
 /// Which nulya created a session — PROVENANCE ONLY, never enforcement.
 ///
-/// The kernel system prompt and the two builtin tool definitions are compile-time
+/// The kernel system prompt and the builtin tool definition are compile-time
 /// constants of the BINARY, yet they enter every session's frozen model-visible
 /// state (DESIGN §5.1, §7.5). So upgrading nulya silently changes the frozen
 /// system prompt / `tools[]` of every existing session — the one hole in physics

@@ -1,6 +1,6 @@
-//! The bundled `std` extension's file tools — `read` / `write` / `append` and
-//! the on-disk freshness they share (docs/goals/std.md §1.2). Owned by std-c;
-//! fixtures come from `std.zig`.
+//! The bundled `std` extension's file tools — `read` / `write` / `append` /
+//! `edit` and the on-disk freshness they share (docs/goals/std.md §1.2).
+//! Fixtures come from `std.zig`.
 //!
 //! Everything here goes through the real binary: `ext run std@<v> <tool> '<json>'`
 //! in a scratch workspace, with `NULYA_SESSION` set when the point is what a
@@ -22,8 +22,8 @@ const session = support.session;
 const environment = support.environment;
 const provider = support.provider;
 
-/// The clip marker's opening, assembled so this file stays editable by the
-/// kernel's `edit` (which refuses an old_string containing it).
+/// The clip marker's opening, assembled so this file stays editable by an
+/// `edit` tool (std's refuses an old_string containing it).
 const marker_open = "\u{2026}[+";
 
 const Ws = struct {
@@ -41,6 +41,9 @@ const Ws = struct {
     }
     fn append(w: Ws, args_json: []const u8, sid: ?[]const u8) !support.CliRun {
         return runStd(w.alloc, w.io, w.dir, w.exe, w.ref, "append", args_json, sid);
+    }
+    fn edit(w: Ws, args_json: []const u8, sid: ?[]const u8) !support.CliRun {
+        return runStd(w.alloc, w.io, w.dir, w.exe, w.ref, "edit", args_json, sid);
     }
 };
 
@@ -176,7 +179,7 @@ test "bundled std read: verbatim without gutter; unchanged stub in a session and
     }
 }
 
-test "bundled std write/append: a new file (parent dirs made) and its line count; the overwrite gate — unseen, partially seen (ranges named), stale — and read-in-full passes; a kernel `edit` is not tracked, so writing after one is refused as changed on disk; a read marker in content is refused; append creates, refuses unread, extends after a read with a numbered tail and a merge note; bytes are exact" {
+test "bundled std write/append: a new file (parent dirs made) and its line count; the overwrite gate — unseen, partially seen (ranges named), stale — and read-in-full passes; std's own `edit` is tracked, so writing after one passes while a change made any other way is refused as changed on disk; a read marker in content is refused; append creates, refuses unread, extends after a read with a numbered tail and a merge note; bytes are exact" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     const exe = try nulyaExe(alloc);
@@ -237,22 +240,29 @@ test "bundled std write/append: a new file (parent dirs made) and its line count
         try std.testing.expectEqualStrings("replaced\n", bytes);
     }
 
-    // D4, pinned: the kernel's `edit` does not report to this record. After a
-    // read, a change made any other way (here: the test writing the file, as
-    // `nulya edit` would) makes the next `write` a stale one — the model must
-    // re-read. If this assertion ever fails, something started tracking edits;
-    // decide on purpose.
+    // One record, one package: `edit` reports its own change here, so a read →
+    // edit → write sequence never demands a re-read (it did while `edit` was a
+    // kernel builtin that could not reach this journal). A change made any
+    // OTHER way still makes the next write stale — that is the gate working.
     {
         const seen = try ws.read("{\"path\":\"g.txt\"}", sid);
         defer alloc.free(seen.stdout);
         try std.testing.expectEqual(@as(u8, 0), seen.code);
-        try tmp.dir.writeFile(io, .{ .sub_path = "g.txt", .data = "edited by the kernel\n" });
+
+        const edited = try ws.edit("{\"path\":\"g.txt\",\"old_string\":\"replaced\",\"new_string\":\"rewritten\"}", sid);
+        defer alloc.free(edited.stdout);
+        try expectOk(edited, "edited g.txt (1 replacement). Result:\n     1\trewritten");
+        const after_edit = try ws.write(overwrite, sid);
+        defer alloc.free(after_edit.stdout);
+        try expectOk(after_edit, "wrote g.txt (1 lines)");
+
+        try tmp.dir.writeFile(io, .{ .sub_path = "g.txt", .data = "changed by something else\n" });
         const stale = try ws.write(overwrite, sid);
         defer alloc.free(stale.stdout);
         try expectRefusal(stale, "g.txt changed on disk since you last read it; re-read it before overwriting so the external changes are not destroyed unknowingly.");
         const bytes = try tmp.dir.readFileAlloc(io, "g.txt", alloc, .unlimited);
         defer alloc.free(bytes);
-        try std.testing.expectEqualStrings("edited by the kernel\n", bytes);
+        try std.testing.expectEqualStrings("changed by something else\n", bytes);
     }
 
     // A read marker is not file content.
@@ -290,6 +300,91 @@ test "bundled std write/append: a new file (parent dirs made) and its line count
         const over = try ws.write("{\"path\":\"u.txt\",\"content\":\"\"}", sid);
         defer alloc.free(over.stdout);
         try expectOk(over, "wrote u.txt (0 lines)");
+    }
+}
+
+test "bundled std edit: an exact unique match rewrites and echoes; ambiguity, a miss and a bad target_line refuse without touching the file; replace_all and target_line select; no session still edits" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    const exe = try nulyaExe(alloc);
+    defer alloc.free(exe);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ref = try buildStd(alloc, io, tmp.dir, exe);
+    defer alloc.free(ref);
+    const ws: Ws = .{ .alloc = alloc, .io = io, .dir = tmp.dir, .exe = exe, .ref = ref };
+    const sid = "s-fs-edit";
+
+    // Exact and unique: the file changes and the answer carries the edited
+    // region, numbered, so nothing needs re-reading.
+    {
+        try tmp.dir.writeFile(io, .{ .sub_path = "one.txt", .data = "alpha\nbeta\ngamma\n" });
+        const ok = try ws.edit("{\"path\":\"one.txt\",\"old_string\":\"beta\",\"new_string\":\"BETA\"}", sid);
+        defer alloc.free(ok.stdout);
+        try expectOk(ok, "edited one.txt (1 replacement). Result:\n     1\talpha\n     2\tBETA\n     3\tgamma");
+        const bytes = try tmp.dir.readFileAlloc(io, "one.txt", alloc, .unlimited);
+        defer alloc.free(bytes);
+        try std.testing.expectEqualStrings("alpha\nBETA\ngamma\n", bytes);
+    }
+
+    // Ambiguous: the count, the occurrences with line numbers, and the three
+    // ways out — and the file is untouched.
+    {
+        try tmp.dir.writeFile(io, .{ .sub_path = "two.txt", .data = "x = 1\nmiddle\nx = 1\n" });
+        const many = try ws.edit("{\"path\":\"two.txt\",\"old_string\":\"x = 1\",\"new_string\":\"x = 2\"}", sid);
+        defer alloc.free(many.stdout);
+        try expectRefusal(many, "old_string appears 2 times; add surrounding context to make it unique, pass target_line from one occurrence below, or set replace_all=true.");
+        try expectRefusal(many, "candidate 1 (line 1):");
+        try expectRefusal(many, "candidate 2 (line 3):");
+        const untouched = try tmp.dir.readFileAlloc(io, "two.txt", alloc, .unlimited);
+        defer alloc.free(untouched);
+        try std.testing.expectEqualStrings("x = 1\nmiddle\nx = 1\n", untouched);
+
+        // target_line picks the second one.
+        const one = try ws.edit("{\"path\":\"two.txt\",\"old_string\":\"x = 1\",\"new_string\":\"x = 2\",\"target_line\":3}", sid);
+        defer alloc.free(one.stdout);
+        try std.testing.expectEqual(@as(u8, 0), one.code);
+        const after = try tmp.dir.readFileAlloc(io, "two.txt", alloc, .unlimited);
+        defer alloc.free(after);
+        try std.testing.expectEqualStrings("x = 1\nmiddle\nx = 2\n", after);
+
+        // A target_line with no occurrence on it refuses and changes nothing.
+        const miss = try ws.edit("{\"path\":\"two.txt\",\"old_string\":\"x = 1\",\"new_string\":\"x = 3\",\"target_line\":2}", sid);
+        defer alloc.free(miss.stdout);
+        try expectRefusal(miss, "target_line 2 does not contain an exact old_string occurrence");
+
+        // replace_all takes both, and says so in the plural.
+        try tmp.dir.writeFile(io, .{ .sub_path = "three.txt", .data = "x = 1\nmiddle\nx = 1\n" });
+        const all = try ws.edit("{\"path\":\"three.txt\",\"old_string\":\"x = 1\",\"new_string\":\"x = 9\",\"replace_all\":true}", sid);
+        defer alloc.free(all.stdout);
+        try expectOkContains(all, "edited three.txt (2 replacements). Result:");
+        const both = try tmp.dir.readFileAlloc(io, "three.txt", alloc, .unlimited);
+        defer alloc.free(both);
+        try std.testing.expectEqualStrings("x = 9\nmiddle\nx = 9\n", both);
+    }
+
+    // No match: similar lines as diagnostic hints, plus the note that this
+    // session has not read the file.
+    {
+        try tmp.dir.writeFile(io, .{ .sub_path = "miss.txt", .data = "fn helper() {\n    actual();\n}\n" });
+        const gone = try ws.edit("{\"path\":\"miss.txt\",\"old_string\":\"fn helper() {\\n    expected();\\n}\",\"new_string\":\"x\"}", sid);
+        defer alloc.free(gone.stdout);
+        try expectRefusal(gone, "old_string not found in file.");
+        try expectRefusal(gone, "diagnostic hints, not replacement targets");
+        try expectRefusal(gone, "note: you have not read the current version of this file");
+    }
+
+    // Outside a session there is no record to consult, so no note is invented
+    // — and the edit itself happens exactly the same way.
+    {
+        try tmp.dir.writeFile(io, .{ .sub_path = "free.txt", .data = "solo\n" });
+        const ok = try ws.edit("{\"path\":\"free.txt\",\"old_string\":\"solo\",\"new_string\":\"duo\"}", null);
+        defer alloc.free(ok.stdout);
+        try expectOk(ok, "edited free.txt (1 replacement). Result:\n     1\tduo");
+        const missing = try ws.edit("{\"path\":\"free.txt\",\"old_string\":\"nope\",\"new_string\":\"x\"}", null);
+        defer alloc.free(missing.stdout);
+        try expectRefusal(missing, "old_string not found in file.");
+        try std.testing.expect(std.mem.indexOf(u8, missing.stdout, "you have not read the current version") == null);
     }
 }
 
@@ -442,7 +537,7 @@ test "bundled std read of a 200 KB file caps itself under the host budget: throu
         var sess = try session.AgentSession.openDurable(alloc, .{
             .model = .{ .ptr = &model, .vtable = &OneCallModel.vtable },
             .step_ctx = .{
-                .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = ws_path },
+                .tool_context = .{ .environment = lenv.environment(), .cwd = ws_path },
                 .scratch_dir = ".nulya/scratch",
             },
         }, .{ .workspace = tmp.dir, .session_path = spath });

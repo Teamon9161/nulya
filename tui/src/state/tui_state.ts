@@ -50,6 +50,14 @@ export interface TuiState {
    * kernel's own `registry.pinned_native_tools` instead.
    */
   session_pins?: string[]
+  /**
+   * Set once `edit` has been offered to an existing `session_pins` list — the
+   * tool moved out of the kernel and into `std` after some people already had
+   * the other std pins written here. The marker is what makes it a migration
+   * rather than a rule: someone who then unpins `edit` in `/ext` keeps it
+   * unpinned.
+   */
+  adopted_std_edit_pin?: boolean
 }
 
 export function tuiStatePath(env: Record<string, string | undefined> = process.env): string {
@@ -81,6 +89,7 @@ export function loadTuiState(path = tuiStatePath()): TuiState {
     if (Array.isArray(pins)) state.session_pins = pins.filter((s): s is string => typeof s === "string")
     const mode = record["mode"]
     if (typeof mode === "string" && isMode(mode)) state.mode = mode
+    if (record["adopted_std_edit_pin"] === true) state.adopted_std_edit_pin = true
     // Every key is picked out by name, so a file written by an older build —
     // `asked_bundled`, retired in T23 when the bundled question went away — is
     // simply not read. An unknown key has never been an error here, and a state

@@ -1,5 +1,5 @@
-//! End-to-end proof of the milestone (DESIGN §16): "Nulya v0.1 ships two tools.
-//! The third is created by Nulya itself."
+//! End-to-end proof of the milestone (DESIGN §16): "Nulya ships one tool. The
+//! second is created by Nulya itself."
 //!
 //! This scaffolds a real extension, builds it with the HOST's zig (injected via
 //! NULYA_TEST_ZIG by build.zig so the ~90MB embed is not needed), activates the
@@ -46,13 +46,14 @@
 //! naming NULYA_EXE / `nulya help` / `nulya src`, and the repo's own
 //! `extensions/guide` composing in as one skill and no system prompt.
 //!
-//! And the bundled `std` extension (docs/goals/std.md): five file/search tools
+//! And the bundled `std` extension (docs/goals/std.md): six file/search tools
 //! in one compiled package — built, activated, reached by `ext run`; `read`'s
 //! self-pagination and freshness stubs, `write` / `append` refusing to touch a
 //! file the session has not read (state on disk under the session's scratch
-//! dir, none outside a session), `grep`'s smart-case / per-file cap / paging /
-//! gitignore, `glob`'s mtime order — and a string JSON-RPC `result` reaching the
-//! caller verbatim (DESIGN §7.3).
+//! dir, none outside a session), `edit`'s exact match, teaching refusals and
+//! the freshness it records for its own change, `grep`'s smart-case / per-file
+//! cap / paging / gitignore, `glob`'s mtime order — and a string JSON-RPC
+//! `result` reaching the caller verbatim (DESIGN §7.3).
 //!
 //! Compiling an extension is a real `zig build-exe`, so `support.zig` keeps a
 //! compile-once cache of built versions under `.zig-cache/` and copies frozen
@@ -72,7 +73,7 @@
 //!   e2e/cli.zig          the self-description entry: `nulya help`, `ext api`
 //!                        topics, the kernel prompt's bootstrap sentence, guide
 //!   e2e/std.zig          the bundled `std` extension: fixtures + smoke;
-//!   e2e/std_fs.zig       … its read / write / append + freshness;
+//!   e2e/std_fs.zig       … its read / write / append / edit + freshness;
 //!   e2e/std_search.zig   … its grep / glob
 
 comptime {

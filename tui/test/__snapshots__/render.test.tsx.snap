@@ -211,7 +211,7 @@ exports[`a sub-session names the session it drives 1`] = `
 exports[`the composition card is two lines at rest: what this session is, and what it carries 1`] = `
 "                                                                            
 ▎ session · 2026-08-16 14:02 · frozen composition                          ▸
-▎ model    anthropic/claude-sonnet-5 · tools 2+1 · skills 1 · prompts 1     
+▎ model    anthropic/claude-sonnet-5 · tools 1+1 · skills 1 · prompts 1     
                                                                             
                                                                             
                                                                             
@@ -232,7 +232,7 @@ exports[`opened, the composition card shows what this session froze 1`] = `
 "                                                                            
 ▎ session · 2026-08-16 14:02 · frozen composition                          ▾
 ▎ model    anthropic/claude-sonnet-5 · api.anthropic.com                    
-▎ tools    shell edit ⚡lint_zig                                            
+▎ tools    shell ⚡lint_zig                                                 
 ▎ skills   zig-style                                                        
 ▎ prompts  evolution                                                        
 ▎ ext      lint@v-3f2a91                                                    

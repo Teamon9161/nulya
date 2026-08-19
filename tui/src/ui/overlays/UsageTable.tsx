@@ -71,7 +71,7 @@ export function UsageTable(props: { rows: ToolUsage[]; width: number }) {
         <text fg={style.theme.muted} height={1}>
           {fit("no tool usage recorded yet", props.width)}
         </text>
-        <For each={wrapWords("the kernel appends a line each time a tool runs · shell and edit count too", props.width)}>
+        <For each={wrapWords("the kernel appends a line each time a tool runs · shell counts too", props.width)}>
           {(line) => (
             <text fg={style.theme.dim} height={1}>
               {line}

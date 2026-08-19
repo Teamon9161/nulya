@@ -184,29 +184,6 @@ const FakeEnv = struct {
     }
 };
 
-/// The executor never touches `req.ctx.fs`; a stub keeps the `ToolContext`
-/// well-formed without reaching the real filesystem.
-const DummyFs = struct {
-    fn readFileAlloc(ptr: *anyopaque, alloc: std.mem.Allocator, path: []const u8, max_bytes: usize) anyerror![]u8 {
-        _ = ptr;
-        _ = alloc;
-        _ = path;
-        _ = max_bytes;
-        return error.NotSupported;
-    }
-
-    fn atomicWriteFile(ptr: *anyopaque, path: []const u8, data: []const u8) anyerror!void {
-        _ = ptr;
-        _ = path;
-        _ = data;
-        return error.NotSupported;
-    }
-
-    fn handle(self: *DummyFs) environment.WorkspaceFs {
-        return .{ .ptr = self, .vtable = &.{ .readFileAlloc = readFileAlloc, .atomicWriteFile = atomicWriteFile } };
-    }
-};
-
 fn testBinding() Binding {
     return .{
         .definition = .{
@@ -285,11 +262,10 @@ test "executor forwards the exact frozen entry path" {
     var binding = testBinding();
     var fake = FakeEnv{ .io = testing.io, .response = success_response };
     defer fake.deinit(alloc);
-    var fs = DummyFs{};
 
     const result = try binding.asTool().executor.call(alloc, .{
         .args_json = "{\"query\":\"zig\"}",
-        .ctx = .{ .environment = fake.handle(), .fs = fs.handle(), .cwd = "ws" },
+        .ctx = .{ .environment = fake.handle(), .cwd = "ws" },
     });
     defer alloc.free(result.output);
 
@@ -300,14 +276,13 @@ test "executor forwards the exact frozen entry path" {
 
 test "a binding's declared timeout reaches the environment; without one the host default does" {
     const alloc = testing.allocator;
-    var fs = DummyFs{};
 
     var default_binding = testBinding();
     var default_env = FakeEnv{ .io = testing.io, .response = success_response };
     defer default_env.deinit(alloc);
     const default_result = try default_binding.asTool().executor.call(alloc, .{
         .args_json = "{}",
-        .ctx = .{ .environment = default_env.handle(), .fs = fs.handle(), .cwd = "ws" },
+        .ctx = .{ .environment = default_env.handle(), .cwd = "ws" },
     });
     defer alloc.free(default_result.output);
     try testing.expectEqual(@as(?u32, invoke.Options.default_timeout_ms), default_env.saw_timeout_ms);
@@ -320,7 +295,7 @@ test "a binding's declared timeout reaches the environment; without one the host
     defer slow_env.deinit(alloc);
     const slow_result = try slow_binding.asTool().executor.call(alloc, .{
         .args_json = "{}",
-        .ctx = .{ .environment = slow_env.handle(), .fs = fs.handle(), .cwd = "ws" },
+        .ctx = .{ .environment = slow_env.handle(), .cwd = "ws" },
     });
     defer alloc.free(slow_result.output);
     try testing.expectEqual(@as(?u32, 600_000), slow_env.saw_timeout_ms);
@@ -331,11 +306,10 @@ test "executor forwards the model's raw arguments as a tool/call request" {
     var binding = testBinding();
     var fake = FakeEnv{ .io = testing.io, .response = success_response };
     defer fake.deinit(alloc);
-    var fs = DummyFs{};
 
     const result = try binding.asTool().executor.call(alloc, .{
         .args_json = "{\"query\":\"zig\"}",
-        .ctx = .{ .environment = fake.handle(), .fs = fs.handle(), .cwd = "ws" },
+        .ctx = .{ .environment = fake.handle(), .cwd = "ws" },
     });
     defer alloc.free(result.output);
 
@@ -353,11 +327,10 @@ test "success maps to a raw success result" {
     var binding = testBinding();
     var fake = FakeEnv{ .io = testing.io, .response = success_response };
     defer fake.deinit(alloc);
-    var fs = DummyFs{};
 
     const result = try binding.asTool().executor.call(alloc, .{
         .args_json = "{\"query\":\"zig\"}",
-        .ctx = .{ .environment = fake.handle(), .fs = fs.handle(), .cwd = "ws" },
+        .ctx = .{ .environment = fake.handle(), .cwd = "ws" },
     });
     defer alloc.free(result.output);
 
@@ -370,11 +343,10 @@ test "application failure maps to a raw failed result without reformatting" {
     var binding = testBinding();
     var fake = FakeEnv{ .io = testing.io, .response = error_response };
     defer fake.deinit(alloc);
-    var fs = DummyFs{};
 
     const result = try binding.asTool().executor.call(alloc, .{
         .args_json = "{\"query\":\"zig\"}",
-        .ctx = .{ .environment = fake.handle(), .fs = fs.handle(), .cwd = "ws" },
+        .ctx = .{ .environment = fake.handle(), .cwd = "ws" },
     });
     defer alloc.free(result.output);
 
@@ -388,11 +360,10 @@ test "timeout remains a normal failed tool result" {
     var binding = testBinding();
     var fake = FakeEnv{ .io = testing.io, .timed_out = true };
     defer fake.deinit(alloc);
-    var fs = DummyFs{};
 
     const result = try binding.asTool().executor.call(alloc, .{
         .args_json = "{\"query\":\"zig\"}",
-        .ctx = .{ .environment = fake.handle(), .fs = fs.handle(), .cwd = "ws" },
+        .ctx = .{ .environment = fake.handle(), .cwd = "ws" },
     });
     defer alloc.free(result.output);
 
@@ -405,11 +376,10 @@ test "cancellation propagates unchanged" {
     var binding = testBinding();
     var fake = FakeEnv{ .io = testing.io, .err = error.Canceled };
     defer fake.deinit(alloc);
-    var fs = DummyFs{};
 
     try testing.expectError(error.Canceled, binding.asTool().executor.call(alloc, .{
         .args_json = "{}",
-        .ctx = .{ .environment = fake.handle(), .fs = fs.handle(), .cwd = "ws" },
+        .ctx = .{ .environment = fake.handle(), .cwd = "ws" },
     }));
 }
 
@@ -418,10 +388,9 @@ test "host faults propagate as errors, not failed results" {
     var binding = testBinding();
     var fake = FakeEnv{ .io = testing.io, .err = error.OutOfMemory };
     defer fake.deinit(alloc);
-    var fs = DummyFs{};
 
     try testing.expectError(error.OutOfMemory, binding.asTool().executor.call(alloc, .{
         .args_json = "{}",
-        .ctx = .{ .environment = fake.handle(), .fs = fs.handle(), .cwd = "ws" },
+        .ctx = .{ .environment = fake.handle(), .cwd = "ws" },
     }));
 }

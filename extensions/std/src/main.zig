@@ -1,13 +1,14 @@
 //! `std` — the file and search tools a coding session reaches for first, as one
 //! extension outside the kernel.
 //!
-//! **What it is.** Five tools in one binary — `read`, `write`, `append`, `grep`,
-//! `glob` — dispatched here on the request's `params.name`. Their behaviour is
-//! ported from tcode's tool crate, error text and numbers included: an error is
-//! written FOR the model (what went wrong, how to succeed next call), a small
-//! read is widened, a big one paginates itself, `write` will not clobber a file
-//! the model has not seen, `grep` is smart-case with a per-file cap, `glob`
-//! sorts by mtime. See docs/goals/std.md for the contract.
+//! **What it is.** Six tools in one binary — `read`, `write`, `append`, `edit`,
+//! `grep`, `glob` — dispatched here on the request's `params.name`. Their
+//! behaviour is ported from tcode's tool crate, error text and numbers
+//! included: an error is written FOR the model (what went wrong, how to succeed
+//! next call), a small read is widened, a big one paginates itself, `write`
+//! will not clobber a file the model has not seen, `edit` replaces an exact
+//! unique string and teaches when it cannot, `grep` is smart-case with a
+//! per-file cap, `glob` sorts by mtime. See docs/goals/std.md for the contract.
 //!
 //! **Why an extension and not builtins.** nulya has no "std tool" layer: a tool
 //! that is always in front of every model costs a `max_tools` slot and prefix
@@ -34,6 +35,7 @@ const rpc = @import("rpc.zig");
 const read = @import("read.zig");
 const write = @import("write.zig");
 const append = @import("append.zig");
+const edit = @import("edit.zig");
 const grep = @import("grep.zig");
 const glob = @import("glob.zig");
 
@@ -81,6 +83,7 @@ fn dispatch(ctx: *const rpc.Ctx, request: rpc.Request) !rpc.Outcome {
         .{ .name = "read", .run = read.run },
         .{ .name = "write", .run = write.run },
         .{ .name = "append", .run = append.run },
+        .{ .name = "edit", .run = edit.run },
         .{ .name = "grep", .run = grep.run },
         .{ .name = "glob", .run = glob.run },
     };
@@ -89,7 +92,7 @@ fn dispatch(ctx: *const rpc.Ctx, request: rpc.Request) !rpc.Outcome {
     }
     return .{ .failed = .{
         .code = rpc.code_unknown_tool,
-        .message = try std.fmt.allocPrint(ctx.alloc, "std has no tool named '{s}' (it has read, write, append, grep, glob)", .{request.name}),
+        .message = try std.fmt.allocPrint(ctx.alloc, "std has no tool named '{s}' (it has read, write, append, edit, grep, glob)", .{request.name}),
     } };
 }
 
@@ -111,6 +114,7 @@ test {
     _ = read;
     _ = write;
     _ = append;
+    _ = edit;
     _ = grep;
     _ = glob;
     _ = @import("freshness.zig");

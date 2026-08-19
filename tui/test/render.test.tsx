@@ -414,9 +414,9 @@ test("the composition card is two lines at rest: what this session is, and what 
     <CompositionCard header={header_fixture} contributions={card_contributions} />
   ))
   expect(frame).toContain("session · 2026-08-16 14:02 · frozen composition")
-  expect(frame).toContain("model    anthropic/claude-sonnet-5 · tools 2+1 · skills 1 · prompts 1")
+  expect(frame).toContain("model    anthropic/claude-sonnet-5 · tools 1+1 · skills 1 · prompts 1")
   // Everything below the model row is provenance, and it is behind the fold.
-  expect(frame).not.toContain("shell edit ⚡lint_zig")
+  expect(frame).not.toContain("shell ⚡lint_zig")
   expect(frame).not.toContain("lint@v-3f2a91")
   expect(frame).not.toContain("parent s-1786800870313-bf37ef:41")
   expect(frame).toMatchSnapshot()
@@ -430,7 +430,7 @@ test("opened, the composition card shows what this session froze", async () => {
     expanded_card,
   )
   expect(frame).toContain("session · 2026-08-16 14:02 · frozen composition")
-  expect(frame).toContain("shell edit ⚡lint_zig")
+  expect(frame).toContain("shell ⚡lint_zig")
   expect(frame).toContain("skills   zig-style")
   expect(frame).toContain("prompts  evolution")
   expect(frame).toContain("anthropic/claude-sonnet-5 · api.anthropic.com")
@@ -691,7 +691,7 @@ test("the composition card degrades to ascii too", async () => {
     ascii,
   )
   expect(frame).toContain("| session · 2026-08-16 14:02 · frozen composition")
-  expect(frame).toContain("shell edit !lint_zig")
+  expect(frame).toContain("shell !lint_zig")
   expect(frame).not.toContain("▎")
   // The fold marker too: ascii has its own pair (`v` / `>`).
   expect(frame).not.toContain("▾")

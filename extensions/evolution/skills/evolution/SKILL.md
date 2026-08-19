@@ -115,7 +115,7 @@ The proposal is one line in the project config:
 
 ```bash
 cat .nulya/config.toml 2>/dev/null      # read what is already pinned
-# then, with `edit`, make the file contain:
+# then make the file contain (with an editing tool if you have one, else `shell`):
 #   [registry]
 #   pinned_native_tools = ["ext:my.helper/do_thing"]
 ```
@@ -160,7 +160,7 @@ printf '{"jsonrpc":"2.0","id":%s,"result":{"text":"…"}}' "$id"
 
 `nulya ext api` prints the real protocol source if you need the exact shape.
 
-For a knowledge proposal there is no extension at all: `edit` the relevant
+For a knowledge proposal there is no extension at all: edit the relevant
 `SKILL.md` or notes file, and record in the report which file and why.
 
 ## 3. The report

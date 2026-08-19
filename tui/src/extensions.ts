@@ -30,8 +30,10 @@ import {
   type SyncLine,
   type SyncReport,
 } from "./nulya/cli.ts"
+import { readContributions } from "./nulya/files.ts"
+import { builtin_tools } from "./pins.ts"
 import { userConfigDir } from "./state/settings.ts"
-import { loadTuiState, rememberSessionPins } from "./state/tui_state.ts"
+import { loadTuiState, rememberSessionPins, saveTuiState, tuiStatePath } from "./state/tui_state.ts"
 import type { Workspace } from "./nulya/bin.ts"
 
 /** What the answer to the trust question does. */
@@ -265,8 +267,15 @@ export function planStore(ws: Workspace, user: boolean): Promise<SyncReport> {
 // it there for a minute of zig. It happens on the way in, in the background,
 // with the status line saying so — and one Enter in `/ext` undoes any of it.
 
-/** The five std tools, as the stable ids `session new --pin` takes. */
-export const std_pins = ["ext:std/read", "ext:std/write", "ext:std/append", "ext:std/grep", "ext:std/glob"]
+/** The six std tools, as the stable ids `session new --pin` takes. */
+export const std_pins = [
+  "ext:std/read",
+  "ext:std/write",
+  "ext:std/append",
+  "ext:std/edit",
+  "ext:std/grep",
+  "ext:std/glob",
+]
 
 /** The bundled ids whose install means "active in every next session". */
 export const bundled_active = ["std", "guide"]
@@ -353,9 +362,9 @@ export async function adoptBundled(
 }
 
 /**
- * Put the five std tools on this TUI's session pin list, unless that would
- * blow the kernel's `max_tools` quota at the next `session new` — a session
- * that refuses to start is worse than an unpinned tool.
+ * Put the six std tools on this TUI's session pin list, unless that would blow
+ * the kernel's `max_tools` quota at the next `session new` — a session that
+ * refuses to start is worse than an unpinned tool.
  */
 async function pinStdTools(ws: Workspace, statePath?: string): Promise<boolean> {
   const current = loadTuiState(statePath).session_pins ?? []
@@ -370,10 +379,77 @@ async function pinStdTools(ws: Workspace, statePath?: string): Promise<boolean> 
     // have the last word.
   }
   const face = new Set([...merged_config, ...current, ...std_pins])
-  if (2 + face.size > max_tools) return false
+  if (builtin_tools + face.size > max_tools) return false
   const mine = new Set([...current, ...std_pins])
   rememberSessionPins([...mine], statePath)
   return true
+}
+
+/**
+ * What the one-time `edit` pin migration should do, given the pin list on disk
+ * and the tools the ACTIVE `std` on this machine declares (`null` = no active
+ * std, or one this build could not read).
+ *
+ * - `done`: nothing to migrate — no std pins here, or `edit` already on the
+ *   list. Mark it so this is never looked at again.
+ * - `adopt`: the other std tools are pinned and the active std declares
+ *   `edit` — add it and mark done.
+ * - `wait`: the other std tools are pinned but the std that is active does
+ *   not declare `edit` yet (an older build of the draft, a machine that has not
+ *   rebuilt). A pin the kernel cannot resolve refuses the next `session new`
+ *   outright (`PinToolNotDeclared`), so do nothing and look again next start.
+ */
+export function stdEditPinDecision(
+  pins: readonly string[],
+  activeStdTools: readonly string[] | null,
+): "done" | "adopt" | "wait" {
+  const others = std_pins.filter((pin) => pin !== "ext:std/edit")
+  const wants = others.every((pin) => pins.includes(pin)) && !pins.includes("ext:std/edit")
+  if (!wants) return "done"
+  return activeStdTools?.includes("edit") ? "adopt" : "wait"
+}
+
+/**
+ * One-time: put `ext:std/edit` on a pin list written before `edit` moved out of
+ * the kernel and into `std`. Somebody who already had the other std tools
+ * pinned asked for that face; the tool they used to get for free is now part of
+ * it, and nothing else would ever add it for them.
+ *
+ * Once, and only once — the marker outlives the pins, so unpinning `edit`
+ * afterwards sticks. Nothing to migrate (no state file, no std pins, `edit`
+ * already there) still marks it done. But never before the active `std` can
+ * honour the pin (`stdEditPinDecision`): a pin list that names a tool the
+ * frozen version lacks stops every session from starting. Returns true when the
+ * list changed.
+ */
+export async function adoptStdEditPin(ws: Workspace, statePath?: string): Promise<boolean> {
+  const path = statePath ?? tuiStatePath()
+  if (!existsSync(path)) return false
+  const state = loadTuiState(path)
+  if (state.adopted_std_edit_pin) return false
+  const pins = state.session_pins ?? []
+  // Only consulted when there is something to migrate: a fresh state file must
+  // not cost an `ext list` on every start.
+  const needs_std = stdEditPinDecision(pins, null) !== "done"
+  let active_tools: string[] | null = null
+  if (needs_std) {
+    try {
+      const entry = (await extList(ws)).find((e) => e.id === "std" && e.current !== null && !e.shadowed)
+      if (entry?.current) active_tools = (await readContributions(ws, "std", entry.current)).tools
+    } catch {
+      // No listing is "unknown": the decision below waits, and tries again.
+    }
+  }
+  switch (stdEditPinDecision(pins, active_tools)) {
+    case "done":
+      saveTuiState({ ...state, adopted_std_edit_pin: true }, path)
+      return false
+    case "wait":
+      return false
+    case "adopt":
+      saveTuiState({ ...state, adopted_std_edit_pin: true, session_pins: [...pins, "ext:std/edit"] }, path)
+      return true
+  }
 }
 
 /**

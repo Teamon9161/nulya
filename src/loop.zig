@@ -643,7 +643,6 @@ test "one step runs a batch of two shell calls and appends one result turn" {
     _ = try runStepForTest(alloc, &l, .{ .ptr = &scripted, .vtable = &Scripted.vtable }, tools, .{
         .tool_context = .{
             .environment = lenv.environment(),
-            .fs = lenv.workspaceFs(),
             .cwd = ".",
         },
         .scratch_dir = "/tmp",
@@ -726,7 +725,7 @@ test "a gate denies one call, the batch keeps its shape, and the rest still run"
     var lenv = try environment.LocalEnvironment.init(alloc, threaded.io(), .{});
     defer lenv.deinit();
     const step_ctx_base: StepContext = .{
-        .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = "." },
+        .tool_context = .{ .environment = lenv.environment(), .cwd = "." },
         .scratch_dir = "/tmp",
     };
 
@@ -810,7 +809,7 @@ test "a denied call has no duration to journal, and the slots stay call-aligned"
     const ir = try prompt.project(alloc, l.view());
     defer ir.deinit(alloc);
     _ = try runStepWithPrompt(alloc, &l, .{ .ptr = &model, .vtable = &TwoCallModel.vtable }, &ir, tools, .{
-        .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = "." },
+        .tool_context = .{ .environment = lenv.environment(), .cwd = "." },
         .scratch_dir = "/tmp",
         .gate = .{ .ptr = &gate, .vtable = &ScriptedGate.vtable },
     }, .{}, &durations);
@@ -885,7 +884,7 @@ test "a transient model failure is retried with a fresh collector; a permanent o
     var watch = Watch{};
     var flaky = Flaky{ .failures_left = 2, .fail_with = error.Transport };
     const ctx: StepContext = .{
-        .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = "." },
+        .tool_context = .{ .environment = lenv.environment(), .cwd = "." },
         .scratch_dir = "/tmp",
         .retry = .{ .max_retries = 3, .initial_backoff_ms = 1, .max_backoff_ms = 2 },
         .observer = .{ .ptr = &watch, .vtable = &Watch.vtable },
@@ -986,7 +985,6 @@ test "a capability note reaches the provider as a capability_note turn" {
     _ = try runStepForTest(alloc, &l, .{ .ptr = &model_impl, .vtable = &NoteModel.vtable }, .{ .tools = &.{} }, .{
         .tool_context = .{
             .environment = lenv.environment(),
-            .fs = lenv.workspaceFs(),
             .cwd = ".",
         },
         .scratch_dir = "/tmp",
@@ -1182,7 +1180,7 @@ test "canceling provider streaming appends no partial assistant and leaves the l
     var model_impl = BlockingModel{ .io = io, .ready = &ready, .release = &release };
 
     const step_ctx: StepContext = .{
-        .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = "." },
+        .tool_context = .{ .environment = lenv.environment(), .cwd = "." },
         .scratch_dir = "/tmp",
     };
     const tools: registry.ToolSetSnapshot = .{ .tools = &.{} };
@@ -1236,7 +1234,7 @@ test "canceling the first executing tool records a complete canceled batch" {
     defer prompt_ir.deinit(alloc);
 
     const step_ctx: StepContext = .{
-        .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = "." },
+        .tool_context = .{ .environment = lenv.environment(), .cwd = "." },
         .scratch_dir = "/tmp",
     };
 
@@ -1295,7 +1293,7 @@ test "a reply cut by max_tokens records the calls verbatim, runs nothing, and cl
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
     defer lenv.deinit();
     const outcome = try runStepForTest(alloc, &l, model_impl.handle(), tools, .{
-        .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = "." },
+        .tool_context = .{ .environment = lenv.environment(), .cwd = "." },
         .scratch_dir = "/tmp",
     });
 
@@ -1353,7 +1351,7 @@ test "a successful earlier tool is kept when a later tool is canceled" {
     defer prompt_ir.deinit(alloc);
 
     const step_ctx: StepContext = .{
-        .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = "." },
+        .tool_context = .{ .environment = lenv.environment(), .cwd = "." },
         .scratch_dir = "/tmp",
     };
 
@@ -1419,7 +1417,7 @@ test "canceling a step-budget spill keeps the ledger complete and never runs lat
     defer prompt_ir.deinit(alloc);
 
     const step_ctx: StepContext = .{
-        .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = "." },
+        .tool_context = .{ .environment = lenv.environment(), .cwd = "." },
         .scratch_dir = "/tmp",
         .step_budget = .{ .max_bytes = 4 }, // tiny: any result forces the spill path
     };

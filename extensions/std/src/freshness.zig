@@ -14,9 +14,9 @@
 //! gate. Paths are keyed absolute, compared byte for byte (as tcode compares
 //! `PathBuf`s); the hash is only ever compared with hashes this file wrote.
 //!
-//! The kernel's `edit` does not report here, so a `write`/`append` to a file
-//! that was `edit`ed since its last `read` is refused as changed on disk until
-//! it is re-read. Known and accepted (docs/goals/std.md D4).
+//! `edit` reports here too (as a read of the echoed snippet under the new
+//! hash, see edit.zig), so a `write`/`append` after our own edit is not mistaken
+//! for an external change; a change made any other way still is.
 
 const std = @import("std");
 

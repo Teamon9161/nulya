@@ -22,6 +22,7 @@ import { loadSettings } from "./state/settings.ts"
 import { loadTuiState, rememberStoreAsked } from "./state/tui_state.ts"
 import { planLaunch } from "./launch.ts"
 import {
+  adoptStdEditPin,
   answerFor,
   applyAnswer,
   inventory,
@@ -112,6 +113,11 @@ async function main() {
   // the question used to hold a bare terminal for a minute with `installing…` as
   // the only sign of life. It happens behind the screen now, on the status line,
   // and `/ext` turns any of it off with one key.
+
+  // `edit` used to be a builtin and is now one of `std`'s tools: a pin list
+  // written before that move is short by one. Once, before anything reads it —
+  // and only once the std that is active here declares `edit`, else it waits.
+  await adoptStdEditPin(ws)
 
   // Read once, for two readers: the launch plan below, and the status bar's
   // context gauge (only `context_window` is taken from the catalog).

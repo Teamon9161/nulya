@@ -360,7 +360,7 @@ test("the model is a click target wherever it is written: the line under the com
     // it, and the model is the target. No session id, no provider name.
     // The frame ends with a newline, so the last row is the blank after it.
     const bar = rows.length - 2
-    expect(rows[bar]).toContain("scripted-demo · tools 2+0")
+    expect(rows[bar]).toContain("scripted-demo · tools 1+0")
     expect(rows[bar]).not.toContain(id)
     // The hint gives up its widest form first when the line runs short (the
     // mode chip on the right is one of the things it makes room for, T24), but

@@ -1,24 +1,22 @@
 //! The tool registry.
 //!
-//! In the immutable kernel there are exactly two builtin tools: shell and edit
-//! (DESIGN §6). Everything else the AI grows as an extension: selected tools are
-//! exposed natively this session through `SessionComposition` pins, and every
-//! other extension capability is invoked through `nulya ext run` (DESIGN §5, §7).
+//! In the immutable kernel there is exactly ONE builtin tool: shell (DESIGN §6).
+//! Everything else the AI grows as an extension: selected tools are exposed
+//! natively this session through `SessionComposition` pins, and every other
+//! extension capability is invoked through `nulya ext run` (DESIGN §5, §7).
 //! A session receives a frozen `ToolSetSnapshot` through `SessionComposition`;
 //! execution never queries a live registry mid-step.
 
 const std = @import("std");
 const tool = @import("tool.zig");
 const shell = @import("tools/shell.zig");
-const edit = @import("tools/edit.zig");
 
 const builtins = [_]tool.Tool{
     shell.def,
-    edit.def,
 };
 
-/// Permanent model-facing tool slots (shell + edit). The tool budget always
-/// reserves these before any extension tool is promoted (DESIGN §6).
+/// Permanent model-facing tool slots (shell). The tool budget always reserves
+/// these before any extension tool is promoted (DESIGN §6).
 pub const builtin_count: usize = builtins.len;
 
 /// A snapshot rejects two ways of colliding. Both are logical-identity clashes,
@@ -32,8 +30,8 @@ pub const SnapshotError = error{
 
 pub const ToolSetSnapshot = struct {
     /// Frozen model-facing tool set for the session composition. Names must be
-    /// unique inside the snapshot; builtin names `shell` and `edit` are
-    /// permanently reserved.
+    /// unique inside the snapshot; the builtin name `shell` is permanently
+    /// reserved.
     tools: []const tool.Tool,
 
     pub fn deinit(self: ToolSetSnapshot, alloc: std.mem.Allocator) void {
@@ -66,8 +64,8 @@ pub fn snapshot(alloc: std.mem.Allocator) !ToolSetSnapshot {
 /// The registry stays ignorant of what `extras` are — extension tools, MCP
 /// tools, anything adapted to `tool.Tool` — and only enforces the two identity
 /// invariants every snapshot must hold: unique stable id and unique model-facing
-/// name. Builtins keep their table order (shell, edit); extras follow, sorted by
-/// stable id so the frozen set is deterministic regardless of caller order.
+/// name. The builtin keeps its leading slot; extras follow, sorted by stable id
+/// so the frozen set is deterministic regardless of caller order.
 pub fn snapshotWith(alloc: std.mem.Allocator, extras: []const tool.Tool) !ToolSetSnapshot {
     const tools = try alloc.alloc(tool.Tool, builtins.len + extras.len);
     errdefer alloc.free(tools);
@@ -94,8 +92,11 @@ fn lessThanById(_: void, a: tool.Tool, b: tool.Tool) bool {
 test "snapshot freezes builtin table for lookup" {
     const snap = try snapshot(std.testing.allocator);
     defer snap.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), snap.tools.len);
     try std.testing.expect(snap.lookup("shell") != null);
-    try std.testing.expect(snap.lookup("edit") != null);
+    // `edit` is not a builtin: it is a tool of the bundled `std` extension and
+    // arrives, if at all, as a pinned extra (DESIGN §6, §7.8).
+    try std.testing.expect(snap.lookup("edit") == null);
     try std.testing.expect(snap.lookup("nope") == null);
 }
 
@@ -137,13 +138,12 @@ test "snapshotWith keeps builtins first and sorts extras by stable id" {
     const snap = try snapshotWith(std.testing.allocator, &extras);
     defer snap.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(@as(usize, 4), snap.tools.len);
-    // Builtins keep their reserved leading order regardless of extras.
+    try std.testing.expectEqual(@as(usize, 3), snap.tools.len);
+    // The builtin keeps its reserved leading slot regardless of extras.
     try std.testing.expectEqualStrings("shell", snap.tools[0].definition.name);
-    try std.testing.expectEqualStrings("edit", snap.tools[1].definition.name);
     // Extras follow, ordered by stable id (a before z), not by caller order.
-    try std.testing.expectEqualStrings("ext:a.pkg/alpha", snap.tools[2].definition.id);
-    try std.testing.expectEqualStrings("ext:z.pkg/zeta", snap.tools[3].definition.id);
+    try std.testing.expectEqualStrings("ext:a.pkg/alpha", snap.tools[1].definition.id);
+    try std.testing.expectEqualStrings("ext:z.pkg/zeta", snap.tools[2].definition.id);
 }
 
 test "snapshotWith rejects a duplicate stable id" {

@@ -18,9 +18,9 @@ help` in PowerShell. Below, `nulya` means whichever of the two applies.
 
 - The kernel is one durable session file and one step: the model answers, its
   tool calls run in order, one batch of results goes back. That is the loop.
-- `shell` and `edit` are the only builtin tools, permanently. Every other
-  capability is an extension, a skill, a system prompt or a driver — all of them
-  outside the kernel, all of them writable.
+- `shell` is the only builtin tool, permanently. Every other capability —
+  including reading and editing files — is an extension, a skill, a system
+  prompt or a driver: all outside the kernel, all writable.
 - A session's composition — its tools, skills, system prompts and the exact
   extension versions — freezes at `session new` and never changes. Changing it
   means starting a new session.
@@ -114,9 +114,9 @@ form changes only in the next session.
 Compile (Zig, a `bin/` entry) when the tool must parse JSON or behave
 identically under both shells. In a nulya checkout, `extensions/compact` and
 `extensions/handoff` are the worked examples, and `extensions/std` (read /
-write / append / grep / glob as one package — build it `--user`, activate it,
-pin `ext:std/<tool>` for the ones you want) is the one to copy for a tool that
-returns text: a string `result` reaches the model verbatim.
+write / append / edit / grep / glob as one package — build it `--user`,
+activate it, pin `ext:std/<tool>` for the ones you want) is the one to copy for
+a tool that returns text: a string `result` reaches the model verbatim.
 
 Store and scope:
 

@@ -22,6 +22,8 @@ import {
   failedIds,
   planProjectStore,
   promptText,
+  std_pins,
+  stdEditPinDecision,
   summarize,
 } from "../src/extensions.ts"
 import { draftHelp } from "../src/ui/overlays/ExtView.tsx"
@@ -285,4 +287,22 @@ test("only the bundled ids that arrived this run are activated", async () => {
   // And the three on-demand packages are never adopted, however they arrived:
   // `evolution`'s system prompt belongs to the one session `/evolve` opens.
   expect(bundled_active).toEqual(["std", "guide"])
+})
+
+test("the edit pin migration adopts only once the active std can honour it, and never twice", () => {
+  const five = std_pins.filter((pin) => pin !== "ext:std/edit")
+  const six_tools = ["read", "write", "append", "edit", "grep", "glob"]
+  // The case it exists for: a list written when `edit` was a builtin, on a
+  // machine whose std has since been rebuilt with it.
+  expect(stdEditPinDecision(five, six_tools)).toBe("adopt")
+  // Same list, but the std that is active here is the old build: a pin the
+  // kernel cannot resolve would refuse every `session new`, so wait.
+  expect(stdEditPinDecision(five, ["read", "write", "append", "grep", "glob"])).toBe("wait")
+  expect(stdEditPinDecision(five, null)).toBe("wait")
+  // Nothing to migrate: no std pins at all, or `edit` already there — and the
+  // answer does not depend on the store, so a fresh machine never lists it.
+  expect(stdEditPinDecision([], null)).toBe("done")
+  expect(stdEditPinDecision(["ext:std/read"], null)).toBe("done")
+  expect(stdEditPinDecision(std_pins, six_tools)).toBe("done")
+  expect(stdEditPinDecision(std_pins, null)).toBe("done")
 })

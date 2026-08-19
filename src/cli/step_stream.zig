@@ -410,7 +410,7 @@ test "session step --stream emits the tui.md §2.2 line protocol in order" {
         },
         .model = scripted.handle(),
         .step_ctx = .{
-            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd_path },
+            .tool_context = .{ .environment = lenv.environment(), .cwd = cwd_path },
             .scratch_dir = "/tmp",
             .observer = stream.observer(),
         },
@@ -496,7 +496,7 @@ test "a reply cut by max_tokens is recorded replayable, closed with a marker, re
         },
         .model = scripted.handle(),
         .step_ctx = .{
-            .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd_path },
+            .tool_context = .{ .environment = lenv.environment(), .cwd = cwd_path },
             .scratch_dir = "/tmp",
             .observer = stream.observer(),
         },

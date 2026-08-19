@@ -60,10 +60,10 @@ test("a draft creates nothing on disk; the screen says so and the store agrees",
     const frame = setup.captureCharFrame()
     // The welcome screen's facts, not a composition card: nothing is frozen
     // yet, and the model is said once — under the composer (T24).
-    expect(frame).toContain("tools       shell edit")
+    expect(frame).toContain("tools       shell")
     expect(frame).not.toContain("frozen composition")
     expect(frame).not.toContain("model       ")
-    expect(frame).toContain("scripted-demo · tools 2+0")
+    expect(frame).toContain("scripted-demo · tools 1+0")
     expect((await sessionList(ws)).map((entry) => entry.id)).toEqual(before)
     // Look and leave: still nothing.
     setup.renderer.destroy()

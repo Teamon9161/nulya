@@ -28,8 +28,8 @@
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs"
 
-/** The two builtins are always on the face and always count (DESIGN §5.1). */
-export const builtin_tools = 2
+/** The one builtin is always on the face and always counts (DESIGN §5.1). */
+export const builtin_tools = 1
 
 export type PinState = "always" | "session" | "other" | "off"
 
@@ -182,9 +182,9 @@ export function orphanPins(pins: readonly string[], available: readonly string[]
 }
 
 /**
- * The quota line. `max_tools` counts the builtins (DESIGN §5.1), so the two are
- * shown rather than hidden — a face of 8 that already spends 2 is the fact
- * behind every "why was my pin refused".
+ * The quota line. `max_tools` counts the builtin (DESIGN §5.1), so it is shown
+ * rather than hidden — a face of 8 that already spends 1 is the fact behind
+ * every "why was my pin refused".
  *
  * Nothing is prevented here. Over-subscription is refused by `session new`, and
  * the panel repeats the kernel's own sentence rather than predicting it.
