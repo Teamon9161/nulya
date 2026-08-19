@@ -279,10 +279,20 @@ Driver 演化比 Tool 保守，因为**归因难**（任务难度 / model / seed
 
 ### 3.8 Authority / sandbox `[占位 · M7]`
 
-- `sandbox` backend 上线后 `manifest.permissions` 才被 OS 强制，从"声明"升级为"边界"。
+- `sandbox` backend 上线后 `manifest.permissions` 才被 OS 强制，从"声明"升级为"边界"。**执行前的那一票否决已经有了**（§3.8.1 的 gate），它是另一件事：拦的是"这一次要不要发生"，不是"发生时能碰什么"。
 - 不变量：**capability 绝不因被生成或被晋升而自动获得 authority**；始终 `capability authority ⊆ session authority`。
 - 与 config 项目层"只能收窄"是同一不变量的两面：checkout 一个 repo 不该能拓宽机器权限。第三面已落地：**workspace store 的 trust gate**（DESIGN §9）——`.nulya/extensions` 也在 checkout 里，所以随 clone 到达的 store 要被人信任一次才进 composition。
 - read-only subagent（reviewer）在 sandbox 之前不给 unrestricted shell（`local` 下无法区分 `cat` 与 `rm`）。
+
+### 3.8.1 权限：gate 是 substrate，mode / 规则是 driver 的 policy `[gate 已落地 · 2026-08 → DESIGN §4/§14；分类器占位]`
+
+`3.8` 是"发生时能碰什么"（OS 强制，未做）。这一节是它前面那半步：**这一次要不要发生**。两件事不该合并，因为它们的答案由不同的东西给。
+
+- **内核只长了一个原语，与 cancellation 同类**（physics #7 的同一形状）：`loop.StepContext.gate` 每个 tool call 执行前问一次，答案只有 `allow` / `deny{note?}` 两种；deny 就是那个 call 的 `tool_results`（`ok=false` + marker + 人的原话），**没有新事件种类、没有新 policy 键、batch 不变量不动**。kernel 里没有任何"该不该问"的判断——那正是它不该有的东西（physics #8）。`session step --gate` 把这个问题接到 stdout 一行 + stdin 一行上（要求与 `--stream` 同用；EOF / 认不出的答案 = fail closed）。
+- **判断在 driver**，今天第一个 consumer 是 TUI（tui.md §5.7）：两档 mode（`ask` / `auto`）+ 三张规则表（`deny` / `ask` / `allow`，条目是 tool id 或 shell 命令前缀）+ 本场的 always 集合。它是**可替换的**：另一个 driver 完全可以只答 `allow`（等于今天不带 `--gate`），或者把每个请求转给一个人的手机。内核不知道也不需要知道。
+- **`manifest.contributes.tools[].readonly` 是声明不是边界**（DESIGN §7.2.1）：包自己说这个 tool 只读，kernel 解析、冻结、**不强制**；driver 的 policy 可以信它（TUI 默认信，一个键可关）。它与 `permissions` 同级——两者都要等 §3.8 的 OS 强制才谈得上"边界"。长期方向是给每个 tool 加一个 `audience`（这个 tool 是给模型的、还是给 driver 的——今天 `extensions.ts` 里那张 `bundled_driver_only` 硬编码名单就是它的替身），与 `readonly` 一样属于"包自己说"的那一类。
+- **与 §3.12 的 policy hook 是两扇门，不合并**：这一扇在**每个 call 执行前**（谁都在跑的那条快路径上，答的人是当场的驱动者）；那一扇在 **promote-to-native**（写一条 pin 的时候，答的人是 reviewer 或人，一场 session 只发生一次）。合成一个"权限系统"会把每步都要答的问题和一辈子答一次的问题塞进同一套配置。
+- **占位：classifier-as-extension。** tcode 的 auto 档背后有个安全分类器（模型判断这一步是否 destructive）。在 nulya 里那**天然是一个 extension**：driver 在 `ask` 之前调它一次，它答"这条命令属于哪一类"，driver 决定信不信。不进内核（是 intelligence，§0.1）、也不必进 TUI（TUI 只要能 spawn 它）。等有人真被问烦了再做——现在连"哪些规则最常被写进 `allow`"的证据都还没有。
 
 ### 3.9 Provider：Anthropic / Codex + cache breakpoints `[已落地 · M4 → DESIGN §13]`
 
@@ -302,12 +312,14 @@ Driver 演化比 Tool 保守，因为**归因难**（任务难度 / model / seed
 ### 3.11 前端 / ACP / MCP `[占位 · M8]`
 
 - 前端（CLI 交互 / TUI / app / ACP）都是 core 之上的薄客户端：tail ledger 文件 + append user 事件。**前端是长期进程，re-spawn 的只是 worker，UI 状态不丢。**
-- **TUI 已有设计契约与里程碑：[tui.md](tui.md)**（Bun + OpenTUI，仓库顶层 `tui/`；唯一内核改动 `session step --stream`，纯观测）。
+- **TUI 已有设计契约与里程碑：[tui.md](tui.md)**（Bun + OpenTUI，仓库顶层 `tui/`；内核改动两处：`session step --stream` 纯观测、`session step --gate` 每个 call 问一次，§3.8.1）。
 - ACP：`session/new|prompt|cancel` 直接翻译成 `nulya session *`。
 - MCP client：一个 extension，把 MCP tools 适配成 `tool.Tool` 进 ToolSetSnapshot（同构）。
 - 唯一需要常驻进程的是"子 agent 与真人持续流式对话跨多轮"——persistent mode，纯后期加法。
 
 ### 3.12 Policy hooks / reviewer `[占位]`
+
+（与 §3.8.1 的 gate 是**两扇门**：那一扇在每个 tool call 执行前、答的人是当场的驱动者；这一扇在 promote-to-native 的时候、答的人是 reviewer 或人。不合并。）
 
 [agents-and-review.md](agents-and-review.md) 的审阅门设计保留其**能力模型**（read_only 硬天花板、ToolPolicy allow/deny、max_turns、结论以 fenced data 进父 ledger），但实现方式按 §3.2：reviewer = `session new --with reviewer@<v> [--pin …]` 的一个 read-only session，由人或 evolution 脚本在 **promote-to-native**（= 写一条 pin，§0.1 #6）这个门上调用；`policy.hook` 档位 `off / auto / human_approval / ai_reviewer` 决定是否调用。默认 `auto`（不调 reviewer）。不进 kernel。
 
@@ -320,7 +332,7 @@ Driver 演化比 Tool 保守，因为**归因难**（任务难度 / model / seed
 - ~~compaction 触发：token 阈值 vs task 边界 vs 混合；summary 由谁生成（agent 自己 vs 专用 session）。~~ 已定（§3.4）：混合——边界由模型经 `handoff` tool 主动提、压力由 driver `/compact` 兜底，汇到同一条 fork 路径；summary 一律由旧 session 自己在 cache 前缀上写，不开专用 session。剩下的边角：handoff 的守卫阈值（多小的 context 不值得 fork）、brief schema 分节强制到什么程度——两者第一版 driver 都**故意没做**（§3.4.1），等 `drivers/goal.*` 有真实使用证据再定，不靠想象拍阈值。
 - `max_tools` 的初值（安放处 `default.toml` 已定，值待调）。~~排序权重初值~~ 不再是问题：排序 policy 已整个移出内核，native 面只由 pin 决定（DESIGN §5.1/§5.5）。
 - ~~`session_outcome` 的最小 verdict 集合；用户不给 verdict 时的默认（缺失 ≠ 失败）。~~ 已定（M5a → DESIGN §3.3）：`success | partial | failure` 三值；**没有行 = unknown ≠ failure**；同一 session 可多行、最后一条作数；不加 `source`（今天只有人写；将来 driver 自动记时再加，届时无 `source` 的 v1 行 = 人评）。
-- **随仓库带的 extension 怎么打包？** `extensions/compact` / `handoff` / `evolution` / `guide` 今天只有**在 checkout 里**才 `ext build` 得到——发布二进制的用户拿不到 `/compact`、拿不到 handoff、也装不了 guide skill。候选是像 `src/**` 那样把 `extensions/**` 也 `@embedFile` 进二进制，并给 `ext build` 一个 bundled 来源（`nulya ext build bundled:guide` 之类），代价是二进制变大 + 多一条"draft 从哪来"的路径。**先不做**：等第一个非 checkout 用户出现再定形状（M8 / 发布），在那之前 checkout 就是安装介质。
+- ~~**随仓库带的 extension 怎么打包？**~~ **源码一半已定并已落地 → DESIGN §7.8 的 `ext seed`**：`extensions/**` 经 `ext_embed` 进二进制，seed 把自带 draft 写进 store root，分发就是二进制本身。剩下的另一半是**编译产物**：compiled 扩展（std / compact / handoff）在用户机器上仍要 `zig build-exe` 一次（首启后台化后不再阻塞，但没装 zig 的机器装不上，首启也非即刻可用）。已定形状（2026-08，未实施）：**两遍发布构建**——CI 先用刚构建的 nulya 对 bundled 扩展跑 `ext build` 得到临时 store，再以 `-Dext-prebuilt=<path>` 二次构建把**已 seal 的版本目录**嵌进二进制（与 `-Dzig-archive` 同一先例）；用户机器上 `ext build`/`sync` 现有的 donor 匹配路径（按 `package_digest + target + compiler` 找、复制后 `.sealed` 复验，DESIGN §7.4）把嵌入集当成多一个 donor。不改"seed 只写源码"的纪律，版本仍内容寻址、门一道不少；代价是二进制 +~14MB、发布流程两遍。**等真做发布流水线时再上**（M8 / 发布）。
 - Verify 套件与 golden 输入数据的 snapshot 边界。
 - Driver episode 的 benchmark suite 如何 version / 防 Goodhart。
 - ~~provider cache breakpoint 各厂商差异核实（Anthropic / OpenAI / 兼容端点）。~~ 已测（M4）：openai / anthropic / codex 三条真实链路都拿到单调不减的 `cache_read`；剩下的是 first-party Anthropic key 上确认 `cache_control` 真被采纳（兼容端点是 implicit cache，看不出来）。
