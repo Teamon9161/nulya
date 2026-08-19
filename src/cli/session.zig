@@ -27,6 +27,7 @@ const common = @import("common.zig");
 const cli_ext = @import("ext.zig");
 const session_list = @import("session_list.zig");
 const StepStream = @import("step_stream.zig").StepStream;
+const StepGate = @import("step_stream.zig").StepGate;
 const cwdRealPath = common.cwdRealPath;
 const flagValue = common.flagValue;
 const sliceHasFlag = common.sliceHasFlag;
@@ -689,7 +690,7 @@ fn warnKernelDrift(alloc: std.mem.Allocator, io: std.Io, id: []const u8, stamp: 
 
 fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (args.len < 1) {
-        try printErr(io, "usage: nulya session step <id> [--max-steps N] [--effort E] [--stream]\n");
+        try printErr(io, "usage: nulya session step <id> [--max-steps N] [--effort E] [--stream] [--gate]\n");
         return 1;
     }
     const id = args[0];
@@ -698,10 +699,26 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         return 1;
     }
     const streaming = sliceHasFlag(args[1..], "--stream");
+    // `--gate` asks the caller before every tool call, on the same wire the
+    // stream uses (DESIGN §14): a request line on stdout, a verdict line on
+    // stdin. Without `--stream` there is no such wire — and a step that silently
+    // ran ungated would be the one refusal this flag exists to prevent — so the
+    // combination is refused rather than approximated.
+    const gating = sliceHasFlag(args[1..], "--gate");
+    if (gating and !streaming) {
+        try printErr(io, "--gate requires --stream: the approval request is a line of that protocol\n");
+        return 1;
+    }
     var out_buf: [4096]u8 = undefined;
     var stdout = std.Io.File.stdout().writerStreaming(io, &out_buf);
     var stream_state: StepStream = .{ .alloc = alloc, .out = &stdout.interface };
     const stream: ?*StepStream = if (streaming) &stream_state else null;
+    // One buffer for the whole run: a verdict line is short, and `deny <note>`
+    // longer than this is a note nobody typed.
+    var in_buf: [4096]u8 = undefined;
+    var stdin = std.Io.File.stdin().readerStreaming(io, &in_buf);
+    var gate_state: StepGate = .{ .io = io, .out = &stdout.interface, .in = &stdin.interface };
+    const gate: ?*StepGate = if (gating) &gate_state else null;
     // The kernel clamps this to `session.max_steps_ceiling`: a driver can lower
     // the budget, never raise it.
     var max_steps: usize = session.max_steps_ceiling;
@@ -792,6 +809,7 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
             .scratch_dir = scratch,
             .retry = cfg.provider.retry,
             .observer = if (stream) |s| s.observer() else null,
+            .gate = if (gate) |g| g.gate() else null,
         },
         .model_options = .{ .effort = effort },
         .extension_roots = ext_roots,
@@ -826,6 +844,17 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
             try printErr(io, @errorName(e));
             try printErr(io, "\n");
             return 1;
+        }
+        // A broken approval channel is the same kind of news: the step is legal
+        // (everything it could not ask about was denied), the caller's picture
+        // is not. Reaching the end of stdin is not a failure and sets nothing.
+        if (gate) |g| {
+            if (g.err) |e| {
+                try printErr(io, "gate channel failed: ");
+                try printErr(io, @errorName(e));
+                try printErr(io, "\n");
+                return 1;
+            }
         }
         return 0;
     }

@@ -45,6 +45,12 @@ const tool_result_recording_canceled_output =
 const tool_not_executed_output =
     "not executed because the step was canceled";
 
+// A call a host gate refused before dispatch (`ToolGate`). Like the canceled
+// tail, nothing about it ran; unlike it, the refusal is a person's answer to
+// this one call, so the batch continues and the next call is asked on its own.
+const tool_denied_output =
+    "not executed: denied by the user; nothing ran and nothing changed";
+
 // A call inside a reply that ran out of `max_tokens`. The reply — and with it
 // this call's arguments — was cut off mid-generation, so the call is not what
 // the model meant and never runs. The text tells the model what happened and
@@ -126,6 +132,49 @@ pub const StepObserver = struct {
     }
 };
 
+/// The one place a host may REFUSE a tool call before it runs (DESIGN §4).
+///
+/// A gate is the observer's sister: same shape, opposite power. An observer only
+/// watches; a gate ANSWERS, and its answer decides whether an executor is
+/// reached at all. What it still cannot do is anything else: it cannot append to
+/// the ledger, cannot touch model-visible state, and cannot fail a step — a
+/// denial becomes an ordinary tool result, so the batch invariant (one assistant
+/// tool-call batch ↔ exactly one matching `tool_results` batch, DESIGN §4) holds
+/// with a gate exactly as it does without one.
+///
+/// It is asked during the SERIAL EXECUTION phase, after `collectTurn` returned:
+/// the model's connection is already closed by then, so whoever answers — a
+/// front end waiting on a person — may take as long as they like without holding
+/// a provider stream open.
+///
+/// Absent by default: a step with no gate runs byte-for-byte the code path it
+/// always ran. Deciding WHICH calls need asking is policy and lives above the
+/// kernel (physics #8); the kernel only offers the question.
+pub const ToolGate = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    /// `deny` may carry a note, which reaches the model inside the marker
+    /// result. The note is borrowed only for the duration of the call — the loop
+    /// copies whatever it keeps.
+    pub const Decision = union(enum) {
+        allow,
+        deny: ?[]const u8,
+    };
+
+    pub const VTable = struct {
+        /// Asked once per call, in batch order, immediately before dispatch.
+        /// A denial stops that call and nothing else: every other call in the
+        /// batch is still asked on its own, because one refusal is not a verdict
+        /// about the rest.
+        review: *const fn (ptr: *anyopaque, call: ledger.ToolCall) Decision,
+    };
+
+    pub fn review(self: ToolGate, call: ledger.ToolCall) Decision {
+        return self.vtable.review(self.ptr, call);
+    }
+};
+
 /// One retry, as reported to an observer: which attempt is about to be made
 /// (1-based), the policy's ceiling, how long the loop waits first, and the
 /// transient error that caused it.
@@ -149,6 +198,10 @@ pub const StepContext = struct {
     /// Optional pure-observation hook (tui.md §2.2). Absent by default: a step
     /// with no observer runs byte-for-byte the same code path it always has.
     observer: ?StepObserver = null,
+    /// Optional per-call approval hook (`ToolGate`). Absent by default, with the
+    /// same promise the observer makes: a step with no gate takes exactly the
+    /// path it always took.
+    gate: ?ToolGate = null,
 };
 
 /// Tees the provider stream: the observer (if any) sees each event first (so a
@@ -216,14 +269,16 @@ fn collectTurn(
 /// (`AgentSession`), which is what folds in the session's system blocks; the
 /// loop only sees the finished IR.
 ///
-/// `durations_ms`, when given, is filled with one wall-clock measurement per
-/// DISPATCHED call, in batch order — so on a completed step it is index-aligned
-/// with the assistant turn's `calls` and with the appended `tool_results`. It is
-/// an out-parameter rather than a field of `StepOutcome` deliberately: how long
-/// a tool took is journal evidence, not conversation fact, so it belongs in
-/// neither the ledger nor a value every caller of `step()` would then have to
-/// free. The caller owns the buffer; a caller that does not want the numbers
-/// passes null and no clock is read at all.
+/// `durations_ms`, when given, gets one entry per call the loop REACHED, in
+/// batch order — so on a completed step it is index-aligned with the assistant
+/// turn's `calls` and with the appended `tool_results`. `null` in an entry means
+/// no executor ran for that call (a gate denied it), and therefore that there is
+/// nothing to measure and nothing to journal: stats are an observation after
+/// execution (DESIGN §5.5). It is an out-parameter rather than a field of
+/// `StepOutcome` deliberately: how long a tool took is journal evidence, not
+/// conversation fact, so it belongs in neither the ledger nor a value every
+/// caller of `step()` would then have to free. The caller owns the buffer; a
+/// caller that does not want the numbers passes null and no clock is read at all.
 pub fn runStepWithPrompt(
     alloc: std.mem.Allocator,
     l: *ledger.Ledger,
@@ -232,7 +287,7 @@ pub fn runStepWithPrompt(
     tool_snapshot: registry.ToolSetSnapshot,
     step_ctx: StepContext,
     model_options: provider.Options,
-    durations_ms: ?*std.ArrayList(u64),
+    durations_ms: ?*std.ArrayList(?u64),
 ) !StepOutcome {
     // seq base is the ledger position: deterministic across replays (DESIGN §1).
     const base_seq = l.len();
@@ -311,6 +366,21 @@ pub fn runStepWithPrompt(
     var canceled = false;
     while (i < turn.calls.len) : (i += 1) {
         const call = turn.calls[i];
+        // The host's veto, before anything is dispatched (`ToolGate`). A denial
+        // gets neither `toolBegin` nor `toolEnd` — the same rule the canceled
+        // tail follows, and for the same reason: no executor ran. The batch goes
+        // on to the next call, which is asked its own question.
+        if (step_ctx.gate) |gate| {
+            switch (gate.review(call)) {
+                .allow => {},
+                .deny => |note| {
+                    results[i] = canceledResult(call.id, try deniedOutput(alloc, note));
+                    initialized_results += 1;
+                    if (durations_ms) |d| try d.append(alloc, null);
+                    continue;
+                },
+            }
+        }
         if (step_ctx.observer) |obs| obs.toolBegin(call);
         const executed = execOne(alloc, tool_snapshot, call, step_ctx, base_seq, i) catch |err| switch (err) {
             error.Canceled => {
@@ -369,6 +439,16 @@ pub fn runStepWithPrompt(
 /// by the batch's cleanup path.
 fn canceledResult(call_id: []const u8, output: []const u8) ledger.ToolResultEntry {
     return .{ .call_id = call_id, .ok = false, .output = output };
+}
+
+/// The text a denied call carries back to the model: the fact first, then — if
+/// the person said anything — their own words, which are the only part of this
+/// the model could not have inferred. Caller owns the result.
+fn deniedOutput(alloc: std.mem.Allocator, note: ?[]const u8) ![]u8 {
+    const said = note orelse return alloc.dupe(u8, tool_denied_output);
+    const trimmed = std.mem.trim(u8, said, " \t\r\n");
+    if (trimmed.len == 0) return alloc.dupe(u8, tool_denied_output);
+    return std.fmt.allocPrint(alloc, "{s}. They said: {s}", .{ tool_denied_output, trimmed });
 }
 
 pub fn completeInterruptedToolBatch(alloc: std.mem.Allocator, l: *ledger.Ledger) !void {
@@ -577,6 +657,170 @@ test "one step runs a batch of two shell calls and appends one result turn" {
     try std.testing.expect(std.mem.indexOf(u8, last.tool_results[0].output, "one") != null);
 
     // Ledger owns cloned assistant/tool-result payloads and frees them in deinit.
+}
+
+/// A two-`shell`-call turn, for the gate tests below: the same batch the test
+/// above uses, so "gated" and "ungated" differ in exactly one thing.
+const TwoCallModel = struct {
+    fn name(_: *anyopaque) []const u8 {
+        return "scripted";
+    }
+    fn modelName(_: *anyopaque) []const u8 {
+        return "scripted-test";
+    }
+    fn capabilities(_: *anyopaque) provider.ProviderCapabilities {
+        return .{};
+    }
+    fn stream(_: *anyopaque, _: std.mem.Allocator, _: provider.Request, sink: provider.EventSink) anyerror!void {
+        try sink.emit(.started);
+        try sink.emit(.{ .tool_use_start = .{ .index = 0, .id = "c1", .name = "shell" } });
+        try sink.emit(.{ .tool_use_input_delta = .{ .index = 0, .fragment = "{\"command\":\"echo one\"}" } });
+        try sink.emit(.{ .tool_use_start = .{ .index = 1, .id = "c2", .name = "shell" } });
+        try sink.emit(.{ .tool_use_input_delta = .{ .index = 1, .fragment = "{\"command\":\"echo two\"}" } });
+        try sink.emit(.{ .done = .tool_use });
+    }
+    const vtable: provider.Model.VTable = .{ .name = name, .modelName = modelName, .capabilities = capabilities, .stream = stream };
+};
+
+/// Records every command an executor was actually handed, so a test can assert
+/// that a denied call never reached one.
+var gate_test_ran: std.ArrayList([]const u8) = .empty;
+
+const GateTestShell = struct {
+    fn run(a: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolResult {
+        const parsed = try tool.parseArgs(a, req.args_json);
+        defer parsed.deinit();
+        const command = try tool.requireString(parsed.value, "command");
+        try gate_test_ran.append(std.testing.allocator, try std.testing.allocator.dupe(u8, command));
+        return .{ .ok = true, .output = try std.fmt.allocPrint(a, "{s}\n[exit 0]", .{command}) };
+    }
+};
+
+/// Answers a fixed verdict for a named call and allows everything else.
+const ScriptedGate = struct {
+    deny_call: []const u8,
+    note: ?[]const u8 = null,
+    asked: usize = 0,
+
+    fn review(ptr: *anyopaque, call: ledger.ToolCall) ToolGate.Decision {
+        const self: *ScriptedGate = @ptrCast(@alignCast(ptr));
+        self.asked += 1;
+        if (std.mem.eql(u8, call.id, self.deny_call)) return .{ .deny = self.note };
+        return .allow;
+    }
+
+    const vtable: ToolGate.VTable = .{ .review = review };
+};
+
+test "a gate denies one call, the batch keeps its shape, and the rest still run" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+
+    const fake_tools = [_]tool.Tool{.{
+        .definition = .{ .id = "test.shell", .name = "shell", .description = "test shell", .input_schema = "{}" },
+        .executor = tool.functionExecutor(GateTestShell.run),
+    }};
+    const tools: registry.ToolSetSnapshot = .{ .tools = &fake_tools };
+
+    var lenv = try environment.LocalEnvironment.init(alloc, threaded.io(), .{});
+    defer lenv.deinit();
+    const step_ctx_base: StepContext = .{
+        .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = "." },
+        .scratch_dir = "/tmp",
+    };
+
+    // ── Allowing everything is the ungated step ─────────────────────────────
+    gate_test_ran = .empty;
+    defer {
+        for (gate_test_ran.items) |c| alloc.free(c);
+        gate_test_ran.deinit(alloc);
+    }
+    var allow_all: ScriptedGate = .{ .deny_call = "nothing-is-called-this" };
+    var model = TwoCallModel{};
+    const handle: Model = .{ .ptr = &model, .vtable = &TwoCallModel.vtable };
+
+    var allowed = ledger.Ledger.init(alloc);
+    defer allowed.deinit();
+    try allowed.append(.{ .user_text = .{ .text = "go" } });
+    var ctx = step_ctx_base;
+    ctx.gate = .{ .ptr = &allow_all, .vtable = &ScriptedGate.vtable };
+    _ = try runStepForTest(alloc, &allowed, handle, tools, ctx);
+    try std.testing.expectEqual(@as(usize, 2), allow_all.asked);
+    try std.testing.expectEqual(@as(usize, 2), gate_test_ran.items.len);
+    const allowed_results = allowed.view()[2].tool_results;
+    try std.testing.expect(allowed_results[0].ok and allowed_results[1].ok);
+
+    // ── Denying the first one ───────────────────────────────────────────────
+    for (gate_test_ran.items) |c| alloc.free(c);
+    gate_test_ran.clearRetainingCapacity();
+    var gate: ScriptedGate = .{ .deny_call = "c1", .note = "not that one" };
+    var denied = ledger.Ledger.init(alloc);
+    defer denied.deinit();
+    try denied.append(.{ .user_text = .{ .text = "go" } });
+    ctx.gate = .{ .ptr = &gate, .vtable = &ScriptedGate.vtable };
+    _ = try runStepForTest(alloc, &denied, handle, tools, ctx);
+
+    // Every call is asked on its own: one refusal is not a verdict on the rest.
+    try std.testing.expectEqual(@as(usize, 2), gate.asked);
+    // …and only the allowed one reached an executor, so the denied command
+    // really did not run.
+    try std.testing.expectEqual(@as(usize, 1), gate_test_ran.items.len);
+    try std.testing.expectEqualStrings("echo two", gate_test_ran.items[0]);
+
+    // The batch invariant holds: one result per call, in call order.
+    try std.testing.expectEqual(@as(usize, 3), denied.len());
+    const results = denied.view()[2].tool_results;
+    try std.testing.expectEqual(@as(usize, 2), results.len);
+    try std.testing.expectEqualStrings("c1", results[0].call_id);
+    try std.testing.expect(!results[0].ok);
+    try std.testing.expect(std.mem.indexOf(u8, results[0].output, "denied by the user") != null);
+    // The note is the one thing the model could not have inferred.
+    try std.testing.expect(std.mem.indexOf(u8, results[0].output, "not that one") != null);
+    try std.testing.expect(results[1].ok);
+    try std.testing.expect(std.mem.indexOf(u8, results[1].output, "echo two") != null);
+}
+
+test "a denied call has no duration to journal, and the slots stay call-aligned" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+
+    const fake_tools = [_]tool.Tool{.{
+        .definition = .{ .id = "test.shell", .name = "shell", .description = "test shell", .input_schema = "{}" },
+        .executor = tool.functionExecutor(GateTestShell.run),
+    }};
+    const tools: registry.ToolSetSnapshot = .{ .tools = &fake_tools };
+    var lenv = try environment.LocalEnvironment.init(alloc, threaded.io(), .{});
+    defer lenv.deinit();
+
+    gate_test_ran = .empty;
+    defer {
+        for (gate_test_ran.items) |c| alloc.free(c);
+        gate_test_ran.deinit(alloc);
+    }
+    var gate: ScriptedGate = .{ .deny_call = "c1" };
+    var model = TwoCallModel{};
+    var l = ledger.Ledger.init(alloc);
+    defer l.deinit();
+    try l.append(.{ .user_text = .{ .text = "go" } });
+
+    var durations: std.ArrayList(?u64) = .empty;
+    defer durations.deinit(alloc);
+    const ir = try prompt.project(alloc, l.view());
+    defer ir.deinit(alloc);
+    _ = try runStepWithPrompt(alloc, &l, .{ .ptr = &model, .vtable = &TwoCallModel.vtable }, &ir, tools, .{
+        .tool_context = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = "." },
+        .scratch_dir = "/tmp",
+        .gate = .{ .ptr = &gate, .vtable = &ScriptedGate.vtable },
+    }, .{}, &durations);
+
+    // One slot per call, in call order — what `recordCompletedToolStats` asserts
+    // — and the denied one is `null`: nothing ran, so there is nothing to record
+    // and no tool to bill for somebody's refusal (DESIGN §5.5).
+    try std.testing.expectEqual(@as(usize, 2), durations.items.len);
+    try std.testing.expect(durations.items[0] == null);
+    try std.testing.expect(durations.items[1] != null);
 }
 
 test "a transient model failure is retried with a fresh collector; a permanent one is not" {

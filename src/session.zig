@@ -264,7 +264,7 @@ pub const AgentSession = struct {
         // buffer, so a duration cannot outlive the step that measured it: it is
         // journal evidence, and neither the ledger nor `StepOutcome` — which
         // every caller of `step()` receives — has any business carrying it.
-        var durations_ms: std.ArrayList(u64) = .empty;
+        var durations_ms: std.ArrayList(?u64) = .empty;
         defer durations_ms.deinit(self.alloc);
         const outcome = try loop.runStepWithPrompt(self.alloc, &self.l, self.model, &prompt_ir, self.composition.tools, self.step_ctx, self.model_options, &durations_ms);
         self.total_usage.add(outcome.usage);
@@ -406,7 +406,7 @@ pub const AgentSession = struct {
     /// can join it against `session-outcomes.jsonl` instead of seeing an
     /// undifferentiated pile of calls. An in-memory session has no durable id
     /// and simply omits it.
-    fn recordCompletedToolStats(self: *AgentSession, before: usize, durations_ms: []const u64) !void {
+    fn recordCompletedToolStats(self: *AgentSession, before: usize, durations_ms: []const ?u64) !void {
         const suffix = self.l.view()[before..];
         if (suffix.len == 1) return; // the model addressed the user; nothing to record
         std.debug.assert(suffix.len == 2);
@@ -418,10 +418,10 @@ pub const AgentSession = struct {
             .tool_results => |r| r,
             else => unreachable, // a completed step with calls always appends its batch
         };
-        // One tool_results entry per assistant call, and one measurement per
-        // call: a completed step dispatched every one of them, and the loop
-        // filled all three in call order. The multi-prong for below panics if
-        // the lengths ever disagree.
+        // One tool_results entry per assistant call, and one measurement slot per
+        // call: a completed step reached every one of them, and the loop filled
+        // all three in call order. The multi-prong for below panics if the
+        // lengths ever disagree.
         std.debug.assert(assistant.calls.len == results.len);
         std.debug.assert(assistant.calls.len == durations_ms.len);
 
@@ -430,7 +430,11 @@ pub const AgentSession = struct {
             std.fs.path.stem(std.fs.path.basename(d.session_path))
         else
             null;
-        for (assistant.calls, results, durations_ms) |call, result, duration_ms| {
+        for (assistant.calls, results, durations_ms) |call, result, measured| {
+            // No measurement means no executor ran: a gate denied the call
+            // (DESIGN §4). Journalling it would bill the tool for somebody's
+            // refusal, the same skew a `max_tokens` marker batch would cause.
+            const duration_ms = measured orelse continue;
             const t = self.composition.tools.lookup(call.tool) orelse continue;
             try tool_stats.append(self.alloc, ctx.environment.io, ctx.cwd, .{
                 .tool_id = t.definition.id,

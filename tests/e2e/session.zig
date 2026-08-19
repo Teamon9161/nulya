@@ -28,6 +28,7 @@ const runCli = support.runCli;
 const runCliEnv = support.runCliEnv;
 const runCliEnvs = support.runCliEnvs;
 const runCliStderr = support.runCliStderr;
+const runCliStdin = support.runCliStdin;
 const scaffoldAndBuild = support.scaffoldAndBuild;
 const shellCallArgs = support.shellCallArgs;
 
@@ -637,6 +638,133 @@ test "session cli: drivers/goal runs the bundled driver — the model hands off,
         seen = true;
     }
     try std.testing.expect(seen);
+}
+
+/// Create a session and queue one turn for it. Returns the id; caller frees.
+fn newSessionWithTurn(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, exe_abs: []const u8) ![]u8 {
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(new.stdout);
+    try std.testing.expectEqual(@as(u8, 0), new.code);
+    const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    errdefer alloc.free(id);
+    const ap = try runCli(alloc, io, ws, &.{ exe_abs, "session", "append", id, "probe the box" });
+    defer alloc.free(ap.stdout);
+    try std.testing.expectEqual(@as(u8, 0), ap.code);
+    return id;
+}
+
+test "session cli: --gate asks stdin before every tool call, denies with the caller's note, and fails closed at EOF" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    // `--gate` without `--stream` has no wire to ask on, and a step that quietly
+    // ran ungated is the one thing this flag exists to prevent.
+    {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const id = try newSessionWithTurn(alloc, io, tmp.dir, exe_abs);
+        defer alloc.free(id);
+        const bad = try runCli(alloc, io, tmp.dir, &.{ exe_abs, "session", "step", id, "--gate" });
+        defer alloc.free(bad.stdout);
+        try std.testing.expectEqual(@as(u8, 1), bad.code);
+        try std.testing.expectEqualStrings("", bad.stdout); // the refusal is on stderr
+    }
+
+    // ── deny, with a note the model can read ────────────────────────────────
+    var denied_tmp = std.testing.tmpDir(.{});
+    defer denied_tmp.cleanup();
+    const denied_id = try newSessionWithTurn(alloc, io, denied_tmp.dir, exe_abs);
+    defer alloc.free(denied_id);
+    const denied = try runCliStdin(
+        alloc,
+        io,
+        denied_tmp.dir,
+        &.{ exe_abs, "session", "step", denied_id, "--stream", "--gate" },
+        "deny no thanks\n",
+        &.{.{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" }},
+    );
+    defer alloc.free(denied.stdout);
+    try std.testing.expectEqual(@as(u8, 0), denied.code);
+
+    // The request line is part of the protocol: one JSON object per line, with
+    // the call's id, its tool and the arguments the model actually wrote.
+    var saw_request = false;
+    var saw_tool_begin = false;
+    var lines = std.mem.tokenizeAny(u8, denied.stdout, "\r\n");
+    while (lines.next()) |line| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, line, .{});
+        defer parsed.deinit();
+        const obj = parsed.value.object;
+        const kind = (obj.get("stream") orelse continue).string;
+        const ev = obj.get("event").?.string;
+        if (std.mem.eql(u8, kind, "gate") and std.mem.eql(u8, ev, "request")) {
+            saw_request = true;
+            try std.testing.expectEqualStrings("c1", obj.get("call_id").?.string);
+            try std.testing.expectEqualStrings("shell", obj.get("tool").?.string);
+            try std.testing.expect(std.mem.indexOf(u8, obj.get("args").?.string, "echo hello-from-nulya") != null);
+        }
+        // A denied call reaches no executor, so it gets no dispatch callbacks —
+        // the same rule the canceled tail follows.
+        if (std.mem.eql(u8, kind, "tool") and std.mem.eql(u8, ev, "begin")) saw_tool_begin = true;
+    }
+    try std.testing.expect(saw_request);
+    try std.testing.expect(!saw_tool_begin);
+
+    // The batch is closed by a denial marker carrying the caller's own words —
+    // and the command's output is nowhere in the ledger, because it never ran.
+    const denied_file = try readSessionFile(alloc, io, denied_tmp.dir, denied_id);
+    defer alloc.free(denied_file);
+    try std.testing.expect(std.mem.indexOf(u8, denied_file, "denied by the user") != null);
+    try std.testing.expect(std.mem.indexOf(u8, denied_file, "no thanks") != null);
+    try std.testing.expect(std.mem.indexOf(u8, denied_file, "hello-from-nulya\\n[exit 0]") == null);
+
+    // ── allow: the same session, the same call, an executor this time ───────
+    var allowed_tmp = std.testing.tmpDir(.{});
+    defer allowed_tmp.cleanup();
+    const allowed_id = try newSessionWithTurn(alloc, io, allowed_tmp.dir, exe_abs);
+    defer alloc.free(allowed_id);
+    const allowed = try runCliStdin(
+        alloc,
+        io,
+        allowed_tmp.dir,
+        &.{ exe_abs, "session", "step", allowed_id, "--stream", "--gate" },
+        "allow\n",
+        &.{.{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" }},
+    );
+    defer alloc.free(allowed.stdout);
+    try std.testing.expectEqual(@as(u8, 0), allowed.code);
+    try std.testing.expect(std.mem.indexOf(u8, allowed.stdout, "{\"stream\":\"tool\",\"event\":\"begin\"") != null);
+    const allowed_file = try readSessionFile(alloc, io, allowed_tmp.dir, allowed_id);
+    defer alloc.free(allowed_file);
+    try std.testing.expect(std.mem.indexOf(u8, allowed_file, "hello-from-nulya") != null);
+    try std.testing.expect(std.mem.indexOf(u8, allowed_file, "denied by the user") == null);
+
+    // ── EOF: an approver that is not there approves nothing ─────────────────
+    var closed_tmp = std.testing.tmpDir(.{});
+    defer closed_tmp.cleanup();
+    const closed_id = try newSessionWithTurn(alloc, io, closed_tmp.dir, exe_abs);
+    defer alloc.free(closed_id);
+    const closed = try runCliStdin(
+        alloc,
+        io,
+        closed_tmp.dir,
+        &.{ exe_abs, "session", "step", closed_id, "--stream", "--gate" },
+        "",
+        &.{.{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" }},
+    );
+    defer alloc.free(closed.stdout);
+    // EOF is a verdict, not a fault: the run finishes, the call did not.
+    try std.testing.expectEqual(@as(u8, 0), closed.code);
+    const closed_file = try readSessionFile(alloc, io, closed_tmp.dir, closed_id);
+    defer alloc.free(closed_file);
+    try std.testing.expect(std.mem.indexOf(u8, closed_file, "denied by the user") != null);
+    try std.testing.expect(std.mem.indexOf(u8, closed_file, "hello-from-nulya\\n[exit 0]") == null);
 }
 
 test "session cli: --stream emits the transient line protocol and leaves the ledger identical" {

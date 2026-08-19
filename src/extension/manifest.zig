@@ -68,6 +68,16 @@ pub const ToolSpec = struct {
     /// manifest is the one place this can be said, because the manifest is the
     /// single source of truth about a tool (DESIGN §7.2.1).
     timeout_ms: ?u32 = null,
+    /// The package's claim that this tool only READS: it makes no change a
+    /// person would want to approve first. A DECLARATION, exactly like
+    /// `permissions` (DESIGN §9) — the kernel parses it, records it in the
+    /// frozen manifest, and enforces nothing. What consumes it is a driver's
+    /// approval policy (`loop.ToolGate`, DESIGN §4), which is free to ignore it;
+    /// a real boundary needs OS enforcement (PLAN §3.8), not a boolean.
+    ///
+    /// Absent means the package did not say, which is not the same as `false`
+    /// and must not be read as one.
+    readonly: ?bool = null,
 };
 
 pub const Permissions = struct {
@@ -265,6 +275,7 @@ fn dupTools(a: std.mem.Allocator, contributes: std.json.ObjectMap) ParseError![]
             .description = try dupStringOr(a, to, "description", ""),
             .input_schema = if (to.get("input")) |iv| try compact(a, iv) else try a.dupe(u8, "{}"),
             .timeout_ms = try optionalU32(to, "timeout_ms"),
+            .readonly = try optionalBool(to, "readonly"),
         };
     }
     return tools;
@@ -276,6 +287,16 @@ fn dupTools(a: std.mem.Allocator, contributes: std.json.ObjectMap) ParseError![]
 fn optionalU32(obj: std.json.ObjectMap, key: []const u8) ParseError!?u32 {
     return switch (obj.get(key) orelse return null) {
         .integer => |n| std.math.cast(u32, n) orelse error.WrongType,
+        else => error.WrongType,
+    };
+}
+
+/// Read an optional boolean field. Absent stays absent — "the package did not
+/// say" is its own answer — and a non-boolean is a WrongType rather than a
+/// silently ignored key, for the same reason `optionalU32` is strict.
+fn optionalBool(obj: std.json.ObjectMap, key: []const u8) ParseError!?bool {
+    return switch (obj.get(key) orelse return null) {
+        .bool => |b| b,
         else => error.WrongType,
     };
 }
@@ -491,6 +512,27 @@ test "a tool may declare its own timeout, within the host ceiling" {
     // A mistyped timeout is a parse error, not a silently defaulted one.
     try std.testing.expectError(error.WrongType, parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"t","input":{},"timeout_ms":"60s"}]}}
+    ));
+}
+
+test "a tool may declare itself readonly; the kernel records the claim and enforces nothing" {
+    const alloc = std.testing.allocator;
+    var m = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"r","runtime":{"entry":"bin/r"},"contributes":{"tools":[{"name":"look","input":{},"readonly":true},{"name":"touch","input":{},"readonly":false},{"name":"quiet","input":{}}]}}
+    );
+    defer m.deinit();
+    // Nothing in `validate` looks at it: the claim is for a driver's approval
+    // policy to read, and a package that lies about it is exactly as dangerous
+    // as one that lies in `permissions` (DESIGN §9).
+    try m.validate();
+    try std.testing.expectEqual(@as(?bool, true), m.tools[0].readonly);
+    try std.testing.expectEqual(@as(?bool, false), m.tools[1].readonly);
+    // Absent is NOT false: the package said nothing, and a reader that turns
+    // silence into a claim would be inventing the one thing this field is for.
+    try std.testing.expect(m.tools[2].readonly == null);
+
+    try std.testing.expectError(error.WrongType, parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"r","runtime":{"entry":"bin/r"},"contributes":{"tools":[{"name":"look","input":{},"readonly":"yes"}]}}
     ));
 }
 

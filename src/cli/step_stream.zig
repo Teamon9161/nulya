@@ -9,6 +9,7 @@ const std = @import("std");
 const ledger = @import("../ledger.zig");
 const loop = @import("../loop.zig");
 const provider = @import("../provider.zig");
+const printErr = @import("common.zig").printErr;
 
 /// Lines carrying a `stream` field are transient observations; lines without one
 /// are ledger events in exactly the `session events` shape. Under `--stream`
@@ -248,6 +249,95 @@ pub const StepStream = struct {
     fn endLine(self: *StepStream) !void {
         try self.out.writeByte('\n');
         try self.out.flush();
+    }
+};
+
+/// `session step --gate`: the approval half of the protocol (DESIGN §14).
+///
+/// One request line out on the same stdout the stream uses, then one verdict
+/// line in on stdin, per tool call, while the loop is between calls. It is a
+/// `loop.ToolGate` and nothing more: it decides nothing itself — the driver on
+/// the other end of the pipe does — and a denial is an ordinary tool result, so
+/// the ledger is legal either way.
+///
+/// **Fail closed.** Anything other than a verdict this side understands is a
+/// denial: an answer it cannot parse, a read that fails, and above all end of
+/// input — a driver that went away has approved nothing, and every remaining
+/// call in the session is denied without asking again.
+pub const StepGate = struct {
+    io: std.Io,
+    out: *std.Io.Writer,
+    in: *std.Io.Reader,
+    /// stdin is done (EOF, or a read that failed): deny from here on, silently —
+    /// the reason was said once, on stderr.
+    closed: bool = false,
+    /// First write failure, if any. Reported by the caller as a non-zero exit,
+    /// the same way a dropped observation is.
+    err: ?anyerror = null,
+
+    pub fn gate(self: *StepGate) loop.ToolGate {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable: loop.ToolGate.VTable = .{ .review = onReview };
+
+    fn onReview(ptr: *anyopaque, call: ledger.ToolCall) loop.ToolGate.Decision {
+        const self: *StepGate = @ptrCast(@alignCast(ptr));
+        return self.ask(call) catch |e| {
+            // The channel itself broke. Say so once, then deny everything: a
+            // gate that cannot ask must not answer "allow" on anybody's behalf.
+            if (self.err == null) self.err = e;
+            if (!self.closed) {
+                self.closed = true;
+                self.say("gate: the approval channel failed; denying every remaining call\n");
+            }
+            return .{ .deny = null };
+        };
+    }
+
+    fn ask(self: *StepGate, call: ledger.ToolCall) !loop.ToolGate.Decision {
+        if (self.closed) return .{ .deny = null };
+        try self.requestLine(call);
+        const line = (try self.in.takeDelimiter('\n')) orelse {
+            self.closed = true;
+            self.say("gate: stdin closed before a verdict; denying this call and every one after it\n");
+            return .{ .deny = null };
+        };
+        const verdict = std.mem.trim(u8, line, " \t\r\n");
+        if (std.mem.eql(u8, verdict, "allow")) return .allow;
+        if (std.mem.eql(u8, verdict, "deny")) return .{ .deny = null };
+        if (std.mem.startsWith(u8, verdict, "deny ")) return .{ .deny = verdict["deny ".len..] };
+        // Not a verdict. The safe reading of an answer nobody can parse is "no".
+        self.say("gate: unrecognized verdict (want `allow`, `deny`, or `deny <note>`); denying this call\n");
+        return .{ .deny = null };
+    }
+
+    /// One call, offered for approval. The arguments go out verbatim — the
+    /// driver decides what a `shell` command or an edit path means, and it can
+    /// only do that on the bytes the model actually wrote.
+    fn requestLine(self: *StepGate, call: ledger.ToolCall) !void {
+        var jw: std.json.Stringify = .{ .writer = self.out };
+        try jw.beginObject();
+        try jw.objectField("stream");
+        try jw.write("gate");
+        try jw.objectField("event");
+        try jw.write("request");
+        try jw.objectField("call_id");
+        try jw.write(call.id);
+        try jw.objectField("tool");
+        try jw.write(call.tool);
+        try jw.objectField("args");
+        try jw.write(call.args_json);
+        try jw.endObject();
+        try self.out.writeByte('\n');
+        try self.out.flush();
+    }
+
+    /// Diagnostics go to stderr: `--gate` implies `--stream`, whose stdout is
+    /// pure protocol. A failure to write the diagnostic changes nothing about
+    /// the verdict, so it is dropped rather than propagated.
+    fn say(self: *StepGate, message: []const u8) void {
+        printErr(self.io, message) catch {};
     }
 };
 
