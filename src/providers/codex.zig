@@ -288,7 +288,7 @@ fn homePath(alloc: std.mem.Allocator, env: *const std.process.Environ.Map, sub: 
 /// that is not something a person should have to restate in `config.toml`, and
 /// a hardcoded list is wrong the week after it is written. So the catalogue is
 /// read, never configured — `nulya config show` projects it for a picker
-/// (DESIGN §9.5) and `nulya config show --refresh` refills the file.
+/// (DESIGN §9.5) and `nulya config refresh` refills the file.
 ///
 /// The numbers are the subscription's, not the public API's: the same id is
 /// served here with a smaller window (`effective_context_window_percent` of the
@@ -401,7 +401,7 @@ fn nonEmptyString(value: ?[]const u8) ?[]const u8 {
 /// Fetch the live catalogue and write it into the Codex CLI's own cache file, so
 /// every later read — this binary's and the CLI's — sees today's line-up. There
 /// is no `codex login` in nulya, so nothing refreshes this on its own: the only
-/// trigger is `nulya config show --refresh` (DESIGN §14).
+/// trigger is `nulya config refresh` (DESIGN §14).
 ///
 /// `client_version` is this binary's version string (the endpoint takes it as a
 /// query parameter, as the CLI does). A 401 means the short-lived access token

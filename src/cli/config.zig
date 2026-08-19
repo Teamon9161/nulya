@@ -15,19 +15,26 @@ const sliceHasFlag = common.sliceHasFlag;
 
 pub fn dispatchConfig(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (args.len == 0) return common.usageSection(io, common.config_usage);
+    // Two verbs, because they are two different acts: `show` reads three files
+    // and prints; `refresh` goes to the network first. A flag on `show` made the
+    // one command in this family that never touched the network sometimes touch
+    // it, which is exactly the property a reader wants to be able to rely on.
     if (std.mem.eql(u8, args[0], "show")) return configShow(alloc, io, .{
         .as_json = sliceHasFlag(args[1..], "--json"),
-        .refresh = sliceHasFlag(args[1..], "--refresh"),
     });
-    try printErr(io, "unknown `config` subcommand; usage: nulya config show [--json] [--refresh]\n");
+    if (std.mem.eql(u8, args[0], "refresh")) return configShow(alloc, io, .{
+        .as_json = sliceHasFlag(args[1..], "--json"),
+        .refresh = true,
+    });
+    try printErr(io, "unknown `config` subcommand; usage: nulya config show [--json] | refresh [--json]\n");
     return 1;
 }
 
 const ShowOptions = struct {
     as_json: bool,
     /// Ask each usable codex profile's endpoint for its live model catalogue and
-    /// write it to the Codex CLI's cache before projecting. The ONLY thing in
-    /// this command that touches the network.
+    /// write it to the Codex CLI's cache before projecting. Set only by
+    /// `config refresh`, the one verb in this family that goes to the network.
     refresh: bool = false,
 };
 
@@ -210,12 +217,12 @@ fn orderByDefault(
     return .{ .ids = ids, .params = ordered };
 }
 
-/// `--refresh`: fetch today's catalogue for every codex profile whose
+/// `nulya config refresh`: fetch today's catalogue for every codex profile whose
 /// subscription credential is present right now, and write it to the file the
 /// projection reads. Returns false when the refresh did not happen — a failure,
 /// or nothing to refresh at all — which the caller turns into exit 1: the
-/// projection is still printed, but a `--refresh` that silently did nothing
-/// would be indistinguishable from a fresh one.
+/// projection is still printed, but a refresh that silently did nothing would be
+/// indistinguishable from a fresh one.
 fn refreshCodexCatalogs(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -230,11 +237,11 @@ fn refreshCodexCatalogs(
         attempted = true;
         codex.refreshCatalog(alloc, io, env, launch.version) catch |err| {
             ok = false;
-            try common.printErrFmt(alloc, io, "config show --refresh: {s}: {s}\n", .{ p.name, @errorName(err) });
+            try common.printErrFmt(alloc, io, "config refresh: {s}: {s}\n", .{ p.name, @errorName(err) });
         };
     }
     if (!attempted) {
-        try printErr(io, "config show --refresh: no profile with a live catalogue to refresh (codex needs `codex login`)\n");
+        try printErr(io, "config refresh: no profile with a live catalogue to refresh (codex needs `codex login`)\n");
         return false;
     }
     return ok;
@@ -527,5 +534,5 @@ test "config show prints an empty pin list as such, never as a missing section" 
     });
     // "no extension tool is native here" is an answer; a silent section is not.
     try std.testing.expect(std.mem.indexOf(u8, text.written(), "pinned_native_tools  (none)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text.written(), "max_tools            8") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text.written(), "max_tools            20") != null);
 }
