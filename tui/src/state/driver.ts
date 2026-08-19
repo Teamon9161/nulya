@@ -10,7 +10,14 @@
  */
 import { createSignal, type Accessor } from "solid-js"
 import { wrapMidTask } from "../midtask.ts"
-import { sessionAppend, sessionCancel, sessionStep, type StepHandle } from "../nulya/cli.ts"
+import {
+  sessionAppend,
+  sessionCancel,
+  sessionStep,
+  type GateRequest,
+  type GateVerdict,
+  type StepHandle,
+} from "../nulya/cli.ts"
 import type { Workspace } from "../nulya/bin.ts"
 import type { SessionState } from "./session.ts"
 
@@ -50,6 +57,20 @@ export interface DriverOptions {
    * would then be dropped as "already seen" — so the first send waits.
    */
   ready?: Promise<void>
+  /**
+   * Answer the kernel's per-call gate (`--gate`, DESIGN §14). Read at every
+   * spawn, not captured once, so a mode switched between two steps takes hold
+   * on the next one — and a switch mid-batch reaches the very next request,
+   * because each request is a fresh call into this.
+   *
+   * Undefined runs the step ungated, which is what an observer's non-existent
+   * step process does anyway.
+   *
+   * The session id rides along because the answer may have to be shown against
+   * the right transcript: a TUI can be driving one session while looking at
+   * another, and the call being asked about belongs to exactly one of them.
+   */
+  gate?: (request: GateRequest, session: string) => Promise<GateVerdict>
 }
 
 /** The kernel's refusal to hand over the writer lease, on the `--stream` wire. */
@@ -96,7 +117,12 @@ export function createDriver(
       for (;;) {
         if (disposed) return
         const pendingBefore = state.pendingCount()
-        const step = sessionStep(ws, id, { maxSteps: options.maxSteps, effort: options.effort?.(), env: options.env })
+        const step = sessionStep(ws, id, {
+          maxSteps: options.maxSteps,
+          effort: options.effort?.(),
+          env: options.env,
+          ...(options.gate ? { gate: (request: GateRequest) => options.gate!(request, id) } : {}),
+        })
         handle = step
         killed = false
         let busy = false

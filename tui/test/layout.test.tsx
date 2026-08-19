@@ -14,9 +14,9 @@ import { createStyle } from "../src/render/theme.ts"
 import { createSessionState } from "../src/state/session.ts"
 import { default_settings } from "../src/state/settings.ts"
 import { sessionNew } from "../src/nulya/cli.ts"
-import { scripted_env, settle, tempWorkspace, type TempWorkspace } from "./support.ts"
+import { auto_settings, scripted_env, settle, tempWorkspace, type TempWorkspace } from "./support.ts"
 
-const style = createStyle(default_settings, {})
+const style = createStyle(auto_settings, {})
 
 let ws: TempWorkspace
 beforeAll(() => {

@@ -1,4 +1,4 @@
-import { Match, Switch } from "solid-js"
+import { Match, Show, Switch } from "solid-js"
 import { UserTurn } from "./UserTurn.tsx"
 import { CompactionCard } from "./CompactionCard.tsx"
 import { compactionMarker } from "../../compact.ts"
@@ -8,6 +8,7 @@ import { midTaskOf } from "../../midtask.ts"
 import { AssistantTurn } from "./AssistantTurn.tsx"
 import { Thinking } from "./Thinking.tsx"
 import { ToolCard } from "./ToolCard.tsx"
+import { ApprovalPrompt } from "./ApprovalPrompt.tsx"
 import { CapabilityBanner } from "./CapabilityBanner.tsx"
 import { useStyle } from "../theme.ts"
 import type { TranscriptItem, UnknownItem } from "../../state/session.ts"
@@ -16,7 +17,11 @@ import type { TranscriptItem, UnknownItem } from "../../state/session.ts"
  * One transcript item → one card. Live and replay both come through here, so a
  * card can never depend on having seen the stream (tui.md §3).
  */
-export function Card(props: { item: TranscriptItem }) {
+export function Card(props: {
+  item: TranscriptItem
+  /** The call whose denial is waiting for a typed reason, if any (tui.md §5.7). */
+  noteWanted?: string | null
+}) {
   return (
     <Switch>
       {/* Compaction's two turns are user turns as far as the ledger is
@@ -53,8 +58,18 @@ export function Card(props: { item: TranscriptItem }) {
       <Match when={props.item.kind === "thinking"}>
         <Thinking item={props.item as Extract<TranscriptItem, { kind: "thinking" }>} />
       </Match>
+      {/* A call the kernel is holding open for a verdict (tui.md §5.7): the card
+          as usual, plus the one line that says the keys. */}
       <Match when={props.item.kind === "tool"}>
-        <ToolCard item={props.item as Extract<TranscriptItem, { kind: "tool" }>} />
+        <box flexDirection="column" width="100%">
+          <ToolCard item={props.item as Extract<TranscriptItem, { kind: "tool" }>} />
+          <Show when={(props.item as Extract<TranscriptItem, { kind: "tool" }>).awaiting}>
+            <ApprovalPrompt
+              item={props.item as Extract<TranscriptItem, { kind: "tool" }>}
+              note={props.noteWanted === (props.item as Extract<TranscriptItem, { kind: "tool" }>).callId}
+            />
+          </Show>
+        </box>
       </Match>
       <Match when={props.item.kind === "capability"}>
         <CapabilityBanner item={props.item as Extract<TranscriptItem, { kind: "capability" }>} />

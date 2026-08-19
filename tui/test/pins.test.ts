@@ -15,6 +15,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import {
   builtin_tools,
+  faceFullLine,
   orphanPins,
   pinAll,
   pinState,
@@ -143,9 +144,25 @@ test("the quota counts the builtins, because max_tools does", () => {
   expect(builtin_tools).toBe(2)
   expect(quotaLine(8, 5)).toBe("tools 2+5/8")
   expect(quotaLine(8, 6)).toBe("tools 2+6/8")
-  // Over the line the panel does not prevent anything; it says what will happen.
-  expect(quotaLine(8, 7)).toContain("over registry.max_tools")
-  expect(quotaLine(8, 7)).toContain("refuse")
+  // Over the line the panel does not prevent anything; it says what will happen
+  // — in a sentence, and with the way out in it. `2+9/8 · nothing changed` was
+  // the whole explanation somebody got for a switch that would not switch
+  // (tui.md §11, T23).
+  expect(quotaLine(8, 7)).toContain("tools 2+7/8")
+  expect(quotaLine(8, 7)).toContain("1 more than registry.max_tools allows")
+  expect(quotaLine(8, 7)).toContain("unpin one in the tools pane")
+  expect(quotaLine(8, 9)).toContain("3 more than registry.max_tools allows")
+})
+
+test("a full tool face refuses the pins, not the extension", () => {
+  // What the switch says when it activated something and could not pin its
+  // tools: how full, how many are off the face, and both ways to use them.
+  const line = faceFullLine(8, 6, 1)
+  expect(line).toContain("tool face is full at 2+6/8")
+  expect(line).toContain("1 tool not pinned")
+  expect(line).toContain("Space in the tools pane")
+  expect(line).toContain("ext run")
+  expect(faceFullLine(8, 6, 2)).toContain("2 tools not pinned")
 })
 
 test("rows come only from extensions a pin could actually resolve through", () => {

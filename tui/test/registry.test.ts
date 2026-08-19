@@ -45,13 +45,15 @@ test("ext build reads the sealed version out of stdout", () => {
   ).toBe("ext build · lint → v-3f2a91")
 })
 
-test("activate and rollback are two different verbs with two different glyphs", () => {
+test("activate is one verb, and an unknown one falls back to the shell card", () => {
   const activate = shell("nulya ext activate lint v-3f2a91")
+  // There is no `ext rollback` any more — going back is `activate` pointed at an
+  // older version (DESIGN §7.4) — so the old spelling is just a command.
   const rollback = shell("nulya ext rollback lint v-0011aa")
   expect(activate.head).toBe("activate · lint@v-3f2a91")
-  expect(rollback.head).toBe("rollback · lint@v-0011aa")
+  expect(rollback.head).toBe("nulya ext rollback lint v-0011aa")
   expect(activate.glyph).toBe(glyphs.capability)
-  expect(rollback.glyph).toBe(glyphs.rollback)
+  expect(rollback.glyph).toBe(glyphs.shell)
 })
 
 test("ext run names the extension and the tool, past any --arg pairs", () => {

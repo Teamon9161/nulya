@@ -16,12 +16,12 @@ import { displayWidth } from "../src/ui/columns.ts"
 import { StyleContext, createStyle, type Style } from "../src/render/theme.ts"
 import { FoldContext, createFoldStore } from "../src/state/folds.ts"
 import { createSessionState } from "../src/state/session.ts"
-import { default_settings, loadSettings } from "../src/state/settings.ts"
+import { default_settings, loadSettings, type Settings } from "../src/state/settings.ts"
 import { createKeymap } from "../src/keymap.ts"
 import { sessionList, sessionNew } from "../src/nulya/cli.ts"
-import { frameLines, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
+import { auto_settings, frameLines, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
 
-const style: Style = createStyle(default_settings, {})
+const style: Style = createStyle(auto_settings, {})
 
 let ws: TempWorkspace
 
@@ -49,7 +49,7 @@ test("/help lists the bindings that are actually in force", async () => {
   // Tall enough for the whole page: this test's point is that EVERY command is
   // on it, and the page is a scrollbox, so a viewport that cuts the last two
   // rows would turn "not discoverable" into "not scrolled to".
-  const setup = await overlay(() => <HelpView keys={createKeymap(default_settings)} onClose={() => {}} />, style, 100, 66)
+  const setup = await overlay(() => <HelpView keys={createKeymap(default_settings)} onClose={() => {}} />, style, 100, 72)
   try {
     // Eight passes, not four: a busy machine captured a half-painted frame once
     // (T1's `settle()` note) and a snapshot that flaky is worse than none.
@@ -211,11 +211,14 @@ test("a [keys] override in tui.toml really moves the fold key", async () => {
   writeFileSync(join(ws.dir, ".nulya", "tui.toml"), '[keys]\nfold = "ctrl+b"\n')
   const settings = await loadSettings(ws.dir, {})
   expect(settings.keys["fold"]).toBe("ctrl+b")
+  // Nobody is at this keyboard to answer the gate, so the tool call runs
+  // (tui.md §5.7); the binding is what this test is about.
+  const bindings: Settings = { ...settings, driver: auto_settings.driver, extensions: auto_settings.extensions }
 
   const id = await sessionNew(ws, { profile: "scripted" })
   const state = createSessionState(id)
   const setup = await testRender(
-    () => <App ws={ws} id={id} state={state} style={createStyle(settings, {})} driver={{ env: scripted_env }} />,
+    () => <App ws={ws} id={id} state={state} style={createStyle(bindings, {})} driver={{ env: scripted_env }} />,
     { width: 80, height: 24 },
   )
   try {

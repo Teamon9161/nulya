@@ -23,6 +23,8 @@ exports[`/help lists the bindings that are actually in force 1`] = `
                                                                                                   █ 
  Enter                            send · in browse, open a sub-session or fold                    █ 
                                   as observer on an empty composer, take over                     █ 
+ y / n / N / a                    on a tool call waiting for you: allow · deny                    █ 
+                                  deny with a reason · always this session                        █ 
  Shift+Enter / Ctrl+J             newline                                                         █ 
  / then Tab                       complete a slash command; Enter always sends what is written    █ 
  ↑ / ↓                            previous / next message, on an empty composer                   █ 
@@ -33,18 +35,22 @@ exports[`/help lists the bindings that are actually in force 1`] = `
  wheel                            scroll the transcript                                           █ 
  click a head line                fold / unfold that card                                         █ 
  click a row                      move the cursor there · click it again for what Enter does      █ 
- click the model                  in the title line or the composition card: open /model          █ 
+ click the model                  in the line under the composer or the composition card: open    █ 
+                                  /model                                                          █ 
+ click ask / auto                 flip the permission mode, the same as /mode                     █ 
  click a tab / a pane             go to it                                                        █ 
  click [x]                        in /ext's tools pane: pin or unpin that tool                    █ 
  drag over text                   select it; releasing copies it to the clipboard                 █ 
                                                                                                   █ 
  slash commands                                                                                   █ 
  /model                           pick the model the next session runs on                         █ 
+ /mode [ask|auto]                 ask before every tool call, or let them run; no argument        █ 
+                                  switches                                                        █ 
  /provider                        endpoints and their keys                                        █ 
                                   add an OpenAI- or Anthropic-compatible one                      █ 
  /effort <level|auto>             change this tab's effort now; the next step runs with it        █ 
- /new [--profile p] [--model id]  a session on the last pick, or on the named profile             █ 
- /sessions                        everything in .nulya/sessions · Enter opens one                 █ 
+ /new [--profile p] [--model id]  a session on the last pick, or on the named profile               
+ /sessions                        everything in .nulya/sessions · Enter opens one                   
  /ext                             extensions: versions, what is active, what it is used for         
  /usage                           what this session cost, and the workspace's tool-usage journal    
  /settings                        the effective tui.toml values and which file each came from       
@@ -53,7 +59,7 @@ exports[`/help lists the bindings that are actually in force 1`] = `
  /outcome <verdict> [note]        success | partial | failure — unjudged is not the same as         
                                   failed                                                            
  /evolve                          build the evolution package and start a session wearing it        
- /mode <id>[@version]             a session carrying a built extension's prompt and skills;         
+ /as <id>[@version]               a session carrying a built extension's prompt and skills;         
                                   nothing is activated                                              
  /step                            continue after a spent step budget (nothing continues by          
                                   itself)                                                           

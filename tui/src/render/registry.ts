@@ -178,15 +178,11 @@ function extCard(words: string[], output: string, glyphs: Glyphs): ToolPresentat
       const version = sealed?.[2]
       return make({ glyph: glyphs.build, head: `ext build · ${id}${version ? ` → ${version}` : ""}` })
     }
-    case "activate":
-    case "rollback": {
+    case "activate": {
       const args = positionals(rest)
       const id = args[0] ?? "?"
       const version = args[1]
-      return make({
-        glyph: verb === "activate" ? glyphs.capability : glyphs.rollback,
-        head: `${verb} · ${id}${version ? `@${version}` : ""}`,
-      })
+      return make({ glyph: glyphs.capability, head: `activate · ${id}${version ? `@${version}` : ""}` })
     }
     case "deactivate":
       return make({ glyph: glyphs.rollback, head: `deactivate · ${positionals(rest)[0] ?? "?"}` })

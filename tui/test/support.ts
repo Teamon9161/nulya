@@ -7,6 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { openWorkspace, type Workspace } from "../src/nulya/bin.ts"
+import { default_settings, type Settings } from "../src/state/settings.ts"
 import type { ConfigView } from "../src/nulya/cli.ts"
 import type { TranscriptItem } from "../src/state/session.ts"
 
@@ -38,6 +39,23 @@ export function tempWorkspace(): TempWorkspace {
 /** The deterministic offline provider, so no test ever needs an API key. */
 export const scripted_env = { NULYA_SCRIPTED_MODE: "finish" }
 export const scripted_loop_env = { NULYA_SCRIPTED_MODE: "loop" }
+
+/**
+ * Settings for a test that wants tool calls to RUN (tui.md §5.7).
+ *
+ * Every step this TUI drives is gated — the kernel asks before each tool call —
+ * and the default mode is `ask`, which means a person. A test with nobody at the
+ * keyboard is a test in `auto` mode: the same gate, answered immediately. What
+ * `ask` does is its own test, where the keys are pressed on purpose.
+ */
+export const auto_settings: Settings = {
+  ...default_settings,
+  driver: { mode: "auto" },
+  // …and without the `handoff` package. Composing it is a real behaviour with
+  // its own test; here it would put a second extension in every workspace whose
+  // store these tests then read back (tui.md §5.8).
+  extensions: { ...default_settings.extensions, handoff: false },
+}
 
 /**
  * A config the way `nulya config show --json` prints it, with one key present.

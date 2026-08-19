@@ -54,7 +54,7 @@ export interface DraftTab extends TabCommon {
   kind: "draft"
   pick: Accessor<ModelPick | undefined>
   setPick(pick: ModelPick | undefined): void
-  /** `--with <id>@<version>`: what `/evolve` and `/mode` put on the session. */
+  /** `--with <id>@<version>`: what `/evolve` and `/as` put on the session. */
   bring: Accessor<WithRef | undefined>
   setBring(ref: WithRef | undefined): void
 }
@@ -81,6 +81,14 @@ export interface OpenOptions {
   effort?: string
 }
 
+/** What the screen adds to a `session new` beyond the draft's own choices. */
+export interface SessionExtras {
+  /** `--with <id>[@<version>]`: composition membership, not a pin. */
+  with?: readonly string[]
+  /** `--pin ext:<id>/<tool>`: a native slot on the model's tool face. */
+  pin?: readonly string[]
+}
+
 export interface DraftOptions {
   pick?: ModelPick
   bring?: WithRef
@@ -105,8 +113,13 @@ export interface TabStore {
    * session tab takes the draft's place. Throws the kernel's own refusal (no
    * credential, an untrusted store, a pin naming nothing) so the caller can show
    * that sentence and leave the draft where it is.
+   *
+   * `extra` is whatever the SCREEN decided this session should also carry — the
+   * `handoff` package, today (tui.md §5.8). It arrives as an argument rather
+   * than as tab state because it is a policy the caller owns and may not have
+   * resolved (a build) until this very moment.
    */
-  materialize(draft: DraftTab): Promise<SessionTab>
+  materialize(draft: DraftTab, extra?: SessionExtras): Promise<SessionTab>
   /**
    * Open `id` in place of the tab keyed `oldKey`: same position, the old
    * attachment released (and the old session un-created if this process made it
@@ -247,17 +260,19 @@ export function createTabStore(ws: Workspace, first: FirstTab, options: TabStore
       setActiveIndex(tabs().length - 1)
       return tab
     },
-    async materialize(draft) {
+    async materialize(draft, extra = {}) {
       const pick = draft.pick()
       const bring = draft.bring()
       // Read at the moment the session is created rather than held in a signal:
       // the pins are program state on disk, and a second TUI (or a `/ext` toggle
       // a second ago) must be the truth here, not whatever this process saw when
       // the draft was opened.
-      const pins = sessionPins(statePath)
+      const pins = [...sessionPins(statePath)]
+      for (const pin of extra.pin ?? []) if (!pins.includes(pin)) pins.push(pin)
+      const members = [...(bring ? withOptions(bring).with ?? [] : []), ...(extra.with ?? [])]
       const id = await sessionNew(ws, {
         ...(pick ? { profile: pick.profile, model: pick.model } : {}),
-        ...(bring ? withOptions(bring) : {}),
+        ...(members.length > 0 ? { with: members } : {}),
         ...(pins.length > 0 ? { pin: pins } : {}),
       })
       return replace(draft.key, id, { created: true, effort: draft.effort() })

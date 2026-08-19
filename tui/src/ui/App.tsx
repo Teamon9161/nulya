@@ -1,4 +1,4 @@
-import { Match, Switch, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
+import { For, Match, Show, Switch, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import type { KeyEvent, ScrollBoxRenderable, Selection } from "@opentui/core"
 import { Transcript, rowsBelow, windowItems } from "./Transcript.tsx"
@@ -17,13 +17,24 @@ import { FoldContext, createFoldStore } from "../state/folds.ts"
 import { BrowseContext, createBrowseStore } from "../state/browse.ts"
 import { OverlayContext, createOverlayStore, type OverlayKind } from "../state/overlay.ts"
 import { createTabStore, type DraftTab, type FirstTab, type SessionTab } from "../state/tabs.ts"
-import { loadTuiState, rememberModel, sessionPins, type ModelPick } from "../state/tui_state.ts"
+import { loadTuiState, rememberModel, rememberMode, sessionPins, type ModelPick } from "../state/tui_state.ts"
+import {
+  alwaysKey,
+  decide,
+  describeKey,
+  isMode,
+  modes,
+  summarize as describeCall,
+  type GateRequest,
+  type PermissionMode,
+} from "../approvals.ts"
+import type { GateVerdict } from "../nulya/cli.ts"
 import { sessions_dir } from "../nulya/files.ts"
 import { createProjectIndex } from "../references.ts"
 import { createSkillTable, skillTurn } from "../skills.ts"
 import { describeTool } from "../render/registry.ts"
 import { no_snapshot } from "../state/session.ts"
-import type { NextSession } from "../render/cards/CompositionCard.tsx"
+import type { NextSession } from "./Welcome.tsx"
 import {
   extSetCurrent,
   extSync,
@@ -33,8 +44,9 @@ import {
   type ModelView as ModelParams,
   type ProfileView,
 } from "../nulya/cli.ts"
-import { failedIds, planStore, summarize } from "../extensions.ts"
+import { adoptBundled, failedIds, planStore, seedBundled, summarize } from "../extensions.ts"
 import { runCompact } from "../compact.ts"
+import { buildHandoff, handoff_pin, headline, nextHandoff, type HandoffFile } from "../handoff.ts"
 import { buildEvolution, formatWithRef, parseWithRef, type WithRef } from "../evolve.ts"
 import { createKeymap, matches } from "../keymap.ts"
 import type { AttachOptions } from "../state/attach.ts"
@@ -94,10 +106,27 @@ export interface AppProps {
   /**
    * Which store roots to build on the way in, and whether to let that pass move
    * `current` (tui.md §11, T11). The user root needs no permission; the project
-   * root is only here when `main` found it already trusted — the question, when
-   * there is one, is asked before this screen exists.
+   * root is only here when `main` found it already trusted — the trust question,
+   * the one thing that can stop a session from being created at all, is asked
+   * before this screen exists and is the only thing still asked there.
+   *
+   * `bundled` seeds the drafts this binary ships into the user store first
+   * (tui.md §11, T23). Both it and `user` are `[extensions] sync_on_start`;
+   * `activate` is `auto_activate`, and it gates the pointer moves in both.
    */
-  sync?: { user: boolean; project: boolean; activate: boolean }
+  sync?: { user: boolean; project: boolean; activate: boolean; bundled: boolean }
+}
+
+/**
+ * One call the kernel is holding open, and the promise it is held on. The
+ * request is what `--gate` offered; resolving it is what lets the step continue
+ * (tui.md §5.7).
+ */
+interface Approval {
+  request: GateRequest
+  /** The session being stepped — not necessarily the tab in front. */
+  session: string
+  resolve: (verdict: GateVerdict) => void
 }
 
 /**
@@ -132,7 +161,19 @@ export function App(props: AppProps) {
     props.id && props.state
       ? { kind: "session", id: props.id, state: props.state, created: props.created ?? false, effort: props.effort }
       : { kind: "draft", pick: props.pick, effort: props.effort }
-  const tabs = createTabStore(props.ws, first, { ...(props.driver ?? {}), statePath: props.statePath })
+  /**
+   * Every step this TUI drives is gated (tui.md §5.7): the kernel asks before
+   * each tool call and this answers. The mode is not passed to the kernel and
+   * never could be — `--gate` has one semantic, allow or deny, and WHICH calls
+   * are worth a person's attention is this front end's policy. So a mode
+   * switched mid-batch reaches the very next request, because every request is a
+   * fresh call into `approve`.
+   */
+  const tabs = createTabStore(props.ws, first, {
+    ...(props.driver ?? {}),
+    statePath: props.statePath,
+    gate: (request, session) => approve(request, session),
+  })
 
   // The workspace's paths, for `@` completion (tui.md §11, T13). Built in the
   // background from the moment the screen exists: the first `@` before it
@@ -165,8 +206,38 @@ export function App(props: AppProps) {
    * signal is what tells this screen to look again.
    */
   const [planTick, setPlanTick] = createSignal(0)
+  /**
+   * The permission mode (tui.md §5.7). Remembered on screen, like the model
+   * pick: `tui-state.json` first (what was last chosen here), then `tui.toml`'s
+   * `[driver] mode`, then `ask`.
+   */
+  const [mode, setMode] = createSignal<PermissionMode>(
+    loadTuiState(props.statePath).mode ?? props.style.settings.driver.mode,
+  )
+  /**
+   * What `a` has collected. In memory and per run on purpose: trying a tool out
+   * should cost nothing and leave nothing in a file somebody else reads — the
+   * durable form of the same statement is `[approvals] allow` in `tui.toml`.
+   */
+  const [always, setAlways] = createSignal<ReadonlySet<string>>(new Set())
+  /** The call the kernel is holding open, and the promise it is holding it on. */
+  const [pending, setPending] = createSignal<Approval | null>(null)
+  /** The denied call whose reason is being typed (the `N` key). */
+  const [noteFor, setNoteFor] = createSignal<string | null>(null)
+  /** A handover the model proposed and nobody has answered yet (tui.md §5.8). */
+  const [handoff, setHandoff] = createSignal<HandoffFile | null>(null)
+  /** Handoff files this process has already acted on or dismissed. */
+  const [handoffsSeen, setHandoffsSeen] = createSignal<ReadonlySet<string>>(new Set())
   let composer: ComposerApi | null = null
   let scroll: ScrollBoxRenderable | null = null
+  /**
+   * The `handoff` build, started once and shared. Compiled, so the first build
+   * on a machine costs a toolchain run — which is why it happens in the
+   * background from the moment the screen exists and not on the way into the
+   * first session.
+   */
+  let handoffBuild: Promise<WithRef | null> | null = null
+  const handoffMember = (): Promise<WithRef | null> => (handoffBuild ??= buildHandoff(props.ws).catch(() => null))
 
   const tab = () => tabs.active()
   /**
@@ -211,10 +282,28 @@ export function App(props: AppProps) {
   const syncStores = async () => {
     const plan = props.sync
     if (!plan) return
+    // The drafts the BINARY ships, into the user store, before the pass that
+    // builds them: seeding writes source only and leaves alone anything already
+    // there (DESIGN §7.8), so the one pass below builds what arrived along with
+    // everything else. This used to be a question on a bare terminal BEFORE the
+    // screen existed, and answering it held that terminal for a minute of zig
+    // with `installing…` as the only sign of life (tui.md §11, T23).
+    let arrived: string[] = []
+    if (plan.user && plan.bundled) {
+      try {
+        setNotice("installing the bundled extensions…")
+        arrived = (await seedBundled(props.ws)).ids
+      } catch {
+        // A binary too old to have `ext seed` ships nothing to install.
+      }
+    }
     const roots = [
       ...(plan.user ? [{ label: "user store", user: true }] : []),
       ...(plan.project ? [{ label: "this checkout", user: false }] : []),
     ]
+    // One line of news for the whole pass, across roots: a quiet second root
+    // must not wipe what the first one had to say.
+    const news: string[] = []
     for (const root of roots) {
       try {
         const total = (await planStore(props.ws, root.user)).lines.length
@@ -229,6 +318,11 @@ export function App(props: AppProps) {
         if (plan.activate) {
           for (const line of report.lines) {
             if (line.state !== "built" || !line.version || line.activation === "active") continue
+            // What arrived with the binary this run is `adoptBundled`'s to
+            // decide: everything a fresh seed drops is `built` by this pass, and
+            // this loop would happily activate `evolution` — whose whole point
+            // is that its system prompt enters ONE session, on purpose.
+            if (arrived.includes(line.id)) continue
             try {
               await extSetCurrent(props.ws, "activate", line.id, line.version, { user: root.user })
               activated += 1
@@ -238,18 +332,31 @@ export function App(props: AppProps) {
             }
           }
         }
+        const adopted =
+          root.user && arrived.length > 0 && plan.activate
+            ? await adoptBundled(props.ws, arrived, report, props.statePath)
+            : []
+        // The std pins land in `tui-state.json`, which the draft card and the
+        // status line read from disk: this is what tells them to look again.
+        if (adopted.length > 0) setPlanTick((tick) => tick + 1)
         // A count of failures is not news anybody can act on. Name them, and
         // point at the one screen that says why and offers the way out.
         const failed = failedIds(report)
-        setNotice(
+        // A pass that changed nothing has no news — "0 built · 5 already" would
+        // park on the status line until the next keypress and say nothing. The
+        // durable per-id state lives in /ext either way.
+        if (report.built === 0 && failed.length === 0 && activated === 0 && adopted.length === 0) continue
+        news.push(
           summarize(root.label, report) +
             (activated > 0 ? ` · ${activated} activated` : "") +
+            adopted.map((part) => ` · ${part}`).join("") +
             (failed.length > 0 ? ` · ${failed.join(" ")} not built · /ext` : ""),
         )
       } catch (error) {
-        setNotice(`extension sync: ${error instanceof Error ? error.message : String(error)}`)
+        news.push(`extension sync: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
+    setNotice(news.length > 0 ? news.join(" · ") : null)
   }
 
   onMount(() => void syncStores())
@@ -453,13 +560,12 @@ export function App(props: AppProps) {
     return snapshot().header?.composition.native_tools.length ?? 0
   }
 
-  /** A draft's composition card: the same three rows, in the future tense. */
+  /** What a draft tab's first message would freeze — the welcome screen's facts. */
   const plan = (): NextSession | undefined => {
     const here = draft()
     if (!here) return undefined
     const bring = here.bring()
     return {
-      model: modelOf(here.pick()),
       tools: plannedPins(),
       ...(bring ? { bring: formatWithRef(bring) } : {}),
     }
@@ -532,13 +638,211 @@ export function App(props: AppProps) {
     const here = tab()
     if (here.kind === "session") return here
     try {
-      const tab = await tabs.materialize(here)
+      const tab = await tabs.materialize(here, await handoffExtras())
       setPlanTick((tick) => tick + 1)
       return tab
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error))
       return null
     }
+  }
+
+  /**
+   * The `handoff` package, for the session about to start (tui.md §5.8).
+   *
+   * Two axes, both needed and both separate (DESIGN §7.5): `--with` makes the
+   * version a member of this composition, `--pin` gives its tool a native slot
+   * so the model can actually call it. It is off with one `tui.toml` key, and a
+   * build that fails costs the session nothing — it starts without the package
+   * and says so, rather than not starting.
+   */
+  const handoffExtras = async (): Promise<{ with?: string[]; pin?: string[] }> => {
+    if (!props.style.settings.extensions.handoff) return {}
+    const ref = await handoffMember()
+    if (!ref) return {}
+    return { with: [formatWithRef(ref)], pin: [handoff_pin] }
+  }
+
+  // ── The gate (tui.md §5.7) ────────────────────────────────────────────────
+
+  /** The tab a gate request belongs to — the session being stepped, not the one in front. */
+  const tabOf = (session: string): SessionTab | null =>
+    (tabs.tabs().find((t) => t.kind === "session" && t.id === session) as SessionTab | undefined) ?? null
+
+  /**
+   * The stable id of a tool on that session's face (`ext:<id>/<tool>`), or
+   * undefined for a builtin. Read from the FROZEN versions the session
+   * composed, which is the only place that knows which package a name came
+   * from — the gate request carries the model-facing name and nothing else.
+   */
+  const toolId = (asked: SessionTab | null, tool: string): string | undefined => {
+    for (const c of asked?.contributions() ?? []) {
+      if (c.tools.includes(tool)) return `ext:${c.id}/${tool}`
+    }
+    return undefined
+  }
+
+  /** Whether the frozen manifest claims this tool only reads (DESIGN §7.2.1). */
+  const toolReadonly = (asked: SessionTab | null, tool: string): boolean | undefined => {
+    for (const c of asked?.contributions() ?? []) {
+      if (c.tools.includes(tool)) return c.readonlyTools.includes(tool)
+    }
+    return undefined
+  }
+
+  const decideNow = (request: GateRequest, asked: SessionTab | null) =>
+    decide(request, {
+      mode: mode(),
+      rules: props.style.settings.approvals,
+      always: always(),
+      idOf: (tool) => toolId(asked, tool),
+      readonlyOf: (tool) => toolReadonly(asked, tool),
+    })
+
+  /**
+   * Answer one gate request (`nulya session step --gate`, DESIGN §14).
+   *
+   * Rules and mode decide first (`approvals.ts`); only what neither settles
+   * reaches a person, as a line under the card that already shows the call. The
+   * kernel is blocked on this promise, which is exactly why it is safe to wait:
+   * the model's connection closed before the batch began.
+   */
+  const approve = (request: GateRequest, session: string): Promise<GateVerdict> => {
+    const asked = tabOf(session)
+    const verdict = decideNow(request, asked)
+    if (verdict === "allow") return Promise.resolve<GateVerdict>({ allow: true })
+    if (verdict === "deny") {
+      const what = describeCall(request)
+      setNotice(`denied by a rule · ${request.tool}${what ? ` · ${what}` : ""}`)
+      return Promise.resolve<GateVerdict>({ allow: false, note: "denied by a standing rule in this workspace" })
+    }
+    asked?.state.setAwaitingApproval(request.call_id)
+    return new Promise<GateVerdict>((resolve) => setPending({ request, session, resolve }))
+  }
+
+  /** Answer the card that is up, and let the kernel go on. */
+  const settleApproval = (verdict: GateVerdict) => {
+    const asked = pending()
+    if (!asked) return
+    setPending(null)
+    setNoteFor(null)
+    tabOf(asked.session)?.state.setAwaitingApproval(null)
+    asked.resolve(verdict)
+  }
+
+  /**
+   * `a` — allow this one and stop asking about its kind for the rest of the run.
+   * `shell` is remembered by its first word, so "always" never quietly becomes
+   * "always run any command" (`approvals.alwaysKey`).
+   */
+  const allowAlways = () => {
+    const asked = pending()
+    if (!asked) return
+    const key = alwaysKey(asked.request, (tool) => toolId(tabOf(asked.session), tool))
+    setAlways(new Set([...always(), key]))
+    setNotice(`always allowing ${describeKey(key)} this session · /mode for the rest`)
+    settleApproval({ allow: true })
+  }
+
+  /**
+   * Switch the mode, and re-judge whatever is on screen with it. A person who
+   * flips to `auto` while a card is up meant that card too — leaving it waiting
+   * would make the switch look broken and hold the kernel for no reason.
+   */
+  const chooseMode = (next: PermissionMode) => {
+    setMode(next)
+    rememberMode(next, props.statePath)
+    const asked = pending()
+    if (asked) {
+      const again = decideNow(asked.request, tabOf(asked.session))
+      if (again === "allow") settleApproval({ allow: true })
+      else if (again === "deny") settleApproval({ allow: false, note: "denied by a standing rule in this workspace" })
+    }
+    setNotice(
+      next === "auto"
+        ? "mode auto · tool calls run without asking, except what [approvals] ask or deny says"
+        : "mode ask · every tool call no rule settles waits for you",
+    )
+  }
+
+  const toggleMode = () => chooseMode(mode() === "ask" ? "auto" : "ask")
+
+  // ── The model's handover proposal (tui.md §5.8) ───────────────────────────
+
+  /**
+   * After every step, look at the directory (DESIGN §11): a new
+   * `.nulya/handoffs/<session>-<n>.md` is the model saying a phase is done and
+   * the rest does not need the transcript. Exactly the signal `drivers/goal.*`
+   * watches for — a file, not a protocol — so both drivers read the same thing.
+   *
+   * `auto` follows it; `ask` puts it on screen, because a fork is the one move
+   * that changes which session the person is talking to.
+   */
+  const checkHandoff = () => {
+    const here = live()
+    if (!here || handoff()) return
+    const found = nextHandoff(props.ws, here.id, handoffsSeen())
+    if (!found) return
+    if (mode() === "auto") {
+      setHandoffsSeen(new Set([...handoffsSeen(), found.path]))
+      void followHandoffFile(found)
+      return
+    }
+    setHandoff(found)
+    setNotice(`handoff proposed · ${headline(found.brief)} · Enter follow · Esc dismiss`)
+  }
+
+  /** A step just ended: that is when a handoff file can have appeared. */
+  createEffect(() => {
+    if (status() !== "idle") return
+    // …and the one case where a card outlives the question: Ctrl+C killed the
+    // step that was waiting for it. Nobody is listening for the answer now, so
+    // the card comes down rather than sitting there holding nothing.
+    const asked = pending()
+    if (asked && tabOf(asked.session)?.attach.status() === "idle") {
+      settleApproval({ allow: false })
+      setNotice("the step ended before that call was answered · nothing ran")
+    }
+    checkHandoff()
+  })
+
+  /**
+   * Fork on a brief the model already wrote: `/compact`'s `brief_file` branch,
+   * which skips asking for a summary and leaves the old session byte-identical
+   * (DESIGN §11). The tab moves to the child, as `/compact` does.
+   */
+  const followHandoffFile = async (file: HandoffFile) => {
+    const source = live()
+    if (!source) return
+    setNotice(`handoff · forking on ${file.path}…`)
+    try {
+      const result = await runCompact(props.ws, source.id, { briefFile: file.path })
+      tabs.replace(source.id, result.session, { created: true, effort: source.effort() })
+      setNotice(`handed off into ${result.session} · ${source.id} kept on disk`)
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error))
+      if (source.attach.role() === "observer") source.attach.takeOver()
+    }
+  }
+
+  /** `Enter` on the proposal. True when there was one, so the composer knows. */
+  const followHandoff = (): boolean => {
+    const file = handoff()
+    if (!file) return false
+    setHandoff(null)
+    setHandoffsSeen(new Set([...handoffsSeen(), file.path]))
+    void followHandoffFile(file)
+    return true
+  }
+
+  /** `Esc` on the proposal: the file stays, this process stops offering it. */
+  const dismissHandoff = (): boolean => {
+    const file = handoff()
+    if (!file) return false
+    setHandoff(null)
+    setHandoffsSeen(new Set([...handoffsSeen(), file.path]))
+    setNotice(`handoff dismissed · the brief is still at ${file.path}`)
+    return true
   }
 
   /**
@@ -560,11 +864,19 @@ export function App(props: AppProps) {
     }
   }
 
-  /** `/mode <id>[@<version>]` — the same move with any package that contributes a prompt. */
-  const modeNow = (word: string | undefined) => {
+  /**
+   * `/as <id>[@<version>]` — the same move as `/evolve` with any package that
+   * contributes a prompt: wear it for one session, activate nothing.
+   *
+   * It was `/mode` until the permission mode needed that name (tui.md §5.7).
+   * `/as evolution` also reads as what it does — this session speaks AS that
+   * package — where `/mode evolution` and `/mode auto` were two unrelated things
+   * behind one word.
+   */
+  const wearNow = (word: string | undefined) => {
     const ref = word ? parseWithRef(word) : null
     if (!ref) {
-      setNotice("/mode <id>[@<version>] · a built extension; no version means the store's current")
+      setNotice("/as <id>[@<version>] · a built extension; no version means the store's current")
       return
     }
     startDraft(undefined, false, ref)
@@ -632,7 +944,7 @@ export function App(props: AppProps) {
     }
     setNotice("compacting · asking this session for a continuation brief…")
     try {
-      const result = await runCompact(props.ws, source.id, focus)
+      const result = await runCompact(props.ws, source.id, { ...(focus ? { focus } : {}) })
       tabs.replace(source.id, result.session, { created: true, effort: source.effort() })
       setNotice(`compacted into ${result.session} · ${source.id} kept on disk`)
     } catch (error) {
@@ -693,7 +1005,14 @@ export function App(props: AppProps) {
       return true
     }
     if (command === "/mode") {
-      modeNow(words[1])
+      const word = words[1]
+      if (!word) toggleMode()
+      else if (isMode(word)) chooseMode(word)
+      else setNotice(`/mode <${modes.join("|")}> · now: ${mode()} · no argument switches`)
+      return true
+    }
+    if (command === "/as") {
+      wearNow(words[1])
       return true
     }
     if (command === "/cancel") {
@@ -803,6 +1122,14 @@ export function App(props: AppProps) {
   }
 
   const submit = (text: string) => {
+    // A typed line while a denial is waiting for its reason is that reason, not
+    // a turn: the call is still open, and anything sent to the model now would
+    // arrive after it (tui.md §5.7).
+    if (pending() && noteFor() !== null) {
+      settleApproval({ allow: false, note: text.trim() })
+      setNotice("denied · the model was told why")
+      return
+    }
     setNotice(null)
     if (runCommand(text)) return
     void sendTurn(text)
@@ -820,6 +1147,30 @@ export function App(props: AppProps) {
   }
 
   useKeyboard((key) => {
+    // A call is waiting for a verdict: the kernel is stopped on it, so these
+    // four keys come before everything else the screen would do with them
+    // (tui.md §5.7). Typing a reason is the one state that hands the keyboard
+    // back — the composer takes it, and `submit` resolves the denial.
+    // …but only while the composer is empty. `y`, `n` and `a` are letters
+    // before they are answers: taking them out of a half-typed line would make
+    // `/mode auto` unsendable exactly when somebody reaches for it (the same
+    // rule Esc follows for browse mode).
+    if (pending() && noteFor() === null && (composer?.isEmpty() ?? true)) {
+      if (key.name === "y") return consume(key, () => settleApproval({ allow: true }))
+      if (key.name === "a") return consume(key, allowAlways)
+      if (key.name === "n") {
+        // Shift is the difference between "no" and "no, because": one key for
+        // the answer that needs no words, one for the one that does.
+        if (key.shift) return consume(key, () => setNoteFor(pending()!.request.call_id))
+        return consume(key, () => {
+          settleApproval({ allow: false })
+          setNotice("denied · nothing ran · N next time to say why")
+        })
+      }
+    }
+    if (pending() && noteFor() !== null && matches(keys.cancel, key)) {
+      return consume(key, () => settleApproval({ allow: false }))
+    }
     // An overlay owns the keyboard while it is up; only the keys that open or
     // close one, and the quit key, stay global (tui.md §11, T2 reminder 3).
     if (overlay.active()) {
@@ -872,6 +1223,8 @@ export function App(props: AppProps) {
       return
     }
     if (matches(keys.cancel, key)) {
+      // A proposal on screen is what Esc is about while it is there.
+      if (dismissHandoff()) return
       const here = live()
       if (here && here.attach.status() === "stepping") {
         void here.attach.cancel()
@@ -946,6 +1299,7 @@ export function App(props: AppProps) {
                       contributions={live()?.contributions() ?? []}
                       plan={plan()}
                       cwd={props.ws.dir}
+                      noteWanted={noteFor()}
                       onPickModel={() => openOverlay("model")}
                       onCommand={submit}
                       ref={(box) => (scroll = box)}
@@ -1008,9 +1362,16 @@ export function App(props: AppProps) {
                 </Switch>
 
                 <Hairline />
+                {/* The model's own proposal to hand over, between the
+                    transcript and the box you answer it in (tui.md §5.8). Not
+                    a transcript card: the brief is a file on disk, not a ledger
+                    event, and this front end shows only what the ledger holds. */}
+                <Show when={handoff()}>
+                  <HandoffPanel file={handoff()!} />
+                </Show>
                 <Composer
                   onSubmit={submit}
-                  onEmptySubmit={takeOverIfOffered}
+                  onEmptySubmit={() => followHandoff() || takeOverIfOffered()}
                   // Clicking the input box means "type here": browse mode holds
                   // the keyboard and the textarea cannot let itself out of it.
                   onActivate={() => {
@@ -1034,6 +1395,9 @@ export function App(props: AppProps) {
                   model={modelName()}
                   effort={tab().effort()}
                   tools={faceSize()}
+                  mode={mode()}
+                  awaiting={pending() !== null}
+                  onToggleMode={toggleMode}
                   hint={notice() ?? undefined}
                   behind={behind()}
                   contextWindow={contextWindow()}
@@ -1047,6 +1411,29 @@ export function App(props: AppProps) {
         </FoldContext.Provider>
       </ScreenContext.Provider>
     </StyleContext.Provider>
+  )
+}
+
+/**
+ * The handover the model proposed, waiting for an answer (tui.md §5.8).
+ *
+ * The brief is shown, not summarised: it is what the NEXT session will open
+ * with, and agreeing to a fork without reading what carries over is agreeing to
+ * lose the rest. Long briefs are cut here and stay whole in the file — the
+ * decision needs the shape of it, not every line.
+ */
+function HandoffPanel(props: { file: HandoffFile }) {
+  const style = useStyle()
+  const lines = () => props.file.brief.split("\n").slice(0, 8)
+  return (
+    <box flexDirection="column" width="100%" paddingLeft={2} paddingRight={1} flexShrink={0}>
+      <box flexDirection="row" width="100%">
+        <text fg={style.theme.accent.evolve}>{style.glyphs.subSession} handoff proposed · </text>
+        <text fg={style.theme.dim}>{props.file.path}</text>
+      </box>
+      <For each={lines()}>{(line) => <text fg={style.theme.muted}>{`  ${line}`}</text>}</For>
+      <text fg={style.theme.dim}>{"  Enter follow it into a new session · Esc dismiss · the file stays either way"}</text>
+    </box>
   )
 }
 

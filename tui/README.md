@@ -8,8 +8,9 @@ step --stream`).
 
 Status: **T8 — complete**. Cards and folding, `tui.toml` settings and keymap
 overrides, `/sessions` `/ext` `/usage` `/settings` `/help`, sub-session tabs,
-observer mode, a single-file build, `/model` `/provider` `/effort`, `/compact`, and the
-slow loop's front end: `/outcome`, `/evolve`, `/mode`.
+observer mode, a single-file build, `/model` `/provider` `/effort`, `/compact`, the
+slow loop's front end (`/outcome`, `/evolve`, `/as`), and the permission mode:
+every tool call is gated, `/mode` says whether you see it first.
 
 A session has exactly one writer. When somebody else holds it — a driver script,
 another TUI, a parent session's shell — this one attaches as an **observer**: it
@@ -226,23 +227,58 @@ refreshes, `Esc` closes. Inside `/ext`: `j`/`k` move, `Tab` switches pane
 (extensions → versions → tools → usage table), `Enter` (or a click on the
 `●`/`○`) turns the highlighted extension on or off for the next session,
 `b` builds the source in its store directory, `Space` in the tools pane pins
-one tool and `A` makes that pin permanent, `a` activates / `r` rolls back the
-highlighted version on the version line (confirm with `y`), `p` prunes old
-versions, `u` jumps to the usage table. Inside `/usage`: `r` refreshes.
+one tool and `A` makes that pin permanent, `a` activates the highlighted version
+on the version line (confirm with `y`) — pointing at an older one is the
+rollback, there is no second verb — `p` prunes old versions, `u` jumps to the
+usage table. Inside `/usage`: `r` refreshes.
 
-Slash commands: `/model` (F5), `/provider` (F6), `/effort <level|auto>`,
-`/new [--profile p] [--model id]`, `/sessions`, `/ext`, `/usage`, `/settings`,
-`/compact [focus]`, `/outcome <success|partial|failure> [note]`, `/evolve`,
-`/mode <id>[@version]`, `/help`, `/step` (continue after a spent step budget),
-`/cancel`, `/fold`, `/quit`. Anything else starting with `/` is sent to the
-model verbatim.
+Slash commands: `/model` (F5), `/provider` (F6), `/mode [ask|auto]`,
+`/effort <level|auto>`, `/new [--profile p] [--model id]`, `/sessions`, `/ext`,
+`/usage`, `/settings`, `/compact [focus]`,
+`/outcome <success|partial|failure> [note]`, `/evolve`, `/as <id>[@version]`,
+`/help`, `/step` (continue after a spent step budget), `/cancel`, `/fold`,
+`/quit`. Anything else starting with `/` is sent to the model verbatim.
+
+`/mode` is the permission mode. Every step this TUI runs is gated: the kernel
+asks before each tool call (`nulya session step --gate`) and the TUI answers. In
+`ask` — the default — a call no rule settles waits for you under its own card:
+`y` allows, `n` denies, `N` denies with a reason the model reads, `a` allows and
+stops asking about that tool (or that `shell` command's first word) for the rest
+of the run. In `auto` the same calls just run. The chip on the status line shows
+which, and a click flips it; the choice is remembered in `tui-state.json`.
+Standing rules live in `tui.toml`:
+
+```toml
+[driver]
+mode = "ask"                       # where a run starts; the chip and /mode win
+
+[approvals]
+allow = ["ext:std/read", "shell:git status"]
+ask   = ["shell:git push"]         # asked even in auto
+deny  = ["shell:rm -rf /"]         # never asked, never run
+manifest_readonly = true           # believe a tool's own "readonly": true
+```
+
+An entry is either a tool (`ext:std/read`, `shell`, `edit`) or a `shell` command
+prefix (`shell:git`). `deny` outranks everything, `ask` outranks the mode, and a
+tool the manifest calls `readonly` is allowed unless you switch that off. None of
+it is a security boundary — an extension runs with the same authority as `shell`
+(DESIGN §9); it is about what you want to look at.
 
 `/outcome` records how a session went in the outcome journal beside the ledger —
 recording nothing means *unjudged*, which is not the same as failure, so nothing
 is written until you say so. `/evolve` builds the `extensions/evolution` package
-that ships with nulya and starts a session carrying it; `/mode <id>` does the
+that ships with nulya and starts a session carrying it; `/as <id>` does the
 same with any built extension. Neither activates anything: the package is a
 member of that one session's composition, and the next session is untouched.
+
+The model can propose the same move itself. Every session this TUI starts
+carries the bundled `handoff` package (`[extensions] handoff`), whose tool
+writes `.nulya/handoffs/<session>-<n>.md` and stops — that file IS the proposal,
+and nothing has happened yet. In `ask` the brief appears above the composer with
+`Enter follow · Esc dismiss`; in `auto` the fork happens and a line says so.
+Following one is `/compact` with the brief already written, so it is the same
+fork and the old session stays whole on disk.
 
 `/compact` asks this session for a continuation brief and moves the tab to a new
 session that points back at it — the old file stays on disk, whole. The
@@ -277,6 +313,20 @@ ascii          = false         # plain glyphs for fonts without the box drawing 
 [ui]
 theme  = "nulya-dark"          # nulya-dark | nulya-light   (NO_COLOR wins over both)
 motion = true                  # spinner and streaming cursor
+
+[driver]
+mode = "ask"                   # ask | auto — where a run starts (see /mode above)
+
+[approvals]                    # standing answers to the gate; see /mode above
+allow = []
+ask   = []
+deny  = []
+manifest_readonly = true
+
+[extensions]
+sync_on_start = true           # build the drafts in the store roots on the way in
+auto_activate = true           # let that pass point `current` at what it built
+handoff       = true           # every session carries the `handoff` tool, pinned
 
 [keys]                         # action = binding; names are the rows of /help
 cancel  = "escape"

@@ -59,15 +59,27 @@ export const extensions_dir = ".nulya/extensions"
  * moment a config layer moved.
  */
 export async function storeRoots(ws: Workspace): Promise<string[]> {
-  const roots: string[] = []
   try {
-    for (const entry of await extList(ws)) {
-      const dir = isAbsolute(entry.root) ? entry.root : join(ws.dir, entry.root)
-      if (!roots.includes(dir)) roots.push(dir)
-    }
+    return rootsOf(ws, await extList(ws))
   } catch {
     // No binary, no store, a build too old to list roots: the workspace root is
     // where extensions have always been, and it is still the first one searched.
+    return rootsOf(ws, [])
+  }
+}
+
+/**
+ * The same roots, from a listing somebody already has.
+ *
+ * `ext list` is a subprocess, and a caller holding its answer should not spawn a
+ * second one to learn what it already read (`/ext` opens by listing and then
+ * needs the roots to find the ids that are only source).
+ */
+export function rootsOf(ws: Workspace, listed: readonly { root: string }[]): string[] {
+  const roots: string[] = []
+  for (const entry of listed) {
+    const dir = isAbsolute(entry.root) ? entry.root : join(ws.dir, entry.root)
+    if (!roots.includes(dir)) roots.push(dir)
   }
   const workspace = join(ws.dir, extensions_dir)
   if (!roots.includes(workspace)) roots.unshift(workspace)
@@ -83,6 +95,13 @@ export interface Contributions {
   id: string
   version: string
   tools: string[]
+  /**
+   * The subset of `tools` whose manifest claims `"readonly": true` (DESIGN
+   * §7.2.1). A CLAIM, recorded by the kernel and enforced by nothing: the
+   * approval policy may believe it (`approvals.ts`), and `[approvals]
+   * manifest_readonly = false` stops believing it.
+   */
+  readonlyTools: string[]
   skills: string[]
   /**
    * Files whose text becomes a system block for any session carrying this
@@ -107,7 +126,7 @@ export async function readContributions(
   version: string,
   roots?: readonly string[],
 ): Promise<Contributions> {
-  const empty: Contributions = { id, version, tools: [], skills: [], systemPrompts: [] }
+  const empty: Contributions = { id, version, tools: [], readonlyTools: [], skills: [], systemPrompts: [] }
   const search = roots ?? (await storeRoots(ws))
   for (const root of search) {
     const path = join(root, id, "versions", version, "extension.json")
@@ -126,14 +145,15 @@ export async function readContributions(
 
 function contributionsOf(
   manifest: Record<string, unknown> | null,
-): Pick<Contributions, "tools" | "skills" | "systemPrompts"> {
+): Pick<Contributions, "tools" | "readonlyTools" | "systemPrompts" | "skills"> {
   const contributes = (manifest?.["contributes"] ?? {}) as Record<string, unknown>
+  const declared = Array.isArray(contributes["tools"]) ? (contributes["tools"] as Array<Record<string, unknown>>) : []
+  const named = declared.filter((tool) => typeof tool?.["name"] === "string")
   return {
-    tools: Array.isArray(contributes["tools"])
-      ? (contributes["tools"] as Array<Record<string, unknown>>)
-          .map((tool) => (typeof tool?.["name"] === "string" ? (tool["name"] as string) : null))
-          .filter((name): name is string => name !== null)
-      : [],
+    tools: named.map((tool) => tool["name"] as string),
+    // Absent is not false (DESIGN §7.2.1): a package that said nothing has made
+    // no claim, and only an explicit `true` is one.
+    readonlyTools: named.filter((tool) => tool["readonly"] === true).map((tool) => tool["name"] as string),
     skills: stringList(contributes["skills"]),
     systemPrompts: stringList(contributes["system_prompts"]),
   }
@@ -451,9 +471,14 @@ export async function listExtensions(ws: Workspace): Promise<ExtensionEntry[]> {
  * manifest of each id the listing did not name. No versions and no `current`:
  * that is exactly what such an id is.
  */
-export async function draftEntries(ws: Workspace, ids: readonly string[]): Promise<ExtensionEntry[]> {
+export async function draftEntries(
+  ws: Workspace,
+  ids: readonly string[],
+  /** The roots, when the caller already listed them (`rootsOf`): one fewer `ext list`. */
+  known?: readonly string[],
+): Promise<ExtensionEntry[]> {
   if (ids.length === 0) return []
-  const roots = await storeRoots(ws)
+  const roots = known ?? (await storeRoots(ws))
   const workspace = join(ws.dir, extensions_dir)
   const out: ExtensionEntry[] = []
   for (const id of ids) {

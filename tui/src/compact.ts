@@ -71,13 +71,17 @@ export interface CompactResult {
 export async function runCompact(
   ws: Workspace,
   sessionId: string,
-  focus?: string,
+  options: { focus?: string; briefFile?: string } = {},
 ): Promise<CompactResult> {
   const version = await extBuild(ws, await bundledDraftPath(ws, compact_id, compact_draft))
-  const trimmed = focus?.trim()
+  const trimmed = options.focus?.trim()
   const call = await extRun(ws, `${compact_id}@${version}`, compact_id, {
     session: sessionId,
     ...(trimmed && trimmed.length > 0 ? { focus: trimmed } : {}),
+    // `brief_file` skips the asking: the summary already exists, written by the
+    // model's own `handoff` call, and the old session is left byte-identical
+    // (DESIGN §11). Same fork, one less round trip.
+    ...(options.briefFile ? { brief_file: options.briefFile } : {}),
   })
   // A refusal is the interesting case: the tool says why in the JSON-RPC error
   // the CLI prints, and that sentence ("nothing moved — the old session is

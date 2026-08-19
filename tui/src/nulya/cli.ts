@@ -29,6 +29,8 @@ export type StreamLine =
   | { stream: "tool"; event: "begin"; call_id: string; tool: string }
   | { stream: "tool"; event: "end"; call_id: string; ok: boolean }
   | { stream: "step"; event: "end"; status: StepStatus }
+  /** `--gate`: this call is waiting for a verdict on stdin (DESIGN §14). */
+  | { stream: "gate"; event: "request"; call_id: string; tool: string; args: string }
   | { stream: "run"; event: "done"; steps: number; stopped: StopReason }
   | { stream: "run"; event: "error"; message: string }
   /** Forward-compatibility: a stream/event pair this build does not know. */
@@ -432,7 +434,7 @@ export interface SyncLine {
   /**
    * What `current` says about this version: `active` (it is the pointer),
    * `activated` (this pass moved it), `kept` (`--activate` left an existing
-   * pointer alone — someone's rollback stands), or null.
+   * pointer alone — someone pointed it somewhere on purpose), or null.
    */
   activation: "active" | "activated" | "kept" | null
   /** The failure reason, or the version a `kept` pointer names. */
@@ -781,7 +783,7 @@ export function sessionFollow(ws: Workspace, id: string, since = 0): FollowHandl
 }
 
 /**
- * `nulya ext activate|rollback` — a CLI action, not a session event. It moves
+ * `nulya ext activate` — a CLI action, not a session event. It moves
  * the store's `current` pointer (physics #5) and therefore changes nothing about
  * the session in front of us: composition froze at `session new` (DESIGN §7.5).
  *
@@ -795,7 +797,7 @@ export function sessionFollow(ws: Workspace, id: string, since = 0): FollowHandl
  */
 export async function extSetCurrent(
   ws: Workspace,
-  verb: "activate" | "rollback",
+  verb: "activate",
   id: string,
   version: string,
   options: { user?: boolean; session?: string } = {},
@@ -849,6 +851,43 @@ export interface StepOptions {
   effort?: string
   /** Extra environment for the child, e.g. NULYA_SCRIPTED_MODE in tests. */
   env?: Record<string, string>
+  /**
+   * Answer the kernel's per-call gate (`--gate`, DESIGN §14). Given, the step
+   * runs gated: every tool call is offered here first and only runs on `allow`.
+   * The kernel is blocked on our answer while this promise is pending, which is
+   * exactly the point — the model's connection is already closed, so a person
+   * may take as long as they like.
+   *
+   * Absent, no `--gate` is passed and the step behaves as it always has.
+   */
+  gate?: (request: GateRequest) => Promise<GateVerdict>
+}
+
+/** What the kernel offers for approval: one call, as the model wrote it. */
+export interface GateRequest {
+  call_id: string
+  tool: string
+  args: string
+}
+
+/** The two answers the wire has; the note reaches the model in the result. */
+export type GateVerdict = { allow: true } | { allow: false; note?: string }
+
+/** The verdict line the kernel reads on stdin: `allow` / `deny` / `deny <note>`. */
+export function verdictLine(verdict: GateVerdict): string {
+  if (verdict.allow) return "allow\n"
+  // One line is the whole protocol, so a note with newlines in it would be read
+  // as a verdict and then some. Flattened here rather than refused: a person's
+  // sentence should reach the model, and its line breaks carry nothing.
+  const note = verdict.note?.replace(/\s+/g, " ").trim()
+  return note && note.length > 0 ? `deny ${note}\n` : "deny\n"
+}
+
+function gateRequestOf(line: StreamLine): GateRequest | null {
+  if (line.stream !== "gate" || line.event !== "request") return null
+  const record = line as unknown as Partial<GateRequest>
+  if (typeof record.call_id !== "string" || typeof record.tool !== "string") return null
+  return { call_id: record.call_id, tool: record.tool, args: typeof record.args === "string" ? record.args : "{}" }
 }
 
 /**
@@ -861,19 +900,55 @@ export function sessionStep(ws: Workspace, id: string, options: StepOptions = {}
   const args = ["session", "step", id, "--stream"]
   if (options.maxSteps !== undefined) args.push("--max-steps", String(options.maxSteps))
   if (options.effort) args.push("--effort", options.effort)
+  if (options.gate) args.push("--gate")
   const proc = Bun.spawn({
     cmd: [ws.bin, ...args],
     cwd: ws.dir,
     env: options.env ? { ...process.env, ...options.env } : process.env,
+    // A gated step reads its verdicts here. Without a gate the child is handed
+    // nothing to read, exactly as before.
+    stdin: options.gate ? "pipe" : "ignore",
     stdout: "pipe",
     stderr: "pipe",
   })
   const stderr = new Response(proc.stderr).text()
 
+  /**
+   * Answer one request and write the verdict back. A gate line never reaches
+   * the consumer: it is machinery between this module and the kernel, and the
+   * caller hears about the call through its own `gate` callback — which is what
+   * draws the card and waits for the key.
+   *
+   * A gate that throws denies. The kernel fails closed when the channel goes
+   * quiet, and this side must not be the reason it waits forever instead.
+   */
+  async function answer(request: GateRequest): Promise<void> {
+    let verdict: GateVerdict = { allow: false }
+    try {
+      verdict = await options.gate!(request)
+    } catch {
+      // Nothing said is not consent.
+    }
+    try {
+      proc.stdin?.write(verdictLine(verdict))
+      proc.stdin?.flush()
+    } catch {
+      // The child is gone; its own EOF path denies whatever is left.
+    }
+  }
+
   async function* lines(): AsyncGenerator<StepLine> {
     for await (const raw of decodeLines(proc.stdout)) {
       const parsed = parseStepLine(raw)
-      if (parsed) yield parsed
+      if (!parsed) continue
+      if (parsed.kind === "stream" && options.gate) {
+        const request = gateRequestOf(parsed.line)
+        if (request) {
+          await answer(request)
+          continue
+        }
+      }
+      yield parsed
     }
   }
 

@@ -6,12 +6,20 @@
  * from files a real `nulya` binary wrote.
  */
 import { afterAll, beforeAll, expect, test } from "bun:test"
-import { rmSync } from "node:fs"
+import { rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { createSignal, type JSX } from "solid-js"
 import { testRender } from "@opentui/solid"
 import { SessionsView } from "../src/ui/overlays/SessionsView.tsx"
-import { ExtView, driftLine, frozenVersion } from "../src/ui/overlays/ExtView.tsx"
+import {
+  ExtView,
+  driftLine,
+  frozenVersion,
+  labelOf,
+  permissionLine,
+  shortVersion,
+  toolRows,
+} from "../src/ui/overlays/ExtView.tsx"
 import { displayWidth } from "../src/ui/columns.ts"
 import { listExtensions, readHeader } from "../src/nulya/files.ts"
 import { sessionPins } from "../src/state/tui_state.ts"
@@ -22,9 +30,9 @@ import { createSessionState } from "../src/state/session.ts"
 import { default_settings } from "../src/state/settings.ts"
 import { sessionAppend, sessionNew, sessionStep } from "../src/nulya/cli.ts"
 import type { SessionHeader } from "../src/nulya/ledger.ts"
-import { frameLines, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
+import { auto_settings, frameLines, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
 
-const style: Style = createStyle(default_settings, {})
+const style: Style = createStyle(auto_settings, {})
 
 let ws: TempWorkspace
 let first: string
@@ -67,6 +75,9 @@ function stable(frame: string): string {
     .replace(/[ ]+$/gm, "")
     .replace(/s-\d+-[0-9a-f]+/g, "s-<id>")
     .replace(/v-[0-9a-z]{8,}/g, "v-<hash>")
+    // `registry.max_tools` is the kernel's default, not this view's layout: a
+    // snapshot that bakes it in fails the day the kernel picks a new number.
+    .replace(/tools (\d)\+(\d+)\/\d+/g, "tools $1+$2/<max>")
     .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/g, "<built>")
     .replace(/\d{2}-\d{2} \d{2}:\d{2}/g, "<when>")
 }
@@ -174,12 +185,12 @@ test("/ext shows the version line, the current pointer and the usage counts", as
     expect(frame).toContain("▎ this session")
     // The four panes name themselves; the store actions are one `?` away.
     expect(frame).toContain("extensions  versions  tools  usage")
-    expect(frame).toContain("Enter on/off · j/k move · Tab pane · Esc close · ? keys")
-    expect(frame).not.toContain("a activate · r rollback")
+    expect(frame).toContain("Enter on/off · j/k move · h/l pane · Esc close · ? keys")
+    expect(frame).not.toContain("a activate one named version")
     expect(stable(frame)).toMatchSnapshot()
 
     setup.mockInput.pressKey("?")
-    expect(await settle(setup, 3)).toContain("a activate · r rollback")
+    expect(await settle(setup, 3)).toContain("a activate one named version")
     setup.mockInput.pressKey("?")
     await settle(setup, 3)
 
@@ -188,6 +199,17 @@ test("/ext shows the version line, the current pointer and the usage counts", as
     const usage = await settle(setup, 4)
     expect(usage).toContain("tool usage · .nulya/tool-usage.jsonl")
     expect(usage).toContain("builtin.shell")
+
+    // The strip is a row of four, so sideways keys walk it — and they wrap both
+    // ways, which is the half `Tab` alone never had (T24).
+    setup.mockInput.pressKey("h")
+    expect(await settle(setup, 4)).toMatch(/tools 2\+0\/\d+/)
+    setup.mockInput.pressKey("l")
+    await settle(setup, 4)
+    setup.mockInput.pressKey("l")
+    const wrapped = await settle(setup, 4)
+    expect(wrapped).toContain("● lint")
+    expect(wrapped).not.toContain("tool usage · .nulya/tool-usage.jsonl")
   } finally {
     setup.renderer.destroy()
   }
@@ -214,16 +236,19 @@ test("/ext at eighty columns: all four panes cut to their columns, the version i
     await until(() => setup.captureCharFrame().includes("extensions ·"), 20_000)
 
     // Pane 1 — the id list. The long id is cut and the short one beside it still
-    // reaches its `1v scri` at the same offset: a gutter, not a coincidence.
+    // reaches its next cell at the same offset: a gutter, not a coincidence.
     const ids = fits(await settle(setup, 6))
     expect(ids).toContain("…")
     expect(ids).not.toContain(long_id)
     const lines = frameLines(ids)
-    const short = lines.find((line) => /▾? ?lint {2,}\dv scri/.test(line))
+    const short = lines.find((line) => /[●○] lint {2,}\d\/\d tools/.test(line))
     expect(short).toBeDefined()
+    // And no version hash on any of these rows (tui.md §11, T23): the list is
+    // about whether to move something, not about which build it is.
+    expect(lines.slice(0, 5).join("\n")).not.toContain(long_version)
 
-    // Pane 2 — the version line. Everything else on it gives up cells first: a
-    // version id is what somebody types into `ext activate`, whole or useless.
+    // Pane 2 — the version line. The full id is under the cursor and nowhere
+    // else: it is what somebody types into `ext activate`, whole or useless.
     setup.mockInput.pressTab()
     const versions = fits(await settle(setup, 4))
     expect(versions).toContain(long_version)
@@ -259,7 +284,9 @@ test("/ext's tools pane pins with a keypress, and the pin is what the next sessi
     await settle(setup, 6)
     setup.mockInput.pressKey("t")
     const pane = await settle(setup, 4)
-    expect(pane).toContain("tools 2+0/8")
+    // The quota's denominator is the kernel's `registry.max_tools` and this test
+    // is about the numerator: the two builtins, and what this panel adds to them.
+    expect(pane).toMatch(/tools 2\+0\/\d+/)
     expect(pane).toContain("[ ] ext:lint/lint")
 
     setup.mockInput.pressKey(" ")
@@ -267,7 +294,7 @@ test("/ext's tools pane pins with a keypress, and the pin is what the next sessi
     // On goes to `this TUI` first: a config file is one more key away (`A`).
     expect(pinned).toContain("[x] ext:lint/lint")
     expect(pinned).toContain("this TUI")
-    expect(pinned).toContain("tools 2+1/8")
+    expect(pinned).toMatch(/tools 2\+1\/\d+/)
     expect(sessionPins(statePath)).toEqual(["ext:lint/lint"])
 
     // And that list is the argv: the kernel freezes exactly it (physics #2).
@@ -307,11 +334,49 @@ test("/ext names the drift between what this session froze and what the store po
   const setup = await overlayFrame(() => <ExtView ws={ws} header={header} onClose={() => {}} />)
   try {
     const frame = await settle(setup, 6)
-    expect(frame).toContain(`frozen v-old · store ${version}`)
+    // Short hashes in the sentence: it says two builds differ, and eight digits
+    // say that as well as twenty-four (tui.md §11, T23).
+    expect(frame).toContain(`frozen v-old · store ${shortVersion(version)}`)
+    expect(shortVersion(version)).toHaveLength(10)
+    // The whole id is still one line away, under the version the cursor is on.
+    expect(frame).toContain(version)
   } finally {
     setup.renderer.destroy()
   }
 }, 60_000)
+
+test("a driver tool is listed with no checkbox: there is no pin for it to be wrong about", () => {
+  // `compact` drives the session it is called ABOUT — it appends to it and
+  // steps it — so a model calling it from inside that session meets the
+  // kernel's writer lock every time (DESIGN §3.4). A checkbox beside it offered
+  // a state that cannot work; the row now says who calls it instead (T24).
+  const entry = (id: string, tools: string[]) => ({
+    id,
+    current: "v-1",
+    versions: [],
+    kind: "compiled" as const,
+    tools,
+    skills: [],
+    systemPrompts: [],
+    permissions: { fs: [], network: [], process: [] },
+    root: "",
+    shadowed: false,
+  })
+  const rows = toolRows(
+    [entry("compact", ["compact"]), entry("std", ["read"])],
+    { user: [], session: [], merged: [] },
+    [],
+  )
+  expect(rows.map((row) => [row.id, row.driver])).toEqual([
+    ["ext:compact/compact", true],
+    ["ext:std/read", false],
+  ])
+  expect(labelOf(rows[0]!)).toBe("driver · ext run")
+  expect(labelOf(rows[1]!)).toBe("")
+  // Pinned anyway — by hand, or by a driver's `--pin` — and the row goes back to
+  // saying what the pin says: the state is real, and taking it off must work.
+  expect(labelOf({ ...rows[0]!, state: "session" })).toBe("this TUI")
+})
 
 test("F3 opens the sessions view and Esc closes it", async () => {
   const state = createSessionState(first)
@@ -402,10 +467,12 @@ test("/ext's action keys move the store's current pointer, with a confirmation",
     await settle(setup, 6)
     setup.mockInput.pressTab() // extensions → versions
     await settle(setup, 2)
-    // The version line is oldest first, so the cursor starts on the first build.
-    setup.mockInput.pressKey("r")
+    // The version line is oldest first, so the cursor starts on the first build
+    // — and pointing `current` back at it is the same verb as pointing it
+    // forward, which is why there is only one key here (DESIGN §7.4).
+    setup.mockInput.pressKey("a")
     const asked = await settle(setup, 3)
-    expect(asked).toContain(`rollback lint ${version}? y / Esc`)
+    expect(asked).toContain(`activate lint ${version}? y / Esc`)
 
     setup.mockInput.pressKey("y")
     await until(async () => (await listExtensions(ws)).find((entry) => entry.id === "lint")!.current === version, 20_000)
@@ -434,12 +501,14 @@ test("/ext lists an id that is only source, says what is missing, and refuses to
     const frame = await settle(setup, 4)
     // No versions, and the draft column says why there are none.
     expect(frame).toContain(`${only_source}`)
-    expect(frame).toContain("0v scri")
     expect(frame).toContain("not built")
 
     // The cursor starts on the first row; `lint` sorts before `source-only`.
     setup.mockInput.pressKey("j")
     await until(() => setup.captureCharFrame().includes("never been built"), 10_000)
+    // What kind of package it is, and that it has nothing to point at, are in
+    // the detail pane — the row itself only answers "should I turn this on".
+    expect(setup.captureCharFrame()).toContain(`${only_source} · script · inactive`)
     // Enter cannot turn on what has no version, and says which key does.
     setup.mockInput.pressEnter()
     await until(() => setup.captureCharFrame().includes("has no built version"), 10_000)
@@ -454,6 +523,29 @@ test("/ext lists an id that is only source, says what is missing, and refuses to
     rmSync(join(ws.dir, ".nulya", "extensions", only_source), { recursive: true, force: true })
   }
 }, 120_000)
+
+/**
+ * What the panel draws about a version, and what it leaves out (tui.md §11,
+ * T23). Pure, because "how much of this content address is worth reading" is a
+ * decision, and one function makes it for every line on the screen.
+ */
+test("a version id is short everywhere but the one line it is typed from", () => {
+  expect(shortVersion("v-0258f08e338c94179b855776")).toBe("v-0258f08e")
+  // Shorter than the cut, and anything that is not a version id, pass through:
+  // a truncation that invents a shape is worse than no truncation.
+  expect(shortVersion("v-old")).toBe("v-old")
+  expect(shortVersion("(none)")).toBe("(none)")
+  expect(shortVersion(null)).toBe("")
+  expect(shortVersion("v-0258f08e338c94179b855776", 6)).toBe("v-0258f0")
+
+  // Authority is drawn only where a package asked for some: a row of zeroes on
+  // every package is how the one package with something to declare stopped
+  // standing out.
+  const none = { permissions: { fs: [], network: [], process: [] } }
+  expect(permissionLine(none)).toBeNull()
+  const some = { permissions: { fs: ["."], network: ["api.example.com"], process: [] } }
+  expect(permissionLine(some)).toBe("permissions fs 1 · net api.example.com")
+})
 
 /**
  * The switch (tui.md §11, T22). One key, both axes: `current` moves and the
@@ -491,5 +583,52 @@ test("/ext: Enter turns an extension on and off, and both axes move together", a
       Bun.spawnSync({ cmd: [ws.bin, "ext", "activate", "lint", before], cwd: ws.dir, env: process.env })
     }
     rmSync(statePath, { force: true })
+  }
+}, 120_000)
+
+/**
+ * A full tool face stops the PINS, never the activation (tui.md §11, T23).
+ *
+ * The bug this is for: six pins already down against `max_tools = 8`, and every
+ * Enter on `compact` — which declares one tool — was refused whole, with
+ * `2+9/8 · nothing changed` as the entire explanation. Membership and pins are
+ * two axes and only one of them has a quota; `nulya ext run` reaches an active
+ * package's tools with nothing on the native face at all, which is exactly how
+ * `/compact` calls `compact`.
+ */
+test("/ext: a full tool face leaves the extension half on rather than refusing it", async () => {
+  const full = tempWorkspace()
+  try {
+    const run = (args: string[]) => Bun.spawnSync({ cmd: [full.bin, ...args], cwd: full.dir, env: process.env })
+    run(["ext", "init", "--script", "lint"])
+    const built = run(["ext", "build", join(".nulya", "extensions", "lint")])
+    expect(/v-[0-9a-zA-Z]+/.exec(built.stdout.toString())?.[0]).toBeDefined()
+    // A face with no room in it at all: the two builtins fill it.
+    writeFileSync(join(full.dir, ".nulya", "config.toml"), "[registry]\nmax_tools = 2\n")
+
+    const statePath = join(full.dir, "full-face.json")
+    const setup = await overlayFrame(() => (
+      <ExtView ws={full} header={null} statePath={statePath} onClose={() => {}} />
+    ))
+    try {
+      await until(() => setup.captureCharFrame().includes("lint"), 20_000)
+      await settle(setup, 4)
+      setup.mockInput.pressEnter()
+      // Activated: the half with no quota on it went through.
+      await until(
+        async () => (await listExtensions(full)).find((entry) => entry.id === "lint")?.current != null,
+        20_000,
+      )
+      const frame = await settle(setup, 4)
+      expect(frame).toContain("tool face is full")
+      expect(frame).toContain("1 tool not pinned")
+      // And the row says which half it is on, in the column that exists for it.
+      expect(frame).toContain("0/1 tools")
+      expect(sessionPins(statePath)).toEqual([])
+    } finally {
+      setup.renderer.destroy()
+    }
+  } finally {
+    full.cleanup()
   }
 }, 120_000)

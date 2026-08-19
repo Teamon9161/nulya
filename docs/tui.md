@@ -1,6 +1,6 @@
 # Nulya TUI — 设计与计划
 
-> **状态：T0–T9 与 T11 全部落地。** 内核侧只有三处：`session step --stream`（纯观测）、`session new --parent` 的 fork 语义 → [DESIGN.md](DESIGN.md) §14/§11，与 `NULYA_EXE`（子进程 env 里的本二进制路径，§7.6——`/compact` 的过程搬进 `extensions/compact` 之后它才调得到 harness）；前端 T1（骨架）、T2（卡片与折叠）、T3（nulya 视图：`/sessions`、`/ext`、sub-session tab、observer）、T4（`/help` `/settings` `/usage`、keymap 覆盖、`bun build --compile`、README、5k 事件性能）、T5（`/model` `/effort`）、T6（布局与 slash 补全）、T7（`/compact`）、T8（慢速回路：`/outcome` `/evolve` `/mode`、`/sessions` 改读 `session list --json`、成本来自 ledger、`/ext` 认多 root）、T9（`/compact` 改成 spawn `extensions/compact`）、T11（启动即安装：`ext sync` 的时机、project store 的 trust 问句、`/ext` 的 draft 列与 `p`）都在 `tui/`（见 §11 与 [`../tui/README.md`](../tui/README.md)）。本文是 `tui/` 的设计契约 + 里程碑 + 实施日志；`tui/` 不在内核范围里（另一条工具链、另一个进程），所以它的现状写在本文 §11，不进 DESIGN.md。
+> **状态：T0–T24 全部落地。** 内核侧只有四处：`session step --stream`（纯观测）、`session step --gate`（每个 tool call 执行前问一次，T24 → DESIGN §4/§14）、`session new --parent` 的 fork 语义 → [DESIGN.md](DESIGN.md) §14/§11，与 `NULYA_EXE`（子进程 env 里的本二进制路径，§7.6——`/compact` 的过程搬进 `extensions/compact` 之后它才调得到 harness）；前端 T1（骨架）、T2（卡片与折叠）、T3（nulya 视图：`/sessions`、`/ext`、sub-session tab、observer）、T4（`/help` `/settings` `/usage`、keymap 覆盖、`bun build --compile`、README、5k 事件性能）、T5（`/model` `/effort`）、T6（布局与 slash 补全）、T7（`/compact`）、T8（慢速回路：`/outcome` `/evolve` `/mode`、`/sessions` 改读 `session list --json`、成本来自 ledger、`/ext` 认多 root）、T9（`/compact` 改成 spawn `extensions/compact`）、T11（启动即安装：`ext sync` 的时机、project store 的 trust 问句、`/ext` 的 draft 列与 `p`）、T24（权限 mode `/mode`、审批卡片、handoff 接线；穿身份的命令改叫 `/as`）都在 `tui/`（见 §11 与 [`../tui/README.md`](../tui/README.md)）。本文是 `tui/` 的设计契约 + 里程碑 + 实施日志；`tui/` 不在内核范围里（另一条工具链、另一个进程），所以它的现状写在本文 §11，不进 DESIGN.md。
 > 上位原则见 [PLAN.md](PLAN.md) §3.11：前端是 core 之上的薄客户端——**tail ledger 文件 + append user 事件；前端是长期进程，re-spawn 的只是 worker**。
 
 ## 0. 定位（三句话）
@@ -33,7 +33,7 @@
 | D5 | 默认折叠 | `edit` diff **展开**；shell / 扩展工具输出 **折叠**；thinking **折叠**；capability banner 展开 | 你的要求 + 演化动作要显眼 |
 | D6 | 取消 | `Esc` = `session cancel`（step 边界消化，当前工具跑完）；`Ctrl+C` 两下 = kill step 进程树（下一次 open 由 kernel `completeInterruptedToolBatch` 修复） | 两种语义都真实存在，都给；不发明第三种 |
 | D7 | sub-agent 谱系来源 | v1 从 transcript 推导（`nulya session new` 的输出 id、`session step <id>` 命令）；**不**改 header | `parent` 语义是 fork/compaction 的续接点，不是 spawned-by；等 subagent skill 真写出来再决定要不要 `spawned_by` header 字段（§10） |
-| D8 | 权限 / 审批 | v1 没有 | kernel 没有 policy hook 消费者；TUI 不发明审批 |
+| D8 | 权限 / 审批 | **两档 mode + 三张规则表**（T24 推翻"v1 没有"）：内核给一个 gate 原语（`session step --gate`，DESIGN §4），前端答；deny 就是那个 call 的 tool_result，模型读得到 | 原来的理由是"kernel 没有可消费的东西，TUI 不发明审批"——对的一半：发明一个内核不知道的审批，模型永远不会知道自己被拒了。所以补的是**内核那一半**（一个语义：allow / deny+note），判断留在前端（§5.7） |
 | D9 | 内容宽度 | transcript 内容宽度上限 `max_width = 100` 列，左对齐 | 250 列的 markdown 不可读；设定可改 |
 | D11 | **session 懒创建：第一条消息才 `session new`** | 开屏是一个 **draft tab**（无 id、磁盘上什么都没有），它只捏着 `session new` 要的东西（pick / `--with`）；pin 在 materialize 那一刻现读 `tui-state.json`。`--session <id>` 仍是真 tab；`/compact` 仍产真 tab | composition 在 `session new` 冻结（physics #2）——开屏就建，等于替人把 tools / pin / model 决定了，随后在 `/ext` `/model` 里做的一切要么落到**下一场**、要么靠"偷偷替换空 session"糊过去。懒创建让"改完再开"变成默认，`discardIfUntouched` 从常规路径退回成边角（T22） |
 | D12 | **`/ext` 的 Enter 是一个开关：activate + pin 一起动** | ON = `ext activate` +（声明了 tool 的话）把它的 tool 全进本 TUI 的 pin 列；OFF = 先撤 pin（含 user config 的 `always`）再 `ext deactivate`。两根轴在内核里仍是两根：单个 tool 仍在 tools pane 用 `Space`，单个版本仍在版本线用 `a`/`r` | **推翻 T12 §5 的"永不合成一个总开关"**。那条原则对内核是对的、对屏幕是错的：两个键（`Space` 批量 pin / `d` deactivate）都藏在 `?` 后面，而它们移动的状态**一格都没画**——截图里 `evolution` `guide` 是 `built` 但 `current (none)`，人按 Enter 没反应、也看不出差别。一个画出来的开关 + 底下写清两根轴，胜过两个没人找得到的键（T22） |
@@ -49,7 +49,7 @@
 | `nulya session step <id> --effort e` | 每个 step 按本 tab 的 effort 传（`/model` 选的、`/effort` 改的）；不传 = kernel 默认 |
 | `nulya config show --json` | `/model` 的行、启动时判断隐式选择能不能跑（`launch.planLaunch`）、draft 的 model id（profile 只给了名字时取它的默认 model）与 `registry`（`max_tools` / 合并后的 pin，draft 的工具面 = 它 ∪ `tui-state.json` 的 `session_pins`）；只报 env var 名与 credential 布尔 |
 | `nulya session append <id> --file f` | 发送：写 `.nulya/scratch/tui-<nonce>.txt` 再 `--file`（多行 / Windows 引号安全）；投进 inbox，**下一 step 边界才进 ledger**（PLAN §4 边角）→ TUI 乐观回显、标 `queued`，见到对应 `user_text` 事件后转正 |
-| `nulya session step <id> --stream` | 每次发送后 spawn 一个；stdout 见 §2.2 |
+| `nulya session step <id> --stream --gate` | 每次发送后 spawn 一个；stdout 见 §2.2。**`--gate` 常开**：每个 tool call 执行前内核打一行请求、等 stdin 一行 `allow` / `deny [note]`，答案由 §5.7 的 mode + 规则给（T24） |
 | `nulya session events <id> [--since N]` | 打开 / resume 时一次性回放；**不**用 `--follow`（driver 模式下 step 的 stdout 已是全量实时源） |
 | `nulya session cancel <id>` | `Esc` |
 | `nulya session list [--json]` | `/sessions` 的全部内容（created 倒序、composition / parent / 事件数 / usage / 最新 verdict）；**TUI 不再自己扫 header**（T8） |
@@ -67,7 +67,7 @@
 | 取消标记文本 | `loop.zig` 四种 marker（interrupted / canceled executing / recording canceled / not executed）→ 识别成 canceled 卡片 |
 | `emit` 溢出 | `tool_results[].spill_path` → 卡片尾部 "full output → path"，`o` 打开（`$EDITOR` / 展开读文件） |
 
-### 2.2 唯一内核改动：`nulya session step <id> --stream` `[已落地 · T0 → DESIGN §14]`
+### 2.2 内核改动之一：`nulya session step <id> --stream` `[已落地 · T0 → DESIGN §14]`
 
 **协议与机制的真相在 [DESIGN.md](DESIGN.md) §14**（`loop.StepContext.observer` 纯观测钩子 + 行协议）。这里只留 TUI 侧的消费约定：
 
@@ -76,7 +76,7 @@
 - `reasoning_item` 不出现在流里（不透明、只为回放）；thinking 的可显示文本只有 `thinking_delta`，turn 结束后从 ledger 的 `reasoning` 尽力抽（§4.2）。
 - 诊断也是 JSON（`{"stream":"run","event":"error","message":"…"}` + 非零退出），所以 `nulya/cli.ts` 的解析器**永远**不必处理裸文本行。
 
-**明确不做的内核改动**（放进 §10 待议）：`session new` 自动记 spawned-by；`nulya config show`；`session append` 打印投递回执；`<id>.live` sidecar。
+**明确不做的内核改动**（放进 §10 待议）：`session new` 自动记 spawned-by；`session append` 打印投递回执；`<id>.live` sidecar。（`nulya config show` 与 `session step --gate` 当时也在这张单子上，后来都做了——前者因为前端不该复刻配置合并链，后者因为"前端自己发明审批"会让模型永远不知道自己被拒了，见 §5.7。）
 
 ## 3. 目录与模块（`tui/`）
 
@@ -177,9 +177,10 @@ tui/
 
 - `Enter` 发送；`Shift+Enter` / `Ctrl+J` 换行；`↑` 空 composer 时翻历史；粘贴多行原样。
 - 发送时若 `stepping`：只 append（queued）；不打断。
-- `/` 开头弹一个小补全：内建命令（`/model` `/effort <level|auto>` `/new [--profile p] [--model id]` `/sessions` `/ext` `/usage` `/compact [focus]` `/outcome` `/evolve` `/mode` `/cancel` `/fold` `/settings` `/help` `/quit`）在前，**activate 了的 skill 在后**（`nulya skill list`，描述截 100 字符）。分发同序：内建 → skill → 原样发给模型。`/<skill> [args]` = `nulya skill load <ref>` 拿到 body、包一层 sentinel 后作为**普通 user turn** append（T15；旧文本写的"nulya 没有 skill slash"已翻案——它把"谁触发"误当成了"谁判断"，理由见 goals/tui-panel.md D8）。
+- `/` 开头弹一个小补全：内建命令（`/model` `/mode [ask|auto]` `/effort <level|auto>` `/new [--profile p] [--model id]` `/sessions` `/ext` `/usage` `/compact [focus]` `/outcome` `/evolve` `/as <id>[@<v>]` `/cancel` `/fold` `/settings` `/help` `/quit`；**`/mode` 从 T24 起是权限 mode**，穿 extension 身份的那个改叫 `/as`——`/mode auto` 与 `/mode evolution` 是两件毫无关系的事，不该共用一个词，而 `/as evolution` 本身就读得出它在做什么）在前，**activate 了的 skill 在后**（`nulya skill list`，描述截 100 字符）。分发同序：内建 → skill → 原样发给模型。`/<skill> [args]` = `nulya skill load <ref>` 拿到 body、包一层 sentinel 后作为**普通 user turn** append（T15；旧文本写的"nulya 没有 skill slash"已翻案——它把"谁触发"误当成了"谁判断"，理由见 goals/tui-panel.md D8）。
 - `@` 开头（前一字符非字母数字下划线）弹文件补全：`↑↓` 选、`Tab` 上屏成 `@path`；已知引用在输入框里 accent。**上屏的是路径，不是文件内容**（T13）。
 - 粘贴：> 1000 字符或 > 15 行折叠成 `[Pasted text #N]`，提交时展开回原文；`Backspace` 落在占位尾部整条删掉（T14）。
+- 有 tool call 在等批准时（§5.7），`y` / `n` / `N` / `a` 先于一切（内核这会儿停在那一个 call 上）；`N` 之后输入框收下的那一行是拒绝理由，`Esc` = 不写理由地拒。
 - 全局：`Esc` cancel（stepping 时）/ browse 模式；`Ctrl+C` 两下退出（stepping 时第一下先 kill）；`Ctrl+L` 重绘；`F2` `/ext`；`F3` `/sessions`；`F4` 下一个 tab；`Ctrl+W` 关掉当前 tab（最后一个不关）。
 - 鼠标（T18）：列表行点一下落光标、点已选中的行执行它的 Enter；`/ext` 的 pane 条、`[x]` 与 id 行的开关记号、TabBar、状态栏的 `↓ N more below`、输入框都可点（点输入框也会退出 browse 模式）；拖过文本是选取，松手复制（OSC 52）。**模型这一行处处可点**（T20 → T22）：**输入框下面那一行开头的 `<model-id> [(effort)]`**、CompositionCard 的 `model` 值都开 `/model`；Welcome 的那几条 `/` 命令行、那一行末尾的 `/help` 也是按钮。所有可点的东西悬停都是同一个 `hover` 底色。
 - **第一条消息才建 session**（T22，D11）：开屏是 draft，`Enter` 发送时先解 skill（`/name`）、再 `session new`、再 append+step。内核在这一步的拒绝（缺 key / store 未信任 / pin 认不出）**留在屏幕上**：notice 是内核原话，tab 仍是 draft，**打的字回到输入框**（`ComposerApi.restore`，只在框还空着时放回去——人在等的时候又打了别的，那是人的）。draft 上 `/outcome` `/compact` `/step` `/cancel` `Esc` 各回一句"这个 tab 还没有 session"，一个都不炸。
@@ -256,6 +257,26 @@ registry 按 shell 命令前缀识别，头行抽关键事实（抽不到就退�
 - **角色靠两个信号判定，都不是猜**：①`<id>.lock` 探针（idle 时轮询，且必须**无副作用**——去"试着拿一下锁"的探法在持锁瞬间会把真 writer 的非阻塞 `flock` 挤成假 `SessionBusy`，不算探针。Windows 上内核的租约是字节区间锁，读第 0 字节即可探到；Linux 上同一租约是 `flock(2)`，读不到但内核在 `/proc/locks` 里公示，按锁文件的 dev:inode 查表即可；两者都没有的 POSIX（macOS）→ 探针诚实地答 `unknown`）；②内核自己的 `SessionBusy`——我们真去 step 时被拒，这一条在所有平台都权威。所以角色是**持续**跟着世界变的，不只是"打开时判一次"。
 - observer 看不到 deltas（deltas 只在 driver 的 stdout）：v1 接受 step 粒度；真正需要时的路径是 kernel 把流也写进 `<id>.live` sidecar，TUI 换 tail 源（`nulya/cli.ts` 内部一处改）。
 
+### 5.7 权限 mode：谁在批准每个 tool call `[T24]`
+
+**内核只有一个语义**（DESIGN §4 / §14）：`nulya session step --gate --stream` 在每个 tool call 执行前打一行 `{"stream":"gate","event":"request",…}`、阻塞读 stdin 一行 `allow` / `deny` / `deny <note>`；deny 就是那个 call 的 `tool_results`（没跑、什么都没变），note 模型看得见。**该不该问是 driver 的 policy**，所以整套判断住在 `tui/src/approvals.ts` 这一个纯函数里。
+
+- **TUI 永远以 `--gate --stream` spawn step**（`nulya/cli.ts` 的 `sessionStep({gate})`：给了 gate 才加 `--gate` 与 `stdin: "pipe"`，gate 请求行**不进** `lines()`——它是这一层与内核之间的机械，屏幕经 callback 知道这件事）。mode 不下传内核、也没法下传：内核那一头没有"模式"这个概念。于是**切换即时生效**——每个请求都是一次新的 `approve(request)` 调用，mid-batch 切 mode 自然作用于下一个请求，而屏幕上正等着的那张卡片会**立刻按新 mode 重裁**（切到 auto 却让卡片继续等，看起来就是键坏了）。
+- **两档**：`ask`（默认）= 规则没管的每个 call 都停下来问；`auto` = 直接跑。存储优先级 **`tui-state.json` 的 `mode`（程序写，记住上次选择）> `tui.toml` `[driver] mode` > `"ask"`**（与 `/model` 的选择同一条纪律：人在屏幕上做的选择由程序记，`tui.toml` 只有人写）。入口：状态栏最右边可点的 chip（点 = 在两档之间切，`auto` 是 warn 色——"没人看着就跑"不该是安静的那一格）、`/mode [ask|auto]`（无参数 = 切）。
+- **决策序**（`approvals.decide`，四层，第一个说话的算数）：① `[approvals] deny` → 直接拒（**连 ask mode 都不弹卡片**；一个被规则拒的 call 从来没被问过，所以它也不可能进过 always 集合，这就是它排在 always 之前而不矛盾的理由）；② 本场 `always` 集合（卡片上按 `a` 记入，内存态、per-run——试一个工具不该在别人读的文件里留下东西；持久版本是 `[approvals] allow`）；③ `[approvals] ask` → 弹卡片（**连 auto mode 也弹**，这正是它自成一张表而不是"没写进 allow"的理由）；④ `[approvals] allow` → 放行；⑤ manifest 的 `readonly: true`（DESIGN §7.2.1，`[approvals] manifest_readonly = false` 可关）；⑥ mode 兜底。
+- **条目两种形状**：tool（`ext:std/read` 稳定 id、或 `shell` / `read` 这样的名字）与 **shell 命令前缀**（`shell:git status`——前缀不是 glob，写的人不必学一套模式语言）。gate 请求只带模型面上的**名字**，稳定 id 由本场冻结的 `contributions` 反查（`ext:<包 id>/<tool>`），builtin 没有 id 就按名字匹配。`a` 记的 key 同理：普通 tool 记整个，**`shell` 只记第一个词**（`shell:git`）——"always allow shell" 等于 "always allow everything"，而 `git` 与 `rm` 不因为同一个程序跑它们就是同一个权限。
+- **卡片是那张 tool 卡本身多一行**（`ToolItem.awaiting` + `ApprovalPrompt`）：命令 / 参数已经画在上面了，再画一个框只是同一件事的第二种视觉语言。键：`y` 允许 · `n` 拒绝 · `N` 拒绝并打一行理由（回车送出，模型读得到；Esc = 不写理由地拒）· `a` 允许并本场不再问这一类。状态栏活动区在等的时候是 `waiting for you · y allow · n deny · a always`（warn 色，且它压过其它所有活动——内核这会儿就停在这里）。
+- **这不是安全边界**（DESIGN §9）：extension 与 shell 同权，`readonly` 是包的主张不是强制。它管的是"这一次要不要发生"，真隔离等 sandbox（PLAN §3.8）。
+
+### 5.8 模型自己提的 handoff `[T24]`
+
+`extensions/handoff` 的 tool 只做一件事：把 brief 渲染成 `.nulya/handoffs/<session>-<n>.md` 并叫模型收尾（DESIGN §11）。**那个文件就是提议**——没有 JSON 要解析，也还什么都没发生；fork 是**驱动者**的动作，`drivers/goal.*` 不问就 fork，这个前端在 `ask` 下先问（旁边就有个人）。
+
+- **进 composition**：draft materialize 那一刻按 `[extensions] handoff`（默认 true）加 `--with handoff@<v> --pin ext:handoff/handoff`（两根轴，DESIGN §7.5：`--with` 是成员，`--pin` 才给它一个 native 槽）。版本由 `buildHandoff` 拿（与 `/evolve` 同一条 `bundledDraftPath` → `ext build` 路，所以**不在 nulya checkout 里也能用**：二进制自带源码，seed 进 user store 再 build）；build 在开屏后台起、失败就这一场不带它并照常开场——**装不上不是开不了场的理由**。局限：第一次在一台机器上要付一次编译（compiled 包）。
+- **看盘的时机**：每个 step 结束（driver 回 idle）看一次 `.nulya/handoffs/<id>-*.md`，与 `drivers/goal.*` 同一个信号；已处理过的路径记在内存里，同一个提议不会问第二遍。
+- **`ask`** = brief 显示在 transcript 与输入框之间（**不是 transcript 卡片**：brief 是磁盘上的制品不是 ledger 事件，这个前端只画 ledger 有的东西），`Enter` 跟过去 / `Esc` 收起（文件留着）。**`auto`** = 直接跟，一行 notice。
+- **跟过去 = `/compact` 的 `brief_file` 分支**（DESIGN §11）：同一条 fork，只是摘要已经写好了，旧 session 逐字节不变，tab 换到子 session——与 `/compact` 完全同一段代码（`compact.ts` 多一个可选参数）。
+
 ## 6. 视觉规范
 
 克制是终端里的美观。规则：
@@ -287,9 +308,19 @@ ascii          = false
 theme  = "nulya-dark"       # nulya-dark | nulya-light
 motion = true
 
+[driver]                    # T24
+mode = "ask"                # ask | auto —— 一趟从哪一档开始；chip 与 `/mode` 的选择记在 tui-state.json 里、优先级更高
+
+[approvals]                 # T24；条目 = tool id / tool 名 / `shell:<命令前缀>`
+allow = []
+ask   = []                  # 连 auto 也弹
+deny  = []                  # 连 ask 也不弹，直接拒
+manifest_readonly = true    # 信一个 tool 自己声明的 `"readonly": true`（DESIGN §7.2.1；是提示不是边界）
+
 [extensions]                # T11
 sync_on_start = true        # 开屏时后台 build 各 store root 下的 draft（`nulya ext sync`）
 auto_activate = true        # 让那一趟把 `current` 指到它刚建出来的版本上
+handoff       = true        # 每场 session 带上 handoff 包（`--with` + `--pin`，§5.8）
 
 [keys]                      # 覆盖默认键；名字表见 keymap.ts
 cancel = "escape"
@@ -300,7 +331,7 @@ fold   = "ctrl+o"
 
 `/settings` 只显示当前生效值与来源文件；不在 TUI 里写配置（编辑器改文件即可，第二个诉求出现再做）。
 
-**`tui-state.json`（D10；T5 起）**：同目录（user 层）下**唯一由程序写**的文件，JSON：`{"model":{"profile":"deepseek","model":"deepseek-v4-flash","effort":"high"}}`——`/model` 的 Enter 与 `/effort` 会更新它；启动无 `--profile` 时的默认选择就是它（`launch.planLaunch`：命令行 > 上次选择 > 内核 `active_profile`；每一层都要 `config show` 说它有 credential 才算数，否则落到离线 scripted 并开屏弹选择器讲原因）。缺失或损坏 = 没记住，永不阻止启动。为什么不放进 `tui.toml`：那是人写的；程序回写人的文件会碰注释与排版（tcode 用 toml_edit 才做到），这里不值得。为什么不进内核 config：内核不需要知道"上次选了谁"（不是 substrate）。
+**`tui-state.json`（D10；T5 起）**：同目录（user 层）下**唯一由程序写**的文件，JSON：`{"model":{"profile":"deepseek","model":"deepseek-v4-flash","effort":"high"},"mode":"ask"}`（`mode` 是 T24 的权限档，同一条理由：人在屏幕上做的选择由程序记）——`/model` 的 Enter 与 `/effort` 会更新它；启动无 `--profile` 时的默认选择就是它（`launch.planLaunch`：命令行 > 上次选择 > 内核 `active_profile`；每一层都要 `config show` 说它有 credential 才算数，否则落到离线 scripted 并开屏弹选择器讲原因）。缺失或损坏 = 没记住，永不阻止启动。为什么不放进 `tui.toml`：那是人写的；程序回写人的文件会碰注释与排版（tcode 用 toml_edit 才做到），这里不值得。为什么不进内核 config：内核不需要知道"上次选了谁"（不是 substrate）。
 
 ## 8. 测试
 
@@ -331,6 +362,7 @@ fold   = "ctrl+o"
 | ~~**T13 · composer 的 `@` 文件补全**~~ ✅ | 触发边界 / token 字符表 / 评分（basename 前缀 0 < path 前缀 1 < 子序列 10+gaps，根文件优先）/ 菜单标签规则全部逐条移植自 tcode `composer.rs`；索引 = `git ls-files --cached --others --exclude-standard`（非 git 退化成带 prune 表的小 walk），上限 20000，后台建、30s 陈旧后台刷；`↑↓` 选、`Tab` 上屏成 `@path`，已知引用在输入框里 accent。**提交时 `@path` 原文进 ledger，不注入文件内容**（契约 D5）。**内核零改动** | `bun test` 135 pass（新增 `references.test.ts` 8 条，其中四条与 tcode 的测试逐条同形 + `composer.test.tsx` 一条交互）；本仓库上 `@comp` 补出 `@src/composition.zig`，`node_modules` 一条不漏进来 |
 | ~~**T14 · 长文本粘贴折叠**~~ ✅ | OpenTUI 的 bracketed paste 事件（`onPaste` + `PasteEvent.preventDefault()`）是现成的；阈值照 tcode（> 1000 字符或 > 15 行）→ 折叠成 `[Pasted text #N]` 占位（accent 高亮、下面一行说明它装了多少、`Backspace` 整体删除），提交时展开回原文。短粘贴一字未变。**图片不做**（内核 vision track，契约 D7）。**内核零改动** | `bun test` 140 pass（新增 `paste.test.ts` 4 条 + `composer.test.tsx` 一条走真 bracketed paste 的往返）|
 | ~~**T15 · skill 作为 slash command**~~ ✅ | `/` 补全内建命令在前、`nulya skill list` 的 skill 在后（描述截 100 字符）；分发同序，`/xyz` 命中 skill → `skill load <ref>` 拿 body、包 tcode 的 `<user-skill …>` sentinel 后作为**普通 user turn** append，未命中原样发给模型；transcript 靠同一个 `parseSkillEcho` 把它折成 `/name args · N lines`（live 与回放共用）；`/ext` 的 activate/rollback/deactivate 让 skill 表失效重取。翻案了 `commands.ts` 头注释与 §4.4 的"nulya 没有 skill slash"（契约 D8）。**内核零改动** | `bun test` 146 pass（新增 `skills.test.ts` 5 条——含 tcode 两条 sentinel 测试同形与一条真二进制闭环——加 `render.test.tsx` 一条折叠快照）；把仓库的 `extensions/guide` 装进一个 store 后 `/g` 补出 `/guide`、`/guide <args>` 变成一条 226 行的 user turn、transcript 折成一行 |
+| ~~**T24 · 权限 mode + handoff 接线**~~ ✅ | 内核：`loop.StepContext.gate` + `session step --gate`（每个 tool call 执行前问一次，deny = 那个 call 的 tool_result；DESIGN §4/§14）+ manifest 的 `readonly?` 声明；前端：`--gate` 常开、`approvals.ts` 一个纯函数（deny/always/ask/allow/readonly/mode 六层）、审批卡片（`y`/`n`/`N`/`a`，只在输入框空着时接管这四个字母）、状态栏可点的 mode chip、`/mode ask\|auto`（穿身份的改叫 `/as`）、handoff 文件每步后看一眼（`ask` 弹面板 / `auto` 直接跟，跟 = `/compact` 的 `brief_file`）、每场默认 `--with handoff@<v> --pin ext:handoff/handoff` | `bun test` 212 pass（`approvals.test.ts` + `gate.test.tsx`）、`zig build e2e` 55 pass（`--gate` 一条：请求行 / deny 带 note / allow 真跑 / EOF fail closed） |
 | **T10 · `/goal`（占位，未开工）** | spawn 随仓库带的 driver 脚本（`win32` → `powershell -NoProfile -ExecutionPolicy Bypass -File drivers/goal.ps1`，否则 `sh drivers/goal.sh`），把它的 **stderr 喂给已有的 `--stream` 解析器**（token delta / tool begin-end / usage 全在里面），把它的 **stdout 当控制通道**：`session <id>` 开 tab、`handoff <old> -> <new>` 换 tab（原 tab 留着可回看）、`done <id>` 收尾并提示 `/outcome`。跟随中的 tab 是 **observer**（driver 持着写者 lease）。**内核零改动**，也不需要 §10.4 的 `<id>.live` sidecar | 起一个两阶段目标：token 实时可见；handoff 时自动切到子 session；`Esc` 停得下来（`session cancel` 或杀脚本）|
 
 顺序 T0 → T1 → T2 → T3 → T4；**T1 结束就开始用它 dogfood**，T2 起的优先级由用出来的痛点重排（T5–T8 就是这么来的）。
@@ -1163,3 +1195,32 @@ cd tui && bun test test/compact.test.ts
 **测试**：`bun test` 187 → **193 pass**、`tsc` 干净。新增 / 改写：`lifecycle.test.tsx` 的两条 eager-create 测试改成"draft 在磁盘上什么都不建、屏幕与 store 一致"与"第一条消息**恰好**建一场，且带着那一刻的 pin"（真二进制、scripted provider）；`overlays.test.tsx` +2（`/ext` 列出只有源码的 id、说清缺什么、拒绝打开；Enter 开 → `current` 指过去 + pin 写下，再 Enter 关 → pin 没了 + deactivate）；`pins.test.ts` 的整包 toggle 改成 `pinAll` / `unpinAll` + 开关三态（`partial` 就叫 partial）；`extensions.test.ts` +1（`needs zig` 的 draft 转述内核原话）并让 sync 汇总点名失败 id；`model.test.tsx` 那条"fresh session 被替换"改成"写 draft，不建 session；已开场的 tab 上开第二个 draft"；`mouse.test.tsx` 的模型可点从标题行改到输入框下面那一行；`/ext` 快照按预期更新（开关一列、`0v` 行）。内核侧：`zig build test` 399 pass / 2 skip（`toolchain.zig` +1：managed 目录里已有的 zig 没内嵌也认，扁平与嵌套两种布局）、`zig build e2e` 54 pass（sync 那条只断 `needs zig` 前缀，句子变长不影响）。
 
 **没做**：draft 的 CompositionCard 不解析 `--with` 包的 skills / prompts（只写 `with <id>@<v>`——那要读版本目录的 manifest，等真需要）；`needs zig` 不自动 `b`（修法要人做一次，做完 `b` 一键）；开屏 sync 的失败仍只是一句 notice（不弹面板）；两块选择器仍是全屏 overlay（T20 同一条）；`d` 若有人肌肉记忆抗议再作为 OFF 的别名放回。
+
+### T23 · 卡顿是结构问题：`/ext` 乐观更新、开屏不再前台编译、清单只答"要不要动它"（2026-08-19）
+
+**内核零改动**（只动 `tui/`）。来源是用户的四句：①"整体卡顿，`/ext` 里开关一个扩展每按一下等半天"；②"第一次启动在进屏幕前编译了很久"；③"我在 compact 上按了很多次 Enter，它就是不 active"；④"版本哈希、`3v comp` 这些占着最显眼的位置，我看的是要不要开它"。四件事同一个病因的四个面：**每个动作都全量往返、每一格都在显示存储的内部标识**。
+
+1. **`/ext` 的每个动作从"全量往返"改成"乐观更新 + 后台校对"。** 原来一次 Enter 是 `ext activate` → `applyPin` → `refreshPins`(`config show`) → `refresh`(两次 `ext sync --dry-run` + `ext list` + `draftEntries` 里又一次 `ext list` + 又一次 `config show`)——**七个子进程串行，全部 await 完才给第一个反馈**，Debug 内核下每个 0.75–1.2s，合计 3–4 秒屏幕一动不动。现在：**两根数据轴按代价分开**（`listed` = `ext list`，一个子进程；`sourceOnly` = 两次 dry-run，是这块屏幕最贵的调用），`extensions` 是两者的 memo。打开面板 = 先 `ext list` 画第一帧，usage / pins / plans 再落进来；**动作后只 `reconcile()`**（`ext list` + `config show`，后台跑，通知早就在屏幕上了）——activate/deactivate 是指针移动，**改不了"一份源码会 build 成什么"**，所以两次 dry-run 只在开面板、`b` build、`p` prune 后重算。`applyPin` 多一个 `reconcile` 开关，一次动作里 `config show` 不再被 spawn 两次。乐观本身：按键当场 `setLocalCurrent` + 把 pin 状态推进信号 + notice 写 `std on…`，**但一个字节都不落盘**——`ext activate` 答应了才写 pin 文件（pin 指着一个没有 `current` 的 extension 是 `session new` **整场拒绝**，它绝不能活过一次失败的 activate；OFF 方向反过来，先撤 pin 再动指针，同一条理由）。失败则把指针与**两张 pin 列原样**放回（`pinSnapshot`——`unpinAll` 会连按之前就有的 pin 一起撤掉，所以回滚存快照而不是取反）。连按去重：`working` 是一张 id 集合，同一个 id 的第二次 Enter 只回一句"还在忙上一次"，不排队、不拿半写状态算第二个决定。id 列表从 `For` 换成 `Index`（tools pane 早有的先例）：乐观改一次、校对再改一次，`For` 会把每一行拆了重建两遍，按下与松开之间被拆掉的行会把这次点击一起带走。
+2. **配额满了不再整体拒绝——两根轴只有一根有配额（用户③的真因）。** 他的 `session_pins` 已有 6 个（handoff + std 五件），`2+6 = 8 = max_tools`，compact 声明 1 个 tool，预检 `2+6+1 > 8` 就把**整个开关**拒了，只留一句 `2+9/8 · nothing changed`——叠上 3–4 秒延迟，体感就是"按了没反应"。但 membership 与 pin 是两根轴：**`ext run` 调一个扩展的 tool 根本不需要 pin**（`/compact` 一直就是这么调 compact 的）。现在配额不够只挡 pin：照常 activate，通知说清"面已满 `2+6/8`、N 个工具没进面、tools pane 的 Space 能腾一格、`ext run` 照样够得着"（`pins.faceFullLine`），行内 `0/1 tools` 那一格本来就是为这个状态准备的。`quotaLine` 越界那句也从 `over registry.max_tools · session new will refuse` 改成人话（差几个、去哪腾、不腾会怎样）。
+3. **on-demand 包的工具不上模型面**（同一轮追加）：`compact` 的 tool 是**driver 接口**——它 append/step 它所关于的那场 session，模型在**那场 session 里**调它必然撞单写者锁（`SessionBusy`）；`handoff` 的 tool 确实是给模型的，但那是 driver 用 `--with … --pin` 按场带进去的，不是每场常驻。所以 `extensions.ts` 多一个 `bundled_driver_only = [compact, evolution, handoff]` + `pinsOnActivate(id)`，`/ext` 的 Enter 对这三个**只做 membership**，通知说明"已激活；此包的工具由 `/compact` 或 driver 用 `ext run` 按需调，不占工具面"；开关三态也跟着用"**可 pin 的**工具数"算，否则 compact 会永远停在半开的 `0/1 tools`。名单是**临时判据**，代码注释写明长期方案是 manifest 的 per-tool `audience`（包自己说它的 tool 是给谁的——只有它知道），内核侧后补。
+4. **自带扩展改成"开屏后台自动装 + 激活"，问句取消**（用户②）。原来 `main.tsx` 在 `render()` **之前**问一句再前台 `ext seed` + `ext sync --user`，其中三个是真的 `zig build-exe`，几十秒到分钟级，屏幕上只有一句 `installing…`——问句本身也没什么可问的：user store 是这个人自己的目录，装进去的东西就是他刚跑的那个二进制带来的。现在 seed 挪进 `App.syncStores`（进屏之后、后台），进度走已有的状态栏 sync 通道，结尾一行汇总 `user store: 5 built · std & guide active · std tools pinned`。**同意模型收敛成一条规则**：只有 `ext seed` 报告"**这一趟才到**"的 id 才被 adopt（`adoptBundled`）——已经在 store 里的是别人早就做过的决定，**包括昨天在 `/ext` 里关掉它这个决定**，任何一次开屏都不许翻案。顺带堵一个新口子：`syncStores` 原来的"激活本趟 built 出来的版本"循环遇上新 seed 会把五个全激活（`evolution` 的 system prompt 就进了每一场 session），所以那个循环显式跳过 `arrived` 的 id——它们的激活是 `adoptBundled` 的事，而它只认 `std` 与 `guide`。`tui.toml` 的两个键照旧：`sync_on_start=false` 一步不动，`auto_activate` 管两边的指针移动。**workspace/project store 的 trust 门原样保留**（DESIGN §9 的内核安全门，且它是唯一能挡住"开不出 session"的东西，仍在屏幕之前问）。`tui-state.json` 的 `asked_bundled` 退役：`loadTuiState` 逐键白名单读，老文件里多一个键从来不是错，模型选择与 pin 照常读回。
+5. **信息密度：主视图只回答"要不要动它"**（用户④）。id 行去掉 `3v comp` 那一格（版本数与 kind 是"已经走近这个包的人"才关心的，它们在详情面板与版本线上），行上只剩：开关标记 · id · 半开提示(`3/5 tools` / `pins only`) · draft 状态 · shadowed。版本线**宽度自适应**（用户当场纠正过一版：先落了"一律短哈希 + 光标下一行画全串"，但宽度绰绰有余时藏着 16 位数字不买任何东西）：两个标记列（current / this session）优先，剩余宽度放得下就整行画**完整版本串**并省掉光标下的辅助行，放不下才退到**短哈希**（`shortVersion`，`v-` + 8 位）+ 光标所在行下方画一次全串——24 位十六进制是内容地址，它存在的理由是"同一份源码 build 两次同名"，人对它做的唯一一件事就是贴到 `ext activate` 后面。**散文行永远用短哈希**：drift 行与详情的 `current v-…` 同样用短哈希（同一个纯函数，两行说同一个 build 不可能差一位）；permissions 行只在**真有非零项**时出现（`permissionLine`：`fs 0 · net — · proc 0` 在每个包上都是三格废话，正是它让唯一真要权限的那个包不再显眼），root 路径留着但降到最暗色。
+
+**测试**：`cd tui && bun test` 193 → **196 pass**、`tsc` 干净。新增：`overlays.test.tsx` +2（`shortVersion` / `permissionLine` 两个纯函数；**满配额的面上 Enter 仍然激活**——独立 temp workspace 写 `[registry] max_tools = 2`，断言 `current` 真的动了、`session_pins` 是空的、屏幕上是 `tool face is full` 而不是 `nothing changed`）、`pins.test.ts` +1（`faceFullLine`）；改写：`extensions.test.ts` 把"问句文案"那条换成"只 adopt 这一趟到达的 id"（没到达的一律不动 = 关掉的东西活得过重启；`needs zig` 的没有版本可指），`overlays.test.tsx` 的 76 列那条改断言"行上没有版本哈希"、drift 那条断言短哈希 + 完整串仍在下一行、source-only 那条把 `0v scri` 换成详情面板的 `· script · inactive`、tools pane 那条不再假设 `max_tools` 是 8（**内核这一轮把默认值改成了 20**），快照的 `stable()` 多一条 `tools 2+N/<max>` 归一化——配额分母是内核的默认值，不是这块屏幕的排版。
+
+**没做**：`/ext` 打开时仍会跑两次 `ext sync --dry-run`（只是不再挡住第一帧；真要更快得让内核给一个便宜的 plan）；乐观更新只覆盖 activate / deactivate / a / r，`b` build 与 `p` prune 仍是"等它、然后全量刷"（它们本来就要改磁盘上的版本目录）；`bundled_driver_only` 是硬编码名单，等 manifest 的 `audience`；状态栏的 sync 进度仍只有一行 notice，没有专门的安装面板。
+
+### T24 · 权限：内核给一个 gate，屏幕决定问不问（2026-08-19）
+
+**内核这一轮真的动了**（前 23 轮里只有 T0 的 `--stream` 和 fork 原语动过）：`loop.StepContext` 多一个 `gate`，`session step` 多一个 `--gate`（DESIGN §4 / §14）。理由是这块屏幕先前唯一诚实的说法是 D8 的"v1 没有权限"——而 kernel 侧没有任何可消费的东西，前端**发明**一个审批就是在 ledger 之外造第二份真相（模型不会知道自己被拒了）。gate 修好的正是这一点：**deny 是那个 call 的 `tool_results`**，模型读得到、ledger 里记得住，没有新事件种类，不设 gate 的路径逐字节不变。
+
+1. **`--gate` 常开**（`nulya/cli.ts`）：TUI spawn 的每个 step 都是 `--gate --stream` + `stdin: "pipe"`；gate 请求行**不进** `lines()`，由 `answer()` 就地问屏幕、把 `allow` / `deny [note]` 写回去。gate 抛异常 = deny（内核那头对 EOF 也 fail closed，这一头不能成为它干等的理由）。
+2. **判断全在 `approvals.ts` 一个纯函数里**（§5.7 的决策序：deny 表 → 本场 always → ask 表 → allow 表 → manifest `readonly` → mode）。条目两种形状（tool id / tool 名，或 `shell:<命令前缀>`），`a` 记的 key 对 shell **只记第一个词**。它不 import 任何 UI、不 spawn 任何东西，所以它是这一轮唯一有密集单测的地方（`approvals.test.ts` 7 条）。
+3. **卡片是那张 tool 卡多一行**（`ToolItem.awaiting` + `ApprovalPrompt`），键 `y` / `n` / `N`(带理由) / `a`；理由经输入框收（这时它不是 turn 而是 note——call 还开着，发给模型的东西会排在它后面）。状态栏活动区在等的时候压过其它一切并转 warn 色。
+4. **`/mode` 让名给权限档，穿身份的改叫 `/as`**（`/mode auto` 与 `/mode evolution` 从来不是同一类东西）。存储链 `tui-state.json` > `tui.toml [driver] mode` > `ask`；状态栏最右的 chip 可点；**有卡片在等时切 mode 会立刻重裁它**。
+5. **handoff 接线**（§5.8）：每个 step 结束看一次 `.nulya/handoffs/<id>-*.md`（与 `drivers/goal.*` 同一个信号），`ask` 弹面板（brief + `Enter` 跟 / `Esc` 收）、`auto` 直接跟；跟过去就是 `/compact` 的 `brief_file` 分支。draft materialize 时按 `[extensions] handoff`（默认 true）加 `--with handoff@<v> --pin ext:handoff/handoff`——`--pin` 在这个前端里的第一个真实 consumer。
+6. **顺带的两处 CLI 清理**（内核那边同一轮）：`ext rollback` 动词删了（回滚 = `activate` 旧版本），所以 `/ext` 版本线只剩 `a`、`registry.ts` 不再认 `rollback` 这个动词、README 的键表跟着改；`config show --refresh` 变成 `nulya config refresh`（TUI 没有消费者，只有 README 一句话改）。
+
+**测试**：`cd tui && bun test` 196 → **211 pass**（+`approvals.test.ts` 7 条纯函数、`gate.test.tsx` 7 条：ask 下等待 + `y` 真跑、`N` + 理由进 ledger 的 marker、卡片在等时 `/mode auto` 当场放行、auto 下直接跑、verdict 行的形状、handoff 文件的发现与去重、以及"这个 TUI 开的 session 真带着 handoff 的成员 + pin"（没有 zig 就 skip——compiled 包））；`tsc` 干净。改写：**跑真步骤的测试一律用 `auto_settings`**（`support.ts` 新增：`driver.mode = "auto"` + 关掉 handoff——没人在键盘前的测试就是 auto 那一档，而 handoff 会给每个被读回的 store 多一个包）；`/ext` 的 `r` 那条改成 `a`（同一个确认框）、`registry.test.ts` 的两动词那条改成"activate 一个动词 + 老拼写退回 shell 卡"、`render.test.tsx` 的 §5.2 那行改成 activate 旧版本、`/help` 快照重出（多了 `/mode` 行、`y/n/N/a` 键行、两条鼠标行，viewport 66 → 72）。内核侧：`zig build test` 全绿（`loop.zig` +2：allow-all == 无 gate、deny 只停这一个 call 且不记 journal）、`zig build e2e` 55 pass（新增一条：`--gate` 的请求行 / deny 带 note / allow 真跑 / EOF fail closed，`support.runCliStdin` 是为它加的第一个喂 stdin 的 runner）。
+
+**没做**：`ask` 下没有"批准这一批"的快捷键（一次一个 call 是内核的形状，批量要另想）；`[approvals]` 不支持 glob（前缀够用，且不必学一套模式语言）；classifier（tcode 的 auto 档背后那个安全分类器）没有——它是 extension 的活，见 PLAN；handoff 的 brief 面板不可滚动（超过 8 行截断，全文在文件里）；`readonly` 目前没有任何自带包声明（`extensions/std` 的 `read` / `grep` / `glob` 是最该标的三个，等一次单独的改动）。

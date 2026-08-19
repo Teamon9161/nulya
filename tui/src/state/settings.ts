@@ -8,6 +8,7 @@
 import { existsSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
+import { default_rules, isMode, type ApprovalRules, type PermissionMode } from "../approvals.ts"
 
 export type FoldDefault = "expanded" | "collapsed"
 export type ThinkingDefault = "expanded" | "collapsed" | "hidden"
@@ -45,7 +46,25 @@ export interface Settings {
      * this being on.
      */
     auto_activate: boolean
+    /**
+     * Bring the bundled `handoff` package into every session this TUI starts
+     * (`--with handoff@<v> --pin ext:handoff/handoff`, DESIGN §11). On by
+     * default: the tool only ever WRITES A FILE proposing a handover — the fork
+     * is this front end's move, and it still asks first in `ask` mode.
+     */
+    handoff: boolean
   }
+  driver: {
+    /**
+     * The permission mode a run STARTS in: `ask` puts every tool call the rules
+     * have no opinion about in front of a person, `auto` runs it. `tui-state.json`
+     * (what was last chosen on screen) wins over this; the chip on the status
+     * line and `/mode` change it for the run in flight (tui.md §5.7).
+     */
+    mode: PermissionMode
+  }
+  /** The three tables and the `readonly` switch (`approvals.ts`). */
+  approvals: ApprovalRules
   keys: Record<string, string>
   /** Files that actually contributed, nearest last (`/settings` shows these). */
   sources: string[]
@@ -61,7 +80,9 @@ export const default_settings: Settings = {
     history_window: 400,
   },
   ui: { theme: "nulya-dark", motion: true },
-  extensions: { sync_on_start: true, auto_activate: true },
+  extensions: { sync_on_start: true, auto_activate: true, handoff: true },
+  driver: { mode: "ask" },
+  approvals: { ...default_rules },
   keys: {},
   sources: [],
 }
@@ -114,6 +135,22 @@ function mergeLayer(into: Settings, layer: unknown, source: string) {
   if (extensions) {
     if (typeof extensions["sync_on_start"] === "boolean") into.extensions.sync_on_start = extensions["sync_on_start"]
     if (typeof extensions["auto_activate"] === "boolean") into.extensions.auto_activate = extensions["auto_activate"]
+    if (typeof extensions["handoff"] === "boolean") into.extensions.handoff = extensions["handoff"]
+  }
+  const driver = record["driver"] as Record<string, unknown> | undefined
+  if (driver && typeof driver["mode"] === "string" && isMode(driver["mode"])) into.driver.mode = driver["mode"]
+  const approvals = record["approvals"] as Record<string, unknown> | undefined
+  if (approvals) {
+    for (const table of ["allow", "ask", "deny"] as const) {
+      const list = approvals[table]
+      // Replaced, not merged: a project layer that wanted to narrow a user
+      // layer's `allow` could not do it if the two were unioned, and narrowing
+      // is the direction that must always be available.
+      if (Array.isArray(list)) into.approvals[table] = list.filter((e): e is string => typeof e === "string")
+    }
+    if (typeof approvals["manifest_readonly"] === "boolean") {
+      into.approvals.manifest_readonly = approvals["manifest_readonly"]
+    }
   }
   const keys = record["keys"] as Record<string, unknown> | undefined
   if (keys) {

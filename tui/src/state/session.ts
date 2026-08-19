@@ -56,6 +56,14 @@ export interface ToolItem extends ItemBase {
   output: string
   spillPath: string | null
   resolved: boolean
+  /**
+   * The kernel is holding this call open, waiting for a verdict (`--gate`,
+   * DESIGN §14). A view fact, not a ledger one: the call is still exactly what
+   * the assistant turn recorded, and one keypress later it either ran or came
+   * back denied. At most one call is ever awaiting — the kernel executes a batch
+   * serially and asks about each call in turn.
+   */
+  awaiting: boolean
 }
 
 export interface CapabilityItem extends ItemBase {
@@ -122,6 +130,12 @@ export interface SessionState {
   enqueueUser(text: string): void
   pendingCount(): number
   setError(message: string | null): void
+  /**
+   * Mark the one call the kernel is holding open for a verdict, or null when
+   * nothing is (`ToolItem.awaiting`). Setting one clears any other, so the flag
+   * cannot survive a step that ended while a card was up.
+   */
+  setAwaitingApproval(callId: string | null): void
 }
 
 /**
@@ -212,6 +226,7 @@ export function createSessionState(id: string): SessionState {
       output: "",
       spillPath: null,
       resolved: false,
+      awaiting: false,
     }))
   }
 
@@ -342,6 +357,7 @@ export function createSessionState(id: string): SessionState {
                   output: result.output,
                   spillPath: result.spill_path,
                   resolved: true,
+                  awaiting: false,
                 },
               ])
             }
@@ -426,6 +442,7 @@ export function createSessionState(id: string): SessionState {
               output: "",
               spillPath: null,
               resolved: false,
+              awaiting: false,
             })
             break
           }
@@ -546,6 +563,15 @@ export function createSessionState(id: string): SessionState {
     setError(message) {
       edit((draft) => {
         draft.error = message
+      })
+    },
+    setAwaitingApproval(callId) {
+      edit((draft) => {
+        for (const item of draft.items) {
+          if (item.kind !== "tool") continue
+          const wants = callId !== null && item.callId === callId && !item.resolved
+          if (item.awaiting !== wants) item.awaiting = wants
+        }
       })
     },
   }

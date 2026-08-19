@@ -20,9 +20,9 @@ import { default_settings } from "../src/state/settings.ts"
 import { readHeader, sessionExists } from "../src/nulya/files.ts"
 import { sessionList, sessionNew } from "../src/nulya/cli.ts"
 import { rememberSessionPins } from "../src/state/tui_state.ts"
-import { scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
+import { auto_settings, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
 
-const style = createStyle(default_settings, {})
+const style = createStyle(auto_settings, {})
 
 let ws: TempWorkspace
 let lint_version: string
@@ -58,9 +58,11 @@ test("a draft creates nothing on disk; the screen says so and the store agrees",
   try {
     await settle(setup, 4)
     const frame = setup.captureCharFrame()
-    // The composition card in the other tense: nothing here is frozen yet.
-    expect(frame).toContain("next session · set when you send the first message")
+    // The welcome screen's facts, not a composition card: nothing is frozen
+    // yet, and the model is said once — under the composer (T24).
+    expect(frame).toContain("tools       shell edit")
     expect(frame).not.toContain("frozen composition")
+    expect(frame).not.toContain("model       ")
     expect(frame).toContain("scripted-demo · tools 2+0")
     expect((await sessionList(ws)).map((entry) => entry.id)).toEqual(before)
     // Look and leave: still nothing.

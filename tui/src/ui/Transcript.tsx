@@ -1,8 +1,8 @@
 import { For, Show } from "solid-js"
 import type { ScrollBoxRenderable } from "@opentui/core"
 import { Card } from "../render/cards/index.tsx"
-import { CompositionCard, type NextSession } from "../render/cards/CompositionCard.tsx"
-import { Welcome } from "./Welcome.tsx"
+import { CompositionCard } from "../render/cards/CompositionCard.tsx"
+import { Welcome, type NextSession } from "./Welcome.tsx"
 import { useStyle } from "../render/theme.ts"
 import type { Contributions } from "../nulya/files.ts"
 import type { SessionHeader } from "../nulya/ledger.ts"
@@ -52,6 +52,8 @@ export function Transcript(props: {
   onPickModel?: () => void
   /** A `/command` on the welcome screen was clicked: run it as if typed. */
   onCommand?: (command: string) => void
+  /** The denied call whose reason is being typed right now (tui.md §5.7). */
+  noteWanted?: string | null
   /** Handed to `App` so PgUp/PgDn and the "more below" hint have something to act on. */
   ref?: (box: ScrollBoxRenderable) => void
 }) {
@@ -72,11 +74,12 @@ export function Transcript(props: {
       }}
       contentOptions={{ flexDirection: "column", width: "100%", maxWidth: style.maxWidth, paddingRight: 1 }}
     >
-      <Show when={props.header || props.plan}>
+      {/* Only a session that has started has a frozen composition to report; a
+          draft's is still a decision and belongs on the welcome screen (T24). */}
+      <Show when={props.header}>
         <CompositionCard
           header={props.header ?? null}
           contributions={props.contributions}
-          plan={props.plan}
           onPickModel={props.onPickModel}
         />
       </Show>
@@ -90,9 +93,9 @@ export function Transcript(props: {
       {/* An empty session is the one screen with nothing to report; it says
           what this session is and what to do, rather than a blank rectangle. */}
       <Show when={props.items.length === 0}>
-        <Welcome cwd={props.cwd} onCommand={props.onCommand} />
+        <Welcome cwd={props.cwd} plan={props.plan} onCommand={props.onCommand} />
       </Show>
-      <For each={shown()}>{(item) => <Card item={item} />}</For>
+      <For each={shown()}>{(item) => <Card item={item} noteWanted={props.noteWanted} />}</For>
     </scrollbox>
   )
 }

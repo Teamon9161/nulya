@@ -9,7 +9,17 @@
  * a panel.
  *
  * It is not a card: nothing here came from the ledger, and giving it a card
- * frame would put something in the transcript that no event backs.
+ * frame would put something in the transcript that no event backs. Since T24 it
+ * also carries what the NEXT session will freeze, which used to be a composition
+ * card in the future tense above it (T22). Two reasons it moved here:
+ *
+ *  - the MODEL was on that card and is also under the composer, three rows
+ *    down, where the eye already is while typing. One fact, one place — and the
+ *    status bar is the place that survives the first message.
+ *  - the TOOLS row was a flex row of names, so a face of seven collapsed to
+ *    `tools 2+5` — the same counts the status bar was already showing. Here it
+ *    is a label column and the names WRAP, so a growing face grows downward
+ *    instead of turning back into a number.
  *
  * The `/` lines are buttons as much as they are captions: a click runs
  * the command exactly as typing it would (`onCommand`), and the row takes the
@@ -22,6 +32,22 @@ import { useScreen, useStyle } from "../render/theme.ts"
 import { onClick } from "./rows.ts"
 import { fit, wrapWords } from "./columns.ts"
 
+/**
+ * What the NEXT session will be told, on a tab that has not started one
+ * (tui.md §11, T22/T24). It is not a header and it is not frozen — that is the
+ * point of showing it: everything on it is still a decision, and `/model`,
+ * `/ext` and `/as` are the three that move it.
+ *
+ * The model is deliberately NOT here: it is under the composer (`StatusBar`),
+ * on the one line that keeps saying it once this screen is gone.
+ */
+export interface NextSession {
+  /** The stable pin ids this TUI would pass as `--pin` (`ext:<id>/<tool>`). */
+  tools: string[]
+  /** `--with <id>[@<version>]`, when `/evolve` or `/as` set one. */
+  bring?: string
+}
+
 /** The `/` commands worth knowing before you have typed anything. */
 const openings: Array<[string, string]> = [
   ["/model", "pick what the next session runs on"],
@@ -31,9 +57,14 @@ const openings: Array<[string, string]> = [
   ["/help", "every key and every command"],
 ]
 
+/** The label column every fact on this screen hangs off. */
+const label_width = 12
+
 export function Welcome(props: {
   /** The workspace whose `.nulya/` this session writes to. */
   cwd?: string
+  /** What the first message will freeze, on a tab with no session yet. */
+  plan?: NextSession
   /** A command row was clicked: run it as if it had been typed and sent. */
   onCommand?: (command: string) => void
 }) {
@@ -41,6 +72,33 @@ export function Welcome(props: {
   const screen = useScreen()
   const wide = () => screen().width >= 60
   const [hovered, setHovered] = createSignal(-1)
+  /** The width a value has beside its label, less the box's own left pad. */
+  const valueWidth = () => Math.max(8, screen().width - 2 - label_width - 1)
+
+  /**
+   * The face the next session would carry. The two builtins are always there
+   * and always first (DESIGN §5.1/§5.2); the pinned ones are the interesting
+   * half, so only those carry the ⚡. A pin is a stable id (`ext:<ext>/<tool>`)
+   * and the tool NAME is what the model calls, so that is what is drawn.
+   */
+  const tools = () => {
+    const pinned = (props.plan?.tools ?? []).map((id) => `${style.glyphs.capability}${id.split("/").pop() ?? id}`)
+    return ["shell", "edit", ...pinned].join(" ")
+  }
+
+  /** One fact: a label, and a value that wraps under itself rather than being cut. */
+  const Fact = (row: { label: string; value: string; fg?: string }) => (
+    <For each={wrapWords(row.value, valueWidth())}>
+      {(line, index) => (
+        <box flexDirection="row" width="100%" height={1}>
+          <box width={label_width} flexShrink={0}>
+            <text fg={style.theme.dim}>{index() === 0 ? row.label : ""}</text>
+          </box>
+          <text fg={row.fg ?? style.theme.muted}>{line}</text>
+        </box>
+      )}
+    </For>
+  )
 
   return (
     <box flexDirection="column" width="100%" paddingLeft={2} paddingTop={1}>
@@ -56,17 +114,22 @@ export function Welcome(props: {
       <text fg={style.theme.muted}>an immutable kernel with two tools, and everything else it builds for itself</text>
       <box height={1} />
 
-      {/* Where. The model and the tools are the composition card above this —
-          saying them twice on one screen is noise — but the card does not say
-          which workspace, and that is the one fact that tells two terminals
-          apart. */}
+      {/* Where, and what with. The model is under the composer and stays there
+          after this screen is gone, so it is not repeated here; the workspace
+          and the face are the two facts nothing else on screen says at length. */}
       <Show when={props.cwd}>
-        <box flexDirection="row" width="100%">
-          <box width={12} flexShrink={0}>
-            <text fg={style.theme.dim}>cwd</text>
-          </box>
-          <text fg={style.theme.muted}>{props.cwd}</text>
-        </box>
+        <Fact label="cwd" value={props.cwd!} />
+      </Show>
+      <Show when={props.plan}>
+        <Fact label="tools" value={tools()} fg={style.theme.fg} />
+        {/* A `--with` package is often nothing but a system prompt (a mode, an
+            identity), and it lasts exactly one session — so the tab has to say
+            it is wearing one before that session exists. */}
+        <Show when={props.plan!.bring}>
+          <Fact label="with" value={props.plan!.bring!} fg={style.theme.accent.evolve} />
+        </Show>
+      </Show>
+      <Show when={props.cwd || props.plan}>
         <box height={1} />
       </Show>
 
@@ -85,12 +148,12 @@ export function Welcome(props: {
               onMouseOver={() => setHovered(index())}
               onMouseOut={() => setHovered((now) => (now === index() ? -1 : now))}
             >
-              <box width={12} flexShrink={0}>
+              <box width={label_width} flexShrink={0}>
                 <text fg={style.theme.accent.evolve}>{command}</text>
               </box>
               {/* Cut, never wrapped: a one-row box clips a second line, and a
                   caption that wraps re-lays itself under the pointer (`ui/columns.ts`). */}
-              <text fg={style.theme.dim}>{fit(what, Math.max(8, screen().width - 2 - 12 - 1))}</text>
+              <text fg={style.theme.dim}>{fit(what, valueWidth())}</text>
             </box>
           )
         }}

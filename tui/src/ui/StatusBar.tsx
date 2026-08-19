@@ -5,6 +5,7 @@ import { displayWidth, fit } from "./columns.ts"
 import type { SessionSnapshot } from "../state/session.ts"
 import type { DriverStatus } from "../state/driver.ts"
 import type { Role } from "../state/attach.ts"
+import type { PermissionMode } from "../approvals.ts"
 
 function compact(n: number): string {
   if (n < 1000) return String(n)
@@ -41,6 +42,12 @@ export function StatusBar(props: {
   effort?: string
   /** Extension tools on the face beside the two builtins (`tools 2+N`). */
   tools: number
+  /** The permission mode this TUI answers the kernel's gate with (tui.md §5.7). */
+  mode?: PermissionMode
+  /** A tool call is on screen waiting for a verdict right now. */
+  awaiting?: boolean
+  /** Clicking the mode chip: the mouse half of `/mode`. */
+  onToggleMode?: () => void
   hint?: string
   /** Rows of transcript below the viewport: >0 means somebody is reading back. */
   behind?: number
@@ -62,9 +69,11 @@ export function StatusBar(props: {
   const [overBehind, setOverBehind] = createSignal(false)
   const [overHelp, setOverHelp] = createSignal(false)
   const [overModel, setOverModel] = createSignal(false)
+  const [overMode, setOverMode] = createSignal(false)
   const behindClick = onClick(() => props.onScrollEnd?.())
   const helpClick = onClick(() => props.onHelp?.())
   const modelClick = onClick(() => props.onPickModel?.())
+  const modeClick = onClick(() => props.onToggleMode?.())
 
   const usage = createMemo(() => {
     const u = props.snapshot.usage
@@ -88,6 +97,9 @@ export function StatusBar(props: {
   })
 
   const activity = createMemo(() => {
+    // A call waiting for a verdict is the only thing happening: the kernel is
+    // stopped on it, and the keys that move it are on the card (tui.md §5.7).
+    if (props.awaiting) return "waiting for you · y allow · n deny · a always"
     if (props.snapshot.error) return `error: ${props.snapshot.error}`
     // Observer mode is not idleness: nothing is stuck, we simply are not the
     // writer. Say which, and say when taking over is possible.
@@ -119,6 +131,7 @@ export function StatusBar(props: {
    * level.
    */
   const color = () => {
+    if (props.awaiting) return style.theme.warn
     if (props.snapshot.error) return style.theme.err
     if (props.snapshot.lastStopped === "budget" || props.snapshot.lastStopped === "max_tokens") return style.theme.warn
     if (props.status !== "idle" || props.takeoverReady) return style.theme.fg
@@ -136,6 +149,8 @@ export function StatusBar(props: {
   const contextChip = () => (context() ? ` ctx ${context()!.percent}% · /compact` : "")
   const behindChip = () =>
     (props.behind ?? 0) > 0 ? ` ${style.glyphs.foldOpen} ${props.behind} more below · Shift+End` : ""
+  /** `ask` / `auto`: which one is only worth a chip when somebody can act on it. */
+  const modeChip = () => (props.mode && screen().width >= 60 ? ` ${props.mode}` : "")
   const roleChip = () =>
     screen().width >= 60
       ? ` step ${props.snapshot.steps} · ${props.role === "observer" ? "observer · driven elsewhere" : "driver"}`
@@ -153,7 +168,8 @@ export function StatusBar(props: {
    */
   const layout = createMemo(() => {
     const budget = Math.max(0, screen().width - 2)
-    const right = displayWidth(contextChip()) + displayWidth(behindChip()) + displayWidth(roleChip())
+    const right =
+      displayWidth(contextChip()) + displayWidth(behindChip()) + displayWidth(modeChip()) + displayWidth(roleChip())
     const activity_chip = ` · ${activity()}`
     const model = fit(modelText(), Math.max(8, budget - right - displayWidth(activity_chip)))
     let room = Math.max(0, budget - displayWidth(model) - displayWidth(activity_chip) - right)
@@ -256,6 +272,22 @@ export function StatusBar(props: {
           onMouseOut={() => setOverBehind(false)}
         >
           <text fg={style.theme.accent.evolve}>{behindChip()}</text>
+        </box>
+      ) : null}
+      {/* The mode, and the click that flips it — the mouse half of `/mode`.
+          `auto` is warn-coloured: it is the stance where tool calls run without
+          anybody looking, and that should never be the quiet one. */}
+      {modeChip().length > 0 ? (
+        <box
+          flexShrink={0}
+          height={1}
+          backgroundColor={props.onToggleMode && overMode() ? style.theme.hover : undefined}
+          onMouseDown={props.onToggleMode ? modeClick.onMouseDown : undefined}
+          onMouseUp={props.onToggleMode ? modeClick.onMouseUp : undefined}
+          onMouseOver={() => setOverMode(true)}
+          onMouseOut={() => setOverMode(false)}
+        >
+          <text fg={props.mode === "auto" ? style.theme.warn : style.theme.dim}>{modeChip()}</text>
         </box>
       ) : null}
       {screen().width >= 60 ? (

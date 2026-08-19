@@ -21,10 +21,10 @@ import { createSessionState, type TranscriptItem } from "../src/state/session.ts
 import { default_settings, loadSettings } from "../src/state/settings.ts"
 import type { SessionHeader } from "../src/nulya/ledger.ts"
 import { sessionAppend, sessionEvents, sessionNew, sessionStep } from "../src/nulya/cli.ts"
-import { scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
+import { auto_settings, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
 import { wrapSkillEcho } from "../src/skills.ts"
 
-const style: Style = createStyle(default_settings, {})
+const style: Style = createStyle(auto_settings, {})
 const narrow: Style = createStyle({ ...default_settings, transcript: { ...default_settings.transcript, max_width: 40 } }, {})
 
 function Harness(props: { items: TranscriptItem[]; style?: Style }) {
@@ -70,6 +70,7 @@ function shellItem(over: { key: string; command: string; output?: string; ok?: b
     output: over.output ?? "[exit 0]",
     spillPath: null,
     resolved: true,
+    awaiting: false,
   }
 }
 
@@ -89,6 +90,7 @@ const shell_item: TranscriptItem = {
   output: "running 12 tests\n--- stderr ---\ntest failure in emit.zig\n[exit 1]",
   spillPath: null,
   resolved: true,
+  awaiting: false,
 }
 const evolve_item = shellItem({
   key: "e4:c2",
@@ -107,6 +109,7 @@ const ext_tool_item: TranscriptItem = {
   output: "src/emit.zig: 0 findings",
   spillPath: null,
   resolved: true,
+  awaiting: false,
 }
 const header_fixture: SessionHeader = {
   kind: "header",
@@ -139,6 +142,7 @@ const edit_item: TranscriptItem = {
   output: "edited src/emit.zig",
   spillPath: null,
   resolved: true,
+  awaiting: false,
 }
 const canceled_item: TranscriptItem = {
   key: "e8:c4",
@@ -152,6 +156,7 @@ const canceled_item: TranscriptItem = {
   output: "tool execution was canceled; side effects may be partial or unknown",
   spillPath: null,
   resolved: true,
+  awaiting: false,
 }
 const spill_item: TranscriptItem = {
   key: "e9:c5",
@@ -165,6 +170,7 @@ const spill_item: TranscriptItem = {
   output: "…clipped…\n[exit 0]",
   spillPath: ".nulya/scratch/spill-9.txt",
   resolved: true,
+  awaiting: false,
 }
 // Verbatim `extension/notes.zig` shape: the banner reads its head line off it.
 const capability_item: TranscriptItem = {
@@ -277,7 +283,9 @@ test("every evolution action in §5.2 has its own head line", async () => {
         output: ".nulya/extensions/lint: v-3f2a91 (built)\n[exit 0]",
       }),
       shellItem({ key: "v4", command: "nulya ext activate lint v-3f2a91", output: "lint: current -> v-3f2a91\n[exit 0]" }),
-      shellItem({ key: "v5", command: "nulya ext rollback lint v-0011aa", output: "lint: current -> v-0011aa\n[exit 0]" }),
+      // Going back is the same verb aimed at an older version (DESIGN §7.4),
+      // so it draws the same head line — there is no second glyph for it.
+      shellItem({ key: "v5", command: "nulya ext activate lint v-0011aa", output: "lint: current -> v-0011aa\n[exit 0]" }),
       shellItem({ key: "v6", command: "nulya ext run lint lint_zig '{\"path\":\"src\"}'", output: "0 findings\n[exit 0]" }),
       shellItem({ key: "v7", command: "nulya skill load evolution/zig-style", output: "# Zig style\n[exit 0]" }),
     ],
@@ -288,7 +296,7 @@ test("every evolution action in §5.2 has its own head line", async () => {
   expect(frame).toContain("⚙ ext init · lint → .nulya/extensions/lint")
   expect(frame).toContain("⚙ ext build · lint → v-3f2a91")
   expect(frame).toContain("⚡ activate · lint@v-3f2a91")
-  expect(frame).toContain("↺ rollback · lint@v-0011aa")
+  expect(frame).toContain("⚡ activate · lint@v-0011aa")
   expect(frame).toContain("⌘ ext run · lint/lint_zig")
   expect(frame).toContain("☰ skill · evolution/zig-style")
   expect(frame).toMatchSnapshot()
@@ -313,10 +321,10 @@ test("the composition card shows what this session froze", async () => {
     <CompositionCard
       header={header_fixture}
       contributions={[
-        { id: "lint", version: "v-3f2a91", tools: ["lint_zig"], skills: ["skills/zig-style"], systemPrompts: [] },
+        { id: "lint", version: "v-3f2a91", tools: ["lint_zig"], readonlyTools: [], skills: ["skills/zig-style"], systemPrompts: [] },
         // A `--with` package: no tool, no skill, one prompt — worn for this
         // session only, and the card has to say so (DESIGN §7.5).
-        { id: "evolution", version: "v-db04b7", tools: [], skills: [], systemPrompts: ["prompts/evolution.md"] },
+        { id: "evolution", version: "v-db04b7", tools: [], readonlyTools: [], skills: [], systemPrompts: ["prompts/evolution.md"] },
       ]}
     />
   ))
@@ -328,6 +336,27 @@ test("the composition card shows what this session froze", async () => {
   expect(frame).toContain("lint@v-3f2a91")
   expect(frame).toContain("parent s-1786800870313-bf37ef:41")
   expect(frame).toMatchSnapshot()
+})
+
+test("the composition card's tools row collapses to counts when it cannot fit whole", async () => {
+  // At 40 columns the full row would be flex-shrunk — names cut mid-word,
+  // separating spaces swallowed — so the card must fall back to counts.
+  const frame = await frameOfNode(
+    () => (
+      <CompositionCard
+        header={header_fixture}
+        contributions={[
+          { id: "lint", version: "v-3f2a91", tools: ["lint_zig"], readonlyTools: [], skills: ["skills/zig-style"], systemPrompts: [] },
+          { id: "evolution", version: "v-db04b7", tools: [], readonlyTools: [], skills: [], systemPrompts: ["prompts/evolution.md"] },
+        ]}
+      />
+    ),
+    40,
+  )
+  expect(frame).toContain("tools 2+1")
+  expect(frame).toContain("· skills 1")
+  expect(frame).toContain("· prompts 1")
+  expect(frame).not.toContain("shell edit")
 })
 
 test("edit renders its diff expanded by default", async () => {

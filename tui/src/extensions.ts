@@ -258,6 +258,12 @@ export function planStore(ws: Workspace, user: boolean): Promise<SyncReport> {
 // whose documented install is activate-and-use; `compact` / `evolution` /
 // `handoff` are built on demand by /compact, /evolve and the goal driver, and
 // deliberately stay out of every composition until one of those brings them in.
+//
+// Since T23 nobody says install: the user store is the person's own directory,
+// what lands in it came with the binary they ran, and the question that used to
+// guard it was asked on a bare terminal before the screen existed and then held
+// it there for a minute of zig. It happens on the way in, in the background,
+// with the status line saying so — and one Enter in `/ext` undoes any of it.
 
 /** The five std tools, as the stable ids `session new --pin` takes. */
 export const std_pins = ["ext:std/read", "ext:std/write", "ext:std/append", "ext:std/grep", "ext:std/glob"]
@@ -265,66 +271,85 @@ export const std_pins = ["ext:std/read", "ext:std/write", "ext:std/append", "ext
 /** The bundled ids whose install means "active in every next session". */
 export const bundled_active = ["std", "guide"]
 
-/** What `ext seed --user --dry-run` says is missing from the user store. */
-export function planBundled(ws: Workspace): Promise<SeedReport> {
-  return extSeed(ws, { user: true, dryRun: true })
-}
+/**
+ * Bundled ids whose declared tools are a DRIVER interface, not a model tool.
+ *
+ * `compact`'s tool drives the session it is called about — it appends to it and
+ * steps it — so a model calling it from inside that very session meets the
+ * kernel's single-writer lock and fails every time (`SessionBusy`, DESIGN §3.4).
+ * `handoff`'s tool IS meant for a model, but for the one session a driver brings
+ * it into with `--with … --pin`, not for every session this TUI opens. Either
+ * way, activating these must move membership only: `nulya ext run` reaches their
+ * tools without a pin, which is how `/compact` has always called `compact`.
+ *
+ * A hard-coded list is the temporary criterion. The durable one is a per-tool
+ * `audience` in the manifest — the package saying what its own tool is for,
+ * which is the only place that knows (kernel side, not yet).
+ */
+export const bundled_driver_only = ["compact", "evolution", "handoff"]
 
-/** One sentence per missing id, for the question. */
-export function bundledPromptText(plan: SeedReport): string {
-  const line = (id: string): string => {
-    switch (id) {
-      case "std":
-        return "std · read/write/append/grep/glob on the model's tool face"
-      case "guide":
-        return "guide · a reference skill for working this harness"
-      case "compact":
-        return "compact · behind /compact, built on demand"
-      case "evolution":
-        return "evolution · behind /evolve, built on demand"
-      case "handoff":
-        return "handoff · the goal driver's handoff tool, built on demand"
-      default:
-        return `${id} · built on demand`
-    }
-  }
-  return `${[
-    `this nulya ships ${plan.seeded} bundled extension${plan.seeded === 1 ? "" : "s"} not yet in your user store:`,
-    ...plan.ids.map((id) => `  ${line(id)}`),
-  ].join("\n")}\n${choicesText("install?", [
-    ["t", "install + activate std & guide"],
-    ["s", "install only"],
-    ["n", "not now"],
-  ])}`
+/** Whether turning this extension on should pin its tools as well. */
+export function pinsOnActivate(id: string): boolean {
+  return !bundled_driver_only.includes(id)
 }
 
 /**
- * Run one answer to the bundled question. Both installing answers seed and
- * build; only `trust` activates — and only `std` and `guide`, never the three
- * on-demand packages — then puts the std tools on this TUI's `--pin` list
- * (tui-state's `session_pins`, the axis that costs nothing to undo in `/ext`).
- * Returns the sentence to print, or null for `skip`.
+ * Write the bundled drafts into the user store — source only (DESIGN §7.8).
+ *
+ * The kernel leaves an id that already has a draft there alone, so this is safe
+ * on every start and the ids it REPORTS are exactly the ones that arrived this
+ * time. That list is the whole consent model since T23: what arrived just now
+ * is installed and turned on, what was already there was already somebody's
+ * decision — including the decision to turn it off in `/ext`, which no later
+ * start may undo.
  */
-export async function installBundled(ws: Workspace, answer: StoreAnswer, statePath?: string): Promise<string | null> {
-  const action = actionFor(answer)
-  if (!action.sync) return null
-  await extSeed(ws, { user: true })
-  const report = await extSync(ws, { user: true })
-  const parts = [summarize("bundled", report)]
-  if (action.activate) {
-    for (const id of bundled_active) {
-      const line = report.lines.find((l) => l.id === id)
-      if (!line?.version || line.state === "failed" || line.state === "needs zig") continue
-      if (line.activation !== "active") await extSetCurrent(ws, "activate", id, line.version, { user: true })
+export function seedBundled(ws: Workspace): Promise<SeedReport> {
+  return extSeed(ws, { user: true })
+}
+
+/**
+ * Finish the install for the ids that ARRIVED in this run: point `current` at
+ * what the build pass produced for `std` and `guide`, and put the five std
+ * tools on this TUI's pin list.
+ *
+ * Never the other three. `compact` / `evolution` / `handoff` are brought into
+ * one session by `/compact`, `/evolve` and the goal driver; activating them
+ * would put `evolution`'s system prompt in front of every model this machine
+ * ever runs. Returns the parts of the sentence the status line will say.
+ */
+export async function adoptBundled(
+  ws: Workspace,
+  arrived: readonly string[],
+  report: SyncReport,
+  statePath?: string,
+): Promise<string[]> {
+  const parts: string[] = []
+  const active: string[] = []
+  for (const id of bundled_active) {
+    if (!arrived.includes(id)) continue
+    const line = report.lines.find((entry) => entry.id === id)
+    if (!line?.version || line.state === "failed" || line.state === "needs zig") continue
+    if (line.activation === "active") {
+      active.push(id)
+      continue
     }
-    parts.push("std & guide active")
-    const pinned = await pinStdTools(ws, statePath)
-    parts.push(pinned ? "std tools pinned for this TUI" : "std tools not pinned (tool face full — `/ext` t to choose)")
+    try {
+      await extSetCurrent(ws, "activate", id, line.version, { user: true })
+      active.push(id)
+    } catch {
+      // The version is built either way, and `/ext`'s Enter still points at it;
+      // a pointer that would not move is not news for the status line.
+    }
   }
-  for (const line of report.lines) {
-    if (line.state === "needs zig" || line.state === "failed") parts.push(`${line.id}: ${line.state}`)
+  if (active.length > 0) parts.push(`${active.join(" & ")} active`)
+  if (active.includes("std")) {
+    parts.push(
+      (await pinStdTools(ws, statePath))
+        ? "std tools pinned"
+        : "std tools not pinned (tool face full — `/ext` to choose)",
+    )
   }
-  return parts.join(" · ")
+  return parts
 }
 
 /**

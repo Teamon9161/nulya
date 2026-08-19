@@ -24,10 +24,10 @@ import { createSessionState, type TranscriptItem } from "../src/state/session.ts
 import { default_settings } from "../src/state/settings.ts"
 import { sessionAppend, sessionNew, sessionStep } from "../src/nulya/cli.ts"
 import { sessionPins } from "../src/state/tui_state.ts"
-import { scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
+import { auto_settings, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
 import type { SessionTab } from "../src/state/tabs.ts"
 
-const style: Style = createStyle(default_settings, {})
+const style: Style = createStyle(auto_settings, {})
 
 let ws: TempWorkspace
 let first: string
@@ -79,6 +79,7 @@ function shellItem(key: string, command: string, output: string): TranscriptItem
     output,
     spillPath: null,
     resolved: true,
+    awaiting: false,
   }
 }
 
@@ -360,7 +361,12 @@ test("the model is a click target wherever it is written: the line under the com
     const bar = rows.length - 2
     expect(rows[bar]).toContain("scripted-demo · tools 2+0")
     expect(rows[bar]).not.toContain(id)
-    expect(rows[bar]).toContain("Esc cancel · Ctrl+O fold · /help")
+    // The hint gives up its widest form first when the line runs short (the
+    // mode chip on the right is one of the things it makes room for, T24), but
+    // the way to `/help` is the part that never goes.
+    expect(rows[bar]).toContain("Ctrl+O fold · /help")
+    // …and the permission mode is on that line too, right of the middle.
+    expect(rows[bar]).toContain("auto")
     await setup.mockMouse.click(rows[bar]!.indexOf("scripted-demo") + 2, bar)
     expect(await settle(setup, 4)).toContain(picker)
     setup.mockInput.pressEscape()

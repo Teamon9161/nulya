@@ -13,6 +13,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
+import { isMode, type PermissionMode } from "../approvals.ts"
 import { userConfigDir } from "./settings.ts"
 
 /** The last (profile, model, effort) picked in `/model`, or by `/effort`. */
@@ -26,6 +27,13 @@ export interface ModelPick {
 
 export interface TuiState {
   model?: ModelPick
+  /**
+   * The permission mode last chosen on screen (`/mode`, the status-line chip).
+   * Program state, like the model pick and for the same reason: a person who
+   * switched to `auto` yesterday should not have to find `tui.toml` today.
+   * `tui.toml`'s `[driver] mode` is the fallback when nothing was chosen.
+   */
+  mode?: PermissionMode
   /**
    * Workspace extension stores the trust question has already been put for, by
    * absolute path. "Only ask once" is the whole point of remembering: a person
@@ -42,12 +50,6 @@ export interface TuiState {
    * kernel's own `registry.pinned_native_tools` instead.
    */
   session_pins?: string[]
-  /**
-   * The "install the bundled extensions?" question has been put once on this
-   * machine (the user store is machine-wide, so this is a boolean rather than a
-   * per-store list). Whatever the answer, `nulya ext seed --user` remains.
-   */
-  asked_bundled?: boolean
 }
 
 export function tuiStatePath(env: Record<string, string | undefined> = process.env): string {
@@ -77,7 +79,12 @@ export function loadTuiState(path = tuiStatePath()): TuiState {
     if (Array.isArray(asked)) state.asked_stores = asked.filter((s): s is string => typeof s === "string")
     const pins = record["session_pins"]
     if (Array.isArray(pins)) state.session_pins = pins.filter((s): s is string => typeof s === "string")
-    if (record["asked_bundled"] === true) state.asked_bundled = true
+    const mode = record["mode"]
+    if (typeof mode === "string" && isMode(mode)) state.mode = mode
+    // Every key is picked out by name, so a file written by an older build —
+    // `asked_bundled`, retired in T23 when the bundled question went away — is
+    // simply not read. An unknown key has never been an error here, and a state
+    // file that refused to load would cost the model pick and the pins as well.
     return state
   } catch {
     return {}
@@ -112,10 +119,10 @@ export function rememberSessionPins(pins: readonly string[], path = tuiStatePath
   saveTuiState(state, path)
 }
 
-/** Remember that the bundled-extensions question was put, whatever the answer. */
-export function rememberBundledAsked(path = tuiStatePath()): void {
+/** Remember the permission mode the person is working in (tui.md §5.7). */
+export function rememberMode(mode: PermissionMode, path = tuiStatePath()): void {
   const state = loadTuiState(path)
-  state.asked_bundled = true
+  state.mode = mode
   saveTuiState(state, path)
 }
 

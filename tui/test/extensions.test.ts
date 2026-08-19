@@ -14,8 +14,9 @@ import { join } from "node:path"
 import { extSeed, extSync, parseSyncLine, parseSyncReport, type SyncReport } from "../src/nulya/cli.ts"
 import {
   actionFor,
+  adoptBundled,
   answerFor,
-  bundledPromptText,
+  bundled_active,
   describeDrafts,
   draftColumn,
   failedIds,
@@ -87,8 +88,8 @@ test("--activate reports the three answers a pointer can have: moved, already th
   expect(settled.lines.find((line) => line.id === "one.mode")!.activation).toBe("active")
   expect(draftColumn(settled.lines.find((line) => line.id === "one.mode")!)).toBe("active")
 
-  // Somebody edits the draft and rolls back to the older version: the sync must
-  // not undo that decision.
+  // Somebody edits the draft and points `current` back at the older version:
+  // the sync must not undo that decision.
   const old = one.version!
   writeDraft(ws.dir, "one.mode", "edited since")
   const rebuilt = await extSync(ws, { activate: true })
@@ -96,7 +97,7 @@ test("--activate reports the three answers a pointer can have: moved, already th
   expect(fresh.version).not.toBe(old)
   expect(fresh.activation).toBe("activated")
 
-  await Bun.spawn({ cmd: [ws.bin, "ext", "rollback", "one.mode", old], cwd: ws.dir, env: process.env }).exited
+  await Bun.spawn({ cmd: [ws.bin, "ext", "activate", "one.mode", old], cwd: ws.dir, env: process.env }).exited
   const kept = await extSync(ws, { activate: true })
   const held = kept.lines.find((line) => line.id === "one.mode")!
   expect(held.activation).toBe("kept")
@@ -257,13 +258,31 @@ test("the binary's bundled drafts seed into a store — dry-run counts them, a s
   }
 })
 
-test("the bundled question names what is missing and what installing does", () => {
-  const plan = { seeded: 3, already: 2, ids: ["std", "guide", "compact"], text: "" }
-  const text = bundledPromptText(plan)
-  expect(text).toContain("3 bundled extensions")
-  expect(text).toContain("std · read/write/append/grep/glob")
-  expect(text).toContain("guide · a reference skill")
-  expect(text).toContain("compact · behind /compact, built on demand")
-  expect(text).toContain("\ninstall?\n  t  install + activate std & guide\n  s  install only\n  n  not now\n› ")
-  expect(text.endsWith("› ")).toBe(true)
+/**
+ * The bundled install is nobody's question any more (tui.md §11, T23), so the
+ * whole of the consent lives in one rule: only what `ext seed` says arrived THIS
+ * run is turned on. Everything below is that rule, with no binary in sight —
+ * each case returns before it would spawn anything.
+ */
+test("only the bundled ids that arrived this run are activated", async () => {
+  const built = report([
+    "std: v-aaaaaaaa built",
+    "guide: v-bbbbbbbb built",
+    "evolution: v-cccccccc built",
+    "3 built, 0 already built, 0 failed",
+  ])
+
+  // Nothing arrived: a later start finds all five drafts already in the store
+  // and must leave every pointer alone — including the one somebody turned off
+  // in `/ext` yesterday.
+  expect(await adoptBundled(ws, [], built, join(ws.dir, "adopt-none.json"))).toEqual([])
+
+  // Arrived, but this machine could not build it: there is no version to point
+  // at, and `needs zig` is `/ext`'s news to deliver, not an activation's.
+  const stuck = report(["std: needs zig (compiled draft; put zig on PATH)", "0 built, 0 already built, 1 failed"])
+  expect(await adoptBundled(ws, ["std"], stuck, join(ws.dir, "adopt-stuck.json"))).toEqual([])
+
+  // And the three on-demand packages are never adopted, however they arrived:
+  // `evolution`'s system prompt belongs to the one session `/evolve` opens.
+  expect(bundled_active).toEqual(["std", "guide"])
 })

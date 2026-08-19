@@ -37,9 +37,9 @@ import { sessionExists } from "../src/nulya/files.ts"
 import { sessionList, sessionNew } from "../src/nulya/cli.ts"
 import { App } from "../src/ui/App.tsx"
 import type { ModelPick } from "../src/state/tui_state.ts"
-import { fake_config, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
+import { auto_settings, fake_config, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
 
-const style: Style = createStyle(default_settings, {})
+const style: Style = createStyle(auto_settings, {})
 
 const fake = fake_config
 

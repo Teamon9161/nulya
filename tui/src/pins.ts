@@ -191,7 +191,27 @@ export function orphanPins(pins: readonly string[], available: readonly string[]
  */
 export function quotaLine(maxTools: number, pinned: number): string {
   const line = `tools ${builtin_tools}+${pinned}/${maxTools}`
-  return builtin_tools + pinned > maxTools ? `${line} · over registry.max_tools · session new will refuse` : line
+  if (builtin_tools + pinned <= maxTools) return line
+  const over = builtin_tools + pinned - maxTools
+  return `${line} · ${over} more than registry.max_tools allows · unpin ${
+    over === 1 ? "one" : `${over}`
+  } in the tools pane, or no session will start`
+}
+
+/**
+ * The face is full and a batch of pins did not fit — in a sentence somebody can
+ * act on, rather than in the gauge's arithmetic (`2+9/8 · nothing changed` was
+ * the whole explanation a person got for pressing Enter and seeing nothing
+ * happen, tui.md §11, T23).
+ *
+ * It is not a refusal. Membership and pins are two axes: an extension can be
+ * active with none of its tools on the native face, and `nulya ext run` reaches
+ * them there — which is exactly how `/compact` has always called `compact`.
+ */
+export function faceFullLine(maxTools: number, face: number, left: number): string {
+  return `tool face is full at ${builtin_tools}+${face}/${maxTools} · ${left} tool${
+    left === 1 ? "" : "s"
+  } not pinned · Space in the tools pane frees a slot; ext run reaches them either way`
 }
 
 // --- the user config file ---------------------------------------------------

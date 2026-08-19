@@ -173,7 +173,7 @@ exports[`every evolution action in §5.2 has its own head line 1`] = `
   ⚙ ext init · lint → .nulya/extensions/lint                            ▸ ok
   ⚙ ext build · lint → v-3f2a91                                         ▸ ok
   ⚡ activate · lint@v-3f2a91                                           ▸ ok
-  ↺ rollback · lint@v-0011aa                                            ▸ ok
+  ⚡ activate · lint@v-0011aa                                           ▸ ok
   ⌘ ext run · lint/lint_zig                                             ▸ ok
   ☰ skill · evolution/zig-style                                        ▸ ok
                                                                             
