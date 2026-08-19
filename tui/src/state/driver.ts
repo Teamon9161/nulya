@@ -25,8 +25,15 @@ export type DriverStatus = "idle" | "sending" | "stepping" | "canceling"
 
 export interface Driver {
   status: Accessor<DriverStatus>
-  /** Append a user turn, and start a step unless one is already running. */
-  send(text: string): Promise<void>
+  /**
+   * Append a user turn, and start a step unless one is already running.
+   *
+   * `framed` says the text already carries its own explanation of how it got
+   * here (`approvalnote.ts`), so the mid-task wrapper must not be put around it
+   * a second time — two sentinels for one turn is one card the transcript
+   * cannot fold and one contract too many for the model to read.
+   */
+  send(text: string, framed?: boolean): Promise<void>
   /** Run a step now (used to continue after a spent budget). */
   step(): Promise<void>
   /** Esc: ask the kernel to stop at its next step boundary. */
@@ -178,7 +185,7 @@ export function createDriver(
 
   return {
     status,
-    async send(text) {
+    async send(text, framed = false) {
       const trimmed = text.trim()
       if (trimmed.length === 0) return
       // A step in flight means the model is mid-task, and a bare user turn
@@ -186,7 +193,7 @@ export function createDriver(
       // own framing (midtask.ts). "sending" is not mid-task: that run has not
       // started yet, the turn just joins its opening batch unwrapped. The
       // contract rides once per run; later messages carry the tag alone.
-      const midTask = status() === "stepping" || status() === "canceling"
+      const midTask = !framed && (status() === "stepping" || status() === "canceling")
       const wire = midTask ? wrapMidTask(trimmed, !noted) : trimmed
       if (midTask) noted = true
       state.enqueueUser(wire)

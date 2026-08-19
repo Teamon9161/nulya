@@ -15,7 +15,8 @@ import { App } from "../src/ui/App.tsx"
 import { createStyle } from "../src/render/theme.ts"
 import { createSessionState } from "../src/state/session.ts"
 import { default_settings } from "../src/state/settings.ts"
-import { sessionList, sessionNew } from "../src/nulya/cli.ts"
+import { sessionEvents, sessionList, sessionNew } from "../src/nulya/cli.ts"
+import { parseApprovalNote } from "../src/approvalnote.ts"
 import { handoffsFor, headline, nextHandoff } from "../src/handoff.ts"
 import { verdictLine } from "../src/nulya/cli.ts"
 import {
@@ -73,16 +74,19 @@ test("in ask mode a tool call waits, marked on its card and asked above the box"
   const { state, setup } = await stepUntilAsked()
   try {
     // Two halves of one question (tui.md §5.7): the card says WHICH call, the
-    // panel above the composer says what the answers are and where to give one.
+    // dialog above the composer offers the answers and takes the note.
     const frame = setup.captureCharFrame()
     expect(frame).toContain("echo hello-from-nulya")
     expect(frame).toContain("waiting for you")
     expect(frame).toContain("allow this call")
     expect(frame).toContain("deny")
+    expect(frame).toContain("note")
     // Nothing ran while it waited.
     expect(state.snapshot.items.some((item) => item.kind === "tool" && item.resolved)).toBe(false)
 
-    setup.mockInput.pressKey("y")
+    // The cursor starts on "allow this call", so Enter is the answer with no
+    // aiming at all — the one gesture that has to be free.
+    setup.mockInput.pressEnter()
     await until(() => state.snapshot.items.some((item) => item.kind === "tool" && item.resolved), 30_000)
     const call = state.snapshot.items.find((item) => item.kind === "tool" && item.resolved)!
     expect(call.kind === "tool" && call.output).toContain("hello-from-nulya")
@@ -91,12 +95,22 @@ test("in ask mode a tool call waits, marked on its card and asked above the box"
   }
 }, 120_000)
 
-test("`N` denies with a typed reason, and the model is told exactly that", async () => {
+/**
+ * The note on a DENY has a kernel channel: `deny <note>` becomes that call's
+ * marker result (DESIGN §4). Reaching it takes no dedicated key — type, and the
+ * words are already in the note.
+ */
+test("a note on a denial reaches the model as that call's result", async () => {
   const { state, setup } = await stepUntilAsked()
   try {
-    setup.mockInput.pressKey("N", { shift: true })
-    await until(() => setup.captureCharFrame().includes("type the reason"), 10_000)
+    // Typing while the list has the cursor IS writing the note (tcode's rule).
     await setup.mockInput.typeText("not on this machine")
+    await until(() => setup.captureCharFrame().includes("not on this machine"), 10_000)
+    // Tab back to the list, then down to the last answer: deny.
+    setup.mockInput.pressTab()
+    // Four answers on a lone call: allow · always · mode auto · deny.
+    for (let i = 0; i < 3; i++) setup.mockInput.pressKey("ARROW_DOWN")
+    expect(await settle(setup, 2)).toContain("deny")
     setup.mockInput.pressEnter()
 
     await until(() => state.snapshot.items.some((item) => item.kind === "tool" && item.resolved), 30_000)
@@ -112,15 +126,18 @@ test("`N` denies with a typed reason, and the model is told exactly that", async
   }
 }, 120_000)
 
-test("switching to auto while a card is up decides that card too", async () => {
+/**
+ * tcode's `set_mode` option, in nulya's vocabulary. It is on the LIST rather
+ * than in the composer because the dialog owns the keyboard: `/mode auto` is
+ * not typeable while a call waits, and "stop asking me" is exactly what
+ * somebody reaches for at the fourth prompt in a row.
+ */
+test("`allow everything from here on` answers this call and switches the mode", async () => {
   const { state, setup } = await stepUntilAsked()
   try {
-    // The prompt holds the kernel, and the composer still takes a command —
-    // which is why the four answer keys only act on an EMPTY box: `/mode auto`
-    // has an `a` in it, and losing it to "always allow" would make the one
-    // command somebody reaches for here impossible to type.
-    await setup.mockInput.typeText("/mode auto")
-    expect(await settle(setup, 2)).toContain("/mode auto")
+    // The digit picks the row it numbers; on a lone call 3 is the mode answer.
+    setup.mockInput.pressKey("3")
+    expect(await settle(setup, 2)).toContain("allow everything from here on")
     setup.mockInput.pressEnter()
     await until(() => state.snapshot.items.some((item) => item.kind === "tool" && item.resolved), 30_000)
     const call = state.snapshot.items.find((item) => item.kind === "tool" && item.resolved)!
@@ -162,19 +179,55 @@ test("in auto mode the same call just runs, and the mode is on the status line",
 }, 120_000)
 
 /**
- * A turn with three calls in it (tui.md §5.7). The kernel offers them one at a
- * time — call N only once N-1 has run — so `A` is a decision about the calls a
- * person can SEE, all three already on screen as cards, rather than a promise
- * about anything the model has not written yet.
+ * The note on a YES, which the kernel's gate has no channel for and should not
+ * (`approvalnote.ts`): the call runs, and the guidance is appended as an
+ * ordinary turn that the next step boundary drains — right behind the
+ * tool_results of the batch it was about.
  */
-test("`A` answers the rest of the batch, and the batch says how many are left", async () => {
+test("a note on an approval runs the call and reaches the model as its own turn", async () => {
+  const { id, state, setup } = await stepUntilAsked()
+  try {
+    await setup.mockInput.typeText("use ls next time")
+    await until(() => setup.captureCharFrame().includes("use ls next time"), 10_000)
+    // The cursor never left "allow this call": the note rides on whichever
+    // answer is chosen, which is the whole point of it living on the dialog.
+    setup.mockInput.pressEnter()
+
+    await until(() => state.snapshot.items.some((item) => item.kind === "tool" && item.resolved), 30_000)
+    const call = state.snapshot.items.find((item) => item.kind === "tool" && item.resolved)!
+    expect(call.kind === "tool" && call.ok).toBe(true)
+    expect(call.kind === "tool" && call.output).toContain("hello-from-nulya")
+
+    // In the ledger as a user turn carrying the sentinel, and on screen as the
+    // person's own words with a badge naming the call.
+    await until(async () => (await sessionEvents(ws, id)).some((event) => event.kind === "user_text" &&
+      parseApprovalNote((event as { text: string }).text) !== null), 30_000)
+    const note = (await sessionEvents(ws, id))
+      .map((event) => (event.kind === "user_text" ? parseApprovalNote((event as { text: string }).text) : null))
+      .find((parsed) => parsed !== null)!
+    expect(note.tool).toBe("shell")
+    expect(note.text).toBe("use ls next time")
+    expect(setup.captureCharFrame()).toContain("note on shell")
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 120_000)
+
+/**
+ * A turn with three calls in it (tui.md §5.7). The kernel offers them one at a
+ * time — call N only once N-1 has run — so the batch answer is a decision about
+ * the calls a person can SEE, all three already on screen as cards, rather than
+ * a promise about anything the model has not written yet.
+ */
+test("the batch answer covers the rest of the turn, and says how many are left", async () => {
   const { state, setup } = await stepUntilAsked(100, 30, scripted_batch_env)
   try {
     const frame = setup.captureCharFrame()
     expect(frame).toContain("1 of 3 in this batch")
     expect(frame).toContain("2 calls left in this batch")
 
-    setup.mockInput.pressKey("A", { shift: true })
+    setup.mockInput.pressKey("2")
+    setup.mockInput.pressEnter()
     // One keypress, three calls: nothing else is ever asked about, and all
     // three ran.
     await until(() => state.snapshot.items.filter((item) => item.kind === "tool" && item.resolved).length === 3, 60_000)
@@ -198,6 +251,37 @@ test("a lone call is not a batch", async () => {
     const frame = setup.captureCharFrame()
     expect(frame).not.toContain("in this batch")
     expect(frame).toContain("allow this call")
+    expect(frame).toContain("1-4 choose")
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 120_000)
+
+/**
+ * The dialog answers to the mouse alone (tui.md §5.7): hovering a row moves the
+ * cursor onto it, clicking it answers, and a note typed first rides along —
+ * dropping it because the last gesture happened to be a click would be a small
+ * betrayal of what was written.
+ */
+test("the pointer alone answers the dialog, note and all", async () => {
+  const { id, state, setup } = await stepUntilAsked(100, 30)
+  try {
+    await setup.mockInput.typeText("prefer ls")
+    await until(() => setup.captureCharFrame().includes("prefer ls"), 10_000)
+
+    const rows = setup.captureCharFrame().split("\n")
+    const at = rows.findIndex((row) => row.includes("always allow"))
+    expect(at).toBeGreaterThanOrEqual(0)
+    // A move first: the pointer is the cursor while it is over the list.
+    await setup.mockMouse.moveTo(10, at)
+    expect(await settle(setup, 2)).toContain("always allow")
+    await setup.mockMouse.click(10, at)
+
+    await until(() => state.snapshot.items.some((item) => item.kind === "tool" && item.resolved), 30_000)
+    const call = state.snapshot.items.find((item) => item.kind === "tool" && item.resolved)!
+    expect(call.kind === "tool" && call.ok).toBe(true)
+    await until(async () => (await sessionEvents(ws, id)).some((event) => event.kind === "user_text" &&
+      parseApprovalNote((event as { text: string }).text)?.text === "prefer ls"), 30_000)
   } finally {
     setup.renderer.destroy()
   }

@@ -1,6 +1,6 @@
 import { For, Match, Show, Switch, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
-import type { KeyEvent, ScrollBoxRenderable, Selection } from "@opentui/core"
+import type { InputRenderable, KeyEvent, ScrollBoxRenderable, Selection } from "@opentui/core"
 import { Transcript, rowsBelow, windowItems } from "./Transcript.tsx"
 import { Composer, type ComposerApi } from "./Composer.tsx"
 import { ApprovalPanel, type ApprovalChoice } from "./ApprovalPanel.tsx"
@@ -31,6 +31,7 @@ import {
 } from "../approvals.ts"
 import type { GateVerdict } from "../nulya/cli.ts"
 import { sessions_dir } from "../nulya/files.ts"
+import { wrapApprovalNote } from "../approvalnote.ts"
 import { createProjectIndex } from "../references.ts"
 import { createSkillTable, skillTurn } from "../skills.ts"
 import { describeTool } from "../render/registry.ts"
@@ -240,8 +241,13 @@ export function App(props: AppProps) {
    * of them already drawn as a card — and nothing else can join the set.
    */
   const [batchAllowed, setBatchAllowed] = createSignal<ReadonlySet<string>>(new Set())
-  /** The denied call whose reason is being typed (the `N` key). */
-  const [noteFor, setNoteFor] = createSignal<string | null>(null)
+  /** Which answer the approval dialog's cursor is on (tui.md §5.7). */
+  const [choice, setChoice] = createSignal(0)
+  /** Whether the dialog's note field has the keyboard rather than the list. */
+  const [noteFocused, setNoteFocused] = createSignal(false)
+  /** The dialog's note field, for focusing, reading and clearing it. */
+  let noteField: InputRenderable | null = null
+
   /** A handover the model proposed and nobody has answered yet (tui.md §5.8). */
   const [handoff, setHandoff] = createSignal<HandoffFile | null>(null)
   /** Handoff files this process has already acted on or dismissed. */
@@ -769,41 +775,72 @@ export function App(props: AppProps) {
     const asked = pending()
     if (!asked) return
     setPendingQueue(pendingQueue().slice(1))
-    setNoteFor(null)
     tabOf(asked.session)?.state.setAwaitingApproval(null)
     asked.resolve(verdict)
+    // The dialog is about ONE call: whatever was typed for it does not belong to
+    // the next one, and the cursor starts each question at "allow".
+    if (noteField) noteField.value = ""
+    setNoteFocused(false)
+    setChoice(0)
   }
 
   /**
-   * `a` — allow this one and stop asking about its kind for the rest of the run.
+   * Answer with a note — the gesture the whole dialog is built around
+   * (`approvalnote.ts`, tui.md §5.7).
+   *
+   * The kernel's gate carries a note on exactly one of its two answers: `deny
+   * <note>` becomes that call's marker result (DESIGN §4). A note on a YES has
+   * nowhere in the gate to go, and should not — the call runs, and what the
+   * model reads next is the tool's own output. So it goes where everything else
+   * a person says goes: `session append`, drained at the next step boundary,
+   * which lands it right after the tool_results of the batch it was about.
+   */
+  const answer = (allow: boolean, note: string) => {
+    const asked = pending()
+    if (!asked) return
+    const trimmed = note.trim()
+    if (!allow) {
+      settleApproval({ allow: false, ...(trimmed.length > 0 ? { note: trimmed } : {}) })
+      return
+    }
+    settleApproval({ allow: true })
+    if (trimmed.length === 0) return
+    const tab = tabOf(asked.session)
+    // Framed by us, so the driver does not also wrap it as a mid-task message:
+    // this one already says what it is about and what to do with it.
+    void tab?.attach.send(wrapApprovalNote(asked.request.tool, trimmed), true)
+  }
+
+  /**
+   * Allow this one and stop asking about its kind for the rest of the run.
    * `shell` is remembered by its first word, so "always" never quietly becomes
    * "always run any command" (`approvals.alwaysKey`).
    */
-  const allowAlways = () => {
+  const allowAlways = (note: string) => {
     const asked = pending()
     if (!asked) return
     const key = alwaysKey(asked.request, (tool) => toolId(tabOf(asked.session), tool))
     setAlways(new Set([...always(), key]))
     setNotice(`always allowing ${describeKey(key)} this session · /mode for the rest`)
-    settleApproval({ allow: true })
+    answer(true, note)
   }
 
   /**
-   * `A` — allow this call and the rest of the batch it belongs to.
+   * Allow this call and the rest of the batch it belongs to.
    *
    * tcode reviews a batch as one prompt where the tool's own policy says that is
    * safe; nulya's gate is serial by construction (the kernel offers call N only
    * once call N-1 has run), so the equivalent here is a person deciding for the
    * calls THEY CAN SEE: the whole turn is already on screen as cards, and this
-   * answers the remaining ones with the one keypress instead of six.
+   * answers the remaining ones in one gesture instead of six.
    */
-  const allowBatch = () => {
+  const allowBatch = (note: string) => {
     const asked = pending()
     if (!asked) return
     const ahead = batchOf(asked.session).ahead.filter((item) => item.callId !== asked.request.call_id)
     setBatchAllowed(new Set([...batchAllowed(), ...ahead.map((item) => item.callId)]))
     setNotice(`allowing the remaining ${ahead.length} call${ahead.length === 1 ? "" : "s"} of this batch`)
-    settleApproval({ allow: true })
+    answer(true, note)
   }
 
   /**
@@ -829,6 +866,26 @@ export function App(props: AppProps) {
 
   const toggleMode = () => chooseMode(mode() === "ask" ? "auto" : "ask")
 
+  /**
+   * Who holds the keyboard while a call waits: the dialog's note field, or
+   * nobody (the list, which is this screen's own key handler). Never the
+   * composer — a box that still blinks is a box that says "type here", and what
+   * is typed there could not be sent anyway while the kernel is stopped.
+   */
+  createEffect(() => {
+    if (!pending()) {
+      noteField?.blur()
+      // …and hand the keyboard back only if nothing else took it meanwhile: an
+      // overlay and browse mode both blur the composer on purpose, and a dialog
+      // closing is no reason to overrule them.
+      if (!overlay.active() && !browse.active()) composer?.focus()
+      return
+    }
+    composer?.blur()
+    if (noteFocused()) noteField?.focus()
+    else noteField?.blur()
+  })
+
   /** Where the call being asked about sits in its batch, for the panel's heading. */
   const batchPlace = createMemo(() => {
     const asked = pending()
@@ -840,10 +897,11 @@ export function App(props: AppProps) {
   const batchAhead = () => Math.max(0, batchPlace().ahead)
 
   /**
-   * The answers, in the order a person weighs them: yes, yes-and-stop-asking,
-   * no. Each is its own row on the panel and each is what its key does, so the
-   * keyboard and the mouse are two ways to the same list rather than two
-   * interfaces (tui.md §5.7).
+   * The answers, widest-reaching last within each side: allow this one, allow
+   * the batch, allow the kind, allow everything — then deny. Every one of them
+   * takes the note, which is why none of them is "deny with a reason": that was
+   * a separate answer only because the note used to belong to one key
+   * (tui.md §5.7).
    */
   const approvalChoices = createMemo((): ApprovalChoice[] => {
     const asked = pending()
@@ -851,33 +909,30 @@ export function App(props: AppProps) {
     const kind = describeKey(alwaysKey(asked.request, (tool) => toolId(tabOf(asked.session), tool)))
     const ahead = batchAhead()
     return [
-      { key: "y", label: "allow this call", tone: "ok", run: () => settleApproval({ allow: true }) },
+      { label: "allow this call", tone: "ok", run: (note) => answer(true, note) },
       ...(ahead > 0
         ? [
             {
-              key: "A",
               label: `allow it and the ${ahead} call${ahead === 1 ? "" : "s"} left in this batch`,
               tone: "ok" as const,
               run: allowBatch,
             },
           ]
         : []),
-      { key: "a", label: `always allow ${kind} this session`, tone: "warn", run: allowAlways },
+      { label: `always allow ${kind} this session`, tone: "warn", run: allowAlways },
       {
-        key: "n",
-        label: "deny · nothing runs, the model is told",
-        tone: "err",
-        run: () => {
-          settleApproval({ allow: false })
-          setNotice("denied · nothing ran · N next time to say why")
+        // tcode's `set_mode` option, in nulya's two-mode vocabulary. It is on
+        // the list because the dialog owns the keyboard: `/mode auto` is not
+        // typeable while a call is waiting, and "stop asking me" is exactly what
+        // somebody reaches for at the fourth prompt in a row.
+        label: "allow everything from here on · mode auto",
+        tone: "warn",
+        run: (note) => {
+          answer(true, note)
+          chooseMode("auto")
         },
       },
-      {
-        key: "N",
-        label: "deny, and type a reason for the model",
-        tone: "err",
-        run: () => setNoteFor(pending()!.request.call_id),
-      },
+      { label: "deny · nothing runs, the model is told", tone: "err", run: (note) => answer(false, note) },
     ]
   })
 
@@ -920,7 +975,9 @@ export function App(props: AppProps) {
         tabOf(asked.session)?.state.setAwaitingApproval(null)
         asked.resolve({ allow: false })
       }
-      setNoteFor(null)
+      if (noteField) noteField.value = ""
+      setNoteFocused(false)
+      setChoice(0)
       setNotice("the step ended before that call was answered · nothing ran")
     }
     // A batch nobody is executing any more cannot have calls left to wave
@@ -1245,17 +1302,16 @@ export function App(props: AppProps) {
   }
 
   const submit = (text: string) => {
-    // A typed line while a denial is waiting for its reason is that reason, not
-    // a turn: the call is still open, and anything sent to the model now would
-    // arrive after it (tui.md §5.7).
-    if (pending() && noteFor() !== null) {
-      settleApproval({ allow: false, note: text.trim() })
-      setNotice("denied · the model was told why")
-      return
-    }
     setNotice(null)
     if (runCommand(text)) return
     void sendTurn(text)
+  }
+
+  /** Take the answer the cursor is on, with whatever is in the note field. */
+  const takeChoice = () => {
+    const choices = approvalChoices()
+    const picked = choices[Math.min(choice(), choices.length - 1)]
+    picked?.run(noteField?.value ?? "")
   }
 
   /**
@@ -1270,35 +1326,65 @@ export function App(props: AppProps) {
   }
 
   useKeyboard((key) => {
-    // A call is waiting for a verdict: the kernel is stopped on it, so these
-    // four keys come before everything else the screen would do with them
-    // (tui.md §5.7). Typing a reason is the one state that hands the keyboard
-    // back — the composer takes it, and `submit` resolves the denial.
-    // …but only while the composer is empty. `y`, `n` and `a` are letters
-    // before they are answers: taking them out of a half-typed line would make
-    // `/mode auto` unsendable exactly when somebody reaches for it (the same
-    // rule Esc follows for browse mode).
-    if (pending() && noteFor() === null && (composer?.isEmpty() ?? true)) {
-      if (key.name === "y") return consume(key, () => settleApproval({ allow: true }))
-      if (key.name === "a") {
-        // Same pair as `n`/`N`: the lower-case key is the narrow answer, the
-        // shifted one the wider. `a` is wider in KIND (every call like this one,
-        // for the rest of the run), `A` in NUMBER (this batch, and nothing else).
-        if (key.shift) return batchAhead() > 0 ? consume(key, allowBatch) : undefined
-        return consume(key, allowAlways)
+    /**
+     * The approval dialog owns the keyboard while it is up (tui.md §5.7).
+     *
+     * The kernel is stopped on this one call, so there is nothing else on screen
+     * to type at — and that is what lets typing have a single obvious meaning
+     * here: it is the note. The old shape (single letters, only on an empty
+     * composer) had to reserve `y`/`n`/`a` from a box that was still live, which
+     * is why saying anything about a call needed its own designated key.
+     *
+     * `Enter` answers with the row the cursor is on; `Tab` moves between the
+     * list and the note. Everything the composer would have done is unreachable
+     * for these few seconds, which is honest — nothing else can happen anyway.
+     */
+    // …but never the modified keys: Ctrl+C has to keep working while a call
+    // waits, and killing the step is one of the two ways out of a dialog whose
+    // question nobody wants to answer.
+    if (pending() && !key.ctrl && !key.meta) {
+      const choices = approvalChoices()
+      if (key.name === "tab") return consume(key, () => setNoteFocused(!noteFocused()))
+      if (key.name === "return") return consume(key, takeChoice)
+      if (noteFocused()) {
+        // Esc empties the note rather than answering: it is the undo for what
+        // was typed, and an Esc that both discarded the words AND denied the
+        // call would make the small mistake expensive.
+        if (matches(keys.cancel, key)) {
+          return consume(key, () => {
+            if (noteField && noteField.value.length > 0) noteField.value = ""
+            else setNoteFocused(false)
+          })
+        }
+        // Everything else is text: the field has the focus and OpenTUI delivers
+        // it there once this listener declines to claim the key.
+        return
       }
-      if (key.name === "n") {
-        // Shift is the difference between "no" and "no, because": one key for
-        // the answer that needs no words, one for the one that does.
-        if (key.shift) return consume(key, () => setNoteFor(pending()!.request.call_id))
+      if (matches(keys.cancel, key)) return consume(key, () => answer(false, noteField?.value ?? ""))
+      // Arrows only — no `j`/`k`. Vim keys on a list whose alternative use for
+      // a letter is "start writing a note" would eat two of the twenty-six.
+      if (key.name === "up") {
+        return consume(key, () => setChoice((at) => (at - 1 + choices.length) % choices.length))
+      }
+      if (key.name === "down") {
+        return consume(key, () => setChoice((at) => (at + 1) % choices.length))
+      }
+      // A digit picks the row it numbers; a digit with no row is just a digit,
+      // and falls through to the note (tcode's rule).
+      if (key.name && /^[1-9]$/.test(key.name) && Number(key.name) <= choices.length) {
+        return consume(key, () => setChoice(Number(key.name) - 1))
+      }
+      // Any other typing means annotating — the reason the note never has to be
+      // discovered: reach for words and you are already writing them. The
+      // character is inserted here because the field is not focused yet, so the
+      // keystroke that opened it would otherwise be swallowed.
+      if (key.name && key.name.length === 1) {
         return consume(key, () => {
-          settleApproval({ allow: false })
-          setNotice("denied · nothing ran · N next time to say why")
+          setNoteFocused(true)
+          noteField?.insertText(key.shift ? key.name.toUpperCase() : key.name)
         })
       }
-    }
-    if (pending() && noteFor() !== null && matches(keys.cancel, key)) {
-      return consume(key, () => settleApproval({ allow: false }))
+      return
     }
     // An overlay owns the keyboard while it is up; only the keys that open or
     // close one, and the quit key, stay global (tui.md §11, T2 reminder 3).
@@ -1530,7 +1616,11 @@ export function App(props: AppProps) {
                     position={batchPlace().position}
                     batch={batchPlace().batch}
                     choices={approvalChoices()}
-                    note={noteFor() !== null}
+                    selected={choice()}
+                    onSelect={setChoice}
+                    noteFocused={noteFocused()}
+                    onFocusNote={() => setNoteFocused(true)}
+                    onReady={(field) => (noteField = field)}
                   />
                 </Show>
                 <Composer

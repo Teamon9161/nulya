@@ -37,7 +37,8 @@ export interface Attachment {
   status: Accessor<DriverStatus>
   /** The lease has looked free for a while: `Enter` would take over. */
   takeoverReady: Accessor<boolean>
-  send(text: string): Promise<void>
+  /** `framed`: the text already carries its own framing (`Driver.send`). */
+  send(text: string, framed?: boolean): Promise<void>
   step(): Promise<void>
   cancel(): Promise<void>
   kill(): void
@@ -134,11 +135,11 @@ export function createAttachment(
     role,
     takeoverReady,
     status: () => (role() === "observer" ? (sending() ? "sending" : "idle") : driver.status()),
-    async send(text) {
+    async send(text, framed = false) {
       const trimmed = text.trim()
       if (trimmed.length === 0) return
       if (role() === "driver") {
-        await driver.send(trimmed)
+        await driver.send(trimmed, framed)
         return
       }
       // Observer: append only. The turn is deposited in the inbox and the other
@@ -147,7 +148,7 @@ export function createAttachment(
       // can see that writer actually holding the lease, its run is in flight
       // and the turn carries the mid-task framing (midtask.ts); "free" and
       // "unknown" claim nothing, so they wrap nothing.
-      const wire = probeWriterLease(ws, id) === "held" ? wrapMidTask(trimmed) : trimmed
+      const wire = !framed && probeWriterLease(ws, id) === "held" ? wrapMidTask(trimmed) : trimmed
       state.enqueueUser(wire)
       setSending(true)
       try {

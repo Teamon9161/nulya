@@ -5,6 +5,7 @@ import { compactionMarker } from "../../compact.ts"
 import { SkillEchoCard } from "./SkillEchoCard.tsx"
 import { skillEchoOf } from "../../skills.ts"
 import { midTaskOf } from "../../midtask.ts"
+import { approvalNoteOf } from "../../approvalnote.ts"
 import { AssistantTurn } from "./AssistantTurn.tsx"
 import { Thinking } from "./Thinking.tsx"
 import { ToolCard } from "./ToolCard.tsx"
@@ -34,6 +35,16 @@ export function Card(props: { item: TranscriptItem }) {
         <SkillEchoCard
           item={props.item as Extract<TranscriptItem, { kind: "user" }>}
           echo={skillEchoOf(props.item)!}
+        />
+      </Match>
+      {/* Said while approving a call: same shape as a mid-task message, and
+          checked first because it IS one — a more specific one, whose badge
+          names the call it was about (`approvalnote.ts`). */}
+      <Match when={approvalNoteOf(props.item) !== null}>
+        <UserTurn
+          item={props.item as Extract<TranscriptItem, { kind: "user" }>}
+          text={approvalNoteOf(props.item)!.text}
+          badge={`note on ${approvalNoteOf(props.item)!.tool}`}
         />
       </Match>
       {/* Typed while a run was in flight: the ledger keeps the sentinel and the

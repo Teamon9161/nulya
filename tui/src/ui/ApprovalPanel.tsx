@@ -1,139 +1,190 @@
-import { For, Show } from "solid-js"
+import { For, createMemo } from "solid-js"
+import type { InputRenderable } from "@opentui/core"
 import { useScreen, useStyle } from "../render/theme.ts"
-import { createHover, onClick, rowBackground } from "./rows.ts"
+import { createHover, onClick, rowBackground, rowGutter } from "./rows.ts"
 import { fit, wrapWords } from "./columns.ts"
 
 /**
- * One thing a person can answer with, on its own row (tui.md §5.7).
- *
- * The key is the whole affordance: it is what is pressed and what is printed,
- * so nothing on this panel is a control whose name has to be learned somewhere
- * else. `run` is also what a click on the row does — the same decision, reached
- * with the other hand.
+ * One answer a person can give. `tone` colours the label, not the row: the row
+ * background is the cursor's, and two things claiming the same signal is how a
+ * list stops saying where you are.
  */
 export interface ApprovalChoice {
-  key: string
   label: string
-  tone: "ok" | "err" | "warn" | "dim"
-  run: () => void
+  tone: "ok" | "err" | "warn"
+  /** Called with the note, if one was typed. */
+  run: (note: string) => void
 }
 
 /**
- * The call the kernel is holding open, asked ABOVE THE COMPOSER instead of
- * inside the transcript (tui.md §5.7, revised in T27).
+ * The call the kernel is holding open, asked as a DIALOG above the composer
+ * (tui.md §5.7, rebuilt in T28 against tcode's `approval.rs`).
  *
- * It used to be one more line under the tool card, on the theory that the card
- * already showed the command and a second box would be a second visual language
- * for the same event. Two things were wrong with that in practice:
+ * Two rewrites got it here. It began as one more line under the tool card — a
+ * row of eight text nodes that the terminal wrapped into rubble below 78
+ * columns, wedged between the other cards of the same batch, because a turn
+ * draws its whole batch before the first call runs. T27 moved it above the
+ * composer and gave every answer its own row. What that still had was the shape
+ * of a shell prompt: a list of letters to press, `[y/n/a]` with more words.
  *
- *  - the card the kernel stopped on is usually NOT the last one on screen. A
- *    turn emits its whole batch at once, so all of the calls are drawn before
- *    the first one runs, and the question appeared wedged between them.
- *  - it was a row of eight text nodes, which the terminal wrapped wherever it
- *    ran out of columns: `run this?` and its keys interleaved into two lines of
- *    rubble on any window narrower than 78.
+ * This is the version tcode has: a LIST YOU CHOOSE FROM. The pointer moves the
+ * cursor, a click answers, `↑↓` and the digits do the same from the keyboard,
+ * and — the part that carries its weight every day — `Tab` opens a note that
+ * rides along with WHICHEVER option is chosen. "Yes, but use the other flag"
+ * and "no, because…" are the same gesture with a different row under the
+ * cursor, which is the whole reason the note belongs to the dialog rather than
+ * to one designated "deny with a reason" answer.
  *
- * So the question moved to the one place a person is already looking — just
- * above the box they would type in — and every row is a single string cut to
- * the width, which is the only wrap-proof shape a terminal has. The card keeps a
- * quiet marker saying which call this is about.
+ * The panel owns the keyboard while it is up (the composer is blurred): the
+ * kernel is stopped on this call, so there is nothing else to type at — and
+ * typing therefore has one obvious meaning, which is the note.
  */
 export function ApprovalPanel(props: {
-  /** The model-facing tool name (`shell`, `ext:std/read`'s `read`). */
+  /** The model-facing tool name (`shell`, `read`). */
   tool: string
-  /** One line of what the call would actually do; empty when there is nothing to show. */
+  /** What the call would actually do; may be several lines, and is capped. */
   summary: string
   /** This call's place in the turn's batch, 1-based, and how many there are. */
   position: number
   batch: number
   choices: readonly ApprovalChoice[]
-  /** True while a denial is waiting for its typed reason: the composer has the keys. */
-  note: boolean
+  /** Which row the cursor is on. */
+  selected: number
+  onSelect: (index: number) => void
+  /** Whether the note field has the keyboard. */
+  noteFocused: boolean
+  onFocusNote: () => void
+  /** Handed back so the screen can read, clear and focus the field. */
+  onReady: (field: InputRenderable) => void
 }) {
   const style = useStyle()
   const screen = useScreen()
   const hover = createHover()
-  const room = () => Math.max(20, Math.min(screen().width, style.maxWidth) - 8)
+  const width = () => Math.min(screen().width, style.maxWidth)
+  const room = () => Math.max(24, width() - 6)
 
-  const toneColor = (tone: ApprovalChoice["tone"]) => {
-    switch (tone) {
-      case "ok":
-        return style.theme.ok
-      case "err":
-        return style.theme.err
-      case "warn":
-        return style.theme.warn
-      default:
-        return style.theme.muted
-    }
-  }
+  /**
+   * The command, wrapped rather than cut — a long shell line is the thing being
+   * judged, and judging half of one is worse than scrolling. Capped anyway: this
+   * panel must never grow until the transcript it is about is off screen.
+   */
+  const summaryRows = createMemo(() => {
+    const rows = props.summary
+      .split("\n")
+      .flatMap((line) => wrapWords(line, room() - 2))
+      .filter((line) => line.length > 0)
+    return rows.length > 6 ? [...rows.slice(0, 6), `… +${rows.length - 6} more lines`] : rows
+  })
+
+  const toneColor = (tone: ApprovalChoice["tone"]) =>
+    tone === "ok" ? style.theme.ok : tone === "err" ? style.theme.err : style.theme.warn
+
+  const noteClick = onClick(() => props.onFocusNote())
+  // The panel reads the field itself, so a MOUSE answer carries the note too. A
+  // note typed and then clicked away is still what the person wrote; dropping it
+  // because the last gesture was a click would be a small betrayal.
+  let field: InputRenderable | null = null
+  const note = () => field?.value ?? ""
 
   return (
-    <box flexDirection="column" width="100%" paddingLeft={2} paddingRight={1} flexShrink={0}>
+    <box flexDirection="column" width="100%" maxWidth={style.maxWidth} paddingLeft={1} paddingRight={1} flexShrink={0}>
       <box flexDirection="row" width="100%" height={1}>
         <text fg={style.theme.warn} flexShrink={0}>
           {style.glyphs.bar} approve this call
         </text>
         <text fg={style.theme.dim} flexShrink={0}>
+          {` · ${props.tool}`}
           {props.batch > 1 ? ` · ${props.position} of ${props.batch} in this batch` : ""}
         </text>
       </box>
-      {/* What is being asked about, in the tool's own words. The card above says
-          the same thing at length; this says enough to answer without scrolling
-          back to find which card the kernel stopped on. */}
-      <box flexDirection="row" width="100%" height={1}>
-        <text fg={style.theme.muted} flexShrink={0}>
-          {"    "}
-          {fit(props.tool, Math.max(8, room()))}
-        </text>
-        <Show when={props.summary.length > 0}>
-          <text fg={style.theme.dim} flexShrink={0}>
-            {` ${fit(props.summary, Math.max(8, room() - props.tool.length - 1))}`}
+      <For each={summaryRows()}>
+        {(line) => (
+          <text fg={style.theme.muted} height={1}>
+            {`  ${line}`}
           </text>
-        </Show>
+        )}
+      </For>
+
+      {/* The answers. Every row is a click target and the pointer moves the
+          cursor onto it, so the mouse alone gets all the way through this
+          dialog — the keyboard is the second way in, not the only one. */}
+      <For each={props.choices}>
+        {(choice, index) => {
+          const click = onClick(() => choice.run(note()))
+          const tone = () => ({ selected: props.selected === index(), hovered: hover.at() === index() })
+          return (
+            <box
+              flexDirection="row"
+              width="100%"
+              height={1}
+              flexShrink={0}
+              backgroundColor={rowBackground(style, tone())}
+              onMouseDown={click.onMouseDown}
+              onMouseUp={click.onMouseUp}
+              onMouseOver={() => {
+                hover.row(index()).onMouseOver()
+                // The pointer IS the cursor while it is over the list: a click
+                // then answers what the eye is on, and Enter agrees with it.
+                if (!props.noteFocused) props.onSelect(index())
+              }}
+              onMouseOut={hover.row(index()).onMouseOut}
+            >
+              <text fg={rowGutter(style, tone()).fg} flexShrink={0}>
+                {`  ${rowGutter(style, tone()).text}`}
+              </text>
+              <text fg={style.theme.dim} flexShrink={0}>
+                {`${index() + 1}  `}
+              </text>
+              <text fg={tone().selected ? toneColor(choice.tone) : style.theme.muted} flexShrink={0}>
+                {fit(choice.label, room() - 6)}
+              </text>
+            </box>
+          )
+        }}
+      </For>
+
+      {/* The note. Always present, never a mode you have to discover: an empty
+          field with its own prompt says "you may say something here" the way a
+          hidden `N` key never did. */}
+      <box
+        flexDirection="row"
+        width="100%"
+        height={1}
+        flexShrink={0}
+        onMouseDown={noteClick.onMouseDown}
+        onMouseUp={noteClick.onMouseUp}
+      >
+        <text fg={props.noteFocused ? style.theme.accent.user : style.theme.faint} flexShrink={0}>
+          {"    note  "}
+        </text>
+        <input
+          ref={(el: InputRenderable) => {
+            field = el
+            props.onReady(el)
+          }}
+          flexGrow={1}
+          placeholder={props.noteFocused ? "" : "Tab to say something about this call"}
+          placeholderColor={style.theme.faint}
+          textColor={style.theme.fg}
+          focusedTextColor={style.theme.fg}
+          cursorColor={style.theme.accent.user}
+        />
       </box>
 
-      <Show
-        when={!props.note}
-        fallback={
-          <For each={wrapWords("type the reason and press Enter — the model reads it · Esc denies without one", room())}>
-            {(line) => (
-              <text fg={style.theme.dim} height={1}>
-                {"    "}
-                {line}
-              </text>
-            )}
-          </For>
-        }
+      <For
+        each={wrapWords(
+          props.noteFocused
+            ? "Enter answers with this note · Tab back to the list · Esc clears it"
+            : `↑↓ or 1-${props.choices.length} choose · click an answer · Tab writes a note · Enter answers · Esc denies`,
+          room(),
+        )}
       >
-        <For each={props.choices}>
-          {(choice, index) => {
-            const click = onClick(choice.run)
-            return (
-              <box
-                flexDirection="row"
-                width="100%"
-                height={1}
-                flexShrink={0}
-                backgroundColor={rowBackground(style, { selected: false, hovered: hover.at() === index() })}
-                onMouseDown={click.onMouseDown}
-                onMouseUp={click.onMouseUp}
-                {...hover.row(index())}
-              >
-                <text fg={style.theme.faint} flexShrink={0}>
-                  {hover.at() === index() ? `  ${style.glyphs.pointer} ` : "    "}
-                </text>
-                <text fg={toneColor(choice.tone)} flexShrink={0}>
-                  {choice.key}
-                </text>
-                <text fg={style.theme.dim} flexShrink={0}>
-                  {`  ${fit(choice.label, Math.max(8, room() - 4))}`}
-                </text>
-              </box>
-            )
-          }}
-        </For>
-      </Show>
+        {(line) => (
+          <text fg={style.theme.dim} height={1}>
+            {`  ${line}`}
+          </text>
+        )}
+      </For>
     </box>
   )
 }
