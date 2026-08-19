@@ -67,7 +67,7 @@ pub fn takeUserFlag(alloc: std.mem.Allocator, args: []const []const u8) !struct 
     return .{ .user = user, .rest = try rest.toOwnedSlice(alloc) };
 }
 
-/// The root spec an `activate` / `rollback` / `deactivate` acts on. `--user`
+/// The root spec an `activate` / `deactivate` acts on. `--user`
 /// names the user store outright. Otherwise the root whose copy of `id` is IN
 /// EFFECT (`Roots.firstActive`, DESIGN §7.2): the operation lands on what a
 /// session would use — an activate there takes effect, an activate anywhere
@@ -88,7 +88,7 @@ pub fn targetRootSpec(
     const index = if (try search.roots.firstActive(alloc, id)) |active| blk: {
         alloc.free(active.version);
         break :blk active.root;
-    } else search.roots.firstWithVersion(alloc, id, version orelse return null) orelse return null;
+    } else search.roots.firstWithVersion(alloc, id, version orelse return null, .structural) orelse return null;
     return try alloc.dupe(u8, search.roots.entries[index].spec);
 }
 
@@ -166,7 +166,7 @@ pub const ext_usage =
     \\  nulya ext sync [--user] [--activate] [--dry-run]  build every draft in that root: source in <root>/<id>/ installs
     \\  nulya ext seed [--user] [<id>…] [--dry-run]       write the drafts this binary ships into that root; sync builds them
     \\  nulya ext run <id>[@<ver>] [tool] <json> | --arg k=v …   run the version in effect, or exactly that one
-    \\  nulya ext activate|rollback [--user] <id> <ver>   point `current` at a version; older ones are kept
+    \\  nulya ext activate [--user] <id> <ver>            point `current` at a version; activating an older one is the rollback
     \\  nulya ext deactivate [--user] <id>                drop `current`; the versions stay
     \\  nulya ext prune [--user] [<id>] [--dry-run]       delete the versions `current` does not name
     \\  nulya ext list | inspect <id>                     every extension (version, root, contributions), or one manifest
@@ -184,9 +184,9 @@ pub const session_usage =
     \\  nulya session append <id> [<text> | --file <p>] [--image <p>]…
     \\                                                    queue a user turn for the next step boundary; --image inlines a
     \\                                                    png/jpeg ≤5 MB, if the model's catalog entry says vision = true
-    \\  nulya session step <id> [--max-steps N] [--effort E] [--stream]
+    \\  nulya session step <id> [--max-steps N] [--effort E] [--stream] [--gate]
     \\                                                    run to end of turn or budget; stdout = event JSONL, --stream adds
-    \\                                                    live model/tool lines as they happen
+    \\                                                    live model/tool lines, --gate asks stdin to allow each tool call
     \\  nulya session events <id> [--since N] [--follow]  read-only tail of the event log
     \\  nulya session cancel <id>                         request cancel at the next step boundary
     \\  nulya session outcome <id> <success|partial|failure> [--note <text>] [--seq N]
@@ -196,8 +196,8 @@ pub const session_usage =
 ;
 
 pub const config_usage =
-    \\  nulya config show [--json] [--refresh]            effective profiles, model catalog and pins; never a secret
-    \\                                                    --refresh asks a subscription endpoint for today's models
+    \\  nulya config show [--json]                        effective profiles, model catalog and pins; never a secret
+    \\  nulya config refresh [--json]                     ask a subscription endpoint for today's models, then show
     \\
 ;
 
@@ -232,7 +232,8 @@ pub fn usage(io: std.Io) !u8 {
         \\reading this harness
         \\
     ++ config_usage ++ skill_usage ++ src_usage ++ toolchain_usage ++
-        \\  nulya help                                        this text; a bare `nulya` runs the built-in demo prompt
+        \\  nulya help                                        this text, which a bare `nulya` prints too
+        \\  nulya demo                                        one fixed-prompt session, end to end, to see it work
         \\
         \\a fuller reference ships with the nulya repo, as an extension you install once:
         \\  nulya ext build extensions/guide --user     then     nulya ext activate --user guide <version>

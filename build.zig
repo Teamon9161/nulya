@@ -51,8 +51,11 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
-    const run_step = b.step("run", "Run nulya");
+    // `demo` rather than nothing: a bare `nulya` prints its usage now, and this
+    // step's job is the smoke test — one real session, end to end. Arguments
+    // given on the command line replace it (`zig build run -- session list`).
+    if (b.args) |args| run_cmd.addArgs(args) else run_cmd.addArg("demo");
+    const run_step = b.step("run", "Run the built-in demo session (or `-- <args>`)");
     run_step.dependOn(&run_cmd.step);
 
     const tests = b.addTest(.{ .root_module = root });

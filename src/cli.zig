@@ -14,9 +14,11 @@ const cli_session = @import("cli/session.zig");
 const cli_src = @import("cli/src.zig");
 const cli_config = @import("cli/config.zig");
 
-/// The bare-`nulya` demo composes a session through the same code path
-/// `session new` does, so the two cannot drift (DESIGN §14).
+/// `nulya demo` composes a session through the same code path `session new`
+/// does, so the two cannot drift (DESIGN §14).
 pub const createSession = cli_session.createSession;
+
+const demo_prompt = "What system am I on?";
 
 /// The top-level help — also what a bare `nulya ext` / `nulya skill` prints, so
 /// it lives beside the rest of the shared plumbing rather than here.
@@ -36,6 +38,27 @@ pub fn dispatch(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) 
     if (std.mem.eql(u8, args[0], "session")) return cli_session.dispatchSession(alloc, io, args[1..]);
     if (std.mem.eql(u8, args[0], "src")) return cli_src.dispatchSrc(alloc, io, args[1..]);
     if (std.mem.eql(u8, args[0], "config")) return cli_config.dispatchConfig(alloc, io, args[1..]);
+    if (std.mem.eql(u8, args[0], "demo")) return runDemo(alloc, io);
     try common.printErrFmt(alloc, io, "unknown command '{s}'; run `nulya help`\n", .{args[0]});
     return 1;
+}
+
+/// `nulya demo` runs a fixed-prompt session over the same durable path a driver
+/// uses (DESIGN §3.4, §14). It is a CLIENT of the verbs beside it — `session
+/// new`, then `session append`, then `session step` — rather than a second
+/// assembly of config, environment and session creation, so it can never drift
+/// from what `nulya session *` actually does. The offline scripted provider
+/// stands in when no credential is set (`session new` says so on stderr).
+///
+/// A verb rather than what a bare `nulya` does: running the binary with no
+/// arguments should say what it can do, not start writing session files.
+fn runDemo(alloc: std.mem.Allocator, io: std.Io) !u8 {
+    const id = (try cli_session.createSession(alloc, io, &.{})) orelse return 1;
+    defer alloc.free(id);
+    std.debug.print("session: {s}\n", .{id});
+
+    const appended = try cli_session.dispatchSession(alloc, io, &.{ "append", id, demo_prompt });
+    if (appended != 0) return appended;
+    // stdout is what the step appended, one JSONL event per line.
+    return cli_session.dispatchSession(alloc, io, &.{ "step", id, "--max-steps", "4" });
 }
