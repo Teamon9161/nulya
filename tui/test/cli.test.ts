@@ -16,7 +16,7 @@ import {
   sessionStep,
   type StepLine,
 } from "../src/nulya/cli.ts"
-import { createSessionState } from "../src/state/session.ts"
+import { cacheShare, createSessionState } from "../src/state/session.ts"
 import { projection, scripted_env, scripted_loop_env, tempWorkspace, type TempWorkspace } from "./support.ts"
 
 let ws: TempWorkspace
@@ -245,4 +245,16 @@ describe("cancel", () => {
     // Well under the budget: the cancel, not the cap, is what stopped it.
     expect(statuses.length).toBeLessThan(20)
   }, 120_000)
+})
+
+test("the cache share is of the whole prompt, not of its uncached part", () => {
+  // The kernel's `input_tokens` is the NON-cached part (provider.zig), so a
+  // step that served 900 of 1000 prompt tokens from cache arrives as
+  // input 100 / cacheRead 900 — 90%, never 900%.
+  expect(cacheShare({ input: 100, cacheRead: 900, cacheWrite: 0 })).toBe(90)
+  // A cache write is prompt too: 1080 read of 1200 + 1080 + 120.
+  expect(cacheShare({ input: 1200, cacheRead: 1080, cacheWrite: 120 })).toBe(45)
+  // Never above 100, and 0 before anything was priced.
+  expect(cacheShare({ input: 0, cacheRead: 500, cacheWrite: 0 })).toBe(100)
+  expect(cacheShare({ input: 0, cacheRead: 0, cacheWrite: 0 })).toBe(0)
 })

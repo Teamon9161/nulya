@@ -25,7 +25,7 @@ import { OverlayFooter, createKeyHelp } from "./Footer.tsx"
 import { readToolUsage, type ToolUsage } from "../../nulya/files.ts"
 import { UsageTable } from "./UsageTable.tsx"
 import type { Workspace } from "../../nulya/bin.ts"
-import type { SessionSnapshot } from "../../state/session.ts"
+import { cacheShare, type SessionSnapshot } from "../../state/session.ts"
 
 const title = "usage · this session's tokens · tool counts since the workspace began"
 const caveat =
@@ -50,7 +50,6 @@ export function UsageView(props: { ws: Workspace; snapshot: SessionSnapshot; onC
   })
 
   const usage = () => props.snapshot.usage
-  const cachePercent = () => (usage().input > 0 ? Math.round((usage().cacheRead / usage().input) * 100) : 0)
 
   /** The columns this overlay may draw in: the box pads one on each side. */
   const inner = () => Math.max(20, screen().width - 2)
@@ -89,7 +88,7 @@ export function UsageView(props: { ws: Workspace; snapshot: SessionSnapshot; onC
       <Row left="steps priced" right={`${usage().pricedSteps} · ${props.snapshot.steps} watched here`} />
       <Row left="input tokens" right={String(usage().input)} />
       <Row left="output tokens" right={String(usage().output)} />
-      <Row left="cache read" right={`${usage().cacheRead} · ${cachePercent()}% of input`} />
+      <Row left="cache read" right={`${usage().cacheRead} · ${cacheShare(usage())}% of prompt`} />
       <Row left="cache write" right={String(usage().cacheWrite)} />
       <Row left="last prompt" right={String(usage().lastPrompt)} />
       <box height={1} />

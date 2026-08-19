@@ -288,7 +288,9 @@ test("/usage separates this session's tokens from the durable tool journal", asy
     expect(frame).toContain("steps priced")
     expect(frame).toContain("1 · 1 watched here")
     expect(frame).toContain("1200")
-    expect(frame).toContain("90% of input")
+    // 1080 cached of a 1200 + 1080 prompt: the share of the WHOLE prompt, not
+    // of the uncached part (which would read 90% here and 900% on a good step).
+    expect(frame).toContain("47% of prompt")
     // The journal the kernel keeps across sessions; the step above ran `shell`.
     expect(frame).toContain("tool usage · .nulya/tool-usage.jsonl")
     expect(frame).toContain("builtin.shell")

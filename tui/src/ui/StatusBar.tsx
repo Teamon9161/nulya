@@ -3,7 +3,7 @@ import { useScreen, useStyle } from "../render/theme.ts"
 import { onClick } from "./rows.ts"
 import { displayWidth, fit } from "./columns.ts"
 import { builtin_tools } from "../pins.ts"
-import type { SessionSnapshot } from "../state/session.ts"
+import { cacheShare, type SessionSnapshot } from "../state/session.ts"
 import type { DriverStatus } from "../state/driver.ts"
 import type { Role } from "../state/attach.ts"
 import type { PermissionMode } from "../approvals.ts"
@@ -90,8 +90,7 @@ export function StatusBar(props: {
   const usage = createMemo(() => {
     const u = props.snapshot.usage
     if (u.input === 0 && u.output === 0) return "no usage yet"
-    const cache = u.input > 0 ? Math.round((u.cacheRead / u.input) * 100) : 0
-    return `↑${compact(u.input)} ↓${compact(u.output)} cache ${cache}%`
+    return `↑${compact(u.input)} ↓${compact(u.output)} cache ${cacheShare(u)}%`
   })
 
   /**

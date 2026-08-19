@@ -133,6 +133,19 @@ export interface UsageTotals {
   lastPrompt: number
 }
 
+/**
+ * The share of all prompt tokens this session has sent that came out of the
+ * provider's cache. The denominator is the WHOLE prompt — `input` here is the
+ * kernel's `input_tokens`, already normalised to the non-cached part (see
+ * `lastPrompt`), so `cacheRead / input` is "cached ÷ uncached" and reads 900%
+ * on a step that hit the cache for nine tokens in ten. Rounded to a percent;
+ * 0 before anything was priced.
+ */
+export function cacheShare(u: Pick<UsageTotals, "input" | "cacheRead" | "cacheWrite">): number {
+  const prompt = u.input + u.cacheRead + u.cacheWrite
+  return prompt > 0 ? Math.round((u.cacheRead / prompt) * 100) : 0
+}
+
 export interface SessionSnapshot {
   id: string
   header: SessionHeader | null
