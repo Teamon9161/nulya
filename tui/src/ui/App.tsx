@@ -4,6 +4,7 @@ import type { InputRenderable, KeyEvent, ScrollBoxRenderable, Selection } from "
 import { Transcript, rowsBelow, windowItems } from "./Transcript.tsx"
 import { Composer, type ComposerApi } from "./Composer.tsx"
 import { ApprovalPanel, type ApprovalChoice } from "./ApprovalPanel.tsx"
+import { ModePicker, initialChoice, modeAt, moveChoice } from "./ModePicker.tsx"
 import { StatusBar } from "./StatusBar.tsx"
 import { TabBar } from "./TabBar.tsx"
 import { SessionsView } from "./overlays/SessionsView.tsx"
@@ -25,14 +26,14 @@ import {
   alwaysKey,
   decide,
   describeKey,
-  isMode,
   modes,
+  normalizeMode,
   summarize as describeCall,
   type GateRequest,
   type PermissionMode,
 } from "../approvals.ts"
 import type { GateVerdict } from "../nulya/cli.ts"
-import { sessions_dir } from "../nulya/files.ts"
+import { listExtensions, sessions_dir } from "../nulya/files.ts"
 import { wrapApprovalNote } from "../approvalnote.ts"
 import { createProjectIndex } from "../references.ts"
 import { createSkillTable, skillTurn } from "../skills.ts"
@@ -49,7 +50,18 @@ import {
   type ProfileView,
   type TaskEntry,
 } from "../nulya/cli.ts"
-import { adoptBundled, failedIds, planStore, seedBundled, summarize } from "../extensions.ts"
+import {
+  activePromptPackages,
+  adoptBundled,
+  autoActivatable,
+  failedIds,
+  planStore,
+  promptPackageWarning,
+  promptsOf,
+  seedBundled,
+  summarize,
+  syncRoot,
+} from "../extensions.ts"
 import { runCompact } from "../compact.ts"
 import { buildHandoff, handoff_pin, headline, nextHandoff, type HandoffFile } from "../handoff.ts"
 import { buildEvolution, formatWithRef, parseWithRef, type WithRef } from "../evolve.ts"
@@ -222,6 +234,13 @@ export function App(props: AppProps) {
     loadTuiState(props.statePath).mode ?? props.style.settings.driver.mode,
   )
   /**
+   * Whether the mode picker is up, and which row its cursor is on (tui.md §5.7,
+   * T31). A dialog above the composer rather than a full-screen overlay — two
+   * rows of content — so it is its own two signals rather than an `OverlayKind`.
+   */
+  const [modePicker, setModePicker] = createSignal(false)
+  const [modeChoice, setModeChoice] = createSignal(0)
+  /**
    * What `a` has collected. In memory and per run on purpose: trying a tool out
    * should cost nothing and leave nothing in a file somebody else reads — the
    * durable form of the same statement is `[approvals] allow` in `tui.toml`.
@@ -349,14 +368,26 @@ export function App(props: AppProps) {
           setNotice(`syncing extensions… ${done}/${total}`)
         })
         let activated = 0
+        /** Ids this pass built and deliberately left switched off (T31). */
+        const held: string[] = []
         if (plan.activate) {
+          const where = syncRoot(props.ws, root.user)
           for (const line of report.lines) {
             if (line.state !== "built" || !line.version || line.activation === "active") continue
             // What arrived with the binary this run is `adoptBundled`'s to
-            // decide: everything a fresh seed drops is `built` by this pass, and
-            // this loop would happily activate `evolution` — whose whole point
-            // is that its system prompt enters ONE session, on purpose.
+            // decide: everything a fresh seed drops is `built` by this pass.
             if (arrived.includes(line.id)) continue
+            // A package that contributes a SYSTEM PROMPT is a mode, and a
+            // background pass does not choose modes (`autoActivatable`, T31).
+            // `arrived` used to be the whole guard, which only ever covered the
+            // ONE start where `ext seed` dropped the drafts — so a machine
+            // seeded yesterday, or by hand, had `evolution` switched on by this
+            // very loop the next time its draft rebuilt, and every session
+            // afterwards opened believing it was the slow loop.
+            if (!autoActivatable(line.id, await promptsOf(props.ws, where, line.id, line.version))) {
+              held.push(line.id)
+              continue
+            }
             try {
               await extSetCurrent(props.ws, "activate", line.id, line.version, { user: root.user })
               activated += 1
@@ -379,18 +410,41 @@ export function App(props: AppProps) {
         // A pass that changed nothing has no news — "0 built · 5 already" would
         // park on the status line until the next keypress and say nothing. The
         // durable per-id state lives in /ext either way.
-        if (report.built === 0 && failed.length === 0 && activated === 0 && adopted.length === 0) continue
+        if (report.built === 0 && failed.length === 0 && activated === 0 && adopted.length === 0 && held.length === 0) {
+          continue
+        }
         news.push(
           summarize(root.label, report) +
             (activated > 0 ? ` · ${activated} activated` : "") +
             adopted.map((part) => ` · ${part}`).join("") +
+            // Built and left off on purpose: said, because a package that is
+            // there and does nothing is otherwise a mystery, and `/ext` is the
+            // one key that turns it on for real.
+            (held.length > 0 ? ` · ${held.join(" ")} built, left off (a mode) · /ext` : "") +
             (failed.length > 0 ? ` · ${failed.join(" ")} not built · /ext` : ""),
         )
       } catch (error) {
         news.push(`extension sync: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
+    // …and whatever a mode package is doing on this machine ALREADY, whoever
+    // switched it on and whenever (T31). This is the half no guard can fix: the
+    // pointer is on disk, `evolution`'s prompt is in front of every model, and
+    // nothing on the screen said so. Named, not undone — turning it off is as
+    // much a person's decision as turning it on was.
+    const worn = promptPackageWarning(await activeModes())
+    if (worn) news.push(worn)
     setNotice(news.length > 0 ? news.join(" · ") : null)
+  }
+
+  /** The packages that are active and contribute a system prompt, right now. */
+  const activeModes = async (): Promise<string[]> => {
+    try {
+      return activePromptPackages(await listExtensions(props.ws))
+    } catch {
+      // No listing is "unknown", and unknown is not news.
+      return []
+    }
   }
 
   onMount(() => void syncStores())
@@ -592,6 +646,28 @@ export function App(props: AppProps) {
     const here = tab()
     if (here.kind === "draft") return plannedPins().length
     return snapshot().header?.composition.native_tools.length ?? 0
+  }
+
+  /**
+   * The packages whose SYSTEM PROMPT this tab is wearing (tui.md §11, T31).
+   *
+   * A `--with` member is usually nothing but a prompt — a mode, an identity —
+   * and it is the single fact that changes what the model thinks it is. It was
+   * visible on the draft screen and on the composition card, and nowhere at all
+   * once the session had started and the card was folded, which is how a session
+   * carrying `evolution` looked exactly like one that was not.
+   *
+   * A draft has only its `--with` ref (nothing is frozen yet, and the version is
+   * not built into a manifest this side can read); a started session has the
+   * frozen contributions, which say which members actually contribute a prompt.
+   */
+  const wearing = (): string[] => {
+    const here = tab()
+    if (here.kind === "draft") {
+      const bring = here.bring()
+      return bring ? [bring.id] : []
+    }
+    return here.contributions().filter((c) => c.systemPrompts.length > 0).map((c) => c.id)
   }
 
   /** What a draft tab's first message would freeze — the welcome screen's facts. */
@@ -855,26 +931,38 @@ export function App(props: AppProps) {
 
   /**
    * Switch the mode, and re-judge whatever is on screen with it. A person who
-   * flips to `auto` while a card is up meant that card too — leaving it waiting
-   * would make the switch look broken and hold the kernel for no reason.
+   * flips to `unsafe` while a card is up meant that card too — leaving it
+   * waiting would make the switch look broken and hold the kernel for no reason.
+   *
+   * It says NOTHING afterwards (T31). The chip on the status line already shows
+   * which mode this is, and the picker that was just up said what both of them
+   * do; a two-line explanation of a state that is drawn three columns away is
+   * how the one line with no room to spare lost the model, the cost and the
+   * activity to each other.
    */
   const chooseMode = (next: PermissionMode) => {
+    setModePicker(false)
     setMode(next)
     rememberMode(next, props.statePath)
     const asked = pending()
-    if (asked) {
-      const again = decideNow(asked.request, tabOf(asked.session))
-      if (again === "allow") settleApproval({ allow: true })
-      else if (again === "deny") settleApproval({ allow: false, note: "denied by a standing rule in this workspace" })
-    }
-    setNotice(
-      next === "auto"
-        ? "mode auto · tool calls run without asking, except what [approvals] ask or deny says"
-        : "mode ask · every tool call no rule settles waits for you",
-    )
+    if (!asked) return
+    const again = decideNow(asked.request, tabOf(asked.session))
+    if (again === "allow") settleApproval({ allow: true })
+    else if (again === "deny") settleApproval({ allow: false, note: "denied by a standing rule in this workspace" })
   }
 
-  const toggleMode = () => chooseMode(mode() === "ask" ? "auto" : "ask")
+  /**
+   * Open the picker — what a click on the chip and a bare `/mode` both do
+   * (tui.md §5.7, T31). It used to be a toggle, which is the one gesture that
+   * cannot say what the other side is.
+   */
+  const openModePicker = () => {
+    setModeChoice(initialChoice(mode()))
+    setModePicker(true)
+    setNotice(null)
+  }
+
+  const closeModePicker = () => setModePicker(false)
 
   /**
    * Who holds the keyboard while a call waits: the dialog's note field, or
@@ -886,14 +974,24 @@ export function App(props: AppProps) {
     if (!pending()) {
       noteField?.blur()
       // …and hand the keyboard back only if nothing else took it meanwhile: an
-      // overlay and browse mode both blur the composer on purpose, and a dialog
-      // closing is no reason to overrule them.
-      if (!overlay.active() && !browse.active()) composer?.focus()
+      // overlay, browse mode and the mode picker all blur the composer on
+      // purpose, and a dialog closing is no reason to overrule them.
+      if (!overlay.active() && !browse.active() && !modePicker()) composer?.focus()
       return
     }
     composer?.blur()
     if (noteFocused()) noteField?.focus()
     else noteField?.blur()
+  })
+
+  /**
+   * The mode picker holds the keyboard while it is up, for the same reason the
+   * approval dialog does (T28): a list you choose from is not a list you can
+   * choose from if `j` goes into the composer behind it.
+   */
+  createEffect(() => {
+    if (modePicker()) composer?.blur()
+    else if (!pending() && !overlay.active() && !browse.active()) composer?.focus()
   })
 
   /** Where the call being asked about sits in its batch, for the panel's heading. */
@@ -932,14 +1030,14 @@ export function App(props: AppProps) {
       { label: `always allow ${kind} this session`, tone: "warn", run: allowAlways },
       {
         // tcode's `set_mode` option, in nulya's two-mode vocabulary. It is on
-        // the list because the dialog owns the keyboard: `/mode auto` is not
+        // the list because the dialog owns the keyboard: `/mode unsafe` is not
         // typeable while a call is waiting, and "stop asking me" is exactly what
         // somebody reaches for at the fourth prompt in a row.
-        label: "allow everything from here on · mode auto",
+        label: "allow everything from here on · mode unsafe",
         tone: "warn",
         run: (note) => {
           answer(true, note)
-          chooseMode("auto")
+          chooseMode("unsafe")
         },
       },
       { label: "deny · nothing runs, the model is told", tone: "err", run: (note) => answer(false, note) },
@@ -954,7 +1052,7 @@ export function App(props: AppProps) {
    * the rest does not need the transcript. Exactly the signal `drivers/goal.*`
    * watches for — a file, not a protocol — so both drivers read the same thing.
    *
-   * `auto` follows it; `ask` puts it on screen, because a fork is the one move
+   * `unsafe` follows it; `ask` puts it on screen, because a fork is the one move
    * that changes which session the person is talking to.
    */
   const checkHandoff = () => {
@@ -962,7 +1060,7 @@ export function App(props: AppProps) {
     if (!here || handoff()) return
     const found = nextHandoff(props.ws, here.id, handoffsSeen())
     if (!found) return
-    if (mode() === "auto") {
+    if (mode() === "unsafe") {
       setHandoffsSeen(new Set([...handoffsSeen(), found.path]))
       void followHandoffFile(found)
       return
@@ -1040,8 +1138,16 @@ export function App(props: AppProps) {
   }
 
   /**
-   * `/evolve` — build the evolution package and put it on the next session
-   * (`evolve.ts`). Not on this one: composition freezes at `session new`
+   * `/evolve` — the slow loop, for one session (`evolve.ts`).
+   *
+   * It opens a NEW tab wearing the evolution package: an identity system prompt
+   * and a skill about reviewing sessions that are already finished and judging
+   * what is worth keeping or building. It is not "make this conversation start
+   * evolving", and it does not activate anything — `--with` is membership in one
+   * composition, where `activate` would put that identity in front of every
+   * model this machine runs (T31, the bug this wording came from).
+   *
+   * Not on THIS session either: composition freezes at `session new`
    * (physics #2), so there is no way to hand the model a new system prompt
    * mid-conversation, and pretending otherwise would be the one lie this front
    * end must never tell.
@@ -1051,6 +1157,12 @@ export function App(props: AppProps) {
     try {
       const ref = await buildEvolution(props.ws)
       startDraft(undefined, false, ref)
+      // After `startDraft`, whose own line is about the model: this says which
+      // tab, what it is wearing, and — the part people got wrong — that nothing
+      // was activated and nothing has started yet.
+      setNotice(
+        `new tab · wearing ${formatWithRef(ref)} · review finished sessions, judge what to keep · nothing activated · your next message starts it`,
+      )
     } catch (error) {
       // Almost always "there is no extensions/evolution here": the package ships
       // with nulya's source, and this is somebody else's workspace.
@@ -1064,8 +1176,8 @@ export function App(props: AppProps) {
    *
    * It was `/mode` until the permission mode needed that name (tui.md §5.7).
    * `/as evolution` also reads as what it does — this session speaks AS that
-   * package — where `/mode evolution` and `/mode auto` were two unrelated things
-   * behind one word.
+   * package — where `/mode evolution` and `/mode unsafe` were two unrelated
+   * things behind one word.
    */
   const wearNow = (word: string | undefined) => {
     const ref = word ? parseWithRef(word) : null
@@ -1213,9 +1325,15 @@ export function App(props: AppProps) {
     }
     if (command === "/mode") {
       const word = words[1]
-      if (!word) toggleMode()
-      else if (isMode(word)) chooseMode(word)
-      else setNotice(`/mode <${modes.join("|")}> · now: ${mode()} · no argument switches`)
+      // Bare `/mode` is the picker, not a flip (T31): the two modes and what
+      // each one does are the answer to "which mode am I in", and a toggle can
+      // only ever say one of them. Named, it still switches on the spot.
+      if (!word) openModePicker()
+      else {
+        const named = normalizeMode(word)
+        if (named) chooseMode(named)
+        else setNotice(`/mode <${modes.join("|")}> · now: ${mode()} · no argument opens the picker`)
+      }
       return true
     }
     if (command === "/as") {
@@ -1357,6 +1475,29 @@ export function App(props: AppProps) {
   }
 
   useKeyboard((key) => {
+    /**
+     * The mode picker, first of all — it is the most recently opened dialog, and
+     * it can be opened by CLICKING the chip while a call is waiting, which is
+     * the one moment two dialogs are on screen at once (tui.md §5.7, T31).
+     * Answering it re-judges that waiting call on the spot (`chooseMode`).
+     */
+    if (modePicker() && !key.ctrl && !key.meta) {
+      if (matches(keys.cancel, key)) return consume(key, closeModePicker)
+      if (key.name === "up" || key.name === "k") return consume(key, () => setModeChoice((at) => moveChoice(at, -1)))
+      if (key.name === "down" || key.name === "j") return consume(key, () => setModeChoice((at) => moveChoice(at, 1)))
+      if (key.name === "return") {
+        return consume(key, () => {
+          const picked = modeAt(modeChoice())
+          if (picked) chooseMode(picked)
+          else closeModePicker()
+        })
+      }
+      // A digit picks the row it numbers, as in the approval dialog.
+      if (key.name && /^[1-9]$/.test(key.name) && modeAt(Number(key.name) - 1)) {
+        return consume(key, () => chooseMode(modeAt(Number(key.name) - 1)!))
+      }
+      return consume(key, () => {})
+    }
     /**
      * The approval dialog owns the keyboard while it is up (tui.md §5.7).
      *
@@ -1651,6 +1792,18 @@ export function App(props: AppProps) {
                 <Show when={handoff()}>
                   <HandoffPanel file={handoff()!} />
                 </Show>
+                {/* The permission mode, where it is chosen (tui.md §5.7, T31).
+                    Above the approval dialog because it can be opened from one:
+                    a click on the chip while a call waits is exactly the "stop
+                    asking me" gesture, and the answer re-judges that call. */}
+                <Show when={modePicker()}>
+                  <ModePicker
+                    current={mode()}
+                    selected={modeChoice()}
+                    onSelect={setModeChoice}
+                    onPick={chooseMode}
+                  />
+                </Show>
                 {/* The call the kernel is stopped on, asked where the answer is
                     given (tui.md §5.7). Above the composer for the same reason
                     the handover proposal is: it is a question about what happens
@@ -1698,7 +1851,9 @@ export function App(props: AppProps) {
                   awaiting={pending() !== null}
                   background={runningTasks()}
                   onOpenTasks={() => openOverlay("tasks")}
-                  onToggleMode={toggleMode}
+                  onPickMode={openModePicker}
+                  wearing={wearing()}
+                  onOpenExt={() => openOverlay("ext")}
                   hint={notice() ?? undefined}
                   behind={behind()}
                   contextWindow={contextWindow()}

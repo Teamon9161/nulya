@@ -1,13 +1,13 @@
 // Bun Snapshot v1, https://bun.sh/docs/test/snapshots
 
-exports[`/model is models and only models: one row per runnable (provider, model), nothing about keys 1`] = `
-" model · what the next session runs on                                                                                  
+exports[`/model is models and only models: grouped under their provider, nothing about keys 1`] = `
+" ◈ model · what the next session runs on                                                                                
                                                                                                                         
- ▾ deepseek  DeepSeek V4 Flash  deepseek-v4-flash  1M ctx  ‹ auto ›  ✓ current                                          
-   deepseek  DeepSeek V4 Pro    deepseek-v4-pro    1M ctx  ‹ auto ›                                                     
-   scripted  scripted-demo                                 no dial   offline                                            
-                                                                                                                        
-                                                                                                                        
+ deepseek                                                                                                               
+   ▾ DeepSeek V4 Flash  deepseek-v4-flash  1M ctx  ‹ auto ›  ✓ current                                                  
+     DeepSeek V4 Pro    deepseek-v4-pro    1M ctx  ‹ auto ›                                                             
+ scripted · offline stand-in                                                                                            
+     scripted-demo                                 no dial                                                              
                                                                                                                         
                                                                                                                         
                                                                                                                         
@@ -30,20 +30,20 @@ exports[`/model is models and only models: one row per runnable (provider, model
                                                                                                                         
                                                                                                                         
  deepseek · openai wire · https://api.deepseek.com · DEEPSEEK_API_KEY set                                               
- j/k move · h/l effort · Enter starts a session · Esc close · ? keys                                                    
+ ↑↓ model · ←→ effort · Enter starts a session · Esc close · ? keys                                                     
 "
 `;
 
 exports[`the model table is cut to its columns at 76: one row each, a gutter that survives, nothing wraps 1`] = `
-" model · what the next session runs on                                      
+" ◈ model · what the next session runs on                                    
  openai has no API key · this session is the offline stand-in               
  pick a model that can run                                                  
                                                                             
- ▾ deepseek  DeepSeek V4 Flash  deepseek-v4-fla…  1M ctx  ‹ auto ›          
-   deepseek  DeepSeek V4 Pro    deepseek-v4-pro   1M ctx  ‹ auto ›          
-   scripted  scripted-demo                                no dial   offline 
-                                                                            
-                                                                            
+ deepseek                                                                   
+   ▾ DeepSeek V4 Flash  deepseek-v4-flash  1M ctx  ‹ auto ›                 
+     DeepSeek V4 Pro    deepseek-v4-pro    1M ctx  ‹ auto ›                 
+ scripted · offline stand-in                                                
+     scripted-demo                                 no dial                  
                                                                             
                                                                             
                                                                             
@@ -64,6 +64,6 @@ exports[`the model table is cut to its columns at 76: one row each, a gutter tha
                                                                             
                                                                             
  deepseek · openai wire · https://api.deepseek.com · DEEPSEEK_API_KEY set   
- j/k move · h/l effort · Enter starts a session · Esc close · ? keys        
+ ↑↓ model · ←→ effort · Enter starts a session · Esc close · ? keys         
 "
 `;

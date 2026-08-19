@@ -13,7 +13,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
-import { isMode, type PermissionMode } from "../approvals.ts"
+import { normalizeMode, type PermissionMode } from "../approvals.ts"
 import { userConfigDir } from "./settings.ts"
 
 /** The last (profile, model, effort) picked in `/model`, or by `/effort`. */
@@ -30,8 +30,9 @@ export interface TuiState {
   /**
    * The permission mode last chosen on screen (`/mode`, the status-line chip).
    * Program state, like the model pick and for the same reason: a person who
-   * switched to `auto` yesterday should not have to find `tui.toml` today.
-   * `tui.toml`'s `[driver] mode` is the fallback when nothing was chosen.
+   * switched to `unsafe` yesterday should not have to find `tui.toml` today.
+   * `tui.toml`'s `[driver] mode` is the fallback when nothing was chosen. A file
+   * that still says `auto` is read as `unsafe` (`normalizeMode`).
    */
   mode?: PermissionMode
   /**
@@ -87,8 +88,15 @@ export function loadTuiState(path = tuiStatePath()): TuiState {
     if (Array.isArray(asked)) state.asked_stores = asked.filter((s): s is string => typeof s === "string")
     const pins = record["session_pins"]
     if (Array.isArray(pins)) state.session_pins = pins.filter((s): s is string => typeof s === "string")
+    // `auto` was this mode's name until it was renamed to `unsafe`; the file
+    // written yesterday still says it, and `normalizeMode` is the one place that
+    // knows. Nothing is rewritten here — the next `rememberMode` writes the new
+    // word, and until then the old one keeps meaning what it meant.
     const mode = record["mode"]
-    if (typeof mode === "string" && isMode(mode)) state.mode = mode
+    if (typeof mode === "string") {
+      const known = normalizeMode(mode)
+      if (known) state.mode = known
+    }
     if (record["adopted_std_edit_pin"] === true) state.adopted_std_edit_pin = true
     // Every key is picked out by name, so a file written by an older build —
     // `asked_bundled`, retired in T23 when the bundled question went away — is

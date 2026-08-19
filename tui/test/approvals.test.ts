@@ -4,16 +4,24 @@
  * so everything a person would call "permissions" is here, and it is a function.
  */
 import { expect, test } from "bun:test"
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import {
   alwaysKey,
   decide,
   default_rules,
   describeKey,
+  isMode,
+  modes,
+  normalizeMode,
   shellCommand,
   summarize,
   type ApprovalContext,
   type GateRequest,
 } from "../src/approvals.ts"
+import { loadTuiState, rememberMode, saveTuiState } from "../src/state/tui_state.ts"
+import { initialChoice, mode_choices, modeAt, moveChoice } from "../src/ui/ModePicker.tsx"
 
 const shell = (command: string): GateRequest => ({
   call_id: "c1",
@@ -34,19 +42,79 @@ function context(over: Partial<ApprovalContext> = {}): ApprovalContext {
   }
 }
 
+/**
+ * The rename (tui.md §11, T31). `auto` promised a judgement — tcode's `Auto` is
+ * a classifier reviewing each action — where this mode makes none at all, so it
+ * is `unsafe`, tcode's own name for the same stance. The old word survives in
+ * exactly one place: reading what an older build wrote.
+ */
+test("`unsafe` is the mode's name, and `auto` is still readable as it", () => {
+  expect(modes).toEqual(["ask", "unsafe"])
+  expect(isMode("auto")).toBe(false)
+  // …but a word arriving from a file or a command line is normalized, so
+  // yesterday's state file and yesterday's tui.toml keep meaning what they said.
+  expect(normalizeMode("auto")).toBe("unsafe")
+  expect(normalizeMode("unsafe")).toBe("unsafe")
+  expect(normalizeMode(" ask ")).toBe("ask")
+  expect(normalizeMode("accept-edits")).toBeNull()
+  expect(normalizeMode("")).toBeNull()
+})
+
+test("a state file written as `auto` comes back as `unsafe`, and is written back that way", () => {
+  const path = join(mkdtempSync(join(tmpdir(), "nulya-tui-mode-")), "tui-state.json")
+  writeFileSync(path, JSON.stringify({ mode: "auto", model: { profile: "deepseek" } }))
+  // Migrated on the way in — and the model pick beside it is untouched: a
+  // rename must not cost the other thing this file remembers.
+  expect(loadTuiState(path).mode).toBe("unsafe")
+  expect(loadTuiState(path).model).toEqual({ profile: "deepseek" })
+
+  // …and the next write says the new word in the file itself, so the old one
+  // fades out on its own rather than being migrated forever.
+  rememberMode("unsafe", path)
+  expect(readFileSync(path, "utf8")).toContain(`"mode": "unsafe"`)
+  expect(readFileSync(path, "utf8")).not.toContain("auto")
+
+  // A word that names no mode at all is not remembered as one.
+  saveTuiState({ mode: "accept-edits" as never }, path)
+  expect(loadTuiState(path).mode).toBeUndefined()
+})
+
+/**
+ * The picker's selection logic (T31), without a terminal. It opens on the mode
+ * in force and CLAMPS rather than wraps: with two rows a wrap makes ↑ and ↓ the
+ * same key, and "press down twice to be sure" would land back where it started.
+ */
+test("the mode picker opens on the mode in force and clamps at both ends", () => {
+  expect(mode_choices.map((choice) => choice.mode)).toEqual(["ask", "unsafe"])
+  expect(initialChoice("ask")).toBe(0)
+  expect(initialChoice("unsafe")).toBe(1)
+
+  expect(moveChoice(0, -1)).toBe(0)
+  expect(moveChoice(0, 1)).toBe(1)
+  expect(moveChoice(1, 1)).toBe(1)
+  expect(moveChoice(1, -1)).toBe(0)
+
+  expect(modeAt(0)).toBe("ask")
+  expect(modeAt(1)).toBe("unsafe")
+  expect(modeAt(2)).toBeNull()
+  // Every row says what its mode does: a picker that only listed two words
+  // would be the toggle it replaced, one press further away.
+  for (const choice of mode_choices) expect(choice.what.length).toBeGreaterThan(20)
+})
+
 test("the mode is the fallback and only the fallback", () => {
   expect(decide(shell("git status"), context({ mode: "ask" }))).toBe("ask")
-  expect(decide(shell("git status"), context({ mode: "auto" }))).toBe("allow")
+  expect(decide(shell("git status"), context({ mode: "unsafe" }))).toBe("allow")
 })
 
 test("deny outranks everything; ask outranks the mode; allow only settles what nothing else claimed", () => {
   const rules = { ...default_rules, deny: ["shell:rm"], ask: ["shell:git push"], allow: ["shell:git"] }
   // Denied by rule: never asked, so it can never have reached the always-list —
   // which is why deny may be read before it without contradicting the order.
-  expect(decide(shell("rm -rf build"), context({ rules, mode: "auto" }))).toBe("deny")
+  expect(decide(shell("rm -rf build"), context({ rules, mode: "unsafe" }))).toBe("deny")
   expect(decide(shell("rm -rf build"), context({ rules, always: new Set(["shell:rm"]) }))).toBe("deny")
-  // An explicit checkpoint reaches a person even in auto.
-  expect(decide(shell("git push origin main"), context({ rules, mode: "auto" }))).toBe("ask")
+  // An explicit checkpoint reaches a person even in unsafe.
+  expect(decide(shell("git push origin main"), context({ rules, mode: "unsafe" }))).toBe("ask")
   // …and the broader allow still covers the rest of git in ask mode.
   expect(decide(shell("git status"), context({ rules, mode: "ask" }))).toBe("allow")
 })

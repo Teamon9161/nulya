@@ -102,6 +102,46 @@ export function rowKey(row: PickerRow): string {
   return `${row.profile.name}/${row.model}`
 }
 
+/**
+ * One drawn line: a provider heading, or one of its models (tui.md §11, T31).
+ *
+ * The provider used to be a COLUMN, repeated on every row of the same endpoint —
+ * which is how tcode's picker is not laid out, and the repetition was buying
+ * nothing: `deepseek deepseek deepseek` down the left edge while the thing being
+ * chosen, the model, started three cells in. As a heading it is said once,
+ * everything under it belongs to it, and what a provider has to say about ITSELF
+ * (no key, offline) has somewhere to sit that is not four model rows at once.
+ *
+ * Headings are drawn and never selected: the cursor is an index into `rows`, and
+ * `j`/`k` step over models only. This is a projection of that same list, so the
+ * two can never disagree about what is on screen.
+ */
+export type PickerLine = { kind: "provider"; profile: ProfileView } | { kind: "model"; at: number }
+
+export function pickerLines(rows: readonly PickerRow[]): PickerLine[] {
+  const out: PickerLine[] = []
+  let last: string | null = null
+  rows.forEach((row, at) => {
+    if (row.profile.name !== last) {
+      out.push({ kind: "provider", profile: row.profile })
+      last = row.profile.name
+    }
+    out.push({ kind: "model", at })
+  })
+  return out
+}
+
+/**
+ * What a provider's heading says about itself: its name, and the one fact that
+ * decides whether anything under it can run.
+ */
+export function providerHeadline(profile: ProfileView): string {
+  if (!profile.credential) {
+    return `${profile.name} · ${blockedReason(profile)}${keyable(profile) ? " · /provider to paste a key" : ""}`
+  }
+  return profile.kind === "scripted" ? `${profile.name} · offline stand-in` : profile.name
+}
+
 /** Where the dial starts for a row: the live effort for the current pick, the config default elsewhere. */
 export function initialSlot(row: PickerRow, current: ModelPick | null): number {
   const isCurrent = current !== null && current.profile === row.profile.name && (current.model ?? "") === row.model
@@ -187,11 +227,11 @@ export function ModelView(props: {
       row,
       row.slots.reduce((a, b) => (b.length > a.length ? b : a), ""),
     )
-  const modelStatus = (row: PickerRow) => {
-    if (!row.profile.credential) return blockedReason(row.profile)
-    if (isCurrentModel(row)) return `${style.glyphs.check} current`
-    return row.profile.kind === "scripted" ? "offline" : ""
-  }
+  /**
+   * The mark on the one in force. Everything else a row used to say here —
+   * `no key`, `offline` — belongs to the provider, and is on its heading now.
+   */
+  const currentMark = (row: PickerRow) => (isCurrentModel(row) ? `${style.glyphs.check} current` : "")
   /** The id beside the label, only when the label is not the id already. */
   const idOf = (row: PickerRow) => (labelOf(row) === row.model ? "" : row.model)
 
@@ -214,9 +254,9 @@ export function ModelView(props: {
   const footer = (): { brief: string; more: string[] } => {
     if (empty()) return { brief: "Enter · p opens /provider · Esc close", more: ["r reload"] }
     return {
-      brief: "j/k move · h/l effort · Enter starts a session · Esc close",
+      brief: "↑↓ model · ←→ effort · Enter starts a session · Esc close",
       more: [
-        "/provider (F6) is where keys and endpoints are · r reload",
+        "j/k and h/l do the same · r reload · /provider (F6) is where keys and endpoints are",
         "the effort dial is per step, not frozen · click a row to select it, again to start on it",
       ],
     }
@@ -250,39 +290,55 @@ export function ModelView(props: {
   const space = () =>
     listBudget(screen().height, 1 + noticeLines().length + 1 + detailLines().length + hintLines().length)
 
-  /** A window that leaves room for the "N more" lines it may need to draw. */
+  /** Every drawn line, headings included: what the window is cut out of. */
+  const lines = createMemo(() => pickerLines(rows()))
+  /** Where the cursor's model sits among those lines. */
+  const cursorLine = createMemo(() => Math.max(0, lines().findIndex((l) => l.kind === "model" && l.at === at())))
+
+  /**
+   * A window that leaves room for the "N more" lines it may need to draw, over
+   * the DRAWN lines — headings take rows too, and a budget counted in models
+   * would overflow a short terminal by one row per provider.
+   *
+   * It never starts on a model: a group whose heading has scrolled off is a list
+   * of models belonging to nobody.
+   */
   const range = createMemo(() => {
-    const count = rows().length
+    const count = lines().length
     const budget = space()
-    return count <= budget ? { start: 0, end: count } : windowRange(count, at(), Math.max(3, budget - 2))
+    if (count <= budget) return { start: 0, end: count }
+    const window = windowRange(count, cursorLine(), Math.max(3, budget - 2))
+    const start = window.start > 0 && lines()[window.start]?.kind === "model" ? window.start - 1 : window.start
+    return { start, end: window.end }
   })
 
   /**
-   * Columns sized from the content: provider, label, the id when it is not the
-   * label, context, dial, status — and, when the screen is narrow, the widest
-   * column giving up cells rather than any of them overflowing. The id is the
-   * one that should go first: the label already names the model, and the detail
-   * line under the list still says the rest — so the label keeps its first
-   * twenty columns as a floor, and the id, with none, yields before the label
-   * loses a letter (at 80 columns the two were the same width, and "widest
-   * first" cut `DeepSeek V4 Fla…` while its id sat whole beside it).
+   * Columns sized from the content: label, the id when it is not the label,
+   * context, dial, and the mark on the one in force — and, when the screen is
+   * narrow, the widest column giving up cells rather than any of them
+   * overflowing. The id is the one that should go first: the label already names
+   * the model, and the detail line under the list still says the rest — so the
+   * label keeps its first twenty columns as a floor, and the id, with none,
+   * yields before the label loses a letter (at 80 columns the two were the same
+   * width, and "widest first" cut `DeepSeek V4 Fla…` while its id sat whole
+   * beside it). There is no provider column since T31: it is the heading above
+   * the group, said once.
    */
   const cols = createMemo(() => {
     const list = rows()
     const labelWant = columnWidth(list.map(labelOf), 2, 26)
-    const [provider, label, id, ctx, dial, status] = squeeze(
+    const [label, id, ctx, dial, mark] = squeeze(
       [
-        columnWidth(list.map((row) => row.profile.name), 2, 20),
         labelWant,
         columnWidth(list.map(idOf), 2, 30),
         columnWidth(list.map((row) => contextOf(row.params)), 2, 10),
         columnWidth(list.map(widestDial), 2, 16),
-        columnWidth(list.map(modelStatus), 0, 24),
+        columnWidth(list.map(currentMark), 0, 12),
       ],
-      [6, Math.min(labelWant, 20), 0, 0, 6, 0],
-      inner() - 2,
+      [Math.min(labelWant, 20), 0, 0, 6, 0],
+      inner() - 4,
     )
-    return { provider: provider!, label: label!, id: id!, ctx: ctx!, dial: dial!, status: status! }
+    return { label: label!, id: id!, ctx: ctx!, dial: dial!, mark: mark! }
   })
 
   /**
@@ -358,7 +414,7 @@ export function ModelView(props: {
   return (
     <box flexDirection="column" width="100%" flexGrow={1} flexShrink={1} paddingLeft={1} paddingRight={1}>
       <text fg={style.theme.accent.evolve} height={1}>
-        {fit("model · what the next session runs on", inner())}
+        {fit(`${style.glyphs.picker} model · what the next session runs on`, inner())}
       </text>
       <For each={noticeLines()}>
         {(line) => (
@@ -376,16 +432,26 @@ export function ModelView(props: {
             {style.glyphs.foldClosed} {range().start} more above
           </text>
         </Show>
-        <For each={rows().slice(range().start, range().end)}>
-          {(row, offset) => {
-            const index = () => range().start + offset()
-            const selected = () => index() === at()
-            const tone = () => ({ selected: selected(), hovered: hover.at() === index() })
+        <For each={lines().slice(range().start, range().end)}>
+          {(line) => {
+            // A provider heading: said once, and everything under it belongs to
+            // it. Not selectable — the cursor only ever lands on a model.
+            if (line.kind === "provider") {
+              return (
+                <text fg={line.profile.credential ? style.theme.muted : style.theme.warn} height={1}>
+                  {fit(providerHeadline(line.profile), inner())}
+                </text>
+              )
+            }
+            const index = line.at
+            const row = rows()[index]!
+            const selected = () => index === at()
+            const tone = () => ({ selected: selected(), hovered: hover.at() === index })
             const gutter = () => rowGutter(style, tone())
             const ready = row.profile.credential
             // Starting a session is the one action in this view that spends
             // money, so it takes two clicks: land, then confirm on the row.
-            const click = onClick(() => (selected() ? pick() : setAt(index())))
+            const click = onClick(() => (selected() ? pick() : setAt(index)))
             return (
               <box
                 flexDirection="row"
@@ -395,14 +461,11 @@ export function ModelView(props: {
                 backgroundColor={rowBackground(style, tone())}
                 onMouseDown={click.onMouseDown}
                 onMouseUp={click.onMouseUp}
-                {...hover.row(index())}
+                {...hover.row(index)}
               >
                 <text fg={gutter().fg} flexShrink={0}>
-                  {gutter().text}
+                  {`  ${gutter().text}`}
                 </text>
-                <box width={cols().provider} flexShrink={0}>
-                  <text fg={style.theme.muted}>{fit(row.profile.name, cols().provider - 2)}</text>
-                </box>
                 <box width={cols().label} flexShrink={0}>
                   <text fg={isCurrentModel(row) ? style.theme.accent.user : ready ? style.theme.fg : style.theme.dim}>
                     {fit(labelOf(row), cols().label - 2)}
@@ -419,17 +482,17 @@ export function ModelView(props: {
                     {fit(dialOf(row, effortOf(row)), cols().dial - 2)}
                   </text>
                 </box>
-                <box width={cols().status} flexShrink={0}>
-                  <text fg={ready ? style.theme.ok : style.theme.warn}>{fit(modelStatus(row), cols().status)}</text>
+                <box width={cols().mark} flexShrink={0}>
+                  <text fg={style.theme.ok}>{fit(currentMark(row), cols().mark)}</text>
                 </box>
               </box>
             )
           }}
         </For>
-        <Show when={range().end < rows().length}>
+        <Show when={range().end < lines().length}>
           <text fg={style.theme.dim} height={1}>
             {"  "}
-            {style.glyphs.foldOpen} {rows().length - range().end} more below
+            {style.glyphs.foldOpen} {lines().length - range().end} more below
           </text>
         </Show>
 

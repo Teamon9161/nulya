@@ -16,7 +16,7 @@
  *      "unless you once said yes to something like it".
  *   2. this session's always-list — the `a` key on an approval card. In memory,
  *      per run: trying something out must not write a file somebody else reads.
- *   3. the `ask` table — a deliberate checkpoint. It prompts even in `auto`,
+ *   3. the `ask` table — a deliberate checkpoint. It prompts even in `unsafe`,
  *      which is the whole reason it exists as its own table rather than as the
  *      absence of an `allow` entry.
  *   4. the `allow` table, then the manifest's `readonly` claim, then the mode.
@@ -39,13 +39,37 @@ export interface GateRequest {
 /** The two answers the wire has, and the third only this side knows about. */
 export type Decision = "allow" | "deny" | "ask"
 
-/** The permission mode: what happens to a call no rule has an opinion about. */
-export type PermissionMode = "ask" | "auto"
+/**
+ * The permission mode: what happens to a call no rule has an opinion about.
+ *
+ * `unsafe`, not `auto`, and the name is the honest one. tcode has four modes and
+ * its `Auto` is a CLASSIFIER — a second model reviews each routine action and
+ * only the boring ones go through. nulya has no classifier and is not getting
+ * one; this mode runs whatever the model wrote, unreviewed, with only the
+ * standing `deny` / `ask` tables in the way. That is tcode's `Unsafe`, and
+ * calling it `auto` promised a judgement nothing here makes.
+ */
+export type PermissionMode = "ask" | "unsafe"
 
-export const modes: PermissionMode[] = ["ask", "auto"]
+export const modes: PermissionMode[] = ["ask", "unsafe"]
 
 export function isMode(word: string): word is PermissionMode {
   return (modes as string[]).includes(word)
+}
+
+/**
+ * A mode word from OUTSIDE this process — `tui-state.json`, `tui.toml`, a
+ * `/mode` argument — or null when it names no mode at all.
+ *
+ * `auto` was this mode's name until it was renamed, so it is read as `unsafe`
+ * here and written back under the new name: a person who chose it yesterday
+ * keeps what they chose, and a `tui.toml` written for an older build keeps
+ * working. One place does the translation, so no reader learns the old word.
+ */
+export function normalizeMode(word: string): PermissionMode | null {
+  const trimmed = word.trim()
+  if (trimmed === "auto") return "unsafe"
+  return isMode(trimmed) ? trimmed : null
 }
 
 /**
@@ -137,7 +161,7 @@ export function decide(request: GateRequest, ctx: ApprovalContext): Decision {
   if (anyMatch(ctx.rules.ask, request, id)) return "ask"
   if (anyMatch(ctx.rules.allow, request, id)) return "allow"
   if (ctx.rules.manifest_readonly && ctx.readonlyOf?.(request.tool) === true) return "allow"
-  return ctx.mode === "auto" ? "allow" : "ask"
+  return ctx.mode === "unsafe" ? "allow" : "ask"
 }
 
 /** One line of preview for a card: what this call would actually do. */

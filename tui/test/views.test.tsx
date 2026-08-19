@@ -19,9 +19,9 @@ import { createSessionState } from "../src/state/session.ts"
 import { default_settings, loadSettings, type Settings } from "../src/state/settings.ts"
 import { createKeymap } from "../src/keymap.ts"
 import { sessionList, sessionNew } from "../src/nulya/cli.ts"
-import { auto_settings, frameLines, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
+import { unsafe_settings, frameLines, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
 
-const style: Style = createStyle(auto_settings, {})
+const style: Style = createStyle(unsafe_settings, {})
 
 let ws: TempWorkspace
 
@@ -213,7 +213,7 @@ test("a [keys] override in tui.toml really moves the fold key", async () => {
   expect(settings.keys["fold"]).toBe("ctrl+b")
   // Nobody is at this keyboard to answer the gate, so the tool call runs
   // (tui.md §5.7); the binding is what this test is about.
-  const bindings: Settings = { ...settings, driver: auto_settings.driver, extensions: auto_settings.extensions }
+  const bindings: Settings = { ...settings, driver: unsafe_settings.driver, extensions: unsafe_settings.extensions }
 
   const id = await sessionNew(ws, { profile: "scripted" })
   const state = createSessionState(id)
@@ -323,6 +323,45 @@ test("/outcome records how this session went, without touching the session file"
     // A judgment is not a turn: the ledger did not grow (DESIGN §3.3).
     expect(judged.events).toBe(0)
     expect(await settle(setup, 3)).toContain("partial")
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 120_000)
+
+/**
+ * Wearing a package is visible without opening anything (tui.md §11, T31).
+ *
+ * A `--with` member is usually nothing but a system prompt — a mode, an
+ * identity — and it decides what the model thinks it is. It was on the draft
+ * card and on the composition card, and nowhere at all once the card was
+ * folded, which is how a session carrying `evolution` looked exactly like one
+ * that was not. `/as` is the general form of `/evolve`, and needs no build.
+ */
+test("a tab wearing a package says so on the draft card and on the status line", async () => {
+  const setup = await testRender(
+    () => (
+      <App
+        ws={ws}
+        pick={{ profile: "scripted", model: "scripted-demo" }}
+        style={style}
+        driver={{ env: scripted_env }}
+        statePath={join(ws.dir, "tui-state-wearing.json")}
+      />
+    ),
+    { width: 100, height: 30 },
+  )
+  try {
+    await settle(setup, 4)
+    expect(setup.captureCharFrame()).not.toContain("evolution")
+
+    await setup.mockInput.typeText("/as evolution")
+    setup.mockInput.pressEnter()
+    const frame = await settle(setup, 4)
+    // The draft card's `with` row, and the chip under the composer that will
+    // still be there once the card is gone.
+    expect(frame).toContain("with        evolution")
+    const rows = frame.split("\n")
+    expect(rows[rows.length - 2]).toContain("◈ evolution")
   } finally {
     setup.renderer.destroy()
   }

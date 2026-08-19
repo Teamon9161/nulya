@@ -37,9 +37,9 @@ import { sessionExists } from "../src/nulya/files.ts"
 import { sessionList, sessionNew } from "../src/nulya/cli.ts"
 import { App } from "../src/ui/App.tsx"
 import type { ModelPick } from "../src/state/tui_state.ts"
-import { auto_settings, fake_config, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
+import { unsafe_settings, fake_config, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
 
-const style: Style = createStyle(auto_settings, {})
+const style: Style = createStyle(unsafe_settings, {})
 
 const fake = fake_config
 
@@ -151,7 +151,7 @@ test("modelRows: a profile's ids become its rows, and a bare profile still offer
   expect(modelRows(fake, bare).map((row) => row.model)).toEqual(["deepseek-v4-flash"])
 })
 
-test("/model is models and only models: one row per runnable (provider, model), nothing about keys", async () => {
+test("/model is models and only models: grouped under their provider, nothing about keys", async () => {
   const setup = await pickerFrame(() => (
     <ModelView
       ws={ws}
@@ -167,17 +167,24 @@ test("/model is models and only models: one row per runnable (provider, model), 
     await until(() => setup.captureCharFrame().includes("DeepSeek V4 Pro"), 10_000)
     const frame = await settle(setup, 4)
     expect(frame).toContain("model · what the next session runs on")
-    // The models of the providers that can run, provider first on the row —
-    // and NOT the models of the ones that cannot: no key, no row.
-    expect(frame).toContain("deepseek  DeepSeek V4 Flash")
+    // The models of the providers that can run, each group under a heading that
+    // names its provider once (T31) — and NOT the models of the ones that
+    // cannot: no key, no row, no heading.
+    const rows = frame.split("\n").map((line) => line.replace(/\s+$/, ""))
+    const group = rows.findIndex((line) => line.trim() === "deepseek")
+    expect(group).toBeGreaterThan(0)
+    expect(rows[group + 1]).toContain("DeepSeek V4 Flash")
+    expect(rows[group + 2]).toContain("DeepSeek V4 Pro")
+    // The provider is said once, not repeated down the left edge of its models.
+    expect(rows[group + 1]).not.toContain("deepseek  ")
     expect(frame).toContain("deepseek-v4-pro")
     expect(frame).toContain("1M ctx")
     expect(frame).toContain("✓ current")
     expect(frame).not.toContain("GPT-5.6 Sol")
     expect(frame).not.toContain("gpt-5.5")
-    // The offline stand-in is a row (it can run), and says so.
-    expect(frame).toContain("scripted")
-    expect(frame).toContain("offline")
+    // The offline stand-in can run, so it is a group of its own — and the fact
+    // that it is a stand-in belongs to the provider, so it is on the heading.
+    expect(frame).toContain("scripted · offline stand-in")
     // T21: no providers row, and none of the provider keys are advertised here.
     // Credentials are a command of their own now, not the tail of this list.
     expect(frame).not.toContain("providers ·")
@@ -277,7 +284,7 @@ test("the models level: ←→ turns the dial, Enter picks the row it is on", as
     // The cursor opens on the model in force.
     await until(() => setup.captureCharFrame().includes("DeepSeek V4 Pro"), 10_000)
     await settle(setup, 3)
-    expect(setup.captureCharFrame()).toMatch(/▾ deepseek\s+DeepSeek V4 Flash/)
+    expect(setup.captureCharFrame()).toMatch(/▾ DeepSeek V4 Flash/)
 
     // → twice turns flash's dial auto → off → low; ↓ then Enter picks pro on
     // ITS dial (auto).
@@ -301,7 +308,7 @@ test("the models level: ←→ turns the dial, Enter picks the row it is on", as
     // Down past the last row stops there: this list has no tail row any more.
     for (let i = 0; i < 10; i++) setup.mockInput.pressKey("j")
     await settle(setup, 2)
-    expect(setup.captureCharFrame()).toMatch(/▾ scripted/)
+    expect(setup.captureCharFrame()).toMatch(/▾ scripted-demo/)
   } finally {
     setup.renderer.destroy()
   }
@@ -325,7 +332,7 @@ test("focusProfile: /provider hands a provider over and the cursor lands on its 
     const frame = await settle(setup, 3)
     // Not on the pick in force (scripted) — on the handed-over provider's first
     // model, which is what "choose a provider, then its model" has to mean.
-    expect(frame).toMatch(/▾ deepseek\s+DeepSeek V4 Flash/)
+    expect(frame).toMatch(/▾ DeepSeek V4 Flash/)
   } finally {
     setup.renderer.destroy()
   }
@@ -465,7 +472,7 @@ test("picking in /model writes the draft, not a session; on a started tab it ope
     await until(() => setup.captureCharFrame().includes("model · what the next session"), 15_000)
     for (let i = 0; i < 40; i++) setup.mockInput.pressKey("j")
     await settle(setup, 2)
-    expect(setup.captureCharFrame()).toMatch(/▾ scripted/)
+    expect(setup.captureCharFrame()).toMatch(/▾ scripted-demo/)
     setup.mockInput.pressEnter()
     // Enter on a draft spawns no process and writes no file: it says what the
     // first message will start, and the pick is remembered (tui.md §11, T22).

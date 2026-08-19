@@ -46,7 +46,7 @@ import {
   type ToolUsage,
 } from "../../nulya/files.ts"
 import { configShow, extBuild, extDeactivate, extPrune, extSetCurrent, type SyncLine } from "../../nulya/cli.ts"
-import { draftColumn, pinsOnActivate, planStore } from "../../extensions.ts"
+import { draftColumn, pinsOnActivate, planStore, promptConsequence } from "../../extensions.ts"
 import {
   builtin_tools,
   faceFullLine,
@@ -117,6 +117,20 @@ export function switchState(active: boolean, tools: number, pinned: number): Swi
 
 /** The marker and its space: one glyph, always two columns, so ids line up. */
 const switch_width = 2
+
+/**
+ * What a package that contributes a SYSTEM PROMPT is called in the id list
+ * (tui.md §11, T31).
+ *
+ * It is the one contribution whose reach is the whole machine: skills wait to be
+ * loaded and tools wait to be called, but a system prompt is in front of every
+ * model of every session that carries the package, before anybody says anything.
+ * So it gets a word of its own in the list rather than the count of prompt files
+ * that used to sit at the end of the detail line, four facts in.
+ */
+export function modeCell(entry: { systemPrompts: string[] }): string {
+  return entry.systemPrompts.length > 0 ? "mode" : ""
+}
 
 /** One row of the tools pane: a pinnable tool, its state, and its evidence. */
 export interface ToolRow {
@@ -499,20 +513,22 @@ export function ExtView(props: {
    */
   const idCols = createMemo(() => {
     const list = extensions()
-    const [id, on, draft, shadow] = squeeze(
+    const [id, mode, on, draft, shadow] = squeeze(
       [
         columnWidth(list.map((entry) => entry.id), 2, 24),
+        columnWidth(list.map(modeCell), 2, 6),
         columnWidth(list.map(switchCell), 2, 12),
         columnWidth(list.map((entry) => draftColumn(draftOf(entry.id))), 2, 11),
         columnWidth(list.map((entry) => (entry.shadowed ? "shadowed" : "")), 0, 9),
       ],
-      [8, 0, 0, 0],
+      [8, 0, 0, 0, 0],
       Math.max(16, Math.floor(inner() / 2)) - 2,
     )
-    return { id: id!, on: on!, draft: draft!, shadow: shadow! }
+    return { id: id!, mode: mode!, on: on!, draft: draft!, shadow: shadow! }
   })
-  /** The whole left pane: the cursor gutter, the switch, and the four columns. */
-  const idWidth = () => 2 + switch_width + idCols().id + idCols().on + idCols().draft + idCols().shadow
+  /** The whole left pane: the cursor gutter, the switch, and the five columns. */
+  const idWidth = () =>
+    2 + switch_width + idCols().id + idCols().mode + idCols().on + idCols().draft + idCols().shadow
   /** What is left for the detail beside it, less its own two-column pad. */
   const detailWidth = () => Math.max(16, inner() - idWidth() - 2)
 
@@ -774,16 +790,22 @@ export function ExtView(props: {
     release(entry.id)
     props.onMembershipChanged?.()
     setNotice(
-      `${entry.id} on · ${version}` +
-        (ids.length > 0
-          ? room
-            ? ` · ${ids.length} tool(s) pinned`
-            : ` · ${faceFullLine(maxTools(), face.length, added.length)}`
-          : entry.tools.length > 0
-            ? // A package whose tools are a driver interface: it is fully on,
-              // and none of it is on the model's face by design.
-              ` · its ${entry.tools.length} tool(s) stay off the model face · /compact and drivers call them with ext run`
-            : ""),
+      // A package that contributes a system prompt gets the sentence about what
+      // that actually costs, instead of a version and a pin count (T31): one
+      // keypress here reaches every session this machine opens from now on, and
+      // that is the fact worth the line.
+      entry.systemPrompts.length > 0
+        ? promptConsequence(entry.id, true)
+        : `${entry.id} on · ${version}` +
+          (ids.length > 0
+            ? room
+              ? ` · ${ids.length} tool(s) pinned`
+              : ` · ${faceFullLine(maxTools(), face.length, added.length)}`
+            : entry.tools.length > 0
+              ? // A package whose tools are a driver interface: it is fully on,
+                // and none of it is on the model's face by design.
+                ` · its ${entry.tools.length} tool(s) stay off the model face · /compact and drivers call them with ext run`
+              : ""),
     )
     // The store has the last word, but it says it after the screen already moved.
     void reconcile()
@@ -814,7 +836,12 @@ export function ExtView(props: {
     }
     release(entry.id)
     props.onMembershipChanged?.()
-    setNotice(`${entry.id} off · its skills and prompts leave the composition · versions all stay${stuck ? ` · ${stuck}` : ""}`)
+    setNotice(
+      (entry.systemPrompts.length > 0
+        ? promptConsequence(entry.id, false)
+        : `${entry.id} off · its skills leave the composition`) +
+        ` · versions all stay${stuck ? ` · ${stuck}` : ""}`,
+    )
     void reconcile()
   }
 
@@ -1243,6 +1270,16 @@ export function ExtView(props: {
                         {fit(entry().id, idCols().id - 2)}
                       </text>
                     </box>
+                    {/* A package that contributes a system prompt is a MODE, and
+                        turning it on reaches every session this machine opens
+                        (T31). Warn-coloured while it is on: that is the state
+                        somebody has to be able to spot without reading a
+                        detail pane. */}
+                    <box width={idCols().mode} flexShrink={0}>
+                      <text fg={on() === "off" ? style.theme.faint : style.theme.warn}>
+                        {fit(modeCell(entry()), Math.max(0, idCols().mode - 2))}
+                      </text>
+                    </box>
                     {/* Half on: which half. `3/5 tools` and `pins only` are the
                         two ways the kernel's two axes come apart. */}
                     <box width={idCols().on} flexShrink={0}>
@@ -1320,6 +1357,18 @@ export function ExtView(props: {
                     width={detailWidth()}
                     fg={style.theme.muted}
                   />
+                  {/* …and what that prompt count MEANS, because a `1` at the end
+                      of the line above is the most consequential fact in this
+                      panel written as the quietest one (T31). */}
+                  <Show when={entry.systemPrompts.length > 0}>
+                    <Lines
+                      text={`a mode · turning it on puts its system prompt in every new session on this machine · ${
+                        entry.id === "evolution" ? "/evolve" : `/as ${entry.id}`
+                      } wears it for one session instead`}
+                      width={detailWidth()}
+                      fg={style.theme.warn}
+                    />
+                  </Show>
                   {/* Authority, only where there is any. `fs 0 · net — · proc 0`
                       is three cells saying nothing, on every package that asked
                       for nothing — and it read as data, which is how the one

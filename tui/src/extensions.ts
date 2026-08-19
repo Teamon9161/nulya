@@ -291,15 +291,110 @@ export const bundled_active = ["std", "guide"]
  * way, activating these must move membership only: `nulya ext run` reaches their
  * tools without a pin, which is how `/compact` has always called `compact`.
  *
+ * `evolution` is here for the other reason, and it is the one that bites: it
+ * declares no tool at all, only a system prompt and a skill, so activating it
+ * puts the slow loop's identity in front of every model this machine runs
+ * (T31). It is worn for one session with `/evolve`, and never activated.
+ *
  * A hard-coded list is the temporary criterion. The durable one is a per-tool
  * `audience` in the manifest — the package saying what its own tool is for,
- * which is the only place that knows (kernel side, not yet).
+ * which is the only place that knows (kernel side, not yet). For the prompt half
+ * the general rule already exists and needs no manifest change:
+ * `autoActivatable` reads `contributes.system_prompts`.
  */
 export const bundled_driver_only = ["compact", "evolution", "handoff"]
 
 /** Whether turning this extension on should pin its tools as well. */
 export function pinsOnActivate(id: string): boolean {
   return !bundled_driver_only.includes(id)
+}
+
+/**
+ * May a BACKGROUND pass point `current` at this package? (tui.md §11, T31.)
+ *
+ * Two "no"s, and both say the same thing. Activating a package that contributes
+ * a SYSTEM PROMPT puts its text in front of every model this machine runs from
+ * then on (DESIGN §5.3 / §7.8) — that is not an installation, it is a MODE, and
+ * choosing one is a person's decision, never a start-up side effect. The bug
+ * that named this function: `evolution` got activated by a sync pass, and every
+ * session afterwards opened believing it was the slow loop and refused ordinary
+ * work. The way to wear it is `/evolve` — one session, `--with`, nothing moved.
+ *
+ *  - the three on-demand bundled ids (`bundled_driver_only`), by name, because
+ *    `/compact`, `/evolve` and the goal driver bring them in themselves;
+ *  - anything whose frozen manifest declares `contributes.system_prompts` —
+ *    the general rule, which covers packages nobody here has heard of.
+ *
+ * `prompts` is `null` for "could not read the manifest", and that is a no as
+ * well: a pass that cannot tell what a package contributes has not learnt that
+ * it contributes nothing. Leaving it built and inactive costs one keypress in
+ * `/ext`; the other direction costs every session on the machine.
+ */
+export function autoActivatable(id: string, prompts: readonly string[] | null): boolean {
+  if (bundled_driver_only.includes(id)) return false
+  return prompts !== null && prompts.length === 0
+}
+
+/**
+ * The store root `ext sync [--user]` acts on, as a directory on this disk.
+ *
+ * The kernel's two write verbs take one root each — the workspace's, or the
+ * user's — so a caller that just ran one of them knows exactly where the
+ * version it built landed, and needs no `ext list` to find it again.
+ */
+export function syncRoot(ws: Workspace, user: boolean): string {
+  return user ? join(userConfigDir(), "extensions") : join(ws.dir, ".nulya", "extensions")
+}
+
+/**
+ * The system prompts a freshly built version contributes, or null when the
+ * manifest is not there to be read (`autoActivatable`'s "don't know").
+ */
+export async function promptsOf(
+  ws: Workspace,
+  root: string,
+  id: string,
+  version: string,
+): Promise<string[] | null> {
+  if (!existsSync(join(root, id, "versions", version, "extension.json"))) return null
+  return (await readContributions(ws, id, version, [root])).systemPrompts
+}
+
+/**
+ * What turning a package that contributes a system prompt on (or off) actually
+ * does, said out loud (tui.md §11, T31).
+ *
+ * `/ext`'s Enter is one keypress and its consequence reaches every session this
+ * machine opens from now on. That asymmetry is the whole reason for this
+ * sentence: the switch stays one keypress — nothing here asks for a `y` — but it
+ * no longer happens silently, and it names the per-session way to the same thing.
+ */
+export function promptConsequence(id: string, on: boolean): string {
+  if (!on) return `${id} off · its system prompt no longer enters new sessions`
+  const wear = id === "evolution" ? "/evolve" : `/as ${id}`
+  return `${id} active · its system prompt now enters EVERY new session on this machine · ${wear} wears it for one session instead · Enter again to turn it off`
+}
+
+/**
+ * Packages that are active right now and contribute a system prompt: what the
+ * start-up check says out loud (tui.md §11, T31).
+ *
+ * A read, never a write. Turning one off is as much a decision as turning it on
+ * was, so this only names them and points at `/ext`; nothing here undoes
+ * somebody's activation on their behalf.
+ */
+export function activePromptPackages(
+  entries: readonly { id: string; current: string | null; shadowed: boolean; systemPrompts: string[] }[],
+): string[] {
+  return entries
+    .filter((entry) => entry.current !== null && !entry.shadowed && entry.systemPrompts.length > 0)
+    .map((entry) => entry.id)
+}
+
+/** The line the status bar shows for them, or null when there are none. */
+export function promptPackageWarning(ids: readonly string[]): string | null {
+  if (ids.length === 0) return null
+  return `${ids.join(" & ")} active · ${ids.length === 1 ? "its system prompt goes" : "their system prompts go"} into every new session on this machine · /ext to turn ${ids.length === 1 ? "it" : "them"} off`
 }
 
 /**

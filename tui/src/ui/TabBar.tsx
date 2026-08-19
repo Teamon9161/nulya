@@ -11,12 +11,18 @@ import type { Tab } from "../state/tabs.ts"
  * tells two tabs apart is what they run on, so that is the label — with a `#n`
  * only when two tabs would otherwise read the same, and `(new)` on a tab that is
  * still a draft, because "has this one started yet" is the other real difference.
+ *
+ * A draft wearing a `--with` package says so too (T31): `/evolve` opens a second
+ * tab on the SAME model as the first, so without it the two read identically and
+ * the only difference between them — which one thinks it is the slow loop — was
+ * invisible from the one line whose whole job is telling tabs apart.
  */
 export function tabLabels(tabs: readonly Tab[]): string[] {
   const base = tabs.map((tab) => {
     if (tab.kind === "draft") {
       const pick = tab.pick()
-      return `${pick?.model || pick?.profile || "new"} (new)`
+      const bring = tab.bring()
+      return `${pick?.model || pick?.profile || "new"}${bring ? ` · ${bring.id}` : ""} (new)`
     }
     const header = tab.state.snapshot.header
     return header?.model_identity.model || header?.model || tab.id

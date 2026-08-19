@@ -20,9 +20,9 @@ import { default_settings } from "../src/state/settings.ts"
 import { readHeader, sessionExists } from "../src/nulya/files.ts"
 import { sessionList, sessionNew } from "../src/nulya/cli.ts"
 import { rememberSessionPins } from "../src/state/tui_state.ts"
-import { auto_settings, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
+import { unsafe_settings, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
 
-const style = createStyle(auto_settings, {})
+const style = createStyle(unsafe_settings, {})
 
 let ws: TempWorkspace
 let lint_version: string

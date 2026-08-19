@@ -184,7 +184,7 @@ tui/
 
 - `Enter` 发送；`Shift+Enter` / `Ctrl+J` 换行；`↑` 空 composer 时翻历史；粘贴多行原样。
 - 发送时若 `stepping`：只 append（queued）；不打断。
-- `/` 开头弹一个小补全：内建命令（`/model` `/mode [ask|auto]` `/effort <level|auto>` `/new [--profile p] [--model id]` `/sessions` `/ext` `/tasks` `/usage` `/compact [focus]` `/outcome` `/evolve` `/as <id>[@<v>]` `/cancel` `/fold` `/settings` `/help` `/quit`；**`/mode` 从 T24 起是权限 mode**，穿 extension 身份的那个改叫 `/as`——`/mode auto` 与 `/mode evolution` 是两件毫无关系的事，不该共用一个词，而 `/as evolution` 本身就读得出它在做什么）在前，**activate 了的 skill 在后**（`nulya skill list`，描述截 100 字符）。分发同序：内建 → skill → 原样发给模型。`/<skill> [args]` = `nulya skill load <ref>` 拿到 body、包一层 sentinel 后作为**普通 user turn** append（T15；旧文本写的"nulya 没有 skill slash"已翻案——它把"谁触发"误当成了"谁判断"，理由见 goals/tui-panel.md D8）。
+- `/` 开头弹一个小补全：内建命令（`/model` `/mode [ask|unsafe]` `/effort <level|auto>` `/new [--profile p] [--model id]` `/sessions` `/ext` `/tasks` `/usage` `/compact [focus]` `/outcome` `/evolve` `/as <id>[@<v>]` `/cancel` `/fold` `/settings` `/help` `/quit`；**`/mode` 从 T24 起是权限 mode**（T31 起裸 `/mode` 开一个 picker），穿 extension 身份的那个改叫 `/as`——`/mode unsafe` 与 `/mode evolution` 是两件毫无关系的事，不该共用一个词，而 `/as evolution` 本身就读得出它在做什么）在前，**activate 了的 skill 在后**（`nulya skill list`，描述截 100 字符）。分发同序：内建 → skill → 原样发给模型。`/<skill> [args]` = `nulya skill load <ref>` 拿到 body、包一层 sentinel 后作为**普通 user turn** append（T15；旧文本写的"nulya 没有 skill slash"已翻案——它把"谁触发"误当成了"谁判断"，理由见 goals/tui-panel.md D8）。
 - `@` 开头（前一字符非字母数字下划线）弹文件补全：`↑↓` 选、`Tab` 上屏成 `@path`；已知引用在输入框里 accent。**上屏的是路径，不是文件内容**（T13）。
 - 粘贴：> 1000 字符或 > 15 行折叠成 `[Pasted text #N]`，提交时展开回原文；`Backspace` 落在占位尾部整条删掉（T14）。
 - 有 tool call 在等批准时（§5.7），**审批对话框拿着键盘**：`↑↓` / 数字键选答案、`Enter` 作答、`Tab` 在答案列表与 note 之间切、直接打字即写 note、`Esc` 在列表上 = deny（在 note 里先清空）。带 modifier 的键（`Ctrl+C`）照旧穿过去。
@@ -201,7 +201,7 @@ tui/
 
 一行，五段（T22 起，标题行取消后它同时是"我在跟谁说话"和"现在在发生什么"）：
 
-`<model-id> [(effort)]`（**主语**，`fg`，可点 → `/model`；effort 只在本 tab 明确选过时才写括号——`auto` 就是内核默认，为它花七列不值） · `tools 1+N`（`dim`；1 = 那一个 builtin `shell`，DESIGN §5.1；draft 上 N = 合并 config pin ∪ `tui-state.json` 的 `session_pins`） · token 累计（`muted`；`↑input ↓output cache%`，**来源是 ledger 的 `assistant.usage`**，流事件只是它落盘前的临时值，同一步不会数两遍——所以重开一场也看得见它到今天为止花了多少，T8；**cache% 的分母是整个 prompt** `input + cache_read + cache_write`（`state/session.ts` `cacheShare`，与下一段 ctx% 的分子同一个量）——`input` 是内核扣掉缓存后的量，早先拿它当分母会在缓存命中好的对话里显示 200%+，2026-08-20 修） · 当前活动（**只在真的在动时**才 `fg`，否则退一档 `muted`） · hint / notice（`dim`，`/help` 单独一个可点的 box）。右：`step n` · role（`driver` / `observer` §5.6）。离开底部时插入 `↓ 3 new`。
+`<model-id> [(effort)]`（**主语**，`fg`，可点 → `/model`；effort 只在本 tab 明确选过时才写括号——`auto` 就是内核默认，为它花七列不值） · `tools 1+N`（`dim`；1 = 那一个 builtin `shell`，DESIGN §5.1；draft 上 N = 合并 config pin ∪ `tui-state.json` 的 `session_pins`） · token 累计（`muted`；`↑input ↓output cache%`，**来源是 ledger 的 `assistant.usage`**，流事件只是它落盘前的临时值，同一步不会数两遍——所以重开一场也看得见它到今天为止花了多少，T8；**cache% 的分母是整个 prompt** `input + cache_read + cache_write`（`state/session.ts` `cacheShare`，与下一段 ctx% 的分子同一个量）——`input` 是内核扣掉缓存后的量，早先拿它当分母会在缓存命中好的对话里显示 200%+，2026-08-20 修） · 当前活动（**只在真的在动时**才 `fg`，否则退一档 `muted`） · hint / notice（`dim`，`/help` 单独一个可点的 box）。右：`ctx N%` · `↓ N more below` · **`◈ <id>`**（这一场戴着的、contribute 了 system prompt 的包，`accent.evolve`，可点 → `/ext`；draft 读 `--with` 的 ref，已开场的读冻结 `contributions`——顶上那张卡默认折着，不写这一格就一个字都没有，T31） · 权限 mode chip（可点 → mode picker，§5.7；`unsafe` 是 warn 色） · `step n` · role（`driver` / `observer` §5.6）。离开底部时插入 `↓ 3 new`。
 
 **窄屏让位的顺序是一句判断，不是平均分**：model / 当前活动 / 通向 `/help` 的那三格**永不让**；notice 排第二（它是新闻——刚发生了什么、或者为什么没发生——所以一有 notice 就把 `tools` 与 token 挤掉，宁可让人读完那句话）；默认 hint 只坚持 ` · /help`，于是 `tools` 与 token 平时都在；再窄就先丢 `tools`（上面的 CompositionCard 已经把工具面写全了）、再丢 token。80 列实测：model、活动、`/help` 全在。
 
@@ -239,11 +239,12 @@ registry 按 shell 命令前缀识别，头行抽关键事实（抽不到就退�
 
 ### 5.3 `/ext` 演化视图（overlay，`F2`）
 
-左列：extensions（**开关记号** · id · `Nv kind` · 半开时那半格 · draft 状态 · 被遮蔽的标 `shadowed`）——清单是 `nulya ext list` **∪ `ext sync --dry-run`（两个 root）**：`ext list` 只列"持有版本"的 id，所以**只有源码、一次都没 build 过的 id 在它里面根本不存在**（T22 的起因：`std` 躺在 user store 里 build 不出来，`/ext` 一个字都不提，唯一的痕迹是状态栏一句 `3 failed` 滚过去）。这样的行显示 `0v <kind>` + draft 状态（`not built` / `needs zig` / `fails`，warn 色），右栏把**内核那句话原样转述**（它现在自带绝对路径的修法），再加至多一行我们自己的（anyzig 那种 version shim 从 cwd 读 `build.zig.zon`，而 store root 里没有）。没有 `current` 的包（只用 `--with` 穿的 mode / evolution）读最新一次 build 的 manifest，否则它会被显示成空的。右栏（选中项）：第一行是**开关的文字版**（`id · kind · active|inactive · tools N/M pinned · current v-…`）、manifest 摘要、版本时间线（`versions/v-*` mtime，`current` 标记，本场 header 冻结的版本标记；两者不同 → `frozen v-a · store v-b → next session`）、该 ext 每个 tool 的 usage。
+左列：extensions（**开关记号** · id · **`mode`**（这个包 contribute 了 system prompt，T31） · 半开时那半格 · draft 状态 · 被遮蔽的标 `shadowed`）——清单是 `nulya ext list` **∪ `ext sync --dry-run`（两个 root）**：`ext list` 只列"持有版本"的 id，所以**只有源码、一次都没 build 过的 id 在它里面根本不存在**（T22 的起因：`std` 躺在 user store 里 build 不出来，`/ext` 一个字都不提，唯一的痕迹是状态栏一句 `3 failed` 滚过去）。这样的行显示 `0v <kind>` + draft 状态（`not built` / `needs zig` / `fails`，warn 色），右栏把**内核那句话原样转述**（它现在自带绝对路径的修法），再加至多一行我们自己的（anyzig 那种 version shim 从 cwd 读 `build.zig.zon`，而 store root 里没有）。没有 `current` 的包（只用 `--with` 穿的 mode / evolution）读最新一次 build 的 manifest，否则它会被显示成空的。右栏（选中项）：第一行是**开关的文字版**（`id · kind · active|inactive · tools N/M pinned · current v-…`）、manifest 摘要、版本时间线（`versions/v-*` mtime，`current` 标记，本场 header 冻结的版本标记；两者不同 → `frozen v-a · store v-b → next session`）、该 ext 每个 tool 的 usage。
 
 **`Enter`（或点开关记号）= 这个 extension 对下一场的总开关**（T22，D12）：
 - **ON** = `ext activate <id> <version>`（版本取 sync plan 说 built 的那个，否则 store 里最新的 build；一个都没有就拒绝并指向 `b`）**+** 把它声明的 tool 全进本 TUI 的 pin 列。**先验配额**（`2 + face > max_tools` 就一个字节都不写，贴内核那句 `session new will refuse`）。
 - **OFF** = 先把它的 tool 从本 TUI 列**和 user config 的 `always`** 里撤掉（别的 config 层写的撤不了，点名说出来），再 `ext deactivate`。顺序是有意的：pin 指着一个没有 `current` 的 extension，`session new` 是**整场拒绝**（`PinNamesUnknownExtension`）而不是少一个工具。同理每次 refresh 都会把"指着已经不 active 的东西"的本 TUI pin 丢掉并说一句。
+- **一个 contribute 了 system prompt 的包是"模式"，开它要把后果说出来**（T31）：id 列表上多一格 `mode`（开着时 warn 色），右栏多一行 `a mode · turning it on puts its system prompt in every new session on this machine · /evolve（或 /as <id>）wears it for one session instead`，Enter 的 notice 换成 `extensions.promptConsequence`（`… enters EVERY new session on this machine · … · Enter again to turn it off`）。**键还是一个键、还是不问 `y`**——它只是不再沉默。开屏时若发现这样的包已经是 active，状态栏也点名一次并指 `/ext`（**不替人关掉**）。
 - **看得见**：`●`/`○`（ascii `*`/`-`）+ 三档色——`ok` 全开、`warn` 半开（另配一格 `3/5 tools` 或 `pins only`）、`faint` 关。tools pane 的 `[x]` 用同一套色（一处颜色一个含义，§6）。**两个方向都不要 `y` 确认**：都是指针 + pin 的移动，同一个键就能放回去，且够不着已经开跑的那一场（physics #2）。
 - 两根轴仍然在：单个 tool 用 tools pane 的 `Space`（`A` 升 `always`），单个版本用版本线的 `a` / `r`（仍带确认——它们点名一个 build，是时间线上的动作）；`d` **删掉了**（它就是 OFF 的一半，两个键做一件事正是被修的那个毛病）。
 
@@ -272,14 +273,15 @@ registry 按 shell 命令前缀识别，头行抽关键事实（抽不到就退�
 
 **内核只有一个语义**（DESIGN §4 / §14）：`nulya session step --gate --stream` 在每个 tool call 执行前打一行 `{"stream":"gate","event":"request",…}`、阻塞读 stdin 一行 `allow` / `deny` / `deny <note>`；deny 就是那个 call 的 `tool_results`（没跑、什么都没变），note 模型看得见。**该不该问是 driver 的 policy**，所以整套判断住在 `tui/src/approvals.ts` 这一个纯函数里。
 
-- **TUI 永远以 `--gate --stream` spawn step**（`nulya/cli.ts` 的 `sessionStep({gate})`：给了 gate 才加 `--gate` 与 `stdin: "pipe"`，gate 请求行**不进** `lines()`——它是这一层与内核之间的机械，屏幕经 callback 知道这件事）。mode 不下传内核、也没法下传：内核那一头没有"模式"这个概念。于是**切换即时生效**——每个请求都是一次新的 `approve(request)` 调用，mid-batch 切 mode 自然作用于下一个请求，而屏幕上正等着的那张卡片会**立刻按新 mode 重裁**（切到 auto 却让卡片继续等，看起来就是键坏了）。
-- **两档**：`ask`（默认）= 规则没管的每个 call 都停下来问；`auto` = 直接跑。存储优先级 **`tui-state.json` 的 `mode`（程序写，记住上次选择）> `tui.toml` `[driver] mode` > `"ask"`**（与 `/model` 的选择同一条纪律：人在屏幕上做的选择由程序记，`tui.toml` 只有人写）。入口：状态栏最右边可点的 chip（点 = 在两档之间切，`auto` 是 warn 色——"没人看着就跑"不该是安静的那一格）、`/mode [ask|auto]`（无参数 = 切）。
-- **决策序**（`approvals.decide`，四层，第一个说话的算数）：① `[approvals] deny` → 直接拒（**连 ask mode 都不弹卡片**；一个被规则拒的 call 从来没被问过，所以它也不可能进过 always 集合，这就是它排在 always 之前而不矛盾的理由）；② 本场 `always` 集合（卡片上按 `a` 记入，内存态、per-run——试一个工具不该在别人读的文件里留下东西；持久版本是 `[approvals] allow`）；③ `[approvals] ask` → 弹卡片（**连 auto mode 也弹**，这正是它自成一张表而不是"没写进 allow"的理由）；④ `[approvals] allow` → 放行；⑤ manifest 的 `readonly: true`（DESIGN §7.2.1，`[approvals] manifest_readonly = false` 可关）；⑥ mode 兜底。
+- **TUI 永远以 `--gate --stream` spawn step**（`nulya/cli.ts` 的 `sessionStep({gate})`：给了 gate 才加 `--gate` 与 `stdin: "pipe"`，gate 请求行**不进** `lines()`——它是这一层与内核之间的机械，屏幕经 callback 知道这件事）。mode 不下传内核、也没法下传：内核那一头没有"模式"这个概念。于是**切换即时生效**——每个请求都是一次新的 `approve(request)` 调用，mid-batch 切 mode 自然作用于下一个请求，而屏幕上正等着的那张卡片会**立刻按新 mode 重裁**（切到 `unsafe` 却让卡片继续等，看起来就是键坏了）。
+- **两档**：`ask`（默认）= 规则没管的每个 call 都停下来问；`unsafe` = 直接跑。**为什么叫 `unsafe` 而不是 `auto`**（T31）：tcode 的 `Auto` 是 classifier 审核，这一档没有任何审核，它就是 tcode 的 `Unsafe`；叫 `auto` 是在承诺一个这里根本不做的判断。存储优先级 **`tui-state.json` 的 `mode`（程序写，记住上次选择）> `tui.toml` `[driver] mode` > `"ask"`**（与 `/model` 的选择同一条纪律：人在屏幕上做的选择由程序记，`tui.toml` 只有人写）；外面来的词里的 `auto` 由 `approvals.normalizeMode` **一处**读成 `unsafe`，写回时写新名。
+- **入口是一个 picker，不是 toggle**（T31，`ui/ModePicker.tsx`，参考 tcode `mode_picker.rs`）。状态栏最右可点的 chip（`unsafe` 是 warn 色——"没人看着就跑"不该是安静的那一格）与**裸 `/mode`** 都开它；`/mode ask|unsafe` 仍然直接切。它是**输入框上面的一个对话框**，与审批对话框同一套样子（标题、`rowGutter` 的光标/悬停、一行一个答案、悬停即移光标、点一下即作答）与同一套键盘归属（在的时候拿键盘，`Ctrl+C` 除外）；一行一个 mode + 一句说明 + `✓` 当前 + 底下一行 hint，`↑↓`/数字键移动（**夹住不回绕**：两行的回绕会让 ↑ 与 ↓ 变成同一个键）、`Enter`/单击选、`Esc` 收。它排在审批对话框**前面**拿键盘——点 chip 正是"别再问我了"这个手势，最容易在有 call 等着的时候发生，选完当场重裁那个 call。**切换本身不再说话**：chip 就在那儿写着是哪一档，picker 刚刚才把两档都说过一遍，再往状态栏甩两句解释只会把 model / cost / activity 挤成一团。
+- **决策序**（`approvals.decide`，四层，第一个说话的算数）：① `[approvals] deny` → 直接拒（**连 ask mode 都不弹卡片**；一个被规则拒的 call 从来没被问过，所以它也不可能进过 always 集合，这就是它排在 always 之前而不矛盾的理由）；② 本场 `always` 集合（卡片上按 `a` 记入，内存态、per-run——试一个工具不该在别人读的文件里留下东西；持久版本是 `[approvals] allow`）；③ `[approvals] ask` → 弹卡片（**连 unsafe mode 也弹**，这正是它自成一张表而不是"没写进 allow"的理由）；④ `[approvals] allow` → 放行；⑤ manifest 的 `readonly: true`（DESIGN §7.2.1，`[approvals] manifest_readonly = false` 可关）；⑥ mode 兜底。
 - **条目两种形状**：tool（`ext:std/read` 稳定 id、或 `shell` / `read` 这样的名字）与 **shell 命令前缀**（`shell:git status`——前缀不是 glob，写的人不必学一套模式语言）。gate 请求只带模型面上的**名字**，稳定 id 由本场冻结的 `contributions` 反查（`ext:<包 id>/<tool>`），builtin 没有 id 就按名字匹配。`a` 记的 key 同理：普通 tool 记整个，**`shell` 只记第一个词**（`shell:git`）——"always allow shell" 等于 "always allow everything"，而 `git` 与 `rm` 不因为同一个程序跑它们就是同一个权限。
-- **它是一个对话框，不是一句 `[y/n]`**（T28 又一次推翻 T27 的形状）。`ApprovalPanel` 在输入框上面，**一行一个答案、可选、可点**：`↑↓` 或数字键移动光标、`Enter` 答出光标那一行、**鼠标悬停即移动光标、点一下即作答**（`ui/rows.ts` 的同一套 `rowBackground` / `rowGutter`，与所有列表同一种视觉语言）。答案本身按"影响范围从窄到宽"排：allow this call · allow the rest of this batch（只在批量 > 1 时）· always allow `<kind>` this session · allow everything from here on（= 切 `auto`，tcode 的 `set_mode` 选项）· deny。那张 tool 卡上留一行 `waiting for you — answer below`，说的是**哪一个** call。
+- **它是一个对话框，不是一句 `[y/n]`**（T28 又一次推翻 T27 的形状）。`ApprovalPanel` 在输入框上面，**一行一个答案、可选、可点**：`↑↓` 或数字键移动光标、`Enter` 答出光标那一行、**鼠标悬停即移动光标、点一下即作答**（`ui/rows.ts` 的同一套 `rowBackground` / `rowGutter`，与所有列表同一种视觉语言）。答案本身按"影响范围从窄到宽"排：allow this call · allow the rest of this batch（只在批量 > 1 时）· always allow `<kind>` this session · allow everything from here on（= 切 `unsafe`，tcode 的 `set_mode` 选项）· deny。那张 tool 卡上留一行 `waiting for you — answer below`，说的是**哪一个** call。
 - **`Tab` 在任意选项上写 note**（T28，tcode `approval.rs` 的 tab-annotation，这个前端的必备功能）：面板底下常驻一个 note 字段，**note 跟着被选中的那个答案走**——"可以，但下次用 ls" 与 "不行，因为…" 是同一个手势换一行光标，这正是 note 属于**对话框**而不属于某个"deny with a reason"专用键的理由。`Tab` 在列表与 note 之间切；**直接打字也进 note**（tcode 的规则：伸手去写字，就已经在写了），所以它从来不需要被发现；note 里的 `Esc` 先清空、再退回列表，列表上的 `Esc` = deny。
   - **note 的去向分两条，因为内核只有一条**：`deny <note>` 是 gate 自带的语义（进那个 call 的 marker 结果，DESIGN §4）；**allow 没有 note 通道，也不该有**——call 跑了，模型接下来读的是这个工具自己的输出，再长一个 payload 等于让内核决定一个人的话该落在转录的哪里（physics #8）。所以 allow 上的 note 走**所有话都走的那条路**：`session append`（`approvalnote.ts` 的 sentinel + 一次性 contract，与 `midtask.ts` 同一形状同一理由），下一个 step 边界排干 → 正好落在它所评论的那一批 `tool_results` 后面。卡片按 sentinel 折回人自己的话，badge 写 `note on <tool>`。
-- **对话框在的时候它拿着键盘**（T28）：内核就停在这一个 call 上，屏幕上没有别的地方可打字——这正是"打字 = 写 note"能够成立的前提。代价是这几秒里 `/mode auto` 打不出来，所以它成了列表上的一个答案（上一条）。`Ctrl+C` 仍然穿过去（带 modifier 的键一律不拦）：杀掉这一步是不想回答时的另一条出路。
+- **对话框在的时候它拿着键盘**（T28）：内核就停在这一个 call 上，屏幕上没有别的地方可打字——这正是"打字 = 写 note"能够成立的前提。代价是这几秒里 `/mode unsafe` 打不出来，所以它成了列表上的一个答案（上一条）。`Ctrl+C` 仍然穿过去（带 modifier 的键一律不拦）：杀掉这一步是不想回答时的另一条出路。
 - **一批 call 的批量答复**（T27）：内核的 gate 天生是串行的（call N 只在 N-1 跑完之后才问，DESIGN §4），所以这里没有 tcode 那种"一个对话框审一整批"的位置；等价物是那一行 answer——**人看得见的那些 call**（整批都已经是屏幕上的卡片）一次答完。实现是把那批**尚未执行**的 `call_id` 记进一个集合，后续请求逐个消费；不是一个布尔，否则一次 run 里的**下一批**（还没人看过）会被它悄悄盖住。它排在 `[approvals] deny` 之后：一条"永不"不该被一次关于六个 call 的按键推翻。面板抬头写 `1 of 3 in this batch`，只有一个 call 时这两样都不出现。
 - **等待中的请求是一个队列，不是一个槽**（T27）：这个进程可以同时 drive 多个 tab，两场 session 各停在一个 call 上是可能的；第二个请求覆盖第一个，会让那个 step 永远等一个没人能兑现的 promise、并一直攥着写者租约。状态栏活动区在等的时候只写 `waiting for your answer`（warn 色，压过其它所有活动——内核这会儿就停在这里）；键不在这一行重复，那正是它在窄屏上被挤成 `y allow · nasknstep` 的原因。
 - **这不是安全边界**（DESIGN §9）：extension 与 shell 同权，`readonly` 是包的主张不是强制。它管的是"这一次要不要发生"，真隔离等 sandbox（PLAN §3.8）。
@@ -290,7 +292,7 @@ registry 按 shell 命令前缀识别，头行抽关键事实（抽不到就退�
 
 - **进 composition**：draft materialize 那一刻按 `[extensions] handoff`（默认 true）加 `--with handoff@<v> --pin ext:handoff/handoff`（两根轴，DESIGN §7.5：`--with` 是成员，`--pin` 才给它一个 native 槽）。版本由 `buildHandoff` 拿（与 `/evolve` 同一条 `bundledDraftPath` → `ext build` 路，所以**不在 nulya checkout 里也能用**：二进制自带源码，seed 进 user store 再 build）；build 在开屏后台起、失败就这一场不带它并照常开场——**装不上不是开不了场的理由**。局限：第一次在一台机器上要付一次编译（compiled 包）。
 - **看盘的时机**：每个 step 结束（driver 回 idle）看一次 `.nulya/handoffs/<id>-*.md`，与 `drivers/goal.*` 同一个信号；已处理过的路径记在内存里，同一个提议不会问第二遍。
-- **`ask`** = brief 显示在 transcript 与输入框之间（**不是 transcript 卡片**：brief 是磁盘上的制品不是 ledger 事件，这个前端只画 ledger 有的东西），`Enter` 跟过去 / `Esc` 收起（文件留着）。**`auto`** = 直接跟，一行 notice。
+- **`ask`** = brief 显示在 transcript 与输入框之间（**不是 transcript 卡片**：brief 是磁盘上的制品不是 ledger 事件，这个前端只画 ledger 有的东西），`Enter` 跟过去 / `Esc` 收起（文件留着）。**`unsafe`** = 直接跟，一行 notice。
 - **跟过去 = `/compact` 的 `brief_file` 分支**（DESIGN §11）：同一条 fork，只是摘要已经写好了，旧 session 逐字节不变，tab 换到子 session——与 `/compact` 完全同一段代码（`compact.ts` 多一个可选参数）。
 
 ### 5.9 后台任务：内核给 supervisor 与事件，屏幕决定何时再 step `[T29]`
@@ -320,7 +322,7 @@ registry 按 shell 命令前缀识别，头行抽关键事实（抽不到就退�
 - **整屏只有一个有边框的东西：输入框**（T26）。原来是三条通栏 hairline 围出四个区，其中两条隔开的正是输入框自己的上下边，第三条在只有一个 tab 时上面什么都没有。现在 transcript / 输入框 / 状态行之间只有输入框那个圆角框（ascii 用 `+-|`），它同时是"在这里打字"的邀请与**键盘在不在这里**的唯一信号（有焦点 = `accent.user`，browse 模式或 overlay 拿走键盘 = `hairline`）。框**随内容长高**（1–8 行，超出由 textarea 自己滚）。
 - **diff 静**：仅前景色的 add/del，无背景块；上下文行 dim。
 - **动效一处**：状态栏一个 braille spinner + 流式末尾 `▍` 光标；不做 shimmer（设定 `motion = false` 全关）。
-- **符号集**（Windows Terminal / 常见等宽字体都有）：`›` user · `●` assistant · `$` shell · `✎` edit · `⌘` ext tool · `⚙` build/init · `⚡` capability/activate · `↺` rollback · `⌕` read kernel · `☰` skill · `⤷` sub-session · `⊘` canceled · `▎` composition · `▸ ▾` fold · `·` pointer（鼠标所在的行）· `⠋` spinner；`ascii = true` 时降级为 `> * $ ~ # + ! < ? = > x . |`。
+- **符号集**（Windows Terminal / 常见等宽字体都有）：`›` user · `●` assistant · `$` shell · `✎` edit · `⌘` ext tool · `⚙` build/init · `⚡` capability/activate · `↺` rollback · `⌕` read kernel · `☰` skill · `⤷` sub-session · `⊘` canceled · `▎` composition · `▸ ▾` fold · `·` pointer（鼠标所在的行）· `⠋` spinner · **`◈` picker**（`/model` 与 `/mode` 的标题，以及状态栏那个「戴着谁」的 chip——只给「选择」用；列 store 或 journal 的面板是「地方」，标题照旧不带记号，T31）· `‹ ›` effort 转盘 · `✓` 当前 · `● ○` `/ext` 开关；`ascii = true` 时降级为 `> * $ ~ # + ! < ? = > x . | #`。
 - **主题 tokens**（`render/theme.ts`；`nulya-dark` 默认、`nulya-light`；尊重 `NO_COLOR`）：`fg muted dim faint accent.user accent.assistant accent.tool accent.evolve ok err warn diff.add diff.del hairline selection hover`。语法高亮用 OpenTUI `SyntaxStyle`，同一套 tokens 派生。
 - **光标与指针是两套记号**：光标行 `▾` + `selection` 底色，指针行 `·` + 更淡的 `hover` 底色。形状不同，所以没有颜色时也分得开。
 - **overlay 的底部只有一行键**（T18）：常驻两三个重点 + `? keys`，`?` 展开其余；没有更多键的面板不写 `? keys`。
@@ -345,17 +347,18 @@ theme  = "nulya-dark"       # nulya-dark | nulya-light
 motion = true
 
 [driver]                    # T24
-mode = "ask"                # ask | auto —— 一趟从哪一档开始；chip 与 `/mode` 的选择记在 tui-state.json 里、优先级更高
+mode = "ask"                # ask | unsafe —— 一趟从哪一档开始；chip 与 `/mode` 的选择记在 tui-state.json 里、优先级更高
+                            # （写着 auto 的老文件照旧读成 unsafe，T31）
 
 [approvals]                 # T24；条目 = tool id / tool 名 / `shell:<命令前缀>`
 allow = []
-ask   = []                  # 连 auto 也弹
+ask   = []                  # 连 unsafe 也弹
 deny  = []                  # 连 ask 也不弹，直接拒
 manifest_readonly = true    # 信一个 tool 自己声明的 `"readonly": true`（DESIGN §7.2.1；是提示不是边界）
 
 [extensions]                # T11
 sync_on_start = true        # 开屏时后台 build 各 store root 下的 draft（`nulya ext sync`）
-auto_activate = true        # 让那一趟把 `current` 指到它刚建出来的版本上
+auto_activate = true        # 让那一趟把 `current` 指到它刚建出来的版本上（**带 system prompt 的包除外**，T31）
 handoff       = true        # 每场 session 带上 handoff 包（`--with` + `--pin`，§5.8）
 
 [keys]                      # 覆盖默认键；名字表见 keymap.ts
@@ -363,7 +366,7 @@ cancel = "escape"
 fold   = "ctrl+o"
 ```
 
-`[extensions]` 两个键都只作用于**这一趟 sync**：`auto_activate` 永远不会盖掉指着别处的 `current`（那是 DESIGN §7.2 的规则，前端无从违反），所以一次 rollback 活得过下一次启动。project store 的那道 trust 问句**不受这两个键管**——它是 DESIGN §9 的边界，只有按键能推动。
+`[extensions]` 两个键都只作用于**这一趟 sync**：`auto_activate` 永远不会盖掉指着别处的 `current`（那是 DESIGN §7.2 的规则，前端无从违反），所以一次 rollback 活得过下一次启动；它也**永远不激活一个 contribute 了 system prompt 的包**（`extensions.autoActivatable`，T31——那是"模式"，activate 它等于让它的 prompt 进这台机器上的每一场 session，选模式是人的决定）。project store 的那道 trust 问句**不受这两个键管**——它是 DESIGN §9 的边界，只有按键能推动。
 
 `/settings` 只显示当前生效值与来源文件；不在 TUI 里写配置（编辑器改文件即可，第二个诉求出现再做）。
 
@@ -1350,3 +1353,29 @@ T27 已经把问句从卡片挪到了输入框上面、把每个答案拆成自�
 EditCard 一个字没改：它按 `view.tool === "edit"` 选卡，而 extension tool 的 model-visible 名字就是 manifest 里的 `name`，仍然是 `edit`；diff 仍从 `old_string` / `new_string` 画（成功时不显示 tool 输出，所以新增的回显片段不会重复出现），失败时显示的就是 std 的教学文案。
 
 **测试**：`cd tui && bun test` **244 pass**（三条快照与四条断言里的 `2+` / `shell edit` 改数）、`tsc` 干净。
+
+### T31 · 模式这个词有两种意思，两种都没说清（2026-08-20）
+
+`docs/BUGS.md` 的头两条，根子上是同一件事：**屏幕上有两种"模式"，哪一种都没把自己的影响范围说出来**。一种是包戴在会话头上的 system prompt（`evolution`），一种是权限档（`ask` / 那时叫 `auto`）。内核零改动，`extensions/` 零改动。
+
+#### 一、`evolution` 被后台悄悄 activate（BUGS 1）
+
+现象是"我没启动 evolution，模型却说自己是 slow loop"。查下来 `~/.nulya/extensions/evolution/current` 确实指着一个版本——而 `evolution` contribute 的是 `[skills prompt]`，**activate = 它的 identity system prompt 进每一场 session 的 system blocks**（DESIGN §5.3 / §7.8）。谁指的：`App.syncStores` 的 auto-activate 循环，它当时唯一的守卫是 `arrived.includes(line.id)`——只挡得住 `ext seed` 刚落下源码的**那一次**启动。之后 draft 一重建（或者手动 seed 过一次），`state === "built"` 就把它 activate 了。
+
+修的是四处，第一处是判据、其余三处是把这件事说出来：
+
+1. **`extensions.autoActivatable(id, prompts)`**（纯函数，`bun test` 钉住）：`bundled_driver_only` 的三个按名字拒，**任何声明了 `contributes.system_prompts` 的包**按通则拒——那是"模式"，选模式是人的决定，不是启动的副作用。`prompts` 为 `null`（读不到冻结 manifest）也是拒：分不清的时候，留着不开的代价是 `/ext` 里一次按键，反过来的代价是这台机器上的每一场 session。配套两个小件：`syncRoot(ws, user)`（`ext sync [--user]` 作用的那个 root，所以刚 build 完的版本在哪儿是已知的，不必再 `ext list`）与 `promptsOf`。后台 pass 主动跳过的 id 会在那一行 sync 汇总里点名（`… built, left off (a mode) · /ext`）——建好了却什么都不做的包，不说就是个谜。
+2. **`/ext` 把后果说出来**：id 列表多一列 `mode`（`modeCell`，on 时 warn 色），详情面多一行 `a mode · turning it on puts its system prompt in every new session on this machine · /evolve（或 /as <id>）wears it for one session instead`，Enter 的 notice 换成 `promptConsequence`——`evolution active · its system prompt now enters EVERY new session on this machine · /evolve wears it for one session instead · Enter again to turn it off`。**开关仍然是一个键、仍然不问 `y`**：它只是不再沉默。
+3. **开屏点名**：`syncStores` 收尾时 `activePromptPackages(await listExtensions(ws))`，有就在状态栏说一句并指 `/ext`（`promptPackageWarning`）。**不替人 deactivate**——关掉和打开一样是决定。这一半是守卫补不了的：指针已经在盘上了。
+4. **进化模式怎么进要看得见**：`/help` 与 `commands.ts` 的 `/evolve` 改成人话（慢速回路：复盘已完成的 session、判断该不该留下或造工具；开一个新 tab 戴上它，**什么都不 activate**）；`/evolve` 执行后自己补一句 notice（开了新 tab、戴的是哪个版本、下一条消息才开场）；draft tab 的标题带上 `--with` 的 id（`tabLabels`：`scripted-demo · evolution (new)`——`/evolve` 开的第二个 tab 与第一个同模型，不写就完全一样）；状态栏多一个 `◈ evolution` chip（`StatusBar.wearing`，draft 读 `bring()`，已开场的 session 读冻结 `contributions` 里有 system prompt 的成员——顶上那张卡默认折着，折起来之后原本一个字都没有）。
+
+#### 二、权限档：`auto` → `unsafe`，切换不解释，改成一个 picker（BUGS 2）
+
+- **名字**。tcode 有四档，它的 `Auto` 是 **classifier 审核**；nulya 这一档没有任何审核，就是不问就跑——那是 tcode 的 `Unsafe`。叫 `auto` 是在承诺一个这里根本不做的判断。全量改名（`approvals.ts` / `/mode` / 审批对话框那一行答案 / 状态栏 chip / `commands.ts` / `/help` / 测试）。迁移只有一处：`approvals.normalizeMode(word)` 把外面来的词（`tui-state.json`、`tui.toml [driver] mode`、`/mode` 的参数）里的 `auto` 读成 `unsafe`，写回时写新名——**`isMode` 不再认 `auto`**，认它的只有这一个函数。
+- **切换不再解释**。原来每次切都甩两句话到状态栏，而状态栏是全屏最挤的一行（model / cost / activity 都在上面），一句解释把它们挤成一团。chip 本身就在说是哪一档，picker 刚刚才把两档都说过一遍——说完了就没有什么要宣布的。
+- **`/mode` 是一个 picker，不是 toggle**（`ui/ModePicker.tsx`，参考 tcode `mode_picker.rs`）。toggle 这个手势天生说不出另一边是什么，那正是它非要配一句解释的原因。picker 是**输入框上面的一个对话框**，与 T28 的审批对话框同一套样子（标题、`rowGutter` 的光标/悬停、一行一个答案、悬停即移光标、点一下即作答）与同一套键盘归属（在的时候拿键盘，`Ctrl+C` 除外）。一行一个 mode + 一句说明（`ask` = ask before every tool call no rule settles；`unsafe` = run every tool call without asking · only `[approvals]` deny / ask rules still stop it——最后半句是它不是全有全无的唯一理由）+ `✓` 当前 + 底下一行 hint。`↑↓`/数字键移动、`Enter`/单击选、`Esc` 收，**夹住不回绕**（两行的回绕会让 ↑ 和 ↓ 变成同一个键）。`/mode ask|unsafe` 仍然直接切。picker 排在审批对话框**前面**拿键盘：点 chip 是"别再问我了"这个手势，正好会在有 call 等着的时候发生，而选完 `chooseMode` 当场重裁那个 call（原来就有的逻辑）。
+- **`/model` 也向 tcode 靠**（`model_picker.rs`）：标题带 `◈`（新 glyph `picker`，只给两个 picker 用——列 store 或 journal 的面板是"地方"不是"选择"，标题照旧）、**按 provider 分组**（`pickerLines` 把 rows 投影成 heading + model 两种行；provider 从每一行的一列变成组标题说一次，`no key` / `offline stand-in` 这类关于 provider 自己的话也跟着搬上去）、`✓` 标当前、effort 档位照旧是 `‹ x ›` 的转盘、底下 hint 改成 `↑↓ model · ←→ effort · Enter starts a session · Esc close`。窗口按**画出来的行**算并且永不停在没有标题的组上。
+
+**没照抄 tcode 的两处**（有意）：① 选中标记仍是共享的 `rowGutter`（`▾` 光标 / `·` 悬停）而不是 `▸`——这一套是全应用六个列表共用的视觉语言（tui.md §6），为两个 picker 破例，换来的是别处全部不一致；② 没有边框——`§4.1`/`§6` 定的就是无边框，审批对话框也没有。
+
+**测试**：`cd tui && bun test`、`tsc` 干净。新增：mode 迁移与 picker 选择逻辑（`approvals.test.ts`）、`autoActivatable` / `promptConsequence` / `activePromptPackages` / `promptsOf`（`extensions.test.ts`）、`/mode` 开 picker 与选完不解释（`gate.test.tsx`）、点 chip 开 picker 并点行作答（`mouse.test.tsx`）、`/ext` 的 mode 列与后果文案（`overlays.test.tsx`）、`tabLabels` 带 `--with`（`evolve.test.ts`）、状态栏 `◈` chip（`views.test.tsx`）。

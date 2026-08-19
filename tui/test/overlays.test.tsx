@@ -6,7 +6,7 @@
  * from files a real `nulya` binary wrote.
  */
 import { afterAll, beforeAll, expect, test } from "bun:test"
-import { rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { createSignal, type JSX } from "solid-js"
 import { testRender } from "@opentui/solid"
@@ -31,9 +31,9 @@ import { default_settings } from "../src/state/settings.ts"
 import { sessionAppend, sessionNew, sessionStep, taskList, type TaskEntry } from "../src/nulya/cli.ts"
 import { TasksView } from "../src/ui/overlays/TasksView.tsx"
 import type { SessionHeader } from "../src/nulya/ledger.ts"
-import { auto_settings, frameLines, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
+import { unsafe_settings, frameLines, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
 
-const style: Style = createStyle(auto_settings, {})
+const style: Style = createStyle(unsafe_settings, {})
 
 let ws: TempWorkspace
 let first: string
@@ -584,6 +584,69 @@ test("/ext: Enter turns an extension on and off, and both axes move together", a
       Bun.spawnSync({ cmd: [ws.bin, "ext", "activate", "lint", before], cwd: ws.dir, env: process.env })
     }
     rmSync(statePath, { force: true })
+  }
+}, 120_000)
+
+/**
+ * A package that contributes a SYSTEM PROMPT is a MODE (tui.md §11, T31).
+ *
+ * The bug: `evolution`'s prompt was in front of every model on the machine, and
+ * nothing anywhere on the screen said so — not the id list, not the switch that
+ * put it there. Turning it on is still one keypress and still asks for no `y`;
+ * it just stops being silent about what that keypress reaches.
+ */
+test("/ext marks a package that contributes a system prompt as a mode, and says what turning it on costs", async () => {
+  const shop = tempWorkspace()
+  try {
+    const run = (args: string[]) => Bun.spawnSync({ cmd: [shop.bin, ...args], cwd: shop.dir, env: process.env })
+    // A data package: a prompt and nothing else, which is exactly what a mode is.
+    const home = join(shop.dir, ".nulya", "extensions", "house.style")
+    Bun.spawnSync({ cmd: [shop.bin, "ext", "init", "house.style"], cwd: shop.dir, env: process.env })
+    writeFileSync(
+      join(home, "extension.json"),
+      JSON.stringify({
+        schema: "nulya.extension/v2",
+        id: "house.style",
+        contributes: { system_prompts: ["prompts/identity.md"] },
+      }),
+    )
+    mkdirSync(join(home, "prompts"), { recursive: true })
+    writeFileSync(join(home, "prompts", "identity.md"), "write in the house style\n")
+    run(["ext", "build", join(".nulya", "extensions", "house.style")])
+
+    const statePath = join(shop.dir, "mode-state.json")
+    const setup = await overlayFrame(() => (
+      <ExtView ws={shop} header={null} statePath={statePath} onClose={() => {}} />
+    ))
+    try {
+      await until(() => setup.captureCharFrame().includes("house.style"), 20_000)
+      const frame = await settle(setup, 4)
+      // A word of its own in the id list — the reach of a system prompt is not
+      // a number at the end of the fourth fact on a detail line.
+      expect(frame).toContain("mode")
+      expect(frame).toContain("turning it on puts its system prompt in every new session")
+      expect(frame).toContain("/as house.style")
+
+      setup.mockInput.pressEnter()
+      await until(
+        async () => (await listExtensions(shop)).find((entry) => entry.id === "house.style")?.current != null,
+        20_000,
+      )
+      const on = await settle(setup, 4)
+      expect(on).toContain("EVERY new session on this machine")
+      expect(on).toContain("Enter again to turn it off")
+
+      setup.mockInput.pressEnter()
+      await until(
+        async () => (await listExtensions(shop)).find((entry) => entry.id === "house.style")?.current == null,
+        20_000,
+      )
+      expect(await settle(setup, 4)).toContain("no longer enters new sessions")
+    } finally {
+      setup.renderer.destroy()
+    }
+  } finally {
+    shop.cleanup()
   }
 }, 120_000)
 

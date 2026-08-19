@@ -56,8 +56,22 @@ export function StatusBar(props: {
   background?: number
   /** Clicking the background count: the mouse half of `/tasks`. */
   onOpenTasks?: () => void
-  /** Clicking the mode chip: the mouse half of `/mode`. */
-  onToggleMode?: () => void
+  /**
+   * Clicking the mode chip: the mouse half of `/mode`, which opens the picker
+   * (tui.md §11, T31). It used to flip the mode straight from here, which is the
+   * one gesture that cannot say what the other side is — so the two words had to
+   * be explained in a notice on this very line, every time.
+   */
+  onPickMode?: () => void
+  /**
+   * Packages whose system prompt this tab carries (`--with`, T31). Usually
+   * empty; when it is not, it is the fact that decides what the model thinks it
+   * is, and nothing else on a started session says it once the composition card
+   * is folded.
+   */
+  wearing?: string[]
+  /** Clicking what this session wears: the mouse half of `/ext`. */
+  onOpenExt?: () => void
   hint?: string
   /** Rows of transcript below the viewport: >0 means somebody is reading back. */
   behind?: number
@@ -85,7 +99,9 @@ export function StatusBar(props: {
   const behindClick = onClick(() => props.onScrollEnd?.())
   const helpClick = onClick(() => props.onHelp?.())
   const modelClick = onClick(() => props.onPickModel?.())
-  const modeClick = onClick(() => props.onToggleMode?.())
+  const [overWearing, setOverWearing] = createSignal(false)
+  const modeClick = onClick(() => props.onPickMode?.())
+  const extClick = onClick(() => props.onOpenExt?.())
 
   const usage = createMemo(() => {
     const u = props.snapshot.usage
@@ -176,8 +192,13 @@ export function StatusBar(props: {
   const contextChip = () => (context() ? ` ctx ${context()!.percent}% · /compact` : "")
   const behindChip = () =>
     (props.behind ?? 0) > 0 ? ` ${style.glyphs.foldOpen} ${props.behind} more below · Shift+End` : ""
-  /** `ask` / `auto`: which one is only worth a chip when somebody can act on it. */
+  /** `ask` / `unsafe`: which one is only worth a chip when somebody can act on it. */
   const modeChip = () => (props.mode && screen().width >= 60 ? ` ${props.mode}` : "")
+  /** ` ◈ evolution` — the mode this session is WEARING, not the permission one. */
+  const wearingChip = () => {
+    const worn = props.wearing ?? []
+    return worn.length > 0 && screen().width >= 60 ? ` ${style.glyphs.picker} ${worn.join(" ")}` : ""
+  }
   const roleChip = () =>
     screen().width >= 60
       ? ` step ${props.snapshot.steps} · ${props.role === "observer" ? "observer · driven elsewhere" : "driver"}`
@@ -196,7 +217,11 @@ export function StatusBar(props: {
   const layout = createMemo(() => {
     const budget = Math.max(0, screen().width - 2)
     const right =
-      displayWidth(contextChip()) + displayWidth(behindChip()) + displayWidth(modeChip()) + displayWidth(roleChip())
+      displayWidth(contextChip()) +
+      displayWidth(behindChip()) +
+      displayWidth(wearingChip()) +
+      displayWidth(modeChip()) +
+      displayWidth(roleChip())
     const wanted = ` · ${activity()}`
     const model = fit(modelText(), Math.max(8, budget - right - displayWidth(wanted)))
     // Cut too, not just measured. An error message or a long tool name is as
@@ -317,20 +342,37 @@ export function StatusBar(props: {
           <text fg={style.theme.accent.evolve}>{behindChip()}</text>
         </box>
       ) : null}
-      {/* The mode, and the click that flips it — the mouse half of `/mode`.
-          `auto` is warn-coloured: it is the stance where tool calls run without
-          anybody looking, and that should never be the quiet one. */}
+      {/* What this session is WEARING — a `--with` package's system prompt, the
+          one thing that changes who the model thinks it is (T31). It opens
+          `/ext`, where it is turned on and off. */}
+      {wearingChip().length > 0 ? (
+        <box
+          flexShrink={0}
+          height={1}
+          backgroundColor={props.onOpenExt && overWearing() ? style.theme.hover : undefined}
+          onMouseDown={props.onOpenExt ? extClick.onMouseDown : undefined}
+          onMouseUp={props.onOpenExt ? extClick.onMouseUp : undefined}
+          onMouseOver={() => setOverWearing(true)}
+          onMouseOut={() => setOverWearing(false)}
+        >
+          <text fg={style.theme.accent.evolve}>{wearingChip()}</text>
+        </box>
+      ) : null}
+      {/* The permission mode, and the click that opens its picker — the mouse
+          half of `/mode`. `unsafe` is warn-coloured: it is the stance where tool
+          calls run without anybody looking, and that should never be the quiet
+          one. */}
       {modeChip().length > 0 ? (
         <box
           flexShrink={0}
           height={1}
-          backgroundColor={props.onToggleMode && overMode() ? style.theme.hover : undefined}
-          onMouseDown={props.onToggleMode ? modeClick.onMouseDown : undefined}
-          onMouseUp={props.onToggleMode ? modeClick.onMouseUp : undefined}
+          backgroundColor={props.onPickMode && overMode() ? style.theme.hover : undefined}
+          onMouseDown={props.onPickMode ? modeClick.onMouseDown : undefined}
+          onMouseUp={props.onPickMode ? modeClick.onMouseUp : undefined}
           onMouseOver={() => setOverMode(true)}
           onMouseOut={() => setOverMode(false)}
         >
-          <text fg={props.mode === "auto" ? style.theme.warn : style.theme.dim}>{modeChip()}</text>
+          <text fg={props.mode === "unsafe" ? style.theme.warn : style.theme.dim}>{modeChip()}</text>
         </box>
       ) : null}
       {screen().width >= 60 ? (

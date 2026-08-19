@@ -8,7 +8,7 @@
 import { existsSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
-import { default_rules, isMode, type ApprovalRules, type PermissionMode } from "../approvals.ts"
+import { default_rules, normalizeMode, type ApprovalRules, type PermissionMode } from "../approvals.ts"
 
 export type FoldDefault = "expanded" | "collapsed"
 export type ThinkingDefault = "expanded" | "collapsed" | "hidden"
@@ -64,9 +64,10 @@ export interface Settings {
   driver: {
     /**
      * The permission mode a run STARTS in: `ask` puts every tool call the rules
-     * have no opinion about in front of a person, `auto` runs it. `tui-state.json`
-     * (what was last chosen on screen) wins over this; the chip on the status
-     * line and `/mode` change it for the run in flight (tui.md §5.7).
+     * have no opinion about in front of a person, `unsafe` runs it.
+     * `tui-state.json` (what was last chosen on screen) wins over this; the chip
+     * on the status line and `/mode` change it for the run in flight
+     * (tui.md §5.7). A layer that still says `auto` is read as `unsafe`.
      */
     mode: PermissionMode
   }
@@ -151,7 +152,13 @@ function mergeLayer(into: Settings, layer: unknown, source: string) {
     if (typeof extensions["handoff"] === "boolean") into.extensions.handoff = extensions["handoff"]
   }
   const driver = record["driver"] as Record<string, unknown> | undefined
-  if (driver && typeof driver["mode"] === "string" && isMode(driver["mode"])) into.driver.mode = driver["mode"]
+  if (driver && typeof driver["mode"] === "string") {
+    // A `tui.toml` written before the rename still says `auto`; it keeps
+    // meaning what it meant (`normalizeMode`). Nothing rewrites the file —
+    // `tui.toml` is a person's, and this only reads it.
+    const mode = normalizeMode(driver["mode"])
+    if (mode) into.driver.mode = mode
+  }
   const approvals = record["approvals"] as Record<string, unknown> | undefined
   if (approvals) {
     for (const table of ["allow", "ask", "deny"] as const) {

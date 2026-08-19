@@ -40,7 +40,7 @@ const actions: Array<[Action, string]> = [
 
 const fixed: Array<[string, string]> = [
   ["Enter", "send · in browse, open a sub-session or fold · as observer on an empty composer, take over"],
-  ["y / n / N / a", "on a tool call waiting for you: allow · deny · deny with a reason · always this session"],
+  ["↑↓ / 1-9, Tab", "in the approval dialog: choose an answer, or write a note that rides on it"],
   ["Shift+Enter / Ctrl+J", "newline"],
   ["/ then Tab", "complete a slash command; Enter always sends what is written"],
   ["↑ / ↓", "previous / next message, on an empty composer"],
@@ -54,7 +54,7 @@ const mouse: Array<[string, string]> = [
   ["click a head line", "fold / unfold that card"],
   ["click a row", "move the cursor there · click it again for what Enter does"],
   ["click the model", "in the line under the composer or the composition card: open /model"],
-  ["click ask / auto", "flip the permission mode, the same as /mode"],
+  ["click ask / unsafe", "open the permission-mode picker, the same as /mode"],
   ["click a tab / a pane", "go to it"],
   ["click [x]", "in /ext's tools pane: pin or unpin that tool"],
   ["drag over text", "select it; releasing copies it to the clipboard"],

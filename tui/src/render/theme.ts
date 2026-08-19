@@ -124,6 +124,13 @@ export interface Glyphs {
   /** The effort dial in `/model`: ‹ auto › */
   dialLeft: string
   dialRight: string
+  /**
+   * The mark on a PICKER's title — `/model` and `/mode` (T31). The two are one
+   * gesture at two altitudes (what the next session runs on, what happens to its
+   * tool calls), and this is what says so at a glance. Panels that list a store
+   * or a journal keep their bare titles: they are places, not choices.
+   */
+  picker: string
   /** "this is the one in force" — the current model row, a passed check. */
   check: string
   /**
@@ -156,6 +163,7 @@ const unicode_glyphs: Glyphs = {
   bar: "▎",
   dialLeft: "‹",
   dialRight: "›",
+  picker: "◈",
   check: "✓",
   switchOn: "●",
   switchOff: "○",
@@ -182,6 +190,7 @@ const ascii_glyphs: Glyphs = {
   bar: "|",
   dialLeft: "<",
   dialRight: ">",
+  picker: "#",
   check: "*",
   switchOn: "*",
   switchOff: "-",

@@ -14,17 +14,23 @@ import { join } from "node:path"
 import { extSeed, extSync, parseSyncLine, parseSyncReport, type SyncReport } from "../src/nulya/cli.ts"
 import {
   actionFor,
+  activePromptPackages,
   adoptBundled,
   answerFor,
+  autoActivatable,
   bundled_active,
   describeDrafts,
   draftColumn,
   failedIds,
   planProjectStore,
+  promptConsequence,
+  promptPackageWarning,
   promptText,
+  promptsOf,
   std_pins,
   stdEditPinDecision,
   summarize,
+  syncRoot,
 } from "../src/extensions.ts"
 import { draftHelp } from "../src/ui/overlays/ExtView.tsx"
 import { tempWorkspace, type TempWorkspace } from "./support.ts"
@@ -287,6 +293,101 @@ test("only the bundled ids that arrived this run are activated", async () => {
   // And the three on-demand packages are never adopted, however they arrived:
   // `evolution`'s system prompt belongs to the one session `/evolve` opens.
   expect(bundled_active).toEqual(["std", "guide"])
+})
+
+/**
+ * The guard the `evolution` bug named (tui.md §11, T31). A package that
+ * contributes a SYSTEM PROMPT is a mode: activating it puts that text in front
+ * of every model this machine runs, so a background pass must never be the one
+ * that decides. `arrived` used to be the whole rule, which covered exactly the
+ * one start where `ext seed` dropped the drafts.
+ */
+test("a background pass never activates a mode, and never guesses when it cannot tell", () => {
+  // The general rule: whatever the id, a declared system prompt is a mode.
+  expect(autoActivatable("somebody.else", ["prompts/identity.md"])).toBe(false)
+  expect(autoActivatable("somebody.else", [])).toBe(true)
+
+  // The three on-demand bundled ids, by name, whatever they contribute —
+  // `compact` and `handoff` declare no prompt at all and are still not the
+  // background pass's to switch on.
+  for (const id of ["compact", "evolution", "handoff"]) expect(autoActivatable(id, [])).toBe(false)
+  // …and the two whose documented install IS activate-and-use.
+  for (const id of bundled_active) expect(autoActivatable(id, [])).toBe(true)
+
+  // An unreadable manifest is "don't know", and don't-know is a no: a pass that
+  // cannot tell what a package contributes has not learnt that it contributes
+  // nothing. Leaving it off costs one keypress in `/ext`; the other direction
+  // costs every session on the machine.
+  expect(autoActivatable("somebody.else", null)).toBe(false)
+})
+
+test("what a mode's switch says, in both directions and for the package that named the bug", () => {
+  const on = promptConsequence("evolution", true)
+  expect(on).toContain("EVERY new session on this machine")
+  expect(on).toContain("/evolve")
+  expect(on).toContain("Enter again to turn it off")
+  // A mode nobody wrote a command for still gets the per-session way in.
+  expect(promptConsequence("house.style", true)).toContain("/as house.style")
+  expect(promptConsequence("evolution", false)).toContain("no longer enters new sessions")
+})
+
+test("the start-up check names the modes that are active, and says nothing when none are", () => {
+  const entry = (id: string, over: Partial<{ current: string | null; shadowed: boolean; systemPrompts: string[] }>) => ({
+    id,
+    current: "v-abc" as string | null,
+    shadowed: false,
+    systemPrompts: [] as string[],
+    ...over,
+  })
+  const listed = [
+    entry("std", {}),
+    entry("evolution", { systemPrompts: ["prompts/identity.md"] }),
+    // Built but switched off: nothing is in front of any model.
+    entry("house.style", { current: null, systemPrompts: ["prompts/style.md"] }),
+    // Active here, but an earlier root already has this id: this copy never runs.
+    entry("shadow.mode", { shadowed: true, systemPrompts: ["prompts/x.md"] }),
+  ]
+  expect(activePromptPackages(listed)).toEqual(["evolution"])
+  expect(activePromptPackages([entry("std", {})])).toEqual([])
+
+  const said = promptPackageWarning(["evolution"])
+  expect(said).toContain("evolution active")
+  expect(said).toContain("/ext")
+  // Nothing to say is said as nothing: a status line that reports the absence
+  // of a mode on every start is one more line nobody reads.
+  expect(promptPackageWarning([])).toBeNull()
+})
+
+test("the prompts of a built version are read from the root that sync wrote them to, and null when absent", async () => {
+  const store = tempWorkspace()
+  try {
+    const root = syncRoot(store, false)
+    expect(root).toBe(join(store.dir, ".nulya", "extensions"))
+    // Nothing built: the honest answer is "don't know", which `autoActivatable`
+    // then reads as a refusal.
+    expect(await promptsOf(store, root, "ghost", "v-nope")).toBeNull()
+
+    writeDraft(store.dir, "mode.pkg", "a mode")
+    const manifest = join(root, "mode.pkg", "extension.json")
+    writeFileSync(
+      manifest,
+      JSON.stringify({
+        schema: "nulya.extension/v2",
+        id: "mode.pkg",
+        contributes: { system_prompts: ["prompts/identity.md"] },
+      }),
+    )
+    mkdirSync(join(root, "mode.pkg", "prompts"), { recursive: true })
+    writeFileSync(join(root, "mode.pkg", "prompts", "identity.md"), "you are a mode\n")
+    const built = await extSync(store)
+    const line = built.lines.find((entry) => entry.id === "mode.pkg")!
+    expect(line.version).toMatch(/^v-/)
+
+    expect(await promptsOf(store, root, "mode.pkg", line.version!)).toEqual(["prompts/identity.md"])
+    expect(autoActivatable("mode.pkg", await promptsOf(store, root, "mode.pkg", line.version!))).toBe(false)
+  } finally {
+    store.cleanup()
+  }
 })
 
 test("the edit pin migration adopts only once the active std can honour it, and never twice", () => {

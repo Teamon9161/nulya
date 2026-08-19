@@ -19,7 +19,7 @@ import { createStyle } from "../src/render/theme.ts"
 import { default_settings } from "../src/state/settings.ts"
 import { App } from "../src/ui/App.tsx"
 import { windowItems } from "../src/ui/Transcript.tsx"
-import { auto_settings, scripted_env, tempWorkspace, type TempWorkspace } from "./support.ts"
+import { unsafe_settings, scripted_env, tempWorkspace, type TempWorkspace } from "./support.ts"
 
 const events_wanted = 5000
 
@@ -88,7 +88,7 @@ test("the transcript draws a 5k-event session without stalling", async () => {
 
   const started = performance.now()
   const setup = await testRender(
-    () => <App ws={ws} id={id} state={state} style={createStyle(auto_settings, {})} driver={{ env: scripted_env }} />,
+    () => <App ws={ws} id={id} state={state} style={createStyle(unsafe_settings, {})} driver={{ env: scripted_env }} />,
     { width: 100, height: 30 },
   )
   try {

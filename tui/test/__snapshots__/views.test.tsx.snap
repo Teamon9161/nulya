@@ -25,8 +25,8 @@ exports[`/help lists the bindings that are actually in force 1`] = `
                                                                                                   █ 
  Enter                            send · in browse, open a sub-session or fold                    █ 
                                   as observer on an empty composer, take over                     █ 
- y / n / N / a                    on a tool call waiting for you: allow · deny                    █ 
-                                  deny with a reason · always this session                        █ 
+ ↑↓ / 1-9, Tab                    in the approval dialog: choose an answer, or write a note that  █ 
+                                  rides on it                                                     █ 
  Shift+Enter / Ctrl+J             newline                                                         █ 
  / then Tab                       complete a slash command; Enter always sends what is written    █ 
  ↑ / ↓                            previous / next message, on an empty composer                   █ 
@@ -39,15 +39,15 @@ exports[`/help lists the bindings that are actually in force 1`] = `
  click a row                      move the cursor there · click it again for what Enter does      █ 
  click the model                  in the line under the composer or the composition card: open    █ 
                                   /model                                                          █ 
- click ask / auto                 flip the permission mode, the same as /mode                     █ 
+ click ask / unsafe               open the permission-mode picker, the same as /mode              █ 
  click a tab / a pane             go to it                                                        █ 
- click [x]                        in /ext's tools pane: pin or unpin that tool                    █ 
- drag over text                   select it; releasing copies it to the clipboard                 █ 
-                                                                                                  █ 
- slash commands                                                                                   █ 
- /model                           pick the model the next session runs on                         ▀ 
- /mode [ask|auto]                 ask before every tool call, or let them run; no argument          
-                                  switches                                                          
+ click [x]                        in /ext's tools pane: pin or unpin that tool                    ▀ 
+ drag over text                   select it; releasing copies it to the clipboard                   
+                                                                                                    
+ slash commands                                                                                     
+ /model                           pick the model the next session runs on                           
+ /mode [ask|unsafe]               ask before every tool call, or run them all unreviewed; no        
+                                  argument opens the picker                                         
  /provider                        endpoints and their keys                                          
                                   add an OpenAI- or Anthropic-compatible one                        
  /effort <level|auto>             change this tab's effort now; the next step runs with it          
@@ -61,7 +61,10 @@ exports[`/help lists the bindings that are actually in force 1`] = `
                                   stays                                                             
  /outcome <verdict> [note]        success | partial | failure — unjudged is not the same as         
                                   failed                                                            
- /evolve                          build the evolution package and start a session wearing it        
+ /evolve                          a new tab wearing the evolution package: the slow loop, where     
+                                  finished sessions are reviewed and it is decided what to keep     
+                                  or build. nothing is activated — the prompt is worn for that      
+                                  one session                                                       
  /as <id>[@version]               a session carrying a built extension's prompt and skills;         
                                   nothing is activated                                              
  /step                            continue after a spent step budget (nothing continues by          
@@ -71,9 +74,6 @@ exports[`/help lists the bindings that are actually in force 1`] = `
  /help                            every key and every command                                       
  /quit                            leave                                                             
  /<skill> [args]                  load an active skill's body as a user turn                        
-                                  \`nulya skill list\` names them                                     
- anything else after /            goes to the model verbatim                                        
-                                                                                                    
  j/k · PgUp/PgDn scroll · Esc close                                                                 
 "
 `;

@@ -10,6 +10,7 @@
  * key calls rather than a second copy of the behaviour.
  */
 import { afterAll, beforeAll, expect, test } from "bun:test"
+import { join } from "node:path"
 import { For, createSignal, type JSX } from "solid-js"
 import { testRender } from "@opentui/solid"
 import { App } from "../src/ui/App.tsx"
@@ -24,10 +25,10 @@ import { createSessionState, type TranscriptItem } from "../src/state/session.ts
 import { default_settings } from "../src/state/settings.ts"
 import { sessionAppend, sessionNew, sessionStep } from "../src/nulya/cli.ts"
 import { sessionPins } from "../src/state/tui_state.ts"
-import { auto_settings, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
+import { unsafe_settings, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
 import type { SessionTab } from "../src/state/tabs.ts"
 
-const style: Style = createStyle(auto_settings, {})
+const style: Style = createStyle(unsafe_settings, {})
 
 let ws: TempWorkspace
 let first: string
@@ -347,7 +348,22 @@ test("the model is a click target wherever it is written: the line under the com
   const id = await sessionNew(ws, { profile: "scripted" })
   const state = createSessionState(id)
   const setup = await testRender(
-    () => <App ws={ws} id={id} state={state} style={style} driver={{ env: scripted_env }} created />,
+    // A state file of this test's own: the mode chip below is CHOSEN from, and
+    // `/mode` remembers the choice (tui.md §7). Without this, picking `ask`
+    // here would be picking it for every later test in the run that renders an
+    // App without a state path — and their tool calls would sit waiting for a
+    // person who is not there.
+    () => (
+      <App
+        ws={ws}
+        id={id}
+        state={state}
+        style={style}
+        driver={{ env: scripted_env }}
+        statePath={join(ws.dir, `tui-state-${id}.json`)}
+        created
+      />
+    ),
     { width: 100, height: 30 },
   )
   const picker = "model · what the next session runs on"
@@ -367,7 +383,7 @@ test("the model is a click target wherever it is written: the line under the com
     // the way to `/help` is the part that never goes.
     expect(rows[bar]).toContain("Ctrl+O fold · /help")
     // …and the permission mode is on that line too, right of the middle.
-    expect(rows[bar]).toContain("auto")
+    expect(rows[bar]).toContain("unsafe")
     await setup.mockMouse.click(rows[bar]!.indexOf("scripted-demo") + 2, bar)
     expect(await settle(setup, 4)).toContain(picker)
     setup.mockInput.pressEscape()
@@ -399,6 +415,25 @@ test("the model is a click target wherever it is written: the line under the com
     const help = rows[bar]!.indexOf("/help")
     await setup.mockMouse.click(help + 1, bar)
     expect(await settle(setup, 4)).toContain("help · keys and commands")
+    setup.mockInput.pressEscape()
+    expect(await settle(setup, 4)).toContain("frozen composition")
+
+    // The permission mode is on that line too, and clicking it OPENS THE
+    // PICKER rather than flipping the mode (tui.md §11, T31): a chip that
+    // silently changed how every tool call is treated, in one click, with the
+    // two words never spelled out anywhere, was the worst kind of quiet.
+    const chip = rows[bar]!.lastIndexOf("unsafe")
+    expect(chip).toBeGreaterThan(0)
+    await setup.mockMouse.click(chip + 1, bar)
+    const modeRows = await settle(setup, 4)
+    expect(modeRows).toContain("permission mode")
+    expect(modeRows).toContain("ask before every tool call no rule settles")
+    // …and clicking a row in it is an answer, as in the approval dialog.
+    const askRow = modeRows.split("\n").findIndex((line) => line.includes("ask before every tool call"))
+    await setup.mockMouse.click(6, askRow)
+    const after = await settle(setup, 4)
+    expect(after).not.toContain("permission mode")
+    expect(after.split("\n")[bar]).toContain("ask")
   } finally {
     setup.renderer.destroy()
   }

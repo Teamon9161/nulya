@@ -240,7 +240,7 @@ test("Enter on a ready provider goes to /model landed on its first model; on a k
     setup.mockInput.pressEnter()
     await until(() => setup.captureCharFrame().includes("what the next session runs on"), 10_000)
     const frame = await settle(setup, 3)
-    expect(frame).toMatch(/▾ deepseek\s+DeepSeek V4 Flash/)
+    expect(frame).toMatch(/▾ DeepSeek V4 Flash/)
     // And it is a models screen: no keys, no endpoints, no way back by accident.
     expect(frame).not.toContain("s paste a key")
   } finally {
@@ -294,8 +294,12 @@ test("s pastes a key where the key belongs, and the models screen gains that pro
     setup.mockInput.pressEnter()
     await until(() => setup.captureCharFrame().includes("GPT-5.6 Sol"), 10_000)
     const frame = await settle(setup, 3)
-    expect(frame).toContain("openai    GPT-5.6 Sol")
-    expect(frame).toMatch(/▾ openai\s+GPT-5.6 Sol/)
+    // Grouped under their provider since T31: the heading names it once, and
+    // the models it just gained are the rows under it.
+    const rows = frame.split("\n").map((line) => line.replace(/\s+$/, ""))
+    const group = rows.findIndex((line) => line.trim() === "openai")
+    expect(group).toBeGreaterThan(0)
+    expect(rows[group + 1]).toMatch(/▾ GPT-5\.6 Sol/)
   } finally {
     setup.renderer.destroy()
   }

@@ -8,9 +8,11 @@
 import { afterAll, beforeAll, expect, test } from "bun:test"
 import { cpSync, existsSync } from "node:fs"
 import { basename, dirname, join } from "node:path"
-import { buildEvolution, evolution_draft, formatWithRef, parseWithRef } from "../src/evolve.ts"
+import { buildEvolution, evolution_draft, formatWithRef, parseWithRef, type WithRef } from "../src/evolve.ts"
 import { extList, sessionList, sessionNew } from "../src/nulya/cli.ts"
+import { tabLabels } from "../src/ui/TabBar.tsx"
 import { tempWorkspace, type TempWorkspace } from "./support.ts"
+import type { Tab } from "../src/state/tabs.ts"
 
 let ws: TempWorkspace
 
@@ -31,6 +33,40 @@ test("a --with ref splits into id and version, and survives the round trip", () 
   expect(parseWithRef("evolution@")).toBeNull()
   expect(formatWithRef({ id: "evolution" })).toBe("evolution")
   expect(formatWithRef({ id: "evolution", version: "v-1" })).toBe("evolution@v-1")
+})
+
+/**
+ * A tab wearing a package says so (tui.md §11, T31).
+ *
+ * `/evolve` opens a SECOND tab on the same model as the first, so without this
+ * the two read identically — and the only difference between them is which one
+ * thinks it is the slow loop. That was the bug: nothing on screen distinguished
+ * a session carrying `evolution` from one that was not.
+ */
+test("a draft tab is named by what it wears as well as what it runs on", () => {
+  const draft = (model: string, bring?: WithRef): Tab => ({
+    kind: "draft",
+    key: `draft-${model}-${bring?.id ?? ""}`,
+    pick: () => ({ profile: "scripted", model }),
+    setPick: () => {},
+    bring: () => bring,
+    setBring: () => {},
+    effort: () => undefined,
+    setEffort: () => {},
+  })
+
+  expect(tabLabels([draft("scripted-demo")])).toEqual(["scripted-demo (new)"])
+  // The version is not in the label: it is a content hash nobody reads, and the
+  // question this line answers is "which tab", not "which build".
+  expect(tabLabels([draft("scripted-demo", { id: "evolution", version: "v-abc123" })])).toEqual([
+    "scripted-demo · evolution (new)",
+  ])
+  // Two tabs on one model, one of them wearing something: told apart by the
+  // package, so neither needs the `#n` that identical labels fall back to.
+  expect(tabLabels([draft("scripted-demo"), draft("scripted-demo", { id: "evolution" })])).toEqual([
+    "scripted-demo (new)",
+    "scripted-demo · evolution (new)",
+  ])
 })
 
 /**

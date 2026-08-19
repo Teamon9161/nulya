@@ -54,12 +54,12 @@ export const scripted_background_env = { NULYA_SCRIPTED_MODE: "background" }
  *
  * Every step this TUI drives is gated — the kernel asks before each tool call —
  * and the default mode is `ask`, which means a person. A test with nobody at the
- * keyboard is a test in `auto` mode: the same gate, answered immediately. What
+ * keyboard is a test in `unsafe` mode: the same gate, answered immediately. What
  * `ask` does is its own test, where the keys are pressed on purpose.
  */
-export const auto_settings: Settings = {
+export const unsafe_settings: Settings = {
   ...default_settings,
-  driver: { mode: "auto" },
+  driver: { mode: "unsafe" },
   // …and without the `handoff` package. Composing it is a real behaviour with
   // its own test; here it would put a second extension in every workspace whose
   // store these tests then read back (tui.md §5.8).

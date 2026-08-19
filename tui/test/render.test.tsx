@@ -22,10 +22,10 @@ import { createSessionState, type TranscriptItem } from "../src/state/session.ts
 import { default_settings, loadSettings } from "../src/state/settings.ts"
 import type { SessionHeader } from "../src/nulya/ledger.ts"
 import { sessionAppend, sessionEvents, sessionNew, sessionStep, type TaskEntry } from "../src/nulya/cli.ts"
-import { auto_settings, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
+import { unsafe_settings, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
 import { wrapSkillEcho } from "../src/skills.ts"
 
-const style: Style = createStyle(auto_settings, {})
+const style: Style = createStyle(unsafe_settings, {})
 const narrow: Style = createStyle({ ...default_settings, transcript: { ...default_settings.transcript, max_width: 40 } }, {})
 
 /**
@@ -638,7 +638,7 @@ test("a finished task is its own card: the command, the tail, the log", async ()
   expect(frame).toMatchSnapshot()
 
   const open = createStyle(
-    { ...auto_settings, transcript: { ...auto_settings.transcript, tool_output: "expanded" } },
+    { ...unsafe_settings, transcript: { ...unsafe_settings.transcript, tool_output: "expanded" } },
     {},
   )
   const opened = await frameOf([task_finished_item], 76, 24, open)

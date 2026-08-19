@@ -19,8 +19,9 @@ import { sessionEvents, sessionList, sessionNew } from "../src/nulya/cli.ts"
 import { parseApprovalNote } from "../src/approvalnote.ts"
 import { handoffsFor, headline, nextHandoff } from "../src/handoff.ts"
 import { verdictLine } from "../src/nulya/cli.ts"
+import { loadTuiState } from "../src/state/tui_state.ts"
 import {
-  auto_settings,
+  unsafe_settings,
   scripted_batch_env,
   scripted_env,
   settle,
@@ -29,7 +30,7 @@ import {
   type TempWorkspace,
 } from "./support.ts"
 
-/** The default: a person answers. `auto_settings` is the other half of the pair. */
+/** The default: a person answers. `unsafe_settings` is the other half of the pair. */
 const ask_style = createStyle(default_settings, {})
 
 let ws: TempWorkspace
@@ -48,7 +49,7 @@ async function stepUntilAsked(width = 100, height = 24, env: Record<string, stri
   const state = createSessionState(id)
   const setup = await testRender(
     // A state file of this call's own. `/mode` REMEMBERS the choice (tui.md
-    // §7), so one test that switches to auto would otherwise decide the mode
+    // §7), so one test that switches to unsafe would otherwise decide the mode
     // every later test in this file starts in.
     () => (
       <App
@@ -108,7 +109,7 @@ test("a note on a denial reaches the model as that call's result", async () => {
     await until(() => setup.captureCharFrame().includes("not on this machine"), 10_000)
     // Tab back to the list, then down to the last answer: deny.
     setup.mockInput.pressTab()
-    // Four answers on a lone call: allow · always · mode auto · deny.
+    // Four answers on a lone call: allow · always · mode unsafe · deny.
     for (let i = 0; i < 3; i++) setup.mockInput.pressKey("ARROW_DOWN")
     expect(await settle(setup, 2)).toContain("deny")
     setup.mockInput.pressEnter()
@@ -128,7 +129,7 @@ test("a note on a denial reaches the model as that call's result", async () => {
 
 /**
  * tcode's `set_mode` option, in nulya's vocabulary. It is on the LIST rather
- * than in the composer because the dialog owns the keyboard: `/mode auto` is
+ * than in the composer because the dialog owns the keyboard: `/mode unsafe` is
  * not typeable while a call waits, and "stop asking me" is exactly what
  * somebody reaches for at the fourth prompt in a row.
  */
@@ -142,13 +143,13 @@ test("`allow everything from here on` answers this call and switches the mode", 
     await until(() => state.snapshot.items.some((item) => item.kind === "tool" && item.resolved), 30_000)
     const call = state.snapshot.items.find((item) => item.kind === "tool" && item.resolved)!
     expect(call.kind === "tool" && call.output).toContain("hello-from-nulya")
-    expect(setup.captureCharFrame()).toContain("auto")
+    expect(setup.captureCharFrame()).toContain("unsafe")
   } finally {
     setup.renderer.destroy()
   }
 }, 120_000)
 
-test("in auto mode the same call just runs, and the mode is on the status line", async () => {
+test("in unsafe mode the same call just runs, and the mode is on the status line", async () => {
   const id = await sessionNew(ws, { profile: "scripted" })
   const state = createSessionState(id)
   const setup = await testRender(
@@ -157,7 +158,7 @@ test("in auto mode the same call just runs, and the mode is on the status line",
         ws={ws}
         id={id}
         state={state}
-        style={createStyle(auto_settings, {})}
+        style={createStyle(unsafe_settings, {})}
         driver={{ env: scripted_env }}
         statePath={join(ws.dir, `tui-state-${id}.json`)}
         created
@@ -172,7 +173,7 @@ test("in auto mode the same call just runs, and the mode is on the status line",
     await until(() => state.snapshot.items.some((item) => item.kind === "tool" && item.resolved), 60_000)
     const call = state.snapshot.items.find((item) => item.kind === "tool" && item.resolved)!
     expect(call.kind === "tool" && call.output).toContain("hello-from-nulya")
-    expect(setup.captureCharFrame()).toContain("auto")
+    expect(setup.captureCharFrame()).toContain("unsafe")
   } finally {
     setup.renderer.destroy()
   }
@@ -282,6 +283,65 @@ test("the pointer alone answers the dialog, note and all", async () => {
     expect(call.kind === "tool" && call.ok).toBe(true)
     await until(async () => (await sessionEvents(ws, id)).some((event) => event.kind === "user_text" &&
       parseApprovalNote((event as { text: string }).text)?.text === "prefer ls"), 30_000)
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 120_000)
+
+/**
+ * The mode is CHOSEN from a list now, not flipped (tui.md §11, T31).
+ *
+ * A toggle cannot say what the other side is, so every press had to be followed
+ * by two lines explaining the state it had just moved to — on the one line of
+ * the screen that has no columns to spare. The picker says both modes at once,
+ * and having said them, the switch itself says nothing at all.
+ */
+test("bare /mode opens a picker that names both modes; choosing one says nothing afterwards", async () => {
+  const setup = await testRender(
+    () => (
+      <App
+        ws={ws}
+        pick={{ profile: "scripted", model: "scripted-demo" }}
+        style={ask_style}
+        driver={{ env: scripted_env }}
+        statePath={join(ws.dir, "tui-state-modepicker.json")}
+      />
+    ),
+    { width: 100, height: 30 },
+  )
+  try {
+    await settle(setup, 3)
+    await setup.mockInput.typeText("/mode")
+    setup.mockInput.pressEnter()
+    await until(() => setup.captureCharFrame().includes("permission mode"), 10_000)
+
+    // Both modes, each with what it actually does — the thing a toggle could
+    // never show, and the reason `unsafe` is not called `auto`.
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("ask before every tool call no rule settles")
+    expect(frame).toContain("run every tool call without asking")
+    // …including the one fact that keeps `unsafe` from being all-or-nothing.
+    expect(frame).toContain("[approvals] deny")
+    // The cursor opens on the mode in force, marked as the current one.
+    expect(frame).toMatch(/▾ ask\s+ask before every tool call no rule settles ✓/)
+
+    setup.mockInput.pressKey("ARROW_DOWN")
+    setup.mockInput.pressEnter()
+    await until(() => !setup.captureCharFrame().includes("permission mode"), 10_000)
+    const after = await settle(setup, 3)
+    // The chip on the status line is the whole of the announcement.
+    expect(after).toContain("unsafe")
+    expect(after).not.toContain("tool calls run without asking, except")
+    // And it is remembered, under the new name.
+    expect(loadTuiState(join(ws.dir, "tui-state-modepicker.json")).mode).toBe("unsafe")
+
+    // Esc closes without choosing: the picker is a question, not a commitment.
+    await setup.mockInput.typeText("/mode")
+    setup.mockInput.pressEnter()
+    await until(() => setup.captureCharFrame().includes("permission mode"), 10_000)
+    setup.mockInput.pressEscape()
+    await until(() => !setup.captureCharFrame().includes("permission mode"), 10_000)
+    expect(loadTuiState(join(ws.dir, "tui-state-modepicker.json")).mode).toBe("unsafe")
   } finally {
     setup.renderer.destroy()
   }

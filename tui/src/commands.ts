@@ -25,7 +25,11 @@ export interface Command {
 
 export const commands: Command[] = [
   { name: "/model", what: "pick the model the next session runs on" },
-  { name: "/mode", args: "[ask|auto]", what: "ask before every tool call, or let them run; no argument switches" },
+  {
+    name: "/mode",
+    args: "[ask|unsafe]",
+    what: "ask before every tool call, or run them all unreviewed; no argument opens the picker",
+  },
   { name: "/provider", what: "endpoints and their keys · add an OpenAI- or Anthropic-compatible one" },
   { name: "/effort", args: "<level|auto>", what: "change this tab's effort now; the next step runs with it" },
   { name: "/new", args: "[--profile p] [--model id]", what: "a session on the last pick, or on the named profile" },
@@ -36,7 +40,10 @@ export const commands: Command[] = [
   { name: "/settings", what: "the effective tui.toml values and which file each came from" },
   { name: "/compact", args: "[focus]", what: "summarise this session and continue in a new one; this file stays" },
   { name: "/outcome", args: "<verdict> [note]", what: "success | partial | failure — unjudged is not the same as failed" },
-  { name: "/evolve", what: "build the evolution package and start a session wearing it" },
+  {
+    name: "/evolve",
+    what: "a new tab wearing the evolution package: the slow loop, where finished sessions are reviewed and it is decided what to keep or build. nothing is activated — the prompt is worn for that one session",
+  },
   { name: "/as", args: "<id>[@version]", what: "a session carrying a built extension's prompt and skills; nothing is activated" },
   { name: "/step", what: "continue after a spent step budget (nothing continues by itself)" },
   { name: "/cancel", what: "stop the running step at the kernel's next step boundary" },
