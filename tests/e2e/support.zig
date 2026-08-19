@@ -340,6 +340,62 @@ pub fn runCliEnvs(
     return .{ .code = code, .stdout = try alloc.dupe(u8, result.stdout) };
 }
 
+/// One CLI invocation that is FED something on stdin — `session step --gate`,
+/// whose approval verdicts arrive there (DESIGN §14). `std.process.run` always
+/// hands the child an empty stdin, so this is the same shape with one pipe more.
+///
+/// The whole answer is written and stdin is closed before stdout is drained:
+/// verdict lines are tiny (far under a pipe buffer) and so is everything the
+/// step prints, so neither side can block on the other. Closing early is also
+/// half the test — after the last written verdict the gate meets EOF, which is
+/// exactly the fail-closed path.
+pub fn runCliStdin(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    ws: std.Io.Dir,
+    argv: []const []const u8,
+    stdin_bytes: []const u8,
+    pairs: []const EnvPair,
+) !CliRun {
+    var env = try std.testing.environ.createMap(alloc);
+    defer env.deinit();
+    const home = try defaultHome(alloc, io, ws);
+    defer alloc.free(home);
+    try env.put("NULYA_HOME", home);
+    for (pairs) |p| try env.put(p.key, p.value);
+
+    var child = try std.process.spawn(io, .{
+        .argv = argv,
+        .cwd = .{ .dir = ws },
+        .environ_map = &env,
+        .stdin = .pipe,
+        .stdout = .pipe,
+        .stderr = .pipe,
+    });
+    defer child.kill(io);
+
+    if (stdin_bytes.len > 0) try child.stdin.?.writeStreamingAll(io, stdin_bytes);
+    child.stdin.?.close(io);
+    child.stdin = null;
+
+    var multi_reader_buffer: std.Io.File.MultiReader.Buffer(2) = undefined;
+    var multi_reader: std.Io.File.MultiReader = undefined;
+    multi_reader.init(alloc, io, multi_reader_buffer.toStreams(), &.{ child.stdout.?, child.stderr.? });
+    defer multi_reader.deinit();
+    while (multi_reader.fill(64, .none)) |_| {} else |err| switch (err) {
+        error.EndOfStream => {},
+        else => |e| return e,
+    }
+    try multi_reader.checkAnyError();
+
+    const term = try child.wait(io);
+    const code = switch (term) {
+        .exited => |c| c,
+        else => 255,
+    };
+    return .{ .code = code, .stdout = try alloc.dupe(u8, multi_reader.reader(0).buffered()) };
+}
+
 /// One CLI invocation, keeping STDERR instead of stdout: notes and warnings are
 /// written there precisely so stdout stays the machine-readable surface. Caller
 /// owns the result.
@@ -461,7 +517,9 @@ fn prebuiltVersion(
 
     var store_dir = try openPrebuiltDir(alloc, io, "store");
     defer store_dir.close(io);
-    var result = try build_ext.buildExtension(alloc, io, draft_root, draft_rel, store_dir, zig_exe);
+    var zig = build_ext.Zig.init(zig_exe);
+    defer zig.deinit(alloc);
+    var result = try build_ext.buildExtension(alloc, io, draft_root, draft_rel, store_dir, &zig);
     defer result.deinit(alloc);
     if (!result.compile_ok) {
         std.debug.print("prebuilt extension failed to compile:\n{s}\n", .{result.stderr});

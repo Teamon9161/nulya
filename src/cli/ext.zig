@@ -47,8 +47,7 @@ pub fn dispatchExt(alloc: std.mem.Allocator, io: std.Io, args: []const []const u
     if (std.mem.eql(u8, sub, "init")) return extInit(alloc, io, rest);
     if (std.mem.eql(u8, sub, "build")) return extBuild(alloc, io, rest);
     if (std.mem.eql(u8, sub, "run")) return extRun(alloc, io, rest);
-    if (std.mem.eql(u8, sub, "activate")) return extActivate(alloc, io, rest, .activate);
-    if (std.mem.eql(u8, sub, "rollback")) return extActivate(alloc, io, rest, .rollback);
+    if (std.mem.eql(u8, sub, "activate")) return extActivate(alloc, io, rest);
     if (std.mem.eql(u8, sub, "deactivate")) return extDeactivate(alloc, io, rest);
     if (std.mem.eql(u8, sub, "sync")) return extSync(alloc, io, rest);
     if (std.mem.eql(u8, sub, "seed")) return extSeed(alloc, io, rest);
@@ -168,8 +167,10 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
     // only if it actually has to compile.
     const zig_exe: ?ZigExe = resolveZig(alloc, io) catch null;
     defer if (zig_exe) |z| z.deinit(alloc);
+    var zig = build_ext.Zig.init(if (zig_exe) |z| z.path else "");
+    defer zig.deinit(alloc);
 
-    var result = build_ext.buildExtensionReusing(alloc, io, std.Io.Dir.cwd(), ext_dir, dest_root, if (zig_exe) |z| z.path else "", donors.dirs.items) catch |err| switch (err) {
+    var result = build_ext.buildExtensionReusing(alloc, io, std.Io.Dir.cwd(), ext_dir, dest_root, &zig, donors.dirs.items) catch |err| switch (err) {
         // Either nothing answered, or what answered could not say its own
         // version — and that difference is the whole repair hint, so it is not
         // flattened into one sentence.
@@ -436,7 +437,10 @@ fn extSync(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
 
     const zig_exe: ?ZigExe = resolveZig(alloc, io) catch null;
     defer if (zig_exe) |z| z.deinit(alloc);
-    const zig_path = if (zig_exe) |z| z.path else "";
+    // One probe for the whole pass: every draft here builds from the same root,
+    // and `zig version` is a subprocess (`build_ext.Zig`).
+    var zig = build_ext.Zig.init(if (zig_exe) |z| z.path else "");
+    defer zig.deinit(alloc);
     // The same three ways out `ext build` names, spelled once for the whole
     // pass: a front end relays this line as-is, so the directory has to be in it.
     const no_zig_hint = try cli_toolchain.noZigHint(alloc);
@@ -450,9 +454,9 @@ fn extSync(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
         // reads from and the store it writes into — no absolute sub-path anywhere,
         // which is what makes an absolute user root work the same as `.nulya/…`.
         var result = (if (dry_run)
-            build_ext.planExtension(alloc, io, root_dir, draft, root_dir, zig_path, donors.dirs.items)
+            build_ext.planExtension(alloc, io, root_dir, draft, root_dir, &zig, donors.dirs.items)
         else
-            build_ext.buildExtensionReusing(alloc, io, root_dir, draft, root_dir, zig_path, donors.dirs.items)) catch |err| switch (err) {
+            build_ext.buildExtensionReusing(alloc, io, root_dir, draft, root_dir, &zig, donors.dirs.items)) catch |err| switch (err) {
             error.ZigVersionUnreadable => {
                 failed += 1;
                 // Two different walls behind one word: no compiler at all, or one
@@ -905,7 +909,7 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     var search = try RootSearch.open(alloc, io, cwd_path);
     defer search.deinit(alloc);
     const resolved: roots_mod.Roots.Resolved = if (with_ref.version) |v|
-        search.roots.resolveVersion(alloc, id, v) catch |err| switch (err) {
+        search.roots.resolveVersion(alloc, id, v, .sealed) catch |err| switch (err) {
             error.Canceled => return err,
             error.VersionNotFound => {
                 try printOut(alloc, io, "no store root holds {s}@{s}; see `nulya ext list`\n", .{ id, v });
@@ -917,7 +921,7 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             },
         }
     else
-        (search.roots.resolveActive(alloc, id) catch |err| switch (err) {
+        (search.roots.resolveActive(alloc, id, .sealed) catch |err| switch (err) {
             error.Canceled => return err,
             // `current` names a version this root cannot serve. Name the fault;
             // `nulya ext list` names the version it points at.
@@ -1074,13 +1078,15 @@ fn writeTypedValue(jw: *std.json.Stringify, val: []const u8, ty: ?[]const u8) !v
     return jw.write(val); // string, or an unparseable scalar left as text
 }
 
-const ActivateMode = enum { activate, rollback };
-
-fn extActivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8, mode: ActivateMode) !u8 {
+/// `nulya ext activate [--user] <id> <version>` — point `current` at one built
+/// version. There is no second verb for going backwards: a rollback IS this,
+/// aimed at an older version (DESIGN §7.4), and a `rollback` that shared every
+/// line of this function only made the CLI look like it had two powers.
+fn extActivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     const flags = try takeUserFlag(alloc, args);
     defer alloc.free(flags.rest);
     if (flags.rest.len < 2) {
-        try printErr(io, "usage: nulya ext activate|rollback [--user] <id> <version>\n");
+        try printErr(io, "usage: nulya ext activate [--user] <id> <version>\n");
         return 1;
     }
     const id = flags.rest[0];
@@ -1097,17 +1103,14 @@ fn extActivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8, m
     defer ext_root.close(io);
     const st = store.Store.init(io, ext_root);
     try warnUserScope(alloc, io, st, id, version, flags.user);
-    (switch (mode) {
-        .activate => st.activate(alloc, id, version),
-        .rollback => st.rollback(alloc, id, version),
-    }) catch |err| {
-        try printOut(alloc, io, "{s} failed: {s} ({s}@{s} in {s})\n", .{ @tagName(mode), @errorName(err), id, version, target });
+    st.activate(alloc, id, version) catch |err| {
+        try printOut(alloc, io, "activate failed: {s} ({s}@{s} in {s})\n", .{ @errorName(err), id, version, target });
         if (err == error.VersionNotFound) {
             // The version exists, just not in the root whose copy is in effect
             // — say so, or "but I built it" is the next question.
             var search = try RootSearch.open(alloc, io, cwd_path);
             defer search.deinit(alloc);
-            if (search.roots.firstWithVersion(alloc, id, version)) |i| {
+            if (search.roots.firstWithVersion(alloc, id, version, .structural)) |i| {
                 try printOut(alloc, io, "note: {s}@{s} is built in {s}, which {s} shadows; activate a version built in {s}, or `--user` to act on the user store\n", .{ id, version, search.roots.entries[i].spec, target, target });
             }
         }
@@ -1160,7 +1163,7 @@ fn warnUserScope(
 
     // Best effort: an unreadable manifest only costs the extra clause.
     const prompts: bool = blk: {
-        var m = st.readManifest(alloc, id, version) catch break :blk false;
+        var m = st.readManifest(alloc, id, version, .structural) catch break :blk false;
         defer m.deinit();
         break :blk m.system_prompts.len != 0;
     };
@@ -1294,7 +1297,11 @@ fn extList(alloc: std.mem.Allocator, io: std.Io) !u8 {
 /// empty string when it contributes nothing nameable or cannot be read. Caller
 /// owns the result.
 fn contributionMarker(alloc: std.mem.Allocator, roots: *const roots_mod.Roots, entry: roots_mod.Roots.ActiveEntry) ![]u8 {
-    const resolved = roots.resolveEntry(alloc, entry) catch return alloc.dupe(u8, "");
+    // `.structural`: this column reports what a version DECLARES. Re-digesting
+    // every megabyte of built binary to print `[tools]` made `ext list` cost
+    // most of a second in a store with a few compiled extensions — and a front
+    // end runs it constantly. What is about to run is checked where it runs.
+    const resolved = roots.resolveEntry(alloc, entry, .structural) catch return alloc.dupe(u8, "");
     defer resolved.deinit(alloc);
     const m = resolved.manifest;
     if (m.tools.len == 0 and m.skills.len == 0 and m.system_prompts.len == 0) return alloc.dupe(u8, "");
@@ -1475,6 +1482,16 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             \\  `permissions` in a manifest is a declaration for readers and review.
             \\  Nothing enforces it yet, so do not treat it as a boundary.
             \\
+            \\  A driver can hold the veto: `nulya session step --gate --stream` asks it
+            \\  before every tool call and runs only what it allows. A refusal comes back
+            \\  as that call's result — the call never ran, nothing changed — and the rest
+            \\  of the batch is decided one call at a time.
+            \\
+            \\  A tool may declare `"readonly": true` in its manifest, meaning it only
+            \\  reads. That is a hint for whoever answers the gate, not a boundary: the
+            \\  kernel records the claim and enforces nothing. Real isolation waits for a
+            \\  sandbox.
+            \\
             \\  Wall clock is enforced: an extension tool is killed at 30s unless its
             \\  manifest sets `timeout_ms` (600s maximum); `shell` defaults to 120s and
             \\  accepts `timeout_ms` up to 600s. A timeout kills the whole process tree
@@ -1497,7 +1514,7 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             \\  nulya ext run my.helper@v-<hash> do_thing --arg name=world    # try it before anything else sees it
             \\  nulya ext activate my.helper v-<hash>         # `current` points at it; CLI callers need nothing more
             \\  nulya session new --pin ext:my.helper/do_thing  # the NEXT session carries it as a native tool
-            \\  nulya ext rollback my.helper v-<older>        # going back is a pointer move, never a rebuild
+            \\  nulya ext activate my.helper v-<older>        # going back is the same verb: a pointer move, never a rebuild
             \\
             \\  # A package you do not want in every session (a mode, a driver): build it,
             \\  # do not activate it, and name the version for one session.

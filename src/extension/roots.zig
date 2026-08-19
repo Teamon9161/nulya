@@ -60,7 +60,8 @@ pub const Roots = struct {
         id: []const u8,
         /// Owned.
         version: []const u8,
-        /// Owned; parsed AND validated, from the integrity-checked version dir.
+        /// Owned; parsed AND validated, from a version directory checked to the
+        /// `Level` the caller asked for.
         manifest: manifest.Manifest,
         /// Index into `Roots.entries` of the root this version was taken from.
         root: usize,
@@ -88,10 +89,10 @@ pub const Roots = struct {
     /// (`firstActive`), with its validated manifest. Null when no root points at
     /// one. Host faults — cancellation above all — propagate unchanged: only a
     /// missing `current` is "not there".
-    pub fn resolveActive(self: *const Roots, alloc: std.mem.Allocator, id: []const u8) !?Resolved {
+    pub fn resolveActive(self: *const Roots, alloc: std.mem.Allocator, id: []const u8, level: ext_store.Level) !?Resolved {
         const active = (try self.firstActive(alloc, id)) orelse return null;
         defer alloc.free(active.version);
-        return try self.resolveAt(alloc, active.root, id, active.version);
+        return try self.resolveAt(alloc, active.root, id, active.version, level);
     }
 
     /// A named built version, taken from the first root that holds a USABLE
@@ -104,10 +105,10 @@ pub const Roots = struct {
     /// specific thing known about why — or `error.VersionNotFound` when no root
     /// held it at all. Host faults (cancellation, OOM, real I/O) propagate at
     /// once and are never softened into "not found".
-    pub fn resolveVersion(self: *const Roots, alloc: std.mem.Allocator, id: []const u8, version: []const u8) !Resolved {
+    pub fn resolveVersion(self: *const Roots, alloc: std.mem.Allocator, id: []const u8, version: []const u8, level: ext_store.Level) !Resolved {
         var first_fault: ?anyerror = null;
         for (self.entries, 0..) |_, i| {
-            return self.resolveAt(alloc, i, id, version) catch |err| {
+            return self.resolveAt(alloc, i, id, version, level) catch |err| {
                 if (!ext_store.isExtensionFault(err)) return err;
                 // "Absent here" is the ordinary case and says nothing; a broken
                 // copy is worth reporting if no later root saves the lookup.
@@ -122,12 +123,12 @@ pub const Roots = struct {
     /// the search order a second time: no repeated `current` read, and no window
     /// in which an activate between listing and lookup swaps the version under
     /// the caller.
-    pub fn resolveEntry(self: *const Roots, alloc: std.mem.Allocator, entry: ActiveEntry) !Resolved {
-        return self.resolveAt(alloc, entry.root, entry.id, entry.version);
+    pub fn resolveEntry(self: *const Roots, alloc: std.mem.Allocator, entry: ActiveEntry, level: ext_store.Level) !Resolved {
+        return self.resolveAt(alloc, entry.root, entry.id, entry.version, level);
     }
 
-    fn resolveAt(self: *const Roots, alloc: std.mem.Allocator, root: usize, id: []const u8, version: []const u8) !Resolved {
-        var m = try self.store(root).readManifest(alloc, id, version);
+    fn resolveAt(self: *const Roots, alloc: std.mem.Allocator, root: usize, id: []const u8, version: []const u8, level: ext_store.Level) !Resolved {
+        var m = try self.store(root).readManifest(alloc, id, version, level);
         errdefer m.deinit();
         const owned_id = try alloc.dupe(u8, id);
         errdefer alloc.free(owned_id);
@@ -213,12 +214,12 @@ pub const Roots = struct {
         alloc.free(list);
     }
 
-    /// Index of the first root holding a BUILT `version` of `id` (integrity
-    /// checked). Content addressing makes every root's copy the same bytes, so
+    /// Index of the first root holding a BUILT `version` of `id`, validated to
+    /// `level`. Content addressing makes every root's copy the same bytes, so
     /// the first one found is as good as any.
-    pub fn firstWithVersion(self: *const Roots, alloc: std.mem.Allocator, id: []const u8, version: []const u8) ?usize {
+    pub fn firstWithVersion(self: *const Roots, alloc: std.mem.Allocator, id: []const u8, version: []const u8, level: ext_store.Level) ?usize {
         for (self.entries, 0..) |_, i| {
-            if (self.store(i).versionExists(alloc, id, version)) return i;
+            if (self.store(i).versionExists(alloc, id, version, level)) return i;
         }
         return null;
     }
@@ -297,9 +298,9 @@ test "roots search in order: the first root holding an id wins, a missing root i
     try std.testing.expect((try roots.firstActive(alloc, "absent")) == null);
     // A frozen version resolves from whichever root actually holds it — the
     // user root's version is found even though the workspace shadows the id.
-    try std.testing.expectEqual(@as(usize, 1), roots.firstWithVersion(alloc, "shared", user_shared).?);
-    try std.testing.expectEqual(@as(usize, 0), roots.firstWithVersion(alloc, "shared", ws_shared).?);
-    try std.testing.expect(roots.firstWithVersion(alloc, "shared", "v-000000000000000000000000") == null);
+    try std.testing.expectEqual(@as(usize, 1), roots.firstWithVersion(alloc, "shared", user_shared, .sealed).?);
+    try std.testing.expectEqual(@as(usize, 0), roots.firstWithVersion(alloc, "shared", ws_shared, .sealed).?);
+    try std.testing.expect(roots.firstWithVersion(alloc, "shared", "v-000000000000000000000000", .sealed) == null);
 
     // Shadowing is by ACTIVE copy, not by directory: deactivate the workspace's
     // `shared` (its `<id>/` and versions stay) and the user root's active copy
@@ -320,7 +321,7 @@ test "roots search in order: the first root holding an id wins, a missing root i
     // `Resolved` is the same order plus the validated manifest — the one lookup
     // every caller shares.
     {
-        const r = (try roots.resolveActive(alloc, "shared")).?;
+        const r = (try roots.resolveActive(alloc, "shared", .sealed)).?;
         defer r.deinit(alloc);
         try std.testing.expectEqual(@as(usize, 1), r.root);
         try std.testing.expectEqualStrings(user_shared, r.version);
@@ -328,25 +329,25 @@ test "roots search in order: the first root holding an id wins, a missing root i
     }
     {
         // A named version comes from whichever root holds it, active or not.
-        const r = try roots.resolveVersion(alloc, "shared", ws_shared);
+        const r = try roots.resolveVersion(alloc, "shared", ws_shared, .sealed);
         defer r.deinit(alloc);
         try std.testing.expectEqual(@as(usize, 0), r.root);
         try std.testing.expectEqualStrings(ws_shared, r.version);
     }
-    try std.testing.expect((try roots.resolveActive(alloc, "absent")) == null);
-    try std.testing.expectError(error.VersionNotFound, roots.resolveVersion(alloc, "shared", "v-000000000000000000000000"));
+    try std.testing.expect((try roots.resolveActive(alloc, "absent", .sealed)) == null);
+    try std.testing.expectError(error.VersionNotFound, roots.resolveVersion(alloc, "shared", "v-000000000000000000000000", .sealed));
 
     // A BROKEN copy in an earlier root does not shadow a good one further down:
     // a crash can leave a half-written `versions/<v>/` (here: no seal at all),
     // and the content-addressed copy in the next root is the same bytes.
     try ext_store.Store.init(io, ws_root).ensureVersionDir(alloc, "shared", user_shared);
     {
-        const r = try roots.resolveVersion(alloc, "shared", user_shared);
+        const r = try roots.resolveVersion(alloc, "shared", user_shared, .sealed);
         defer r.deinit(alloc);
         try std.testing.expectEqual(@as(usize, 1), r.root);
     }
     // When NO root yields a usable copy, the broken one's own fault is what the
     // caller hears — not a bare "not found".
     try ext_store.Store.init(io, ws_root).ensureVersionDir(alloc, "shared", "v-111111111111111111111111");
-    try std.testing.expectError(error.VersionSealInvalid, roots.resolveVersion(alloc, "shared", "v-111111111111111111111111"));
+    try std.testing.expectError(error.VersionSealInvalid, roots.resolveVersion(alloc, "shared", "v-111111111111111111111111", .sealed));
 }

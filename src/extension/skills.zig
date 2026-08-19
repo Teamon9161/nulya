@@ -124,7 +124,11 @@ pub fn listActive(
         // fails the session on the same fault: this is a READ-ONLY listing, and
         // showing the catalog it can beats refusing to show any of it. Nothing
         // downstream of a listing is silently missing a capability.
-        const r = roots.resolveEntry(alloc, entry) catch |err| switch (err) {
+        //
+        // `.structural` for the same reason: a catalog only has to name what a
+        // complete version declares. Nothing here runs, and the paths that do
+        // (composition, `ext run`) ask for `.sealed` themselves.
+        const r = roots.resolveEntry(alloc, entry, .structural) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => continue,
         };
@@ -145,7 +149,9 @@ pub fn loadFrozenAcross(
     frozen_ref: []const u8,
 ) ![]u8 {
     const parsed = try parseRef(frozen_ref); // malformed: fail before touching a root
-    const r = try roots.resolveVersion(alloc, parsed.extension_id, parsed.version);
+    // `.sealed`: a loaded SKILL.md body goes straight into the model's context,
+    // so this is a read that CONSUMES the frozen bytes, not one that lists them.
+    const r = try roots.resolveVersion(alloc, parsed.extension_id, parsed.version, .sealed);
     defer r.deinit(alloc);
     return readSkillBody(alloc, roots.io, roots.entries[r.root].dir, parsed, r.manifest);
 }
@@ -190,7 +196,7 @@ fn readFrozenManifest(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id
     // Delegates to `Store.readManifest`, the single validate+parse path. That
     // keeps integrity validation identical here and preserves `error.Canceled`
     // instead of collapsing it into a spurious integrity error.
-    return store.Store.init(io, root).readManifest(alloc, id, version);
+    return store.Store.init(io, root).readManifest(alloc, id, version, .sealed);
 }
 
 fn basename(path: []const u8) ?[]const u8 {

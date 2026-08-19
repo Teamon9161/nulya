@@ -26,8 +26,8 @@ help` in PowerShell. Below, `nulya` means whichever of the two applies.
   means starting a new session.
 - The session file only grows. Events are appended, never rewritten; a
   correction is one more event.
-- Extension versions are content-addressed and immutable. `activate` and
-  `rollback` move a pointer; nothing is ever overwritten.
+- Extension versions are content-addressed and immutable. `activate` moves a
+  pointer; nothing is ever overwritten, and going back is `activate` again.
 
 ## Finding your way
 
@@ -122,14 +122,14 @@ Store and scope:
 
 - `nulya ext build <path>` freezes whatever directory you point at — the draft
   may live anywhere — and files the result under the store by its manifest id.
-- `--user` on `init` / `build` / `sync` / `prune` / `activate` / `rollback` /
+- `--user` on `init` / `build` / `sync` / `prune` / `activate` /
   `deactivate` uses the user store, which every workspace on this machine sees.
   **A tool you want everywhere belongs there.**
 - **The least-effort install: put the source in `<root>/<id>/` and run `nulya ext
   sync [--user]`.** It builds every draft in that root, one line each, and one
   bad manifest does not stop the rest. Add `--activate` to point `current` at
   what it just built (and at ids that have none) — it never moves a `current`
-  that names something else, so a rollback survives. `--dry-run` says what it
+  that names something else, so going back to an older version survives. `--dry-run` says what it
   would do and writes nothing.
 - A build takes a copy instead of compiling when another root already holds that
   exact version, which is what lets a machine with no toolchain install a

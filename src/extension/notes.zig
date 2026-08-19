@@ -54,7 +54,7 @@ pub fn noteText(alloc: std.mem.Allocator, id: []const u8, version: []const u8, t
 /// cannot be read. `root` is the extensions store root. Caller owns the result.
 pub fn buildActiveNoteText(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id: []const u8, version: []const u8) !?[]u8 {
     const st = store.Store.init(io, root);
-    var m = st.readManifest(alloc, id, version) catch |err| switch (err) {
+    var m = st.readManifest(alloc, id, version, .structural) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         else => return null,
     };

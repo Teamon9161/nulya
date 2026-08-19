@@ -116,7 +116,7 @@ pub const Options = struct {
     pinned_native_tools: []const []const u8 = &.{},
     /// Provider-facing total tool count, builtins included. shell + edit always
     /// occupy `registry.builtin_count` of it.
-    max_tools: u32 = 8,
+    max_tools: u32 = 20,
     /// Extensions to bring into THIS session's composition whether or not they
     /// are activated (`nulya session new --with`, DESIGN §14). Membership only:
     /// their skills enter the catalog, their system prompts enter the system
@@ -452,7 +452,7 @@ fn resolveActiveExtensions(alloc: std.mem.Allocator, roots: *const roots_mod.Roo
     for (active) |entry| {
         // A host fault — cancellation, OOM, a real I/O failure — must propagate
         // as itself, never be reported as a broken extension (isExtensionFault).
-        const r = roots.resolveEntry(alloc, entry) catch |err| switch (err) {
+        const r = roots.resolveEntry(alloc, entry, .sealed) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => {
                 if (!isExtensionFault(err)) return err;
@@ -484,7 +484,7 @@ fn reportBrokenActive(
     if (builtin.is_test) return;
     const line = try std.fmt.allocPrint(
         alloc,
-        "active extension {s}@{s} is broken ({s}); run 'nulya ext deactivate {s}' or 'nulya ext rollback {s}' to recover\n",
+        "active extension {s}@{s} is broken ({s}); run 'nulya ext deactivate {s}', or 'nulya ext activate {s} <older-version>' to go back\n",
         .{ entry.id, entry.version, @errorName(err), entry.id, entry.id },
     );
     defer alloc.free(line);
@@ -512,12 +512,12 @@ fn unionWith(
 
     for (with) |ref| {
         const r = if (ref.version) |v|
-            roots.resolveVersion(alloc, ref.id, v) catch |err| switch (err) {
+            roots.resolveVersion(alloc, ref.id, v, .sealed) catch |err| switch (err) {
                 error.VersionNotFound => return error.WithVersionNotFound,
                 else => return err,
             }
         else
-            (try roots.resolveActive(alloc, ref.id)) orelse return error.WithVersionNotFound;
+            (try roots.resolveActive(alloc, ref.id, .sealed)) orelse return error.WithVersionNotFound;
         errdefer r.deinit(alloc);
 
         // Replace an entry for the same id rather than shadowing it: two
@@ -543,7 +543,7 @@ fn resolveFrozenExtensions(alloc: std.mem.Allocator, roots: *const roots_mod.Roo
     var resolved: std.ArrayList(roots_mod.Roots.Resolved) = .empty;
     errdefer freeResolved(alloc, resolved.items);
     for (active) |ext| {
-        const r = try roots.resolveVersion(alloc, ext.id, ext.version);
+        const r = try roots.resolveVersion(alloc, ext.id, ext.version, .sealed);
         errdefer r.deinit(alloc);
         try resolved.append(alloc, r);
     }

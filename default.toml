@@ -180,7 +180,7 @@ label = "Tencent Hy3 (free)"
 context_window = 262144
 
 [registry]
-max_tools = 8
+max_tools = 20
 # Extension tools exposed on the model's tool face, as stable ids
 # ("ext:<extension-id>/<tool>"). A pin is a decision — nothing promotes itself
 # from the usage journal. Each one costs a slot in max_tools and prefix tokens

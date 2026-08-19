@@ -231,7 +231,10 @@ const PromptIndex = struct {
         if (gop.found_existing) return gop.value_ptr.*;
         gop.value_ptr.* = &.{};
 
-        const resolved = roots.resolveVersion(a, ref.id, ref.version) catch return gop.value_ptr.*;
+        // `.structural`: a read-only projection of what a frozen version
+        // declares. "Cannot read it" already means "not listed" here (best
+        // effort), and nothing in a listing runs.
+        const resolved = roots.resolveVersion(a, ref.id, ref.version, .structural) catch return gop.value_ptr.*;
         defer resolved.deinit(a);
         const paths = try a.alloc([]const u8, resolved.manifest.system_prompts.len);
         // The manifest owns its strings; the listing outlives it, so copy while

@@ -58,7 +58,9 @@ test "closed loop: init -> build -> activate -> run round-trips JSON" {
     //    the workspace store root under the manifest's own id.
     var ws_ext_root = try ws.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
     defer ws_ext_root.close(io);
-    var result = try build_ext.buildExtension(alloc, io, ws, ext_dir_rel, ws_ext_root, zig_exe);
+    var zig = build_ext.Zig.init(zig_exe);
+    defer zig.deinit(alloc);
+    var result = try build_ext.buildExtension(alloc, io, ws, ext_dir_rel, ws_ext_root, &zig);
     defer result.deinit(alloc);
     if (!result.compile_ok) {
         std.debug.print("extension failed to compile:\n{s}\n", .{result.stderr});
@@ -67,7 +69,7 @@ test "closed loop: init -> build -> activate -> run round-trips JSON" {
     try std.testing.expect(std.mem.startsWith(u8, result.version, "v-"));
 
     // Building again is a reproducible no-op on the same version.
-    var again = try build_ext.buildExtension(alloc, io, ws, ext_dir_rel, ws_ext_root, zig_exe);
+    var again = try build_ext.buildExtension(alloc, io, ws, ext_dir_rel, ws_ext_root, &zig);
     defer again.deinit(alloc);
     try std.testing.expect(again.already_built);
     try std.testing.expectEqualStrings(result.version, again.version);
@@ -431,7 +433,9 @@ fn buildSkillExtensionIn(
     defer alloc.free(draft);
     var dest = try ws.openDir(io, root_rel, .{});
     defer dest.close(io);
-    var result = try build_ext.buildExtension(alloc, io, ws, draft, dest, "zig-unused-for-data");
+    var zig = build_ext.Zig.init("zig-unused-for-data");
+    defer zig.deinit(alloc);
+    var result = try build_ext.buildExtension(alloc, io, ws, draft, dest, &zig);
     defer result.deinit(alloc);
     if (!result.compile_ok) return error.ExtensionBuildFailed;
     return alloc.dupe(u8, result.version);
@@ -744,7 +748,9 @@ test "cli: a workspace store that arrived with a checkout is refused until `ext 
     const version = blk: {
         var dest = try ws.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
         defer dest.close(io);
-        var result = try build_ext.buildExtension(alloc, io, ws, draft, dest, "");
+        var zig = build_ext.Zig.init("");
+        defer zig.deinit(alloc);
+        var result = try build_ext.buildExtension(alloc, io, ws, draft, dest, &zig);
         defer result.deinit(alloc);
         try std.testing.expect(result.compile_ok);
         const v = try alloc.dupe(u8, result.version);
@@ -1710,10 +1716,10 @@ test "cli ext sync: every draft in a root is built in one pass — data, script 
     };
     defer alloc.free(second_version);
 
-    // --activate, case 3: someone rolled back, and the draft's version is already
-    // built — the rollback stands. A decision outlives the next sync.
+    // --activate, case 3: someone activated an older version, and the draft's
+    // version is already built — that decision outlives the next sync.
     {
-        const rolled = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "rollback", "data.mode", data_version }, env);
+        const rolled = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "activate", "data.mode", data_version }, env);
         defer alloc.free(rolled.stdout);
         try std.testing.expectEqual(@as(u8, 0), rolled.code);
 
@@ -1946,7 +1952,9 @@ fn scaffoldAndBuildScript(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, 
 
     var dest = try ws.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
     defer dest.close(io);
-    var result = try build_ext.buildExtension(alloc, io, ws, ext_dir, dest, "zig-unused-for-scripts");
+    var zig = build_ext.Zig.init("zig-unused-for-scripts");
+    defer zig.deinit(alloc);
+    var result = try build_ext.buildExtension(alloc, io, ws, ext_dir, dest, &zig);
     defer result.deinit(alloc);
     if (!result.compile_ok) return error.ExtensionBuildFailed;
     // A script build produces no separate binary artifact.
@@ -2036,7 +2044,9 @@ test "script extension: version id excludes compiler identity and is stable acro
     const ext_dir = if (windows) ".nulya\\extensions\\greeter" else ".nulya/extensions/greeter";
     var dest = try ws.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
     defer dest.close(io);
-    var rebuilt = try build_ext.buildExtension(alloc, io, ws, ext_dir, dest, "a-completely-different-zig");
+    var zig = build_ext.Zig.init("a-completely-different-zig");
+    defer zig.deinit(alloc);
+    var rebuilt = try build_ext.buildExtension(alloc, io, ws, ext_dir, dest, &zig);
     defer rebuilt.deinit(alloc);
     try std.testing.expect(rebuilt.compile_ok);
     try std.testing.expect(rebuilt.already_built);

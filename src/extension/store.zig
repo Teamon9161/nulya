@@ -1,11 +1,11 @@
-//! Extension version store — immutable versions + atomic activate/rollback
+//! Extension version store — immutable versions + one atomic `activate`
 //! (DESIGN §7.4).
 //!
 //! Nulya never overwrites a running tool's binary. Every build produces an
 //! IMMUTABLE version whose id is `hash(package_snapshot + compiler + target)`;
 //! versions accumulate side by side and a single `current` pointer selects the
-//! active one. Switching is an atomic rename, so rollback is just repointing
-//! `current` at an older version — B breaking never disturbs A.
+//! active one. Switching is an atomic rename, so going back is just `activate`
+//! pointed at an older version — B breaking never disturbs A.
 //!
 //! Layout under the store root (`.nulya/extensions`):
 //!
@@ -36,6 +36,11 @@ const integrity = @import("integrity.zig");
 const testkit = @import("testkit.zig");
 
 pub const version_prefix = integrity.version_prefix;
+/// How hard a caller wants a frozen version checked (`integrity.Level`). Every
+/// read below takes one EXPLICITLY: a read-only projection asking for
+/// `.structural` and a session freeze asking for `.sealed` are different
+/// questions, and a default would silently answer one with the other.
+pub const Level = integrity.Level;
 /// The workspace-level store root, relative to the workspace — the first root
 /// of every search (`Roots`, DESIGN §7.2) and the default for a session that
 /// names no others.
@@ -114,13 +119,13 @@ pub const Store = struct {
         return self.versionEntryPath(alloc, id, version, rt.entry);
     }
 
-    pub fn versionExists(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8) bool {
-        validateBuiltVersion(self, alloc, id, version) catch return false;
+    pub fn versionExists(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8, level: Level) bool {
+        validateBuiltVersion(self, alloc, id, version, level) catch return false;
         return true;
     }
 
     /// Take `<id>/.lock`, the writer lease every mutation of `<id>/` runs under
-    /// (build, activate, rollback, deactivate). Blocking, and held for the whole
+    /// (build, activate, deactivate). Blocking, and held for the whole
     /// mutation — for a compiled build that is the entire `zig build-exe`, which
     /// is deliberate: a second writer wants the result, not a refusal, and waiting
     /// is simpler and more correct than staging directories. Creates `<id>/` when
@@ -144,7 +149,10 @@ pub const Store = struct {
         // succeeded.
         var held = try self.lease(alloc, id);
         defer held.close(self.io);
-        try validateBuiltVersion(self, alloc, id, version);
+        // `.sealed`: activation is the rare, explicit decision to make these
+        // bytes run in every future session — the one place worth re-digesting
+        // the whole version even though a listing no longer does.
+        try validateBuiltVersion(self, alloc, id, version, .sealed);
 
         const tmp_sub = try std.fs.path.join(alloc, &.{ id, ".current.tmp" });
         defer alloc.free(tmp_sub);
@@ -153,12 +161,6 @@ pub const Store = struct {
 
         try self.root.writeFile(self.io, .{ .sub_path = tmp_sub, .data = version });
         try self.root.rename(tmp_sub, self.root, final_sub, self.io);
-    }
-
-    /// Rollback is mechanically identical to activate: repoint `current`
-    /// (DESIGN §7.4). Named separately so call sites read intent.
-    pub fn rollback(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8) !void {
-        return self.activate(alloc, id, version);
     }
 
     pub fn deactivate(self: Store, alloc: std.mem.Allocator, id: []const u8) !void {
@@ -172,22 +174,25 @@ pub const Store = struct {
         };
     }
 
-    /// Parse and validate the frozen manifest of a built version. Fails if the
-    /// version does not pass integrity validation. Caller owns the manifest.
-    pub fn readManifest(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8) !manifest.Manifest {
+    /// Parse and validate the frozen manifest of a built version at `level`.
+    /// Fails if the version does not pass validation at that level. Caller owns
+    /// the manifest.
+    ///
+    /// `.structural` is what a listing wants (is this a complete version, and
+    /// what does it declare); `.sealed` is what running or freezing these bytes
+    /// wants. Nothing here picks for the caller.
+    pub fn readManifest(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8, level: Level) !manifest.Manifest {
         // Validate directly rather than through `versionExists`: that boolean
         // convenience collapses EVERY error to `false`, including `error.Canceled`,
         // which would then surface as a spurious `VersionIntegrityInvalid`. On a
         // cancellation-sensitive path the real error must propagate unchanged.
-        try validateBuiltVersion(self, alloc, id, version);
-        const manifest_rel = try self.versionManifestPath(alloc, id, version);
-        defer alloc.free(manifest_rel);
-        const bytes = try self.root.readFileAlloc(self.io, manifest_rel, alloc, .limited(1 << 20));
-        defer alloc.free(bytes);
-        var m = try manifest.parse(alloc, bytes);
-        errdefer m.deinit();
-        try m.validate();
-        return m;
+        //
+        // Validation already reads, parses and validates this manifest, so it
+        // hands it back rather than leaving a second read to happen here.
+        try validateIdentity(id, version);
+        const version_rel = try self.versionDir(alloc, id, version);
+        defer alloc.free(version_rel);
+        return integrity.openVersion(alloc, self.io, self.root, version_rel, version, id, level);
     }
 
     /// The active version id, or null if the extension has none. Caller owns the
@@ -310,11 +315,11 @@ fn validateIdentity(id: []const u8, version: []const u8) !void {
     if (!integrity.isVersionId(version)) return error.InvalidVersion;
 }
 
-fn validateBuiltVersion(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8) !void {
+fn validateBuiltVersion(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8, level: Level) !void {
     try validateIdentity(id, version);
     const version_rel = try self.versionDir(alloc, id, version);
     defer alloc.free(version_rel);
-    try integrity.validateVersionDir(alloc, self.io, self.root, version_rel, version, id);
+    try integrity.validateVersionDir(alloc, self.io, self.root, version_rel, version, id, level);
 }
 
 fn writeBuiltVersion(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id: []const u8, marker: []const u8) ![]u8 {
@@ -350,7 +355,7 @@ test "version id is deterministic and inputs-sensitive" {
     try std.testing.expect(!std.mem.eql(u8, a, c));
 }
 
-test "activate and rollback move the current pointer atomically" {
+test "activate moves the current pointer atomically, forwards and back" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -379,8 +384,9 @@ test "activate and rollback move the current pointer atomically" {
         try std.testing.expectEqualStrings(second, active);
     }
 
-    // Rollback is just repointing current at the old version.
-    try store.rollback(alloc, id, first);
+    // Going back is the same verb pointed at the older version: there is nothing
+    // a separate `rollback` could have done that this does not (DESIGN §7.4).
+    try store.activate(alloc, id, first);
     {
         const active = (try store.activeVersion(alloc, id)).?;
         defer alloc.free(active);
@@ -465,6 +471,61 @@ test "activate refuses a sealed version whose binary changed" {
     try std.testing.expectError(error.VersionSealInvalid, store.activate(alloc, "demo", version));
 }
 
+test "the two levels answer different questions: a tampered binary passes structural and fails sealed; a missing one fails both" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const store = Store.init(io, tmp.dir);
+
+    const version = try writeBuiltVersion(alloc, io, tmp.dir, "demo", "original");
+    defer alloc.free(version);
+    const exe_name = try std.fmt.allocPrint(alloc, "demo{s}", .{exe_suffix});
+    defer alloc.free(exe_name);
+    const entry_sub = try std.fs.path.join(alloc, &.{ "demo", versions_dir, version, "bin", exe_name });
+    defer alloc.free(entry_sub);
+
+    try std.testing.expect(store.versionExists(alloc, "demo", version, .structural));
+    try std.testing.expect(store.versionExists(alloc, "demo", version, .sealed));
+
+    // Tampered: the version directory is still COMPLETE (that is all a listing
+    // asks), but it is no longer the bytes that were sealed.
+    try tmp.dir.writeFile(io, .{ .sub_path = entry_sub, .data = "tampered" });
+    try std.testing.expect(store.versionExists(alloc, "demo", version, .structural));
+    try std.testing.expect(!store.versionExists(alloc, "demo", version, .sealed));
+    // A structural read still yields the frozen manifest — what `ext list` and
+    // the skill catalog project.
+    {
+        var m = try store.readManifest(alloc, "demo", version, .structural);
+        defer m.deinit();
+        try std.testing.expectEqualStrings("demo", m.id);
+    }
+    try std.testing.expectError(error.VersionSealInvalid, store.readManifest(alloc, "demo", version, .sealed));
+
+    // Missing entirely: incomplete, so BOTH levels refuse. Structural is about
+    // completeness, never about trust.
+    try tmp.dir.deleteFile(io, entry_sub);
+    try std.testing.expect(!store.versionExists(alloc, "demo", version, .structural));
+    try std.testing.expect(!store.versionExists(alloc, "demo", version, .sealed));
+}
+
+test "structural validation refuses a version missing a path its manifest declares" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const store = Store.init(io, tmp.dir);
+
+    const version = try testkit.writeSkillVersion(alloc, io, tmp.dir, "skills", "demo");
+    defer alloc.free(version);
+    try std.testing.expect(store.versionExists(alloc, "skills", version, .structural));
+
+    const skill_dir = try std.fs.path.join(alloc, &.{ "skills", versions_dir, version, integrity.package_dir, "skills" });
+    defer alloc.free(skill_dir);
+    try tmp.dir.deleteTree(io, skill_dir);
+    try std.testing.expectError(error.VersionPackageMissing, store.readManifest(alloc, "skills", version, .structural));
+}
+
 test "openOrCreateRoot creates a missing root, by absolute path as well as relative" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
@@ -527,7 +588,9 @@ fn readManifestAfterRecancel(
         error.Canceled => io.recancel(),
     };
 
-    return st.readManifest(alloc, id, version);
+    // `.sealed` — the level that does the most I/O, so the pending cancelation
+    // has the widest surface to land on.
+    return st.readManifest(alloc, id, version, .sealed);
 }
 
 test "readManifest propagates cancellation instead of folding it into an integrity error" {

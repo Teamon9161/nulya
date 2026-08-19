@@ -67,6 +67,28 @@ pub const Seal = struct {
     }
 };
 
+/// How thoroughly a frozen version directory is checked (DESIGN §7.4). Two
+/// questions, not one: "is this directory a complete extension version?" and
+/// "are these still the bytes that were sealed?". They used to be answered
+/// together, which made every read-only listing pay a full-tree sha256 of
+/// megabytes of built binary.
+pub const Level = enum {
+    /// Structure only: the directory is there, its `seal.json` parses, its
+    /// manifest parses, validates and names this id, and every path the manifest
+    /// declares — the frozen `src/` tree, each skill directory, each system
+    /// prompt, a compiled entry binary — exists. Nothing is digested, so the
+    /// cost is a handful of stats plus two small file reads and does not grow
+    /// with the package. What a READ-ONLY projection needs: it must not invent
+    /// an extension that is not there, and it is not about to run any of it.
+    structural,
+    /// Structural, plus the at-rest content re-digest: the frozen package must
+    /// hash to the seal's `package_digest`, that digest must reproduce this very
+    /// version id, and a compiled binary must hash to the sealed one. What every
+    /// path that is about to RUN these bytes or FREEZE them into a session
+    /// needs — session composition, `ext run`, activation, a copied version.
+    sealed,
+};
+
 pub fn isVersionId(s: []const u8) bool {
     if (s.len != version_prefix.len + digest_bytes * 2) return false;
     if (!std.mem.startsWith(u8, s, version_prefix)) return false;
@@ -269,7 +291,26 @@ pub fn validateVersionDir(
     version_rel: []const u8,
     version: []const u8,
     expected_id: []const u8,
+    level: Level,
 ) !void {
+    var m = try openVersion(alloc, io, root, version_rel, version, expected_id, level);
+    m.deinit();
+}
+
+/// `validateVersionDir` that hands back what it already parsed. Reading and
+/// validating the frozen manifest IS part of validation at either level, so the
+/// caller that also wants the manifest (`Store.readManifest`, and through it
+/// every `Roots.Resolved`) gets it from here instead of reading and parsing the
+/// same file a second time. Caller owns the result.
+pub fn openVersion(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    root: std.Io.Dir,
+    version_rel: []const u8,
+    version: []const u8,
+    expected_id: []const u8,
+    level: Level,
+) !manifest.Manifest {
     // Integrity checks map I/O failures to descriptive `Version*` errors, but a
     // cancellation is host execution control, not corruption — it must propagate
     // as `error.Canceled` so callers on cancellation-sensitive paths (note sync,
@@ -290,42 +331,88 @@ pub fn validateVersionDir(
     defer alloc.free(manifest_bytes);
 
     var m = try manifest.parse(alloc, manifest_bytes);
-    defer m.deinit();
+    errdefer m.deinit();
     try m.validate();
     if (!std.mem.eql(u8, m.id, expected_id)) return error.VersionManifestIdMismatch;
 
-    const snapshot = collectFrozenSnapshot(alloc, io, root, version_rel, manifest_bytes, m) catch |err| return cancelable(err, error.VersionPackageMissing);
-    defer snapshot.deinit(alloc);
-    const canonical = try snapshot.canonicalBytes(alloc);
-    defer alloc.free(canonical);
+    switch (level) {
+        .structural => try requireDeclaredPaths(alloc, io, root, version_rel, m),
+        .sealed => {
+            const snapshot = collectFrozenSnapshot(alloc, io, root, version_rel, manifest_bytes, m) catch |err| return cancelable(err, error.VersionPackageMissing);
+            defer snapshot.deinit(alloc);
+            const canonical = try snapshot.canonicalBytes(alloc);
+            defer alloc.free(canonical);
 
-    const package_digest = try digestHex(alloc, canonical);
-    defer alloc.free(package_digest);
-    if (!std.mem.eql(u8, package_digest, seal.package_digest)) return error.VersionSealInvalid;
+            const package_digest = try digestHex(alloc, canonical);
+            defer alloc.free(package_digest);
+            if (!std.mem.eql(u8, package_digest, seal.package_digest)) return error.VersionSealInvalid;
 
-    const expected_version = try versionId(alloc, canonical, seal.compiler, seal.target);
-    defer alloc.free(expected_version);
-    if (!std.mem.eql(u8, version, expected_version)) return error.VersionSealInvalid;
+            const expected_version = try versionId(alloc, canonical, seal.compiler, seal.target);
+            defer alloc.free(expected_version);
+            if (!std.mem.eql(u8, version, expected_version)) return error.VersionSealInvalid;
+        },
+    }
 
     if (m.runtime) |rt| {
         if (manifest.isScript(rt)) {
             // A script extension is frozen into `package/` and covered by the
             // package digest; it has no separately-built binary, so the seal must
-            // record none.
+            // record none. Cheap either way — a shape check on the seal.
             if (seal.binary_digest != null) return error.VersionSealInvalid;
         } else {
             const entry = try std.fmt.allocPrint(alloc, "{s}{s}", .{ rt.entry, exe_suffix });
             defer alloc.free(entry);
             const entry_sub = try std.fs.path.join(alloc, &.{ version_rel, entry });
             defer alloc.free(entry_sub);
-            const binary_digest = try fileDigestHex(alloc, io, root, entry_sub);
-            defer alloc.free(binary_digest);
-            const sealed_binary = seal.binary_digest orelse return error.VersionSealInvalid;
-            if (!std.mem.eql(u8, binary_digest, sealed_binary)) return error.VersionSealInvalid;
+            switch (level) {
+                // The built binary is the one file whose size is unbounded, so
+                // it is exactly where the two levels part: is it there, versus
+                // is it byte for byte the one that was sealed.
+                .structural => {
+                    root.access(io, entry_sub, .{}) catch |err| return cancelable(err, error.VersionEntryNotFound);
+                    if (seal.binary_digest == null) return error.VersionSealInvalid;
+                },
+                .sealed => {
+                    const binary_digest = try fileDigestHex(alloc, io, root, entry_sub);
+                    defer alloc.free(binary_digest);
+                    const sealed_binary = seal.binary_digest orelse return error.VersionSealInvalid;
+                    if (!std.mem.eql(u8, binary_digest, sealed_binary)) return error.VersionSealInvalid;
+                },
+            }
         }
     } else if (seal.binary_digest != null) {
         return error.VersionSealInvalid;
     }
+    return m;
+}
+
+/// Every path the frozen manifest declares is present — the existence half of
+/// what `Level.sealed` proves by digesting. `access` only: the frozen `src/`
+/// tree, each declared skill directory, each declared system prompt file. It
+/// answers "this version directory is complete", never "these are the sealed
+/// bytes", and its cost does not grow with the package.
+fn requireDeclaredPaths(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    root: std.Io.Dir,
+    version_rel: []const u8,
+    m: manifest.Manifest,
+) !void {
+    if (m.runtime != null) try requirePackagePath(alloc, io, root, version_rel, "src");
+    for (m.skills) |skill_path| try requirePackagePath(alloc, io, root, version_rel, skill_path);
+    for (m.system_prompts) |prompt_path| try requirePackagePath(alloc, io, root, version_rel, prompt_path);
+}
+
+fn requirePackagePath(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    root: std.Io.Dir,
+    version_rel: []const u8,
+    rel: []const u8,
+) !void {
+    const sub = try std.fs.path.join(alloc, &.{ version_rel, package_dir, rel });
+    defer alloc.free(sub);
+    root.access(io, sub, .{}) catch |err| return cancelable(err, error.VersionPackageMissing);
 }
 
 test "validates version id shape" {

@@ -121,7 +121,7 @@ pub const Provider = struct {
 /// which extension tools take one of those slots. Both are decisions, never
 /// derived — nothing in the kernel reads usage to fill a slot (DESIGN §5.1).
 pub const Registry = struct {
-    max_tools: u32 = 8,
+    max_tools: u32 = 20,
     pinned_native_tools: []const []const u8 = &.{},
 };
 
@@ -520,7 +520,7 @@ test "default config parses into a usable provider profile" {
     const profile = cfg.provider.activeProfile().?;
     try std.testing.expectEqual(ProviderKind.openai, profile.kind);
     try std.testing.expectEqualStrings("OPENAI_API_KEY", profile.api_key_env);
-    try std.testing.expectEqual(@as(u32, 8), cfg.registry.max_tools);
+    try std.testing.expectEqual(@as(u32, 20), cfg.registry.max_tools);
 }
 
 test "default catalog: every model a built-in profile lists is described, and effort defaults resolve" {
