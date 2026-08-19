@@ -9,8 +9,11 @@ step --stream`).
 Status: **T8 — complete**. Cards and folding, `tui.toml` settings and keymap
 overrides, `/sessions` `/ext` `/usage` `/settings` `/help`, sub-session tabs,
 observer mode, a single-file build, `/model` `/provider` `/effort`, `/compact`, the
-slow loop's front end (`/outcome`, `/evolve`, `/as`), and the permission mode:
-every tool call is gated, `/mode` says whether you see it first.
+slow loop's front end (`/outcome`, `/evolve`, `/as`), the permission mode —
+every tool call is gated, `/mode` says whether you see it first — and background
+tasks: a command started with `shell {background: true}` outlives its step, shows
+up in `/tasks` and on the status line, and when it finishes this window steps the
+session so the model reads its report.
 
 A session has exactly one writer. When somebody else holds it — a driver script,
 another TUI, a parent session's shell — this one attaches as an **observer**: it
@@ -219,6 +222,7 @@ bun run tui\src\main.tsx --profile codex
 | `F4` | next tab (tabs appear once a second session is open) |
 | `F5` | `/model` — the models that can run, with effort; Enter picks what the next session runs on (a draft tab just changes its pick; a started tab gets a new draft beside it) |
 | `F6` | `/provider` — endpoints and their keys; `s` pastes a key, `a` adds a compatible endpoint, Enter on a ready one goes to its models |
+| `F7` | `/tasks` — background commands this session started; `Enter` shows one's log, `k` stops it, `K` stops them all |
 | `Ctrl+W` | close the current tab (with one tab it is the composer's delete-word, as in a shell) |
 | click the model under the composer | `/model` |
 
@@ -230,11 +234,14 @@ refreshes, `Esc` closes. Inside `/ext`: `j`/`k` move, `Tab` switches pane
 one tool and `A` makes that pin permanent, `a` activates the highlighted version
 on the version line (confirm with `y`) — pointing at an older one is the
 rollback, there is no second verb — `p` prunes old versions, `u` jumps to the
-usage table. Inside `/usage`: `r` refreshes.
+usage table. Inside `/usage`: `r` refreshes. Inside `/tasks`: `↑`/`↓` move —
+`k` is the kill verb here, not the cursor — `Enter` shows the last 64 KB of the
+highlighted task's log, `k` stops it, `K` stops every task still running, `r`
+re-reads the list, `Esc` closes.
 
 Slash commands: `/model` (F5), `/provider` (F6), `/mode [ask|auto]`,
 `/effort <level|auto>`, `/new [--profile p] [--model id]`, `/sessions`, `/ext`,
-`/usage`, `/settings`, `/compact [focus]`,
+`/tasks`, `/usage`, `/settings`, `/compact [focus]`,
 `/outcome <success|partial|failure> [note]`, `/evolve`, `/as <id>[@version]`,
 `/help`, `/step` (continue after a spent step budget), `/cancel`, `/fold`,
 `/quit`. Anything else starting with `/` is sent to the model verbatim.

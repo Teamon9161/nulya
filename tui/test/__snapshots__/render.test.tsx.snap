@@ -403,3 +403,87 @@ exports[`ascii mode degrades every glyph 1`] = `
                                                                             
 "
 `;
+
+exports[`a background call names its task and how long it has been running 1`] = `
+"                                                                            
+  $ zig build test  (background s-1/t3 · running 12s) ▸                     
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+"
+`;
+
+exports[`once the report lands, the call that started it says how it ended 1`] = `
+"                                                                            
+  $ zig build test  (background s-1/t4 · exit 1 · 41.8s) ▸                  
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+"
+`;
+
+exports[`a finished task is its own card: the command, the tail, the log 1`] = `
+"                                                                            
+  $ zig build test  (background s-1/t3 · exit 1 · 41.8s) ▸                  
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+"
+`;

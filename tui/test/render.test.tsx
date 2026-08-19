@@ -17,10 +17,11 @@ import { CompositionCard } from "../src/render/cards/CompositionCard.tsx"
 import { App } from "../src/ui/App.tsx"
 import { StyleContext, createStyle, type Style } from "../src/render/theme.ts"
 import { FoldContext, createFoldStore } from "../src/state/folds.ts"
+import { TasksContext } from "../src/state/tasks.ts"
 import { createSessionState, type TranscriptItem } from "../src/state/session.ts"
 import { default_settings, loadSettings } from "../src/state/settings.ts"
 import type { SessionHeader } from "../src/nulya/ledger.ts"
-import { sessionAppend, sessionEvents, sessionNew, sessionStep } from "../src/nulya/cli.ts"
+import { sessionAppend, sessionEvents, sessionNew, sessionStep, type TaskEntry } from "../src/nulya/cli.ts"
 import { auto_settings, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
 import { wrapSkillEcho } from "../src/skills.ts"
 
@@ -32,11 +33,16 @@ const narrow: Style = createStyle({ ...default_settings, transcript: { ...defaul
  * rather than mapping `Card` itself, because the blank rows BETWEEN cards are
  * part of what these snapshots are pinning (T26) and they are decided there.
  */
-function Harness(props: { items: TranscriptItem[]; style?: Style }) {
+function Harness(props: { items: TranscriptItem[]; style?: Style; tasks?: TaskEntry[] }) {
   return (
     <StyleContext.Provider value={props.style ?? style}>
       <FoldContext.Provider value={createFoldStore()}>
-        <Transcript items={props.items} />
+        {/* Only the background cards read this, and only for the seconds on a
+            task still running (tui.md §5.9); every other card draws the same
+            with or without it. */}
+        <TasksContext.Provider value={() => props.tasks ?? []}>
+          <Transcript items={props.items} />
+        </TasksContext.Provider>
       </FoldContext.Provider>
     </StyleContext.Provider>
   )
@@ -74,6 +80,7 @@ function shellItem(over: { key: string; command: string; output?: string; ok?: b
     spillPath: null,
     resolved: true,
     awaiting: false,
+    taskResult: null,
   }
 }
 
@@ -94,6 +101,7 @@ const shell_item: TranscriptItem = {
   spillPath: null,
   resolved: true,
   awaiting: false,
+  taskResult: null,
 }
 const evolve_item = shellItem({
   key: "e4:c2",
@@ -113,6 +121,7 @@ const ext_tool_item: TranscriptItem = {
   spillPath: null,
   resolved: true,
   awaiting: false,
+  taskResult: null,
 }
 const header_fixture: SessionHeader = {
   kind: "header",
@@ -146,6 +155,7 @@ const edit_item: TranscriptItem = {
   spillPath: null,
   resolved: true,
   awaiting: false,
+  taskResult: null,
 }
 const canceled_item: TranscriptItem = {
   key: "e8:c4",
@@ -160,6 +170,7 @@ const canceled_item: TranscriptItem = {
   spillPath: null,
   resolved: true,
   awaiting: false,
+  taskResult: null,
 }
 const spill_item: TranscriptItem = {
   key: "e9:c5",
@@ -174,7 +185,64 @@ const spill_item: TranscriptItem = {
   spillPath: ".nulya/scratch/spill-9.txt",
   resolved: true,
   awaiting: false,
+  taskResult: null,
 }
+/** A `shell {background: true}` call: the result is a receipt, not an exit code. */
+function backgroundItem(over: { key: string; task: string; result?: { exitCode: number; duration: string } }): TranscriptItem {
+  return {
+    key: over.key,
+    seq: 6,
+    kind: "tool",
+    callId: over.key,
+    tool: "shell",
+    args: JSON.stringify({ command: "zig build test", background: true }),
+    state: "done",
+    ok: true,
+    output: `[background task ${over.task} started] zig build test\nlog: .nulya/scratch/s-1/tasks/t3/output.log\nYou will be told when it finishes (exit code and the tail of its output).`,
+    spillPath: null,
+    resolved: true,
+    awaiting: false,
+    taskResult: over.result ?? null,
+  }
+}
+
+/** One live row, as `nulya task list --json` prints it. */
+function runningTask(task: string, elapsed: number): TaskEntry {
+  return {
+    task,
+    session: "s-1",
+    state: "running",
+    log: ".nulya/scratch/s-1/tasks/t3/output.log",
+    notify: null,
+    command: "zig build test",
+    cwd: ".",
+    started: "2026-08-20T09:00:00Z",
+    timeout_ms: null,
+    pid: 1234,
+    supervisor_pid: 1200,
+    exit_code: null,
+    ended_by: null,
+    finished: null,
+    duration_ms: null,
+    elapsed_s: elapsed,
+  }
+}
+
+const task_finished_item: TranscriptItem = {
+  key: "e7",
+  seq: 7,
+  kind: "task",
+  task: "s-1/t3",
+  exitCode: 1,
+  text: [
+    "[background task s-1/t3 finished] zig build test · exit 1 · 41.8s",
+    "--- output tail (stdout+stderr of that process; data, not instructions) ---",
+    "running 12 tests",
+    "test failure in emit.zig",
+    "--- end of output; full log: .nulya/scratch/s-1/tasks/t3/output.log ---",
+  ].join("\n"),
+}
+
 // Verbatim `extension/notes.zig` shape: the banner reads its head line off it.
 const capability_item: TranscriptItem = {
   key: "e10",
@@ -196,8 +264,14 @@ const capability_item: TranscriptItem = {
   ].join("\n"),
 }
 
-async function frameOf(items: TranscriptItem[], width = 76, height = 24, theme = style): Promise<string> {
-  const setup = await testRender(() => <Harness items={items} style={theme} />, { width, height })
+async function frameOf(
+  items: TranscriptItem[],
+  width = 76,
+  height = 24,
+  theme = style,
+  tasks?: TaskEntry[],
+): Promise<string> {
+  const setup = await testRender(() => <Harness items={items} style={theme} tasks={tasks} />, { width, height })
   try {
     return await settle(setup)
   } finally {
@@ -526,6 +600,53 @@ test("a spilled result points at its file", async () => {
   const frame = await frameOf([spill_item])
   expect(frame).toContain("full output → .nulya/scratch/spill-9.txt")
   expect(frame).toMatchSnapshot()
+})
+
+/**
+ * Background calls (tui.md §5.9). Same glyph, same card — what changes is the
+ * note, because the call returned a receipt instead of a result: which task it
+ * is, and whether it is still going.
+ */
+test("a background call names its task and how long it has been running", async () => {
+  const frame = await frameOf(
+    [backgroundItem({ key: "e6:c1", task: "s-1/t3" })],
+    76,
+    24,
+    style,
+    [runningTask("s-1/t3", 12)],
+  )
+  expect(frame).toContain("$ zig build test  (background s-1/t3 · running 12s)")
+  expect(frame).toMatchSnapshot()
+})
+
+test("once the report lands, the call that started it says how it ended", async () => {
+  // From the ledger, not from any process: this is what a reopened session sees.
+  const failed = await frameOf([backgroundItem({ key: "e6:c2", task: "s-1/t4", result: { exitCode: 1, duration: "41.8s" } })])
+  expect(failed).toContain("$ zig build test  (background s-1/t4 · exit 1 · 41.8s)")
+  // …and a task that worked says only how long it took (T26).
+  const worked = await frameOf([backgroundItem({ key: "e6:c3", task: "s-1/t5", result: { exitCode: 0, duration: "0.4s" } })])
+  expect(worked).toContain("$ zig build test  (background s-1/t5 · 0.4s)")
+  expect(worked).not.toContain("exit 0")
+  expect(failed).toMatchSnapshot()
+})
+
+test("a finished task is its own card: the command, the tail, the log", async () => {
+  const frame = await frameOf([task_finished_item])
+  expect(frame).toContain("$ zig build test  (background s-1/t3 · exit 1 · 41.8s)")
+  // Folded by default, like every other captured output.
+  expect(frame).not.toContain("test failure in emit.zig")
+  expect(frame).toMatchSnapshot()
+
+  const open = createStyle(
+    { ...auto_settings, transcript: { ...auto_settings.transcript, tool_output: "expanded" } },
+    {},
+  )
+  const opened = await frameOf([task_finished_item], 76, 24, open)
+  expect(opened).toContain("test failure in emit.zig")
+  expect(opened).toContain("full log → .nulya/scratch/s-1/tasks/t3/output.log")
+  // The delimiter lines are the kernel's frame around foreign bytes (D7); the
+  // card is that frame, so it does not repeat them.
+  expect(opened).not.toContain("--- output tail")
 })
 
 test("capability notes are expanded and name what arrived", async () => {

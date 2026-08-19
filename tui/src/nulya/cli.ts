@@ -365,6 +365,74 @@ export async function sessionOutcome(
 }
 
 /**
+ * One row of `nulya task list --json` (DESIGN §6.1 / §14).
+ *
+ * `state` is the kernel's own projection and the TUI does not re-derive any of
+ * it: `starting` is a task whose supervisor has not written its status yet and
+ * `lost` is one that says `running` while nothing holds its lease — two answers
+ * that need the lock and the directory together, which is exactly the kind of
+ * thing `/sessions` stopped re-deriving in T8. A task retargeted here by a
+ * compaction is listed by the same command (its `notify` names this session), so
+ * even "which tasks are mine" is the kernel's answer, not ours.
+ */
+export interface TaskEntry {
+  /** Full name `<session>/t<N>` — what every `nulya task` verb takes. */
+  task: string
+  /** The session that STARTED it; `notify` is where its report goes. */
+  session: string
+  state: "starting" | "running" | "done" | "lost"
+  /** Workspace-relative path of the whole captured output. */
+  log: string
+  notify: string | null
+  command: string
+  cwd: string
+  started: string
+  timeout_ms: number | null
+  pid: number | null
+  supervisor_pid: number | null
+  exit_code: number | null
+  ended_by: "exit" | "timeout" | "kill" | null
+  finished: string | null
+  /** Set once it ended; `elapsed_s` is set while it has not. */
+  duration_ms: number | null
+  elapsed_s: number | null
+}
+
+export function taskIsDone(task: TaskEntry): boolean {
+  return task.state === "done" || task.state === "lost"
+}
+
+/**
+ * `nulya task list --session <id> --json` — the background tasks of one session.
+ *
+ * Scoped to a session on purpose: `/tasks` is a view of the tab in front of you,
+ * and the workspace-wide answer is `nulya task list` in a terminal (tui.md §5.9).
+ */
+export async function taskList(ws: Workspace, id: string, env?: Record<string, string>): Promise<TaskEntry[]> {
+  const result = await run(ws, ["task", "list", "--session", id, "--json"], env)
+  if (result.code !== 0) fail("task list failed", result)
+  let value: unknown
+  try {
+    value = JSON.parse(result.stdout)
+  } catch {
+    fail("task list returned no JSON", result)
+  }
+  const rows = (value as { tasks?: unknown }).tasks
+  return Array.isArray(rows) ? (rows as TaskEntry[]) : []
+}
+
+/**
+ * `nulya task kill <task>` — write the kill marker; the supervisor takes the
+ * whole process tree down at its next look (DESIGN §6.1). Idempotent, and a task
+ * that already finished is told so rather than treated as an error.
+ */
+export async function taskKill(ws: Workspace, task: string): Promise<string> {
+  const result = await run(ws, ["task", "kill", task])
+  if (result.code !== 0) fail("task kill failed", result)
+  return result.stdout.trim()
+}
+
+/**
  * `nulya ext build <path>` — freeze a draft into the store and return the
  * version it sealed to. Content-addressed, so building an unchanged draft twice
  * yields the same version and no second copy (physics #5).

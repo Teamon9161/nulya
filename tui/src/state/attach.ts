@@ -56,6 +56,13 @@ export interface AttachOptions extends DriverOptions {
    * means nothing — it just means we looked between two of its steps.
    */
   freeProbesToOffer?: number
+  /**
+   * This process is already this session's driver when the attachment is made
+   * (it ran `session new` for it). Lets `wake()` act from the first probe; a
+   * session merely OPENED here earns that only once someone drives it from this
+   * tab — see `driven` below.
+   */
+  driven?: boolean
 }
 
 export function createAttachment(
@@ -74,6 +81,17 @@ export function createAttachment(
   let follow: FollowHandle | null = null
   let freeProbes = 0
   let disposed = false
+  // Has THIS process driven this session — created it, or sent / stepped /
+  // taken over from this tab? The wake-up below is the one step nobody asked
+  // for, so it is allowed only where we are the established driver. A tab merely
+  // opened on a session (a SubSessionCard's `Enter`, `/sessions`) starts as
+  // "driver" by default, and until the first probe says otherwise it has no way
+  // of knowing that a parent's shell or a driver script is between two steps of
+  // its own — with the inbox non-empty (the other driver's `task wait --any` just
+  // returned) that is exactly the instant it would step, and the other driver's
+  // next `session step` would be refused `SessionBusy`. Explicit acts (a
+  // message, ↵ take-over) are the user saying "drive"; this flag remembers that.
+  let driven = options.driven ?? false
 
   const driver: Driver = createDriver(ws, id, state, {
     ...options,
@@ -128,7 +146,17 @@ export function createAttachment(
     if (lease === "free" && role() === "observer") {
       freeProbes += 1
       if (freeProbes >= needed) setTakeoverReady(true)
+      return
     }
+    // The driver's wake-up (tui.md §5.9): something is in the inbox and only a
+    // step boundary drains it. On THIS timer rather than one of its own — it is
+    // the same "what has the world done while we sat still" beat the lease probe
+    // already runs, and a second timer would only be a second thing to stop.
+    //
+    // An observer never gets here, and must not: the other writer drains that
+    // inbox at its own next step, and two writers is the one thing a durable
+    // session refuses (DESIGN §3.4).
+    if (role() === "driver" && driven) void driver.wake()
   }, pollMs)
 
   return {
@@ -139,6 +167,7 @@ export function createAttachment(
       const trimmed = text.trim()
       if (trimmed.length === 0) return
       if (role() === "driver") {
+        driven = true
         await driver.send(trimmed, framed)
         return
       }
@@ -161,6 +190,7 @@ export function createAttachment(
     },
     async step() {
       if (role() === "observer") return
+      driven = true
       await driver.step()
     },
     async cancel() {
@@ -185,6 +215,7 @@ export function createAttachment(
       freeProbes = 0
       setTakeoverReady(false)
       setRole("driver")
+      driven = true
       // A turn we queued as observer is still in the inbox if the other writer
       // left before draining it. Taking over is the user saying "drive", and the
       // one mechanical re-step tui.md §4.3 allows is exactly this case: our own

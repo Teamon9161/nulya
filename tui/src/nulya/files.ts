@@ -264,11 +264,60 @@ function probeProcLocks(path: string): LeaseState {
   return "free"
 }
 
-// --- un-creating an unused session ------------------------------------------
+// --- the inbox --------------------------------------------------------------
 
 function siblingPath(ws: Workspace, id: string, suffix: string): string {
   return join(ws.dir, sessions_dir, `${id}${suffix}`)
 }
+
+/**
+ * Is there anything in this session's inbox waiting for a step boundary?
+ *
+ * The one question the wake-up policy asks (tui.md §5.9, goals/background.md
+ * D8). A deposit is one file per event, written `.tmp` then renamed (DESIGN
+ * §3.4), so a `.json` in there is a whole event nobody has drained — a finished
+ * background task, a turn appended from another terminal, a capability note.
+ * WHAT is in there is deliberately not read: the kernel drains it, and stepping
+ * because the inbox is non-empty is true of every depositor there will ever be.
+ *
+ * Cheap and read-only, like `probeWriterLease`: one directory listing, no
+ * process, nothing written.
+ */
+export function inboxPending(ws: Workspace, id: string): boolean {
+  const inbox = siblingPath(ws, id, ".inbox")
+  try {
+    return readdirSync(inbox).some((name) => name.endsWith(".json"))
+  } catch {
+    // No inbox directory means nothing was ever deposited.
+    return false
+  }
+}
+
+// --- background task logs ---------------------------------------------------
+
+/** How much of a task log `/tasks` reads: the end of it, and no more. */
+export const task_log_tail_bytes = 64 * 1024
+
+/**
+ * The tail of a background task's `output.log` (DESIGN §6.1).
+ *
+ * Not a live tail — it is re-read on the panel's own poll, which is honest about
+ * what it is and costs nothing between reads. The path comes from `task list
+ * --json`, so this never composes a scratch path of its own.
+ */
+export async function readTaskLog(ws: Workspace, path: string, bytes = task_log_tail_bytes): Promise<string> {
+  const full = isAbsolute(path) ? path : join(ws.dir, path)
+  try {
+    const file = Bun.file(full)
+    const size = file.size
+    return await (size > bytes ? file.slice(size - bytes) : file).text()
+  } catch {
+    // Not written yet, or removed under us: an empty log reads the same way.
+    return ""
+  }
+}
+
+// --- un-creating an unused session ------------------------------------------
 
 /**
  * Remove a session that has recorded nothing, if — and only if — nothing about

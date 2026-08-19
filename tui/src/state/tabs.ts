@@ -20,6 +20,7 @@
 import { createSignal, type Accessor } from "solid-js"
 import { createSessionState, type SessionState } from "./session.ts"
 import { createAttachment, type AttachOptions, type Attachment } from "./attach.ts"
+import { createTaskWatch, type TaskWatch } from "./tasks.ts"
 import { sessionPins, type ModelPick } from "./tui_state.ts"
 import { discardIfUntouched, readActiveContributions, readHeader, type Contributions } from "../nulya/files.ts"
 import { sessionEvents, sessionNew } from "../nulya/cli.ts"
@@ -64,6 +65,12 @@ export interface SessionTab extends TabCommon {
   id: string
   state: SessionState
   attach: Attachment
+  /**
+   * The background tasks this session has, re-read on a beat (tui.md §5.9).
+   * Per tab because a task belongs to a session and outlives every step of it —
+   * and because the interval has to stop when the tab does.
+   */
+  tasks: TaskWatch
   contributions: Accessor<Contributions[]>
   /**
    * This process ran `session new` for it. Only such a session is un-created
@@ -197,7 +204,11 @@ export function createTabStore(ws: Workspace, first: FirstTab, options: TabStore
       key: id,
       id,
       state,
-      attach: createAttachment(ws, id, state, { ...attachOptions, ready, effort }),
+      // `driven`: a session this process created is ours to wake from the first
+      // probe; one merely opened here (a sub-session, `/sessions`) is not, until
+      // someone drives it from this tab (attach.ts).
+      attach: createAttachment(ws, id, state, { ...attachOptions, ready, effort, driven: opened.created ?? false }),
+      tasks: createTaskWatch(ws, id, { ...(attachOptions.env ? { env: attachOptions.env } : {}) }),
       contributions,
       effort,
       setEffort,
@@ -211,6 +222,7 @@ export function createTabStore(ws: Workspace, first: FirstTab, options: TabStore
   function release(tab: Tab) {
     if (tab.kind !== "session") return // a draft is nothing on disk; there is nothing to let go of
     tab.attach.dispose()
+    tab.tasks.dispose()
     if (tab.created) discardIfUntouched(ws, tab.id)
   }
 

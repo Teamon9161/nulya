@@ -13,10 +13,12 @@ import { SettingsView } from "./overlays/SettingsView.tsx"
 import { UsageView } from "./overlays/UsageView.tsx"
 import { ModelView } from "./overlays/ModelView.tsx"
 import { ProviderView } from "./overlays/ProviderView.tsx"
+import { TasksView } from "./overlays/TasksView.tsx"
 import { ScreenContext, StyleContext, useScreen, useStyle, type Style } from "../render/theme.ts"
 import { FoldContext, createFoldStore } from "../state/folds.ts"
 import { BrowseContext, createBrowseStore } from "../state/browse.ts"
 import { OverlayContext, createOverlayStore, type OverlayKind } from "../state/overlay.ts"
+import { TasksContext } from "../state/tasks.ts"
 import { createTabStore, type DraftTab, type FirstTab, type SessionTab } from "../state/tabs.ts"
 import { loadTuiState, rememberModel, rememberMode, sessionPins, type ModelPick } from "../state/tui_state.ts"
 import {
@@ -45,6 +47,7 @@ import {
   verdicts,
   type ModelView as ModelParams,
   type ProfileView,
+  type TaskEntry,
 } from "../nulya/cli.ts"
 import { adoptBundled, failedIds, planStore, seedBundled, summarize } from "../extensions.ts"
 import { runCompact } from "../compact.ts"
@@ -198,6 +201,8 @@ export function App(props: AppProps) {
    * verdict was recorded, or the question was already put once and declined.
    */
   const [settled, setSettled] = createSignal<readonly string[]>([])
+  /** Whether `/quit` has already said what happens to a running task. */
+  const [tasksWarned, setTasksWarned] = createSignal(false)
   const [spinnerTick, setSpinnerTick] = createSignal(0)
   const [ctrlCArmed, setCtrlCArmed] = createSignal(false)
   const [allOpen, setAllOpen] = createSignal(false)
@@ -281,10 +286,15 @@ export function App(props: AppProps) {
   const status = () => live()?.attach.status() ?? "idle"
   const role = () => live()?.attach.role() ?? "driver"
   const cards = () => foldable(snapshot().items, props.style.historyWindow)
+  /** This tab's background tasks, and how many of them have not ended (§5.9). */
+  const tasks = (): TaskEntry[] => live()?.tasks.tasks() ?? []
+  const runningTasks = () => live()?.tasks.live() ?? 0
 
   createEffect(() => {
     if (!props.style.motion) return
-    if (status() === "idle") return
+    // A background task spins the same spinner while the driver rests: it is the
+    // one thing that keeps happening when nothing else is (tui.md §5.9).
+    if (status() === "idle" && runningTasks() === 0) return
     const timer = setInterval(() => setSpinnerTick((tick) => tick + 1), 90)
     onCleanup(() => clearInterval(timer))
   })
@@ -983,6 +993,10 @@ export function App(props: AppProps) {
     // A batch nobody is executing any more cannot have calls left to wave
     // through; the ids would be dead weight until the process ends.
     if (batchAllowed().size > 0) setBatchAllowed(new Set<string>())
+    // A step that just ended is when a background task can have been STARTED —
+    // its receipt is in the batch that just landed — so this is the moment the
+    // list is worth re-reading. Its own poll takes over from here (§5.9).
+    void live()?.tasks.refresh()
     checkHandoff()
   })
 
@@ -1161,6 +1175,19 @@ export function App(props: AppProps) {
       setNotice(`how did this session go? /outcome ${verdicts.join("|")} [note] · or /quit again`)
       return
     }
+    // Leaving does not stop them, and pretending otherwise would be the lie
+    // (tui.md §5.9): a task is a detached process with a supervisor of its own,
+    // its output keeps going into its log, and its report will be waiting in the
+    // inbox for whoever steps this session next. Said once, then `/quit` again
+    // leaves; `/tasks` is where they are actually stopped.
+    const running = runningTasks()
+    if (running > 0 && ask && !tasksWarned()) {
+      setTasksWarned(true)
+      setNotice(
+        `${running} background task${running === 1 ? "" : "s"} keep running; their results land in the session inbox · /tasks · K stops them all`,
+      )
+      return
+    }
     tabs.disposeAll()
     renderer.destroy()
     process.exit(0)
@@ -1218,6 +1245,10 @@ export function App(props: AppProps) {
     }
     if (command === "/sessions") {
       openOverlay("sessions")
+      return true
+    }
+    if (command === "/tasks") {
+      openOverlay("tasks")
       return true
     }
     if (command === "/ext") {
@@ -1393,6 +1424,7 @@ export function App(props: AppProps) {
       if (matches(keys.sessions, key)) return consume(key, () => openOverlay("sessions"))
       if (matches(keys.model, key)) return consume(key, () => openOverlay("model"))
       if (matches(keys.provider, key)) return consume(key, () => openOverlay("provider"))
+      if (matches(keys.tasks, key)) return consume(key, () => openOverlay("tasks"))
       if (matches(keys.help, key)) return consume(key, () => openOverlay("help"))
       if (matches(keys.quit, key)) quit()
       return
@@ -1424,6 +1456,7 @@ export function App(props: AppProps) {
     if (matches(keys.ext, key)) return consume(key, () => openOverlay("ext"))
     if (matches(keys.model, key)) return consume(key, () => openOverlay("model"))
     if (matches(keys.provider, key)) return consume(key, () => openOverlay("provider"))
+    if (matches(keys.tasks, key)) return consume(key, () => openOverlay("tasks"))
     if (matches(keys.help, key)) return consume(key, () => openOverlay("help"))
     // Reading back. The composer is focused and keeps the keyboard, so these
     // have to be taken here or they are the textarea's cursor movement.
@@ -1514,6 +1547,10 @@ export function App(props: AppProps) {
         <FoldContext.Provider value={folds}>
           <BrowseContext.Provider value={browse}>
             <OverlayContext.Provider value={overlay}>
+              {/* The live task rows, for the one card that needs a fact nothing
+                  appended can carry: how long a background command has been
+                  going (tui.md §5.9). */}
+              <TasksContext.Provider value={tasks}>
               {/* Transcript, composer, status line — and the only line drawn
                   between any of them is the composer's own border (tui.md §4.1,
                   T26). Three full-width rules used to fence four regions; two of
@@ -1562,6 +1599,15 @@ export function App(props: AppProps) {
                       sessionFile={live() ? `${sessions_dir}/${live()!.id}.jsonl` : undefined}
                       statePath={props.statePath}
                       onMembershipChanged={skills.invalidate}
+                      onClose={closeOverlay}
+                    />
+                  </Match>
+                  <Match when={overlay.kind() === "tasks"}>
+                    <TasksView
+                      ws={props.ws}
+                      sessionId={live()?.id ?? ""}
+                      tasks={tasks()}
+                      onRefresh={() => void live()?.tasks.refresh()}
                       onClose={closeOverlay}
                     />
                   </Match>
@@ -1650,6 +1696,8 @@ export function App(props: AppProps) {
                   tools={faceSize()}
                   mode={mode()}
                   awaiting={pending() !== null}
+                  background={runningTasks()}
+                  onOpenTasks={() => openOverlay("tasks")}
                   onToggleMode={toggleMode}
                   hint={notice() ?? undefined}
                   behind={behind()}
@@ -1659,6 +1707,7 @@ export function App(props: AppProps) {
                   onHelp={() => openOverlay("help")}
                 />
               </box>
+              </TasksContext.Provider>
             </OverlayContext.Provider>
           </BrowseContext.Provider>
         </FoldContext.Provider>

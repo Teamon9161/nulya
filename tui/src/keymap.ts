@@ -16,6 +16,7 @@ export type Action =
   | "sessions"
   | "model"
   | "provider"
+  | "tasks"
   | "nextTab"
   | "closeTab"
   | "scrollUp"
@@ -35,6 +36,10 @@ export const default_keys: Record<Action, string> = {
   // The other half of the model question (tui.md §11, T21). Next to F5 because
   // the two are read together: what runs, and what could serve it.
   provider: "f6",
+  // The background tasks (tui.md §5.9). After the two model keys because it is
+  // read the same way they are: something the screen can tell you about the
+  // session without you having to ask the model.
+  tasks: "f7",
   nextTab: "f4",
   closeTab: "ctrl+w",
   scrollUp: "pageup",

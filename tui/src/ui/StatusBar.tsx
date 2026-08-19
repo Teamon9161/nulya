@@ -46,6 +46,15 @@ export function StatusBar(props: {
   mode?: PermissionMode
   /** A tool call is on screen waiting for a verdict right now. */
   awaiting?: boolean
+  /**
+   * Background tasks of this session that have not finished (tui.md §5.9). They
+   * outlive the step that started them, so this is shown while the driver is
+   * IDLE too — an idle bar with work going on in the background is the one case
+   * where "idle" would be a lie.
+   */
+  background?: number
+  /** Clicking the background count: the mouse half of `/tasks`. */
+  onOpenTasks?: () => void
   /** Clicking the mode chip: the mouse half of `/mode`. */
   onToggleMode?: () => void
   hint?: string
@@ -70,6 +79,8 @@ export function StatusBar(props: {
   const [overHelp, setOverHelp] = createSignal(false)
   const [overModel, setOverModel] = createSignal(false)
   const [overMode, setOverMode] = createSignal(false)
+  const [overTasks, setOverTasks] = createSignal(false)
+  const tasksClick = onClick(() => props.onOpenTasks?.())
   const behindClick = onClick(() => props.onScrollEnd?.())
   const helpClick = onClick(() => props.onHelp?.())
   const modelClick = onClick(() => props.onPickModel?.())
@@ -96,6 +107,12 @@ export function StatusBar(props: {
     return { percent, urgent: percent >= 80 }
   })
 
+  /** `⠋ 2 background`, or nothing at all when nothing is running. */
+  const background = () => {
+    const n = props.background ?? 0
+    return n > 0 ? `${props.spinnerFrame} ${n} background` : null
+  }
+
   const activity = createMemo(() => {
     // A call waiting for a verdict is the only thing happening: the kernel is
     // stopped on it, and the keys that move it are on the card (tui.md §5.7).
@@ -118,6 +135,10 @@ export function StatusBar(props: {
     }
     if (props.status === "sending") return `${props.spinnerFrame} sending`
     if (props.snapshot.lastStopped === "budget") return "step budget spent · /step to continue"
+    // Below the two stop reasons, which ask for a keypress, and above every
+    // resting state: with nothing else happening, a command still running in
+    // the background IS what is happening.
+    if (background() !== null && props.snapshot.lastStopped !== "max_tokens") return background()!
     // The kernel stops after two replies in a row hit max_tokens (DESIGN §4); the
     // marker results already told the model why. Sending a message continues
     // whether the cut reply ended in calls (results present) or in text (a bare
@@ -137,9 +158,12 @@ export function StatusBar(props: {
     if (props.awaiting) return style.theme.warn
     if (props.snapshot.error) return style.theme.err
     if (props.snapshot.lastStopped === "budget" || props.snapshot.lastStopped === "max_tokens") return style.theme.warn
-    if (props.status !== "idle" || props.takeoverReady) return style.theme.fg
+    if (props.status !== "idle" || props.takeoverReady || showingBackground()) return style.theme.fg
     return style.theme.muted
   }
+
+  /** Whether the activity slot is the background count — the one that is a link. */
+  const showingBackground = () => background() !== null && activity() === background()
 
   /**
    * The model, and the effort only when this tab has chosen one — `auto` is the
@@ -242,9 +266,20 @@ export function StatusBar(props: {
         <text fg={style.theme.muted} flexShrink={0}>
           {layout().usage}
         </text>
-        <text fg={color()} flexShrink={0}>
-          {layout().activity}
-        </text>
+        {/* The activity is a link only when it is the background count: that is
+            the one thing on this line that stands for a screen you can open
+            (`/tasks`), and everything else here is a state, not a place. */}
+        <box
+          flexShrink={0}
+          height={1}
+          backgroundColor={showingBackground() && props.onOpenTasks && overTasks() ? style.theme.hover : undefined}
+          onMouseDown={showingBackground() && props.onOpenTasks ? tasksClick.onMouseDown : undefined}
+          onMouseUp={showingBackground() && props.onOpenTasks ? tasksClick.onMouseUp : undefined}
+          onMouseOver={() => setOverTasks(true)}
+          onMouseOut={() => setOverTasks(false)}
+        >
+          <text fg={color()}>{layout().activity}</text>
+        </box>
         <text fg={style.theme.dim} flexShrink={0}>
           {hint().text}
         </text>

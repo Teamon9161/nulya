@@ -130,3 +130,22 @@ test("a still-streaming call shows its raw arguments rather than guessing", () =
   expect(card.kind).toBe("shell")
   expect(card.head).toBe('{"command":"zig bu')
 })
+
+/**
+ * A background launch is a launch, not the action it names (tui.md §5.9): the
+ * call comes back with a receipt, and whether the command worked is a separate
+ * event minutes later. So the evolution table stands down for it and the plain
+ * shell card — whose note is about the task — draws it.
+ */
+test("a background `nulya …` call is a shell card, not an evolution one", () => {
+  const args = JSON.stringify({ command: "nulya ext build extensions/std", background: true })
+  const card = describeTool({ tool: "shell", args, output: "" }, glyphs)
+  expect(card.kind).toBe("shell")
+  expect(card.head).toBe("nulya ext build extensions/std")
+  // The same command in the foreground is still an evolution action.
+  const foreground = describeTool(
+    { tool: "shell", args: JSON.stringify({ command: "nulya ext build extensions/std" }), output: "" },
+    glyphs,
+  )
+  expect(foreground.kind).toBe("evolve")
+})

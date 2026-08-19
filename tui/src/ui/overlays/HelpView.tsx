@@ -27,6 +27,7 @@ const actions: Array<[Action, string]> = [
   ["sessions", "/sessions — the session store"],
   ["model", "/model — the models that can run; Enter starts a session on one"],
   ["provider", "/provider — endpoints and their keys; Enter on a ready one goes to its models"],
+  ["tasks", "/tasks — background commands still running, their logs, k to stop one"],
   ["help", "this page"],
   ["scrollUp", "scroll the transcript back a page"],
   ["scrollDown", "scroll it forward a page"],

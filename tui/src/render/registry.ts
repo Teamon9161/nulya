@@ -52,6 +52,24 @@ function firstLine(text: string, limit: number): string {
   return line.length > limit ? `${line.slice(0, limit - 1)}…` : line
 }
 
+/**
+ * Whether this `shell` call was launched with `background: true` (DESIGN §6.1).
+ *
+ * Read from the ARGUMENTS, not from the result: it is true from the moment the
+ * call is complete and stays true, where the receipt only exists once the call
+ * has returned. Which matters because it decides which card draws it.
+ */
+export function isBackground(argsJson: string): boolean {
+  try {
+    const value = JSON.parse(argsJson)
+    return Boolean(value && typeof value === "object" && (value as { background?: unknown }).background === true)
+  } catch {
+    // Still streaming, or malformed: not a background launch as far as anyone
+    // can tell yet, and the head line is the same either way.
+    return false
+  }
+}
+
 export function shellCommandOf(argsJson: string): string | null {
   try {
     const value = JSON.parse(argsJson)
@@ -298,6 +316,12 @@ export function describeTool(view: ToolView, glyphs: Glyphs): ToolPresentation {
   if (view.tool === "shell") {
     const command = shellCommandOf(view.args)
     if (command === null) return shellPresentation(firstLine(view.args, 200), glyphs)
+    // A background launch is not the action its command names: the call returns
+    // a receipt, and what the command DID is a separate event later (tui.md
+    // §5.9). So `nulya ext build … background: true` keeps the plain shell card,
+    // whose note is about the task rather than about a version that does not
+    // exist yet.
+    if (isBackground(view.args)) return shellPresentation(firstLine(command, 200), glyphs)
     return evolvePresentation(command, view.output, glyphs) ?? shellPresentation(firstLine(command, 200), glyphs)
   }
   if (view.tool === "edit") {

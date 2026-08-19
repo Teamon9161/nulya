@@ -58,6 +58,11 @@
 | `nulya ext build <path>` | `/evolve` 与 `/compact` 的第一步；version 内容寻址，所以每次都 build，未改动就是同一个 version |
 | `nulya ext run <id>@<v> <tool> <json>` | `/compact`：过程住在 `extensions/compact` 里（DESIGN §11），前端只 build 它、run 它、把 tab 换到它返回的 session；它持锁的这段时间本 tab 自己翻成 observer 跟随（§5.6） |
 | `nulya ext list` | `/ext` 的目录清单：每个 id 来自哪个 root、谁被 `(shadowed)`——root 顺序与"首个持有者胜"是 kernel policy，TUI 不复刻（T8） |
+| `nulya task list --session <id> --json` | `/tasks` 与状态栏 `⠋ N background` 的**全部**内容（`state` / `exit_code` / `elapsed_s` / `duration_ms` / `command` / `log`）。`starting`（还没写 status）与 `lost`（说 running 但租约空闲）是内核算好的投影，TUI 一律不复刻——与 `/sessions` 改读 `session list --json` 同一条纪律（§5.9） |
+| `nulya task kill <task>` | `/tasks` 的 `k`（`K` = 每一个还在跑的）；写 kill 标记，supervisor 杀整棵进程树 |
+| `.nulya/sessions/<id>.inbox/` | 有没有 `.json` = 有没有等着下一个 step 边界排干的事件 → **driver 唤醒的唯一判据**（§5.9）；与 `.lock` 探针同一个 idle 定时器、同样无副作用 |
+| `.nulya/scratch/<sid>/tasks/t<N>/output.log` | `/tasks` 的 `Enter`：读最后 64 KB（路径来自 `task list --json`，TUI 不自己拼 scratch 路径）；不是真·live tail，跟着面板的轮询重读 |
+| 后台回执 / 报告文本 | `[background task <sid>/t<N> started] … log: …`（`shell {background:true}` 的结果）与 `task_finished.text` 的两条分隔行 → 两张卡片按文本形状识别（`nulya/ledger.ts`，与 `[exit N]` 同一先例） |
 | `.nulya/sessions/<id>.lock` | 能否非阻塞独占 → 有无别的写者（§5.6）；`session list` 给不了"此刻谁在写"，所以这条探针留在 TUI |
 | `<root>/<id>/versions/v-*/extension.json` | `/ext` 与 CompositionCard 的明细：`runtime`/`contributes`（tools / skills / **system_prompts**）/`permissions`；root 由 `ext list` 指出 |
 | `.nulya/tool-usage.jsonl` | `/ext` 里的 usage 表：一行取 `tool_id` + `ok` → uses_total / recent / success_rate（**只投影，不重算排序**——排序是 kernel policy，TUI 不复刻）。行上还有 `at` / `session?` / `duration_ms?`（DESIGN §5.5），TUI 只挑它要的两列、其余原样忽略 |
@@ -156,6 +161,8 @@ tui/
 | `assistant.text` | AssistantTurn | `●` + markdown（tree-sitter 高亮） | — | 展开 |
 | `assistant.reasoning` / `thinking_delta` | Thinking | `⋯ thinking  (N chars) ▸`（T26 起与所有卡片同一个 `CardFrame`，dim 一档） | 流式时显示滚动的最后一行 dim；结束后从 `reasoning` 尽力抽 `thinking` 字段（Anthropic 形状），抽不到显示 `reasoning (opaque)` | 折叠；设定 `thinking = collapsed\|hidden\|expanded` |
 | call `shell` | ShellCard | `$ 命令  (N lines[· exit N]) ▸`（exit 0 不写） | stdout / stderr 分段 | **折叠**；设定 `tool_output` |
+| call `shell` `{background:true}` | ShellCard（后台变体） | `$ 命令  (background <sid>/t3 · running 12s) ▸`；报告到了换成 `(background <sid>/t3[ · exit N] · 41.8s)` | 回执原文（任务全名 + log 路径 + 三条命令） | **折叠**；**不加新 glyph**（还是那条命令，变的只有那一格 note） |
+| `task_finished` | TaskFinishedCard | `$ 命令  (background <sid>/t3[ · exit N][ · killed] · 41.8s) ▸`（`exit 0` 照 T26 省略） | 输出 tail + 尾行 `full log → <path>` | **折叠**；一条事件一张卡，不是回执那张卡的更新 |
 | call `edit` | EditCard | `✎ path  (+2 -1[· failed])` | unified diff（`diff` 组件，语法高亮） | **展开**；设定 `edit_diff = expanded\|collapsed` |
 | call `ext:*` | ExtToolCard | `⌘ tool_name · 参数摘要  (N lines) ▸`（**第一个参数不写键名**——工具的第一个参数就是它的主语：路径、模式、命令，T26） | 输出 | 折叠 |
 | shell 命令前缀 `nulya src` / `nulya ext init\|build\|activate\|rollback\|run` / `nulya skill load` / `nulya session new\|append\|step\|events` | EvolveCard / SubSessionCard | 见 §5.2 / §5.5 | 原始输出可展开 | 折叠但头行信息量大 |
@@ -177,11 +184,11 @@ tui/
 
 - `Enter` 发送；`Shift+Enter` / `Ctrl+J` 换行；`↑` 空 composer 时翻历史；粘贴多行原样。
 - 发送时若 `stepping`：只 append（queued）；不打断。
-- `/` 开头弹一个小补全：内建命令（`/model` `/mode [ask|auto]` `/effort <level|auto>` `/new [--profile p] [--model id]` `/sessions` `/ext` `/usage` `/compact [focus]` `/outcome` `/evolve` `/as <id>[@<v>]` `/cancel` `/fold` `/settings` `/help` `/quit`；**`/mode` 从 T24 起是权限 mode**，穿 extension 身份的那个改叫 `/as`——`/mode auto` 与 `/mode evolution` 是两件毫无关系的事，不该共用一个词，而 `/as evolution` 本身就读得出它在做什么）在前，**activate 了的 skill 在后**（`nulya skill list`，描述截 100 字符）。分发同序：内建 → skill → 原样发给模型。`/<skill> [args]` = `nulya skill load <ref>` 拿到 body、包一层 sentinel 后作为**普通 user turn** append（T15；旧文本写的"nulya 没有 skill slash"已翻案——它把"谁触发"误当成了"谁判断"，理由见 goals/tui-panel.md D8）。
+- `/` 开头弹一个小补全：内建命令（`/model` `/mode [ask|auto]` `/effort <level|auto>` `/new [--profile p] [--model id]` `/sessions` `/ext` `/tasks` `/usage` `/compact [focus]` `/outcome` `/evolve` `/as <id>[@<v>]` `/cancel` `/fold` `/settings` `/help` `/quit`；**`/mode` 从 T24 起是权限 mode**，穿 extension 身份的那个改叫 `/as`——`/mode auto` 与 `/mode evolution` 是两件毫无关系的事，不该共用一个词，而 `/as evolution` 本身就读得出它在做什么）在前，**activate 了的 skill 在后**（`nulya skill list`，描述截 100 字符）。分发同序：内建 → skill → 原样发给模型。`/<skill> [args]` = `nulya skill load <ref>` 拿到 body、包一层 sentinel 后作为**普通 user turn** append（T15；旧文本写的"nulya 没有 skill slash"已翻案——它把"谁触发"误当成了"谁判断"，理由见 goals/tui-panel.md D8）。
 - `@` 开头（前一字符非字母数字下划线）弹文件补全：`↑↓` 选、`Tab` 上屏成 `@path`；已知引用在输入框里 accent。**上屏的是路径，不是文件内容**（T13）。
 - 粘贴：> 1000 字符或 > 15 行折叠成 `[Pasted text #N]`，提交时展开回原文；`Backspace` 落在占位尾部整条删掉（T14）。
 - 有 tool call 在等批准时（§5.7），**审批对话框拿着键盘**：`↑↓` / 数字键选答案、`Enter` 作答、`Tab` 在答案列表与 note 之间切、直接打字即写 note、`Esc` 在列表上 = deny（在 note 里先清空）。带 modifier 的键（`Ctrl+C`）照旧穿过去。
-- 全局：`Esc` cancel（stepping 时）/ browse 模式；**`Ctrl+C` 由近及远，永远不在第一下退出**（T27）：输入框里有字 → 先清空（`ComposerApi.clear`）· 正在 stepping → 先 kill 这一步 · 都没有 → 先说一句 `Ctrl+C again to quit`，**再按一下才退**（提示 3 秒后失效，所以几分钟后的一下永远不是意外退出）。半条写了一半的消息、和整个屏幕，都不是第二次按键能撤销的东西；`main.tsx` 的 `exitOnCtrlC: false` 是这条链成立的前提。`Ctrl+L` 重绘；`F2` `/ext`；`F3` `/sessions`；`F4` 下一个 tab；`Ctrl+W` 关掉当前 tab（最后一个不关）。
+- 全局：`Esc` cancel（stepping 时）/ browse 模式；**`Ctrl+C` 由近及远，永远不在第一下退出**（T27）：输入框里有字 → 先清空（`ComposerApi.clear`）· 正在 stepping → 先 kill 这一步 · 都没有 → 先说一句 `Ctrl+C again to quit`，**再按一下才退**（提示 3 秒后失效，所以几分钟后的一下永远不是意外退出）。半条写了一半的消息、和整个屏幕，都不是第二次按键能撤销的东西；`main.tsx` 的 `exitOnCtrlC: false` 是这条链成立的前提。`Ctrl+L` 重绘；`F2` `/ext`；`F3` `/sessions`；`F4` 下一个 tab；`F7` `/tasks`；`Ctrl+W` 关掉当前 tab（最后一个不关）。
 - 鼠标（T18）：列表行点一下落光标、点已选中的行执行它的 Enter；`/ext` 的 pane 条、`[x]` 与 id 行的开关记号、TabBar、状态栏的 `↓ N more below`、输入框都可点（点输入框也会退出 browse 模式）；拖过文本是选取，松手复制（OSC 52）。**模型这一行处处可点**（T20 → T22）：**输入框下面那一行开头的 `<model-id> [(effort)]`**、CompositionCard 的 `model` 值都开 `/model`；Welcome 的那几条 `/` 命令行、那一行末尾的 `/help` 也是按钮。所有可点的东西悬停都是同一个 `hover` 底色。
 - **第一条消息才建 session**（T22，D11）：开屏是 draft，`Enter` 发送时先解 skill（`/name`）、再 `session new`、再 append+step。内核在这一步的拒绝（缺 key / store 未信任 / pin 认不出）**留在屏幕上**：notice 是内核原话，tab 仍是 draft，**打的字回到输入框**（`ComposerApi.restore`，只在框还空着时放回去——人在等的时候又打了别的，那是人的）。draft 上 `/outcome` `/compact` `/step` `/cancel` `Esc` 各回一句"这个 tab 还没有 session"，一个都不炸。
 - `/model`（F5）与 `/provider`（F6）是**两个命令、两个问题**（T5 → T6 → T20 → T21，与 tcode 的 `/model` ÷ `/provider` 同一刀）：
@@ -286,6 +293,23 @@ registry 按 shell 命令前缀识别，头行抽关键事实（抽不到就退�
 - **`ask`** = brief 显示在 transcript 与输入框之间（**不是 transcript 卡片**：brief 是磁盘上的制品不是 ledger 事件，这个前端只画 ledger 有的东西），`Enter` 跟过去 / `Esc` 收起（文件留着）。**`auto`** = 直接跟，一行 notice。
 - **跟过去 = `/compact` 的 `brief_file` 分支**（DESIGN §11）：同一条 fork，只是摘要已经写好了，旧 session 逐字节不变，tab 换到子 session——与 `/compact` 完全同一段代码（`compact.ts` 多一个可选参数）。
 
+### 5.9 后台任务：内核给 supervisor 与事件，屏幕决定何时再 step `[T29]`
+
+内核那一半已经全在（DESIGN §6.1 / §3.1）：`shell {background:true}` 起一个脱离 step 进程的命令并立刻回执，supervisor 看着它跑，结束时把 `task_finished{task, exit_code, text}` **投进这场 session 的 inbox**，下一个 step 边界排干、进 ledger、模型读到。少的只有一件事——**谁来开那一步**。何时继续从来是 driver 的 policy（physics #8，goals/background.md D8），所以这块屏幕补的就是这一条：
+
+- **唤醒判据是四个词：driver 角色 + 这场是本进程驱动过的 + `status() === "idle"` + `<id>.inbox/` 非空**（`state/driver.ts` 的 `wake()`，唯一的新 policy；"驱动过"= 本进程 `session new` 出来的，或从这个 tab 发过消息 / step 过 / `↵` 接管过——`attach.ts` 的 `driven`）。四点都承重：
+  - **"驱动过"挡的是一个窄而后果重的窗口**：一个刚打开的 tab（SubSessionCard 的 `Enter`、`/sessions`）角色缺省是 driver，第一次探针之前它分不清"没人驱动"与"别人正好在两个 step 之间"——而 inbox 非空恰恰发生在那个别人的 `task wait --any` 刚返回、还没来得及 `session step` 的一瞬，我们抢先一步，它的下一步就是 `SessionBusy`，一个 driver 脚本会就此退出。所以没人要求的那一步只在**我们已经是它的驱动者**的 session 上发生；打开一场旧 session 只看不说，第一条消息才把它变成我们的（`tasks.test.ts` 两条钉住）。
+  - 判据是**inbox**，不是"某个任务 done 了"。任务结束只是让 inbox 非空的来源之一，别的终端 `session append`、`ext activate` 的 capability note 都算；反过来，**inbox 为空时绝不裸 step**——那会把上一条 assistant turn 当 prefill 重发（DESIGN §4），不是"继续"，是关于谁最后说话的谎。
+  - 轮询搭 `probeWriterLease` 那个 idle 定时器的车（`state/attach.ts`，默认 700 ms），**不另起第二个**：它本来就是"我们坐着不动的时候世界干了什么"的那一拍，而多一个定时器只是多一个要停的东西。
+  - **observer 不踢**（角色判断留在 `attach.ts`，`driver.ts` 只回答"inbox 里有没有东西"）：那个 inbox 由持锁的写者在它自己的下一个 step 边界排干，两个写者正是 durable session 唯一拒绝的事（DESIGN §3.4）。
+  - **`ask` 模式照踢**：模型只是去读一个结果，它接下来每一个 tool call 仍然逐个过 gate（§5.7）。
+- **`nulya task list --session <id> --json` 是任务面的唯一数据源**（`state/tasks.ts` 一个 per-tab 的 watch：tab 打开读一次、每个 step 结束读一次、有没 done 的任务时每 1.5 s 读一次；一个从没起过任务的 session 只付开场那一次）。`starting` / `lost` / `elapsed_s` 全是内核算好的投影，TUI **不复刻**——它们要同时读任务目录与那把锁，第二份实现迟早跟唯一算数的那份说两样话。
+- **两张卡**（§4.2）：ShellCard 的后台变体（同一个 `$`，note 换成 `background <sid>/t3 · running 12s`）与 `task_finished` 的 TaskFinishedCard（`$ 命令 (background <sid>/t3 · exit 1 · 41.8s)`，体是输出 tail + 尾行 `full log → …`）。两者靠**全名** `<sid>/t<N>` 连起来：回执首行写了它，事件里又写了一遍，所以 `session.ts` 排干那条事件时按名字找回发起它的那张卡并记下 exit 与耗时——**重开一场也照样显示**，不靠任何进程。"还在跑几秒了"这种没法 append 的事实才走 live 投影（`TasksContext`）。
+- **状态栏**：有没 done 的任务就在活动区写 `⠋ 2 background`，**driver idle 时也写**——任务活得过 step，一条正在跑的命令是那一刻唯一还在发生的事，说"idle"才是假话。它排在两个 stop reason（都要人按一下键）之下、其余静息状态之上；点它 = `/tasks`。
+- **`/tasks`（F7）**：一行一个 `<sid>/t<N> · state · 用时 · 命令 · 怎么结束的`；`Enter` 看 log 的最后 64 KB（跟着面板的 1.5 s 轮询重读，**不求真·live tail**——那要一个常驻进程，而人想知道的"它现在在干什么"重读就够）；`k` kill（不二次确认：杀错了重跑一次就行，杀不掉的任务才是没有 undo 的那个），`K` 杀掉所有还在跑的；`r` 重读。**这是全前端唯一 `j/k` 不是移动的列表**——`k` 在这里是 kill(1) 那个动词，光标只认方向键，footer 写明白；一个键在五个面板里移动光标、在第六个面板里毁东西，是两种不一致里更糟的那种。
+- **`/quit` 不杀**：有还在跑的任务就先说一句 `N background tasks keep running; their results land in the session inbox`，再 `/quit` 一次才走。离开这个前端不该停掉一个 detached 的进程（内核里也根本没有"session 结束"这个概念）；结果会在 inbox 里等下一个 step。要停就去 `/tasks` 按 `K`。
+- **不做**：跨 tab 的任务汇总视图（`/tasks` 只看当前 tab 的 session，整个 workspace 的答案是终端里的 `nulya task list`）；后台输出实时进 transcript（log 文件 + `/tasks` 就是观察面）；任何"自动清理"或退出时杀任务。
+
 ## 6. 视觉规范
 
 克制是终端里的美观。规则：
@@ -380,7 +404,7 @@ fold   = "ctrl+o"
 | ~~**T27 · 审批面板 + Ctrl+C 的三层含义**~~ ✅ | 审批从"tool 卡多一行"改成**输入框上面的面板**（一行一个答案、可点、`fit` 到宽度，卡片只留 `waiting for you` 标记）；新增 `A` = 连同本批剩下的 call 一起允许（记 call_id 集合，不是布尔）；等待中的请求改成**队列**（多 tab 同时 drive 不再丢答案）；状态栏 activity 也过 `fit`（`nasknstep 1` 那种叠字）；`Ctrl+C` 由近及远、永不第一下退出。内核一处：`--stream` 在 `model started` 之前先刷已经存在的 ledger 行，于是排干的 `user_text` 当场转正（`queued` 不再挂满整个 step） | `bun test` 219 pass（`gate.test.tsx` 批量两条 + `lifecycle` 的 Ctrl+C 一条 + 面板文案）、`zig build e2e` 55 pass（`--stream` 首行改断言成排干的 user_text） |
 | ~~**T28 · 审批对话框（tcode 形状）+ 任意选项的 note**~~ ✅ | 审批从"一列要按的字母"改成**一个可选可点的答案列表**（`↑↓`/数字/悬停移动光标、`Enter`/点击作答、五个答案按影响范围排、末位是 tcode 的 `set_mode`），底下常驻 **note 字段**：`Tab` 或直接打字进入，**note 跟着被选中的答案走**。note 的两条去向：deny 用内核自带的 `deny <note>`，allow 走 `session append`（`approvalnote.ts` sentinel + contract，下一个 step 边界落在同批 tool_results 后面，卡片 badge `note on <tool>`）。对话框在时拿键盘（`Ctrl+C` 除外）。**内核零改动** | `bun test` 221 pass（`approvalnote.test.ts` 6 条 + gate 的 allow-note / deny-note / 纯鼠标作答 / mode 答案 / 批量各一条） |
 | **T10 · `/goal`（占位，未开工）** | spawn 随仓库带的 driver 脚本（`win32` → `powershell -NoProfile -ExecutionPolicy Bypass -File drivers/goal.ps1`，否则 `sh drivers/goal.sh`），把它的 **stderr 喂给已有的 `--stream` 解析器**（token delta / tool begin-end / usage 全在里面），把它的 **stdout 当控制通道**：`session <id>` 开 tab、`handoff <old> -> <new>` 换 tab（原 tab 留着可回看）、`done <id>` 收尾并提示 `/outcome`。跟随中的 tab 是 **observer**（driver 持着写者 lease）。**内核零改动**，也不需要 §10.4 的 `<id>.live` sidecar | 起一个两阶段目标：token 实时可见；handoff 时自动切到子 session；`Esc` 停得下来（`session cancel` 或杀脚本）|
-| **T29 · 后台任务（占位，契约已定：[goals/background.md](goals/background.md) B5）** | 内核先长 `shell {background:true}` → supervisor → inbox → 第五种事件 `task_finished`（B1–B4，DESIGN 同步）；前端只做**屏幕该做的**：`driver.ts` 的唯一新 policy "driver 角色 + idle + `<id>.inbox/` 非空 → step"（inbox 为空绝不裸 step；`ask` 也踢；observer 不踢）· `nulya task list --session <id> --json` 喂状态栏 `⠋ N background` chip 与 `/tasks`（看 log、`k` kill）· ShellCard 后台变体 + `TaskFinishedCard`（按全名 `<sid>/t<N>` 连回发起的那张卡）· `/quit` 提示不杀。**TUI 不复刻** `lost` 判定与 retarget 扫描——kernel 的投影是权威 | `bun test`：任务 done 后 idle 的 driver 自动 step 且 ledger 出现 `task_finished`；inbox 为空不 step；observer 不 step；两张卡快照；`bun build --compile` 仍单文件 |
+| ~~**T29 · 后台任务**~~ ✅ | 内核先长 `shell {background:true}` → supervisor → inbox → 第五种事件 `task_finished`（B1–B4，DESIGN 同步）；前端只做**屏幕该做的**：`driver.ts` 的唯一新 policy "driver 角色 + 本进程驱动过 + idle + `<id>.inbox/` 非空 → step"（inbox 为空绝不裸 step；`ask` 也踢；observer 不踢；只打开没说话的 tab 不踢）· `nulya task list --session <id> --json` 喂状态栏 `⠋ N background` chip 与 `/tasks`（看 log、`k` kill）· ShellCard 后台变体 + `TaskFinishedCard`（按全名 `<sid>/t<N>` 连回发起的那张卡）· `/quit` 提示不杀。**TUI 不复刻** `lost` 判定与 retarget 扫描——kernel 的投影是权威 | `bun test`：任务 done 后 idle 的 driver 自动 step 且 ledger 出现 `task_finished`；inbox 为空不 step；observer 不 step；两张卡快照；`bun build --compile` 仍单文件 |
 
 顺序 T0 → T1 → T2 → T3 → T4；**T1 结束就开始用它 dogfood**，T2 起的优先级由用出来的痛点重排（T5–T8 就是这么来的）。
 
@@ -1296,3 +1320,21 @@ T27 已经把问句从卡片挪到了输入框上面、把每个答案拆成自�
 **测试**：`bun test` 219 → **221 pass**。新增 `approvalnote.test.ts`（6 条，含"两个 sentinel 互不相认"——卡片路由先问它，一条 mid-task 落进那个分支会被安上一个它从来不属于的 call 名）；`gate.test.tsx` 改成走新形状，并补三条：**allow + note**（call 真跑了，note 作为一条带 sentinel 的 `user_text` 进 ledger、屏幕上 badge 是 `note on shell`）· **纯鼠标作答**（`moveTo` 移光标 → `click` 作答，note 一起带走）· **数字键选到 `mode auto` 那一行**（原来那条"打 `/mode auto`"的测试的去处）。
 
 **没做**：不给面板加边框（§6 仍然只有输入框有边框，整屏一个）；note 仍是单行（多行要么变成第二个 composer，要么让面板顶掉转录，两者都不值）；不做 tcode 的 `ask_user` 表单——那要内核先有一个"模型向人提问"的原语，今天没有，它属于 PLAN。
+
+### T29 · 后台任务：内核已经把结果放进 inbox，屏幕只欠一步（2026-08-20）
+
+**内核零改动**（B1–B4 已经把 substrate 全长完了：`shell {background:true}` → supervisor → inbox → 第五种事件 `task_finished`，DESIGN §6.1 / §3.1）。`tui/src/` 十九个文件（三个是新的：`state/tasks.ts` · `render/cards/TaskFinishedCard.tsx` · `ui/overlays/TasksView.tsx`）。这一轮真正新增的判断只有一条，其余全是"把内核已经答出来的东西画出来"。
+
+1. **唯一的新 policy 是三个词：driver + idle + inbox 非空。** 内核不会替谁决定何时再 step（physics #8），所以一个任务结束后，报告就躺在 `<id>.inbox/` 里等一个 step 边界。判据写成 `driver.wake()`：**inbox 非空**才 drive，而不是"某个任务 done 了"——任务结束只是让 inbox 非空的来源之一（别的终端 `session append`、`ext activate` 的 note 都算），而 inbox 为空时裸 step 会把上一条 assistant turn 当 prefill 重发（DESIGN §4）。轮询搭 `probeWriterLease` 那个 idle 定时器的车，一个新定时器都没起；角色判断留在 `attach.ts`（`if (role() === "driver") void driver.wake()`），`driver.ts` 只回答"里面有没有东西"——observer 去踢就是抢别人的写者租约。
+2. **`lost` / `starting` / `elapsed_s` 一律读内核的投影。** `nulya task list --session <id> --json` 是任务面的唯一数据源（`state/tasks.ts`，per-tab 的 watch）。这两个状态要同时读任务目录和那把锁才答得出来，前端复刻一份迟早跟唯一算数的那份说两样话——与 T8 让 `/sessions` 改读 `session list --json` 同一条纪律。轮询自己关自己：没有未 done 的任务就不发进程，所以一个从没起过任务的 session 只付 tab 打开那一次。
+3. **两张卡靠全名连起来，连接点在 ledger 而不在轮询。** 回执首行 `[background task <sid>/t<N> started]` 与事件里的 `task` 是同一个字符串，所以 `session.ts` 排干那条事件时按名字找回发起它的那张 shell 卡、记下 exit 与耗时（`ToolItem.taskResult`）——**重开一场照样显示**，不靠任何进程。只有"还在跑，已经几秒了"这种没法 append 的事实才走 live 投影（`TasksContext`，与 fold / browse 同一种 context 形状，所以快照测试不需要 provider）。`task_finished` 是**自己一张卡**而不是那张卡的更新：那次调用早就返回过了（返回的是回执），这是几分钟后的第二个事件，模型也是当成新的一轮读的。不加新 glyph（还是 `$`），`exit 0` 照 T26 沉默。
+4. **`registry.ts` 多一句判断：后台启动不是它命名的那个动作。** `shell {command:"nulya ext build …", background:true}` 原来会被演化表认成 EvolveCard，头行去 stdout 里找一个还不存在的 version、note 报"回执有几行"——都是关于回执的话，不是关于那条命令的。判据取 **args 里的 `background`** 而不是结果文本（前者在整个调用生命周期里稳定），落在那个唯一按名字 / 前缀 match 的文件里。
+5. **状态栏在 idle 时也说话。** `⠋ 2 background` 排在两个 stop reason（都要人按键）之下、其余静息状态之上：任务活得过 step，一条正在跑的命令是那一刻唯一还在发生的事，写"idle"才是假话。spinner 的定时器因此也要认它，否则那个 `⠋` 是一个不动的字符。
+6. **`/tasks`（F7）里 `k` 是 kill 不是光标**——全前端唯一 `j/k` 不移动的列表，光标只认方向键，footer 写明白。理由：这个面板的行是可以被停掉的进程，`k` 从 kill(1) 起就是这个意思；一个键在五个面板里移动光标、在第六个面板里毁东西，是两种不一致里更糟的那种。`k` 不二次确认（杀错了重跑一次，杀不掉的任务才是没有 undo 的那个），`K` 杀掉所有还在跑的，`Enter` 看 log 最后 64 KB（跟着 1.5 s 轮询重读，不求真·live tail）。
+7. **`/quit` 说一句，不杀。** 离开这个前端不该停掉一个 detached 的进程——内核里根本没有"session 结束"这个概念，而结果会在 inbox 里等下一个 step（下一次开这场 session 的人就会读到）。所以只提示一次 `N background tasks keep running; their results land in the session inbox`，再 `/quit` 一次就走；要停在 `/tasks` 按 `K`。
+
+8. **review 时补上第四个条件（同日）**：唤醒只对**本进程驱动过**的 session 生效（`attach.ts` 的 `driven`：`session new` 出来的、或从这个 tab 发过消息 / step 过 / `↵` 接管过）。实现时留下的那条观察——刚打开的 sub-session tab 在第一次探针前有 ≤700 ms 可能替别人跑一步——不只是多跑一步：对方的下一次 `session step` 会被 `SessionBusy` 拒掉，`drivers/goal.*` 就此 exit 1。规则仍然只在一个地方（`attach.ts` 那一行 `role() === "driver" && driven`），`tabs.ts` 在 materialize 时把 `created` 递成初值。`tasks.test.ts` 多两条：只打开不说话的 tab 面对非空 inbox 不动、发过一条消息之后 append 就能唤醒；`driven: true` 的 attachment 从第一次探针起就排干。
+
+**测试**：`cd tui && bun test` 227 → **244 pass**、`tsc` 干净、`bun build --compile` 仍出单文件。新增 `tasks.test.ts` 9 条：真二进制的 `background` 档全环（起任务 → 本步以 waiting 收尾 → 谁都不碰它 → 报告进 ledger → 模型说 `background done` → 卡片记下 exit → **inbox 空了就不再自己 step**）· 空 inbox 上 `wake()` 两次一个事件都不多 · 持锁的另一个写者在时 observer 一步都不走（step 的二进制换成 `bun`，真走了会在状态栏留一句，沉默就是断言）· `task list --json` 的每一列 · 回执与报告的解析四条（命令里带 ` · `、killed、timed out、无输出、读不懂就返回 null）· 一条报告只认自己那张卡。`render.test.tsx` 加三条（后台变体的 running / 报告到了 / TaskFinishedCard 折叠与展开，三张快照），`overlays.test.tsx` 加两条 `/tasks` 的帧，`registry.test.ts` 加一条“后台的 `nulya …` 不是演化卡”。
+
+**没做**：跨 tab 的任务汇总（`/tasks` 只看当前 tab 的 session，整个 workspace 用终端里的 `nulya task list`）；后台输出实时进 transcript；退出时自动杀；`/tasks` 里没有"再跑一次"（重跑是一句话，让模型说）。

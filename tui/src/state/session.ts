@@ -13,6 +13,7 @@
  *    and sorts back into place even though it arrived after the model deltas.
  */
 import { createStore, produce } from "solid-js/store"
+import { backgroundStartOf, taskReportOf } from "../nulya/ledger.ts"
 import type { LedgerEvent, SessionHeader, ToolCall, Usage } from "../nulya/ledger.ts"
 import type { StreamLine, StepStatus, StopReason } from "../nulya/cli.ts"
 
@@ -64,12 +65,34 @@ export interface ToolItem extends ItemBase {
    * serially and asks about each call in turn.
    */
   awaiting: boolean
+  /**
+   * How the background task this call started ended, once its report landed
+   * (tui.md §5.9). Set by the `task_finished` event, matched to this card by the
+   * full task name in its own receipt — so a reopened session shows the same
+   * head line without any process being asked anything.
+   */
+  taskResult: { exitCode: number; duration: string } | null
 }
 
 export interface CapabilityItem extends ItemBase {
   kind: "capability"
   id: string
   version: string
+  text: string
+}
+
+/**
+ * A background task ended and said so in the ledger (`task_finished`, DESIGN
+ * §3.1). Its own card, not an update to the shell call that started it: the call
+ * already returned — with a receipt — and this is a second event, minutes later,
+ * that the model reads as a turn of its own.
+ */
+export interface TaskItem extends ItemBase {
+  kind: "task"
+  /** Full name `<session>/t<N>`. */
+  task: string
+  exitCode: number
+  /** The report verbatim, as the model received it. */
   text: string
 }
 
@@ -80,7 +103,14 @@ export interface UnknownItem extends ItemBase {
   raw: string
 }
 
-export type TranscriptItem = UserItem | AssistantItem | ThinkingItem | ToolItem | CapabilityItem | UnknownItem
+export type TranscriptItem =
+  | UserItem
+  | AssistantItem
+  | ThinkingItem
+  | ToolItem
+  | CapabilityItem
+  | TaskItem
+  | UnknownItem
 
 export interface UsageTotals {
   input: number
@@ -227,6 +257,7 @@ export function createSessionState(id: string): SessionState {
       spillPath: null,
       resolved: false,
       awaiting: false,
+      taskResult: null,
     }))
   }
 
@@ -358,6 +389,7 @@ export function createSessionState(id: string): SessionState {
                   spillPath: result.spill_path,
                   resolved: true,
                   awaiting: false,
+                  taskResult: null,
                 },
               ])
             }
@@ -368,6 +400,25 @@ export function createSessionState(id: string): SessionState {
           const note = event as Extract<LedgerEvent, { kind: "capability_note" }>
           insertCommitted(draft, [
             { key: `e${seq}`, seq, kind: "capability", id: note.id, version: note.version, text: note.text },
+          ])
+          break
+        }
+        case "task_finished": {
+          const finished = event as Extract<LedgerEvent, { kind: "task_finished" }>
+          const report = taskReportOf(finished.text)
+          // The card that started it stops saying "running". Matched by the FULL
+          // task name, which the receipt printed and this event repeats — no
+          // guessing by position, and a session with three tasks in flight
+          // resolves each of them onto its own card.
+          for (let i = draft.items.length - 1; i >= 0; i--) {
+            const item = draft.items[i]!
+            if (item.kind !== "tool") continue
+            if (backgroundStartOf(item.output)?.task !== finished.task) continue
+            item.taskResult = { exitCode: finished.exit_code, duration: report?.duration ?? "" }
+            break
+          }
+          insertCommitted(draft, [
+            { key: `e${seq}`, seq, kind: "task", task: finished.task, exitCode: finished.exit_code, text: finished.text },
           ])
           break
         }
@@ -443,6 +494,7 @@ export function createSessionState(id: string): SessionState {
               spillPath: null,
               resolved: false,
               awaiting: false,
+              taskResult: null,
             })
             break
           }

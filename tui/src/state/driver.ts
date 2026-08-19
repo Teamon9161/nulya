@@ -4,9 +4,14 @@
  * It owns the `session step --stream` subprocess and nothing else. Deciding
  * *why* or *how long* an agent should keep going is a driver-script or agent
  * concern (PLAN §3.6), never the TUI's — so there is no goal loop here, no
- * retry policy, and no automatic continuation past a spent step budget. The one
- * automatic re-step is the mechanical case tui.md §4.3 calls for: the user
- * spoke while a run was ending, so their turn is still queued in the inbox.
+ * retry policy, and no automatic continuation past a spent step budget.
+ *
+ * A step is started by itself in exactly one situation, spelled two ways: there
+ * is something in the inbox that only a step boundary can drain. Inside a run
+ * that is the case tui.md §4.3 calls for (the user spoke while the run was
+ * ending); at rest it is `wake()` (a background task finished, or another
+ * process appended). Both are mechanical — an event exists and nobody else will
+ * pick it up — and neither ever steps on an empty inbox.
  */
 import { createSignal, type Accessor } from "solid-js"
 import { wrapMidTask } from "../midtask.ts"
@@ -18,6 +23,7 @@ import {
   type GateVerdict,
   type StepHandle,
 } from "../nulya/cli.ts"
+import { inboxPending } from "../nulya/files.ts"
 import type { Workspace } from "../nulya/bin.ts"
 import type { SessionState } from "./session.ts"
 
@@ -36,6 +42,24 @@ export interface Driver {
   send(text: string, framed?: boolean): Promise<void>
   /** Run a step now (used to continue after a spent budget). */
   step(): Promise<void>
+  /**
+   * Step IF the session's inbox has something in it — the whole wake-up policy
+   * (tui.md §5.9, goals/background.md D8).
+   *
+   * A background task that finished deposits its report into the inbox and the
+   * kernel drains it at the next step boundary; without somebody starting that
+   * step the report sits on disk and the model never hears about the thing it
+   * asked for. Deciding when to continue is a driver's job, never the kernel's
+   * (physics #8), and this is that decision in one line.
+   *
+   * The condition is the INBOX, not "a task finished". Finishing is only one of
+   * the ways the inbox becomes non-empty — a `session append` from another
+   * terminal and an `ext activate` are two more — and stepping on an EMPTY inbox
+   * is the thing that must never happen: a bare step re-sends the last assistant
+   * turn as a prefill (DESIGN §4), which is not a continuation, it is a lie
+   * about who spoke last.
+   */
+  wake(): Promise<void>
   /** Esc: ask the kernel to stop at its next step boundary. */
   cancel(): Promise<void>
   /** Ctrl+C twice: kill the step process; the kernel repairs the tail next open. */
@@ -217,6 +241,11 @@ export function createDriver(
     },
     async step() {
       if (status() !== "idle") return
+      await drive()
+    },
+    async wake() {
+      if (disposed || driving || status() !== "idle") return
+      if (!inboxPending(ws, id)) return
       await drive()
     },
     async cancel() {

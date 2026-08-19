@@ -31,6 +31,7 @@ export const commands: Command[] = [
   { name: "/new", args: "[--profile p] [--model id]", what: "a session on the last pick, or on the named profile" },
   { name: "/sessions", what: "everything in .nulya/sessions · Enter opens one" },
   { name: "/ext", what: "extensions: versions, what is active, what it is used for" },
+  { name: "/tasks", what: "background commands: what is running, its log, k stops one" },
   { name: "/usage", what: "what this session cost, and the workspace's tool-usage journal" },
   { name: "/settings", what: "the effective tui.toml values and which file each came from" },
   { name: "/compact", args: "[focus]", what: "summarise this session and continue in a new one; this file stays" },

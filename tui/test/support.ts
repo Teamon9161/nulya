@@ -41,6 +41,13 @@ export const scripted_env = { NULYA_SCRIPTED_MODE: "finish" }
 export const scripted_loop_env = { NULYA_SCRIPTED_MODE: "loop" }
 /** Three shell calls in one turn: what a serial gate looks like from a driver. */
 export const scripted_batch_env = { NULYA_SCRIPTED_MODE: "batch" }
+/**
+ * One `shell {background: true}`, then end of turn — and `background done` only
+ * once a `task_finished` turn is in the transcript (`launch.ScriptedProvider`).
+ * That last part is what makes the wake-up testable: it tells "was stepped
+ * again" apart from "was stepped again AND read the report" (tui.md §5.9).
+ */
+export const scripted_background_env = { NULYA_SCRIPTED_MODE: "background" }
 
 /**
  * Settings for a test that wants tool calls to RUN (tui.md §5.7).

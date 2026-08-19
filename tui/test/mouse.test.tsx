@@ -80,6 +80,7 @@ function shellItem(key: string, command: string, output: string): TranscriptItem
     spillPath: null,
     resolved: true,
     awaiting: false,
+    taskResult: null,
   }
 }
 

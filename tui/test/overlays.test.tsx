@@ -28,7 +28,8 @@ import { StyleContext, createStyle, type Style } from "../src/render/theme.ts"
 import { FoldContext, createFoldStore } from "../src/state/folds.ts"
 import { createSessionState } from "../src/state/session.ts"
 import { default_settings } from "../src/state/settings.ts"
-import { sessionAppend, sessionNew, sessionStep } from "../src/nulya/cli.ts"
+import { sessionAppend, sessionNew, sessionStep, taskList, type TaskEntry } from "../src/nulya/cli.ts"
+import { TasksView } from "../src/ui/overlays/TasksView.tsx"
 import type { SessionHeader } from "../src/nulya/ledger.ts"
 import { auto_settings, frameLines, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
 
@@ -632,3 +633,54 @@ test("/ext: a full tool face leaves the extension half on rather than refusing i
     full.cleanup()
   }
 }, 120_000)
+
+/**
+ * `/tasks` (tui.md §5.9). Every column on a row is `nulya task list --json`,
+ * so this drives the real binary: a background command is started, finishes,
+ * and the panel says what became of it.
+ */
+test("/tasks lists this session's background commands and shows one's log", async () => {
+  const id = await sessionNew(ws, { profile: "scripted" })
+  await sessionAppend(ws, id, "go")
+  const step = sessionStep(ws, id, { env: { NULYA_SCRIPTED_MODE: "background" } })
+  for await (const _ of step.lines) {
+    // Drained so the child can exit.
+  }
+  await step.exited
+  await until(async () => (await taskList(ws, id)).some((task) => task.state === "done"), 60_000)
+
+  const [tasks, setTasks] = createSignal<TaskEntry[]>([])
+  const refresh = async () => setTasks(await taskList(ws, id))
+  await refresh()
+  const setup = await overlayFrame(() => (
+    <TasksView ws={ws} sessionId={id} tasks={tasks()} onRefresh={() => void refresh()} onClose={() => {}} />
+  ))
+  try {
+    const frame = await settle(setup, 4)
+    expect(frame).toContain(`${id}/t1`)
+    expect(frame).toContain("done")
+    expect(frame).toContain("echo scripted-background-marker")
+    expect(frame).toContain("↑↓ move · Enter log · k kill · Esc close")
+    // Enter opens the log — the file the receipt named, not a second guess at
+    // where output goes.
+    setup.mockInput.pressEnter()
+    const opened = await settle(setup, 8)
+    expect(opened).toContain("output.log")
+    expect(opened).toContain("scripted-background-marker")
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 120_000)
+
+test("/tasks on a tab with no session says so instead of drawing an empty list", async () => {
+  const setup = await overlayFrame(() => (
+    <TasksView ws={ws} sessionId="" tasks={[]} onRefresh={() => {}} onClose={() => {}} />
+  ))
+  try {
+    const frame = await settle(setup, 3)
+    expect(frame).toContain("this tab has no session yet")
+    expect(frame).toContain("shell {background: true}")
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 60_000)

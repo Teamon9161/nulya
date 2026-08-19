@@ -11,6 +11,7 @@ import { Thinking } from "./Thinking.tsx"
 import { ToolCard } from "./ToolCard.tsx"
 import { ApprovalPrompt } from "./ApprovalPrompt.tsx"
 import { CapabilityBanner } from "./CapabilityBanner.tsx"
+import { TaskFinishedCard } from "./TaskFinishedCard.tsx"
 import { useStyle } from "../theme.ts"
 import type { TranscriptItem, UnknownItem } from "../../state/session.ts"
 
@@ -78,6 +79,11 @@ export function Card(props: { item: TranscriptItem }) {
       </Match>
       <Match when={props.item.kind === "capability"}>
         <CapabilityBanner item={props.item as Extract<TranscriptItem, { kind: "capability" }>} />
+      </Match>
+      {/* A background command ended (tui.md §5.9): its own event, its own card,
+          and the shell call that started it has already said what it is. */}
+      <Match when={props.item.kind === "task"}>
+        <TaskFinishedCard item={props.item as Extract<TranscriptItem, { kind: "task" }>} />
       </Match>
       <Match when={props.item.kind === "unknown"}>
         <UnknownCard item={props.item as UnknownItem} />
