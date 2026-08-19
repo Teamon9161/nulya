@@ -812,8 +812,7 @@ test "an image is a source block that can take the moving breakpoint; a turn wit
     const plain_body = try testRequestJson(alloc, &plain, true, null);
     defer alloc.free(plain_body);
     // The whole user message, byte for byte as it was before images existed.
-    try std.testing.expect(std.mem.indexOf(u8, plain_body,
-        "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hello\",\"cache_control\":{\"type\":\"ephemeral\"}}]}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plain_body, "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hello\",\"cache_control\":{\"type\":\"ephemeral\"}}]}") != null);
     try std.testing.expect(std.mem.indexOf(u8, plain_body, "\"type\":\"image\"") == null);
 
     var shot = ledger.Ledger.init(alloc);
@@ -828,8 +827,7 @@ test "an image is a source block that can take the moving breakpoint; a turn wit
     // Text block, then the image as a base64 source block — and the turn is
     // still ONE message.
     const text_at = std.mem.indexOf(u8, body, "\"type\":\"text\",\"text\":\"what is this\"").?;
-    const image_at = std.mem.indexOf(u8, body,
-        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"iVBORw0=\"}").?;
+    const image_at = std.mem.indexOf(u8, body, "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"iVBORw0=\"}").?;
     try std.testing.expect(text_at < image_at);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, body, "\"role\":\"user\""));
 

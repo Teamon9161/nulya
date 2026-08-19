@@ -194,7 +194,7 @@ pub fn isStablePrefix(prefix: []const Turn, full: []const Turn) bool {
 fn turnsEqual(a: Turn, b: Turn) bool {
     if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
     return switch (a) {
-                .user_text => |u| blk: {
+        .user_text => |u| blk: {
             const other = b.user_text;
             if (!std.mem.eql(u8, u.text, other.text)) break :blk false;
             if (u.images.len != other.images.len) break :blk false;

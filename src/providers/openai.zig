@@ -727,9 +727,8 @@ test "an image turn becomes a parts array; a turn without one keeps the plain-st
     defer shot_ir.deinit(alloc);
     const shot_body = try buildRequestJson(alloc, "test-model", false, .{ .prompt_ir = &shot_ir, .tools = &.{} });
     defer alloc.free(shot_body);
-    try std.testing.expect(std.mem.indexOf(u8, shot_body,
-        "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"what is this\"}," ++
-            "{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,iVBORw0=\"}}]}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, shot_body, "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"what is this\"}," ++
+        "{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,iVBORw0=\"}}]}") != null);
 
     // An image with nothing said about it writes no empty text part.
     var bare = L.init(alloc);
@@ -739,7 +738,6 @@ test "an image turn becomes a parts array; a turn without one keeps the plain-st
     defer bare_ir.deinit(alloc);
     const bare_body = try buildRequestJson(alloc, "test-model", false, .{ .prompt_ir = &bare_ir, .tools = &.{} });
     defer alloc.free(bare_body);
-    try std.testing.expect(std.mem.indexOf(u8, bare_body,
-        "{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/jpeg;base64,/9j/\"}}]}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bare_body, "{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/jpeg;base64,/9j/\"}}]}") != null);
     try std.testing.expect(std.mem.indexOf(u8, bare_body, "\"type\":\"text\"") == null);
 }

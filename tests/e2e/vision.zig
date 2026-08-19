@@ -169,9 +169,8 @@ test "session append --image: a claimed model takes the image onto the ledger li
     // second event.
     {
         const run = try runCli(alloc, io, ws, &.{
-            exe_abs,      "session",    "append", id, "what is this",
-            "--image",    "shot.png",   "--image",
-            "photo.jpg",
+            exe_abs,   "session",  "append",  id,          "what is this",
+            "--image", "shot.png", "--image", "photo.jpg",
         });
         defer alloc.free(run.stdout);
         try std.testing.expectEqual(@as(u8, 0), run.code);
