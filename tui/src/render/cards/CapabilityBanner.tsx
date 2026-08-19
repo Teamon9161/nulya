@@ -24,7 +24,7 @@ export function CapabilityBanner(props: { item: CapabilityItem }) {
   }
 
   return (
-    <box flexDirection="column" width="100%" marginTop={1}>
+    <box flexDirection="column" width="100%">
       <box flexDirection="row" width="100%">
         <text fg={style.theme.accent.evolve}>{style.glyphs.capability} capability · </text>
         <text fg={style.theme.fg}>

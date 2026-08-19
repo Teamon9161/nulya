@@ -1,7 +1,5 @@
-import { Show } from "solid-js"
 import { useStyle } from "../theme.ts"
-import { useFolds } from "../../state/folds.ts"
-import { useBrowse } from "../../state/browse.ts"
+import { CardFrame } from "./CardFrame.tsx"
 import type { ThinkingItem } from "../../state/session.ts"
 
 /**
@@ -11,35 +9,29 @@ import type { ThinkingItem } from "../../state/session.ts"
  *
  * Folded by default and dim throughout: it is context for what the model did,
  * not something it said (tui.md §1.2 D5).
+ *
+ * It is a `CardFrame` like every other head line (T26). It used to draw its own
+ * — fold marker on the LEFT, where every other card has a glyph, and a toggle on
+ * bare `onMouseDown`, so dragging across it to copy the text folded it away.
+ * One skeleton, one gesture, one place where either can be fixed.
  */
 export function Thinking(props: { item: ThinkingItem }) {
   const style = useStyle()
-  const folds = useFolds()
-  const browse = useBrowse()
   const setting = () => style.settings.transcript.thinking
-  const open = () => folds.isOpen(props.item.key, setting() === "expanded")
-  const head = () =>
-    props.item.opaque ? "reasoning (opaque)" : `thinking · ${props.item.text.length} chars`
-
+  if (setting() === "hidden") return null
   return (
-    <Show when={setting() !== "hidden"}>
-      <box flexDirection="column" width="100%" paddingLeft={2}>
-        <box
-          flexDirection="row"
-          width="100%"
-          backgroundColor={browse.selected() === props.item.key ? style.theme.selection : undefined}
-          onMouseDown={() => folds.toggle(props.item.key, setting() === "expanded")}
-        >
-          <text fg={style.theme.dim}>
-            {open() ? style.glyphs.foldOpen : style.glyphs.foldClosed} {head()}
-          </text>
-        </box>
-        <Show when={open() && props.item.text.length > 0}>
-          <box paddingLeft={2}>
-            <text fg={style.theme.dim}>{props.item.text}</text>
-          </box>
-        </Show>
-      </box>
-    </Show>
+    <CardFrame
+      itemKey={props.item.key}
+      glyph={style.glyphs.thinking}
+      accent={style.theme.dim}
+      head={props.item.opaque ? "reasoning (opaque)" : "thinking"}
+      headTone="dim"
+      chip={props.item.opaque || props.item.text.length === 0 ? "" : `${props.item.text.length} chars`}
+      chipTone="dim"
+      defaultOpen={setting() === "expanded"}
+      foldable={props.item.text.length > 0}
+    >
+      <text fg={style.theme.dim}>{props.item.text}</text>
+    </CardFrame>
   )
 }

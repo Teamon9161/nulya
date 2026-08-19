@@ -306,6 +306,7 @@ never writes them.
 edit_diff      = "expanded"    # expanded | collapsed
 tool_output    = "collapsed"   # collapsed | expanded
 thinking       = "collapsed"   # collapsed | hidden | expanded
+composition    = "collapsed"   # collapsed | expanded — the session card at the top
 max_width      = 100
 history_window = 400           # cards mounted at once, newest first; 0 = all
 ascii          = false         # plain glyphs for fonts without the box drawing set

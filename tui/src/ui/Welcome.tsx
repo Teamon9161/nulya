@@ -30,6 +30,7 @@
 import { For, Show, createSignal } from "solid-js"
 import { useScreen, useStyle } from "../render/theme.ts"
 import { onClick } from "./rows.ts"
+import { Fact, label_width } from "./Fact.tsx"
 import { fit, wrapWords } from "./columns.ts"
 
 /**
@@ -57,9 +58,6 @@ const openings: Array<[string, string]> = [
   ["/help", "every key and every command"],
 ]
 
-/** The label column every fact on this screen hangs off. */
-const label_width = 12
-
 export function Welcome(props: {
   /** The workspace whose `.nulya/` this session writes to. */
   cwd?: string
@@ -86,20 +84,6 @@ export function Welcome(props: {
     return ["shell", "edit", ...pinned].join(" ")
   }
 
-  /** One fact: a label, and a value that wraps under itself rather than being cut. */
-  const Fact = (row: { label: string; value: string; fg?: string }) => (
-    <For each={wrapWords(row.value, valueWidth())}>
-      {(line, index) => (
-        <box flexDirection="row" width="100%" height={1}>
-          <box width={label_width} flexShrink={0}>
-            <text fg={style.theme.dim}>{index() === 0 ? row.label : ""}</text>
-          </box>
-          <text fg={row.fg ?? style.theme.muted}>{line}</text>
-        </box>
-      )}
-    </For>
-  )
-
   return (
     <box flexDirection="column" width="100%" paddingLeft={2} paddingTop={1}>
       <Show
@@ -118,15 +102,15 @@ export function Welcome(props: {
           after this screen is gone, so it is not repeated here; the workspace
           and the face are the two facts nothing else on screen says at length. */}
       <Show when={props.cwd}>
-        <Fact label="cwd" value={props.cwd!} />
+        <Fact label="cwd" value={props.cwd!} width={valueWidth()} />
       </Show>
       <Show when={props.plan}>
-        <Fact label="tools" value={tools()} fg={style.theme.fg} />
+        <Fact label="tools" value={tools()} width={valueWidth()} fg={style.theme.fg} />
         {/* A `--with` package is often nothing but a system prompt (a mode, an
             identity), and it lasts exactly one session — so the tab has to say
             it is wearing one before that session exists. */}
         <Show when={props.plan!.bring}>
-          <Fact label="with" value={props.plan!.bring!} fg={style.theme.accent.evolve} />
+          <Fact label="with" value={props.plan!.bring!} width={valueWidth()} fg={style.theme.accent.evolve} />
         </Show>
       </Show>
       <Show when={props.cwd || props.plan}>

@@ -64,16 +64,25 @@ export function shellCommandOf(argsJson: string): string | null {
   return null
 }
 
-/** A one-line digest of arbitrary tool arguments: top-level keys, truncated. */
+/**
+ * A one-line digest of arbitrary tool arguments.
+ *
+ * The FIRST argument is printed bare (T26). Tools put their subject first — the
+ * path, the pattern, the command — so `read · src/emit.zig · offset=1` says what
+ * the call is about in the place a person reads first, where `path=src/emit.zig
+ * offset=1` made every call look like a log line. The rest keep their keys: an
+ * `offset=1` without its name is a number nobody can place.
+ */
 function argsSummary(argsJson: string, limit: number): string {
   try {
     const value = JSON.parse(argsJson)
     if (value && typeof value === "object" && !Array.isArray(value)) {
-      const parts = Object.entries(value as Record<string, unknown>).map(([key, entry]) => {
+      const parts = Object.entries(value as Record<string, unknown>).map(([key, entry], index) => {
         const text = typeof entry === "string" ? entry : JSON.stringify(entry)
-        return `${key}=${firstLine(text ?? "", 40)}`
+        const written = firstLine(text ?? "", 40)
+        return index === 0 && typeof entry === "string" ? written : `${key}=${written}`
       })
-      return firstLine(parts.join(" "), limit)
+      return firstLine(parts.join(" · "), limit)
     }
   } catch {
     // Fall through.

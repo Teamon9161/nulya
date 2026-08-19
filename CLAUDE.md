@@ -14,7 +14,7 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 | [docs/PLAN.md](docs/PLAN.md) | **计划**：方向修正、路线图、尚未实现的设计（演化层、driver / `/goal`、handoff、subagent、慢速回路） | 讨论方向 / 做新功能前 |
 | [docs/base-tools.md](docs/base-tools.md) | shell / edit / `emit` 的输出纪律（已实现，含"later hardening"标注） | 改 `tools/` 或 `emit.zig` 时 |
 | [docs/agents-and-review.md](docs/agents-and-review.md) | subagent 原语 + 审阅门设计——**全部未实现**，归属 PLAN | 做 subagent 时 |
-| [docs/tui.md](docs/tui.md) | `tui/`（Bun + OpenTUI 前端）的设计契约 + 里程碑 + 实施日志（§11）——**T0–T24 已落地（T10 `/goal` 占位）**；内核改动只有 `session step --stream`（DESIGN §14）、`session step --gate`（DESIGN §4/§14）、`session new --parent` 的父校验 / 身份继承（DESIGN §11）与 `NULYA_EXE`（DESIGN §7.6） | 做 TUI / 改 `session step` 时 |
+| [docs/tui.md](docs/tui.md) | `tui/`（Bun + OpenTUI 前端）的设计契约 + 里程碑 + 实施日志（§11）——**T0–T26 已落地（T10 `/goal` 占位）**；内核改动只有 `session step --stream`（DESIGN §14）、`session step --gate`（DESIGN §4/§14）、`session new --parent` 的父校验 / 身份继承（DESIGN §11）与 `NULYA_EXE`（DESIGN §7.6） | 做 TUI / 改 `session step` 时 |
 | `docs/history/` | 考古：拆分前的完整 DESIGN、v0.1 开发历史 | 不用读 |
 
 **铁律：DESIGN.md 只写已落地的东西；PLAN.md 写将来。**

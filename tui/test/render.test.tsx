@@ -12,7 +12,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { For, type JSX } from "solid-js"
 import { testRender } from "@opentui/solid"
-import { Card } from "../src/render/cards/index.tsx"
+import { Transcript, gapBefore } from "../src/ui/Transcript.tsx"
 import { CompositionCard } from "../src/render/cards/CompositionCard.tsx"
 import { App } from "../src/ui/App.tsx"
 import { StyleContext, createStyle, type Style } from "../src/render/theme.ts"
@@ -27,13 +27,16 @@ import { wrapSkillEcho } from "../src/skills.ts"
 const style: Style = createStyle(auto_settings, {})
 const narrow: Style = createStyle({ ...default_settings, transcript: { ...default_settings.transcript, max_width: 40 } }, {})
 
+/**
+ * The cards as the screen actually stacks them. It goes through `Transcript`
+ * rather than mapping `Card` itself, because the blank rows BETWEEN cards are
+ * part of what these snapshots are pinning (T26) and they are decided there.
+ */
 function Harness(props: { items: TranscriptItem[]; style?: Style }) {
   return (
     <StyleContext.Provider value={props.style ?? style}>
       <FoldContext.Provider value={createFoldStore()}>
-        <box flexDirection="column" width="100%">
-          <For each={props.items}>{(item) => <Card item={item} />}</For>
-        </box>
+        <Transcript items={props.items} />
       </FoldContext.Provider>
     </StyleContext.Provider>
   )
@@ -229,7 +232,7 @@ test("a skill echo folds back to the `/name args` that was typed", async () => {
 
 test("thinking is collapsed by default and names its size", async () => {
   const frame = await frameOf([thinking_item])
-  expect(frame).toContain("▸ thinking · 17 chars")
+  expect(frame).toContain("⋯ thinking  (17 chars) ▸")
   expect(frame).not.toContain("weigh the options")
   expect(frame).toMatchSnapshot()
 })
@@ -254,8 +257,11 @@ test("an expanded shell card shows stdout and stderr", async () => {
 
 test("an extension tool call carries the ⌘ glyph and an argument digest", async () => {
   const frame = await frameOf([ext_tool_item])
-  expect(frame).toContain("⌘ lint_zig · path=src/emit.zig")
-  expect(frame).toContain("ok")
+  expect(frame).toContain("⌘ lint_zig · src/emit.zig")
+  // A call that worked says how much it brought back and nothing else: the
+  // word `ok` on every successful line was noise (T26).
+  expect(frame).toContain("(1 line)")
+  expect(frame).not.toContain("ok")
   expect(frame).not.toContain("0 findings")
   expect(frame).toMatchSnapshot()
 })
@@ -316,47 +322,104 @@ test("a sub-session names the session it drives", async () => {
   expect(frame).toMatchSnapshot()
 })
 
-test("the composition card shows what this session froze", async () => {
+/** The two packages the card fixtures are written against. */
+const card_contributions = [
+  { id: "lint", version: "v-3f2a91", tools: ["lint_zig"], readonlyTools: [], skills: ["skills/zig-style"], systemPrompts: [] },
+  // A `--with` package: no tool, no skill, one prompt — worn for this
+  // session only, and the card has to say so (DESIGN §7.5).
+  { id: "evolution", version: "v-db04b7", tools: [], readonlyTools: [], skills: [], systemPrompts: ["prompts/evolution.md"] },
+]
+
+const expanded_card = createStyle(
+  { ...default_settings, transcript: { ...default_settings.transcript, composition: "expanded" } },
+  {},
+)
+
+test("the composition card is two lines at rest: what this session is, and what it carries", async () => {
   const frame = await frameOfNode(() => (
-    <CompositionCard
-      header={header_fixture}
-      contributions={[
-        { id: "lint", version: "v-3f2a91", tools: ["lint_zig"], readonlyTools: [], skills: ["skills/zig-style"], systemPrompts: [] },
-        // A `--with` package: no tool, no skill, one prompt — worn for this
-        // session only, and the card has to say so (DESIGN §7.5).
-        { id: "evolution", version: "v-db04b7", tools: [], readonlyTools: [], skills: [], systemPrompts: ["prompts/evolution.md"] },
-      ]}
-    />
+    <CompositionCard header={header_fixture} contributions={card_contributions} />
   ))
   expect(frame).toContain("session · 2026-08-16 14:02 · frozen composition")
-  expect(frame).toContain("shell edit ⚡lint_zig")
-  expect(frame).toContain("skills zig-style")
-  expect(frame).toContain("prompts 1")
-  expect(frame).toContain("anthropic/claude-sonnet-5 · api.anthropic.com")
-  expect(frame).toContain("lint@v-3f2a91")
-  expect(frame).toContain("parent s-1786800870313-bf37ef:41")
+  expect(frame).toContain("model    anthropic/claude-sonnet-5 · tools 2+1 · skills 1 · prompts 1")
+  // Everything below the model row is provenance, and it is behind the fold.
+  expect(frame).not.toContain("shell edit ⚡lint_zig")
+  expect(frame).not.toContain("lint@v-3f2a91")
+  expect(frame).not.toContain("parent s-1786800870313-bf37ef:41")
   expect(frame).toMatchSnapshot()
 })
 
-test("the composition card's tools row collapses to counts when it cannot fit whole", async () => {
-  // At 40 columns the full row would be flex-shrunk — names cut mid-word,
-  // separating spaces swallowed — so the card must fall back to counts.
+test("opened, the composition card shows what this session froze", async () => {
+  const frame = await frameOfNode(
+    () => <CompositionCard header={header_fixture} contributions={card_contributions} />,
+    76,
+    16,
+    expanded_card,
+  )
+  expect(frame).toContain("session · 2026-08-16 14:02 · frozen composition")
+  expect(frame).toContain("shell edit ⚡lint_zig")
+  expect(frame).toContain("skills   zig-style")
+  expect(frame).toContain("prompts  evolution")
+  expect(frame).toContain("anthropic/claude-sonnet-5 · api.anthropic.com")
+  expect(frame).toContain("lint@v-3f2a91")
+  expect(frame).toContain("parent   s-1786800870313-bf37ef:41")
+  expect(frame).toMatchSnapshot()
+})
+
+test("the composition card wraps its rows instead of letting them be shrunk", async () => {
+  // At 40 columns the old flex rows were SHRUNK — names cut mid-word, the
+  // space between label and value swallowed (`model` came out as `mode`). Every
+  // row is a label column and a wrapping value now, so nothing is ever cut.
   const frame = await frameOfNode(
     () => (
       <CompositionCard
-        header={header_fixture}
-        contributions={[
-          { id: "lint", version: "v-3f2a91", tools: ["lint_zig"], readonlyTools: [], skills: ["skills/zig-style"], systemPrompts: [] },
-          { id: "evolution", version: "v-db04b7", tools: [], readonlyTools: [], skills: [], systemPrompts: ["prompts/evolution.md"] },
-        ]}
+        header={{
+          ...header_fixture,
+          composition: {
+            active: [
+              { id: "compact", version: "v-0258f08e338c94179b855776" },
+              { id: "std", version: "v-04322ca65993627ff40136c6" },
+            ],
+            native_tools: ["ext:std/read", "ext:std/write", "ext:std/grep"],
+          },
+        }}
+        contributions={card_contributions}
       />
     ),
     40,
+    16,
+    expanded_card,
   )
-  expect(frame).toContain("tools 2+1")
-  expect(frame).toContain("· skills 1")
-  expect(frame).toContain("· prompts 1")
-  expect(frame).not.toContain("shell edit")
+  expect(frame).not.toContain("mode ")
+  expect(frame).toContain("model")
+  // Long hashes are cut to an identity, and the list wraps at its ` · ` joints.
+  expect(frame).toContain("compact@v-0258f08e")
+  expect(frame).toContain("std@v-04322ca6")
+  expect(frame).not.toContain("0258f08e338c94179b855776")
+  for (const line of frame.split("\n")) expect(line.length).toBeLessThanOrEqual(41)
+})
+
+test("the fold default is a setting, and a click on the head line overrides it", async () => {
+  const setup = await testRender(
+    () => (
+      <StyleContext.Provider value={style}>
+        <FoldContext.Provider value={createFoldStore()}>
+          <CompositionCard header={header_fixture} contributions={card_contributions} />
+        </FoldContext.Provider>
+      </StyleContext.Provider>
+    ),
+    { width: 76, height: 16 },
+  )
+  try {
+    const frame = await settle(setup)
+    const head = frame.split("\n").findIndex((row) => row.includes("frozen composition"))
+    expect(head).toBeGreaterThanOrEqual(0)
+    await setup.mockMouse.click(10, head)
+    expect(await settle(setup, 2)).toContain("lint@v-3f2a91")
+    await setup.mockMouse.click(10, head)
+    expect(await settle(setup, 2)).not.toContain("lint@v-3f2a91")
+  } finally {
+    setup.renderer.destroy()
+  }
 })
 
 test("edit renders its diff expanded by default", async () => {
@@ -407,13 +470,27 @@ test("a project tui.toml flips the edit diff default", async () => {
   }
 })
 
+test("the transcript's rhythm: two rows before a person, one between beats, none inside a run", async () => {
+  const run = (key: string, command: string) => shellItem({ key, command, output: "ok\n[exit 0]" })
+  const items: TranscriptItem[] = [user_item, thinking_item, assistant_item, run("r1", "ls"), run("r2", "pwd"), user_item]
+  // The pure function first: it is the whole of the rhythm (T26).
+  expect(items.map((item, index) => gapBefore(items[index - 1], item))).toEqual([1, 1, 0, 1, 0, 2])
+  const frame = await frameOf(items, 76, 20)
+  const rows = frame.split("\n").map((row) => row.trimEnd())
+  const ls = rows.findIndex((row) => row.includes("$ ls"))
+  // The two calls of one run are neighbours; the sentence above them is not.
+  expect(rows[ls + 1]).toContain("$ pwd")
+  expect(rows[ls - 1]).toBe("")
+})
+
 test("clicking a card's head line folds it", async () => {
   const setup = await testRender(() => <Harness items={[shell_item]} />, { width: 76, height: 12 })
   try {
+    // Row 0 is the transcript's leading blank; the card starts on row 1 (T26).
     expect(await settle(setup)).not.toContain("running 12 tests")
-    await setup.mockMouse.click(4, 0)
+    await setup.mockMouse.click(4, 1)
     expect(await settle(setup)).toContain("running 12 tests")
-    await setup.mockMouse.click(4, 0)
+    await setup.mockMouse.click(4, 1)
     expect(await settle(setup)).not.toContain("running 12 tests")
   } finally {
     setup.renderer.destroy()
@@ -459,10 +536,14 @@ test("capability notes are expanded and name what arrived", async () => {
   expect(frame).toMatchSnapshot()
 })
 
-test("a narrow viewport drops the right-hand chip", async () => {
+test("a narrow viewport cuts the head, never the state word", async () => {
+  // The note used to be dropped whole below 60 columns, which took `exit 1`
+  // off the screen — the one thing on that line worth carrying to a phone-sized
+  // terminal. It stays now; the command gives up columns instead (T26).
   const frame = await frameOf([shell_item], 48, 12, narrow)
-  expect(frame).toContain("$ zig build test")
-  expect(frame).not.toContain("exit 1")
+  expect(frame).toContain("exit 1")
+  expect(frame).toContain("$ zig build")
+  for (const line of frame.split("\n")) expect(line.length).toBeLessThanOrEqual(49)
 })
 
 test("ascii mode degrades every glyph", async () => {
@@ -478,7 +559,10 @@ test("ascii mode degrades every glyph", async () => {
 })
 
 test("the composition card degrades to ascii too", async () => {
-  const ascii = createStyle({ ...default_settings, transcript: { ...default_settings.transcript, ascii: true } }, {})
+  const ascii = createStyle(
+    { ...default_settings, transcript: { ...default_settings.transcript, ascii: true, composition: "expanded" } },
+    {},
+  )
   const frame = await frameOfNode(
     () => <CompositionCard header={header_fixture} contributions={[]} />,
     76,
@@ -488,6 +572,8 @@ test("the composition card degrades to ascii too", async () => {
   expect(frame).toContain("| session · 2026-08-16 14:02 · frozen composition")
   expect(frame).toContain("shell edit !lint_zig")
   expect(frame).not.toContain("▎")
+  // The fold marker too: ascii has its own pair (`v` / `>`).
+  expect(frame).not.toContain("▾")
 })
 
 // --- live vs replay, and the App under programmatic keys ---------------------
@@ -551,12 +637,16 @@ test("typing and pressing Enter drives a real step", async () => {
   }
 }, 120_000)
 
-/** Rows between the two hairlines: the transcript, without the status bar's counters. */
+/**
+ * Everything above the composer's box — the transcript, without the status
+ * bar's counters (a live run has stepped, a reopened one has not). The two
+ * hairlines this used to slice between are gone: the box's own border is the
+ * only line drawn between the regions now (T26).
+ */
 function transcriptOf(frame: string): string {
   const rows = frame.split("\n")
-  const rule = rows.findIndex((row) => row.startsWith("──"))
-  const end = rows.findIndex((row, index) => index > rule && row.startsWith("──"))
-  return rows.slice(rule + 1, end).join("\n")
+  const box = rows.findIndex((row) => row.trimStart().startsWith("╭"))
+  return rows.slice(0, box < 0 ? rows.length : box).join("\n")
 }
 
 test("closing and reopening with --session paints the same transcript", async () => {

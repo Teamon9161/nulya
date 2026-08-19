@@ -1,18 +1,42 @@
 import { Show, createSignal, type JSX } from "solid-js"
 import { useScreen, useStyle } from "../theme.ts"
+import { displayWidth, fit } from "../../ui/columns.ts"
 import { onClick } from "../../ui/rows.ts"
 import { useFolds } from "../../state/folds.ts"
 import { useBrowse } from "../../state/browse.ts"
 
-export type ChipTone = "ok" | "err" | "warn" | "dim"
+/**
+ * `ok` is not one of these on purpose (T26): a call that worked says how much
+ * it brought back, in the same dim as every other note, and the colours are
+ * left to the two cases where something needs saying.
+ */
+export type ChipTone = "err" | "warn" | "dim"
 
 /**
- * The shared skeleton of every tool card: one head line (glyph · head · chip)
- * and a body that folds. Each concrete card decides its glyph, head, chip and
+ * How much a call brought back, as the note says it: nothing at all when it
+ * brought back nothing, and never "1 lines".
+ */
+export function sizeNote(output: string): string {
+  if (output.length === 0) return ""
+  const lines = output.split("\n").length
+  return lines === 1 ? "1 line" : `${lines} lines`
+}
+
+/**
+ * The shared skeleton of every tool card: one head line (glyph · head · note)
+ * and a body that folds. Each concrete card decides its glyph, head, note and
  * body; the layout, the fold affordance and the spill pointer live here once,
  * so a new card cannot accidentally invent a second visual language.
  *
  * No borders anywhere (tui.md §6): the body is indented, not boxed.
+ *
+ * THE HEAD LINE READS LEFT TO RIGHT (T26). The note used to be a right-aligned
+ * chip, which put an `ok` at column 98 with thirty blank columns between it and
+ * the call it belonged to — a second ragged column of small print, and the main
+ * reason a screenful of calls looked like a form rather than a story. It sits
+ * inline now, in parentheses, right where the eye already is: `$ zig build test
+ * (12 lines · exit 1)`. Nothing on the line can be flex-shrunk — the head is cut
+ * by us (`fit`) to whatever the note and the fold marker leave.
  */
 export function CardFrame(props: {
   /** The card's stable key — the fold store and browse mode both key off it. */
@@ -22,6 +46,8 @@ export function CardFrame(props: {
   head: string
   chip?: string
   chipTone?: ChipTone
+  /** `dim` for a card that is context rather than something that happened. */
+  headTone?: "muted" | "dim"
   /** From `tui.toml` (tui.md §7); a per-card toggle overrides it. */
   defaultOpen: boolean
   /** False when there is nothing to reveal: no fold marker, no click target. */
@@ -36,7 +62,6 @@ export function CardFrame(props: {
   const [hovered, setHovered] = createSignal(false)
 
   const open = () => props.foldable && folds.isOpen(props.itemKey, props.defaultOpen)
-  const wide = () => screen().width >= 60
   const selected = () => browse.selected() === props.itemKey
   const toggle = () => {
     if (props.foldable) folds.toggle(props.itemKey, props.defaultOpen)
@@ -47,10 +72,18 @@ export function CardFrame(props: {
   // of the transcript rearrange the transcript (`ui/rows.ts`).
   const click = onClick(toggle)
 
+  /**
+   * The line's own width discipline. The note keeps what it needs (it is short
+   * and it is the part that says something went wrong); the head gives up
+   * columns first, because the beginning of a path or a command is the half
+   * worth reading.
+   */
+  const room = () => Math.min(screen().width, style.maxWidth) - 2 - 2 - (props.foldable ? 2 : 0)
+  const note = () => fit(props.chip ?? "", Math.max(0, Math.floor(room() / 2)))
+  const head = () => fit(props.head, Math.max(4, room() - (note().length > 0 ? displayWidth(note()) + 4 : 0)))
+
   const chipColor = () => {
     switch (props.chipTone ?? "dim") {
-      case "ok":
-        return style.theme.ok
       case "err":
         return style.theme.err
       case "warn":
@@ -80,14 +113,19 @@ export function CardFrame(props: {
         <text fg={props.accent} flexShrink={0}>
           {props.glyph}{" "}
         </text>
-        <box flexGrow={1} flexShrink={1} flexBasis={0}>
-          <text fg={style.theme.fg}>{props.head}</text>
-        </box>
-        <Show when={wide() && (props.chip ?? "").length > 0}>
-          <text fg={chipColor()} flexShrink={0}>
+        {/* `muted`, not `fg`: a call is what the model DID, and the brightest
+            text on screen should stay what it and the person SAID. The glyph
+            already carries the role colour (tui.md §6). */}
+        <text fg={props.headTone === "dim" ? style.theme.dim : style.theme.muted} flexShrink={0}>
+          {head()}
+        </text>
+        <Show when={note().length > 0}>
+          <text fg={chipColor()} flexShrink={0}>{`  (${note()})`}</text>
+        </Show>
+        <Show when={props.foldable}>
+          <text fg={style.theme.faint} flexShrink={0}>
             {" "}
-            {props.foldable ? `${open() ? style.glyphs.foldOpen : style.glyphs.foldClosed} ` : ""}
-            {props.chip}
+            {open() ? style.glyphs.foldOpen : style.glyphs.foldClosed}
           </text>
         </Show>
       </box>

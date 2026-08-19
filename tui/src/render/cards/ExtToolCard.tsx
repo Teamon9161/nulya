@@ -1,5 +1,5 @@
 import { useStyle } from "../theme.ts"
-import { CardFrame } from "./CardFrame.tsx"
+import { CardFrame, sizeNote } from "./CardFrame.tsx"
 import type { ToolItem } from "../../state/session.ts"
 import type { ToolPresentation } from "../registry.ts"
 
@@ -11,10 +11,14 @@ import type { ToolPresentation } from "../registry.ts"
  */
 export function ExtToolCard(props: { item: ToolItem; presentation: ToolPresentation }) {
   const style = useStyle()
+  // Same discipline as every other card (T26): how much came back, and a word
+  // only when something went wrong.
   const chip = () => {
     if (props.item.state === "pending") return "…"
     if (props.item.state === "running") return "running"
-    return props.item.ok === null ? "" : props.item.ok ? "ok" : "failed"
+    const size = sizeNote(props.item.output)
+    if (props.item.ok === false) return size.length > 0 ? `${size} · failed` : "failed"
+    return size
   }
   return (
     <CardFrame
@@ -23,7 +27,7 @@ export function ExtToolCard(props: { item: ToolItem; presentation: ToolPresentat
       accent={style.theme.accent.tool}
       head={props.presentation.head}
       chip={chip()}
-      chipTone={props.item.ok === false ? "err" : props.item.ok === true ? "ok" : "dim"}
+      chipTone={props.item.ok === false ? "err" : "dim"}
       defaultOpen={style.settings.transcript.tool_output === "expanded"}
       foldable={props.item.output.length > 0}
       spillPath={props.item.spillPath}

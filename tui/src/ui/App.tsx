@@ -1283,13 +1283,20 @@ export function App(props: AppProps) {
         <FoldContext.Provider value={folds}>
           <BrowseContext.Provider value={browse}>
             <OverlayContext.Provider value={overlay}>
-              {/* Three blocks, two hairlines (tui.md §4.1). There is no title
-                  line: what a person needs to know about the session — what it
-                  runs on — is under the composer where they are looking, and the
-                  id it used to lead with was a string nobody reads (T22). */}
+              {/* Transcript, composer, status line — and the only line drawn
+                  between any of them is the composer's own border (tui.md §4.1,
+                  T26). Three full-width rules used to fence four regions; two of
+                  them were separating things the box already separates, and the
+                  top one was a rule with nothing above it whenever there was
+                  only one tab. There is no title line either: what a person
+                  needs to know about the session — what it runs on — is under
+                  the composer where they are looking, and the id it used to lead
+                  with was a string nobody reads (T22). */}
               <box flexDirection="column" width="100%" height="100%">
                 <TabBar tabs={tabs.tabs()} activeIndex={tabs.activeIndex()} onSelect={(index) => tabs.select(index)} />
-                <Hairline />
+                <Show when={tabs.tabs().length > 1}>
+                  <Hairline />
+                </Show>
 
                 <Switch
                   fallback={
@@ -1361,7 +1368,6 @@ export function App(props: AppProps) {
                   </Match>
                 </Switch>
 
-                <Hairline />
                 {/* The model's own proposal to hand over, between the
                     transcript and the box you answer it in (tui.md §5.8). Not
                     a transcript card: the brief is a file on disk, not a ledger
@@ -1385,7 +1391,6 @@ export function App(props: AppProps) {
                     if (overlay.active()) api.blur()
                   }}
                 />
-                <Hairline />
                 <StatusBar
                   snapshot={snapshot()}
                   status={status()}

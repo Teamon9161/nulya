@@ -18,6 +18,13 @@ export interface Settings {
     edit_diff: FoldDefault
     tool_output: FoldDefault
     thinking: ThinkingDefault
+    /**
+     * The composition card at the top of a session (tui.md §5.1). Collapsed by
+     * default: what it says at rest — model and counts — is what changes what
+     * the session can do; the extension versions under it are provenance, and
+     * provenance does not earn a fifth of the screen on every session.
+     */
+    composition: FoldDefault
     max_width: number
     ascii: boolean
     /**
@@ -75,6 +82,7 @@ export const default_settings: Settings = {
     edit_diff: "expanded",
     tool_output: "collapsed",
     thinking: "collapsed",
+    composition: "collapsed",
     max_width: 100,
     ascii: false,
     history_window: 400,
@@ -117,6 +125,11 @@ function mergeLayer(into: Settings, layer: unknown, source: string) {
       transcript["thinking"],
       ["expanded", "collapsed", "hidden"],
       into.transcript.thinking,
+    )
+    into.transcript.composition = pick(
+      transcript["composition"],
+      ["expanded", "collapsed"],
+      into.transcript.composition,
     )
     if (typeof transcript["max_width"] === "number" && transcript["max_width"] > 0) {
       into.transcript.max_width = Math.floor(transcript["max_width"])

@@ -11,7 +11,7 @@ import type { UserItem } from "../../state/session.ts"
 export function UserTurn(props: { item: UserItem; text?: string; badge?: string }) {
   const style = useStyle()
   return (
-    <box flexDirection="row" width="100%" marginTop={1}>
+    <box flexDirection="row" width="100%">
       <text fg={style.theme.accent.user}>{style.glyphs.user} </text>
       <box flexDirection="row" flexGrow={1} flexShrink={1}>
         <text fg={style.theme.fg}>{props.text ?? props.item.text}</text>

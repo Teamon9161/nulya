@@ -2,7 +2,7 @@ import { For, Show, createMemo, createSignal, onMount } from "solid-js"
 import type { KeyEvent, PasteEvent, TextareaRenderable } from "@opentui/core"
 import { SyntaxStyle } from "@opentui/core"
 import { useScreen, useStyle } from "../render/theme.ts"
-import { columnWidth, fit, squeeze, wrapWords } from "./columns.ts"
+import { columnWidth, displayWidth, fit, squeeze, wrapWords } from "./columns.ts"
 import { completions } from "../commands.ts"
 import {
   activeReference,
@@ -23,6 +23,51 @@ import {
   type PasteAttachment,
 } from "../paste.ts"
 import { skillCompletions, type SkillTable } from "../skills.ts"
+
+/**
+ * The composer's border in ascii mode: the one bordered object on screen still
+ * has to draw on a font without the box-drawing set (tui.md §6).
+ */
+const ascii_border = {
+  topLeft: "+", topRight: "+", bottomLeft: "+", bottomRight: "+",
+  horizontal: "-", vertical: "|",
+  topT: "+", bottomT: "+", leftT: "+", rightT: "+", cross: "+",
+}
+
+/**
+ * Rows a soft-wrapped buffer needs at `width` columns: greedy word wrap, a word
+ * longer than the line broken across rows, and a trailing newline counted (the
+ * cursor is on the row it opened). Ours rather than the textarea's because the
+ * box is sized before the text inside it is laid out.
+ */
+export function wrappedRows(text: string, width: number): number {
+  if (width <= 0) return 1
+  let rows = 0
+  for (const logical of text.split("\n")) {
+    if (logical.length === 0) {
+      rows += 1
+      continue
+    }
+    let used = 0
+    for (const word of logical.split(" ")) {
+      const w = displayWidth(word)
+      if (used === 0) {
+        rows += 1
+        used = w
+      } else if (used + 1 + w <= width) {
+        used += 1 + w
+      } else {
+        rows += 1
+        used = w
+      }
+      while (used > width) {
+        rows += 1
+        used -= width
+      }
+    }
+  }
+  return Math.max(1, rows)
+}
 
 /**
  * The composer. Enter sends, Shift+Enter (or Ctrl+J, for terminals without the
@@ -115,6 +160,12 @@ export function Composer(props: {
    * the token drops both.
    */
   const [attachments, setAttachments] = createSignal<PasteAttachment[]>([])
+  /**
+   * Whether the keyboard is in the box. The border is the only thing on screen
+   * that says so, and it has to say it: in browse mode and under an overlay the
+   * composer is still visible, still full of text, and no longer listening.
+   */
+  const [focused, setFocused] = createSignal(true)
   let nextAttachment = 1
   /** The ones the draft currently refers to — what the line under the box shows. */
   const drafted = () => referenced(line(), attachments())
@@ -202,6 +253,20 @@ export function Composer(props: {
     }
   }
 
+  /**
+   * How tall the box is: exactly what is in it (T26).
+   *
+   * It used to be three rows always, so two of them were blank on every screen
+   * anybody ever looks at, and a twelve-line paste scrolled inside a window of
+   * three. The count is ours rather than the textarea's because the box has to
+   * be sized BEFORE the text is laid out, and it is capped: past eight rows the
+   * composer would start eating the transcript, and the textarea scrolls.
+   *
+   * The width is the row's own: two columns of border, two of padding, two for
+   * the `›` and its space.
+   */
+  const rows = () => Math.min(8, Math.max(1, wrappedRows(line(), Math.max(8, screen().width - 6))))
+
   const sync = () => {
     setLine(area?.plainText ?? "")
     setAt(area?.cursorOffset ?? 0)
@@ -221,7 +286,15 @@ export function Composer(props: {
   const onPaste = (event: PasteEvent) => {
     const text = new TextDecoder().decode(event.bytes)
     const size = measure(text)
-    if (!pasteShouldFold(size.chars, size.lines)) return
+    if (!pasteShouldFold(size.chars, size.lines)) {
+      // The textarea will insert it; the mirror has to follow, or the buffer and
+      // everything derived from it (the menus, the box's own height) go on
+      // describing what was there before the paste. Keystrokes sync through
+      // `onKeyDown`, and a paste is the one way in that is not a keystroke —
+      // which is also how an IME commits a phrase (T26).
+      queueMicrotask(sync)
+      return
+    }
     event.preventDefault()
     const attachment: PasteAttachment = { id: nextAttachment++, text, ...size }
     setAttachments([...attachments(), attachment])
@@ -250,8 +323,14 @@ export function Composer(props: {
     area?.focus()
     props.onReady?.({
       isEmpty: () => (area?.plainText ?? "").length === 0,
-      focus: () => area?.focus(),
-      blur: () => area?.blur(),
+      focus: () => {
+        area?.focus()
+        setFocused(true)
+      },
+      blur: () => {
+        area?.blur()
+        setFocused(false)
+      },
       restore: (text: string) => {
         // Only into a box the user has not started refilling: they typed the
         // next thing while the refusal was in flight, and that is theirs.
@@ -435,15 +514,25 @@ export function Composer(props: {
         flexDirection="row"
         width="100%"
         flexShrink={0}
+        border
+        borderStyle={style.settings.transcript.ascii ? "single" : "rounded"}
+        customBorderChars={style.settings.transcript.ascii ? ascii_border : undefined}
+        borderColor={focused() ? style.theme.accent.user : style.theme.hairline}
         paddingLeft={1}
         paddingRight={1}
         onMouseDown={() => props.onActivate?.()}
       >
-        <text fg={style.theme.accent.user}>{style.glyphs.user} </text>
+        {/* `flexShrink={0}`, or a buffer wide enough to fill the row wins the
+            flex negotiation and the prompt glyph is squeezed out of existence —
+            the text then starts one column left of where its own wrapped
+            continuation lines do. */}
+        <text fg={style.theme.accent.user} flexShrink={0}>
+          {style.glyphs.user}{" "}
+        </text>
         <textarea
           ref={area}
           flexGrow={1}
-          height={3}
+          height={rows()}
           wrapMode="word"
           placeholder={props.placeholder ?? "message nulya  ·  / for commands  ·  @ for files"}
           placeholderColor={style.theme.dim}

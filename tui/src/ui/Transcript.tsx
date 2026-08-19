@@ -1,4 +1,4 @@
-import { For, Show } from "solid-js"
+import { Index, Show } from "solid-js"
 import type { ScrollBoxRenderable } from "@opentui/core"
 import { Card } from "../render/cards/index.tsx"
 import { CompositionCard } from "../render/cards/CompositionCard.tsx"
@@ -27,6 +27,32 @@ import type { TranscriptItem } from "../state/session.ts"
 export function windowItems(items: readonly TranscriptItem[], window: number): TranscriptItem[] {
   if (window <= 0 || items.length <= window) return items as TranscriptItem[]
   return items.slice(-window)
+}
+
+/**
+ * Blank rows before an item — the transcript's whole vertical rhythm, in one
+ * pure function (T26).
+ *
+ * A turn is not a list of events, it is a handful of BEATS: the person says
+ * something, the model thinks and answers, the model does a run of things, the
+ * kernel reports. Inside a beat there is no gap (a run of six calls is one
+ * block, the way tcode draws its `Read 5 ranges`); between beats there is
+ * exactly one blank row. Before this, `marginTop` lived on two cards and tool
+ * cards had none, so a run of calls was welded to the sentence above it and the
+ * screen had no grain at all.
+ *
+ * Thinking belongs to the answer that follows it, so those two never separate.
+ */
+export function gapBefore(previous: TranscriptItem | undefined, item: TranscriptItem): number {
+  // The first item follows the composition card or the welcome screen; one row
+  // of air separates it from either.
+  if (!previous) return 1
+  if (previous.kind === "tool" && item.kind === "tool") return 0
+  if (previous.kind === "thinking" && item.kind === "assistant") return 0
+  // A person speaking starts a new exchange, not just a new beat: two rows, so
+  // the grain of the screen says where one question ended and the next began.
+  if (item.kind === "user") return 2
+  return 1
 }
 
 /**
@@ -95,7 +121,16 @@ export function Transcript(props: {
       <Show when={props.items.length === 0}>
         <Welcome cwd={props.cwd} plan={props.plan} onCommand={props.onCommand} />
       </Show>
-      <For each={shown()}>{(item) => <Card item={item} noteWanted={props.noteWanted} />}</For>
+      {/* `Index` rather than `For`: the gap is a property of an item's PLACE in
+          the list, so keying by identity would rebuild a card whenever the item
+          before it changed kind. */}
+      <Index each={shown()}>
+        {(item, index) => (
+          <box flexDirection="column" width="100%" marginTop={gapBefore(shown()[index - 1], item())}>
+            <Card item={item()} noteWanted={props.noteWanted} />
+          </box>
+        )}
+      </Index>
     </scrollbox>
   )
 }

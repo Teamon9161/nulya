@@ -9,7 +9,7 @@ import type { AssistantItem } from "../../state/session.ts"
 export function AssistantTurn(props: { item: AssistantItem }) {
   const style = useStyle()
   return (
-    <box flexDirection="row" width="100%" marginTop={1}>
+    <box flexDirection="row" width="100%">
       <text fg={style.theme.accent.assistant}>{style.glyphs.assistant} </text>
       <box flexDirection="column" flexGrow={1}>
         <markdown

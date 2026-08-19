@@ -1,14 +1,18 @@
 import { Show, createMemo } from "solid-js"
 import { useStyle } from "../theme.ts"
-import { CardFrame } from "./CardFrame.tsx"
+import { CardFrame, sizeNote } from "./CardFrame.tsx"
 import { splitShellOutput } from "../../nulya/ledger.ts"
 import type { ToolItem } from "../../state/session.ts"
 import type { ToolPresentation } from "../registry.ts"
 
 /**
  * A `shell` call: the command on the head line, the captured output folded
- * away by default (tui.md §4.2, D5). The chip carries the two facts worth
+ * away by default (tui.md §4.2, D5). The note carries the two facts worth
  * seeing without unfolding — how much came back, and how it exited.
+ *
+ * `exit 0` is not one of them (T26). A call that worked says only how much it
+ * brought back; silence is what success looks like, and it leaves the colour
+ * and the words for the call that failed.
  */
 export function ShellCard(props: { item: ToolItem; presentation: ToolPresentation }) {
   const style = useStyle()
@@ -17,15 +21,16 @@ export function ShellCard(props: { item: ToolItem; presentation: ToolPresentatio
   const chip = () => {
     if (props.item.state === "pending") return "…"
     if (props.item.state === "running") return "running"
-    const lines = props.item.output.length === 0 ? 0 : props.item.output.split("\n").length
+    const size = sizeNote(props.item.output)
     const exit = shell().exit
-    return exit === null ? `${lines} lines` : `${lines} lines · exit ${exit}`
+    if (exit === null || exit === 0) return size
+    return size.length > 0 ? `${size} · exit ${exit}` : `exit ${exit}`
   }
 
   const tone = () => {
     const exit = shell().exit
-    if (exit === null) return props.item.ok === false ? "err" : "dim"
-    return exit === 0 ? "ok" : "err"
+    if (exit !== null && exit !== 0) return "err"
+    return props.item.ok === false ? "err" : "dim"
   }
 
   return (

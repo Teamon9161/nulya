@@ -145,7 +145,7 @@ tui/
 
 三块：transcript（`scrollbox`，sticky bottom，鼠标滚轮 / PgUp / PgDn；离开底部时状态栏出现 `↓ new` 提示）、composer（`textarea`）、**输入框下面那一行**（1 行，§4.5）。没有边框，用两条 hairline 分隔；空状态首屏是一个小 wordmark（`ascii-font`）+ cwd + 几条 `/` 命令。
 
-**没有标题行**（T22）。原来那行是 `nulya · <session id> · <profile> · <model> · effort · tools · skills`：给程序看的，不是给人看的——session id 人读不出也用不上（要它就去 `/sessions`），`nulya` 是废话，provider 名字紧挨着 model id 也是。它说的唯一有用的东西是**模型**，而模型该在人打字时看得见的地方——输入框底下，tcode 就是这么放的。TabBar 仍在（>1 个 tab 时），但 tab 名是**模型 + 需要时 `#n`**、draft 标 `(new)`，不是 session id。
+**只有一条线，是输入框自己的边框**（T26）：TabBar（>1 个 tab 时）· transcript · 输入框 · 状态行，四块之间原来有三条通栏 hairline，现在一条都没有——见 §6。**没有标题行**（T22）。原来那行是 `nulya · <session id> · <profile> · <model> · effort · tools · skills`：给程序看的，不是给人看的——session id 人读不出也用不上（要它就去 `/sessions`），`nulya` 是废话，provider 名字紧挨着 model id 也是。它说的唯一有用的东西是**模型**，而模型该在人打字时看得见的地方——输入框底下，tcode 就是这么放的。TabBar 仍在（>1 个 tab 时），但 tab 名是**模型 + 需要时 `#n`**、draft 标 `(new)`，不是 session id。
 
 ### 4.2 Transcript 项与卡片
 
@@ -154,10 +154,10 @@ tui/
 | header | CompositionCard | `session · 时间 · frozen composition` | tools（builtin 平色、ext 带 ⚡）、skills、model identity、parent 链接 | 展开，一场一张 |
 | `user_text` | UserTurn | `›` + 文本（markdown 关，保留换行） | — | queued 时头行加 `· queued` dim |
 | `assistant.text` | AssistantTurn | `●` + markdown（tree-sitter 高亮） | — | 展开 |
-| `assistant.reasoning` / `thinking_delta` | Thinking | `▸ thinking · N chars` | 流式时显示滚动的最后一行 dim；结束后从 `reasoning` 尽力抽 `thinking` 字段（Anthropic 形状），抽不到显示 `reasoning (opaque)` | 折叠；设定 `thinking = collapsed\|hidden\|expanded` |
-| call `shell` | ShellCard | `$ 命令（单行截断）` + 右侧 `▸ N lines · ok\|exit N` | stdout / stderr 分段 | **折叠**；设定 `tool_output` |
-| call `edit` | EditCard | `✎ path` + `ok\|failed` | unified diff（`diff` 组件，语法高亮） | **展开**；设定 `edit_diff = expanded\|collapsed` |
-| call `ext:*` | ExtToolCard | `⌘ tool_name · 参数摘要（一级键截断）` | 输出 | 折叠 |
+| `assistant.reasoning` / `thinking_delta` | Thinking | `⋯ thinking  (N chars) ▸`（T26 起与所有卡片同一个 `CardFrame`，dim 一档） | 流式时显示滚动的最后一行 dim；结束后从 `reasoning` 尽力抽 `thinking` 字段（Anthropic 形状），抽不到显示 `reasoning (opaque)` | 折叠；设定 `thinking = collapsed\|hidden\|expanded` |
+| call `shell` | ShellCard | `$ 命令  (N lines[· exit N]) ▸`（exit 0 不写） | stdout / stderr 分段 | **折叠**；设定 `tool_output` |
+| call `edit` | EditCard | `✎ path  (+2 -1[· failed])` | unified diff（`diff` 组件，语法高亮） | **展开**；设定 `edit_diff = expanded\|collapsed` |
+| call `ext:*` | ExtToolCard | `⌘ tool_name · 参数摘要  (N lines) ▸`（**第一个参数不写键名**——工具的第一个参数就是它的主语：路径、模式、命令，T26） | 输出 | 折叠 |
 | shell 命令前缀 `nulya src` / `nulya ext init\|build\|activate\|rollback\|run` / `nulya skill load` / `nulya session new\|append\|step\|events` | EvolveCard / SubSessionCard | 见 §5.2 / §5.5 | 原始输出可展开 | 折叠但头行信息量大 |
 | `capability_note` | CapabilityBanner | `⚡ capability · id@version · tools: …` | note 全文 | 展开 |
 | canceled marker | CanceledCard | `⊘ tool · canceled (side effects unknown)` 三种文案对应三种 marker | — | 展开 |
@@ -205,6 +205,10 @@ tui/
 ### 5.1 CompositionCard（每场 session 的冻结契约）
 
 来自 header：model identity（provider/model/base_url 主机）、`active[]`（ext id@version 短 hash）、`native_tools`、skills（从各 active 版本的 `extension.json` `contributes.skills` 读）、`parent`。这是"这一场模型看到什么"的一眼版本；打开两场对比就是演化的差分。
+
+**它会折，且默认折着**（T25，设定 `transcript.composition`）：静息只有两行——标题（`session · <时间> · frozen composition`，右端一个折叠记号，与每张 tool 卡同一列）与 model 行（`model  <provider/model> · tools 2+N · skills n · prompts n · ext n`，模型本身仍是 `/model` 的点击目标，点击不冒泡到折叠）。展开后每根轴一行：`model`（这一行的右半换成 endpoint 主机）· `tools` · `skills` · `prompts`（贡献 system prompt 的包名）· `ext`（`id@v-` + 8 位）· `parent`。**版本哈希是 provenance，不是每场都值一屏的东西**——五个自带扩展的全串曾经在第一句话之前占掉八行。
+
+**每一行都是"标签列 + 会换行的值"（`ui/Fact`），不是 flex 行。** OpenTUI 对超宽的 flex 行不换行而是**压缩**：名字从中间被切、标签与值之间的空格被吞，`model` 于是显示成 `mode`。所以窄屏的处理写死在两处纯函数里——值按 ` · ` 关节折到下一行（`wrapWords`），标题按整段短语退让（完整 → 去掉 `frozen composition` → 只剩 `session`），model 行的计数从最不紧要的一端整格丢弃而不是把 `ext 5` 切成 `e…`。
 
 **draft 变体**（T22）：还没有 session 的 tab 上，同一张卡换个时态——标题是 `next session · set when you send the first message`，三行同序（tools = `shell edit` + 计划中的 pin、model = draft 的 pick 解出来的 model id、`--with` 写在 model 那行右边）。数据只来自 `config show --json`、`tui-state.json` 与 `ext list` 已经说过的东西，**没有第二个 composition 解析器**——真正的解析永远是内核在 `session new` 里做的那一次。
 
@@ -280,16 +284,18 @@ registry 按 shell 命令前缀识别，头行抽关键事实（抽不到就退�
 ## 6. 视觉规范
 
 克制是终端里的美观。规则：
-- **一处颜色一个含义**：角色色只用于左侧 glyph 和卡片头行；成功/失败是短 chip（`ok` / `exit 1`）不是整行变色。
+- **一处颜色一个含义**：角色色只用于左侧 glyph；卡片头行是 `muted`（说出来的话才是最亮的那一档）。**成功是沉默的**（T26）：一次调用只说它带回来多少（`(121 lines)`、`(+2 -1)`），出事才说词（`exit 1` / `failed`，err 色）——每一行都写个 `ok` 只是噪音，而且把颜色用光了。
 - **四档明度是一个层级，不是一块调色板**（T18）：一段文字用哪一档由它**是什么**决定，不由它该多显眼决定——`fg` 这个东西本身（卡片头行、选中行、值）· `muted` 它由什么构成（id 旁的 label、计数、状态）· `dim` 关于它写的话（说明、hint、footer、列名）· `faint` 家具（hover 记号、空 gutter、失效格）。
-- **无边框 transcript**：垂直节奏靠空行——turn 之间一空行、卡片之间不空、卡片体缩进 +2；两条 hairline 分隔三块。
+- **头行从左往右读**（T26）：`glyph 头行  (note) ▸`，note 在括号里紧跟头行、fold 记号在文字末尾。原来 note 是**右对齐 chip**，于是第 98 列上挂着一个 `ok`、和它说的那次调用之间隔着三十个空列——第二列小字，也是一屏调用看起来像表单而不像叙述的主要原因。行内没有任何东西会被 flex 压缩：头行由我们 `fit` 到 note 与记号剩下的宽度（窄屏切头行，**不切状态词**）。
+- **无边框 transcript**：垂直节奏靠空行，而且节奏是**三档**（T26，`Transcript.gapBefore` 一个纯函数说了算）——**一次 run 里的调用之间 0**（六次调用是一块，像 tcode 的 `Read 5 ranges`）、**beat 之间 1**（thinking 与它后面那句话属于同一个 beat，所以那里也是 0）、**人开口之前 2**（换一轮对话不只是换一个 beat）。卡片体缩进 +2。
+- **整屏只有一个有边框的东西：输入框**（T26）。原来是三条通栏 hairline 围出四个区，其中两条隔开的正是输入框自己的上下边，第三条在只有一个 tab 时上面什么都没有。现在 transcript / 输入框 / 状态行之间只有输入框那个圆角框（ascii 用 `+-|`），它同时是"在这里打字"的邀请与**键盘在不在这里**的唯一信号（有焦点 = `accent.user`，browse 模式或 overlay 拿走键盘 = `hairline`）。框**随内容长高**（1–8 行，超出由 textarea 自己滚）。
 - **diff 静**：仅前景色的 add/del，无背景块；上下文行 dim。
 - **动效一处**：状态栏一个 braille spinner + 流式末尾 `▍` 光标；不做 shimmer（设定 `motion = false` 全关）。
 - **符号集**（Windows Terminal / 常见等宽字体都有）：`›` user · `●` assistant · `$` shell · `✎` edit · `⌘` ext tool · `⚙` build/init · `⚡` capability/activate · `↺` rollback · `⌕` read kernel · `☰` skill · `⤷` sub-session · `⊘` canceled · `▎` composition · `▸ ▾` fold · `·` pointer（鼠标所在的行）· `⠋` spinner；`ascii = true` 时降级为 `> * $ ~ # + ! < ? = > x . |`。
 - **主题 tokens**（`render/theme.ts`；`nulya-dark` 默认、`nulya-light`；尊重 `NO_COLOR`）：`fg muted dim faint accent.user accent.assistant accent.tool accent.evolve ok err warn diff.add diff.del hairline selection hover`。语法高亮用 OpenTUI `SyntaxStyle`，同一套 tokens 派生。
 - **光标与指针是两套记号**：光标行 `▾` + `selection` 底色，指针行 `·` + 更淡的 `hover` 底色。形状不同，所以没有颜色时也分得开。
 - **overlay 的底部只有一行键**（T18）：常驻两三个重点 + `? keys`，`?` 展开其余；没有更多键的面板不写 `? keys`。
-- **宽度**：内容 ≤ `max_width`（默认 100），左对齐；窄于 60 列时隐藏状态栏右半与卡片右侧 chip。
+- **宽度**：内容 ≤ `max_width`（默认 100），左对齐；窄于 60 列时隐藏状态栏右半（卡片的 note 不再隐藏——T26 起它切的是头行，因为 `exit 1` 正是窄屏上最该留下的那一格）。
 
 ## 7. 设定 `tui.toml`
 
@@ -300,6 +306,7 @@ registry 按 shell 命令前缀识别，头行抽关键事实（抽不到就退�
 edit_diff      = "expanded"    # expanded | collapsed
 tool_output    = "collapsed"   # collapsed | expanded
 thinking       = "collapsed"   # collapsed | hidden | expanded
+composition    = "collapsed"   # collapsed | expanded —— 顶上那张 session 卡（T25）
 max_width      = 100
 history_window = 400           # 同时挂载的卡片数（从最新往回数）；0 = 全挂（T4）
 ascii          = false
@@ -363,6 +370,8 @@ fold   = "ctrl+o"
 | ~~**T14 · 长文本粘贴折叠**~~ ✅ | OpenTUI 的 bracketed paste 事件（`onPaste` + `PasteEvent.preventDefault()`）是现成的；阈值照 tcode（> 1000 字符或 > 15 行）→ 折叠成 `[Pasted text #N]` 占位（accent 高亮、下面一行说明它装了多少、`Backspace` 整体删除），提交时展开回原文。短粘贴一字未变。**图片不做**（内核 vision track，契约 D7）。**内核零改动** | `bun test` 140 pass（新增 `paste.test.ts` 4 条 + `composer.test.tsx` 一条走真 bracketed paste 的往返）|
 | ~~**T15 · skill 作为 slash command**~~ ✅ | `/` 补全内建命令在前、`nulya skill list` 的 skill 在后（描述截 100 字符）；分发同序，`/xyz` 命中 skill → `skill load <ref>` 拿 body、包 tcode 的 `<user-skill …>` sentinel 后作为**普通 user turn** append，未命中原样发给模型；transcript 靠同一个 `parseSkillEcho` 把它折成 `/name args · N lines`（live 与回放共用）；`/ext` 的 activate/rollback/deactivate 让 skill 表失效重取。翻案了 `commands.ts` 头注释与 §4.4 的"nulya 没有 skill slash"（契约 D8）。**内核零改动** | `bun test` 146 pass（新增 `skills.test.ts` 5 条——含 tcode 两条 sentinel 测试同形与一条真二进制闭环——加 `render.test.tsx` 一条折叠快照）；把仓库的 `extensions/guide` 装进一个 store 后 `/g` 补出 `/guide`、`/guide <args>` 变成一条 226 行的 user turn、transcript 折成一行 |
 | ~~**T24 · 权限 mode + handoff 接线**~~ ✅ | 内核：`loop.StepContext.gate` + `session step --gate`（每个 tool call 执行前问一次，deny = 那个 call 的 tool_result；DESIGN §4/§14）+ manifest 的 `readonly?` 声明；前端：`--gate` 常开、`approvals.ts` 一个纯函数（deny/always/ask/allow/readonly/mode 六层）、审批卡片（`y`/`n`/`N`/`a`，只在输入框空着时接管这四个字母）、状态栏可点的 mode chip、`/mode ask\|auto`（穿身份的改叫 `/as`）、handoff 文件每步后看一眼（`ask` 弹面板 / `auto` 直接跟，跟 = `/compact` 的 `brief_file`）、每场默认 `--with handoff@<v> --pin ext:handoff/handoff` | `bun test` 212 pass（`approvals.test.ts` + `gate.test.tsx`）、`zig build e2e` 55 pass（`--gate` 一条：请求行 / deny 带 note / allow 真跑 / EOF fail closed） |
+| ~~**T25 · CompositionCard 折叠**~~ ✅ | 顶上那张卡默认折成两行（标题 + model 行的模型与计数），展开才有 tools / skills / prompts / ext / parent；每一行改成"标签列 + 会换行的值"（`ui/Fact`，与 Welcome 共用）而不是会被 OpenTUI 压缩的 flex 行；版本哈希缩到 8 位；设定 `transcript.composition`。**内核零改动** | `bun test` 214 pass（静息 / 展开两张新快照、40 列逐行宽度断言、头行点击开关） |
+| ~~**T26 · 一屏的节奏**~~ ✅ | 拿 tcode 的截图当标尺：头行从右对齐 chip 改成行内 `(note)` + 行尾 fold 记号；成功不再写 `ok`（只报大小，出事才说词）；`Transcript.gapBefore` 一个纯函数定三档空行（run 内 0 / beat 间 1 / 人开口前 2）；Thinking 并进 `CardFrame`；参数摘要第一个参数不写键名；三条通栏 hairline 换成**输入框自己的圆角边框**（有焦点变色），输入框随内容 1–8 行长高。**内核零改动** | `bun test` 216 pass（`gapBefore` / `wrappedRows` 两个纯函数 + 全部卡片快照重出 + 窄屏切头行不切状态词） |
 | **T10 · `/goal`（占位，未开工）** | spawn 随仓库带的 driver 脚本（`win32` → `powershell -NoProfile -ExecutionPolicy Bypass -File drivers/goal.ps1`，否则 `sh drivers/goal.sh`），把它的 **stderr 喂给已有的 `--stream` 解析器**（token delta / tool begin-end / usage 全在里面），把它的 **stdout 当控制通道**：`session <id>` 开 tab、`handoff <old> -> <new>` 换 tab（原 tab 留着可回看）、`done <id>` 收尾并提示 `/outcome`。跟随中的 tab 是 **observer**（driver 持着写者 lease）。**内核零改动**，也不需要 §10.4 的 `<id>.live` sidecar | 起一个两阶段目标：token 实时可见；handoff 时自动切到子 session；`Esc` 停得下来（`session cancel` 或杀脚本）|
 
 顺序 T0 → T1 → T2 → T3 → T4；**T1 结束就开始用它 dogfood**，T2 起的优先级由用出来的痛点重排（T5–T8 就是这么来的）。
@@ -1224,3 +1233,29 @@ cd tui && bun test test/compact.test.ts
 **测试**：`cd tui && bun test` 196 → **211 pass**（+`approvals.test.ts` 7 条纯函数、`gate.test.tsx` 7 条：ask 下等待 + `y` 真跑、`N` + 理由进 ledger 的 marker、卡片在等时 `/mode auto` 当场放行、auto 下直接跑、verdict 行的形状、handoff 文件的发现与去重、以及"这个 TUI 开的 session 真带着 handoff 的成员 + pin"（没有 zig 就 skip——compiled 包））；`tsc` 干净。改写：**跑真步骤的测试一律用 `auto_settings`**（`support.ts` 新增：`driver.mode = "auto"` + 关掉 handoff——没人在键盘前的测试就是 auto 那一档，而 handoff 会给每个被读回的 store 多一个包）；`/ext` 的 `r` 那条改成 `a`（同一个确认框）、`registry.test.ts` 的两动词那条改成"activate 一个动词 + 老拼写退回 shell 卡"、`render.test.tsx` 的 §5.2 那行改成 activate 旧版本、`/help` 快照重出（多了 `/mode` 行、`y/n/N/a` 键行、两条鼠标行，viewport 66 → 72）。内核侧：`zig build test` 全绿（`loop.zig` +2：allow-all == 无 gate、deny 只停这一个 call 且不记 journal）、`zig build e2e` 55 pass（新增一条：`--gate` 的请求行 / deny 带 note / allow 真跑 / EOF fail closed，`support.runCliStdin` 是为它加的第一个喂 stdin 的 runner）。
 
 **没做**：`ask` 下没有"批准这一批"的快捷键（一次一个 call 是内核的形状，批量要另想）；`[approvals]` 不支持 glob（前缀够用，且不必学一套模式语言）；classifier（tcode 的 auto 档背后那个安全分类器）没有——它是 extension 的活，见 PLAN；handoff 的 brief 面板不可滚动（超过 8 行截断，全文在文件里）；`readonly` 目前没有任何自带包声明（`extensions/std` 的 `read` / `grep` / `glob` 是最该标的三个，等一次单独的改动）。
+
+### T25 · 顶上那张卡：默认折起来，行不再被压缩（2026-08-19）
+
+**内核零改动**，`tui/` 三个文件。来源是一张运行中的截图 + 一句话："这个对话面板这样显示是不是有点太丑了……默认也没必要全部展示出来吧"。截图上是五个自带扩展的完整版本串，把 CompositionCard 撑成八行，并且 `model` 那个标签显示成 `mode`。
+
+1. **两个病其实是一个：行被压缩，不是被换行。** 卡里每一行原来是一串 `<text>` 组成的 flex 行，OpenTUI 对装不下的 flex 行**收缩子节点**——名字中间被切、标签与值之间的那个空格被吞（`modecodex/gpt-5.5`）。老代码知道这件事，办法是 `toolsFit()`：算一遍总宽，装不下就整行换成计数。但那只保护了 tools 行，model 行后面挂着 `· ext <五个全串>`，于是它就是被压缩的那一行。现在**没有一行是 flex 行**：`ui/Fact` 是"标签列 + 由我们自己折行的值"（`wrapWords`，先在 ` · ` 关节上折），Welcome 屏幕本来就是这么写的（T24 §5.1 那条注释写得很清楚），这次把它抽出来成第二个 consumer 共用——`toolsFit()` 连同它那套"装不下就变数字"一起删掉，因为值现在向下长。
+2. **默认折起来（`transcript.composition`，默认 `collapsed`）。** 静息两行：标题 + model 行（模型 + `tools 2+N · skills n · prompts n · ext n` 那串计数）。判据是**改变这场 session 能做什么的东西留在外面，provenance 收进去**：模型与计数是前者，"哪个包冻在哪个 hash 上"是后者——它值得随手可得，不值得每一场都占五分之一屏。折叠走已有的 `state/folds.ts`（key = `composition:<session id>`），所以 `Ctrl+Shift+O` 一起管它；头行点击 = 折叠（与每张 tool 卡同一个手势、同一个右端记号列），model 那一格的点击 `stopPropagation` 后仍是 `/model`（T20 起就有的目标，测试点的还是那一行）。
+3. **哈希缩到 8 位**（`shortVersion` 是 `/ext` 版本线 T23 就有的同一条规矩：散文里一律短哈希，全串留给要贴进 `ext activate` 的地方）；`prompts` 从计数改成**贡献者的名字**（`prompts  evolution` 比 `prompts 1` 多告诉你一件事，而这行只在展开时出现）；窄屏时标题整段退让（完整 → 去掉 `frozen composition` → `session`），计数从末尾整格丢弃——切成 `e…` 的一格什么也没说。
+
+**测试**：`cd tui && bun test` 211 → **214 pass**、`tsc` 干净。`render.test.tsx` 的那张卡拆成四条：静息两行（新快照，断言 provenance 确实不在屏幕上）、展开全貌（新快照）、40 列不压缩（逐行断言宽度 ≤ 41、`mode ` 不出现、长哈希不出现）、头行点击开关一次。老的"tools 行装不下就退回计数"那条随 `toolsFit()` 一起删除；ascii 那条改成在展开的设定下跑并多断一句折叠记号也降级了。`zig build test` / `zig build e2e` 未受影响（内核一字未动）。
+
+**没做**：`Ctrl+O`（"最近一张卡"）不认这张卡——它按 transcript item 找，而 header 不是 event；要它得给 browse 模式一个非 item 的成员，不值。`/settings` 里没有为这个键单开一行（它和另外三个 fold 键同表）。draft 屏（Welcome）没动。
+
+### T26 · 一屏的节奏：把 tcode 的密度学过来（2026-08-19）
+
+**内核零改动**，`tui/` 十个文件。来源是用户贴的一张 tcode 截图 + 一句"我们的还有一种廉价感"。对着两张图看，差的不是颜色也不是字形，是**三件排版上的事**——而它们各自都指向同一个毛病：这块屏幕在**报告**，不在**叙述**。
+
+1. **右对齐的 chip 是廉价感的第一来源。** 一行 `⌘ lint_zig · path=src/emit.zig` 后面隔着三十个空列，第 98 列上挂一个 `ok`——第二列小字，每张卡都有，而且它说的那件事（成功了）本来就是默认。改成 tcode 的写法：note 用括号紧跟头行、fold 记号在文字末尾，整行从左往右读完。行内没有一个节点会被 flex 压缩（头行由 `fit` 切到 note 剩下的宽度），窄屏于是切的是命令而不是 `exit 1`——原来 60 列以下是把整个 chip 丢掉的，正好丢掉那一行上唯一要紧的东西。
+2. **成功是沉默的。** `ok` 从每一张卡上删掉：一次调用只说它带回来多少（`(121 lines)` / `(+2 -1)`），失败才说词并且只有那时候才有颜色（`exit 1`、`failed`）。`ChipTone` 的 `ok` 一档随之删除（没有写者了）。`exit 0` 同理不写。`sizeNote` 一个函数管三张卡的计数，顺手修掉 `1 lines`。
+3. **空行是有语法的。** 原来 `marginTop={1}` 挂在 UserTurn / AssistantTurn 两张卡上，tool 卡一个都没有——于是一句话和它下面六次调用焊在一起，整屏没有纹理。现在垂直节奏是 `Transcript.gapBefore` 一个纯函数：**run 内 0**（六次调用是一块，就是 tcode 的 `Read 5 ranges` 在做的事，只是我们每行自带 glyph、不需要那行汇总）· **beat 间 1**（thinking 属于它后面那句话，所以那里也是 0）· **人开口前 2**（换一轮对话不只是换一个 beat）。卡片自己不再决定自己上面有多少空——一处定节奏，`render.test.tsx` 的 `Harness` 也改成走真的 `Transcript`，因为空行现在是快照要钉的东西。
+4. **顺手把三件"看着像 bug"的东西修了**：Thinking 并进 `CardFrame`（原来 fold 记号在**左**边、别的卡都在右边，而且它的 toggle 挂在裸 `onMouseDown` 上——拖过去选文字会把它折起来，正是 `ui/rows.ts` 存在的理由）· 参数摘要的第一个参数不写键名（`read · src/emit.zig · offset=1`，工具的第一个参数就是它的主语）· edit 卡的 diff 高度多算了 patch 的三行头和一个尾行，每张 edit 卡底下都拖着两行空白。
+5. **三条通栏 hairline 换成输入框自己的边框。** 四个区、三条线，其中两条隔开的正是输入框的上下边（输入框自己就能说这件事），第三条在只有一个 tab 时上面什么都没有。现在整屏只有一个有边框的东西，就是**你打字的那个框**（圆角，ascii 降级成 `+-|`）——它同时是"在这里打字"的邀请与**键盘在不在这里**的唯一信号（有焦点 `accent.user`，browse 模式 / overlay 拿走键盘时退回 `hairline`）。框还**随内容长高**（`wrappedRows`，1–8 行）：原来恒定三行，于是任何时候都有两行是空的，而粘一段十二行的东西时它在三行的窗口里滚。两个真 bug 一起掉出来：`›` 那个 glyph 没写 `flexShrink={0}`，一段够宽的文字会把它挤没（文字于是比自己的续行还靠左一列）；`onPaste` 在**不折叠**的短粘贴上直接 return，镜像信号 `line()` 不更新——补全菜单与新的高度都会照着粘贴之前的内容算，而 IME 上屏一整句走的也是这条路。
+
+**测试**：`bun test` 214 → **216 pass**、`tsc` 干净。新增两个纯函数的单测（`gapBefore` 三档 + 真帧断言"两次调用是邻居、上面那句话不是"；`wrappedRows` 含 CJK 双宽与结尾换行，外加真渲染的"框会长高"）；窄屏那条从"chip 被丢掉"改成"切头行、`exit 1` 留下、每行不超宽"；`registry.test.ts` 多一条"第一个参数不写键名、后面的照写"；`layout.test.tsx` 的"三行"改成"框的上下边都在"；`transcriptOf`（live == replay 那条）改成切到输入框的框上沿，因为它原来是靠两条 hairline 定位的。全部卡片快照重出。
+
+**没做**：不做 tcode 的 `● Read 5 ranges` 汇总头行——我们每次调用自带 glyph，汇总只会多一行并重复它下面已经写着的东西；不给 assistant 正文上色（`fg` 是内容该在的那一档，代价会落在 markdown 的代码块上）；`Ctrl+O` 仍然只认 transcript item（header 不是 event）；输入框的宽度没跟着 `max_width` 收（框是屏幕的家具，不是内容）。

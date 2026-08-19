@@ -42,18 +42,19 @@ async function crowded(height: number) {
 }
 
 for (const height of [30, 24, 16, 10]) {
-  test(`the composer keeps its three rows under a long transcript at ${height} rows`, async () => {
+  test(`the composer keeps its whole box under a long transcript at ${height} rows`, async () => {
     const { setup } = await crowded(height)
     try {
       const frame = await settle(setup, 5)
       // The prompt is on screen…
       expect(frame).toContain("message nulya")
-      // …with its full height, not shaved down to the prompt line.
+      // …inside a box that still has both of its sides (T26): the border is the
+      // affordance, and half a box would be a squeezed one.
       const rows = frame.split("\n")
       const at = rows.findIndex((row) => row.includes("message nulya"))
       expect(at).toBeGreaterThanOrEqual(0)
-      expect(rows[at + 1]).toBeDefined()
-      expect(rows[at + 2]).toBeDefined()
+      expect(rows[at - 1]).toContain("╭")
+      expect(rows[at + 1]).toContain("╰")
       // And the status bar below it still says something.
       expect(frame).toContain("driver")
     } finally {

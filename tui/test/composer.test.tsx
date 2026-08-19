@@ -5,7 +5,7 @@
 import { expect, test } from "bun:test"
 import { testRender } from "@opentui/solid"
 import { useKeyboard } from "@opentui/solid"
-import { Composer } from "../src/ui/Composer.tsx"
+import { Composer, wrappedRows } from "../src/ui/Composer.tsx"
 import { completions } from "../src/commands.ts"
 import { displayWidth } from "../src/ui/columns.ts"
 import { StyleContext, createStyle } from "../src/render/theme.ts"
@@ -15,6 +15,37 @@ import type { ProjectIndex } from "../src/references.ts"
 import type { SkillTable } from "../src/skills.ts"
 
 const style = createStyle(default_settings, {})
+
+test("the box is as tall as what is in it", async () => {
+  // The count behind the growing composer (T26). CJK is two columns wide, so a
+  // line of it wraps at half the characters — the reason this counts display
+  // width rather than `text.length`.
+  expect(wrappedRows("", 40)).toBe(1)
+  expect(wrappedRows("short", 40)).toBe(1)
+  expect(wrappedRows("one\ntwo\nthree", 40)).toBe(3)
+  expect(wrappedRows("a".repeat(85), 40)).toBe(3)
+  expect(wrappedRows("看".repeat(30), 40)).toBe(2)
+  // A trailing newline is a row: the cursor is sitting on it.
+  expect(wrappedRows("one\n", 40)).toBe(2)
+
+  const setup = await testRender(
+    () => (
+      <StyleContext.Provider value={style}>
+        <Composer onSubmit={() => {}} />
+      </StyleContext.Provider>
+    ),
+    { width: 40, height: 10 },
+  )
+  try {
+    await settle(setup, 3)
+    const rowsOf = (frame: string) => frame.split("\n").filter((row) => row.includes("│")).length
+    expect(rowsOf(setup.captureCharFrame())).toBe(1)
+    await setup.mockInput.typeText("a word that will not fit on one line of a forty column box")
+    expect(rowsOf(await settle(setup, 3))).toBeGreaterThan(1)
+  } finally {
+    setup.renderer.destroy()
+  }
+})
 
 test("Up walks the whole history, not just the last message", async () => {
   const sent: string[] = []

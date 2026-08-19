@@ -1,6 +1,6 @@
 import { createMemo } from "solid-js"
 import { useStyle } from "../theme.ts"
-import { CardFrame } from "./CardFrame.tsx"
+import { CardFrame, sizeNote } from "./CardFrame.tsx"
 import { ShellOutput } from "./ShellCard.tsx"
 import { splitShellOutput } from "../../nulya/ledger.ts"
 import type { ToolItem } from "../../state/session.ts"
@@ -21,19 +21,20 @@ export function EvolveCard(props: { item: ToolItem; presentation: ToolPresentati
     if (props.item.state === "running") return "running"
     const exit = shell().exit
     if (props.presentation.countsLines) {
-      const lines = props.item.output.length === 0 ? 0 : props.item.output.split("\n").length
-      return exit === null || exit === 0 ? `${lines} lines` : `${lines} lines · exit ${exit}`
+      const size = sizeNote(props.item.output)
+      if (exit === null || exit === 0) return size
+      return size.length > 0 ? `${size} · exit ${exit}` : `exit ${exit}`
     }
     if (exit !== null && exit !== 0) return `exit ${exit}`
-    if (props.item.ok === null) return ""
-    return props.item.ok ? "ok" : "failed"
+    // Success is silent (T26): an evolution action that worked has its result
+    // in the head line already (`ext build · lint → v-3f2a91`).
+    return props.item.ok === false ? "failed" : ""
   }
 
   const tone = () => {
     const exit = shell().exit
     if (exit !== null && exit !== 0) return "err"
     if (props.item.ok === false) return "err"
-    if (props.item.ok === true) return "ok"
     return "dim"
   }
 

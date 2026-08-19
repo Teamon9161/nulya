@@ -30,15 +30,22 @@ export function EditCard(props: { item: ToolItem; presentation: ToolPresentation
     if (props.item.state === "pending") return "…"
     if (props.item.state === "running") return "running"
     const parsed = args()
-    if (!showDiff() || !parsed) return props.item.ok === null ? "" : props.item.ok ? "ok" : "failed"
+    if (!showDiff() || !parsed) return props.item.ok === false ? "failed" : ""
     const stats = diffStats(parsed)
-    return `${parsed.replace_all ? "all · " : ""}+${stats.added} -${stats.removed} · ${props.item.ok ? "ok" : "failed"}`
+    // The diff is right below; `ok` on top of it would be saying it twice (T26).
+    const counts = `${parsed.replace_all ? "all · " : ""}+${stats.added} -${stats.removed}`
+    return props.item.ok === false ? `${counts} · failed` : counts
   }
 
-  const tone = () => (props.item.ok === false ? "err" : props.item.ok === true ? "ok" : "dim")
-  // The diff renderable needs an explicit height; the patch's own line count is
-  // it, capped so one enormous edit cannot swallow the viewport.
-  const diffHeight = () => Math.min(Math.max(patch().split("\n").length - 3, 1) + 1, 40)
+  const tone = () => (props.item.ok === false ? "err" : "dim")
+  /**
+   * The diff renderable needs an explicit height, and it draws one row per
+   * CHANGE row: the patch's three header lines and its trailing newline are not
+   * on screen, so they are not in the count (T26 — they used to be, and every
+   * edit card carried two blank rows under its diff). Capped, so one enormous
+   * edit cannot swallow the viewport.
+   */
+  const diffHeight = () => Math.min(Math.max(patch().split("\n").length - 4, 1), 40)
 
   return (
     <CardFrame

@@ -114,7 +114,13 @@ test("shell, edit and extension tools each get their own card", () => {
   expect(edit.isEdit).toBe(true)
   const ext = describeTool({ tool: "lint_zig", args: JSON.stringify({ path: "src" }), output: "" }, glyphs)
   expect(ext.kind).toBe("ext")
-  expect(ext.head).toBe("lint_zig · path=src")
+  // The first argument is the subject and loses its key (T26); the rest keep theirs.
+  expect(ext.head).toBe("lint_zig · src")
+  const two = describeTool(
+    { tool: "read", args: JSON.stringify({ path: "src/emit.zig", offset: 40 }), output: "" },
+    glyphs,
+  )
+  expect(two.head).toBe("read · src/emit.zig · offset=40")
   // A stable id (`ext:<ext>/<tool>`) resolves to the same tool name.
   expect(describeTool({ tool: "ext:lint/lint_zig", args: "{}", output: "" }, glyphs).head).toContain("lint_zig")
 })

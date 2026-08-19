@@ -6,8 +6,8 @@ exports[`user and assistant turns 1`] = `
                                                                             
 ● Reading emit.zig first.                                                   
                                                                             
-› and write it to default.toml · queued                                     
                                                                             
+› and write it to default.toml · queued                                     
                                                                             
                                                                             
                                                                             
@@ -29,8 +29,8 @@ exports[`user and assistant turns 1`] = `
 `;
 
 exports[`a skill echo folds back to the \`/name args\` that was typed 1`] = `
-"  › /guide how do extensions work · 3 lines                          ▸ skill
-                                                                            
+"                                                                            
+  › /guide how do extensions work · 3 lines  (skill) ▸                      
                                                                             
                                                                             
                                                                             
@@ -57,8 +57,8 @@ exports[`a skill echo folds back to the \`/name args\` that was typed 1`] = `
 `;
 
 exports[`thinking is collapsed by default and names its size 1`] = `
-"  ▸ thinking · 17 chars                                                     
-                                                                            
+"                                                                            
+  ⋯ thinking  (17 chars) ▸                                                  
                                                                             
                                                                             
                                                                             
@@ -85,8 +85,8 @@ exports[`thinking is collapsed by default and names its size 1`] = `
 `;
 
 exports[`shell output is collapsed, with an exit chip 1`] = `
-"  $ zig build test                                        ▸ 4 lines · exit 1
-                                                                            
+"                                                                            
+  $ zig build test  (4 lines · exit 1) ▸                                    
                                                                             
                                                                             
                                                                             
@@ -113,8 +113,8 @@ exports[`shell output is collapsed, with an exit chip 1`] = `
 `;
 
 exports[`an extension tool call carries the ⌘ glyph and an argument digest 1`] = `
-"  ⌘ lint_zig · path=src/emit.zig                                        ▸ ok
-                                                                            
+"                                                                            
+  ⌘ lint_zig · src/emit.zig  (1 line) ▸                                     
                                                                             
                                                                             
                                                                             
@@ -141,8 +141,8 @@ exports[`an extension tool call carries the ⌘ glyph and an argument digest 1`]
 `;
 
 exports[`a \`nulya …\` command reads as an evolution action 1`] = `
-"  ⚙ ext build · lint → v-3f2a91                                         ▸ ok
-                                                                            
+"                                                                            
+  ⚙ ext build · lint → v-3f2a91 ▸                                           
                                                                             
                                                                             
                                                                             
@@ -169,14 +169,14 @@ exports[`a \`nulya …\` command reads as an evolution action 1`] = `
 `;
 
 exports[`every evolution action in §5.2 has its own head line 1`] = `
-"  ⌕ read kernel · emit.zig                                         ▸ 2 lines
-  ⚙ ext init · lint → .nulya/extensions/lint                            ▸ ok
-  ⚙ ext build · lint → v-3f2a91                                         ▸ ok
-  ⚡ activate · lint@v-3f2a91                                           ▸ ok
-  ⚡ activate · lint@v-0011aa                                           ▸ ok
-  ⌘ ext run · lint/lint_zig                                             ▸ ok
-  ☰ skill · evolution/zig-style                                        ▸ ok
-                                                                            
+"                                                                            
+  ⌕ read kernel · emit.zig  (2 lines) ▸                                     
+  ⚙ ext init · lint → .nulya/extensions/lint ▸                              
+  ⚙ ext build · lint → v-3f2a91 ▸                                           
+  ⚡ activate · lint@v-3f2a91 ▸                                             
+  ⚡ activate · lint@v-0011aa ▸                                             
+  ⌘ ext run · lint/lint_zig ▸                                               
+  ☰ skill · evolution/zig-style ▸                                          
                                                                             
                                                                             
                                                                             
@@ -193,8 +193,28 @@ exports[`every evolution action in §5.2 has its own head line 1`] = `
 `;
 
 exports[`a sub-session names the session it drives 1`] = `
-"  ⤷ sub-session · s-1786815442964-8462dd                                ▸ ok
-  ⤷ sub-session step · s-1786815442964-8462dd                           ▸ ok
+"                                                                            
+  ⤷ sub-session · s-1786815442964-8462dd ▸                                  
+  ⤷ sub-session step · s-1786815442964-8462dd ▸                             
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+"
+`;
+
+exports[`the composition card is two lines at rest: what this session is, and what it carries 1`] = `
+"                                                                            
+▎ session · 2026-08-16 14:02 · frozen composition                          ▸
+▎ model    anthropic/claude-sonnet-5 · tools 2+1 · skills 1 · prompts 1     
+                                                                            
+                                                                            
+                                                                            
                                                                             
                                                                             
                                                                             
@@ -208,15 +228,15 @@ exports[`a sub-session names the session it drives 1`] = `
 "
 `;
 
-exports[`the composition card shows what this session froze 1`] = `
+exports[`opened, the composition card shows what this session froze 1`] = `
 "                                                                            
-▎ session · 2026-08-16 14:02 · frozen composition                           
-▎ tools shell edit ⚡lint_zig  skills zig-style prompts 1                   
-▎ model anthropic/claude-sonnet-5 · api.anthropic.com · ext lint@v-3f2a91   
-▎ parent s-1786800870313-bf37ef:41                                          
-                                                                            
-                                                                            
-                                                                            
+▎ session · 2026-08-16 14:02 · frozen composition                          ▾
+▎ model    anthropic/claude-sonnet-5 · api.anthropic.com                    
+▎ tools    shell edit ⚡lint_zig                                            
+▎ skills   zig-style                                                        
+▎ prompts  evolution                                                        
+▎ ext      lint@v-3f2a91                                                    
+▎ parent   s-1786800870313-bf37ef:41                                        
                                                                             
                                                                             
                                                                             
@@ -229,11 +249,11 @@ exports[`the composition card shows what this session froze 1`] = `
 `;
 
 exports[`edit renders its diff expanded by default 1`] = `
-"  ✎ src/emit.zig                                                ▾ +2 -1 · ok
+"                                                                            
+  ✎ src/emit.zig  (+2 -1) ▾                                                 
      1 - pub const head_bytes = 4096;                                       
      1 + pub const head_bytes = 4096; // default                            
      2 + pub const tail_bytes = 2048;                                       
-                                                                            
                                                                             
                                                                             
                                                                             
@@ -257,8 +277,8 @@ exports[`edit renders its diff expanded by default 1`] = `
 `;
 
 exports[`a canceled call is recognised by its marker, not by any stream line 1`] = `
-"  ⊘ sleep 60                                 canceled · side effects unknown
-                                                                            
+"                                                                            
+  ⊘ sleep 60  (canceled · side effects unknown)                             
                                                                             
                                                                             
                                                                             
@@ -285,11 +305,11 @@ exports[`a canceled call is recognised by its marker, not by any stream line 1`]
 `;
 
 exports[`each cancellation marker says something different about the world 1`] = `
-"  ⊘ sleep 60                                         canceled · side effects unknown
-  ⊘ zig build                                    canceled · completed but unrecorded
-  ⊘ zig build test                                           canceled · not executed
-  ⊘ rm -rf tmp                                      interrupted · results unrecorded
-                                                                                    
+"                                                                                    
+  ⊘ sleep 60  (canceled · side effects unknown)                                     
+  ⊘ zig build  (canceled · completed but unrecorded)                                
+  ⊘ zig build test  (canceled · not executed)                                       
+  ⊘ rm -rf tmp  (interrupted · results unrecorded)                                  
                                                                                     
                                                                                     
                                                                                     
@@ -301,9 +321,9 @@ exports[`each cancellation marker says something different about the world 1`] =
 `;
 
 exports[`a spilled result points at its file 1`] = `
-"  $ rg -n fn src                                          ▸ 2 lines · exit 0
+"                                                                            
+  $ rg -n fn src  (2 lines) ▸                                               
     full output → .nulya/scratch/spill-9.txt                                
-                                                                            
                                                                             
                                                                             
                                                                             
@@ -372,12 +392,12 @@ exports[`ascii mode degrades every glyph 1`] = `
   - zig-style — House Zig style.                                            
     load: nulya skill load lint/zig-style                                   
                                                                             
-  + ext build · lint → v-3f2a91                                         > ok
-  ~ src/emit.zig                                                v +2 -1 · ok
+                                                                            
+  + ext build · lint → v-3f2a91 >                                           
+  ~ src/emit.zig  (+2 -1) v                                                 
      1 - pub const head_bytes = 4096;                                       
      1 + pub const head_bytes = 4096; // default                            
      2 + pub const tail_bytes = 2048;                                       
-                                                                            
                                                                             
                                                                             
                                                                             

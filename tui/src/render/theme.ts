@@ -105,6 +105,8 @@ export interface Glyphs {
   rollback: string
   readKernel: string
   skill: string
+  /** Reasoning: three dots, because that is all anyone is being shown of it. */
+  thinking: string
   subSession: string
   canceled: string
   foldClosed: string
@@ -144,6 +146,7 @@ const unicode_glyphs: Glyphs = {
   rollback: "↺",
   readKernel: "⌕",
   skill: "☰",
+  thinking: "⋯",
   subSession: "⤷",
   canceled: "⊘",
   foldClosed: "▸",
@@ -169,6 +172,7 @@ const ascii_glyphs: Glyphs = {
   rollback: "<",
   readKernel: "?",
   skill: "=",
+  thinking: "...",
   subSession: ">",
   canceled: "x",
   foldClosed: ">",
