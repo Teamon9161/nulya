@@ -6,6 +6,7 @@
     "tools": [
       {
         "name": "read",
+        "readonly": true,
         "description": "Read a text file. Content comes back verbatim, without a line-number gutter: when you need to cite a line, count from the first line of the range the footer reports. Use offset/limit for large files; limits under 120 lines are widened to 120, so read generous windows instead of many small slices. If the tool reports the file unchanged since your last read, the content is already in your context — do not re-read; pass force=true only if you have a specific reason. Directories, binary files and files over 10 MB are refused with a hint.",
         "input": {
           "type": "object",
@@ -44,6 +45,7 @@
       },
       {
         "name": "grep",
+        "readonly": true,
         "description": "Search file contents with a regex (respects .gitignore). Look for several symbols in one call with alternation — `foo|bar|baz` beats three searches. An all-lowercase pattern matches case-insensitively; any uppercase in it makes the match exact. Pass fixed=true to search the pattern as a literal string (nothing to escape). Set files_only=true to list just the matching files with their match counts — the cheap first pass of a broad survey. Pull surrounding code with `context` (both sides), `before` or `after` — one search with context often gives you enough to edit without a follow-up read. Filter files with `glob`; cap matches with head_limit (default 200) and page with offset. The regex is byte-level: classes, alternation, groups (including (?:)), quantifiers and anchors work; lookaround, backreferences and inline flags like (?i) do not — pass case_insensitive=true instead. Skips directory-scanned files over 512 KiB (an explicit file path may be up to 10 MiB), skips built/cache directories, and reports oversized skips when they explain an empty result.",
         "input": {
           "type": "object",
@@ -65,6 +67,7 @@
       },
       {
         "name": "glob",
+        "readonly": true,
         "description": "Find files by name pattern, e.g. **/*.zig or src/**/build.zig. Respects .gitignore and skips built/cache directories. Directory symlinks are skipped by default; set follow_symlinks=true to search their targets. Results sorted by modification time (newest first), capped at 200; page with offset.",
         "input": {
           "type": "object",
