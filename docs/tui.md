@@ -201,7 +201,7 @@ tui/
 
 一行，五段（T22 起，标题行取消后它同时是"我在跟谁说话"和"现在在发生什么"）：
 
-`<model-id> [(effort)]`（**主语**，`fg`，可点 → `/model`；effort 只在本 tab 明确选过时才写括号——`auto` 就是内核默认，为它花七列不值） · `tools 1+N`（`dim`；1 = 那一个 builtin `shell`，DESIGN §5.1；draft 上 N = 合并 config pin ∪ `tui-state.json` 的 `session_pins`） · token 累计（`muted`；`↑input ↓output cache%`，**来源是 ledger 的 `assistant.usage`**，流事件只是它落盘前的临时值，同一步不会数两遍——所以重开一场也看得见它到今天为止花了多少，T8） · 当前活动（**只在真的在动时**才 `fg`，否则退一档 `muted`） · hint / notice（`dim`，`/help` 单独一个可点的 box）。右：`step n` · role（`driver` / `observer` §5.6）。离开底部时插入 `↓ 3 new`。
+`<model-id> [(effort)]`（**主语**，`fg`，可点 → `/model`；effort 只在本 tab 明确选过时才写括号——`auto` 就是内核默认，为它花七列不值） · `tools 1+N`（`dim`；1 = 那一个 builtin `shell`，DESIGN §5.1；draft 上 N = 合并 config pin ∪ `tui-state.json` 的 `session_pins`） · token 累计（`muted`；`↑input ↓output cache%`，**来源是 ledger 的 `assistant.usage`**，流事件只是它落盘前的临时值，同一步不会数两遍——所以重开一场也看得见它到今天为止花了多少，T8；**cache% 的分母是整个 prompt** `input + cache_read + cache_write`（`state/session.ts` `cacheShare`，与下一段 ctx% 的分子同一个量）——`input` 是内核扣掉缓存后的量，早先拿它当分母会在缓存命中好的对话里显示 200%+，2026-08-20 修） · 当前活动（**只在真的在动时**才 `fg`，否则退一档 `muted`） · hint / notice（`dim`，`/help` 单独一个可点的 box）。右：`step n` · role（`driver` / `observer` §5.6）。离开底部时插入 `↓ 3 new`。
 
 **窄屏让位的顺序是一句判断，不是平均分**：model / 当前活动 / 通向 `/help` 的那三格**永不让**；notice 排第二（它是新闻——刚发生了什么、或者为什么没发生——所以一有 notice 就把 `tools` 与 token 挤掉，宁可让人读完那句话）；默认 hint 只坚持 ` · /help`，于是 `tools` 与 token 平时都在；再窄就先丢 `tools`（上面的 CompositionCard 已经把工具面写全了）、再丢 token。80 列实测：model、活动、`/help` 全在。
 
