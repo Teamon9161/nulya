@@ -1,12 +1,16 @@
 //! Builtin tool: shell (base-tools.md §4).
 //!
-//! `{ command, cwd?, timeout_ms? }`. Hands the command to the execution
-//! Environment (which picks the dialect and provides a sanitized child env —
-//! DESIGN §8/§9), captures stdout+stderr, appends the exit code, and returns raw
-//! text. The agent loop applies `emit` uniformly after every executor returns.
+//! `{ command, cwd?, timeout_ms?, background? }`. Hands the command to the
+//! execution Environment (which picks the dialect and provides a sanitized child
+//! env — DESIGN §8/§9), captures stdout+stderr, appends the exit code, and
+//! returns raw text. The agent loop applies `emit` uniformly after every
+//! executor returns.
 //!
-//! Skeleton scope: synchronous run only. Background tasks / streaming are later
-//! work (base-tools.md §4); the wall-clock timeout is enforced.
+//! `background: true` is the other half (DESIGN §6.1): the command is started
+//! DETACHED and this returns at once with a receipt. It is a flag on this tool
+//! rather than a separate CLI verb on purpose — a gate and an approval policy
+//! read `shell`'s own `command`, and a `nulya task run -- rm -rf x` wrapper would
+//! blind both of them.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -21,13 +25,18 @@ pub const def: tool.Tool = .{
     .definition = .{
         .id = "builtin.shell",
         .name = "shell",
-        .description = "Run a command in the configured shell.",
+        .description = "Run a command in the configured shell. With background:true it starts detached and returns at once; you are told when it finishes.",
         .input_schema =
-        \\{"type":"object","properties":{"command":{"type":"string"},"cwd":{"type":"string"},"timeout_ms":{"type":"integer"}},"required":["command"]}
+        \\{"type":"object","properties":{"command":{"type":"string"},"cwd":{"type":"string"},"timeout_ms":{"type":"integer"},"background":{"type":"boolean"}},"required":["command"]}
         ,
     },
     .executor = tool.functionExecutor(run),
 };
+
+/// What a background call is told when there is no session to report back to.
+/// Teaching, not just refusing: the tool says how to get one and what to do
+/// right now (base-tools.md §1).
+const no_session_text = "background needs a durable session (nulya session new); run it in the foreground here";
 
 fn run(alloc: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolResult {
     const parsed = try tool.parseArgs(alloc, req.args_json);
@@ -36,6 +45,13 @@ fn run(alloc: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolRes
 
     const command = try tool.requireString(args, "command");
     const cwd = tool.optionalString(args, "cwd") orelse req.ctx.cwd;
+
+    const background = backgroundFlag(args) catch return .{
+        .ok = false,
+        .output = try alloc.dupe(u8, "background must be true or false; omit it to run the command in the foreground"),
+    };
+    if (background) return startBackground(alloc, req, args, command, cwd);
+
     const timeout_ms = timeoutMs(args) catch return .{
         .ok = false,
         .output = try std.fmt.allocPrint(
@@ -83,6 +99,70 @@ fn run(alloc: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolRes
 
     const out = try raw.toOwnedSlice(alloc);
     return .{ .ok = outcome.exit_code == 0 and !outcome.timed_out, .output = out };
+}
+
+/// Start the command detached and answer immediately. The receipt is the whole
+/// of what the model gets now — a name, where the output is accumulating, and
+/// the three commands that ask about it — because the RESULT arrives later, as
+/// its own turn (DESIGN §3.1, §6.1).
+fn startBackground(
+    alloc: std.mem.Allocator,
+    req: tool.ToolRequest,
+    args: std.json.Value,
+    command: []const u8,
+    cwd: []const u8,
+) anyerror!tool.RawToolResult {
+    const timeout_ms = backgroundTimeoutMs(args) catch return .{
+        .ok = false,
+        .output = try alloc.dupe(u8, "timeout_ms must be a positive integer of milliseconds; omit it and the task runs until it finishes or you kill it"),
+    };
+
+    const start = req.ctx.environment.startShellTask(alloc, .{
+        .command = command,
+        .cwd = cwd,
+        .timeout_ms = timeout_ms,
+    }) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        // Nowhere to report a result TO. Not a failure of the command — it was
+        // never started — so the model is told what is missing, and what works.
+        error.NoDurableSession => return .{ .ok = false, .output = try alloc.dupe(u8, no_session_text) },
+        else => return .{
+            .ok = false,
+            .output = try std.fmt.allocPrint(alloc, "could not start a background task: {s}", .{@errorName(err)}),
+        },
+    };
+    defer start.deinit(alloc);
+
+    return .{ .ok = true, .output = try std.fmt.allocPrint(
+        alloc,
+        "[background task {s} started] {s}\nlog: {s}\n" ++
+            "You will be told when it finishes (exit code and the tail of its output). Until then: " ++
+            "nulya task status {s} · nulya task wait {s} --timeout-ms 60000 · nulya task kill {s}; " ++
+            "read its output so far with tail.",
+        .{ start.task_id, command, start.log_path, start.task_id, start.task_id, start.task_id },
+    ) };
+}
+
+/// `background` is a bool or it is nothing: a string `"yes"` is refused rather
+/// than guessed at, the same discipline `timeout_ms` follows. Getting this wrong
+/// silently would mean the model believes a command is running in the background
+/// while the step waits for it (or the reverse).
+fn backgroundFlag(args: std.json.Value) !bool {
+    if (args != .object) return false;
+    const v = args.object.get("background") orelse return false;
+    if (v != .bool) return error.InvalidBackground;
+    return v.bool;
+}
+
+/// A background task's budget: passed through as given, with NO default and NO
+/// ceiling (DESIGN §6.1). Outliving the step is the whole point of the flag, so
+/// the foreground's 120s / 600s would defeat it; what ends a task instead is
+/// `nulya task kill`. Only the "not a positive integer" refusal is shared.
+fn backgroundTimeoutMs(args: std.json.Value) !?u32 {
+    if (args != .object) return null;
+    const v = args.object.get("timeout_ms") orelse return null;
+    if (v != .integer or v.integer <= 0 or v.integer > std.math.maxInt(u32)) return error.InvalidTimeout;
+    return @intCast(v.integer);
 }
 
 /// The command's wall-clock budget: the model's `timeout_ms` clamped into
@@ -178,6 +258,67 @@ test "timeout_ms is clamped to the max, and a non-integer teaches instead of gue
         const bad = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
         defer bad.deinit();
         try std.testing.expectError(error.InvalidTimeout, timeoutMs(bad.value));
+    }
+}
+
+test "background:true outside a durable session teaches instead of starting anything" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_real: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd = root_real[0..try tmp.dir.realPath(io, &root_real)];
+
+    // An environment with no session — a `session new`, the demo, a library
+    // caller. There is nowhere to deposit a `task_finished`, so nothing starts.
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+    const ctx: tool.ToolContext = .{ .environment = lenv.environment(), .fs = lenv.workspaceFs(), .cwd = cwd };
+
+    const res = try run(alloc, .{
+        .args_json = "{\"command\":\"echo never\",\"background\":true}",
+        .ctx = ctx,
+    });
+    defer alloc.free(res.output);
+    try std.testing.expect(!res.ok);
+    try std.testing.expectEqualStrings(no_session_text, res.output);
+    // And it really did not start: no tasks tree was created anywhere.
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, ".nulya", .{}));
+
+    // A `background` that is not a bool is refused, not guessed at — believing
+    // a command is detached when it is not (or the reverse) is the failure this
+    // prevents.
+    const bad = try run(alloc, .{
+        .args_json = "{\"command\":\"echo never\",\"background\":\"yes\"}",
+        .ctx = ctx,
+    });
+    defer alloc.free(bad.output);
+    try std.testing.expect(!bad.ok);
+    try std.testing.expect(std.mem.indexOf(u8, bad.output, "background must be true or false") != null);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, ".nulya", .{}));
+}
+
+test "a background timeout is passed through unclamped; a foreground one is still clamped" {
+    const alloc = std.testing.allocator;
+
+    // No default and no ceiling: outliving the step is the point (DESIGN §6.1).
+    const none = try std.json.parseFromSlice(std.json.Value, alloc, "{\"command\":\"x\"}", .{});
+    defer none.deinit();
+    try std.testing.expectEqual(@as(?u32, null), try backgroundTimeoutMs(none.value));
+
+    const huge = try std.json.parseFromSlice(std.json.Value, alloc, "{\"timeout_ms\":3600000}", .{});
+    defer huge.deinit();
+    try std.testing.expectEqual(@as(?u32, 3_600_000), (try backgroundTimeoutMs(huge.value)).?);
+    // The same number in the foreground is still clamped to the kernel ceiling.
+    try std.testing.expectEqual(tool.Timeouts.shell_max_ms, try timeoutMs(huge.value));
+
+    for ([_][]const u8{ "{\"timeout_ms\":0}", "{\"timeout_ms\":-1}", "{\"timeout_ms\":\"600\"}" }) |body| {
+        const bad = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+        defer bad.deinit();
+        try std.testing.expectError(error.InvalidTimeout, backgroundTimeoutMs(bad.value));
     }
 }
 

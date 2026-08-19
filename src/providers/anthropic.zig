@@ -278,11 +278,12 @@ fn writeCacheControl(jw: *std.json.Stringify) !void {
 
 const Role = enum { user, assistant };
 
-/// Which message role a turn belongs to. Tool results and capability notes are
-/// user-side content on this API — there is no mid-conversation system role.
+/// Which message role a turn belongs to. Tool results, capability notes and
+/// background task reports are user-side content on this API — there is no
+/// mid-conversation system role.
 fn roleOf(turn: prompt.Turn) Role {
     return switch (turn) {
-        .user_text, .tool_results, .capability_note => .user,
+        .user_text, .tool_results, .capability_note, .task_finished => .user,
         .assistant => .assistant,
     };
 }
@@ -326,7 +327,7 @@ fn writeMessage(jw: *std.json.Stringify, alloc: std.mem.Allocator, role: Role, r
             if (u.text.len != 0 or u.images.len == 0) try writeTextBlock(jw, u.text, takes(breakpoint, &seen));
             for (u.images) |img| try writeImageBlock(jw, img, takes(breakpoint, &seen));
         },
-        .capability_note => |text| try writeTextBlock(jw, text, takes(breakpoint, &seen)),
+        .capability_note, .task_finished => |text| try writeTextBlock(jw, text, takes(breakpoint, &seen)),
         .assistant => |as| {
             // The turn's `thinking` / `redacted_thinking` blocks, exactly as this
             // API streamed them (signature included). They must lead the
@@ -407,7 +408,7 @@ fn cacheableBlocks(run: []const prompt.Turn) usize {
             if (u.text.len != 0 or u.images.len == 0) n += 1;
             n += u.images.len;
         },
-        .capability_note => n += 1,
+        .capability_note, .task_finished => n += 1,
         .assistant => |as| {
             if (as.text.len != 0) n += 1;
             n += as.calls.len;
@@ -801,6 +802,33 @@ test "thinking blocks are collected whole and replayed verbatim ahead of the tur
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, body, "\"cache_control\""));
     // No empty text block was invented: the thinking blocks and the call are the body.
     try std.testing.expect(std.mem.indexOf(u8, body, "\"text\":\"\"") == null);
+}
+
+test "a finished background task is a user text block the moving breakpoint can land on" {
+    const alloc = std.testing.allocator;
+
+    var l = ledger.Ledger.init(alloc);
+    defer l.deinit();
+    try l.append(.{ .user_text = .{ .text = "build it" } });
+    try l.append(.{ .assistant = .{ .text = "started", .calls = &.{} } });
+    try l.append(.{ .task_finished = .{
+        .task = "s-1/t3",
+        .exit_code = 0,
+        .text = "[background task s-1/t3 finished] zig build test · exit 0",
+    } });
+    const body = try testRequestJson(alloc, &l, true, null);
+    defer alloc.free(body);
+
+    // User side on this wire, exactly like a capability note: there is no
+    // mid-conversation system role here to put it in.
+    const report_at = std.mem.indexOf(u8, body, "[background task s-1/t3 finished]").?;
+    const last_user_at = std.mem.lastIndexOf(u8, body, "\"role\":\"user\"").?;
+    try std.testing.expect(last_user_at < report_at);
+
+    // `cacheableBlocks` counted it, so the moving breakpoint sits on it — the
+    // last block of the last message — and there are still exactly two.
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, body, "\"cache_control\""));
+    try std.testing.expect(std.mem.lastIndexOf(u8, body, "\"cache_control\"").? > report_at);
 }
 
 test "an image is a source block that can take the moving breakpoint; a turn without one is unchanged" {

@@ -83,11 +83,12 @@ fn emit(raw: []const u8, tool: []const u8, spill_key: SpillKey, ctx: *Ctx) Emitt
 ## 4. 三个基础工具各自的形态
 
 ### shell
-- 单工具，`{ command, cwd?, timeout_ms? }`。**去掉 `output_mode`**——溢出由 §2 `emit` 自动落盘，模型不用选。
+- 单工具，`{ command, cwd?, timeout_ms?, background? }`。**去掉 `output_mode`**——溢出由 §2 `emit` 自动落盘，模型不用选。
 - exit code 追加；stderr 以 `--- stderr ---` 分隔追加。
 - `timeout_ms` **已实现**：缺省 §3 的 120s、夹进 `[1, 600000]`，非正整数当场教学式拒绝（不替它换个数）。到点杀掉**整棵进程树**（POSIX process group / Windows job object，取消走同一条路径；OS 拒绝 job 时降级为只杀直接子进程，DESIGN §6.1），输出里 `[exit …]` 之前多一行 `[timed out after <n> ms; process killed, output above is partial]`，`ok=false`。
 - **正常返回不杀树**：`some-server >/dev/null 2>&1 &` 这样的后台进程活得过这次调用（两个平台一致）。但它**必须重定向 stdio**——否则它继承着管道写端，而 §2 的 drain 要读到 EOF，这次调用就会一直等到它退出。
-- Later hardening：`run_in_background`、静默+非零时的解析提示。不要为了 walking skeleton 提前引入后台任务子系统。
+- **`background: true` 已实现**（当年这里写的 "later hardening：`run_in_background`"，DESIGN §6.1）：命令交给一个 supervisor 进程（`nulya task supervise`）看着跑，调用**立刻返回回执**（任务全名 `<sid>/t<N>` + log 路径 + status / wait / kill 三条命令），结束时结果作为第五种 ledger 事件 `task_finished` 经 inbox 在下一个 step 边界进对话。与前台相反的三条：**没有缺省 timeout 也没有上限**（活得过 step 就是它的意义，收口靠 `nulya task kill`）· **取消 step 不碰任务** · usage journal 记的是那次**发射**。没有 durable session 就 `ok=false` + 教学文案、什么都不启动；`background` 不是 bool 当场拒绝。**没有引入"后台任务子系统"**：内核只多了 `Environment.startShellTask` 与一种事件，supervisor 与 `nulya task …` 全在壳层（`cli/task.zig`）。
+- Later hardening：静默+非零时的解析提示。
 - **不做** per-command 输出过滤子系统。噪声大的命令：要么模型自己 `| tail`/`| rg`，要么 §2 的头尾+落盘通用兜底。
 
 ### edit

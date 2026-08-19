@@ -270,6 +270,7 @@ pub fn flattenIR(alloc: std.mem.Allocator, ir: prompt.PromptIR) ![]u8 {
             try out.writer.print("T|{s}|{}|{s}\n", .{ r.call_id, r.ok, r.output });
         },
         .capability_note => |text| try out.writer.print("N|{s}\n", .{text}),
+        .task_finished => |text| try out.writer.print("F|{s}\n", .{text}),
     };
     return out.toOwnedSlice();
 }
@@ -703,4 +704,32 @@ pub fn stageBundledIn(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, root
     const version = try prebuiltVersion(alloc, io, key, repo_dir, draft_rel, zig_exe);
     try installVersionInto(alloc, io, ws, root_rel, id, version);
     return alloc.dupe(u8, version);
+}
+
+/// The repo's own copy of a bundled extension, built into this workspace's store.
+/// Returns `<id>@<version>` — the ref every caller here runs it by, since a
+/// bundled extension is never activated. Caller frees. Skips the test when the
+/// harness did not name a repo or a toolchain.
+pub fn buildBundled(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, exe_abs: []const u8, id: []const u8) ![]u8 {
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const zig_exe = host_env.get("NULYA_TEST_ZIG") orelse return error.SkipZigTest;
+    const repo = host_env.get("NULYA_REPO") orelse return error.SkipZigTest;
+
+    // The compile is shared with every other test that wants this package
+    // (`stageBundled`); the real `ext build` below then answers "already built" —
+    // the same CLI path, without a second seven-second compile.
+    alloc.free(try stageBundled(alloc, io, ws, id));
+
+    const src = try std.fs.path.join(alloc, &.{ repo, "extensions", id });
+    defer alloc.free(src);
+    const built = try runCliEnv(alloc, io, ws, &.{ exe_abs, "ext", "build", src }, "NULYA_ZIG", zig_exe);
+    defer alloc.free(built.stdout);
+    if (built.code != 0) {
+        std.debug.print("{s} extension failed to build:\n{s}\n", .{ id, built.stdout });
+        return error.ExtensionBuildFailed;
+    }
+    const version = try extractVersion(alloc, built.stdout);
+    defer alloc.free(version);
+    return std.fmt.allocPrint(alloc, "{s}@{s}", .{ id, version });
 }

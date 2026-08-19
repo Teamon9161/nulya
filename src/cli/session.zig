@@ -298,7 +298,9 @@ pub fn createSession(alloc: std.mem.Allocator, io: std.Io, args: []const []const
 
     try std.Io.Dir.cwd().createDirPath(io, launch.sessions_dir);
 
-    var lenv = launch.localEnvironment(alloc, io, &cfg) catch |err| switch (err) {
+    // No session ref: `session new` composes and writes a header, it never runs
+    // a tool, so nothing here can start a background task.
+    var lenv = launch.localEnvironment(alloc, io, &cfg, null) catch |err| switch (err) {
         error.UnsupportedEnvironmentBackend => {
             try printErrFmt(alloc, io, "environment backend '{s}' is not implemented; only local\n", .{@tagName(cfg.environment.backend)});
             return null;
@@ -760,7 +762,15 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     var cfg = try config.load(alloc, io, &host);
     defer cfg.deinit();
 
-    var lenv = launch.localEnvironment(alloc, io, &cfg) catch |err| switch (err) {
+    // The session this step's background tasks belong to: their supervisor
+    // deposits `task_finished` into this file's inbox, and their directories
+    // live beside this session's spills (DESIGN §6.1).
+    const tasks_dir = try launch.sessionTasksDir(alloc, id);
+    defer alloc.free(tasks_dir);
+    var lenv = launch.localEnvironment(alloc, io, &cfg, .{
+        .session_path = spath,
+        .tasks_dir = tasks_dir,
+    }) catch |err| switch (err) {
         error.UnsupportedEnvironmentBackend => {
             return stepFail(alloc, io, stream, "environment backend '{s}' is not implemented; only local", .{@tagName(cfg.environment.backend)});
         },

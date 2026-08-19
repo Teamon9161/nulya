@@ -204,11 +204,19 @@ fn compact(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ
         return .{ .failed = try fail(alloc, -32000, "cannot open the continuing session: {s}", .{detail(forked)}) };
     }
 
+    // 5b. Background tasks the parent still has running are handed over too.
+    //     A fork does NOT inherit them by itself and should not — a sub-session
+    //     must not take a parent's work — but a compaction is not a branch: it
+    //     is the same conversation in a new file, and a result delivered into a
+    //     session nobody is reading any more is a result lost. Failing to hand
+    //     one over never fails the fork; the result simply stays with the parent.
+    const tasks_footer = try handOverTasks(alloc, io, exe, args.session, new_id);
+
     // 6. Carry the brief over, with the parent pointer written by code (see
     //    `parent_footer`). It is deposited, not stepped: it waits in the new
     //    session's inbox exactly like a turn typed before a step runs.
     const footer = try std.fmt.allocPrint(alloc, parent_footer, .{ args.session, found.seq, args.session });
-    const carried = try std.fmt.allocPrint(alloc, "{s}\n{s}{s}", .{ summary_marker, found.summary, footer });
+    const carried = try std.fmt.allocPrint(alloc, "{s}\n{s}{s}{s}", .{ summary_marker, found.summary, footer, tasks_footer });
     const handed = try runNulya(alloc, io, exe, &.{ "session", "append", new_id, carried });
     if (handed.code != 0) {
         return .{ .failed = try fail(alloc, -32000, "{s} was created but the summary could not be carried into it: {s}", .{ new_id, detail(handed) }) };
@@ -222,6 +230,64 @@ fn compact(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ
         .parent_seq = found.seq,
         .summary_bytes = found.summary.len,
     } };
+}
+
+/// Retarget every task the parent still has running to the child, and describe
+/// them for the carried brief. Empty when there are none — a session with no
+/// background work says nothing about background work.
+///
+/// The kernel is the authority on what "still running" means: this asks
+/// `task list --running --json` rather than re-deriving `lost` from lease files,
+/// the same discipline the front end follows. Every failure here is a warning on
+/// stderr and nothing more: the fork has already happened, and a task whose
+/// delivery could not be moved still reports into the parent's inbox, where it
+/// is findable — losing the whole compaction over it would be the worse trade.
+fn handOverTasks(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, parent: []const u8, child: []const u8) ![]const u8 {
+    const listed = try runNulya(alloc, io, exe, &.{ "task", "list", "--session", parent, "--running", "--json" });
+    if (listed.code != 0) {
+        try warn(alloc, io, "compact: could not list {s}'s background tasks: {s}\n", .{ parent, detail(listed) });
+        return "";
+    }
+    const parsed = std.json.parseFromSlice(std.json.Value, alloc, listed.stdout, .{}) catch return "";
+    if (parsed.value != .object) return "";
+    const tasks = switch (parsed.value.object.get("tasks") orelse return "") {
+        .array => |a| a,
+        else => return "",
+    };
+
+    var moved: std.ArrayList([]const u8) = .empty;
+    var first: []const u8 = "";
+    for (tasks.items) |entry| {
+        if (entry != .object) continue;
+        const name = stringField(entry.object, "task") orelse continue;
+        const done = try runNulya(alloc, io, exe, &.{ "task", "retarget", name, "--to", child });
+        if (done.code != 0) {
+            try warn(alloc, io, "compact: {s} keeps reporting into {s}: {s}\n", .{ name, parent, detail(done) });
+            continue;
+        }
+        if (first.len == 0) first = name;
+        const command = stringField(entry.object, "command") orelse "";
+        const elapsed: ?i64 = switch (entry.object.get("elapsed_s") orelse std.json.Value{ .null = {} }) {
+            .integer => |n| n,
+            else => null,
+        };
+        try moved.append(alloc, if (elapsed) |s|
+            try std.fmt.allocPrint(alloc, "{s} ({s}, {d}s so far)", .{ name, command, s })
+        else
+            try std.fmt.allocPrint(alloc, "{s} ({s})", .{ name, command }));
+    }
+    if (moved.items.len == 0) return "";
+
+    return std.fmt.allocPrint(
+        alloc,
+        "\nBackground tasks still running when this session was forked: {s} — nulya task status {s}; their results will arrive here when they finish.\n",
+        .{ try std.mem.join(alloc, ", ", moved.items), first },
+    );
+}
+
+fn warn(alloc: std.mem.Allocator, io: std.Io, comptime fmt: []const u8, fmt_args: anytype) !void {
+    const line = try std.fmt.allocPrint(alloc, fmt, fmt_args);
+    try std.Io.File.stderr().writeStreamingAll(io, line);
 }
 
 /// A brief, or the reason there is none. Every way of NOT getting one leaves the

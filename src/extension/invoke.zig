@@ -181,6 +181,13 @@ const FakeEnv = struct {
         return error.NotSupported;
     }
 
+    fn startShellTask(ptr: *anyopaque, alloc: std.mem.Allocator, req: environment.TaskRequest) anyerror!environment.TaskStart {
+        _ = ptr;
+        _ = alloc;
+        _ = req;
+        return error.NoDurableSession;
+    }
+
     fn handle(self: *FakeEnv) environment.Environment {
         return .{
             .io = self.io,
@@ -189,6 +196,7 @@ const FakeEnv = struct {
                 .dialect = dialect,
                 .runShell = runShell,
                 .runExtension = runExtension,
+                .startShellTask = startShellTask,
             },
         };
     }

@@ -52,6 +52,7 @@ test "cli help: help / --help / -h print the same usage covering every verb fami
         "--effort",     "--stream",     "--gate",    "session events", "session cancel",
         "outcome",      "session list", "--image",   "config show",    "config refresh",
         "skill load",   "src",          "toolchain", "help",           "demo",
+        "task run",     "task list",    "wait",      "retarget",       "--running",
     }) |needle| {
         std.testing.expect(std.mem.indexOf(u8, help.stdout, needle) != null) catch |err| {
             std.debug.print("`nulya help` never mentions '{s}'\n", .{needle});
@@ -62,8 +63,11 @@ test "cli help: help / --help / -h print the same usage covering every verb fami
     // One screen: this is read by a model that pays for every line of it. The
     // budget moves only when a real capability arrives (`--image`, +2; `ext
     // seed`, +1; `config refresh`, +1; `demo`, +1 — it stopped being what a bare
-    // `nulya` does, so it has to be listed).
-    try std.testing.expect(std.mem.count(u8, help.stdout, "\n") <= 45);
+    // `nulya` does, so it has to be listed; `nulya task`, +6 — a whole verb
+    // family, compressed to two entries whose continuation lines still have to
+    // carry `wait`'s three exit codes, which is the one thing a driver cannot
+    // guess).
+    try std.testing.expect(std.mem.count(u8, help.stdout, "\n") <= 51);
 
     // The two flag spellings a terminal user reaches for reach the same text.
     for ([_][]const u8{ "--help", "-h" }) |flag| {

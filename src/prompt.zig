@@ -56,6 +56,13 @@ pub const Turn = union(enum) {
     /// another appended turn, so it extends the stable prefix — the cache keeps
     /// hitting.
     capability_note: []const u8,
+    /// The report a finished background task left behind — its text only
+    /// (DESIGN §3.1). The task's full name and its exit code are structured
+    /// facts for readers, never model-visible on their own: everything the model
+    /// needs to read is already IN the text, which the supervisor renders with
+    /// its own delimiters. Another appended turn, so it extends the stable
+    /// prefix like any other.
+    task_finished: []const u8,
 
     /// A user turn's model-visible content: its text and the images inlined
     /// with it. Unlike `ToolCall` / `ToolResult`, this is not a narrowing of
@@ -172,6 +179,7 @@ pub fn projectWithSystem(alloc: std.mem.Allocator, system_blocks: []const System
             turn.* = .{ .tool_results = projected };
         },
         .capability_note => |note| turn.* = .{ .capability_note = note.text },
+        .task_finished => |t| turn.* = .{ .task_finished = t.text },
     };
     return .{
         .system_blocks = system_blocks,
@@ -205,6 +213,7 @@ fn turnsEqual(a: Turn, b: Turn) bool {
             break :blk true;
         },
         .capability_note => |text| std.mem.eql(u8, text, b.capability_note),
+        .task_finished => |text| std.mem.eql(u8, text, b.task_finished),
         .assistant => |as| blk: {
             const other = b.assistant;
             if (!std.mem.eql(u8, as.reasoning, other.reasoning)) break :blk false;
@@ -426,6 +435,29 @@ test "a capability_note appends a capability_note turn without breaking the pref
     try std.testing.expectEqual(before.turns.len + 1, after.turns.len);
     // Only the announcement text is model-visible; id/version stay behind.
     try std.testing.expectEqualStrings("New capability available: `greet`.", after.turns[after.turns.len - 1].capability_note);
+}
+
+test "a finished task appends one turn carrying only its text" {
+    const alloc = std.testing.allocator;
+    var l = ledger.Ledger.init(alloc);
+    defer l.deinit();
+
+    try l.append(.{ .user_text = .{ .text = "build it" } });
+    const before = try project(alloc, l.view());
+    defer before.deinit(alloc);
+
+    const report = "[background task s-1/t3 finished] zig build test · exit 0 · 41.8s\n--- output tail ---\nok\n--- end of output ---";
+    try l.append(.{ .task_finished = .{ .task = "s-1/t3", .exit_code = 0, .text = report } });
+    const after = try project(alloc, l.view());
+    defer after.deinit(alloc);
+
+    // Just another appended turn: the cached prefix is untouched (DESIGN §1).
+    try std.testing.expect(isStablePrefix(before.turns, after.turns));
+    try std.testing.expectEqual(before.turns.len + 1, after.turns.len);
+    // The name and the exit code are facts for readers, not model-visible on
+    // their own — `Turn.task_finished` has nowhere to put them, which is the
+    // point (they are already inside the text the supervisor rendered).
+    try std.testing.expectEqualStrings(report, after.turns[after.turns.len - 1].task_finished);
 }
 
 test "reopening a durable ledger projects a turn-identical prefix" {

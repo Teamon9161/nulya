@@ -139,6 +139,46 @@ pub const WorkspaceFs = struct {
     }
 };
 
+/// A command to run DETACHED, outliving the step process that asked for it
+/// (DESIGN §6.1). Deliberately unlike `ShellRequest`: there is no capture cap
+/// (the whole of the output goes to the task's log file), and `timeout_ms` has
+/// no default and no ceiling — a task that outlives its step is the point, and
+/// what ends one is `nulya task kill`.
+pub const TaskRequest = struct {
+    command: []const u8,
+    cwd: []const u8,
+    timeout_ms: ?u32 = null,
+};
+
+/// What starting a task tells the caller, immediately: which task this is and
+/// where to watch it. Both strings are caller-owned.
+pub const TaskStart = struct {
+    /// The task's FULL name, `<session-id>/t<N>` (DESIGN §6.1). Full so that a
+    /// task whose report was retargeted to another session still names itself
+    /// unambiguously, and so no workspace-wide counter is needed.
+    task_id: []u8,
+    /// The log accumulating this task's stdout+stderr, relative to the workspace.
+    log_path: []u8,
+
+    pub fn deinit(self: TaskStart, alloc: std.mem.Allocator) void {
+        alloc.free(self.task_id);
+        alloc.free(self.log_path);
+    }
+};
+
+/// The durable session an environment's background tasks belong to (DESIGN §8),
+/// when it has one. Both halves are decided by the SHELL layer and handed down —
+/// the same division of labour as `StepContext.scratch_dir`, which the kernel
+/// only writes into: `session_path` is the file the supervisor deposits its
+/// `task_finished` into (and whose stem names the task), `tasks_dir` is where
+/// this workspace keeps that session's tasks (`launch.sessionTasksDir`). Absent
+/// means `startShellTask` has nowhere to report to, and says so instead of
+/// guessing a session.
+pub const SessionRef = struct {
+    session_path: []const u8,
+    tasks_dir: []const u8,
+};
+
 /// The environment handle carried in every tool's `ToolContext`. The vtable
 /// covers process execution and dialect. Fixed-shape — nothing grows with the
 /// conversation, so it is safe in `ToolContext` (DESIGN §7.6).
@@ -151,6 +191,7 @@ pub const Environment = struct {
         dialect: *const fn (ptr: *anyopaque) Dialect,
         runShell: *const fn (ptr: *anyopaque, alloc: std.mem.Allocator, req: ShellRequest) anyerror!ShellOutcome,
         runExtension: *const fn (ptr: *anyopaque, alloc: std.mem.Allocator, req: ExtensionRequest) anyerror!ExtensionOutcome,
+        startShellTask: *const fn (ptr: *anyopaque, alloc: std.mem.Allocator, req: TaskRequest) anyerror!TaskStart,
     };
 
     pub fn dialect(self: Environment) Dialect {
@@ -163,6 +204,15 @@ pub const Environment = struct {
 
     pub fn runExtension(self: Environment, alloc: std.mem.Allocator, req: ExtensionRequest) !ExtensionOutcome {
         return self.vtable.runExtension(self.ptr, alloc, req);
+    }
+
+    /// Start `req` detached and return at once. The ONE entry point for a
+    /// background task: `shell {background:true}` and `nulya task run` both
+    /// arrive here, so allocating the slot and launching the supervisor exist
+    /// in exactly one place. `error.NoDurableSession` when this environment
+    /// belongs to no session — there would be nowhere to report the result.
+    pub fn startShellTask(self: Environment, alloc: std.mem.Allocator, req: TaskRequest) !TaskStart {
+        return self.vtable.startShellTask(self.ptr, alloc, req);
     }
 };
 
@@ -215,6 +265,25 @@ fn isWindowsBashLauncherDir(path: []const u8) bool {
 pub const LocalOptions = struct {
     /// Override the OS-derived shell dialect.
     dialect: ?Dialect = null,
+    /// The durable session background tasks started here belong to, when there
+    /// is one. `session new`, `nulya demo` and the tests leave it null: nothing
+    /// they do can start a task.
+    session: ?SessionRef = null,
+};
+
+/// How many `t<N>` slots one session may hand out. High enough that no real
+/// session reaches it, finite so a corrupted tasks directory cannot spin here.
+const max_tasks_per_session: usize = 10_000;
+
+/// One assembled shell invocation: the argv and whatever heap string it borrows.
+pub const ShellCommandLine = struct {
+    argv: []const []const u8,
+    /// The one string the powershell form allocates; null for bash.
+    owned_script: ?[]u8,
+
+    pub fn deinit(self: ShellCommandLine, alloc: std.mem.Allocator) void {
+        if (self.owned_script) |s| alloc.free(s);
+    }
 };
 
 /// The `local` backend: runs in the host process with a sanitized child
@@ -224,9 +293,15 @@ pub const LocalOptions = struct {
 /// `sandbox` backend.
 pub const LocalEnvironment = struct {
     io: std.Io,
+    alloc: std.mem.Allocator,
     dialect_val: Dialect,
     bash_exe: []const u8,
     env: std.process.Environ.Map,
+    /// The session this environment's background tasks belong to, copied so it
+    /// cannot outlive the caller's strings. Null = no session, so
+    /// `startShellTask` refuses (see `SessionRef`).
+    session_path: ?[]u8 = null,
+    tasks_dir: ?[]u8 = null,
 
     pub fn init(alloc: std.mem.Allocator, io: std.Io, opts: LocalOptions) !LocalEnvironment {
         var host = try hostEnvironMap(alloc);
@@ -256,16 +331,30 @@ pub const LocalEnvironment = struct {
 
         const bash_exe = if (builtin.os.tag == .windows) findWindowsBash(io, &host) orelse default_bash_exe else default_bash_exe;
 
+        var session_path: ?[]u8 = null;
+        errdefer if (session_path) |p| alloc.free(p);
+        var tasks_dir: ?[]u8 = null;
+        errdefer if (tasks_dir) |p| alloc.free(p);
+        if (opts.session) |s| {
+            session_path = try alloc.dupe(u8, s.session_path);
+            tasks_dir = try alloc.dupe(u8, s.tasks_dir);
+        }
+
         return .{
             .io = io,
+            .alloc = alloc,
             .dialect_val = opts.dialect orelse defaultDialect(io, &host),
             .bash_exe = bash_exe,
             .env = sanitized,
+            .session_path = session_path,
+            .tasks_dir = tasks_dir,
         };
     }
 
     pub fn deinit(self: *LocalEnvironment) void {
         self.env.deinit();
+        if (self.session_path) |p| self.alloc.free(p);
+        if (self.tasks_dir) |p| self.alloc.free(p);
         self.* = undefined;
     }
 
@@ -282,27 +371,45 @@ pub const LocalEnvironment = struct {
         return self.dialect_val;
     }
 
-    fn runShellImpl(ptr: *anyopaque, alloc: std.mem.Allocator, req: ShellRequest) anyerror!ShellOutcome {
-        const self: *LocalEnvironment = @ptrCast(@alignCast(ptr));
-
-        const bash_argv = [_][]const u8{ self.bash_exe, "-lc", req.command };
-        var powershell_argv: [5][]const u8 = undefined;
-        var owned_script: ?[]u8 = null;
-        defer if (owned_script) |script| alloc.free(script);
-
-        const argv: []const []const u8 = switch (self.dialect_val) {
-            .bash => bash_argv[0..],
-            .powershell => blk: {
+    /// The argv that runs `command` in this environment's dialect — the ONE
+    /// place that decision is made. Two consumers: an in-process `shell` call
+    /// below, and `nulya task supervise`, which runs a BACKGROUND command and
+    /// must reach the same interpreter with the same flags (DESIGN §6.1).
+    ///
+    /// `buf` backs the argv and must outlive the returned value; the powershell
+    /// form additionally owns one heap string, released by `deinit`.
+    pub fn shellArgv(
+        self: *const LocalEnvironment,
+        alloc: std.mem.Allocator,
+        command: []const u8,
+        buf: *[5][]const u8,
+    ) !ShellCommandLine {
+        switch (self.dialect_val) {
+            .bash => {
+                buf[0] = self.bash_exe;
+                buf[1] = "-lc";
+                buf[2] = command;
+                return .{ .argv = buf[0..3], .owned_script = null };
+            },
+            .powershell => {
                 const script = try std.fmt.allocPrint(
                     alloc,
                     "try {{ [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8 }} catch {{}}; {s}",
-                    .{req.command},
+                    .{command},
                 );
-                owned_script = script;
-                powershell_argv = .{ "powershell", "-NoProfile", "-NonInteractive", "-Command", script };
-                break :blk powershell_argv[0..];
+                buf.* = .{ "powershell", "-NoProfile", "-NonInteractive", "-Command", script };
+                return .{ .argv = buf[0..5], .owned_script = script };
             },
-        };
+        }
+    }
+
+    fn runShellImpl(ptr: *anyopaque, alloc: std.mem.Allocator, req: ShellRequest) anyerror!ShellOutcome {
+        const self: *LocalEnvironment = @ptrCast(@alignCast(ptr));
+
+        var argv_buf: [5][]const u8 = undefined;
+        const cmdline = try self.shellArgv(alloc, req.command, &argv_buf);
+        defer cmdline.deinit(alloc);
+        const argv = cmdline.argv;
         // `argv[0]` is resolved via the *parent* PATH (std.process contract), so a
         // stripped child env still finds `bash`/`powershell` when an absolute Git
         // Bash path was not detected.
@@ -527,6 +634,97 @@ pub const LocalEnvironment = struct {
         return .{ .deadline = std.Io.Clock.Timestamp.fromNow(io, duration) };
     }
 
+    /// Start a detached background command and return the moment it is launched
+    /// (DESIGN §6.1). What is started is NOT the command itself but
+    /// `nulya task supervise` — the same binary, in its supervisor role: it
+    /// holds the task's lease, runs the real command under a `Tree` so
+    /// `nulya task kill` ends the whole subtree, and deposits the
+    /// `task_finished` event when it is over. Nothing is waited on here.
+    ///
+    /// The slot is allocated with an exclusive `mkdir` (the handoff file's
+    /// discipline, one directory up): the first free `t<N>` wins, so two callers
+    /// racing cannot be handed the same name, and the name is monotonic within a
+    /// session.
+    fn startShellTaskImpl(ptr: *anyopaque, alloc: std.mem.Allocator, req: TaskRequest) anyerror!TaskStart {
+        const self: *LocalEnvironment = @ptrCast(@alignCast(ptr));
+        const session_path = self.session_path orelse return error.NoDurableSession;
+        const tasks_dir = self.tasks_dir orelse return error.NoDurableSession;
+        // The supervisor IS this binary. `NULYA_EXE` is where every child of a
+        // nulya process learns which one that is (DESIGN §7.6); without it there
+        // is no honest way to start one.
+        const exe = self.env.get("NULYA_EXE") orelse return error.HarnessPathUnknown;
+
+        const session_id = std.fs.path.stem(std.fs.path.basename(session_path));
+        if (session_id.len == 0) return error.NoDurableSession;
+
+        const cwd = std.Io.Dir.cwd();
+        try cwd.createDirPath(self.io, tasks_dir);
+
+        var slot: usize = 1;
+        var task_dir: ?[]u8 = null;
+        errdefer if (task_dir) |d| alloc.free(d);
+        while (slot <= max_tasks_per_session) : (slot += 1) {
+            const name = try std.fmt.allocPrint(alloc, "t{d}", .{slot});
+            defer alloc.free(name);
+            const candidate = try std.fs.path.join(alloc, &.{ tasks_dir, name });
+            if (cwd.createDir(self.io, candidate, .default_dir)) |_| {
+                task_dir = candidate;
+                break;
+            } else |err| {
+                alloc.free(candidate);
+                if (err != error.PathAlreadyExists) return err;
+            }
+        }
+        const dir_rel = task_dir orelse return error.TooManyTasks;
+
+        const task_id = try std.fmt.allocPrint(alloc, "{s}/t{d}", .{ session_id, slot });
+        errdefer alloc.free(task_id);
+        const log_path = try std.fs.path.join(alloc, &.{ dir_rel, task_log_name });
+        errdefer alloc.free(log_path);
+
+        var timeout_buf: [16]u8 = undefined;
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(alloc);
+        try argv.appendSlice(alloc, &.{ exe, "task", "supervise", "--dir", dir_rel, "--session", session_path, "--cwd", req.cwd });
+        if (req.timeout_ms) |ms| {
+            try argv.appendSlice(alloc, &.{ "--timeout-ms", try std.fmt.bufPrint(&timeout_buf, "{d}", .{ms}) });
+        }
+        try argv.appendSlice(alloc, &.{ "--", req.command });
+
+        // A PLAIN spawn, not a `Tree`: this call returns normally and kills
+        // nothing, and the supervisor must survive both this process and the
+        // terminal it was started from — hence its own process group on POSIX
+        // and no console on Windows. Its stdio is null because it inherits this
+        // process's pipes otherwise, and a step's drain would then wait for a
+        // process designed to outlive it (see `Tree`'s note on detaching).
+        var detached: DetachedStdio = .take();
+        defer detached.restore();
+        var child = try std.process.spawn(self.io, .{
+            .argv = argv.items,
+            // The workspace, NOT `req.cwd`: `--dir` and `--session` are
+            // workspace-relative, and where the COMMAND runs is `--cwd`'s job.
+            .cwd = .inherit,
+            .environ_map = &self.env,
+            .stdin = .ignore,
+            .stdout = .ignore,
+            .stderr = .ignore,
+            .create_no_window = true,
+            .pgid = if (builtin.os.tag == .windows) null else 0,
+        });
+        // Nothing is waited on: the supervisor outlives this call by design. On
+        // Windows the handle is ours to release; on POSIX the exiting step
+        // process hands the child to init.
+        if (builtin.os.tag == .windows) {
+            if (child.id) |handle| std.os.windows.CloseHandle(handle);
+            std.os.windows.CloseHandle(child.thread_handle);
+            child.id = null;
+        }
+
+        alloc.free(dir_rel);
+        task_dir = null;
+        return .{ .task_id = task_id, .log_path = log_path };
+    }
+
     fn readFileAllocImpl(ptr: *anyopaque, alloc: std.mem.Allocator, path: []const u8, max_bytes: usize) anyerror![]u8 {
         const self: *LocalEnvironment = @ptrCast(@alignCast(ptr));
         return std.Io.Dir.cwd().readFileAlloc(self.io, path, alloc, .limited(max_bytes));
@@ -559,7 +757,68 @@ pub const LocalEnvironment = struct {
         .dialect = dialectImpl,
         .runShell = runShellImpl,
         .runExtension = runExtensionImpl,
+        .startShellTask = startShellTaskImpl,
     };
+};
+
+/// The one file a task's stdout and stderr are appended to, in arrival order.
+/// Named here because both halves of the mechanism need it: the environment
+/// tells the caller where it is, and `nulya task supervise` writes it.
+pub const task_log_name = "output.log";
+
+/// The two kernel32 calls `DetachedStdio` needs, declared locally exactly as
+/// `environment/tree.zig` declares the job-object calls — std 0.16 ships
+/// neither. Analyzed lazily, so the externs never reach a POSIX link.
+const win32 = struct {
+    const windows = std.os.windows;
+    const HANDLE_FLAG_INHERIT: windows.DWORD = 0x00000001;
+    extern "kernel32" fn GetHandleInformation(hObject: windows.HANDLE, lpdwFlags: *windows.DWORD) callconv(.winapi) windows.BOOL;
+    extern "kernel32" fn SetHandleInformation(hObject: windows.HANDLE, dwMask: windows.DWORD, dwFlags: windows.DWORD) callconv(.winapi) windows.BOOL;
+};
+
+/// Keep this process's own stdio out of a DETACHED child.
+///
+/// Windows `CreateProcessW` is called with `bInheritHandles = TRUE` and no
+/// handle list, so a child inherits every INHERITABLE handle — not only the
+/// three the startup info names. When nulya itself was spawned with pipes (a
+/// driver running `session step`, a test running the CLI), those pipe write ends
+/// are exactly such handles: a supervisor that inherited a duplicate would hold
+/// them open for the task's whole life, and the caller's drain would not reach
+/// EOF until the background command finished. That is precisely the wait
+/// detaching exists to avoid — the task would be background in name only.
+///
+/// So the inherit flag is cleared on stdin/stdout/stderr across the spawn and
+/// restored right after. POSIX needs nothing: std opens its own descriptors
+/// `CLOEXEC`, and the child's three are redirected by `dup2`.
+const DetachedStdio = struct {
+    saved: if (builtin.os.tag == .windows) [3]?Saved else void =
+        if (builtin.os.tag == .windows) .{ null, null, null } else {},
+
+    const Saved = struct { handle: std.os.windows.HANDLE, flags: std.os.windows.DWORD };
+
+    fn take() DetachedStdio {
+        if (builtin.os.tag != .windows) return .{ .saved = {} };
+        var self: DetachedStdio = .{};
+        const files = [3]std.Io.File{ std.Io.File.stdin(), std.Io.File.stdout(), std.Io.File.stderr() };
+        for (files, 0..) |f, i| {
+            const handle = f.handle;
+            if (handle == std.os.windows.INVALID_HANDLE_VALUE) continue;
+            var flags: std.os.windows.DWORD = 0;
+            if (!win32.GetHandleInformation(handle, &flags).toBool()) continue;
+            if (flags & win32.HANDLE_FLAG_INHERIT == 0) continue;
+            if (!win32.SetHandleInformation(handle, win32.HANDLE_FLAG_INHERIT, 0).toBool()) continue;
+            self.saved[i] = .{ .handle = handle, .flags = flags };
+        }
+        return self;
+    }
+
+    fn restore(self: *DetachedStdio) void {
+        if (builtin.os.tag != .windows) return;
+        for (self.saved) |entry| {
+            const e = entry orelse continue;
+            _ = win32.SetHandleInformation(e.handle, win32.HANDLE_FLAG_INHERIT, e.flags & win32.HANDLE_FLAG_INHERIT);
+        }
+    }
 };
 
 /// Host secret-shaped environment variables should not reach an AI-authored

@@ -44,9 +44,7 @@ $log = ".nulya/scratch/goal-$id.jsonl"; New-Item -ItemType Directory -Force (Spl
 $i = 0
 while ($i -lt $max) {
     $i++
-    # The step's stdout goes to OUR stderr as it arrives, and to the log so the two
-    # signals below can be read back. A failing native command does not throw here,
-    # which is why the error line is checked explicitly.
+    # Step stdout goes to OUR stderr live and to the log so the checks below can read it back. A failing native command does not throw, hence the explicit error check.
     & $N session step $id --max-steps 1 --stream | Tee-Object -FilePath $log | ForEach-Object { [Console]::Error.WriteLine($_) }
     $streamed = (Get-Content -Raw $log)
     if ($streamed -match '"stream":"run","event":"error"') { exit 1 }
@@ -61,6 +59,8 @@ while ($i -lt $max) {
         continue
     }
     if ($streamed -match '"stopped":"end_turn"') {
+        # A background task may still owe an answer: 0 = one landed (step again to read it), 3 = nothing left to wait for.
+        & $N task wait --any --session $id | Out-Null; $w = $LASTEXITCODE; if ($w -eq 0) { continue } elseif ($w -ne 3) { exit 5 }
         Write-Output "done $id"
         Write-Output "evaluate: $N session outcome $id <success|partial|failure>"
         exit 0

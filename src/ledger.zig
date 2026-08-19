@@ -136,6 +136,28 @@ pub const Event = union(enum) {
         version: []const u8,
         text: []const u8,
     },
+    /// A background command this session started has ended (DESIGN §3.1). Same
+    /// genre as `capability_note`: a FACT about the environment that arrived
+    /// from another process, deposited into the inbox and drained at a step
+    /// boundary, projected as one more user-role turn.
+    ///
+    /// Deliberately NOT a `tool_results` entry: the call that started the task
+    /// already has its result ("started"), and one assistant batch maps to
+    /// exactly one matching `tool_results` (DESIGN §4) — a late arrival would
+    /// break that invariant and be rejected on every wire we speak besides.
+    /// Deliberately not a `user_text` either: the ledger would then claim a
+    /// person said this.
+    ///
+    /// `task` is the full name `<session-id>/t<N>`, `exit_code` is what the
+    /// supervisor saw the direct child exit with, and `text` is the whole of
+    /// what the model reads. Only `text` is projected — `task` / `exit_code`
+    /// are structured facts for readers and front ends, exactly as a note's
+    /// `id` / `version` are.
+    task_finished: struct {
+        task: []const u8,
+        exit_code: u8,
+        text: []const u8,
+    },
 };
 
 pub const Ledger = struct {
@@ -277,6 +299,11 @@ fn cloneEvent(a: std.mem.Allocator, e: Event) !Event {
             .id = try a.dupe(u8, note.id),
             .version = try a.dupe(u8, note.version),
             .text = try a.dupe(u8, note.text),
+        } },
+        .task_finished => |t| .{ .task_finished = .{
+            .task = try a.dupe(u8, t.task),
+            .exit_code = t.exit_code,
+            .text = try a.dupe(u8, t.text),
         } },
     };
 }
@@ -732,6 +759,13 @@ pub fn encodeEventBody(jw: *std.json.Stringify, e: Event) !void {
             try writeField(jw, "version", n.version);
             try writeField(jw, "text", n.text);
         },
+        .task_finished => |t| {
+            try jw.write("task_finished");
+            try writeField(jw, "task", t.task);
+            try jw.objectField("exit_code");
+            try jw.write(t.exit_code);
+            try writeField(jw, "text", t.text);
+        },
     }
 }
 
@@ -772,6 +806,11 @@ pub const WireEvent = struct {
     results: ?[]const ToolResultEntry = null,
     id: ?[]const u8 = null,
     version: ?[]const u8 = null,
+    /// A finished background task's full name `<session-id>/t<N>` and the exit
+    /// code its supervisor observed (see `Event.task_finished`); absent on every
+    /// other kind.
+    task: ?[]const u8 = null,
+    exit_code: ?u8 = null,
 };
 
 pub const WireCall = struct {
@@ -827,6 +866,13 @@ pub fn toEvent(a: std.mem.Allocator, w: WireEvent) !Event {
         return .{ .capability_note = .{
             .id = w.id orelse return error.CorruptLedger,
             .version = w.version orelse return error.CorruptLedger,
+            .text = w.text orelse return error.CorruptLedger,
+        } };
+    }
+    if (std.mem.eql(u8, w.kind, "task_finished")) {
+        return .{ .task_finished = .{
+            .task = w.task orelse return error.CorruptLedger,
+            .exit_code = w.exit_code orelse return error.CorruptLedger,
             .text = w.text orelse return error.CorruptLedger,
         } };
     }
@@ -1005,6 +1051,11 @@ fn expectEventsEqual(a: []const Event, b: []const Event) !void {
                 try std.testing.expectEqualStrings(n.id, y.capability_note.id);
                 try std.testing.expectEqualStrings(n.version, y.capability_note.version);
                 try std.testing.expectEqualStrings(n.text, y.capability_note.text);
+            },
+            .task_finished => |t| {
+                try std.testing.expectEqualStrings(t.task, y.task_finished.task);
+                try std.testing.expectEqual(t.exit_code, y.task_finished.exit_code);
+                try std.testing.expectEqualStrings(t.text, y.task_finished.text);
             },
         }
     }
@@ -1229,6 +1280,83 @@ test "an image deposited into the inbox is applied exactly once, images and all"
     var reopened = try openDurable(alloc, io, tmp.dir, spath);
     defer reopened.deinit();
     try expectEventsEqual(&.{shot}, reopened.view());
+}
+
+test "a finished background task round-trips as its own kind, multi-line text and all" {
+    const alloc = std.testing.allocator;
+
+    // The real shape: the supervisor's report is several lines with its own
+    // delimiters, so the round-trip has to survive escaped newlines.
+    const done: Event = .{ .task_finished = .{
+        .task = "s-1786-3f/t3",
+        .exit_code = 0,
+        .text = "[background task s-1786-3f/t3 finished] zig build test · exit 0 · 41.8s\n" ++
+            "--- output tail ---\nAll 114 tests passed.\n--- end of output ---",
+    } };
+    const line = try encodeEventLine(alloc, done, 7);
+    defer alloc.free(line);
+    // A flat line like every other kind, with the two structured facts beside
+    // the text a reader (or a front end) would otherwise have to parse out of it.
+    try std.testing.expect(std.mem.startsWith(
+        u8,
+        line,
+        "{\"seq\":7,\"kind\":\"task_finished\",\"task\":\"s-1786-3f/t3\",\"exit_code\":0,\"text\":\"",
+    ));
+    const parsed = try parseEventLine(alloc, line);
+    defer parsed.deinit();
+    try expectEventsEqual(&.{done}, &.{try toEvent(parsed.arena.allocator(), parsed.value)});
+
+    // A non-zero code is the same fact, not an error to read.
+    const failed: Event = .{ .task_finished = .{ .task = "s-1/t1", .exit_code = 137, .text = "killed" } };
+    const failed_line = try encodeEventLine(alloc, failed, 1);
+    defer alloc.free(failed_line);
+    try std.testing.expectEqualStrings(
+        "{\"seq\":1,\"kind\":\"task_finished\",\"task\":\"s-1/t1\",\"exit_code\":137,\"text\":\"killed\"}\n",
+        failed_line,
+    );
+
+    // A line missing either structured field is corruption, never a default:
+    // "which task" and "what happened to it" are not derivable from the text.
+    for ([_][]const u8{
+        "{\"seq\":1,\"kind\":\"task_finished\",\"exit_code\":0,\"text\":\"x\"}",
+        "{\"seq\":1,\"kind\":\"task_finished\",\"task\":\"s/t1\",\"text\":\"x\"}",
+        "{\"seq\":1,\"kind\":\"task_finished\",\"task\":\"s/t1\",\"exit_code\":0}",
+    }) |bad| {
+        const p = try parseEventLine(alloc, bad);
+        defer p.deinit();
+        try std.testing.expectError(error.CorruptLedger, toEvent(p.arena.allocator(), p.value));
+    }
+}
+
+test "a task report deposited into the inbox is applied exactly once" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const spath = "s.jsonl";
+
+    const done: Event = .{ .task_finished = .{
+        .task = "s/t3",
+        .exit_code = 0,
+        .text = "[background task s/t3 finished] echo hi · exit 0 · 0.1s",
+    } };
+    var l = try createDurable(alloc, io, tmp.dir, spath, .{ .session = "s" });
+    defer l.deinit();
+    // The supervisor's delivery name is DETERMINISTIC (`task-<sid>-t<N>`), so a
+    // redelivery is the same name — and the origin column alone makes applying
+    // it twice impossible. There is no content dedup arm for this kind.
+    try depositEvent(alloc, io, tmp.dir, spath, "task-s-t3", done);
+    try drainInbox(alloc, io, &l, tmp.dir, spath);
+    try depositEvent(alloc, io, tmp.dir, spath, "task-s-t3", done);
+    try drainInbox(alloc, io, &l, tmp.dir, spath);
+    try std.testing.expectEqual(@as(usize, 1), l.len());
+    try expectEventsEqual(&.{done}, l.view());
+
+    // A DIFFERENT task under a different name is a different fact and lands.
+    const second: Event = .{ .task_finished = .{ .task = "s/t4", .exit_code = 1, .text = "other" } };
+    try depositEvent(alloc, io, tmp.dir, spath, "task-s-t4", second);
+    try drainInbox(alloc, io, &l, tmp.dir, spath);
+    try std.testing.expectEqual(@as(usize, 2), l.len());
 }
 
 test "a stop reason the shape cannot say is written; the two it can are not" {

@@ -65,6 +65,7 @@ test {
     _ = @import("cli/common.zig");
     _ = @import("cli/session.zig");
     _ = @import("cli/session_list.zig");
+    _ = @import("cli/task.zig");
     _ = @import("cli/step_stream.zig");
     _ = @import("cli/ext.zig");
     _ = @import("cli/config.zig");

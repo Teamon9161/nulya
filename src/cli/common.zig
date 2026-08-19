@@ -195,6 +195,16 @@ pub const session_usage =
     \\
 ;
 
+pub const task_usage =
+    \\  nulya task run [--session <id>] [--cwd <dir>] [--timeout-ms N] -- <command>
+    \\                                                    start a detached command that outlives this step; you are told when
+    \\                                                    it finishes, and its whole output is kept in a log
+    \\  nulya task list [--session <id>] [--running] [--json] | status <task> [--json] | wait (<task> | --any) [--timeout-ms N] | kill <task> | retarget <task> --to <id>
+    \\                                                    watch them; wait exits 0 finished / 2 timed out / 3 nothing to wait
+    \\                                                    for; kill ends the whole tree; retarget delivers the result elsewhere
+    \\
+;
+
 pub const config_usage =
     \\  nulya config show [--json]                        effective profiles, model catalog and pins; never a secret
     \\  nulya config refresh [--json]                     ask a subscription endpoint for today's models, then show
@@ -227,7 +237,7 @@ pub fn usage(io: std.Io) !u8 {
         \\
         \\sessions — composition freezes at `new` and never changes; only `step` writes the file
         \\
-    ++ session_usage ++
+    ++ session_usage ++ task_usage ++
         \\
         \\reading this harness
         \\

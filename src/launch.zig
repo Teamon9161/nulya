@@ -41,6 +41,18 @@ pub fn sessionScratchDir(alloc: std.mem.Allocator, id: []const u8) ![]u8 {
     return std.fs.path.join(alloc, &.{ scratch_dir, id });
 }
 
+/// Where that session's background tasks live: `<scratch>/<id>/tasks`, one
+/// directory per task (DESIGN §6.1). Beside the spills on purpose — a session's
+/// whole byproduct is one subtree, so `rm -rf .nulya/scratch/<id>` clears it in
+/// one move and nothing survives under a name nobody remembers. Caller owns it.
+pub fn sessionTasksDir(alloc: std.mem.Allocator, id: []const u8) ![]u8 {
+    const scratch = try sessionScratchDir(alloc, id);
+    defer alloc.free(scratch);
+    return std.fs.path.join(alloc, &.{ scratch, tasks_subdir });
+}
+
+pub const tasks_subdir = "tasks";
+
 /// A deterministic, terminating scripted provider — the offline stand-in for a
 /// real model (DESIGN §13). Four modes, selected by `NULYA_SCRIPTED_MODE`:
 ///
@@ -57,10 +69,22 @@ pub fn sessionScratchDir(alloc: std.mem.Allocator, id: []const u8) ![]u8 {
 ///                     was forked from it. That makes the whole /goal loop —
 ///                     model proposes, driver forks, work continues in the child
 ///                     — testable with no network and no real model.
+///   background:       start ONE background command, then end the turn — saying
+///                     `background done` once a `task_finished` turn is in the
+///                     transcript and `waiting` while it is not, so a test can
+///                     tell whether the model actually READ the report rather
+///                     than merely being stepped again.
 pub const ScriptedProvider = struct {
     mode: Mode = .finish,
 
-    pub const Mode = enum { finish, loop, truncate, handoff, batch };
+    pub const Mode = enum { finish, loop, truncate, handoff, batch, background };
+
+    /// What the `background` mode's command prints. `echo` means the same thing
+    /// in both dialects, so the stand-in needs no dialect of its own.
+    pub const background_marker = "scripted-background-marker";
+    const background_args =
+        \\{"command":"echo scripted-background-marker","background":true}
+    ;
 
     /// The fixed brief the `handoff` mode proposes. Three complete sections, so
     /// the real bundled tool accepts it, with a sentinel a test can follow all
@@ -135,6 +159,27 @@ pub const ScriptedProvider = struct {
             try sink.emit(.{ .done = .tool_use });
             return;
         }
+        if (self.mode == .background) {
+            // The report landed: say so in a way a test can distinguish from
+            // "was stepped again but read nothing".
+            if (hasTaskReport(request.prompt_ir.turns)) {
+                try sink.emit(.{ .text_delta = "background done" });
+                try sink.emit(.{ .done = .end_turn });
+                return;
+            }
+            // The receipt came back but the task has not finished: end the turn
+            // and leave it to the driver to step again when there is something
+            // to read (DESIGN §6.1 — when to continue is policy, not kernel).
+            if (hasToolResult(request.prompt_ir.turns)) {
+                try sink.emit(.{ .text_delta = "waiting" });
+                try sink.emit(.{ .done = .end_turn });
+                return;
+            }
+            try sink.emit(.{ .tool_use_start = .{ .index = 0, .id = "bg1", .name = "shell" } });
+            try sink.emit(.{ .tool_use_input_delta = .{ .index = 0, .fragment = background_args } });
+            try sink.emit(.{ .done = .tool_use });
+            return;
+        }
         if (self.mode == .handoff) {
             // The handoff already happened this turn (its result is in the
             // transcript): say so and stop, so a parent that gets stepped again
@@ -174,6 +219,13 @@ pub const ScriptedProvider = struct {
 fn hasToolResult(turns: []const prompt.Turn) bool {
     for (turns) |turn| {
         if (turn == .tool_results) return true;
+    }
+    return false;
+}
+
+fn hasTaskReport(turns: []const prompt.Turn) bool {
+    for (turns) |turn| {
+        if (turn == .task_finished) return true;
     }
     return false;
 }
@@ -388,13 +440,24 @@ pub fn nonEmpty(value: []const u8, fallback: []const u8) []const u8 {
 /// implementation, so they are refused HERE — at the one place a session's
 /// environment is built — rather than silently running locally under a config
 /// that asked for isolation.
+///
+/// `session` names the durable session background tasks belong to, and is what
+/// makes `startShellTask` possible at all: null (a `session new`, the demo, a
+/// test) means a `shell {background:true}` has nowhere to report to and says so.
+/// Both halves are computed HERE rather than derived down in the environment —
+/// where a workspace keeps its sidecars is the shell layer's decision, exactly
+/// as `StepContext.scratch_dir` is.
 pub fn localEnvironment(
     alloc: std.mem.Allocator,
     io: std.Io,
     cfg: *const config.Config,
+    session: ?environment.SessionRef,
 ) !environment.LocalEnvironment {
     if (cfg.environment.backend != .local) return error.UnsupportedEnvironmentBackend;
-    return environment.LocalEnvironment.init(alloc, io, .{ .dialect = cfg.environment.shell.toLocalOption() });
+    return environment.LocalEnvironment.init(alloc, io, .{
+        .dialect = cfg.environment.shell.toLocalOption(),
+        .session = session,
+    });
 }
 
 /// The extension store roots this process searches, in order (DESIGN §7.2):
@@ -874,13 +937,23 @@ test "only the local environment backend runs; sandbox / remote are refused, not
     defer cfg.deinit();
 
     // The default backend builds an environment as usual…
-    var local = try localEnvironment(alloc, std.testing.io, &cfg);
+    var local = try localEnvironment(alloc, std.testing.io, &cfg, null);
     local.deinit();
 
     // …and a backend this build cannot honour fails rather than running the
     // tools locally under a config that asked for isolation (DESIGN §8).
     cfg.environment.backend = .sandbox;
-    try std.testing.expectError(error.UnsupportedEnvironmentBackend, localEnvironment(alloc, std.testing.io, &cfg));
+    try std.testing.expectError(error.UnsupportedEnvironmentBackend, localEnvironment(alloc, std.testing.io, &cfg, null));
     cfg.environment.backend = .remote;
-    try std.testing.expectError(error.UnsupportedEnvironmentBackend, localEnvironment(alloc, std.testing.io, &cfg));
+    try std.testing.expectError(error.UnsupportedEnvironmentBackend, localEnvironment(alloc, std.testing.io, &cfg, null));
+}
+
+test "a session's tasks live beside its spills, under one removable subtree" {
+    const alloc = std.testing.allocator;
+    const scratch = try sessionScratchDir(alloc, "s-1");
+    defer alloc.free(scratch);
+    const tasks = try sessionTasksDir(alloc, "s-1");
+    defer alloc.free(tasks);
+    try std.testing.expect(std.mem.startsWith(u8, tasks, scratch));
+    try std.testing.expect(std.mem.endsWith(u8, tasks, tasks_subdir));
 }

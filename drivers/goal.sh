@@ -42,9 +42,7 @@ log=".nulya/scratch/goal-$id.jsonl"; mkdir -p "${log%/*}"   # per goal run (the 
 i=0
 while [ "$i" -lt "$max" ]; do
   i=$((i + 1))
-  # The step's stdout goes to OUR stderr as it arrives, and to the log so the two
-  # signals below can be read back. A failing left side of a pipe is invisible to
-  # `set -e`, which is why the error line is checked explicitly.
+  # Step stdout goes to OUR stderr live and to the log so the checks below can read it back. A failing pipe left side is invisible to `set -e`, hence the explicit error check.
   "$N" session step "$id" --max-steps 1 --stream | tee "$log" >&2
   if grep -q '"stream":"run","event":"error"' "$log"; then exit 1; fi
   # Disk before log: a handoff ends the turn too, and a proposal must win.
@@ -58,6 +56,8 @@ while [ "$i" -lt "$max" ]; do
     continue
   fi
   if grep -q '"stopped":"end_turn"' "$log"; then
+    # A background task may still owe an answer: 0 = one landed (step again to read it), 3 = nothing left to wait for.
+    set +e; "$N" task wait --any --session "$id" >/dev/null; w=$?; set -e; [ "$w" -eq 3 ] || { [ "$w" -eq 0 ] && continue; exit 5; }
     echo "done $id"
     echo "evaluate: $N session outcome $id <success|partial|failure>"
     exit 0

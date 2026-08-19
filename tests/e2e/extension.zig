@@ -24,6 +24,7 @@ const tool_stats = support.tool_stats;
 const EndTurnModel = support.EndTurnModel;
 const EnvPair = support.EnvPair;
 const buildAndActivate = support.buildAndActivate;
+const buildBundled = support.buildBundled;
 const callNative = support.callNative;
 const extractVersion = support.extractVersion;
 const greetSource = support.greetSource;
@@ -1178,34 +1179,6 @@ test "bundled compact: ext build extensions/compact, then ext run forks the sess
     defer alloc.free(missing.stdout);
     try std.testing.expectEqual(@as(u8, 1), missing.code);
     try std.testing.expect(std.mem.indexOf(u8, missing.stdout, "s-does-not-exist") != null);
-}
-
-/// The repo's own copy of a bundled extension, built into this workspace's store.
-/// Returns `<id>@<version>` — the ref every caller here runs it by, since a
-/// bundled extension is never activated. Caller frees. Skips the test when the
-/// harness did not name a repo or a toolchain.
-fn buildBundled(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, exe_abs: []const u8, id: []const u8) ![]u8 {
-    var host_env = try std.testing.environ.createMap(alloc);
-    defer host_env.deinit();
-    const zig_exe = host_env.get("NULYA_TEST_ZIG") orelse return error.SkipZigTest;
-    const repo = host_env.get("NULYA_REPO") orelse return error.SkipZigTest;
-
-    // The compile is shared with every other test that wants this package
-    // (support.stageBundled); the real `ext build` below then answers "already
-    // built" — the same CLI path, without a second seven-second compile.
-    alloc.free(try support.stageBundled(alloc, io, ws, id));
-
-    const src = try std.fs.path.join(alloc, &.{ repo, "extensions", id });
-    defer alloc.free(src);
-    const built = try runCliEnv(alloc, io, ws, &.{ exe_abs, "ext", "build", src }, "NULYA_ZIG", zig_exe);
-    defer alloc.free(built.stdout);
-    if (built.code != 0) {
-        std.debug.print("{s} extension failed to build:\n{s}\n", .{ id, built.stdout });
-        return error.ExtensionBuildFailed;
-    }
-    const version = try extractVersion(alloc, built.stdout);
-    defer alloc.free(version);
-    return std.fmt.allocPrint(alloc, "{s}@{s}", .{ id, version });
 }
 
 test "bundled compact: brief_file forks at the tail without touching the parent — the parent file is byte-identical, the child queues the brief plus a parent pointer, and an empty parent or a missing file is refused" {

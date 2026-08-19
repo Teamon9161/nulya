@@ -100,6 +100,24 @@ pub fn emit(
     };
 }
 
+/// The head+tail discipline on its own, without the spill: `body` trimmed to
+/// `budget.max_bytes` by keeping a head and a tail around the same self-
+/// describing elision marker `emit` uses, on UTF-8 (and where it can, line)
+/// boundaries. Caller owns the result.
+///
+/// The second consumer of that discipline (`emit` is the first): a background
+/// task's report quotes the tail of a log that is ALREADY the complete bytes on
+/// disk (DESIGN §6.1), so it needs the trimming and must not spill a second
+/// copy. Everything the two share stays in one implementation here.
+pub fn headTail(alloc: std.mem.Allocator, body: []const u8, budget: OutputBudget) ![]u8 {
+    if (body.len <= budget.max_bytes) return alloc.dupe(u8, body);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    try appendHeadTail(alloc, &out, body, budget.max_bytes, budget);
+    std.debug.assert(out.items.len <= budget.max_bytes);
+    return out.toOwnedSlice(alloc);
+}
+
 fn clipLongLines(
     alloc: std.mem.Allocator,
     raw: []const u8,
