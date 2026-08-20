@@ -406,6 +406,12 @@ pub const AgentSession = struct {
     /// can join it against `session-outcomes.jsonl` instead of seeing an
     /// undifferentiated pile of calls. An in-memory session has no durable id
     /// and simply omits it.
+    ///
+    /// …and WHICH FROZEN IMPLEMENTATION served it, looked up in this session's
+    /// frozen member list — the one truth about member versions, held right
+    /// here in `self.composition`. The stable id stays version-free (a tool's
+    /// history is one history); the version sits beside it so the same history
+    /// can also be read per implementation. The builtin has none.
     fn recordCompletedToolStats(self: *AgentSession, before: usize, durations_ms: []const ?u64) !void {
         const suffix = self.l.view()[before..];
         if (suffix.len == 1) return; // the model addressed the user; nothing to record
@@ -440,9 +446,32 @@ pub const AgentSession = struct {
                 .tool_id = t.definition.id,
                 .ok = result.ok,
                 .session = session_id,
+                .version = self.frozenVersionOf(t.definition.id),
                 .duration_ms = duration_ms,
             });
         }
+    }
+
+    /// The frozen version of the member extension that owns `tool_id`, or null
+    /// when no member does: the builtin (`builtin.shell` names no extension)
+    /// and — in theory unreachable, since every binding came from a member — a
+    /// stable id whose extension is not in the frozen list. A null there is
+    /// "not recorded", the same honest gap an old journal line carries; it is
+    /// never an error, because a missing evidence column must not be able to
+    /// fail a step. The id shape is `ext:<extension-id>/<tool-name>` and ids
+    /// never contain `/`, so reading the id segment needs no validation here:
+    /// it arrives from a frozen `ToolDefinition`, not from a user. The returned
+    /// slice is borrowed from the composition, which outlives the append.
+    fn frozenVersionOf(self: *const AgentSession, tool_id: []const u8) ?[]const u8 {
+        const prefix = "ext:";
+        if (!std.mem.startsWith(u8, tool_id, prefix)) return null;
+        const rest = tool_id[prefix.len..];
+        const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
+        const ext_id = rest[0..slash];
+        for (self.composition.extensions) |e| {
+            if (std.mem.eql(u8, e.id, ext_id)) return e.version;
+        }
+        return null;
     }
 };
 
@@ -1011,7 +1040,7 @@ test "run clamps any requested budget to the kernel ceiling" {
     try std.testing.expectEqual(1 + 2 * max_steps_ceiling, sess.l.len());
 }
 
-test "completed step records stable ids, never model names or hallucinated names" {
+test "completed step records stable ids and the frozen version behind each, never model names or hallucinated names" {
     const alloc = std.testing.allocator;
     var threaded: std.Io.Threaded = .init(alloc, .{});
     defer threaded.deinit();
@@ -1033,10 +1062,15 @@ test "completed step records stable ids, never model names or hallucinated names
             .definition = .{ .id = "ext:web.search/web_search", .name = "web_search", .description = "search", .input_schema = "{}" },
             .executor = .{ .ptr = null, .callFn = OkTool.call },
         },
+        .{
+            .definition = .{ .id = "builtin.shell", .name = "shell", .description = "run", .input_schema = "{}" },
+            .executor = .{ .ptr = null, .callFn = OkTool.call },
+        },
     };
 
-    // One real call (web_search) and one name the model invented (ghost): the
-    // real call resolves to its stable id, the hallucinated one is skipped.
+    // One real extension call (web_search), one builtin (shell) and one name
+    // the model invented (ghost): the real calls resolve to their stable ids,
+    // the hallucinated one is skipped.
     const MixedModel = struct {
         fn name(ptr: *anyopaque) []const u8 {
             _ = ptr;
@@ -1057,8 +1091,10 @@ test "completed step records stable ids, never model names or hallucinated names
             try sink.emit(.started);
             try sink.emit(.{ .tool_use_start = .{ .index = 0, .id = "c1", .name = "web_search" } });
             try sink.emit(.{ .tool_use_input_delta = .{ .index = 0, .fragment = "{}" } });
-            try sink.emit(.{ .tool_use_start = .{ .index = 1, .id = "c2", .name = "ghost" } });
+            try sink.emit(.{ .tool_use_start = .{ .index = 1, .id = "c2", .name = "shell" } });
             try sink.emit(.{ .tool_use_input_delta = .{ .index = 1, .fragment = "{}" } });
+            try sink.emit(.{ .tool_use_start = .{ .index = 2, .id = "c3", .name = "ghost" } });
+            try sink.emit(.{ .tool_use_input_delta = .{ .index = 2, .fragment = "{}" } });
             try sink.emit(.{ .done = .tool_use });
         }
         const vtable: provider.Model.VTable = .{
@@ -1076,7 +1112,9 @@ test "completed step records stable ids, never model names or hallucinated names
         .alloc = alloc,
         .l = ledger.Ledger.init(alloc),
         .composition = .{
-            .extensions = &.{},
+            // The one truth about member versions: the stats write point reads
+            // the version out of here, not out of a copy in the binding.
+            .extensions = &.{.{ .id = "web.search", .version = "v-frozen" }},
             .extension_tool_bindings = &.{},
             .tools = .{ .tools = &tools_arr },
             .skills = .{ .skills = &.{} },
@@ -1098,15 +1136,24 @@ test "completed step records stable ids, never model names or hallucinated names
 
     const events = try tool_stats.readAll(alloc, io, cwd);
     defer tool_stats.freeEvents(alloc, events);
-    try std.testing.expectEqual(@as(usize, 1), events.len);
+    try std.testing.expectEqual(@as(usize, 2), events.len);
     try std.testing.expectEqualStrings("ext:web.search/web_search", events[0].tool_id);
     try std.testing.expect(events[0].ok);
+    // The stable id says WHICH tool; the version beside it says which frozen
+    // implementation answered this call — looked up in the frozen member list.
+    try std.testing.expectEqualStrings("v-frozen", events[0].version.?);
     // Every recorded call carries a stamp and a measurement…
     try std.testing.expect(events[0].at != null);
     try std.testing.expect(events[0].duration_ms != null);
     // …and no session, because this one is pure memory: there is no id to join
     // an outcome to, and inventing one would be a lie.
     try std.testing.expect(events[0].session == null);
+
+    // The builtin is the kernel: it has no implementation version to record,
+    // which is a different fact from an unrecorded one only in that no honest
+    // writer could ever fill it in.
+    try std.testing.expectEqualStrings("builtin.shell", events[1].tool_id);
+    try std.testing.expect(events[1].version == null);
 }
 
 test "a durable session's usage rows name the session, so outcomes can be joined to them" {
