@@ -33,7 +33,7 @@ const narrow: Style = createStyle({ ...default_settings, transcript: { ...defaul
  * rather than mapping `Card` itself, because the blank rows BETWEEN cards are
  * part of what these snapshots are pinning (T26) and they are decided there.
  */
-function Harness(props: { items: TranscriptItem[]; style?: Style; tasks?: TaskEntry[] }) {
+function Harness(props: { items: TranscriptItem[]; style?: Style; tasks?: TaskEntry[]; error?: string | null }) {
   return (
     <StyleContext.Provider value={props.style ?? style}>
       <FoldContext.Provider value={createFoldStore()}>
@@ -41,7 +41,7 @@ function Harness(props: { items: TranscriptItem[]; style?: Style; tasks?: TaskEn
             task still running (tui.md §5.9); every other card draws the same
             with or without it. */}
         <TasksContext.Provider value={() => props.tasks ?? []}>
-          <Transcript items={props.items} />
+          <Transcript items={props.items} error={props.error} />
         </TasksContext.Provider>
       </FoldContext.Provider>
     </StyleContext.Provider>
@@ -270,8 +270,12 @@ async function frameOf(
   height = 24,
   theme = style,
   tasks?: TaskEntry[],
+  error?: string | null,
 ): Promise<string> {
-  const setup = await testRender(() => <Harness items={items} style={theme} tasks={tasks} />, { width, height })
+  const setup = await testRender(() => <Harness items={items} style={theme} tasks={tasks} error={error} />, {
+    width,
+    height,
+  })
   try {
     return await settle(setup)
   } finally {
@@ -398,10 +402,10 @@ test("a sub-session names the session it drives", async () => {
 
 /** The two packages the card fixtures are written against. */
 const card_contributions = [
-  { id: "lint", version: "v-3f2a91", tools: ["lint_zig"], readonlyTools: [], skills: ["skills/zig-style"], systemPrompts: [] },
+  { id: "lint", version: "v-3f2a91", tools: ["lint_zig"], readonlyTools: [], driverTools: [], skills: ["skills/zig-style"], systemPrompts: [] },
   // A `--with` package: no tool, no skill, one prompt — worn for this
   // session only, and the card has to say so (DESIGN §7.5).
-  { id: "evolution", version: "v-db04b7", tools: [], readonlyTools: [], skills: [], systemPrompts: ["prompts/evolution.md"] },
+  { id: "evolution", version: "v-db04b7", tools: [], readonlyTools: [], driverTools: [], skills: [], systemPrompts: ["prompts/evolution.md"] },
 ]
 
 const expanded_card = createStyle(
@@ -569,6 +573,33 @@ test("clicking a card's head line folds it", async () => {
   } finally {
     setup.renderer.destroy()
   }
+})
+
+test("a driver failure is written out in the transcript, in full, wrapped", async () => {
+  // The bug this pins: the message used to live in the one-row status bar,
+  // which cut it at `error: model request failed (Transp` — so the one line
+  // that says what to do next was the one line nobody could read. It is not a
+  // ledger event, so it is not an item; it is drawn after them.
+  const frame = await frameOf(
+    [user_item, assistant_item],
+    76,
+    24,
+    style,
+    undefined,
+    "model request failed (Transport); retry 1/5 in 1s",
+  )
+  expect(frame).toContain("✗ model request failed (Transport); retry 1/5 in 1s")
+  expect(frame).toMatchSnapshot()
+})
+
+test("a long failure wraps rather than being cut", async () => {
+  const long =
+    "step exited 1: nulya: session new refused: profile `codex` names provider codex but no credential resolved (~/.codex/auth.json)"
+  const frame = await frameOf([user_item], 60, 24, style, undefined, long)
+  // Every word survives, on whatever row the wrap put it.
+  const text = frame.replace(/\s+/g, " ")
+  for (const word of ["session", "refused:", "credential", "auth.json)"]) expect(text).toContain(word)
+  expect(frame).toMatchSnapshot()
 })
 
 test("a canceled call is recognised by its marker, not by any stream line", async () => {

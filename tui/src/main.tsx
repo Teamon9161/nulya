@@ -19,20 +19,23 @@ import { openWorkspace, type Workspace } from "./nulya/bin.ts"
 import { configShow } from "./nulya/cli.ts"
 import { sessionExists } from "./nulya/files.ts"
 import { loadSettings } from "./state/settings.ts"
-import { loadTuiState, rememberStoreAsked } from "./state/tui_state.ts"
+import { loadTuiState, rememberAgentsAnswer, rememberStoreAsked } from "./state/tui_state.ts"
 import { planLaunch } from "./launch.ts"
 import {
   adoptStdEditPin,
   answerFor,
   applyAnswer,
+  choicesText,
   inventory,
   planProjectStore,
   promptText,
+  samePath,
   storeTrusted,
   summarize,
   workspaceStorePath,
   type StoreAnswer,
 } from "./extensions.ts"
+import { agentAnswerFor, agentsDirOf, planProjectAgents, workspaceAgentFiles } from "./agents.ts"
 import { createStyle } from "./render/theme.ts"
 import { createSessionState } from "./state/session.ts"
 import { App } from "./ui/App.tsx"
@@ -107,6 +110,13 @@ async function main() {
   // plain terminal, since the alternate screen has not been entered yet.
   const projectStore = settings.extensions.sync_on_start ? await askAboutProjectStore(ws) : "none"
 
+  // …and the definitions beside it, for the two reasons in `planProjectAgents`:
+  // a persona from a checkout becomes a system prompt, and materialising one
+  // builds into that same store. Both are settled here, before anything is
+  // built and before the screen exists — the store question's own timing, and
+  // for the store question's own reason (DESIGN §9).
+  const agentsTrusted = await askAboutProjectAgents(ws)
+
   // The drafts the BINARY ships (`ext seed`, DESIGN §7.8) are NOT asked about
   // any more (tui.md §11, T23): they arrive in the user store — the person's own
   // directory — with the binary they just ran, three of them are zig builds, and
@@ -165,6 +175,7 @@ async function main() {
           activate: settings.extensions.auto_activate,
           bundled: settings.extensions.sync_on_start,
         }}
+        agentsTrusted={agentsTrusted}
       />
     ),
     { exitOnCtrlC: false, targetFps: 30 },
@@ -200,6 +211,47 @@ async function askAboutProjectStore(ws: Workspace): Promise<"none" | "ready" | "
   const report = await applyAnswer(ws, answer)
   if (report) process.stdout.write(`${summarize("this checkout", report)}\n`)
   return "answered"
+}
+
+/**
+ * The agent definitions this CHECKOUT ships, before the screen exists
+ * (tui.md §5.10).
+ *
+ * Asked once per directory, whatever the answer, exactly as the store question
+ * is — and asked here for the store question's reason: the first time one of
+ * these personas is used it is built into this workspace's extension store, and
+ * a local build into an empty store is how the kernel records trust for it
+ * (DESIGN §9). A question asked later would be a question asked after the
+ * signature. `~/.nulya/agents` is never asked about.
+ *
+ * Two keys, not three: there is nothing to install here, only whether a persona
+ * somebody else wrote may speak with this workspace's tools.
+ */
+async function askAboutProjectAgents(ws: Workspace): Promise<boolean> {
+  const dir = agentsDirOf(ws, "workspace")
+  const state = loadTuiState()
+  const trusted = (state.trusted_agents ?? []).some((known) => samePath(known, dir))
+  const plan = planProjectAgents(dir, workspaceAgentFiles(ws), trusted, state.asked_agents ?? [], samePath)
+  if (plan.kind !== "ask") return plan.kind === "ready"
+
+  process.stdout.write(
+    `${[`this checkout defines agents in ${dir}:`, ...plan.names.map((line) => `  ${line}`)].join("\n")}\n${choicesText(
+      "each one is a system prompt a session here would run with. use them?",
+      [
+        ["t", "trust these definitions"],
+        ["n", "not now"],
+      ],
+    )}`,
+  )
+  let answer: boolean | null = null
+  while (answer === null) {
+    const key = await readKey()
+    answer = agentAnswerFor(key)
+    if (answer !== null) process.stdout.write(`${key === "return" ? "" : key === "escape" ? "esc" : key}\n`)
+  }
+  rememberAgentsAnswer(dir, answer)
+  if (!answer) process.stdout.write("left alone · /agent still lists them, and starts none\n")
+  return answer
 }
 
 /**

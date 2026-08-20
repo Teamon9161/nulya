@@ -109,6 +109,8 @@ export interface Glyphs {
   thinking: string
   subSession: string
   canceled: string
+  /** Something the driver could not do: a failed request, a step that died. */
+  failed: string
   foldClosed: string
   foldOpen: string
   /**
@@ -156,6 +158,7 @@ const unicode_glyphs: Glyphs = {
   thinking: "⋯",
   subSession: "⤷",
   canceled: "⊘",
+  failed: "✗",
   foldClosed: "▸",
   foldOpen: "▾",
   pointer: "·",
@@ -183,6 +186,7 @@ const ascii_glyphs: Glyphs = {
   thinking: "...",
   subSession: ">",
   canceled: "x",
+  failed: "!",
   foldClosed: ">",
   foldOpen: "v",
   pointer: ".",

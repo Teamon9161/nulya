@@ -70,6 +70,27 @@ export function isBackground(argsJson: string): boolean {
   }
 }
 
+/**
+ * The `agent` tool's call, and the session its receipt named (tui.md §5.10).
+ *
+ * A delegation IS a sub-session, so it gets that glyph and that accent — and the
+ * id comes from the receipt rather than from the arguments, because the session
+ * does not exist until the call returns. Same shape as `nulya session new`
+ * through `shell` two functions down: the ledger keeps both halves, so a replay
+ * reads the same fact.
+ */
+function agentNameOf(argsJson: string): string | null {
+  try {
+    const value = JSON.parse(argsJson)
+    if (value && typeof value === "object" && typeof (value as { name?: unknown }).name === "string") {
+      return (value as { name: string }).name
+    }
+  } catch {
+    // Still streaming, or malformed: the head line says so rather than guessing.
+  }
+  return null
+}
+
 export function shellCommandOf(argsJson: string): string | null {
   try {
     const value = JSON.parse(argsJson)
@@ -336,6 +357,26 @@ export function describeTool(view: ToolView, glyphs: Glyphs): ToolPresentation {
       countsLines: false,
       sessionId: null,
     }
+  }
+  // Matching the BARE name is deliberate, not an oversight. What reaches here is
+  // `ledger.ToolCall.tool`, and the kernel records the model-facing name there —
+  // which package it came from is in the session header, not in the call
+  // (`toolId` in `App.tsx` is the one place that joins them, and it needs the
+  // tab's frozen composition to do it). Threading that through the transcript so
+  // this card could insist on `ext:agent/agent` would be a new pipeline for one
+  // glyph; the cost of not having it is that a third-party tool also named
+  // `agent` draws a sub-session card, which is a wrong picture and not a wrong
+  // action. The stable id is accepted too, for a caller that has one.
+  if (view.tool === "agent" || view.tool === "ext:agent/agent") {
+    const named = view.output.split("\n").map((line) => session_id.exec(line.trim())?.[0]).find(Boolean) ??
+      /\bs-[A-Za-z0-9._-]+\b/.exec(view.output)?.[0] ??
+      null
+    return make({
+      kind: "subsession",
+      glyph: glyphs.subSession,
+      head: `agent · ${agentNameOf(view.args) ?? "(pending)"}${named ? ` → ${named}` : ""}`,
+      sessionId: named,
+    })
   }
   // Anything else is an extension tool promoted onto the model's tool face
   // (DESIGN §5.1). The ledger records the tool NAME; `ext:<id>/<tool>` is the

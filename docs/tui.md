@@ -77,7 +77,7 @@
 **协议与机制的真相在 [DESIGN.md](DESIGN.md) §14**（`loop.StepContext.observer` 纯观测钩子 + 行协议）。这里只留 TUI 侧的消费约定：
 
 - 一行一个 JSON，写完即 flush；带 `stream` 字段 = 瞬态观测行，不带 = 与 `session events` 同形的 ledger 事件行（同一套 seq，可直接按 seq 入 items）。
-- 行序（每个 step）：`started → text_delta* / thinking_delta* → tool_use_start / tool_use_input_delta* → done → tool begin/end* → 该 step 的 ledger 行 → step end`；整次调用最后一行是 `run done{steps,stopped}`（`stopped ∈ end_turn | budget | canceled | max_tokens`；被 `max_tokens` 截断的 step 的 `step end` 多一列 `"stop":"max_tokens"`，DESIGN §4）。见到 `step end` 就知道这一步的事件已全。**瞬态失败**（DESIGN §13）：一次尝试中途可能冒出 `{"stream":"model","event":"retry","attempt","max_retries","delay_ms","error"}`——这次尝试的 delta / usage 全部作废，内核退避后原样重发、再从 `started` 开始；`session.ts` 收到它就 `dropInFlight` + 回退 provisional usage，并把 "retry n/m in Xs" 放进 `error` 供状态栏显示，下一个 `started` 清掉。
+- 行序（每个 step）：`started → text_delta* / thinking_delta* → tool_use_start / tool_use_input_delta* → done → tool begin/end* → 该 step 的 ledger 行 → step end`；整次调用最后一行是 `run done{steps,stopped}`（`stopped ∈ end_turn | budget | canceled | max_tokens`；被 `max_tokens` 截断的 step 的 `step end` 多一列 `"stop":"max_tokens"`，DESIGN §4）。见到 `step end` 就知道这一步的事件已全。**瞬态失败**（DESIGN §13）：一次尝试中途可能冒出 `{"stream":"model","event":"retry","attempt","max_retries","delay_ms","error"}`——这次尝试的 delta / usage 全部作废，内核退避后原样重发、再从 `started` 开始；`session.ts` 收到它就 `dropInFlight` + 回退 provisional usage，并把 "retry n/m in Xs" 放进 `error` 供 **transcript 末尾**的 `ErrorNotice` 显示（§4.2），下一个 `started` 清掉。
 - `reasoning_item` 不出现在流里（不透明、只为回放）；thinking 的可显示文本只有 `thinking_delta`，turn 结束后从 ledger 的 `reasoning` 尽力抽（§4.2）。
 - 诊断也是 JSON（`{"stream":"run","event":"error","message":"…"}` + 非零退出），所以 `nulya/cli.ts` 的解析器**永远**不必处理裸文本行。
 
@@ -169,6 +169,9 @@ tui/
 | `capability_note` | CapabilityBanner | `⚡ capability · id@version · tools: …` | note 全文 | 展开 |
 | canceled marker | CanceledCard | `⊘ tool · canceled (side effects unknown)` 三种文案对应三种 marker | — | 展开 |
 | `spill_path` | 卡片尾行 | `full output → .nulya/scratch/…` | — | — |
+| （不是事件）`snapshot.error` | ErrorNotice | `✗ ` + 驱动侧最后一次失败的**原文**（provider 的 retry、`run error`、`step exited N`、`session new` 被拒） | — | 永远展开，在 items **之后**；下一个 `model started` 清掉 |
+
+**`ErrorNotice` 不是 item**：它没有 ledger 事件、replay 也不会重现它，所以像 CompositionCard 一样待在 item 列表**外面**（一个在顶、一个在底），不必参与 `seq` 排序或 `dropInFlight`。它从状态栏搬下来，因为那一行只有一行、还要和 model / cost / chips 分：`error: model request failed (Transp` 就是所有人真正读到的错误的形状。换行由我们自己做（`wrapWords`，同 `ui/Fact` 的理由），状态栏只留 `error · see transcript`。
 
 折叠交互：鼠标在头行**按下与松开落在同一格**才切换（拖过去的是选取文本，不是点击，T18）；键盘 `Ctrl+O` 切换最近一张卡；`Esc` 空 composer 时进 browse 模式（`j/k` 移动高亮卡、`Enter`/`Space` 切换、`Esc` 回 composer）；`Ctrl+Shift+O` 全部展开/折叠。
 
@@ -184,7 +187,7 @@ tui/
 
 - `Enter` 发送；`Shift+Enter` / `Ctrl+J` 换行；`↑` 空 composer 时翻历史；粘贴多行原样。
 - 发送时若 `stepping`：只 append（queued）；不打断。
-- `/` 开头弹一个小补全：内建命令（`/model` `/mode [ask|unsafe]` `/effort <level|auto>` `/new [--profile p] [--model id]` `/sessions` `/ext` `/tasks` `/usage` `/compact [focus]` `/outcome` `/evolve` `/as <id>[@<v>]` `/cancel` `/fold` `/settings` `/help` `/quit`；**`/mode` 从 T24 起是权限 mode**（T31 起裸 `/mode` 开一个 picker），穿 extension 身份的那个改叫 `/as`——`/mode unsafe` 与 `/mode evolution` 是两件毫无关系的事，不该共用一个词，而 `/as evolution` 本身就读得出它在做什么）在前，**activate 了的 skill 在后**（`nulya skill list`，描述截 100 字符）。分发同序：内建 → skill → 原样发给模型。`/<skill> [args]` = `nulya skill load <ref>` 拿到 body、包一层 sentinel 后作为**普通 user turn** append（T15；旧文本写的"nulya 没有 skill slash"已翻案——它把"谁触发"误当成了"谁判断"，理由见 goals/tui-panel.md D8）。
+- `/` 开头弹一个小补全：内建命令（`/model` `/mode [ask|unsafe]` `/effort <level|auto>` `/new [--profile p] [--model id]` `/sessions` `/ext` `/tasks` `/usage` `/compact [focus]` `/outcome` `/evolve` `/as <id>[@<v>]` `/agent [<name> <task…>]`（§5.10）`/cancel` `/fold` `/settings` `/help` `/quit`；**`/mode` 从 T24 起是权限 mode**（T31 起裸 `/mode` 开一个 picker），穿 extension 身份的那个改叫 `/as`——`/mode unsafe` 与 `/mode evolution` 是两件毫无关系的事，不该共用一个词，而 `/as evolution` 本身就读得出它在做什么）在前，**activate 了的 skill 在后**（`nulya skill list`，描述截 100 字符）。分发同序：内建 → skill → 原样发给模型。`/<skill> [args]` = `nulya skill load <ref>` 拿到 body、包一层 sentinel 后作为**普通 user turn** append（T15；旧文本写的"nulya 没有 skill slash"已翻案——它把"谁触发"误当成了"谁判断"，理由见 goals/tui-panel.md D8）。
 - `@` 开头（前一字符非字母数字下划线）弹文件补全：`↑↓` 选、`Tab` 上屏成 `@path`；已知引用在输入框里 accent。**上屏的是路径，不是文件内容**（T13）。
 - 粘贴：> 1000 字符或 > 15 行折叠成 `[Pasted text #N]`，提交时展开回原文；`Backspace` 落在占位尾部整条删掉（T14）。
 - 有 tool call 在等批准时（§5.7），**审批对话框拿着键盘**：`↑↓` / 数字键选答案、`Enter` 作答、`Tab` 在答案列表与 note 之间切、直接打字即写 note、`Esc` 在列表上 = deny（在 note 里先清空）。带 modifier 的键（`Ctrl+C`）照旧穿过去。
@@ -200,6 +203,8 @@ tui/
 ### 4.5 输入框下面那一行
 
 一行，五段（T22 起，标题行取消后它同时是"我在跟谁说话"和"现在在发生什么"）：
+
+（**驱动侧的失败不在这一行**：这一行只写 `error · see transcript`，原文整段在 transcript 末尾，§4.2 `ErrorNotice`。）
 
 `<model-id> [(effort)]`（**主语**，`fg`，可点 → `/model`；effort 只在本 tab 明确选过时才写括号——`auto` 就是内核默认，为它花七列不值） · `tools 1+N`（`dim`；1 = 那一个 builtin `shell`，DESIGN §5.1；draft 上 N = 合并 config pin ∪ `tui-state.json` 的 `session_pins`） · token 累计（`muted`；`↑input ↓output cache%`，**来源是 ledger 的 `assistant.usage`**，流事件只是它落盘前的临时值，同一步不会数两遍——所以重开一场也看得见它到今天为止花了多少，T8；**cache% 的分母是整个 prompt** `input + cache_read + cache_write`（`state/session.ts` `cacheShare`，与下一段 ctx% 的分子同一个量）——`input` 是内核扣掉缓存后的量，早先拿它当分母会在缓存命中好的对话里显示 200%+，2026-08-20 修） · 当前活动（**只在真的在动时**才 `fg`，否则退一档 `muted`） · hint / notice（`dim`，`/help` 单独一个可点的 box）。右：`ctx N%` · `↓ N more below` · **`◈ <id>`**（这一场戴着的、contribute 了 system prompt 的包，`accent.evolve`，可点 → `/ext`；draft 读 `--with` 的 ref，已开场的读冻结 `contributions`——顶上那张卡默认折着，不写这一格就一个字都没有，T31） · 权限 mode chip（可点 → mode picker，§5.7；`unsafe` 是 warn 色） · `step n` · role（`driver` / `observer` §5.6）。离开底部时插入 `↓ 3 new`。
 
@@ -242,11 +247,13 @@ registry 按 shell 命令前缀识别，头行抽关键事实（抽不到就退�
 左列：extensions（**开关记号** · id · **`mode`**（这个包 contribute 了 system prompt，T31） · 半开时那半格 · draft 状态 · 被遮蔽的标 `shadowed`）——清单是 `nulya ext list` **∪ `ext sync --dry-run`（两个 root）**：`ext list` 只列"持有版本"的 id，所以**只有源码、一次都没 build 过的 id 在它里面根本不存在**（T22 的起因：`std` 躺在 user store 里 build 不出来，`/ext` 一个字都不提，唯一的痕迹是状态栏一句 `3 failed` 滚过去）。这样的行显示 `0v <kind>` + draft 状态（`not built` / `needs zig` / `fails`，warn 色），右栏把**内核那句话原样转述**（它现在自带绝对路径的修法），再加至多一行我们自己的（anyzig 那种 version shim 从 cwd 读 `build.zig.zon`，而 store root 里没有）。没有 `current` 的包（只用 `--with` 穿的 mode / evolution）读最新一次 build 的 manifest，否则它会被显示成空的。右栏（选中项）：第一行是**开关的文字版**（`id · kind · active|inactive · tools N/M pinned · current v-…`）、manifest 摘要、版本时间线（`versions/v-*` mtime，`current` 标记，本场 header 冻结的版本标记；两者不同 → `frozen v-a · store v-b → next session`）、该 ext 每个 tool 的 usage。
 
 **`Enter`（或点开关记号）= 这个 extension 对下一场的总开关**（T22，D12）：
-- **ON** = `ext activate <id> <version>`（版本取 sync plan 说 built 的那个，否则 store 里最新的 build；一个都没有就拒绝并指向 `b`）**+** 把它声明的 tool 全进本 TUI 的 pin 列。**先验配额**（`2 + face > max_tools` 就一个字节都不写，贴内核那句 `session new will refuse`）。
+- **ON** = `ext activate <id> <version>`（版本取 sync plan 说 built 的那个，否则 store 里最新的 build；一个都没有就拒绝并指向 `b`）**+** 把它声明的 **model-audience** tool 进本 TUI 的 pin 列（`extensions.pinsOf`，判据是冻结 manifest 的 `audience`，DESIGN §7.2.1；一个 model tool 都没有的包——`compact`——于是只做 membership，开关是全开而不是半开）。**先验配额**（`2 + face > max_tools` 就一个字节都不写，贴内核那句 `session new will refuse`）。
 - **OFF** = 先把它的 tool 从本 TUI 列**和 user config 的 `always`** 里撤掉（别的 config 层写的撤不了，点名说出来），再 `ext deactivate`。顺序是有意的：pin 指着一个没有 `current` 的 extension，`session new` 是**整场拒绝**（`PinNamesUnknownExtension`）而不是少一个工具。同理每次 refresh 都会把"指着已经不 active 的东西"的本 TUI pin 丢掉并说一句。
 - **一个 contribute 了 system prompt 的包是"模式"，开它要把后果说出来**（T31）：id 列表上多一格 `mode`（开着时 warn 色），右栏多一行 `a mode · turning it on puts its system prompt in every new session on this machine · /evolve（或 /as <id>）wears it for one session instead`，Enter 的 notice 换成 `extensions.promptConsequence`（`… enters EVERY new session on this machine · … · Enter again to turn it off`）。**键还是一个键、还是不问 `y`**——它只是不再沉默。开屏时若发现这样的包已经是 active，状态栏也点名一次并指 `/ext`（**不替人关掉**）。
 - **看得见**：`●`/`○`（ascii `*`/`-`）+ 三档色——`ok` 全开、`warn` 半开（另配一格 `3/5 tools` 或 `pins only`）、`faint` 关。tools pane 的 `[x]` 用同一套色（一处颜色一个含义，§6）。**两个方向都不要 `y` 确认**：都是指针 + pin 的移动，同一个键就能放回去，且够不着已经开跑的那一场（physics #2）。
 - 两根轴仍然在：单个 tool 用 tools pane 的 `Space`（`A` 升 `always`），单个版本用版本线的 `a` / `r`（仍带确认——它们点名一个 build，是时间线上的动作）；`d` **删掉了**（它就是 OFF 的一半，两个键做一件事正是被修的那个毛病）。
+
+**tools pane 只列有 checkbox 的行**（T33）：driver tool（**包自己在 manifest 里声明 `audience: "driver"` 的那些**，DESIGN §7.2.1；T34 之前是这里一张按 id 写死的名单）折在列表下面一行里——`▸ N driver tools · called with ext run, never on the model face · d shows`，`d` 或点它展开。判据是 `driver && 没有 pin`：一个真被 pin 上的 driver tool 照常显示，因为那是这张表能撤回的状态。展开状态不记进 `tui-state.json`（是好奇，不是设定）。
 
 其它动作键：`b` build 选中 id 在它 store 目录里的源码（`ext build <root>/<id>`，落哪个 root 由内核按路径决定）；`p` = `ext prune <id>`（带确认，成功后显示内核自己那句代价说明）。底部常驻句按 tab 有没有 session 分两种：有 → `changes apply to the NEXT session — this one froze its tools at start`；draft → `changes apply to the session this tab is about to start`。第四块 pane：全部 tool 的 usage 表（只投影 `.nulya/tool-usage.jsonl`；**不**复刻排序算法，"下一场谁晋升"留给未来的 `nulya composition preview` CLI，见 §10）。
 
@@ -290,7 +297,7 @@ registry 按 shell 命令前缀识别，头行抽关键事实（抽不到就退�
 
 `extensions/handoff` 的 tool 只做一件事：把 brief 渲染成 `.nulya/handoffs/<session>-<n>.md` 并叫模型收尾（DESIGN §11）。**那个文件就是提议**——没有 JSON 要解析，也还什么都没发生；fork 是**驱动者**的动作，`drivers/goal.*` 不问就 fork，这个前端在 `ask` 下先问（旁边就有个人）。
 
-- **进 composition**：draft materialize 那一刻按 `[extensions] handoff`（默认 true）加 `--with handoff@<v> --pin ext:handoff/handoff`（两根轴，DESIGN §7.5：`--with` 是成员，`--pin` 才给它一个 native 槽）。版本由 `buildHandoff` 拿（与 `/evolve` 同一条 `bundledDraftPath` → `ext build` 路，所以**不在 nulya checkout 里也能用**：二进制自带源码，seed 进 user store 再 build）；build 在开屏后台起、失败就这一场不带它并照常开场——**装不上不是开不了场的理由**。局限：第一次在一台机器上要付一次编译（compiled 包）。
+- **进 composition**：draft materialize 那一刻按 `[extensions] session_with`（默认 `["handoff", "agent"]`，T34；老键 `handoff = false` 照读，等于把它从列表里去掉）加 `--with handoff@<v>` + 它每个 model-audience tool 的 `--pin`（这里就是 `ext:handoff/handoff`）（两根轴，DESIGN §7.5：`--with` 是成员，`--pin` 才给它一个 native 槽）。版本由 `extensions.sessionMember` 拿（与 `/evolve` 同一条 `bundledDraftPath` → `ext build` 路，所以**不在 nulya checkout 里也能用**：二进制自带源码，seed 进 user store 再 build）；build 在开屏后台起、失败就这一场不带它并照常开场——**装不上不是开不了场的理由**。局限：第一次在一台机器上要付一次编译（compiled 包）。
 - **看盘的时机**：每个 step 结束（driver 回 idle）看一次 `.nulya/handoffs/<id>-*.md`，与 `drivers/goal.*` 同一个信号；已处理过的路径记在内存里，同一个提议不会问第二遍。
 - **`ask`** = brief 显示在 transcript 与输入框之间（**不是 transcript 卡片**：brief 是磁盘上的制品不是 ledger 事件，这个前端只画 ledger 有的东西），`Enter` 跟过去 / `Esc` 收起（文件留着）。**`unsafe`** = 直接跟，一行 notice。
 - **跟过去 = `/compact` 的 `brief_file` 分支**（DESIGN §11）：同一条 fork，只是摘要已经写好了，旧 session 逐字节不变，tab 换到子 session——与 `/compact` 完全同一段代码（`compact.ts` 多一个可选参数）。
@@ -311,6 +318,26 @@ registry 按 shell 命令前缀识别，头行抽关键事实（抽不到就退�
 - **`/tasks`（F7）**：一行一个 `<sid>/t<N> · state · 用时 · 命令 · 怎么结束的`；`Enter` 看 log 的最后 64 KB（跟着面板的 1.5 s 轮询重读，**不求真·live tail**——那要一个常驻进程，而人想知道的"它现在在干什么"重读就够）；`k` kill（不二次确认：杀错了重跑一次就行，杀不掉的任务才是没有 undo 的那个），`K` 杀掉所有还在跑的；`r` 重读。**这是全前端唯一 `j/k` 不是移动的列表**——`k` 在这里是 kill(1) 那个动词，光标只认方向键，footer 写明白；一个键在五个面板里移动光标、在第六个面板里毁东西，是两种不一致里更糟的那种。
 - **`/quit` 不杀**：有还在跑的任务就先说一句 `N background tasks keep running; their results land in the session inbox`，再 `/quit` 一次才走。离开这个前端不该停掉一个 detached 的进程（内核里也根本没有"session 结束"这个概念）；结果会在 inbox 里等下一个 step。要停就去 `/tasks` 按 `K`。
 - **不做**：跨 tab 的任务汇总视图（`/tasks` 只看当前 tab 的 session，整个 workspace 的答案是终端里的 `nulya task list`）；后台输出实时进 transcript（log 文件 + `/tasks` 就是观察面）；任何"自动清理"或退出时杀任务。
+
+### 5.10 Sub-agent：一个定义文件，就是一组 `session new` 参数 `[T32]`
+
+PLAN §3.2 早就把答案写死了——**一个 agent 就是 `session new` 的一组参数**，`AgentDef` 不进 kernel。所以这一块从头到尾没有一样新东西是内核给的：定义是一个 markdown 文件，材料化成 data extension，`--with` 戴上，`--pin` 给工具面，`--max-steps` 给预算，readonly 由 gate 兜住。**内核零改动**。
+
+- **定义在哪**：`.nulya/agents/*.md`（workspace）与 `~/.nulya/agents/*.md`（`NULYA_HOME` 整体搬走，与内核 config 同规则）。**只认一层平铺、只认 `.md`**——`agents/` 是一列 persona，不是要组织的树；同名 workspace 胜出，输的那个**点名报出来**而不是静悄悄丢掉（"我在改的是哪一个"必须答得出来）。坏定义 **warn-and-skip 不致命**（tcode 同款纪律）：只有"没有 front matter"与"没有正文"两种情况会被跳过（那正是"不是一个定义"的两种含义），其余每一条读不动的字段都是一条警告 + 一个缺省——为一行坏字段丢掉整个 persona 是贵的那个答案。
+- **front matter 的每个字段都是 `session new` 的一个参数**：`name`（缺省 = 文件名 stem）· `description`（picker 里那一行）· `readonly`（见下）· `model`（`profile` 或 `profile/model-id` → `--profile` / `--model`；不写就继承发起它的那个 tab 的模型——一个不在乎跑在哪的 persona 不该把活悄悄挪到内核缺省上）· `pins`（`ext:<id>/<tool>` 数组，逐个 `--pin`；**形状不对的一律丢掉并警告**，因为一个解不出来的 pin 不是少一个工具，是整场 `session new` 被拒）· `max_steps`（该 tab 的 `session step --max-steps`）。**正文就是 system prompt，逐字**。
+- **材料化**：定义渲染成一个 data extension draft（id `agent-<name>`，`contributes.system_prompts: ["prompt.md"]`，无 runtime、无 permissions——它贡献的是文本，能做什么由 pin 与 gate 说了算），`ext build` 冻结。draft 落 `.nulya/scratch/agents/<id>/`，**刻意不在任何 store root 里**：放进 `.nulya/extensions/<id>/` 会被下一次 `ext sync` 当成有人在维护的包重建一遍，而它只是隔壁那个真正被维护的文件的一次渲染。**每次都 build**（`/evolve` 同款理由）：版本 = 这两个文件的 hash，没改就是 store 里已有的那个版本，改了下一次 `/agent` 自动拿到新的，没人需要记得重 build。workspace 定义落 workspace store，user 定义 `--user`。**永不 activate**——activate 会把一个 persona 摆到这台机器每一场 session 前面（T31 那个 bug），`--with` 才是"戴一场"。
+- **trust 问句**（`main.tsx`，与 T11 的 store 问句同一时刻、同一形状、同一"只问一次"）：随 checkout 到达的 `.nulya/agents/*.md` 要答一次才能用。**两个理由，第二个有牙**：① 一个定义就是一段 system prompt，用它 = 让别人写的 persona 拿着本 workspace 的工具说话；② 材料化会 build 进本 workspace 的 extension store，而**本机 build 填满空 store 就是信任**（DESIGN §9）——问句晚于第一次 build，就等于替 checkout 签完名再问。所以两个键（`t` 信任 / `n` 现在不）、问在屏幕出现之前、答案记在 `tui-state.json` 的 `asked_agents` / `trusted_agents`。`~/.nulya/agents` 永不问（与 user store 同理由：没有人放，它不会自己到那儿）。
+- **`/agent <name> <task…>`**：材料化 →（`session new --with agent-<name>@<v> [--pin]* [--profile/--model]`）→ **开一张看得见的新 tab** → append task → TUI 照常以 driver 驱动（`--gate --stream`，`max_steps` 生效）。看得见是有意的：一个跑歪了的委派，得有人能看、能 `Esc`、事后能读。**裸 `/agent` 是 picker**（`ui/AgentPicker.tsx`，与 `/mode` `/model` 同一套对话框：`◈` 标题、`ui/rows.ts` 的光标与悬停、数字键、`Enter`、`Esc`，在的时候拿键盘）——**选中一行不启动任何东西**，只把 `/agent <name> ` 写进输入框：委派需要一个任务，而任务没人猜得出来，一个替人编了任务就开场的 picker 是前端往别人嘴里塞话。
+- **`readonly` 是一道天花板，不是一条规则**（agents-and-review §1 不变式 1）：它在**三张表之前**问，且任何东西都掀不动它——一条 `[approvals] allow` 悄悄把 `shell` 放回一个 read-only persona，就是这个功能唯一会变成谎话的形状。两条：`shell` 一律拒（没有 OS sandbox 就分不出 `cat foo` 与 `rm foo`，同 §1 不变式 5）；extension tool 只放行**自己的冻结 manifest 声明了 `"readonly": true`** 的（DESIGN §7.2.1 那个声明是包的自述、内核不强制，**信不信是这条 policy 的选择**，`[approvals] manifest_readonly = false` 是不想信的人说话的地方）。拒绝走内核 gate 的 `deny <note>`，所以**模型读得到自己为什么什么都没跑**，而且那是那个 call 的 `tool_results`，在 ledger 里（DESIGN §4）。**这不是安全边界**，和 §5.7 最后一句是同一句话：真隔离等 sandbox（PLAN §3.8）。
+- **模型自己委派：`agent{name|session, task}`，回报走后台任务**（`session` 形态 = 往一场已经报告过的子场再送一轮，append-only 命中它自己的前缀缓存；能不能委派由被委派者定义里的 `agents` 白名单决定，空 = leaf。两者的门与理由见 DESIGN §7.8）（`extensions/agent`，DESIGN §7.8/§11）。这一半**前端零新机制**：`agent{name, task}` 起一个**属于父场**的后台任务去驱动子场，任务结束时 supervisor 把 `task_finished` 投进父场 inbox——而"driver 角色 + idle + inbox 非空 → 再 step"（§5.9 T29 唯一那条 policy）本来就在跑，所以报告自己会到，**没有第二个看盘的钩子、没有新的面板、`drivers/goal.*` 一个字没改**。第一版规格是"写请求文件 + 每步之后看盘"，否掉的理由是它等于给每个 driver 发明一份要重学的盘面约定（且跨平台两份实现），而内核已经有且只有一个"欠答案"的回路。
+  - **带入条件两条，都刻意**：`--with agent@<v> --pin ext:agent/agent` **只在这个 workspace 真的有 agent 定义时**才加（一个只会答"没有人可以委派"的 tool 照样占一个 `max_tools` 槽与每场的前缀 token，PLAN §3.4.1），且**只加在顶层 session**——委派出去的子场不带它，所以子 agent 不能再委派（leaf，agents-and-review §1 的 `SpawnPolicy` 最小形态）。
+  - **材料化只有一处实现**：`ext run agent@<v> materialize --arg name=<n>`。渲染出的 manifest 字节决定 version id（physics #5），两份实现就是同一个 persona 的两个版本，所以 TUI 的 `/agent` 也调它——TS 侧只留**读**（发现、列表、picker）。
+  - **卡片**：`agent` 这个 tool call 在 registry 里是一张 **subsession 卡**（`⤷ agent · <name> → <子 id>`），子 id 取自**回执**而不是参数——调用返回前那场 session 还不存在，与 `nulya session new` 经 shell 的那一行同一个手法；于是 browse 模式 `Enter` 就能打开子 tab。
+  - **600 s 天花板**：`run` 经 `ext run` 调用，而 `ext run` 强制 manifest 的 `timeout_ms`、上限 `tool.Timeouts.extension_max_ms`（`src/cli/ext.zig`），manifest 顶格要满。将来解除不用改设计——换一种任务命令形态即可。
+- **定义分三层，什么都不写也有三个能用的**（DESIGN §7.8）：`.nulya/agents/*.md`（workspace）> `~/.nulya/agents/*.md`（user）> **包自带的 `explore` / `plan` / `general` / `orchestrator`**（`extensions/agent/src/builtin/*.md`，`@embedFile` 进那个包的二进制，随它一起分发）。**首个持有者胜，输的那个照样列出来并标 `shadowed`**——与 store roots 同一条规则、同一个理由。四个 persona 移植自 tcode，`ask_user` 与 tcode 那些我们没有的 frontmatter 是**删掉**而不是翻译；`orchestrator` 是唯一带 `agents` 白名单（可以委派）的那个，其余三个都是 leaf。
+- **读也只有一处实现**：`ext run agent@<v> list` 返回全部定义（name / description / readonly / layer / shadowed / pins / max_steps / warnings）。TUI 的 picker、readonly 天花板、委派参数**全部读它**——TS 侧一行 frontmatter 解析都没有。理由与写路径同款：两个 parser 就是"这个 agent 是不是 readonly"的两个答案，而那正是天花板要变成一次拒绝的那个问题。**唯一的例外是 trust 问句**：它问在屏幕出现之前、任何 build 之前，所以它读的是**文件名**（`workspaceAgentFiles`，一次 `readdir`），不是定义——"这个 clone 带来了定义吗"本来就是关于名字的问题。
+- **pins 连带 `--with`**：pin 给 tool 一个 native 槽但不让它的包成为成员，而 pin 一个非成员是整场拒绝（`PinNamesUnknownExtension`）。所以委派为 pins 里每个不同的 ext id 派生 `--with <id>`（取 `current`），**并且 `materialize` 先验证它们解析得出来**，否则报一句点名 persona、点名包、给出安装命令的话且什么都不建（`ext build extensions/std --user`）。两条委派路径（模型的 `agent` tool 与 `/agent`）共用这一次验证。
+- **`◈ agent-<name>` 白拿**：戴着的包在 tab 标题与状态栏那个 chip 上本来就看得见（T31 的机制），不需要为 sub-agent 加第二套显示。
 
 ## 6. 视觉规范
 
@@ -423,6 +450,7 @@ fold   = "ctrl+o"
 6. **`split-footer` 模式**作为可选屏幕模式（scrollback 原生复制），与折叠可变历史的取舍。
 7. session `--system-file/--skill/--pin`（PLAN §3.2 未落地）落地后 `/new` 的表单。
 8. ~~**header 的 `created` 现在是空串**~~ **已落地（M5f）**：`session new` 写 RFC3339 UTC，`session list --json` 按它倒序；CompositionCard 可以显示时间了（老 session 仍是空串，退回按 id 排）。
+9. ~~**"这个 tool 是给 driver 的"今天是前端的一张硬编码名单**（`bundled_driver_only` → `pinsOnActivate`，T24/T33）。~~ **已落地（T34）**：manifest per-tool 的 `audience`（`"model" | "driver"`，DESIGN §7.2.1，与 `readonly?` 同级：解析、冻结、不强制），前端四张名单（`bundled_driver_only` / `pinsOnActivate` / `bundled_active` / 字面量 `std_pins`）随之消失，第三方的 driver 型 extension 现在说得出这件事。
 
 ## 11. 实施日志
 
@@ -1246,13 +1274,13 @@ cd tui && bun test test/compact.test.ts
 
 1. **`/ext` 的每个动作从"全量往返"改成"乐观更新 + 后台校对"。** 原来一次 Enter 是 `ext activate` → `applyPin` → `refreshPins`(`config show`) → `refresh`(两次 `ext sync --dry-run` + `ext list` + `draftEntries` 里又一次 `ext list` + 又一次 `config show`)——**七个子进程串行，全部 await 完才给第一个反馈**，Debug 内核下每个 0.75–1.2s，合计 3–4 秒屏幕一动不动。现在：**两根数据轴按代价分开**（`listed` = `ext list`，一个子进程；`sourceOnly` = 两次 dry-run，是这块屏幕最贵的调用），`extensions` 是两者的 memo。打开面板 = 先 `ext list` 画第一帧，usage / pins / plans 再落进来；**动作后只 `reconcile()`**（`ext list` + `config show`，后台跑，通知早就在屏幕上了）——activate/deactivate 是指针移动，**改不了"一份源码会 build 成什么"**，所以两次 dry-run 只在开面板、`b` build、`p` prune 后重算。`applyPin` 多一个 `reconcile` 开关，一次动作里 `config show` 不再被 spawn 两次。乐观本身：按键当场 `setLocalCurrent` + 把 pin 状态推进信号 + notice 写 `std on…`，**但一个字节都不落盘**——`ext activate` 答应了才写 pin 文件（pin 指着一个没有 `current` 的 extension 是 `session new` **整场拒绝**，它绝不能活过一次失败的 activate；OFF 方向反过来，先撤 pin 再动指针，同一条理由）。失败则把指针与**两张 pin 列原样**放回（`pinSnapshot`——`unpinAll` 会连按之前就有的 pin 一起撤掉，所以回滚存快照而不是取反）。连按去重：`working` 是一张 id 集合，同一个 id 的第二次 Enter 只回一句"还在忙上一次"，不排队、不拿半写状态算第二个决定。id 列表从 `For` 换成 `Index`（tools pane 早有的先例）：乐观改一次、校对再改一次，`For` 会把每一行拆了重建两遍，按下与松开之间被拆掉的行会把这次点击一起带走。
 2. **配额满了不再整体拒绝——两根轴只有一根有配额（用户③的真因）。** 他的 `session_pins` 已有 6 个（handoff + std 五件），`2+6 = 8 = max_tools`，compact 声明 1 个 tool，预检 `2+6+1 > 8` 就把**整个开关**拒了，只留一句 `2+9/8 · nothing changed`——叠上 3–4 秒延迟，体感就是"按了没反应"。但 membership 与 pin 是两根轴：**`ext run` 调一个扩展的 tool 根本不需要 pin**（`/compact` 一直就是这么调 compact 的）。现在配额不够只挡 pin：照常 activate，通知说清"面已满 `2+6/8`、N 个工具没进面、tools pane 的 Space 能腾一格、`ext run` 照样够得着"（`pins.faceFullLine`），行内 `0/1 tools` 那一格本来就是为这个状态准备的。`quotaLine` 越界那句也从 `over registry.max_tools · session new will refuse` 改成人话（差几个、去哪腾、不腾会怎样）。
-3. **on-demand 包的工具不上模型面**（同一轮追加）：`compact` 的 tool 是**driver 接口**——它 append/step 它所关于的那场 session，模型在**那场 session 里**调它必然撞单写者锁（`SessionBusy`）；`handoff` 的 tool 确实是给模型的，但那是 driver 用 `--with … --pin` 按场带进去的，不是每场常驻。所以 `extensions.ts` 多一个 `bundled_driver_only = [compact, evolution, handoff]` + `pinsOnActivate(id)`，`/ext` 的 Enter 对这三个**只做 membership**，通知说明"已激活；此包的工具由 `/compact` 或 driver 用 `ext run` 按需调，不占工具面"；开关三态也跟着用"**可 pin 的**工具数"算，否则 compact 会永远停在半开的 `0/1 tools`。名单是**临时判据**，代码注释写明长期方案是 manifest 的 per-tool `audience`（包自己说它的 tool 是给谁的——只有它知道），内核侧后补。
+3. **on-demand 包的工具不上模型面**（同一轮追加；名单已于 T34 被 manifest 的 `audience` 取代）：`compact` 的 tool 是**driver 接口**——它 append/step 它所关于的那场 session，模型在**那场 session 里**调它必然撞单写者锁（`SessionBusy`）；`handoff` 的 tool 确实是给模型的，但那是 driver 用 `--with … --pin` 按场带进去的，不是每场常驻。所以 `extensions.ts` 多一个 `bundled_driver_only = [compact, evolution, handoff]` + `pinsOnActivate(id)`，`/ext` 的 Enter 对这三个**只做 membership**，通知说明"已激活；此包的工具由 `/compact` 或 driver 用 `ext run` 按需调，不占工具面"；开关三态也跟着用"**可 pin 的**工具数"算，否则 compact 会永远停在半开的 `0/1 tools`。名单是**临时判据**，代码注释写明长期方案是 manifest 的 per-tool `audience`（包自己说它的 tool 是给谁的——只有它知道），内核侧后补。
 4. **自带扩展改成"开屏后台自动装 + 激活"，问句取消**（用户②）。原来 `main.tsx` 在 `render()` **之前**问一句再前台 `ext seed` + `ext sync --user`，其中三个是真的 `zig build-exe`，几十秒到分钟级，屏幕上只有一句 `installing…`——问句本身也没什么可问的：user store 是这个人自己的目录，装进去的东西就是他刚跑的那个二进制带来的。现在 seed 挪进 `App.syncStores`（进屏之后、后台），进度走已有的状态栏 sync 通道，结尾一行汇总 `user store: 5 built · std & guide active · std tools pinned`。**同意模型收敛成一条规则**：只有 `ext seed` 报告"**这一趟才到**"的 id 才被 adopt（`adoptBundled`）——已经在 store 里的是别人早就做过的决定，**包括昨天在 `/ext` 里关掉它这个决定**，任何一次开屏都不许翻案。顺带堵一个新口子：`syncStores` 原来的"激活本趟 built 出来的版本"循环遇上新 seed 会把五个全激活（`evolution` 的 system prompt 就进了每一场 session），所以那个循环显式跳过 `arrived` 的 id——它们的激活是 `adoptBundled` 的事，而它只认 `std` 与 `guide`。`tui.toml` 的两个键照旧：`sync_on_start=false` 一步不动，`auto_activate` 管两边的指针移动。**workspace/project store 的 trust 门原样保留**（DESIGN §9 的内核安全门，且它是唯一能挡住"开不出 session"的东西，仍在屏幕之前问）。`tui-state.json` 的 `asked_bundled` 退役：`loadTuiState` 逐键白名单读，老文件里多一个键从来不是错，模型选择与 pin 照常读回。
 5. **信息密度：主视图只回答"要不要动它"**（用户④）。id 行去掉 `3v comp` 那一格（版本数与 kind 是"已经走近这个包的人"才关心的，它们在详情面板与版本线上），行上只剩：开关标记 · id · 半开提示(`3/5 tools` / `pins only`) · draft 状态 · shadowed。版本线**宽度自适应**（用户当场纠正过一版：先落了"一律短哈希 + 光标下一行画全串"，但宽度绰绰有余时藏着 16 位数字不买任何东西）：两个标记列（current / this session）优先，剩余宽度放得下就整行画**完整版本串**并省掉光标下的辅助行，放不下才退到**短哈希**（`shortVersion`，`v-` + 8 位）+ 光标所在行下方画一次全串——24 位十六进制是内容地址，它存在的理由是"同一份源码 build 两次同名"，人对它做的唯一一件事就是贴到 `ext activate` 后面。**散文行永远用短哈希**：drift 行与详情的 `current v-…` 同样用短哈希（同一个纯函数，两行说同一个 build 不可能差一位）；permissions 行只在**真有非零项**时出现（`permissionLine`：`fs 0 · net — · proc 0` 在每个包上都是三格废话，正是它让唯一真要权限的那个包不再显眼），root 路径留着但降到最暗色。
 
 **测试**：`cd tui && bun test` 193 → **196 pass**、`tsc` 干净。新增：`overlays.test.tsx` +2（`shortVersion` / `permissionLine` 两个纯函数；**满配额的面上 Enter 仍然激活**——独立 temp workspace 写 `[registry] max_tools = 2`，断言 `current` 真的动了、`session_pins` 是空的、屏幕上是 `tool face is full` 而不是 `nothing changed`）、`pins.test.ts` +1（`faceFullLine`）；改写：`extensions.test.ts` 把"问句文案"那条换成"只 adopt 这一趟到达的 id"（没到达的一律不动 = 关掉的东西活得过重启；`needs zig` 的没有版本可指），`overlays.test.tsx` 的 76 列那条改断言"行上没有版本哈希"、drift 那条断言短哈希 + 完整串仍在下一行、source-only 那条把 `0v scri` 换成详情面板的 `· script · inactive`、tools pane 那条不再假设 `max_tools` 是 8（**内核这一轮把默认值改成了 20**），快照的 `stable()` 多一条 `tools 2+N/<max>` 归一化——配额分母是内核的默认值，不是这块屏幕的排版。
 
-**没做**：`/ext` 打开时仍会跑两次 `ext sync --dry-run`（只是不再挡住第一帧；真要更快得让内核给一个便宜的 plan）；乐观更新只覆盖 activate / deactivate / a / r，`b` build 与 `p` prune 仍是"等它、然后全量刷"（它们本来就要改磁盘上的版本目录）；`bundled_driver_only` 是硬编码名单，等 manifest 的 `audience`；状态栏的 sync 进度仍只有一行 notice，没有专门的安装面板。
+**没做**：`/ext` 打开时仍会跑两次 `ext sync --dry-run`（只是不再挡住第一帧；真要更快得让内核给一个便宜的 plan）；乐观更新只覆盖 activate / deactivate / a / r，`b` build 与 `p` prune 仍是"等它、然后全量刷"（它们本来就要改磁盘上的版本目录）；`bundled_driver_only` 是硬编码名单，等 manifest 的 `audience`（**T34 已做**）；状态栏的 sync 进度仍只有一行 notice，没有专门的安装面板。
 
 ### T24 · 权限：内核给一个 gate，屏幕决定问不问（2026-08-19）
 
@@ -1262,7 +1290,7 @@ cd tui && bun test test/compact.test.ts
 2. **判断全在 `approvals.ts` 一个纯函数里**（§5.7 的决策序：deny 表 → 本场 always → ask 表 → allow 表 → manifest `readonly` → mode）。条目两种形状（tool id / tool 名，或 `shell:<命令前缀>`），`a` 记的 key 对 shell **只记第一个词**。它不 import 任何 UI、不 spawn 任何东西，所以它是这一轮唯一有密集单测的地方（`approvals.test.ts` 7 条）。
 3. **卡片是那张 tool 卡多一行**（`ToolItem.awaiting` + `ApprovalPrompt`），键 `y` / `n` / `N`(带理由) / `a`；理由经输入框收（这时它不是 turn 而是 note——call 还开着，发给模型的东西会排在它后面）。状态栏活动区在等的时候压过其它一切并转 warn 色。
 4. **`/mode` 让名给权限档，穿身份的改叫 `/as`**（`/mode auto` 与 `/mode evolution` 从来不是同一类东西）。存储链 `tui-state.json` > `tui.toml [driver] mode` > `ask`；状态栏最右的 chip 可点；**有卡片在等时切 mode 会立刻重裁它**。
-5. **handoff 接线**（§5.8）：每个 step 结束看一次 `.nulya/handoffs/<id>-*.md`（与 `drivers/goal.*` 同一个信号），`ask` 弹面板（brief + `Enter` 跟 / `Esc` 收）、`auto` 直接跟；跟过去就是 `/compact` 的 `brief_file` 分支。draft materialize 时按 `[extensions] handoff`（默认 true）加 `--with handoff@<v> --pin ext:handoff/handoff`——`--pin` 在这个前端里的第一个真实 consumer。
+5. **handoff 接线**（§5.8）：每个 step 结束看一次 `.nulya/handoffs/<id>-*.md`（与 `drivers/goal.*` 同一个信号），`ask` 弹面板（brief + `Enter` 跟 / `Esc` 收）、`auto` 直接跟；跟过去就是 `/compact` 的 `brief_file` 分支。draft materialize 时按 `[extensions] handoff`（默认 true）加 `--with handoff@<v> --pin ext:handoff/handoff`——`--pin` 在这个前端里的第一个真实 consumer。（T34 起那个键是 `[extensions] session_with` 列表里的一项，pin 由 manifest 的 `audience` 派生。）
 6. **顺带的两处 CLI 清理**（内核那边同一轮）：`ext rollback` 动词删了（回滚 = `activate` 旧版本），所以 `/ext` 版本线只剩 `a`、`registry.ts` 不再认 `rollback` 这个动词、README 的键表跟着改；`config show --refresh` 变成 `nulya config refresh`（TUI 没有消费者，只有 README 一句话改）。
 
 **测试**：`cd tui && bun test` 196 → **211 pass**（+`approvals.test.ts` 7 条纯函数、`gate.test.tsx` 7 条：ask 下等待 + `y` 真跑、`N` + 理由进 ledger 的 marker、卡片在等时 `/mode auto` 当场放行、auto 下直接跑、verdict 行的形状、handoff 文件的发现与去重、以及"这个 TUI 开的 session 真带着 handoff 的成员 + pin"（没有 zig 就 skip——compiled 包））；`tsc` 干净。改写：**跑真步骤的测试一律用 `auto_settings`**（`support.ts` 新增：`driver.mode = "auto"` + 关掉 handoff——没人在键盘前的测试就是 auto 那一档，而 handoff 会给每个被读回的 store 多一个包）；`/ext` 的 `r` 那条改成 `a`（同一个确认框）、`registry.test.ts` 的两动词那条改成"activate 一个动词 + 老拼写退回 shell 卡"、`render.test.tsx` 的 §5.2 那行改成 activate 旧版本、`/help` 快照重出（多了 `/mode` 行、`y/n/N/a` 键行、两条鼠标行，viewport 66 → 72）。内核侧：`zig build test` 全绿（`loop.zig` +2：allow-all == 无 gate、deny 只停这一个 call 且不记 journal）、`zig build e2e` 55 pass（新增一条：`--gate` 的请求行 / deny 带 note / allow 真跑 / EOF fail closed，`support.runCliStdin` 是为它加的第一个喂 stdin 的 runner）。
@@ -1364,7 +1392,7 @@ EditCard 一个字没改：它按 `view.tool === "edit"` 选卡，而 extension 
 
 修的是四处，第一处是判据、其余三处是把这件事说出来：
 
-1. **`extensions.autoActivatable(id, prompts)`**（纯函数，`bun test` 钉住）：`bundled_driver_only` 的三个按名字拒，**任何声明了 `contributes.system_prompts` 的包**按通则拒——那是"模式"，选模式是人的决定，不是启动的副作用。`prompts` 为 `null`（读不到冻结 manifest）也是拒：分不清的时候，留着不开的代价是 `/ext` 里一次按键，反过来的代价是这台机器上的每一场 session。配套两个小件：`syncRoot(ws, user)`（`ext sync [--user]` 作用的那个 root，所以刚 build 完的版本在哪儿是已知的，不必再 `ext list`）与 `promptsOf`。后台 pass 主动跳过的 id 会在那一行 sync 汇总里点名（`… built, left off (a mode) · /ext`）——建好了却什么都不做的包，不说就是个谜。
+1. **`extensions.autoActivatable(id, prompts)`**（纯函数，`bun test` 钉住）：`bundled_driver_only` 的三个按名字拒（**T34 删掉了这一半**，只剩下面那条通则），**任何声明了 `contributes.system_prompts` 的包**按通则拒——那是"模式"，选模式是人的决定，不是启动的副作用。`prompts` 为 `null`（读不到冻结 manifest）也是拒：分不清的时候，留着不开的代价是 `/ext` 里一次按键，反过来的代价是这台机器上的每一场 session。配套两个小件：`syncRoot(ws, user)`（`ext sync [--user]` 作用的那个 root，所以刚 build 完的版本在哪儿是已知的，不必再 `ext list`）与 `promptsOf`。后台 pass 主动跳过的 id 会在那一行 sync 汇总里点名（`… built, left off (a mode) · /ext`）——建好了却什么都不做的包，不说就是个谜。
 2. **`/ext` 把后果说出来**：id 列表多一列 `mode`（`modeCell`，on 时 warn 色），详情面多一行 `a mode · turning it on puts its system prompt in every new session on this machine · /evolve（或 /as <id>）wears it for one session instead`，Enter 的 notice 换成 `promptConsequence`——`evolution active · its system prompt now enters EVERY new session on this machine · /evolve wears it for one session instead · Enter again to turn it off`。**开关仍然是一个键、仍然不问 `y`**：它只是不再沉默。
 3. **开屏点名**：`syncStores` 收尾时 `activePromptPackages(await listExtensions(ws))`，有就在状态栏说一句并指 `/ext`（`promptPackageWarning`）。**不替人 deactivate**——关掉和打开一样是决定。这一半是守卫补不了的：指针已经在盘上了。
 4. **进化模式怎么进要看得见**：`/help` 与 `commands.ts` 的 `/evolve` 改成人话（慢速回路：复盘已完成的 session、判断该不该留下或造工具；开一个新 tab 戴上它，**什么都不 activate**）；`/evolve` 执行后自己补一句 notice（开了新 tab、戴的是哪个版本、下一条消息才开场）；draft tab 的标题带上 `--with` 的 id（`tabLabels`：`scripted-demo · evolution (new)`——`/evolve` 开的第二个 tab 与第一个同模型，不写就完全一样）；状态栏多一个 `◈ evolution` chip（`StatusBar.wearing`，draft 读 `bring()`，已开场的 session 读冻结 `contributions` 里有 system prompt 的成员——顶上那张卡默认折着，折起来之后原本一个字都没有）。
@@ -1379,3 +1407,87 @@ EditCard 一个字没改：它按 `view.tool === "edit"` 选卡，而 extension 
 **没照抄 tcode 的两处**（有意）：① 选中标记仍是共享的 `rowGutter`（`▾` 光标 / `·` 悬停）而不是 `▸`——这一套是全应用六个列表共用的视觉语言（tui.md §6），为两个 picker 破例，换来的是别处全部不一致；② 没有边框——`§4.1`/`§6` 定的就是无边框，审批对话框也没有。
 
 **测试**：`cd tui && bun test`、`tsc` 干净。新增：mode 迁移与 picker 选择逻辑（`approvals.test.ts`）、`autoActivatable` / `promptConsequence` / `activePromptPackages` / `promptsOf`（`extensions.test.ts`）、`/mode` 开 picker 与选完不解释（`gate.test.tsx`）、点 chip 开 picker 并点行作答（`mouse.test.tsx`）、`/ext` 的 mode 列与后果文案（`overlays.test.tsx`）、`tabLabels` 带 `--with`（`evolve.test.ts`）、状态栏 `◈` chip（`views.test.tsx`）。
+
+### T32 · sub-agent 第一期：一个定义文件，就是一组 `session new` 参数（2026-08-20）
+
+**内核零改动**，`extensions/` 零改动。新文件三个（`src/agents.ts` · `src/ui/AgentPicker.tsx` · `test/agents.test.ts` + `test/delegate.test.tsx`），其余是小接线。设计契约在 §5.10；这里只记为什么是这个形状。
+
+1. **没有新机制，一个都没有。** PLAN §3.2 那句"一个 agent 就是 `session new` 的一组参数"是这一轮唯一的设计，剩下全是把已有的东西按那句话摆好：`ext build` 一个 draft（`/evolve` 的路）· `session new --with <精确版本>`（`/evolve` 的路）· `--pin` 一个工具面（T12 的路）· `--max-steps` 一次 run（driver 本来就有的 option）· `--gate` 拦一个 call（T24 的路）。**`src/` 一个字节都没动**，`docs/DESIGN.md` 也因此一个字都不用改——没有新的内核事实。
+2. **system prompt 只有一条路进 session，所以材料化不是绕路，它就是那条路。** physics #3/#4：model-visible 状态只经 append 改变，换 composition = 换 session。一个 persona 要被模型看见，只能是某个**冻结的 extension 版本**贡献的 system block。把 markdown 渲染成 data extension 因此不是"为了复用 extension 机制"，而是"这本来就是唯一的机制"——顺带白拿内容寻址：改了 markdown 就是新版本，没改就是老版本，`/agent` 每次都 build 也不用谁记得重建。
+3. **trust 问句的时序是被 DESIGN §9 逼出来的，不是抄 T11 抄的。** 本机 `ext build` 填满一个空的 workspace store **就是**信任（出生地规则）。所以"第一次材料化一个 project 定义"这个动作会替 checkout 把名签了；问句必须早于它，而"早于它"最干净的位置就是 T11 那个问句旁边——屏幕还没进备用屏、`session new` 还没发生。两个键而不是三个：这里没有"装一半"这回事，只有"别人写的 persona 能不能拿着本 workspace 的工具说话"。
+4. **`readonly` 排在三张表之前，是因为它排在别的地方就会变成谎话。** 决策序原本是 deny → always → ask → allow → manifest readonly → mode（§5.7）；readonly agent 的天花板插在**最前面**且不可上诉。理由不是"更安全"（它本来就不是安全边界，§5.7 末句），而是**语义**：`readonly: true` 的全部意思就是没有东西能掀开它，一条 `allow` 能把 `shell` 放回来的话，这个词就只是装饰。拒绝用内核自带的 `deny <note>`，于是模型读得到自己为什么什么都没跑，而且那句话在 ledger 里而不是只在屏幕上。
+5. **picker 选中一行不启动任何东西。** 它把 `/agent <name> ` 写进输入框就停手。一个委派需要一个任务、任务没人猜得出来，而"替人编一个任务然后开场"是这个前端唯一不能犯的那类错——和 T22 那条"第一条消息才开场"是同一条纪律。
+6. **`◈` chip / tab 标题 / CompositionCard 全部白拿**：sub-agent 的 session 戴着 `agent-<name>` 这个 `--with` 成员，T31 已经把"这一场戴着谁"画在两处了，所以这一轮**没有**为 sub-agent 加任何显示代码。
+
+**测试**：`cd tui && bun test` 257 → **272 pass**（新增 `agents.test.ts` 11 条纯函数——front matter 的四种写法 / 字段全解 / 缺省 / 坏文件 warn-skip 的两种跳过与四条警告 / 双层发现与同名点名 / manifest 形状 / **真二进制的材料化幂等与改一个字得新版本** / readonly 天花板 / 问句只问一次 / 答案落盘；`delegate.test.tsx` 4 条真二进制全环——`/agent` 开出戴着 persona 的子 session 且 **read-only 的 `shell` call 在子 ledger 里是 `ok=false` 带 gate note**、未知名字列全并什么都不建、没给任务时说清为什么要给、裸 `/agent` 的 picker 与"Enter 只写命令"）。`/help` 快照重出（多了 `/agent` 三行，viewport 74 → 77）。`tsc` 干净。
+
+**第二期（同日）：模型自己委派，靠内核已有的后台任务回路。** `extensions/agent`（compiled，四个源文件）三个 tool：`agent{name,task}`（模型的委派：材料化 → `session new` → `session append` → `task run`，回执点名子场并叫模型收尾）· `materialize{name}`（定义 → 冻结的 data extension 版本；**这套渲染的唯一实现**）· `run{session,agent?,readonly?,max_steps?}`（后台任务跑的那条命令：解析 `session step --stream` 的 JSONL、`readonly` 时以 `--gate` 机械应答、把子场最后一条 assistant 文本包成 fence 打 stdout）。**内核零改动。**
+
+7. **第一版规格被否掉的那件事，值得记下来。** 原方案是"`agent` tool 写一个请求文件，TUI 每步之后看盘跟进"——handoff 的形状。问题不在它跑不通，而在它**发明了一份每个 driver 都要重学的盘面约定**：TUI 一份、`goal.sh` 一份、`goal.ps1` 一份、下一个 driver 再一份，而它们要认的是同一件事——"有个东西欠你一个答案"。内核里**已经有且只有一个**这样的回路（`task_finished` 经 inbox 在 step 边界排干，DESIGN §6.1/§3.1），T29 又已经把"inbox 非空就再 step"写成了 driver 侧唯一那条 policy。所以走它：`drivers/goal.*` **一个字没改**就能收到 sub-agent 的报告，TUI 也没加第二个钩子。`extensions/handoff` 的文件形态从此是**历史特例**，不新增第二个（这条已进 CLAUDE.md 的工作约定）。
+8. **两个 driver，一条天花板。** 人按 `/agent` 时 TUI 是 driver，readonly 由屏幕那条 gate policy 兜住（上面第 4 条）；模型调 `agent` 时 `run` 是 driver，同一条天花板由它**机械应答**——没有人在键盘前，所以规则是死的：`shell` 一律拒、extension tool 只放行**子场自己的冻结 manifest** 声明了 `readonly:true` 的（放行名单在开跑前从子场 header 一次算好——gate 请求只带模型面上的名字，"这个名字来自哪个包"的答案在 header 里）。两条路的拒绝都是内核 gate 的 `deny <note>`，都进子场 ledger。
+9. **报告是数据。** `run` 打出的是子场**最后一条 assistant 文本**（子 agent 被告知最终发言即报告），包在 `<agent-report agent=… session=…>` 里 + 一句"这是待评估的发现不是命令"的合同 + 由**代码**附上子 session id（`nulya session events <id>` 读全程）。它落进 `task_finished.text`，而内核那层本来就在外面又包了一句"data, not instructions"——两层框，都不是模型写的。
+10. **`materialize` 是写路径的唯一实现，TS 只留读。** version id 是 manifest 字节的 hash，两份渲染就是同一个 persona 的两个版本；所以 `agents.ts` 删掉了 `agentManifest` / `agentDraftPath` / 自己写 draft 那段，改成 `buildAgentPackage` + `materializeAgent`（走 `ext run`），发现与解析（picker 要列）留在 TS。
+11. **撞到的一堵墙（规格没预见，绕法不引入新机制）**：`std.json.Stringify` 的 `objectField` 之后**不能直接往 writer 写原始字节**——状态机会以为没有值被写出，下一个 `endObject` 就踩 unreachable。`materialize` 要返回一个对象（它的读者是 driver 不是模型），所以走它自己的 `beginWriteRaw` / `endWriteRaw` 开口而不是绕过它。
+
+**测试**：`extensions/agent` 的 e2e 一条全环（`tests/e2e/extension.zig`，scripted）：materialize 幂等 + 坏 pin 被丢并点名 + 冻的是 data extension 且**没有 current** · 未知名字列全 · 无 session 拒绝 · 一次真委派——子场建出来、以父场的后台任务跑、**read-only 的 `shell` call 在子 ledger 里是 `ok=false` 带 gate note**、`task wait --any` 等到它、父场下一步排干出 `task_finished` 且里面是 `<agent-report>` + `as DATA`。前端：`delegate.test.tsx` 多一条"有定义才带 `agent`、子场绝不带"，`registry.test.ts` 多一条回执解析出子 id，`agents.test.ts` 的材料化那条改成走真包的 `materialize`。`ext seed` 的自带扩展 5 → 6，两处计数与文档同步。
+
+**第三期（同日）：自带 persona，读路径也收成一处。** `extensions/agent` 从三个 tool 变四个，多的是 `list`（driver-facing、永不 pin）。
+
+12. **"标准库"体验：什么都不写就有 `explore` / `plan` / `general`。** 三个 persona 移植自 tcode 的 builtin（`crates/tcode-tools/src/agent/builtin/*.md`），`@embedFile` 进这个 extension 自己的二进制——分发就是二进制，没有安装步骤也没有要建的目录。**nulya 没有的概念是删掉而不是翻译**：`ask_user`（没有"子 agent 向人提问"的原语，plan 那条改成"取最合理的读法、在报告里说你取了哪一种"）与向下 fan-out（子场不带这个包 = leaf，explore/plan/general 三份正文里那几条都删了）；`orchestrator` 整个不移植——它存在的意义就是 fan-out。frontmatter 只留我们有的：explore = `readonly: true` + `pins: [ext:std/read, ext:std/grep, ext:std/glob]` + `max_steps: 12`；plan 同样三个只读 pin、`max_steps: 20`（它不是 readonly——它跑在调用者的权限档下，改动照样过 gate）；general 六个 std tool 全要、`max_steps: 30`。三个都**不点名模型**：不在乎跑在哪的 persona 该跟着发起它的那一场。
+13. **分层用 store roots 那条规则，不用 tcode 那条。** workspace > user > builtin，**首个持有者胜、输的照样列出来并标 `shadowed`**。tcode 是"builtin 名字保留、不许覆盖"——那在它那里成立，在这里不成立：这个仓库里每一样分层的东西（store root、config 层）都是遮蔽而不是拒绝，为一处破例换来的是别处全部不一致。
+14. **读路径收成一处。** `list` 是定义格式的唯一 reader，`agents.ts` 里的 frontmatter 解析全删——picker、readonly 天花板、委派参数都读它。两个 parser 就是"这个 agent 是不是 readonly"的两个答案，而那正是天花板要变成一次拒绝的那个问题。**唯一的例外是 trust 问句**：它问在屏幕之前、任何 build 之前，所以读的是**文件名**（一次 `readdir`），不是定义。
+15. **pins 连带 `--with`，且先验证。** 一个 pin 不让它的包成为成员，而 pin 非成员是整场拒绝，所以每个不同的 ext id 派生一个 `--with <id>`（取 `current`）。**并且 `materialize` 先验证**——不然消息是内核那句真话但没有出路的 `--with names an extension with no such built version`，而人需要的是"`explore` 要 std，`nulya ext build extensions/std --user`"。
+16. **顺手改掉一个自己造的错**：`refreshAgents()` 一度挂在 `onMount` 上，于是**开屏就编译一次 agent 包**——正是 T11/T23 反复在赶出关键路径的那件事（它还顺带把别的测试的 `/ext` 断言打挂了，因为那个包出现在了共享的 user store 里）。改成懒的：`/agent` 用到时、或第一场 session 组装时（与 handoff 包同一形状）。带入条件也随之变简单——包自带 persona，所以"有定义才带"恒真，改成一个 `tui.toml` 键 `[extensions] agent`（与 `handoff` 并排），说不要的人有地方说。
+17. **撞到一个内核 bug，没改内核**（`src/` 仍冻结）：`session new --with <解析得出来的> --with <解析不出来的>` 在 `composition.unionWith` 的 `errdefer freeResolved` 里 **panic（Invalid free）**；把解析不出来的放在**前面**则正常报 `WithVersionNotFound`。委派永远先放 persona 自己那个 `--with`，所以它永远走崩的那个顺序。绕法不引入新机制：`materialize` 先验证成员——这本来就是好消息该有的样子。已在报告里点名。
+
+**测试**：`zig build test` 448 pass（新增 `extensions/agent/src/defs.zig` 六条：frontmatter 四种写法 / 缺省与 CRLF / 三种致命与四条警告 / pin 与 name 的形状 / **三层发现与遮蔽** / 自带三个 persona 都解析得出来且只有 explore 是 readonly；build.zig 第三个 `addTest`）。`zig build e2e` 69 pass（新增一条：什么都不写时 `list` 的形状与三个 builtin、workspace 同名定义遮蔽 builtin 且 `materialize` 取赢的那个、std 没装时点名指路且什么都不建、装上后 builtin explore 真委派——子场冻结里有 `agent-explore` + `std`、native face 正好是那三个只读 tool、`shell` 被 gate 拒）。`cd tui && bun test` 269 pass、`tsc` 干净。
+
+**第四期（同日）：追问，以及谁可以委派。** `agent` tool 长出第二个形态、frontmatter 长出两个字段、builtin 补齐第四个。内核零改动。
+
+18. **`agent{name|session, task}`：追问是同一个 tool 的第二个形态。** `session` 往一场**已经报告过的**子场再送一轮——append-only，子场带着它找到的一切 resume，**命中它自己的前缀缓存**（DESIGN §1），一次纠正只付一轮，而重开一场要把侦察再买一遍。这是设计红利而不是新机制：ledger 只 append，resume 就是再 step。四道门都在建任何东西之前：s-… 形状 · 冻结 header 必须戴着 `agent-*`（否则那是别人的对话）· **还在跑就拒绝**（判据用内核自己的 `task list --json`——驱动它的后台任务 `starting`/`running` 就是"还在工作"；往正在产出报告的 run 里塞一轮，报告说不清自己包含了什么）· `max_exchanges`（数子场的 `user_text`，未声明 = 不限）。每一轮一个新后台任务、一条 `task_finished`——**报告的路一条都没变**。
+19. **`readonly` 自动仍然对**：runner 每次都从**那一场自己的冻结 header** 重算放行名单，追问既不换 composition 也不换 header，所以没有第二处要同步的东西。**并发点写进文档**：人若在 TUI 子 tab 接管说话、模型同时追问，撞的是 durable session 的单写者语义（`SessionBusy` / 上面那道"还在跑"的门）——行为安全，两个写者本来就是内核唯一拒绝的事。
+20. **能不能委派，是被委派者定义里的一个字段**：`agents: [name, …]`，**空 = leaf**（除协调者外每个 persona 的默认）。非空时那一场才额外带 `--with agent@<自身版本> --pin ext:agent/agent`——**一个字段、一处读取**，于是"不能委派的子场"干脆没有这个 tool，没有"事后再拒绝"这回事。tool 侧的校验从**本场冻结 header 里的 `agent-<name>` 成员**反查定义（header 是冻的，说的是这一场实际 composed 成什么，不是定义文件今天说什么），名字不在单里就报错并列出允许的。
+21. **深度兜底防的是间接环，不是攻击**：白名单看不见 `a→b→a`，所以 runner 给它驱动的那一步设 `NULYA_AGENT_DEPTH=<n+1>`（非 secret 形状，过得了净化），tool 读到 ≥3 拒绝。**人从前端驱动子场时这个变量根本不在**——写明了：它和白名单都是 policy，与审批表同类，真隔离等 sandbox。
+22. **`orchestrator` 补上了**（前一期跳过它，理由是"它的意义就是 fan-out 而我们是 leaf"——白名单一到位那个理由就没了）。移植纪律同前三个：`agents: [explore, plan, general]`、`max_exchanges: 4`、**不给 pins**（委派是它的全部工作，正文也这么说）；tcode 的 `tools: []` / `gatesOutput` / `disallowedAgents` 我们没有，删掉；"用 `resume` 把纠正送回子 agent 完整的上下文"那句**留着并改写成我们的形态**——第 18 条刚好把它变成真的。
+
+**测试**：`zig build test` 450 pass（`defs.zig` 多两条：白名单 / exchange 预算的三种写法与坏条目，session id 形状；builtin 那条改成"恰好一个协调者，且它只点名本包有的 persona"）。`zig build e2e` 71 pass（多两条：**追问全环**——委派 → 读报告 → `agent{session,task}` → 第二份 `task_finished`，断言子场两条 `user_text`、`session list` 行数不变（没有新场）、超 `max_exchanges` 拒绝、还在跑时拒绝（`loop` 档）、neither/both/非委派场三种参数错；**白名单与深度**——协调者的场 `native_tools` 有 `ext:agent/agent` 而叶子的场没有、名字不在单里报错并列名、叶子场一律拒绝、`NULYA_AGENT_DEPTH=3` 拒绝）。`cd tui && bun test` 269 pass、`tsc` 干净。
+
+### T33 · tools pane 的每一行都该是一个能按的开关（2026-08-20）
+
+`/ext` 的 tools pane 上，六个 driver tool（`agent` 一家四个 + `compact` + `handoff`）与五个可 pin 的 `std` tool 并列，**并且按 id 字母序排在前面**。于是这张表的第一屏答的不是它自己的问题（哪些在模型脸上、还能加几个），而是"这里有一堆你按不动的东西"。
+
+**判据不是"driver tool 该不该显示"，是"这张表的行意味着什么"。** T24 当初把它们列出来的理由（"一个存在却哪儿都画不出来的 tool，正是 `compact` 变成谜的方式"）今天只对了一半：extensions pane 的详情行早就在说 `its N tool(s) stay off the model face · /compact and drivers call them with ext run`（T22/T24），所以它们并不是"哪儿都画不出来"。而**可 pin 的那一半有 `registry.max_tools` 封顶，driver 那一半没有封顶**——每加一个自带包（T32 一次加四个）就往这张表顶上多堆一行，噪音是往错误方向增长的。
+
+所以：**折叠，不是隐藏**。列表里只留有 checkbox 的行，底下一行常驻 `▸ N driver tools · called with ext run, never on the model face · d shows`，`d` 或点它展开/收起。
+
+- **三个纯函数**（`bun test` 钉住，不碰渲染）：`foldedRows` / `shownRows(rows, expanded)` / `foldLine(count, expanded)`。折叠的判据是 `driver && state === "off"`——**一个 driver tool 若真被 pin 上了，它照常显示**：那是这张表能改的一个状态（`Space` 撤回），而列表里唯一那个错的 checkbox 是最不该藏的东西。
+- **展开状态不进 `tui-state.json`**：它是一次"还装了些什么"的好奇，不是一条关于这个前端该长什么样的设定。
+- **光标跟着行走，不是跟着序号走**：展开/收起时按 id 重新定位，否则六行从光标底下抽走，选中项会漂到别处。
+- **折叠行在列表下面而不是在列表里**：它没有 checkbox 也不吃光标——"光标能走上去却按不动"正是这次要拆掉的那个形状。
+- **空列表的两种理由分开说**：一个 tool 都没有 → 照旧教怎么 build；只有 driver tool → `nothing on the model face · every active extension here declares driver tools only`（那些包是 active 的，让人去 build 是假话）。
+- `d` 只在 tools pane 且真有东西可折时才响应——在别处按下去没反应的键，比没绑定的键更糟。
+
+**测试**：`bun test` 271 pass、`tsc` 干净。新增 `pins.test.ts` 一条（折叠/展开/计数/被 pin 的 driver 行仍在）与 `overlays.test.tsx` 一条真渲染（store 里放一个真的 `compact` 脚本包：折起来时它不在帧里、`d` 之后在、再 `d` 又不在）。
+
+### T34 · 一个 tool 是给谁的，只有它的包知道（2026-08-20）
+
+前端里有四张名单在替包回答"这个 tool 是给模型的还是给 driver 的"——而这个问题**只有包自己知道**。这一轮把它换成内核 manifest 的一个字段，然后把四张名单全删掉。**内核动了一处**（`contributes.tools[].audience`，DESIGN §7.2.1），是 PLAN §4 早就定好形状的那一条。
+
+**内核侧（第二个"包自己说"的字段，不长新机制）**：`manifest.ToolSpec.audience: ?[]const u8` + `Audience{model, driver}` + `audienceOf()`，与 `readonly?` 逐条同纪律——**解析、冻结、不强制**。kernel 不据此过滤工具面、不影响 pin 解析：**pin 一个 driver tool 依然合法**，只是没有 driver 会默认这么写。错误的分法跟着 `timeout_ms`：类型不对（`true`）是 parse 的 `WrongType`，认不出的词（`"drivers"`）是 validate 的 **`InvalidAudience`**——退回缺省的后果正是这个字段要防的那件事。**缺省是 null 不是 `"model"`**：把沉默读成 model 是**读的人**的选择，做在用它的地方（`files.modelTools`），不做在内核里。自带包只标了该标的：`compact` 的唯一 tool、`agent` 的 `materialize`/`run`/`list`——**`agent` 那个 tool 不标**，它正是给模型的委派入口。
+
+**四张名单变成了什么**：
+
+| 原来 | 现在 |
+|---|---|
+| `bundled_driver_only = ["agent","compact","evolution","handoff"]` | **删除**。判据是每个 tool 自己的 `audience` |
+| `pinsOnActivate(id)`（per 包的布尔） | `pinsOf(contributions)`（per tool 派生：model-audience 的才给 pin）。`agent` 因此一个包两个答案 |
+| `bundled_active = ["std","guide"]` | **删除**。开屏 sync 的 auto-activate 只剩通则 `autoActivatable(prompts)` |
+| 字面量 `std_pins` 六个 | 从 std **当前冻结版本**的 manifest 派生；字面量降级为冷启动 fallback + `edit` 那次一次性迁移的历史依据（那条迁移一个字没动） |
+
+**`autoActivatable` 少了一半，这是收益不是退让。** 它原来两条：按名字拒四个 bundled id，以及按通则拒任何 contribute 了 system prompt 的包。第一条删掉后 `compact` / `handoff` / `agent` 会被开屏后台 sync 激活——**这是预期行为**：activate 只是 membership，pin 那一半由 audience 挡住，而它们都不 contribute system prompt，所以没有 T31 那种"每场 session 都被戴上一个模式"的风险。`evolution` 仍被挡，靠的是那条**本来就是真正理由**的通则。
+
+**`[extensions] handoff` / `agent` 两个布尔 → 一个列表键 `session_with`**（默认 `["handoff", "agent"]`）。"要带哪些包"是列表形状的问题，不该每加一个就多一个键 + `App.tsx` 里多一个分支。老键照读（`withPackage`：读到 `handoff = false` 就把它从列表里去掉，读在列表之后所以是更近的那句话），**只读不重写文件**——与 `normalizeMode` 认老 `auto` 同一先例。`App.tsx` 的 `handoffExtras` / `sessionExtras` 两段手写分支塌缩成对这个列表的一个循环（`extensions.sessionMember`：自带 draft 就 build（内容寻址故幂等），否则取 store `current`；一个包解析不出来只 notice 一句、session 照开）；`handoffBuild` / `agentBuild` 两个 `let` 合成一张 `memberBuilds` map，于是 `/agent` 与 composition 走同一次 build 而不是各建一次。`handoff_pin` / `buildHandoff` / `handoff_id` 随之删除（`agent_pin` 留着——委派路径在用）。
+
+**`render/registry.ts` 的 `view.tool === "agent"` 保持现状并写明了原因**：到这里的是 `ledger.ToolCall.tool`，内核记的是**模型面的名字**，包名在 session header 里而不在这次调用里（`App.tsx` 的 `toolId` 是唯一把两者接起来的地方，它要那个 tab 的冻结 composition）。为一个 glyph 把冻结 composition 穿过整条 transcript 管道不值得；不做的代价是"另一个也叫 `agent` 的第三方 tool 会画成子场卡"——**画错一张图，不是做错一件事**。
+
+**测试**：`zig build test` 通过（`manifest.zig` 新增一条：三种声明 + 沉默 ≠ model + `InvalidAudience` + 类型错是 `WrongType`；`cli/ext.zig` 那条"每个 manifest 错都是 draft fault"补上新错误名）。`zig build e2e` 通过（新增一条：script 包声明三种 audience → build → **冻结 manifest 逐个读得回、沉默仍是沉默** → 证明内核不据此改变行为（pin 一个 driver tool 的 session 照样组装得出来）→ 认不出的词被 `ext build` 点名拒绝且**一个版本目录都没建**）。`cd tui && bun test` 277 pass、`tsc` 干净（新增：`pinsOf` 的四种包形状含一个仓库外的 id、std pin 从 manifest 派生且 fallback 仍在、`session_with` 新旧键三种写法、`withPackage`；改写：`overlays.test.tsx` 的折叠真渲染换成一个**这个前端从没听说过的** `patrol` 包——它成为 driver tool 靠的是自己 manifest 里那句话；`pins.test.ts` 的折叠计数从 5 变 4，因为 `ext:agent/agent` 现在正确地留在可 pin 那一半；`delegate.test.tsx` 多断言顶层场的 `native_tools` 里**只有** `ext:agent/agent`）。

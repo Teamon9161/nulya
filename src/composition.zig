@@ -514,7 +514,15 @@ fn unionWith(
 ) ![]roots_mod.Roots.Resolved {
     if (with.len == 0) return base;
     var list: std.ArrayList(roots_mod.Roots.Resolved) = .{ .items = base, .capacity = base.len };
-    errdefer freeResolved(alloc, list.items);
+    // Not `freeResolved(alloc, list.items)`: once `append` below has grown the
+    // list past `base.len`, `list.items.len` no longer matches the allocation
+    // the allocator actually handed out (`list.capacity` can be larger), and
+    // freeing the shorter slice is an invalid free. `list.deinit` frees the
+    // real allocated slice; the items still need their own `deinit` first.
+    errdefer {
+        for (list.items) |r| r.deinit(alloc);
+        list.deinit(alloc);
+    }
 
     for (with) |ref| {
         const r = if (ref.version) |v|
@@ -878,6 +886,40 @@ test "--with brings a built-but-inactive version into one session, overrides an 
     try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "absent" }} }));
     try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "mode", .version = "v-000000000000000000000000" }} }));
     try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, &.{"nulya-absent-root"}, .{ .with = &.{.{ .id = "mode" }} }));
+}
+
+test "--with of a resolvable extension followed by one that fails to resolve reports WithVersionNotFound regardless of order (regression: used to panic on an invalid free)" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmpPath(alloc, io, tmp.dir);
+    defer alloc.free(cwd);
+
+    const manifest_bytes =
+        \\{"schema":"nulya.extension/v2","id":"good","contributes":{"system_prompts":["prompts/base.md"]}}
+    ;
+    const v_good = try testkit.writeFrozenVersion(alloc, io, tmp.dir, "good", manifest_bytes, &.{.{ .rel = "prompts/base.md", .bytes = "hello" }});
+    defer alloc.free(v_good);
+
+    // Nothing is active, so `unionWith`'s base list starts empty and the first
+    // resolvable `--with` grows the list past the (empty) slice it started
+    // as — its backing allocation ends up bigger than `list.items`. A second
+    // `--with` that then fails to resolve must still free that grown
+    // allocation correctly, not free the shorter `list.items` slice against a
+    // larger tracked allocation (that mismatch used to panic with "invalid
+    // free" under the testing allocator).
+    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{
+        .{ .id = "good", .version = v_good },
+        .{ .id = "bad", .version = "v-000000000000000000000000" },
+    } }));
+
+    // The reverse order never grew the list before failing, so it always
+    // worked — kept here so both orders are pinned down side by side.
+    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{
+        .{ .id = "bad", .version = "v-000000000000000000000000" },
+        .{ .id = "good", .version = v_good },
+    } }));
 }
 
 test "system prompt ordering is deterministic by pinned extension id and manifest order" {

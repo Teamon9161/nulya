@@ -60,10 +60,10 @@ export const scripted_background_env = { NULYA_SCRIPTED_MODE: "background" }
 export const unsafe_settings: Settings = {
   ...default_settings,
   driver: { mode: "unsafe" },
-  // …and without the `handoff` package. Composing it is a real behaviour with
-  // its own test; here it would put a second extension in every workspace whose
-  // store these tests then read back (tui.md §5.8).
-  extensions: { ...default_settings.extensions, handoff: false },
+  // …and without the `handoff` or `agent` packages. Composing them is a real
+  // behaviour with its own test; here they would put two more extensions in
+  // every workspace whose store these tests then read back (tui.md §5.8/§5.10).
+  extensions: { ...default_settings.extensions, session_with: [] },
 }
 
 /**

@@ -327,7 +327,7 @@ extension 装在**多个 store root** 里，按固定顺序搜索（`extension/r
 - 不存在的 root 是**缺席**不是错误（多数机器没有 user store）；写端（`ext init --user` / `ext build --user`）需要时才创建。
 - **为什么 project 层不能加 root**：一个 root 决定"这台机器上哪些目录可以供出 `current`"，即哪些代码可以被跑起来——checkout 能加就是拓宽权限，正是 §9.5 "只能收窄"禁止的事。同一条理由的另一面是 **workspace root 自己就在 checkout 里**，所以它有一道一次性的 trust gate（§9）：随 clone 到达的 store 要被人信任一次（`nulya ext trust`）才进 composition，本机 `ext build` 建出来的则自动可信。只读投影不过门。
 - **三个作用于整个 root 的壳层动词**（`cli/ext.zig`，都不改任何语义）：`sync` / `prune` 逐个 `<id>/` 做同一件事，`seed` 把二进制自带的 draft 落进来：
-  - **`nulya ext seed [--user] [<id>…] [--dry-run]`** = 把**这个二进制内嵌的自带 draft**（build.zig 把仓库自己的 `extensions/**` 按 `src_embed` 同一先例 `@embedFile` 进来，`src/bundled.zig` 投影；§7.8 的五个）写进该 root——**分发就是二进制本身**，一台从没见过这个 checkout 的机器也拿得到。只写**源码**：build 归 `ext sync`，trust / activate / pin 的每道门原样不动。**该 root 已有 draft 的 id 一律不动**（它可能带着别人的编辑；seed 不是更新通道，要重播先手删 `<root>/<id>/`），版本目录更不碰（physics #5）。点名不存在的 id → 报错并列出内嵌清单，exit 1。`--dry-run` 不写盘，连 root 目录都不建。
+  - **`nulya ext seed [--user] [<id>…] [--dry-run]`** = 把**这个二进制内嵌的自带 draft**（build.zig 把仓库自己的 `extensions/**` 按 `src_embed` 同一先例 `@embedFile` 进来，`src/bundled.zig` 投影；§7.8 的六个）写进该 root——**分发就是二进制本身**，一台从没见过这个 checkout 的机器也拿得到。只写**源码**：build 归 `ext sync`，trust / activate / pin 的每道门原样不动。**该 root 已有 draft 的 id 一律不动**（它可能带着别人的编辑；seed 不是更新通道，要重播先手删 `<root>/<id>/`），版本目录更不碰（physics #5）。点名不存在的 id → 报错并列出内嵌清单，exit 1。`--dry-run` 不写盘，连 root 目录都不建。
   - **`nulya ext sync [--user] [--activate] [--dry-run]`** = 把这个 root 下的每个 **draft**（判据：`<root>/<id>/extension.json` 存在，就是 `ext init` 写 manifest 的位置；只认一层）走一遍 `ext build`。**装一个 extension 从此就是"把源码放进 `<root>/<id>/` 再 sync 一次"**——目录布局本来就是这样，缺的只是这个动词。drafts 之间彼此独立，所以**一个失败不中断其它**（每个 id 一行，坏 manifest 只报它自己；host fault 仍照原样传播），有任何一个没拿到版本就 exit 1。`--activate` 单独一档，因为 **build 是机械的、activate 是决定**（§7.4）：它只把 `current` 指向**这一趟新拿进来的版本**、以及**根本没有 `current` 的 id**；`current` 已经指着别处的一律不动（那是有人 rollback / activate 过）——所以一次 rollback 活得过下一次 sync。`--dry-run` 走同一条计算（`build_ext` 的 `Mode.plan`：同一份 manifest / snapshot / 搜索，写之前停手、也不拿 lease），因此它与真跑不可能对同一个 draft 说两样话。填满一个空 workspace store 时同样按 §9 记一条 birth trust——它就是本机 build。
   - **`nulya ext prune [--user] [<id>] [--dry-run]`** = 删这个 root 下**不是 `current`** 的版本目录（持同一个 `<id>/.lock`）。版本堆积是故意的（rollback 才只是移指针），代价是磁盘；**`current` 缺失的 id 一个都不删**——没有指针就没有"该留哪个"的依据，猜（最新？最大？）会删掉别人正要回滚到的那个。代价直说：冻在被删版本上的旧 session 无法 resume；恢复路径是 draft 还在（同源码重 build 得同一个 version id）。**不扫 session header 保护被引用的版本**（等真实需要）。
 
@@ -346,7 +346,7 @@ extension 装在**多个 store root** 里，按固定顺序搜索（`extension/r
   "id": "web.search",
   "runtime": { "entry": "bin/web-search" },
   "contributes": {
-    "tools": [{ "name": "web_search", "description": "…", "input": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] }, "timeout_ms": 60000, "readonly": true }],
+    "tools": [{ "name": "web_search", "description": "…", "input": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] }, "timeout_ms": 60000, "readonly": true, "audience": "model" }],
     "skills": ["skills/risk-parity"],
     "system_prompts": ["prompts/finance.md"]
   },
@@ -354,13 +354,19 @@ extension 装在**多个 store root** 里，按固定顺序搜索（`extension/r
 }
 ```
 
-校验（`manifest.zig`）：schema id 精确匹配；`id` 合法；**至少一种 contribution**（`NoContributions`）；有 tool 时必须有 `runtime`（`MissingRuntime`）；tool 名不能是 `shell`（保留名只有这一个，§5.2）、不能重复；`timeout_ms` 若写了必须是正数且 ≤ `tool.Timeouts.extension_max_ms`（600s），否则 `InvalidTimeout`；`entry` / skill / system_prompt 路径不能逃出包目录。**manifest 是 schema 唯一真相**：绝不"启动 binary 再问它有什么"。
+校验（`manifest.zig`）：schema id 精确匹配；`id` 合法；**至少一种 contribution**（`NoContributions`）；有 tool 时必须有 `runtime`（`MissingRuntime`）；tool 名不能是 `shell`（保留名只有这一个，§5.2）、不能重复；`timeout_ms` 若写了必须是正数且 ≤ `tool.Timeouts.extension_max_ms`（600s），否则 `InvalidTimeout`；`audience` 若写了必须是 `model` / `driver` 之一，否则 `InvalidAudience`；`entry` / skill / system_prompt 路径不能逃出包目录。**manifest 是 schema 唯一真相**：绝不"启动 binary 再问它有什么"。
 
 `tools[].input` schema 只在该 tool 被 pin 进 `tools[]` 时才喂给模型；平时是可发现性元数据。
 
 `tools[].timeout_ms?` 是**这个 tool 自己**的 wall-clock 上限（缺省 = host 的 30s，§7.3）：知道自己慢的 tool 在 manifest 里说出来，因为 manifest 就是关于一个 tool 的唯一真相。第一个用它的是随仓库带的 `extensions/compact`——它要等一次真实的 model step，30s 一定不够。
 
 `tools[].readonly?`（可选 bool）是这个包对**这个 tool 只读**的**声明**——与 `permissions` 完全同级（§9）：kernel 解析它、把它冻进版本的 manifest、**一个字节都不强制**。消费者是 driver 的审批 policy（§4 的 gate；TUI 的 `[approvals] manifest_readonly`），它有权不信；真边界要等 OS 强制（PLAN §3.8），不是一个布尔值。**缺省是 null 不是 false**：包什么都没说，与包说了"不是只读"是两件事，读的人不许把沉默读成主张。类型不对（`"readonly": "yes"`）是 `WrongType` 而不是被悄悄忽略，与 `timeout_ms` 同一条纪律。
+
+`tools[].audience?`（可选，`"model"` / `"driver"`）是这一类声明的**第二个**，与 `readonly` 逐条同纪律：kernel 解析、冻进版本的 manifest、**不强制**。它答的是一个只有包自己知道的问题——**这个 tool 是给模型的，还是给驱动这场 session 的人/程序的**。`driver` 的意思是"它经 `nulya ext run` 被调用，不该占模型工具面上的一格"：`extensions/compact` 的 tool 会 append/step 它所关于的那一场，模型在场内调必撞单写者锁（§3.4）；`extensions/agent` 的 `materialize` / `run` / `list` 同理（委派入口 `agent` 则**不标**——那一个正是给模型的）。
+
+- **kernel 不据此改变任何行为**：不过滤工具面、不影响 pin 解析——**pin 一个 `driver` tool 依然合法**，只是没有 driver 会默认这么写。消费者是 driver 的 pin / 审批 / 折叠 policy（TUI：`/ext` 的 activate 开关只 pin model-audience 的 tool，tools pane 把没被 pin 的 driver tool 折起来，tui.md §11 T33/T34）。
+- **缺省是 null 不是 `"model"`**：与 `readonly` 同一句话——"包没说"与"包说了 model"是两件事，落盘不会替包补一个字。把沉默读成 model 是**读的人**的选择（这个字段存在之前写的每一份 manifest 声明的都是 model tool），那个选择做在用它的地方，不做在内核里。
+- 类型不对（`"audience": true`）是 `WrongType`；**认不出的词**（`"drivers"`）是 `InvalidAudience` 而不是退回缺省——一个想说 `driver` 却拼错的包，退回缺省的后果正是这个字段要防的那一件事。这与 `timeout_ms` 的分法一致：类型错在 parse，值错在 validate。
 
 ### 7.3 Wire protocol（`protocol.zig` / `invoke.zig`）
 
@@ -448,15 +454,34 @@ Tool 是"能执行的能力"，Skill 是"要遵循的方法 / 知识"；不同 r
 
 都是普通 extension，走 §7.4 同一条 build → activate 路，**没有一个是内核层**：默认不在任何 composition 里（`--with` 成员 / pin 进 native 面 / `activate` 全是用户或 driver 的决定），随 checkout 到达的 store 照过 §9 的 trust gate。
 
-**分发**：这五个 draft 的源码被 build.zig `@embedFile` 进二进制（`src_embed` 的同一先例，`src/bundled.zig` 投影），`nulya ext seed` 把它们写进任一 store root（§7.2）——所以拿到二进制就拿到了它们，不需要这个 checkout 在场；seed 之后走的路与手放源码毫无区别。
+**分发**：这六个 draft 的源码被 build.zig `@embedFile` 进二进制（`src_embed` 的同一先例，`src/bundled.zig` 投影），`nulya ext seed` 把它们写进任一 store root（§7.2）——所以拿到二进制就拿到了它们，不需要这个 checkout 在场；seed 之后走的路与手放源码毫无区别。
 
 | id | kind | contribute | 谁消费 / 怎么进 session |
 |---|---|---|---|
-| `compact` | compiled | `compact` tool（§11） | TUI `/compact` 与 `drivers/goal.*` 经 `ext run` |
+| `compact` | compiled | `compact` tool（§11，声明 `audience: driver`，§7.2.1） | TUI `/compact` 与 `drivers/goal.*` 经 `ext run` |
+| `agent` | compiled | `agent` / `materialize` / `list` / `run` 四个 tool（后三个声明 `audience: driver`，§7.2.1；`agent` 不标——它是给模型的委派入口）+ 自带四个 agent 定义（`explore` / `plan` / `general` / `orchestrator`，见下） | driver `session new --with agent@<v> --pin ext:agent/agent`（只带顶层场）；`materialize` / `list` / `run` 经 `ext run` |
 | `handoff` | compiled | `handoff` tool（§11） | `drivers/goal.*` 的 `session new --with handoff@<v> --pin ext:handoff/handoff` |
 | `evolution` | data | system prompt + skill | `session new --with evolution@<v>`（mode） |
 | `guide` | data | skill | 用户 `--user` 装一次，每场 `<available_skills>` 多一行 |
 | `std` | compiled | `read` / `write` / `append` / `edit` / `grep` / `glob` 六个 tool（`read` / `grep` / `glob` 声明 `readonly`，§7.2.1） | 用户 `ext build extensions/std --user` → `activate --user` → user config `[registry] pinned_native_tools`（builtin 1 + 6 = 7 ≤ `max_tools` 20） |
+
+**`agent`：委派，靠已有的后台任务回路。** 四个 tool 一个二进制（`params.name` 分发）：`agent{name, task}` 是**模型**在委派——材料化 persona、`session new` 出子场、`session append` 给任务、`task run` 起一个**属于父场**的后台任务去驱动它，返回一张点名子 session 的回执；`materialize{name}` 把一个定义文件冻成 data extension 版本（**写路径唯一实现**——manifest 字节决定 version id，两份实现就是同一个 persona 的两个版本，所以 TUI 也调它）；`list` 列出全部定义（含 `agents` / `max_exchanges` 两列；**读路径唯一实现**，driver-facing、永不 pin：模型不需要目录——名字写错时错误消息里就有名单——而 driver 要画 picker）；`run{session, agent?, readonly?, max_steps?}` 是那个后台任务跑的命令本身。
+
+**定义分三层，规则是 store roots 那一条。** `.nulya/agents/*.md`（workspace）> `<NULYA_HOME | ~/.nulya>/agents/*.md`（user）> **包自带的 `explore` / `plan` / `general` / `orchestrator`**（`src/builtin/*.md`，`@embedFile` 进这个 extension 自己的二进制，随 `ext seed` + `ext build` 走同一条分发路）。**首个持有者胜，输的那个照样列出来并标 `shadowed`**——与 §7.2 同一条规则、同一个理由；tcode 是"builtin 名字保留、不许覆盖"，那在它那里成立，在这里不成立：这个仓库里每一样分层的东西都是遮蔽而不是拒绝。四个 persona 移植自 tcode（`crates/tcode-tools/src/agent/builtin/*.md`），**nulya 没有的概念是删掉而不是翻译**：`ask_user`（没有"子 agent 向人提问"的原语）与 tcode 那些我们没有的 frontmatter（`gatesOutput` / `tools: []` / `questionPolicy`）；`orchestrator` 是唯一带 `agents` 白名单的那个，其余三个都是 leaf。于是**什么都不写就有四个能用的**。
+
+**pins 要连带 `--with`。** 一个 pin 给 tool 一个 native 槽，但**不**让它的包成为成员，而 pin 一个非成员是硬拒（`PinNamesUnknownExtension`，§5.1）。所以委派为定义 pins 里**每个不同的 ext id** 派生一个 `--with <id>`（不带 `@version`，取 `current`）。去重只是为了命令行别把同一件事说三遍——内核文档与实测都确认：重复 `--with` 同一个 id、或 `--with` 一个已经 activate 的 id，都是后者覆盖前者而不是错误。**`materialize` 先验证这些 id 解析得出来**（`ext list` 说它 active 才算），不然报一句点名 persona、点名包、给出安装命令的话，**什么都不建**——把它交给内核只会得到一句真话但没有出路的 `--with names an extension with no such built version`。
+
+**追问是同一个 tool 的第二个形态：`agent{name|session, task}`。** `name` 开一场新的，`session` 往一场**已经报告过的**子场再送一轮；两个二选一（都给或都不给 → `-32602` 说清楚），`task` 必填。为什么是同一个 tool：它们是同一件事——请别人做事、拿回一份报告——而第二种是**便宜的那一种**，模型该先伸手去够它：追问是 append-only，子场带着它已经找到的一切 resume，**命中的是它自己的前缀缓存**（§1），一次纠正只付一轮；重开一场则要把侦察再买一遍。四道门，都在建任何东西之前：目标必须是 s-… 形状 · 它的**冻结 header 必须戴着某个 `agent-*` 成员**（否则那是别人的对话，不是可以追问的委派）· **还在跑就拒绝**（判据是内核自己的 `task list --json` 投影——驱动它的那个后台任务 `starting`/`running` 就是"还在工作"，往正在产出报告的那个 run 里塞一轮只会让报告说不清自己包含了什么）· frontmatter 的 `max_exchanges`（数子场 ledger 里的 `user_text`；未声明 = 不限，每轮本来就有 `max_steps` 兜底）。报告照旧：每一轮一个新的后台任务、一条 `task_finished`，没有第二种机制。**readonly 自动仍然对**——runner 每次都从**那一场自己的 header** 重算放行名单，追问既不换 composition 也不换 header。**一个并发点写在这里**：人若在前端接管那个子 tab 说话、模型同时追问，撞的是 durable session 的单写者语义（`SessionBusy` / 上面那道"还在跑"的门），行为安全——两个写者是内核唯一拒绝的事（§3.4）。
+
+**能不能委派，是被委派者定义里的一个字段。** frontmatter 的 `agents: [name, …]`：**空 = leaf**，这是除协调者之外每个 persona 的默认。非空时，那一场子场才额外带 `--with agent@<自身版本> --pin ext:agent/agent`——**一个字段、一处读取**，决定这一场是不是叶子；一个不能委派的子场干脆就不带这个 tool，于是没有"事后再拒绝"这回事。tool 自己那一侧的校验从**本场冻结 header 里那个 `agent-<name>` 成员**反查定义（header 是权威：它是冻的，说的是这一场实际composed 成什么，而不是定义文件今天说什么），它的 `agents` 决定本场够得着谁，名字不在单里就报错并列出允许的；没有 `agent-*` 成员（顶层会话）= 不限。**深度兜底**：白名单看不见**间接**环（`a` 可以委派 `b`、`b` 可以委派 `a`），所以 runner 给它驱动的那一步设 `NULYA_AGENT_DEPTH=<n+1>`（不是 secret 形状，过得了净化，§7.6），tool 读到 ≥3 一律拒绝。**这是防环兜底不是安全边界**：人从前端驱动一场子场时这个变量根本不在，而它上面那层白名单本来就与审批表同类——policy，不是隔离（§9）。
+
+**报告为什么走后台任务。** 委派是一种"欠答案"的机制，而内核里**已经有且只有一个**这样的回路：后台任务结束时 supervisor 把 `task_finished` 投进那场 session 的 inbox，下一个 step 边界排干（§6.1 / §3.1）。用它意味着**每个 driver 都已经会收这个答案**——`drivers/goal.*` 一个字没改，TUI 不需要第二个看盘的钩子，下一个 driver 也不需要。先考虑过的另一条是"写一个请求文件让 driver 轮询"（`extensions/handoff` 的形状），那是让每个 driver 再学一套盘面约定、且跨平台要两份实现，为的是内核已经在跑的一个回路。**`extensions/handoff` 的文件形态因此是历史特例，不新增第二个。**
+
+**readonly 由 gate 机械应答。** `run` 在 `readonly` 时以 `--gate` 起 `session step`（§4）：`shell` 一律拒，extension tool 只放行**子场自己的冻结 manifest** 声明了 `"readonly": true` 的（§7.2.1；哪个名字来自哪个包不在 gate 请求里，所以放行名单在开跑前从子场 header 一次算好——`extensions/std` 的 `read` / `grep` / `glob` 正是这么被放行的）。拒绝就是那个 call 的 `tool_results`，所以子 agent 读得到自己为什么什么都没跑。**这不是安全边界**（§9），是一条 policy——真隔离等 sandbox。
+
+**报告是数据不是指令。** `run` 打到 stdout 的是子场**最后一条 assistant 文本**（子 agent 被告知最终发言即报告），包在 `<agent-report agent=… session=…>` 里，底下一句合同说明它是待评估的发现而不是命令，并由**代码**附上子 session id（`nulya session events <id>` 能读全程；与 `compact` 追加父指针同一手法）。**leaf 是默认**：只有定义里 `agents` 非空的那一场才带这个包（见上），其余子场根本没有这个 tool。
+
+**600 s 天花板。** `run` 经 `nulya ext run` 调用，而 `ext run` 强制 manifest 的 `timeout_ms`、上限 `tool.Timeouts.extension_max_ms` = 600s（§7.3），manifest 因此顶格要满。将来要解除**不用改设计**：换一种任务命令形态（任务里直接跑 `session step` 循环）即可，上面的协议一个字不变。
 
 **`std` 不是 "std tool 层"**（PLAN §3.4.1 那句话仍成立）：叫 std 只因它装的是一场编码 session 最先伸手的那几样东西。行为逐条移植自 tcode（零猜测的错误文案、`read` 放大小读 + 自分页 + 无行号、`write` 不覆盖没读过的文件、`grep` smart-case + per-file 上限 + gitignore、`glob` 按 mtime）；它是 §7.3 "string result 原文进 emit" 的第一个 consumer；每个结果自守在 `emit` 预算之下（read ≤ 120 KB、grep ≤ 100 KB），所以 spill 对它们不触发。它唯一跨调用的状态——模型读过哪些文件、看到哪些行——按 §7.6 走**磁盘制品**：`.nulya/scratch/<session-id>/std-freshness.jsonl`（append-only，从 `NULYA_SESSION` 取 id，fork 之后自然是新文件；不在 session 里就没有去重也没有门）。regex 引擎是 vendored 的 mvzr（字节级、无 lookaround / backreference，smart-case 由 wrapper 补）；gitignore / glob 匹配移植自 zeegrep 的两个 core 模块；walker 单线程 + 10 s deadline。契约与进度在 `docs/goals/std.md`。
 
@@ -523,7 +548,21 @@ user 层与 workspace 的 `.nulya/` 同形、每个平台一个好找的位置�
 
 投影里这份参数是 **per-profile 的 `catalog`**（§14）而不是并进 `[[models]]`：同一个 id（`gpt-5.6-sol`）经订阅与经公开 API 是**两套数字**（258 400 vs 1 050 000、多出 `xhigh`/`max`/`ultra` 档、默认也不同），id-keyed 的表按定义说不了它。同理 **`Config.defaultEffort` 在 codex profile 上到 `p.effort` 为止**：目录的 `default_effort` 描述的是公开 API 的默认，往订阅上发它等于悄悄推翻后端自己的 per-model 默认——什么都不发，"auto" 在这里就是订阅的 auto。刷新只有一个触发器（nulya 没有自己的 `codex login`）：`nulya config show --refresh`，§14。
 
-**credential 的边界**：secret 不进 session 文件（header 只存 `api_key_env` 的**名字**与 profile 名，每次 step 重新解析）、不进工具子进程的 env（`environment.isSecretKey` 剥掉 `*API_KEY*` 等）、不从 project 层来（checkout 不能定义 profile）。在这三条之内，credential 可以来自两处：profile 自己的 `api_key`（**user 层文件**，`~/.nulya/config.toml`——TUI `/model` 的 `s` 写的就是它）或 `api_key_env` 指的环境变量；`launch.credentialSource` 定顺序 `config > env`（人贴进 nulya 自己文件的 key 应当生效，哪怕还留着一个过期的环境变量）。`codex` 的 credential 是 Codex CLI 的 `auth.json`（读文件判断），与 user 层 `api_key` 同类：本机用户自己的文件。resume 时 `cli/session.zig` 按 header 的 profile 名从 config 取 `api_key` 交给 `buildFromDescriptor(.inline_key)`，找不到再看 env，都没有 → `MissingCredential`，不静默降级。config 在 session 开始解析成 effective 值一次；磁盘改动下一场生效。**为什么文件里的 key 是必要而不只是方便**：模型自己 `nulya session new`（sub-agent 自调用）时它的 shell env 已被剥掉所有 key，能让子 session 跑起来的只有 kernel 自己读得到的文件。
+**credential 的边界**：secret 不进 session 文件（header 只存 `api_key_env` 的**名字**与 profile 名，每次 step 重新解析）、不进工具子进程的 env（`environment.isSecretKey` 剥掉 `*API_KEY*` 等）、不从 project 层来（checkout 不能定义 profile）。在这三条之内，credential 可以来自**三处**，`launch.credentialSource` 是定义顺序的**唯一一处**（改它，`config show` 的可用性投影 / `session new` 的冻结 / resume 全部跟着走）：
+
+```
+config  profile 自己的 api_key（user 层 ~/.nulya/config.toml，TUI /model 的 `s` 写的就是它）
+  ↓
+env     api_key_env 指的环境变量
+  ↓
+file    <NULYA_HOME | ~/.nulya>/credentials.toml —— 键就是 api_key_env 的那个名字
+```
+
+**为什么有第三处，以及为什么它的键是环境变量名。** 子进程拿不到 secret（上面第二条，physics #6），这是对的、不改；代价是**一个后台任务或一个 driver 型 extension 解析不出 `api_key_env`**——它 `session new` 出来的子 session 会没有 key。`codex` 从来没这个问题，因为它的 credential 一直是**文件**（`~/.codex/auth.json`，而 `HOME` 不是 secret）。`credentials.toml` 就是把这个先例推广给其它 provider：它提供的是 profile **已经声明的那些名字**的值（`OPENAI_API_KEY = "…"`），所以 profile 一个字不用改、没有第二套命名、"durable credential 只经 `api_key_env`"这句话字面上仍然成立——文件只是这些名字的第二个来源。格式是 TOML 而不是第四条 journal：三条 `.jsonl` 记的是发生过的事或一次授权，这个是**人写的设定**，与它并排的 `config.toml` 同类同解析器（vendored zig-toml 的 `Table` 目标）。POSIX 上 mode 宽于 0600 → stderr 一行警告（每进程至多一次）**照读**（与 `auth.json` 同款态度：那是人自己放的东西）；Windows 没有 mode 就不说。**值绝不进任何投影**：`config show` 只报 `credential` 与 `credential_source`（多了 `"file"` 一档），header 只记名字。
+
+**缺 credential 就不开场（`session new` exit 1）。** profile 点名一个真实 provider 而三条路都解析不到 → stderr 一句指路（那个变量名 · `credentials.toml` 的绝对路径 · user config · `nulya config show`）+ exit 1，**什么都不创建**。它曾经是"警告一行然后把身份冻结成 scripted"，那是比失败更糟的一种失败：session 开起来了、看着就是被点名的那个模型、而回答它的是离线替身，且因为身份是冻的，这一场此后一辈子如此（§3）。现在它与 resume 的 `MissingCredential` 对称——同一个事实，在一场 session 生命的两端，同样大声。**唯一的例外是 `nulya demo`**：不带 key 跑本来就是 demo 的语义，所以 `cli/session.zig` 的 `createSession` 收一个 `KeylessPolicy{refuse, stand_in}`，两个调用点各自写明要哪个（`session new` = `refuse`，`demo` = `stand_in`，后者照打同一句话再补一句"改用离线替身"）。
+
+resume 时 `cli/session.zig` 按 header 的 profile 名从 config 取 `api_key` 交给 `buildFromDescriptor(.inline_key)`，找不到再看 env、再看 credentials.toml，都没有 → `MissingCredential`，不静默降级。config 在 session 开始解析成 effective 值一次；磁盘改动下一场生效。
 
 ---
 
@@ -631,6 +670,8 @@ nulya ext init [--script] [--user] <id> [tool] | build <path> [--user]
           | list | inspect <id> | trust | api [protocol|permissions|examples]
 nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--with <id>[@<version>]]… [--pin ext:<id>/<tool>]…
                                                          ← 冻结 composition + 模型身份、写 header，打印 session id
+                                                           点名的 profile 解析不到 credential（config / env / credentials.toml / codex auth）
+                                                           → stderr 指路 + **exit 1，什么都不创建**（§9.5；`nulya demo` 是唯一保留 stand-in 的调用点）
           | append <id> [<text>|--file f] [--image <path>]…
                                                          ← 把一条 user turn 投进 inbox（下一 step 边界进 ledger）；`--image` 可重复，与文本合成**同一条**事件
           | step <id> [--max-steps N] [--effort E] [--stream] [--gate]

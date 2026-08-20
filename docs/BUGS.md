@@ -14,3 +14,11 @@ ai回复:
 3. cache 显示 200%+
 
 **已修（commit 457d4ff）。** 根因：内核把三个 provider 的 `input_tokens` 统一成**未命中**的那部分，而 cache% 的分母用的正是它，于是这个比例是"命中 ÷ 未命中"，命中率一过 50% 就 100%+（实测 200%+）。改成用整个 prompt（`input + cache_read + cache_write`）作分母，状态栏与 `/usage` 共用 `state/session.ts` 的 `cacheShare`。
+
+4. 为什么报错信息也在 composer 呢，现在看不全报错，帮我先排查下为什么会报错，然后再调整这个报错位置？这个报错应该放对话记录那边吧？
+
+**两件事，都已处理。**
+
+**① 报错本身不是 nulya 的 bug**：`chatgpt.com` 在这台机器上连不通——`getent hosts chatgpt.com` 给的是 `198.18.0.43`（fake-IP 段，说明有一层 tun 代理在接管解析），而对它的 **TCP connect 直接超时**（`curl --connect-timeout 8` 报 `Connection timed out`，`time_connect=0`）。同一时刻 `api.openai.com` / `api.anthropic.com` / `auth.openai.com` 都正常（分别 401 / 404 / 405），所以不是断网，是代理对 `chatgpt.com` 这条规则的落点是死的。codex provider 打的正是 `chatgpt.com/backend-api/codex/responses`（`providers/codex.zig`），于是 `wire.zig` 的 stall watchdog 在 `RetryPolicy.stall_timeout_ms`（默认 120 s）到期时把它折成 `Transport`，`isTransient` 判它可重试 → `model request failed (Transport); retry 1/5 in 1s`。**修法在代理侧**，内核照它该做的做了。
+
+**② 位置确实错了（已修，TUI 层）**：`snapshot.error` 原来只画在输入框下面那一行的活动区，而那一行有一行、还要分给 model / cost / chips，所以任何真实错误都被切成 `error: model request failed (Transp`——最该读全的那句话是屏幕上唯一读不全的。现在它是 transcript 末尾的 `ErrorNotice`（`render/cards/ErrorNotice.tsx`）：`✗` + 原文，按 `wrapWords` 自己换行、续行挂在文字列下（`ui/Fact` 同一个理由——OpenTUI 对超宽 flex 行是压缩不是换行）。**它不是 item**：没有 ledger 事件、replay 不会重现，所以和 CompositionCard 一样待在 item 列表外面（一个在顶一个在底），不必参与 `seq` 排序或 `dropInFlight`；生命周期一个字没变，仍是下一个 `model started` 清掉。状态栏只留 `error · see transcript`（滚上去了也知道有这么回事）。docs/tui.md §4.2 / §4.5 已同步。

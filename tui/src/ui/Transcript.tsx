@@ -2,6 +2,7 @@ import { Index, Show } from "solid-js"
 import type { ScrollBoxRenderable } from "@opentui/core"
 import { Card } from "../render/cards/index.tsx"
 import { CompositionCard } from "../render/cards/CompositionCard.tsx"
+import { ErrorNotice } from "../render/cards/ErrorNotice.tsx"
 import { Welcome, type NextSession } from "./Welcome.tsx"
 import { useStyle } from "../render/theme.ts"
 import type { Contributions } from "../nulya/files.ts"
@@ -72,6 +73,13 @@ export function Transcript(props: {
   contributions?: Contributions[]
   /** On a tab with no session yet: what the first message will freeze (T22). */
   plan?: NextSession
+  /**
+   * The driver's last failure, verbatim (`SessionSnapshot.error`). Drawn after
+   * the items because that is when it happened, and here rather than in the
+   * status bar because it is the one message that has to be read in full
+   * (`ErrorNotice`).
+   */
+  error?: string | null
   /** The workspace this session's `.nulya/` lives in — the welcome screen says so. */
   cwd?: string
   /** The model line of the composition card was clicked: open `/model`. */
@@ -129,6 +137,9 @@ export function Transcript(props: {
           </box>
         )}
       </Index>
+      <Show when={props.error}>
+        <ErrorNotice text={props.error!} />
+      </Show>
     </scrollbox>
   )
 }

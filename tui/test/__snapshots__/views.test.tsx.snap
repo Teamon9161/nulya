@@ -41,8 +41,8 @@ exports[`/help lists the bindings that are actually in force 1`] = `
                                   /model                                                          █ 
  click ask / unsafe               open the permission-mode picker, the same as /mode              █ 
  click a tab / a pane             go to it                                                        █ 
- click [x]                        in /ext's tools pane: pin or unpin that tool                    ▀ 
- drag over text                   select it; releasing copies it to the clipboard                   
+ click [x]                        in /ext's tools pane: pin or unpin that tool                    █ 
+ drag over text                   select it; releasing copies it to the clipboard                 █ 
                                                                                                     
  slash commands                                                                                     
  /model                           pick the model the next session runs on                           
@@ -67,6 +67,9 @@ exports[`/help lists the bindings that are actually in force 1`] = `
                                   one session                                                       
  /as <id>[@version]               a session carrying a built extension's prompt and skills;         
                                   nothing is activated                                              
+ /agent [<name> <task…>]          delegate a task to an agent defined in .nulya/agents or           
+                                  ~/.nulya/agents: a session of its own, in its own tab, whose      
+                                  report comes back here. no name lists them                        
  /step                            continue after a spent step budget (nothing continues by          
                                   itself)                                                           
  /cancel                          stop the running step at the kernel's next step boundary          

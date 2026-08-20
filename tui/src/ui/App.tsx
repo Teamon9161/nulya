@@ -5,6 +5,7 @@ import { Transcript, rowsBelow, windowItems } from "./Transcript.tsx"
 import { Composer, type ComposerApi } from "./Composer.tsx"
 import { ApprovalPanel, type ApprovalChoice } from "./ApprovalPanel.tsx"
 import { ModePicker, initialChoice, modeAt, moveChoice } from "./ModePicker.tsx"
+import { AgentPicker } from "./AgentPicker.tsx"
 import { StatusBar } from "./StatusBar.tsx"
 import { TabBar } from "./TabBar.tsx"
 import { SessionsView } from "./overlays/SessionsView.tsx"
@@ -59,12 +60,25 @@ import {
   promptPackageWarning,
   promptsOf,
   seedBundled,
+  sessionMember,
   summarize,
   syncRoot,
+  type SessionMember,
 } from "../extensions.ts"
 import { runCompact } from "../compact.ts"
-import { buildHandoff, handoff_pin, headline, nextHandoff, type HandoffFile } from "../handoff.ts"
+import { headline, nextHandoff, type HandoffFile } from "../handoff.ts"
 import { buildEvolution, formatWithRef, parseWithRef, type WithRef } from "../evolve.ts"
+import {
+  agent_id,
+  agent_pin,
+  agentPick,
+  listAgents,
+  materializeAgent,
+  readonlyCeiling,
+  usableAgents,
+  type AgentEntry,
+  type MaterializedAgent,
+} from "../agents.ts"
 import { createKeymap, matches } from "../keymap.ts"
 import type { AttachOptions } from "../state/attach.ts"
 import type { SessionState, TranscriptItem } from "../state/session.ts"
@@ -132,6 +146,16 @@ export interface AppProps {
    * `activate` is `auto_activate`, and it gates the pointer moves in both.
    */
   sync?: { user: boolean; project: boolean; activate: boolean; bundled: boolean }
+  /**
+   * Whether the agent definitions that came with this CHECKOUT may be used
+   * (tui.md §5.10). Asked once before this screen exists, exactly as the store
+   * question is, and for two reasons at once: a definition becomes a system
+   * prompt, and materialising one builds into this workspace's extension store,
+   * which for an empty store is how the kernel records trust for it (DESIGN §9).
+   * Definitions in `~/.nulya/agents` are never gated — nothing arrives there
+   * without the person putting it there.
+   */
+  agentsTrusted?: boolean
 }
 
 /**
@@ -272,20 +296,60 @@ export function App(props: AppProps) {
   /** The dialog's note field, for focusing, reading and clearing it. */
   let noteField: InputRenderable | null = null
 
+  /**
+   * The agent definitions this workspace and this machine hold (tui.md §5.10).
+   *
+   * Re-read whenever `/agent` is used rather than watched: a definition is a
+   * file somebody edits in another window, and the moment that matters is the
+   * moment one is about to be used. Warnings are the parser's own — a file that
+   * is not a definition is named and skipped, never fatal.
+   */
+  const [agentDefs, setAgentDefs] = createSignal<readonly AgentEntry[]>([])
+  const [agentWarnings, setAgentWarnings] = createSignal<readonly string[]>([])
+  /** Whether the picker is up, and which row its cursor is on (`AgentPicker`). */
+  const [agentPicker, setAgentPicker] = createSignal(false)
+  const [agentChoice, setAgentChoice] = createSignal(0)
+  /**
+   * Which tabs are running an agent definition, and which one — the tab-level
+   * gate policy reads it (`readonlyCeiling`). A map rather than tab state
+   * because it is a fact about a delegation this process started, and a session
+   * re-opened later is an ordinary session again: its composition still carries
+   * the persona, but the ceiling was never in the ledger and this front end must
+   * not pretend it was.
+   */
+  const agentOf = new Map<string, MaterializedAgent>()
+  /**
+   * The packages this front end composes sessions with, resolved once each and
+   * shared. Compiled ones cost a toolchain run the first time on a machine,
+   * which is why every caller goes through this instead of building again — and
+   * why nothing here happens on mount.
+   *
+   * One map where there used to be one `let` per package (T34): `handoff` and
+   * `agent` are two entries in `[extensions] session_with`, and `agentPackage`
+   * below reads the same entry the composition does rather than building the
+   * same draft a second time.
+   */
+  const memberBuilds = new Map<string, Promise<SessionMember | null>>()
+  const sessionMemberOnce = (id: string): Promise<SessionMember | null> => {
+    let started = memberBuilds.get(id)
+    if (!started) {
+      started = sessionMember(props.ws, id).catch(() => null)
+      memberBuilds.set(id, started)
+    }
+    return started
+  }
+  /** The `agent` package, for the delegation paths that need its version. */
+  const agentPackage = async (): Promise<WithRef | null> => {
+    const member = await sessionMemberOnce(agent_id)
+    return member ? { id: member.id, version: member.version } : null
+  }
+
   /** A handover the model proposed and nobody has answered yet (tui.md §5.8). */
   const [handoff, setHandoff] = createSignal<HandoffFile | null>(null)
   /** Handoff files this process has already acted on or dismissed. */
   const [handoffsSeen, setHandoffsSeen] = createSignal<ReadonlySet<string>>(new Set())
   let composer: ComposerApi | null = null
   let scroll: ScrollBoxRenderable | null = null
-  /**
-   * The `handoff` build, started once and shared. Compiled, so the first build
-   * on a machine costs a toolchain run — which is why it happens in the
-   * background from the moment the screen exists and not on the way into the
-   * first session.
-   */
-  let handoffBuild: Promise<WithRef | null> | null = null
-  const handoffMember = (): Promise<WithRef | null> => (handoffBuild ??= buildHandoff(props.ws).catch(() => null))
 
   const tab = () => tabs.active()
   /**
@@ -384,7 +448,7 @@ export function App(props: AppProps) {
             // seeded yesterday, or by hand, had `evolution` switched on by this
             // very loop the next time its draft rebuilt, and every session
             // afterwards opened believing it was the slow loop.
-            if (!autoActivatable(line.id, await promptsOf(props.ws, where, line.id, line.version))) {
+            if (!autoActivatable(await promptsOf(props.ws, where, line.id, line.version))) {
               held.push(line.id)
               continue
             }
@@ -748,7 +812,7 @@ export function App(props: AppProps) {
     const here = tab()
     if (here.kind === "session") return here
     try {
-      const tab = await tabs.materialize(here, await handoffExtras())
+      const tab = await tabs.materialize(here, await sessionExtras())
       setPlanTick((tick) => tick + 1)
       return tab
     } catch (error) {
@@ -758,19 +822,42 @@ export function App(props: AppProps) {
   }
 
   /**
-   * The `handoff` package, for the session about to start (tui.md §5.8).
+   * Everything the SCREEN adds to a top-level `session new`: one `--with` and
+   * its pins for each id in `[extensions] session_with` (tui.md §5.8 / §5.10).
    *
    * Two axes, both needed and both separate (DESIGN §7.5): `--with` makes the
-   * version a member of this composition, `--pin` gives its tool a native slot
-   * so the model can actually call it. It is off with one `tui.toml` key, and a
-   * build that fails costs the session nothing — it starts without the package
-   * and says so, rather than not starting.
+   * version a member of this composition, `--pin` gives a tool a native slot so
+   * the model can actually call it. WHICH tools get a slot is the package's own
+   * answer now (`audience`, DESIGN §7.2.1) instead of a constant per package
+   * here — which is what let two hand-written branches become this loop (T34).
+   *
+   * A package that cannot be resolved costs the session nothing: it starts
+   * without it and says so, rather than not starting.
+   *
+   * **Only top-level**, and that condition is load-bearing for `agent`: a
+   * delegated session does not get it, so a sub-agent cannot delegate again —
+   * one level, until there is a reason and a bound for more (agents-and-review
+   * §1, `SpawnPolicy` in its minimal form). Which is why this lives here and not
+   * in `startAgent`, the thing that composes a child.
    */
-  const handoffExtras = async (): Promise<{ with?: string[]; pin?: string[] }> => {
-    if (!props.style.settings.extensions.handoff) return {}
-    const ref = await handoffMember()
-    if (!ref) return {}
-    return { with: [formatWithRef(ref)], pin: [handoff_pin] }
+  const sessionExtras = async (): Promise<{ with?: string[]; pin?: string[] }> => {
+    const withRefs: string[] = []
+    const pins: string[] = []
+    const missing: string[] = []
+    for (const id of props.style.settings.extensions.session_with) {
+      const member = await sessionMemberOnce(id)
+      if (!member) {
+        missing.push(id)
+        continue
+      }
+      withRefs.push(formatWithRef({ id: member.id, version: member.version }))
+      pins.push(...member.pins)
+    }
+    if (missing.length > 0) setNotice(`${missing.join(" & ")} not composed in · /ext for what it said`)
+    return {
+      ...(withRefs.length > 0 ? { with: withRefs } : {}),
+      ...(pins.length > 0 ? { pin: pins } : {}),
+    }
   }
 
   // ── The gate (tui.md §5.7) ────────────────────────────────────────────────
@@ -836,6 +923,16 @@ export function App(props: AppProps) {
    */
   const approve = (request: GateRequest, session: string): Promise<GateVerdict> => {
     const asked = tabOf(session)
+    // A read-only agent's ceiling, before every table (tui.md §5.10): the whole
+    // meaning of `readonly: true` is that nothing can lift it — an `allow` entry
+    // that quietly re-admitted `shell` to a read-only persona would make the
+    // word a decoration. It is a policy like every other one here, not a
+    // sandbox: the model is told, in the deny note, why nothing ran.
+    const wearing_agent = agentOf.get(session)
+    if (wearing_agent?.readonly) {
+      const refusal = readonlyCeiling(request.tool, toolReadonly(asked, request.tool))
+      if (refusal) return Promise.resolve<GateVerdict>({ allow: false, note: refusal })
+    }
     const verdict = decideNow(request, asked)
     if (verdict === "deny") {
       const what = describeCall(request)
@@ -976,7 +1073,7 @@ export function App(props: AppProps) {
       // …and hand the keyboard back only if nothing else took it meanwhile: an
       // overlay, browse mode and the mode picker all blur the composer on
       // purpose, and a dialog closing is no reason to overrule them.
-      if (!overlay.active() && !browse.active() && !modePicker()) composer?.focus()
+      if (!overlay.active() && !browse.active() && !modePicker() && !agentPicker()) composer?.focus()
       return
     }
     composer?.blur()
@@ -985,12 +1082,12 @@ export function App(props: AppProps) {
   })
 
   /**
-   * The mode picker holds the keyboard while it is up, for the same reason the
+   * Either picker holds the keyboard while it is up, for the same reason the
    * approval dialog does (T28): a list you choose from is not a list you can
    * choose from if `j` goes into the composer behind it.
    */
   createEffect(() => {
-    if (modePicker()) composer?.blur()
+    if (modePicker() || agentPicker()) composer?.blur()
     else if (!pending() && !overlay.active() && !browse.active()) composer?.focus()
   })
 
@@ -1170,6 +1267,156 @@ export function App(props: AppProps) {
     }
   }
 
+  // ── `/agent` (tui.md §5.10) ───────────────────────────────────────────────
+
+  /**
+   * Re-read the definitions — through the package, which is the one reader
+   * (`agents.ts`). Asked again at every `/agent` rather than watched: a
+   * definition is a file somebody edits in another window, and the moment that
+   * matters is the moment one is about to be used.
+   */
+  const refreshAgents = async (): Promise<readonly AgentEntry[]> => {
+    const pkg = await agentPackage()
+    if (!pkg) return []
+    try {
+      const found = await listAgents(props.ws, pkg)
+      setAgentDefs(usableAgents(found))
+      setAgentWarnings(found.flatMap((entry) => entry.warnings))
+      return agentDefs()
+    } catch {
+      // No listing is "none known"; the sentence a caller needs comes from
+      // whichever command it was about to run.
+      return agentDefs()
+    }
+  }
+
+  // Deliberately NOT on mount: reading the definitions means building the
+  // package, which is a compiled build, and a compiled build on the way in is
+  // the thing T11/T23 exist to keep off the critical path. It happens when
+  // `/agent` is used, and — in the background, once — when the first session is
+  // composed, exactly as the handoff package's does.
+
+  /**
+   * Start a delegation: build the persona, open a tab on a session wearing it,
+   * and send the task.
+   *
+   * Every part of it is something this front end already does — `ext build` a
+   * draft (`/evolve`), `session new --with` the exact version (`/evolve`),
+   * `--pin` a tool face (T12), `--max-steps` a run (the driver's own option) —
+   * which is the point: a sub-agent is a `session new` with a particular set of
+   * arguments (PLAN §3.2), and there is nothing here the kernel had to grow.
+   *
+   * A visible tab rather than a hidden run, because a delegation that goes wrong
+   * is a delegation somebody has to be able to watch, cancel and read afterwards.
+   */
+  const startAgent = async (entry: AgentEntry, task: string): Promise<SessionTab | null> => {
+    if (entry.layer === "workspace" && props.agentsTrusted === false) {
+      setNotice(`'${entry.name}' came with this checkout and was not trusted · its prompt would enter a session here · answer the question again by clearing asked_agents in tui-state.json`)
+      return null
+    }
+    setNotice(`agent ${entry.name} · building its prompt…`)
+    const pkg = await agentPackage()
+    if (!pkg) {
+      setNotice("the agent package could not be built here · /ext for what it said")
+      return null
+    }
+    let m: MaterializedAgent
+    try {
+      // The package renders and freezes the definition, and checks that the
+      // packages its pins name can be brought in — one implementation of both,
+      // and the same one the model reaches through the `agent` tool.
+      m = await materializeAgent(props.ws, pkg, entry.name)
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error))
+      return null
+    }
+    // The parent's model unless the definition names one.
+    const inherited = currentPick()
+    const pick =
+      agentPick(m) ??
+      (inherited ? { profile: inherited.profile, ...(inherited.model ? { model: inherited.model } : {}) } : undefined)
+    const draft = tabs.draft({ ...(pick ? { pick } : {}), bring: parseWithRef(m.ref) ?? undefined })
+    try {
+      const child = await tabs.materialize(draft, {
+        // A pin needs its package to be a MEMBER of the session (DESIGN §5.1),
+        // and the child composes from scratch: the ids its pins name come along
+        // as `--with`, at the store's `current`.
+        // …and the `agent` package itself, but only for a persona that names
+        // somebody to pass work to. Everything else is a leaf: a delegated
+        // session that cannot delegate simply does not carry the tool.
+        ...(m.members.length > 0 || m.agents.length > 0
+          ? { with: [...m.members, ...(m.agents.length > 0 ? [formatWithRef(pkg)] : [])] }
+          : {}),
+        ...(m.pins.length > 0 || m.agents.length > 0
+          ? { pin: [...m.pins, ...(m.agents.length > 0 ? [agent_pin] : [])] }
+          : {}),
+        ...(m.max_steps > 0 ? { maxSteps: m.max_steps } : {}),
+      })
+      agentOf.set(child.id, m)
+      setNotice(`${m.name} · ${child.id}${m.readonly ? " · read-only" : ""}`)
+      await child.attach.send(task)
+      return child
+    } catch (error) {
+      // A refusal (no credential, an untrusted store, a pin naming nothing) is
+      // the kernel's sentence; the draft tab stays where it is, as everywhere.
+      setNotice(error instanceof Error ? error.message : String(error))
+      return null
+    }
+  }
+
+  /** Bare `/agent`: the list, as a dialog above the composer. */
+  const openAgentPicker = async () => {
+    const defs = await refreshAgents()
+    setAgentChoice(0)
+    setAgentPicker(true)
+    const skipped = agentWarnings().length
+    setNotice(
+      defs.length === 0
+        ? "no agent definitions yet"
+        : skipped > 0
+          ? `${defs.length} agent${defs.length === 1 ? "" : "s"} · ${skipped} file${skipped === 1 ? "" : "s"} skipped: ${agentWarnings()[0]}`
+          : null,
+    )
+  }
+
+  const closeAgentPicker = () => setAgentPicker(false)
+
+  /**
+   * Taking a row writes the command and stops. A delegation needs a task and
+   * nobody can guess it — and a picker that started a session on a task it made
+   * up would be the front end putting words in somebody's mouth.
+   */
+  const takeAgentChoice = () => {
+    const def = agentDefs()[agentChoice()]
+    setAgentPicker(false)
+    if (!def) return
+    composer?.restore(`/agent ${def.name} `)
+    setNotice(`${def.name}${def.description ? ` · ${def.description}` : ""} · type the task and send`)
+  }
+
+  /** `/agent <name> <task…>`. */
+  const delegate = async (name: string | undefined, task: string) => {
+    if (!name) {
+      await openAgentPicker()
+      return
+    }
+    const defs = await refreshAgents()
+    const def = defs.find((entry) => entry.name === name)
+    if (!def) {
+      setNotice(
+        defs.length === 0
+          ? `no agent '${name}' · no definitions in .nulya/agents or ~/.nulya/agents`
+          : `no agent '${name}' · ${defs.map((entry) => entry.name).join(" ")}`,
+      )
+      return
+    }
+    if (task.trim().length === 0) {
+      setNotice(`/agent ${def.name} <task> · it starts a session of its own and sees nothing of this one, so say the whole task`)
+      return
+    }
+    void startAgent(def, task.trim())
+  }
+
   /**
    * `/as <id>[@<version>]` — the same move as `/evolve` with any package that
    * contributes a prompt: wear it for one session, activate nothing.
@@ -1340,6 +1587,10 @@ export function App(props: AppProps) {
       wearNow(words[1])
       return true
     }
+    if (command === "/agent") {
+      void delegate(words[1], rest.slice(words[1]?.length ?? 0).trim())
+      return true
+    }
     if (command === "/cancel") {
       const here = live()
       if (here) void here.attach.cancel()
@@ -1475,6 +1726,30 @@ export function App(props: AppProps) {
   }
 
   useKeyboard((key) => {
+    /**
+     * The agent picker, on the same terms as the mode picker below it: while a
+     * dialog above the composer is up it holds the keyboard, so the list is a
+     * list you can actually choose from (T28). It is the outermost of the three
+     * because it is the one that can only be opened deliberately.
+     */
+    if (agentPicker() && !key.ctrl && !key.meta) {
+      const count = agentDefs().length
+      if (matches(keys.cancel, key)) return consume(key, closeAgentPicker)
+      if (key.name === "up" || key.name === "k") {
+        return consume(key, () => setAgentChoice((at) => Math.max(at - 1, 0)))
+      }
+      if (key.name === "down" || key.name === "j") {
+        return consume(key, () => setAgentChoice((at) => Math.min(at + 1, Math.max(count - 1, 0))))
+      }
+      if (key.name === "return") return consume(key, takeAgentChoice)
+      if (key.name && /^[1-9]$/.test(key.name) && Number(key.name) <= count) {
+        return consume(key, () => {
+          setAgentChoice(Number(key.name) - 1)
+          takeAgentChoice()
+        })
+      }
+      return consume(key, () => {})
+    }
     /**
      * The mode picker, first of all — it is the most recently opened dialog, and
      * it can be opened by CLICKING the chip while a call is waiting, which is
@@ -1714,6 +1989,7 @@ export function App(props: AppProps) {
                       header={snapshot().header}
                       contributions={live()?.contributions() ?? []}
                       plan={plan()}
+                      error={snapshot().error}
                       cwd={props.ws.dir}
                       onPickModel={() => openOverlay("model")}
                       onCommand={submit}
@@ -1796,6 +2072,20 @@ export function App(props: AppProps) {
                     Above the approval dialog because it can be opened from one:
                     a click on the chip while a call waits is exactly the "stop
                     asking me" gesture, and the answer re-judges that call. */}
+                {/* Which agent to delegate to (tui.md §5.10). Same dialog shape
+                    as the mode picker, above it for the same reason it holds the
+                    keyboard first: it is only ever opened on purpose. */}
+                <Show when={agentPicker()}>
+                  <AgentPicker
+                    defs={agentDefs()}
+                    selected={agentChoice()}
+                    onSelect={setAgentChoice}
+                    onPick={(def) => {
+                      setAgentChoice(agentDefs().indexOf(def))
+                      takeAgentChoice()
+                    }}
+                  />
+                </Show>
                 <Show when={modePicker()}>
                   <ModePicker
                     current={mode()}

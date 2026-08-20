@@ -12,6 +12,7 @@ const environment = support.environment;
 const integrity = support.integrity;
 const launch = support.launch;
 const ledger = support.ledger;
+const manifest_mod = support.manifest;
 const prompt = support.prompt;
 const protocol = support.protocol;
 const provider = support.provider;
@@ -1999,6 +2000,104 @@ test "script extension: init(--script) -> build(seal) -> activate -> run -> pinn
     try std.testing.expect(std.mem.indexOf(u8, result.output, "hello from a Nulya script extension") != null);
 }
 
+test "manifest audience: the frozen version keeps what the draft declared, and an unknown word is refused before anything is built" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const windows = @import("builtin").os.tag == .windows;
+    const entry = if (windows) "src/run.ps1" else "src/run.sh";
+    const interpreter = if (windows) "powershell" else "sh";
+    const script_name = if (windows) "run.ps1" else "run.sh";
+    const script_body = if (windows) templates.script_ps1 else templates.script_sh;
+
+    // A script package, so this costs no toolchain: three tools, one for each
+    // thing a package can say about who a tool is for.
+    const draft_rel = ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "faces";
+    const src_rel = draft_rel ++ std.fs.path.sep_str ++ "src";
+    try ws.createDirPath(io, src_rel);
+    const script_rel = try std.fs.path.join(alloc, &.{ src_rel, script_name });
+    defer alloc.free(script_rel);
+    try ws.writeFile(io, .{ .sub_path = script_rel, .data = script_body });
+
+    const good = try std.fmt.allocPrint(alloc,
+        \\{{"schema":"nulya.extension/v2","id":"faces","runtime":{{"entry":"{s}","interpreter":"{s}"}},"contributes":{{"tools":[
+        \\{{"name":"ask","input":{{}},"audience":"model"}},
+        \\{{"name":"drive","input":{{}},"audience":"driver"}},
+        \\{{"name":"quiet","input":{{}}}}
+        \\]}}}}
+    , .{ entry, interpreter });
+    defer alloc.free(good);
+    const manifest_rel = draft_rel ++ std.fs.path.sep_str ++ "extension.json";
+    try ws.writeFile(io, .{ .sub_path = manifest_rel, .data = good });
+
+    const built = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "build", draft_rel });
+    defer alloc.free(built.stdout);
+    try std.testing.expectEqual(@as(u8, 0), built.code);
+    const version = try extractVersion(alloc, built.stdout);
+    defer alloc.free(version);
+
+    // The version's own manifest — the bytes a session freezes and every reader
+    // (a driver's pin policy, `ext inspect`) sees — carries the declaration.
+    const frozen_rel = try std.fs.path.join(alloc, &.{ ".nulya", "extensions", "faces", "versions", version, "extension.json" });
+    defer alloc.free(frozen_rel);
+    const frozen_bytes = try ws.readFileAlloc(io, frozen_rel, alloc, .limited(1 << 20));
+    defer alloc.free(frozen_bytes);
+    var frozen = try manifest_mod.parse(alloc, frozen_bytes);
+    defer frozen.deinit();
+    try frozen.validate();
+    try std.testing.expectEqual(@as(usize, 3), frozen.tools.len);
+    try std.testing.expectEqual(@as(?manifest_mod.Audience, .model), frozen.tools[0].audienceOf());
+    try std.testing.expectEqual(@as(?manifest_mod.Audience, .driver), frozen.tools[1].audienceOf());
+    // Silence survives as silence: the kernel never writes `model` in for a
+    // package that said nothing (DESIGN §7.2.1).
+    try std.testing.expect(frozen.tools[2].audience == null);
+
+    // The declaration changes NOTHING the kernel does: a session may still pin
+    // the driver-audience tool, and it executes like any other.
+    var ws_real: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
+    {
+        var ext_root = try ws.openDir(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{});
+        defer ext_root.close(io);
+        try store.Store.init(io, ext_root).activate(alloc, "faces", version);
+    }
+    const pins = [_][]const u8{"ext:faces/drive"};
+    var comp = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{ .pinned_native_tools = &pins });
+    defer comp.deinit(alloc);
+    try std.testing.expect(comp.tools.lookup("drive") != null);
+
+    // A word outside the two is a manifest fault: `ext build` names it and
+    // writes no version at all.
+    const bad_rel = ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "typo";
+    try ws.createDirPath(io, bad_rel ++ std.fs.path.sep_str ++ "src");
+    const bad_script_rel = try std.fs.path.join(alloc, &.{ bad_rel, "src", script_name });
+    defer alloc.free(bad_script_rel);
+    try ws.writeFile(io, .{ .sub_path = bad_script_rel, .data = script_body });
+    const bad = try std.fmt.allocPrint(alloc,
+        \\{{"schema":"nulya.extension/v2","id":"typo","runtime":{{"entry":"{s}","interpreter":"{s}"}},"contributes":{{"tools":[{{"name":"t","input":{{}},"audience":"drivers"}}]}}}}
+    , .{ entry, interpreter });
+    defer alloc.free(bad);
+    try ws.writeFile(io, .{ .sub_path = bad_rel ++ std.fs.path.sep_str ++ "extension.json", .data = bad });
+
+    const refused = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "build", bad_rel });
+    defer alloc.free(refused.stdout);
+    try std.testing.expectEqual(@as(u8, 1), refused.code);
+    const said = try runCliStderr(alloc, io, ws, &.{ exe_abs, "ext", "build", bad_rel }, &.{});
+    defer alloc.free(said);
+    try std.testing.expect(std.mem.indexOf(u8, said, "InvalidAudience") != null);
+    try std.testing.expectError(error.FileNotFound, ws.access(io, bad_rel ++ std.fs.path.sep_str ++ "versions", .{}));
+}
+
 test "script extension: version id excludes compiler identity and is stable across rebuilds" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
@@ -2058,7 +2157,7 @@ test "cli ext seed: the binary's own drafts land in a store root — never over 
         defer alloc.free(dry.stdout);
         try std.testing.expectEqual(@as(u8, 0), dry.code);
         try std.testing.expect(std.mem.indexOf(u8, dry.stdout, "std: would seed") != null);
-        try std.testing.expect(std.mem.indexOf(u8, dry.stdout, "5 would seed, 0 already there") != null);
+        try std.testing.expect(std.mem.indexOf(u8, dry.stdout, "6 would seed, 0 already there") != null);
         try std.testing.expectError(error.FileNotFound, ws.access(io, ws_store, .{}));
     }
 
@@ -2090,7 +2189,7 @@ test "cli ext seed: the binary's own drafts land in a store root — never over 
         defer alloc.free(seeded.stdout);
         try std.testing.expectEqual(@as(u8, 0), seeded.code);
         try std.testing.expect(std.mem.indexOf(u8, seeded.stdout, "guide: draft already in") != null);
-        try std.testing.expect(std.mem.indexOf(u8, seeded.stdout, "4 seeded, 1 already there") != null);
+        try std.testing.expect(std.mem.indexOf(u8, seeded.stdout, "5 seeded, 1 already there") != null);
 
         const kept = try ws.readFileAlloc(io, guide_dir ++ std.fs.path.sep_str ++ "extension.json", alloc, .limited(1 << 16));
         defer alloc.free(kept);
@@ -2099,4 +2198,589 @@ test "cli ext seed: the binary's own drafts land in a store root — never over 
         try ws.access(io, ws_store ++ std.fs.path.sep_str ++ "std" ++ std.fs.path.sep_str ++ "extension.json", .{});
         try ws.access(io, ws_store ++ std.fs.path.sep_str ++ "std" ++ std.fs.path.sep_str ++ "src" ++ std.fs.path.sep_str ++ "vendor" ++ std.fs.path.sep_str ++ "mvzr.zig", .{});
     }
+}
+
+// ── The bundled agent extension: delegation over the task substrate ─────────
+
+test "bundled agent: materialize freezes a definition idempotently; a delegation opens a child session, runs it as a background task of the parent, holds a read-only agent to the gate, and reports back through the parent's inbox" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const ref = try buildBundled(alloc, io, ws, exe_abs, "agent");
+    defer alloc.free(ref);
+
+    // Two definitions: one read-only, one ordinary. Front matter is a set of
+    // `session new` arguments; the body is the system prompt.
+    try ws.createDirPath(io, ".nulya/agents");
+    try ws.writeFile(io, .{
+        .sub_path = ".nulya/agents/prober.md",
+        .data =
+        \\---
+        \\description: a read-only prober
+        \\readonly: true
+        \\max_steps: 2
+        \\pins: [nonsense]
+        \\---
+        \\You only read. Report what you found.
+        \\
+        ,
+    });
+
+    // ① `materialize` is the ONE implementation of the rendering, so the version
+    // it seals is the version everybody gets — and an unedited definition seals
+    // to the one already in the store (physics #5).
+    var frozen: []u8 = undefined;
+    {
+        const first = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "materialize", "{\"name\":\"prober\"}" });
+        defer alloc.free(first.stdout);
+        try std.testing.expectEqual(@as(u8, 0), first.code);
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, std.mem.trim(u8, first.stdout, " \r\n"), .{});
+        defer parsed.deinit();
+        const obj = parsed.value.object;
+        try std.testing.expectEqualStrings("agent-prober", obj.get("id").?.string);
+        try std.testing.expectEqual(true, obj.get("readonly").?.bool);
+        try std.testing.expectEqual(@as(i64, 2), obj.get("max_steps").?.integer);
+        // A pin the kernel could not resolve refuses the whole `session new`, so
+        // a malformed one is dropped here — and said out loud.
+        try std.testing.expectEqual(@as(usize, 0), obj.get("pins").?.array.items.len);
+        try std.testing.expect(std.mem.indexOf(u8, obj.get("warnings").?.array.items[0].string, "nonsense") != null);
+        frozen = try alloc.dupe(u8, obj.get("ref").?.string);
+
+        const again = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "materialize", "{\"name\":\"prober\"}" });
+        defer alloc.free(again.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, again.stdout, frozen) != null);
+    }
+    defer alloc.free(frozen);
+
+    // The persona is a DATA extension carrying one system prompt, and it is
+    // never activated: it is worn for one session with `--with` (T31).
+    {
+        const version = frozen[std.mem.indexOfScalar(u8, frozen, '@').? + 1 ..];
+        const manifest_path = try std.fmt.allocPrint(alloc, ".nulya/extensions/agent-prober/versions/{s}/extension.json", .{version});
+        defer alloc.free(manifest_path);
+        const manifest = try ws.readFileAlloc(io, manifest_path, alloc, .limited(1 << 16));
+        defer alloc.free(manifest);
+        try std.testing.expect(std.mem.indexOf(u8, manifest, "\"system_prompts\":[\"prompt.md\"]") != null or
+            std.mem.indexOf(u8, manifest, "\"prompt.md\"") != null);
+        try std.testing.expectError(error.FileNotFound, ws.access(io, ".nulya/extensions/agent-prober/current", .{}));
+    }
+
+    // ② An unknown name lists the ones there are, and creates nothing.
+    {
+        const unknown = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "materialize", "{\"name\":\"nope\"}" });
+        defer alloc.free(unknown.stdout);
+        try std.testing.expectEqual(@as(u8, 1), unknown.code);
+        try std.testing.expect(std.mem.indexOf(u8, unknown.stdout, "no agent 'nope'") != null);
+        try std.testing.expect(std.mem.indexOf(u8, unknown.stdout, "prober") != null);
+    }
+
+    // ③ Outside a session there is nobody to report back to, so a complete
+    // delegation is refused and nothing is created.
+    {
+        const nowhere = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"prober\",\"task\":\"go\"}" });
+        defer alloc.free(nowhere.stdout);
+        try std.testing.expectEqual(@as(u8, 1), nowhere.code);
+        try std.testing.expect(std.mem.indexOf(u8, nowhere.stdout, "inside a session") != null);
+    }
+
+    // ④ The whole circle. A parent session delegates; the child is created,
+    // driven by a background task OF THE PARENT, and its report comes back the
+    // way every other late answer does — `task_finished` in the parent's inbox.
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(new.stdout);
+    const parent = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(parent);
+    const session_file = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{parent});
+    defer alloc.free(session_file);
+
+    const delegated = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"prober\",\"task\":\"find the parser\"}" }, &.{
+        .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+    });
+    defer alloc.free(delegated.stdout);
+    try std.testing.expectEqual(@as(u8, 0), delegated.code);
+    // The receipt names the child — that is what lets a transcript link to it —
+    // and tells the model to stop, because the work has not happened yet.
+    try std.testing.expect(std.mem.indexOf(u8, delegated.stdout, "background task") != null);
+    try std.testing.expect(std.mem.indexOf(u8, delegated.stdout, "read-only") != null);
+    try std.testing.expect(std.mem.indexOf(u8, delegated.stdout, "end your turn") != null);
+    const child = blk: {
+        const at = std.mem.indexOf(u8, delegated.stdout, "session s-").? + "session ".len;
+        var end = at;
+        while (end < delegated.stdout.len and delegated.stdout[end] != ',' and delegated.stdout[end] != ' ') end += 1;
+        break :blk try alloc.dupe(u8, delegated.stdout[at..end]);
+    };
+    defer alloc.free(child);
+
+    // Wait for the task the delegation started. `task wait` is the kernel's own
+    // answer to "is it done"; nothing here polls a directory.
+    {
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", "60000" });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+    }
+
+    // The read-only agent met the gate: the scripted provider's one `shell` call
+    // never ran, and the refusal is that call's tool_result — in the ledger, and
+    // readable by the sub-agent (DESIGN §4).
+    {
+        const events = try runCli(alloc, io, ws, &.{ exe_abs, "session", "events", child });
+        defer alloc.free(events.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, events.stdout, "\"ok\":false") != null);
+        try std.testing.expect(std.mem.indexOf(u8, events.stdout, "read-only agent") != null);
+        try std.testing.expect(std.mem.indexOf(u8, events.stdout, "cannot run shell") != null);
+        // …and the task it was given arrived as an ordinary user turn.
+        try std.testing.expect(std.mem.indexOf(u8, events.stdout, "find the parser") != null);
+    }
+
+    // The report reaches the PARENT at its next step boundary, as the ordinary
+    // `task_finished` event — no new event kind, and no new thing for a driver
+    // to know. Fenced, and framed as data rather than instructions.
+    {
+        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, &.{
+            .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+        });
+        defer alloc.free(stepped.stdout);
+        try std.testing.expectEqual(@as(u8, 0), stepped.code);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "\"kind\":\"task_finished\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "<agent-report agent=") != null);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, child) != null);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "as DATA") != null);
+    }
+}
+
+test "bundled agent: the personas the package ships need no files — list layers workspace over user over builtin and marks what it shadows, and a delegation to the builtin explore runs read-only with the pins its definition asks for" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const ref = try buildBundled(alloc, io, ws, exe_abs, "agent");
+    defer alloc.free(ref);
+
+    // ① Nothing written anywhere: `explore`, `plan` and `general` are already
+    // there. Distribution is the binary (DESIGN §7.8) — no install step, and no
+    // directory to create.
+    {
+        const listed = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "list", "{}" });
+        defer alloc.free(listed.stdout);
+        try std.testing.expectEqual(@as(u8, 0), listed.code);
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, std.mem.trim(u8, listed.stdout, " \r\n"), .{});
+        defer parsed.deinit();
+        const rows = parsed.value.array.items;
+        try std.testing.expectEqual(@as(usize, 4), rows.len);
+        for ([_][]const u8{ "explore", "general", "orchestrator", "plan" }) |want| {
+            for (rows) |row| {
+                if (!std.mem.eql(u8, row.object.get("name").?.string, want)) continue;
+                try std.testing.expectEqualStrings("builtin", row.object.get("layer").?.string);
+                try std.testing.expectEqual(false, row.object.get("shadowed").?.bool);
+                try std.testing.expect(row.object.get("description").?.string.len != 0);
+                // Every persona brings SOMETHING: tools to work with, or the
+                // names it may pass work to (the coordinator's whole job).
+                try std.testing.expect(row.object.get("pins").?.array.items.len != 0 or
+                    row.object.get("agents").?.array.items.len != 0);
+                break;
+            } else return error.TestUnexpectedResult;
+        }
+        // The one that is read-only is the one that says so.
+        for (rows) |row| {
+            const ro = row.object.get("readonly").?.bool;
+            try std.testing.expectEqual(std.mem.eql(u8, row.object.get("name").?.string, "explore"), ro);
+        }
+    }
+
+    // ② A workspace definition of the same name WINS, and the builtin is still
+    // listed, marked — the store roots' rule (§7.2), not a reserved name.
+    try ws.createDirPath(io, ".nulya/agents");
+    try ws.writeFile(io, .{ .sub_path = ".nulya/agents/explore.md", .data = "---\ndescription: mine\n---\nmy own explore\n" });
+    {
+        const listed = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "list", "{}" });
+        defer alloc.free(listed.stdout);
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, std.mem.trim(u8, listed.stdout, " \r\n"), .{});
+        defer parsed.deinit();
+        try std.testing.expectEqual(@as(usize, 5), parsed.value.array.items.len);
+        var winner_layer: []const u8 = "";
+        var shadowed_builtin = false;
+        for (parsed.value.array.items) |row| {
+            if (!std.mem.eql(u8, row.object.get("name").?.string, "explore")) continue;
+            if (row.object.get("shadowed").?.bool) {
+                try std.testing.expectEqualStrings("builtin", row.object.get("layer").?.string);
+                shadowed_builtin = true;
+            } else winner_layer = row.object.get("layer").?.string;
+        }
+        try std.testing.expectEqualStrings("workspace", winner_layer);
+        try std.testing.expect(shadowed_builtin);
+        // …and the winner is what materialising that name freezes.
+        const m = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "materialize", "{\"name\":\"explore\"}" });
+        defer alloc.free(m.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, m.stdout, "\"layer\":\"workspace\"") != null);
+    }
+    try ws.deleteFile(io, ".nulya/agents/explore.md");
+
+    // ③ The builtin `explore` pins `std`'s read-only tools, so a delegation to it
+    // needs `std` installed — and says so plainly when it is not. Nothing is
+    // created: the pins would otherwise reach a `session new` that can only
+    // refuse them.
+    {
+        const refused = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "materialize", "{\"name\":\"explore\"}" });
+        defer alloc.free(refused.stdout);
+        try std.testing.expectEqual(@as(u8, 1), refused.code);
+        try std.testing.expect(std.mem.indexOf(u8, refused.stdout, "not built here: std") != null);
+        try std.testing.expect(std.mem.indexOf(u8, refused.stdout, "ext build extensions/std") != null);
+    }
+
+    // ④ With `std` active, the builtin persona delegates for real: its pins
+    // become the child's tool face, the `--with` its pins imply comes along, and
+    // `readonly` is held at the kernel's gate.
+    const std_ref = try buildBundled(alloc, io, ws, exe_abs, "std");
+    defer alloc.free(std_ref);
+    const std_version = std_ref[std.mem.indexOfScalar(u8, std_ref, '@').? + 1 ..];
+    {
+        const activated = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "activate", "std", std_version });
+        defer alloc.free(activated.stdout);
+        try std.testing.expectEqual(@as(u8, 0), activated.code);
+    }
+
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(new.stdout);
+    const parent = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(parent);
+    const session_file = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{parent});
+    defer alloc.free(session_file);
+
+    const delegated = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"explore\",\"task\":\"find the parser\"}" }, &.{
+        .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+    });
+    defer alloc.free(delegated.stdout);
+    try std.testing.expectEqual(@as(u8, 0), delegated.code);
+    try std.testing.expect(std.mem.indexOf(u8, delegated.stdout, "read-only") != null);
+    const child = blk: {
+        const at = std.mem.indexOf(u8, delegated.stdout, "session s-").? + "session ".len;
+        var end = at;
+        while (end < delegated.stdout.len and delegated.stdout[end] != ',' and delegated.stdout[end] != ' ') end += 1;
+        break :blk try alloc.dupe(u8, delegated.stdout[at..end]);
+    };
+    defer alloc.free(child);
+
+    {
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", "60000" });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+    }
+
+    // The child's frozen composition: the persona, plus the `std` its pins
+    // implied, plus exactly the three read-only tools on its native face.
+    {
+        const header = try support.readSessionFile(alloc, io, ws, child);
+        defer alloc.free(header);
+        try std.testing.expect(std.mem.indexOf(u8, header, "agent-explore") != null);
+        try std.testing.expect(std.mem.indexOf(u8, header, "\"id\":\"std\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, header, "\"native_tools\":[\"ext:std/read\",\"ext:std/grep\",\"ext:std/glob\"]") != null);
+    }
+    // …and the gate held it to them: the scripted provider's `shell` never ran.
+    {
+        const events = try runCli(alloc, io, ws, &.{ exe_abs, "session", "events", child });
+        defer alloc.free(events.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, events.stdout, "\"ok\":false") != null);
+        try std.testing.expect(std.mem.indexOf(u8, events.stdout, "cannot run shell") != null);
+    }
+}
+
+test "bundled agent: a follow-up resumes the same delegated session rather than starting one; it is refused while the agent is still working, past max_exchanges, and outside a delegation" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const ref = try buildBundled(alloc, io, ws, exe_abs, "agent");
+    defer alloc.free(ref);
+
+    // No pins: this test is about the conversation, not about a tool face.
+    try ws.createDirPath(io, ".nulya/agents");
+    try ws.writeFile(io, .{
+        .sub_path = ".nulya/agents/worker.md",
+        .data = "---\ndescription: plain worker\nmax_exchanges: 1\n---\nDo the work.\n",
+    });
+
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(new.stdout);
+    const parent = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(parent);
+    const session_file = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{parent});
+    defer alloc.free(session_file);
+    const in_parent: []const EnvPair = &.{
+        .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+    };
+
+    // ① The first delegation, and its report.
+    const first = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"worker\",\"task\":\"first\"}" }, in_parent);
+    defer alloc.free(first.stdout);
+    try std.testing.expectEqual(@as(u8, 0), first.code);
+    // The receipt teaches the cheaper move for next time.
+    try std.testing.expect(std.mem.indexOf(u8, first.stdout, "call agent again with session=") != null);
+    const child = blk: {
+        const at = std.mem.indexOf(u8, first.stdout, "session s-").? + "session ".len;
+        var end = at;
+        while (end < first.stdout.len and first.stdout[end] != ',' and first.stdout[end] != ' ') end += 1;
+        break :blk try alloc.dupe(u8, first.stdout[at..end]);
+    };
+    defer alloc.free(child);
+    {
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", "60000" });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+    }
+
+    // ② A follow-up goes into THAT session — append-only, so the sub-agent
+    // resumes with everything it already found and hits its own prefix cache
+    // (DESIGN §1). No new session is created.
+    // Read the first report, as a model would before following up — and as this
+    // test must, since `task wait --any` counts a done task whose result nobody
+    // has drained yet.
+    {
+        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, in_parent);
+        defer alloc.free(stepped.stdout);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, stepped.stdout, "\"kind\":\"task_finished\""));
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "<agent-report agent=") != null);
+    }
+
+    const before = try runCli(alloc, io, ws, &.{ exe_abs, "session", "list" });
+    defer alloc.free(before.stdout);
+    const follow_request = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"second, be specific\"}}", .{child});
+    defer alloc.free(follow_request);
+    const again = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", follow_request }, in_parent);
+    defer alloc.free(again.stdout);
+    try std.testing.expectEqual(@as(u8, 0), again.code);
+    try std.testing.expect(std.mem.indexOf(u8, again.stdout, "follow-up sent to agent session") != null);
+    {
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", "60000" });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+    }
+    const after = try runCli(alloc, io, ws, &.{ exe_abs, "session", "list" });
+    defer alloc.free(after.stdout);
+    try std.testing.expectEqual(std.mem.count(u8, before.stdout, "\n"), std.mem.count(u8, after.stdout, "\n"));
+
+    // Two turns in the child's ledger, and two reports in the parent's inbox —
+    // one background task each, the ordinary `task_finished` both times.
+    {
+        const events = try runCli(alloc, io, ws, &.{ exe_abs, "session", "events", child });
+        defer alloc.free(events.stdout);
+        try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, events.stdout, "\"kind\":\"user_text\""));
+        try std.testing.expect(std.mem.indexOf(u8, events.stdout, "second, be specific") != null);
+    }
+    {
+        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, in_parent);
+        defer alloc.free(stepped.stdout);
+        // The second report, the same way as the first: an ordinary
+        // `task_finished`, one background task per turn.
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, stepped.stdout, "\"kind\":\"task_finished\""));
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "<agent-report agent=") != null);
+    }
+
+    // ③ Past `max_exchanges`: named, with the number.
+    {
+        const request = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"third\"}}", .{child});
+        defer alloc.free(request);
+        const over = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", request }, in_parent);
+        defer alloc.free(over.stdout);
+        try std.testing.expectEqual(@as(u8, 1), over.code);
+        try std.testing.expect(std.mem.indexOf(u8, over.stdout, "allows 1 follow-up turn") != null);
+    }
+
+    // ④ Neither / both / a session that is not a delegation.
+    {
+        const neither = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"task\":\"x\"}" }, in_parent);
+        defer alloc.free(neither.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, neither.stdout, "EITHER name") != null);
+        const both = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"worker\",\"session\":\"s-x\",\"task\":\"x\"}" }, in_parent);
+        defer alloc.free(both.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, both.stdout, "not both") != null);
+        const plain_request = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"x\"}}", .{parent});
+        defer alloc.free(plain_request);
+        const plain = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", plain_request }, in_parent);
+        defer alloc.free(plain.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, plain.stdout, "not a delegated agent session") != null);
+    }
+
+    // ⑤ While it is still working, a follow-up is refused rather than dropped
+    // into the run that is producing the report. `loop` never ends its turn, so
+    // the runner is still going when this is asked.
+    {
+        const busy_new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+        defer alloc.free(busy_new.stdout);
+        const busy_parent = try alloc.dupe(u8, std.mem.trim(u8, busy_new.stdout, " \r\n"));
+        defer alloc.free(busy_parent);
+        const busy_file = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{busy_parent});
+        defer alloc.free(busy_file);
+        const busy_env: []const EnvPair = &.{
+            .{ .key = "NULYA_SESSION", .value = busy_file },
+            .{ .key = "NULYA_SCRIPTED_MODE", .value = "loop" },
+        };
+        const started = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"worker\",\"task\":\"a long one\"}" }, busy_env);
+        defer alloc.free(started.stdout);
+        try std.testing.expectEqual(@as(u8, 0), started.code);
+        const busy_child = blk: {
+            const at = std.mem.indexOf(u8, started.stdout, "session s-").? + "session ".len;
+            var end = at;
+            while (end < started.stdout.len and started.stdout[end] != ',' and started.stdout[end] != ' ') end += 1;
+            break :blk try alloc.dupe(u8, started.stdout[at..end]);
+        };
+        defer alloc.free(busy_child);
+
+        const hurry = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"hurry\"}}", .{busy_child});
+        defer alloc.free(hurry);
+        const refused = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", hurry }, busy_env);
+        defer alloc.free(refused.stdout);
+        try std.testing.expectEqual(@as(u8, 1), refused.code);
+        try std.testing.expect(std.mem.indexOf(u8, refused.stdout, "is still working") != null);
+
+        const task_name = try std.fmt.allocPrint(alloc, "{s}/t1", .{busy_parent});
+        defer alloc.free(task_name);
+        const killed = try runCli(alloc, io, ws, &.{ exe_abs, "task", "kill", task_name });
+        alloc.free(killed.stdout);
+    }
+}
+
+test "bundled agent: only a persona with an agents whitelist carries the tool, it may reach only the names on that list, and the depth backstop stops an indirect cycle" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const ref = try buildBundled(alloc, io, ws, exe_abs, "agent");
+    defer alloc.free(ref);
+
+    try ws.createDirPath(io, ".nulya/agents");
+    try ws.writeFile(io, .{ .sub_path = ".nulya/agents/worker.md", .data = "---\ndescription: a leaf\n---\nDo the work.\n" });
+    try ws.writeFile(io, .{ .sub_path = ".nulya/agents/boss.md", .data = "---\ndescription: coordinates\nagents: [worker]\n---\nYou coordinate.\n" });
+
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(new.stdout);
+    const parent = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(parent);
+    const session_file = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{parent});
+    defer alloc.free(session_file);
+    const in_parent: []const EnvPair = &.{
+        .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+    };
+
+    // A coordinator's session carries the tool; a leaf's does not — one field in
+    // one place decides it, so a leaf has nothing to refuse later.
+    const boss_file = try delegateTo(alloc, io, ws, exe_abs, ref, in_parent, parent, "boss", "coordinate");
+    defer alloc.free(boss_file);
+    const worker_file = try delegateTo(alloc, io, ws, exe_abs, ref, in_parent, parent, "worker", "work");
+    defer alloc.free(worker_file);
+    {
+        const boss_header = try support.readSessionFile(alloc, io, ws, std.fs.path.stem(boss_file));
+        defer alloc.free(boss_header);
+        try std.testing.expect(std.mem.indexOf(u8, boss_header, "\"native_tools\":[\"ext:agent/agent\"]") != null);
+        const worker_header = try support.readSessionFile(alloc, io, ws, std.fs.path.stem(worker_file));
+        defer alloc.free(worker_header);
+        try std.testing.expect(std.mem.indexOf(u8, worker_header, "ext:agent/agent") == null);
+    }
+
+    const in_boss: []const EnvPair = &.{
+        .{ .key = "NULYA_SESSION", .value = boss_file },
+        .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+    };
+
+    // The whitelist is read from the persona this session is WEARING (its frozen
+    // header), and a name off the list comes back with the list.
+    {
+        const denied = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"explore\",\"task\":\"x\"}" }, in_boss);
+        defer alloc.free(denied.stdout);
+        try std.testing.expectEqual(@as(u8, 1), denied.code);
+        try std.testing.expect(std.mem.indexOf(u8, denied.stdout, "may only delegate to: worker") != null);
+    }
+
+    // A leaf's session refuses every name, and says why rather than listing none.
+    {
+        const in_worker: []const EnvPair = &.{
+            .{ .key = "NULYA_SESSION", .value = worker_file },
+            .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+        };
+        const denied = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"worker\",\"task\":\"x\"}" }, in_worker);
+        defer alloc.free(denied.stdout);
+        try std.testing.expectEqual(@as(u8, 1), denied.code);
+        try std.testing.expect(std.mem.indexOf(u8, denied.stdout, "cannot delegate") != null);
+    }
+
+    // The depth backstop: a whitelist cannot see an INDIRECT cycle (`a` may
+    // delegate to `b`, `b` to `a`), so the runner tells each step how deep it is
+    // and this refuses at the bound. Not a security boundary — the variable is
+    // absent when a person drives a delegated session — and it says so in DESIGN.
+    {
+        const deep: []const EnvPair = &.{
+            .{ .key = "NULYA_SESSION", .value = boss_file },
+            .{ .key = "NULYA_AGENT_DEPTH", .value = "3" },
+        };
+        const refused = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"worker\",\"task\":\"x\"}" }, deep);
+        defer alloc.free(refused.stdout);
+        try std.testing.expectEqual(@as(u8, 1), refused.code);
+        try std.testing.expect(std.mem.indexOf(u8, refused.stdout, "levels deep") != null);
+    }
+}
+
+/// Delegate to `name` from `parent` and wait for the report; returns the child's
+/// session FILE path (what `NULYA_SESSION` takes). Caller frees.
+fn delegateTo(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    ws: std.Io.Dir,
+    exe_abs: []const u8,
+    ref: []const u8,
+    env: []const EnvPair,
+    parent: []const u8,
+    name: []const u8,
+    task: []const u8,
+) ![]u8 {
+    const request = try std.fmt.allocPrint(alloc, "{{\"name\":\"{s}\",\"task\":\"{s}\"}}", .{ name, task });
+    defer alloc.free(request);
+    const out = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", request }, env);
+    defer alloc.free(out.stdout);
+    try std.testing.expectEqual(@as(u8, 0), out.code);
+    const at = std.mem.indexOf(u8, out.stdout, "session s-").? + "session ".len;
+    var end = at;
+    while (end < out.stdout.len and out.stdout[end] != ',' and out.stdout[end] != ' ') end += 1;
+    const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", "60000" });
+    alloc.free(waited.stdout);
+    return std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{out.stdout[at..end]});
 }

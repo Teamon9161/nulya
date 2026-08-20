@@ -43,6 +43,22 @@ export interface TuiState {
    */
   asked_stores?: string[]
   /**
+   * Agent-definition directories the question has already been put for, by
+   * absolute path, and the ones that were answered yes (tui.md §5.10).
+   *
+   * A definition that arrives with a checkout becomes a SYSTEM PROMPT the moment
+   * somebody delegates to it — the T31 hazard, one directory over — and
+   * materialising one also writes into this workspace's extension store, which
+   * for an empty store is the kernel's own "a local build IS the trust" rule
+   * (DESIGN §9). So the question is asked before any of that can happen, and
+   * asked once: `asked` is what stops it coming back every morning, `trusted` is
+   * the answer it got. The machine's own `~/.nulya/agents` is never asked about,
+   * for the same reason the user extension store is not — nothing arrives there
+   * without the person putting it there.
+   */
+  asked_agents?: string[]
+  trusted_agents?: string[]
+  /**
    * Extension tools this TUI puts on the face of every session it starts, as
    * stable ids (`ext:<id>/<tool>`) — the `this TUI` state of the pin panel
    * (tui.md §11, T12). Program state rather than config on purpose: trying a
@@ -86,6 +102,10 @@ export function loadTuiState(path = tuiStatePath()): TuiState {
     if (model) state.model = model
     const asked = record["asked_stores"]
     if (Array.isArray(asked)) state.asked_stores = asked.filter((s): s is string => typeof s === "string")
+    for (const key of ["asked_agents", "trusted_agents"] as const) {
+      const list = record[key]
+      if (Array.isArray(list)) state[key] = list.filter((s): s is string => typeof s === "string")
+    }
     const pins = record["session_pins"]
     if (Array.isArray(pins)) state.session_pins = pins.filter((s): s is string => typeof s === "string")
     // `auto` was this mode's name until it was renamed to `unsafe`; the file
@@ -140,6 +160,19 @@ export function rememberSessionPins(pins: readonly string[], path = tuiStatePath
 export function rememberMode(mode: PermissionMode, path = tuiStatePath()): void {
   const state = loadTuiState(path)
   state.mode = mode
+  saveTuiState(state, path)
+}
+
+/**
+ * Remember the answer to the agent-definitions question for one directory.
+ * Asked either way, trusted only on a yes (tui.md §5.10).
+ */
+export function rememberAgentsAnswer(dir: string, trusted: boolean, path = tuiStatePath()): void {
+  const state = loadTuiState(path)
+  const asked = state.asked_agents ?? []
+  const allowed = state.trusted_agents ?? []
+  state.asked_agents = asked.includes(dir) ? asked : [...asked, dir]
+  if (trusted && !allowed.includes(dir)) state.trusted_agents = [...allowed, dir]
   saveTuiState(state, path)
 }
 

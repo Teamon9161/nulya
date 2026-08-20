@@ -18,10 +18,11 @@ import {
   adoptBundled,
   answerFor,
   autoActivatable,
-  bundled_active,
+  builtContributions,
   describeDrafts,
   draftColumn,
   failedIds,
+  pinsOf,
   planProjectStore,
   promptConsequence,
   promptPackageWarning,
@@ -32,6 +33,8 @@ import {
   summarize,
   syncRoot,
 } from "../src/extensions.ts"
+import { modelTools } from "../src/nulya/files.ts"
+import { default_settings, loadSettings, withPackage } from "../src/state/settings.ts"
 import { draftHelp } from "../src/ui/overlays/ExtView.tsx"
 import { tempWorkspace, type TempWorkspace } from "./support.ts"
 
@@ -252,9 +255,9 @@ test("the binary's bundled drafts seed into a store — dry-run counts them, a s
   const env = { NULYA_HOME: home }
   try {
     const plan = await extSeed(ws, { user: true, dryRun: true, env })
-    expect(plan.seeded).toBe(5)
+    expect(plan.seeded).toBe(6)
     expect(plan.already).toBe(0)
-    expect(plan.ids).toEqual(["compact", "evolution", "guide", "handoff", "std"])
+    expect(plan.ids).toEqual(["agent", "compact", "evolution", "guide", "handoff", "std"])
 
     const first = await extSeed(ws, { user: true, ids: ["guide"], env })
     expect(first.seeded).toBe(1)
@@ -290,9 +293,11 @@ test("only the bundled ids that arrived this run are activated", async () => {
   const stuck = report(["std: needs zig (compiled draft; put zig on PATH)", "0 built, 0 already built, 1 failed"])
   expect(await adoptBundled(ws, ["std"], stuck, join(ws.dir, "adopt-stuck.json"))).toEqual([])
 
-  // And the three on-demand packages are never adopted, however they arrived:
-  // `evolution`'s system prompt belongs to the one session `/evolve` opens.
-  expect(bundled_active).toEqual(["std", "guide"])
+  // Arrived and built, but a MODE: `evolution` contributes a system prompt, so
+  // no background pass turns it on however it arrived (`autoActivatable`). It
+  // is the only bundled id that rule still refuses — and it needs no list of
+  // names to be refused (T34).
+  expect(await adoptBundled(ws, ["evolution"], built, join(ws.dir, "adopt-mode.json"))).toEqual([])
 })
 
 /**
@@ -303,22 +308,24 @@ test("only the bundled ids that arrived this run are activated", async () => {
  * one start where `ext seed` dropped the drafts.
  */
 test("a background pass never activates a mode, and never guesses when it cannot tell", () => {
-  // The general rule: whatever the id, a declared system prompt is a mode.
-  expect(autoActivatable("somebody.else", ["prompts/identity.md"])).toBe(false)
-  expect(autoActivatable("somebody.else", [])).toBe(true)
+  // The one rule, and it is about system prompts — not about ids. Whoever wrote
+  // the package, a declared prompt is a mode and a mode is a person's decision.
+  expect(autoActivatable(["prompts/identity.md"])).toBe(false)
+  expect(autoActivatable([])).toBe(true)
 
-  // The three on-demand bundled ids, by name, whatever they contribute —
-  // `compact` and `handoff` declare no prompt at all and are still not the
-  // background pass's to switch on.
-  for (const id of ["compact", "evolution", "handoff"]) expect(autoActivatable(id, [])).toBe(false)
-  // …and the two whose documented install IS activate-and-use.
-  for (const id of bundled_active) expect(autoActivatable(id, [])).toBe(true)
+  // The four bundled ids the list used to name are no longer special (T34):
+  // `compact` / `handoff` / `agent` declare no prompt, so they are ordinary
+  // membership and the pass may switch them on; their DRIVER tools stay off the
+  // model's face because their manifests say so, not because this file knows
+  // them. Only `evolution` is still refused, by the rule above.
+  expect(autoActivatable([])).toBe(true)
+  expect(autoActivatable(["prompts/evolution.md"])).toBe(false)
 
   // An unreadable manifest is "don't know", and don't-know is a no: a pass that
   // cannot tell what a package contributes has not learnt that it contributes
   // nothing. Leaving it off costs one keypress in `/ext`; the other direction
   // costs every session on the machine.
-  expect(autoActivatable("somebody.else", null)).toBe(false)
+  expect(autoActivatable(null)).toBe(false)
 })
 
 test("what a mode's switch says, in both directions and for the package that named the bug", () => {
@@ -384,7 +391,7 @@ test("the prompts of a built version are read from the root that sync wrote them
     expect(line.version).toMatch(/^v-/)
 
     expect(await promptsOf(store, root, "mode.pkg", line.version!)).toEqual(["prompts/identity.md"])
-    expect(autoActivatable("mode.pkg", await promptsOf(store, root, "mode.pkg", line.version!))).toBe(false)
+    expect(autoActivatable(await promptsOf(store, root, "mode.pkg", line.version!))).toBe(false)
   } finally {
     store.cleanup()
   }
@@ -406,4 +413,105 @@ test("the edit pin migration adopts only once the active std can honour it, and 
   expect(stdEditPinDecision(["ext:std/read"], null)).toBe("done")
   expect(stdEditPinDecision(std_pins, six_tools)).toBe("done")
   expect(stdEditPinDecision(std_pins, null)).toBe("done")
+})
+
+/**
+ * The four hard-coded lists this file used to hold are gone (tui.md §11, T34):
+ * which of a package's tools belong on the model's face is the package's own
+ * word (`audience`, DESIGN §7.2.1), read out of the frozen manifest.
+ */
+test("the pins an activation writes come from the manifest, per tool, for a package nobody here has heard of", () => {
+  const pkg = (id: string, tools: string[], driverTools: string[] = []) => ({ id, tools, driverTools })
+
+  // Silence is read as `model`, which is what every manifest written before the
+  // field existed means — and the kernel deliberately does not write the
+  // default in for a package that said nothing.
+  expect(pinsOf(pkg("std", ["read", "edit"]))).toEqual(["ext:std/read", "ext:std/edit"])
+  expect(modelTools(pkg("std", ["read", "edit"]))).toEqual(["read", "edit"])
+
+  // One package, both answers: the delegation entry point is the model's, the
+  // three commands a driver runs are not. A per-PACKAGE list could not say this.
+  expect(pinsOf(pkg("agent", ["agent", "list", "materialize", "run"], ["list", "materialize", "run"]))).toEqual([
+    "ext:agent/agent",
+  ])
+
+  // All driver: the switch is membership alone, and that is not half-anything —
+  // `nulya ext run` reaches the tool without a pin.
+  expect(pinsOf(pkg("compact", ["compact"], ["compact"]))).toEqual([])
+
+  // And a package this repository never heard of gets the same answer, which is
+  // the whole point of asking the manifest instead of a list of bundled ids.
+  expect(pinsOf(pkg("acme.patrol", ["watch", "sweep"], ["sweep"]))).toEqual(["ext:acme.patrol/watch"])
+})
+
+test("the std pin list is the frozen manifest's, with the literal only as a cold-start fallback", async () => {
+  const store = tempWorkspace()
+  try {
+    const root = join(store.dir, ".nulya", "extensions")
+    mkdirSync(join(root, "std", "src"), { recursive: true })
+    writeFileSync(join(root, "std", "src", "run.sh"), "#!/bin/sh\necho '{}'\n")
+    writeFileSync(
+      join(root, "std", "extension.json"),
+      JSON.stringify({
+        schema: "nulya.extension/v2",
+        id: "std",
+        runtime: { entry: "src/run.sh", interpreter: "sh" },
+        contributes: {
+          tools: [
+            { name: "read", input: {}, readonly: true },
+            { name: "edit", input: {} },
+            // A driver tool a future std might grow: it must not be pinned, and
+            // no edit to this file is needed for that to hold.
+            { name: "reindex", input: {}, audience: "driver" },
+          ],
+        },
+      }),
+    )
+    const built = await extSync(store)
+    const line = built.lines.find((entry) => entry.id === "std")!
+    const what = (await builtContributions(store, root, "std", line.version!))!
+    expect(what.driverTools).toEqual(["reindex"])
+    expect(pinsOf(what)).toEqual(["ext:std/read", "ext:std/edit"])
+
+    // The literal is still the answer when no manifest can be read at all — and
+    // it is still what the one-time `edit` migration is about, which is a claim
+    // about pin lists people wrote, not about what std declares today.
+    expect(await builtContributions(store, root, "std", "v-nosuchversion")).toBeNull()
+    expect(std_pins).toContain("ext:std/edit")
+  } finally {
+    store.cleanup()
+  }
+})
+
+test("session_with replaces two per-package booleans, and still reads them", async () => {
+  expect(default_settings.extensions.session_with).toEqual(["handoff", "agent"])
+
+  const layer = tempWorkspace()
+  try {
+    mkdirSync(join(layer.dir, ".nulya"), { recursive: true })
+    // The old key, off: that id leaves the list and nothing else moves.
+    writeFileSync(join(layer.dir, ".nulya", "tui.toml"), "[extensions]\nhandoff = false\n")
+    expect((await loadSettings(layer.dir, {})).extensions.session_with).toEqual(["agent"])
+
+    // The old key, on, for a layer that had turned it off in the list: the
+    // boolean is read after the list, so it is the nearer statement.
+    writeFileSync(
+      join(layer.dir, ".nulya", "tui.toml"),
+      '[extensions]\nsession_with = ["handoff"]\nagent = true\n',
+    )
+    expect((await loadSettings(layer.dir, {})).extensions.session_with).toEqual(["handoff", "agent"])
+
+    // The list alone, replacing rather than merging: a nearer layer must be able
+    // to ask for FEWER packages, which a union could never express.
+    writeFileSync(join(layer.dir, ".nulya", "tui.toml"), "[extensions]\nsession_with = []\n")
+    expect((await loadSettings(layer.dir, {})).extensions.session_with).toEqual([])
+  } finally {
+    layer.cleanup()
+  }
+})
+
+test("withPackage adds, removes, and never reorders what it leaves", () => {
+  expect(withPackage(["handoff", "agent"], "handoff", false)).toEqual(["agent"])
+  expect(withPackage(["handoff", "agent"], "handoff", true)).toEqual(["agent", "handoff"])
+  expect(withPackage(["agent"], "handoff", false)).toEqual(["agent"])
 })

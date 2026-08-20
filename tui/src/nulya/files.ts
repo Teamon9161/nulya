@@ -102,6 +102,17 @@ export interface Contributions {
    * manifest_readonly = false` stops believing it.
    */
   readonlyTools: string[]
+  /**
+   * The subset of `tools` whose manifest says `"audience": "driver"` (DESIGN
+   * §7.2.1) — called with `nulya ext run` by whoever drives a session, never
+   * meant for the model's tool face.
+   *
+   * Silence is not on this list: a package that said nothing is read as `model`
+   * (`modelTools`), which is what every manifest written before the field
+   * existed means. The kernel records the claim and enforces nothing — pinning
+   * a driver tool still works; this is what makes the front end not do it.
+   */
+  driverTools: string[]
   skills: string[]
   /**
    * Files whose text becomes a system block for any session carrying this
@@ -126,7 +137,15 @@ export async function readContributions(
   version: string,
   roots?: readonly string[],
 ): Promise<Contributions> {
-  const empty: Contributions = { id, version, tools: [], readonlyTools: [], skills: [], systemPrompts: [] }
+  const empty: Contributions = {
+    id,
+    version,
+    tools: [],
+    readonlyTools: [],
+    driverTools: [],
+    skills: [],
+    systemPrompts: [],
+  }
   const search = roots ?? (await storeRoots(ws))
   for (const root of search) {
     const path = join(root, id, "versions", version, "extension.json")
@@ -145,7 +164,7 @@ export async function readContributions(
 
 function contributionsOf(
   manifest: Record<string, unknown> | null,
-): Pick<Contributions, "tools" | "readonlyTools" | "systemPrompts" | "skills"> {
+): Pick<Contributions, "tools" | "readonlyTools" | "driverTools" | "systemPrompts" | "skills"> {
   const contributes = (manifest?.["contributes"] ?? {}) as Record<string, unknown>
   const declared = Array.isArray(contributes["tools"]) ? (contributes["tools"] as Array<Record<string, unknown>>) : []
   const named = declared.filter((tool) => typeof tool?.["name"] === "string")
@@ -154,9 +173,29 @@ function contributionsOf(
     // Absent is not false (DESIGN §7.2.1): a package that said nothing has made
     // no claim, and only an explicit `true` is one.
     readonlyTools: named.filter((tool) => tool["readonly"] === true).map((tool) => tool["name"] as string),
+    // The kernel refuses any other word, so only `"driver"` can be here; absent
+    // stays absent and `modelTools` is where silence is read.
+    driverTools: named.filter((tool) => tool["audience"] === "driver").map((tool) => tool["name"] as string),
     skills: stringList(contributes["skills"]),
     systemPrompts: stringList(contributes["system_prompts"]),
   }
+}
+
+/**
+ * The tools of a package that belong on the MODEL's tool face — the ones a pin
+ * is for (DESIGN §5.1, §7.2.1).
+ *
+ * This is the one place silence is read: a package that declared no `audience`
+ * is taken to mean `model`, because that is what every manifest written before
+ * the field existed says, and the kernel deliberately does not write the
+ * default in for anybody. A package with no model tools at all (`compact`) is
+ * not half-installed — it is fully on with nothing on the face, which is how a
+ * driver's package works.
+ */
+export function modelTools(
+  what: Pick<Contributions, "tools" | "driverTools">,
+): string[] {
+  return what.tools.filter((tool) => !what.driverTools.includes(tool))
 }
 
 export async function readActiveContributions(
@@ -408,6 +447,8 @@ export interface ExtensionEntry {
   versions: ExtensionVersion[]
   kind: ImplementationKind
   tools: string[]
+  /** The declared driver-audience subset of `tools` (DESIGN §7.2.1). */
+  driverTools: string[]
   skills: string[]
   systemPrompts: string[]
   permissions: { fs: string[]; network: string[]; process: string[] }
@@ -434,7 +475,7 @@ function stringList(value: unknown): string[] {
 
 function manifestFacts(manifest: Record<string, unknown> | null): Pick<
   ExtensionEntry,
-  "kind" | "tools" | "skills" | "systemPrompts" | "permissions"
+  "kind" | "tools" | "driverTools" | "skills" | "systemPrompts" | "permissions"
 > {
   const runtime = manifest?.["runtime"] as Record<string, unknown> | undefined
   const entry = typeof runtime?.["entry"] === "string" ? (runtime["entry"] as string) : null

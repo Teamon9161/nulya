@@ -45,6 +45,11 @@ export const commands: Command[] = [
     what: "a new tab wearing the evolution package: the slow loop, where finished sessions are reviewed and it is decided what to keep or build. nothing is activated — the prompt is worn for that one session",
   },
   { name: "/as", args: "<id>[@version]", what: "a session carrying a built extension's prompt and skills; nothing is activated" },
+  {
+    name: "/agent",
+    args: "[<name> <task…>]",
+    what: "delegate a task to an agent defined in .nulya/agents or ~/.nulya/agents: a session of its own, in its own tab, whose report comes back here. no name lists them",
+  },
   { name: "/step", what: "continue after a spent step budget (nothing continues by itself)" },
   { name: "/cancel", what: "stop the running step at the kernel's next step boundary" },
   { name: "/fold", what: "collapse every card" },

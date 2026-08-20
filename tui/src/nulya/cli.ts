@@ -162,10 +162,12 @@ export interface ProfileView {
   credential: boolean
   /**
    * Where the credential comes from: `config` (the profile's own `api_key` in
-   * the user file), `env` (`api_key_env` is set), `login` (codex auth file),
-   * `builtin` (scripted), `none`.
+   * the user file), `env` (`api_key_env` is set), `file` (the user credential
+   * file answers that same variable name — DESIGN §9.5, the one source a spawned
+   * process can still reach, since secrets are stripped from every child's
+   * environment), `login` (codex auth file), `builtin` (scripted), `none`.
    */
-  credential_source: "config" | "env" | "login" | "builtin" | "none"
+  credential_source: "config" | "env" | "file" | "login" | "builtin" | "none"
   /** Default model id and the selectable list (the default is always in it). */
   model: string
   models: string[]
@@ -437,8 +439,14 @@ export async function taskKill(ws: Workspace, task: string): Promise<string> {
  * version it sealed to. Content-addressed, so building an unchanged draft twice
  * yields the same version and no second copy (physics #5).
  */
-export async function extBuild(ws: Workspace, path: string): Promise<string> {
-  const result = await run(ws, ["ext", "build", path])
+export async function extBuild(ws: Workspace, path: string, options: { user?: boolean } = {}): Promise<string> {
+  const args = ["ext", "build", path]
+  // `--user` decides the DESTINATION root, not the source: a draft staged
+  // anywhere can be frozen into the user store (DESIGN §7.4). Which is how a
+  // persona defined in `~/.nulya/agents` stays on this machine rather than
+  // accumulating in whatever workspace happened to run it (`agents.ts`).
+  if (options.user) args.push("--user")
+  const result = await run(ws, args)
   const version = /v-[0-9a-zA-Z]+/.exec(result.stdout)?.[0]
   if (result.code !== 0 || !version) fail("ext build failed", result)
   return version

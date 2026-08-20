@@ -1,0 +1,109 @@
+{
+  "schema": "nulya.extension/v2",
+  "id": "agent",
+  "runtime": {
+    "entry": "bin/agent"
+  },
+  "contributes": {
+    "tools": [
+      {
+        "name": "agent",
+        "description": "Delegate one self-contained piece of work to a sub-agent, or send another turn into one that already reported. A sub-agent runs in a session of its own — its own context, its own tool face — and ONLY its final report comes back to you, as a message a little later; nothing else from its session enters this conversation and it cannot see yours. Give `name` to START one: say the whole task, because it sees nothing of this conversation and cannot ask you anything. Give `session` INSTEAD to follow up on a report you already have — that session still holds everything it found, so a correction or a request for specifics costs one turn where starting over pays for the search again. Prefer it. Use delegation for work that is separable and worth a fresh context (a broad search, a focused review); not for something you could finish in a step or two yourself, and never for the same thing twice. Calling an unknown name lists the ones that exist. After it returns, end your turn: the work has not happened yet.",
+        "timeout_ms": 120000,
+        "input": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Which agent definition to delegate to. Give this OR session, not both."
+            },
+            "session": {
+              "type": "string",
+              "description": "An agent session that already reported, to send another turn into. Give this OR name, not both."
+            },
+            "task": {
+              "type": "string",
+              "description": "The whole task (or the whole follow-up) in its own words: what to do, what to look at, what counts as finished."
+            }
+          },
+          "required": [
+            "task"
+          ]
+        }
+      },
+      {
+        "name": "materialize",
+        "audience": "driver",
+        "description": "Freeze an agent definition into the data extension version a session can carry. For drivers: returns the built version and the session arguments the definition asks for. Building an unchanged definition returns the version already in the store.",
+        "timeout_ms": 120000,
+        "input": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Which agent definition to freeze."
+            }
+          },
+          "required": [
+            "name"
+          ]
+        }
+      },
+      {
+        "name": "list",
+        "audience": "driver",
+        "description": "Every agent definition this workspace, this machine and this package hold, in search order, with the ones an earlier layer shadows marked. For drivers: a picker's data. Never needed by a model — an unknown name already comes back with the names that exist.",
+        "timeout_ms": 30000,
+        "input": {
+          "type": "object",
+          "properties": {}
+        }
+      },
+      {
+        "name": "run",
+        "audience": "driver",
+        "description": "Drive one delegated session to the end of its turn and print its report. For drivers: this is the command the background task started by `agent` runs; the report reaches the parent as that task's result.",
+        "timeout_ms": 600000,
+        "input": {
+          "type": "object",
+          "properties": {
+            "session": {
+              "type": "string",
+              "description": "The delegated session to drive."
+            },
+            "agent": {
+              "type": "string",
+              "description": "Which definition it is running, for the report's framing."
+            },
+            "readonly": {
+              "type": "boolean",
+              "description": "Hold it to tools that declare themselves read-only, refusing everything else at the kernel's gate."
+            },
+            "max_steps": {
+              "type": "integer",
+              "description": "Step budget for the run; omitted means the kernel's own."
+            },
+            "depth": {
+              "type": "integer",
+              "description": "How deep this delegation sits; the step it drives is told, so an indirect cycle of personas cannot recurse for ever."
+            }
+          },
+          "required": [
+            "session"
+          ]
+        }
+      }
+    ]
+  },
+  "permissions": {
+    "fs": [
+      ".nulya/agents",
+      ".nulya/scratch/agents",
+      "~/.nulya/agents"
+    ],
+    "network": [],
+    "process": [
+      "nulya"
+    ]
+  }
+}

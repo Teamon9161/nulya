@@ -46,7 +46,7 @@ import {
   type ToolUsage,
 } from "../../nulya/files.ts"
 import { configShow, extBuild, extDeactivate, extPrune, extSetCurrent, type SyncLine } from "../../nulya/cli.ts"
-import { draftColumn, pinsOnActivate, planStore, promptConsequence } from "../../extensions.ts"
+import { draftColumn, pinsOf, planStore, promptConsequence } from "../../extensions.ts"
 import {
   builtin_tools,
   faceFullLine,
@@ -141,12 +141,17 @@ export interface ToolRow {
   uses: number
   ok: number
   /**
-   * This tool is a DRIVER interface, not something a model calls (T24). It is
-   * listed — a tool that exists and is drawn nowhere is how `compact` became a
-   * mystery — but it has no checkbox, because a pin would put it on the model's
-   * face where calling it deadlocks on the session's own writer lock
-   * (`SessionBusy`, DESIGN §3.4). `/compact` and the goal driver reach it with
-   * `nulya ext run`, which needs no pin at all.
+   * This tool is a DRIVER interface, not something a model calls — the
+   * package's own word for it (`audience: "driver"`, DESIGN §7.2.1), where
+   * until T34 it was this front end guessing from a list of bundled ids.
+   *
+   * It has no checkbox by default, because a pin would put it on the model's
+   * face where calling it can deadlock on the session's own writer lock
+   * (`SessionBusy`, DESIGN §3.4); `/compact` and the goal driver reach it with
+   * `nulya ext run`, which needs no pin at all. It is still REACHABLE from this
+   * pane — a tool that exists and is drawn nowhere is how `compact` became a
+   * mystery — but folded (T33), because it is not an answer to the question
+   * this pane asks.
    */
   driver: boolean
 }
@@ -176,11 +181,46 @@ export function toolRows(
         state: pinState(id, sources),
         uses: row?.uses ?? 0,
         ok: row?.ok ?? 0,
-        driver: !pinsOnActivate(entry.id),
+        driver: entry.driverTools.includes(tool),
       })
     }
   }
   return rows.sort((a, b) => a.id.localeCompare(b.id))
+}
+
+/**
+ * A row the fold hides. A driver tool that somehow HAS a pin down is not one:
+ * that is a state this pane can act on (`Space` takes it back), and the one
+ * wrong checkbox in the list is the last thing to hide.
+ */
+function isFolded(row: ToolRow): boolean {
+  return row.driver && row.state === "off"
+}
+
+/** The rows a driver calls and nobody can pin (tui.md §11, T33). */
+export function foldedRows(rows: readonly ToolRow[]): ToolRow[] {
+  return rows.filter(isFolded)
+}
+
+/**
+ * What the list draws. Collapsed, every row has a checkbox and the list means
+ * one thing: here is the model's tool face, and here is what could join it.
+ *
+ * The driver rows were listed beside them until T33, when there were six of
+ * them to five pinnable ones — and, sorted by id, they came FIRST. The pinnable
+ * half is capped by `registry.max_tools`; the driver half is capped by nothing,
+ * so it grows the wrong way with every bundled package. They fold behind one
+ * line (`foldLine`) instead of disappearing: what each of them costs a reader
+ * is a row, not the fact of its existence.
+ */
+export function shownRows(rows: readonly ToolRow[], expanded: boolean): ToolRow[] {
+  return expanded ? [...rows] : rows.filter((row) => !isFolded(row))
+}
+
+/** The one line the folded half becomes, and the key that opens it. */
+export function foldLine(count: number, expanded: boolean): string {
+  const what = `${count} driver tool${count === 1 ? "" : "s"} · called with ext run, never on the model face`
+  return `${what} · d ${expanded ? "folds" : "shows"}`
 }
 
 /** What the NEXT session's face would carry: the merged config plus our own. */
@@ -341,6 +381,12 @@ export function ExtView(props: {
   const [cursor, setCursor] = createSignal(0)
   const [versionCursor, setVersionCursor] = createSignal(0)
   const [toolCursor, setToolCursor] = createSignal(0)
+  /**
+   * Whether the driver half of the tools pane is unfolded. Deliberately NOT in
+   * `tui-state.json`: it is a moment's curiosity about what else is installed,
+   * not a setting about how this front end should look.
+   */
+  const [driversOpen, setDriversOpen] = createSignal(false)
   const [pane, setPane] = createSignal<Pane>("extensions")
   const [notice, setNotice] = createSignal<string | null>(null)
   const [drafts, setDrafts] = createSignal<SyncLine[]>([])
@@ -467,22 +513,38 @@ export function ExtView(props: {
   /** The sync plan's line for an id, when that id still has a draft. */
   const draftOf = (id: string) => drafts().find((line) => line.id === id) ?? null
 
-  const tools = createMemo(() => toolRows(extensions(), sources(), usage()))
+  const allTools = createMemo(() => toolRows(extensions(), sources(), usage()))
+  /** The rows on screen: everything, or everything with a checkbox (T33). */
+  const tools = createMemo(() => shownRows(allTools(), driversOpen()))
+  const folded = createMemo(() => foldedRows(allTools()))
   const selectedTool = createMemo(() => tools()[Math.min(toolCursor(), Math.max(0, tools().length - 1))] ?? null)
+  /**
+   * Fold and unfold. The cursor is kept ON THE SAME ROW rather than at the same
+   * index — folding six rows out from under it would otherwise scroll the
+   * selection somewhere nobody asked it to go.
+   */
+  const toggleFold = () => {
+    const row = selectedTool()
+    const next = !driversOpen()
+    setDriversOpen(next)
+    const at = shownRows(allTools(), next).findIndex((entry) => entry.id === row?.id)
+    setToolCursor(at >= 0 ? at : 0)
+  }
+  const [foldHover, setFoldHover] = createSignal(false)
+  const foldClick = onClick(toggleFold)
   const quota = createMemo(() => quotaLine(maxTools(), nextFace(sources()).length))
 
   /** An extension takes part in the next session: an active version, not shadowed. */
   const isActive = (entry: ExtensionEntry) => entry.current !== null && !entry.shadowed
   /** Its declared tools, as the stable ids a pin names. */
-  const toolIdsOf = (entry: ExtensionEntry) => entry.tools.map((tool) => toolId(entry.id, tool))
   /**
-   * The tools the SWITCH pins — every one it declares, unless the package's
-   * tools are a driver interface rather than a model's (`pinsOnActivate`). For
-   * those the switch is membership alone, and the pin axis is not half-anything:
-   * `compact` is fully on with nothing on the face, because that is how a driver
-   * calls it.
+   * The tools the SWITCH pins: the ones the package puts on the MODEL's face
+   * (`pinsOf`, DESIGN §7.2.1). A package whose tools are all a driver interface
+   * yields none, and its switch is membership alone — the pin axis is not
+   * half-anything there: `compact` is fully on with nothing on the face,
+   * because that is how a driver calls it.
    */
-  const pinnable = (entry: ExtensionEntry) => (pinsOnActivate(entry.id) ? toolIdsOf(entry) : [])
+  const pinnable = (entry: ExtensionEntry) => pinsOf(entry)
   const pinnedCount = (entry: ExtensionEntry) =>
     pinnable(entry).filter((id) => pinState(id, sources()) !== "off").length
   const stateOf = (entry: ExtensionEntry): SwitchState =>
@@ -1015,6 +1077,9 @@ export function ExtView(props: {
     if (key.name === "a" && key.shift) return pinKey("promote")
     if (key.name === "a") return act()
     if (key.name === "b") return void buildDraft()
+    // Only where there is something to fold: `d` elsewhere in this view is a
+    // key that appears to do nothing, which is worse than a key that is unbound.
+    if (key.name === "d" && pane() === "tools" && (driversOpen() || folded().length > 0)) return toggleFold()
     if (key.name === "p") return prune()
     if (key.name === "t") return setPane(pane() === "tools" ? "extensions" : "tools")
     if (key.name === "u") return setPane(pane() === "usage" ? "extensions" : "usage")
@@ -1122,12 +1187,49 @@ export function ExtView(props: {
           )
         }}
       </Index>
+      {/* An empty list has two different reasons now, and the older sentence —
+          "build something first" — is wrong about the second one: those
+          extensions are active, they just have nothing a model may call. */}
       <Show when={tools().length === 0}>
-        <Lines
-          text="nothing can be pinned yet · a tool reaches the model only through an extension with an active version"
-          fg={style.theme.muted}
-        />
-        <Lines text="put its source in a store directory, then `b` builds it and Enter turns it on" />
+        <Show
+          when={folded().length === 0}
+          fallback={
+            <Lines
+              text="nothing on the model face · every active extension here declares driver tools only"
+              fg={style.theme.muted}
+            />
+          }
+        >
+          <Lines
+            text="nothing can be pinned yet · a tool reaches the model only through an extension with an active version"
+            fg={style.theme.muted}
+          />
+          <Lines text="put its source in a store directory, then `b` builds it and Enter turns it on" />
+        </Show>
+      </Show>
+      {/*
+        The folded half, as one line that answers to `d` and to a click. It sits
+        UNDER the list rather than in it: it has no checkbox and no cursor, and
+        a row the cursor walks onto but cannot act on is the shape T33 took out.
+      */}
+      <Show when={driversOpen() || folded().length > 0}>
+        <box height={1} />
+        <box
+          flexDirection="row"
+          width="100%"
+          height={1}
+          flexShrink={0}
+          backgroundColor={foldHover() ? style.theme.hover : undefined}
+          onMouseOver={() => setFoldHover(true)}
+          onMouseOut={() => setFoldHover(false)}
+          onMouseDown={foldClick.onMouseDown}
+          onMouseUp={foldClick.onMouseUp}
+        >
+          <box width={4} height={1} flexShrink={0}>
+            <text fg={style.theme.faint}>{` ${driversOpen() ? style.glyphs.foldOpen : style.glyphs.foldClosed}  `}</text>
+          </box>
+          <text fg={style.theme.dim}>{fit(foldLine(folded().length, driversOpen()), inner() - 4)}</text>
+        </box>
       </Show>
     </box>
   )
@@ -1488,7 +1590,7 @@ export function ExtView(props: {
         more={[
           "Enter activates the extension and pins its tools, again turns both off · a click on the row the cursor is already on does the same",
           "h/l ←/→ Tab move across the panes · j/k ↑/↓ move down a list",
-          "Space pin one tool · A promote it to always · b build the source · p prune old versions",
+          "Space pin one tool · A promote it to always · d fold the driver tools in or out · b build the source · p prune old versions",
           "a activate one named version, on the version line — an older one is the rollback · t tools · u usage",
         ]}
       />

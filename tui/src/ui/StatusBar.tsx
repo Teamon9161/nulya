@@ -136,7 +136,13 @@ export function StatusBar(props: {
     // row; repeating them here in a line that has to fit whatever is left over
     // is how they ended up as `y allow · nasknstep` on a narrow window.
     if (props.awaiting) return "waiting for your answer"
-    if (props.snapshot.error) return `error: ${props.snapshot.error}`
+    // The message itself is in the transcript, wrapped and in full
+    // (`ErrorNotice`). This line has one row and shares it with the model, the
+    // cost and the chips, so putting the text here meant `error: model request
+    // failed (Transp` — the shape of every error anyone actually read. What
+    // belongs on a status line is the state, and a pointer to where it is
+    // written out, for the case where the transcript is scrolled away.
+    if (props.snapshot.error) return "error · see transcript"
     // Observer mode is not idleness: nothing is stuck, we simply are not the
     // writer. Say which, and say when taking over is possible.
     if (props.role === "observer") {

@@ -290,7 +290,7 @@ Driver 演化比 Tool 保守，因为**归因难**（任务难度 / model / seed
 
 - **内核只长了一个原语，与 cancellation 同类**（physics #7 的同一形状）：`loop.StepContext.gate` 每个 tool call 执行前问一次，答案只有 `allow` / `deny{note?}` 两种；deny 就是那个 call 的 `tool_results`（`ok=false` + marker + 人的原话），**没有新事件种类、没有新 policy 键、batch 不变量不动**。kernel 里没有任何"该不该问"的判断——那正是它不该有的东西（physics #8）。`session step --gate` 把这个问题接到 stdout 一行 + stdin 一行上（要求与 `--stream` 同用；EOF / 认不出的答案 = fail closed）。
 - **判断在 driver**，今天第一个 consumer 是 TUI（tui.md §5.7）：两档 mode（`ask` / `auto`）+ 三张规则表（`deny` / `ask` / `allow`，条目是 tool id 或 shell 命令前缀）+ 本场的 always 集合。它是**可替换的**：另一个 driver 完全可以只答 `allow`（等于今天不带 `--gate`），或者把每个请求转给一个人的手机。内核不知道也不需要知道。
-- **`manifest.contributes.tools[].readonly` 是声明不是边界**（DESIGN §7.2.1）：包自己说这个 tool 只读，kernel 解析、冻结、**不强制**；driver 的 policy 可以信它（TUI 默认信，一个键可关）。它与 `permissions` 同级——两者都要等 §3.8 的 OS 强制才谈得上"边界"。长期方向是给每个 tool 加一个 `audience`（这个 tool 是给模型的、还是给 driver 的——今天 `extensions.ts` 里那张 `bundled_driver_only` 硬编码名单就是它的替身），与 `readonly` 一样属于"包自己说"的那一类。
+- **`manifest.contributes.tools[].readonly` 是声明不是边界**（DESIGN §7.2.1）：包自己说这个 tool 只读，kernel 解析、冻结、**不强制**；driver 的 policy 可以信它（TUI 默认信，一个键可关）。它与 `permissions` 同级——两者都要等 §3.8 的 OS 强制才谈得上"边界"。同一类的第二个字段 `audience`（这个 tool 是给模型的还是给 driver 的）**已落地** → DESIGN §7.2.1。
 - **与 §3.12 的 policy hook 是两扇门，不合并**：这一扇在**每个 call 执行前**（谁都在跑的那条快路径上，答的人是当场的驱动者）；那一扇在 **promote-to-native**（写一条 pin 的时候，答的人是 reviewer 或人，一场 session 只发生一次）。合成一个"权限系统"会把每步都要答的问题和一辈子答一次的问题塞进同一套配置。
 - **占位：classifier-as-extension。** tcode 的 auto 档背后有个安全分类器（模型判断这一步是否 destructive）。在 nulya 里那**天然是一个 extension**：driver 在 `ask` 之前调它一次，它答"这条命令属于哪一类"，driver 决定信不信。不进内核（是 intelligence，§0.1）、也不必进 TUI（TUI 只要能 spawn 它）。等有人真被问烦了再做——现在连"哪些规则最常被写进 `allow`"的证据都还没有。
 
@@ -351,3 +351,4 @@ base-tools.md §4 当年留下的 "later hardening：`run_in_background`"。执�
   - **粒度：整个 store 一条，key 是 store 路径，不含任何内容 hash。** hash 是错的抽象——agent 每造一个能力、每 activate 一次都会改它，一道每轮都重问的门会把自演化循环卡死。判据换成**出生地**：本机 `ext build` 填满一个空 store 就自动记信任（生于本地），已有内容却无记录就是随 checkout 到达。
   - **拒绝时的行为：硬拒整场**，不跳过该 root。理由正是这条问题自己提示的那个对照——"少一个能力的 session"不是它被要求的那一场（§7.5 对坏 active 版本的硬失败同理）。
   - 落地形状：`journals/trust.zig`（user 层 `<NULYA_HOME | ~/.nulya>/trusted-stores.jsonl`）+ `launch.ensureWorkspaceStoreTrusted`（门在壳层，内核不知道）+ `nulya ext trust`（显式信任，先打印要信任的东西）。只读投影与 `ext run` 不过门。
+- ~~**一个 tool 是给模型看的还是给 driver 看的，只有它自己的包知道——今天却由前端按名字猜**（`tui/src/extensions.ts` 的 `bundled_driver_only`）。~~ **已落地 → DESIGN §7.2.1 的 `contributes.tools[].audience`**（`"model" | "driver"`，与 `readonly?` 同级同纪律：kernel 解析、冻结、不强制；缺省 null ≠ `"model"`）。TUI 侧四张硬编码名单随之消失（tui.md §11 T34）。当初留的两个判断都成立：**两半确实要分开**——pin 那一半由 audience 答，`autoActivatable`（开屏该不该 activate）那一半仍只用通则 `contributes.system_prompts`，没有第二个字段；而"按需带入哪个包"仍是 driver 自己的知识，现在是 `tui.toml` 的 `[extensions] session_with` 一个列表键，不是 manifest 说的话。

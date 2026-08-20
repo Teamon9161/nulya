@@ -77,6 +77,19 @@ pub fn build(b: *std.Build) void {
     const std_ext_tests = b.addTest(.{ .root_module = std_ext_mod });
     test_step.dependOn(&b.addRunArtifact(std_ext_tests).step);
 
+    // The bundled `agent` package's definition reader: the front matter dialect,
+    // the three-layer search and its shadowing, and the personas this package
+    // ships (`extensions/agent/src/defs.zig`). It is the ONE reader of that
+    // format — the front end asks it rather than parsing — so it is the one
+    // place those answers can be pinned down.
+    const agent_ext_mod = b.createModule(.{
+        .root_source_file = b.path("extensions/agent/src/defs.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const agent_ext_tests = b.addTest(.{ .root_module = agent_ext_mod });
+    test_step.dependOn(&b.addRunArtifact(agent_ext_tests).step);
+
     // End-to-end closed-loop test (DESIGN §16 milestone): init -> build -> run.
     // It uses the host's own zig (no embed needed) via NULYA_TEST_ZIG, so it
     // actually compiles and runs a real extension. Everything reachable from

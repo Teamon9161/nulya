@@ -9,28 +9,17 @@
  * asking, this front end asks first (in `ask` mode) because there is a person
  * right there.
  *
- * So this module is two small things: find the files, and build the package.
- * The fork itself is `/compact`'s `brief_file` branch (`compact.ts`), which is
- * the same fork `/compact` always did with the brief supplied instead of asked
- * for — one path, two triggers.
+ * So this module is one small thing: find the files. Bringing the package into
+ * a session is `[extensions] session_with` like any other (`extensions.ts`), and
+ * the fork itself is `/compact`'s `brief_file` branch (`compact.ts`) — the same
+ * fork `/compact` always did, with the brief supplied instead of asked for.
  */
 import { existsSync, readFileSync, readdirSync } from "node:fs"
 import { join } from "node:path"
-import { extBuild } from "./nulya/cli.ts"
-import { bundledDraftPath } from "./extensions.ts"
-import type { WithRef } from "./evolve.ts"
 import type { Workspace } from "./nulya/bin.ts"
-
-export const handoff_id = "handoff"
 
 /** Where the tool writes, relative to the workspace (DESIGN §11). */
 export const handoff_dir = ".nulya/handoffs"
-
-/** The draft in nulya's own tree; elsewhere the binary's embedded copy is used. */
-export const handoff_draft = "extensions/handoff"
-
-/** The stable tool id a session must pin for the model to reach it (DESIGN §5.1). */
-export const handoff_pin = "ext:handoff/handoff"
 
 export interface HandoffFile {
   /** Workspace-relative path — what `compact --arg brief_file=` takes. */
@@ -85,20 +74,6 @@ export function headline(brief: string): string {
     if (line.length > 0) return line.length > 80 ? `${line.slice(0, 77)}…` : line
   }
   return "a handover brief"
-}
-
-/**
- * Build the bundled `handoff` package and name the version to compose in.
- *
- * Same shape as `/evolve`'s build (`evolve.ts`): a version id is the hash of the
- * draft, so an unchanged package rebuilds to the version already in the store.
- * This one is compiled, so the FIRST build on a machine costs a toolchain run —
- * which is why the caller starts it in the background rather than on the way
- * into a session.
- */
-export async function buildHandoff(ws: Workspace): Promise<WithRef> {
-  const draft = await bundledDraftPath(ws, handoff_id, handoff_draft)
-  return { id: handoff_id, version: await extBuild(ws, draft) }
 }
 
 function escapeForRegExp(text: string): string {

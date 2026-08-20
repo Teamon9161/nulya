@@ -276,6 +276,62 @@ exports[`edit renders its diff expanded by default 1`] = `
 "
 `;
 
+exports[`a driver failure is written out in the transcript, in full, wrapped 1`] = `
+"                                                                            
+› make emit budgets configurable                                            
+                                                                            
+● Reading emit.zig first.                                                   
+                                                                            
+✗ model request failed (Transport); retry 1/5 in 1s                         
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+"
+`;
+
+exports[`a long failure wraps rather than being cut 1`] = `
+"                                                            
+› make emit budgets configurable                            
+                                                            
+✗ step exited 1: nulya: session new refused: profile        
+  \`codex\` names provider codex but no credential resolved   
+  (~/.codex/auth.json)                                      
+                                                            
+                                                            
+                                                            
+                                                            
+                                                            
+                                                            
+                                                            
+                                                            
+                                                            
+                                                            
+                                                            
+                                                            
+                                                            
+                                                            
+                                                            
+                                                            
+                                                            
+                                                            
+"
+`;
+
 exports[`a canceled call is recognised by its marker, not by any stream line 1`] = `
 "                                                                            
   ⊘ sleep 60  (canceled · side effects unknown)                             
@@ -342,62 +398,6 @@ exports[`a spilled result points at its file 1`] = `
                                                                             
                                                                             
                                                                             
-                                                                            
-                                                                            
-                                                                            
-"
-`;
-
-exports[`capability notes are expanded and name what arrived 1`] = `
-"                                                                                                
-⚡ capability · lint@v-3f2a91 · tools: lint_zig · skills: zig-style                             
-  New capabilities from extension \`lint\` version \`v-3f2a91\` are now available:                  
-                                                                                                
-  Tools:                                                                                        
-  - lint_zig — Lint Zig sources.                                                                
-    invoke: nulya ext run lint <tool> '<json-args>'                                             
-                                                                                                
-  Skills:                                                                                       
-  - zig-style — House Zig style.                                                                
-    load: nulya skill load lint/zig-style                                                       
-                                                                                                
-                                                                                                
-                                                                                                
-                                                                                                
-                                                                                                
-                                                                                                
-                                                                                                
-                                                                                                
-                                                                                                
-                                                                                                
-                                                                                                
-                                                                                                
-                                                                                                
-"
-`;
-
-exports[`ascii mode degrades every glyph 1`] = `
-"                                                                            
-> make emit budgets configurable                                            
-                                                                            
-! capability · lint@v-3f2a91 · tools: lint_zig · skills: zig-style          
-  New capabilities from extension \`lint\` version \`v-3f2a91\` are now         
-  available:                                                                
-                                                                            
-  Tools:                                                                    
-  - lint_zig — Lint Zig sources.                                            
-    invoke: nulya ext run lint <tool> '<json-args>'                         
-                                                                            
-  Skills:                                                                   
-  - zig-style — House Zig style.                                            
-    load: nulya skill load lint/zig-style                                   
-                                                                            
-                                                                            
-  + ext build · lint → v-3f2a91 >                                           
-  ~ src/emit.zig  (+2 -1) v                                                 
-     1 - pub const head_bytes = 4096;                                       
-     1 + pub const head_bytes = 4096; // default                            
-     2 + pub const tail_bytes = 2048;                                       
                                                                             
                                                                             
                                                                             
@@ -482,6 +482,62 @@ exports[`a finished task is its own card: the command, the tail, the log 1`] = `
                                                                             
                                                                             
                                                                             
+                                                                            
+                                                                            
+                                                                            
+"
+`;
+
+exports[`capability notes are expanded and name what arrived 1`] = `
+"                                                                                                
+⚡ capability · lint@v-3f2a91 · tools: lint_zig · skills: zig-style                             
+  New capabilities from extension \`lint\` version \`v-3f2a91\` are now available:                  
+                                                                                                
+  Tools:                                                                                        
+  - lint_zig — Lint Zig sources.                                                                
+    invoke: nulya ext run lint <tool> '<json-args>'                                             
+                                                                                                
+  Skills:                                                                                       
+  - zig-style — House Zig style.                                                                
+    load: nulya skill load lint/zig-style                                                       
+                                                                                                
+                                                                                                
+                                                                                                
+                                                                                                
+                                                                                                
+                                                                                                
+                                                                                                
+                                                                                                
+                                                                                                
+                                                                                                
+                                                                                                
+                                                                                                
+                                                                                                
+"
+`;
+
+exports[`ascii mode degrades every glyph 1`] = `
+"                                                                            
+> make emit budgets configurable                                            
+                                                                            
+! capability · lint@v-3f2a91 · tools: lint_zig · skills: zig-style          
+  New capabilities from extension \`lint\` version \`v-3f2a91\` are now         
+  available:                                                                
+                                                                            
+  Tools:                                                                    
+  - lint_zig — Lint Zig sources.                                            
+    invoke: nulya ext run lint <tool> '<json-args>'                         
+                                                                            
+  Skills:                                                                   
+  - zig-style — House Zig style.                                            
+    load: nulya skill load lint/zig-style                                   
+                                                                            
+                                                                            
+  + ext build · lint → v-3f2a91 >                                           
+  ~ src/emit.zig  (+2 -1) v                                                 
+     1 - pub const head_bytes = 4096;                                       
+     1 + pub const head_bytes = 4096; // default                            
+     2 + pub const tail_bytes = 2048;                                       
                                                                             
                                                                             
                                                                             

@@ -173,18 +173,38 @@ fn containsString(haystack: []const []const u8, needle: []const u8) bool {
 }
 
 fn sessionNew(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
-    const id = (try createSession(alloc, io, args)) orelse return 1;
+    const id = (try createSession(alloc, io, args, .refuse)) orelse return 1;
     defer alloc.free(id);
     try printOut(alloc, io, "{s}\n", .{id});
     return 0;
 }
 
+/// What creation does when the named profile's credential resolves nowhere.
+///
+/// The two callers genuinely want opposite things, and neither is a default the
+/// other could live with (DESIGN §9.5):
+///
+///   refuse    — `session new`. A session freezes its identity for life, so one
+///               created without the credential it asked for would be answered
+///               by the offline stand-in from then on, while looking exactly
+///               like the model that was requested. That is worse than failing.
+///   stand_in  — `nulya demo`. Running with no key at all is what a demo IS: it
+///               exists to show the durable path on a machine that has nothing
+///               configured, and refusing there would refuse the demonstration.
+pub const KeylessPolicy = enum { refuse, stand_in };
+
 /// Create a durable session file from `session new`'s own flags and return its
 /// id (owned by the caller), or null when the request was refused and the
 /// reason has already been printed. `session new` is a thin printer over this;
-/// the bare-`nulya` demo is its other caller, so the two cannot drift on how a
-/// session is composed (DESIGN §14).
-pub fn createSession(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !?[]u8 {
+/// the `nulya demo` verb is its other caller, so the two cannot drift on how a
+/// session is composed (DESIGN §14) — `keyless` is the one thing they differ on,
+/// and it is named at both call sites rather than inferred.
+pub fn createSession(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    args: []const []const u8,
+    keyless: KeylessPolicy,
+) !?[]u8 {
     var host = try environment.hostEnvironMap(alloc);
     defer host.deinit();
 
@@ -273,15 +293,39 @@ pub fn createSession(alloc: std.mem.Allocator, io: std.Io, args: []const []const
             try printErrFmt(alloc, io, "no such profile '{s}' (see `nulya config show`)\n", .{profile});
             return null;
         };
+        // No credential, no session. This used to warn and freeze the identity
+        // as `scripted`, which is the one failure mode worse than failing: the
+        // session started, looked like the model that was asked for, and was
+        // answered by the offline stand-in — and being frozen, it stayed that
+        // way for its whole life (DESIGN §3). Refusing here is the creation-time
+        // twin of resume's `MissingCredential` (§9.5): the same fact, reported at
+        // the same volume, at both ends of a session's life.
+        //
+        // `nulya demo` deliberately keeps the fallback — running with no key at
+        // all is what a demo IS — and it does not come through here.
         if (!launch.credentialAvailable(alloc, io, profile_cfg, &host)) {
             var paths = try config.ConfigPaths.init(alloc, &host);
             defer paths.deinit(alloc);
-            const warn = if (profile_cfg.kind == .codex)
-                try std.fmt.allocPrint(alloc, "warning: profile '{s}' has no credential (run `codex login`); session frozen as scripted\n", .{profile})
+            const creds = (try launch.credentialFilePath(alloc, &host)) orelse try alloc.dupe(u8, launch.credentials_file);
+            defer alloc.free(creds);
+            const msg = if (profile_cfg.kind == .codex)
+                try std.fmt.allocPrint(alloc, "profile '{s}' has no credential: run `codex login` (see `nulya config show`)\n", .{profile})
             else
-                try std.fmt.allocPrint(alloc, "warning: profile '{s}' has no credential (put api_key in {s}, or set {s}); session frozen as scripted\n", .{ profile, paths.user, profile_cfg.api_key_env });
-            defer alloc.free(warn);
-            try printErr(io, warn);
+                try std.fmt.allocPrint(
+                    alloc,
+                    "profile '{s}' has no credential: set {s}, or put `{s} = \"…\"` in {s}, or api_key in {s} (see `nulya config show`)\n",
+                    .{ profile, profile_cfg.api_key_env, profile_cfg.api_key_env, creds, paths.user },
+                );
+            defer alloc.free(msg);
+            if (keyless == .refuse) {
+                try printErr(io, msg);
+                return null;
+            }
+            // `stand_in`: say the same sentence, then say what happens instead.
+            // The demo goes on — with the scripted provider, frozen as scripted,
+            // which is exactly what `resolveDescriptor` returns below.
+            try printErr(io, msg);
+            try printErr(io, "running the offline stand-in instead (this is `nulya demo`)\n");
         }
         // Freeze the RESOLVED model identity now: config chooses the model at
         // creation, and a later config edit can never change this session's

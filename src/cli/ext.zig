@@ -1492,6 +1492,12 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             \\  kernel records the claim and enforces nothing. Real isolation waits for a
             \\  sandbox.
             \\
+            \\  A tool may also declare `"audience": "driver"`, meaning it is called by
+            \\  whoever drives a session (`nulya ext run`, a front end) and does not
+            \\  belong on a model's tool face. `"model"` is the other value, and saying
+            \\  nothing says nothing. Recorded and never enforced, like `readonly`: a
+            \\  pin naming a driver tool still works, drivers simply do not write one.
+            \\
             \\  Wall clock is enforced: an extension tool is killed at 30s unless its
             \\  manifest sets `timeout_ms` (600s maximum); `shell` defaults to 120s and
             \\  accepts `timeout_ms` up to 600s. A timeout kills the whole process tree
@@ -1551,8 +1557,9 @@ test "every manifest parse/validate error is a draft fault; a host fault is not"
         error.WrongType,          error.UnsupportedSchema,       error.InvalidId,
         error.MissingRuntime,     error.InvalidEntry,            error.InvalidInterpreter,
         error.NoContributions,    error.InvalidToolName,         error.ReservedToolName,
-        error.DuplicateToolName,  error.InvalidTimeout,          error.InvalidSkillPath,
-        error.DuplicateSkillPath, error.InvalidSystemPromptPath, error.DuplicateSystemPromptPath,
+        error.DuplicateToolName,  error.InvalidTimeout,          error.InvalidAudience,
+        error.InvalidSkillPath,   error.DuplicateSkillPath,      error.InvalidSystemPromptPath,
+        error.DuplicateSystemPromptPath,
     }) |err| {
         std.testing.expect(isManifestFault(err)) catch |e| {
             std.debug.print("{s} should be reported as a bad manifest\n", .{@errorName(err)});

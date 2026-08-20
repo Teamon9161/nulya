@@ -21,6 +21,7 @@ import { existsSync, readFileSync, realpathSync } from "node:fs"
 import { join } from "node:path"
 import {
   configShow,
+  extBuild,
   extList,
   extSeed,
   extSetCurrent,
@@ -30,8 +31,8 @@ import {
   type SyncLine,
   type SyncReport,
 } from "./nulya/cli.ts"
-import { readContributions } from "./nulya/files.ts"
-import { builtin_tools } from "./pins.ts"
+import { modelTools, readContributions, type Contributions } from "./nulya/files.ts"
+import { builtin_tools, toolId } from "./pins.ts"
 import { userConfigDir } from "./state/settings.ts"
 import { loadTuiState, rememberSessionPins, saveTuiState, tuiStatePath } from "./state/tui_state.ts"
 import type { Workspace } from "./nulya/bin.ts"
@@ -101,7 +102,8 @@ export function storeTrusted(store: string, env: Record<string, string | undefin
   return false
 }
 
-function samePath(a: string, b: string): boolean {
+/** Two paths naming the same place, as far as a remembered answer is concerned. */
+export function samePath(a: string, b: string): boolean {
   const norm = (s: string) => s.replace(/[\\/]+$/, "").replace(/\\/g, "/")
   const left = norm(a)
   const right = norm(b)
@@ -253,21 +255,37 @@ export function planStore(ws: Workspace, user: boolean): Promise<SyncReport> {
 
 // ── The bundled extensions (DESIGN §7.8) ────────────────────────────────────
 //
-// The binary embeds the five drafts nulya's own repo ships, and `ext seed`
+// The binary embeds the six drafts nulya's own repo ships, and `ext seed`
 // writes them into a store root — so they are installable in ANY workspace,
-// not just a nulya checkout. What is policy here is only which of them mean
-// "active everywhere" when someone says install: `std` and `guide` are the two
-// whose documented install is activate-and-use; `compact` / `evolution` /
-// `handoff` are built on demand by /compact, /evolve and the goal driver, and
-// deliberately stay out of every composition until one of those brings them in.
+// not just a nulya checkout.
 //
-// Since T23 nobody says install: the user store is the person's own directory,
-// what lands in it came with the binary they ran, and the question that used to
-// guard it was asked on a bare terminal before the screen existed and then held
-// it there for a minute of zig. It happens on the way in, in the background,
-// with the status line saying so — and one Enter in `/ext` undoes any of it.
+// There used to be two hard-coded lists here saying which of them meant what:
+// one for "install means active everywhere", one for "these tools are a driver
+// interface". Both are gone (T34). The second is now the package's own words —
+// `contributes.tools[].audience` in the frozen manifest (DESIGN §7.2.1) — which
+// is the only place that knows, and works for a package this repository has
+// never heard of. The first turned out to be nothing: activation is membership,
+// the pin half is decided per tool by audience, and the one activation that
+// really is a decision (a package contributing a SYSTEM PROMPT) already has its
+// own general rule in `autoActivatable`.
+//
+// Since T23 nobody is asked about any of it: the user store is the person's own
+// directory, what lands in it came with the binary they ran, and the question
+// that used to guard it was asked on a bare terminal before the screen existed
+// and then held it there for a minute of zig. It happens on the way in, in the
+// background, with the status line saying so — and one Enter in `/ext` undoes
+// any of it.
 
-/** The six std tools, as the stable ids `session new --pin` takes. */
+/**
+ * The six std tools, as the stable ids `session new --pin` takes.
+ *
+ * A COLD-START FALLBACK and a frozen historical record, not the truth. The
+ * truth is the manifest of whichever `std` version is active on this machine
+ * (`pinsOf`), because that is what the kernel will resolve the pins against.
+ * This list is used in exactly two places: when no built version can be read at
+ * all, and by the one-time `edit` migration below, whose whole subject is the
+ * pin list people wrote when these six were the six.
+ */
 export const std_pins = [
   "ext:std/read",
   "ext:std/write",
@@ -277,61 +295,49 @@ export const std_pins = [
   "ext:std/glob",
 ]
 
-/** The bundled ids whose install means "active in every next session". */
-export const bundled_active = ["std", "guide"]
-
 /**
- * Bundled ids whose declared tools are a DRIVER interface, not a model tool.
+ * The pins turning a package on should write: one per tool its frozen manifest
+ * puts on the MODEL's face (DESIGN §7.2.1).
  *
- * `compact`'s tool drives the session it is called about — it appends to it and
- * steps it — so a model calling it from inside that very session meets the
- * kernel's single-writer lock and fails every time (`SessionBusy`, DESIGN §3.4).
- * `handoff`'s tool IS meant for a model, but for the one session a driver brings
- * it into with `--with … --pin`, not for every session this TUI opens. Either
- * way, activating these must move membership only: `nulya ext run` reaches their
- * tools without a pin, which is how `/compact` has always called `compact`.
+ * This replaces `pinsOnActivate(id)`, which answered per PACKAGE from a list of
+ * names in this file. Per tool is the shape the question actually has — the
+ * bundled `agent` package has one model tool and three driver ones — and asking
+ * the package means a driver extension from outside this repository gets the
+ * same answer instead of arriving in the tools pane wearing a checkbox that
+ * cannot work.
  *
- * `evolution` is here for the other reason, and it is the one that bites: it
- * declares no tool at all, only a system prompt and a skill, so activating it
- * puts the slow loop's identity in front of every model this machine runs
- * (T31). It is worn for one session with `/evolve`, and never activated.
- *
- * A hard-coded list is the temporary criterion. The durable one is a per-tool
- * `audience` in the manifest — the package saying what its own tool is for,
- * which is the only place that knows (kernel side, not yet). For the prompt half
- * the general rule already exists and needs no manifest change:
- * `autoActivatable` reads `contributes.system_prompts`.
+ * A package with none (`compact`) yields an empty list, and that is not
+ * half-anything: the switch is membership alone, and `nulya ext run` reaches
+ * its tool without a pin, which is how `/compact` has always called it.
  */
-export const bundled_driver_only = ["compact", "evolution", "handoff"]
-
-/** Whether turning this extension on should pin its tools as well. */
-export function pinsOnActivate(id: string): boolean {
-  return !bundled_driver_only.includes(id)
+export function pinsOf(what: Pick<Contributions, "id" | "tools" | "driverTools">): string[] {
+  return modelTools(what).map((tool) => toolId(what.id, tool))
 }
 
 /**
  * May a BACKGROUND pass point `current` at this package? (tui.md §11, T31.)
  *
- * Two "no"s, and both say the same thing. Activating a package that contributes
- * a SYSTEM PROMPT puts its text in front of every model this machine runs from
+ * One rule, and it is about system prompts. Activating a package that
+ * contributes one puts its text in front of every model this machine runs from
  * then on (DESIGN §5.3 / §7.8) — that is not an installation, it is a MODE, and
  * choosing one is a person's decision, never a start-up side effect. The bug
  * that named this function: `evolution` got activated by a sync pass, and every
  * session afterwards opened believing it was the slow loop and refused ordinary
  * work. The way to wear it is `/evolve` — one session, `--with`, nothing moved.
  *
- *  - the three on-demand bundled ids (`bundled_driver_only`), by name, because
- *    `/compact`, `/evolve` and the goal driver bring them in themselves;
- *  - anything whose frozen manifest declares `contributes.system_prompts` —
- *    the general rule, which covers packages nobody here has heard of.
+ * It used to also refuse four bundled ids by name. That half is gone with
+ * `bundled_driver_only` (T34), and losing it is the point: activating `compact`
+ * / `handoff` / `agent` is membership and nothing else — none of them
+ * contributes a system prompt, and their driver tools stay off the model's face
+ * because their own manifests say so, not because this file knows their names.
+ * `evolution` is still refused, by the rule that was always the real one.
  *
  * `prompts` is `null` for "could not read the manifest", and that is a no as
  * well: a pass that cannot tell what a package contributes has not learnt that
  * it contributes nothing. Leaving it built and inactive costs one keypress in
  * `/ext`; the other direction costs every session on the machine.
  */
-export function autoActivatable(id: string, prompts: readonly string[] | null): boolean {
-  if (bundled_driver_only.includes(id)) return false
+export function autoActivatable(prompts: readonly string[] | null): boolean {
   return prompts !== null && prompts.length === 0
 }
 
@@ -356,8 +362,25 @@ export async function promptsOf(
   id: string,
   version: string,
 ): Promise<string[] | null> {
+  return (await builtContributions(ws, root, id, version))?.systemPrompts ?? null
+}
+
+/**
+ * What one freshly built version in a KNOWN root contributes, or null when the
+ * manifest is not there to be read.
+ *
+ * The root is known because the caller just ran `ext sync`/`ext build` on it
+ * (`syncRoot`), so this reads one file rather than searching every root — and
+ * `null` stays a first-class answer for every reader of it.
+ */
+export async function builtContributions(
+  ws: Workspace,
+  root: string,
+  id: string,
+  version: string,
+): Promise<Contributions | null> {
   if (!existsSync(join(root, id, "versions", version, "extension.json"))) return null
-  return (await readContributions(ws, id, version, [root])).systemPrompts
+  return await readContributions(ws, id, version, [root])
 }
 
 /**
@@ -413,13 +436,18 @@ export function seedBundled(ws: Workspace): Promise<SeedReport> {
 
 /**
  * Finish the install for the ids that ARRIVED in this run: point `current` at
- * what the build pass produced for `std` and `guide`, and put the five std
- * tools on this TUI's pin list.
+ * what the build pass produced, and put the std tools on this TUI's pin list.
  *
- * Never the other three. `compact` / `evolution` / `handoff` are brought into
- * one session by `/compact`, `/evolve` and the goal driver; activating them
- * would put `evolution`'s system prompt in front of every model this machine
- * ever runs. Returns the parts of the sentence the status line will say.
+ * Which ones get activated used to be a list of two names here (`std` and
+ * `guide`). It is now the same general rule the rest of the sync pass uses —
+ * `autoActivatable`, i.e. anything that does not contribute a system prompt
+ * (T34). `evolution` is still left switched off by it, for the reason that rule
+ * exists; `compact` / `handoff` / `agent` are now switched on, and that is
+ * membership and nothing more — their driver tools stay off the model's face
+ * because their own manifests say so (DESIGN §7.2.1), and the sessions that
+ * want their model tools bring the version in themselves (`session_with`).
+ *
+ * Returns the parts of the sentence the status line will say.
  */
 export async function adoptBundled(
   ws: Workspace,
@@ -429,10 +457,14 @@ export async function adoptBundled(
 ): Promise<string[]> {
   const parts: string[] = []
   const active: string[] = []
-  for (const id of bundled_active) {
-    if (!arrived.includes(id)) continue
+  const root = syncRoot(ws, true)
+  let std: Contributions | null = null
+  for (const id of arrived) {
     const line = report.lines.find((entry) => entry.id === id)
     if (!line?.version || line.state === "failed" || line.state === "needs zig") continue
+    const what = await builtContributions(ws, root, id, line.version)
+    if (id === "std") std = what
+    if (!autoActivatable(what?.systemPrompts ?? null)) continue
     if (line.activation === "active") {
       active.push(id)
       continue
@@ -448,7 +480,7 @@ export async function adoptBundled(
   if (active.length > 0) parts.push(`${active.join(" & ")} active`)
   if (active.includes("std")) {
     parts.push(
-      (await pinStdTools(ws, statePath))
+      (await pinStdTools(ws, std, statePath))
         ? "std tools pinned"
         : "std tools not pinned (tool face full — `/ext` to choose)",
     )
@@ -457,11 +489,20 @@ export async function adoptBundled(
 }
 
 /**
- * Put the six std tools on this TUI's session pin list, unless that would blow
- * the kernel's `max_tools` quota at the next `session new` — a session that
- * refuses to start is worse than an unpinned tool.
+ * Put the std tools on this TUI's session pin list, unless that would blow the
+ * kernel's `max_tools` quota at the next `session new` — a session that refuses
+ * to start is worse than an unpinned tool.
+ *
+ * WHICH tools comes from the version that was just built (`pinsOf`), so a `std`
+ * that grew or lost one is followed without editing this file; the frozen list
+ * is only the answer for a build whose manifest could not be read at all.
  */
-async function pinStdTools(ws: Workspace, statePath?: string): Promise<boolean> {
+async function pinStdTools(
+  ws: Workspace,
+  std: Contributions | null,
+  statePath?: string,
+): Promise<boolean> {
+  const wanted = std ? pinsOf(std) : std_pins
   const current = loadTuiState(statePath).session_pins ?? []
   let merged_config: string[] = []
   let max_tools = 8
@@ -473,9 +514,9 @@ async function pinStdTools(ws: Workspace, statePath?: string): Promise<boolean> 
     // No projection is "unknown": assume the defaults and let `session new`
     // have the last word.
   }
-  const face = new Set([...merged_config, ...current, ...std_pins])
+  const face = new Set([...merged_config, ...current, ...wanted])
   if (builtin_tools + face.size > max_tools) return false
-  const mine = new Set([...current, ...std_pins])
+  const mine = new Set([...current, ...wanted])
   rememberSessionPins([...mine], statePath)
   return true
 }
@@ -544,6 +585,66 @@ export async function adoptStdEditPin(ws: Workspace, statePath?: string): Promis
     case "adopt":
       saveTuiState({ ...state, adopted_std_edit_pin: true, session_pins: [...pins, "ext:std/edit"] }, path)
       return true
+  }
+}
+
+/**
+ * One package this TUI composes a top-level session with (`[extensions]
+ * session_with`): the exact version, and the pins its tools ask for.
+ */
+export interface SessionMember {
+  id: string
+  version: string
+  /** One per tool this version puts on the model's face (`pinsOf`). */
+  pins: string[]
+}
+
+/**
+ * Resolve one `session_with` id to the version a `session new` should name, and
+ * the pins that version's own manifest asks for.
+ *
+ * Two ways in, in this order:
+ *
+ *  - a draft this BINARY ships (`handoff`, `agent`, …) is built, every time.
+ *    A version id is the hash of the draft, so an unchanged package rebuilds to
+ *    the version already in the store — and an edited one is picked up without
+ *    anybody remembering to rebuild. This is what `/evolve` and the handoff
+ *    build have always done; it is not per-package knowledge, it is what the
+ *    kernel's content addressing makes free.
+ *  - anything else is taken at the store's `current`, which is what somebody
+ *    activated. A package with no active version cannot be composed, and saying
+ *    so is better than composing a session that is quietly missing it.
+ *
+ * Throws with a sentence for the notice; the caller starts the session anyway.
+ */
+export async function sessionMember(ws: Workspace, id: string): Promise<SessionMember> {
+  const version = (await buildBundledDraft(ws, id)) ?? (await activeVersion(ws, id))
+  if (!version) {
+    throw new Error(`${id} · no active version in any store · \`nulya ext build <path> --user\` then \`nulya ext activate --user ${id} <v>\``)
+  }
+  return { id, version, pins: pinsOf(await readContributions(ws, id, version)) }
+}
+
+/** Build the draft this binary ships for `id`, or null when it ships none. */
+async function buildBundledDraft(ws: Workspace, id: string): Promise<string | null> {
+  let draft: string
+  try {
+    draft = await bundledDraftPath(ws, id, join("extensions", id))
+  } catch {
+    // `ext seed <id>` refuses an id the binary does not ship: not an error
+    // here, just the answer that this one lives in a store like any other.
+    return null
+  }
+  return await extBuild(ws, draft)
+}
+
+/** The version `current` names for `id`, in the first root that has one. */
+async function activeVersion(ws: Workspace, id: string): Promise<string | null> {
+  try {
+    const entry = (await extList(ws)).find((e) => e.id === id && e.current !== null && !e.shadowed)
+    return entry?.current ?? null
+  } catch {
+    return null
   }
 }
 

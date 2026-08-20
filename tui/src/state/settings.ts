@@ -54,12 +54,26 @@ export interface Settings {
      */
     auto_activate: boolean
     /**
-     * Bring the bundled `handoff` package into every session this TUI starts
-     * (`--with handoff@<v> --pin ext:handoff/handoff`, DESIGN §11). On by
-     * default: the tool only ever WRITES A FILE proposing a handover — the fork
-     * is this front end's move, and it still asks first in `ask` mode.
+     * The packages every TOP-LEVEL session this TUI starts is composed with:
+     * `--with <id>@<v>`, plus a `--pin` for each tool that version puts on the
+     * model's face (`audience`, DESIGN §7.2.1). One list where there used to be
+     * one boolean per package (T34) — "which packages" is a list-shaped question,
+     * and a new one should not need a new key and a new branch in `App.tsx`.
+     *
+     * Both defaults earn their place. `handoff`'s tool only ever WRITES A FILE
+     * proposing a handover (DESIGN §11) — the fork is this front end's move and
+     * it still asks first in `ask` mode. `agent` ships four personas, so there
+     * is always something to delegate to, and a delegation is a background task
+     * the model can only ASK for; every tool call inside it still meets the gate.
+     *
+     * TOP-LEVEL only, and that is load-bearing for `agent`: a delegated session
+     * composes itself (DESIGN §7.8), so this list never reaches one.
+     *
+     * The two booleans this replaces (`[extensions] handoff` / `agent`) are
+     * still read: `handoff = false` removes that id from the list, exactly as it
+     * used to mean. Nothing rewrites the file.
      */
-    handoff: boolean
+    session_with: string[]
   }
   driver: {
     /**
@@ -89,7 +103,7 @@ export const default_settings: Settings = {
     history_window: 400,
   },
   ui: { theme: "nulya-dark", motion: true },
-  extensions: { sync_on_start: true, auto_activate: true, handoff: true },
+  extensions: { sync_on_start: true, auto_activate: true, session_with: ["handoff", "agent"] },
   driver: { mode: "ask" },
   approvals: { ...default_rules },
   keys: {},
@@ -113,6 +127,15 @@ export function settingsPaths(workspaceDir: string, env: Record<string, string |
 
 function pick<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
   return typeof value === "string" && (allowed as readonly string[]).includes(value) ? (value as T) : fallback
+}
+
+/**
+ * The list with `id` present or absent, order otherwise untouched. What a
+ * legacy per-package boolean turns into (`[extensions] handoff = false`).
+ */
+export function withPackage(list: readonly string[], id: string, on: boolean): string[] {
+  const without = list.filter((entry) => entry !== id)
+  return on ? [...without, id] : without
 }
 
 function mergeLayer(into: Settings, layer: unknown, source: string) {
@@ -149,7 +172,18 @@ function mergeLayer(into: Settings, layer: unknown, source: string) {
   if (extensions) {
     if (typeof extensions["sync_on_start"] === "boolean") into.extensions.sync_on_start = extensions["sync_on_start"]
     if (typeof extensions["auto_activate"] === "boolean") into.extensions.auto_activate = extensions["auto_activate"]
-    if (typeof extensions["handoff"] === "boolean") into.extensions.handoff = extensions["handoff"]
+    // Replaced, not merged — the same discipline as the approval tables: a
+    // nearer layer that wants FEWER packages must be able to say so.
+    if (Array.isArray(extensions["session_with"])) {
+      into.extensions.session_with = extensions["session_with"].filter((e): e is string => typeof e === "string")
+    }
+    // The two per-package booleans this key replaced (T34). A layer that still
+    // writes one keeps meaning what it meant: `false` takes that id off the
+    // list, `true` puts it back. Read only — `tui.toml` is a person's file.
+    for (const legacy of ["handoff", "agent"] as const) {
+      if (typeof extensions[legacy] !== "boolean") continue
+      into.extensions.session_with = withPackage(into.extensions.session_with, legacy, extensions[legacy] as boolean)
+    }
   }
   const driver = record["driver"] as Record<string, unknown> | undefined
   if (driver && typeof driver["mode"] === "string") {

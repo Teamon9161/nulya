@@ -1418,3 +1418,91 @@ test "session cli: outcome appends a verdict to the outcomes journal, rejects a 
 }
 
 // ── M2b: script extensions (DESIGN §7.1) ────────────────────────────────────
+
+// ── §9.5: credentials — the file, and the refusal ───────────────────────────
+
+test "session new: a profile whose credential resolves nowhere refuses instead of freezing scripted, and the user credential file answers api_key_env by name" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    // The developer running this may well have a real key exported; an empty
+    // value is "no credential" (`launch.envValue`), so the test says what the
+    // world looks like rather than hoping.
+    const keyless: []const support.EnvPair = &.{.{ .key = "OPENAI_API_KEY", .value = "" }};
+
+    // ① No credential anywhere: exit 1, and the message is the whole way out —
+    // the variable, the credential file, the config, and `config show`. It used
+    // to be a warning followed by a session frozen as `scripted`, which is the
+    // failure that looks like success.
+    {
+        const err = try support.runCliStderr(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "openai" }, keyless);
+        defer alloc.free(err);
+        for ([_][]const u8{ "no credential", "OPENAI_API_KEY", "credentials.toml", "config show" }) |needle| {
+            try std.testing.expect(std.mem.indexOf(u8, err, needle) != null);
+        }
+        try std.testing.expect(std.mem.indexOf(u8, err, "frozen as scripted") == null);
+        // Nothing was created: a refusal that left a session behind would be the
+        // same lie one directory over.
+        try std.testing.expectError(error.FileNotFound, ws.access(io, ".nulya/sessions", .{}));
+    }
+
+    // ② The same profile, the same config, one new file: the key by the very
+    // name `api_key_env` already declares (DESIGN §9.5). No profile edit, and no
+    // second naming scheme.
+    const home = try support.testHome(alloc, io, ws);
+    defer alloc.free(home);
+    try std.Io.Dir.cwd().createDirPath(io, home);
+    const creds = try std.fs.path.join(alloc, &.{ home, "credentials.toml" });
+    defer alloc.free(creds);
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = creds,
+        .data = "OPENAI_API_KEY = \"sk-e2e-from-file\"\n",
+    });
+
+    const new = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "openai" }, keyless);
+    defer alloc.free(new.stdout);
+    try std.testing.expectEqual(@as(u8, 0), new.code);
+    const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(id);
+
+    // What got frozen is the real provider — the whole point of the refusal
+    // above and of this file. `session new` never goes near the network, so this
+    // is assertable offline.
+    const header = try readSessionFile(alloc, io, ws, id);
+    defer alloc.free(header);
+    try std.testing.expect(std.mem.indexOf(u8, header, "\"provider\":\"openai\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, header, "\"api_key_env\":\"OPENAI_API_KEY\"") != null);
+    // The header holds the NAME and never the value (§3.4) — the file changed
+    // where a key can be found, not what a session records.
+    try std.testing.expect(std.mem.indexOf(u8, header, "sk-e2e-from-file") == null);
+
+    // …and `config show` reports the new source without ever printing the value.
+    {
+        const shown = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "config", "show", "--json" }, keyless);
+        defer alloc.free(shown.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, shown.stdout, "\"credential_source\":\"file\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, shown.stdout, "sk-e2e-from-file") == null);
+    }
+
+    // ③ The environment still wins for the length of a shell that exports one.
+    {
+        const shown = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "config", "show", "--json" }, &.{.{ .key = "OPENAI_API_KEY", .value = "sk-from-env" }});
+        defer alloc.free(shown.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, shown.stdout, "\"credential_source\":\"env\"") != null);
+    }
+
+    // ④ A scripted profile needs nothing and is untouched by any of it.
+    const scripted = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" }, keyless);
+    defer alloc.free(scripted.stdout);
+    try std.testing.expectEqual(@as(u8, 0), scripted.code);
+}

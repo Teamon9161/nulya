@@ -30,7 +30,7 @@ import {
   writeUserPins,
   type PinSources,
 } from "../src/pins.ts"
-import { nextFace, switchState, toolRows } from "../src/ui/overlays/ExtView.tsx"
+import { foldLine, foldedRows, nextFace, shownRows, switchState, toolRows } from "../src/ui/overlays/ExtView.tsx"
 import { readHeader } from "../src/nulya/files.ts"
 import { sessionNew } from "../src/nulya/cli.ts"
 import type { ExtensionEntry } from "../src/nulya/files.ts"
@@ -184,6 +184,40 @@ test("rows come only from extensions a pin could actually resolve through", () =
   expect(nextFace(sources({ merged: ["a", "b"], session: ["b", "c"] }))).toEqual(["a", "b", "c"])
 })
 
+test("the list holds only rows with a checkbox, and says how many it folded", () => {
+  // The audiences are the packages' own (`driverTools`, DESIGN §7.2.1) — which
+  // is why `agent` splits: one model tool, three driver ones. Before T34 the
+  // whole package was driver-only because its id was on a list here, and its
+  // delegation entry point was folded away with the rest.
+  const entries: ExtensionEntry[] = [
+    { ...entry("agent", "v-1", ["agent", "list", "materialize", "run"]), driverTools: ["list", "materialize", "run"] },
+    { ...entry("compact", "v-1", ["compact"]), driverTools: ["compact"] },
+    entry("std", "v-1", ["read", "grep"]),
+  ]
+  const rows = toolRows(entries, sources({ user: [toolId("std", "read")] }), [])
+
+  // Collapsed: the four driver tools are gone and every remaining row is a
+  // switch somebody can throw. Expanded: the same list as before T33.
+  expect(shownRows(rows, false).map((row) => row.id)).toEqual([
+    toolId("agent", "agent"),
+    toolId("std", "grep"),
+    toolId("std", "read"),
+  ])
+  expect(shownRows(rows, true).map((row) => row.id)).toEqual(rows.map((row) => row.id))
+  expect(foldedRows(rows)).toHaveLength(4)
+  expect(foldLine(4, false)).toContain("4 driver tools")
+  expect(foldLine(4, false)).toContain("ext run")
+  expect(foldLine(4, false)).toContain("d shows")
+  expect(foldLine(1, true)).toContain("1 driver tool ")
+  expect(foldLine(1, true)).toContain("d folds")
+
+  // A driver tool with a pin somehow down stays visible: it is the one row here
+  // that IS a state, and taking it back is what this pane is for.
+  const pinned = toolRows(entries, sources({ user: [toolId("compact", "compact")] }), [])
+  expect(shownRows(pinned, false).map((row) => row.id)).toContain(toolId("compact", "compact"))
+  expect(foldedRows(pinned)).toHaveLength(3)
+})
+
 test("the config write replaces one line and leaves every other byte alone", () => {
   const written = [
     "# my nulya config",
@@ -289,6 +323,7 @@ function entry(id: string, current: string, tools: string[]): ExtensionEntry {
     versions: [{ version: current, mtime: 0 }],
     kind: "script",
     tools,
+    driverTools: [],
     skills: [],
     systemPrompts: [],
     permissions: { fs: [], network: [], process: [] },

@@ -6,7 +6,7 @@
  * from files a real `nulya` binary wrote.
  */
 import { afterAll, beforeAll, expect, test } from "bun:test"
-import { mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { createSignal, type JSX } from "solid-js"
 import { testRender } from "@opentui/solid"
@@ -346,17 +346,67 @@ test("/ext names the drift between what this session froze and what the store po
   }
 }, 60_000)
 
+test("the tools pane folds the driver half away and says how much it folded", async () => {
+  // A real driver package in the store, and deliberately one this front end has
+  // never heard of: what makes it a driver tool is its own manifest saying
+  // `"audience": "driver"` (DESIGN §7.2.1), not its id being on a list in
+  // `extensions.ts` — which is exactly what a third party could not do before
+  // T34. `ext init --script` names the tool after the id, so this row is
+  // `ext:patrol/patrol`, sorted above the pinnable one by the letter p.
+  const run = (args: string[]) => Bun.spawnSync({ cmd: [ws.bin, ...args], cwd: ws.dir, env: process.env })
+  run(["ext", "init", "--script", "patrol"])
+  const draft = join(ws.dir, ".nulya", "extensions", "patrol", "extension.json")
+  const manifest = JSON.parse(readFileSync(draft, "utf8")) as {
+    contributes: { tools: Array<Record<string, unknown>> }
+  }
+  manifest.contributes.tools[0]!["audience"] = "driver"
+  writeFileSync(draft, JSON.stringify(manifest, null, 2))
+  const built = run(["ext", "build", ".nulya/extensions/patrol"])
+  const driver_version = /v-[0-9a-zA-Z]+/.exec(built.stdout.toString())?.[0] ?? ""
+  run(["ext", "activate", "patrol", driver_version])
+
+  const setup = await overlayFrame(() => <ExtView ws={ws} header={null} onClose={() => {}} />, 100, 24)
+  try {
+    await settle(setup, 6)
+    setup.mockInput.pressKey("t")
+    const folded = await settle(setup, 4)
+    expect(folded).toContain("[ ] ext:lint/lint")
+    expect(folded).not.toContain("ext:patrol/patrol")
+    expect(folded).toContain("1 driver tool · called with ext run, never on the model face · d shows")
+
+    setup.mockInput.pressKey("d")
+    const open = await settle(setup, 4)
+    expect(open).toContain("ext:patrol/patrol")
+    expect(open).toContain("driver · ext run")
+    expect(open).toContain("d folds")
+
+    setup.mockInput.pressKey("d")
+    expect(await settle(setup, 4)).not.toContain("ext:patrol/patrol")
+  } finally {
+    setup.renderer.destroy()
+    // The rest of this file counts on `lint` being the only extension.
+    run(["ext", "deactivate", "patrol"])
+    rmSync(join(ws.dir, ".nulya", "extensions", "patrol"), { recursive: true, force: true })
+  }
+}, 120_000)
+
 test("a driver tool is listed with no checkbox: there is no pin for it to be wrong about", () => {
   // `compact` drives the session it is called ABOUT — it appends to it and
   // steps it — so a model calling it from inside that session meets the
   // kernel's writer lock every time (DESIGN §3.4). A checkbox beside it offered
   // a state that cannot work; the row now says who calls it instead (T24).
-  const entry = (id: string, tools: string[]) => ({
+  //
+  // WHICH tools those are is the package's own word since T34 (`audience`,
+  // DESIGN §7.2.1) rather than a list of bundled ids here — so a package this
+  // front end has never heard of gets the same treatment, and one that mixes
+  // both kinds (the bundled `agent`) gets it per tool.
+  const entry = (id: string, tools: string[], driverTools: string[] = []) => ({
     id,
     current: "v-1",
     versions: [],
     kind: "compiled" as const,
     tools,
+    driverTools,
     skills: [],
     systemPrompts: [],
     permissions: { fs: [], network: [], process: [] },
@@ -364,19 +414,27 @@ test("a driver tool is listed with no checkbox: there is no pin for it to be wro
     shadowed: false,
   })
   const rows = toolRows(
-    [entry("compact", ["compact"]), entry("std", ["read"])],
+    [
+      entry("compact", ["compact"], ["compact"]),
+      entry("agent", ["agent", "run"], ["run"]),
+      entry("std", ["read"]),
+    ],
     { user: [], session: [], merged: [] },
     [],
   )
   expect(rows.map((row) => [row.id, row.driver])).toEqual([
+    // One package, both answers: the delegation entry point is the model's, the
+    // command its background task runs is not.
+    ["ext:agent/agent", false],
+    ["ext:agent/run", true],
     ["ext:compact/compact", true],
     ["ext:std/read", false],
   ])
-  expect(labelOf(rows[0]!)).toBe("driver · ext run")
-  expect(labelOf(rows[1]!)).toBe("")
+  expect(labelOf(rows[1]!)).toBe("driver · ext run")
+  expect(labelOf(rows[0]!)).toBe("")
   // Pinned anyway — by hand, or by a driver's `--pin` — and the row goes back to
   // saying what the pin says: the state is real, and taking it off must work.
-  expect(labelOf({ ...rows[0]!, state: "session" })).toBe("this TUI")
+  expect(labelOf({ ...rows[1]!, state: "session" })).toBe("this TUI")
 })
 
 test("F3 opens the sessions view and Esc closes it", async () => {

@@ -86,6 +86,13 @@ export type Tab = DraftTab | SessionTab
 export interface OpenOptions {
   created?: boolean
   effort?: string
+  /**
+   * `session step --max-steps` for this tab's steps. Per tab because it is a
+   * per-run budget the kernel clamps (`session.max_steps_ceiling`), not part of
+   * the frozen identity — and because a sub-agent tab is the first thing that
+   * wants one while the tab beside it does not (`agents.ts`).
+   */
+  maxSteps?: number
 }
 
 /** What the screen adds to a `session new` beyond the draft's own choices. */
@@ -94,6 +101,8 @@ export interface SessionExtras {
   with?: readonly string[]
   /** `--pin ext:<id>/<tool>`: a native slot on the model's tool face. */
   pin?: readonly string[]
+  /** The step budget the resulting tab drives with (`OpenOptions.maxSteps`). */
+  maxSteps?: number
 }
 
 export interface DraftOptions {
@@ -207,7 +216,13 @@ export function createTabStore(ws: Workspace, first: FirstTab, options: TabStore
       // `driven`: a session this process created is ours to wake from the first
       // probe; one merely opened here (a sub-session, `/sessions`) is not, until
       // someone drives it from this tab (attach.ts).
-      attach: createAttachment(ws, id, state, { ...attachOptions, ready, effort, driven: opened.created ?? false }),
+      attach: createAttachment(ws, id, state, {
+        ...attachOptions,
+        ...(opened.maxSteps !== undefined ? { maxSteps: opened.maxSteps } : {}),
+        ready,
+        effort,
+        driven: opened.created ?? false,
+      }),
       tasks: createTaskWatch(ws, id, { ...(attachOptions.env ? { env: attachOptions.env } : {}) }),
       contributions,
       effort,
@@ -287,7 +302,11 @@ export function createTabStore(ws: Workspace, first: FirstTab, options: TabStore
         ...(members.length > 0 ? { with: members } : {}),
         ...(pins.length > 0 ? { pin: pins } : {}),
       })
-      return replace(draft.key, id, { created: true, effort: draft.effort() })
+      return replace(draft.key, id, {
+        created: true,
+        effort: draft.effort(),
+        ...(extra.maxSteps !== undefined ? { maxSteps: extra.maxSteps } : {}),
+      })
     },
     select(index) {
       if (index >= 0 && index < tabs().length) setActiveIndex(index)

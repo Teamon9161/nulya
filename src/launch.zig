@@ -8,6 +8,7 @@
 //! path the CLI does.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const provider = @import("provider.zig");
 const prompt = @import("prompt.zig");
 const openai = @import("providers/openai.zig");
@@ -20,6 +21,7 @@ const environment = @import("environment.zig");
 const store = @import("extension/store.zig");
 const ext_manifest = @import("extension/manifest.zig");
 const trust = @import("journals/trust.zig");
+const toml = @import("toml");
 const build_options = @import("config_options");
 
 /// This build's version string, straight from `build.zig.zon` `.version` (build.zig
@@ -332,10 +334,12 @@ pub fn resolveDescriptor(
 }
 
 /// Where a profile's credential comes from right now, if anywhere. `config`
-/// (its own `api_key`, the user's file) wins over `env` (`api_key_env`), so the
-/// key a person pasted into nulya's own config is the one that runs even if a
-/// stale variable is still exported. `scripted` needs nothing.
-pub const CredentialSource = enum { none, config, env, login, builtin };
+/// (its own `api_key`, the user's file) wins over `env` (`api_key_env`), which
+/// wins over `file` (the user credential file, §9.5) — so the key a person
+/// pasted into nulya's own config is the one that runs even if a stale variable
+/// is still exported, and an exported variable still beats the file for the
+/// length of that shell. `scripted` needs nothing.
+pub const CredentialSource = enum { none, config, env, file, login, builtin };
 
 pub fn credentialSource(
     alloc: std.mem.Allocator,
@@ -345,8 +349,97 @@ pub fn credentialSource(
 ) CredentialSource {
     return switch (profile.kind) {
         .scripted => .builtin,
-        .openai, .anthropic => if (inlineKey(profile) != null) .config else if (envValue(env, profile.api_key_env) != null) .env else .none,
+        .openai, .anthropic => if (inlineKey(profile) != null)
+            .config
+        else if (envValue(env, profile.api_key_env) != null)
+            .env
+        else if (fileValue(alloc, io, env, profile.api_key_env)) |v| blk: {
+            alloc.free(v);
+            break :blk .file;
+        } else .none,
         .codex => if (codex.Auth.available(alloc, io, env)) .login else .none,
+    };
+}
+
+/// The user credential file: `<NULYA_HOME | ~/.nulya>/credentials.toml`.
+///
+/// **Why a file at all.** A child process does not inherit secrets: every
+/// process nulya spawns gets an environment with the secret-shaped variables
+/// stripped (`environment.isSecretKey`, physics #6), which is right and is not
+/// changing. But it means a background task — or an extension acting as a driver
+/// — cannot resolve an `api_key_env` credential, so anything it creates would
+/// have had no key. `codex` never had this problem because its credential was
+/// always a FILE (`~/.codex/auth.json`) and `HOME` is not a secret. This
+/// generalises that precedent to the other providers.
+///
+/// **Why the keys are env var names.** The file supplies VALUES for the names a
+/// profile already declares in `api_key_env`; it introduces no second naming
+/// scheme, no per-profile section, and no config change — "a durable credential
+/// travels only through `api_key_env`" (DESIGN §9.5) stays literally true, and
+/// the file is simply a second place those names can be answered from.
+///
+/// **Why TOML rather than a journal.** The three `.jsonl` files in this
+/// repository are journals: append-only records of things that happened or were
+/// authorised. This is neither — it is human-written settings, exactly like
+/// `config.toml`, which it sits beside and shares a parser with.
+pub const credentials_file = "credentials.toml";
+
+pub fn credentialFilePath(alloc: std.mem.Allocator, env: *const std.process.Environ.Map) !?[]u8 {
+    const home = try config.userHome(alloc, env);
+    defer alloc.free(home);
+    if (home.len == 0) return null;
+    return try std.fs.path.join(alloc, &.{ home, credentials_file });
+}
+
+/// Said at most once per process: a warning that repeats on every profile of
+/// every `config show` is a warning nobody reads.
+var warned_credentials_mode = false;
+
+/// The value the credential file gives for `name`, or null. Caller frees.
+///
+/// Every failure is a null: no home, no file, unreadable, malformed, no such
+/// key, empty value. A credential that cannot be read is a credential that is
+/// not there, and the caller's answer to that — a refusal naming this path — is
+/// more use than an error about TOML syntax.
+fn fileValue(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    env: *const std.process.Environ.Map,
+    name: []const u8,
+) ?[]u8 {
+    if (name.len == 0) return null;
+    const path = (credentialFilePath(alloc, env) catch return null) orelse return null;
+    defer alloc.free(path);
+
+    // POSIX: a secret readable by everyone on the machine is worth a sentence.
+    // Read anyway — refusing to use a key somebody put there on purpose would be
+    // this program deciding for them (the same attitude `codex` auth.json gets).
+    // Windows has no mode bits to judge, so it says nothing.
+    if (builtin.os.tag != .windows and !warned_credentials_mode) {
+        if (std.Io.Dir.cwd().statFile(io, path, .{})) |st| {
+            if (@intFromEnum(st.permissions) & 0o077 != 0) {
+                warned_credentials_mode = true;
+                const msg = std.fmt.allocPrint(alloc, "warning: {s} is readable by other users; chmod 600 it\n", .{path}) catch return fileValueAt(alloc, io, path, name);
+                defer alloc.free(msg);
+                std.Io.File.stderr().writeStreamingAll(io, msg) catch {};
+            }
+        } else |_| {}
+    }
+    return fileValueAt(alloc, io, path, name);
+}
+
+fn fileValueAt(alloc: std.mem.Allocator, io: std.Io, path: []const u8, name: []const u8) ?[]u8 {
+    // `toml.Table` as the parse target is the vendored parser's own escape hatch
+    // from struct mapping: this file has no fixed field names — its keys ARE the
+    // `api_key_env` names a person's profiles happen to declare.
+    var parser = toml.Parser(toml.Table).init(alloc);
+    defer parser.deinit();
+    var parsed = parser.parseFile(io, path) catch return null;
+    defer parsed.deinit();
+    const value = parsed.value.get(name) orelse return null;
+    return switch (value) {
+        .string => |s| if (s.len == 0) null else alloc.dupe(u8, s) catch null,
+        else => null,
     };
 }
 
@@ -402,8 +495,17 @@ pub fn buildFromDescriptor(
         return .{ .scripted = ScriptedProvider.fromEnv(env) };
     }
     const inline_key: ?[]const u8 = if (opts.inline_key) |k| (if (k.len != 0) k else null) else null;
+    // The file is the LAST place looked, after the config's own key and the
+    // environment (`credentialSource` says the same order, and says it once).
+    // Owned, so it is freed the moment the provider has copied it — a secret
+    // does not outlive the call that needed it.
+    var from_file: ?[]u8 = null;
+    defer if (from_file) |v| alloc.free(v);
+    if (inline_key == null and envValue(env, desc.api_key_env) == null) {
+        from_file = fileValue(alloc, io, env, desc.api_key_env);
+    }
     if (std.mem.eql(u8, desc.provider, "openai")) {
-        const api_key = inline_key orelse envValue(env, desc.api_key_env) orelse return error.MissingCredential;
+        const api_key = inline_key orelse envValue(env, desc.api_key_env) orelse from_file orelse return error.MissingCredential;
         return .{ .openai = try openai.OpenAiProvider.init(alloc, io, .{
             .api_key = api_key,
             .model = nonEmpty(desc.model, default_openai_model),
@@ -411,7 +513,7 @@ pub fn buildFromDescriptor(
         }) };
     }
     if (std.mem.eql(u8, desc.provider, "anthropic")) {
-        const api_key = inline_key orelse envValue(env, desc.api_key_env) orelse return error.MissingCredential;
+        const api_key = inline_key orelse envValue(env, desc.api_key_env) orelse from_file orelse return error.MissingCredential;
         return .{ .anthropic = try anthropic.AnthropicProvider.init(alloc, io, .{
             .api_key = api_key,
             .model = nonEmpty(desc.model, anthropic.default_model),
@@ -800,6 +902,76 @@ test "resolveDescriptor is credential-aware: what it freezes is what will run" {
     try std.testing.expectEqualStrings("scripted", resolveDescriptor(alloc, std.testing.io, prov, &env, "local", null).provider);
     try std.testing.expect(credentialAvailable(alloc, std.testing.io, prov.findProfile("local").?, &env));
     try std.testing.expectEqualStrings("scripted", resolveDescriptor(alloc, std.testing.io, prov, &env, "nope", null).provider);
+}
+
+test "the user credential file answers api_key_env names, after the config key and the environment" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = home_buf[0..try tmp.dir.realPath(io, &home_buf)];
+
+    var profiles = [_]config.ProviderProfile{
+        .{ .name = "openai", .kind = .openai, .api_key_env = "OPENAI_API_KEY" },
+        .{ .name = "inline", .kind = .openai, .api_key = "sk-inline", .api_key_env = "OPENAI_API_KEY" },
+        .{ .name = "nameless", .kind = .openai, .api_key_env = "" },
+    };
+    const prov: config.Provider = .{ .active_profile = "openai", .profiles = &profiles };
+    const openai_profile = prov.findProfile("openai").?;
+
+    var env: std.process.Environ.Map = .init(alloc);
+    defer env.deinit();
+    try env.put("NULYA_HOME", home);
+
+    // No file yet: nothing to find, and nothing to fail about either.
+    try std.testing.expectEqual(CredentialSource.none, credentialSource(alloc, io, openai_profile, &env));
+
+    // The permission warning is a one-shot and this test is about the VALUE; a
+    // unit test that writes to a shared runner's stderr is noise, and the mode a
+    // freshly written temp file lands on is the umask's business, not ours.
+    warned_credentials_mode = true;
+    try tmp.dir.writeFile(io, .{
+        .sub_path = credentials_file,
+        .data = "# nulya credentials\nOPENAI_API_KEY = \"sk-from-file\"\nEMPTY = \"\"\n",
+    });
+
+    // Found by the NAME the profile already declares — no second naming scheme,
+    // and the profile's own config is untouched.
+    try std.testing.expectEqual(CredentialSource.file, credentialSource(alloc, io, openai_profile, &env));
+    try std.testing.expect(credentialAvailable(alloc, io, openai_profile, &env));
+    // …and that is enough to freeze a real identity rather than degrade (§9.5).
+    try std.testing.expectEqualStrings("openai", resolveDescriptor(alloc, io, prov, &env, "openai", null).provider);
+
+    // Precedence, both directions: the environment beats the file for the length
+    // of that shell, and the config's own key beats both.
+    try env.put("OPENAI_API_KEY", "sk-from-env");
+    try std.testing.expectEqual(CredentialSource.env, credentialSource(alloc, io, openai_profile, &env));
+    try std.testing.expectEqual(CredentialSource.config, credentialSource(alloc, io, prov.findProfile("inline").?, &env));
+
+    // The value itself, and the shapes that are not one.
+    const key = fileValue(alloc, io, &env, "OPENAI_API_KEY").?;
+    defer alloc.free(key);
+    try std.testing.expectEqualStrings("sk-from-file", key);
+    // An empty value is not a credential, an absent key is not a credential, and
+    // a profile that names no variable cannot be answered by name at all.
+    try std.testing.expect(fileValue(alloc, io, &env, "EMPTY") == null);
+    try std.testing.expect(fileValue(alloc, io, &env, "NOT_THERE") == null);
+    try std.testing.expect(fileValue(alloc, io, &env, "") == null);
+    try std.testing.expectEqual(CredentialSource.none, credentialSource(alloc, io, prov.findProfile("nameless").?, &env));
+
+    // A file this build cannot parse is a credential that is not there — never an
+    // error about TOML syntax in front of somebody trying to start a session.
+    try tmp.dir.writeFile(io, .{ .sub_path = credentials_file, .data = "OPENAI_API_KEY = \n[[[\n" });
+    try env.put("OPENAI_API_KEY", "");
+    try std.testing.expect(fileValue(alloc, io, &env, "OPENAI_API_KEY") == null);
+    try std.testing.expectEqual(CredentialSource.none, credentialSource(alloc, io, openai_profile, &env));
+
+    // No home at all: the file simply does not exist as a concept.
+    var homeless: std.process.Environ.Map = .init(alloc);
+    defer homeless.deinit();
+    try std.testing.expect((try credentialFilePath(alloc, &homeless)) == null);
 }
 
 test "a profile's default model comes from `model`, else the first of `models`" {

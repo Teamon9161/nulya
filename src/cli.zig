@@ -55,7 +55,7 @@ pub fn dispatch(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) 
 /// A verb rather than what a bare `nulya` does: running the binary with no
 /// arguments should say what it can do, not start writing session files.
 fn runDemo(alloc: std.mem.Allocator, io: std.Io) !u8 {
-    const id = (try cli_session.createSession(alloc, io, &.{})) orelse return 1;
+    const id = (try cli_session.createSession(alloc, io, &.{}, .stand_in)) orelse return 1;
     defer alloc.free(id);
     std.debug.print("session: {s}\n", .{id});
 

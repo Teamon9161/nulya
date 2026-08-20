@@ -149,3 +149,24 @@ test("a background `nulya …` call is a shell card, not an evolution one", () =
   )
   expect(foreground.kind).toBe("evolve")
 })
+
+test("an agent call reads as a sub-session, and its receipt names the session to open", () => {
+  const glyphs = createStyle(default_settings, {}).glyphs
+  const pending = describeTool({ tool: "agent", args: '{"name":"explore","task":"go"}', output: "" }, glyphs)
+  expect(pending.kind).toBe("subsession")
+  expect(pending.head).toContain("agent · explore")
+  expect(pending.sessionId).toBeNull()
+
+  // The child does not exist until the call returns, so the id comes from the
+  // receipt — the same place `nulya session new` through `shell` reads it.
+  const done = describeTool(
+    {
+      tool: "agent",
+      args: '{"name":"explore","task":"go"}',
+      output: "delegated to 'explore' — session s-1234-ab, running as background task s-9/t1.",
+    },
+    glyphs,
+  )
+  expect(done.sessionId).toBe("s-1234-ab")
+  expect(done.head).toContain("→ s-1234-ab")
+})
