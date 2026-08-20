@@ -300,8 +300,10 @@ export function agentPick(m: MaterializedAgent): ModelPick | undefined {
 // ── the read-only ceiling ───────────────────────────────────────────────────
 
 /**
- * What a `readonly: true` agent may call, decided before any approval table
- * (tui.md §5.10, agents-and-review §1 invariant 1).
+ * What a `readonly: true` agent — or, since tui-plugin D3, a
+ * `contributes.policy.readonly: true` package that is a member of this
+ * session's frozen composition — may call, decided before any approval table
+ * (tui.md §5.10, agents-and-review §1 invariant 1, goals/tui-plugin.md D3).
  *
  * A ceiling, not a rule: it is asked first and nothing can lift it, because the
  * alternative — a `[approvals] allow` entry quietly re-admitting `shell` to a
@@ -317,14 +319,18 @@ export function agentPick(m: MaterializedAgent): ModelPick | undefined {
  *    policy makes, and `[approvals] manifest_readonly = false` is where somebody
  *    who does not want to believe it says so for the ordinary path.
  *
- * Returns the note the model is told, or null when the call may go on to the
- * ordinary decision.
+ * `subject` names WHO is read-only in the note the model reads — an agent
+ * persona or a package's own policy are two different origins for the exact
+ * same claim, and the judgment above is written once for both of them (D3:
+ * "两个天花板一处判断，绝不写第二份") while the wording still says which one
+ * fired. Returns the note the model is told, or null when the call may go on
+ * to the ordinary decision.
  */
-export function readonlyCeiling(tool: string, readonly: boolean | undefined): string | null {
+export function readonlyCeiling(tool: string, readonly: boolean | undefined, subject = "read-only agent"): string | null {
   if (tool === "shell") {
-    return "this is a read-only agent: it cannot run shell commands. Answer from what you can read."
+    return `this is a ${subject}: it cannot run shell commands. Answer from what you can read.`
   }
   if (readonly === true) return null
-  return `this is a read-only agent: '${tool}' does not declare itself read-only, so it cannot run here. Use the tools that only read.`
+  return `this is a ${subject}: '${tool}' does not declare itself read-only, so it cannot run here. Use the tools that only read.`
 }
 

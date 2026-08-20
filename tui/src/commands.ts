@@ -64,6 +64,12 @@ export const commands: Command[] = [
 ]
 
 /**
+ * Built-in command names, bare (no leading `/`) — what `packageCommands.ts`
+ * checks a package command against so a built-in can never be shadowed (D8).
+ */
+export const builtin_names: ReadonlySet<string> = new Set(commands.map((command) => command.name.slice(1)))
+
+/**
  * The commands `text` could still become, best first.
  *
  * Only a first word is completed: once there is a space the person is typing

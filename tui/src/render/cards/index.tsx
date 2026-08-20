@@ -14,12 +14,13 @@ import { CapabilityBanner } from "./CapabilityBanner.tsx"
 import { TaskFinishedCard } from "./TaskFinishedCard.tsx"
 import { useStyle } from "../theme.ts"
 import type { TranscriptItem, UnknownItem } from "../../state/session.ts"
+import type { Contributions } from "../../nulya/files.ts"
 
 /**
  * One transcript item → one card. Live and replay both come through here, so a
  * card can never depend on having seen the stream (tui.md §3).
  */
-export function Card(props: { item: TranscriptItem }) {
+export function Card(props: { item: TranscriptItem; contributions?: Contributions[] }) {
   return (
     <Switch>
       {/* Compaction's two turns are user turns as far as the ledger is
@@ -71,7 +72,10 @@ export function Card(props: { item: TranscriptItem }) {
           The keys are above the composer, where the answer is given. */}
       <Match when={props.item.kind === "tool"}>
         <box flexDirection="column" width="100%">
-          <ToolCard item={props.item as Extract<TranscriptItem, { kind: "tool" }>} />
+          <ToolCard
+            item={props.item as Extract<TranscriptItem, { kind: "tool" }>}
+            contributions={props.contributions}
+          />
           <Show when={(props.item as Extract<TranscriptItem, { kind: "tool" }>).awaiting}>
             <ApprovalPrompt />
           </Show>

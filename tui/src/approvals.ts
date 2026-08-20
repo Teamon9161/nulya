@@ -26,6 +26,7 @@
  * driver that believes it is choosing to. `[approvals] manifest_readonly = false`
  * stops believing it.
  */
+import type { Contributions } from "./nulya/files.ts"
 
 /** What the kernel asks about: one call, exactly as the model wrote it. */
 export interface GateRequest {
@@ -101,6 +102,45 @@ export interface ApprovalContext {
   idOf?: (tool: string) => string | undefined
   /** Whether the frozen manifest claims this tool only reads. */
   readonlyOf?: (tool: string) => boolean | undefined
+}
+
+/**
+ * A composition's `contributes.policy` narrowing, folded into one answer
+ * (DESIGN §7.2.1, tui-plugin D2/D3).
+ *
+ * `deny`/`ask` are POOLED across every member that declared a policy — a
+ * package can only narrow (never `allow`, D3's own parse-time rule), so
+ * pooling several members' entries together is still only ever a narrowing,
+ * the same way `mergeProject`'s config layers only ever tighten. `readonlyBy`
+ * names which member(s) claimed `readonly: true`, because that is what makes
+ * the gate's eventual deny note legible — "the read-only policy of `plan`"
+ * rather than an unexplained refusal.
+ */
+export interface CompositionPolicy {
+  deny: string[]
+  ask: string[]
+  readonlyBy: string[]
+}
+
+export const no_policy: CompositionPolicy = { deny: [], ask: [], readonlyBy: [] }
+
+export function poolPolicy(contributions: readonly Pick<Contributions, "id" | "policy">[]): CompositionPolicy {
+  const deny: string[] = []
+  const ask: string[] = []
+  const readonlyBy: string[] = []
+  for (const c of contributions) {
+    if (!c.policy) continue
+    for (const entry of c.policy.deny) if (!deny.includes(entry)) deny.push(entry)
+    for (const entry of c.policy.ask) if (!ask.includes(entry)) ask.push(entry)
+    if (c.policy.readonly === true) readonlyBy.push(c.id)
+  }
+  return { deny, ask, readonlyBy }
+}
+
+/** `ApprovalRules` with a composition's pooled `deny`/`ask` entries merged in (tui-plugin D3) — `decide` itself takes no new parameter. */
+export function withPolicy(rules: ApprovalRules, policy: CompositionPolicy): ApprovalRules {
+  if (policy.deny.length === 0 && policy.ask.length === 0) return rules
+  return { ...rules, deny: [...rules.deny, ...policy.deny], ask: [...rules.ask, ...policy.ask] }
 }
 
 /** The `command` a `shell` call carries, or null for anything else. */

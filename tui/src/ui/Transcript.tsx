@@ -135,7 +135,7 @@ export function Transcript(props: {
       <Index each={shown()}>
         {(item, index) => (
           <box flexDirection="column" width="100%" marginTop={gapBefore(shown()[index - 1], item())}>
-            <Card item={item()} />
+            <Card item={item()} contributions={props.contributions} />
           </box>
         )}
       </Index>

@@ -16,9 +16,33 @@ import { parseEditArgs } from "../nulya/diff.ts"
 import type { Glyphs } from "./theme.ts"
 
 export type AccentRole = "tool" | "evolve"
-export type BodyKind = "diff" | "output"
+export type BodyKind = "diff" | "output" | "markdown"
 /** Which card draws this call. Cards dispatch on this, never on the tool name. */
-export type CardKind = "shell" | "edit" | "ext" | "evolve" | "subsession"
+export type CardKind = "shell" | "edit" | "ext" | "evolve" | "subsession" | "checklist" | "markdown"
+
+export type ChecklistState = "todo" | "doing" | "done"
+export interface ChecklistItem {
+  text: string
+  state: ChecklistState
+}
+
+/**
+ * How a checklist item's state reads, in plain text (`ChecklistCard.tsx`,
+ * `ui/PanelStrip.tsx` — the transcript card and the panel projection draw the
+ * same convention, so the marker is written once). Not a new glyph: the
+ * theme's glyph set is unicode/ascii dual (tui.md §6) and none of its
+ * existing entries mean "todo" — these three read the same in both modes.
+ */
+export function checklistMarker(state: ChecklistState): string {
+  if (state === "done") return "[x]"
+  if (state === "doing") return "[~]"
+  return "[ ]"
+}
+
+/** `done/total`, the chip both checklist presentations share. */
+export function checklistChip(items: readonly ChecklistItem[]): string {
+  return `${items.filter((item) => item.state === "done").length}/${items.length}`
+}
 
 export interface ToolPresentation {
   kind: CardKind
@@ -33,6 +57,8 @@ export interface ToolPresentation {
   countsLines: boolean
   /** A session this call names (tui.md §5.5); T3 makes it openable. */
   sessionId: string | null
+  /** Present only when `kind === "checklist"`: the parsed `items` (D12). */
+  checklist?: ChecklistItem[]
 }
 
 /** Everything the registry is allowed to look at. */
@@ -45,6 +71,52 @@ export interface ToolView {
    * printed — and the ledger keeps both halves, so replay reads the same facts.
    */
   output: string
+}
+
+/**
+ * A manifest's per-tool rendering claim, as far as the registry is concerned
+ * (`ToolSpec.render`, DESIGN §7.2.1, tui-plugin D12) — resolved by the CALLER
+ * from the session's frozen composition (`ui/App.tsx`, since only it has both
+ * the tool name and the composition to look it up in) and handed in here so
+ * `describeTool` itself stays a pure function of "one call, one hint".
+ */
+export interface RenderHint {
+  /** Absent or null: the package made no claim, or this call is not an extension tool at all. */
+  render?: string | null
+}
+
+/**
+ * `items: [{text, state}]` — the `"checklist"` convention (D12) — tried in the
+ * call's ARGUMENTS first, then its recorded OUTPUT, because a checklist tool
+ * might declare its plan up front (`todo{items}`) or only know it once it has
+ * run. Anything that does not match this exact shape is not a checklist as far
+ * as this reader is concerned, and the caller falls back to a plain card.
+ */
+function parseChecklist(json: string): ChecklistItem[] | null {
+  let value: unknown
+  try {
+    value = JSON.parse(json)
+  } catch {
+    return null
+  }
+  if (typeof value !== "object" || value === null) return null
+  const items = (value as Record<string, unknown>)["items"]
+  if (!Array.isArray(items) || items.length === 0) return null
+  const parsed: ChecklistItem[] = []
+  for (const raw of items) {
+    if (typeof raw !== "object" || raw === null) return null
+    const record = raw as Record<string, unknown>
+    const text = record["text"]
+    const state = record["state"]
+    if (typeof text !== "string") return null
+    if (state !== "todo" && state !== "doing" && state !== "done") return null
+    parsed.push({ text, state })
+  }
+  return parsed
+}
+
+function checklistOf(view: ToolView): ChecklistItem[] | null {
+  return parseChecklist(view.args) ?? (view.output.length > 0 ? parseChecklist(view.output) : null)
 }
 
 function firstLine(text: string, limit: number): string {
@@ -333,7 +405,7 @@ function shellPresentation(head: string, glyphs: Glyphs): ToolPresentation {
   }
 }
 
-export function describeTool(view: ToolView, glyphs: Glyphs): ToolPresentation {
+export function describeTool(view: ToolView, glyphs: Glyphs, hint: RenderHint = {}): ToolPresentation {
   if (view.tool === "shell") {
     const command = shellCommandOf(view.args)
     if (command === null) return shellPresentation(firstLine(view.args, 200), glyphs)
@@ -383,10 +455,55 @@ export function describeTool(view: ToolView, glyphs: Glyphs): ToolPresentation {
   // stable id and only shows up if a caller passes one, so both are accepted.
   const name = view.tool.startsWith("ext:") ? (view.tool.split("/").pop() ?? view.tool) : view.tool
   const summary = argsSummary(view.args, 120)
+  const head = summary.length > 0 && summary !== "{}" ? `${name || "tool"} · ${summary}` : name || "tool"
+  // The manifest's own rendering claim (D12), only reachable here — shell,
+  // edit and the sub-session presentations above are kernel-recognised
+  // commands, never a package's declared tool, so they carry no such hint.
+  switch (hint.render) {
+    case "checklist": {
+      const items = checklistOf(view)
+      // The convention's shape ("items: [{text, state}]") did not match: fall
+      // through to the plain card below rather than draw an empty checklist.
+      if (items) {
+        return {
+          kind: "checklist",
+          glyph: glyphs.ext,
+          head,
+          accent: "tool",
+          body: "output",
+          isEdit: false,
+          countsLines: false,
+          sessionId: null,
+          checklist: items,
+        }
+      }
+      break
+    }
+    case "markdown":
+      return {
+        kind: "markdown",
+        glyph: glyphs.ext,
+        head,
+        accent: "tool",
+        body: "markdown",
+        isEdit: false,
+        countsLines: false,
+        sessionId: null,
+      }
+    case undefined:
+    case null:
+      break
+    default:
+      // A word this build does not recognise (D12: the vocabulary is open, and
+      // an unknown entry is the reader's decision, never a build refusal) — the
+      // plain card below is exactly right, and there is nothing further to say
+      // that a person reading the transcript needs to see.
+      break
+  }
   return {
     kind: "ext",
     glyph: glyphs.ext,
-    head: summary.length > 0 && summary !== "{}" ? `${name || "tool"} · ${summary}` : name || "tool",
+    head,
     accent: "tool",
     body: "output",
     isEdit: false,

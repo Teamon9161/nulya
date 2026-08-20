@@ -32,7 +32,9 @@ import {
   describeKey,
   modes,
   normalizeMode,
+  poolPolicy,
   summarize as describeCall,
+  withPolicy,
   type GateRequest,
   type PermissionMode,
 } from "../approvals.ts"
@@ -40,11 +42,12 @@ import type { GateVerdict } from "../nulya/cli.ts"
 import { listExtensions, sessions_dir } from "../nulya/files.ts"
 import { wrapApprovalNote } from "../approvalnote.ts"
 import { createProjectIndex } from "../references.ts"
-import { createSkillTable, skillTurn } from "../skills.ts"
+import { createSkillTable, skillTurn, splitSlash } from "../skills.ts"
 import { describeTool } from "../render/registry.ts"
 import { no_snapshot } from "../state/session.ts"
 import type { NextSession } from "./Welcome.tsx"
 import {
+  extRun,
   extSetCurrent,
   extSync,
   isVerdict,
@@ -56,6 +59,7 @@ import {
 } from "../nulya/cli.ts"
 import {
   activePromptPackages,
+  activeVersionOf,
   adoptBundled,
   autoActivatable,
   builtContributions,
@@ -68,6 +72,16 @@ import {
   syncRoot,
   type SessionMember,
 } from "../extensions.ts"
+import { builtin_names } from "../commands.ts"
+import {
+  createPackageCommandTable,
+  packageCompletions,
+  parseAction,
+  resolve as resolvePackageCommands,
+  runArgs,
+} from "../packageCommands.ts"
+import { PanelStrip } from "./PanelStrip.tsx"
+import { panelItemsOf } from "../state/panels.ts"
 import { runCompact } from "../compact.ts"
 import { headline, nextHandoff, type HandoffFile } from "../handoff.ts"
 import { buildEvolution, formatWithRef, parseWithRef, type WithRef } from "../evolve.ts"
@@ -247,6 +261,13 @@ export function App(props: AppProps) {
    * back `invalidate` rather than this polling for it.
    */
   const skills = createSkillTable(props.ws)
+  /**
+   * Package-declared slash commands (tui-plugin D1/D2/D8), same staleness
+   * contract as `skills` above — `/ext` invalidates both on a membership
+   * change, since activating or deactivating a package can add or remove
+   * either kind of thing it offers.
+   */
+  const packageCmds = createPackageCommandTable(props.ws)
 
   /**
    * The line under the composer, when it has news (T35).
@@ -959,10 +980,23 @@ export function App(props: AppProps) {
     return undefined
   }
 
+  /**
+   * A member package's `contributes.policy` narrowing, pooled (tui-plugin
+   * D2/D3): every member's `deny`/`ask` entries and which of them, if any,
+   * claimed `readonly: true`. Read from the frozen composition — for a
+   * SessionTab that is already `contributions()`, populated before the first
+   * step can run (`state/tabs.ts` `hydrate`/`ready`), so there is no race to
+   * guard against here.
+   */
+  const compositionPolicy = (asked: SessionTab | null) => poolPolicy(asked?.contributions() ?? [])
+
   const decideNow = (request: GateRequest, asked: SessionTab | null) =>
     decide(request, {
       mode: mode(),
-      rules: props.style.settings.approvals,
+      // A package can only narrow (D3's own parse-time rule), so merging its
+      // `deny`/`ask` into the tables `tui.toml` already declares is still
+      // only ever a narrowing — `decide` itself takes no new parameter.
+      rules: withPolicy(props.style.settings.approvals, compositionPolicy(asked)),
       always: always(),
       idOf: (tool) => toolId(asked, tool),
       readonlyOf: (tool) => toolReadonly(asked, tool),
@@ -1003,6 +1037,19 @@ export function App(props: AppProps) {
     const wearing_agent = agentOf.get(session)
     if (wearing_agent?.readonly) {
       const refusal = readonlyCeiling(request.tool, toolReadonly(asked, request.tool))
+      if (refusal) return Promise.resolve<GateVerdict>({ allow: false, note: refusal })
+    }
+    // Same ceiling, the other origin (tui-plugin D3): a composition member's
+    // own `contributes.policy.readonly: true` — judged by the identical
+    // function above rather than a second copy of it (D3's "两个天花板一处判断"),
+    // with the note naming which package's policy fired.
+    const policy = compositionPolicy(asked)
+    if (policy.readonlyBy.length > 0) {
+      const refusal = readonlyCeiling(
+        request.tool,
+        toolReadonly(asked, request.tool),
+        `read-only policy of ${policy.readonlyBy.join(", ")}`,
+      )
       if (refusal) return Promise.resolve<GateVerdict>({ allow: false, note: refusal })
     }
     const verdict = decideNow(request, asked)
@@ -1490,6 +1537,75 @@ export function App(props: AppProps) {
   }
 
   /**
+   * The package command table, resolved: built-ins can never be shadowed
+   * (D8), and among the rest the first package `/ext list` names for a given
+   * name wins — the loser is reported, not silently dropped (`packageCommands.ts`
+   * `resolve`). Recomputed on every read rather than cached again: the table
+   * itself is already cached (`packageCmds`), and this is a pure fold over it.
+   */
+  const resolvedPackageCommands = () => resolvePackageCommands(packageCmds.entries(), builtin_names)
+
+  /**
+   * `/name` where `name` is a package's own command (tui-plugin D1/D8):
+   * `false` when no package claims it, so the caller falls through to the
+   * skill catalog and then the model, exactly as an unrecognised built-in
+   * does today.
+   *
+   * The three verbs each land on a path that already exists for a person
+   * typing the general form by hand — `wear` is `startDraft`'s own `--with`
+   * move (`wearNow` below), `run <tool>` is `ext run` naming the version this
+   * package is active AT RIGHT NOW (not whatever it was when the table was
+   * last read), and `skill <ref>` is T15's `skillTurn` with the ref standing
+   * in for whatever the person would otherwise have typed after `/`.
+   */
+  const runPackageCommand = async (raw: string): Promise<boolean> => {
+    const { name, args } = splitSlash(raw)
+    const row = resolvedPackageCommands().winners.find((entry) => entry.name === name)
+    if (!row) return false
+    const action = parseAction(row.action)
+    switch (action.kind) {
+      case "wear":
+        startDraft(undefined, false, { id: row.id })
+        return true
+      case "run": {
+        const version = await activeVersionOf(props.ws, row.id)
+        if (!version) {
+          setNotice(`${row.id} has no active version · run \`nulya ext build\` then \`nulya ext activate\` first`)
+          return true
+        }
+        const result = await extRun(props.ws, `${row.id}@${version}`, action.tool, runArgs(args))
+        const said = (result.stdout.trim() || result.stderr.trim() || `exit ${result.code}`).split("\n")[0]
+        setNotice(`${row.id} ${action.tool} · ${said}`)
+        return true
+      }
+      case "skill": {
+        try {
+          const turn = await skillTurn(props.ws, skills.entries(), `/${action.ref} ${args}`.trim())
+          if (turn === null) {
+            setNotice(`${row.id} · '/${row.name}' names skill '${action.ref}', which is not in the active catalog`)
+            return true
+          }
+          const here = await ensureSession()
+          if (!here) {
+            composer?.restore(raw)
+            return true
+          }
+          await here.attach.send(turn)
+        } catch (error) {
+          setNotice(error instanceof Error ? error.message : String(error))
+        }
+        return true
+      }
+      case "unknown":
+        // An open vocabulary (manifest.zig `Command.action`, D1): a word this
+        // build does not understand is skipped rather than refused, and the
+        // package's other contributions still stand.
+        setNotice(`${row.id} · '/${row.name}' has an action this build does not understand (${action.word || "empty"}) · skipped`)
+        return true
+    }
+  }
+
+  /**
    * `/with <id>[@<version>]` — the same move as `/evolve` with any package that
    * contributes a prompt: wear it for one session, activate nothing.
    *
@@ -1809,11 +1925,12 @@ export function App(props: AppProps) {
    * The one path a message takes, and the one place a session comes into
    * existence (tui.md §11, T22).
    *
-   * A `/name` no built-in claimed is offered to the skill catalog first: if a
-   * skill has that name, its body becomes an ordinary user turn wrapped in the
-   * echo sentinel (`skills.ts`), and a failure to load says so rather than
-   * quietly sending `/name` as prose. Only then — with something real to say —
-   * is the draft turned into a session.
+   * A `/name` no built-in claimed is offered to a PACKAGE command next
+   * (`runPackageCommand`, tui-plugin D1/D8), and only then to the skill
+   * catalog: if a skill has that name, its body becomes an ordinary user turn
+   * wrapped in the echo sentinel (`skills.ts`), and a failure to load says so
+   * rather than quietly sending `/name` as prose. Only then — with something
+   * real to say — is the draft turned into a session.
    *
    * The order matters both ways: a skill that will not load must not create a
    * session, and a session that will not start must not lose the text. The
@@ -1823,6 +1940,7 @@ export function App(props: AppProps) {
   const sendTurn = async (text: string) => {
     let turn = text
     if (text.startsWith("/")) {
+      if (await runPackageCommand(text)) return
       try {
         turn = (await skillTurn(props.ws, skills.entries(), text)) ?? text
       } catch (error) {
@@ -2158,7 +2276,13 @@ export function App(props: AppProps) {
                       // about either, which the null header already says.
                       sessionFile={live() ? `${sessions_dir}/${live()!.id}.jsonl` : undefined}
                       statePath={props.statePath}
-                      onMembershipChanged={skills.invalidate}
+                      onMembershipChanged={() => {
+                        skills.invalidate()
+                        // Activating or deactivating a package can add or
+                        // remove a `/name` it declares just as easily as a
+                        // skill (tui-plugin D1/D8): same staleness, same fix.
+                        packageCmds.invalidate()
+                      }}
                       onClose={closeOverlay}
                     />
                   </Match>
@@ -2277,6 +2401,15 @@ export function App(props: AppProps) {
                   now={clockNow()}
                   onOpenTasks={() => openOverlay("tasks")}
                 />
+                {/* `panel: true`'s degraded progress display (DESIGN §7.2.1,
+                    tui-plugin D12): the latest call of a declaring tool, so it
+                    is visible whether or not its own card is still on screen.
+                    Below the activity line for the same reason it is above
+                    the composer — both are read on every glance. */}
+                <PanelStrip
+                  items={panelItemsOf(snapshot().items, live()?.contributions() ?? [])}
+                  contributions={live()?.contributions() ?? []}
+                />
                 <Composer
                   onSubmit={submit}
                   onEmptySubmit={() => followHandoff() || takeOverIfOffered()}
@@ -2287,6 +2420,7 @@ export function App(props: AppProps) {
                   }}
                   references={references}
                   skills={skills}
+                  packages={packageCmds}
                   onReady={(api) => {
                     composer = api
                     // The picker may already be up (`guide`): it owns the keys.

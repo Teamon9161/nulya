@@ -8,7 +8,7 @@
  * throwing.
  */
 import { expect, test } from "bun:test"
-import { describeTool } from "../src/render/registry.ts"
+import { describeTool, type ChecklistItem } from "../src/render/registry.ts"
 import { createStyle } from "../src/render/theme.ts"
 import { default_settings } from "../src/state/settings.ts"
 
@@ -169,4 +169,58 @@ test("an agent call reads as a sub-session, and its receipt names the session to
   )
   expect(done.sessionId).toBe("s-1234-ab")
   expect(done.head).toContain("→ s-1234-ab")
+})
+
+// --- tui-plugin U2: the manifest's per-tool `render` claim (D12) -----------
+
+function extCall(tool: string, args: unknown, output = "", render?: string | null) {
+  return describeTool({ tool, args: JSON.stringify(args), output }, glyphs, { render })
+}
+
+test("`render: \"checklist\"` reads `items` from the arguments and draws a checklist card", () => {
+  const items: ChecklistItem[] = [
+    { text: "read the spec", state: "done" },
+    { text: "write the tool", state: "doing" },
+    { text: "ship it", state: "todo" },
+  ]
+  const card = extCall("todo", { items }, "", "checklist")
+  expect(card.kind).toBe("checklist")
+  expect(card.checklist).toEqual(items)
+})
+
+test("`render: \"checklist\"` falls back to the RESULT when the arguments do not carry `items`", () => {
+  const items: ChecklistItem[] = [{ text: "one item", state: "todo" }]
+  const card = extCall("todo", {}, JSON.stringify({ items }), "checklist")
+  expect(card.kind).toBe("checklist")
+  expect(card.checklist).toEqual(items)
+})
+
+test("`render: \"checklist\"` falls back to a plain card when neither side matches the convention", () => {
+  // Missing `items` entirely.
+  expect(extCall("todo", { plan: "do it" }, "", "checklist").kind).toBe("ext")
+  // `items` present but a member fails the shape check (an unknown state word).
+  expect(extCall("todo", { items: [{ text: "x", state: "later" }] }, "", "checklist").kind).toBe("ext")
+  // A member with no `text`.
+  expect(extCall("todo", { items: [{ state: "todo" }] }, "", "checklist").kind).toBe("ext")
+  // An empty list is not a checklist to draw.
+  expect(extCall("todo", { items: [] }, "", "checklist").kind).toBe("ext")
+})
+
+test("`render: \"markdown\"` keeps the ordinary ext head and marks the body markdown", () => {
+  const plain = extCall("brief", { plan_md: "# Plan" }, "# Plan\n\nDo the thing.")
+  const card = extCall("brief", { plan_md: "# Plan" }, "# Plan\n\nDo the thing.", "markdown")
+  expect(card.kind).toBe("markdown")
+  expect(card.body).toBe("markdown")
+  // Only the kind and body change — the head line reads the same as the plain
+  // ext presentation of the identical call.
+  expect(card.head).toBe(plain.head)
+})
+
+test("an unrecognised `render` word falls back to the plain ext card (D12: the vocabulary is open)", () => {
+  const card = extCall("todo", { items: [{ text: "x", state: "todo" }] }, "", "kanban")
+  expect(card.kind).toBe("ext")
+})
+
+test("no hint at all (a tool no member declared a render claim for) is the plain ext card", () => {
+  expect(extCall("plain", {}).kind).toBe("ext")
 })

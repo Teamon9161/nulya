@@ -15,11 +15,14 @@ import {
   isMode,
   modes,
   normalizeMode,
+  poolPolicy,
   shellCommand,
   summarize,
+  withPolicy,
   type ApprovalContext,
   type GateRequest,
 } from "../src/approvals.ts"
+import type { Contributions } from "../src/nulya/files.ts"
 import { loadTuiState, rememberMode, saveTuiState } from "../src/state/tui_state.ts"
 import { initialChoice, mode_choices, modeAt, moveChoice } from "../src/ui/ModePicker.tsx"
 
@@ -156,6 +159,65 @@ test("a shell call with unreadable arguments is not a command anybody can judge"
   expect(shellCommand(torn)).toBeNull()
   // So no prefix rule matches it, and it goes to the person in ask mode.
   expect(decide(torn, context({ rules: { ...default_rules, allow: ["shell:rm"] } }))).toBe("ask")
+})
+
+// --- tui-plugin U2 D2/D3: a package's own `contributes.policy` ------------
+
+function member(id: string, policy: Contributions["policy"]): Pick<Contributions, "id" | "policy"> {
+  return { id, policy }
+}
+
+test("poolPolicy: a member with no policy at all contributes nothing", () => {
+  expect(poolPolicy([member("std", null)])).toEqual({ deny: [], ask: [], readonlyBy: [] })
+  // An explicit `{}` is still a policy declaration (D3's own distinction), but
+  // an empty one narrows nothing and claims no readonly.
+  expect(poolPolicy([member("plan", { readonly: null, deny: [], ask: [] })])).toEqual({
+    deny: [],
+    ask: [],
+    readonlyBy: [],
+  })
+})
+
+test("poolPolicy: several members' deny/ask entries pool together, de-duplicated", () => {
+  const policy = poolPolicy([
+    member("guard", { readonly: null, deny: ["shell"], ask: ["ext:std/write"] }),
+    member("rules", { readonly: null, deny: ["shell", "ext:std/edit"], ask: [] }),
+  ])
+  expect(policy.deny).toEqual(["shell", "ext:std/edit"])
+  expect(policy.ask).toEqual(["ext:std/write"])
+  expect(policy.readonlyBy).toEqual([])
+})
+
+test("poolPolicy: `readonlyBy` names every member that claimed it, in composition order", () => {
+  const policy = poolPolicy([
+    member("plan", { readonly: true, deny: [], ask: [] }),
+    member("std", { readonly: false, deny: [], ask: [] }),
+    member("guard", { readonly: true, deny: [], ask: [] }),
+  ])
+  expect(policy.readonlyBy).toEqual(["plan", "guard"])
+})
+
+test("withPolicy: merges a composition's deny/ask into tui.toml's own tables, never touching `allow`", () => {
+  const rules = { ...default_rules, allow: ["shell:git"], deny: ["shell:rm"], ask: [] }
+  const merged = withPolicy(rules, { deny: ["shell"], ask: ["ext:std/write"], readonlyBy: [] })
+  expect(merged.deny).toEqual(["shell:rm", "shell"])
+  expect(merged.ask).toEqual(["ext:std/write"])
+  expect(merged.allow).toEqual(["shell:git"])
+  // No policy entries at all: the same rules object comes back, not a copy —
+  // `decide` sees identical behaviour either way.
+  expect(withPolicy(rules, { deny: [], ask: [], readonlyBy: [] })).toBe(rules)
+})
+
+test("a pooled policy deny actually decides `shell` — the same table `decide` already reads", () => {
+  const rules = withPolicy(default_rules, { deny: ["shell"], ask: [], readonlyBy: [] })
+  expect(decide(shell("git status"), context({ rules, mode: "unsafe" }))).toBe("deny")
+})
+
+test("a pooled policy ask reaches a person even in unsafe mode", () => {
+  const rules = withPolicy(default_rules, { deny: [], ask: ["ext:std/write"], readonlyBy: [] })
+  const write: GateRequest = { call_id: "c9", tool: "write", args: "{}" }
+  const idOf = () => "ext:std/write"
+  expect(decide(write, context({ rules, mode: "unsafe", idOf }))).toBe("ask")
 })
 
 test("the summary is what the call would actually do", () => {

@@ -133,6 +133,55 @@ export interface Contributions {
    * `"always"` because that is what the kernel does with it.
    */
   activation: "always" | "on_request"
+  /**
+   * This package's slash commands (`manifest.Command`, DESIGN §7.2.1,
+   * tui-plugin D1/D2/D8). Absent reads as empty, the same convention as
+   * `skills` / `system_prompts`. `action` is kept as WRITTEN — an open verb
+   * vocabulary the kernel does not police beyond one shape check (`run <tool>`
+   * must name a tool this same manifest declares) — so a word this build does
+   * not recognise is this reader's decision (`packageCommands.ts`), not a
+   * parse failure.
+   */
+  commands: PackageCommand[]
+  /**
+   * This package's approval-policy narrowing (`manifest.Policy`, DESIGN
+   * §7.2.1, tui-plugin D2/D3), or null when the package states no policy at
+   * all. Null and "present but every field empty" are DIFFERENT facts here,
+   * mirroring the kernel's own `Manifest.policy` — an explicit `{}` still
+   * counts as a contribution, never having written `contributes.policy` does
+   * not.
+   */
+  policy: PackagePolicy | null
+  /**
+   * `ToolSpec.render`, by tool name — a rendering hint from an OPEN
+   * vocabulary (`"checklist"`, `"markdown"`, more later, DESIGN §7.2.1,
+   * tui-plugin D12). A tool absent from this map made no claim; `render/
+   * registry.ts` is the one place that reads it and decides whether it
+   * recognises the word.
+   */
+  toolRender: Record<string, string>
+  /**
+   * The subset of `tools` whose manifest says `panel: true` (DESIGN §7.2.1,
+   * tui-plugin D12) — the package's request that the latest call also be
+   * projected as a persistent widget above the composer.
+   */
+  panelTools: string[]
+}
+
+/** A package's own slash command (`manifest.Command`). */
+export interface PackageCommand {
+  name: string
+  description: string
+  /** The verb, kept as written — `"wear"` | `"run <tool>"` | `"skill <ref>"` today. */
+  action: string
+}
+
+/** A package's approval-policy narrowing (`manifest.Policy`). Narrow-only: no `allow`. */
+export interface PackagePolicy {
+  /** Absent is null, not `false` — the package said nothing (same discipline as `readonlyTools`). */
+  readonly: boolean | null
+  deny: string[]
+  ask: string[]
 }
 
 /**
@@ -158,6 +207,10 @@ export async function readContributions(
     skills: [],
     systemPrompts: [],
     activation: "always",
+    commands: [],
+    policy: null,
+    toolRender: {},
+    panelTools: [],
   }
   const search = roots ?? (await storeRoots(ws))
   for (const root of search) {
@@ -177,10 +230,28 @@ export async function readContributions(
 
 function contributionsOf(
   manifest: Record<string, unknown> | null,
-): Pick<Contributions, "tools" | "readonlyTools" | "driverTools" | "systemPrompts" | "skills" | "activation"> {
+): Pick<
+  Contributions,
+  | "tools"
+  | "readonlyTools"
+  | "driverTools"
+  | "systemPrompts"
+  | "skills"
+  | "activation"
+  | "commands"
+  | "policy"
+  | "toolRender"
+  | "panelTools"
+> {
   const contributes = (manifest?.["contributes"] ?? {}) as Record<string, unknown>
   const declared = Array.isArray(contributes["tools"]) ? (contributes["tools"] as Array<Record<string, unknown>>) : []
   const named = declared.filter((tool) => typeof tool?.["name"] === "string")
+  const toolRender: Record<string, string> = {}
+  for (const tool of named) {
+    // Kept as WRITTEN (D12): an unrecognised word is the reader's decision
+    // (`render/registry.ts`), never something this projection filters out.
+    if (typeof tool["render"] === "string") toolRender[tool["name"] as string] = tool["render"]
+  }
   return {
     tools: named.map((tool) => tool["name"] as string),
     // Absent is not false (DESIGN §7.2.1): a package that said nothing has made
@@ -194,6 +265,38 @@ function contributionsOf(
     // Top level, beside `permissions` — not a contribution but a fact about
     // all of them. The kernel refuses any other word, so this is total.
     activation: manifest?.["activation"] === "on_request" ? "on_request" : "always",
+    commands: commandsOf(contributes["commands"]),
+    policy: policyOf(contributes["policy"]),
+    toolRender,
+    panelTools: named.filter((tool) => tool["panel"] === true).map((tool) => tool["name"] as string),
+  }
+}
+
+function commandsOf(value: unknown): PackageCommand[] {
+  if (!Array.isArray(value)) return []
+  const out: PackageCommand[] = []
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null) continue
+    const record = entry as Record<string, unknown>
+    if (typeof record["name"] !== "string" || typeof record["action"] !== "string") continue
+    out.push({
+      name: record["name"],
+      description: typeof record["description"] === "string" ? record["description"] : "",
+      action: record["action"],
+    })
+  }
+  return out
+}
+
+function policyOf(value: unknown): PackagePolicy | null {
+  // Null and "present but empty" are different facts (DESIGN §7.2.1): the
+  // package writing `contributes.policy` at all is what counts, even `{}`.
+  if (typeof value !== "object" || value === null) return null
+  const record = value as Record<string, unknown>
+  return {
+    readonly: typeof record["readonly"] === "boolean" ? record["readonly"] : null,
+    deny: stringList(record["deny"]),
+    ask: stringList(record["ask"]),
   }
 }
 
@@ -212,6 +315,31 @@ export function modelTools(
   what: Pick<Contributions, "tools" | "driverTools">,
 ): string[] {
   return what.tools.filter((tool) => !what.driverTools.includes(tool))
+}
+
+/**
+ * A tool's `render` claim (`ToolSpec.render`, DESIGN §7.2.1, tui-plugin D12),
+ * read from whichever member of the frozen composition declares `tool`. Null
+ * when nothing declares it, or when the declaring package said nothing —
+ * "absent" and "not a member" are the same answer to a reader that only wants
+ * to know whether to draw a hinted card.
+ */
+export function renderHintOf(contributions: readonly Pick<Contributions, "tools" | "toolRender">[], tool: string): string | null {
+  for (const c of contributions) {
+    if (c.tools.includes(tool)) return c.toolRender[tool] ?? null
+  }
+  return null
+}
+
+/**
+ * The tools with `panel: true`, across the frozen composition, in package
+ * order and de-duplicated by name — the row order a panel strip stacks in
+ * (tui-plugin U2 §5, open question 3: v1 stacks by package order).
+ */
+export function panelToolsOf(contributions: readonly Pick<Contributions, "panelTools">[]): string[] {
+  const out: string[] = []
+  for (const c of contributions) for (const tool of c.panelTools) if (!out.includes(tool)) out.push(tool)
+  return out
 }
 
 export async function readActiveContributions(

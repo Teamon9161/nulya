@@ -3,7 +3,7 @@ import type { KeyEvent, PasteEvent, TextareaRenderable } from "@opentui/core"
 import { SyntaxStyle } from "@opentui/core"
 import { useScreen, useStyle } from "../render/theme.ts"
 import { columnWidth, displayWidth, fit, squeeze, wrapWords } from "./columns.ts"
-import { completions } from "../commands.ts"
+import { builtin_names, completions } from "../commands.ts"
 import {
   activeReference,
   knownReferenceRanges,
@@ -23,6 +23,7 @@ import {
   type PasteAttachment,
 } from "../paste.ts"
 import { skillCompletions, type SkillTable } from "../skills.ts"
+import { packageCompletions, resolve as resolvePackageCommands, type PackageCommandTable } from "../packageCommands.ts"
 
 /**
  * The composer's border in ascii mode: the one bordered object on screen still
@@ -131,6 +132,14 @@ export function Composer(props: {
   references?: ProjectIndex
   /** The skill catalog, listed after the built-in commands. */
   skills?: SkillTable
+  /**
+   * The package command catalog, listed after built-ins and before skills
+   * (tui-plugin D1/D8) — resolved the same way dispatch resolves it
+   * (`ui/App.tsx` `runPackageCommand`: built-ins never shadowed, a same-name
+   * collision between two packages settled by scan order), so what this menu
+   * offers is exactly what typing the name and pressing Enter would run.
+   */
+  packages?: PackageCommandTable
   onReady?: (api: ComposerApi) => void
 }) {
   const style = useStyle()
@@ -149,11 +158,14 @@ export function Composer(props: {
   const [at, setAt] = createSignal(0)
   const [pick, setPick] = createSignal(0)
   /**
-   * Built-in commands first, then skills (tui.md §11, T15) — the same order
-   * dispatch uses, so what the menu offers first is what Enter would run.
+   * Built-in commands first, then packages, then skills (tui.md §11, T15;
+   * tui-plugin D1/D8) — the same order dispatch uses (`ui/App.tsx`
+   * `runCommand` → `runPackageCommand` → `skillTurn`), so what the menu
+   * offers first is what Enter would run.
    */
   const matches = (): { name: string; args?: string; what: string }[] => [
     ...completions(line()),
+    ...packageCompletions(resolvePackageCommands(props.packages?.entries() ?? [], builtin_names).winners, line()),
     ...skillCompletions(props.skills?.entries() ?? [], line()),
   ]
 

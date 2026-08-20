@@ -543,3 +543,63 @@ exports[`ascii mode degrades every glyph 1`] = `
                                                                             
 "
 `;
+
+exports[`\`render: "checklist"\` draws a plan as a plan, not as raw JSON 1`] = `
+"                                                                            
+  ⌘ todo · items=[{"text":"read the spec","state":"done"…  (1/3) ▾          
+    [x] read the spec                                                       
+    [~] write the tool                                                      
+    [ ] ship it                                                             
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+"
+`;
+
+exports[`\`render: "markdown"\` renders the body through the markdown primitive 1`] = `
+"                                                                            
+  ⌘ brief · # Plan  (3 lines) ▾                                             
+    Plan                                                                    
+                                                                            
+    Do the thing, carefully.                                                
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+"
+`;
+
+exports[`the panel strip projects the latest call of a \`panel: true\` tool, folded by default 1`] = `
+"  ⌘ todo · items=[{"text":"read the spec","state":"done"…  (1/3) ▸          
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+"
+`;

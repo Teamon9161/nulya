@@ -18,12 +18,14 @@ import { App } from "../src/ui/App.tsx"
 import { StyleContext, createStyle, type Style } from "../src/render/theme.ts"
 import { FoldContext, createFoldStore } from "../src/state/folds.ts"
 import { TasksContext } from "../src/state/tasks.ts"
-import { createSessionState, type TranscriptItem } from "../src/state/session.ts"
+import { createSessionState, type ToolItem, type TranscriptItem } from "../src/state/session.ts"
 import { default_settings, loadSettings } from "../src/state/settings.ts"
 import type { SessionHeader } from "../src/nulya/ledger.ts"
 import { sessionAppend, sessionEvents, sessionNew, sessionStep, type TaskEntry } from "../src/nulya/cli.ts"
 import { unsafe_settings, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
 import { wrapSkillEcho } from "../src/skills.ts"
+import { PanelStrip } from "../src/ui/PanelStrip.tsx"
+import type { Contributions } from "../src/nulya/files.ts"
 
 const style: Style = createStyle(unsafe_settings, {})
 const narrow: Style = createStyle({ ...default_settings, transcript: { ...default_settings.transcript, max_width: 40 } }, {})
@@ -33,7 +35,13 @@ const narrow: Style = createStyle({ ...default_settings, transcript: { ...defaul
  * rather than mapping `Card` itself, because the blank rows BETWEEN cards are
  * part of what these snapshots are pinning (T26) and they are decided there.
  */
-function Harness(props: { items: TranscriptItem[]; style?: Style; tasks?: TaskEntry[]; error?: string | null }) {
+function Harness(props: {
+  items: TranscriptItem[]
+  style?: Style
+  tasks?: TaskEntry[]
+  error?: string | null
+  contributions?: Contributions[]
+}) {
   return (
     <StyleContext.Provider value={props.style ?? style}>
       <FoldContext.Provider value={createFoldStore()}>
@@ -41,7 +49,7 @@ function Harness(props: { items: TranscriptItem[]; style?: Style; tasks?: TaskEn
             task still running (tui.md §5.9); every other card draws the same
             with or without it. */}
         <TasksContext.Provider value={() => props.tasks ?? []}>
-          <Transcript items={props.items} error={props.error} />
+          <Transcript items={props.items} error={props.error} contributions={props.contributions} />
         </TasksContext.Provider>
       </FoldContext.Provider>
     </StyleContext.Provider>
@@ -123,6 +131,130 @@ const ext_tool_item: TranscriptItem = {
   awaiting: false,
   taskResult: null,
 }
+// --- tui-plugin U2: `render`/`panel` (D12) ----------------------------------
+
+/** A `Contributions` fixture with every field the type demands, overridable per field. */
+function contribution(over: Partial<Contributions> & Pick<Contributions, "id">): Contributions {
+  return {
+    version: "v-0",
+    tools: [],
+    readonlyTools: [],
+    driverTools: [],
+    skills: [],
+    systemPrompts: [],
+    activation: "always",
+    commands: [],
+    policy: null,
+    toolRender: {},
+    panelTools: [],
+    ...over,
+  }
+}
+
+/** A `plan`-shaped package: one checklist tool (also `panel: true`) and one markdown tool. */
+const plan_contributions = [
+  contribution({
+    id: "plan",
+    tools: ["todo", "brief"],
+    toolRender: { todo: "checklist", brief: "markdown" },
+    panelTools: ["todo"],
+  }),
+]
+
+function toolItem(over: Partial<ToolItem> & { key: string; tool: string; args: string }): ToolItem {
+  return {
+    seq: 9,
+    kind: "tool",
+    callId: over.key,
+    state: "done",
+    ok: true,
+    output: "",
+    spillPath: null,
+    resolved: true,
+    awaiting: false,
+    taskResult: null,
+    ...over,
+  }
+}
+
+const checklist_item = toolItem({
+  key: "e9:c1",
+  tool: "todo",
+  args: JSON.stringify({
+    items: [
+      { text: "read the spec", state: "done" },
+      { text: "write the tool", state: "doing" },
+      { text: "ship it", state: "todo" },
+    ],
+  }),
+})
+
+const markdown_item = toolItem({
+  key: "e9:c2",
+  tool: "brief",
+  args: JSON.stringify({ plan_md: "# Plan" }),
+  output: "# Plan\n\nDo the thing, **carefully**.",
+})
+
+const plan_expanded = createStyle(
+  { ...default_settings, transcript: { ...default_settings.transcript, tool_output: "expanded" } },
+  {},
+)
+
+test("`render: \"checklist\"` draws a plan as a plan, not as raw JSON", async () => {
+  const frame = await frameOf([checklist_item], 76, 16, plan_expanded, undefined, undefined, plan_contributions)
+  expect(frame).toContain("⌘ todo")
+  expect(frame).toContain("[x] read the spec")
+  expect(frame).toContain("[~] write the tool")
+  expect(frame).toContain("[ ] ship it")
+  expect(frame).toMatchSnapshot()
+})
+
+test("`render: \"markdown\"` renders the body through the markdown primitive", async () => {
+  const frame = await frameOf([markdown_item], 76, 16, plan_expanded, undefined, undefined, plan_contributions)
+  expect(frame).toContain("⌘ brief")
+  // Markdown emphasis renders, rather than showing the literal `**carefully**`.
+  expect(frame).toContain("carefully")
+  expect(frame).not.toContain("**carefully**")
+  expect(frame).toMatchSnapshot()
+})
+
+test("a tool call with no render claim on this composition is the ordinary ext card", async () => {
+  // Same tool name, but the composition handed in declares no `plan` member —
+  // the hint resolves to null and `describeTool` falls back on its own.
+  const frame = await frameOf([checklist_item])
+  expect(frame).toContain("⌘ todo · items=")
+  expect(frame).not.toContain("[x] read the spec")
+})
+
+/**
+ * `panel: true`'s own strip (`ui/PanelStrip.tsx`): a PURE projection of
+ * ledger items and the frozen composition, drawn above the composer whether
+ * or not the same call's transcript card is still on screen — folded by
+ * default, exactly like the ordinary tool card is.
+ */
+test("the panel strip projects the latest call of a `panel: true` tool, folded by default", async () => {
+  const frame = await frameOfNode(() => <PanelStrip items={[checklist_item]} contributions={plan_contributions} />)
+  expect(frame).toContain("⌘ todo")
+  expect(frame).toContain("1/3")
+  expect(frame).not.toContain("[x] read the spec")
+  expect(frame).toMatchSnapshot()
+})
+
+test("the panel strip stacks up to two rows and folds the rest behind a count", async () => {
+  const contributions = [
+    contribution({ id: "plan", tools: ["todo", "brief", "extra"], panelTools: ["todo", "brief", "extra"] }),
+  ]
+  const extra_item = toolItem({ key: "e9:c3", tool: "extra", args: "{}", output: "third row" })
+  const frame = await frameOfNode(() => (
+    <PanelStrip items={[checklist_item, markdown_item, extra_item]} contributions={contributions} />
+  ))
+  expect(frame).toContain("⌘ todo")
+  expect(frame).toContain("⌘ brief")
+  expect(frame).not.toContain("⌘ extra")
+  expect(frame).toContain("+1 more panel · /ext")
+})
+
 const header_fixture: SessionHeader = {
   kind: "header",
   v: 1,
@@ -271,11 +403,12 @@ async function frameOf(
   theme = style,
   tasks?: TaskEntry[],
   error?: string | null,
+  contributions?: Contributions[],
 ): Promise<string> {
-  const setup = await testRender(() => <Harness items={items} style={theme} tasks={tasks} error={error} />, {
-    width,
-    height,
-  })
+  const setup = await testRender(
+    () => <Harness items={items} style={theme} tasks={tasks} error={error} contributions={contributions} />,
+    { width, height },
+  )
   try {
     return await settle(setup)
   } finally {
@@ -402,10 +535,36 @@ test("a sub-session names the session it drives", async () => {
 
 /** The two packages the card fixtures are written against. */
 const card_contributions = [
-  { id: "lint", version: "v-3f2a91", tools: ["lint_zig"], readonlyTools: [], driverTools: [], skills: ["skills/zig-style"], systemPrompts: [], activation: "always" as const },
+  {
+    id: "lint",
+    version: "v-3f2a91",
+    tools: ["lint_zig"],
+    readonlyTools: [],
+    driverTools: [],
+    skills: ["skills/zig-style"],
+    systemPrompts: [],
+    activation: "always" as const,
+    commands: [],
+    policy: null,
+    toolRender: {},
+    panelTools: [],
+  },
   // A `--with` package: no tool, no skill, one prompt — worn for this
   // session only, and the card has to say so (DESIGN §7.5).
-  { id: "evolution", version: "v-db04b7", tools: [], readonlyTools: [], driverTools: [], skills: [], systemPrompts: ["prompts/evolution.md"], activation: "on_request" as const },
+  {
+    id: "evolution",
+    version: "v-db04b7",
+    tools: [],
+    readonlyTools: [],
+    driverTools: [],
+    skills: [],
+    systemPrompts: ["prompts/evolution.md"],
+    activation: "on_request" as const,
+    commands: [],
+    policy: null,
+    toolRender: {},
+    panelTools: [],
+  },
 ]
 
 const expanded_card = createStyle(

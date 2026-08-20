@@ -31,7 +31,7 @@ import {
   type SyncLine,
   type SyncReport,
 } from "./nulya/cli.ts"
-import { modelTools, readContributions, type Contributions } from "./nulya/files.ts"
+import { modelTools, readContributions, rootsOf, type Contributions, type PackageCommand } from "./nulya/files.ts"
 import { builtin_tools, toolId } from "./pins.ts"
 import { userConfigDir } from "./state/settings.ts"
 import { loadTuiState, rememberSessionPins, saveTuiState, tuiStatePath } from "./state/tui_state.ts"
@@ -641,7 +641,7 @@ export interface SessionMember {
  * Throws with a sentence for the notice; the caller starts the session anyway.
  */
 export async function sessionMember(ws: Workspace, id: string): Promise<SessionMember> {
-  const version = (await buildBundledDraft(ws, id)) ?? (await activeVersion(ws, id))
+  const version = (await buildBundledDraft(ws, id)) ?? (await activeVersionOf(ws, id))
   if (!version) {
     throw new Error(`${id} · no active version in any store · \`nulya ext build <path> --user\` then \`nulya ext activate --user ${id} <v>\``)
   }
@@ -661,14 +661,69 @@ async function buildBundledDraft(ws: Workspace, id: string): Promise<string | nu
   return await extBuild(ws, draft)
 }
 
-/** The version `current` names for `id`, in the first root that has one. */
-async function activeVersion(ws: Workspace, id: string): Promise<string | null> {
+/**
+ * The version `current` names for `id`, in the first root that has one.
+ *
+ * Exported for a package command's `run <tool>` action (tui-plugin D8): the
+ * version has to be read again at DISPATCH time, not carried from whenever the
+ * command table was harvested — the same read `/ext` itself would make.
+ */
+export async function activeVersionOf(ws: Workspace, id: string): Promise<string | null> {
   try {
     const entry = (await extList(ws)).find((e) => e.id === id && e.current !== null && !e.shadowed)
     return entry?.current ?? null
   } catch {
     return null
   }
+}
+
+/**
+ * The slash commands of every ACTIVATED, TRUSTED package (DESIGN §7.2.1,
+ * tui-plugin D1/D2/D8) — the data source `/ext` itself reads (`listExtensions`
+ * → `ext list`), so this spawns no process of its own beyond that one call.
+ *
+ * "Activated" here is deliberately not "a member of the CURRENT session's
+ * composition": a `wear` command's whole point is to bring an `on_request`
+ * package INTO a session that does not have it yet, and that has to be typable
+ * before there is anything to be a member of (a draft tab, tui.md §11 T22). So
+ * the filter is exactly `ext list`'s own notion of "holding a current version,
+ * not shadowed" — the same one `/with`'s picker uses.
+ *
+ * Trust is the one thing `ext list` does not say: a workspace store that
+ * arrived with a checkout and has never been looked at (DESIGN §9) still lists
+ * its `current` versions, but naming one of its commands would run headlong
+ * into the kernel's own refusal at the first `session new` or `ext run`. So
+ * this reads the same trust journal the start-up question does
+ * (`storeTrusted`) and drops that root's entries rather than offering a
+ * command that cannot work. Every other root (the user's own, or an
+ * `extensions.paths` addition) needs no such gate (DESIGN §9, physics #6).
+ *
+ * Returned in `ext list`'s own order — root by root, in kernel search order —
+ * which is what lets a caller resolve a same-name collision between two
+ * DIFFERENT packages by "first one in this list wins" (D8) without this
+ * function itself having an opinion about names.
+ */
+export async function packageCommands(
+  ws: Workspace,
+  env: Record<string, string | undefined> = process.env,
+): Promise<Array<{ id: string; command: PackageCommand }>> {
+  let listed: Awaited<ReturnType<typeof extList>> = []
+  try {
+    listed = await extList(ws)
+  } catch {
+    // No binary, no store: an empty command table, never a crash.
+    return []
+  }
+  const trusted = storeTrusted(workspaceStorePath(ws), env)
+  const roots = rootsOf(ws, listed)
+  const out: Array<{ id: string; command: PackageCommand }> = []
+  for (const entry of listed) {
+    if (entry.current === null || entry.shadowed) continue
+    if (entry.root === workspace_root_spec && !trusted) continue
+    const contributions = await readContributions(ws, entry.id, entry.current, roots)
+    for (const command of contributions.commands) out.push({ id: entry.id, command })
+  }
+  return out
 }
 
 /**
