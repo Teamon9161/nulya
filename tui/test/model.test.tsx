@@ -37,7 +37,16 @@ import { sessionExists } from "../src/nulya/files.ts"
 import { sessionList, sessionNew } from "../src/nulya/cli.ts"
 import { App } from "../src/ui/App.tsx"
 import type { ModelPick } from "../src/state/tui_state.ts"
-import { unsafe_settings, fake_config, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
+import {
+  unsafe_settings,
+  fake_config,
+  scripted_env,
+  settle,
+  statusLine,
+  tempWorkspace,
+  until,
+  type TempWorkspace,
+} from "./support.ts"
 
 const style: Style = createStyle(unsafe_settings, {})
 
@@ -513,8 +522,10 @@ test("/effort sets this tab's effort: the header shows it and the next step is s
     await setup.mockInput.typeText("/effort high")
     setup.mockInput.pressEnter()
     await until(() => setup.captureCharFrame().includes("effort high"), 10_000)
-    // The effort rides with the model, as tcode writes it: `id (effort)`.
-    expect(setup.captureCharFrame()).toContain("scripted-demo (high)")
+    // The effort rides with the model, as tcode writes it: `id (effort)` — on
+    // the bottom line, once the notice that answered `/effort` has come down
+    // off it on its own (T35).
+    await until(() => statusLine(setup).includes("scripted-demo (high)"), 15_000)
     expect(loadTuiState(statePath).model?.effort).toBe("high")
     // The scripted provider ignores effort, but the flag must not break the
     // step: the run still completes.
@@ -524,7 +535,7 @@ test("/effort sets this tab's effort: the header shows it and the next step is s
     expect(state.snapshot.error).toBeNull()
     await setup.mockInput.typeText("/effort auto")
     setup.mockInput.pressEnter()
-    await until(() => !setup.captureCharFrame().includes("scripted-demo (high)"), 10_000)
+    await until(() => statusLine(setup).includes("scripted-demo") && !statusLine(setup).includes("(high)"), 15_000)
   } finally {
     setup.renderer.destroy()
     rmSync(dir, { recursive: true, force: true })

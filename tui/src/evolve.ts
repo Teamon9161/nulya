@@ -1,5 +1,5 @@
 /**
- * `/evolve` and `/as` — putting a package in front of the model for ONE
+ * `/evolve` and `/with` — putting a package in front of the model for ONE
  * session (DESIGN §7.5, PLAN §3.7.9).
  *
  * Both are the same two moves: build a draft into the store, then start a

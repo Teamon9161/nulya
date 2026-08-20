@@ -35,6 +35,8 @@ export type Role = "driver" | "observer"
 export interface Attachment {
   role: Accessor<Role>
   status: Accessor<DriverStatus>
+  /** When whatever is running started, or null (`Driver.startedAt`, T38). */
+  startedAt: Accessor<number | null>
   /** The lease has looked free for a while: `Enter` would take over. */
   takeoverReady: Accessor<boolean>
   /** `framed`: the text already carries its own framing (`Driver.send`). */
@@ -77,6 +79,8 @@ export function createAttachment(
   const [role, setRole] = createSignal<Role>("driver")
   const [takeoverReady, setTakeoverReady] = createSignal(false)
   const [sending, setSending] = createSignal(false)
+  /** An observer's own clock: how long its append has been queued for. */
+  const [queuedAt, setQueuedAt] = createSignal<number | null>(null)
 
   let follow: FollowHandle | null = null
   let freeProbes = 0
@@ -163,6 +167,7 @@ export function createAttachment(
     role,
     takeoverReady,
     status: () => (role() === "observer" ? (sending() ? "sending" : "idle") : driver.status()),
+    startedAt: () => (role() === "observer" ? queuedAt() : driver.startedAt()),
     async send(text, framed = false) {
       const trimmed = text.trim()
       if (trimmed.length === 0) return
@@ -180,12 +185,14 @@ export function createAttachment(
       const wire = !framed && probeWriterLease(ws, id) === "held" ? wrapMidTask(trimmed) : trimmed
       state.enqueueUser(wire)
       setSending(true)
+      setQueuedAt(Date.now())
       try {
         await sessionAppend(ws, id, wire)
       } catch (error) {
         state.setError(error instanceof Error ? error.message : String(error))
       } finally {
         setSending(false)
+        setQueuedAt(null)
       }
     },
     async step() {

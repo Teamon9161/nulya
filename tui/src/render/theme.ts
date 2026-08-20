@@ -43,6 +43,16 @@ export interface Theme {
   selection: string
   /** The quieter of the two row backgrounds: the pointer is merely here. */
   hover: string
+  /**
+   * Where a cell goes when the running highlight passes over it (T38).
+   *
+   * "Brighter" is not a direction a colour has on its own — on a light theme
+   * the way to stand out is DOWN, toward ink. So each theme names its own end
+   * of the lift, and `shimmerColor` only interpolates. Monochrome names `fg`,
+   * which makes the sweep a no-op rather than a flicker in a terminal that was
+   * asked for no colour at all.
+   */
+  lift: string
 }
 
 const nulya_dark: Theme = {
@@ -58,6 +68,7 @@ const nulya_dark: Theme = {
   hairline: "#2c3140",
   selection: "#2f3550",
   hover: "#242937",
+  lift: "#f2f5fb",
 }
 
 const nulya_light: Theme = {
@@ -73,6 +84,7 @@ const nulya_light: Theme = {
   hairline: "#d3d7de",
   selection: "#dfe4f0",
   hover: "#eef1f7",
+  lift: "#0b0e14",
 }
 
 /** NO_COLOR: every token collapses to the terminal's own foreground. */
@@ -91,6 +103,7 @@ function monochrome(): Theme {
     hairline: fg,
     selection: fg,
     hover: fg,
+    lift: fg,
   }
 }
 
@@ -142,6 +155,12 @@ export interface Glyphs {
    */
   switchOn: string
   switchOff: string
+  /**
+   * The opening screen's one tip (T38). Its own shape because one glyph means
+   * one thing here: `capability` is what an extension gained, and a tip is not
+   * an event — it is the screen talking to the person.
+   */
+  tip: string
 }
 
 const unicode_glyphs: Glyphs = {
@@ -170,6 +189,7 @@ const unicode_glyphs: Glyphs = {
   check: "✓",
   switchOn: "●",
   switchOff: "○",
+  tip: "✻",
 }
 
 const ascii_glyphs: Glyphs = {
@@ -198,6 +218,7 @@ const ascii_glyphs: Glyphs = {
   check: "*",
   switchOn: "*",
   switchOff: "-",
+  tip: "*",
 }
 
 export interface Style {
@@ -211,6 +232,51 @@ export interface Style {
   spinner: string[]
   /** Derived from the same tokens, so highlighted code cannot drift from the theme. */
   syntax: SyntaxStyle
+}
+
+/**
+ * One cell of a line that is running: a soft band sweeps left to right, rests
+ * a beat past the end, and starts again (T38, ported from tcode's
+ * `theme::shimmer_color`).
+ *
+ * The band LIFTS the cell's own colour toward `theme.lift` instead of painting
+ * over it, so the line keeps its identity — amber stays amber while it moves —
+ * and at rest every cell is exactly `base`. `frame` must be monotonic;
+ * `width` is the painted width, so the rest between passes scales with the
+ * line rather than with the terminal.
+ */
+export function shimmerColor(frame: number, column: number, width: number, base: string, lift: string): string {
+  const speed = 1.5 // columns per frame
+  const sigma = 4.0 // band half-width
+  const dwell = 12.0 // off-end travel: a beat of rest between sweeps
+  const span = width + dwell + 2 * sigma
+  const center = ((frame * speed) % span) - sigma
+  const d = column - center
+  const t = Math.exp((-d * d) / (2 * sigma * sigma))
+  if (t < 0.02) return base
+  return mixHex(base, lift, t)
+}
+
+/** `a` moved `t` of the way to `b`, in sRGB. Both are `#rrggbb`. */
+export function mixHex(a: string, b: string, t: number): string {
+  const from = channels(a)
+  const to = channels(b)
+  if (!from || !to) return a
+  const lerp = (x: number, y: number) => Math.round(x + (y - x) * t)
+  return (
+    "#" +
+    [lerp(from[0], to[0]), lerp(from[1], to[1]), lerp(from[2], to[2])]
+      .map((v) => Math.max(0, Math.min(255, v)).toString(16).padStart(2, "0"))
+      .join("")
+  )
+}
+
+function channels(hex: string): [number, number, number] | null {
+  const raw = hex.trim().replace("#", "")
+  if (raw.length !== 6) return null
+  const n = Number.parseInt(raw, 16)
+  if (Number.isNaN(n)) return null
+  return [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff]
 }
 
 export const spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]

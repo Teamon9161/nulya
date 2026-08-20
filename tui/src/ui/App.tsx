@@ -1,4 +1,4 @@
-import { For, Match, Show, Switch, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
+import { For, Match, Show, Switch, createEffect, createMemo, createSignal, onCleanup, onMount, untrack } from "solid-js"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import type { InputRenderable, KeyEvent, ScrollBoxRenderable, Selection } from "@opentui/core"
 import { Transcript, rowsBelow, windowItems } from "./Transcript.tsx"
@@ -6,7 +6,10 @@ import { Composer, type ComposerApi } from "./Composer.tsx"
 import { ApprovalPanel, type ApprovalChoice } from "./ApprovalPanel.tsx"
 import { ModePicker, initialChoice, modeAt, moveChoice } from "./ModePicker.tsx"
 import { AgentPicker } from "./AgentPicker.tsx"
+import { WithPicker, type Wearable } from "./WithPicker.tsx"
 import { StatusBar } from "./StatusBar.tsx"
+import { pickTip } from "./Welcome.tsx"
+import { WorkingStatus, activityOf } from "./WorkingStatus.tsx"
 import { TabBar } from "./TabBar.tsx"
 import { SessionsView } from "./overlays/SessionsView.tsx"
 import { ExtView } from "./overlays/ExtView.tsx"
@@ -55,10 +58,10 @@ import {
   activePromptPackages,
   adoptBundled,
   autoActivatable,
+  builtContributions,
   failedIds,
   planStore,
   promptPackageWarning,
-  promptsOf,
   seedBundled,
   sessionMember,
   summarize,
@@ -171,9 +174,26 @@ interface Approval {
 }
 
 /**
- * The cards browse mode walks and Ctrl+O toggles: everything with a body that
- * is actually on screen. Items outside `history_window` are not mounted, so a
- * selection there would be invisible.
+ * How long a notice stays up before the status line goes back to what it says
+ * at rest (T35): as long as it takes to read it, and no longer.
+ *
+ * A notice covers that whole line while it is up, so it has to come down on its
+ * own — and a fixed number would be wrong at both ends, since the same slot
+ * carries `opened s-a1b2` and a three-clause sync summary. The floor is where
+ * `Ctrl+C again to quit` lands, which is also exactly how long that offer is
+ * good for: the two agree by construction rather than by coincidence.
+ */
+export function noticeHold(text: string): number {
+  return Math.min(9000, Math.max(ctrl_c_ms, 1500 + text.length * 45))
+}
+
+/** The window in which a second Ctrl+C means what the first one offered. */
+const ctrl_c_ms = 3000
+
+/**
+ * The cards browse mode walks: everything with a body that is actually on
+ * screen. Items outside `history_window` are not mounted, so a selection there
+ * would be invisible.
  */
 function foldable(items: readonly TranscriptItem[], window: number): TranscriptItem[] {
   return windowItems(items, window).filter((item) => item.kind === "tool" || item.kind === "thinking")
@@ -228,7 +248,26 @@ export function App(props: AppProps) {
    */
   const skills = createSkillTable(props.ws)
 
-  const [notice, setNotice] = createSignal<string | null>(null)
+  /**
+   * The line under the composer, when it has news (T35).
+   *
+   * A notice covers that whole line while it is up, so it must also come down
+   * on its own: a message that stays is a message that stops being true — the
+   * screen said `Ctrl+C again to quit` long after the offer had lapsed, and
+   * `opened s-…` for the rest of the session. Everything here is news by
+   * default and goes stale; `holdNotice` is for the two things that are not
+   * news but a state the screen is IN (browse mode, a handoff awaiting an
+   * answer), which their own code path clears.
+   */
+  const [notice, setNoticeState] = createSignal<{ text: string; hold: boolean } | null>(null)
+  const setNotice = (text: string | null) => setNoticeState(text === null ? null : { text, hold: false })
+  const holdNotice = (text: string) => setNoticeState({ text, hold: true })
+  createEffect(() => {
+    const current = notice()
+    if (!current || current.hold) return
+    const timer = setTimeout(() => setNoticeState((now) => (now === current ? null : now)), noticeHold(current.text))
+    onCleanup(() => clearTimeout(timer))
+  })
   const [guide, setGuide] = createSignal<string | null>(props.guide ?? null)
   /** Which provider `/model` should open on, when `/provider` sent it there. */
   const [focusProfile, setFocusProfile] = createSignal<string | undefined>(undefined)
@@ -241,7 +280,6 @@ export function App(props: AppProps) {
   const [tasksWarned, setTasksWarned] = createSignal(false)
   const [spinnerTick, setSpinnerTick] = createSignal(0)
   const [ctrlCArmed, setCtrlCArmed] = createSignal(false)
-  const [allOpen, setAllOpen] = createSignal(false)
   const [behind, setBehind] = createSignal(0)
   /**
    * Bumped whenever the pin list on disk may have moved (an overlay closed, a
@@ -308,6 +346,10 @@ export function App(props: AppProps) {
   const [agentWarnings, setAgentWarnings] = createSignal<readonly string[]>([])
   /** Whether the picker is up, and which row its cursor is on (`AgentPicker`). */
   const [agentPicker, setAgentPicker] = createSignal(false)
+  /** Bare `/with`: the registered packages a session may name (`WithPicker`). */
+  const [withPicker, setWithPicker] = createSignal(false)
+  const [withChoice, setWithChoice] = createSignal(0)
+  const [wearables, setWearables] = createSignal<Wearable[]>([])
   const [agentChoice, setAgentChoice] = createSignal(0)
   /**
    * Which tabs are running an agent definition, and which one — the tab-level
@@ -448,7 +490,7 @@ export function App(props: AppProps) {
             // seeded yesterday, or by hand, had `evolution` switched on by this
             // very loop the next time its draft rebuilt, and every session
             // afterwards opened believing it was the slow loop.
-            if (!autoActivatable(await promptsOf(props.ws, where, line.id, line.version))) {
+            if (!autoActivatable(await builtContributions(props.ws, where, line.id, line.version))) {
               held.push(line.id)
               continue
             }
@@ -521,7 +563,15 @@ export function App(props: AppProps) {
   })
   createEffect(() => {
     if (!ctrlCArmed()) return
-    const timer = setTimeout(() => setCtrlCArmed(false), 3000)
+    // The offer comes off the screen with the arm that backs it. Leaving the
+    // words up past the window they describe is how the bottom line ended up
+    // permanently reading `Ctrl+C again to quit` on a session where the next
+    // press would have done nothing of the sort.
+    const said = untrack(notice)
+    const timer = setTimeout(() => {
+      setCtrlCArmed(false)
+      setNoticeState((now) => (now === said ? null : now))
+    }, ctrl_c_ms)
     onCleanup(() => clearTimeout(timer))
   })
 
@@ -588,12 +638,34 @@ export function App(props: AppProps) {
 
   onCleanup(() => tabs.disposeAll())
 
+  /** One tip per launch, chosen here so re-rendering the screen cannot reroll it. */
+  const tip = pickTip()
+
   const spinnerFrame = () => props.style.spinner[spinnerTick() % props.style.spinner.length]!
 
-  const lastFoldable = () => {
-    const list = cards()
-    return list.length > 0 ? list[list.length - 1]! : null
-  }
+  /**
+   * What the line above the composer says (T38). The rules are in
+   * `WorkingStatus.activityOf` — a pure function of the same facts the status
+   * bar reads — so "what is happening" has exactly one definition.
+   */
+  const activity = createMemo(() =>
+    activityOf({
+      status: status(),
+      role: role(),
+      snapshot: snapshot(),
+      takeoverReady: live()?.attach.takeoverReady() ?? false,
+      awaiting: pending() !== null,
+      background: runningTasks(),
+    }),
+  )
+
+  /**
+   * `Date.now()`, resampled on the animation tick rather than read during a
+   * render. A render that reads the wall clock is not a function of its inputs
+   * — it would show a different elapsed each repaint and never repaint on its
+   * own — so the tick that moves the sweep is also what moves the clock.
+   */
+  const clockNow = () => (spinnerTick(), Date.now())
 
   /** The session a card names, if it names one — the sub-session link (tui.md §5.5). */
   const sessionOf = (item: TranscriptItem | null): string | null => {
@@ -606,7 +678,7 @@ export function App(props: AppProps) {
     if (list.length === 0) return
     composer?.blur()
     browse.enter(list[list.length - 1]!.key)
-    setNotice("browse · j/k move · Enter open/fold · Space fold · Esc back")
+    holdNotice("browse · j/k move · Enter open/fold · Space fold · Esc back")
   }
 
   const leaveBrowse = () => {
@@ -1073,7 +1145,7 @@ export function App(props: AppProps) {
       // …and hand the keyboard back only if nothing else took it meanwhile: an
       // overlay, browse mode and the mode picker all blur the composer on
       // purpose, and a dialog closing is no reason to overrule them.
-      if (!overlay.active() && !browse.active() && !modePicker() && !agentPicker()) composer?.focus()
+      if (!overlay.active() && !browse.active() && !modePicker() && !agentPicker() && !withPicker()) composer?.focus()
       return
     }
     composer?.blur()
@@ -1087,7 +1159,7 @@ export function App(props: AppProps) {
    * choose from if `j` goes into the composer behind it.
    */
   createEffect(() => {
-    if (modePicker() || agentPicker()) composer?.blur()
+    if (modePicker() || agentPicker() || withPicker()) composer?.blur()
     else if (!pending() && !overlay.active() && !browse.active()) composer?.focus()
   })
 
@@ -1163,7 +1235,7 @@ export function App(props: AppProps) {
       return
     }
     setHandoff(found)
-    setNotice(`handoff proposed · ${headline(found.brief)} · Enter follow · Esc dismiss`)
+    holdNotice(`handoff proposed · ${headline(found.brief)} · Enter follow · Esc dismiss`)
   }
 
   /** A step just ended: that is when a handoff file can have appeared. */
@@ -1418,21 +1490,80 @@ export function App(props: AppProps) {
   }
 
   /**
-   * `/as <id>[@<version>]` — the same move as `/evolve` with any package that
+   * `/with <id>[@<version>]` — the same move as `/evolve` with any package that
    * contributes a prompt: wear it for one session, activate nothing.
    *
-   * It was `/mode` until the permission mode needed that name (tui.md §5.7).
-   * `/as evolution` also reads as what it does — this session speaks AS that
-   * package — where `/mode evolution` and `/mode unsafe` were two unrelated
-   * things behind one word.
+   * It is the kernel's own word: this runs `session new --with <id>[@<version>]`
+   * and nothing else, so the front end does not get to call it something else
+   * (tui.md §11, T36). The two earlier names both said less than the flag does —
+   * `/mode` collided with the permission mode (T24), and `/as` read the general
+   * verb as a special case: `--with` is MEMBERSHIP, and a member may contribute
+   * only tools or only skills, in which case no session is speaking "as"
+   * anything. `/as` stays as an alias because it is in people's fingers.
    */
   const wearNow = (word: string | undefined) => {
-    const ref = word ? parseWithRef(word) : null
+    if (!word) {
+      void openWithPicker()
+      return
+    }
+    const ref = parseWithRef(word)
     if (!ref) {
-      setNotice("/as <id>[@<version>] · a built extension; no version means the store's current")
+      setNotice("/with <id>[@<version>] · a built extension; no version means the store's current")
       return
     }
     startDraft(undefined, false, ref)
+  }
+
+  /**
+   * Bare `/with`: the packages this machine has REGISTERED, as a dialog above
+   * the composer (tui.md §11, T37).
+   *
+   * Derived from the store and nothing else. A package that declares
+   * `activation: "on_request"` (DESIGN §7.2.1) becomes nameable by being
+   * switched on and stops being nameable when it is switched off, so this list
+   * is the answer to "what did activating anything actually give me" — and a
+   * mode nobody registered is offered by no command, which is the point.
+   *
+   * `always` packages are left out on purpose: their prompt is already in every
+   * session, so a row offering to wear one would offer a no-op.
+   */
+  const openWithPicker = async () => {
+    let listed: Wearable[] = []
+    try {
+      listed = (await listExtensions(props.ws))
+        .filter(
+          (entry) =>
+            entry.current !== null &&
+            !entry.shadowed &&
+            entry.systemPrompts.length > 0 &&
+            entry.activation === "on_request",
+        )
+        .map((entry) => ({
+          id: entry.id,
+          version: entry.current!,
+          prompts: entry.systemPrompts.length,
+          skills: entry.skills.length,
+          tools: entry.tools.length,
+        }))
+    } catch {
+      // A store this process cannot read is an empty list with its own sentence,
+      // never a crash on the way to a dialog.
+      setNotice("could not read the extension store · /ext shows what the kernel says")
+    }
+    setWearables(listed)
+    setWithChoice(0)
+    setWithPicker(true)
+  }
+
+  const closeWithPicker = () => setWithPicker(false)
+
+  /** Taking a row acts: wearing needs no argument, so the tab opens. */
+  const takeWithChoice = () => {
+    const one = wearables()[withChoice()]
+    setWithPicker(false)
+    if (!one) return
+    startDraft(undefined, false, { id: one.id })
+    setNotice(`new tab · wearing ${one.id} · nothing activated · your next message starts it`)
   }
 
   /**
@@ -1583,7 +1714,10 @@ export function App(props: AppProps) {
       }
       return true
     }
-    if (command === "/as") {
+    // `/as` is the old name, kept working: an alias costs one line here, while a
+    // muscle-memory `/as` that fell through would be offered to the skill
+    // catalog and then sent to the model verbatim (commands.ts).
+    if (command === "/with" || command === "/as") {
       wearNow(words[1])
       return true
     }
@@ -1607,9 +1741,12 @@ export function App(props: AppProps) {
       void compactNow(rest)
       return true
     }
+    // Collapse only. The other direction — one key that opens everything —
+    // was a key (T38): a screenful of every tool body at once is not a view of
+    // anything, and folding back down is what a person actually wants after
+    // reading a few cards open.
     if (command === "/fold") {
       folds.setAll(false)
-      setAllOpen(false)
       return true
     }
     if (command === "/sessions") {
@@ -1732,6 +1869,24 @@ export function App(props: AppProps) {
      * list you can actually choose from (T28). It is the outermost of the three
      * because it is the one that can only be opened deliberately.
      */
+    if (withPicker() && !key.ctrl && !key.meta) {
+      const count = wearables().length
+      if (matches(keys.cancel, key)) return consume(key, closeWithPicker)
+      if (key.name === "up" || key.name === "k") {
+        return consume(key, () => setWithChoice((at) => Math.max(at - 1, 0)))
+      }
+      if (key.name === "down" || key.name === "j") {
+        return consume(key, () => setWithChoice((at) => Math.min(at + 1, Math.max(count - 1, 0))))
+      }
+      if (key.name === "return") return consume(key, takeWithChoice)
+      if (key.name && /^[1-9]$/.test(key.name) && Number(key.name) <= count) {
+        return consume(key, () => {
+          setWithChoice(Number(key.name) - 1)
+          takeWithChoice()
+        })
+      }
+      return consume(key, () => {})
+    }
     if (agentPicker() && !key.ctrl && !key.meta) {
       const count = agentDefs().length
       if (matches(keys.cancel, key)) return consume(key, closeAgentPicker)
@@ -1898,19 +2053,6 @@ export function App(props: AppProps) {
       if (composer?.isEmpty() ?? true) enterBrowse()
       return
     }
-    if (matches(keys.fold, key)) {
-      return consume(key, () => {
-        const item = lastFoldable()
-        if (item) folds.toggle(item.key, false)
-      })
-    }
-    if (matches(keys.foldAll, key)) {
-      return consume(key, () => {
-        const next = !allOpen()
-        setAllOpen(next)
-        folds.setAll(next)
-      })
-    }
     if (matches(keys.redraw, key)) return consume(key, () => renderer.requestRender())
     if (matches(keys.quit, key)) {
       // Ctrl+C narrows from the nearest thing to stop to the furthest, and
@@ -1993,6 +2135,7 @@ export function App(props: AppProps) {
                       cwd={props.ws.dir}
                       onPickModel={() => openOverlay("model")}
                       onCommand={submit}
+                      tip={tip}
                       ref={(box) => (scroll = box)}
                     />
                   }
@@ -2075,6 +2218,17 @@ export function App(props: AppProps) {
                 {/* Which agent to delegate to (tui.md §5.10). Same dialog shape
                     as the mode picker, above it for the same reason it holds the
                     keyboard first: it is only ever opened on purpose. */}
+                <Show when={withPicker()}>
+                  <WithPicker
+                    wearables={wearables()}
+                    selected={withChoice()}
+                    onSelect={setWithChoice}
+                    onPick={(one) => {
+                      setWithChoice(wearables().indexOf(one))
+                      takeWithChoice()
+                    }}
+                  />
+                </Show>
                 <Show when={agentPicker()}>
                   <AgentPicker
                     defs={agentDefs()}
@@ -2112,6 +2266,17 @@ export function App(props: AppProps) {
                     onReady={(field) => (noteField = field)}
                   />
                 </Show>
+                {/* What is happening, directly above the box you would type
+                    into to change it (tui.md §4.4b, T38). Below the panels: a
+                    question waiting for an answer outranks a report of work. */}
+                <WorkingStatus
+                  activity={activity()}
+                  frame={spinnerTick()}
+                  spinnerFrame={spinnerFrame()}
+                  since={live()?.attach.startedAt() ?? null}
+                  now={clockNow()}
+                  onOpenTasks={() => openOverlay("tasks")}
+                />
                 <Composer
                   onSubmit={submit}
                   onEmptySubmit={() => followHandoff() || takeOverIfOffered()}
@@ -2130,26 +2295,19 @@ export function App(props: AppProps) {
                 />
                 <StatusBar
                   snapshot={snapshot()}
-                  status={status()}
                   role={role()}
-                  takeoverReady={live()?.attach.takeoverReady() ?? false}
-                  spinnerFrame={spinnerFrame()}
                   model={modelName()}
                   effort={tab().effort()}
                   tools={faceSize()}
                   mode={mode()}
-                  awaiting={pending() !== null}
-                  background={runningTasks()}
-                  onOpenTasks={() => openOverlay("tasks")}
                   onPickMode={openModePicker}
                   wearing={wearing()}
                   onOpenExt={() => openOverlay("ext")}
-                  hint={notice() ?? undefined}
+                  hint={notice()?.text}
                   behind={behind()}
                   contextWindow={contextWindow()}
                   onPickModel={() => openOverlay("model")}
                   onScrollEnd={scrollToEnd}
-                  onHelp={() => openOverlay("help")}
                 />
               </box>
               </TasksContext.Provider>

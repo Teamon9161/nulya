@@ -326,6 +326,7 @@ function entry(id: string, current: string, tools: string[]): ExtensionEntry {
     driverTools: [],
     skills: [],
     systemPrompts: [],
+    activation: "always" as const,
     permissions: { fs: [], network: [], process: [] },
     root: ".nulya/extensions",
     shadowed: false,

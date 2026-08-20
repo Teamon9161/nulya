@@ -378,11 +378,11 @@ test("the model is a click target wherever it is written: the line under the com
     const bar = rows.length - 2
     expect(rows[bar]).toContain("scripted-demo · tools 1+0")
     expect(rows[bar]).not.toContain(id)
-    // The hint gives up its widest form first when the line runs short (the
-    // mode chip on the right is one of the things it makes room for, T24), but
-    // the way to `/help` is the part that never goes.
-    expect(rows[bar]).toContain("Ctrl+O fold · /help")
-    // …and the permission mode is on that line too, right of the middle.
+    // No keyboard hints and no `/help` on it any more (T38): a reminder that
+    // is always there is read once and then never again, and it was spending
+    // the busiest line on the screen. The permission mode leads the line.
+    expect(rows[bar]).not.toContain("Ctrl+O")
+    expect(rows[bar]).not.toContain("/help")
     expect(rows[bar]).toContain("unsafe")
     await setup.mockMouse.click(rows[bar]!.indexOf("scripted-demo") + 2, bar)
     expect(await settle(setup, 4)).toContain(picker)
@@ -410,10 +410,10 @@ test("the model is a click target wherever it is written: the line under the com
     setup.mockInput.pressEscape()
     expect(await settle(setup, 4)).toContain("frozen composition")
 
-    // And `/help` on that same line is the last thing on screen that reads
-    // like a command, so it too answers to a click.
-    const help = rows[bar]!.indexOf("/help")
-    await setup.mockMouse.click(help + 1, bar)
+    // …and so does `/help`, the last of the welcome rows.
+    const helpRow = rows.findIndex((row) => row.includes("/help") && row.includes("every key and every command"))
+    expect(helpRow).toBeGreaterThan(0)
+    await setup.mockMouse.click(4, helpRow)
     expect(await settle(setup, 4)).toContain("help · keys and commands")
     setup.mockInput.pressEscape()
     expect(await settle(setup, 4)).toContain("frozen composition")

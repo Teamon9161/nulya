@@ -15,6 +15,12 @@
  * skills" mistook "who triggers" for "who judges").
  *
  * The built-ins are tried first, so a skill can never take `/model` away.
+ *
+ * Two names dispatch without being listed: `/as` (what `/with` was called until
+ * T36) and `/evolve` (which rebuilds the shipped evolution draft before wearing
+ * it). Both keep working; neither is offered, because a command in this table is
+ * a command this front end says exists, and `/evolve` named ONE package whether
+ * or not this machine had it — the confusion T37 set out to end.
  */
 export interface Command {
   name: string
@@ -41,10 +47,10 @@ export const commands: Command[] = [
   { name: "/compact", args: "[focus]", what: "summarise this session and continue in a new one; this file stays" },
   { name: "/outcome", args: "<verdict> [note]", what: "success | partial | failure — unjudged is not the same as failed" },
   {
-    name: "/evolve",
-    what: "a new tab wearing the evolution package: the slow loop, where finished sessions are reviewed and it is decided what to keep or build. nothing is activated — the prompt is worn for that one session",
+    name: "/with",
+    args: "[<id>[@version]]",
+    what: "a new tab carrying a registered extension's prompt and skills; nothing is activated. no argument lists what is registered (`/as` is the old name; `/evolve` still rebuilds and wears the shipped evolution package)",
   },
-  { name: "/as", args: "<id>[@version]", what: "a session carrying a built extension's prompt and skills; nothing is activated" },
   {
     name: "/agent",
     args: "[<name> <task…>]",

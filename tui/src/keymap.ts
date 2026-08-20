@@ -1,14 +1,18 @@
 /**
- * Key bindings, as strings like `ctrl+o` / `escape`. Defaults live here;
+ * Key bindings, as strings like `ctrl+w` / `escape`. Defaults live here;
  * `tui.toml`'s `[keys]` table overrides individual actions (tui.md §7).
+ *
+ * Folding is not in this table (T38). A card opens and closes by clicking its
+ * head line, and from browse mode with `Enter` / `Space` — two ways already,
+ * both of which say what they act on. `ctrl+o` was a third that acted on
+ * whichever card happened to be last, and `ctrl+shift+o` opened all of them at
+ * once, which is not a view of anything.
  */
 import type { KeyEvent } from "@opentui/core"
 import type { Settings } from "./state/settings.ts"
 
 export type Action =
   | "cancel"
-  | "fold"
-  | "foldAll"
   | "quit"
   | "redraw"
   | "help"
@@ -25,8 +29,6 @@ export type Action =
 
 export const default_keys: Record<Action, string> = {
   cancel: "escape",
-  fold: "ctrl+o",
-  foldAll: "ctrl+shift+o",
   quit: "ctrl+c",
   redraw: "ctrl+l",
   help: "f1",

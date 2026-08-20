@@ -4,7 +4,7 @@
  * and replay draw the same frame.
  *
  * Keyboard interaction is driven programmatically (`mockInput`) rather than by
- * hand, so an unattended run still proves Enter sends and Ctrl+O folds.
+ * hand, so an unattended run still proves Enter sends and a click folds.
  */
 import { afterAll, beforeAll, expect, test } from "bun:test"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
@@ -402,10 +402,10 @@ test("a sub-session names the session it drives", async () => {
 
 /** The two packages the card fixtures are written against. */
 const card_contributions = [
-  { id: "lint", version: "v-3f2a91", tools: ["lint_zig"], readonlyTools: [], driverTools: [], skills: ["skills/zig-style"], systemPrompts: [] },
+  { id: "lint", version: "v-3f2a91", tools: ["lint_zig"], readonlyTools: [], driverTools: [], skills: ["skills/zig-style"], systemPrompts: [], activation: "always" as const },
   // A `--with` package: no tool, no skill, one prompt — worn for this
   // session only, and the card has to say so (DESIGN §7.5).
-  { id: "evolution", version: "v-db04b7", tools: [], readonlyTools: [], driverTools: [], skills: [], systemPrompts: ["prompts/evolution.md"] },
+  { id: "evolution", version: "v-db04b7", tools: [], readonlyTools: [], driverTools: [], skills: [], systemPrompts: ["prompts/evolution.md"], activation: "on_request" as const },
 ]
 
 const expanded_card = createStyle(
@@ -833,7 +833,14 @@ test("closing and reopening with --session paints the same transcript", async ()
   }
 }, 120_000)
 
-test("Ctrl+O expands the most recent tool card", async () => {
+/**
+ * Clicking a head line is now the ONLY pointer gesture for folding, and since
+ * T38 there is no key beside it except browse mode's — `ctrl+o` (this card) and
+ * `ctrl+shift+o` (all of them at once) are gone. A third way to fold, acting on
+ * whichever card happened to be last, was one way too many; opening every card
+ * on the screen at once was never a view of anything.
+ */
+test("clicking a tool card's head line expands it, and clicking it again folds it", async () => {
   const id = await sessionNew(ws, { profile: "scripted" })
   const state = createSessionState(id)
   const setup = await testRender(
@@ -847,11 +854,17 @@ test("Ctrl+O expands the most recent tool card", async () => {
     await until(() => state.snapshot.items.some((item) => item.kind === "tool" && item.resolved))
     // Collapsed: the command echoes the string once, in the head line only.
     const occurrences = (frame: string) => frame.split("hello-from-nulya").length - 1
-    expect(occurrences(await settle(setup, 5))).toBe(1)
+    const frame = await settle(setup, 5)
+    expect(occurrences(frame)).toBe(1)
 
-    setup.mockInput.pressKey("o", { ctrl: true })
+    const head = frame.split("\n").findIndex((row) => row.includes("hello-from-nulya"))
+    expect(head).toBeGreaterThan(0)
+    await setup.mockMouse.click(6, head)
     // Expanded: the head line plus the captured stdout.
     expect(occurrences(await settle(setup, 5))).toBe(2)
+
+    await setup.mockMouse.click(6, head)
+    expect(occurrences(await settle(setup, 5))).toBe(1)
   } finally {
     setup.renderer.destroy()
   }

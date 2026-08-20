@@ -409,6 +409,7 @@ test("a driver tool is listed with no checkbox: there is no pin for it to be wro
     driverTools,
     skills: [],
     systemPrompts: [],
+    activation: "always" as const,
     permissions: { fs: [], network: [], process: [] },
     root: "",
     shadowed: false,
@@ -683,7 +684,7 @@ test("/ext marks a package that contributes a system prompt as a mode, and says 
       // a number at the end of the fourth fact on a detail line.
       expect(frame).toContain("mode")
       expect(frame).toContain("turning it on puts its system prompt in every new session")
-      expect(frame).toContain("/as house.style")
+      expect(frame).toContain("/with house.style")
 
       setup.mockInput.pressEnter()
       await until(

@@ -16,7 +16,15 @@ import { createStyle } from "../src/render/theme.ts"
 import { sessionEvents, sessionList } from "../src/nulya/cli.ts"
 import type { LedgerEvent, ToolResultEntry } from "../src/nulya/ledger.ts"
 import { agentsDirOf } from "../src/agents.ts"
-import { scripted_env, settle, tempWorkspace, unsafe_settings, until, type TempWorkspace } from "./support.ts"
+import {
+  scripted_env,
+  settle,
+  statusLine,
+  tempWorkspace,
+  unsafe_settings,
+  until,
+  type TempWorkspace,
+} from "./support.ts"
 
 // `unsafe_settings` keeps both bundled packages out of every other test's
 // workspace; this file is the one that is ABOUT the agent package, so it asks
@@ -90,9 +98,10 @@ test("/agent opens a second tab on a session wearing the definition's prompt, an
     // built from the markdown, never activated (physics #2, T31).
     await until(async () => (await agentSession("probe")) !== null, 60_000)
     const child = (await agentSession("probe"))!
-    const frame = await settle(setup, 4)
-    // A visible tab, and the status line says which persona it is wearing.
-    expect(frame).toContain("agent-probe")
+    await settle(setup, 4)
+    // A visible tab, and the status line says which persona it is wearing —
+    // once the notice announcing the new tab has come off that line (T35).
+    await until(() => statusLine(setup).includes("agent-probe"), 15_000)
 
     // The scripted provider's `shell echo hello-from-nulya` is refused by the
     // ceiling, and the model is told why — a deny is that call's tool_result

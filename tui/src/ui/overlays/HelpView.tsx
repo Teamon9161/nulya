@@ -21,8 +21,6 @@ import { default_keys, type Action, type Keymap } from "../../keymap.ts"
 /** What each rebindable action does, in the order a newcomer needs them. */
 const actions: Array<[Action, string]> = [
   ["cancel", "cancel the step (kernel stops at its next step boundary) · browse when idle"],
-  ["fold", "fold / unfold the most recent tool or thinking card"],
-  ["foldAll", "expand everything, again to collapse everything"],
   ["ext", "/ext — the extension store"],
   ["sessions", "/sessions — the session store"],
   ["model", "/model — the models that can run; Enter starts a session on one"],
@@ -51,7 +49,7 @@ const fixed: Array<[string, string]> = [
 /** What the pointer does. It is worth its own block: none of it is discoverable. */
 const mouse: Array<[string, string]> = [
   ["wheel", "scroll the transcript"],
-  ["click a head line", "fold / unfold that card"],
+  ["click a head line", "fold / unfold that card · Esc then Enter is the keyboard way"],
   ["click a row", "move the cursor there · click it again for what Enter does"],
   ["click the model", "in the line under the composer or the composition card: open /model"],
   ["click ask / unsafe", "open the permission-mode picker, the same as /mode"],

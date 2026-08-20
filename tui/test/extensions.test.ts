@@ -27,7 +27,6 @@ import {
   promptConsequence,
   promptPackageWarning,
   promptText,
-  promptsOf,
   std_pins,
   stdEditPinDecision,
   summarize,
@@ -301,49 +300,74 @@ test("only the bundled ids that arrived this run are activated", async () => {
 })
 
 /**
- * The guard the `evolution` bug named (tui.md §11, T31). A package that
- * contributes a SYSTEM PROMPT is a mode: activating it puts that text in front
- * of every model this machine runs, so a background pass must never be the one
- * that decides. `arrived` used to be the whole rule, which covered exactly the
- * one start where `ext seed` dropped the drafts.
+ * The guard the `evolution` bug named (tui.md §11, T31), under T37's sharper
+ * question. A background pass must never be the one that puts a system prompt
+ * in front of every model this machine runs — but whether activation DOES that
+ * is now something the package answers itself (DESIGN §7.2.1).
  */
 test("a background pass never activates a mode, and never guesses when it cannot tell", () => {
-  // The one rule, and it is about system prompts — not about ids. Whoever wrote
-  // the package, a declared prompt is a mode and a mode is a person's decision.
-  expect(autoActivatable(["prompts/identity.md"])).toBe(false)
-  expect(autoActivatable([])).toBe(true)
+  const what = (systemPrompts: string[], activation: "always" | "on_request" = "always") => ({
+    systemPrompts,
+    activation,
+  })
+
+  // A prompt that would reach every session: a person's decision, not a
+  // start-up side effect. Whoever wrote the package.
+  expect(autoActivatable(what(["prompts/identity.md"]))).toBe(false)
+  expect(autoActivatable(what([]))).toBe(true)
+
+  // The same package, saying activation only REGISTERS it: switching it on
+  // changes no session, so the pass may. This is what makes the `/with` route
+  // to a bundled mode appear without anybody deciding anything (T37).
+  expect(autoActivatable(what(["prompts/evolution.md"], "on_request"))).toBe(true)
 
   // The four bundled ids the list used to name are no longer special (T34):
   // `compact` / `handoff` / `agent` declare no prompt, so they are ordinary
   // membership and the pass may switch them on; their DRIVER tools stay off the
   // model's face because their manifests say so, not because this file knows
-  // them. Only `evolution` is still refused, by the rule above.
-  expect(autoActivatable([])).toBe(true)
-  expect(autoActivatable(["prompts/evolution.md"])).toBe(false)
+  // them.
+  expect(autoActivatable(what([]))).toBe(true)
 
   // An unreadable manifest is "don't know", and don't-know is a no: a pass that
-  // cannot tell what a package contributes has not learnt that it contributes
-  // nothing. Leaving it off costs one keypress in `/ext`; the other direction
-  // costs every session on the machine.
+  // cannot tell what a package does has not learnt that it does nothing.
+  // Leaving it off costs one keypress in `/ext`; the other direction costs
+  // every session on the machine.
   expect(autoActivatable(null)).toBe(false)
 })
 
 test("what a mode's switch says, in both directions and for the package that named the bug", () => {
   const on = promptConsequence("evolution", true)
   expect(on).toContain("EVERY new session on this machine")
-  expect(on).toContain("/evolve")
+  expect(on).toContain("/with evolution")
   expect(on).toContain("Enter again to turn it off")
   // A mode nobody wrote a command for still gets the per-session way in.
-  expect(promptConsequence("house.style", true)).toContain("/as house.style")
+  expect(promptConsequence("house.style", true)).toContain("/with house.style")
   expect(promptConsequence("evolution", false)).toContain("no longer enters new sessions")
+
+  // The same package saying activation only REGISTERS it (T37): the switch is
+  // nearly free, and the frightening sentence would be a lie about it.
+  const registered = promptConsequence("evolution", true, "on_request")
+  expect(registered).not.toContain("EVERY new session")
+  expect(registered).toContain("no session changed")
+  expect(registered).toContain("/with evolution")
+  expect(promptConsequence("evolution", false, "on_request")).toContain("unregistered")
 })
 
 test("the start-up check names the modes that are active, and says nothing when none are", () => {
-  const entry = (id: string, over: Partial<{ current: string | null; shadowed: boolean; systemPrompts: string[] }>) => ({
+  const entry = (
+    id: string,
+    over: Partial<{
+      current: string | null
+      shadowed: boolean
+      systemPrompts: string[]
+      activation: "always" | "on_request"
+    }>,
+  ) => ({
     id,
     current: "v-abc" as string | null,
     shadowed: false,
     systemPrompts: [] as string[],
+    activation: "always" as "always" | "on_request",
     ...over,
   })
   const listed = [
@@ -353,6 +377,9 @@ test("the start-up check names the modes that are active, and says nothing when 
     entry("house.style", { current: null, systemPrompts: ["prompts/style.md"] }),
     // Active here, but an earlier root already has this id: this copy never runs.
     entry("shadow.mode", { shadowed: true, systemPrompts: ["prompts/x.md"] }),
+    // Active AND a prompt, but it joins only the sessions that name it (T37):
+    // warning about this one would teach people to ignore the line.
+    entry("opt.in", { systemPrompts: ["prompts/lens.md"], activation: "on_request" }),
   ]
   expect(activePromptPackages(listed)).toEqual(["evolution"])
   expect(activePromptPackages([entry("std", {})])).toEqual([])
@@ -365,14 +392,14 @@ test("the start-up check names the modes that are active, and says nothing when 
   expect(promptPackageWarning([])).toBeNull()
 })
 
-test("the prompts of a built version are read from the root that sync wrote them to, and null when absent", async () => {
+test("what a built version contributes is read from the root that sync wrote it to, and null when absent", async () => {
   const store = tempWorkspace()
   try {
     const root = syncRoot(store, false)
     expect(root).toBe(join(store.dir, ".nulya", "extensions"))
     // Nothing built: the honest answer is "don't know", which `autoActivatable`
     // then reads as a refusal.
-    expect(await promptsOf(store, root, "ghost", "v-nope")).toBeNull()
+    expect(await builtContributions(store, root, "ghost", "v-nope")).toBeNull()
 
     writeDraft(store.dir, "mode.pkg", "a mode")
     const manifest = join(root, "mode.pkg", "extension.json")
@@ -390,8 +417,12 @@ test("the prompts of a built version are read from the root that sync wrote them
     const line = built.lines.find((entry) => entry.id === "mode.pkg")!
     expect(line.version).toMatch(/^v-/)
 
-    expect(await promptsOf(store, root, "mode.pkg", line.version!)).toEqual(["prompts/identity.md"])
-    expect(autoActivatable(await promptsOf(store, root, "mode.pkg", line.version!))).toBe(false)
+    const what = await builtContributions(store, root, "mode.pkg", line.version!)
+    expect(what?.systemPrompts).toEqual(["prompts/identity.md"])
+    // It did not say when activation brings it in, so it means what every
+    // manifest written before that field meant: every session on this machine.
+    expect(what?.activation).toBe("always")
+    expect(autoActivatable(what)).toBe(false)
   } finally {
     store.cleanup()
   }

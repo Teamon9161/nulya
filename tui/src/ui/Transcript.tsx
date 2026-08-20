@@ -86,6 +86,8 @@ export function Transcript(props: {
   onPickModel?: () => void
   /** A `/command` on the welcome screen was clicked: run it as if typed. */
   onCommand?: (command: string) => void
+  /** This launch's tip for the opening screen (T38), chosen once by `App`. */
+  tip?: string
   /** Handed to `App` so PgUp/PgDn and the "more below" hint have something to act on. */
   ref?: (box: ScrollBoxRenderable) => void
 }) {
@@ -125,7 +127,7 @@ export function Transcript(props: {
       {/* An empty session is the one screen with nothing to report; it says
           what this session is and what to do, rather than a blank rectangle. */}
       <Show when={props.items.length === 0}>
-        <Welcome cwd={props.cwd} plan={props.plan} onCommand={props.onCommand} />
+        <Welcome cwd={props.cwd} plan={props.plan} onCommand={props.onCommand} tip={props.tip} />
       </Show>
       {/* `Index` rather than `For`: the gap is a property of an item's PLACE in
           the list, so keying by identity would rebuild a card whenever the item

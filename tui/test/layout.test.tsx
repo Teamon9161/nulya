@@ -55,8 +55,10 @@ for (const height of [30, 24, 16, 10]) {
       expect(at).toBeGreaterThanOrEqual(0)
       expect(rows[at - 1]).toContain("╭")
       expect(rows[at + 1]).toContain("╰")
-      // And the status bar below it still says something.
-      expect(frame).toContain("driver")
+      // And the row under the box still says something. What it says depends on
+      // the moment — the model and the mode at rest, the news of the moment
+      // while a notice is up (T35) — so what is asserted is that it is there.
+      expect(rows[at + 2]?.trim().length ?? 0).toBeGreaterThan(0)
     } finally {
       setup.renderer.destroy()
     }

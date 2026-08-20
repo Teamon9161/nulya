@@ -37,7 +37,7 @@ import { fit, wrapWords } from "./columns.ts"
  * What the NEXT session will be told, on a tab that has not started one
  * (tui.md §11, T22/T24). It is not a header and it is not frozen — that is the
  * point of showing it: everything on it is still a decision, and `/model`,
- * `/ext` and `/as` are the three that move it.
+ * `/ext` and `/with` are the three that move it.
  *
  * The model is deliberately NOT here: it is under the composer (`StatusBar`),
  * on the one line that keeps saying it once this screen is gone.
@@ -45,8 +45,39 @@ import { fit, wrapWords } from "./columns.ts"
 export interface NextSession {
   /** The stable pin ids this TUI would pass as `--pin` (`ext:<id>/<tool>`). */
   tools: string[]
-  /** `--with <id>[@<version>]`, when `/evolve` or `/as` set one. */
+  /** `--with <id>[@<version>]`, when `/evolve` or `/with` set one. */
   bring?: string
+}
+
+/**
+ * One of these shows per launch, picked at random (T38, tcode's `TIPS`).
+ *
+ * This is where a keyboard hint belongs. The row under the composer used to
+ * carry `Esc cancel · Ctrl+O fold · /help` at all times, which is the worst of
+ * both: a reminder that is always there stops being read after the first hour,
+ * and it spent the busiest line on the screen to do it. A tip is read once, on
+ * the screen that exists precisely because there is nothing else to look at.
+ *
+ * Every entry must describe behaviour that is real TODAY — a stale tip is worse
+ * than no tip, because it is the one line a newcomer believes.
+ */
+const tips: string[] = [
+  "Esc stops a running step · on an empty box it opens browse, where j/k walk the cards",
+  "click a card's head line to open or close it · /fold closes all of them",
+  "type while a step runs: the turn is queued and joins it at the next step boundary",
+  "/model picks what the NEXT session runs on · ←→ on a row changes its effort",
+  "/mode switches between asking about every tool call and not asking at all",
+  "/compact hands this conversation to a fresh session with a summary in front",
+  "/ext is the store: what is built, what is active, and which tools are pinned",
+  "/agent delegates to a sub-agent in a tab of its own · bare /agent lists them",
+  "shell {background:true} outlives the step · /tasks shows what is still running",
+  "/outcome success|partial|failure records how a session went · nothing recorded is not failure",
+  "Ctrl+C stops the step and never exits on the first press",
+]
+
+/** The tip for this launch. Picked once by the caller, never during a render. */
+export function pickTip(random: () => number = Math.random): string {
+  return tips[Math.min(tips.length - 1, Math.floor(random() * tips.length))]!
 }
 
 /** The `/` commands worth knowing before you have typed anything. */
@@ -65,6 +96,12 @@ export function Welcome(props: {
   plan?: NextSession
   /** A command row was clicked: run it as if it had been typed and sent. */
   onCommand?: (command: string) => void
+  /**
+   * The tip for this launch. Given rather than picked here so the screen does
+   * not choose a different one every time it re-renders — a line that changes
+   * under the eye while the eye is on it is not a tip, it is a distraction.
+   */
+  tip?: string
 }) {
   const style = useStyle()
   const screen = useScreen()
@@ -145,18 +182,22 @@ export function Welcome(props: {
       <box height={1} />
       {/* Broken at its joints by us, so a narrow terminal gets two whole
           phrases rather than a line that folds mid-word. */}
-      <For
-        each={wrapWords(
-          `${style.glyphs.user} type below and press Enter · Esc to stop a step, or to read back through the cards`,
-          Math.max(20, screen().width - 3),
-        )}
-      >
+      <For each={wrapWords(`${style.glyphs.user} type below and press Enter`, Math.max(20, screen().width - 3))}>
         {(line) => (
           <text fg={style.theme.dim} height={1}>
             {line}
           </text>
         )}
       </For>
+      <box height={1} />
+      {/* One key or command a launch, where a hint can be read once instead of
+          living forever on the status line (T38). */}
+      <box flexDirection="row" width="100%">
+        <text fg={style.theme.accent.evolve} flexShrink={0}>
+          {`${style.glyphs.tip} `}
+        </text>
+        <text fg={style.theme.dim}>{fit(`tip: ${props.tip ?? tips[0]!}`, Math.max(10, screen().width - 5))}</text>
+      </box>
     </box>
   )
 }

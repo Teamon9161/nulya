@@ -121,6 +121,18 @@ export interface Contributions {
    * show the most deliberate part of a composition as empty.
    */
   systemPrompts: string[]
+  /**
+   * When activation brings this package in (DESIGN §7.2.1). `"on_request"`
+   * means activating it only REGISTERS it — it joins the sessions that name it
+   * with `--with` and no others — while `"always"` (the default, and what every
+   * manifest written before the field says) means every new session on this
+   * machine.
+   *
+   * The one manifest declaration the kernel enforces, so unlike `readonly` and
+   * `audience` there is no silence to interpret here: absent reads as
+   * `"always"` because that is what the kernel does with it.
+   */
+  activation: "always" | "on_request"
 }
 
 /**
@@ -145,6 +157,7 @@ export async function readContributions(
     driverTools: [],
     skills: [],
     systemPrompts: [],
+    activation: "always",
   }
   const search = roots ?? (await storeRoots(ws))
   for (const root of search) {
@@ -164,7 +177,7 @@ export async function readContributions(
 
 function contributionsOf(
   manifest: Record<string, unknown> | null,
-): Pick<Contributions, "tools" | "readonlyTools" | "driverTools" | "systemPrompts" | "skills"> {
+): Pick<Contributions, "tools" | "readonlyTools" | "driverTools" | "systemPrompts" | "skills" | "activation"> {
   const contributes = (manifest?.["contributes"] ?? {}) as Record<string, unknown>
   const declared = Array.isArray(contributes["tools"]) ? (contributes["tools"] as Array<Record<string, unknown>>) : []
   const named = declared.filter((tool) => typeof tool?.["name"] === "string")
@@ -178,6 +191,9 @@ function contributionsOf(
     driverTools: named.filter((tool) => tool["audience"] === "driver").map((tool) => tool["name"] as string),
     skills: stringList(contributes["skills"]),
     systemPrompts: stringList(contributes["system_prompts"]),
+    // Top level, beside `permissions` — not a contribution but a fact about
+    // all of them. The kernel refuses any other word, so this is total.
+    activation: manifest?.["activation"] === "on_request" ? "on_request" : "always",
   }
 }
 
@@ -451,6 +467,13 @@ export interface ExtensionEntry {
   driverTools: string[]
   skills: string[]
   systemPrompts: string[]
+  /**
+   * When activating this id brings it in (DESIGN §7.2.1). `"on_request"` means
+   * the switch REGISTERS it and changes no session — it joins the ones that
+   * name it with `--with`. The `/ext` switch means two different things for the
+   * two values, so the pane has to know which.
+   */
+  activation: "always" | "on_request"
   permissions: { fs: string[]; network: string[]; process: string[] }
   /** Which store root holds this copy (DESIGN §7.2). */
   root: string
@@ -475,7 +498,7 @@ function stringList(value: unknown): string[] {
 
 function manifestFacts(manifest: Record<string, unknown> | null): Pick<
   ExtensionEntry,
-  "kind" | "tools" | "driverTools" | "skills" | "systemPrompts" | "permissions"
+  "kind" | "tools" | "driverTools" | "skills" | "systemPrompts" | "activation" | "permissions"
 > {
   const runtime = manifest?.["runtime"] as Record<string, unknown> | undefined
   const entry = typeof runtime?.["entry"] === "string" ? (runtime["entry"] as string) : null

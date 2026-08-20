@@ -55,7 +55,7 @@ export interface DraftTab extends TabCommon {
   kind: "draft"
   pick: Accessor<ModelPick | undefined>
   setPick(pick: ModelPick | undefined): void
-  /** `--with <id>@<version>`: what `/evolve` and `/as` put on the session. */
+  /** `--with <id>@<version>`: what `/evolve` and `/with` put on the session. */
   bring: Accessor<WithRef | undefined>
   setBring(ref: WithRef | undefined): void
 }

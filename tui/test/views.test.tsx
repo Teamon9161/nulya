@@ -10,7 +10,7 @@ import type { JSX } from "solid-js"
 import { testRender } from "@opentui/solid"
 import { App } from "../src/ui/App.tsx"
 import { HelpView } from "../src/ui/overlays/HelpView.tsx"
-import { SettingsView, settingRows } from "../src/ui/overlays/SettingsView.tsx"
+import { SettingsView } from "../src/ui/overlays/SettingsView.tsx"
 import { UsageView } from "../src/ui/overlays/UsageView.tsx"
 import { displayWidth } from "../src/ui/columns.ts"
 import { StyleContext, createStyle, type Style } from "../src/render/theme.ts"
@@ -19,7 +19,16 @@ import { createSessionState } from "../src/state/session.ts"
 import { default_settings, loadSettings, type Settings } from "../src/state/settings.ts"
 import { createKeymap } from "../src/keymap.ts"
 import { sessionList, sessionNew } from "../src/nulya/cli.ts"
-import { unsafe_settings, frameLines, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
+import {
+  unsafe_settings,
+  frameLines,
+  scripted_env,
+  settle,
+  statusLine,
+  tempWorkspace,
+  until,
+  type TempWorkspace,
+} from "./support.ts"
 
 const style: Style = createStyle(unsafe_settings, {})
 
@@ -56,8 +65,10 @@ test("/help lists the bindings that are actually in force", async () => {
     const frame = await settle(setup, 8)
     expect(frame).toContain("help · keys and commands")
     expect(frame).toContain("escape")
-    expect(frame).toContain("ctrl+o")
     expect(frame).toContain("f3")
+    // Folding has no binding any more (T38) — a click on a head line, or
+    // browse mode — so the page must not print one.
+    expect(frame).not.toContain("ctrl+o")
     // Nothing was overridden, so nothing claims to be.
     expect(frame).not.toContain("(tui.toml)")
     expect(frame).toMatchSnapshot()
@@ -68,7 +79,7 @@ test("/help lists the bindings that are actually in force", async () => {
     expect(frame).toContain("/outcome <verdict> [note]")
     expect(frame).toContain("/quit")
 
-    const rebound = createStyle({ ...default_settings, keys: { fold: "ctrl+b" } }, {})
+    const rebound = createStyle({ ...default_settings, keys: { tasks: "ctrl+b" } }, {})
     const second = await overlay(() => <HelpView keys={createKeymap(rebound.settings)} onClose={() => {}} />)
     try {
       const changed = await settle(second, 4)
@@ -101,9 +112,9 @@ test("/help at eighty columns: every description broken by us, the key column cu
     // The gutter is a column, not a coincidence: two rows put their description
     // at exactly the same offset, with at least two blanks in front of it.
     const quit = lines.find((line) => line.includes("kill the running step"))!
-    const fold = lines.find((line) => line.includes("fold / unfold the most recent"))!
-    expect(quit.indexOf("kill the running step")).toBe(fold.indexOf("fold / unfold the most recent"))
-    expect(fold).toMatch(/ctrl\+o {2,}fold \/ unfold the most recent/)
+    const redraw = lines.find((line) => line.includes("redraw the screen"))!
+    expect(quit.indexOf("kill the running step")).toBe(redraw.indexOf("redraw the screen"))
+    expect(redraw).toMatch(/ctrl\+l {2,}redraw the screen/)
 
     // A description too long for its column costs a second ROW, indented under
     // the text column — never a wrap, and never a line over the width. The
@@ -113,7 +124,7 @@ test("/help at eighty columns: every description broken by us, the key column cu
     expect(first).toBeGreaterThan(0)
     const rest = lines[first + 1]!
     expect(rest).toContain("next step boundary) · browse when idle")
-    expect(rest.indexOf("next step")).toBe(fold.indexOf("fold / unfold the most recent"))
+    expect(rest.indexOf("next step")).toBe(redraw.indexOf("redraw the screen"))
   } finally {
     setup.renderer.destroy()
   }
@@ -206,11 +217,11 @@ test("/usage at eighty columns: the label column holds, the caveat is broken, a 
   }
 }, 60_000)
 
-test("a [keys] override in tui.toml really moves the fold key", async () => {
+test("a [keys] override in tui.toml really moves a binding", async () => {
   mkdirSync(join(ws.dir, ".nulya"), { recursive: true })
-  writeFileSync(join(ws.dir, ".nulya", "tui.toml"), '[keys]\nfold = "ctrl+b"\n')
+  writeFileSync(join(ws.dir, ".nulya", "tui.toml"), '[keys]\nhelp = "ctrl+b"\n')
   const settings = await loadSettings(ws.dir, {})
-  expect(settings.keys["fold"]).toBe("ctrl+b")
+  expect(settings.keys["help"]).toBe("ctrl+b")
   // Nobody is at this keyboard to answer the gate, so the tool call runs
   // (tui.md §5.7); the binding is what this test is about.
   const bindings: Settings = { ...settings, driver: unsafe_settings.driver, extensions: unsafe_settings.extensions }
@@ -223,38 +234,20 @@ test("a [keys] override in tui.toml really moves the fold key", async () => {
   )
   try {
     await settle(setup, 4)
+    // A real step first: this session's shell call is what the `/usage` test
+    // below reads out of `.nulya/tool-usage.jsonl`, and it is the only thing in
+    // this file that puts a line there.
     await setup.mockInput.typeText("probe")
     setup.mockInput.pressEnter()
     await until(() => state.snapshot.items.some((item) => item.kind === "tool" && item.resolved))
-    const occurrences = (frame: string) => frame.split("hello-from-nulya").length - 1
-    expect(occurrences(await settle(setup, 5))).toBe(1)
+    await settle(setup, 4)
 
     // The default binding is gone…
-    setup.mockInput.pressKey("o", { ctrl: true })
-    expect(occurrences(await settle(setup, 4))).toBe(1)
+    setup.mockInput.pressKey("f1")
+    expect(await settle(setup, 4)).not.toContain("help · keys and commands")
     // …and the one from the file works.
     setup.mockInput.pressKey("b", { ctrl: true })
-    expect(occurrences(await settle(setup, 5))).toBe(2)
-  } finally {
-    setup.renderer.destroy()
-  }
-}, 120_000)
-
-test("/settings shows the effective values and which file they came from", async () => {
-  // Written by the test above; this view's whole job is to name it.
-  const settings = await loadSettings(ws.dir, {})
-  const rows = settingRows(settings)
-  expect(rows.find((row) => row.key === "transcript.edit_diff")?.value).toBe("expanded")
-  expect(rows.find((row) => row.key === "keys.fold")?.value).toBe("ctrl+b")
-
-  const setup = await overlay(() => <SettingsView ws={ws} onClose={() => {}} />, createStyle(settings, {}))
-  try {
-    const frame = await settle(setup, 4)
-    expect(frame).toContain("settings · tui.toml")
-    expect(frame).toContain("applied")
-    expect(frame).toContain(join(".nulya", "tui.toml"))
-    expect(frame).toContain("transcript.history_window")
-    expect(frame).toContain("keys.fold")
+    expect(await settle(setup, 5)).toContain("help · keys and commands")
   } finally {
     setup.renderer.destroy()
   }
@@ -335,7 +328,7 @@ test("/outcome records how this session went, without touching the session file"
  * identity — and it decides what the model thinks it is. It was on the draft
  * card and on the composition card, and nowhere at all once the card was
  * folded, which is how a session carrying `evolution` looked exactly like one
- * that was not. `/as` is the general form of `/evolve`, and needs no build.
+ * that was not. `/with` is the general form of `/evolve`, and needs no build.
  */
 test("a tab wearing a package says so on the draft card and on the status line", async () => {
   const setup = await testRender(
@@ -354,14 +347,14 @@ test("a tab wearing a package says so on the draft card and on the status line",
     await settle(setup, 4)
     expect(setup.captureCharFrame()).not.toContain("evolution")
 
-    await setup.mockInput.typeText("/as evolution")
+    await setup.mockInput.typeText("/with evolution")
     setup.mockInput.pressEnter()
     const frame = await settle(setup, 4)
     // The draft card's `with` row, and the chip under the composer that will
-    // still be there once the card is gone.
+    // still be there once the card is gone — visible once the notice that
+    // answered `/with` has come off that line on its own (T35).
     expect(frame).toContain("with        evolution")
-    const rows = frame.split("\n")
-    expect(rows[rows.length - 2]).toContain("◈ evolution")
+    await until(() => statusLine(setup).includes("◈ evolution"), 15_000)
   } finally {
     setup.renderer.destroy()
   }

@@ -136,6 +136,20 @@ export function frameLines(frame: string): string[] {
   return frame.split("\n").map((line) => line.replace(/\s+$/, ""))
 }
 
+/**
+ * The line under the composer. The frame ends with a newline, so the last row
+ * is the blank after it and the status bar is the one before that.
+ *
+ * Worth a helper because a notice covers that whole line while it is up (T35):
+ * an assertion about the bar has to be about the bar, not about the frame
+ * happening to contain the word somewhere — the composition card at the top
+ * names the model too.
+ */
+export function statusLine(setup: { captureCharFrame(): string }): string {
+  const rows = setup.captureCharFrame().split("\n")
+  return rows[rows.length - 2] ?? ""
+}
+
 export async function until(predicate: () => boolean | Promise<boolean>, timeoutMs = 20_000): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (!(await predicate())) {

@@ -32,6 +32,15 @@ export type DriverStatus = "idle" | "sending" | "stepping" | "canceling"
 export interface Driver {
   status: Accessor<DriverStatus>
   /**
+   * When the current run began (`Date.now()`), or null while idle (T38).
+   *
+   * The one thing a person wants from a spinner is whether it is still worth
+   * waiting for, and only the thing that starts the run knows when that was.
+   * It is a clock, not state: nothing branches on it, the running line reads it
+   * to say `12s`.
+   */
+  startedAt: Accessor<number | null>
+  /**
    * Append a user turn, and start a step unless one is already running.
    *
    * `framed` says the text already carries its own explanation of how it got
@@ -122,7 +131,18 @@ export function createDriver(
   state: SessionState,
   options: DriverOptions = {},
 ): Driver {
-  const [status, setStatus] = createSignal<DriverStatus>("idle")
+  const [status, setStatusRaw] = createSignal<DriverStatus>("idle")
+  const [startedAt, setStartedAt] = createSignal<number | null>(null)
+  /**
+   * Every status change goes through here so the clock cannot drift from the
+   * state it dates: idle clears it, and the first step out of idle starts it —
+   * `sending` into `stepping` is one run, not two.
+   */
+  const setStatus = (next: DriverStatus) => {
+    if (next === "idle") setStartedAt(null)
+    else if (startedAt() === null) setStartedAt(Date.now())
+    setStatusRaw(next)
+  }
   let handle: StepHandle | null = null
   let disposed = false
   // `drive()` must never run twice at once: two `session step` processes on
@@ -209,6 +229,7 @@ export function createDriver(
 
   return {
     status,
+    startedAt,
     async send(text, framed = false) {
       const trimmed = text.trim()
       if (trimmed.length === 0) return

@@ -315,30 +315,36 @@ export function pinsOf(what: Pick<Contributions, "id" | "tools" | "driverTools">
 }
 
 /**
- * May a BACKGROUND pass point `current` at this package? (tui.md §11, T31.)
+ * May a BACKGROUND pass point `current` at this package? (tui.md §11, T31/T37.)
  *
- * One rule, and it is about system prompts. Activating a package that
- * contributes one puts its text in front of every model this machine runs from
- * then on (DESIGN §5.3 / §7.8) — that is not an installation, it is a MODE, and
- * choosing one is a person's decision, never a start-up side effect. The bug
- * that named this function: `evolution` got activated by a sync pass, and every
- * session afterwards opened believing it was the slow loop and refused ordinary
- * work. The way to wear it is `/evolve` — one session, `--with`, nothing moved.
+ * One rule, and it is about REACH: refuse only when activating would put a
+ * system prompt in front of every model this machine runs from then on. That is
+ * not an installation, it is a MODE, and choosing one is a person's decision,
+ * never a start-up side effect. The bug that named this function: `evolution`
+ * got activated by a sync pass, and every session afterwards opened believing
+ * it was the slow loop and refused ordinary work.
+ *
+ * Since T37 the reach question has two halves, and a package answers the second
+ * one itself: a manifest saying `activation: "on_request"` (DESIGN §7.2.1) is
+ * activated INTO REGISTRATION — it joins only the sessions that name it — so
+ * pointing `current` at it changes no session at all and a background pass may
+ * do it. That is what makes `evolution` auto-activatable now: the switch turns
+ * on the `/with evolution` route, and nothing else.
  *
  * It used to also refuse four bundled ids by name. That half is gone with
  * `bundled_driver_only` (T34), and losing it is the point: activating `compact`
  * / `handoff` / `agent` is membership and nothing else — none of them
  * contributes a system prompt, and their driver tools stay off the model's face
  * because their own manifests say so, not because this file knows their names.
- * `evolution` is still refused, by the rule that was always the real one.
  *
- * `prompts` is `null` for "could not read the manifest", and that is a no as
- * well: a pass that cannot tell what a package contributes has not learnt that
- * it contributes nothing. Leaving it built and inactive costs one keypress in
- * `/ext`; the other direction costs every session on the machine.
+ * `what` is `null` for "could not read the manifest", and that is a no as well:
+ * a pass that cannot tell what a package does has not learnt that it does
+ * nothing. Leaving it built and inactive costs one keypress in `/ext`; the
+ * other direction costs every session on the machine.
  */
-export function autoActivatable(prompts: readonly string[] | null): boolean {
-  return prompts !== null && prompts.length === 0
+export function autoActivatable(what: Pick<Contributions, "systemPrompts" | "activation"> | null): boolean {
+  if (what === null) return false
+  return what.systemPrompts.length === 0 || what.activation === "on_request"
 }
 
 /**
@@ -350,19 +356,6 @@ export function autoActivatable(prompts: readonly string[] | null): boolean {
  */
 export function syncRoot(ws: Workspace, user: boolean): string {
   return user ? join(userConfigDir(), "extensions") : join(ws.dir, ".nulya", "extensions")
-}
-
-/**
- * The system prompts a freshly built version contributes, or null when the
- * manifest is not there to be read (`autoActivatable`'s "don't know").
- */
-export async function promptsOf(
-  ws: Workspace,
-  root: string,
-  id: string,
-  version: string,
-): Promise<string[] | null> {
-  return (await builtContributions(ws, root, id, version))?.systemPrompts ?? null
 }
 
 /**
@@ -385,32 +378,62 @@ export async function builtContributions(
 
 /**
  * What turning a package that contributes a system prompt on (or off) actually
- * does, said out loud (tui.md §11, T31).
+ * does, said out loud (tui.md §11, T31/T37).
  *
- * `/ext`'s Enter is one keypress and its consequence reaches every session this
- * machine opens from now on. That asymmetry is the whole reason for this
- * sentence: the switch stays one keypress — nothing here asks for a `y` — but it
- * no longer happens silently, and it names the per-session way to the same thing.
+ * `/ext`'s Enter is one keypress, and for a package that says `activation:
+ * "always"` its consequence reaches every session this machine opens from now
+ * on. That asymmetry is the whole reason for this sentence: the switch stays
+ * one keypress — nothing here asks for a `y` — but it no longer happens
+ * silently, and it names the per-session way to the same thing.
+ *
+ * For `on_request` the same keypress is nearly free, and saying the scary
+ * sentence there would be worse than saying nothing: it registers the package
+ * and changes no session, which is exactly what makes `/with <id>` appear as a
+ * route. Two states, two sentences (DESIGN §7.2.1).
  */
-export function promptConsequence(id: string, on: boolean): string {
+export function promptConsequence(
+  id: string,
+  on: boolean,
+  activation: "always" | "on_request" = "always",
+): string {
+  if (activation === "on_request") {
+    return on
+      ? `${id} registered · no session changed · /with ${id} wears it for one session · Enter again to unregister it`
+      : `${id} unregistered · /with ${id} no longer resolves; name a version to wear it`
+  }
   if (!on) return `${id} off · its system prompt no longer enters new sessions`
-  const wear = id === "evolution" ? "/evolve" : `/as ${id}`
-  return `${id} active · its system prompt now enters EVERY new session on this machine · ${wear} wears it for one session instead · Enter again to turn it off`
+  return `${id} active · its system prompt now enters EVERY new session on this machine · /with ${id} wears it for one session instead · Enter again to turn it off`
 }
 
 /**
- * Packages that are active right now and contribute a system prompt: what the
- * start-up check says out loud (tui.md §11, T31).
+ * Packages whose system prompt is, right now, in front of every session this
+ * machine opens: what the start-up check says out loud (tui.md §11, T31/T37).
  *
  * A read, never a write. Turning one off is as much a decision as turning it on
  * was, so this only names them and points at `/ext`; nothing here undoes
  * somebody's activation on their behalf.
+ *
+ * An active `on_request` package is deliberately NOT named: its prompt reaches
+ * only the sessions that ask for it (DESIGN §7.2.1), so warning about it would
+ * teach people to ignore the line that matters.
  */
 export function activePromptPackages(
-  entries: readonly { id: string; current: string | null; shadowed: boolean; systemPrompts: string[] }[],
+  entries: readonly {
+    id: string
+    current: string | null
+    shadowed: boolean
+    systemPrompts: string[]
+    activation: "always" | "on_request"
+  }[],
 ): string[] {
   return entries
-    .filter((entry) => entry.current !== null && !entry.shadowed && entry.systemPrompts.length > 0)
+    .filter(
+      (entry) =>
+        entry.current !== null &&
+        !entry.shadowed &&
+        entry.systemPrompts.length > 0 &&
+        entry.activation === "always",
+    )
     .map((entry) => entry.id)
 }
 
@@ -464,7 +487,7 @@ export async function adoptBundled(
     if (!line?.version || line.state === "failed" || line.state === "needs zig") continue
     const what = await builtContributions(ws, root, id, line.version)
     if (id === "std") std = what
-    if (!autoActivatable(what?.systemPrompts ?? null)) continue
+    if (!autoActivatable(what)) continue
     if (line.activation === "active") {
       active.push(id)
       continue

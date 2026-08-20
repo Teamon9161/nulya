@@ -120,16 +120,25 @@ const switch_width = 2
 
 /**
  * What a package that contributes a SYSTEM PROMPT is called in the id list
- * (tui.md §11, T31).
+ * (tui.md §11, T31/T37).
  *
  * It is the one contribution whose reach is the whole machine: skills wait to be
  * loaded and tools wait to be called, but a system prompt is in front of every
  * model of every session that carries the package, before anybody says anything.
  * So it gets a word of its own in the list rather than the count of prompt files
  * that used to sit at the end of the detail line, four facts in.
+ *
+ * Two words, because since T37 there are two reaches and the package declares
+ * which one it has (DESIGN §7.2.1). `mode` is the far one: the switch puts this
+ * prompt in front of every session this machine opens. `opt-in` is the near
+ * one: the switch only registers the package, and a session gets it by naming
+ * it (`/with <id>`) — which is why this word is NOT warn-coloured. Same
+ * contribution, opposite blast radius; one word each is the least this list can
+ * do about that.
  */
-export function modeCell(entry: { systemPrompts: string[] }): string {
-  return entry.systemPrompts.length > 0 ? "mode" : ""
+export function modeCell(entry: { systemPrompts: string[]; activation: "always" | "on_request" }): string {
+  if (entry.systemPrompts.length === 0) return ""
+  return entry.activation === "on_request" ? "opt-in" : "mode"
 }
 
 /** One row of the tools pane: a pinnable tool, its state, and its evidence. */
@@ -578,7 +587,7 @@ export function ExtView(props: {
     const [id, mode, on, draft, shadow] = squeeze(
       [
         columnWidth(list.map((entry) => entry.id), 2, 24),
-        columnWidth(list.map(modeCell), 2, 6),
+        columnWidth(list.map(modeCell), 2, 8),
         columnWidth(list.map(switchCell), 2, 12),
         columnWidth(list.map((entry) => draftColumn(draftOf(entry.id))), 2, 11),
         columnWidth(list.map((entry) => (entry.shadowed ? "shadowed" : "")), 0, 9),
@@ -857,7 +866,7 @@ export function ExtView(props: {
       // keypress here reaches every session this machine opens from now on, and
       // that is the fact worth the line.
       entry.systemPrompts.length > 0
-        ? promptConsequence(entry.id, true)
+        ? promptConsequence(entry.id, true, entry.activation)
         : `${entry.id} on · ${version}` +
           (ids.length > 0
             ? room
@@ -900,7 +909,7 @@ export function ExtView(props: {
     props.onMembershipChanged?.()
     setNotice(
       (entry.systemPrompts.length > 0
-        ? promptConsequence(entry.id, false)
+        ? promptConsequence(entry.id, false, entry.activation)
         : `${entry.id} off · its skills leave the composition`) +
         ` · versions all stay${stuck ? ` · ${stuck}` : ""}`,
     )
@@ -1378,7 +1387,13 @@ export function ExtView(props: {
                         somebody has to be able to spot without reading a
                         detail pane. */}
                     <box width={idCols().mode} flexShrink={0}>
-                      <text fg={on() === "off" ? style.theme.faint : style.theme.warn}>
+                      <text
+                        fg={
+                          on() === "off" || entry().activation === "on_request"
+                            ? style.theme.faint
+                            : style.theme.warn
+                        }
+                      >
                         {fit(modeCell(entry()), Math.max(0, idCols().mode - 2))}
                       </text>
                     </box>
@@ -1464,11 +1479,13 @@ export function ExtView(props: {
                       panel written as the quietest one (T31). */}
                   <Show when={entry.systemPrompts.length > 0}>
                     <Lines
-                      text={`a mode · turning it on puts its system prompt in every new session on this machine · ${
-                        entry.id === "evolution" ? "/evolve" : `/as ${entry.id}`
-                      } wears it for one session instead`}
+                      text={
+                        entry.activation === "on_request"
+                          ? `opt-in · turning it on only registers it; no session changes · /with ${entry.id} wears it for one session`
+                          : `a mode · turning it on puts its system prompt in every new session on this machine · /with ${entry.id} wears it for one session instead`
+                      }
                       width={detailWidth()}
-                      fg={style.theme.warn}
+                      fg={entry.activation === "on_request" ? style.theme.muted : style.theme.warn}
                     />
                   </Show>
                   {/* Authority, only where there is any. `fs 0 · net — · proc 0`

@@ -4,7 +4,6 @@ import { onClick } from "./rows.ts"
 import { displayWidth, fit } from "./columns.ts"
 import { builtin_tools } from "../pins.ts"
 import { cacheShare, type SessionSnapshot } from "../state/session.ts"
-import type { DriverStatus } from "../state/driver.ts"
 import type { Role } from "../state/attach.ts"
 import type { PermissionMode } from "../approvals.ts"
 
@@ -15,25 +14,30 @@ function compact(n: number): string {
 }
 
 /**
- * The one line under the composer (tui.md §4.1, §4.5, §11 T22): what this
- * session runs on, what its face carries, what it has cost, what is happening
- * right now, and the way to everything else.
+ * The one line under the composer (tui.md §4.1, §4.5, §11 T22): a standing
+ * description of this session — what it runs on, what its face carries, what
+ * it has cost, and how it is being driven.
  *
  * It replaced a header line whose subject was the session id — a string a
  * person never reads and cannot use — and it sits under the input box for the
  * same reason tcode's does: the model is the answer to "what am I talking to",
  * which is a question you ask while typing, not while scrolling.
  *
+ * What is HAPPENING is not here (T38). It moved to its own line above the
+ * composer (`WorkingStatus`), because an activity and a description are read at
+ * different rates: this row is read once and then trusted, and a live fact
+ * parked at the end of it had the least room and the least contrast on the
+ * screen. What went with it: `idle` (a word whose only content is that there
+ * was nothing to say) and the keyboard hints, which are now tips on the opening
+ * screen — a reminder shown forever stops being read.
+ *
  * The totals are the ledger's — every step records what it cost (DESIGN §3.1) —
  * so they survive a reopen and are the same numbers whoever is driving.
  */
 export function StatusBar(props: {
   snapshot: SessionSnapshot
-  status: DriverStatus
   /** Who holds the writer lease: us, or somebody else (tui.md §5.6). */
   role: Role
-  takeoverReady: boolean
-  spinnerFrame: string
   /**
    * The model this tab talks to: the session's frozen identity, or — on a tab
    * that is still a draft — what the next `session new` will name.
@@ -45,17 +49,6 @@ export function StatusBar(props: {
   tools: number
   /** The permission mode this TUI answers the kernel's gate with (tui.md §5.7). */
   mode?: PermissionMode
-  /** A tool call is on screen waiting for a verdict right now. */
-  awaiting?: boolean
-  /**
-   * Background tasks of this session that have not finished (tui.md §5.9). They
-   * outlive the step that started them, so this is shown while the driver is
-   * IDLE too — an idle bar with work going on in the background is the one case
-   * where "idle" would be a lie.
-   */
-  background?: number
-  /** Clicking the background count: the mouse half of `/tasks`. */
-  onOpenTasks?: () => void
   /**
    * Clicking the mode chip: the mouse half of `/mode`, which opens the picker
    * (tui.md §11, T31). It used to flip the mode straight from here, which is the
@@ -85,27 +78,27 @@ export function StatusBar(props: {
   onPickModel?: () => void
   /** Clicking the "N more below" marker: the mouse half of Shift+End. */
   onScrollEnd?: () => void
-  /** Clicking `/help` in the default hint: the mouse half of typing it. */
-  onHelp?: () => void
 }) {
   const style = useStyle()
   const screen = useScreen()
   const [overBehind, setOverBehind] = createSignal(false)
-  const [overHelp, setOverHelp] = createSignal(false)
   const [overModel, setOverModel] = createSignal(false)
   const [overMode, setOverMode] = createSignal(false)
-  const [overTasks, setOverTasks] = createSignal(false)
-  const tasksClick = onClick(() => props.onOpenTasks?.())
   const behindClick = onClick(() => props.onScrollEnd?.())
-  const helpClick = onClick(() => props.onHelp?.())
   const modelClick = onClick(() => props.onPickModel?.())
   const [overWearing, setOverWearing] = createSignal(false)
   const modeClick = onClick(() => props.onPickMode?.())
   const extClick = onClick(() => props.onOpenExt?.())
 
+  /**
+   * What this session has cost so far, or nothing at all before it has cost
+   * anything. A session that has not run yet is the state you are looking at on
+   * every draft tab, and `no usage yet` spent twelve columns of the busiest line
+   * on the screen to say what the absent chip says by being absent.
+   */
   const usage = createMemo(() => {
     const u = props.snapshot.usage
-    if (u.input === 0 && u.output === 0) return "no usage yet"
+    if (u.input === 0 && u.output === 0) return null
     return `↑${compact(u.input)} ↓${compact(u.output)} cache ${cacheShare(u)}%`
   })
 
@@ -123,70 +116,6 @@ export function StatusBar(props: {
     return { percent, urgent: percent >= 80 }
   })
 
-  /** `⠋ 2 background`, or nothing at all when nothing is running. */
-  const background = () => {
-    const n = props.background ?? 0
-    return n > 0 ? `${props.spinnerFrame} ${n} background` : null
-  }
-
-  const activity = createMemo(() => {
-    // A call waiting for a verdict is the only thing happening: the kernel is
-    // stopped on it, and the keys that move it are on the card (tui.md §5.7).
-    // The keys are on the panel right above this line now, spelled out one per
-    // row; repeating them here in a line that has to fit whatever is left over
-    // is how they ended up as `y allow · nasknstep` on a narrow window.
-    if (props.awaiting) return "waiting for your answer"
-    // The message itself is in the transcript, wrapped and in full
-    // (`ErrorNotice`). This line has one row and shares it with the model, the
-    // cost and the chips, so putting the text here meant `error: model request
-    // failed (Transp` — the shape of every error anyone actually read. What
-    // belongs on a status line is the state, and a pointer to where it is
-    // written out, for the case where the transcript is scrolled away.
-    if (props.snapshot.error) return "error · see transcript"
-    // Observer mode is not idleness: nothing is stuck, we simply are not the
-    // writer. Say which, and say when taking over is possible.
-    if (props.role === "observer") {
-      if (props.takeoverReady) return "press ↵ to take over"
-      if (props.status === "sending") return `${props.spinnerFrame} queued for the other writer`
-      return "following"
-    }
-    if (props.status === "canceling") return `${props.spinnerFrame} canceling`
-    if (props.status === "stepping") {
-      const tool = props.snapshot.activeTool
-      return `${props.spinnerFrame} ${tool ? tool : "model"}`
-    }
-    if (props.status === "sending") return `${props.spinnerFrame} sending`
-    if (props.snapshot.lastStopped === "budget") return "step budget spent · /step to continue"
-    // Below the two stop reasons, which ask for a keypress, and above every
-    // resting state: with nothing else happening, a command still running in
-    // the background IS what is happening.
-    if (background() !== null && props.snapshot.lastStopped !== "max_tokens") return background()!
-    // The kernel stops after two replies in a row hit max_tokens (DESIGN §4); the
-    // marker results already told the model why. Sending a message continues
-    // whether the cut reply ended in calls (results present) or in text (a bare
-    // /step would prefill the assistant, which thinking-on providers reject).
-    if (props.snapshot.lastStopped === "max_tokens") return "reply cut off (max_tokens) · send a message to continue"
-    if (props.snapshot.lastStopped === "canceled") return "canceled"
-    return "idle"
-  })
-
-  /**
-   * The activity is the one live fact on this line, so it is the one thing here
-   * drawn at full brightness besides the model — and only while something is
-   * actually happening. An idle bar has nothing to shout about and drops back a
-   * level.
-   */
-  const color = () => {
-    if (props.awaiting) return style.theme.warn
-    if (props.snapshot.error) return style.theme.err
-    if (props.snapshot.lastStopped === "budget" || props.snapshot.lastStopped === "max_tokens") return style.theme.warn
-    if (props.status !== "idle" || props.takeoverReady || showingBackground()) return style.theme.fg
-    return style.theme.muted
-  }
-
-  /** Whether the activity slot is the background count — the one that is a link. */
-  const showingBackground = () => background() !== null && activity() === background()
-
   /**
    * The model, and the effort only when this tab has chosen one — `auto` is the
    * kernel's default for that model and saying so costs seven columns of the
@@ -198,17 +127,33 @@ export function StatusBar(props: {
   const contextChip = () => (context() ? ` ctx ${context()!.percent}% · /compact` : "")
   const behindChip = () =>
     (props.behind ?? 0) > 0 ? ` ${style.glyphs.foldOpen} ${props.behind} more below · Shift+End` : ""
-  /** `ask` / `unsafe`: which one is only worth a chip when somebody can act on it. */
-  const modeChip = () => (props.mode && screen().width >= 60 ? ` ${props.mode}` : "")
+  /**
+   * `ask` / `unsafe`, at the head of the line (T35).
+   *
+   * It used to sit at the far right, past the cost and the chips, which is
+   * where a line puts the things it is willing to lose. This one is the stance
+   * every tool call on the screen is judged by; it reads first, before the
+   * model, for the same reason the model reads before the cost.
+   */
+  const modeChip = () => (props.mode && screen().width >= 60 ? props.mode : "")
+  /** The separator belongs outside the clickable box, so the chip is the word. */
+  const modeLead = () => (modeChip() ? `${modeChip()} · ` : "")
   /** ` ◈ evolution` — the mode this session is WEARING, not the permission one. */
   const wearingChip = () => {
     const worn = props.wearing ?? []
     return worn.length > 0 && screen().width >= 60 ? ` ${style.glyphs.picker} ${worn.join(" ")}` : ""
   }
-  const roleChip = () =>
-    screen().width >= 60
-      ? ` step ${props.snapshot.steps} · ${props.role === "observer" ? "observer · driven elsewhere" : "driver"}`
-      : ""
+  /**
+   * Being the writer is the ordinary case and the word `driver` was on this
+   * line in every session anybody ever had — a chip that is always the same is
+   * not information (T35). Only the exception says itself. The step count goes
+   * the same way before there is a session to count steps of.
+   */
+  const roleChip = () => {
+    if (screen().width < 60) return ""
+    if (props.role === "observer") return ` step ${props.snapshot.steps} · observer · driven elsewhere`
+    return props.snapshot.steps > 0 ? ` step ${props.snapshot.steps}` : ""
+  }
 
   /**
    * Who gives up columns first, when there are not enough.
@@ -221,171 +166,145 @@ export function StatusBar(props: {
    * because the composition card above says the same thing at length.
    */
   const layout = createMemo(() => {
-    const budget = Math.max(0, screen().width - 2)
+    const budget = Math.max(0, screen().width - 2 - displayWidth(modeLead()))
     const right =
       displayWidth(contextChip()) +
       displayWidth(behindChip()) +
       displayWidth(wearingChip()) +
-      displayWidth(modeChip()) +
       displayWidth(roleChip())
-    const wanted = ` · ${activity()}`
-    const model = fit(modelText(), Math.max(8, budget - right - displayWidth(wanted)))
-    // Cut too, not just measured. An error message or a long tool name is as
-    // long as somebody else made it, and a segment that overflows its row does
-    // not stop at the edge — it runs into the chips beside it and both become
-    // one unreadable word (`nasknstep 1`, T27).
-    const activity_chip = fit(wanted, Math.max(0, budget - right - displayWidth(model)))
-    let room = Math.max(0, budget - displayWidth(model) - displayWidth(activity_chip) - right)
-    // What the tail insists on before the ambient chips get anything. A NOTICE
-    // is news — what just happened, or why something did not — and it outranks
-    // both of them; the default hint only insists on ` · /help`, because an
-    // overlay nobody can reach is worse than a chip nobody can see.
-    const floor =
-      props.hint !== undefined
-        ? Math.min(displayWidth(` · ${props.hint}`), room)
-        : displayWidth(" · /help")
-    const usage_chip = ` · ${usage()}`
-    const keepUsage = room - displayWidth(usage_chip) >= floor
+    // Cut too, not just measured. A model id is as long as whoever named it
+    // made it, and a segment that overflows its row does not stop at the edge —
+    // it runs into the chips beside it and both become one unreadable word
+    // (`nasknstep 1`, T27).
+    const model = fit(modelText(), Math.max(8, budget - right))
+    let room = Math.max(0, budget - displayWidth(model) - right)
+    const spent = usage()
+    const usage_chip = spent ? ` · ${spent}` : ""
+    const keepUsage = usage_chip.length > 0 && room >= displayWidth(usage_chip)
     if (keepUsage) room -= displayWidth(usage_chip)
     const tools_chip = ` · tools ${builtin_tools}+${props.tools}`
-    const keepTools = room - displayWidth(tools_chip) >= floor
+    const keepTools = room >= displayWidth(tools_chip)
     if (keepTools) room -= displayWidth(tools_chip)
     return {
       model,
       tools: keepTools ? tools_chip : "",
       usage: keepUsage ? usage_chip : "",
-      activity: activity_chip,
-      room,
     }
   })
 
   /**
-   * The hint, in the room the line actually has: the whole reminder, then a
-   * shorter one, then just the way to `/help`. A notice replaces it entirely —
-   * whatever just happened outranks a reminder of which key folds a card.
+   * A notice takes the whole line for as long as it is up (T35).
+   *
+   * It used to be one more segment competing for the leftovers, which put the
+   * news of the moment — `Ctrl+C again to quit` — in the last few columns of a
+   * row that already carried the model, the cost, the mode and the step count,
+   * and let it sit there afterwards as if it were still true. News is not a
+   * chip: it covers the line, and `App` takes it away again on its own clock.
    */
-  const hint = () => {
-    const room = layout().room
-    if (props.hint !== undefined) return { text: fit(` · ${props.hint}`, room), help: false }
-    for (const lead of [" · Esc cancel · Ctrl+O fold · ", " · Ctrl+O fold · ", " · "]) {
-      if (room >= displayWidth(lead) + 5) return { text: lead, help: true }
-    }
-    return { text: "", help: false }
-  }
+  const noticeText = () => (props.hint === undefined ? null : fit(props.hint, Math.max(0, screen().width - 2)))
 
   return (
     <box flexDirection="row" width="100%" height={1} flexShrink={0} paddingLeft={1} paddingRight={1}>
-      <box flexDirection="row" flexGrow={1} flexShrink={1} flexBasis={0}>
-        {/* The model is the subject of this line and the one thing on it that
-            answers to a click — it opens `/model`, the way tcode's model line
-            does. The same tint every clickable thing takes under the pointer
-            (`ui/rows.ts`). */}
-        <box
-          flexShrink={0}
-          height={1}
-          backgroundColor={props.onPickModel && overModel() ? style.theme.hover : undefined}
-          onMouseDown={props.onPickModel ? modelClick.onMouseDown : undefined}
-          onMouseUp={props.onPickModel ? modelClick.onMouseUp : undefined}
-          onMouseOver={() => setOverModel(true)}
-          onMouseOut={() => setOverModel(false)}
-        >
-          <text fg={style.theme.fg}>{layout().model}</text>
-        </box>
-        <text fg={style.theme.dim} flexShrink={0}>
-          {layout().tools}
-        </text>
-        <text fg={style.theme.muted} flexShrink={0}>
-          {layout().usage}
-        </text>
-        {/* The activity is a link only when it is the background count: that is
-            the one thing on this line that stands for a screen you can open
-            (`/tasks`), and everything else here is a state, not a place. */}
-        <box
-          flexShrink={0}
-          height={1}
-          backgroundColor={showingBackground() && props.onOpenTasks && overTasks() ? style.theme.hover : undefined}
-          onMouseDown={showingBackground() && props.onOpenTasks ? tasksClick.onMouseDown : undefined}
-          onMouseUp={showingBackground() && props.onOpenTasks ? tasksClick.onMouseUp : undefined}
-          onMouseOver={() => setOverTasks(true)}
-          onMouseOut={() => setOverTasks(false)}
-        >
-          <text fg={color()}>{layout().activity}</text>
-        </box>
-        <text fg={style.theme.dim} flexShrink={0}>
-          {hint().text}
-        </text>
-        <Show when={hint().help}>
-          <box
-            flexShrink={0}
-            height={1}
-            backgroundColor={overHelp() ? style.theme.hover : undefined}
-            onMouseDown={helpClick.onMouseDown}
-            onMouseUp={helpClick.onMouseUp}
-            onMouseOver={() => setOverHelp(true)}
-            onMouseOut={() => setOverHelp(false)}
-          >
-            <text fg={style.theme.dim}>/help</text>
+      {noticeText() !== null ? (
+        <text fg={style.theme.fg}>{noticeText()}</text>
+      ) : (
+        <box flexDirection="row" width="100%" height={1}>
+          {/* The permission mode leads the line, and the click opens its picker
+              — the mouse half of `/mode`. `unsafe` is warn-coloured: it is the
+              stance where tool calls run without anybody looking, and that
+              should never be the quiet one. */}
+          {modeChip().length > 0 ? (
+            <box
+              flexShrink={0}
+              height={1}
+              backgroundColor={props.onPickMode && overMode() ? style.theme.hover : undefined}
+              onMouseDown={props.onPickMode ? modeClick.onMouseDown : undefined}
+              onMouseUp={props.onPickMode ? modeClick.onMouseUp : undefined}
+              onMouseOver={() => setOverMode(true)}
+              onMouseOut={() => setOverMode(false)}
+            >
+              <text fg={props.mode === "unsafe" ? style.theme.warn : style.theme.dim}>{modeChip()}</text>
+            </box>
+          ) : null}
+          <Show when={modeChip().length > 0}>
+            <text fg={style.theme.dim} flexShrink={0}>
+              {" · "}
+            </text>
+          </Show>
+          <box flexDirection="row" flexGrow={1} flexShrink={1} flexBasis={0}>
+            {/* The model is the subject of this line and the one thing on it that
+                answers to a click — it opens `/model`, the way tcode's model line
+                does. The same tint every clickable thing takes under the pointer
+                (`ui/rows.ts`). */}
+            <box
+              flexShrink={0}
+              height={1}
+              backgroundColor={props.onPickModel && overModel() ? style.theme.hover : undefined}
+              onMouseDown={props.onPickModel ? modelClick.onMouseDown : undefined}
+              onMouseUp={props.onPickModel ? modelClick.onMouseUp : undefined}
+              onMouseOver={() => setOverModel(true)}
+              onMouseOut={() => setOverModel(false)}
+            >
+              <text fg={style.theme.fg}>{layout().model}</text>
+            </box>
+            {/* An empty segment is not rendered at all: a `<text>` with nothing
+                in it still takes a column, and two of them side by side is how
+                `tools 1+0  · idle` grew the gap that made this line look
+                mis-aligned once the cost chip learned to be absent (T35). */}
+            <Show when={layout().tools.length > 0}>
+              <text fg={style.theme.dim} flexShrink={0}>
+                {layout().tools}
+              </text>
+            </Show>
+            <Show when={layout().usage.length > 0}>
+              <text fg={style.theme.muted} flexShrink={0}>
+                {layout().usage}
+              </text>
+            </Show>
           </box>
-        </Show>
-      </box>
-      {context() ? (
-        <text fg={context()!.urgent ? style.theme.warn : style.theme.dim} flexShrink={0}>
-          {contextChip()}
-        </text>
-      ) : null}
-      {/* Scrolled away from the live end: the newest card is off screen, which
-          is worth saying — otherwise a streaming answer looks like a stall. */}
-      {(props.behind ?? 0) > 0 ? (
-        <box
-          flexShrink={0}
-          height={1}
-          backgroundColor={overBehind() ? style.theme.hover : undefined}
-          onMouseDown={behindClick.onMouseDown}
-          onMouseUp={behindClick.onMouseUp}
-          onMouseOver={() => setOverBehind(true)}
-          onMouseOut={() => setOverBehind(false)}
-        >
-          <text fg={style.theme.accent.evolve}>{behindChip()}</text>
+          {context() ? (
+            <text fg={context()!.urgent ? style.theme.warn : style.theme.dim} flexShrink={0}>
+              {contextChip()}
+            </text>
+          ) : null}
+          {/* Scrolled away from the live end: the newest card is off screen, which
+              is worth saying — otherwise a streaming answer looks like a stall. */}
+          {(props.behind ?? 0) > 0 ? (
+            <box
+              flexShrink={0}
+              height={1}
+              backgroundColor={overBehind() ? style.theme.hover : undefined}
+              onMouseDown={behindClick.onMouseDown}
+              onMouseUp={behindClick.onMouseUp}
+              onMouseOver={() => setOverBehind(true)}
+              onMouseOut={() => setOverBehind(false)}
+            >
+              <text fg={style.theme.accent.evolve}>{behindChip()}</text>
+            </box>
+          ) : null}
+          {/* What this session is WEARING — a `--with` package's system prompt, the
+              one thing that changes who the model thinks it is (T31). It opens
+              `/ext`, where it is turned on and off. */}
+          {wearingChip().length > 0 ? (
+            <box
+              flexShrink={0}
+              height={1}
+              backgroundColor={props.onOpenExt && overWearing() ? style.theme.hover : undefined}
+              onMouseDown={props.onOpenExt ? extClick.onMouseDown : undefined}
+              onMouseUp={props.onOpenExt ? extClick.onMouseUp : undefined}
+              onMouseOver={() => setOverWearing(true)}
+              onMouseOut={() => setOverWearing(false)}
+            >
+              <text fg={style.theme.accent.evolve}>{wearingChip()}</text>
+            </box>
+          ) : null}
+          {roleChip().length > 0 ? (
+            <text fg={props.role === "observer" ? style.theme.warn : style.theme.dim} flexShrink={0}>
+              {roleChip()}
+            </text>
+          ) : null}
         </box>
-      ) : null}
-      {/* What this session is WEARING — a `--with` package's system prompt, the
-          one thing that changes who the model thinks it is (T31). It opens
-          `/ext`, where it is turned on and off. */}
-      {wearingChip().length > 0 ? (
-        <box
-          flexShrink={0}
-          height={1}
-          backgroundColor={props.onOpenExt && overWearing() ? style.theme.hover : undefined}
-          onMouseDown={props.onOpenExt ? extClick.onMouseDown : undefined}
-          onMouseUp={props.onOpenExt ? extClick.onMouseUp : undefined}
-          onMouseOver={() => setOverWearing(true)}
-          onMouseOut={() => setOverWearing(false)}
-        >
-          <text fg={style.theme.accent.evolve}>{wearingChip()}</text>
-        </box>
-      ) : null}
-      {/* The permission mode, and the click that opens its picker — the mouse
-          half of `/mode`. `unsafe` is warn-coloured: it is the stance where tool
-          calls run without anybody looking, and that should never be the quiet
-          one. */}
-      {modeChip().length > 0 ? (
-        <box
-          flexShrink={0}
-          height={1}
-          backgroundColor={props.onPickMode && overMode() ? style.theme.hover : undefined}
-          onMouseDown={props.onPickMode ? modeClick.onMouseDown : undefined}
-          onMouseUp={props.onPickMode ? modeClick.onMouseUp : undefined}
-          onMouseOver={() => setOverMode(true)}
-          onMouseOut={() => setOverMode(false)}
-        >
-          <text fg={props.mode === "unsafe" ? style.theme.warn : style.theme.dim}>{modeChip()}</text>
-        </box>
-      ) : null}
-      {screen().width >= 60 ? (
-        <text fg={props.role === "observer" ? style.theme.warn : style.theme.dim} flexShrink={0}>
-          {roleChip()}
-        </text>
-      ) : null}
+      )}
     </box>
   )
 }
