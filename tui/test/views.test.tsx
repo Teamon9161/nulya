@@ -10,7 +10,7 @@ import type { JSX } from "solid-js"
 import { testRender } from "@opentui/solid"
 import { App } from "../src/ui/App.tsx"
 import { HelpView } from "../src/ui/overlays/HelpView.tsx"
-import { SettingsView } from "../src/ui/overlays/SettingsView.tsx"
+import { SettingsView, settingRows } from "../src/ui/overlays/SettingsView.tsx"
 import { UsageView } from "../src/ui/overlays/UsageView.tsx"
 import { displayWidth } from "../src/ui/columns.ts"
 import { StyleContext, createStyle, type Style } from "../src/render/theme.ts"
@@ -252,6 +252,26 @@ test("a [keys] override in tui.toml really moves a binding", async () => {
     setup.renderer.destroy()
   }
 }, 60_000)
+
+test("/settings shows the effective values and which file they came from", async () => {
+  // Written by the test above; this view's whole job is to name it.
+  const settings = await loadSettings(ws.dir, {})
+  const rows = settingRows(settings)
+  expect(rows.find((row) => row.key === "transcript.edit_diff")?.value).toBe("expanded")
+  expect(rows.find((row) => row.key === "keys.help")?.value).toBe("ctrl+b")
+
+  const setup = await overlay(() => <SettingsView ws={ws} onClose={() => {}} />, createStyle(settings, {}))
+  try {
+    const frame = await settle(setup, 4)
+    expect(frame).toContain("settings · tui.toml")
+    expect(frame).toContain("applied")
+    expect(frame).toContain(join(".nulya", "tui.toml"))
+    expect(frame).toContain("transcript.history_window")
+    expect(frame).toContain("keys.help")
+  } finally {
+    setup.renderer.destroy()
+  }
+})
 
 test("/usage separates this session's tokens from the durable tool journal", async () => {
   const state = createSessionState("s-usage")
