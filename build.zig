@@ -16,6 +16,15 @@ pub fn build(b: *std.Build) void {
     const zig_archive_path = b.option([]const u8, "zig-archive", "Path to the host Zig release archive to embed");
     const zig_archive = zigArchiveLazyPath(b, embed_toolchain, zig_archive_path);
 
+    // `zig build test|e2e -Dtest-filter="…"` runs only tests whose NAME contains
+    // the substring (repeatable; zig's own convention). Iterating on one failing
+    // e2e case without it means paying the whole real-binary suite per attempt.
+    const test_filters = b.option(
+        []const []const u8,
+        "test-filter",
+        "Only run tests whose name contains the given substring (may be repeated)",
+    ) orelse &.{};
+
     const root = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -58,7 +67,7 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the built-in demo session (or `-- <args>`)");
     run_step.dependOn(&run_cmd.step);
 
-    const tests = b.addTest(.{ .root_module = root });
+    const tests = b.addTest(.{ .root_module = root, .filters = test_filters });
     const run_tests = b.addRunArtifact(tests);
     run_tests.setEnvironmentVariable("NULYA_TEST_ZIG", b.graph.zig_exe);
     const test_step = b.step("test", "Run unit tests");
@@ -74,7 +83,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const std_ext_tests = b.addTest(.{ .root_module = std_ext_mod });
+    const std_ext_tests = b.addTest(.{ .root_module = std_ext_mod, .filters = test_filters });
     test_step.dependOn(&b.addRunArtifact(std_ext_tests).step);
 
     // The bundled `agent` package's definition reader: the front matter dialect,
@@ -87,7 +96,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const agent_ext_tests = b.addTest(.{ .root_module = agent_ext_mod });
+    const agent_ext_tests = b.addTest(.{ .root_module = agent_ext_mod, .filters = test_filters });
     test_step.dependOn(&b.addRunArtifact(agent_ext_tests).step);
 
     // End-to-end closed-loop test (DESIGN §16 milestone): init -> build -> run.
@@ -108,7 +117,7 @@ pub fn build(b: *std.Build) void {
     e2e_support_mod.addImport("toml", toml);
     e2e_support_mod.addOptions("config_options", config_options);
     e2e_mod.addImport("support", e2e_support_mod);
-    const e2e_tests = b.addTest(.{ .root_module = e2e_mod });
+    const e2e_tests = b.addTest(.{ .root_module = e2e_mod, .filters = test_filters });
     const run_e2e = b.addRunArtifact(e2e_tests);
     run_e2e.setEnvironmentVariable("NULYA_TEST_ZIG", b.graph.zig_exe);
     // The CLI tests spawn the real `nulya` binary (the runner's own stdout is
@@ -132,7 +141,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     integration_mod.addImport("support", e2e_support_mod);
-    const integration_tests = b.addTest(.{ .root_module = integration_mod });
+    const integration_tests = b.addTest(.{ .root_module = integration_mod, .filters = test_filters });
     const run_integration = b.addRunArtifact(integration_tests);
     run_integration.has_side_effects = true; // network; never cached
     const integration_step = b.step("integration", "Run live-provider integration tests (needs NULYA_INTEGRATION_PROFILE)");

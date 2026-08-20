@@ -97,6 +97,7 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 ```bash
 zig build test      # 单元测试（每个模块同文件的 test 块，由 main.zig 聚合）
 zig build e2e       # tests/e2e.zig 聚合 tests/e2e/*.zig：真实二进制的 extension 闭环 + 自造 + 按 pin 晋升
+zig build e2e -Dtest-filter="follow-up"   # 只跑名字含该子串的测试（test / e2e / integration 都认，可重复）
 zig build run       # nulya demo：固定 prompt 的一场 session（无 API key 时走 scripted provider）
 
 # 唯一联网的测试（DESIGN §13.2）。不设变量就整体 skip，不会让没 key 的机器变红。
