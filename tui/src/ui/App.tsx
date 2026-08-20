@@ -1036,6 +1036,7 @@ export function App(props: AppProps) {
       // two sentinels on one turn is one card the transcript cannot fold.
       await here.attach.send(wrapExtNote(pkg, kind, text), true)
     },
+    compact: (options) => forkHere(options),
     openTab: (sessionId) => {
       tabs.open(sessionId)
       setNotice(`opened ${sessionId}`)
@@ -1459,21 +1460,44 @@ export function App(props: AppProps) {
   })
 
   /**
-   * Fork on a brief the model already wrote: `/compact`'s `brief_file` branch,
-   * which skips asking for a summary and leaves the old session byte-identical
-   * (DESIGN §11). The tab moves to the child, as `/compact` does.
+   * Fork this tab's session and move the tab to the child — the one place that
+   * does it on a brief somebody already wrote.
+   *
+   * Two callers, and they differ only in who asked: the model's handoff
+   * proposal below (`/compact`'s `brief_file` branch, DESIGN §11 — the summary
+   * exists, so the old session is left byte-identical), and a plugin calling
+   * `api.actions.compact` (tui-plugin 1.1, `extensions/plan`'s approve step).
+   * The guards, the tab move and the recovery when the lease was lost belong to
+   * the act, not to whoever requested it, so they live here once.
+   *
+   * Throws with a sentence: the handoff path shows it as a notice, the plugin
+   * path gets it as a rejected promise and says it in its own words.
    */
-  const followHandoffFile = async (file: HandoffFile) => {
+  const forkHere = async (options: { briefFile?: string; focus?: string }) => {
     const source = live()
-    if (!source) return
-    setNotice(`handoff · forking on ${file.path}…`)
+    if (!source) throw new Error("this tab has no session yet · nothing to fork")
+    if (source.attach.status() !== "idle") throw new Error("a step is running · fork when it stops")
+    setNotice(options.briefFile ? `forking on ${options.briefFile}…` : "compacting…")
     try {
-      const result = await runCompact(props.ws, source.id, { briefFile: file.path })
+      const result = await runCompact(props.ws, source.id, options)
       tabs.replace(source.id, result.session, { created: true, effort: source.effort() })
-      setNotice(`handed off into ${result.session} · ${source.id} kept on disk`)
+      setNotice(`continued in ${result.session} · ${source.id} kept on disk`)
+      return result
+    } catch (error) {
+      // The lease was the driver's while it ran, so this tab may have gone to
+      // observer on the way. Nothing is driving it now — take it back rather
+      // than leaving the user to reclaim their own session by hand.
+      if (source.attach.role() === "observer") source.attach.takeOver()
+      throw error
+    }
+  }
+
+  /** The model's handover proposal, followed. */
+  const followHandoffFile = async (file: HandoffFile) => {
+    try {
+      await forkHere({ briefFile: file.path })
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error))
-      if (source.attach.role() === "observer") source.attach.takeOver()
     }
   }
 

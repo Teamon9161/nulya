@@ -2169,7 +2169,7 @@ test "cli ext seed: the binary's own drafts land in a store root — never over 
         defer alloc.free(dry.stdout);
         try std.testing.expectEqual(@as(u8, 0), dry.code);
         try std.testing.expect(std.mem.indexOf(u8, dry.stdout, "std: would seed") != null);
-        try std.testing.expect(std.mem.indexOf(u8, dry.stdout, "6 would seed, 0 already there") != null);
+        try std.testing.expect(std.mem.indexOf(u8, dry.stdout, "8 would seed, 0 already there") != null);
         try std.testing.expectError(error.FileNotFound, ws.access(io, ws_store, .{}));
     }
 
@@ -2201,7 +2201,7 @@ test "cli ext seed: the binary's own drafts land in a store root — never over 
         defer alloc.free(seeded.stdout);
         try std.testing.expectEqual(@as(u8, 0), seeded.code);
         try std.testing.expect(std.mem.indexOf(u8, seeded.stdout, "guide: draft already in") != null);
-        try std.testing.expect(std.mem.indexOf(u8, seeded.stdout, "5 seeded, 1 already there") != null);
+        try std.testing.expect(std.mem.indexOf(u8, seeded.stdout, "7 seeded, 1 already there") != null);
 
         const kept = try ws.readFileAlloc(io, guide_dir ++ std.fs.path.sep_str ++ "extension.json", alloc, .limited(1 << 16));
         defer alloc.free(kept);
@@ -2795,4 +2795,175 @@ fn delegateTo(
     const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", "60000" });
     alloc.free(waited.stdout);
     return std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{out.stdout[at..end]});
+}
+
+// ── The bundled plan / ask extensions: the front end's two consumers ────────
+
+test "bundled plan and ask: propose, todo and ask record without writing anything; approve renders the brief compact forks on, and the session that continues does not wear the planning persona" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const plan_ref = try buildBundled(alloc, io, ws, exe_abs, "plan");
+    defer alloc.free(plan_ref);
+    const ask_ref = try buildBundled(alloc, io, ws, exe_abs, "ask");
+    defer alloc.free(ask_ref);
+
+    // ① `propose` and `todo` answer and write NOTHING. The call itself, with the
+    //    plan in its arguments, is already in the ledger — a second copy on disk
+    //    would be a second truth (physics #3).
+    {
+        const ok = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", plan_ref, "propose", "{\"plan_md\":\"# Plan\\n\\nphase one\"}" });
+        defer alloc.free(ok.stdout);
+        try std.testing.expectEqual(@as(u8, 0), ok.code);
+        try std.testing.expect(std.mem.indexOf(u8, ok.stdout, "end this turn now") != null);
+        try std.testing.expectError(error.FileNotFound, ws.access(io, ".nulya/handoffs", .{}));
+
+        // A missing section names the field and still writes nothing — the
+        // `handoff` discipline, so the retry is an informed one.
+        const empty = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", plan_ref, "propose", "{}" });
+        defer alloc.free(empty.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, empty.stdout, "-32602") != null);
+        try std.testing.expect(std.mem.indexOf(u8, empty.stdout, "non-empty plan_md") != null);
+
+        const list = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", plan_ref, "todo", "{\"items\":[{\"text\":\"read\",\"state\":\"done\"},{\"text\":\"plan\"}]}" });
+        defer alloc.free(list.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, list.stdout, "1 of 2 done") != null);
+
+        const bad = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", plan_ref, "todo", "{\"items\":[{\"text\":\"x\",\"state\":\"nope\"}]}" });
+        defer alloc.free(bad.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, bad.stdout, "not a state") != null);
+    }
+
+    // ② `ask` is the same shape: recorded, end the turn, nothing on disk. The
+    //    question is answerable because it is in the conversation, not because
+    //    anything here waited for an answer.
+    {
+        const ok = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ask_ref, "ask", "{\"question\":\"which one?\",\"options\":[\"a\",\"b\"]}" });
+        defer alloc.free(ok.stdout);
+        try std.testing.expectEqual(@as(u8, 0), ok.code);
+        try std.testing.expect(std.mem.indexOf(u8, ok.stdout, "end this turn now") != null);
+
+        const empty = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ask_ref, "ask", "{\"options\":[\"a\"]}" });
+        defer alloc.free(empty.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, empty.stdout, "-32602") != null);
+        try std.testing.expect(std.mem.indexOf(u8, empty.stdout, "non-empty question") != null);
+    }
+
+    // ③ A session wearing `plan`: the prompt is a frozen system block, the
+    //    narrowing it asks for is frozen with the version (so "what this
+    //    session's permission stance was" stays answerable afterwards), and the
+    //    tools are on the model's face only because this session pinned them —
+    //    membership and pin are two axes (DESIGN §7.5).
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--with", plan_ref, "--pin", "ext:plan/propose" });
+    defer alloc.free(new.stdout);
+    try std.testing.expectEqual(@as(u8, 0), new.code);
+    const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(id);
+
+    {
+        var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+        defer lenv.deinit();
+        var model = EndTurnModel{};
+        const spath = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{id});
+        defer alloc.free(spath);
+        var ws_real: [std.fs.max_path_bytes]u8 = undefined;
+        const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
+        var sess = try session.AgentSession.openDurable(alloc, .{
+            .model = .{ .ptr = &model, .vtable = &EndTurnModel.vtable },
+            .step_ctx = .{
+                .tool_context = .{ .environment = lenv.environment(), .cwd = ws_path },
+                .scratch_dir = ".nulya/scratch",
+            },
+        }, .{ .workspace = ws, .session_path = spath });
+        defer sess.deinit();
+
+        // `shell` plus the one pinned tool: `todo` and `approve` are declared
+        // and not pinned, which is the whole of the second axis.
+        try std.testing.expectEqual(@as(usize, 2), sess.composition.tools.tools.len);
+        var saw_prompt = false;
+        for (sess.composition.system_prompts.blocks) |b| {
+            if (std.mem.indexOf(u8, b.source, "plan") != null) saw_prompt = true;
+        }
+        try std.testing.expect(saw_prompt);
+
+        var checked_policy = false;
+        for (sess.composition.extensions) |member| {
+            if (!std.mem.eql(u8, member.id, "plan")) continue;
+            const rel = try std.fmt.allocPrint(
+                alloc,
+                ".nulya/extensions/{s}/versions/{s}/extension.json",
+                .{ member.id, member.version },
+            );
+            defer alloc.free(rel);
+            const bytes = try ws.readFileAlloc(io, rel, alloc, .limited(1 << 20));
+            defer alloc.free(bytes);
+            var frozen = try manifest_mod.parse(alloc, bytes);
+            defer frozen.deinit();
+            try std.testing.expectEqual(@as(?bool, true), frozen.policy.?.readonly);
+            checked_policy = true;
+        }
+        try std.testing.expect(checked_policy);
+    }
+
+    // One real turn, so there is a conversation to fork FROM: `compact` refuses
+    // a session with no events, which is the honest answer to "continue from
+    // where?" when there is no where.
+    {
+        const appended = try runCli(alloc, io, ws, &.{ exe_abs, "session", "append", id, "draft a plan" });
+        alloc.free(appended.stdout);
+        const stepped = try runCli(alloc, io, ws, &.{ exe_abs, "session", "step", id, "--max-steps", "1" });
+        alloc.free(stepped.stdout);
+    }
+
+    // ④ `approve` is the one tool here that touches the disk, and what it writes
+    //    is a brief in `handoff`'s own shape — so `compact --arg brief_file=`
+    //    forks on it with no special case at all.
+    const approve_args = try std.fmt.allocPrint(
+        alloc,
+        "{{\"session\":\"{s}\",\"plan_md\":\"# Plan\\n\\nphase one: touch src/main.zig\"}}",
+        .{id},
+    );
+    defer alloc.free(approve_args);
+    const approved = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", plan_ref, "approve", approve_args });
+    defer alloc.free(approved.stdout);
+    try std.testing.expectEqual(@as(u8, 0), approved.code);
+    const brief_rel = try std.fmt.allocPrint(alloc, ".nulya/handoffs/{s}-1.md", .{id});
+    defer alloc.free(brief_rel);
+    try std.testing.expect(std.mem.indexOf(u8, approved.stdout, brief_rel) != null);
+
+    const written = try ws.readFileAlloc(io, brief_rel, alloc, .limited(1 << 16));
+    defer alloc.free(written);
+    try std.testing.expect(std.mem.indexOf(u8, written, "# Approved plan") != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "touch src/main.zig") != null);
+
+    const compact_ref = try buildBundled(alloc, io, ws, exe_abs, "compact");
+    defer alloc.free(compact_ref);
+    const fork_args = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"brief_file\":\"{s}\"}}", .{ id, brief_rel });
+    defer alloc.free(fork_args);
+    const forked = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", compact_ref, "compact", fork_args });
+    defer alloc.free(forked.stdout);
+    try std.testing.expectEqual(@as(u8, 0), forked.code);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, std.mem.trim(u8, forked.stdout, " \r\n"), .{});
+    defer parsed.deinit();
+    const child = parsed.value.object.get("session").?.string;
+    const child_path = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{child});
+    defer alloc.free(child_path);
+    const child_file = try ws.readFileAlloc(io, child_path, alloc, .limited(1 << 20));
+    defer alloc.free(child_file);
+    const header_line = child_file[0 .. std.mem.indexOfScalar(u8, child_file, '\n') orelse child_file.len];
+    // The plan travelled; the persona that wrote it did not. `session new
+    // --parent` takes no `--with`, and `plan` declares `on_request` so nothing
+    // puts it back — which is the whole point of continuing in a fresh session.
+    try std.testing.expect(std.mem.indexOf(u8, header_line, "\"plan\"") == null);
 }

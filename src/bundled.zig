@@ -43,11 +43,11 @@ pub fn has(id: []const u8) bool {
     return false;
 }
 
-test "bundled drafts include the repo's five, each with a manifest at its root" {
+test "bundled drafts include every one the repo ships, each with a manifest at its root" {
     const alloc = std.testing.allocator;
     const list = try ids(alloc);
     defer alloc.free(list);
-    for ([_][]const u8{ "compact", "evolution", "guide", "handoff", "std" }) |want| {
+    for ([_][]const u8{ "agent", "ask", "compact", "evolution", "guide", "handoff", "plan", "std" }) |want| {
         try std.testing.expect(has(want));
         var manifest_path_buf: [64]u8 = undefined;
         const manifest_path = try std.fmt.bufPrint(&manifest_path_buf, "{s}/extension.json", .{want});

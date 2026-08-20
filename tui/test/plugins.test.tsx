@@ -142,6 +142,7 @@ function hostWith(over: Partial<Parameters<typeof createPluginHost>[0]> = {}): P
     session: () => null,
     tasks: () => [],
     appendNote: async () => {},
+    compact: async () => ({ session: "s-child", parent: { session: "s-parent", seq: 1 } }),
     openTab: () => {},
     wearNext: () => {},
     notice: () => {},

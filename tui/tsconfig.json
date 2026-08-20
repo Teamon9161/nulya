@@ -29,5 +29,9 @@
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false
   },
-  "include": ["src", "test", "plugin-api.d.ts"]
+  // The repo's own bundled plugins are checked against the contract too. They
+  // are the only modules written from OUTSIDE this package that this build
+  // ships, and a contract nothing is written against is a contract nobody has
+  // read — the same reason `test/fixtures/probe-plugin.ts` is a real file.
+  "include": ["src", "test", "plugin-api.d.ts", "../extensions/*/tui"]
 }

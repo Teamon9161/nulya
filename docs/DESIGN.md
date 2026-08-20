@@ -484,7 +484,7 @@ Tool 是"能执行的能力"，Skill 是"要遵循的方法 / 知识"；不同 r
 
 都是普通 extension，走 §7.4 同一条 build → activate 路，**没有一个是内核层**：默认不在任何 composition 里（`--with` 成员 / pin 进 native 面 / `activate` 全是用户或 driver 的决定），随 checkout 到达的 store 照过 §9 的 trust gate。
 
-**分发**：这六个 draft 的源码被 build.zig `@embedFile` 进二进制（`src_embed` 的同一先例，`src/bundled.zig` 投影），`nulya ext seed` 把它们写进任一 store root（§7.2）——所以拿到二进制就拿到了它们，不需要这个 checkout 在场；seed 之后走的路与手放源码毫无区别。
+**分发**：这八个 draft 的源码被 build.zig `@embedFile` 进二进制（`src_embed` 的同一先例，`src/bundled.zig` 投影），`nulya ext seed` 把它们写进任一 store root（§7.2）——所以拿到二进制就拿到了它们，不需要这个 checkout 在场；seed 之后走的路与手放源码毫无区别。
 
 | id | kind | contribute | 谁消费 / 怎么进 session |
 |---|---|---|---|
@@ -494,6 +494,8 @@ Tool 是"能执行的能力"，Skill 是"要遵循的方法 / 知识"；不同 r
 | `evolution` | data | system prompt + skill（manifest 声明 `activation: on_request`，§7.2.1） | `activate` 只是登记；`session new --with evolution` 才戴上（mode） |
 | `guide` | data | skill | 用户 `--user` 装一次，每场 `<available_skills>` 多一行 |
 | `std` | compiled | `read` / `write` / `append` / `edit` / `grep` / `glob` 六个 tool（`read` / `grep` / `glob` 声明 `readonly`，§7.2.1） | 用户 `ext build extensions/std --user` → `activate --user` → user config `[registry] pinned_native_tools`（builtin 1 + 6 = 7 ≤ `max_tools` 20） |
+| `plan` | compiled | system prompt + `policy{readonly}` + `commands[/plan]` + `propose` / `todo`（都声明 `readonly`，`todo` 另带 `render: checklist` + `panel`）/ `approve`（`audience: driver`）+ `contributes.tui`（manifest 声明 `activation: on_request`） | `activate` 只是登记；`/plan` 或 `session new --with plan` 才戴上（mode）。`approve` 经 `ext run` 写出 brief，`compact --arg brief_file=` 接着 fork |
+| `ask` | compiled | `ask` tool（声明 `readonly`）+ `commands[/ask]` + `contributes.tui`（`activation: on_request`） | `activate` 只是登记；`session new --with ask --pin ext:ask/ask` 才戴上 |
 
 **`agent`：委派，靠已有的后台任务回路。** 四个 tool 一个二进制（`params.name` 分发）：`agent{name, task}` 是**模型**在委派——材料化 persona、`session new` 出子场、`session append` 给任务、`task run` 起一个**属于父场**的后台任务去驱动它，返回一张点名子 session 的回执；`materialize{name}` 把一个定义文件冻成 data extension 版本（**写路径唯一实现**——manifest 字节决定 version id，两份实现就是同一个 persona 的两个版本，所以 TUI 也调它）；`list` 列出全部定义（含 `agents` / `max_exchanges` 两列；**读路径唯一实现**，driver-facing、永不 pin：模型不需要目录——名字写错时错误消息里就有名单——而 driver 要画 picker）；`run{session, agent?, readonly?, max_steps?}` 是那个后台任务跑的命令本身。
 
@@ -514,6 +516,10 @@ Tool 是"能执行的能力"，Skill 是"要遵循的方法 / 知识"；不同 r
 **600 s 天花板。** `run` 经 `nulya ext run` 调用，而 `ext run` 强制 manifest 的 `timeout_ms`、上限 `tool.Timeouts.extension_max_ms` = 600s（§7.3），manifest 因此顶格要满。将来要解除**不用改设计**：换一种任务命令形态（任务里直接跑 `session step` 循环）即可，上面的协议一个字不变。
 
 **`std` 不是 "std tool 层"**（PLAN §3.4.1 那句话仍成立）：叫 std 只因它装的是一场编码 session 最先伸手的那几样东西。行为逐条移植自 tcode（零猜测的错误文案、`read` 放大小读 + 自分页 + 无行号、`write` 不覆盖没读过的文件、`grep` smart-case + per-file 上限 + gitignore、`glob` 按 mtime）；它是 §7.3 "string result 原文进 emit" 的第一个 consumer；每个结果自守在 `emit` 预算之下（read ≤ 120 KB、grep ≤ 100 KB），所以 spill 对它们不触发。它唯一跨调用的状态——模型读过哪些文件、看到哪些行——按 §7.6 走**磁盘制品**：`.nulya/scratch/<session-id>/std-freshness.jsonl`（append-only，从 `NULYA_SESSION` 取 id，fork 之后自然是新文件；不在 session 里就没有去重也没有门）。regex 引擎是 vendored 的 mvzr（字节级、无 lookaround / backreference，smart-case 由 wrapper 补）；gitignore / glob 匹配移植自 zeegrep 的两个 core 模块；walker 单线程 + 10 s deadline。契约与进度在 `docs/goals/std.md`。
+
+**`plan` / `ask`：声明层与代码层的两个真实 consumer**（goals/tui-plugin.md U4；前端那一半在 tui.md §11 T41，不进这里）。两个包合起来把 §7.2.1 那五个声明位一次用全：`plan` 的 manifest 说出它是什么（system prompt）、戴上它意味着什么权限立场（`policy.readonly`——gate 上先于一切审批表，`propose` / `todo` 因此各自声明 `readonly: true`）、人怎么戴上（`commands`）、它的 tool 怎么画（`render` / `panel`）、以及它带了一段前端代码（`tui`）。**内核对这两个包一个字节都没有多做**：五个字段里只有 `activation` 是强制的，其余全是驱动方读了才算数的声明。
+
+三个 tool 的分工是 §11 那条分界的直接推论：`propose{plan_md}` 与 `todo{items}` **什么都不写**——计划与清单在调用的参数里，而调用已经在 ledger 里，磁盘上再写一份就是第二份真相（physics #3）；`ask{question, options?}` 同理，且**不阻塞**（把一个 step 押在人的阅读速度上，还要撞 600 s 的 extension 天花板，同时让没人看着的 driver 挂死；答案作为下一条 user turn 到达，append-only 只付一轮增量）。唯一碰磁盘的是 `approve{session, plan_md}`（`audience: driver`）：它把批准的计划渲染成 `.nulya/handoffs/<session>-<n>.md`——**与 `handoff` 逐字节同形、同目录、同独占创建规则**，所以 `compact --arg brief_file=` 一个特例都不用加就能 fork 过去，而 `session new --parent` 不带 `--with`、`plan` 又声明 `on_request`，于是**计划过去了、写它的 persona 没过去**：执行场是一场能真正改东西的普通 session。
 
 **`edit` 是这个包里的第六个 tool，也是原 §6.2 的落点。** 设计要点原样成立，只是不再住在内核里：**精确串匹配**（`{path, old_string, new_string, replace_all?, target_line?}`）——唯一匹配才动手，歧义就报次数并给最多 5 个带行号的候选窗口，匹配不上就给相似行提示，让模型一轮纠正；**匹配本身就是校验**，不设 read-before-edit 门；**不做 fuzzy patch**（§17：apply 失败多一轮 round-trip，违反 §0.2）——所谓 recovery ladder（标点归一 → 逐行空白归一 → 跨行 reflow 归一）每一级都只在**唯一**命中时才动手，且回填的是文件的真实字节，多于一个候选一律报歧义，所以它是"把模型的排版漂移对回原文"，不是"猜一个位置打补丁"。原子写并保留可执行位。**D4 的已知代价随之消失**：`edit` 现在和 `read` / `write` / `append` 共用同一份 freshness 记录，它把回显的片段按新 hash 登记成一次 **read**（不是 write——write 会把整文件标成已看过，让之后的窗口读错误地回 unchanged），所以 read → edit → write 同一文件不再被拦一次要求重读（e2e 钉住新行为）。
 

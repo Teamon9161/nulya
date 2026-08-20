@@ -1,0 +1,34 @@
+{
+  "schema": "nulya.extension/v2",
+  "id": "ask",
+  "activation": "on_request",
+  "runtime": { "entry": "bin/ask" },
+  "contributes": {
+    "tools": [{
+      "name": "ask",
+      "readonly": true,
+      "description": "Ask the person driving this session one question, and stop. Call it only when the answer would change what you do next and you cannot find it yourself: a choice between two defensible paths, a fact only they have, a go-ahead for something you cannot take back. Ask the whole question in one message — they see this and nothing else of your reasoning — and give `options` when the answer is a choice, so it can be answered with one key. Nothing is decided by calling this and nothing waits on it: the answer arrives as the next message. Call it once, then end your turn; do not guess an answer and carry on.",
+      "input": {
+        "type": "object",
+        "properties": {
+          "question": { "type": "string", "description": "The question in full, as the person will read it." },
+          "options": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "The answers to choose between, each a short phrase. Optional; omit it for an open question.",
+            "maxItems": 20
+          },
+          "free_text": { "type": "boolean", "description": "Whether an answer outside the options is welcome. Optional; an answer in their own words is always possible, this only says you expect one." }
+        },
+        "required": ["question"]
+      }
+    }],
+    "commands": [{
+      "name": "ask",
+      "description": "wear the ask package, so the model can put a question to you",
+      "action": "wear"
+    }],
+    "tui": { "entry": "tui/ask.ts", "api": 1 }
+  },
+  "permissions": { "fs": [], "network": [], "process": [] }
+}

@@ -52,6 +52,7 @@ import type {
   CardRenderer,
   CommandContext,
   CommandSpec,
+  CompactedView,
   LedgerEventView,
   Line,
   LineRenderer,
@@ -132,6 +133,12 @@ export interface PluginHostSeams {
   tasks: () => TaskView[]
   /** `session append`, wrapped in the plugin sentinel (`extnote.ts`). */
   appendNote: (pkg: string, kind: string, text: string) => Promise<void>
+  /**
+   * `/compact` on the front tab's session (`api.actions.compact`, contract 1.1).
+   * The same verb, the same guards and the same tab move a person gets; what
+   * differs is only who asked for it.
+   */
+  compact: (options: { briefFile?: string; focus?: string }) => Promise<CompactedView>
   openTab: (sessionId: string) => void
   wearNext: (id: string) => void
   notice: (text: string) => void
@@ -171,13 +178,40 @@ export function pluginKeyOf(key: {
   ctrl?: boolean
   shift?: boolean
   meta?: boolean
+  sequence?: string
 }): PluginKey {
+  const text = printableOf(key)
   return {
     name: key.name ?? "",
     ctrl: key.ctrl ?? false,
     shift: key.shift ?? false,
     meta: key.meta ?? false,
+    ...(text !== null ? { text } : {}),
   }
+}
+
+/**
+ * The character a keypress produced, or null when it produced none.
+ *
+ * `PluginKey.name` is a key's IDENTITY — lower-cased, shared by `a` and `A`,
+ * and a word (`escape`, `pageup`) for keys that are not characters. A panel
+ * that lets somebody write needs the byte instead, and reconstructing it from
+ * `name` + `shift` is a keyboard-layout guess (`shift+3` is `#` on one layout
+ * and `£` on another). OpenTUI already parsed the real bytes into `sequence`,
+ * so the rule is simply: one printable character, and no modifier that turns a
+ * keypress into a command.
+ */
+function printableOf(key: { sequence?: string; ctrl?: boolean; meta?: boolean }): string | null {
+  if (key.ctrl || key.meta) return null
+  const seq = key.sequence
+  if (typeof seq !== "string" || seq.length === 0) return null
+  // One code point, and not a control character: `\r`, `\t`, `\x1b[A` and every
+  // escape sequence fall out here, and they all have a `name` of their own.
+  const points = [...seq]
+  if (points.length !== 1) return null
+  const code = seq.codePointAt(0)
+  if (code === undefined || code < 0x20 || code === 0x7f) return null
+  return seq
 }
 
 /**
@@ -407,6 +441,7 @@ export function createPluginHost(seams: PluginHostSeams): PluginHost {
           guardTool(tool, "run")
           return await extRun(seams.ws, `${plugin.id}@${plugin.version}`, tool, args)
         },
+        compact: (options) => seams.compact(options ?? {}),
         openTab: (sessionId) => seams.openTab(sessionId),
         wearNext: (id) => seams.wearNext(id),
       },

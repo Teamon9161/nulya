@@ -38,6 +38,17 @@
  * knows which version a package declared, and that is the whole point of the
  * number being frozen in the manifest.
  *
+ * A plugin cannot ask which MINOR it is running against, and does not need to:
+ * a build older than a field it wants simply leaves that field `undefined`
+ * (`PluginKey.text`) or that method missing, which a plugin already has to
+ * tolerate for any optional part of this file. What is here so far:
+ *
+ *   1.0  the whole of it, as U3 shipped it.
+ *   1.1  `PluginKey.text` — the character a key produced, so a panel can accept
+ *        typing; and `PluginActions.compact` — `/compact` on the front tab's
+ *        session, which is how an approved plan continues in a session that no
+ *        longer wears the persona that wrote it (`extensions/plan`).
+ *
  * ── WHAT IS DELIBERATELY NOT HERE ─────────────────────────────────────────
  *
  * No component tree, no renderer, no reactive primitive. A plugin renders by
@@ -133,6 +144,18 @@ export interface PluginKey {
   ctrl: boolean
   shift: boolean
   meta: boolean
+  /**
+   * The CHARACTER this key produced, when it produced one — `"a"`, `"A"`,
+   * `"."`, `"7"` — and absent for every key that is a command rather than a
+   * letter (`escape`, `up`, `f3`, anything with `ctrl` or `meta`).
+   *
+   * Added in 1.1, for the one thing `name` cannot do: a panel that lets a
+   * person WRITE. `name` is a key's identity, lower-cased and shared by `a` and
+   * `A`; typing needs the byte, and reconstructing it from `name` + `shift` is
+   * a keyboard-layout guess. A panel accumulating `key.text` and handling
+   * `space` / `backspace` / `return` itself is the whole of a text field here.
+   */
+  text?: string
 }
 
 /** Return `true` from `onKey` to say the key was used; anything else lets the host have it. */
@@ -291,6 +314,12 @@ export interface ExtRunResult {
   stderr: string
 }
 
+/** Where a compaction landed: the session that continues, and from where. */
+export interface CompactedView {
+  session: string
+  parent: { session: string; seq: number }
+}
+
 /**
  * Changing the world — and only in the ways a person already can (tui-plugin
  * D5). There is deliberately no gate verdict, no session write, no second
@@ -318,6 +347,29 @@ export interface PluginActions {
    * does not declare throws: a plugin runs its own code, never somebody else's.
    */
   extRun(tool: string, args: Record<string, unknown>): Promise<ExtRunResult>
+
+  /**
+   * `/compact` on the front tab's session — the person's own verb (tui.md
+   * §5.8, DESIGN §11), added in 1.1.
+   *
+   * `briefFile` is a workspace-relative path to a brief that has already been
+   * written; giving one skips the summarising round trip and leaves the old
+   * session byte-identical, which is the branch `/compact` takes when the model
+   * writes a handoff. Without it, the session is asked to summarise itself
+   * first. Either way the fork is `session new --parent` with no `--with`, so
+   * the child carries the brief and NOT the packages this session was wearing —
+   * which is exactly what an approved plan wants: the plan travels, the
+   * planning persona does not.
+   *
+   * The tab moves to the child, as it does when a person runs `/compact`.
+   * Rejects when there is no session, when somebody else is driving it, or when
+   * a step is running.
+   *
+   * There is no fork primitive here beyond this one. A plugin cannot open a
+   * session, name a parent, or choose a composition: it can ask for the move a
+   * person could have made from the composer, and that is all (D5).
+   */
+  compact(options?: { briefFile?: string; focus?: string }): Promise<CompactedView>
 
   /** Open a session in a tab of its own (what `Enter` on a sub-session card does). */
   openTab(sessionId: string): void

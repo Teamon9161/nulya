@@ -254,9 +254,9 @@ test("the binary's bundled drafts seed into a store — dry-run counts them, a s
   const env = { NULYA_HOME: home }
   try {
     const plan = await extSeed(ws, { user: true, dryRun: true, env })
-    expect(plan.seeded).toBe(6)
+    expect(plan.seeded).toBe(8)
     expect(plan.already).toBe(0)
-    expect(plan.ids).toEqual(["agent", "compact", "evolution", "guide", "handoff", "std"])
+    expect(plan.ids).toEqual(["agent", "ask", "compact", "evolution", "guide", "handoff", "plan", "std"])
 
     const first = await extSeed(ws, { user: true, ids: ["guide"], env })
     expect(first.seeded).toBe(1)
