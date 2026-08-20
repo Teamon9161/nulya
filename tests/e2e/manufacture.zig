@@ -159,12 +159,21 @@ test "self-manufacture closed loop: a shell-only session builds its own extensio
         for (events) |e| {
             // Every writer stamps every line, whichever process it came from.
             try std.testing.expect(e.at != null);
-            if (std.mem.eql(u8, e.tool_id, "ext:demo/greet")) saw_ext = true;
+            if (std.mem.eql(u8, e.tool_id, "ext:demo/greet")) {
+                // The version the model itself just built and activated: the id
+                // stays version-free, the column beside it names the frozen
+                // implementation that answered.
+                try std.testing.expectEqualStrings(ver, e.version.?);
+                saw_ext = true;
+            }
             // The kernel measures the calls it dispatches itself. This session is
             // in-memory, so no row names a session — there is no id to name.
             if (std.mem.eql(u8, e.tool_id, "builtin.shell")) {
                 try std.testing.expect(e.duration_ms != null);
                 try std.testing.expect(e.session == null);
+                // The builtin IS the kernel: no implementation version exists to
+                // record, so the column is absent rather than invented.
+                try std.testing.expect(e.version == null);
                 saw_measured_shell = true;
             }
         }

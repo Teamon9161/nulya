@@ -400,6 +400,40 @@ test "a line written before the added columns reads back with them absent" {
     try std.testing.expectEqual(@as(usize, 1), newer.len);
 }
 
+test "an old line and a new one live in the same journal, each honest about its version" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmpCwd(alloc, io, tmp);
+    defer alloc.free(cwd);
+
+    var ws = try std.Io.Dir.openDirAbsolute(io, cwd, .{});
+    defer ws.close(io);
+    try ws.createDirPath(io, journal_dir);
+    // A line from before this column existed — still `v:1`, still true.
+    try ws.writeFile(io, .{ .sub_path = journal_rel, .data = "{\"v\":1,\"at\":\"2026-08-17T09:31:07Z\",\"tool_id\":\"ext:a.pkg/alpha\",\"ok\":true}\n" });
+
+    try append(alloc, io, cwd, .{ .tool_id = "ext:a.pkg/alpha", .ok = true, .version = "v-3f9c" });
+
+    const events = try readAll(alloc, io, cwd);
+    defer freeEvents(alloc, events);
+    try std.testing.expectEqual(@as(usize, 2), events.len);
+    // Same tool, one history — and no retroactive attribution: the old call
+    // stays unknown, because evidence is append-only and cannot be backfilled.
+    try std.testing.expectEqualStrings("ext:a.pkg/alpha", events[0].tool_id);
+    try std.testing.expect(events[0].version == null);
+    try std.testing.expectEqualStrings("ext:a.pkg/alpha", events[1].tool_id);
+    try std.testing.expectEqualStrings("v-3f9c", events[1].version.?);
+
+    // And the addition changes nothing about how calls are counted: `aggregate`
+    // still groups the whole history under the one stable id.
+    const stats = try aggregate(alloc, events);
+    defer freeStats(alloc, stats);
+    try std.testing.expectEqual(@as(usize, 1), stats.len);
+    try std.testing.expectEqual(@as(u64, 2), stats[0].uses_total);
+}
+
 test "aggregate groups by stable id in lexical order" {
     const events = [_]UseEvent{
         .{ .tool_id = "ext:a.pkg/alpha", .ok = true },

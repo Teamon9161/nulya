@@ -1015,6 +1015,11 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
         .tool_id = stable_id,
         .ok = invocation.ok,
         .session = in_session,
+        // …and beside that version-free identity, the implementation that
+        // actually ran: whichever version resolution settled on above, whether
+        // the caller named it or `current` chose it. The one resolution this
+        // command already performed answers it — no second lookup can disagree.
+        .version = resolved.version,
     });
 
     try printOut(alloc, io, "{s}\n", .{invocation.output});

@@ -232,7 +232,7 @@ test "closed loop: a pinned tool executes the frozen version through the tool ex
     }
 }
 
-test "cli ext run records a version-free stable tool id in the usage journal" {
+test "cli ext run records a version-free stable tool id in the usage journal, with the version that served the call beside it" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -268,6 +268,9 @@ test "cli ext run records a version-free stable tool id in the usage journal" {
     try std.testing.expectEqual(@as(usize, 1), events.len);
     try std.testing.expectEqualStrings("ext:web.search/web_search", events[0].tool_id);
     try std.testing.expect(events[0].ok);
+    // …and beside it, the frozen version that actually answered: the one the
+    // command resolved, so evidence can be read per implementation later.
+    try std.testing.expectEqualStrings(v1, events[0].version.?);
 
     // v2: a different implementation -> a different immutable version, but the
     // same tool identity. Activating it must not change the stats identity.
@@ -285,6 +288,11 @@ test "cli ext run records a version-free stable tool id in the usage journal" {
     try std.testing.expectEqual(@as(usize, 2), events2.len);
     try std.testing.expectEqualStrings("ext:web.search/web_search", events2[0].tool_id);
     try std.testing.expectEqualStrings("ext:web.search/web_search", events2[1].tool_id);
+    // The two identities in one journal, doing their separate jobs: one id
+    // across both rows (a tool's history is one history), two versions across
+    // them (and that history can also be read per implementation).
+    try std.testing.expectEqualStrings(v1, events2[0].version.?);
+    try std.testing.expectEqualStrings(v2, events2[1].version.?);
 }
 
 test "cli ext run records ok=false for a failed invocation" {
@@ -341,6 +349,10 @@ test "cli ext run records ok=false for a failed invocation" {
     try std.testing.expectEqual(@as(usize, 1), events.len);
     try std.testing.expectEqualStrings("ext:flaky/boom", events[0].tool_id);
     try std.testing.expect(!events[0].ok);
+    // A failure names its implementation too — that pairing is the whole point
+    // of recording the version: "which one of them was failing" is a question
+    // only an evidence trail can answer later.
+    try std.testing.expectEqualStrings(version, events[0].version.?);
 }
 
 test "cli ext run failures before invocation write no usage stats" {
