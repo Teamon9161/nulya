@@ -1166,16 +1166,20 @@ fn warnUserScope(
     const sid = (try envSessionId(alloc)) orelse return;
     defer alloc.free(sid);
 
-    // Best effort: an unreadable manifest only costs the extra clause.
-    const prompts: bool = blk: {
+    // Best effort: an unreadable manifest only costs the extra clause. The
+    // clause is about REACH, so it asks both questions reach depends on: a
+    // package whose prompt only joins the sessions that NAME it (`on_request`,
+    // DESIGN §7.2.1) reaches nobody who did not ask, and saying otherwise would
+    // be the frightening half of a sentence that is not true.
+    const prompt_reach: bool = blk: {
         var m = st.readManifest(alloc, id, version, .structural) catch break :blk false;
         defer m.deinit();
-        break :blk m.system_prompts.len != 0;
+        break :blk m.system_prompts.len != 0 and m.activationOf() == .always;
     };
     const line = try std.fmt.allocPrint(
         alloc,
         "note: activating {s}@{s} in the user store from inside session {s}: it becomes active for every workspace on this machine{s}\n",
-        .{ id, version, sid, if (prompts) " and its system prompt enters every future session" else "" },
+        .{ id, version, sid, if (prompt_reach) " and its system prompt enters every future session" else "" },
     );
     defer alloc.free(line);
     try printErr(io, line);
@@ -1236,8 +1240,10 @@ fn extDeactivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
 /// its frozen manifest). `prompt` is the one that earns the column: an activated
 /// package's `system_prompts` enter the system blocks of every future session
 /// (DESIGN §7.5) with no gate anywhere, and until now the only way to see that
-/// was to read the manifest by hand. Unreadable manifest → no marker, never a
-/// failed listing.
+/// was to read the manifest by hand. A package that says `on_request` is the
+/// exception and says so in a column of its own, because for it `active` means
+/// registered rather than everywhere (DESIGN §7.2.1). Unreadable manifest → no
+/// marker, never a failed listing.
 fn extList(alloc: std.mem.Allocator, io: std.Io) !u8 {
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     var search = try RootSearch.open(alloc, io, try cwdRealPath(io, &cwd_buf));
@@ -1298,9 +1304,11 @@ fn extList(alloc: std.mem.Allocator, io: std.Io) !u8 {
     return 0;
 }
 
-/// `\t[tools skills prompt]` for what this frozen version contributes, or an
-/// empty string when it contributes nothing nameable or cannot be read. Caller
-/// owns the result.
+/// `\t[tools skills prompt]` for what this frozen version contributes, plus
+/// `\ton-request` when the package says activation only REGISTERS it
+/// (`manifest.Activation`, DESIGN §7.2.1) — without that word `active` reads as
+/// "in every session", which for a mode it is not. Empty string when the version
+/// contributes nothing nameable or cannot be read. Caller owns the result.
 fn contributionMarker(alloc: std.mem.Allocator, roots: *const roots_mod.Roots, entry: roots_mod.Roots.ActiveEntry) ![]u8 {
     // `.structural`: this column reports what a version DECLARES. Re-digesting
     // every megabyte of built binary to print `[tools]` made `ext list` cost
@@ -1326,6 +1334,7 @@ fn contributionMarker(alloc: std.mem.Allocator, roots: *const roots_mod.Roots, e
         first = false;
     }
     try out.writer.writeByte(']');
+    if (m.activationOf() == .on_request) try out.writer.writeAll("\ton-request");
     return out.toOwnedSlice();
 }
 
@@ -1503,6 +1512,15 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             \\  nothing says nothing. Recorded and never enforced, like `readonly`: a
             \\  pin naming a driver tool still works, drivers simply do not write one.
             \\
+            \\  A package may declare `"activation": "on_request"` at the top level. Then
+            \\  activating it REGISTERS it and nothing more: it joins only the sessions
+            \\  that name it (`nulya session new --with <id>`), and every other session is
+            \\  exactly as it was. The default, `"always"`, is the other meaning: activation
+            \\  puts the package — tools, skills, system prompt — into every new session
+            \\  on this machine. This one IS enforced; it is the only declaration on this
+            \\  page that is. Say `on_request` if your package is a mode somebody should
+            \\  choose per session rather than live in.
+            \\
             \\  Wall clock is enforced: an extension tool is killed at 30s unless its
             \\  manifest sets `timeout_ms` (600s maximum); `shell` defaults to 120s and
             \\  accepts `timeout_ms` up to 600s. A timeout kills the whole process tree
@@ -1527,10 +1545,12 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             \\  nulya session new --pin ext:my.helper/do_thing  # the NEXT session carries it as a native tool
             \\  nulya ext activate my.helper v-<older>        # going back is the same verb: a pointer move, never a rebuild
             \\
-            \\  # A package you do not want in every session (a mode, a driver): build it,
-            \\  # do not activate it, and name the version for one session.
+            \\  # A mode — a package a session should CHOOSE, not one every session lives in.
+            \\  # Its manifest says `"activation": "on_request"`, so activating it only registers it.
             \\  nulya ext build extensions/evolution          # prints v-<hash>
-            \\  nulya session new --with evolution@v-<hash>   # its skills and system prompts, this session only
+            \\  nulya ext activate evolution v-<hash>         # registered; no session changed
+            \\  nulya session new --with evolution            # this session wears it, at `current`
+            \\  nulya session new --with evolution@v-<hash>   # or name a build, activated or not
             \\
             \\  # Every workspace on this machine, and the one-time trust of a store.
             \\  nulya ext build extensions/guide --user
@@ -1558,13 +1578,13 @@ test "every manifest parse/validate error is a draft fault; a host fault is not"
     // The whole surface `manifest.parse` and `Manifest.validate` can produce,
     // so `ext build` answers with a sentence rather than a stack trace.
     for ([_]anyerror{
-        error.InvalidJson,        error.NotAnObject,             error.MissingField,
-        error.WrongType,          error.UnsupportedSchema,       error.InvalidId,
-        error.MissingRuntime,     error.InvalidEntry,            error.InvalidInterpreter,
-        error.NoContributions,    error.InvalidToolName,         error.ReservedToolName,
-        error.DuplicateToolName,  error.InvalidTimeout,          error.InvalidAudience,
-        error.InvalidSkillPath,   error.DuplicateSkillPath,      error.InvalidSystemPromptPath,
-        error.DuplicateSystemPromptPath,
+        error.InvalidJson,             error.NotAnObject,               error.MissingField,
+        error.WrongType,               error.UnsupportedSchema,         error.InvalidId,
+        error.MissingRuntime,          error.InvalidEntry,              error.InvalidInterpreter,
+        error.NoContributions,         error.InvalidToolName,           error.ReservedToolName,
+        error.DuplicateToolName,       error.InvalidTimeout,            error.InvalidAudience,
+        error.InvalidActivation,       error.InvalidSkillPath,          error.DuplicateSkillPath,
+        error.InvalidSystemPromptPath, error.DuplicateSystemPromptPath,
     }) |err| {
         std.testing.expect(isManifestFault(err)) catch |e| {
             std.debug.print("{s} should be reported as a bad manifest\n", .{@errorName(err)});

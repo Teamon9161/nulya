@@ -110,3 +110,8 @@ pub fn writeSkillVersion(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir,
 pub fn activate(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id: []const u8, version: []const u8) !void {
     return store.Store.init(io, root).activate(alloc, id, version);
 }
+
+/// Drop `current` — the other direction of `activate`.
+pub fn deactivate(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id: []const u8) !void {
+    return store.Store.init(io, root).deactivate(alloc, id);
+}

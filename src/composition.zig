@@ -467,6 +467,17 @@ fn resolveActiveExtensions(alloc: std.mem.Allocator, roots: *const roots_mod.Roo
             },
         };
         errdefer r.deinit(alloc);
+        // The package's own answer to "when does activation bring me in"
+        // (`manifest.Activation`, DESIGN §7.2.1): `on_request` means activation
+        // registered it and nothing more — it joins the sessions that NAME it,
+        // which `unionWith` does a moment later from the same `current` this
+        // loop just read. Resolved first all the same, and a version that will
+        // not resolve still fails the session: `on_request` changes WHEN a
+        // package joins, not whether a broken activation is a broken machine.
+        if (r.manifest.activationOf() == .on_request) {
+            r.deinit(alloc);
+            continue;
+        }
         try resolved.append(alloc, r);
     }
     return resolved.toOwnedSlice(alloc);
@@ -826,6 +837,66 @@ test "inactive extension contributions do not enter composition" {
     try std.testing.expectEqual(@as(usize, 0), comp.extensions.len);
     try std.testing.expectEqual(@as(usize, 0), comp.skills.skills.len);
     try std.testing.expectEqual(@as(usize, 1), comp.system_prompts.blocks.len); // kernel only
+}
+
+test "an on_request package is registered by activation, and joins only the sessions that name it" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmpPath(alloc, io, tmp.dir);
+    defer alloc.free(cwd);
+
+    // Two activated packages that differ in one field: one is a policy, the
+    // other a mode. Both contribute a system prompt and a skill, so what is
+    // being tested is WHEN each joins — never which parts of it do.
+    const policy_bytes =
+        \\{"schema":"nulya.extension/v2","id":"policy","contributes":{"system_prompts":["prompts/base.md"]}}
+    ;
+    const mode_bytes =
+        \\{"schema":"nulya.extension/v2","id":"mode","activation":"on_request","contributes":{"system_prompts":["prompts/base.md"]}}
+    ;
+    const policy_v = try testkit.writeFrozenVersion(alloc, io, tmp.dir, "policy", policy_bytes, &.{.{ .rel = "prompts/base.md", .bytes = "POLICY" }});
+    defer alloc.free(policy_v);
+    const mode_v = try testkit.writeFrozenVersion(alloc, io, tmp.dir, "mode", mode_bytes, &.{.{ .rel = "prompts/base.md", .bytes = "MODE" }});
+    defer alloc.free(mode_v);
+    try testkit.activate(alloc, io, tmp.dir, "policy", policy_v);
+    try testkit.activate(alloc, io, tmp.dir, "mode", mode_v);
+
+    // An ordinary session: the policy is here because activating it said so,
+    // and the mode is not, although it is just as activated.
+    {
+        var plain = try SessionComposition.init(alloc, io, cwd, one_root, .{});
+        defer plain.deinit(alloc);
+        try std.testing.expectEqual(@as(usize, 1), plain.extensions.len);
+        try std.testing.expectEqualStrings("policy", plain.extensions[0].id);
+        try std.testing.expectEqual(@as(usize, 2), plain.system_prompts.blocks.len); // kernel + policy
+        try std.testing.expectEqualStrings("POLICY", plain.system_prompts.blocks[1].bytes);
+    }
+
+    // Naming it brings it in WHOLE, at the version activation points at — no
+    // version to remember, which is what registering it bought.
+    {
+        var worn = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "mode" }} });
+        defer worn.deinit(alloc);
+        try std.testing.expectEqual(@as(usize, 2), worn.extensions.len);
+        try std.testing.expectEqual(@as(usize, 3), worn.system_prompts.blocks.len);
+        // Members are sorted by id, so the mode's block sits before the policy's.
+        try std.testing.expectEqualStrings("MODE", worn.system_prompts.blocks[1].bytes);
+        try std.testing.expectEqualStrings("POLICY", worn.system_prompts.blocks[2].bytes);
+    }
+
+    // Deactivating it takes the bare name away again: `--with <id>` reads
+    // `current`, and registration is exactly what `current` is.
+    try testkit.deactivate(alloc, io, tmp.dir, "mode");
+    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "mode" }} }));
+    // …while the exact version still composes, as it did before it was ever
+    // activated: naming a build never needed a pointer.
+    {
+        var pinned = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "mode", .version = mode_v }} });
+        defer pinned.deinit(alloc);
+        try std.testing.expectEqual(@as(usize, 3), pinned.system_prompts.blocks.len);
+    }
 }
 
 test "--with brings a built-but-inactive version into one session, overrides an active one, and refuses what does not exist" {

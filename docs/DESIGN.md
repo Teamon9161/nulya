@@ -347,6 +347,7 @@ extension 装在**多个 store root** 里，按固定顺序搜索（`extension/r
 {
   "schema": "nulya.extension/v2",
   "id": "web.search",
+  "activation": "always",
   "runtime": { "entry": "bin/web-search" },
   "contributes": {
     "tools": [{ "name": "web_search", "description": "…", "input": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] }, "timeout_ms": 60000, "readonly": true, "audience": "model" }],
@@ -357,7 +358,7 @@ extension 装在**多个 store root** 里，按固定顺序搜索（`extension/r
 }
 ```
 
-校验（`manifest.zig`）：schema id 精确匹配；`id` 合法；**至少一种 contribution**（`NoContributions`）；有 tool 时必须有 `runtime`（`MissingRuntime`）；tool 名不能是 `shell`（保留名只有这一个，§5.2）、不能重复；`timeout_ms` 若写了必须是正数且 ≤ `tool.Timeouts.extension_max_ms`（600s），否则 `InvalidTimeout`；`audience` 若写了必须是 `model` / `driver` 之一，否则 `InvalidAudience`；`entry` / skill / system_prompt 路径不能逃出包目录。**manifest 是 schema 唯一真相**：绝不"启动 binary 再问它有什么"。
+校验（`manifest.zig`）：schema id 精确匹配；`id` 合法；**至少一种 contribution**（`NoContributions`）；有 tool 时必须有 `runtime`（`MissingRuntime`）；tool 名不能是 `shell`（保留名只有这一个，§5.2）、不能重复；`timeout_ms` 若写了必须是正数且 ≤ `tool.Timeouts.extension_max_ms`（600s），否则 `InvalidTimeout`；`audience` 若写了必须是 `model` / `driver` 之一，否则 `InvalidAudience`；`activation` 若写了必须是 `always` / `on_request` 之一，否则 `InvalidActivation`；`entry` / skill / system_prompt 路径不能逃出包目录。**manifest 是 schema 唯一真相**：绝不"启动 binary 再问它有什么"。
 
 `tools[].input` schema 只在该 tool 被 pin 进 `tools[]` 时才喂给模型；平时是可发现性元数据。
 
@@ -370,6 +371,19 @@ extension 装在**多个 store root** 里，按固定顺序搜索（`extension/r
 - **kernel 不据此改变任何行为**：不过滤工具面、不影响 pin 解析——**pin 一个 `driver` tool 依然合法**，只是没有 driver 会默认这么写。消费者是 driver 的 pin / 审批 / 折叠 policy（TUI：`/ext` 的 activate 开关只 pin model-audience 的 tool，tools pane 把没被 pin 的 driver tool 折起来，tui.md §11 T33/T34）。
 - **缺省是 null 不是 `"model"`**：与 `readonly` 同一句话——"包没说"与"包说了 model"是两件事，落盘不会替包补一个字。把沉默读成 model 是**读的人**的选择（这个字段存在之前写的每一份 manifest 声明的都是 model tool），那个选择做在用它的地方，不做在内核里。
 - 类型不对（`"audience": true`）是 `WrongType`；**认不出的词**（`"drivers"`）是 `InvalidAudience` 而不是退回缺省——一个想说 `driver` 却拼错的包，退回缺省的后果正是这个字段要防的那一件事。这与 `timeout_ms` 的分法一致：类型错在 parse，值错在 validate。
+
+`activation?`（可选，`"always"`（缺省） / `"on_request"`）答的是**这个包被 activate 之后，接下来的 session 会怎样**——与上面两个声明性字段不同，**这一个是内核唯一强制的 manifest 字段**：
+
+- **`always`**：activate 就是这台机器上此后每一场 session 都带上它——tools、skills、system prompt 一起。这是 `std` / `guide` 那一类**policy** 包：装它就是因为想让每一场都有。
+- **`on_request`**：activate 只是**登记**（`current` 指向某个版本），**一场 session 都不改变**；它只进那些**点名**它的场（`session new --with <id>`，§7.5）。这是 `evolution` 那一类 **mode** 包：一个 persona、一个审阅回路、一副镜片，戴不戴是每一场自己的决定。
+
+**为什么这根轴是整包的、由作者声明的。** 另一种设计是让**使用者**按机器决定"这个包的 tool 要、prompt 不要"——被否决，两条理由：① 一个包的 tool 常常是**按它自己的 prompt 在场**写的，逐机器拆开会造出作者从没跑过的组合，而组合数随包数爆炸；② "我是 policy 还是 mode" 这个问题**只有包自己答得出**，与 `audience`（这个 tool 是给谁的）、`timeout_ms`（我有多慢）同一个性质。人的否决权因此不在"要你哪半边"，而在**装不装**——那个否决是完整的，且已经存在。
+
+**作者会不会一律写 `always`？** 会，如果他的包真是 policy——那正是他该写的，这是诚实信号而不是漏洞。装它的人手里那一票（不 activate）没有被这个字段削弱一分。
+
+**缺省是 `always`，而且这个读法定在 `manifest.zig` 而不是各读者手里**（与 `audience` / `readonly` 的"沉默不许被读成主张"**相反**，是刻意的）：这个字段出现之前写下的每一份 manifest 都是"activate 即全局生效"，缺省必须继续是那件事——这是关于**文件格式**的事实，不是一个判断，所以只写一次。类型不对（`"activation": false`）是 `WrongType`，**认不出的词**（`"onrequest"`）是 `InvalidActivation` 而不是退回缺省——一个想说 `on_request` 却拼错的包，退回缺省的后果正是这个字段要防的那一件事。
+
+`nulya ext list` 因此对这样的包多打一列 `on-request`：对它来说 `active` 的意思是"登记了"而不是"处处生效"，那两件事不该看起来一样。
 
 ### 7.3 Wire protocol（`protocol.zig` / `invoke.zig`）
 
@@ -412,6 +426,8 @@ draft ──build──▶ versions/v-<hash>（immutable）──activate──�
 ### 7.5 组合在 session 开始冻结（keystone）
 
 `SessionComposition.init()` 解析 active extensions，冻住每个的版本，一次冻结 tools / skills / system prompts。被 pin 成 native 的工具在此刻解析出**绝对 `entry_path`**（基于冻结的版本），运行期只按此路径 spawn，**绝不二次读 `current`**。
+
+**discovery 只捡 `always` 的包。** 一个 activate 了但声明 `on_request` 的包（§7.2.1）不进 discovery 集合——它已经被解析过（坏掉的版本照样 `ActiveExtensionBroken`：`on_request` 决定的是**何时**加入，不是"坏了的 activate 算不算坏"），只是不被 append 进成员；随后 `--with <id>` 从同一个 `current` 把它整个带进来。所以 `activate` 对这种包等于**登记**：命令行与前端可以据此列出"可以戴的东西"，而没点名它的场一个 token 都不多付。
 
 **成员解析三条路，一样严。** 一个 extension 进这一场 composition 只有三种来路——discovery（`current` 指着它）、`session new --with`、resume 时 header 里冻的 `active`——三条都是**硬失败**：解析不出来就开不了这一场，绝不静默少一个能力地开场。discovery 从前是唯一的例外（`isExtensionFault` 就 `continue`），而它恰恰是意图最明确的那条：`activate` 是有人明说"这个要生效"。加重的是 §7.2 的首个 active 持有者胜——workspace 那份坏了，静默跳过会让整个 extension 消失，哪怕 user root 里有完好的 active 版本。所以 discovery 里坏掉的 active 版本返回 `ActiveExtensionBroken`，并在**内核里**往 stderr 打一行指名道姓的话（Zig 的 error 不带 payload，光一个错误名说不出是哪个包）：
 
@@ -464,7 +480,7 @@ Tool 是"能执行的能力"，Skill 是"要遵循的方法 / 知识"；不同 r
 | `compact` | compiled | `compact` tool（§11，声明 `audience: driver`，§7.2.1） | TUI `/compact` 与 `drivers/goal.*` 经 `ext run` |
 | `agent` | compiled | `agent` / `materialize` / `list` / `run` 四个 tool（后三个声明 `audience: driver`，§7.2.1；`agent` 不标——它是给模型的委派入口）+ 自带四个 agent 定义（`explore` / `plan` / `general` / `orchestrator`，见下） | driver `session new --with agent@<v> --pin ext:agent/agent`（只带顶层场）；`materialize` / `list` / `run` 经 `ext run` |
 | `handoff` | compiled | `handoff` tool（§11） | `drivers/goal.*` 的 `session new --with handoff@<v> --pin ext:handoff/handoff` |
-| `evolution` | data | system prompt + skill | `session new --with evolution@<v>`（mode） |
+| `evolution` | data | system prompt + skill（manifest 声明 `activation: on_request`，§7.2.1） | `activate` 只是登记；`session new --with evolution` 才戴上（mode） |
 | `guide` | data | skill | 用户 `--user` 装一次，每场 `<available_skills>` 多一行 |
 | `std` | compiled | `read` / `write` / `append` / `edit` / `grep` / `glob` 六个 tool（`read` / `grep` / `glob` 声明 `readonly`，§7.2.1） | 用户 `ext build extensions/std --user` → `activate --user` → user config `[registry] pinned_native_tools`（builtin 1 + 6 = 7 ≤ `max_tools` 20） |
 

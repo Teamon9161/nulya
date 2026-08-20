@@ -1,6 +1,7 @@
 {
   "schema": "nulya.extension/v2",
   "id": "evolution",
+  "activation": "on_request",
   "contributes": {
     "system_prompts": ["prompts/evolution.md"],
     "skills": ["skills/evolution"]
