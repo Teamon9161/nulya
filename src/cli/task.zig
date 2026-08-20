@@ -253,6 +253,8 @@ fn readNotify(alloc: std.mem.Allocator, io: std.Io, dir: []const u8) !?[]u8 {
 /// The supervisor. Its step ORDER is load-bearing, which is why it is spelled
 /// out here rather than left to read off the code:
 ///
+///   0. drop every pipe handle the spawn chain leaked into this process
+///      (`closeInheritedStrayPipes`) — before anything long-lived begins;
 ///   1. take the lease, write `running` — so a reader can already see the task;
 ///   2. honour a kill marker that arrived first, WITHOUT spawning anything;
 ///   3. run the real command under a `Tree`, so a kill ends the whole subtree;
@@ -267,6 +269,9 @@ fn readNotify(alloc: std.mem.Allocator, io: std.Io, dir: []const u8) !?[]u8 {
 /// with nothing new to read (DESIGN §4's "a bare step replays the last reply as
 /// a prefill").
 fn taskSupervise(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+    // ⓪ Before anything long-lived begins: this process must hold no pipe an
+    // ancestor is still draining (see `closeInheritedStrayPipes`).
+    closeInheritedStrayPipes();
     const dir = flagValue(args, "--dir") orelse return superviseUsage(io);
     const session_path = flagValue(args, "--session") orelse return superviseUsage(io);
     const run_cwd = flagValue(args, "--cwd") orelse return superviseUsage(io);
@@ -399,6 +404,54 @@ fn taskSupervise(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
 fn superviseUsage(io: std.Io) !u8 {
     try printErr(io, "usage: nulya task supervise --dir <task-dir> --session <session-file> --cwd <dir> [--timeout-ms N] -- <command>\n");
     return 1;
+}
+
+/// The kernel32 calls the stray-pipe sweep needs, declared locally exactly as
+/// `environment.zig` declares the `DetachedStdio` pair — std 0.16 ships
+/// neither. `CloseHandle` is our own extern rather than std's wrapper because
+/// std's asserts on failure, and a swept handle is not worth crashing over.
+const win32 = struct {
+    const windows = std.os.windows;
+    const FILE_TYPE_PIPE: windows.DWORD = 0x0003;
+    extern "kernel32" fn GetFileType(hFile: windows.HANDLE) callconv(.winapi) windows.DWORD;
+    extern "kernel32" fn CloseHandle(hObject: windows.HANDLE) callconv(.winapi) windows.BOOL;
+};
+
+/// Close every pipe handle this process inherited but does not own (Windows
+/// only; POSIX descriptors are CLOEXEC and never arrive).
+///
+/// `CreateProcessW` runs with `bInheritHandles = TRUE` and no handle list (std
+/// 0.16 spawns no other way), so a supervisor started at the end of a nested
+/// chain — front end → `session step` → extension → `nulya task run` — inherits
+/// a duplicate of every inheritable pipe anywhere UP that chain, not only its
+/// parent's stdio (which `environment.DetachedStdio` strips at the one spawn it
+/// can see). Each such write end held here keeps an ancestor's reader from EOF
+/// for the task's whole life: the delegation receipt arrives when the task
+/// ENDS, and the task is background in name only (observed as `ext run agent`
+/// blocking the full 15 s of its sub-agent's run).
+///
+/// The supervisor is the one long-lived process in that chain and legitimately
+/// owns no pipes at all — `startShellTask` gives it the null device for stdio —
+/// so every pipe-typed handle in its table except its own stdio is such a
+/// stray, and sweeping them here works at any nesting depth, including chains
+/// that pass through processes (extensions, shells) that never heard of the
+/// problem. Handle values are small multiples of 4 and strays are duplicated at
+/// process creation, before anything else allocates; 0x1000 is far past all of
+/// them.
+fn closeInheritedStrayPipes() void {
+    if (builtin.os.tag != .windows) return;
+    const stdio = [3]std.os.windows.HANDLE{
+        std.Io.File.stdin().handle,
+        std.Io.File.stdout().handle,
+        std.Io.File.stderr().handle,
+    };
+    var value: usize = 4;
+    sweep: while (value <= 0x1000) : (value += 4) {
+        const handle: std.os.windows.HANDLE = @ptrFromInt(value);
+        for (stdio) |own| if (handle == own) continue :sweep;
+        if (win32.GetFileType(handle) != win32.FILE_TYPE_PIPE) continue;
+        _ = win32.CloseHandle(handle);
+    }
 }
 
 /// Everything after `--`, joined by spaces. One argument is the normal case

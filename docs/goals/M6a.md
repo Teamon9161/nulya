@@ -73,5 +73,6 @@ usage journal 的每条 fact 从今天起**多记一列可空 `version`**——�
 - **文档（m6a-d）**：DESIGN §5.5（列的语义 + 双身份 + 两个写点 + 为什么仍是 v1 + 只写不读）与 §3 表格那一行的 shape；PLAN §1 的 M6 条目（Phase A ✅、注明 fact/投影拆开与 v1 修正）与 §3.5.2（加一段"相对本节原文的两处修正"）；CLAUDE.md 模块表 `journals/tool_stats.zig` 行 + 现状区新增一条。model-facing 文本零改动（如契约所料）。
 
 **测试**：`zig build test` 全绿。`zig build e2e` = **71 pass / 1 fail**，唯一那条失败是 `e2e.extension` 的 `bundled agent: a follow-up resumes the same delegated session …`（`expected 1, found 0`，数 `task_finished` 的时序断言）——**本轮开工前在干净的 `main` 上验过，同一条、同一处先已失败**，与 usage journal 无关（本轮四个子项每一步都复跑过，失败集合始终是这一条，未新增）。
+**后记（合并时排查）**：实际失败断言是 ⑤ 的 `refused.code`（`extension.zig:2663`）而非 `task_finished` 计数；根因是 Windows 嵌套 spawn 链的句柄继承让委派的回执阻塞到子 agent 跑完（实测 15.5 s ≈ 任务全程），"还在跑就拒绝"那道门到场时任务已 `done`。已在 main 上修（supervisor 启动清扫杂散 pipe 句柄 + `runnerRunning` 补 `starting` 窗口，DESIGN §8/§14），与本契约无关。
 
 **BLOCKED**：无。越界项一个未碰：`tui/` 零 diff；`ledger` / `prompt` / `loop` / `composition` / `store` 未改；`aggregate` 未改；无 `VersionStats` 投影；M6 B–E 未做。

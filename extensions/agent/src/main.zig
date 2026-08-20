@@ -228,7 +228,6 @@ fn materialize(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
     }
 }
 
-
 /// The distinct extension ids a definition's pins name.
 ///
 /// A pin gives a tool a native slot; it does not make its package a member of
@@ -252,7 +251,6 @@ fn pinMembers(alloc: std.mem.Allocator, pins: []const []const u8) ![]const []con
     }
     return out.items;
 }
-
 
 /// Check that every `--with` a persona's pins imply can actually be resolved,
 /// and say how to fix it when one cannot. Null when all of them are fine.
@@ -634,7 +632,13 @@ fn startRunner(
 /// The kernel's own projection answers it (`task list --json`, DESIGN §6.1):
 /// `starting` and `running` mean a runner is in flight, `done` and `lost` mean
 /// nobody is. Matched on the command, which names the session it drives — the
-/// same string this tool composed.
+/// same string this tool composed. One honest gap: a `starting` row has no
+/// `status.json` yet, so its command is still empty and it cannot say WHICH
+/// session it drives. It might be our runner in its first milliseconds, and
+/// letting the follow-up through would drop it into the very run that is
+/// producing the report — so an unattributable starting row counts as
+/// in-flight. Refusing is the safe direction: the caller is told to wait, and
+/// a moment later the row has a command and the answer is exact.
 fn runnerRunning(ctx: *const Ctx, parent: []const u8, child: []const u8) !bool {
     const alloc = ctx.alloc;
     const listed = try run(alloc, ctx.io, &.{ ctx.exe, "task", "list", "--session", parent, "--json" });
@@ -648,17 +652,21 @@ fn runnerRunning(ctx: *const Ctx, parent: []const u8, child: []const u8) !bool {
         else => return false,
     };
     const needle = try std.fmt.allocPrint(alloc, "session={s}", .{child});
+    var unattributable_start = false;
     for (tasks.items) |item| {
         const row = switch (item) {
             .object => |o| o,
             else => continue,
         };
         const command = rpc.stringField(row, "command") orelse continue;
-        if (std.mem.indexOf(u8, command, needle) == null) continue;
         const state = rpc.stringField(row, "state") orelse continue;
+        if (std.mem.indexOf(u8, command, needle) == null) {
+            if (command.len == 0 and std.mem.eql(u8, state, "starting")) unattributable_start = true;
+            continue;
+        }
         if (std.mem.eql(u8, state, "starting") or std.mem.eql(u8, state, "running")) return true;
     }
-    return false;
+    return unattributable_start;
 }
 
 /// How many turns a caller has sent into `child` — its `user_text` events.
@@ -764,7 +772,7 @@ fn detail(r: Run) []const u8 {
     const err = std.mem.trim(u8, r.stderr, " \t\r\n");
     const said = if (err.len != 0) err else std.mem.trim(u8, r.stdout, " \t\r\n");
     if (said.len == 0) return "no output";
-    return said[said.len -| max_detail_bytes ..];
+    return said[said.len -| max_detail_bytes..];
 }
 
 fn firstLine(text: []const u8) []const u8 {
