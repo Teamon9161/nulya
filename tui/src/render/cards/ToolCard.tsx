@@ -10,6 +10,8 @@ import { EvolveCard } from "./EvolveCard.tsx"
 import { CanceledCard } from "./CanceledCard.tsx"
 import { ChecklistCard } from "./ChecklistCard.tsx"
 import { MarkdownToolCard } from "./MarkdownToolCard.tsx"
+import { PluginToolCard } from "./PluginToolCard.tsx"
+import { usePlugins } from "../../plugins/context.ts"
 import type { ToolItem } from "../../state/session.ts"
 
 /**
@@ -22,6 +24,15 @@ import type { ToolItem } from "../../state/session.ts"
  */
 export function ToolCard(props: { item: ToolItem; contributions?: Contributions[] }) {
   const style = useStyle()
+  const plugins = usePlugins()
+  /**
+   * A code card from the package that owns this tool, if there is one — asked
+   * BEFORE the registry's own kinds, because a package that shipped a renderer
+   * has superseded its own `render:` hint (the same ceiling-over-floor rule the
+   * widget strip follows). Never before cancellation, which is about the call
+   * not having happened at all.
+   */
+  const pluginCard = () => plugins?.cardFor(props.item.tool) ?? null
   const presentation = createMemo(() =>
     describeTool({ tool: props.item.tool, args: props.item.args, output: props.item.output }, style.glyphs, {
       // Only a member of this session's frozen composition can have made a
@@ -37,6 +48,14 @@ export function ToolCard(props: { item: ToolItem; contributions?: Contributions[
     <Switch>
       <Match when={marker() !== null}>
         <CanceledCard item={props.item} presentation={presentation()} marker={marker()!} />
+      </Match>
+      <Match when={pluginCard() !== null}>
+        <PluginToolCard
+          item={props.item}
+          presentation={presentation()}
+          card={pluginCard()!}
+          revision={plugins?.revision() ?? 0}
+        />
       </Match>
       <Match when={presentation().kind === "edit"}>
         <EditCard item={props.item} presentation={presentation()} />

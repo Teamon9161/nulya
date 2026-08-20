@@ -10,6 +10,12 @@
 
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
+    // The plugin-host contract (`plugin-api.d.ts`) is written ONCE and read
+    // from both sides: a plugin author writes `import type { PluginApi } from
+    // "nulya-tui/plugin-api"`, and so does the host that implements it. A
+    // second copy of those types inside `src/` would be two answers to one
+    // question the first time either moved.
+    "paths": { "nulya-tui/plugin-api": ["./plugin-api.d.ts"] },
     "verbatimModuleSyntax": true,
     "noEmit": true,
 
@@ -23,5 +29,5 @@
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false
   },
-  "include": ["src", "test"]
+  "include": ["src", "test", "plugin-api.d.ts"]
 }

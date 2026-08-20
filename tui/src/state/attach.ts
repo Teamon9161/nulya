@@ -120,6 +120,14 @@ export function createAttachment(
           if (disposed || follow !== handle) return
           // Idempotent by seq, so a `--since` off by one costs nothing.
           state.applyEvent(event)
+          // An observer tab sees ledger events and no deltas — the granularity
+          // the role has (§5.6) — but it sees them, so a plugin watching a
+          // session somebody else drives is not watching a blank screen.
+          try {
+            options.onLine?.({ kind: "event", event }, id)
+          } catch {
+            // A follower is a convenience; nothing in it may stop the tail.
+          }
         }
       } catch {
         // The follower is a convenience, never a source of truth: if the tail

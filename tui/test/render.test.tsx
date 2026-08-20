@@ -147,6 +147,7 @@ function contribution(over: Partial<Contributions> & Pick<Contributions, "id">):
     policy: null,
     toolRender: {},
     panelTools: [],
+    tui: null,
     ...over,
   }
 }
@@ -548,6 +549,7 @@ const card_contributions = [
     policy: null,
     toolRender: {},
     panelTools: [],
+    tui: null,
   },
   // A `--with` package: no tool, no skill, one prompt — worn for this
   // session only, and the card has to say so (DESIGN §7.5).
@@ -564,6 +566,7 @@ const card_contributions = [
     policy: null,
     toolRender: {},
     panelTools: [],
+    tui: null,
   },
 ]
 

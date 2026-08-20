@@ -166,6 +166,24 @@ export interface Contributions {
    * projected as a persistent widget above the composer.
    */
   panelTools: string[]
+  /**
+   * `contributes.tui` (DESIGN §7.2.1, tui-plugin D10): a package-relative path
+   * to a front-end module and the plugin-host API major version it was
+   * written against, or null when the package ships no code layer.
+   *
+   * The kernel freezes the entry's bytes with the version and never loads it
+   * (`Manifest.Tui`); who loads it, and whether this build's API version
+   * matches, is a front end's decision — `src/plugins/host.ts`.
+   */
+  tui: PackageTui | null
+}
+
+/** A package's front-end module declaration (`manifest.Tui`). */
+export interface PackageTui {
+  /** Package-relative, checked safe by the kernel at build time. */
+  entry: string
+  /** The plugin-host API major version. The kernel refuses 0. */
+  api: number
 }
 
 /** A package's own slash command (`manifest.Command`). */
@@ -211,6 +229,7 @@ export async function readContributions(
     policy: null,
     toolRender: {},
     panelTools: [],
+    tui: null,
   }
   const search = roots ?? (await storeRoots(ws))
   for (const root of search) {
@@ -228,6 +247,27 @@ export async function readContributions(
   return empty
 }
 
+/**
+ * Where a frozen version's PACKAGE files are on this disk — the directory the
+ * kernel copies the sealed snapshot into (`integrity.package_dir`), which is
+ * what a `contributes.tui.entry` / `system_prompts` path is relative to. Null
+ * when no root holds that version.
+ *
+ * The first root that has it wins, as everywhere: a version id is a hash of
+ * its own contents, so two roots holding one version hold the same bytes.
+ */
+export function packageDirOf(
+  roots: readonly string[],
+  id: string,
+  version: string,
+): string | null {
+  for (const root of roots) {
+    const dir = join(root, id, "versions", version, "package")
+    if (existsSync(dir)) return dir
+  }
+  return null
+}
+
 function contributionsOf(
   manifest: Record<string, unknown> | null,
 ): Pick<
@@ -242,6 +282,7 @@ function contributionsOf(
   | "policy"
   | "toolRender"
   | "panelTools"
+  | "tui"
 > {
   const contributes = (manifest?.["contributes"] ?? {}) as Record<string, unknown>
   const declared = Array.isArray(contributes["tools"]) ? (contributes["tools"] as Array<Record<string, unknown>>) : []
@@ -269,7 +310,23 @@ function contributionsOf(
     policy: policyOf(contributes["policy"]),
     toolRender,
     panelTools: named.filter((tool) => tool["panel"] === true).map((tool) => tool["name"] as string),
+    tui: tuiOf(contributes["tui"]),
   }
+}
+
+/**
+ * `contributes.tui`, or null. Both fields are required by the kernel's own
+ * parse, so anything missing one of them is a manifest this build cannot use
+ * — read as "no code layer" rather than half a declaration.
+ */
+function tuiOf(value: unknown): PackageTui | null {
+  if (typeof value !== "object" || value === null) return null
+  const record = value as Record<string, unknown>
+  const entry = record["entry"]
+  const api = record["api"]
+  if (typeof entry !== "string" || entry.length === 0) return null
+  if (typeof api !== "number" || !Number.isFinite(api)) return null
+  return { entry, api }
 }
 
 function commandsOf(value: unknown): PackageCommand[] {

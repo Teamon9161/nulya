@@ -6,6 +6,7 @@ import { SkillEchoCard } from "./SkillEchoCard.tsx"
 import { skillEchoOf } from "../../skills.ts"
 import { midTaskOf } from "../../midtask.ts"
 import { approvalNoteOf } from "../../approvalnote.ts"
+import { extNoteBadge, extNoteOf } from "../../extnote.ts"
 import { AssistantTurn } from "./AssistantTurn.tsx"
 import { Thinking } from "./Thinking.tsx"
 import { ToolCard } from "./ToolCard.tsx"
@@ -47,6 +48,17 @@ export function Card(props: { item: TranscriptItem; contributions?: Contribution
           item={props.item as Extract<TranscriptItem, { kind: "user" }>}
           text={approvalNoteOf(props.item)!.text}
           badge={`note on ${approvalNoteOf(props.item)!.tool}`}
+        />
+      </Match>
+      {/* Assembled by a plugin on the person's behalf (`extnote.ts`, tui-plugin
+          D5). Its badge names the package, because a block of text a package
+          composed is not the same thing as a person typing it — and the
+          transcript is the one place that distinction survives a replay. */}
+      <Match when={extNoteOf(props.item) !== null}>
+        <UserTurn
+          item={props.item as Extract<TranscriptItem, { kind: "user" }>}
+          text={extNoteOf(props.item)!.text}
+          badge={extNoteBadge(extNoteOf(props.item)!)}
         />
       </Match>
       {/* Typed while a run was in flight: the ledger keeps the sentinel and the

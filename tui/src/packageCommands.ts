@@ -129,7 +129,13 @@ export function resolve(
  * `skillCompletions` — same shape, same "exact match keeps the explanation up"
  * rule).
  */
-export function packageCompletions(rows: readonly PackageCommandRow[], text: string): { name: string; what: string }[] {
+export function packageCompletions(
+  // Only the two fields a menu row needs, so a loaded plugin's command list
+  // (tui-plugin U3, which has no `action` and no store `id`) goes through the
+  // same function rather than a second copy of these four lines.
+  rows: readonly { name: string; description: string }[],
+  text: string,
+): { name: string; what: string }[] {
   if (!text.startsWith("/")) return []
   const head = text.split(/\s/)[0] ?? text
   if (head.length < text.length) {

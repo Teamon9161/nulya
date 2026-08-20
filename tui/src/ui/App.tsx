@@ -81,7 +81,12 @@ import {
   runArgs,
 } from "../packageCommands.ts"
 import { PanelStrip } from "./PanelStrip.tsx"
-import { panelItemsOf } from "../state/panels.ts"
+import { PluginPanel } from "./PluginPanel.tsx"
+import { PluginWidgets } from "./PluginWidgets.tsx"
+import { panelItemsOf, withoutSuperseded } from "../state/panels.ts"
+import { createPluginHost, pluginKeyOf } from "../plugins/host.ts"
+import { PluginContext } from "../plugins/context.ts"
+import { wrapExtNote } from "../extnote.ts"
 import { runCompact } from "../compact.ts"
 import { headline, nextHandoff, type HandoffFile } from "../handoff.ts"
 import { buildEvolution, formatWithRef, parseWithRef, type WithRef } from "../evolve.ts"
@@ -248,6 +253,10 @@ export function App(props: AppProps) {
     ...(props.driver ?? {}),
     statePath: props.statePath,
     gate: (request, session) => approve(request, session),
+    // Every line every step prints, to whatever plugins asked to watch
+    // (tui-plugin U3, `api.observe`). A pure observer: it runs after the
+    // transcript has been told, and it decides nothing.
+    onLine: (line, session) => plugins.observe(line, session),
   })
 
   // The workspace's paths, for `@` completion (tui.md §11, T13). Built in the
@@ -574,7 +583,11 @@ export function App(props: AppProps) {
     }
   }
 
-  onMount(() => void syncStores())
+  // …and only then the code layer: a plugin lives in an ACTIVE version, and
+  // the pass above is what makes a freshly seeded package active. Chained
+  // rather than parallel for that ordering alone — `syncStores` returns at once
+  // when there is nothing to sync (a test, `sync_on_start = false`).
+  onMount(() => void syncStores().then(loadPlugins))
 
   // "Ctrl+C again to quit" is an offer about THIS step. It lapses when a new
   // step starts (the first press must kill again, not quit) and after a short
@@ -953,6 +966,116 @@ export function App(props: AppProps) {
     }
   }
 
+  // ── The plugin host (tui-plugin U3) ───────────────────────────────────────
+
+  /**
+   * Whether a dialog owns the composer area right now.
+   *
+   * Three of these are TRUSTED ZONES and the reason this predicate exists at
+   * all (tui-plugin D4): the approval dialog, the permission-mode picker and
+   * `/provider`'s key field are where a person answers about permission or
+   * types a secret, and a plugin panel must be unable to appear over them or
+   * take a keystroke meant for them. A plugin's `open()` while one is up does
+   * not fail — it waits, and lands the moment the zone clears, which is the
+   * behaviour a plugin cannot tell apart from having opened slowly.
+   *
+   * The `/with` and `/agent` pickers are in here too, for a duller reason:
+   * they are dialogs in the same three rows, and two of them drawn at once is
+   * just a mess. Nothing is being protected there.
+   */
+  const dialogUp = (): boolean =>
+    pending() !== null || modePicker() || withPicker() || agentPicker() || overlay.kind() === "provider"
+
+  /** The front tab's session, in the read-only shape the contract projects. */
+  const pluginSession = () => {
+    const here = live()
+    if (!here) return null
+    const header = here.state.snapshot.header
+    return {
+      id: here.id,
+      model: header?.model_identity.model || header?.model || "",
+      members: here.contributions().map((c) => ({ id: c.id, version: c.version, tools: [...c.tools] })),
+    }
+  }
+
+  /**
+   * The code layer (`tui.toml` `[extensions] plugins`, tui-plugin U3). Every
+   * seam it is given is a verb this screen already performs for a person (D5):
+   * there is no way from here to answer the gate, write a session file, or
+   * reach a package other than the plugin's own.
+   *
+   * One host per process, not per tab, and the tab context rides in the seams:
+   * a module that has been imported has been imported, and pretending
+   * otherwise would mean calling one package's `activate` once per tab with
+   * several APIs that all wrote to the same `tui-state.json` slot.
+   */
+  const plugins = createPluginHost({
+    ws: props.ws,
+    enabled: props.style.settings.extensions.plugins,
+    ...(props.statePath ? { statePath: props.statePath } : {}),
+    // The union over every open session: a package a tab is WEARING is loaded
+    // at the version that tab froze, which is not necessarily the store's
+    // `current` (`pluginCandidates`).
+    members: () =>
+      tabs
+        .tabs()
+        .flatMap((one) => (one.kind === "session" ? one.contributions() : [])),
+    session: pluginSession,
+    tasks: () =>
+      tasks().map((task) => ({
+        task: task.task,
+        state: task.state,
+        command: task.command,
+        exitCode: task.exit_code,
+      })),
+    appendNote: async (pkg, kind, text) => {
+      const here = live()
+      if (!here) throw new Error(`${pkg}: this tab has no session yet · nothing to append to`)
+      // Framed by us, so the driver does not ALSO wrap it as a mid-task
+      // message: this turn already says how it got there (`extnote.ts`), and
+      // two sentinels on one turn is one card the transcript cannot fold.
+      await here.attach.send(wrapExtNote(pkg, kind, text), true)
+    },
+    openTab: (sessionId) => {
+      tabs.open(sessionId)
+      setNotice(`opened ${sessionId}`)
+    },
+    wearNext: (id) => startDraft(undefined, false, { id }),
+    notice: setNotice,
+    zoneBusy: dialogUp,
+  })
+
+  /**
+   * Load, and say what could not be. A pass adds warnings and never removes
+   * them, so the count is what tells a later pass whether it has news — the
+   * first one usually has none, which is the point of not announcing anything
+   * when a machine has no plugins at all.
+   */
+  const loadPlugins = async () => {
+    const before = plugins.warnings().length
+    await plugins.load()
+    const fresh = plugins.warnings().slice(before)
+    if (fresh.length > 0) setNotice(fresh.join(" · "))
+  }
+
+  /**
+   * A tab's frozen composition arrived: a package this session is WEARING can
+   * ship a front end at exactly the version that session froze, which the
+   * store's `current` need not name any more (`pluginCandidates`' second
+   * half). Only when the set actually grows — `contributions()` settles once
+   * per tab, and a pass costs an `ext list`.
+   */
+  const wornSeen = new Set<string>()
+  createEffect(() => {
+    const worn = tabs
+      .tabs()
+      .flatMap((one) => (one.kind === "session" ? one.contributions() : []))
+      .map((c) => `${c.id}@${c.version}`)
+    if (worn.every((ref) => wornSeen.has(ref))) return
+    for (const ref of worn) wornSeen.add(ref)
+    void loadPlugins()
+  })
+
   // ── The gate (tui.md §5.7) ────────────────────────────────────────────────
 
   /** The tab a gate request belongs to — the session being stepped, not the one in front. */
@@ -1192,7 +1315,16 @@ export function App(props: AppProps) {
       // …and hand the keyboard back only if nothing else took it meanwhile: an
       // overlay, browse mode and the mode picker all blur the composer on
       // purpose, and a dialog closing is no reason to overrule them.
-      if (!overlay.active() && !browse.active() && !modePicker() && !agentPicker() && !withPicker()) composer?.focus()
+      if (
+        !overlay.active() &&
+        !browse.active() &&
+        !modePicker() &&
+        !agentPicker() &&
+        !withPicker() &&
+        !plugins.panel()
+      ) {
+        composer?.focus()
+      }
       return
     }
     composer?.blur()
@@ -1207,7 +1339,19 @@ export function App(props: AppProps) {
    */
   createEffect(() => {
     if (modePicker() || agentPicker() || withPicker()) composer?.blur()
-    else if (!pending() && !overlay.active() && !browse.active()) composer?.focus()
+    else if (!pending() && !overlay.active() && !browse.active() && !plugins.panel()) composer?.focus()
+  })
+
+  /**
+   * A plugin panel takes the keyboard the same way (T28's rule, applied to a
+   * surface this front end did not write): a box that still blinks says "type
+   * here", and what is typed there would be eaten by the panel anyway.
+   */
+  createEffect(() => {
+    if (plugins.panel()) composer?.blur()
+    else if (!pending() && !overlay.active() && !browse.active() && !modePicker() && !agentPicker() && !withPicker()) {
+      composer?.focus()
+    }
   })
 
   /** Where the call being asked about sits in its batch, for the panel's heading. */
@@ -1546,9 +1690,32 @@ export function App(props: AppProps) {
   const resolvedPackageCommands = () => resolvePackageCommands(packageCmds.entries(), builtin_names)
 
   /**
-   * `/name` where `name` is a package's own command (tui-plugin D1/D8):
-   * `false` when no package claims it, so the caller falls through to the
-   * skill catalog and then the model, exactly as an unrecognised built-in
+   * `/name` where a loaded PLUGIN registered it (`api.registerCommand`).
+   *
+   * Asked before the declaration layer, which settles the rule tui-plugin §5
+   * left open: a package's code command beats the same package's declared one,
+   * because it is the same package making a more capable statement about
+   * itself. A built-in is still untouchable — the host refuses to register one
+   * at all (D8) — and where a code command and a DIFFERENT package's declared
+   * command collide, the code one wins for the same reason a code widget wins
+   * over a `panel: true` row: the ceiling covers the floor.
+   */
+  const runPluginCommand = async (raw: string): Promise<boolean> => {
+    const { name, args } = splitSlash(raw)
+    const row = plugins.commands().find((entry) => entry.name === name)
+    if (!row) return false
+    try {
+      await row.run({ args, session: pluginSession() })
+    } catch (error) {
+      setNotice(`${row.pkg} · /${row.name} · ${error instanceof Error ? error.message : String(error)}`)
+    }
+    return true
+  }
+
+  /**
+   * `/name` where `name` is a package's own DECLARED command (tui-plugin
+   * D1/D8): `false` when no package claims it, so the caller falls through to
+   * the skill catalog and then the model, exactly as an unrecognised built-in
    * does today.
    *
    * The three verbs each land on a path that already exists for a person
@@ -1925,7 +2092,8 @@ export function App(props: AppProps) {
    * The one path a message takes, and the one place a session comes into
    * existence (tui.md §11, T22).
    *
-   * A `/name` no built-in claimed is offered to a PACKAGE command next
+   * A `/name` no built-in claimed is offered to a loaded PLUGIN's command
+   * next (`runPluginCommand`, U3), then to a package's DECLARED one
    * (`runPackageCommand`, tui-plugin D1/D8), and only then to the skill
    * catalog: if a skill has that name, its body becomes an ordinary user turn
    * wrapped in the echo sentinel (`skills.ts`), and a failure to load says so
@@ -1940,6 +2108,7 @@ export function App(props: AppProps) {
   const sendTurn = async (text: string) => {
     let turn = text
     if (text.startsWith("/")) {
+      if (await runPluginCommand(text)) return
       if (await runPackageCommand(text)) return
       try {
         turn = (await skillTurn(props.ws, skills.entries(), text)) ?? text
@@ -2118,6 +2287,17 @@ export function App(props: AppProps) {
       if (matches(keys.quit, key)) quit()
       return
     }
+    /**
+     * A plugin's panel owns the keyboard while it is up (tui-plugin D6) — on
+     * exactly the terms every other composer dialog has, and no better ones:
+     * the trusted zones above already returned, a full-screen overlay above
+     * already returned, and `Ctrl+C` never arrives here at all
+     * (`PluginHost.handleKey` refuses it, and the branch below still runs).
+     * `Esc` takes the panel down whether or not the plugin wants it.
+     */
+    if (plugins.panel() && !key.ctrl && !key.meta) {
+      if (plugins.handleKey(pluginKeyOf(key))) return consume(key, () => {})
+    }
     if (browse.active()) {
       // The composer is blurred while browsing, so these keys are ours alone.
       if (matches(keys.cancel, key)) {
@@ -2223,6 +2403,12 @@ export function App(props: AppProps) {
         <FoldContext.Provider value={folds}>
           <BrowseContext.Provider value={browse}>
             <OverlayContext.Provider value={overlay}>
+              {/* The loaded plugins, for the one card that has to ask whether
+                  a package draws its own tool call (`render/cards/ToolCard.tsx`,
+                  tui-plugin D11). A context for the same reason the style is
+                  one: threading it through Transcript → Card → ToolCard would
+                  put a plugin concern in three files that have none. */}
+              <PluginContext.Provider value={plugins}>
               {/* The live task rows, for the one card that needs a fact nothing
                   appended can carry: how long a background command has been
                   going (tui.md §5.9). */}
@@ -2282,6 +2468,11 @@ export function App(props: AppProps) {
                         // remove a `/name` it declares just as easily as a
                         // skill (tui-plugin D1/D8): same staleness, same fix.
                         packageCmds.invalidate()
+                        // A package that was just activated may ship a front
+                        // end. The other direction is not symmetric and says
+                        // so in `host.ts`: a module that has run has run, so
+                        // deactivating takes effect at the next start.
+                        void loadPlugins()
                       }}
                       onClose={closeOverlay}
                     />
@@ -2376,6 +2567,14 @@ export function App(props: AppProps) {
                     given (tui.md §5.7). Above the composer for the same reason
                     the handover proposal is: it is a question about what happens
                     next, not a thing that happened. */}
+                {/* A plugin's own panel (tui-plugin D6), below every dialog
+                    the host owns: a trusted zone hides it outright
+                    (`dialogUp`), and the ordering here is the second half of
+                    that promise — nothing an extension drew can ever sit
+                    between a person and the question they are answering. */}
+                <Show when={plugins.panel()}>
+                  <PluginPanel panel={plugins.panel()!} revision={plugins.revision()} />
+                </Show>
                 <Show when={pending()}>
                   <ApprovalPanel
                     tool={pending()!.request.tool}
@@ -2406,8 +2605,17 @@ export function App(props: AppProps) {
                     is visible whether or not its own card is still on screen.
                     Below the activity line for the same reason it is above
                     the composer — both are read on every glance. */}
+                {/* …and the code layer's version of the same row, above it:
+                    a package that ships a widget has superseded its own
+                    `panel: true` projection (U3), so the strip below drops
+                    those tools rather than saying it twice. */}
+                <PluginWidgets widgets={plugins.widgets()} revision={plugins.revision()} />
                 <PanelStrip
-                  items={panelItemsOf(snapshot().items, live()?.contributions() ?? [])}
+                  items={withoutSuperseded(
+                    panelItemsOf(snapshot().items, live()?.contributions() ?? []),
+                    live()?.contributions() ?? [],
+                    plugins.widgetPackages(),
+                  )}
                   contributions={live()?.contributions() ?? []}
                 />
                 <Composer
@@ -2421,6 +2629,7 @@ export function App(props: AppProps) {
                   references={references}
                   skills={skills}
                   packages={packageCmds}
+                  pluginCommands={plugins.commands}
                   onReady={(api) => {
                     composer = api
                     // The picker may already be up (`guide`): it owns the keys.
@@ -2445,6 +2654,7 @@ export function App(props: AppProps) {
                 />
               </box>
               </TasksContext.Provider>
+              </PluginContext.Provider>
             </OverlayContext.Provider>
           </BrowseContext.Provider>
         </FoldContext.Provider>

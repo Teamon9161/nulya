@@ -140,6 +140,13 @@ export function Composer(props: {
    * offers is exactly what typing the name and pressing Enter would run.
    */
   packages?: PackageCommandTable
+  /**
+   * The commands loaded PLUGINS registered (tui-plugin U3). Listed before the
+   * declared ones because dispatch tries them first — the same package's code
+   * command supersedes its own manifest entry (`ui/App.tsx`
+   * `runPluginCommand`).
+   */
+  pluginCommands?: () => readonly { name: string; description: string }[]
   onReady?: (api: ComposerApi) => void
 }) {
   const style = useStyle()
@@ -165,6 +172,7 @@ export function Composer(props: {
    */
   const matches = (): { name: string; args?: string; what: string }[] => [
     ...completions(line()),
+    ...packageCompletions(props.pluginCommands?.() ?? [], line()),
     ...packageCompletions(resolvePackageCommands(props.packages?.entries() ?? [], builtin_names).winners, line()),
     ...skillCompletions(props.skills?.entries() ?? [], line()),
   ]

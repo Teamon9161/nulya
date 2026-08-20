@@ -74,6 +74,23 @@ export interface Settings {
      * used to mean. Nothing rewrites the file.
      */
     session_with: string[]
+    /**
+     * The CODE layer's one switch (tui-plugin U3): whether a trusted, active
+     * package's `contributes.tui` module is loaded into this process at all.
+     *
+     * `false` leaves the declaration layer exactly as U2 left it — commands,
+     * policy, `render`/`panel` hints all still work, because those are JSON a
+     * package wrote and any driver can read. What it turns off is the half
+     * where a package ships TypeScript that runs here.
+     *
+     * On by default, because loading is already gated by the one boundary this
+     * decision has: an extension's code runs on this machine the moment
+     * anybody calls `ext run`, and the trust gate (DESIGN §9) is where that was
+     * decided (tui-plugin D4). Off is for somebody who wants the screen to be
+     * only ever the screen — and per package, the switch is `/ext`'s own: a
+     * package that is not active and not worn is never loaded.
+     */
+    plugins: boolean
   }
   driver: {
     /**
@@ -103,7 +120,7 @@ export const default_settings: Settings = {
     history_window: 400,
   },
   ui: { theme: "nulya-dark", motion: true },
-  extensions: { sync_on_start: true, auto_activate: true, session_with: ["handoff", "agent"] },
+  extensions: { sync_on_start: true, auto_activate: true, session_with: ["handoff", "agent"], plugins: true },
   driver: { mode: "ask" },
   approvals: { ...default_rules },
   keys: {},
@@ -172,6 +189,7 @@ function mergeLayer(into: Settings, layer: unknown, source: string) {
   if (extensions) {
     if (typeof extensions["sync_on_start"] === "boolean") into.extensions.sync_on_start = extensions["sync_on_start"]
     if (typeof extensions["auto_activate"] === "boolean") into.extensions.auto_activate = extensions["auto_activate"]
+    if (typeof extensions["plugins"] === "boolean") into.extensions.plugins = extensions["plugins"]
     // Replaced, not merged — the same discipline as the approval tables: a
     // nearer layer that wants FEWER packages must be able to say so.
     if (Array.isArray(extensions["session_with"])) {

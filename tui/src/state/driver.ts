@@ -22,6 +22,7 @@ import {
   type GateRequest,
   type GateVerdict,
   type StepHandle,
+  type StepLine,
 } from "../nulya/cli.ts"
 import { inboxPending } from "../nulya/files.ts"
 import type { Workspace } from "../nulya/bin.ts"
@@ -111,6 +112,18 @@ export interface DriverOptions {
    * another, and the call being asked about belongs to exactly one of them.
    */
   gate?: (request: GateRequest, session: string) => Promise<GateVerdict>
+  /**
+   * A pure OBSERVER of everything this step prints — `--stream` lines and
+   * ledger events alike, in arrival order, after `state` has been told
+   * (tui-plugin U3, `api.observe`). The kernel's own `StepContext.observer` is
+   * the precedent for the shape and for the discipline: it may not decide
+   * anything, and a throw in it must not reach the step.
+   *
+   * The session id rides along because one process drives several tabs, and a
+   * plugin watching "the plan being written" has to know which session wrote
+   * it.
+   */
+  onLine?: (line: StepLine, session: string) => void
 }
 
 /** The kernel's refusal to hand over the writer lease, on the `--stream` wire. */
@@ -191,6 +204,16 @@ export function createDriver(
             if (isRunError(line)) reported = true
             if (line.kind === "stream") state.applyStream(line.line)
             else state.applyEvent(line.event)
+            // After the transcript, never before it: an observer sees what is
+            // already on screen, so it can never be the reason something is.
+            // A throw here is the observer's problem alone — a plugin must not
+            // be able to stop a step by mis-reading its output (D10).
+            try {
+              options.onLine?.(line, id)
+            } catch {
+              // The host already reports what its own callbacks did; nothing
+              // here is worth risking the step for.
+            }
           }
           code = await step.exited
         } catch (error) {

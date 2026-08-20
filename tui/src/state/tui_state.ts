@@ -75,6 +75,17 @@ export interface TuiState {
    * unpinned.
    */
   adopted_std_edit_pin?: boolean
+  /**
+   * One slot per plugin package, keyed by package id (tui-plugin U3,
+   * `api.state`). PREFERENCES a plugin should remember between runs — not view
+   * state (that dies with the process) and not anything the model must see
+   * (that is a ledger turn, `extnote.ts`).
+   *
+   * Namespaced by id so two packages cannot collide, and read back loosely:
+   * whatever a plugin wrote is whatever it gets, and a slot this build cannot
+   * make sense of is still not a reason to lose the model pick.
+   */
+  plugins?: Record<string, Record<string, unknown>>
 }
 
 export function tuiStatePath(env: Record<string, string | undefined> = process.env): string {
@@ -118,6 +129,16 @@ export function loadTuiState(path = tuiStatePath()): TuiState {
       if (known) state.mode = known
     }
     if (record["adopted_std_edit_pin"] === true) state.adopted_std_edit_pin = true
+    const plugins = record["plugins"]
+    if (typeof plugins === "object" && plugins !== null && !Array.isArray(plugins)) {
+      const slots: Record<string, Record<string, unknown>> = {}
+      for (const [id, slot] of Object.entries(plugins as Record<string, unknown>)) {
+        if (typeof slot === "object" && slot !== null && !Array.isArray(slot)) {
+          slots[id] = slot as Record<string, unknown>
+        }
+      }
+      state.plugins = slots
+    }
     // Every key is picked out by name, so a file written by an older build —
     // `asked_bundled`, retired in T23 when the bundled question went away — is
     // simply not read. An unknown key has never been an error here, and a state
@@ -174,6 +195,23 @@ export function rememberAgentsAnswer(dir: string, trusted: boolean, path = tuiSt
   state.asked_agents = asked.includes(dir) ? asked : [...asked, dir]
   if (trusted && !allowed.includes(dir)) state.trusted_agents = [...allowed, dir]
   saveTuiState(state, path)
+}
+
+/** One plugin package's remembered slot (`api.state`, tui-plugin U3). */
+export function pluginState(pkg: string, path?: string): Record<string, unknown> {
+  return loadTuiState(path ?? tuiStatePath()).plugins?.[pkg] ?? {}
+}
+
+/**
+ * Write one plugin's slot back. Read-modify-write like every other remember
+ * here, so two plugins writing in the same second do not lose each other's
+ * preferences — and so a slot never takes the model pick down with it.
+ */
+export function rememberPluginState(pkg: string, slot: Record<string, unknown>, path?: string): void {
+  const where = path ?? tuiStatePath()
+  const state = loadTuiState(where)
+  state.plugins = { ...(state.plugins ?? {}), [pkg]: slot }
+  saveTuiState(state, where)
 }
 
 /** Remember that the trust question was put for this store, whatever the answer. */

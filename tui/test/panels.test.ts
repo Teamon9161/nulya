@@ -5,7 +5,7 @@
  * `test/render.test.tsx`.
  */
 import { expect, test } from "bun:test"
-import { panelItemsOf } from "../src/state/panels.ts"
+import { panelItemsOf, withoutSuperseded } from "../src/state/panels.ts"
 import type { Contributions } from "../src/nulya/files.ts"
 import type { TranscriptItem, ToolItem } from "../src/state/session.ts"
 
@@ -22,6 +22,7 @@ function contribution(over: Partial<Contributions> & Pick<Contributions, "id">):
     policy: null,
     toolRender: {},
     panelTools: [],
+    tui: null,
     ...over,
   }
 }
@@ -85,4 +86,29 @@ test("the same tool name declared by two members is one row, not two", () => {
   ]
   const items: TranscriptItem[] = [tool({ key: "e1:c1", tool: "todo", seq: 1 })]
   expect(panelItemsOf(items, contributions)).toHaveLength(1)
+})
+
+// --- tui-plugin U3: a code widget stands the declared row down --------------
+
+test("a package that ships a widget supersedes its OWN panel rows, and nobody else's", () => {
+  const contributions = [
+    contribution({ id: "plan", panelTools: ["todo"] }),
+    contribution({ id: "watch", panelTools: ["progress"] }),
+  ]
+  const items = panelItemsOf(
+    [tool({ key: "e1:c1", tool: "todo", seq: 1 }), tool({ key: "e2:c1", tool: "progress", seq: 2 })],
+    contributions,
+  )
+  expect(items.map((item) => item.tool)).toEqual(["todo", "progress"])
+
+  // `plan` shipped code, so its declared projection stands down — the ceiling
+  // covers its own floor. `watch` said nothing new and keeps its row.
+  expect(withoutSuperseded(items, contributions, new Set(["plan"])).map((item) => item.tool)).toEqual(["progress"])
+  // A package with a widget and no `panel: true` tools hides nothing.
+  expect(withoutSuperseded(items, contributions, new Set(["ask"])).map((item) => item.tool)).toEqual([
+    "todo",
+    "progress",
+  ])
+  // No plugins at all: the U2 answer, untouched.
+  expect(withoutSuperseded(items, contributions, new Set())).toEqual(items)
 })
