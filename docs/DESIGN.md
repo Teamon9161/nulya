@@ -350,15 +350,18 @@ extension 装在**多个 store root** 里，按固定顺序搜索（`extension/r
   "activation": "always",
   "runtime": { "entry": "bin/web-search" },
   "contributes": {
-    "tools": [{ "name": "web_search", "description": "…", "input": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] }, "timeout_ms": 60000, "readonly": true, "audience": "model" }],
+    "tools": [{ "name": "web_search", "description": "…", "input": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] }, "timeout_ms": 60000, "readonly": true, "audience": "model", "render": "checklist", "panel": true }],
     "skills": ["skills/risk-parity"],
-    "system_prompts": ["prompts/finance.md"]
+    "system_prompts": ["prompts/finance.md"],
+    "commands": [{ "name": "search", "description": "…", "action": "run web_search" }],
+    "policy": { "readonly": true, "deny": ["shell"], "ask": [] },
+    "tui": { "entry": "tui/panel.ts", "api": 1 }
   },
   "permissions": { "fs": [], "network": ["https"], "process": [] }
 }
 ```
 
-校验（`manifest.zig`）：schema id 精确匹配；`id` 合法；**至少一种 contribution**（`NoContributions`）；有 tool 时必须有 `runtime`（`MissingRuntime`）；tool 名不能是 `shell`（保留名只有这一个，§5.2）、不能重复；`timeout_ms` 若写了必须是正数且 ≤ `tool.Timeouts.extension_max_ms`（600s），否则 `InvalidTimeout`；`audience` 若写了必须是 `model` / `driver` 之一，否则 `InvalidAudience`；`activation` 若写了必须是 `always` / `on_request` 之一，否则 `InvalidActivation`；`entry` / skill / system_prompt 路径不能逃出包目录。**manifest 是 schema 唯一真相**：绝不"启动 binary 再问它有什么"。
+校验（`manifest.zig`）：schema id 精确匹配；`id` 合法；**至少一种 contribution**（`NoContributions`——`tools` / `skills` / `system_prompts` / `commands` / `policy` / `tui` 任一非空即算）；有 tool 时必须有 `runtime`（`MissingRuntime`）；tool 名不能是 `shell`（保留名只有这一个，§5.2）、不能重复；`timeout_ms` 若写了必须是正数且 ≤ `tool.Timeouts.extension_max_ms`（600s），否则 `InvalidTimeout`；`audience` 若写了必须是 `model` / `driver` 之一，否则 `InvalidAudience`；`activation` 若写了必须是 `always` / `on_request` 之一，否则 `InvalidActivation`；`entry` / skill / system_prompt / `tui.entry` 路径不能逃出包目录；命令 `name` 必须是 `[a-z0-9-]+` 且包内不重复（`InvalidCommandName` / `DuplicateCommandName`），`action` 若形如 `"run <tool>"` 则 `<tool>` 必须是本包声明的 tool（`UnknownCommandTool`）；`policy.deny` / `.ask` 的条目不能是空串（`InvalidPolicyEntry`，`allow` 键在 parse 阶段就被拒——见下）；`tui.api` 不能是 0（`InvalidTuiApi`）。**manifest 是 schema 唯一真相**：绝不"启动 binary 再问它有什么"。
 
 `tools[].input` schema 只在该 tool 被 pin 进 `tools[]` 时才喂给模型；平时是可发现性元数据。
 
@@ -372,7 +375,15 @@ extension 装在**多个 store root** 里，按固定顺序搜索（`extension/r
 - **缺省是 null 不是 `"model"`**：与 `readonly` 同一句话——"包没说"与"包说了 model"是两件事，落盘不会替包补一个字。把沉默读成 model 是**读的人**的选择（这个字段存在之前写的每一份 manifest 声明的都是 model tool），那个选择做在用它的地方，不做在内核里。
 - 类型不对（`"audience": true`）是 `WrongType`；**认不出的词**（`"drivers"`）是 `InvalidAudience` 而不是退回缺省——一个想说 `driver` 却拼错的包，退回缺省的后果正是这个字段要防的那一件事。这与 `timeout_ms` 的分法一致：类型错在 parse，值错在 validate。
 
-`activation?`（可选，`"always"`（缺省） / `"on_request"`）答的是**这个包被 activate 之后，接下来的 session 会怎样**——与上面两个声明性字段不同，**这一个是内核唯一强制的 manifest 字段**：
+`tools[].render?`（可选字符串，如 `"checklist"`）与 `tools[].panel?`（可选 bool）是给**画这个 tool 调用的人**的提示（tui-plugin §1 D12）。与 `audience` **不同**的是这一个词表**开放**：kernel 只管它是不是字符串，**从不因为值而拒绝**——`readonly` / `activation` 那种封闭词表能穷举合法值，`render` 不能（今天是 `"checklist"` / `"markdown"`，以后会长），所以认不出的词是**读的人**的选择（退回一张普通卡），不是 build 拒绝。`panel: true` 是同一类声明的另一半：请求把这个 tool 最新一次调用**也**投影成输入框上方一个常驻可折叠 widget——没装代码插件的前端能给的最低限度进度显示。两个都是**声明**：kernel 解析、冻进版本、**不强制**；缺省是 null，不是任何具体的词或 `false`。
+
+`contributes.commands?`（可选，`[]{name, description, action}`）是这个包说给**驱动 session 的人/程序**听的斜杠命令（tui-plugin §1 D1/D2/D8）——JSON 就能写，任何 driver（不只是有屏幕的那个）都读得到，是没装代码插件时的降级地板。`name` 的字符集是 `[a-z0-9-]+`（比 `isValidId` 窄——命令是人在 `/` 后面敲的，不是不透明 id）、空串或超出字符集是 `InvalidCommandName`，包内重复是 `DuplicateCommandName`。`action` 是一个动词，**原样保留、开放词表**——与 `render` 同一条纪律：今天是 `"wear"` / `"run <tool>"` / `"skill <ref>"`，认不出的动词是**读的人**的选择（warn-and-skip），不是 build 拒绝。**唯一被 kernel 检查的形状**是 `"run <tool>"`：`<tool>` 必须是**这同一份 manifest**声明的 tool（`UnknownCommandTool`）——这是一个包内闭合引用，是关于这份文件自己形状的事实，不是词表的一员。
+
+`contributes.policy?`（可选，`{readonly: ?bool, deny: ?[]str, ask: ?[]str}`）是这个包要求一个审批 policy 在**它是本场冻结 composition 的成员期间**收窄的表（tui-plugin §1 D2/D3）——与 `ToolSpec.readonly` / `.audience` 同级的**声明**：kernel 解析、冻进版本、**不强制**，消费者是 driver 自己的审批 policy（TUI 的 `approvals.decide`）。**形状刻意只许收窄**：`deny` / `ask` 与 `[approvals]` 的表同形，但**没有 `allow`**——一个包能往 allow 表里塞条目就是 authority 经 activate 隐式增长（physics #6，与 `mergeProject` "只能收窄"同一条纪律）。`allow` 键的**出现本身**就是违规，没有任何值能让它合法，所以这条检查在 **parse 阶段**（`dupPolicy`）就拒绝（`PolicyAllowNotPermitted`），根本不留到 `validate`。`validate` 只管两件剩下的事：类型，与 `deny` / `ask` 里不能有空串条目（`InvalidPolicyEntry`）。`policy` 整体可以不写（`null`——包完全没提这件事）；写了但是空 `{}` 是**另一件事**（一个显式的、内容为空的策略），两者都不算错，但前者不算 `NoContributions` 的贡献而后者算。
+
+`contributes.tui?`（可选，`{entry: str, api: u32}`）是这个包**自己的前端模块**声明（tui-plugin §1 D1/D10）——kernel 只验证**形状**：`entry` 与 `system_prompts` 同一条路径安全检查（不能逃出包目录，否则 `InvalidTuiEntry`），且在 `ext build` 收集包快照时要求这个文件**真的存在**（`validateTui`，与 `validateSystemPrompts` 检查 system prompt 文件存在同一先例，`TuiEntryFileMissing`）；`api`（插件宿主 API 版本）必须 ≥ 1，否则 `InvalidTuiApi`——0 不可能是真实版本号，也没有"缺省"这回事，因为 `tui` 这个块本身是可选的（没写 `tui` 就没有 `Tui` 值，不存在"api 缺省该读成什么"的问题）。**kernel 从不加载或运行这个文件**：那是 TUI 自己的事（tui-plugin U3，本 commit 之外）——这里只冻结一个指针、验证它指向的东西没有逃出包、build 时它确实在场。
+
+`activation?`（可选，`"always"`（缺省） / `"on_request"`）答的是**这个包被 activate 之后，接下来的 session 会怎样**——与上面几个声明性字段不同，**这一个是内核唯一强制的 manifest 字段**：
 
 - **`always`**：activate 就是这台机器上此后每一场 session 都带上它——tools、skills、system prompt 一起。这是 `std` / `guide` 那一类**policy** 包：装它就是因为想让每一场都有。
 - **`on_request`**：activate 只是**登记**（`current` 指向某个版本），**一场 session 都不改变**；它只进那些**点名**它的场（`session new --with <id>`，§7.5）。这是 `evolution` 那一类 **mode** 包：一个 persona、一个审阅回路、一副镜片，戴不戴是每一场自己的决定。

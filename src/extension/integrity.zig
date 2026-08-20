@@ -151,6 +151,14 @@ pub fn collectPackageSnapshot(
         try collectFile(alloc, io, root, prompt_fs, prompt_rel, &files);
     }
 
+    if (m.tui) |t| {
+        const tui_fs = try std.fs.path.join(alloc, &.{ ext_dir_rel, t.entry });
+        defer alloc.free(tui_fs);
+        const tui_rel = try canonicalRel(alloc, t.entry);
+        defer alloc.free(tui_rel);
+        try collectFile(alloc, io, root, tui_fs, tui_rel, &files);
+    }
+
     return finishSnapshot(alloc, &files);
 }
 
@@ -187,6 +195,14 @@ pub fn collectFrozenSnapshot(
         const prompt_rel = try canonicalRel(alloc, prompt_path);
         defer alloc.free(prompt_rel);
         try collectFile(alloc, io, root, prompt_fs, prompt_rel, &files);
+    }
+
+    if (m.tui) |t| {
+        const tui_fs = try std.fs.path.join(alloc, &.{ version_rel, package_dir, t.entry });
+        defer alloc.free(tui_fs);
+        const tui_rel = try canonicalRel(alloc, t.entry);
+        defer alloc.free(tui_rel);
+        try collectFile(alloc, io, root, tui_fs, tui_rel, &files);
     }
 
     return finishSnapshot(alloc, &files);
@@ -401,6 +417,7 @@ fn requireDeclaredPaths(
     if (m.runtime != null) try requirePackagePath(alloc, io, root, version_rel, "src");
     for (m.skills) |skill_path| try requirePackagePath(alloc, io, root, version_rel, skill_path);
     for (m.system_prompts) |prompt_path| try requirePackagePath(alloc, io, root, version_rel, prompt_path);
+    if (m.tui) |t| try requirePackagePath(alloc, io, root, version_rel, t.entry);
 }
 
 fn requirePackagePath(

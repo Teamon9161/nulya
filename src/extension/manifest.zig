@@ -116,6 +116,23 @@ pub const ToolSpec = struct {
     /// model (every manifest written before this field existed declares model
     /// tools), but that reading is the reader's, made where it is used.
     audience: ?[]const u8 = null,
+    /// A rendering HINT for whoever draws this tool's calls (DESIGN §7.2.1,
+    /// tui-plugin D12) — a word from an OPEN vocabulary (`"checklist"`,
+    /// `"markdown"`, more later), kept as WRITTEN and NEVER refused by
+    /// `validate`. Unlike `audience` (a closed two-word set the kernel can
+    /// exhaustively check), this vocabulary is expected to grow, so an
+    /// unrecognized word is the READER's decision — fall back to a plain
+    /// card and move on — not a build-time refusal. Absent is null, not any
+    /// particular word: the same "silence is not a claim" discipline as
+    /// `readonly` and `audience`.
+    render: ?[]const u8 = null,
+    /// The package's request that the LATEST call of this tool also be
+    /// projected as a persistent, foldable widget above the input — the
+    /// degraded display a front end with no plugin code can still give a
+    /// progress indicator (tui-plugin D12). A DECLARATION like the rest of
+    /// this struct: absent is null, not `false`, and the kernel does not act
+    /// on it.
+    panel: ?bool = null,
 
     /// The declared audience, decoded. Null when absent — and also when the
     /// word is not one of the two, which `validate` refuses, so on a validated
@@ -163,6 +180,81 @@ pub const Permissions = struct {
     process: []const []const u8 = &.{},
 };
 
+/// A slash command this package offers whoever DRIVES a session (DESIGN
+/// §7.2.1, tui-plugin D1/D2/D8). Declared in the manifest — not in a sidecar
+/// the front end alone reads — so any driver, headless or not, sees the same
+/// commands a session's frozen composition actually carries.
+pub const Command = struct {
+    name: []const u8,
+    description: []const u8,
+    /// The verb this command performs, kept as WRITTEN — the same "silence is
+    /// not a claim, a wrong TYPE is a parse error" discipline as `audience`,
+    /// but NOT the same discipline for a wrong VALUE: this vocabulary
+    /// (`"wear"` / `"run <tool>"` / `"skill <ref>"` today) is expected to
+    /// grow, so an unrecognized verb is the READER's decision (warn and
+    /// skip), never a `validate` refusal (tui-plugin D1 / DESIGN §7.2.1
+    /// `render` precedent). The one shape `validate` DOES check is the
+    /// `"run <tool>"` case: `<tool>` must name a tool this SAME manifest
+    /// declares (`commandRunTarget` + `UnknownCommandTool`) — that is a
+    /// closed, in-package reference, a fact about this file's own shape, not
+    /// a member of the open verb vocabulary.
+    action: []const u8,
+};
+
+/// The narrowing this package asks an approval policy to apply while it is a
+/// member of a session's frozen composition (DESIGN §7.2.1, tui-plugin
+/// D2/D3). A DECLARATION exactly like `ToolSpec.readonly` / `.audience`
+/// beside it: the kernel parses it, freezes it into the version, and
+/// enforces nothing — the consumer is a driver's own approval policy (TUI's
+/// `approvals.decide`).
+///
+/// The shape is deliberately narrow-ONLY: `readonly` / `deny` / `ask` mirror
+/// the tables an approval policy already reads (`[approvals]`), and there is
+/// no `allow`. A package that could ADD an entry to an allow table would be
+/// authority growing implicitly through activation alone (physics #6) — the
+/// same reasoning `mergeProject`'s "only ever narrows" already rests on. That
+/// is why an `allow` key is refused in `dupPolicy`, at PARSE time: its
+/// presence alone is the violation, no value under it could make the shape
+/// acceptable, so there is nothing left for `validate` to check.
+pub const Policy = struct {
+    /// Same three-state discipline as `ToolSpec.readonly`: absent is null,
+    /// not `false` — the package said nothing, which is not the same as
+    /// saying "not readonly".
+    readonly: ?bool = null,
+    /// Tool ids / names / `shell:<prefix>` entries an approval policy should
+    /// treat as denied while this package is a composition member. Absent
+    /// reads as empty, the same convention `skills` / `system_prompts` /
+    /// `Permissions` fields already use.
+    deny: []const []const u8 = &.{},
+    /// Same shape as `deny`, for the table an approval policy asks about
+    /// before running.
+    ask: []const []const u8 = &.{},
+};
+
+/// The package's own front-end module, if it has one (DESIGN §7.2.1,
+/// tui-plugin D1/D10). A DECLARATION only: the kernel validates the SHAPE
+/// (a safe relative path, a non-zero API version) and never loads or
+/// executes it — loading is a TUI's job, not this layer's, and is out of
+/// scope until U3.
+pub const Tui = struct {
+    /// Package-relative path to the module a TUI loads. Same path-safety
+    /// rule as `system_prompts` (`isSafeRelPath`, checked in `validate`), and
+    /// once a build actually collects the package snapshot, the same
+    /// existence check `validateSystemPrompts` runs for a system prompt file
+    /// (`extension/build/build_ext.zig`) — a declared entry that is not
+    /// there is a fault in the draft, not something discovered at load time.
+    entry: []const u8,
+    /// The plugin-host API version this module was written against. Kept as
+    /// a bare number rather than a word set, because API versions are
+    /// linearly ordered and a TUI's compatibility check is "is my major
+    /// version at least this" (warn-and-skip on mismatch, a TUI-side policy
+    /// for U3) — not membership in a vocabulary. Zero can never be a real
+    /// version, so it is the one value `validate` refuses (`InvalidTuiApi`);
+    /// there is no "absent" case because `Tui` itself is optional on
+    /// `Manifest` — a package with no `tui` block simply has no `Tui` value.
+    api: u32,
+};
+
 pub const Manifest = struct {
     arena: std.heap.ArenaAllocator,
     schema: []const u8,
@@ -171,6 +263,19 @@ pub const Manifest = struct {
     tools: []const ToolSpec,
     skills: []const []const u8,
     system_prompts: []const []const u8,
+    /// This package's slash commands (see `Command`). Absent reads as empty —
+    /// same convention as `skills` / `system_prompts`.
+    commands: []const Command = &.{},
+    /// This package's approval-policy narrowing (see `Policy`), or null when
+    /// the package states no policy at all. Null and "present but every
+    /// field empty" (`{}`) are DIFFERENT facts here — unlike `deny/ask`
+    /// inside `Policy`, whose own absence does read as empty — because an
+    /// explicit empty `{}` still counts as a contribution (`NoContributions`)
+    /// while never having written `contributes.policy` does not.
+    policy: ?Policy = null,
+    /// This package's front-end module (see `Tui`), or null when it has
+    /// none.
+    tui: ?Tui = null,
     permissions: Permissions,
     /// When activation brings this package in, kept as WRITTEN — same storage
     /// discipline as `ToolSpec.audience`, so an unrecognized word is a named
@@ -200,7 +305,8 @@ pub const Manifest = struct {
     pub fn validate(self: Manifest) ValidateError!void {
         if (!std.mem.eql(u8, self.schema, schema_id)) return error.UnsupportedSchema;
         if (!isValidId(self.id)) return error.InvalidId;
-        if (self.tools.len == 0 and self.skills.len == 0 and self.system_prompts.len == 0) return error.NoContributions;
+        if (self.tools.len == 0 and self.skills.len == 0 and self.system_prompts.len == 0 and
+            self.commands.len == 0 and self.policy == null and self.tui == null) return error.NoContributions;
         // Refused rather than read as the default, for `audience`'s reason: a
         // package that meant `on_request` and typed `onrequest` would otherwise
         // put its system prompt into every session on the machine — the exact
@@ -256,6 +362,41 @@ pub const Manifest = struct {
                 if (std.mem.eql(u8, prompt_path, other)) return error.DuplicateSystemPromptPath;
             }
         }
+
+        for (self.commands, 0..) |c, i| {
+            if (!isValidCommandName(c.name)) return error.InvalidCommandName;
+            for (self.commands[i + 1 ..]) |other| {
+                if (std.mem.eql(u8, c.name, other.name)) return error.DuplicateCommandName;
+            }
+            // The one shape check on an otherwise open verb vocabulary (see
+            // `Command.action`): a `"run <tool>"` command must name a tool
+            // THIS manifest itself declares — a closed, in-package reference,
+            // not a member of a word list that might grow.
+            if (commandRunTarget(c.action)) |target| {
+                var found = false;
+                for (self.tools) |t| {
+                    if (std.mem.eql(u8, t.name, target)) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) return error.UnknownCommandTool;
+            }
+        }
+
+        // `readonly` needs no check (same three-state bool as `ToolSpec`); the
+        // shape violation `Policy` refuses (an `allow` key) is caught earlier,
+        // at parse time, in `dupPolicy` — by the time `validate` runs it
+        // cannot occur. All that is left here is entries with nothing in them.
+        if (self.policy) |p| {
+            for (p.deny) |entry| if (entry.len == 0) return error.InvalidPolicyEntry;
+            for (p.ask) |entry| if (entry.len == 0) return error.InvalidPolicyEntry;
+        }
+
+        if (self.tui) |t| {
+            if (!isSafeRelPath(t.entry)) return error.InvalidTuiEntry;
+            if (t.api == 0) return error.InvalidTuiApi;
+        }
     }
 };
 
@@ -264,6 +405,10 @@ pub const ParseError = error{
     NotAnObject,
     MissingField,
     WrongType,
+    /// `contributes.policy` contains an `allow` key. Refused here rather than
+    /// in `validate`, because the violation is the key's mere PRESENCE — no
+    /// value under it could make the shape acceptable (see `Policy`).
+    PolicyAllowNotPermitted,
 } || std.mem.Allocator.Error;
 
 pub const ValidateError = error{
@@ -286,6 +431,19 @@ pub const ValidateError = error{
     DuplicateSkillPath,
     InvalidSystemPromptPath,
     DuplicateSystemPromptPath,
+    /// A command's `name` is empty or outside `[a-z0-9-]+`.
+    InvalidCommandName,
+    DuplicateCommandName,
+    /// A command's `action` is `"run <tool>"`, but no tool this SAME manifest
+    /// declares is named `<tool>` (`Command.action`).
+    UnknownCommandTool,
+    /// A `policy.deny` / `policy.ask` entry is the empty string.
+    InvalidPolicyEntry,
+    /// `tui.entry` escapes the package directory — `InvalidEntry` /
+    /// `InvalidSystemPromptPath`'s rule, applied to the same field.
+    InvalidTuiEntry,
+    /// `tui.api` is zero, which can never be a real API version.
+    InvalidTuiApi,
 };
 
 /// Load `extension.json` into arena-owned memory. Structural only — call
@@ -315,6 +473,9 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!Manifest {
     const tools = try dupTools(a, contributes);
     const skills = try dupStringList(a, contributes, "skills");
     const system_prompts = try dupStringList(a, contributes, "system_prompts");
+    const commands = try dupCommands(a, contributes);
+    const policy = try dupPolicy(a, contributes);
+    const tui = try dupTui(a, contributes);
     const permissions: Permissions = .{
         .fs = try dupPermissionList(a, obj, "fs"),
         .network = try dupPermissionList(a, obj, "network"),
@@ -330,9 +491,36 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!Manifest {
         .tools = tools,
         .skills = skills,
         .system_prompts = system_prompts,
+        .commands = commands,
+        .policy = policy,
+        .tui = tui,
         .permissions = permissions,
         .activation = activation,
     };
+}
+
+/// A slash command name: `[a-z0-9-]+`. Deliberately narrower than
+/// `isValidId` (lowercase only, no `.` / `_`) — a command name is typed by a
+/// person after `/`, not carried as an opaque id, so the charset matches
+/// what a driver's slash dispatcher already expects everywhere else (DESIGN
+/// §7.2.1, tui-plugin §3 U1).
+fn isValidCommandName(s: []const u8) bool {
+    if (s.len == 0) return false;
+    for (s) |c| {
+        const ok = (c >= 'a' and c <= 'z') or (c >= '0' and c <= '9') or c == '-';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+/// `action`'s one checked shape: `"run <tool>"`. Returns the tool name when
+/// `action` has that prefix, null for every other verb (including a bare
+/// `"run"` with nothing after it) — those are left to the open vocabulary
+/// `Command.action` describes, not checked here.
+fn commandRunTarget(action: []const u8) ?[]const u8 {
+    const prefix = "run ";
+    if (!std.mem.startsWith(u8, action, prefix)) return null;
+    return action[prefix.len..];
 }
 
 pub fn isValidId(s: []const u8) bool {
@@ -391,9 +579,62 @@ fn dupTools(a: std.mem.Allocator, contributes: std.json.ObjectMap) ParseError![]
             .timeout_ms = try optionalU32(to, "timeout_ms"),
             .readonly = try optionalBool(to, "readonly"),
             .audience = try optionalString(a, to, "audience"),
+            .render = try optionalString(a, to, "render"),
+            .panel = try optionalBool(to, "panel"),
         };
     }
     return tools;
+}
+
+fn dupCommands(a: std.mem.Allocator, contributes: std.json.ObjectMap) ParseError![]const Command {
+    const commands_val = switch (contributes.get("commands") orelse return a.alloc(Command, 0)) {
+        .array => |arr| arr,
+        else => return error.WrongType,
+    };
+    const commands = try a.alloc(Command, commands_val.items.len);
+    for (commands_val.items, 0..) |cv, i| {
+        const co = switch (cv) {
+            .object => |o| o,
+            else => return error.WrongType,
+        };
+        commands[i] = .{
+            .name = try dupString(a, co, "name"),
+            .description = try dupStringOr(a, co, "description", ""),
+            .action = try dupString(a, co, "action"),
+        };
+    }
+    return commands;
+}
+
+fn dupPolicy(a: std.mem.Allocator, contributes: std.json.ObjectMap) ParseError!?Policy {
+    const value = contributes.get("policy") orelse return null;
+    const policy_obj = switch (value) {
+        .object => |o| o,
+        else => return error.WrongType,
+    };
+    // D3 (physics #6, no implicit authority growth): a package's policy may
+    // only NARROW the tables an approval policy already reads — never place
+    // authority INTO them. An `allow` key's mere PRESENCE is the violation,
+    // so it is refused here rather than left for `validate` to reject a value
+    // that could never have been acceptable in the first place.
+    if (policy_obj.get("allow") != null) return error.PolicyAllowNotPermitted;
+    return .{
+        .readonly = try optionalBool(policy_obj, "readonly"),
+        .deny = try dupStringList(a, policy_obj, "deny"),
+        .ask = try dupStringList(a, policy_obj, "ask"),
+    };
+}
+
+fn dupTui(a: std.mem.Allocator, contributes: std.json.ObjectMap) ParseError!?Tui {
+    const value = contributes.get("tui") orelse return null;
+    const tui_obj = switch (value) {
+        .object => |o| o,
+        else => return error.WrongType,
+    };
+    return .{
+        .entry = try dupString(a, tui_obj, "entry"),
+        .api = try requiredU32(tui_obj, "api"),
+    };
 }
 
 /// Read an optional non-negative integer field. A value that is not an integer,
@@ -401,6 +642,17 @@ fn dupTools(a: std.mem.Allocator, contributes: std.json.ObjectMap) ParseError![]
 /// a mistyped timeout would otherwise read as "use the default".
 fn optionalU32(obj: std.json.ObjectMap, key: []const u8) ParseError!?u32 {
     return switch (obj.get(key) orelse return null) {
+        .integer => |n| std.math.cast(u32, n) orelse error.WrongType,
+        else => error.WrongType,
+    };
+}
+
+/// Read a required non-negative integer field. Missing is a `MissingField`,
+/// the same split `dupString` makes for a required string; a value that is
+/// not an integer, or does not fit, is a `WrongType` — `optionalU32`'s
+/// strictness, minus the "absent is fine" case.
+fn requiredU32(obj: std.json.ObjectMap, key: []const u8) ParseError!u32 {
+    return switch (obj.get(key) orelse return error.MissingField) {
         .integer => |n| std.math.cast(u32, n) orelse error.WrongType,
         else => error.WrongType,
     };
@@ -786,4 +1038,202 @@ test "rejects invalid and duplicate system prompt paths" {
     var b = try parse(std.testing.allocator, dup);
     defer b.deinit();
     try std.testing.expectError(error.DuplicateSystemPromptPath, b.validate());
+}
+
+// --- tui-plugin U1: `commands` / `policy` / `render` / `panel` / `tui` -----
+
+test "round-trips commands, policy and tui, and a tool's render/panel hints" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\{
+        \\  "schema": "nulya.extension/v2",
+        \\  "id": "plan",
+        \\  "runtime": { "entry": "bin/plan" },
+        \\  "contributes": {
+        \\    "tools": [
+        \\      {"name": "propose", "input": {}, "render": "checklist", "panel": true},
+        \\      {"name": "quiet", "input": {}}
+        \\    ],
+        \\    "commands": [
+        \\      {"name": "plan", "description": "review a plan", "action": "wear"},
+        \\      {"name": "review", "description": "run the propose tool", "action": "run propose"}
+        \\    ],
+        \\    "policy": {"readonly": true, "deny": ["shell"], "ask": ["propose"]},
+        \\    "tui": {"entry": "tui/panel.ts", "api": 1}
+        \\  }
+        \\}
+    ;
+    var m = try parse(alloc, src);
+    defer m.deinit();
+    try m.validate();
+
+    try std.testing.expectEqualStrings("checklist", m.tools[0].render.?);
+    try std.testing.expectEqual(@as(?bool, true), m.tools[0].panel);
+    // Absent is null, not any particular word — same as `audience`/`readonly`.
+    try std.testing.expect(m.tools[1].render == null);
+    try std.testing.expect(m.tools[1].panel == null);
+
+    try std.testing.expectEqual(@as(usize, 2), m.commands.len);
+    try std.testing.expectEqualStrings("plan", m.commands[0].name);
+    try std.testing.expectEqualStrings("wear", m.commands[0].action);
+    try std.testing.expectEqualStrings("review", m.commands[1].name);
+    try std.testing.expectEqualStrings("run propose", m.commands[1].action);
+
+    const p = m.policy.?;
+    try std.testing.expectEqual(@as(?bool, true), p.readonly);
+    try std.testing.expectEqual(@as(usize, 1), p.deny.len);
+    try std.testing.expectEqualStrings("shell", p.deny[0]);
+    try std.testing.expectEqual(@as(usize, 1), p.ask.len);
+    try std.testing.expectEqualStrings("propose", p.ask[0]);
+
+    const t = m.tui.?;
+    try std.testing.expectEqualStrings("tui/panel.ts", t.entry);
+    try std.testing.expectEqual(@as(u32, 1), t.api);
+}
+
+test "a command name is [a-z0-9-]+ and may not repeat within a package" {
+    const alloc = std.testing.allocator;
+
+    var upper = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","contributes":{"commands":[{"name":"Plan","description":"","action":"wear"}]}}
+    );
+    defer upper.deinit();
+    try std.testing.expectError(error.InvalidCommandName, upper.validate());
+
+    var empty = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","contributes":{"commands":[{"name":"","description":"","action":"wear"}]}}
+    );
+    defer empty.deinit();
+    try std.testing.expectError(error.InvalidCommandName, empty.validate());
+
+    var dup = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","contributes":{"commands":[{"name":"plan","description":"","action":"wear"},{"name":"plan","description":"","action":"skill x"}]}}
+    );
+    defer dup.deinit();
+    try std.testing.expectError(error.DuplicateCommandName, dup.validate());
+}
+
+test "a `run <tool>` command must name a tool this same manifest declares; other verbs are the reader's word" {
+    const alloc = std.testing.allocator;
+
+    // The open vocabulary: `validate` never refuses a verb it does not know.
+    var wear = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","contributes":{"commands":[{"name":"plan","description":"","action":"wear"}]}}
+    );
+    defer wear.deinit();
+    try wear.validate();
+
+    var skill = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","contributes":{"commands":[{"name":"help","description":"","action":"skill some/ref"}]}}
+    );
+    defer skill.deinit();
+    try skill.validate();
+
+    // `"run <tool>"` IS checked: the closed, in-package reference.
+    var missing = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"other","input":{}}],"commands":[{"name":"review","description":"","action":"run propose"}]}}
+    );
+    defer missing.deinit();
+    try std.testing.expectError(error.UnknownCommandTool, missing.validate());
+
+    var present = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"propose","input":{}}],"commands":[{"name":"review","description":"","action":"run propose"}]}}
+    );
+    defer present.deinit();
+    try present.validate();
+}
+
+test "policy may only narrow: an `allow` key is refused at parse time; an empty entry at validate time" {
+    const alloc = std.testing.allocator;
+
+    // The key's mere presence is the violation — no value under it could pass.
+    try std.testing.expectError(error.PolicyAllowNotPermitted, parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","contributes":{"policy":{"allow":["shell"]}}}
+    ));
+
+    var empty_deny = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","contributes":{"policy":{"deny":[""]}}}
+    );
+    defer empty_deny.deinit();
+    try std.testing.expectError(error.InvalidPolicyEntry, empty_deny.validate());
+
+    var empty_ask = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","contributes":{"policy":{"ask":[""]}}}
+    );
+    defer empty_ask.deinit();
+    try std.testing.expectError(error.InvalidPolicyEntry, empty_ask.validate());
+
+    // An explicit, empty `{}` still counts as a contribution — a different
+    // fact than never having written `contributes.policy` at all.
+    var declared_empty = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","contributes":{"policy":{}}}
+    );
+    defer declared_empty.deinit();
+    try declared_empty.validate();
+    try std.testing.expect(declared_empty.policy != null);
+    try std.testing.expect(declared_empty.policy.?.readonly == null);
+    try std.testing.expectEqual(@as(usize, 0), declared_empty.policy.?.deny.len);
+}
+
+test "tui.entry cannot escape the package directory, and tui.api must be at least 1" {
+    const alloc = std.testing.allocator;
+
+    var escapes = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","contributes":{"tui":{"entry":"../evil.ts","api":1}}}
+    );
+    defer escapes.deinit();
+    try std.testing.expectError(error.InvalidTuiEntry, escapes.validate());
+
+    var zero = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","contributes":{"tui":{"entry":"tui/panel.ts","api":0}}}
+    );
+    defer zero.deinit();
+    try std.testing.expectError(error.InvalidTuiApi, zero.validate());
+
+    // `api` is required the moment `tui` is written at all — a missing one is
+    // a parse error, the same split every other required field makes.
+    try std.testing.expectError(error.MissingField, parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","contributes":{"tui":{"entry":"tui/panel.ts"}}}
+    ));
+}
+
+test "a command, a policy, or a tui block each alone counts as a contribution" {
+    const alloc = std.testing.allocator;
+
+    var cmd = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","contributes":{"commands":[{"name":"plan","description":"","action":"wear"}]}}
+    );
+    defer cmd.deinit();
+    try cmd.validate();
+
+    var pol = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","contributes":{"policy":{"readonly":true}}}
+    );
+    defer pol.deinit();
+    try pol.validate();
+
+    var tui = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","contributes":{"tui":{"entry":"tui/panel.ts","api":1}}}
+    );
+    defer tui.deinit();
+    try tui.validate();
+
+    var none = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","contributes":{}}
+    );
+    defer none.deinit();
+    try std.testing.expectError(error.NoContributions, none.validate());
+}
+
+test "commands, policy and tui default to absent, and a manifest predating them still validates" {
+    // `valid_manifest` (top of file) has none of these three — the fixture
+    // that already stood for "the format before this field existed".
+    var m = try parse(std.testing.allocator, valid_manifest);
+    defer m.deinit();
+    try m.validate();
+    try std.testing.expectEqual(@as(usize, 0), m.commands.len);
+    try std.testing.expect(m.policy == null);
+    try std.testing.expect(m.tui == null);
+    try std.testing.expect(m.tools[0].render == null);
+    try std.testing.expect(m.tools[0].panel == null);
 }

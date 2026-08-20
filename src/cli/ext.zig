@@ -358,6 +358,7 @@ fn isDraftFault(err: anyerror) bool {
         error.SystemPromptFileMissing,
         error.SystemPromptTooLarge,
         error.InvalidUtf8,
+        error.TuiEntryFileMissing,
         => true,
         else => false,
     };
@@ -1512,6 +1513,26 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             \\  nothing says nothing. Recorded and never enforced, like `readonly`: a
             \\  pin naming a driver tool still works, drivers simply do not write one.
             \\
+            \\  A tool may also declare `"render": "checklist"` (or another word), a hint
+            \\  for whoever draws its calls. The word list is open and never enforced: an
+            \\  unrecognized one just falls back to a plain rendering. `"panel": true` asks
+            \\  that the tool's latest call also show as a small standing status line above
+            \\  the input — again a hint, not a boundary.
+            \\
+            \\  A package may declare `contributes.commands`, a list of
+            \\  `{"name", "description", "action"}` slash commands it offers whoever
+            \\  drives a session. `name` is lowercase letters, digits and `-` only.
+            \\  `action` is a verb a driver interprets (`"wear"`, `"run <tool>"`,
+            \\  `"skill <ref>"` today, more later); the one shape the kernel checks is that
+            \\  a `"run <tool>"` command names a tool this SAME manifest declares.
+            \\
+            \\  A package may declare `contributes.policy`, an approval-policy narrowing
+            \\  that applies while it is a member of a session's composition:
+            \\  `{"readonly": bool, "deny": [...], "ask": [...]}`. There is no `allow` key
+            \\  — a package can only narrow what a driver's approval policy already reads,
+            \\  never widen it, so writing one is refused outright. Recorded and never
+            \\  enforced by the kernel itself, like `readonly` and `audience` above.
+            \\
             \\  A package may declare `"activation": "on_request"` at the top level. Then
             \\  activating it REGISTERS it and nothing more: it joins only the sessions
             \\  that name it (`nulya session new --with <id>`), and every other session is
@@ -1520,6 +1541,13 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             \\  on this machine. This one IS enforced; it is the only declaration on this
             \\  page that is. Say `on_request` if your package is a mode somebody should
             \\  choose per session rather than live in.
+            \\
+            \\  A package may declare `contributes.tui`, `{"entry", "api"}`, naming a
+            \\  front-end module a TUI can load. `entry` follows the same path rule as a
+            \\  system prompt (it cannot escape the package directory) and must exist when
+            \\  the package is built; `api` is the plugin-host API version, at least 1.
+            \\  Declared, frozen and shape-checked like everything above — loading and
+            \\  running the module is a front end's job, not this one's.
             \\
             \\  Wall clock is enforced: an extension tool is killed at 30s unless its
             \\  manifest sets `timeout_ms` (600s maximum); `shell` defaults to 120s and
@@ -1564,6 +1592,14 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             \\  nulya ext sync --dry-run                       # what it would do, touching nothing
             \\  nulya ext prune --user                         # drop versions `current` does not name; the draft
             \\                                                # can always rebuild the same version id
+            \\
+            \\  # A slash command, a narrowed policy, and a front-end module — all just
+            \\  # declared; a driver reads them, the kernel never runs any of it.
+            \\  #   "contributes": {
+            \\  #     "commands": [{"name": "plan", "description": "…", "action": "wear"}],
+            \\  #     "policy": {"readonly": true},
+            \\  #     "tui": {"entry": "tui/panel.ts", "api": 1}
+            \\  #   }
             \\
             \\  # Afterwards: say how it went, so later passes have evidence.
             \\  nulya session outcome <session-id> success --note "the helper did it"

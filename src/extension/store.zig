@@ -246,36 +246,56 @@ pub const Store = struct {
 /// Anything else — host cancellation, `OutOfMemory`, real I/O failures — is a
 /// host fault and must propagate: an OOM must never masquerade as a broken
 /// extension or as `PinNamesUnknownExtension`.
+///
+/// Derived from the error sets `manifest.zig` declares (plus the handful of
+/// version/store-integrity errors below) by REFLECTION, the same construction
+/// `cli/ext.zig`'s `isManifestFault` uses — so a new `manifest.ValidateError`
+/// member is covered here automatically. A hand-written `switch` was the
+/// previous shape, and it had already drifted: `InvalidTimeout`,
+/// `InvalidAudience`, `InvalidActivation`, and `DuplicateSkillPath` had each
+/// been added to `manifest.zig` without a matching case here, so a manifest
+/// that failed validation for one of those reasons was propagated as a host
+/// fault instead of being treated as a broken extension.
 pub fn isExtensionFault(err: anyerror) bool {
-    return switch (err) {
-        // Invalid extension identity.
-        error.InvalidId,
-        error.InvalidVersion,
-        // Bad `current` pointer or a frozen version failing integrity.
-        error.VersionNotFound,
-        error.VersionSealInvalid,
-        error.VersionManifestIdMismatch,
-        error.VersionPackageMissing,
-        error.VersionEntryNotFound,
-        // Unparseable or invalid manifest.
-        error.InvalidJson,
-        error.NotAnObject,
-        error.MissingField,
-        error.WrongType,
-        error.UnsupportedSchema,
-        error.MissingRuntime,
-        error.InvalidEntry,
-        error.InvalidInterpreter,
-        error.NoContributions,
-        error.InvalidToolName,
-        error.ReservedToolName,
-        error.DuplicateToolName,
-        error.InvalidSkillPath,
-        error.InvalidSystemPromptPath,
-        error.DuplicateSystemPromptPath,
-        => true,
-        else => false,
-    };
+    // BOTH manifest sets, not just `ValidateError`: `ParseError` carries
+    // manifest-shape refusals of its own (`PolicyAllowNotPermitted` arrived
+    // the same day this reflection did), and hand-copying its members here
+    // would be the drift this function was rewritten to end. Its one
+    // non-manifest rider, `OutOfMemory` (via `Allocator.Error`), is skipped
+    // below — the doc comment's host-fault rule.
+    const Faults = manifest.ParseError || manifest.ValidateError ||
+        error{
+            // Invalid extension identity.
+            InvalidVersion,
+            // Bad `current` pointer or a frozen version failing integrity.
+            VersionNotFound,
+            VersionSealInvalid,
+            VersionManifestIdMismatch,
+            VersionPackageMissing,
+            VersionEntryNotFound,
+        };
+    inline for (@typeInfo(Faults).error_set.?) |candidate| {
+        if (comptime std.mem.eql(u8, candidate.name, "OutOfMemory")) continue;
+        if (err == @field(anyerror, candidate.name)) return true;
+    }
+    return false;
+}
+
+// A reflection-driven check, not a hand-copied list: it walks the SAME
+// manifest error sets `isExtensionFault` reflects over, so it can never
+// itself drift the way the old hand-written `switch` did. Any future
+// `ParseError` or `ValidateError` member is covered the moment it is added
+// to `manifest.zig` — this test needs no edit to keep pinning the invariant.
+test "isExtensionFault covers every manifest parse/validate member, but never OOM" {
+    inline for (@typeInfo(manifest.ParseError || manifest.ValidateError).error_set.?) |candidate| {
+        if (comptime std.mem.eql(u8, candidate.name, "OutOfMemory")) continue;
+        const err = @field(anyerror, candidate.name);
+        std.testing.expect(isExtensionFault(err)) catch |e| {
+            std.debug.print("manifest error {s} is not treated as an extension fault\n", .{candidate.name});
+            return e;
+        };
+    }
+    try std.testing.expect(!isExtensionFault(error.OutOfMemory));
 }
 
 /// Open a store root, creating it (and its parents) if it is not there yet —

@@ -200,6 +200,7 @@ fn build(
     defer snapshot.deinit(alloc);
     try ext_skills.validateSnapshot(alloc, m, snapshot);
     try validateSystemPrompts(alloc, m, snapshot);
+    try validateTui(alloc, m, snapshot);
     const snapshot_bytes = try snapshot.canonicalBytes(alloc);
     defer alloc.free(snapshot_bytes);
 
@@ -504,6 +505,19 @@ fn validateSystemPrompts(alloc: std.mem.Allocator, m: manifest.Manifest, snapsho
         if (bytes.len > prompt.max_system_prompt_bytes) return error.SystemPromptTooLarge;
         if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidUtf8;
     }
+}
+
+/// `contributes.tui.entry` names a module a TUI loads (DESIGN §7.2.1,
+/// tui-plugin D10) — a declared path this build must actually be able to
+/// freeze, the same existence half `validateSystemPrompts` checks for a
+/// system prompt file. No size ceiling here: `prompt.max_system_prompt_bytes`
+/// bounds what is fed to a MODEL, and this file never is (it is TUI source,
+/// read by U3's plugin host, not by `prompt.zig`).
+fn validateTui(alloc: std.mem.Allocator, m: manifest.Manifest, snapshot: integrity.PackageSnapshot) !void {
+    const t = m.tui orelse return;
+    const rel = try integrity.canonicalRel(alloc, t.entry);
+    defer alloc.free(rel);
+    _ = integrity.findSnapshotFile(snapshot, rel) orelse return error.TuiEntryFileMissing;
 }
 
 fn testZigExe(alloc: std.mem.Allocator) ![]u8 {
