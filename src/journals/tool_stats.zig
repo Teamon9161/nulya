@@ -10,22 +10,31 @@
 //! Format: one JSON object per line in `<workspace>/.nulya/tool-usage.jsonl`:
 //!
 //!   {"v":1,"at":"2026-08-17T09:31:07Z","session":"s-1786-3f",
-//!    "tool_id":"ext:web.search/web_search","ok":true,"duration_ms":812}
+//!    "tool_id":"ext:web.search/web_search","version":"v-3f9c…","ok":true,
+//!    "duration_ms":812}
 //!
 //! `v` is the journal schema version; a future format change bumps it so old
 //! journals fail with a precise error instead of garbage. `tool_id` is the
 //! durable identity (`ext:<id>/<tool>`, `builtin.shell`, ...), never the
 //! model-facing name, so stats accumulate across implementation versions.
 //!
-//! The three columns beside them are what turns a bag of calls into evidence a
+//! The four columns beside them are what turns a bag of calls into evidence a
 //! slow loop can reason with: `at` puts a call on a timeline, `session` joins it
-//! to `session-outcomes.jsonl` (did the session this call served succeed?), and
+//! to `session-outcomes.jsonl` (did the session this call served succeed?),
 //! `duration_ms` is the cost dimension `ok` alone cannot express — a tool that
-//! works but takes a minute is a different fact from one that works. All three
-//! are OPTIONAL on read and stay `v:1`: every line written before they existed
-//! reads back with them null, which is "not recorded", never a zero. `session`
-//! and `duration_ms` are also genuinely absent for live writers — an in-memory
-//! session has no id, and `nulya ext run` measures nothing.
+//! works but takes a minute is a different fact from one that works — and
+//! `version` is WHICH FROZEN IMPLEMENTATION served this call, the second half of
+//! the two-identity rule: `tool_id` stays version-free so a tool's history is
+//! one history, and `version` sits beside it so that history can also be read
+//! per implementation (did the last rebuild make it worse?). Evidence is
+//! append-only and cannot be backfilled: a call not recorded with its version
+//! is unknown forever, which is why the column is written today even though
+//! nothing in the kernel reads it yet. All four are OPTIONAL on read and stay
+//! `v:1`: every line written before they existed reads back with them null,
+//! which is "not recorded", never a zero. `session`, `duration_ms` and
+//! `version` are also genuinely absent for live writers — an in-memory session
+//! has no id, `nulya ext run` measures nothing, and `builtin.shell` has no
+//! implementation version at all (it is the kernel).
 //!
 //! Only complete events count: an append interrupted by cancel or crash can
 //! leave a partial final line; the next append first drops that tail back to
@@ -66,18 +75,24 @@ pub const UseEvent = struct {
     at: ?[]const u8 = null,
     /// The durable session the call ran in.
     session: ?[]const u8 = null,
+    /// The frozen extension version that served the call (`v-<hash>`). Null is
+    /// honest in two different ways: an old line never recorded one (unknown),
+    /// and a new line for a builtin has none to record.
+    version: ?[]const u8 = null,
     /// Wall-clock milliseconds the call itself took.
     duration_ms: ?u64 = null,
 };
 
-/// What one `append` records. Only the caller can know the two optional
-/// columns: `session` is the session id when there is a durable one, and
-/// `duration_ms` is a measurement taken around the executor, at the one place
-/// that brackets it (`loop.zig`).
+/// What one `append` records. Only the caller can know the three optional
+/// columns: `session` is the session id when there is a durable one,
+/// `version` is the frozen extension version the caller resolved this call
+/// against, and `duration_ms` is a measurement taken around the executor, at
+/// the one place that brackets it (`loop.zig`).
 pub const Append = struct {
     tool_id: []const u8,
     ok: bool,
     session: ?[]const u8 = null,
+    version: ?[]const u8 = null,
     duration_ms: ?u64 = null,
 };
 
@@ -198,6 +213,11 @@ fn encodeEvent(alloc: std.mem.Allocator, event: Append, at: []const u8) ![]u8 {
     }
     try jw.objectField("tool_id");
     try jw.write(event.tool_id);
+    // Beside the identity it qualifies: the same call, by this implementation.
+    if (event.version) |v| {
+        try jw.objectField("version");
+        try jw.write(v);
+    }
     try jw.objectField("ok");
     try jw.write(event.ok);
     if (event.duration_ms) |ms| {
@@ -210,7 +230,7 @@ fn encodeEvent(alloc: std.mem.Allocator, event: Append, at: []const u8) ![]u8 {
 }
 
 /// One journal line's shape. The two original columns are REQUIRED — a complete
-/// line missing either is malformed, not a line with defaults — and the three
+/// line missing either is malformed, not a line with defaults — and the four
 /// added ones default to null, which is how an old line reads back unchanged.
 /// Unknown fields are ignored so a newer writer at the same `v` never breaks an
 /// older reader.
@@ -223,6 +243,7 @@ const WireEvent = struct {
     ok: bool,
     at: ?[]const u8 = null,
     session: ?[]const u8 = null,
+    version: ?[]const u8 = null,
     duration_ms: ?u64 = null,
 };
 
@@ -249,6 +270,7 @@ fn dupeEvent(alloc: std.mem.Allocator, w: WireEvent) !UseEvent {
     e.tool_id = try alloc.dupe(u8, w.tool_id);
     if (w.at) |s| e.at = try alloc.dupe(u8, s);
     if (w.session) |s| e.session = try alloc.dupe(u8, s);
+    if (w.version) |s| e.version = try alloc.dupe(u8, s);
     return e;
 }
 
@@ -256,6 +278,7 @@ fn freeEvent(alloc: std.mem.Allocator, e: UseEvent) void {
     alloc.free(e.tool_id);
     if (e.at) |s| alloc.free(s);
     if (e.session) |s| alloc.free(s);
+    if (e.version) |s| alloc.free(s);
 }
 
 fn tmpCwd(alloc: std.mem.Allocator, io: std.Io, tmp: std.testing.TmpDir) ![]u8 {
@@ -272,7 +295,7 @@ test "append and read roundtrip preserves order and every column" {
     const cwd = try tmpCwd(alloc, io, tmp);
     defer alloc.free(cwd);
 
-    try append(alloc, io, cwd, .{ .tool_id = "ext:a.pkg/alpha", .ok = true, .session = "s-1", .duration_ms = 812 });
+    try append(alloc, io, cwd, .{ .tool_id = "ext:a.pkg/alpha", .ok = true, .session = "s-1", .version = "v-3f9c", .duration_ms = 812 });
     try append(alloc, io, cwd, .{ .tool_id = "ext:b.pkg/beta", .ok = false });
     try append(alloc, io, cwd, .{ .tool_id = "ext:a.pkg/alpha", .ok = true, .duration_ms = 0 });
 
@@ -282,6 +305,7 @@ test "append and read roundtrip preserves order and every column" {
     try std.testing.expectEqualStrings("ext:a.pkg/alpha", events[0].tool_id);
     try std.testing.expect(events[0].ok);
     try std.testing.expectEqualStrings("s-1", events[0].session.?);
+    try std.testing.expectEqualStrings("v-3f9c", events[0].version.?);
     try std.testing.expectEqual(@as(?u64, 812), events[0].duration_ms);
 
     // A writer with nothing to say about a column simply omits it, and the
@@ -289,6 +313,7 @@ test "append and read roundtrip preserves order and every column" {
     try std.testing.expectEqualStrings("ext:b.pkg/beta", events[1].tool_id);
     try std.testing.expect(!events[1].ok);
     try std.testing.expect(events[1].session == null);
+    try std.testing.expect(events[1].version == null);
     try std.testing.expect(events[1].duration_ms == null);
 
     // …which is a different fact from a measured zero.
@@ -320,15 +345,18 @@ test "the line carries its columns in a fixed order, and only the ones that exis
         .tool_id = "ext:a.pkg/alpha",
         .ok = true,
         .session = "s-1",
+        .version = "v-3f9c",
         .duration_ms = 812,
     }, "2026-08-17T09:31:07Z");
     defer alloc.free(full);
     try std.testing.expectEqualStrings(
         "{\"v\":1,\"at\":\"2026-08-17T09:31:07Z\",\"session\":\"s-1\"," ++
-            "\"tool_id\":\"ext:a.pkg/alpha\",\"ok\":true,\"duration_ms\":812}\n",
+            "\"tool_id\":\"ext:a.pkg/alpha\",\"version\":\"v-3f9c\",\"ok\":true,\"duration_ms\":812}\n",
         full,
     );
 
+    // A builtin has no implementation version, so the column is simply not
+    // there — the shape a pre-`version` writer produced, byte for byte.
     const bare = try encodeEvent(alloc, .{ .tool_id = "builtin.shell", .ok = false }, "2026-08-17T09:31:07Z");
     defer alloc.free(bare);
     try std.testing.expectEqualStrings(
@@ -359,6 +387,9 @@ test "a line written before the added columns reads back with them absent" {
     try std.testing.expect(events[0].ok);
     try std.testing.expect(events[0].at == null);
     try std.testing.expect(events[0].session == null);
+    // Unknown, not "no version": evidence cannot be backfilled, so a call
+    // recorded before the column existed stays unattributed forever.
+    try std.testing.expect(events[0].version == null);
     try std.testing.expect(events[0].duration_ms == null);
 
     // A column this build does not know is ignored, not an error: a newer writer
