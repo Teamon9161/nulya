@@ -66,7 +66,9 @@ kernel  = ledger 文件格式 + PromptIR 投影 + 一次 step + 工具执行 + c
 - 相对原计划的两处修正（已定，理由见 DESIGN §3.3 / §14）：`session_outcome` **不是** ledger 事件；`--skill` 被更通用的 `--with` 吸收。
 
 ### M6 · Version-aware evidence（§3.5，原 v0.2 Phase A–E）
-- A usage fact 加可空 `version`（journal v1→v2 兼容读）+ `VersionStats` 投影 → B `VersionCreatedFact{parent, reason}` → C Seal → Verify(sealed) 门 → D `EvaluationEvidence` → E policy 比较 implementation、建议 rollback。
+- A usage fact 加可空 `version` **✅ 已落地**（执行契约 [goals/M6a.md](goals/M6a.md) → DESIGN §5.5）→ B `VersionCreatedFact{parent, reason}` → C Seal → Verify(sealed) 门 → D `EvaluationEvidence` → E policy 比较 implementation、建议 rollback。
+- **Phase A 刻意拆成两半，只做了 fact 那半**：写下 `version` 是**补不了课**的（journal 只能 append，今天不记，将来判断 rollback 时这段历史永远是 unknown），而 `VersionStats` 投影只是从已有的行里算出来的——什么时候算都不晚。所以投影**等第一个真实 consumer**（"第二个 consumer 出现之前不抽 abstraction"），`aggregate` 一字未动，内核新增读者数为零。
+- 相对原计划的一处修正：journal **不升 v2**，是 v1 加一个可选列（理由见 §3.5.2）。
 - 进 DESIGN：每个 phase 单独进。
 
 ### M7 · Authority / sandbox（§3.8）
@@ -182,7 +184,9 @@ loop until objective / swarm           → 脚本
 
 **Identity rule（authoring 规则，非 kernel 强制）：** 同一 stable id 声明自己属于同一 logical contract。`web_search(query)` v1→v4 实现变、id 不变；变成 `database_query(sql)` 就该是新 id。kernel 只强制 identity 的语法；"没偷换语义"由 Verify / review 保证。
 
-**3.5.2 Version-aware evidence（A）。** usage fact 加可空 `version`（`v:2`）。**reader 同时接受 v1 + v2**：v1 → `version = null`（过去不知道就诚实标 unknown，不丢历史）。两个投影喂两个决定：`LogicalToolStats`（吃全部历史 → 要不要为它写一条 pin）、`VersionStats`（只吃 version-known → activation / rollback）。两个决定都在内核之外做。`ToolStats` 名字与语义不变。
+**3.5.2 Version-aware evidence（A）。** usage fact 加可空 `version`。**老行 → `version = null`**（过去不知道就诚实标 unknown，不丢历史）。两个投影喂两个决定：`LogicalToolStats`（吃全部历史 → 要不要为它写一条 pin）、`VersionStats`（只吃 version-known → activation / rollback）。两个决定都在内核之外做。`ToolStats` 名字与语义不变。
+
+> **相对本节原文的两处修正（已落地，goals/M6a.md）。** ① 这一列**不升 `v:2`，是 `v:1` 加一个可选列**：这条 journal 的纪律从来是"加可选列、reader 忽略未知列、同 `v` 的新写者不破坏老读者"（`at` / `session` / `duration_ms` 三个先例都是这么进来的），升 v2 只会让老读者（老二进制、TUI 的 `files.ts`）对每一条新行报 `UnsupportedStatsVersion`，零收益；`v` 留给真正的格式断裂。② **只落了 fact 那半，两个投影都没做**：写 `version` 补不了课（journal 只能 append），投影什么时候算都不晚——所以它等第一个真实 consumer。今天的 `version` 只写不读，`aggregate` 一字未动。
 
 **3.5.3 Lineage（B）。** **provenance 绝不进 version hash**（否则同源码因两次不同 reason 变两个 version）。独立 fact：`VersionCreatedFact{ version, parent?, created_by, reason? }`。单亲，v0.x 不做 DAG。
 

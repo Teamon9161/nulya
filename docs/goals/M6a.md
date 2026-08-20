@@ -64,4 +64,14 @@ usage journal 的每条 fact 从今天起**多记一列可空 `version`**——�
 
 ## 6. 进度区（执行时更新）
 
-（空）
+分支 `m6a`（从 `main` = `164a1b7` 切）。未 push。
+
+- `9c7b88a` · docs: M6a 执行契约（本文件进分支）。无偏离。
+- `89fbcb7` · **m6a-a**：`tool_stats.zig` 的 `Append`/`UseEvent`/`WireEvent` 各加 `version: ?[]const u8 = null`，`encodeEvent` 只在非 null 时写、列位在 `tool_id` 之后 `ok` 之前，`dupeEvent`/`freeEvent` 跟上；`v` 仍是 1（D2）。单测：roundtrip 保 `version`、固定列序两种形状（带 / 不带）、老行读回 null。无偏离。
+- `3673674` · **m6a-b**：`session.recordCompletedToolStats` 每条 fact 带 `version`，由新的私有 `AgentSession.frozenVersionOf` 从 `self.composition.extensions` 反查（`Binding` 未加字段，D4）；builtin 与反查不到写 null。已有的 "completed step records stable ids…" 单测扩成三个 call（ext / builtin / 幻觉名）并断言 `v-frozen` 与 builtin 的 null，测试名相应加长。无偏离。
+- `e58c271` · **m6a-c**：`cli/ext.zig` 的 `extRun` 用 `resolved.version`（同一次解析，第二处不可能不一致）。e2e：`extension.zig` 的 `ext run` 那条跨 v1/v2 断言"一个 `tool_id`、两个 `version`"，失败调用那条也断言版本；`manufacture.zig` 断言 `ext:demo/greet` 行 == 模型自己 build 的版本、`builtin.shell` 行 `version == null`。单测补一条"老行 + 新行同处一册且 `aggregate` 不变"。**一处顺手**：`zig fmt` 把 `cli/ext.zig` 里一张与本轮无关的错误表重排了，已手工还原，最终 diff 只有那 5 行。
+- **文档（m6a-d）**：DESIGN §5.5（列的语义 + 双身份 + 两个写点 + 为什么仍是 v1 + 只写不读）与 §3 表格那一行的 shape；PLAN §1 的 M6 条目（Phase A ✅、注明 fact/投影拆开与 v1 修正）与 §3.5.2（加一段"相对本节原文的两处修正"）；CLAUDE.md 模块表 `journals/tool_stats.zig` 行 + 现状区新增一条。model-facing 文本零改动（如契约所料）。
+
+**测试**：`zig build test` 全绿。`zig build e2e` = **71 pass / 1 fail**，唯一那条失败是 `e2e.extension` 的 `bundled agent: a follow-up resumes the same delegated session …`（`expected 1, found 0`，数 `task_finished` 的时序断言）——**本轮开工前在干净的 `main` 上验过，同一条、同一处先已失败**，与 usage journal 无关（本轮四个子项每一步都复跑过，失败集合始终是这一条，未新增）。
+
+**BLOCKED**：无。越界项一个未碰：`tui/` 零 diff；`ledger` / `prompt` / `loop` / `composition` / `store` 未改；`aggregate` 未改；无 `VersionStats` 投影；M6 B–E 未做。

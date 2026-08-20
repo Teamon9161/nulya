@@ -124,7 +124,7 @@ UI / trajectory / metrics 是 ledger 的投影，不持久化 mutable 状态。*
 
 | journal | 一行 | 谁写 | 为什么不是 ledger 事件 |
 |---|---|---|---|
-| `.nulya/tool-usage.jsonl`（§5.5） | `{"v":1,"at":"<RFC3339 UTC>","session":"s-…"?,"tool_id":…,"ok":…,"duration_ms":N?}` | session 每个**真的执行过 tool 的** completed step；`nulya ext run` | 纯 CLI 调用没有对话，塞进 ledger 会污染 prompt 前缀 |
+| `.nulya/tool-usage.jsonl`（§5.5） | `{"v":1,"at":"<RFC3339 UTC>","session":"s-…"?,"tool_id":…,"version":"v-…"?,"ok":…,"duration_ms":N?}` | session 每个**真的执行过 tool 的** completed step；`nulya ext run` | 纯 CLI 调用没有对话，塞进 ledger 会污染 prompt 前缀 |
 | `.nulya/session-outcomes.jsonl` | `{"v":1,"session":"s-…","verdict":"success\|partial\|failure","note":…?,"at":"<RFC3339 UTC>","source":"agent"?,"by":"s-…"?,"seq":N?}` | 人或 agent 经 `nulya session outcome`（§14） | session 尾往往没有下一个 step 来排干 inbox；verdict 是**关于**这场 session 的判断、不是其中一轮；不给 `prompt.zig` 开"存了但不投影"的事件种类 |
 
 原则相同：**persist facts, derive stats**。outcome 的三条语义：**没有行 = unknown ≠ failure**；同一 session 可多行，**最后一条作数**（纠正也是 append，`outcome.latestFor`）；三个可选列说明**谁在评**与**评的是什么**，且**只在非默认时写**——所以人评整场的行与这三列存在之前逐字节相同，schema 版本不动：
@@ -239,14 +239,17 @@ agent 在对话中经 shell `nulya ext build/activate` 造出新 extension 后�
 
 ```
 .nulya/tool-usage.jsonl   每行 {"v":1,"at":"2026-08-17T09:31:07Z","session":"s-1786-3f",
-                                "tool_id":"ext:web.search/web_search","ok":true,"duration_ms":812}
+                                "tool_id":"ext:web.search/web_search","version":"v-3f9c…",
+                                "ok":true,"duration_ms":812}
         └─ projection ─▶ ToolStats { uses_total, successes, last_used_seq }   (journals/tool_stats.zig)
         └─ 读者：人、或 evolution session（PLAN §3.7）——内核里没有读者
 ```
 
-- 写入点：session 每个 completed step 后按 suffix 形状记一次（`session.recordCompletedToolStats`；模型幻觉的名字不记）；CLI `nulya ext run` 成功进入 invocation 后记一次。**被 `max_tokens` 截断的 step 不记**——它的 tool_results 是 loop 自己写的 marker（没有任何 executor 跑过，§4），记下去等于让 tool 为模型的输出上限背一次失败，直接污染 evolution 读的 `success_rate`。stats 是**执行之后的观测**，"host 认为这一步完成了" 不等于 "tool 跑过了"。**`tool_id` 跨实现版本累计**（无 `version` 字段）。
-- `ok` 之外的三列是让这堆调用变成慢速回路读得懂的证据：**`at`** 把一次调用放上时间轴（`append` 自己盖，没有调用方能忘）；**`session`** 让它 join 到 `session-outcomes.jsonl`（这次调用服务的那场 session 成了吗）——durable session 是文件 stem，`nulya ext run` 从 `NULYA_SESSION` 认（§5.3），所以**未 pin 的 extension tool 走 CLI 那条路也认得出场次**；**`duration_ms`** 是 `ok` 说不出的成本维度（能用但要一分钟的 tool 与能用的 tool 不是同一个事实），只由 loop 在 executor 两端用**单调时钟**量（不进 ledger：耗时是 journal 的事实，不是对话的事实；也不出 `AgentSession.step()` 的返回值），所以 `nulya ext run` 那条路没有这一列。
-- **三列都是可选、`v` 仍是 1**：加宽之前写下的每一行原样读回，缺的列是 null = "没记录"，绝不是 0；内存 session 没有 id、`ext run` 没量耗时，也照样缺。完整的行读端仍然严格。
+- 写入点：session 每个 completed step 后按 suffix 形状记一次（`session.recordCompletedToolStats`；模型幻觉的名字不记）；CLI `nulya ext run` 成功进入 invocation 后记一次。**被 `max_tokens` 截断的 step 不记**——它的 tool_results 是 loop 自己写的 marker（没有任何 executor 跑过，§4），记下去等于让 tool 为模型的输出上限背一次失败，直接污染 evolution 读的 `success_rate`。stats 是**执行之后的观测**，"host 认为这一步完成了" 不等于 "tool 跑过了"。**`tool_id` 跨实现版本累计**（这个字段里永远没有版本——版本是它旁边那一列）。
+- `ok` 之外的四列是让这堆调用变成慢速回路读得懂的证据：**`at`** 把一次调用放上时间轴（`append` 自己盖，没有调用方能忘）；**`session`** 让它 join 到 `session-outcomes.jsonl`（这次调用服务的那场 session 成了吗）——durable session 是文件 stem，`nulya ext run` 从 `NULYA_SESSION` 认（§5.3），所以**未 pin 的 extension tool 走 CLI 那条路也认得出场次**；**`duration_ms`** 是 `ok` 说不出的成本维度（能用但要一分钟的 tool 与能用的 tool 不是同一个事实），只由 loop 在 executor 两端用**单调时钟**量（不进 ledger：耗时是 journal 的事实，不是对话的事实；也不出 `AgentSession.step()` 的返回值），所以 `nulya ext run` 那条路没有这一列；**`version`** 是**这次调用由哪个冻结实现服务的**（`v-<hash>`）。
+- **`version` 是双身份的另一半**（PLAN §3.5）：`tool_id` 不带版本，所以一个 tool 的历史是**一段**历史（换个实现不等于换个工具）；`version` 在它旁边，所以同一段历史也能**按实现**读（上次重建之后是不是变差了）。null 有两种都诚实的含义：这一行早于此列 = **unknown**（不是"没有版本"）；这一行是 builtin = 它就是内核，没有实现版本可记。两个写点各自拿着答案，不需要新 plumbing：session 从**本场冻结的成员列表**（`composition.extensions` 的 `FrozenExtension{id, version}`）按 `ext:<id>/<tool>` 的 `<id>` 反查——版本是冻结成员关系的属性，唯一真相就在那里，不复制进 binding；`nulya ext run` 用它**自己刚解析出**的那个版本（点名 `@<version>` 也好、`current` 也好）。反查不到 = 写 null，不是错误：证据缺一列不该让一步失败。
+- **写的理由是 evidence 补不了课**：journal 只能 append，今天不记，将来做 rollback 判断时这段历史永远是 unknown。所以这一列**只写不读**——内核里没有读者，`aggregate` 一字未动（照旧按 stable `tool_id` 聚合全部历史），per-version 的投影等第一个真实 consumer（PLAN §3.5.2）。
+- **四列都是可选、`v` 仍是 1**：加宽之前写下的每一行原样读回，缺的列是 null = "没记录"，绝不是 0；内存 session 没有 id、`ext run` 没量耗时、builtin 没有版本，也照样缺。**为什么不升 v2**：这条 journal 的纪律一直是"加可选列、reader 忽略未知列、同 `v` 的新写者不破坏老读者"（`at` / `session` / `duration_ms` 三个先例都是这么进来的），升 v2 只会让所有老读者对新行报 `UnsupportedStatsVersion`，零收益；`v` 留给真正的格式断裂。完整的行读端仍然严格。
 - reader：`v` 未知精确报错（`UnsupportedStatsVersion`）；坏行 / 残尾容忍；同一 `v` 下未知列忽略。
 - **内核不读这条 journal。** 没有排序、没有权重、没有自动补位：`journals/tool_stats.zig` 只负责把 facts 老老实实写下来、读回来。
 
