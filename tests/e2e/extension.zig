@@ -2137,7 +2137,7 @@ test "script extension: version id excludes compiler identity and is stable acro
     try std.testing.expectEqualStrings(v1, rebuilt.version);
 }
 
-test "cli ext seed: the binary's own drafts land in a store root — never over an existing draft, --dry-run writes nothing, and sync builds what was seeded" {
+test "cli ext seed: the binary's own drafts land in a store root, move forward when the binary does, never over somebody's edit without --force, --dry-run writes nothing, and sync builds what was seeded" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -2169,7 +2169,7 @@ test "cli ext seed: the binary's own drafts land in a store root — never over 
         defer alloc.free(dry.stdout);
         try std.testing.expectEqual(@as(u8, 0), dry.code);
         try std.testing.expect(std.mem.indexOf(u8, dry.stdout, "std: would seed") != null);
-        try std.testing.expect(std.mem.indexOf(u8, dry.stdout, "8 would seed, 0 already there") != null);
+        try std.testing.expect(std.mem.indexOf(u8, dry.stdout, "8 seeded, 0 updated, 0 up to date, 0 left alone") != null);
         try std.testing.expectError(error.FileNotFound, ws.access(io, ws_store, .{}));
     }
 
@@ -2179,7 +2179,7 @@ test "cli ext seed: the binary's own drafts land in a store root — never over 
         const seeded = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "seed", "--user", "guide", "evolution" }, env);
         defer alloc.free(seeded.stdout);
         try std.testing.expectEqual(@as(u8, 0), seeded.code);
-        try std.testing.expect(std.mem.indexOf(u8, seeded.stdout, "2 seeded, 0 already there") != null);
+        try std.testing.expect(std.mem.indexOf(u8, seeded.stdout, "2 seeded, 0 updated, 0 up to date, 0 left alone") != null);
         try std.testing.expect(std.mem.indexOf(u8, seeded.stdout, "`nulya ext sync --user` builds them") != null);
         try std.testing.expect(std.mem.indexOf(u8, seeded.stdout, "compact") == null);
 
@@ -2187,28 +2187,70 @@ test "cli ext seed: the binary's own drafts land in a store root — never over 
         defer alloc.free(synced.stdout);
         try std.testing.expectEqual(@as(u8, 0), synced.code);
         try std.testing.expect(std.mem.indexOf(u8, synced.stdout, "2 built, 0 already built, 0 failed") != null);
+
+        // Seeding the same ids again is a no-op that says so — and the build
+        // beside the draft is not a change to it.
+        const again = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "seed", "--user", "guide", "evolution" }, env);
+        defer alloc.free(again.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, again.stdout, "guide: up to date in") != null);
+        try std.testing.expect(std.mem.indexOf(u8, again.stdout, "0 seeded, 0 updated, 2 up to date, 0 left alone") != null);
     }
 
     // The default root is the workspace store, and an id that already holds a
-    // draft there keeps it byte for byte — seeding is not an update channel.
+    // draft NOBODY here wrote keeps it byte for byte: an edit is somebody's
+    // work, and only `--force` names it out loud.
     {
         const guide_dir = ws_store ++ std.fs.path.sep_str ++ "guide";
+        const guide_manifest = guide_dir ++ std.fs.path.sep_str ++ "extension.json";
         try ws.createDirPath(io, guide_dir);
         const mine = "{\"mine\": true}";
-        try ws.writeFile(io, .{ .sub_path = guide_dir ++ std.fs.path.sep_str ++ "extension.json", .data = mine });
+        try ws.writeFile(io, .{ .sub_path = guide_manifest, .data = mine });
 
         const seeded = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "seed" }, env);
         defer alloc.free(seeded.stdout);
         try std.testing.expectEqual(@as(u8, 0), seeded.code);
-        try std.testing.expect(std.mem.indexOf(u8, seeded.stdout, "guide: draft already in") != null);
-        try std.testing.expect(std.mem.indexOf(u8, seeded.stdout, "7 seeded, 1 already there") != null);
+        try std.testing.expect(std.mem.indexOf(u8, seeded.stdout, "guide: differs from this build, left alone") != null);
+        try std.testing.expect(std.mem.indexOf(u8, seeded.stdout, "--force guide") != null);
+        try std.testing.expect(std.mem.indexOf(u8, seeded.stdout, "7 seeded, 0 updated, 0 up to date, 1 left alone") != null);
 
-        const kept = try ws.readFileAlloc(io, guide_dir ++ std.fs.path.sep_str ++ "extension.json", alloc, .limited(1 << 16));
+        const kept = try ws.readFileAlloc(io, guide_manifest, alloc, .limited(1 << 16));
         defer alloc.free(kept);
         try std.testing.expectEqualStrings(mine, kept);
         // The others really arrived, manifest and all.
         try ws.access(io, ws_store ++ std.fs.path.sep_str ++ "std" ++ std.fs.path.sep_str ++ "extension.json", .{});
         try ws.access(io, ws_store ++ std.fs.path.sep_str ++ "std" ++ std.fs.path.sep_str ++ "src" ++ std.fs.path.sep_str ++ "vendor" ++ std.fs.path.sep_str ++ "mvzr.zig", .{});
+
+        // …and `--force` is the one way past it.
+        const forced = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "seed", "--force", "guide" }, env);
+        defer alloc.free(forced.stdout);
+        try std.testing.expectEqual(@as(u8, 0), forced.code);
+        try std.testing.expect(std.mem.indexOf(u8, forced.stdout, "guide: replaced") != null);
+        const replaced = try ws.readFileAlloc(io, guide_manifest, alloc, .limited(1 << 16));
+        defer alloc.free(replaced);
+        try std.testing.expect(std.mem.indexOf(u8, replaced, "\"id\": \"guide\"") != null);
+    }
+
+    // What the update channel rests on: every draft this binary wrote carries a
+    // record of the tree it wrote, and an edit to the draft is measured against
+    // it. (The refresh itself needs two different binaries to observe, so it is
+    // tested where both sides can be constructed — `cli/ext_seed.zig`.)
+    {
+        const std_dir = ws_store ++ std.fs.path.sep_str ++ "std";
+        try ws.access(io, std_dir ++ std.fs.path.sep_str ++ ".seed", .{});
+
+        const std_manifest = std_dir ++ std.fs.path.sep_str ++ "extension.json";
+        const shipped = try ws.readFileAlloc(io, std_manifest, alloc, .limited(1 << 20));
+        defer alloc.free(shipped);
+        const edited = try std.fmt.allocPrint(alloc, "{s}\n", .{shipped});
+        defer alloc.free(edited);
+        try ws.writeFile(io, .{ .sub_path = std_manifest, .data = edited });
+
+        const held = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "seed", "std" }, env);
+        defer alloc.free(held.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, held.stdout, "std: differs from this build, left alone") != null);
+        const kept = try ws.readFileAlloc(io, std_manifest, alloc, .limited(1 << 20));
+        defer alloc.free(kept);
+        try std.testing.expectEqualStrings(edited, kept);
     }
 }
 

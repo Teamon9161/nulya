@@ -146,6 +146,27 @@ export function cacheShare(u: Pick<UsageTotals, "input" | "cacheRead" | "cacheWr
   return prompt > 0 ? Math.round((u.cacheRead / prompt) * 100) : 0
 }
 
+/** `12.3k`, `1.2M` — a token count at a glance. */
+export function compactCount(n: number): string {
+  if (n < 1000) return String(n)
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`
+  return `${(n / 1_000_000).toFixed(1)}M`
+}
+
+/**
+ * What this session has cost, in one phrase — or null before it has cost
+ * anything (a draft tab, a session reopened but not stepped).
+ *
+ * It is said on the ACTIVITY line and only while something is happening (T42):
+ * a running total is news exactly while it is moving, and the row under the
+ * composer is a standing description of the session, read once and then
+ * trusted. `/usage` is where the whole ledger's arithmetic lives.
+ */
+export function usageLabel(u: UsageTotals): string | null {
+  if (u.input === 0 && u.output === 0) return null
+  return `↑${compactCount(u.input)} ↓${compactCount(u.output)} cache ${cacheShare(u)}%`
+}
+
 export interface SessionSnapshot {
   id: string
   header: SessionHeader | null

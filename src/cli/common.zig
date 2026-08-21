@@ -164,7 +164,7 @@ pub const ext_usage =
     \\  nulya ext init [--script] [--user] <id> [tool]    scaffold a draft (--script needs no compiler)
     \\  nulya ext build <path> [--user]                   freeze a draft into an immutable version, print its id
     \\  nulya ext sync [--user] [--activate] [--dry-run]  build every draft in that root: source in <root>/<id>/ installs
-    \\  nulya ext seed [--user] [<id>…] [--dry-run]       write the drafts this binary ships into that root; sync builds them
+    \\  nulya ext seed [--user] [<id>…] [--force] [--dry-run]  write the drafts this binary ships into that root; sync builds them
     \\  nulya ext run <id>[@<ver>] [tool] <json> | --arg k=v …   run the version in effect, or exactly that one
     \\  nulya ext activate [--user] <id> <ver>            point `current` at a version; activating an older one is the rollback
     \\  nulya ext deactivate [--user] <id>                drop `current`; the versions stay

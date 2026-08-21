@@ -545,6 +545,8 @@ export function ExtView(props: {
 
   /** An extension takes part in the next session: an active version, not shadowed. */
   const isActive = (entry: ExtensionEntry) => entry.current !== null && !entry.shadowed
+  /** …and one this front end brings into every session it starts (T42). */
+  const composedEverySession = (id: string) => style.settings.extensions.session_with.includes(id)
   /** Its declared tools, as the stable ids a pin names. */
   /**
    * The tools the SWITCH pins: the ones the package puts on the MODEL's face
@@ -1486,6 +1488,19 @@ export function ExtView(props: {
                       }
                       width={detailWidth()}
                       fg={entry.activation === "on_request" ? style.theme.muted : style.theme.warn}
+                    />
+                  </Show>
+                  {/* A package this front end composes every session with
+                      (`[extensions] session_with`, T42). Its tools reach the
+                      model without ever being pinned here, so the row's `0/4
+                      tools` is true about THIS list and false about what the
+                      model can call — and that gap is exactly what made `agent`
+                      look switched off on a machine where every session had it. */}
+                  <Show when={composedEverySession(entry.id)}>
+                    <Lines
+                      text={`composed into every session this TUI starts · its tools are on the face there, not from this list · \`[extensions] session_with\` in tui.toml`}
+                      width={detailWidth()}
+                      fg={style.theme.muted}
                     />
                   </Show>
                   {/* Authority, only where there is any. `fs 0 · net — · proc 0`

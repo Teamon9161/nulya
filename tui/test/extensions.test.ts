@@ -9,7 +9,7 @@
  * filesystem.
  */
 import { afterAll, beforeAll, expect, test } from "bun:test"
-import { mkdirSync, writeFileSync } from "node:fs"
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { extSeed, extSync, parseSyncLine, parseSyncReport, type SyncReport } from "../src/nulya/cli.ts"
 import {
@@ -263,6 +263,21 @@ test("the binary's bundled drafts seed into a store — dry-run counts them, a s
     const again = await extSeed(ws, { user: true, ids: ["guide"], env })
     expect(again.seeded).toBe(0)
     expect(again.already).toBe(1)
+    expect(again.updated).toEqual([])
+    expect(again.mine).toEqual([])
+
+    // An edited draft is somebody's: seeding names it and leaves it, and only
+    // `--force` puts the binary's own source back (T42).
+    const manifest = join(home, "extensions", "guide", "extension.json")
+    const shipped = readFileSync(manifest, "utf8")
+    writeFileSync(manifest, `${shipped}\n`)
+    const edited = await extSeed(ws, { user: true, ids: ["guide"], env })
+    expect(edited.mine).toEqual(["guide"])
+    expect(readFileSync(manifest, "utf8")).toBe(`${shipped}\n`)
+
+    const forced = await extSeed(ws, { user: true, ids: ["guide"], force: true, env })
+    expect(forced.updated).toEqual(["guide"])
+    expect(readFileSync(manifest, "utf8")).toBe(shipped)
   } finally {
     ws.cleanup()
   }

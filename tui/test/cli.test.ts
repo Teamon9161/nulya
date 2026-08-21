@@ -16,7 +16,7 @@ import {
   sessionStep,
   type StepLine,
 } from "../src/nulya/cli.ts"
-import { cacheShare, createSessionState } from "../src/state/session.ts"
+import { cacheShare, createSessionState, usageLabel, no_snapshot } from "../src/state/session.ts"
 import { projection, scripted_env, scripted_loop_env, tempWorkspace, type TempWorkspace } from "./support.ts"
 
 let ws: TempWorkspace
@@ -257,4 +257,16 @@ test("the cache share is of the whole prompt, not of its uncached part", () => {
   // Never above 100, and 0 before anything was priced.
   expect(cacheShare({ input: 0, cacheRead: 500, cacheWrite: 0 })).toBe(100)
   expect(cacheShare({ input: 0, cacheRead: 0, cacheWrite: 0 })).toBe(0)
+})
+
+test("what a session has cost is a phrase, or nothing at all before it has cost anything", () => {
+  // The absent case is every draft tab and every session reopened but not
+  // stepped: the line that would carry it (T42: the activity line) is not
+  // there either, so `null` is what "say nothing" looks like here.
+  expect(usageLabel(no_snapshot.usage)).toBeNull()
+  expect(usageLabel({ ...no_snapshot.usage, input: 281_600, output: 12_000, cacheRead: 1_718_400 })).toBe(
+    "↑281.6k ↓12.0k cache 86%",
+  )
+  // Output alone is still a cost — a step that was served entirely from cache.
+  expect(usageLabel({ ...no_snapshot.usage, output: 12 })).toBe("↑0 ↓12 cache 0%")
 })

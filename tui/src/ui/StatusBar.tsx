@@ -3,15 +3,9 @@ import { useScreen, useStyle } from "../render/theme.ts"
 import { onClick } from "./rows.ts"
 import { displayWidth, fit } from "./columns.ts"
 import { builtin_tools } from "../pins.ts"
-import { cacheShare, type SessionSnapshot } from "../state/session.ts"
+import type { SessionSnapshot } from "../state/session.ts"
 import type { Role } from "../state/attach.ts"
 import type { PermissionMode } from "../approvals.ts"
-
-function compact(n: number): string {
-  if (n < 1000) return String(n)
-  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`
-  return `${(n / 1_000_000).toFixed(1)}M`
-}
 
 /**
  * The one line under the composer (tui.md §4.1, §4.5, §11 T22): a standing
@@ -31,8 +25,13 @@ function compact(n: number): string {
  * was nothing to say) and the keyboard hints, which are now tips on the opening
  * screen — a reminder shown forever stops being read.
  *
- * The totals are the ledger's — every step records what it cost (DESIGN §3.1) —
- * so they survive a reopen and are the same numbers whoever is driving.
+ * The running cost went the same way (T42). A total that changes is a live
+ * fact, and it belongs on the line that is only there while something is
+ * changing it; standing here it was six columns of arithmetic that nobody was
+ * reading between steps, and it pushed the model id — the answer to "what am I
+ * talking to" — into being cut first on a narrow terminal. `/usage` still has
+ * every number, and `ctx N%` still appears here when the window fills, because
+ * that one is not a total but a warning.
  */
 export function StatusBar(props: {
   snapshot: SessionSnapshot
@@ -89,18 +88,6 @@ export function StatusBar(props: {
   const [overWearing, setOverWearing] = createSignal(false)
   const modeClick = onClick(() => props.onPickMode?.())
   const extClick = onClick(() => props.onOpenExt?.())
-
-  /**
-   * What this session has cost so far, or nothing at all before it has cost
-   * anything. A session that has not run yet is the state you are looking at on
-   * every draft tab, and `no usage yet` spent twelve columns of the busiest line
-   * on the screen to say what the absent chip says by being absent.
-   */
-  const usage = createMemo(() => {
-    const u = props.snapshot.usage
-    if (u.input === 0 && u.output === 0) return null
-    return `↑${compact(u.input)} ↓${compact(u.output)} cache ${cacheShare(u)}%`
-  })
 
   /**
    * How full the window is, after the last step. Nothing acts on this — nulya
@@ -160,10 +147,9 @@ export function StatusBar(props: {
    *
    * A `<text>` that runs out of box does not stop at the last whole word, so
    * every segment on this line is measured and cut by us (`ui/columns.ts`). The
-   * order is a judgement about what this line is FOR: the model (what you are
-   * talking to), what is happening, and the way to the rest of the keys must
-   * survive every width; the running cost gives up next; `tools 1+N` first,
-   * because the composition card above says the same thing at length.
+   * order is a judgement about what this line is FOR: the model — what you are
+   * talking to — survives every width, and `tools 1+N` gives up first, because
+   * the composition card above says the same thing at length.
    */
   const layout = createMemo(() => {
     const budget = Math.max(0, screen().width - 2 - displayWidth(modeLead()))
@@ -177,18 +163,11 @@ export function StatusBar(props: {
     // it runs into the chips beside it and both become one unreadable word
     // (`nasknstep 1`, T27).
     const model = fit(modelText(), Math.max(8, budget - right))
-    let room = Math.max(0, budget - displayWidth(model) - right)
-    const spent = usage()
-    const usage_chip = spent ? ` · ${spent}` : ""
-    const keepUsage = usage_chip.length > 0 && room >= displayWidth(usage_chip)
-    if (keepUsage) room -= displayWidth(usage_chip)
+    const room = Math.max(0, budget - displayWidth(model) - right)
     const tools_chip = ` · tools ${builtin_tools}+${props.tools}`
-    const keepTools = room >= displayWidth(tools_chip)
-    if (keepTools) room -= displayWidth(tools_chip)
     return {
       model,
-      tools: keepTools ? tools_chip : "",
-      usage: keepUsage ? usage_chip : "",
+      tools: room >= displayWidth(tools_chip) ? tools_chip : "",
     }
   })
 
@@ -254,11 +233,6 @@ export function StatusBar(props: {
             <Show when={layout().tools.length > 0}>
               <text fg={style.theme.dim} flexShrink={0}>
                 {layout().tools}
-              </text>
-            </Show>
-            <Show when={layout().usage.length > 0}>
-              <text fg={style.theme.muted} flexShrink={0}>
-                {layout().usage}
               </text>
             </Show>
           </box>

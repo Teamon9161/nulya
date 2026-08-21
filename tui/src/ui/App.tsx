@@ -44,7 +44,7 @@ import { wrapApprovalNote } from "../approvalnote.ts"
 import { createProjectIndex } from "../references.ts"
 import { createSkillTable, skillTurn, splitSlash } from "../skills.ts"
 import { describeTool } from "../render/registry.ts"
-import { no_snapshot } from "../state/session.ts"
+import { no_snapshot, usageLabel } from "../state/session.ts"
 import type { NextSession } from "./Welcome.tsx"
 import {
   extRun,
@@ -64,6 +64,7 @@ import {
   autoActivatable,
   builtContributions,
   failedIds,
+  pinsOf,
   planStore,
   promptPackageWarning,
   seedBundled,
@@ -415,6 +416,32 @@ export function App(props: AppProps) {
     const member = await sessionMemberOnce(agent_id)
     return member ? { id: member.id, version: member.version } : null
   }
+  /**
+   * The pins those packages will put on the face, known before the session
+   * exists (T42) — so the draft screen can count them.
+   *
+   * Read from the ACTIVE version's manifest (one `ext list`), not by resolving
+   * the member: `sessionMember` builds the bundled draft, which is a toolchain
+   * run, and a screen that has not been asked for anything yet must not start
+   * one (T23). A pin names a TOOL, never a version (`ext:agent/agent`), so the
+   * two answers differ only for a package that is not active anywhere on this
+   * machine — and the background sync that runs at the same moment is what makes
+   * it active. Under-reporting for that one second is the right way to be wrong.
+   */
+  const [composedPins, setComposedPins] = createSignal<readonly string[]>([])
+  const resolveComposedPins = async () => {
+    try {
+      const listed = await listExtensions(props.ws)
+      const pins: string[] = []
+      for (const id of props.style.settings.extensions.session_with) {
+        const entry = listed.find((held) => held.id === id && held.current !== null && !held.shadowed)
+        if (entry) pins.push(...pinsOf(entry))
+      }
+      setComposedPins(pins)
+    } catch {
+      // No listing is "unknown"; the count stays what the pin files say.
+    }
+  }
 
   /** A handover the model proposed and nobody has answered yet (tui.md §5.8). */
   const [handoff, setHandoff] = createSignal<HandoffFile | null>(null)
@@ -472,16 +499,29 @@ export function App(props: AppProps) {
     const plan = props.sync
     if (!plan) return
     // The drafts the BINARY ships, into the user store, before the pass that
-    // builds them: seeding writes source only and leaves alone anything already
-    // there (DESIGN §7.8), so the one pass below builds what arrived along with
-    // everything else. This used to be a question on a bare terminal BEFORE the
-    // screen existed, and answering it held that terminal for a minute of zig
-    // with `installing…` as the only sign of life (tui.md §11, T23).
+    // builds them: seeding writes source only (DESIGN §7.8), so the one pass
+    // below builds what arrived along with everything else. This used to be a
+    // question on a bare terminal BEFORE the screen existed, and answering it
+    // held that terminal for a minute of zig with `installing…` as the only
+    // sign of life (tui.md §11, T23).
+    //
+    // It also CARRIES FORWARD the drafts a previous binary seeded and nobody has
+    // edited since (T42) — before that, upgrading nulya left the user store on
+    // whatever source the first binary happened to drop, so a package that grew
+    // a tool or declared itself `on_request` stayed as it was until somebody
+    // deleted the directory. Drafts that were edited are left alone and named
+    // below; the ids seeding moved are ordinary changed drafts to the pass that
+    // follows, which builds them and points `current` at what it built.
     let arrived: string[] = []
+    let refreshed: string[] = []
+    let untouched: string[] = []
     if (plan.user && plan.bundled) {
       try {
         setNotice("installing the bundled extensions…")
-        arrived = (await seedBundled(props.ws)).ids
+        const seed = await seedBundled(props.ws)
+        arrived = seed.ids
+        refreshed = seed.updated
+        untouched = seed.mine
       } catch {
         // A binary too old to have `ext seed` ships nothing to install.
       }
@@ -563,6 +603,15 @@ export function App(props: AppProps) {
         news.push(`extension sync: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
+    // What the binary brought and what it did not dare touch (T42). The second
+    // half is the one that needs a person: a bundled draft it cannot recognise
+    // as its own is either something you wrote or something an old nulya seeded,
+    // and only you know which — so it is named with the command that replaces it
+    // rather than replaced.
+    if (refreshed.length > 0) news.push(`${refreshed.join(" & ")} updated to this build`)
+    if (untouched.length > 0) {
+      news.push(`${untouched.join(" & ")} differ from this build · edited, or seeded by an older nulya · \`nulya ext seed --user --force ${untouched.join(" ")}\` replaces them`)
+    }
     // …and whatever a mode package is doing on this machine ALREADY, whoever
     // switched it on and whenever (T31). This is the half no guard can fix: the
     // pointer is on disk, `evolution`'s prompt is in front of every model, and
@@ -587,7 +636,7 @@ export function App(props: AppProps) {
   // the pass above is what makes a freshly seeded package active. Chained
   // rather than parallel for that ordering alone — `syncStores` returns at once
   // when there is nothing to sync (a test, `sync_on_start = false`).
-  onMount(() => void syncStores().then(loadPlugins))
+  onMount(() => void syncStores().then(loadPlugins).then(resolveComposedPins))
 
   // "Ctrl+C again to quit" is an offer about THIS step. It lapses when a new
   // step starts (the first press must kill again, not quit) and after a short
@@ -766,8 +815,11 @@ export function App(props: AppProps) {
     overlay.close()
     composer?.focus()
     // `/ext` may have moved a pin or an activation while it was up, and the
-    // draft card's tool face is read off those files.
+    // draft card's tool face is read off those files — including, since T42,
+    // what the `session_with` packages contribute, which an activation there
+    // can have just changed.
     setPlanTick((tick) => tick + 1)
+    void resolveComposedPins()
   }
 
   const openSession = (id: string, created = false) => {
@@ -798,8 +850,16 @@ export function App(props: AppProps) {
 
   /**
    * What the next `session new` from this TUI would put on the model's face:
-   * the merged config pins plus this TUI's own list, read from disk. The same
-   * two sources `/ext`'s quota line adds up — there is no third answer here.
+   * the merged config pins, this TUI's own list, and the pins the packages in
+   * `[extensions] session_with` bring with them (T42).
+   *
+   * That third source is not a third ANSWER — it is the same `--pin` arguments
+   * `sessionExtras` is about to pass, asked for early. It was missing here, and
+   * the cost was a screen that said `tools 1+5` and listed no `agent` on every
+   * draft, while the session that started a keystroke later froze `agent`'s
+   * tools onto the face: the one place a person looks to find out what the model
+   * can do was under-reporting it, and the honest reading of that screen was
+   * "the agent package is off".
    */
   // A memo, because reading it is a file read: it is asked for once per frame by
   // both the status line and the draft card, and it can only change when
@@ -808,6 +868,7 @@ export function App(props: AppProps) {
     planTick()
     const face = [...(props.pinnedTools ?? [])]
     for (const pin of sessionPins(props.statePath)) if (!face.includes(pin)) face.push(pin)
+    for (const pin of composedPins()) if (!face.includes(pin)) face.push(pin)
     return face
   })
 
@@ -1303,6 +1364,18 @@ export function App(props: AppProps) {
   }
 
   const closeModePicker = () => setModePicker(false)
+
+  /**
+   * The chip's click: open the picker, and close it again if it is already up
+   * (T42).
+   *
+   * The same gesture on the same spot goes both ways everywhere else on this
+   * screen — every overlay opens and closes on its own key and on a second
+   * click (`openOverlay`), a fold opens and closes on its head row. A dialog
+   * that can only be opened by the thing that opened it is the one place where
+   * the way in is not the way out.
+   */
+  const toggleModePicker = () => (modePicker() ? closeModePicker() : openModePicker())
 
   /**
    * Who holds the keyboard while a call waits: the dialog's note field, or
@@ -2622,6 +2695,7 @@ export function App(props: AppProps) {
                   spinnerFrame={spinnerFrame()}
                   since={live()?.attach.startedAt() ?? null}
                   now={clockNow()}
+                  usage={usageLabel(snapshot().usage)}
                   onOpenTasks={() => openOverlay("tasks")}
                 />
                 {/* `panel: true`'s degraded progress display (DESIGN §7.2.1,
@@ -2667,7 +2741,7 @@ export function App(props: AppProps) {
                   effort={tab().effort()}
                   tools={faceSize()}
                   mode={mode()}
-                  onPickMode={openModePicker}
+                  onPickMode={toggleModePicker}
                   wearing={wearing()}
                   onOpenExt={() => openOverlay("ext")}
                   hint={notice()?.text}

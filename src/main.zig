@@ -68,6 +68,7 @@ test {
     _ = @import("cli/task.zig");
     _ = @import("cli/step_stream.zig");
     _ = @import("cli/ext.zig");
+    _ = @import("cli/ext_seed.zig");
     _ = @import("cli/config.zig");
     _ = @import("cli/skill.zig");
     _ = @import("cli/src.zig");

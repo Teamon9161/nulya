@@ -20,6 +20,7 @@ const tool_stats = @import("../journals/tool_stats.zig");
 const trust = @import("../journals/trust.zig");
 const launch = @import("../launch.zig");
 const bundled = @import("../bundled.zig");
+const ext_seed = @import("ext_seed.zig");
 const cli_src = @import("src.zig");
 const cli_toolchain = @import("toolchain.zig");
 const ZigExe = cli_toolchain.ZigExe;
@@ -50,7 +51,7 @@ pub fn dispatchExt(alloc: std.mem.Allocator, io: std.Io, args: []const []const u
     if (std.mem.eql(u8, sub, "activate")) return extActivate(alloc, io, rest);
     if (std.mem.eql(u8, sub, "deactivate")) return extDeactivate(alloc, io, rest);
     if (std.mem.eql(u8, sub, "sync")) return extSync(alloc, io, rest);
-    if (std.mem.eql(u8, sub, "seed")) return extSeed(alloc, io, rest);
+    if (std.mem.eql(u8, sub, "seed")) return ext_seed.extSeed(alloc, io, rest);
     if (std.mem.eql(u8, sub, "prune")) return extPrune(alloc, io, rest);
     if (std.mem.eql(u8, sub, "list")) return extList(alloc, io);
     if (std.mem.eql(u8, sub, "inspect")) return extInspect(alloc, io, rest);
@@ -560,104 +561,6 @@ fn appendActivation(
     try st.activate(alloc, result.id, result.version);
     depositSessionNote(alloc, io, root_dir, result.id, result.version) catch {};
     try out.writeAll(" -> current");
-}
-
-/// `nulya ext seed [--user] [<id>…] [--dry-run]` — write the drafts this binary
-/// ships into a store root (DESIGN §7.8).
-///
-/// build.zig embeds the nulya repo's own `extensions/**`, so a distributed
-/// binary carries its bundled drafts and this works in any workspace — no
-/// checkout required. Seeding writes SOURCE only: `ext sync` builds it like any
-/// other draft, and every later gate (trust, activation, pins) is unchanged.
-///
-/// A draft the root already holds is left alone, whatever it contains: it may
-/// carry somebody's edits, and a seed that refreshed drafts would be an update
-/// channel nobody asked for. Delete `<root>/<id>/` first to reseed. Versions
-/// beside a draft are immutable and never touched (physics #5).
-fn extSeed(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
-    const flags = try takeUserFlag(alloc, args);
-    defer alloc.free(flags.rest);
-    var dry_run = false;
-    var named: std.ArrayList([]const u8) = .empty;
-    defer named.deinit(alloc);
-    for (flags.rest) |a| {
-        if (std.mem.eql(u8, a, "--dry-run")) {
-            dry_run = true;
-        } else if (std.mem.startsWith(u8, a, "--")) {
-            try printErr(io, "usage: nulya ext seed [--user] [<id>…] [--dry-run]\n");
-            return 1;
-        } else {
-            try named.append(alloc, a);
-        }
-    }
-
-    const all_ids = try bundled.ids(alloc);
-    defer alloc.free(all_ids);
-    for (named.items) |want| {
-        if (bundled.has(want)) continue;
-        var list: std.Io.Writer.Allocating = .init(alloc);
-        defer list.deinit();
-        for (all_ids, 0..) |id, i| try list.writer.print("{s}{s}", .{ if (i == 0) "" else " ", id });
-        try printErrFmt(alloc, io, "this binary ships no draft '{s}'; bundled: {s}\n", .{ want, list.written() });
-        return 1;
-    }
-
-    const root_spec = (try writeRootSpec(alloc, flags.user)) orelse {
-        try printErr(io, "no home directory for --user (set NULYA_HOME or HOME)\n");
-        return 1;
-    };
-    defer alloc.free(root_spec);
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_path = try cwdRealPath(io, &cwd_buf);
-    // A plan must not leave a mark, and creating the root directory IS one — so
-    // dry-run only opens what exists (an absent root just means nothing is
-    // already there).
-    var root_dir: ?std.Io.Dir = if (dry_run)
-        store.openRoot(io, cwd_path, root_spec) catch |err| switch (err) {
-            error.FileNotFound, error.NotDir => null,
-            else => return err,
-        }
-    else
-        try store.openOrCreateRoot(io, cwd_path, root_spec);
-    defer if (root_dir) |*d| d.close(io);
-
-    var seeded: usize = 0;
-    var kept: usize = 0;
-    for (all_ids) |id| {
-        if (named.items.len != 0 and !sliceHasString(named.items, id)) continue;
-
-        // A draft is `<root>/<id>/extension.json` (the `draftIds` definition);
-        // its presence, whatever the content, means this id is somebody's.
-        const marker = try std.fs.path.join(alloc, &.{ id, "extension.json" });
-        defer alloc.free(marker);
-        const already = blk: {
-            const dir = root_dir orelse break :blk false;
-            dir.access(io, marker, .{}) catch break :blk false;
-            break :blk true;
-        };
-        if (already) {
-            kept += 1;
-            try printOut(alloc, io, "{s}: draft already in {s} (left alone)\n", .{ id, root_spec });
-            continue;
-        }
-
-        var count: usize = 0;
-        for (bundled.files) |f| {
-            if (!std.mem.eql(u8, bundled.idOf(f.path), id)) continue;
-            count += 1;
-            if (dry_run) continue;
-            if (std.fs.path.dirname(f.path)) |parent| try root_dir.?.createDirPath(io, parent);
-            try root_dir.?.writeFile(io, .{ .sub_path = f.path, .data = f.bytes });
-        }
-        seeded += 1;
-        try printOut(alloc, io, "{s}: {s} ({d} files) into {s}\n", .{ id, if (dry_run) "would seed" else "seeded", count, root_spec });
-    }
-
-    try printOut(alloc, io, "{d} {s}, {d} already there\n", .{ seeded, if (dry_run) "would seed" else "seeded", kept });
-    if (seeded != 0 and !dry_run) {
-        try printOut(alloc, io, "`nulya ext sync{s}` builds them\n", .{if (flags.user) " --user" else ""});
-    }
-    return 0;
 }
 
 /// `nulya ext prune [--user] [<id>] [--dry-run]` — drop the version directories a

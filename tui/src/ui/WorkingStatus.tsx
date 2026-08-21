@@ -117,6 +117,14 @@ export function WorkingStatus(props: {
   since?: number | null
   /** Read from the caller so the clock advances on the same tick as the sweep. */
   now?: number
+  /**
+   * What this session has cost so far (`state/session.usageLabel`), or absent
+   * before it has cost anything. It rides the line that is only up while
+   * something is running (T42): a total is worth reading while it moves, and
+   * the row under the composer — where it used to stand all day — is a
+   * description of the session, not a meter.
+   */
+  usage?: string | null
   onOpenTasks?: () => void
 }) {
   const style = useStyle()
@@ -146,17 +154,22 @@ export function WorkingStatus(props: {
   }
 
   /**
-   * The dim tail: how long, and — only when Esc would actually stop it — the
-   * key that does. The clock goes with anything in flight; the offer goes with
-   * `cancelable` alone, because `esc to cancel` over `2 background` or a queued
-   * observer append names a key that would open browse mode instead.
+   * The dim tail: how long, the key that stops it, and what it has cost.
+   *
+   * The clock goes with anything in flight; the offer goes with `cancelable`
+   * alone, because `esc to cancel` over `2 background` or a queued observer
+   * append names a key that would open browse mode instead. The cost comes
+   * last of the three because the tail is cut from the end when the terminal is
+   * narrow, and that is the order these are worth losing in.
    */
   const tail = () => {
     const activity = props.activity
     if (!activity || !activity.moving) return ""
     const since = props.since
     const age = since ? ` · ${elapsedLabel((props.now ?? Date.now()) - since)}` : ""
-    return activity.cancelable ? `${age} · esc to cancel` : age
+    const esc = activity.cancelable ? " · esc to cancel" : ""
+    const spent = props.usage ? ` · ${props.usage}` : ""
+    return `${age}${esc}${spent}`
   }
 
   /** Cut to one row: a tool name is as long as whoever wrote it made it. */

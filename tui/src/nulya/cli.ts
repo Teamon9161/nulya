@@ -452,43 +452,72 @@ export async function extBuild(ws: Workspace, path: string, options: { user?: bo
   return version
 }
 
-/** What `nulya ext seed` reports: how many bundled drafts arrived. */
+/**
+ * What `nulya ext seed` reports: what became of each bundled draft in that root
+ * (DESIGN §7.8).
+ *
+ * Four answers, and the difference between the middle two is the whole point:
+ * a draft the binary itself wrote and nobody has touched is carried forward
+ * (`updated`), while one that has been edited — or that arrived by a hand the
+ * store has no record of — is left where it is (`mine`) and named.
+ */
 export interface SeedReport {
-  /** Drafts written (or, under `--dry-run`, that would be). */
+  /** Drafts written where there was none (or, under `--dry-run`, that would be). */
   seeded: number
-  /** Ids left alone because the root already holds a draft of them. */
+  /** Ids left alone because they are already what this binary ships. */
   already: number
   /** The ids counted in `seeded`, in the order the kernel printed them. */
   ids: string[]
+  /** Ids moved forward to this binary's source, having been its own copy. */
+  updated: string[]
+  /** Ids that differ from this binary and are somebody's: left untouched. */
+  mine: string[]
   text: string
 }
 
 /**
  * `nulya ext seed` — write the extension drafts the BINARY ships into a store
- * root (DESIGN §7.8). Source only: building stays `ext sync`'s job, and an id
- * that already has a draft in that root is left alone, so this is safe to call
- * on every start and as a fallback before an on-demand `ext build`.
+ * root (DESIGN §7.8). Source only: building stays `ext sync`'s job.
+ *
+ * Safe to call on every start: it writes what is missing, refreshes what it
+ * wrote itself and nobody has since touched, and never overwrites an edited
+ * draft without `--force`.
  */
 export async function extSeed(
   ws: Workspace,
-  options: { user?: boolean; ids?: string[]; dryRun?: boolean; env?: Record<string, string> } = {},
+  options: {
+    user?: boolean
+    ids?: string[]
+    dryRun?: boolean
+    force?: boolean
+    env?: Record<string, string>
+  } = {},
 ): Promise<SeedReport> {
   const args = ["ext", "seed"]
   if (options.user) args.push("--user")
   if (options.ids) args.push(...options.ids)
+  if (options.force) args.push("--force")
   if (options.dryRun) args.push("--dry-run")
   const result = await run(ws, args, options.env)
   if (result.code !== 0) fail("ext seed failed", result)
-  const summary = /(\d+) (?:seeded|would seed), (\d+) already there/.exec(result.stdout)
+  const summary = /(\d+) seeded, (\d+) updated, (\d+) up to date, (\d+) left alone/.exec(result.stdout)
   const ids: string[] = []
+  const updated: string[] = []
+  const mine: string[] = []
   for (const line of result.stdout.split("\n")) {
-    const seeded = /^([^\s:]+): (?:seeded|would seed) /.exec(line.trim())
-    if (seeded) ids.push(seeded[1]!)
+    const done = /^([^\s:]+): (seeded|would seed|updated|would update|replaced|would replace|differs) /.exec(line.trim())
+    if (!done) continue
+    const [, id, verb] = done as unknown as [string, string, string]
+    if (verb === "differs") mine.push(id)
+    else if (verb === "seeded" || verb === "would seed") ids.push(id)
+    else updated.push(id)
   }
   return {
     seeded: summary ? Number.parseInt(summary[1]!, 10) : 0,
-    already: summary ? Number.parseInt(summary[2]!, 10) : 0,
+    already: summary ? Number.parseInt(summary[3]!, 10) : 0,
     ids,
+    updated,
+    mine,
     text: result.stdout,
   }
 }

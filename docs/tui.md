@@ -143,11 +143,11 @@ tui/
 
   ● 改好了，测试通过。要不要把默认值也写进 default.toml？▍                               (streaming)
 ─────────────────────────────────────────────────────────────────────────────────────────────────────
- ⠋ shell · 3s · esc to cancel                                                     (WorkingStatus §4.4b)
+ ⠋ shell · 3s · esc to cancel · ↑12.4k ↓3.1k cache 89%                            (WorkingStatus §4.4b)
 ─────────────────────────────────────────────────────────────────────────────────────────────────────
  › 好，写进去_                                                                            (Composer)
 ─────────────────────────────────────────────────────────────────────────────────────────────────────
- unsafe · claude-sonnet-5 (high) · tools 1+3 · ↑12.4k ↓3.1k cache 89%              ctx 61% · step 4
+ unsafe · claude-sonnet-5 (high) · tools 1+3                                       ctx 61% · step 4
 ```
 
 四块：transcript（`scrollbox`，sticky bottom，鼠标滚轮 / PgUp / PgDn；离开底部时状态栏出现 `↓ new` 提示）、**输入框上面那一行**（0 或 1 行，只在有事发生时存在，§4.4b）、composer（`textarea`）、**输入框下面那一行**（1 行，§4.5）。没有边框，用两条 hairline 分隔；空状态首屏是一个小 wordmark（`ascii-font`）+ cwd + 几条 `/` 命令 + **一条 tip**（T38）。
@@ -208,7 +208,7 @@ tui/
 
 分工是一句判断：**"这一场是什么"与"此刻在发生什么"是两个问题，被读的频率差一个数量级**。前者（model / mode / face / cost）读一次就信了，住在输入框**下面**；后者每过一秒都要再读一遍，之前挂在那一行的尾巴上——屏幕上**最少的列、最低的对比度**给了唯一一个活的事实，还逼着那一行常年留一格给 `idle`（一个"没什么可说"的词）。现在它自己一行，就在你要打字的那个框上面。
 
-一行两段：**主段**（一个 spinner + 它是什么，`accent.assistant` 绿——正在跑的就是 assistant 那一轮，不是警告）· **尾段**（`dim`：`· 12s · esc to cancel`——钟给一切在动的东西，`esc to cancel` **只给 Esc 真能停的那一步**（本 tab 正在 drive 的 step，`Activity.cancelable`）：`waiting for your answer` 底下写它是在提议取消一个已经停住的 step，`2 background` 或 observer 排队的 append 底下写它则点名了一个其实会进 browse 模式的键，而后台命令本来就活得过 step）。`12s` 的钟来自 `Driver.startedAt`（离开 idle 时打点、回 idle 清掉；observer 用它自己排队的时刻），**跟着动画那一拍重采样**——渲染里读墙上时钟就不是它输入的函数了。
+一行两段：**主段**（一个 spinner + 它是什么，`accent.assistant` 绿——正在跑的就是 assistant 那一轮，不是警告）· **尾段**（`dim`：`· 12s · esc to cancel · ↑12.4k ↓3.1k cache 89%`——**花掉多少也在这里**（T42：一个会变的总数，正是只在它变的时候值得读；静息态它下面那一行不再写它）；尾段窄屏时从末尾截，所以这三样的顺序就是它们该被丢掉的顺序。钟给一切在动的东西，`esc to cancel` **只给 Esc 真能停的那一步**（本 tab 正在 drive 的 step，`Activity.cancelable`）：`waiting for your answer` 底下写它是在提议取消一个已经停住的 step，`2 background` 或 observer 排队的 append 底下写它则点名了一个其实会进 browse 模式的键，而后台命令本来就活得过 step）。`12s` 的钟来自 `Driver.startedAt`（离开 idle 时打点、回 idle 清掉；observer 用它自己排队的时刻），**跟着动画那一拍重采样**——渲染里读墙上时钟就不是它输入的函数了。
 
 **高光扫过**（`theme.shimmerColor`，逐条移植自 tcode `theme::shimmer_color`）：一条高斯软带从左扫到右，越过尾巴后停一拍再来。它**抬起每格自己的颜色**（朝 `theme.lift`）而不是覆盖它，所以绿的还是绿的、静止时每一格精确等于 base。`theme.lift` 是主题自己声明的（深色朝亮、浅色朝墨、`NO_COLOR` 就是 `fg` 因而整个扫描是 no-op）——"更亮"不是颜色自带的方向。实现上**一格一个 `<text>`**：`<span fg>` 是显然的写法，而 @opentui/solid 0.5.3 把这个 prop 丢掉、整段一个颜色（实测）；`Index` 而非 `For`，位置固定、字符在变。`motion = false` 关掉的正是这两样（spinner 与扫带），文字一字不变。
 
@@ -220,13 +220,13 @@ tui/
 
 （**驱动侧的失败不在这一行**：`error · see transcript` 写在上面那一行（§4.4b），原文整段在 transcript 末尾，§4.2 `ErrorNotice`。）
 
-**权限 mode**（`ask` / `unsafe`，**行首**，可点 → mode picker，§5.7；`unsafe` 是 warn 色；T35 之前它在最右边——那是一行愿意先丢掉的东西所在的位置，而它是屏幕上每个 tool call 被裁决的立场，该在 model 之前读到） · `<model-id> [(effort)]`（**主语**，`fg`，可点 → `/model`；effort 只在本 tab 明确选过时才写括号——`auto` 就是内核默认，为它花七列不值） · `tools 1+N`（`dim`；1 = 那一个 builtin `shell`，DESIGN §5.1；draft 上 N = 合并 config pin ∪ `tui-state.json` 的 `session_pins`） · token 累计（`muted`；`↑input ↓output cache%`，**来源是 ledger 的 `assistant.usage`**，流事件只是它落盘前的临时值，同一步不会数两遍——所以重开一场也看得见它到今天为止花了多少，T8；**cache% 的分母是整个 prompt** `input + cache_read + cache_write`（`state/session.ts` `cacheShare`，与下一段 ctx% 的分子同一个量）——`input` 是内核扣掉缓存后的量，早先拿它当分母会在缓存命中好的对话里显示 200%+，2026-08-20 修）。右：`ctx N%` · `↓ N more below` · **`◈ <id>`**（这一场戴着的、contribute 了 system prompt 的包，`accent.evolve`，可点 → `/ext`；draft 读 `--with` 的 ref，已开场的读冻结 `contributions`——顶上那张卡默认折着，不写这一格就一个字都没有，T31） · `step n`（**跑过步才写**）· `observer · driven elsewhere`（§5.6；**只有例外说自己**——当写者是常态，`driver` 那个词在每个人的每一场里都一模一样，一格恒定的东西不是信息，T35）。离开底部时插入 `↓ 3 new`。
+**权限 mode**（`ask` / `unsafe`，**行首**，可点 → mode picker（**再点一下收起**，T42），§5.7；`unsafe` 是 warn 色；T35 之前它在最右边——那是一行愿意先丢掉的东西所在的位置，而它是屏幕上每个 tool call 被裁决的立场，该在 model 之前读到） · `<model-id> [(effort)]`（**主语**，`fg`，可点 → `/model`；effort 只在本 tab 明确选过时才写括号——`auto` 就是内核默认，为它花七列不值） · `tools 1+N`（`dim`；1 = 那一个 builtin `shell`，DESIGN §5.1；draft 上 N = 合并 config pin ∪ `tui-state.json` 的 `session_pins` ∪ **`[extensions] session_with` 那几个包 active 版本的 model-facing tool**——它们由 `sessionExtras` 在 `session new` 那一刻 `--pin` 进去，不算进来的话开屏就在说 `agent` 没启用，T42）。**token 累计从 T42 起不在这一行**——它搬去了 §4.4b 那一行，只在跑着的时候写（`state/session.ts` 的 `usageLabel`，来源仍是 ledger 的 `assistant.usage`；`/usage` 里是全部账）。右：`ctx N%` · `↓ N more below` · **`◈ <id>`**（这一场戴着的、contribute 了 system prompt 的包，`accent.evolve`，可点 → `/ext`；draft 读 `--with` 的 ref，已开场的读冻结 `contributions`——顶上那张卡默认折着，不写这一格就一个字都没有，T31） · `step n`（**跑过步才写**）· `observer · driven elsewhere`（§5.6；**只有例外说自己**——当写者是常态，`driver` 那个词在每个人的每一场里都一模一样，一格恒定的东西不是信息，T35）。离开底部时插入 `↓ 3 new`。
 
-**没有的东西不占列**：一场还没花过钱就整格不写（T35 之前写 `no usage yet`，用屏幕上最挤那一行的十二列说了一句"缺席"本来就能说的话）；没跑过步就不写 `step 0`。**键位提示也不在这里了**（T38）：`Esc cancel · Ctrl+O fold · /help` 常年挂在这一行，是两头都输——一个永远在那儿的提醒过了第一个小时就没人再读，而它占的是屏幕上最挤的一行。它搬去了开屏那一屏，一次一条 tip（§4.1、`Welcome.tips`），tcode 的做法；`/help` 那个可点的 box 也随之删掉——开屏的 `/help` 那一行本来就是同一个按钮。
+**没有的东西不占列**：没跑过步就不写 `step 0`（T35 之前连"一场还没花过钱"都要用十二列写成 `no usage yet`；那一格后来整个搬走了，见上）。**键位提示也不在这里了**（T38）：`Esc cancel · Ctrl+O fold · /help` 常年挂在这一行，是两头都输——一个永远在那儿的提醒过了第一个小时就没人再读，而它占的是屏幕上最挤的一行。它搬去了开屏那一屏，一次一条 tip（§4.1、`Welcome.tips`），tcode 的做法；`/help` 那个可点的 box 也随之删掉——开屏的 `/help` 那一行本来就是同一个按钮。
 
 **notice 盖住整行，然后自己下去**（T35）。它曾经是这一行里再多一段、去抢剩下的列，于是"刚发生了什么"被挤进最后几列，而且**留在那儿**——`Ctrl+C again to quit` 在那个 offer 早已过期之后还挂着，`opened s-…` 挂一整场。现在：有 notice 就整行是它（`fg`），停留时间按长度算（`App.noticeHold`：`1500 + 45/字`，夹在 3 s–9 s），到点自己让位给静息态。下限 3 s 就是 `Ctrl+C again to quit` 落的地方，也正是那个 offer 有效的窗口——两者**由构造相等**而不是碰巧：arm 到期时同一处把这句话取下来。两个例外用 `holdNotice` 声明：browse 模式的键位提示与等着回答的 handoff 提议——它们不是新闻，是屏幕**正处在**的状态，各自的代码路径负责清掉。
 
-**窄屏让位的顺序是一句判断，不是平均分**：mode 与 model **永不让**；再窄就先丢 `tools`（上面的 CompositionCard 已经把工具面写全了）、再丢 token。notice 不参与这场分配（T35 起它拿整行），活动也不参与了（T38 起它自己一行）。
+**窄屏让位的顺序是一句判断，不是平均分**：mode 与 model **永不让**；再窄就丢 `tools`（上面的 CompositionCard 已经把工具面写全了）。notice 不参与这场分配（T35 起它拿整行），活动也不参与了（T38 起它自己一行）。
 
 上下文占用（`ctx 72% · /compact`）只在 ≥60% 时出现、≥80% 转 warn 色。分母是 `[[models]]` 目录的 `context_window`（目录没写就整个不显示，不编分母）；分子是**最后一步**的 `input + cache_read + cache_write`——`provider.Usage.input_tokens` 是扣掉缓存之后的量，只读它会把一个快满的窗口报成几乎空的。它只是显示，不触发任何动作。
 
@@ -1627,3 +1627,23 @@ U1 给了 manifest 五个声明位，U2 把它们接进前端，U3 让一个包�
 **⑥ 装它们是一个决定，但是一个便宜的决定。** 两个包都 `activation: "on_request"`，所以开屏那趟后台 sync 会把它们 activate（`autoActivatable` 对 `on_request` 放行，T37）——而那一下**什么 session 都没改变**，只是让 `/plan` `/ask` `/with plan` 这几条路存在，以及让两个前端模块被加载。代价是第一次开屏多两个 `zig build-exe`（后台，T23 已经把它赶出关键路径）。
 
 **测试**：`bun test` **348/348**（37 个文件），新增 `test/consumers.test.tsx` 四条（真二进制、真 store、真冻结版本、真 `session append` / `ext run` / fork；唯一模拟的是**模型**——没有任何离线 provider 会调 `propose` 或 `ask`，所以那两行 `tool` 流与那条 assistant 事件是直接交给 host 的，与 `session step --stream` 打出来的字节同形）：① plan 全环（propose → 面板自己开 → 评论 → `r` 落**一条**带 `pkg="plan" kind="plan-comments"` 的 sentinel user turn 且引文带行号 → 再 propose → `a` → brief 落盘 → fork 出的子场 composition 里**没有** `plan@`，而 brief 是它的第一条 turn）· ② plan 场上 gate 拒 `shell` 且 note 写 `read-only policy of plan`（真渲染的 `App`，`unsafe` 模式——所以拒绝只可能来自天花板）· ③ ask 选项作答落 ledger · ④ ask 自己打字作答（`key.text` 的钉子）。`zig build e2e` **73/73**，新增一条包级：propose / todo / ask 的成功与 `-32602` 两路 + **什么都没写进 `.nulya/handoffs`** · 戴上 plan 的场里 prompt 进了 system blocks、policy 冻在版本的 manifest 里、`tools` 是 `shell` + 唯一那个 pin（两根轴）· `approve` 写出的 brief 被 `compact --arg brief_file=` 直接吃下、子场 header 里没有 `plan`。`ext seed` 的自带扩展 6 → 8，三处计数（e2e 两处 + `test/extensions.test.ts` 一处）与 `src/bundled.zig` 的钉子同步。`bunx tsc --noEmit` 干净——`tsconfig` 的 `include` 多了 `../extensions/*/tui`，所以**这两个包的插件模块被按契约 typecheck**（与 `test/fixtures/probe-plugin.ts` 是真文件同一个理由）。
+
+### T42 · 三处「说得不对的地方」，与自带扩展的更新通道（2026-08-21）
+
+四件事，三件在前端，一件在壳层（内核语义仍然零改动）。它们凑成一条是因为触发它们的是同一次使用：一场跑了 20 步的 session，屏幕上有一行在说没人读的数字、一格在说一件不真的事，而那件不真的事的根源在磁盘上。
+
+**① 流量搬到「正在发生什么」那一行（§4.4b / §4.5）。** `↑281.6k ↓12.0k cache 86%` 原来常驻输入框下面那一行。一个**会变的总数**只在它变的时候值得读——静息时它是六列没人看的算术，还把 model id（"我在跟谁说话"）挤成第一个被截断的东西。现在它是 `WorkingStatus` 尾段的第三样（`· 12s · esc to cancel · ↑… ↓… cache …%`），跑完就随整行一起消失；`/usage` 仍然是全部账，`ctx N%` 留在原处（它不是总数，是警告）。共用的短语落在 `state/session.ts` 的 `usageLabel` / `compactCount`，与 `cacheShare` 同一处。
+
+**② mode chip 再点一下收起（§4.5）。** 点 `unsafe` 开 picker，再点一下什么都不发生——而这个屏幕上其它每一个"点开"都是可以点回去的（`openOverlay` 本来就是 `overlay.toggle`，折叠卡的头行也是）。`toggleModePicker` 一行，把 `/mode` 那条命令留在 `openModePicker`（打两次 `/mode` 不是收起的意思）。
+
+**③ `◈ evolution` 为什么会自己出现——它不是新 bug，是磁盘上的旧账。** `~/.nulya/extensions/evolution/current` 指着一个**旧版本**：那份 manifest 早于 `activation: "on_request"`（DESIGN §7.2.1），所以在 discovery 里它仍是 `always` = 它的 identity system prompt 进这台机器上的每一场 session（`docs/BUGS.md` 第 1 条的余烬——那次修的是"以后不会再被自动打开"，没有、也不该由 harness 替人关掉已经开着的）。点它开 `/ext` 是设计（T31：这一格就是 `/ext` 的鼠标那一半）。**真正的问题是它为什么还是旧的**，那就是 ④。
+
+**④ `nulya ext seed` 成为自带扩展的更新通道（DESIGN §7.2 / §7.8，新 `src/cli/ext_seed.zig`）。** 原来的规则是"该 root 已有 draft 的 id 一律不动"，理由正当（那可能带着别人的编辑），后果却是：**升级二进制永远不会更新已经装上的自带扩展**。于是这台机器上 `agent` 的三个 `audience: "driver"` 没生效（四个 tool 全在模型面上）、`std` 还没有 `edit`、`evolution` 还是 `always`——全都是本机 build 过一次就冻在那儿了。
+
+判据不能是内容 hash（自演化每轮都改），也不能是问一句（这一步跑在开屏之前的后台），所以是**一条记录**：seed 每写一个 draft 就在 `<root>/<id>/.seed` 记下自己写的那棵树的 digest。四种答案——没有 → seed；与本二进制逐字节相同 → up to date（**顺手补记录**，这是老 store 唯一的补课机会）；记录仍描述盘上这棵树 → 这是 harness 自己的副本、没人动过 → **自动刷新**；记录对不上或没有记录 → 有人动过（或是记录出现之前的老 seed）→ **原样留着并点名**，`--force` 是唯一的覆盖入口。刷新过的 draft 对随后那趟 `ext sync` 就是一个普通的"变了的 draft"：build 出新版本、`--activate` 把 `current` 指过去，于是 ③ 的 `evolution` 会自己变成 `on_request` 的那一版（activate 从此只是登记，不再进任何 session）。记录**不进 package snapshot**（snapshot 由 manifest 决定），所以 version id 一位都不变。
+
+前端只多两句 notice：`X & Y updated to this build`，以及点名它不敢碰的那些 + 那条 `--force` 命令（`App.syncStores`）。老 store 的那一次仍然需要人点头——这是对的：只有人知道那份 draft 是自己改的还是上一个二进制留下的。
+
+**⑤ 顺带修掉一个被它暴露出来的谎：draft 屏幕上 `[extensions] session_with` 的包一个都不算数。** 状态行与 Welcome 卡的 `tools 1+N` 只数**持久 pin**（config 的 `pinned_native_tools` ∪ `tui-state.json` 的 `session_pins`），而 `handoff` / `agent` 是在 `session new` 那一刻由 `sessionExtras` 加进去的——于是开屏永远写着 `tools 1+5`、Welcome 的 tools 行里没有 `agent`，而下一条消息开出来的 session header 里**明明有四个 agent tool**。一个人看着那块屏幕，唯一合理的结论就是"agent 没启用"。修法是 `plannedPins` 认第三个来源（`composedPins`）：从 `ext list` 里读那几个 id **active 版本**的 model-facing tool（`pinsOf`），**不是**去 `sessionMember` 解析——后者会 build bundled draft，那是一趟 zig，而一个还没被要求做任何事的开屏不该起编译（T23）。pin 指的是 tool 不是版本（`ext:agent/agent`），所以两种读法只在"这台机器上根本没 active 过这个包"时才不同，而那一秒正是后台 sync 在把它变 active——少报一秒是这里该有的错法。`/ext` 详情面同时多一行：这个包**每一场都在**，它的 tool 不经这张表上面（否则 `agent 0/4 tools` 是"关于这张表"为真、"关于模型能调什么"为假的一句话）。
+
+**测试**：`zig build test` 465/465（新增两条纯函数级：seed → `current` → 编辑 → `theirs`，以及"记录描述盘上这棵树"→ `stale` → 刷新后连多出来的文件一起清掉）；`zig build e2e` 74（那条 seed 的 e2e 改写成四种答案 + `--force`）；`bun test` 全绿（`extensions.test.ts` 补了编辑→点名→`--force` 三步）。
