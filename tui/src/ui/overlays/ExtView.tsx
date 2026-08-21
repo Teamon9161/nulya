@@ -45,7 +45,15 @@ import {
   type ExtensionEntry,
   type ToolUsage,
 } from "../../nulya/files.ts"
-import { configShow, extBuild, extDeactivate, extPrune, extSetCurrent, type SyncLine } from "../../nulya/cli.ts"
+import {
+  configShow,
+  extBuild,
+  extDeactivate,
+  extPrune,
+  extSeed,
+  extSetCurrent,
+  type SyncLine,
+} from "../../nulya/cli.ts"
 import { draftColumn, pinsOf, planStore, promptConsequence } from "../../extensions.ts"
 import {
   builtin_tools,
@@ -232,10 +240,16 @@ export function foldLine(count: number, expanded: boolean): string {
   return `${what} · d ${expanded ? "folds" : "shows"}`
 }
 
-/** What the NEXT session's face would carry: the merged config plus our own. */
+/**
+ * What the NEXT session's face would carry: the merged config, our own list, and
+ * what the `session_with` packages bring with them (T42) — the same three
+ * sources `App.plannedPins` adds up, because there is one face and it should not
+ * have two counts.
+ */
 export function nextFace(sources: PinSources): string[] {
   const face = [...sources.merged]
   for (const pin of sources.session) if (!face.includes(pin)) face.push(pin)
+  for (const pin of sources.composed ?? []) if (!face.includes(pin)) face.push(pin)
   return face
 }
 
@@ -407,6 +421,28 @@ export function ExtView(props: {
   const [userPath, setUserPath] = createSignal("")
   const [userPins, setUserPins] = createSignal<string[]>([])
   const [tuiPins, setTuiPins] = createSignal<string[]>(sessionPins(props.statePath))
+  /**
+   * The tools that reach the face because their PACKAGE is composed into every
+   * session this front end starts (`[extensions] session_with`, T42). Filled
+   * from the listing this panel already loads.
+   *
+   * Without it every one of them drew an empty checkbox and `agent` read
+   * `0/4 tools` — a panel whose whole job is "what can the model call" saying no
+   * about four tools the model was calling.
+   */
+  const [composedPins, setComposedPins] = createSignal<string[]>([])
+  /**
+   * Bundled ids whose draft in the user store is NOT what this binary ships and
+   * that `ext seed` will not touch on its own — someone edited it, or an older
+   * nulya (one from before seed kept a record) wrote it (DESIGN §7.2, T42).
+   *
+   * It belongs on this screen and not only in a start-up notice: the state is
+   * durable — it is a fact about a directory, true until somebody acts on it —
+   * and a line that scrolls off the status bar six seconds after a person walked
+   * away to make coffee is not where a durable fact lives. `s` on the row is the
+   * action; the notice now just points here.
+   */
+  const [outdated, setOutdated] = createSignal<readonly string[]>([])
   // One hover slot per list: the four panes are never on screen together, so
   // sharing one would be a highlight that follows the pointer into the wrong
   // column.
@@ -420,6 +456,7 @@ export function ExtView(props: {
     user: userPins(),
     session: tuiPins(),
     merged: merged(),
+    composed: composedPins(),
   }))
 
   const refreshPins = async () => {
@@ -441,6 +478,9 @@ export function ExtView(props: {
   const loadListing = async (): Promise<ExtensionEntry[]> => {
     const entries = await listExtensions(props.ws)
     setListed(entries)
+    setComposedPins(
+      entries.filter((entry) => isActive(entry) && composedEverySession(entry.id)).flatMap((entry) => pinsOf(entry)),
+    )
     return entries
   }
 
@@ -461,6 +501,13 @@ export function ExtView(props: {
       plans = [...ws_plan.lines, ...user_plan.lines]
     } catch {
       return // no plan is "unknown", never a wrong column
+    }
+    // The third dry-run, and the cheapest: no compiler, just digests of the
+    // bundled drafts against what this binary carries.
+    try {
+      setOutdated((await extSeed(props.ws, { user: true, dryRun: true })).mine)
+    } catch {
+      // A binary too old to have `ext seed` ships nothing to compare against.
     }
     setDrafts(plans)
     const held = listed()
@@ -591,7 +638,11 @@ export function ExtView(props: {
         columnWidth(list.map((entry) => entry.id), 2, 24),
         columnWidth(list.map(modeCell), 2, 8),
         columnWidth(list.map(switchCell), 2, 12),
-        columnWidth(list.map((entry) => draftColumn(draftOf(entry.id))), 2, 11),
+        columnWidth(
+          list.map((entry) => (outdated().includes(entry.id) ? "differs" : draftColumn(draftOf(entry.id)))),
+          2,
+          11,
+        ),
         columnWidth(list.map((entry) => (entry.shadowed ? "shadowed" : "")), 0, 9),
       ],
       [8, 0, 0, 0, 0],
@@ -967,6 +1018,52 @@ export function ExtView(props: {
   }
 
   /**
+   * `s` — take this binary's own copy of a bundled draft, and make it the one
+   * that runs (T42).
+   *
+   * The one thing `ext seed` will not do by itself: this draft is either
+   * somebody's edit or an older nulya's copy, and only a person knows which. So
+   * the whole gesture is here, on the row that says `differs`, and it is the
+   * three commands a person would otherwise have to find in a status line that
+   * has already scrolled away — `seed --force`, `build`, and (only if this id
+   * was already the active one) `activate`.
+   *
+   * Nothing is lost that was ever built: a frozen version keeps its source in
+   * `package/`, so the copy this replaces is still on disk under its own hash.
+   */
+  const updateDraft = async () => {
+    const entry = selected()
+    if (!entry) return
+    if (!outdated().includes(entry.id)) {
+      setNotice(`${entry.id} is already this build's copy`)
+      return
+    }
+    if (busy(entry.id)) {
+      setNotice(`${entry.id} · still working on the last press`)
+      return
+    }
+    const was_active = entry.current !== null
+    hold(entry.id)
+    setNotice(`updating ${entry.id} to this build…`)
+    try {
+      await extSeed(props.ws, { user: true, ids: [entry.id], force: true })
+      const version = await extBuild(props.ws, join(entry.root, entry.id))
+      if (was_active) await extSetCurrent(props.ws, "activate", entry.id, version, { user: true })
+      release(entry.id)
+      await refresh()
+      setNotice(
+        was_active
+          ? `${entry.id} ${version} · this build's copy, active`
+          : `${entry.id} ${version} built · Enter turns it on`,
+      )
+    } catch (error) {
+      release(entry.id)
+      setNotice(error instanceof Error ? error.message : String(error))
+      await refresh()
+    }
+  }
+
+  /**
    * `a` on the version line: point `current` at exactly this build.
    *
    * One verb, both directions — going back is activating an older version
@@ -1088,6 +1185,7 @@ export function ExtView(props: {
     if (key.name === "a" && key.shift) return pinKey("promote")
     if (key.name === "a") return act()
     if (key.name === "b") return void buildDraft()
+    if (key.name === "s") return void updateDraft()
     // Only where there is something to fold: `d` elsewhere in this view is a
     // key that appears to do nothing, which is worse than a key that is unbound.
     if (key.name === "d" && pane() === "tools" && (driversOpen() || folded().length > 0)) return toggleFold()
@@ -1311,7 +1409,12 @@ export function ExtView(props: {
               {(row, index) => {
                 const entry = row
                 const here = () => index === cursor()
-                const draft = () => draftColumn(draftOf(entry().id))
+                // `differs` outranks the sync word: an id whose draft is not
+                // this binary's is usually `active` there — the quiet, true,
+                // useless answer — while the fact worth acting on is that the
+                // code running is older than the binary running it (T42).
+                const draft = () =>
+                  outdated().includes(entry().id) ? "differs" : draftColumn(draftOf(entry().id))
                 const tone = () => ({
                   selected: here() && pane() === "extensions",
                   hovered: idHover.at() === index,
@@ -1496,6 +1599,18 @@ export function ExtView(props: {
                       tools` is true about THIS list and false about what the
                       model can call — and that gap is exactly what made `agent`
                       look switched off on a machine where every session had it. */}
+                  {/* The draft in the store is not the source this binary
+                      carries, and seeding will not overwrite it on its own
+                      (DESIGN §7.2): only a person knows whether that is their
+                      edit or a copy an older nulya left behind. Said here,
+                      where it stays true, with the key that resolves it. */}
+                  <Show when={outdated().includes(entry.id)}>
+                    <Lines
+                      text={`differs from the source this binary ships · your edit, or a copy an older nulya seeded · \`s\` replaces it with this build's (older source stays inside its frozen versions)`}
+                      width={detailWidth()}
+                      fg={style.theme.warn}
+                    />
+                  </Show>
                   <Show when={composedEverySession(entry.id)}>
                     <Lines
                       text={`composed into every session this TUI starts · its tools are on the face there, not from this list · \`[extensions] session_with\` in tui.toml`}
@@ -1622,7 +1737,7 @@ export function ExtView(props: {
         more={[
           "Enter activates the extension and pins its tools, again turns both off · a click on the row the cursor is already on does the same",
           "h/l ←/→ Tab move across the panes · j/k ↑/↓ move down a list",
-          "Space pin one tool · A promote it to always · d fold the driver tools in or out · b build the source · p prune old versions",
+          "Space pin one tool · A promote it to always · d fold the driver tools in or out · b build the source · s take this binary's copy of a bundled draft (`differs`) · p prune old versions",
           "a activate one named version, on the version line — an older one is the rollback · t tools · u usage",
         ]}
       />

@@ -121,6 +121,13 @@ export interface Glyphs {
   /** Reasoning: three dots, because that is all anyone is being shown of it. */
   thinking: string
   subSession: string
+  /**
+   * A row that takes you somewhere else — today the one link a card can carry,
+   * to the session a delegation opened (T43). Distinct from every fold and
+   * cursor mark on this screen, because it is the one glyph that means "this is
+   * not where the thing is".
+   */
+  open: string
   canceled: string
   /** Something the driver could not do: a failed request, a step that died. */
   failed: string
@@ -176,6 +183,7 @@ const unicode_glyphs: Glyphs = {
   skill: "☰",
   thinking: "⋯",
   subSession: "⤷",
+  open: "↗",
   canceled: "⊘",
   failed: "✗",
   foldClosed: "▸",
@@ -205,6 +213,7 @@ const ascii_glyphs: Glyphs = {
   skill: "=",
   thinking: "...",
   subSession: ">",
+  open: "->",
   canceled: "x",
   failed: "!",
   foldClosed: ">",

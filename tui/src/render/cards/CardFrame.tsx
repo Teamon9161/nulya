@@ -53,6 +53,15 @@ export function CardFrame(props: {
   /** False when there is nothing to reveal: no fold marker, no click target. */
   foldable: boolean
   spillPath?: string | null
+  /**
+   * One thing this card can DO, on a row of its own under the head line (T43).
+   *
+   * OUTSIDE THE FOLD, like the spill pointer above it and for the same reason:
+   * a card is folded by default, and an affordance nobody can see is not one.
+   * The head line keeps meaning "fold me" — one gesture, one meaning, on every
+   * card — and this row is the only place a card offers a second one.
+   */
+  action?: { text: string; onPress: () => void } | null
   children?: JSX.Element
 }) {
   const style = useStyle()
@@ -136,11 +145,43 @@ export function CardFrame(props: {
         </box>
       </Show>
 
+      <Show when={props.action}>
+        <ActionRow action={props.action!} />
+      </Show>
+
       <Show when={props.spillPath}>
         <box paddingLeft={2}>
           <text fg={style.theme.dim}>full output → {props.spillPath}</text>
         </box>
       </Show>
+    </box>
+  )
+}
+
+/**
+ * The one clickable row a card may offer. It looks like what it is — the arrow
+ * glyph, `accent.evolve`, and the same hover tint the head line uses, because
+ * the tint is the only thing on this screen that says "a click does something
+ * here" (T43). Press and release on the same cell, so dragging across it to
+ * copy text does not navigate.
+ */
+function ActionRow(props: { action: { text: string; onPress: () => void } }) {
+  const style = useStyle()
+  const [hovered, setHovered] = createSignal(false)
+  const click = onClick(() => props.action.onPress())
+  return (
+    <box
+      paddingLeft={2}
+      flexDirection="row"
+      backgroundColor={hovered() ? style.theme.hover : undefined}
+      onMouseDown={click.onMouseDown}
+      onMouseUp={click.onMouseUp}
+      onMouseOver={() => setHovered(true)}
+      onMouseOut={() => setHovered(false)}
+    >
+      <text fg={style.theme.accent.evolve} flexShrink={0}>
+        {style.glyphs.open} {props.action.text}
+      </text>
     </box>
   )
 }

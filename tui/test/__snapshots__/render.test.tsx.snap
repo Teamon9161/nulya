@@ -1,5 +1,65 @@
 // Bun Snapshot v1, https://bun.sh/docs/test/snapshots
 
+exports[`\`render: "checklist"\` draws a plan as a plan, not as raw JSON 1`] = `
+"                                                                            
+  ⌘ todo · items=[{"text":"read the spec","state":"done"…  (1/3) ▾          
+    [x] read the spec                                                       
+    [~] write the tool                                                      
+    [ ] ship it                                                             
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+"
+`;
+
+exports[`\`render: "markdown"\` renders the body through the markdown primitive 1`] = `
+"                                                                            
+  ⌘ brief · # Plan  (3 lines) ▾                                             
+    Plan                                                                    
+                                                                            
+    Do the thing, carefully.                                                
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+"
+`;
+
+exports[`the panel strip projects the latest call of a \`panel: true\` tool, folded by default 1`] = `
+"  ⌘ todo · items=[{"text":"read the spec","state":"done"…  (1/3) ▸          
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+"
+`;
+
 exports[`user and assistant turns 1`] = `
 "                                                                            
 › make emit budgets configurable                                            
@@ -56,7 +116,7 @@ exports[`a skill echo folds back to the \`/name args\` that was typed 1`] = `
 "
 `;
 
-exports[`thinking is collapsed by default and names its size 1`] = `
+exports[`thinking is hidden by default, and \`collapsed\` brings the card back 1`] = `
 "                                                                            
   ⋯ thinking  (17 chars) ▸                                                  
                                                                             
@@ -196,6 +256,30 @@ exports[`a sub-session names the session it drives 1`] = `
 "                                                                            
   ⤷ sub-session · s-1786815442964-8462dd ▸                                  
   ⤷ sub-session step · s-1786815442964-8462dd ▸                             
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+"
+`;
+
+exports[`a run of successful calls becomes one line, and a failure stays out of it 1`] = `
+"                                                                            
+● Reading emit.zig first.                                                   
+                                                                            
+  ⋯ shell ×2 ▸                                                              
+  $ cat missing  (2 lines · exit 1) ▸                                       
+  ⋯ shell ×2 ▸                                                              
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
                                                                             
                                                                             
                                                                             
@@ -538,66 +622,6 @@ exports[`ascii mode degrades every glyph 1`] = `
      1 - pub const head_bytes = 4096;                                       
      1 + pub const head_bytes = 4096; // default                            
      2 + pub const tail_bytes = 2048;                                       
-                                                                            
-                                                                            
-                                                                            
-"
-`;
-
-exports[`\`render: "checklist"\` draws a plan as a plan, not as raw JSON 1`] = `
-"                                                                            
-  ⌘ todo · items=[{"text":"read the spec","state":"done"…  (1/3) ▾          
-    [x] read the spec                                                       
-    [~] write the tool                                                      
-    [ ] ship it                                                             
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-"
-`;
-
-exports[`\`render: "markdown"\` renders the body through the markdown primitive 1`] = `
-"                                                                            
-  ⌘ brief · # Plan  (3 lines) ▾                                             
-    Plan                                                                    
-                                                                            
-    Do the thing, carefully.                                                
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-"
-`;
-
-exports[`the panel strip projects the latest call of a \`panel: true\` tool, folded by default 1`] = `
-"  ⌘ todo · items=[{"text":"read the spec","state":"done"…  (1/3) ▸          
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
                                                                             
                                                                             
                                                                             

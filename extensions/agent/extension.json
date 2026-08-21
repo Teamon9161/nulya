@@ -24,6 +24,10 @@
             "task": {
               "type": "string",
               "description": "The whole task (or the whole follow-up) in its own words: what to do, what to look at, what counts as finished."
+            },
+            "model": {
+              "type": "string",
+              "description": "Which model runs this delegation: `<profile>` or `<profile>/<model-id>`. Only with name — a follow-up runs on what its session already froze. Omit unless you have a reason: without it the definition decides, and failing that the sub-agent runs on the same model you do. Give one when this piece of work is worth a different one than the conversation it came from. `nulya config show` lists what can run."
             }
           },
           "required": [

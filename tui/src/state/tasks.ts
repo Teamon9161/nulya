@@ -99,3 +99,42 @@ export function seconds(total: number): string {
   const minutes = Math.floor(total / 60)
   return `${minutes}m ${String(total % 60).padStart(2, "0")}s`
 }
+
+/** How a call's own report of its task ended, once one has landed in the ledger. */
+export interface TaskOutcome {
+  exitCode: number
+  duration: string
+}
+
+/**
+ * How a background task is going, in the words a head line uses (T43).
+ *
+ * TWO SOURCES IN ONE ORDER, and the order is the whole of it: the LEDGER's
+ * report if it has landed — a fact, and one that survives closing the session
+ * and opening it again — otherwise the live projection, which is where the
+ * seconds come from while it is still going. Neither is invented: with no
+ * report and no live row, all that can honestly be said is the name.
+ *
+ * Two callers since T43 — a `shell {background: true}` receipt and a delegation
+ * receipt — which is why it is here rather than inside one of the cards. They
+ * are the same fact about the same kind of thing, and a person should not have
+ * to learn that `running 42s` and `still going` mean the same.
+ */
+export function backgroundNote(
+  task: string,
+  reported: TaskOutcome | null,
+  tasks: readonly TaskEntry[],
+): { text: string; failed: boolean } {
+  if (reported) {
+    const how = reported.exitCode === 0 ? "" : ` · exit ${reported.exitCode}`
+    return { text: `${task}${how}${reported.duration ? ` · ${reported.duration}` : ""}`, failed: reported.exitCode !== 0 }
+  }
+  const live = taskNamed(tasks, task)
+  if (!live) return { text: task, failed: false }
+  if (live.state === "done") {
+    const bad = live.exit_code !== null && live.exit_code !== 0
+    return { text: `${task}${bad ? ` · exit ${live.exit_code}` : ""}`, failed: bad }
+  }
+  if (live.state === "lost") return { text: `${task} · lost`, failed: false }
+  return { text: `${task} · running${live.elapsed_s !== null ? ` ${seconds(live.elapsed_s)}` : ""}`, failed: false }
+}

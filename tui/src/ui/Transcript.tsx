@@ -1,13 +1,18 @@
-import { Index, Show } from "solid-js"
+import { Index, Match, Show, Switch, createMemo } from "solid-js"
 import type { ScrollBoxRenderable } from "@opentui/core"
 import { Card } from "../render/cards/index.tsx"
+import { RunCard } from "../render/cards/RunCard.tsx"
+import { describeTool } from "../render/registry.ts"
+import { foldsIntoRun, groupRuns, type TranscriptRow } from "../render/runs.ts"
+import { usePlugins } from "../plugins/context.ts"
 import { CompositionCard } from "../render/cards/CompositionCard.tsx"
 import { ErrorNotice } from "../render/cards/ErrorNotice.tsx"
 import { Welcome, type NextSession } from "./Welcome.tsx"
-import { useStyle } from "../render/theme.ts"
-import type { Contributions } from "../nulya/files.ts"
+import { useStyle, type Style } from "../render/theme.ts"
+import { renderHintOf, type Contributions } from "../nulya/files.ts"
 import type { SessionHeader } from "../nulya/ledger.ts"
-import type { TranscriptItem } from "../state/session.ts"
+import type { ToolItem, TranscriptItem } from "../state/session.ts"
+import type { ThinkingDefault } from "../state/settings.ts"
 
 /**
  * The transcript: a sticky-bottom scrollbox, no borders, content capped at
@@ -31,6 +36,19 @@ export function windowItems(items: readonly TranscriptItem[], window: number): T
 }
 
 /**
+ * What is on screen at all (T43). `thinking = "hidden"` — the default — is not
+ * "draw an empty card": an item that draws nothing still takes its place in the
+ * rhythm, and it would leave the blank row `gapBefore` puts in front of it. So
+ * the item leaves the LIST, and everything downstream — the gaps, the browse
+ * selection, the `N earlier items` count — is computed over what is actually
+ * drawn.
+ */
+export function visibleItems(items: readonly TranscriptItem[], thinking: ThinkingDefault): TranscriptItem[] {
+  if (thinking !== "hidden") return items as TranscriptItem[]
+  return items.filter((item) => item.kind !== "thinking")
+}
+
+/**
  * Blank rows before an item — the transcript's whole vertical rhythm, in one
  * pure function (T26).
  *
@@ -42,18 +60,60 @@ export function windowItems(items: readonly TranscriptItem[], window: number): T
  * cards had none, so a run of calls was welded to the sentence above it and the
  * screen had no grain at all.
  *
- * Thinking belongs to the answer that follows it, so those two never separate.
+ * Thinking used to be welded to the answer under it — same beat, no gap. On
+ * screen that was two CARDS with nothing between them (T43): a head line with
+ * its own glyph and fold marker, and then a markdown body starting on the very
+ * next row. "Belongs to" is already said by the order and by the dim; a beat
+ * boundary is what a blank row means everywhere else on this screen, and
+ * thinking is one. When it is hidden — the default since T43 — there is no
+ * second card and nothing to separate.
  */
 export function gapBefore(previous: TranscriptItem | undefined, item: TranscriptItem): number {
   // The first item follows the composition card or the welcome screen; one row
   // of air separates it from either.
   if (!previous) return 1
   if (previous.kind === "tool" && item.kind === "tool") return 0
-  if (previous.kind === "thinking" && item.kind === "assistant") return 0
   // A person speaking starts a new exchange, not just a new beat: two rows, so
   // the grain of the screen says where one question ended and the next began.
   if (item.kind === "user") return 2
   return 1
+}
+
+/**
+ * ITEMS → ROWS, the whole projection: what is on screen, how much of it is
+ * mounted, and which calls have been gathered into a run (T43).
+ *
+ * One implementation, two callers — the transcript draws these rows and browse
+ * mode walks them. Two would be two answers to "is that call on screen", and
+ * browse would put its cursor on a card nobody can see.
+ */
+export function transcriptRows(
+  items: readonly TranscriptItem[],
+  style: Style,
+  contributions: readonly Contributions[],
+  drawnByPlugin?: (tool: string) => boolean,
+): TranscriptRow[] {
+  const shown = windowItems(visibleItems(items, style.settings.transcript.thinking), style.historyWindow)
+  const folds = (item: ToolItem) => {
+    const render = renderHintOf(contributions, item.tool)
+    return foldsIntoRun({
+      item,
+      kind: describeTool({ tool: item.tool, args: item.args, output: item.output }, style.glyphs, { render }).kind,
+      render,
+      drawnByPlugin: drawnByPlugin?.(item.tool) ?? false,
+    })
+  }
+  return groupRuns(shown, folds, style.settings.transcript.run_summary)
+}
+
+/**
+ * The item a row's rhythm is computed from. A run stands in for the calls it
+ * holds — it IS those calls — so a run next to a call the summary would not
+ * take (a failure, an edit) still reads as one block, which is what it is.
+ */
+function rowSubject(row: TranscriptRow | undefined): TranscriptItem | undefined {
+  if (!row) return undefined
+  return row.kind === "item" ? row.item : row.items[0]
 }
 
 /**
@@ -92,8 +152,19 @@ export function Transcript(props: {
   ref?: (box: ScrollBoxRenderable) => void
 }) {
   const style = useStyle()
-  const shown = () => windowItems(props.items, style.historyWindow)
-  const hidden = () => props.items.length - shown().length
+  const plugins = usePlugins()
+  const drawable = () => visibleItems(props.items, style.settings.transcript.thinking)
+  const shown = () => windowItems(drawable(), style.historyWindow)
+  const hidden = () => drawable().length - shown().length
+  /**
+   * Memoised, and that is load-bearing (T43): the row list is read once per row
+   * to find the row BEFORE it, so recomputing it inside the loop is quadratic —
+   * and each pass parses every call's arguments to decide which card it is. On
+   * a 5k-event session the un-memoised version cost 2.2 s for the first frame.
+   */
+  const rows = createMemo(() =>
+    transcriptRows(props.items, style, props.contributions ?? [], (tool) => plugins?.cardFor(tool) != null),
+  )
   return (
     <scrollbox
       ref={props.ref}
@@ -129,13 +200,31 @@ export function Transcript(props: {
       <Show when={props.items.length === 0}>
         <Welcome cwd={props.cwd} plan={props.plan} onCommand={props.onCommand} tip={props.tip} />
       </Show>
-      {/* `Index` rather than `For`: the gap is a property of an item's PLACE in
-          the list, so keying by identity would rebuild a card whenever the item
+      {/* `Index` rather than `For`: the gap is a property of a row's PLACE in
+          the list, so keying by identity would rebuild a card whenever the row
           before it changed kind. */}
-      <Index each={shown()}>
-        {(item, index) => (
-          <box flexDirection="column" width="100%" marginTop={gapBefore(shown()[index - 1], item())}>
-            <Card item={item()} contributions={props.contributions} />
+      <Index each={rows()}>
+        {(row, index) => (
+          <box
+            flexDirection="column"
+            width="100%"
+            marginTop={gapBefore(rowSubject(rows()[index - 1]), rowSubject(row())!)}
+          >
+            <Switch>
+              <Match when={row().kind === "run"}>
+                <RunCard
+                  items={(row() as Extract<TranscriptRow, { kind: "run" }>).items}
+                  itemKey={row().key}
+                  contributions={props.contributions}
+                />
+              </Match>
+              <Match when={row().kind === "item"}>
+                <Card
+                  item={(row() as Extract<TranscriptRow, { kind: "item" }>).item}
+                  contributions={props.contributions}
+                />
+              </Match>
+            </Switch>
           </box>
         )}
       </Index>

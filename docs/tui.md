@@ -30,7 +30,7 @@
 | D2 | 流式传输 | v1：`step --stream` 写 **stdout**（TUI 拥有 step 子进程） | 最简、可调试。observer 模式（别人在 drive）要看 deltas 需 `<id>.live` sidecar——等第一个 driver 脚本出现再做（§5.6） |
 | D3 | 绑定 | Solid | opencode 同款；fine-grained 更新适合流式。React 也行，API 同形 |
 | D4 | 设定文件 | 独立 `tui.toml`，路径**镜像**内核 config 的目录（user 层 + `.nulya/tui.toml` 项目层），不放进内核 config | 内核不该认识 TUI 的键；同目录让"设定在哪"只有一个答案 |
-| D5 | 默认折叠 | `edit` diff **展开**；shell / 扩展工具输出 **折叠**；thinking **折叠**；capability banner 展开 | 你的要求 + 演化动作要显眼 |
+| D5 | 默认折叠 | `edit` diff **展开**；shell / 扩展工具输出 **折叠**；**thinking 默认 `hidden`**（T43，可设回 `collapsed`）；capability banner 展开；**一串跑完且成功的无身体调用折成一行 run 摘要**（T43，`run_summary`） | 你的要求 + 演化动作要显眼；reasoning 既不是模型说的也不是它做的，而「正在想」由输入框上面那一行说（T38） |
 | D6 | 取消 | `Esc` = `session cancel`（step 边界消化，当前工具跑完）；`Ctrl+C` 两下 = kill step 进程树（下一次 open 由 kernel `completeInterruptedToolBatch` 修复） | 两种语义都真实存在，都给；不发明第三种 |
 | D7 | sub-agent 谱系来源 | v1 从 transcript 推导（`nulya session new` 的输出 id、`session step <id>` 命令）；**不**改 header | `parent` 语义是 fork/compaction 的续接点，不是 spawned-by；等 subagent skill 真写出来再决定要不要 `spawned_by` header 字段（§10） |
 | D8 | 权限 / 审批 | **两档 mode + 三张规则表**（T24 推翻"v1 没有"）：内核给一个 gate 原语（`session step --gate`，DESIGN §4），前端答；deny 就是那个 call 的 tool_result，模型读得到 | 原来的理由是"kernel 没有可消费的东西，TUI 不发明审批"——对的一半：发明一个内核不知道的审批，模型永远不会知道自己被拒了。所以补的是**内核那一半**（一个语义：allow / deny+note），判断留在前端（§5.7） |
@@ -161,10 +161,11 @@ tui/
 | header | CompositionCard | `session · 时间 · frozen composition` | tools（builtin 平色、ext 带 ⚡）、skills、model identity、parent 链接 | 展开，一场一张 |
 | `user_text` | UserTurn | `›` + 文本（markdown 关，保留换行） | — | queued 时头行加 `· queued` dim |
 | `assistant.text` | AssistantTurn | `●` + markdown（tree-sitter 高亮） | — | 展开 |
-| `assistant.reasoning` / `thinking_delta` | Thinking | `⋯ thinking  (N chars) ▸`（T26 起与所有卡片同一个 `CardFrame`，dim 一档） | 流式时显示滚动的最后一行 dim；结束后从 `reasoning` 尽力抽 `thinking` 字段（Anthropic 形状），抽不到显示 `reasoning (opaque)` | 折叠；设定 `thinking = collapsed\|hidden\|expanded` |
+| `assistant.reasoning` / `thinking_delta` | Thinking | `⋯ thinking  (N chars) ▸`（T26 起与所有卡片同一个 `CardFrame`，dim 一档） | 流式时显示滚动的最后一行 dim；结束后从 `reasoning` 尽力抽 `thinking` 字段（Anthropic 形状），抽不到显示 `reasoning (opaque)` | **默认 `hidden`**（T43）；设定 `thinking = hidden\|collapsed\|expanded`。hidden 时它**离开 item 列表**（`Transcript.visibleItems`）而不是画一张零高的卡——否则它前面那一行空行还留在屏幕上 |
 | call `shell` | ShellCard | `$ 命令  (N lines[· exit N]) ▸`（exit 0 不写） | stdout / stderr 分段 | **折叠**；设定 `tool_output` |
 | call `shell` `{background:true}` | ShellCard（后台变体） | `$ 命令  (background <sid>/t3 · running 12s) ▸`；报告到了换成 `(background <sid>/t3[ · exit N] · 41.8s)` | 回执原文（任务全名 + log 路径 + 三条命令） | **折叠**；**不加新 glyph**（还是那条命令，变的只有那一格 note） |
 | `task_finished` | TaskFinishedCard | `$ 命令  (background <sid>/t3[ · exit N][ · killed] · 41.8s) ▸`（`exit 0` 照 T26 省略） | 输出 tail + 尾行 `full log → <path>` | **折叠**；一条事件一张卡，不是回执那张卡的更新 |
+| 一串调用 | RunCard | `⋯ read ×3 · grep ×2 · shell ▸`（glyph 是 thinking 的三点、全程 dim、**没有 note**——一个 run 按构造就是"都成功了、没什么可给你看"，再写一格 `(6 calls)` 是同一句话说两遍，T26） | 展开就是原来那些卡，各自照旧折叠 | **折叠**；设定 `run_summary`。**进得去的**只有「跑完 + 成功 + 没有身体」的 `shell` / 扩展 tool，且至少两个；**进不去的**：还在跑的、失败的（含 `exit != 0`）、被取消的、回执型的（后台任务 / 子场）、`edit`、演化动作、`checklist`/`markdown`、包自己用代码画的卡，以及**任何声明了 `render` 的 tool**——那就是包说「我对这次调用长什么样有意见」，一个有画面要给的调用不该被概括（`render/runs.ts`） |
 | call `edit` | EditCard | `✎ path  (+2 -1[· failed])` | unified diff（`diff` 组件，语法高亮） | **展开**；设定 `edit_diff = expanded\|collapsed` |
 | call `ext:*` | ExtToolCard | `⌘ tool_name · 参数摘要  (N lines) ▸`（**第一个参数不写键名**——工具的第一个参数就是它的主语：路径、模式、命令，T26） | 输出 | 折叠 |
 | shell 命令前缀 `nulya src` / `nulya ext init\|build\|activate\|rollback\|run` / `nulya skill load` / `nulya session new\|append\|step\|events` | EvolveCard / SubSessionCard | 见 §5.2 / §5.5 | 原始输出可展开 | 折叠但头行信息量大 |
@@ -350,7 +351,7 @@ PLAN §3.2 早就把答案写死了——**一个 agent 就是 `session new` 的
 - **模型自己委派：`agent{name|session, task}`，回报走后台任务**（`session` 形态 = 往一场已经报告过的子场再送一轮，append-only 命中它自己的前缀缓存；能不能委派由被委派者定义里的 `agents` 白名单决定，空 = leaf。两者的门与理由见 DESIGN §7.8）（`extensions/agent`，DESIGN §7.8/§11）。这一半**前端零新机制**：`agent{name, task}` 起一个**属于父场**的后台任务去驱动子场，任务结束时 supervisor 把 `task_finished` 投进父场 inbox——而"driver 角色 + idle + inbox 非空 → 再 step"（§5.9 T29 唯一那条 policy）本来就在跑，所以报告自己会到，**没有第二个看盘的钩子、没有新的面板、`drivers/goal.*` 一个字没改**。第一版规格是"写请求文件 + 每步之后看盘"，否掉的理由是它等于给每个 driver 发明一份要重学的盘面约定（且跨平台两份实现），而内核已经有且只有一个"欠答案"的回路。
   - **带入条件两条，都刻意**：`--with agent@<v> --pin ext:agent/agent` **只在这个 workspace 真的有 agent 定义时**才加（一个只会答"没有人可以委派"的 tool 照样占一个 `max_tools` 槽与每场的前缀 token，PLAN §3.4.1），且**只加在顶层 session**——委派出去的子场不带它，所以子 agent 不能再委派（leaf，agents-and-review §1 的 `SpawnPolicy` 最小形态）。
   - **材料化只有一处实现**：`ext run agent@<v> materialize --arg name=<n>`。渲染出的 manifest 字节决定 version id（physics #5），两份实现就是同一个 persona 的两个版本，所以 TUI 的 `/agent` 也调它——TS 侧只留**读**（发现、列表、picker）。
-  - **卡片**：`agent` 这个 tool call 在 registry 里是一张 **subsession 卡**（`⤷ agent · <name> → <子 id>`），子 id 取自**回执**而不是参数——调用返回前那场 session 还不存在，与 `nulya session new` 经 shell 的那一行同一个手法；于是 browse 模式 `Enter` 就能打开子 tab。
+  - **卡片**：`agent` 这个 tool call 在 registry 里是一张 **subsession 卡**（`⤷ agent · <name> → <子 id>`），子 id 取自**回执**而不是参数——调用返回前那场 session 还不存在，与 `nulya session new` 经 shell 的那一行同一个手法。**T43 起它自己一张卡**（`SubSessionCard`）：note 说那个后台任务在怎么样（`s-1/t1 · running 42s` → 报告到了变成 `· exit 0 · 41.8s`，与后台 `shell` 同一套读法），头行下面一行 **`↗ open <id> in a tab`** 点得动——与 browse 模式 `Enter` 走同一个入口（`state/navigate.ts`）。
   - **600 s 天花板**：`run` 经 `ext run` 调用，而 `ext run` 强制 manifest 的 `timeout_ms`、上限 `tool.Timeouts.extension_max_ms`（`src/cli/ext.zig`），manifest 顶格要满。将来解除不用改设计——换一种任务命令形态即可。
 - **定义分三层，什么都不写也有三个能用的**（DESIGN §7.8）：`.nulya/agents/*.md`（workspace）> `~/.nulya/agents/*.md`（user）> **包自带的 `explore` / `plan` / `general` / `orchestrator`**（`extensions/agent/src/builtin/*.md`，`@embedFile` 进那个包的二进制，随它一起分发）。**首个持有者胜，输的那个照样列出来并标 `shadowed`**——与 store roots 同一条规则、同一个理由。四个 persona 移植自 tcode，`ask_user` 与 tcode 那些我们没有的 frontmatter 是**删掉**而不是翻译；`orchestrator` 是唯一带 `agents` 白名单（可以委派）的那个，其余三个都是 leaf。
 - **读也只有一处实现**：`ext run agent@<v> list` 返回全部定义（name / description / readonly / layer / shadowed / pins / max_steps / warnings）。TUI 的 picker、readonly 天花板、委派参数**全部读它**——TS 侧一行 frontmatter 解析都没有。理由与写路径同款：两个 parser 就是"这个 agent 是不是 readonly"的两个答案，而那正是天花板要变成一次拒绝的那个问题。**唯一的例外是 trust 问句**：它问在屏幕出现之前、任何 build 之前，所以它读的是**文件名**（`workspaceAgentFiles`，一次 `readdir`），不是定义——"这个 clone 带来了定义吗"本来就是关于名字的问题。
@@ -363,10 +364,10 @@ PLAN §3.2 早就把答案写死了——**一个 agent 就是 `session new` 的
 - **一处颜色一个含义**：角色色只用于左侧 glyph；卡片头行是 `muted`（说出来的话才是最亮的那一档）。**成功是沉默的**（T26）：一次调用只说它带回来多少（`(121 lines)`、`(+2 -1)`），出事才说词（`exit 1` / `failed`，err 色）——每一行都写个 `ok` 只是噪音，而且把颜色用光了。
 - **四档明度是一个层级，不是一块调色板**（T18）：一段文字用哪一档由它**是什么**决定，不由它该多显眼决定——`fg` 这个东西本身（卡片头行、选中行、值）· `muted` 它由什么构成（id 旁的 label、计数、状态）· `dim` 关于它写的话（说明、hint、footer、列名）· `faint` 家具（hover 记号、空 gutter、失效格）。
 - **头行从左往右读**（T26）：`glyph 头行  (note) ▸`，note 在括号里紧跟头行、fold 记号在文字末尾。原来 note 是**右对齐 chip**，于是第 98 列上挂着一个 `ok`、和它说的那次调用之间隔着三十个空列——第二列小字，也是一屏调用看起来像表单而不像叙述的主要原因。行内没有任何东西会被 flex 压缩：头行由我们 `fit` 到 note 与记号剩下的宽度（窄屏切头行，**不切状态词**）。
-- **无边框 transcript**：垂直节奏靠空行，而且节奏是**三档**（T26，`Transcript.gapBefore` 一个纯函数说了算）——**一次 run 里的调用之间 0**（六次调用是一块，像 tcode 的 `Read 5 ranges`）、**beat 之间 1**（thinking 与它后面那句话属于同一个 beat，所以那里也是 0）、**人开口之前 2**（换一轮对话不只是换一个 beat）。卡片体缩进 +2。
+- **无边框 transcript**：垂直节奏靠空行，而且节奏是**三档**（T26，`Transcript.gapBefore` 一个纯函数说了算）——**一次 run 里的调用之间 0**（六次调用是一块，像 tcode 的 `Read 5 ranges`；T43 起它们多半根本折成了一行）、**beat 之间 1**、**人开口之前 2**（换一轮对话不只是换一个 beat）。卡片体缩进 +2。**T43 把 thinking→assistant 那条 0 收回了**：屏幕上那是两张卡贴在一起（一个带 glyph 与 fold 记号的头行，紧接着一段 markdown），而「属于后面那句话」由顺序和 dim 已经说完；空行在这一屏的语法里就是 beat 边界。
 - **整屏只有一个有边框的东西：输入框**（T26）。原来是三条通栏 hairline 围出四个区，其中两条隔开的正是输入框自己的上下边，第三条在只有一个 tab 时上面什么都没有。现在 transcript / 输入框 / 状态行之间只有输入框那个圆角框（ascii 用 `+-|`），它同时是"在这里打字"的邀请与**键盘在不在这里**的唯一信号（有焦点 = `accent.user`，browse 模式或 overlay 拿走键盘 = `hairline`）。框**随内容长高**（1–8 行，超出由 textarea 自己滚）。
 - **diff 静**：仅前景色的 add/del，无背景块；上下文行 dim。
-- **动效一处**：状态栏一个 braille spinner + 流式末尾 `▍` 光标；不做 shimmer（设定 `motion = false` 全关）。
+- **动效只在一行上**（T38/T43）：输入框**上面**那一行的 braille spinner + 扫光（`WorkingStatus`），`motion = false` 全关。transcript 里没有任何会动的东西——流式末尾那个 `▍` 光标 T43 删掉了：它是拼进 markdown **content** 的，于是每个 delta 都在重新解析一份多一个字形的文档，而在块边界上那个字形会被吞掉或独占一行（实测三个 delta 内 7→6→7 行地抖），sticky-bottom 的 scrollbox 每抖一次就是整屏重排。
 - **符号集**（Windows Terminal / 常见等宽字体都有）：`›` user · `●` assistant · `$` shell · `✎` edit · `⌘` ext tool · `⚙` build/init · `⚡` capability/activate · `↺` rollback · `⌕` read kernel · `☰` skill · `⤷` sub-session · `⊘` canceled · `▎` composition · `▸ ▾` fold · `·` pointer（鼠标所在的行）· `⠋` spinner · **`✻` tip**（开屏那一条，T38——一个记号一个意思：`⚡` 是某个 extension 得到了能力，tip 不是事件，是屏幕在跟人说话）· **`◈` picker**（`/model` 与 `/mode` 的标题，以及状态栏那个「戴着谁」的 chip——只给「选择」用；列 store 或 journal 的面板是「地方」，标题照旧不带记号，T31）· `‹ ›` effort 转盘 · `✓` 当前 · `● ○` `/ext` 开关；`ascii = true` 时降级为 `> * $ ~ # + ! < ? = > x . | #`。
 - **主题 tokens**（`render/theme.ts`；`nulya-dark` 默认、`nulya-light`；尊重 `NO_COLOR`）：`fg muted dim faint accent.user accent.assistant accent.tool accent.evolve ok err warn diff.add diff.del hairline selection hover`。语法高亮用 OpenTUI `SyntaxStyle`，同一套 tokens 派生。
 - **光标与指针是两套记号**：光标行 `▾` + `selection` 底色，指针行 `·` + 更淡的 `hover` 底色。形状不同，所以没有颜色时也分得开。
@@ -381,7 +382,8 @@ PLAN §3.2 早就把答案写死了——**一个 agent 就是 `session new` 的
 [transcript]
 edit_diff      = "expanded"    # expanded | collapsed
 tool_output    = "collapsed"   # collapsed | expanded
-thinking       = "collapsed"   # collapsed | hidden | expanded
+thinking       = "hidden"      # hidden | collapsed | expanded —— 默认不画 reasoning 卡（T43）
+run_summary    = true          # 一串跑完且成功的无身体调用折成一行（T43）；false = 一次调用一行
 composition    = "collapsed"   # collapsed | expanded —— 顶上那张 session 卡（T25）
 max_width      = 100
 history_window = 400           # 同时挂载的卡片数（从最新往回数）；0 = 全挂（T4）
@@ -608,7 +610,7 @@ NULYA_SCRIPTED_MODE=finish bun run src/main.tsx --model scripted   # 离线
 - **CapabilityBanner 的头行自己解析 note 文本。** `extension/notes.zig` 生成的文本是确定性的（`Tools:` / `Skills:` 两段，每条 `- <name> — <desc>`），把名字提到头行正是这张卡存在的理由——"agent 现在会 X 了"不该需要展开。解析放在 `nulya/ledger.ts`（那是唯一认识内核形状的目录），认不出的形状就只是没有名字，全文照旧在下面。
 - **browse 模式让 composer 先 blur。** 不 blur 的话 `j`/`k` 会同时进文本框；blur 之后 App 的 `useKeyboard` 独占这几个键，`Esc` 再把焦点还回去。`Esc` 的三义在一个地方分完：stepping → cancel；idle 且 composer 空 → 进 browse；browse 中 → 退出。
 - **`Ctrl+Shift+O` 改成 toggle。** T1 只会全展开，按第二下没反应；§4.2 写的是"全部展开/折叠"，所以记一个 `allOpen` 信号来回翻。
-- **SubSessionCard 不做独立组件。** 它与 EvolveCard 唯一的差别是 glyph 和"有一个 session id"，而"打开成第二个 tab"是 T3。按 CLAUDE.md「第二个 consumer 出现之前不抽 abstraction」，registry 保留 `kind:"subsession"` + `sessionId` 这两个**事实**，绘制暂时交给 `EvolveCard`；T3 要接的话，落点就是 `ToolCard` 里那个 Match 分支（代码里有注释指着）。第一版曾加过一行 dim 的 `⤷ session <id>`，与头行完全重复，删掉了。
+- ~~**SubSessionCard 不做独立组件。**~~ **T43 推翻**：当时它与 EvolveCard 的差别只是 glyph 和「有一个 session id」，抽出来是无谓的（registry 先保留 `kind:"subsession"` + `sessionId` 两个**事实**，绘制交给 `EvolveCard`）。现在差别是两条**实时**事实（那个后台任务在怎么样）加一个**手势**（`↗ open … in a tab`），第二个 consumer 到了，于是 `render/cards/SubSessionCard.tsx` 成立。第一版曾加过一行 dim 的 `⤷ session <id>`，与头行完全重复，删掉了——现在那一行说的是它**不重复**的东西。
 
 **偏离设计之处**
 
@@ -1644,6 +1646,34 @@ U1 给了 manifest 五个声明位，U2 把它们接进前端，U3 让一个包�
 
 前端只多两句 notice：`X & Y updated to this build`，以及点名它不敢碰的那些 + 那条 `--force` 命令（`App.syncStores`）。老 store 的那一次仍然需要人点头——这是对的：只有人知道那份 draft 是自己改的还是上一个二进制留下的。
 
-**⑤ 顺带修掉一个被它暴露出来的谎：draft 屏幕上 `[extensions] session_with` 的包一个都不算数。** 状态行与 Welcome 卡的 `tools 1+N` 只数**持久 pin**（config 的 `pinned_native_tools` ∪ `tui-state.json` 的 `session_pins`），而 `handoff` / `agent` 是在 `session new` 那一刻由 `sessionExtras` 加进去的——于是开屏永远写着 `tools 1+5`、Welcome 的 tools 行里没有 `agent`，而下一条消息开出来的 session header 里**明明有四个 agent tool**。一个人看着那块屏幕，唯一合理的结论就是"agent 没启用"。修法是 `plannedPins` 认第三个来源（`composedPins`）：从 `ext list` 里读那几个 id **active 版本**的 model-facing tool（`pinsOf`），**不是**去 `sessionMember` 解析——后者会 build bundled draft，那是一趟 zig，而一个还没被要求做任何事的开屏不该起编译（T23）。pin 指的是 tool 不是版本（`ext:agent/agent`），所以两种读法只在"这台机器上根本没 active 过这个包"时才不同，而那一秒正是后台 sync 在把它变 active——少报一秒是这里该有的错法。`/ext` 详情面同时多一行：这个包**每一场都在**，它的 tool 不经这张表上面（否则 `agent 0/4 tools` 是"关于这张表"为真、"关于模型能调什么"为假的一句话）。
+**⑤ 顺带修掉一个被它暴露出来的谎：draft 屏幕上 `[extensions] session_with` 的包一个都不算数。** 状态行与 Welcome 卡的 `tools 1+N` 只数**持久 pin**（config 的 `pinned_native_tools` ∪ `tui-state.json` 的 `session_pins`），而 `handoff` / `agent` 是在 `session new` 那一刻由 `sessionExtras` 加进去的——于是开屏永远写着 `tools 1+5`、Welcome 的 tools 行里没有 `agent`，而下一条消息开出来的 session header 里**明明有四个 agent tool**。一个人看着那块屏幕，唯一合理的结论就是"agent 没启用"。修法是 `plannedPins` 认第三个来源（`composedPins`）：从 `ext list` 里读那几个 id **active 版本**的 model-facing tool（`pinsOf`），**不是**去 `sessionMember` 解析——后者会 build bundled draft，那是一趟 zig，而一个还没被要求做任何事的开屏不该起编译（T23）。pin 指的是 tool 不是版本（`ext:agent/agent`），所以两种读法只在"这台机器上根本没 active 过这个包"时才不同，而那一秒正是后台 sync 在把它变 active——少报一秒是这里该有的错法。`/ext` 那半边也一样在说谎：tools pane 给这些 tool 画的是**空 checkbox**、`agent` 那行写 `0/4 tools`——一个整块屏幕都在回答"模型能调什么"的面板，对四个模型正在调的 tool 说了"没有"。所以 `PinState` 多第五档 **`composed`**（`pins.ts`：`always` / `session` / `other` / **`composed`** / `off`，标签 `with the package`）：它不是"pin 被写在哪儿"的第四个地方，是"没有任何列表写它、它照样上脸"的那一类；`toggle` / `promote` 对它与 `other` 同一态度——**不写，点名是谁决定的**（`[extensions] session_with` 在 `tui.toml` 里），因为一个按下去会被下一场纠正的开关就是一句谎。`nextFace` 与 `plannedPins` 因此加同一个来源，一张脸只有一个数。详情面另加一行说这个包每一场都在。
+
+**⑥ 「以后还会不会这样、而人根本看不出来」——这一条的答案在 `/ext` 里，不在 notice 里。** 自动那半边从此是自动的：seed 写下的 `.seed` 记录让下一个二进制认得出自己的副本、直接刷新。**停下来的只剩两种**——你编辑过的 draft（这是对的，不能替人覆盖）与**记录出现之前的老 store**（一次性）。这两种以前只在开屏 notice 里说一句、六秒后消失，还让人去终端敲 `nulya ext seed --user --force`——一个状态是**持久的**（它是一个目录的事实，直到有人处理它为止都为真），就不该只活在一条新闻里。所以 `/ext` 的 id 列表多一列 `differs`（第三个 dry-run，`ext seed --user --dry-run`，无编译只算 digest；它压过 sync 那一列的 `active`——"这份代码比跑它的二进制旧"才是能动手的那个事实），详情面把两种可能与代价写全（**旧源码留在它自己那个冻结版本的 `package/` 里**，所以这一步丢不掉任何 build 过的东西），**`s` 一键做完那三条命令**（`seed --force` → `build` → 原来是 active 的才 `activate`）。notice 改成指路 `/ext`。
 
 **测试**：`zig build test` 465/465（新增两条纯函数级：seed → `current` → 编辑 → `theirs`，以及"记录描述盘上这棵树"→ `stale` → 刷新后连多出来的文件一起清掉）；`zig build e2e` 74（那条 seed 的 e2e 改写成四种答案 + `--force`）；`bun test` 全绿（`extensions.test.ts` 补了编辑→点名→`--force` 三步）。
+
+### T43 · 一屏该说的话，和一次委派该由谁挑模型（2026-08-21）
+
+五件事，四件在前端（内核零改动），一件在 `extensions/agent`。凑成一条是因为它们来自同一次使用：一场跑着的对话，屏幕在抖、回答被挤住、探索把回答顶出屏幕，而委派永远跑在跟主场一样贵的模型上。
+
+**① 流式时的闪烁：那个光标是 markdown。** `AssistantTurn` 原来画的是 `content={text + (streaming && motion ? " ▍" : "")}`——光标拼进的是 **content**，所以它参与解析。于是每个 delta 都在重新解析一份多一个字形的文档，而那个字形在**块边界**上会改变答案：文本以换行结尾时它独占一行（+1），下一个 delta 又收回（−1），一个开头的 ``` 干脆把它吞进未闭合的 code block。逐 chunk 抓帧实测：三个 delta 内 7 → **6** → 7 行。而 transcript 是 sticky-bottom 的 scrollbox，每一次高度回缩都是整屏重排——那就是"疯狂闪烁"。删掉之后同一段流式输出的行数**只增不减**（同一份探针，回缩计数 0）。它本来也该走了：T38 之后"正在发生什么"是输入框上面一整行自己的事（spinner + 扫光），transcript 里不该再有会动的东西。
+
+**② thinking 默认 `hidden`，且 hidden 意味着离开列表。** 一个折叠的 reasoning 卡仍然要花掉一个头行、一个 glyph、一个 fold 记号——**每一次回答都花，而且就花在回答正上方**。它既不是模型说的（那是 assistant 文本）也不是它做的（那是 tool 卡），是 provider 的草稿纸，留在 ledger 里为的是回放（DESIGN §3.1）；而"它正在想"这件事，输入框上面那一行本来就在说（`activityOf` 没有 tool 时就写 `thinking`）。`transcript.thinking = "collapsed"` 把卡要回来，一个字节都没丢。**实现上有个坑**：`hidden` 不能只是让卡返回 `null`——一个画不出东西的 item 仍然占着 `gapBefore` 给它的那一行空白。所以它**离开 item 列表**（`Transcript.visibleItems`），下游的空行、browse 光标、`N earlier items` 计数全都算在真正画出来的东西上。
+
+**③ 回答与它上面那张卡之间补一行空。** `gapBefore` 原来有一条 `thinking → assistant = 0`（"thinking 与它后面那句话是同一个 beat"）。那个道理在，但屏幕上那是**两张卡贴在一起**：一个带 glyph 与 fold 记号的头行，紧接着一段 markdown，挤成一坨。"属于后面那句话"由顺序和 dim 已经说完了；空行在这一屏的语法里就是 beat 边界，而 thinking 是一个 beat。②之后这条多半用不上——但当有人把卡要回来时，它得是对的。
+
+**④ 一串跑完的调用折成一行（`render/runs.ts` + `render/cards/RunCard.tsx`）。** 模型读十一个文件再回答，屏幕上就是十一行，把它**说的话**顶出去。现在那一串是 `⋯ read ×3 · grep ×2 · shell ▸`，展开就是原来那些卡各自照旧。三个纯函数、一份测试：`foldsIntoRun`（一次调用进不进得去）· `groupRuns`（**两个起步**——把一次调用概括成"1 call"是用一行换一行还藏掉了一条命令）· `runSummary`（按 tool 名计数，**不猜语义**：tcode 的 `Read 5 ranges` 与 Claude Code 的 `Read and edited config.py` 都要求知道每个 tool 是什么意思，而这块屏幕不知道——包给自己 tool 起的名字就是现成的最短的词）。
+
+**进不去的比进得去的重要**，每一条都是规则不是口味：**还在跑的**（那正是唯一值得看的一行——于是效果自然就是 Claude Code 那样：跑的时候看得见，跑完了收起来）· **失败的**（成功才沉默，T26；一条静静包含着失败的摘要行是这个功能唯一比没有更糟的形态）· 被取消的（marker 就是那张卡的全部内容）· **回执型的**（后台任务、子场：它们不是做完的动作）· `edit` 的 diff · 演化动作（`nulya ext build` 这些正是 nulya 存在要让人看见的时刻，§5.2）· `checklist` / `markdown` · 包用代码画的卡。
+
+**包怎么说"别收我"：声明 `render`。** 不加 manifest 字段（DESIGN §7.2.1 的 `contributes.tools[].render` 已经是开放词表、kernel 只解析不强制），驱动者能从中读出的正是"这个包对它这次调用长什么样有意见"——一个有画面要给的调用不该被概括。于是 `std` 想让 `write` 跳出摘要，就是给它一个 `render` 声明，不必等前端认识这个名字。`tui.toml` 的 `run_summary = false` 是人这一侧的总开关，回到一次调用一行。
+
+**⑤ 委派卡：说出它在怎么样，并且能点进去（`SubSessionCard`）。** `agent` 的调用返回的是**回执**——别处有一个后台任务正在驱动一场 session，报告稍后才到——而它原来画的是 `EvolveCard`，一张"做完了的动作"的卡。现在：note 用**和后台 `shell` 完全同一套读法**（`state/tasks.ts` 的 `backgroundNote`，两个 consumer 了才抽）——ledger 的报告到了就用它（重开一场照样显示），没到就用 `task list` 的实时投影（`s-1/t1 · running 42s`）；头行下面多一行 **`↗ open <id> in a tab`**，点它或 browse 模式 `Enter` 走**同一个入口**（`state/navigate.ts` 的 `NavigateContext`，App 给的是它自己的 `tabs.open`）。这一步同时修好一个静默失效：`task_finished` 找"是哪张卡起的这个任务"用的是 `backgroundStartOf`，只认内核那句 `[background task X started]`，而 `agent` 的回执是自己的句子——所以委派卡从来不会变成 `done`。现在两种回执由 `startedTaskOf` 一处读。
+
+**这推翻了 T2 的一条决策**（§9 里"SubSessionCard 不做独立组件"）：当时它与 `EvolveCard` 的差别只是 glyph 和一个 id，抽出来是无谓的。现在差别是两条实时事实 + 一个手势，第二个 consumer 到了。
+
+**"这能不能纯在 `extensions/agent` 的 tui plugin 里做"——不能，而且不该。** 契约版本 1 的 `CardRenderer` 只返回 `Line[]`，`onKey` **明确写着不会被调用**（卡片没有自己的焦点，browse 模式持有卡片上的键），也没有点击回调；`actions.openTab` 有，但只够从一条 `/命令` 或一个 panel 触发。进度更根本：子场是**后台任务**在驱动，它的 `--stream` 根本不经过这个前端，而 `observe.onStream` / `onEvent` 给的是前端自己驱动的 step 与 front tab 的事件。要让插件做，得给 API 加"卡片激活回调"和"跨 session 观测"两样，而第一个 consumer 就是宿主自己——那正是"第二个 consumer 出现之前不抽 abstraction"要拦的事。**跳转本来就是宿主的手势**（T3 起 `Enter` 就能开），缺的只是屏幕上没有一个东西说得出这件事。
+
+**⑥ 委派可以点名跑在什么模型上：`agent{name, task, model?}`（DESIGN §7.8）。** 原来只有定义文件的 `model:` frontmatter，不写就继承发起它的那一场——于是一次宽搜和一次严审花一样的钱，而这两件事的价值差一个数量级。形态与 frontmatter 逐字相同、**一处解析**（`defs.parseModelRef`，两个 parser 就是两套语法）；优先级由近及远：**这次调用 > 定义 > 继承**，且取的是**一对**（profile 与 id 从不同来源拼起来会点名一个那个 profile 不服务的模型）。`session` 形态给 `model` 是 `-32602` 而不是静默忽略——那一场的身份创建时就冻死了（physics #2），而 append-only 正是追问便宜的原因。解析不出当场报错并指 `nulya config show`；profile 名对不上则由内核那句拒绝原样上来，只多一句"这是你给的 `model` 参数、可以不带它重试"。
+
+**测试**：`bun test` 新增 `test/runs.test.ts`（5 条：什么折得进去、什么折不进去的**八种**、`render` 声明与代码卡两种 opt-out、两个起步与被打断的 run、摘要文案）+ `render.test.tsx` 三条（thinking 默认不在屏幕上而 `collapsed` 把卡要回来、委派卡的实时 note 与**真的点得动**的 `↗ open`、一串调用折成一行而中间那个 `exit 1` 留在外面）；节奏那条改用 `run_summary = false` 的 style（节奏说的是空行在哪，摘要说的是有几行，两件事）。`zig build test` 466/466（`parseModelRef` 一条：只有 profile、profile/id、以及三种半截）；`zig build e2e` 73/73（那条 bundled agent 的 e2e 多两段：坏 `model` 报错并指 `config show`、追问形态给 `model` 被拒，两条都在建任何东西之前）。**一个性能回归当场被 `perf.test.tsx` 抓住**：行列表原来是普通函数，而每一行都要读它一次去找自己前面那一行 → 平方级，且每一趟都在解析每个调用的参数以判断它是哪种卡；5k 事件的第一帧因此 2.2 s。`createMemo` 之后 208 ms、流式每帧 7 ms。App 那一侧的 `cards()` **刻意不 memo**（memo 会在创建时立即求值，而 `plugins` 那时还没建好——它读在按键上，不在帧上）。

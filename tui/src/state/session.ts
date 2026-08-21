@@ -13,7 +13,7 @@
  *    and sorts back into place even though it arrived after the model deltas.
  */
 import { createStore, produce } from "solid-js/store"
-import { backgroundStartOf, taskReportOf } from "../nulya/ledger.ts"
+import { startedTaskOf, taskReportOf } from "../nulya/ledger.ts"
 import type { LedgerEvent, SessionHeader, ToolCall, Usage } from "../nulya/ledger.ts"
 import type { StreamLine, StepStatus, StopReason } from "../nulya/cli.ts"
 
@@ -447,7 +447,7 @@ export function createSessionState(id: string): SessionState {
           for (let i = draft.items.length - 1; i >= 0; i--) {
             const item = draft.items[i]!
             if (item.kind !== "tool") continue
-            if (backgroundStartOf(item.output)?.task !== finished.task) continue
+            if (startedTaskOf(item.output) !== finished.task) continue
             item.taskResult = { exitCode: finished.exit_code, duration: report?.duration ?? "" }
             break
           }

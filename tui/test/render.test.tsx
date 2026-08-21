@@ -18,6 +18,7 @@ import { App } from "../src/ui/App.tsx"
 import { StyleContext, createStyle, type Style } from "../src/render/theme.ts"
 import { FoldContext, createFoldStore } from "../src/state/folds.ts"
 import { TasksContext } from "../src/state/tasks.ts"
+import { NavigateContext } from "../src/state/navigate.ts"
 import { createSessionState, type ToolItem, type TranscriptItem } from "../src/state/session.ts"
 import { default_settings, loadSettings } from "../src/state/settings.ts"
 import type { SessionHeader } from "../src/nulya/ledger.ts"
@@ -29,6 +30,11 @@ import type { Contributions } from "../src/nulya/files.ts"
 
 const style: Style = createStyle(unsafe_settings, {})
 const narrow: Style = createStyle({ ...default_settings, transcript: { ...default_settings.transcript, max_width: 40 } }, {})
+/** One row per call — the transcript before run summaries, and `run_summary = false` after (T43). */
+const listed_style: Style = createStyle(
+  { ...unsafe_settings, transcript: { ...unsafe_settings.transcript, run_summary: false } },
+  {},
+)
 
 /**
  * The cards as the screen actually stacks them. It goes through `Transcript`
@@ -442,8 +448,21 @@ test("a skill echo folds back to the `/name args` that was typed", async () => {
   expect(frame).toMatchSnapshot()
 })
 
-test("thinking is collapsed by default and names its size", async () => {
-  const frame = await frameOf([thinking_item])
+/**
+ * T43: reasoning is not on screen unless it is asked for. It used to be a
+ * collapsed card above every answer — a head line, a glyph and a fold marker
+ * spent on the one thing the model neither said nor did. `collapsed` still
+ * draws exactly that card, which is the half this pins: the default changed,
+ * the card did not.
+ */
+test("thinking is hidden by default, and `collapsed` brings the card back", async () => {
+  expect(await frameOf([thinking_item])).not.toContain("thinking")
+
+  const collapsed = createStyle(
+    { ...default_settings, transcript: { ...default_settings.transcript, thinking: "collapsed" } },
+    {},
+  )
+  const frame = await frameOf([thinking_item], 76, 24, collapsed)
   expect(frame).toContain("⋯ thinking  (17 chars) ▸")
   expect(frame).not.toContain("weigh the options")
   expect(frame).toMatchSnapshot()
@@ -531,6 +550,72 @@ test("a sub-session names the session it drives", async () => {
   )
   expect(frame).toContain("⤷ sub-session · s-1786815442964-8462dd")
   expect(frame).toContain("⤷ sub-session step · s-1786815442964-8462dd")
+  expect(frame).toMatchSnapshot()
+})
+
+/**
+ * A delegation is the one card whose story continues somewhere else (T43), so
+ * it says how that is going and offers a way in. Without a `Navigate` there is
+ * no link at all — a card in a screen with no tabs must not offer one.
+ */
+test("a delegation says how its background task is going, and offers the session", async () => {
+  const delegated = toolItem({
+    key: "d1",
+    tool: "agent",
+    args: JSON.stringify({ name: "explore", task: "find the writers" }),
+    output:
+      "delegated to 'explore' — session s-1786815442964-8462dd, running as background task s-1/t1 (read-only).\nDo not call any more tools about this; end your turn.",
+  })
+
+  const without = await frameOf([delegated], 76, 12)
+  expect(without).toContain("⤷ agent · explore → s-1786815442964-8462dd")
+  expect(without).not.toContain("open s-")
+
+  let opened = null as string | null
+  const setup = await testRender(
+    () => (
+      <NavigateContext.Provider value={{ openSession: (id) => (opened = id) }}>
+        <Harness items={[delegated]} tasks={[runningTask("s-1/t1", 42)]} />
+      </NavigateContext.Provider>
+    ),
+    { width: 76, height: 12 },
+  )
+  try {
+    const frame = await settle(setup)
+    // The live projection, in the same words a background shell call uses.
+    expect(frame).toContain("s-1/t1 · running 42s")
+    expect(frame).toContain("↗ open s-1786815442964-8462dd in a tab")
+    // …and the row is the affordance, not decoration: clicking it navigates.
+    const rows = frame.split("\n")
+    const at = rows.findIndex((row) => row.includes("↗ open"))
+    await setup.mockMouse.click(6, at)
+    expect(opened).toBe("s-1786815442964-8462dd")
+  } finally {
+    setup.renderer.destroy()
+  }
+})
+
+/**
+ * The run summary (T43). A stretch of finished, successful, bodyless calls is
+ * one line; a failure in the middle of it is not in that line.
+ */
+test("a run of successful calls becomes one line, and a failure stays out of it", async () => {
+  const items: TranscriptItem[] = [
+    assistant_item,
+    shellItem({ key: "r1", command: "ls" }),
+    shellItem({ key: "r2", command: "pwd" }),
+    shellItem({ key: "r3", command: "cat missing", output: "no such file\n[exit 1]" }),
+    shellItem({ key: "r4", command: "wc -l src/emit.zig" }),
+    shellItem({ key: "r5", command: "grep -n emit src/emit.zig" }),
+  ]
+  const frame = await frameOf(items, 76, 20)
+  expect(frame).toContain("⋯ shell ×2")
+  // The failure keeps its own row, its own command and its own exit.
+  expect(frame).toContain("$ cat missing")
+  expect(frame).toContain("exit 1")
+  // The successful ones are not on screen until the summary is opened.
+  expect(frame).not.toContain("$ ls")
+  expect(frame).not.toContain("$ grep")
   expect(frame).toMatchSnapshot()
 })
 
@@ -713,9 +798,14 @@ test("a project tui.toml flips the edit diff default", async () => {
 test("the transcript's rhythm: two rows before a person, one between beats, none inside a run", async () => {
   const run = (key: string, command: string) => shellItem({ key, command, output: "ok\n[exit 0]" })
   const items: TranscriptItem[] = [user_item, thinking_item, assistant_item, run("r1", "ls"), run("r2", "pwd"), user_item]
-  // The pure function first: it is the whole of the rhythm (T26).
-  expect(items.map((item, index) => gapBefore(items[index - 1], item))).toEqual([1, 1, 0, 1, 0, 2])
-  const frame = await frameOf(items, 76, 20)
+  // The pure function first: it is the whole of the rhythm (T26). Thinking is a
+  // card like any other and gets its own row of air (T43) — when it is on
+  // screen at all, which by default it is not.
+  expect(items.map((item, index) => gapBefore(items[index - 1], item))).toEqual([1, 1, 1, 1, 0, 2])
+  // Drawn with the run summary OFF, because the rhythm is about where the blank
+  // rows go and the summary is about how many rows there are (T43). What the
+  // summary does to these same two calls is its own test.
+  const frame = await frameOf(items, 76, 20, listed_style)
   const rows = frame.split("\n").map((row) => row.trimEnd())
   const ls = rows.findIndex((row) => row.includes("$ ls"))
   // The two calls of one run are neighbours; the sentence above them is not.

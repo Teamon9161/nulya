@@ -7,6 +7,7 @@ import { ShellCard } from "./ShellCard.tsx"
 import { EditCard } from "./EditCard.tsx"
 import { ExtToolCard } from "./ExtToolCard.tsx"
 import { EvolveCard } from "./EvolveCard.tsx"
+import { SubSessionCard } from "./SubSessionCard.tsx"
 import { CanceledCard } from "./CanceledCard.tsx"
 import { ChecklistCard } from "./ChecklistCard.tsx"
 import { MarkdownToolCard } from "./MarkdownToolCard.tsx"
@@ -61,12 +62,14 @@ export function ToolCard(props: { item: ToolItem; contributions?: Contributions[
         <EditCard item={props.item} presentation={presentation()} />
       </Match>
       {/*
-        A sub-session is an evolution action that happens to name a session
-        (tui.md §5.5). The registry keeps the two kinds apart because
-        `sessionId` is the fact T3 needs to open one as a second tab; until
-        something is done with it, drawing a second card would be duplication.
+        A call that opened a session of its own has its own card since T43: it
+        is the one kind whose story continues somewhere else, so it says how
+        that is going and offers a way in (`SubSessionCard`).
       */}
-      <Match when={presentation().kind === "evolve" || presentation().kind === "subsession"}>
+      <Match when={presentation().kind === "subsession"}>
+        <SubSessionCard item={props.item} presentation={presentation()} />
+      </Match>
+      <Match when={presentation().kind === "evolve"}>
         <EvolveCard item={props.item} presentation={presentation()} />
       </Match>
       <Match when={presentation().kind === "checklist"}>

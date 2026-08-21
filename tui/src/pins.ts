@@ -21,6 +21,11 @@
  *  - `other`    — the merged projection has it but the user file does not, so a
  *                 project or system layer wrote it. Read-only here: this module
  *                 writes exactly one key in exactly one file (D3).
+ *  - `composed` — no list has it, and it will be on the face anyway: its package
+ *                 is one this front end brings into every session it starts
+ *                 (`[extensions] session_with`), and `session new --pin`s its
+ *                 model tools there (T42). Read-only here for the same reason
+ *                 `other` is — the decision is in `tui.toml`, not in this panel.
  *
  * Everything below the write helpers is pure, because "what would the next
  * session's tool face be" is a question that should be answerable without a
@@ -31,7 +36,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs"
 /** The one builtin is always on the face and always counts (DESIGN §5.1). */
 export const builtin_tools = 1
 
-export type PinState = "always" | "session" | "other" | "off"
+export type PinState = "always" | "session" | "other" | "composed" | "off"
 
 /** A stable tool id, the only form a pin has: `ext:<extension-id>/<tool>`. */
 export function toolId(extension: string, tool: string): string {
@@ -48,12 +53,21 @@ export interface PinSources {
   user: readonly string[]
   session: readonly string[]
   merged: readonly string[]
+  /**
+   * Tools that reach the face without any pin list naming them: the model tools
+   * of the packages in `[extensions] session_with` (T42). Not a place a pin is
+   * WRITTEN — a place the face gets one anyway — and this panel has to know
+   * about it, because a checkbox that reads `off` about a tool the model can
+   * call is simply wrong.
+   */
+  composed?: readonly string[]
 }
 
 export function pinState(id: string, sources: PinSources): PinState {
   if (sources.user.includes(id)) return "always"
   if (sources.session.includes(id)) return "session"
   if (sources.merged.includes(id)) return "other"
+  if (sources.composed?.includes(id)) return "composed"
   return "off"
 }
 
@@ -61,6 +75,7 @@ export function stateLabel(state: PinState): string {
   if (state === "always") return "always"
   if (state === "session") return "this TUI"
   if (state === "other") return "from another config layer"
+  if (state === "composed") return "with the package"
   return ""
 }
 
@@ -98,6 +113,9 @@ export function toggle(id: string, sources: PinSources): PinChange {
   if (state === "other") {
     return unchanged(`${id} is pinned by another config layer · edit that file to change it`)
   }
+  if (state === "composed") {
+    return unchanged(`${id} comes with its package in every session · \`[extensions] session_with\` in tui.toml decides that`)
+  }
   if (state === "always") {
     return { user: without(sources.user, id), session: null, notice: `${id} unpinned · next session` }
   }
@@ -119,6 +137,9 @@ export function promote(id: string, sources: PinSources): PinChange {
   if (state === "always") return unchanged(`${id} is already always`)
   if (state === "other") {
     return unchanged(`${id} is pinned by another config layer · edit that file to change it`)
+  }
+  if (state === "composed") {
+    return unchanged(`${id} is already on every session's face, with its package`)
   }
   return {
     user: with_(sources.user, id),

@@ -45,6 +45,45 @@ ai回复:
 
 **① `ask` / `plan` 其实已经 build 并 active 了**（`nulya ext list` 里两行都在，`plan` 标 `on-request`）——开屏那趟后台 sync 干的，只是它跑在后台、`/ext` 开得早就会看到还没有。这是正常的。
 
-**② agent 的 tool 也一直在，是屏幕在说谎（已修，T42 ⑤）。** 状态行与 Welcome 卡的 `tools 1+N` 只数持久 pin（config 的 `pinned_native_tools` ∪ `tui-state.json` 的 `session_pins`），而 `handoff` / `agent` 是 `[extensions] session_with` 的成员、在 `session new` 那一刻才 `--pin` 进去。实测：开屏写 `tools 1+5`、tools 行里没有 agent，而上一场 session 的 header 里 `native_tools` **明明有四个 `ext:agent/*`**。修法是 `plannedPins` 认第三个来源（从 `ext list` 读 active 版本的 model-facing tool，不 build），`/ext` 详情面也多一行说"这个包每一场都在"。现在开屏那行是 `shell ⚡read … ⚡handoff ⚡agent ⚡materialize ⚡list ⚡run`。
+**② agent 的 tool 也一直在，是屏幕在说谎（已修，T42 ⑤）。** 状态行与 Welcome 卡的 `tools 1+N` 只数持久 pin（config 的 `pinned_native_tools` ∪ `tui-state.json` 的 `session_pins`），而 `handoff` / `agent` 是 `[extensions] session_with` 的成员、在 `session new` 那一刻才 `--pin` 进去。实测：开屏写 `tools 1+5`、tools 行里没有 agent，而上一场 session 的 header 里 `native_tools` **明明有四个 `ext:agent/*`**。修法两处：`plannedPins` 认第三个来源（从 `ext list` 读 active 版本的 model-facing tool，不 build），以及 `PinState` 多一档 `composed`（标签 `with the package`）——`/ext` 的 tools pane 从此给它们画 `[x]`、`agent` 那行整个是 on，按 Enter 不写任何列表而是点名 `[extensions] session_with`。现在开屏那行是 `shell ⚡read … ⚡handoff ⚡agent`。
 
-**③ 那一行同时暴露了第 7 条的后果**：`materialize` / `list` / `run` 本该是 `audience: "driver"`（不上模型面），本机 agent 还是旧 manifest 所以四个全上去了。跑一次 `nulya ext seed --user --force && nulya ext sync --user --activate` 之后就只剩 `⚡agent`。
+**③ 那一行同时暴露了第 7 条的后果**：`materialize` / `list` / `run` 本该是 `audience: "driver"`（不上模型面），本机 agent 还是旧 manifest 所以四个全上去了。**已在本机执行** `nulya ext seed --user --force`（5 个 replaced、3 个 up to date）+ `ext sync --user --activate`（5 built → current）：agent 到 `v-debf629c`（模型面只剩 `⚡agent`，另三个进了 `/ext` 那行折起来的 driver tools）、std 到 `v-9b172a2a`（有 `edit`，下次启动 `adoptStdEditPin` 会把 `ext:std/edit` 补进 pin 列表）、evolution 到 `v-a0d760f4` 且是 `on-request`——**第 6 条的 `◈ evolution` 也随之消失**（activate 从此只是登记）。
+
+10. 但是以后会不会还是出现一样的情况, 然后用户不知道怎么修呢, 这就是个隐患
+
+**已消（T42 ⑥）。** 分三种情况说：① **新机器全自动**——第一次 seed 就写下 `.seed` 记录，之后每个新二进制认得出"这是我自己的副本、没人动过"，直接刷新，什么都不问；② **你编辑过的 draft** 会停下来，这是对的（不能替人覆盖），但它现在**在 `/ext` 里持久可见**：id 列表那一列写 `differs`，详情面写清两种可能与代价（旧源码留在它自己那个冻结版本的 `package/` 里，build 过的东西一个都丢不了），**`s` 一键做完 `seed --force` → `build` → `activate`**；③ **记录出现之前的老 store**（就是你这台）是一次性的，走同一条 `s`。开屏 notice 从"给你一条命令"改成"指 `/ext`"——一条六秒后消失的新闻不该是一个持久状态的唯一去处。
+
+11. agent tool现在不支持指定模型启动
+
+**已加（`extensions/agent`，内核零改动；DESIGN §7.8、tui.md T43 ⑥）。** `agent{name, task, model?}`：值与定义文件的 `model:` 逐字同形（`<profile>` 或 `<profile>/<model-id>`），**一处解析**（`defs.parseModelRef`——一个参数和一个 frontmatter 字段说的是同一件事，两个 parser 就是两套语法）。优先级由近及远：**这次调用 > 定义 > 继承发起它的那一场**，而且取的是**一对**（profile 与 id 从两个来源拼起来，会点名一个那个 profile 根本不服务的模型）。为什么让模型自己挑：定义说的是"这个 persona 一般跑在什么上"，调用者知道定义不知道的那件事——**这一件活值多少**（宽搜配便宜的、严审配贵的）。`agent{session, …}`（追问）给 `model` 是 `-32602` 而不是静默忽略：那一场的身份创建时就冻死了（physics #2），而 append-only 正是追问便宜的原因。解析不出当场报错并指 `nulya config show`；profile 名对不上就把内核那句拒绝原样递上来，只多一句"这是你给的 `model` 参数、可以不带它重试"。
+
+12. tui有启动agent的展示,但是只有下拉展开的内容, 能不能有个地方点击调转过去了, 类似tcode那种做法, 这样才知道agent做到哪一步了, 这个而能纯粹在agent extention的 tui中实现吗, 还是需要额外的拓展能力
+
+**做了，在宿主层，不是插件层（tui.md T43 ⑤）。** 委派卡从此是它自己的 `SubSessionCard`：头行下面一行 **`↗ open <id> in a tab`**（点它、或 browse 模式 `Enter`，走同一个入口 `state/navigate.ts`），note 说那个后台任务此刻在怎么样——`s-1/t1 · running 42s`，报告落进 ledger 后变成 `· exit 0 · 41.8s`，重开一场照样显示（用的是后台 `shell` 卡那一套读法，两个 consumer 了才抽出 `backgroundNote`）。**顺带修好一个静默失效**：`task_finished` 认领"是哪张卡起的这个任务"只认内核那句 `[background task X started]`，而 `agent` 的回执是自己的句子——所以委派卡从来不会变成 done。两种回执现在由 `startedTaskOf` 一处读。
+
+**能不能纯在 agent extension 的 tui plugin 里做：不能，而且不该。** 契约版本 1 的 `CardRenderer` 只返回 `Line[]`，`onKey` **明确写着不会被调用**（卡片没有自己的焦点，browse 模式持有卡片上的键），也没有点击回调；`actions.openTab` 有，但只够从一条 `/命令` 或一个 panel 触发。进度更根本：子场是**后台任务**在驱动，它的 `--stream` 根本不经过这个前端，而 `observe.onStream` / `onEvent` 只给前端自己驱动的 step 和 front tab 的事件。要让插件做得给 API 加"卡片激活回调"和"跨 session 观测"两样，而第一个 consumer 就是宿主自己——正是"第二个 consumer 出现之前不抽 abstraction"要拦的事。跳转本来就是宿主的手势（T3 起 `Enter` 就能开），缺的只是屏幕上没有一个东西说得出这件事。
+
+13. 有时候模型在输出内容, 然后渲染的那个内容会疯狂闪烁
+
+**已修（tui.md T43 ①）。** 元凶是流式末尾那个 `▍` 光标：它拼进的是 markdown 的 **content**，所以参与解析。每个 delta 都在重新解析一份多一个字形的文档，而那个字形在**块边界**上会改变答案——文本以换行结尾时它独占一行（+1），下一个 delta 收回（−1），一个开头的 ``` 干脆把它吞进未闭合的 code block。逐 chunk 抓帧实测：三个 delta 内 **7 → 6 → 7** 行。transcript 是 sticky-bottom 的 scrollbox，每一次高度回缩就是整屏重排。删掉之后同一段输出的行数**只增不减**（同一份探针，回缩计数 0）。它本来也该走了：T38 之后"正在发生什么"是输入框上面一整行自己的事（spinner + 扫光），transcript 里不该再有会动的东西。
+
+14. 我在想那个thinking干脆像tcode那样默认隐藏吧, 然后就是探索的调用我觉得也是默认隐藏比较好…不过我的偏好是最好extention中可以配置什么不收进去
+
+**两半都做了（tui.md T43 ②④）。**
+
+**thinking 默认 `hidden`。** 一张折叠的 reasoning 卡仍然要花掉一个头行、一个 glyph、一个 fold 记号，**每一次回答都花，就花在回答正上方**；而它既不是模型说的也不是它做的，是 provider 的草稿纸（留在 ledger 里为的是回放）。"它正在想"这件事，输入框上面那一行本来就在说。`transcript.thinking = "collapsed"` 把卡要回来。实现上有个坑：hidden 不能只让卡返回 `null`——画不出东西的 item 仍占着 `gapBefore` 给它的那一行空白，所以它**离开 item 列表**。
+
+**探索调用折成一行**：`⋯ read ×3 · grep ×2 · shell ▸`，展开就是原来那些卡各自照旧。**进不去的比进得去的重要**：还在跑的（那正是唯一值得看的一行——于是效果自然是"跑的时候看得见，跑完了收起来"）· 失败的（成功才沉默，一条静静包含失败的摘要行是这个功能唯一比没有更糟的形态）· 被取消的 · 回执型的（后台任务 / 子场）· `edit` 的 diff · 演化动作 · `checklist`/`markdown` · 包用代码画的卡。
+
+**"extension 中可以配置什么不收进去"——就是已有的 `render` 声明位**（DESIGN §7.2.1 的 `contributes.tools[].render`，开放词表、kernel 只解析不强制）。规则一句话：**声明了画法 = 有身体值得看 = 不收**。所以不加 manifest 字段，`std` 想让 `write` 跳出摘要就给它一个 `render` 声明，不必等前端认识这个词。人这一侧的总开关是 `tui.toml` 的 `run_summary = false`（回到一次调用一行）。
+
+15. 现在模型回答的md渲染和上面没有间隔一行, 会感觉挤在一起
+
+**已修（tui.md T43 ③）。** `gapBefore` 有一条 `thinking → assistant = 0`（"thinking 与它后面那句话是同一个 beat"）。道理在，但屏幕上那是**两张卡贴在一起**：一个带 glyph 与 fold 记号的头行，紧接着一段 markdown。实测帧：
+
+```
+  ⋯ reasoning (opaque)
+● Heading
+```
+
+"属于后面那句话"由顺序和 dim 已经说完了；空行在这一屏的语法里就是 beat 边界，而 thinking 是一个 beat。第 14 条之后这条多半用不上——但当有人把卡要回来时，它得是对的。

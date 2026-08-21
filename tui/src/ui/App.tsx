@@ -1,7 +1,7 @@
 import { For, Match, Show, Switch, createEffect, createMemo, createSignal, onCleanup, onMount, untrack } from "solid-js"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import type { InputRenderable, KeyEvent, ScrollBoxRenderable, Selection } from "@opentui/core"
-import { Transcript, rowsBelow, windowItems } from "./Transcript.tsx"
+import { Transcript, rowsBelow, transcriptRows } from "./Transcript.tsx"
 import { Composer, type ComposerApi } from "./Composer.tsx"
 import { ApprovalPanel, type ApprovalChoice } from "./ApprovalPanel.tsx"
 import { ModePicker, initialChoice, modeAt, moveChoice } from "./ModePicker.tsx"
@@ -24,6 +24,8 @@ import { FoldContext, createFoldStore } from "../state/folds.ts"
 import { BrowseContext, createBrowseStore } from "../state/browse.ts"
 import { OverlayContext, createOverlayStore, type OverlayKind } from "../state/overlay.ts"
 import { TasksContext } from "../state/tasks.ts"
+import { NavigateContext, type Navigate } from "../state/navigate.ts"
+import type { TranscriptRow } from "../render/runs.ts"
 import { createTabStore, type DraftTab, type FirstTab, type SessionTab } from "../state/tabs.ts"
 import { loadTuiState, rememberModel, rememberMode, sessionPins, type ModelPick } from "../state/tui_state.ts"
 import {
@@ -212,11 +214,18 @@ const ctrl_c_ms = 3000
 
 /**
  * The cards browse mode walks: everything with a body that is actually on
- * screen. Items outside `history_window` are not mounted, so a selection there
- * would be invisible.
+ * screen. It walks ROWS, not items (T43) — the transcript's own projection,
+ * so a call gathered into a run summary is not a place the cursor can land and
+ * the run itself is. Anything outside `history_window` is not mounted, and a
+ * selection there would be invisible.
  */
-function foldable(items: readonly TranscriptItem[], window: number): TranscriptItem[] {
-  return windowItems(items, window).filter((item) => item.kind === "tool" || item.kind === "thinking")
+function foldable(rows: readonly TranscriptRow[]): { key: string; item: TranscriptItem | null }[] {
+  const out: { key: string; item: TranscriptItem | null }[] = []
+  for (const row of rows) {
+    if (row.kind === "run") out.push({ key: row.key, item: null })
+    else if (row.item.kind === "tool" || row.item.kind === "thinking") out.push({ key: row.key, item: row.item })
+  }
+  return out
 }
 
 /**
@@ -467,7 +476,15 @@ export function App(props: AppProps) {
   const snapshot = () => live()?.state.snapshot ?? no_snapshot
   const status = () => live()?.attach.status() ?? "idle"
   const role = () => live()?.attach.role() ?? "driver"
-  const cards = () => foldable(snapshot().items, props.style.historyWindow)
+  /**
+   * Lazy, not memoised: a memo runs on creation and `plugins` is not built yet
+   * at this point in `App`. It is read on a keypress, never on a frame — the
+   * transcript's own row list is where the memo has to be (`Transcript.rows`).
+   */
+  const cards = () =>
+    foldable(
+      transcriptRows(snapshot().items, props.style, live()?.contributions() ?? [], (tool) => plugins.cardFor(tool) != null),
+    )
   /** This tab's background tasks, and how many of them have not ended (§5.9). */
   const tasks = (): TaskEntry[] => live()?.tasks.tasks() ?? []
   const runningTasks = () => live()?.tasks.live() ?? 0
@@ -610,7 +627,11 @@ export function App(props: AppProps) {
     // rather than replaced.
     if (refreshed.length > 0) news.push(`${refreshed.join(" & ")} updated to this build`)
     if (untouched.length > 0) {
-      news.push(`${untouched.join(" & ")} differ from this build · edited, or seeded by an older nulya · \`nulya ext seed --user --force ${untouched.join(" ")}\` replaces them`)
+      // A notice is not where this lives — it is durable state, and `/ext` says
+      // it for as long as it is true, with the key that fixes it (T42). Naming a
+      // shell command here was the wrong shape twice over: it is gone in six
+      // seconds, and it asks a person to leave the program to repair it.
+      news.push(`${untouched.join(" & ")} differ from this build · /ext · s updates one`)
     }
     // …and whatever a mode package is doing on this machine ALREADY, whoever
     // switched it on and whenever (T31). This is the half no guard can fix: the
@@ -778,7 +799,8 @@ export function App(props: AppProps) {
     browse.select(list[next]!.key)
   }
 
-  const selectedItem = () => cards().find((item) => item.key === browse.selected()) ?? null
+  /** The item under the browse cursor — null on a run summary, which is a row rather than an event. */
+  const selectedItem = () => cards().find((row) => row.key === browse.selected())?.item ?? null
 
   const toggleSelected = () => {
     const key = browse.selected()
@@ -826,6 +848,19 @@ export function App(props: AppProps) {
     tabs.open(id, { created })
     closeOverlay()
     setNotice(`opened ${id}`)
+  }
+
+  /**
+   * What a card's link does (T43). One entry point, so clicking `↗ open …` on a
+   * delegation card and pressing `Enter` on it in browse mode are the same move
+   * and cannot drift; browse mode steps aside first, because the keyboard
+   * belongs to the tab that just came to the front.
+   */
+  const navigate: Navigate = {
+    openSession: (id) => {
+      if (browse.active()) leaveBrowse()
+      openSession(id)
+    },
   }
 
   /**
@@ -2409,9 +2444,7 @@ export function App(props: AppProps) {
         // sub-session link is the one place Enter means something else.
         const id = sessionOf(selectedItem())
         if (id) {
-          leaveBrowse()
-          tabs.open(id)
-          setNotice(`opened ${id}`)
+          navigate.openSession(id)
           return
         }
         return toggleSelected()
@@ -2510,6 +2543,10 @@ export function App(props: AppProps) {
                   appended can carry: how long a background command has been
                   going (tui.md §5.9). */}
               <TasksContext.Provider value={tasks}>
+              {/* What a card's `↗ open …` link does — the front end's own verb,
+                  handed down so a card can offer it without knowing about tabs
+                  (`state/navigate.ts`). */}
+              <NavigateContext.Provider value={navigate}>
               {/* Transcript, composer, status line — and the only line drawn
                   between any of them is the composer's own border (tui.md §4.1,
                   T26). Three full-width rules used to fence four regions; two of
@@ -2751,6 +2788,7 @@ export function App(props: AppProps) {
                   onScrollEnd={scrollToEnd}
                 />
               </box>
+              </NavigateContext.Provider>
               </TasksContext.Provider>
               </PluginContext.Provider>
             </OverlayContext.Provider>

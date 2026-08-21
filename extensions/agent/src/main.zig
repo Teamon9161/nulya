@@ -407,6 +407,7 @@ fn delegate(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
     const target = rpc.trimmedField(args, "session");
     const raw_task = rpc.trimmedField(args, "task");
     const task = raw_task[0..@min(raw_task.len, max_task_bytes)];
+    const asked_model = rpc.trimmedField(args, "model");
 
     if (task.len == 0) {
         return rpc.invalidParams(
@@ -441,13 +442,40 @@ fn delegate(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
         );
     }
 
+    // A model reference is a choice made when a session is CREATED and frozen
+    // there (physics #2, DESIGN §3.4). A follow-up creates nothing — it appends
+    // a turn to a session whose identity was frozen rounds ago — so a `model`
+    // on that form cannot be honoured, and quietly ignoring it would be the
+    // worst of the three answers.
+    if (target.len != 0 and asked_model.len != 0) {
+        return rpc.invalidParams(
+            alloc,
+            "model applies to a NEW delegation only: session {s} froze what it runs on when it was created and append-only is what makes a follow-up cheap. Drop model to follow up, or start a fresh delegation with name + model.",
+            .{target},
+        );
+    }
+    const chosen: ?defs.ModelRef = if (asked_model.len == 0) null else defs.parseModelRef(asked_model) orelse {
+        return rpc.invalidParams(
+            alloc,
+            "model must be <profile> or <profile>/<model-id> (the same form a definition's `model:` takes) — got '{s}'. `nulya config show` lists the profiles and the model ids each one serves.",
+            .{asked_model},
+        );
+    };
+
     if (target.len != 0) return followUp(ctx, parent, target, task, depth);
-    return newDelegation(ctx, parent, name, task, depth);
+    return newDelegation(ctx, parent, name, task, chosen, depth);
 }
 
 /// A fresh delegation: materialise the persona, open a session wearing it, give
 /// it the task, and start the background task that drives it.
-fn newDelegation(ctx: *const Ctx, parent: []const u8, name: []const u8, task: []const u8, depth: u32) !rpc.Outcome {
+fn newDelegation(
+    ctx: *const Ctx,
+    parent: []const u8,
+    name: []const u8,
+    task: []const u8,
+    chosen: ?defs.ModelRef,
+    depth: u32,
+) !rpc.Outcome {
     const alloc = ctx.alloc;
 
     // What may THIS session delegate to? A session wearing a persona may only
@@ -470,12 +498,25 @@ fn newDelegation(ctx: *const Ctx, parent: []const u8, name: []const u8, task: []
         .ok => |ok| ok,
     };
 
-    // The parent's model unless the definition names one: a persona that does
-    // not care which model runs it should not silently move the work onto
-    // whatever the config's default happens to be.
+    // Three answers to "what runs this", nearest first: what THIS call asked
+    // for, then what the definition says, then what the parent is running on. A
+    // persona that does not care which model runs it should not silently move
+    // the work onto whatever the config's default happens to be — and the caller
+    // knows something neither of the other two do, which is what this piece of
+    // work is worth.
+    //
+    // A pair, never a mix: `--model` is an id WITHIN a profile (DESIGN §9.5), so
+    // taking the profile from one source and the id from another would name a
+    // model that profile does not serve.
     const inherited = parentIdentity(alloc, ctx.io, parent);
-    const profile = if (m.def.profile.len != 0) m.def.profile else inherited.profile;
-    const model = if (m.def.profile.len != 0) m.def.model else inherited.model;
+    const identity: Identity = if (chosen) |ref|
+        .{ .profile = ref.profile, .model = ref.model }
+    else if (m.def.profile.len != 0)
+        .{ .profile = m.def.profile, .model = m.def.model }
+    else
+        inherited;
+    const profile = identity.profile;
+    const model = identity.model;
 
     const self_ref = try selfRef(alloc, ctx.io);
 
@@ -503,6 +544,16 @@ fn newDelegation(ctx: *const Ctx, parent: []const u8, name: []const u8, task: []
         // Straight through, including the credential refusal (DESIGN §9.5): the
         // kernel already says the whole way out, and a second sentence composed
         // here would be a second place that has an opinion about credentials.
+        // The one thing added is where the model reference came from, and only
+        // when it came from the CALL — the caller can retry without it, which is
+        // not obvious from a message about a profile it did not know it named.
+        if (chosen != null) {
+            return rpc.refuse(
+                alloc,
+                "could not open a session for '{s}' on the model you asked for: {s}\n(That was the `model` argument of this call. `nulya config show` lists the profiles that can run; dropping the argument runs '{s}' on its own default.)",
+                .{ m.def.name, detail(created), m.def.name },
+            );
+        }
         return rpc.refuse(alloc, "could not open a session for '{s}': {s}", .{ m.def.name, detail(created) });
     }
     const child = std.mem.trim(u8, created.stdout, " \t\r\n");

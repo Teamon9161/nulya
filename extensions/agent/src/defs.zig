@@ -110,6 +110,26 @@ pub fn isPin(text: []const u8) bool {
     return true;
 }
 
+/// `<profile>` or `<profile>/<model-id>` — the kernel's two flags, which mean
+/// different things (DESIGN §9.5). Naming only the profile is legal and means
+/// "that profile's default model". Null is "this is not a model reference".
+///
+/// TWO CALLERS, ONE SHAPE: a definition's `model:` front matter and the `model`
+/// argument of the `agent` tool. They must be the same string in the same
+/// grammar — the argument's whole purpose is to override the field for one
+/// delegation, and two parsers would be two grammars.
+pub const ModelRef = struct { profile: []const u8, model: []const u8 };
+
+pub fn parseModelRef(value: []const u8) ?ModelRef {
+    const v = std.mem.trim(u8, value, " \t");
+    if (v.len == 0) return null;
+    const at = std.mem.indexOfScalar(u8, v, '/') orelse return .{ .profile = v, .model = "" };
+    const profile = std.mem.trim(u8, v[0..at], " \t");
+    const model = std.mem.trim(u8, v[at + 1 ..], " \t");
+    if (profile.len == 0 or model.len == 0) return null;
+    return .{ .profile = profile, .model = model };
+}
+
 fn unquote(value: []const u8) []const u8 {
     const t = std.mem.trim(u8, value, " \t\r");
     if (t.len >= 2 and (t[0] == '"' or t[0] == '\'') and t[t.len - 1] == t[0]) return t[1 .. t.len - 1];
@@ -183,18 +203,10 @@ pub fn parse(
                 try warn(alloc, warnings, source, "readonly must be true or false, read as false");
             }
         } else if (std.mem.eql(u8, key, "model")) {
-            // `profile` or `profile/model-id`: the kernel's two flags, which mean
-            // different things (DESIGN §9.5). Naming only the profile is legal.
-            const v = unquote(value);
-            if (std.mem.indexOfScalar(u8, v, '/')) |at| {
-                def.profile = std.mem.trim(u8, v[0..at], " \t");
-                def.model = std.mem.trim(u8, v[at + 1 ..], " \t");
-                if (def.profile.len == 0 or def.model.len == 0) {
-                    def.profile = "";
-                    def.model = "";
-                    try warn(alloc, warnings, source, "model must be <profile> or <profile>/<model-id>, ignored");
-                }
-            } else def.profile = v;
+            if (parseModelRef(unquote(value))) |ref| {
+                def.profile = ref.profile;
+                def.model = ref.model;
+            } else try warn(alloc, warnings, source, "model must be <profile> or <profile>/<model-id>, ignored");
         } else if (std.mem.eql(u8, key, "max_steps")) {
             def.max_steps = std.fmt.parseInt(u32, unquote(value), 10) catch 0;
             if (def.max_steps == 0) try warn(alloc, warnings, source, "max_steps must be a positive whole number, ignored");
@@ -599,6 +611,24 @@ test "a session id is checked because it becomes a path" {
     try std.testing.expect(!isPlainSessionId("s-"));
     try std.testing.expect(!isPlainSessionId("nope"));
     try std.testing.expect(!isPlainSessionId("s-../etc/passwd"));
+}
+
+// The front matter field and the `agent` tool's `model` argument are the same
+// string in the same grammar, so this is the whole of both readings.
+test "a model reference is a profile, optionally with an id inside it" {
+    const only_profile = parseModelRef("deepseek").?;
+    try std.testing.expectEqualStrings("deepseek", only_profile.profile);
+    // Empty is "that profile's default", which is not the same as naming one.
+    try std.testing.expectEqualStrings("", only_profile.model);
+
+    const both = parseModelRef(" anthropic / claude-opus-5 ").?;
+    try std.testing.expectEqualStrings("anthropic", both.profile);
+    try std.testing.expectEqualStrings("claude-opus-5", both.model);
+
+    // Half a reference names nothing that can run.
+    try std.testing.expect(parseModelRef("/claude-opus-5") == null);
+    try std.testing.expect(parseModelRef("anthropic/") == null);
+    try std.testing.expect(parseModelRef("   ") == null);
 }
 
 test "a pin has one shape, and a name is one path component" {

@@ -332,3 +332,22 @@ function entry(id: string, current: string, tools: string[]): ExtensionEntry {
     shadowed: false,
   }
 }
+
+test("a tool its package brings into every session reads as on, and this panel will not toggle it", () => {
+  // `[extensions] session_with` puts `--pin ext:agent/agent` on every session
+  // this front end starts (T42). No pin list names it, so the panel used to
+  // draw an empty checkbox about a tool the model was calling all day.
+  const sources = { user: [], session: ["ext:std/read"], merged: [], composed: ["ext:agent/agent"] }
+  expect(pinState("ext:agent/agent", sources)).toBe("composed")
+  expect(stateLabel(pinState("ext:agent/agent", sources))).toBe("with the package")
+  // …and it counts on the face, once, beside the lists.
+  expect(nextFace(sources)).toEqual(["ext:std/read", "ext:agent/agent"])
+
+  // Neither key writes anything: the decision is in `tui.toml`, and a checkbox
+  // that appears to turn it off would be a lie the next session corrects.
+  const off = toggle("ext:agent/agent", sources)
+  expect(off.user).toBeNull()
+  expect(off.session).toBeNull()
+  expect(off.notice).toContain("session_with")
+  expect(promote("ext:agent/agent", sources).session).toBeNull()
+})

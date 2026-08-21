@@ -2411,6 +2411,31 @@ test "bundled agent: materialize freezes a definition idempotently; a delegation
         try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, child) != null);
         try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "as DATA") != null);
     }
+
+    // ⑤ `model` says what THIS delegation runs on (DESIGN §7.8). Two refusals,
+    // both before anything is created: a string that is not a model reference,
+    // and a reference on a FOLLOW-UP — that session froze its identity when it
+    // was created (physics #2), and silently ignoring the argument would be the
+    // worst of the three available answers.
+    {
+        const bad = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"prober\",\"task\":\"go\",\"model\":\"/nope\"}" }, &.{
+            .{ .key = "NULYA_SESSION", .value = session_file },
+        });
+        defer alloc.free(bad.stdout);
+        try std.testing.expectEqual(@as(u8, 1), bad.code);
+        try std.testing.expect(std.mem.indexOf(u8, bad.stdout, "<profile>") != null);
+        try std.testing.expect(std.mem.indexOf(u8, bad.stdout, "config show") != null);
+    }
+    {
+        const args = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"more\",\"model\":\"scripted\"}}", .{child});
+        defer alloc.free(args);
+        const late = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", args }, &.{
+            .{ .key = "NULYA_SESSION", .value = session_file },
+        });
+        defer alloc.free(late.stdout);
+        try std.testing.expectEqual(@as(u8, 1), late.code);
+        try std.testing.expect(std.mem.indexOf(u8, late.stdout, "NEW delegation") != null);
+    }
 }
 
 test "bundled agent: the personas the package ships need no files — list layers workspace over user over builtin and marks what it shadows, and a delegation to the builtin explore runs read-only with the pins its definition asks for" {

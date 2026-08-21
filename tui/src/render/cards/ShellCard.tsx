@@ -2,7 +2,7 @@ import { Show, createMemo } from "solid-js"
 import { useStyle } from "../theme.ts"
 import { CardFrame, sizeNote } from "./CardFrame.tsx"
 import { backgroundStartOf, splitShellOutput } from "../../nulya/ledger.ts"
-import { seconds, taskNamed, useTasks } from "../../state/tasks.ts"
+import { backgroundNote, taskNamed, useTasks } from "../../state/tasks.ts"
 import type { ToolItem } from "../../state/session.ts"
 import type { ToolPresentation } from "../registry.ts"
 
@@ -26,27 +26,8 @@ export function ShellCard(props: { item: ToolItem; presentation: ToolPresentatio
   const started = createMemo(() => backgroundStartOf(props.item.output))
   const tasks = useTasks()
 
-  /**
-   * The note of a background call, from the two sources in the right order: the
-   * ledger's report if it has landed (a fact, and one that survives a reopen),
-   * otherwise the live projection for the seconds ticking. Neither is invented —
-   * with no report and no live row all that can honestly be said is the name.
-   */
-  const backgroundChip = (task: string) => {
-    const done = props.item.taskResult
-    if (done) {
-      const how = done.exitCode === 0 ? "" : ` · exit ${done.exitCode}`
-      return `background ${task}${how}${done.duration ? ` · ${done.duration}` : ""}`
-    }
-    const live = taskNamed(tasks(), task)
-    if (!live) return `background ${task}`
-    if (live.state === "done") {
-      const how = live.exit_code !== null && live.exit_code !== 0 ? ` · exit ${live.exit_code}` : ""
-      return `background ${task}${how}`
-    }
-    if (live.state === "lost") return `background ${task} · lost`
-    return `background ${task} · running${live.elapsed_s !== null ? ` ${seconds(live.elapsed_s)}` : ""}`
-  }
+  /** `background <task> · running 42s` — the shared reading (`state/tasks.ts`). */
+  const backgroundChip = (task: string) => `background ${backgroundNote(task, props.item.taskResult, tasks()).text}`
 
   const chip = () => {
     if (props.item.state === "pending") return "…"

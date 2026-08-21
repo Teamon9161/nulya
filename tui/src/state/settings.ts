@@ -11,6 +11,18 @@ import { join } from "node:path"
 import { default_rules, normalizeMode, type ApprovalRules, type PermissionMode } from "../approvals.ts"
 
 export type FoldDefault = "expanded" | "collapsed"
+/**
+ * `hidden` is the default (T43). Reasoning is not something the model SAID and
+ * not something it DID — it is the provider's own scratch, kept in the ledger
+ * for replay (DESIGN §3.1) — and a collapsed card for it still spends a head
+ * line, a glyph and a fold marker on every single answer, directly above the
+ * answer. What that line was doing for a reader is said better by the status
+ * line, which reads `thinking` while the model is in exactly that state (T38).
+ *
+ * Nothing is lost and nothing is decided for anybody: the reasoning is in the
+ * ledger either way, and `transcript.thinking = "collapsed"` brings the card
+ * back for whoever wants it.
+ */
 export type ThinkingDefault = "expanded" | "collapsed" | "hidden"
 
 export interface Settings {
@@ -25,6 +37,16 @@ export interface Settings {
      * provenance does not earn a fifth of the screen on every session.
      */
     composition: FoldDefault
+    /**
+     * Gather a run of finished, successful, bodyless calls into one line
+     * (T43, `render/runs.ts`). On by default: a model that reads eleven files
+     * before answering should not push what it SAID off the screen.
+     *
+     * Off restores one row per call. It is a boolean and not a fold default
+     * because "summarised but open" and "not summarised" differ by one row of
+     * heading — there is no third thing to say.
+     */
+    run_summary: boolean
     max_width: number
     ascii: boolean
     /**
@@ -113,8 +135,9 @@ export const default_settings: Settings = {
   transcript: {
     edit_diff: "expanded",
     tool_output: "collapsed",
-    thinking: "collapsed",
+    thinking: "hidden",
     composition: "collapsed",
+    run_summary: true,
     max_width: 100,
     ascii: false,
     history_window: 400,
@@ -175,6 +198,7 @@ function mergeLayer(into: Settings, layer: unknown, source: string) {
     if (typeof transcript["max_width"] === "number" && transcript["max_width"] > 0) {
       into.transcript.max_width = Math.floor(transcript["max_width"])
     }
+    if (typeof transcript["run_summary"] === "boolean") into.transcript.run_summary = transcript["run_summary"]
     if (typeof transcript["ascii"] === "boolean") into.transcript.ascii = transcript["ascii"]
     if (typeof transcript["history_window"] === "number" && transcript["history_window"] >= 0) {
       into.transcript.history_window = Math.floor(transcript["history_window"])
