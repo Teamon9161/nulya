@@ -333,7 +333,7 @@ fn activation(listing: []const u8, id: []const u8) Activation {
 /// Driver-facing, and never pinned: the model does not need a catalogue (an
 /// unknown name already comes back with the names that exist), while a driver
 /// needs one to draw a picker and to decide what a checkout brought with it.
-/// This is the ONE reader of the definition format, the way `materialize` is the
+/// This is the ONE reader of the definition format, the way `render` is the
 /// one writer of the rendering — the front end used to parse front matter as
 /// well, and two parsers of one file is two answers to "is this agent read-only".
 fn list(ctx: *const Ctx) !rpc.Outcome {

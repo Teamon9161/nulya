@@ -3,7 +3,7 @@
 //!
 //! Lifted from `extensions/std/src/rpc.zig` (itself lifted from
 //! `extensions/handoff`), which is the same contract — three tools in one binary
-//! dispatched on `params.name`. The one addition is `json`: `materialize` is
+//! dispatched on `params.name`. The one addition is `json`: `render` is
 //! read by a DRIVER rather than by a model, and a driver wants an object it can
 //! parse, not a sentence (the same split `extensions/compact` makes).
 //!

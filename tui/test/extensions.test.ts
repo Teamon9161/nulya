@@ -477,7 +477,7 @@ test("the pins an activation writes come from the manifest, per tool, for a pack
 
   // One package, both answers: the delegation entry point is the model's, the
   // three commands a driver runs are not. A per-PACKAGE list could not say this.
-  expect(pinsOf(pkg("agent", ["agent", "list", "materialize", "run"], ["list", "materialize", "run"]))).toEqual([
+  expect(pinsOf(pkg("agent", ["agent", "list", "render", "run"], ["list", "render", "run"]))).toEqual([
     "ext:agent/agent",
   ])
 

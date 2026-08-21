@@ -72,4 +72,20 @@
 - **sp-b** `04f8343` — `composition.Options.prompts` + `Resolved.prompts`（arena 拷贝）+ `SessionComposition.prompts`（给 header 写入）；`buildSystemPrompts` 在 ext 块之后 / catalog 之前追加；`session.createDurable` 把它写进 header。两条单测：块顺序 + 从 header 用**不存在的 store root** 重建。无偏离。
 - **sp-c** `9437115` — `session new --prompt <file>`（可重复；创建时读字节、`source` = 文件 stem、缺文件/空文件/超 2 MiB → stderr 点名 + exit 1 且**什么都不建**）；`nulya help` session 块改写（仍 51 行，e2e 的一屏预算不动，needle 表加 `--prompt`）；`session list --json` composition 多一列 `prompts`（只有 source 与字节数）。新 e2e 一条覆盖：块顺序 · 跨进程 resume byte-identical · 删掉整个 store root 后照样 resume · fork 不继承 · 两种拒绝 · 投影不泄正文。无偏离。
 - **sp-d** `bc0b81b` — `extensions/agent` 去材料化：`materialize` → **`render`**（只写 `.nulya/scratch/agents/agent-<name>.md` 并回一整组 `session new` 参数，多了 `prompt`/`label`、少了 `id`/`version`/`ref`）；spawn 改 `session new --prompt <file>`；`defs.writeDraft`/`draftPath`/`extensionId`/`userStore` 与 `main.extractVersion` 删除，换成 `promptLabel`/`promptPath`/`writePrompt`；`wornPersona` 改读 header `composition.prompts[].source` 的 `agent-` 前缀。e2e 三处更新 + 新断言：子场 header 有 `"source":"agent-explore"`、成员里没有 `agent-*`、store 里 `.nulya/extensions/agent-*` 不存在。无偏离。
-- **sp-e** `<pending>` — TUI 跟随：`sessionNew` / `SessionExtras` 长出 `prompt`；`materializeAgent` → `renderAgent`（`MaterializedAgent` → `RenderedAgent`，`ref` 换成 `prompt`+`label`，`agentExtensionId` 删除）；`startAgent` 改传 `prompt: [m.prompt]`、不再 `bring` 派生包；TS 侧 header/`session list` 类型各加 `prompts` 投影，`wearing()`（状态栏 `◈`）与 `delegate.test` 的 `agentSession()` 改读它。`/ext` 零改动。快照零变更。无偏离。
+- **sp-e** `63c6501` — TUI 跟随：`sessionNew` / `SessionExtras` 长出 `prompt`；`materializeAgent` → `renderAgent`（`MaterializedAgent` → `RenderedAgent`，`ref` 换成 `prompt`+`label`，`agentExtensionId` 删除）；`startAgent` 改传 `prompt: [m.prompt]`、不再 `bring` 派生包；TS 侧 header/`session list` 类型各加 `prompts` 投影，`wearing()`（状态栏 `◈`）与 `delegate.test` 的 `agentSession()` 改读它。`/ext` 零改动。快照零变更。无偏离。
+- **sp-f** `303a6b2` — 文档：DESIGN §3.4（header 形状 + `prompts` 那段"冻字节不冻引用"）· **新 §5.6**（system blocks 三个来源的表 + 那把尺子 + 块顺序 + fork 不继承）· §7.2.1 的 `audience` 例子 · §7.8（`agent` 四个 tool 改名、新增"persona 不是 extension"一段、四道门措辞）· §14（命令表 `--prompt` 行、`session new --prompt` 条目、`session list --json` 投影）；PLAN §3.2 修正段标 ✅ 并对齐落地；CLAUDE.md（新增一条现状 + T32 条目改写 + 模块表 `ledger.zig` / `composition.zig` 两行）；tui.md §5.10 四处改写 + **新 T44**；顺手把 `rpc.zig` / `main.zig` / 两个 TS fixture 里遗留的 `materialize` 字样改掉。无偏离。
+
+### 最终测试结果（本机 Linux，Zig 0.16，分支 `session-prompt`，未 push）
+
+| 命令 | 结果 |
+|---|---|
+| `zig build test` | **468 pass / 0 fail**（321 + 138 + 9 三个 test binary：`src` 聚合、`extensions/std` 纯逻辑、`extensions/agent/src/defs.zig`） |
+| `zig build e2e` | **74 pass / 0 fail** |
+| `cd tui && bun test` | **356 pass / 1 fail**，357 across 38 files，32 snapshots——唯一的失败是 `test/plugin.test.tsx` 的 `wear, run and skill each land on the path…`：它的 fixture 要 `interpreter: "powershell"`，本机没装 pwsh；**在本 commit 之前的干净工作树上实测同样红**（本轮开工前 stash 验证过），不是本契约弄坏的 |
+| `bunx tsc --noEmit` | 干净 |
+
+**快照**：零变更（32 个 snapshot 全部沿用——本契约没有动任何一行的画法）。
+
+**完成标准逐条核对（§2）**：① 三套测试如上 ✅（bun 那条除已知恒红项）· ② resume byte-identical 有 e2e 钉死，含"删掉整个 store root 后照样 resume"那条自证；老 header 兼容由 `ledger.zig` 的 newer-writer 容忍测试钉死；既有断言只加不减（`cli.zig` 的 needle 表多了 `--prompt`，一屏 51 行预算不动）✅ · ③ 委派产生的子场：header 有 `"source":"agent-explore"`、成员里没有 `agent-*`、`.nulya/extensions/agent-*` 不存在，三条都在 `tests/e2e/extension.zig` 里 ✅ · ④ 文档与代码同 commit，六个 `sp-x:` commit 在分支 `session-prompt` 上，**未 push** ✅。
+
+**无 BLOCKED，无偏离契约之处。**

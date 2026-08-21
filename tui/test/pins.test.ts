@@ -190,7 +190,7 @@ test("the list holds only rows with a checkbox, and says how many it folded", ()
   // whole package was driver-only because its id was on a list here, and its
   // delegation entry point was folded away with the rest.
   const entries: ExtensionEntry[] = [
-    { ...entry("agent", "v-1", ["agent", "list", "materialize", "run"]), driverTools: ["list", "materialize", "run"] },
+    { ...entry("agent", "v-1", ["agent", "list", "render", "run"]), driverTools: ["list", "render", "run"] },
     { ...entry("compact", "v-1", ["compact"]), driverTools: ["compact"] },
     entry("std", "v-1", ["read", "grep"]),
   ]
