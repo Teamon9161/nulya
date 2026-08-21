@@ -386,9 +386,28 @@ pub const ExtensionRef = struct {
 ///
 /// `native_tools` is the subset of stable tool ids exposed directly to the
 /// model this session (DESIGN §5.1).
+///
+/// `prompts` is the per-session system prompt text handed to `session new
+/// --prompt <file>` — bytes, not a reference. Empty for every session that did
+/// not ask for one, which is why the field is optional-by-default rather than a
+/// header version bump.
 pub const FrozenComposition = struct {
     active: []const ExtensionRef = &.{},
     native_tools: []const []const u8 = &.{},
+    prompts: []const InlinePrompt = &.{},
+};
+
+/// One system prompt frozen into the header by VALUE (DESIGN §3, §5).
+///
+/// Text whose lifetime is one session's has its home in the session file, the
+/// way `ModelDescriptor` does: a store reference would make resume depend on a
+/// shared artifact still being there (`ext prune` would break it) and a file
+/// path would drift. `source` is an opaque label the kernel only carries — it
+/// names the block in `PromptIR` and never means anything to the kernel; who
+/// wrote it decides what it says.
+pub const InlinePrompt = struct {
+    source: []const u8 = "",
+    text: []const u8 = "",
 };
 
 /// The RESOLVED model identity frozen at session creation (DESIGN §3, physics
@@ -1071,6 +1090,7 @@ const sample_header: Header = .{
     .composition = .{
         .active = &.{.{ .id = "web.search", .version = "v-0123456789abcdef01234567" }},
         .native_tools = &.{"ext:web.search/web_search"},
+        .prompts = &.{.{ .source = "agent-explore", .text = "You are a scout.\n" }},
     },
 };
 
@@ -1099,6 +1119,10 @@ test "header encode/parse round-trips every field" {
     try std.testing.expectEqualStrings("v-0123456789abcdef01234567", h.composition.active[0].version);
     try std.testing.expectEqual(@as(usize, 1), h.composition.native_tools.len);
     try std.testing.expectEqualStrings("ext:web.search/web_search", h.composition.native_tools[0]);
+    // The inline prompt rides as VALUE, so resume needs nothing but this file.
+    try std.testing.expectEqual(@as(usize, 1), h.composition.prompts.len);
+    try std.testing.expectEqualStrings("agent-explore", h.composition.prompts[0].source);
+    try std.testing.expectEqualStrings("You are a scout.\n", h.composition.prompts[0].text);
 }
 
 test "a root header has a null parent after round-trip; unknown fields are ignored" {
@@ -1117,6 +1141,9 @@ test "a root header has a null parent after round-trip; unknown fields are ignor
     // an EMPTY stamp: unknown, which is never a mismatch to warn about.
     try std.testing.expectEqualStrings("", newer.value.nulya.version);
     try std.testing.expectEqualStrings("", newer.value.nulya.kernel_hash);
+    // Same for a header written before inline prompts existed: no field, no
+    // prompts — the header `v` stays 1 because the old meanings all still hold.
+    try std.testing.expectEqual(@as(usize, 0), newer.value.composition.prompts.len);
 }
 
 test "a header from a future ledger version is refused, not read as v1" {

@@ -67,4 +67,5 @@
 
 ## 6. 进度区（执行时更新）
 
-（待开工）
+- **checkpoint** `5921c05` — 工作树里与本契约无关的未提交改动（tui T43 等）原样落盘；本文件（未跟踪）一并进这个 commit。
+- **sp-a** `<pending>` — `ledger.InlinePrompt` + `FrozenComposition.prompts`（默认空 slice，header `v` 仍 1）；roundtrip 测试带 prompts、老 header 读回空。无偏离。
