@@ -45,14 +45,15 @@ test "cli help: help / --help / -h print the same usage covering every verb fami
     // omits them sends the model guessing at exactly the two decisions it has to
     // make (compose a version in, put a tool on the tool face).
     for ([_][]const u8{
-        "ext init",     "--script",     "ext build", "ext run",        "--arg",
-        "ext activate", "--user",       "ext trust", "ext api",        "ext sync",
-        "ext seed",     "ext prune",    "--dry-run", "--activate",     "session new",
-        "--with",       "--pin",        "--parent",  "session step",   "--max-steps",
-        "--effort",     "--stream",     "--gate",    "session events", "session cancel",
-        "outcome",      "session list", "--image",   "config show",    "config refresh",
-        "skill load",   "src",          "toolchain", "help",           "demo",
-        "task run",     "task list",    "wait",      "retarget",       "--running",
+        "ext init",       "--script",   "ext build",    "ext run",    "--arg",
+        "ext activate",   "--user",     "ext trust",    "ext api",    "ext sync",
+        "ext seed",       "ext prune",  "--dry-run",    "--activate", "session new",
+        "--with",         "--pin",      "--parent",     "--prompt",   "session step",
+        "--max-steps",    "--effort",   "--stream",     "--gate",     "session events",
+        "session cancel", "outcome",    "session list", "--image",    "config show",
+        "config refresh", "skill load", "src",          "toolchain",  "help",
+        "demo",           "task run",   "task list",    "wait",       "retarget",
+        "--running",
     }) |needle| {
         std.testing.expect(std.mem.indexOf(u8, help.stdout, needle) != null) catch |err| {
             std.debug.print("`nulya help` never mentions '{s}'\n", .{needle});

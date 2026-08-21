@@ -69,4 +69,5 @@
 
 - **checkpoint** `5921c05` — 工作树里与本契约无关的未提交改动（tui T43 等）原样落盘；本文件（未跟踪）一并进这个 commit。
 - **sp-a** `b6763ea` — `ledger.InlinePrompt` + `FrozenComposition.prompts`（默认空 slice，header `v` 仍 1）；roundtrip 测试带 prompts、老 header 读回空。无偏离。
-- **sp-b** `<pending>` — `composition.Options.prompts` + `Resolved.prompts`（arena 拷贝）+ `SessionComposition.prompts`（给 header 写入）；`buildSystemPrompts` 在 ext 块之后 / catalog 之前追加；`session.createDurable` 把它写进 header。两条单测：块顺序 + 从 header 用**不存在的 store root** 重建。无偏离。
+- **sp-b** `04f8343` — `composition.Options.prompts` + `Resolved.prompts`（arena 拷贝）+ `SessionComposition.prompts`（给 header 写入）；`buildSystemPrompts` 在 ext 块之后 / catalog 之前追加；`session.createDurable` 把它写进 header。两条单测：块顺序 + 从 header 用**不存在的 store root** 重建。无偏离。
+- **sp-c** `<pending>` — `session new --prompt <file>`（可重复；创建时读字节、`source` = 文件 stem、缺文件/空文件/超 2 MiB → stderr 点名 + exit 1 且**什么都不建**）；`nulya help` session 块改写（仍 51 行，e2e 的一屏预算不动，needle 表加 `--prompt`）；`session list --json` composition 多一列 `prompts`（只有 source 与字节数）。新 e2e 一条覆盖：块顺序 · 跨进程 resume byte-identical · 删掉整个 store root 后照样 resume · fork 不继承 · 两种拒绝 · 投影不泄正文。无偏离。

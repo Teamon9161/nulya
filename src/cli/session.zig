@@ -18,6 +18,7 @@ const journal = @import("../journals/journal.zig");
 const outcome = @import("../journals/outcome.zig");
 const config = @import("../config.zig");
 const ledger = @import("../ledger.zig");
+const prompt = @import("../prompt.zig");
 const session = @import("../session.zig");
 const loop = @import("../loop.zig");
 const provider = @import("../provider.zig");
@@ -163,6 +164,60 @@ fn pinRefs(alloc: std.mem.Allocator, configured: []const []const u8, args: []con
         i += 1;
     }
     return out.toOwnedSlice(alloc);
+}
+
+/// Every `--prompt <file>` (repeatable), read HERE, at creation time, into the
+/// bytes the header freezes (DESIGN §3, §5). A path or a store id would make the
+/// session's identity text depend on something outside the session file staying
+/// put; the bytes do not.
+///
+/// Null means the request was refused and the reason is already on stderr —
+/// before a session id exists, so nothing was created (the same discipline as a
+/// missing credential). The caller owns the array and every string in it.
+fn promptRefs(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !?[]ledger.InlinePrompt {
+    var out: std.ArrayList(ledger.InlinePrompt) = .empty;
+    // Covers both ways this can end early — a refusal and an allocation failure
+    // — because a successful `toOwnedSlice` leaves the list empty and this
+    // frees nothing.
+    defer {
+        freePrompts(alloc, out.items);
+        out.deinit(alloc);
+    }
+    var i: usize = 0;
+    while (i + 1 < args.len) : (i += 1) {
+        if (!std.mem.eql(u8, args[i], "--prompt")) continue;
+        const path = args[i + 1];
+        i += 1;
+        // The same limit composition reads an extension's system prompt with, so
+        // a file accepted here is a file every later session boundary can carry.
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(prompt.max_system_prompt_bytes)) catch |err| {
+            const why = switch (err) {
+                error.FileNotFound => "no such file",
+                error.StreamTooLong => "larger than the 2 MiB system prompt limit",
+                error.IsDir => "is a directory",
+                error.AccessDenied => "cannot be read",
+                else => @errorName(err),
+            };
+            try printErrFmt(alloc, io, "--prompt {s}: {s}\n", .{ path, why });
+            return null;
+        };
+        if (bytes.len == 0) {
+            alloc.free(bytes);
+            try printErrFmt(alloc, io, "--prompt {s}: file is empty\n", .{path});
+            return null;
+        }
+        // The label the block carries for the rest of the session's life. The
+        // kernel never reads it; whoever wrote the file decides what it means.
+        try out.append(alloc, .{ .source = try alloc.dupe(u8, std.fs.path.stem(path)), .text = bytes });
+    }
+    return try out.toOwnedSlice(alloc);
+}
+
+fn freePrompts(alloc: std.mem.Allocator, prompts: []const ledger.InlinePrompt) void {
+    for (prompts) |p| {
+        alloc.free(p.source);
+        alloc.free(p.text);
+    }
 }
 
 fn containsString(haystack: []const []const u8, needle: []const u8) bool {
@@ -333,6 +388,14 @@ pub fn createSession(
         identity = launch.resolveDescriptor(alloc, io, cfg.provider, &host, profile, model_id);
     }
 
+    // Read before anything exists on disk: a `--prompt` that cannot be read must
+    // leave no session behind at all (D8 — the missing-credential discipline).
+    const prompts = (try promptRefs(alloc, io, args)) orelse return null;
+    defer {
+        freePrompts(alloc, prompts);
+        alloc.free(prompts);
+    }
+
     const id = try launch.genSessionId(alloc, io);
     defer alloc.free(id);
     const created = try journal.rfc3339Now(alloc, io);
@@ -382,6 +445,7 @@ pub fn createSession(
             .pinned_native_tools = pins,
             .max_tools = cfg.registry.max_tools,
             .with = with,
+            .prompts = prompts,
         },
     }, .{
         .workspace = std.Io.Dir.cwd(),

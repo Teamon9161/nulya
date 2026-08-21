@@ -53,6 +53,16 @@ const SessionView = struct {
         /// system blocks of every session it is in should be readable from the
         /// listing, not only from the manifest.
         system_prompts: []const []const u8,
+        /// The per-session prompts frozen into the header by `--prompt`
+        /// (DESIGN §3, §5) — their labels and sizes only. A listing says WHICH
+        /// session is which; the text itself is the session's own content, and
+        /// `nulya session events` is where content is read.
+        prompts: []const InlinePromptView,
+    };
+
+    const InlinePromptView = struct {
+        source: []const u8,
+        bytes: usize,
     };
 
     const OutcomeView = struct {
@@ -173,6 +183,9 @@ fn readSessionView(
     const active = try a.alloc([]const u8, h.composition.active.len);
     for (h.composition.active, active) |ref, *out| out.* = try std.fmt.allocPrint(a, "{s}@{s}", .{ ref.id, ref.version });
 
+    const inline_prompts = try a.alloc(SessionView.InlinePromptView, h.composition.prompts.len);
+    for (h.composition.prompts, inline_prompts) |p, *out| out.* = .{ .source = p.source, .bytes = p.text.len };
+
     const id = file_name[0 .. file_name.len - ".jsonl".len];
     const latest = outcome.latestFor(outcomes, id);
     return .{
@@ -191,6 +204,7 @@ fn readSessionView(
             .active = active,
             .native_tools = h.composition.native_tools,
             .system_prompts = try prompts.forActive(a, h.composition.active),
+            .prompts = inline_prompts,
         },
         .usage = total,
         .episode_usage = total,
@@ -359,7 +373,7 @@ test "resolveEpisodes walks a fork chain to its root and totals the episode's us
                 .model_id = "",
                 .nulya = .{},
                 .events = 0,
-                .composition = .{ .active = &.{}, .native_tools = &.{}, .system_prompts = &.{} },
+                .composition = .{ .active = &.{}, .native_tools = &.{}, .system_prompts = &.{}, .prompts = &.{} },
                 .usage = .{ .input_tokens = input },
                 .episode_usage = .{},
                 .first_user_text = "",

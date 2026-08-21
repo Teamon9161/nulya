@@ -177,10 +177,10 @@ pub const ext_usage =
 ;
 
 pub const session_usage =
-    \\  nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--with <id>[@<ver>]]… [--pin ext:<id>/<tool>]…
-    \\                                                    freeze composition + model, print a new session id; --with composes
-    \\                                                    a built version in, --pin puts one of its tools on the model's tool
-    \\                                                    face, --parent continues that session as a fork
+    \\  nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--with <id>[@<ver>]]… [--pin ext:<id>/<tool>]… [--prompt <file>]…
+    \\                                                    freeze composition + model, print a new session id; --with composes a built
+    \\                                                    version in, --pin puts one of its tools on the model's tool face, --parent
+    \\                                                    forks that session, --prompt freezes a file as this session's system prompt
     \\  nulya session append <id> [<text> | --file <p>] [--image <p>]…
     \\                                                    queue a user turn for the next step boundary; --image inlines a
     \\                                                    png/jpeg ≤5 MB, if the model's catalog entry says vision = true

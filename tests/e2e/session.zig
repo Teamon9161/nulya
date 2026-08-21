@@ -1175,6 +1175,181 @@ test "session cli: --with pins a built-but-not-activated version into one sessio
     }
 }
 
+/// How many session files exist right now — the check behind "a refused
+/// `session new` creates nothing".
+fn countSessions(io: std.Io, ws: std.Io.Dir) !usize {
+    var dir = ws.openDir(io, sessions_dir_rel, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return 0,
+        else => return err,
+    };
+    defer dir.close(io);
+    var n: usize = 0;
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".jsonl")) n += 1;
+    }
+    return n;
+}
+
+test "session cli: --prompt freezes a file's bytes into the header, blocks land after the members', and a resume survives losing the whole store" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var ws_real: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
+
+    // A member package contributing one system prompt and one skill, so the
+    // ordering claim (kernel → members → inline → catalog) has all four kinds.
+    const mode_dir = ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "mode.demo";
+    try ws.createDirPath(io, mode_dir ++ std.fs.path.sep_str ++ "prompts");
+    try ws.createDirPath(io, mode_dir ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "mode-recipes");
+    try ws.writeFile(io, .{ .sub_path = mode_dir ++ std.fs.path.sep_str ++ "extension.json", .data =
+        \\{"schema":"nulya.extension/v2","id":"mode.demo","contributes":{"system_prompts":["prompts/mode.md"],"skills":["skills/mode-recipes"]}}
+    });
+    try ws.writeFile(io, .{ .sub_path = mode_dir ++ std.fs.path.sep_str ++ "prompts" ++ std.fs.path.sep_str ++ "mode.md", .data = "You are running in demo mode.\n" });
+    try ws.writeFile(io, .{ .sub_path = mode_dir ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "mode-recipes" ++ std.fs.path.sep_str ++ "SKILL.md", .data = "---\nname: mode-recipes\ndescription: recipes for demo mode\n---\nthe recipes\n" });
+
+    const built = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "build", ".nulya/extensions/mode.demo" });
+    defer alloc.free(built.stdout);
+    try std.testing.expectEqual(@as(u8, 0), built.code);
+    const version = try extractVersion(alloc, built.stdout);
+    defer alloc.free(version);
+
+    const persona_text = "You are a scout. Report what you find.\n";
+    const brief_text = "Today's brief: read only.\n";
+    try ws.writeFile(io, .{ .sub_path = "persona.md", .data = persona_text });
+    try ws.writeFile(io, .{ .sub_path = "brief.txt", .data = brief_text });
+    try ws.writeFile(io, .{ .sub_path = "empty.md", .data = "" });
+
+    const with_arg = try std.fmt.allocPrint(alloc, "mode.demo@{s}", .{version});
+    defer alloc.free(with_arg);
+    const created = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--with", with_arg, "--prompt", "persona.md", "--prompt", "brief.txt" });
+    defer alloc.free(created.stdout);
+    try std.testing.expectEqual(@as(u8, 0), created.code);
+    const id = try alloc.dupe(u8, std.mem.trim(u8, created.stdout, " \r\n"));
+    defer alloc.free(id);
+
+    // The BYTES are in the header, not a path and not a store id: this file is
+    // the whole of what the session needs to say who it is.
+    const header = try readSessionFile(alloc, io, ws, id);
+    defer alloc.free(header);
+    try std.testing.expect(std.mem.indexOf(u8, header, "\"source\":\"persona\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, header, "You are a scout.") != null);
+    // The label is the file's stem, extension and directory dropped, and the
+    // kernel never reads what it says.
+    try std.testing.expect(std.mem.indexOf(u8, header, "\"source\":\"brief\"") != null);
+
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+    var model = EndTurnModel{};
+    const opts: session.AgentSession.Options = .{
+        .model = .{ .ptr = &model, .vtable = &EndTurnModel.vtable },
+        .step_ctx = .{
+            .tool_context = .{ .environment = lenv.environment(), .cwd = ws_path },
+            .scratch_dir = ".nulya/scratch",
+        },
+    };
+    const spath = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{id});
+    defer alloc.free(spath);
+    {
+        // Another process wrote that header; this one rebuilds the system blocks
+        // from it alone, and they are byte-identical to the files that were read
+        // at creation.
+        var resumed = try session.AgentSession.openDurable(alloc, opts, .{ .workspace = ws, .session_path = spath });
+        defer resumed.deinit();
+        const blocks = resumed.composition.system_prompts.blocks;
+        try std.testing.expectEqual(@as(usize, 5), blocks.len);
+        try std.testing.expectEqualStrings("kernel", blocks[0].source);
+        try std.testing.expectEqualStrings("You are running in demo mode.\n", blocks[1].bytes);
+        try std.testing.expectEqualStrings("persona", blocks[2].source);
+        try std.testing.expectEqualStrings(persona_text, blocks[2].bytes);
+        try std.testing.expectEqualStrings("brief", blocks[3].source);
+        try std.testing.expectEqualStrings(brief_text, blocks[3].bytes);
+        try std.testing.expectEqualStrings("skills:catalog", blocks[4].source);
+    }
+
+    // The listing names them and sizes them; the text itself stays in the
+    // session file, which is where a session's content is read.
+    {
+        const listed = try runCli(alloc, io, ws, &.{ exe_abs, "session", "list", "--json" });
+        defer alloc.free(listed.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, listed.stdout, "You are a scout.") == null);
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, listed.stdout, .{});
+        defer parsed.deinit();
+        const composed = parsed.value.object.get("sessions").?.array.items[0].object.get("composition").?.object;
+        const inline_prompts = composed.get("prompts").?.array.items;
+        try std.testing.expectEqual(@as(usize, 2), inline_prompts.len);
+        try std.testing.expectEqualStrings("persona", inline_prompts[0].object.get("source").?.string);
+        try std.testing.expectEqual(@as(i64, @intCast(persona_text.len)), inline_prompts[0].object.get("bytes").?.integer);
+    }
+
+    // A fork does not inherit it: `--prompt` is the caller's argument, the way
+    // `--with` is, and a new session is where today's answer is given again.
+    {
+        const parent_ref = try std.fmt.allocPrint(alloc, "{s}:0", .{id});
+        defer alloc.free(parent_ref);
+        const fork = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--parent", parent_ref });
+        defer alloc.free(fork.stdout);
+        try std.testing.expectEqual(@as(u8, 0), fork.code);
+        const fork_id = try alloc.dupe(u8, std.mem.trim(u8, fork.stdout, " \r\n"));
+        defer alloc.free(fork_id);
+        const fork_header = try readSessionFile(alloc, io, ws, fork_id);
+        defer alloc.free(fork_header);
+        try std.testing.expect(std.mem.indexOf(u8, fork_header, "\"prompts\":[]") != null);
+    }
+
+    // An unreadable `--prompt` refuses and leaves NOTHING behind — the same
+    // discipline as a profile with no credential.
+    {
+        const before = try countSessions(io, ws);
+        const missing = try runCliStderr(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--prompt", "nope.md" }, &.{});
+        defer alloc.free(missing);
+        try std.testing.expect(std.mem.indexOf(u8, missing, "nope.md") != null);
+        const empty = try runCliStderr(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--prompt", "empty.md" }, &.{});
+        defer alloc.free(empty);
+        try std.testing.expect(std.mem.indexOf(u8, empty, "empty.md") != null);
+        try std.testing.expectEqual(before, try countSessions(io, ws));
+
+        const run = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--prompt", "nope.md" });
+        defer alloc.free(run.stdout);
+        try std.testing.expectEqual(@as(u8, 1), run.code);
+        try std.testing.expectEqual(@as(usize, 0), run.stdout.len);
+    }
+
+    // The self-proof: a session with no members and one `--prompt`, resumed
+    // after the entire extension store is gone. Bytes in the header owe the
+    // store nothing — which a reference would not have managed (`ext prune`
+    // would have broken it).
+    {
+        const alone = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--prompt", "persona.md" });
+        defer alloc.free(alone.stdout);
+        try std.testing.expectEqual(@as(u8, 0), alone.code);
+        const alone_id = try alloc.dupe(u8, std.mem.trim(u8, alone.stdout, " \r\n"));
+        defer alloc.free(alone_id);
+
+        try ws.deleteTree(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions");
+
+        const alone_path = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{alone_id});
+        defer alloc.free(alone_path);
+        var resumed = try session.AgentSession.openDurable(alloc, opts, .{ .workspace = ws, .session_path = alone_path });
+        defer resumed.deinit();
+        const blocks = resumed.composition.system_prompts.blocks;
+        try std.testing.expectEqual(@as(usize, 2), blocks.len);
+        try std.testing.expectEqualStrings("kernel", blocks[0].source);
+        try std.testing.expectEqualStrings("persona", blocks[1].source);
+        try std.testing.expectEqualStrings(persona_text, blocks[1].bytes);
+    }
+}
+
 // ── M5d: `ext build` lands under the store root, by manifest id ─────────────
 
 /// A model that prices every turn, so the ledger has a real cost to record.
