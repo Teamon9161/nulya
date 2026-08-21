@@ -101,6 +101,12 @@ export interface SessionExtras {
   with?: readonly string[]
   /** `--pin ext:<id>/<tool>`: a native slot on the model's tool face. */
   pin?: readonly string[]
+  /**
+   * `--prompt <file>`: a file whose bytes become this session's own system
+   * prompt, frozen into its header. Nothing is installed — a sub-agent persona
+   * is what wants this (`agents.ts`).
+   */
+  prompt?: readonly string[]
   /** The step budget the resulting tab drives with (`OpenOptions.maxSteps`). */
   maxSteps?: number
 }
@@ -301,6 +307,7 @@ export function createTabStore(ws: Workspace, first: FirstTab, options: TabStore
         ...(pick ? { profile: pick.profile, model: pick.model } : {}),
         ...(members.length > 0 ? { with: members } : {}),
         ...(pins.length > 0 ? { pin: pins } : {}),
+        ...((extra.prompt?.length ?? 0) > 0 ? { prompt: extra.prompt } : {}),
       })
       return replace(draft.key, id, {
         created: true,

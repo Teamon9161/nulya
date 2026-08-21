@@ -131,6 +131,15 @@ export interface NewSessionOptions {
    * away. The TUI's own pin panel writes these from `tui-state.json`.
    */
   pin?: readonly string[]
+  /**
+   * `--prompt <file>`, repeatable: freeze a file's bytes into THIS session's
+   * system blocks (DESIGN §3, §5). Nothing is installed and nothing is
+   * versioned — which is the whole difference from `with`: text that only this
+   * session has a use for lives in this session's header, so no later `ext
+   * prune` can take it away from a resume. A sub-agent persona is the first
+   * caller (`agents.ts`).
+   */
+  prompt?: readonly string[]
 }
 
 /** `nulya session new` — stdout is the session id. `env` is a test seam (`NULYA_HOME`). */
@@ -145,6 +154,7 @@ export async function sessionNew(
   if (options.parent) args.push("--parent", `${options.parent.session}:${options.parent.seq}`)
   for (const ref of options.with ?? []) args.push("--with", ref)
   for (const pin of options.pin ?? []) args.push("--pin", pin)
+  for (const file of options.prompt ?? []) args.push("--prompt", file)
   const result = await run(ws, args, env)
   const id = result.stdout.trim()
   if (result.code !== 0 || !id.startsWith("s-")) fail("session new failed", result)
@@ -302,7 +312,17 @@ export interface SessionListEntry {
   provider: string
   model_id: string
   events: number
-  composition: { active: string[]; native_tools: string[] }
+  composition: {
+    active: string[]
+    native_tools: string[]
+    /**
+     * The per-session system prompts frozen into this session's header
+     * (`session new --prompt`, DESIGN §3): their labels and sizes, never the
+     * text — a listing says WHICH session is which. A sub-agent persona is the
+     * first thing that shows up here (`agents.ts`).
+     */
+    prompts: { source: string; bytes: number }[]
+  }
   /** Every recorded step's cost, summed. Steps the provider never priced add nothing. */
   usage: Usage
   first_user_text: string
@@ -340,6 +360,7 @@ export async function sessionList(ws: Workspace, env?: Record<string, string>): 
     composition: {
       active: row.composition?.active ?? [],
       native_tools: row.composition?.native_tools ?? [],
+      prompts: row.composition?.prompts ?? [],
     },
     usage: { ...no_usage, ...(row.usage ?? {}) },
     first_user_text: row.first_user_text ?? "",

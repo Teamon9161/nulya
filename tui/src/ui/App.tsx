@@ -98,11 +98,11 @@ import {
   agent_pin,
   agentPick,
   listAgents,
-  materializeAgent,
+  renderAgent,
   readonlyCeiling,
   usableAgents,
   type AgentEntry,
-  type MaterializedAgent,
+  type RenderedAgent,
 } from "../agents.ts"
 import { createKeymap, matches } from "../keymap.ts"
 import type { AttachOptions } from "../state/attach.ts"
@@ -399,7 +399,7 @@ export function App(props: AppProps) {
    * the persona, but the ceiling was never in the ledger and this front end must
    * not pretend it was.
    */
-  const agentOf = new Map<string, MaterializedAgent>()
+  const agentOf = new Map<string, RenderedAgent>()
   /**
    * The packages this front end composes sessions with, resolved once each and
    * shared. Compiled ones cost a toolchain run the first time on a machine,
@@ -925,7 +925,10 @@ export function App(props: AppProps) {
    *
    * A draft has only its `--with` ref (nothing is frozen yet, and the version is
    * not built into a manifest this side can read); a started session has the
-   * frozen contributions, which say which members actually contribute a prompt.
+   * frozen contributions, which say which members actually contribute a prompt
+   * — plus whatever `--prompt` froze into its header by value, which is a system
+   * prompt this session wears by exactly the same measure and belongs to no
+   * package at all (a sub-agent persona is the one that does this).
    */
   const wearing = (): string[] => {
     const here = tab()
@@ -933,7 +936,10 @@ export function App(props: AppProps) {
       const bring = here.bring()
       return bring ? [bring.id] : []
     }
-    return here.contributions().filter((c) => c.systemPrompts.length > 0).map((c) => c.id)
+    return [
+      ...here.contributions().filter((c) => c.systemPrompts.length > 0).map((c) => c.id),
+      ...(snapshot().header?.composition.prompts ?? []).map((p) => p.source),
+    ]
   }
 
   /** What a draft tab's first message would freeze — the welcome screen's facts. */
@@ -1695,11 +1701,11 @@ export function App(props: AppProps) {
    * Start a delegation: build the persona, open a tab on a session wearing it,
    * and send the task.
    *
-   * Every part of it is something this front end already does — `ext build` a
-   * draft (`/evolve`), `session new --with` the exact version (`/evolve`),
-   * `--pin` a tool face (T12), `--max-steps` a run (the driver's own option) —
-   * which is the point: a sub-agent is a `session new` with a particular set of
-   * arguments (PLAN §3.2), and there is nothing here the kernel had to grow.
+   * Every part of it is something this front end already does — `session new
+   * --prompt` a file, `--with` the packages its pins imply (`/evolve`), `--pin`
+   * a tool face (T12), `--max-steps` a run (the driver's own option) — which is
+   * the point: a sub-agent is a `session new` with a particular set of arguments
+   * (PLAN §3.2), and there is nothing here the kernel had to grow.
    *
    * A visible tab rather than a hidden run, because a delegation that goes wrong
    * is a delegation somebody has to be able to watch, cancel and read afterwards.
@@ -1709,18 +1715,18 @@ export function App(props: AppProps) {
       setNotice(`'${entry.name}' came with this checkout and was not trusted · its prompt would enter a session here · answer the question again by clearing asked_agents in tui-state.json`)
       return null
     }
-    setNotice(`agent ${entry.name} · building its prompt…`)
+    setNotice(`agent ${entry.name} · rendering its prompt…`)
     const pkg = await agentPackage()
     if (!pkg) {
       setNotice("the agent package could not be built here · /ext for what it said")
       return null
     }
-    let m: MaterializedAgent
+    let m: RenderedAgent
     try {
-      // The package renders and freezes the definition, and checks that the
-      // packages its pins name can be brought in — one implementation of both,
-      // and the same one the model reaches through the `agent` tool.
-      m = await materializeAgent(props.ws, pkg, entry.name)
+      // The package renders the definition and checks that the packages its
+      // pins name can be brought in — one implementation of both, and the same
+      // one the model reaches through the `agent` tool.
+      m = await renderAgent(props.ws, pkg, entry.name)
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error))
       return null
@@ -1730,9 +1736,13 @@ export function App(props: AppProps) {
     const pick =
       agentPick(m) ??
       (inherited ? { profile: inherited.profile, ...(inherited.model ? { model: inherited.model } : {}) } : undefined)
-    const draft = tabs.draft({ ...(pick ? { pick } : {}), bring: parseWithRef(m.ref) ?? undefined })
+    const draft = tabs.draft(pick ? { pick } : {})
     try {
       const child = await tabs.materialize(draft, {
+        // The persona rides as BYTES the header freezes (DESIGN §3): nothing is
+        // installed, so `/ext` gains nothing and no `ext prune` can take this
+        // session's own identity text away from its resume.
+        prompt: [m.prompt],
         // A pin needs its package to be a MEMBER of the session (DESIGN §5.1),
         // and the child composes from scratch: the ids its pins name come along
         // as `--with`, at the store's `current`.

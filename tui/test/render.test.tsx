@@ -275,7 +275,7 @@ const header_fixture: SessionHeader = {
     api_key_env: "ANTHROPIC_API_KEY",
   },
   created: "2026-08-16T14:02:11Z",
-  composition: { active: [{ id: "lint", version: "v-3f2a91" }], native_tools: ["ext:lint/lint_zig"] },
+  composition: { active: [{ id: "lint", version: "v-3f2a91" }], native_tools: ["ext:lint/lint_zig"], prompts: [] },
 }
 const edit_item: TranscriptItem = {
   key: "e6:c3",
@@ -705,6 +705,7 @@ test("the composition card wraps its rows instead of letting them be shrunk", as
               { id: "std", version: "v-04322ca65993627ff40136c6" },
             ],
             native_tools: ["ext:std/read", "ext:std/write", "ext:std/grep"],
+            prompts: [],
           },
         }}
         contributions={card_contributions}

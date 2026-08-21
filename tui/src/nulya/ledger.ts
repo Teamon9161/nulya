@@ -27,9 +27,21 @@ export interface ExtensionRef {
   version: string
 }
 
+/**
+ * One system prompt frozen into the header BY VALUE (`session new --prompt`,
+ * DESIGN §3): text whose only life is this session's, so it lives in this file
+ * rather than in an extension version that could be pruned away. `source` is an
+ * opaque label — the kernel carries it and never reads it.
+ */
+export interface InlinePrompt {
+  source: string
+  text: string
+}
+
 export interface FrozenComposition {
   active: ExtensionRef[]
   native_tools: string[]
+  prompts: InlinePrompt[]
 }
 
 export interface ModelDescriptor {
@@ -142,7 +154,12 @@ export function parseHeaderLine(line: string): SessionHeader | null {
       api_key_env: "",
     },
     created: typeof record["created"] === "string" ? record["created"] : "",
-    composition: (record["composition"] as FrozenComposition) ?? { active: [], native_tools: [] },
+    composition: {
+      active: [],
+      native_tools: [],
+      prompts: [],
+      ...((record["composition"] as Partial<FrozenComposition> | undefined) ?? {}),
+    },
   }
 }
 

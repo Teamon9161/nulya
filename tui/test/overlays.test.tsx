@@ -171,7 +171,7 @@ test("/ext shows the version line, the current pointer and the usage counts", as
     model: "scripted",
     model_identity: { provider: "scripted", model: "", base_url: "", api_key_env: "" },
     created: "",
-    composition: { active: [{ id: "lint", version }], native_tools: ["ext:lint/lint"] },
+    composition: { active: [{ id: "lint", version }], native_tools: ["ext:lint/lint"], prompts: [] },
   }
   const setup = await overlayFrame(() => <ExtView ws={ws} header={header} onClose={() => {}} />)
   try {
@@ -324,7 +324,7 @@ test("/ext names the drift between what this session froze and what the store po
     model: "scripted",
     model_identity: { provider: "scripted", model: "", base_url: "", api_key_env: "" },
     created: "",
-    composition: { active: [{ id: "lint", version: "v-old" }], native_tools: [] },
+    composition: { active: [{ id: "lint", version: "v-old" }], native_tools: [], prompts: [] },
   }
   expect(frozenVersion(header, "lint")).toBe("v-old")
   expect(frozenVersion(header, "other")).toBeNull()

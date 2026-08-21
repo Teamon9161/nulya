@@ -1,7 +1,7 @@
 /**
  * `/agent` on screen (tui.md §5.10), against the real binary.
  *
- * The pure halves — parsing a definition, the manifest it becomes, the ceiling —
+ * The pure halves — parsing a definition, the prompt it becomes, the ceiling —
  * are `agents.test.ts`. What is left, and what only a real run can show, is that
  * a definition ends up being **a session with a particular set of arguments**:
  * its own tab, its own ledger, wearing its own prompt, and — for a read-only one
@@ -80,10 +80,14 @@ function open(width = 100, height = 30) {
   )
 }
 
-/** The session `/agent <name>` created: the one wearing that persona. */
+/**
+ * The session `/agent <name>` created: the one whose header froze that persona's
+ * prompt. Nothing was installed for it, so the listing's `prompts` — labels and
+ * sizes, never text — is where a delegation is recognizable.
+ */
 async function agentSession(id: string): Promise<string | null> {
   const listed = await sessionList(ws)
-  const found = listed.find((entry) => entry.composition.active.some((ref) => ref.startsWith(`agent-${id}@`)))
+  const found = listed.find((entry) => entry.composition.prompts.some((p) => p.source === `agent-${id}`))
   return found?.id ?? null
 }
 
@@ -94,8 +98,8 @@ test("/agent opens a second tab on a session wearing the definition's prompt, an
     await setup.mockInput.typeText("/agent probe find the parser")
     setup.mockInput.pressEnter()
 
-    // A session of its own, composed with the persona as a `--with` member —
-    // built from the markdown, never activated (physics #2, T31).
+    // A session of its own, wearing the persona as BYTES its header froze —
+    // rendered from the markdown, and installed nowhere at all.
     await until(async () => (await agentSession("probe")) !== null, 60_000)
     const child = (await agentSession("probe"))!
     await settle(setup, 4)
@@ -215,7 +219,7 @@ test("a session carries the agent tool when this workspace defines agents, and a
     // …and ONLY that one. The package's other three declare `audience:
     // "driver"` in their manifest (DESIGN §7.2.1), and that is what keeps them
     // off the face — nothing here knows their names (tui.md §11, T34).
-    for (const driver of ["ext:agent/run", "ext:agent/materialize", "ext:agent/list"]) {
+    for (const driver of ["ext:agent/run", "ext:agent/render", "ext:agent/list"]) {
       expect(parent.composition.native_tools).not.toContain(driver)
     }
 
@@ -225,7 +229,9 @@ test("a session carries the agent tool when this workspace defines agents, and a
     await until(async () => (await agentSession("writer")) !== null, 120_000)
     const writer = (await agentSession("writer"))!
     const child = (await sessionList(ws)).find((e) => e.id === writer)!
-    expect(child.composition.active.some((r) => r.startsWith("agent-writer@"))).toBe(true)
+    expect(child.composition.prompts.some((p) => p.source === "agent-writer")).toBe(true)
+    // …and the persona is not a package: nothing was installed to carry it.
+    expect(child.composition.active.some((r) => r.startsWith("agent-"))).toBe(false)
     expect(child.composition.active.some((r) => r.startsWith("agent@"))).toBe(false)
     expect(child.composition.native_tools).not.toContain("ext:agent/agent")
   } finally {

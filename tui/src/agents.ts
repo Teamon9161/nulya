@@ -1,5 +1,5 @@
 /**
- * Sub-agents: a definition file, an extension, a session (tui.md §5.10).
+ * Sub-agents: a definition file, a prompt, a session (tui.md §5.10).
  *
  * The kernel has no `AgentDef` and is not getting one. PLAN §3.2 settled that in
  * one sentence — **an agent is a `session new` with a particular set of
@@ -7,23 +7,22 @@
  * set of arguments and whose body is a system prompt.
  *
  * **Neither end of that is implemented here.** The bundled `agent` package owns
- * both: `list` reads every definition all three layers hold, `materialize`
- * freezes one into the data extension a session carries. This module spawns
- * those two and does what only a front end can — the picker, the tab, the trust
- * question, the read-only ceiling on a tab this process drives.
+ * both: `list` reads every definition all three layers hold, `render` writes one
+ * body where `session new --prompt` can read it. This module spawns those two
+ * and does what only a front end can — the picker, the tab, the trust question,
+ * the read-only ceiling on a tab this process drives.
  *
- * Why: the rendering decides the version id (the hash of exactly those bytes,
- * physics #5), so two writers would be two versions of one persona; and two
- * PARSERS would be two answers to "is this agent read-only" — the one question
- * the ceiling below turns into a refusal. One reader, one writer, both in the
- * package that ships the builtin personas anyway.
+ * Why: two PARSERS would be two answers to "is this agent read-only" — the one
+ * question the ceiling below turns into a refusal. One reader, one writer, both
+ * in the package that ships the builtin personas anyway.
  *
- * **Why an extension for the prompt at all.** A system prompt reaches a session
- * exactly one way (physics #3/#4): contributed by a frozen extension version the
- * session composed. And nothing is ever activated — `activate` would put a
- * persona in front of every session on this machine (T31, the bug that named
- * `autoActivatable`), where `--with` is membership in one composition and no
- * other. Same move as `/evolve`.
+ * **Why a file and not an extension.** It used to be an extension: the body was
+ * frozen into an `agent-<name>` data package and composed in with `--with`. That
+ * turned per-session text into an installed artifact — visible in `/ext`, and
+ * prunable out from under the resume of a session frozen on it. `session new
+ * --prompt <file>` freezes the BYTES into the session header (DESIGN §3, §5),
+ * which is where text with one session's lifetime belongs; nothing is installed
+ * and nothing is activated, so no persona can leak into the session next door.
  */
 import { readdirSync } from "node:fs"
 import { join } from "node:path"
@@ -60,11 +59,6 @@ export interface AgentEntry {
   agents: string[]
   pins: string[]
   warnings: string[]
-}
-
-/** The extension id a definition materialises into. */
-export function agentExtensionId(name: string): string {
-  return `agent-${name}`
 }
 
 /** The definitions directory of one file layer, as a path on this disk. */
@@ -151,11 +145,11 @@ export type AgentTrustPlan =
  *  1. a definition is a SYSTEM PROMPT. Delegating to one puts a persona written
  *     by whoever wrote the checkout in front of a model with this workspace's
  *     tools (T31, the same hazard one directory over).
- *  2. materialising one BUILDS into this workspace's extension store, and a
- *     local build into an empty store is how the kernel records trust for it
- *     (DESIGN §9). So the question must be asked before the first build, or the
- *     act of using a checkout's persona would have signed for the checkout's
- *     store on the person's behalf.
+ *  2. delegating to one is what first BUILDS the bundled `agent` package into
+ *     this workspace's extension store, and a local build into an empty store is
+ *     how the kernel records trust for it (DESIGN §9). So the question must be
+ *     asked before the first build, or the act of using a checkout's persona
+ *     would have signed for the checkout's store on the person's behalf.
  *
  * Asked once, whatever the answer, exactly as the store question is (T11): "not
  * now" is a real answer and must not become a prompt every morning.
@@ -180,14 +174,13 @@ export function agentAnswerFor(key: string): boolean | null {
   return null
 }
 
-// ── materialising: the bundled `agent` package does it ──────────────────────
+// ── rendering: the bundled `agent` package does it ──────────────────────────
 //
-// The rendering of a definition into a data extension — the manifest bytes, the
-// prompt file, which store root — is NOT here. It decides the version id, which
-// is the hash of exactly those bytes (physics #5), so two implementations of it
-// would be two versions of one persona that happen to disagree about a trailing
-// newline. The single implementation is `extensions/agent`'s `materialize` tool;
-// this side reads definitions (to list them) and asks that to build.
+// Turning a definition into the prompt file a session wears is NOT here. The
+// single implementation is `extensions/agent`'s `render` tool — the same one the
+// model reaches through the `agent` tool — so the front end and the model can
+// never disagree about what a persona is. This side asks for it and composes the
+// `session new`.
 
 export const agent_id = "agent"
 
@@ -211,11 +204,13 @@ export async function buildAgentPackage(ws: Workspace): Promise<WithRef> {
   return { id: agent_id, version: await extBuild(ws, draft) }
 }
 
-/** What `materialize` answers: the frozen version, and the session arguments. */
-export interface MaterializedAgent {
+/** What `render` answers: the prompt file, and the session arguments. */
+export interface RenderedAgent {
   name: string
-  /** `agent-<name>` and the exact version, ready for `--with`. */
-  ref: string
+  /** The file `session new --prompt` reads the persona's body from. */
+  prompt: string
+  /** The label that body's system block carries (`agent-<name>`). */
+  label: string
   description: string
   readonly: boolean
   layer: AgentLayer
@@ -239,33 +234,33 @@ export interface MaterializedAgent {
 }
 
 /**
- * Freeze one definition, through the package that owns that rendering.
+ * Render one definition, through the package that owns that rendering.
  *
- * Called every time a delegation starts, and that is cheap and deliberate for
- * the reason `/evolve` rebuilds every time: an unedited definition returns the
- * version already in the store, and an edit is picked up without anybody
- * running a command.
+ * Called every time a delegation starts, and that is cheap and deliberate: the
+ * contents are decided by the definition, so an unedited one rewrites the same
+ * file and an edit is picked up without anybody running a command.
  */
-export async function materializeAgent(
+export async function renderAgent(
   ws: Workspace,
   pkg: WithRef,
   name: string,
-): Promise<MaterializedAgent> {
-  const call = await extRun(ws, formatWithRef(pkg), "materialize", { name })
+): Promise<RenderedAgent> {
+  const call = await extRun(ws, formatWithRef(pkg), "render", { name })
   if (call.code !== 0) throw new Error(said(call.stdout, call.stderr))
   let value: unknown
   try {
     value = JSON.parse(call.stdout.trim())
   } catch {
-    throw new Error(`materialize returned no result: ${said(call.stdout, call.stderr)}`)
+    throw new Error(`render returned no result: ${said(call.stdout, call.stderr)}`)
   }
-  const m = value as Partial<MaterializedAgent>
-  if (typeof m.ref !== "string" || m.ref.length === 0) {
-    throw new Error(`materialize returned no version: ${said(call.stdout, call.stderr)}`)
+  const m = value as Partial<RenderedAgent>
+  if (typeof m.prompt !== "string" || m.prompt.length === 0) {
+    throw new Error(`render returned no prompt file: ${said(call.stdout, call.stderr)}`)
   }
   return {
     name: m.name ?? name,
-    ref: m.ref,
+    prompt: m.prompt,
+    label: m.label ?? `agent-${m.name ?? name}`,
     description: m.description ?? "",
     readonly: m.readonly === true,
     layer: m.layer === "workspace" || m.layer === "user" ? m.layer : "builtin",
@@ -287,12 +282,12 @@ function said(stdout: string, stderr: string): string {
 }
 
 /**
- * The `session new` model arguments a materialised definition asks for, or
- * undefined when it asks for none — and then the caller's own pick stands: a
- * persona that does not care which model runs it should not silently move the
- * work onto whatever the kernel's default happens to be.
+ * The `session new` model arguments a rendered definition asks for, or undefined
+ * when it asks for none — and then the caller's own pick stands: a persona that
+ * does not care which model runs it should not silently move the work onto
+ * whatever the kernel's default happens to be.
  */
-export function agentPick(m: MaterializedAgent): ModelPick | undefined {
+export function agentPick(m: RenderedAgent): ModelPick | undefined {
   if (m.profile.length === 0) return undefined
   return { profile: m.profile, ...(m.model.length > 0 ? { model: m.model } : {}) }
 }

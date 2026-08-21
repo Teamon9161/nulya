@@ -1,10 +1,10 @@
 /**
- * Agent definitions (tui.md §5.10): the file, the extension it becomes, and the
+ * Agent definitions (tui.md §5.10): the file, the prompt it becomes, and the
  * ceiling a read-only one runs under.
  *
  * The pure half is the parser and the two policies; the rest runs the real
- * binary, because "a definition becomes a data extension" is only true if
- * `nulya ext build` says so.
+ * binary, because "a definition becomes a session's own system prompt" is only
+ * true if `nulya session new --prompt` says so.
  */
 import { afterAll, beforeAll, expect, test } from "bun:test"
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
@@ -15,7 +15,7 @@ import {
   agentsDirOf,
   buildAgentPackage,
   listAgents,
-  materializeAgent,
+  renderAgent,
   planProjectAgents,
   readonlyCeiling,
   usableAgents,
@@ -120,16 +120,16 @@ test("a workspace with no definition files still has the personas the package sh
   }
 }, 300_000)
 
-// ── materialising ───────────────────────────────────────────────────────────
+// ── rendering ───────────────────────────────────────────────────────────────
 
 /**
- * The rendering of a definition into a data extension lives in ONE place — the
- * bundled `agent` package's `materialize` tool — because it decides the version
- * id, which is the hash of exactly those bytes (physics #5). So this exercises
- * the real package against the real binary rather than a second copy of the
- * rendering that could disagree about a trailing newline.
+ * Turning a definition into the prompt a session wears lives in ONE place — the
+ * bundled `agent` package's `render` tool — so the front end and the model's own
+ * `agent` tool can never disagree about what a persona is. This exercises the
+ * real package against the real binary rather than a second copy of the
+ * rendering.
  */
-test("materialize freezes a definition into a data extension, idempotently, and reports what it asks of a session", async () => {
+test("render writes a definition's body to a file a session can wear, installs nothing, and reports what it asks of a session", async () => {
   const dir = agentsDirOf(ws, "workspace")
   mkdirSync(dir, { recursive: true })
   writeFileSync(
@@ -139,35 +139,31 @@ test("materialize freezes a definition into a data extension, idempotently, and 
   const pkg = await buildAgentPackage(ws)
   expect(pkg.id).toBe("agent")
 
-  const first = await materializeAgent(ws, pkg, "probe")
-  expect(first.ref).toMatch(/^agent-probe@v-[0-9a-f]+$/)
+  const first = await renderAgent(ws, pkg, "probe")
+  expect(first.label).toBe("agent-probe")
   expect(first.readonly).toBe(true)
   expect(first.max_steps).toBe(4)
   // A pin the kernel could not resolve refuses the whole `session new`, so a
   // malformed one is dropped before it can, and said out loud.
   expect(first.pins).toEqual([])
   expect(first.members).toEqual([])
-  expect(first.warnings.some((line) => line.includes("nonsense"))).toBe(true)
+  expect(first.warnings.some((line: string) => line.includes("nonsense"))).toBe(true)
   expect(agentPick(first)).toBeUndefined()
 
-  // Content addressing does the remembering: an unedited definition returns the
-  // version already in the store, so a delegation can build every time.
-  expect((await materializeAgent(ws, pkg, "probe")).ref).toBe(first.ref)
+  // The body is on disk, under the label, for `session new --prompt` to read —
+  // and NOTHING was installed: no package, so nothing in `/ext` and nothing an
+  // `ext prune` could take away from a resume.
+  expect(readFileSync(join(ws.dir, first.prompt), "utf8").trim()).toBe("first prompt")
+  expect(existsSync(join(ws.dir, ".nulya/extensions/agent-probe"))).toBe(false)
 
-  // The frozen version really is a data extension whose prompt is the body.
-  const version = first.ref.split("@")[1]!
-  const frozen = join(ws.dir, ".nulya/extensions/agent-probe/versions", version)
-  expect(JSON.parse(readFileSync(join(frozen, "extension.json"), "utf8")).contributes.system_prompts).toEqual([
-    "prompt.md",
-  ])
-  expect(readFileSync(join(frozen, "package/prompt.md"), "utf8").trim()).toBe("first prompt")
-  // Never activated: a persona is worn for one session with `--with` (T31).
-  expect(existsSync(join(ws.dir, ".nulya/extensions/agent-probe/current"))).toBe(false)
+  // Content-determined: rendering an unedited definition is the same file, so a
+  // delegation can render every time.
+  expect((await renderAgent(ws, pkg, "probe")).prompt).toBe(first.prompt)
 
-  // An edit is a new version, with no command to remember.
+  // An edit rewrites it, with no command to remember.
   writeFileSync(join(dir, "probe.md"), "---\nname: probe\nmodel: scripted/scripted-demo\n---\nsecond prompt\n")
-  const edited = await materializeAgent(ws, pkg, "probe")
-  expect(edited.ref).not.toBe(first.ref)
+  const edited = await renderAgent(ws, pkg, "probe")
+  expect(readFileSync(join(ws.dir, edited.prompt), "utf8").trim()).toBe("second prompt")
   expect(edited.readonly).toBe(false)
   expect(agentPick(edited)).toEqual({ profile: "scripted", model: "scripted-demo" })
 
@@ -175,10 +171,10 @@ test("materialize freezes a definition into a data extension, idempotently, and 
   // refused BEFORE a session exists, and the message is the way out — the pins
   // would otherwise be handed to a `session new` that can only say no.
   writeFileSync(join(dir, "needy.md"), "---\nname: needy\npins: [ext:std/read]\n---\nI need std\n")
-  await expect(materializeAgent(ws, pkg, "needy")).rejects.toThrow(/not built here: std/)
+  await expect(renderAgent(ws, pkg, "needy")).rejects.toThrow(/not built here: std/)
 
   // An unknown name is refused by the same tool, with the names there are.
-  await expect(materializeAgent(ws, pkg, "not-a-thing")).rejects.toThrow(/no agent 'not-a-thing'/)
+  await expect(renderAgent(ws, pkg, "not-a-thing")).rejects.toThrow(/no agent 'not-a-thing'/)
 }, 300_000)
 
 // ── the read-only ceiling ───────────────────────────────────────────────────
