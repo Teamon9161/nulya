@@ -68,4 +68,5 @@
 ## 6. 进度区（执行时更新）
 
 - **checkpoint** `5921c05` — 工作树里与本契约无关的未提交改动（tui T43 等）原样落盘；本文件（未跟踪）一并进这个 commit。
-- **sp-a** `<pending>` — `ledger.InlinePrompt` + `FrozenComposition.prompts`（默认空 slice，header `v` 仍 1）；roundtrip 测试带 prompts、老 header 读回空。无偏离。
+- **sp-a** `b6763ea` — `ledger.InlinePrompt` + `FrozenComposition.prompts`（默认空 slice，header `v` 仍 1）；roundtrip 测试带 prompts、老 header 读回空。无偏离。
+- **sp-b** `<pending>` — `composition.Options.prompts` + `Resolved.prompts`（arena 拷贝）+ `SessionComposition.prompts`（给 header 写入）；`buildSystemPrompts` 在 ext 块之后 / catalog 之前追加；`session.createDurable` 把它写进 header。两条单测：块顺序 + 从 header 用**不存在的 store root** 重建。无偏离。

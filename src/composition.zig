@@ -131,6 +131,12 @@ pub const Options = struct {
     /// extension overrides it for this session; a later `--with` of the same id
     /// overrides an earlier one.
     with: []const WithRef = &.{},
+    /// Per-session system prompts, already read into memory by the caller
+    /// (`nulya session new --prompt <file>`, DESIGN §5). Text with no life of
+    /// its own outside this session, so it is carried by value and frozen into
+    /// the header rather than resolved against a store: the composition never
+    /// learns where the bytes came from, and it never interprets `source`.
+    prompts: []const ledger.InlinePrompt = &.{},
 };
 
 /// One `--with` request: an extension id, optionally at an exact version.
@@ -177,6 +183,11 @@ pub const SessionComposition = struct {
     /// Owned, address-stable bindings for the natively exposed extension tools.
     /// `tools` borrows these, so they must outlive it and are freed after it.
     extension_tool_bindings: []ext_tools.Binding,
+    /// The per-session system prompts this composition was built with, kept
+    /// verbatim so `createDurable` can write the same bytes into the header —
+    /// which is where a resumed session reads them back from. Already among the
+    /// system blocks; this is the record, not a second source of truth.
+    prompts: []const ledger.InlinePrompt = &.{},
     tools: registry.ToolSetSnapshot,
     skills: skill.SkillSetSnapshot,
     system_prompts: prompt.SystemPromptSnapshot,
@@ -270,6 +281,9 @@ const Resolved = struct {
     extensions: []roots_mod.Roots.Resolved,
     /// Already arena-owned: the composition keeps these verbatim.
     bindings: []ext_tools.Binding,
+    /// Same — the per-session prompts, copied into the arena so they outlive the
+    /// caller's argv buffers and the header they may have been parsed from.
+    prompts: []const ledger.InlinePrompt,
 };
 
 /// Phase one: decide membership. Discovery, `--with` and a header's frozen
@@ -291,7 +305,27 @@ fn resolve(gpa: std.mem.Allocator, a: std.mem.Allocator, roots: *const roots_mod
         .fresh => |opts| opts.pinned_native_tools,
         .frozen => |frozen| frozen.native_tools,
     };
-    return .{ .extensions = extensions, .bindings = try resolveBindings(a, roots, extensions, pins) };
+    // The one input with no store side at all: a fresh session gets the bytes
+    // the caller read from `--prompt`, a resumed one the bytes the header
+    // froze, and neither path touches `roots`.
+    const prompts = switch (request) {
+        .fresh => |opts| opts.prompts,
+        .frozen => |frozen| frozen.prompts,
+    };
+    return .{
+        .extensions = extensions,
+        .bindings = try resolveBindings(a, roots, extensions, pins),
+        .prompts = try copyInlinePrompts(a, prompts),
+    };
+}
+
+fn copyInlinePrompts(a: std.mem.Allocator, prompts: []const ledger.InlinePrompt) ![]const ledger.InlinePrompt {
+    const out = try a.alloc(ledger.InlinePrompt, prompts.len);
+    for (prompts, out) |p, *slot| slot.* = .{
+        .source = try a.dupe(u8, p.source),
+        .text = try a.dupe(u8, p.text),
+    };
+    return out;
 }
 
 /// Phase two: build the frozen session state out of what phase one decided —
@@ -325,9 +359,10 @@ fn assemble(
     return .{
         .extensions = try copyFrozenExtensions(a, resolved.extensions),
         .extension_tool_bindings = bindings,
+        .prompts = resolved.prompts,
         .tools = try snapshotFromBindings(a, bindings),
         .skills = skills,
-        .system_prompts = try buildSystemPrompts(a, io, roots, resolved.extensions, skills),
+        .system_prompts = try buildSystemPrompts(a, io, roots, resolved.extensions, resolved.prompts, skills),
     };
 }
 
@@ -593,6 +628,7 @@ fn buildSystemPrompts(
     io: std.Io,
     roots: *const roots_mod.Roots,
     resolved: []const roots_mod.Roots.Resolved,
+    prompts: []const ledger.InlinePrompt,
     skills: skill.SkillSetSnapshot,
 ) !prompt.SystemPromptSnapshot {
     var blocks: std.ArrayList(prompt.SystemBlock) = .empty;
@@ -607,6 +643,12 @@ fn buildSystemPrompts(
             try blocks.append(a, .{ .source = source, .bytes = bytes });
         }
     }
+
+    // Inline prompts sit after the members' and before the catalog: they are
+    // identity text like an extension's, so they belong on that side of the
+    // divide, and the catalog stays last (DESIGN §5). `source` is carried, never
+    // read — the kernel does not know what any label means.
+    for (prompts) |p| try blocks.append(a, .{ .source = p.source, .bytes = p.text });
 
     if (try skills.catalogText(a)) |catalog| {
         try blocks.append(a, .{ .source = "skills:catalog", .bytes = catalog });
@@ -1024,6 +1066,72 @@ test "system prompt ordering is deterministic by pinned extension id and manifes
     try std.testing.expectEqualStrings("A1", comp.system_prompts.blocks[1].bytes);
     try std.testing.expectEqualStrings("A2", comp.system_prompts.blocks[2].bytes);
     try std.testing.expectEqualStrings("B1", comp.system_prompts.blocks[3].bytes);
+}
+
+test "inline prompts land after every member's block and before the skills catalog, in argv order" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmpPath(alloc, io, tmp.dir);
+    defer alloc.free(cwd);
+
+    const manifest_bytes =
+        \\{"schema":"nulya.extension/v2","id":"b","contributes":{"system_prompts":["prompts/b1.md"],"skills":["skills/probe"]}}
+    ;
+    const v = try testkit.writeFrozenVersion(alloc, io, tmp.dir, "b", manifest_bytes, &.{
+        .{ .rel = "prompts/b1.md", .bytes = "B1" },
+        .{ .rel = "skills/probe/SKILL.md", .bytes = "---\nname: probe\ndescription: a skill\n---\nbody\n" },
+    });
+    defer alloc.free(v);
+    try testkit.activate(alloc, io, tmp.dir, "b", v);
+
+    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .prompts = &.{
+        .{ .source = "agent-explore", .text = "FIRST" },
+        .{ .source = "brief", .text = "SECOND" },
+    } });
+    defer comp.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 5), comp.system_prompts.blocks.len);
+    try std.testing.expectEqualStrings("kernel", comp.system_prompts.blocks[0].source);
+    try std.testing.expectEqualStrings("B1", comp.system_prompts.blocks[1].bytes);
+    // Argv order, verbatim source labels: the kernel neither sorts these nor
+    // reads what they say.
+    try std.testing.expectEqualStrings("agent-explore", comp.system_prompts.blocks[2].source);
+    try std.testing.expectEqualStrings("FIRST", comp.system_prompts.blocks[2].bytes);
+    try std.testing.expectEqualStrings("brief", comp.system_prompts.blocks[3].source);
+    try std.testing.expectEqualStrings("SECOND", comp.system_prompts.blocks[3].bytes);
+    try std.testing.expectEqualStrings("skills:catalog", comp.system_prompts.blocks[4].source);
+
+    // …and the composition keeps the same bytes for the header writer, which is
+    // the only reason a resume can rebuild this without the caller's argv.
+    try std.testing.expectEqual(@as(usize, 2), comp.prompts.len);
+    try std.testing.expectEqualStrings("agent-explore", comp.prompts[0].source);
+    try std.testing.expectEqualStrings("SECOND", comp.prompts[1].text);
+}
+
+test "a header's inline prompts rebuild the identical blocks with no store to consult" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmpPath(alloc, io, tmp.dir);
+    defer alloc.free(cwd);
+
+    const frozen: ledger.FrozenComposition = .{ .prompts = &.{
+        .{ .source = "agent-explore", .text = "You are a scout.\n" },
+    } };
+
+    // A store root that does not exist: an inline prompt is bytes in the header,
+    // so nothing about resuming it can depend on an extension version still
+    // being on disk (which is what a store reference would have cost).
+    var comp = try SessionComposition.initFrozen(alloc, io, cwd, &.{"nulya-absent-root"}, frozen);
+    defer comp.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 2), comp.system_prompts.blocks.len);
+    try std.testing.expectEqualStrings("kernel", comp.system_prompts.blocks[0].source);
+    try std.testing.expectEqualStrings("agent-explore", comp.system_prompts.blocks[1].source);
+    try std.testing.expectEqualStrings("You are a scout.\n", comp.system_prompts.blocks[1].bytes);
 }
 
 test "parseStableToolId splits ext:<id>/<tool>, rejecting malformed pins" {

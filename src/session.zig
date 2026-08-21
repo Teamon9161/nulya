@@ -161,7 +161,10 @@ pub const AgentSession = struct {
             .model_identity = d.model_identity,
             .created = d.created,
             .nulya = .{ .version = d.nulya_version, .kernel_hash = kernel_hash },
-            .composition = .{ .active = active, .native_tools = native },
+            // The inline prompts go in by VALUE — they have no store entry to
+            // point at, and freezing the bytes is what lets a resume rebuild
+            // the identical system blocks from this file alone (DESIGN §3).
+            .composition = .{ .active = active, .native_tools = native, .prompts = comp.prompts },
         });
         errdefer l.deinit();
 
