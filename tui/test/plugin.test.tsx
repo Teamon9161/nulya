@@ -9,7 +9,7 @@
  *
  * Two fixture packages, built once for the whole file:
  *
- *  - `plugin` (a PowerShell script extension, DESIGN §7.1) declares one tool
+ *  - `plugin` (a script extension, DESIGN §7.1) declares one tool
  *    (`echo`) and one skill (`note`), and three commands — one for each verb
  *    (`wear` / `run <tool>` / `skill <ref>`). `activation: "on_request"` is
  *    the realistic shape for a package like this: registering it (building +
@@ -34,6 +34,10 @@ import type { LedgerEvent, ToolResultEntry } from "../src/nulya/ledger.ts"
 import { unsafe_settings, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
 
 let ws: TempWorkspace
+/** The fixture's interpreter follows `ext init --script`'s own platform rule
+ * (`cli/ext.zig`: `windows ? "powershell" : "sh"`), so the suite runs wherever
+ * the kernel's generated scripts would. */
+const win = process.platform === "win32"
 /** The workspace-store version `plugin` built to — named once, used by several tests. */
 let plugin_version: string
 let guard_version: string
@@ -56,7 +60,9 @@ beforeAll(async () => {
     JSON.stringify({
       schema: "nulya.extension/v2",
       id: "plugin",
-      runtime: { entry: "src/main.ps1", interpreter: "powershell" },
+      runtime: win
+        ? { entry: "src/main.ps1", interpreter: "powershell" }
+        : { entry: "src/main.sh", interpreter: "sh" },
       // A persona-shaped package is realistically opt-in per session, not a
       // machine-wide policy — the same reason `evolution` declares it.
       activation: "on_request",
@@ -80,25 +86,40 @@ beforeAll(async () => {
   )
   // Reads the request, echoes back `params.arguments.text` under `echoed` — the
   // minimal deterministic proof that `ext run` actually invoked this process
-  // (`templates.zig`'s own `script_ps1` is the precedent for a Windows-real
-  // script extension in this test suite).
-  writeFileSync(
-    join(plugin_dir, "src", "main.ps1"),
-    [
-      "$ErrorActionPreference = 'Stop'",
-      "$in = [Console]::In.ReadToEnd()",
-      "$id = 'call'",
-      "$text = ''",
-      "try {",
-      "  $req = $in | ConvertFrom-Json",
-      "  if ($req.id) { $id = [string]$req.id }",
-      "  if ($req.params.arguments.text) { $text = [string]$req.params.arguments.text }",
-      "} catch {}",
-      "$resp = [ordered]@{ jsonrpc = '2.0'; id = $id; result = [ordered]@{ echoed = $text } }",
-      "[Console]::Out.Write(($resp | ConvertTo-Json -Compress))",
-      "",
-    ].join("\n"),
-  )
+  // (`templates.zig`'s own `script_ps1` / `script_sh` are the precedents for a
+  // real script extension in this test suite; the sh sed extraction is the
+  // template's own).
+  if (win)
+    writeFileSync(
+      join(plugin_dir, "src", "main.ps1"),
+      [
+        "$ErrorActionPreference = 'Stop'",
+        "$in = [Console]::In.ReadToEnd()",
+        "$id = 'call'",
+        "$text = ''",
+        "try {",
+        "  $req = $in | ConvertFrom-Json",
+        "  if ($req.id) { $id = [string]$req.id }",
+        "  if ($req.params.arguments.text) { $text = [string]$req.params.arguments.text }",
+        "} catch {}",
+        "$resp = [ordered]@{ jsonrpc = '2.0'; id = $id; result = [ordered]@{ echoed = $text } }",
+        "[Console]::Out.Write(($resp | ConvertTo-Json -Compress))",
+        "",
+      ].join("\n"),
+    )
+  else
+    writeFileSync(
+      join(plugin_dir, "src", "main.sh"),
+      [
+        "#!/bin/sh",
+        "req=$(cat)",
+        'id=$(printf \'%s\' "$req" | sed -n \'s/.*"id":"\\([^"]*\\)".*/\\1/p\')',
+        '[ -z "$id" ] && id=call',
+        'text=$(printf \'%s\' "$req" | sed -n \'s/.*"text":"\\([^"]*\\)".*/\\1/p\')',
+        'printf \'{"jsonrpc":"2.0","id":"%s","result":{"echoed":"%s"}}\' "$id" "$text"',
+        "",
+      ].join("\n"),
+    )
   writeFileSync(
     join(plugin_dir, "skills", "note", "SKILL.md"),
     "---\nname: note\ndescription: a note the plugin package offers\n---\nRemember: the plugin package is active.\n",

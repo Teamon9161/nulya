@@ -44,6 +44,11 @@ import { unsafe_settings, scripted_env, settle, tempWorkspace, until, type TempW
 
 let ws: TempWorkspace
 
+/** Never invoked (the runtime only satisfies `Manifest.validate`), but declared
+ * per platform anyway — the same `windows ? "powershell" : "sh"` rule as
+ * `ext init --script` (`cli/ext.zig`). */
+const win = process.platform === "win32"
+
 const style: Style = createStyle(unsafe_settings, {})
 /** The same screen with the code layer switched off (`[extensions] plugins`). */
 const style_no_plugins: Style = createStyle(
@@ -94,7 +99,9 @@ beforeAll(async () => {
     "probe",
     null,
     {
-      runtime: { entry: "src/main.ps1", interpreter: "powershell" },
+      runtime: win
+        ? { entry: "src/main.ps1", interpreter: "powershell" }
+        : { entry: "src/main.sh", interpreter: "sh" },
       contributes: {
         tools: [
           {
@@ -108,7 +115,8 @@ beforeAll(async () => {
     { entry: "tui/probe.ts", api: plugin_api_version },
   )
   mkdirSync(join(extensionDir("probe"), "src"), { recursive: true })
-  writeFileSync(join(extensionDir("probe"), "src", "main.ps1"), "[Console]::Out.Write('{}')\n")
+  if (win) writeFileSync(join(extensionDir("probe"), "src", "main.ps1"), "[Console]::Out.Write('{}')\n")
+  else writeFileSync(join(extensionDir("probe"), "src", "main.sh"), "printf '{}'\n")
   copyFileSync(join(import.meta.dir, "fixtures", "probe-plugin.ts"), join(extensionDir("probe"), "tui", "probe.ts"))
 
   // `future` — a version this build does not implement.
