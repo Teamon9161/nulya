@@ -30,12 +30,6 @@ const builtin = @import("builtin.zig");
 /// the store roots' rule (DESIGN §7.2), for the store roots' reason.
 pub const Layer = enum { workspace, user, builtin };
 
-/// Where a materialised version lands. A workspace definition belongs to this
-/// checkout; a user definition and a builtin persona belong to the machine.
-pub fn userStore(layer: Layer) bool {
-    return layer != .workspace;
-}
-
 pub const Def = struct {
     name: []const u8,
     description: []const u8 = "",
@@ -380,72 +374,48 @@ pub fn names(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Envir
     return out.items;
 }
 
-/// The extension id a definition materialises into.
-pub fn extensionId(alloc: std.mem.Allocator, name: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(alloc, "agent-{s}", .{name});
+/// The prefix this package writes on a persona's prompt and reads back off a
+/// session header. A label, not an id: the kernel carries `source` verbatim and
+/// never looks inside it, so the writer and the reader of this convention are
+/// both here (`promptPath` writes it, `wornPersona` strips it).
+const label_prefix = "agent-";
+
+/// The label a definition's system prompt block carries for the life of every
+/// session that wears it.
+pub fn promptLabel(alloc: std.mem.Allocator, name: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(alloc, label_prefix ++ "{s}", .{name});
 }
 
-/// Where a definition is staged before `ext build` freezes it.
+/// Where a definition's body is rendered for `session new --prompt` to read.
 ///
 /// Under `.nulya/scratch/`, where this repository already stages things for the
-/// CLI, and deliberately NOT under a store root: a draft in
-/// `.nulya/extensions/<id>/` would be picked up by the next `ext sync` and built
-/// as if somebody maintained it — and nobody does. It is a rendering of a file
-/// that IS maintained, one directory away.
-pub fn draftPath(alloc: std.mem.Allocator, id: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(alloc, ".nulya/scratch/agents/{s}", .{id});
+/// CLI, and deliberately NOT under a store root: a persona is text with no life
+/// of its own outside the session that wears it, so it is never an installed
+/// artifact — nothing to activate, nothing to prune, nothing showing up in
+/// `ext list`. The file name's stem is the label, because that is what
+/// `session new` takes as the block's `source`.
+pub fn promptPath(alloc: std.mem.Allocator, label: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(alloc, ".nulya/scratch/agents/{s}.md", .{label});
 }
 
-/// Render the definition into a draft directory. Written fresh every time: a
-/// stale `prompt.md` from a definition that has since been edited would be
-/// frozen into a version claiming to be the new one.
+/// Render the definition's body to that file, overwriting whatever was there.
 ///
-/// The manifest bytes are what the version id hashes, so they are produced in
-/// one place with one spelling — the reason this is not also implemented on the
-/// front end.
-pub fn writeDraft(alloc: std.mem.Allocator, io: std.Io, def: Def, id: []const u8, draft: []const u8) !void {
+/// Written fresh every time and content-determined: two delegations to one
+/// definition race harmlessly because they write the same bytes, and an edited
+/// definition is picked up without anybody running a command. The file is a
+/// handoff to `session new`, which reads it once and freezes the bytes into the
+/// header — after that nothing depends on it existing.
+pub fn writePrompt(alloc: std.mem.Allocator, io: std.Io, def: Def, path: []const u8) !void {
     const cwd = std.Io.Dir.cwd();
-    cwd.deleteTree(io, draft) catch {};
-    try cwd.createDirPath(io, draft);
-
-    var manifest: std.Io.Writer.Allocating = .init(alloc);
-    var jw: std.json.Stringify = .{ .writer = &manifest.writer, .options = .{ .whitespace = .indent_2 } };
-    try jw.beginObject();
-    try jw.objectField("schema");
-    try jw.write("nulya.extension/v2");
-    try jw.objectField("id");
-    try jw.write(id);
-    try jw.objectField("contributes");
-    try jw.beginObject();
-    try jw.objectField("system_prompts");
-    try jw.beginArray();
-    try jw.write("prompt.md");
-    try jw.endArray();
-    try jw.endObject();
-    // No runtime and no permissions: it contributes TEXT. What the agent may do
-    // is its pins and the gate, never this file.
-    try jw.objectField("permissions");
-    try jw.beginObject();
-    inline for (.{ "fs", "network", "process" }) |field| {
-        try jw.objectField(field);
-        try jw.beginArray();
-        try jw.endArray();
-    }
-    try jw.endObject();
-    try jw.endObject();
-    try manifest.writer.writeByte('\n');
-
-    const manifest_path = try std.fs.path.join(alloc, &.{ draft, "extension.json" });
-    try cwd.writeFile(io, .{ .sub_path = manifest_path, .data = manifest.writer.buffered() });
-
-    const prompt_path = try std.fs.path.join(alloc, &.{ draft, "prompt.md" });
-    const prompt = try std.fmt.allocPrint(alloc, "{s}\n", .{def.prompt});
-    try cwd.writeFile(io, .{ .sub_path = prompt_path, .data = prompt });
+    if (std.fs.path.dirname(path)) |dir| try cwd.createDirPath(io, dir);
+    const body = try std.fmt.allocPrint(alloc, "{s}\n", .{def.prompt});
+    try cwd.writeFile(io, .{ .sub_path = path, .data = body });
 }
 
 /// The persona a session is wearing, from its frozen header: the `agent-<name>`
-/// member `session new --with` put there (DESIGN §3.4). Null for a session that
-/// is not a delegation — a top-level conversation, where nothing is restricted.
+/// system prompt `session new --prompt` froze into it (DESIGN §3). Null for a
+/// session that is not a delegation — a top-level conversation, where nothing is
+/// restricted.
 ///
 /// The header is the authority on purpose: it is frozen, so it says what this
 /// session actually composed with rather than what a definition file says today.
@@ -465,20 +435,20 @@ pub fn wornPersona(alloc: std.mem.Allocator, io: std.Io, session_id: []const u8)
         .object => |o| o,
         else => return null,
     };
-    const active = switch (composition.get("active") orelse return null) {
+    const prompts = switch (composition.get("prompts") orelse return null) {
         .array => |a| a,
         else => return null,
     };
-    for (active.items) |entry| {
-        const member = switch (entry) {
+    for (prompts.items) |entry| {
+        const block = switch (entry) {
             .object => |o| o,
             else => continue,
         };
-        const id = switch (member.get("id") orelse continue) {
+        const source = switch (block.get("source") orelse continue) {
             .string => |s| s,
             else => continue,
         };
-        if (std.mem.startsWith(u8, id, "agent-")) return try alloc.dupe(u8, id["agent-".len..]);
+        if (std.mem.startsWith(u8, source, label_prefix)) return try alloc.dupe(u8, source[label_prefix.len..]);
     }
     return null;
 }
@@ -712,12 +682,6 @@ test "discovery layers workspace over user over builtin, and marks what it shado
             try std.testing.expectEqual(@as(usize, 1), count);
         }
     }
-
-    // A version lands in the user store for a user or builtin definition, and in
-    // this checkout's for one that came with it.
-    try std.testing.expect(userStore(.builtin));
-    try std.testing.expect(userStore(.user));
-    try std.testing.expect(!userStore(.workspace));
 
     try std.testing.expect((try find(a, io, &env, "not-a-thing")) == null);
 }

@@ -3,13 +3,22 @@
 //! **What it is.** Three tools in one binary, dispatched on `params.name`:
 //!
 //!   `agent {name, task}`   the model asking for one piece of work to be
-//!                          delegated. Materialises the persona, creates the
-//!                          child session, and starts a BACKGROUND TASK that
-//!                          drives it. Returns a receipt naming the child.
-//!   `materialize {name}`   a definition file → a frozen data extension version.
-//!                          The single writer of that rendering; the front end
-//!                          calls it too rather than keeping a second copy.
+//!                          delegated. Renders the persona, creates the child
+//!                          session wearing it, and starts a BACKGROUND TASK
+//!                          that drives it. Returns a receipt naming the child.
+//!   `render {name}`        a definition file → the prompt file and the whole
+//!                          set of `session new` arguments it asks for. The
+//!                          single writer of that rendering; the front end calls
+//!                          it too rather than keeping a second copy.
 //!   `run {session, …}`     the background command itself (`runner.zig`).
+//!
+//! **Why the persona is not an extension.** It used to be: every delegation
+//! froze the body into an `agent-<name>` data extension and composed it in with
+//! `--with`. That made a piece of per-session text into an installed artifact —
+//! it showed up in `ext list`, and `ext prune` could break the resume of a
+//! session frozen on an older version of it. `session new --prompt <file>`
+//! freezes the BYTES into the session header instead (DESIGN §3, §5), which is
+//! where text with one session's lifetime belongs.
 //!
 //! **Why the report comes back through a background task.** A delegation is a
 //! mechanism that owes an answer later, and the kernel already has exactly one
@@ -85,7 +94,7 @@ fn dispatch(ctx: *const Ctx, request: rpc.Request) !rpc.Outcome {
         return rpc.refuse(ctx.alloc, "agent cannot find the nulya that spawned it (NULYA_EXE is not set)", .{});
     }
     if (std.mem.eql(u8, request.name, "agent")) return delegate(ctx, request.arguments);
-    if (std.mem.eql(u8, request.name, "materialize")) return materialize(ctx, request.arguments);
+    if (std.mem.eql(u8, request.name, "render")) return renderTool(ctx, request.arguments);
     if (std.mem.eql(u8, request.name, "list")) return list(ctx);
     if (std.mem.eql(u8, request.name, "run")) {
         return runner.run(ctx.alloc, ctx.io, ctx.exe, .{
@@ -99,23 +108,25 @@ fn dispatch(ctx: *const Ctx, request: rpc.Request) !rpc.Outcome {
     }
     return .{ .failed = .{
         .code = rpc.code_unknown_tool,
-        .message = try std.fmt.allocPrint(ctx.alloc, "agent has no tool named '{s}' (it has agent, materialize, list, run)", .{request.name}),
+        .message = try std.fmt.allocPrint(ctx.alloc, "agent has no tool named '{s}' (it has agent, render, list, run)", .{request.name}),
     } };
 }
 
-// ── materialize ─────────────────────────────────────────────────────────────
+// ── render ──────────────────────────────────────────────────────────────────
 
-const Materialized = struct {
+const Rendered = struct {
     def: defs.Def,
-    id: []const u8,
-    version: []const u8,
+    /// The block label this persona's system prompt carries (`agent-<name>`).
+    label: []const u8,
+    /// The file `session new --prompt` reads the body from.
+    path: []const u8,
     warnings: []const []const u8,
 };
 
-/// Read a definition, render it, freeze it. The one implementation of that
-/// rendering (see `defs.zig`): the version id is the hash of exactly these
-/// bytes, so a second spelling anywhere would be a second version of one persona.
-fn build(ctx: *const Ctx, name: []const u8) !union(enum) { ok: Materialized, failed: rpc.Fail } {
+/// Read a definition and write its body where `session new --prompt` can read
+/// it. The one implementation of that rendering (see `defs.zig`), so the front
+/// end and the model's own `agent` tool cannot disagree about what a persona is.
+fn render(ctx: *const Ctx, name: []const u8) !union(enum) { ok: Rendered, failed: rpc.Fail } {
     const alloc = ctx.alloc;
     if (!defs.isPlainName(name)) {
         return .{ .failed = .{
@@ -137,41 +148,32 @@ fn build(ctx: *const Ctx, name: []const u8) !union(enum) { ok: Materialized, fai
 
     const def = entry.def;
 
-    const id = try defs.extensionId(alloc, def.name);
-    const draft = try defs.draftPath(alloc, id);
-    try defs.writeDraft(alloc, ctx.io, def, id, draft);
-
-    // Built every time, and that is cheap and deliberate: the version is the
-    // hash of the draft, so an unedited definition rebuilds to the version
-    // already in the store, and an edit is picked up without anybody running a
-    // command. A user definition lands in the user store — the layer it was
-    // written in, so a checkout's personas do not accumulate on the machine.
-    var argv: std.ArrayList([]const u8) = .empty;
-    try argv.appendSlice(alloc, &.{ ctx.exe, "ext", "build", draft });
-    if (defs.userStore(def.layer)) try argv.append(alloc, "--user");
-    const built = try run(alloc, ctx.io, argv.items);
-    if (built.code != 0) {
-        return .{ .failed = try failed(alloc, rpc.code_refused, "could not build the persona for '{s}': {s}", .{ def.name, detail(built) }) };
-    }
-    const version = extractVersion(built.stdout) orelse {
-        return .{ .failed = try failed(alloc, rpc.code_refused, "building '{s}' produced no version: {s}", .{ def.name, detail(built) }) };
+    // Written every time, and that is cheap and deliberate: the contents are
+    // decided by the definition, so an unedited one rewrites the same bytes and
+    // an edit is picked up without anybody running a command. Two delegations
+    // racing here write the same file.
+    const label = try defs.promptLabel(alloc, def.name);
+    const path = try defs.promptPath(alloc, label);
+    defs.writePrompt(alloc, ctx.io, def, path) catch |err| {
+        return .{ .failed = try failed(alloc, rpc.code_refused, "could not write the prompt for '{s}' to {s}: {s}", .{ def.name, path, @errorName(err) }) };
     };
+
     // Before anybody composes with this: can the packages its pins name actually
     // be brought in? Checked here so BOTH callers get the same answer — the
     // model's `agent` tool and the front end's `/agent` both go through
-    // `materialize`, and a second check on one side would be a second opinion.
+    // `render`, and a second check on one side would be a second opinion.
     if (try membersAvailable(ctx, def.name, try pinMembers(alloc, def.pins))) |fail| {
         return .{ .failed = fail };
     }
-    return .{ .ok = .{ .def = def, .id = id, .version = version, .warnings = entry.warnings } };
+    return .{ .ok = .{ .def = def, .label = label, .path = path, .warnings = entry.warnings } };
 }
 
-/// `materialize {name}` → the frozen version, and the arguments a driver needs
-/// to compose it. JSON rather than prose: its reader is a driver.
-fn materialize(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
+/// `render {name}` → the prompt file, and the arguments a driver needs to open a
+/// session wearing it. JSON rather than prose: its reader is a driver.
+fn renderTool(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
     const name = rpc.trimmedField(args, "name");
-    if (name.len == 0) return rpc.invalidParams(ctx.alloc, "materialize needs a name (which agent definition to freeze)", .{});
-    const outcome = try build(ctx, name);
+    if (name.len == 0) return rpc.invalidParams(ctx.alloc, "render needs a name (which agent definition to render)", .{});
+    const outcome = try render(ctx, name);
     switch (outcome) {
         .failed => |f| return .{ .failed = f },
         .ok => |m| {
@@ -180,12 +182,13 @@ fn materialize(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
             try jw.beginObject();
             try jw.objectField("name");
             try jw.write(m.def.name);
-            try jw.objectField("id");
-            try jw.write(m.id);
-            try jw.objectField("version");
-            try jw.write(m.version);
-            try jw.objectField("ref");
-            try jw.write(try std.fmt.allocPrint(ctx.alloc, "{s}@{s}", .{ m.id, m.version }));
+            // `session new --prompt <this>`: the whole of how a persona reaches
+            // a session now. Nothing is installed, so there is no version and no
+            // id to name.
+            try jw.objectField("prompt");
+            try jw.write(m.path);
+            try jw.objectField("label");
+            try jw.write(m.label);
             try jw.objectField("description");
             try jw.write(m.def.description);
             try jw.objectField("readonly");
@@ -466,8 +469,8 @@ fn delegate(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
     return newDelegation(ctx, parent, name, task, chosen, depth);
 }
 
-/// A fresh delegation: materialise the persona, open a session wearing it, give
-/// it the task, and start the background task that drives it.
+/// A fresh delegation: render the persona, open a session wearing it, give it
+/// the task, and start the background task that drives it.
 fn newDelegation(
     ctx: *const Ctx,
     parent: []const u8,
@@ -492,7 +495,7 @@ fn newDelegation(
         }
     }
 
-    const outcome = try build(ctx, name);
+    const outcome = try render(ctx, name);
     const m = switch (outcome) {
         .failed => |f| return .{ .failed = f },
         .ok => |ok| ok,
@@ -521,7 +524,10 @@ fn newDelegation(
     const self_ref = try selfRef(alloc, ctx.io);
 
     var new_argv: std.ArrayList([]const u8) = .empty;
-    try new_argv.appendSlice(alloc, &.{ ctx.exe, "session", "new", "--with", try std.fmt.allocPrint(alloc, "{s}@{s}", .{ m.id, m.version }) });
+    // The persona rides as BYTES the header freezes (DESIGN §3): nothing is
+    // installed, so this session's identity text cannot be pruned out from
+    // under its own resume.
+    try new_argv.appendSlice(alloc, &.{ ctx.exe, "session", "new", "--prompt", m.path });
     if (profile.len != 0) try new_argv.appendSlice(alloc, &.{ "--profile", profile });
     if (model.len != 0) try new_argv.appendSlice(alloc, &.{ "--model", model });
     // A pin needs its package to be a MEMBER of the session (DESIGN §5.1), and
@@ -592,7 +598,8 @@ fn followUp(ctx: *const Ctx, parent: []const u8, child: []const u8, task: []cons
         return rpc.invalidParams(alloc, "'{s}' is not a session id (they look like s-…)", .{child});
     }
 
-    // Is it a delegation at all? A session wearing an `agent-*` member is one;
+    // Is it a delegation at all? A session whose header froze an `agent-*`
+    // system prompt is one;
     // anything else is somebody's conversation, and appending a task to it
     // through this tool would be a delegation nobody asked for.
     const worn = (try defs.wornPersona(alloc, ctx.io, child)) orelse {
@@ -834,11 +841,4 @@ fn firstLine(text: []const u8) []const u8 {
 
 fn failed(alloc: std.mem.Allocator, code: i64, comptime fmt: []const u8, args: anytype) !rpc.Fail {
     return .{ .code = code, .message = try std.fmt.allocPrint(alloc, fmt, args) };
-}
-
-fn extractVersion(text: []const u8) ?[]const u8 {
-    const at = std.mem.indexOf(u8, text, "v-") orelse return null;
-    var end = at + 2;
-    while (end < text.len and (std.ascii.isAlphanumeric(text[end]))) end += 1;
-    return if (end > at + 2) text[at..end] else null;
 }

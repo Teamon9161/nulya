@@ -2256,7 +2256,7 @@ test "cli ext seed: the binary's own drafts land in a store root, move forward w
 
 // ── The bundled agent extension: delegation over the task substrate ─────────
 
-test "bundled agent: materialize freezes a definition idempotently; a delegation opens a child session, runs it as a background task of the parent, holds a read-only agent to the gate, and reports back through the parent's inbox" {
+test "bundled agent: render writes a persona nothing installs; a delegation opens a child session wearing its bytes, runs it as a background task of the parent, holds a read-only agent to the gate, and reports back through the parent's inbox" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -2290,48 +2290,46 @@ test "bundled agent: materialize freezes a definition idempotently; a delegation
         ,
     });
 
-    // ① `materialize` is the ONE implementation of the rendering, so the version
-    // it seals is the version everybody gets — and an unedited definition seals
-    // to the one already in the store (physics #5).
-    var frozen: []u8 = undefined;
+    // ① `render` is the ONE implementation of that rendering: it writes the body
+    // where `session new --prompt` can read it and answers with the whole set of
+    // arguments the definition asks for. Content-determined, so running it twice
+    // is the same file.
+    var prompt_rel: []u8 = undefined;
     {
-        const first = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "materialize", "{\"name\":\"prober\"}" });
+        const first = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "render", "{\"name\":\"prober\"}" });
         defer alloc.free(first.stdout);
         try std.testing.expectEqual(@as(u8, 0), first.code);
         const parsed = try std.json.parseFromSlice(std.json.Value, alloc, std.mem.trim(u8, first.stdout, " \r\n"), .{});
         defer parsed.deinit();
         const obj = parsed.value.object;
-        try std.testing.expectEqualStrings("agent-prober", obj.get("id").?.string);
+        try std.testing.expectEqualStrings("agent-prober", obj.get("label").?.string);
         try std.testing.expectEqual(true, obj.get("readonly").?.bool);
         try std.testing.expectEqual(@as(i64, 2), obj.get("max_steps").?.integer);
         // A pin the kernel could not resolve refuses the whole `session new`, so
         // a malformed one is dropped here — and said out loud.
         try std.testing.expectEqual(@as(usize, 0), obj.get("pins").?.array.items.len);
         try std.testing.expect(std.mem.indexOf(u8, obj.get("warnings").?.array.items[0].string, "nonsense") != null);
-        frozen = try alloc.dupe(u8, obj.get("ref").?.string);
+        prompt_rel = try alloc.dupe(u8, obj.get("prompt").?.string);
 
-        const again = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "materialize", "{\"name\":\"prober\"}" });
+        const again = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "render", "{\"name\":\"prober\"}" });
         defer alloc.free(again.stdout);
-        try std.testing.expect(std.mem.indexOf(u8, again.stdout, frozen) != null);
+        try std.testing.expect(std.mem.indexOf(u8, again.stdout, prompt_rel) != null);
     }
-    defer alloc.free(frozen);
+    defer alloc.free(prompt_rel);
 
-    // The persona is a DATA extension carrying one system prompt, and it is
-    // never activated: it is worn for one session with `--with` (T31).
+    // The persona is a FILE, and nothing installed it: no `agent-*` package
+    // appears in the store, so `/ext` has nothing new in it and `ext prune`
+    // cannot break the resume of a session wearing one.
     {
-        const version = frozen[std.mem.indexOfScalar(u8, frozen, '@').? + 1 ..];
-        const manifest_path = try std.fmt.allocPrint(alloc, ".nulya/extensions/agent-prober/versions/{s}/extension.json", .{version});
-        defer alloc.free(manifest_path);
-        const manifest = try ws.readFileAlloc(io, manifest_path, alloc, .limited(1 << 16));
-        defer alloc.free(manifest);
-        try std.testing.expect(std.mem.indexOf(u8, manifest, "\"system_prompts\":[\"prompt.md\"]") != null or
-            std.mem.indexOf(u8, manifest, "\"prompt.md\"") != null);
-        try std.testing.expectError(error.FileNotFound, ws.access(io, ".nulya/extensions/agent-prober/current", .{}));
+        const body = try ws.readFileAlloc(io, prompt_rel, alloc, .limited(1 << 16));
+        defer alloc.free(body);
+        try std.testing.expect(std.mem.indexOf(u8, body, "You only read.") != null);
+        try std.testing.expectError(error.FileNotFound, ws.access(io, ".nulya/extensions/agent-prober", .{}));
     }
 
     // ② An unknown name lists the ones there are, and creates nothing.
     {
-        const unknown = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "materialize", "{\"name\":\"nope\"}" });
+        const unknown = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "render", "{\"name\":\"nope\"}" });
         defer alloc.free(unknown.stdout);
         try std.testing.expectEqual(@as(u8, 1), unknown.code);
         try std.testing.expect(std.mem.indexOf(u8, unknown.stdout, "no agent 'nope'") != null);
@@ -2375,6 +2373,17 @@ test "bundled agent: materialize freezes a definition idempotently; a delegation
         break :blk try alloc.dupe(u8, delegated.stdout[at..end]);
     };
     defer alloc.free(child);
+
+    // The child WEARS the persona: its bytes are in the header, under the label
+    // the package chose, and no extension of any kind came along for it.
+    {
+        const header = try support.readSessionFile(alloc, io, ws, child);
+        defer alloc.free(header);
+        try std.testing.expect(std.mem.indexOf(u8, header, "\"source\":\"agent-prober\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, header, "You only read.") != null);
+        try std.testing.expect(std.mem.indexOf(u8, header, "\"active\":[]") != null);
+        try std.testing.expectError(error.FileNotFound, ws.access(io, ".nulya/extensions/agent-prober", .{}));
+    }
 
     // Wait for the task the delegation started. `task wait` is the kernel's own
     // answer to "is it done"; nothing here polls a directory.
@@ -2507,8 +2516,8 @@ test "bundled agent: the personas the package ships need no files — list layer
         }
         try std.testing.expectEqualStrings("workspace", winner_layer);
         try std.testing.expect(shadowed_builtin);
-        // …and the winner is what materialising that name freezes.
-        const m = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "materialize", "{\"name\":\"explore\"}" });
+        // …and the winner is what rendering that name writes.
+        const m = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "render", "{\"name\":\"explore\"}" });
         defer alloc.free(m.stdout);
         try std.testing.expect(std.mem.indexOf(u8, m.stdout, "\"layer\":\"workspace\"") != null);
     }
@@ -2519,7 +2528,7 @@ test "bundled agent: the personas the package ships need no files — list layer
     // created: the pins would otherwise reach a `session new` that can only
     // refuse them.
     {
-        const refused = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "materialize", "{\"name\":\"explore\"}" });
+        const refused = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "render", "{\"name\":\"explore\"}" });
         defer alloc.free(refused.stdout);
         try std.testing.expectEqual(@as(u8, 1), refused.code);
         try std.testing.expect(std.mem.indexOf(u8, refused.stdout, "not built here: std") != null);
@@ -2566,14 +2575,18 @@ test "bundled agent: the personas the package ships need no files — list layer
         try std.testing.expectEqual(@as(u8, 0), waited.code);
     }
 
-    // The child's frozen composition: the persona, plus the `std` its pins
-    // implied, plus exactly the three read-only tools on its native face.
+    // The child's frozen composition: the persona as BYTES the header holds, the
+    // `std` its pins implied as the only member, and exactly the three read-only
+    // tools on its native face. The persona is not an extension — the store
+    // gained nothing from this delegation.
     {
         const header = try support.readSessionFile(alloc, io, ws, child);
         defer alloc.free(header);
-        try std.testing.expect(std.mem.indexOf(u8, header, "agent-explore") != null);
+        try std.testing.expect(std.mem.indexOf(u8, header, "\"source\":\"agent-explore\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, header, "\"id\":\"agent-explore\"") == null);
         try std.testing.expect(std.mem.indexOf(u8, header, "\"id\":\"std\"") != null);
         try std.testing.expect(std.mem.indexOf(u8, header, "\"native_tools\":[\"ext:std/read\",\"ext:std/grep\",\"ext:std/glob\"]") != null);
+        try std.testing.expectError(error.FileNotFound, ws.access(io, ".nulya/extensions/agent-explore", .{}));
     }
     // …and the gate held it to them: the scripted provider's `shell` never ran.
     {

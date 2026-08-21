@@ -36,16 +36,16 @@
         }
       },
       {
-        "name": "materialize",
+        "name": "render",
         "audience": "driver",
-        "description": "Freeze an agent definition into the data extension version a session can carry. For drivers: returns the built version and the session arguments the definition asks for. Building an unchanged definition returns the version already in the store.",
+        "description": "Render an agent definition's body to a file a session can wear. For drivers: returns that file's path, for `session new --prompt`, plus the session arguments the definition asks for. Nothing is installed and nothing is versioned — the bytes are frozen into the session header when the session is created.",
         "timeout_ms": 120000,
         "input": {
           "type": "object",
           "properties": {
             "name": {
               "type": "string",
-              "description": "Which agent definition to freeze."
+              "description": "Which agent definition to render."
             }
           },
           "required": [
