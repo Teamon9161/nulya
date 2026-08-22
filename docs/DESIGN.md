@@ -369,7 +369,7 @@ extension 装在**多个 store root** 里，按固定顺序搜索（`extension/r
 manifest 讲给三种不同的听众，字段按哪个听众读它分成三层——每一层守一种纪律，说一次，不是每个字段各说一遍（ext-review D3）：
 
 - **内核强制**的字段：类型错是 parse 错，值错是 validate 错，字段本身的语义由 kernel 的代码路径读取并照做。
-- **driver 声明**：kernel 解析它、冻进版本的 manifest、**一个字节都不强制**——封闭词表的字段值错仍然是 validate 错（拼错一个词不该被读成缺省），但"要不要有这个字段"从不是 build 会拒绝的事。消费者是某个 driver 自己的 policy（审批表、pin 规则、devise 判断）。
+- **driver 声明**：kernel 解析它、冻进版本的 manifest、**一个字节都不强制**——封闭词表的字段值错仍然是 validate 错（拼错一个词不该被读成缺省），但"要不要有这个字段"从不是 build 会拒绝的事。消费者是某个 driver 自己的 policy（审批表、pin 规则、折叠判断）。
 - **前端声明**：形状由 kernel 检查，**值是开放词表**——认不出的词是**读的人**的选择（退回一张朴素的卡、warn-and-skip），永远不是 build 拒绝。
 
 ```
@@ -405,7 +405,7 @@ manifest 讲给三种不同的听众，字段按哪个听众读它分成三层�
 
 #### 内核强制
 
-`runtime.entry` / `.interpreter` / `.wire` 说的是**怎么跑这个 runtime**——entry/interpreter 各自既可以是字符串也可以是按 `builtin.os.tag` 键名的对象（选不中host时是硬失败，见上），`wire` 决定进程边界上说的是哪种协议：`"jsonrpc"`（缺省，§7.3 的 JSON-RPC 信封）或 `"plain"`（stdin 是这次调用参数的一个 compact JSON 对象，stdout 原文就是字符串结果——超时、被杀整棵树、env 净化、`NULYA_EXE`/`NULYA_SESSION` 与 jsonrpc 完全相同，走同一条 `runExtension` 路，§7.3）。
+`runtime.entry` / `.interpreter` / `.wire` 说的是**怎么跑这个 runtime**——entry/interpreter 各自既可以是字符串也可以是按 `builtin.os.tag` 键名的对象（选不中宿主时是硬失败，见上），`wire` 决定进程边界上说的是哪种协议：`"jsonrpc"`（缺省，§7.3 的 JSON-RPC 信封）或 `"plain"`（stdin 是这次调用参数的一个 compact JSON 对象，stdout 原文就是字符串结果——超时、被杀整棵树、env 净化、`NULYA_EXE`/`NULYA_SESSION` 与 jsonrpc 完全相同，走同一条 `runExtension` 路，§7.3）。
 
 `tools[].input` schema 只在该 tool 被 pin 进 `tools[]` 时才喂给模型；平时是可发现性元数据。`tools[].timeout_ms?` 是**这个 tool 自己**的 wall-clock 上限——但只在它被 pin 到**模型的工具面**上的那次调用生效（缺省 = host 的 30s，§7.3；`nulya ext run` 不套用它，见 §7.3 的 timeout 讨论）：知道自己慢的 tool 在 manifest 里说出来，因为 manifest 就是关于一个 tool 的唯一真相。`skills` / `system_prompts` 是这个版本贡献的文件列表，随 build 冻结进快照。
 

@@ -693,12 +693,21 @@ function manifestFacts(manifest: Record<string, unknown> | null): Pick<
   "kind" | "tools" | "driverTools" | "skills" | "systemPrompts" | "activation" | "permissions"
 > {
   const runtime = manifest?.["runtime"] as Record<string, unknown> | undefined
-  const entry = typeof runtime?.["entry"] === "string" ? (runtime["entry"] as string) : null
+  // `runtime.entry` is a string, or an object keyed by OS for a script that
+  // ships one file per platform (DESIGN §7.1); the kind is the same question
+  // asked of every variant, as `manifest.isScript` asks it.
+  const rawEntry = runtime?.["entry"]
+  const entries =
+    typeof rawEntry === "string"
+      ? [rawEntry]
+      : typeof rawEntry === "object" && rawEntry !== null
+        ? Object.values(rawEntry as Record<string, unknown>).filter((v): v is string => typeof v === "string")
+        : []
   const permissions = (manifest?.["permissions"] ?? {}) as Record<string, unknown>
   return {
     // `bin/` means the kernel compiles it, anything else is frozen as-is; no
     // runtime at all is a pure skill/prompt package (DESIGN §7.1).
-    kind: entry === null ? "data" : entry.startsWith("bin/") ? "compiled" : "script",
+    kind: entries.length === 0 ? "data" : entries.some((e) => e.startsWith("bin/")) ? "compiled" : "script",
     ...contributionsOf(manifest),
     permissions: {
       fs: stringList(permissions["fs"]),
