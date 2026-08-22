@@ -2598,21 +2598,22 @@ test "bundled agent: the personas the package ships need no files — list layer
     }
     try ws.deleteFile(io, ".nulya/agents/explore.md");
 
-    // ③ The builtin `explore` pins `std`'s read-only tools, so a delegation to it
-    // needs `std` installed — and says so plainly when it is not. Nothing is
-    // created: the pins would otherwise reach a `session new` that can only
-    // refuse them.
+    // ③ The builtin `explore` pins `std`'s read-only tools. `render` hands those
+    // pins on as written and has no opinion about whether they resolve: a pin
+    // brings its own package into the session (DESIGN §5.1), so there is exactly
+    // one judge of that, and it is the `session new` that would be refused.
+    // Nothing is derived here, and no `members` list is answered any more.
     {
-        const refused = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "render", "{\"name\":\"explore\"}" });
-        defer alloc.free(refused.stdout);
-        try std.testing.expectEqual(@as(u8, 1), refused.code);
-        try std.testing.expect(std.mem.indexOf(u8, refused.stdout, "not built here: std") != null);
-        try std.testing.expect(std.mem.indexOf(u8, refused.stdout, "ext build extensions/std") != null);
+        const rendered = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "render", "{\"name\":\"explore\"}" });
+        defer alloc.free(rendered.stdout);
+        try std.testing.expectEqual(@as(u8, 0), rendered.code);
+        try std.testing.expect(std.mem.indexOf(u8, rendered.stdout, "\"ext:std/read\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered.stdout, "\"members\"") == null);
     }
 
     // ④ With `std` active, the builtin persona delegates for real: its pins
-    // become the child's tool face, the `--with` its pins imply comes along, and
-    // `readonly` is held at the kernel's gate.
+    // become the child's tool face, the membership they imply comes with them,
+    // and `readonly` is held at the kernel's gate.
     const std_ref = try buildBundled(alloc, io, ws, exe_abs, "std");
     defer alloc.free(std_ref);
     const std_version = std_ref[std.mem.indexOfScalar(u8, std_ref, '@').? + 1 ..];
@@ -2622,13 +2623,12 @@ test "bundled agent: the personas the package ships need no files — list layer
         try std.testing.expectEqual(@as(u8, 0), activated.code);
     }
 
-    // What "read-only" MEANS at the gate is read out of the frozen manifest of
-    // every member the child's header names — `<id>@<version>`, never the draft,
-    // because the frozen one is what that session composed with. `ext inspect`
-    // is where that question is asked, so if this form stops answering, a
-    // read-only delegation is read-only in name only: the allow-list comes back
-    // empty and every call the sub-agent makes is refused, including the reads
-    // its own persona tells it to make.
+    // What "read-only" MEANS at the gate now travels on the gate request itself
+    // (DESIGN §4), frozen from this very manifest at composition time. `ext
+    // inspect <id>@<version>` still has to answer for it — it is how a person
+    // checks the same claim — but nothing reads it to build an allow-list any
+    // more, which is the derivation that once came back empty and made a
+    // read-only delegation read-only in name only (BUGS #16).
     {
         const frozen = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "inspect", std_ref });
         defer alloc.free(frozen.stdout);
@@ -2665,9 +2665,10 @@ test "bundled agent: the personas the package ships need no files — list layer
     }
 
     // The child's frozen composition: the persona as BYTES the header holds, the
-    // `std` its pins implied as the only member, and exactly the three read-only
-    // tools on its native face. The persona is not an extension — the store
-    // gained nothing from this delegation.
+    // `std` its pins brought in as the only member (nothing on the delegation's
+    // command line named it — the kernel's own implication did, DESIGN §5.1),
+    // and exactly the three read-only tools on its native face. The persona is
+    // not an extension — the store gained nothing from this delegation.
     {
         const header = try support.readSessionFile(alloc, io, ws, child);
         defer alloc.free(header);

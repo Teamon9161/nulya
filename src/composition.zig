@@ -116,9 +116,13 @@ pub const Options = struct {
     /// Stable ids (`ext:<extension-id>/<tool-name>`) to expose natively this
     /// session — `registry.pinned_native_tools` plus `session new --pin`
     /// (DESIGN §5.1). The ONLY way an extension tool reaches the model's tool
-    /// face: usage facts never fill a slot by themselves. Each must resolve
-    /// against an active extension; an unknown pin is a hard error, never a
-    /// silent skip.
+    /// face: usage facts never fill a slot by themselves. An unresolvable pin is
+    /// a hard error, never a silent skip.
+    ///
+    /// A pin whose package is not already a member BRINGS IT IN, at `current`
+    /// (`resolveFreshExtensions`): a tool cannot take a slot in a session its
+    /// package is absent from, so membership was always implied and only the
+    /// saying of it was left to each caller.
     pinned_native_tools: []const []const u8 = &.{},
     /// Provider-facing total tool count, the builtin included. `shell` always
     /// occupies `registry.builtin_count` of it.
@@ -154,12 +158,17 @@ pub const CompositionError = error{
     ToolBudgetExceeded,
     /// A pin is not `ext:<extension-id>/<tool-name>`.
     InvalidStableToolId,
-    /// A pin names an extension that is not a member of this session.
+    /// A pin names an extension NO STORE ROOT HOLDS — never built on this
+    /// machine, or named with a typo. A pin whose package merely was not a
+    /// member is not this error any more: it brings the package in
+    /// (`resolveFreshExtensions`), and a package that is held but has no
+    /// `current` fails as `WithVersionNotFound` instead.
     PinNamesUnknownExtension,
     /// The extension is a member, but its frozen manifest declares no such tool.
     PinToolNotDeclared,
-    /// A `--with` extension has no built version to use: either no `current` at
-    /// all, or the named version is in none of the store roots.
+    /// An extension named for this session has no built version to use: either
+    /// no `current` at all, or the named version is in none of the store roots.
+    /// Both `--with` and the membership a pin implies arrive here.
     WithVersionNotFound,
     /// An ACTIVATED extension does not validate: its `current` points at a
     /// version whose seal, manifest or package is unusable. Named by a stderr
@@ -295,7 +304,7 @@ const Resolved = struct {
 /// phase), `gpa` backs the resolved manifests (they do not).
 fn resolve(gpa: std.mem.Allocator, a: std.mem.Allocator, roots: *const roots_mod.Roots, request: Request) !Resolved {
     const extensions = switch (request) {
-        .fresh => |opts| try unionWith(gpa, roots, try resolveActiveExtensions(gpa, roots), opts.with),
+        .fresh => |opts| try resolveFreshExtensions(gpa, roots, opts),
         .frozen => |frozen| try resolveFrozenExtensions(gpa, roots, frozen.active),
     };
     errdefer freeResolved(gpa, extensions);
@@ -317,6 +326,91 @@ fn resolve(gpa: std.mem.Allocator, a: std.mem.Allocator, roots: *const roots_mod
         .bindings = try resolveBindings(a, roots, extensions, pins),
         .prompts = try copyInlinePrompts(a, prompts),
     };
+}
+
+/// Membership for a FRESH session, in three layers: what is activated, what
+/// `--with` names, and last what the pins imply.
+///
+/// **A pin implies membership** (DESIGN §5.1). A pin gives a tool a native slot,
+/// and a tool cannot take a slot in a session its package is not a member of —
+/// so the two were never independent, and every driver was made to say the same
+/// thing twice (`--pin ext:std/read --with std`). Saying it once, here, is the
+/// implication itself rather than a convenience: nothing new can be reached, and
+/// the only alternative to deriving it was for each driver to derive it, which
+/// is how three of them came to hold three slightly different copies.
+///
+/// Last, and never an override: an id already resolved — activated, or named by
+/// `--with` at an exact version — keeps the version it was resolved at. The pin
+/// asks for the tool, not for a version, so it must not quietly move a session
+/// off the version somebody named.
+///
+/// Only ids some root actually HOLDS are implied. That keeps the two refusals
+/// distinguishable: nothing anywhere holds this id → `PinNamesUnknownExtension`
+/// (it was never built here), held but no `current` → `WithVersionNotFound`
+/// (built, never activated — `--with <id>@<version>` or `activate` is the way
+/// in). The frozen path is untouched: a header's `active` already lists every
+/// member this rule brought in, so a resume never re-derives it.
+fn resolveFreshExtensions(gpa: std.mem.Allocator, roots: *const roots_mod.Roots, opts: Options) ![]roots_mod.Roots.Resolved {
+    const named = try unionWith(gpa, roots, try resolveActiveExtensions(gpa, roots), opts.with);
+    // From here on `named` belongs to `unionWith`'s contract — it takes the base
+    // and releases it on any failure — so a failure in between has to release it
+    // by hand rather than through an errdefer that the tail call would double.
+    const implied = pinImpliedRefs(gpa, roots, opts.pinned_native_tools, named) catch |err| {
+        freeResolved(gpa, named);
+        return err;
+    };
+    defer gpa.free(implied);
+    return unionWith(gpa, roots, named, implied);
+}
+
+/// The `--with` refs a pin list implies: one per distinct `ext:<id>/…` id that
+/// is not already a member and that some root holds, at `current`
+/// (`version = null`).
+///
+/// Borrows each id from the pin string, which outlives this composition step.
+/// A malformed pin is skipped rather than reported: `resolveBindings` is the one
+/// place that judges pins, and it says `InvalidStableToolId` about this very
+/// string a moment later — two places refusing the same pin would eventually
+/// refuse it for two different reasons.
+fn pinImpliedRefs(
+    alloc: std.mem.Allocator,
+    roots: *const roots_mod.Roots,
+    pins: []const []const u8,
+    members: []const roots_mod.Roots.Resolved,
+) ![]WithRef {
+    var out: std.ArrayList(WithRef) = .empty;
+    errdefer out.deinit(alloc);
+    for (pins) |pin| {
+        const parsed = parseStableToolId(pin) catch continue;
+        if (findResolved(members, parsed.ext_id) != null) continue;
+        for (out.items) |seen| {
+            if (std.mem.eql(u8, seen.id, parsed.ext_id)) break;
+        } else {
+            if (!try anyRootHolds(alloc, roots, parsed.ext_id)) continue;
+            try out.append(alloc, .{ .id = parsed.ext_id });
+        }
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+/// Does any store root hold this extension at all — a `current`, or any built
+/// version? "Held" is the same notion the trust gate uses (DESIGN §9): a
+/// directory with a lock in it and nothing else is where a failed build left
+/// its lease, not an extension.
+fn anyRootHolds(alloc: std.mem.Allocator, roots: *const roots_mod.Roots, id: []const u8) !bool {
+    if (try roots.firstActive(alloc, id)) |active| {
+        alloc.free(active.version);
+        return true;
+    }
+    for (roots.entries, 0..) |_, i| {
+        const versions = roots.store(i).listVersions(alloc, id) catch continue;
+        defer {
+            for (versions) |v| alloc.free(v);
+            alloc.free(versions);
+        }
+        if (versions.len != 0) return true;
+    }
+    return false;
 }
 
 fn copyInlinePrompts(a: std.mem.Allocator, prompts: []const ledger.InlinePrompt) ![]const ledger.InlinePrompt {
@@ -446,6 +540,10 @@ fn resolvePinnedBinding(
         .name = spec.name,
         .description = spec.description,
         .input_schema = spec.input_schema,
+        // The package's own claim about this tool, frozen with everything else
+        // the manifest says (DESIGN §7.2.1). The kernel enforces nothing with
+        // it — it travels so the gate can be told (DESIGN §4).
+        .readonly = spec.readonly,
     }, entry_abs, if (rt.interpreter) |ip| ip.forHost() else null, spec.timeout_ms, rt.wireOf());
 }
 
@@ -1568,6 +1666,92 @@ test "a pin to an inactive extension or undeclared tool is a hard error" {
     try std.testing.expectError(error.ToolBudgetExceeded, SessionComposition.init(alloc, io, cwd, one_root, .{
         .pinned_native_tools = &[_][]const u8{"ext:web.search/web_search"},
         .max_tools = registry.builtin_count,
+    }));
+}
+
+test "a pin brings its own package into the session, at current, without a --with saying so" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmpPath(alloc, io, tmp.dir);
+    defer alloc.free(cwd);
+
+    // `on_request`: activated, so it has a `current`, but discovery leaves it
+    // out — exactly the shape that used to make a standing pin unusable.
+    const manifest_bytes =
+        \\{"schema":"nulya.extension/v2","id":"opt","activation":"on_request","runtime":{"entry":"bin/run"},"contributes":{"tools":[{"name":"look","description":"a tool","input":{"type":"object"},"readonly":true}]}}
+    ;
+    const version = try testkit.writeFrozenVersion(alloc, io, tmp.dir, "opt", manifest_bytes, &.{.{ .rel = "src/main.zig", .bytes = "pub fn main() void {}\n" }});
+    defer alloc.free(version);
+    try testkit.activate(alloc, io, tmp.dir, "opt", version);
+
+    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .pinned_native_tools = &[_][]const u8{"ext:opt/look"} });
+    defer comp.deinit(alloc);
+
+    // A member, at `current`, and its tool on the face — from the pin alone.
+    try std.testing.expectEqual(@as(usize, 1), comp.extensions.len);
+    try std.testing.expectEqualStrings("opt", comp.extensions[0].id);
+    try std.testing.expectEqualStrings(version, comp.extensions[0].version);
+    try std.testing.expect(comp.tools.lookup("look") != null);
+    // …and the manifest's own claim rode along with the definition (DESIGN §4).
+    try std.testing.expectEqual(@as(?bool, true), comp.tools.lookup("look").?.definition.readonly);
+    try std.testing.expect(comp.tools.lookup("shell").?.definition.readonly == null);
+}
+
+test "a pin never moves a session off a version somebody named" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmpPath(alloc, io, tmp.dir);
+    defer alloc.free(cwd);
+
+    const v1 = try writeToolExtension(alloc, io, tmp.dir, "web.search", "web_search", "v1");
+    defer alloc.free(v1);
+    const v2 = try writeToolExtension(alloc, io, tmp.dir, "web.search", "web_search", "v2");
+    defer alloc.free(v2);
+    try testkit.activate(alloc, io, tmp.dir, "web.search", v2);
+
+    // `--with` names the OLD version; the pin names the tool. The pin asks for a
+    // slot, not for a version, so it must not quietly promote the session to
+    // `current`.
+    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{
+        .with = &.{.{ .id = "web.search", .version = v1 }},
+        .pinned_native_tools = &[_][]const u8{"ext:web.search/web_search"},
+    });
+    defer comp.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), comp.extensions.len);
+    try std.testing.expectEqualStrings(v1, comp.extensions[0].version);
+}
+
+test "a pin whose package is held but has no current fails as WithVersionNotFound; one nothing holds is still an unknown extension" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmpPath(alloc, io, tmp.dir);
+    defer alloc.free(cwd);
+
+    // Built here, never activated: there is a version to name, so the refusal
+    // is about the missing `current` and the way out is `--with <id>@<v>`.
+    const built = try writeToolExtension(alloc, io, tmp.dir, "shy", "peek", "v1");
+    defer alloc.free(built);
+    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_root, .{
+        .pinned_native_tools = &[_][]const u8{"ext:shy/peek"},
+    }));
+    // Naming that version explicitly is the way in, and the pin then resolves.
+    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{
+        .with = &.{.{ .id = "shy", .version = built }},
+        .pinned_native_tools = &[_][]const u8{"ext:shy/peek"},
+    });
+    defer comp.deinit(alloc);
+    try std.testing.expect(comp.tools.lookup("peek") != null);
+
+    // Nothing anywhere holds this id: it was never built here, and no version
+    // could be named — a different sentence, so a different error.
+    try std.testing.expectError(error.PinNamesUnknownExtension, SessionComposition.init(alloc, io, cwd, one_root, .{
+        .pinned_native_tools = &[_][]const u8{"ext:never.built/tool"},
     }));
 }
 

@@ -1298,27 +1298,6 @@ export function App(props: AppProps) {
     (tabs.tabs().find((t) => t.kind === "session" && t.id === session) as SessionTab | undefined) ?? null
 
   /**
-   * The stable id of a tool on that session's face (`ext:<id>/<tool>`), or
-   * undefined for a builtin. Read from the FROZEN versions the session
-   * composed, which is the only place that knows which package a name came
-   * from — the gate request carries the model-facing name and nothing else.
-   */
-  const toolId = (asked: SessionTab | null, tool: string): string | undefined => {
-    for (const c of asked?.contributions() ?? []) {
-      if (c.tools.includes(tool)) return `ext:${c.id}/${tool}`
-    }
-    return undefined
-  }
-
-  /** Whether the frozen manifest claims this tool only reads (DESIGN §7.2.1). */
-  const toolReadonly = (asked: SessionTab | null, tool: string): boolean | undefined => {
-    for (const c of asked?.contributions() ?? []) {
-      if (c.tools.includes(tool)) return c.readonlyTools.includes(tool)
-    }
-    return undefined
-  }
-
-  /**
    * A member package's `contributes.policy` narrowing, pooled (tui-plugin
    * D2/D3): every member's `deny`/`ask` entries and which of them, if any,
    * claimed `readonly: true`. Read from the frozen composition — for a
@@ -1336,8 +1315,6 @@ export function App(props: AppProps) {
       // only ever a narrowing — `decide` itself takes no new parameter.
       rules: withPolicy(props.style.settings.approvals, compositionPolicy(asked)),
       always: always(),
-      idOf: (tool) => toolId(asked, tool),
-      readonlyOf: (tool) => toolReadonly(asked, tool),
     })
 
   /**
@@ -1374,7 +1351,7 @@ export function App(props: AppProps) {
     // sandbox: the model is told, in the deny note, why nothing ran.
     const wearing_agent = agentOf.get(session)
     if (wearing_agent?.readonly) {
-      const refusal = readonlyCeiling(request.tool, toolReadonly(asked, request.tool))
+      const refusal = readonlyCeiling(request.tool, request.readonly ?? undefined)
       if (refusal) return Promise.resolve<GateVerdict>({ allow: false, note: refusal })
     }
     // Same ceiling, the other origin (tui-plugin D3): a composition member's
@@ -1385,7 +1362,7 @@ export function App(props: AppProps) {
     if (policy.readonlyBy.length > 0) {
       const refusal = readonlyCeiling(
         request.tool,
-        toolReadonly(asked, request.tool),
+        request.readonly ?? undefined,
         `read-only policy of ${policy.readonlyBy.join(", ")}`,
       )
       if (refusal) return Promise.resolve<GateVerdict>({ allow: false, note: refusal })
@@ -1459,7 +1436,7 @@ export function App(props: AppProps) {
   const allowAlways = (note: string) => {
     const asked = pending()
     if (!asked) return
-    const key = alwaysKey(asked.request, (tool) => toolId(tabOf(asked.session), tool))
+    const key = alwaysKey(asked.request)
     setAlways(new Set([...always(), key]))
     setNotice(`always allowing ${describeKey(key)} this session · /mode for the rest`)
     answer(true, note)
@@ -1601,7 +1578,7 @@ export function App(props: AppProps) {
   const approvalChoices = createMemo((): ApprovalChoice[] => {
     const asked = pending()
     if (!asked) return []
-    const kind = describeKey(alwaysKey(asked.request, (tool) => toolId(tabOf(asked.session), tool)))
+    const kind = describeKey(alwaysKey(asked.request))
     const ahead = batchAhead()
     return [
       { label: "allow this call", tone: "ok", run: (note) => answer(true, note) },
@@ -1855,15 +1832,12 @@ export function App(props: AppProps) {
         // installed, so `/ext` gains nothing and no `ext prune` can take this
         // session's own identity text away from its resume.
         prompt: [m.prompt],
-        // A pin needs its package to be a MEMBER of the session (DESIGN §5.1),
-        // and the child composes from scratch: the ids its pins name come along
-        // as `--with`, at the store's `current`.
-        // …and the `agent` package itself, but only for a persona that names
-        // somebody to pass work to. Everything else is a leaf: a delegated
-        // session that cannot delegate simply does not carry the tool.
-        ...(m.members.length > 0 || m.agents.length > 0
-          ? { with: [...m.members, ...(m.agents.length > 0 ? [formatWithRef(pkg)] : [])] }
-          : {}),
+        // Only the `agent` package rides as `--with`, and only for a persona
+        // that names somebody to pass work to: everything else is a leaf, and a
+        // delegated session that cannot delegate simply does not carry the tool.
+        // The persona's OWN pins bring their packages in by themselves — that
+        // implication is the kernel's (DESIGN §5.1), not a list assembled here.
+        ...(m.agents.length > 0 ? { with: [formatWithRef(pkg)] } : {}),
         ...(m.pins.length > 0 || m.agents.length > 0
           ? { pin: [...m.pins, ...(m.agents.length > 0 ? [agent_pin] : [])] }
           : {}),

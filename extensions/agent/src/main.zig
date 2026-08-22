@@ -159,13 +159,6 @@ fn render(ctx: *const Ctx, name: []const u8) !union(enum) { ok: Rendered, failed
         return .{ .failed = try failed(alloc, rpc.code_refused, "could not write the prompt for '{s}' to {s}: {s}", .{ def.name, path, @errorName(err) }) };
     };
 
-    // Before anybody composes with this: can the packages its pins name actually
-    // be brought in? Checked here so BOTH callers get the same answer — the
-    // model's `agent` tool and the front end's `/agent` both go through
-    // `render`, and a second check on one side would be a second opinion.
-    if (try membersAvailable(ctx, def.name, try pinMembers(alloc, def.pins))) |fail| {
-        return .{ .failed = fail };
-    }
     return .{ .ok = .{ .def = def, .label = label, .path = path, .warnings = entry.warnings } };
 }
 
@@ -211,16 +204,14 @@ fn renderTool(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
             try jw.beginArray();
             for (m.def.agents) |one| try jw.write(one);
             try jw.endArray();
+            // Pins only. The `--with` a pin implies is the KERNEL's implication
+            // now (DESIGN §5.1): `session new --pin ext:<id>/<tool>` brings the
+            // package in at `current` by itself, so a driver that derived the
+            // membership list here was saying the same thing a second time — and
+            // three drivers said it three slightly different ways.
             try jw.objectField("pins");
             try jw.beginArray();
             for (m.def.pins) |pin| try jw.write(pin);
-            try jw.endArray();
-            // The `--with` members those pins imply: a pin names a tool of an
-            // extension, and an extension that is not a MEMBER of the session
-            // cannot be pinned into it (`PinNamesUnknownExtension`, DESIGN §5.1).
-            try jw.objectField("members");
-            try jw.beginArray();
-            for (try pinMembers(ctx.alloc, m.def.pins)) |id| try jw.write(id);
             try jw.endArray();
             try jw.objectField("warnings");
             try jw.beginArray();
@@ -230,101 +221,6 @@ fn renderTool(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
             return .{ .json = try out.toOwnedSlice() };
         },
     }
-}
-
-/// The distinct extension ids a definition's pins name.
-///
-/// A pin gives a tool a native slot; it does not make its package a member of
-/// the session, and pinning a tool of a non-member is a hard refusal
-/// (`PinNamesUnknownExtension`, DESIGN §5.1). So every delegation derives one
-/// `--with <id>` per distinct id — without a version, so the store's `current`
-/// is used and the persona follows whatever is installed.
-///
-/// Deduplicated because a command line saying the same thing three times is
-/// noise, not because it would be wrong: the kernel documents (and this
-/// repository's own check confirmed) that a repeated `--with` of one id simply
-/// overrides the earlier one, as does naming an already-activated id.
-fn pinMembers(alloc: std.mem.Allocator, pins: []const []const u8) ![]const []const u8 {
-    var out: std.ArrayList([]const u8) = .empty;
-    for (pins) |pin| {
-        const rest = pin["ext:".len..];
-        const id = rest[0..std.mem.indexOfScalar(u8, rest, '/').?];
-        for (out.items) |seen| {
-            if (std.mem.eql(u8, seen, id)) break;
-        } else try out.append(alloc, id);
-    }
-    return out.items;
-}
-
-/// Check that every `--with` a persona's pins imply can actually be resolved,
-/// and say how to fix it when one cannot. Null when all of them are fine.
-///
-/// Two reasons this is checked HERE rather than left to the kernel's own
-/// refusal:
-///
-///  1. **The message.** The kernel says "--with names an extension with no such
-///     built version", which is true and does not tell a person that their
-///     `explore` persona wants `std` and that `nulya ext build extensions/std
-///     --user` is the way out. This one names the persona, the packages, and the
-///     command.
-///  2. **A kernel bug this would otherwise hit.** `session new --with <a
-///     resolvable one> --with <an unresolvable one>` panics in
-///     `composition.unionWith`'s `errdefer freeResolved` (an invalid free)
-///     rather than returning `WithVersionNotFound`; with the unresolvable one
-///     FIRST it reports cleanly. A delegation always passes the persona's own
-///     `--with` first, so it would always take the crashing order. Reported
-///     alongside this change; nothing here depends on how it is fixed —
-///     checking first is what a good message needs anyway.
-///
-/// "Resolvable" is `current`, because that is what a bare `--with <id>` takes:
-/// a version built but never activated is not one the store will hand over.
-fn membersAvailable(ctx: *const Ctx, agent_name: []const u8, members: []const []const u8) !?rpc.Fail {
-    if (members.len == 0) return null;
-    const alloc = ctx.alloc;
-    const listed = try run(alloc, ctx.io, &.{ ctx.exe, "ext", "list" });
-    if (listed.code != 0) return null; // no listing is no evidence; let the kernel answer
-
-    var missing: std.ArrayList([]const u8) = .empty;
-    var inactive: std.ArrayList([]const u8) = .empty;
-    for (members) |id| {
-        switch (activation(listed.stdout, id)) {
-            .active => {},
-            .built => try inactive.append(alloc, id),
-            .absent => try missing.append(alloc, id),
-        }
-    }
-    if (missing.items.len == 0 and inactive.items.len == 0) return null;
-
-    var out: std.Io.Writer.Allocating = .init(alloc);
-    try out.writer.print("'{s}' asks for tools from packages this workspace cannot use yet", .{agent_name});
-    if (inactive.items.len != 0) {
-        try out.writer.print("; built but not active: {s} (`nulya ext activate --user <id> <version>`, see `nulya ext list`)", .{try std.mem.join(alloc, ", ", inactive.items)});
-    }
-    if (missing.items.len != 0) {
-        try out.writer.print("; not built here: {s} (`nulya ext seed --user` then `nulya ext build <draft> --user`, e.g. `nulya ext build extensions/std --user`)", .{try std.mem.join(alloc, ", ", missing.items)});
-    }
-    try out.writer.writeAll(". Nothing was delegated — install them, or drop those pins from the definition.");
-    return .{ .code = rpc.code_refused, .message = try out.toOwnedSlice() };
-}
-
-const Activation = enum { active, built, absent };
-
-/// One `ext list` row: `<id>\t<version|(inactive)>\t<root>[\t…]` (DESIGN §7.2).
-fn activation(listing: []const u8, id: []const u8) Activation {
-    var found: Activation = .absent;
-    var lines = std.mem.splitScalar(u8, listing, '\n');
-    while (lines.next()) |raw| {
-        const line = std.mem.trimEnd(u8, raw, " \t\r");
-        var fields = std.mem.splitScalar(u8, line, '\t');
-        const row_id = fields.next() orelse continue;
-        if (!std.mem.eql(u8, row_id, id)) continue;
-        const version = fields.next() orelse continue;
-        // The first root that has it ACTIVE is the one that wins (§7.2); a later
-        // inactive copy says nothing about the earlier answer.
-        if (std.mem.startsWith(u8, version, "v-")) return .active;
-        found = .built;
-    }
-    return found;
 }
 
 // ── list ────────────────────────────────────────────────────────────────────
@@ -531,12 +427,10 @@ fn newDelegation(
     try new_argv.appendSlice(alloc, &.{ ctx.exe, "session", "new", "--prompt", m.path });
     if (profile.len != 0) try new_argv.appendSlice(alloc, &.{ "--profile", profile });
     if (model.len != 0) try new_argv.appendSlice(alloc, &.{ "--model", model });
-    // A pin needs its package to be a MEMBER of the session (DESIGN §5.1), and
-    // the child composes from scratch — whatever is activated in this workspace
-    // is not automatically in it. So each distinct id its pins name comes along
-    // as `--with <id>`, at the store's `current`.
-    const members = try pinMembers(alloc, m.def.pins);
-    for (members) |id| try new_argv.appendSlice(alloc, &.{ "--with", id });
+    // Just the pins. A pin brings its own package into the session at `current`
+    // (DESIGN §5.1) — the child composes from scratch, and the kernel is the one
+    // place that implication is made, so a `--with` derived here would only be a
+    // second, slightly different copy of it.
     for (m.def.pins) |pin| try new_argv.appendSlice(alloc, &.{ "--pin", pin });
     // …and this package itself, but ONLY for a persona that names somebody to
     // pass work to. That one field is what makes a session a leaf or not, and it

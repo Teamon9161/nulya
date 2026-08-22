@@ -146,7 +146,6 @@ test("render writes a definition's body to a file a session can wear, installs n
   // A pin the kernel could not resolve refuses the whole `session new`, so a
   // malformed one is dropped before it can, and said out loud.
   expect(first.pins).toEqual([])
-  expect(first.members).toEqual([])
   expect(first.warnings.some((line: string) => line.includes("nonsense"))).toBe(true)
   expect(agentPick(first)).toBeUndefined()
 
@@ -167,11 +166,14 @@ test("render writes a definition's body to a file a session can wear, installs n
   expect(edited.readonly).toBe(false)
   expect(agentPick(edited)).toEqual({ profile: "scripted", model: "scripted-demo" })
 
-  // A persona whose pins name a package this workspace cannot bring in is
-  // refused BEFORE a session exists, and the message is the way out — the pins
-  // would otherwise be handed to a `session new` that can only say no.
+  // A persona whose pins name a package this workspace does not have renders
+  // fine, and hands the pins on as written. Whether they resolve is the
+  // kernel's question, asked once, at `session new`: a pin brings its own
+  // package into the session (DESIGN §5.1), so this side no longer derives a
+  // `--with` list and no longer has a second opinion about it.
   writeFileSync(join(dir, "needy.md"), "---\nname: needy\npins: [ext:std/read]\n---\nI need std\n")
-  await expect(renderAgent(ws, pkg, "needy")).rejects.toThrow(/not built here: std/)
+  const needy = await renderAgent(ws, pkg, "needy")
+  expect(needy.pins).toEqual(["ext:std/read"])
 
   // An unknown name is refused by the same tool, with the names there are.
   await expect(renderAgent(ws, pkg, "not-a-thing")).rejects.toThrow(/no agent 'not-a-thing'/)

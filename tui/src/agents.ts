@@ -226,9 +226,12 @@ export interface RenderedAgent {
    * not (DESIGN §7.8).
    */
   agents: string[]
+  /**
+   * The pins this persona asks for. No member list beside them: a pin brings its
+   * own package into the session at `current` (DESIGN §5.1), so the `--with`
+   * that used to be derived here was the same implication said twice.
+   */
   pins: string[]
-  /** The `--with <id>` those pins imply; the package checked they resolve. */
-  members: string[]
   /** Everything the parser found wrong that did not make the file unusable. */
   warnings: string[]
 }
@@ -270,7 +273,6 @@ export async function renderAgent(
     max_exchanges: typeof m.max_exchanges === "number" ? m.max_exchanges : 0,
     agents: Array.isArray(m.agents) ? m.agents.filter((a): a is string => typeof a === "string") : [],
     pins: Array.isArray(m.pins) ? m.pins.filter((p): p is string => typeof p === "string") : [],
-    members: Array.isArray(m.members) ? m.members.filter((p): p is string => typeof p === "string") : [],
     warnings: Array.isArray(m.warnings) ? m.warnings.filter((w): w is string => typeof w === "string") : [],
   }
 }

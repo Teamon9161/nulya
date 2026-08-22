@@ -162,16 +162,36 @@ pub const ToolGate = struct {
         deny: ?[]const u8,
     };
 
+    /// One call, offered for approval, together with what this session FROZE
+    /// about the tool it names.
+    ///
+    /// The call alone carries the model-facing name, and a name is not an
+    /// identity: "which package is this from" and "does it claim to only read"
+    /// are answers the composition already holds (`ToolDefinition.id` /
+    /// `.readonly`, DESIGN §5.1 / §7.2.1). Handing them over costs nothing and
+    /// removes the reason every answerer had to re-derive them from manifests —
+    /// a derivation each one wrote separately, and one of which failed silently
+    /// into "nothing is read-only" (BUGS #16).
+    pub const Request = struct {
+        call: ledger.ToolCall,
+        /// Null when this session's frozen tool face has no such tool. The call
+        /// is still offered — the gate's answer decides nothing for it either
+        /// way, since `execOne` will answer the model with the unknown-tool
+        /// message — but there is no frozen declaration to show, and inventing
+        /// one would be a claim nobody made.
+        definition: ?*const tool.ToolDefinition,
+    };
+
     pub const VTable = struct {
         /// Asked once per call, in batch order, immediately before dispatch.
         /// A denial stops that call and nothing else: every other call in the
         /// batch is still asked on its own, because one refusal is not a verdict
         /// about the rest.
-        review: *const fn (ptr: *anyopaque, call: ledger.ToolCall) Decision,
+        review: *const fn (ptr: *anyopaque, request: Request) Decision,
     };
 
-    pub fn review(self: ToolGate, call: ledger.ToolCall) Decision {
-        return self.vtable.review(self.ptr, call);
+    pub fn review(self: ToolGate, request: Request) Decision {
+        return self.vtable.review(self.ptr, request);
     }
 };
 
@@ -371,7 +391,15 @@ pub fn runStepWithPrompt(
         // tail follows, and for the same reason: no executor ran. The batch goes
         // on to the next call, which is asked its own question.
         if (step_ctx.gate) |gate| {
-            switch (gate.review(call)) {
+            // The frozen definition travels with the question (`ToolGate.Request`).
+            // `lookup` returns a copy of the snapshot's entry, whose strings are
+            // the snapshot's own; the local outlives the call, which is the whole
+            // life the borrow needs.
+            const declared = tool_snapshot.lookup(call.tool);
+            switch (gate.review(.{
+                .call = call,
+                .definition = if (declared) |*d| &d.definition else null,
+            })) {
                 .allow => {},
                 .deny => |note| {
                     results[i] = canceledResult(call.id, try deniedOutput(alloc, note));
@@ -695,16 +723,21 @@ const GateTestShell = struct {
     }
 };
 
-/// Answers a fixed verdict for a named call and allows everything else.
+/// Answers a fixed verdict for a named call and allows everything else, and
+/// remembers the stable id it was shown for the last question it was asked.
 const ScriptedGate = struct {
     deny_call: []const u8,
     note: ?[]const u8 = null,
     asked: usize = 0,
+    last_id: ?[]const u8 = null,
+    last_readonly: ?bool = null,
 
-    fn review(ptr: *anyopaque, call: ledger.ToolCall) ToolGate.Decision {
+    fn review(ptr: *anyopaque, request: ToolGate.Request) ToolGate.Decision {
         const self: *ScriptedGate = @ptrCast(@alignCast(ptr));
         self.asked += 1;
-        if (std.mem.eql(u8, call.id, self.deny_call)) return .{ .deny = self.note };
+        self.last_id = if (request.definition) |d| d.id else null;
+        self.last_readonly = if (request.definition) |d| d.readonly else null;
+        if (std.mem.eql(u8, request.call.id, self.deny_call)) return .{ .deny = self.note };
         return .allow;
     }
 
@@ -747,6 +780,11 @@ test "a gate denies one call, the batch keeps its shape, and the rest still run"
     _ = try runStepForTest(alloc, &allowed, handle, tools, ctx);
     try std.testing.expectEqual(@as(usize, 2), allow_all.asked);
     try std.testing.expectEqual(@as(usize, 2), gate_test_ran.items.len);
+    // The question carries the FROZEN definition, not just the model-facing
+    // name: the stable id (which the name alone cannot give) and the tool's own
+    // readonly claim, `null` here because this fake declares none.
+    try std.testing.expectEqualStrings("test.shell", allow_all.last_id.?);
+    try std.testing.expect(allow_all.last_readonly == null);
     const allowed_results = allowed.view()[2].tool_results;
     try std.testing.expect(allowed_results[0].ok and allowed_results[1].ok);
 
@@ -778,6 +816,34 @@ test "a gate denies one call, the batch keeps its shape, and the rest still run"
     try std.testing.expect(std.mem.indexOf(u8, results[0].output, "not that one") != null);
     try std.testing.expect(results[1].ok);
     try std.testing.expect(std.mem.indexOf(u8, results[1].output, "echo two") != null);
+}
+
+test "a gate asked about a name this session does not have is shown no declaration" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+
+    // An empty face: the model's `shell` calls name nothing this session froze.
+    const tools: registry.ToolSetSnapshot = .{ .tools = &.{} };
+    var lenv = try environment.LocalEnvironment.init(alloc, threaded.io(), .{});
+    defer lenv.deinit();
+
+    var gate: ScriptedGate = .{ .deny_call = "nothing-is-called-this" };
+    var model = TwoCallModel{};
+    var l = ledger.Ledger.init(alloc);
+    defer l.deinit();
+    try l.append(.{ .user_text = .{ .text = "go" } });
+    _ = try runStepForTest(alloc, &l, .{ .ptr = &model, .vtable = &TwoCallModel.vtable }, tools, .{
+        .tool_context = .{ .environment = lenv.environment(), .cwd = "." },
+        .scratch_dir = "/tmp",
+        .gate = .{ .ptr = &gate, .vtable = &ScriptedGate.vtable },
+    });
+
+    // Still asked — the gate answers about the call, not about the tool — but
+    // with nothing frozen to show: no id was invented for a name nobody declared.
+    try std.testing.expectEqual(@as(usize, 2), gate.asked);
+    try std.testing.expect(gate.last_id == null);
+    try std.testing.expect(gate.last_readonly == null);
 }
 
 test "a denied call has no duration to journal, and the slots stay call-aligned" {

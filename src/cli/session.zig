@@ -458,8 +458,12 @@ pub fn createSession(
         .parent = parent,
     }) catch |err| switch (err) {
         // The caller named these extensions, so an unusable one is not a warning.
+        // A pin names them too, silently: it brings its own package into the
+        // composition (DESIGN §5.1), so this refusal can be about a package
+        // nothing on the command line spelled out — hence the second line.
         error.WithVersionNotFound => {
-            try printErrFmt(alloc, io, "session new failed: --with names an extension with no such built version (see `nulya ext list`)\n", .{});
+            try printErrFmt(alloc, io, "session new failed: an extension this session names has no such built version (see `nulya ext list`)\n", .{});
+            try printPinImplied(alloc, io, pins, with);
             return null;
         },
         // Activation is a statement of intent too, so a broken active version
@@ -532,6 +536,43 @@ fn printPinFailure(alloc: std.mem.Allocator, io: std.Io, pins: []const []const u
     const listed = try std.mem.join(alloc, " ", pins);
     defer alloc.free(listed);
     try printErrFmt(alloc, io, "session new failed: a pin {s}; pinned: {s}\n", .{ reason, listed });
+}
+
+/// The packages nobody spelled out but the pins asked for anyway.
+///
+/// `--with` is visible on the command line; the membership a pin implies
+/// (DESIGN §5.1) is not, so without this line "an extension this session names"
+/// would be about a name the reader cannot find anywhere. Printed only when
+/// there IS such a package: a plain `--with` failure keeps saying only what it
+/// always said. Which one of them is the unresolvable one is not knowable here
+/// — a Zig error carries no payload — but the list is short, exactly derived,
+/// and the way out is the same for every entry on it.
+fn printPinImplied(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    pins: []const []const u8,
+    with: []const composition.WithRef,
+) !void {
+    var implied: std.ArrayList([]const u8) = .empty;
+    defer implied.deinit(alloc);
+    for (pins) |pin| {
+        const rest = if (std.mem.startsWith(u8, pin, "ext:")) pin["ext:".len..] else continue;
+        const id = rest[0 .. std.mem.indexOfScalar(u8, rest, '/') orelse continue];
+        if (containsString(implied.items, id)) continue;
+        for (with) |ref| {
+            if (std.mem.eql(u8, ref.id, id)) break;
+        } else try implied.append(alloc, id);
+    }
+    if (implied.items.len == 0) return;
+    const listed = try std.mem.join(alloc, " ", implied.items);
+    defer alloc.free(listed);
+    try printErrFmt(
+        alloc,
+        io,
+        "  a pin brings its own package into the session, so these were named too: {s}\n" ++
+            "  one of them has no `current` here; give it a version with `--with <id>@<version>`, or `nulya ext activate <id> <version>` (see `nulya ext list`)\n",
+        .{listed},
+    );
 }
 
 const append_usage = "usage: nulya session append <id> [<text> | --file <path>] [--image <path>]…\n";

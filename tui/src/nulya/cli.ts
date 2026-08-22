@@ -1031,10 +1031,25 @@ export interface StepOptions {
   gate?: (request: GateRequest) => Promise<GateVerdict>
 }
 
-/** What the kernel offers for approval: one call, as the model wrote it. */
+/**
+ * What the kernel offers for approval: one call as the model wrote it, plus
+ * what this session FROZE about the tool it names (DESIGN §4).
+ */
 export interface GateRequest {
   call_id: string
   tool: string
+  /**
+   * The stable id (`ext:<id>/<tool>`, or the builtin's), or null for a name this
+   * session's tool face does not declare. The kernel's own answer to "which
+   * package is this from" — reading it here is what retired a front-end
+   * derivation over the frozen manifests.
+   */
+  tool_id: string | null
+  /**
+   * The package's `readonly` claim for this tool. `null` is not `false`: the
+   * builtin makes no claim and neither does a manifest that said nothing.
+   */
+  readonly: boolean | null
   args: string
 }
 
@@ -1055,7 +1070,16 @@ function gateRequestOf(line: StreamLine): GateRequest | null {
   if (line.stream !== "gate" || line.event !== "request") return null
   const record = line as unknown as Partial<GateRequest>
   if (typeof record.call_id !== "string" || typeof record.tool !== "string") return null
-  return { call_id: record.call_id, tool: record.tool, args: typeof record.args === "string" ? record.args : "{}" }
+  return {
+    call_id: record.call_id,
+    tool: record.tool,
+    // Absent is read as "not said", the same as an explicit null: a kernel that
+    // predates these columns has made no claim, and only an explicit `true`
+    // ever waves anything through.
+    tool_id: typeof record.tool_id === "string" ? record.tool_id : null,
+    readonly: typeof record.readonly === "boolean" ? record.readonly : null,
+    args: typeof record.args === "string" ? record.args : "{}",
+  }
 }
 
 /**

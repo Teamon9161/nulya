@@ -24,15 +24,32 @@
  * The `readonly` claim is a HINT, not a boundary (DESIGN §9): the package says
  * its tool only reads, the kernel records that and enforces nothing, and a
  * driver that believes it is choosing to. `[approvals] manifest_readonly = false`
- * stops believing it.
+ * stops believing it — the key stays, because what it configures is belief, not
+ * where the claim comes from.
+ *
+ * Where it comes from is the gate request itself (DESIGN §4): the kernel freezes
+ * the claim into the tool definition at composition time and puts it, with the
+ * stable id, on the line it asks with. Nothing here opens a manifest.
  */
 import type { Contributions } from "./nulya/files.ts"
 
-/** What the kernel asks about: one call, exactly as the model wrote it. */
+/**
+ * What the kernel asks about: one call exactly as the model wrote it, plus the
+ * two facts this session froze about the tool it names (DESIGN §4).
+ *
+ * Both frozen columns arrive on the wire. They used to be re-derived here from
+ * the composition's manifests — which package is this name from, does that
+ * package claim it only reads — and a derivation the kernel could simply hand
+ * over is one more place to be wrong about a permission.
+ */
 export interface GateRequest {
   call_id: string
   /** The model-facing tool NAME (`shell`, `read`) — the tool face's own word. */
   tool: string
+  /** The stable id (`ext:<id>/<tool>`), or null for a name this session has no tool for. */
+  tool_id: string | null
+  /** The manifest's `readonly` claim. `null` is "said nothing", never `false`. */
+  readonly: boolean | null
   /** Raw JSON arguments, verbatim. */
   args: string
 }
@@ -93,15 +110,6 @@ export interface ApprovalContext {
   rules: ApprovalRules
   /** Keys the `a` key has collected this session (`alwaysKey`). */
   always: ReadonlySet<string>
-  /**
-   * The stable id of a tool name on this session's face (`ext:<id>/<tool>`), or
-   * undefined for the builtin and for a name this process cannot resolve. Rules
-   * may name either; the id is what a person writes in a config file, because it
-   * is the same string whatever a session happens to call the tool.
-   */
-  idOf?: (tool: string) => string | undefined
-  /** Whether the frozen manifest claims this tool only reads. */
-  readonlyOf?: (tool: string) => boolean | undefined
 }
 
 /**
@@ -162,13 +170,13 @@ export function shellCommand(request: GateRequest): string | null {
  * allow everything" — `git` and `rm` are not the same permission just because
  * one program runs them both.
  */
-export function alwaysKey(request: GateRequest, idOf?: (tool: string) => string | undefined): string {
+export function alwaysKey(request: GateRequest): string {
   const command = shellCommand(request)
   if (command !== null) {
     const argv0 = command.trim().split(/\s+/)[0] ?? ""
     return `shell:${argv0}`
   }
-  return idOf?.(request.tool) ?? request.tool
+  return request.tool_id ?? request.tool
 }
 
 /** How an always-key reads on screen: `shell git`, `ext:std/write`. */
@@ -176,7 +184,7 @@ export function describeKey(key: string): string {
   return key.startsWith("shell:") ? `shell ${key.slice("shell:".length)}` : key
 }
 
-function matches(rule: string, request: GateRequest, id: string | undefined): boolean {
+function matches(rule: string, request: GateRequest): boolean {
   const trimmed = rule.trim()
   if (trimmed.length === 0) return false
   if (trimmed.startsWith("shell:")) {
@@ -187,20 +195,24 @@ function matches(rule: string, request: GateRequest, id: string | undefined): bo
     // wrote it does not have to learn a pattern language to say so.
     return prefix.length > 0 && command.trim().startsWith(prefix)
   }
-  return trimmed === id || trimmed === request.tool
+  // Either spelling: a rule may name the tool as the model sees it, or by the
+  // stable id — which is the same string whatever a session calls the tool, and
+  // therefore what a person writes in a config file.
+  return trimmed === request.tool_id || trimmed === request.tool
 }
 
-function anyMatch(rules: readonly string[], request: GateRequest, id: string | undefined): boolean {
-  return rules.some((rule) => matches(rule, request, id))
+function anyMatch(rules: readonly string[], request: GateRequest): boolean {
+  return rules.some((rule) => matches(rule, request))
 }
 
 export function decide(request: GateRequest, ctx: ApprovalContext): Decision {
-  const id = ctx.idOf?.(request.tool)
-  if (anyMatch(ctx.rules.deny, request, id)) return "deny"
-  if (ctx.always.has(alwaysKey(request, ctx.idOf))) return "allow"
-  if (anyMatch(ctx.rules.ask, request, id)) return "ask"
-  if (anyMatch(ctx.rules.allow, request, id)) return "allow"
-  if (ctx.rules.manifest_readonly && ctx.readonlyOf?.(request.tool) === true) return "allow"
+  if (anyMatch(ctx.rules.deny, request)) return "deny"
+  if (ctx.always.has(alwaysKey(request))) return "allow"
+  if (anyMatch(ctx.rules.ask, request)) return "ask"
+  if (anyMatch(ctx.rules.allow, request)) return "allow"
+  // The claim, believed only because `[approvals] manifest_readonly` says to.
+  // `null` (the builtin, or a package that said nothing) is not `true`.
+  if (ctx.rules.manifest_readonly && request.readonly === true) return "allow"
   return ctx.mode === "unsafe" ? "allow" : "ask"
 }
 

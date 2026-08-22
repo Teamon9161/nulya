@@ -19,9 +19,15 @@
 //! the sub-agent reads why nothing ran, and the ledger records it. The policy is
 //! mechanical here (no person is watching a background task): `shell` is refused
 //! outright, and an extension tool is allowed only where the session's own
-//! frozen manifest declared `"readonly": true`. Which manifest said what is not
-//! knowable from the gate request — it carries the model-facing NAME — so the
-//! allowed names are computed once, before the step, from the child's header.
+//! frozen manifest declared `"readonly": true`.
+//!
+//! That claim is ON the request line (`readonly`, beside the stable `tool_id`),
+//! frozen by the composition the child is running. It used to be re-derived
+//! here — one `nulya ext inspect <id>@<version>` per member of the child's
+//! header, parsed for `readonly: true` — and that derivation failed silently
+//! into an empty allow-list, which is a read-only agent that can read nothing
+//! (BUGS #16). Reading the answer the kernel already has removes the failure
+//! mode rather than hardening it.
 //!
 //! **The 600 s ceiling.** This tool is reached through `nulya ext run`, which
 //! enforces the manifest's `timeout_ms` capped at `tool.Timeouts.extension_max_ms`
@@ -32,7 +38,6 @@
 
 const std = @import("std");
 const rpc = @import("rpc.zig");
-const header_mod = @import("header.zig");
 
 /// Cap on what one report carries back. The supervisor applies the kernel's own
 /// head/tail budget to the task's output on top of this (DESIGN §6.1); this
@@ -87,12 +92,6 @@ pub fn run(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args: Args) !r
     if (args.session.len == 0) {
         return rpc.invalidParams(alloc, "run needs a session id (the delegated session to drive)", .{});
     }
-    // Which tool NAMES this session's frozen composition says only read. Read
-    // once, before the step: the gate request carries a model-facing name and
-    // nothing else, and the answer to "which package is that from" is in the
-    // header (DESIGN §7.5).
-    const readonly_tools = if (args.readonly) try readonlyToolNames(alloc, io, exe, args.session) else &[_][]const u8{};
-
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(alloc, &.{ exe, "session", "step", args.session, "--stream" });
     if (args.max_steps != 0) {
@@ -168,7 +167,7 @@ pub fn run(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args: Args) !r
             };
             if (rpc.stringField(obj, "stream")) |stream| {
                 if (std.mem.eql(u8, stream, "gate") and writer != null) {
-                    const verdict = gateVerdict(obj, readonly_tools);
+                    const verdict = gateVerdict(alloc, obj);
                     writer.?.interface.writeAll(verdict) catch {};
                     writer.?.interface.flush() catch {};
                     continue;
@@ -228,81 +227,28 @@ pub fn run(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args: Args) !r
 /// `allow` / `deny <note>`, mechanically (tui.md §5.10's ceiling, with nobody at
 /// the keyboard). Both refusals say what the sub-agent may do instead, because
 /// the note is the only thing it will read about this.
-fn gateVerdict(obj: std.json.ObjectMap, readonly_tools: []const []const u8) []const u8 {
+///
+/// Every fact this needs is on the request line (DESIGN §4): `tool` is the name
+/// the sub-agent used, `readonly` is what its session's FROZEN manifest claims
+/// about that tool, and `tool_id` names the package for a refusal that has to be
+/// legible. Silence is not a claim — only an explicit `true` allows anything.
+fn gateVerdict(alloc: std.mem.Allocator, obj: std.json.ObjectMap) []const u8 {
     const tool = rpc.stringField(obj, "tool") orelse return "deny this agent is read-only and that call could not be identified\n";
     if (std.mem.eql(u8, tool, "shell")) {
         return "deny this is a read-only agent: it cannot run shell commands. Answer from what you can read.\n";
     }
-    for (readonly_tools) |name| {
-        if (std.mem.eql(u8, name, tool)) return "allow\n";
-    }
-    return "deny this is a read-only agent: that tool does not declare itself read-only, so it cannot run here. Use the tools that only read.\n";
-}
-
-/// The tool names this session's frozen versions declare `"readonly": true`
-/// (DESIGN §7.2.1). Asked of the kernel rather than re-derived: `ext inspect`
-/// reads the same manifests `composition` froze.
-fn readonlyToolNames(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, session: []const u8) ![]const []const u8 {
-    var out: std.ArrayList([]const u8) = .empty;
-    const root = header_mod.object(alloc, io, session) orelse return out.items;
-    const composition = root.get("composition") orelse return out.items;
-    const active = switch (composition) {
-        .object => |o| o.get("active") orelse return out.items,
-        else => return out.items,
+    const readonly = switch (obj.get("readonly") orelse std.json.Value{ .null = {} }) {
+        .bool => |b| b,
+        else => false,
     };
-    const list = switch (active) {
-        .array => |a| a,
-        else => return out.items,
-    };
-    for (list.items) |entry| {
-        const member = switch (entry) {
-            .object => |o| o,
-            else => continue,
-        };
-        const id = rpc.stringField(member, "id") orelse continue;
-        const version = rpc.stringField(member, "version") orelse continue;
-        const ref = try std.fmt.allocPrint(alloc, "{s}@{s}", .{ id, version });
-        const shown = std.process.run(alloc, io, .{
-            .argv = &.{ exe, "ext", "inspect", ref },
-            .stdout_limit = .limited(1 << 20),
-            .stderr_limit = .limited(1 << 16),
-        }) catch continue;
-        try collectReadonly(alloc, shown.stdout, &out);
-    }
-    return out.items;
-}
-
-/// `ext inspect` prints the frozen manifest; the readonly tools are the ones
-/// whose entry says so. Parsed as JSON when it is JSON, and skipped when it is
-/// not — a name this cannot confirm is simply not allowed, which is the safe end.
-fn collectReadonly(alloc: std.mem.Allocator, text: []const u8, into: *std.ArrayList([]const u8)) !void {
-    const start = std.mem.indexOfScalar(u8, text, '{') orelse return;
-    const parsed = std.json.parseFromSlice(std.json.Value, alloc, text[start..], .{}) catch return;
-    const root = switch (parsed.value) {
-        .object => |o| o,
-        else => return,
-    };
-    const contributes = switch (root.get("contributes") orelse return) {
-        .object => |o| o,
-        else => return,
-    };
-    const tools = switch (contributes.get("tools") orelse return) {
-        .array => |a| a,
-        else => return,
-    };
-    for (tools.items) |entry| {
-        const tool = switch (entry) {
-            .object => |o| o,
-            else => continue,
-        };
-        const readonly = switch (tool.get("readonly") orelse continue) {
-            .bool => |b| b,
-            else => false,
-        };
-        if (!readonly) continue;
-        const name = rpc.stringField(tool, "name") orelse continue;
-        try into.append(alloc, try alloc.dupe(u8, name));
-    }
+    if (readonly) return "allow\n";
+    const refused = "deny this is a read-only agent: that tool does not declare itself read-only, so it cannot run here. Use the tools that only read.";
+    // Name the package too, when the line says which one: the sub-agent reads
+    // this note and nothing else about the refusal, and `ext:std/write` tells it
+    // more than `write` does. A line without the column, or an allocator that
+    // cannot, still refuses — the verdict never depends on the wording.
+    const id = rpc.stringField(obj, "tool_id") orelse return refused ++ "\n";
+    return std.fmt.allocPrint(alloc, "{s} (this call was {s})\n", .{ refused, id }) catch refused ++ "\n";
 }
 
 fn firstLine(text: []const u8) []const u8 {

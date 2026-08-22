@@ -65,6 +65,11 @@ pub const Binding = struct {
                 .name = name,
                 .description = description,
                 .input_schema = input_schema,
+                // Copied, not re-read: an optional bool owns nothing, and this
+                // is the frozen manifest's claim travelling to whoever answers
+                // the gate (DESIGN §4/§7.2.1). `null` stays `null` — silence is
+                // not "not read-only".
+                .readonly = definition.readonly,
             },
             .entry_path = owned_entry,
             .interpreter = owned_interp,
@@ -234,6 +239,25 @@ test "initOwned copies every exposed string and survives the source being freed"
     try testing.expectEqualStrings("Search web", binding.definition.description);
     try testing.expectEqualStrings("{\"type\":\"object\"}", binding.definition.input_schema);
     try testing.expectEqualStrings("/frozen/v1/bin/web-search", binding.entry_path);
+    // Nothing was claimed, so nothing is claimed here either (DESIGN §7.2.1).
+    try testing.expect(binding.definition.readonly == null);
+}
+
+test "a manifest's readonly claim rides on the frozen definition" {
+    const alloc = testing.allocator;
+    var binding = try Binding.initOwned(alloc, .{
+        .id = "ext:std/read",
+        .name = "read",
+        .description = "Read a file",
+        .input_schema = "{\"type\":\"object\"}",
+        .readonly = true,
+    }, "/frozen/v1/bin/std", null, null, .jsonrpc);
+    defer binding.deinit(alloc);
+
+    // The claim is what the gate is shown (DESIGN §4): the alternative — asking
+    // a manifest again at approval time — is a second derivation of a fact this
+    // session already froze.
+    try testing.expectEqual(@as(?bool, true), binding.asTool().definition.readonly);
 }
 
 test "initOwned leaks nothing when an interior allocation fails" {

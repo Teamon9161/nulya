@@ -298,9 +298,9 @@ pub const StepGate = struct {
 
     const vtable: loop.ToolGate.VTable = .{ .review = onReview };
 
-    fn onReview(ptr: *anyopaque, call: ledger.ToolCall) loop.ToolGate.Decision {
+    fn onReview(ptr: *anyopaque, request: loop.ToolGate.Request) loop.ToolGate.Decision {
         const self: *StepGate = @ptrCast(@alignCast(ptr));
-        return self.ask(call) catch |e| {
+        return self.ask(request) catch |e| {
             // The channel itself broke. Say so once, then deny everything: a
             // gate that cannot ask must not answer "allow" on anybody's behalf.
             if (self.err == null) self.err = e;
@@ -312,9 +312,9 @@ pub const StepGate = struct {
         };
     }
 
-    fn ask(self: *StepGate, call: ledger.ToolCall) !loop.ToolGate.Decision {
+    fn ask(self: *StepGate, request: loop.ToolGate.Request) !loop.ToolGate.Decision {
         if (self.closed) return .{ .deny = null };
-        try self.requestLine(call);
+        try self.requestLine(request);
         const line = (try self.in.takeDelimiter('\n')) orelse {
             self.closed = true;
             self.say("gate: stdin closed before a verdict; denying this call and every one after it\n");
@@ -329,10 +329,17 @@ pub const StepGate = struct {
         return .{ .deny = null };
     }
 
-    /// One call, offered for approval. The arguments go out verbatim — the
-    /// driver decides what a `shell` command or an edit path means, and it can
-    /// only do that on the bytes the model actually wrote.
-    fn requestLine(self: *StepGate, call: ledger.ToolCall) !void {
+    /// One call, offered for approval, with what this session froze about the
+    /// tool it names. The arguments go out verbatim — the driver decides what a
+    /// `shell` command or an edit path means, and it can only do that on the
+    /// bytes the model actually wrote.
+    ///
+    /// `tool_id` and `readonly` are the frozen facts (`ToolGate.Request`): the
+    /// stable id a pin and the usage journal use, and the package's own
+    /// read-only claim. Both are `null` for a name this session's tool face does
+    /// not declare, and `readonly` is `null` for the builtin and for any package
+    /// that made no claim — `null` is not `false`.
+    fn requestLine(self: *StepGate, request: loop.ToolGate.Request) !void {
         var jw: std.json.Stringify = .{ .writer = self.out };
         try jw.beginObject();
         try jw.objectField("stream");
@@ -340,11 +347,15 @@ pub const StepGate = struct {
         try jw.objectField("event");
         try jw.write("request");
         try jw.objectField("call_id");
-        try jw.write(call.id);
+        try jw.write(request.call.id);
         try jw.objectField("tool");
-        try jw.write(call.tool);
+        try jw.write(request.call.tool);
+        try jw.objectField("tool_id");
+        try jw.write(if (request.definition) |d| d.id else null);
+        try jw.objectField("readonly");
+        try jw.write(if (request.definition) |d| d.readonly else null);
         try jw.objectField("args");
-        try jw.write(call.args_json);
+        try jw.write(request.call.args_json);
         try jw.endObject();
         try self.out.writeByte('\n');
         try self.out.flush();

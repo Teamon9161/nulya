@@ -29,18 +29,29 @@ import { initialChoice, mode_choices, modeAt, moveChoice } from "../src/ui/ModeP
 const shell = (command: string): GateRequest => ({
   call_id: "c1",
   tool: "shell",
+  // The builtin: the kernel is not a package and makes no claim about itself.
+  tool_id: "builtin.shell",
+  readonly: null,
   args: JSON.stringify({ command }),
 })
 
-const read: GateRequest = { call_id: "c2", tool: "read", args: JSON.stringify({ path: "src/loop.zig" }) }
+/** A pinned extension tool, as the kernel offers it: name, stable id, claim. */
+const readWith = (readonly: boolean | null): GateRequest => ({
+  call_id: "c2",
+  tool: "read",
+  tool_id: "ext:std/read",
+  readonly,
+  args: JSON.stringify({ path: "src/loop.zig" }),
+})
+
+/** …claiming nothing, which is what a manifest that stayed silent means. */
+const read: GateRequest = readWith(null)
 
 function context(over: Partial<ApprovalContext> = {}): ApprovalContext {
   return {
     mode: "ask",
     rules: { ...default_rules },
     always: new Set(),
-    idOf: (tool) => (tool === "read" ? "ext:std/read" : undefined),
-    readonlyOf: () => undefined,
     ...over,
   }
 }
@@ -134,17 +145,19 @@ test("an entry is a tool id, a tool name, or a shell command prefix", () => {
 })
 
 test("a manifest's readonly claim allows, and the switch stops believing it", () => {
-  const readonlyOf = (tool: string) => tool === "read"
-  expect(decide(read, context({ readonlyOf }))).toBe("allow")
-  expect(decide(read, context({ readonlyOf, rules: { ...default_rules, manifest_readonly: false } }))).toBe("ask")
+  // The claim rides on the request itself now (DESIGN §4): nothing here opens a
+  // manifest, and the config key still decides whether to believe what arrives.
+  expect(decide(readWith(true), context())).toBe("allow")
+  expect(decide(readWith(true), context({ rules: { ...default_rules, manifest_readonly: false } }))).toBe("ask")
   // A claim is not a boundary: an explicit `ask` entry still wins over it.
-  expect(decide(read, context({ readonlyOf, rules: { ...default_rules, ask: ["ext:std/read"] } }))).toBe("ask")
+  expect(decide(readWith(true), context({ rules: { ...default_rules, ask: ["ext:std/read"] } }))).toBe("ask")
   // Saying nothing is not saying false, and it is not saying true either.
-  expect(decide(read, context({ readonlyOf: () => undefined }))).toBe("ask")
+  expect(decide(readWith(null), context())).toBe("ask")
+  expect(decide(readWith(false), context())).toBe("ask")
 })
 
 test("`always` remembers a tool whole, and shell by its first word only", () => {
-  expect(alwaysKey(read, (tool) => (tool === "read" ? "ext:std/read" : undefined))).toBe("ext:std/read")
+  expect(alwaysKey(read)).toBe("ext:std/read")
   expect(alwaysKey(shell("git push origin main"))).toBe("shell:git")
   // The whole point: saying yes once to `git` must not say yes to `rm`.
   const always = new Set(["shell:git"])
@@ -155,7 +168,13 @@ test("`always` remembers a tool whole, and shell by its first word only", () => 
 })
 
 test("a shell call with unreadable arguments is not a command anybody can judge", () => {
-  const torn: GateRequest = { call_id: "c3", tool: "shell", args: '{"command":"rm -' }
+  const torn: GateRequest = {
+    call_id: "c3",
+    tool: "shell",
+    tool_id: "builtin.shell",
+    readonly: null,
+    args: '{"command":"rm -',
+  }
   expect(shellCommand(torn)).toBeNull()
   // So no prefix rule matches it, and it goes to the person in ask mode.
   expect(decide(torn, context({ rules: { ...default_rules, allow: ["shell:rm"] } }))).toBe("ask")
@@ -215,13 +234,12 @@ test("a pooled policy deny actually decides `shell` — the same table `decide` 
 
 test("a pooled policy ask reaches a person even in unsafe mode", () => {
   const rules = withPolicy(default_rules, { deny: [], ask: ["ext:std/write"], readonlyBy: [] })
-  const write: GateRequest = { call_id: "c9", tool: "write", args: "{}" }
-  const idOf = () => "ext:std/write"
-  expect(decide(write, context({ rules, mode: "unsafe", idOf }))).toBe("ask")
+  const write: GateRequest = { call_id: "c9", tool: "write", tool_id: "ext:std/write", readonly: null, args: "{}" }
+  expect(decide(write, context({ rules, mode: "unsafe" }))).toBe("ask")
 })
 
 test("the summary is what the call would actually do", () => {
   expect(summarize(shell("zig build test"))).toBe("zig build test")
   expect(summarize(read)).toContain("src/loop.zig")
-  expect(summarize({ call_id: "c", tool: "noop", args: "{}" })).toBe("")
+  expect(summarize({ call_id: "c", tool: "noop", tool_id: null, readonly: null, args: "{}" })).toBe("")
 })

@@ -100,6 +100,18 @@ pub const ToolDefinition = struct {
     name: []const u8,
     description: []const u8,
     input_schema: []const u8,
+    /// This tool's own claim that it only reads, frozen from its manifest
+    /// (`contributes.tools[].readonly`, DESIGN §7.2.1). The kernel enforces
+    /// nothing with it; it travels here so that whoever answers the gate
+    /// (DESIGN §4) reads the frozen fact instead of re-deriving it from a
+    /// manifest — which is a derivation that can fail silently, and did.
+    ///
+    /// `null` is not `false`: the package said nothing (and the builtin `shell`
+    /// is the kernel itself, which makes no claim either). Not part of the
+    /// provider wire — a definition's readonly-ness is a fact about the tool,
+    /// not part of what the model is told about it — so `kernel_hash` (which
+    /// hashes the builtin definitions) is unaffected by the default.
+    readonly: ?bool = null,
 };
 
 /// A registered tool: its model-facing definition and its execution handler.

@@ -144,7 +144,6 @@ function contribution(over: Partial<Contributions> & Pick<Contributions, "id">):
   return {
     version: "v-0",
     tools: [],
-    readonlyTools: [],
     driverTools: [],
     skills: [],
     systemPrompts: [],
@@ -625,7 +624,6 @@ const card_contributions = [
     id: "lint",
     version: "v-3f2a91",
     tools: ["lint_zig"],
-    readonlyTools: [],
     driverTools: [],
     skills: ["skills/zig-style"],
     systemPrompts: [],
@@ -642,7 +640,6 @@ const card_contributions = [
     id: "evolution",
     version: "v-db04b7",
     tools: [],
-    readonlyTools: [],
     driverTools: [],
     skills: [],
     systemPrompts: ["prompts/evolution.md"],

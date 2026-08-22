@@ -96,13 +96,6 @@ export interface Contributions {
   version: string
   tools: string[]
   /**
-   * The subset of `tools` whose manifest claims `"readonly": true` (DESIGN
-   * §7.2.1). A CLAIM, recorded by the kernel and enforced by nothing: the
-   * approval policy may believe it (`approvals.ts`), and `[approvals]
-   * manifest_readonly = false` stops believing it.
-   */
-  readonlyTools: string[]
-  /**
    * The subset of `tools` whose manifest says `"audience": "driver"` (DESIGN
    * §7.2.1) — called with `nulya ext run` by whoever drives a session, never
    * meant for the model's tool face.
@@ -196,7 +189,7 @@ export interface PackageCommand {
 
 /** A package's approval-policy narrowing (`manifest.Policy`). Narrow-only: no `allow`. */
 export interface PackagePolicy {
-  /** Absent is null, not `false` — the package said nothing (same discipline as `readonlyTools`). */
+  /** Absent is null, not `false` — the package said nothing (same discipline as `tools[].readonly`). */
   readonly: boolean | null
   deny: string[]
   ask: string[]
@@ -220,7 +213,6 @@ export async function readContributions(
     id,
     version,
     tools: [],
-    readonlyTools: [],
     driverTools: [],
     skills: [],
     systemPrompts: [],
@@ -273,7 +265,6 @@ function contributionsOf(
 ): Pick<
   Contributions,
   | "tools"
-  | "readonlyTools"
   | "driverTools"
   | "systemPrompts"
   | "skills"
@@ -296,9 +287,6 @@ function contributionsOf(
   }
   return {
     tools: named.map((tool) => tool["name"] as string),
-    // Absent is not false (DESIGN §7.2.1): a package that said nothing has made
-    // no claim, and only an explicit `true` is one.
-    readonlyTools: named.filter((tool) => tool["readonly"] === true).map((tool) => tool["name"] as string),
     // The kernel refuses any other word, so only `"driver"` can be here; absent
     // stays absent and `modelTools` is where silence is read.
     driverTools: named.filter((tool) => tool["audience"] === "driver").map((tool) => tool["name"] as string),
