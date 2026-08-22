@@ -1,20 +1,20 @@
 /**
  * The declaration layer of goals/tui-plugin.md U2, against the real binary:
  * `contributes.commands` reaching the slash chain, `contributes.policy`
- * reaching the gate's read-only ceiling. `render`/`panel` are pure and tested
- * where `describeTool` lives (`test/registry.test.ts`); the merge rules for
- * commands are pure and tested in `test/packageCommands.test.ts`; this file is
- * what only a real session and a real build can show — that the declared
- * things actually run.
+ * reaching the gate's read-only ceiling. `ui.render`/`ui.panel` are pure and
+ * tested where `describeTool` lives (`test/registry.test.ts`); the merge
+ * rules for commands are pure and tested in `test/packageCommands.test.ts`;
+ * this file is what only a real session and a real build can show — that the
+ * declared things actually run.
  *
  * Two fixture packages, built once for the whole file:
  *
  *  - `plugin` (a script extension, DESIGN §7.1) declares one tool
  *    (`echo`) and one skill (`note`), and three commands — one for each verb
- *    (`wear` / `run <tool>` / `skill <ref>`). `activation: "on_request"` is
+ *    (`with` / `run <tool>` / `skill <ref>`). `activation: "on_request"` is
  *    the realistic shape for a package like this: registering it (building +
  *    activating) makes its commands discoverable without putting it in front
- *    of every session on the machine (DESIGN §7.2.1) — `/wear-plugin` is the
+ *    of every session on the machine (DESIGN §7.2.1) — `/with-plugin` is the
  *    per-session decision.
  *  - `guard` contributes NOTHING but a policy narrowing (`{"readonly": true}`)
  *    — no tools, no runtime needed at all (`Manifest.validate`'s
@@ -76,7 +76,7 @@ beforeAll(async () => {
         ],
         skills: ["skills/note"],
         commands: [
-          { name: "wear-plugin", description: "wear the plugin package for the next session", action: "wear" },
+          { name: "with-plugin", description: "wear the plugin package for the next session", action: "with" },
           { name: "echo-run", description: "run the echo tool directly", action: "run echo" },
           { name: "plugin-note", description: "load the note skill", action: "skill note" },
         ],
@@ -154,12 +154,12 @@ afterAll(() => {
 /**
  * The three verbs a package's `contributes.commands` can declare, each landing
  * on the path a person typing the general form by hand would already reach
- * (goals/tui-plugin.md U2 bullet 1): `wear` is `startDraft`'s own `--with`
+ * (goals/tui-plugin.md U2 bullet 1): `with` is `startDraft`'s own `--with`
  * move, `run <tool>` is `ext run` naming the version this package is active
  * AT, `skill <ref>` is T15's `skillTurn` with the declared ref standing in for
  * whatever the person typed.
  */
-test("wear, run and skill each land on the path a person typing the general form would reach", async () => {
+test("with, run and skill each land on the path a person typing the general form would reach", async () => {
   const setup = await testRender(
     () => (
       <App
@@ -175,10 +175,10 @@ test("wear, run and skill each land on the path a person typing the general form
   try {
     await settle(setup, 4)
 
-    // `wear`: a draft's `--with` — visible on the Welcome card's `with` row
+    // `with`: a draft's `--with` — visible on the Welcome card's `with` row
     // before any session exists, exactly like the general `/with plugin` would
     // be (`test/views.test.tsx`'s "wearing a package" test is the precedent).
-    await setup.mockInput.typeText("/wear-plugin")
+    await setup.mockInput.typeText("/with-plugin")
     setup.mockInput.pressEnter()
     let frame = await settle(setup, 4)
     expect(frame).toContain("with        plugin")
@@ -250,7 +250,7 @@ test("a package cannot take a built-in name away, even by declaring it", async (
       schema: "nulya.extension/v2",
       id: "shadow",
       activation: "on_request",
-      contributes: { commands: [{ name: "model", description: "a package pretending to be /model", action: "wear" }] },
+      contributes: { commands: [{ name: "model", description: "a package pretending to be /model", action: "with" }] },
     }),
   )
   const version = await extBuild(ws, ".nulya/extensions/shadow")
@@ -271,7 +271,7 @@ test("a package cannot take a built-in name away, even by declaring it", async (
   try {
     await settle(setup, 4)
     // `/model` opens the model picker — the built-in behaviour — never
-    // `shadow`'s `wear` action (which would instead have opened a draft card
+    // `shadow`'s `with` action (which would instead have opened a draft card
     // saying `with        shadow`).
     await setup.mockInput.typeText("/model")
     setup.mockInput.pressEnter()

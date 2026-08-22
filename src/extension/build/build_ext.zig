@@ -216,7 +216,7 @@ fn build(
     defer snapshot.deinit(alloc);
     try ext_skills.validateSnapshot(alloc, m, snapshot);
     try validateSystemPrompts(alloc, m, snapshot);
-    try validateTui(alloc, m, snapshot);
+    try validateUi(alloc, m, snapshot);
     try validateScriptEntries(alloc, m, snapshot);
     const snapshot_bytes = try snapshot.canonicalBytes(alloc);
     defer alloc.free(snapshot_bytes);
@@ -637,17 +637,17 @@ fn validateSystemPrompts(alloc: std.mem.Allocator, m: manifest.Manifest, snapsho
     }
 }
 
-/// `contributes.tui.entry` names a module a TUI loads (DESIGN §7.2.1,
+/// `contributes.ui.entry` names a module a front end loads (DESIGN §7.2.1,
 /// tui-plugin D10) — a declared path this build must actually be able to
 /// freeze, the same existence half `validateSystemPrompts` checks for a
 /// system prompt file. No size ceiling here: `prompt.max_system_prompt_bytes`
-/// bounds what is fed to a MODEL, and this file never is (it is TUI source,
-/// read by U3's plugin host, not by `prompt.zig`).
-fn validateTui(alloc: std.mem.Allocator, m: manifest.Manifest, snapshot: integrity.PackageSnapshot) !void {
-    const t = m.tui orelse return;
-    const rel = try integrity.canonicalRel(alloc, t.entry);
+/// bounds what is fed to a MODEL, and this file never is (it is front-end
+/// source, read by U3's plugin host, not by `prompt.zig`).
+fn validateUi(alloc: std.mem.Allocator, m: manifest.Manifest, snapshot: integrity.PackageSnapshot) !void {
+    const u = m.ui orelse return;
+    const rel = try integrity.canonicalRel(alloc, u.entry);
     defer alloc.free(rel);
-    _ = integrity.findSnapshotFile(snapshot, rel) orelse return error.TuiEntryFileMissing;
+    _ = integrity.findSnapshotFile(snapshot, rel) orelse return error.UiEntryFileMissing;
 }
 
 /// EVERY declared script entry is in the snapshot — not just this host's

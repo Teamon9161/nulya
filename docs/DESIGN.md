@@ -366,10 +366,16 @@ extension 装在**多个 store root** 里，按固定顺序搜索（`extension/r
 
 ### 7.2.1 目录与 manifest（`nulya.extension/v2`）
 
+manifest 讲给三种不同的听众，字段按哪个听众读它分成三层——每一层守一种纪律，说一次，不是每个字段各说一遍（ext-review D3）：
+
+- **内核强制**的字段：类型错是 parse 错，值错是 validate 错，字段本身的语义由 kernel 的代码路径读取并照做。
+- **driver 声明**：kernel 解析它、冻进版本的 manifest、**一个字节都不强制**——封闭词表的字段值错仍然是 validate 错（拼错一个词不该被读成缺省），但"要不要有这个字段"从不是 build 会拒绝的事。消费者是某个 driver 自己的 policy（审批表、pin 规则、devise 判断）。
+- **前端声明**：形状由 kernel 检查，**值是开放词表**——认不出的词是**读的人**的选择（退回一张朴素的卡、warn-and-skip），永远不是 build 拒绝。
+
 ```
 <store root>/<id>/               ← draft（可变）
 ├── extension.json
-├── src/main.zig                 ← 有 runtime 时
+├── src/…                        ← 有 runtime 时；`bin/` 前缀是编译产物，其余是脚本，按平台可以是多个文件
 └── skills/<name>/SKILL.md       ← 声明的 skill 目录
 ```
 
@@ -378,24 +384,45 @@ extension 装在**多个 store root** 里，按固定顺序搜索（`extension/r
   "schema": "nulya.extension/v2",
   "id": "web.search",
   "activation": "always",
-  "runtime": { "entry": "bin/web-search" },
+  "runtime": {
+    "entry": { "windows": "src/run.ps1", "default": "src/run.sh" },
+    "interpreter": { "windows": "powershell", "default": "sh" },
+    "wire": "plain"
+  },
   "contributes": {
-    "tools": [{ "name": "web_search", "description": "…", "input": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] }, "timeout_ms": 60000, "readonly": true, "audience": "model", "render": "checklist", "panel": true }],
+    "tools": [{ "name": "web_search", "description": "…", "input": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] }, "timeout_ms": 60000, "readonly": true, "audience": "model", "ui": { "render": "checklist", "panel": true } }],
     "skills": ["skills/risk-parity"],
     "system_prompts": ["prompts/finance.md"],
     "commands": [{ "name": "search", "description": "…", "action": "run web_search" }],
     "policy": { "readonly": true, "deny": ["shell"], "ask": [] },
-    "tui": { "entry": "tui/panel.ts", "api": 1 }
+    "ui": { "entry": "tui/panel.ts", "api": 1 }
   },
   "permissions": { "fs": [], "network": ["https"], "process": [] }
 }
 ```
 
-校验（`manifest.zig`）：schema id 精确匹配；`id` 合法；**至少一种 contribution**（`NoContributions`——`tools` / `skills` / `system_prompts` / `commands` / `policy` / `tui` 任一非空即算）；有 tool 时必须有 `runtime`（`MissingRuntime`）；tool 名不能是 `shell`（保留名只有这一个，§5.2）、不能重复；`timeout_ms` 若写了必须是正数且 ≤ `tool.Timeouts.extension_max_ms`（600s），否则 `InvalidTimeout`；`audience` 若写了必须是 `model` / `driver` 之一，否则 `InvalidAudience`；`activation` 若写了必须是 `always` / `on_request` 之一，否则 `InvalidActivation`；`entry` / skill / system_prompt / `tui.entry` 路径不能逃出包目录；命令 `name` 必须是 `[a-z0-9-]+` 且包内不重复（`InvalidCommandName` / `DuplicateCommandName`），`action` 若形如 `"run <tool>"` 则 `<tool>` 必须是本包声明的 tool（`UnknownCommandTool`）；`policy.deny` / `.ask` 的条目不能是空串（`InvalidPolicyEntry`，`allow` 键在 parse 阶段就被拒——见下）；`tui.api` 不能是 0（`InvalidTuiApi`）。**manifest 是 schema 唯一真相**：绝不"启动 binary 再问它有什么"。
+校验（`manifest.zig`）：schema id 精确匹配；`id` 合法；**至少一种 contribution**（`NoContributions`——`tools` / `skills` / `system_prompts` / `commands` / 有内容的 `policy` / `ui` 任一非空即算；一个写了 `contributes.policy` 但 `readonly` 是 null 且 `deny`/`ask` 都空的 `{}`，与从没写过这个键是**同一件事**——`{}` 是"没有收窄任何东西"，不是贡献，见下，ext-review D5）；有 tool 时必须有 `runtime`（`MissingRuntime`）；tool 名不能是 `shell`（保留名只有这一个，§5.2）、不能重复；`timeout_ms` 若写了必须是正数且 ≤ `tool.Timeouts.extension_max_ms`（600s），否则 `InvalidTimeout`；`audience` 若写了必须是 `model` / `driver` 之一，否则 `InvalidAudience`；`activation` 若写了必须是 `always` / `on_request` 之一，否则 `InvalidActivation`；`runtime.wire` 若写了必须是 `jsonrpc` / `plain` 之一，否则 `InvalidWire`（§7.1）；`entry` / `interpreter` 按平台声明成 `{"<os>": …, "default"?: …}` 时只许脚本实现（混进 `bin/` 是 `InvalidEntry`），且宿主的 os 必须能在其中选出一个变体（选不出是 `EntryUnsupportedOnHost`，在 pin 它的 `session new` 与点名它的 `ext run` 两处各自 hard fail，§7.1）；`entry` / skill / system_prompt / `ui.entry` 路径不能逃出包目录；命令 `name` 必须是 `[a-z0-9-]+` 且包内不重复（`InvalidCommandName` / `DuplicateCommandName`），`action` 若形如 `"run <tool>"` 则 `<tool>` 必须是本包声明的 tool（`UnknownCommandTool`）；`policy.deny` / `.ask` 的条目不能是空串（`InvalidPolicyEntry`，`allow` 键在 parse 阶段就被拒——见下）；`ui.api` 不能是 0（`InvalidUiApi`）。**manifest 是 schema 唯一真相**：绝不"启动 binary 再问它有什么"。
 
-`tools[].input` schema 只在该 tool 被 pin 进 `tools[]` 时才喂给模型；平时是可发现性元数据。
+#### 内核强制
 
-`tools[].timeout_ms?` 是**这个 tool 自己**的 wall-clock 上限（缺省 = host 的 30s，§7.3）：知道自己慢的 tool 在 manifest 里说出来，因为 manifest 就是关于一个 tool 的唯一真相。第一个用它的是随仓库带的 `extensions/compact`——它要等一次真实的 model step，30s 一定不够。
+`runtime.entry` / `.interpreter` / `.wire` 说的是**怎么跑这个 runtime**——entry/interpreter 各自既可以是字符串也可以是按 `builtin.os.tag` 键名的对象（选不中host时是硬失败，见上），`wire` 决定进程边界上说的是哪种协议：`"jsonrpc"`（缺省，§7.3 的 JSON-RPC 信封）或 `"plain"`（stdin 是这次调用参数的一个 compact JSON 对象，stdout 原文就是字符串结果——超时、被杀整棵树、env 净化、`NULYA_EXE`/`NULYA_SESSION` 与 jsonrpc 完全相同，走同一条 `runExtension` 路，§7.3）。
+
+`tools[].input` schema 只在该 tool 被 pin 进 `tools[]` 时才喂给模型；平时是可发现性元数据。`tools[].timeout_ms?` 是**这个 tool 自己**的 wall-clock 上限——但只在它被 pin 到**模型的工具面**上的那次调用生效（缺省 = host 的 30s，§7.3；`nulya ext run` 不套用它，见 §7.3 的 timeout 讨论）：知道自己慢的 tool 在 manifest 里说出来，因为 manifest 就是关于一个 tool 的唯一真相。`skills` / `system_prompts` 是这个版本贡献的文件列表，随 build 冻结进快照。
+
+`activation?`（可选，缺省按形状——见下）答的是**这个包被 activate 之后，接下来的 session 会怎样**——与其它声明性字段不同，这一个是内核**唯一强制**的字段：
+
+- **`always`**：activate 就是这台机器上此后每一场 session 都带上它——tools、skills、system prompt 一起。这是 `std` / `guide` 那一类**policy** 包：装它就是因为想让每一场都有。
+- **`on_request`**：activate 只是**登记**（`current` 指向某个版本），**一场 session 都不改变**；它只进那些**点名**它的场（`session new --with <id>`，§7.5）。这是 `evolution` 那一类 **mode** 包：一个 persona、一个审阅回路、一副镜片，戴不戴是每一场自己的决定。
+
+**为什么这根轴是整包的、由作者声明的。** 另一种设计是让**使用者**按机器决定"这个包的 tool 要、prompt 不要"——被否决，两条理由：① 一个包的 tool 常常是**按它自己的 prompt 在场**写的，逐机器拆开会造出作者从没跑过的组合，而组合数随包数爆炸；② "我是 policy 还是 mode" 这个问题**只有包自己答得出**，与 `audience`（这个 tool 是给谁的）、`timeout_ms`（我有多慢）同一个性质。人的否决权因此不在"要你哪半边"，而在**装不装**——那个否决是完整的，且已经存在。
+
+**作者会不会一律写 `always`？** 会，如果他的包真是 policy——那正是他该写的，这是诚实信号而不是漏洞。装它的人手里那一票（不 activate）没有被这个字段削弱一分。
+
+**缺省按形状，不是固定一个词**：`system_prompts` 非空的包缺省 `on_request`，否则缺省 `always`——理由是 system prompt 是唯一一种"activate 即每场付费"的贡献（它进每一场新 session 的模型上下文，其余贡献只在被 pin/以 `--with` 点名时才现身），而这正是 `docs/BUGS.md` 第一条重演的路径：一个只贡献 system prompt 的包被自动同步 activate 之后，缺省读法若仍是 `always`，它的 identity 就悄悄进了这台机器此后的每一场对话。**向后兼容不是理由**——这个字段出现之前的 manifest 只有仓库内这八份，不值得为它们留一个危险缺省。**写了就按写的**：这条缺省规则只在字段缺省时才问，`always` 或 `on_request` 一旦显式写出，读法与这条规则无关。类型不对（`"activation": false`）是 `WrongType`，**认不出的词**（`"onrequest"`）是 `InvalidActivation` 而不是退回缺省——一个想说 `on_request` 却拼错的包，退回缺省的后果正是这个字段要防的那一件事。
+
+`nulya ext list` 因此对这样的包多打一列 `on-request`：对它来说 `active` 的意思是"登记了"而不是"处处生效"，那两件事不该看起来一样。
+
+#### driver 声明
 
 `tools[].readonly?`（可选 bool）是这个包对**这个 tool 只读**的**声明**——与 `permissions` 完全同级（§9）：kernel 解析它、把它冻进版本的 manifest、**一个字节都不强制**。消费者是 driver 的审批 policy（§4 的 gate；TUI 的 `[approvals] manifest_readonly`），它有权不信；真边界要等 OS 强制（PLAN §3.8），不是一个布尔值。**缺省是 null 不是 false**：包什么都没说，与包说了"不是只读"是两件事，读的人不许把沉默读成主张。类型不对（`"readonly": "yes"`）是 `WrongType` 而不是被悄悄忽略，与 `timeout_ms` 同一条纪律。
 
@@ -405,26 +432,23 @@ extension 装在**多个 store root** 里，按固定顺序搜索（`extension/r
 - **缺省是 null 不是 `"model"`**：与 `readonly` 同一句话——"包没说"与"包说了 model"是两件事，落盘不会替包补一个字。把沉默读成 model 是**读的人**的选择（这个字段存在之前写的每一份 manifest 声明的都是 model tool），那个选择做在用它的地方，不做在内核里。
 - 类型不对（`"audience": true`）是 `WrongType`；**认不出的词**（`"drivers"`）是 `InvalidAudience` 而不是退回缺省——一个想说 `driver` 却拼错的包，退回缺省的后果正是这个字段要防的那一件事。这与 `timeout_ms` 的分法一致：类型错在 parse，值错在 validate。
 
-`tools[].render?`（可选字符串，如 `"checklist"`）与 `tools[].panel?`（可选 bool）是给**画这个 tool 调用的人**的提示（tui-plugin §1 D12）。与 `audience` **不同**的是这一个词表**开放**：kernel 只管它是不是字符串，**从不因为值而拒绝**——`readonly` / `activation` 那种封闭词表能穷举合法值，`render` 不能（今天是 `"checklist"` / `"markdown"`，以后会长），所以认不出的词是**读的人**的选择（退回一张普通卡），不是 build 拒绝。`panel: true` 是同一类声明的另一半：请求把这个 tool 最新一次调用**也**投影成输入框上方一个常驻可折叠 widget——没装代码插件的前端能给的最低限度进度显示。两个都是**声明**：kernel 解析、冻进版本、**不强制**；缺省是 null，不是任何具体的词或 `false`。
+`contributes.policy?`（可选，`{readonly: ?bool, deny: ?[]str, ask: ?[]str}`）是这个包要求一个审批 policy 在**它是本场冻结 composition 的成员期间**收窄的表（tui-plugin §1 D2/D3）——与 `ToolSpec.readonly` / `.audience` 同级的**声明**：kernel 解析、冻进版本、**不强制**，消费者是 driver 自己的审批 policy（TUI 的 `approvals.decide`）。**形状刻意只许收窄**：`deny` / `ask` 与 `[approvals]` 的表同形，但**没有 `allow`**——一个包能往 allow 表里塞条目就是 authority 经 activate 隐式增长（physics #6，与 `mergeProject` "只能收窄"同一条纪律）。`allow` 键的**出现本身**就是违规，没有任何值能让它合法，所以这条检查在 **parse 阶段**（`dupPolicy`）就拒绝（`PolicyAllowNotPermitted`），根本不留到 `validate`。`validate` 只管两件剩下的事：类型，与 `deny` / `ask` 里不能有空串条目（`InvalidPolicyEntry`）。`policy` 整体可以不写（`null`——包完全没提这件事）；写了但内容为空的 `{}` 是**不同的值**（一个显式的、内容为空的策略，`policy != null` 但没有一个字段有内容）——这个区别在解析出的数据里仍然读得出来，但对 `NoContributions` 而言两者**算同一件事**：`{}` 没有收窄任何东西，所以不算贡献，与从没写过 `contributes.policy` 一样（ext-review D5，是对早先"写了 `{}` 也算贡献"那条规则的收窄）。
 
-`contributes.commands?`（可选，`[]{name, description, action}`）是这个包说给**驱动 session 的人/程序**听的斜杠命令（tui-plugin §1 D1/D2/D8）——JSON 就能写，任何 driver（不只是有屏幕的那个）都读得到，是没装代码插件时的降级地板。`name` 的字符集是 `[a-z0-9-]+`（比 `isValidId` 窄——命令是人在 `/` 后面敲的，不是不透明 id）、空串或超出字符集是 `InvalidCommandName`，包内重复是 `DuplicateCommandName`。`action` 是一个动词，**原样保留、开放词表**——与 `render` 同一条纪律：今天是 `"wear"` / `"run <tool>"` / `"skill <ref>"`，认不出的动词是**读的人**的选择（warn-and-skip），不是 build 拒绝。**唯一被 kernel 检查的形状**是 `"run <tool>"`：`<tool>` 必须是**这同一份 manifest**声明的 tool（`UnknownCommandTool`）——这是一个包内闭合引用，是关于这份文件自己形状的事实，不是词表的一员。
+`permissions?`（`{fs, network, process}`，与 `contributes` 同层）是这个包对自己文件系统/网络/进程足迹的**声明**——kernel 解析、冻进版本，**今天零读者**：不是给它已经在读的什么东西看的，是等 M7 的沙箱给它一个读者（§9）。
 
-`contributes.policy?`（可选，`{readonly: ?bool, deny: ?[]str, ask: ?[]str}`）是这个包要求一个审批 policy 在**它是本场冻结 composition 的成员期间**收窄的表（tui-plugin §1 D2/D3）——与 `ToolSpec.readonly` / `.audience` 同级的**声明**：kernel 解析、冻进版本、**不强制**，消费者是 driver 自己的审批 policy（TUI 的 `approvals.decide`）。**形状刻意只许收窄**：`deny` / `ask` 与 `[approvals]` 的表同形，但**没有 `allow`**——一个包能往 allow 表里塞条目就是 authority 经 activate 隐式增长（physics #6，与 `mergeProject` "只能收窄"同一条纪律）。`allow` 键的**出现本身**就是违规，没有任何值能让它合法，所以这条检查在 **parse 阶段**（`dupPolicy`）就拒绝（`PolicyAllowNotPermitted`），根本不留到 `validate`。`validate` 只管两件剩下的事：类型，与 `deny` / `ask` 里不能有空串条目（`InvalidPolicyEntry`）。`policy` 整体可以不写（`null`——包完全没提这件事）；写了但是空 `{}` 是**另一件事**（一个显式的、内容为空的策略），两者都不算错，但前者不算 `NoContributions` 的贡献而后者算。
+#### 前端声明
 
-`contributes.tui?`（可选，`{entry: str, api: u32}`）是这个包**自己的前端模块**声明（tui-plugin §1 D1/D10）——kernel 只验证**形状**：`entry` 与 `system_prompts` 同一条路径安全检查（不能逃出包目录，否则 `InvalidTuiEntry`），且在 `ext build` 收集包快照时要求这个文件**真的存在**（`validateTui`，与 `validateSystemPrompts` 检查 system prompt 文件存在同一先例，`TuiEntryFileMissing`）；`api`（插件宿主 API 版本）必须 ≥ 1，否则 `InvalidTuiApi`——0 不可能是真实版本号，也没有"缺省"这回事，因为 `tui` 这个块本身是可选的（没写 `tui` 就没有 `Tui` 值，不存在"api 缺省该读成什么"的问题）。**kernel 从不加载或运行这个文件**：那是 TUI 自己的事（tui-plugin U3，本 commit 之外）——这里只冻结一个指针、验证它指向的东西没有逃出包、build 时它确实在场。
+`tools[].ui?`（可选，`{render: ?str, panel: ?bool}`）是给**画这个 tool 调用的人**的提示（tui-plugin §1 D12）。`render`（如 `"checklist"`）与 `audience` **不同**的是这一个词表**开放**：kernel 只管它是不是字符串，**从不因为值而拒绝**——`readonly` / `activation` 那种封闭词表能穷举合法值，`render` 不能（今天是 `"checklist"` / `"markdown"`，以后会长），所以认不出的词是**读的人**的选择（退回一张普通卡），不是 build 拒绝。`panel: true` 是同一个块里的另一半：请求把这个 tool 最新一次调用**也**投影成输入框上方一个常驻可折叠 widget——没装代码插件的前端能给的最低限度进度显示。两个都是**声明**：kernel 解析、冻进版本、**不强制**；两者缺省都是 null，不是任何具体的词或 `false`；`ui` 整个块也可以不写。
 
-`activation?`（可选，`"always"`（缺省） / `"on_request"`）答的是**这个包被 activate 之后，接下来的 session 会怎样**——与上面几个声明性字段不同，**这一个是内核唯一强制的 manifest 字段**：
+`contributes.commands?`（可选，`[]{name, description, action}`）是这个包说给**驱动 session 的人/程序**听的斜杠命令（tui-plugin §1 D1/D2/D8）——JSON 就能写，任何 driver（不只是有屏幕的那个）都读得到，是没装代码插件时的降级地板。`name` 的字符集是 `[a-z0-9-]+`（比 `isValidId` 窄——命令是人在 `/` 后面敲的，不是不透明 id）、空串或超出字符集是 `InvalidCommandName`，包内重复是 `DuplicateCommandName`。`action` 是一个动词，**原样保留、开放词表**——与 `ui.render` 同一条纪律：今天是 `"with"` / `"run <tool>"` / `"skill <ref>"`，认不出的动词是**读的人**的选择（warn-and-skip），不是 build 拒绝。**唯一被 kernel 检查的形状**是 `"run <tool>"`：`<tool>` 必须是**这同一份 manifest**声明的 tool（`UnknownCommandTool`）——这是一个包内闭合引用，是关于这份文件自己形状的事实，不是词表的一员。
 
-- **`always`**：activate 就是这台机器上此后每一场 session 都带上它——tools、skills、system prompt 一起。这是 `std` / `guide` 那一类**policy** 包：装它就是因为想让每一场都有。
-- **`on_request`**：activate 只是**登记**（`current` 指向某个版本），**一场 session 都不改变**；它只进那些**点名**它的场（`session new --with <id>`，§7.5）。这是 `evolution` 那一类 **mode** 包：一个 persona、一个审阅回路、一副镜片，戴不戴是每一场自己的决定。
+`contributes.ui?`（可选，`{entry: str, api: u32}`）是这个包**自己的前端模块**声明（tui-plugin §1 D1/D10）——kernel 只验证**形状**：`entry` 与 `system_prompts` 同一条路径安全检查（不能逃出包目录，否则 `InvalidUiEntry`），且在 `ext build` 收集包快照时要求这个文件**真的存在**（`validateUi`，与 `validateSystemPrompts` 检查 system prompt 文件存在同一先例，`UiEntryFileMissing`）；`api`（插件宿主 API 版本）必须 ≥ 1，否则 `InvalidUiApi`——0 不可能是真实版本号，也没有"缺省"这回事，因为 `ui` 这个块本身是可选的（没写 `ui` 就没有 `Ui` 值，不存在"api 缺省该读成什么"的问题）。**kernel 从不加载或运行这个文件**：那是前端自己的事（tui-plugin U3）——这里只冻结一个指针、验证它指向的东西没有逃出包、build 时它确实在场。
 
-**为什么这根轴是整包的、由作者声明的。** 另一种设计是让**使用者**按机器决定"这个包的 tool 要、prompt 不要"——被否决，两条理由：① 一个包的 tool 常常是**按它自己的 prompt 在场**写的，逐机器拆开会造出作者从没跑过的组合，而组合数随包数爆炸；② "我是 policy 还是 mode" 这个问题**只有包自己答得出**，与 `audience`（这个 tool 是给谁的）、`timeout_ms`（我有多慢）同一个性质。人的否决权因此不在"要你哪半边"，而在**装不装**——那个否决是完整的，且已经存在。
+#### 三处 `readonly`，并排
 
-**作者会不会一律写 `always`？** 会，如果他的包真是 policy——那正是他该写的，这是诚实信号而不是漏洞。装它的人手里那一票（不 activate）没有被这个字段削弱一分。
+这个词在 manifest 生态里出现三次，问的是三件不同的事，都不是同一层的强制：`tools[].readonly` 是这一个 tool 自己的属性（"我只读"）；`policy.readonly` 是这个包对**它是成员的整场 session** 提的一个请求（"戴上我的时候，把这一整场按只读办"，判在三张审批表之前、agent 天花板同一处，§7.8）；agent 定义 frontmatter 的 `readonly` 是对**一个即将开出的子 session** 提的请求（"这次委派按只读办"，同一处天花板判、判据来自 runner 每次从子场自己的冻结 header 重算的放行名单，§7.8）。三者字面同名是因为问的是同一类问题在不同粒度上的样子，不是同一个开关的三个入口——本 goal 不统一它们，统一是想象出来的简化，会把"一个 tool 的属性"与"一场 session 的请求"混成一件事。
 
-**缺省是 `always`，而且这个读法定在 `manifest.zig` 而不是各读者手里**（与 `audience` / `readonly` 的"沉默不许被读成主张"**相反**，是刻意的）：这个字段出现之前写下的每一份 manifest 都是"activate 即全局生效"，缺省必须继续是那件事——这是关于**文件格式**的事实，不是一个判断，所以只写一次。类型不对（`"activation": false`）是 `WrongType`，**认不出的词**（`"onrequest"`）是 `InvalidActivation` 而不是退回缺省——一个想说 `on_request` 却拼错的包，退回缺省的后果正是这个字段要防的那一件事。
-
-`nulya ext list` 因此对这样的包多打一列 `on-request`：对它来说 `active` 的意思是"登记了"而不是"处处生效"，那两件事不该看起来一样。
+---
 
 ### 7.3 Wire protocol（`protocol.zig` / `invoke.zig`）
 
@@ -543,8 +567,8 @@ Tool 是"能执行的能力"，Skill 是"要遵循的方法 / 知识"；不同 r
 | `evolution` | data | system prompt + skill（manifest 声明 `activation: on_request`，§7.2.1） | `activate` 只是登记；`session new --with evolution` 才戴上（mode） |
 | `guide` | data | skill | 用户 `--user` 装一次，每场 `<available_skills>` 多一行 |
 | `std` | compiled | `read` / `write` / `append` / `edit` / `grep` / `glob` 六个 tool（`read` / `grep` / `glob` 声明 `readonly`，§7.2.1） | 用户 `ext build extensions/std --user` → `activate --user` → user config `[registry] pinned_native_tools`（builtin 1 + 6 = 7 ≤ `max_tools` 20） |
-| `plan` | compiled | system prompt + `policy{readonly}` + `commands[/plan]` + `propose` / `todo`（都声明 `readonly`，`todo` 另带 `render: checklist` + `panel`）/ `approve`（`audience: driver`）+ `contributes.tui`（manifest 声明 `activation: on_request`） | `activate` 只是登记；`/plan` 或 `session new --with plan` 才戴上（mode）。`approve` 经 `ext run` 写出 brief，`compact --arg brief_file=` 接着 fork |
-| `ask` | compiled | `ask` tool（声明 `readonly`）+ `commands[/ask]` + `contributes.tui`（`activation` 默认 `always`——它是能力不是模式） | `activate` = 进每一场的 composition，工具面另算一根 pin（`ext:ask/ask`）；只给一场用是 `session new --with ask --pin ext:ask/ask` |
+| `plan` | compiled | system prompt + `policy{readonly}` + `commands[/plan]` + `propose` / `todo`（都声明 `readonly`，`todo` 另带 `ui: {render: checklist, panel: true}`）/ `approve`（`audience: driver`）+ `contributes.ui`（manifest 声明 `activation: on_request`） | `activate` 只是登记；`/plan` 或 `session new --with plan` 才戴上（mode）。`approve` 经 `ext run` 写出 brief，`compact --arg brief_file=` 接着 fork |
+| `ask` | compiled | `ask` tool（声明 `readonly`）+ `commands[/ask]` + `contributes.ui`（`activation` 默认 `always`——它是能力不是模式） | `activate` = 进每一场的 composition，工具面另算一根 pin（`ext:ask/ask`）；只给一场用是 `session new --with ask --pin ext:ask/ask` |
 
 **`agent`：委派，靠已有的后台任务回路。** 四个 tool 一个二进制（`params.name` 分发）：`agent{name, task, model?}` 是**模型**在委派——渲染 persona、`session new --prompt` 出子场、`session append` 给任务、`task run` 起一个**属于父场**的后台任务去驱动它，返回一张点名子 session 的回执；`render{name}` 把一个定义文件的正文写成 `.nulya/scratch/agents/agent-<name>.md` 并回一整组 `session new` 参数（**写路径唯一实现**，所以 TUI 也调它——两份实现就是同一个 persona 的两种读法）；`list` 列出全部定义（含 `agents` / `max_exchanges` 两列；**读路径唯一实现**，driver-facing、永不 pin：模型不需要目录——名字写错时错误消息里就有名单——而 driver 要画 picker）；`run{session, agent?, readonly?, max_steps?}` 是那个后台任务跑的命令本身。
 
@@ -570,7 +594,7 @@ Tool 是"能执行的能力"，Skill 是"要遵循的方法 / 知识"；不同 r
 
 **`std` 不是 "std tool 层"**（PLAN §3.4.1 那句话仍成立）：叫 std 只因它装的是一场编码 session 最先伸手的那几样东西。行为逐条移植自 tcode（零猜测的错误文案、`read` 放大小读 + 自分页 + 无行号、`write` 不覆盖没读过的文件、`grep` smart-case + per-file 上限 + gitignore、`glob` 按 mtime）；它是 §7.3 "string result 原文进 emit" 的第一个 consumer；每个结果自守在 `emit` 预算之下（read ≤ 120 KB、grep ≤ 100 KB），所以 spill 对它们不触发。它唯一跨调用的状态——模型读过哪些文件、看到哪些行——按 §7.6 走**磁盘制品**：`.nulya/scratch/<session-id>/std-freshness.jsonl`（append-only，从 `NULYA_SESSION` 取 id，fork 之后自然是新文件；不在 session 里就没有去重也没有门）。regex 引擎是 vendored 的 mvzr（字节级、无 lookaround / backreference，smart-case 由 wrapper 补）；gitignore / glob 匹配移植自 zeegrep 的两个 core 模块；walker 单线程 + 10 s deadline。契约与进度在 `docs/goals/std.md`。
 
-**`plan` / `ask`：声明层与代码层的两个真实 consumer**（goals/tui-plugin.md U4；前端那一半在 tui.md §11 T41，不进这里）。两个包合起来把 §7.2.1 那五个声明位一次用全：`plan` 的 manifest 说出它是什么（system prompt）、戴上它意味着什么权限立场（`policy.readonly`——gate 上先于一切审批表，`propose` / `todo` 因此各自声明 `readonly: true`）、人怎么戴上（`commands`）、它的 tool 怎么画（`render` / `panel`）、以及它带了一段前端代码（`tui`）。**内核对这两个包一个字节都没有多做**：五个字段里只有 `activation` 是强制的，其余全是驱动方读了才算数的声明。
+**`plan` / `ask`：声明层与代码层的两个真实 consumer**（goals/tui-plugin.md U4；前端那一半在 tui.md §11 T41，不进这里）。两个包合起来把 §7.2.1 那五个声明位一次用全：`plan` 的 manifest 说出它是什么（system prompt）、戴上它意味着什么权限立场（`policy.readonly`——gate 上先于一切审批表，`propose` / `todo` 因此各自声明 `readonly: true`）、人怎么戴上（`commands`）、它的 tool 怎么画（`ui.render` / `ui.panel`）、以及它带了一段前端代码（`ui`）。**内核对这两个包一个字节都没有多做**：五个字段里只有 `activation` 是强制的，其余全是驱动方读了才算数的声明。
 
 三个 tool 的分工是 §11 那条分界的直接推论：`propose{plan_md}` 与 `todo{items}` **什么都不写**——计划与清单在调用的参数里，而调用已经在 ledger 里，磁盘上再写一份就是第二份真相（physics #3）；`ask{question, options?}` 同理，且**不阻塞**（把一个 step 押在人的阅读速度上，还要撞 600 s 的 extension 天花板，同时让没人看着的 driver 挂死；答案作为下一条 user turn 到达，append-only 只付一轮增量）。唯一碰磁盘的是 `approve{session, plan_md}`（`audience: driver`）：它把批准的计划渲染成 `.nulya/handoffs/<session>-<n>.md`——**与 `handoff` 逐字节同形、同目录、同独占创建规则**，所以 `compact --arg brief_file=` 一个特例都不用加就能 fork 过去，而 `session new --parent` 不带 `--with`、`plan` 又声明 `on_request`，于是**计划过去了、写它的 persona 没过去**：执行场是一场能真正改东西的普通 session。
 

@@ -1,5 +1,5 @@
 /**
- * The plugin host: loading a package's `contributes.tui` module and giving it
+ * The plugin host: loading a package's `contributes.ui` module and giving it
  * the one narrow API it gets (tui-plugin U3, contract in `tui/plugin-api.d.ts`).
  *
  * ── WHAT LOADING IS, AND IS NOT ───────────────────────────────────────────
@@ -67,7 +67,7 @@ import type {
 
 /**
  * The API major version this build implements. A package declares its own in
- * `contributes.tui.api`; anything else is warn-and-skip (D10). One number, and
+ * `contributes.ui.api`; anything else is warn-and-skip (D10). One number, and
  * the reason it is a number rather than a word set is in the contract file.
  */
 export const plugin_api_version = 1
@@ -281,16 +281,16 @@ export async function pluginCandidates(
   const out: PluginCandidate[] = []
   for (const one of wanted) {
     const contributions = await readContributions(ws, one.id, one.version, roots)
-    if (!contributions.tui) continue
+    if (!contributions.ui) continue
     const dir = packageDirOf(roots, one.id, one.version)
     if (dir === null) continue
     out.push({
       id: one.id,
       version: one.version,
       // The kernel checked at build time that this path is safe and present
-      // (`build_ext.validateTui`), and froze the bytes with the version.
-      entry: `${dir}/${contributions.tui.entry}`,
-      api: contributions.tui.api,
+      // (`build_ext.validateUi`), and froze the bytes with the version.
+      entry: `${dir}/${contributions.ui.entry}`,
+      api: contributions.ui.api,
       tools: contributions.tools,
     })
   }

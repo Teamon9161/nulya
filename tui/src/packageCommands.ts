@@ -4,7 +4,7 @@
  * `contributes.commands` lets an extension add itself to the slash chain
  * without this front end knowing its name in advance — the same relationship
  * `skills.ts` already has with `nulya skill list` (T15), one layer earlier: a
- * package says "I offer `/plan`, and typing it means `wear`", and dispatch
+ * package says "I offer `/plan`, and typing it means `with`", and dispatch
  * insertS one more link — built-in → PACKAGE → skill → the model, verbatim
  * (`commands.ts`, `ui/App.tsx` `runCommand`/`runPackageCommand`).
  *
@@ -29,17 +29,23 @@ export interface PackageCommandRow extends PackageCommand {
  * other words this build understands. Anything else is `unknown` — an open
  * vocabulary the kernel deliberately does not police (manifest.zig `Command`),
  * so a word this build has never heard of is this reader's decision, same
- * discipline as an unrecognised `render` hint (D12).
+ * discipline as an unrecognised `ui.render` hint (D12).
+ *
+ * `"wear"` was this word's name before the manifest review renamed it to
+ * `"with"` (the same word `/with` and `session new --with` already use for
+ * the same idea). It is still accepted here, folded into the same `"with"`
+ * kind, for one release — a warning names the package so its author sees why.
  */
 export type PackageAction =
-  | { kind: "wear" }
+  | { kind: "with" }
   | { kind: "run"; tool: string }
   | { kind: "skill"; ref: string }
   | { kind: "unknown"; word: string }
 
 export function parseAction(action: string): PackageAction {
   const trimmed = action.trim()
-  if (trimmed === "wear") return { kind: "wear" }
+  if (trimmed === "with") return { kind: "with" }
+  if (trimmed === "wear") return { kind: "with" }
   if (trimmed.startsWith("run ")) {
     const tool = trimmed.slice("run ".length).trim()
     if (tool.length > 0) return { kind: "run", tool }
@@ -49,6 +55,16 @@ export function parseAction(action: string): PackageAction {
     if (ref.length > 0) return { kind: "skill", ref }
   }
   return { kind: "unknown", word: trimmed }
+}
+
+/**
+ * Whether `action`, as WRITTEN in a manifest, is the deprecated `"wear"`
+ * spelling — so a caller that already has the row (and so the package id
+ * that declared it) can name it in a warning, once, rather than this pure
+ * parser reaching for a console of its own.
+ */
+export function isDeprecatedWearAction(action: string): boolean {
+  return action.trim() === "wear"
 }
 
 /**

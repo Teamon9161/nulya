@@ -75,7 +75,7 @@ export interface ToolView {
 
 /**
  * A manifest's per-tool rendering claim, as far as the registry is concerned
- * (`ToolSpec.render`, DESIGN §7.2.1, tui-plugin D12) — resolved by the CALLER
+ * (`ToolSpec.ui.render`, DESIGN §7.2.1, tui-plugin D12) — resolved by the CALLER
  * from the session's frozen composition (`ui/App.tsx`, since only it has both
  * the tool name and the composition to look it up in) and handed in here so
  * `describeTool` itself stays a pure function of "one call, one hint".

@@ -93,6 +93,7 @@ import {
 import { builtin_names } from "../commands.ts"
 import {
   createPackageCommandTable,
+  isDeprecatedWearAction,
   packageCompletions,
   parseAction,
   resolve as resolvePackageCommands,
@@ -1972,7 +1973,7 @@ export function App(props: AppProps) {
    * does today.
    *
    * The three verbs each land on a path that already exists for a person
-   * typing the general form by hand — `wear` is `startDraft`'s own `--with`
+   * typing the general form by hand — `with` is `startDraft`'s own `--with`
    * move (`wearNow` below), `run <tool>` is `ext run` naming the version this
    * package is active AT RIGHT NOW (not whatever it was when the table was
    * last read), and `skill <ref>` is T15's `skillTurn` with the ref standing
@@ -1982,9 +1983,14 @@ export function App(props: AppProps) {
     const { name, args } = splitSlash(raw)
     const row = resolvedPackageCommands().winners.find((entry) => entry.name === name)
     if (!row) return false
+    // `"wear"` is the pre-D4 spelling of `"with"`, folded into the same kind
+    // below; warned once per dispatch so the package's own author sees it.
+    if (isDeprecatedWearAction(row.action)) {
+      console.warn(`${row.id}: command '/${row.name}' declares action "wear" — rename it to "with"`)
+    }
     const action = parseAction(row.action)
     switch (action.kind) {
-      case "wear":
+      case "with":
         startDraft(undefined, false, { id: row.id })
         return true
       case "run": {

@@ -291,8 +291,8 @@ test.skipIf(!has_zig)(
     await bench.host.load()
     expect(bench.host.loaded().some((one) => one.id === "plan")).toBe(true)
     // The package registers a card for its own tool, and no widget: it DECLARES
-    // `todo{panel: true}`, and a code widget would supersede that row to say
-    // the same thing twice (`registerWidget`'s contract).
+    // `todo{ui: {panel: true}}`, and a code widget would supersede that row to
+    // say the same thing twice (`registerWidget`'s contract).
     expect(bench.host.cardFor("propose")?.pkg).toBe("plan")
     expect(bench.host.widgets().some((one) => one.pkg === "plan")).toBe(false)
 

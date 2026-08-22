@@ -9,7 +9,7 @@
     "commands": [{
       "name": "plan",
       "description": "wear planning mode for the next session: investigate, plan, change nothing",
-      "action": "wear"
+      "action": "with"
     }],
     "tools": [
       {
@@ -27,8 +27,7 @@
       {
         "name": "todo",
         "readonly": true,
-        "render": "checklist",
-        "panel": true,
+        "ui": { "render": "checklist", "panel": true },
         "description": "Record the checklist you are working through, so the person watching can see where you are. Send the WHOLE list every time — each call replaces what is shown, and an item's state is how it stands right now. It changes nothing and ends nothing, so call it whenever something moves.",
         "input": {
           "type": "object",
@@ -63,7 +62,6 @@
         }
       }
     ],
-    "tui": { "entry": "tui/plan.ts", "api": 1 }
-  },
-  "permissions": { "fs": [".nulya/handoffs"], "network": [], "process": [] }
+    "ui": { "entry": "tui/plan.ts", "api": 1 }
+  }
 }

@@ -19,6 +19,5 @@
       "timeout_ms": 600000,
       "audience": "driver"
     }]
-  },
-  "permissions": { "fs": [], "network": [], "process": ["nulya"] }
+  }
 }

@@ -96,6 +96,5 @@
         }
       }
     ]
-  },
-  "permissions": { "fs": [".nulya/scratch"], "network": [], "process": [] }
+  }
 }

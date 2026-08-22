@@ -98,7 +98,7 @@ export interface Settings {
     session_with: string[]
     /**
      * The CODE layer's one switch (tui-plugin U3): whether a trusted, active
-     * package's `contributes.tui` module is loaded into this process at all.
+     * package's `contributes.ui` module is loaded into this process at all.
      *
      * `false` leaves the declaration layer exactly as U2 left it — commands,
      * policy, `render`/`panel` hints all still work, because those are JSON a

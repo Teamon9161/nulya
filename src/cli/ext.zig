@@ -370,7 +370,7 @@ fn isDraftFault(err: anyerror) bool {
         error.SystemPromptFileMissing,
         error.SystemPromptTooLarge,
         error.InvalidUtf8,
-        error.TuiEntryFileMissing,
+        error.UiEntryFileMissing,
         => true,
         else => false,
     };
@@ -1455,65 +1455,69 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             \\  A tool gets args, a working directory and that environment — never the
             \\  conversation. It cannot read or append to the session.
             \\
-            \\  `permissions` in a manifest is a declaration for readers and review.
-            \\  Nothing enforces it yet, so do not treat it as a boundary.
-            \\
             \\  A driver can hold the veto: `nulya session step --gate --stream` asks it
             \\  before every tool call and runs only what it allows. A refusal comes back
             \\  as that call's result — the call never ran, nothing changed — and the rest
             \\  of the batch is decided one call at a time.
             \\
-            \\  A tool may declare `"readonly": true` in its manifest, meaning it only
-            \\  reads. That is a hint for whoever answers the gate, not a boundary: the
-            \\  kernel records the claim and enforces nothing. Real isolation waits for a
-            \\  sandbox.
+            \\  A manifest speaks to three different readers, and each one keeps its own
+            \\  discipline for every field it owns rather than restating it field by field.
             \\
-            \\  A tool may also declare `"audience": "driver"`, meaning it is called by
-            \\  whoever drives a session (`nulya ext run`, a front end) and does not
-            \\  belong on a model's tool face. `"model"` is the other value, and saying
-            \\  nothing says nothing. Recorded and never enforced, like `readonly`: a
-            \\  pin naming a driver tool still works, drivers simply do not write one.
+            \\  KERNEL-ENFORCED, checked at build time and acted on at run time: `id`;
+            \\  `runtime.entry` and `runtime.interpreter` (either a plain string, or an
+            \\  object keyed by OS — `windows`, `linux`, `macos`, … — plus an optional
+            \\  `default`, so one version can carry a different script per platform; the
+            \\  object form is script-only, and a host this build has no entry for is a
+            \\  named refusal rather than a silent skip); `runtime.wire`, `"jsonrpc"` (the
+            \\  default) or `"plain"` — plain trades the JSON-RPC envelope for two flat
+            \\  halves, stdin is the call's arguments as one compact JSON object and stdout
+            \\  is the result text taken verbatim. Everything else about running the
+            \\  extension — the sanitized environment, NULYA_EXE/NULYA_SESSION, timeout,
+            \\  being killed as a whole tree — is identical either way. `tools[].name` /
+            \\  `.input` / `.timeout_ms` (this tool's own cap on a MODEL-FACE call, default
+            \\  30s, ceiling 600s); `skills`; `system_prompts`; `activation` (`"always"` or
+            \\  `"on_request"` — absent defaults to whichever the package's own shape
+            \\  implies: contributing a system prompt defaults to `"on_request"`, since that
+            \\  is the one contribution that reaches every session the moment it is
+            \\  activated, and anything else defaults to `"always"`; an explicit value
+            \\  always wins over that default).
             \\
-            \\  A tool may also declare `"render": "checklist"` (or another word), a hint
-            \\  for whoever draws its calls. The word list is open and never enforced: an
-            \\  unrecognized one just falls back to a plain rendering. `"panel": true` asks
-            \\  that the tool's latest call also show as a small standing status line above
-            \\  the input — again a hint, not a boundary.
+            \\  DRIVER DECLARATIONS, parsed, frozen into the version, and never enforced by
+            \\  the kernel: a claim for whoever DRIVES a session (a front end, `nulya ext
+            \\  run`, a script) to read and act on however it likes. Absent reads as null,
+            \\  "the package did not say", never a default value: `tools[].readonly` (this
+            \\  tool only reads, in the package's own words); `tools[].audience` (`"model"`
+            \\  or `"driver"` — a closed pair, and an unrecognized word is refused rather
+            \\  than read as either one); `policy`, an approval-policy narrowing that
+            \\  applies while this package is a session member — `{"readonly", "deny",
+            \\  "ask"}`, with no `allow` key: a package can only narrow what a driver's
+            \\  approval policy already reads, never widen it, so writing one is refused
+            \\  outright; `permissions`, a filesystem/network/process claim, kept for
+            \\  readers and review — nothing acts on it yet.
             \\
-            \\  A package may declare `contributes.commands`, a list of
-            \\  `{"name", "description", "action"}` slash commands it offers whoever
-            \\  drives a session. `name` is lowercase letters, digits and `-` only.
-            \\  `action` is a verb a driver interprets (`"wear"`, `"run <tool>"`,
-            \\  `"skill <ref>"` today, more later); the one shape the kernel checks is that
-            \\  a `"run <tool>"` command names a tool this SAME manifest declares.
+            \\  FRONT-END DECLARATIONS, open vocabularies: the kernel checks only the
+            \\  shape, never the word, so a word this build has never heard of is simply
+            \\  something the reader falls back on, never a build-time refusal: `commands`,
+            \\  slash commands this package offers whoever drives a session — `{"name",
+            \\  "description", "action"}`, `name` lowercase letters, digits and `-` only,
+            \\  `action` a verb (`"with"`, `"run <tool>"`, `"skill <ref>"` today, more
+            \\  later; the one shape the kernel DOES check is that a `"run <tool>"` command
+            \\  names a tool this SAME manifest declares); `tools[].ui`, `{"render",
+            \\  "panel"}` — a rendering hint for whoever draws this tool's calls, and a
+            \\  request that its latest call also show as a small standing status line
+            \\  above the input; `ui`, `{"entry", "api"}` — a front-end module a driver can
+            \\  load, `entry` following the same path rule as a system prompt (it cannot
+            \\  escape the package directory) and required to exist when the package is
+            \\  built, `api` the plugin-host version (checked only for being a real number,
+            \\  never for being one this build recognizes).
             \\
-            \\  A package may declare `contributes.policy`, an approval-policy narrowing
-            \\  that applies while it is a member of a session's composition:
-            \\  `{"readonly": bool, "deny": [...], "ask": [...]}`. There is no `allow` key
-            \\  — a package can only narrow what a driver's approval policy already reads,
-            \\  never widen it, so writing one is refused outright. Recorded and never
-            \\  enforced by the kernel itself, like `readonly` and `audience` above.
-            \\
-            \\  A package may declare `"activation": "on_request"` at the top level. Then
-            \\  activating it REGISTERS it and nothing more: it joins only the sessions
-            \\  that name it (`nulya session new --with <id>`), and every other session is
-            \\  exactly as it was. The default, `"always"`, is the other meaning: activation
-            \\  puts the package — tools, skills, system prompt — into every new session
-            \\  on this machine. This one IS enforced; it is the only declaration on this
-            \\  page that is. Say `on_request` if your package is a mode somebody should
-            \\  choose per session rather than live in.
-            \\
-            \\  A package may declare `contributes.tui`, `{"entry", "api"}`, naming a
-            \\  front-end module a TUI can load. `entry` follows the same path rule as a
-            \\  system prompt (it cannot escape the package directory) and must exist when
-            \\  the package is built; `api` is the plugin-host API version, at least 1.
-            \\  Declared, frozen and shape-checked like everything above — loading and
-            \\  running the module is a front end's job, not this one's.
-            \\
-            \\  Wall clock is enforced: an extension tool is killed at 30s unless its
-            \\  manifest sets `timeout_ms` (600s maximum); `shell` defaults to 120s and
-            \\  accepts `timeout_ms` up to 600s. A timeout kills the whole process tree
-            \\  and returns whatever was captured.
+            \\  Wall clock is enforced on the model's tool face only: a call an activated,
+            \\  pinned or worn package puts in front of a model is killed at 30s unless the
+            \\  manifest's `timeout_ms` says otherwise (600s maximum); `shell` there
+            \\  defaults to 120s and accepts up to 600s. `nulya ext run` applies no timeout
+            \\  of its own — it is a driver's own process — but takes an optional
+            \\  `--timeout-ms` for a driver that wants one. A timeout, wherever it applies,
+            \\  kills the whole process tree and returns whatever was captured.
             \\
             \\  A workspace store (.nulya/extensions) that arrived with a checkout takes
             \\  part in no session until `nulya ext trust` records it once on this
@@ -1561,9 +1565,9 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             \\  # A slash command, a narrowed policy, and a front-end module — all just
             \\  # declared; a driver reads them, the kernel never runs any of it.
             \\  #   "contributes": {
-            \\  #     "commands": [{"name": "plan", "description": "…", "action": "wear"}],
+            \\  #     "commands": [{"name": "plan", "description": "…", "action": "with"}],
             \\  #     "policy": {"readonly": true},
-            \\  #     "tui": {"entry": "tui/panel.ts", "api": 1}
+            \\  #     "ui": {"entry": "tui/panel.ts", "api": 1}
             \\  #   }
             \\
             \\  # Afterwards: say how it went, so later passes have evidence.

@@ -344,7 +344,7 @@ sync_on_start = true           # build the drafts in the store roots on the way 
 auto_activate = true           # let that pass point `current` at what it built
 handoff       = true           # every session carries the `handoff` tool, pinned
 plugins       = true           # load the front-end module of a trusted, active package
-                               # (`contributes.tui`); false leaves only the declared
+                               # (`contributes.ui`); false leaves only the declared
                                # commands / policy / render hints. See plugin-api.d.ts
 
 [keys]                         # action = binding; names are the rows of /help

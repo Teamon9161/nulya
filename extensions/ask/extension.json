@@ -25,9 +25,8 @@
     "commands": [{
       "name": "ask",
       "description": "give the next session alone a way to ask you a question (/ext keeps it on for every session)",
-      "action": "wear"
+      "action": "with"
     }],
-    "tui": { "entry": "tui/ask.ts", "api": 1 }
-  },
-  "permissions": { "fs": [], "network": [], "process": [] }
+    "ui": { "entry": "tui/ask.ts", "api": 1 }
+  }
 }

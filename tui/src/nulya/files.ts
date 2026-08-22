@@ -153,7 +153,7 @@ export interface Contributions {
    */
   policy: PackagePolicy | null
   /**
-   * `ToolSpec.render`, by tool name — a rendering hint from an OPEN
+   * `ToolSpec.ui.render`, by tool name — a rendering hint from an OPEN
    * vocabulary (`"checklist"`, `"markdown"`, more later, DESIGN §7.2.1,
    * tui-plugin D12). A tool absent from this map made no claim; `render/
    * registry.ts` is the one place that reads it and decides whether it
@@ -161,25 +161,25 @@ export interface Contributions {
    */
   toolRender: Record<string, string>
   /**
-   * The subset of `tools` whose manifest says `panel: true` (DESIGN §7.2.1,
-   * tui-plugin D12) — the package's request that the latest call also be
-   * projected as a persistent widget above the composer.
+   * The subset of `tools` whose manifest says `ui.panel: true` (DESIGN
+   * §7.2.1, tui-plugin D12) — the package's request that the latest call
+   * also be projected as a persistent widget above the composer.
    */
   panelTools: string[]
   /**
-   * `contributes.tui` (DESIGN §7.2.1, tui-plugin D10): a package-relative path
+   * `contributes.ui` (DESIGN §7.2.1, tui-plugin D10): a package-relative path
    * to a front-end module and the plugin-host API major version it was
    * written against, or null when the package ships no code layer.
    *
    * The kernel freezes the entry's bytes with the version and never loads it
-   * (`Manifest.Tui`); who loads it, and whether this build's API version
+   * (`Manifest.Ui`); who loads it, and whether this build's API version
    * matches, is a front end's decision — `src/plugins/host.ts`.
    */
-  tui: PackageTui | null
+  ui: PackageUi | null
 }
 
-/** A package's front-end module declaration (`manifest.Tui`). */
-export interface PackageTui {
+/** A package's front-end module declaration (`manifest.Ui`). */
+export interface PackageUi {
   /** Package-relative, checked safe by the kernel at build time. */
   entry: string
   /** The plugin-host API major version. The kernel refuses 0. */
@@ -190,7 +190,7 @@ export interface PackageTui {
 export interface PackageCommand {
   name: string
   description: string
-  /** The verb, kept as written — `"wear"` | `"run <tool>"` | `"skill <ref>"` today. */
+  /** The verb, kept as written — `"with"` | `"run <tool>"` | `"skill <ref>"` today. */
   action: string
 }
 
@@ -229,7 +229,7 @@ export async function readContributions(
     policy: null,
     toolRender: {},
     panelTools: [],
-    tui: null,
+    ui: null,
   }
   const search = roots ?? (await storeRoots(ws))
   for (const root of search) {
@@ -250,7 +250,7 @@ export async function readContributions(
 /**
  * Where a frozen version's PACKAGE files are on this disk — the directory the
  * kernel copies the sealed snapshot into (`integrity.package_dir`), which is
- * what a `contributes.tui.entry` / `system_prompts` path is relative to. Null
+ * what a `contributes.ui.entry` / `system_prompts` path is relative to. Null
  * when no root holds that version.
  *
  * The first root that has it wins, as everywhere: a version id is a hash of
@@ -282,7 +282,7 @@ function contributionsOf(
   | "policy"
   | "toolRender"
   | "panelTools"
-  | "tui"
+  | "ui"
 > {
   const contributes = (manifest?.["contributes"] ?? {}) as Record<string, unknown>
   const declared = Array.isArray(contributes["tools"]) ? (contributes["tools"] as Array<Record<string, unknown>>) : []
@@ -291,7 +291,8 @@ function contributionsOf(
   for (const tool of named) {
     // Kept as WRITTEN (D12): an unrecognised word is the reader's decision
     // (`render/registry.ts`), never something this projection filters out.
-    if (typeof tool["render"] === "string") toolRender[tool["name"] as string] = tool["render"]
+    const render = toolUiOf(tool)["render"]
+    if (typeof render === "string") toolRender[tool["name"] as string] = render
   }
   return {
     tools: named.map((tool) => tool["name"] as string),
@@ -309,17 +310,23 @@ function contributionsOf(
     commands: commandsOf(contributes["commands"]),
     policy: policyOf(contributes["policy"]),
     toolRender,
-    panelTools: named.filter((tool) => tool["panel"] === true).map((tool) => tool["name"] as string),
-    tui: tuiOf(contributes["tui"]),
+    panelTools: named.filter((tool) => toolUiOf(tool)["panel"] === true).map((tool) => tool["name"] as string),
+    ui: uiOf(contributes["ui"]),
   }
 }
 
+/** A tool's `ui` object (`ToolSpec.ui`, DESIGN §7.2.1), or `{}` when absent or malformed. */
+function toolUiOf(tool: Record<string, unknown>): Record<string, unknown> {
+  const value = tool["ui"]
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {}
+}
+
 /**
- * `contributes.tui`, or null. Both fields are required by the kernel's own
+ * `contributes.ui`, or null. Both fields are required by the kernel's own
  * parse, so anything missing one of them is a manifest this build cannot use
  * — read as "no code layer" rather than half a declaration.
  */
-function tuiOf(value: unknown): PackageTui | null {
+function uiOf(value: unknown): PackageUi | null {
   if (typeof value !== "object" || value === null) return null
   const record = value as Record<string, unknown>
   const entry = record["entry"]
@@ -375,11 +382,11 @@ export function modelTools(
 }
 
 /**
- * A tool's `render` claim (`ToolSpec.render`, DESIGN §7.2.1, tui-plugin D12),
- * read from whichever member of the frozen composition declares `tool`. Null
- * when nothing declares it, or when the declaring package said nothing —
- * "absent" and "not a member" are the same answer to a reader that only wants
- * to know whether to draw a hinted card.
+ * A tool's `render` claim (`ToolSpec.ui.render`, DESIGN §7.2.1, tui-plugin
+ * D12), read from whichever member of the frozen composition declares
+ * `tool`. Null when nothing declares it, or when the declaring package said
+ * nothing — "absent" and "not a member" are the same answer to a reader that
+ * only wants to know whether to draw a hinted card.
  */
 export function renderHintOf(contributions: readonly Pick<Contributions, "tools" | "toolRender">[], tool: string): string | null {
   for (const c of contributions) {

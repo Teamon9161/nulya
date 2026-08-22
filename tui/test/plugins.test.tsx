@@ -1,6 +1,6 @@
 /**
  * The code layer of goals/tui-plugin.md U3: loading a package's
- * `contributes.tui` module and the host API it gets.
+ * `contributes.ui` module and the host API it gets.
  *
  * Four fixture packages, built once into a throwaway workspace store:
  *
@@ -70,11 +70,11 @@ function writePackage(
   id: string,
   module: string | null,
   over: Record<string, unknown> = {},
-  tui: { entry: string; api: number } | null = { entry: "tui/main.ts", api: plugin_api_version },
+  ui: { entry: string; api: number } | null = { entry: "tui/main.ts", api: plugin_api_version },
 ): void {
   const dir = extensionDir(id)
   mkdirSync(join(dir, "tui"), { recursive: true })
-  const contributes = { ...(tui ? { tui } : {}), ...((over["contributes"] as object) ?? {}) }
+  const contributes = { ...(ui ? { ui } : {}), ...((over["contributes"] as object) ?? {}) }
   writeFileSync(
     join(dir, "extension.json"),
     JSON.stringify({
@@ -85,7 +85,7 @@ function writePackage(
       contributes,
     }),
   )
-  if (module !== null) writeFileSync(join(dir, tui!.entry), module)
+  if (module !== null) writeFileSync(join(dir, ui!.entry), module)
 }
 
 beforeAll(async () => {

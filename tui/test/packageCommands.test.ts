@@ -10,6 +10,7 @@
 import { expect, test } from "bun:test"
 import {
   dedupe,
+  isDeprecatedWearAction,
   packageCompletions,
   parseAction,
   resolve,
@@ -19,11 +20,20 @@ import {
 } from "../src/packageCommands.ts"
 
 test("parseAction reads the three verbs, keeping the run/skill target verbatim", () => {
-  expect(parseAction("wear")).toEqual({ kind: "wear" })
+  expect(parseAction("with")).toEqual({ kind: "with" })
   expect(parseAction("run propose")).toEqual({ kind: "run", tool: "propose" })
   expect(parseAction("skill std/note")).toEqual({ kind: "skill", ref: "std/note" })
   // Whitespace around the verb itself is trimmed; the target keeps its own.
-  expect(parseAction("  wear  ")).toEqual({ kind: "wear" })
+  expect(parseAction("  with  ")).toEqual({ kind: "with" })
+})
+
+test("parseAction: `wear` is the pre-D4 spelling, folded into the same `with` kind for one release", () => {
+  expect(parseAction("wear")).toEqual({ kind: "with" })
+  expect(parseAction("  wear  ")).toEqual({ kind: "with" })
+  expect(isDeprecatedWearAction("wear")).toBe(true)
+  expect(isDeprecatedWearAction("  wear  ")).toBe(true)
+  expect(isDeprecatedWearAction("with")).toBe(false)
+  expect(isDeprecatedWearAction("run propose")).toBe(false)
 })
 
 test("parseAction: a word this build does not know is `unknown`, verbatim — an open vocabulary (D1)", () => {
@@ -46,7 +56,7 @@ test("runArgs: free text is wrapped, because ext run's own CLI requires a JSON o
   expect(runArgs("find the parser")).toEqual({ text: "find the parser" })
 })
 
-function row(id: string, name: string, action = "wear"): PackageCommandRow {
+function row(id: string, name: string, action = "with"): PackageCommandRow {
   return { id, name, description: `${name} from ${id}`, action }
 }
 

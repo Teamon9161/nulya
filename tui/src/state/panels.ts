@@ -1,7 +1,7 @@
 /**
- * The `panel: true` projection: a tool's latest call, always visible above the
- * composer even when the transcript that call happened in has scrolled off
- * (DESIGN §7.2.1, tui-plugin D12, U2 §3).
+ * The `ui.panel: true` projection: a tool's latest call, always visible above
+ * the composer even when the transcript that call happened in has scrolled
+ * off (DESIGN §7.2.1, tui-plugin D12, U2 §3).
  *
  * A pure projection of the ledger's own items — never a second source of
  * truth. Replaying a session must draw the same strip a live one did, so this
@@ -12,7 +12,7 @@ import type { ToolItem, TranscriptItem } from "./session.ts"
 import { panelToolsOf, type Contributions } from "../nulya/files.ts"
 
 /**
- * The most recent call of each `panel: true` tool, one row per tool, in
+ * The most recent call of each `ui.panel: true` tool, one row per tool, in
  * package-declaration order (`panelToolsOf`). A tool with no call yet
  * contributes no row — there is nothing to project until it has run once.
  */
@@ -41,8 +41,8 @@ export function panelItemsOf(
  * The rows a package's own CODE widget has replaced (tui-plugin U3,
  * `api.registerWidget`).
  *
- * `panel: true` is a package asking for a degraded progress display — the one
- * a front end with no plugin host can still give (D12). A package that also
+ * `ui.panel: true` is a package asking for a degraded progress display — the
+ * one a front end with no plugin host can still give (D12). A package that also
  * ships a widget has said the same thing better, in its own code, so the
  * declared projection stands down: the ceiling covers the floor, and the
  * alternative is one package saying one thing twice, three rows apart.

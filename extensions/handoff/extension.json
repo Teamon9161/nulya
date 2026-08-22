@@ -17,6 +17,5 @@
         "required": ["done", "next_task", "keep"]
       }
     }]
-  },
-  "permissions": { "fs": [".nulya/handoffs"], "network": [], "process": [] }
+  }
 }

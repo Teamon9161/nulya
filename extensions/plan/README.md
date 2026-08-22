@@ -11,7 +11,7 @@
 | tool | 给谁 | 做什么 |
 |---|---|---|
 | `propose{plan_md}` | 模型 | 把想好的计划**整篇**作为参数记下来，然后收尾。**不写盘、不 fork、不阻塞**——计划本身进 ledger，那就是唯一那份记录。 |
-| `todo{items}` | 模型 | 当前的清单（`render: "checklist"` + `panel: true`）。同样不写盘，调用本身就是记录。 |
+| `todo{items}` | 模型 | 当前的清单（`ui: {render: "checklist", panel: true}`）。同样不写盘，调用本身就是记录。 |
 | `approve{session, plan_md}` | driver（`audience: "driver"`） | 把**已被批准**的计划渲染成 `.nulya/handoffs/<session>-<n>.md`（与 `extensions/handoff` 逐字节同形），返回路径。 |
 
 ## 装它
@@ -51,7 +51,7 @@ sync 本来也会把它 activate（`on_request` 的包 activate 只是登记，�
 
 - 计划在 ledger 里，就在 `propose` 那张卡的参数上——读得到；
 - 评论就是**直接打字**：把意见写成一条普通消息发过去，模型照样改了再 `propose`；
-- 清单靠声明层：`render: "checklist"` 画成 `[x] 3/5` 的卡，`panel: true` 让最新一次
+- 清单靠声明层：`ui.render: "checklist"` 画成 `[x] 3/5` 的卡，`ui.panel: true` 让最新一次
   调用常驻在输入框上面；
 - 批准 = `nulya ext run plan approve --arg session=<id> --arg plan_md=<计划>`，
   再 `nulya ext run compact --arg session=<id> --arg brief_file=<那个文件>`。

@@ -1,7 +1,7 @@
 /**
  * The nulya TUI plugin host API — version 1.
  *
- * This file is THE CONTRACT. A package declares `contributes.tui = {entry,
+ * This file is THE CONTRACT. A package declares `contributes.ui = {entry,
  * api}` in its manifest (DESIGN §7.2.1); the entry is a TypeScript module
  * inside the package that default-exports, or named-exports, an `activate`
  * function. The host imports it and calls `activate(api)` once.
@@ -23,7 +23,7 @@
  *
  * ── VERSION POLICY ────────────────────────────────────────────────────────
  *
- * `contributes.tui.api` is a single number and it is the MAJOR version of this
+ * `contributes.ui.api` is a single number and it is the MAJOR version of this
  * file. The host loads a module only when that number equals the version it
  * implements (`api === 1` today); anything else is one warning line and a skip
  * — the package's other contributions (tools, skills, prompts, commands,

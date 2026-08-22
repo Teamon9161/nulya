@@ -3,6 +3,5 @@
   "id": "guide",
   "contributes": {
     "skills": ["skills/guide"]
-  },
-  "permissions": { "fs": [], "network": [], "process": [] }
+  }
 }

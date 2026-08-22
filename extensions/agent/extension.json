@@ -98,16 +98,5 @@
         }
       }
     ]
-  },
-  "permissions": {
-    "fs": [
-      ".nulya/agents",
-      ".nulya/scratch/agents",
-      "~/.nulya/agents"
-    ],
-    "network": [],
-    "process": [
-      "nulya"
-    ]
   }
 }
