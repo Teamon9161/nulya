@@ -149,21 +149,44 @@ export function describeDrafts(store: StoreInventory): string[] {
   return lines
 }
 
-/** The one-line summary a finished pass leaves behind. */
+/**
+ * The one-line summary a finished pass leaves behind.
+ *
+ * `failed` and `needs zig` are counted apart even though the kernel adds them
+ * together (`SyncReport.failed`), because they are not the same news: one says
+ * a draft is broken, the other says this machine cannot compile one. Told as a
+ * single number, the second reads as the first — and a reader whose toolchain
+ * was perfectly fine goes off to check their zig install, which is exactly what
+ * happened.
+ */
 export function summarize(where: string, report: SyncReport): string {
   const parts = [`${report.built} built`]
   if (report.already > 0) parts.push(`${report.already} already`)
-  if (report.failed > 0) parts.push(`${report.failed} failed`)
+  // The kernel's total minus the ones it merged in. Never below zero: if a
+  // line failed to parse the count leans towards "failed", which is the honest
+  // direction — see `parseSyncReport`.
+  const broken = Math.max(0, report.failed - report.needsZig)
+  if (broken > 0) parts.push(`${broken} failed`)
+  if (report.needsZig > 0) parts.push(`${report.needsZig} need zig`)
   return `${where}: ${parts.join(" · ")}`
 }
 
 /**
- * The ids a pass could not build. `3 failed` scrolling past in the status bar
- * is how `std` stayed invisible for a week (tui.md §11, T22): a count says
- * something went wrong, a name says what to go and look at.
+ * The ids a pass could not build, split by what would fix them.
+ *
+ * `3 failed` scrolling past in the status bar is how `std` stayed invisible for
+ * a week (tui.md §11, T22): a count says something went wrong, a name says what
+ * to go and look at. The split is the same lesson one level down — the name is
+ * only actionable next to the right verb, and "not built" beside a draft that
+ * merely wants a toolchain sends a person to read source that compiles fine.
  */
 export function failedIds(report: SyncReport): string[] {
-  return report.lines.filter((line) => line.state === "failed" || line.state === "needs zig").map((line) => line.id)
+  return report.lines.filter((line) => line.state === "failed").map((line) => line.id)
+}
+
+/** The ids that would build here the moment this machine had a zig 0.16. */
+export function needsZigIds(report: SyncReport): string[] {
+  return report.lines.filter((line) => line.state === "needs zig").map((line) => line.id)
 }
 
 /** What a draft line says in `/ext`'s draft column. */
@@ -315,6 +338,31 @@ export function pinsOf(what: Pick<Contributions, "id" | "tools" | "driverTools">
 }
 
 /**
+ * The pins a STANDING list — `tui-state.json`'s `session_pins`, or the user
+ * config's `registry.pinned_native_tools` — may hold for this package.
+ *
+ * The rule is one sentence and it is the kernel's, not a preference: a pin is
+ * resolved against the session's COMPOSITION, and an `activation: "on_request"`
+ * package is not in one unless that session named it (`--with`, DESIGN §7.2.1).
+ * So a standing pin naming its tool is a promise nothing can keep — and it does
+ * not degrade to "one tool short", it is `PinNamesUnknownExtension` and the
+ * session does not open at all.
+ *
+ * That is not hypothetical: `/ext`'s switch wrote `pinsOf` for every package it
+ * turned on, so switching on `plan` and `ask` left three lines in
+ * `tui-state.json` that refused EVERY `session new` this front end tried, with
+ * one truncated status-bar line as the whole explanation.
+ *
+ * An `on_request` package's tools still reach the face — in the session that
+ * wears it, where `--with` and `--pin` travel together (`App.wornPins`).
+ */
+export function standingPinsOf(
+  what: Pick<Contributions, "id" | "tools" | "driverTools" | "activation">,
+): string[] {
+  return what.activation === "on_request" ? [] : pinsOf(what)
+}
+
+/**
  * May a BACKGROUND pass point `current` at this package? (tui.md §11, T31/T37.)
  *
  * One rule, and it is about REACH: refuse only when activating would put a
@@ -395,10 +443,17 @@ export function promptConsequence(
   id: string,
   on: boolean,
   activation: "always" | "on_request" = "always",
+  modelTools = 0,
 ): string {
   if (activation === "on_request") {
+    // `modelTools` is named here and nowhere else in this sentence's family,
+    // because for an `on_request` package the tools and the membership are the
+    // same fact: they reach a model's face in the session that wears it and in
+    // no other, so "registered" without them reads as "switched on and its tool
+    // is still missing" (`standingPinsOf`).
+    const brings = modelTools > 0 ? ` with its ${modelTools} tool(s)` : ""
     return on
-      ? `${id} registered · no session changed · /with ${id} wears it for one session · Enter again to unregister it`
+      ? `${id} registered · no session changed · /with ${id} wears it${brings} for one session · Enter again to unregister it`
       : `${id} unregistered · /with ${id} no longer resolves; name a version to wear it`
   }
   if (!on) return `${id} off · its system prompt no longer enters new sessions`

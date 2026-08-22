@@ -16,12 +16,20 @@ nulya ext activate --user ask <version>
 ```
 
 不在 nulya 的 checkout 里也一样：源码随二进制走（DESIGN §7.8），`nulya ext seed --user ask`
-把它写进 user store 再 build。TUI 里这两步是 `/ext` 上那一行的 `Enter`；开屏那趟后台
-sync 本来也会把它 activate（`on_request` 的包 activate 只是登记，不改变任何一场 session）。
+把它写进 user store 再 build。TUI 里这两步是 `/ext` 上那一行的 `Enter`——它同时 activate
+并把 `ext:ask/ask` 放上工具面，这一个键就是「模型可以问我了」。
 
-`activation: "on_request"`——activate 只是登记，戴上一场才生效：
+**它的 `activation` 是默认那一档（`always`），和隔壁 `extensions/plan` 相反**，因为
+`activation` 问的是「我是能力还是模式」（DESIGN §7.2.1）。`plan` 是模式：戴上它是在说
+**这一场**是什么（人格、只读立场），而那是人在开工前做的决定。**没有人能预先决定"待会儿
+会有一个问题"**——模型是在任务中间才发现的，所以一个只在被预先指定的 session 里才存在的
+提问包，等于一个永远不会触发的包。于是 activate 让它进每一场；它那**一个 tool 要不要占
+一个 `max_tools` 槽**是另一根轴的事——pin（DESIGN §7.5），按机器配置、一个键收回。
 
-- TUI：`/ask`（这个包自己声明的命令）或 `/with ask`；
+只想给某一场用、不想常驻占槽：
+
+- TUI：`/ask`（这个包自己声明的命令）或 `/with ask`——`--with` 带的那一场会连它的 tool
+  一起放上工具面（tui.md §11 T46）；
 - 命令行：`nulya session new --with ask --pin ext:ask/ask`。
 
 ## 装了插件之后

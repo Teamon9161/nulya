@@ -105,9 +105,29 @@ async function run(ws: Workspace, args: string[], env?: Record<string, string>):
   return { code, stdout, stderr }
 }
 
+/**
+ * A command that refused, with BOTH readings of what it said.
+ *
+ * `message` is one line, because most callers put it on the status bar and that
+ * line is one row shared with the model and the cost. `detail` is everything
+ * the command printed, because some refusals are a paragraph — `session new`
+ * naming the store it will not trust and listing what is in it, or naming every
+ * pin when one of them is bad — and a reader who only ever sees the first 70
+ * columns of that cannot act on it. Whoever has room shows `detail`
+ * (`ErrorNotice`); nobody has to.
+ */
+export class CliError extends Error {
+  readonly detail: string
+  constructor(message: string, detail: string) {
+    super(message)
+    this.name = "CliError"
+    this.detail = detail
+  }
+}
+
 function fail(what: string, result: RunResult): never {
-  const detail = (result.stderr.trim() || result.stdout.trim() || `exit ${result.code}`).split("\n")[0]
-  throw new Error(`${what}: ${detail}`)
+  const said = result.stderr.trim() || result.stdout.trim() || `exit ${result.code}`
+  throw new CliError(`${what}: ${said.split("\n")[0]}`, `${what}\n${said}`)
 }
 
 export interface NewSessionOptions {
@@ -571,12 +591,29 @@ export interface SyncReport {
   lines: SyncLine[]
   built: number
   already: number
+  /**
+   * The kernel's own failure total — which counts `needs zig` drafts too
+   * (`cli/ext.zig`: `ZigVersionUnreadable` does `failed += 1`). Kept as it
+   * arrives, because it is the authority on how many drafts got no version;
+   * `needsZig` below is what splits it back apart.
+   */
   failed: number
+  /**
+   * How many of `failed` are only missing a toolchain — counted from the lines
+   * rather than given by the summary, because the kernel merges the two there.
+   *
+   * They are different problems with different repairs: a draft that does not
+   * compile wants its diagnostics read, one that needs zig wants a toolchain
+   * installed, and nothing the person does about one helps the other. A single
+   * `2 failed` sent a reader to check their zig install when their zig was
+   * fine.
+   */
+  needsZig: number
   /** Everything the command printed, for a view that wants the raw text. */
   text: string
 }
 
-const empty_report: SyncReport = { lines: [], built: 0, already: 0, failed: 0, text: "" }
+const empty_report: SyncReport = { lines: [], built: 0, already: 0, failed: 0, needsZig: 0, text: "" }
 
 /**
  * Parse `ext sync` output. The kernel prints one line per draft plus a summary;
@@ -598,6 +635,11 @@ export function parseSyncReport(text: string): SyncReport {
     const parsed = parseSyncLine(line)
     if (parsed) report.lines.push(parsed)
   }
+  // Counted here, not summed alongside `failed`: a line the parser did not
+  // recognise must not quietly turn a compile failure into a toolchain one.
+  // Miscounting this way over-reports "failed", which is the safe direction —
+  // the other would hide a broken draft behind "install zig".
+  report.needsZig = report.lines.filter((line) => line.state === "needs zig").length
   return report
 }
 

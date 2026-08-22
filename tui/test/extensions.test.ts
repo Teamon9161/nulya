@@ -22,7 +22,9 @@ import {
   describeDrafts,
   draftColumn,
   failedIds,
+  needsZigIds,
   pinsOf,
+  standingPinsOf,
   planProjectStore,
   promptConsequence,
   promptPackageWarning,
@@ -203,6 +205,8 @@ test("the three keys map to what actually runs, and anything else installs nothi
 
 test("a finished pass leaves one line worth reading, and names what it could not build", () => {
   expect(summarize("user store", report(["3 built, 1 already built, 0 failed"]))).toBe("user store: 3 built · 1 already")
+  // No line to read it off, so the kernel's total stands as failures — the safe
+  // direction (see `parseSyncReport`).
   expect(summarize("this checkout", report(["0 built, 0 already built, 2 failed"]))).toBe("this checkout: 0 built · 2 failed")
 
   // A count is not news anybody can act on. `std: needs zig` scrolling past as
@@ -213,8 +217,44 @@ test("a finished pass leaves one line worth reading, and names what it could not
     "broken: failed: ManifestUnreadable",
     "1 built, 1 already built, 2 failed",
   ])
-  expect(failedIds(failed)).toEqual(["std", "broken"])
+  expect(failedIds(failed)).toEqual(["broken"])
+  expect(needsZigIds(failed)).toEqual(["std"])
   expect(failedIds(report(["1 built, 0 already built, 0 failed"]))).toEqual([])
+  expect(needsZigIds(report(["1 built, 0 already built, 0 failed"]))).toEqual([])
+})
+
+/**
+ * The kernel adds "needs zig" into its failure total (`cli/ext.zig`), and for
+ * one line on a status bar that is a lie by merge: a machine with no toolchain
+ * and a draft that does not compile want opposite things done about them. Read
+ * as one number, the first looks like the second — which sent a reader to check
+ * a zig install that was working perfectly.
+ */
+test("a pass tells a broken draft apart from a machine that cannot compile one", () => {
+  const both = report([
+    "std: needs zig (compiled draft; put zig on PATH)",
+    "ask: needs zig (compiled draft; put zig on PATH)",
+    "broken: failed: ManifestUnreadable",
+    "0 built, 0 already built, 3 failed",
+  ])
+  expect(summarize("user store", both)).toBe("user store: 0 built · 1 failed · 2 need zig")
+
+  // Only a toolchain missing: nothing here is broken, and the line must not say
+  // "failed" at all.
+  const toolchain = report([
+    "std: needs zig (compiled draft; put zig on PATH)",
+    "ask: needs zig (compiled draft; put zig on PATH)",
+    "0 built, 0 already built, 2 failed",
+  ])
+  expect(summarize("user store", toolchain)).toBe("user store: 0 built · 2 need zig")
+
+  // Only broken drafts: unchanged from before the split.
+  const broken = report(["broken: failed: ManifestUnreadable", "0 built, 0 already built, 1 failed"])
+  expect(summarize("user store", broken)).toBe("user store: 0 built · 1 failed")
+
+  // The count can never go negative, however the two disagree.
+  const odd = report(["std: needs zig (compiled draft; put zig on PATH)", "0 built, 0 already built, 0 failed"])
+  expect(summarize("user store", odd)).toBe("user store: 0 built · 1 need zig")
 })
 
 test("a draft with no version says what stopped it, in the kernel's own words", () => {
@@ -488,6 +528,37 @@ test("the pins an activation writes come from the manifest, per tool, for a pack
   // And a package this repository never heard of gets the same answer, which is
   // the whole point of asking the manifest instead of a list of bundled ids.
   expect(pinsOf(pkg("acme.patrol", ["watch", "sweep"], ["sweep"]))).toEqual(["ext:acme.patrol/watch"])
+})
+
+/**
+ * The bug this rule ends: `/ext`'s switch wrote `pinsOf` for `plan` and `ask`,
+ * both `activation: "on_request"`, and the three lines it left in
+ * `tui-state.json` made EVERY later `session new` exit 1 with
+ * `PinNamesUnknownExtension` — a front end that could not open a session at
+ * all, explaining itself in one clipped status line.
+ */
+test("a package that joins only the sessions naming it can hold no standing pin", () => {
+  const pkg = (id: string, tools: string[], activation: "always" | "on_request") => ({
+    id,
+    tools,
+    driverTools: [],
+    activation,
+  })
+
+  // Composed into every session: a standing pin resolves in every one of them.
+  expect(standingPinsOf(pkg("std", ["read", "edit"], "always"))).toEqual(["ext:std/read", "ext:std/edit"])
+
+  // Registered only: activation moved a pointer and changed no composition
+  // (DESIGN §7.2.1), so there is nothing here for a standing list to name.
+  expect(standingPinsOf(pkg("plan", ["propose", "todo"], "on_request"))).toEqual([])
+  expect(standingPinsOf(pkg("ask", ["ask"], "on_request"))).toEqual([])
+
+  // The tools did not stop existing — they reach a face in the session that
+  // wears the package, where `--with` and `--pin` travel in one argv.
+  expect(pinsOf(pkg("plan", ["propose", "todo"], "on_request"))).toEqual([
+    "ext:plan/propose",
+    "ext:plan/todo",
+  ])
 })
 
 test("the std pin list is the frozen manifest's, with the literal only as a cold-start fallback", async () => {

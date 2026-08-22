@@ -27,7 +27,14 @@ import { TasksContext } from "../state/tasks.ts"
 import { NavigateContext, type Navigate } from "../state/navigate.ts"
 import type { TranscriptRow } from "../render/runs.ts"
 import { createTabStore, type DraftTab, type FirstTab, type SessionTab } from "../state/tabs.ts"
-import { loadTuiState, rememberModel, rememberMode, sessionPins, type ModelPick } from "../state/tui_state.ts"
+import {
+  loadTuiState,
+  rememberModel,
+  rememberMode,
+  rememberSessionPins,
+  sessionPins,
+  type ModelPick,
+} from "../state/tui_state.ts"
 import {
   alwaysKey,
   decide,
@@ -41,7 +48,13 @@ import {
   type PermissionMode,
 } from "../approvals.ts"
 import type { GateVerdict } from "../nulya/cli.ts"
-import { listExtensions, sessions_dir } from "../nulya/files.ts"
+import {
+  listExtensions,
+  readContributions,
+  sessionExists,
+  sessions_dir,
+  type ExtensionEntry,
+} from "../nulya/files.ts"
 import { wrapApprovalNote } from "../approvalnote.ts"
 import { createProjectIndex } from "../references.ts"
 import { createSkillTable, skillTurn, splitSlash } from "../skills.ts"
@@ -49,6 +62,7 @@ import { describeTool } from "../render/registry.ts"
 import { no_snapshot, usageLabel } from "../state/session.ts"
 import type { NextSession } from "./Welcome.tsx"
 import {
+  CliError,
   extRun,
   extSetCurrent,
   extSync,
@@ -66,6 +80,7 @@ import {
   autoActivatable,
   builtContributions,
   failedIds,
+  needsZigIds,
   pinsOf,
   planStore,
   promptPackageWarning,
@@ -93,6 +108,7 @@ import { wrapExtNote } from "../extnote.ts"
 import { runCompact } from "../compact.ts"
 import { headline, nextHandoff, type HandoffFile } from "../handoff.ts"
 import { buildEvolution, formatWithRef, parseWithRef, type WithRef } from "../evolve.ts"
+import { orphanPins, resolvableStandingPins } from "../pins.ts"
 import {
   agent_id,
   agent_pin,
@@ -447,10 +463,55 @@ export function App(props: AppProps) {
         if (entry) pins.push(...pinsOf(entry))
       }
       setComposedPins(pins)
+      healStandingPins(listed)
     } catch {
       // No listing is "unknown"; the count stays what the pin files say.
     }
   }
+
+  /**
+   * Take back standing pins the kernel can no longer resolve — before the first
+   * message, not when somebody happens to open `/ext`.
+   *
+   * `session new --pin` naming an extension that is not in the composition is
+   * not a missing tool, it is `PinNamesUnknownExtension` and the session does
+   * not start (`cli/session.zig`). `/ext` has repaired this list since T12, but
+   * only while its panel was up, so a `tui-state.json` that went stale — a
+   * package deactivated elsewhere, or the `on_request` pins this front end used
+   * to write itself (`standingPinsOf`) — met the person as a front end that
+   * could not open a session at all, explaining itself in one clipped status
+   * line. This list is our own program state; dropping a line out loud is the
+   * honest repair, and the same one `ExtView.dropOrphanPins` makes.
+   */
+  const healStandingPins = (listed: readonly ExtensionEntry[]) => {
+    const pins = sessionPins(props.statePath)
+    const orphans = orphanPins(pins, resolvableStandingPins(listed))
+    if (orphans.length === 0) return
+    rememberSessionPins(
+      pins.filter((pin) => !orphans.includes(pin)),
+      props.statePath,
+    )
+    setPlanTick((tick) => tick + 1)
+    setNotice(`${orphans.join(" ")} unpinned · nothing composed into every session declares them`)
+  }
+
+  /**
+   * Why the draft in front of this person is still a draft (tui.md §11, T46).
+   *
+   * A `session new` that refuses says a paragraph — the untrusted store and
+   * everything in it, or every pin when one of them names nothing — and it used
+   * to be shown only on the status line, which is ONE row shared with the model
+   * and the cost. `session new failed: a pin names an extension with no active`
+   * was the whole of what a person could read about a front end that would not
+   * open a session at all.
+   *
+   * So it goes where a failure has room: the transcript, through the notice a
+   * session's own driver failures already use (`ErrorNotice`). Its lifetime is
+   * the draft's — cleared the moment the next attempt starts, so it never
+   * outlives the thing it explains, and never appears over a session that did
+   * open.
+   */
+  const [refusal, setRefusal] = createSignal<string | null>(null)
 
   /** A handover the model proposed and nobody has answered yet (tui.md §5.8). */
   const [handoff, setHandoff] = createSignal<HandoffFile | null>(null)
@@ -598,12 +659,22 @@ export function App(props: AppProps) {
         // status line read from disk: this is what tells them to look again.
         if (adopted.length > 0) setPlanTick((tick) => tick + 1)
         // A count of failures is not news anybody can act on. Name them, and
-        // point at the one screen that says why and offers the way out.
+        // point at the one screen that says why and offers the way out — and
+        // name them under the right verb: a draft that does not compile and one
+        // this machine has no toolchain for are two different errands.
         const failed = failedIds(report)
+        const needsZig = needsZigIds(report)
         // A pass that changed nothing has no news — "0 built · 5 already" would
         // park on the status line until the next keypress and say nothing. The
         // durable per-id state lives in /ext either way.
-        if (report.built === 0 && failed.length === 0 && activated === 0 && adopted.length === 0 && held.length === 0) {
+        if (
+          report.built === 0 &&
+          failed.length === 0 &&
+          needsZig.length === 0 &&
+          activated === 0 &&
+          adopted.length === 0 &&
+          held.length === 0
+        ) {
           continue
         }
         news.push(
@@ -614,7 +685,12 @@ export function App(props: AppProps) {
             // there and does nothing is otherwise a mystery, and `/ext` is the
             // one key that turns it on for real.
             (held.length > 0 ? ` · ${held.join(" ")} built, left off (a mode) · /ext` : "") +
-            (failed.length > 0 ? ` · ${failed.join(" ")} not built · /ext` : ""),
+            (failed.length > 0 ? ` · ${failed.join(" ")} not built · /ext` : "") +
+            // A different sentence, because it is a different repair: nothing
+            // is wrong with these drafts, this machine just cannot compile one.
+            // `/ext` carries the kernel's own line, which names the directory a
+            // toolchain can be unpacked into.
+            (needsZig.length > 0 ? ` · ${needsZig.join(" ")} need a toolchain · /ext` : ""),
         )
       } catch (error) {
         news.push(`extension sync: ${error instanceof Error ? error.message : String(error)}`)
@@ -1019,11 +1095,18 @@ export function App(props: AppProps) {
   const ensureSession = async (): Promise<SessionTab | null> => {
     const here = tab()
     if (here.kind === "session") return here
+    setRefusal(null)
     try {
-      const tab = await tabs.materialize(here, await sessionExtras())
+      const extras = await sessionExtras()
+      const worn = await wornPins(here.bring())
+      const tab = await tabs.materialize(here, {
+        ...extras,
+        ...(worn.length > 0 ? { pin: [...(extras.pin ?? []), ...worn] } : {}),
+      })
       setPlanTick((tick) => tick + 1)
       return tab
     } catch (error) {
+      setRefusal(error instanceof CliError ? error.detail : error instanceof Error ? error.message : String(error))
       setNotice(error instanceof Error ? error.message : String(error))
       return null
     }
@@ -1048,6 +1131,34 @@ export function App(props: AppProps) {
    * §1, `SpawnPolicy` in its minimal form). Which is why this lives here and not
    * in `startAgent`, the thing that composes a child.
    */
+  /**
+   * The pins that travel with this draft's `--with` (`/plan`, `/ask`, `/with`,
+   * `/evolve`).
+   *
+   * Membership and pins are separate axes everywhere else (DESIGN §7.5), and
+   * for a worn package they cannot be: an `activation: "on_request"` package is
+   * a member of exactly this session, so a pin naming its tool is legal in
+   * exactly this argv and refused in every standing list (`standingPinsOf`).
+   * Written anywhere else it does not cost a tool — it costs the session, which
+   * is the bug this pairing exists to end.
+   *
+   * A package that cannot be read costs nothing: the session starts with the
+   * member and without the pins, which is what wearing it meant before its
+   * tools were ever on the face.
+   */
+  const wornPins = async (bring: WithRef | undefined): Promise<string[]> => {
+    if (!bring) return []
+    try {
+      const version =
+        bring.version ??
+        (await listExtensions(props.ws)).find((entry) => entry.id === bring.id && !entry.shadowed)?.current
+      if (!version) return []
+      return pinsOf(await readContributions(props.ws, bring.id, version))
+    } catch {
+      return []
+    }
+  }
+
   const sessionExtras = async (): Promise<{ with?: string[]; pin?: string[] }> => {
     const withRefs: string[] = []
     const pins: string[] = []
@@ -2174,8 +2285,28 @@ export function App(props: AppProps) {
       folds.setAll(false)
       return true
     }
-    if (command === "/sessions") {
-      openOverlay("sessions")
+    // `/resume` is the word other harnesses use for this, and it is the SAME
+    // command rather than one of its own (commands.ts): a name that opened a
+    // different door than `/sessions` would be a second concept wearing an
+    // alias. Bare, the list; with an argument, the session it names — the one
+    // way to reach one by id from inside the screen, which until now meant
+    // relaunching with `--session`.
+    //
+    // "Resume" needs no ceremony of its own: a ledger is append-only, so opening
+    // a session and saying the next thing IS continuing it (physics #1) — and
+    // whether this process may write is the lease's answer, not ours
+    // (`state/attach.ts`).
+    if (command === "/sessions" || command === "/resume") {
+      const id = words[1]
+      if (!id) {
+        openOverlay("sessions")
+        return true
+      }
+      if (!sessionExists(props.ws, id)) {
+        setNotice(`no session '${id}' in ${sessions_dir} · ${command} with no id lists them`)
+        return true
+      }
+      openSession(id)
       return true
     }
     if (command === "/tasks") {
@@ -2186,7 +2317,12 @@ export function App(props: AppProps) {
       openOverlay("ext")
       return true
     }
-    if (command === "/new") {
+    // `/clear` is `/new` under the name other harnesses use for it, and an alias
+    // costs one line here while a muscle-memory `/clear` that fell through would
+    // be offered to the skill catalog and then sent to the model as prose
+    // (commands.ts). It is not listed, and it clears nothing: the session it
+    // leaves behind keeps its tab, its file and every event in it.
+    if (command === "/new" || command === "/clear") {
       const flag = (name: string) => {
         const at = words.indexOf(name)
         return at >= 0 ? words[at + 1] : undefined
@@ -2579,7 +2715,11 @@ export function App(props: AppProps) {
                       header={snapshot().header}
                       contributions={live()?.contributions() ?? []}
                       plan={plan()}
-                      error={snapshot().error}
+                      // A draft has no snapshot to carry one, so the refusal
+                      // that kept it a draft rides the same channel a live
+                      // session's driver failure does — one notice, one place
+                      // to read a failure in full.
+                      error={snapshot().error ?? refusal()}
                       cwd={props.ws.dir}
                       onPickModel={() => openOverlay("model")}
                       onCommand={submit}

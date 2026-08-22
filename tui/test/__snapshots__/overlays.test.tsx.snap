@@ -1,10 +1,10 @@
 // Bun Snapshot v1, https://bun.sh/docs/test/snapshots
 
 exports[`/sessions lists the store and opens the highlighted session 1`] = `
-" sessions · 2
+" sessions · 2   s-<id>
 
- ▾ s-<id> <when> · scripted/scripted-demo · 0 events
-   s-<id> <when> · scripted/scripted-demo · 4 events · make the budgets configurable
+ ▾ nothing said yet                                                                                            <when>
+   make the budgets configurable                                                                    ▎ this tab <when>
 
 
 

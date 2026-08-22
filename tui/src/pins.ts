@@ -203,6 +203,37 @@ export function orphanPins(pins: readonly string[], available: readonly string[]
 }
 
 /**
+ * Every tool id a STANDING pin list may name, from a store listing.
+ *
+ * Two conditions, and both are the kernel's: the extension has an active,
+ * un-shadowed version (or the pin names nothing), and its activation composes
+ * it into every session rather than only the ones that say `--with`
+ * (`activation: "on_request"`, DESIGN §7.2.1). Miss the second and the pin is
+ * refused exactly as hard as missing the first — `PinNamesUnknownExtension`,
+ * and no session opens at all.
+ *
+ * Driver tools are in: `audience` is a package's advice about whose face a tool
+ * belongs on, not a rule about what may be pinned, and this pane lets a person
+ * pin one on purpose. What is NOT here is what cannot resolve.
+ */
+export function resolvableStandingPins(
+  entries: readonly {
+    id: string
+    tools: readonly string[]
+    current: string | null
+    shadowed: boolean
+    activation: "always" | "on_request"
+  }[],
+): string[] {
+  const ids: string[] = []
+  for (const entry of entries) {
+    if (!entry.current || entry.shadowed || entry.activation === "on_request") continue
+    for (const tool of entry.tools) ids.push(toolId(entry.id, tool))
+  }
+  return ids
+}
+
+/**
  * The quota line. `max_tools` counts the builtin (DESIGN §5.1), so it is shown
  * rather than hidden — a face of 8 that already spends 1 is the fact behind
  * every "why was my pin refused".

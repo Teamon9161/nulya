@@ -21,6 +21,7 @@ import {
   pinState,
   promote,
   quotaLine,
+  resolvableStandingPins,
   readUserPins,
   setPinnedTools,
   stateLabel,
@@ -350,4 +351,41 @@ test("a tool its package brings into every session reads as on, and this panel w
   expect(off.session).toBeNull()
   expect(off.notice).toContain("session_with")
   expect(promote("ext:agent/agent", sources).session).toBeNull()
+})
+
+/**
+ * What a standing list may legally name, and therefore what a stale one gets
+ * repaired against (`App.healStandingPins`, `ExtView.dropOrphanPins`).
+ *
+ * Both conditions are the kernel's, and both refuse the same way: an unknown
+ * extension and a registered-but-not-composed one are `PinNamesUnknownExtension`
+ * alike, and neither costs a tool — each costs the whole session.
+ */
+test("only a package composed into every session offers a tool a standing pin can name", () => {
+  const entry = (
+    id: string,
+    tools: string[],
+    over: Partial<{ current: string | null; shadowed: boolean; activation: "always" | "on_request" }> = {},
+  ) => ({ id, tools, current: "v-1", shadowed: false, activation: "always" as const, ...over })
+
+  const available = resolvableStandingPins([
+    entry("std", ["read", "edit"]),
+    // Driver tools are in: `audience` is the package's advice about whose face
+    // a tool belongs on, not a rule about what may be pinned.
+    entry("agent", ["agent", "run"]),
+    // Registered, not composed: `--with` is the only way in (DESIGN §7.2.1).
+    entry("plan", ["propose", "todo"], { activation: "on_request" }),
+    // Nothing points at a version, and an earlier root already answers for this
+    // id: neither can resolve either.
+    entry("guide", ["guide"], { current: null }),
+    entry("compact", ["compact"], { shadowed: true }),
+  ])
+  expect(available).toEqual(["ext:std/read", "ext:std/edit", "ext:agent/agent", "ext:agent/run"])
+
+  // The three lines that made every `session new` refuse, found by the same
+  // predicate that repairs them.
+  expect(orphanPins(["ext:std/read", "ext:plan/propose", "ext:ask/ask"], available)).toEqual([
+    "ext:plan/propose",
+    "ext:ask/ask",
+  ])
 })

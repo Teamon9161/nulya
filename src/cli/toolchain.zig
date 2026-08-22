@@ -58,6 +58,22 @@ pub const ZigExe = struct {
     pub fn deinit(self: ZigExe, alloc: std.mem.Allocator) void {
         alloc.free(self.path);
     }
+
+    /// Where this path came from, for a sentence a person has to act on.
+    ///
+    /// It decides what a failure even means. `NULYA_ZIG` is taken **verbatim,
+    /// unchecked** — the other two answer only after finding a file — so a
+    /// broken `NULYA_ZIG` and a toolchain that went missing between resolving
+    /// and spawning read identically without this word, and they are somebody
+    /// editing an environment variable versus something on the machine holding
+    /// a file open.
+    pub fn origin(self: ZigExe) []const u8 {
+        return switch (self.source) {
+            .env => "from NULYA_ZIG",
+            .managed => "nulya's own toolchain directory",
+            .path => "found on PATH",
+        };
+    }
 };
 
 /// Resolve a zig executable, in this order: `NULYA_ZIG` (the explicit dev

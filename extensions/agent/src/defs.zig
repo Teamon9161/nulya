@@ -22,6 +22,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin.zig");
+const header_mod = @import("header.zig");
 
 /// Which layer a definition came from, in search order. Workspace wins on a
 /// name collision — a checkout says what its own work needs, the machine's copy
@@ -420,17 +421,7 @@ pub fn writePrompt(alloc: std.mem.Allocator, io: std.Io, def: Def, path: []const
 /// The header is the authority on purpose: it is frozen, so it says what this
 /// session actually composed with rather than what a definition file says today.
 pub fn wornPersona(alloc: std.mem.Allocator, io: std.Io, session_id: []const u8) !?[]const u8 {
-    const path = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{session_id});
-    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
-    defer file.close(io);
-    var buf: [16 << 10]u8 = undefined;
-    var reader = file.reader(io, &buf);
-    const line = (reader.interface.takeDelimiter('\n') catch return null) orelse return null;
-    const parsed = std.json.parseFromSlice(std.json.Value, alloc, line, .{}) catch return null;
-    const root = switch (parsed.value) {
-        .object => |o| o,
-        else => return null,
-    };
+    const root = header_mod.object(alloc, io, session_id) orelse return null;
     const composition = switch (root.get("composition") orelse return null) {
         .object => |o| o,
         else => return null,

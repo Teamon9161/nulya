@@ -179,7 +179,7 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
             const hint = try cli_toolchain.noZigHint(alloc);
             defer alloc.free(hint);
             if (zig_exe) |z| {
-                try printOut(alloc, io, "the zig at {s} could not report its version (`zig version` failed here), and a compiled extension needs one; {s}\n", .{ z.path, hint });
+                try printOut(alloc, io, "the zig at {s} ({s}) could not report its version ({s}), and a compiled extension needs one; {s}\n", .{ z.path, z.origin(), zig.whyUnreadable() orelse "`zig version` failed here", hint });
             } else {
                 try printOut(alloc, io, "no zig toolchain (needed to compile this extension); put zig on PATH, {s}\n", .{hint});
             }
@@ -466,7 +466,7 @@ fn extSync(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
                 // (a version-manager shim that reads a build.zig.zon from the
                 // cwd does exactly that in a store root). Name which.
                 if (zig_exe) |z| {
-                    try printOut(alloc, io, "{s}: needs zig (compiled draft; the zig at {s} could not report its version from the store root — {s})\n", .{ draft, z.path, no_zig_hint });
+                    try printOut(alloc, io, "{s}: needs zig (compiled draft; the zig at {s} ({s}) could not report its version from the store root — {s}; {s})\n", .{ draft, z.path, z.origin(), zig.whyUnreadable() orelse "`zig version` failed there", no_zig_hint });
                 } else {
                     try printOut(alloc, io, "{s}: needs zig (compiled draft; put zig on PATH, {s})\n", .{ draft, no_zig_hint });
                 }
@@ -1354,22 +1354,60 @@ fn printLine(alloc: std.mem.Allocator, io: std.Io, to_err: bool, comptime fmt: [
     return printOut(alloc, io, fmt, args);
 }
 
+/// `<id>` prints the draft manifest of the first root that holds one;
+/// `<id>@<version>` prints the FROZEN manifest of that built version, from the
+/// first root holding it. The second form is the one a session can name: its
+/// header records `id@version` for every member (DESIGN §3.4), so this is how
+/// anything answering a question ABOUT A RUNNING SESSION — a driver's approval
+/// policy, a reader of `session list` — reads the manifest that session actually
+/// composed with instead of whatever the draft says today. Without it every such
+/// reader either re-derives the store layout or silently reads the wrong file.
 fn extInspect(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (args.len < 1) {
-        try printErr(io, "usage: nulya ext inspect <id>\n");
+        try printErr(io, "usage: nulya ext inspect <id>[@<version>]\n");
         return 1;
     }
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     var search = try RootSearch.open(alloc, io, try cwdRealPath(io, &cwd_buf));
     defer search.deinit(alloc);
 
-    const manifest_rel = try std.fs.path.join(alloc, &.{ args[0], "extension.json" });
-    defer alloc.free(manifest_rel);
+    const ref = withRef(args[0]);
+    if (ref.version) |v| {
+        // A malformed version is simply a version no root holds — inspect is a
+        // projection, so it answers rather than faults.
+        for (search.roots.entries, 0..) |entry, i| {
+            const manifest_rel = search.roots.store(i).versionManifestPath(alloc, ref.id, v) catch break;
+            defer alloc.free(manifest_rel);
+            const bytes = entry.dir.readFileAlloc(io, manifest_rel, alloc, .limited(1 << 20)) catch continue;
+            defer alloc.free(bytes);
+            try printOut(alloc, io, "{s}\n", .{bytes});
+            return 0;
+        }
+        try printOut(alloc, io, "no store root holds {s}@{s}; see `nulya ext list`\n", .{ ref.id, v });
+        return 1;
+    }
+
+    // Bare id: the draft if there is one — it is what `ext build` would freeze
+    // next — and otherwise the version in effect. A store filled by `ext build
+    // <path>` holds no draft at all (DESIGN §7.4), and answering "no such
+    // extension" about something `ext list` shows as active is just wrong.
+    const draft_rel = try std.fs.path.join(alloc, &.{ ref.id, "extension.json" });
+    defer alloc.free(draft_rel);
     for (search.roots.entries) |entry| {
-        const bytes = entry.dir.readFileAlloc(io, manifest_rel, alloc, .limited(1 << 20)) catch continue;
+        const bytes = entry.dir.readFileAlloc(io, draft_rel, alloc, .limited(1 << 20)) catch continue;
         defer alloc.free(bytes);
         try printOut(alloc, io, "{s}\n", .{bytes});
         return 0;
+    }
+    if (try search.roots.firstActive(alloc, ref.id)) |active| {
+        defer alloc.free(active.version);
+        const manifest_rel = try search.roots.store(active.root).versionManifestPath(alloc, ref.id, active.version);
+        defer alloc.free(manifest_rel);
+        if (search.roots.entries[active.root].dir.readFileAlloc(io, manifest_rel, alloc, .limited(1 << 20))) |bytes| {
+            defer alloc.free(bytes);
+            try printOut(alloc, io, "{s}\n", .{bytes});
+            return 0;
+        } else |_| {}
     }
     try printOut(alloc, io, "no such extension '{s}'\n", .{args[0]});
     return 1;

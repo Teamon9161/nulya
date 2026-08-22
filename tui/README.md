@@ -149,7 +149,10 @@ an API key), `codex` (uses whatever `codex login` left in `~/.codex/auth.json`),
 `~/.nulya/config.toml` (or let `/provider`'s `a` write it for you); it then shows
 up in `/model` like the others.
 Inside the TUI, `/new` opens another session on the last pick;
-`/new --profile <p> [--model <id>]` on a named one.
+`/new --profile <p> [--model <id>]` on a named one. `/clear` is another name
+for it — nothing is erased either way: the session you stepped away from keeps
+its tab, its file and every event in it. `/sessions <id>` (or `/resume <id>`,
+the same command) goes back to one.
 
 Offline, with no key of any kind:
 
@@ -226,7 +229,11 @@ bun run tui\src\main.tsx --profile codex
 | `Ctrl+W` | close the current tab (with one tab it is the composer's delete-word, as in a shell) |
 | click the model under the composer | `/model` |
 
-Inside `/sessions`: `j`/`k` move, `Enter` opens, `n` starts a new session, `r`
+Each row is the first thing that was said to the session — which is what you
+actually recognise one by — and how long ago that was; a session nobody has
+spoken to yet says `nothing said yet`. The id is the one thing here nobody can
+read and everybody occasionally has to paste, so it is printed once, beside the
+count at the top, for the row the cursor is on. Inside `/sessions`: `j`/`k` move, `Enter` opens, `n` starts a new session, `r`
 refreshes, `Esc` closes. Inside `/ext`: `j`/`k` move, `Tab` switches pane
 (extensions → versions → tools → usage table), `Enter` (or a click on the
 `●`/`○`) turns the highlighted extension on or off for the next session,
@@ -239,12 +246,13 @@ usage table. Inside `/usage`: `r` refreshes. Inside `/tasks`: `↑`/`↓` move �
 highlighted task's log, `k` stops it, `K` stops every task still running, `r`
 re-reads the list, `Esc` closes.
 
-Slash commands: `/model` (F5), `/provider` (F6), `/mode [ask|auto]`,
-`/effort <level|auto>`, `/new [--profile p] [--model id]`, `/sessions`, `/ext`,
-`/tasks`, `/usage`, `/settings`, `/compact [focus]`,
-`/outcome <success|partial|failure> [note]`, `/evolve`, `/as <id>[@version]`,
-`/help`, `/step` (continue after a spent step budget), `/cancel`, `/fold`,
-`/quit`. Anything else starting with `/` is sent to the model verbatim.
+Slash commands: `/model` (F5), `/provider` (F6), `/mode [ask|unsafe]`,
+`/effort <level|auto>`, `/new [--profile p] [--model id]`,
+`/sessions [<id>]`, `/ext`, `/tasks`, `/usage`, `/settings`, `/compact [focus]`,
+`/outcome <success|partial|failure> [note]`, `/with [<id>[@version]]`,
+`/agent [<name> <task…>]`, `/help`, `/step` (continue after a spent step
+budget), `/cancel`, `/fold`, `/quit`. `/clear` and `/resume` are other names for `/new` and `/sessions`.
+Anything else starting with `/` is sent to the model verbatim.
 
 `/mode` is the permission mode. Every step this TUI runs is gated: the kernel
 asks before each tool call (`nulya session step --gate`) and the TUI answers. In

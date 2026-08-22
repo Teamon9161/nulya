@@ -2445,6 +2445,39 @@ test "bundled agent: render writes a persona nothing installs; a delegation open
         try std.testing.expectEqual(@as(u8, 1), late.code);
         try std.testing.expect(std.mem.indexOf(u8, late.stdout, "NEW delegation") != null);
     }
+
+    // ⑥ A ledger line is as long as the text inside it: the task alone can be
+    // thousands of bytes, and an assistant turn carries the provider's opaque
+    // reasoning as well. So whoever reads the child's `--stream` has to hold a
+    // whole line whatever its length — a reader that gives up on a long one
+    // stops draining a pipe the child is still writing into, and then the child
+    // blocks on stdout while the reader blocks on its stderr: the report never
+    // arrives, and the parent waits for ever for a sub-agent that has already
+    // finished. Nothing about that failure is visible in either session, which
+    // is exactly why it is worth a test.
+    {
+        const long = try alloc.alloc(u8, 12 << 10);
+        defer alloc.free(long);
+        @memset(long, 'x');
+        const args = try std.fmt.allocPrint(alloc, "{{\"name\":\"prober\",\"task\":\"{s}\"}}", .{long});
+        defer alloc.free(args);
+        const big = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", args }, &.{
+            .{ .key = "NULYA_SESSION", .value = session_file },
+            .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+        });
+        defer alloc.free(big.stdout);
+        try std.testing.expectEqual(@as(u8, 0), big.code);
+
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", "60000" });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+
+        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, &.{
+            .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+        });
+        defer alloc.free(stepped.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "<agent-report agent=") != null);
+    }
 }
 
 test "bundled agent: the personas the package ships need no files — list layers workspace over user over builtin and marks what it shadows, and a delegation to the builtin explore runs read-only with the pins its definition asks for" {
@@ -2545,6 +2578,20 @@ test "bundled agent: the personas the package ships need no files — list layer
         const activated = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "activate", "std", std_version });
         defer alloc.free(activated.stdout);
         try std.testing.expectEqual(@as(u8, 0), activated.code);
+    }
+
+    // What "read-only" MEANS at the gate is read out of the frozen manifest of
+    // every member the child's header names — `<id>@<version>`, never the draft,
+    // because the frozen one is what that session composed with. `ext inspect`
+    // is where that question is asked, so if this form stops answering, a
+    // read-only delegation is read-only in name only: the allow-list comes back
+    // empty and every call the sub-agent makes is refused, including the reads
+    // its own persona tells it to make.
+    {
+        const frozen = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "inspect", std_ref });
+        defer alloc.free(frozen.stdout);
+        try std.testing.expectEqual(@as(u8, 0), frozen.code);
+        try std.testing.expect(std.mem.indexOf(u8, frozen.stdout, "\"readonly\": true") != null);
     }
 
     const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });

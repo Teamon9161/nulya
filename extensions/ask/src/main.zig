@@ -24,6 +24,20 @@
 //! and it carries its own instructions, because the description is in front of
 //! the model for the whole session.
 //!
+//! **Why its activation is the default one** (`always`, DESIGN §7.2.1), unlike
+//! its sibling `extensions/plan`. `activation` is a package answering "am I a
+//! capability or a mode", and the two answers are for two different questions.
+//! `plan` is a mode: wearing it says what THIS session is — a persona, a
+//! read-only stance — and a person decides that before the work starts.
+//! Nobody can decide in advance that a question will come up: the model finds
+//! that out in the middle of a task, so a package that only worked in sessions
+//! somebody had already earmarked for questions would be a package that never
+//! fires. So activation composes this into every session, and whether its one
+//! tool costs a `max_tools` slot is the OTHER axis's question — a pin (DESIGN
+//! §7.5), which is per-machine and reversible with one key. For one session
+//! only, without a standing pin, `--with ask --pin ext:ask/ask` still does what
+//! it always did; the `/ask` command this manifest declares is that route.
+//!
 //! **Why compiled Zig rather than a script.** Identical to `handoff`: the tool
 //! receives a JSON-RPC request, must echo its `id` back, and validates its
 //! arguments. `sh` has no JSON reader, Windows has neither `jq` nor a guaranteed

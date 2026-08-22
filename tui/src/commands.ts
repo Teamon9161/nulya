@@ -16,11 +16,16 @@
  *
  * The built-ins are tried first, so a skill can never take `/model` away.
  *
- * Two names dispatch without being listed: `/as` (what `/with` was called until
- * T36) and `/evolve` (which rebuilds the shipped evolution draft before wearing
- * it). Both keep working; neither is offered, because a command in this table is
- * a command this front end says exists, and `/evolve` named ONE package whether
- * or not this machine had it — the confusion T37 set out to end.
+ * Four names dispatch without being listed: `/as` (what `/with` was called
+ * until T36), `/evolve` (which rebuilds the shipped evolution draft before
+ * wearing it), `/clear` (the word other harnesses use for what `/new` does) and
+ * `/resume` (theirs for what `/sessions` does). All four keep working; none is
+ * offered, because a command in this table is a command this front end says
+ * exists — `/evolve` named ONE package whether or not this machine had it (the
+ * confusion T37 set out to end), and the other two would each put a second word
+ * on the table for a concept that already has one. `/clear` would also name the
+ * one thing that never happens here: a ledger is append-only, nothing is
+ * cleared, and a new session is a new session (physics #1, #4).
  */
 export interface Command {
   name: string
@@ -38,8 +43,16 @@ export const commands: Command[] = [
   },
   { name: "/provider", what: "endpoints and their keys · add an OpenAI- or Anthropic-compatible one" },
   { name: "/effort", args: "<level|auto>", what: "change this tab's effort now; the next step runs with it" },
-  { name: "/new", args: "[--profile p] [--model id]", what: "a session on the last pick, or on the named profile" },
-  { name: "/sessions", what: "everything in .nulya/sessions · Enter opens one" },
+  {
+    name: "/new",
+    args: "[--profile p] [--model id]",
+    what: "a session on the last pick, or on the named profile · `/clear` is another name for it",
+  },
+  {
+    name: "/sessions",
+    args: "[<id>]",
+    what: "everything in .nulya/sessions · Enter opens one · an id opens that one · `/resume` is another name for it",
+  },
   { name: "/ext", what: "extensions: versions, what is active, what it is used for" },
   { name: "/tasks", what: "background commands: what is running, its log, k stops one" },
   { name: "/usage", what: "what this session cost, and the workspace's tool-usage journal" },
@@ -64,10 +77,33 @@ export const commands: Command[] = [
 ]
 
 /**
+ * The names that dispatch but are NOT on the table, and what each one is — the
+ * four in this file's header, in one place a reader can check the claim
+ * against.
+ *
+ * `ui/App.tsx` decides what each one does (`/resume` shares its branch with
+ * `/sessions`, `/clear` with `/new`; `/as` and `/evolve` have their own), but
+ * the RESERVATION belongs here: an alias is dispatched before a package command
+ * is even looked up, so a package allowed to claim `/clear` would register a
+ * command that could never fire.
+ */
+export const aliases: Readonly<Record<string, string>> = {
+  as: "/with",
+  evolve: "/with, on the shipped evolution package",
+  clear: "/new",
+  resume: "/sessions",
+}
+
+/**
  * Built-in command names, bare (no leading `/`) — what `packageCommands.ts`
  * checks a package command against so a built-in can never be shadowed (D8).
+ * The aliases are in it for the same reason the listed names are: this front
+ * end answers them, so nothing else may claim them.
  */
-export const builtin_names: ReadonlySet<string> = new Set(commands.map((command) => command.name.slice(1)))
+export const builtin_names: ReadonlySet<string> = new Set([
+  ...commands.map((command) => command.name.slice(1)),
+  ...Object.keys(aliases),
+])
 
 /**
  * The commands `text` could still become, best first.

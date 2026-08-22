@@ -193,3 +193,67 @@ test("a session merely opened by id is never a candidate, empty or not", async (
   setup.renderer.destroy()
   expect(sessionExists(ws, id)).toBe(true)
 }, 60_000)
+
+/**
+ * `/sessions <id>` — `/resume <id>` under its other name — is the only way to
+ * reach a session by id from inside the screen; `/clear` is `/new` under the
+ * name other harnesses use.
+ *
+ * Both are tested here because both are about the same claim: neither one
+ * destroys anything. A resumed session is opened, not created — so the guard
+ * above does not apply to it and it survives the window that opened it — and a
+ * `/clear` leaves the session it stepped away from exactly where it was, on
+ * disk and in its own tab.
+ *
+ * The alias is exercised rather than the listed name deliberately: an alias
+ * that reached different code than `/sessions` would be a second command
+ * wearing a nickname, which is the thing this front end refuses to have.
+ */
+test("/resume opens a past session by id; /clear steps away without touching it", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "nulya-tui-state-"))
+  const statePath = join(dir, "tui-state.json")
+  const id = await sessionNew(ws, { profile: "scripted" })
+  const before = (await sessionList(ws)).length
+  const setup = await testRender(
+    () => (
+      <App
+        ws={ws}
+        pick={{ profile: "scripted", model: "scripted-demo" }}
+        style={style}
+        driver={{ env: scripted_env }}
+        statePath={statePath}
+      />
+    ),
+    { width: 120, height: 24 },
+  )
+  try {
+    await settle(setup, 3)
+    // A name that is no session says so and opens nothing: `/resume` takes an
+    // id, and a typo must not become a message to the model.
+    await setup.mockInput.typeText("/resume s-not-a-session")
+    setup.mockInput.pressEnter()
+    await until(() => setup.captureCharFrame().includes("no session 's-not-a-session'"), 15_000)
+    // Bare, the same word is the list — the alias and `/sessions` are one
+    // command with two names, not two commands.
+    await setup.mockInput.typeText("/resume")
+    setup.mockInput.pressEnter()
+    await until(() => setup.captureCharFrame().includes("sessions ·"), 15_000)
+    setup.mockInput.pressKey("escape")
+    await settle(setup, 3)
+
+    await setup.mockInput.typeText(`/resume ${id}`)
+    setup.mockInput.pressEnter()
+    await until(() => setup.captureCharFrame().includes(`opened ${id}`), 20_000)
+
+    await setup.mockInput.typeText("/clear")
+    setup.mockInput.pressEnter()
+    await until(() => setup.captureCharFrame().includes("starts when you send a message"), 15_000)
+    // Nothing was created by either of them: a draft is nothing on disk.
+    expect((await sessionList(ws)).length).toBe(before)
+  } finally {
+    setup.renderer.destroy()
+    rmSync(dir, { recursive: true, force: true })
+  }
+  // Opened, not created — so leaving does not take it with us.
+  expect(sessionExists(ws, id)).toBe(true)
+}, 120_000)

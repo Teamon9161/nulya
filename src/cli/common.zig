@@ -169,7 +169,7 @@ pub const ext_usage =
     \\  nulya ext activate [--user] <id> <ver>            point `current` at a version; activating an older one is the rollback
     \\  nulya ext deactivate [--user] <id>                drop `current`; the versions stay
     \\  nulya ext prune [--user] [<id>] [--dry-run]       delete the versions `current` does not name
-    \\  nulya ext list | inspect <id>                     every extension (version, root, contributions), or one manifest
+    \\  nulya ext list | inspect <id>[@<ver>]             every extension (version, root, contributions), or one manifest
     \\  nulya ext trust                                   allow this workspace's store once, if it came with a checkout
     \\  nulya ext api [protocol|permissions|examples]     the tool wire protocol, the authority model, worked commands
     \\  --user acts on the user store, which every workspace on this machine sees

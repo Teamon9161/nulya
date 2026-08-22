@@ -32,6 +32,7 @@
 
 const std = @import("std");
 const rpc = @import("rpc.zig");
+const header_mod = @import("header.zig");
 
 /// Cap on what one report carries back. The supervisor applies the kernel's own
 /// head/tail budget to the task's output on top of this (DESIGN §6.1); this
@@ -39,6 +40,12 @@ const rpc = @import("rpc.zig");
 const max_report_bytes: usize = 256 << 10;
 
 const max_stream_bytes: usize = 8 << 20;
+
+/// How long one line of the `--stream` protocol may be and still be read. Sized
+/// for the biggest thing that protocol emits on one line: a ledger event for an
+/// assistant turn, which carries the turn's text and the provider's opaque
+/// reasoning item.
+const max_line_bytes: usize = 4 << 20;
 
 pub const Args = struct {
     session: []const u8,
@@ -119,17 +126,39 @@ pub fn run(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args: Args) !r
     var seen_bytes: usize = 0;
 
     {
-        var out_buf: [4096]u8 = undefined;
-        var reader = child.stdout.?.readerStreaming(io, &out_buf);
+        // The buffer has to hold the LONGEST line whole. A ledger event line
+        // carries a whole assistant turn — its text plus the provider's opaque
+        // reasoning — so tens of kilobytes is ordinary, and a header line
+        // carries the frozen persona. `takeDelimiter` answers `StreamTooLong`
+        // for anything longer WITHOUT consuming it, so a loop that gives up
+        // there stops draining a pipe the child is still writing into: the
+        // child blocks on stdout, we block reading its stderr, and the
+        // delegation hangs for ever — the parent waiting for a report from a
+        // sub-agent that has already finished. Hence a generous buffer, and
+        // below, a skip rather than an exit for anything longer still.
+        const out_buf = try alloc.alloc(u8, max_line_bytes);
+        defer alloc.free(out_buf);
+        var reader = child.stdout.?.readerStreaming(io, out_buf);
         var in_buf: [256]u8 = undefined;
         var writer = if (args.readonly) child.stdin.?.writerStreaming(io, &in_buf) else null;
 
         // One line at a time, in arrival order. The gate is strictly
         // request-then-answer — the kernel is blocked on our verdict while we
         // write it — so a single-threaded read/write loop cannot deadlock.
-        while (reader.interface.takeDelimiter('\n') catch null) |line| {
+        while (true) {
+            const line = reader.interface.takeDelimiter('\n') catch |err| switch (err) {
+                // Longer than we are willing to hold: step over it and keep
+                // reading. Skipping one line loses at most one observation;
+                // stopping loses the whole delegation (see above).
+                error.StreamTooLong => {
+                    _ = reader.interface.discardDelimiterInclusive('\n') catch break;
+                    continue;
+                },
+                else => break,
+            } orelse break;
             seen_bytes += line.len;
-            if (seen_bytes > max_stream_bytes) break;
+            // Past the budget we stop PARSING, never stop reading.
+            if (seen_bytes > max_stream_bytes) continue;
             const trimmed = std.mem.trim(u8, line, " \t\r\n");
             if (trimmed.len == 0) continue;
             const parsed = std.json.parseFromSlice(std.json.Value, alloc, trimmed, .{}) catch continue;
@@ -215,12 +244,8 @@ fn gateVerdict(obj: std.json.ObjectMap, readonly_tools: []const []const u8) []co
 /// reads the same manifests `composition` froze.
 fn readonlyToolNames(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, session: []const u8) ![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
-    const header = readHeader(alloc, io, session) catch return out.items;
-    const parsed = std.json.parseFromSlice(std.json.Value, alloc, header, .{}) catch return out.items;
-    const composition = switch (parsed.value) {
-        .object => |o| o.get("composition") orelse return out.items,
-        else => return out.items,
-    };
+    const root = header_mod.object(alloc, io, session) orelse return out.items;
+    const composition = root.get("composition") orelse return out.items;
     const active = switch (composition) {
         .object => |o| o.get("active") orelse return out.items,
         else => return out.items,
@@ -278,15 +303,6 @@ fn collectReadonly(alloc: std.mem.Allocator, text: []const u8, into: *std.ArrayL
         const name = rpc.stringField(tool, "name") orelse continue;
         try into.append(alloc, try alloc.dupe(u8, name));
     }
-}
-
-fn readHeader(alloc: std.mem.Allocator, io: std.Io, session: []const u8) ![]const u8 {
-    const path = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{session});
-    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
-    defer file.close(io);
-    var buf: [4096]u8 = undefined;
-    var reader = file.reader(io, &buf);
-    return (try reader.interface.takeDelimiter('\n')) orelse "";
 }
 
 fn firstLine(text: []const u8) []const u8 {

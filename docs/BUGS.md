@@ -87,3 +87,11 @@ ai回复:
 ```
 
 "属于后面那句话"由顺序和 dim 已经说完了；空行在这一屏的语法里就是 beat 边界，而 thinking 是一个 beat。第 14 条之后这条多半用不上——但当有人把卡要回来时，它得是对的。
+
+16. 我让 nulya 主 agent 启动了一个 explore agent，但是 sub-agent 说无法读取文件，主 agent 则一直在等待 sub-agent 返回，但其实 sub-agent 已经完成了
+
+**两个 bug，同一场委派上撞见，都已修（内核壳层 + `extensions/agent`）。**
+
+**① sub-agent 什么都读不了：`ext inspect` 不认 `<id>@<version>`。** `readonly` 的委派由 `runner.zig` 机械应答内核的 gate：`shell` 一律拒，extension tool 只放行**子场冻结 manifest** 声明 `readonly: true` 的那些。那份名单由 `readonlyToolNames` 从子场 header 的每个成员算出来，问法是 `nulya ext inspect <id>@<version>`——而 `extInspect` 从来只读 `<root>/<id>/extension.json`（draft），把整个 `std@v-…` 当成目录名去找，于是恒定打印 `no such extension` + exit 1。`collectReadonly` 找不到 JSON 就当"确认不了的名字不放行"（安全的那一端），**名单恒为空**：`read` / `grep` / `glob` 全被拒，而 explore 的 persona 正是让它去读。屏幕上看到的是"这个 agent 说它不能读文件"，ledger 里是三条 `deny`。修法是让 `ext inspect` 认它本来就该认的形状：`<id>@<version>` = 那个版本的冻结 manifest（session header 记的正是这个形状），`<id>` 保持 draft 优先、**没有 draft 就退回生效中那个版本**（`ext build <path>` 填出来的 store 根本没有 draft，对着 `ext list` 里明明活着的 id 回答 "no such extension" 本身就是错的）。DESIGN §14 已同步，e2e 钉在 `bundled agent … explore` 那个用例里。
+
+**② 主 agent 永远等不到报告：`--stream` 的读行缓冲是 4096 字节。** `runner.zig` 用 `[4096]u8` 读子场 `session step --stream` 的每一行，而一条 assistant ledger 行装着整轮文本 + provider 不透明的 reasoning（实测这次是 **11225** 字节，早两步的行都在 4096 以下，所以前两步一切正常）。`Reader.takeDelimiter` 对超长行返回 `error.StreamTooLong` 且**一个字节都不消费**，而那里写的是 `catch null` —— 与 EOF 同义，循环就此退出。于是：子场把剩下的字节写进没人再读的 stdout 管道并**永久阻塞**，runner 关掉 stdin 后转去 `allocRemaining` 读它的 stderr，也**永久阻塞**；supervisor 等 runner、`task_finished` 永远不 deposit、父场的 inbox 一直是空的——"driver + idle + inbox 非空 → 再 step" 那条 policy 因此永远不触发。四个进程就这么挂着（实测 `nulya task supervise` / `ext run agent … run` / `session step --gate` 全部活着，`status.json` 停在 `running`，`output.log` 是空的）。修法三处：读行缓冲改成 `max_line_bytes = 4 MB` 的堆缓冲；超长行**跳过而不是退出**（`discardDelimiterInclusive`，少一条观测 vs 丢掉整场委派）；`max_stream_bytes` 到顶后**停止解析、绝不停止读**。三处读 session header 的地方（`runner` / `defs.wornPersona` / `main.parentIdentity`，4096 / 16K / 8192 三种猜法）合并成 `extensions/agent/src/header.zig` 一处——T44 之后 header 里冻着 persona 正文，而内核给 system prompt 的上限是 2 MB，栈上的固定缓冲在这件事上只会静默地答错。e2e：一次 12 KB 任务的委派，报告必须照常回到父场（旧代码在这里会一路挂到 `task wait` 超时）。

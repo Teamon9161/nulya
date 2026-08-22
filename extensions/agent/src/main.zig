@@ -47,6 +47,7 @@ const std = @import("std");
 const rpc = @import("rpc.zig");
 const defs = @import("defs.zig");
 const runner = @import("runner.zig");
+const header_mod = @import("header.zig");
 
 /// The largest task text this tool will pass on to a child session.
 const max_task_bytes: usize = 64 << 10;
@@ -776,17 +777,7 @@ const Identity = struct { profile: []const u8 = "", model: []const u8 = "" };
 /// effort: an unreadable header simply means "no inheritance", and then the
 /// kernel's own default decides — which is what would have happened anyway.
 fn parentIdentity(alloc: std.mem.Allocator, io: std.Io, parent: []const u8) Identity {
-    const path = std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{parent}) catch return .{};
-    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return .{};
-    defer file.close(io);
-    var buf: [8192]u8 = undefined;
-    var reader = file.reader(io, &buf);
-    const line = (reader.interface.takeDelimiter('\n') catch return .{}) orelse return .{};
-    const parsed = std.json.parseFromSlice(std.json.Value, alloc, line, .{}) catch return .{};
-    const obj = switch (parsed.value) {
-        .object => |o| o,
-        else => return .{},
-    };
+    const obj = header_mod.object(alloc, io, parent) orelse return .{};
     var out: Identity = .{};
     if (rpc.stringField(obj, "model")) |profile| out.profile = alloc.dupe(u8, profile) catch "";
     if (obj.get("model_identity")) |ident| {

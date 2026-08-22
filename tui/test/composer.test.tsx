@@ -144,7 +144,10 @@ test("a `/` line lists the commands it could still be, and Tab finishes it", asy
     setup.mockInput.pressEnter()
     await settle(setup, 2)
     // Enter sends what is written — the completion is text, not a selection.
-    expect(sent).toEqual(["/sessions"])
+    // The trailing space is the argument affordance: `/sessions` takes an
+    // optional id, and every command that takes one is completed with room for
+    // it. `runCommand` trims, so a bare Enter still means the bare command.
+    expect(sent).toEqual(["/sessions "])
     expect(await settle(setup, 2)).not.toContain("/settings")
 
     // A command that takes arguments is completed with room for them, and the
@@ -219,7 +222,7 @@ test("both completion menus at eighty columns: one row a candidate, cut, nothing
     const settle_row = rows.find((line) => line.includes("/settle"))!
     // One offset for the description column, and a gutter in front of it.
     expect(sessions.indexOf("everything in")).toBe(settle_row.indexOf("settle a long"))
-    expect(sessions).toMatch(/\/sessions {2,}everything in/)
+    expect(sessions).toMatch(/\/sessions \[<id>\] {2,}everything in/)
 
     // The `@` menu: a path longer than the screen is cut, not wrapped.
     setup.mockInput.pressEnter()

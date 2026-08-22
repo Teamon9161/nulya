@@ -54,7 +54,7 @@ import {
   extSetCurrent,
   type SyncLine,
 } from "../../nulya/cli.ts"
-import { draftColumn, pinsOf, planStore, promptConsequence } from "../../extensions.ts"
+import { draftColumn, pinsOf, planStore, promptConsequence, standingPinsOf } from "../../extensions.ts"
 import {
   builtin_tools,
   faceFullLine,
@@ -176,9 +176,10 @@ export interface ToolRow {
 /**
  * Every tool an active extension declares, with the state each one is in.
  *
- * Only extensions with an ACTIVE, un-shadowed version are here: a pin naming
- * anything else is refused by `session new` (`PinNamesUnknownExtension`), so
- * offering it would be offering a session that will not start.
+ * Only extensions with an ACTIVE, un-shadowed version whose activation composes
+ * them into EVERY session are here: a pin naming anything else is refused by
+ * `session new` (`PinNamesUnknownExtension`), so offering it would be offering
+ * a session that will not start.
  */
 export function toolRows(
   extensions: readonly ExtensionEntry[],
@@ -188,6 +189,11 @@ export function toolRows(
   const rows: ToolRow[] = []
   for (const entry of extensions) {
     if (!entry.current || entry.shadowed) continue
+    // Registered, not composed in: its tools cannot hold a standing pin, so a
+    // checkbox here would offer a session that refuses to open
+    // (`standingPinsOf`). `dropOrphanPins` reads this same list, which is what
+    // takes such a pin back off an existing `tui-state.json`.
+    if (entry.activation === "on_request") continue
     for (const tool of entry.tools) {
       const id = toolId(entry.id, tool)
       const row = usage.find((u) => u.toolId === id)
@@ -602,7 +608,14 @@ export function ExtView(props: {
    * half-anything there: `compact` is fully on with nothing on the face,
    * because that is how a driver calls it.
    */
-  const pinnable = (entry: ExtensionEntry) => pinsOf(entry)
+  /**
+   * The pins this pane's switch writes for a row — a STANDING list, so nothing
+   * for a package that joins only the sessions that name it (`standingPinsOf`).
+   * An `on_request` row is therefore membership alone, exactly like `compact`:
+   * fully on, nothing on the standing face, and `/with <id>` is what puts its
+   * tools in front of a model.
+   */
+  const pinnable = (entry: ExtensionEntry) => standingPinsOf(entry)
   const pinnedCount = (entry: ExtensionEntry) =>
     pinnable(entry).filter((id) => pinState(id, sources()) !== "off").length
   const stateOf = (entry: ExtensionEntry): SwitchState =>
@@ -918,8 +931,12 @@ export function ExtView(props: {
       // that actually costs, instead of a version and a pin count (T31): one
       // keypress here reaches every session this machine opens from now on, and
       // that is the fact worth the line.
-      entry.systemPrompts.length > 0
-        ? promptConsequence(entry.id, true, entry.activation)
+      // An `on_request` row gets that sentence whether or not it has a prompt:
+      // what its switch did — registered it, changed no session — is the fact,
+      // and the branch below would otherwise tell `ask` its tool "stays off the
+      // model face", which is true of every session except the one it is for.
+      entry.activation === "on_request" || entry.systemPrompts.length > 0
+        ? promptConsequence(entry.id, true, entry.activation, pinsOf(entry).length)
         : `${entry.id} on · ${version}` +
           (ids.length > 0
             ? room
@@ -961,8 +978,8 @@ export function ExtView(props: {
     release(entry.id)
     props.onMembershipChanged?.()
     setNotice(
-      (entry.systemPrompts.length > 0
-        ? promptConsequence(entry.id, false, entry.activation)
+      (entry.activation === "on_request" || entry.systemPrompts.length > 0
+        ? promptConsequence(entry.id, false, entry.activation, pinsOf(entry).length)
         : `${entry.id} off · its skills leave the composition`) +
         ` · versions all stay${stuck ? ` · ${stuck}` : ""}`,
     )

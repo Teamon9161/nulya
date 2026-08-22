@@ -10,7 +10,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { createSignal, type JSX } from "solid-js"
 import { testRender } from "@opentui/solid"
-import { SessionsView } from "../src/ui/overlays/SessionsView.tsx"
+import { SessionsView, ago } from "../src/ui/overlays/SessionsView.tsx"
 import {
   ExtView,
   driftLine,
@@ -80,7 +80,9 @@ function stable(frame: string): string {
     // snapshot that bakes it in fails the day the kernel picks a new number.
     .replace(/tools (\d)\+(\d+)\/\d+/g, "tools $1+$2/<max>")
     .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/g, "<built>")
-    .replace(/\d{2}-\d{2} \d{2}:\d{2}/g, "<when>")
+    // How long ago is a moving target by construction: a slow `beforeAll` turns
+    // `just now` into `1m ago`. The layout is what the snapshot is about.
+    .replace(/just now|\d+[mhd] ago|(?<![\d-])\d{2}-\d{2}(?![\d-])/g, "<when>")
 }
 
 async function overlayFrame(node: () => JSX.Element, width = 120, height = 20) {
@@ -108,9 +110,15 @@ test("/sessions lists the store and opens the highlighted session", async () => 
   ))
   try {
     const frame = await settle(setup, 6)
-    expect(frame).toContain(first)
+    // A row is the sentence that started the session (T47): what was asked
+    // first, and how long ago. The id is unreadable and only sometimes needed,
+    // so it is printed once, in the title line, for the row under the cursor —
+    // which starts on the newest session, the one nothing was ever said to.
+    expect(frame).toContain("make the budgets configurable")
+    expect(frame).toContain("nothing said yet")
     expect(frame).toContain(second)
-    expect(frame).toContain("events")
+    expect(frame).not.toContain(first)
+    expect(frame).not.toContain("events")
     // One line of keys, the rest behind `?` (tui.md §11, T18).
     expect(frame).toContain("j/k move · Enter open · Esc close · ? keys")
     expect(frame).not.toContain("n new")
@@ -124,7 +132,9 @@ test("/sessions lists the store and opens the highlighted session", async () => 
     // Newest first, so the second (untouched) session leads; j then Enter opens
     // the one below it.
     setup.mockInput.pressKey("j")
-    await settle(setup, 2)
+    // The title line follows the cursor, so this is where the id of the session
+    // about to be opened becomes readable (and pasteable).
+    expect(await settle(setup, 2)).toContain(first)
     setup.mockInput.pressEnter()
     await until(() => opened() !== null, 10_000)
     expect(opened()).toBe(first)
@@ -132,6 +142,26 @@ test("/sessions lists the store and opens the highlighted session", async () => 
     setup.renderer.destroy()
   }
 }, 60_000)
+
+test("how long ago is said the way a person says it", () => {
+  // The row is a sentence and this is the only number left on it (T47), so the
+  // boundaries are pinned: a timestamp nobody has to subtract today's date from,
+  // and a date again once the distance stops being memorable.
+  const now = Date.parse("2026-08-22T12:00:00Z")
+  const back = (ms: number) => new Date(now - ms).toISOString()
+  expect(ago(back(3_000), now)).toBe("just now")
+  expect(ago(back(59_000), now)).toBe("just now")
+  expect(ago(back(60_000), now)).toBe("1m ago")
+  expect(ago(back(90 * 60_000), now)).toBe("1h ago")
+  expect(ago(back(26 * 3600_000), now)).toBe("1d ago")
+  expect(ago(back(6 * 86_400_000), now)).toBe("6d ago")
+  // A week out, the distance is no longer the answer.
+  expect(ago(back(8 * 86_400_000), now)).toMatch(/^\d{2}-\d{2}$/)
+  // A clock that runs backwards (another machine's timestamp) is still now.
+  expect(ago(new Date(now + 5_000).toISOString(), now)).toBe("just now")
+  expect(ago("", now)).toBe("—")
+  expect(ago("not a date", now)).toBe("—")
+})
 
 test("/sessions marks a session somebody else is driving as live", async () => {
   const busy = await sessionNew(ws, { profile: "scripted" })

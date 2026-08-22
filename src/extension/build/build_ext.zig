@@ -79,6 +79,15 @@ pub const Zig = struct {
     probed: bool = false,
     /// Owned once probed; null means the host could not name its compiler.
     identity: ?[]u8 = null,
+    /// Why the probe could not name it, in the host's own words — owned, and
+    /// null unless `identity` is null for a reason worth repeating.
+    ///
+    /// `ZigVersionUnreadable` is one name over three different walls: the
+    /// executable would not run, it ran and failed, or it ran and said nothing.
+    /// Each wants a different thing done about it, and the caller prints a
+    /// sentence a person is supposed to act on — so the reason travels with the
+    /// failure instead of dying at the `catch` that noticed it.
+    failure: ?[]u8 = null,
 
     pub fn init(exe: []const u8) Zig {
         return .{ .exe = exe };
@@ -86,7 +95,14 @@ pub const Zig = struct {
 
     pub fn deinit(self: *Zig, alloc: std.mem.Allocator) void {
         if (self.identity) |id| alloc.free(id);
+        if (self.failure) |why| alloc.free(why);
         self.* = undefined;
+    }
+
+    /// What stopped the probe, or null when nothing did (or when saying so ran
+    /// out of memory — a missing note never turns into a missing failure).
+    pub fn whyUnreadable(self: *const Zig) ?[]const u8 {
+        return self.failure;
     }
 
     /// `zig <version>`, or null when this machine cannot name its compiler —
@@ -94,7 +110,7 @@ pub const Zig = struct {
     /// where a compile is unavoidable. Borrowed; owned by the `Zig`.
     fn resolve(self: *Zig, alloc: std.mem.Allocator, io: std.Io, workspace: std.Io.Dir) !?[]const u8 {
         if (self.probed) return self.identity;
-        self.identity = compilerIdentity(alloc, io, workspace, self.exe) catch |err| switch (err) {
+        self.identity = compilerIdentity(alloc, io, workspace, self.exe, &self.failure) catch |err| switch (err) {
             error.OutOfMemory => return err,
             else => null,
         };
@@ -343,23 +359,131 @@ fn sealed(
     };
 }
 
-fn compilerIdentity(alloc: std.mem.Allocator, io: std.Io, workspace: std.Io.Dir, zig_exe: []const u8) ![]u8 {
+/// The first line of `text`, trimmed and clipped — enough of a subprocess's
+/// complaint to recognize it by, on one line of somebody's terminal.
+fn firstLine(text: []const u8) []const u8 {
+    const trimmed = std.mem.trim(u8, text, " \t\r\n");
+    const end = std.mem.indexOfScalar(u8, trimmed, '\n') orelse trimmed.len;
+    // Trimmed again: the line a CRLF host hands over ends in a carriage
+    // return, and that byte inside a sentence is a mangled terminal.
+    const line = std.mem.trim(u8, trimmed[0..end], " \t\r");
+    return line[0..@min(line.len, 200)];
+}
+
+/// One `access`, kept as the error it actually was — `null` when the path
+/// answered. The error NAME is the part worth keeping: "not there" and "there,
+/// but this process cannot reach it" are different facts about the machine.
+fn accessError(io: std.Io, dir: std.Io.Dir, path: []const u8) ?anyerror {
+    if (dir.access(io, path, .{})) |_| return null else |e| return e;
+}
+
+/// What a failed spawn actually means, asked of the filesystem rather than
+/// guessed from the error name.
+///
+/// Windows answers `FileNotFound` for BOTH a missing executable and a missing
+/// working directory, and those are opposite repairs — install a toolchain,
+/// versus find out why the directory this build runs in went away. The name
+/// alone cannot separate them, so the two get looked up.
+///
+/// The lookup is then reported as what it found, never rounded to the likeliest
+/// story. "Not there at all" and "there, but this process cannot reach it" are
+/// different facts and different repairs, and a person told the wrong one goes
+/// and looks, finds the opposite, and starts distrusting the sentence instead
+/// of the machine. So the answers stay separate — including the one where the
+/// probe finds nothing wrong and hands back the bare error name.
+fn spawnNote(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    workspace: std.Io.Dir,
+    zig_exe: []const u8,
+    err: anyerror,
+) ?[]u8 {
+    const plain = std.fmt.allocPrint(alloc, "could not run it: {s}", .{@errorName(err)}) catch null;
+    if (err != error.FileNotFound) return plain;
+
+    const exe_err = accessError(io, std.Io.Dir.cwd(), zig_exe);
+    const dir_err = accessError(io, workspace, ".");
+    if (exe_err == null and dir_err == null) return plain; // both there: the OS refused the spawn itself
+    if (plain) |p| alloc.free(p);
+
+    if (exe_err) |e| {
+        if (e != error.FileNotFound) {
+            return std.fmt.allocPrint(
+                alloc,
+                "that file cannot be reached from here right now: {s}",
+                .{@errorName(e)},
+            ) catch null;
+        }
+        // Missing for real. Whether its directory is there too decides between
+        // "nothing was ever unpacked" and "the toolchain lost its executable".
+        const parent = std.fs.path.dirname(zig_exe) orelse
+            return alloc.dupe(u8, "there is no file at that path") catch null;
+        const parent_there = accessError(io, std.Io.Dir.cwd(), parent) == null;
+        return alloc.dupe(u8, if (parent_there)
+            "that directory is there, but it holds no file by that name"
+        else
+            "neither that file nor the directory it belongs in exists") catch null;
+    }
+    return alloc.dupe(u8, "that file is there, but the directory this build runs in is not") catch null;
+}
+
+/// `zig <version>` as this host reports it, or `error.ZigVersionUnreadable`
+/// with `why` set to what stopped it.
+///
+/// The three failures are three different repairs — the executable would not
+/// run at all (a path that is not there, a file something else has open, a
+/// spawn the OS refused), it ran and exited non-zero (a version-manager shim
+/// that wants a `build.zig.zon` it cannot find from this cwd says exactly
+/// this, and says so ON STDERR), or it ran and printed nothing. One error name
+/// covers all three, so the account travels out through `why`: without it the
+/// person reading `could not report its version` cannot tell "install a
+/// toolchain" from "something is holding your zig.exe", and both sentences end
+/// in the same shrug.
+fn compilerIdentity(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    workspace: std.Io.Dir,
+    zig_exe: []const u8,
+    why: *?[]u8,
+) ![]u8 {
     const result = std.process.run(alloc, io, .{
         .argv = &.{ zig_exe, "version" },
         .cwd = .{ .dir = workspace },
         .stdout_limit = .limited(4096),
         .stderr_limit = .limited(4096),
-    }) catch return error.ZigVersionUnreadable;
+    }) catch |err| {
+        // The output limits above land here too: a shim whose complaint runs
+        // past 4 KB never reaches the exit code, and that is worth telling
+        // apart from a spawn the OS refused.
+        why.* = spawnNote(alloc, io, workspace, zig_exe, err);
+        return error.ZigVersionUnreadable;
+    };
     defer alloc.free(result.stdout);
     defer alloc.free(result.stderr);
 
     const exit_code: u8 = switch (result.term) {
         .exited => |c| c,
-        else => return error.ZigVersionUnreadable,
+        else => {
+            why.* = alloc.dupe(u8, "it did not exit normally") catch null;
+            return error.ZigVersionUnreadable;
+        },
     };
-    if (exit_code != 0) return error.ZigVersionUnreadable;
+    const complaint = firstLine(result.stderr);
+    if (exit_code != 0) {
+        why.* = if (complaint.len != 0)
+            std.fmt.allocPrint(alloc, "it exited {d}: {s}", .{ exit_code, complaint }) catch null
+        else
+            std.fmt.allocPrint(alloc, "it exited {d} without saying why", .{exit_code}) catch null;
+        return error.ZigVersionUnreadable;
+    }
     const trimmed = std.mem.trim(u8, result.stdout, " \t\r\n");
-    if (trimmed.len == 0) return error.ZigVersionUnreadable;
+    if (trimmed.len == 0) {
+        why.* = if (complaint.len != 0)
+            std.fmt.allocPrint(alloc, "it printed no version: {s}", .{complaint}) catch null
+        else
+            alloc.dupe(u8, "it exited 0 but printed no version") catch null;
+        return error.ZigVersionUnreadable;
+    }
     return try std.fmt.allocPrint(alloc, "zig {s}", .{trimmed});
 }
 
@@ -558,6 +682,68 @@ fn sharedVersionStore(io: std.Io) !std.Io.Dir {
     const cwd = std.Io.Dir.cwd();
     try cwd.createDirPath(io, rel);
     return cwd.openDir(io, rel, .{});
+}
+
+// `firstLine` is what a person actually reads when a toolchain probe fails,
+// so it has to survive whatever a subprocess prints: nothing, several lines,
+// or a wall of them. It clips rather than wraps because the caller puts it
+// inside one sentence on one line.
+test "the probe quotes one line of a subprocess complaint, however it arrives" {
+    try std.testing.expectEqualStrings("", firstLine(""));
+    try std.testing.expectEqualStrings("", firstLine(" \n\t\n "));
+    try std.testing.expectEqualStrings("no build.zig", firstLine("no build.zig\n  you can:\n  1. run"));
+    // Trimmed first, so a leading blank line is not the "first" line.
+    try std.testing.expectEqualStrings("real complaint", firstLine("\n\nreal complaint\nrest"));
+    // CRLF: the carriage return goes with the trim, not into the quote.
+    try std.testing.expectEqualStrings("windows says", firstLine("windows says\r\nmore"));
+    // One very long line is clipped, never wrapped into the sentence around it.
+    const long = "x" ** 300;
+    try std.testing.expectEqual(@as(usize, 200), firstLine(long).len);
+}
+
+test "the spawn probe says what it found, not what it guessed" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = real_buf[0..try tmp.dir.realPath(io, &real_buf)];
+
+    // A spawn that failed for a nameable reason is quoted, not investigated:
+    // the filesystem has nothing to add to `AccessDenied`.
+    {
+        const note = spawnNote(alloc, io, tmp.dir, "whatever", error.AccessDenied).?;
+        defer alloc.free(note);
+        try std.testing.expectEqualStrings("could not run it: AccessDenied", note);
+    }
+    // Nothing unpacked: the directory is missing too, and saying so separates
+    // "install a toolchain" from "the toolchain lost its executable".
+    {
+        const gone = try std.fs.path.join(alloc, &.{ base, "nowhere", "zig" });
+        defer alloc.free(gone);
+        const note = spawnNote(alloc, io, tmp.dir, gone, error.FileNotFound).?;
+        defer alloc.free(note);
+        try std.testing.expectEqualStrings("neither that file nor the directory it belongs in exists", note);
+    }
+    // The directory is there and empty — a different repair, a different line.
+    {
+        const missing = try std.fs.path.join(alloc, &.{ base, "zig" });
+        defer alloc.free(missing);
+        const note = spawnNote(alloc, io, tmp.dir, missing, error.FileNotFound).?;
+        defer alloc.free(note);
+        try std.testing.expectEqualStrings("that directory is there, but it holds no file by that name", note);
+    }
+    // The file IS there and the cwd is fine, yet the spawn said FileNotFound.
+    // The probe must not invent an absence: it hands back the plain error, and
+    // whoever reads it goes looking for what holds the file open.
+    {
+        try tmp.dir.writeFile(io, .{ .sub_path = "zig", .data = "" });
+        const present = try std.fs.path.join(alloc, &.{ base, "zig" });
+        defer alloc.free(present);
+        const note = spawnNote(alloc, io, tmp.dir, present, error.FileNotFound).?;
+        defer alloc.free(note);
+        try std.testing.expectEqualStrings("could not run it: FileNotFound", note);
+    }
 }
 
 test "missing manifest is a clear error" {

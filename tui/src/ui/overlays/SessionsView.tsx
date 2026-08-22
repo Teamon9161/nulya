@@ -4,8 +4,19 @@
  * The rows are `nulya session list --json` — the kernel's own read-only
  * projection of `.nulya/sessions/` plus the outcome journal (DESIGN §14), newest
  * first, nested by `parent`. The TUI does not parse headers for this any more:
- * composition, cost and verdict arrive already decided, and the verdict in
- * particular lives in a second journal the front end has no business reading.
+ * composition and verdict arrive already decided, and the verdict in particular
+ * lives in a second journal the front end has no business reading. The opening
+ * user turn arrives ready to print too — the kernel caps it at 120 bytes and
+ * turns its newlines and tabs into spaces (`session_list.zig` `summarize`),
+ * which is why nothing here has to.
+ *
+ * A ROW IS THE SENTENCE THAT STARTED IT (T47). Everything else a session file
+ * knows — how many events, which packages it wore, what it cost, on which model
+ * — has been on this line at some point and is gone: none of it is how a person
+ * recognises the conversation they want back, and a column that separates
+ * nothing is not information (§4.5). The id went with them; it is the one thing
+ * here nobody can read but everybody occasionally has to paste, so it is
+ * printed once, in the title line, for the row the cursor is on.
  *
  * Two things stay ours. `● live` means some other process holds the writer lease
  * right now — a fact about this instant, not about the file, and the same one
@@ -51,47 +62,41 @@ export function sessionRows(entries: readonly SessionListEntry[]): Row[] {
   return rows
 }
 
-/** `2026-08-16T09:12:44Z` → `08-16 09:12`; anything else is left alone. */
-export function when(created: string): string {
+/**
+ * How long ago, in the words a person answers that question with.
+ *
+ * `08-16 09:12` was a timestamp: correct, and something the reader had to
+ * subtract from today's date to learn the only thing they were after — whether
+ * this is the one from ten minutes ago. Inside a week the answer is the
+ * distance; past that the distance stops being memorable and the date takes
+ * over.
+ */
+export function ago(created: string, now: number = Date.now()): string {
   const at = Date.parse(created)
   if (created.length === 0 || Number.isNaN(at)) return "—"
+  const seconds = Math.max(0, Math.round((now - at) / 1000))
+  if (seconds < 60) return "just now"
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+  const days = Math.floor(hours / 24)
+  if (days < 7) return `${days}d ago`
   const date = new Date(at)
   const pad = (n: number) => String(n).padStart(2, "0")
-  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
-}
-
-function modelOf(entry: SessionListEntry): string {
-  return entry.model_id.length > 0 ? `${entry.provider}/${entry.model_id}` : entry.model || "?"
-}
-
-function tokens(n: number): string {
-  if (n < 1000) return String(n)
-  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`
-  return `${(n / 1_000_000).toFixed(1)}M`
-}
-
-/** What one session cost, or nothing at all when no step was ever priced. */
-export function costOf(entry: SessionListEntry): string {
-  const { input_tokens, output_tokens, cache_read_tokens, cache_write_tokens } = entry.usage
-  if (input_tokens + output_tokens + cache_read_tokens + cache_write_tokens === 0) return ""
-  return `↑${tokens(input_tokens + cache_read_tokens + cache_write_tokens)} ↓${tokens(output_tokens)}`
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
 }
 
 const verdict_glyph: Record<Verdict, string> = { success: "+", partial: "~", failure: "!" }
 
-/** What a session is made of: when, on what, how much, wearing what. */
-function meta(entry: SessionListEntry): string {
-  const cost = costOf(entry)
-  const worn =
-    entry.composition.active.length > 0
-      ? ` · with ${entry.composition.active.map((ref) => ref.split("@")[0]).join(" ")}`
-      : ""
-  return `${when(entry.created)} · ${modelOf(entry)} · ${entry.events} events${cost ? ` · ${cost}` : ""}${worn}`
-}
-
-/** The line that makes a row recognisable: what was asked of it first. */
-function said(entry: SessionListEntry): string {
-  return entry.first_user_text.length > 0 ? ` · ${entry.first_user_text.slice(0, 40)}` : ""
+/**
+ * The line that makes a row recognisable: what was asked of it first.
+ *
+ * A session with nothing in it says so in words. It is the one row whose
+ * emptiness the event count used to carry (`0 events`), and that count is gone.
+ */
+export function title(entry: SessionListEntry): string {
+  return entry.first_user_text.length > 0 ? entry.first_user_text : "nothing said yet"
 }
 
 export function SessionsView(props: {
@@ -154,6 +159,23 @@ export function SessionsView(props: {
     if (cursor() >= count) setCursor(Math.max(0, count - 1))
   })
 
+  /**
+   * One width for every `ago` on screen, so they line up as a column instead of
+   * a ragged edge. Measured from what is actually drawn — `just now` and
+   * `3d ago` are not the same length, and neither is a number typed here once.
+   */
+  const clock = createMemo(() => {
+    const now = Date.now()
+    let widest = 0
+    for (const row of rows().slice(range().start, range().end)) {
+      widest = Math.max(widest, displayWidth(ago(row.entry.created, now)))
+    }
+    return widest
+  })
+
+  /** The id of the row the cursor is on: unreadable, occasionally needed, printed once. */
+  const pointed = () => rows()[cursor()]?.entry.id ?? ""
+
   const move = (delta: number) => {
     const count = rows().length
     if (count === 0) return
@@ -188,7 +210,22 @@ export function SessionsView(props: {
 
   return (
     <box flexDirection="column" width="100%" flexGrow={1} paddingLeft={1} paddingRight={1}>
-      <text fg={style.theme.accent.evolve}>sessions · {entries().length}</text>
+      {/* The title line carries the id of the pointed row: the list itself is
+          made of sentences now, and this is where the machine's name for the one
+          under the cursor stays reachable — to paste into `nulya session
+          events`, into `/outcome`, into a message to somebody else. Beside the
+          count rather than off at the right margin: an id's hash is not a fixed
+          length, so a right-aligned one moves the whole line every time the
+          cursor does (tui.md §11, T12 — the same shape of bug, one line up). */}
+      <box flexDirection="row" width="100%" height={1}>
+        <text fg={style.theme.accent.evolve} flexShrink={0}>
+          sessions · {entries().length}
+        </text>
+        <text fg={style.theme.faint} flexShrink={1}>
+          {"   "}
+          {fit(pointed(), Math.max(0, inner() - 16))}
+        </text>
+      </box>
       <box height={1} />
       <box flexDirection="column" flexGrow={1} flexShrink={1}>
         <Show when={range().start > 0}>
@@ -212,23 +249,23 @@ export function SessionsView(props: {
             const tone = () => ({ selected: selected(), hovered: hover.at() === index() })
             const gutter = () => rowGutter(style, tone())
             const live = () => leases()[row().entry.id] === "held"
+            const here = () => row().entry.id === props.currentId
             const verdict = () => row().entry.outcome?.verdict ?? null
             const click = onClick(() => clickRow(index()))
-            /** The two chips that sit at the end of the row, when they apply. */
+            const clock_cell = () => ` ${ago(row().entry.created).padStart(clock())}`
+            /** The chips that sit at the end of the row, when they apply. */
             const chips = () =>
+              (here() ? ` ${style.glyphs.bar} this tab` : "") +
               (verdict() ? ` ${verdict_glyph[verdict()!]} ${verdict()}` : "") +
               (live() ? ` ${style.glyphs.assistant} live` : "")
             /**
-             * What is left for the middle after the fixed ends. This row was the
-             * last one in the front end still trusting the terminal with its own
-             * wrapping (tui.md §11, T16 "仍未迁"); a long id and a long first
-             * line together are exactly the second row that garbles the first.
+             * What is left for the sentence after the fixed ends. This row was
+             * the last one in the front end still trusting the terminal with its
+             * own wrapping (tui.md §11, T16 "仍未迁"); a long first line and a
+             * chip together are exactly the second row that garbles the first.
              */
-            const middle = () =>
-              Math.max(
-                0,
-                inner() - 2 - row().depth * 2 - displayWidth(row().entry.id) - 1 - displayWidth(chips()),
-              )
+            const said = () =>
+              Math.max(0, inner() - 2 - row().depth * 2 - displayWidth(clock_cell()) - displayWidth(chips()))
             return (
               <box
                 flexDirection="row"
@@ -244,20 +281,28 @@ export function SessionsView(props: {
                   {gutter().text}
                   {"  ".repeat(row().depth)}
                 </text>
-                <text fg={row().entry.id === props.currentId ? style.theme.accent.user : style.theme.fg} flexShrink={0}>
-                  {row().entry.id}
-                </text>
-                {/* The id is the subject of the row; when, on what and how much
-                    are what it is made of; the first thing that was said is the
-                    caption that makes it recognisable. Three tiers, one row. */}
-                <box flexDirection="row" flexGrow={1} flexShrink={1} flexBasis={0} paddingLeft={1}>
-                  <text fg={style.theme.muted} flexShrink={0}>
-                    {fit(meta(row().entry), middle())}
-                  </text>
-                  <text fg={style.theme.dim}>
-                    {fit(said(row().entry), Math.max(0, middle() - displayWidth(meta(row().entry))))}
+                {/* The subject of the row, and the reason the row exists. */}
+                <box flexDirection="row" flexGrow={1} flexShrink={1} flexBasis={0}>
+                  <text
+                    fg={
+                      row().entry.first_user_text.length === 0
+                        ? style.theme.faint
+                        : here()
+                          ? style.theme.accent.user
+                          : style.theme.fg
+                    }
+                  >
+                    {fit(title(row().entry), said())}
                   </text>
                 </box>
+                {/* Which one is on screen right now: a colour alone cannot say it
+                    where there are no colours (NO_COLOR, a mono terminal). */}
+                <Show when={here()}>
+                  <text fg={style.theme.accent.user} flexShrink={0}>
+                    {" "}
+                    {style.glyphs.bar} this tab
+                  </text>
+                </Show>
                 {/* No verdict is "not judged", which is NOT failure (DESIGN §3.3):
                     an unjudged session shows nothing rather than a neutral chip. */}
                 <Show when={verdict()}>
@@ -275,6 +320,11 @@ export function SessionsView(props: {
                     {style.glyphs.assistant} live
                   </text>
                 </Show>
+                {/* Last, so that it is a column: chips come and go, and a clock
+                    that moves left when one appears is not one. */}
+                <text fg={style.theme.muted} flexShrink={0}>
+                  {clock_cell()}
+                </text>
               </box>
             )
           }}

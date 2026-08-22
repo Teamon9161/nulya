@@ -45,13 +45,15 @@ exports[`/help lists the bindings that are actually in force 1`] = `
  slash commands                                                                                   █ 
  /model                           pick the model the next session runs on                         █ 
  /mode [ask|unsafe]               ask before every tool call, or run them all unreviewed; no      █ 
-                                  argument opens the picker                                       █ 
- /provider                        endpoints and their keys                                        █ 
-                                  add an OpenAI- or Anthropic-compatible one                      █ 
- /effort <level|auto>             change this tab's effort now; the next step runs with it        █ 
- /new [--profile p] [--model id]  a session on the last pick, or on the named profile             █ 
- /sessions                        everything in .nulya/sessions · Enter opens one                 █ 
- /ext                             extensions: versions, what is active, what it is used for       █ 
+                                  argument opens the picker                                         
+ /provider                        endpoints and their keys                                          
+                                  add an OpenAI- or Anthropic-compatible one                        
+ /effort <level|auto>             change this tab's effort now; the next step runs with it          
+ /new [--profile p] [--model id]  a session on the last pick, or on the named profile               
+                                  \`/clear\` is another name for it                                   
+ /sessions [<id>]                 everything in .nulya/sessions · Enter opens one                   
+                                  an id opens that one · \`/resume\` is another name for it           
+ /ext                             extensions: versions, what is active, what it is used for         
  /tasks                           background commands: what is running, its log, k stops one        
  /usage                           what this session cost, and the workspace's tool-usage journal    
  /settings                        the effective tui.toml values and which file each came from       
@@ -75,8 +77,6 @@ exports[`/help lists the bindings that are actually in force 1`] = `
  /<skill> [args]                  load an active skill's body as a user turn                        
                                   \`nulya skill list\` names them                                     
  anything else after /            goes to the model verbatim                                        
-                                                                                                    
- a session has one writer                                                                           
  j/k · PgUp/PgDn scroll · Esc close                                                                 
 "
 `;

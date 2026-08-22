@@ -33,7 +33,8 @@ import { createSessionState } from "../src/state/session.ts"
 import { createPluginHost, type PluginHost } from "../src/plugins/host.ts"
 import { parseExtNote, wrapExtNote } from "../src/extnote.ts"
 import { runCompact } from "../src/compact.ts"
-import { bundledDraftPath } from "../src/extensions.ts"
+import { rememberModel } from "../src/state/tui_state.ts"
+import { builtContributions, bundledDraftPath, pinsOf, standingPinsOf } from "../src/extensions.ts"
 import {
   extBuild,
   extSetCurrent,
@@ -189,6 +190,98 @@ const first_plan = [
   "",
   "Change them.",
 ].join("\n")
+
+/**
+ * The two packages answer "am I a capability or a mode" differently, and the
+ * manifest is where each one says so (`activation`, DESIGN §7.2.1, T46).
+ *
+ * `plan` is a mode: wearing it says what THIS session is — a persona and a
+ * read-only stance — and that is a decision somebody makes before the work
+ * starts. `ask` is a capability: nobody can decide in advance that a question
+ * will come up, because the model finds that out in the middle of a task, so a
+ * package that only existed in sessions earmarked for questions would never
+ * fire.
+ *
+ * The consequence is the whole point of the split, so it is asserted against
+ * the real frozen manifests rather than described: a standing pin is legal for
+ * one of them and impossible for the other (`standingPinsOf`).
+ */
+test.skipIf(!has_zig)("plan is a mode and ask is a capability, and their manifests say which", async () => {
+  const root = join(process.env["NULYA_HOME"]!, "extensions")
+  const plan = (await builtContributions(ws, root, "plan", plan_version))!
+  const ask = (await builtContributions(ws, root, "ask", ask_version))!
+
+  expect(plan.activation).toBe("on_request")
+  expect(plan.systemPrompts.length).toBeGreaterThan(0)
+  // Registered by activation, composed only into the sessions that name it, so
+  // nothing standing may pin its tools — `/plan` is the whole way in.
+  expect(standingPinsOf(plan)).toEqual([])
+  expect(pinsOf(plan)).toEqual(["ext:plan/propose", "ext:plan/todo"])
+
+  expect(ask.activation).toBe("always")
+  expect(ask.systemPrompts).toEqual([])
+  // One key in `/ext` is "the model may ask me", in every session from now on.
+  expect(standingPinsOf(ask)).toEqual(["ext:ask/ask"])
+})
+
+/**
+ * Wearing a package brings its tools with it (tui.md §11, T46).
+ *
+ * The two axes are independent everywhere else (DESIGN §7.5) and here they
+ * cannot be: `plan` says `activation: "on_request"`, so it is a member of
+ * exactly the session that names it, and a pin for its tool has nowhere to live
+ * except the same argv. Written into a standing list instead — which is what
+ * `/ext`'s switch used to do — it is `PinNamesUnknownExtension` and NO session
+ * opens at all.
+ *
+ * So this drives the real keystrokes: `/with plan` on a draft, then a message,
+ * and asks the kernel what it froze.
+ */
+test.skipIf(!has_zig)("plan: /with puts the package AND its tools into the session it starts", async () => {
+  const before = await sessionNew(ws, { profile: "scripted" })
+  const state = createSessionState(before)
+  // The draft has to know what to run on: a `/model` pick is remembered here,
+  // and without one the next session is the config's default profile — which on
+  // a test machine has no credential and refuses before any of this is reached.
+  const statePath = join(ws.dir, "tui-state-wear.json")
+  rememberModel({ profile: "scripted" }, statePath)
+  const setup = await testRender(
+    () => (
+      <App
+        ws={ws}
+        id={before}
+        state={state}
+        style={style}
+        statePath={statePath}
+        driver={{ env: scripted_env }}
+        created
+      />
+    ),
+    { width: 90, height: 24 },
+  )
+  await settle(setup, 3)
+  // Back to a draft, then wear the package: neither of these starts anything.
+  await setup.mockInput.typeText("/clear")
+  setup.mockInput.pressEnter()
+  await settle(setup, 3)
+  await setup.mockInput.typeText("/with plan")
+  setup.mockInput.pressEnter()
+  await settle(setup, 3)
+  // The first message is what makes a draft a session (T22).
+  await setup.mockInput.typeText("probe")
+  setup.mockInput.pressEnter()
+  await until(async () => (await sessionList(ws)).some((row) => row.id !== before))
+  const started = (await sessionList(ws)).find((row) => row.id !== before)!
+  setup.renderer.destroy()
+
+  // Membership: the version is in the composition, frozen.
+  expect(started.composition.active.some((one) => one.startsWith("plan@"))).toBe(true)
+  // …and the face: both model tools, beside the one builtin. `approve` is the
+  // package's own `audience: "driver"` and stays off it.
+  expect(started.composition.native_tools).toContain("ext:plan/propose")
+  expect(started.composition.native_tools).toContain("ext:plan/todo")
+  expect(started.composition.native_tools).not.toContain("ext:plan/approve")
+}, 180_000)
 
 test.skipIf(!has_zig)(
   "plan: propose opens the review, comments come back as one turn, and approval continues in a session that does not wear the persona",

@@ -33,6 +33,8 @@ const style: Style = createStyle(unsafe_settings, {})
 let ws: TempWorkspace
 let first: string
 let second: string
+/** The first session's opening line: how its row is found on screen (T47). */
+const said = "make the budgets configurable"
 
 beforeAll(async () => {
   ws = tempWorkspace()
@@ -151,11 +153,11 @@ test("/sessions: a click selects the row, a second click opens it", async () => 
     20,
   )
   try {
-    await until(() => setup.captureCharFrame().includes(first), 20_000)
+    await until(() => setup.captureCharFrame().includes(said), 20_000)
     const frame = await settle(setup, 6)
     const rows = frame.split("\n")
     // Newest first, so `first` is the SECOND row and the cursor starts above it.
-    const at = rows.findIndex((row) => row.includes(first))
+    const at = rows.findIndex((row) => row.includes(said))
     expect(at).toBeGreaterThanOrEqual(0)
     expect(rows[at]!.trimStart().startsWith("▾")).toBe(false)
 
@@ -181,9 +183,9 @@ test("/sessions: the pointer marks the row it is over, and lets go of it", async
     20,
   )
   try {
-    await until(() => setup.captureCharFrame().includes(second), 20_000)
+    await until(() => setup.captureCharFrame().includes(said), 20_000)
     const rows = (await settle(setup, 6)).split("\n")
-    const at = rows.findIndex((row) => row.includes(first))
+    const at = rows.findIndex((row) => row.includes(said))
     expect(rows[at]!.trimStart().startsWith("·")).toBe(false)
 
     await setup.mockMouse.moveTo(30, at)
