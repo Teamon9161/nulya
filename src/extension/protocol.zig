@@ -1,10 +1,38 @@
 //! Extension wire protocol (DESIGN §7.3).
 //!
-//! The transport is still deliberately dumb and oneshot: the host spawns the
-//! extension, writes exactly ONE JSON-RPC request to stdin, reads ONE JSON-RPC
-//! response from stdout, and the process exits. No daemon, no streaming, no
-//! bidirectional events, no host callbacks. The wire protocol IS the ABI, so
-//! extensions need not be written in Zig (DESIGN §7.1).
+//! The transport is deliberately dumb and oneshot: the host spawns the
+//! extension, writes ONE request to stdin, reads its stdout, and the process
+//! exits. No daemon, no streaming, no bidirectional events, no host callbacks.
+//! The wire protocol IS the ABI, so extensions need not be written in Zig
+//! (DESIGN §7.1).
+//!
+//! A manifest picks one of two wires with `runtime.wire`. Everything else about
+//! a call is identical between them: the same timeout, the same process-tree
+//! kill, the same sanitized environment with NULYA_EXE (and NULYA_SESSION
+//! inside a session), the same working directory, and the same result shape.
+//! `nulya ext run <id> <tool> --arg k=v` and a model's own call go down the same
+//! path, so a runtime cannot tell who called it.
+//!
+//! ── "wire": "plain" ────────────────────────────────────────────────────────
+//!
+//! For anything a few lines of shell can do. No JSON to parse, no id to echo.
+//!
+//!   stdin   The arguments for this call: one compact JSON object, the exact
+//!           bytes the model produced (`{}` when there are none).
+//!   env     NULYA_TOOL=<tool name>. Plus NULYA_ARG_<k>=<value> for every
+//!           TOP-LEVEL argument whose value is a string, number or boolean:
+//!           strings verbatim, numbers as written, booleans `true` / `false`.
+//!           Arrays, objects and null are not exported, nor is a key outside
+//!           [A-Za-z0-9_] — those live on stdin only.
+//!   stdout  The tool's text output, VERBATIM. It reaches the model exactly as
+//!           printed (the string-result rule below, one rule for both wires).
+//!   exit    0 = success. Non-zero = a failed call, whose text is `exit <code>`
+//!           followed by stderr, and by stdout if anything was printed.
+//!
+//!     #!/bin/sh
+//!     printf 'hello %s\n' "${NULYA_ARG_name:-world}"
+//!
+//! ── "wire": "jsonrpc" (the default) ────────────────────────────────────────
 //!
 //!   request   { "jsonrpc":"2.0", "id":"call-17", "method":"tool/call",
 //!               "params":{ "name":"web_search", "arguments":{...} } }

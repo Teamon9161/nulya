@@ -45,7 +45,7 @@ test "cli help: help / --help / -h print the same usage covering every verb fami
     // omits them sends the model guessing at exactly the two decisions it has to
     // make (compose a version in, put a tool on the tool face).
     for ([_][]const u8{
-        "ext init",       "--script",   "ext build",    "ext run",    "--arg",
+        "ext init",       "--zig",      "ext build",    "ext run",    "--arg",
         "ext activate",   "--user",     "ext trust",    "ext api",    "ext sync",
         "ext seed",       "ext prune",  "--dry-run",    "--activate", "session new",
         "--with",         "--pin",      "--parent",     "--prompt",   "session step",
@@ -132,9 +132,12 @@ test "cli ext api: permissions and examples carry no document citations and walk
     defer alloc.free(examples.stdout);
     try std.testing.expectEqual(@as(u8, 0), examples.code);
     for ([_][]const u8{
-        "ext init --script", "ext build",       "ext run",  "--arg",
-        "ext activate",      "--pin",           "--with",   "--user",
-        "ext trust",         "session outcome", "ext sync", "ext prune",
+        "ext init my.helper", "ext build",       "ext run",  "--arg",
+        "ext activate",       "--pin",           "--with",   "--user",
+        "ext trust",          "session outcome", "ext sync", "ext prune",
+        // The default scaffold is a script on the `plain` wire, so the worked
+        // path has to show what a script actually reads (DESIGN §7.1/§7.3).
+        "NULYA_ARG_",         "--zig",
     }) |needle| {
         std.testing.expect(std.mem.indexOf(u8, examples.stdout, needle) != null) catch |err| {
             std.debug.print("`ext api examples` never shows '{s}'\n", .{needle});

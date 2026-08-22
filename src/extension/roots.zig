@@ -8,6 +8,7 @@
 //! search order or on where a frozen entry lives.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const manifest = @import("manifest.zig");
 // `Roots.store` is a method, so the module import carries a distinct name
 // rather than being shadowed inside the struct body.
@@ -79,11 +80,36 @@ pub const Roots = struct {
         /// cwd, which is not this process's cwd. Caller owns the result.
         pub fn entryPathAbs(self: Resolved, alloc: std.mem.Allocator, roots: *const Roots) ![]u8 {
             const rt = self.manifest.runtime orelse return error.MissingRuntime;
-            const entry_rel = try roots.store(self.root).versionRuntimeEntryPath(alloc, self.id, self.version, rt);
+            const entry_rel = roots.store(self.root).versionRuntimeEntryPath(alloc, self.id, self.version, rt) catch |err| {
+                // The one line that carries what `EntryUnsupportedOnHost` cannot
+                // (the `reportBrokenActive` precedent in `composition.zig`): a
+                // Zig error has no payload, and "which package, and on which
+                // host" is the whole of what the reader has to know. Best
+                // effort — a failure to say it never changes the failure.
+                if (err == error.EntryUnsupportedOnHost) reportEntryUnsupported(roots.io, self.id, self.version);
+                return err;
+            };
             defer alloc.free(entry_rel);
             return std.fs.path.join(alloc, &.{ roots.entries[self.root].real, entry_rel });
         }
     };
+
+    /// Name the package a per-OS `runtime.entry` does not cover on this machine
+    /// (DESIGN §7.1). stderr, so `session step --stream` keeps stdout pure JSON —
+    /// the channel `composition.reportBrokenActive` and the kernel-drift warning
+    /// already use. Silent under `builtin.is_test` for that function's reason:
+    /// unit tests construct this state on purpose and assert the error, and a
+    /// repair line about a tmp store reads as advice about a real one.
+    fn reportEntryUnsupported(io: std.Io, id: []const u8, version: []const u8) void {
+        if (builtin.is_test) return;
+        var buf: [512]u8 = undefined;
+        const line = std.fmt.bufPrint(
+            &buf,
+            "extension {s}@{s} declares no runtime entry for {s}; see `nulya ext inspect {s}@{s}`\n",
+            .{ id, version, @tagName(builtin.os.tag), id, version },
+        ) catch return;
+        std.Io.File.stderr().writeStreamingAll(io, line) catch {};
+    }
 
     /// The version an id's `current` selects, first active root winning
     /// (`firstActive`), with its validated manifest. Null when no root points at

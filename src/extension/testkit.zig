@@ -74,7 +74,8 @@ pub fn writeFrozenVersion(
     var binary_digest: ?[]u8 = null;
     defer if (binary_digest) |d| alloc.free(d);
     if (m.runtime) |rt| {
-        const entry = try std.fmt.allocPrint(alloc, "{s}{s}", .{ rt.entry, integrity.exe_suffix });
+        const host_entry = rt.entry.forHost() orelse return error.EntryUnsupportedOnHost;
+        const entry = try std.fmt.allocPrint(alloc, "{s}{s}", .{ host_entry, integrity.exe_suffix });
         defer alloc.free(entry);
         const entry_sub = try std.fs.path.join(alloc, &.{ version_rel, entry });
         defer alloc.free(entry_sub);

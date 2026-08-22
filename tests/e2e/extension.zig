@@ -1857,27 +1857,33 @@ fn readActive(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, root_rel: []
     return alloc.dupe(u8, std.mem.trim(u8, raw, " \t\r\n"));
 }
 
-/// Write a host-appropriate script extension DRAFT under `root_rel`; no build.
+/// Write a script extension DRAFT under `root_rel`; no build. Exactly what
+/// `ext init` scaffolds — one manifest naming an entry per OS, and both scripts,
+/// because a build checks that EVERY declared variant is in the snapshot.
 fn writeScriptDraft(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, root_rel: []const u8, id: []const u8) !void {
-    const windows = @import("builtin").os.tag == .windows;
-    const script_name = if (windows) "run.ps1" else "run.sh";
-    const entry = if (windows) "src/run.ps1" else "src/run.sh";
-    const interpreter = if (windows) "powershell" else "sh";
-
     const ext_dir = try std.fs.path.join(alloc, &.{ root_rel, id });
     defer alloc.free(ext_dir);
     const src_dir = try std.fs.path.join(alloc, &.{ ext_dir, "src" });
     defer alloc.free(src_dir);
     try ws.createDirPath(io, src_dir);
 
-    const manifest_bytes = try templates.scriptManifestJson(alloc, id, "do_thing", entry, interpreter);
+    const manifest_bytes = try templates.scriptManifestJson(alloc, id, "do_thing");
     defer alloc.free(manifest_bytes);
     const manifest_rel = try std.fs.path.join(alloc, &.{ ext_dir, "extension.json" });
     defer alloc.free(manifest_rel);
     try ws.writeFile(io, .{ .sub_path = manifest_rel, .data = manifest_bytes });
-    const script_rel = try std.fs.path.join(alloc, &.{ src_dir, script_name });
-    defer alloc.free(script_rel);
-    try ws.writeFile(io, .{ .sub_path = script_rel, .data = if (windows) templates.script_ps1 else templates.script_sh });
+
+    const sh = try templates.scriptSh(alloc, id);
+    defer alloc.free(sh);
+    const sh_rel = try std.fs.path.join(alloc, &.{ src_dir, "run.sh" });
+    defer alloc.free(sh_rel);
+    try ws.writeFile(io, .{ .sub_path = sh_rel, .data = sh });
+
+    const ps1 = try templates.scriptPs1(alloc, id);
+    defer alloc.free(ps1);
+    const ps1_rel = try std.fs.path.join(alloc, &.{ src_dir, "run.ps1" });
+    defer alloc.free(ps1_rel);
+    try ws.writeFile(io, .{ .sub_path = ps1_rel, .data = ps1 });
 }
 
 /// Write a pure-skill (data kind) extension DRAFT at `dir_rel`; no build.
@@ -1910,16 +1916,40 @@ fn writeSkillDraft(
 
 // ── M5b: per-step usage on the assistant event (DESIGN §3.1) ────────────────
 
-/// Scaffold a host-appropriate script extension (PowerShell on Windows, POSIX sh
-/// elsewhere) and build it into an immutable version WITHOUT a toolchain. The
-/// `zig_exe` argument is ignored for scripts — passed only to satisfy the shared
-/// build entry point. Returns the built version id; caller frees.
+/// A JSON-RPC script entry, PowerShell and POSIX sh. `ext init` no longer
+/// scaffolds these — its default is the `plain` wire (DESIGN §7.1) — but the
+/// JSON-RPC wire is still what a script MAY declare, and the test below is the
+/// standing proof that a script speaking it goes the whole way. So the fixture
+/// lives here, where its consumer is, rather than as a template nothing
+/// generates.
+const jsonrpc_script_ps1 =
+    \\$ErrorActionPreference = 'Stop'
+    \\$in = [Console]::In.ReadToEnd()
+    \\$id = 'call'
+    \\try { $req = $in | ConvertFrom-Json; if ($req.id) { $id = [string]$req.id } } catch {}
+    \\$resp = [ordered]@{ jsonrpc = '2.0'; id = $id; result = [ordered]@{ greeting = 'hello from a Nulya script extension' } }
+    \\[Console]::Out.Write(($resp | ConvertTo-Json -Compress))
+    \\
+;
+
+const jsonrpc_script_sh =
+    \\#!/bin/sh
+    \\req=$(cat)
+    \\id=$(printf '%s' "$req" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+    \\[ -z "$id" ] && id=call
+    \\printf '{"jsonrpc":"2.0","id":"%s","result":{"greeting":"hello from a Nulya script extension"}}' "$id"
+    \\
+;
+
+/// Scaffold a host-appropriate JSON-RPC script extension (PowerShell on Windows,
+/// POSIX sh elsewhere) and build it into an immutable version WITHOUT a
+/// toolchain. Returns the built version id; caller frees.
 fn scaffoldAndBuildScript(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, id: []const u8, tool_name: []const u8) ![]u8 {
     const windows = @import("builtin").os.tag == .windows;
     const script_name = if (windows) "run.ps1" else "run.sh";
     const entry = if (windows) "src/run.ps1" else "src/run.sh";
     const interpreter = if (windows) "powershell" else "sh";
-    const body = if (windows) templates.script_ps1 else templates.script_sh;
+    const body = if (windows) jsonrpc_script_ps1 else jsonrpc_script_sh;
 
     const ext_dir = try std.fs.path.join(alloc, &.{ ".nulya", "extensions", id });
     defer alloc.free(ext_dir);
@@ -1927,7 +1957,19 @@ fn scaffoldAndBuildScript(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, 
     defer alloc.free(src_dir);
     try ws.createDirPath(io, src_dir);
 
-    const manifest_bytes = try templates.scriptManifestJson(alloc, id, tool_name, entry, interpreter);
+    // The wire is left unwritten on purpose: absent means JSON-RPC, which is
+    // what every manifest predating `runtime.wire` says.
+    const manifest_bytes = try std.fmt.allocPrint(alloc,
+        \\{{
+        \\  "schema": "nulya.extension/v2",
+        \\  "id": "{s}",
+        \\  "runtime": {{ "entry": "{s}", "interpreter": "{s}" }},
+        \\  "contributes": {{
+        \\    "tools": [{{ "name": "{s}", "description": "A script tool.", "input": {{ "type": "object", "properties": {{}} }} }}]
+        \\  }}
+        \\}}
+        \\
+    , .{ id, entry, interpreter, tool_name });
     defer alloc.free(manifest_bytes);
     const manifest_rel = try std.fs.path.join(alloc, &.{ ext_dir, "extension.json" });
     defer alloc.free(manifest_rel);
@@ -2030,7 +2072,7 @@ test "manifest audience: the frozen version keeps what the draft declared, and a
     const entry = if (windows) "src/run.ps1" else "src/run.sh";
     const interpreter = if (windows) "powershell" else "sh";
     const script_name = if (windows) "run.ps1" else "run.sh";
-    const script_body = if (windows) templates.script_ps1 else templates.script_sh;
+    const script_body = if (windows) jsonrpc_script_ps1 else jsonrpc_script_sh;
 
     // A script package, so this costs no toolchain: three tools, one for each
     // thing a package can say about who a tool is for.

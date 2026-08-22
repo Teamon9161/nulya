@@ -114,9 +114,16 @@ pub const Store = struct {
 
     /// Root-relative path of the version's entry, dispatching on runtime kind.
     /// Caller owns the result.
+    ///
+    /// `error.EntryUnsupportedOnHost` when the frozen manifest declares entries
+    /// per OS and names none for this one (DESIGN §7.1). A real state of a
+    /// perfectly valid version — the package simply does not run here — so it is
+    /// its own error rather than an integrity fault; `Roots.Resolved.entryPathAbs`
+    /// is where it gets named.
     pub fn versionRuntimeEntryPath(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8, rt: manifest.Runtime) ![]u8 {
-        if (manifest.isScript(rt)) return self.versionScriptEntryPath(alloc, id, version, rt.entry);
-        return self.versionEntryPath(alloc, id, version, rt.entry);
+        const entry = rt.entry.forHost() orelse return error.EntryUnsupportedOnHost;
+        if (manifest.isScript(rt)) return self.versionScriptEntryPath(alloc, id, version, entry);
+        return self.versionEntryPath(alloc, id, version, entry);
     }
 
     pub fn versionExists(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8, level: Level) bool {

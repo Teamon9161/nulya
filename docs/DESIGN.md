@@ -317,14 +317,26 @@ OS 不给 job（老 Windows 的嵌套限制、或 nulya 自己跑在受限 job �
 
 > 任何 **model-visible** 的东西必须能从 ledger 重建。Extension 只能 **propose**，kernel **append**，PromptIR **project**。Extension 永不 rewrite PromptIR / system prompt。
 
-### 7.1 形态：原生可执行 + stdio JSON-RPC
+### 7.1 形态：原生可执行 + stdio 上的两种 wire
 
-Extension = 子进程；wire protocol 就是 ABI。不用 `.so/.dll`（ABI / Zig 版本 / crash 带死 host / allocator 所有权），不用 WASM（与原生 + 内嵌工具链冲突，削弱语言无关性）。协议不绑定语言，runtime 有两种，由 `runtime.entry` 前缀区分（纯语法、无需探盘）：
+Extension = 子进程；wire protocol 就是 ABI。不用 `.so/.dll`（ABI / Zig 版本 / crash 带死 host / allocator 所有权），不用 WASM（与原生 + 内嵌工具链冲突，削弱语言无关性）。协议不绑定语言，runtime 有两种 kind，由 `runtime.entry` 前缀区分（纯语法、无需探盘）：
 
 - **编译 Zig**：`entry = "bin/<name>"`，`nulya ext build` 从 `src/main.zig` 编译出 `bin/<name><exe>`；version 含 compiler identity。
 - **脚本**：`entry = "src/<file>"`（+ 可选 `runtime.interpreter`，如 `powershell` / `sh` / `python3`），**不编译**，原样冻结进 `package/`，运行时 spawn `[interpreter, <frozen entry>]`（无 interpreter 则直接执行，如 Windows `.cmd` / 带 shebang 的可执行）；version = `hash(snapshot)`**不含** compiler identity，因此跨机器、跨 zig 版本稳定（§7.4）。
 
-`nulya ext init --script` 按宿主平台生成脚本骨架（Windows `run.ps1` + powershell / 其余 `run.sh` + sh）。脚本与编译 extension 共用 seal / integrity / store / activate / rollback / usage，区别只在"是否编译"和 hash 是否含 compiler。
+**`runtime.wire?`（`"jsonrpc"`（缺省）/ `"plain"`）与 kind 正交**——它说的是"怎么跟这个进程说话"，不是"这是什么进程"，所以**编译的 Zig 也可以声明 `plain`**。缺省是 `jsonrpc`：这个字段出现之前的每一份 manifest 说的就是它，与 `activation` 同一条纪律（类型错在 parse 是 `WrongType`，认不出的词在 validate 是 `InvalidWire`，缺省的读法定在 `manifest.zig` 一处而不是各读者手里）。两种 wire 的**其余一切完全相同**：同一个 `Environment.runExtension`、同一条超时与杀整棵树、同一份净化过的 env（含 `NULYA_EXE` / session 内 `NULYA_SESSION`）、同一个 cwd、同一种结果形状；`nulya ext run <id> <tool> --arg k=v` 与模型自己的调用走同一条路，脚本看不出是谁在调。契约写在 `protocol.zig` 的模块注释顶部（= `nulya ext api protocol` 打印的东西，零漂移），细节见 §7.3。
+
+**`plain` 存在的理由**：M2b 之后随仓库带的六个有 runtime 的 extension 全是编译 Zig，一个脚本都没有——因为 JSON-RPC 要在 stdin 上解析 JSON（`sh` 没有解析器、Windows 没 `jq`）、要把同一个 `id` 回echo。PLAN §0.1 #3 的"脚本默认"因此名存实亡。`plain` 把这一层去掉：**stdin 是这次调用的 arguments 对象，env 里多出 `NULYA_TOOL` 与每个顶层标量参数的 `NULYA_ARG_<k>`，stdout 原样就是结果，退出码就是成败**——五行 `sh` 就是一个真 tool。
+
+**`runtime.entry` / `runtime.interpreter` 各自既可以是字符串，也可以是按 OS 的对象**：`{ "<os>": "…", …, "default"?: "…" }`，`<os>` 用 Zig `builtin.os.tag` 的名字（`windows` / `linux` / `macos` / …）。解析顺序：**宿主 os → `default` → 没有**。
+
+- **一个包一个 version**：snapshot 本来就收整个 `src/**`，所以每个平台的变体都在**同一个内容寻址的版本**里，`v-…` 在每台机器上指同一个包，只有"跑哪个文件"不同。这正是要的——从前一个 manifest 只有一个 `interpreter`，`ps1` + `sh` 没法共用一个版本。
+- **对象形式只许 script kind**：所有变体都必须在 `src/` 下；对象里出现 `bin/`、或混着 `bin/` 与 `src/` → `InvalidEntry`（一个版本 id 说不出"这台机器上是编译的、那台是脚本"两件事）。编译 kind 的跨平台是**交叉编译**，不在这个字段里。`isScript` / `implementationKind` 因此看**全部变体**。
+- **OS 键是封闭词表**：不是 `std.Target.Os.Tag` 的名字、也不是 `default` → `InvalidEntry`（`audience` 那条纪律：写错 `"win"` 否则就等于"Windows 上没有入口"，而那个后果要到一场 session 之后才现形）。
+- **build 校验每个声明的变体都在 snapshot 里**（`validateScriptEntries`，与 `validateSystemPrompts` 检查 system prompt 文件存在同一先例）：建它的那台机器是唯一能发现"Windows 那个变体根本没写"的地方。
+- **本机没有入口 = 一个可命名的状态，不是坏包**：它照样 build、照样 activate；只有真要跑它时才失败——pin 它的 `session new` 以新错误 `EntryUnsupportedOnHost` **硬失败**（`roots.Resolved.entryPathAbs` 先往 stderr 点名 `<id>@<version>` 与宿主 os，`reportBrokenActive` 那条先例：Zig 错误没有 payload，而"哪个包、在哪个 host"正是读的人要知道的全部），`ext run` 打同一行然后 exit 1。判据只有一处实现（`store.versionRuntimeEntryPath`）。
+
+`nulya ext init` **缺省生成脚本骨架**（`src/run.sh` + `src/run.ps1` 两个文件、manifest 用对象形式的 entry + interpreter + `"wire": "plain"`、tool input 声明一个可选 `name`），`--zig` 才是编译骨架（仍 jsonrpc）；`--script` 作为无操作别名保留一个版本期、usage 不再列它。两个模板都**不写 `permissions`**——内核解析它但没有读者（§9），而模板被复制的次数远多于被读的次数。脚本与编译 extension 共用 seal / integrity / store / activate / rollback / usage，区别只在"是否编译"和 hash 是否含 compiler。
 
 ### 7.2 Store roots：搜索顺序（首个 active 持有者胜）
 
@@ -416,7 +428,25 @@ extension 装在**多个 store root** 里，按固定顺序搜索（`extension/r
 
 ### 7.3 Wire protocol（`protocol.zig` / `invoke.zig`）
 
-JSON-RPC 2.0，oneshot：spawn → stdin 一条 request → stdout 一条 response → exit。
+oneshot：spawn → stdin 一条 request → 读 stdout → exit。两种 wire 由 manifest 的 `runtime.wire` 选（§7.1），**一次调用的其余一切两边完全相同**：同一条 `Environment.runExtension`、同一个超时与杀整棵树、同一份净化 env（含 `NULYA_EXE` / `NULYA_SESSION`）、同一个 cwd、同一个 `ToolInvocation` 结果形状；`nulya ext run` 与模型的调用走同一条路，runtime 分辨不出调用者。
+
+**`"wire": "plain"`**（新）——给"几行 shell 就能做完"的那一类：
+
+```
+stdin   这次调用的 arguments：一个 compact JSON object（模型写的原文；没有参数就是 `{}`）
+env     NULYA_TOOL=<tool name>；外加对每个**顶层**且值是 string / number / bool 的键 `k` 一个
+        NULYA_ARG_<k>=<值>（string 原样、number 按 JSON 文本、bool 是 true / false）。
+        数组 / 对象 / null 不导出，键名不在 `[A-Za-z0-9_]+` 里的也不导出——它们仍在 stdin 上。
+stdout  这个 tool 的文本输出，**原样**；它就是模型看到的字节（下面那条字符串结果规则，**不加第二条**）。
+exit    0 = 成功；非 0 = 一次**失败的调用**，文本是 `exit <code>` + stderr（经 `emit.headTail` 的既有预算），
+        stdout 若非空也附在后面。
+```
+
+- **arguments 必须是 JSON object**，两种 wire 同一条规则、同两个错误（`InvalidArgumentsJson` / `ArgumentsNotObject`），且在 spawn **之前**判——一个 tool 的 `input` schema 描述不了的东西不该被送进去。
+- **不导出结构**是刻意的：环境变量是字符串，替数组/对象发明一种序列化就等于给脚本第二种参数格式，而 stdin 上那份原本就是完整的。键名不合法时也不改写它（改写不会让 shell 读得懂），值里含 NUL 字节的同样跳过（NUL 在两个平台上都会**截断**环境字符串，静默截断比不给更糟）。
+- 每次调用的这几个变量是**那一次 spawn 的一份 env 拷贝**，进程级的净化 map 不被改动；`env_extra` 为空（= 每一次 JSON-RPC 调用）时传的就是 map 自己，所以那条路一个字节都没变。
+
+**`"wire": "jsonrpc"`（缺省）**：spawn → stdin 一条 request → stdout 一条 response → exit。
 
 ```json
 { "jsonrpc": "2.0", "id": 17, "method": "tool/call", "params": { "name": "web_search", "arguments": { "query": "…" } } }
@@ -440,7 +470,8 @@ draft ──build──▶ versions/v-<hash>（immutable）──activate──�
 
 - **version id = `hash(canonical PackageSnapshot + compiler_identity + target)`，其中 `compiler_identity` 与 `target` 只对 compiled extension 非空。** 三种 implementation kind（`manifest.ImplementationKind`）决定什么进身份：`data`（无 runtime，纯 skill / system_prompt）与 `script`（`src/…` 冻结即跑、不编译）都是**纯 snapshot 身份**，`compiler_identity = target = ""`，因此跨平台稳定、**建时根本不需要 zig**；只有 `compiled`（`bin/…` 由 Zig 编出，二进制依赖编译器与 host target）才把两者算进 hash。snapshot 收 `extension.json`、有 runtime 时的 `src/**`、声明的 skills / system_prompts 目录，按 `relative_path + len + bytes` 排序 hash；`versions/`、`.zig-cache/` 不进。（seal.json 仍记录 host / compiler / target 作为诊断元数据——metadata ≠ identity。）
 - **落点由 manifest id + store root 决定，不由 draft 路径决定**：`nulya ext build <path> [--user]` 把版本写进 `<store root>/<manifest.id>/versions/<v>`。root 的选择：`--user` → user root；否则 draft 若在某个 store root 之内 → 该 root（所以 `.nulya/extensions/<id>` 的 draft 建出来的位置与从前逐字节相同）；否则 → workspace root。这让 draft 可以待在任意路径（仓库里 git 管着的 `extensions/…`、`modes/…`），建出来的版本 `activate` 找得到，而不是在源码旁留下一个孤儿 `versions/`。编译进程的 cwd 就是 dest root（frozen source 与 `-femit-bin` 都在版本目录内），所以绝对路径的 user root 不需要给 `std.Io.Dir` 传绝对 sub_path。
-- 版本目录冻结 snapshot：编译 extension 得 `versions/v-…/{extension.json, package/src/**, package/skills/**, bin/<entry><exe>}` + seal（含 `binary_digest`）；**编译从 frozen `package/src/main.zig` 进行**，不读 mutable draft。脚本 extension 得 `versions/v-…/{extension.json, package/src/**, …}` + seal（`binary_digest` = null；脚本已在 `package/src/` 里被 package_digest 覆盖），运行入口 = `package/<entry>`。同源码再 build = 同 version，`already_built`。
+- 版本目录冻结 snapshot：编译 extension 得 `versions/v-…/{extension.json, package/src/**, package/skills/**, bin/<entry><exe>}` + seal（含 `binary_digest`）；**编译从 frozen `package/src/main.zig` 进行**，不读 mutable draft。脚本 extension 得 `versions/v-…/{extension.json, package/src/**, …}` + seal（`binary_digest` = null；脚本已在 `package/src/` 里被 package_digest 覆盖），运行入口 = `package/<本机那个 entry 变体>`。同源码再 build = 同 version，`already_built`。
+  - **按 OS 的 `runtime.entry`（§7.1）不给版本身份加任何东西**：snapshot 本来就收整个 `src/**`，所以 `src/run.ps1` 与 `src/run.sh` 都在里面、`v-…` 在每台机器上都一样——这正是"一个包一个版本、每个平台各跑各的"能成立的原因。build 因此校验**每一个**声明的变体都在 snapshot 里（`validateScriptEntries`，`validateSystemPrompts` 的存在性那一半），不只是本机那个：建它的那台机器是唯一能发现另一个平台的变体根本没写的地方。运行时才按宿主选（`store.versionRuntimeEntryPath`，唯一一处），选不出就是 `EntryUnsupportedOnHost`（§7.1）而不是 integrity 故障——那个版本一点毛病都没有，只是不在这台机器上跑。
 - **build 先在别的 root 找，找不到才调编译器**（`buildExtensionReusing` 的 `donors`，是内容寻址的直接推论、不是新语义）：某个 root 若持有**同一份 snapshot**（seal 的 `package_digest`）、**同一个 target**、且**同一个 compiler identity**，那它持有的就是本次 build 会产出的字节——整树复制进 dest root、**再验一次 `validateVersionDir`（`.sealed`，见下一条）**，与本地编译等价。stdout 因此多一种状态：`(built, copied from <root spec>, in <dest>)`。复制发生在**本机 `ext build` 内**，所以 §9 的出生地信任规则一字不变。
   - 匹配键是 seal 的三元组而不是"算好的 `v`"，是为了**编译器缺席时也能匹配**：compiled 版本的 id 含 compiler identity，没有 zig 就算不出 `v`。所以 `compilerIdentity` 不再提前失败——**问得到**就把 compiler 也算进匹配（等价于按 `v` 精确找，至多一个候选），**问不到**就只按 `(package_digest, target)` 找（同一份源码可能被几个 zig 各建过一次，候选按 version id 排序取第一个，不依赖目录顺序）。真的要编译时才报 `ZigVersionUnreadable`。这条正是"一台没有工具链的机器也能装上 user store 里已有的 compiled 能力"的全部机制。
 - **integrity 校验分两层，调用点显式选（`integrity.Level`，无默认值）。** 一个冻结版本目录被问的其实是两个不同的问题：**结构完整**（目录在、`seal.json` 能 parse、`extension.json` 能 parse + validate 且 id 对得上、manifest 声明的每条路径与 compiled 的 `bin/<entry>` 都在）与**字节仍是当初被 seal 的那些**（重算 package digest 对 seal、重算 version id 对目录名、重算 binary digest 对 seal）。从前两个问题一起答，于是**每一次只读投影都要把整棵版本树 sha256 一遍**——那里面是几 MB 的编译产物，`ext list` 在一个装了三个 compiled extension 的 user store 上因此要 0.8 s，而前端每按一次键就 spawn 一次。现在两问分开，每个读点自己说要哪一层：
@@ -719,7 +750,9 @@ NULYA_INTEGRATION_PROFILE=deepseek-anthropic zig build integration
 ## 14. CLI 表面（`cli.zig` 只是 dispatcher，每个动词族一个 `cli/<verb>.zig`；都不是 LLM tool，经 shell 调用）
 
 ```
-nulya ext init [--script] [--user] <id> [tool] | build <path> [--user]
+nulya ext init [--zig] [--user] <id> [tool] | build <path> [--user]
+                                                         ← 缺省是脚本骨架（`src/run.sh` + `src/run.ps1`，`wire: plain`，§7.1）；
+                                                           `--zig` 才是编译骨架（jsonrpc）。`--script` 是无操作别名，保留一个版本期
           | sync [--user] [--activate] [--dry-run]        ← build 这个 root 下的每个 draft（§7.2）
           | seed [--user] [<id>…] [--force] [--dry-run]   ← 把二进制内嵌的自带 draft 写进/更新到该 root（§7.2/§7.8）
           | run <id>[@<version>] [tool] (<json-args> | --arg k=v …)
@@ -762,7 +795,7 @@ nulya                       ← 无参数：同 `nulya help`（跑一个二进�
 ```
 
 - **`nulya help` = 自描述入口，`usage` 与上面这张表逐动词对齐是约定。** `cli/common.zig` 把 usage 拆成**按动词族**的常量（`ext_usage` / `session_usage` / `config_usage` / `skill_usage` / `src_usage` / `toolchain_usage`），`help` 拼成一屏，**bare `nulya ext` / `nulya session` / `nulya skill` / `nulya config` / `nulya toolchain` 各印自己那块**（`common.usageSection`）——同一份文本，两处不可能对同一个动词说两样话（原来 `cli/session.zig` 里那份独立的 session usage 已删）。加动词/加 flag 就同时改这张表和那几个常量。未知命令 → stderr `unknown command '<x>'; run \`nulya help\`` + exit 1（stdout 保持空）。**bare `nulya` 就是这一屏**（demo 搬去 `nulya demo`：跑一个不带参数的二进制不该开始写 session 文件，而"能做什么"正是那时唯一想知道的事；`zig build run` 改成传 `demo`，冒烟用法不变），bare `nulya src` 仍是列全树。整屏**一屏以内**是硬约束（模型每次读都在付 token；当前 45 行，e2e 钉预算，动它要有真能力到场——`--image` +2、`ext seed` +1、`config refresh` +1、`demo` +1 是先例）。
-- **`nulya ext api` 三个 topic 的现状**：`protocol`（缺省）= 真实 `extension/protocol.zig` 源码；`permissions` = 今天的 authority（与 shell 同权、无 sandbox；子进程 env 净化后**加** `NULYA_EXE` / session 内 `NULYA_SESSION`；tool 拿不到对话；`manifest.permissions` 仅声明、无强制；extension tool 默认 30s / `timeout_ms` 上限 600s、`shell` 默认 120s / 上限 600s；workspace store 的 trust gate）；`examples` = 一条完整路径（`ext init --script` → `build` → `run <id>@<v> --arg k=v` → `activate` → `session new --pin` → 故意不 activate 的包用 `--with <id>@<v>` → `--user` → `ext trust` → `session outcome`）。
+- **`nulya ext api` 三个 topic 的现状**：`protocol`（缺省）= 真实 `extension/protocol.zig` 源码；`permissions` = 今天的 authority（与 shell 同权、无 sandbox；子进程 env 净化后**加** `NULYA_EXE` / session 内 `NULYA_SESSION`；tool 拿不到对话；`manifest.permissions` 仅声明、无强制；extension tool 默认 30s / `timeout_ms` 上限 600s、`shell` 默认 120s / 上限 600s；workspace store 的 trust gate）；`examples` = 一条完整路径（`ext init`（缺省脚本 + `plain` wire，连三行 `sh` 的样子一起给出）→ `build` → `run <id>@<v> --arg k=v` → `activate` → `session new --pin` → 故意不 activate 的包用 `--with <id>@<v>` → `--user` → `ext trust` → `session outcome`）。
 - **model-facing 文本零文档引用**：kernel prompt（§7.5）、`usage`、`ext api` 的 `permissions` / `examples`、随仓库带的 `SKILL.md`——模型读得到的字只写行为与用法，**不出现 `DESIGN §x` / `PLAN §x` / 文件名**（模型读不到 docs，extension 还可能装到别的 workspace）。文档引用只待在代码注释与 docs 里；e2e 断言这几处不含 `DESIGN` / `PLAN`。
 
 - `session new --profile P [--model ID]`：`--profile` 是 config 里的 profile 名（默认 `active_profile`），`--model` 是该 profile 服务的一个 model id（默认 `ProviderProfile.defaultModel()`；接受任意 id，选择器只列目录里的）。不存在的 profile 直接拒绝（exit 1，提示 `nulya config show`）；存在但 credential 不可用的 profile 仍冻结为 scripted（离线替身，`resolveDescriptor` 的语义不变），但 stderr 明说。

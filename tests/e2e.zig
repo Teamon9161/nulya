@@ -17,9 +17,13 @@
 //! loop to completion, and `--max-steps` is enforced by the kernel even when the
 //! loop-mode model would run forever.
 //!
-//! And script extensions (DESIGN §7.1): a script extension goes init(--script) →
-//! build (no toolchain) → activate → run → pinned native and executes through
-//! its interpreter; its version excludes compiler identity and is rebuild-stable.
+//! And script extensions (DESIGN §7.1): a script extension goes init → build (no
+//! toolchain) → activate → run → pinned native and executes through its
+//! interpreter; its version excludes compiler identity and is rebuild-stable.
+//! Both wires are covered — JSON-RPC (a manifest that says nothing about
+//! `wire`) and `plain` (arguments on stdin, `NULYA_ARG_<k>` in the environment,
+//! stdout verbatim) — as is a per-OS `runtime.entry`: the host picks its own
+//! variant, and a version naming none for this host is a named hard failure.
 //!
 //! And the slow loop's substrate (M5): a verdict recorded while another process
 //! holds the session lease (DESIGN §3.3); per-step usage on the assistant event,
@@ -64,6 +68,7 @@
 //!
 //!   e2e/support.zig      shared fixtures — CLI runners, scaffolds, fake models
 //!   e2e/extension.zig    the extension lifecycle, store roots, bundled packages
+//!   e2e/script_wire.zig  the `plain` wire and per-platform entry / interpreter
 //!   e2e/session.zig      the durable ledger and the `nulya session *` surface
 //!   e2e/vision.zig       images in a user turn: the catalog gate, the line, events
 //!   e2e/background.zig   background tasks: the supervisor, `nulya task …`,
@@ -79,6 +84,7 @@
 comptime {
     _ = @import("e2e/support.zig");
     _ = @import("e2e/extension.zig");
+    _ = @import("e2e/script_wire.zig");
     _ = @import("e2e/session.zig");
     _ = @import("e2e/vision.zig");
     _ = @import("e2e/background.zig");

@@ -446,7 +446,7 @@ fn resolvePinnedBinding(
         .name = spec.name,
         .description = spec.description,
         .input_schema = spec.input_schema,
-    }, entry_abs, rt.interpreter, spec.timeout_ms);
+    }, entry_abs, if (rt.interpreter) |ip| ip.forHost() else null, spec.timeout_ms, rt.wireOf());
 }
 
 fn findResolved(resolved: []const roots_mod.Roots.Resolved, id: []const u8) ?roots_mod.Roots.Resolved {

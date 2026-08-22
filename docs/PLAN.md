@@ -27,7 +27,7 @@ kernel  = ledger 文件格式 + PromptIR 投影 + 一次 step + 工具执行 + c
 |---|---|---|---|
 | 1 | ledger 落盘 / resume 属"等第二个前端出现再做" | **排第一** | subagent=自调用、resume≡re-spawn、fork、evolution 读轨迹、crash recovery 全站在"ledger 在磁盘上"的假设上；usage journal 已 durable 而对话不 durable 是倒挂 |
 | 2 | generation = 事件投影，compaction 是一种事件 | **generation == ledger 文件**；compaction / fork = 新文件 + parent 指针 | 单文件永远单 generation、只 append，前缀不变量成了文件系统性质；`currentGeneration()` 删掉；fork 免费 |
-| 3 | extension 制造路径 = Zig 源码 → 内嵌工具链编译 | **脚本 extension 默认**（`run.sh` / `run.ps1` / `run.py` 任意可执行）；Zig 是**实测需要时**的优化 | 制造循环发生在 AI 所在机器，摩擦决定尝试次数；多数有价值能力在 Zig 里也只是 wrap 系统命令。与"先测量再持久化"同一纪律 |
+| 3 | extension 制造路径 = Zig 源码 → 内嵌工具链编译 | **脚本 extension 默认**（`run.sh` / `run.ps1` / `run.py` 任意可执行）；Zig 是**实测需要时**的优化 —— ✅ **已兑现**：`nulya ext init` 缺省就是脚本骨架、`--zig` 才编译，`runtime.wire: "plain"` 让 stdin 是 arguments、`NULYA_ARG_<k>` 在 env 里、stdout 原样就是结果（不必解析 JSON、不必回 id），按 OS 的 `entry` / `interpreter` 让 `sh` + `ps1` 共用**一个**版本（DESIGN §7.1/§7.3） | 制造循环发生在 AI 所在机器，摩擦决定尝试次数；多数有价值能力在 Zig 里也只是 wrap 系统命令。与"先测量再持久化"同一纪律 |
 | 4 | SessionDriver = out-of-process JSON-RPC + host-callback 通道 + `driver/*` 方法 | **driver = 脚本 + `nulya session new\|append\|step\|events\|cancel`** | 黑名单自动成立（CLI 没那些动词）；host callback / 分帧 / 背压全消失；`/goal` 是 20 行 shell |
 | 5 | Hook 三类：Provider / Middleware / Observer | **删 Middleware**，只留 Observer + propose→append | "拦截、修改"与"extension 永不 rewrite model-visible 内容"矛盾且未定义 |
 | 6 | AI reviewer 倾向默认开，门在 activate | **默认关**；门放在 **promote-to-native**，而这个门就是"**写一条 pin**"这个动作本身——由人或 evolution session 做，内核只认 pin 不认统计（DESIGN §5.1/§5.5） | existence 几乎免费（一个目录）；promote 才有真实成本（cache prefix + 每 session token）。高门槛抑制尝试、诱发 theater |
@@ -134,10 +134,13 @@ loop until objective / swarm           → 脚本
 
 ### 3.3 脚本 extension `[已落地 · M2b → DESIGN §7.1/§7.4]`
 
-✅ **已实现，现状见 [DESIGN §7.1 / §7.4](DESIGN.md)。** `runtime.entry` 的前缀区分编译（`bin/`）与脚本（`src/`）；脚本带可选 `runtime.interpreter`（`powershell` / `sh` / `python3` …），无 `src/main.zig` 就不编译，version = `hash(snapshot)`（compiler 为空串、不含 identity、跨机器稳定），seal / integrity / activate / rollback / usage 完全共用。`nulya ext init --script` 按宿主生成骨架；`nulya ext run --arg k=v` 按 manifest schema 类型生成 JSON（`'<json>'` 仍可用）。
+✅ **已实现，现状见 [DESIGN §7.1 / §7.3 / §7.4](DESIGN.md)。** `runtime.entry` 的前缀区分编译（`bin/`）与脚本（`src/`）；脚本带可选 `runtime.interpreter`（`powershell` / `sh` / `python3` …），无 `src/main.zig` 就不编译，version = `hash(snapshot)`（compiler 为空串、不含 identity、跨机器稳定），seal / integrity / activate / rollback / usage 完全共用。`nulya ext run --arg k=v` 按 manifest schema 类型生成 JSON（`'<json>'` 仍可用）。
 
-- 能力谱：**shell 一行 → 脚本 extension（`ext init --script`）→（实测有需要）native Zig** 成立。
+✅ **"脚本默认"这句话也已兑现**（ext-review Lane A）：M2b 之后随仓库带的六个有 runtime 的包一个脚本都没有，原因全是 wire——JSON-RPC 要在 stdin 上解析 JSON（`sh` 没有、Windows 没 `jq`）、要回同一个 `id`，而一个 manifest 只有一个 `interpreter` 所以 `sh` + `ps1` 共用不了一个版本。三处收口：**`runtime.wire: "plain"`**（stdin = arguments 对象、env 多 `NULYA_TOOL` 与顶层标量的 `NULYA_ARG_<k>`、stdout 原样即结果、退出码即成败；与 kind 正交，编译的 Zig 也能声明）· **按 OS 的 `entry` / `interpreter`**（对象形式，宿主 → `default` → 没有；只许 script kind，一个版本装下所有平台，本机没有入口 = `EntryUnsupportedOnHost` 点名硬失败）· **`ext init` 缺省脚本、`--zig` 才编译**（两个模板都不再写 `permissions`）。
+
+- 能力谱：**shell 一行 → 脚本 extension（`ext init`，五行 `sh`）→（实测有需要）native Zig** 成立。
 - persistent runtime（warm worker 池、LRU、TTL）仍是**先测量再做**的后期加法。
+- 仍未做：`plain` 的 streaming；把随仓库带的八个包改写成脚本（按需的事，不是这一轮的）。
 
 ### 3.4 Compaction = 开新 ledger 文件 `[已落地 · fork 原语 → DESIGN §11/§14；第一个 driver = extensions/compact]`
 

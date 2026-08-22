@@ -103,6 +103,24 @@ pub const ExtensionRequest = struct {
     /// Wall-clock cap for the oneshot call (`tool.Timeouts`, base-tools.md §3).
     /// `null` disables the guard; callers should only do that in controlled tests.
     timeout_ms: ?u32 = tool.Timeouts.extension_ms,
+    /// Environment variables for THIS call, layered on top of the sanitized
+    /// child environment — the `plain` wire's `NULYA_TOOL` / `NULYA_ARG_<k>`
+    /// (DESIGN §7.3), derived by `invoke.zig` from the same arguments JSON that
+    /// goes to stdin. Authority is unchanged: these are the model's own
+    /// arguments, not host state, and the secret denylist still governs what was
+    /// inherited (physics #6).
+    ///
+    /// Empty for the JSON-RPC wire, and an empty list is the ONE path that
+    /// spawns with the process-wide map itself — so a jsonrpc child's
+    /// environment is byte-identical to what it was before this field existed.
+    env_extra: []const EnvVar = &.{},
+};
+
+/// One name/value pair for `ExtensionRequest.env_extra`. Borrowed for the
+/// duration of the call; the child's environment map takes its own copies.
+pub const EnvVar = struct {
+    name: []const u8,
+    value: []const u8,
 };
 
 /// A completed extension run. `stdout`/`stderr` are owned by the caller's allocator.
@@ -535,12 +553,29 @@ pub const LocalEnvironment = struct {
             argv_buf[0] = req.entry_path;
             break :blk argv_buf[0..1];
         };
+        // Per-call variables (the `plain` wire's `NULYA_TOOL` / `NULYA_ARG_<k>`)
+        // are a COPY of the sanitized map with those names put on top: the
+        // process-wide map belongs to every other spawn and must not be mutated
+        // for one call. With none of them — every JSON-RPC call — the map itself
+        // is passed, so nothing about that path changed.
+        var overlay: ?std.process.Environ.Map = null;
+        defer if (overlay) |*m| m.deinit();
+        const child_env: *const std.process.Environ.Map = if (req.env_extra.len == 0) &self.env else blk: {
+            var m: std.process.Environ.Map = .init(alloc);
+            errdefer m.deinit();
+            var it = self.env.iterator();
+            while (it.next()) |entry| try m.put(entry.key_ptr.*, entry.value_ptr.*);
+            for (req.env_extra) |v| try m.put(v.name, v.value);
+            overlay = m;
+            break :blk &overlay.?;
+        };
+
         // Same tree discipline as the shell (see `Tree`): an extension is free to
         // spawn helpers of its own, and the timeout below has to end all of them.
         var tree = try Tree.spawn(self.io, .{
             .argv = argv,
             .cwd = .{ .path = req.cwd },
-            .environ_map = &self.env,
+            .environ_map = child_env,
             .stdin = .pipe,
             .stdout = .pipe,
             .stderr = .pipe,

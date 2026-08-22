@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const tool = @import("../tool.zig");
+const ext_manifest = @import("manifest.zig");
 const invoke = @import("invoke.zig");
 
 /// A frozen extension tool binding.
@@ -28,6 +29,10 @@ pub const Binding = struct {
     /// null to take the host default (`invoke.Options.timeout_ms`). Frozen with
     /// the version like everything else the manifest says.
     timeout_ms: ?u32 = null,
+    /// How to talk to this runtime (`manifest.Runtime.wireOf`), frozen with the
+    /// version for the same reason `interpreter` is: what runs and how it is
+    /// spoken to are both decided once, at composition time.
+    wire: ext_manifest.Wire = .jsonrpc,
 
     /// Build a binding that owns copies of every string it exposes, so it can
     /// outlive the transient manifest and version data it was resolved from. The
@@ -40,6 +45,7 @@ pub const Binding = struct {
         entry_path: []const u8,
         interpreter: ?[]const u8,
         timeout_ms: ?u32,
+        wire: ext_manifest.Wire,
     ) !Binding {
         const id = try alloc.dupe(u8, definition.id);
         errdefer alloc.free(id);
@@ -63,6 +69,7 @@ pub const Binding = struct {
             .entry_path = owned_entry,
             .interpreter = owned_interp,
             .timeout_ms = timeout_ms,
+            .wire = wire,
         };
     }
 
@@ -101,6 +108,7 @@ fn call(ptr: ?*anyopaque, alloc: std.mem.Allocator, req: tool.ToolRequest) anyer
         .{
             .interpreter = self.interpreter,
             .timeout_ms = self.timeout_ms orelse invoke.Options.default_timeout_ms,
+            .wire = self.wire,
         },
     );
 
@@ -211,7 +219,7 @@ test "initOwned copies every exposed string and survives the source being freed"
         .name = name,
         .description = description,
         .input_schema = input_schema,
-    }, entry_path, null, null);
+    }, entry_path, null, null, .jsonrpc);
     defer binding.deinit(alloc);
 
     // Drop the sources; the binding must not alias them.
@@ -236,7 +244,7 @@ test "initOwned leaks nothing when an interior allocation fails" {
                 .name = "web_search",
                 .description = "Search web",
                 .input_schema = "{\"type\":\"object\"}",
-            }, "/frozen/v1/bin/web-search", null, null);
+            }, "/frozen/v1/bin/web-search", null, null, .jsonrpc);
             binding.deinit(alloc);
         }
     }.run, .{});
@@ -299,6 +307,27 @@ test "a binding's declared timeout reaches the environment; without one the host
     });
     defer alloc.free(slow_result.output);
     try testing.expectEqual(@as(?u32, 600_000), slow_env.saw_timeout_ms);
+}
+
+test "a binding's declared wire decides what the child is sent and how its stdout is read" {
+    const alloc = testing.allocator;
+    var binding = testBinding();
+    binding.entry_path = "/frozen/v1/src/run.sh";
+    binding.wire = .plain;
+    // A plain runtime writes text, not an envelope; the executor hands it on.
+    var fake = FakeEnv{ .io = testing.io, .response = "hello from greeter\n" };
+    defer fake.deinit(alloc);
+
+    const result = try binding.asTool().executor.call(alloc, .{
+        .args_json = "{\"query\":\"zig\"}",
+        .ctx = .{ .environment = fake.handle(), .cwd = "ws" },
+    });
+    defer alloc.free(result.output);
+
+    try testing.expect(result.ok);
+    try testing.expectEqualStrings("hello from greeter\n", result.output);
+    // stdin is the arguments themselves — no JSON-RPC envelope in sight.
+    try testing.expectEqualStrings("{\"query\":\"zig\"}", fake.saw_request_json);
 }
 
 test "executor forwards the model's raw arguments as a tool/call request" {

@@ -1,9 +1,21 @@
-//! Scaffolding templates for `nulya ext init` (DESIGN §7.2, §7.5).
+//! Scaffolding templates for `nulya ext init` (DESIGN §7.1, §7.2, §7.5).
 //!
-//! The generated extension is a real, buildable, runnable oneshot extension: it
-//! reads one JSON-RPC request on stdin and writes one JSON-RPC response on
-//! stdout. This is what makes "the third tool is created by Nulya itself" a
-//! running demonstration rather than a diagram.
+//! Two scaffolds, because there are two wires (`manifest.Wire`):
+//!
+//!   default   a SCRIPT extension on the `plain` wire — `src/run.sh` and
+//!             `src/run.ps1`, three lines each, selected per host by the
+//!             manifest's per-OS `entry` / `interpreter`. No compiler, no JSON
+//!             to parse, nothing to echo back.
+//!   `--zig`   a compiled Zig extension on the JSON-RPC wire, for when a
+//!             compiled runtime has been measured to be needed.
+//!
+//! Both are real, buildable, runnable extensions the moment they are written.
+//! That is what makes "the second tool is created by Nulya itself" a running
+//! demonstration rather than a diagram.
+//!
+//! `permissions` is in neither: the kernel parses the field but has no reader
+//! for it (DESIGN §9), and a template is copied far more often than it is read,
+//! so an empty declaration nobody enforces would propagate as ceremony.
 
 const std = @import("std");
 
@@ -76,51 +88,59 @@ pub const example_test_json =
     \\
 ;
 
-/// A generated PowerShell script extension entry (JSON-RPC 2.0, oneshot): read
-/// one request on stdin, write one response on stdout. Frozen and run as-is — no
-/// compilation (DESIGN §7.1).
-pub const script_ps1 =
-    \\$ErrorActionPreference = 'Stop'
-    \\$in = [Console]::In.ReadToEnd()
-    \\$id = 'call'
-    \\try { $req = $in | ConvertFrom-Json; if ($req.id) { $id = [string]$req.id } } catch {}
-    \\$resp = [ordered]@{ jsonrpc = '2.0'; id = $id; result = [ordered]@{ greeting = 'hello from a Nulya script extension' } }
-    \\[Console]::Out.Write(($resp | ConvertTo-Json -Compress))
-    \\
-;
+/// The generated PowerShell entry for the `plain` wire: read one argument out of
+/// the environment, print one line. Frozen and run as-is — no compilation
+/// (DESIGN §7.1). Caller owns the returned bytes.
+///
+/// `[Console]::Out.Write` rather than `Write-Output`: stdout IS the result the
+/// model sees, so the script decides its own trailing newline instead of a
+/// cmdlet deciding it per platform.
+pub fn scriptPs1(alloc: std.mem.Allocator, id: []const u8) ![]u8 {
+    return std.fmt.allocPrint(alloc,
+        \\# stdin is this call's arguments as JSON; each simple argument is also NULYA_ARG_<key>.
+        \\$name = if ($env:NULYA_ARG_name) {{ $env:NULYA_ARG_name }} else {{ 'world' }}
+        \\[Console]::Out.Write("hello from {s}, name=$name`n")
+        \\
+    , .{id});
+}
 
-/// A generated POSIX sh script extension entry (JSON-RPC 2.0, oneshot).
-pub const script_sh =
-    \\#!/bin/sh
-    \\req=$(cat)
-    \\id=$(printf '%s' "$req" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
-    \\[ -z "$id" ] && id=call
-    \\printf '{"jsonrpc":"2.0","id":"%s","result":{"greeting":"hello from a Nulya script extension"}}' "$id"
-    \\
-;
+/// The generated POSIX sh entry for the `plain` wire. Caller owns the bytes.
+pub fn scriptSh(alloc: std.mem.Allocator, id: []const u8) ![]u8 {
+    return std.fmt.allocPrint(alloc,
+        \\#!/bin/sh
+        \\# stdin is this call's arguments as JSON; each simple argument is also NULYA_ARG_<key>.
+        \\printf 'hello from {s}, name=%s\n' "${{NULYA_ARG_name:-world}}"
+        \\
+    , .{id});
+}
 
-/// Render `extension.json` for a SCRIPT extension: a `runtime.entry` under `src/`
-/// plus an interpreter, no build step. Caller owns the returned bytes.
-pub fn scriptManifestJson(alloc: std.mem.Allocator, id: []const u8, tool: []const u8, entry: []const u8, interpreter: []const u8) ![]u8 {
+/// Render `extension.json` for a SCRIPT extension on the `plain` wire: one entry
+/// and one interpreter per OS, so a single content-addressed version runs on
+/// every platform (DESIGN §7.1). Caller owns the returned bytes.
+pub fn scriptManifestJson(alloc: std.mem.Allocator, id: []const u8, tool: []const u8) ![]u8 {
     return std.fmt.allocPrint(alloc,
         \\{{
         \\  "schema": "nulya.extension/v2",
         \\  "id": "{s}",
-        \\  "runtime": {{ "entry": "{s}", "interpreter": "{s}" }},
+        \\  "runtime": {{
+        \\    "entry": {{ "windows": "src/run.ps1", "default": "src/run.sh" }},
+        \\    "interpreter": {{ "windows": "powershell", "default": "sh" }},
+        \\    "wire": "plain"
+        \\  }},
         \\  "contributes": {{
         \\    "tools": [{{
         \\      "name": "{s}",
         \\      "description": "A generated Nulya script extension tool.",
-        \\      "input": {{ "type": "object", "properties": {{}} }}
+        \\      "input": {{ "type": "object", "properties": {{ "name": {{ "type": "string" }} }} }}
         \\    }}]
-        \\  }},
-        \\  "permissions": {{ "fs": [], "network": [], "process": [] }}
+        \\  }}
         \\}}
         \\
-    , .{ id, entry, interpreter, tool });
+    , .{ id, tool });
 }
 
-/// Render `extension.json` for `id`/`tool`. Caller owns the returned bytes.
+/// Render `extension.json` for a compiled `--zig` extension. Caller owns the
+/// returned bytes.
 pub fn manifestJson(alloc: std.mem.Allocator, id: []const u8, tool: []const u8) ![]u8 {
     return std.fmt.allocPrint(alloc,
         \\{{
@@ -134,8 +154,7 @@ pub fn manifestJson(alloc: std.mem.Allocator, id: []const u8, tool: []const u8) 
         \\      "input": {{ "type": "object", "properties": {{}} }}
         \\    }}],
         \\    "skills": []
-        \\  }},
-        \\  "permissions": {{ "fs": [], "network": [], "process": [] }}
+        \\  }}
         \\}}
         \\
     , .{ id, id, tool });

@@ -10,6 +10,7 @@
 //! (DESIGN §7.4, §12). Whether a tool is "good taste" is policy, not validation.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const tool = @import("../tool.zig");
 
 pub const schema_id = "nulya.extension/v2";
@@ -19,24 +20,126 @@ pub const schema_id = "nulya.extension/v2";
 /// list when it became a tool of the bundled `std` extension (DESIGN §7.8).
 pub const reserved_tool_names = [_][]const u8{"shell"};
 
+/// How the host talks to a runtime for one call (DESIGN §7.1, §7.3). A closed
+/// two-word vocabulary the kernel ENFORCES: it decides what is written to the
+/// child's stdin and how its stdout is read, so an unrecognized word cannot be
+/// left to a reader.
+///
+///   - `jsonrpc` : one JSON-RPC 2.0 `tool/call` request in, one response out
+///                 (`protocol.zig`). The default, so every manifest written
+///                 before this field means exactly what it meant.
+///   - `plain`   : the arguments JSON on stdin, `NULYA_TOOL` / `NULYA_ARG_<k>`
+///                 in the environment, stdout verbatim as the tool's text,
+///                 exit code as ok/failed. Five lines of `sh` can serve it.
+///
+/// Independent of `ImplementationKind`: a compiled Zig runtime may declare
+/// `plain` too. What the wire says is how to TALK to a process, not what kind
+/// of process it is.
+pub const Wire = enum {
+    jsonrpc,
+    plain,
+
+    pub fn fromString(s: []const u8) ?Wire {
+        if (std.mem.eql(u8, s, "jsonrpc")) return .jsonrpc;
+        if (std.mem.eql(u8, s, "plain")) return .plain;
+        return null;
+    }
+};
+
+/// A runtime string that may differ per host OS (DESIGN §7.1). Written either
+/// as a bare string — one value everywhere — or as an object keyed by
+/// `builtin.os.tag` names plus an optional `"default"`:
+///
+///     "entry": "src/run.sh"
+///     "entry": { "windows": "src/run.ps1", "default": "src/run.sh" }
+///
+/// One package, one version id: the snapshot already collects the whole `src/`
+/// tree, so every platform's variant is inside the same content-addressed
+/// version. That is the point — `v-…` names the same package on every machine,
+/// and only WHICH file runs differs.
+///
+/// Both forms are one representation, so every consumer iterates `variants`
+/// without asking which shape was written; `per_os` records WHICH shape the
+/// manifest used, because the two mean different things about the same list
+/// (one value for every host, versus one value per named host).
+pub const PlatformValue = struct {
+    variants: []const Variant,
+    /// The manifest wrote an object. False = a bare string, in which case
+    /// `variants` holds exactly one entry whose `os` is empty.
+    per_os: bool = false,
+
+    pub const Variant = struct {
+        /// A `std.Target.Os.Tag` name or `"default"` in the object form; empty
+        /// in the bare-string form.
+        os: []const u8,
+        value: []const u8,
+    };
+
+    pub const default_key = "default";
+
+    pub fn single(value: []const u8) PlatformValue {
+        return .{ .variants = &.{.{ .os = "", .value = value }} };
+    }
+
+    /// The value this OS gets: an exact match first, then `"default"`, then
+    /// null — "this version has no entry on that host", which is a real and
+    /// nameable state, not a fault in the package.
+    pub fn forOs(self: PlatformValue, os_name: []const u8) ?[]const u8 {
+        if (!self.per_os) return if (self.variants.len == 0) null else self.variants[0].value;
+        var fallback: ?[]const u8 = null;
+        for (self.variants) |v| {
+            if (std.mem.eql(u8, v.os, os_name)) return v.value;
+            if (std.mem.eql(u8, v.os, default_key)) fallback = v.value;
+        }
+        return fallback;
+    }
+
+    /// `forOs` for the machine this binary runs on.
+    pub fn forHost(self: PlatformValue) ?[]const u8 {
+        return self.forOs(@tagName(builtin.os.tag));
+    }
+};
+
 pub const Runtime = struct {
-    /// Relative path to the runtime entry within the package. A `bin/<name>`
-    /// entry is a COMPILED Zig extension (built from `src/main.zig`); any other
-    /// entry (e.g. `src/run.ps1`) is a SCRIPT extension frozen as-is — see
-    /// `isScript`.
-    entry: []const u8,
+    /// Relative path to the runtime entry within the package, possibly per-OS
+    /// (`PlatformValue`). A `bin/<name>` entry is a COMPILED Zig extension
+    /// (built from `src/main.zig`); any other entry (e.g. `src/run.ps1`) is a
+    /// SCRIPT extension frozen as-is — see `isScript`. The per-OS form is for
+    /// scripts only: a compiled extension's cross-platform story is cross
+    /// compilation, which this field is not.
+    entry: PlatformValue,
     /// For a script extension, the executable used to run `entry` (e.g. `sh`,
-    /// `powershell`, `python3`). Absent means the entry is directly executable
-    /// (a `.cmd`/`.bat` on Windows, or a shebang script with the exec bit).
-    interpreter: ?[]const u8 = null,
+    /// `powershell`, `python3`), possibly per-OS. Absent means the entry is
+    /// directly executable (a `.cmd`/`.bat` on Windows, or a shebang script
+    /// with the exec bit).
+    interpreter: ?PlatformValue = null,
+    /// How to talk to this runtime, kept as WRITTEN — the `activation`
+    /// discipline, for `activation`'s reason: a wrong TYPE is a parse error, an
+    /// unrecognized WORD is a named `validate` refusal (`InvalidWire`), and the
+    /// reading of ABSENT is decided once, here (`wireOf` → `.jsonrpc`), because
+    /// it is a fact about the file format rather than a judgement.
+    wire: ?[]const u8 = null,
+
+    /// How to talk to this runtime. Absent means `.jsonrpc` (see the field),
+    /// and so does a word `validate` would refuse — on a validated manifest
+    /// that case cannot occur.
+    pub fn wireOf(self: Runtime) Wire {
+        const written = self.wire orelse return .jsonrpc;
+        return Wire.fromString(written) orelse .jsonrpc;
+    }
 };
 
 /// A script extension is frozen and run as-is (no compilation); a compiled Zig
 /// extension outputs a binary under `bin/`. The `bin/` prefix is the sole,
 /// purely-syntactic distinguisher, so every consumer decides identically without
-/// probing the filesystem.
+/// probing the filesystem — and it is asked of EVERY declared variant, so a
+/// per-OS entry cannot be one kind here and another kind there (`validate`
+/// refuses the mixture outright).
 pub fn isScript(rt: Runtime) bool {
-    return !std.mem.startsWith(u8, rt.entry, "bin/");
+    for (rt.entry.variants) |v| {
+        if (std.mem.startsWith(u8, v.value, "bin/")) return false;
+    }
+    return true;
 }
 
 /// How an extension version is materialized — the one axis that decides what
@@ -316,14 +419,35 @@ pub const Manifest = struct {
         }
 
         if (self.runtime) |rt| {
-            if (!isSafeRelPath(rt.entry)) return error.InvalidEntry;
-            // A compiled entry lives under `bin/` (the build output); a script
-            // entry lives under `src/` (frozen with the source tree). Anything
-            // else is rejected so every consumer can locate the entry the same way.
-            if (isScript(rt) and !std.mem.startsWith(u8, rt.entry, "src/")) return error.InvalidEntry;
-            if (rt.interpreter) |i| {
-                if (i.len == 0) return error.InvalidInterpreter;
-                for (i) |c| if (c < 0x20) return error.InvalidInterpreter;
+            if (rt.wire) |w| {
+                if (Wire.fromString(w) == null) return error.InvalidWire;
+            }
+            if (rt.entry.variants.len == 0) return error.InvalidEntry;
+            const per_os = rt.entry.per_os;
+            for (rt.entry.variants) |v| {
+                if (per_os and !isKnownOsKey(v.os)) return error.InvalidEntry;
+                if (!isSafeRelPath(v.value)) return error.InvalidEntry;
+                // A compiled entry lives under `bin/` (the build output); a
+                // script entry lives under `src/` (frozen with the source tree).
+                // Anything else is rejected so every consumer can locate the
+                // entry the same way. In the per-OS form EVERY variant must be a
+                // script: a package that is compiled on one platform and a
+                // script on another is two implementation kinds under one
+                // version id, and the version id would have to be two things at
+                // once (DESIGN §7.4). Cross-platform compiled means cross
+                // compilation, not this field.
+                if (per_os or isScript(rt)) {
+                    if (!std.mem.startsWith(u8, v.value, "src/")) return error.InvalidEntry;
+                }
+            }
+            if (rt.interpreter) |ip| {
+                if (ip.variants.len == 0) return error.InvalidInterpreter;
+                const ip_per_os = ip.per_os;
+                for (ip.variants) |v| {
+                    if (ip_per_os and !isKnownOsKey(v.os)) return error.InvalidInterpreter;
+                    if (v.value.len == 0) return error.InvalidInterpreter;
+                    for (v.value) |c| if (c < 0x20) return error.InvalidInterpreter;
+                }
             }
         } else if (self.tools.len != 0) {
             return error.MissingRuntime;
@@ -417,6 +541,8 @@ pub const ValidateError = error{
     MissingRuntime,
     InvalidEntry,
     InvalidInterpreter,
+    /// `runtime.wire` is a string, but not one of `jsonrpc` / `plain`.
+    InvalidWire,
     NoContributions,
     InvalidToolName,
     ReservedToolName,
@@ -533,6 +659,16 @@ pub fn isValidId(s: []const u8) bool {
     return true;
 }
 
+/// An OS key in a per-OS `entry` / `interpreter` object: a `std.Target.Os.Tag`
+/// name, or `"default"`. A CLOSED vocabulary the kernel can enumerate, so a typo
+/// (`"win"`) is refused here rather than silently meaning "no entry on Windows"
+/// — the same reason `audience` refuses a word it cannot read, and the failure
+/// this catches would otherwise surface a session away, at `session new`.
+fn isKnownOsKey(key: []const u8) bool {
+    if (std.mem.eql(u8, key, PlatformValue.default_key)) return true;
+    return std.meta.stringToEnum(std.Target.Os.Tag, key) != null;
+}
+
 /// A relative path that cannot escape the extension directory.
 fn isSafeRelPath(s: []const u8) bool {
     if (s.len == 0) return false;
@@ -550,15 +686,45 @@ fn dupRuntime(a: std.mem.Allocator, obj: std.json.ObjectMap) ParseError!?Runtime
         .object => |o| o,
         else => return error.WrongType,
     };
-    const interpreter: ?[]const u8 = switch (runtime_obj.get("interpreter") orelse std.json.Value{ .null = {} }) {
-        .string => |s| try a.dupe(u8, s),
+    const interpreter: ?PlatformValue = switch (runtime_obj.get("interpreter") orelse std.json.Value{ .null = {} }) {
         .null => null,
-        else => return error.WrongType,
+        else => |v| try dupPlatformValue(a, v),
     };
     return .{
-        .entry = try dupString(a, runtime_obj, "entry"),
+        .entry = try dupPlatformValue(a, runtime_obj.get("entry") orelse return error.MissingField),
         .interpreter = interpreter,
+        .wire = try optionalString(a, runtime_obj, "wire"),
     };
+}
+
+/// A runtime string written either bare or keyed by OS (`PlatformValue`).
+/// Anything that is neither a string nor an object is a `WrongType`, the same
+/// strictness every other manifest field applies — a mistyped entry must not
+/// read as "absent".
+fn dupPlatformValue(a: std.mem.Allocator, value: std.json.Value) ParseError!PlatformValue {
+    switch (value) {
+        .string => |s| {
+            const one = try a.alloc(PlatformValue.Variant, 1);
+            one[0] = .{ .os = "", .value = try a.dupe(u8, s) };
+            return .{ .variants = one };
+        },
+        .object => |o| {
+            const variants = try a.alloc(PlatformValue.Variant, o.count());
+            var it = o.iterator();
+            var i: usize = 0;
+            while (it.next()) |entry| : (i += 1) {
+                variants[i] = .{
+                    .os = try a.dupe(u8, entry.key_ptr.*),
+                    .value = switch (entry.value_ptr.*) {
+                        .string => |s| try a.dupe(u8, s),
+                        else => return error.WrongType,
+                    },
+                };
+            }
+            return .{ .variants = variants, .per_os = true };
+        },
+        else => return error.WrongType,
+    }
 }
 
 fn dupTools(a: std.mem.Allocator, contributes: std.json.ObjectMap) ParseError![]const ToolSpec {
@@ -746,7 +912,7 @@ test "parses and validates a well-formed manifest" {
     try m.validate();
     try std.testing.expectEqualStrings("web.search", m.id);
     try std.testing.expect(m.runtime != null);
-    try std.testing.expectEqualStrings("bin/web-search", m.runtime.?.entry);
+    try std.testing.expectEqualStrings("bin/web-search", m.runtime.?.entry.forHost().?);
     try std.testing.expectEqual(@as(usize, 1), m.tools.len);
     try std.testing.expectEqualStrings("web_search", m.tools[0].name);
     try std.testing.expect(std.mem.indexOf(u8, m.tools[0].input_schema, "query") != null);
@@ -765,7 +931,9 @@ test "parses and validates a script runtime with an interpreter" {
     try m.validate();
     try std.testing.expect(m.runtime != null);
     try std.testing.expect(isScript(m.runtime.?));
-    try std.testing.expectEqualStrings("powershell", m.runtime.?.interpreter.?);
+    try std.testing.expectEqualStrings("powershell", m.runtime.?.interpreter.?.forHost().?);
+    // Saying nothing about the wire means what it has always meant.
+    try std.testing.expectEqual(@as(Wire, .jsonrpc), m.runtime.?.wireOf());
 }
 
 test "a bin/ entry is a compiled runtime, not a script" {
@@ -795,6 +963,123 @@ test "rejects an empty interpreter" {
     var m = try parse(std.testing.allocator, src);
     defer m.deinit();
     try std.testing.expectError(error.InvalidInterpreter, m.validate());
+}
+
+test "a runtime says how to talk to it; silence is jsonrpc and an unknown word is refused" {
+    const alloc = std.testing.allocator;
+
+    var plain = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"src/run.sh","interpreter":"sh","wire":"plain"},"contributes":{"tools":[{"name":"t","input":{}}]}}
+    );
+    defer plain.deinit();
+    try plain.validate();
+    try std.testing.expectEqual(@as(Wire, .plain), plain.runtime.?.wireOf());
+
+    // Both kinds may declare either wire: what it says is how to TALK to a
+    // process, not what kind of process it is.
+    var compiled_plain = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a","wire":"plain"},"contributes":{"tools":[{"name":"t","input":{}}]}}
+    );
+    defer compiled_plain.deinit();
+    try compiled_plain.validate();
+    try std.testing.expectEqual(@as(Wire, .plain), compiled_plain.runtime.?.wireOf());
+
+    // A word outside the two is a named refusal, not a default: the wire decides
+    // what is written to stdin, so a typo cannot be left to a reader.
+    var typo = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"src/run.sh","wire":"json-rpc"},"contributes":{"tools":[{"name":"t","input":{}}]}}
+    );
+    defer typo.deinit();
+    try std.testing.expectError(error.InvalidWire, typo.validate());
+
+    // And a wrong TYPE is a parse error — `activation`'s split, for its reason.
+    try std.testing.expectError(error.WrongType, parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"src/run.sh","wire":true},"contributes":{"tools":[{"name":"t","input":{}}]}}
+    ));
+}
+
+test "entry and interpreter may be written per OS; the host picks, then `default`, then nothing" {
+    const alloc = std.testing.allocator;
+    var m = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":{"windows":"src/run.ps1","default":"src/run.sh"},"interpreter":{"windows":"powershell","default":"sh"},"wire":"plain"},"contributes":{"tools":[{"name":"t","input":{}}]}}
+    );
+    defer m.deinit();
+    try m.validate();
+    const rt = m.runtime.?;
+    // Every variant is a script, so the package is one implementation kind.
+    try std.testing.expect(isScript(rt));
+    try std.testing.expectEqual(ImplementationKind.script, implementationKind(m));
+    try std.testing.expectEqualStrings("src/run.ps1", rt.entry.forOs("windows").?);
+    try std.testing.expectEqualStrings("src/run.sh", rt.entry.forOs("linux").?);
+    try std.testing.expectEqualStrings("powershell", rt.interpreter.?.forOs("windows").?);
+    try std.testing.expectEqualStrings("sh", rt.interpreter.?.forOs("macos").?);
+
+    // No `default`: a host outside the list simply has no entry here. That is a
+    // nameable state, not a broken package — the version stays buildable and
+    // installable, and only running it on that host fails.
+    var narrow = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":{"linux":"src/run.sh"},"interpreter":{"linux":"sh"}},"contributes":{"tools":[{"name":"t","input":{}}]}}
+    );
+    defer narrow.deinit();
+    try narrow.validate();
+    try std.testing.expectEqualStrings("src/run.sh", narrow.runtime.?.entry.forOs("linux").?);
+    try std.testing.expect(narrow.runtime.?.entry.forOs("windows") == null);
+
+    // A bare string still answers for every host — the shape most manifests use.
+    var bare = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"src/run.sh"},"contributes":{"tools":[{"name":"t","input":{}}]}}
+    );
+    defer bare.deinit();
+    try bare.validate();
+    try std.testing.expectEqualStrings("src/run.sh", bare.runtime.?.entry.forOs("windows").?);
+    try std.testing.expect(!bare.runtime.?.entry.per_os);
+}
+
+test "the per-OS entry form is scripts only, and its keys must be OS names" {
+    const alloc = std.testing.allocator;
+
+    // A `bin/` path inside the object: two implementation kinds under one
+    // version id, which the id cannot be.
+    var compiled = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":{"windows":"bin/a","default":"src/run.sh"}},"contributes":{"tools":[{"name":"t","input":{}}]}}
+    );
+    defer compiled.deinit();
+    try std.testing.expectError(error.InvalidEntry, compiled.validate());
+
+    var all_compiled = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":{"windows":"bin/a.exe","default":"bin/a"}},"contributes":{"tools":[{"name":"t","input":{}}]}}
+    );
+    defer all_compiled.deinit();
+    try std.testing.expectError(error.InvalidEntry, all_compiled.validate());
+
+    // A typo'd OS key would otherwise mean "no entry on Windows", and say so a
+    // session later. Refused where the file is read instead.
+    var typo = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":{"win":"src/run.ps1"}},"contributes":{"tools":[{"name":"t","input":{}}]}}
+    );
+    defer typo.deinit();
+    try std.testing.expectError(error.InvalidEntry, typo.validate());
+
+    var typo_interp = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"src/run.sh","interpreter":{"linnux":"sh"}},"contributes":{"tools":[{"name":"t","input":{}}]}}
+    );
+    defer typo_interp.deinit();
+    try std.testing.expectError(error.InvalidInterpreter, typo_interp.validate());
+
+    // An empty object declares nothing at all.
+    var empty = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":{}},"contributes":{"tools":[{"name":"t","input":{}}]}}
+    );
+    defer empty.deinit();
+    try std.testing.expectError(error.InvalidEntry, empty.validate());
+
+    // A non-string variant is a parse error, like every other mistyped field.
+    try std.testing.expectError(error.WrongType, parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":{"windows":42}},"contributes":{"tools":[{"name":"t","input":{}}]}}
+    ));
+    try std.testing.expectError(error.WrongType, parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":["src/run.sh"]},"contributes":{"tools":[{"name":"t","input":{}}]}}
+    ));
 }
 
 test "validates a pure skill package without runtime" {

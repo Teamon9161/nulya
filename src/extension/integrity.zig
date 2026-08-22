@@ -376,7 +376,10 @@ pub fn openVersion(
             // record none. Cheap either way — a shape check on the seal.
             if (seal.binary_digest != null) return error.VersionSealInvalid;
         } else {
-            const entry = try std.fmt.allocPrint(alloc, "{s}{s}", .{ rt.entry, exe_suffix });
+            // A compiled entry is never per-OS (`manifest.validate` refuses the
+            // object form for `bin/` paths), so the host always has one.
+            const compiled_entry = rt.entry.forHost() orelse return error.VersionEntryNotFound;
+            const entry = try std.fmt.allocPrint(alloc, "{s}{s}", .{ compiled_entry, exe_suffix });
             defer alloc.free(entry);
             const entry_sub = try std.fs.path.join(alloc, &.{ version_rel, entry });
             defer alloc.free(entry_sub);

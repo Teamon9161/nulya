@@ -161,7 +161,7 @@ pub fn writeInto(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, sub_dir:
 // so every line states behaviour and usage and cites no document.
 
 pub const ext_usage =
-    \\  nulya ext init [--script] [--user] <id> [tool]    scaffold a draft (--script needs no compiler)
+    \\  nulya ext init [--zig] [--user] <id> [tool]       scaffold a draft: a script by default, --zig for a compiled one
     \\  nulya ext build <path> [--user]                   freeze a draft into an immutable version, print its id
     \\  nulya ext sync [--user] [--activate] [--dry-run]  build every draft in that root: source in <root>/<id>/ installs
     \\  nulya ext seed [--user] [<id>…] [--force] [--dry-run]  write the drafts this binary ships into that root; sync builds them

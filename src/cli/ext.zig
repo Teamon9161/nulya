@@ -4,7 +4,6 @@
 //! of it is a model-facing tool.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const environment = @import("../environment.zig");
 const build_ext = @import("../extension/build/build_ext.zig");
 const store = @import("../extension/store.zig");
@@ -65,14 +64,24 @@ pub fn dispatchExt(alloc: std.mem.Allocator, io: std.Io, args: []const []const u
 fn extInit(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     const flags = try takeUserFlag(alloc, args);
     defer alloc.free(flags.rest);
-    var is_script = false;
+    // A script is the default (PLAN §0.1 #3): the manufacturing loop happens on
+    // the machine the AI is on, and friction there decides how many attempts get
+    // made. `--zig` is for when a compiled runtime has been MEASURED to be
+    // needed. `--script` says what is now the default, so it is accepted and does
+    // nothing — the drafts and docs already written with it keep working — and it
+    // is no longer listed.
+    var want_zig = false;
     var positional: std.ArrayList([]const u8) = .empty;
     defer positional.deinit(alloc);
     for (flags.rest) |a| {
-        if (std.mem.eql(u8, a, "--script")) is_script = true else try positional.append(alloc, a);
+        if (std.mem.eql(u8, a, "--zig")) {
+            want_zig = true;
+        } else if (std.mem.eql(u8, a, "--script")) {
+            // no-op alias
+        } else try positional.append(alloc, a);
     }
     if (positional.items.len < 1) {
-        try printErr(io, "usage: nulya ext init [--script] [--user] <id> [tool]\n");
+        try printErr(io, "usage: nulya ext init [--zig] [--user] <id> [tool]\n");
         return 1;
     }
     const id = positional.items[0];
@@ -99,18 +108,20 @@ fn extInit(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     try cwd.createDirPath(io, src_dir);
     try cwd.createDirPath(io, tests_dir);
 
-    if (is_script) {
-        // Scaffold a script extension for the host platform: PowerShell on
-        // Windows, POSIX sh elsewhere. Both are frozen and run as-is (no build).
-        const windows = builtin.os.tag == .windows;
-        const script_name = if (windows) "run.ps1" else "run.sh";
-        const entry = if (windows) "src/run.ps1" else "src/run.sh";
-        const interpreter = if (windows) "powershell" else "sh";
-        const body = if (windows) templates.script_ps1 else templates.script_sh;
-        const manifest_bytes = try templates.scriptManifestJson(alloc, id, tool, entry, interpreter);
+    if (!want_zig) {
+        // Both platforms at once, in ONE version: the manifest names an entry
+        // and an interpreter per OS, and the snapshot carries both files, so
+        // `v-…` is the same package everywhere and only which script runs
+        // differs (DESIGN §7.1).
+        const manifest_bytes = try templates.scriptManifestJson(alloc, id, tool);
         defer alloc.free(manifest_bytes);
+        const sh = try templates.scriptSh(alloc, id);
+        defer alloc.free(sh);
+        const ps1 = try templates.scriptPs1(alloc, id);
+        defer alloc.free(ps1);
         try writeInto(alloc, io, cwd, dir, "extension.json", manifest_bytes);
-        try writeInto(alloc, io, cwd, src_dir, script_name, body);
+        try writeInto(alloc, io, cwd, src_dir, "run.sh", sh);
+        try writeInto(alloc, io, cwd, src_dir, "run.ps1", ps1);
         try writeInto(alloc, io, cwd, tests_dir, "example.json", templates.example_test_json);
         try printOut(alloc, io, "initialized script extension '{s}' at {s}{c}{s}\n", .{ id, root_spec, std.fs.path.sep, id });
         return 0;
@@ -874,7 +885,13 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     // A compiled binary lives under `bin/`; a script under `package/`. The
     // resolution dispatches on runtime kind so this CLI path and session
     // composition never drift on how a frozen entry is located.
-    const entry_abs = try resolved.entryPathAbs(alloc, &search.roots);
+    const entry_abs = resolved.entryPathAbs(alloc, &search.roots) catch |err| switch (err) {
+        // A per-OS `runtime.entry` that names no variant for this machine
+        // (DESIGN §7.1). `entryPathAbs` already named the package and the host
+        // on stderr, so this only decides the exit code.
+        error.EntryUnsupportedOnHost => return 1,
+        else => return err,
+    };
     defer alloc.free(entry_abs);
 
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
@@ -889,7 +906,10 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
         // carries into its binding, read from the same place.
         .timeout_ms = spec.?.timeout_ms orelse tool_mod.Timeouts.extension_ms,
         .max_output_bytes = 1 << 20,
-        .interpreter = rt.interpreter,
+        .interpreter = if (rt.interpreter) |ip| ip.forHost() else null,
+        // The same frozen manifest a natively pinned binding reads, so `ext run`
+        // and a model's call cannot speak two different wires to one runtime.
+        .wire = rt.wireOf(),
     }) catch |err| switch (err) {
         // The trailing positional IS the arguments, so a malformed one is a
         // usage error rather than a host fault — and `ext run <id> <tool>` with
@@ -1505,9 +1525,13 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (std.mem.eql(u8, topic, "examples")) {
         try printRaw(io,
             \\  # A script tool, from nothing to the model's tool face.
-            \\  nulya ext init --script my.helper do_thing     # draft in .nulya/extensions/my.helper
-            \\  # edit src/run.sh (or src/run.ps1): one JSON-RPC request in on stdin,
-            \\  # one response out on stdout — `nulya ext api protocol` is the exact shape
+            \\  nulya ext init my.helper do_thing             # draft in .nulya/extensions/my.helper
+            \\  # it scaffolds src/run.sh + src/run.ps1 on the "plain" wire: stdin is the
+            \\  # arguments JSON, each simple argument is also NULYA_ARG_<key>, and whatever
+            \\  # the script prints IS the result. Three lines is a real tool:
+            \\  #   #!/bin/sh
+            \\  #   printf 'hello %s\n' "${NULYA_ARG_name:-world}"
+            \\  # `nulya ext api protocol` has both wires; --zig scaffolds the JSON-RPC one.
             \\  nulya ext build .nulya/extensions/my.helper    # prints v-<hash>; the version is immutable
             \\  nulya ext run my.helper@v-<hash> do_thing --arg name=world    # try it before anything else sees it
             \\  nulya ext activate my.helper v-<hash>         # `current` points at it; CLI callers need nothing more

@@ -96,7 +96,11 @@ test "self-manufacture closed loop: a shell-only session builds its own extensio
     var args: [5][]const u8 = .{ "", "", "", "", "" };
     defer for (args) |a| if (a.len != 0) alloc.free(a);
     {
-        const c = try std.fmt.allocPrint(alloc, "{s}'{s}' ext init demo greet", .{ call_prefix, exe_fwd });
+        // `--zig`: this test's subject is the COMPILED path — a real
+        // `zig build-exe` reached through shell -> nulya -> zig, with NULYA_ZIG
+        // surviving sanitization. `ext init` without it scaffolds a script,
+        // which is the default precisely because it needs none of that.
+        const c = try std.fmt.allocPrint(alloc, "{s}'{s}' ext init --zig demo greet", .{ call_prefix, exe_fwd });
         defer alloc.free(c);
         args[0] = try shellCallArgs(alloc, c);
     }

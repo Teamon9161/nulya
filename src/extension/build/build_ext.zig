@@ -217,6 +217,7 @@ fn build(
     try ext_skills.validateSnapshot(alloc, m, snapshot);
     try validateSystemPrompts(alloc, m, snapshot);
     try validateTui(alloc, m, snapshot);
+    try validateScriptEntries(alloc, m, snapshot);
     const snapshot_bytes = try snapshot.canonicalBytes(alloc);
     defer alloc.free(snapshot_bytes);
 
@@ -246,8 +247,14 @@ fn build(
 
     // `entry_rel` is the BUILT binary path — compiled extensions only. A script's
     // entry is frozen inside `package/` and located via `store.versionScriptEntryPath`.
+    // A compiled entry is never per-OS (`manifest.validate` refuses the object
+    // form for `bin/` paths), so the host's variant is the one that was written.
+    const declared_entry: []const u8 = if (compiled)
+        m.runtime.?.entry.forHost() orelse return error.EntryUnsupportedOnHost
+    else
+        "";
     const entry_rel: ?[]u8 = if (compiled)
-        try std.fmt.allocPrint(alloc, "{s}{s}", .{ m.runtime.?.entry, exe_suffix })
+        try std.fmt.allocPrint(alloc, "{s}{s}", .{ declared_entry, exe_suffix })
     else
         null;
     errdefer if (entry_rel) |entry| alloc.free(entry);
@@ -286,7 +293,6 @@ fn build(
         return sealed(alloc, m.id, version, entry_rel, false, null);
     }
 
-    const rt = m.runtime.?;
     const entry = entry_rel.?;
     const bin_rel = try std.fs.path.join(alloc, &.{ version_rel, entry });
     defer alloc.free(bin_rel);
@@ -304,7 +310,7 @@ fn build(
     // from the frozen package, never the mutable draft tree. Source and output
     // are both inside the version directory, so the store root is the cwd.
     const result = std.process.run(alloc, io, .{
-        .argv = &.{ zig.exe, "build-exe", frozen_source, "-O", "ReleaseSafe", emit_arg, "--name", std.fs.path.stem(rt.entry) },
+        .argv = &.{ zig.exe, "build-exe", frozen_source, "-O", "ReleaseSafe", emit_arg, "--name", std.fs.path.stem(declared_entry) },
         .cwd = .{ .dir = dest_root },
         .stdout_limit = .limited(1 << 20),
         .stderr_limit = .limited(1 << 20),
@@ -642,6 +648,22 @@ fn validateTui(alloc: std.mem.Allocator, m: manifest.Manifest, snapshot: integri
     const rel = try integrity.canonicalRel(alloc, t.entry);
     defer alloc.free(rel);
     _ = integrity.findSnapshotFile(snapshot, rel) orelse return error.TuiEntryFileMissing;
+}
+
+/// EVERY declared script entry is in the snapshot — not just this host's
+/// (DESIGN §7.1, §7.4). `validateSystemPrompts`' existence half, applied to a
+/// field that can now name several files: a per-OS entry freezes one version for
+/// all platforms, so the machine that builds it is the only chance to notice
+/// that the Windows variant was never written. A compiled entry is skipped here
+/// because it does not exist yet — the build is what produces it.
+fn validateScriptEntries(alloc: std.mem.Allocator, m: manifest.Manifest, snapshot: integrity.PackageSnapshot) !void {
+    const rt = m.runtime orelse return;
+    if (!manifest.isScript(rt)) return;
+    for (rt.entry.variants) |v| {
+        const rel = try integrity.canonicalRel(alloc, v.value);
+        defer alloc.free(rel);
+        _ = integrity.findSnapshotFile(snapshot, rel) orelse return error.EntryFileMissing;
+    }
 }
 
 fn testZigExe(alloc: std.mem.Allocator) ![]u8 {
