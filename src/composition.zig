@@ -561,7 +561,7 @@ fn resolvePinnedBinding(
         // the manifest says (DESIGN §7.2.1). The kernel enforces nothing with
         // it — it travels so the gate can be told (DESIGN §4).
         .readonly = spec.readonly,
-    }, entry_abs, if (rt.interpreter) |ip| ip.forHost() else null, spec.timeout_ms, rt.wireOf());
+    }, entry_abs, if (rt.interpreter) |ip| ip.forHost() else null, spec.timeout_ms);
 }
 
 fn findResolved(resolved: []const roots_mod.Roots.Resolved, id: []const u8) ?roots_mod.Roots.Resolved {
@@ -1302,7 +1302,7 @@ fn writeToolExtension(
 /// exercised without spawning a real process.
 const FakeEnv = struct {
     io: std.Io,
-    response: []const u8 = "{\"jsonrpc\":\"2.0\",\"id\":\"call\",\"result\":{\"results\":[]}}",
+    response: []const u8 = "{\"results\":[]}",
     saw_entry_path: []const u8 = "",
 
     fn runExtension(ptr: *anyopaque, alloc: std.mem.Allocator, req: environment.ExtensionRequest) anyerror!environment.ExtensionOutcome {

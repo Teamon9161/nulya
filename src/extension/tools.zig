@@ -12,14 +12,13 @@
 
 const std = @import("std");
 const tool = @import("../tool.zig");
-const ext_manifest = @import("manifest.zig");
 const invoke = @import("invoke.zig");
 
 /// A frozen extension tool binding.
 pub const Binding = struct {
     /// Model-facing identity and schema. `definition.id` is the stable logical
     /// id (never version-qualified); `definition.name` is the tool name the
-    /// manifest declared, which is what the wire carries.
+    /// manifest declared, which is what reaches the child as `NULYA_TOOL`.
     definition: tool.ToolDefinition,
     /// Exact frozen executable path, passed verbatim to `Environment.runExtension`.
     entry_path: []const u8,
@@ -30,10 +29,6 @@ pub const Binding = struct {
     /// null to take the host default (`invoke.Options.timeout_ms`). Frozen with
     /// the version like everything else the manifest says.
     timeout_ms: ?u32 = null,
-    /// How to talk to this runtime (`manifest.Runtime.wireOf`), frozen with the
-    /// version for the same reason `interpreter` is: what runs and how it is
-    /// spoken to are both decided once, at composition time.
-    wire: ext_manifest.Wire = .jsonrpc,
 
     /// Build a binding that owns copies of every string it exposes, so it can
     /// outlive the transient manifest and version data it was resolved from. The
@@ -46,7 +41,6 @@ pub const Binding = struct {
         entry_path: []const u8,
         interpreter: ?[]const u8,
         timeout_ms: ?u32,
-        wire: ext_manifest.Wire,
     ) !Binding {
         const id = try alloc.dupe(u8, definition.id);
         errdefer alloc.free(id);
@@ -75,7 +69,6 @@ pub const Binding = struct {
             .entry_path = owned_entry,
             .interpreter = owned_interp,
             .timeout_ms = timeout_ms,
-            .wire = wire,
         };
     }
 
@@ -99,8 +92,8 @@ pub const Binding = struct {
     }
 };
 
-/// `ToolExecutor` callback: a thin passthrough — `invokeTool` owns
-/// encode/run/decode and the failure taxonomy.
+/// `ToolExecutor` callback: a thin passthrough — `invokeTool` owns the spawn,
+/// the capture and the failure taxonomy.
 fn call(ptr: ?*anyopaque, alloc: std.mem.Allocator, req: tool.ToolRequest) anyerror!tool.RawToolResult {
     const self: *Binding = @ptrCast(@alignCast(ptr));
 
@@ -114,7 +107,6 @@ fn call(ptr: ?*anyopaque, alloc: std.mem.Allocator, req: tool.ToolRequest) anyer
         .{
             .interpreter = self.interpreter,
             .timeout_ms = self.timeout_ms orelse invoke.Options.default_timeout_ms,
-            .wire = self.wire,
         },
     );
 
@@ -126,8 +118,10 @@ fn call(ptr: ?*anyopaque, alloc: std.mem.Allocator, req: tool.ToolRequest) anyer
 const testing = std.testing;
 const environment = @import("../environment.zig");
 
-const success_response = "{\"jsonrpc\":\"2.0\",\"id\":\"call\",\"result\":{\"results\":[]}}";
-const error_response = "{\"jsonrpc\":\"2.0\",\"id\":\"call\",\"error\":{\"code\":-32000,\"message\":\"down\"}}";
+/// What a successful call prints: stdout is the result, so a driver-facing tool
+/// puts JSON here and a model-facing one puts text. Either way the executor
+/// hands the bytes on unchanged.
+const success_output = "{\"results\":[]}";
 
 /// Scripted environment backend: returns a canned `ExtensionOutcome` (or a
 /// canned error) and records what the helper sent, so the executor's
@@ -135,6 +129,8 @@ const error_response = "{\"jsonrpc\":\"2.0\",\"id\":\"call\",\"error\":{\"code\"
 const FakeEnv = struct {
     io: std.Io,
     response: []const u8 = "",
+    stderr_text: []const u8 = "",
+    exit_code: u8 = 0,
     timed_out: bool = false,
     err: ?anyerror = null,
     saw_entry_path: []const u8 = "",
@@ -154,10 +150,10 @@ const FakeEnv = struct {
         errdefer alloc.free(saw_request_json);
         const stdout = try alloc.dupe(u8, self.response);
         errdefer alloc.free(stdout);
-        const stderr = try alloc.dupe(u8, "");
+        const stderr = try alloc.dupe(u8, self.stderr_text);
         self.saw_entry_path = saw_entry_path;
         self.saw_request_json = saw_request_json;
-        return .{ .stdout = stdout, .stderr = stderr, .exit_code = 0, .timed_out = self.timed_out };
+        return .{ .stdout = stdout, .stderr = stderr, .exit_code = self.exit_code, .timed_out = self.timed_out };
     }
 
     fn dialect(ptr: *anyopaque) environment.Dialect {
@@ -225,7 +221,7 @@ test "initOwned copies every exposed string and survives the source being freed"
         .name = name,
         .description = description,
         .input_schema = input_schema,
-    }, entry_path, null, null, .jsonrpc);
+    }, entry_path, null, null);
     defer binding.deinit(alloc);
 
     // Drop the sources; the binding must not alias them.
@@ -252,7 +248,7 @@ test "a manifest's readonly claim rides on the frozen definition" {
         .description = "Read a file",
         .input_schema = "{\"type\":\"object\"}",
         .readonly = true,
-    }, "/frozen/v1/bin/std", null, null, .jsonrpc);
+    }, "/frozen/v1/bin/std", null, null);
     defer binding.deinit(alloc);
 
     // The claim is what the gate is shown (DESIGN §4): the alternative — asking
@@ -269,7 +265,7 @@ test "initOwned leaks nothing when an interior allocation fails" {
                 .name = "web_search",
                 .description = "Search web",
                 .input_schema = "{\"type\":\"object\"}",
-            }, "/frozen/v1/bin/web-search", null, null, .jsonrpc);
+            }, "/frozen/v1/bin/web-search", null, null);
             binding.deinit(alloc);
         }
     }.run, .{});
@@ -293,7 +289,7 @@ test "asTool exposes the frozen definition and binding pointer" {
 test "executor forwards the exact frozen entry path" {
     const alloc = testing.allocator;
     var binding = testBinding();
-    var fake = FakeEnv{ .io = testing.io, .response = success_response };
+    var fake = FakeEnv{ .io = testing.io, .response = success_output };
     defer fake.deinit(alloc);
 
     const result = try binding.asTool().executor.call(alloc, .{
@@ -311,7 +307,7 @@ test "a binding's declared timeout reaches the environment; without one the host
     const alloc = testing.allocator;
 
     var default_binding = testBinding();
-    var default_env = FakeEnv{ .io = testing.io, .response = success_response };
+    var default_env = FakeEnv{ .io = testing.io, .response = success_output };
     defer default_env.deinit(alloc);
     const default_result = try default_binding.asTool().executor.call(alloc, .{
         .args_json = "{}",
@@ -324,7 +320,7 @@ test "a binding's declared timeout reaches the environment; without one the host
     // binding carries that verbatim to the child.
     var slow_binding = testBinding();
     slow_binding.timeout_ms = 600_000;
-    var slow_env = FakeEnv{ .io = testing.io, .response = success_response };
+    var slow_env = FakeEnv{ .io = testing.io, .response = success_output };
     defer slow_env.deinit(alloc);
     const slow_result = try slow_binding.asTool().executor.call(alloc, .{
         .args_json = "{}",
@@ -334,13 +330,10 @@ test "a binding's declared timeout reaches the environment; without one the host
     try testing.expectEqual(@as(?u32, 600_000), slow_env.saw_timeout_ms);
 }
 
-test "a binding's declared wire decides what the child is sent and how its stdout is read" {
+test "executor forwards the model's raw arguments to stdin" {
     const alloc = testing.allocator;
     var binding = testBinding();
-    binding.entry_path = "/frozen/v1/src/run.sh";
-    binding.wire = .plain;
-    // A plain runtime writes text, not an envelope; the executor hands it on.
-    var fake = FakeEnv{ .io = testing.io, .response = "hello from greeter\n" };
+    var fake = FakeEnv{ .io = testing.io, .response = success_output };
     defer fake.deinit(alloc);
 
     const result = try binding.asTool().executor.call(alloc, .{
@@ -349,37 +342,15 @@ test "a binding's declared wire decides what the child is sent and how its stdou
     });
     defer alloc.free(result.output);
 
-    try testing.expect(result.ok);
-    try testing.expectEqualStrings("hello from greeter\n", result.output);
-    // stdin is the arguments themselves — no JSON-RPC envelope in sight.
+    // What the child is sent is the model's own arguments object — no envelope
+    // around it, and no re-emission of the JSON it wrote.
     try testing.expectEqualStrings("{\"query\":\"zig\"}", fake.saw_request_json);
 }
 
-test "executor forwards the model's raw arguments as a tool/call request" {
+test "success maps to a raw success result carrying stdout verbatim" {
     const alloc = testing.allocator;
     var binding = testBinding();
-    var fake = FakeEnv{ .io = testing.io, .response = success_response };
-    defer fake.deinit(alloc);
-
-    const result = try binding.asTool().executor.call(alloc, .{
-        .args_json = "{\"query\":\"zig\"}",
-        .ctx = .{ .environment = fake.handle(), .cwd = "ws" },
-    });
-    defer alloc.free(result.output);
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, fake.saw_request_json, .{});
-    defer parsed.deinit();
-    const obj = parsed.value.object;
-    try testing.expectEqualStrings("tool/call", obj.get("method").?.string);
-    const params = obj.get("params").?.object;
-    try testing.expectEqualStrings("web_search", params.get("name").?.string);
-    try testing.expectEqualStrings("zig", params.get("arguments").?.object.get("query").?.string);
-}
-
-test "success maps to a raw success result" {
-    const alloc = testing.allocator;
-    var binding = testBinding();
-    var fake = FakeEnv{ .io = testing.io, .response = success_response };
+    var fake = FakeEnv{ .io = testing.io, .response = success_output };
     defer fake.deinit(alloc);
 
     const result = try binding.asTool().executor.call(alloc, .{
@@ -395,7 +366,8 @@ test "success maps to a raw success result" {
 test "application failure maps to a raw failed result without reformatting" {
     const alloc = testing.allocator;
     var binding = testBinding();
-    var fake = FakeEnv{ .io = testing.io, .response = error_response };
+    // A tool that failed: its message on stderr, a non-zero exit.
+    var fake = FakeEnv{ .io = testing.io, .stderr_text = "down", .exit_code = 1 };
     defer fake.deinit(alloc);
 
     const result = try binding.asTool().executor.call(alloc, .{

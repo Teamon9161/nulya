@@ -19,7 +19,6 @@ pub const ledger = @import("ledger.zig");
 pub const manifest = @import("extension/manifest.zig");
 pub const outcome = @import("journals/outcome.zig");
 pub const prompt = @import("prompt.zig");
-pub const protocol = @import("extension/protocol.zig");
 pub const provider = @import("provider.zig");
 pub const session = @import("session.zig");
 pub const store = @import("extension/store.zig");

@@ -936,15 +936,12 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     } else std.math.maxInt(u32);
 
     // Resolution (active version, integrity, frozen manifest, tool declaration,
-    // exact entry path) is the CLI's job; from here on the helper owns encode,
-    // run, decode, and diagnostics.
+    // exact entry path) is the CLI's job; from here on the helper owns the
+    // spawn, the capture, and the diagnostics.
     const invocation = invoke.invokeTool(alloc, lenv.environment(), entry_abs, cwd_path, tool, args_json, .{
         .timeout_ms = timeout_ms,
         .max_output_bytes = 1 << 20,
         .interpreter = if (rt.interpreter) |ip| ip.forHost() else null,
-        // The same frozen manifest a natively pinned binding reads, so `ext run`
-        // and a model's call cannot speak two different wires to one runtime.
-        .wire = rt.wireOf(),
     }) catch |err| switch (err) {
         // The trailing positional IS the arguments, so a malformed one is a
         // usage error rather than a host fault — and `ext run <id> <tool>` with
@@ -1547,16 +1544,13 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             \\  object keyed by OS — `windows`, `linux`, `macos`, … — plus an optional
             \\  `default`, so one version can carry a different script per platform; the
             \\  object form is script-only, and a host this build has no entry for is a
-            \\  named refusal rather than a silent skip); `runtime.wire`, which every new
-            \\  extension writes as `"plain"` — stdin is the call's arguments as one
+            \\  named refusal rather than a silent skip); `tools[].name` / `.input` /
+            \\  `.timeout_ms` (this tool's own cap on a MODEL-FACE call, default 30s,
+            \\  ceiling 600s); `skills`; `system_prompts`. Nothing says how the runtime is
+            \\  talked to, because there is one way: stdin is the call's arguments as one
             \\  compact JSON object, NULYA_TOOL names the tool, stdout is the result taken
             \\  verbatim, and a non-zero exit is a failed call whose text is `exit <code>`
-            \\  plus stderr. Left out it still means the deprecated `"jsonrpc"` envelope,
-            \\  which works for one more version; everything else about running the
-            \\  extension — the sanitized environment, NULYA_EXE/NULYA_SESSION, timeout,
-            \\  being killed as a whole tree — is identical either way. `tools[].name` /
-            \\  `.input` / `.timeout_ms` (this tool's own cap on a MODEL-FACE call, default
-            \\  30s, ceiling 600s); `skills`; `system_prompts`.
+            \\  plus stderr — `nulya ext api protocol` is the whole contract.
             \\
             \\  A manifest cannot say which sessions carry it. That is two decisions, and
             \\  both are the person's, in config or on one command line: MEMBERSHIP
@@ -1619,12 +1613,12 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
         try printRaw(io,
             \\  # A script tool, from nothing to the model's tool face.
             \\  nulya ext init my.helper do_thing             # draft in .nulya/extensions/my.helper
-            \\  # it scaffolds src/run.sh + src/run.ps1 on the "plain" wire: stdin is the
-            \\  # arguments JSON, each simple argument is also NULYA_ARG_<key>, and whatever
-            \\  # the script prints IS the result. Three lines is a real tool:
+            \\  # it scaffolds src/run.sh + src/run.ps1: stdin is the arguments JSON, each
+            \\  # simple argument is also NULYA_ARG_<key>, and whatever the script prints
+            \\  # IS the result. Three lines is a real tool:
             \\  #   #!/bin/sh
             \\  #   printf 'hello %s\n' "${NULYA_ARG_name:-world}"
-            \\  # `--zig` scaffolds the same wire, compiled. `nulya ext api protocol` is it.
+            \\  # `--zig` scaffolds the same thing, compiled. `nulya ext api protocol` is it.
             \\  nulya ext build .nulya/extensions/my.helper    # prints v-<hash>; the version is immutable
             \\  nulya ext run my.helper@v-<hash> do_thing --arg name=world    # try it before anything else sees it
             \\  nulya ext activate my.helper v-<hash>         # `current` points at it; CLI callers need nothing more

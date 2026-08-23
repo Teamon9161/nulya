@@ -1,11 +1,11 @@
 //! The wire half of `std`: this call's arguments in on stdin, its answer out on
 //! stdout, and the small vocabulary every tool answers in.
 //!
-//! The wire is `plain` (DESIGN §7.3, contract at the top of
-//! `src/extension/protocol.zig`): stdin is the arguments as one JSON object, the
-//! tool's name is `NULYA_TOOL` in the environment, and there is no envelope to
-//! read or write. A tool never touches stdio itself: `main.zig` reads, dispatches
-//! on that name, and prints whatever `Outcome` comes back.
+//! The wire (DESIGN §7.3, contract at the top of `src/extension/protocol.zig`):
+//! stdin is the arguments as one JSON object, the tool's name is `NULYA_TOOL` in
+//! the environment, and there is no envelope to read or write. A tool never
+//! touches stdio itself: `main.zig` reads, dispatches on that name, and prints
+//! whatever `Outcome` comes back.
 //!
 //! Two shapes of answer, on purpose:
 //!   - `text`   → stdout, verbatim, exit 0. The host hands those bytes to the
@@ -18,8 +18,7 @@
 //!
 //! One shape for every failure, deliberately: a missing argument, an unknown
 //! tool name and a file that is not there all reach the model as one sentence.
-//! The JSON-RPC codes these used to carry (-32602 / -32601 / -32000) reached it
-//! as a number nobody read, and went out with the envelope.
+//! The error codes these used to carry reached it as a number nobody read.
 
 const std = @import("std");
 

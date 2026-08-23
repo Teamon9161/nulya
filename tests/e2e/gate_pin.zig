@@ -42,8 +42,8 @@ fn buildScriptPackage(
 ) ![]u8 {
     const entry = if (windows) "src/run.ps1" else "src/run.sh";
     const script_name = if (windows) "run.ps1" else "run.sh";
-    // The plain wire (DESIGN §7.3): nothing here looks at the tool's output,
-    // so the script only has to exist and exit 0.
+    // Nothing here looks at the tool's output, so the script only has to exist
+    // and exit 0.
     const script_body = if (windows) "[Console]::Out.Write('ok')\n" else "#!/bin/sh\nprintf ok\n";
     const interpreter = if (windows) "powershell" else "sh";
 
@@ -57,7 +57,7 @@ fn buildScriptPackage(
     try ws.writeFile(io, .{ .sub_path = script_rel, .data = script_body });
 
     const manifest_bytes = try std.fmt.allocPrint(alloc,
-        \\{{"schema":"nulya.extension/v2","id":"{s}"{s},"runtime":{{"entry":"{s}","interpreter":"{s}","wire":"plain"}},"contributes":{{"tools":[{{"name":"{s}","description":"a tool","input":{{"type":"object"}}{s}}}]}}}}
+        \\{{"schema":"nulya.extension/v2","id":"{s}"{s},"runtime":{{"entry":"{s}","interpreter":"{s}"}},"contributes":{{"tools":[{{"name":"{s}","description":"a tool","input":{{"type":"object"}}{s}}}]}}}}
     , .{ id, top_extra, entry, interpreter, tool_name, tool_extra });
     defer alloc.free(manifest_bytes);
     const manifest_rel = try std.fs.path.join(alloc, &.{ draft_rel, "extension.json" });

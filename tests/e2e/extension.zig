@@ -14,7 +14,6 @@ const launch = support.launch;
 const ledger = support.ledger;
 const manifest_mod = support.manifest;
 const prompt = support.prompt;
-const protocol = support.protocol;
 const provider = support.provider;
 const session = support.session;
 const store = support.store;
@@ -88,9 +87,8 @@ test "closed loop: init -> build -> activate -> run round-trips JSON" {
     }
 
     // 4. `ext run`: invoke the built binary through the Environment seam — the
-    //    same path a live agent uses. The `--zig` scaffold speaks the `plain`
-    //    wire (DESIGN §7.1, ext-review-2 C1): stdin is the arguments object,
-    //    stdout is the result verbatim, so there is no envelope to decode.
+    //    same path a live agent uses: stdin is the arguments object, stdout is
+    //    the result verbatim, so there is no envelope to decode (DESIGN §7.1).
     var ws_real: [std.fs.max_path_bytes]u8 = undefined;
     const ws_real_len = try ws.realPath(io, &ws_real);
     const ws_path = ws_real[0..ws_real_len];
@@ -241,14 +239,14 @@ test "cli ext run records a version-free stable tool id in the usage journal, wi
     const ws_path = ws_real[0..ws_real_len];
 
     // v1 of the extension.
-    const v1 = try buildAndActivate(alloc, io, ws, zig_exe, "web.search", "web_search", support.jsonrpc_main_zig);
+    const v1 = try buildAndActivate(alloc, io, ws, zig_exe, "web.search", "web_search", support.plain_main_zig);
     defer alloc.free(v1);
 
     // A real `nulya ext run` invocation against v1.
     const run1 = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", "web.search", "web_search", "{}" });
     defer alloc.free(run1.stdout);
     try std.testing.expectEqual(@as(u8, 0), run1.code);
-    try std.testing.expect(std.mem.indexOf(u8, run1.stdout, "greeting") != null);
+    try std.testing.expect(std.mem.indexOf(u8, run1.stdout, "hello from a Nulya-built extension") != null);
 
     // The journal records the durable, version-free stable id — never the
     // model-facing name (`web_search`) and never a version-scoped id.
@@ -263,7 +261,7 @@ test "cli ext run records a version-free stable tool id in the usage journal, wi
 
     // v2: a different implementation -> a different immutable version, but the
     // same tool identity. Activating it must not change the stats identity.
-    const v2_src = "// v2 implementation\n" ++ support.jsonrpc_main_zig;
+    const v2_src = "// v2 implementation\n" ++ support.plain_main_zig;
     const v2 = try buildAndActivate(alloc, io, ws, zig_exe, "web.search", "web_search", v2_src);
     defer alloc.free(v2);
     try std.testing.expect(!std.mem.eql(u8, v1, v2));
@@ -299,8 +297,8 @@ test "cli ext run records ok=false for a failed invocation" {
     defer tmp.cleanup();
     const ws = tmp.dir;
 
-    // A real extension that answers with a JSON-RPC application error (exit 0):
-    // a normal failed invocation, never a host fault.
+    // A real extension that fails the way the wire says to — its message on
+    // stderr, a non-zero exit: a normal failed invocation, never a host fault.
     const failing_main =
         \\const std = @import("std");
         \\
@@ -313,13 +311,14 @@ test "cli ext run records ok=false for a failed invocation" {
         \\    defer threaded.deinit();
         \\    const io = threaded.io();
         \\
-        \\    // Drain the request so the host's stdin write never blocks.
+        \\    // Drain the arguments so the host's stdin write never blocks.
         \\    var in_buf: [4096]u8 = undefined;
         \\    var reader = std.Io.File.stdin().readerStreaming(io, &in_buf);
-        \\    const request = try reader.interface.allocRemaining(alloc, .limited(1 << 20));
-        \\    defer alloc.free(request);
+        \\    const args_json = try reader.interface.allocRemaining(alloc, .limited(1 << 20));
+        \\    defer alloc.free(args_json);
         \\
-        \\    try std.Io.File.stdout().writeStreamingAll(io, "{\"jsonrpc\":\"2.0\",\"id\":\"call\",\"error\":{\"code\":-32000,\"message\":\"boom\"}}");
+        \\    try std.Io.File.stderr().writeStreamingAll(io, "boom");
+        \\    std.process.exit(1);
         \\}
         \\
     ;
@@ -362,7 +361,7 @@ test "cli ext run failures before invocation write no usage stats" {
     // An active extension is needed so the store root exists and the "absent"
     // case below is a plain inactive-extension rejection, not a missing-root
     // host fault.
-    const version = try buildAndActivate(alloc, io, ws, zig_exe, "demo", "greet", support.jsonrpc_main_zig);
+    const version = try buildAndActivate(alloc, io, ws, zig_exe, "demo", "greet", support.plain_main_zig);
     defer alloc.free(version);
 
     var ws_real: [std.fs.max_path_bytes]u8 = undefined;
@@ -1196,7 +1195,7 @@ test "bundled compact: ext build extensions/compact, then ext run forks the sess
     }
 
     // A session that does not exist stops at the first step, with the CLI's own
-    // words carried out through the JSON-RPC error.
+    // words carried out as the failed call's text.
     const missing = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "compact", "{\"session\":\"s-does-not-exist\"}" });
     defer alloc.free(missing.stdout);
     try std.testing.expectEqual(@as(u8, 1), missing.code);
@@ -1925,40 +1924,34 @@ fn writeSkillDraft(
 
 // ── M5b: per-step usage on the assistant event (DESIGN §3.1) ────────────────
 
-/// A JSON-RPC script entry, PowerShell and POSIX sh. `ext init` no longer
-/// scaffolds these — its default is the `plain` wire (DESIGN §7.1) — but the
-/// JSON-RPC wire is still what a script MAY declare, and the test below is the
-/// standing proof that a script speaking it goes the whole way. So the fixture
-/// lives here, where its consumer is, rather than as a template nothing
-/// generates.
-const jsonrpc_script_ps1 =
+/// A script entry, PowerShell and POSIX sh: drain stdin, print one line. Its
+/// stdout IS the result, so the tests below assert on that exact sentence.
+/// Kept here rather than as a template, because `ext init` generates its own
+/// (`templates.scriptSh` / `scriptPs1`) and a fixture that moved whenever the
+/// scaffold's wording did would be a test of the wording.
+const greeter_script_ps1 =
     \\$ErrorActionPreference = 'Stop'
     \\$in = [Console]::In.ReadToEnd()
-    \\$id = 'call'
-    \\try { $req = $in | ConvertFrom-Json; if ($req.id) { $id = [string]$req.id } } catch {}
-    \\$resp = [ordered]@{ jsonrpc = '2.0'; id = $id; result = [ordered]@{ greeting = 'hello from a Nulya script extension' } }
-    \\[Console]::Out.Write(($resp | ConvertTo-Json -Compress))
+    \\[Console]::Out.Write('hello from a Nulya script extension')
     \\
 ;
 
-const jsonrpc_script_sh =
+const greeter_script_sh =
     \\#!/bin/sh
-    \\req=$(cat)
-    \\id=$(printf '%s' "$req" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
-    \\[ -z "$id" ] && id=call
-    \\printf '{"jsonrpc":"2.0","id":"%s","result":{"greeting":"hello from a Nulya script extension"}}' "$id"
+    \\cat >/dev/null
+    \\printf 'hello from a Nulya script extension'
     \\
 ;
 
-/// Scaffold a host-appropriate JSON-RPC script extension (PowerShell on Windows,
-/// POSIX sh elsewhere) and build it into an immutable version WITHOUT a
-/// toolchain. Returns the built version id; caller frees.
+/// Scaffold a host-appropriate script extension (PowerShell on Windows, POSIX
+/// sh elsewhere) and build it into an immutable version WITHOUT a toolchain.
+/// Returns the built version id; caller frees.
 fn scaffoldAndBuildScript(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, id: []const u8, tool_name: []const u8) ![]u8 {
     const windows = @import("builtin").os.tag == .windows;
     const script_name = if (windows) "run.ps1" else "run.sh";
     const entry = if (windows) "src/run.ps1" else "src/run.sh";
     const interpreter = if (windows) "powershell" else "sh";
-    const body = if (windows) jsonrpc_script_ps1 else jsonrpc_script_sh;
+    const body = if (windows) greeter_script_ps1 else greeter_script_sh;
 
     const ext_dir = try std.fs.path.join(alloc, &.{ ".nulya", "extensions", id });
     defer alloc.free(ext_dir);
@@ -1966,8 +1959,6 @@ fn scaffoldAndBuildScript(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, 
     defer alloc.free(src_dir);
     try ws.createDirPath(io, src_dir);
 
-    // The wire is left unwritten on purpose: absent means JSON-RPC, which is
-    // what every manifest predating `runtime.wire` says.
     const manifest_bytes = try std.fmt.allocPrint(alloc,
         \\{{
         \\  "schema": "nulya.extension/v2",
@@ -2081,7 +2072,7 @@ test "manifest audience: the frozen version keeps what the draft declared, and a
     const entry = if (windows) "src/run.ps1" else "src/run.sh";
     const interpreter = if (windows) "powershell" else "sh";
     const script_name = if (windows) "run.ps1" else "run.sh";
-    const script_body = if (windows) jsonrpc_script_ps1 else jsonrpc_script_sh;
+    const script_body = if (windows) greeter_script_ps1 else greeter_script_sh;
 
     // A script package, so this costs no toolchain: three tools, one for each
     // thing a package can say about who a tool is for.

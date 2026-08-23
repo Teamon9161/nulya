@@ -52,7 +52,7 @@ test "cli src: --raw matches the on-disk source; default strips tests; ext api r
     defer alloc.free(api.stdout);
     try std.testing.expectEqual(@as(u8, 0), api.code);
     try std.testing.expect(std.mem.indexOf(u8, api.stdout, "Extension wire protocol") != null);
-    try std.testing.expect(std.mem.indexOf(u8, api.stdout, "tool/call") != null);
+    try std.testing.expect(std.mem.indexOf(u8, api.stdout, "NULYA_ARG_") != null);
 
     // An unknown path fails cleanly.
     const miss = try runCli(alloc, io, ws, &.{ exe_abs, "src", "nope.zig" });

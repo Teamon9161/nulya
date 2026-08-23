@@ -20,34 +20,6 @@ pub const schema_id = "nulya.extension/v2";
 /// list when it became a tool of the bundled `std` extension (DESIGN §7.8).
 pub const reserved_tool_names = [_][]const u8{"shell"};
 
-/// How the host talks to a runtime for one call (DESIGN §7.1, §7.3). A closed
-/// two-word vocabulary the kernel ENFORCES: it decides what is written to the
-/// child's stdin and how its stdout is read, so an unrecognized word cannot be
-/// left to a reader.
-///
-///   - `plain`   : the arguments JSON on stdin, `NULYA_TOOL` / `NULYA_ARG_<k>`
-///                 in the environment, stdout verbatim as the tool's text,
-///                 exit code as ok/failed. Five lines of `sh` can serve it, and
-///                 it is what every extension should say.
-///   - `jsonrpc` : one JSON-RPC 2.0 `tool/call` request in, one response out
-///                 (`protocol.zig`). DEPRECATED and going away; still the
-///                 reading of ABSENT, so every manifest written before this
-///                 field means exactly what it meant.
-///
-/// Independent of `ImplementationKind`: a compiled Zig runtime may declare
-/// `plain` too. What the wire says is how to TALK to a process, not what kind
-/// of process it is.
-pub const Wire = enum {
-    jsonrpc,
-    plain,
-
-    pub fn fromString(s: []const u8) ?Wire {
-        if (std.mem.eql(u8, s, "jsonrpc")) return .jsonrpc;
-        if (std.mem.eql(u8, s, "plain")) return .plain;
-        return null;
-    }
-};
-
 /// A runtime string that may differ per host OS (DESIGN §7.1). Written either
 /// as a bare string — one value everywhere — or as an object keyed by
 /// `builtin.os.tag` names plus an optional `"default"`:
@@ -115,20 +87,6 @@ pub const Runtime = struct {
     /// directly executable (a `.cmd`/`.bat` on Windows, or a shebang script
     /// with the exec bit).
     interpreter: ?PlatformValue = null,
-    /// How to talk to this runtime, kept as WRITTEN — the `audience`
-    /// discipline, for its reason: a wrong TYPE is a parse error, an
-    /// unrecognized WORD is a named `validate` refusal (`InvalidWire`), and the
-    /// reading of ABSENT is decided once, here (`wireOf` → `.jsonrpc`), because
-    /// it is a fact about the file format rather than a judgement.
-    wire: ?[]const u8 = null,
-
-    /// How to talk to this runtime. Absent means `.jsonrpc` (see the field),
-    /// and so does a word `validate` would refuse — on a validated manifest
-    /// that case cannot occur.
-    pub fn wireOf(self: Runtime) Wire {
-        const written = self.wire orelse return .jsonrpc;
-        return Wire.fromString(written) orelse .jsonrpc;
-    }
 };
 
 /// A script extension is frozen and run as-is (no compilation); a compiled Zig
@@ -414,6 +372,18 @@ pub const Manifest = struct {
     /// `tui` entry — the only front end that existed when the flat form did —
     /// and this is what makes `ext build` say so.
     legacy_ui: bool = false,
+    /// What this manifest still writes for the removed `runtime.wire` key, as
+    /// written (empty when it was not a string — the note is about the key, and
+    /// a mistyped value has the same answer as a mistyped word).
+    ///
+    /// There is one wire now, so a runtime does not choose one: `plain` is what
+    /// every call speaks (DESIGN §7.3). The key is unknown like `activation`
+    /// and `permissions` before it, but the two words a draft may still carry
+    /// mean different things to their author — `"jsonrpc"` asked for an
+    /// envelope that no longer exists, `"plain"` asked for exactly what happens
+    /// anyway — so `ext build` answers each in its own words. The only reader
+    /// is that note.
+    legacy_wire: ?[]const u8 = null,
 
     pub fn deinit(self: *Manifest) void {
         self.arena.deinit();
@@ -429,9 +399,6 @@ pub const Manifest = struct {
             self.commands.len == 0 and !policyContributes(self.policy) and self.ui.len == 0) return error.NoContributions;
 
         if (self.runtime) |rt| {
-            if (rt.wire) |w| {
-                if (Wire.fromString(w) == null) return error.InvalidWire;
-            }
             if (rt.entry.variants.len == 0) return error.InvalidEntry;
             const per_os = rt.entry.per_os;
             for (rt.entry.variants) |v| {
@@ -555,8 +522,6 @@ pub const ValidateError = error{
     MissingRuntime,
     InvalidEntry,
     InvalidInterpreter,
-    /// `runtime.wire` is a string, but not one of `jsonrpc` / `plain`.
-    InvalidWire,
     NoContributions,
     InvalidToolName,
     ReservedToolName,
@@ -637,6 +602,21 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!Manifest {
         .legacy_permissions = obj.get("permissions") != null,
         .legacy_command_action = legacy_command_action,
         .legacy_ui = legacy_ui,
+        .legacy_wire = try legacyWire(a, obj),
+    };
+}
+
+/// What `runtime.wire` still says, for the one note that reads it. A non-string
+/// value reads as `""`: the key is what the note is about, and there is no word
+/// left to quote back.
+fn legacyWire(a: std.mem.Allocator, obj: std.json.ObjectMap) ParseError!?[]const u8 {
+    const runtime_obj = switch (obj.get("runtime") orelse return null) {
+        .object => |o| o,
+        else => return null,
+    };
+    return switch (runtime_obj.get("wire") orelse return null) {
+        .string => |s| try a.dupe(u8, s),
+        else => "",
     };
 }
 
@@ -709,7 +689,6 @@ fn dupRuntime(a: std.mem.Allocator, obj: std.json.ObjectMap) ParseError!?Runtime
     return .{
         .entry = try dupPlatformValue(a, runtime_obj.get("entry") orelse return error.MissingField),
         .interpreter = interpreter,
-        .wire = try optionalString(a, runtime_obj, "wire"),
     };
 }
 
@@ -1009,8 +988,8 @@ test "parses and validates a script runtime with an interpreter" {
     try std.testing.expect(m.runtime != null);
     try std.testing.expect(isScript(m.runtime.?));
     try std.testing.expectEqualStrings("powershell", m.runtime.?.interpreter.?.forHost().?);
-    // Saying nothing about the wire means what it has always meant.
-    try std.testing.expectEqual(@as(Wire, .jsonrpc), m.runtime.?.wireOf());
+    // Nothing about a wire: there is one, and a runtime does not pick it.
+    try std.testing.expect(m.legacy_wire == null);
 }
 
 test "a bin/ entry is a compiled runtime, not a script" {
@@ -1042,43 +1021,46 @@ test "rejects an empty interpreter" {
     try std.testing.expectError(error.InvalidInterpreter, m.validate());
 }
 
-test "a runtime says how to talk to it; silence is jsonrpc and an unknown word is refused" {
+test "a leftover runtime.wire is an unknown key that still builds, and `ext build` can say which word was written" {
     const alloc = std.testing.allocator;
 
+    // Whatever it says, the package is unaffected: one wire means a runtime has
+    // nothing to choose, so the key composes exactly like any other unknown one.
     var plain = try parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"src/run.sh","interpreter":"sh","wire":"plain"},"contributes":{"tools":[{"name":"t","input":{}}]}}
     );
     defer plain.deinit();
     try plain.validate();
-    try std.testing.expectEqual(@as(Wire, .plain), plain.runtime.?.wireOf());
+    try std.testing.expectEqualStrings("plain", plain.legacy_wire.?);
 
-    // Both kinds may declare either wire: what it says is how to TALK to a
-    // process, not what kind of process it is.
-    var compiled_plain = try parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a","wire":"plain"},"contributes":{"tools":[{"name":"t","input":{}}]}}
+    var rpc = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a","wire":"jsonrpc"},"contributes":{"tools":[{"name":"t","input":{}}]}}
     );
-    defer compiled_plain.deinit();
-    try compiled_plain.validate();
-    try std.testing.expectEqual(@as(Wire, .plain), compiled_plain.runtime.?.wireOf());
+    defer rpc.deinit();
+    try rpc.validate();
+    try std.testing.expectEqualStrings("jsonrpc", rpc.legacy_wire.?);
 
-    // A word outside the two is a named refusal, not a default: the wire decides
-    // what is written to stdin, so a typo cannot be left to a reader.
+    // A word nobody recognizes, and a value that is not even a word, both reach
+    // the same note: the key is what is being answered, not what it says.
     var typo = try parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"src/run.sh","wire":"json-rpc"},"contributes":{"tools":[{"name":"t","input":{}}]}}
     );
     defer typo.deinit();
-    try std.testing.expectError(error.InvalidWire, typo.validate());
+    try typo.validate();
+    try std.testing.expectEqualStrings("json-rpc", typo.legacy_wire.?);
 
-    // And a wrong TYPE is a parse error — `audience`'s split, for its reason.
-    try std.testing.expectError(error.WrongType, parse(alloc,
+    var mistyped = try parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"src/run.sh","wire":true},"contributes":{"tools":[{"name":"t","input":{}}]}}
-    ));
+    );
+    defer mistyped.deinit();
+    try mistyped.validate();
+    try std.testing.expectEqualStrings("", mistyped.legacy_wire.?);
 }
 
 test "entry and interpreter may be written per OS; the host picks, then `default`, then nothing" {
     const alloc = std.testing.allocator;
     var m = try parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":{"windows":"src/run.ps1","default":"src/run.sh"},"interpreter":{"windows":"powershell","default":"sh"},"wire":"plain"},"contributes":{"tools":[{"name":"t","input":{}}]}}
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":{"windows":"src/run.ps1","default":"src/run.sh"},"interpreter":{"windows":"powershell","default":"sh"}},"contributes":{"tools":[{"name":"t","input":{}}]}}
     );
     defer m.deinit();
     try m.validate();

@@ -145,7 +145,7 @@ test "cli ext api: manifest and examples carry no document citations and walk sc
         "ext init my.helper", "ext build",       "ext run",  "--arg",
         "ext activate",       "--pin",           "--with",   "--user",
         "ext trust",          "session outcome", "ext sync", "ext prune",
-        // The default scaffold is a script on the `plain` wire, so the worked
+        // The default scaffold is a script, so the worked
         // path has to show what a script actually reads (DESIGN §7.1/§7.3).
         "NULYA_ARG_",         "--zig",
     }) |needle| {

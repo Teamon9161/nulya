@@ -90,8 +90,7 @@ fn scriptPackage(
     const windows = @import("builtin").os.tag == .windows;
     const entry = if (windows) "src/run.ps1" else "src/run.sh";
     const script_name = if (windows) "run.ps1" else "run.sh";
-    // The plain wire (DESIGN §7.3): nothing here calls the tool, so the script
-    // only has to exist.
+    // Nothing here calls the tool, so the script only has to exist.
     const script_body = if (windows) "[Console]::Out.Write('ok')\n" else "#!/bin/sh\nprintf ok\n";
     const interpreter = if (windows) "powershell" else "sh";
 
@@ -105,7 +104,7 @@ fn scriptPackage(
     try ws.writeFile(io, .{ .sub_path = script, .data = script_body });
 
     const manifest = try std.fmt.allocPrint(alloc,
-        \\{{"schema":"nulya.extension/v2","id":"{s}","runtime":{{"entry":"{s}","interpreter":"{s}","wire":"plain"}},"contributes":{{"tools":[{{"name":"{s}","description":"a tool","input":{{"type":"object"}}}}]}}}}
+        \\{{"schema":"nulya.extension/v2","id":"{s}","runtime":{{"entry":"{s}","interpreter":"{s}"}},"contributes":{{"tools":[{{"name":"{s}","description":"a tool","input":{{"type":"object"}}}}]}}}}
     , .{ id, entry, interpreter, tool_name });
     defer alloc.free(manifest);
     const manifest_path = try std.fs.path.join(alloc, &.{ draft, "extension.json" });
@@ -319,21 +318,16 @@ test "--with <id> onto a broken current names the version and refuses the sessio
 const snooze_ps1 =
     \\$ErrorActionPreference = 'Stop'
     \\$in = [Console]::In.ReadToEnd()
-    \\$id = 'call'
-    \\try { $req = $in | ConvertFrom-Json; if ($req.id) { $id = [string]$req.id } } catch {}
     \\Start-Sleep -Seconds 2
-    \\$resp = [ordered]@{ jsonrpc = '2.0'; id = $id; result = 'slept 2s' }
-    \\[Console]::Out.Write(($resp | ConvertTo-Json -Compress))
+    \\[Console]::Out.Write('slept 2s')
     \\
 ;
 
 const snooze_sh =
     \\#!/bin/sh
-    \\req=$(cat)
-    \\id=$(printf '%s' "$req" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
-    \\[ -z "$id" ] && id=call
+    \\cat >/dev/null
     \\sleep 2
-    \\printf '{"jsonrpc":"2.0","id":"%s","result":"slept 2s"}' "$id"
+    \\printf 'slept 2s'
     \\
 ;
 

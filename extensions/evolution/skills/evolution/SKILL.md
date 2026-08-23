@@ -149,17 +149,16 @@ nulya ext build .nulya/extensions/my.helper     # prints v-<hash>
 nulya ext activate my.helper v-<hash>           # only if the report says why
 ```
 
-The script contract (`"wire": "plain"`, what `ext init` scaffolds): stdin holds
-the call's arguments as one JSON object, each simple argument is also
-`NULYA_ARG_<key>`, whatever the script prints is the result, and a non-zero exit
-fails the call:
+The script contract (what `ext init` scaffolds): stdin holds the call's
+arguments as one JSON object, each simple argument is also `NULYA_ARG_<key>`,
+whatever the script prints is the result, and a non-zero exit fails the call:
 
 ```sh
 #!/bin/sh
 printf 'hello %s\n' "${NULYA_ARG_name:-world}"
 ```
 
-`nulya ext api` prints both wire contracts if you need the exact shape.
+`nulya ext api` prints the wire contract if you need the exact shape.
 
 For a knowledge proposal there is no extension at all: edit the relevant
 `SKILL.md` or notes file, and record in the report which file and why.

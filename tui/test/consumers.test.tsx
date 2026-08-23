@@ -49,8 +49,8 @@ import type { CompactedView, PluginKey } from "nulya-tui/plugin-api"
 import { scripted_env, settle, tempWorkspace, unsafe_settings, until, type TempWorkspace } from "./support.ts"
 
 /**
- * Both packages are COMPILED (they parse JSON-RPC and echo an id back, which is
- * why every bundled tool package is), so this whole file needs a toolchain —
+ * Both packages are COMPILED (they parse and emit JSON, which is why every
+ * bundled tool package is), so this whole file needs a toolchain —
  * `gate.test.tsx`'s handoff test is the precedent for saying so rather than
  * failing on a machine that has none.
  */

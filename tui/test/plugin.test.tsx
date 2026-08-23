@@ -80,26 +80,18 @@ beforeAll(async () => {
       },
     }),
   )
-  // Reads the request, echoes back `params.arguments.text` under `echoed` — the
-  // minimal deterministic proof that `ext run` actually invoked this process
-  // (`templates.zig`'s own `script_ps1` / `script_sh` are the precedents for a
-  // real script extension in this test suite; the sh sed extraction is the
-  // template's own).
+  // Echoes back the `text` argument — the minimal deterministic proof that
+  // `ext run` actually invoked this process. The wire is the whole story: the
+  // argument arrives as NULYA_ARG_text, and whatever the script prints IS the
+  // result (`templates.zig`'s own `scriptPs1` / `scriptSh` are the precedents
+  // for a real script extension in this test suite).
   if (win)
     writeFileSync(
       join(plugin_dir, "src", "main.ps1"),
       [
         "$ErrorActionPreference = 'Stop'",
         "$in = [Console]::In.ReadToEnd()",
-        "$id = 'call'",
-        "$text = ''",
-        "try {",
-        "  $req = $in | ConvertFrom-Json",
-        "  if ($req.id) { $id = [string]$req.id }",
-        "  if ($req.params.arguments.text) { $text = [string]$req.params.arguments.text }",
-        "} catch {}",
-        "$resp = [ordered]@{ jsonrpc = '2.0'; id = $id; result = [ordered]@{ echoed = $text } }",
-        "[Console]::Out.Write(($resp | ConvertTo-Json -Compress))",
+        "[Console]::Out.Write(\"echoed: $env:NULYA_ARG_text\")",
         "",
       ].join("\n"),
     )
@@ -108,11 +100,8 @@ beforeAll(async () => {
       join(plugin_dir, "src", "main.sh"),
       [
         "#!/bin/sh",
-        "req=$(cat)",
-        'id=$(printf \'%s\' "$req" | sed -n \'s/.*"id":"\\([^"]*\\)".*/\\1/p\')',
-        '[ -z "$id" ] && id=call',
-        'text=$(printf \'%s\' "$req" | sed -n \'s/.*"text":"\\([^"]*\\)".*/\\1/p\')',
-        'printf \'{"jsonrpc":"2.0","id":"%s","result":{"echoed":"%s"}}\' "$id" "$text"',
+        "cat >/dev/null",
+        "printf 'echoed: %s' \"$NULYA_ARG_text\"",
         "",
       ].join("\n"),
     )

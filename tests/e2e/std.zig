@@ -92,7 +92,7 @@ test "bundled std: ext build compiles one binary with five tools; ext run reache
     }
 
     // A call reaches the named tool: the answer is that tool's own refusal (a
-    // path that does not exist), which on the `plain` wire is the message on
+    // path that does not exist), which on this wire is the message on
     // stderr and a non-zero exit, and which the CLI reports as `exit 1` plus
     // that message — not "unknown tool", not a crash. What the refusal SAYS is
     // std_fs.zig's business.

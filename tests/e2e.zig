@@ -4,7 +4,7 @@
 //! This scaffolds a real extension, builds it with the HOST's zig (injected via
 //! NULYA_TEST_ZIG by build.zig so the ~90MB embed is not needed), activates the
 //! immutable version, then invokes it through the same Environment seam a live
-//! agent would use — and checks the wire response round-trips. Run with
+//! agent would use — and checks what it printed reaches the caller. Run with
 //! `zig build e2e`.
 //!
 //! It also covers the durable ledger (DESIGN §3.4): a session created with
@@ -20,10 +20,10 @@
 //! And script extensions (DESIGN §7.1): a script extension goes init → build (no
 //! toolchain) → activate → run → pinned native and executes through its
 //! interpreter; its version excludes compiler identity and is rebuild-stable.
-//! Both wires are covered — JSON-RPC (a manifest that says nothing about
-//! `wire`) and `plain` (arguments on stdin, `NULYA_ARG_<k>` in the environment,
-//! stdout verbatim) — as is a per-OS `runtime.entry`: the host picks its own
-//! variant, and a version naming none for this host is a named hard failure.
+//! The one wire is covered (arguments on stdin, `NULYA_ARG_<k>` in the
+//! environment, stdout verbatim, exit code as ok/failed), as is a per-OS
+//! `runtime.entry`: the host picks its own variant, and a version naming none
+//! for this host is a named hard failure.
 //!
 //! And the slow loop's substrate (M5): a verdict recorded while another process
 //! holds the session lease (DESIGN §3.3); per-step usage on the assistant event,
@@ -58,7 +58,7 @@
 //! the freshness it records for its own change, `grep`'s smart-case / per-file
 //! cap / paging / gitignore, `glob`'s mtime order — and a tool's stdout
 //! reaching the caller verbatim, its stderr and non-zero exit reaching it as a
-//! failed call (the `plain` wire, DESIGN §7.3).
+//! failed call (DESIGN §7.3).
 //!
 //! Compiling an extension is a real `zig build-exe`, so `support.zig` keeps a
 //! compile-once cache of built versions under `.zig-cache/` and copies frozen
@@ -69,7 +69,7 @@
 //!
 //!   e2e/support.zig      shared fixtures — CLI runners, scaffolds, fake models
 //!   e2e/extension.zig    the extension lifecycle, store roots, bundled packages
-//!   e2e/script_wire.zig  the `plain` wire and per-platform entry / interpreter
+//!   e2e/script_wire.zig  the wire and per-platform entry / interpreter
 //!   e2e/session.zig      the durable ledger and the `nulya session *` surface
 //!   e2e/vision.zig       images in a user turn: the catalog gate, the line, events
 //!   e2e/background.zig   background tasks: the supervisor, `nulya task …`,

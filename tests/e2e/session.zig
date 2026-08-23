@@ -11,7 +11,6 @@ const environment = support.environment;
 const ledger = support.ledger;
 const outcome = support.outcome;
 const prompt = support.prompt;
-const protocol = support.protocol;
 const provider = support.provider;
 const session = support.session;
 const store = support.store;

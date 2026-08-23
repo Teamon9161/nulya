@@ -19,7 +19,6 @@ pub const ledger = support.ledger;
 pub const manifest = support.manifest;
 pub const outcome = support.outcome;
 pub const prompt = support.prompt;
-pub const protocol = support.protocol;
 pub const provider = support.provider;
 pub const session = support.session;
 pub const store = support.store;
@@ -28,16 +27,15 @@ pub const tool = support.tool;
 pub const tool_stats = support.tool_stats;
 pub const trust = support.trust;
 
-/// A single-file extension speaking `jsonrpc` (`manifest.Wire.jsonrpc`, still
-/// the default wire): reads one request, echoes its id, answers with
-/// `{"greeting": "..."}`. This used to be `templates.main_zig` itself, but
-/// that template moved to the `plain` wire for real (`ext init --zig` scaffolds
-/// it now, DESIGN §7.1, ext-review-2 C1) — it is no longer a JSON-RPC fixture,
-/// it is the thing `script_wire.zig` proves the real shape of. Every test here
-/// that decodes a `tool/call` response, or (like `greetSource`) edits the
-/// greeting text into one, needs a fixture that still speaks the wire it is
-/// asserting about, so this is that fixture, kept local to the tests.
-pub const jsonrpc_main_zig =
+/// A single-file compiled extension, as small as the wire allows: drain stdin
+/// (so the host's write never blocks), print one line, exit 0. Its stdout IS
+/// what the caller reads back, so a test can assert on the greeting directly.
+///
+/// Deliberately not `templates.main_zig`, which is the real `ext init --zig`
+/// scaffold: `greetSource` rewrites the greeting to tell two builds apart, and
+/// pinning the assertions of a dozen tests to the text of a scaffold would make
+/// every wording change there a test change here.
+pub const plain_main_zig =
     \\const std = @import("std");
     \\
     \\pub fn main(init: std.process.Init) !void {
@@ -46,47 +44,20 @@ pub const jsonrpc_main_zig =
     \\
     \\    var in_buf: [4096]u8 = undefined;
     \\    var reader = std.Io.File.stdin().readerStreaming(io, &in_buf);
-    \\    const request = try reader.interface.allocRemaining(alloc, .limited(1 << 20));
-    \\    defer alloc.free(request);
+    \\    const args_json = try reader.interface.allocRemaining(alloc, .limited(1 << 20));
+    \\    defer alloc.free(args_json);
     \\
-    \\    var id: []const u8 = "";
-    \\    const parsed = std.json.parseFromSlice(std.json.Value, alloc, request, .{}) catch null;
-    \\    defer if (parsed) |p| p.deinit();
-    \\    if (parsed) |p| switch (p.value) {
-    \\        .object => |o| if (o.get("id")) |v| switch (v) {
-    \\            .string => |s| id = s,
-    \\            else => {},
-    \\        },
-    \\        else => {},
-    \\    };
-    \\
-    \\    var out: std.Io.Writer.Allocating = .init(alloc);
-    \\    defer out.deinit();
-    \\    var jw: std.json.Stringify = .{ .writer = &out.writer };
-    \\    try jw.beginObject();
-    \\    try jw.objectField("jsonrpc");
-    \\    try jw.write("2.0");
-    \\    try jw.objectField("id");
-    \\    try jw.write(id);
-    \\    try jw.objectField("result");
-    \\    try jw.beginObject();
-    \\    try jw.objectField("greeting");
-    \\    try jw.write("hello from a Nulya-built extension");
-    \\    try jw.endObject();
-    \\    try jw.endObject();
-    \\
-    \\    try std.Io.File.stdout().writeStreamingAll(io, out.writer.buffered());
+    \\    try std.Io.File.stdout().writeStreamingAll(io, "hello from a Nulya-built extension");
     \\}
     \\
 ;
 
-/// `extension.json` for `jsonrpc_main_zig` and every custom JSON-RPC-shaped
-/// `main_src` these tests hand to `scaffoldAndBuild` / `buildAndActivate`
-/// (e.g. a fixture that answers a `tool/call` request with a JSON-RPC error).
-/// No `runtime.wire`, so it defaults to `jsonrpc` — the wire every such
-/// fixture is written against, regardless of what `templates.manifestJson`
-/// (the real `ext init --zig` scaffold) declares today.
-fn jsonRpcManifestJson(alloc: std.mem.Allocator, id: []const u8, tool_name: []const u8) ![]u8 {
+/// `extension.json` for `plain_main_zig` and every hand-written `main_src`
+/// these tests hand to `scaffoldAndBuild` / `buildAndActivate`. Deliberately
+/// minimal — one tool, an empty input schema — rather than
+/// `templates.manifestJson`, so the fixtures do not move when the scaffold's
+/// wording does.
+fn fixtureManifestJson(alloc: std.mem.Allocator, id: []const u8, tool_name: []const u8) ![]u8 {
     return std.fmt.allocPrint(alloc,
         \\{{
         \\  "schema": "nulya.extension/v2",
@@ -141,12 +112,7 @@ pub fn scaffoldAndBuild(
     tool_name: []const u8,
     main_src: []const u8,
 ) ![]u8 {
-    // Every `main_src` handed to this helper (jsonrpc_main_zig itself,
-    // `greetSource`'s edits of it, or a hand-written fixture like `failing_main`
-    // in extension.zig) speaks `jsonrpc`, so the manifest declares that wire
-    // regardless of what `templates.manifestJson` — the real `ext init --zig`
-    // scaffold — declares today (`plain`, ext-review-2 C1).
-    const manifest_bytes = try jsonRpcManifestJson(alloc, id, tool_name);
+    const manifest_bytes = try fixtureManifestJson(alloc, id, tool_name);
     defer alloc.free(manifest_bytes);
     try writeSingleFileDraft(alloc, io, ws, ".nulya" ++ std.fs.path.sep_str ++ "extensions", id, manifest_bytes, main_src);
     return installPrebuilt(alloc, io, ws, zig_exe, id, manifest_bytes, main_src);
@@ -191,20 +157,20 @@ pub fn runCli(
     return runCliEnvs(alloc, io, ws, argv, &.{});
 }
 
-/// The generated `greet` extension with its greeting text swapped, so two builds
-/// differ by observable output (and therefore by content-addressed version). The
-/// source stays a real, compilable single-file extension. Caller owns the bytes.
+/// The `greet` fixture with its greeting text swapped, so two builds differ by
+/// observable output (and therefore by content-addressed version). The source
+/// stays a real, compilable single-file extension. Caller owns the bytes.
 pub fn greetSource(alloc: std.mem.Allocator, greeting: []const u8) ![]u8 {
     const needle = "hello from a Nulya-built extension";
-    const size = std.mem.replacementSize(u8, jsonrpc_main_zig, needle, greeting);
+    const size = std.mem.replacementSize(u8, plain_main_zig, needle, greeting);
     const buf = try alloc.alloc(u8, size);
     errdefer alloc.free(buf);
-    _ = std.mem.replace(u8, jsonrpc_main_zig, needle, greeting, buf);
+    _ = std.mem.replace(u8, plain_main_zig, needle, greeting, buf);
     return buf;
 }
 
 /// One native tool invocation through the real executor chain: a fresh
-/// `LocalEnvironment` spawns the frozen executable and returns its decoded output.
+/// `LocalEnvironment` spawns the frozen executable and returns its output.
 /// Caller owns `result.output`.
 pub fn callNative(alloc: std.mem.Allocator, io: std.Io, t: tool.Tool, ws_path: []const u8) !tool.RawToolResult {
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{});

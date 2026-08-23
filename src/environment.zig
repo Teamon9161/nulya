@@ -85,11 +85,10 @@ pub const ShellRequest = struct {
     timeout_ms: ?u32 = null,
 };
 
-/// One oneshot extension invocation (DESIGN §7.3). `request_json` is the full
-/// wire request written to the child's stdin; `stdout` on return is the raw
-/// response the child wrote before exiting — the caller decodes it with
-/// `extension/protocol.zig`, so a malformed reply is a decode error, not a host
-/// crash.
+/// One oneshot extension invocation (DESIGN §7.3). `request_json` is this
+/// call's arguments object, written to the child's stdin; `stdout` on return is
+/// exactly what the child printed before exiting, which IS the tool's result —
+/// this seam never interprets it.
 pub const ExtensionRequest = struct {
     /// Absolute path to the extension entry: a built binary for a compiled
     /// extension, or a frozen script for a script extension (DESIGN §7.1).
@@ -98,21 +97,22 @@ pub const ExtensionRequest = struct {
     /// argv[0], with the entry as argv[1]). `null` runs the entry directly.
     interpreter: ?[]const u8 = null,
     cwd: []const u8,
+    /// The arguments for this call: one compact JSON object (`{}` when there
+    /// are none), written to stdin verbatim.
     request_json: []const u8,
     max_output_bytes: usize,
     /// Wall-clock cap for the oneshot call (`tool.Timeouts`, base-tools.md §3).
     /// `null` disables the guard; callers should only do that in controlled tests.
     timeout_ms: ?u32 = tool.Timeouts.extension_ms,
     /// Environment variables for THIS call, layered on top of the sanitized
-    /// child environment — the `plain` wire's `NULYA_TOOL` / `NULYA_ARG_<k>`
-    /// (DESIGN §7.3), derived by `invoke.zig` from the same arguments JSON that
-    /// goes to stdin. Authority is unchanged: these are the model's own
-    /// arguments, not host state, and the secret denylist still governs what was
-    /// inherited (physics #6).
+    /// child environment — `NULYA_TOOL` / `NULYA_ARG_<k>` (DESIGN §7.3),
+    /// derived by `protocol.PlainEnv` from the same arguments JSON that goes to
+    /// stdin. Authority is unchanged: these are the model's own arguments, not
+    /// host state, and the secret denylist still governs what was inherited
+    /// (physics #6).
     ///
-    /// Empty for the JSON-RPC wire, and an empty list is the ONE path that
-    /// spawns with the process-wide map itself — so a jsonrpc child's
-    /// environment is byte-identical to what it was before this field existed.
+    /// An empty list is the ONE path that spawns with the process-wide map
+    /// itself, so a caller with nothing to add costs no copy.
     env_extra: []const EnvVar = &.{},
 };
 
@@ -553,11 +553,11 @@ pub const LocalEnvironment = struct {
             argv_buf[0] = req.entry_path;
             break :blk argv_buf[0..1];
         };
-        // Per-call variables (the `plain` wire's `NULYA_TOOL` / `NULYA_ARG_<k>`)
-        // are a COPY of the sanitized map with those names put on top: the
-        // process-wide map belongs to every other spawn and must not be mutated
-        // for one call. With none of them — every JSON-RPC call — the map itself
-        // is passed, so nothing about that path changed.
+        // Per-call variables (`NULYA_TOOL` / `NULYA_ARG_<k>`) are a COPY of the
+        // sanitized map with those names put on top: the process-wide map
+        // belongs to every other spawn and must not be mutated for one call.
+        // With none of them the map itself is passed, so a caller that adds
+        // nothing pays nothing.
         var overlay: ?std.process.Environ.Map = null;
         defer if (overlay) |*m| m.deinit();
         const child_env: *const std.process.Environ.Map = if (req.env_extra.len == 0) &self.env else blk: {
@@ -585,8 +585,8 @@ pub const LocalEnvironment = struct {
         const child = &tree.child;
         errdefer tree.killAll(self.io);
 
-        // Write the request, then close stdin so the child sees EOF. v1 requests
-        // are small JSON lines (< pipe buffer), so writing before draining stdout
+        // Write the arguments, then close stdin so the child sees EOF. They are
+        // a small JSON object (< pipe buffer), so writing before draining stdout
         // cannot deadlock.
         try child.stdin.?.writeStreamingAll(self.io, req.request_json);
         child.stdin.?.close(self.io);

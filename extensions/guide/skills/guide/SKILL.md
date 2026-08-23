@@ -84,7 +84,8 @@ nulya ext run my.helper@v-<hash> do_thing --arg name=world
 nulya ext activate my.helper v-<hash>
 ```
 
-The scaffold speaks the `plain` wire, so the script is the whole tool:
+There is nothing between the script and the caller, so the script is the whole
+tool:
 
 ```sh
 #!/bin/sh
@@ -101,10 +102,6 @@ printf 'hello %s\n' "${NULYA_ARG_name:-world}"
   `runtime.interpreter` names what runs it (`sh`, `powershell`, `python`). Both
   may be written per OS — `{"windows": "src/run.ps1", "default": "src/run.sh"}`
   — so one version runs everywhere.
-- `runtime.wire` — write `"plain"` (above); a compiled runtime says it too, it
-  is how you talk to a process, not what kind of process it is. Left out it
-  still means the deprecated `"jsonrpc"` envelope, which works for one more
-  version. `nulya ext api protocol` is the contract.
 - `contributes.tools[]` — `{name, description, input, timeout_ms?}`. `input` is
   the JSON Schema the model sees. This manifest is the only source of truth for
   a tool's shape.
@@ -144,7 +141,7 @@ identically under both shells. In a nulya checkout, `extensions/compact` and
 `extensions/handoff` are the worked examples, and `extensions/std` (read /
 write / append / edit / grep / glob as one package — build it `--user`,
 activate it, pin `ext:std/<tool>` for the ones you want) is the one to copy for
-a tool that returns text: a string `result` reaches the model verbatim.
+a tool that returns text: whatever it prints reaches the model verbatim.
 
 Store and scope:
 

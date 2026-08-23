@@ -1,4 +1,4 @@
-//! The `plain` wire and per-platform entries (DESIGN §7.1, §7.3).
+//! The wire and per-platform entries (DESIGN §7.1, §7.3).
 //!
 //! The claim under test is that a script extension is a real one: what `nulya
 //! ext init` scaffolds — no compiler, no JSON to parse, no id to echo — goes the
@@ -8,10 +8,9 @@
 //! for this host fails LOUDLY (naming the package) instead of running something
 //! else or vanishing from the session.
 //!
-//! The JSON-RPC wire is unaffected and stays proved where it always was:
-//! `extension.zig`'s "script extension: init(--script) -> build(seal) -> ..."
-//! builds a script whose manifest says nothing about `wire`, which is what every
-//! manifest written before the field says.
+//! There is one wire, and nothing in a manifest selects it — so what a package
+//! declares is only where its entry is, and these tests never say a word about
+//! how it will be spoken to.
 
 const std = @import("std");
 const support = @import("support.zig");
@@ -107,7 +106,7 @@ fn nulyaExe(alloc: std.mem.Allocator, host_env: *const std.process.Environ.Map) 
     return std.fs.path.resolve(alloc, &.{exe_rel});
 }
 
-test "plain wire: `ext init` scaffolds it, `ext run --arg` runs it, and a pinned session reads its stdout byte for byte" {
+test "the wire: `ext init` scaffolds it, `ext run --arg` runs it, and a pinned session reads its stdout byte for byte" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -132,12 +131,13 @@ test "plain wire: `ext init` scaffolds it, `ext run --arg` runs it, and a pinned
     const draft = ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "greeter";
     try ws.access(io, draft ++ std.fs.path.sep_str ++ "src" ++ std.fs.path.sep_str ++ "run.sh", .{});
     try ws.access(io, draft ++ std.fs.path.sep_str ++ "src" ++ std.fs.path.sep_str ++ "run.ps1", .{});
-    // And the scaffold declares no `permissions`: the key is not in the schema
-    // any more, so a template must not propagate the ceremony (DESIGN §9).
+    // And the scaffold declares neither `permissions` nor `wire`: neither key is
+    // in the schema any more, and a template is copied far more often than it is
+    // read, so it must not propagate the ceremony (DESIGN §9, §7.1).
     const manifest_bytes = try ws.readFileAlloc(io, draft ++ std.fs.path.sep_str ++ "extension.json", alloc, .limited(1 << 16));
     defer alloc.free(manifest_bytes);
     try std.testing.expect(std.mem.indexOf(u8, manifest_bytes, "permissions") == null);
-    try std.testing.expect(std.mem.indexOf(u8, manifest_bytes, "\"wire\": \"plain\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, manifest_bytes, "wire") == null);
 
     // A script build needs no toolchain at all.
     const built = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "build", draft });
@@ -216,7 +216,7 @@ test "plain wire: `ext init` scaffolds it, `ext run --arg` runs it, and a pinned
     try std.testing.expectEqualStrings(expected, found.?);
 }
 
-test "plain wire: a non-zero exit is a failed call carrying the code, stderr and stdout" {
+test "a non-zero exit is a failed call carrying the code, stderr and stdout" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -235,8 +235,7 @@ test "plain wire: a non-zero exit is a failed call carrying the code, stderr and
         \\  "id": "boom",
         \\  "runtime": {
         \\    "entry": { "windows": "src/run.ps1", "default": "src/run.sh" },
-        \\    "interpreter": { "windows": "powershell", "default": "sh" },
-        \\    "wire": "plain"
+        \\    "interpreter": { "windows": "powershell", "default": "sh" }
         \\  },
         \\  "contributes": { "tools": [{ "name": "t", "input": { "type": "object" } }] }
         \\}
@@ -291,8 +290,7 @@ test "per-platform entry: one version, this host's script — and a version with
         \\  "id": "both",
         \\  "runtime": {
         \\    "entry": { "windows": "src/run.ps1", "default": "src/run.sh" },
-        \\    "interpreter": { "windows": "powershell", "default": "sh" },
-        \\    "wire": "plain"
+        \\    "interpreter": { "windows": "powershell", "default": "sh" }
         \\  },
         \\  "contributes": { "tools": [{ "name": "t", "input": { "type": "object" } }] }
         \\}
@@ -326,8 +324,7 @@ test "per-platform entry: one version, this host's script — and a version with
         \\  "id": "elsewhere",
         \\  "runtime": {
         \\    "entry": { "linux": "src/run.sh" },
-        \\    "interpreter": { "linux": "sh" },
-        \\    "wire": "plain"
+        \\    "interpreter": { "linux": "sh" }
         \\  },
         \\  "contributes": { "tools": [{ "name": "t", "input": { "type": "object" } }] }
         \\}
@@ -393,8 +390,7 @@ test "per-platform entry: one version, this host's script — and a version with
         \\  "id": "missing",
         \\  "runtime": {
         \\    "entry": { "windows": "src/run.ps1", "default": "src/run.sh" },
-        \\    "interpreter": { "windows": "powershell", "default": "sh" },
-        \\    "wire": "plain"
+        \\    "interpreter": { "windows": "powershell", "default": "sh" }
         \\  },
         \\  "contributes": { "tools": [{ "name": "t", "input": { "type": "object" } }] }
         \\}
@@ -407,7 +403,7 @@ test "per-platform entry: one version, this host's script — and a version with
     try std.testing.expectEqual(@as(u8, 1), missing_built.code);
 }
 
-test "an unreadable wire word stops the build, before any version exists" {
+test "a leftover runtime.wire builds and runs, and the build says the key is not read any more" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -420,30 +416,47 @@ test "an unreadable wire word stops the build, before any version exists" {
     defer tmp.cleanup();
     const ws = tmp.dir;
 
-    try writeDraft(alloc, io, ws, "typo",
+    // A package written against the wire that used to exist. It is not broken —
+    // there is one wire and it was always going to be spoken this way — so the
+    // build proceeds and the tool answers; what the author gets is a sentence
+    // saying their word is no longer read.
+    try writeDraft(alloc, io, ws, "leftover",
         \\{
         \\  "schema": "nulya.extension/v2",
-        \\  "id": "typo",
-        \\  "runtime": { "entry": "src/run.sh", "interpreter": "sh", "wire": "json-rpc" },
+        \\  "id": "leftover",
+        \\  "runtime": { "entry": "src/run.sh", "interpreter": "sh", "wire": "jsonrpc" },
         \\  "contributes": { "tools": [{ "name": "t", "input": { "type": "object" } }] }
         \\}
     , &.{
-        .{ .rel = "src/run.sh", .bytes = "#!/bin/sh\nprintf 'x'\n" },
+        .{ .rel = "src/run.sh", .bytes = "#!/bin/sh\ncat >/dev/null\nprintf 'still here'\n" },
     });
 
-    const draft = ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "typo";
+    const draft = ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "leftover";
     const argv = [_][]const u8{ exe_abs, "ext", "build", draft };
     const built = try runCli(alloc, io, ws, &argv);
     defer alloc.free(built.stdout);
-    try std.testing.expectEqual(@as(u8, 1), built.code);
+    try std.testing.expectEqual(@as(u8, 0), built.code);
+    const version = try extractVersion(alloc, built.stdout);
+    defer alloc.free(version);
+
+    // The note names the package and the key, on stderr so stdout stays the
+    // version id a caller parses.
     const err_text = try runCliStderr(alloc, io, ws, &argv, &.{});
     defer alloc.free(err_text);
-    // The manifest's own fault, reported as a sentence rather than a stack trace.
-    try std.testing.expect(std.mem.indexOf(u8, err_text, "InvalidWire") != null);
+    try std.testing.expect(std.mem.indexOf(u8, err_text, "leftover") != null);
+    try std.testing.expect(std.mem.indexOf(u8, err_text, "runtime.wire") != null);
     try std.testing.expect(std.mem.indexOf(u8, err_text, ".zig:") == null);
+
+    if (windows) return; // no `sh` to run the entry with
+    const ref = try std.fmt.allocPrint(alloc, "leftover@{s}", .{version});
+    defer alloc.free(ref);
+    const run = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "t", "{}" });
+    defer alloc.free(run.stdout);
+    try std.testing.expectEqual(@as(u8, 0), run.code);
+    try std.testing.expect(std.mem.startsWith(u8, run.stdout, "still here"));
 }
 
-test "`ext init --zig` scaffolds the plain wire too: --arg, no json defaults to {}, and no tool is a usage error (C1/C2, ext-review-2 §2)" {
+test "`ext init --zig` scaffolds a runtime spoken to the same way: --arg, no json defaults to {}, and no tool is a usage error (C1/C2, ext-review-2 §2)" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -462,11 +475,11 @@ test "`ext init --zig` scaffolds the plain wire too: --arg, no json defaults to 
     try std.testing.expectEqual(@as(u8, 0), init.code);
 
     const draft = ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "compiled.greeter";
-    // The compiled scaffold declares the same wire as the script one: `plain`
-    // is not tied to scripts, it is the default for both (DESIGN §7.1).
+    // The compiled scaffold says nothing about a wire either: how a process is
+    // talked to was never a property of what kind of process it is (DESIGN §7.1).
     const manifest_bytes = try ws.readFileAlloc(io, draft ++ std.fs.path.sep_str ++ "extension.json", alloc, .limited(1 << 16));
     defer alloc.free(manifest_bytes);
-    try std.testing.expect(std.mem.indexOf(u8, manifest_bytes, "\"wire\": \"plain\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, manifest_bytes, "wire") == null);
 
     const built = try runCliEnv(alloc, io, ws, &.{ exe_abs, "ext", "build", draft }, "NULYA_ZIG", zig_exe);
     defer alloc.free(built.stdout);

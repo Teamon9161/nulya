@@ -44,6 +44,14 @@ fn noteLegacyShapes(alloc: std.mem.Allocator, io: std.Io, m: manifest.Manifest) 
     if (m.legacy_permissions) try noteLegacyShape(alloc, io, m.id, "still declares \"permissions\"; that key is no longer read — an unenforced footprint was ceremony, and a sandbox will define its own shape");
     if (m.legacy_command_action) try noteLegacyShape(alloc, io, m.id, "writes a command \"action\" as a string; write the object instead — {\"with\": true}, {\"run\": \"<tool>\"}, {\"skill\": \"<ref>\"}. The string is read for one more version");
     if (m.legacy_ui) try noteLegacyShape(alloc, io, m.id, "writes \"contributes.ui\" without a host; key it by front end instead — {\"tui\": {\"entry\": …, \"api\": …}}. The flat form is read as \"tui\" for one more version");
+    // One wire now, so a runtime no longer picks one. The two words a draft may
+    // still carry asked for different things, so each is answered in its own.
+    if (m.legacy_wire) |w| {
+        if (std.mem.eql(u8, w, "plain"))
+            try noteLegacyShape(alloc, io, m.id, "still declares \"runtime.wire\"; that key is no longer needed — plain is the one wire every call speaks")
+        else
+            try noteLegacyShape(alloc, io, m.id, "still declares \"runtime.wire\"; that wire is gone and this runtime will be called the plain way: stdin is the arguments object, stdout verbatim is the result, and the exit code is success — see `nulya ext api protocol`");
+    }
 }
 
 fn noteLegacyShape(alloc: std.mem.Allocator, io: std.Io, id: []const u8, what: []const u8) !void {

@@ -211,7 +211,7 @@ test "bundled std grep: hits, smart case, glob filter, context shape, per-file c
     }
 
     // Refusals: a pattern that will not compile teaches escaping; a path that
-    // does not exist says so. Both are failed calls — on the `plain` wire that
+    // does not exist says so. Both are failed calls — on this wire that
     // is the message on stderr and a non-zero exit, which the CLI reports as
     // `exit 1` followed by it.
     {
