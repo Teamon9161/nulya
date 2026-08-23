@@ -1,9 +1,10 @@
 //! Scaffolding templates for `nulya ext init` (DESIGN §7.1, §7.2, §7.5).
 //!
-//! Two scaffolds, one wire — `plain` (`manifest.Wire.plain`), the default: the
-//! model's arguments arrive on stdin as one JSON object, and whatever the
-//! process prints to stdout IS the result the model sees, no envelope, no id
-//! to echo. `nulya ext api protocol` documents the other wire, `jsonrpc`.
+//! Two scaffolds, one wire — `plain` (`manifest.Wire.plain`): the model's
+//! arguments arrive on stdin as one JSON object, and whatever the process prints
+//! to stdout IS the result the model sees, no envelope, no id to echo. It is the
+//! only wire to write against; `nulya ext api protocol` is the whole contract,
+//! and says why the other one is retiring.
 //!
 //!   default   a SCRIPT extension — `src/run.sh` and `src/run.ps1`, three
 //!             lines each, selected per host by the manifest's per-OS `entry`

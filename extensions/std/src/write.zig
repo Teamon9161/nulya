@@ -102,8 +102,7 @@ test "write: a new file (parent dirs created) reports its line count; content wi
     try std.testing.expectEqualStrings("one\ntwo\n", bytes);
 
     const marked = try f.call(run, "{{\"path\":\"m.txt\",\"content\":\"x{s}12 bytes]\"}}", .{text.marker_open});
-    try std.testing.expectEqual(rpc.code_refused, marked.failed.code);
-    try std.testing.expect(std.mem.startsWith(u8, marked.failed.message, "content contains a truncation marker"));
+    try std.testing.expect(std.mem.startsWith(u8, marked.failed, "content contains a truncation marker"));
     try std.testing.expectError(error.FileNotFound, f.tmp.dir.access(io, "m.txt", .{}));
 }
 
@@ -118,16 +117,16 @@ test "write: the visibility gate — unseen, partial (with the seen ranges), sta
     try f.tmp.dir.writeFile(io, .{ .sub_path = "g.txt", .data = body.items });
 
     const unseen = try f.call(run, "{{\"path\":\"g.txt\",\"content\":\"new\\n\"}}", .{});
-    try std.testing.expectEqualStrings("g.txt already exists and you have not read its current version; read it first so no content is destroyed unknowingly.", unseen.failed.message);
+    try std.testing.expectEqualStrings("g.txt already exists and you have not read its current version; read it first so no content is destroyed unknowingly.", unseen.failed);
 
     _ = try f.call(read.run, "{{\"path\":\"g.txt\",\"offset\":1,\"limit\":120}}", .{});
     const partial = try f.call(run, "{{\"path\":\"g.txt\",\"content\":\"new\\n\"}}", .{});
-    try std.testing.expectEqualStrings("g.txt already exists and you have only seen lines 1-120 of its current version; `write` replaces the whole file. Read the remaining lines first, or use `edit`/`append` for a targeted change.", partial.failed.message);
+    try std.testing.expectEqualStrings("g.txt already exists and you have only seen lines 1-120 of its current version; `write` replaces the whole file. Read the remaining lines first, or use `edit`/`append` for a targeted change.", partial.failed);
 
     _ = try f.call(read.run, "{{\"path\":\"g.txt\",\"offset\":121}}", .{});
     try f.tmp.dir.writeFile(io, .{ .sub_path = "g.txt", .data = "changed behind your back\n" });
     const stale = try f.call(run, "{{\"path\":\"g.txt\",\"content\":\"new\\n\"}}", .{});
-    try std.testing.expectEqualStrings("g.txt changed on disk since you last read it; re-read it before overwriting so the external changes are not destroyed unknowingly.", stale.failed.message);
+    try std.testing.expectEqualStrings("g.txt changed on disk since you last read it; re-read it before overwriting so the external changes are not destroyed unknowingly.", stale.failed);
 
     _ = try f.call(read.run, "{{\"path\":\"g.txt\"}}", .{});
     const ok = try f.call(run, "{{\"path\":\"g.txt\",\"content\":\"new\\n\"}}", .{});

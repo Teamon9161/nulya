@@ -44,9 +44,9 @@
 //! plugin degrades to a person typing their comments, which is the same thing.
 //!
 //! **Why compiled Zig rather than a script.** Identical to `handoff` and
-//! `agent`: JSON-RPC in, an `id` to echo, arguments to validate. `sh` has no
-//! JSON reader, Windows has neither `jq` nor a guaranteed python, and one
-//! manifest carries one `interpreter`.
+//! `agent`: a plan and a checklist to validate before either is on the record,
+//! and a brief to write. `sh` has no JSON reader, Windows has neither `jq` nor a
+//! guaranteed python, and one manifest carries one `interpreter`.
 
 const std = @import("std");
 const rpc = @import("rpc.zig");
@@ -82,34 +82,25 @@ pub fn main(init: std.process.Init) !void {
     // one file and prints one line, so individual frees would be noise.
     const alloc = init.arena.allocator();
 
-    const request = rpc.readRequest(alloc, io) catch |err| switch (err) {
+    const name = init.environ_map.get("NULYA_TOOL") orelse "";
+    const arguments = rpc.readArguments(alloc, io) catch |err| switch (err) {
         error.OutOfMemory => return err,
-        else => {
-            try rpc.writeResponse(alloc, io, rpc.fallback_id, .{ .failed = .{
-                .code = -32600,
-                .message = "plan expects one JSON-RPC tool/call request on stdin",
-            } });
-            return;
-        },
+        else => try rpc.answer(io, .{ .failed = "plan expects this call's arguments as one JSON object on stdin" }),
     };
 
-    // Host faults surface as Zig errors and are folded into a `-32000` here, so
-    // every path still writes exactly one response.
-    const outcome = dispatch(alloc, io, request) catch |err| rpc.Outcome{ .failed = .{
-        .code = rpc.code_refused,
-        .message = try std.fmt.allocPrint(alloc, "{s} could not run: {s}", .{ request.name, @errorName(err) }),
-    } };
-    try rpc.writeResponse(alloc, io, request.id, outcome);
+    // Host faults surface as Zig errors and are folded into a refusal here, so
+    // every path still ends in exactly one answer.
+    const outcome = dispatch(alloc, io, name, arguments) catch |err| rpc.Outcome{
+        .failed = try std.fmt.allocPrint(alloc, "{s} could not run: {s}", .{ name, @errorName(err) }),
+    };
+    try rpc.answer(io, outcome);
 }
 
-fn dispatch(alloc: std.mem.Allocator, io: std.Io, request: rpc.Request) !rpc.Outcome {
-    if (std.mem.eql(u8, request.name, "propose")) return propose(alloc, request.arguments);
-    if (std.mem.eql(u8, request.name, "todo")) return todo(alloc, request.arguments);
-    if (std.mem.eql(u8, request.name, "approve")) return approve(alloc, io, request.arguments);
-    return .{ .failed = .{
-        .code = rpc.code_unknown_tool,
-        .message = "plan has three tools: propose, todo, approve",
-    } };
+fn dispatch(alloc: std.mem.Allocator, io: std.Io, name: []const u8, arguments: std.json.ObjectMap) !rpc.Outcome {
+    if (std.mem.eql(u8, name, "propose")) return propose(alloc, arguments);
+    if (std.mem.eql(u8, name, "todo")) return todo(alloc, arguments);
+    if (std.mem.eql(u8, name, "approve")) return approve(alloc, io, arguments);
+    return .{ .failed = "plan has three tools: propose, todo, approve" };
 }
 
 // ── propose ────────────────────────────────────────────────────────────────
@@ -121,7 +112,7 @@ fn dispatch(alloc: std.mem.Allocator, io: std.Io, request: rpc.Request) !rpc.Out
 fn propose(alloc: std.mem.Allocator, args: std.json.ObjectMap) !rpc.Outcome {
     const plan = rpc.trimmedField(args, "plan_md");
     if (plan.len == 0) {
-        return rpc.invalidParams(
+        return rpc.refuse(
             alloc,
             "propose needs a non-empty plan_md; nothing was recorded. " ++
                 "plan_md is the WHOLE plan in markdown: the phases in order, and for each one the files and " ++
@@ -130,7 +121,7 @@ fn propose(alloc: std.mem.Allocator, args: std.json.ObjectMap) !rpc.Outcome {
         );
     }
     if (plan.len > max_plan_bytes) {
-        return rpc.invalidParams(
+        return rpc.refuse(
             alloc,
             "that plan is {d} bytes, past the {d} this tool takes; a plan nobody can read in one sitting " ++
                 "is a phase list plus a transcript — send the phase list.",
@@ -148,7 +139,7 @@ fn propose(alloc: std.mem.Allocator, args: std.json.ObjectMap) !rpc.Outcome {
 fn todo(alloc: std.mem.Allocator, args: std.json.ObjectMap) !rpc.Outcome {
     const items = switch (args.get("items") orelse std.json.Value{ .null = {} }) {
         .array => |a| a,
-        else => return rpc.invalidParams(
+        else => return rpc.refuse(
             alloc,
             "todo needs items: [{{\"text\": \"…\", \"state\": \"todo\"|\"doing\"|\"done\"}}]. " ++
                 "Send the WHOLE list every time — each call replaces what is shown.",
@@ -156,10 +147,10 @@ fn todo(alloc: std.mem.Allocator, args: std.json.ObjectMap) !rpc.Outcome {
         ),
     };
     if (items.items.len == 0) {
-        return rpc.invalidParams(alloc, "todo needs at least one item; an empty list says nothing.", .{});
+        return rpc.refuse(alloc, "todo needs at least one item; an empty list says nothing.", .{});
     }
     if (items.items.len > max_items) {
-        return rpc.invalidParams(
+        return rpc.refuse(
             alloc,
             "{d} items is not a checklist anybody reads; keep it to the {d} steps that matter.",
             .{ items.items.len, max_items },
@@ -170,7 +161,7 @@ fn todo(alloc: std.mem.Allocator, args: std.json.ObjectMap) !rpc.Outcome {
     for (items.items) |item| {
         const obj = switch (item) {
             .object => |o| o,
-            else => return rpc.invalidParams(
+            else => return rpc.refuse(
                 alloc,
                 "every entry of items must be an object {{text, state}}.",
                 .{},
@@ -178,7 +169,7 @@ fn todo(alloc: std.mem.Allocator, args: std.json.ObjectMap) !rpc.Outcome {
         };
         const text = rpc.trimmedField(obj, "text");
         if (text.len == 0 or text.len > max_item_bytes) {
-            return rpc.invalidParams(
+            return rpc.refuse(
                 alloc,
                 "every item needs a short non-empty text; nothing was recorded.",
                 .{},
@@ -189,7 +180,7 @@ fn todo(alloc: std.mem.Allocator, args: std.json.ObjectMap) !rpc.Outcome {
         if (std.mem.eql(u8, state, "done")) {
             done += 1;
         } else if (!std.mem.eql(u8, state, "todo") and !std.mem.eql(u8, state, "doing")) {
-            return rpc.invalidParams(
+            return rpc.refuse(
                 alloc,
                 "'{s}' is not a state; each item is \"todo\", \"doing\" or \"done\" (leaving it out means todo).",
                 .{state},
@@ -215,21 +206,21 @@ fn todo(alloc: std.mem.Allocator, args: std.json.ObjectMap) !rpc.Outcome {
 fn approve(alloc: std.mem.Allocator, io: std.Io, args: std.json.ObjectMap) !rpc.Outcome {
     const session = rpc.trimmedField(args, "session");
     if (session.len == 0) {
-        return rpc.invalidParams(alloc, "approve needs {{\"session\": \"<id>\", \"plan_md\": \"…\"}}.", .{});
+        return rpc.refuse(alloc, "approve needs {{\"session\": \"<id>\", \"plan_md\": \"…\"}}.", .{});
     }
     // The id becomes part of a file name, so it has to be one component. Not a
     // security boundary (this tool has the caller's authority either way,
     // DESIGN §9) — it is the difference between a clear refusal and a file
     // written somewhere nobody will look for it.
     if (std.mem.indexOfAny(u8, session, "/\\:") != null or std.mem.eql(u8, session, "..")) {
-        return rpc.invalidParams(alloc, "'{s}' is not a session id; pass the id, not a path.", .{session});
+        return rpc.refuse(alloc, "'{s}' is not a session id; pass the id, not a path.", .{session});
     }
     const plan = rpc.trimmedField(args, "plan_md");
     if (plan.len == 0) {
-        return rpc.invalidParams(alloc, "approve needs the approved plan_md; nothing was written.", .{});
+        return rpc.refuse(alloc, "approve needs the approved plan_md; nothing was written.", .{});
     }
     if (plan.len > max_plan_bytes) {
-        return rpc.invalidParams(
+        return rpc.refuse(
             alloc,
             "that plan is {d} bytes, past the {d} this tool takes.",
             .{ plan.len, max_plan_bytes },
@@ -252,7 +243,7 @@ fn approve(alloc: std.mem.Allocator, io: std.Io, args: std.json.ObjectMap) !rpc.
         };
         defer file.close(io);
         try file.writeStreamingAll(io, body);
-        return .{ .json = try std.fmt.allocPrint(alloc, "{{\"recorded\":{f}}}", .{std.json.fmt(rel, .{})}) };
+        return .{ .text = try std.fmt.allocPrint(alloc, "{{\"recorded\":{f}}}", .{std.json.fmt(rel, .{})}) };
     }
     return rpc.refuse(alloc, "{s} has already recorded too many briefs", .{session});
 }

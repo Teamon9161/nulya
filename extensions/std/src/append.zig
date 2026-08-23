@@ -95,7 +95,7 @@ test "append: a missing file is created (parent dirs too) and echoed numbered; e
     defer f.deinit();
     const io = std.testing.io;
     const empty = try f.call(run, "{{\"path\":\"n/new.txt\",\"content\":\"\"}}", .{});
-    try std.testing.expectEqualStrings("content must not be empty", empty.failed.message);
+    try std.testing.expectEqualStrings("content must not be empty", empty.failed);
     try std.testing.expectError(error.FileNotFound, f.tmp.dir.access(io, "n", .{}));
 
     const created = try f.call(run, "{{\"path\":\"n/new.txt\",\"content\":\"a\\nb\\n\"}}", .{});
@@ -118,12 +118,12 @@ test "append: the gate — unseen and stale refuse, a partial read passes; the e
     try f.tmp.dir.writeFile(io, .{ .sub_path = "g.txt", .data = body.items });
 
     const unseen = try f.call(run, "{{\"path\":\"g.txt\",\"content\":\"x\\n\"}}", .{});
-    try std.testing.expectEqualStrings("g.txt already exists and you have not read its current version; read it (even partially) before appending so you know what you are extending.", unseen.failed.message);
+    try std.testing.expectEqualStrings("g.txt already exists and you have not read its current version; read it (even partially) before appending so you know what you are extending.", unseen.failed);
 
     _ = try f.call(read.run, "{{\"path\":\"g.txt\",\"offset\":1,\"limit\":120}}", .{});
     try f.tmp.dir.writeFile(io, .{ .sub_path = "g.txt", .data = "changed\n" });
     const stale = try f.call(run, "{{\"path\":\"g.txt\",\"content\":\"x\\n\"}}", .{});
-    try std.testing.expectEqualStrings("g.txt changed on disk since you last read it; re-read it before appending.", stale.failed.message);
+    try std.testing.expectEqualStrings("g.txt changed on disk since you last read it; re-read it before appending.", stale.failed);
 
     try f.tmp.dir.writeFile(io, .{ .sub_path = "g.txt", .data = body.items });
     _ = try f.call(read.run, "{{\"path\":\"g.txt\",\"offset\":1,\"limit\":120}}", .{});
@@ -131,7 +131,7 @@ test "append: the gate — unseen and stale refuse, a partial read passes; the e
     try std.testing.expectEqualStrings("appended 2 lines to g.txt (now 202 lines). Result:\n   198\tline 198\n   199\tline 199\n   200\tline 200\n   201\tx\n   202\ty\n", ok.text);
     // Partial stays partial: a whole-file write is still refused, naming both ranges.
     const w = try f.call(@import("write.zig").run, "{{\"path\":\"g.txt\",\"content\":\"z\\n\"}}", .{});
-    try std.testing.expect(std.mem.indexOf(u8, w.failed.message, "only seen lines 1-120, 198-202 of its current version") != null);
+    try std.testing.expect(std.mem.indexOf(u8, w.failed, "only seen lines 1-120, 198-202 of its current version") != null);
 
     try f.tmp.dir.writeFile(io, .{ .sub_path = "m.txt", .data = "no newline" });
     _ = try f.call(read.run, "{{\"path\":\"m.txt\"}}", .{});
@@ -150,7 +150,7 @@ test "append: not valid UTF-8 is refused; CRLF content is written byte-exact; no
     const io = std.testing.io;
     try f.tmp.dir.writeFile(io, .{ .sub_path = "b.txt", .data = "\xff\xfe" });
     const bad = try f.call(run, "{{\"path\":\"b.txt\",\"content\":\"x\"}}", .{});
-    try std.testing.expectEqualStrings("b.txt is not valid UTF-8; append only supports text files and will not extend bytes lossily", bad.failed.message);
+    try std.testing.expectEqualStrings("b.txt is not valid UTF-8; append only supports text files and will not extend bytes lossily", bad.failed);
 
     try f.tmp.dir.writeFile(io, .{ .sub_path = "c.txt", .data = "a\r\n" });
     const ok = try f.call(run, "{{\"path\":\"c.txt\",\"content\":\"b\\r\\n\"}}", .{});

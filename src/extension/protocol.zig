@@ -6,16 +6,18 @@
 //! The wire protocol IS the ABI, so extensions need not be written in Zig
 //! (DESIGN §7.1).
 //!
-//! A manifest picks one of two wires with `runtime.wire`. Everything else about
-//! a call is identical between them: the same timeout, the same process-tree
-//! kill, the same sanitized environment with NULYA_EXE (and NULYA_SESSION
-//! inside a session), the same working directory, and the same result shape.
-//! `nulya ext run <id> <tool> --arg k=v` and a model's own call go down the same
-//! path, so a runtime cannot tell who called it.
+//! There is ONE wire to write against, `plain`, and everything about a call
+//! other than the three things below is the same whatever a runtime is written
+//! in: the same timeout, the same process-tree kill, the same sanitized
+//! environment with NULYA_EXE (and NULYA_SESSION inside a session), the same
+//! working directory, the same result. `nulya ext run <id> <tool> --arg k=v` and
+//! a model's own call go down the same path, so a runtime cannot tell who called
+//! it.
 //!
 //! ── "wire": "plain" ────────────────────────────────────────────────────────
 //!
-//! For anything a few lines of shell can do. No JSON to parse, no id to echo.
+//! Declare it in the manifest: `"runtime": { "entry": "…", "wire": "plain" }`.
+//! No JSON to parse unless the tool wants to, no id to echo.
 //!
 //!   stdin   The arguments for this call: one compact JSON object, the exact
 //!           bytes the model produced (`{}` when there are none).
@@ -24,29 +26,45 @@
 //!           strings verbatim, numbers as written, booleans `true` / `false`.
 //!           Arrays, objects and null are not exported, nor is a key outside
 //!           [A-Za-z0-9_] — those live on stdin only.
-//!   stdout  The tool's text output, VERBATIM. It reaches the model exactly as
-//!           printed (the string-result rule below, one rule for both wires).
+//!   stdout  The tool's output, VERBATIM. It reaches the model exactly as
+//!           printed — a file's contents, a search listing, or JSON when the
+//!           caller is a driver that parses one; stdout is bytes, so one wire
+//!           carries both.
 //!   exit    0 = success. Non-zero = a failed call, whose text is `exit <code>`
-//!           followed by stderr, and by stdout if anything was printed.
+//!           followed by stderr, and by stdout if anything was printed. So the
+//!           message a tool writes to stderr before failing IS what the model
+//!           reads: say what went wrong and what would work next call.
 //!
 //!     #!/bin/sh
 //!     printf 'hello %s\n' "${NULYA_ARG_name:-world}"
 //!
-//! ── "wire": "jsonrpc" (the default) ────────────────────────────────────────
+//! ── "wire": "jsonrpc" — DEPRECATED ─────────────────────────────────────────
+//!
+//! Still accepted, and still what a manifest that says nothing about `wire`
+//! means, so an extension written outside this repository keeps working for one
+//! version. It is going away; write `plain`.
+//!
+//! It asked for three things `plain` does not, and by the time every extension
+//! in this repository spoke it, none of the three had a reader: an `id` to echo
+//! (the runtime is oneshot — there is only ever the one request to be answering),
+//! an `error.code` (a number the model was shown and nothing branched on), and
+//! `error.data.retryable` (never read at all). It offered nothing plain lacks.
+//! A framed wire may come back if a persistent or streaming runtime is ever
+//! measured to be needed (PLAN §3.3) — that frame should then be designed for
+//! what it is for, not inherited from here.
 //!
 //!   request   { "jsonrpc":"2.0", "id":"call-17", "method":"tool/call",
 //!               "params":{ "name":"web_search", "arguments":{...} } }
 //!   success   { "jsonrpc":"2.0", "id":"call-17", "result":{...} }
 //!             { "jsonrpc":"2.0", "id":"call-17", "result":"plain text…" }
 //!   error     { "jsonrpc":"2.0", "id":"call-17",
-//!               "error":{ "code":-32000, "message":"..",
-//!                          "data":{ "retryable":true } } }
+//!               "error":{ "code":-32000, "message":".." } }
 //!
 //! `result` is any JSON value. A STRING result is the tool's text output and
 //! reaches the model verbatim (a file's contents, a search listing) — exactly as
-//! a builtin's output would; anything else is structured data and is handed on
-//! as compact JSON. Without this a tool that returns text would show the model
-//! an escaped JSON string, paid for on every call.
+//! `plain`'s stdout does; anything else is structured data and is handed on as
+//! compact JSON. Without this a tool that returns text would show the model an
+//! escaped JSON string, paid for on every call.
 
 const std = @import("std");
 

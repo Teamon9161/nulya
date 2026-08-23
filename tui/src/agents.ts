@@ -26,7 +26,7 @@
  */
 import { readdirSync } from "node:fs"
 import { join } from "node:path"
-import { extBuild, extRun } from "./nulya/cli.ts"
+import { extBuild, extRun, toolSaid } from "./nulya/cli.ts"
 import { bundledDraftPath } from "./extensions.ts"
 import { formatWithRef } from "./evolve.ts"
 import { userConfigDir } from "./state/settings.ts"
@@ -277,10 +277,9 @@ export async function renderAgent(
   }
 }
 
-/** The first line of whatever the call said — `ext run` prints the extension's own error on stdout. */
+/** The sentence the call said — `ext run` prints the extension's own message on stdout, behind the plain wire's `exit` / `stderr:` framing (`toolSaid`). */
 function said(stdout: string, stderr: string): string {
-  const text = stdout.trim() || stderr.trim() || "no output"
-  return text.split("\n")[0]!
+  return toolSaid({ stdout, stderr })
 }
 
 /**

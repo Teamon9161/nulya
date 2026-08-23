@@ -3011,7 +3011,7 @@ test "bundled plan and ask: propose, todo and ask record without writing anythin
         // `handoff` discipline, so the retry is an informed one.
         const empty = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", plan_ref, "propose", "{}" });
         defer alloc.free(empty.stdout);
-        try std.testing.expect(std.mem.indexOf(u8, empty.stdout, "-32602") != null);
+        try std.testing.expect(std.mem.startsWith(u8, empty.stdout, "exit 1\nstderr:\n"));
         try std.testing.expect(std.mem.indexOf(u8, empty.stdout, "non-empty plan_md") != null);
 
         const list = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", plan_ref, "todo", "{\"items\":[{\"text\":\"read\",\"state\":\"done\"},{\"text\":\"plan\"}]}" });
@@ -3034,7 +3034,7 @@ test "bundled plan and ask: propose, todo and ask record without writing anythin
 
         const empty = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ask_ref, "ask", "{\"options\":[\"a\"]}" });
         defer alloc.free(empty.stdout);
-        try std.testing.expect(std.mem.indexOf(u8, empty.stdout, "-32602") != null);
+        try std.testing.expect(std.mem.startsWith(u8, empty.stdout, "exit 1\nstderr:\n"));
         try std.testing.expect(std.mem.indexOf(u8, empty.stdout, "non-empty question") != null);
     }
 

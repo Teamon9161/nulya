@@ -1,7 +1,7 @@
 {
   "schema": "nulya.extension/v2",
   "id": "ask",
-  "runtime": { "entry": "bin/ask" },
+  "runtime": { "entry": "bin/ask", "wire": "plain" },
   "contributes": {
     "tools": [{
       "name": "ask",

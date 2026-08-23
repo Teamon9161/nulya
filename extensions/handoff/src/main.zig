@@ -30,12 +30,12 @@
 //! forks a session.
 //!
 //! **Why compiled Zig rather than a script.** Identical to `extensions/compact`:
-//! the tool receives a JSON-RPC request, must echo its `id` back, and has to
-//! validate four sections. `sh` has no JSON reader (jq is not guaranteed),
-//! Windows has neither jq nor a guaranteed python, and one manifest carries one
-//! `interpreter` — so a repo-shipped script tool would mean a `.ps1` and a `.sh`
-//! implementation of the same tool that could never share one version id. PLAN
-//! §0.1 #3 keeps compiled Zig open for exactly this.
+//! four sections to validate as a group, and a markdown file to render from
+//! them. `sh` has no JSON reader (jq is not guaranteed), Windows has neither jq
+//! nor a guaranteed python, and one manifest carries one `interpreter` — so a
+//! repo-shipped script tool would mean a `.ps1` and a `.sh` implementation of
+//! the same tool that could never share one version id. PLAN §0.1 #3 keeps
+//! compiled Zig open for exactly this.
 
 const std = @import("std");
 
@@ -55,14 +55,13 @@ const max_section_bytes: usize = 64 << 10;
 /// off a thousand times is not making progress.
 const max_handoffs_per_session: usize = 1000;
 
-const Fail = struct { code: i64, message: []const u8 };
-
 const Done = struct { recorded: []const u8 };
 
-/// What the tool answers with: a result, or a JSON-RPC error. Host faults (out
-/// of memory, an unwritable workspace) surface as Zig errors and are folded into
-/// a `-32000` by `main`, so every path still writes exactly one response.
-const Outcome = union(enum) { done: Done, failed: Fail };
+/// What the tool answers with: the recorded proposal, or a teaching message.
+/// Host faults (out of memory, an unwritable workspace) surface as Zig errors
+/// and are folded into a refusal by `main`, so every path still ends in exactly
+/// one answer.
+const Outcome = union(enum) { done: Done, failed: []const u8 };
 
 /// The brief, already trimmed. The three required sections are validated as a
 /// group so a model that forgot two of them is told about both at once.
@@ -75,6 +74,11 @@ const Brief = struct {
 
 /// `std.process.Init` rather than a bare `main()`: the io it hands over carries
 /// the real process environment, which is where `NULYA_SESSION` lives.
+///
+/// The wire is `plain` (DESIGN §7.3, contract at the top of
+/// `src/extension/protocol.zig`): stdin is this call's arguments as one JSON
+/// object, and this package has one tool, so `NULYA_TOOL` says nothing it does
+/// not already know.
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     // One arena for the whole call: this process validates a brief, writes one
@@ -85,25 +89,17 @@ pub fn main(init: std.process.Init) !void {
     var reader = std.Io.File.stdin().readerStreaming(io, &in_buf);
     const request = try reader.interface.allocRemaining(alloc, .limited(1 << 20));
 
-    // The host sends a string id and requires it back unchanged (DESIGN §7.3).
-    var call_id: []const u8 = "call";
-    var outcome: Outcome = .{ .failed = .{
-        .code = -32600,
-        .message = "handoff expects one JSON-RPC tool/call request on stdin",
-    } };
+    var outcome: Outcome = .{ .failed = "handoff expects this call's arguments as one JSON object on stdin" };
 
     if (std.json.parseFromSlice(std.json.Value, alloc, request, .{})) |parsed| {
         if (parsed.value == .object) {
-            const obj = parsed.value.object;
-            if (stringField(obj, "id")) |id| call_id = id;
-            outcome = record(alloc, io, init.environ_map, readBrief(obj)) catch |err| Outcome{ .failed = .{
-                .code = -32000,
-                .message = try std.fmt.allocPrint(alloc, "handoff could not run: {s}", .{@errorName(err)}),
-            } };
+            outcome = record(alloc, io, init.environ_map, readBrief(parsed.value.object)) catch |err| Outcome{
+                .failed = try std.fmt.allocPrint(alloc, "handoff could not run: {s}", .{@errorName(err)}),
+            };
         }
     } else |_| {}
 
-    try writeResponse(alloc, io, call_id, outcome);
+    try answer(alloc, io, outcome);
 }
 
 /// Validate, then write. Every refusal happens BEFORE anything is written: a
@@ -111,7 +107,7 @@ pub fn main(init: std.process.Init) !void {
 /// fork on a handoff the model was told to redo.
 fn record(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map, brief: Brief) !Outcome {
     if (try missingSections(alloc, brief)) |message| {
-        return .{ .failed = .{ .code = -32602, .message = message } };
+        return .{ .failed = message };
     }
 
     // Which session is this? `session step` puts the live session's file path in
@@ -119,15 +115,11 @@ fn record(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.
     // id. Without it there is nobody to hand off FROM: the driver would have no
     // way to tell whose proposal this file is, and the model would have been
     // told "recorded" for a phase boundary that does not exist.
-    const session_path = env.get("NULYA_SESSION") orelse return Outcome{ .failed = .{
-        .code = -32000,
-        .message = "handoff must be called from inside a session (NULYA_SESSION is not set)",
-    } };
+    const session_path = env.get("NULYA_SESSION") orelse
+        return Outcome{ .failed = "handoff must be called from inside a session (NULYA_SESSION is not set)" };
     const session_id = std.fs.path.stem(session_path);
-    if (session_id.len == 0) return Outcome{ .failed = .{
-        .code = -32000,
-        .message = "handoff must be called from inside a session (NULYA_SESSION names no session file)",
-    } };
+    if (session_id.len == 0)
+        return Outcome{ .failed = "handoff must be called from inside a session (NULYA_SESSION names no session file)" };
 
     const body = try render(alloc, session_id, brief);
     const cwd = std.Io.Dir.cwd();
@@ -147,10 +139,7 @@ fn record(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.
         try file.writeStreamingAll(io, body);
         return .{ .done = .{ .recorded = rel } };
     }
-    return .{ .failed = .{
-        .code = -32000,
-        .message = "this session has already recorded too many handoffs",
-    } };
+    return .{ .failed = "this session has already recorded too many handoffs" };
 }
 
 /// The message naming every required section that is missing, or null when the
@@ -187,18 +176,10 @@ fn render(alloc: std.mem.Allocator, session_id: []const u8, brief: Brief) ![]u8 
     return out.toOwnedSlice();
 }
 
-/// `params.arguments` of a `tool/call`. A request without them yields an empty
-/// brief, which `missingSections` then reports section by section — the same
-/// message a half-filled brief gets, because to the model it is the same mistake.
-fn readBrief(request: std.json.ObjectMap) Brief {
-    const params = switch (request.get("params") orelse return .{}) {
-        .object => |o| o,
-        else => return .{},
-    };
-    const arguments = switch (params.get("arguments") orelse return .{}) {
-        .object => |o| o,
-        else => return .{},
-    };
+/// This call's arguments. An empty object yields an empty brief, which
+/// `missingSections` then reports section by section — the same message a
+/// half-filled brief gets, because to the model it is the same mistake.
+fn readBrief(arguments: std.json.ObjectMap) Brief {
     return .{
         .done = section(arguments, "done"),
         .next_task = section(arguments, "next_task"),
@@ -222,37 +203,28 @@ fn stringField(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
     };
 }
 
-/// One JSON-RPC response on stdout, then exit — the whole runtime contract.
-fn writeResponse(alloc: std.mem.Allocator, io: std.Io, call_id: []const u8, outcome: Outcome) !void {
-    var out: std.Io.Writer.Allocating = .init(alloc);
-    var jw: std.json.Stringify = .{ .writer = &out.writer };
-
-    try jw.beginObject();
-    try jw.objectField("jsonrpc");
-    try jw.write("2.0");
-    try jw.objectField("id");
-    try jw.write(call_id);
+/// The answer, then exit — the whole runtime contract. A success is JSON on
+/// stdout because it carries two facts (where the proposal landed, and that the
+/// turn is over); a failure is the teaching message on stderr, and the non-zero
+/// exit is what makes it a failed call (DESIGN §7.3).
+fn answer(alloc: std.mem.Allocator, io: std.Io, outcome: Outcome) !noreturn {
     switch (outcome) {
         .done => |done| {
-            try jw.objectField("result");
+            var out: std.Io.Writer.Allocating = .init(alloc);
+            var jw: std.json.Stringify = .{ .writer = &out.writer };
             try jw.beginObject();
             try jw.objectField("recorded");
             try jw.write(done.recorded);
             try jw.objectField("message");
             try jw.write(end_turn_message);
             try jw.endObject();
+            try std.Io.File.stdout().writeStreamingAll(io, out.writer.buffered());
+            std.process.exit(0);
         },
-        .failed => |failed| {
-            try jw.objectField("error");
-            try jw.beginObject();
-            try jw.objectField("code");
-            try jw.write(failed.code);
-            try jw.objectField("message");
-            try jw.write(failed.message);
-            try jw.endObject();
+        .failed => |message| {
+            try std.Io.File.stderr().writeStreamingAll(io, message);
+            try std.Io.File.stderr().writeStreamingAll(io, "\n");
+            std.process.exit(1);
         },
     }
-    try jw.endObject();
-
-    try std.Io.File.stdout().writeStreamingAll(io, out.writer.buffered());
 }

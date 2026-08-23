@@ -85,7 +85,28 @@ zig build && cd tui && bun test && bun run typecheck
 
 ### Lane W
 
-（待开始）
+**W1 · 六个包迁 `plain`**（`zig build test` / `zig build e2e` 全绿）。每个包的 `main` 现在是同一形状：读 stdin 的参数对象 → 按 `NULYA_TOOL` 分发（单 tool 的包忽略它，因为它说不出新东西）→ 一个 `answer()` 把结果打 stdout + exit 0，或把消息打 stderr + exit 1。manifest 各加 `"wire": "plain"`。tool 逻辑一个字未动。
+
+| 包 | 删掉的 | 行数 |
+|---|---|---|
+| `std` | `rpc.zig` 的 `readRequest` / `writeResponse` / `Request` / `fallback_id` / 三个码 / `Fail` / `invalidParams`；`main.zig` 的信封分发 | rpc 217 → 167，main 127 → 140（`std_options` 见下） |
+| `agent` | 同上；`Outcome.json` 并进 `.text`；`failed()` 去掉 `code` 参数 | rpc 156 → 110，main 750 → 738 |
+| `plan` | 同上 | rpc 140 → 94，main 277 → 268 |
+| `handoff` | 内联信封（`writeResponse` / `call_id` / `Fail`）+ `readBrief` 里那两层 `params.arguments` | main 258 → 230 |
+| `compact` | 同上 + `readArgs` 的两层 + `fail()` 的 `code` 参数 | main 566 → 537 |
+| `ask` | 同上 + 整个 `arguments()` 辅助函数 | main 222 → 172 |
+
+**退出码不做词表，落到了类型上。** 三个码删掉之后 `Fail{code, message}` 只剩一个 message，于是 `Outcome.failed` 直接是 `[]const u8`；`refuse` 与 `invalidParams` 变成同一个函数（都是"消息 + exit 1"），并成 `refuse`（`std` 的六个 tool 模块因此各有几处纯改名，是这条 lane 里唯一碰到 tool 逻辑文件的改动）；`agent` / `plan` 的 `Outcome.json` 与 `.text` 在 plain 上都只是"把这些字节打到 stdout"，并成 `.text`。**driver 面的字节没变**：`render` / `list` / `approve` / `compact` / `handoff` 照旧打同一个 compact JSON，`tui/src/nulya/cli.ts` 的 `JSON.parse` 与 `drivers/goal.*` 的 `grep -o '"session":"s-…'` 都不用动。
+
+**一处新纪律，是迁移本身逼出来的：plain 上 stderr 就是失败消息，所以包必须独占 stderr。** `extensions/std` 里 vendored 的 mvzr 用 `std.log` 打了一行 `error(mvzr): missing closing parenthesis`，从前谁也看不见（jsonrpc 的 application error 分支不附 stderr），迁过来之后它挤在教学文案**上面**——一个库的调试行，出现在模型要照着改的那句话里。修法是 `extensions/std/src/main.zig` 声明一个空的 `std_options.logFn`：这个二进制没有第二种输出，refusal 该说什么已经逐句写好了。（`compact` 的 `warn()` 不受影响：它只在成功路径上说话，那时 stderr 照旧被丢弃。）
+
+**W2 · e2e**：`std.zig:102` / `std_fs.zig:66` / `std_search.zig:218,222,225` 五处从 `extension error [-32000|-32602]: …` 改成 `exit 1\nstderr:\n` + 同一句文案（`invoke.invokePlain` 拼的形状），**每一句教学文案原样保留**；`extension.zig:3014,3037`（`plan propose {}` / `ask {}`）两处 `indexOf("-32602")` 改成 `startsWith("exit 1\nstderr:\n")`。`handoff` / `compact` 的 e2e 一个字没改——它们本来就 `JSON.parse` stdout。`tests/e2e.zig` 顶部那句"a string JSON-RPC `result`"随之改写。仓库里 `extension error [` 的最后一个写者只剩 `invoke.invokeJsonRpc`。
+
+**W3 · jsonrpc 降级**：`protocol.zig` 模块注释重写——`plain` 在前、写成唯一要写的 wire（多一句"stderr 就是模型读到的消息"），jsonrpc 一节标 **DEPRECATED** 并写清它为什么退场（多的三样 `id` / `error.code` / `error.data.retryable` 一个读者都没有，少的东西没有，分帧留给真需要它的那天按用途设计）。`ext api manifest` 的 `runtime.wire` 一句、`ext api examples` 里那句"--zig scaffolds the JSON-RPC one"随之改；顺带把 `manifest.zig` 的 `Wire` 枚举文档（plain 在前、jsonrpc 标 deprecated）、`templates.zig` 顶部、`tools.zig` 那句"`definition.name` 是 JSON-RPC name"一起改准。**`ToolCallRequest` / `decodeResponse` / `invokeJsonRpc` / `Wire.jsonrpc` 一个都没删**，缺省仍读作 jsonrpc，e2e 里那些合成 fixture（`support.jsonrpc_main_zig` 等）照旧证明它能跑。
+
+**W4 · 文档**：DESIGN §7.1（wire 段拆成"要写的只有 plain"+"jsonrpc 已 deprecated"两段）、§7.3（开头一句、plain 的 stdout 那行补一句 driver 面打 JSON、jsonrpc 小节标 DEPRECATED、末尾新增一段"为什么 jsonrpc 退场"）、§7.6（"只拿 JSON-RPC request" → "只拿这次调用的 arguments"）、§7.8（表前一句加"六个有 runtime 的都说 plain"；`agent` 的"`params.name` 分发" → "`NULYA_TOOL` 分发"）、§11（`compact` 的 `-32001`、`handoff` 的 `-32602` 与"要读 JSON-RPC 请求、回同一个 id"的理由）、§15.1 那张表一行、架构图一处；CLAUDE.md 加一条 ext-review-3 W 的现状 bullet + 改 `protocol.zig`/`invoke.zig` 那一行 + 两处旧叙述；`extensions/guide` 的 SKILL.md 那一条；`docs/goals/std.md` 的 D6（它是 `std` 的活契约，写着"错误 = JSON-RPC error … `-32602`/`-32000`"）。各包 `main.zig` 顶部的"Why compiled Zig"改成真正的理由——`std` 是 regex + gitignore walker + `edit` 的归一化回退，`agent` 是 `run` 要逐行读 `session step` 的 JSONL 并在管道上答 gate，`plan` / `handoff` / `ask` 是"把几个分节/选项当一组校验"，`compact` 本来写的就是"要解析 JSONL"、未动。
+
+**没做 / 留给别人**：`tui/src/compact.ts:86` 与 `tui/src/nulya/cli.ts:790` 两处注释仍写着"the JSON-RPC error the CLI prints"——**行为没变**（非零退出、消息在 stdout），只是措辞过时了；本 lane 不碰 `tui/**`（Lane S 的地盘），留给 R 或 S 顺手改。`docs/goals/ext-review.md` / `ext-review-2.md` 是历史契约，未改。
 
 ### Lane R
 

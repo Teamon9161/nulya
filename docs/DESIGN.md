@@ -76,7 +76,7 @@ Ledger ──projection──▶ PromptIR { system_blocks, turns }
         │  extension/*    manifest/store/build  │
         │  tool_stats     usage facts（只记不判）│
         └────┬──────────┬───────────┬──────────┘
-          shell                 Extensions（子进程，JSON-RPC stdio）
+          shell                 Extensions（子进程，stdin/stdout/退出码）
        (builtin)                ← 经 shell `nulya ext run …`，或被 pin 成 native
 ```
 
@@ -341,9 +341,9 @@ Extension = 子进程；wire protocol 就是 ABI。不用 `.so/.dll`（ABI / Zig
 - **编译 Zig**：`entry = "bin/<name>"`，`nulya ext build` 从 `src/main.zig` 编译出 `bin/<name><exe>`；version 含 compiler identity。
 - **脚本**：`entry = "src/<file>"`（+ 可选 `runtime.interpreter`，如 `powershell` / `sh` / `python3`），**不编译**，原样冻结进 `package/`，运行时 spawn `[interpreter, <frozen entry>]`（无 interpreter 则直接执行，如 Windows `.cmd` / 带 shebang 的可执行）；version = `hash(snapshot)`**不含** compiler identity，因此跨机器、跨 zig 版本稳定（§7.4）。
 
-**`runtime.wire?`（`"jsonrpc"`（缺省）/ `"plain"`）与 kind 正交**——它说的是"怎么跟这个进程说话"，不是"这是什么进程"，所以**编译的 Zig 也可以声明 `plain`**。缺省是 `jsonrpc`：这个字段出现之前的每一份 manifest 说的就是它，与 `activation` 同一条纪律（类型错在 parse 是 `WrongType`，认不出的词在 validate 是 `InvalidWire`，缺省的读法定在 `manifest.zig` 一处而不是各读者手里）。两种 wire 的**其余一切完全相同**：同一个 `Environment.runExtension`、同一条超时与杀整棵树、同一份净化过的 env（含 `NULYA_EXE` / session 内 `NULYA_SESSION`）、同一个 cwd、同一种结果形状；`nulya ext run <id> <tool> --arg k=v` 与模型自己的调用走同一条路，脚本看不出是谁在调。契约写在 `protocol.zig` 的模块注释顶部（= `nulya ext api protocol` 打印的东西，零漂移），细节见 §7.3。
+**`runtime.wire?` 与 kind 正交**——它说的是"怎么跟这个进程说话"，不是"这是什么进程"，所以**编译的 Zig 也说 `plain`**（随仓库带的六个有 runtime 的包全都说，§7.8）。**要写的只有一种：`"plain"`**——**stdin 是这次调用的 arguments 对象，env 里多出 `NULYA_TOOL` 与每个顶层标量参数的 `NULYA_ARG_<k>`，stdout 原样就是结果，退出码就是成败**——五行 `sh` 就是一个真 tool。契约写在 `protocol.zig` 的模块注释顶部（= `nulya ext api protocol` 打印的东西，零漂移），细节见 §7.3。
 
-**`plain` 存在的理由**：M2b 之后随仓库带的六个有 runtime 的 extension 全是编译 Zig，一个脚本都没有——因为 JSON-RPC 要在 stdin 上解析 JSON（`sh` 没有解析器、Windows 没 `jq`）、要把同一个 `id` 回echo。PLAN §0.1 #3 的"脚本默认"因此名存实亡。`plain` 把这一层去掉：**stdin 是这次调用的 arguments 对象，env 里多出 `NULYA_TOOL` 与每个顶层标量参数的 `NULYA_ARG_<k>`，stdout 原样就是结果，退出码就是成败**——五行 `sh` 就是一个真 tool。
+**`"jsonrpc"` 仍被接受、已 deprecated**（ext-review-3 W）：它仍是**缺省**（这个字段出现之前的每一份 manifest 说的就是它），所以仓库外写的 extension 还能跑一个版本期；下一个版本删。纪律与从前相同（类型错在 parse 是 `WrongType`，认不出的词在 validate 是 `InvalidWire`，缺省的读法定在 `manifest.zig` 一处而不是各读者手里）。两种 wire 的**其余一切完全相同**：同一个 `Environment.runExtension`、同一条超时与杀整棵树、同一份净化过的 env（含 `NULYA_EXE` / session 内 `NULYA_SESSION`）、同一个 cwd、同一种结果形状；`nulya ext run <id> <tool> --arg k=v` 与模型自己的调用走同一条路，脚本看不出是谁在调。
 
 **`runtime.entry` / `runtime.interpreter` 各自既可以是字符串，也可以是按 OS 的对象**：`{ "<os>": "…", …, "default"?: "…" }`，`<os>` 用 Zig `builtin.os.tag` 的名字（`windows` / `linux` / `macos` / …）。解析顺序：**宿主 os → `default` → 没有**。
 
@@ -420,7 +420,7 @@ manifest 讲给三种不同的听众，字段按哪个听众读它分成三层�
 
 #### 内核强制
 
-`runtime.entry` / `.interpreter` / `.wire` 说的是**怎么跑这个 runtime**——entry/interpreter 各自既可以是字符串也可以是按 `builtin.os.tag` 键名的对象（选不中宿主时是硬失败，见上），`wire` 决定进程边界上说的是哪种协议：`"jsonrpc"`（缺省，§7.3 的 JSON-RPC 信封）或 `"plain"`（stdin 是这次调用参数的一个 compact JSON 对象，stdout 原文就是字符串结果——超时、被杀整棵树、env 净化、`NULYA_EXE`/`NULYA_SESSION` 与 jsonrpc 完全相同，走同一条 `runExtension` 路，§7.3）。
+`runtime.entry` / `.interpreter` / `.wire` 说的是**怎么跑这个 runtime**——entry/interpreter 各自既可以是字符串也可以是按 `builtin.os.tag` 键名的对象（选不中宿主时是硬失败，见上），`wire` 决定进程边界上说的是哪种协议：`"plain"`（stdin 是这次调用参数的一个 compact JSON 对象、`NULYA_TOOL` 是 tool 名、stdout 原文就是结果、退出码即成败）或缺省的 `"jsonrpc"`（§7.3 的信封，已 deprecated）——超时、被杀整棵树、env 净化、`NULYA_EXE`/`NULYA_SESSION` 两边完全相同，走同一条 `runExtension` 路，§7.3。
 
 `tools[].input` schema 只在该 tool 被 pin 进 `tools[]` 时才喂给模型；平时是可发现性元数据。`tools[].timeout_ms?` 是**这个 tool 自己**的 wall-clock 上限——但只在它被 pin 到**模型的工具面**上的那次调用生效（缺省 = host 的 30s，§7.3；`nulya ext run` 不套用它，见 §7.3 的 timeout 讨论）：知道自己慢的 tool 在 manifest 里说出来，因为 manifest 就是关于一个 tool 的唯一真相。`skills` / `system_prompts` 是这个版本贡献的文件列表，随 build 冻结进快照。
 
@@ -471,25 +471,26 @@ manifest 讲给三种不同的听众，字段按哪个听众读它分成三层�
 
 ### 7.3 Wire protocol（`protocol.zig` / `invoke.zig`）
 
-oneshot：spawn → stdin 一条 request → 读 stdout → exit。两种 wire 由 manifest 的 `runtime.wire` 选（§7.1），**一次调用的其余一切两边完全相同**：同一条 `Environment.runExtension`、同一个超时与杀整棵树、同一份净化 env（含 `NULYA_EXE` / `NULYA_SESSION`）、同一个 cwd、同一个 `ToolInvocation` 结果形状；`nulya ext run` 与模型的调用走同一条路，runtime 分辨不出调用者。
+oneshot：spawn → stdin 一条 request → 读 stdout → exit。**要写的 wire 只有 `plain` 一种**；`jsonrpc` 由 manifest 的 `runtime.wire` 缺省选中，已 deprecated（§7.1，下面）。**一次调用的其余一切两边完全相同**：同一条 `Environment.runExtension`、同一个超时与杀整棵树、同一份净化 env（含 `NULYA_EXE` / `NULYA_SESSION`）、同一个 cwd、同一个 `ToolInvocation` 结果形状；`nulya ext run` 与模型的调用走同一条路，runtime 分辨不出调用者。
 
-**`"wire": "plain"`**（新）——给"几行 shell 就能做完"的那一类：
+**`"wire": "plain"`**——进程边界上只有三样东西，装的就是这三样：
 
 ```
 stdin   这次调用的 arguments：一个 compact JSON object（模型写的原文；没有参数就是 `{}`）
 env     NULYA_TOOL=<tool name>；外加对每个**顶层**且值是 string / number / bool 的键 `k` 一个
         NULYA_ARG_<k>=<值>（string 原样、number 按 JSON 文本、bool 是 true / false）。
         数组 / 对象 / null 不导出，键名不在 `[A-Za-z0-9_]+` 里的也不导出——它们仍在 stdin 上。
-stdout  这个 tool 的文本输出，**原样**；它就是模型看到的字节（下面那条字符串结果规则，**不加第二条**）。
+stdout  这个 tool 的输出，**原样**；它就是模型看到的字节（下面那条字符串结果规则，**不加第二条**）。
+        driver-facing 的 tool 在这里打 JSON——stdout 是字节，一种 wire 两种读者都服务得了。
 exit    0 = 成功；非 0 = 一次**失败的调用**，文本是 `exit <code>` + stderr（经 `emit.headTail` 的既有预算），
         stdout 若非空也附在后面。
 ```
 
 - **arguments 必须是 JSON object**，两种 wire 同一条规则、同两个错误（`InvalidArgumentsJson` / `ArgumentsNotObject`），且在 spawn **之前**判——一个 tool 的 `input` schema 描述不了的东西不该被送进去。
 - **不导出结构**是刻意的：环境变量是字符串，替数组/对象发明一种序列化就等于给脚本第二种参数格式，而 stdin 上那份原本就是完整的。键名不合法时也不改写它（改写不会让 shell 读得懂），值里含 NUL 字节的同样跳过（NUL 在两个平台上都会**截断**环境字符串，静默截断比不给更糟）。
-- 每次调用的这几个变量是**那一次 spawn 的一份 env 拷贝**，进程级的净化 map 不被改动；`env_extra` 为空（= 每一次 JSON-RPC 调用）时传的就是 map 自己，所以那条路一个字节都没变。
+- 每次调用的这几个变量是**那一次 spawn 的一份 env 拷贝**，进程级的净化 map 不被改动；`env_extra` 为空（= 每一次 jsonrpc 调用）时传的就是 map 自己，所以那条路一个字节都没变。
 
-**`"wire": "jsonrpc"`（缺省）**：spawn → stdin 一条 request → stdout 一条 response → exit。
+**`"wire": "jsonrpc"`（缺省，DEPRECATED）**：spawn → stdin 一条 request → stdout 一条 response → exit。
 
 ```json
 { "jsonrpc": "2.0", "id": 17, "method": "tool/call", "params": { "name": "web_search", "arguments": { "query": "…" } } }
@@ -501,6 +502,8 @@ exit    0 = 成功；非 0 = 一次**失败的调用**，文本是 `exit <code>`
 - **`result` 是任意 JSON 值，按形状交给模型：字符串 = 这个 tool 的文本输出，原样进 `emit`（与 builtin 的输出同地位，模型看到的就是那段文字）；其它值 = 结构化数据，compact JSON。** 不做这一分，返回文本的 tool（读文件、搜索列表）每次都让模型读一个转义过的 JSON 字符串。extension 的 JSON-RPC error 一律折成 `ok=false` 的 `extension error [<code>]: <message>`。
 - **`timeout_ms` 只是模型工具面上一次 call 的上限，不是这个 tool 本身的属性**（D6）：一次调用的 wall-clock 上限来自 `tool.Timeouts.extension_ms`（30s，与 shell 同一张表，§6.1 / base-tools.md §3），**除非该 tool 的冻结 manifest 自己声明了 `timeout_ms`**（§7.2.1，上限 `extension_max_ms` = 600s，与 shell 的上限同值）：到点 kill，并把已捕获的 stderr 一起折成一次**失败的调用**（不是 host error、更不是取消）。这条只管**native pin 的路径**（`ext_tools.Binding`，与将来任何把同一个 tool 摆上模型工具面的路径）——一个模型没法自己盯着一次调用挂了多久，manifest 的作者替它把话说在前面。**`nulya ext run` 缺省不套任何超时**：那是一个人或一段脚本在自己的进程、自己的时钟上跑同一个 tool，manifest 的声明对它没有意义；要一个上限就用 `--timeout-ms N`，给了才夹到同一个 `extension_max_ms`。所以这两条路从此读的是不同的东西，而不是同一个字段的两个入口——分歧是设计，不是疏漏。
 - 只有 `tool/call` 一个 method，用专用 `ToolCallRequest` 类型；**不提前抽通用 JsonRpcRequest**，等第二个 method 真出现。
+
+**为什么 jsonrpc 退场**（ext-review-3 W，`docs/goals/ext-review-3.md` §1）。不是因为它复杂，是因为它**多余**：比 `plain` 多的三样东西，到六个自带包全都说它的那天，一个读者都没有——`id`（oneshot 进程，一次只有一个请求，回显它只是仪式）、`error.code`（到模型那里只是一个没人分支的数字）、`error.data.retryable`（内核从不读）。而它**少**的东西没有：`plain` 的 stdout 可以是文本（模型面）也可以是 JSON（driver 面）。代价则是实打实的——AI 要读两份契约、`ext init --zig` 的模板与自带包形状不一致、内核多一整条路只为一种 wire、三份 `rpc.zig` 互相复制着漂移。留它的唯一理由本是将来 persistent runtime / streaming 需要**分帧**，但那是"先测量再做"的事（PLAN §3.3）：真到那天，帧该按它自己的用途设计，而不是从这里继承一个。所以缺省仍读作 `jsonrpc`（仓库外写的 extension 一个版本期内照跑），下一个版本删 `ToolCallRequest` / `decodeResponse` / `invokeJsonRpc` / `Wire.jsonrpc`。
 - 不做 daemon / persistent worker / streaming / host callback。spawn 一个原生 binary ≈ 毫秒，对比模型 round-trip 秒级可忽略；最高频的 `shell` 是 in-core 内置根本不 spawn。真正的成本是某些 extension 每次调用的重初始化（浏览器 / DB 连接）——**先测量再持久化**（PLAN §3.3）。
 
 ### 7.4 生命周期：不可变版本 + 原子切换（`store.zig` / `integrity.zig` / `build/build_ext.zig`）
@@ -558,7 +561,7 @@ extension <id>: current points at <version>, which is broken (<err>); run 'nulya
 
 不给 ledger 的四条理由：模型是上下文路由器；大对话每次 spawn 序列化开销爆炸；最小权限；`args → result` 纯函数才可复现。
 
-**当前 tool 实际拿到的：** in-core builtin 拿 `ToolContext{ environment, cwd }`（`edit` 搬进 extension 之后没有 in-core tool 再读文件，那个 `fs` 抽象因此删掉了，§8）；extension 子进程只拿 **JSON-RPC request + 净化后的 env + cwd**（`environment.runExtensionImpl`），没有别的。那份净化 env 里有两个 kernel 自己放的变量，都不是 secret、也不是 model-visible 状态：**`NULYA_EXE`**（`LocalEnvironment.init` 放的**本进程可执行文件绝对路径**——子进程要调 `nulya …` 时该调的是**正在跑的这个**二进制，而不是 PATH 上碰巧有的某个副本；取不到路径就不设，建 environment 永不因此失败）与 **`NULYA_SESSION`**（只有 `session step` 会放，见 §5.3：让 shell 子进程找得到活着的 session 文件去投 capability note）。前者是 driver 型 extension（`extensions/compact`，§11）能存在的前提；两者都不是权限，`ext:… ⊆ shell ⊆ session` 不变（§9）。一个恒定大小的显式 `ctx_header`（os / dialect / scratch / 预算 / 权限描述，经 env var 或 `_ctx` 注入）属 PLAN。
+**当前 tool 实际拿到的：** in-core builtin 拿 `ToolContext{ environment, cwd }`（`edit` 搬进 extension 之后没有 in-core tool 再读文件，那个 `fs` 抽象因此删掉了，§8）；extension 子进程只拿 **这次调用的 arguments + 净化后的 env + cwd**（`environment.runExtensionImpl`），没有别的。那份净化 env 里有两个 kernel 自己放的变量，都不是 secret、也不是 model-visible 状态：**`NULYA_EXE`**（`LocalEnvironment.init` 放的**本进程可执行文件绝对路径**——子进程要调 `nulya …` 时该调的是**正在跑的这个**二进制，而不是 PATH 上碰巧有的某个副本；取不到路径就不设，建 environment 永不因此失败）与 **`NULYA_SESSION`**（只有 `session step` 会放，见 §5.3：让 shell 子进程找得到活着的 session 文件去投 capability note）。前者是 driver 型 extension（`extensions/compact`，§11）能存在的前提；两者都不是权限，`ext:… ⊆ shell ⊆ session` 不变（§9）。一个恒定大小的显式 `ctx_header`（os / dialect / scratch / 预算 / 权限描述，经 env var 或 `_ctx` 注入）属 PLAN。
 
 tool↔tool 共享知识只走两条路：**模型中转**（大结果落盘留指针，指针流动）与**磁盘制品**（`.nulya/cache/`）。禁止 tool 直接互调 / 共享内存态。
 
@@ -574,7 +577,7 @@ Tool 是"能执行的能力"，Skill 是"要遵循的方法 / 知识"；不同 r
 
 ### 7.8 随仓库带的 extension（顶层 `extensions/`）
 
-都是普通 extension，走 §7.4 同一条 build → activate 路，**没有一个是内核层**：默认不在任何 composition 里（成员是 config `[extensions] with` 或 `session new --with`、工具面是 pin，§5.1 那张 2×2，全是用户或 driver 的决定；`activate` 只说 `<id>` 指哪个版本），随 checkout 到达的 store 照过 §9 的 trust gate。
+都是普通 extension，走 §7.4 同一条 build → activate 路，**没有一个是内核层**；六个有 runtime 的都说 `"wire": "plain"`（§7.3）：默认不在任何 composition 里（成员是 config `[extensions] with` 或 `session new --with`、工具面是 pin，§5.1 那张 2×2，全是用户或 driver 的决定；`activate` 只说 `<id>` 指哪个版本），随 checkout 到达的 store 照过 §9 的 trust gate。
 
 **分发**：这八个 draft 的源码被 build.zig `@embedFile` 进二进制（`src_embed` 的同一先例，`src/bundled.zig` 投影），`nulya ext seed` 把它们写进任一 store root（§7.2）——所以拿到二进制就拿到了它们，不需要这个 checkout 在场；seed 之后走的路与手放源码毫无区别。**升级也走同一个动词**：seed 留下的 `.seed` 记录让它认得出"这份 draft 是我写的、之后没人动过"，那种就直接刷新成新二进制的源码，动过的则原样留着并点名（§7.2）——否则一台机器会永远停在第一次 seed 时的那版自带扩展。
 
@@ -589,7 +592,7 @@ Tool 是"能执行的能力"，Skill 是"要遵循的方法 / 知识"；不同 r
 | `plan` | compiled | system prompt + `policy{readonly}` + `propose` / `todo`（都声明 `readonly`，`todo` 另带 `ui: {render: checklist, panel: true}`）/ `approve`（`audience: driver`）+ `contributes.ui.tui` | mode：`/plan`（贡献 prompt 的包自动得到自己名字那条命令，manifest 不写，tui.md T49）或 `session new --with plan --pin ext:plan/propose --pin ext:plan/todo` 戴一场 |
 | `ask` | compiled | `ask` tool（声明 `readonly`）+ `commands[/ask]`（它不贡献 prompt，所以这条命令是它自己的主张）+ `contributes.ui.tui` | 能力不是模式，所以它想常驻：user config `[extensions] with = ["ask"]` + `pinned_native_tools = ["ext:ask/ask"]`；只给一场用是 `session new --with ask --pin ext:ask/ask`（pin 蕴含成员，所以 `--with` 可省） |
 
-**`agent`：委派，靠已有的后台任务回路。** 四个 tool 一个二进制（`params.name` 分发）：`agent{name, task, model?}` 是**模型**在委派——渲染 persona、`session new --prompt` 出子场、`session append` 给任务、`task run` 起一个**属于父场**的后台任务去驱动它，返回一张点名子 session 的回执；`render{name}` 把一个定义文件的正文写成 `.nulya/scratch/agents/agent-<name>.md` 并回一整组 `session new` 参数（**写路径唯一实现**，所以 TUI 也调它——两份实现就是同一个 persona 的两种读法）；`list` 列出全部定义（含 `agents` / `max_exchanges` 两列；**读路径唯一实现**，driver-facing、永不 pin：模型不需要目录——名字写错时错误消息里就有名单——而 driver 要画 picker）；`run{session, agent?, readonly?, max_steps?}` 是那个后台任务跑的命令本身。
+**`agent`：委派，靠已有的后台任务回路。** 四个 tool 一个二进制（`NULYA_TOOL` 分发）：`agent{name, task, model?}` 是**模型**在委派——渲染 persona、`session new --prompt` 出子场、`session append` 给任务、`task run` 起一个**属于父场**的后台任务去驱动它，返回一张点名子 session 的回执；`render{name}` 把一个定义文件的正文写成 `.nulya/scratch/agents/agent-<name>.md` 并回一整组 `session new` 参数（**写路径唯一实现**，所以 TUI 也调它——两份实现就是同一个 persona 的两种读法）；`list` 列出全部定义（含 `agents` / `max_exchanges` 两列；**读路径唯一实现**，driver-facing、永不 pin：模型不需要目录——名字写错时错误消息里就有名单——而 driver 要画 picker）；`run{session, agent?, readonly?, max_steps?}` 是那个后台任务跑的命令本身。
 
 **persona 不是 extension。** 它曾经是：每次委派把正文冻成一个 `agent-<name>` data extension 再 `--with` 进去。那把一段 per-session 文本做成了**安装物**——`ext list` 里长出一排派生包，而 `ext prune` 能删掉某一场赖以 resume 的身份文本。现在走 `session new --prompt <file>`（§5.6）：字节冻进 header，什么都不安装、什么都没有版本。`agent-` 这个前缀从此**只是这个包自己的写/读约定**——`render` 写这个文件名，`wornPersona` 从 header 的 `composition.prompts[].source` 剥这个前缀；内核对这个标签一无所知（§3.4）。
 
@@ -597,9 +600,9 @@ Tool 是"能执行的能力"，Skill 是"要遵循的方法 / 知识"；不同 r
 
 **pins 直接传，不派生 `--with`。** 委派把定义的 `pins` 原样交给 `session new --pin`，没有第二张列表：pin 蕴含成员是**内核的**推论了（§5.1），包按 `current` 自己进来。从前这里为每个不同 ext id 派生一个 `--with <id>`，还先拿 `ext list` 验一遍解析得出来才肯建 session——两件事都是同一个蕴含的第二份实现（TUI 手上还有第三份），而"这个 pin 解析得出来吗"本来就只该有一个答案、由那唯一会拒绝的那一层给出。`render` 因此只回 `pins`，`members` 那一列删掉；解析不到时说话的是 `session new` 自己，它的 stderr 会点名是哪些包由 pin 带进来的。
 
-**追问是同一个 tool 的第二个形态：`agent{name|session, task}`。** `name` 开一场新的，`session` 往一场**已经报告过的**子场再送一轮；两个二选一（都给或都不给 → `-32602` 说清楚），`task` 必填。为什么是同一个 tool：它们是同一件事——请别人做事、拿回一份报告——而第二种是**便宜的那一种**，模型该先伸手去够它：追问是 append-only，子场带着它已经找到的一切 resume，**命中的是它自己的前缀缓存**（§1），一次纠正只付一轮；重开一场则要把侦察再买一遍。四道门，都在建任何东西之前：目标必须是 s-… 形状 · 它的**冻结 header 必须戴着某个 `agent-*` system prompt**（否则那是别人的对话，不是可以追问的委派）· **还在跑就拒绝**（判据是内核自己的 `task list --json` 投影——驱动它的那个后台任务 `starting`/`running` 就是"还在工作"，往正在产出报告的那个 run 里塞一轮只会让报告说不清自己包含了什么）· frontmatter 的 `max_exchanges`（数子场 ledger 里的 `user_text`；未声明 = 不限，每轮本来就有 `max_steps` 兜底）。报告照旧：每一轮一个新的后台任务、一条 `task_finished`，没有第二种机制。**readonly 自动仍然对**——runner 每次都从**那一场自己的 header** 重算放行名单，追问既不换 composition 也不换 header。**一个并发点写在这里**：人若在前端接管那个子 tab 说话、模型同时追问，撞的是 durable session 的单写者语义（`SessionBusy` / 上面那道"还在跑"的门），行为安全——两个写者是内核唯一拒绝的事（§3.4）。
+**追问是同一个 tool 的第二个形态：`agent{name|session, task}`。** `name` 开一场新的，`session` 往一场**已经报告过的**子场再送一轮；两个二选一（都给或都不给 → 一次失败的调用，消息说清楚），`task` 必填。为什么是同一个 tool：它们是同一件事——请别人做事、拿回一份报告——而第二种是**便宜的那一种**，模型该先伸手去够它：追问是 append-only，子场带着它已经找到的一切 resume，**命中的是它自己的前缀缓存**（§1），一次纠正只付一轮；重开一场则要把侦察再买一遍。四道门，都在建任何东西之前：目标必须是 s-… 形状 · 它的**冻结 header 必须戴着某个 `agent-*` system prompt**（否则那是别人的对话，不是可以追问的委派）· **还在跑就拒绝**（判据是内核自己的 `task list --json` 投影——驱动它的那个后台任务 `starting`/`running` 就是"还在工作"，往正在产出报告的那个 run 里塞一轮只会让报告说不清自己包含了什么）· frontmatter 的 `max_exchanges`（数子场 ledger 里的 `user_text`；未声明 = 不限，每轮本来就有 `max_steps` 兜底）。报告照旧：每一轮一个新的后台任务、一条 `task_finished`，没有第二种机制。**readonly 自动仍然对**——runner 每次都从**那一场自己的 header** 重算放行名单，追问既不换 composition 也不换 header。**一个并发点写在这里**：人若在前端接管那个子 tab 说话、模型同时追问，撞的是 durable session 的单写者语义（`SessionBusy` / 上面那道"还在跑"的门），行为安全——两个写者是内核唯一拒绝的事（§3.4）。
 
-**`model` 是这一次委派跑在什么上，第三个答案。** 形态与定义里的 `model:` 逐字相同（`<profile>` 或 `<profile>/<model-id>`，§9.5 的两个 flag），**一处解析**（`defs.parseModelRef`）：一个参数与一个 frontmatter 字段说的是同一件事，两个 parser 就是两套语法。优先级由近及远——**这次调用 > 定义 > 继承发起它的那一场**，且**取的是一对而不是拼一对**：`--model` 是 profile 之内的 id，从一处拿 profile、另一处拿 id 会点名一个那个 profile 根本不服务的模型。为什么让模型自己挑：定义说的是"这个 persona 一般跑在什么上"，而调用者知道定义不知道的那件事——**这一件活值多少**（一次宽搜配便宜模型、一次严审配贵的）。`session` 形态给 `model` 是 `-32602` 而不是静默忽略：那一场的身份在创建时就冻死了（physics #2 / §3.4），而 append-only 正是追问便宜的原因。解析不出的字符串当场报错并指 `nulya config show`；profile 名对不上则由内核那句拒绝原样上来，只多一句"这是你给的 `model` 参数"——调用者可以不带它重试，而那不是一句关于 profile 的话能说清的。
+**`model` 是这一次委派跑在什么上，第三个答案。** 形态与定义里的 `model:` 逐字相同（`<profile>` 或 `<profile>/<model-id>`，§9.5 的两个 flag），**一处解析**（`defs.parseModelRef`）：一个参数与一个 frontmatter 字段说的是同一件事，两个 parser 就是两套语法。优先级由近及远——**这次调用 > 定义 > 继承发起它的那一场**，且**取的是一对而不是拼一对**：`--model` 是 profile 之内的 id，从一处拿 profile、另一处拿 id 会点名一个那个 profile 根本不服务的模型。为什么让模型自己挑：定义说的是"这个 persona 一般跑在什么上"，而调用者知道定义不知道的那件事——**这一件活值多少**（一次宽搜配便宜模型、一次严审配贵的）。`session` 形态给 `model` 是一次失败的调用而不是静默忽略：那一场的身份在创建时就冻死了（physics #2 / §3.4），而 append-only 正是追问便宜的原因。解析不出的字符串当场报错并指 `nulya config show`；profile 名对不上则由内核那句拒绝原样上来，只多一句"这是你给的 `model` 参数"——调用者可以不带它重试，而那不是一句关于 profile 的话能说清的。
 
 **能不能委派，是被委派者定义里的一个字段。** frontmatter 的 `agents: [name, …]`：**空 = leaf**，这是除协调者之外每个 persona 的默认。非空时，那一场子场才额外带 `--with agent@<自身版本> --pin ext:agent/agent`——**一个字段、一处读取**，决定这一场是不是叶子；一个不能委派的子场干脆就不带这个 tool，于是没有"事后再拒绝"这回事。tool 自己那一侧的校验从**本场冻结 header 里那个 `agent-<name>` prompt**反查定义（header 是权威：它是冻的，说的是这一场实际composed 成什么，而不是定义文件今天说什么），它的 `agents` 决定本场够得着谁，名字不在单里就报错并列出允许的；没有 `agent-*` prompt（顶层会话）= 不限。**深度兜底**：白名单看不见**间接**环（`a` 可以委派 `b`、`b` 可以委派 `a`），所以 runner 给它驱动的那一步设 `NULYA_AGENT_DEPTH=<n+1>`（不是 secret 形状，过得了净化，§7.6），tool 读到 ≥3 一律拒绝。**这是防环兜底不是安全边界**：人从前端驱动一场子场时这个变量根本不在，而它上面那层白名单本来就与审批表同类——policy，不是隔离（§9）。
 
@@ -720,11 +723,11 @@ resume 时 `cli/session.zig` 按 header 的 profile 名从 config 取 `api_key` 
 
 **何时压、压成什么，都不在内核里。** 前者是 driver 的 policy（内核没有对应的 config 键——没人消费的键就是死代码，已删），后者是模型的判断。两者都由 driver 用现成的 `session append` / `session step` / `session new --parent` 组合出来。
 
-**第一个 consumer 是随仓库带的 `extensions/compact`**（与 `extensions/evolution/` 同层）：一个 **compiled** extension，contribute 一个 `compact{session, focus?, max_steps?}` tool，七步就是上面那条组合——找到 harness（`NULYA_EXE`，§7.6）→ 往**旧** session append 一条带 `<nulya:compact-request>` 标记的请求 → `session step` 它并**解析它打印的事件 JSONL** → 没拿到摘要就什么都不动（JSON-RPC error `-32001`，两条真实事件留在旧 ledger 里说明它为什么停）→ `session new --parent <old>:<seq>` → 往新 session append `<nulya:context-summary>` + 摘要 → 返回 `{session, parent{session,seq}, summary_bytes}`。它是 **compiled** 而不是脚本，只因为要解析 JSONL：`sh` 没有 JSON 读取器（jq 不保证有）、Windows 两者都没有，两份脚本实现同一个过程更糟（PLAN §0.1 #3 给 Zig 留的正是这种情况）。TUI 的 `/compact` 现在只做三件事：`ext build extensions/compact` → `ext run compact@<v>` → 把 tab 换到返回的 session（tui.md §11 T9）；它跑的时候持着旧 session 的写者 lease，所以那个 tab 自己翻成 observer 跟着看。内核既不知道也不关心发生过一次压缩，`src/` 为它加的只有 `NULYA_EXE` 一个变量。
+**第一个 consumer 是随仓库带的 `extensions/compact`**（与 `extensions/evolution/` 同层）：一个 **compiled** extension，contribute 一个 `compact{session, focus?, max_steps?}` tool，七步就是上面那条组合——找到 harness（`NULYA_EXE`，§7.6）→ 往**旧** session append 一条带 `<nulya:compact-request>` 标记的请求 → `session step` 它并**解析它打印的事件 JSONL** → 没拿到摘要就什么都不动（一次失败的调用，消息说"什么都没动、旧 session 还是活的那个"，两条真实事件留在旧 ledger 里说明它为什么停）→ `session new --parent <old>:<seq>` → 往新 session append `<nulya:context-summary>` + 摘要 → 返回 `{session, parent{session,seq}, summary_bytes}`。它是 **compiled** 而不是脚本，只因为要解析 JSONL：`sh` 没有 JSON 读取器（jq 不保证有）、Windows 两者都没有，两份脚本实现同一个过程更糟（PLAN §0.1 #3 给 Zig 留的正是这种情况）。TUI 的 `/compact` 现在只做三件事：`ext build extensions/compact` → `ext run compact@<v>` → 把 tab 换到返回的 session（tui.md §11 T9）；它跑的时候持着旧 session 的写者 lease，所以那个 tab 自己翻成 observer 跟着看。内核既不知道也不关心发生过一次压缩，`src/` 为它加的只有 `NULYA_EXE` 一个变量。
 
 **换个触发者：模型主动的 handoff（`extensions/handoff` + `drivers/goal.*`）。** `/compact` 是 driver 因为"满了"发起；handoff 是**模型**因为"一个阶段做完了、剩下的工作不再需要过程细节"发起。动作完全相同——同一条 fork 路径、同一个 `<nulya:context-summary>` marker（**没有第三个 marker**）——只有触发者、信号、brief 侧重不同。**内核零改动**：`src/` 为这一整块加的只有 `launch.ScriptedProvider` 的第四档（离线替身，§13）。
 
-- **`extensions/handoff`**（与 `compact` / `evolution` 同层，compiled，理由同 `compact`：要读 JSON-RPC 请求、回同一个 `id`、校验分节，而一个 manifest 只有一个 interpreter，随仓库带的东西没法 ps1 + sh 各一份还共用一个 version）contribute 一个 `handoff{done, next_task, keep, drop?}` tool。**只 propose、不 fork**：它不调 `session new`，所以 `session new --parent` 在整个仓库里仍然只被 `extensions/compact/src/main.zig` 调用。它做三件事——校验三个必填节（缺 → `-32602`，一次列全缺的，**不落盘**）、认 `NULYA_SESSION`（不在 session 里 → 错误，**不落盘**）、把 brief 渲染成 markdown 写进 `.nulya/handoffs/<session>-<n>.md`（`n` 取第一个空位、exclusive create，单调、不覆盖），然后回 `{recorded, message}`，message 就是"记录好了，别再调工具，结束本轮"。**那个文件就是提议**——driver 不必解析任何 JSON 也能看见它。
+- **`extensions/handoff`**（与 `compact` / `evolution` 同层，compiled，理由同 `compact`：要把四个分节当一组校验，而一个 manifest 只有一个 interpreter，随仓库带的东西没法 ps1 + sh 各一份还共用一个 version）contribute 一个 `handoff{done, next_task, keep, drop?}` tool。**只 propose、不 fork**：它不调 `session new`，所以 `session new --parent` 在整个仓库里仍然只被 `extensions/compact/src/main.zig` 调用。它做三件事——校验三个必填节（缺 → 一次失败的调用，一次列全缺的，**不落盘**）、认 `NULYA_SESSION`（不在 session 里 → 错误，**不落盘**）、把 brief 渲染成 markdown 写进 `.nulya/handoffs/<session>-<n>.md`（`n` 取第一个空位、exclusive create，单调、不覆盖），然后回 `{recorded, message}`，message 就是"记录好了，别再调工具，结束本轮"。**那个文件就是提议**——driver 不必解析任何 JSON 也能看见它。
 - **`extensions/handoff` 默认不在任何 composition 里**，由需要它的 driver 在 `session new` 时带进来：`--with handoff@<v>` 让它成为成员、`--pin ext:handoff/handoff` 给它一个 native 槽（两根轴，§7.5）。这使 handoff 成为 **`--pin` 的第一个真实 consumer**。交互模式不给它：那时 driver 是人、人有 `/compact`，一个没人消费的 handoff 只会让 result 说"已记录"而什么都不发生。
 - **`compact` 的 `brief_file` 分支**：给了这个参数就**跳过七步里的 2–4**（不 append 请求、不 step 旧 session，旧文件**逐字节不变**），fork 点 = 旧 ledger 当前 tail（`session events <old>` 的最后一行 `seq`），brief = 文件内容；父一条事件都没有、或文件读不到 / 为空 → 报错不 fork。**两条路径**都由**代码**在 carried 文本末尾追加一段父指针（`Parent session: <id> (forked at seq N) … nulya session events <id>`）——不指望模型记得写；旧 ledger 还在盘上、新 session 有 shell，于是有损压缩退化成惰性检索。
 - **fork 不继承后台任务，compaction 继承。** `session new --parent` 对任务一无所知，这是对的：将来的 subagent 也走这条路，而一个子场不该抢走父场的工作。但压缩不是分叉——它是同一场对话换了个文件，把结果投进一个再没人读的 session 就是把结果丢了。所以**继承发生在 `extensions/compact` 里**（两条路径同一段代码，fork 成功之后、carry 之前）：`nulya task list --session <parent> --running --json` → 每个 `nulya task retarget <task> --to <child>` → carried 文本末尾由**代码**追加一行 `Background tasks still running when this session was forked: <sid>/t3 (<command>, 41s so far) … — nulya task status <sid>/t3; their results will arrive here when they finish.`（与 `parent_footer` 同一手法：模型没法记住一件它从不知道的事）。什么算"还在跑"由**内核**回答（`task list --running`，不在这里重算 `lost`）；**retarget 失败绝不让 fork 失败**——stderr 说一句、照常返回，那个任务照旧报告进父场的 inbox，找得到。§6.1 / §14。
@@ -920,7 +923,7 @@ shell 永久 builtin（唯一那个）                     tools/
 immutable package + 内容寻址版本                  extension/store.zig, integrity.zig
 store root 搜索顺序（首个 active 持有者胜）        extension/roots.zig
 build / activate / rollback / integrity           extension/build/build_ext.zig, store.zig
-extension JSON-RPC tool/call                      extension/protocol.zig, invoke.zig
+extension wire（plain；jsonrpc deprecated）         extension/protocol.zig, invoke.zig
 SessionComposition 版本冻结（成员解析一律硬失败）    composition.zig
 ToolExecutor / Binding（builtin/extension 同构）   tool.zig, extension/tools.zig
 skills + 渐进披露 catalog                          skill.zig, extension/skills.zig

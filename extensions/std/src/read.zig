@@ -39,9 +39,9 @@ pub fn run(ctx: *const rpc.Ctx, args: std.json.ObjectMap) anyerror!rpc.Outcome {
         .ok => |s| s,
         .failed => |f| return f,
     };
-    const offset_arg = rpc.optionalUnsigned(args, "offset") catch return rpc.invalidParams(alloc, "offset must be a non-negative integer", .{});
-    const limit_arg = rpc.optionalUnsigned(args, "limit") catch return rpc.invalidParams(alloc, "limit must be a non-negative integer", .{});
-    const force = rpc.optionalBool(args, "force", false) catch return rpc.invalidParams(alloc, "force must be a boolean", .{});
+    const offset_arg = rpc.optionalUnsigned(args, "offset") catch return rpc.refuse(alloc, "offset must be a non-negative integer", .{});
+    const limit_arg = rpc.optionalUnsigned(args, "limit") catch return rpc.refuse(alloc, "limit must be a non-negative integer", .{});
+    const force = rpc.optionalBool(args, "force", false) catch return rpc.refuse(alloc, "force must be a boolean", .{});
 
     const path = try ctx.resolve(path_arg);
     const shown = text.rel(path, ctx.cwd);
@@ -244,19 +244,18 @@ test "read: changed on disk is noted; a directory, a missing file, a binary file
     try f.tmp.dir.createDirPath(io, "d");
     try f.tmp.dir.writeFile(io, .{ .sub_path = "d/inner.txt", .data = "" });
     const dir = try f.call(run, "{{\"path\":\"d\"}}", .{});
-    try std.testing.expectEqual(rpc.code_refused, dir.failed.code);
-    try std.testing.expect(std.mem.indexOf(u8, dir.failed.message, "is a directory, not a file. It contains: inner.txt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, dir.failed, "is a directory, not a file. It contains: inner.txt") != null);
 
     const missing = try f.call(run, "{{\"path\":\"d/nope.txt\"}}", .{});
-    try std.testing.expect(std.mem.startsWith(u8, missing.failed.message, "File not found: "));
-    try std.testing.expect(std.mem.endsWith(u8, missing.failed.message, "exists and contains: inner.txt"));
+    try std.testing.expect(std.mem.startsWith(u8, missing.failed, "File not found: "));
+    try std.testing.expect(std.mem.endsWith(u8, missing.failed, "exists and contains: inner.txt"));
 
     try f.tmp.dir.writeFile(io, .{ .sub_path = "bin.dat", .data = "abc\x00def" });
     const bin = try f.call(run, "{{\"path\":\"bin.dat\"}}", .{});
-    try std.testing.expect(std.mem.indexOf(u8, bin.failed.message, "is a binary file (7 bytes); refusing to dump it into context.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bin.failed, "is a binary file (7 bytes); refusing to dump it into context.") != null);
 
     const empty_path = try f.call(run, "{{\"path\":\"e.txt\"}}", .{});
-    try std.testing.expect(std.mem.startsWith(u8, empty_path.failed.message, "File not found: "));
+    try std.testing.expect(std.mem.startsWith(u8, empty_path.failed, "File not found: "));
     try f.tmp.dir.writeFile(io, .{ .sub_path = "e.txt", .data = "" });
     const empty = try f.call(run, "{{\"path\":\"e.txt\"}}", .{});
     try std.testing.expectEqualStrings("(empty file)", empty.text);
@@ -272,7 +271,7 @@ test "read: a file over 10 MB is refused before it is loaded; a long line is cli
     @memset(huge, 'h');
     try f.tmp.dir.writeFile(io, .{ .sub_path = "huge.txt", .data = huge });
     const refused = try f.call(run, "{{\"path\":\"huge.txt\"}}", .{});
-    try std.testing.expectEqualStrings("huge.txt is 10.0 MB — too large to load into context. Search it with grep, or read a specific range via shell, e.g. `sed -n '2000,2100p'`.", refused.failed.message);
+    try std.testing.expectEqualStrings("huge.txt is 10.0 MB — too large to load into context. Search it with grep, or read a specific range via shell, e.g. `sed -n '2000,2100p'`.", refused.failed);
 
     const long = try alloc.alloc(u8, 40_000);
     @memset(long, 'l');
@@ -286,12 +285,11 @@ test "read: a file over 10 MB is refused before it is loaded; a long line is cli
     try std.testing.expect(std.mem.indexOf(u8, clipped.text, "[showing") == null);
 }
 
-test "read: bad argument types are -32602, a missing path too" {
+test "read: bad argument types are refused, a missing path too" {
     const f = try TestFixture.init(null);
     defer f.deinit();
     const no_path = try f.call(run, "{{}}", .{});
-    try std.testing.expectEqual(rpc.code_invalid_params, no_path.failed.code);
+    try std.testing.expectEqualStrings("missing required parameter: path", no_path.failed);
     const bad_offset = try f.call(run, "{{\"path\":\"x\",\"offset\":\"1\"}}", .{});
-    try std.testing.expectEqual(rpc.code_invalid_params, bad_offset.failed.code);
-    try std.testing.expect(std.mem.indexOf(u8, bad_offset.failed.message, "offset") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bad_offset.failed, "offset") != null);
 }

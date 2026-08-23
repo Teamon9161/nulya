@@ -32,10 +32,10 @@ fn answer(ctx: *const rpc.Ctx, args: std.json.ObjectMap) anyerror!rpc.Outcome {
     const path_arg: ?[]const u8 = switch (args.get("path") orelse std.json.Value.null) {
         .null => null,
         .string => |s| s,
-        else => return rpc.invalidParams(alloc, "path must be a string", .{}),
+        else => return rpc.refuse(alloc, "path must be a string", .{}),
     };
-    const offset = (rpc.optionalUnsigned(args, "offset") catch return rpc.invalidParams(alloc, "offset must be a non-negative integer", .{})) orelse 0;
-    const follow_links = rpc.optionalBool(args, "follow_symlinks", false) catch return rpc.invalidParams(alloc, "follow_symlinks must be a boolean", .{});
+    const offset = (rpc.optionalUnsigned(args, "offset") catch return rpc.refuse(alloc, "offset must be a non-negative integer", .{})) orelse 0;
+    const follow_links = rpc.optionalBool(args, "follow_symlinks", false) catch return rpc.refuse(alloc, "follow_symlinks must be a boolean", .{});
 
     const base = if (path_arg) |p| try ctx.resolve(p) else ctx.cwd;
     const base_display = try walk.relDisplay(alloc, base, ctx.cwd);
@@ -159,7 +159,7 @@ const TestCtx = struct {
         const parsed = try std.json.parseFromSliceLeaky(std.json.Value, self.arena.allocator(), args_json, .{});
         return switch (try run(&self.ctx, parsed.object)) {
             .text => |t| t,
-            .failed => |f| f.message,
+            .failed => |message| message,
         };
     }
 };

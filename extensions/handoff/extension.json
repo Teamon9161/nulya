@@ -1,7 +1,7 @@
 {
   "schema": "nulya.extension/v2",
   "id": "handoff",
-  "runtime": { "entry": "bin/handoff" },
+  "runtime": { "entry": "bin/handoff", "wire": "plain" },
   "contributes": {
     "tools": [{
       "name": "handoff",

@@ -63,7 +63,7 @@ fn expectOkContains(run: support.CliRun, needle: []const u8) !void {
 
 fn expectRefusal(run: support.CliRun, needle: []const u8) !void {
     try std.testing.expectEqual(@as(u8, 1), run.code);
-    try std.testing.expect(std.mem.startsWith(u8, run.stdout, "extension error [-32000]: "));
+    try std.testing.expect(std.mem.startsWith(u8, run.stdout, "exit 1\nstderr:\n"));
     if (std.mem.indexOf(u8, run.stdout, needle) == null) {
         std.debug.print("expected {s} in:\n{s}\n", .{ needle, run.stdout });
         return error.TestUnexpectedResult;

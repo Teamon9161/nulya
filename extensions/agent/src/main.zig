@@ -1,6 +1,6 @@
 //! `agent` — delegation, outside the kernel.
 //!
-//! **What it is.** Three tools in one binary, dispatched on `params.name`:
+//! **What it is.** Four tools in one binary, dispatched on `NULYA_TOOL`:
 //!
 //!   `agent {name, task}`   the model asking for one piece of work to be
 //!                          delegated. Renders the persona, creates the child
@@ -47,10 +47,10 @@
 //! sub-agent that was not given that field cannot delegate again — the tool is
 //! simply not there. One field, read in one place, and no refusal to write.
 //!
-//! **Why compiled Zig.** Identical to `compact` and `handoff`: JSON-RPC in, an
-//! `id` to echo, arguments to validate, and `run` parses the `session step`
-//! JSONL protocol and answers a gate on a pipe. `sh` has no JSON reader, Windows
-//! has neither `jq` nor a guaranteed python, and one manifest carries one
+//! **Why compiled Zig.** `run` reads the `session step` JSONL protocol line by
+//! line and answers a gate on a pipe while it does, and the other three parse
+//! markdown front matter and validate it. `sh` has no JSON reader, Windows has
+//! neither `jq` nor a guaranteed python, and one manifest carries one
 //! `interpreter` — a script version would be a `.sh` and a `.ps1` that could
 //! never share a version id.
 
@@ -78,50 +78,41 @@ pub fn main(init: std.process.Init) !void {
     // and prints one response, so individual frees would be noise.
     const alloc = init.arena.allocator();
 
-    const request = rpc.readRequest(alloc, io) catch |err| switch (err) {
+    const name = init.environ_map.get("NULYA_TOOL") orelse "";
+    const arguments = rpc.readArguments(alloc, io) catch |err| switch (err) {
         error.OutOfMemory => return err,
-        else => {
-            try rpc.writeResponse(alloc, io, rpc.fallback_id, .{ .failed = .{
-                .code = -32600,
-                .message = "agent expects one JSON-RPC tool/call request on stdin",
-            } });
-            return;
-        },
+        else => try rpc.answer(io, .{ .failed = "agent expects this call's arguments as one JSON object on stdin" }),
     };
 
     const exe = init.environ_map.get("NULYA_EXE") orelse "";
     const ctx: Ctx = .{ .alloc = alloc, .io = io, .env = init.environ_map, .exe = exe };
 
-    // Host faults surface as Zig errors and are folded into a `-32000` here, so
-    // every path still writes exactly one response.
-    const outcome = dispatch(&ctx, request) catch |err| rpc.Outcome{ .failed = .{
-        .code = rpc.code_refused,
-        .message = try std.fmt.allocPrint(alloc, "{s} could not run: {s}", .{ request.name, @errorName(err) }),
-    } };
-    try rpc.writeResponse(alloc, io, request.id, outcome);
+    // Host faults surface as Zig errors and are folded into a refusal here, so
+    // every path still ends in exactly one answer.
+    const outcome = dispatch(&ctx, name, arguments) catch |err| rpc.Outcome{
+        .failed = try std.fmt.allocPrint(alloc, "{s} could not run: {s}", .{ name, @errorName(err) }),
+    };
+    try rpc.answer(io, outcome);
 }
 
-fn dispatch(ctx: *const Ctx, request: rpc.Request) !rpc.Outcome {
+fn dispatch(ctx: *const Ctx, name: []const u8, arguments: std.json.ObjectMap) !rpc.Outcome {
     if (ctx.exe.len == 0) {
         return rpc.refuse(ctx.alloc, "agent cannot find the nulya that spawned it (NULYA_EXE is not set)", .{});
     }
-    if (std.mem.eql(u8, request.name, "agent")) return delegate(ctx, request.arguments);
-    if (std.mem.eql(u8, request.name, "render")) return renderTool(ctx, request.arguments);
-    if (std.mem.eql(u8, request.name, "list")) return list(ctx);
-    if (std.mem.eql(u8, request.name, "run")) {
+    if (std.mem.eql(u8, name, "agent")) return delegate(ctx, arguments);
+    if (std.mem.eql(u8, name, "render")) return renderTool(ctx, arguments);
+    if (std.mem.eql(u8, name, "list")) return list(ctx);
+    if (std.mem.eql(u8, name, "run")) {
         return runner.run(ctx.alloc, ctx.io, ctx.exe, .{
-            .session = rpc.trimmedField(request.arguments, "session"),
-            .agent = rpc.trimmedField(request.arguments, "agent"),
-            .readonly = rpc.boolField(request.arguments, "readonly"),
-            .max_steps = rpc.intField(request.arguments, "max_steps") orelse 0,
-            .depth = rpc.intField(request.arguments, "depth") orelse 1,
+            .session = rpc.trimmedField(arguments, "session"),
+            .agent = rpc.trimmedField(arguments, "agent"),
+            .readonly = rpc.boolField(arguments, "readonly"),
+            .max_steps = rpc.intField(arguments, "max_steps") orelse 0,
+            .depth = rpc.intField(arguments, "depth") orelse 1,
             .env = ctx.env,
         });
     }
-    return .{ .failed = .{
-        .code = rpc.code_unknown_tool,
-        .message = try std.fmt.allocPrint(ctx.alloc, "agent has no tool named '{s}' (it has agent, render, list, run)", .{request.name}),
-    } };
+    return rpc.refuse(ctx.alloc, "agent has no tool named '{s}' (it has agent, render, list, run)", .{name});
 }
 
 // ── render ──────────────────────────────────────────────────────────────────
@@ -138,24 +129,21 @@ const Rendered = struct {
 /// Read a definition and write its body where `session new --prompt` can read
 /// it. The one implementation of that rendering (see `defs.zig`), so the front
 /// end and the model's own `agent` tool cannot disagree about what a persona is.
-fn render(ctx: *const Ctx, name: []const u8) !union(enum) { ok: Rendered, failed: rpc.Fail } {
+fn render(ctx: *const Ctx, name: []const u8) !union(enum) { ok: Rendered, failed: []const u8 } {
     const alloc = ctx.alloc;
     if (!defs.isPlainName(name)) {
-        return .{ .failed = .{
-            .code = rpc.code_invalid_params,
-            .message = try std.fmt.allocPrint(alloc, "'{s}' is not an agent name; a name is letters, digits, '.', '_' or '-' and names one definition file", .{name}),
-        } };
+        return .{ .failed = try std.fmt.allocPrint(alloc, "'{s}' is not an agent name; a name is letters, digits, '.', '_' or '-' and names one definition file", .{name}) };
     }
     const entry = (try defs.find(alloc, ctx.io, ctx.env, name)) orelse {
         const known = try defs.names(alloc, ctx.io, ctx.env);
-        return .{ .failed = .{ .code = rpc.code_invalid_params, .message = if (known.len == 0)
+        return .{ .failed = if (known.len == 0)
             try std.fmt.allocPrint(
                 alloc,
                 "no agent '{s}': this workspace defines no agents at all. Definitions are markdown files in {s}/ or in this machine's agents directory; without one there is nobody to delegate to, so do the work yourself.",
                 .{ name, defs.project_dir },
             )
         else
-            try std.fmt.allocPrint(alloc, "no agent '{s}'. Available: {s}.", .{ name, try std.mem.join(alloc, ", ", known) }) } };
+            try std.fmt.allocPrint(alloc, "no agent '{s}'. Available: {s}.", .{ name, try std.mem.join(alloc, ", ", known) }) };
     };
 
     const def = entry.def;
@@ -167,7 +155,7 @@ fn render(ctx: *const Ctx, name: []const u8) !union(enum) { ok: Rendered, failed
     const label = try defs.promptLabel(alloc, def.name);
     const path = try defs.promptPath(alloc, label);
     defs.writePrompt(alloc, ctx.io, def, path) catch |err| {
-        return .{ .failed = try failed(alloc, rpc.code_refused, "could not write the prompt for '{s}' to {s}: {s}", .{ def.name, path, @errorName(err) }) };
+        return .{ .failed = try failed(alloc, "could not write the prompt for '{s}' to {s}: {s}", .{ def.name, path, @errorName(err) }) };
     };
 
     return .{ .ok = .{ .def = def, .label = label, .path = path, .warnings = entry.warnings } };
@@ -177,7 +165,7 @@ fn render(ctx: *const Ctx, name: []const u8) !union(enum) { ok: Rendered, failed
 /// session wearing it. JSON rather than prose: its reader is a driver.
 fn renderTool(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
     const name = rpc.trimmedField(args, "name");
-    if (name.len == 0) return rpc.invalidParams(ctx.alloc, "render needs a name (which agent definition to render)", .{});
+    if (name.len == 0) return rpc.refuse(ctx.alloc, "render needs a name (which agent definition to render)", .{});
     const outcome = try render(ctx, name);
     switch (outcome) {
         .failed => |f| return .{ .failed = f },
@@ -239,7 +227,7 @@ fn renderTool(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
             for (m.warnings) |w| try jw.write(w);
             try jw.endArray();
             try jw.endObject();
-            return .{ .json = try out.toOwnedSlice() };
+            return .{ .text = try out.toOwnedSlice() };
         },
     }
 }
@@ -299,7 +287,7 @@ fn list(ctx: *const Ctx) !rpc.Outcome {
         try jw.endObject();
     }
     try jw.endArray();
-    return .{ .json = try out.toOwnedSlice() };
+    return .{ .text = try out.toOwnedSlice() };
 }
 
 // ── agent ───────────────────────────────────────────────────────────────────
@@ -331,14 +319,14 @@ fn delegate(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
     const asked_model = rpc.trimmedField(args, "model");
 
     if (task.len == 0) {
-        return rpc.invalidParams(
+        return rpc.refuse(
             alloc,
             "agent needs a non-empty task — the whole job in its own words: what to do, what to look at, what counts as finished, because the sub-agent sees nothing of this conversation.",
             .{},
         );
     }
     if ((name.len == 0) == (target.len == 0)) {
-        return rpc.invalidParams(
+        return rpc.refuse(
             alloc,
             "agent takes EITHER name (start a new delegation) OR session (send another turn into one that already reported), not {s}. A follow-up is the cheaper one: that session still holds everything it found.",
             .{if (name.len == 0) "neither" else "both"},
@@ -369,14 +357,14 @@ fn delegate(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
     // on that form cannot be honoured, and quietly ignoring it would be the
     // worst of the three answers.
     if (target.len != 0 and asked_model.len != 0) {
-        return rpc.invalidParams(
+        return rpc.refuse(
             alloc,
             "model applies to a NEW delegation only: session {s} froze what it runs on when it was created and append-only is what makes a follow-up cheap. Drop model to follow up, or start a fresh delegation with name + model.",
             .{target},
         );
     }
     const chosen: ?defs.ModelRef = if (asked_model.len == 0) null else defs.parseModelRef(asked_model) orelse {
-        return rpc.invalidParams(
+        return rpc.refuse(
             alloc,
             "model must be <profile> or <profile>/<model-id> (the same form a definition's `model:` takes) — got '{s}'. `nulya config show` lists the profiles and the model ids each one serves.",
             .{asked_model},
@@ -511,7 +499,7 @@ fn newDelegation(
 fn followUp(ctx: *const Ctx, parent: []const u8, child: []const u8, task: []const u8, depth: u32) !rpc.Outcome {
     const alloc = ctx.alloc;
     if (!defs.isPlainSessionId(child)) {
-        return rpc.invalidParams(alloc, "'{s}' is not a session id (they look like s-…)", .{child});
+        return rpc.refuse(alloc, "'{s}' is not a session id (they look like s-…)", .{child});
     }
 
     // Is it a delegation at all? A session whose header froze an `agent-*`
@@ -745,6 +733,6 @@ fn firstLine(text: []const u8) []const u8 {
     return trimmed[0..at];
 }
 
-fn failed(alloc: std.mem.Allocator, code: i64, comptime fmt: []const u8, args: anytype) !rpc.Fail {
-    return .{ .code = code, .message = try std.fmt.allocPrint(alloc, fmt, args) };
+fn failed(alloc: std.mem.Allocator, comptime fmt: []const u8, args: anytype) ![]const u8 {
+    return std.fmt.allocPrint(alloc, fmt, args);
 }

@@ -56,8 +56,9 @@
 //! file the session has not read (state on disk under the session's scratch
 //! dir, none outside a session), `edit`'s exact match, teaching refusals and
 //! the freshness it records for its own change, `grep`'s smart-case / per-file
-//! cap / paging / gitignore, `glob`'s mtime order — and a string JSON-RPC
-//! `result` reaching the caller verbatim (DESIGN §7.3).
+//! cap / paging / gitignore, `glob`'s mtime order — and a tool's stdout
+//! reaching the caller verbatim, its stderr and non-zero exit reaching it as a
+//! failed call (the `plain` wire, DESIGN §7.3).
 //!
 //! Compiling an extension is a real `zig build-exe`, so `support.zig` keeps a
 //! compile-once cache of built versions under `.zig-cache/` and copies frozen

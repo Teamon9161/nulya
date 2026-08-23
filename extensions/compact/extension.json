@@ -1,7 +1,7 @@
 {
   "schema": "nulya.extension/v2",
   "id": "compact",
-  "runtime": { "entry": "bin/compact" },
+  "runtime": { "entry": "bin/compact", "wire": "plain" },
   "contributes": {
     "tools": [{
       "name": "compact",

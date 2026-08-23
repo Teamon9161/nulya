@@ -1,124 +1,78 @@
-//! The wire half of `agent`: one JSON-RPC `tool/call` in on stdin, one response
-//! out on stdout, and the vocabulary the three tools answer in.
+//! The wire half of `agent`: this call's arguments in on stdin, its answer out
+//! on stdout, and the vocabulary the four tools answer in.
 //!
-//! Lifted from `extensions/std/src/rpc.zig` (itself lifted from
-//! `extensions/handoff`), which is the same contract — three tools in one binary
-//! dispatched on `params.name`. The one addition is `json`: `render` is
-//! read by a DRIVER rather than by a model, and a driver wants an object it can
-//! parse, not a sentence (the same split `extensions/compact` makes).
+//! The wire is `plain` (DESIGN §7.3, contract at the top of
+//! `src/extension/protocol.zig`): stdin is the arguments as one JSON object, the
+//! tool's name is `NULYA_TOOL` in the environment, and there is no envelope to
+//! read or write. Lifted from `extensions/std/src/rpc.zig`, which is the same
+//! contract — several tools in one binary dispatched on that name.
 //!
-//! Three shapes of answer, on purpose:
-//!   - `text`   → `"result": "<text>"`. The host hands a STRING result to the
-//!                model verbatim (DESIGN §7.3), so `agent`'s receipt and `run`'s
-//!                report arrive as plain text.
-//!   - `json`   → `"result": <object>`, already serialised by the caller. What
-//!                `ext run` prints, and what the TUI parses.
-//!   - `failed` → `"error": {code, message}`. The host folds it into a failed
-//!                tool result (`ok=false`), shown as `extension error [<code>]:
-//!                <message>` — so the message IS the teaching text.
+//! Two shapes of answer, on purpose:
+//!   - `text`   → stdout, verbatim, exit 0. `agent`'s receipt and `run`'s report
+//!                reach the model as the sentences they are; `render` and `list`
+//!                print JSON, which a DRIVER parses — one wire carries both,
+//!                because stdout is just bytes.
+//!   - `failed` → stderr, then exit 1. The host folds it into a failed tool
+//!                result (`ok=false`) whose text is `exit 1` and that message, so
+//!                the message IS the teaching text.
 
 const std = @import("std");
 
-pub const Fail = struct { code: i64, message: []const u8 };
-
 pub const Outcome = union(enum) {
+    /// The tool's answer — prose for a model, JSON for a driver — printed to
+    /// stdout exactly as it stands.
     text: []const u8,
-    /// Raw JSON, written into `result` as-is.
-    json: []const u8,
-    failed: Fail,
+    /// The teaching message, written to stderr before `exit 1`.
+    failed: []const u8,
 };
 
-pub const code_invalid_params: i64 = -32602;
-pub const code_unknown_tool: i64 = -32601;
-pub const code_refused: i64 = -32000;
-
-/// A refusal with a formatted teaching message (`-32000`).
+/// A refusal with a formatted teaching message: what went wrong, and what would
+/// work next call.
 pub fn refuse(alloc: std.mem.Allocator, comptime fmt: []const u8, args: anytype) !Outcome {
-    return .{ .failed = .{ .code = code_refused, .message = try std.fmt.allocPrint(alloc, fmt, args) } };
+    return .{ .failed = try std.fmt.allocPrint(alloc, fmt, args) };
 }
 
-/// A bad-arguments answer (`-32602`): the model sent something the schema does
-/// not allow, and the message says which field and what would be accepted.
-pub fn invalidParams(alloc: std.mem.Allocator, comptime fmt: []const u8, args: anytype) !Outcome {
-    return .{ .failed = .{ .code = code_invalid_params, .message = try std.fmt.allocPrint(alloc, fmt, args) } };
-}
-
-/// One decoded `tool/call`. `arguments` borrows the parsed JSON tree.
-pub const Request = struct {
-    id: []const u8,
-    name: []const u8,
-    arguments: std.json.ObjectMap,
-};
-
-pub const fallback_id = "call";
-
+/// A task text can be long, so the cap is on the wire read rather than on any
+/// one field.
 pub const max_request_bytes: usize = 4 << 20;
 
-pub const ReadError = error{ NotJsonRpc, NotAnObject, NoArguments };
+pub const ReadError = error{NotAnObject};
 
-pub fn readRequest(alloc: std.mem.Allocator, io: std.Io) !Request {
+/// Read this call's arguments from stdin: one JSON object, the exact bytes the
+/// caller produced (`{}` when it sent none). The host already checked that shape
+/// before spawning, so `NotAnObject` means somebody ran this binary by hand.
+pub fn readArguments(alloc: std.mem.Allocator, io: std.Io) !std.json.ObjectMap {
     var in_buf: [4096]u8 = undefined;
     var reader = std.Io.File.stdin().readerStreaming(io, &in_buf);
     const raw = try reader.interface.allocRemaining(alloc, .limited(max_request_bytes));
 
     const parsed = std.json.parseFromSliceLeaky(std.json.Value, alloc, raw, .{}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return error.NotJsonRpc,
-    };
-    const obj = switch (parsed) {
-        .object => |o| o,
         else => return error.NotAnObject,
     };
-    const id = stringField(obj, "id") orelse fallback_id;
-    const params = switch (obj.get("params") orelse return error.NoArguments) {
+    return switch (parsed) {
         .object => |o| o,
-        else => return error.NoArguments,
+        else => error.NotAnObject,
     };
-    const name = stringField(params, "name") orelse return error.NoArguments;
-    const arguments = switch (params.get("arguments") orelse std.json.Value{ .object = .empty }) {
-        .object => |o| o,
-        else => return error.NoArguments,
-    };
-    return .{ .id = id, .name = name, .arguments = arguments };
 }
 
-/// One JSON-RPC response on stdout — the whole runtime contract.
-pub fn writeResponse(alloc: std.mem.Allocator, io: std.Io, id: []const u8, outcome: Outcome) !void {
-    var out: std.Io.Writer.Allocating = .init(alloc);
-    var jw: std.json.Stringify = .{ .writer = &out.writer };
-
-    try jw.beginObject();
-    try jw.objectField("jsonrpc");
-    try jw.write("2.0");
-    try jw.objectField("id");
-    try jw.write(id);
+/// Print the answer and end the process the way the wire reads it: stdout and 0,
+/// or stderr and 1. The one place either happens, so no tool can invent a third
+/// way to be finished.
+pub fn answer(io: std.Io, outcome: Outcome) !noreturn {
     switch (outcome) {
+        // Verbatim: no trailing newline is added, because these bytes ARE the
+        // result — a driver parsing `render`'s JSON gets exactly what was built.
         .text => |text| {
-            try jw.objectField("result");
-            try jw.write(text);
+            try std.Io.File.stdout().writeStreamingAll(io, text);
+            std.process.exit(0);
         },
-        .json => |raw| {
-            try jw.objectField("result");
-            // Through the stringifier's own raw hatch, not straight at the
-            // writer: bytes written behind its back leave it believing no value
-            // was emitted, and the next `endObject` then trips its state check.
-            try jw.beginWriteRaw();
-            try out.writer.writeAll(raw);
-            jw.endWriteRaw();
-        },
-        .failed => |failed| {
-            try jw.objectField("error");
-            try jw.beginObject();
-            try jw.objectField("code");
-            try jw.write(failed.code);
-            try jw.objectField("message");
-            try jw.write(failed.message);
-            try jw.endObject();
+        .failed => |message| {
+            try std.Io.File.stderr().writeStreamingAll(io, message);
+            try std.Io.File.stderr().writeStreamingAll(io, "\n");
+            std.process.exit(1);
         },
     }
-    try jw.endObject();
-
-    try std.Io.File.stdout().writeStreamingAll(io, out.writer.buffered());
 }
 
 pub fn stringField(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {

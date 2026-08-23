@@ -25,12 +25,14 @@ pub const reserved_tool_names = [_][]const u8{"shell"};
 /// child's stdin and how its stdout is read, so an unrecognized word cannot be
 /// left to a reader.
 ///
-///   - `jsonrpc` : one JSON-RPC 2.0 `tool/call` request in, one response out
-///                 (`protocol.zig`). The default, so every manifest written
-///                 before this field means exactly what it meant.
 ///   - `plain`   : the arguments JSON on stdin, `NULYA_TOOL` / `NULYA_ARG_<k>`
 ///                 in the environment, stdout verbatim as the tool's text,
-///                 exit code as ok/failed. Five lines of `sh` can serve it.
+///                 exit code as ok/failed. Five lines of `sh` can serve it, and
+///                 it is what every extension should say.
+///   - `jsonrpc` : one JSON-RPC 2.0 `tool/call` request in, one response out
+///                 (`protocol.zig`). DEPRECATED and going away; still the
+///                 reading of ABSENT, so every manifest written before this
+///                 field means exactly what it meant.
 ///
 /// Independent of `ImplementationKind`: a compiled Zig runtime may declare
 /// `plain` too. What the wire says is how to TALK to a process, not what kind

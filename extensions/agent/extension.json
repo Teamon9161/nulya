@@ -2,7 +2,8 @@
   "schema": "nulya.extension/v2",
   "id": "agent",
   "runtime": {
-    "entry": "bin/agent"
+    "entry": "bin/agent",
+    "wire": "plain"
   },
   "contributes": {
     "tools": [

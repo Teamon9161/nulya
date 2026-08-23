@@ -1547,10 +1547,12 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             \\  object keyed by OS — `windows`, `linux`, `macos`, … — plus an optional
             \\  `default`, so one version can carry a different script per platform; the
             \\  object form is script-only, and a host this build has no entry for is a
-            \\  named refusal rather than a silent skip); `runtime.wire`, `"jsonrpc"` (the
-            \\  default) or `"plain"` — plain trades the JSON-RPC envelope for two flat
-            \\  halves, stdin is the call's arguments as one compact JSON object and stdout
-            \\  is the result text taken verbatim. Everything else about running the
+            \\  named refusal rather than a silent skip); `runtime.wire`, which every new
+            \\  extension writes as `"plain"` — stdin is the call's arguments as one
+            \\  compact JSON object, NULYA_TOOL names the tool, stdout is the result taken
+            \\  verbatim, and a non-zero exit is a failed call whose text is `exit <code>`
+            \\  plus stderr. Left out it still means the deprecated `"jsonrpc"` envelope,
+            \\  which works for one more version; everything else about running the
             \\  extension — the sanitized environment, NULYA_EXE/NULYA_SESSION, timeout,
             \\  being killed as a whole tree — is identical either way. `tools[].name` /
             \\  `.input` / `.timeout_ms` (this tool's own cap on a MODEL-FACE call, default
@@ -1622,7 +1624,7 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             \\  # the script prints IS the result. Three lines is a real tool:
             \\  #   #!/bin/sh
             \\  #   printf 'hello %s\n' "${NULYA_ARG_name:-world}"
-            \\  # `nulya ext api protocol` has both wires; --zig scaffolds the JSON-RPC one.
+            \\  # `--zig` scaffolds the same wire, compiled. `nulya ext api protocol` is it.
             \\  nulya ext build .nulya/extensions/my.helper    # prints v-<hash>; the version is immutable
             \\  nulya ext run my.helper@v-<hash> do_thing --arg name=world    # try it before anything else sees it
             \\  nulya ext activate my.helper v-<hash>         # `current` points at it; CLI callers need nothing more

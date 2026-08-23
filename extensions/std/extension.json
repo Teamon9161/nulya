@@ -1,7 +1,7 @@
 {
   "schema": "nulya.extension/v2",
   "id": "std",
-  "runtime": { "entry": "bin/std" },
+  "runtime": { "entry": "bin/std", "wire": "plain" },
   "contributes": {
     "tools": [
       {

@@ -101,8 +101,10 @@ printf 'hello %s\n' "${NULYA_ARG_name:-world}"
   `runtime.interpreter` names what runs it (`sh`, `powershell`, `python`). Both
   may be written per OS — `{"windows": "src/run.ps1", "default": "src/run.sh"}`
   — so one version runs everywhere.
-- `runtime.wire` — `"plain"` (above) or `"jsonrpc"` (the default: one JSON-RPC
-  request in on stdin, one response out). `nulya ext api` prints both contracts.
+- `runtime.wire` — write `"plain"` (above); a compiled runtime says it too, it
+  is how you talk to a process, not what kind of process it is. Left out it
+  still means the deprecated `"jsonrpc"` envelope, which works for one more
+  version. `nulya ext api protocol` is the contract.
 - `contributes.tools[]` — `{name, description, input, timeout_ms?}`. `input` is
   the JSON Schema the model sees. This manifest is the only source of truth for
   a tool's shape.

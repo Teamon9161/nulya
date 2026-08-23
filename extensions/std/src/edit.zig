@@ -64,12 +64,12 @@ pub fn run(ctx: *const rpc.Ctx, args: std.json.ObjectMap) anyerror!rpc.Outcome {
     if (text.hasReadMarker(new)) return rpc.refuse(alloc, "{s}", .{try text.markerError(alloc, "new_string")});
 
     const replace_all = rpc.optionalBool(args, "replace_all", false) catch
-        return rpc.invalidParams(alloc, "replace_all must be a boolean", .{});
+        return rpc.refuse(alloc, "replace_all must be a boolean", .{});
     const target_line: ?usize = blk: {
         const raw = rpc.optionalUnsigned(args, "target_line") catch
-            return rpc.invalidParams(alloc, "target_line must be a positive 1-based line number", .{});
+            return rpc.refuse(alloc, "target_line must be a positive 1-based line number", .{});
         const line = raw orelse break :blk null;
-        if (line == 0) return rpc.invalidParams(alloc, "target_line must be a positive 1-based line number", .{});
+        if (line == 0) return rpc.refuse(alloc, "target_line must be a positive 1-based line number", .{});
         break :blk @intCast(line);
     };
     if (replace_all and target_line != null)
@@ -869,19 +869,19 @@ test "edit: an empty old_string and a non-UTF-8 file are refused without touchin
 
     try f.tmp.dir.writeFile(io, .{ .sub_path = "text.txt", .data = "unchanged" });
     const empty = try f.call(run, "{{\"path\":\"text.txt\",\"old_string\":\"\",\"new_string\":\"x\",\"replace_all\":true}}", .{});
-    try std.testing.expectEqualStrings("old_string must not be empty", empty.failed.message);
+    try std.testing.expectEqualStrings("old_string must not be empty", empty.failed);
     try std.testing.expectEqualStrings("unchanged", try f.tmp.dir.readFileAlloc(io, "text.txt", f.arena.allocator(), .unlimited));
 
     try f.tmp.dir.writeFile(io, .{ .sub_path = "data.bin", .data = "before\xffafter" });
     const binary = try f.call(run, "{{\"path\":\"data.bin\",\"old_string\":\"before\",\"new_string\":\"changed\"}}", .{});
-    try std.testing.expect(std.mem.indexOf(u8, binary.failed.message, "not valid UTF-8") != null);
+    try std.testing.expect(std.mem.indexOf(u8, binary.failed, "not valid UTF-8") != null);
     try std.testing.expectEqualStrings("before\xffafter", try f.tmp.dir.readFileAlloc(io, "data.bin", f.arena.allocator(), .unlimited));
 
     const same = try f.call(run, "{{\"path\":\"text.txt\",\"old_string\":\"a\",\"new_string\":\"a\"}}", .{});
-    try std.testing.expectEqualStrings("old_string and new_string are identical", same.failed.message);
+    try std.testing.expectEqualStrings("old_string and new_string are identical", same.failed);
 
     const marked = try f.call(run, "{{\"path\":\"text.txt\",\"old_string\":\"un{s}9 bytes]\",\"new_string\":\"x\"}}", .{text.marker_open});
-    try std.testing.expect(std.mem.startsWith(u8, marked.failed.message, "old_string contains a truncation marker"));
+    try std.testing.expect(std.mem.startsWith(u8, marked.failed, "old_string contains a truncation marker"));
 }
 
 test "edit: target_line picks one exact and one normalized occurrence, and refuses a miss or replace_all" {
@@ -902,12 +902,12 @@ test "edit: target_line picks one exact and one normalized occurrence, and refus
 
     try f.tmp.dir.writeFile(io, .{ .sub_path = "c.txt", .data = "needle\nseparator\nneedle\n" });
     const miss = try f.call(run, "{{\"path\":\"c.txt\",\"old_string\":\"needle\",\"new_string\":\"changed\",\"target_line\":2}}", .{});
-    try std.testing.expect(std.mem.indexOf(u8, miss.failed.message, "does not contain an exact old_string") != null);
+    try std.testing.expect(std.mem.indexOf(u8, miss.failed, "does not contain an exact old_string") != null);
     try std.testing.expectEqualStrings("needle\nseparator\nneedle\n", try f.tmp.dir.readFileAlloc(io, "c.txt", alloc, .unlimited));
 
     try f.tmp.dir.writeFile(io, .{ .sub_path = "d.txt", .data = "needle\nneedle\n" });
     const both = try f.call(run, "{{\"path\":\"d.txt\",\"old_string\":\"needle\",\"new_string\":\"changed\",\"target_line\":1,\"replace_all\":true}}", .{});
-    try std.testing.expectEqualStrings("target_line cannot be combined with replace_all=true", both.failed.message);
+    try std.testing.expectEqualStrings("target_line cannot be combined with replace_all=true", both.failed);
     try std.testing.expectEqualStrings("needle\nneedle\n", try f.tmp.dir.readFileAlloc(io, "d.txt", alloc, .unlimited));
 }
 
@@ -919,8 +919,8 @@ test "edit: an ambiguous exact match reports the count and the occurrences; repl
 
     try f.tmp.dir.writeFile(io, .{ .sub_path = "m.txt", .data = "a x\nb\na x\n" });
     const many = try f.call(run, "{{\"path\":\"m.txt\",\"old_string\":\"a x\",\"new_string\":\"a y\"}}", .{});
-    try std.testing.expect(std.mem.startsWith(u8, many.failed.message, "old_string appears 2 times; add surrounding context to make it unique, pass target_line from one occurrence below, or set replace_all=true.\nOccurrences:\n"));
-    try std.testing.expect(std.mem.indexOf(u8, many.failed.message, "candidate 2 (line 3):") != null);
+    try std.testing.expect(std.mem.startsWith(u8, many.failed, "old_string appears 2 times; add surrounding context to make it unique, pass target_line from one occurrence below, or set replace_all=true.\nOccurrences:\n"));
+    try std.testing.expect(std.mem.indexOf(u8, many.failed, "candidate 2 (line 3):") != null);
     try std.testing.expectEqualStrings("a x\nb\na x\n", try f.tmp.dir.readFileAlloc(io, "m.txt", alloc, .unlimited));
 
     const all = try f.call(run, "{{\"path\":\"m.txt\",\"old_string\":\"a x\",\"new_string\":\"a y\",\"replace_all\":true}}", .{});
@@ -999,7 +999,7 @@ test "edit: without a session there is no freshness note and the edit still happ
 
     const missing = try f.call(run, "{{\"path\":\"n.txt\",\"old_string\":\"gamma\",\"new_string\":\"x\"}}", .{});
     // No record exists, so the tool must not claim the file was never read.
-    try std.testing.expect(std.mem.indexOf(u8, missing.failed.message, "you have not read the current version") == null);
+    try std.testing.expect(std.mem.indexOf(u8, missing.failed, "you have not read the current version") == null);
     try std.testing.expectError(error.FileNotFound, f.tmp.dir.access(io, ".nulya", .{}));
 }
 
@@ -1008,7 +1008,7 @@ test "edit: in a session an unread file's failed match adds the read-it note" {
     defer f.deinit();
     try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "u.txt", .data = "alpha\n" });
     const missing = try f.call(run, "{{\"path\":\"u.txt\",\"old_string\":\"gamma\",\"new_string\":\"x\"}}", .{});
-    try std.testing.expect(std.mem.endsWith(u8, missing.failed.message, "\nnote: you have not read the current version of this file; read it to get the exact text."));
+    try std.testing.expect(std.mem.endsWith(u8, missing.failed, "\nnote: you have not read the current version of this file; read it to get the exact text."));
 }
 
 test "edit: a missing file gets the directory listing, and bad argument types are named" {
@@ -1017,20 +1017,17 @@ test "edit: a missing file gets the directory listing, and bad argument types ar
     try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "here.txt", .data = "x\n" });
 
     const gone = try f.call(run, "{{\"path\":\"nope.txt\",\"old_string\":\"a\",\"new_string\":\"b\"}}", .{});
-    try std.testing.expect(std.mem.startsWith(u8, gone.failed.message, "File not found: "));
-    try std.testing.expect(std.mem.indexOf(u8, gone.failed.message, "here.txt") != null);
+    try std.testing.expect(std.mem.startsWith(u8, gone.failed, "File not found: "));
+    try std.testing.expect(std.mem.indexOf(u8, gone.failed, "here.txt") != null);
 
     const no_old = try f.call(run, "{{\"path\":\"here.txt\",\"new_string\":\"b\"}}", .{});
-    try std.testing.expectEqual(rpc.code_invalid_params, no_old.failed.code);
-    try std.testing.expectEqualStrings("missing required parameter: old_string", no_old.failed.message);
+    try std.testing.expectEqualStrings("missing required parameter: old_string", no_old.failed);
 
     const bad_line = try f.call(run, "{{\"path\":\"here.txt\",\"old_string\":\"a\",\"new_string\":\"b\",\"target_line\":0}}", .{});
-    try std.testing.expectEqual(rpc.code_invalid_params, bad_line.failed.code);
-    try std.testing.expectEqualStrings("target_line must be a positive 1-based line number", bad_line.failed.message);
+    try std.testing.expectEqualStrings("target_line must be a positive 1-based line number", bad_line.failed);
 
     const bad_all = try f.call(run, "{{\"path\":\"here.txt\",\"old_string\":\"a\",\"new_string\":\"b\",\"replace_all\":\"yes\"}}", .{});
-    try std.testing.expectEqual(rpc.code_invalid_params, bad_all.failed.code);
-    try std.testing.expectEqualStrings("replace_all must be a boolean", bad_all.failed.message);
+    try std.testing.expectEqualStrings("replace_all must be a boolean", bad_all.failed);
 }
 
 test "edit: an executable file keeps its permission bits" {

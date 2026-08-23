@@ -86,18 +86,18 @@ fn answer(ctx: *const rpc.Ctx, args: std.json.ObjectMap) anyerror!rpc.Outcome {
         .ok => |s| s,
         .failed => |f| return f,
     };
-    const path_arg = optionalString(args, "path") catch return rpc.invalidParams(alloc, "path must be a string", .{});
-    const glob_arg = optionalString(args, "glob") catch return rpc.invalidParams(alloc, "glob must be a string", .{});
-    const case_insensitive = rpc.optionalBool(args, "case_insensitive", false) catch return rpc.invalidParams(alloc, "case_insensitive must be a boolean", .{});
-    const fixed = rpc.optionalBool(args, "fixed", false) catch return rpc.invalidParams(alloc, "fixed must be a boolean", .{});
-    const files_only = rpc.optionalBool(args, "files_only", false) catch return rpc.invalidParams(alloc, "files_only must be a boolean", .{});
-    const limit = @max((rpc.optionalUnsigned(args, "head_limit") catch return rpc.invalidParams(alloc, "head_limit must be a non-negative integer", .{})) orelse default_match_limit, 1);
-    const offset = (rpc.optionalUnsigned(args, "offset") catch return rpc.invalidParams(alloc, "offset must be a non-negative integer", .{})) orelse 0;
+    const path_arg = optionalString(args, "path") catch return rpc.refuse(alloc, "path must be a string", .{});
+    const glob_arg = optionalString(args, "glob") catch return rpc.refuse(alloc, "glob must be a string", .{});
+    const case_insensitive = rpc.optionalBool(args, "case_insensitive", false) catch return rpc.refuse(alloc, "case_insensitive must be a boolean", .{});
+    const fixed = rpc.optionalBool(args, "fixed", false) catch return rpc.refuse(alloc, "fixed must be a boolean", .{});
+    const files_only = rpc.optionalBool(args, "files_only", false) catch return rpc.refuse(alloc, "files_only must be a boolean", .{});
+    const limit = @max((rpc.optionalUnsigned(args, "head_limit") catch return rpc.refuse(alloc, "head_limit must be a non-negative integer", .{})) orelse default_match_limit, 1);
+    const offset = (rpc.optionalUnsigned(args, "offset") catch return rpc.refuse(alloc, "offset must be a non-negative integer", .{})) orelse 0;
     // -C sets both sides; -A/-B override it. Capped so context can't blow up
     // the output. (tcode)
-    const ctx_c = (rpc.optionalUnsigned(args, "context") catch return rpc.invalidParams(alloc, "context must be a non-negative integer", .{})) orelse 0;
-    const before: usize = @intCast(@min((rpc.optionalUnsigned(args, "before") catch return rpc.invalidParams(alloc, "before must be a non-negative integer", .{})) orelse ctx_c, max_context));
-    const after: usize = @intCast(@min((rpc.optionalUnsigned(args, "after") catch return rpc.invalidParams(alloc, "after must be a non-negative integer", .{})) orelse ctx_c, max_context));
+    const ctx_c = (rpc.optionalUnsigned(args, "context") catch return rpc.refuse(alloc, "context must be a non-negative integer", .{})) orelse 0;
+    const before: usize = @intCast(@min((rpc.optionalUnsigned(args, "before") catch return rpc.refuse(alloc, "before must be a non-negative integer", .{})) orelse ctx_c, max_context));
+    const after: usize = @intCast(@min((rpc.optionalUnsigned(args, "after") catch return rpc.refuse(alloc, "after must be a non-negative integer", .{})) orelse ctx_c, max_context));
 
     const base = if (path_arg) |p| try ctx.resolve(p) else ctx.cwd;
     const base_stat = std.Io.Dir.cwd().statFile(io, base, .{}) catch |err| switch (err) {
@@ -729,7 +729,7 @@ const TestCtx = struct {
         const parsed = try std.json.parseFromSliceLeaky(std.json.Value, self.arena.allocator(), args_json, .{});
         return switch (try run(&self.ctx, parsed.object)) {
             .text => |t| t,
-            .failed => |f| f.message,
+            .failed => |message| message,
         };
     }
 };

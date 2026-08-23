@@ -16,7 +16,7 @@
  * nobody typed does not look typed. `extensions/compact/src/main.zig` declares
  * them as `pub const`; these two strings mirror it, and it is the source.
  */
-import { extBuild, extRun } from "./nulya/cli.ts"
+import { extBuild, extRun, toolSaid } from "./nulya/cli.ts"
 import { bundledDraftPath } from "./extensions.ts"
 import type { Workspace } from "./nulya/bin.ts"
 import type { TranscriptItem } from "./state/session.ts"
@@ -83,9 +83,9 @@ export async function runCompact(
     // (DESIGN §11). Same fork, one less round trip.
     ...(options.briefFile ? { brief_file: options.briefFile } : {}),
   })
-  // A refusal is the interesting case: the tool says why in the JSON-RPC error
-  // the CLI prints, and that sentence ("nothing moved — the old session is
-  // still the live one") is the one the user needs to read.
+  // A refusal is the interesting case: the tool says why on its stderr, which
+  // the CLI prints behind an `exit 1` line, and that sentence ("nothing moved —
+  // the old session is still the live one") is the one the user needs to read.
   if (call.code !== 0) throw new Error(said(call.stdout, call.stderr))
 
   let value: unknown
@@ -107,8 +107,7 @@ export async function runCompact(
   }
 }
 
-/** The first line of whatever the call said — stdout first: `ext run` prints the extension's own error there. */
+/** The sentence the call said — stdout first: `ext run` prints the extension's own message there, behind the plain wire's `exit` / `stderr:` framing (`toolSaid`). */
 function said(stdout: string, stderr: string): string {
-  const text = stdout.trim() || stderr.trim() || "no output"
-  return text.split("\n")[0]!
+  return toolSaid({ stdout, stderr })
 }

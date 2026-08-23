@@ -14,6 +14,7 @@ import {
   sessionNew,
   sessionOutcome,
   sessionStep,
+  toolSaid,
   type StepLine,
 } from "../src/nulya/cli.ts"
 import { cacheShare, createSessionState, usageLabel, no_snapshot } from "../src/state/session.ts"
@@ -268,4 +269,19 @@ test("what a session has cost is a phrase, or nothing at all before it has cost 
   )
   // Output alone is still a cost — a step that was served entirely from cache.
   expect(usageLabel({ ...no_snapshot.usage, output: 12 })).toBe("↑0 ↓12 cache 0%")
+})
+
+test("toolSaid reads the tool's sentence past the plain wire's exit / stderr framing", () => {
+  // A refusal on the plain wire, as `ext run` prints it (DESIGN §7.3).
+  expect(toolSaid({ stdout: "exit 1\nstderr:\nno agent 'x' (there are: explore, plan)\n", stderr: "" })).toBe(
+    "no agent 'x' (there are: explore, plan)",
+  )
+  // ...with something printed before the failure: the stderr line still wins.
+  expect(toolSaid({ stdout: "exit 1\nstderr:\nnothing moved\nstdout:\n{}\n", stderr: "" })).toBe("nothing moved")
+  // A tool that said nothing on stderr is reported by its exit line.
+  expect(toolSaid({ stdout: "exit 3\n", stderr: "" })).toBe("exit 3")
+  // Plain text with no framing, and the stderr fallback, are taken as they are.
+  expect(toolSaid({ stdout: "already built\nmore", stderr: "" })).toBe("already built")
+  expect(toolSaid({ stdout: "", stderr: "spawn failed" })).toBe("spawn failed")
+  expect(toolSaid({ stdout: "", stderr: "" })).toBe("no output")
 })

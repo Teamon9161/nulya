@@ -787,9 +787,9 @@ export async function extTrust(ws: Workspace): Promise<string> {
  * there is no `current` to fall back on.
  *
  * The raw result is returned instead of thrown, because a non-zero exit is how
- * a tool REFUSES — `ext run` prints the extension's own JSON-RPC error on
- * stdout — and the caller usually wants that sentence, not an exception with
- * the wrong words in it.
+ * a tool REFUSES — `ext run` prints the extension's own message on stdout —
+ * and the caller usually wants that sentence (`toolSaid`), not an exception
+ * with the wrong words in it.
  */
 export async function extRun(
   ws: Workspace,
@@ -798,6 +798,27 @@ export async function extRun(
   args: unknown,
 ): Promise<RunResult> {
   return run(ws, ["ext", "run", ref, tool, JSON.stringify(args)])
+}
+
+/**
+ * The one sentence a failed `ext run` said.
+ *
+ * On the `plain` wire (DESIGN §7.3) a refusal is the tool's message on its
+ * stderr and a non-zero exit, which the CLI prints on ITS stdout as
+ * `exit <code>`, a `stderr:` line, then the message (and a `stdout:` section
+ * after that when the tool printed something before failing). The framing is
+ * the kernel's bookkeeping; the message is what a person, or the model, should
+ * read — so this skips the two framing lines when they are there and takes
+ * the first line after them. A tool that wrote nothing to stderr is reported
+ * by its exit line, which is then all there is to say.
+ */
+export function toolSaid(result: { stdout: string; stderr: string }): string {
+  const text = result.stdout.trim() || result.stderr.trim() || "no output"
+  const lines = text.split("\n")
+  let at = 0
+  if (/^exit -?\d+$/.test(lines[0]!.trim())) at = 1
+  if (lines[at]?.trim() === "stderr:") at += 1
+  return lines[at]?.trim() || lines[0]!.trim()
 }
 
 /** One line of `nulya ext list`: an extension directory, in the root that holds it. */

@@ -90,7 +90,7 @@ const report_contract =
 
 pub fn run(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args: Args) !rpc.Outcome {
     if (args.session.len == 0) {
-        return rpc.invalidParams(alloc, "run needs a session id (the delegated session to drive)", .{});
+        return rpc.refuse(alloc, "run needs a session id (the delegated session to drive)", .{});
     }
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(alloc, &.{ exe, "session", "step", args.session, "--stream" });

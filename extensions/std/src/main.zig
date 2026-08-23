@@ -2,7 +2,7 @@
 //! extension outside the kernel.
 //!
 //! **What it is.** Six tools in one binary — `read`, `write`, `append`, `edit`,
-//! `grep`, `glob` — dispatched here on the request's `params.name`. Their
+//! `grep`, `glob` — dispatched here on `NULYA_TOOL`. Their
 //! behaviour is ported from tcode's tool crate, error text and numbers
 //! included: an error is written FOR the model (what went wrong, how to succeed
 //! next call), a small read is widened, a big one paginates itself, `write`
@@ -17,10 +17,11 @@
 //! --user`), activates it, and pins the tools they want in `[registry]
 //! pinned_native_tools` (`ext:std/read`, …). The id `std` is a name, not a rank.
 //!
-//! **Why compiled Zig.** Same reason as `compact` and `handoff`: a JSON-RPC
-//! request to parse, an id to echo back, and one version id across both shell
-//! dialects; plus a regex engine and a gitignore walker that a shell script
-//! cannot carry.
+//! **Why compiled Zig.** A regex engine, a gitignore-aware walker and the
+//! whitespace-normalising fallbacks `edit` needs — none of which a shell script
+//! carries. And one version id across both shell dialects: a manifest holds one
+//! `interpreter`, so a script version would be a `.sh` and a `.ps1` of the same
+//! six tools that could never share a content-addressed version.
 //!
 //! **State.** A tool sees only its arguments, a sanitized environment and the
 //! working directory. The one thing these tools remember between calls — what
@@ -39,22 +40,38 @@ const edit = @import("edit.zig");
 const grep = @import("grep.zig");
 const glob = @import("glob.zig");
 
+/// On the `plain` wire stderr IS the failure message the model reads (DESIGN
+/// §7.3), so nothing may write there but `rpc.answer`. The vendored regex engine
+/// logs its parse diagnostic through `std.log`, which would otherwise arrive
+/// above the teaching text — a library's debug line, in the sentence a model is
+/// meant to act on. Discarded rather than routed somewhere: this binary has no
+/// second output, and what a refusal should say is already said by hand.
+pub const std_options: std.Options = .{ .logFn = discardLog };
+
+fn discardLog(
+    comptime level: std.log.Level,
+    comptime scope: @EnumLiteral(),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    _ = level;
+    _ = scope;
+    _ = format;
+    _ = args;
+}
+
 /// `std.process.Init` rather than a bare `main()`: the io it hands over carries
-/// the real process environment, which is where `NULYA_SESSION` lives.
+/// the real process environment, which is where `NULYA_TOOL` and `NULYA_SESSION`
+/// live.
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     // One arena for the whole call: individual frees would be noise.
     const alloc = init.arena.allocator();
 
-    const request = rpc.readRequest(alloc, io) catch |err| switch (err) {
+    const name = init.environ_map.get("NULYA_TOOL") orelse "";
+    const arguments = rpc.readArguments(alloc, io) catch |err| switch (err) {
         error.OutOfMemory => return err,
-        else => {
-            try rpc.writeResponse(alloc, io, rpc.fallback_id, .{ .failed = .{
-                .code = -32600,
-                .message = "std expects one JSON-RPC tool/call request on stdin",
-            } });
-            return;
-        },
+        else => try rpc.answer(io, .{ .failed = "std expects this call's arguments as one JSON object on stdin" }),
     };
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -68,16 +85,15 @@ pub fn main(init: std.process.Init) !void {
     };
 
     // Host faults (out of memory, an unreadable working directory) surface as
-    // Zig errors and are folded into a `-32000` here, so every path still
-    // writes exactly one response.
-    const outcome = dispatch(&ctx, request) catch |err| rpc.Outcome{ .failed = .{
-        .code = rpc.code_refused,
-        .message = try std.fmt.allocPrint(alloc, "{s} could not run: {s}", .{ request.name, @errorName(err) }),
-    } };
-    try rpc.writeResponse(alloc, io, request.id, outcome);
+    // Zig errors and are folded into a refusal here, so every path still ends
+    // in exactly one answer.
+    const outcome = dispatch(&ctx, name, arguments) catch |err| rpc.Outcome{
+        .failed = try std.fmt.allocPrint(alloc, "{s} could not run: {s}", .{ name, @errorName(err) }),
+    };
+    try rpc.answer(io, outcome);
 }
 
-fn dispatch(ctx: *const rpc.Ctx, request: rpc.Request) !rpc.Outcome {
+fn dispatch(ctx: *const rpc.Ctx, name: []const u8, arguments: std.json.ObjectMap) !rpc.Outcome {
     const Tool = struct { name: []const u8, run: *const fn (*const rpc.Ctx, std.json.ObjectMap) anyerror!rpc.Outcome };
     const tools = [_]Tool{
         .{ .name = "read", .run = read.run },
@@ -88,12 +104,9 @@ fn dispatch(ctx: *const rpc.Ctx, request: rpc.Request) !rpc.Outcome {
         .{ .name = "glob", .run = glob.run },
     };
     for (tools) |t| {
-        if (std.mem.eql(u8, t.name, request.name)) return t.run(ctx, request.arguments);
+        if (std.mem.eql(u8, t.name, name)) return t.run(ctx, arguments);
     }
-    return .{ .failed = .{
-        .code = rpc.code_unknown_tool,
-        .message = try std.fmt.allocPrint(ctx.alloc, "std has no tool named '{s}' (it has read, write, append, edit, grep, glob)", .{request.name}),
-    } };
+    return rpc.refuse(ctx.alloc, "std has no tool named '{s}' (it has read, write, append, edit, grep, glob)", .{name});
 }
 
 /// The session this call runs in, from the file path `session step` puts in the

@@ -96,8 +96,6 @@ const max_child_output: usize = 4 << 20;
 /// How much of a failing child's stderr is quoted back to the caller.
 const max_detail_bytes: usize = 400;
 
-const Fail = struct { code: i64, message: []const u8 };
-
 const Done = struct {
     session: []const u8,
     parent_session: []const u8,
@@ -105,10 +103,11 @@ const Done = struct {
     summary_bytes: usize,
 };
 
-/// What the tool answers with: a result, or a JSON-RPC error. Host faults (out
-/// of memory, an unspawnable child) surface as Zig errors and are folded into a
-/// `-32000` by `main`, so every path still writes exactly one response.
-const Outcome = union(enum) { done: Done, failed: Fail };
+/// What the tool answers with: the fork it made, or the reason it made none.
+/// Host faults (out of memory, an unspawnable child) surface as Zig errors and
+/// are folded into a refusal by `main`, so every path still ends in exactly one
+/// answer.
+const Outcome = union(enum) { done: Done, failed: []const u8 };
 
 const Args = struct {
     session: []const u8,
@@ -138,32 +137,24 @@ pub fn main(init: std.process.Init) !void {
     var reader = std.Io.File.stdin().readerStreaming(io, &in_buf);
     const request = try reader.interface.allocRemaining(alloc, .limited(1 << 20));
 
-    // The host sends a string id and requires it back unchanged (DESIGN §7.3).
-    var call_id: []const u8 = "call";
-    var outcome: Outcome = .{ .failed = .{
-        .code = -32600,
-        .message = "compact expects one JSON-RPC tool/call request on stdin",
-    } };
+    // The wire is `plain` (DESIGN §7.3): stdin is this call's arguments as one
+    // JSON object, and this package has one tool, so `NULYA_TOOL` says nothing
+    // it does not already know.
+    var outcome: Outcome = .{ .failed = "compact expects this call's arguments as one JSON object on stdin" };
 
     if (std.json.parseFromSlice(std.json.Value, alloc, request, .{})) |parsed| {
         if (parsed.value == .object) {
-            const obj = parsed.value.object;
-            if (stringField(obj, "id")) |id| call_id = id;
-            if (readArgs(obj)) |args| {
-                outcome = compact(alloc, io, init.environ_map, args) catch |err| Outcome{ .failed = .{
-                    .code = -32000,
-                    .message = try std.fmt.allocPrint(alloc, "compact could not run: {s}", .{@errorName(err)}),
-                } };
+            if (readArgs(parsed.value.object)) |args| {
+                outcome = compact(alloc, io, init.environ_map, args) catch |err| Outcome{
+                    .failed = try std.fmt.allocPrint(alloc, "compact could not run: {s}", .{@errorName(err)}),
+                };
             } else {
-                outcome = .{ .failed = .{
-                    .code = -32602,
-                    .message = "compact needs {\"session\":\"<id>\"} (optional: \"focus\", \"max_steps\")",
-                } };
+                outcome = .{ .failed = "compact needs {\"session\":\"<id>\"} (optional: \"focus\", \"max_steps\")" };
             }
         }
     } else |_| {}
 
-    try writeResponse(alloc, io, call_id, outcome);
+    try answer(alloc, io, outcome);
 }
 
 /// The whole procedure. Every early return leaves the conversation exactly where
@@ -173,10 +164,8 @@ fn compact(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ
     // 1. Where is the harness? Not `nulya` on PATH — the binary that matters is
     //    the one running this session, and it put its own path here for exactly
     //    this.
-    const exe = env.get("NULYA_EXE") orelse return Outcome{ .failed = .{
-        .code = -32000,
-        .message = "compact needs NULYA_EXE (the nulya kernel sets it for its children)",
-    } };
+    const exe = env.get("NULYA_EXE") orelse
+        return Outcome{ .failed = "compact needs NULYA_EXE (the nulya kernel sets it for its children)" };
 
     // 1b. A caller holding the brief already (the `/goal` driver with a handoff
     //     in hand) skips straight to the fork: steps 2-4 exist only to OBTAIN a
@@ -201,7 +190,7 @@ fn compact(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ
     const forked = try runNulya(alloc, io, exe, &.{ "session", "new", "--parent", parent_ref });
     const new_id = std.mem.trim(u8, forked.stdout, " \t\r\n");
     if (forked.code != 0 or !std.mem.startsWith(u8, new_id, "s-")) {
-        return .{ .failed = try fail(alloc, -32000, "cannot open the continuing session: {s}", .{detail(forked)}) };
+        return .{ .failed = try fail(alloc, "cannot open the continuing session: {s}", .{detail(forked)}) };
     }
 
     // 5b. Background tasks the parent still has running are handed over too.
@@ -219,7 +208,7 @@ fn compact(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ
     const carried = try std.fmt.allocPrint(alloc, "{s}\n{s}{s}{s}", .{ summary_marker, found.summary, footer, tasks_footer });
     const handed = try runNulya(alloc, io, exe, &.{ "session", "append", new_id, carried });
     if (handed.code != 0) {
-        return .{ .failed = try fail(alloc, -32000, "{s} was created but the summary could not be carried into it: {s}", .{ new_id, detail(handed) }) };
+        return .{ .failed = try fail(alloc, "{s} was created but the summary could not be carried into it: {s}", .{ new_id, detail(handed) }) };
     }
 
     // 7. The caller decides what to do with the new session; this tool only
@@ -293,27 +282,27 @@ fn warn(alloc: std.mem.Allocator, io: std.Io, comptime fmt: []const u8, fmt_args
 /// A brief, or the reason there is none. Every way of NOT getting one leaves the
 /// conversation exactly where it was, so both branches answer in this shape and
 /// the fork happens in one place.
-const Brief = union(enum) { harvested: Harvest, failed: Fail };
+const Brief = union(enum) { harvested: Harvest, failed: []const u8 };
 
 /// The `brief_file` branch: read the brief the caller already has, and fork at
 /// the old ledger's current tail. Nothing is written to the old session.
 fn briefFromFile(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args: Args) !Brief {
     const raw = readFileMaybe(alloc, io, args.brief_file) catch |err| return Brief{
-        .failed = try fail(alloc, -32602, "cannot read brief_file '{s}': {s}", .{ args.brief_file, @errorName(err) }),
+        .failed = try fail(alloc, "cannot read brief_file '{s}': {s}", .{ args.brief_file, @errorName(err) }),
     };
     const summary = std.mem.trim(u8, raw orelse "", " \t\r\n");
     if (summary.len == 0) {
-        return .{ .failed = try fail(alloc, -32602, "brief_file '{s}' is missing or empty; nothing moved", .{args.brief_file}) };
+        return .{ .failed = try fail(alloc, "brief_file '{s}' is missing or empty; nothing moved", .{args.brief_file}) };
     }
 
     // The fork point is where the old ledger stands right now. `session events`
     // is a read-only tail (DESIGN §14), so asking costs the old file nothing.
     const listed = try runNulya(alloc, io, exe, &.{ "session", "events", args.session });
     if (listed.code != 0) {
-        return .{ .failed = try fail(alloc, -32000, "cannot read the events of {s}: {s}", .{ args.session, detail(listed) }) };
+        return .{ .failed = try fail(alloc, "cannot read the events of {s}: {s}", .{ args.session, detail(listed) }) };
     }
     const seq = lastSeq(alloc, listed.stdout) orelse return Brief{
-        .failed = try fail(alloc, -32001, "{s} has no events yet; there is nothing to fork from", .{args.session}),
+        .failed = try fail(alloc, "{s} has no events yet; there is nothing to fork from", .{args.session}),
     };
     return .{ .harvested = .{ .summary = summary, .seq = seq } };
 }
@@ -333,24 +322,23 @@ fn briefFromSession(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args:
     );
     const asked = try runNulya(alloc, io, exe, &.{ "session", "append", args.session, request_text });
     if (asked.code != 0) {
-        return .{ .failed = try fail(alloc, -32000, "cannot append the compaction request to {s}: {s}", .{ args.session, detail(asked) }) };
+        return .{ .failed = try fail(alloc, "cannot append the compaction request to {s}: {s}", .{ args.session, detail(asked) }) };
     }
 
     // 3. Step the OLD session, on its own cached prefix, and read what it wrote.
     const budget = try std.fmt.allocPrint(alloc, "{d}", .{args.max_steps});
     const stepped = try runNulya(alloc, io, exe, &.{ "session", "step", args.session, "--max-steps", budget });
     if (stepped.code != 0) {
-        return .{ .failed = try fail(alloc, -32000, "the summarising step failed: {s}", .{detail(stepped)}) };
+        return .{ .failed = try fail(alloc, "the summarising step failed: {s}", .{detail(stepped)}) };
     }
 
     // 4. No brief is a legitimate outcome, not an accident to paper over: a
     //    cancelled step, or a model that answered with tool calls, leaves the
     //    window exactly as full as it was. The two turns from steps 2-3 stay in
     //    the old ledger — that file records why the attempt happened.
-    const found = (try harvest(alloc, stepped.stdout)) orelse return Brief{ .failed = .{
-        .code = -32001,
-        .message = "no summary came back; nothing moved — the old session is still the live one",
-    } };
+    const found = (try harvest(alloc, stepped.stdout)) orelse return Brief{
+        .failed = "no summary came back; nothing moved — the old session is still the live one",
+    };
     return .{ .harvested = found };
 }
 
@@ -484,22 +472,14 @@ fn detail(run: Run) []const u8 {
     return said[said.len -| max_detail_bytes..];
 }
 
-/// A `Fail` with a formatted message. Both `Outcome` and `Brief` carry one, so
-/// the reason is built here and the caller says which shape it is returning.
-fn fail(alloc: std.mem.Allocator, code: i64, comptime fmt: []const u8, fmt_args: anytype) !Fail {
-    return .{ .code = code, .message = try std.fmt.allocPrint(alloc, fmt, fmt_args) };
+/// A refusal message. Both `Outcome` and `Brief` carry one, so the reason is
+/// built here and the caller says which shape it is returning.
+fn fail(alloc: std.mem.Allocator, comptime fmt: []const u8, fmt_args: anytype) ![]const u8 {
+    return std.fmt.allocPrint(alloc, fmt, fmt_args);
 }
 
-/// `params.arguments` of a `tool/call`, or null when it does not name a session.
-fn readArgs(request: std.json.ObjectMap) ?Args {
-    const params = switch (request.get("params") orelse return null) {
-        .object => |o| o,
-        else => return null,
-    };
-    const arguments = switch (params.get("arguments") orelse return null) {
-        .object => |o| o,
-        else => return null,
-    };
+/// This call's arguments, or null when they do not name a session.
+fn readArgs(arguments: std.json.ObjectMap) ?Args {
     const session = stringField(arguments, "session") orelse return null;
     if (session.len == 0) return null;
 
@@ -523,19 +503,15 @@ fn stringField(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
     };
 }
 
-/// One JSON-RPC response on stdout, then exit — the whole runtime contract.
-fn writeResponse(alloc: std.mem.Allocator, io: std.Io, call_id: []const u8, outcome: Outcome) !void {
-    var out: std.Io.Writer.Allocating = .init(alloc);
-    var jw: std.json.Stringify = .{ .writer = &out.writer };
-
-    try jw.beginObject();
-    try jw.objectField("jsonrpc");
-    try jw.write("2.0");
-    try jw.objectField("id");
-    try jw.write(call_id);
+/// The answer, then exit — the whole runtime contract. A success is JSON on
+/// stdout because a driver reads the new session id out of it; a refusal is the
+/// message on stderr, and the non-zero exit is what makes it a failed call
+/// (DESIGN §7.3).
+fn answer(alloc: std.mem.Allocator, io: std.Io, outcome: Outcome) !noreturn {
     switch (outcome) {
         .done => |done| {
-            try jw.objectField("result");
+            var out: std.Io.Writer.Allocating = .init(alloc);
+            var jw: std.json.Stringify = .{ .writer = &out.writer };
             try jw.beginObject();
             try jw.objectField("session");
             try jw.write(done.session);
@@ -549,18 +525,13 @@ fn writeResponse(alloc: std.mem.Allocator, io: std.Io, call_id: []const u8, outc
             try jw.objectField("summary_bytes");
             try jw.write(done.summary_bytes);
             try jw.endObject();
+            try std.Io.File.stdout().writeStreamingAll(io, out.writer.buffered());
+            std.process.exit(0);
         },
-        .failed => |failed| {
-            try jw.objectField("error");
-            try jw.beginObject();
-            try jw.objectField("code");
-            try jw.write(failed.code);
-            try jw.objectField("message");
-            try jw.write(failed.message);
-            try jw.endObject();
+        .failed => |message| {
+            try std.Io.File.stderr().writeStreamingAll(io, message);
+            try std.Io.File.stderr().writeStreamingAll(io, "\n");
+            std.process.exit(1);
         },
     }
-    try jw.endObject();
-
-    try std.Io.File.stdout().writeStreamingAll(io, out.writer.buffered());
 }

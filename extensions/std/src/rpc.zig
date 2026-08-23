@@ -1,23 +1,25 @@
-//! The wire half of `std`: one JSON-RPC `tool/call` in on stdin, one response
-//! out on stdout, and the small vocabulary every tool answers in.
+//! The wire half of `std`: this call's arguments in on stdin, its answer out on
+//! stdout, and the small vocabulary every tool answers in.
 //!
-//! Lifted from `extensions/handoff` (the same request/response contract) so the
-//! five tools here share one reader, one writer and one `Outcome` instead of
-//! five copies. A tool never touches stdio itself: `main.zig` reads, dispatches
-//! on `params.name`, and writes whatever `Outcome` comes back.
+//! The wire is `plain` (DESIGN §7.3, contract at the top of
+//! `src/extension/protocol.zig`): stdin is the arguments as one JSON object, the
+//! tool's name is `NULYA_TOOL` in the environment, and there is no envelope to
+//! read or write. A tool never touches stdio itself: `main.zig` reads, dispatches
+//! on that name, and prints whatever `Outcome` comes back.
 //!
 //! Two shapes of answer, on purpose:
-//!   - `text`   → `"result": "<text>"`. The host hands a STRING result to the
-//!                model verbatim, so a file's contents or a search listing arrive
-//!                as plain text — the same way a builtin's output would.
-//!   - `failed` → `"error": {code, message}`. The host folds it into a failed
-//!                tool result (`ok=false`, and the usage journal records it so),
-//!                shown as `extension error [<code>]: <message>`. The message IS
-//!                the teaching text: what went wrong and how to succeed next call.
-//! Codes: -32602 when the arguments themselves are missing or mistyped, -32601
-//! for a tool name this binary does not implement, -32000 for everything the
-//! tool refused or could not do (file not found, an unread file being
-//! overwritten, an invalid regex, …).
+//!   - `text`   → stdout, verbatim, exit 0. The host hands those bytes to the
+//!                model unchanged, so a file's contents or a search listing
+//!                arrive as plain text — the same way a builtin's output would.
+//!   - `failed` → stderr, then exit 1. The host folds it into a failed tool
+//!                result (`ok=false`, and the usage journal records it so),
+//!                shown as `exit 1` followed by that message. The message IS the
+//!                teaching text: what went wrong and how to succeed next call.
+//!
+//! One shape for every failure, deliberately: a missing argument, an unknown
+//! tool name and a file that is not there all reach the model as one sentence.
+//! The JSON-RPC codes these used to carry (-32602 / -32601 / -32000) reached it
+//! as a number nobody read, and went out with the envelope.
 
 const std = @import("std");
 
@@ -46,103 +48,61 @@ pub const Ctx = struct {
     }
 };
 
-pub const Fail = struct { code: i64, message: []const u8 };
-
 pub const Outcome = union(enum) {
+    /// The tool's answer, printed to stdout exactly as it stands.
     text: []const u8,
-    failed: Fail,
+    /// The teaching message, written to stderr before `exit 1`.
+    failed: []const u8,
 };
 
-pub const code_invalid_params: i64 = -32602;
-pub const code_unknown_tool: i64 = -32601;
-pub const code_refused: i64 = -32000;
-
-/// A refusal with a formatted teaching message (`-32000`).
+/// A refusal with a formatted teaching message: what went wrong, and what would
+/// work next call.
 pub fn refuse(alloc: std.mem.Allocator, comptime fmt: []const u8, args: anytype) !Outcome {
-    return .{ .failed = .{ .code = code_refused, .message = try std.fmt.allocPrint(alloc, fmt, args) } };
+    return .{ .failed = try std.fmt.allocPrint(alloc, fmt, args) };
 }
-
-/// A bad-arguments answer (`-32602`): the model sent something the schema does
-/// not allow, and the message says which field and what would be accepted.
-pub fn invalidParams(alloc: std.mem.Allocator, comptime fmt: []const u8, args: anytype) !Outcome {
-    return .{ .failed = .{ .code = code_invalid_params, .message = try std.fmt.allocPrint(alloc, fmt, args) } };
-}
-
-/// One decoded `tool/call`. `arguments` borrows the parsed JSON tree, which
-/// lives in the arena.
-pub const Request = struct {
-    id: []const u8,
-    name: []const u8,
-    arguments: std.json.ObjectMap,
-};
-
-/// The host sends a string id and requires it back unchanged; until a request
-/// is decoded, this is what any error is addressed to.
-pub const fallback_id = "call";
 
 /// The largest request this process will read. `write` carries a whole file in
 /// `content`, so this is generous; the model-side limit is the provider's, not
 /// ours.
 pub const max_request_bytes: usize = 16 << 20;
 
-pub const ReadError = error{ NotJsonRpc, NotAnObject, NoArguments };
+pub const ReadError = error{NotAnObject};
 
-/// Read and decode the single request on stdin. On a malformed request the
-/// caller answers with `fallback_id`.
-pub fn readRequest(alloc: std.mem.Allocator, io: std.Io) !Request {
+/// Read this call's arguments from stdin: one JSON object, the exact bytes the
+/// model produced (`{}` when it sent none). The host already checked that shape
+/// before spawning, so `NotAnObject` means somebody ran this binary by hand.
+pub fn readArguments(alloc: std.mem.Allocator, io: std.Io) !std.json.ObjectMap {
     var in_buf: [4096]u8 = undefined;
     var reader = std.Io.File.stdin().readerStreaming(io, &in_buf);
     const raw = try reader.interface.allocRemaining(alloc, .limited(max_request_bytes));
 
     const parsed = std.json.parseFromSliceLeaky(std.json.Value, alloc, raw, .{}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return error.NotJsonRpc,
-    };
-    const obj = switch (parsed) {
-        .object => |o| o,
         else => return error.NotAnObject,
     };
-    const id = stringField(obj, "id") orelse fallback_id;
-    const params = switch (obj.get("params") orelse return error.NoArguments) {
+    return switch (parsed) {
         .object => |o| o,
-        else => return error.NoArguments,
+        else => error.NotAnObject,
     };
-    const name = stringField(params, "name") orelse return error.NoArguments;
-    const arguments = switch (params.get("arguments") orelse std.json.Value{ .object = .empty }) {
-        .object => |o| o,
-        else => return error.NoArguments,
-    };
-    return .{ .id = id, .name = name, .arguments = arguments };
 }
 
-/// One JSON-RPC response on stdout — the whole runtime contract.
-pub fn writeResponse(alloc: std.mem.Allocator, io: std.Io, id: []const u8, outcome: Outcome) !void {
-    var out: std.Io.Writer.Allocating = .init(alloc);
-    var jw: std.json.Stringify = .{ .writer = &out.writer };
-
-    try jw.beginObject();
-    try jw.objectField("jsonrpc");
-    try jw.write("2.0");
-    try jw.objectField("id");
-    try jw.write(id);
+/// Print the answer and end the process the way the wire reads it: stdout and 0,
+/// or stderr and 1. The one place either happens, so no tool can invent a third
+/// way to be finished.
+pub fn answer(io: std.Io, outcome: Outcome) !noreturn {
     switch (outcome) {
+        // Verbatim: no trailing newline is added, because these bytes ARE the
+        // result and a tool that wants one prints it itself.
         .text => |text| {
-            try jw.objectField("result");
-            try jw.write(text);
+            try std.Io.File.stdout().writeStreamingAll(io, text);
+            std.process.exit(0);
         },
-        .failed => |failed| {
-            try jw.objectField("error");
-            try jw.beginObject();
-            try jw.objectField("code");
-            try jw.write(failed.code);
-            try jw.objectField("message");
-            try jw.write(failed.message);
-            try jw.endObject();
+        .failed => |message| {
+            try std.Io.File.stderr().writeStreamingAll(io, message);
+            try std.Io.File.stderr().writeStreamingAll(io, "\n");
+            std.process.exit(1);
         },
     }
-    try jw.endObject();
-
-    try std.Io.File.stdout().writeStreamingAll(io, out.writer.buffered());
 }
 
 // ---------------------------------------------------------------- arguments
@@ -154,13 +114,13 @@ pub fn stringField(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
     };
 }
 
-/// A required string argument, or the `-32602` that names it.
+/// A required string argument, or the refusal that names it.
 pub const StringArg = union(enum) { ok: []const u8, failed: Outcome };
 
 pub fn requireString(alloc: std.mem.Allocator, args: std.json.ObjectMap, key: []const u8) !StringArg {
-    return switch (args.get(key) orelse return .{ .failed = try invalidParams(alloc, "missing required parameter: {s}", .{key}) }) {
+    return switch (args.get(key) orelse return .{ .failed = try refuse(alloc, "missing required parameter: {s}", .{key}) }) {
         .string => |s| .{ .ok = s },
-        else => .{ .failed = try invalidParams(alloc, "{s} must be a string", .{key}) },
+        else => .{ .failed = try refuse(alloc, "{s} must be a string", .{key}) },
     };
 }
 
@@ -186,7 +146,7 @@ pub fn optionalBool(args: std.json.ObjectMap, key: []const u8, default: bool) er
 
 test {
     // Analyze every public function under `zig build test`, not only the ones a
-    // test happens to call: `readRequest` / `writeResponse` are otherwise only
+    // test happens to call: `readArguments` / `answer` are otherwise only
     // reached from `main`, which the test build never references.
     std.testing.refAllDecls(@This());
 }
@@ -204,14 +164,4 @@ test "optional arguments: absent and null read as defaults, wrong types are BadT
     try std.testing.expect(try optionalBool(args, "b", false));
     try std.testing.expect(!try optionalBool(args, "absent", false));
     try std.testing.expectError(error.BadType, optionalBool(args, "s", false));
-}
-
-test "a text outcome is written as a JSON string result and a failure as an error object" {
-    // Exercised through the same encoder `writeResponse` uses, minus stdout.
-    const alloc = std.testing.allocator;
-    var out: std.Io.Writer.Allocating = .init(alloc);
-    defer out.deinit();
-    var jw: std.json.Stringify = .{ .writer = &out.writer };
-    try jw.write("a\nb");
-    try std.testing.expectEqualStrings("\"a\\nb\"", out.writer.buffered());
 }

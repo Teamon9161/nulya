@@ -18,7 +18,8 @@ const invoke = @import("invoke.zig");
 /// A frozen extension tool binding.
 pub const Binding = struct {
     /// Model-facing identity and schema. `definition.id` is the stable logical
-    /// id (never version-qualified); `definition.name` is the JSON-RPC name.
+    /// id (never version-qualified); `definition.name` is the tool name the
+    /// manifest declared, which is what the wire carries.
     definition: tool.ToolDefinition,
     /// Exact frozen executable path, passed verbatim to `Environment.runExtension`.
     entry_path: []const u8,

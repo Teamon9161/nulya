@@ -413,7 +413,7 @@ pub fn lossyUtf8(alloc: std.mem.Allocator, s: []const u8) ![]const u8 {
 pub fn sanitize(alloc: std.mem.Allocator, outcome: rpc.Outcome) !rpc.Outcome {
     return switch (outcome) {
         .text => |t| .{ .text = try lossyUtf8(alloc, t) },
-        .failed => |f| .{ .failed = .{ .code = f.code, .message = try lossyUtf8(alloc, f.message) } },
+        .failed => |message| .{ .failed = try lossyUtf8(alloc, message) },
     };
 }
 
@@ -473,8 +473,8 @@ test "lossyUtf8 keeps valid text as is and replaces every bad sequence with U+FF
     const fixed = try lossyUtf8(alloc, bad);
     try std.testing.expectEqualStrings("caf\u{FFFD} \u{FFFD}\u{FFFD} x\u{FFFD}y", fixed);
     try std.testing.expect(std.unicode.utf8ValidateSlice(fixed));
-    const s = try sanitize(alloc, .{ .failed = .{ .code = -32000, .message = "path \xff" } });
-    try std.testing.expectEqualStrings("path \u{FFFD}", s.failed.message);
+    const s = try sanitize(alloc, .{ .failed = "path \xff" });
+    try std.testing.expectEqualStrings("path \u{FFFD}", s.failed);
 }
 
 test "PruneReport: counts by name, note in byte order with × for repeats" {

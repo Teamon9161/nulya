@@ -92,14 +92,15 @@ test "bundled std: ext build compiles one binary with five tools; ext run reache
     }
 
     // A call reaches the named tool: the answer is that tool's own refusal (a
-    // path that does not exist), a JSON-RPC error the CLI reports as exit 1 —
-    // not "unknown tool", not an invalid response, not a crash. What the
-    // refusal SAYS is std_fs.zig's business.
+    // path that does not exist), which on the `plain` wire is the message on
+    // stderr and a non-zero exit, and which the CLI reports as `exit 1` plus
+    // that message — not "unknown tool", not a crash. What the refusal SAYS is
+    // std_fs.zig's business.
     {
         const run = try runStd(alloc, io, ws, exe_abs, ref, "read", "{\"path\":\"no-such-file.txt\"}", null);
         defer alloc.free(run.stdout);
         try std.testing.expectEqual(@as(u8, 1), run.code);
-        try std.testing.expect(std.mem.indexOf(u8, run.stdout, "extension error [-32000]") != null);
+        try std.testing.expect(std.mem.startsWith(u8, run.stdout, "exit 1\nstderr:\n"));
         try std.testing.expect(std.mem.indexOf(u8, run.stdout, "no tool named") == null);
         try std.testing.expect(std.mem.indexOf(u8, run.stdout, "invalid response") == null);
     }

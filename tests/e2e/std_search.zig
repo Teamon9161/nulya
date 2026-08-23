@@ -211,18 +211,20 @@ test "bundled std grep: hits, smart case, glob filter, context shape, per-file c
     }
 
     // Refusals: a pattern that will not compile teaches escaping; a path that
-    // does not exist says so. Both are JSON-RPC errors (exit 1).
+    // does not exist says so. Both are failed calls — on the `plain` wire that
+    // is the message on stderr and a non-zero exit, which the CLI reports as
+    // `exit 1` followed by it.
     {
         const bad = try call(alloc, io, ws, exe, ref, "grep", "{\"pattern\":\"ZQX_(unclosed\"}", 1);
         defer alloc.free(bad);
-        try std.testing.expect(has(bad, "extension error [-32000]: invalid regex: /ZQX_(unclosed/"));
+        try std.testing.expect(has(bad, "exit 1\nstderr:\ninvalid regex: /ZQX_(unclosed/"));
         try std.testing.expect(has(bad, "escape literal ( ) [ ] { } . * + ? with a backslash"));
         const gone = try call(alloc, io, ws, exe, ref, "grep", "{\"pattern\":\"x\",\"path\":\"no/such/dir\"}", 1);
         defer alloc.free(gone);
-        try std.testing.expect(has(gone, "extension error [-32000]: search path does not exist: "));
+        try std.testing.expect(has(gone, "exit 1\nstderr:\nsearch path does not exist: "));
         const missing = try call(alloc, io, ws, exe, ref, "grep", "{}", 1);
         defer alloc.free(missing);
-        try std.testing.expect(has(missing, "extension error [-32602]: missing required parameter: pattern"));
+        try std.testing.expect(has(missing, "exit 1\nstderr:\nmissing required parameter: pattern"));
     }
 
     // The whole answer stays under 100 KB on a tree that would exceed it, cut

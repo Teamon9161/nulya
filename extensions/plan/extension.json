@@ -1,7 +1,7 @@
 {
   "schema": "nulya.extension/v2",
   "id": "plan",
-  "runtime": { "entry": "bin/plan" },
+  "runtime": { "entry": "bin/plan", "wire": "plain" },
   "contributes": {
     "system_prompts": ["prompts/plan.md"],
     "policy": { "readonly": true },
