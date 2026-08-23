@@ -1,6 +1,6 @@
-# Goal · ext-review-3（草案）：一种 wire + 两轮评审的收尾
+# Goal · ext-review-3：一种 wire + 两轮评审的收尾（2026-08-23 拍板）
 
-> **草案**：§1–§3 的决定是建议，拍板之后才算"已定"；拍板后按 [ext-review-2.md](ext-review-2.md) 同一套方式跑（契约 → lane → 审 diff → 合并）。地图与 physics 在 [CLAUDE.md](../../CLAUDE.md)，现状在 [DESIGN.md](../DESIGN.md) §7。
+> 这是一份**执行契约**（2026-08-23 拍板）：§1–§3 的决策已定，不要重开；认为错了就写进 §6 自己那一节的 `BLOCKED:` 并停下。按 [ext-review-2.md](ext-review-2.md) 同一套方式跑（契约 → lane → 审 diff → 合并）。**S 在 worktree 里与 W 并行，两者文件不重叠；R 在两者合并之后跑。**地图与 physics 在 [CLAUDE.md](../../CLAUDE.md)，现状在 [DESIGN.md](../DESIGN.md) §7。
 > 来源：2026-08-23 两轮 extension 评审（[ext-review.md](ext-review.md)、[ext-review-2.md](ext-review-2.md)）落地后剩下的三件事。
 
 ## 0. 为什么还有一批
@@ -37,7 +37,7 @@ stdout  {"jsonrpc":"2.0","id":"call","result":"<文件内容>"}       <文件内
 
 **不弃用也行**——今天"两种 wire、plain 缺省"已经能用。但按"核心足够简单、方便 AI 了解和扩展"这把尺子，一种 wire 是终态。
 
-### 1.3 已定决策（待拍板）
+### 1.3 已定决策
 
 - **W1 · 六个自带编译包迁 plain**：`std` / `agent` / `plan` / `handoff` / `compact` / `ask`。每个包：`main` 读 stdin 为参数对象、按 `NULYA_TOOL` 分发（多 tool 的包）、结果写 stdout（文本或 JSON，与今天 `result` 的内容逐字节相同）、失败 = 消息写 stderr + `exit 1`；删 `rpc.zig` 的信封那一半（`readRequest` / `writeResponse` / id），`Outcome` 可以留作内部类型；manifest 加 `"wire": "plain"`。**退出码不做词表**（不区分 -32602 / -32000——消息本身已经说清，一个数字没有读者）。
 - **W2 · e2e 断言**：`tests/e2e/std.zig:102`、`std_fs.zig:66`、`std_search.zig:218-225` 五处从 `extension error [-32000]: …` 改为 plain 的失败文本（`exit 1` + 消息）；其余自带包的 e2e 若有同类断言一并改。TUI 若有按前缀识别失败文本的地方（grep `extension error`）同步——今天 grep 为零。
@@ -50,12 +50,13 @@ stdout  {"jsonrpc":"2.0","id":"call","result":"<文件内容>"}       <文件内
 - **R1**：一个读者按模型会走的顺序从头读一遍——kernel prompt（`composition.zig` 常量）→ `nulya help` → `nulya ext api protocol` / `manifest` / `examples` → `extensions/guide/skills/guide/SKILL.md`——对照 DESIGN §5.1 / §7.1 / §7.2.1 / §14 **今天**的语义，列出每一处矛盾或过时（重点：`activation` / `permissions` / `policy.deny` 残留、`commands[].action` 对象形式、`ui` 按宿主、`--bare`、`[extensions] with`、`ext run` 形状、一种 wire），逐处修正。
 - **R2**：`nulya help` 仍一屏（e2e 有行数预算）；model-facing 文本**零文档引用**的 e2e 仍绿。
 - **R3**：同一遍也读 TUI 的 `/help` 文案与 `Welcome.tips`，对照 tui.md T48–T50。
+- **R4**：DESIGN / CLAUDE.md / PLAN 里 grep `on_request` / `activation` / `permissions` / `PolicyAllowNotPermitted` / `jsonrpc`，历史叙述加一句"（已删，ext-review-2/3）"或删；`docs/goals/ext-review.md` 与 `ext-review-2.md` 是历史契约，不改。
 
 ## 3. Lane S · 小件（sonnet，最先做）
 
 - **S1** · `tui/test/isolate.ts` 的 scratch `NULYA_HOME`（`mkdtempSync`）退出时 `rmSync(..., {recursive, force})`——今天 `%TEMP%` 里已堆 786 个 `nulya-*`。
 - **S2** · `tui-state.json` 的 `session_with`（K8 新加，`/ext` 写的常驻清单）与 `tui.toml [extensions] session_with`（TUI 恒带的 `handoff` / `agent`，按精确版本）**撞名**。改 state 键为 `standing_with`，读旧名一个版本期；`tui_state.ts` 那段"Not to be confused with…"注释随之消失。
-- **S3** · 残句：tui.md §7 提到已删的 `autoActivatable`；DESIGN / CLAUDE.md 里 grep `on_request` / `activation` / `permissions` / `PolicyAllowNotPermitted`，历史叙述加一句"（已删，ext-review-2）"或删。`docs/goals/ext-review.md` 是历史契约，不改。
+- **S3** · 残句：tui.md §7 提到已删的 `autoActivatable`（只动 tui.md——DESIGN / CLAUDE.md 的残留归 R4，免得与 W4 撞文件）。
 
 ## 4. 验收
 
@@ -67,18 +68,18 @@ zig build && cd tui && bun test && bun run typecheck
 
 ## 5. 顺序
 
-**S → W → R**。S 最小、先清场；W 改内核文本与六个包，最大；R 放最后——对**最终**状态做一遍一致性复读，而不是对中间状态。
+**S ∥ W，然后 R**。S 只碰 `tui/` 与 tui.md，W 只碰 `extensions/`、`src/extension/{protocol,invoke}.zig`、`tests/e2e/`、DESIGN §7、CLAUDE.md、guide——不重叠，所以并行；R 放最后，对**最终**状态做一遍一致性复读，而不是对中间状态。
 
 ## 6. 进度（拍板后各 lane 在自己那节追加）
 
 ### Lane S
 
-（待拍板）
+（待开始）
 
 ### Lane W
 
-（待拍板）
+（待开始）
 
 ### Lane R
 
-（待拍板）
+（待开始）
