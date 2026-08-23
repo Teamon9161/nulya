@@ -408,7 +408,7 @@ manifest_readonly = true    # 信一个 tool 自己声明的 `"readonly": true`�
 
 [extensions]                # T11
 sync_on_start = true        # 开屏时后台 build 各 store root 下的 draft（`nulya ext sync`）
-auto_activate = true        # 让那一趟把 `current` 指到它刚建出来的版本上（**带 system prompt 的包除外**，T31）
+auto_activate = true        # 让那一趟把 `current` 指到它刚建出来的版本上（activate 只是移指针，T50）
 handoff       = true        # 每场 session 带上 handoff 包（`--with` + `--pin`，§5.8）
 plugins       = true        # 代码层总开关（T40）：加载 trusted + 已激活/本场戴着的包的 `contributes.ui.tui.entry`
                             # false = 只剩声明层（commands / policy / 每个 tool 的 ui 照常，逐字节等于 T39 结束时）
@@ -417,7 +417,7 @@ plugins       = true        # 代码层总开关（T40）：加载 trusted + 已
 cancel = "escape"
 ```
 
-`[extensions]` 两个键都只作用于**这一趟 sync**：`auto_activate` 永远不会盖掉指着别处的 `current`（那是 DESIGN §7.2 的规则，前端无从违反），所以一次 rollback 活得过下一次启动；它也**永远不激活一个 contribute 了 system prompt 的包**（`extensions.autoActivatable`，T31——那是"模式"，activate 它等于让它的 prompt 进这台机器上的每一场 session，选模式是人的决定）。project store 的那道 trust 问句**不受这两个键管**——它是 DESIGN §9 的边界，只有按键能推动。
+`[extensions]` 两个键都只作用于**这一趟 sync**：`auto_activate` 永远不会盖掉指着别处的 `current`（那是 DESIGN §7.2 的规则，前端无从违反），所以一次 rollback 活得过下一次启动。**`activate` 今天只是移动一个指针**（`current`，ext-review-2 Lane K）——一个包无论声明了什么、贡献没贡献 system prompt，activate 本身都不改变任何 session 的 composition，所以 `auto_activate` 对"模式"包没有从前需要挡的那件事了。会不会让它进每一场 session 是分开的决定，住在 `/ext`'s Enter（standing pins / standing with 那两半，T48）：对一个贡献了 system prompt 的包，Enter **永不**写 standing with（T50，ext-review-2 §3b）——选模式仍然是人的决定，只是不再靠这里的 `auto_activate` 挡着。project store 的那道 trust 问句**不受这两个键管**——它是 DESIGN §9 的边界，只有按键能推动。
 
 `/settings` 只显示当前生效值与来源文件；不在 TUI 里写配置（编辑器改文件即可，第二个诉求出现再做）。
 
@@ -1783,3 +1783,13 @@ K/C/M 三条 lane 落地之后对 TUI **用户**的一次复盘（`goals/ext-rev
 **② 开屏只问一句。** 随 checkout 到达的东西曾经问两次：先是 `.nulya/extensions` 的 store 问句（`t`/`s`/`n`），再是 `.nulya/agents` 的 agent 问句（`t`/`n`）——同一次开屏、同一个人、同一把"只问一次"的尺子，却是两段先后打出来的文字。新写的纯函数 `extensions.planCheckout(storePlan, agentsPlan)`（与 `planProjectStore` 并排，按类型导入 `agents.ts` 的 `AgentTrustPlan`，不产生值层面的循环依赖）判断三种情形：两边都不用问 → `{kind:"none"}`；只有一边要问 → 原样返回**那一边今天的问题**（文字、按键、`apply` 的行为逐字节不变，`agentsPromptText`/`bothPromptText` 两个新的纯文本组装函数只在"只问一边"与"两边都问"时才被用到）；两边都要问 → 一段文本先列 store 持有什么、再列 agents 定义了什么，接一句新问题、三个答案：`t` 信任并安装两者（store：trust+build+activate；agents：trusted）、`s` 只 build 扩展、两者都不信任、`n` 都不动。返回类型 `{kind:"ask", text, choices, apply(key)}` 里的 `apply` **保持纯**——它只把一次按键翻译成一个 `CheckoutAction{store, agentsTrust}`，不碰文件系统；真正跑命令、记 `asked_stores`/`asked_agents`/`trusted_agents`、打印"installing…"与两句"left alone"的，是 `main.tsx` 新写的**唯一**glue 函数 `askAboutCheckout`（取代原来的 `askAboutProjectStore` / `askAboutProjectAgents` / `readAnswer`，`readKey` 保留），它读 `plan.text`、循环 `readKey()` 直到 `plan.apply(key)` 接受一个答案为止，再按 `action.store.sync` 决定要不要打印"installing…"+`summarize(...)`，按 `checkoutFollowUp(action, storeAsked, agentsAsked)`（新的纯函数，只对**这次真的被问到**的那一侧打印"left alone"）补上两句从前分开打的话。`sync_on_start` 关掉时 store 半句仍然整个不问（这条开关本来就是"要不要碰扩展"的总闸），agent 半句不受它影响，与从前一致。`applyAnswer` 拆成 `applyStoreAction`（按 `StoreAction` 直接跑）+ 一层 `actionFor` 转换，供两条路复用同一份命令。
 
 **测试**：`extensions.test.ts` 新增 `planCheckout` 一条（六种组合：都不问、都 ready、只 store、只 agents、两者都问的三个答案）与 `checkoutFollowUp` 一条；`standingWith` 那条改名重写（prompt 包现在断言 `false`，skill/command/ui 三种各自 `true`，prompt+skill 同时贡献仍是 `false`）；`consumers.test.tsx` 里 `plan is a mode and ask is a capability` 那条的 `standingWith(plan)` 断言从 `true` 改成 `false`（`plan` 真实清单里同时有 `ui` 面板，正是"prompt 优先于其它贡献"这条规则的活例子）；`overlays.test.tsx` 的 `/ext marks a package that contributes a system prompt as a mode…` 整条重写，断言 Enter 之后 `session_with` **不含**该 id、notice 含 `/<id>`、detail 文案含"nothing here composes it standing"。`bun test` 365 跑绿（一次全量偶发在高负载下丢一条 lease 等待测试的超时，隔离重跑照绿——`project-nulya-tui-test-gotchas.md` 记过的既有类别，与本改动无关）。`bun run typecheck` 干净。`CLAUDE.md` 里 ext-review-2 Lane K 那条现状 bullet 的 TUI 指路从"tui.md T47"改成"tui.md T48/T50"（T47 说的是 `/sessions` 那张表，从不是这条规则住的地方；T48 引入了这条规则，T50 是它现在的样子）。
+
+### T51 · 测试 scratch 目录清理 + `tui-state.json` 那半 `session_with` 改名（`goals/ext-review-3.md` Lane S，2026-08-23）
+
+两轮评审落地后剩下的两件小事，都只碰 TUI 自己的文件，内核零改动。
+
+**① `tui/test/isolate.ts` 不再往 `%TEMP%` 里堆。** preload 给每次 `bun test` 起一个 scratch `NULYA_HOME`（`mkdtempSync`，几乎每条测试都要 spawn 真二进制，见该文件顶部注释），但从没人删过它——跑得够久的一台机器 `%TEMP%` 里已经堆了近八百个 `nulya-tui-home-*` 目录。补一个 `process.on("exit", …)` 里的 `rmSync(scratchHome, {recursive:true, force:true})`，包一层 `try/catch` 吞掉失败：一次清理失败绝不该拖垮一次测试跑（Windows 上一个还攥着 handle 的子进程会让这次删除失败，下一次进程退出时再试）。文件顶部那段解释"为什么要隔离"的注释不用动——它说的是隔离本身，不是清理。
+
+**② `tui-state.json` 的 `session_with`（K8 新加，`/ext` Enter 写的常驻成员半张单子）与 `tui.toml` `[extensions] session_with`（T34：TUI 恒带的 `handoff` / `agent`，按精确版本解析）撞了同一个词——两个文件里两样几乎不相关的东西共用一个名字，读一遍代码先要分清"这一处是程序状态还是人写的设定"。改法是把 state 那半改名 `standing_with`：`tui_state.ts` 的 `sessionWith`/`rememberSessionWith` 随之改名 **`standingWithIds`/`rememberStandingWith`**——不叫 `standingWith`，因为 `extensions.ts` 早就用这个名字导出一个谓词（Lane T：这个包贡献的东西够不够格进 standing with 名单），两个不同的东西不能共享一个名字。`loadTuiState` 读**两个**键名一个版本期（`record["standing_with"] ?? record["session_with"]`，与 `mode` 那半认老 `auto` 同一先例），只写新名（`saveTuiState`）；调用点全部跟着改名——`ExtView.tsx` 的 `switchOn`/`switchOff`/`composedEverySession`、`App.tsx` 的 `sessionExtras`、`overlays.test.tsx` 的 `/ext marks a package that contributes a system prompt as a mode…`。`tui_state.ts` 里那段"Not to be confused with `tui.toml`'s `session_with`"的澄清注释随之删除——名字不再相同，没什么好澄清的了。`tui.toml` 自己的 `[extensions] session_with` 一个字没动（那是人写的设定，不在这次改名范围里），历史日志（K8/T1/T48/T50）里对 state 那半的旧称呼也没动——那些条目描述的是当时的名字，跟"老文件里的 `auto` 仍读成 `unsafe`"同一个先例：历史不因后来的改名而重写。
+
+**测试**：两处都是纯改名 + 一个 best-effort 清理，行为不变，没有新增断言。`bun test` 365 跑绿（隔离重跑 `overlays.test.tsx`/`extensions.test.ts`/`consumers.test.tsx`/`pins.test.ts` 时丢过一条无关的 lease 等待测试超时——`/sessions marks a session somebody else is driving as live`，单独重跑即绿，`project-nulya-tui-test-gotchas.md` 记过的既有类别）。`bun run typecheck` 干净。

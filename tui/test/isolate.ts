@@ -15,8 +15,19 @@
  * only changes what a spawn inherits by default. Set on purpose even when the
  * caller has one: the point is that no run can see the real home.
  */
-import { mkdtempSync } from "node:fs"
+import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-process.env["NULYA_HOME"] = mkdtempSync(join(tmpdir(), "nulya-tui-home-"))
+const scratchHome = mkdtempSync(join(tmpdir(), "nulya-tui-home-"))
+process.env["NULYA_HOME"] = scratchHome
+
+// Best effort: never let cleanup failure fail a test run (a spawned child
+// still holding a handle open on Windows, an already-gone directory, etc).
+process.on("exit", () => {
+  try {
+    rmSync(scratchHome, { recursive: true, force: true })
+  } catch {
+    // ignore
+  }
+})

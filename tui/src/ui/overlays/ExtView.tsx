@@ -73,7 +73,7 @@ import {
   type PinSources,
   type PinState,
 } from "../../pins.ts"
-import { rememberSessionPins, rememberSessionWith, sessionPins, sessionWith } from "../../state/tui_state.ts"
+import { rememberSessionPins, rememberStandingWith, sessionPins, standingWithIds } from "../../state/tui_state.ts"
 import { UsageTable } from "./UsageTable.tsx"
 import type { Workspace } from "../../nulya/bin.ts"
 import type { SessionHeader } from "../../nulya/ledger.ts"
@@ -406,7 +406,7 @@ export function ExtView(props: {
    * The kernel's own standing membership list (`[extensions] with`, DESIGN
    * §5.1), read from the same projection the pins come from. This front end
    * never writes it — its own standing list is `tui-state.json`'s
-   * `session_with` — but a package config already composes is one whose row
+   * `standing_with` — but a package config already composes is one whose row
    * must not read as "off".
    */
   const [configWith, setConfigWith] = createSignal<string[]>([])
@@ -588,7 +588,7 @@ export function ExtView(props: {
   /**
    * …and one that is a MEMBER of every session opened here, from any of the
    * three lists that can say so (K8): the kernel's own `[extensions] with`,
-   * this front end's `tui-state.json` `session_with` (what Enter writes), and
+   * this front end's `tui-state.json` `standing_with` (what Enter writes), and
    * `tui.toml`'s `session_with` (the packages it always brings, T42).
    *
    * Three sources and one question, because the row is drawn once. Which file
@@ -596,7 +596,7 @@ export function ExtView(props: {
    */
   const composedEverySession = (id: string) =>
     configWith().includes(id) ||
-    sessionWith(props.statePath).includes(id) ||
+    standingWithIds(props.statePath).includes(id) ||
     style.settings.extensions.session_with.includes(id)
   /** Its declared tools, as the stable ids a pin names. */
   /**
@@ -930,8 +930,8 @@ export function ExtView(props: {
     // §3b) — `derivedCommand` already gave it a `/<id>` below, and that is the
     // per-session way in this row's Enter means now.
     if (standingWith(entry)) {
-      const held = sessionWith(props.statePath)
-      if (!held.includes(entry.id)) rememberSessionWith([...held, entry.id], props.statePath)
+      const held = standingWithIds(props.statePath)
+      if (!held.includes(entry.id)) rememberStandingWith([...held, entry.id], props.statePath)
     }
     release(entry.id)
     props.onMembershipChanged?.()
@@ -984,8 +984,8 @@ export function ExtView(props: {
     // this list that has no `current` makes `session new` refuse outright
     // (`WithVersionNotFound`), so leaving it behind would be leaving a front
     // end that cannot open a session at all.
-    const held = sessionWith(props.statePath)
-    if (held.includes(entry.id)) rememberSessionWith(held.filter((id) => id !== entry.id), props.statePath)
+    const held = standingWithIds(props.statePath)
+    if (held.includes(entry.id)) rememberStandingWith(held.filter((id) => id !== entry.id), props.statePath)
     release(entry.id)
     props.onMembershipChanged?.()
     setNotice(

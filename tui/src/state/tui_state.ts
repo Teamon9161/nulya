@@ -76,12 +76,8 @@ export interface TuiState {
    * cost nothing and leave nothing in a file somebody else reads. The permanent
    * form is the kernel's own `[extensions] with` in config, which `nulya config
    * show` projects and this TUI never writes.
-   *
-   * Not to be confused with `tui.toml`'s `[extensions] session_with`, which is a
-   * human-written setting naming the packages this front end always brings
-   * (`handoff`, `agent`) and is resolved to an exact version each time.
    */
-  session_with?: string[]
+  standing_with?: string[]
   /**
    * Set once `edit` has been offered to an existing `session_pins` list — the
    * tool moved out of the kernel and into `std` after some people already had
@@ -132,9 +128,18 @@ export function loadTuiState(path = tuiStatePath()): TuiState {
       const list = record[key]
       if (Array.isArray(list)) state[key] = list.filter((s): s is string => typeof s === "string")
     }
-    for (const key of ["session_pins", "session_with"] as const) {
-      const list = record[key]
-      if (Array.isArray(list)) state[key] = list.filter((s): s is string => typeof s === "string")
+    const sessionPinsList = record["session_pins"]
+    if (Array.isArray(sessionPinsList)) {
+      state.session_pins = sessionPinsList.filter((s): s is string => typeof s === "string")
+    }
+    // `session_with` was this key's name until K8's rename to `standing_with`
+    // (S2, avoiding the collision with `extensions.ts`'s `standingWith`
+    // predicate) — a file written yesterday still has the old name. Read
+    // either for one version, folded into the new field; only `standing_with`
+    // is ever written back (`saveTuiState`).
+    const standingWithList = record["standing_with"] ?? record["session_with"]
+    if (Array.isArray(standingWithList)) {
+      state.standing_with = standingWithList.filter((s): s is string => typeof s === "string")
     }
     // `auto` was this mode's name until it was renamed to `unsafe`; the file
     // written yesterday still says it, and `normalizeMode` is the one place that
@@ -195,13 +200,13 @@ export function rememberSessionPins(pins: readonly string[], path = tuiStatePath
 }
 
 /** The `--with` list every `session new` from this TUI carries (K8). */
-export function sessionWith(path = tuiStatePath()): string[] {
-  return loadTuiState(path).session_with ?? []
+export function standingWithIds(path = tuiStatePath()): string[] {
+  return loadTuiState(path).standing_with ?? []
 }
 
-export function rememberSessionWith(ids: readonly string[], path = tuiStatePath()): void {
+export function rememberStandingWith(ids: readonly string[], path = tuiStatePath()): void {
   const state = loadTuiState(path)
-  state.session_with = [...ids]
+  state.standing_with = [...ids]
   saveTuiState(state, path)
 }
 

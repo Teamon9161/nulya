@@ -524,7 +524,7 @@ export function derivedCommand(
 
 /**
  * Does turning this package on in `/ext` also mean composing it — a standing
- * entry in `tui-state.json`'s `session_with`?
+ * entry in `tui-state.json`'s `standing_with`?
  *
  * `false` for a package that contributes a SYSTEM PROMPT (T1, ext-review-2
  * §3b): wearing that prompt in EVERY session this front end opens is almost

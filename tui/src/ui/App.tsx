@@ -33,7 +33,7 @@ import {
   rememberMode,
   rememberSessionPins,
   sessionPins,
-  sessionWith,
+  standingWithIds,
   type ModelPick,
 } from "../state/tui_state.ts"
 import {
@@ -1143,7 +1143,7 @@ export function App(props: AppProps) {
     // because it needs their pins before the session exists, while these follow
     // `current` exactly as the kernel's own `[extensions] with` does — so `/ext`
     // rolling one back with `a` is honoured without touching this list.
-    for (const id of sessionWith(props.statePath)) {
+    for (const id of standingWithIds(props.statePath)) {
       if (!withRefs.some((ref) => ref === id || ref.startsWith(`${id}@`))) withRefs.push(id)
     }
     if (missing.length > 0) setNotice(`${missing.join(" & ")} not composed in · /ext for what it said`)

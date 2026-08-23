@@ -21,7 +21,7 @@ import {
 } from "../src/ui/overlays/ExtView.tsx"
 import { displayWidth } from "../src/ui/columns.ts"
 import { listExtensions, readHeader } from "../src/nulya/files.ts"
-import { sessionPins, sessionWith } from "../src/state/tui_state.ts"
+import { sessionPins, standingWithIds } from "../src/state/tui_state.ts"
 import { App } from "../src/ui/App.tsx"
 import { StyleContext, createStyle, type Style } from "../src/render/theme.ts"
 import { FoldContext, createFoldStore } from "../src/state/folds.ts"
@@ -675,7 +675,7 @@ test("/ext: Enter turns an extension on and off, and both axes move together", a
  * The bug T31 fixed: `evolution`'s prompt was in front of every model on the
  * machine, and nothing on the screen said so. The bug T1 fixes is what T31's
  * own fix grew into (K8): Enter on a mode wrote it onto the STANDING
- * `session_with` list, so turning `plan` on meant every session from then on
+ * `standing_with` list, so turning `plan` on meant every session from then on
  * paid for its prompt — almost never what pressing Enter on a row was asking
  * for, so the switch had to carry a scary sentence just to say what it had
  * done. Enter still moves `current` in one keypress with no `y` — it just
@@ -727,7 +727,7 @@ test("/ext marks a package that contributes a system prompt as a mode, and Enter
       // T1, Enter must NOT write a standing membership entry for a mode. The
       // per-session `/house.style` command it just earned is `derivedCommand`
       // reading `current`, not this list.
-      expect(sessionWith(statePath)).not.toContain("house.style")
+      expect(standingWithIds(statePath)).not.toContain("house.style")
 
       setup.mockInput.pressEnter()
       await until(
@@ -739,7 +739,7 @@ test("/ext marks a package that contributes a system prompt as a mode, and Enter
       expect(off).toContain("versions all stay")
       // Still nothing on the standing list to take back — there was never
       // anything there to begin with.
-      expect(sessionWith(statePath)).not.toContain("house.style")
+      expect(standingWithIds(statePath)).not.toContain("house.style")
     } finally {
       setup.renderer.destroy()
     }

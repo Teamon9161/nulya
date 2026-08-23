@@ -74,7 +74,14 @@ zig build && cd tui && bun test && bun run typecheck
 
 ### Lane S
 
-（待开始）
+**完成**（sonnet，worktree，与 Lane W 并行）。三件小事，只碰 `tui/**` 与 `docs/tui.md`，内核零改动。
+
+- **S1**：`tui/test/isolate.ts:22-33` — scratch `NULYA_HOME` 现在在 `process.on("exit", …)` 里 `rmSync(scratchHome, {recursive:true, force:true})`（`try/catch` 吞掉失败，best effort）。文件顶部解释隔离理由的注释未动。
+- **S2**：`tui/src/state/tui_state.ts` 的 STATE 键 `session_with` 改名 `standing_with`（interface 字段 `:84`、`loadTuiState` 读两个键名一个版本期只写新名 `:131-143`、导出函数改名 `sessionWith`→`standingWithIds` / `rememberSessionWith`→`rememberStandingWith` `:194-201`，避开 `tui/src/extensions.ts` 的谓词 `standingWith`）；"Not to be confused with…" 澄清注释删除。调用点全部跟上：`tui/src/ui/overlays/ExtView.tsx`（import + 4 处调用 + 2 处注释）、`tui/src/ui/App.tsx`（import + 1 处调用）、`tui/test/overlays.test.tsx`（import + 2 处调用 + 1 处历史叙述性注释同步改名）、`tui/src/extensions.ts`（1 处注释）。`tui.toml` 的 `[extensions] session_with`（`state/settings.ts`）与它在 `pins.ts`/`handoff.ts`/`App.tsx`/`ExtView.tsx` 里的其余引用**一字未动**——grep 过每一处，确认是那个人写的设定而不是这个 state 键。`docs/tui.md` §11 里 K8/T1/T48/T50 历史日志对 state 那半的旧称呼也**没有**回填改名（与 `auto`→`unsafe` 那条同一先例：历史条目描述的是当时的名字）。
+- **S3**：`docs/tui.md` §7 两处 `autoActivatable` 残留都改了——TOML 样例里 `auto_activate` 那行内联注释（原 `**带 system prompt 的包除外**，T31`，现在说 `activate 只是移指针，T50`）与它下面那段散文（重写：activate 今天只移 `current` 指针、不改变 composition；进不进 session 是 `/ext` Enter 的 standing pins / standing with 两半决定，对模式包 Enter 永不写 standing with，T48/T50）。§11 里其余 8 处 `autoActivatable` 提及全在历史日志段落（T34/T37/T41/T46/T48 等），描述的是它存在时的行为，按惯例不改。
+- **旁及发现，未动**：同一段 TOML 样例里 `handoff = true` 那一行（`docs/tui.md:412`）与代码不符——T34 起 `[extensions] handoff` 已经是列表键 `session_with = ["handoff", "agent"]`，旧布尔键只在读的时候认（`withPackage`）。与 S3 认领的 `autoActivatable` 残留是两回事，超出这条任务的范围，留着给下一次经过这段文档的人（不是 Lane R 的 model-facing 文本复读范围，也不是 DESIGN/CLAUDE 残留）。
+
+**验收**：`zig build`（首次 worktree，成功）；`cd tui && bun run typecheck`（干净）；`bun test` 全量 365 pass / 0 fail（一次跑干净，无超时）；针对改动最集中的四个文件（`overlays.test.tsx` `extensions.test.ts` `consumers.test.tsx` `pins.test.ts`）单独重跑时丢过一条无关的 lease 等待测试超时（`/sessions marks a session somebody else is driving as live`，与 `standing_with` 改名无关），单独重跑该测试即绿——`project-nulya-tui-test-gotchas.md` 记过的既有类别。
 
 ### Lane W
 
