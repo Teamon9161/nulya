@@ -409,7 +409,7 @@ manifest_readonly = true    # 信一个 tool 自己声明的 `"readonly": true`�
 [extensions]                # T11
 sync_on_start = true        # 开屏时后台 build 各 store root 下的 draft（`nulya ext sync`）
 auto_activate = true        # 让那一趟把 `current` 指到它刚建出来的版本上（activate 只是移指针，T50）
-handoff       = true        # 每场 session 带上 handoff 包（`--with` + `--pin`，§5.8）
+session_with  = ["handoff", "agent"]  # 这个前端给它开的每个顶层 tab 额外带上的包（`--with` + `--pin`，§5.8 / §5.10）；旧的 `handoff = false` 仍认
 plugins       = true        # 代码层总开关（T40）：加载 trusted + 已激活/本场戴着的包的 `contributes.ui.tui.entry`
                             # false = 只剩声明层（commands / policy / 每个 tool 的 ui 照常，逐字节等于 T39 结束时）
 

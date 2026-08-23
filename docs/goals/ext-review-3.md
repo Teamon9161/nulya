@@ -45,6 +45,24 @@ stdout  {"jsonrpc":"2.0","id":"call","result":"<文件内容>"}       <文件内
 - **W4 · 文档**：DESIGN §7.1 / §7.3（两种 wire → 一种 + 一段"jsonrpc 为什么退场"）、§7.8 表格的 kind 列、CLAUDE.md 现状段与模块表 `protocol.zig` / `invoke.zig` 行、guide `SKILL.md`、各包 `main.zig` 顶部"Why compiled Zig"那段（理由从"要解析 JSON-RPC"改成真正的理由：regex / walker / 解析 `session step` 的 JSONL）。
 - **不做**：persistent runtime；streaming；改 `plain` 契约的任何字节。
 
+## 1b. Lane D · 删 jsonrpc 代码路径（opus，W 之后立刻；2026-08-23 拍板：不等版本期）
+
+W3 原定"等一个版本期再删"。拍板改为现在删：仓库内已无人说 jsonrpc，仓库外还没有人写过扩展，一个版本期保护不了任何人，而留着的是内核里一整条没有读者的路。
+
+### 1b.1 已定决策
+
+- **D1 · 只有一种 wire，所以没有 `wire` 字段。** 删 `manifest.Wire`、`Runtime.wire`、`wireOf`、`InvalidWire` 与相关单测。manifest 里的 `wire` 键从此是未知键：`parse` 记下写的值（`Manifest.legacy_wire: ?[]const u8`），`build_ext.noteLegacyShapes` 打一行——写 `"jsonrpc"` 的说"那种 wire 已经没有了，这个 runtime 会按 plain 被调用：stdin 是参数对象、stdout 原文是结果、退出码是成败——见 `nulya ext api protocol`"；写 `"plain"` 的说"这个键不再需要，plain 是唯一的 wire"。六个自带包的 manifest 与 `templates.zig` 的两个模板都删掉这一行。
+- **D2 · `protocol.zig` = 契约 + 契约里两条纯规则。** 删 `jsonrpc_version` / `method_tool_call` / `ToolCallRequest` / `ErrorBody` / `DecodedResponse` / `DecodeError` / `decodeResponse` / `stringField` / `compactValue` 与它们的单测；模块注释只剩 plain（jsonrpc 那一节整个删，不留"deprecated"——退场的理由留在 DESIGN §7.3 一段里，model-facing 文本不讲历史）。把 `invoke.zig` 里**两边都要遵守的纯规则**搬进来并带着单测：`normalizedArguments`（"没有参数就是 `{}`"）与 `NULYA_TOOL` / `NULYA_ARG_<k>` 的导出规则（`PlainEnv` + `isEnvSafeKey`，哪些键导出、NUL 跳过）——于是 `nulya ext api protocol` 打印的就是契约与它的实现，`invoke.zig` 只剩 spawn、捕获与失败文本。
+- **D3 · `invoke.zig`**：删 `invokeJsonRpc`、`request_id`、`Options.wire`、所有 jsonrpc 单测与只为它存在的 `invokeToolAllocSweep`；`invokeTool` 直接走 plain。`ToolInvocation` 与失败文本（`exit <code>` / `stderr:` / `stdout:`）一个字节不变（e2e 与 TUI `toolSaid` 都读它）。
+- **D4 · 调用链**：`tools.Binding.wire` 与 `initOwned` 的 `wire` 参数删；`composition.zig` / `cli/ext.zig` 的 `rt.wireOf()` 传参删；`environment.zig` 里凡是把 stdin 叫作"JSON-RPC request"的注释改成"这次调用的参数对象"（`request_json` 这个字段名若改成 `stdin_json` 就一起改到 `FakeEnv`，不改也行，但注释必须是真的）。`extensions/std/src/rpc.zig` 顶部残留的 jsonrpc 一句删。
+- **D5 · 测试**：`tests/e2e/support.zig` 的 `jsonrpc_main_zig` / `jsonRpcManifestJson` 改成 plain 夹具（`greetSource` 改写一个打印 greeting 的 plain `main`；`extension.zig` 的 `failing_main` 改成 stderr + `exit 1`）；`script_wire.zig` 里"老 jsonrpc wire 照绿"那条测试删；`extension.zig` / `ext_cli.zig` 里经 `protocol.decodeResponse` 断言的地方改成直接断言 stdout；`gate_pin.zig` 的 manifest 字符串删 `"wire":"plain"`；`tests/e2e.zig` 头注释。
+- **D6 · 文本**：`ext api manifest`（`cli/ext.zig`）删 `runtime.wire` 那句；DESIGN §7.1 / §7.3（"一种 wire"；jsonrpc 只留一段过去时的"曾经有、为什么退场"）、§7.8、§14；CLAUDE.md 模块表 `protocol.zig` / `invoke.zig` / `manifest.zig` 行与现状段（W 那条加"代码路径已删"）；guide `SKILL.md` 的 `runtime.wire` 那条删。
+- **不做**：`plain` 契约任何字节；persistent / streaming；`kernel_hash` 不动（kernel prompt 不碰）。
+
+### 1b.2 验收
+
+`zig build test`、`zig build e2e`、`zig build && cd tui && bun test`（TUI 经 `ext run` 跑真二进制，失败文本形状不能变）。
+
 ## 2. Lane R · model-facing 文本一致性复读（sonnet，在 W 之后）
 
 - **R1**：一个读者按模型会走的顺序从头读一遍——kernel prompt（`composition.zig` 常量）→ `nulya help` → `nulya ext api protocol` / `manifest` / `examples` → `extensions/guide/skills/guide/SKILL.md`——对照 DESIGN §5.1 / §7.1 / §7.2.1 / §14 **今天**的语义，列出每一处矛盾或过时（重点：`activation` / `permissions` / `policy.deny` 残留、`commands[].action` 对象形式、`ui` 按宿主、`--bare`、`[extensions] with`、`ext run` 形状、一种 wire），逐处修正。
