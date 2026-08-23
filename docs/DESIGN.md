@@ -100,7 +100,7 @@ task_finished    { task, exit_code, text }                              ← 后�
 
 **`task_finished` 与 `capability_note` 同 genre：跨进程到达的、关于环境的事实。** `shell {background:true}` 起的那条命令活得过起它的那个 step 进程（§6.1），结束时由它的 supervisor 把这条事件投进 session 的 inbox，写者在下一个 step 边界排干（§3.4），投影成又一条 user-role turn。`task` 是全名 `<session-id>/t<N>`、`exit_code` 是 supervisor 看到的直接子进程退出码、`text` 是模型读的全文；**只投影 `text`**（`task` / `exit_code` 是给读者与前端的结构化事实，与 note 的 `id` / `version` 同理——模型要读的东西已经在 `text` 里了）。落盘的行**必须两列都在**：缺任一列是 `CorruptLedger` 而不是默认值——"哪个任务"与"它怎么了"都不是从文本里派生得出来的。
 
-**为什么它不是 `tool_results`**：起任务的那个 call 已经有结果了（"started"），而一条 assistant batch ↔ 恰好一条匹配的 tool_results 是 §4 的不变量（`recordCompletedToolStats` 直接 assert 它）；wire 上也不允许——Anthropic 要求 `tool_result` 紧跟引用它的 `tool_use`，OpenAI 的 `role:"tool"` 同理，几轮之后补一条就是 400。**也不是 `user_text` + sentinel**：那样 ledger 会说"人说了这句话"，而 `session events` 与前端只能靠解析文本把它认回来——ledger 存的是事实，不是像事实的东西。第二个类似的 consumer（subagent 结束？）出现之前**不泛化成 `notice`**。
+**为什么它不是 `tool_results`**：起任务的那个 call 已经有结果了（"started"），而一条 assistant batch ↔ 恰好一条匹配的 tool_results 是 §4 的不变量（`recordCompletedToolStats` 直接 assert 它）；wire 上也不允许——Anthropic 要求 `tool_result` 紧跟引用它的 `tool_use`，OpenAI 的 `role:"tool"` 同理，几轮之后补一条就是 400。**也不是 `user_text` + sentinel**：那样 ledger 会说"人说了这句话"，而 `session events` 与前端只能靠解析文本把它认回来——ledger 存的是事实，不是像事实的东西。第二个类似的 consumer（subagent 结束？）出现之前**不泛化成 `notice`**。（2026-08-23 复核：TUI 今天的四种 sentinel——`<ext-note>`、approval note、plan 评论、ask 答案——装的都是**人**在屏幕上的输入、由包替人组装，所以它们是 user_text 是对的；下一个真正的"机器事实"consumer 出现时，加一种事件，不加第五种 sentinel。）
 
 **`calls[].args_json` 是模型实际产出的那些字节**，包括被 `max_tokens` 切断时的半截 JSON 前缀——ledger 记事实，不记"应该是什么"。把它变成可发给 provider 的东西是投影的事（`prompt.ToolCall`，§4）。
 
