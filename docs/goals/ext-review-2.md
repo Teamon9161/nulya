@@ -74,6 +74,22 @@
 - 不动 `readonly` / `audience` / `tools[].ui{render,panel}`。
 - 不动 plugin-api 的方法面（只改顶部注释）。
 
+## 3b. Lane T · TUI 收尾：`/ext` 一个动作一个意思 + 开屏一问（sonnet，K/C/M 合并之后，主工作树）
+
+来源：K/C/M 落地后对 **TUI 用户**的复盘——用户要懂的只该是"启动即就绪、`/ext` 开关、模式是一条斜杠命令、几个常用命令"，CLI 是模型与 driver 的面。复盘只剩两处与这句话不一致，都在 TUI，内核零改动。
+
+### 3b.1 已定决策
+
+- **T1 · `/ext` Enter = 让这个包可用，一个意思。** 今天 K8 的 `standingWith` 把贡献 system prompt 的包也写进 standing `session_with`，于是对 `plan` / `evolution` 按 Enter = 戴进每一场——几乎永远不是用户要的，所以才需要一句"后果"文案来吓人。改成：**贡献 system prompt 的包，Enter 只改 `current`**（于是 M4 派生的 `/<id>` 命令出现，按场戴），**永不写 standing with**；不贡献 prompt 的包照旧——tool 包 = pins，skill / commands / ui 包 = standing with。规则落在 `extensions.standingWith` 一处：`systemPrompts.length > 0 → false`，否则 `skills || commands || ui`。`switchOn` 对 prompt 包的 notice 改成 `` `<id>` on · /<id> opens a new tab wearing it for one session · Enter again takes the command away ``；`switchOff` 的 notice 去掉 "its system prompt no longer enters new sessions" 那句（它从来就不该进），改成 `` `<id>` off · /<id> is gone · versions all stay ``。`promptConsequence` 删除。`switchOff` 仍从 `session_with` 里移除该 id（处理这一改之前写进去的旧条目）。`mode` 列保留（信息：这个包是模式），它的说明文案改成"Enter 给它一条 `/<id>` 命令"。"一个模式常驻每一场"不在 TUI 里提供——那是 config `[extensions] with` 一行、一个罕见且明确的决定。`WithPicker` 不动。
+- **T2 · 开屏只问一次。** 今天 `tui/src/main.tsx` 先问 `.nulya/extensions`（`t` trust+build+activate / `s` 只 build / `n`），再问 `.nulya/agents`（`t` / `n`）——一个 checkout 两个问句。合成 **一个纯函数 `planCheckout(storePlan, agentsPlan)`**（放 `extensions.ts`，与 `planProjectStore` / `planProjectAgents` 并排）→ `{ kind: "none" } | { kind: "ask", text, choices, apply(answer) }`：两边都不问 → 不问；只有一边要问 → 那一边今天的问句原样；**两边都要问 → 一段文本列出扩展与 agent 定义，三个答案**：`t` = 信任两者（store：trust + build + activate；agents：trusted）· `s` = 只 build 扩展、两者都不信任 · `n` = 都不动。记录与今天相同（`rememberStoreAsked` / `rememberAgentsAnswer`），一问之后两边都算问过。`main.tsx` 的两个 `askAbout*` 合成一个 `askAboutCheckout`，读 key 的循环复用 `readAnswer` / `readKey` 现有代码。文案仍走 `choicesText`。
+- **T3 · 测试与文档。** `tui/test/extensions.test.ts`：`standingWith` 三种形状（prompt 包 false、skill 包 true、纯 tool 包 false）+ `planCheckout` 四种组合；`tui/test/overlays.test.tsx`（或 `ext` 那组）：对 prompt 包按 Enter 后 `session_with` **不含**它、notice 含 `/<id>`。`docs/tui.md` §11 加 **T50**（两件事一条）；CLAUDE.md 里 K 那条 "Enter 的后果：… standing with（包贡献了 skills / system_prompts / commands / ui 任一时）" 改成新规则；`docs/tui.md` §5 凡是描述开屏两问的句子改成一问。
+
+### 3b.2 不做
+
+- 不动内核、不动 `nulya ext` 任何动词。
+- `/ext` 的维护键（`a` / `p` / `s` / `d`）不动。
+- 不给 TUI 加"把模式常驻每一场"的入口。
+
 ## 4. 验收（每条 lane 自己跑，合并后我再跑一遍全套）
 
 ```bash
