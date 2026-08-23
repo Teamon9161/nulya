@@ -1509,11 +1509,16 @@ fn draftManifestAtPath(alloc: std.mem.Allocator, io: std.Io, arg: []const u8) !?
 
 /// `ext api` is a curated `nulya src` (PLAN §3.10): the wire-protocol topic prints
 /// the REAL `extension/protocol.zig`, so the ABI the model reads can never drift
-/// from the code that implements it. `permissions` and `examples` stay short notes
-/// (policy and CLI usage — not source that drifts).
+/// from the code that implements it. `manifest` and `examples` stay short notes
+/// (authority, the manifest's three tiers, and CLI usage — not source that drifts).
+///
+/// `permissions` was this topic's name while the manifest still had a
+/// `permissions` field. The field is gone and the topic is about the whole
+/// manifest, so the word moved; the old one keeps printing the same text for a
+/// version, because it is what everything written before this points at.
 fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     const topic = if (args.len >= 1) args[0] else "protocol";
-    if (std.mem.eql(u8, topic, "permissions")) {
+    if (std.mem.eql(u8, topic, "manifest") or std.mem.eql(u8, topic, "permissions")) {
         try printRaw(io,
             \\Authority — what an extension tool may do, honestly:
             \\
@@ -1566,36 +1571,40 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             \\  "the package did not say", never a default value: `tools[].readonly` (this
             \\  tool only reads, in the package's own words); `tools[].audience` (`"model"`
             \\  or `"driver"` — a closed pair, and an unrecognized word is refused rather
-            \\  than read as either one); `policy`, an approval-policy narrowing that
-            \\  applies while this package is a session member — `{"readonly", "deny",
-            \\  "ask"}`, with no `allow` key: a package can only narrow what a driver's
-            \\  approval policy already reads, never widen it, so writing one is refused
-            \\  outright; `permissions`, a filesystem/network/process claim, kept for
-            \\  readers and review — nothing acts on it yet.
+            \\  than read as either one); `policy`, `{"readonly": true}` — one narrowing a
+            \\  package can ask an approval policy for while it is a session member. There
+            \\  is no key that widens anything: a package that could add to an allow table
+            \\  would gain authority just by being composed in.
             \\
             \\  FRONT-END DECLARATIONS, open vocabularies: the kernel checks only the
             \\  shape, never the word, so a word this build has never heard of is simply
             \\  something the reader falls back on, never a build-time refusal: `commands`,
             \\  slash commands this package offers whoever drives a session — `{"name",
             \\  "description", "action"}`, `name` lowercase letters, digits and `-` only,
-            \\  `action` a verb (`"with"`, `"run <tool>"`, `"skill <ref>"` today, more
-            \\  later; the one shape the kernel DOES check is that a `"run <tool>"` command
-            \\  names a tool this SAME manifest declares); `tools[].ui`, `{"render",
-            \\  "panel"}` — a rendering hint for whoever draws this tool's calls, and a
-            \\  request that its latest call also show as a small standing status line
-            \\  above the input; `ui`, `{"entry", "api"}` — a front-end module a driver can
+            \\  `action` an object with exactly one key, the verb, whose value is the
+            \\  verb's argument or a bare `true` when it takes none: `{"with": true}`,
+            \\  `{"run": "<tool>"}`, `{"skill": "<ref>"}` today, more later; the one
+            \\  reference the kernel DOES follow is that a `run` command names a tool this
+            \\  SAME manifest declares; `tools[].ui`, `{"render", "panel"}` — a rendering
+            \\  hint for whoever draws this tool's calls, and a request that its latest
+            \\  call also show as a small standing status line above the input; `ui`, keyed
+            \\  by front end — `{"tui": {"entry", "api"}}` — a module that front end can
             \\  load, `entry` following the same path rule as a system prompt (it cannot
             \\  escape the package directory) and required to exist when the package is
             \\  built, `api` the plugin-host version (checked only for being a real number,
-            \\  never for being one this build recognizes).
+            \\  never for being one this build recognizes). A front end reads its own key
+            \\  and ignores the rest; a package with no key for it simply has no module
+            \\  there.
             \\
-            \\  Wall clock is enforced on the model's tool face only: a call an activated,
-            \\  pinned or worn package puts in front of a model is killed at 30s unless the
-            \\  manifest's `timeout_ms` says otherwise (600s maximum); `shell` there
-            \\  defaults to 120s and accepts up to 600s. `nulya ext run` applies no timeout
-            \\  of its own — it is a driver's own process — but takes an optional
-            \\  `--timeout-ms` for a driver that wants one. A timeout, wherever it applies,
-            \\  kills the whole process tree and returns whatever was captured.
+            \\  Wall clock is enforced on the model's tool face only: a call a pinned
+            \\  package puts in front of a model is killed at 30s unless the manifest's
+            \\  `timeout_ms` says otherwise (600s maximum); `shell` there defaults to 120s
+            \\  and accepts up to 600s. That field means nothing anywhere else, so a tool
+            \\  that is only ever called by a driver has no reason to write one: `nulya ext
+            \\  run` applies no timeout of its own — it is a driver's own process — but
+            \\  takes an optional `--timeout-ms` for a driver that wants one. A timeout,
+            \\  wherever it applies, kills the whole process tree and returns whatever was
+            \\  captured.
             \\
             \\  A workspace store (.nulya/extensions) that arrived with a checkout takes
             \\  part in no session until `nulya ext trust` records it once on this
@@ -1644,9 +1653,9 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             \\  # A slash command, a narrowed policy, and a front-end module — all just
             \\  # declared; a driver reads them, the kernel never runs any of it.
             \\  #   "contributes": {
-            \\  #     "commands": [{"name": "plan", "description": "…", "action": "with"}],
+            \\  #     "commands": [{"name": "plan", "description": "…", "action": {"with": true}}],
             \\  #     "policy": {"readonly": true},
-            \\  #     "ui": {"entry": "tui/panel.ts", "api": 1}
+            \\  #     "ui": {"tui": {"entry": "tui/panel.ts", "api": 1}}
             \\  #   }
             \\
             \\  # Afterwards: say how it went, so later passes have evidence.
@@ -1668,7 +1677,9 @@ test "every manifest parse/validate error is a draft fault; a host fault is not"
         error.NoContributions,           error.InvalidToolName,    error.ReservedToolName,
         error.DuplicateToolName,         error.InvalidTimeout,     error.InvalidAudience,
         error.InvalidSkillPath,          error.DuplicateSkillPath, error.InvalidSystemPromptPath,
-        error.DuplicateSystemPromptPath,
+        error.DuplicateSystemPromptPath, error.InvalidCommandName, error.DuplicateCommandName,
+        error.InvalidCommandAction,      error.UnknownCommandTool, error.InvalidUiHost,
+        error.InvalidUiEntry,            error.InvalidUiApi,
     }) |err| {
         std.testing.expect(isManifestFault(err)) catch |e| {
             std.debug.print("{s} should be reported as a bad manifest\n", .{@errorName(err)});

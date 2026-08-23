@@ -1,6 +1,7 @@
 /**
- * The plugin host: loading a package's `contributes.ui` module and giving it
- * the one narrow API it gets (tui-plugin U3, contract in `tui/plugin-api.d.ts`).
+ * The plugin host: loading a package's `contributes.ui.tui` module and giving
+ * it the one narrow API it gets (tui-plugin U3, contract in
+ * `tui/plugin-api.d.ts`).
  *
  * ── WHAT LOADING IS, AND IS NOT ───────────────────────────────────────────
  *
@@ -67,8 +68,8 @@ import type {
 
 /**
  * The API major version this build implements. A package declares its own in
- * `contributes.ui.api`; anything else is warn-and-skip (D10). One number, and
- * the reason it is a number rather than a word set is in the contract file.
+ * `contributes.ui.tui.api`; anything else is warn-and-skip (D10). One number,
+ * and the reason it is a number rather than a word set is in the contract file.
  */
 export const plugin_api_version = 1
 
@@ -281,6 +282,8 @@ export async function pluginCandidates(
   const out: PluginCandidate[] = []
   for (const one of wanted) {
     const contributions = await readContributions(ws, one.id, one.version, roots)
+    // No entry for this front end is an ordinary answer, not a warning: the
+    // manifest keys `ui` by host, and a package may ship modules for others.
     if (!contributions.ui) continue
     const dir = packageDirOf(roots, one.id, one.version)
     if (dir === null) continue

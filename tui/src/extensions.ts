@@ -352,6 +352,39 @@ export function pinsOf(what: Pick<Contributions, "id" | "tools" | "driverTools">
  * that only moved the pointer would turn a mode "on" and change nothing a
  * person could see.
  */
+/**
+ * The `/<id>` a package that contributes a SYSTEM PROMPT gets for free — "wear
+ * this for the next session" — or null when it neither is one nor can be named
+ * that way (M4).
+ *
+ * The manifest does not have to declare it. A mode's whole shape already says
+ * what typing its name would do: `--with <id>` is the only sensible verb for a
+ * package whose contribution is a prompt, and a `commands` entry saying exactly
+ * that was ceremony every such package had to copy. What a package still
+ * declares is anything OTHER than the obvious — `ask` is a tool package, so
+ * `/ask` is a real claim it makes; `plan` is a mode, so `/plan` needs no line
+ * in its manifest.
+ *
+ * Null when the id is not a command name (`web.search` — command names are
+ * `[a-z0-9-]+`, ids are wider): a name a person cannot type is not a command.
+ * Built-ins are not checked here — `packageCommands.resolve` drops a package
+ * row a built-in already holds, and this row goes through it like any other.
+ */
+export function derivedCommand(
+  what: Pick<Contributions, "id" | "systemPrompts" | "commands">,
+): PackageCommand | null {
+  if (what.systemPrompts.length === 0) return null
+  if (!/^[a-z0-9-]+$/.test(what.id)) return null
+  // The package's own entry of the same name wins: a declaration is more
+  // specific than a derivation, and it may well mean something else by it.
+  if (what.commands.some((command) => command.name === what.id)) return null
+  return {
+    name: what.id,
+    description: `a new tab wearing ${what.id}'s prompt; nothing is activated`,
+    action: { with: true },
+  }
+}
+
 export function standingWith(
   what: Pick<Contributions, "skills" | "systemPrompts" | "commands" | "ui">,
 ): boolean {
@@ -663,6 +696,10 @@ export async function activeVersionOf(ws: Workspace, id: string): Promise<string
  * command that cannot work. Every other root (the user's own, or an
  * `extensions.paths` addition) needs no such gate (DESIGN §9, physics #6).
  *
+ * Each package also gets whatever `derivedCommand` says its shape already
+ * implies — `/<id>` for a mode — after its own declarations, so a package that
+ * declared the same name keeps it.
+ *
  * Returned in `ext list`'s own order — root by root, in kernel search order —
  * which is what lets a caller resolve a same-name collision between two
  * DIFFERENT packages by "first one in this list wins" (D8) without this
@@ -687,6 +724,10 @@ export async function packageCommands(
     if (entry.root === workspace_root_spec && !trusted) continue
     const contributions = await readContributions(ws, entry.id, entry.current, roots)
     for (const command of contributions.commands) out.push({ id: entry.id, command })
+    // A mode's own name, which it never had to declare (`derivedCommand`).
+    // Last, so the package's own entries keep their scan-order positions.
+    const derived = derivedCommand(contributions)
+    if (derived) out.push({ id: entry.id, command: derived })
   }
   return out
 }

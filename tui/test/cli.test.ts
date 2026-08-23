@@ -188,7 +188,6 @@ describe("the slow loop", () => {
         schema: "nulya.extension/v2",
         id: "reviewer",
         contributes: { system_prompts: ["prompts/reviewer.md"] },
-        permissions: { fs: [], network: [], process: [] },
       }),
     )
     await Bun.write(`${draft}/prompts/reviewer.md`, "You are reviewing, not writing.\n")

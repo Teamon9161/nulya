@@ -10,7 +10,7 @@
 import { expect, test } from "bun:test"
 import {
   dedupe,
-  isDeprecatedWearAction,
+  deprecatedActionNote,
   packageCompletions,
   parseAction,
   resolve,
@@ -19,28 +19,40 @@ import {
   type PackageCommandRow,
 } from "../src/packageCommands.ts"
 
-test("parseAction reads the three verbs, keeping the run/skill target verbatim", () => {
+test("parseAction reads the three verbs out of the object, keeping the run/skill target verbatim", () => {
+  expect(parseAction({ with: true })).toEqual({ kind: "with" })
+  expect(parseAction({ run: "propose" })).toEqual({ kind: "run", tool: "propose" })
+  expect(parseAction({ skill: "std/note" })).toEqual({ kind: "skill", ref: "std/note" })
+  // Whitespace inside a target is trimmed; the verb is a key, so it has none.
+  expect(parseAction({ run: "  propose  " })).toEqual({ kind: "run", tool: "propose" })
+  // The current spelling has nothing to warn about.
+  expect(deprecatedActionNote({ with: true })).toBeNull()
+  expect(deprecatedActionNote({ run: "propose" })).toBeNull()
+})
+
+test("parseAction: the pre-M3 string form is folded by splitting at the first space, and named in a warning", () => {
   expect(parseAction("with")).toEqual({ kind: "with" })
   expect(parseAction("run propose")).toEqual({ kind: "run", tool: "propose" })
   expect(parseAction("skill std/note")).toEqual({ kind: "skill", ref: "std/note" })
-  // Whitespace around the verb itself is trimmed; the target keeps its own.
   expect(parseAction("  with  ")).toEqual({ kind: "with" })
+  expect(deprecatedActionNote("with")).toContain("object")
+  expect(deprecatedActionNote("run propose")).toContain("object")
 })
 
-test("parseAction: `wear` is the pre-D4 spelling, folded into the same `with` kind for one release", () => {
+test("parseAction: `wear` is the pre-D4 spelling of `with`, folded into the same kind in either shape", () => {
   expect(parseAction("wear")).toEqual({ kind: "with" })
-  expect(parseAction("  wear  ")).toEqual({ kind: "with" })
-  expect(isDeprecatedWearAction("wear")).toBe(true)
-  expect(isDeprecatedWearAction("  wear  ")).toBe(true)
-  expect(isDeprecatedWearAction("with")).toBe(false)
-  expect(isDeprecatedWearAction("run propose")).toBe(false)
+  expect(parseAction({ wear: true })).toEqual({ kind: "with" })
+  expect(deprecatedActionNote({ wear: true })).toContain("with")
 })
 
-test("parseAction: a word this build does not know is `unknown`, verbatim — an open vocabulary (D1)", () => {
-  expect(parseAction("review changes")).toEqual({ kind: "unknown", word: "review changes" })
+test("parseAction: a verb this build does not know is `unknown`, verbatim — an open vocabulary (D1)", () => {
+  expect(parseAction({ review: "changes" })).toEqual({ kind: "unknown", word: "review" })
+  expect(parseAction("review changes")).toEqual({ kind: "unknown", word: "review" })
+  expect(parseAction({})).toEqual({ kind: "unknown", word: "" })
   expect(parseAction("")).toEqual({ kind: "unknown", word: "" })
-  // `run`/`skill` with nothing after the verb are not the closed shape either —
-  // there is no tool or ref to act on, so this is the reader's fallback too.
+  // `run`/`skill` with no target are not the closed shape either — there is no
+  // tool or ref to act on, so this is the reader's fallback too.
+  expect(parseAction({ run: true })).toEqual({ kind: "unknown", word: "run" })
   expect(parseAction("run")).toEqual({ kind: "unknown", word: "run" })
   expect(parseAction("skill")).toEqual({ kind: "unknown", word: "skill" })
 })

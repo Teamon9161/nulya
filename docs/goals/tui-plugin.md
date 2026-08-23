@@ -145,3 +145,11 @@
 - **偏离**：① 契约写"tui 模块 … `done` 后 widget 亮 'plan ready · Enter to review'"——按 §6 U3 的提醒落成了「panel 在 propose 的 `tool end` 上自己打开」+ 一条 `/plan-review` 兜底命令，并且 **plan 故意不注册 widget**（它已经声明了 `todo{panel: true}`，代码 widget 会把那一行顶掉，两层说同一句话就是重复）。② 面板里的评论**只活在插件内存**（契约如此）：进程重开、或换一场 session，评论就没了；已经 `r` 出去的那一条在 ledger 里。③ 插件只从 `observe` 学到计划，而 `onEvent` 不重放历史（`state.hydrate` 不走 `onLine`），所以**重开一场旧 session，`/plan-review` 会说"这一轮还没有人提计划"**——计划本身仍在那张 `propose` 卡上读得到。要让它重放，最小做法是给 `observe` 一条历史回灌，那是下一次真的有人抱怨时的事。
 - **测试结果**：`bun test` **348/348**（37 个文件；新增 `test/consumers.test.tsx` 四条，其余原样绿——整套跑完时 `test/tasks.test.ts` 的 "an observer never steps" 撞过一次高负载超时，隔离重跑 6 s 通过，是 `project-nulya-tui-test-gotchas.md` 记过的已知类别），`bunx tsc --noEmit` 干净（`tsconfig.include` 加了 `../extensions/*/tui`，所以两个包的插件模块被按契约检查），`zig build test` 461 pass 与 `zig build e2e` **73/73** 全绿（e2e 新增一条包级测试；`ext seed` 的计数 6 → 8 同步了三处）。
 
+
+**2026-08-23 · 形状变更（ext-review-2 Lane M）。** 本契约描述的四个声明位有三个换了写法，语义一个都没变；U1–U4 的决定（D1 / D2 / D3 / D10 / D12）原样成立，改的只是它们在 JSON 里长什么样。
+
+- **D1 的 `action`**：字符串小语言 → **恰一个键的对象**，`{"with": true}` / `{"run": "<tool>"}` / `{"skill": "<ref>"}`。键是动词、值是它的参数（没有参数就写 `true`）。开放词表与「`run` 的包内引用 validate 查」一字未改；新增的唯一规则是「恰一个键」（`InvalidCommandAction`）——零个或两个动词说不出敲这个命令做什么。旧字符串认一个版本期（`parse` 按第一个空格折成同一对字段，`ext build` 提一句）。
+- **D1/D10 的 `contributes.ui`**：`{entry, api}` → **按宿主键** `{"tui": {entry, api}}`。内核的 schema 不该点名一个具体前端；host 是开放词表 `[a-z0-9-]+`，一个前端读自己那一条，没有就是「这个包对我没有插件」，不是警告。`validateUi` 现在查**每一条**的文件在不在（一个版本要服务所有宿主）。旧的平铺形认一个版本期，读成 `tui` 那一条。`tui/plugin-api.d.ts` 顶部随之改了两处说法。
+- **D2/D3 的 `policy`**：`{readonly?, deny?, ask?}` → **`{readonly?}`**。D3 的论证（包只能收窄，physics #6）不变，但它不再需要一条规则来守：一个可选 bool 说不出任何拓宽的话，于是 `allow` 只是未知键，`PolicyAllowNotPermitted` 与 `InvalidPolicyEntry` 都没有了检查对象。删两张表的另一半理由是它们没有 `readonly` 答不出的用例——包点名某几个 tool 塞进人的审批表，是同一个天花板更弱的写法。TUI 侧 `poolPolicy` 只剩 `readonlyBy`，`withPolicy` 删除（`decide` 拿到的就是人自己的三张表）。
+- **`contributes.commands` 对一个 mode 不再必要**：贡献 system prompt 的包自动得到 `/<id>` = with（`extensions.derivedCommand`）。所以 `extensions/plan` 的 `commands` 条目删了，`extensions/ask` 的留着——它不贡献 prompt，`/ask` 是它自己的主张。包自己声明的同名条目优先，内建名永不被夺走。
+- **`permissions` 整个字段删除**（不属本契约，但 §1 的表里提到过）：零读者，等沙箱定形状（DESIGN §7.2.1 / PLAN §3.8）。

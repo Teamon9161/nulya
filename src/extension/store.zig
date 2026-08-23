@@ -265,8 +265,8 @@ pub const Store = struct {
 /// fault instead of being treated as a broken extension.
 pub fn isExtensionFault(err: anyerror) bool {
     // BOTH manifest sets, not just `ValidateError`: `ParseError` carries
-    // manifest-shape refusals of its own (`PolicyAllowNotPermitted` arrived
-    // the same day this reflection did), and hand-copying its members here
+    // manifest-shape refusals of its own (a mistyped field is as much a broken
+    // draft as one that fails a rule), and hand-copying its members here
     // would be the drift this function was rewritten to end. Its one
     // non-manifest rider, `OutOfMemory` (via `Allocator.Error`), is skipped
     // below — the doc comment's host-fault rule.
@@ -351,7 +351,7 @@ fn validateBuiltVersion(self: Store, alloc: std.mem.Allocator, id: []const u8, v
 
 fn writeBuiltVersion(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, id: []const u8, marker: []const u8) ![]u8 {
     const manifest_bytes = try std.fmt.allocPrint(alloc,
-        \\{{"schema":"nulya.extension/v2","id":"{s}","runtime":{{"entry":"bin/demo"}},"contributes":{{"tools":[{{"name":"greet","input":{{}}}}],"skills":[]}},"permissions":{{}}}}
+        \\{{"schema":"nulya.extension/v2","id":"{s}","runtime":{{"entry":"bin/demo"}},"contributes":{{"tools":[{{"name":"greet","input":{{}}}}],"skills":[]}}}}
     , .{id});
     defer alloc.free(manifest_bytes);
     const source_bytes = try std.fmt.allocPrint(alloc, "pub fn main() void {{}} // {s}\n", .{marker});

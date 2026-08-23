@@ -37,7 +37,8 @@ help` in PowerShell. Below, `nulya` means whichever of the two applies.
   one file with its test blocks stripped, `--tests` keeps them. There is no
   filter flag — pipe it: `nulya src | grep session`.
 - `nulya ext api` prints the real tool wire-protocol source; `nulya ext api
-  permissions` the authority model; `nulya ext api examples` worked sequences.
+  manifest` what a manifest may say and who reads it; `nulya ext api examples`
+  worked sequences.
 - `nulya config show` (add `--json`) — effective profiles, whether each
   credential is usable right now, the model catalog, the pinned tools and
   `max_tools`, and the config paths in use. Never a secret.
@@ -109,7 +110,7 @@ printf 'hello %s\n' "${NULYA_ARG_name:-world}"
 - `contributes.system_prompts[]` — files that join the system blocks of every
   session this package is a member of. Which sessions those are is not the
   package's to say: see the two axes below.
-- `nulya ext api permissions` lists every other field, grouped by who reads it.
+- `nulya ext api manifest` lists every other field, grouped by who reads it.
 
 A tool receives its arguments, a working directory and a sanitized environment
 — never the conversation; it cannot read or append to the session. On the

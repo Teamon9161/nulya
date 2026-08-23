@@ -116,39 +116,30 @@ export interface ApprovalContext {
  * A composition's `contributes.policy` narrowing, folded into one answer
  * (DESIGN §7.2.1, tui-plugin D2/D3).
  *
- * `deny`/`ask` are POOLED across every member that declared a policy — a
- * package can only narrow (never `allow`, D3's own parse-time rule), so
- * pooling several members' entries together is still only ever a narrowing,
- * the same way `mergeProject`'s config layers only ever tighten. `readonlyBy`
- * names which member(s) claimed `readonly: true`, because that is what makes
- * the gate's eventual deny note legible — "the read-only policy of `plan`"
- * rather than an unexplained refusal.
+ * One question, because the manifest now asks one: which member(s) claimed
+ * `readonly: true`. Naming them is what makes the gate's eventual deny note
+ * legible — "the read-only policy of `plan`" rather than an unexplained
+ * refusal — and it is the whole reason this is a list of ids rather than a
+ * bool.
+ *
+ * There were `deny`/`ask` lists here too, pooled across members and merged
+ * into `ApprovalRules` before `decide` read them. They went with the manifest
+ * fields: `readonly` already answers the case that existed, and a package
+ * naming individual tools in a person's approval tables was a second, weaker
+ * spelling of the ceiling this one sets.
  */
 export interface CompositionPolicy {
-  deny: string[]
-  ask: string[]
   readonlyBy: string[]
 }
 
-export const no_policy: CompositionPolicy = { deny: [], ask: [], readonlyBy: [] }
+export const no_policy: CompositionPolicy = { readonlyBy: [] }
 
 export function poolPolicy(contributions: readonly Pick<Contributions, "id" | "policy">[]): CompositionPolicy {
-  const deny: string[] = []
-  const ask: string[] = []
   const readonlyBy: string[] = []
   for (const c of contributions) {
-    if (!c.policy) continue
-    for (const entry of c.policy.deny) if (!deny.includes(entry)) deny.push(entry)
-    for (const entry of c.policy.ask) if (!ask.includes(entry)) ask.push(entry)
-    if (c.policy.readonly === true) readonlyBy.push(c.id)
+    if (c.policy?.readonly === true) readonlyBy.push(c.id)
   }
-  return { deny, ask, readonlyBy }
-}
-
-/** `ApprovalRules` with a composition's pooled `deny`/`ask` entries merged in (tui-plugin D3) — `decide` itself takes no new parameter. */
-export function withPolicy(rules: ApprovalRules, policy: CompositionPolicy): ApprovalRules {
-  if (policy.deny.length === 0 && policy.ask.length === 0) return rules
-  return { ...rules, deny: [...rules.deny, ...policy.deny], ask: [...rules.ask, ...policy.ask] }
+  return { readonlyBy }
 }
 
 /** The `command` a `shell` call carries, or null for anything else. */

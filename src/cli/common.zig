@@ -198,7 +198,7 @@ pub const ext_usage =
     \\  nulya ext prune [--user] [<id>] [--dry-run]       delete the versions `current` does not name
     \\  nulya ext list | inspect <id>[@<ver>] | <path>     every extension, or one manifest: the version in effect, an exact one, or a draft named by path
     \\  nulya ext trust                                   allow this workspace's store once, if it came with a checkout
-    \\  nulya ext api [protocol|permissions|examples]     the tool wire protocol, the authority model, worked commands
+    \\  nulya ext api [protocol|manifest|examples]        the tool wire protocol, what a manifest may say, worked commands
     \\  --user acts on the user store, which every workspace on this machine sees
     \\
 ;

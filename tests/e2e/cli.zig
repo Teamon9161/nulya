@@ -100,7 +100,7 @@ test "cli help: help / --help / -h print the same usage covering every verb fami
     try std.testing.expect(std.mem.indexOf(u8, bad_err, "nulya help") != null);
 }
 
-test "cli ext api: permissions and examples carry no document citations and walk script init -> build -> run -> activate -> --with/--pin -> outcome" {
+test "cli ext api: manifest and examples carry no document citations and walk script init -> build -> run -> activate -> --with/--pin -> outcome" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -113,21 +113,30 @@ test "cli ext api: permissions and examples carry no document citations and walk
     defer tmp.cleanup();
     const ws = tmp.dir;
 
-    const perms = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "api", "permissions" });
+    const perms = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "api", "manifest" });
     defer alloc.free(perms.stdout);
     try std.testing.expectEqual(@as(u8, 0), perms.code);
-    // Today's authority, not a version-stamped note: the same authority as
-    // shell, the sanitized child environment, the two variables that ARE passed,
-    // the declarative-only manifest field, the enforced clock, the store gate.
+    // Today's authority and today's manifest, not a version-stamped note: the
+    // same authority as shell, the sanitized child environment, the two
+    // variables that ARE passed, one field from each declaration tier, the
+    // enforced clock, the store gate.
     for ([_][]const u8{
-        "shell",      "NULYA_EXE", "NULYA_SESSION", "permissions",
-        "timeout_ms", "600",       "ext trust",
+        "shell",     "NULYA_EXE", "NULYA_SESSION", "readonly",
+        "commands",  "ui",        "timeout_ms",    "600",
+        "ext trust",
     }) |needle| {
         std.testing.expect(std.mem.indexOf(u8, perms.stdout, needle) != null) catch |err| {
-            std.debug.print("`ext api permissions` never mentions '{s}'\n", .{needle});
+            std.debug.print("`ext api manifest` never mentions '{s}'\n", .{needle});
             return err;
         };
     }
+
+    // `permissions` was this topic's name; it still prints the same screen, so
+    // everything written against the old word keeps working for a version.
+    const alias = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "api", "permissions" });
+    defer alloc.free(alias.stdout);
+    try std.testing.expectEqual(@as(u8, 0), alias.code);
+    try std.testing.expectEqualStrings(perms.stdout, alias.stdout);
 
     const examples = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "api", "examples" });
     defer alloc.free(examples.stdout);

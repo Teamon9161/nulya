@@ -65,6 +65,9 @@ function extensionDir(id: string): string {
  * deliberately outside `src/`: a script package's whole `src/` tree is already
  * collected into the snapshot, and putting the module there would ask whether
  * one file can be collected twice — a question no fixture needs to raise.
+ *
+ * The manifest keys `contributes.ui` by front end, so the caller gives the one
+ * entry and this writes it under `tui` — the host key this build reads.
  */
 function writePackage(
   id: string,
@@ -74,7 +77,7 @@ function writePackage(
 ): void {
   const dir = extensionDir(id)
   mkdirSync(join(dir, "tui"), { recursive: true })
-  const contributes = { ...(ui ? { ui } : {}), ...((over["contributes"] as object) ?? {}) }
+  const contributes = { ...(ui ? { ui: { tui: ui } } : {}), ...((over["contributes"] as object) ?? {}) }
   writeFileSync(
     join(dir, "extension.json"),
     JSON.stringify({

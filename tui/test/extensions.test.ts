@@ -26,6 +26,7 @@ import {
   adoptBundled,
   answerFor,
   builtContributions,
+  derivedCommand,
   describeDrafts,
   draftColumn,
   failedIds,
@@ -40,7 +41,7 @@ import {
   summarize,
   syncRoot,
 } from "../src/extensions.ts"
-import { modelTools, readHeader } from "../src/nulya/files.ts"
+import { modelTools, readHeader, type PackageCommand } from "../src/nulya/files.ts"
 import { default_settings, loadSettings, withPackage } from "../src/state/settings.ts"
 import { draftHelp } from "../src/ui/overlays/ExtView.tsx"
 import { tempWorkspace, type TempWorkspace } from "./support.ts"
@@ -424,12 +425,51 @@ test("only a package with something a member alone can give gets a standing with
   // A skill lands in the catalog the same way, and so do a slash command and a
   // front-end module — none of them has a pin to arrive by.
   expect(standingWith(what({ skills: ["skills/guide"] }))).toBe(true)
-  expect(standingWith(what({ commands: [{ name: "plan", description: "", action: "with" }] }))).toBe(true)
+  expect(standingWith(what({ commands: [{ name: "plan", description: "", action: { with: true } }] }))).toBe(true)
   expect(standingWith(what({ ui: { entry: "tui/plan.ts", api: 1 } }))).toBe(true)
 
   // A pure tool package: `compact`, `handoff`, `ask`. Nothing here needs an
   // entry, because a pin brings the package in at `current` all by itself.
   expect(standingWith(what())).toBe(false)
+})
+
+/**
+ * A mode's own `/<id>`, which it never has to declare (M4).
+ *
+ * `--with <id>` is the only thing typing a prompt package's name could mean, so
+ * every such package used to copy the same three-line `commands` entry into its
+ * manifest to say it. What a package still declares is anything other than the
+ * obvious.
+ */
+test("a package that contributes a system prompt gets `/<id>` for free; anything else has to ask", () => {
+  const what = (over: Partial<Parameters<typeof derivedCommand>[0]> = {}) => ({
+    id: "plan",
+    systemPrompts: ["prompts/plan.md"],
+    commands: [] as PackageCommand[],
+    ...over,
+  })
+
+  expect(derivedCommand(what())).toEqual({
+    name: "plan",
+    description: "a new tab wearing plan's prompt; nothing is activated",
+    action: { with: true },
+  })
+
+  // A tool package is not a mode: `/ask` is a real claim `ask` makes, and it
+  // makes it in its manifest.
+  expect(derivedCommand(what({ id: "ask", systemPrompts: [] }))).toBeNull()
+
+  // The package's own entry of the same name wins — a declaration is more
+  // specific than a derivation, and may well mean something else by it.
+  expect(
+    derivedCommand(what({ commands: [{ name: "plan", description: "run it instead", action: { run: "propose" } }] })),
+  ).toBeNull()
+  // A DIFFERENT name it declares changes nothing.
+  expect(derivedCommand(what({ commands: [{ name: "review", description: "", action: { with: true } }] }))).not.toBeNull()
+
+  // An id a person cannot type after `/` is not a command name (`[a-z0-9-]+`).
+  expect(derivedCommand(what({ id: "web.search" }))).toBeNull()
+  expect(derivedCommand(what({ id: "My_Mode" }))).toBeNull()
 })
 
 test("what a mode's switch says, in both directions", () => {

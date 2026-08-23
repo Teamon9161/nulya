@@ -16,9 +16,10 @@
 //! That is what makes "the second tool is created by Nulya itself" a running
 //! demonstration rather than a diagram.
 //!
-//! `permissions` is in neither: the kernel parses the field but has no reader
-//! for it (DESIGN §9), and a template is copied far more often than it is read,
-//! so an empty declaration nobody enforces would propagate as ceremony.
+//! `permissions` is in neither, and no longer in the schema either: it was a
+//! claimed footprint the kernel parsed and never read (DESIGN §9), and a
+//! template is copied far more often than it is read, so an empty declaration
+//! nobody enforces would have propagated as ceremony.
 
 const std = @import("std");
 

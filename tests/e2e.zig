@@ -44,7 +44,7 @@
 //! child, control lines on stdout and the step's `--stream` protocol on stderr.
 //!
 //! And the self-description entry (guide): `nulya help` printing one screen
-//! that every bare verb family is a strict substring of, `ext api permissions`
+//! that every bare verb family is a strict substring of, `ext api manifest`
 //! / `examples` stating today's authority and a worked path with no document
 //! citations anywhere the model can read, a fresh session's kernel system block
 //! naming NULYA_EXE / `nulya help` / `nulya src`, and the repo's own

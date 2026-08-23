@@ -44,7 +44,6 @@ import {
   normalizeMode,
   poolPolicy,
   summarize as describeCall,
-  withPolicy,
   type GateRequest,
   type PermissionMode,
 } from "../approvals.ts"
@@ -89,7 +88,7 @@ import {
 import { builtin_names } from "../commands.ts"
 import {
   createPackageCommandTable,
-  isDeprecatedWearAction,
+  deprecatedActionNote,
   packageCompletions,
   parseAction,
   resolve as resolvePackageCommands,
@@ -1273,21 +1272,21 @@ export function App(props: AppProps) {
 
   /**
    * A member package's `contributes.policy` narrowing, pooled (tui-plugin
-   * D2/D3): every member's `deny`/`ask` entries and which of them, if any,
-   * claimed `readonly: true`. Read from the frozen composition — for a
-   * SessionTab that is already `contributions()`, populated before the first
-   * step can run (`state/tabs.ts` `hydrate`/`ready`), so there is no race to
-   * guard against here.
+   * D2/D3): which members, if any, claimed `readonly: true`. Read from the
+   * frozen composition — for a SessionTab that is already `contributions()`,
+   * populated before the first step can run (`state/tabs.ts` `hydrate`/`ready`),
+   * so there is no race to guard against here.
+   *
+   * It reaches the gate as the CEILING below, never as extra rows in the
+   * approval tables: a package asks for one thing now, and that one thing is
+   * judged before any table is read.
    */
   const compositionPolicy = (asked: SessionTab | null) => poolPolicy(asked?.contributions() ?? [])
 
   const decideNow = (request: GateRequest, asked: SessionTab | null) =>
     decide(request, {
       mode: mode(),
-      // A package can only narrow (D3's own parse-time rule), so merging its
-      // `deny`/`ask` into the tables `tui.toml` already declares is still
-      // only ever a narrowing — `decide` itself takes no new parameter.
-      rules: withPolicy(props.style.settings.approvals, compositionPolicy(asked)),
+      rules: props.style.settings.approvals,
       always: always(),
     })
 
@@ -1931,11 +1930,11 @@ export function App(props: AppProps) {
     const { name, args } = splitSlash(raw)
     const row = resolvedPackageCommands().winners.find((entry) => entry.name === name)
     if (!row) return false
-    // `"wear"` is the pre-D4 spelling of `"with"`, folded into the same kind
-    // below; warned once per dispatch so the package's own author sees it.
-    if (isDeprecatedWearAction(row.action)) {
-      console.warn(`${row.id}: command '/${row.name}' declares action "wear" — rename it to "with"`)
-    }
+    // An older spelling this build still reads (the string form, or the
+    // `"wear"` verb) is folded below; warned once per dispatch so the
+    // package's own author sees it.
+    const stale = deprecatedActionNote(row.action)
+    if (stale) console.warn(`${row.id}: command '/${row.name}' — ${stale}`)
     const action = parseAction(row.action)
     switch (action.kind) {
       case "with":

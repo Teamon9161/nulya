@@ -64,7 +64,7 @@
 | `.nulya/scratch/<sid>/tasks/t<N>/output.log` | `/tasks` 的 `Enter`：读最后 64 KB（路径来自 `task list --json`，TUI 不自己拼 scratch 路径）；不是真·live tail，跟着面板的轮询重读 |
 | 后台回执 / 报告文本 | `[background task <sid>/t<N> started] … log: …`（`shell {background:true}` 的结果）与 `task_finished.text` 的两条分隔行 → 两张卡片按文本形状识别（`nulya/ledger.ts`，与 `[exit N]` 同一先例） |
 | `.nulya/sessions/<id>.lock` | 能否非阻塞独占 → 有无别的写者（§5.6）；`session list` 给不了"此刻谁在写"，所以这条探针留在 TUI |
-| `<root>/<id>/versions/v-*/extension.json` | `/ext` 与 CompositionCard 的明细：`runtime`/`contributes`（tools / skills / **system_prompts**）/`permissions`；root 由 `ext list` 指出 |
+| `<root>/<id>/versions/v-*/extension.json` | `/ext` 与 CompositionCard 的明细：`runtime`/`contributes`（tools / skills / **system_prompts** / commands / policy / 本前端那一条 `ui.tui`）；root 由 `ext list` 指出 |
 | `.nulya/tool-usage.jsonl` | `/ext` 里的 usage 表：一行取 `tool_id` + `ok` → uses_total / recent / success_rate（**只投影，不重算排序**——排序是 kernel policy，TUI 不复刻）。行上还有 `at` / `session?` / `duration_ms?`（DESIGN §5.5），TUI 只挑它要的两列、其余原样忽略 |
 | header `composition.native_tools` / `active[]` | 本场冻结契约（§5.1）；与 store `current` 比对 → "下一场会变"的漂移提示 |
 | shell 结果形状 | `stdout` + `--- stderr ---` + `[exit N]`（`tools/shell.zig`）→ 状态 chip 解析 `[exit N]` |
@@ -410,7 +410,7 @@ manifest_readonly = true    # 信一个 tool 自己声明的 `"readonly": true`�
 sync_on_start = true        # 开屏时后台 build 各 store root 下的 draft（`nulya ext sync`）
 auto_activate = true        # 让那一趟把 `current` 指到它刚建出来的版本上（**带 system prompt 的包除外**，T31）
 handoff       = true        # 每场 session 带上 handoff 包（`--with` + `--pin`，§5.8）
-plugins       = true        # 代码层总开关（T40）：加载 trusted + 已激活/本场戴着的包的 `contributes.ui.entry`
+plugins       = true        # 代码层总开关（T40）：加载 trusted + 已激活/本场戴着的包的 `contributes.ui.tui.entry`
                             # false = 只剩声明层（commands / policy / 每个 tool 的 ui 照常，逐字节等于 T39 结束时）
 
 [keys]                      # 覆盖默认键；名字表见 keymap.ts
@@ -1761,3 +1761,15 @@ T37 给了包一个字段自己说"activate 我算不算常驻"（`activation`�
 其余是把新语义画出来：`/ext` 的 `mode` 列只剩一个词（"贡献 system prompt"，从前要在 `mode` / `opt-in` 里选一个说包声明了哪种 reach）；detail 里"composed into every session"那行现在说得出是**哪张单子**把它放进去的（config 的 `[extensions] with` / `tui.toml` 的 `session_with` / 这个面板自己）；裸 `/with` 的 picker 列出**所有**有 `current` 且贡献 system prompt 的包（从前只列声明了 opt-in 的）；`ext list` 第二列的 `(inactive)` 改叫 `(no current)`，TS 侧两个词都认（新前端 + 老二进制）。`session new --bare` 由 `sessionNew`/`SessionExtras` 透传，值来自 `extensions/agent` 的 `render`——委派该带什么是那个包的事，不是这里的。
 
 **测试**：`bun test` 全绿（新增：`standingWith` 的四种贡献各一条 + 纯 tool 包一条；`/ext` 那条端到端多断言 `session_with` 两个方向都动了；`pins.test` 的"standing 名单"少了一个条件，多了 mode 的 tool 也能被 pin 这一条）。`zig build test` / `zig build e2e` 见 goals/ext-review-2.md §6 Lane K。
+
+### T49 · manifest 瘦身的前端一半：对象 action、按宿主的 ui、一个 mode 不必再声明自己的名字（2026-08-23）
+
+内核那一半是 ext-review-2 的 Lane M（DESIGN §7.2.1）。前端这边跟着改了四处，**没有一处是新概念**：
+
+- **`packageCommands.parseAction` 读对象**（`{with:true}` / `{run:"<tool>"}` / `{skill:"<ref>"}`），旧的字符串形与 `"wear"` 两种老写法都仍然折进同一个 `PackageAction`。`isDeprecatedWearAction` 因此变成 **`deprecatedActionNote`**：它回的不再是一个 bool 而是**要说的那句话**（"写成对象" / "把 `wear` 改成 `with`"），因为现在有两种老写法而调用点只有一个。
+- **`files.uiOf` 读 `contributes.ui.tui`**（`plugins/host.ts` 一个字没改——它读的一直是 `contributions.ui`）。没有 `tui` 这一条 = 这个包对本前端没有插件，**跳过不警告**：manifest 按宿主键之后，"没有我的那一条" 是普通答案不是缺陷。平铺的老形式仍读成本前端的（顶层有 `entry` 键就是它）——冻结版本留在盘上的字节不会因为 draft 改了写法就变。
+- **`approvals.poolPolicy` 只剩 `readonlyBy`，`withPolicy` 删掉**。`decide` 从此拿到的就是 `tui.toml` 那三张表本身，一个包不能再往里加行；它能要的那一件事（整场只读）判在三张表**之前**，与 agent 天花板同一处 —— 那条路径本来就在，只是现在是唯一的一条。
+- **`/<id>` 不必声明**（`extensions.derivedCommand`）：一个贡献 system prompt 的包，它的名字唯一可能的意思就是"戴上它"，而每个这样的包都得在 manifest 里抄同一条 `commands` 才能说出来。现在 driver 自己推：有 `current` + 贡献 prompt + id 是 `[a-z0-9-]+` → `/<id>` = with。包自己声明的同名条目**优先**（声明比推导更具体，它可能另有所指），内建名永不被夺走（`resolve` 那条既有规则，derived row 与别的 row 走同一条路）。`extensions/plan` 的 `commands` 条目因此删掉，`extensions/ask` 的留着——`ask` 不贡献 prompt，`/ask` 是它真正的主张。
+- 顺带：`/ext` 详情里那行 `permissions fs 1 · net …` 删了（`permissionLine` 与 `ExtensionEntry.permissions` 一起），字段已经不在 schema 里。
+
+**测试**：`bun test` 全绿（`parseAction` 三条按新旧形状重写、`poolPolicy` 收成两条 + 一条"包的 policy 永远进不了审批表"、`derivedCommand` 一条新的；`plugins.test.tsx` 的夹具与 `plugin.test.tsx` 的 manifest 改成新写法）。

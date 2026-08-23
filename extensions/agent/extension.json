@@ -39,7 +39,6 @@
         "name": "render",
         "audience": "driver",
         "description": "Render an agent definition's body to a file a session can wear. For drivers: returns that file's path, for `session new --prompt`, plus the session arguments the definition asks for. Nothing is installed and nothing is versioned — the bytes are frozen into the session header when the session is created.",
-        "timeout_ms": 120000,
         "input": {
           "type": "object",
           "properties": {
@@ -57,7 +56,6 @@
         "name": "list",
         "audience": "driver",
         "description": "Every agent definition this workspace, this machine and this package hold, in search order, with the ones an earlier layer shadows marked. For drivers: a picker's data. Never needed by a model — an unknown name already comes back with the names that exist.",
-        "timeout_ms": 30000,
         "input": {
           "type": "object",
           "properties": {}
@@ -67,7 +65,6 @@
         "name": "run",
         "audience": "driver",
         "description": "Drive one delegated session to the end of its turn and print its report. For drivers: this is the command the background task started by `agent` runs; the report reaches the parent as that task's result.",
-        "timeout_ms": 600000,
         "input": {
           "type": "object",
           "properties": {

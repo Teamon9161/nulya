@@ -118,10 +118,10 @@ export interface Contributions {
    * This package's slash commands (`manifest.Command`, DESIGN §7.2.1,
    * tui-plugin D1/D2/D8). Absent reads as empty, the same convention as
    * `skills` / `system_prompts`. `action` is kept as WRITTEN — an open verb
-   * vocabulary the kernel does not police beyond one shape check (`run <tool>`
-   * must name a tool this same manifest declares) — so a word this build does
-   * not recognise is this reader's decision (`packageCommands.ts`), not a
-   * parse failure.
+   * vocabulary the kernel does not police beyond one reference check (a `run`
+   * command must name a tool this same manifest declares) — so a verb this
+   * build does not recognise is this reader's decision
+   * (`packageCommands.ts`), not a parse failure.
    */
   commands: PackageCommand[]
   /**
@@ -147,18 +147,23 @@ export interface Contributions {
    */
   panelTools: string[]
   /**
-   * `contributes.ui` (DESIGN §7.2.1, tui-plugin D10): a package-relative path
-   * to a front-end module and the plugin-host API major version it was
-   * written against, or null when the package ships no code layer.
+   * `contributes.ui.tui` (DESIGN §7.2.1, tui-plugin D10): a package-relative
+   * path to THIS front end's module and the plugin-host API major version it
+   * was written against, or null when the package ships no code layer for it.
    *
-   * The kernel freezes the entry's bytes with the version and never loads it
-   * (`Manifest.Ui`); who loads it, and whether this build's API version
-   * matches, is a front end's decision — `src/plugins/host.ts`.
+   * The manifest keys `ui` by host, because the kernel's schema must not name
+   * one front end. This is the one key that concerns this one — a package with
+   * modules for other hosts and none for `tui` reads as null, which is an
+   * ordinary answer, not a warning.
+   *
+   * The kernel freezes each entry's bytes with the version and never loads any
+   * of them (`manifest.UiHost`); who loads one, and whether this build's API
+   * version matches, is a front end's decision — `src/plugins/host.ts`.
    */
   ui: PackageUi | null
 }
 
-/** A package's front-end module declaration (`manifest.Ui`). */
+/** One front end's module declaration (`manifest.UiHost`), for this host. */
 export interface PackageUi {
   /** Package-relative, checked safe by the kernel at build time. */
   entry: string
@@ -166,20 +171,33 @@ export interface PackageUi {
   api: number
 }
 
+/** The host key this front end reads out of `contributes.ui`. */
+export const ui_host = "tui"
+
 /** A package's own slash command (`manifest.Command`). */
 export interface PackageCommand {
   name: string
   description: string
-  /** The verb, kept as written — `"with"` | `"run <tool>"` | `"skill <ref>"` today. */
-  action: string
+  /**
+   * The verb, kept exactly as the manifest wrote it: the object form
+   * (`{"with": true}` / `{"run": "<tool>"}` / `{"skill": "<ref>"}`), or the
+   * string form that preceded it. `packageCommands.parseAction` is the one
+   * reader, and an unrecognised verb is its decision.
+   */
+  action: PackageActionValue
 }
 
-/** A package's approval-policy narrowing (`manifest.Policy`). Narrow-only: no `allow`. */
+/** Either action spelling, unread (`PackageCommand.action`). */
+export type PackageActionValue = string | Record<string, unknown>
+
+/**
+ * A package's approval-policy narrowing (`manifest.Policy`). One field, and it
+ * can only narrow: a shape that is a single optional bool cannot widen
+ * anything, which is why the kernel needs no rule saying so (physics #6).
+ */
 export interface PackagePolicy {
   /** Absent is null, not `false` — the package said nothing (same discipline as `tools[].readonly`). */
   readonly: boolean | null
-  deny: string[]
-  ask: string[]
 }
 
 /**
@@ -292,15 +310,27 @@ function toolUiOf(tool: Record<string, unknown>): Record<string, unknown> {
 }
 
 /**
- * `contributes.ui`, or null. Both fields are required by the kernel's own
- * parse, so anything missing one of them is a manifest this build cannot use
- * — read as "no code layer" rather than half a declaration.
+ * This host's entry in `contributes.ui`, or null.
+ *
+ * The manifest keys the block by front end (`{"tui": {entry, api}}`), so a
+ * package with no key for this one has no module here — read as "no code
+ * layer", never as a warning. Both fields are required by the kernel's own
+ * parse, so half a declaration reads the same way.
+ *
+ * A block written FLAT (`{entry, api}`, no host at all) is the spelling that
+ * predated the host key, when this was the only front end there was. It is
+ * still read as this host's for one version — frozen versions on disk keep the
+ * bytes they were built with, so this reader meets the old shape long after a
+ * draft stops writing it.
  */
 function uiOf(value: unknown): PackageUi | null {
   if (typeof value !== "object" || value === null) return null
   const record = value as Record<string, unknown>
-  const entry = record["entry"]
-  const api = record["api"]
+  const mine = "entry" in record ? record : record[ui_host]
+  if (typeof mine !== "object" || mine === null) return null
+  const host = mine as Record<string, unknown>
+  const entry = host["entry"]
+  const api = host["api"]
   if (typeof entry !== "string" || entry.length === 0) return null
   if (typeof api !== "number" || !Number.isFinite(api)) return null
   return { entry, api }
@@ -312,11 +342,16 @@ function commandsOf(value: unknown): PackageCommand[] {
   for (const entry of value) {
     if (typeof entry !== "object" || entry === null) continue
     const record = entry as Record<string, unknown>
-    if (typeof record["name"] !== "string" || typeof record["action"] !== "string") continue
+    const action = record["action"]
+    const written =
+      typeof action === "string" || (typeof action === "object" && action !== null && !Array.isArray(action))
+        ? (action as PackageActionValue)
+        : null
+    if (typeof record["name"] !== "string" || written === null) continue
     out.push({
       name: record["name"],
       description: typeof record["description"] === "string" ? record["description"] : "",
-      action: record["action"],
+      action: written,
     })
   }
   return out
@@ -327,11 +362,7 @@ function policyOf(value: unknown): PackagePolicy | null {
   // package writing `contributes.policy` at all is what counts, even `{}`.
   if (typeof value !== "object" || value === null) return null
   const record = value as Record<string, unknown>
-  return {
-    readonly: typeof record["readonly"] === "boolean" ? record["readonly"] : null,
-    deny: stringList(record["deny"]),
-    ask: stringList(record["ask"]),
-  }
+  return { readonly: typeof record["readonly"] === "boolean" ? record["readonly"] : null }
 }
 
 /**
@@ -637,7 +668,6 @@ export interface ExtensionEntry {
    */
   commands: PackageCommand[]
   ui: PackageUi | null
-  permissions: { fs: string[]; network: string[]; process: string[] }
   /** Which store root holds this copy (DESIGN §7.2). */
   root: string
   /** An earlier root has the same id active: this copy is never the one that runs. */
@@ -661,7 +691,7 @@ function stringList(value: unknown): string[] {
 
 function manifestFacts(manifest: Record<string, unknown> | null): Pick<
   ExtensionEntry,
-  "kind" | "tools" | "driverTools" | "skills" | "systemPrompts" | "commands" | "ui" | "permissions"
+  "kind" | "tools" | "driverTools" | "skills" | "systemPrompts" | "commands" | "ui"
 > {
   const runtime = manifest?.["runtime"] as Record<string, unknown> | undefined
   // `runtime.entry` is a string, or an object keyed by OS for a script that
@@ -674,17 +704,11 @@ function manifestFacts(manifest: Record<string, unknown> | null): Pick<
       : typeof rawEntry === "object" && rawEntry !== null
         ? Object.values(rawEntry as Record<string, unknown>).filter((v): v is string => typeof v === "string")
         : []
-  const permissions = (manifest?.["permissions"] ?? {}) as Record<string, unknown>
   return {
     // `bin/` means the kernel compiles it, anything else is frozen as-is; no
     // runtime at all is a pure skill/prompt package (DESIGN §7.1).
     kind: entries.length === 0 ? "data" : entries.some((e) => e.startsWith("bin/")) ? "compiled" : "script",
     ...contributionsOf(manifest),
-    permissions: {
-      fs: stringList(permissions["fs"]),
-      network: stringList(permissions["network"]),
-      process: stringList(permissions["process"]),
-    },
   }
 }
 

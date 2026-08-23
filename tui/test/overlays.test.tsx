@@ -16,7 +16,6 @@ import {
   driftLine,
   frozenVersion,
   labelOf,
-  permissionLine,
   shortVersion,
   toolRows,
 } from "../src/ui/overlays/ExtView.tsx"
@@ -441,7 +440,6 @@ test("a driver tool is listed with no checkbox: there is no pin for it to be wro
     systemPrompts: [],
     commands: [],
     ui: null,
-    permissions: { fs: [], network: [], process: [] },
     root: "",
     shadowed: false,
   })
@@ -628,14 +626,6 @@ test("a version id is short everywhere but the one line it is typed from", () =>
   expect(shortVersion("(none)")).toBe("(none)")
   expect(shortVersion(null)).toBe("")
   expect(shortVersion("v-0258f08e338c94179b855776", 6)).toBe("v-0258f0")
-
-  // Authority is drawn only where a package asked for some: a row of zeroes on
-  // every package is how the one package with something to declare stopped
-  // standing out.
-  const none = { permissions: { fs: [], network: [], process: [] } }
-  expect(permissionLine(none)).toBeNull()
-  const some = { permissions: { fs: ["."], network: ["api.example.com"], process: [] } }
-  expect(permissionLine(some)).toBe("permissions fs 1 · net api.example.com")
 })
 
 /**

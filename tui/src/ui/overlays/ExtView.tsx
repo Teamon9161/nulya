@@ -307,22 +307,6 @@ export function draftHelp(line: SyncLine | null): string[] {
   return []
 }
 
-/**
- * What authority this package asked for, or nothing at all when it asked for
- * none (tui.md §11, T23). Authority never grows implicitly (physics #6), so the
- * interesting state is a non-empty one — and a row of zeroes on every package
- * is what made it invisible on the one package that had something to say.
- */
-export function permissionLine(entry: {
-  permissions: { fs: string[]; network: string[]; process: string[] }
-}): string | null {
-  const parts: string[] = []
-  if (entry.permissions.fs.length > 0) parts.push(`fs ${entry.permissions.fs.length}`)
-  if (entry.permissions.network.length > 0) parts.push(`net ${entry.permissions.network.join(",")}`)
-  if (entry.permissions.process.length > 0) parts.push(`proc ${entry.permissions.process.length}`)
-  return parts.length === 0 ? null : `permissions ${parts.join(" · ")}`
-}
-
 /** When a version was built, to the minute — enough to order two of them. */
 function stamp(mtime: number): string {
   return new Date(mtime).toISOString().slice(0, 16)
@@ -1653,13 +1637,6 @@ export function ExtView(props: {
                       width={detailWidth()}
                       fg={style.theme.muted}
                     />
-                  </Show>
-                  {/* Authority, only where there is any. `fs 0 · net — · proc 0`
-                      is three cells saying nothing, on every package that asked
-                      for nothing — and it read as data, which is how the one
-                      package that DID ask for something stopped standing out. */}
-                  <Show when={permissionLine(entry)}>
-                    <Lines text={permissionLine(entry)!} width={detailWidth()} />
                   </Show>
                   <Show when={drift()}>
                     <Lines text={drift()!} width={detailWidth()} fg={style.theme.warn} />

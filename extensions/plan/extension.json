@@ -5,11 +5,6 @@
   "contributes": {
     "system_prompts": ["prompts/plan.md"],
     "policy": { "readonly": true },
-    "commands": [{
-      "name": "plan",
-      "description": "wear planning mode for the next session: investigate, plan, change nothing",
-      "action": "with"
-    }],
     "tools": [
       {
         "name": "propose",
@@ -61,6 +56,6 @@
         }
       }
     ],
-    "ui": { "entry": "tui/plan.ts", "api": 1 }
+    "ui": { "tui": { "entry": "tui/plan.ts", "api": 1 } }
   }
 }

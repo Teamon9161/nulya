@@ -16,7 +16,6 @@
         },
         "required": ["session"]
       },
-      "timeout_ms": 600000,
       "audience": "driver"
     }]
   }

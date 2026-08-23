@@ -132,8 +132,8 @@ test "plain wire: `ext init` scaffolds it, `ext run --arg` runs it, and a pinned
     const draft = ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "greeter";
     try ws.access(io, draft ++ std.fs.path.sep_str ++ "src" ++ std.fs.path.sep_str ++ "run.sh", .{});
     try ws.access(io, draft ++ std.fs.path.sep_str ++ "src" ++ std.fs.path.sep_str ++ "run.ps1", .{});
-    // And the scaffold declares no `permissions`: the kernel has no reader for
-    // it, so a template must not propagate the ceremony (DESIGN §9).
+    // And the scaffold declares no `permissions`: the key is not in the schema
+    // any more, so a template must not propagate the ceremony (DESIGN §9).
     const manifest_bytes = try ws.readFileAlloc(io, draft ++ std.fs.path.sep_str ++ "extension.json", alloc, .limited(1 << 16));
     defer alloc.free(manifest_bytes);
     try std.testing.expect(std.mem.indexOf(u8, manifest_bytes, "permissions") == null);

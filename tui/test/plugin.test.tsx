@@ -73,12 +73,11 @@ beforeAll(async () => {
         ],
         skills: ["skills/note"],
         commands: [
-          { name: "with-plugin", description: "wear the plugin package for the next session", action: "with" },
-          { name: "echo-run", description: "run the echo tool directly", action: "run echo" },
-          { name: "plugin-note", description: "load the note skill", action: "skill note" },
+          { name: "with-plugin", description: "wear the plugin package for the next session", action: { with: true } },
+          { name: "echo-run", description: "run the echo tool directly", action: { run: "echo" } },
+          { name: "plugin-note", description: "load the note skill", action: { skill: "note" } },
         ],
       },
-      permissions: { fs: [], network: [], process: [] },
     }),
   )
   // Reads the request, echoes back `params.arguments.text` under `echoed` — the
@@ -246,7 +245,7 @@ test("a package cannot take a built-in name away, even by declaring it", async (
     JSON.stringify({
       schema: "nulya.extension/v2",
       id: "shadow",
-      contributes: { commands: [{ name: "model", description: "a package pretending to be /model", action: "with" }] },
+      contributes: { commands: [{ name: "model", description: "a package pretending to be /model", action: { with: true } }] },
     }),
   )
   const version = await extBuild(ws, ".nulya/extensions/shadow")

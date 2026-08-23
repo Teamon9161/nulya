@@ -15,7 +15,7 @@
  * without a workspace on disk.
  */
 import { packageCommands as harvestPackageCommands } from "./extensions.ts"
-import type { PackageCommand } from "./nulya/files.ts"
+import type { PackageActionValue, PackageCommand } from "./nulya/files.ts"
 import type { Workspace } from "./nulya/bin.ts"
 
 /** One package command, flattened with the id of the package that declared it. */
@@ -24,17 +24,22 @@ export interface PackageCommandRow extends PackageCommand {
 }
 
 /**
- * `Command.action`, parsed into the one shape kernel `validate` checks
- * (`run <tool>` must name a tool the SAME manifest declares) plus the two
- * other words this build understands. Anything else is `unknown` — an open
- * vocabulary the kernel deliberately does not police (manifest.zig `Command`),
- * so a word this build has never heard of is this reader's decision, same
- * discipline as an unrecognised `ui.render` hint (D12).
+ * `Command.action`, parsed into the three verbs this build understands.
+ * Anything else is `unknown` — an open vocabulary the kernel deliberately does
+ * not police (manifest.zig `Action`), so a verb this build has never heard of
+ * is this reader's decision, same discipline as an unrecognised `ui.render`
+ * hint (D12).
  *
- * `"wear"` was this word's name before the manifest review renamed it to
- * `"with"` (the same word `/with` and `session new --with` already use for
- * the same idea). It is still accepted here, folded into the same `"with"`
- * kind, for one release — a warning names the package so its author sees why.
+ * A manifest writes an OBJECT with exactly one key: the verb, whose value is
+ * its argument or a bare `true` when it takes none. Two older spellings are
+ * still folded in here:
+ *
+ *   - the STRING form (`"run propose"`), a mini-language the reader had to
+ *     split on a space. Read for one version, by that same split.
+ *   - `"wear"`, which is what `"with"` was called before the review renamed it
+ *     to the word `/with` and `session new --with` already use. Folded into the
+ *     same `with` kind in either spelling; `deprecatedActionNote` is what
+ *     lets a caller name the package in a warning.
  */
 export type PackageAction =
   | { kind: "with" }
@@ -42,29 +47,48 @@ export type PackageAction =
   | { kind: "skill"; ref: string }
   | { kind: "unknown"; word: string }
 
-export function parseAction(action: string): PackageAction {
-  const trimmed = action.trim()
-  if (trimmed === "with") return { kind: "with" }
-  if (trimmed === "wear") return { kind: "with" }
-  if (trimmed.startsWith("run ")) {
-    const tool = trimmed.slice("run ".length).trim()
-    if (tool.length > 0) return { kind: "run", tool }
-  }
-  if (trimmed.startsWith("skill ")) {
-    const ref = trimmed.slice("skill ".length).trim()
-    if (ref.length > 0) return { kind: "skill", ref }
-  }
-  return { kind: "unknown", word: trimmed }
+export function parseAction(action: PackageActionValue): PackageAction {
+  const { verb, target } = splitAction(action)
+  if (verb === "with" || verb === "wear") return { kind: "with" }
+  if (verb === "run" && target.length > 0) return { kind: "run", tool: target }
+  if (verb === "skill" && target.length > 0) return { kind: "skill", ref: target }
+  return { kind: "unknown", word: verb }
 }
 
 /**
- * Whether `action`, as WRITTEN in a manifest, is the deprecated `"wear"`
- * spelling — so a caller that already has the row (and so the package id
- * that declared it) can name it in a warning, once, rather than this pure
- * parser reaching for a console of its own.
+ * An action in either spelling, reduced to the verb and its argument — the two
+ * things every reader wants and neither shape hands over directly.
+ *
+ * An object with no keys, or more than one, is a manifest the kernel's own
+ * `validate` refuses (`InvalidCommandAction`), so it cannot reach a built
+ * version; reading the first key is what this side does with the impossible
+ * rather than a rule of its own.
  */
-export function isDeprecatedWearAction(action: string): boolean {
-  return action.trim() === "wear"
+function splitAction(action: PackageActionValue): { verb: string; target: string } {
+  if (typeof action !== "string") {
+    const [verb] = Object.keys(action)
+    if (verb === undefined) return { verb: "", target: "" }
+    const value = action[verb]
+    return { verb, target: typeof value === "string" ? value.trim() : "" }
+  }
+  const trimmed = action.trim()
+  const space = trimmed.indexOf(" ")
+  if (space < 0) return { verb: trimmed, target: "" }
+  return { verb: trimmed.slice(0, space), target: trimmed.slice(space + 1).trim() }
+}
+
+/**
+ * Whether `action`, as WRITTEN in a manifest, uses a spelling this build still
+ * reads but no longer wants — the pre-object STRING form, or the `"wear"` verb
+ * — so a caller that already has the row (and so the package id that declared
+ * it) can name it in a warning, once, rather than this pure parser reaching for
+ * a console of its own. Null when there is nothing to say.
+ */
+export function deprecatedActionNote(action: PackageActionValue): string | null {
+  if (typeof action === "string") {
+    return `write it as an object instead — {"with": true}, {"run": "<tool>"}, {"skill": "<ref>"}`
+  }
+  return "wear" in action ? `rename the "wear" verb to "with"` : null
 }
 
 /**

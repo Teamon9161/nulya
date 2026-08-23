@@ -18,7 +18,6 @@ import {
   poolPolicy,
   shellCommand,
   summarize,
-  withPolicy,
   type ApprovalContext,
   type GateRequest,
 } from "../src/approvals.ts"
@@ -187,55 +186,28 @@ function member(id: string, policy: Contributions["policy"]): Pick<Contributions
 }
 
 test("poolPolicy: a member with no policy at all contributes nothing", () => {
-  expect(poolPolicy([member("std", null)])).toEqual({ deny: [], ask: [], readonlyBy: [] })
+  expect(poolPolicy([member("std", null)])).toEqual({ readonlyBy: [] })
   // An explicit `{}` is still a policy declaration (D3's own distinction), but
-  // an empty one narrows nothing and claims no readonly.
-  expect(poolPolicy([member("plan", { readonly: null, deny: [], ask: [] })])).toEqual({
-    deny: [],
-    ask: [],
-    readonlyBy: [],
-  })
-})
-
-test("poolPolicy: several members' deny/ask entries pool together, de-duplicated", () => {
-  const policy = poolPolicy([
-    member("guard", { readonly: null, deny: ["shell"], ask: ["ext:std/write"] }),
-    member("rules", { readonly: null, deny: ["shell", "ext:std/edit"], ask: [] }),
-  ])
-  expect(policy.deny).toEqual(["shell", "ext:std/edit"])
-  expect(policy.ask).toEqual(["ext:std/write"])
-  expect(policy.readonlyBy).toEqual([])
+  // an empty one claims no readonly.
+  expect(poolPolicy([member("plan", { readonly: null })])).toEqual({ readonlyBy: [] })
 })
 
 test("poolPolicy: `readonlyBy` names every member that claimed it, in composition order", () => {
   const policy = poolPolicy([
-    member("plan", { readonly: true, deny: [], ask: [] }),
-    member("std", { readonly: false, deny: [], ask: [] }),
-    member("guard", { readonly: true, deny: [], ask: [] }),
+    member("plan", { readonly: true }),
+    member("std", { readonly: false }),
+    member("guard", { readonly: true }),
   ])
   expect(policy.readonlyBy).toEqual(["plan", "guard"])
 })
 
-test("withPolicy: merges a composition's deny/ask into tui.toml's own tables, never touching `allow`", () => {
-  const rules = { ...default_rules, allow: ["shell:git"], deny: ["shell:rm"], ask: [] }
-  const merged = withPolicy(rules, { deny: ["shell"], ask: ["ext:std/write"], readonlyBy: [] })
-  expect(merged.deny).toEqual(["shell:rm", "shell"])
-  expect(merged.ask).toEqual(["ext:std/write"])
-  expect(merged.allow).toEqual(["shell:git"])
-  // No policy entries at all: the same rules object comes back, not a copy —
-  // `decide` sees identical behaviour either way.
-  expect(withPolicy(rules, { deny: [], ask: [], readonlyBy: [] })).toBe(rules)
-})
-
-test("a pooled policy deny actually decides `shell` — the same table `decide` already reads", () => {
-  const rules = withPolicy(default_rules, { deny: ["shell"], ask: [], readonlyBy: [] })
-  expect(decide(shell("git status"), context({ rules, mode: "unsafe" }))).toBe("deny")
-})
-
-test("a pooled policy ask reaches a person even in unsafe mode", () => {
-  const rules = withPolicy(default_rules, { deny: [], ask: ["ext:std/write"], readonlyBy: [] })
-  const write: GateRequest = { call_id: "c9", tool: "write", tool_id: "ext:std/write", readonly: null, args: "{}" }
-  expect(decide(write, context({ rules, mode: "unsafe" }))).toBe("ask")
+test("a package's policy never reaches the approval tables — the one thing it can ask for is the ceiling", () => {
+  // `decide` takes the person's own tables and nothing else. A package used to
+  // be able to pool `deny`/`ask` entries into them; the manifest no longer has
+  // those fields, and `readonly` is judged before any table is read (App.tsx).
+  const policy = poolPolicy([member("plan", { readonly: true })])
+  expect(Object.keys(policy)).toEqual(["readonlyBy"])
+  expect(decide(shell("git status"), context({ rules: default_rules, mode: "unsafe" }))).toBe("allow")
 })
 
 test("the summary is what the call would actually do", () => {

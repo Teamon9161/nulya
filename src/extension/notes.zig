@@ -96,12 +96,12 @@ pub fn depositActiveNote(
 
 const test_manifest =
     \\{"schema":"nulya.extension/v2","id":"demo","runtime":{"entry":"bin/demo"},
-    \\ "contributes":{"tools":[{"name":"greet","description":"Say hello.","input":{}}],"skills":[]},"permissions":{}}
+    \\ "contributes":{"tools":[{"name":"greet","description":"Say hello.","input":{}}],"skills":[]}}
 ;
 
 const test_manifest_v2 =
     \\{"schema":"nulya.extension/v2","id":"demo","runtime":{"entry":"bin/demo"},
-    \\ "contributes":{"tools":[{"name":"greet","description":"Say hello.","input":{}},{"name":"wave","description":"Wave goodbye.","input":{}}],"skills":[]},"permissions":{}}
+    \\ "contributes":{"tools":[{"name":"greet","description":"Say hello.","input":{}},{"name":"wave","description":"Wave goodbye.","input":{}}],"skills":[]}}
 ;
 
 test "noteText is deterministic and names every invocation" {

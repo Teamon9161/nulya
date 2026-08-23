@@ -24,26 +24,30 @@ const manifest_file = integrity.manifest_file;
 const package_dir = integrity.package_dir;
 const seal_file = integrity.seal_file;
 
-/// One line for a draft that still writes the removed `activation` key
-/// (`manifest.Manifest.legacy_activation`). The build itself is unaffected — it
-/// is an unknown key — but the author wrote it to keep the package out of
-/// sessions that did not ask, and that decision moved to the person's config,
-/// where a package cannot make it. Saying nothing would leave a mode believing
-/// it still opts out of every session on the machine.
+/// One line per manifest shape this draft writes that the current schema no
+/// longer does. Each is harmless to the build — a removed key is an unknown
+/// key, and an old spelling is folded by `manifest.parse` — but silence would
+/// leave the author believing something still reads what they wrote.
 ///
 /// stderr, so `ext build`'s stdout stays the version id a caller parses, and
 /// `reportBrokenActive`'s reason: the id belongs in the sentence and an error
 /// code cannot carry it. Best effort — a note that cannot be printed never
 /// fails a build.
-fn noteLegacyActivation(alloc: std.mem.Allocator, io: std.Io, id: []const u8) !void {
-    // Unit tests build packages with this key on purpose to assert it is
-    // ignored; the real binary (e2e included) always prints it.
+fn noteLegacyShapes(alloc: std.mem.Allocator, io: std.Io, m: manifest.Manifest) !void {
+    // Unit tests build packages with these shapes on purpose to assert they
+    // are accepted; the real binary (e2e included) always prints them.
     if (builtin.is_test) return;
-    const line = try std.fmt.allocPrint(
-        alloc,
-        "note: {s} still declares \"activation\"; that key is no longer read — a package joins every session only when [extensions] with in config names it\n",
-        .{id},
-    );
+    // Reach is the person's decision now, not the author's (DESIGN §7.2.1).
+    if (m.legacy_activation) try noteLegacyShape(alloc, io, m.id, "still declares \"activation\"; that key is no longer read — a package joins every session only when [extensions] with in config names it");
+    // A declaration nothing enforced; the shape a sandbox needs is the
+    // sandbox's to decide (PLAN §3.8).
+    if (m.legacy_permissions) try noteLegacyShape(alloc, io, m.id, "still declares \"permissions\"; that key is no longer read — an unenforced footprint was ceremony, and a sandbox will define its own shape");
+    if (m.legacy_command_action) try noteLegacyShape(alloc, io, m.id, "writes a command \"action\" as a string; write the object instead — {\"with\": true}, {\"run\": \"<tool>\"}, {\"skill\": \"<ref>\"}. The string is read for one more version");
+    if (m.legacy_ui) try noteLegacyShape(alloc, io, m.id, "writes \"contributes.ui\" without a host; key it by front end instead — {\"tui\": {\"entry\": …, \"api\": …}}. The flat form is read as \"tui\" for one more version");
+}
+
+fn noteLegacyShape(alloc: std.mem.Allocator, io: std.Io, id: []const u8, what: []const u8) !void {
+    const line = try std.fmt.allocPrint(alloc, "note: {s} {s}\n", .{ id, what });
     defer alloc.free(line);
     std.Io.File.stderr().writeStreamingAll(io, line) catch {};
 }
@@ -236,7 +240,7 @@ fn build(
     var m = try manifest.parse(alloc, manifest_bytes);
     defer m.deinit();
     try m.validate();
-    if (m.legacy_activation) try noteLegacyActivation(alloc, io, m.id);
+    try noteLegacyShapes(alloc, io, m);
 
     const snapshot = try integrity.collectPackageSnapshot(alloc, io, workspace, ext_dir_rel, manifest_bytes, m);
     defer snapshot.deinit(alloc);
@@ -663,17 +667,21 @@ fn validateSystemPrompts(alloc: std.mem.Allocator, m: manifest.Manifest, snapsho
     }
 }
 
-/// `contributes.ui.entry` names a module a front end loads (DESIGN §7.2.1,
-/// tui-plugin D10) — a declared path this build must actually be able to
-/// freeze, the same existence half `validateSystemPrompts` checks for a
-/// system prompt file. No size ceiling here: `prompt.max_system_prompt_bytes`
-/// bounds what is fed to a MODEL, and this file never is (it is front-end
-/// source, read by U3's plugin host, not by `prompt.zig`).
+/// Every `contributes.ui` entry names a module some front end loads (DESIGN
+/// §7.2.1, tui-plugin D10) — a declared path this build must actually be able
+/// to freeze, the same existence half `validateSystemPrompts` checks for a
+/// system prompt file. EVERY host's, not just the one this machine happens to
+/// run: one version serves them all, so the build is the only chance to notice
+/// that a declared module was never written (`validateScriptEntries`' reason).
+/// No size ceiling here: `prompt.max_system_prompt_bytes` bounds what is fed to
+/// a MODEL, and this file never is (it is front-end source, read by a plugin
+/// host, not by `prompt.zig`).
 fn validateUi(alloc: std.mem.Allocator, m: manifest.Manifest, snapshot: integrity.PackageSnapshot) !void {
-    const u = m.ui orelse return;
-    const rel = try integrity.canonicalRel(alloc, u.entry);
-    defer alloc.free(rel);
-    _ = integrity.findSnapshotFile(snapshot, rel) orelse return error.UiEntryFileMissing;
+    for (m.ui) |u| {
+        const rel = try integrity.canonicalRel(alloc, u.entry);
+        defer alloc.free(rel);
+        _ = integrity.findSnapshotFile(snapshot, rel) orelse return error.UiEntryFileMissing;
+    }
 }
 
 /// EVERY declared script entry is in the snapshot — not just this host's

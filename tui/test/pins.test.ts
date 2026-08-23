@@ -329,7 +329,6 @@ function entry(id: string, current: string, tools: string[]): ExtensionEntry {
     systemPrompts: [],
     commands: [],
     ui: null,
-    permissions: { fs: [], network: [], process: [] },
     root: ".nulya/extensions",
     shadowed: false,
   }

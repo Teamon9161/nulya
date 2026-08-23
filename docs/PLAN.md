@@ -72,7 +72,7 @@ kernel  = ledger 文件格式 + PromptIR 投影 + 一次 step + 工具执行 + c
 - 进 DESIGN：每个 phase 单独进。
 
 ### M7 · Authority / sandbox（§3.8）
-- `sandbox` backend（Linux landlock+seccomp / macOS sandbox-exec / Windows AppContainer 或容器）；`manifest.permissions` 从声明升级为 OS 强制边界。
+- `sandbox` backend（Linux landlock+seccomp / macOS sandbox-exec / Windows AppContainer 或容器）；一个包声明自己足迹的字段随它一起定形状。
 
 ### M8 · Ecosystem adapters（§3.11）
 - MCP client 作为 extension（tools 同构进 ToolSetSnapshot）；ACP 作为前端 transport；TUI。作为输入 / 输出适配器，不是主架构。
@@ -286,7 +286,7 @@ Driver 演化比 Tool 保守，因为**归因难**（任务难度 / model / seed
 
 ### 3.8 Authority / sandbox `[占位 · M7]`
 
-- `sandbox` backend 上线后 `manifest.permissions` 才被 OS 强制，从"声明"升级为"边界"。**执行前的那一票否决已经有了**（§3.8.1 的 gate），它是另一件事：拦的是"这一次要不要发生"，不是"发生时能碰什么"。
+- `sandbox` backend 上线后才有 OS 强制的"边界"。manifest 曾经有一个 `permissions`（`{fs, network, process}`）先把形状占下了，2026-08-23 删掉了（DESIGN §7.2.1）：它零读者，而一条没人执行的声明放久了会被读成保证；**要什么形状由沙箱自己定**，不继承一个在它之前猜出来的。**执行前的那一票否决已经有了**（§3.8.1 的 gate），它是另一件事：拦的是"这一次要不要发生"，不是"发生时能碰什么"。
 - 不变量：**capability 绝不因被生成或被晋升而自动获得 authority**；始终 `capability authority ⊆ session authority`。
 - 与 config 项目层"只能收窄"是同一不变量的两面：checkout 一个 repo 不该能拓宽机器权限。第三面已落地：**workspace store 的 trust gate**（DESIGN §9）——`.nulya/extensions` 也在 checkout 里，所以随 clone 到达的 store 要被人信任一次才进 composition。
 - read-only subagent（reviewer）在 sandbox 之前不给 unrestricted shell（`local` 下无法区分 `cat` 与 `rm`）。
