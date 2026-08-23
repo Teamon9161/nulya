@@ -28,6 +28,83 @@ pub const tool = support.tool;
 pub const tool_stats = support.tool_stats;
 pub const trust = support.trust;
 
+/// A single-file extension speaking `jsonrpc` (`manifest.Wire.jsonrpc`, still
+/// the default wire): reads one request, echoes its id, answers with
+/// `{"greeting": "..."}`. This used to be `templates.main_zig` itself, but
+/// that template moved to the `plain` wire for real (`ext init --zig` scaffolds
+/// it now, DESIGN §7.1, ext-review-2 C1) — it is no longer a JSON-RPC fixture,
+/// it is the thing `script_wire.zig` proves the real shape of. Every test here
+/// that decodes a `tool/call` response, or (like `greetSource`) edits the
+/// greeting text into one, needs a fixture that still speaks the wire it is
+/// asserting about, so this is that fixture, kept local to the tests.
+pub const jsonrpc_main_zig =
+    \\const std = @import("std");
+    \\
+    \\pub fn main(init: std.process.Init) !void {
+    \\    const alloc = init.gpa;
+    \\    const io = init.io;
+    \\
+    \\    var in_buf: [4096]u8 = undefined;
+    \\    var reader = std.Io.File.stdin().readerStreaming(io, &in_buf);
+    \\    const request = try reader.interface.allocRemaining(alloc, .limited(1 << 20));
+    \\    defer alloc.free(request);
+    \\
+    \\    var id: []const u8 = "";
+    \\    const parsed = std.json.parseFromSlice(std.json.Value, alloc, request, .{}) catch null;
+    \\    defer if (parsed) |p| p.deinit();
+    \\    if (parsed) |p| switch (p.value) {
+    \\        .object => |o| if (o.get("id")) |v| switch (v) {
+    \\            .string => |s| id = s,
+    \\            else => {},
+    \\        },
+    \\        else => {},
+    \\    };
+    \\
+    \\    var out: std.Io.Writer.Allocating = .init(alloc);
+    \\    defer out.deinit();
+    \\    var jw: std.json.Stringify = .{ .writer = &out.writer };
+    \\    try jw.beginObject();
+    \\    try jw.objectField("jsonrpc");
+    \\    try jw.write("2.0");
+    \\    try jw.objectField("id");
+    \\    try jw.write(id);
+    \\    try jw.objectField("result");
+    \\    try jw.beginObject();
+    \\    try jw.objectField("greeting");
+    \\    try jw.write("hello from a Nulya-built extension");
+    \\    try jw.endObject();
+    \\    try jw.endObject();
+    \\
+    \\    try std.Io.File.stdout().writeStreamingAll(io, out.writer.buffered());
+    \\}
+    \\
+;
+
+/// `extension.json` for `jsonrpc_main_zig` and every custom JSON-RPC-shaped
+/// `main_src` these tests hand to `scaffoldAndBuild` / `buildAndActivate`
+/// (e.g. a fixture that answers a `tool/call` request with a JSON-RPC error).
+/// No `runtime.wire`, so it defaults to `jsonrpc` — the wire every such
+/// fixture is written against, regardless of what `templates.manifestJson`
+/// (the real `ext init --zig` scaffold) declares today.
+fn jsonRpcManifestJson(alloc: std.mem.Allocator, id: []const u8, tool_name: []const u8) ![]u8 {
+    return std.fmt.allocPrint(alloc,
+        \\{{
+        \\  "schema": "nulya.extension/v2",
+        \\  "id": "{s}",
+        \\  "runtime": {{ "entry": "bin/{s}" }},
+        \\  "contributes": {{
+        \\    "tools": [{{
+        \\      "name": "{s}",
+        \\      "description": "A generated Nulya extension tool.",
+        \\      "input": {{ "type": "object", "properties": {{}} }}
+        \\    }}],
+        \\    "skills": []
+        \\  }}
+        \\}}
+        \\
+    , .{ id, id, tool_name });
+}
+
 /// Scaffold a real, buildable extension (`id`/`tool`, single-file entry source),
 /// put its immutable built version in the workspace store, and activate it.
 /// Returns the activated version id; caller frees.
@@ -64,7 +141,12 @@ pub fn scaffoldAndBuild(
     tool_name: []const u8,
     main_src: []const u8,
 ) ![]u8 {
-    const manifest_bytes = try templates.manifestJson(alloc, id, tool_name);
+    // Every `main_src` handed to this helper (jsonrpc_main_zig itself,
+    // `greetSource`'s edits of it, or a hand-written fixture like `failing_main`
+    // in extension.zig) speaks `jsonrpc`, so the manifest declares that wire
+    // regardless of what `templates.manifestJson` — the real `ext init --zig`
+    // scaffold — declares today (`plain`, ext-review-2 C1).
+    const manifest_bytes = try jsonRpcManifestJson(alloc, id, tool_name);
     defer alloc.free(manifest_bytes);
     try writeSingleFileDraft(alloc, io, ws, ".nulya" ++ std.fs.path.sep_str ++ "extensions", id, manifest_bytes, main_src);
     return installPrebuilt(alloc, io, ws, zig_exe, id, manifest_bytes, main_src);
@@ -114,10 +196,10 @@ pub fn runCli(
 /// source stays a real, compilable single-file extension. Caller owns the bytes.
 pub fn greetSource(alloc: std.mem.Allocator, greeting: []const u8) ![]u8 {
     const needle = "hello from a Nulya-built extension";
-    const size = std.mem.replacementSize(u8, templates.main_zig, needle, greeting);
+    const size = std.mem.replacementSize(u8, jsonrpc_main_zig, needle, greeting);
     const buf = try alloc.alloc(u8, size);
     errdefer alloc.free(buf);
-    _ = std.mem.replace(u8, templates.main_zig, needle, greeting, buf);
+    _ = std.mem.replace(u8, jsonrpc_main_zig, needle, greeting, buf);
     return buf;
 }
 

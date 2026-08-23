@@ -87,8 +87,10 @@ test "closed loop: init -> build -> activate -> run round-trips JSON" {
         try std.testing.expectEqualStrings(result.version, active);
     }
 
-    // 4. `ext run`: invoke the built binary through the Environment seam and
-    //    decode the wire response — the same path a live agent uses.
+    // 4. `ext run`: invoke the built binary through the Environment seam — the
+    //    same path a live agent uses. The `--zig` scaffold speaks the `plain`
+    //    wire (DESIGN §7.1, ext-review-2 C1): stdin is the arguments object,
+    //    stdout is the result verbatim, so there is no envelope to decode.
     var ws_real: [std.fs.max_path_bytes]u8 = undefined;
     const ws_real_len = try ws.realPath(io, &ws_real);
     const ws_path = ws_real[0..ws_real_len];
@@ -100,28 +102,15 @@ test "closed loop: init -> build -> activate -> run round-trips JSON" {
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
     defer lenv.deinit();
 
-    const req: protocol.ToolCallRequest = .{ .id = "call-1", .name = "greet", .arguments_json = "{}" };
-    const request_json = try req.encode(alloc);
-    defer alloc.free(request_json);
-
     const invocation = try lenv.environment().runExtension(alloc, .{
         .entry_path = entry_abs,
         .cwd = ws_path,
-        .request_json = request_json,
+        .request_json = "{\"name\":\"zig\"}",
         .max_output_bytes = 1 << 20,
     });
     defer invocation.deinit(alloc);
     try std.testing.expectEqual(@as(u8, 0), invocation.exit_code);
-
-    const decoded = try protocol.decodeResponse(alloc, req.id, invocation.stdout);
-    defer decoded.deinit(alloc);
-    switch (decoded) {
-        .result => |json| try std.testing.expect(std.mem.indexOf(u8, json, "greeting") != null),
-        .extension_error => |err| {
-            std.debug.print("unexpected extension error: [{d}] {s}\n", .{ err.code, err.message });
-            return error.TestUnexpectedResult;
-        },
-    }
+    try std.testing.expectEqualStrings("hello from a Nulya-built extension, name=zig\n", invocation.stdout);
 }
 
 test "closed loop: a pinned tool executes the frozen version through the tool executor (harness-built extension)" {
@@ -252,7 +241,7 @@ test "cli ext run records a version-free stable tool id in the usage journal, wi
     const ws_path = ws_real[0..ws_real_len];
 
     // v1 of the extension.
-    const v1 = try buildAndActivate(alloc, io, ws, zig_exe, "web.search", "web_search", templates.main_zig);
+    const v1 = try buildAndActivate(alloc, io, ws, zig_exe, "web.search", "web_search", support.jsonrpc_main_zig);
     defer alloc.free(v1);
 
     // A real `nulya ext run` invocation against v1.
@@ -274,7 +263,7 @@ test "cli ext run records a version-free stable tool id in the usage journal, wi
 
     // v2: a different implementation -> a different immutable version, but the
     // same tool identity. Activating it must not change the stats identity.
-    const v2_src = "// v2 implementation\n" ++ templates.main_zig;
+    const v2_src = "// v2 implementation\n" ++ support.jsonrpc_main_zig;
     const v2 = try buildAndActivate(alloc, io, ws, zig_exe, "web.search", "web_search", v2_src);
     defer alloc.free(v2);
     try std.testing.expect(!std.mem.eql(u8, v1, v2));
@@ -373,7 +362,7 @@ test "cli ext run failures before invocation write no usage stats" {
     // An active extension is needed so the store root exists and the "absent"
     // case below is a plain inactive-extension rejection, not a missing-root
     // host fault.
-    const version = try buildAndActivate(alloc, io, ws, zig_exe, "demo", "greet", templates.main_zig);
+    const version = try buildAndActivate(alloc, io, ws, zig_exe, "demo", "greet", support.jsonrpc_main_zig);
     defer alloc.free(version);
 
     var ws_real: [std.fs.max_path_bytes]u8 = undefined;
@@ -1606,7 +1595,7 @@ test "cli ext build: a compiled version another store root already holds is copi
         const activated = try runCliEnv(alloc, io, ws, &.{ exe_abs, "ext", "activate", "compact", version }, "NULYA_HOME", home_abs);
         defer alloc.free(activated.stdout);
         try std.testing.expectEqual(@as(u8, 0), activated.code);
-        const ran = try runCliEnv(alloc, io, ws, &.{ exe_abs, "ext", "run", "compact", "{}" }, "NULYA_HOME", home_abs);
+        const ran = try runCliEnv(alloc, io, ws, &.{ exe_abs, "ext", "run", "compact", "compact", "{}" }, "NULYA_HOME", home_abs);
         defer alloc.free(ran.stdout);
         try std.testing.expect(ran.stdout.len != 0);
     }

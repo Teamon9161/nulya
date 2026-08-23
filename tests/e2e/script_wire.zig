@@ -26,6 +26,7 @@ const tool = support.tool;
 
 const extractVersion = support.extractVersion;
 const runCli = support.runCli;
+const runCliEnv = support.runCliEnv;
 const runCliStderr = support.runCliStderr;
 
 const windows = @import("builtin").os.tag == .windows;
@@ -440,4 +441,69 @@ test "an unreadable wire word stops the build, before any version exists" {
     // The manifest's own fault, reported as a sentence rather than a stack trace.
     try std.testing.expect(std.mem.indexOf(u8, err_text, "InvalidWire") != null);
     try std.testing.expect(std.mem.indexOf(u8, err_text, ".zig:") == null);
+}
+
+test "`ext init --zig` scaffolds the plain wire too: --arg, no json defaults to {}, and no tool is a usage error (C1/C2, ext-review-2 §2)" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_abs = try nulyaExe(alloc, &host_env);
+    defer alloc.free(exe_abs);
+    const zig_exe = host_env.get("NULYA_TEST_ZIG") orelse return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const init = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "init", "--zig", "compiled.greeter", "greet" });
+    defer alloc.free(init.stdout);
+    try std.testing.expectEqual(@as(u8, 0), init.code);
+
+    const draft = ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "compiled.greeter";
+    // The compiled scaffold declares the same wire as the script one: `plain`
+    // is not tied to scripts, it is the default for both (DESIGN §7.1).
+    const manifest_bytes = try ws.readFileAlloc(io, draft ++ std.fs.path.sep_str ++ "extension.json", alloc, .limited(1 << 16));
+    defer alloc.free(manifest_bytes);
+    try std.testing.expect(std.mem.indexOf(u8, manifest_bytes, "\"wire\": \"plain\"") != null);
+
+    const built = try runCliEnv(alloc, io, ws, &.{ exe_abs, "ext", "build", draft }, "NULYA_ZIG", zig_exe);
+    defer alloc.free(built.stdout);
+    try std.testing.expectEqual(@as(u8, 0), built.code);
+    const version = try extractVersion(alloc, built.stdout);
+    defer alloc.free(version);
+    const ref = try std.fmt.allocPrint(alloc, "compiled.greeter@{s}", .{version});
+    defer alloc.free(ref);
+
+    // ① `--arg name=zig` becomes NULYA_ARG_name for the compiled binary too —
+    // one wire, whichever kind of runtime is behind it.
+    {
+        const run = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "greet", "--arg", "name=zig" });
+        defer alloc.free(run.stdout);
+        try std.testing.expectEqual(@as(u8, 0), run.code);
+        try std.testing.expect(std.mem.indexOf(u8, run.stdout, "zig") != null);
+    }
+
+    // ② No JSON at all, and no --arg: the tool is named, so the call still
+    // runs — its arguments default to `{}` (C2, ext-review-2 §2).
+    {
+        const run = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "greet" });
+        defer alloc.free(run.stdout);
+        try std.testing.expectEqual(@as(u8, 0), run.code);
+        try std.testing.expect(std.mem.indexOf(u8, run.stdout, "name=world") != null);
+    }
+
+    // ③ No tool at all: usage on stderr, exit 1 — the tool is required, never
+    // inferred from the manifest's own (possibly singular) tool list.
+    {
+        const argv = [_][]const u8{ exe_abs, "ext", "run", ref };
+        const run = try runCli(alloc, io, ws, &argv);
+        defer alloc.free(run.stdout);
+        try std.testing.expectEqual(@as(u8, 1), run.code);
+        try std.testing.expectEqualStrings("", run.stdout);
+        const err_text = try runCliStderr(alloc, io, ws, &argv, &.{});
+        defer alloc.free(err_text);
+        try std.testing.expect(std.mem.indexOf(u8, err_text, "usage: nulya ext run") != null);
+    }
 }

@@ -1,13 +1,16 @@
 //! Scaffolding templates for `nulya ext init` (DESIGN §7.1, §7.2, §7.5).
 //!
-//! Two scaffolds, because there are two wires (`manifest.Wire`):
+//! Two scaffolds, one wire — `plain` (`manifest.Wire.plain`), the default: the
+//! model's arguments arrive on stdin as one JSON object, and whatever the
+//! process prints to stdout IS the result the model sees, no envelope, no id
+//! to echo. `nulya ext api protocol` documents the other wire, `jsonrpc`.
 //!
-//!   default   a SCRIPT extension on the `plain` wire — `src/run.sh` and
-//!             `src/run.ps1`, three lines each, selected per host by the
-//!             manifest's per-OS `entry` / `interpreter`. No compiler, no JSON
-//!             to parse, nothing to echo back.
-//!   `--zig`   a compiled Zig extension on the JSON-RPC wire, for when a
-//!             compiled runtime has been measured to be needed.
+//!   default   a SCRIPT extension — `src/run.sh` and `src/run.ps1`, three
+//!             lines each, selected per host by the manifest's per-OS `entry`
+//!             / `interpreter`. No compiler, no JSON parser needed at all.
+//!   `--zig`   a compiled Zig extension, for when a compiled runtime has been
+//!             measured to be needed. Same wire — `plain` is not tied to
+//!             scripts, it is just the wire that needs the least ceremony.
 //!
 //! Both are real, buildable, runnable extensions the moment they are written.
 //! That is what makes "the second tool is created by Nulya itself" a running
@@ -19,11 +22,17 @@
 
 const std = @import("std");
 
-/// A minimal but complete extension entry point. Single-file so
-/// `zig build-exe src/main.zig` compiles it with no build.zig (DESIGN §7.3, §10).
+/// A minimal but complete extension entry point on the `plain` wire. Single-file
+/// so `zig build-exe src/main.zig` compiles it with no build.zig (DESIGN §7.3,
+/// §10).
 pub const main_zig =
-    \\//! A generated Nulya extension (JSON-RPC 2.0, oneshot).
-    \\//! Reads one request JSON on stdin, writes one response JSON on stdout.
+    \\//! A generated Nulya extension (`plain` wire, oneshot).
+    \\//! stdin is this call's arguments as one JSON object (`{}` when there are
+    \\//! none) — the exact bytes the model produced. Whatever this prints to
+    \\//! stdout IS the result the model sees, verbatim; exit 0 for success. An
+    \\//! error path looks like this instead: write to stderr, then
+    \\//! `std.process.exit(1)` (a non-zero exit is a FAILED call, its text made
+    \\//! from `exit <code>` plus stderr — DESIGN §7.3, `nulya ext api protocol`).
     \\const std = @import("std");
     \\
     \\/// `std.process.Init` rather than a bare `main()`: the io it hands over
@@ -36,54 +45,40 @@ pub const main_zig =
     \\    const alloc = init.gpa;
     \\    const io = init.io;
     \\
-    \\    // Read the whole request from stdin.
+    \\    // Read the whole request from stdin: this call's arguments as one JSON
+    \\    // object.
     \\    var in_buf: [4096]u8 = undefined;
     \\    var reader = std.Io.File.stdin().readerStreaming(io, &in_buf);
-    \\    const request = try reader.interface.allocRemaining(alloc, .limited(1 << 20));
-    \\    defer alloc.free(request);
+    \\    const args_json = try reader.interface.allocRemaining(alloc, .limited(1 << 20));
+    \\    defer alloc.free(args_json);
     \\
-    \\    // Best-effort: echo back the request id if present. The host currently
-    \\    // sends string ids; a handwritten extension may support numeric ids too.
-    \\    var id: []const u8 = "";
-    \\    const parsed = std.json.parseFromSlice(std.json.Value, alloc, request, .{}) catch null;
+    \\    var name: []const u8 = "world";
+    \\    const parsed = std.json.parseFromSlice(std.json.Value, alloc, args_json, .{}) catch null;
     \\    defer if (parsed) |p| p.deinit();
     \\    if (parsed) |p| switch (p.value) {
-    \\        .object => |o| if (o.get("id")) |v| switch (v) {
-    \\            .string => |s| {
-    \\                id = s;
-    \\            },
+    \\        .object => |o| if (o.get("name")) |v| switch (v) {
+    \\            .string => |s| name = s,
     \\            else => {},
     \\        },
     \\        else => {},
     \\    };
     \\
-    \\    // Build the success response.
     \\    var out: std.Io.Writer.Allocating = .init(alloc);
     \\    defer out.deinit();
-    \\    var jw: std.json.Stringify = .{ .writer = &out.writer };
-    \\    try jw.beginObject();
-    \\    try jw.objectField("jsonrpc");
-    \\    try jw.write("2.0");
-    \\    try jw.objectField("id");
-    \\    try jw.write(id);
-    \\    try jw.objectField("result");
-    \\    try jw.beginObject();
-    \\    try jw.objectField("greeting");
-    \\    try jw.write("hello from a Nulya-built extension");
-    \\    try jw.endObject();
-    \\    try jw.endObject();
-    \\
+    \\    try out.writer.print("hello from a Nulya-built extension, name={s}\n", .{name});
     \\    try std.Io.File.stdout().writeStreamingAll(io, out.writer.buffered());
     \\}
     \\
 ;
 
 /// A real acceptance case (DESIGN §12): input the model/user can inspect, and
-/// the expected shape of a successful response.
+/// the expected shape of a successful response — the `plain` wire: `request`
+/// is the arguments object, `expect.stdout` is the exact text the model would
+/// read back.
 pub const example_test_json =
     \\{
-    \\  "request": { "method": "tool/call", "params": { "name": "greet", "arguments": {} } },
-    \\  "expect": { "result": {} }
+    \\  "request": { "arguments": { "name": "world" } },
+    \\  "expect": { "stdout": "hello from a Nulya-built extension, name=world\n" }
     \\}
     \\
 ;
@@ -139,19 +134,21 @@ pub fn scriptManifestJson(alloc: std.mem.Allocator, id: []const u8, tool: []cons
     , .{ id, tool });
 }
 
-/// Render `extension.json` for a compiled `--zig` extension. Caller owns the
+/// Render `extension.json` for a compiled `--zig` extension: the `plain` wire,
+/// same as the script scaffold — a compiled runtime is a different `entry`
+/// prefix, not a different way of talking (DESIGN §7.1). Caller owns the
 /// returned bytes.
 pub fn manifestJson(alloc: std.mem.Allocator, id: []const u8, tool: []const u8) ![]u8 {
     return std.fmt.allocPrint(alloc,
         \\{{
         \\  "schema": "nulya.extension/v2",
         \\  "id": "{s}",
-        \\  "runtime": {{ "entry": "bin/{s}" }},
+        \\  "runtime": {{ "entry": "bin/{s}", "wire": "plain" }},
         \\  "contributes": {{
         \\    "tools": [{{
         \\      "name": "{s}",
         \\      "description": "A generated Nulya extension tool.",
-        \\      "input": {{ "type": "object", "properties": {{}} }}
+        \\      "input": {{ "type": "object", "properties": {{ "name": {{ "type": "string" }} }} }}
         \\    }}],
         \\    "skills": []
         \\  }}

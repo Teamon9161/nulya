@@ -144,7 +144,10 @@ Store and scope:
   bad manifest does not stop the rest. Add `--activate` to point `current` at
   what it just built (and at ids that have none) — it never moves a `current`
   that names something else, so going back to an older version survives. `--dry-run` says what it
-  would do and writes nothing.
+  would do and writes nothing. Add `--seed` to bring in this binary's own
+  bundled drafts (`extensions/{agent,ask,compact,evolution,guide,handoff,plan,std}`
+  and any later ones) first — `nulya ext sync --seed --user` on a machine that
+  has never seen this checkout writes and builds all of them in one call.
 - A build takes a copy instead of compiling when another root already holds that
   exact version, which is what lets a machine with no toolchain install a
   compiled tool the user store already carries.

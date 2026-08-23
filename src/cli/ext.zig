@@ -396,15 +396,33 @@ fn extSync(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     defer alloc.free(flags.rest);
     var activate = false;
     var dry_run = false;
+    var seed = false;
     for (flags.rest) |a| {
         if (std.mem.eql(u8, a, "--activate")) {
             activate = true;
         } else if (std.mem.eql(u8, a, "--dry-run")) {
             dry_run = true;
+        } else if (std.mem.eql(u8, a, "--seed")) {
+            seed = true;
         } else {
-            try printErr(io, "usage: nulya ext sync [--user] [--activate] [--dry-run]\n");
+            try printErr(io, "usage: nulya ext sync [--user] [--activate] [--dry-run] [--seed]\n");
             return 1;
         }
+    }
+
+    // `--seed` is `ext seed [--user]` (never `--force`: sync should not
+    // overwrite someone's edited draft on their behalf) followed by this same
+    // sync, sharing `--dry-run` with it — the drafts it writes (or, dry-run,
+    // only plans to write) are picked up by the build loop below like any
+    // other draft (DESIGN §7.2). `ext_seed.extSeed` owns the printing; its
+    // exit code folds into this command's.
+    var seed_failed = false;
+    if (seed) {
+        var seed_args: std.ArrayList([]const u8) = .empty;
+        defer seed_args.deinit(alloc);
+        if (flags.user) try seed_args.append(alloc, "--user");
+        if (dry_run) try seed_args.append(alloc, "--dry-run");
+        if ((try ext_seed.extSeed(alloc, io, seed_args.items)) != 0) seed_failed = true;
     }
 
     const root_spec = (try writeRootSpec(alloc, flags.user)) orelse {
@@ -536,7 +554,7 @@ fn extSync(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (!dry_run and produced != 0 and workspace_store_was_empty and std.mem.eql(u8, root_spec, store.workspace_root_rel)) {
         try recordBirthTrust(alloc, io, cwd_path);
     }
-    return if (failed != 0) 1 else 0;
+    return if (failed != 0 or seed_failed) 1 else 0;
 }
 
 const SyncMode = struct { activate: bool, dry_run: bool, user: bool };
@@ -771,14 +789,16 @@ fn draftIds(alloc: std.mem.Allocator, io: std.Io, root_dir: std.Io.Dir) ![][]u8 
     return items;
 }
 
+const ext_run_usage = "usage: nulya ext run <id>[@<version>] <tool> [<json-args> | --arg k=v ...] [--timeout-ms N]\n";
+
 fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (args.len < 1) {
-        try printErr(io, "usage: nulya ext run <id>[@<version>] [tool] <json-args> | --arg k=v ... [--timeout-ms N]\n");
+        try printErr(io, ext_run_usage);
         return 1;
     }
 
     // Split off `--arg k=v` pairs and an optional `--timeout-ms N` from
-    // positional args ([id, tool?, json?]).
+    // positional args ([id, tool, json?]).
     var pairs: std.ArrayList([]const u8) = .empty;
     defer pairs.deinit(alloc);
     var positional: std.ArrayList([]const u8) = .empty;
@@ -796,8 +816,10 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             } else try positional.append(alloc, args[i]);
         }
     }
-    if (positional.items.len == 0) {
-        try printErr(io, "usage: nulya ext run <id>[@<version>] [tool] <json-args> | --arg k=v ... [--timeout-ms N]\n");
+    // The tool is required (C2, ext-review-2 §2): [id, tool] is the shortest
+    // legal shape, JSON args (or lack of them) come after.
+    if (positional.items.len < 2) {
+        try printErr(io, ext_run_usage);
         return 1;
     }
     // `<id>` runs the version in effect; `<id>@<version>` runs exactly that
@@ -806,11 +828,8 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     // frozen version without touching `current`.
     const with_ref = withRef(positional.items[0]);
     const id = with_ref.id;
+    const tool = positional.items[1];
     const use_args = pairs.items.len > 0;
-    if (!use_args and positional.items.len < 2) {
-        try printErr(io, "usage: nulya ext run <id>[@<version>] [tool] <json-args> | --arg k=v ... [--timeout-ms N]\n");
-        return 1;
-    }
     for (pairs.items) |p| {
         if (std.mem.indexOfScalar(u8, p, '=') == null) {
             try printErr(io, "--arg must be of the form k=v\n");
@@ -856,16 +875,6 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     defer resolved.deinit(alloc);
     const m = resolved.manifest;
 
-    // With --arg the only extra positional is an optional tool name; otherwise
-    // the last positional is the JSON and an optional tool name precedes it.
-    const has_explicit_tool = if (use_args) positional.items.len >= 2 else positional.items.len >= 3;
-    const tool = if (has_explicit_tool) positional.items[1] else blk: {
-        if (m.tools.len == 0) {
-            try printOut(alloc, io, "extension '{s}' contributes no runnable tools\n", .{id});
-            return 1;
-        }
-        break :blk m.tools[0].name;
-    };
     const rt = m.runtime orelse {
         try printOut(alloc, io, "extension '{s}' has no runtime\n", .{id});
         return 1;
@@ -882,10 +891,13 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     }
 
     // Build the arguments JSON: from --arg pairs (typed by the tool's input
-    // schema) when given, otherwise the trailing positional JSON verbatim.
+    // schema) when given, otherwise the trailing positional JSON if there is
+    // one beyond [id, tool], otherwise `{}` — the tool is required, its
+    // arguments are optional (C2, ext-review-2 §2).
     const owned_args: ?[]u8 = if (use_args) try buildArgsJson(alloc, pairs.items, spec.?.input_schema) else null;
     defer if (owned_args) |a| alloc.free(a);
-    const args_json = owned_args orelse positional.items[positional.items.len - 1];
+    const args_json = owned_args orelse
+        if (positional.items.len >= 3) positional.items[positional.items.len - 1] else "{}";
 
     // A compiled binary lives under `bin/`; a script under `package/`. The
     // resolution dispatches on runtime kind so this CLI path and session

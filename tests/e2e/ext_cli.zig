@@ -1,6 +1,7 @@
 //! `nulya ext run` / `ext inspect` / activation's shape default end to end
 //! (docs/goals/ext-review.md Lane C, DESIGN §7.3/§7.5/§7.8/§14): the three
-//! CLI-surface changes this lane makes, proved against the real binary.
+//! CLI-surface changes that lane made, proved against the real binary — plus
+//! `ext sync --seed` (docs/goals/ext-review-2.md Lane C §2, C3).
 //!
 //!   - a field-less, prompt-only package now defaults to `on_request`
 //!     (DESIGN §7.5): `activate` alone registers it, a plain `session new`
@@ -12,6 +13,8 @@
 //!   - `nulya ext inspect` answers the STORE, never a draft, for `<id>` and
 //!     `<id>@<version>`; a draft is asked for by naming its path instead
 //!     (D9).
+//!   - `nulya ext sync --seed` is `ext seed` followed by the same sync
+//!     (DESIGN §7.2): `--dry-run` plans both steps and writes neither.
 
 const std = @import("std");
 const support = @import("support.zig");
@@ -274,4 +277,41 @@ test "ext inspect: bare id answers the version in effect with no draft fallback,
         defer alloc.free(inspected.stdout);
         try std.testing.expectEqual(@as(u8, 1), inspected.code);
     }
+}
+
+// ── 4. `ext sync --seed` (ext-review-2 §2, C3) ───────────────────────────────
+
+test "ext sync --seed --dry-run: a seed plan for the bundled drafts, on a root that does not exist yet, writes nothing" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_abs = try nulyaExe(alloc, &host_env);
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    // Nothing at all in the workspace store yet — not even the root directory.
+    try std.testing.expectError(error.FileNotFound, ws.access(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{}));
+
+    const synced = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "sync", "--seed", "--dry-run" });
+    defer alloc.free(synced.stdout);
+    try std.testing.expectEqual(@as(u8, 0), synced.code);
+
+    // The seed half of the plan: every bundled draft this binary ships would be
+    // written, and dry-run says so in the same words `ext seed --dry-run` does.
+    try std.testing.expect(std.mem.indexOf(u8, synced.stdout, "would seed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, synced.stdout, "seeded, ") != null);
+
+    // The sync half of the plan runs right after, over what seed would have
+    // written — and since nothing was actually written, it still finds no
+    // drafts to build.
+    try std.testing.expect(std.mem.indexOf(u8, synced.stdout, "no drafts in") != null);
+
+    // Neither half of a dry-run may leave a mark: the root directory itself
+    // must not exist afterward.
+    try std.testing.expectError(error.FileNotFound, ws.access(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions", .{}));
 }

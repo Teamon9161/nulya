@@ -101,7 +101,31 @@ cd tui && bun test
 
 ### Lane C
 
-（待开始）
+**C1–C5 已落地**（worktree 从 33fd05c fast-forward 到 28b4540 后开始）。
+
+- **C1**：`src/extension/build/templates.zig` 的 `main_zig`（28 行起）改成 `plain` wire——stdin 解一个 JSON object 取可选 `name`（缺省 `world`），打印一行文本，退出码 0；模块顶部注释与 `manifestJson`（141 行）同步声明 `"wire": "plain"` + tool input 的可选 `name`；`example_test_json`（78 行）改成 `{"request":{"arguments":{"name":"world"}},"expect":{"stdout":"hello from a Nulya-built extension, name=world\n"}}`（唯一读者是 `ext init` 写进 `tests/example.json`，已 grep 确认）。
+- **C2**：`src/cli/ext.zig` 的 `extRun`（794 行起）：删掉 `has_explicit_tool` 位置推断与"没给 tool 就用第一个"的缺省；tool 是 `positional.items[1]`（831 行），`positional.items.len < 2` 直接 usage + exit 1（821 行）；json 缺省 `"{}"`（`positional.items.len >= 3` 才取最后一个 positional）；`ext_run_usage` 常量（792 行）统一三处 usage 文案。`cli/common.zig` 的 `ext_run` 一行 usage 同步；DESIGN §14 表格行、guide `SKILL.md` 的用法（已含显式 tool 名，未改，确认过）。
+- **C3**：`extSync`（394 行）加 `--seed` 分支（399/425 行）：先按同样的 `--user`/`--dry-run` 调 `ext_seed.extSeed`（复用 `cli/ext_seed.zig` 原实现，不传 `--force`），失败折进 `seed_failed` 参与最终 exit code；`ext_usage` 的 sync 行、DESIGN §7.2（sync 那条 bullet）与 §14、guide `SKILL.md` 的 "least-effort install" 段同步（提到 `--seed` 拉自带包）。
+- **C4**：`src/cli/session.zig` 481 行 `PinNamesUnknownExtension` 文案改成 `names an extension no store root holds — never built on this machine, or a typo (see \`nulya ext list\`)`。
+- **C5**：`tests/e2e/script_wire.zig` 加一个测试（"`ext init --zig` scaffolds the plain wire too: --arg, no json defaults to {}, and no tool is a usage error"）覆盖 ①②③；`tests/e2e/ext_cli.zig` 加 "ext sync --seed --dry-run: a seed plan for the bundled drafts, on a root that does not exist yet, writes nothing" 覆盖 ④。
+
+**`zig build test`**：全绿。
+
+**`zig build e2e`**：83 pass / 3 fail（起点是 4 fail，見下）。
+
+**顺手改了 `tests/e2e/support.zig`**（不在任一 lane 的归属表里，是两边测试共用的 fixture 文件，C1 直接让它的假设失真，所以在我的 scope 内修）：`buildAndActivate`/`scaffoldAndBuild`/`greetSource` 一直复用 `templates.main_zig` + `templates.manifestJson` 当"一个真的、会说 JSON-RPC 的最小 extension"夹具——C1 把这两个模板函数改成 `plain` wire 之后，那份假设不再成立。加了一份独立的 `support.jsonrpc_main_zig` + 私有 `jsonRpcManifestJson`（33–106 行），`scaffoldAndBuild` 与 `greetSource` 改用它们，两边语义与改动前逐字节一致（`manifestJson` 里没有 `wire` 字段，缺省仍是 `jsonrpc`）。这修好了 `extension.zig` 里 "cli ext run records ok=false for a failed invocation"（用自写的 `failing_main` 直接写 JSON-RPC error，不依赖 `templates.*`）。
+
+**剩下 3 个 fail，全在 Lane K 的文件（`tests/e2e/extension.zig` / `gate_pin.zig`），按规则没有动，只在这里点名，各自的修法都已经查清、一行就能改**：
+
+1. `tests/e2e/extension.zig`："closed loop: init -> build -> activate -> run round-trips JSON"（40 行起）——直接调 `templates.manifestJson` + `templates.main_zig`，走 `protocol.decodeResponse` 断言 JSON-RPC 的 `greeting` 字段，测的正是 C1 改掉的那个默认形状。等价场景已经在 `tests/e2e/script_wire.zig`（我新加的那个测试）覆盖了新形状，所以这个测试该删或者改成断言 plain wire 的输出（`invocation.stdout` 就是 `"hello from a Nulya-built extension, name=world\n"`，不必再 decode）。
+2. `tests/e2e/extension.zig`："cli ext run records a version-free stable tool id in the usage journal, with the version that served the call beside it"（235 行起）——第 255 行把 `templates.main_zig`（现在是 plain wire 的源码）直接递给 `buildAndActivate`，而 `support.zig` 的 `scaffoldAndBuild` 现在照旧生成 `jsonrpc` 的 manifest（见上面 support.zig 那条）——manifest 说 jsonrpc、二进制说 plain，两边对不上。一行修法：把第 255 行的 `templates.main_zig` 换成 `support.jsonrpc_main_zig`（我在 support.zig 里新加的那个导出常量，本来就是给这种情况用的）。
+3. `tests/e2e/gate_pin.zig` 297 行：`try std.testing.expect(std.mem.indexOf(u8, said, "no active version here") != null);` 断言的是 `PinNamesUnknownExtension` 的旧文案。C4 把它改成了 `names an extension no store root holds …`；一行修法：把那个子串换成 `"no store root holds"`（或整句）。
+
+**其它顺带发现**（不是失败，只是行为变了、没有测试盯着）：`tests/e2e/extension.zig` 1609 行 `ext run compact {}`（没给 tool，靠旧的"只有一个 tool 就推断"）现在会把 `"{}"` 当成 tool 名字去找（找不到），报 `extension 'compact' does not declare tool '{}'`——巧的是这条错误走的是 `printOut`（stdout）不是 `printErr`，而那处测试只断言 `ran.stdout.len != 0`，所以没测出来。这行如果要保持"调用真的成功"的原意，得改成显式给 tool 名，例如 `ext run compact compact {}` 或者 `ext run compact compact --arg session=... `视 compact 的 tool 名而定；没有去查 compact 的 tool 叫什么，留给 Lane K。
+
+**`tests/e2e/cli.zig`**（不在任一 lane 归属表里，同样是被 C2 直接影响的共用测试）：改了 "cli ext run/build: missing or malformed JSON arguments…" 这个测试——标题去掉 "missing"（缺 json 不再是错误）、循环只留两种真正 malformed 的 json、加一段"没有 json 等于 `{}`"的成功断言、加一段"没有 tool 是 usage + exit 1"的断言。`nulya help` 那条测试的 needle 列表与行数预算（`<= 51`）不用动——`ext run` usage 那一行只是文字变宽，没多一行。
+
+**未做/超出范围**：`docs/tui.md` 1718 行有一句叙述性文字引用了旧的 `PinNamesUnknownExtension` 文案（"a pin names an extension with no active version here"），是历史场景描述不是断言，没有改；`extApi` 的 `examples` 文本（`src/cli/ext.zig` 1621 行）已经带着显式 tool 名（`do_thing`），C2 不需要动它，但没有提 `--seed`——那是 Lane M 的文件，留着。
 
 ### Lane M
 

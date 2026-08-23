@@ -479,7 +479,7 @@ pub fn createSession(
         // obvious — the bad one is in that list, in `.nulya/config.toml` or on
         // the command line.
         error.PinNamesUnknownExtension => {
-            try printPinFailure(alloc, io, pins, "names an extension with no active version here (see `nulya ext list`)");
+            try printPinFailure(alloc, io, pins, "names an extension no store root holds — never built on this machine, or a typo (see `nulya ext list`)");
             return null;
         },
         error.PinToolNotDeclared => {

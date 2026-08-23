@@ -163,9 +163,9 @@ pub fn writeInto(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, sub_dir:
 pub const ext_usage =
     \\  nulya ext init [--zig] [--user] <id> [tool]       scaffold a draft: a script by default, --zig for a compiled one
     \\  nulya ext build <path> [--user]                   freeze a draft into an immutable version, print its id
-    \\  nulya ext sync [--user] [--activate] [--dry-run]  build every draft in that root: source in <root>/<id>/ installs
+    \\  nulya ext sync [--user] [--activate] [--seed] [--dry-run]  build every draft in that root; --seed writes this binary's own drafts first
     \\  nulya ext seed [--user] [<id>…] [--force] [--dry-run]  write the drafts this binary ships into that root; sync builds them
-    \\  nulya ext run <id>[@<ver>] [tool] <json> | --arg k=v … [--timeout-ms N]   run the version in effect, or exactly that one; no timeout unless asked
+    \\  nulya ext run <id>[@<ver>] <tool> [<json> | --arg k=v …] [--timeout-ms N]   run the version in effect, or exactly that one; no timeout unless asked
     \\  nulya ext activate [--user] <id> <ver>            point `current` at a version; activating an older one is the rollback
     \\  nulya ext deactivate [--user] <id>                drop `current`; the versions stay
     \\  nulya ext prune [--user] [<id>] [--dry-run]       delete the versions `current` does not name

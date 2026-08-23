@@ -294,7 +294,7 @@ test "pin: a package with no current refuses and names the pin; one nothing hold
     {
         const said = try runCliStderr(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--pin", "ext:never.built/tool" }, &.{});
         defer alloc.free(said);
-        try std.testing.expect(std.mem.indexOf(u8, said, "no active version here") != null);
+        try std.testing.expect(std.mem.indexOf(u8, said, "no store root holds") != null);
         try std.testing.expect(std.mem.indexOf(u8, said, "ext:never.built/tool") != null);
     }
 }

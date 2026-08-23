@@ -458,7 +458,7 @@ test "cli config show: a codex profile's models and their parameters come from t
     try std.testing.expectEqualStrings("gpt-5.5", offline.get("model").?.string);
 }
 
-test "cli ext run/build: missing or malformed JSON arguments and an unbuildable draft are one line on stderr and exit 1, never a Zig stack trace" {
+test "cli ext run/build: malformed JSON arguments and an unbuildable draft are one line on stderr and exit 1, never a Zig stack trace" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -485,11 +485,11 @@ test "cli ext run/build: missing or malformed JSON arguments and an unbuildable 
     const ref = try std.fmt.allocPrint(alloc, "my.helper@{s}", .{version});
     defer alloc.free(ref);
 
-    // The three shapes a caller actually arrives with: no JSON at all (the tool
-    // name is then read as the arguments), JSON that does not parse, and JSON
-    // that parses but is not an object.
+    // The two shapes of genuinely malformed JSON: does not parse, and parses
+    // but is not an object. The tool is required (C2, ext-review-2 §2), so a
+    // separate case below covers no JSON at all — that is no longer one of
+    // these; it means `{}`.
     for ([_][]const []const u8{
-        &.{ exe_abs, "ext", "run", ref, "do_thing" },
         &.{ exe_abs, "ext", "run", ref, "do_thing", "{bad" },
         &.{ exe_abs, "ext", "run", ref, "do_thing", "[]" },
     }) |argv| {
@@ -509,11 +509,29 @@ test "cli ext run/build: missing or malformed JSON arguments and an unbuildable 
         try std.testing.expect(std.mem.indexOf(u8, err_text, ".zig:") == null);
     }
 
-    // A valid invocation is untouched.
-    const ok = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "do_thing", "{}" });
-    defer alloc.free(ok.stdout);
-    try std.testing.expectEqual(@as(u8, 0), ok.code);
-    try std.testing.expect(ok.stdout.len != 0);
+    // A valid invocation is untouched, and no JSON at all is the same as `{}`.
+    for ([_][]const []const u8{
+        &.{ exe_abs, "ext", "run", ref, "do_thing", "{}" },
+        &.{ exe_abs, "ext", "run", ref, "do_thing" },
+    }) |argv| {
+        const ok = try runCli(alloc, io, ws, argv);
+        defer alloc.free(ok.stdout);
+        try std.testing.expectEqual(@as(u8, 0), ok.code);
+        try std.testing.expect(ok.stdout.len != 0);
+    }
+
+    // No tool at all: usage on stderr, exit 1 — never a position inferred from
+    // the manifest's tool list (C2, ext-review-2 §2).
+    {
+        const argv = [_][]const u8{ exe_abs, "ext", "run", ref };
+        const run = try runCli(alloc, io, ws, &argv);
+        defer alloc.free(run.stdout);
+        try std.testing.expectEqual(@as(u8, 1), run.code);
+        try std.testing.expectEqualStrings("", run.stdout);
+        const err_text = try runCliStderr(alloc, io, ws, &argv, &.{});
+        defer alloc.free(err_text);
+        try std.testing.expect(std.mem.indexOf(u8, err_text, "usage: nulya ext run") != null);
+    }
 
     // Same class, same treatment: a build pointed at a directory with no
     // manifest, and one whose manifest the author has just broken.
