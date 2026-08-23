@@ -26,6 +26,7 @@ import {
   adoptBundled,
   answerFor,
   builtContributions,
+  checkoutFollowUp,
   derivedCommand,
   describeDrafts,
   draftColumn,
@@ -33,14 +34,16 @@ import {
   needsZigIds,
   pinsOf,
   standingWith,
+  planCheckout,
   planProjectStore,
-  promptConsequence,
   promptText,
   std_pins,
   stdEditPinDecision,
   summarize,
   syncRoot,
+  type CheckoutAction,
 } from "../src/extensions.ts"
+import { planProjectAgents } from "../src/agents.ts"
 import { modelTools, readHeader, type PackageCommand } from "../src/nulya/files.ts"
 import { default_settings, loadSettings, withPackage } from "../src/state/settings.ts"
 import { draftHelp } from "../src/ui/overlays/ExtView.tsx"
@@ -404,14 +407,20 @@ test("a bundled mode that arrives is activated too, and the pointer really moves
 })
 
 /**
- * Which half of `/ext`'s switch a package needs (K8).
+ * Which half of `/ext`'s switch a package needs (T1, ext-review-2 §3b).
  *
  * Activating alone composes nothing (DESIGN §5.1), so the switch has to write a
- * standing MEMBERSHIP entry for anything only a member can give — and must not
- * for a pure tool package, whose pins bring it in by themselves. Two ways of
- * saying one thing would be two things to take back.
+ * standing MEMBERSHIP entry for anything only a member can give — a skill, a
+ * slash command, a front-end module — and must not for a pure tool package,
+ * whose pins bring it in by themselves (two ways of saying one thing would be
+ * two things to take back). A package that contributes a SYSTEM PROMPT is the
+ * one exception either way: it used to be the flagship case (wearing a mode in
+ * EVERY session was the entire reason this entry existed), and it is now
+ * excluded on purpose — Enter moves `current` and hands back a `/<id>`
+ * command instead, and a mode's standing reach is a person's explicit config
+ * decision (`[extensions] with`), never a keypress in this row.
  */
-test("only a package with something a member alone can give gets a standing with entry", () => {
+test("a package that contributes a system prompt never gets a standing with entry; skills, commands and ui still do", () => {
   const what = (over: Partial<Parameters<typeof standingWith>[0]> = {}) => ({
     skills: [] as string[],
     systemPrompts: [] as string[],
@@ -420,13 +429,17 @@ test("only a package with something a member alone can give gets a standing with
     ...over,
   })
 
-  // A mode: its prompt reaches a session only through membership.
-  expect(standingWith(what({ systemPrompts: ["prompts/identity.md"] }))).toBe(true)
-  // A skill lands in the catalog the same way, and so do a slash command and a
-  // front-end module — none of them has a pin to arrive by.
+  // A mode: Enter reaches it through a per-session command now, not through
+  // standing membership — so this is `false` where it used to be `true`.
+  expect(standingWith(what({ systemPrompts: ["prompts/identity.md"] }))).toBe(false)
+  // A skill lands in the catalog only through membership, and so do a slash
+  // command and a front-end module — none of them has a pin to arrive by.
   expect(standingWith(what({ skills: ["skills/guide"] }))).toBe(true)
   expect(standingWith(what({ commands: [{ name: "plan", description: "", action: { with: true } }] }))).toBe(true)
   expect(standingWith(what({ ui: { entry: "tui/plan.ts", api: 1 } }))).toBe(true)
+  // A package with BOTH a prompt and a skill: the prompt exclusion wins —
+  // Enter still never writes it standing, whatever else it contributes.
+  expect(standingWith(what({ systemPrompts: ["prompts/identity.md"], skills: ["skills/guide"] }))).toBe(false)
 
   // A pure tool package: `compact`, `handoff`, `ask`. Nothing here needs an
   // entry, because a pin brings the package in at `current` all by itself.
@@ -472,14 +485,97 @@ test("a package that contributes a system prompt gets `/<id>` for free; anything
   expect(derivedCommand(what({ id: "My_Mode" }))).toBeNull()
 })
 
-test("what a mode's switch says, in both directions", () => {
-  const on = promptConsequence("evolution", true)
-  expect(on).toContain("EVERY new session")
-  expect(on).toContain("/with evolution")
-  expect(on).toContain("Enter again to turn it off")
-  // A mode nobody wrote a command for still gets the per-session way in.
-  expect(promptConsequence("house.style", true)).toContain("/with house.style")
-  expect(promptConsequence("evolution", false)).toContain("no longer enters new sessions")
+/**
+ * `planCheckout` merges the workspace store question (DESIGN §9) and the
+ * agent-definitions question (tui.md §5.10) into the one this screen actually
+ * asks (T2, ext-review-2 §3b): nothing when neither needs a look, today's own
+ * question unchanged when only one does, and a new three-answer question when
+ * both do — never two prompts stacked on the same terminal.
+ */
+test("planCheckout: neither, one, or both — and one merged question replaces two stacked ones", () => {
+  const store = "/repo/.nulya/extensions"
+  const drafts = { drafts: report(["a.mode: v-a1 not built"]), holds: [] as string[] }
+  const dir = "/repo/.nulya/agents"
+
+  const storeReady = planProjectStore(store, drafts, true, [])
+  const storeAsk = planProjectStore(store, drafts, false, [])
+  const storeNone = planProjectStore(store, inventoryOf([]), false, [])
+  const agentsReady = planProjectAgents(dir, ["explore.md"], true, [], (a, b) => a === b)
+  const agentsAsk = planProjectAgents(dir, ["explore.md"], false, [], (a, b) => a === b)
+  const agentsNone = planProjectAgents(dir, [], false, [], (a, b) => a === b)
+
+  // Neither side has anything to ask: silence, whatever "ready" either one is.
+  expect(planCheckout(storeNone, agentsNone).kind).toBe("none")
+  expect(planCheckout(storeReady, agentsReady).kind).toBe("none")
+  expect(planCheckout(storeReady, agentsNone).kind).toBe("none")
+
+  // Only the store needs a look: today's question, byte for byte — same text
+  // `promptText` would produce, same three keys, `apply` behaving exactly like
+  // `answerFor`/`actionFor` and touching the agents side not at all.
+  if (storeAsk.kind !== "ask") throw new Error("unreachable")
+  const onlyStore = planCheckout(storeAsk, agentsReady)
+  if (onlyStore.kind !== "ask") throw new Error("unreachable")
+  expect(onlyStore.text).toBe(promptText(storeAsk))
+  expect(onlyStore.choices.map(([key]) => key)).toEqual(["t", "s", "n"])
+  expect(onlyStore.apply("t")).toEqual({ store: { trust: true, sync: true, activate: true }, agentsTrust: false })
+  expect(onlyStore.apply("n")).toEqual({ store: { trust: false, sync: false, activate: false }, agentsTrust: false })
+  expect(onlyStore.apply("q")).toBeNull()
+
+  // Only the agents side needs a look: two keys, not three — there is nothing
+  // to install here, and the store action is always a no-op.
+  const onlyAgents = planCheckout(storeNone, agentsAsk)
+  if (onlyAgents.kind !== "ask") throw new Error("unreachable")
+  expect(onlyAgents.choices.map(([key]) => key)).toEqual(["t", "n"])
+  expect(onlyAgents.text).toContain(dir)
+  expect(onlyAgents.text).toContain("explore.md")
+  expect(onlyAgents.apply("t")).toEqual({ store: { trust: false, sync: false, activate: false }, agentsTrust: true })
+  expect(onlyAgents.apply("n")).toEqual({ store: { trust: false, sync: false, activate: false }, agentsTrust: false })
+  expect(onlyAgents.apply("s")).toBeNull() // not one of this question's two keys
+
+  // Both need a look: one paragraph naming both, three answers that now speak
+  // for both sides at once.
+  const both = planCheckout(storeAsk, agentsAsk)
+  if (both.kind !== "ask") throw new Error("unreachable")
+  expect(both.text).toContain(store)
+  expect(both.text).toContain("a.mode")
+  expect(both.text).toContain(dir)
+  expect(both.text).toContain("explore.md")
+  expect(both.choices.map(([key]) => key)).toEqual(["t", "s", "n"])
+  // t: trust and install everything, on both sides.
+  expect(both.apply("t")).toEqual({ store: { trust: true, sync: true, activate: true }, agentsTrust: true })
+  // s: build the extensions only, and trust neither side.
+  expect(both.apply("s")).toEqual({ store: { trust: false, sync: true, activate: false }, agentsTrust: false })
+  // n: leave both alone.
+  expect(both.apply("n")).toEqual({ store: { trust: false, sync: false, activate: false }, agentsTrust: false })
+  expect(both.apply("q")).toBeNull()
+})
+
+/**
+ * `checkoutFollowUp` is what used to be printed inline by the two separate
+ * `askAbout*` functions — kept, byte for byte, but only for a side this run
+ * actually asked about: a checkout whose agents question never appeared must
+ * not be told its (nonexistent) agents question was declined.
+ */
+test("checkoutFollowUp: the two 'left alone' sentences, each only for a side that was actually asked", () => {
+  const nothing: CheckoutAction = { store: { trust: false, sync: false, activate: false }, agentsTrust: false }
+  const both: CheckoutAction = { store: { trust: true, sync: true, activate: true }, agentsTrust: true }
+
+  // Store-only question, declined: its own sentence, and nothing about agents
+  // (which this question never mentioned).
+  expect(checkoutFollowUp(nothing, true, false)).toEqual(["left alone · `nulya ext trust` whenever you mean to"])
+  // Agents-only question, declined.
+  expect(checkoutFollowUp(nothing, false, true)).toEqual(["left alone · /agent still lists them, and starts none"])
+  // The merged question, "n": both sentences, because both were actually asked.
+  expect(checkoutFollowUp(nothing, true, true)).toEqual([
+    "left alone · `nulya ext trust` whenever you mean to",
+    "left alone · /agent still lists them, and starts none",
+  ])
+  // Everything trusted and installed: nothing left to say.
+  expect(checkoutFollowUp(both, true, true)).toEqual([])
+  // Neither side was even part of the question (the "none"/"ready" case never
+  // reaches this function in `main.tsx`, but the function itself stays honest
+  // about it): no side asked, no line, even though nothing happened.
+  expect(checkoutFollowUp(nothing, false, false)).toEqual([])
 })
 
 test("what a built version contributes is read from the root that sync wrote it to, and null when absent", async () => {
@@ -509,9 +605,10 @@ test("what a built version contributes is read from the root that sync wrote it 
 
     const what = await builtContributions(store, root, "mode.pkg", line.version!)
     expect(what?.systemPrompts).toEqual(["prompts/identity.md"])
-    // A prompt is something only a member gets, so `/ext`'s switch has to write
-    // the standing membership entry as well as move the pointer (K8).
-    expect(standingWith(what!)).toBe(true)
+    // A prompt reaches a session through membership, but Enter no longer
+    // writes a mode's membership standing (T1, ext-review-2 §3b) — it moves
+    // the pointer and hands back a `/<id>` command instead.
+    expect(standingWith(what!)).toBe(false)
   } finally {
     store.cleanup()
   }

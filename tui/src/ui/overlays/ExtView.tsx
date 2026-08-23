@@ -54,7 +54,7 @@ import {
   extSetCurrent,
   type SyncLine,
 } from "../../nulya/cli.ts"
-import { draftColumn, pinsOf, planStore, promptConsequence, standingWith } from "../../extensions.ts"
+import { draftColumn, pinsOf, planStore, standingWith } from "../../extensions.ts"
 import {
   builtin_tools,
   faceFullLine,
@@ -139,9 +139,10 @@ const switch_width = 2
  * One word, not two. There used to be a second (`opt-in`) for a package that
  * had declared its prompt reached only the sessions naming it — the reach was
  * the package's to state, so the list had to repeat which of the two it had
- * chosen. Reach is the person's now (DESIGN §5.1), and this row's Enter is
- * where they state it, so the column says what the package IS and the switch
- * says what it costs.
+ * chosen. Reach is the person's now (DESIGN §5.1), and this column says what
+ * the package IS; what Enter does about it is a `/<id>` command, not a
+ * standing decision (T1, ext-review-2 §3b) — wearing a mode in EVERY session
+ * from this front end is still reachable, just not from this row.
  */
 export function modeCell(entry: { systemPrompts: string[] }): string {
   return entry.systemPrompts.length === 0 ? "" : "mode"
@@ -920,11 +921,14 @@ export function ExtView(props: {
     // Agreed: now the pin lists are written where the next `session new` reads.
     if (change) await applyPin(change, { reconcile: false })
     // …and the MEMBERSHIP half, for a package that has something only a member
-    // can give (K8). Activating alone composes nothing now (DESIGN §5.1), so
-    // without this line the switch would move a pointer and change nothing a
-    // person could see. A pure tool package needs no entry: its pins bring it
-    // in by themselves, and a second way of saying that is a second thing to
-    // take back.
+    // can give and that Enter cannot already reach another way (`standingWith`).
+    // Activating alone composes nothing now (DESIGN §5.1), so without this line
+    // the switch would move a pointer and change nothing a person could see. A
+    // pure tool package needs no entry: its pins bring it in by themselves, and
+    // a second way of saying that is a second thing to take back. A package
+    // that contributes a SYSTEM PROMPT never gets one here (T1, ext-review-2
+    // §3b) — `derivedCommand` already gave it a `/<id>` below, and that is the
+    // per-session way in this row's Enter means now.
     if (standingWith(entry)) {
       const held = sessionWith(props.statePath)
       if (!held.includes(entry.id)) rememberSessionWith([...held, entry.id], props.statePath)
@@ -932,12 +936,12 @@ export function ExtView(props: {
     release(entry.id)
     props.onMembershipChanged?.()
     setNotice(
-      // A package that contributes a system prompt gets the sentence about what
-      // that actually costs, instead of a version and a pin count (T31): one
-      // keypress here reaches every session this front end opens from now on,
-      // and that is the fact worth the line.
+      // A package that contributes a system prompt gets the sentence about the
+      // command Enter just gave it, instead of a version and a pin count (T1,
+      // ext-review-2 §3b) — Enter no longer reaches every session from here,
+      // so there is nothing scary left to say, only where the new command is.
       entry.systemPrompts.length > 0
-        ? promptConsequence(entry.id, true)
+        ? `${entry.id} on · /${entry.id} opens a new tab wearing it for one session · Enter again takes the command away`
         : `${entry.id} on · ${version}` +
           (ids.length > 0
             ? room
@@ -985,8 +989,11 @@ export function ExtView(props: {
     release(entry.id)
     props.onMembershipChanged?.()
     setNotice(
+      // Used to say the prompt "no longer enters new sessions" — it never did
+      // from here alone (T1, ext-review-2 §3b), so what actually leaves is the
+      // `/<id>` command Enter had given it.
       (entry.systemPrompts.length > 0
-        ? promptConsequence(entry.id, false)
+        ? `${entry.id} off · /${entry.id} is gone`
         : `${entry.id} off · its skills leave the composition`) +
         ` · versions all stay${stuck ? ` · ${stuck}` : ""}`,
     )
@@ -1597,14 +1604,18 @@ export function ExtView(props: {
                     width={detailWidth()}
                     fg={style.theme.muted}
                   />
-                  {/* …and what that prompt count MEANS, because a `1` at the end
-                      of the line above is the most consequential fact in this
-                      panel written as the quietest one (T31). */}
+                  {/* …and what that prompt count MEANS: a package this row's
+                      Enter never composes standing any more (T1, ext-review-2
+                      §3b) — it moves `current` and hands back a `/<id>`
+                      command that wears the prompt for one session. Standing
+                      reach for a mode is still there, just not from here:
+                      `[extensions] with` in config, or `session_with` in
+                      `tui.toml`. */}
                   <Show when={entry.systemPrompts.length > 0}>
                     <Lines
-                      text={`a mode · turning it on puts its system prompt in every new session from this front end · /with ${entry.id} wears it for one session instead`}
+                      text={`a mode · Enter gives it a \`/${entry.id}\` command that wears its prompt for one session · nothing here composes it standing`}
                       width={detailWidth()}
-                      fg={style.theme.warn}
+                      fg={style.theme.muted}
                     />
                   </Show>
                   {/* A package this front end composes every session with

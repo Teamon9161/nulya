@@ -23,19 +23,19 @@ import { loadTuiState, rememberAgentsAnswer, rememberStoreAsked } from "./state/
 import { planLaunch } from "./launch.ts"
 import {
   adoptStdEditPin,
-  answerFor,
-  applyAnswer,
-  choicesText,
+  applyStoreAction,
+  checkoutFollowUp,
   inventory,
+  planCheckout,
   planProjectStore,
-  promptText,
   samePath,
   storeTrusted,
   summarize,
   workspaceStorePath,
-  type StoreAnswer,
+  type CheckoutAction,
+  type ProjectStorePlan,
 } from "./extensions.ts"
-import { agentAnswerFor, agentsDirOf, planProjectAgents, workspaceAgentFiles } from "./agents.ts"
+import { agentsDirOf, planProjectAgents, workspaceAgentFiles } from "./agents.ts"
 import { createStyle } from "./render/theme.ts"
 import { createSessionState } from "./state/session.ts"
 import { App } from "./ui/App.tsx"
@@ -106,16 +106,13 @@ async function main() {
 
   // Before any session exists, because this is the one thing that can stop one
   // from being created: a store that came with the checkout takes part in no
-  // session until someone has looked at it once (DESIGN §9). Asked here, in the
-  // plain terminal, since the alternate screen has not been entered yet.
-  const projectStore = settings.extensions.sync_on_start ? await askAboutProjectStore(ws) : "none"
-
-  // …and the definitions beside it, for the two reasons in `planProjectAgents`:
-  // a persona from a checkout becomes a system prompt, and materialising one
-  // builds into that same store. Both are settled here, before anything is
-  // built and before the screen exists — the store question's own timing, and
-  // for the store question's own reason (DESIGN §9).
-  const agentsTrusted = await askAboutProjectAgents(ws)
+  // session until someone has looked at it once (DESIGN §9), and a definition
+  // in `.nulya/agents` is a system prompt a checkout wrote (tui.md §5.10).
+  // Asked here, in the plain terminal, since the alternate screen has not been
+  // entered yet — and asked as ONE question when both need a look (T2,
+  // ext-review-2 §3b): `planCheckout` is what decides whether that is no
+  // question, one of the two unchanged, or the merged one.
+  const { projectStore, agentsTrusted } = await askAboutCheckout(ws, settings.extensions.sync_on_start)
 
   // The drafts the BINARY ships (`ext seed`, DESIGN §7.8) are NOT asked about
   // any more (tui.md §11, T23): they arrive in the user store — the person's own
@@ -183,97 +180,73 @@ async function main() {
 }
 
 /**
- * The workspace store, before the screen exists: nothing to install, already
- * trusted (leave it to the background pass), or a question.
+ * The one start-up question this checkout might need, before the screen
+ * exists (T2, ext-review-2 §3b): the workspace extension store (DESIGN §9)
+ * and the agent definitions beside it (tui.md §5.10) merged by `planCheckout`
+ * — nothing to ask, today's question for whichever one side needs it,
+ * unchanged, or the merged three-answer one when both do. This function is
+ * the only glue: it gathers the two plans, prints `plan.text`, reads a key
+ * (`readKey`) until `plan.apply` accepts one, then carries out and remembers
+ * the answer.
  *
- * A question is a real one — a single keypress, with what the store holds
- * printed above it — and it is asked once per store whatever the answer, so
- * declining a checkout does not become a prompt every morning.
+ * The store side is skipped ENTIRELY when `syncOnStart` is off — that
+ * setting is the master switch for extension syncing, and a question about a
+ * store nothing else will touch has no honest answer. The agent side has no
+ * such switch: whether a checkout's personas may run is asked whenever they
+ * exist, exactly as it always was.
  */
-async function askAboutProjectStore(ws: Workspace): Promise<"none" | "ready" | "answered"> {
+async function askAboutCheckout(
+  ws: Workspace,
+  syncOnStart: boolean,
+): Promise<{ projectStore: "none" | "ready" | "answered"; agentsTrusted: boolean }> {
   const store = workspaceStorePath(ws)
-  let plan
-  try {
-    plan = planProjectStore(store, await inventory(ws, false), storeTrusted(store), loadTuiState().asked_stores ?? [])
-  } catch {
-    return "none" // no store, no binary answer — the session's own gate still speaks
+  let storePlan: ProjectStorePlan = { kind: "none" }
+  if (syncOnStart) {
+    try {
+      storePlan = planProjectStore(store, await inventory(ws, false), storeTrusted(store), loadTuiState().asked_stores ?? [])
+    } catch {
+      storePlan = { kind: "none" } // no store, no binary answer — the session's own gate still speaks
+    }
   }
-  if (plan.kind !== "ask") return plan.kind === "ready" ? "ready" : "none"
 
-  process.stdout.write(promptText(plan))
-  const answer = await readAnswer()
-  rememberStoreAsked(store)
-  if (answer === "skip") {
-    process.stdout.write("left alone · `nulya ext trust` whenever you mean to\n")
-    return "answered"
-  }
-  process.stdout.write("installing…\n")
-  const report = await applyAnswer(ws, answer)
-  if (report) process.stdout.write(`${summarize("this checkout", report)}\n`)
-  return "answered"
-}
-
-/**
- * The agent definitions this CHECKOUT ships, before the screen exists
- * (tui.md §5.10).
- *
- * Asked once per directory, whatever the answer, exactly as the store question
- * is — and asked here for the store question's reason: the first time one of
- * these personas is used it is built into this workspace's extension store, and
- * a local build into an empty store is how the kernel records trust for it
- * (DESIGN §9). A question asked later would be a question asked after the
- * signature. `~/.nulya/agents` is never asked about.
- *
- * Two keys, not three: there is nothing to install here, only whether a persona
- * somebody else wrote may speak with this workspace's tools.
- */
-async function askAboutProjectAgents(ws: Workspace): Promise<boolean> {
   const dir = agentsDirOf(ws, "workspace")
   const state = loadTuiState()
-  const trusted = (state.trusted_agents ?? []).some((known) => samePath(known, dir))
-  const plan = planProjectAgents(dir, workspaceAgentFiles(ws), trusted, state.asked_agents ?? [], samePath)
-  if (plan.kind !== "ask") return plan.kind === "ready"
+  const agentsAlreadyTrusted = (state.trusted_agents ?? []).some((known) => samePath(known, dir))
+  const agentsPlan = planProjectAgents(dir, workspaceAgentFiles(ws), agentsAlreadyTrusted, state.asked_agents ?? [], samePath)
 
-  process.stdout.write(
-    `${[`this checkout defines agents in ${dir}:`, ...plan.names.map((line) => `  ${line}`)].join("\n")}\n${choicesText(
-      "each one is a system prompt a session here would run with. use them?",
-      [
-        ["t", "trust these definitions"],
-        ["n", "not now"],
-      ],
-    )}`,
-  )
-  let answer: boolean | null = null
-  while (answer === null) {
-    const key = await readKey()
-    answer = agentAnswerFor(key)
-    if (answer !== null) process.stdout.write(`${key === "return" ? "" : key === "escape" ? "esc" : key}\n`)
+  const plan = planCheckout(storePlan, agentsPlan)
+  if (plan.kind !== "ask") {
+    return {
+      projectStore: storePlan.kind === "ready" ? "ready" : "none",
+      agentsTrusted: agentsPlan.kind === "ready",
+    }
   }
-  rememberAgentsAnswer(dir, answer)
-  if (!answer) process.stdout.write("left alone · /agent still lists them, and starts none\n")
-  return answer
-}
 
-/**
- * The answer to a `choicesText` question: keys until one of them IS an answer,
- * then that key echoed on the `› ` line with a newline after it.
- *
- * Both halves matter. Raw mode swallows the echo, so without ours the keypress
- * is invisible — the screen shows the same bare cursor before and after, and a
- * `t` followed by a minute of zig building the std extension looks exactly like
- * a hang. And a byte that is not one of the three keys is not a "no": a
- * terminal's reply to a query, a focus event, an IME's partial sequence, an
- * empty first chunk all arrive on the same stream, and every one of them used to
- * be read as "not now" — silently, once, never to be asked again.
- */
-async function readAnswer(): Promise<StoreAnswer> {
-  for (;;) {
+  process.stdout.write(plan.text)
+  let action: CheckoutAction | null = null
+  while (action === null) {
     const key = await readKey()
-    const answer = answerFor(key)
-    if (!answer) continue
-    process.stdout.write(`${key === "return" ? "" : key === "escape" ? "esc" : key}\n`)
-    return answer
+    action = plan.apply(key)
+    if (action !== null) process.stdout.write(`${key === "return" ? "" : key === "escape" ? "esc" : key}\n`)
   }
+
+  if (storePlan.kind === "ask") rememberStoreAsked(store)
+  if (agentsPlan.kind === "ask") rememberAgentsAnswer(dir, action.agentsTrust)
+
+  let projectStore: "none" | "ready" | "answered" = storePlan.kind === "ready" ? "ready" : "none"
+  if (action.store.sync) {
+    projectStore = "answered"
+    process.stdout.write("installing…\n")
+    const report = await applyStoreAction(ws, action.store)
+    if (report) process.stdout.write(`${summarize("this checkout", report)}\n`)
+  } else if (storePlan.kind === "ask") {
+    projectStore = "answered"
+  }
+  for (const line of checkoutFollowUp(action, storePlan.kind === "ask", agentsPlan.kind === "ask")) {
+    process.stdout.write(`${line}\n`)
+  }
+
+  return { projectStore, agentsTrusted: action.agentsTrust || agentsPlan.kind === "ready" }
 }
 
 /**

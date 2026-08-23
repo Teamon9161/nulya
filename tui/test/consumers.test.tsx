@@ -198,8 +198,12 @@ const first_plan = [
  *
  * `plan` is a mode: it carries a system prompt, so wearing it says what THIS
  * session is — a persona and a read-only stance — and that is a decision
- * somebody makes before the work starts. `ask` is a capability: one tool, no
- * prompt, because nobody can decide in advance that a question will come up.
+ * somebody makes before the work starts, one `/plan` (or `--with`) at a time
+ * (T1, ext-review-2 §3b) — never `/ext`'s Enter, which would put it in front
+ * of every session from this front end whether anybody asked for the persona
+ * or not. `ask` is a capability: one tool, no prompt, because nobody can
+ * decide in advance that a question will come up, and its `/ask` command
+ * still needs standing membership the way a mode's `/<id>` no longer does.
  *
  * That difference is what `/ext` reads to decide whether its switch must also
  * compose the package (`standingWith`), so it is asserted against the real
@@ -211,21 +215,25 @@ test.skipIf(!has_zig)("plan is a mode and ask is a capability, and their shapes 
   const ask = (await builtContributions(ws, root, "ask", ask_version))!
 
   expect(plan.systemPrompts.length).toBeGreaterThan(0)
-  // A prompt and a slash command: only a MEMBER gets either, so `/ext`'s switch
-  // has to write the standing `with` entry as well as the pins.
-  expect(standingWith(plan)).toBe(true)
+  // A prompt: `/ext`'s Enter must NEVER write a standing `with` entry for it,
+  // whatever else the package contributes (`plan` also has a `ui` panel here)
+  // — a mode's standing reach is a person's explicit config decision, not a
+  // keypress on this row (T1). The panel still works from a `/plan` tab: that
+  // session composes `plan` through its own `--with`, not through the
+  // standing list this switch used to write.
+  expect(standingWith(plan)).toBe(false)
   expect(pinsOf(plan)).toEqual(["ext:plan/propose", "ext:plan/todo"])
 
   expect(ask.systemPrompts).toEqual([])
   // One key in `/ext` is "the model may ask me", in every session from now on.
   expect(pinsOf(ask)).toEqual(["ext:ask/ask"])
-  // It gets a standing `with` entry too, but for a different reason than
-  // `plan`: not a prompt, its `/ask` command. That entry is redundant with the
-  // pin — a pin brings its package in by itself — and harmless: naming one id
-  // twice composes it once (`composition.unionWith`). The alternative would be
-  // this front end deciding which of a package's four member-only
-  // contributions "really" needs membership, which is a judgement it has no
-  // standing to make about a package it has never heard of.
+  // It gets a standing `with` entry too, for a different reason than a prompt
+  // would: not a system prompt, its `/ask` command. That entry is redundant
+  // with the pin — a pin brings its package in by itself — and harmless:
+  // naming one id twice composes it once (`composition.unionWith`). The
+  // alternative would be this front end deciding which of a package's
+  // member-only contributions "really" needs membership, which is a judgement
+  // it has no standing to make about a package it has never heard of.
   expect(standingWith(ask)).toBe(true)
   expect(ask.commands.map((c) => c.name)).toEqual(["ask"])
 })

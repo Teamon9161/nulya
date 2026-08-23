@@ -668,14 +668,21 @@ test("/ext: Enter turns an extension on and off, and both axes move together", a
 }, 120_000)
 
 /**
- * A package that contributes a SYSTEM PROMPT is a MODE (tui.md §11, T31).
+ * A package that contributes a SYSTEM PROMPT is a MODE, and `/ext`'s Enter on
+ * one means exactly one thing: this package is now USABLE (tui.md §11, T1,
+ * ext-review-2 §3b).
  *
- * The bug: `evolution`'s prompt was in front of every model on the machine, and
- * nothing anywhere on the screen said so — not the id list, not the switch that
- * put it there. Turning it on is still one keypress and still asks for no `y`;
- * it just stops being silent about what that keypress reaches.
+ * The bug T31 fixed: `evolution`'s prompt was in front of every model on the
+ * machine, and nothing on the screen said so. The bug T1 fixes is what T31's
+ * own fix grew into (K8): Enter on a mode wrote it onto the STANDING
+ * `session_with` list, so turning `plan` on meant every session from then on
+ * paid for its prompt — almost never what pressing Enter on a row was asking
+ * for, so the switch had to carry a scary sentence just to say what it had
+ * done. Enter still moves `current` in one keypress with no `y` — it just
+ * never reaches standing membership for a mode any more: what it hands back
+ * is a `/<id>` command that wears the prompt for one session at a time.
  */
-test("/ext marks a package that contributes a system prompt as a mode, and says what turning it on costs", async () => {
+test("/ext marks a package that contributes a system prompt as a mode, and Enter never composes it standing", async () => {
   const shop = tempWorkspace()
   try {
     const run = (args: string[]) => Bun.spawnSync({ cmd: [shop.bin, ...args], cwd: shop.dir, env: process.env })
@@ -704,8 +711,8 @@ test("/ext marks a package that contributes a system prompt as a mode, and says 
       // A word of its own in the id list — the reach of a system prompt is not
       // a number at the end of the fourth fact on a detail line.
       expect(frame).toContain("mode")
-      expect(frame).toContain("turning it on puts its system prompt in every new session")
-      expect(frame).toContain("/with house.style")
+      expect(frame).toContain("a `/house.style` command")
+      expect(frame).toContain("nothing here composes it standing")
 
       setup.mockInput.pressEnter()
       await until(
@@ -713,21 +720,25 @@ test("/ext marks a package that contributes a system prompt as a mode, and says 
         20_000,
       )
       const on = await settle(setup, 4)
-      expect(on).toContain("EVERY new session from this front end")
-      expect(on).toContain("Enter again to turn it off")
-      // Both halves of the switch moved, and the second is the one that makes
-      // the first mean anything (K8): the pointer says which version
-      // `house.style` is, the standing membership entry says a session gets it.
-      expect(sessionWith(statePath)).toContain("house.style")
+      expect(on).toContain("/house.style opens a new tab wearing it for one session")
+      expect(on).toContain("Enter again takes the command away")
+      // The pointer moved — `current` says which version `house.style` is now
+      // — but the notice's own claim is the one that matters: unlike before
+      // T1, Enter must NOT write a standing membership entry for a mode. The
+      // per-session `/house.style` command it just earned is `derivedCommand`
+      // reading `current`, not this list.
+      expect(sessionWith(statePath)).not.toContain("house.style")
 
       setup.mockInput.pressEnter()
       await until(
         async () => (await listExtensions(shop)).find((entry) => entry.id === "house.style")?.current == null,
         20_000,
       )
-      expect(await settle(setup, 4)).toContain("no longer enters new sessions")
-      // …and the membership entry came off with it. Left behind it would name a
-      // package with no `current`, which is what makes `session new` refuse.
+      const off = await settle(setup, 4)
+      expect(off).toContain("house.style off · /house.style is gone")
+      expect(off).toContain("versions all stay")
+      // Still nothing on the standing list to take back — there was never
+      // anything there to begin with.
       expect(sessionWith(statePath)).not.toContain("house.style")
     } finally {
       setup.renderer.destroy()

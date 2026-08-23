@@ -36,6 +36,7 @@ import { builtin_tools, toolId } from "./pins.ts"
 import { userConfigDir } from "./state/settings.ts"
 import { loadTuiState, rememberSessionPins, saveTuiState, tuiStatePath } from "./state/tui_state.ts"
 import type { Workspace } from "./nulya/bin.ts"
+import type { AgentTrustPlan } from "./agents.ts"
 
 /** What the answer to the trust question does. */
 export type StoreAnswer = "trust" | "build" | "skip"
@@ -251,13 +252,16 @@ export function choicesText(question: string, choices: ReadonlyArray<[key: strin
   return `${[question, ...choices.map(([key, what]) => `  ${key}  ${what}`)].join("\n")}\n› `
 }
 
+/** The keys `promptText`'s question offers — reused, unchanged, by the merged question below. */
+const store_choices: ReadonlyArray<[key: string, what: string]> = [
+  ["t", "trust + build + activate"],
+  ["s", "build only"],
+  ["n", "not now"],
+]
+
 export function promptText(plan: ProjectStoreAsk): string {
   const lines = [`this checkout ships extensions in ${plan.store}:`, ...plan.drafts.map((line) => `  ${line}`)]
-  return `${lines.join("\n")}\n${choicesText("trust & install?", [
-    ["t", "trust + build + activate"],
-    ["s", "build only"],
-    ["n", "not now"],
-  ])}`
+  return `${lines.join("\n")}\n${choicesText("trust & install?", store_choices)}`
 }
 
 /**
@@ -265,10 +269,159 @@ export function promptText(plan: ProjectStoreAsk): string {
  * trusting or building means.
  */
 export async function applyAnswer(ws: Workspace, answer: StoreAnswer): Promise<SyncReport | null> {
-  const action = actionFor(answer)
+  return applyStoreAction(ws, actionFor(answer))
+}
+
+/**
+ * Run one store action directly — the same commands `applyAnswer` runs, but
+ * from the ACTION rather than a raw `t`/`s`/`n` key. `planCheckout`'s merged
+ * question needs this: on the combined question its own `t`/`s` keys do not
+ * always mean the same `StoreAnswer` the store's own question would have made
+ * of them (its `t` also trusts the agent definitions, which is not a
+ * `StoreAnswer` at all).
+ */
+export async function applyStoreAction(ws: Workspace, action: StoreAction): Promise<SyncReport | null> {
   if (action.trust) await extTrust(ws)
   if (!action.sync) return null
   return extSync(ws, { activate: action.activate })
+}
+
+// ── merging the two start-up questions into one (T2, ext-review-2 §3b) ─────
+
+const agents_choices: ReadonlyArray<[key: string, what: string]> = [
+  ["t", "trust these definitions"],
+  ["n", "not now"],
+]
+
+const both_choices: ReadonlyArray<[key: string, what: string]> = [
+  ["t", "trust everything: extensions + agent definitions"],
+  ["s", "build the extensions only, trust neither"],
+  ["n", "not now"],
+]
+
+/** What no store action at all looks like — the answer for a key that never touches the store. */
+const no_store_action: StoreAction = { trust: false, sync: false, activate: false }
+
+/** What one answer to the merged (or single) start-up question does, in full. */
+export interface CheckoutAction {
+  store: StoreAction
+  agentsTrust: boolean
+}
+
+export interface CheckoutAsk {
+  kind: "ask"
+  text: string
+  choices: ReadonlyArray<[key: string, what: string]>
+  /** What a raw key means here, or null when it answers nothing (the question stays open). */
+  apply: (key: string) => CheckoutAction | null
+}
+
+export type CheckoutPlan = { kind: "none" } | CheckoutAsk
+
+/**
+ * The one start-up question a checkout actually needs (T2, ext-review-2 §3b).
+ *
+ * Two different things can each need a look before a session may compose
+ * them — the workspace extension store (DESIGN §9, `planProjectStore`) and
+ * the agent definitions beside it (tui.md §5.10, `planProjectAgents`) — and
+ * they share everything but the file they are about: the same "only a
+ * keypress moves it" shape, the same "not now is a real answer, asked once"
+ * rule, even the same reason (a local build is how the kernel records trust,
+ * DESIGN §9, so the question has to come before the first one). Stacked as
+ * two separate prompts on a bare terminal, that resemblance read as
+ * repetition instead of the single fact it is.
+ *
+ * `none` when neither needs asking. When only one does, this hands back
+ * EXACTLY today's question for that one, unchanged — the sentence, the keys,
+ * what `apply` does with them. Only when BOTH need a look does the shape
+ * change: one paragraph naming what each holds, three answers that now speak
+ * for both — `t` trusts and installs everything, `s` builds the extensions
+ * without trusting either side, `n` leaves both alone.
+ *
+ * Pure: `apply` says what a key MEANS, not what happens on disk — no
+ * filesystem, no process, nothing awaited. The caller (`main.tsx`
+ * `askAboutCheckout`) is the one with a terminal: it prints `text`, reads a
+ * key until `apply` accepts one, then runs the resulting `CheckoutAction`
+ * (`applyStoreAction`) and remembers the answer on whichever side(s) were
+ * actually part of this question.
+ */
+export function planCheckout(store: ProjectStorePlan, agents: AgentTrustPlan): CheckoutPlan {
+  const storeAsk = store.kind === "ask" ? store : null
+  const agentsAsk = agents.kind === "ask" ? agents : null
+  if (!storeAsk && !agentsAsk) return { kind: "none" }
+
+  if (storeAsk && !agentsAsk) {
+    return {
+      kind: "ask",
+      text: promptText(storeAsk),
+      choices: store_choices,
+      apply: (key) => {
+        const answer = answerFor(key)
+        return answer ? { store: actionFor(answer), agentsTrust: false } : null
+      },
+    }
+  }
+
+  if (!storeAsk && agentsAsk) {
+    return {
+      kind: "ask",
+      text: agentsPromptText(agentsAsk),
+      choices: agents_choices,
+      apply: (key) => {
+        if (key === "t") return { store: no_store_action, agentsTrust: true }
+        if (key === "n" || key === "escape" || key === "return") return { store: no_store_action, agentsTrust: false }
+        return null
+      },
+    }
+  }
+
+  // Neither branch above returned, so by elimination both asked — TypeScript
+  // cannot see that across two independent `if`s, but the three conditions
+  // together are exhaustive over "which of the two is non-null".
+  return {
+    kind: "ask",
+    text: bothPromptText(storeAsk!, agentsAsk!),
+    choices: both_choices,
+    apply: (key) => {
+      if (key === "t") return { store: actionFor("trust"), agentsTrust: true }
+      if (key === "s") return { store: actionFor("build"), agentsTrust: false }
+      if (key === "n" || key === "escape" || key === "return") return { store: no_store_action, agentsTrust: false }
+      return null
+    },
+  }
+}
+
+function agentsPromptText(plan: Extract<AgentTrustPlan, { kind: "ask" }>): string {
+  const lines = [`this checkout defines agents in ${plan.dir}:`, ...plan.names.map((line) => `  ${line}`)]
+  return `${lines.join("\n")}\n${choicesText(
+    "each one is a system prompt a session here would run with. use them?",
+    agents_choices,
+  )}`
+}
+
+function bothPromptText(store: ProjectStoreAsk, agents: Extract<AgentTrustPlan, { kind: "ask" }>): string {
+  const lines = [
+    `this checkout ships extensions in ${store.store}:`,
+    ...store.drafts.map((line) => `  ${line}`),
+    `and defines agents in ${agents.dir}:`,
+    ...agents.names.map((line) => `  ${line}`),
+  ]
+  return `${lines.join("\n")}\n${choicesText("trust & use all of it?", both_choices)}`
+}
+
+/**
+ * What to say once an answer has been carried out, for whichever side(s) it
+ * left untouched — the two "left alone" sentences the individual questions
+ * always had, unchanged, and only for a side this run actually asked about (a
+ * checkout that never showed the agents question does not get told its
+ * agents were left alone).
+ */
+export function checkoutFollowUp(action: CheckoutAction, storeAsked: boolean, agentsAsked: boolean): string[] {
+  const lines: string[] = []
+  const storeDidNothing = !action.store.trust && !action.store.sync && !action.store.activate
+  if (storeAsked && storeDidNothing) lines.push("left alone · `nulya ext trust` whenever you mean to")
+  if (agentsAsked && !action.agentsTrust) lines.push("left alone · /agent still lists them, and starts none")
+  return lines
 }
 
 /** A store root's drafts, without writing anything. */
@@ -337,22 +490,6 @@ export function pinsOf(what: Pick<Contributions, "id" | "tools" | "driverTools">
 }
 
 /**
- * Does turning this package on in `/ext` also mean composing it — a standing
- * entry in `tui-state.json`'s `session_with` (K8)?
- *
- * Yes exactly when the package contributes something a session can only get by
- * being a MEMBER of it: skills, system prompts, slash commands, a front-end
- * module. A pure tool package needs no such entry — its pins bring it in by
- * themselves (DESIGN §5.1) — so writing one would be a second way of saying
- * what the pins already say, and a second thing to take back.
- *
- * The switch used to be an activate alone, and that composed the package
- * because the kernel discovered every id with a `current`. It no longer does:
- * `current` says which version `<id>` means and nothing more, so a front end
- * that only moved the pointer would turn a mode "on" and change nothing a
- * person could see.
- */
-/**
  * The `/<id>` a package that contributes a SYSTEM PROMPT gets for free — "wear
  * this for the next session" — or null when it neither is one nor can be named
  * that way (M4).
@@ -385,15 +522,32 @@ export function derivedCommand(
   }
 }
 
+/**
+ * Does turning this package on in `/ext` also mean composing it — a standing
+ * entry in `tui-state.json`'s `session_with`?
+ *
+ * `false` for a package that contributes a SYSTEM PROMPT (T1, ext-review-2
+ * §3b): wearing that prompt in EVERY session this front end opens is almost
+ * never what pressing Enter on a mode means, and writing it silently is what
+ * used to force a scary "reaches every session" sentence just to say what
+ * Enter had done. Its `current` still moves (`switchOn`), and `derivedCommand`
+ * gives it a `/<id>` that wears it for one session at a time — that is the
+ * command Enter's notice now points to. Standing membership for a mode is
+ * still reachable, just not from here: `[extensions] with` in config, or
+ * `tui.toml`'s `session_with`, are the person's explicit, rare way to say a
+ * prompt belongs in every session.
+ *
+ * Otherwise `true` exactly when the package contributes something a session
+ * can only get by being a MEMBER of it: skills, slash commands, a front-end
+ * module. A pure tool package needs no such entry either way — its pins bring
+ * it in by themselves (DESIGN §5.1) — so writing one would be a second way of
+ * saying what the pins already say, and a second thing to take back.
+ */
 export function standingWith(
   what: Pick<Contributions, "skills" | "systemPrompts" | "commands" | "ui">,
 ): boolean {
-  return (
-    what.skills.length > 0 ||
-    what.systemPrompts.length > 0 ||
-    what.commands.length > 0 ||
-    what.ui !== null
-  )
+  if (what.systemPrompts.length > 0) return false
+  return what.skills.length > 0 || what.commands.length > 0 || what.ui !== null
 }
 
 /**
@@ -423,27 +577,6 @@ export async function builtContributions(
 ): Promise<Contributions | null> {
   if (!existsSync(join(root, id, "versions", version, "extension.json"))) return null
   return await readContributions(ws, id, version, [root])
-}
-
-/**
- * What turning a package that contributes a SYSTEM PROMPT on (or off) actually
- * does, said out loud (tui.md §11, T31/T37, K8).
- *
- * `/ext`'s Enter is one keypress, and for this kind of package its consequence
- * reaches every session this front end opens from now on: the id goes on the
- * standing `session_with` list (`standingWith`), so the prompt is in front of
- * every model, before anybody says anything, and paid for on every step. That
- * asymmetry is the whole reason for this sentence — the switch stays one
- * keypress, nothing here asks for a `y`, but it no longer happens silently, and
- * it names the per-session way to the same thing.
- *
- * There used to be a second pair of sentences here, for a package that had
- * declared its prompt opt-in. Reach is not the package's to declare any more
- * (DESIGN §5.1), so there is one switch with one consequence, and this is it.
- */
-export function promptConsequence(id: string, on: boolean): string {
-  if (!on) return `${id} off · its system prompt no longer enters new sessions`
-  return `${id} active · its system prompt now enters EVERY new session from this front end · /with ${id} wears it for one session instead · Enter again to turn it off`
 }
 
 /**
