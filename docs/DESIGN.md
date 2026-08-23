@@ -484,7 +484,7 @@ exit    0 = 成功；非 0 = 一次**失败的调用**，文本是 `exit <code>`
 
 - 响应 `id` 必须与请求相同，否则 invalid response。
 - **`result` 是任意 JSON 值，按形状交给模型：字符串 = 这个 tool 的文本输出，原样进 `emit`（与 builtin 的输出同地位，模型看到的就是那段文字）；其它值 = 结构化数据，compact JSON。** 不做这一分，返回文本的 tool（读文件、搜索列表）每次都让模型读一个转义过的 JSON 字符串。extension 的 JSON-RPC error 一律折成 `ok=false` 的 `extension error [<code>]: <message>`。
-- 一次调用的 wall-clock 上限来自 `tool.Timeouts.extension_ms`（30s，与 shell 同一张表，§6.1 / base-tools.md §3），**除非该 tool 的冻结 manifest 自己声明了 `timeout_ms`**（§7.2.1，上限 `extension_max_ms` = 600s，与 shell 的上限同值）：到点 kill，并把已捕获的 stderr 一起折成一次**失败的调用**（不是 host error、更不是取消）。native pin 的路径（`ext_tools.Binding`）与 CLI 的路径（`nulya ext run`）读的是同一个 manifest 字段，所以两边不会分岔。
+- **`timeout_ms` 只是模型工具面上一次 call 的上限，不是这个 tool 本身的属性**（D6）：一次调用的 wall-clock 上限来自 `tool.Timeouts.extension_ms`（30s，与 shell 同一张表，§6.1 / base-tools.md §3），**除非该 tool 的冻结 manifest 自己声明了 `timeout_ms`**（§7.2.1，上限 `extension_max_ms` = 600s，与 shell 的上限同值）：到点 kill，并把已捕获的 stderr 一起折成一次**失败的调用**（不是 host error、更不是取消）。这条只管**native pin 的路径**（`ext_tools.Binding`，与将来任何把同一个 tool 摆上模型工具面的路径）——一个模型没法自己盯着一次调用挂了多久，manifest 的作者替它把话说在前面。**`nulya ext run` 缺省不套任何超时**：那是一个人或一段脚本在自己的进程、自己的时钟上跑同一个 tool，manifest 的声明对它没有意义；要一个上限就用 `--timeout-ms N`，给了才夹到同一个 `extension_max_ms`。所以这两条路从此读的是不同的东西，而不是同一个字段的两个入口——分歧是设计，不是疏漏。
 - 只有 `tool/call` 一个 method，用专用 `ToolCallRequest` 类型；**不提前抽通用 JsonRpcRequest**，等第二个 method 真出现。
 - 不做 daemon / persistent worker / streaming / host callback。spawn 一个原生 binary ≈ 毫秒，对比模型 round-trip 秒级可忽略；最高频的 `shell` 是 in-core 内置根本不 spawn。真正的成本是某些 extension 每次调用的重初始化（浏览器 / DB 连接）——**先测量再持久化**（PLAN §3.3）。
 
@@ -515,7 +515,7 @@ draft ──build──▶ versions/v-<hash>（immutable）──activate──�
 
 `SessionComposition.init()` 解析 active extensions，冻住每个的版本，一次冻结 tools / skills / system prompts。被 pin 成 native 的工具在此刻解析出**绝对 `entry_path`**（基于冻结的版本），运行期只按此路径 spawn，**绝不二次读 `current`**。
 
-**discovery 只捡 `always` 的包。** 一个 activate 了但声明 `on_request` 的包（§7.2.1）不进 discovery 集合——它已经被解析过（坏掉的版本照样 `ActiveExtensionBroken`：`on_request` 决定的是**何时**加入，不是"坏了的 activate 算不算坏"），只是不被 append 进成员；随后 `--with <id>` 从同一个 `current` 把它整个带进来。所以 `activate` 对这种包等于**登记**：命令行与前端可以据此列出"可以戴的东西"，而没点名它的场一个 token 都不多付。
+**discovery 只捡 `always` 的包。** 一个 activate 了但**是** `on_request`（写明的，或字段缺省时按形状读出来的——见下）的包（§7.2.1）不进 discovery 集合——它已经被解析过（坏掉的版本照样 `ActiveExtensionBroken`：`on_request` 决定的是**何时**加入，不是"坏了的 activate 算不算坏"），只是不被 append 进成员；随后 `--with <id>` 从同一个 `current` 把它整个带进来。所以 `activate` 对这种包等于**登记**：命令行与前端可以据此列出"可以戴的东西"，而没点名它的场一个 token 都不多付。**字段缺省时的读法按包的形状分**（`manifest.activationOf`）：贡献了 system prompt 的包缺省 `on_request`——那是 activate 单独一下就让机器上**每一场**session 都多付的唯一贡献，缺省该偏向"没决定就别默认全场都戴上"；否则（纯 tool / skill）缺省仍是 `always`，因为在被 pin 或 `--with` 之前它不花任何一场 session 一个 token。这不是新纪律，是把"缺省即安全"从一个常量收紧成一条按形状读的规则：老常量在的时候，一个建于该字段出现之前、恰好带着 system prompt 的包会被读成 `always`，activate 一下就悄悄成了这台机器上每一场 session 的身份——这正是 BUGS #1 撞见的那种重演路径。
 
 **成员解析三条路，一样严。** 一个 extension 进这一场 composition 只有三种来路——discovery（`current` 指着它）、`session new --with`、resume 时 header 里冻的 `active`——三条都是**硬失败**：解析不出来就开不了这一场，绝不静默少一个能力地开场。discovery 从前是唯一的例外（`isExtensionFault` 就 `continue`），而它恰恰是意图最明确的那条：`activate` 是有人明说"这个要生效"。加重的是 §7.2 的首个 active 持有者胜——workspace 那份坏了，静默跳过会让整个 extension 消失，哪怕 user root 里有完好的 active 版本。所以 discovery 里坏掉的 active 版本返回 `ActiveExtensionBroken`，并在**内核里**往 stderr 打一行指名道姓的话（Zig 的 error 不带 payload，光一个错误名说不出是哪个包）：
 
@@ -594,7 +594,7 @@ Tool 是"能执行的能力"，Skill 是"要遵循的方法 / 知识"；不同 r
 
 **报告是数据不是指令。** `run` 打到 stdout 的是子场**最后一条 assistant 文本**（子 agent 被告知最终发言即报告），包在 `<agent-report agent=… session=…>` 里，底下一句合同说明它是待评估的发现而不是命令，并由**代码**附上子 session id（`nulya session events <id>` 能读全程；与 `compact` 追加父指针同一手法）。**leaf 是默认**：只有定义里 `agents` 非空的那一场才带这个包（见上），其余子场根本没有这个 tool。
 
-**600 s 天花板。** `run` 经 `nulya ext run` 调用，而 `ext run` 强制 manifest 的 `timeout_ms`、上限 `tool.Timeouts.extension_max_ms` = 600s（§7.3），manifest 因此顶格要满。将来要解除**不用改设计**：换一种任务命令形态（任务里直接跑 `session step` 循环）即可，上面的协议一个字不变。
+**`ext run` 不套 timeout，上限只在模型面**（D6、§7.3）：`run` 经 `nulya ext run` 调用，而这条 CLI 路径缺省不再夹 manifest 的 `timeout_ms`——那个字段现在只是这个 tool 万一被摆上模型工具面（native pin）时的上限，`run` 从不被 pin，所以它对这条委派路径不生效；manifest 上的 `600000` 因此只是留着的声明，不再是这条路径实际的天花板。
 
 **`std` 不是 "std tool 层"**（PLAN §3.4.1 那句话仍成立）：叫 std 只因它装的是一场编码 session 最先伸手的那几样东西。行为逐条移植自 tcode（零猜测的错误文案、`read` 放大小读 + 自分页 + 无行号、`write` 不覆盖没读过的文件、`grep` smart-case + per-file 上限 + gitignore、`glob` 按 mtime）；它是 §7.3 "string result 原文进 emit" 的第一个 consumer；每个结果自守在 `emit` 预算之下（read ≤ 120 KB、grep ≤ 100 KB），所以 spill 对它们不触发。它唯一跨调用的状态——模型读过哪些文件、看到哪些行——按 §7.6 走**磁盘制品**：`.nulya/scratch/<session-id>/std-freshness.jsonl`（append-only，从 `NULYA_SESSION` 取 id，fork 之后自然是新文件；不在 session 里就没有去重也没有门）。regex 引擎是 vendored 的 mvzr（字节级、无 lookaround / backreference，smart-case 由 wrapper 补）；gitignore / glob 匹配移植自 zeegrep 的两个 core 模块；walker 单线程 + 10 s deadline。契约与进度在 `docs/goals/std.md`。
 
@@ -783,12 +783,14 @@ nulya ext init [--zig] [--user] <id> [tool] | build <path> [--user]
                                                            `--zig` 才是编译骨架（jsonrpc）。`--script` 是无操作别名，保留一个版本期
           | sync [--user] [--activate] [--dry-run]        ← build 这个 root 下的每个 draft（§7.2）
           | seed [--user] [<id>…] [--force] [--dry-run]   ← 把二进制内嵌的自带 draft 写进/更新到该 root（§7.2/§7.8）
-          | run <id>[@<version>] [tool] (<json-args> | --arg k=v …)
+          | run <id>[@<version>] [tool] (<json-args> | --arg k=v …) [--timeout-ms N]
+                                                         ← 缺省不套 timeout（D6/§7.3）；`--timeout-ms` 给了才夹到 `extension_max_ms`
           | activate [--user] <id> <version> | deactivate [--user] <id>   ← 回滚 = activate 旧版本，没有第二个动词
           | prune [--user] [<id>] [--dry-run]             ← 删非 `current` 的版本目录（§7.2）
-          | list | inspect <id>[@<version>] | trust | api [protocol|permissions|examples]
-                                                         ← `inspect <id>` = draft manifest，没有 draft 就退回生效中那个版本的冻结 manifest
+          | list | inspect (<id>[@<version>] | <path>) | trust | api [protocol|permissions|examples]
+                                                         ← `inspect <id>` = **生效中版本**的冻结 manifest（`Roots.firstActive`），没有生效版本即拒（D9，没有 draft 回退）
                                                            `inspect <id>@<version>` = **点名那个版本**的冻结 manifest（session header 记的正是这个形状，§3.4）
+                                                           `inspect <path>`（含路径分隔符，或是带 `extension.json` 的目录）= 那份 draft，未建未冻
 nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--with <id>[@<version>]]… [--pin ext:<id>/<tool>]…
                   [--prompt <file>]…                     ← 把这个文件的字节冻成本场的一个 system block（§5.6）；不安装任何东西
                                                          ← 冻结 composition + 模型身份、写 header，打印 session id

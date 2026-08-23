@@ -117,13 +117,17 @@ export interface Contributions {
   /**
    * When activation brings this package in (DESIGN §7.2.1). `"on_request"`
    * means activating it only REGISTERS it — it joins the sessions that name it
-   * with `--with` and no others — while `"always"` (the default, and what every
-   * manifest written before the field says) means every new session on this
-   * machine.
+   * with `--with` and no others — while `"always"` means every new session on
+   * this machine.
    *
    * The one manifest declaration the kernel enforces, so unlike `readonly` and
-   * `audience` there is no silence to interpret here: absent reads as
-   * `"always"` because that is what the kernel does with it.
+   * `audience` there is no silence to interpret here — but absent is no longer
+   * one constant (DESIGN §7.5): a package carrying a system prompt reads as
+   * `"on_request"` (activation alone would otherwise make every session on the
+   * machine pay for it, whether it asked for the package or not), and a
+   * tool/skill-only package still reads as `"always"`. This is the same
+   * function `manifest.activationOf` runs, mirrored here rather than shared,
+   * because there is no third process to share it with.
    */
   activation: "always" | "on_request"
   /**
@@ -139,10 +143,9 @@ export interface Contributions {
   /**
    * This package's approval-policy narrowing (`manifest.Policy`, DESIGN
    * §7.2.1, tui-plugin D2/D3), or null when the package states no policy at
-   * all. Null and "present but every field empty" are DIFFERENT facts here,
-   * mirroring the kernel's own `Manifest.policy` — an explicit `{}` still
-   * counts as a contribution, never having written `contributes.policy` does
-   * not.
+   * all. An explicit `{}` parses to a policy with nothing in it; for the
+   * kernel that is not a contribution (it narrows nothing), and nothing here
+   * treats it differently from null either.
    */
   policy: PackagePolicy | null
   /**
@@ -285,16 +288,25 @@ function contributionsOf(
     const render = toolUiOf(tool)["render"]
     if (typeof render === "string") toolRender[tool["name"] as string] = render
   }
+  const systemPrompts = stringList(contributes["system_prompts"])
+  const written = manifest?.["activation"]
   return {
     tools: named.map((tool) => tool["name"] as string),
     // The kernel refuses any other word, so only `"driver"` can be here; absent
     // stays absent and `modelTools` is where silence is read.
     driverTools: named.filter((tool) => tool["audience"] === "driver").map((tool) => tool["name"] as string),
     skills: stringList(contributes["skills"]),
-    systemPrompts: stringList(contributes["system_prompts"]),
+    systemPrompts,
     // Top level, beside `permissions` — not a contribution but a fact about
-    // all of them. The kernel refuses any other word, so this is total.
-    activation: manifest?.["activation"] === "on_request" ? "on_request" : "always",
+    // all of them. The kernel refuses any other word, so a written value is
+    // total; an absent one follows the package's shape (`manifest.activationOf`,
+    // DESIGN §7.5): a system prompt makes the default `on_request`.
+    activation:
+      written === "on_request" || written === "always"
+        ? written
+        : systemPrompts.length > 0
+          ? "on_request"
+          : "always",
     commands: commandsOf(contributes["commands"]),
     policy: policyOf(contributes["policy"]),
     toolRender,

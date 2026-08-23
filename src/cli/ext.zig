@@ -773,26 +773,31 @@ fn draftIds(alloc: std.mem.Allocator, io: std.Io, root_dir: std.Io.Dir) ![][]u8 
 
 fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (args.len < 1) {
-        try printErr(io, "usage: nulya ext run <id>[@<version>] [tool] <json-args> | --arg k=v ...\n");
+        try printErr(io, "usage: nulya ext run <id>[@<version>] [tool] <json-args> | --arg k=v ... [--timeout-ms N]\n");
         return 1;
     }
 
-    // Split off `--arg k=v` pairs from positional args ([id, tool?, json?]).
+    // Split off `--arg k=v` pairs and an optional `--timeout-ms N` from
+    // positional args ([id, tool?, json?]).
     var pairs: std.ArrayList([]const u8) = .empty;
     defer pairs.deinit(alloc);
     var positional: std.ArrayList([]const u8) = .empty;
     defer positional.deinit(alloc);
+    var timeout_ms_arg: ?[]const u8 = null;
     {
         var i: usize = 0;
         while (i < args.len) : (i += 1) {
             if (std.mem.eql(u8, args[i], "--arg") and i + 1 < args.len) {
                 try pairs.append(alloc, args[i + 1]);
                 i += 1;
+            } else if (std.mem.eql(u8, args[i], "--timeout-ms") and i + 1 < args.len) {
+                timeout_ms_arg = args[i + 1];
+                i += 1;
             } else try positional.append(alloc, args[i]);
         }
     }
     if (positional.items.len == 0) {
-        try printErr(io, "usage: nulya ext run <id>[@<version>] [tool] <json-args> | --arg k=v ...\n");
+        try printErr(io, "usage: nulya ext run <id>[@<version>] [tool] <json-args> | --arg k=v ... [--timeout-ms N]\n");
         return 1;
     }
     // `<id>` runs the version in effect; `<id>@<version>` runs exactly that
@@ -803,7 +808,7 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     const id = with_ref.id;
     const use_args = pairs.items.len > 0;
     if (!use_args and positional.items.len < 2) {
-        try printErr(io, "usage: nulya ext run <id>[@<version>] [tool] <json-args> | --arg k=v ...\n");
+        try printErr(io, "usage: nulya ext run <id>[@<version>] [tool] <json-args> | --arg k=v ... [--timeout-ms N]\n");
         return 1;
     }
     for (pairs.items) |p| {
@@ -897,14 +902,32 @@ fn extRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
     defer lenv.deinit();
 
+    // `ext run` applies NO timeout by default (D6, DESIGN §7.3/§7.8): the
+    // manifest's own `timeout_ms` bounds a call reaching a model's tool face
+    // (a natively pinned tool, or the loop path a `session step` drives) —
+    // that path is unchanged. A driver running the same tool in its own
+    // process, on its own clock, opts into a bound with `--timeout-ms`; given,
+    // it is clamped to the same ceiling a manifest-declared timeout would be
+    // (`extension_max_ms`). `std.math.maxInt(u32)` (~49.7 days) is the
+    // practical "no bound" sentinel `invoke.Options.timeout_ms` accepts —
+    // there is no `?u32` on that type to carry an explicit "none" through.
+    const timeout_ms: u32 = if (timeout_ms_arg) |raw| blk: {
+        const parsed = std.fmt.parseInt(u32, raw, 10) catch {
+            try printErr(io, "--timeout-ms must be a positive integer\n");
+            return 1;
+        };
+        if (parsed == 0) {
+            try printErr(io, "--timeout-ms must be a positive integer\n");
+            return 1;
+        }
+        break :blk @min(parsed, tool_mod.Timeouts.extension_max_ms);
+    } else std.math.maxInt(u32);
+
     // Resolution (active version, integrity, frozen manifest, tool declaration,
     // exact entry path) is the CLI's job; from here on the helper owns encode,
     // run, decode, and diagnostics.
     const invocation = invoke.invokeTool(alloc, lenv.environment(), entry_abs, cwd_path, tool, args_json, .{
-        // The frozen manifest may say this tool needs longer than the host
-        // default (DESIGN §7.3) — the same declaration a natively pinned tool
-        // carries into its binding, read from the same place.
-        .timeout_ms = spec.?.timeout_ms orelse tool_mod.Timeouts.extension_ms,
+        .timeout_ms = timeout_ms,
         .max_output_bytes = 1 << 20,
         .interpreter = if (rt.interpreter) |ip| ip.forHost() else null,
         // The same frozen manifest a natively pinned binding reads, so `ext run`
@@ -1374,24 +1397,56 @@ fn printLine(alloc: std.mem.Allocator, io: std.Io, to_err: bool, comptime fmt: [
     return printOut(alloc, io, fmt, args);
 }
 
-/// `<id>` prints the draft manifest of the first root that holds one;
-/// `<id>@<version>` prints the FROZEN manifest of that built version, from the
-/// first root holding it. The second form is the one a session can name: its
-/// header records `id@version` for every member (DESIGN §3.4), so this is how
-/// anything answering a question ABOUT A RUNNING SESSION — a driver's approval
-/// policy, a reader of `session list` — reads the manifest that session actually
-/// composed with instead of whatever the draft says today. Without it every such
-/// reader either re-derives the store layout or silently reads the wrong file.
+/// `<id>` prints the manifest of the version IN EFFECT (`Roots.firstActive`) —
+/// what a plain `session new` would compose if it named this id — with NO
+/// draft fallback (D9: inspect answers the STORE; a draft is asked for by
+/// where it lives, below). No active version is a named refusal, not a
+/// silent read of whatever happens to be lying around.
+/// `<id>@<version>` prints the FROZEN manifest of that exact built version,
+/// from the first root holding it — the shape a session header records for
+/// every member (DESIGN §3.4), so this is how anything answering a question
+/// ABOUT A RUNNING SESSION — a driver's approval policy, a reader of
+/// `session list` — reads the manifest that session actually composed with,
+/// instead of whatever `current` points at today.
+/// `<path>` — an argument that names a directory holding `extension.json`,
+/// which a bare separator already makes unambiguous — prints THAT draft,
+/// unbuilt and unfrozen: the one form that answers "what would `ext build`
+/// freeze next", spelled exactly the way `ext build <path>` already takes it.
+/// A path never falls back to an id lookup, and an id never falls back to a
+/// draft: the two questions ("what does this workspace have lying around" vs.
+/// "what does the store say") are asked with different arguments, not
+/// disambiguated by guessing which one the caller meant.
 fn extInspect(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (args.len < 1) {
-        try printErr(io, "usage: nulya ext inspect <id>[@<version>]\n");
+        try printErr(io, "usage: nulya ext inspect <id>[@<version>] | <path>\n");
         return 1;
     }
+    const arg = args[0];
+
+    // Try it as a path first — a bare directory name (no separator) that
+    // happens to hold `extension.json` counts too, the same as `ext build .`
+    // would take it. This can only ever answer for a PATH, never for an
+    // `<id>[@<version>]` reference: `manifest.isValidId` forbids a separator
+    // in an id, so a real id can never collide with this check.
+    if (try draftManifestAtPath(alloc, io, arg)) |bytes| {
+        defer alloc.free(bytes);
+        try printOut(alloc, io, "{s}\n", .{bytes});
+        return 0;
+    }
+    // A path with nothing readable at it is a mistyped path, not an id in
+    // disguise — `nulya ext build <path>` reports the identical fault the
+    // identical way, and falling back to an id lookup here would silently
+    // answer a different question than the one asked.
+    if (looksLikePathArg(arg)) {
+        try printErrFmt(alloc, io, "ext inspect: no readable extension.json in '{s}'\n", .{arg});
+        return 1;
+    }
+
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     var search = try RootSearch.open(alloc, io, try cwdRealPath(io, &cwd_buf));
     defer search.deinit(alloc);
 
-    const ref = withRef(args[0]);
+    const ref = withRef(arg);
     if (ref.version) |v| {
         // A malformed version is simply a version no root holds — inspect is a
         // projection, so it answers rather than faults.
@@ -1407,18 +1462,8 @@ fn extInspect(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
         return 1;
     }
 
-    // Bare id: the draft if there is one — it is what `ext build` would freeze
-    // next — and otherwise the version in effect. A store filled by `ext build
-    // <path>` holds no draft at all (DESIGN §7.4), and answering "no such
-    // extension" about something `ext list` shows as active is just wrong.
-    const draft_rel = try std.fs.path.join(alloc, &.{ ref.id, "extension.json" });
-    defer alloc.free(draft_rel);
-    for (search.roots.entries) |entry| {
-        const bytes = entry.dir.readFileAlloc(io, draft_rel, alloc, .limited(1 << 20)) catch continue;
-        defer alloc.free(bytes);
-        try printOut(alloc, io, "{s}\n", .{bytes});
-        return 0;
-    }
+    // Bare id: the version IN EFFECT, never a draft (D9) — a draft is the
+    // `<path>` form above, tried and ruled out before we ever got here.
     if (try search.roots.firstActive(alloc, ref.id)) |active| {
         defer alloc.free(active.version);
         const manifest_rel = try search.roots.store(active.root).versionManifestPath(alloc, ref.id, active.version);
@@ -1429,8 +1474,32 @@ fn extInspect(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u
             return 0;
         } else |_| {}
     }
-    try printOut(alloc, io, "no such extension '{s}'\n", .{args[0]});
+    try printErrFmt(alloc, io, "no active version of '{s}'; see `nulya ext list`\n", .{ref.id});
     return 1;
+}
+
+/// Whether an `ext inspect` argument names a PATH rather than an
+/// `<id>[@<version>]` store reference: a path separator makes that
+/// unambiguous on its own. `manifest.isValidId` forbids `/` and `\` in an id,
+/// so this can never misclassify a real id.
+fn looksLikePathArg(arg: []const u8) bool {
+    return std.mem.indexOfAny(u8, arg, "/\\") != null;
+}
+
+/// Read `<arg>/extension.json` as a draft manifest — the exact file `ext
+/// build <arg>` would freeze next. Null when there is nothing readable there
+/// (arg is not a directory, has no manifest, or is a plain id with no local
+/// directory of the same name); the caller decides from `looksLikePathArg`
+/// whether that null means "fall back to a store lookup" or "report the path
+/// as broken". `error.Canceled` propagates — a host fault, never "not found".
+fn draftManifestAtPath(alloc: std.mem.Allocator, io: std.Io, arg: []const u8) !?[]u8 {
+    const rel = try std.fs.path.join(alloc, &.{ arg, "extension.json" });
+    defer alloc.free(rel);
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, rel, alloc, .limited(1 << 20)) catch |err| switch (err) {
+        error.Canceled => return err,
+        else => return null,
+    };
+    return bytes;
 }
 
 /// `ext api` is a curated `nulya src` (PLAN §3.10): the wire-protocol topic prints

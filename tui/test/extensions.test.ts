@@ -474,10 +474,12 @@ test("what a built version contributes is read from the root that sync wrote it 
 
     const what = await builtContributions(store, root, "mode.pkg", line.version!)
     expect(what?.systemPrompts).toEqual(["prompts/identity.md"])
-    // It did not say when activation brings it in, so it means what every
-    // manifest written before that field meant: every session on this machine.
-    expect(what?.activation).toBe("always")
-    expect(autoActivatable(what)).toBe(false)
+    // It did not say when activation brings it in, and it carries a system prompt, so the
+    // default follows its shape (DESIGN §7.5): registered by activation, worn per session.
+    expect(what?.activation).toBe("on_request")
+    // …and registering an on_request package changes no session, so the start-up
+    // sync may do it (T37) — the same reason `evolution` is auto-activatable.
+    expect(autoActivatable(what)).toBe(true)
   } finally {
     store.cleanup()
   }

@@ -964,7 +964,7 @@ test "inactive extension contributions do not enter composition" {
     defer alloc.free(cwd);
 
     const manifest_bytes =
-        \\{"schema":"nulya.extension/v2","id":"inactive","contributes":{"skills":["skills/demo"],"system_prompts":["prompts/base.md"]}}
+        \\{"schema":"nulya.extension/v2","id":"inactive","activation":"always","contributes":{"skills":["skills/demo"],"system_prompts":["prompts/base.md"]}}
     ;
     const version = try testkit.writeFrozenVersion(alloc, io, tmp.dir, "inactive", manifest_bytes, &.{
         .{ .rel = "skills/demo/SKILL.md", .bytes = "---\nname: demo\ndescription: demo skill\n---\nbody\n" },
@@ -991,7 +991,7 @@ test "an on_request package is registered by activation, and joins only the sess
     // other a mode. Both contribute a system prompt and a skill, so what is
     // being tested is WHEN each joins — never which parts of it do.
     const policy_bytes =
-        \\{"schema":"nulya.extension/v2","id":"policy","contributes":{"system_prompts":["prompts/base.md"]}}
+        \\{"schema":"nulya.extension/v2","id":"policy","activation":"always","contributes":{"system_prompts":["prompts/base.md"]}}
     ;
     const mode_bytes =
         \\{"schema":"nulya.extension/v2","id":"mode","activation":"on_request","contributes":{"system_prompts":["prompts/base.md"]}}
@@ -1048,7 +1048,7 @@ test "--with brings a built-but-inactive version into one session, overrides an 
     defer alloc.free(cwd);
 
     const manifest_bytes =
-        \\{"schema":"nulya.extension/v2","id":"mode","contributes":{"system_prompts":["prompts/base.md"]}}
+        \\{"schema":"nulya.extension/v2","id":"mode","activation":"always","contributes":{"system_prompts":["prompts/base.md"]}}
     ;
     const v1 = try testkit.writeFrozenVersion(alloc, io, tmp.dir, "mode", manifest_bytes, &.{.{ .rel = "prompts/base.md", .bytes = "V1" }});
     defer alloc.free(v1);
@@ -1108,7 +1108,7 @@ test "--with of a resolvable extension followed by one that fails to resolve rep
     defer alloc.free(cwd);
 
     const manifest_bytes =
-        \\{"schema":"nulya.extension/v2","id":"good","contributes":{"system_prompts":["prompts/base.md"]}}
+        \\{"schema":"nulya.extension/v2","id":"good","activation":"always","contributes":{"system_prompts":["prompts/base.md"]}}
     ;
     const v_good = try testkit.writeFrozenVersion(alloc, io, tmp.dir, "good", manifest_bytes, &.{.{ .rel = "prompts/base.md", .bytes = "hello" }});
     defer alloc.free(v_good);
@@ -1142,10 +1142,10 @@ test "system prompt ordering is deterministic by pinned extension id and manifes
     defer alloc.free(cwd);
 
     const manifest_b =
-        \\{"schema":"nulya.extension/v2","id":"b","contributes":{"system_prompts":["prompts/b1.md"]}}
+        \\{"schema":"nulya.extension/v2","id":"b","activation":"always","contributes":{"system_prompts":["prompts/b1.md"]}}
     ;
     const manifest_a =
-        \\{"schema":"nulya.extension/v2","id":"a","contributes":{"system_prompts":["prompts/a1.md","prompts/a2.md"]}}
+        \\{"schema":"nulya.extension/v2","id":"a","activation":"always","contributes":{"system_prompts":["prompts/a1.md","prompts/a2.md"]}}
     ;
     const vb = try testkit.writeFrozenVersion(alloc, io, tmp.dir, "b", manifest_b, &.{.{ .rel = "prompts/b1.md", .bytes = "B1" }});
     defer alloc.free(vb);
@@ -1175,7 +1175,7 @@ test "inline prompts land after every member's block and before the skills catal
     defer alloc.free(cwd);
 
     const manifest_bytes =
-        \\{"schema":"nulya.extension/v2","id":"b","contributes":{"system_prompts":["prompts/b1.md"],"skills":["skills/probe"]}}
+        \\{"schema":"nulya.extension/v2","id":"b","activation":"always","contributes":{"system_prompts":["prompts/b1.md"],"skills":["skills/probe"]}}
     ;
     const v = try testkit.writeFrozenVersion(alloc, io, tmp.dir, "b", manifest_bytes, &.{
         .{ .rel = "prompts/b1.md", .bytes = "B1" },

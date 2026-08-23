@@ -696,6 +696,9 @@ test("/ext marks a package that contributes a system prompt as a mode, and says 
       JSON.stringify({
         schema: "nulya.extension/v2",
         id: "house.style",
+        // Explicit: a prompt-only package now DEFAULTS to on_request (DESIGN §7.5); this
+        // test is about the always path — the one whose switch costs every session.
+        activation: "always",
         contributes: { system_prompts: ["prompts/identity.md"] },
       }),
     )

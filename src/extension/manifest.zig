@@ -402,16 +402,33 @@ pub const Manifest = struct {
     /// `validate` refusal (`InvalidActivation`) instead of a silent default.
     ///
     /// Unlike `audience`, the reading of ABSENT is decided here rather than at
-    /// each reader (`activationOf` → `.always`), because it is a fact about the
-    /// file format and not a judgement: every manifest written before this
-    /// field existed was activated machine-wide, and must keep being.
+    /// each reader (`activationOf`) — but it is no longer one constant. A
+    /// system prompt is the one contribution that activation alone makes every
+    /// session on the machine pay for: it lands in the system blocks of every
+    /// session opened afterwards, not only the ones that asked for it. Reading
+    /// silence as `.always` regardless of shape is exactly how a forgotten
+    /// field turns into a machine-wide identity change nobody decided (BUGS
+    /// #1: a manifest built before this field existed carried a prompt, the
+    /// old constant default said `.always`, and every session on that machine
+    /// woke up believing it was a different package). So the default now
+    /// follows the package's own shape (`activationOf`): "backward compatible"
+    /// for the old constant meant compatible with the handful of manifests
+    /// this repository ships — not a reason to keep a default that can turn
+    /// silence into every session's identity.
     activation: ?[]const u8 = null,
 
-    /// When activation brings this package in. Absent means `.always` (see the
-    /// field), and so does a word `validate` would refuse — on a validated
-    /// manifest that case cannot occur.
+    /// When activation brings this package in. Absent means `.on_request` if
+    /// this package carries a system prompt — activation is the moment every
+    /// session opened afterwards starts paying for it, so silence should not
+    /// read as "every session, always" — else `.always` (a tool/skill-only
+    /// package has nothing that costs a session anything until it is pinned or
+    /// named with `--with`, so machine-wide is the harmless default it always
+    /// was). A word `validate` would refuse reads the same way `.always` used
+    /// to — on a validated manifest that case cannot occur.
     pub fn activationOf(self: Manifest) Activation {
-        const written = self.activation orelse return .always;
+        const written = self.activation orelse {
+            return if (self.system_prompts.len > 0) .on_request else .always;
+        };
         return Activation.fromString(written) orelse .always;
     }
 
@@ -1275,10 +1292,11 @@ test "a tool may declare who it is for; silence is not a claim and an unknown wo
     ));
 }
 
-test "a package says when activation brings it in; silence is `always` and an unknown word is refused" {
+test "a package says when activation brings it in; silence follows shape and an unknown word is refused" {
     const alloc = std.testing.allocator;
 
-    // The mode: activation registers it, and only a session that names it gets it.
+    // The mode, explicit: activation registers it, and only a session that
+    // names it gets it. Explicit always wins over the shape default below.
     var mode = try parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"evolution","activation":"on_request","contributes":{"system_prompts":["p.md"]}}
     );
@@ -1286,8 +1304,10 @@ test "a package says when activation brings it in; silence is `always` and an un
     try mode.validate();
     try std.testing.expectEqual(@as(Activation, .on_request), mode.activationOf());
 
-    // Absent is `always`, and that reading is fixed HERE rather than per reader:
-    // every manifest written before this field meant machine-wide, and still does.
+    // Absent on a package with NO system prompt is `.always`, and that reading
+    // is fixed HERE rather than per reader: a tool/skill-only package has
+    // nothing that costs a session anything until pinned or `--with`, so
+    // machine-wide is the harmless default it always was.
     var old = try parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"std","contributes":{"skills":["s"]}}
     );
@@ -1295,6 +1315,39 @@ test "a package says when activation brings it in; silence is `always` and an un
     try old.validate();
     try std.testing.expect(old.activation == null);
     try std.testing.expectEqual(@as(Activation, .always), old.activationOf());
+
+    // Absent on a package that DOES carry a system prompt is `.on_request` —
+    // activation is the moment every session opened afterwards starts paying
+    // for that prompt, so silence must not read as "every session, always"
+    // (BUGS #1: exactly this silent reading is how one machine's sessions all
+    // woke up believing they were a mode they never asked to wear).
+    var prompt_only = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"b","contributes":{"system_prompts":["p.md"]}}
+    );
+    defer prompt_only.deinit();
+    try prompt_only.validate();
+    try std.testing.expect(prompt_only.activation == null);
+    try std.testing.expectEqual(@as(Activation, .on_request), prompt_only.activationOf());
+
+    // Absent on a TOOL-only package (no prompt) is still `.always` — the shape
+    // rule only changes silence for packages that carry a system prompt.
+    var tool_only = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"c","runtime":{"entry":"bin/c"},"contributes":{"tools":[{"name":"t","input":{}}]}}
+    );
+    defer tool_only.deinit();
+    try tool_only.validate();
+    try std.testing.expect(tool_only.activation == null);
+    try std.testing.expectEqual(@as(Activation, .always), tool_only.activationOf());
+
+    // An explicit `always` on a prompt-carrying package is honored as
+    // written — the shape default only fills silence, never overrides a
+    // decision the author actually made.
+    var explicit_always = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"d","activation":"always","contributes":{"system_prompts":["p.md"]}}
+    );
+    defer explicit_always.deinit();
+    try explicit_always.validate();
+    try std.testing.expectEqual(@as(Activation, .always), explicit_always.activationOf());
 
     // A word outside the two is a named refusal: read as the default, a typo
     // would put a mode's prompt into every session on the machine.

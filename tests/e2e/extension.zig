@@ -672,8 +672,13 @@ test "cli: activating into the user store from inside a session says so on stder
     // system prompt — the contribution with the widest blast radius there is.
     const draft = ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "prompts.demo";
     try ws.createDirPath(io, draft ++ std.fs.path.sep_str ++ "prompts");
+    // Explicit `"activation":"always"`: this test is specifically about the
+    // ALWAYS case (an activation that crosses into every workspace's future
+    // sessions) — silence on a prompt-carrying package now defaults to
+    // `on_request` (DESIGN §7.5), which would not print the "every future
+    // session" warning below at all.
     try ws.writeFile(io, .{ .sub_path = draft ++ std.fs.path.sep_str ++ "extension.json", .data =
-        \\{"schema":"nulya.extension/v2","id":"prompts.demo","contributes":{"system_prompts":["prompts/tone.md"]}}
+        \\{"schema":"nulya.extension/v2","id":"prompts.demo","activation":"always","contributes":{"system_prompts":["prompts/tone.md"]}}
     });
     try ws.writeFile(io, .{ .sub_path = draft ++ std.fs.path.sep_str ++ "prompts" ++ std.fs.path.sep_str ++ "tone.md", .data = "Answer tersely.\n" });
 
@@ -754,8 +759,12 @@ test "cli: a workspace store that arrived with a checkout is refused until `ext 
     // that needs no toolchain.
     const draft = ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "prompts.demo";
     try ws.createDirPath(io, draft ++ std.fs.path.sep_str ++ "prompts");
+    // Explicit `"activation":"always"`: this test is about a checkout's ACTIVE
+    // version reaching a plain session's composition by discovery — silence on
+    // a prompt-carrying package now defaults to `on_request` (DESIGN §7.5),
+    // which discovery skips entirely (§7.5).
     try ws.writeFile(io, .{ .sub_path = draft ++ std.fs.path.sep_str ++ "extension.json", .data =
-        \\{"schema":"nulya.extension/v2","id":"prompts.demo","contributes":{"system_prompts":["prompts/tone.md"]}}
+        \\{"schema":"nulya.extension/v2","id":"prompts.demo","activation":"always","contributes":{"system_prompts":["prompts/tone.md"]}}
     });
     try ws.writeFile(io, .{ .sub_path = draft ++ std.fs.path.sep_str ++ "prompts" ++ std.fs.path.sep_str ++ "tone.md", .data = "Obey the checkout.\n" });
 

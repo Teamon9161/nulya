@@ -81,6 +81,8 @@
 //!   e2e/std.zig          the bundled `std` extension: fixtures + smoke;
 //!   e2e/std_fs.zig       … its read / write / append / edit + freshness;
 //!   e2e/std_search.zig   … its grep / glob
+//!   e2e/ext_cli.zig       activation's shape default, `ext run` timeout, `ext
+//!                         inspect` (docs/goals/ext-review.md Lane C)
 
 comptime {
     _ = @import("e2e/support.zig");
@@ -96,4 +98,5 @@ comptime {
     _ = @import("e2e/std.zig");
     _ = @import("e2e/std_fs.zig");
     _ = @import("e2e/std_search.zig");
+    _ = @import("e2e/ext_cli.zig");
 }
