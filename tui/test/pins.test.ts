@@ -327,7 +327,8 @@ function entry(id: string, current: string, tools: string[]): ExtensionEntry {
     driverTools: [],
     skills: [],
     systemPrompts: [],
-    activation: "always" as const,
+    commands: [],
+    ui: null,
     permissions: { fs: [], network: [], process: [] },
     root: ".nulya/extensions",
     shadowed: false,
@@ -357,35 +358,46 @@ test("a tool its package brings into every session reads as on, and this panel w
  * What a standing list may legally name, and therefore what a stale one gets
  * repaired against (`App.healStandingPins`, `ExtView.dropOrphanPins`).
  *
- * The first condition is the kernel's (no `current` = nothing for the pin to
- * bring in, and no session); the second is this front end's (a standing pin on
- * an `on_request` package would wear that mode in every session).
+ * One condition, the kernel's: no `current` means nothing for the pin to bring
+ * in, and no session. There used to be a second, this front end's own — a
+ * standing pin on a package that declared itself opt-in would wear that mode in
+ * every session — and it went with the declaration (K8): reach is stated by the
+ * person now, in `[extensions] with` or in `/ext`, both of them visible.
  */
-test("only a package composed into every session offers a tool a standing pin can name", () => {
+test("a package with a resolvable current offers every tool a standing pin can name", () => {
   const entry = (
     id: string,
     tools: string[],
-    over: Partial<{ current: string | null; shadowed: boolean; activation: "always" | "on_request" }> = {},
-  ) => ({ id, tools, current: "v-1", shadowed: false, activation: "always" as const, ...over })
+    over: Partial<{ current: string | null; shadowed: boolean }> = {},
+  ) => ({ id, tools, current: "v-1", shadowed: false, ...over })
 
   const available = resolvableStandingPins([
     entry("std", ["read", "edit"]),
     // Driver tools are in: `audience` is the package's advice about whose face
     // a tool belongs on, not a rule about what may be pinned.
     entry("agent", ["agent", "run"]),
-    // Registered, not composed: `--with` is the only way in (DESIGN §7.2.1).
-    entry("plan", ["propose", "todo"], { activation: "on_request" }),
+    // A mode's tools are in too, now. Pinning one is a real decision a person
+    // can make and take back — and the pin brings its package into every
+    // session, which is the same thing `[extensions] with` would say.
+    entry("plan", ["propose", "todo"]),
     // Nothing points at a version, and an earlier root already answers for this
     // id: neither can resolve either.
     entry("guide", ["guide"], { current: null }),
     entry("compact", ["compact"], { shadowed: true }),
   ])
-  expect(available).toEqual(["ext:std/read", "ext:std/edit", "ext:agent/agent", "ext:agent/run"])
-
-  // The three lines that made every `session new` refuse, found by the same
-  // predicate that repairs them.
-  expect(orphanPins(["ext:std/read", "ext:plan/propose", "ext:ask/ask"], available)).toEqual([
+  expect(available).toEqual([
+    "ext:std/read",
+    "ext:std/edit",
+    "ext:agent/agent",
+    "ext:agent/run",
     "ext:plan/propose",
+    "ext:plan/todo",
+  ])
+
+  // The two lines that would make every `session new` refuse, found by the same
+  // predicate that repairs them.
+  expect(orphanPins(["ext:std/read", "ext:guide/guide", "ext:ask/ask"], available)).toEqual([
+    "ext:guide/guide",
     "ext:ask/ask",
   ])
 })

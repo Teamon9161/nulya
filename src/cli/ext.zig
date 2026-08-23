@@ -586,7 +586,7 @@ fn appendActivation(
     if (result.already_built and current != null) {
         return out.print(" (current stays {s})", .{current.?});
     }
-    try warnUserScope(alloc, io, st, result.id, result.version, mode.user);
+    try warnUserScope(alloc, io, result.id, result.version, mode.user);
     try st.activate(alloc, result.id, result.version);
     depositSessionNote(alloc, io, root_dir, result.id, result.version) catch {};
     try out.writeAll(" -> current");
@@ -1066,7 +1066,7 @@ fn extActivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     var ext_root = try store.openOrCreateRoot(io, cwd_path, target);
     defer ext_root.close(io);
     const st = store.Store.init(io, ext_root);
-    try warnUserScope(alloc, io, st, id, version, flags.user);
+    try warnUserScope(alloc, io, id, version, flags.user);
     st.activate(alloc, id, version) catch |err| {
         try printOut(alloc, io, "activate failed: {s} ({s}@{s} in {s})\n", .{ @errorName(err), id, version, target });
         if (err == error.VersionNotFound) {
@@ -1106,17 +1106,21 @@ fn extActivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
 }
 
 /// Say, on stderr, when a model running inside a session reaches OUT of that
-/// session's workspace: `--user` puts the version in the user store, where it is
-/// active for every workspace on this machine (DESIGN §7.2), and if it
-/// contributes a system prompt that text joins the system blocks of every future
-/// session (DESIGN §7.5). Neither is refused — the model is allowed to do this,
-/// and a refusal here would be a policy in the kernel's shell. What is not
-/// allowed is doing it INVISIBLY. Silent outside `--user`, and silent when no
-/// session is running.
+/// session's workspace: `--user` moves `current` in the user store, so `<id>`
+/// means this version for every workspace on this machine (DESIGN §7.2). It is
+/// not refused — the model is allowed to do this, and a refusal here would be a
+/// policy in the kernel's shell. What is not allowed is doing it INVISIBLY.
+/// Silent outside `--user`, and silent when no session is running.
+///
+/// The sentence used to have a second half about the package's system prompt
+/// entering every future session. That is no longer what activating does: a
+/// package joins a session only when somebody names it (config's `[extensions]
+/// with`, or `--with`, DESIGN §5.1), so this move changes WHICH VERSION those
+/// sessions get and nothing about who gets it. Which is why no manifest is read
+/// here any more.
 fn warnUserScope(
     alloc: std.mem.Allocator,
     io: std.Io,
-    st: store.Store,
     id: []const u8,
     version: []const u8,
     user: bool,
@@ -1125,20 +1129,10 @@ fn warnUserScope(
     const sid = (try envSessionId(alloc)) orelse return;
     defer alloc.free(sid);
 
-    // Best effort: an unreadable manifest only costs the extra clause. The
-    // clause is about REACH, so it asks both questions reach depends on: a
-    // package whose prompt only joins the sessions that NAME it (`on_request`,
-    // DESIGN §7.2.1) reaches nobody who did not ask, and saying otherwise would
-    // be the frightening half of a sentence that is not true.
-    const prompt_reach: bool = blk: {
-        var m = st.readManifest(alloc, id, version, .structural) catch break :blk false;
-        defer m.deinit();
-        break :blk m.system_prompts.len != 0 and m.activationOf() == .always;
-    };
     const line = try std.fmt.allocPrint(
         alloc,
-        "note: activating {s}@{s} in the user store from inside session {s}: it becomes active for every workspace on this machine{s}\n",
-        .{ id, version, sid, if (prompt_reach) " and its system prompt enters every future session" else "" },
+        "note: activating {s}@{s} in the user store from inside session {s}: {s} now means this version for every workspace on this machine\n",
+        .{ id, version, sid, id },
     );
     defer alloc.free(line);
     try printErr(io, line);
@@ -1188,21 +1182,22 @@ fn extDeactivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
 }
 
 /// Every extension directory in every root, in search order, with the root it
-/// came from. An ACTIVE id that an earlier root also has active is marked
-/// `(shadowed)`: only the first active copy is ever used (`Roots.listActive`),
-/// and silently hiding the duplicate is how a stale user-level copy becomes a
-/// mystery. A directory without `current` shadows nothing and is listed as
-/// `(inactive)` for its root alone — unless it holds no built version either, in
-/// which case it is a bare writer lease, not an extension, and is skipped.
+/// came from. The second column is exactly what `current` points at, and nothing
+/// more: which version `<id>` means when somebody names it without one. An id
+/// whose `current` an earlier root also sets is marked `(shadowed)` — only the
+/// first is ever used (`Roots.firstActive`), and silently hiding the duplicate is
+/// how a stale user-level copy becomes a mystery. A directory with no `current`
+/// shadows nothing and says `(no current)` for its root alone — unless it holds
+/// no built version either, in which case it is a bare writer lease, not an
+/// extension, and is skipped.
 ///
-/// A listed version also says what it CONTRIBUTES (`[tools skills prompt]`, from
-/// its frozen manifest). `prompt` is the one that earns the column: an activated
-/// package's `system_prompts` enter the system blocks of every future session
-/// (DESIGN §7.5) with no gate anywhere, and until now the only way to see that
-/// was to read the manifest by hand. A package that says `on_request` is the
-/// exception and says so in a column of its own, because for it `active` means
-/// registered rather than everywhere (DESIGN §7.2.1). Unreadable manifest → no
-/// marker, never a failed listing.
+/// Two more markers, and between them they answer "will a session have this?".
+/// `[tools skills prompt]` is what the version CONTRIBUTES, from its frozen
+/// manifest; `[with]` says this id is in the merged config's `[extensions] with`,
+/// which is the only standing way a package joins every session here (DESIGN
+/// §5.1). Without the second, `prompt` reads as a threat it is not: a system
+/// prompt costs a session nothing until something names its package.
+/// Unreadable manifest → no contribution marker, never a failed listing.
 fn extList(alloc: std.mem.Allocator, io: std.Io) !u8 {
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     var search = try RootSearch.open(alloc, io, try cwdRealPath(io, &cwd_buf));
@@ -1250,11 +1245,12 @@ fn extList(alloc: std.mem.Allocator, io: std.Io) !u8 {
                 try alloc.dupe(u8, "");
             defer alloc.free(contributes);
             printed += 1;
-            try printOut(alloc, io, "{s}\t{s}\t{s}{s}{s}\n", .{
+            try printOut(alloc, io, "{s}\t{s}\t{s}{s}{s}{s}\n", .{
                 dir_entry.name,
-                active orelse "(inactive)",
+                active orelse "(no current)",
                 entry.spec,
                 contributes,
+                if (sliceHasString(search.with, dir_entry.name)) "\t[with]" else "",
                 if (shadowed) "\t(shadowed)" else "",
             });
         }
@@ -1263,11 +1259,9 @@ fn extList(alloc: std.mem.Allocator, io: std.Io) !u8 {
     return 0;
 }
 
-/// `\t[tools skills prompt]` for what this frozen version contributes, plus
-/// `\ton-request` when the package says activation only REGISTERS it
-/// (`manifest.Activation`, DESIGN §7.2.1) — without that word `active` reads as
-/// "in every session", which for a mode it is not. Empty string when the version
-/// contributes nothing nameable or cannot be read. Caller owns the result.
+/// `\t[tools skills prompt]` for what this frozen version contributes. Empty
+/// string when the version contributes nothing nameable or cannot be read.
+/// Caller owns the result.
 fn contributionMarker(alloc: std.mem.Allocator, roots: *const roots_mod.Roots, entry: roots_mod.Roots.ActiveEntry) ![]u8 {
     // `.structural`: this column reports what a version DECLARES. Re-digesting
     // every megabyte of built binary to print `[tools]` made `ext list` cost
@@ -1293,7 +1287,6 @@ fn contributionMarker(alloc: std.mem.Allocator, roots: *const roots_mod.Roots, e
         first = false;
     }
     try out.writer.writeByte(']');
-    if (m.activationOf() == .on_request) try out.writer.writeAll("\ton-request");
     return out.toOwnedSlice();
 }
 
@@ -1556,12 +1549,16 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             \\  extension — the sanitized environment, NULYA_EXE/NULYA_SESSION, timeout,
             \\  being killed as a whole tree — is identical either way. `tools[].name` /
             \\  `.input` / `.timeout_ms` (this tool's own cap on a MODEL-FACE call, default
-            \\  30s, ceiling 600s); `skills`; `system_prompts`; `activation` (`"always"` or
-            \\  `"on_request"` — absent defaults to whichever the package's own shape
-            \\  implies: contributing a system prompt defaults to `"on_request"`, since that
-            \\  is the one contribution that reaches every session the moment it is
-            \\  activated, and anything else defaults to `"always"`; an explicit value
-            \\  always wins over that default).
+            \\  30s, ceiling 600s); `skills`; `system_prompts`.
+            \\
+            \\  A manifest cannot say which sessions carry it. That is two decisions, and
+            \\  both are the person's, in config or on one command line: MEMBERSHIP
+            \\  (`[extensions] with`, or `session new --with <id>[@<version>]`) and the
+            \\  TOOL FACE (`[registry] pinned_native_tools`, or `session new --pin
+            \\  ext:<id>/<tool>`, which brings its own package in). `nulya ext activate` is
+            \\  on neither axis: it says which version `<id>` means, and nothing else.
+            \\  `nulya config show` prints both standing lists; `session new --bare`
+            \\  ignores them and composes from its own flags alone.
             \\
             \\  DRIVER DECLARATIONS, parsed, frozen into the version, and never enforced by
             \\  the kernel: a claim for whoever DRIVES a session (a front end, `nulya ext
@@ -1624,9 +1621,10 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             \\  nulya ext activate my.helper v-<older>        # going back is the same verb: a pointer move, never a rebuild
             \\
             \\  # A mode — a package a session should CHOOSE, not one every session lives in.
-            \\  # Its manifest says `"activation": "on_request"`, so activating it only registers it.
+            \\  # Nothing in the manifest marks it: it is simply left out of `[extensions]
+            \\  # with`, so it reaches only the sessions that name it.
             \\  nulya ext build extensions/evolution          # prints v-<hash>
-            \\  nulya ext activate evolution v-<hash>         # registered; no session changed
+            \\  nulya ext activate evolution v-<hash>         # `evolution` now means this version
             \\  nulya session new --with evolution            # this session wears it, at `current`
             \\  nulya session new --with evolution@v-<hash>   # or name a build, activated or not
             \\
@@ -1664,13 +1662,13 @@ test "every manifest parse/validate error is a draft fault; a host fault is not"
     // The whole surface `manifest.parse` and `Manifest.validate` can produce,
     // so `ext build` answers with a sentence rather than a stack trace.
     for ([_]anyerror{
-        error.InvalidJson,             error.NotAnObject,               error.MissingField,
-        error.WrongType,               error.UnsupportedSchema,         error.InvalidId,
-        error.MissingRuntime,          error.InvalidEntry,              error.InvalidInterpreter,
-        error.NoContributions,         error.InvalidToolName,           error.ReservedToolName,
-        error.DuplicateToolName,       error.InvalidTimeout,            error.InvalidAudience,
-        error.InvalidActivation,       error.InvalidSkillPath,          error.DuplicateSkillPath,
-        error.InvalidSystemPromptPath, error.DuplicateSystemPromptPath,
+        error.InvalidJson,               error.NotAnObject,        error.MissingField,
+        error.WrongType,                 error.UnsupportedSchema,  error.InvalidId,
+        error.MissingRuntime,            error.InvalidEntry,       error.InvalidInterpreter,
+        error.NoContributions,           error.InvalidToolName,    error.ReservedToolName,
+        error.DuplicateToolName,         error.InvalidTimeout,     error.InvalidAudience,
+        error.InvalidSkillPath,          error.DuplicateSkillPath, error.InvalidSystemPromptPath,
+        error.DuplicateSystemPromptPath,
     }) |err| {
         std.testing.expect(isManifestFault(err)) catch |e| {
             std.debug.print("{s} should be reported as a bad manifest\n", .{@errorName(err)});

@@ -22,7 +22,7 @@ import {
 } from "../src/ui/overlays/ExtView.tsx"
 import { displayWidth } from "../src/ui/columns.ts"
 import { listExtensions, readHeader } from "../src/nulya/files.ts"
-import { sessionPins } from "../src/state/tui_state.ts"
+import { sessionPins, sessionWith } from "../src/state/tui_state.ts"
 import { App } from "../src/ui/App.tsx"
 import { StyleContext, createStyle, type Style } from "../src/render/theme.ts"
 import { FoldContext, createFoldStore } from "../src/state/folds.ts"
@@ -439,7 +439,8 @@ test("a driver tool is listed with no checkbox: there is no pin for it to be wro
     driverTools,
     skills: [],
     systemPrompts: [],
-    activation: "always" as const,
+    commands: [],
+    ui: null,
     permissions: { fs: [], network: [], process: [] },
     root: "",
     shadowed: false,
@@ -696,9 +697,6 @@ test("/ext marks a package that contributes a system prompt as a mode, and says 
       JSON.stringify({
         schema: "nulya.extension/v2",
         id: "house.style",
-        // Explicit: a prompt-only package now DEFAULTS to on_request (DESIGN §7.5); this
-        // test is about the always path — the one whose switch costs every session.
-        activation: "always",
         contributes: { system_prompts: ["prompts/identity.md"] },
       }),
     )
@@ -725,8 +723,12 @@ test("/ext marks a package that contributes a system prompt as a mode, and says 
         20_000,
       )
       const on = await settle(setup, 4)
-      expect(on).toContain("EVERY new session on this machine")
+      expect(on).toContain("EVERY new session from this front end")
       expect(on).toContain("Enter again to turn it off")
+      // Both halves of the switch moved, and the second is the one that makes
+      // the first mean anything (K8): the pointer says which version
+      // `house.style` is, the standing membership entry says a session gets it.
+      expect(sessionWith(statePath)).toContain("house.style")
 
       setup.mockInput.pressEnter()
       await until(
@@ -734,6 +736,9 @@ test("/ext marks a package that contributes a system prompt as a mode, and says 
         20_000,
       )
       expect(await settle(setup, 4)).toContain("no longer enters new sessions")
+      // …and the membership entry came off with it. Left behind it would name a
+      // package with no `current`, which is what makes `session new` refuse.
+      expect(sessionWith(statePath)).not.toContain("house.style")
     } finally {
       setup.renderer.destroy()
     }

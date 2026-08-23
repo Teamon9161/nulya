@@ -77,6 +77,7 @@ export const fake_config: ConfigView = {
   paths: { system: "/etc/nulya/config.toml", user: "/home/me/.nulya/config.toml", project: ".nulya/config.toml" },
   active_profile: "openai",
   registry: { max_tools: 8, pinned_native_tools: [] },
+  extensions: { with: [] },
   profiles: [
     {
       name: "openai",

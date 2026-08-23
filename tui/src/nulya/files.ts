@@ -115,22 +115,6 @@ export interface Contributions {
    */
   systemPrompts: string[]
   /**
-   * When activation brings this package in (DESIGN §7.2.1). `"on_request"`
-   * means activating it only REGISTERS it — it joins the sessions that name it
-   * with `--with` and no others — while `"always"` means every new session on
-   * this machine.
-   *
-   * The one manifest declaration the kernel enforces, so unlike `readonly` and
-   * `audience` there is no silence to interpret here — but absent is no longer
-   * one constant (DESIGN §7.5): a package carrying a system prompt reads as
-   * `"on_request"` (activation alone would otherwise make every session on the
-   * machine pay for it, whether it asked for the package or not), and a
-   * tool/skill-only package still reads as `"always"`. This is the same
-   * function `manifest.activationOf` runs, mirrored here rather than shared,
-   * because there is no third process to share it with.
-   */
-  activation: "always" | "on_request"
-  /**
    * This package's slash commands (`manifest.Command`, DESIGN §7.2.1,
    * tui-plugin D1/D2/D8). Absent reads as empty, the same convention as
    * `skills` / `system_prompts`. `action` is kept as WRITTEN — an open verb
@@ -219,7 +203,6 @@ export async function readContributions(
     driverTools: [],
     skills: [],
     systemPrompts: [],
-    activation: "always",
     commands: [],
     policy: null,
     toolRender: {},
@@ -271,7 +254,6 @@ function contributionsOf(
   | "driverTools"
   | "systemPrompts"
   | "skills"
-  | "activation"
   | "commands"
   | "policy"
   | "toolRender"
@@ -288,25 +270,13 @@ function contributionsOf(
     const render = toolUiOf(tool)["render"]
     if (typeof render === "string") toolRender[tool["name"] as string] = render
   }
-  const systemPrompts = stringList(contributes["system_prompts"])
-  const written = manifest?.["activation"]
   return {
     tools: named.map((tool) => tool["name"] as string),
     // The kernel refuses any other word, so only `"driver"` can be here; absent
     // stays absent and `modelTools` is where silence is read.
     driverTools: named.filter((tool) => tool["audience"] === "driver").map((tool) => tool["name"] as string),
     skills: stringList(contributes["skills"]),
-    systemPrompts,
-    // Top level, beside `permissions` — not a contribution but a fact about
-    // all of them. The kernel refuses any other word, so a written value is
-    // total; an absent one follows the package's shape (`manifest.activationOf`,
-    // DESIGN §7.5): a system prompt makes the default `on_request`.
-    activation:
-      written === "on_request" || written === "always"
-        ? written
-        : systemPrompts.length > 0
-          ? "on_request"
-          : "always",
+    systemPrompts: stringList(contributes["system_prompts"]),
     commands: commandsOf(contributes["commands"]),
     policy: policyOf(contributes["policy"]),
     toolRender,
@@ -660,12 +630,13 @@ export interface ExtensionEntry {
   skills: string[]
   systemPrompts: string[]
   /**
-   * When activating this id brings it in (DESIGN §7.2.1). `"on_request"` means
-   * the switch REGISTERS it and changes no session — it joins the ones that
-   * name it with `--with`. The `/ext` switch means two different things for the
-   * two values, so the pane has to know which.
+   * The other two things only a MEMBER of a session can give (`standingWith`):
+   * this package's slash commands, and its front-end module. Already computed
+   * by `contributionsOf`; named here so `/ext` can ask one question — does
+   * turning this on have to compose it, or do its pins do that by themselves?
    */
-  activation: "always" | "on_request"
+  commands: PackageCommand[]
+  ui: PackageUi | null
   permissions: { fs: string[]; network: string[]; process: string[] }
   /** Which store root holds this copy (DESIGN §7.2). */
   root: string
@@ -690,7 +661,7 @@ function stringList(value: unknown): string[] {
 
 function manifestFacts(manifest: Record<string, unknown> | null): Pick<
   ExtensionEntry,
-  "kind" | "tools" | "driverTools" | "skills" | "systemPrompts" | "activation" | "permissions"
+  "kind" | "tools" | "driverTools" | "skills" | "systemPrompts" | "commands" | "ui" | "permissions"
 > {
   const runtime = manifest?.["runtime"] as Record<string, unknown> | undefined
   // `runtime.entry` is a string, or an object keyed by OS for a script that

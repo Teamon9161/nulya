@@ -1041,7 +1041,7 @@ test "session cli: --with pins a built-but-not-activated version into one sessio
     {
         const list = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "list" });
         defer alloc.free(list.stdout);
-        try std.testing.expect(std.mem.indexOf(u8, list.stdout, "(inactive)") != null);
+        try std.testing.expect(std.mem.indexOf(u8, list.stdout, "(no current)") != null);
     }
 
     // A session started `--with mode.demo@<version>` composes it in: the header

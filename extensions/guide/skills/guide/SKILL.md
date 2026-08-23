@@ -106,9 +106,9 @@ printf 'hello %s\n' "${NULYA_ARG_name:-world}"
   the JSON Schema the model sees. This manifest is the only source of truth for
   a tool's shape.
 - `contributes.skills[]` — directories holding a `SKILL.md`.
-- `contributes.system_prompts[]` — files that join a session's system blocks.
-  A package that has these is registered by activation and worn per session
-  with `--with`, unless it says `"activation": "always"`.
+- `contributes.system_prompts[]` — files that join the system blocks of every
+  session this package is a member of. Which sessions those are is not the
+  package's to say: see the two axes below.
 - `nulya ext api permissions` lists every other field, grouped by who reads it.
 
 A tool receives its arguments, a working directory and a sanitized environment
@@ -117,13 +117,24 @@ model's tool face a call is killed at 30s unless the manifest raises
 `timeout_ms` (600000 maximum); `nulya ext run` applies no timeout unless given
 `--timeout-ms`.
 
-**Getting a tool onto the model's tool face is a separate decision from
-versions.** Only a pin does it — `[registry] pinned_native_tools` or `nulya
-session new --pin ext:<id>/<tool>` — and only from the next session onward.
-`--with` composes an extension into a session (its skills, its system prompts,
-its tools callable through the CLI) but grants no native slot. Activating a new
-version mid-session changes what the CLI runs immediately; the natively exposed
-form changes only in the next session.
+**Two independent axes, each with a standing form and a per-session one, and
+`activate` is on neither.** `activate` says which version `<id>` means; that is
+all it does.
+
+- MEMBERSHIP — the package is in this session: its skills in the catalog, its
+  system prompts in the system blocks, its tools callable through the CLI.
+  Standing: `[extensions] with` in config. One session: `nulya session new
+  --with <id>[@<version>]`.
+- TOOL FACE — one of its tools takes a native slot the model can call.
+  Standing: `[registry] pinned_native_tools`. One session: `nulya session new
+  --pin ext:<id>/<tool>`. A pin brings its own package in, so a pin alone is
+  enough.
+
+Both take effect from the next session onward; `nulya config show` prints the
+two standing lists. `nulya session new --bare` ignores both of them and composes
+from its own flags alone. Activating a new version mid-session changes what the
+CLI runs immediately; the natively exposed form changes only in the next
+session.
 
 Compile (Zig, a `bin/` entry) when the tool must parse JSON or behave
 identically under both shells. In a nulya checkout, `extensions/compact` and
@@ -168,12 +179,12 @@ Store and scope:
   `---`, then the body. Only name and description enter a session, one catalog
   line each; the body is read on demand with `nulya skill load <ref>`. Put the
   recipes in the body — that is what makes a skill cheap to carry.
-- A `system_prompt` is the opposite: every byte joins every session's system
-  blocks for as long as that version is active. Activate one deliberately.
-- A mode is a data extension contributing a system prompt that is built but
-  deliberately **not** activated, then brought into one session with `nulya
-  session new --with <id>@<version>`. In a nulya checkout,
-  `extensions/evolution` is one.
+- A `system_prompt` is the opposite: every byte joins the system blocks of
+  every session that package is a member of, and is paid for on every step.
+- A mode is a data extension contributing a system prompt that is built and
+  activated but deliberately left OUT of `[extensions] with`, so it reaches
+  only the sessions that name it: `nulya session new --with <id>`. In a nulya
+  checkout, `extensions/evolution` is one.
 - An extension with only skills and prompts needs no compiler, and its version
   is a pure content hash — the same id on every machine.
 

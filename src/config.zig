@@ -132,6 +132,19 @@ pub const Environment = struct {
 
 pub const Extensions = struct {
     paths: []const []const u8 = &.{},
+    /// Extension ids that are a MEMBER of every session opened in this
+    /// workspace (DESIGN §5.1) — skills into the catalog, system prompts into
+    /// the system blocks, tools reachable through the CLI. The standing half of
+    /// the membership axis, exactly as `registry.pinned_native_tools` is the
+    /// standing half of the tool-face axis; `session new --with` is the
+    /// per-session half of this one, and the shell joins the two before the
+    /// composition ever sees them.
+    ///
+    /// Each entry is a bare id, resolved at `current` when the session opens.
+    /// No version here on purpose: pinning a version in config would make
+    /// `ext activate` stop meaning anything for these packages, and rolling
+    /// back would need a config edit instead of one verb.
+    with: []const []const u8 = &.{},
 };
 
 pub const Config = struct {
@@ -237,6 +250,7 @@ const RawEnvironment = struct {
 
 const RawExtensions = struct {
     paths: ?[]const []const u8 = null,
+    with: ?[]const []const u8 = null,
 };
 
 pub fn load(alloc: std.mem.Allocator, io: std.Io, host_env: *const std.process.Environ.Map) !Config {
@@ -325,6 +339,7 @@ fn mergeTrusted(cfg: *Config, raw: RawConfig) !void {
 
     if (raw.extensions) |extensions| {
         if (extensions.paths) |paths| cfg.extensions.paths = try dupeStringList(arena, paths);
+        if (extensions.with) |with| cfg.extensions.with = try dupeStringList(arena, with);
     }
 }
 
@@ -353,11 +368,21 @@ fn mergeProject(cfg: *Config, raw: RawConfig) !void {
         }
     }
 
-    // `extensions.paths` is deliberately NOT read here. A store root decides
-    // which directories on this machine get to supply `current` versions — i.e.
-    // which code a session may run — so a checkout adding one would widen
-    // authority, the exact thing the project layer may never do (DESIGN §9.5).
-    // Trusted layers (system / user) still set it.
+    // `extensions.with` IS read here, for `pinned_native_tools`' reason: it can
+    // only name a package this machine already holds and already trusts (the
+    // §9 gate stands in front of it), so a checkout cannot use it to introduce
+    // code — only to select among what is here. A project-level house-style
+    // prompt is exactly the use, and it lasts as long as the checkout is open.
+    if (raw.extensions) |extensions| {
+        if (extensions.with) |with| cfg.extensions.with = try dupeStringList(arena, with);
+    }
+
+    // `extensions.paths` is deliberately NOT read here, and that is the
+    // difference. A store root decides which DIRECTORIES on this machine get to
+    // supply `current` versions — i.e. which code a session may run — so a
+    // checkout adding one would widen authority, the exact thing the project
+    // layer may never do (DESIGN §9.5). Trusted layers (system / user) still
+    // set it.
 }
 
 fn upsertProfile(cfg: *Config, raw: RawProviderProfile) !void {

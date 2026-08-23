@@ -16,7 +16,6 @@ function contribution(over: Partial<Contributions> & Pick<Contributions, "id">):
     driverTools: [],
     skills: [],
     systemPrompts: [],
-    activation: "always",
     commands: [],
     policy: null,
     toolRender: {},

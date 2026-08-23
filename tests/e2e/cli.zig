@@ -67,8 +67,9 @@ test "cli help: help / --help / -h print the same usage covering every verb fami
     // `nulya` does, so it has to be listed; `nulya task`, +6 — a whole verb
     // family, compressed to two entries whose continuation lines still have to
     // carry `wait`'s three exit codes, which is the one thing a driver cannot
-    // guess).
-    try std.testing.expect(std.mem.count(u8, help.stdout, "\n") <= 51);
+    // guess; `session new --bare`, +1 — a session that ignores the config's two
+    // standing lists cannot be inferred from the other flags).
+    try std.testing.expect(std.mem.count(u8, help.stdout, "\n") <= 52);
 
     // The two flag spellings a terminal user reaches for reach the same text.
     for ([_][]const u8{ "--help", "-h" }) |flag| {

@@ -152,6 +152,14 @@ export interface NewSessionOptions {
    */
   pin?: readonly string[]
   /**
+   * `--bare`: compose from these flags alone, ignoring the config's standing
+   * `[extensions] with` and `registry.pinned_native_tools` (DESIGN §14). What a
+   * delegated sub-agent session gets, whose whole capability list is its own
+   * definition — `extensions/agent`'s `render` returns it, so the TUI passes
+   * through whatever that says rather than deciding here.
+   */
+  bare?: boolean
+  /**
    * `--prompt <file>`, repeatable: freeze a file's bytes into THIS session's
    * system blocks (DESIGN §3, §5). Nothing is installed and nothing is
    * versioned — which is the whole difference from `with`: text that only this
@@ -172,6 +180,7 @@ export async function sessionNew(
   if (options.profile) args.push("--profile", options.profile)
   if (options.model) args.push("--model", options.model)
   if (options.parent) args.push("--parent", `${options.parent.session}:${options.parent.seq}`)
+  if (options.bare) args.push("--bare")
   for (const ref of options.with ?? []) args.push("--with", ref)
   for (const pin of options.pin ?? []) args.push("--pin", pin)
   for (const file of options.prompt ?? []) args.push("--prompt", file)
@@ -245,12 +254,26 @@ export interface RegistryView {
   pinned_native_tools: string[]
 }
 
+/**
+ * The merged `[extensions]`, projected for the same reason `[registry]` is:
+ * which packages are a member of every session opened here (DESIGN §5.1) is
+ * not something a front end should read three config files to learn — and one
+ * of those layers may hold an inline `api_key`.
+ *
+ * `paths` is deliberately not in the projection: it names directories code may
+ * come from, which `ext list` already answers by showing each root.
+ */
+export interface ExtensionsView {
+  with: string[]
+}
+
 export interface ConfigView {
   paths: ConfigPaths
   active_profile: string
   profiles: ProfileView[]
   models: ModelView[]
   registry: RegistryView
+  extensions: ExtensionsView
 }
 
 /**
@@ -273,11 +296,17 @@ export async function configShow(ws: Workspace, env?: Record<string, string>): P
   const profiles = Array.isArray(record["profiles"]) ? (record["profiles"] as ProfileView[]) : []
   const models = Array.isArray(record["models"]) ? (record["models"] as ModelView[]) : []
   const registry = (record["registry"] ?? {}) as Partial<RegistryView>
+  const extensions = (record["extensions"] ?? {}) as Partial<ExtensionsView>
   return {
     registry: {
       max_tools: typeof registry.max_tools === "number" ? registry.max_tools : 8,
       pinned_native_tools: Array.isArray(registry.pinned_native_tools) ? registry.pinned_native_tools : [],
     },
+    // Absent means an older binary that did not project it, which reads the
+    // same as "nothing joins every session here" — the safe direction: a
+    // package this front end fails to notice as standing is one it offers to
+    // add, never one it silently assumes is already there.
+    extensions: { with: Array.isArray(extensions.with) ? extensions.with : [] },
     paths: { system: paths.system ?? "", user: paths.user ?? "", project: paths.project ?? "" },
     active_profile: typeof record["active_profile"] === "string" ? record["active_profile"] : "",
     profiles: profiles.map((p) => ({
@@ -801,10 +830,15 @@ export async function extList(ws: Workspace): Promise<ExtStoreEntry[]> {
     const [id, version, root] = fields as [string, string, string]
     entries.push({
       id,
-      current: version === "(inactive)" ? null : version,
+      // `(no current)` is the kernel's word for "this id points at no version";
+      // `(inactive)` was the same column before K8 renamed it, and is still
+      // read so a newer TUI against an older binary does not report every
+      // unpointed package as one pointing at a version called `(inactive)`.
+      current: version === "(no current)" || version === "(inactive)" ? null : version,
       root,
       // A trailing column, not a fixed one: an active row also carries
-      // `[tools skills prompt]`, so position would be the wrong test.
+      // `[tools skills prompt]` and possibly `[with]`, so position would be the
+      // wrong test.
       shadowed: fields.includes("(shadowed)"),
     })
   }

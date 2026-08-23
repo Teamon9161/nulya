@@ -33,6 +33,7 @@ import {
   rememberMode,
   rememberSessionPins,
   sessionPins,
+  sessionWith,
   type ModelPick,
 } from "../state/tui_state.ts"
 import {
@@ -74,20 +75,15 @@ import {
   type TaskEntry,
 } from "../nulya/cli.ts"
 import {
-  activePromptPackages,
   activeVersionOf,
   adoptBundled,
-  autoActivatable,
-  builtContributions,
   failedIds,
   needsZigIds,
   pinsOf,
   planStore,
-  promptPackageWarning,
   seedBundled,
   sessionMember,
   summarize,
-  syncRoot,
   type SessionMember,
 } from "../extensions.ts"
 import { builtin_names } from "../commands.ts"
@@ -474,15 +470,12 @@ export function App(props: AppProps) {
    * Take back standing pins this front end should no longer hold — before the
    * first message, not when somebody happens to open `/ext`.
    *
-   * Two kinds of stale line. A pin whose package has no `current` any more: a
+   * One kind of stale line: a pin whose package has no `current` any more. A
    * pin brings its package in (DESIGN §5.1), and with nothing to bring the
-   * session does not start (`WithVersionNotFound`, `cli/session.zig`). And a pin
-   * on an `on_request` package — which this front end used to write itself —
-   * that the kernel now honours by wearing the mode in EVERY session
-   * (`standingPinsOf`), which is worse than refusing. `/ext` has repaired this
-   * list since T12, but only while its panel was up. The list is our own
-   * program state; dropping a line out loud is the honest repair, and the same
-   * one `ExtView.dropOrphanPins` makes.
+   * session does not start at all (`WithVersionNotFound`, `cli/session.zig`).
+   * `/ext` has repaired this list since T12, but only while its panel was up.
+   * The list is our own program state; dropping a line out loud is the honest
+   * repair, and the same one `ExtView.dropOrphanPins` makes.
    */
   const healStandingPins = (listed: readonly ExtensionEntry[]) => {
     const pins = sessionPins(props.statePath)
@@ -568,11 +561,15 @@ export function App(props: AppProps) {
    * plan and the pass are both `nulya ext sync`.
    *
    * Activation is narrower than the kernel's `--activate`, which also points
-   * `current` at any id that has none at all. Since `ext seed` (tui.md §11,
-   * T19) the user store legitimately holds built-but-inactive packages —
-   * evolution, whose system prompt must NOT enter every session — so this pass
-   * only activates versions it produced itself: a draft somebody just dropped
-   * in gets picked up, a package left inactive on purpose stays that way.
+   * `current` at any id that has none at all: this pass only activates versions
+   * it produced itself, so a package somebody deliberately rolled back stays
+   * where they put it.
+   *
+   * It no longer asks WHAT a package contributes before pointing at it (K8).
+   * Activating is safe now — it says which version `<id>` means and composes
+   * nothing (DESIGN §5.1) — so the guard that used to keep `evolution`'s system
+   * prompt out of every session has nothing left to guard: composing is
+   * `[extensions] with` and `/ext`'s Enter, both of them a person's line.
    */
   const syncStores = async () => {
     const plan = props.sync
@@ -587,8 +584,8 @@ export function App(props: AppProps) {
     // It also CARRIES FORWARD the drafts a previous binary seeded and nobody has
     // edited since (T42) — before that, upgrading nulya left the user store on
     // whatever source the first binary happened to drop, so a package that grew
-    // a tool or declared itself `on_request` stayed as it was until somebody
-    // deleted the directory. Drafts that were edited are left alone and named
+    // a tool, or lost a manifest field, stayed as it was until somebody deleted
+    // the directory. Drafts that were edited are left alone and named
     // below; the ids seeding moved are ordinary changed drafts to the pass that
     // follows, which builds them and points `current` at what it built.
     let arrived: string[] = []
@@ -623,26 +620,12 @@ export function App(props: AppProps) {
           setNotice(`syncing extensions… ${done}/${total}`)
         })
         let activated = 0
-        /** Ids this pass built and deliberately left switched off (T31). */
-        const held: string[] = []
         if (plan.activate) {
-          const where = syncRoot(props.ws, root.user)
           for (const line of report.lines) {
             if (line.state !== "built" || !line.version || line.activation === "active") continue
             // What arrived with the binary this run is `adoptBundled`'s to
             // decide: everything a fresh seed drops is `built` by this pass.
             if (arrived.includes(line.id)) continue
-            // A package that contributes a SYSTEM PROMPT is a mode, and a
-            // background pass does not choose modes (`autoActivatable`, T31).
-            // `arrived` used to be the whole guard, which only ever covered the
-            // ONE start where `ext seed` dropped the drafts — so a machine
-            // seeded yesterday, or by hand, had `evolution` switched on by this
-            // very loop the next time its draft rebuilt, and every session
-            // afterwards opened believing it was the slow loop.
-            if (!autoActivatable(await builtContributions(props.ws, where, line.id, line.version))) {
-              held.push(line.id)
-              continue
-            }
             try {
               await extSetCurrent(props.ws, "activate", line.id, line.version, { user: root.user })
               activated += 1
@@ -673,8 +656,7 @@ export function App(props: AppProps) {
           failed.length === 0 &&
           needsZig.length === 0 &&
           activated === 0 &&
-          adopted.length === 0 &&
-          held.length === 0
+          adopted.length === 0
         ) {
           continue
         }
@@ -682,10 +664,6 @@ export function App(props: AppProps) {
           summarize(root.label, report) +
             (activated > 0 ? ` · ${activated} activated` : "") +
             adopted.map((part) => ` · ${part}`).join("") +
-            // Built and left off on purpose: said, because a package that is
-            // there and does nothing is otherwise a mystery, and `/ext` is the
-            // one key that turns it on for real.
-            (held.length > 0 ? ` · ${held.join(" ")} built, left off (a mode) · /ext` : "") +
             (failed.length > 0 ? ` · ${failed.join(" ")} not built · /ext` : "") +
             // A different sentence, because it is a different repair: nothing
             // is wrong with these drafts, this machine just cannot compile one.
@@ -710,24 +688,12 @@ export function App(props: AppProps) {
       // seconds, and it asks a person to leave the program to repair it.
       news.push(`${untouched.join(" & ")} differ from this build · /ext · s updates one`)
     }
-    // …and whatever a mode package is doing on this machine ALREADY, whoever
-    // switched it on and whenever (T31). This is the half no guard can fix: the
-    // pointer is on disk, `evolution`'s prompt is in front of every model, and
-    // nothing on the screen said so. Named, not undone — turning it off is as
-    // much a person's decision as turning it on was.
-    const worn = promptPackageWarning(await activeModes())
-    if (worn) news.push(worn)
+    // There used to be one more line here: whichever mode packages were active
+    // on this machine, named because activating one put its system prompt in
+    // front of every model (T31). That state no longer exists — `current` says
+    // which version an id means and composes nothing (DESIGN §5.1) — so there
+    // is nothing to warn about and no list to compute.
     setNotice(news.length > 0 ? news.join(" · ") : null)
-  }
-
-  /** The packages that are active and contribute a system prompt, right now. */
-  const activeModes = async (): Promise<string[]> => {
-    try {
-      return activePromptPackages(await listExtensions(props.ws))
-    } catch {
-      // No listing is "unknown", and unknown is not news.
-      return []
-    }
   }
 
   // …and only then the code layer: a plugin lives in an ACTIVE version, and
@@ -1137,11 +1103,10 @@ export function App(props: AppProps) {
    * `/evolve`).
    *
    * Membership and pins are separate axes everywhere else (DESIGN §7.5), and
-   * for a worn package they cannot be: an `activation: "on_request"` package is
-   * a member of exactly this session, so a pin naming its tool belongs in
-   * exactly this argv and in no standing list (`standingPinsOf`). Written there
-   * instead it would not cost a tool — it would wear the mode in every session,
-   * which is the bug this pairing exists to end.
+   * for a WORN package they cannot be: it is a member of exactly this session,
+   * so a pin naming its tool belongs in exactly this argv. On a standing list
+   * it would not cost a tool — it would wear the mode in every session, which
+   * is the difference `/with` exists to make.
    *
    * A package that cannot be read costs nothing: the session starts with the
    * member and without the pins, which is what wearing it meant before its
@@ -1172,6 +1137,15 @@ export function App(props: AppProps) {
       }
       withRefs.push(formatWithRef({ id: member.id, version: member.version }))
       pins.push(...member.pins)
+    }
+    // …and this TUI's own standing membership list, the half of `/ext`'s Enter
+    // that `session_pins` is the other half of (K8). BARE ids, unlike the two
+    // above: those are packages this front end resolves to an exact version
+    // because it needs their pins before the session exists, while these follow
+    // `current` exactly as the kernel's own `[extensions] with` does — so `/ext`
+    // rolling one back with `a` is honoured without touching this list.
+    for (const id of sessionWith(props.statePath)) {
+      if (!withRefs.some((ref) => ref === id || ref.startsWith(`${id}@`))) withRefs.push(id)
     }
     if (missing.length > 0) setNotice(`${missing.join(" & ")} not composed in · /ext for what it said`)
     return {
@@ -2031,29 +2005,24 @@ export function App(props: AppProps) {
   }
 
   /**
-   * Bare `/with`: the packages this machine has REGISTERED, as a dialog above
-   * the composer (tui.md §11, T37).
+   * Bare `/with`: the modes this machine could wear, as a dialog above the
+   * composer (tui.md §11, T37/K8).
    *
-   * Derived from the store and nothing else. A package that declares
-   * `activation: "on_request"` (DESIGN §7.2.1) becomes nameable by being
-   * switched on and stops being nameable when it is switched off, so this list
-   * is the answer to "what did activating anything actually give me" — and a
-   * mode nobody registered is offered by no command, which is the point.
+   * Derived from the store and nothing else: a package with a `current` and a
+   * SYSTEM PROMPT. That is what makes wearing one a decision worth a dialog —
+   * it changes what this session IS, and it is paid for on every step.
    *
-   * `always` packages are left out on purpose: their prompt is already in every
-   * session, so a row offering to wear one would offer a no-op.
+   * The filter used to also ask the manifest whether the package had declared
+   * itself opt-in, and skip the ones that had not, because those were already
+   * in every session and a row offering one would offer a no-op. Nothing is
+   * automatically in every session now (DESIGN §5.1), so the question has no
+   * answer to ask for and every mode belongs on this list.
    */
   const openWithPicker = async () => {
     let listed: Wearable[] = []
     try {
       listed = (await listExtensions(props.ws))
-        .filter(
-          (entry) =>
-            entry.current !== null &&
-            !entry.shadowed &&
-            entry.systemPrompts.length > 0 &&
-            entry.activation === "on_request",
-        )
+        .filter((entry) => entry.current !== null && !entry.shadowed && entry.systemPrompts.length > 0)
         .map((entry) => ({
           id: entry.id,
           version: entry.current!,

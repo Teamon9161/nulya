@@ -4,8 +4,9 @@
 //! **What the package is.** A system prompt that says what this session is for,
 //! a `policy` that narrows what it may do while it is worn, one slash command
 //! that puts it on, three tools, and a front-end module (`tui/plan.ts`). The
-//! kernel enforces exactly one of those (`activation: on_request`, DESIGN
-//! §7.2.1); everything else is a declaration that a driver chooses to honour.
+//! kernel enforces none of it (DESIGN §7.2.1): every part is a declaration that
+//! a driver chooses to honour, and whether a session wears this package at all
+//! is the person's own decision, said in config or on one `session new`.
 //!
 //! **The three tools.**
 //!

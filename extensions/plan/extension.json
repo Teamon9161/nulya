@@ -1,7 +1,6 @@
 {
   "schema": "nulya.extension/v2",
   "id": "plan",
-  "activation": "on_request",
   "runtime": { "entry": "bin/plan" },
   "contributes": {
     "system_prompts": ["prompts/plan.md"],

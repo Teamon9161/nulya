@@ -259,7 +259,7 @@ pub const Store = struct {
 /// `cli/ext.zig`'s `isManifestFault` uses — so a new `manifest.ValidateError`
 /// member is covered here automatically. A hand-written `switch` was the
 /// previous shape, and it had already drifted: `InvalidTimeout`,
-/// `InvalidAudience`, `InvalidActivation`, and `DuplicateSkillPath` had each
+/// `InvalidAudience`, and `DuplicateSkillPath` had each
 /// been added to `manifest.zig` without a matching case here, so a manifest
 /// that failed validation for one of those reasons was propagated as a host
 /// fault instead of being treated as a broken extension.

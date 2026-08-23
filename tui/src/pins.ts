@@ -206,12 +206,16 @@ export function orphanPins(pins: readonly string[], available: readonly string[]
 /**
  * Every tool id a STANDING pin list may name, from a store listing.
  *
- * Two conditions. The first is the kernel's: the extension has an active,
+ * One condition, and it is the kernel's: the extension has an active,
  * un-shadowed version — a pin brings its package in at `current` (DESIGN
- * §5.1), and with no `current` the session does not open. The second is this
- * front end's: the package composes into every session (`activation:
- * "always"`), because a standing pin on an `on_request` package would wear that
- * mode in every session — the exact thing the word declines (`standingPinsOf`).
+ * §5.1), and with no `current` the session does not open.
+ *
+ * There used to be a second, this front end's own: a standing pin on a package
+ * that declared `activation: "on_request"` would wear that mode in every
+ * session, so such a pin was never written. The declaration is gone, and with
+ * it the hazard's hiding place: a package reaches every session only when
+ * `[extensions] with` or a standing pin says so, both of them the person's own
+ * lines, both visible in `nulya config show` and in `/ext`.
  *
  * Driver tools are in: `audience` is a package's advice about whose face a tool
  * belongs on, not a rule about what may be pinned, and this pane lets a person
@@ -223,12 +227,11 @@ export function resolvableStandingPins(
     tools: readonly string[]
     current: string | null
     shadowed: boolean
-    activation: "always" | "on_request"
   }[],
 ): string[] {
   const ids: string[] = []
   for (const entry of entries) {
-    if (!entry.current || entry.shadowed || entry.activation === "on_request") continue
+    if (!entry.current || entry.shadowed) continue
     for (const tool of entry.tools) ids.push(toolId(entry.id, tool))
   }
   return ids

@@ -195,7 +195,7 @@ test "gate: the request line carries the stable tool id and the frozen readonly 
     }
 }
 
-test "pin: an opt-in package joins the session that pins one of its tools, and no other" {
+test "pin: a package nothing else names joins the session that pins one of its tools, and no other" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -209,9 +209,9 @@ test "pin: an opt-in package joins the session that pins one of its tools, and n
     defer tmp.cleanup();
     const ws = tmp.dir;
 
-    // `activation: "on_request"`: activating it REGISTERS it and nothing more
-    // (DESIGN §7.2.1), so discovery leaves it out of every session.
-    const version = try buildScriptPackage(alloc, io, ws, exe_abs, "optin", "look", ",\"activation\":\"on_request\"", "");
+    // Activated, which says only that `optin` means this version (DESIGN §5.1)
+    // — and named by neither `[extensions] with` nor `--with`.
+    const version = try buildScriptPackage(alloc, io, ws, exe_abs, "optin", "look", "", "");
     defer alloc.free(version);
     {
         const activated = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "activate", "optin", version });
@@ -219,7 +219,7 @@ test "pin: an opt-in package joins the session that pins one of its tools, and n
         try std.testing.expectEqual(@as(u8, 0), activated.code);
     }
 
-    // Registered is not composed: a plain session has no member at all.
+    // Activated is not composed: a plain session has no member at all.
     {
         const plain = try newSession(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
         defer alloc.free(plain);

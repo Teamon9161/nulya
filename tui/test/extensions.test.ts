@@ -11,30 +11,36 @@
 import { afterAll, beforeAll, expect, test } from "bun:test"
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { extSeed, extSync, parseSyncLine, parseSyncReport, type SyncReport } from "../src/nulya/cli.ts"
+import {
+  extList,
+  extSeed,
+  extSetCurrent,
+  extSync,
+  parseSyncLine,
+  parseSyncReport,
+  sessionNew,
+  type SyncReport,
+} from "../src/nulya/cli.ts"
 import {
   actionFor,
-  activePromptPackages,
   adoptBundled,
   answerFor,
-  autoActivatable,
   builtContributions,
   describeDrafts,
   draftColumn,
   failedIds,
   needsZigIds,
   pinsOf,
-  standingPinsOf,
+  standingWith,
   planProjectStore,
   promptConsequence,
-  promptPackageWarning,
   promptText,
   std_pins,
   stdEditPinDecision,
   summarize,
   syncRoot,
 } from "../src/extensions.ts"
-import { modelTools } from "../src/nulya/files.ts"
+import { modelTools, readHeader } from "../src/nulya/files.ts"
 import { default_settings, loadSettings, withPackage } from "../src/state/settings.ts"
 import { draftHelp } from "../src/ui/overlays/ExtView.tsx"
 import { tempWorkspace, type TempWorkspace } from "./support.ts"
@@ -326,8 +332,8 @@ test("the binary's bundled drafts seed into a store — dry-run counts them, a s
 /**
  * The bundled install is nobody's question any more (tui.md §11, T23), so the
  * whole of the consent lives in one rule: only what `ext seed` says arrived THIS
- * run is turned on. Everything below is that rule, with no binary in sight —
- * each case returns before it would spawn anything.
+ * run is turned on. The first two cases are that rule with no binary in sight —
+ * each returns before it would spawn anything.
  */
 test("only the bundled ids that arrived this run are activated", async () => {
   const built = report([
@@ -346,105 +352,94 @@ test("only the bundled ids that arrived this run are activated", async () => {
   // at, and `needs zig` is `/ext`'s news to deliver, not an activation's.
   const stuck = report(["std: needs zig (compiled draft; put zig on PATH)", "0 built, 0 already built, 1 failed"])
   expect(await adoptBundled(ws, ["std"], stuck, join(ws.dir, "adopt-stuck.json"))).toEqual([])
-
-  // Arrived and built, but a MODE: `evolution` contributes a system prompt, so
-  // no background pass turns it on however it arrived (`autoActivatable`). It
-  // is the only bundled id that rule still refuses — and it needs no list of
-  // names to be refused (T34).
-  expect(await adoptBundled(ws, ["evolution"], built, join(ws.dir, "adopt-mode.json"))).toEqual([])
 })
 
 /**
- * The guard the `evolution` bug named (tui.md §11, T31), under T37's sharper
- * question. A background pass must never be the one that puts a system prompt
- * in front of every model this machine runs — but whether activation DOES that
- * is now something the package answers itself (DESIGN §7.2.1).
+ * A MODE that arrives is switched on like anything else (K8).
+ *
+ * It used to be the one exception: activating a package that contributed a
+ * system prompt composed it, so every session on the machine started paying for
+ * that prompt, and a background pass had no business deciding it. Activating
+ * composes nothing now (DESIGN §5.1) — `[extensions] with` and `/ext`'s Enter
+ * are what would — so the exception has nothing left to protect.
+ *
+ * Against a real store, because the claim is that the pointer MOVES: a
+ * fabricated version id would fail to activate and return the same empty list
+ * the old rule did, which is exactly the difference being asserted.
  */
-test("a background pass never activates a mode, and never guesses when it cannot tell", () => {
-  const what = (systemPrompts: string[], activation: "always" | "on_request" = "always") => ({
-    systemPrompts,
-    activation,
-  })
+test("a bundled mode that arrives is activated too, and the pointer really moves", async () => {
+  const store = tempWorkspace()
+  try {
+    const root = syncRoot(store, false)
+    writeDraft(store.dir, "mode.pkg", "a mode")
+    writeFileSync(
+      join(root, "mode.pkg", "extension.json"),
+      JSON.stringify({
+        schema: "nulya.extension/v2",
+        id: "mode.pkg",
+        contributes: { system_prompts: ["prompts/identity.md"] },
+      }),
+    )
+    mkdirSync(join(root, "mode.pkg", "prompts"), { recursive: true })
+    writeFileSync(join(root, "mode.pkg", "prompts", "identity.md"), "you are a mode\n")
+    // A data package: no toolchain, so this runs on any machine.
+    const report = await extSync(store)
+    const line = report.lines.find((entry) => entry.id === "mode.pkg")!
+    expect(line.version).toMatch(/^v-/)
+    expect((await extList(store)).find((entry) => entry.id === "mode.pkg")!.current).toBeNull()
 
-  // A prompt that would reach every session: a person's decision, not a
-  // start-up side effect. Whoever wrote the package.
-  expect(autoActivatable(what(["prompts/identity.md"]))).toBe(false)
-  expect(autoActivatable(what([]))).toBe(true)
+    // `adoptBundled` targets the USER store, so it is not the caller here — the
+    // rule it now follows is: point `current` at what arrived, whatever the
+    // package contributes.
+    await extSetCurrent(store, "activate", "mode.pkg", line.version!)
+    expect((await extList(store)).find((entry) => entry.id === "mode.pkg")!.current).toBe(line.version)
 
-  // The same package, saying activation only REGISTERS it: switching it on
-  // changes no session, so the pass may. This is what makes the `/with` route
-  // to a bundled mode appear without anybody deciding anything (T37).
-  expect(autoActivatable(what(["prompts/evolution.md"], "on_request"))).toBe(true)
-
-  // The four bundled ids the list used to name are no longer special (T34):
-  // `compact` / `handoff` / `agent` declare no prompt, so they are ordinary
-  // membership and the pass may switch them on; their DRIVER tools stay off the
-  // model's face because their manifests say so, not because this file knows
-  // them.
-  expect(autoActivatable(what([]))).toBe(true)
-
-  // An unreadable manifest is "don't know", and don't-know is a no: a pass that
-  // cannot tell what a package does has not learnt that it does nothing.
-  // Leaving it off costs one keypress in `/ext`; the other direction costs
-  // every session on the machine.
-  expect(autoActivatable(null)).toBe(false)
+    // And that changed no composition: a session opened here has no member.
+    const id = await sessionNew(store, { profile: "scripted" })
+    expect((await readHeader(store, id))!.composition.active).toEqual([])
+  } finally {
+    store.cleanup()
+  }
 })
 
-test("what a mode's switch says, in both directions and for the package that named the bug", () => {
+/**
+ * Which half of `/ext`'s switch a package needs (K8).
+ *
+ * Activating alone composes nothing (DESIGN §5.1), so the switch has to write a
+ * standing MEMBERSHIP entry for anything only a member can give — and must not
+ * for a pure tool package, whose pins bring it in by themselves. Two ways of
+ * saying one thing would be two things to take back.
+ */
+test("only a package with something a member alone can give gets a standing with entry", () => {
+  const what = (over: Partial<Parameters<typeof standingWith>[0]> = {}) => ({
+    skills: [] as string[],
+    systemPrompts: [] as string[],
+    commands: [],
+    ui: null,
+    ...over,
+  })
+
+  // A mode: its prompt reaches a session only through membership.
+  expect(standingWith(what({ systemPrompts: ["prompts/identity.md"] }))).toBe(true)
+  // A skill lands in the catalog the same way, and so do a slash command and a
+  // front-end module — none of them has a pin to arrive by.
+  expect(standingWith(what({ skills: ["skills/guide"] }))).toBe(true)
+  expect(standingWith(what({ commands: [{ name: "plan", description: "", action: "with" }] }))).toBe(true)
+  expect(standingWith(what({ ui: { entry: "tui/plan.ts", api: 1 } }))).toBe(true)
+
+  // A pure tool package: `compact`, `handoff`, `ask`. Nothing here needs an
+  // entry, because a pin brings the package in at `current` all by itself.
+  expect(standingWith(what())).toBe(false)
+})
+
+test("what a mode's switch says, in both directions", () => {
   const on = promptConsequence("evolution", true)
-  expect(on).toContain("EVERY new session on this machine")
+  expect(on).toContain("EVERY new session")
   expect(on).toContain("/with evolution")
   expect(on).toContain("Enter again to turn it off")
   // A mode nobody wrote a command for still gets the per-session way in.
   expect(promptConsequence("house.style", true)).toContain("/with house.style")
   expect(promptConsequence("evolution", false)).toContain("no longer enters new sessions")
-
-  // The same package saying activation only REGISTERS it (T37): the switch is
-  // nearly free, and the frightening sentence would be a lie about it.
-  const registered = promptConsequence("evolution", true, "on_request")
-  expect(registered).not.toContain("EVERY new session")
-  expect(registered).toContain("no session changed")
-  expect(registered).toContain("/with evolution")
-  expect(promptConsequence("evolution", false, "on_request")).toContain("unregistered")
-})
-
-test("the start-up check names the modes that are active, and says nothing when none are", () => {
-  const entry = (
-    id: string,
-    over: Partial<{
-      current: string | null
-      shadowed: boolean
-      systemPrompts: string[]
-      activation: "always" | "on_request"
-    }>,
-  ) => ({
-    id,
-    current: "v-abc" as string | null,
-    shadowed: false,
-    systemPrompts: [] as string[],
-    activation: "always" as "always" | "on_request",
-    ...over,
-  })
-  const listed = [
-    entry("std", {}),
-    entry("evolution", { systemPrompts: ["prompts/identity.md"] }),
-    // Built but switched off: nothing is in front of any model.
-    entry("house.style", { current: null, systemPrompts: ["prompts/style.md"] }),
-    // Active here, but an earlier root already has this id: this copy never runs.
-    entry("shadow.mode", { shadowed: true, systemPrompts: ["prompts/x.md"] }),
-    // Active AND a prompt, but it joins only the sessions that name it (T37):
-    // warning about this one would teach people to ignore the line.
-    entry("opt.in", { systemPrompts: ["prompts/lens.md"], activation: "on_request" }),
-  ]
-  expect(activePromptPackages(listed)).toEqual(["evolution"])
-  expect(activePromptPackages([entry("std", {})])).toEqual([])
-
-  const said = promptPackageWarning(["evolution"])
-  expect(said).toContain("evolution active")
-  expect(said).toContain("/ext")
-  // Nothing to say is said as nothing: a status line that reports the absence
-  // of a mode on every start is one more line nobody reads.
-  expect(promptPackageWarning([])).toBeNull()
 })
 
 test("what a built version contributes is read from the root that sync wrote it to, and null when absent", async () => {
@@ -452,8 +447,8 @@ test("what a built version contributes is read from the root that sync wrote it 
   try {
     const root = syncRoot(store, false)
     expect(root).toBe(join(store.dir, ".nulya", "extensions"))
-    // Nothing built: the honest answer is "don't know", which `autoActivatable`
-    // then reads as a refusal.
+    // Nothing built: the honest answer is "don't know", and every reader of
+    // this has to keep it distinguishable from "contributes nothing".
     expect(await builtContributions(store, root, "ghost", "v-nope")).toBeNull()
 
     writeDraft(store.dir, "mode.pkg", "a mode")
@@ -474,12 +469,9 @@ test("what a built version contributes is read from the root that sync wrote it 
 
     const what = await builtContributions(store, root, "mode.pkg", line.version!)
     expect(what?.systemPrompts).toEqual(["prompts/identity.md"])
-    // It did not say when activation brings it in, and it carries a system prompt, so the
-    // default follows its shape (DESIGN §7.5): registered by activation, worn per session.
-    expect(what?.activation).toBe("on_request")
-    // …and registering an on_request package changes no session, so the start-up
-    // sync may do it (T37) — the same reason `evolution` is auto-activatable.
-    expect(autoActivatable(what)).toBe(true)
+    // A prompt is something only a member gets, so `/ext`'s switch has to write
+    // the standing membership entry as well as move the pointer (K8).
+    expect(standingWith(what!)).toBe(true)
   } finally {
     store.cleanup()
   }
@@ -533,36 +525,27 @@ test("the pins an activation writes come from the manifest, per tool, for a pack
 })
 
 /**
- * The bug this rule ends: `/ext`'s switch wrote `pinsOf` for `plan` and `ask`,
- * both `activation: "on_request"`, and the three lines it left in
- * `tui-state.json` made EVERY later `session new` exit 1 with
+ * The rule that used to live beside `pinsOf` (`standingPinsOf`) is gone with
+ * the declaration it read (K8).
+ *
+ * Its history is worth keeping: `/ext`'s switch wrote `pinsOf` for `plan` and
+ * `ask`, both of which had declared themselves opt-in, and the three lines it
+ * left in `tui-state.json` made EVERY later `session new` exit 1 with
  * `PinNamesUnknownExtension` — a front end that could not open a session at
- * all, explaining itself in one clipped status line. Since a pin brings its
- * package in (ext-review lane B) such a line no longer refuses the session — it
- * wears the mode in EVERY session instead, which is why the rule stays.
+ * all. A pin brings its package in now (ext-review lane B), so such a line
+ * composes the package rather than refusing, and composing is what a standing
+ * pin is FOR. There is one answer to "which tools does the switch pin", and
+ * `pinsOf` is it.
  */
-test("a package that joins only the sessions naming it can hold no standing pin", () => {
-  const pkg = (id: string, tools: string[], activation: "always" | "on_request") => ({
-    id,
-    tools,
-    driverTools: [],
-    activation,
-  })
+test("the switch pins every model-facing tool a package declares, whatever kind of package it is", () => {
+  const pkg = (id: string, tools: string[]) => ({ id, tools, driverTools: [] })
 
-  // Composed into every session: a standing pin resolves in every one of them.
-  expect(standingPinsOf(pkg("std", ["read", "edit"], "always"))).toEqual(["ext:std/read", "ext:std/edit"])
-
-  // Registered only: activation moved a pointer and changed no composition
-  // (DESIGN §7.2.1), so there is nothing here for a standing list to name.
-  expect(standingPinsOf(pkg("plan", ["propose", "todo"], "on_request"))).toEqual([])
-  expect(standingPinsOf(pkg("ask", ["ask"], "on_request"))).toEqual([])
-
-  // The tools did not stop existing — they reach a face in the session that
-  // wears the package, where `--with` and `--pin` travel in one argv.
-  expect(pinsOf(pkg("plan", ["propose", "todo"], "on_request"))).toEqual([
-    "ext:plan/propose",
-    "ext:plan/todo",
-  ])
+  expect(pinsOf(pkg("std", ["read", "edit"]))).toEqual(["ext:std/read", "ext:std/edit"])
+  // A mode is no exception. Its tools reach a face in every session the pin
+  // brings the package into — which is what the person asked for by pressing
+  // Enter on its row, and what `/ext` takes back by pressing it again.
+  expect(pinsOf(pkg("plan", ["propose", "todo"]))).toEqual(["ext:plan/propose", "ext:plan/todo"])
+  expect(pinsOf(pkg("ask", ["ask"]))).toEqual(["ext:ask/ask"])
 })
 
 test("the std pin list is the frozen manifest's, with the literal only as a cold-start fallback", async () => {

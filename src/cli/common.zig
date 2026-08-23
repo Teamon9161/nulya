@@ -20,29 +20,56 @@ const environment = @import("../environment.zig");
 /// root holding an ACTIVE version of an id wins.
 pub const RootSearch = struct {
     specs: []const []const u8,
+    /// The merged config's `[extensions] with` — the ids that are a member of
+    /// every session opened here (DESIGN §5.1). Owned alongside `specs`.
+    ///
+    /// It rides with the roots because it comes out of the same config load and
+    /// answers the other half of one question: the roots say where an id's code
+    /// may come from, this says whether a session gets it. Loading the chain a
+    /// second time for it would be two answers where the caller wants one.
+    with: []const []const u8,
     roots: roots_mod.Roots,
 
     pub fn open(alloc: std.mem.Allocator, io: std.Io, cwd: []const u8) !RootSearch {
-        const specs = try rootSpecs(alloc, io);
-        errdefer launch.freeExtensionRoots(alloc, specs);
-        const roots = try roots_mod.Roots.open(alloc, io, cwd, specs);
-        return .{ .specs = specs, .roots = roots };
+        const resolved = try rootSpecs(alloc, io);
+        errdefer launch.freeExtensionRoots(alloc, resolved.specs);
+        errdefer launch.freeExtensionRoots(alloc, resolved.with);
+        const roots = try roots_mod.Roots.open(alloc, io, cwd, resolved.specs);
+        return .{ .specs = resolved.specs, .with = resolved.with, .roots = roots };
     }
 
     pub fn deinit(self: *RootSearch, alloc: std.mem.Allocator) void {
         self.roots.deinit();
         launch.freeExtensionRoots(alloc, self.specs);
+        launch.freeExtensionRoots(alloc, self.with);
     }
 };
 
-/// Resolve the ordered root specs from the environment + config chain. Caller
-/// owns the result (`launch.freeExtensionRoots`).
-pub fn rootSpecs(alloc: std.mem.Allocator, io: std.Io) ![]const []const u8 {
+/// The two lists one config load answers: the ordered root specs, and the
+/// standing member ids (`[extensions] with`). Caller owns both
+/// (`launch.freeExtensionRoots`).
+pub fn rootSpecs(alloc: std.mem.Allocator, io: std.Io) !struct {
+    specs: []const []const u8,
+    with: []const []const u8,
+} {
     var host = try environment.hostEnvironMap(alloc);
     defer host.deinit();
     var cfg = try config.load(alloc, io, &host);
     defer cfg.deinit();
-    return launch.extensionRoots(alloc, &host, &cfg);
+    const specs = try launch.extensionRoots(alloc, &host, &cfg);
+    errdefer launch.freeExtensionRoots(alloc, specs);
+    return .{ .specs = specs, .with = try dupeOwnedList(alloc, cfg.extensions.with) };
+}
+
+/// Copy a config-arena string list into caller-owned memory — the config dies
+/// with the load, and `RootSearch` outlives it.
+fn dupeOwnedList(alloc: std.mem.Allocator, list: []const []const u8) ![]const []const u8 {
+    const out = try alloc.alloc([]const u8, list.len);
+    errdefer alloc.free(out);
+    var filled: usize = 0;
+    errdefer for (out[0..filled]) |s| alloc.free(s);
+    while (filled < list.len) : (filled += 1) out[filled] = try alloc.dupe(u8, list[filled]);
+    return out;
 }
 
 /// Where a write-side command puts things: the user store under `--user`, else
@@ -177,10 +204,11 @@ pub const ext_usage =
 ;
 
 pub const session_usage =
-    \\  nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--with <id>[@<ver>]]… [--pin ext:<id>/<tool>]… [--prompt <file>]…
+    \\  nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--with <id>[@<ver>]]… [--pin ext:<id>/<tool>]… [--prompt <file>]… [--bare]
     \\                                                    freeze composition + model, print a new session id; --with composes a built
     \\                                                    version in, --pin puts one of its tools on the model's tool face, --parent
-    \\                                                    forks that session, --prompt freezes a file as this session's system prompt
+    \\                                                    forks that session, --prompt freezes a file as this session's system prompt,
+    \\                                                    --bare ignores the config's standing [extensions] with and pinned_native_tools
     \\  nulya session append <id> [<text> | --file <p>] [--image <p>]…
     \\                                                    queue a user turn for the next step boundary; --image inlines a
     \\                                                    png/jpeg ≤5 MB, if the model's catalog entry says vision = true

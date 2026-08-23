@@ -11,7 +11,7 @@
 //! `Options.pinned_native_tools`). "Pin" means only the second.
 //!
 //! Two phases, one intermediate value. `resolve` answers the request — a fresh
-//! session's discovery plus `--with`, or a session header's frozen versions —
+//! session's named members, or a session header's frozen versions —
 //! and resolves the pins into bindings; `assemble` builds the frozen session
 //! state out of that answer alone. Everything about WHY an extension or a tool
 //! is here is decided in the first phase and unrepresentable in the second, so
@@ -127,13 +127,17 @@ pub const Options = struct {
     /// Provider-facing total tool count, the builtin included. `shell` always
     /// occupies `registry.builtin_count` of it.
     max_tools: u32 = 20,
-    /// Extensions to bring into THIS session's composition whether or not they
-    /// are activated (`nulya session new --with`, DESIGN §14). Membership only:
-    /// their skills enter the catalog, their system prompts enter the system
-    /// blocks, and their tools become invocable through the CLI — whether a tool
-    /// takes a native slot is still `pinned_native_tools`. Same id as an active
-    /// extension overrides it for this session; a later `--with` of the same id
-    /// overrides an earlier one.
+    /// The session's member extensions — the WHOLE list (DESIGN §5.1). Its two
+    /// spellings mean the same thing and reach here already joined by the shell:
+    /// config's `[extensions] with` ("in this workspace, every session") and
+    /// `nulya session new --with` ("this session"), exactly as
+    /// `pinned_native_tools` joins the config pins with `--pin`.
+    ///
+    /// Membership only: their skills enter the catalog, their system prompts
+    /// enter the system blocks, and their tools become invocable through the
+    /// CLI — whether a tool takes a native slot is still `pinned_native_tools`.
+    /// A later mention of one id overrides an earlier one, so a `--with
+    /// <id>@<version>` on the command line wins over the standing entry.
     with: []const WithRef = &.{},
     /// Per-session system prompts, already read into memory by the caller
     /// (`nulya session new --prompt <file>`, DESIGN §5). Text with no life of
@@ -144,8 +148,8 @@ pub const Options = struct {
 };
 
 /// One `--with` request: an extension id, optionally at an exact version.
-/// Without a version, the id's `current` is used — but unlike discovery, an id
-/// that resolves to nothing is a hard error, because the caller named it.
+/// Without a version, the id's `current` is used — and an id that resolves to
+/// nothing is a hard error, because the caller named it.
 pub const WithRef = struct {
     id: []const u8,
     version: ?[]const u8 = null,
@@ -170,9 +174,9 @@ pub const CompositionError = error{
     /// no `current` at all, or the named version is in none of the store roots.
     /// Both `--with` and the membership a pin implies arrive here.
     WithVersionNotFound,
-    /// An ACTIVATED extension does not validate: its `current` points at a
+    /// A member named WITHOUT a version has a `current`, and it points at a
     /// version whose seal, manifest or package is unusable. Named by a stderr
-    /// line before the error leaves `resolveActiveExtensions`.
+    /// line before the error leaves `resolveCurrent`.
     ActiveExtensionBroken,
 };
 
@@ -210,10 +214,10 @@ pub const SessionComposition = struct {
     ) !SessionComposition {
         try validateBudget(opts);
 
-        // No store root existing anywhere needs no special case: discovery finds
-        // nothing, so a pin fails as `PinNamesUnknownExtension` and a `--with`
-        // as `WithVersionNotFound` on the ordinary path — the same errors, from
-        // the same two places, as when the roots exist but the extension does not.
+        // No store root existing anywhere needs no special case: a pin fails as
+        // `PinNamesUnknownExtension` and a `--with` as `WithVersionNotFound` on
+        // the ordinary path — the same errors, from the same two places, as when
+        // the roots exist but the extension does not.
         var roots = try roots_mod.Roots.open(alloc, io, cwd, ext_roots);
         defer roots.deinit();
 
@@ -272,8 +276,8 @@ fn build(gpa: std.mem.Allocator, io: std.Io, roots: *const roots_mod.Roots, requ
 }
 
 /// What a session's composition was ASKED for, in the only two shapes that
-/// exist: a fresh session (whatever is active, plus `--with`, with pins named
-/// by config / `--pin`) or the frozen record in a session header. The
+/// exist: a fresh session (the members named by config / `--with`, with pins
+/// named by config / `--pin`) or the frozen record in a session header. The
 /// difference lives here and dies here — `resolve` turns either into the same
 /// `Resolved`.
 const Request = union(enum) {
@@ -283,7 +287,7 @@ const Request = union(enum) {
 
 /// A composition request, answered: which extension versions are in this
 /// session (sorted by id) and the bindings for the tools that take a native
-/// slot. Everything about WHY — active, `--with`, frozen header; pinned by
+/// slot. Everything about WHY — named, pin-implied, frozen header; pinned by
 /// config or by the header — has been decided by the time this exists.
 const Resolved = struct {
     /// `gpa`-owned (each carries a parsed manifest), released by `build`.
@@ -295,10 +299,10 @@ const Resolved = struct {
     prompts: []const ledger.InlinePrompt,
 };
 
-/// Phase one: decide membership. Discovery, `--with` and a header's frozen
-/// versions differ only in how the extension list is obtained — every one of
-/// them is strict, and so is pin resolution: an extension someone activated, or
-/// named, or froze, that cannot be composed fails the session rather than
+/// Phase one: decide membership. The named members and a header's frozen
+/// versions differ only in how the extension list is obtained — both are
+/// strict, and so is pin resolution: an extension someone named, or froze, that
+/// cannot be composed fails the session rather than
 /// letting it quietly start without a capability it was asked for. `roots`
 /// stays the caller's; `a` is the composition arena (the bindings survive this
 /// phase), `gpa` backs the resolved manifests (they do not).
@@ -328,8 +332,8 @@ fn resolve(gpa: std.mem.Allocator, a: std.mem.Allocator, roots: *const roots_mod
     };
 }
 
-/// Membership for a FRESH session, in three layers: what is activated, what
-/// `--with` names, and last what the pins imply.
+/// Membership for a FRESH session, in two layers: what `Options.with` names
+/// (config's `[extensions] with` then `--with`), and last what the pins imply.
 ///
 /// **A pin implies membership** (DESIGN §5.1). A pin gives a tool a native slot,
 /// and a tool cannot take a slot in a session its package is not a member of —
@@ -339,19 +343,32 @@ fn resolve(gpa: std.mem.Allocator, a: std.mem.Allocator, roots: *const roots_mod
 /// the only alternative to deriving it was for each driver to derive it, which
 /// is how three of them came to hold three slightly different copies.
 ///
-/// Last, and never an override: an id already resolved — activated, or named by
-/// `--with` at an exact version — keeps the version it was resolved at. The pin
+/// Last, and never an override: an id already resolved — named by config or by
+/// `--with`, at an exact version — keeps the version it was resolved at. The pin
 /// asks for the tool, not for a version, so it must not quietly move a session
 /// off the version somebody named.
 ///
 /// Only ids some root actually HOLDS are implied. That keeps the two refusals
 /// distinguishable: nothing anywhere holds this id → `PinNamesUnknownExtension`
 /// (it was never built here), held but no `current` → `WithVersionNotFound`
-/// (built, never activated — `--with <id>@<version>` or `activate` is the way
-/// in). The frozen path is untouched: a header's `active` already lists every
+/// (built, never activated — `--with <id>@<version>` or `ext activate` is the
+/// way in). The frozen path is untouched: a header's `active` already lists every
 /// member this rule brought in, so a resume never re-derives it.
 fn resolveFreshExtensions(gpa: std.mem.Allocator, roots: *const roots_mod.Roots, opts: Options) ![]roots_mod.Roots.Resolved {
-    const named = try unionWith(gpa, roots, try resolveActiveExtensions(gpa, roots), opts.with);
+    // The base is EMPTY, and that is the whole membership rule: a session's
+    // members are the ones somebody named (`Options.with` = config's
+    // `[extensions] with` plus `--with`) and the ones a pin drags in. There used
+    // to be a third source — "every id with a `current`" — and it made
+    // `activate` mean two things at once: which version `<id>` resolves to, and
+    // whether the package is in every session from now on. The second is a
+    // decision about REACH and belongs to the person, in config, beside the pins
+    // (DESIGN §5.1, physics #6); the first is all `current` says now.
+    //
+    // An allocated empty slice rather than a stack array: `unionWith` hands the
+    // base back untouched when there is nothing to union, and that slice can
+    // escape as this function's result — a pointer into this frame, even at
+    // length zero, is not something to return. Freeing it is a no-op either way.
+    const named = try unionWith(gpa, roots, try gpa.alloc(roots_mod.Roots.Resolved, 0), opts.with);
     // From here on `named` belongs to `unionWith`'s contract — it takes the base
     // and releases it on any failure — so a failure in between has to release it
     // by hand rather than through an errdefer that the tail call would double.
@@ -363,7 +380,7 @@ fn resolveFreshExtensions(gpa: std.mem.Allocator, roots: *const roots_mod.Roots,
     return unionWith(gpa, roots, named, implied);
 }
 
-/// The `--with` refs a pin list implies: one per distinct `ext:<id>/…` id that
+/// The member refs a pin list implies: one per distinct `ext:<id>/…` id that
 /// is not already a member and that some root holds, at `current`
 /// (`version = null`).
 ///
@@ -424,7 +441,7 @@ fn copyInlinePrompts(a: std.mem.Allocator, prompts: []const ledger.InlinePrompt)
 
 /// Phase two: build the frozen session state out of what phase one decided —
 /// the tool set, the skill catalog, the system blocks, the frozen member
-/// versions — and nothing else. It cannot tell an active extension from a
+/// versions — and nothing else. It cannot tell a config member from a
 /// `--with` one, or a config pin from a header's: by the time anything reaches here those
 /// questions have no representation left. Each resolved extension names the
 /// root index it was found in, so the search order is never re-derived either.
@@ -567,60 +584,11 @@ fn findToolSpec(m: manifest.Manifest, name: []const u8) ?manifest.ToolSpec {
 /// fault of the machine, not of the extension, and propagates as itself.
 const isExtensionFault = store.isExtensionFault;
 
-/// Discover the active extensions across every store root, in search order:
-/// `Roots.listActive` already applied first-root-wins, so each entry only has
-/// to be turned into a validated `Resolved` — `resolveEntry` takes the root and
-/// version the listing decided rather than asking `current` again.
-///
-/// An activated extension that does not validate FAILS THE SESSION. `activate`
-/// is the most explicit statement of intent the store has, so it gets the same
-/// strictness as `--with` and as a header's frozen versions: a session that
-/// quietly starts without a capability someone activated is not the session
-/// that was asked for, and first-root-wins makes silence worse — a broken
-/// workspace copy would erase the extension outright even with a good active
-/// version in the user root. The offending `id@version` is named on stderr,
-/// because Zig errors carry no payload and `ActiveExtensionBroken` alone would
-/// not say which of the store's extensions to repair.
-fn resolveActiveExtensions(alloc: std.mem.Allocator, roots: *const roots_mod.Roots) ![]roots_mod.Roots.Resolved {
-    var resolved: std.ArrayList(roots_mod.Roots.Resolved) = .empty;
-    errdefer freeResolved(alloc, resolved.items);
-
-    const active = try roots.listActive(alloc);
-    defer roots_mod.Roots.freeActive(alloc, active);
-
-    for (active) |entry| {
-        // A host fault — cancellation, OOM, a real I/O failure — must propagate
-        // as itself, never be reported as a broken extension (isExtensionFault).
-        const r = roots.resolveEntry(alloc, entry, .sealed) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            else => {
-                if (!isExtensionFault(err)) return err;
-                try reportBrokenActive(roots.io, alloc, entry, err);
-                return error.ActiveExtensionBroken;
-            },
-        };
-        errdefer r.deinit(alloc);
-        // The package's own answer to "when does activation bring me in"
-        // (`manifest.Activation`, DESIGN §7.2.1): `on_request` means activation
-        // registered it and nothing more — it joins the sessions that NAME it,
-        // which `unionWith` does a moment later from the same `current` this
-        // loop just read. Resolved first all the same, and a version that will
-        // not resolve still fails the session: `on_request` changes WHEN a
-        // package joins, not whether a broken activation is a broken machine.
-        if (r.manifest.activationOf() == .on_request) {
-            r.deinit(alloc);
-            continue;
-        }
-        try resolved.append(alloc, r);
-    }
-    return resolved.toOwnedSlice(alloc);
-}
-
 /// The one line that carries what `error.ActiveExtensionBroken` cannot: which
-/// activated version is unusable, why, and the two verbs that make the store
-/// consistent again. stderr, so `session step --stream` keeps stdout pure JSON
-/// (DESIGN §14) — the same channel `ext activate --user` and the kernel-drift
-/// warning already use.
+/// version `<id>`'s `current` points at is unusable, why, and the two verbs that
+/// make the store consistent again. stderr, so `session step --stream` keeps
+/// stdout pure JSON (DESIGN §14) — the same channel `ext activate --user` and
+/// the kernel-drift warning already use.
 fn reportBrokenActive(
     io: std.Io,
     alloc: std.mem.Allocator,
@@ -634,22 +602,29 @@ fn reportBrokenActive(
     if (builtin.is_test) return;
     const line = try std.fmt.allocPrint(
         alloc,
-        "active extension {s}@{s} is broken ({s}); run 'nulya ext deactivate {s}', or 'nulya ext activate {s} <older-version>' to go back\n",
+        "extension {s}: current points at {s}, which is broken ({s}); run 'nulya ext activate {s} <older-version>', or name a good one with --with {s}@<version>\n",
         .{ entry.id, entry.version, @errorName(err), entry.id, entry.id },
     );
     defer alloc.free(line);
     try std.Io.File.stderr().writeStreamingAll(io, line);
 }
 
-/// Union the `--with` extensions into the discovered set (DESIGN §14): each one
-/// enters this session's composition whether or not it is activated, at the
-/// named version or at its `current`. Same id as a discovered extension REPLACES
-/// it (this session says which version it means), and a repeated `--with` of one
-/// id keeps the last — the request is an override, so the last override wins.
+/// Resolve the named members into the list (DESIGN §14): each one enters this
+/// session's composition at the named version or at its `current`. A repeated
+/// mention of one id keeps the last — config's `[extensions] with` comes first
+/// and `--with` after it, so naming a version on the command line overrides the
+/// standing entry, which is the whole point of being able to.
 ///
 /// The caller named these, so an id with no built version, or a version no root
-/// holds, fails the session. Takes ownership of `base`; on any error it and
-/// everything built so far is released.
+/// holds, fails the session. So does an id whose `current` points at something
+/// unusable: the pointer is a statement of intent, and a session that quietly
+/// starts without a capability it was composed with is not the session that was
+/// asked for. That one is `ActiveExtensionBroken`, named on stderr first —
+/// `WithVersionNotFound` would say "never built here", which is a different
+/// repair from "built, and the copy on disk is damaged".
+///
+/// Takes ownership of `base`; on any error it and everything built so far is
+/// released.
 fn unionWith(
     alloc: std.mem.Allocator,
     roots: *const roots_mod.Roots,
@@ -675,7 +650,7 @@ fn unionWith(
                 else => return err,
             }
         else
-            (try roots.resolveActive(alloc, ref.id, .sealed)) orelse return error.WithVersionNotFound;
+            try resolveCurrent(alloc, roots, ref.id);
         errdefer r.deinit(alloc);
 
         // Replace an entry for the same id rather than shadowing it: two
@@ -688,6 +663,37 @@ fn unionWith(
         try list.append(alloc, r);
     }
     return list.toOwnedSlice(alloc);
+}
+
+/// One member named WITHOUT a version: whatever its `current` points at, in
+/// search order (`Roots.firstActive` — the first root holding an active copy
+/// wins). Two distinguishable refusals, because they need different repairs:
+/// no `current` anywhere is `WithVersionNotFound` ("built but never activated,
+/// or never built"), while a `current` that resolves to a damaged version is
+/// `ActiveExtensionBroken`, with the offending `id@version` named on stderr
+/// first — Zig errors carry no payload, and "an extension is broken" without
+/// which one is not a repairable sentence.
+///
+/// `firstActive` + `resolveEntry` rather than `resolveActive`: the version has
+/// to survive the failure so the line can name it.
+fn resolveCurrent(
+    alloc: std.mem.Allocator,
+    roots: *const roots_mod.Roots,
+    id: []const u8,
+) !roots_mod.Roots.Resolved {
+    const active = (try roots.firstActive(alloc, id)) orelse return error.WithVersionNotFound;
+    defer alloc.free(active.version);
+    const entry: roots_mod.Roots.ActiveEntry = .{ .id = id, .root = active.root, .version = active.version };
+    return roots.resolveEntry(alloc, entry, .sealed) catch |err| switch (err) {
+        // A host fault — cancellation, OOM, a real I/O failure — must propagate
+        // as itself, never be reported as a broken extension.
+        error.Canceled => error.Canceled,
+        else => {
+            if (!isExtensionFault(err)) return err;
+            try reportBrokenActive(roots.io, alloc, entry, err);
+            return error.ActiveExtensionBroken;
+        },
+    };
 }
 
 /// Resolve exactly the frozen (id, version) pairs from a session header: this
@@ -845,7 +851,7 @@ fn tmpPath(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) ![]u8 {
     return try alloc.dupe(u8, buf[0..len]);
 }
 
-test "session composition pins active extension versions for the session" {
+test "a member named without a version freezes whatever current pointed at when the session began" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -866,8 +872,11 @@ test "session composition pins active extension versions for the session" {
     const v2 = try testkit.writeFrozenVersion(alloc, io, tmp.dir, "finance", manifest_v2, &.{.{ .rel = "skills/risk-parity/SKILL.md", .bytes = skill_v2 }});
     defer alloc.free(v2);
 
+    // Named without a version, so `current` decides which build this session
+    // gets — and then the session's own copy of the answer is frozen.
+    const with_finance: []const WithRef = &.{.{ .id = "finance" }};
     try testkit.activate(alloc, io, tmp.dir, "finance", v1);
-    var first = try SessionComposition.init(alloc, io, cwd, one_root, .{});
+    var first = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = with_finance });
     defer first.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), first.extensions.len);
     try std.testing.expectEqualStrings(v1, first.extensions[0].version);
@@ -880,7 +889,7 @@ test "session composition pins active extension versions for the session" {
     try std.testing.expectEqualStrings(v1, first.extensions[0].version);
     try std.testing.expectEqualStrings("v1 skill", first.skills.skills[0].description);
 
-    var second = try SessionComposition.init(alloc, io, cwd, one_root, .{});
+    var second = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = with_finance });
     defer second.deinit(alloc);
     try std.testing.expectEqualStrings(v2, second.extensions[0].version);
     try std.testing.expectEqualStrings("v2 skill", second.skills.skills[0].description);
@@ -903,7 +912,7 @@ test "pinned skill load survives current changes and absent draft source" {
     defer alloc.free(v2);
     try testkit.activate(alloc, io, tmp.dir, "finance", v1);
 
-    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{});
+    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "finance" }} });
     defer comp.deinit(alloc);
     const ref = try alloc.dupe(u8, comp.skills.skills[0].ref);
     defer alloc.free(ref);
@@ -931,7 +940,7 @@ test "skill frontmatter name must match the skill directory" {
     defer alloc.free(version);
     try testkit.activate(alloc, io, tmp.dir, "finance", version);
 
-    try std.testing.expectError(error.SkillNameDoesNotMatchDirectory, SessionComposition.init(alloc, io, cwd, one_root, .{}));
+    try std.testing.expectError(error.SkillNameDoesNotMatchDirectory, SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "finance" }} }));
 }
 
 test "duplicate skill names in one extension are rejected" {
@@ -952,10 +961,10 @@ test "duplicate skill names in one extension are rejected" {
     defer alloc.free(version);
     try testkit.activate(alloc, io, tmp.dir, "finance", version);
 
-    try std.testing.expectError(error.DuplicateSkillName, SessionComposition.init(alloc, io, cwd, one_root, .{}));
+    try std.testing.expectError(error.DuplicateSkillName, SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "finance" }} }));
 }
 
-test "inactive extension contributions do not enter composition" {
+test "activating a package composes nothing: a member is one somebody NAMED, and activate only says which version that is" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -963,39 +972,17 @@ test "inactive extension contributions do not enter composition" {
     const cwd = try tmpPath(alloc, io, tmp.dir);
     defer alloc.free(cwd);
 
-    const manifest_bytes =
-        \\{"schema":"nulya.extension/v2","id":"inactive","activation":"always","contributes":{"skills":["skills/demo"],"system_prompts":["prompts/base.md"]}}
+    // Two packages, identical in every way that used to matter: both built,
+    // both activated, both contributing a system prompt. There is no field
+    // left that could make one of them join a session the other does not —
+    // reach is not the package's to declare (DESIGN §5.1, physics #6).
+    const bytes =
+        \\{"schema":"nulya.extension/v2","id":"ID","contributes":{"system_prompts":["prompts/base.md"]}}
     ;
-    const version = try testkit.writeFrozenVersion(alloc, io, tmp.dir, "inactive", manifest_bytes, &.{
-        .{ .rel = "skills/demo/SKILL.md", .bytes = "---\nname: demo\ndescription: demo skill\n---\nbody\n" },
-        .{ .rel = "prompts/base.md", .bytes = "inactive prompt\n" },
-    });
-    defer alloc.free(version);
-
-    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{});
-    defer comp.deinit(alloc);
-    try std.testing.expectEqual(@as(usize, 0), comp.extensions.len);
-    try std.testing.expectEqual(@as(usize, 0), comp.skills.skills.len);
-    try std.testing.expectEqual(@as(usize, 1), comp.system_prompts.blocks.len); // kernel only
-}
-
-test "an on_request package is registered by activation, and joins only the sessions that name it" {
-    const alloc = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const cwd = try tmpPath(alloc, io, tmp.dir);
-    defer alloc.free(cwd);
-
-    // Two activated packages that differ in one field: one is a policy, the
-    // other a mode. Both contribute a system prompt and a skill, so what is
-    // being tested is WHEN each joins — never which parts of it do.
-    const policy_bytes =
-        \\{"schema":"nulya.extension/v2","id":"policy","activation":"always","contributes":{"system_prompts":["prompts/base.md"]}}
-    ;
-    const mode_bytes =
-        \\{"schema":"nulya.extension/v2","id":"mode","activation":"on_request","contributes":{"system_prompts":["prompts/base.md"]}}
-    ;
+    const policy_bytes = try std.mem.replaceOwned(u8, alloc, bytes, "ID", "policy");
+    defer alloc.free(policy_bytes);
+    const mode_bytes = try std.mem.replaceOwned(u8, alloc, bytes, "ID", "mode");
+    defer alloc.free(mode_bytes);
     const policy_v = try testkit.writeFrozenVersion(alloc, io, tmp.dir, "policy", policy_bytes, &.{.{ .rel = "prompts/base.md", .bytes = "POLICY" }});
     defer alloc.free(policy_v);
     const mode_v = try testkit.writeFrozenVersion(alloc, io, tmp.dir, "mode", mode_bytes, &.{.{ .rel = "prompts/base.md", .bytes = "MODE" }});
@@ -1003,39 +990,49 @@ test "an on_request package is registered by activation, and joins only the sess
     try testkit.activate(alloc, io, tmp.dir, "policy", policy_v);
     try testkit.activate(alloc, io, tmp.dir, "mode", mode_v);
 
-    // An ordinary session: the policy is here because activating it said so,
-    // and the mode is not, although it is just as activated.
+    // A session that names nobody has nobody, however much is activated. This
+    // is the whole deletion: there is no discovery pass, so the store's content
+    // cannot reach a session on its own.
     {
         var plain = try SessionComposition.init(alloc, io, cwd, one_root, .{});
         defer plain.deinit(alloc);
-        try std.testing.expectEqual(@as(usize, 1), plain.extensions.len);
-        try std.testing.expectEqualStrings("policy", plain.extensions[0].id);
-        try std.testing.expectEqual(@as(usize, 2), plain.system_prompts.blocks.len); // kernel + policy
-        try std.testing.expectEqualStrings("POLICY", plain.system_prompts.blocks[1].bytes);
+        try std.testing.expectEqual(@as(usize, 0), plain.extensions.len);
+        try std.testing.expectEqual(@as(usize, 0), plain.skills.skills.len);
+        try std.testing.expectEqual(@as(usize, 1), plain.system_prompts.blocks.len); // kernel only
     }
 
-    // Naming it brings it in WHOLE, at the version activation points at — no
-    // version to remember, which is what registering it bought.
+    // Naming one brings it in WHOLE, at the version `current` points at — the
+    // caller needs no version, which is the entire thing activating bought.
     {
         var worn = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "mode" }} });
         defer worn.deinit(alloc);
-        try std.testing.expectEqual(@as(usize, 2), worn.extensions.len);
-        try std.testing.expectEqual(@as(usize, 3), worn.system_prompts.blocks.len);
-        // Members are sorted by id, so the mode's block sits before the policy's.
+        try std.testing.expectEqual(@as(usize, 1), worn.extensions.len);
+        try std.testing.expectEqualStrings("mode", worn.extensions[0].id);
+        try std.testing.expectEqualStrings(mode_v, worn.extensions[0].version);
+        try std.testing.expectEqual(@as(usize, 2), worn.system_prompts.blocks.len);
         try std.testing.expectEqualStrings("MODE", worn.system_prompts.blocks[1].bytes);
-        try std.testing.expectEqualStrings("POLICY", worn.system_prompts.blocks[2].bytes);
     }
 
-    // Deactivating it takes the bare name away again: `--with <id>` reads
-    // `current`, and registration is exactly what `current` is.
+    // Naming both — which is what config's `[extensions] with` and `--with`
+    // reach here as, already joined — brings both, sorted by id.
+    {
+        var both = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{ .{ .id = "policy" }, .{ .id = "mode" } } });
+        defer both.deinit(alloc);
+        try std.testing.expectEqual(@as(usize, 2), both.extensions.len);
+        try std.testing.expectEqualStrings("MODE", both.system_prompts.blocks[1].bytes);
+        try std.testing.expectEqualStrings("POLICY", both.system_prompts.blocks[2].bytes);
+    }
+
+    // Deactivating takes the BARE name away: `--with <id>` reads `current`, and
+    // that pointer is all `current` ever was.
     try testkit.deactivate(alloc, io, tmp.dir, "mode");
     try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "mode" }} }));
     // …while the exact version still composes, as it did before it was ever
     // activated: naming a build never needed a pointer.
     {
-        var pinned = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "mode", .version = mode_v }} });
-        defer pinned.deinit(alloc);
-        try std.testing.expectEqual(@as(usize, 3), pinned.system_prompts.blocks.len);
+        var exact = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "mode", .version = mode_v }} });
+        defer exact.deinit(alloc);
+        try std.testing.expectEqual(@as(usize, 2), exact.system_prompts.blocks.len);
     }
 }
 
@@ -1157,7 +1154,9 @@ test "system prompt ordering is deterministic by pinned extension id and manifes
     try testkit.activate(alloc, io, tmp.dir, "b", vb);
     try testkit.activate(alloc, io, tmp.dir, "a", va);
 
-    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{});
+    // Named in the OPPOSITE order to the one the blocks come out in: the sort is
+    // by member id, never by the order somebody wrote them.
+    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{ .{ .id = "b" }, .{ .id = "a" } } });
     defer comp.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 4), comp.system_prompts.blocks.len);
     try std.testing.expectEqualStrings("kernel", comp.system_prompts.blocks[0].source);
@@ -1184,7 +1183,7 @@ test "inline prompts land after every member's block and before the skills catal
     defer alloc.free(v);
     try testkit.activate(alloc, io, tmp.dir, "b", v);
 
-    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .prompts = &.{
+    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "b" }}, .prompts = &.{
         .{ .source = "agent-explore", .text = "FIRST" },
         .{ .source = "brief", .text = "SECOND" },
     } });
@@ -1507,7 +1506,7 @@ test "executor calls reach the composition-time frozen entry path" {
     }
 }
 
-test "a corrupted ACTIVE version fails the session instead of vanishing from it" {
+test "a member named without a version whose current is corrupted fails the session instead of vanishing from it" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -1519,9 +1518,12 @@ test "a corrupted ACTIVE version fails the session instead of vanishing from it"
     defer alloc.free(v1);
     try testkit.activate(alloc, io, tmp.dir, "web.search", v1);
 
+    // Named without a version, so this session's copy comes through `current`.
+    const named: []const WithRef = &.{.{ .id = "web.search" }};
+
     // A healthy store composes normally.
     {
-        var ok = try SessionComposition.init(alloc, io, cwd, one_root, .{});
+        var ok = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = named });
         defer ok.deinit(alloc);
         try std.testing.expectEqual(@as(usize, 1), ok.extensions.len);
     }
@@ -1531,19 +1533,26 @@ test "a corrupted ACTIVE version fails the session instead of vanishing from it"
     defer alloc.free(seal_sub);
     try tmp.dir.writeFile(io, .{ .sub_path = seal_sub, .data = "{}" });
 
-    // Someone activated this; a session that silently starts without it is not
-    // the session that was asked for. (The diagnostic naming id@version goes to
-    // stderr — this line in the test output is that diagnostic, not a failure.)
-    try std.testing.expectError(error.ActiveExtensionBroken, SessionComposition.init(alloc, io, cwd, one_root, .{}));
+    // Somebody named this package; a session that silently starts without it is
+    // not the session that was asked for. Distinguishable from "never built
+    // here" (`WithVersionNotFound`) because the two need different repairs, and
+    // the offending `id@version` is named on stderr.
+    try std.testing.expectError(error.ActiveExtensionBroken, SessionComposition.init(alloc, io, cwd, one_root, .{ .with = named }));
 
-    // Deactivating it is the documented way back: nothing is active, so the
-    // session composes again — now honestly without the capability.
+    // Not naming it at all composes fine — it was never the store's presence
+    // that put it in a session.
+    {
+        var unnamed = try SessionComposition.init(alloc, io, cwd, one_root, .{});
+        defer unnamed.deinit(alloc);
+        try std.testing.expectEqual(@as(usize, 0), unnamed.extensions.len);
+    }
+
+    // And with `current` gone the SAME request is the other refusal: nothing to
+    // repair, something to build or activate.
     var root = try tmp.dir.openDir(io, ".", .{ .iterate = true });
     defer root.close(io);
     try store.Store.init(io, root).deactivate(alloc, "web.search");
-    var recovered = try SessionComposition.init(alloc, io, cwd, one_root, .{});
-    defer recovered.deinit(alloc);
-    try std.testing.expectEqual(@as(usize, 0), recovered.extensions.len);
+    try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_root, .{ .with = named }));
 }
 
 test "a broken workspace copy fails the session rather than hiding a good user-root one" {
@@ -1570,24 +1579,26 @@ test "a broken workspace copy fails the session rather than hiding a good user-r
 
     const two_roots: []const []const u8 = &.{ "workspace", "user" };
 
-    // Break the WORKSPACE copy. `listActive` is first-root-wins, so it is the
-    // one the session composes; skipping it would erase the extension entirely
-    // even though the user root holds a perfectly good active version. Failing
-    // says which copy to repair instead.
+    const named: []const WithRef = &.{.{ .id = "web.search" }};
+
+    // Break the WORKSPACE copy. `firstActive` is first-root-wins, so it is the
+    // one a bare `--with web.search` composes; skipping it would erase the
+    // extension entirely even though the user root holds a perfectly good
+    // active version. Failing says which copy to repair instead.
     const seal_sub = try std.fs.path.join(alloc, &.{ "web.search", "versions", ws_v, integrity.seal_file });
     defer alloc.free(seal_sub);
     try ws.writeFile(io, .{ .sub_path = seal_sub, .data = "{}" });
-    try std.testing.expectError(error.ActiveExtensionBroken, SessionComposition.init(alloc, io, cwd, two_roots, .{}));
+    try std.testing.expectError(error.ActiveExtensionBroken, SessionComposition.init(alloc, io, cwd, two_roots, .{ .with = named }));
 
     // Deactivate in the workspace and the user root's copy takes effect.
     try store.Store.init(io, ws).deactivate(alloc, "web.search");
-    var comp = try SessionComposition.init(alloc, io, cwd, two_roots, .{});
+    var comp = try SessionComposition.init(alloc, io, cwd, two_roots, .{ .with = named });
     defer comp.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), comp.extensions.len);
     try std.testing.expectEqualStrings(user_v, comp.extensions[0].version);
 }
 
-test "an active but unpinned extension tool is not natively visible" {
+test "a member's tool is not natively visible without a pin" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -1599,9 +1610,9 @@ test "an active but unpinned extension tool is not natively visible" {
     defer alloc.free(v1);
     try testkit.activate(alloc, io, tmp.dir, "web.search", v1);
 
-    // No pins: the extension is still active (composition pins its version), but
+    // No pins: the extension is a member (composition freezes its version), but
     // its tool is reachable only through the CLI, never the model-facing set.
-    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{});
+    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "web.search" }} });
     defer comp.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 0), comp.extension_tool_bindings.len);
     try std.testing.expect(comp.tools.lookup("web_search") == null);

@@ -3,8 +3,7 @@
 一个包，把「先调查、再计划、什么都不改，最后交人审阅」这件事说完整：
 一段 system prompt（这一场是干什么的）、一条收窄的 `policy`（戴着它的时候能做什么）、
 一条 `/plan` 命令（怎么戴上）、三个 tool，以及一段前端代码（`tui/plan.ts`）。
-内核只强制其中一样（`activation: "on_request"`，DESIGN §7.2.1），其余全是**声明**——
-读它的 driver 有权不信。
+这里没有一样是内核强制的（DESIGN §7.2.1）：全是**声明**——读它的 driver 有权不信。
 
 ## 三个 tool
 
@@ -23,10 +22,10 @@ nulya ext activate --user plan <version>
 
 不在 nulya 的 checkout 里也一样：源码随二进制走（DESIGN §7.8），`nulya ext seed --user plan`
 把它写进 user store 再 build。TUI 里这两步是 `/ext` 上那一行的 `Enter`；开屏那趟后台
-sync 本来也会把它 activate（`on_request` 的包 activate 只是登记，不改变任何一场 session）。
+sync 本来也会把它 activate——**activate 只是让 `plan` 这个名字指向这个版本**，
+一场 session 都不改变（DESIGN §5.1）。
 
-`activation: "on_request"` 的意思是 **activate 只是登记**：它一场 session 都不改变，
-只进点名它的那一场。戴上一场：
+它只进点名它的那一场。戴上一场：
 
 - TUI：`/plan`（这个包自己声明的命令）或 `/with plan`；
 - 命令行：`nulya session new --with plan --pin ext:plan/propose --pin ext:plan/todo`。

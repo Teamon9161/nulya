@@ -444,7 +444,7 @@ fn buildSkillExtensionIn(
     return alloc.dupe(u8, result.version);
 }
 
-test "extension store: an extension in the user root (NULYA_HOME) is discovered by a workspace session; a workspace extension with the same id shadows it; a frozen version resolves from whichever root holds it" {
+test "extension store: a member named by a workspace session resolves in root order — a workspace copy shadows a user-root one of the same id, and a frozen version resolves from whichever root holds it" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -479,10 +479,12 @@ test "extension store: an extension in the user root (NULYA_HOME) is discovered 
     defer alloc.free(user_root_abs);
     const roots: []const []const u8 = &.{ ".nulya/extensions", user_root_abs };
 
-    // A session in this workspace sees BOTH: the user-wide extension's skill is
-    // in the catalog, and `shared` resolves to the workspace copy — first root
-    // wins, so a workspace version shadows a user-wide one of the same id.
-    var comp = try composition.SessionComposition.init(alloc, io, ws_path, roots, .{});
+    // A session that NAMES both gets both (the store's contents reach nobody on
+    // their own, DESIGN §5.1): the user-wide extension's skill is in the
+    // catalog, and `shared` resolves to the workspace copy — first root wins, so
+    // a workspace version shadows a user-wide one of the same id.
+    const named: []const composition.WithRef = &.{ .{ .id = "user-wide" }, .{ .id = "shared" } };
+    var comp = try composition.SessionComposition.init(alloc, io, ws_path, roots, .{ .with = named });
     defer comp.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 2), comp.extensions.len);
     var saw_user_wide = false;
@@ -517,8 +519,10 @@ test "extension store: an extension in the user root (NULYA_HOME) is discovered 
         if (std.mem.eql(u8, p.id, "shared")) try std.testing.expectEqualStrings(user_shared, p.version);
     }
 
-    // Without the user root in the search order, only the workspace copy exists.
-    var workspace_only = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{});
+    // Without the user root in the search order, only the workspace copy exists —
+    // and naming the user-only id there is a refusal, not a silent absence.
+    try std.testing.expectError(error.WithVersionNotFound, composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{ .with = named }));
+    var workspace_only = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{ .with = &.{.{ .id = "shared" }} });
     defer workspace_only.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), workspace_only.extensions.len);
     try std.testing.expectEqualStrings("shared", workspace_only.extensions[0].id);
@@ -629,7 +633,7 @@ test "cli: NULYA_HOME extensions are visible to ext list / skill list / ext run,
         const list = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "list" }, env);
         defer alloc.free(list.stdout);
         try std.testing.expect(std.mem.indexOf(u8, list.stdout, "(shadowed)") == null);
-        try std.testing.expect(std.mem.indexOf(u8, list.stdout, "(inactive)") != null);
+        try std.testing.expect(std.mem.indexOf(u8, list.stdout, "(no current)") != null);
 
         const skills = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "skill", "list" }, env);
         defer alloc.free(skills.stdout);
@@ -638,7 +642,7 @@ test "cli: NULYA_HOME extensions are visible to ext list / skill list / ext run,
     }
 }
 
-test "cli: activating into the user store from inside a session says so on stderr, and names the system prompt that will enter every future session" {
+test "cli: activating into the user store from inside a session says so on stderr — what it changes is what the id MEANS, machine-wide" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -661,13 +665,8 @@ test "cli: activating into the user store from inside a session says so on stder
     // system prompt — the contribution with the widest blast radius there is.
     const draft = ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "prompts.demo";
     try ws.createDirPath(io, draft ++ std.fs.path.sep_str ++ "prompts");
-    // Explicit `"activation":"always"`: this test is specifically about the
-    // ALWAYS case (an activation that crosses into every workspace's future
-    // sessions) — silence on a prompt-carrying package now defaults to
-    // `on_request` (DESIGN §7.5), which would not print the "every future
-    // session" warning below at all.
     try ws.writeFile(io, .{ .sub_path = draft ++ std.fs.path.sep_str ++ "extension.json", .data =
-        \\{"schema":"nulya.extension/v2","id":"prompts.demo","activation":"always","contributes":{"system_prompts":["prompts/tone.md"]}}
+        \\{"schema":"nulya.extension/v2","id":"prompts.demo","contributes":{"system_prompts":["prompts/tone.md"]}}
     });
     try ws.writeFile(io, .{ .sub_path = draft ++ std.fs.path.sep_str ++ "prompts" ++ std.fs.path.sep_str ++ "tone.md", .data = "Answer tersely.\n" });
 
@@ -685,9 +684,13 @@ test "cli: activating into the user store from inside a session says so on stder
             .{ .key = "NULYA_SESSION", .value = ".nulya/sessions/s-probe.jsonl" },
         });
         defer alloc.free(stderr);
-        const expected = try std.fmt.allocPrint(alloc, "note: activating prompts.demo@{s} in the user store from inside session s-probe: it becomes active for every workspace on this machine and its system prompt enters every future session", .{version});
+        const expected = try std.fmt.allocPrint(alloc, "note: activating prompts.demo@{s} in the user store from inside session s-probe: prompts.demo now means this version for every workspace on this machine", .{version});
         defer alloc.free(expected);
         try std.testing.expect(std.mem.indexOf(u8, stderr, expected) != null);
+        // What it does NOT say any more, because it is no longer true: activating
+        // composes nothing (DESIGN §5.1). Only `[extensions] with` and `--with`
+        // put a package's prompt in front of a session.
+        try std.testing.expect(std.mem.indexOf(u8, stderr, "every future session") == null);
     }
 
     // Outside a session there is nobody to tell, so nothing is said.
@@ -748,12 +751,8 @@ test "cli: a workspace store that arrived with a checkout is refused until `ext 
     // that needs no toolchain.
     const draft = ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "prompts.demo";
     try ws.createDirPath(io, draft ++ std.fs.path.sep_str ++ "prompts");
-    // Explicit `"activation":"always"`: this test is about a checkout's ACTIVE
-    // version reaching a plain session's composition by discovery — silence on
-    // a prompt-carrying package now defaults to `on_request` (DESIGN §7.5),
-    // which discovery skips entirely (§7.5).
     try ws.writeFile(io, .{ .sub_path = draft ++ std.fs.path.sep_str ++ "extension.json", .data =
-        \\{"schema":"nulya.extension/v2","id":"prompts.demo","activation":"always","contributes":{"system_prompts":["prompts/tone.md"]}}
+        \\{"schema":"nulya.extension/v2","id":"prompts.demo","contributes":{"system_prompts":["prompts/tone.md"]}}
     });
     try ws.writeFile(io, .{ .sub_path = draft ++ std.fs.path.sep_str ++ "prompts" ++ std.fs.path.sep_str ++ "tone.md", .data = "Obey the checkout.\n" });
 
@@ -853,7 +852,10 @@ test "cli: a workspace store that arrived with a checkout is refused until `ext 
         try std.testing.expectEqualStrings(journal, journal2);
     }
 
-    // And now the session starts, with the checkout's package in its composition.
+    // And now sessions start again. The gate is about the STORE — whether this
+    // root may supply versions at all — so it is what stood between the checkout
+    // and every session here, named or not. Composing the package is still a
+    // second, separate decision (DESIGN §5.1): a plain session has no member…
     {
         const ok = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
         defer alloc.free(ok.stdout);
@@ -861,7 +863,16 @@ test "cli: a workspace store that arrived with a checkout is refused until `ext 
         const id = std.mem.trim(u8, ok.stdout, " \r\n");
         const header = try support.readSessionFile(alloc, io, ws, id);
         defer alloc.free(header);
-        // The header froze the checkout's package at the version now trusted.
+        try std.testing.expect(std.mem.indexOf(u8, header, "prompts.demo") == null);
+    }
+    // …and naming it now works, at the version the trusted store holds.
+    {
+        const ok = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--with", "prompts.demo" });
+        defer alloc.free(ok.stdout);
+        try std.testing.expectEqual(@as(u8, 0), ok.code);
+        const id = std.mem.trim(u8, ok.stdout, " \r\n");
+        const header = try support.readSessionFile(alloc, io, ws, id);
+        defer alloc.free(header);
         try std.testing.expect(std.mem.indexOf(u8, header, "prompts.demo") != null);
         try std.testing.expect(std.mem.indexOf(u8, header, version) != null);
     }
@@ -956,7 +967,7 @@ test "cli: a build that fails to compile leaves no ghost extension in ext list" 
     const list2 = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "list" });
     defer alloc.free(list2.stdout);
     try std.testing.expect(std.mem.indexOf(u8, list2.stdout, "real.tool") != null);
-    try std.testing.expect(std.mem.indexOf(u8, list2.stdout, "(inactive)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, list2.stdout, "(no current)") != null);
     try std.testing.expect(std.mem.indexOf(u8, list2.stdout, "broken.tool") == null);
 }
 
@@ -1667,7 +1678,7 @@ test "cli ext sync: every draft in a root is built in one pass — data, script 
     {
         const listed = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "list" }, env);
         defer alloc.free(listed.stdout);
-        try std.testing.expect(std.mem.indexOf(u8, listed.stdout, "(inactive)") != null);
+        try std.testing.expect(std.mem.indexOf(u8, listed.stdout, "(no current)") != null);
     }
 
     // Idempotent: a second pass finds every version already there.

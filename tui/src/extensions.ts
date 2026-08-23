@@ -287,10 +287,9 @@ export function planStore(ws: Workspace, user: boolean): Promise<SyncReport> {
 // interface". Both are gone (T34). The second is now the package's own words —
 // `contributes.tools[].audience` in the frozen manifest (DESIGN §7.2.1) — which
 // is the only place that knows, and works for a package this repository has
-// never heard of. The first turned out to be nothing: activation is membership,
-// the pin half is decided per tool by audience, and the one activation that
-// really is a decision (a package contributing a SYSTEM PROMPT) already has its
-// own general rule in `autoActivatable`.
+// never heard of. The first turned out to be nothing twice over: activating is
+// a pointer move that composes nothing (DESIGN §5.1), and what a session
+// carries is said by the person, in `[extensions] with` or in `/ext`'s Enter.
 //
 // Since T23 nobody is asked about any of it: the user store is the person's own
 // directory, what lands in it came with the binary they ran, and the question
@@ -338,59 +337,30 @@ export function pinsOf(what: Pick<Contributions, "id" | "tools" | "driverTools">
 }
 
 /**
- * The pins a STANDING list — `tui-state.json`'s `session_pins`, or the user
- * config's `registry.pinned_native_tools` — may hold for this package.
+ * Does turning this package on in `/ext` also mean composing it — a standing
+ * entry in `tui-state.json`'s `session_with` (K8)?
  *
- * The rule is one sentence: a pin brings its package into the session (DESIGN
- * §5.1), and a STANDING pin does that for every session this machine opens.
- * For a package that says `activation: "on_request"` that is the one thing it
- * asked not to happen — it is a mode, worn per session by a decision (`--with`,
- * DESIGN §7.2.1) — so a standing pin naming its tool would turn the mode on
- * everywhere, quietly, through a tools-pane checkbox. The kernel no longer
- * refuses such a pin (it used to be `PinNamesUnknownExtension`, and every
- * `session new` failed — the bug that named this function); it honours it,
- * which is worse. So this front end simply never writes one.
+ * Yes exactly when the package contributes something a session can only get by
+ * being a MEMBER of it: skills, system prompts, slash commands, a front-end
+ * module. A pure tool package needs no such entry — its pins bring it in by
+ * themselves (DESIGN §5.1) — so writing one would be a second way of saying
+ * what the pins already say, and a second thing to take back.
  *
- * An `on_request` package's tools still reach the face — in the session that
- * wears it, where `--with` and `--pin` travel together (`App.wornPins`).
+ * The switch used to be an activate alone, and that composed the package
+ * because the kernel discovered every id with a `current`. It no longer does:
+ * `current` says which version `<id>` means and nothing more, so a front end
+ * that only moved the pointer would turn a mode "on" and change nothing a
+ * person could see.
  */
-export function standingPinsOf(
-  what: Pick<Contributions, "id" | "tools" | "driverTools" | "activation">,
-): string[] {
-  return what.activation === "on_request" ? [] : pinsOf(what)
-}
-
-/**
- * May a BACKGROUND pass point `current` at this package? (tui.md §11, T31/T37.)
- *
- * One rule, and it is about REACH: refuse only when activating would put a
- * system prompt in front of every model this machine runs from then on. That is
- * not an installation, it is a MODE, and choosing one is a person's decision,
- * never a start-up side effect. The bug that named this function: `evolution`
- * got activated by a sync pass, and every session afterwards opened believing
- * it was the slow loop and refused ordinary work.
- *
- * Since T37 the reach question has two halves, and a package answers the second
- * one itself: a manifest saying `activation: "on_request"` (DESIGN §7.2.1) is
- * activated INTO REGISTRATION — it joins only the sessions that name it — so
- * pointing `current` at it changes no session at all and a background pass may
- * do it. That is what makes `evolution` auto-activatable now: the switch turns
- * on the `/with evolution` route, and nothing else.
- *
- * It used to also refuse four bundled ids by name. That half is gone with
- * `bundled_driver_only` (T34), and losing it is the point: activating `compact`
- * / `handoff` / `agent` is membership and nothing else — none of them
- * contributes a system prompt, and their driver tools stay off the model's face
- * because their own manifests say so, not because this file knows their names.
- *
- * `what` is `null` for "could not read the manifest", and that is a no as well:
- * a pass that cannot tell what a package does has not learnt that it does
- * nothing. Leaving it built and inactive costs one keypress in `/ext`; the
- * other direction costs every session on the machine.
- */
-export function autoActivatable(what: Pick<Contributions, "systemPrompts" | "activation"> | null): boolean {
-  if (what === null) return false
-  return what.systemPrompts.length === 0 || what.activation === "on_request"
+export function standingWith(
+  what: Pick<Contributions, "skills" | "systemPrompts" | "commands" | "ui">,
+): boolean {
+  return (
+    what.skills.length > 0 ||
+    what.systemPrompts.length > 0 ||
+    what.commands.length > 0 ||
+    what.ui !== null
+  )
 }
 
 /**
@@ -423,77 +393,24 @@ export async function builtContributions(
 }
 
 /**
- * What turning a package that contributes a system prompt on (or off) actually
- * does, said out loud (tui.md §11, T31/T37).
+ * What turning a package that contributes a SYSTEM PROMPT on (or off) actually
+ * does, said out loud (tui.md §11, T31/T37, K8).
  *
- * `/ext`'s Enter is one keypress, and for a package that says `activation:
- * "always"` its consequence reaches every session this machine opens from now
- * on. That asymmetry is the whole reason for this sentence: the switch stays
- * one keypress — nothing here asks for a `y` — but it no longer happens
- * silently, and it names the per-session way to the same thing.
+ * `/ext`'s Enter is one keypress, and for this kind of package its consequence
+ * reaches every session this front end opens from now on: the id goes on the
+ * standing `session_with` list (`standingWith`), so the prompt is in front of
+ * every model, before anybody says anything, and paid for on every step. That
+ * asymmetry is the whole reason for this sentence — the switch stays one
+ * keypress, nothing here asks for a `y`, but it no longer happens silently, and
+ * it names the per-session way to the same thing.
  *
- * For `on_request` the same keypress is nearly free, and saying the scary
- * sentence there would be worse than saying nothing: it registers the package
- * and changes no session, which is exactly what makes `/with <id>` appear as a
- * route. Two states, two sentences (DESIGN §7.2.1).
+ * There used to be a second pair of sentences here, for a package that had
+ * declared its prompt opt-in. Reach is not the package's to declare any more
+ * (DESIGN §5.1), so there is one switch with one consequence, and this is it.
  */
-export function promptConsequence(
-  id: string,
-  on: boolean,
-  activation: "always" | "on_request" = "always",
-  modelTools = 0,
-): string {
-  if (activation === "on_request") {
-    // `modelTools` is named here and nowhere else in this sentence's family,
-    // because for an `on_request` package the tools and the membership are the
-    // same fact: they reach a model's face in the session that wears it and in
-    // no other, so "registered" without them reads as "switched on and its tool
-    // is still missing" (`standingPinsOf`).
-    const brings = modelTools > 0 ? ` with its ${modelTools} tool(s)` : ""
-    return on
-      ? `${id} registered · no session changed · /with ${id} wears it${brings} for one session · Enter again to unregister it`
-      : `${id} unregistered · /with ${id} no longer resolves; name a version to wear it`
-  }
+export function promptConsequence(id: string, on: boolean): string {
   if (!on) return `${id} off · its system prompt no longer enters new sessions`
-  return `${id} active · its system prompt now enters EVERY new session on this machine · /with ${id} wears it for one session instead · Enter again to turn it off`
-}
-
-/**
- * Packages whose system prompt is, right now, in front of every session this
- * machine opens: what the start-up check says out loud (tui.md §11, T31/T37).
- *
- * A read, never a write. Turning one off is as much a decision as turning it on
- * was, so this only names them and points at `/ext`; nothing here undoes
- * somebody's activation on their behalf.
- *
- * An active `on_request` package is deliberately NOT named: its prompt reaches
- * only the sessions that ask for it (DESIGN §7.2.1), so warning about it would
- * teach people to ignore the line that matters.
- */
-export function activePromptPackages(
-  entries: readonly {
-    id: string
-    current: string | null
-    shadowed: boolean
-    systemPrompts: string[]
-    activation: "always" | "on_request"
-  }[],
-): string[] {
-  return entries
-    .filter(
-      (entry) =>
-        entry.current !== null &&
-        !entry.shadowed &&
-        entry.systemPrompts.length > 0 &&
-        entry.activation === "always",
-    )
-    .map((entry) => entry.id)
-}
-
-/** The line the status bar shows for them, or null when there are none. */
-export function promptPackageWarning(ids: readonly string[]): string | null {
-  if (ids.length === 0) return null
-  return `${ids.join(" & ")} active · ${ids.length === 1 ? "its system prompt goes" : "their system prompts go"} into every new session on this machine · /ext to turn ${ids.length === 1 ? "it" : "them"} off`
+  return `${id} active · its system prompt now enters EVERY new session from this front end · /with ${id} wears it for one session instead · Enter again to turn it off`
 }
 
 /**
@@ -514,14 +431,11 @@ export function seedBundled(ws: Workspace): Promise<SeedReport> {
  * Finish the install for the ids that ARRIVED in this run: point `current` at
  * what the build pass produced, and put the std tools on this TUI's pin list.
  *
- * Which ones get activated used to be a list of two names here (`std` and
- * `guide`). It is now the same general rule the rest of the sync pass uses —
- * `autoActivatable`, i.e. anything that does not contribute a system prompt
- * (T34). `evolution` is still left switched off by it, for the reason that rule
- * exists; `compact` / `handoff` / `agent` are now switched on, and that is
- * membership and nothing more — their driver tools stay off the model's face
- * because their own manifests say so (DESIGN §7.2.1), and the sessions that
- * want their model tools bring the version in themselves (`session_with`).
+ * Which ones get activated used to be a list of two names, then a rule about
+ * system prompts. It is now every id that arrived: activating one says which
+ * version it means and composes nothing (DESIGN §5.1), so there is no longer a
+ * package this pass could switch on to somebody's cost. What a session actually
+ * carries is `[extensions] with` and `/ext`'s Enter — a person's lines.
  *
  * Returns the parts of the sentence the status line will say.
  */
@@ -538,9 +452,7 @@ export async function adoptBundled(
   for (const id of arrived) {
     const line = report.lines.find((entry) => entry.id === id)
     if (!line?.version || line.state === "failed" || line.state === "needs zig") continue
-    const what = await builtContributions(ws, root, id, line.version)
-    if (id === "std") std = what
-    if (!autoActivatable(what)) continue
+    if (id === "std") std = await builtContributions(ws, root, id, line.version)
     if (line.activation === "active") {
       active.push(id)
       continue
@@ -736,9 +648,9 @@ export async function activeVersionOf(ws: Workspace, id: string): Promise<string
  * → `ext list`), so this spawns no process of its own beyond that one call.
  *
  * "Activated" here is deliberately not "a member of the CURRENT session's
- * composition": a `wear` command's whole point is to bring an `on_request`
- * package INTO a session that does not have it yet, and that has to be typable
- * before there is anything to be a member of (a draft tab, tui.md §11 T22). So
+ * composition": a `with` command's whole point is to bring a package INTO a
+ * session that does not have it yet, and that has to be typable before there
+ * is anything to be a member of (a draft tab, tui.md §11 T22). So
  * the filter is exactly `ext list`'s own notion of "holding a current version,
  * not shadowed" — the same one `/with`'s picker uses.
  *

@@ -11,6 +11,7 @@
 //! ~90MB embed.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const manifest = @import("../manifest.zig");
 const integrity = @import("../integrity.zig");
 const ext_skills = @import("../skills.zig");
@@ -22,6 +23,30 @@ pub const exe_suffix = integrity.exe_suffix;
 const manifest_file = integrity.manifest_file;
 const package_dir = integrity.package_dir;
 const seal_file = integrity.seal_file;
+
+/// One line for a draft that still writes the removed `activation` key
+/// (`manifest.Manifest.legacy_activation`). The build itself is unaffected — it
+/// is an unknown key — but the author wrote it to keep the package out of
+/// sessions that did not ask, and that decision moved to the person's config,
+/// where a package cannot make it. Saying nothing would leave a mode believing
+/// it still opts out of every session on the machine.
+///
+/// stderr, so `ext build`'s stdout stays the version id a caller parses, and
+/// `reportBrokenActive`'s reason: the id belongs in the sentence and an error
+/// code cannot carry it. Best effort — a note that cannot be printed never
+/// fails a build.
+fn noteLegacyActivation(alloc: std.mem.Allocator, io: std.Io, id: []const u8) !void {
+    // Unit tests build packages with this key on purpose to assert it is
+    // ignored; the real binary (e2e included) always prints it.
+    if (builtin.is_test) return;
+    const line = try std.fmt.allocPrint(
+        alloc,
+        "note: {s} still declares \"activation\"; that key is no longer read — a package joins every session only when [extensions] with in config names it\n",
+        .{id},
+    );
+    defer alloc.free(line);
+    std.Io.File.stderr().writeStreamingAll(io, line) catch {};
+}
 
 pub const BuildResult = struct {
     /// The manifest's id — which `<id>/` under the store root this landed in.
@@ -211,6 +236,7 @@ fn build(
     var m = try manifest.parse(alloc, manifest_bytes);
     defer m.deinit();
     try m.validate();
+    if (m.legacy_activation) try noteLegacyActivation(alloc, io, m.id);
 
     const snapshot = try integrity.collectPackageSnapshot(alloc, io, workspace, ext_dir_rel, manifest_bytes, m);
     defer snapshot.deinit(alloc);

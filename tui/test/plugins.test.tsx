@@ -80,7 +80,6 @@ function writePackage(
     JSON.stringify({
       schema: "nulya.extension/v2",
       id,
-      activation: "on_request",
       ...over,
       contributes,
     }),

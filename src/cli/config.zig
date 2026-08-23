@@ -57,6 +57,19 @@ const ConfigView = struct {
     /// which may hold an inline `api_key`. Typed as `config.Registry`, so the
     /// two names printed are the two keys to write back.
     registry: config.Registry,
+    /// The other standing axis: which packages are a member of every session
+    /// opened here (DESIGN §5.1). Projected for the pins' reason exactly — a
+    /// reader who cannot see it here goes and reads the three config files
+    /// itself, and one of those may hold an inline `api_key`.
+    ///
+    /// `extensions.paths` is deliberately not projected: it names directories
+    /// this machine will run code from, which is not a question a picker or a
+    /// model has, and a store root is visible as such in `nulya ext list`.
+    extensions: ExtensionsView,
+
+    const ExtensionsView = struct {
+        with: []const []const u8,
+    };
 
     const Paths = struct {
         system: []const u8,
@@ -156,6 +169,7 @@ fn configShow(alloc: std.mem.Allocator, io: std.Io, opts: ShowOptions) !u8 {
         .profiles = views,
         .models = cfg.models,
         .registry = cfg.registry,
+        .extensions = .{ .with = cfg.extensions.with },
     };
 
     var out: std.Io.Writer.Allocating = .init(alloc);
@@ -296,6 +310,18 @@ fn writeConfigText(w: *std.Io.Writer, view: ConfigView) !void {
             try w.writeAll(pin);
         }
     }
+    // The membership axis, beside the tool face and under its own key name. An
+    // empty list is printed as such for the pins' reason: "no package joins
+    // every session here" is the answer, not a missing section.
+    try w.writeAll("\n\nextensions:\n  with                 ");
+    if (view.extensions.with.len == 0) {
+        try w.writeAll("(none)");
+    } else {
+        for (view.extensions.with, 0..) |id, i| {
+            if (i != 0) try w.writeAll(", ");
+            try w.writeAll(id);
+        }
+    }
     try w.writeByte('\n');
 }
 
@@ -334,6 +360,7 @@ test "config show projects profiles with credential availability and the catalog
     cfg.models = &models;
     var pins = [_][]const u8{ "ext:date.now/print_date", "ext:notes/append" };
     cfg.registry = .{ .max_tools = 6, .pinned_native_tools = &pins };
+    cfg.extensions = .{ .with = &.{"guide"} };
 
     var env: std.process.Environ.Map = .init(alloc);
     defer env.deinit();
@@ -361,6 +388,7 @@ test "config show projects profiles with credential availability and the catalog
         .profiles = views,
         .models = &models,
         .registry = cfg.registry,
+        .extensions = .{ .with = cfg.extensions.with },
     };
 
     var out: std.Io.Writer.Allocating = .init(alloc);
@@ -406,6 +434,15 @@ test "config show projects profiles with credential availability and the catalog
     const projected_pins = registry.get("pinned_native_tools").?.array.items;
     try std.testing.expectEqual(@as(usize, 2), projected_pins.len);
     try std.testing.expectEqualStrings("ext:date.now/print_date", projected_pins[0].string);
+    // …and so does the other standing axis, for the same reason (DESIGN §5.1):
+    // which packages are a member of every session here is not something a
+    // reader should have to open `config.toml` to learn.
+    const projected_with = root.get("extensions").?.object.get("with").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), projected_with.len);
+    try std.testing.expectEqualStrings("guide", projected_with[0].string);
+    // `extensions.paths` is NOT projected: it says which directories may supply
+    // code, which is a different question and one `ext list` already answers.
+    try std.testing.expect(root.get("extensions").?.object.get("paths") == null);
 
     // The plain-text form mentions each profile and the model line.
     var text: std.Io.Writer.Allocating = .init(alloc);
@@ -507,6 +544,7 @@ test "config show: a codex profile's model list and parameters come from the sub
         }},
         .models = &.{},
         .registry = .{},
+        .extensions = .{ .with = &.{} },
     });
     for ([_][]const u8{
         "models from ~/.codex/models_cache.json",
@@ -521,7 +559,7 @@ test "config show: a codex profile's model list and parameters come from the sub
     }
 }
 
-test "config show prints an empty pin list as such, never as a missing section" {
+test "config show prints both standing lists, empty ones as such rather than as a missing section" {
     const alloc = std.testing.allocator;
     var text: std.Io.Writer.Allocating = .init(alloc);
     defer text.deinit();
@@ -531,8 +569,25 @@ test "config show prints an empty pin list as such, never as a missing section" 
         .profiles = &.{},
         .models = &.{},
         .registry = .{},
+        .extensions = .{ .with = &.{} },
     });
     // "no extension tool is native here" is an answer; a silent section is not.
     try std.testing.expect(std.mem.indexOf(u8, text.written(), "pinned_native_tools  (none)") != null);
     try std.testing.expect(std.mem.indexOf(u8, text.written(), "max_tools            20") != null);
+    // …and the same for the other standing axis (DESIGN §5.1). Without it a
+    // reader cannot tell "nothing joins every session" from "this build does
+    // not project that", and goes back to reading the config files.
+    try std.testing.expect(std.mem.indexOf(u8, text.written(), "with                 (none)") != null);
+
+    var filled: std.Io.Writer.Allocating = .init(alloc);
+    defer filled.deinit();
+    try writeConfigText(&filled.writer, .{
+        .paths = .{ .system = "s", .user = "u", .project = config.project_config_path },
+        .active_profile = "scripted",
+        .profiles = &.{},
+        .models = &.{},
+        .registry = .{},
+        .extensions = .{ .with = &.{ "guide", "std" } },
+    });
+    try std.testing.expect(std.mem.indexOf(u8, filled.written(), "with                 guide, std") != null);
 }

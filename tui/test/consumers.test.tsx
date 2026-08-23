@@ -34,7 +34,7 @@ import { createPluginHost, type PluginHost } from "../src/plugins/host.ts"
 import { parseExtNote, wrapExtNote } from "../src/extnote.ts"
 import { runCompact } from "../src/compact.ts"
 import { rememberModel } from "../src/state/tui_state.ts"
-import { builtContributions, bundledDraftPath, pinsOf, standingPinsOf } from "../src/extensions.ts"
+import { builtContributions, bundledDraftPath, pinsOf, standingWith } from "../src/extensions.ts"
 import {
   extBuild,
   extSetCurrent,
@@ -192,47 +192,52 @@ const first_plan = [
 ].join("\n")
 
 /**
- * The two packages answer "am I a capability or a mode" differently, and the
- * manifest is where each one says so (`activation`, DESIGN §7.2.1, T46).
+ * The two packages are a mode and a capability, and the SHAPE of each says so
+ * — no manifest field does, because reach is not the package's to declare
+ * (DESIGN §5.1, K8).
  *
- * `plan` is a mode: wearing it says what THIS session is — a persona and a
- * read-only stance — and that is a decision somebody makes before the work
- * starts. `ask` is a capability: nobody can decide in advance that a question
- * will come up, because the model finds that out in the middle of a task, so a
- * package that only existed in sessions earmarked for questions would never
- * fire.
+ * `plan` is a mode: it carries a system prompt, so wearing it says what THIS
+ * session is — a persona and a read-only stance — and that is a decision
+ * somebody makes before the work starts. `ask` is a capability: one tool, no
+ * prompt, because nobody can decide in advance that a question will come up.
  *
- * The consequence is the whole point of the split, so it is asserted against
- * the real frozen manifests rather than described: a standing pin is legal for
- * one of them and impossible for the other (`standingPinsOf`).
+ * That difference is what `/ext` reads to decide whether its switch must also
+ * compose the package (`standingWith`), so it is asserted against the real
+ * frozen manifests rather than described.
  */
-test.skipIf(!has_zig)("plan is a mode and ask is a capability, and their manifests say which", async () => {
+test.skipIf(!has_zig)("plan is a mode and ask is a capability, and their shapes say which", async () => {
   const root = join(process.env["NULYA_HOME"]!, "extensions")
   const plan = (await builtContributions(ws, root, "plan", plan_version))!
   const ask = (await builtContributions(ws, root, "ask", ask_version))!
 
-  expect(plan.activation).toBe("on_request")
   expect(plan.systemPrompts.length).toBeGreaterThan(0)
-  // Registered by activation, composed only into the sessions that name it, so
-  // nothing standing may pin its tools — `/plan` is the whole way in.
-  expect(standingPinsOf(plan)).toEqual([])
+  // A prompt and a slash command: only a MEMBER gets either, so `/ext`'s switch
+  // has to write the standing `with` entry as well as the pins.
+  expect(standingWith(plan)).toBe(true)
   expect(pinsOf(plan)).toEqual(["ext:plan/propose", "ext:plan/todo"])
 
-  expect(ask.activation).toBe("always")
   expect(ask.systemPrompts).toEqual([])
   // One key in `/ext` is "the model may ask me", in every session from now on.
-  expect(standingPinsOf(ask)).toEqual(["ext:ask/ask"])
+  expect(pinsOf(ask)).toEqual(["ext:ask/ask"])
+  // It gets a standing `with` entry too, but for a different reason than
+  // `plan`: not a prompt, its `/ask` command. That entry is redundant with the
+  // pin — a pin brings its package in by itself — and harmless: naming one id
+  // twice composes it once (`composition.unionWith`). The alternative would be
+  // this front end deciding which of a package's four member-only
+  // contributions "really" needs membership, which is a judgement it has no
+  // standing to make about a package it has never heard of.
+  expect(standingWith(ask)).toBe(true)
+  expect(ask.commands.map((c) => c.name)).toEqual(["ask"])
 })
 
 /**
  * Wearing a package brings its tools with it (tui.md §11, T46).
  *
  * The two axes are independent everywhere else (DESIGN §7.5) and here they
- * cannot be: `plan` says `activation: "on_request"`, so it is a member of
- * exactly the session that names it, and a pin for its tool has nowhere to live
- * except the same argv. Written into a standing list instead — which is what
- * `/ext`'s switch used to do — it would now wear `plan` in EVERY session (a pin
- * brings its package in), so no standing list gets it.
+ * cannot be: a WORN package is a member of exactly the session that names it,
+ * so a pin for its tool has nowhere to live except the same argv. On a standing
+ * list it would wear `plan` in EVERY session (a pin brings its package in),
+ * which is the difference `/with` exists to make.
  *
  * So this drives the real keystrokes: `/with plan` on a draft, then a message,
  * and asks the kernel what it froze.

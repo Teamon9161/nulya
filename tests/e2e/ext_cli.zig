@@ -1,11 +1,13 @@
-//! `nulya ext run` / `ext inspect` / activation's shape default end to end
-//! (docs/goals/ext-review.md Lane C, DESIGN §7.3/§7.5/§7.8/§14): the three
-//! CLI-surface changes that lane made, proved against the real binary — plus
-//! `ext sync --seed` (docs/goals/ext-review-2.md Lane C §2, C3).
+//! Membership / `ext run` / `ext inspect` / `ext sync --seed` on the real binary
+//! (docs/goals/ext-review-2.md Lane K + Lane C, ext-review.md Lane C; DESIGN
+//! §5.1/§7.2/§7.3/§7.5/§7.8/§14).
 //!
-//!   - a field-less, prompt-only package now defaults to `on_request`
-//!     (DESIGN §7.5): `activate` alone registers it, a plain `session new`
-//!     never sees it, and `--with` brings it in explicitly.
+//!   - a package joins a session only when something NAMES it: config's
+//!     `[extensions] with` (standing, and the project layer may write it) or
+//!     `session new --with` (one session). `activate` says which version `<id>`
+//!     means and composes nothing.
+//!   - `session new --bare` reads neither standing list.
+//!   - a named member whose `current` is broken fails the session by name.
 //!   - `nulya ext run` no longer applies a manifest's own `timeout_ms` — that
 //!     field now bounds only a call reaching the model's tool face (D6). A
 //!     slow script tool run through the CLI is unbounded unless the caller
@@ -30,9 +32,113 @@ fn nulyaExe(alloc: std.mem.Allocator, host_env: *const std.process.Environ.Map) 
     return std.fs.path.resolve(alloc, &.{rel});
 }
 
-// ── 1. activation's shape default (DESIGN §7.5) ──────────────────────────────
+// ── 1. membership: only a NAME composes a package (DESIGN §5.1) ─────────────
 
-test "activation shape default: a field-less prompt-only package is registered, not discovered — a plain session skips it, --with brings it in" {
+/// Build and activate a data package whose only contribution is a system
+/// prompt (no runtime, so no toolchain is needed). Returns its version id;
+/// caller owns it.
+fn promptPackage(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    ws: std.Io.Dir,
+    exe_abs: []const u8,
+    id: []const u8,
+    body: []const u8,
+) ![]u8 {
+    const draft = try std.fs.path.join(alloc, &.{ ".nulya", "extensions", id });
+    defer alloc.free(draft);
+    const prompts = try std.fs.path.join(alloc, &.{ draft, "prompts" });
+    defer alloc.free(prompts);
+    try ws.createDirPath(io, prompts);
+
+    const manifest = try std.fmt.allocPrint(
+        alloc,
+        \\{{"schema":"nulya.extension/v2","id":"{s}","contributes":{{"system_prompts":["prompts/tone.md"]}}}}
+    ,
+        .{id},
+    );
+    defer alloc.free(manifest);
+    const manifest_path = try std.fs.path.join(alloc, &.{ draft, "extension.json" });
+    defer alloc.free(manifest_path);
+    try ws.writeFile(io, .{ .sub_path = manifest_path, .data = manifest });
+    const tone_path = try std.fs.path.join(alloc, &.{ prompts, "tone.md" });
+    defer alloc.free(tone_path);
+    try ws.writeFile(io, .{ .sub_path = tone_path, .data = body });
+
+    const built = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "build", draft });
+    defer alloc.free(built.stdout);
+    try std.testing.expectEqual(@as(u8, 0), built.code);
+    const version = try extractVersion(alloc, built.stdout);
+    errdefer alloc.free(version);
+
+    const activated = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "activate", id, version });
+    defer alloc.free(activated.stdout);
+    try std.testing.expectEqual(@as(u8, 0), activated.code);
+    return version;
+}
+
+/// A script package declaring one tool (so no toolchain is needed), built but
+/// not activated. Returns its version id; caller owns it.
+fn scriptPackage(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    ws: std.Io.Dir,
+    exe_abs: []const u8,
+    id: []const u8,
+    tool_name: []const u8,
+) ![]u8 {
+    const windows = @import("builtin").os.tag == .windows;
+    const entry = if (windows) "src/run.ps1" else "src/run.sh";
+    const script_name = if (windows) "run.ps1" else "run.sh";
+    // The plain wire (DESIGN §7.3): nothing here calls the tool, so the script
+    // only has to exist.
+    const script_body = if (windows) "[Console]::Out.Write('ok')\n" else "#!/bin/sh\nprintf ok\n";
+    const interpreter = if (windows) "powershell" else "sh";
+
+    const draft = try std.fs.path.join(alloc, &.{ ".nulya", "extensions", id });
+    defer alloc.free(draft);
+    const src = try std.fs.path.join(alloc, &.{ draft, "src" });
+    defer alloc.free(src);
+    try ws.createDirPath(io, src);
+    const script = try std.fs.path.join(alloc, &.{ src, script_name });
+    defer alloc.free(script);
+    try ws.writeFile(io, .{ .sub_path = script, .data = script_body });
+
+    const manifest = try std.fmt.allocPrint(alloc,
+        \\{{"schema":"nulya.extension/v2","id":"{s}","runtime":{{"entry":"{s}","interpreter":"{s}","wire":"plain"}},"contributes":{{"tools":[{{"name":"{s}","description":"a tool","input":{{"type":"object"}}}}]}}}}
+    , .{ id, entry, interpreter, tool_name });
+    defer alloc.free(manifest);
+    const manifest_path = try std.fs.path.join(alloc, &.{ draft, "extension.json" });
+    defer alloc.free(manifest_path);
+    try ws.writeFile(io, .{ .sub_path = manifest_path, .data = manifest });
+
+    const built = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "build", draft });
+    defer alloc.free(built.stdout);
+    try std.testing.expectEqual(@as(u8, 0), built.code);
+    return extractVersion(alloc, built.stdout);
+}
+
+/// The header of a session created with `extra` appended to `session new`, or
+/// null when creation was refused. Caller owns the bytes.
+fn newSessionHeader(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    ws: std.Io.Dir,
+    exe_abs: []const u8,
+    extra: []const []const u8,
+) !?[]u8 {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(alloc);
+    try argv.appendSlice(alloc, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    try argv.appendSlice(alloc, extra);
+
+    const new = try runCli(alloc, io, ws, argv.items);
+    defer alloc.free(new.stdout);
+    if (new.code != 0) return null;
+    return try support.readSessionFile(alloc, io, ws, std.mem.trim(u8, new.stdout, " \r\n"));
+}
+
+test "a built and activated prompt package joins no session until `[extensions] with` or --with names it" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -45,49 +151,163 @@ test "activation shape default: a field-less prompt-only package is registered, 
     defer tmp.cleanup();
     const ws = tmp.dir;
 
-    // A data package (no runtime, no toolchain needed) whose only contribution
-    // is a system prompt, with NO `activation` field at all — the exact shape
-    // this lane's default rule is about.
-    const draft = ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "mode.silent";
-    try ws.createDirPath(io, draft ++ std.fs.path.sep_str ++ "prompts");
-    try ws.writeFile(io, .{ .sub_path = draft ++ std.fs.path.sep_str ++ "extension.json", .data =
-        \\{"schema":"nulya.extension/v2","id":"mode.silent","contributes":{"system_prompts":["prompts/tone.md"]}}
-    });
-    try ws.writeFile(io, .{ .sub_path = draft ++ std.fs.path.sep_str ++ "prompts" ++ std.fs.path.sep_str ++ "tone.md", .data = "SILENT MODE\n" });
-
-    const built = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "build", draft });
-    defer alloc.free(built.stdout);
-    try std.testing.expectEqual(@as(u8, 0), built.code);
-    const version = try extractVersion(alloc, built.stdout);
+    const version = try promptPackage(alloc, io, ws, exe_abs, "mode.silent", "SILENT MODE\n");
     defer alloc.free(version);
 
-    const activated = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "activate", "mode.silent", version });
-    defer alloc.free(activated.stdout);
-    try std.testing.expectEqual(@as(u8, 0), activated.code);
-
-    // `activate` only REGISTERED it (`.on_request` by shape): a plain session
-    // never sees it, exactly as if it had written `"activation":"on_request"`.
+    // Built and activated, and that composes nothing at all: `current` says
+    // which version `mode.silent` means, not that any session gets it.
     {
-        const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
-        defer alloc.free(new.stdout);
-        try std.testing.expectEqual(@as(u8, 0), new.code);
-        const id = std.mem.trim(u8, new.stdout, " \r\n");
-        const header = try support.readSessionFile(alloc, io, ws, id);
+        const header = (try newSessionHeader(alloc, io, ws, exe_abs, &.{})).?;
         defer alloc.free(header);
         try std.testing.expect(std.mem.indexOf(u8, header, "mode.silent") == null);
     }
 
-    // `--with` names it explicitly and it joins THIS session, at the version
-    // `activate` pointed at — registering it bought exactly that lookup.
+    // `--with` names it for one session, at the version `current` points at.
     {
-        const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--with", "mode.silent" });
-        defer alloc.free(new.stdout);
-        try std.testing.expectEqual(@as(u8, 0), new.code);
-        const id = std.mem.trim(u8, new.stdout, " \r\n");
-        const header = try support.readSessionFile(alloc, io, ws, id);
+        const header = (try newSessionHeader(alloc, io, ws, exe_abs, &.{ "--with", "mode.silent" })).?;
         defer alloc.free(header);
         try std.testing.expect(std.mem.indexOf(u8, header, "mode.silent") != null);
         try std.testing.expect(std.mem.indexOf(u8, header, version) != null);
+    }
+
+    // The standing form says it once, for every session opened here — and the
+    // PROJECT layer may write it (`mergeProject`): unlike `extensions.paths` it
+    // can only select among packages this machine already holds and trusts, so
+    // a checkout cannot use it to introduce code.
+    try ws.createDirPath(io, ".nulya");
+    try ws.writeFile(io, .{
+        .sub_path = ".nulya" ++ std.fs.path.sep_str ++ "config.toml",
+        .data = "[extensions]\nwith = [\"mode.silent\"]\n",
+    });
+    {
+        const header = (try newSessionHeader(alloc, io, ws, exe_abs, &.{})).?;
+        defer alloc.free(header);
+        try std.testing.expect(std.mem.indexOf(u8, header, "mode.silent") != null);
+        try std.testing.expect(std.mem.indexOf(u8, header, version) != null);
+    }
+
+    // …and `--bare` composes from its own flags alone, so the same workspace
+    // opens a session without it (DESIGN §14).
+    {
+        const header = (try newSessionHeader(alloc, io, ws, exe_abs, &.{"--bare"})).?;
+        defer alloc.free(header);
+        try std.testing.expect(std.mem.indexOf(u8, header, "mode.silent") == null);
+    }
+}
+
+test "--bare ignores both standing config lists; a --pin on the command line still composes its own package" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_abs = try nulyaExe(alloc, &host_env);
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    // A script tool package, so there is something a pin can name, plus a
+    // prompt-only one for the membership half.
+    const tool_version = try scriptPackage(alloc, io, ws, exe_abs, "face", "look");
+    defer alloc.free(tool_version);
+    const activated = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "activate", "face", tool_version });
+    defer alloc.free(activated.stdout);
+    try std.testing.expectEqual(@as(u8, 0), activated.code);
+    const mode_version = try promptPackage(alloc, io, ws, exe_abs, "mode.silent", "SILENT MODE\n");
+    defer alloc.free(mode_version);
+
+    // Both standing lists set, in the project layer.
+    try ws.createDirPath(io, ".nulya");
+    try ws.writeFile(io, .{
+        .sub_path = ".nulya" ++ std.fs.path.sep_str ++ "config.toml",
+        .data =
+        \\[extensions]
+        \\with = ["mode.silent"]
+        \\
+        \\[registry]
+        \\pinned_native_tools = ["ext:face/look"]
+        \\
+        ,
+    });
+
+    // Without `--bare`, both apply.
+    {
+        const header = (try newSessionHeader(alloc, io, ws, exe_abs, &.{})).?;
+        defer alloc.free(header);
+        try std.testing.expect(std.mem.indexOf(u8, header, "mode.silent") != null);
+        try std.testing.expect(std.mem.indexOf(u8, header, "ext:face/look") != null);
+    }
+
+    // With it, the tool face is `shell` alone and nothing is a member: this is
+    // the composition a delegated sub-agent gets, whose whole capability list is
+    // its own definition (`extensions/agent`).
+    {
+        const header = (try newSessionHeader(alloc, io, ws, exe_abs, &.{"--bare"})).?;
+        defer alloc.free(header);
+        try std.testing.expect(std.mem.indexOf(u8, header, "mode.silent") == null);
+        try std.testing.expect(std.mem.indexOf(u8, header, "ext:face/look") == null);
+        try std.testing.expect(std.mem.indexOf(u8, header, "face") == null);
+    }
+
+    // `--bare` subtracts only the CONFIG half: a pin on the command line still
+    // brings its own package in (DESIGN §5.1).
+    {
+        const header = (try newSessionHeader(alloc, io, ws, exe_abs, &.{ "--bare", "--pin", "ext:face/look" })).?;
+        defer alloc.free(header);
+        try std.testing.expect(std.mem.indexOf(u8, header, "ext:face/look") != null);
+        try std.testing.expect(std.mem.indexOf(u8, header, tool_version) != null);
+        try std.testing.expect(std.mem.indexOf(u8, header, "mode.silent") == null);
+    }
+}
+
+test "--with <id> onto a broken current names the version and refuses the session" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_abs = try nulyaExe(alloc, &host_env);
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const version = try promptPackage(alloc, io, ws, exe_abs, "mode.silent", "SILENT MODE\n");
+    defer alloc.free(version);
+
+    // Corrupt the seal of the version `current` points at.
+    const seal = try std.fs.path.join(alloc, &.{ ".nulya", "extensions", "mode.silent", "versions", version, "seal.json" });
+    defer alloc.free(seal);
+    try ws.writeFile(io, .{ .sub_path = seal, .data = "{}" });
+
+    // Naming it fails, and the stderr names WHICH version is broken and the two
+    // ways back — an error code alone would not say which of a store's packages
+    // to repair.
+    const argv = [_][]const u8{ exe_abs, "session", "new", "--profile", "scripted", "--with", "mode.silent" };
+    {
+        const refused = try runCli(alloc, io, ws, &argv);
+        defer alloc.free(refused.stdout);
+        try std.testing.expectEqual(@as(u8, 1), refused.code);
+        try std.testing.expectEqualStrings("", refused.stdout); // refusals are stderr
+    }
+    const said = try runCliStderr(alloc, io, ws, &argv, &.{});
+    defer alloc.free(said);
+    for ([_][]const u8{ "mode.silent", version, "ext activate mode.silent", "--with mode.silent@" }) |needle| {
+        std.testing.expect(std.mem.indexOf(u8, said, needle) != null) catch |err| {
+            std.debug.print("refusal never mentions '{s}':\n{s}\n", .{ needle, said });
+            return err;
+        };
+    }
+
+    // Not naming it composes fine — a broken package in the store was never on
+    // its own a reason a session could not start.
+    {
+        const header = (try newSessionHeader(alloc, io, ws, exe_abs, &.{})).?;
+        defer alloc.free(header);
+        try std.testing.expect(std.mem.indexOf(u8, header, "mode.silent") == null);
     }
 }
 
@@ -201,7 +421,7 @@ test "ext inspect: bare id answers the version in effect with no draft fallback,
     const draft = ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "inspect.demo";
     try ws.createDirPath(io, draft ++ std.fs.path.sep_str ++ "prompts");
     try ws.writeFile(io, .{ .sub_path = draft ++ std.fs.path.sep_str ++ "extension.json", .data =
-        \\{"schema":"nulya.extension/v2","id":"inspect.demo","activation":"always","contributes":{"system_prompts":["prompts/tone.md"]}}
+        \\{"schema":"nulya.extension/v2","id":"inspect.demo","contributes":{"system_prompts":["prompts/tone.md"]}}
     });
     try ws.writeFile(io, .{ .sub_path = draft ++ std.fs.path.sep_str ++ "prompts" ++ std.fs.path.sep_str ++ "tone.md", .data = "ORIGINAL\n" });
 
@@ -228,7 +448,7 @@ test "ext inspect: bare id answers the version in effect with no draft fallback,
     // and the draft on disk diverge TEXTUALLY — a second system prompt this
     // draft names but v1 never saw.
     try ws.writeFile(io, .{ .sub_path = draft ++ std.fs.path.sep_str ++ "extension.json", .data =
-        \\{"schema":"nulya.extension/v2","id":"inspect.demo","activation":"always","contributes":{"system_prompts":["prompts/tone.md","prompts/second.md"]}}
+        \\{"schema":"nulya.extension/v2","id":"inspect.demo","contributes":{"system_prompts":["prompts/tone.md","prompts/second.md"]}}
     });
     try ws.writeFile(io, .{ .sub_path = draft ++ std.fs.path.sep_str ++ "prompts" ++ std.fs.path.sep_str ++ "second.md", .data = "SECOND\n" });
 

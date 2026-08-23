@@ -113,8 +113,8 @@ pub const Runtime = struct {
     /// directly executable (a `.cmd`/`.bat` on Windows, or a shebang script
     /// with the exec bit).
     interpreter: ?PlatformValue = null,
-    /// How to talk to this runtime, kept as WRITTEN — the `activation`
-    /// discipline, for `activation`'s reason: a wrong TYPE is a parse error, an
+    /// How to talk to this runtime, kept as WRITTEN — the `audience`
+    /// discipline, for its reason: a wrong TYPE is a parse error, an
     /// unrecognized WORD is a named `validate` refusal (`InvalidWire`), and the
     /// reading of ABSENT is decided once, here (`wireOf` → `.jsonrpc`), because
     /// it is a fact about the file format rather than a judgement.
@@ -234,8 +234,8 @@ pub const ToolSpec = struct {
     /// parses it, freezes it into the version's manifest, and enforces nothing.
     /// Nothing here filters a tool face or refuses a pin — pinning a `driver`
     /// tool stays legal, it is simply not what a driver would do by default.
-    /// The consumers are a driver's own policies: which tools an activation
-    /// pins, which ones a panel lists, which ones an approval rule is about.
+    /// The consumers are a driver's own policies: which tools a standing pin
+    /// list holds, which ones a panel lists, which ones an approval rule is about.
     ///
     /// Absent is null, NOT `.model`. "The package did not say" and "the package
     /// said model" are different facts; a reader is free to treat silence as
@@ -254,38 +254,6 @@ pub const ToolSpec = struct {
     /// manifest null means only "did not say".
     pub fn audienceOf(self: ToolSpec) ?Audience {
         return Audience.fromString(self.audience orelse return null);
-    }
-};
-
-/// What ACTIVATING a package means for the sessions this machine opens
-/// afterwards (DESIGN §7.2.1) — the one question about a package that only
-/// the package can answer.
-///
-///   - `always`     : activation is machine-wide. Every new session gets this
-///                    package: its tools, its skills, its system prompt. The
-///                    package is a POLICY — tools everyone here should have, or
-///                    a prompt that IS how this machine works (`std`, `guide`).
-///   - `on_request` : activation REGISTERS the package. It joins only the
-///                    sessions that name it (`session new --with <id>`), and an
-///                    activation on its own changes no session at all. The
-///                    package is a MODE — a persona, a review loop, a lens —
-///                    and which session wears one is a decision per session
-///                    (`evolution`).
-///
-/// The split is whole-package on purpose. Splitting a package's prompt from its
-/// tools per machine would produce combinations its author never ran: a tool
-/// written expecting its own prompt, invoked without it. So the axis is not
-/// "which parts of you do I take" but "when do you join", and the author — who
-/// knows which kind of thing the package is — declares it. The person's veto is
-/// unchanged and total: do not activate it.
-pub const Activation = enum {
-    always,
-    on_request,
-
-    pub fn fromString(s: []const u8) ?Activation {
-        if (std.mem.eql(u8, s, "always")) return .always;
-        if (std.mem.eql(u8, s, "on_request")) return .on_request;
-        return null;
     }
 };
 
@@ -327,7 +295,7 @@ pub const Command = struct {
 /// The shape is deliberately narrow-ONLY: `readonly` / `deny` / `ask` mirror
 /// the tables an approval policy already reads (`[approvals]`), and there is
 /// no `allow`. A package that could ADD an entry to an allow table would be
-/// authority growing implicitly through activation alone (physics #6) — the
+/// authority growing implicitly through membership alone (physics #6) — the
 /// same reasoning `mergeProject`'s "only ever narrows" already rests on. That
 /// is why an `allow` key is refused in `dupPolicy`, at PARSE time: its
 /// presence alone is the violation, no value under it could make the shape
@@ -397,40 +365,17 @@ pub const Manifest = struct {
     ui: ?Ui = null,
     /// See `Permissions` — a declaration, zero readers today, waiting for M7.
     permissions: Permissions,
-    /// When activation brings this package in, kept as WRITTEN — same storage
-    /// discipline as `ToolSpec.audience`, so an unrecognized word is a named
-    /// `validate` refusal (`InvalidActivation`) instead of a silent default.
+    /// True when this manifest still writes the removed `activation` key.
     ///
-    /// Unlike `audience`, the reading of ABSENT is decided here rather than at
-    /// each reader (`activationOf`) — but it is no longer one constant. A
-    /// system prompt is the one contribution that activation alone makes every
-    /// session on the machine pay for: it lands in the system blocks of every
-    /// session opened afterwards, not only the ones that asked for it. Reading
-    /// silence as `.always` regardless of shape is exactly how a forgotten
-    /// field turns into a machine-wide identity change nobody decided (BUGS
-    /// #1: a manifest built before this field existed carried a prompt, the
-    /// old constant default said `.always`, and every session on that machine
-    /// woke up believing it was a different package). So the default now
-    /// follows the package's own shape (`activationOf`): "backward compatible"
-    /// for the old constant meant compatible with the handful of manifests
-    /// this repository ships — not a reason to keep a default that can turn
-    /// silence into every session's identity.
-    activation: ?[]const u8 = null,
-
-    /// When activation brings this package in. Absent means `.on_request` if
-    /// this package carries a system prompt — activation is the moment every
-    /// session opened afterwards starts paying for it, so silence should not
-    /// read as "every session, always" — else `.always` (a tool/skill-only
-    /// package has nothing that costs a session anything until it is pinned or
-    /// named with `--with`, so machine-wide is the harmless default it always
-    /// was). A word `validate` would refuse reads the same way `.always` used
-    /// to — on a validated manifest that case cannot occur.
-    pub fn activationOf(self: Manifest) Activation {
-        const written = self.activation orelse {
-            return if (self.system_prompts.len > 0) .on_request else .always;
-        };
-        return Activation.fromString(written) orelse .always;
-    }
+    /// The key is an UNKNOWN key now, so parsing ignores it like any other and
+    /// nothing about the package changes. But a draft still carrying it was
+    /// written to mean something ("only the sessions that name me"), and that
+    /// meaning now lives in one place a package cannot reach: config's
+    /// `[extensions] with` (DESIGN §5.1) — reach is the person's decision, not
+    /// the author's. Silently ignoring the word would leave the author believing
+    /// their package still opts out, so `ext build` / `ext sync` say one line
+    /// about it. The only reader is that note; nothing in a session ever asks.
+    legacy_activation: bool = false,
 
     pub fn deinit(self: *Manifest) void {
         self.arena.deinit();
@@ -444,13 +389,6 @@ pub const Manifest = struct {
         if (!isValidId(self.id)) return error.InvalidId;
         if (self.tools.len == 0 and self.skills.len == 0 and self.system_prompts.len == 0 and
             self.commands.len == 0 and !policyContributes(self.policy) and self.ui == null) return error.NoContributions;
-        // Refused rather than read as the default, for `audience`'s reason: a
-        // package that meant `on_request` and typed `onrequest` would otherwise
-        // put its system prompt into every session on the machine — the exact
-        // outcome the field exists to let it avoid.
-        if (self.activation) |a| {
-            if (Activation.fromString(a) == null) return error.InvalidActivation;
-        }
 
         if (self.runtime) |rt| {
             if (rt.wire) |w| {
@@ -595,8 +533,6 @@ pub const ValidateError = error{
     InvalidTimeout,
     /// A tool's `audience` is a string, but not one of `model` / `driver`.
     InvalidAudience,
-    /// `activation` is a string, but not one of `always` / `on_request`.
-    InvalidActivation,
     InvalidSkillPath,
     DuplicateSkillPath,
     InvalidSystemPromptPath,
@@ -651,8 +587,6 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!Manifest {
         .network = try dupPermissionList(a, obj, "network"),
         .process = try dupPermissionList(a, obj, "process"),
     };
-    const activation = try optionalString(a, obj, "activation");
-
     return .{
         .arena = arena,
         .schema = schema,
@@ -665,7 +599,9 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!Manifest {
         .policy = policy,
         .ui = ui,
         .permissions = permissions,
-        .activation = activation,
+        // An unknown key, read for one purpose: `ext build` says a line about it
+        // (see the field). Nothing composed from this manifest is affected.
+        .legacy_activation = obj.get("activation") != null,
     };
 }
 
@@ -1048,7 +984,7 @@ test "a runtime says how to talk to it; silence is jsonrpc and an unknown word i
     defer typo.deinit();
     try std.testing.expectError(error.InvalidWire, typo.validate());
 
-    // And a wrong TYPE is a parse error — `activation`'s split, for its reason.
+    // And a wrong TYPE is a parse error — `audience`'s split, for its reason.
     try std.testing.expectError(error.WrongType, parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"src/run.sh","wire":true},"contributes":{"tools":[{"name":"t","input":{}}]}}
     ));
@@ -1292,75 +1228,44 @@ test "a tool may declare who it is for; silence is not a claim and an unknown wo
     ));
 }
 
-test "a package says when activation brings it in; silence follows shape and an unknown word is refused" {
+test "the removed `activation` key is ignored, whatever it says, and only flagged for a build note" {
     const alloc = std.testing.allocator;
 
-    // The mode, explicit: activation registers it, and only a session that
-    // names it gets it. Explicit always wins over the shape default below.
+    // A package that still writes it parses and validates exactly like one that
+    // does not. Which sessions it joins is not its decision any more: config's
+    // `[extensions] with` names the members, `--with` names them for one session
+    // (DESIGN §5.1), and both read the same `current` this key used to qualify.
     var mode = try parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"evolution","activation":"on_request","contributes":{"system_prompts":["p.md"]}}
     );
     defer mode.deinit();
     try mode.validate();
-    try std.testing.expectEqual(@as(Activation, .on_request), mode.activationOf());
+    try std.testing.expect(mode.legacy_activation);
 
-    // Absent on a package with NO system prompt is `.always`, and that reading
-    // is fixed HERE rather than per reader: a tool/skill-only package has
-    // nothing that costs a session anything until pinned or `--with`, so
-    // machine-wide is the harmless default it always was.
-    var old = try parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"std","contributes":{"skills":["s"]}}
-    );
-    defer old.deinit();
-    try old.validate();
-    try std.testing.expect(old.activation == null);
-    try std.testing.expectEqual(@as(Activation, .always), old.activationOf());
+    // Including a word the old enum would have refused: an unknown key has no
+    // vocabulary to be outside of, so `onrequest` is no more an error than
+    // `on_request` is — and neither is a wrong TYPE, which used to be one.
+    for ([_][]const u8{
+        \\{"schema":"nulya.extension/v2","id":"a","activation":"onrequest","contributes":{"skills":["s"]}}
+        ,
+        \\{"schema":"nulya.extension/v2","id":"a","activation":false,"contributes":{"skills":["s"]}}
+        ,
+    }) |src| {
+        var m = try parse(alloc, src);
+        defer m.deinit();
+        try m.validate();
+        try std.testing.expect(m.legacy_activation);
+    }
 
-    // Absent on a package that DOES carry a system prompt is `.on_request` —
-    // activation is the moment every session opened afterwards starts paying
-    // for that prompt, so silence must not read as "every session, always"
-    // (BUGS #1: exactly this silent reading is how one machine's sessions all
-    // woke up believing they were a mode they never asked to wear).
-    var prompt_only = try parse(alloc,
+    // Silence is the ordinary case and says nothing at all — no default to
+    // infer from the package's shape, because there is no longer a question
+    // here for a shape to answer.
+    var quiet = try parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"b","contributes":{"system_prompts":["p.md"]}}
     );
-    defer prompt_only.deinit();
-    try prompt_only.validate();
-    try std.testing.expect(prompt_only.activation == null);
-    try std.testing.expectEqual(@as(Activation, .on_request), prompt_only.activationOf());
-
-    // Absent on a TOOL-only package (no prompt) is still `.always` — the shape
-    // rule only changes silence for packages that carry a system prompt.
-    var tool_only = try parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"c","runtime":{"entry":"bin/c"},"contributes":{"tools":[{"name":"t","input":{}}]}}
-    );
-    defer tool_only.deinit();
-    try tool_only.validate();
-    try std.testing.expect(tool_only.activation == null);
-    try std.testing.expectEqual(@as(Activation, .always), tool_only.activationOf());
-
-    // An explicit `always` on a prompt-carrying package is honored as
-    // written — the shape default only fills silence, never overrides a
-    // decision the author actually made.
-    var explicit_always = try parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"d","activation":"always","contributes":{"system_prompts":["p.md"]}}
-    );
-    defer explicit_always.deinit();
-    try explicit_always.validate();
-    try std.testing.expectEqual(@as(Activation, .always), explicit_always.activationOf());
-
-    // A word outside the two is a named refusal: read as the default, a typo
-    // would put a mode's prompt into every session on the machine.
-    var typo = try parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"a","activation":"onrequest","contributes":{"skills":["s"]}}
-    );
-    defer typo.deinit();
-    try std.testing.expectError(error.InvalidActivation, typo.validate());
-
-    // A wrong TYPE is a parse error — `audience`'s split, for `audience`'s reason.
-    try std.testing.expectError(error.WrongType, parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"a","activation":false,"contributes":{"skills":["s"]}}
-    ));
+    defer quiet.deinit();
+    try quiet.validate();
+    try std.testing.expect(!quiet.legacy_activation);
 }
 
 test "rejects entry that escapes the extension dir" {

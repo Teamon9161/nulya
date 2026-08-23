@@ -15,13 +15,12 @@ export interface Wearable {
 }
 
 /**
- * Bare `/with`: which packages this machine has registered for a session to
- * wear (tui.md §11, T37).
+ * Bare `/with`: which modes this machine could wear for one session (tui.md
+ * §11, T37/K8).
  *
- * The list is DERIVED, and that is the whole point of the command. A package
- * whose manifest says `activation: "on_request"` (DESIGN §7.2.1) is registered
- * by activating it and by nothing else, so this dialog can only offer what
- * somebody switched on — turn a mode off in `/ext` and its row here is gone.
+ * The list is DERIVED, and that is the whole point of the command: a package
+ * with a `current` and a system prompt. So this dialog offers exactly what has
+ * been built and activated here — roll one back in `/ext` and its row is gone.
  * The front end knows no ids of its own.
  *
  * Same dialog above the composer as `/mode` and `/agent`, for the same reasons
@@ -58,7 +57,7 @@ export function WithPicker(props: {
       <Show when={props.wearables.length === 0}>
         <For
           each={wrapWords(
-            "nothing registered to wear · a package with a system prompt and activation: on_request appears here once you switch it on in /ext · or name a build directly with /with <id>@<version>",
+            "nothing to wear · a package with a system prompt appears here once it is built and activated in /ext · or name a build directly with /with <id>@<version>",
             room(),
           )}
         >

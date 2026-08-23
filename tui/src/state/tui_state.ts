@@ -68,6 +68,21 @@ export interface TuiState {
    */
   session_pins?: string[]
   /**
+   * Extension ids this TUI composes into every session it starts, as bare ids
+   * resolved at `current` — the membership half of what `/ext`'s Enter turns on
+   * (K8), beside `session_pins`, which is the tool-face half.
+   *
+   * Program state for the same reason the pins are: trying a package out should
+   * cost nothing and leave nothing in a file somebody else reads. The permanent
+   * form is the kernel's own `[extensions] with` in config, which `nulya config
+   * show` projects and this TUI never writes.
+   *
+   * Not to be confused with `tui.toml`'s `[extensions] session_with`, which is a
+   * human-written setting naming the packages this front end always brings
+   * (`handoff`, `agent`) and is resolved to an exact version each time.
+   */
+  session_with?: string[]
+  /**
    * Set once `edit` has been offered to an existing `session_pins` list — the
    * tool moved out of the kernel and into `std` after some people already had
    * the other std pins written here. The marker is what makes it a migration
@@ -117,8 +132,10 @@ export function loadTuiState(path = tuiStatePath()): TuiState {
       const list = record[key]
       if (Array.isArray(list)) state[key] = list.filter((s): s is string => typeof s === "string")
     }
-    const pins = record["session_pins"]
-    if (Array.isArray(pins)) state.session_pins = pins.filter((s): s is string => typeof s === "string")
+    for (const key of ["session_pins", "session_with"] as const) {
+      const list = record[key]
+      if (Array.isArray(list)) state[key] = list.filter((s): s is string => typeof s === "string")
+    }
     // `auto` was this mode's name until it was renamed to `unsafe`; the file
     // written yesterday still says it, and `normalizeMode` is the one place that
     // knows. Nothing is rewritten here — the next `rememberMode` writes the new
@@ -174,6 +191,17 @@ export function sessionPins(path = tuiStatePath()): string[] {
 export function rememberSessionPins(pins: readonly string[], path = tuiStatePath()): void {
   const state = loadTuiState(path)
   state.session_pins = [...pins]
+  saveTuiState(state, path)
+}
+
+/** The `--with` list every `session new` from this TUI carries (K8). */
+export function sessionWith(path = tuiStatePath()): string[] {
+  return loadTuiState(path).session_with ?? []
+}
+
+export function rememberSessionWith(ids: readonly string[], path = tuiStatePath()): void {
+  const state = loadTuiState(path)
+  state.session_with = [...ids]
   saveTuiState(state, path)
 }
 

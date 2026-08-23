@@ -63,9 +63,6 @@ beforeAll(async () => {
       runtime: win
         ? { entry: "src/main.ps1", interpreter: "powershell" }
         : { entry: "src/main.sh", interpreter: "sh" },
-      // A persona-shaped package is realistically opt-in per session, not a
-      // machine-wide policy — the same reason `evolution` declares it.
-      activation: "on_request",
       contributes: {
         tools: [
           {
@@ -249,7 +246,6 @@ test("a package cannot take a built-in name away, even by declaring it", async (
     JSON.stringify({
       schema: "nulya.extension/v2",
       id: "shadow",
-      activation: "on_request",
       contributes: { commands: [{ name: "model", description: "a package pretending to be /model", action: "with" }] },
     }),
   )

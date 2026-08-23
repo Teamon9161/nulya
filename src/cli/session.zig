@@ -130,11 +130,27 @@ fn sessionOutcome(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8
     return 0;
 }
 
-/// Collect every `--with <id>[@<version>]` (the flag is repeatable). Slices
-/// borrow `args`; the caller owns only the returned array.
-fn withRefs(alloc: std.mem.Allocator, args: []const []const u8) ![]composition.WithRef {
+/// The session's member extensions: the config's `extensions.with` first, then
+/// every `--with <id>[@<version>]` in argv order (the flag is repeatable).
+///
+/// Exactly `pinRefs`' shape, for exactly its reason (DESIGN §5.1): config says
+/// "in this workspace, every session", `--with` says "for this session", and
+/// they are two spellings of one axis. Config first so a command line naming the
+/// same id — with a version, typically — overrides it: `composition.unionWith`
+/// keeps the last mention of an id.
+///
+/// Slices borrow `configured` and `args`; the caller owns only the returned
+/// array.
+fn withRefs(
+    alloc: std.mem.Allocator,
+    configured: []const []const u8,
+    args: []const []const u8,
+) ![]composition.WithRef {
     var out: std.ArrayList(composition.WithRef) = .empty;
     errdefer out.deinit(alloc);
+    // Bare ids: a standing member follows `current`, so `ext activate` keeps
+    // meaning something for it and a rollback stays one verb (`config.Extensions`).
+    for (configured) |id| try out.append(alloc, .{ .id = id });
     var i: usize = 0;
     while (i + 1 < args.len) : (i += 1) {
         if (!std.mem.eql(u8, args[i], "--with")) continue;
@@ -142,6 +158,26 @@ fn withRefs(alloc: std.mem.Allocator, args: []const []const u8) ![]composition.W
         i += 1;
     }
     return out.toOwnedSlice(alloc);
+}
+
+/// `--bare`: compose from argv alone (DESIGN §14).
+///
+/// The two standing config lists — `[extensions] with` and
+/// `registry.pinned_native_tools` — are how a person says "every session in this
+/// workspace gets this". A session opened FOR a job by something other than a
+/// person (a delegated sub-agent, whose whole tool face is its own definition)
+/// is not one of those, and inheriting a workspace's standing composition would
+/// give it capabilities its author never wrote down.
+///
+/// `max_tools` is still read: it is a ceiling, not a selection, and a `--bare`
+/// session that could exceed it would be a way around the budget rather than a
+/// way out of the config.
+///
+/// Nothing about the flag reaches the header. A resume reads the members and
+/// pins the header froze, which is the same list either way — a flag recording
+/// how the list was ARRIVED at would be a second fact to keep true.
+fn bareComposition(args: []const []const u8) bool {
+    return sliceHasFlag(args, "--bare");
 }
 
 /// The session's native tool pins: the config's `registry.pinned_native_tools`
@@ -419,15 +455,21 @@ pub fn createSession(
     const ext_roots = try launch.extensionRoots(alloc, &host, &cfg);
     defer launch.freeExtensionRoots(alloc, ext_roots);
 
-    // `--with <id>[@<version>]` (repeatable) brings a BUILT version into this
-    // one session's composition without activating it anywhere (DESIGN §14).
-    const with = try withRefs(alloc, args);
+    // `--bare` composes from argv alone: the two standing config lists below are
+    // read as empty, and everything else about the session is unchanged.
+    const bare = bareComposition(args);
+
+    // The session's members: config's standing `[extensions] with`, then every
+    // `--with <id>[@<version>]` on the command line (DESIGN §5.1, §14). A
+    // package joins a session only by being on this list or by being dragged in
+    // by a pin — activating one never puts it here.
+    const with = try withRefs(alloc, if (bare) &.{} else cfg.extensions.with, args);
     defer alloc.free(with);
 
     // `--pin ext:<id>/<tool>` (repeatable), unioned with the configured pins:
     // the whole native tool selection, and the only one there is — the usage
     // journal never puts a tool on the model's face by itself (DESIGN §5.1).
-    const pins = try pinRefs(alloc, cfg.registry.pinned_native_tools, args);
+    const pins = try pinRefs(alloc, if (bare) &.{} else cfg.registry.pinned_native_tools, args);
     defer alloc.free(pins);
 
     // A placeholder handle is enough since `new` never steps.
@@ -466,12 +508,12 @@ pub fn createSession(
             try printPinImplied(alloc, io, pins, with);
             return null;
         },
-        // Activation is a statement of intent too, so a broken active version
-        // stops the session instead of vanishing from it. `resolveActiveExtensions`
-        // already named the offending `id@version` and the two repair verbs on
-        // stderr; this line only says what it cost.
+        // A member named without a version resolves through `current`, and that
+        // pointer led to something unusable. `composition.resolveCurrent` already
+        // named the offending `id@version` and the two ways back on stderr; this
+        // line only says what it cost.
         error.ActiveExtensionBroken => {
-            try printErrFmt(alloc, io, "session new failed: an activated extension does not validate (see the line above)\n", .{});
+            try printErrFmt(alloc, io, "session new failed: an extension this session names has a broken current version (see the line above)\n", .{});
             return null;
         },
         // Same rule for pins: a session missing a tool the operator asked for is
@@ -1271,7 +1313,7 @@ test "events prints an image turn with the base64 replaced, and every other line
     try std.testing.expect(try redactImages(alloc, decoy, 1) == null);
 }
 
-test "--with is repeatable and splits <id>[@<version>]" {
+test "--with unions with the configured members, config first, and splits <id>[@<version>]" {
     const alloc = std.testing.allocator;
     const args = [_][]const u8{
         "--profile",      "scripted",
@@ -1281,7 +1323,7 @@ test "--with is repeatable and splits <id>[@<version>]" {
         "--with-nothing", "ignored",
         "--with",
     }; // a trailing --with with no value is not a ref
-    const refs = try withRefs(alloc, &args);
+    const refs = try withRefs(alloc, &.{}, &args);
     defer alloc.free(refs);
 
     try std.testing.expectEqual(@as(usize, 2), refs.len);
@@ -1290,9 +1332,29 @@ test "--with is repeatable and splits <id>[@<version>]" {
     try std.testing.expectEqualStrings("web.search", refs[1].id);
     try std.testing.expectEqualStrings("v-0123456789abcdef01234567", refs[1].version.?);
 
-    const none = try withRefs(alloc, &.{ "--profile", "scripted" });
+    const none = try withRefs(alloc, &.{}, &.{ "--profile", "scripted" });
     defer alloc.free(none);
     try std.testing.expectEqual(@as(usize, 0), none.len);
+
+    // Config's standing members come FIRST and carry no version — they follow
+    // `current`, so `ext activate` still moves them. A command line naming the
+    // same id lands after, which is what lets it override (`unionWith` keeps
+    // the last mention of an id).
+    const configured = [_][]const u8{ "guide", "std" };
+    const both = try withRefs(alloc, &configured, &.{ "--with", "std@v-0123456789abcdef01234567" });
+    defer alloc.free(both);
+    try std.testing.expectEqual(@as(usize, 3), both.len);
+    try std.testing.expectEqualStrings("guide", both[0].id);
+    try std.testing.expect(both[0].version == null);
+    try std.testing.expectEqualStrings("std", both[1].id);
+    try std.testing.expect(both[1].version == null);
+    try std.testing.expectEqualStrings("std", both[2].id);
+    try std.testing.expectEqualStrings("v-0123456789abcdef01234567", both[2].version.?);
+
+    // `--bare` is the shell reading the standing list as empty; the argv half
+    // is untouched (`bareComposition`, DESIGN §14).
+    try std.testing.expect(bareComposition(&.{ "--profile", "scripted", "--bare" }));
+    try std.testing.expect(!bareComposition(&args));
 }
 
 test "--pin unions with the configured pins, in order, without duplicating one" {

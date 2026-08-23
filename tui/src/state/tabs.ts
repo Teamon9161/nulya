@@ -102,6 +102,13 @@ export interface SessionExtras {
   /** `--pin ext:<id>/<tool>`: a native slot on the model's tool face. */
   pin?: readonly string[]
   /**
+   * `--bare`: ignore the config's standing `[extensions] with` and
+   * `pinned_native_tools`, composing from these flags alone (DESIGN §14). A
+   * sub-agent tab is what wants it, and it comes from the agent package's own
+   * `render` rather than being decided here (`agents.ts`).
+   */
+  bare?: boolean
+  /**
    * `--prompt <file>`: a file whose bytes become this session's own system
    * prompt, frozen into its header. Nothing is installed — a sub-agent persona
    * is what wants this (`agents.ts`).

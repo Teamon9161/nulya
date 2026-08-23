@@ -31,10 +31,21 @@
 //! second protocol every driver would have to learn, in two implementations on
 //! two platforms, for a loop the kernel already runs.
 //!
-//! **Leaf.** A delegated session does not carry this package (the driver brings
-//! it in with `--with` only for top-level sessions), so a sub-agent cannot
-//! delegate again. One level, until there is a reason and a bound for more —
-//! agents-and-review §1's `SpawnPolicy`, in its minimal form.
+//! **A definition is the WHOLE composition.** Every child session is created
+//! `--bare` (DESIGN §14): the workspace's standing `[extensions] with` and
+//! `registry.pinned_native_tools` are read as empty for it. Those two lists are
+//! how a PERSON says "every session I open here carries this"; a session opened
+//! by the model to do one piece of work is not one of those, and inheriting
+//! them would give a sub-agent capabilities its author never wrote down — and
+//! would make the same definition behave differently in two workspaces. So a
+//! definition with no `pins` gets `shell` and nothing else, which is a real
+//! answer (`explore` deliberately narrows itself that way) rather than an
+//! oversight to be topped up from config.
+//!
+//! **Leaf by default.** A delegated session carries this package only when its
+//! own definition names somebody to pass work to (`agents:` non-empty), so a
+//! sub-agent that was not given that field cannot delegate again — the tool is
+//! simply not there. One field, read in one place, and no refusal to write.
 //!
 //! **Why compiled Zig.** Identical to `compact` and `handoff`: JSON-RPC in, an
 //! `id` to echo, arguments to validate, and `run` parses the `session step`
@@ -181,6 +192,16 @@ fn renderTool(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
             // id to name.
             try jw.objectField("prompt");
             try jw.write(m.path);
+            // Always true, and named rather than assumed, because a driver that
+            // opened this session WITHOUT it would compose something else
+            // entirely (`session new --bare`, DESIGN §14). A definition's
+            // `pins` are its whole tool face; a workspace's standing
+            // `[extensions] with` / `pinned_native_tools` are what a PERSON
+            // asked every session of theirs to carry, and a delegated session
+            // is not one of those. Inheriting them would hand a sub-agent
+            // capabilities its author never wrote down.
+            try jw.objectField("bare");
+            try jw.write(true);
             try jw.objectField("label");
             try jw.write(m.label);
             try jw.objectField("description");
@@ -424,7 +445,7 @@ fn newDelegation(
     // The persona rides as BYTES the header freezes (DESIGN §3): nothing is
     // installed, so this session's identity text cannot be pruned out from
     // under its own resume.
-    try new_argv.appendSlice(alloc, &.{ ctx.exe, "session", "new", "--prompt", m.path });
+    try new_argv.appendSlice(alloc, &.{ ctx.exe, "session", "new", "--bare", "--prompt", m.path });
     if (profile.len != 0) try new_argv.appendSlice(alloc, &.{ "--profile", profile });
     if (model.len != 0) try new_argv.appendSlice(alloc, &.{ "--model", model });
     // Just the pins. A pin brings its own package into the session at `current`

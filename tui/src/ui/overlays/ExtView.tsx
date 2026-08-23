@@ -54,7 +54,7 @@ import {
   extSetCurrent,
   type SyncLine,
 } from "../../nulya/cli.ts"
-import { draftColumn, pinsOf, planStore, promptConsequence, standingPinsOf } from "../../extensions.ts"
+import { draftColumn, pinsOf, planStore, promptConsequence, standingWith } from "../../extensions.ts"
 import {
   builtin_tools,
   faceFullLine,
@@ -73,7 +73,7 @@ import {
   type PinSources,
   type PinState,
 } from "../../pins.ts"
-import { rememberSessionPins, sessionPins } from "../../state/tui_state.ts"
+import { rememberSessionPins, rememberSessionWith, sessionPins, sessionWith } from "../../state/tui_state.ts"
 import { UsageTable } from "./UsageTable.tsx"
 import type { Workspace } from "../../nulya/bin.ts"
 import type { SessionHeader } from "../../nulya/ledger.ts"
@@ -136,17 +136,15 @@ const switch_width = 2
  * So it gets a word of its own in the list rather than the count of prompt files
  * that used to sit at the end of the detail line, four facts in.
  *
- * Two words, because since T37 there are two reaches and the package declares
- * which one it has (DESIGN §7.2.1). `mode` is the far one: the switch puts this
- * prompt in front of every session this machine opens. `opt-in` is the near
- * one: the switch only registers the package, and a session gets it by naming
- * it (`/with <id>`) — which is why this word is NOT warn-coloured. Same
- * contribution, opposite blast radius; one word each is the least this list can
- * do about that.
+ * One word, not two. There used to be a second (`opt-in`) for a package that
+ * had declared its prompt reached only the sessions naming it — the reach was
+ * the package's to state, so the list had to repeat which of the two it had
+ * chosen. Reach is the person's now (DESIGN §5.1), and this row's Enter is
+ * where they state it, so the column says what the package IS and the switch
+ * says what it costs.
  */
-export function modeCell(entry: { systemPrompts: string[]; activation: "always" | "on_request" }): string {
-  if (entry.systemPrompts.length === 0) return ""
-  return entry.activation === "on_request" ? "opt-in" : "mode"
+export function modeCell(entry: { systemPrompts: string[] }): string {
+  return entry.systemPrompts.length === 0 ? "" : "mode"
 }
 
 /** One row of the tools pane: a pinnable tool, its state, and its evidence. */
@@ -176,12 +174,10 @@ export interface ToolRow {
 /**
  * Every tool an active extension declares, with the state each one is in.
  *
- * Only extensions with an ACTIVE, un-shadowed version whose activation composes
- * them into EVERY session are here. A pin on a package with no `current` is
- * refused by `session new` (a pin brings its package in, and there is nothing
- * to bring), and a standing pin on an `on_request` package would wear that mode
- * in every session (`standingPinsOf`) — neither is something a checkbox should
- * offer.
+ * Only extensions with an ACTIVE, un-shadowed version are here: a pin on a
+ * package with no `current` is refused by `session new` (a pin brings its
+ * package in, and there is nothing to bring), which is not something a checkbox
+ * should offer.
  */
 export function toolRows(
   extensions: readonly ExtensionEntry[],
@@ -191,11 +187,6 @@ export function toolRows(
   const rows: ToolRow[] = []
   for (const entry of extensions) {
     if (!entry.current || entry.shadowed) continue
-    // Registered, not composed in: a standing pin would wear this mode in
-    // every session, so no checkbox here (`standingPinsOf`). `dropOrphanPins`
-    // reads this same list, which is what takes such a pin back off an
-    // existing `tui-state.json`.
-    if (entry.activation === "on_request") continue
     for (const tool of entry.tools) {
       const id = toolId(entry.id, tool)
       const row = usage.find((u) => u.toolId === id)
@@ -426,6 +417,14 @@ export function ExtView(props: {
   // `userPath` comes from the kernel's own projection: we write where it reads.
   const [maxTools, setMaxTools] = createSignal(8)
   const [merged, setMerged] = createSignal<string[]>([])
+  /**
+   * The kernel's own standing membership list (`[extensions] with`, DESIGN
+   * §5.1), read from the same projection the pins come from. This front end
+   * never writes it — its own standing list is `tui-state.json`'s
+   * `session_with` — but a package config already composes is one whose row
+   * must not read as "off".
+   */
+  const [configWith, setConfigWith] = createSignal<string[]>([])
   const [userPath, setUserPath] = createSignal("")
   const [userPins, setUserPins] = createSignal<string[]>([])
   const [tuiPins, setTuiPins] = createSignal<string[]>(sessionPins(props.statePath))
@@ -473,6 +472,7 @@ export function ExtView(props: {
       const view = await configShow(props.ws)
       setMaxTools(view.registry.max_tools)
       setMerged(view.registry.pinned_native_tools)
+      setConfigWith(view.extensions.with)
       setUserPath(view.paths.user)
       setUserPins(readUserPins(view.paths.user))
     } catch {
@@ -600,8 +600,19 @@ export function ExtView(props: {
 
   /** An extension takes part in the next session: an active version, not shadowed. */
   const isActive = (entry: ExtensionEntry) => entry.current !== null && !entry.shadowed
-  /** …and one this front end brings into every session it starts (T42). */
-  const composedEverySession = (id: string) => style.settings.extensions.session_with.includes(id)
+  /**
+   * …and one that is a MEMBER of every session opened here, from any of the
+   * three lists that can say so (K8): the kernel's own `[extensions] with`,
+   * this front end's `tui-state.json` `session_with` (what Enter writes), and
+   * `tui.toml`'s `session_with` (the packages it always brings, T42).
+   *
+   * Three sources and one question, because the row is drawn once. Which file
+   * a given id came from is in the detail pane below, where the answer differs.
+   */
+  const composedEverySession = (id: string) =>
+    configWith().includes(id) ||
+    sessionWith(props.statePath).includes(id) ||
+    style.settings.extensions.session_with.includes(id)
   /** Its declared tools, as the stable ids a pin names. */
   /**
    * The tools the SWITCH pins: the ones the package puts on the MODEL's face
@@ -611,13 +622,11 @@ export function ExtView(props: {
    * because that is how a driver calls it.
    */
   /**
-   * The pins this pane's switch writes for a row — a STANDING list, so nothing
-   * for a package that joins only the sessions that name it (`standingPinsOf`).
-   * An `on_request` row is therefore membership alone, exactly like `compact`:
-   * fully on, nothing on the standing face, and `/with <id>` is what puts its
-   * tools in front of a model.
+   * The pins this pane's switch writes for a row: one per tool the package puts
+   * on the MODEL's face. A package whose tools are all a driver interface
+   * yields none, and its switch is membership alone.
    */
-  const pinnable = (entry: ExtensionEntry) => standingPinsOf(entry)
+  const pinnable = (entry: ExtensionEntry) => pinsOf(entry)
   const pinnedCount = (entry: ExtensionEntry) =>
     pinnable(entry).filter((id) => pinState(id, sources()) !== "off").length
   const stateOf = (entry: ExtensionEntry): SwitchState =>
@@ -926,19 +935,25 @@ export function ExtView(props: {
     }
     // Agreed: now the pin lists are written where the next `session new` reads.
     if (change) await applyPin(change, { reconcile: false })
+    // …and the MEMBERSHIP half, for a package that has something only a member
+    // can give (K8). Activating alone composes nothing now (DESIGN §5.1), so
+    // without this line the switch would move a pointer and change nothing a
+    // person could see. A pure tool package needs no entry: its pins bring it
+    // in by themselves, and a second way of saying that is a second thing to
+    // take back.
+    if (standingWith(entry)) {
+      const held = sessionWith(props.statePath)
+      if (!held.includes(entry.id)) rememberSessionWith([...held, entry.id], props.statePath)
+    }
     release(entry.id)
     props.onMembershipChanged?.()
     setNotice(
       // A package that contributes a system prompt gets the sentence about what
       // that actually costs, instead of a version and a pin count (T31): one
-      // keypress here reaches every session this machine opens from now on, and
-      // that is the fact worth the line.
-      // An `on_request` row gets that sentence whether or not it has a prompt:
-      // what its switch did — registered it, changed no session — is the fact,
-      // and the branch below would otherwise tell `ask` its tool "stays off the
-      // model face", which is true of every session except the one it is for.
-      entry.activation === "on_request" || entry.systemPrompts.length > 0
-        ? promptConsequence(entry.id, true, entry.activation, pinsOf(entry).length)
+      // keypress here reaches every session this front end opens from now on,
+      // and that is the fact worth the line.
+      entry.systemPrompts.length > 0
+        ? promptConsequence(entry.id, true)
         : `${entry.id} on · ${version}` +
           (ids.length > 0
             ? room
@@ -977,11 +992,17 @@ export function ExtView(props: {
       release(entry.id)
       return
     }
+    // The membership half comes off with the pointer: unlike a pin, an id on
+    // this list that has no `current` makes `session new` refuse outright
+    // (`WithVersionNotFound`), so leaving it behind would be leaving a front
+    // end that cannot open a session at all.
+    const held = sessionWith(props.statePath)
+    if (held.includes(entry.id)) rememberSessionWith(held.filter((id) => id !== entry.id), props.statePath)
     release(entry.id)
     props.onMembershipChanged?.()
     setNotice(
-      (entry.activation === "on_request" || entry.systemPrompts.length > 0
-        ? promptConsequence(entry.id, false, entry.activation, pinsOf(entry).length)
+      (entry.systemPrompts.length > 0
+        ? promptConsequence(entry.id, false)
         : `${entry.id} off · its skills leave the composition`) +
         ` · versions all stay${stuck ? ` · ${stuck}` : ""}`,
     )
@@ -1506,18 +1527,12 @@ export function ExtView(props: {
                       </text>
                     </box>
                     {/* A package that contributes a system prompt is a MODE, and
-                        turning it on reaches every session this machine opens
-                        (T31). Warn-coloured while it is on: that is the state
+                        turning it on reaches every session this front end opens
+                        (T31/K8). Warn-coloured while it is on: that is the state
                         somebody has to be able to spot without reading a
                         detail pane. */}
                     <box width={idCols().mode} flexShrink={0}>
-                      <text
-                        fg={
-                          on() === "off" || entry().activation === "on_request"
-                            ? style.theme.faint
-                            : style.theme.warn
-                        }
-                      >
+                      <text fg={on() === "off" ? style.theme.faint : style.theme.warn}>
                         {fit(modeCell(entry()), Math.max(0, idCols().mode - 2))}
                       </text>
                     </box>
@@ -1603,13 +1618,9 @@ export function ExtView(props: {
                       panel written as the quietest one (T31). */}
                   <Show when={entry.systemPrompts.length > 0}>
                     <Lines
-                      text={
-                        entry.activation === "on_request"
-                          ? `opt-in · turning it on only registers it; no session changes · /with ${entry.id} wears it for one session`
-                          : `a mode · turning it on puts its system prompt in every new session on this machine · /with ${entry.id} wears it for one session instead`
-                      }
+                      text={`a mode · turning it on puts its system prompt in every new session from this front end · /with ${entry.id} wears it for one session instead`}
                       width={detailWidth()}
-                      fg={entry.activation === "on_request" ? style.theme.muted : style.theme.warn}
+                      fg={style.theme.warn}
                     />
                   </Show>
                   {/* A package this front end composes every session with
@@ -1632,7 +1643,13 @@ export function ExtView(props: {
                   </Show>
                   <Show when={composedEverySession(entry.id)}>
                     <Lines
-                      text={`composed into every session this TUI starts · its tools are on the face there, not from this list · \`[extensions] session_with\` in tui.toml`}
+                      text={`composed into every session started here · ${
+                        configWith().includes(entry.id)
+                          ? "`[extensions] with` in config — `nulya config show`"
+                          : style.settings.extensions.session_with.includes(entry.id)
+                            ? "`[extensions] session_with` in tui.toml · its tools are on the face there, not from this list"
+                            : "this pane's switch put it there · Enter again takes it back"
+                      }`}
                       width={detailWidth()}
                       fg={style.theme.muted}
                     />

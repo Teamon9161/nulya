@@ -282,7 +282,7 @@ Driver 演化比 Tool 保守，因为**归因难**（任务难度 / model / seed
 
 **3.7.8 触发、递归、地板。** 三档触发，每档 threshold 是 policy：① 用户 `nulya session new --with evolution@<version>`（最先，✅ M5）② 主 driver 任务结束时 `if enough new evidence` ③ 每 N 个 episode。Evolution skill 自己也可演化（`evolution v1 → v2`，复用同一套 candidate → verify → trial → rollback）。**递归的地板 = 八条 physics 不可自改**——正是这块不可自改的地板让上面一切可以放心试错。Driver 演化的真实来源多半是**重复的人类 correction 结晶**（"先写 plan""找 reviewer 看"连说十次），不是凭空花样。
 
-**3.7.9 mode = 贡献 system_prompt 的 data extension + `--with`。** ✅ 机制已在（M5e/M5g）。同一个包两种投放：`activate` = 常驻（每场都有），不 activate、只 `--with` = 按场。evolution 是第一个 mode；`handoff`（§3.4.1）会是第二个形状（tool 而非 prompt，同样"随仓库带、按需带入"）。**不为 mode 造别的机制**：一个"模式"就是一个 data extension 加一次 `--with`，没有 mode 注册表、没有 mode 生命周期。
+**3.7.9 mode = 贡献 system_prompt 的 data extension + 被点名。** ✅ 机制已在（M5e/M5g；2026-08-23 ext-review-2 Lane K 收口）。同一个包两种投放，**两个都是人的决定**：写进 config `[extensions] with` = 常驻（这个 workspace 每场都有），只 `session new --with` = 按场（DESIGN §5.1）。`activate` 不是其中之一——它只说 `<id>` 指哪个版本。evolution 是第一个 mode；`handoff`（§3.4.1）是第二个形状（tool 而非 prompt，同样"随仓库带、按需带入"）。**不为 mode 造别的机制**：一个"模式"就是一个 extension 加一句点名，没有 mode 注册表、没有 mode 生命周期。曾经有过半个——manifest 的 `activation`（包自己声明"activate 我算不算常驻"）——已删：reach 是人的决定不是作者的，而 pin 蕴含成员之后那个 bit 也已经拦不住任何东西（DESIGN §7.2.1）。
 
 ### 3.8 Authority / sandbox `[占位 · M7]`
 

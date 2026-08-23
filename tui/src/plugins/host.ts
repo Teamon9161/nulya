@@ -248,11 +248,11 @@ export interface PluginCandidate {
  * shadowed, and — for the workspace root — trusted) plus every package a
  * session in this process is WEARING.
  *
- * Both halves matter and neither implies the other. An `on_request` package
- * that is registered but not worn still gets to offer its `/command`; a
- * package brought in with `--with` at a version the store's `current` no
- * longer names is what this session is actually running, and its plugin has to
- * be the version that was frozen with it.
+ * Both halves matter and neither implies the other. A package that is built
+ * and activated but in no session still gets to offer its `/command` — that is
+ * how a mode becomes reachable at all; and a package brought in with `--with`
+ * at a version the store's `current` no longer names is what this session is
+ * actually running, so its plugin has to be the version frozen with it.
  */
 export async function pluginCandidates(
   ws: Workspace,
