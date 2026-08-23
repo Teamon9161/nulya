@@ -110,4 +110,29 @@ zig build && cd tui && bun test && bun run typecheck
 
 ### Lane R
 
-（待开始）
+**完成**（sonnet，主工作树，在 S/W 合并之后）。R1 是从 kernel prompt 读到 `nulya help` 读到 `ext api` 三个 topic 再到 guide `SKILL.md` 的一次顺读，对照今天的 DESIGN §5.1/§7.1/§7.2.1/§14；R4 是对 DESIGN/CLAUDE/PLAN/tui.md/base-tools.md/agents-and-review.md 的一次 grep 复读。**大部分文本已经是准的**——kernel prompt、`nulya help`（跑的是真二进制）、`ext api protocol/manifest/examples`、guide SKILL.md、`notes.zig` 的 `noteText`、TUI 的 `/help` 与 `Welcome.tips` 逐一读过，均与今天的语义（一种 wire、`policy{readonly}`、`commands[].action` 对象、按宿主 `ui`、`--bare`、`[extensions] with`）一致，没有改动（详见下面"读过、没动"）。改动全在 DESIGN.md / CLAUDE.md / PLAN.md，六处：
+
+- `docs/DESIGN.md:621`（§7.8 `plan`/`ask` 一节）：**当前状态错误**——原文说"`session new --parent` 不带 `--with`、`plan` 又声明 `on_request`"，但 `activation` 字段已在 ext-review-2 Lane K 整个删除（验证：`extensions/plan/extension.json` 里根本没有 `activation` 键）。改成"`session new --parent` 不带 `--with`（composition 一律现解，不继承，§5.1）"——保留原意（fork 不带 persona），去掉对已删字段的引用。
+- `docs/DESIGN.md:845`（`nulya help` 一节）：**当前状态错误**——原文说"当前 45 行"，但 `zig build && nulya help | wc -l` 与 `tests/e2e/cli.zig:72` 的预算都是 52（`git blame` 找到两笔未记的增量：background task 动词族 `47b80a8` +6，`--bare` 的 `4e19d27` +1）。改成"当前 52 行"，先例列表补上 `task` 整个动词族 +6、`--bare` +1。
+- `docs/DESIGN.md:440`（§7.2.1 driver 声明，`readonly?`）：`readonly?` 与已删的 `permissions` 字段"完全同级（§9）"这句在 §7.2.1 自己 12 行之后才说明 `permissions` 已删——顺序读容易先当它还在。改成引用 §9 那句"没有一个 manifest 字段是安全边界"本身，不再点名一个已经不存在的字段。
+- `docs/DESIGN.md:379` 与 `CLAUDE.md:47`（同一句，`ext seed` 的记录理由）：`evolution` 的 `activation: on_request` 作为历史例证与仍然存在的 `agent.audience` 并列，没有任何标记说前者已经不在 schema 里。各加一句"该字段现已删，§7.2.1" / "该字段后来被删，见下面 ext-review-2 Lane K 那条"。
+- `docs/PLAN.md:300`（§3.8.1，readonly 与 permissions 对比）：同一种问题更明显——本节自己在两段之前（§3.8）刚说"2026-08-23 删掉了"，这里却接着说 readonly "它与 `permissions` 同级——两者都要等 §3.8 的 OS 强制才谈得上边界"，读起来像 permissions 还在等沙箱而不是已经没了。改成"要等 §3.8 的 OS 强制才谈得上边界（已删的 `permissions` 字段曾经也是这一类声明，见上）"。
+- `CLAUDE.md:50`（gate 那条现状 bullet）：同一处比较，加"当时"两字并指向后面 manifest 瘦身那条的删除记录。
+
+**读过、没动，附理由**：
+
+- kernel prompt（`src/composition.zig:47`）：57 词，逐句核对——`shell` 是唯一 builtin、pin 冻在场首、ledger 角色那句——都与今天的行为一致，没有一个字提到已删的机制。改它会动 `kernel_hash`，不值得为纯文风改一次。
+- `nulya help`（`src/cli/common.zig` 的六个 `*_usage` 常量 + `usage()`）：跑的是 `zig build` 之后的真二进制，52 行，`ext run`/`session new --bare`/`--prompt`/`ext seed`/`ext trust` 等全部与 DESIGN §14 逐行对齐；e2e 预算 52 与实测相符（本 lane 未改预算本身，只改了 DESIGN.md 里那句描述性数字）。
+- `nulya ext api protocol`：打印的是真实 `src/extension/protocol.zig` 源码（`nulya src` 的特例），plain 在前、jsonrpc 一节明确标 DEPRECATED 并解释"为什么退场"——这份文本允许出现 `DESIGN §`（e2e 的零引用断言只检查 `manifest`/`examples`/`help`，见 `tests/e2e/cli.zig:163`），不受 R2 约束。
+- `nulya ext api manifest` / `examples`：三层声明（内核强制/driver 声明/前端声明）逐段核对，`policy` 只剩 `{readonly}`、`commands[].action` 是对象、`ui` 按宿主键、`--bare` 与 2×2 表都在，零 `DESIGN`/`PLAN` 字样（grep 确认）。
+- `extensions/guide/skills/guide/SKILL.md`：257 行全文读过，`activation`/`permissions`/`on_request` 一个字都不出现，两根轴（membership × tool face）的表述与 DESIGN §5.1 一致，`--bare`/`--seed`/plain wire recipe 都在。CLAUDE.md 那条"guide"现状 bullet 里的"187 行"是它 2026-08 落地时的行数，历史 bullet 不追更行号，未动。
+- `src/extension/notes.zig` 的 `noteText`：`invoke: nulya ext run {id} <tool> '<json-args>'` 与今天 `ext run` 的形状一致，不提任何已删机制。
+- TUI `/help`（`tui/src/ui/overlays/HelpView.tsx`）与 `tui/src/commands.ts`：命令表逐条核对，`/mode [ask|unsafe]`、`/with`（`/as` 旧名仍认）、`/agent` 均是 T31/T36/T48-T50 之后的说法；`Welcome.tips`（`tui/src/ui/Welcome.tsx:64`）十一条逐条核对，没有过时描述。两处都不需要改。
+- `tui/src/compact.ts:86` 与 `tui/src/nulya/cli.ts:790`：Lane W 的进度记录说这两处"JSON-RPC error"措辞留给下一棒，但重新 `grep -rn 'JSON-RPC\|jsonrpc' tui/src` 是**零命中**——两处已经在 W 的同一个提交（`74aa3ea`）里改成了"a non-zero exit"/"REFUSES"的说法，Lane W 的自述与实际 diff 不一致，但代码本身已经是对的，R 这里不需要再动。
+- `docs/agents-and-review.md:93`（"declared permissions ⊆ session_authority"）：整份文档在 CLAUDE.md 的路由表里标"全部未实现，归属 PLAN"，这句是未来 policy-hook 设计里的不变量措辞，呼应的是 DESIGN §9 至今仍然成立的 `extension_permissions ⊆ session_authority`，不是在断言 manifest 还有一个叫 `permissions` 的字段。未动。
+- `docs/tui.md` §11 的全部命中（T23/T24/T31/T32/T34/T37/T41/T42/T46/T48）：都在"实施日志"里，逐条描述的是**那一个 T 当时**的行为（`activation`/`autoActivatable`/`standingPinsOf`/`on_request` 在被引入、被使用、最终在 T48 被删除的过程），T48/T50 已经在同一份日志里正确记录了删除。与 Lane S 处理 `autoActivatable` 残留时的先例一致：历史日志条目不因为后来改名/删除而重写，只有"当前该怎么做"的说明性段落（S3 已处理的 TOML 样例那两处）才需要跟着改。未再动 tui.md。
+- `docs/base-tools.md`：grep 零命中，无需处理。
+- `docs/PLAN.md` 其余命中（31/52/139/190/285/289/361）：31/139/190/285/289/361 均已正确标注"已删"/"✅ 已落地"或是与已删字段无关的通用词（如 190 的"activation / rollback"是英文动词，不是 manifest 字段）；52（M2c 一节讲 `handoff` 当初为什么是 compiled、要读 JSON-RPC）是纯历史记录，描述的是落地那一刻的决定与理由，不是当前 `handoff` 的实现方式（`handoff` 已在 Lane W 迁到 plain wire），但这段话本身没有断言"现在还是这样"，只是没有再补一句"后来 wire 变了"——留给下一次真正碰 M2c 一节的人一起处理，不在本次 grep 目标（`on_request`/`activation`/`permissions`/`jsonrpc` 等）划出的六处硬伤之列。
+- 未在 R4 的 grep 列表里、但顺带读到的一处：`docs/PLAN.md:299`（3.8.1 那条 mode 表述）仍写"两档 mode（`ask` / `auto`）"——T31（2026-08-20）已把 `auto` 改名 `unsafe`。这个词不在本 lane 的 grep 目标（`on_request`/`activation`/`permissions`/`jsonrpc`/`autoActivatable`/`standingPinsOf`）里，按任务范围界定未改，记在这里供下一遍复读参考。
+
+**验收**：`zig build test` exit 0；`zig build e2e` exit 0（含 `nulya help` 的 52 行预算、`ext api manifest`/`examples`/`help` 的零文档引用断言）。未改动任何 `tui/**` 或 `.zig` 文件，所以未跑 `bun test`（S 的 worktree 已经跑绿过一次，W 之后没有 TUI 侧改动），也未跑 `zig fmt`（没有 `.zig` 改动）。全部改动都是 `.md` 文件的最小字面修正，没有重排未改动的段落。

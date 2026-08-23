@@ -296,8 +296,8 @@ Driver 演化比 Tool 保守，因为**归因难**（任务难度 / model / seed
 `3.8` 是"发生时能碰什么"（OS 强制，未做）。这一节是它前面那半步：**这一次要不要发生**。两件事不该合并，因为它们的答案由不同的东西给。
 
 - **内核只长了一个原语，与 cancellation 同类**（physics #7 的同一形状）：`loop.StepContext.gate` 每个 tool call 执行前问一次，答案只有 `allow` / `deny{note?}` 两种；deny 就是那个 call 的 `tool_results`（`ok=false` + marker + 人的原话），**没有新事件种类、没有新 policy 键、batch 不变量不动**。kernel 里没有任何"该不该问"的判断——那正是它不该有的东西（physics #8）。`session step --gate` 把这个问题接到 stdout 一行 + stdin 一行上（要求与 `--stream` 同用；EOF / 认不出的答案 = fail closed）。
-- **判断在 driver**，今天第一个 consumer 是 TUI（tui.md §5.7）：两档 mode（`ask` / `auto`）+ 三张规则表（`deny` / `ask` / `allow`，条目是 tool id 或 shell 命令前缀）+ 本场的 always 集合。它是**可替换的**：另一个 driver 完全可以只答 `allow`（等于今天不带 `--gate`），或者把每个请求转给一个人的手机。内核不知道也不需要知道。
-- **`manifest.contributes.tools[].readonly` 是声明不是边界**（DESIGN §7.2.1）：包自己说这个 tool 只读，kernel 解析、冻结、**不强制**；driver 的 policy 可以信它（TUI 默认信，一个键可关）。它与 `permissions` 同级——两者都要等 §3.8 的 OS 强制才谈得上"边界"。同一类的第二个字段 `audience`（这个 tool 是给模型的还是给 driver 的）**已落地** → DESIGN §7.2.1。
+- **判断在 driver**，今天第一个 consumer 是 TUI（tui.md §5.7）：两档 mode（`ask` / `unsafe`，T31 之前叫 `auto`）+ 三张规则表（`deny` / `ask` / `allow`，条目是 tool id 或 shell 命令前缀）+ 本场的 always 集合。它是**可替换的**：另一个 driver 完全可以只答 `allow`（等于今天不带 `--gate`），或者把每个请求转给一个人的手机。内核不知道也不需要知道。
+- **`manifest.contributes.tools[].readonly` 是声明不是边界**（DESIGN §7.2.1）：包自己说这个 tool 只读，kernel 解析、冻结、**不强制**；driver 的 policy 可以信它（TUI 默认信，一个键可关）。要等 §3.8 的 OS 强制才谈得上"边界"（已删的 `permissions` 字段曾经也是这一类声明，见上）。同一类的第二个字段 `audience`（这个 tool 是给模型的还是给 driver 的）**已落地** → DESIGN §7.2.1。
 - **与 §3.12 的 policy hook 是两扇门，不合并**：这一扇在**每个 call 执行前**（谁都在跑的那条快路径上，答的人是当场的驱动者）；那一扇在 **promote-to-native**（写一条 pin 的时候，答的人是 reviewer 或人，一场 session 只发生一次）。合成一个"权限系统"会把每步都要答的问题和一辈子答一次的问题塞进同一套配置。
 - **占位：classifier-as-extension。** tcode 的 auto 档背后有个安全分类器（模型判断这一步是否 destructive）。在 nulya 里那**天然是一个 extension**：driver 在 `ask` 之前调它一次，它答"这条命令属于哪一类"，driver 决定信不信。不进内核（是 intelligence，§0.1）、也不必进 TUI（TUI 只要能 spawn 它）。等有人真被问烦了再做——现在连"哪些规则最常被写进 `allow`"的证据都还没有。
 
