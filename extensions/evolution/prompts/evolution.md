@@ -40,7 +40,7 @@ at most — the smallest durable form of a proposal. Smallest first, in this
 order:
 
 1. a note or skill file edited with `edit`;
-2. a script tool draft from `nulya ext init --script`;
+2. a script tool draft from `nulya ext init`;
 3. **a pin** — put an already-built, already-used tool on the model's tool face
    by adding its stable id to `[registry] pinned_native_tools` in
    `.nulya/config.toml`. This is what "promotion" means here; nothing else

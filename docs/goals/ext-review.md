@@ -229,3 +229,8 @@
 - DESIGN §7.8 里紧挨 `plan`/`ask` 表格的那段 prose（"声明层与代码层的两个真实 consumer"）也被我改了字段名，同样不在字面归属范围（表只包括表格本身）；同样是零冲突风险的顺手修正。
 - `tui/README.md` 与 `tui/plugin-api.d.ts` 里各有一处指名 `contributes.tui` 的文本，`extensions/plan/README.md` 里两处 `render`/`panel` 的用户可读文档；这三个文件都不在任何 lane 的 §5 归属表里，我按"直接描述我改的字段、零冲突风险"的同一标准顺手修了。
 - Lane A 的 `runtime.wire`/按平台 `entry`/`interpreter` 与 Lane C 的 `activation` 缺省按形状规则、`ext run --timeout-ms`，我在 `ext api permissions` 与 DESIGN §7.2.1 里都是**按契约文本描述**写的（因为这两块文字的完整性要求提前"知道"它们的最终形状），**没有验证过 A/C 实际落地的代码是否逐字匹配这份描述**——合并时如果 A/C 的实现在错误名（`InvalidWire`/`EntryUnsupportedOnHost`）、缺省规则的边界条件、或 `--timeout-ms` 的精确行为上与契约文本有出入，这两段文字需要跟着他们的实际实现再核一遍。
+
+### 合并后的两处 follow-up（编排者，2026-08-23）
+
+- **常驻 pin 与 `on_request` 包**：B 标记的"前端仍拒绝给 `on_request` 包写常驻 pin"**不是**要放开的东西——pin ⇒ with 之后，一条常驻 pin 会让**每一场**都戴上那个 mode，正是 `on_request` 要避免的事。行为保留（`standingPinsOf` / `resolvableStandingPins` / `ExtView.toolRows`），改的是三处代码、四处测试注释与 tui.md §5 里写的**理由**：从"内核 `PinNamesUnknownExtension`、session 开不了"改成"内核现在会照办，于是 mode 进每一场"；没有 `current` 的那一支错误名改成 `WithVersionNotFound`。
+- **`extensions/guide` / `evolution` 的脚本教学**改成 plain wire（`ext init` 缺省脚本、`NULYA_ARG_<k>`、stdout 即结果、`--zig` 才是 JSON-RPC 编译版；guide 另补 `runtime.wire` / 按 OS 的 entry / `activation` 缺省按形状 / `ext run` 不套 timeout）。两个包的版本 id 因此改变；`ext seed` 的 `.seed` 记录负责把没人动过的旧副本刷新上来。

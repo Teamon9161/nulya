@@ -537,7 +537,9 @@ test("the pins an activation writes come from the manifest, per tool, for a pack
  * both `activation: "on_request"`, and the three lines it left in
  * `tui-state.json` made EVERY later `session new` exit 1 with
  * `PinNamesUnknownExtension` — a front end that could not open a session at
- * all, explaining itself in one clipped status line.
+ * all, explaining itself in one clipped status line. Since a pin brings its
+ * package in (ext-review lane B) such a line no longer refuses the session — it
+ * wears the mode in EVERY session instead, which is why the rule stays.
  */
 test("a package that joins only the sessions naming it can hold no standing pin", () => {
   const pkg = (id: string, tools: string[], activation: "always" | "on_request") => ({

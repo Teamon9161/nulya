@@ -169,7 +169,7 @@ test("a full tool face refuses the pins, not the extension", () => {
 test("rows come only from extensions a pin could actually resolve through", () => {
   const entries: ExtensionEntry[] = [
     entry("std", "v-1", ["read", "grep"]),
-    // No `current`: `session new --pin` would fail with PinNamesUnknownExtension.
+    // No `current`: `session new --pin` would fail — the pin brings its package in, and there is nothing to bring.
     { ...entry("mode", "v-1", ["nope"]), current: null },
     // Shadowed by an earlier root: this copy never runs.
     { ...entry("old", "v-1", ["stale"]), shadowed: true },
@@ -357,9 +357,9 @@ test("a tool its package brings into every session reads as on, and this panel w
  * What a standing list may legally name, and therefore what a stale one gets
  * repaired against (`App.healStandingPins`, `ExtView.dropOrphanPins`).
  *
- * Both conditions are the kernel's, and both refuse the same way: an unknown
- * extension and a registered-but-not-composed one are `PinNamesUnknownExtension`
- * alike, and neither costs a tool — each costs the whole session.
+ * The first condition is the kernel's (no `current` = nothing for the pin to
+ * bring in, and no session); the second is this front end's (a standing pin on
+ * an `on_request` package would wear that mode in every session).
  */
 test("only a package composed into every session offers a tool a standing pin can name", () => {
   const entry = (

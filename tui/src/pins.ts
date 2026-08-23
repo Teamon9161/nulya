@@ -164,8 +164,9 @@ export function pinAll(ids: readonly string[], sources: PinSources): PinChange {
 /**
  * The other half: take an extension's tools off both lists this panel writes.
  *
- * A pin left behind by a deactivation is not harmless — the next `session new`
- * refuses by name (`PinNamesUnknownExtension`) and the session simply does not
+ * A pin left behind by a deactivation is not harmless — a pin brings its
+ * package in at `current` (DESIGN §5.1), and with no `current` the next
+ * `session new` refuses (`WithVersionNotFound`) and the session simply does not
  * start — so OFF has to clear `always` too, which is the one case where this
  * module writes the config file without being asked for `A`. A pin some other
  * layer wrote still cannot be touched (D3), so it is named instead.
@@ -205,12 +206,12 @@ export function orphanPins(pins: readonly string[], available: readonly string[]
 /**
  * Every tool id a STANDING pin list may name, from a store listing.
  *
- * Two conditions, and both are the kernel's: the extension has an active,
- * un-shadowed version (or the pin names nothing), and its activation composes
- * it into every session rather than only the ones that say `--with`
- * (`activation: "on_request"`, DESIGN §7.2.1). Miss the second and the pin is
- * refused exactly as hard as missing the first — `PinNamesUnknownExtension`,
- * and no session opens at all.
+ * Two conditions. The first is the kernel's: the extension has an active,
+ * un-shadowed version — a pin brings its package in at `current` (DESIGN
+ * §5.1), and with no `current` the session does not open. The second is this
+ * front end's: the package composes into every session (`activation:
+ * "always"`), because a standing pin on an `on_request` package would wear that
+ * mode in every session — the exact thing the word declines (`standingPinsOf`).
  *
  * Driver tools are in: `audience` is a package's advice about whose face a tool
  * belongs on, not a rule about what may be pinned, and this pane lets a person

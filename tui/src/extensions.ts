@@ -341,17 +341,15 @@ export function pinsOf(what: Pick<Contributions, "id" | "tools" | "driverTools">
  * The pins a STANDING list — `tui-state.json`'s `session_pins`, or the user
  * config's `registry.pinned_native_tools` — may hold for this package.
  *
- * The rule is one sentence and it is the kernel's, not a preference: a pin is
- * resolved against the session's COMPOSITION, and an `activation: "on_request"`
- * package is not in one unless that session named it (`--with`, DESIGN §7.2.1).
- * So a standing pin naming its tool is a promise nothing can keep — and it does
- * not degrade to "one tool short", it is `PinNamesUnknownExtension` and the
- * session does not open at all.
- *
- * That is not hypothetical: `/ext`'s switch wrote `pinsOf` for every package it
- * turned on, so switching on `plan` and `ask` left three lines in
- * `tui-state.json` that refused EVERY `session new` this front end tried, with
- * one truncated status-bar line as the whole explanation.
+ * The rule is one sentence: a pin brings its package into the session (DESIGN
+ * §5.1), and a STANDING pin does that for every session this machine opens.
+ * For a package that says `activation: "on_request"` that is the one thing it
+ * asked not to happen — it is a mode, worn per session by a decision (`--with`,
+ * DESIGN §7.2.1) — so a standing pin naming its tool would turn the mode on
+ * everywhere, quietly, through a tools-pane checkbox. The kernel no longer
+ * refuses such a pin (it used to be `PinNamesUnknownExtension`, and every
+ * `session new` failed — the bug that named this function); it honours it,
+ * which is worse. So this front end simply never writes one.
  *
  * An `on_request` package's tools still reach the face — in the session that
  * wears it, where `--with` and `--pin` travel together (`App.wornPins`).

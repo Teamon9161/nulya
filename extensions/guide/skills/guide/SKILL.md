@@ -76,32 +76,46 @@ help` in PowerShell. Below, `nulya` means whichever of the two applies.
 Reach for a script first — it needs no compiler and no toolchain:
 
 ```
-nulya ext init --script my.helper do_thing    # draft in .nulya/extensions/my.helper
-# edit src/run.sh (or src/run.ps1)
+nulya ext init my.helper do_thing             # draft in .nulya/extensions/my.helper
+# it scaffolds src/run.sh + src/run.ps1; edit the one(s) for your platforms
 nulya ext build .nulya/extensions/my.helper   # prints v-<hash>
 nulya ext run my.helper@v-<hash> do_thing --arg name=world
 nulya ext activate my.helper v-<hash>
 ```
 
+The scaffold speaks the `plain` wire, so the script is the whole tool:
+
+```sh
+#!/bin/sh
+# stdin: this call's arguments as one JSON object. NULYA_ARG_<key> holds each
+# simple argument, NULYA_TOOL the tool's name. Whatever you print is the
+# result; exit non-zero to fail the call (stderr becomes the message).
+printf 'hello %s\n' "${NULYA_ARG_name:-world}"
+```
+
 `extension.json` is the whole declaration; nothing is asked of the binary:
 
-- `runtime.entry` — a `bin/<name>` path means "compile this"; anything else
-  (`src/run.sh`) is frozen and run as it is. `runtime.interpreter` names what
-  runs it (`sh`, `powershell`, `python`).
+- `runtime.entry` — a `bin/<name>` path means "compile this" (`nulya ext init
+  --zig` scaffolds one); anything under `src/` is frozen and run as it is.
+  `runtime.interpreter` names what runs it (`sh`, `powershell`, `python`). Both
+  may be written per OS — `{"windows": "src/run.ps1", "default": "src/run.sh"}`
+  — so one version runs everywhere.
+- `runtime.wire` — `"plain"` (above) or `"jsonrpc"` (the default: one JSON-RPC
+  request in on stdin, one response out). `nulya ext api` prints both contracts.
 - `contributes.tools[]` — `{name, description, input, timeout_ms?}`. `input` is
   the JSON Schema the model sees. This manifest is the only source of truth for
   a tool's shape.
 - `contributes.skills[]` — directories holding a `SKILL.md`.
-- `contributes.system_prompts[]` — files that join every session's system blocks
-  once this version is active.
-- `permissions` — declarative today. `nulya ext api permissions` says exactly
-  what is and is not enforced.
+- `contributes.system_prompts[]` — files that join a session's system blocks.
+  A package that has these is registered by activation and worn per session
+  with `--with`, unless it says `"activation": "always"`.
+- `nulya ext api permissions` lists every other field, grouped by who reads it.
 
-The wire contract is one JSON-RPC request in on stdin, one response out on
-stdout, then exit. `nulya ext api` prints the exact source. A tool receives its
-arguments, a working directory and a sanitized environment — never the
-conversation; it cannot read or append to the session. It is killed at 30s
-unless the manifest raises `timeout_ms` (600000 maximum).
+A tool receives its arguments, a working directory and a sanitized environment
+— never the conversation; it cannot read or append to the session. On the
+model's tool face a call is killed at 30s unless the manifest raises
+`timeout_ms` (600000 maximum); `nulya ext run` applies no timeout unless given
+`--timeout-ms`.
 
 **Getting a tool onto the model's tool face is a separate decision from
 versions.** Only a pin does it — `[registry] pinned_native_tools` or `nulya

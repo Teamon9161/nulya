@@ -471,18 +471,18 @@ export function App(props: AppProps) {
   }
 
   /**
-   * Take back standing pins the kernel can no longer resolve — before the first
-   * message, not when somebody happens to open `/ext`.
+   * Take back standing pins this front end should no longer hold — before the
+   * first message, not when somebody happens to open `/ext`.
    *
-   * `session new --pin` naming an extension that is not in the composition is
-   * not a missing tool, it is `PinNamesUnknownExtension` and the session does
-   * not start (`cli/session.zig`). `/ext` has repaired this list since T12, but
-   * only while its panel was up, so a `tui-state.json` that went stale — a
-   * package deactivated elsewhere, or the `on_request` pins this front end used
-   * to write itself (`standingPinsOf`) — met the person as a front end that
-   * could not open a session at all, explaining itself in one clipped status
-   * line. This list is our own program state; dropping a line out loud is the
-   * honest repair, and the same one `ExtView.dropOrphanPins` makes.
+   * Two kinds of stale line. A pin whose package has no `current` any more: a
+   * pin brings its package in (DESIGN §5.1), and with nothing to bring the
+   * session does not start (`WithVersionNotFound`, `cli/session.zig`). And a pin
+   * on an `on_request` package — which this front end used to write itself —
+   * that the kernel now honours by wearing the mode in EVERY session
+   * (`standingPinsOf`), which is worse than refusing. `/ext` has repaired this
+   * list since T12, but only while its panel was up. The list is our own
+   * program state; dropping a line out loud is the honest repair, and the same
+   * one `ExtView.dropOrphanPins` makes.
    */
   const healStandingPins = (listed: readonly ExtensionEntry[]) => {
     const pins = sessionPins(props.statePath)
@@ -1138,10 +1138,10 @@ export function App(props: AppProps) {
    *
    * Membership and pins are separate axes everywhere else (DESIGN §7.5), and
    * for a worn package they cannot be: an `activation: "on_request"` package is
-   * a member of exactly this session, so a pin naming its tool is legal in
-   * exactly this argv and refused in every standing list (`standingPinsOf`).
-   * Written anywhere else it does not cost a tool — it costs the session, which
-   * is the bug this pairing exists to end.
+   * a member of exactly this session, so a pin naming its tool belongs in
+   * exactly this argv and in no standing list (`standingPinsOf`). Written there
+   * instead it would not cost a tool — it would wear the mode in every session,
+   * which is the bug this pairing exists to end.
    *
    * A package that cannot be read costs nothing: the session starts with the
    * member and without the pins, which is what wearing it meant before its

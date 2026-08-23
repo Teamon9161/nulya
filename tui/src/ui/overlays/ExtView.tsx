@@ -177,9 +177,11 @@ export interface ToolRow {
  * Every tool an active extension declares, with the state each one is in.
  *
  * Only extensions with an ACTIVE, un-shadowed version whose activation composes
- * them into EVERY session are here: a pin naming anything else is refused by
- * `session new` (`PinNamesUnknownExtension`), so offering it would be offering
- * a session that will not start.
+ * them into EVERY session are here. A pin on a package with no `current` is
+ * refused by `session new` (a pin brings its package in, and there is nothing
+ * to bring), and a standing pin on an `on_request` package would wear that mode
+ * in every session (`standingPinsOf`) — neither is something a checkbox should
+ * offer.
  */
 export function toolRows(
   extensions: readonly ExtensionEntry[],
@@ -189,10 +191,10 @@ export function toolRows(
   const rows: ToolRow[] = []
   for (const entry of extensions) {
     if (!entry.current || entry.shadowed) continue
-    // Registered, not composed in: its tools cannot hold a standing pin, so a
-    // checkbox here would offer a session that refuses to open
-    // (`standingPinsOf`). `dropOrphanPins` reads this same list, which is what
-    // takes such a pin back off an existing `tui-state.json`.
+    // Registered, not composed in: a standing pin would wear this mode in
+    // every session, so no checkbox here (`standingPinsOf`). `dropOrphanPins`
+    // reads this same list, which is what takes such a pin back off an
+    // existing `tui-state.json`.
     if (entry.activation === "on_request") continue
     for (const tool of entry.tools) {
       const id = toolId(entry.id, tool)
@@ -545,9 +547,9 @@ export function ExtView(props: {
   /**
    * Pins on this TUI's list that no active extension can resolve any more.
    *
-   * A `session new --pin` naming an inactive extension is refused outright
-   * (`PinNamesUnknownExtension`), so a stale line here does not cost a tool — it
-   * costs the whole session. This list is our own program state, so the honest
+   * A `session new --pin` naming a package with no `current` is refused
+   * outright (the pin brings its package in, and there is nothing to bring), so
+   * a stale line here does not cost a tool — it costs the whole session. This list is our own program state, so the honest
    * repair is to drop it, out loud, rather than to keep offering a session that
    * will not open.
    */

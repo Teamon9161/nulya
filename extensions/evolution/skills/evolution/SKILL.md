@@ -143,22 +143,23 @@ provably cannot do it.
 A script extension draft, which needs no toolchain:
 
 ```bash
-nulya ext init --script my.helper do_thing      # draft in .nulya/extensions/my.helper
-# edit src/run.sh (or run.ps1): read one JSON-RPC request on stdin, write one response
+nulya ext init my.helper do_thing               # draft in .nulya/extensions/my.helper
+# edit src/run.sh (and src/run.ps1 for Windows): arguments arrive as NULYA_ARG_<key>
 nulya ext build .nulya/extensions/my.helper     # prints v-<hash>
 nulya ext activate my.helper v-<hash>           # only if the report says why
 ```
 
-The script contract is one request in, one response out:
+The script contract (`"wire": "plain"`, what `ext init` scaffolds): stdin holds
+the call's arguments as one JSON object, each simple argument is also
+`NULYA_ARG_<key>`, whatever the script prints is the result, and a non-zero exit
+fails the call:
 
 ```sh
 #!/bin/sh
-request=$(cat)                      # {"jsonrpc":"2.0","id":1,"method":"tool/call","params":{...}}
-id=$(printf '%s' "$request" | sed 's/.*"id":\([0-9]*\).*/\1/')
-printf '{"jsonrpc":"2.0","id":%s,"result":{"text":"…"}}' "$id"
+printf 'hello %s\n' "${NULYA_ARG_name:-world}"
 ```
 
-`nulya ext api` prints the real protocol source if you need the exact shape.
+`nulya ext api` prints both wire contracts if you need the exact shape.
 
 For a knowledge proposal there is no extension at all: edit the relevant
 `SKILL.md` or notes file, and record in the report which file and why.

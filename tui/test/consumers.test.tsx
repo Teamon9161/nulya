@@ -231,8 +231,8 @@ test.skipIf(!has_zig)("plan is a mode and ask is a capability, and their manifes
  * cannot be: `plan` says `activation: "on_request"`, so it is a member of
  * exactly the session that names it, and a pin for its tool has nowhere to live
  * except the same argv. Written into a standing list instead — which is what
- * `/ext`'s switch used to do — it is `PinNamesUnknownExtension` and NO session
- * opens at all.
+ * `/ext`'s switch used to do — it would now wear `plan` in EVERY session (a pin
+ * brings its package in), so no standing list gets it.
  *
  * So this drives the real keystrokes: `/with plan` on a draft, then a message,
  * and asks the kernel what it froze.
