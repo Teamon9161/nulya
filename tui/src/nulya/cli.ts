@@ -171,9 +171,10 @@ export interface NewSessionOptions {
    */
   pin?: readonly string[]
   /**
-   * `--bare`: compose from these flags alone, ignoring the config's standing
-   * `[extensions] with` and `registry.pinned_native_tools` (DESIGN §14). What a
-   * delegated sub-agent session gets, whose whole capability list is its own
+   * `--bare`: compose from these flags alone, ignoring activated
+   * `activation:"always"` packages plus config's standing `[extensions] with`
+   * and `registry.pinned_native_tools` (DESIGN §14). What a delegated
+   * sub-agent session gets, whose whole capability list is its own
    * definition — `extensions/agent`'s `render` returns it, so the TUI passes
    * through whatever that says rather than deciding here.
    */
