@@ -688,6 +688,8 @@ export interface ExtensionEntry {
   current: string | null
   versions: ExtensionVersion[]
   kind: ImplementationKind
+  /** Manifest activation lifecycle; absent reads as on_request. */
+  activation: PackageActivation
   tools: string[]
   /** The declared pin-surface subset of `tools` (DESIGN §7.2.1). */
   pinTools: string[]
@@ -728,7 +730,7 @@ function stringList(value: unknown): string[] {
 
 function manifestFacts(manifest: Record<string, unknown> | null): Pick<
   ExtensionEntry,
-  "kind" | "tools" | "pinTools" | "withTools" | "driverTools" | "skills" | "systemPrompts" | "commands" | "ui"
+  "kind" | "activation" | "tools" | "pinTools" | "withTools" | "driverTools" | "skills" | "systemPrompts" | "commands" | "ui"
 > {
   const runtime = manifest?.["runtime"] as Record<string, unknown> | undefined
   // `runtime.entry` is a string, or an object keyed by OS for a script that
