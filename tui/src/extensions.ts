@@ -490,13 +490,12 @@ export function pinsOf(what: Pick<Contributions, "id" | "tools" | "pinTools" | "
 }
 
 /**
- * The `/<id>` a package that contributes a SYSTEM PROMPT gets for free — "wear
- * this for the next session" — or null when it neither is one nor can be named
- * that way (M4).
+ * The `/<id>` an on-request SYSTEM PROMPT package gets for free — "wear this
+ * for the next session" — or null for an always package and non-prompt packages.
  *
- * The manifest does not have to declare it. A mode's whole shape already says
- * what typing its name would do: `--with <id>` is the only sensible verb for a
- * package whose contribution is a prompt, and a `commands` entry saying exactly
+ * The manifest does not have to declare it. An on-request mode's whole shape
+ * already says what typing its name would do: `--with <id>` is the sensible
+ * per-session verb for a prompt package, and a `commands` entry saying exactly
  * that was ceremony every such package had to copy. What a package still
  * declares is anything OTHER than the obvious — `ask` is a tool package, so
  * `/ask` is a real claim it makes; `plan` is a mode, so `/plan` needs no line
@@ -508,9 +507,9 @@ export function pinsOf(what: Pick<Contributions, "id" | "tools" | "pinTools" | "
  * row a built-in already holds, and this row goes through it like any other.
  */
 export function derivedCommand(
-  what: Pick<Contributions, "id" | "systemPrompts" | "commands">,
+  what: Pick<Contributions, "id" | "activation" | "systemPrompts" | "commands">,
 ): PackageCommand | null {
-  if (what.systemPrompts.length === 0) return null
+  if (what.systemPrompts.length === 0 || what.activation === "always") return null
   if (!/^[a-z0-9-]+$/.test(what.id)) return null
   // The package's own entry of the same name wins: a declaration is more
   // specific than a derivation, and it may well mean something else by it.
@@ -526,16 +525,11 @@ export function derivedCommand(
  * Does turning this package on in `/ext` also mean composing it — a standing
  * entry in `tui-state.json`'s `standing_with`?
  *
- * `false` for a package that contributes a SYSTEM PROMPT (T1, ext-review-2
- * §3b): wearing that prompt in EVERY session this front end opens is almost
- * never what pressing Enter on a mode means, and writing it silently is what
- * used to force a scary "reaches every session" sentence just to say what
- * Enter had done. Its `current` still moves (`switchOn`), and `derivedCommand`
- * gives it a `/<id>` that wears it for one session at a time — that is the
- * command Enter's notice now points to. Standing membership for a mode is
- * still reachable, just not from here: `[extensions] with` in config, or
- * `tui.toml`'s `session_with`, are the person's explicit, rare way to say a
- * prompt belongs in every session.
+ * `false` for every package that contributes a SYSTEM PROMPT. Its manifest
+ * now decides the two useful cases without a second TUI state bit:
+ * activation:"always" + current gives standing membership, while on_request
+ * gets a derived `/<id>` command for one-session wear. Writing standing_with
+ * here would duplicate either decision.
  *
  * Otherwise `true` exactly when the package contributes something a session
  * can only get by being a MEMBER of it: skills, slash commands, a front-end
@@ -598,10 +592,9 @@ export function seedBundled(ws: Workspace): Promise<SeedReport> {
  * what the build pass produced, and put the std tools on this TUI's pin list.
  *
  * Which ones get activated used to be a list of two names, then a rule about
- * system prompts. It is now every id that arrived: activating one says which
- * version it means and composes nothing (DESIGN §5.1), so there is no longer a
- * package this pass could switch on to somebody's cost. What a session actually
- * carries is `[extensions] with` and `/ext`'s Enter — a person's lines.
+ * system prompts. It is every bundled id that arrived. Bundled manifests default
+ * to on_request unless they explicitly say always, so adding a future always
+ * package is an intentional choice to make activation carry standing reach.
  *
  * Returns the parts of the sentence the status line will say.
  */
