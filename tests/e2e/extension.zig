@@ -641,7 +641,7 @@ test "cli: NULYA_HOME extensions are visible to ext list / skill list / ext run,
     }
 }
 
-test "cli: activating into the user store from inside a session says so on stderr — what it changes is what the id MEANS, machine-wide" {
+test "cli: activation always joins future non-bare sessions and is visible in ext list" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -660,12 +660,12 @@ test "cli: activating into the user store from inside a session says so on stder
     defer alloc.free(home_abs);
     const home_env: EnvPair = .{ .key = "NULYA_HOME", .value = home_abs };
 
-    // A data package (no runtime, no toolchain) whose only contribution is a
-    // system prompt — the contribution with the widest blast radius there is.
+    // Data-only, always-on, and positioned: one fixture exercises both new
+    // manifest axes through the real build path.
     const draft = ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "prompts.demo";
     try ws.createDirPath(io, draft ++ std.fs.path.sep_str ++ "prompts");
     try ws.writeFile(io, .{ .sub_path = draft ++ std.fs.path.sep_str ++ "extension.json", .data =
-        \\{"schema":"nulya.extension/v2","id":"prompts.demo","contributes":{"system_prompts":["prompts/tone.md"]}}
+        \\{"schema":"nulya.extension/v2","id":"prompts.demo","activation":"always","contributes":{"system_prompts":[{"path":"prompts/tone.md","position":"late"}]}}
     });
     try ws.writeFile(io, .{ .sub_path = draft ++ std.fs.path.sep_str ++ "prompts" ++ std.fs.path.sep_str ++ "tone.md", .data = "Answer tersely.\n" });
 
@@ -675,8 +675,9 @@ test "cli: activating into the user store from inside a session says so on stder
     const version = try extractVersion(alloc, built.stdout);
     defer alloc.free(version);
 
-    // From inside a session, `--user` reaches out of this workspace: the model is
-    // allowed to do it, but not invisibly.
+    // From inside a session, --user reaches machine-wide state and says the
+    // conditional reach of activation=always instead of pretending every
+    // activation has that effect.
     {
         const stderr = try runCliStderr(alloc, io, ws, &.{ exe_abs, "ext", "activate", "--user", "prompts.demo", version }, &.{
             home_env,
@@ -686,10 +687,7 @@ test "cli: activating into the user store from inside a session says so on stder
         const expected = try std.fmt.allocPrint(alloc, "note: activating prompts.demo@{s} in the user store from inside session s-probe: prompts.demo now means this version for every workspace on this machine", .{version});
         defer alloc.free(expected);
         try std.testing.expect(std.mem.indexOf(u8, stderr, expected) != null);
-        // What it does NOT say any more, because it is no longer true: activating
-        // composes nothing (DESIGN §5.1). Only `[extensions] with` and `--with`
-        // put a package's prompt in front of a session.
-        try std.testing.expect(std.mem.indexOf(u8, stderr, "every future session") == null);
+        try std.testing.expect(std.mem.indexOf(u8, stderr, "activation=always") != null);
     }
 
     // Outside a session there is nobody to tell, so nothing is said.
@@ -699,12 +697,31 @@ test "cli: activating into the user store from inside a session says so on stder
         try std.testing.expect(std.mem.indexOf(u8, stderr, "note: activating") == null);
     }
 
-    // And the listing marks the package as one that contributes a system prompt.
+    // A normal fresh session discovers the current always package without
+    // --with; --bare is the explicit escape hatch and remains argv-only.
+    {
+        const made = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" }, &.{home_env});
+        defer alloc.free(made.stdout);
+        try std.testing.expectEqual(@as(u8, 0), made.code);
+        const id = std.mem.trim(u8, made.stdout, " \r\n");
+        const header = try support.readSessionFile(alloc, io, ws, id);
+        defer alloc.free(header);
+        try std.testing.expect(std.mem.indexOf(u8, header, "prompts.demo") != null);
+    }
+    {
+        const made = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--bare" }, &.{home_env});
+        defer alloc.free(made.stdout);
+        try std.testing.expectEqual(@as(u8, 0), made.code);
+        const id = std.mem.trim(u8, made.stdout, " \r\n");
+        const header = try support.readSessionFile(alloc, io, ws, id);
+        defer alloc.free(header);
+        try std.testing.expect(std.mem.indexOf(u8, header, "prompts.demo") == null);
+    }
+
     const list = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "list" }, &.{home_env});
     defer alloc.free(list.stdout);
-    try std.testing.expect(std.mem.indexOf(u8, list.stdout, "[prompt]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, list.stdout, "[prompt]\t[always]") != null);
 }
-
 test "cli: a workspace store that arrived with a checkout is refused until `ext trust`; one this machine built is trusted by birth" {
     // DESIGN §9. `.nulya/extensions` is checkout content AND the first store root,
     // so cloning a repo used to be enough to put its active versions into every
