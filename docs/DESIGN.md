@@ -217,18 +217,39 @@ session 开始时一次选定，整场冻结（`composition.zig` `SessionComposi
 
 只有这两条 fresh native 入口。**usage 自己绝不改 `tools[]`**——journal 是证据，晋升是有人写下一条 pin（§5.5），或有人把一个带 `surface:"with"` 工具的包列为成员。
 
-**成员（membership）是另一根轴，形状与 pin 逐位对称**：一个包进这一场的 composition（skills 进 catalog、system prompts 进 system blocks、tools 经 CLI 可调；其中 `surface:"with"` 的 tools 也进 native 面）只有两种来路，同义、并集、后者胜——config 的 **`[extensions] with = ["<id>", …]`**（这个 workspace 的每一场；project 层也可以写，理由与 `pinned_native_tools` 同——它只能在这台机器**已经持有且已经信任**的包里挑，不像 `extensions.paths` 那样决定哪些目录可以供出代码，§9.5）与 **`session new --with <id>[@<version>]`**（这一场）。config 在前、argv 在后，所以命令行点名同一个 id（通常带版本）会覆盖常驻那条。
+**成员（membership）是另一根轴。** 一个包进这一场的 composition（skills
+进 catalog、system prompts 进 system blocks、tools 经 CLI 可调）有四条来源，按
+“自动默认 → 人的显式覆盖”组合：
 
-**两根轴的 2×2 是全部：**
+1. 生效中的 `current` 版本若 manifest 显式写 `activation:"always"`，普通 fresh
+   session 自动把它收为成员；缺省 / `"on_request"` 不 discovery。
+2. config `[extensions] with = ["<id>", …]` 是 workspace 的显式 standing membership。
+3. `session new --with <id>[@<version>]` 是这一场的显式 membership；同 id 的后写
+   版本覆盖前面的 discovery/config 选择。
+4. pin 蕴含自己的 package membership，但不额外展开 on-request 包的
+   `surface:"with"` tools。
 
-| | 每一场（config） | 这一场（argv） |
+**工具面仍是独立轴**：
+
+| | standing | 这一场 |
 |---|---|---|
-| 成员 | `[extensions] with` | `session new --with` |
-| 工具面 | `[registry] pinned_native_tools` | `session new --pin` |
+| 成员 | `activation:"always"` + current；`[extensions] with` | `session new --with` |
+| pin 工具面 | `[registry] pinned_native_tools` | `session new --pin` |
 
-**`nulya ext activate` 不在这张表上。** 它只回答"`<id>` 现在指哪个版本"——`current` 是一个指针，一场 session 都不改变。从前它还回答第二个问题（"要不要进此后的每一场"）：fresh 路有一趟 discovery，把每个有 `current` 的包都收成成员。那趟 discovery **已删**（`composition.resolveActiveExtensions` 不存在了），连同它逼出来的那个 manifest 字段 `activation`——reach 是人的决定，不是包作者的（physics #6），而 pin 蕴含成员之后包作者那个 bit 也已经拦不住任何东西（config 里一条 `pinned_native_tools = ["ext:plan/propose"]` 就把它带进每一场）。老 manifest 写了 `activation` 的：`parse` 当未知键忽略，`ext build` / `ext sync` 在 stderr 提一行。
+`nulya ext activate` 永远先做同一件机械动作：移动 `current`。manifest 缺省
+`activation:"on_request"` 时到此为止；只有显式 `"always"` 才让这个 current
+同时成为后续普通 fresh session 的 standing member。这样 mode 默认仍是 opt-in，
+而 policy/identity 这类作者明确声明全局生命周期的包可以做到“activate 即生效”。
+当前 session 已冻结，activate 不会改它；deactivate 删除 current，always membership
+也随之从下一场消失。
 
-**`session new --bare`** 两张 config 表都不读，composition 只来自 argv（`--with` / `--pin` / `--prompt`）加 pin 蕴含。`max_tools` 照读——它是天花板不是选择。header 不记这个 flag（resume 读 header 冻的成员与 pins，本来就不重推）。用它的是 `extensions/agent` 委派出的子场：定义里的 `pins` 就是它的全部工具面，而两张常驻表是**人**对自己每一场说的话（§7.8）。
+**`session new --bare`** 抑制全部 standing composition：不 discovery
+`activation:"always"` 的 current，也不读 config 的 `[extensions] with` 与
+`pinned_native_tools`；composition 只来自 argv（`--with` / `--pin` /
+`--prompt`）加 pin 蕴含。 `max_tools` 照读——它是天花板不是选择。header 不记
+这个 flag（resume 读 header 已冻结的成员与 native ids，本来就不重推）。第一个
+consumer 仍是 `extensions/agent` 委派出的子场：定义里的 pins/with 就是它明确
+要求的能力，不会被用户机器上的 always mode/policy 悄悄带进去。
 
 第 1 档（那一个 builtin 的定义）与 kernel system prompt（§7.5）都是**二进制的编译期常量**，不由 header 冻结——所以它们的 hash 与 build 版本串一起记进 header 的 `nulya` stamp（§3.4），换了二进制 resume 时会警告。
 
@@ -278,7 +299,7 @@ version-aware evidence / lineage / verify 见 PLAN §3.5。
 
 ### 5.6 System blocks 的三个来源
 
-`PromptIR.system_blocks` 在 session 开始一次冻结（`composition.buildSystemPrompts`），顺序固定 **kernel → extension → inline → `skills:catalog`**：
+`PromptIR.system_blocks` 在 session 开始一次冻结（`composition.buildSystemPrompts`），顺序固定 **kernel → early extension → normal extension → inline → `skills:catalog` → late extension**：
 
 | block | 来源 | 生命周期 | `source` |
 |---|---|---|---|
@@ -286,6 +307,12 @@ version-aware evidence / lineage / verify 见 PLAN §3.5。
 | extension | 成员包 manifest 的 `contributes.system_prompts`（activate 或 `--with`） | 跟着那个**冻结版本** | `ext:<id>@<v>/<path>` |
 | inline | `session new --prompt <file>`，创建时读字节冻进 header（§3.4） | **只有这一场** | CLI 给的 basename 去扩展名 |
 | skills catalog | 冻结 skill 集的渐进披露文本（§7.7） | 跟着成员 | `skills:catalog` |
+
+`contributes.system_prompts` 保留字符串写法（= `position:"normal"`），也接受
+`{"path":"prompts/x.md","position":"early|normal|late"}`。position 是**序列化位置，
+不是 authority**：extension 不能跑到 kernel 前；`late` 才在 catalog 后。每个
+position 内继续按 extension id 排序，同一 manifest 内按声明顺序，activate/install
+先后永不进入排序，所以同一 composition 的 system blocks 是确定的。
 
 **尺子：这段文本有没有独立于某一场 session 的生命周期。** 有（装得上、activate 得了、回滚有意义——`evolution` / `plan` / `handoff`）→ 它是个 extension；没有（一个 sub-agent 的 persona 正文、一份只发给这一场的 brief）→ 它是 `--prompt`。把后者做成 extension 的代价实测过：per-session 文本变成安装物，出现在 `ext list` 里，而 `ext prune` 能把某一场赖以 resume 的身份文本删掉。
 
@@ -369,7 +396,10 @@ extension 装在**多个 store root** 里，按固定顺序搜索（`extension/r
 
 - **同一个 id 在多个 root → 首个持有 active 版本（有 `current`）的 root 胜**（workspace 遮蔽 user）。"持有"看 `current` 不看目录：一个只有 `<id>/` 目录、没有 `current` 的 root（draft、或已 `deactivate` 的副本）**不参与遮蔽**——否则在 workspace `deactivate` 会静默藏起 user 那份而不是让它生效。同一定义贯穿 `Roots.listActive`（composition / `skill list`）、`Roots.firstActive`（`ext run`、`--with` 不带版本、`ext deactivate` 的落点）与 `ext list` 的 `(shadowed)` 标记；`ext deactivate` 作用于生效的那份，若因此让后面 root 的副本顶上来会打印一行 note。
 - **frozen 版本按 root 顺序找**（`initFrozen`、`skill load` 的 frozen ref、`ext run <id>@<version>` 的 entry）：version 是内容寻址的，integrity 照验，所以顺序只决定"在哪找到"，从不决定"跑什么"。精确地说：data / script 版本的 id 就是 snapshot 的 hash，任意 root 的副本**严格**同字节；compiled 版本的 id 是 `snapshot + compiler + target` 的 hash，二进制 digest 只进 seal 不进 id，所以"两个 root 各自编出的同 id 副本同字节"是**可复现构建不变量**（同源、同编译器、同 target），不是数学保证——不为此重构 build identity，只是别把它当定理。
-- **`--user` 从 session 里跑会说一句。** `ext activate|rollback --user` 在 `NULYA_SESSION` 存在时（= 模型经 `shell` 调的），动手前往 **stderr** 打一行 `note: activating <id>@<version> in the user store from inside session <sid>: it becomes active for every workspace on this machine`，该版本若声明了 system_prompts 再接 ` and its system prompt enters every future session`。**照做，不拦**：模型有权这么做，在内核的外壳里长出一条 policy 才是错的；不许的是**悄悄**这么做。不带 `--user`、或不在 session 里，一个字不说。
+- **`--user` 从 session 里跑会说一句。** `ext activate --user` 在
+  `NULYA_SESSION` 存在时往 stderr 点名它改的是 machine-wide current，并明确说：
+  若该版本 manifest 声明 `activation=always`，后续 non-bare session 会自动包含它。
+  这只是可见性，不拦操作；真正是否 always 仍只由 composition 读取冻结 manifest 判断。
 - **写端的落点：`activate` / `rollback` 作用于该 id 生效中的那个 root**（`Roots.firstActive`）：在那里激活才真的生效；在被遮蔽的 root 里激活会"成功"却改变不了任何 session 看到的东西。所以要激活的版本若不在生效 root 里 → 明确失败（并指出它建在哪个 root、可用 `--user` 显式打到 user store）；只有当该 id **在任何 root 都没有 active 副本**时才按 `firstWithVersion` 找首个持有该 built 版本的 root。操作完成后重新算一次 `firstActive`：只有生效的 `{root, version}` 真的是目标时才向 live session 投 capability_note（§5.3），否则打印 `note: not in effect — <id>@<v> in <root> shadows it`（`--user` 显式打进被遮蔽的 root 时会遇到）。`deactivate` 同样作用于生效的那份。
 - **每个 `<id>/` 的变更都在 `<root>/<id>/.lock` 下进行**（`Store.lease`：build 写 `versions/<v>`、activate / rollback 改 `current`、deactivate 删 `current`；阻塞式排他 advisory 锁，与 session 的 `<id>.lock` 同一原语）——user store 被这台机器上的每个 workspace 共写，两个进程同时 build / activate 同一个 id 不能互相撕对方的目录树或共用一个 `.current.tmp`。读端不拿锁：`current` 是原子 rename，版本目录靠 seal 校验。
 - **header 不记 root**（`active` 仍是 `{id, version}`）：记了就等于把一台机器的目录布局冻进会话，而那与"跑的是哪份字节"无关。
