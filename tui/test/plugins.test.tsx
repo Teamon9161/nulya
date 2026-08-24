@@ -10,7 +10,7 @@
  *              file that runs here is type-checked against `plugin-api.d.ts`
  *              by `tsc`, and is loaded from a frozen version by absolute path,
  *              exactly as a real package's would be.
- *  - `future`  declares `api: 2`. One warning, skipped, nothing else affected.
+ *  - `future`  declares the next API major. One warning, skipped, nothing else affected.
  *  - `broken`  a module that does not parse. Same treatment.
  *  - `nosy`    registers a card for a tool it does not declare (D11). Its
  *              `activate` throws, its registrations are rolled back, and the

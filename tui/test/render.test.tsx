@@ -15,6 +15,7 @@ import { testRender } from "@opentui/solid"
 import { Transcript, gapBefore } from "../src/ui/Transcript.tsx"
 import { CompositionCard } from "../src/render/cards/CompositionCard.tsx"
 import { PluginToolCard } from "../src/render/cards/PluginToolCard.tsx"
+import { diffStat } from "../src/plugins/surface.tsx"
 import { describeTool } from "../src/render/registry.ts"
 import type { PluginCard } from "../src/plugins/host.ts"
 import { App } from "../src/ui/App.tsx"
@@ -836,6 +837,46 @@ test("diff = collapsed hides a plugin diff", async () => {
   const frame = await editPluginFrame(collapsed)
   expect(frame).toContain("⌘ edit · src/emit.zig")
   expect(frame).not.toContain("pub const tail_bytes = 2048;")
+})
+
+test("a plugin card does not treat raw presentation as a diff", async () => {
+  const failed: ToolItem = {
+    ...edit_item,
+    key: "e6:c3:failed",
+    ok: false,
+    output: "freshness journal failed",
+  }
+  const failedCard: PluginCard = {
+    pkg: "std",
+    tool: "edit",
+    renderer: {
+      render: (view) => view.output.split("\n").map((line) => [{ text: line }]),
+    },
+  }
+  const frame = await frameOfNode(
+    () => (
+      <PluginToolCard
+        item={failed}
+        presentation={describeTool({ tool: failed.tool, args: failed.args, output: failed.output }, style.glyphs)}
+        card={failedCard}
+        revision={0}
+      />
+    ),
+    76,
+    24,
+    style,
+  )
+  expect(frame).toContain("1 line · failed")
+  expect(frame).not.toContain("+2 -1 · failed")
+})
+
+test("diff stats count only hunk body lines", () => {
+  expect(
+    diffStat({
+      kind: "diff",
+      patch: ["--- a/todo.txt", "+++ b/todo.txt", "@@ -1,2 +1,2 @@", "--- TODO", "+++counter", ""].join("\n"),
+    }),
+  ).toEqual({ added: 1, removed: 1 })
 })
 
 /**

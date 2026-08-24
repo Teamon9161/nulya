@@ -95,10 +95,15 @@ export function diffStat(surface: DiffSurface): DiffStat {
   }
   let added = 0
   let removed = 0
+  let inHunk = false
   for (const line of surface.patch.split("\n")) {
-    if (line.startsWith("+++") || line.startsWith("---")) continue
+    if (line.startsWith("@@")) {
+      inHunk = true
+      continue
+    }
+    if (!inHunk) continue
     if (line.startsWith("+")) added += 1
-    if (line.startsWith("-")) removed += 1
+    else if (line.startsWith("-")) removed += 1
   }
   return { added, removed }
 }

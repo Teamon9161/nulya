@@ -1,5 +1,5 @@
 /**
- * The nulya TUI plugin host API — version 1.
+ * The nulya TUI plugin host API — version 2.
  *
  * This file is THE CONTRACT. A package declares `contributes.ui.tui = {entry,
  * api}` in its manifest (DESIGN §7.2.1) — the block is keyed by front end, and
@@ -26,14 +26,14 @@
  *
  * `contributes.ui.tui.api` is a single number and it is the MAJOR version of
  * this file. The host loads a module only when that number equals the version it
- * implements (`api === 1` today); anything else is one warning line and a skip
+ * implements (`api === 2` today); anything else is one warning line and a skip
  * — the package's other contributions (tools, skills, prompts, commands,
  * policy, render hints) are unaffected, exactly as an agent definition this
  * build cannot read is skipped rather than fatal.
  *
  * Within a major version this file only ever GROWS: new optional fields, new
- * methods, new theme tokens. A plugin written against 1.0 keeps working
- * against 1.9. Anything that would break an existing plugin — a removed
+ * methods, new theme tokens. A plugin written against 2.0 keeps working
+ * against 2.9. Anything that would break an existing plugin — a removed
  * method, a changed argument order, a narrowed return — is a new major, and
  * then both numbers are honoured for as long as it is worth it: the host
  * knows which version a package declared, and that is the whole point of the
@@ -44,16 +44,14 @@
  * (`PluginKey.text`) or that method missing, which a plugin already has to
  * tolerate for any optional part of this file. What is here so far:
  *
- *   1.0  the whole of it, as U3 shipped it.
- *   1.1  `PluginKey.text` — the character a key produced, so a panel can accept
- *        typing; and `PluginActions.compact` — `/compact` on the front tab's
- *        session, which is how an approved plan continues in a session that no
- *        longer wears the persona that wrote it (`extensions/plan`).
+ *   2.0  rows, `PluginKey.text`, `PluginActions.compact`, and the transcript-card
+ *        `DiffSurface` primitive. Adding a union variant is a major-version
+ *        change because an older host cannot silently ignore it correctly.
  *
  * ── WHAT IS DELIBERATELY NOT HERE ─────────────────────────────────────────
  *
  * No component tree, no renderer, no reactive primitive. A plugin renders by
- * returning LINES (tui-plugin D9), which means there is no single-instance
+ * returning rows or host-owned card primitives (tui-plugin D9), which means there is no single-instance
  * problem, no version skew with a UI library, and nothing terminal-specific in
  * this contract beyond the idea of a fixed-width row. The host owns the frame,
  * the folding, the focus, the layout and the mapping from token to colour
@@ -200,10 +198,6 @@ export interface LineRenderer {
   onKey?(key: PluginKey): KeyResult
 }
 
-/** A renderer that may return a host-owned primitive such as a diff. */
-export interface SurfaceRenderer {
-  render(width: number): Surface
-}
 
 /** One tool call, as much of it as a card is allowed to see. */
 export interface CardView {

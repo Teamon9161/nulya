@@ -471,7 +471,7 @@ test("a package that contributes a system prompt never gets a standing with entr
   // command and a front-end module — none of them has a pin to arrive by.
   expect(standingWith(what({ skills: ["skills/guide"] }))).toBe(true)
   expect(standingWith(what({ commands: [{ name: "plan", description: "", action: { with: true } }] }))).toBe(true)
-  expect(standingWith(what({ ui: { entry: "tui/plan.ts", api: 1 } }))).toBe(true)
+  expect(standingWith(what({ ui: { entry: "tui/plan.ts", api: 2 } }))).toBe(true)
   // A package with BOTH a prompt and a skill: the prompt exclusion wins —
   // Enter still never writes it standing, whatever else it contributes.
   expect(standingWith(what({ systemPrompts: ["prompts/identity.md"], skills: ["skills/guide"] }))).toBe(false)

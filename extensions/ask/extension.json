@@ -28,6 +28,6 @@
       "description": "give the next session alone a way to ask you a question (/ext keeps it on for every session)",
       "action": { "with": true }
     }],
-    "ui": { "tui": { "entry": "tui/ask.ts", "api": 1 } }
+    "ui": { "tui": { "entry": "tui/ask.ts", "api": 2 } }
   }
 }

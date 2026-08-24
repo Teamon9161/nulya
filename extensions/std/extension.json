@@ -97,7 +97,7 @@
       }
     ],
     "ui": {
-      "tui": { "entry": "tui/std.ts", "api": 1 }
+      "tui": { "entry": "tui/std.ts", "api": 2 }
     }
   }
 }

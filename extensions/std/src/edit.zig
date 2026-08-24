@@ -355,22 +355,61 @@ fn unifiedReplacementDiff(
     try out.writer.print("--- a/{s}\n+++ b/{s}\n", .{ shown_path, shown_path });
 
     if (!replace_all) {
-        try writeHunk(alloc, &out.writer, old_text, new_text, plan.at, plan.at, plan.old, plan.new);
+        const ranges = replacementHunkRanges(old_text, new_text, plan.at, plan.at, plan.old, plan.new);
+        try writeHunk(alloc, &out.writer, old_text, new_text, ranges);
         return out.toOwnedSlice();
     }
 
+    var ranges: std.ArrayList(HunkRanges) = .empty;
     var search: usize = 0;
     var offset_delta: isize = 0;
-    var emitted: usize = 0;
+    var found: usize = 0;
     while (std.mem.indexOfPos(u8, old_text, search, plan.old)) |at| {
         const new_at = addOffsetDelta(at, offset_delta);
-        try writeHunk(alloc, &out.writer, old_text, new_text, at, new_at, plan.old, plan.new);
-        emitted += 1;
+        try appendMergedHunkRange(alloc, &ranges, replacementHunkRanges(old_text, new_text, at, new_at, plan.old, plan.new));
+        found += 1;
         search = at + plan.old.len;
         offset_delta += lenDelta(plan.old.len, plan.new.len);
-        if (emitted == plan.count) break;
+        if (found == plan.count) break;
     }
+
+    for (ranges.items) |range| try writeHunk(alloc, &out.writer, old_text, new_text, range);
     return out.toOwnedSlice();
+}
+
+const HunkRanges = struct {
+    old: ByteRange,
+    new: ByteRange,
+};
+
+fn replacementHunkRanges(
+    old_text: []const u8,
+    new_text: []const u8,
+    old_at: usize,
+    new_at: usize,
+    old_chunk: []const u8,
+    new_chunk: []const u8,
+) HunkRanges {
+    const old_range = affectedLineRange(old_text, old_at, old_chunk.len);
+    const new_range = if (new_chunk.len == 0 and old_range.start == old_at and old_range.end == old_at + old_chunk.len)
+        ByteRange{ .start = new_at, .end = new_at }
+    else
+        affectedLineRange(new_text, new_at, new_chunk.len);
+    return .{ .old = old_range, .new = new_range };
+}
+
+fn appendMergedHunkRange(alloc: std.mem.Allocator, ranges: *std.ArrayList(HunkRanges), next: HunkRanges) !void {
+    if (ranges.items.len == 0) {
+        try ranges.append(alloc, next);
+        return;
+    }
+    const last = &ranges.items[ranges.items.len - 1];
+    if (next.old.start <= last.old.end and next.new.start <= last.new.end) {
+        last.old.end = @max(last.old.end, next.old.end);
+        last.new.end = @max(last.new.end, next.new.end);
+        return;
+    }
+    try ranges.append(alloc, next);
 }
 
 fn writeHunk(
@@ -378,20 +417,12 @@ fn writeHunk(
     w: *std.Io.Writer,
     old_text: []const u8,
     new_text: []const u8,
-    old_at: usize,
-    new_at: usize,
-    old_chunk: []const u8,
-    new_chunk: []const u8,
+    ranges: HunkRanges,
 ) !void {
-    const old_range = affectedLineRange(old_text, old_at, old_chunk.len);
-    const new_range = if (new_chunk.len == 0 and old_range.start == old_at and old_range.end == old_at + old_chunk.len)
-        ByteRange{ .start = new_at, .end = new_at }
-    else
-        affectedLineRange(new_text, new_at, new_chunk.len);
-    const old_lines = try text.lines(alloc, old_text[old_range.start..old_range.end]);
-    const new_lines = try text.lines(alloc, new_text[new_range.start..new_range.end]);
-    const old_start = lineNoAt(old_text, old_range.start);
-    const new_start = lineNoAt(new_text, new_range.start);
+    const old_lines = try diffLines(alloc, old_text[ranges.old.start..ranges.old.end]);
+    const new_lines = try diffLines(alloc, new_text[ranges.new.start..ranges.new.end]);
+    const old_start = lineNoAt(old_text, ranges.old.start);
+    const new_start = lineNoAt(new_text, ranges.new.start);
 
     try w.print("@@ -{d},{d} +{d},{d} @@\n", .{ old_start, old_lines.len, new_start, new_lines.len });
     try writeLineDiff(alloc, w, old_lines, new_lines);
@@ -419,7 +450,33 @@ fn lineNoAt(s: []const u8, at: usize) usize {
     return std.mem.count(u8, s[0..at], "\n") + 1;
 }
 
-fn writeLineDiff(alloc: std.mem.Allocator, w: *std.Io.Writer, old_lines: []const []const u8, new_lines: []const []const u8) !void {
+const DiffLine = struct {
+    text: []const u8,
+    ends_with_newline: bool,
+};
+
+fn diffLines(alloc: std.mem.Allocator, bytes: []const u8) ![]DiffLine {
+    var out: std.ArrayList(DiffLine) = .empty;
+    var rest = bytes;
+    while (rest.len != 0) {
+        const nl = std.mem.indexOfScalar(u8, rest, '\n') orelse {
+            try out.append(alloc, .{ .text = rest, .ends_with_newline = false });
+            break;
+        };
+        var line = rest[0..nl];
+        if (line.len != 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
+        try out.append(alloc, .{ .text = line, .ends_with_newline = true });
+        rest = rest[nl + 1 ..];
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+const max_diff_lcs_cells: usize = 1_000_000;
+
+fn writeLineDiff(alloc: std.mem.Allocator, w: *std.Io.Writer, old_lines: []const DiffLine, new_lines: []const DiffLine) !void {
+    if (lcsCellsWouldExceedBudget(old_lines.len, new_lines.len))
+        return writeFallbackLineDiff(w, old_lines, new_lines);
+
     const stride = new_lines.len + 1;
     const cells = try alloc.alloc(usize, (old_lines.len + 1) * stride);
     @memset(cells, 0);
@@ -431,7 +488,7 @@ fn writeLineDiff(alloc: std.mem.Allocator, w: *std.Io.Writer, old_lines: []const
         while (j > 0) {
             j -= 1;
             const here = i * stride + j;
-            if (std.mem.eql(u8, old_lines[i], new_lines[j])) {
+            if (diffLineEql(old_lines[i], new_lines[j])) {
                 cells[here] = 1 + cells[(i + 1) * stride + (j + 1)];
             } else {
                 cells[here] = @max(cells[(i + 1) * stride + j], cells[i * stride + (j + 1)]);
@@ -442,20 +499,53 @@ fn writeLineDiff(alloc: std.mem.Allocator, w: *std.Io.Writer, old_lines: []const
     i = 0;
     var j: usize = 0;
     while (i < old_lines.len and j < new_lines.len) {
-        if (std.mem.eql(u8, old_lines[i], new_lines[j])) {
-            try w.print(" {s}\n", .{old_lines[i]});
+        if (diffLineEql(old_lines[i], new_lines[j])) {
+            try writeDiffLine(w, ' ', old_lines[i]);
             i += 1;
             j += 1;
         } else if (cells[(i + 1) * stride + j] >= cells[i * stride + (j + 1)]) {
-            try w.print("-{s}\n", .{old_lines[i]});
+            try writeDiffLine(w, '-', old_lines[i]);
             i += 1;
         } else {
-            try w.print("+{s}\n", .{new_lines[j]});
+            try writeDiffLine(w, '+', new_lines[j]);
             j += 1;
         }
     }
-    while (i < old_lines.len) : (i += 1) try w.print("-{s}\n", .{old_lines[i]});
-    while (j < new_lines.len) : (j += 1) try w.print("+{s}\n", .{new_lines[j]});
+    while (i < old_lines.len) : (i += 1) try writeDiffLine(w, '-', old_lines[i]);
+    while (j < new_lines.len) : (j += 1) try writeDiffLine(w, '+', new_lines[j]);
+}
+
+fn lcsCellsWouldExceedBudget(old_len: usize, new_len: usize) bool {
+    if (old_len == std.math.maxInt(usize) or new_len == std.math.maxInt(usize)) return true;
+    const rows = old_len + 1;
+    const stride = new_len + 1;
+    return rows > max_diff_lcs_cells / stride;
+}
+
+fn writeFallbackLineDiff(w: *std.Io.Writer, old_lines: []const DiffLine, new_lines: []const DiffLine) !void {
+    var prefix: usize = 0;
+    while (prefix < old_lines.len and prefix < new_lines.len and diffLineEql(old_lines[prefix], new_lines[prefix])) : (prefix += 1) {}
+
+    var old_suffix = old_lines.len;
+    var new_suffix = new_lines.len;
+    while (old_suffix > prefix and new_suffix > prefix and diffLineEql(old_lines[old_suffix - 1], new_lines[new_suffix - 1])) {
+        old_suffix -= 1;
+        new_suffix -= 1;
+    }
+
+    for (old_lines[0..prefix]) |line| try writeDiffLine(w, ' ', line);
+    for (old_lines[prefix..old_suffix]) |line| try writeDiffLine(w, '-', line);
+    for (new_lines[prefix..new_suffix]) |line| try writeDiffLine(w, '+', line);
+    for (old_lines[old_suffix..]) |line| try writeDiffLine(w, ' ', line);
+}
+
+fn diffLineEql(a: DiffLine, b: DiffLine) bool {
+    return a.ends_with_newline == b.ends_with_newline and std.mem.eql(u8, a.text, b.text);
+}
+
+fn writeDiffLine(w: *std.Io.Writer, prefix: u8, line: DiffLine) !void {
+    try w.print("{c}{s}\n", .{ prefix, line.text });
+    if (!line.ends_with_newline) try w.writeAll("\\ No newline at end of file\n");
 }
 
 fn lenDelta(old_len: usize, new_len: usize) isize {
@@ -870,6 +960,71 @@ test "edit diff: deleting a complete line does not mark the following line as ad
             "-b\n",
         patch,
     );
+}
+
+test "edit diff: replace_all occurrences on one line share one hunk" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const old_text = "foo foo\n";
+    const plan = try expectPlan(alloc, old_text, "foo", "bar");
+    const new_text = try std.mem.replaceOwned(u8, alloc, old_text, plan.old, plan.new);
+    const patch = try unifiedReplacementDiff(alloc, "a.txt", old_text, new_text, plan, true);
+    try std.testing.expectEqualStrings(
+        "--- a/a.txt\n" ++
+            "+++ b/a.txt\n" ++
+            "@@ -1,1 +1,1 @@\n" ++
+            "-foo foo\n" ++
+            "+bar bar\n",
+        patch,
+    );
+}
+
+test "edit diff: adding the final newline is visible" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const old_text = "foo";
+    const plan = try expectPlan(alloc, old_text, "foo", "foo\n");
+    const new_text = try replaceOnceAt(alloc, old_text, plan);
+    const patch = try unifiedReplacementDiff(alloc, "a.txt", old_text, new_text, plan, false);
+    try std.testing.expectEqualStrings(
+        "--- a/a.txt\n" ++
+            "+++ b/a.txt\n" ++
+            "@@ -1,1 +1,1 @@\n" ++
+            "-foo\n" ++
+            "\\ No newline at end of file\n" ++
+            "+foo\n",
+        patch,
+    );
+}
+
+test "edit diff: large hunks use a bounded fallback" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var old_middle: std.ArrayList(u8) = .empty;
+    var new_middle: std.ArrayList(u8) = .empty;
+    try old_middle.appendSlice(alloc, "same-prefix\n");
+    try new_middle.appendSlice(alloc, "same-prefix\n");
+    for (0..1000) |i| {
+        try old_middle.print(alloc, "old-{d}\n", .{i});
+        try new_middle.print(alloc, "new-{d}\n", .{i});
+    }
+    try old_middle.appendSlice(alloc, "same-suffix\n");
+    try new_middle.appendSlice(alloc, "same-suffix\n");
+
+    const old_text = try std.mem.concat(alloc, u8, &.{ "before\n", old_middle.items, "after\n" });
+    const plan = try expectPlan(alloc, old_text, old_middle.items, new_middle.items);
+    const new_text = try replaceOnceAt(alloc, old_text, plan);
+    const patch = try unifiedReplacementDiff(alloc, "a.txt", old_text, new_text, plan, false);
+    try std.testing.expect(std.mem.indexOf(u8, patch, " same-prefix\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, patch, "-old-0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, patch, "+new-0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, patch, " same-suffix\n") != null);
 }
 
 test "edit plan: an LF old_string matches a CRLF file and the replacement keeps CRLF" {

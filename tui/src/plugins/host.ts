@@ -71,7 +71,7 @@ import type {
  * `contributes.ui.tui.api`; anything else is warn-and-skip (D10). One number,
  * and the reason it is a number rather than a word set is in the contract file.
  */
-export const plugin_api_version = 1
+export const plugin_api_version = 2
 
 /** Where a workspace store root is spelled in `ext list` output. */
 const workspace_root_spec = ".nulya/extensions"

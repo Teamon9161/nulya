@@ -58,6 +58,6 @@
         }
       }
     ],
-    "ui": { "tui": { "entry": "tui/plan.ts", "api": 1 } }
+    "ui": { "tui": { "entry": "tui/plan.ts", "api": 2 } }
   }
 }

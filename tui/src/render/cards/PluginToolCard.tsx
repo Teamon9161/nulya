@@ -48,7 +48,7 @@ export function PluginToolCard(props: {
       return { surface: [], failed: error instanceof Error ? error.message : String(error) }
     }
   })
-  const diff = () => diffSurfaceOf(props.item.presentation ?? null) ?? diffSurfaceOf(rendered().surface)
+  const diff = () => diffSurfaceOf(rendered().surface)
   const chip = () => {
     if (props.item.state === "pending") return "…"
     if (props.item.state === "running") return "running"
