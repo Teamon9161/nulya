@@ -344,6 +344,35 @@ pub const UiHost = struct {
     api: u32,
 };
 
+/// Whether activating this package also makes it a member of ordinary fresh
+/// sessions. Absent is deliberately `.on_request`: old manifests and modes
+/// stay opt-in unless the author explicitly asks for machine-wide reach.
+pub const Activation = enum {
+    always,
+    on_request,
+
+    pub fn fromString(value: []const u8) ?Activation {
+        if (std.mem.eql(u8, value, "always")) return .always;
+        if (std.mem.eql(u8, value, "on_request")) return .on_request;
+        return null;
+    }
+};
+
+/// Serialization position for one extension system-prompt block. This controls
+/// order only, never authority.
+pub const SystemPromptPosition = enum {
+    early,
+    normal,
+    late,
+
+    pub fn fromString(value: []const u8) ?SystemPromptPosition {
+        if (std.mem.eql(u8, value, "early")) return .early;
+        if (std.mem.eql(u8, value, "normal")) return .normal;
+        if (std.mem.eql(u8, value, "late")) return .late;
+        return null;
+    }
+};
+
 pub const Manifest = struct {
     arena: std.heap.ArenaAllocator,
     schema: []const u8,
@@ -352,6 +381,9 @@ pub const Manifest = struct {
     tools: []const ToolSpec,
     skills: []const []const u8,
     system_prompts: []const []const u8,
+    /// Parallel to `system_prompts`. A legacy string entry is `normal`;
+    /// an object entry may write `early`, `normal` or `late`.
+    system_prompt_positions: []const []const u8 = &.{},
     /// This package's slash commands (see `Command`). Absent reads as empty —
     /// same convention as `skills` / `system_prompts`.
     commands: []const Command = &.{},
@@ -365,17 +397,20 @@ pub const Manifest = struct {
     /// This package's front-end modules, one per host (see `UiHost`). Absent
     /// reads as empty — same convention as `skills` / `system_prompts`.
     ui: []const UiHost = &.{},
-    /// True when this manifest still writes the removed `activation` key.
-    ///
-    /// The key is an UNKNOWN key now, so parsing ignores it like any other and
-    /// nothing about the package changes. But a draft still carrying it was
-    /// written to mean something ("only the sessions that name me"), and that
-    /// meaning now lives in one place a package cannot reach: config's
-    /// `[extensions] with` (DESIGN §5.1) — reach is the person's decision, not
-    /// the author's. Silently ignoring the word would leave the author believing
-    /// their package still opts out, so `ext build` / `ext sync` say one line
-    /// about it. The only reader is that note; nothing in a session ever asks.
-    legacy_activation: bool = false,
+    /// When activation also makes this package a standing member. Kept as
+    /// written so an unknown word is a validate error. Absent = on_request.
+    activation: ?[]const u8 = null,
+
+    pub fn activationOf(self: Manifest) Activation {
+        const written = self.activation orelse return .on_request;
+        return Activation.fromString(written) orelse .on_request;
+    }
+
+    pub fn systemPromptPosition(self: Manifest, index: usize) SystemPromptPosition {
+        if (index >= self.system_prompt_positions.len) return .normal;
+        return SystemPromptPosition.fromString(self.system_prompt_positions[index]) orelse .normal;
+    }
+
     /// True when this manifest still writes the removed `permissions` key —
     /// `{fs, network, process}`, a claimed footprint the kernel parsed, froze,
     /// and never read. It was kept for a sandbox that does not exist yet, and
@@ -418,6 +453,10 @@ pub const Manifest = struct {
         if (!isValidId(self.id)) return error.InvalidId;
         if (self.tools.len == 0 and self.skills.len == 0 and self.system_prompts.len == 0 and
             self.commands.len == 0 and !policyContributes(self.policy) and self.ui.len == 0) return error.NoContributions;
+
+        if (self.activation) |written| {
+            if (Activation.fromString(written) == null) return error.InvalidActivation;
+        }
 
         if (self.runtime) |rt| {
             if (rt.entry.variants.len == 0) return error.InvalidEntry;
@@ -483,6 +522,9 @@ pub const Manifest = struct {
 
         for (self.system_prompts, 0..) |prompt_path, i| {
             if (!isSafeRelPath(prompt_path)) return error.InvalidSystemPromptPath;
+            if (i < self.system_prompt_positions.len and
+                SystemPromptPosition.fromString(self.system_prompt_positions[i]) == null)
+                return error.InvalidSystemPromptPosition;
             for (self.system_prompts[i + 1 ..]) |other| {
                 if (std.mem.eql(u8, prompt_path, other)) return error.DuplicateSystemPromptPath;
             }
@@ -556,10 +598,14 @@ pub const ValidateError = error{
     InvalidSurface,
     /// A legacy tool `audience` is a string, but not one of `model` / `driver`.
     InvalidAudience,
+    /// `activation` is a string, but not `always` / `on_request`.
+    InvalidActivation,
     InvalidSkillPath,
     DuplicateSkillPath,
     InvalidSystemPromptPath,
     DuplicateSystemPromptPath,
+    /// A system prompt object's `position` is not early / normal / late.
+    InvalidSystemPromptPosition,
     /// A command's `name` is empty or outside `[a-z0-9-]+`.
     InvalidCommandName,
     DuplicateCommandName,
@@ -604,7 +650,8 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!Manifest {
     const runtime = try dupRuntime(a, obj);
     const tools = try dupTools(a, contributes);
     const skills = try dupStringList(a, contributes, "skills");
-    const system_prompts = try dupStringList(a, contributes, "system_prompts");
+    const system_prompts = try dupSystemPrompts(a, contributes);
+    const activation = try optionalString(a, obj, "activation");
     var legacy_command_action = false;
     const commands = try dupCommands(a, contributes, &legacy_command_action);
     const policy = try readPolicy(contributes);
@@ -617,14 +664,14 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!Manifest {
         .runtime = runtime,
         .tools = tools,
         .skills = skills,
-        .system_prompts = system_prompts,
+        .system_prompts = system_prompts.paths,
+        .system_prompt_positions = system_prompts.positions,
         .commands = commands,
         .policy = policy,
         .ui = ui,
+        .activation = activation,
         // Unknown keys and folded old shapes, read for one purpose: `ext build`
-        // says a line about each (see the fields). Nothing composed from this
-        // manifest is affected by any of them.
-        .legacy_activation = obj.get("activation") != null,
+        // says a line about each (see the fields).
         .legacy_permissions = obj.get("permissions") != null,
         .legacy_command_action = legacy_command_action,
         .legacy_ui = legacy_ui,
@@ -951,6 +998,37 @@ fn dupStringOr(a: std.mem.Allocator, obj: std.json.ObjectMap, key: []const u8, d
         .string => |s| try a.dupe(u8, s),
         else => error.WrongType,
     };
+}
+
+const SystemPrompts = struct {
+    paths: []const []const u8,
+    positions: []const []const u8,
+};
+
+fn dupSystemPrompts(a: std.mem.Allocator, obj: std.json.ObjectMap) ParseError!SystemPrompts {
+    const list = switch (obj.get("system_prompts") orelse return .{
+        .paths = try a.alloc([]const u8, 0),
+        .positions = try a.alloc([]const u8, 0),
+    }) {
+        .array => |arr| arr,
+        else => return error.WrongType,
+    };
+    const paths = try a.alloc([]const u8, list.items.len);
+    const positions = try a.alloc([]const u8, list.items.len);
+    for (list.items, 0..) |value, i| {
+        switch (value) {
+            .string => |path| {
+                paths[i] = try a.dupe(u8, path);
+                positions[i] = "normal";
+            },
+            .object => |entry| {
+                paths[i] = try dupString(a, entry, "path");
+                positions[i] = (try optionalString(a, entry, "position")) orelse "normal";
+            },
+            else => return error.WrongType,
+        }
+    }
+    return .{ .paths = paths, .positions = positions };
 }
 
 fn dupStringList(a: std.mem.Allocator, obj: std.json.ObjectMap, key: []const u8) ParseError![]const []const u8 {
@@ -1347,44 +1425,41 @@ test "a tool's surface declares pin, with or driver placement and overrides lega
     ));
 }
 
-test "the removed `activation` key is ignored, whatever it says, and only flagged for a build note" {
+test "activation is explicit always or on_request, and silence is on_request" {
     const alloc = std.testing.allocator;
 
-    // A package that still writes it parses and validates exactly like one that
-    // does not. Which sessions it joins is not its decision any more: config's
-    // `[extensions] with` names the members, `--with` names them for one session
-    // (DESIGN §5.1), and both read the same `current` this key used to qualify.
-    var mode = try parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"evolution","activation":"on_request","contributes":{"system_prompts":["p.md"]}}
+    var always = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"policy","activation":"always","contributes":{"system_prompts":["p.md"]}}
     );
-    defer mode.deinit();
-    try mode.validate();
-    try std.testing.expect(mode.legacy_activation);
+    defer always.deinit();
+    try always.validate();
+    try std.testing.expectEqual(Activation.always, always.activationOf());
 
-    // Including a word the old enum would have refused: an unknown key has no
-    // vocabulary to be outside of, so `onrequest` is no more an error than
-    // `on_request` is — and neither is a wrong TYPE, which used to be one.
-    for ([_][]const u8{
-        \\{"schema":"nulya.extension/v2","id":"a","activation":"onrequest","contributes":{"skills":["s"]}}
-        ,
-        \\{"schema":"nulya.extension/v2","id":"a","activation":false,"contributes":{"skills":["s"]}}
-        ,
-    }) |src| {
-        var m = try parse(alloc, src);
-        defer m.deinit();
-        try m.validate();
-        try std.testing.expect(m.legacy_activation);
-    }
+    var requested = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"mode","activation":"on_request","contributes":{"system_prompts":["p.md"]}}
+    );
+    defer requested.deinit();
+    try requested.validate();
+    try std.testing.expectEqual(Activation.on_request, requested.activationOf());
 
-    // Silence is the ordinary case and says nothing at all — no default to
-    // infer from the package's shape, because there is no longer a question
-    // here for a shape to answer.
+    // Silence never turns an old manifest into machine-wide prompt injection.
     var quiet = try parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"b","contributes":{"system_prompts":["p.md"]}}
+        \\{"schema":"nulya.extension/v2","id":"quiet","contributes":{"system_prompts":["p.md"]}}
     );
     defer quiet.deinit();
     try quiet.validate();
-    try std.testing.expect(!quiet.legacy_activation);
+    try std.testing.expect(quiet.activation == null);
+    try std.testing.expectEqual(Activation.on_request, quiet.activationOf());
+
+    var typo = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","activation":"onrequest","contributes":{"skills":["s"]}}
+    );
+    defer typo.deinit();
+    try std.testing.expectError(error.InvalidActivation, typo.validate());
+
+    try std.testing.expectError(error.WrongType, parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","activation":false,"contributes":{"skills":["s"]}}
+    ));
 }
 
 test "rejects entry that escapes the extension dir" {
@@ -1442,6 +1517,34 @@ test "rejects invalid and duplicate system prompt paths" {
 }
 
 // --- tui-plugin U1: `commands` / `policy` / a tool's `ui` / the package `ui` -----
+
+test "system prompts accept legacy strings and positioned objects" {
+    const alloc = std.testing.allocator;
+    var m = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"prompts","contributes":{"system_prompts":["prompts/normal.md",{"path":"prompts/early.md","position":"early"},{"path":"prompts/late.md","position":"late"},{"path":"prompts/default.md"}]}}
+    );
+    defer m.deinit();
+    try m.validate();
+    try std.testing.expectEqual(@as(usize, 4), m.system_prompts.len);
+    try std.testing.expectEqualStrings("prompts/normal.md", m.system_prompts[0]);
+    try std.testing.expectEqual(SystemPromptPosition.normal, m.systemPromptPosition(0));
+    try std.testing.expectEqual(SystemPromptPosition.early, m.systemPromptPosition(1));
+    try std.testing.expectEqual(SystemPromptPosition.late, m.systemPromptPosition(2));
+    try std.testing.expectEqual(SystemPromptPosition.normal, m.systemPromptPosition(3));
+
+    var bad_position = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"prompts","contributes":{"system_prompts":[{"path":"p.md","position":"front"}]}}
+    );
+    defer bad_position.deinit();
+    try std.testing.expectError(error.InvalidSystemPromptPosition, bad_position.validate());
+
+    try std.testing.expectError(error.WrongType, parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"prompts","contributes":{"system_prompts":[{"path":42}]}}
+    ));
+    try std.testing.expectError(error.WrongType, parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"prompts","contributes":{"system_prompts":[{"path":"p.md","position":true}]}}
+    ));
+}
 
 test "round-trips commands, policy and ui, and a tool's ui hints" {
     const alloc = std.testing.allocator;
