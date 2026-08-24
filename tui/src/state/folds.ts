@@ -10,7 +10,7 @@ import { createStore, produce } from "solid-js/store"
 export interface FoldStore {
   isOpen(key: string, byDefault: boolean): boolean
   toggle(key: string, byDefault: boolean): void
-  /** Ctrl+Shift+O: force every known and future card one way. */
+  /** `/fold`: force every known and future card one way (collapse, in practice). */
   setAll(open: boolean): void
 }
 

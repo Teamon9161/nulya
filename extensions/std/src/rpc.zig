@@ -125,7 +125,7 @@ pub fn requireString(alloc: std.mem.Allocator, args: std.json.ObjectMap, key: []
 
 /// An optional non-negative integer argument. `null` / absent → null; anything
 /// that is not a non-negative integer → `error.BadType` (the caller turns it
-/// into a `-32602` naming the field).
+/// into a refusal naming the field).
 pub fn optionalUnsigned(args: std.json.ObjectMap, key: []const u8) error{BadType}!?u64 {
     return switch (args.get(key) orelse return null) {
         .null => null,

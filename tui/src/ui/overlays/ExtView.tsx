@@ -27,8 +27,7 @@
  *
  * An extension id, a tool name and a store root are all as long as somebody
  * chose to make them, so every cell here is cut to its column and every sentence
- * is broken at its ` · ` joints by us. `ui/columns.ts` says why a line that
- * wraps in a list is garbled rather than merely untidy.
+ * is broken at its ` · ` joints by us rather than the terminal (`ui/columns.ts`).
  */
 import { For, Index, Show, createMemo, createSignal, onMount } from "solid-js"
 import { join } from "node:path"

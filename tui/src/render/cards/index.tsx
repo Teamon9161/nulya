@@ -100,7 +100,7 @@ export function Card(props: { item: TranscriptItem; contributions?: Contribution
         />
       </Match>
       {/* A background command ended (tui.md §5.9): its own event, its own card,
-          and the shell call that started it has already said what it is. */}
+          and the call that started it has already said what it is. */}
       <Match when={props.item.kind === "task"}>
         <TaskFinishedCard item={props.item as Extract<TranscriptItem, { kind: "task" }>} />
       </Match>

@@ -576,10 +576,6 @@ fn setIfNonZero(slot: *u64, value: u64) void {
     if (value != 0) slot.* = value;
 }
 
-fn eqlString(actual: ?[]const u8, expected: []const u8) bool {
-    return actual != null and std.mem.eql(u8, actual.?, expected);
-}
-
 fn stopReasonFrom(s: []const u8) provider.StopReason {
     if (std.mem.eql(u8, s, "tool_use")) return .tool_use;
     if (std.mem.eql(u8, s, "end_turn") or std.mem.eql(u8, s, "stop_sequence")) return .end_turn;

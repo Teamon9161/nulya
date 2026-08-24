@@ -2796,13 +2796,6 @@ export function App(props: AppProps) {
                 <Show when={handoff()}>
                   <HandoffPanel file={handoff()!} />
                 </Show>
-                {/* The permission mode, where it is chosen (tui.md §5.7, T31).
-                    Above the approval dialog because it can be opened from one:
-                    a click on the chip while a call waits is exactly the "stop
-                    asking me" gesture, and the answer re-judges that call. */}
-                {/* Which agent to delegate to (tui.md §5.10). Same dialog shape
-                    as the mode picker, above it for the same reason it holds the
-                    keyboard first: it is only ever opened on purpose. */}
                 <Show when={withPicker()}>
                   <WithPicker
                     wearables={wearables()}
@@ -2814,6 +2807,9 @@ export function App(props: AppProps) {
                     }}
                   />
                 </Show>
+                {/* Which agent to delegate to (tui.md §5.10). Same dialog shape
+                    as the mode picker, above it for the same reason it holds the
+                    keyboard first: it is only ever opened on purpose. */}
                 <Show when={agentPicker()}>
                   <AgentPicker
                     defs={agentDefs()}
@@ -2825,6 +2821,10 @@ export function App(props: AppProps) {
                     }}
                   />
                 </Show>
+                {/* The permission mode, where it is chosen (tui.md §5.7, T31).
+                    Above the approval dialog because it can be opened from one:
+                    a click on the chip while a call waits is exactly the "stop
+                    asking me" gesture, and the answer re-judges that call. */}
                 <Show when={modePicker()}>
                   <ModePicker
                     current={mode()}
@@ -2833,10 +2833,6 @@ export function App(props: AppProps) {
                     onPick={chooseMode}
                   />
                 </Show>
-                {/* The call the kernel is stopped on, asked where the answer is
-                    given (tui.md §5.7). Above the composer for the same reason
-                    the handover proposal is: it is a question about what happens
-                    next, not a thing that happened. */}
                 {/* A plugin's own panel (tui-plugin D6), below every dialog
                     the host owns: a trusted zone hides it outright
                     (`dialogUp`), and the ordering here is the second half of
@@ -2845,6 +2841,10 @@ export function App(props: AppProps) {
                 <Show when={plugins.panel()}>
                   <PluginPanel panel={plugins.panel()!} revision={plugins.revision()} />
                 </Show>
+                {/* The call the kernel is stopped on, asked where the answer is
+                    given (tui.md §5.7). Above the composer for the same reason
+                    the handover proposal is: it is a question about what happens
+                    next, not a thing that happened. */}
                 <Show when={pending()}>
                   <ApprovalPanel
                     tool={pending()!.request.tool}

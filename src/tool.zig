@@ -130,12 +130,12 @@ pub const Tool = struct {
     executor: ToolExecutor,
 };
 
-/// Helper: parse raw tool arguments as JSON.
 pub fn parseArgs(alloc: std.mem.Allocator, args_json: []const u8) !std.json.Parsed(std.json.Value) {
     return std.json.parseFromSlice(std.json.Value, alloc, args_json, .{}) catch error.InvalidArgsJson;
 }
 
-/// Helper: fetch a required string field from parsed args, with a teaching error.
+/// Distinct error variants (`ArgsNotObject` / `MissingField` / `FieldNotString`)
+/// so a caller's failure message can teach the model exactly what was wrong.
 pub fn requireString(args: std.json.Value, field: []const u8) ![]const u8 {
     if (args != .object) return error.ArgsNotObject;
     const v = args.object.get(field) orelse return error.MissingField;
@@ -143,7 +143,6 @@ pub fn requireString(args: std.json.Value, field: []const u8) ![]const u8 {
     return v.string;
 }
 
-/// Helper: fetch an optional string field.
 pub fn optionalString(args: std.json.Value, field: []const u8) ?[]const u8 {
     if (args != .object) return null;
     const v = args.object.get(field) orelse return null;

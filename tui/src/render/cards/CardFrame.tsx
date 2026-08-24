@@ -119,9 +119,9 @@ export function CardFrame(props: {
           selected() ? style.theme.selection : props.foldable && hovered() ? style.theme.hover : undefined
         }
         // Clicking the head line is the mouse half of the fold interaction
-        // (tui.md §4.2); the keyboard half is Ctrl+O and browse mode. The tint
-        // under the pointer is the only thing that says a head line answers to
-        // a click at all — a card has no button to look like.
+        // (tui.md §4.2); the keyboard half is browse mode. The tint under the
+        // pointer is the only thing that says a head line answers to a click
+        // at all — a card has no button to look like.
         onMouseDown={click.onMouseDown}
         onMouseUp={click.onMouseUp}
         onMouseOver={() => setHovered(true)}

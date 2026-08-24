@@ -34,8 +34,7 @@
  * Every line on this screen is laid out by us and never by the terminal: cells
  * are cut to their column, sentences are broken at their ` · ` joints, and the
  * columns are sized from the content rather than from a number that the next
- * provider name outgrows. `ui/columns.ts` says why a wrapped line here is not
- * merely untidy but garbled.
+ * provider name outgrows (`ui/columns.ts`).
  */
 import { For, Show, createEffect, createMemo, createSignal, onMount } from "solid-js"
 import { useKeyboard } from "@opentui/solid"

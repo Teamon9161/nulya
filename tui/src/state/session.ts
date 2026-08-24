@@ -85,7 +85,7 @@ export interface CapabilityItem extends ItemBase {
 
 /**
  * A background task ended and said so in the ledger (`task_finished`, DESIGN
- * §3.1). Its own card, not an update to the shell call that started it: the call
+ * §3.1). Its own card, not an update to the call that started it: the call
  * already returned — with a receipt — and this is a second event, minutes later,
  * that the model reads as a turn of its own.
  */
