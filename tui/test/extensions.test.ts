@@ -415,7 +415,7 @@ test("a bundled mode that arrives is activated too, and the pointer really moves
       JSON.stringify({
         schema: "nulya.extension/v2",
         id: "mode.pkg",
-        contributes: { system_prompts: ["prompts/identity.md"] },
+        contributes: { system_prompts: [{ path: "prompts/identity.md", position: "late" }] },
       }),
     )
     mkdirSync(join(root, "mode.pkg", "prompts"), { recursive: true })
@@ -432,7 +432,8 @@ test("a bundled mode that arrives is activated too, and the pointer really moves
     await extSetCurrent(store, "activate", "mode.pkg", line.version!)
     expect((await extList(store)).find((entry) => entry.id === "mode.pkg")!.current).toBe(line.version)
 
-    // And that changed no composition: a session opened here has no member.
+    // Default activation is on_request, so moving current still changes no
+    // composition unless the manifest explicitly says always.
     const id = await sessionNew(store, { profile: "scripted" })
     expect((await readHeader(store, id))!.composition.active).toEqual([])
   } finally {
@@ -443,16 +444,11 @@ test("a bundled mode that arrives is activated too, and the pointer really moves
 /**
  * Which half of `/ext`'s switch a package needs (T1, ext-review-2 §3b).
  *
- * Activating alone composes nothing (DESIGN §5.1), so the switch has to write a
- * standing MEMBERSHIP entry for anything only a member can give — a skill, a
- * slash command, a front-end module — and must not for a pure tool package,
- * whose pins bring it in by themselves (two ways of saying one thing would be
- * two things to take back). A package that contributes a SYSTEM PROMPT is the
- * one exception either way: it used to be the flagship case (wearing a mode in
- * EVERY session was the entire reason this entry existed), and it is now
- * excluded on purpose — Enter moves `current` and hands back a `/<id>`
- * command instead, and a mode's standing reach is a person's explicit config
- * decision (`[extensions] with`), never a keypress in this row.
+ * Prompt packages never need a second TUI standing bit: activation:"always"
+ * already gives standing membership, while the default on_request shape gets
+ * a derived per-session command. Skills/commands/ui still need standing_with
+ * when no prompt owns the package's membership semantics; pure pinned tools do
+ * not, because the pin itself implies membership.
  */
 test("a package that contributes a system prompt never gets a standing with entry; skills, commands and ui still do", () => {
   const what = (over: Partial<Parameters<typeof standingWith>[0]> = {}) => ({
@@ -485,16 +481,14 @@ test("a package that contributes a system prompt never gets a standing with entr
 })
 
 /**
- * A mode's own `/<id>`, which it never has to declare (M4).
- *
- * `--with <id>` is the only thing typing a prompt package's name could mean, so
- * every such package used to copy the same three-line `commands` entry into its
- * manifest to say it. What a package still declares is anything other than the
- * obvious.
+ * An on-request mode's own `/<id>`, which it never has to declare (M4).
+ * Always prompt packages are already present in ordinary sessions, so deriving
+ * a one-session wear command for them would suggest the wrong lifecycle.
  */
-test("a package that contributes a system prompt gets `/<id>` for free; anything else has to ask", () => {
+test("on-request prompt packages get `/<id>` for free; always packages do not", () => {
   const what = (over: Partial<Parameters<typeof derivedCommand>[0]> = {}) => ({
     id: "plan",
+    activation: "on_request" as const,
     systemPrompts: ["prompts/plan.md"],
     commands: [] as PackageCommand[],
     ...over,
@@ -505,6 +499,8 @@ test("a package that contributes a system prompt gets `/<id>` for free; anything
     description: "a new tab wearing plan's prompt; nothing is activated",
     action: { with: true },
   })
+
+  expect(derivedCommand(what({ activation: "always" }))).toBeNull()
 
   // A tool package is not a mode: `/ask` is a real claim `ask` makes, and it
   // makes it in its manifest.
@@ -642,6 +638,7 @@ test("what a built version contributes is read from the root that sync wrote it 
     expect(line.version).toMatch(/^v-/)
 
     const what = await builtContributions(store, root, "mode.pkg", line.version!)
+    expect(what?.activation).toBe("on_request")
     expect(what?.systemPrompts).toEqual(["prompts/identity.md"])
     // A prompt reaches a session through membership, but Enter no longer
     // writes a mode's membership standing (T1, ext-review-2 §3b) — it moves
