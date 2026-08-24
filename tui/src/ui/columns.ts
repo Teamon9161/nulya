@@ -181,6 +181,56 @@ export function wrapWords(text: string, width: number): string[] {
   return lines
 }
 
+/** Expand tabs to real cells before measuring or painting wrapped transcript rows. */
+export function expandTabs(text: string, startColumn = 0, tabWidth = 8): string {
+  let column = startColumn
+  let out = ""
+  for (const ch of text) {
+    if (ch === "\t") {
+      const spaces = tabWidth - (column % tabWidth)
+      out += " ".repeat(spaces)
+      column += spaces
+      continue
+    }
+    out += ch
+    column += charWidth(ch.codePointAt(0) ?? 0)
+  }
+  return out
+}
+
+/**
+ * Split one logical line into display-width-bounded rows without dropping text.
+ * This is for transcript bodies that must not rely on terminal soft wrapping:
+ * each returned row is painted by its own renderable, so a resize changes rows
+ * deliberately instead of leaving previous-frame cells behind.
+ */
+export function hardWrap(text: string, width: number): string[] {
+  if (width <= 0) return []
+  const source = expandTabs(text)
+  if (source.length === 0) return [""]
+  const rows: string[] = []
+  let row = ""
+  let used = 0
+  for (const ch of source) {
+    const w = charWidth(ch.codePointAt(0) ?? 0)
+    if (row.length > 0 && used + w > width) {
+      rows.push(row)
+      row = ""
+      used = 0
+    }
+    row += ch
+    used += w
+  }
+  rows.push(row)
+  return rows
+}
+
+/** Apply `hardWrap` to every logical line, preserving blank lines. */
+export function hardWrapLines(text: string, width: number): string[] {
+  if (width <= 0) return []
+  return text.split("\n").flatMap((line) => hardWrap(line, width))
+}
+
 /**
  * A column wide enough for every one of `values`, plus `gutter` blank columns
  * after it, and never wider than `cap` — the widest value is content, the cap

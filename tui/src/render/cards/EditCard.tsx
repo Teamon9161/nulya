@@ -1,8 +1,9 @@
-import { Show, createMemo } from "solid-js"
-import { useStyle } from "../theme.ts"
+import { For, Show, createMemo } from "solid-js"
+import { useScreen, useStyle } from "../theme.ts"
 import { CardFrame } from "./CardFrame.tsx"
 import { ShellOutput } from "./ShellCard.tsx"
-import { diffStats, filetypeOf, parseEditArgs, unifiedDiff } from "../../nulya/diff.ts"
+import { diffStats, parseEditArgs, unifiedDiff } from "../../nulya/diff.ts"
+import { hardWrap } from "../../ui/columns.ts"
 import type { ToolItem } from "../../state/session.ts"
 import type { ToolPresentation } from "../registry.ts"
 
@@ -38,14 +39,11 @@ export function EditCard(props: { item: ToolItem; presentation: ToolPresentation
   }
 
   const tone = () => (props.item.ok === false ? "err" : "dim")
-  /**
-   * The diff renderable needs an explicit height, and it draws one row per
-   * CHANGE row: the patch's three header lines and its trailing newline are not
-   * on screen, so they are not in the count (T26 — they used to be, and every
-   * edit card carried two blank rows under its diff). Capped, so one enormous
-   * edit cannot swallow the viewport.
-   */
-  const diffHeight = () => Math.min(Math.max(patch().split("\n").length - 4, 1), 40)
+  const screen = useScreen()
+  const diffWidth = () => Math.max(12, Math.min(screen().width, style.maxWidth) - 6)
+  const diffRows = createMemo(() => renderDiffRows(patch(), diffWidth(), style))
+  const visibleRows = () => diffRows().slice(0, 40)
+  const clipped = () => diffRows().length > visibleRows().length
 
   return (
     <CardFrame
@@ -64,24 +62,57 @@ export function EditCard(props: { item: ToolItem; presentation: ToolPresentation
       spillPath={props.item.spillPath}
     >
       <Show when={showDiff()} fallback={<ShellOutput output={props.item.output} />}>
-        <diff
-          diff={patch()}
-          view="unified"
-          filetype={filetypeOf(args()!.path)}
-          syntaxStyle={style.syntax}
-          // The gutter is what carries the +/- signs: without it the diff is
-          // colour-only, which fails NO_COLOR and every plain-text capture.
-          showLineNumbers
-          lineNumberFg={style.theme.dim}
-          addedBg="transparent"
-          removedBg="transparent"
-          contextBg="transparent"
-          addedSignColor={style.theme.diff.add}
-          removedSignColor={style.theme.diff.del}
-          height={diffHeight()}
-          width="100%"
-        />
+        <For each={visibleRows()}>
+          {(row) => (
+            <box height={1} width="100%" backgroundColor={row.bg}>
+              <text fg={row.fg} height={1}>{row.text}</text>
+            </box>
+          )}
+        </For>
+        <Show when={clipped()}>
+          <text fg={style.theme.dim} height={1}>… diff clipped after 40 rows</text>
+        </Show>
       </Show>
     </CardFrame>
   )
+}
+
+
+type DiffRow = { text: string; fg: string; bg: string }
+
+type DiffTone = "add" | "del" | "hunk" | "context"
+
+function rowColors(tone: DiffTone, style: ReturnType<typeof useStyle>): { fg: string; bg: string } {
+  switch (tone) {
+    case "add":
+      return { fg: style.theme.diff.add, bg: style.theme.diff.addBg }
+    case "del":
+      return { fg: style.theme.diff.del, bg: style.theme.diff.delBg }
+    case "hunk":
+      return { fg: style.theme.dim, bg: "transparent" }
+    default:
+      return { fg: style.theme.muted, bg: "transparent" }
+  }
+}
+
+function renderDiffRows(patch: string, width: number, style: ReturnType<typeof useStyle>): DiffRow[] {
+  const rows: DiffRow[] = []
+  for (const raw of patch.split("\n")) {
+    if (raw.length === 0 || raw.startsWith("--- ") || raw.startsWith("+++ ")) continue
+    const tone: DiffTone = raw.startsWith("+")
+      ? "add"
+      : raw.startsWith("-")
+        ? "del"
+        : raw.startsWith("@@")
+          ? "hunk"
+          : "context"
+    const prefix = tone === "hunk" ? "  " : raw.slice(0, 1)
+    const body = tone === "hunk" ? raw : raw.slice(1)
+    const colors = rowColors(tone, style)
+    const wrapped = hardWrap(body, Math.max(1, width - 2))
+    for (let i = 0; i < wrapped.length; i++) {
+      rows.push({ ...colors, text: `${i === 0 ? prefix : " "} ${wrapped[i] ?? ""}` })
+    }
+  }
+  return rows.length > 0 ? rows : [{ text: "", fg: style.theme.dim, bg: "transparent" }]
 }

@@ -178,17 +178,19 @@ export function shellCommandOf(argsJson: string): string | null {
 /**
  * A one-line digest of arbitrary tool arguments.
  *
- * The FIRST argument is printed bare (T26). Tools put their subject first — the
- * path, the pattern, the command — so `read · src/emit.zig · offset=1` says what
- * the call is about in the place a person reads first, where `path=src/emit.zig
- * offset=1` made every call look like a log line. The rest keep their keys: an
- * `offset=1` without its name is a number nobody can place.
+ * A `{path, offset?, limit?}` object is a common file-target shape, so it reads
+ * as one target (`src/a.ts:10-14`) without naming the plumbing keys. Everything
+ * else follows the generic rule: first string argument bare, later arguments
+ * keyed, because the TUI cannot know a package's domain vocabulary.
  */
 function argsSummary(argsJson: string, limit: number): string {
   try {
     const value = JSON.parse(argsJson)
     if (value && typeof value === "object" && !Array.isArray(value)) {
-      const parts = Object.entries(value as Record<string, unknown>).map(([key, entry], index) => {
+      const record = value as Record<string, unknown>
+      const path = pathArgsSummary(record)
+      if (path !== null) return firstLine(path, limit)
+      const parts = Object.entries(record).map(([key, entry], index) => {
         const text = typeof entry === "string" ? entry : JSON.stringify(entry)
         const written = firstLine(text ?? "", 40)
         return index === 0 && typeof entry === "string" ? written : `${key}=${written}`
@@ -199,6 +201,24 @@ function argsSummary(argsJson: string, limit: number): string {
     // Fall through.
   }
   return firstLine(argsJson, limit)
+}
+
+function numberArg(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.trunc(value)
+  if (typeof value === "string" && /^\d+$/.test(value)) return Number(value)
+  return null
+}
+
+/** Common file-target convention, not a tool-name rule: `{path, offset?, limit?}`. */
+function pathArgsSummary(record: Record<string, unknown>): string | null {
+  const path = record["path"]
+  if (typeof path !== "string" || path.length === 0) return null
+  const offset = numberArg(record["offset"])
+  const limit = numberArg(record["limit"])
+  const target = path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path) ? baseName(path) : path
+  if (offset !== null && limit !== null && limit > 0) return `${target}:${offset}-${offset + limit - 1}`
+  if (offset !== null) return `${target}:${offset}`
+  return target
 }
 
 /** Split a command line into words, respecting single and double quotes. */

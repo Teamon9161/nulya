@@ -62,12 +62,12 @@ exports[`the panel strip projects the latest call of a \`panel: true\` tool, fol
 
 exports[`user and assistant turns 1`] = `
 "                                                                            
-› make emit budgets configurable                                            
+▎ make emit budgets configurable                                            
                                                                             
 ● Reading emit.zig first.                                                   
                                                                             
                                                                             
-› and write it to default.toml · queued                                     
+▎ and write it to default.toml · queued                                     
                                                                             
                                                                             
                                                                             
@@ -231,18 +231,18 @@ exports[`a \`nulya …\` command reads as an evolution action 1`] = `
 exports[`every evolution action in §5.2 has its own head line 1`] = `
 "                                                                            
   ⌕ read kernel · emit.zig  (2 lines) ▸                                     
+                                                                            
   ⚙ ext init · lint → .nulya/extensions/lint ▸                              
+                                                                            
   ⚙ ext build · lint → v-3f2a91 ▸                                           
+                                                                            
   ⚡ activate · lint@v-3f2a91 ▸                                             
+                                                                            
   ⚡ activate · lint@v-0011aa ▸                                             
+                                                                            
   ⌘ ext run · lint/lint_zig ▸                                               
+                                                                            
   ☰ skill · evolution/zig-style ▸                                          
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
-                                                                            
                                                                             
                                                                             
                                                                             
@@ -255,8 +255,8 @@ exports[`every evolution action in §5.2 has its own head line 1`] = `
 exports[`a sub-session names the session it drives 1`] = `
 "                                                                            
   ⤷ sub-session · s-1786815442964-8462dd ▸                                  
-  ⤷ sub-session step · s-1786815442964-8462dd ▸                             
                                                                             
+  ⤷ sub-session step · s-1786815442964-8462dd ▸                             
                                                                             
                                                                             
                                                                             
@@ -272,11 +272,11 @@ exports[`a run of successful calls becomes one line, and a failure stays out of 
 "                                                                            
 ● Reading emit.zig first.                                                   
                                                                             
-  ⋯ shell ×2 ▸                                                              
+  ● Run 2 commands ▸                                                        
+                                                                            
   $ cat missing  (2 lines · exit 1) ▸                                       
-  ⋯ shell ×2 ▸                                                              
                                                                             
-                                                                            
+  ● Run 2 commands ▸                                                        
                                                                             
                                                                             
                                                                             
@@ -335,10 +335,10 @@ exports[`opened, the composition card shows what this session froze 1`] = `
 exports[`edit renders its diff expanded by default 1`] = `
 "                                                                            
   ✎ src/emit.zig  (+2 -1) ▾                                                 
-     1 - pub const head_bytes = 4096;                                       
-     1 + pub const head_bytes = 4096; // default                            
-     2 + pub const tail_bytes = 2048;                                       
-                                                                            
+       @@ -1,1 +1,2 @@                                                      
+    - pub const head_bytes = 4096;                                          
+    + pub const head_bytes = 4096; // default                               
+    + pub const tail_bytes = 2048;                                          
                                                                             
                                                                             
                                                                             
@@ -362,7 +362,7 @@ exports[`edit renders its diff expanded by default 1`] = `
 
 exports[`a driver failure is written out in the transcript, in full, wrapped 1`] = `
 "                                                                            
-› make emit budgets configurable                                            
+▎ make emit budgets configurable                                            
                                                                             
 ● Reading emit.zig first.                                                   
                                                                             
@@ -390,7 +390,7 @@ exports[`a driver failure is written out in the transcript, in full, wrapped 1`]
 
 exports[`a long failure wraps rather than being cut 1`] = `
 "                                                            
-› make emit budgets configurable                            
+▎ make emit budgets configurable                            
                                                             
 ✗ step exited 1: nulya: session new refused: profile        
   \`codex\` names provider codex but no credential resolved   
@@ -447,12 +447,12 @@ exports[`a canceled call is recognised by its marker, not by any stream line 1`]
 exports[`each cancellation marker says something different about the world 1`] = `
 "                                                                                    
   ⊘ sleep 60  (canceled · side effects unknown)                                     
+                                                                                    
   ⊘ zig build  (canceled · completed but unrecorded)                                
+                                                                                    
   ⊘ zig build test  (canceled · not executed)                                       
+                                                                                    
   ⊘ rm -rf tmp  (interrupted · results unrecorded)                                  
-                                                                                    
-                                                                                    
-                                                                                    
                                                                                     
                                                                                     
                                                                                     
@@ -572,18 +572,18 @@ exports[`a finished task is its own card: the command, the tail, the log 1`] = `
 "
 `;
 
-exports[`capability notes are expanded and name what arrived 1`] = `
+exports[`capability notes name activation, availability and version changes 1`] = `
 "                                                                                                
-⚡ capability · lint@v-3f2a91 · tools: lint_zig · skills: zig-style                             
-  New capabilities from extension \`lint\` version \`v-3f2a91\` are now available:                  
+  ⚡ extension activated · lint@v-3f2a91                                                        
+    tool   lint_zig — Lint Zig sources.                                                         
+    skill  zig-style — House Zig style.                                                         
                                                                                                 
-  Tools:                                                                                        
-  - lint_zig — Lint Zig sources.                                                                
-    invoke: nulya ext run lint <tool> '<json-args>'                                             
                                                                                                 
-  Skills:                                                                                       
-  - zig-style — House Zig style.                                                                
-    load: nulya skill load lint/zig-style                                                       
+                                                                                                
+                                                                                                
+                                                                                                
+                                                                                                
+                                                                                                
                                                                                                 
                                                                                                 
                                                                                                 
@@ -602,26 +602,26 @@ exports[`capability notes are expanded and name what arrived 1`] = `
 
 exports[`ascii mode degrades every glyph 1`] = `
 "                                                                            
-> make emit budgets configurable                                            
+| make emit budgets configurable                                            
                                                                             
-! capability · lint@v-3f2a91 · tools: lint_zig · skills: zig-style          
-  New capabilities from extension \`lint\` version \`v-3f2a91\` are now         
-  available:                                                                
-                                                                            
-  Tools:                                                                    
-  - lint_zig — Lint Zig sources.                                            
-    invoke: nulya ext run lint <tool> '<json-args>'                         
-                                                                            
-  Skills:                                                                   
-  - zig-style — House Zig style.                                            
-    load: nulya skill load lint/zig-style                                   
-                                                                            
+  ! extension activated · lint@v-3f2a91                                     
+    tool   lint_zig — Lint Zig sources.                                     
+    skill  zig-style — House Zig style.                                     
                                                                             
   + ext build · lint → v-3f2a91 >                                           
+                                                                            
   ~ src/emit.zig  (+2 -1) v                                                 
-     1 - pub const head_bytes = 4096;                                       
-     1 + pub const head_bytes = 4096; // default                            
-     2 + pub const tail_bytes = 2048;                                       
+       @@ -1,1 +1,2 @@                                                      
+    - pub const head_bytes = 4096;                                          
+    + pub const head_bytes = 4096; // default                               
+    + pub const tail_bytes = 2048;                                          
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
+                                                                            
                                                                             
                                                                             
                                                                             

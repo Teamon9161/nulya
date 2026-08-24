@@ -21,7 +21,7 @@ import type { Contributions } from "../../nulya/files.ts"
  * One transcript item → one card. Live and replay both come through here, so a
  * card can never depend on having seen the stream (tui.md §3).
  */
-export function Card(props: { item: TranscriptItem; contributions?: Contributions[] }) {
+export function Card(props: { item: TranscriptItem; contributions?: Contributions[]; capabilityPreviousVersion?: string | null }) {
   return (
     <Switch>
       {/* Compaction's two turns are user turns as far as the ledger is
@@ -94,7 +94,10 @@ export function Card(props: { item: TranscriptItem; contributions?: Contribution
         </box>
       </Match>
       <Match when={props.item.kind === "capability"}>
-        <CapabilityBanner item={props.item as Extract<TranscriptItem, { kind: "capability" }>} />
+        <CapabilityBanner
+          item={props.item as Extract<TranscriptItem, { kind: "capability" }>}
+          previousVersion={props.capabilityPreviousVersion}
+        />
       </Match>
       {/* A background command ended (tui.md §5.9): its own event, its own card,
           and the shell call that started it has already said what it is. */}

@@ -2,12 +2,10 @@
  * A RUN: the stretch of calls between one thing the model said and the next,
  * collapsed to a line (T43).
  *
- * The transcript already treated a run as one block — `gapBefore` puts no air
- * between two tool cards, exactly as tcode's `Read 5 ranges` does — but the
- * block was still one row per call, and a model that reads eleven files before
- * answering pushed everything it SAID off the screen. What a person wants from
- * those eleven rows, while the answer is still coming, is one sentence: it read
- * some files.
+ * The transcript already treated a run as one block, but the block was still
+ * one row per call, and a model that reads eleven files before answering pushed
+ * everything it SAID off the screen. What a person wants from those eleven
+ * rows, while the answer is still coming, is one sentence: it read some files.
  *
  * WHAT DOES NOT GO IN, and why each one is a rule rather than a taste:
  *
@@ -108,16 +106,9 @@ function shortName(tool: string): string {
 }
 
 /**
- * What a run says it did: each tool once, in the order it first appeared, with
- * a count when there was more than one — `read ×3 · grep ×2 · shell`.
- *
- * Counting by TOOL NAME and nothing else is deliberate. tcode writes "Read 5
- * ranges" and Claude Code writes "Read and edited config.py, ran 2 commands",
- * which read beautifully and require knowing what each tool means; this screen
- * does not know, and a summary that guessed would be wrong exactly when a
- * package ships a tool nobody here has heard of. The name a package chose for
- * its own tool is the best short word available, and it is already the word on
- * the card underneath.
+ * What a run says it did. TUI core only owns the kernel's `shell` wording; an
+ * extension tool keeps the name its manifest chose unless a package-owned UI
+ * layer draws something richer.
  */
 export function runSummary(items: readonly ToolItem[]): string {
   const counts = new Map<string, number>()
@@ -125,5 +116,14 @@ export function runSummary(items: readonly ToolItem[]): string {
     const name = shortName(item.tool)
     counts.set(name, (counts.get(name) ?? 0) + 1)
   }
-  return [...counts].map(([name, count]) => (count > 1 ? `${name} ×${count}` : name)).join(" · ")
+  return [...counts].map(([name, count]) => summaryPhrase(name, count)).join(" · ")
+}
+
+function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
+  return `${count} ${count === 1 ? singular : pluralForm}`
+}
+
+function summaryPhrase(name: string, count: number): string {
+  if (name === "shell" && count > 1) return `Run ${plural(count, "command")}`
+  return count > 1 ? `${name} ×${count}` : name
 }

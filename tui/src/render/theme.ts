@@ -38,7 +38,7 @@ export interface Theme {
   ok: string
   err: string
   warn: string
-  diff: { add: string; del: string }
+  diff: { add: string; del: string; addBg: string; delBg: string }
   hairline: string
   selection: string
   /** The quieter of the two row backgrounds: the pointer is merely here. */
@@ -64,7 +64,7 @@ const nulya_dark: Theme = {
   ok: "#7fbf8a",
   err: "#e08a86",
   warn: "#e0b978",
-  diff: { add: "#7fbf8a", del: "#e08a86" },
+  diff: { add: "#7fbf8a", del: "#e08a86", addBg: "#1f3a2d", delBg: "#432624" },
   hairline: "#2c3140",
   selection: "#2f3550",
   hover: "#242937",
@@ -80,7 +80,7 @@ const nulya_light: Theme = {
   ok: "#1f7a45",
   err: "#b03a35",
   warn: "#9a6b12",
-  diff: { add: "#1f7a45", del: "#b03a35" },
+  diff: { add: "#1f7a45", del: "#b03a35", addBg: "#dcefe1", delBg: "#f5dddd" },
   hairline: "#d3d7de",
   selection: "#dfe4f0",
   hover: "#eef1f7",
@@ -99,7 +99,7 @@ function monochrome(): Theme {
     ok: fg,
     err: fg,
     warn: fg,
-    diff: { add: fg, del: fg },
+    diff: { add: fg, del: fg, addBg: "transparent", delBg: "transparent" },
     hairline: fg,
     selection: fg,
     hover: fg,

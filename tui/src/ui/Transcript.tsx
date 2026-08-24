@@ -54,11 +54,11 @@ export function visibleItems(items: readonly TranscriptItem[], thinking: Thinkin
  *
  * A turn is not a list of events, it is a handful of BEATS: the person says
  * something, the model thinks and answers, the model does a run of things, the
- * kernel reports. Inside a beat there is no gap (a run of six calls is one
- * block, the way tcode draws its `Read 5 ranges`); between beats there is
- * exactly one blank row. Before this, `marginTop` lived on two cards and tool
- * cards had none, so a run of calls was welded to the sentence above it and the
- * screen had no grain at all.
+ * kernel reports. Between visible records there is exactly one blank row, with
+ * one extra row before a new user message so the exchange boundary is louder.
+ * Before this, `marginTop` lived on two cards and tool cards had none, so a
+ * run of edit calls was welded into one slab and the screen had no grain at
+ * all.
  *
  * Thinking used to be welded to the answer under it — same beat, no gap. On
  * screen that was two CARDS with nothing between them (T43): a head line with
@@ -72,7 +72,7 @@ export function gapBefore(previous: TranscriptItem | undefined, item: Transcript
   // The first item follows the composition card or the welcome screen; one row
   // of air separates it from either.
   if (!previous) return 1
-  if (previous.kind === "tool" && item.kind === "tool") return 0
+  if (previous.kind === "tool" && item.kind === "tool") return 1
   // A person speaking starts a new exchange, not just a new beat: two rows, so
   // the grain of the screen says where one question ended and the next began.
   if (item.kind === "user") return 2
@@ -114,6 +114,21 @@ export function transcriptRows(
 function rowSubject(row: TranscriptRow | undefined): TranscriptItem | undefined {
   if (!row) return undefined
   return row.kind === "item" ? row.item : row.items[0]
+}
+
+export function capabilityPreviousVersions(
+  items: readonly TranscriptItem[],
+  header?: SessionHeader | null,
+): Map<string, string | null> {
+  const current = new Map<string, string>()
+  for (const entry of header?.composition.active ?? []) current.set(entry.id, entry.version)
+  const previous = new Map<string, string | null>()
+  for (const item of items) {
+    if (item.kind !== "capability") continue
+    previous.set(item.key, current.get(item.id) ?? null)
+    current.set(item.id, item.version)
+  }
+  return previous
 }
 
 /**
@@ -165,6 +180,7 @@ export function Transcript(props: {
   const rows = createMemo(() =>
     transcriptRows(props.items, style, props.contributions ?? [], (tool) => plugins?.cardFor(tool) != null),
   )
+  const capabilityPrevious = createMemo(() => capabilityPreviousVersions(props.items, props.header))
   return (
     <scrollbox
       ref={props.ref}
@@ -219,10 +235,16 @@ export function Transcript(props: {
                 />
               </Match>
               <Match when={row().kind === "item"}>
-                <Card
-                  item={(row() as Extract<TranscriptRow, { kind: "item" }>).item}
-                  contributions={props.contributions}
-                />
+                {(() => {
+                  const item = (row() as Extract<TranscriptRow, { kind: "item" }>).item
+                  return (
+                    <Card
+                      item={item}
+                      contributions={props.contributions}
+                      capabilityPreviousVersion={capabilityPrevious().get(item.key) ?? null}
+                    />
+                  )
+                })()}
               </Match>
             </Switch>
           </box>

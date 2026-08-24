@@ -47,6 +47,7 @@ function Harness(props: {
   tasks?: TaskEntry[]
   error?: string | null
   contributions?: Contributions[]
+  header?: SessionHeader | null
 }) {
   return (
     <StyleContext.Provider value={props.style ?? style}>
@@ -55,7 +56,7 @@ function Harness(props: {
             task still running (tui.md §5.9); every other card draws the same
             with or without it. */}
         <TasksContext.Provider value={() => props.tasks ?? []}>
-          <Transcript items={props.items} error={props.error} contributions={props.contributions} />
+          <Transcript items={props.items} header={props.header} error={props.error} contributions={props.contributions} />
         </TasksContext.Provider>
       </FoldContext.Provider>
     </StyleContext.Provider>
@@ -411,9 +412,10 @@ async function frameOf(
   tasks?: TaskEntry[],
   error?: string | null,
   contributions?: Contributions[],
+  header?: SessionHeader | null,
 ): Promise<string> {
   const setup = await testRender(
-    () => <Harness items={items} style={theme} tasks={tasks} error={error} contributions={contributions} />,
+    () => <Harness items={items} style={theme} tasks={tasks} error={error} contributions={contributions} header={header} />,
     { width, height },
   )
   try {
@@ -425,7 +427,7 @@ async function frameOf(
 
 test("user and assistant turns", async () => {
   const frame = await frameOf([user_item, assistant_item, queued_item])
-  expect(frame).toContain("› make emit budgets configurable")
+  expect(frame).toContain("▎ make emit budgets configurable")
   expect(frame).toContain("● Reading")
   expect(frame).toContain("· queued")
   expect(frame).toMatchSnapshot()
@@ -495,6 +497,21 @@ test("an extension tool call carries the ⌘ glyph and an argument digest", asyn
   expect(frame).not.toContain("ok")
   expect(frame).not.toContain("0 findings")
   expect(frame).toMatchSnapshot()
+})
+
+test("a single read call uses the same compact target as a batch read item", async () => {
+  const frame = await frameOf([
+    toolItem({
+      key: "read1",
+      tool: "ext:std/read",
+      args: JSON.stringify({ path: "/home/teamon/code/zig/nulya/tui/src/render/registry.ts", offset: 10, limit: 5 }),
+      output: "one\ntwo\nthree\nfour\nfive",
+    }),
+  ])
+  expect(frame).toContain("⌘ read · registry.ts:10-14")
+  expect(frame).not.toContain("path=")
+  expect(frame).not.toContain("offset=")
+  expect(frame).not.toContain("limit=")
 })
 
 test("a `nulya …` command reads as an evolution action", async () => {
@@ -609,7 +626,7 @@ test("a run of successful calls becomes one line, and a failure stays out of it"
     shellItem({ key: "r5", command: "grep -n emit src/emit.zig" }),
   ]
   const frame = await frameOf(items, 76, 20)
-  expect(frame).toContain("⋯ shell ×2")
+  expect(frame).toContain("● Run 2 commands")
   // The failure keeps its own row, its own command and its own exit.
   expect(frame).toContain("$ cat missing")
   expect(frame).toContain("exit 1")
@@ -796,21 +813,22 @@ test("a project tui.toml flips the edit diff default", async () => {
   }
 })
 
-test("the transcript's rhythm: two rows before a person, one between beats, none inside a run", async () => {
+test("the transcript's rhythm: two rows before a person, one between beats and tool records", async () => {
   const run = (key: string, command: string) => shellItem({ key, command, output: "ok\n[exit 0]" })
   const items: TranscriptItem[] = [user_item, thinking_item, assistant_item, run("r1", "ls"), run("r2", "pwd"), user_item]
   // The pure function first: it is the whole of the rhythm (T26). Thinking is a
   // card like any other and gets its own row of air (T43) — when it is on
   // screen at all, which by default it is not.
-  expect(items.map((item, index) => gapBefore(items[index - 1], item))).toEqual([1, 1, 1, 1, 0, 2])
+  expect(items.map((item, index) => gapBefore(items[index - 1], item))).toEqual([1, 1, 1, 1, 1, 2])
   // Drawn with the run summary OFF, because the rhythm is about where the blank
   // rows go and the summary is about how many rows there are (T43). What the
   // summary does to these same two calls is its own test.
   const frame = await frameOf(items, 76, 20, listed_style)
   const rows = frame.split("\n").map((row) => row.trimEnd())
   const ls = rows.findIndex((row) => row.includes("$ ls"))
-  // The two calls of one run are neighbours; the sentence above them is not.
-  expect(rows[ls + 1]).toContain("$ pwd")
+  // Adjacent tool records still get air; the sentence above them is not welded to the run.
+  expect(rows[ls + 1]).toBe("")
+  expect(rows[ls + 2]).toContain("$ pwd")
   expect(rows[ls - 1]).toBe("")
 })
 
@@ -933,12 +951,29 @@ test("a finished task is its own card: the command, the tail, the log", async ()
   expect(opened).not.toContain("--- output tail")
 })
 
-test("capability notes are expanded and name what arrived", async () => {
-  const frame = await frameOf([capability_item], 96)
-  expect(frame).toContain("⚡ capability · lint@v-3f2a91 · tools: lint_zig · skills: zig-style")
-  // The note the model itself was given, verbatim underneath.
-  expect(frame).toContain("- lint_zig — Lint Zig sources.")
-  expect(frame).toMatchSnapshot()
+test("capability notes name activation, availability and version changes", async () => {
+  const activated = await frameOf([capability_item], 96)
+  expect(activated).toContain("⚡ extension activated · lint@v-3f2a91")
+  expect(activated).toContain("tool   lint_zig — Lint Zig sources.")
+  expect(activated).toContain("skill  zig-style — House Zig style.")
+  expect(activated).not.toContain("invoke:")
+
+  const available = await frameOf([capability_item], 96, 24, style, undefined, undefined, undefined, header_fixture)
+  expect(available).toContain("⚡ extension available · lint@v-3f2a91")
+
+  const changed = await frameOf(
+    [capability_item],
+    96,
+    24,
+    style,
+    undefined,
+    undefined,
+    undefined,
+    { ...header_fixture, composition: { ...header_fixture.composition, active: [{ id: "lint", version: "v-001122" }] } },
+  )
+  expect(changed).toContain("⚡ extension version changed · lint")
+  expect(changed).toContain("v-001122 → v-3f2a91")
+  expect(activated).toMatchSnapshot()
 })
 
 test("a narrow viewport cuts the head, never the state word", async () => {
@@ -954,8 +989,8 @@ test("a narrow viewport cuts the head, never the state word", async () => {
 test("ascii mode degrades every glyph", async () => {
   const ascii = createStyle({ ...default_settings, transcript: { ...default_settings.transcript, ascii: true } }, {})
   const frame = await frameOf([user_item, capability_item, evolve_item, edit_item], 76, 24, ascii)
-  expect(frame).toContain("> make emit budgets configurable")
-  expect(frame).toContain("! capability · lint@v-3f2a91")
+  expect(frame).toContain("| make emit budgets configurable")
+  expect(frame).toContain("! extension activated · lint@v-3f2a91")
   expect(frame).toContain("+ ext build · lint → v-3f2a91")
   expect(frame).toContain("~ src/emit.zig")
   expect(frame).not.toContain("›")
@@ -1033,7 +1068,7 @@ test("typing and pressing Enter drives a real step", async () => {
 
     // The user turn was promoted out of `queued`, the tool card is there, and
     // the assistant's closing turn arrived — one full run, through the binary.
-    expect(frame).toContain("› read the kernel")
+    expect(frame).toContain("▎ read the kernel")
     expect(frame).not.toContain("queued")
     expect(frame).toContain("$ echo hello-from-nulya")
     expect(state.snapshot.lastStopped).toBe("end_turn")

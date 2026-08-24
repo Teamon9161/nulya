@@ -342,7 +342,7 @@ manifest_readonly = true
 [extensions]
 sync_on_start = true           # build the drafts in the store roots on the way in
 auto_activate = true           # let that pass point `current` at what it built
-handoff       = true           # every session carries the `handoff` tool, pinned
+session_with = ["handoff", "agent"] # every session carries these packages; surface:"with" tools join the face
 plugins       = true           # load the front-end module of a trusted, active package
                                # (`contributes.ui`); false leaves only the declared
                                # commands / policy / render hints. See plugin-api.d.ts

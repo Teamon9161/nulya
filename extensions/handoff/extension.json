@@ -5,6 +5,7 @@
   "contributes": {
     "tools": [{
       "name": "handoff",
+      "surface": "with",
       "description": "Hand the work over at a phase boundary. Record what this phase concluded and what the next phase must do, so the work continues with a clean context that no longer carries this phase's process detail. Call it ONLY when a phase is genuinely finished and the remaining work no longer needs the details of how you got here — not to escape a hard problem, and not for a small task that should simply be completed. Call it once. After it returns, do not call any other tool: end your turn.",
       "input": {
         "type": "object",

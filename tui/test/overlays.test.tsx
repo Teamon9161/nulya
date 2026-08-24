@@ -560,6 +560,7 @@ test("/ext's action keys move the store's current pointer, with a confirmation",
     await settle(setup, 6)
     setup.mockInput.pressTab() // extensions → versions
     await settle(setup, 2)
+    expect(setup.captureCharFrame()).toContain("versions · 2 · oldest → newest")
     // The version line is oldest first, so the cursor starts on the first build
     // — and pointing `current` back at it is the same verb as pointing it
     // forward, which is why there is only one key here (DESIGN §7.4).

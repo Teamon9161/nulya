@@ -379,7 +379,7 @@ test("a handoff file is the proposal, found by name and read once", () => {
  * starts without it, which is what this test would otherwise be asserting the
  * opposite of.
  */
-test.skipIf(!Bun.which("zig"))("a session this TUI starts carries handoff, as a member and a pin", async () => {
+test.skipIf(!Bun.which("zig"))("a session this TUI starts carries handoff, as a member and a with-surface tool", async () => {
   const shop = tempWorkspace()
   // A home of this test's own: installing `handoff` writes into the USER store
   // (that is the whole point — it works outside a nulya checkout), and the run's
@@ -406,7 +406,8 @@ test.skipIf(!Bun.which("zig"))("a session this TUI starts carries handoff, as a 
     // has to finish first is a real `zig build-exe` the first time.
     await until(async () => (await sessionList(shop)).length > 0, 180_000)
     const [session] = await sessionList(shop)
-    // Two axes, both of them (DESIGN §7.5): membership, and a native slot.
+    // One membership axis: the package is composed in, and its surface:"with"
+    // tool reaches the native face from that membership rather than a pin.
     expect(session!.composition.active.some((ref) => ref.startsWith("handoff@"))).toBe(true)
     expect(session!.composition.native_tools).toContain("ext:handoff/handoff")
   } finally {

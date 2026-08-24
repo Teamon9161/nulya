@@ -1656,7 +1656,7 @@ export function ExtView(props: {
                   <box height={1} />
 
                   <text fg={style.theme.dim} height={1}>
-                    {fit(`versions · ${entry.versions.length}`, detailWidth())}
+                    {fit(`versions · ${entry.versions.length}${entry.versions.length > 1 ? " · oldest → newest" : ""}`, detailWidth())}
                   </text>
                   <For each={entry.versions}>
                     {(version, index) => {

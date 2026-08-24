@@ -622,10 +622,17 @@ export function App(props: AppProps) {
         let activated = 0
         if (plan.activate) {
           for (const line of report.lines) {
-            if (line.state !== "built" || !line.version || line.activation === "active") continue
+            if (!line.version || line.activation === "active") continue
             // What arrived with the binary this run is `adoptBundled`'s to
             // decide: everything a fresh seed drops is `built` by this pass.
             if (arrived.includes(line.id)) continue
+            // A bundled draft refreshed by `ext seed` is this binary's own old
+            // copy, untouched locally. The build may still print `already
+            // built` when that content-addressed version was produced earlier
+            // (for example by `/compact` or another TUI start), but the SOURCE
+            // did move forward in this run and the active pointer should follow
+            // it just as it does when the version was newly built here.
+            if (line.state !== "built" && !(root.user && refreshed.includes(line.id))) continue
             try {
               await extSetCurrent(props.ws, "activate", line.id, line.version, { user: root.user })
               activated += 1

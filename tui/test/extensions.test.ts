@@ -333,27 +333,34 @@ test("the binary's bundled drafts seed into a store — dry-run counts them, a s
   }
 })
 
-test("bundled ask and plan expose member-scoped tools without writing pins", async () => {
+test("bundled ask, handoff, and plan expose member-scoped tools without writing pins", async () => {
   const store = tempWorkspace()
   try {
-    await extSeed(store, { ids: ["ask", "plan"] })
+    await extSeed(store, { ids: ["ask", "handoff", "plan"] })
     const built = await extSync(store, { activate: true })
     const root = syncRoot(store, false)
     const askLine = built.lines.find((entry) => entry.id === "ask")!
+    const handoffLine = built.lines.find((entry) => entry.id === "handoff")!
     const planLine = built.lines.find((entry) => entry.id === "plan")!
     expect(askLine.state).not.toBe("failed")
+    expect(handoffLine.state).not.toBe("failed")
     expect(planLine.state).not.toBe("failed")
     expect(askLine.version).toBeTruthy()
+    expect(handoffLine.version).toBeTruthy()
     expect(planLine.version).toBeTruthy()
 
     const ask = (await builtContributions(store, root, "ask", askLine.version!))!
+    const handoff = (await builtContributions(store, root, "handoff", handoffLine.version!))!
     const plan = (await builtContributions(store, root, "plan", planLine.version!))!
     expect(ask.withTools).toEqual(["ask"])
+    expect(handoff.withTools).toEqual(["handoff"])
     expect(plan.withTools).toEqual(["propose", "todo"])
     expect(plan.driverTools).toEqual(["approve"])
     expect(pinsOf(ask)).toEqual([])
+    expect(pinsOf(handoff)).toEqual([])
     expect(pinsOf(plan)).toEqual([])
     expect(standingWith(ask)).toBe(true)
+    expect(standingWith(handoff)).toBe(true)
     expect(standingWith(plan)).toBe(false)
   } finally {
     store.cleanup()
@@ -472,8 +479,8 @@ test("a package that contributes a system prompt never gets a standing with entr
   // A package with member-scoped model tools needs membership for those tools.
   expect(standingWith(what({ withTools: ["ask"] }))).toBe(true)
 
-  // A pure pinnable-tool package: `compact`, `handoff`, old `ask`. Nothing here needs an
-  // entry, because a pin brings the package in at `current` all by itself.
+  // A pure pinnable-tool package: old `handoff`, old `ask`. Nothing here needs
+  // an entry, because a pin brings the package in at `current` all by itself.
   expect(standingWith(what())).toBe(false)
 })
 

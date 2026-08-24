@@ -102,9 +102,14 @@ printf 'hello %s\n' "${NULYA_ARG_name:-world}"
   `runtime.interpreter` names what runs it (`sh`, `powershell`, `python`). Both
   may be written per OS — `{"windows": "src/run.ps1", "default": "src/run.sh"}`
   — so one version runs everywhere.
-- `contributes.tools[]` — `{name, description, input, timeout_ms?}`. `input` is
-  the JSON Schema the model sees. This manifest is the only source of truth for
-  a tool's shape.
+- `contributes.tools[]` — `{name, description, input, surface?, timeout_ms?,
+  readonly?, ui?}`. `input` is the JSON Schema the model sees. `surface` says
+  how the tool can reach the model face: `pin` (default for old manifests) means
+  it may be named by `--pin` / `pinned_native_tools`; `with` means it appears
+  when the package is explicitly composed with `--with` / `[extensions] with`;
+  `driver` means front ends and scripts call it with `nulya ext run`, never as a
+  fresh session's native model tool. This manifest is the only source of truth
+  for a tool's shape and placement.
 - `contributes.skills[]` — directories holding a `SKILL.md`.
 - `contributes.system_prompts[]` — files that join the system blocks of every
   session this package is a member of. Which sessions those are is not the
@@ -125,10 +130,12 @@ all it does.
   system prompts in the system blocks, its tools callable through the CLI.
   Standing: `[extensions] with` in config. One session: `nulya session new
   --with <id>[@<version>]`.
-- TOOL FACE — one of its tools takes a native slot the model can call.
-  Standing: `[registry] pinned_native_tools`. One session: `nulya session new
-  --pin ext:<id>/<tool>`. A pin brings its own package in, so a pin alone is
-  enough.
+- TOOL FACE — a tool takes a native slot the model can call. For `surface:"pin"`
+  tools, standing form is `[registry] pinned_native_tools`; one-session form is
+  `nulya session new --pin ext:<id>/<tool>`. A pin brings its own package in, so
+  a pin alone is enough. For `surface:"with"` tools, the tool face follows the
+  membership axis instead: compose the package, and those tools appear without a
+  pin. `surface:"driver"` tools never join this face in fresh sessions.
 
 Both take effect from the next session onward; `nulya config show` prints the
 two standing lists. `nulya session new --bare` ignores both of them and composes
