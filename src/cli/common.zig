@@ -208,7 +208,7 @@ pub const session_usage =
     \\                                                    freeze composition + model, print a new session id; --with composes a built
     \\                                                    version in, --pin puts one of its tools on the model's tool face, --parent
     \\                                                    forks that session, --prompt freezes a file as this session's system prompt,
-    \\                                                    --bare ignores the config's standing [extensions] with and pinned_native_tools
+    \\                                                    --bare also ignores activated always packages and the config's standing with/pins
     \\  nulya session append <id> [<text> | --file <p>] [--image <p>]…
     \\                                                    queue a user turn for the next step boundary; --image inlines a
     \\                                                    png/jpeg ≤5 MB, if the model's catalog entry says vision = true
