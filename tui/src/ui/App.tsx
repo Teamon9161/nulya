@@ -2830,6 +2830,7 @@ export function App(props: AppProps) {
                   skills={skills}
                   packages={packageCmds}
                   pluginCommands={plugins.commands}
+                  disabled={overlay.active()}
                   onReady={(api) => {
                     composer = api
                     // The picker may already be up (`guide`): it owns the keys.

@@ -60,13 +60,32 @@ export function parseStepLine(line: string): StepLine | null {
   return event ? { kind: "event", event } : null
 }
 
-async function* decodeLines(stream: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+async function* decodeLines(
+  stream: ReadableStream<Uint8Array>,
+  stopAfter?: Promise<unknown>,
+): AsyncGenerator<string> {
   const reader = stream.getReader()
   const decoder = new TextDecoder()
   let buffered = ""
+  const stopped = stopAfter
+    ? stopAfter.then(
+        () => new Promise<"stop">((resolve) => setTimeout(() => resolve("stop"), 100)),
+        () => new Promise<"stop">((resolve) => setTimeout(() => resolve("stop"), 100)),
+      )
+    : null
   try {
     for (;;) {
-      const { done, value } = await reader.read()
+      const read = reader.read().then(
+        (result) => ({ kind: "read" as const, result }),
+        (error) => ({ kind: "error" as const, error }),
+      )
+      const next = stopped ? await Promise.race([read, stopped]) : await read
+      if (next === "stop") {
+        await reader.cancel().catch(() => {})
+        break
+      }
+      if (next.kind === "error") throw next.error
+      const { done, value } = next.result
       if (done) break
       buffered += decoder.decode(value, { stream: true })
       let at = buffered.indexOf("\n")
@@ -1185,7 +1204,7 @@ export function sessionStep(ws: Workspace, id: string, options: StepOptions = {}
   }
 
   async function* lines(): AsyncGenerator<StepLine> {
-    for await (const raw of decodeLines(proc.stdout)) {
+    for await (const raw of decodeLines(proc.stdout, proc.exited)) {
       const parsed = parseStepLine(raw)
       if (!parsed) continue
       if (parsed.kind === "stream" && options.gate) {

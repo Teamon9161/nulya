@@ -1,4 +1,4 @@
-import { For, Show, createMemo, createSignal, onMount } from "solid-js"
+import { For, Show, createEffect, createMemo, createSignal, onMount } from "solid-js"
 import type { KeyEvent, PasteEvent, TextareaRenderable } from "@opentui/core"
 import { SyntaxStyle } from "@opentui/core"
 import { useScreen, useStyle } from "../render/theme.ts"
@@ -147,6 +147,8 @@ export function Composer(props: {
    * `runPluginCommand`).
    */
   pluginCommands?: () => readonly { name: string; description: string }[]
+  /** The input remains visible, but cannot take focus while a full-screen overlay owns the keyboard. */
+  disabled?: boolean
   onReady?: (api: ComposerApi) => void
 }) {
   const style = useStyle()
@@ -191,7 +193,7 @@ export function Composer(props: {
    * that says so, and it has to say it: in browse mode and under an overlay the
    * composer is still visible, still full of text, and no longer listening.
    */
-  const [focused, setFocused] = createSignal(true)
+  const [focused, setFocused] = createSignal(!props.disabled)
   let nextAttachment = 1
   /** The ones the draft currently refers to — what the line under the box shows. */
   const drafted = () => referenced(line(), attachments())
@@ -310,6 +312,10 @@ export function Composer(props: {
    * the event is claimed.
    */
   const onPaste = (event: PasteEvent) => {
+    if (props.disabled) {
+      event.preventDefault()
+      return
+    }
     const text = new TextDecoder().decode(event.bytes)
     const size = measure(text)
     if (!pasteShouldFold(size.chars, size.lines)) {
@@ -345,11 +351,21 @@ export function Composer(props: {
     return true
   }
 
+  createEffect(() => {
+    if (!area) return
+    area.focusable = !props.disabled
+    if (props.disabled) {
+      area.blur()
+      setFocused(false)
+    }
+  })
+
   onMount(() => {
-    area?.focus()
+    if (!props.disabled) area?.focus()
     props.onReady?.({
       isEmpty: () => (area?.plainText ?? "").length === 0,
       focus: () => {
+        if (props.disabled) return
         area?.focus()
         setFocused(true)
       },
@@ -428,6 +444,10 @@ export function Composer(props: {
   }
 
   const onKeyDown = (event: KeyEvent) => {
+    if (props.disabled) {
+      event.preventDefault()
+      return
+    }
     if (event.name === "tab") {
       if (complete()) event.preventDefault()
       return
@@ -554,7 +574,9 @@ export function Composer(props: {
         borderColor={focused() ? style.theme.accent.user : style.theme.hairline}
         paddingLeft={1}
         paddingRight={1}
-        onMouseDown={() => props.onActivate?.()}
+        onMouseDown={() => {
+          if (!props.disabled) props.onActivate?.()
+        }}
       >
         {/* `flexShrink={0}`, or a buffer wide enough to fill the row wins the
             flex negotiation and the prompt glyph is squeezed out of existence —

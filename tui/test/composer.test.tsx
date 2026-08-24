@@ -369,3 +369,28 @@ test("a key the screen consumed does not also edit the buffer", async () => {
     setup.renderer.destroy()
   }
 }, 60_000)
+
+
+test("disabled composer stays visible but does not take text", async () => {
+  const sent: string[] = []
+  const setup = await testRender(
+    () => (
+      <StyleContext.Provider value={style}>
+        <Composer disabled onSubmit={(text) => sent.push(text)} />
+      </StyleContext.Provider>
+    ),
+    { width: 60, height: 6 },
+  )
+  try {
+    await settle(setup, 3)
+    expect(setup.captureCharFrame()).toContain("message nulya")
+    await setup.mockInput.typeText("should not land")
+    setup.mockInput.pressEnter()
+    const frame = await settle(setup, 3)
+    expect(frame).toContain("message nulya")
+    expect(frame).not.toContain("should not land")
+    expect(sent).toEqual([])
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 60_000)

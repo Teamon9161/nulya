@@ -3,6 +3,9 @@
  * (tui.md §8). No API key, no network, no mocked protocol: if the kernel's line
  * protocol moves, these fail.
  */
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import {
   extBuild,
@@ -102,6 +105,28 @@ describe("session step --stream", () => {
     expect(runDone.kind === "stream" && (runDone.line as { stopped: string }).stopped).toBe("end_turn")
     expect(runDone.kind === "stream" && (runDone.line as { steps: number }).steps).toBe(2)
   }, 60_000)
+
+  test("a dead step does not keep the stream open through inherited stdout", async () => {
+    if (process.platform === "win32") return
+    const dir = mkdtempSync(join(tmpdir(), "nulya-tui-step-leak-"))
+    const bin = join(dir, "fake-step")
+    writeFileSync(
+      bin,
+      `#!/usr/bin/env bash\nprintf '%s\\n' '{"stream":"run","event":"error","message":"boom"}'\n(sleep 5) &\nexit 7\n`,
+    )
+    chmodSync(bin, 0o755)
+    try {
+      const started = Date.now()
+      const step = sessionStep({ ...ws, bin }, "s-fake")
+      const lines = await collect(step.lines)
+      const code = await step.exited
+      expect(code).toBe(7)
+      expect(Date.now() - started).toBeLessThan(1500)
+      expect(streamTags(lines)).toEqual(["run:error"])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 10_000)
 
   test("events replay lands on the same transcript as watching it live", async () => {
     const id = await sessionNew(ws, { profile: "scripted" })

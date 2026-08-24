@@ -1744,21 +1744,10 @@ export function ExtView(props: {
       <Show when={confirm()} keyed>
         {(pending: Pending) => <Lines text={confirmLine(pending)} fg={style.theme.warn} />}
       </Show>
-      {/* The sister sentence of the drift line: every key in this view moves a
-          pointer or a pin, and physics #2 says none of them can reach a session
-          that has already started. On a tab that has NOT started one, the very
-          same fact is good news and reads the other way round (T22). */}
       <OverlayFooter
         width={inner()}
         help={help}
         notice={confirm() ? null : notice()}
-        warning={
-          // A frozen header IS a started session; without one this tab is still
-          // a draft, and then the very same fact reads the other way round.
-          props.header
-            ? "changes apply to the NEXT session — this one froze its tools at start"
-            : "changes apply to the session this tab is about to start"
-        }
         brief="Enter on/off · j/k move · h/l pane · Esc close"
         more={[
           "Enter activates the extension and pins its tools, again turns both off · a click on the row the cursor is already on does the same",
