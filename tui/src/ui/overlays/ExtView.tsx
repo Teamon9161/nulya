@@ -64,6 +64,7 @@ import {
   promote,
   quotaLine,
   readUserPins,
+  resolvableStandingPins,
   stateLabel,
   toggle,
   toolId,
@@ -148,7 +149,7 @@ export function modeCell(entry: { systemPrompts: string[] }): string {
   return entry.systemPrompts.length === 0 ? "" : "mode"
 }
 
-/** One row of the tools pane: a pinnable tool, its state, and its evidence. */
+/** One row of the tools pane: a declared tool, its placement, state, and evidence. */
 export interface ToolRow {
   id: string
   extension: string
@@ -156,19 +157,9 @@ export interface ToolRow {
   state: PinState
   uses: number
   ok: number
-  /**
-   * This tool is a DRIVER interface, not something a model calls — the
-   * package's own word for it (`audience: "driver"`, DESIGN §7.2.1), where
-   * until T34 it was this front end guessing from a list of bundled ids.
-   *
-   * It has no checkbox by default, because a pin would put it on the model's
-   * face where calling it can deadlock on the session's own writer lock
-   * (`SessionBusy`, DESIGN §3.4); `/compact` and the goal driver reach it with
-   * `nulya ext run`, which needs no pin at all. It is still REACHABLE from this
-   * pane — a tool that exists and is drawn nowhere is how `compact` became a
-   * mystery — but folded (T33), because it is not an answer to the question
-   * this pane asks.
-   */
+  /** This tool is exposed by explicit package membership, not by a checkbox. */
+  with: boolean
+  /** This tool is a driver interface, not model-facing. */
   driver: boolean
 }
 
@@ -198,6 +189,7 @@ export function toolRows(
         state: pinState(id, sources),
         uses: row?.uses ?? 0,
         ok: row?.ok ?? 0,
+        with: entry.withTools.includes(tool),
         driver: entry.driverTools.includes(tool),
       })
     }
@@ -220,8 +212,8 @@ export function foldedRows(rows: readonly ToolRow[]): ToolRow[] {
 }
 
 /**
- * What the list draws. Collapsed, every row has a checkbox and the list means
- * one thing: here is the model's tool face, and here is what could join it.
+ * What the list draws. Collapsed, pinnable rows and with-surface rows stay in
+ * view, while driver-only rows fold away.
  *
  * The driver rows were listed beside them until T33, when there were six of
  * them to five pinnable ones — and, sorted by id, they came FIRST. The pinnable
@@ -240,12 +232,12 @@ export function foldLine(count: number, expanded: boolean): string {
   return `${what} · d ${expanded ? "folds" : "shows"}`
 }
 
-/**
- * What the NEXT session's face would carry: the merged config, our own list, and
- * what the `session_with` packages bring with them (T42) — the same three
- * sources `App.plannedPins` adds up, because there is one face and it should not
- * have two counts.
- */
+  /**
+   * What the NEXT session's face would carry: merged config pins, this TUI's
+   * own pins, and `surface:"with"` tools from packages composed every session.
+   * It is the same face the draft status counts, even though the last group is
+   * derived from membership rather than written as `--pin`.
+   */
 export function nextFace(sources: PinSources): string[] {
   const face = [...sources.merged]
   for (const pin of sources.session) if (!face.includes(pin)) face.push(pin)
@@ -319,6 +311,7 @@ function stamp(mtime: number): string {
  * checkbox raises (T24).
  */
 export function labelOf(row: ToolRow): string {
+  if (row.with && row.state === "off") return "with · package/mode"
   if (row.driver && row.state === "off") return "driver · ext run"
   return stateLabel(row.state)
 }
@@ -414,15 +407,11 @@ export function ExtView(props: {
   const [userPins, setUserPins] = createSignal<string[]>([])
   const [tuiPins, setTuiPins] = createSignal<string[]>(sessionPins(props.statePath))
   /**
-   * The tools that reach the face because their PACKAGE is composed into every
-   * session this front end starts (`[extensions] session_with`, T42). Filled
-   * from the listing this panel already loads.
-   *
-   * Without it every one of them drew an empty checkbox and `agent` read
-   * `0/4 tools` — a panel whose whole job is "what can the model call" saying no
-   * about four tools the model was calling.
+   * With-surface tool ids from packages that this front end composes into every
+   * session. They are native tools, but not pins; the kernel derives them from
+   * membership at `session new`.
    */
-  const [composedPins, setComposedPins] = createSignal<string[]>([])
+  const [composedTools, setComposedTools] = createSignal<string[]>([])
   /**
    * Bundled ids whose draft in the user store is NOT what this binary ships and
    * that `ext seed` will not touch on its own — someone edited it, or an older
@@ -448,7 +437,7 @@ export function ExtView(props: {
     user: userPins(),
     session: tuiPins(),
     merged: merged(),
-    composed: composedPins(),
+    composed: composedTools(),
   }))
 
   const refreshPins = async () => {
@@ -458,6 +447,12 @@ export function ExtView(props: {
       setMaxTools(view.registry.max_tools)
       setMerged(view.registry.pinned_native_tools)
       setConfigWith(view.extensions.with)
+      const alwaysComposed = new Set([...view.extensions.with, ...standingWithIds(props.statePath), ...style.settings.extensions.session_with])
+      setComposedTools(
+        listed()
+          .filter((entry) => isActive(entry) && alwaysComposed.has(entry.id))
+          .flatMap((entry) => entry.withTools.map((tool) => toolId(entry.id, tool))),
+      )
       setUserPath(view.paths.user)
       setUserPins(readUserPins(view.paths.user))
     } catch {
@@ -471,8 +466,10 @@ export function ExtView(props: {
   const loadListing = async (): Promise<ExtensionEntry[]> => {
     const entries = await listExtensions(props.ws)
     setListed(entries)
-    setComposedPins(
-      entries.filter((entry) => isActive(entry) && composedEverySession(entry.id)).flatMap((entry) => pinsOf(entry)),
+    setComposedTools(
+      entries
+        .filter((entry) => isActive(entry) && composedEverySession(entry.id))
+        .flatMap((entry) => entry.withTools.map((tool) => toolId(entry.id, tool))),
     )
     return entries
   }
@@ -539,7 +536,7 @@ export function ExtView(props: {
    * will not open.
    */
   const dropOrphanPins = (entries: readonly ExtensionEntry[]) => {
-    const available = toolRows(entries, sources(), []).map((row) => row.id)
+    const available = resolvableStandingPins(entries)
     const orphans = orphanPins(tuiPins(), available)
     if (orphans.length === 0) return
     const kept = tuiPins().filter((pin) => !orphans.includes(pin))
@@ -563,7 +560,7 @@ export function ExtView(props: {
   const draftOf = (id: string) => drafts().find((line) => line.id === id) ?? null
 
   const allTools = createMemo(() => toolRows(extensions(), sources(), usage()))
-  /** The rows on screen: everything, or everything with a checkbox (T33). */
+  /** The rows on screen: everything, or everything except folded driver rows. */
   const tools = createMemo(() => shownRows(allTools(), driversOpen()))
   const folded = createMemo(() => foldedRows(allTools()))
   const selectedTool = createMemo(() => tools()[Math.min(toolCursor(), Math.max(0, tools().length - 1))] ?? null)
@@ -598,18 +595,10 @@ export function ExtView(props: {
     configWith().includes(id) ||
     standingWithIds(props.statePath).includes(id) ||
     style.settings.extensions.session_with.includes(id)
-  /** Its declared tools, as the stable ids a pin names. */
   /**
-   * The tools the SWITCH pins: the ones the package puts on the MODEL's face
-   * (`pinsOf`, DESIGN §7.2.1). A package whose tools are all a driver interface
-   * yields none, and its switch is membership alone — the pin axis is not
-   * half-anything there: `compact` is fully on with nothing on the face,
-   * because that is how a driver calls it.
-   */
-  /**
-   * The pins this pane's switch writes for a row: one per tool the package puts
-   * on the MODEL's face. A package whose tools are all a driver interface
-   * yields none, and its switch is membership alone.
+   * The pins this pane's switch writes for a row: one per `surface:"pin"` tool.
+   * With-surface tools come from membership, and driver tools stay off the model
+   * face unless an old pin is being removed.
    */
   const pinnable = (entry: ExtensionEntry) => pinsOf(entry)
   const pinnedCount = (entry: ExtensionEntry) =>
@@ -693,7 +682,7 @@ export function ExtView(props: {
     return { version, when, current: current!, mine: mine!, full }
   })
 
-  /** The pin panel's rows: a checkbox, the tool id, its state, its evidence. */
+  /** The pin panel's rows: placement glyph, tool id, state, and evidence. */
   const toolCols = createMemo(() => {
     const list = tools()
     const [id, state, uses, ok] = squeeze(
@@ -787,6 +776,10 @@ export function ExtView(props: {
    * exactly what this should do.
    */
   const toggleTool = (row: ToolRow) => {
+    if (row.with && (row.state === "off" || row.state === "composed")) {
+      setNotice(`${row.id} comes with sessions that compose ${row.extension} · use /${row.extension} or /with, not a pin`)
+      return
+    }
     if (row.driver && row.state === "off") {
       setNotice(`${row.id} is called by a driver with ext run · a pin would put it on the model face, where it cannot run`)
       return
@@ -800,6 +793,10 @@ export function ExtView(props: {
       const row = selectedTool()
       if (!row) return
       if (verb === "toggle") return toggleTool(row)
+      if (row.with) {
+        setNotice(`${row.id} is a with-surface tool · it reaches the model when ${row.extension} is composed`)
+        return
+      }
       if (row.driver) {
         setNotice(`${row.id} is a driver tool · there is nothing to promote · /compact and drivers call it with ext run`)
         return
@@ -947,11 +944,13 @@ export function ExtView(props: {
             ? room
               ? ` · ${ids.length} tool(s) pinned`
               : ` · ${faceFullLine(maxTools(), face.length, added.length)}`
-            : entry.tools.length > 0
-              ? // A package whose tools are a driver interface: it is fully on,
-                // and none of it is on the model's face by design.
-                ` · its ${entry.tools.length} tool(s) stay off the model face · /compact and drivers call them with ext run`
-              : ""),
+            : entry.withTools.length > 0
+              ? ` · ${entry.withTools.length} tool(s) come with sessions that compose it`
+              : entry.tools.length > 0
+                ? // A package whose tools are a driver interface: it is fully on,
+                  // and none of it is on the model's face by design.
+                  ` · its ${entry.tools.length} tool(s) stay off the model face · /compact and drivers call them with ext run`
+                : ""),
     )
     // The store has the last word, but it says it after the screen already moved.
     void reconcile()
@@ -1293,8 +1292,8 @@ export function ExtView(props: {
                 {/* The same three colours the id list's switch uses: `ok` for on
                     and ours, `warn` for on but written somewhere we may not
                     edit, `faint` for off. One meaning, one colour (tui.md §6).
-                    A driver tool has no box at all: there is no state here for a
-                    checkbox to be wrong about. */}
+                    A driver or with-surface tool has no box: there is no pin
+                    state this checkbox can honestly change. */}
                 <text
                   fg={
                     row().state === "other"
@@ -1304,7 +1303,7 @@ export function ExtView(props: {
                         : style.theme.faint
                   }
                 >
-                  {row().driver && !on() ? " ·  " : on() ? "[x] " : "[ ] "}
+                  {row().driver || row().with ? " ·  " : on() ? "[x] " : "[ ] "}
                 </text>
               </box>
               <box width={toolCols().id} flexShrink={0}>
@@ -1335,7 +1334,7 @@ export function ExtView(props: {
           when={folded().length === 0}
           fallback={
             <Lines
-              text="nothing on the model face · every active extension here declares driver tools only"
+              text="nothing pinnable or with-scoped here · every active extension in this list declares driver tools only"
               fg={style.theme.muted}
             />
           }
@@ -1578,7 +1577,9 @@ export function ExtView(props: {
                         ? ""
                         : pinnable(entry).length > 0
                           ? ` · tools ${pinnedCount(entry)}/${entry.tools.length} pinned`
-                          : ` · tools ${entry.tools.length} · called with ext run, never on the model face`
+                          : entry.withTools.length > 0
+                            ? ` · tools ${entry.withTools.length}/${entry.tools.length} with package/mode`
+                            : ` · tools ${entry.tools.length} · called with ext run, never on the model face`
                     } · current ${entry.current ? shortVersion(entry.current) : "(none)"}`}
                     width={detailWidth()}
                     fg={style.theme.fg}

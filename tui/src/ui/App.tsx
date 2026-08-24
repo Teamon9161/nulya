@@ -47,10 +47,9 @@ import {
   type GateRequest,
   type PermissionMode,
 } from "../approvals.ts"
-import type { GateVerdict } from "../nulya/cli.ts"
+import { configShow, type GateVerdict } from "../nulya/cli.ts"
 import {
   listExtensions,
-  readContributions,
   sessionExists,
   sessions_dir,
   type ExtensionEntry,
@@ -78,7 +77,6 @@ import {
   adoptBundled,
   failedIds,
   needsZigIds,
-  pinsOf,
   planStore,
   seedBundled,
   sessionMember,
@@ -104,7 +102,7 @@ import { wrapExtNote } from "../extnote.ts"
 import { runCompact } from "../compact.ts"
 import { headline, nextHandoff, type HandoffFile } from "../handoff.ts"
 import { buildEvolution, formatWithRef, parseWithRef, type WithRef } from "../evolve.ts"
-import { orphanPins, resolvableStandingPins } from "../pins.ts"
+import { orphanPins, resolvableStandingPins, toolId } from "../pins.ts"
 import {
   agent_id,
   agent_pin,
@@ -437,31 +435,34 @@ export function App(props: AppProps) {
     const member = await sessionMemberOnce(agent_id)
     return member ? { id: member.id, version: member.version } : null
   }
+  const [composedWithTools, setComposedWithTools] = createSignal<string[]>([])
   /**
-   * The pins those packages will put on the face, known before the session
-   * exists (T42) — so the draft screen can count them.
+   * The `surface:"with"` tools those composed packages will put on the face,
+   * known before the session exists (T42) — so the draft screen can count them.
    *
-   * Read from the ACTIVE version's manifest (one `ext list`), not by resolving
-   * the member: `sessionMember` builds the bundled draft, which is a toolchain
-   * run, and a screen that has not been asked for anything yet must not start
-   * one (T23). A pin names a TOOL, never a version (`ext:agent/agent`), so the
-   * two answers differ only for a package that is not active anywhere on this
-   * machine — and the background sync that runs at the same moment is what makes
-   * it active. Under-reporting for that one second is the right way to be wrong.
+   * Read from the ACTIVE version's manifest plus config projection, not by
+   * resolving the member: `sessionMember` may build a bundled draft, which is a
+   * toolchain run, and a screen that has not been asked for anything yet must
+   * not start one (T23). Under-reporting while background sync is still
+   * activating a freshly built bundled package is the right way to be wrong.
    */
-  const [composedPins, setComposedPins] = createSignal<readonly string[]>([])
-  const resolveComposedPins = async () => {
+  const refreshComposedMembership = async () => {
     try {
-      const listed = await listExtensions(props.ws)
-      const pins: string[] = []
-      for (const id of props.style.settings.extensions.session_with) {
-        const entry = listed.find((held) => held.id === id && held.current !== null && !held.shadowed)
-        if (entry) pins.push(...pinsOf(entry))
-      }
-      setComposedPins(pins)
+      const [listed, config] = await Promise.all([listExtensions(props.ws), configShow(props.ws, props.driver?.env)])
       healStandingPins(listed)
+      const alwaysComposed = new Set([
+        ...config.extensions.with,
+        ...props.style.settings.extensions.session_with,
+        ...standingWithIds(props.statePath),
+      ])
+      setComposedWithTools(
+        listed
+          .filter((entry) => entry.current && !entry.shadowed && alwaysComposed.has(entry.id))
+          .flatMap((entry) => entry.withTools.map((tool) => toolId(entry.id, tool))),
+      )
     } catch {
-      // No listing is "unknown"; the count stays what the pin files say.
+      // No listing is "unknown"; the pin files still say what they say.
+      setComposedWithTools([])
     }
   }
 
@@ -699,7 +700,7 @@ export function App(props: AppProps) {
   // the pass above is what makes a freshly seeded package active. Chained
   // rather than parallel for that ordering alone — `syncStores` returns at once
   // when there is nothing to sync (a test, `sync_on_start = false`).
-  onMount(() => void syncStores().then(loadPlugins).then(resolveComposedPins))
+  onMount(() => void syncStores().then(loadPlugins).then(refreshComposedMembership))
 
   // "Ctrl+C again to quit" is an offer about THIS step. It lapses when a new
   // step starts (the first press must kill again, not quit) and after a short
@@ -878,12 +879,11 @@ export function App(props: AppProps) {
   const closeOverlay = () => {
     overlay.close()
     composer?.focus()
-    // `/ext` may have moved a pin or an activation while it was up, and the
-    // draft card's tool face is read off those files — including, since T42,
-    // what the `session_with` packages contribute, which an activation there
-    // can have just changed.
+      // `/ext` may have moved a membership, pin, or activation while it was up,
+      // and the draft card's tool face is read off those files plus the active
+      // manifests for composed `surface:"with"` tools.
     setPlanTick((tick) => tick + 1)
-    void resolveComposedPins()
+    void refreshComposedMembership()
   }
 
   const openSession = (id: string, created = false) => {
@@ -927,32 +927,28 @@ export function App(props: AppProps) {
 
   /**
    * What the next `session new` from this TUI would put on the model's face:
-   * the merged config pins, this TUI's own list, and the pins the packages in
-   * `[extensions] session_with` bring with them (T42).
+   * the merged config pins, this TUI's own pin list, and `surface:"with"` tools
+   * from packages this TUI composes into every session.
    *
-   * That third source is not a third ANSWER — it is the same `--pin` arguments
-   * `sessionExtras` is about to pass, asked for early. It was missing here, and
-   * the cost was a screen that said `tools 1+5` and listed no `agent` on every
-   * draft, while the session that started a keystroke later froze `agent`'s
-   * tools onto the face: the one place a person looks to find out what the model
-   * can do was under-reporting it, and the honest reading of that screen was
-   * "the agent package is off".
+   * The composed entries are counted for display only. They are not passed as
+   * `--pin`; the kernel derives them from the `--with` membership when the
+   * session is created.
    */
-  // A memo, because reading it is a file read: it is asked for once per frame by
-  // both the status line and the draft card, and it can only change when
-  // something wrote that file — which is what `planTick` says.
-  const plannedPins = createMemo((): string[] => {
+  // A memo, because reading the session pins is a file read: it is asked for
+  // once per frame by both the status line and the draft card, and it can only
+  // change when something wrote that file — which is what `planTick` says.
+  const plannedFaceTools = createMemo((): string[] => {
     planTick()
     const face = [...(props.pinnedTools ?? [])]
     for (const pin of sessionPins(props.statePath)) if (!face.includes(pin)) face.push(pin)
-    for (const pin of composedPins()) if (!face.includes(pin)) face.push(pin)
+    for (const id of composedWithTools()) if (!face.includes(id)) face.push(id)
     return face
   })
 
   /** The tool face this tab shows beside the builtin. */
   const faceSize = (): number => {
     const here = tab()
-    if (here.kind === "draft") return plannedPins().length
+    if (here.kind === "draft") return plannedFaceTools().length
     return snapshot().header?.composition.native_tools.length ?? 0
   }
 
@@ -990,7 +986,7 @@ export function App(props: AppProps) {
     if (!here) return undefined
     const bring = here.bring()
     return {
-      tools: plannedPins(),
+      tools: plannedFaceTools(),
       ...(bring ? { bring: formatWithRef(bring) } : {}),
     }
   }
@@ -1064,11 +1060,7 @@ export function App(props: AppProps) {
     setRefusal(null)
     try {
       const extras = await sessionExtras()
-      const worn = await wornPins(here.bring())
-      const tab = await tabs.materialize(here, {
-        ...extras,
-        ...(worn.length > 0 ? { pin: [...(extras.pin ?? []), ...worn] } : {}),
-      })
+      const tab = await tabs.materialize(here, extras)
       setPlanTick((tick) => tick + 1)
       return tab
     } catch (error) {
@@ -1079,14 +1071,13 @@ export function App(props: AppProps) {
   }
 
   /**
-   * Everything the SCREEN adds to a top-level `session new`: one `--with` and
-   * its pins for each id in `[extensions] session_with` (tui.md §5.8 / §5.10).
+   * Everything the SCREEN adds to a top-level `session new`: one `--with` for
+   * each id in `[extensions] session_with`, plus `/ext`'s standing membership
+   * list (tui.md §5.8 / §5.10).
    *
-   * Two axes, both needed and both separate (DESIGN §7.5): `--with` makes the
-   * version a member of this composition, `--pin` gives a tool a native slot so
-   * the model can actually call it. WHICH tools get a slot is the package's own
-   * answer now (`audience`, DESIGN §7.2.1) instead of a constant per package
-   * here — which is what let two hand-written branches become this loop (T34).
+   * `surface:"with"` tools do not appear here as pins. The kernel derives those
+   * native tool slots from the membership itself, so the TUI has one job: pass
+   * the membership it means.
    *
    * A package that cannot be resolved costs the session nothing: it starts
    * without it and says so, rather than not starting.
@@ -1097,36 +1088,8 @@ export function App(props: AppProps) {
    * §1, `SpawnPolicy` in its minimal form). Which is why this lives here and not
    * in `startAgent`, the thing that composes a child.
    */
-  /**
-   * The pins that travel with this draft's `--with` (`/plan`, `/ask`, `/with`,
-   * `/evolve`).
-   *
-   * Membership and pins are separate axes everywhere else (DESIGN §7.5), and
-   * for a WORN package they cannot be: it is a member of exactly this session,
-   * so a pin naming its tool belongs in exactly this argv. On a standing list
-   * it would not cost a tool — it would wear the mode in every session, which
-   * is the difference `/with` exists to make.
-   *
-   * A package that cannot be read costs nothing: the session starts with the
-   * member and without the pins, which is what wearing it meant before its
-   * tools were ever on the face.
-   */
-  const wornPins = async (bring: WithRef | undefined): Promise<string[]> => {
-    if (!bring) return []
-    try {
-      const version =
-        bring.version ??
-        (await listExtensions(props.ws)).find((entry) => entry.id === bring.id && !entry.shadowed)?.current
-      if (!version) return []
-      return pinsOf(await readContributions(props.ws, bring.id, version))
-    } catch {
-      return []
-    }
-  }
-
   const sessionExtras = async (): Promise<{ with?: string[]; pin?: string[] }> => {
     const withRefs: string[] = []
-    const pins: string[] = []
     const missing: string[] = []
     for (const id of props.style.settings.extensions.session_with) {
       const member = await sessionMemberOnce(id)
@@ -1135,21 +1098,18 @@ export function App(props: AppProps) {
         continue
       }
       withRefs.push(formatWithRef({ id: member.id, version: member.version }))
-      pins.push(...member.pins)
     }
     // …and this TUI's own standing membership list, the half of `/ext`'s Enter
-    // that `session_pins` is the other half of (K8). BARE ids, unlike the two
-    // above: those are packages this front end resolves to an exact version
-    // because it needs their pins before the session exists, while these follow
-    // `current` exactly as the kernel's own `[extensions] with` does — so `/ext`
-    // rolling one back with `a` is honoured without touching this list.
+    // that composes packages into every session opened here (K8). BARE ids,
+    // unlike the bundled session_with entries above: those follow `current`
+    // exactly as the kernel's own `[extensions] with` does, so `/ext` rolling
+    // one back with `a` is honoured without touching this list.
     for (const id of standingWithIds(props.statePath)) {
       if (!withRefs.some((ref) => ref === id || ref.startsWith(`${id}@`))) withRefs.push(id)
     }
     if (missing.length > 0) setNotice(`${missing.join(" & ")} not composed in · /ext for what it said`)
     return {
       ...(withRefs.length > 0 ? { with: withRefs } : {}),
-      ...(pins.length > 0 ? { pin: pins } : {}),
     }
   }
 

@@ -21,11 +21,12 @@
  *  - `other`    — the merged projection has it but the user file does not, so a
  *                 project or system layer wrote it. Read-only here: this module
  *                 writes exactly one key in exactly one file (D3).
- *  - `composed` — no list has it, and it will be on the face anyway: its package
- *                 is one this front end brings into every session it starts
- *                 (`[extensions] session_with`), and `session new --pin`s its
- *                 model tools there (T42). Read-only here for the same reason
- *                 `other` is — the decision is in `tui.toml`, not in this panel.
+ *  - `composed` — no pin list has it, and it will be on the face anyway: its
+ *                 package is one this front end brings into every session it
+ *                 starts (`[extensions] session_with` or `/ext` standing
+ *                 membership), and the tool declares `surface:"with"`. Read-only
+ *                 here for the same reason `other` is — the decision is package
+ *                 membership, not a checkbox in this panel.
  *
  * Everything below the write helpers is pure, because "what would the next
  * session's tool face be" is a question that should be answerable without a
@@ -54,11 +55,11 @@ export interface PinSources {
   session: readonly string[]
   merged: readonly string[]
   /**
-   * Tools that reach the face without any pin list naming them: the model tools
-   * of the packages in `[extensions] session_with` (T42). Not a place a pin is
+   * Tools that reach the face without any pin list naming them: `surface:"with"`
+   * tools from packages composed into every session. Not a place a pin is
    * WRITTEN — a place the face gets one anyway — and this panel has to know
-   * about it, because a checkbox that reads `off` about a tool the model can
-   * call is simply wrong.
+   * about it, because a row that reads `off` about a tool the model can call is
+   * simply wrong.
    */
   composed?: readonly string[]
 }
@@ -114,7 +115,7 @@ export function toggle(id: string, sources: PinSources): PinChange {
     return unchanged(`${id} is pinned by another config layer · edit that file to change it`)
   }
   if (state === "composed") {
-    return unchanged(`${id} comes with its package in every session · \`[extensions] session_with\` in tui.toml decides that`)
+    return unchanged(`${id} comes with composed package membership · remove that membership rather than a pin`)
   }
   if (state === "always") {
     return { user: without(sources.user, id), session: null, notice: `${id} unpinned · next session` }
@@ -206,25 +207,18 @@ export function orphanPins(pins: readonly string[], available: readonly string[]
 /**
  * Every tool id a STANDING pin list may name, from a store listing.
  *
- * One condition, and it is the kernel's: the extension has an active,
- * un-shadowed version — a pin brings its package in at `current` (DESIGN
- * §5.1), and with no `current` the session does not open.
- *
- * There used to be a second, this front end's own: a standing pin on a package
- * that declared `activation: "on_request"` would wear that mode in every
- * session, so such a pin was never written. The declaration is gone, and with
- * it the hazard's hiding place: a package reaches every session only when
- * `[extensions] with` or a standing pin says so, both of them the person's own
- * lines, both visible in `nulya config show` and in `/ext`.
- *
- * Driver tools are in: `audience` is a package's advice about whose face a tool
- * belongs on, not a rule about what may be pinned, and this pane lets a person
- * pin one on purpose. What is NOT here is what cannot resolve.
+ * One condition is the kernel's: the extension has an active, un-shadowed
+ * version — a pin brings its package in at `current` (DESIGN §5.1), and with no
+ * `current` the session does not open. The second condition is the tool's
+ * manifest surface: only `surface:"pin"` tools may be pinned. `surface:"with"`
+ * tools arrive through explicit membership, and `surface:"driver"` tools are
+ * for `nulya ext run`.
  */
 export function resolvableStandingPins(
   entries: readonly {
     id: string
     tools: readonly string[]
+    pinTools?: readonly string[]
     current: string | null
     shadowed: boolean
   }[],
@@ -232,7 +226,7 @@ export function resolvableStandingPins(
   const ids: string[] = []
   for (const entry of entries) {
     if (!entry.current || entry.shadowed) continue
-    for (const tool of entry.tools) ids.push(toolId(entry.id, tool))
+    for (const tool of entry.pinTools ?? entry.tools) ids.push(toolId(entry.id, tool))
   }
   return ids
 }

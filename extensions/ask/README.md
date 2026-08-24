@@ -16,22 +16,22 @@ nulya ext activate --user ask <version>
 ```
 
 不在 nulya 的 checkout 里也一样：源码随二进制走（DESIGN §7.8），`nulya ext seed --user ask`
-把它写进 user store 再 build。TUI 里这两步是 `/ext` 上那一行的 `Enter`——它同时 activate
-并把 `ext:ask/ask` 放上工具面，这一个键就是「模型可以问我了」。
+把它写进 user store 再 build。TUI 里这两步是 `/ext` 上那一行的 `Enter`——它会 activate
+并把 `ask` 写进 `[extensions] with`，这一个键就是「模型可以问我了」。
 
 **它想常驻，和隔壁 `extensions/plan` 相反**——但这不是 manifest 说得出的话：
 「进不进每一场」是人的决定（config 的 `[extensions] with`，DESIGN §5.1）。理由值得写下来：
 `plan` 是模式，戴上它是在说**这一场**是什么（人格、只读立场），而那是人在开工前做的决定。
 **没有人能预先决定"待会儿会有一个问题"**——模型是在任务中间才发现的，所以一个只在被预先
 指定的 session 里才存在的提问包，等于一个永远不会触发的包。所以把 `ask` 写进
-`[extensions] with`，再给它那**一个 tool** 一条 pin——占不占 `max_tools` 槽是另一根轴的事
-（DESIGN §7.5），按机器配置、一个键收回。
+`[extensions] with`，这个 tool 的 `surface: "with"` 会让它随显式成员进模型工具面——占不占
+`max_tools` 槽仍由这台机器把不把 `ask` 列为成员决定，一个键收回。
 
 只想给某一场用、不想常驻占槽：
 
 - TUI：`/ask`（这个包自己声明的命令）或 `/with ask`——`--with` 带的那一场会连它的 tool
   一起放上工具面（tui.md §11 T46）；
-- 命令行：`nulya session new --with ask --pin ext:ask/ask`。
+- 命令行：`nulya session new --with ask`。
 
 ## 装了插件之后
 

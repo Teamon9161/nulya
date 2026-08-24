@@ -185,14 +185,14 @@ test("rows come only from extensions a pin could actually resolve through", () =
   expect(nextFace(sources({ merged: ["a", "b"], session: ["b", "c"] }))).toEqual(["a", "b", "c"])
 })
 
-test("the list holds only rows with a checkbox, and says how many it folded", () => {
-  // The audiences are the packages' own (`driverTools`, DESIGN §7.2.1) — which
+test("the list folds driver-only rows, while pinnable and with-surface rows stay visible", () => {
+  // The surfaces are the packages' own (`driverTools`, DESIGN §7.2.1) — which
   // is why `agent` splits: one model tool, three driver ones. Before T34 the
   // whole package was driver-only because its id was on a list here, and its
   // delegation entry point was folded away with the rest.
   const entries: ExtensionEntry[] = [
-    { ...entry("agent", "v-1", ["agent", "list", "render", "run"]), driverTools: ["list", "render", "run"] },
-    { ...entry("compact", "v-1", ["compact"]), driverTools: ["compact"] },
+    { ...entry("agent", "v-1", ["agent", "list", "render", "run"]), pinTools: ["agent"], driverTools: ["list", "render", "run"] },
+    { ...entry("compact", "v-1", ["compact"]), pinTools: [], driverTools: ["compact"] },
     entry("std", "v-1", ["read", "grep"]),
   ]
   const rows = toolRows(entries, sources({ user: [toolId("std", "read")] }), [])
@@ -324,6 +324,8 @@ function entry(id: string, current: string, tools: string[]): ExtensionEntry {
     versions: [{ version: current, mtime: 0 }],
     kind: "script",
     tools,
+    pinTools: tools,
+    withTools: [],
     driverTools: [],
     skills: [],
     systemPrompts: [],
@@ -334,10 +336,10 @@ function entry(id: string, current: string, tools: string[]): ExtensionEntry {
   }
 }
 
-test("a tool its package brings into every session reads as on, and this panel will not toggle it", () => {
-  // `[extensions] session_with` puts `--pin ext:agent/agent` on every session
-  // this front end starts (T42). No pin list names it, so the panel used to
-  // draw an empty checkbox about a tool the model was calling all day.
+test("a with-surface tool its package brings into every session reads as on, and this panel will not toggle it", () => {
+  // A composed package contributes `surface:\"with\"` tools to every session
+  // this front end starts. No pin list names them, so the panel must not draw
+  // an empty checkbox about a tool the model can call.
   const sources = { user: [], session: ["ext:std/read"], merged: [], composed: ["ext:agent/agent"] }
   expect(pinState("ext:agent/agent", sources)).toBe("composed")
   expect(stateLabel(pinState("ext:agent/agent", sources))).toBe("with the package")
@@ -349,7 +351,7 @@ test("a tool its package brings into every session reads as on, and this panel w
   const off = toggle("ext:agent/agent", sources)
   expect(off.user).toBeNull()
   expect(off.session).toBeNull()
-  expect(off.notice).toContain("session_with")
+  expect(off.notice).toContain("composed package membership")
   expect(promote("ext:agent/agent", sources).session).toBeNull()
 })
 
@@ -363,40 +365,34 @@ test("a tool its package brings into every session reads as on, and this panel w
  * every session — and it went with the declaration (K8): reach is stated by the
  * person now, in `[extensions] with` or in `/ext`, both of them visible.
  */
-test("a package with a resolvable current offers every tool a standing pin can name", () => {
+test("a package with a resolvable current offers only surface-pin tools a standing pin can name", () => {
   const entry = (
     id: string,
     tools: string[],
+    pinTools = tools,
     over: Partial<{ current: string | null; shadowed: boolean }> = {},
-  ) => ({ id, tools, current: "v-1", shadowed: false, ...over })
+  ) => ({ id, tools, pinTools, current: "v-1", shadowed: false, ...over })
 
   const available = resolvableStandingPins([
     entry("std", ["read", "edit"]),
-    // Driver tools are in: `audience` is the package's advice about whose face
-    // a tool belongs on, not a rule about what may be pinned.
-    entry("agent", ["agent", "run"]),
-    // A mode's tools are in too, now. Pinning one is a real decision a person
-    // can make and take back — and the pin brings its package into every
-    // session, which is the same thing `[extensions] with` would say.
-    entry("plan", ["propose", "todo"]),
+    entry("agent", ["agent", "run"], ["agent"]),
+    entry("plan", ["propose", "todo"], []),
     // Nothing points at a version, and an earlier root already answers for this
     // id: neither can resolve either.
-    entry("guide", ["guide"], { current: null }),
-    entry("compact", ["compact"], { shadowed: true }),
+    entry("guide", ["guide"], ["guide"], { current: null }),
+    entry("compact", ["compact"], [], { shadowed: true }),
   ])
   expect(available).toEqual([
     "ext:std/read",
     "ext:std/edit",
     "ext:agent/agent",
-    "ext:agent/run",
-    "ext:plan/propose",
-    "ext:plan/todo",
   ])
 
-  // The two lines that would make every `session new` refuse, found by the same
-  // predicate that repairs them.
-  expect(orphanPins(["ext:std/read", "ext:guide/guide", "ext:ask/ask"], available)).toEqual([
+  // Lines for with-surface or inactive tools would make every `session new`
+  // refuse, found by the same predicate that repairs them.
+  expect(orphanPins(["ext:std/read", "ext:guide/guide", "ext:ask/ask", "ext:plan/propose"], available)).toEqual([
     "ext:guide/guide",
     "ext:ask/ask",
+    "ext:plan/propose",
   ])
 })

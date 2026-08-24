@@ -8,7 +8,7 @@
     "tools": [
       {
         "name": "agent",
-        "description": "Delegate one self-contained piece of work to a sub-agent, or send another turn into one that already reported. A sub-agent runs in a session of its own — its own context, its own tool face — and ONLY its final report comes back to you, as a message a little later; nothing else from its session enters this conversation and it cannot see yours. Give `name` to START one: say the whole task, because it sees nothing of this conversation and cannot ask you anything. Give `session` INSTEAD to follow up on a report you already have — that session still holds everything it found, so a correction or a request for specifics costs one turn where starting over pays for the search again. Prefer it. Use delegation for work that is separable and worth a fresh context (a broad search, a focused review); not for something you could finish in a step or two yourself, and never for the same thing twice. Calling an unknown name lists the ones that exist. After it returns, end your turn: the work has not happened yet.",
+        "description": "Delegate one self-contained piece of work to a sub-agent, or send another turn into one that already reported. A sub-agent runs in a session of its own — its own context, its own tool face — and ONLY its final report comes back to you, as a message a little later; nothing else from its session enters this conversation and it cannot see yours. Give `name` to START one: say the whole task, because it sees nothing of this conversation and cannot ask you anything. Give `session` INSTEAD to follow up on a report you already have — that session still holds everything it found, so a correction or a request for specifics costs one turn where starting over pays for the search again. Prefer it. Use delegation for work that is separable and worth a fresh context (a broad search, a focused review); not for something you could finish in a step or two yourself, and never for the same thing twice. Calling an unknown name lists a short catalogue; for the full catalogue, use shell: `nulya ext run agent list`. After it returns, end your turn: the work has not happened yet.",
         "timeout_ms": 120000,
         "input": {
           "type": "object",
@@ -37,7 +37,7 @@
       },
       {
         "name": "render",
-        "audience": "driver",
+        "surface": "driver",
         "description": "Render an agent definition's body to a file a session can wear. For drivers: returns that file's path, for `session new --prompt`, plus the session arguments the definition asks for. Nothing is installed and nothing is versioned — the bytes are frozen into the session header when the session is created.",
         "input": {
           "type": "object",
@@ -54,7 +54,7 @@
       },
       {
         "name": "list",
-        "audience": "driver",
+        "surface": "driver",
         "description": "Every agent definition this workspace, this machine and this package hold, in search order, with the ones an earlier layer shadows marked. For drivers: a picker's data. Never needed by a model — an unknown name already comes back with the names that exist.",
         "input": {
           "type": "object",
@@ -63,7 +63,7 @@
       },
       {
         "name": "run",
-        "audience": "driver",
+        "surface": "driver",
         "description": "Drive one delegated session to the end of its turn and print its report. For drivers: this is the command the background task started by `agent` runs; the report reaches the parent as that task's result.",
         "input": {
           "type": "object",

@@ -13,6 +13,8 @@ function contribution(over: Partial<Contributions> & Pick<Contributions, "id">):
   return {
     version: "v-0",
     tools: [],
+    pinTools: [],
+    withTools: [],
     driverTools: [],
     skills: [],
     systemPrompts: [],

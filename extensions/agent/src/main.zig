@@ -135,7 +135,7 @@ fn render(ctx: *const Ctx, name: []const u8) !union(enum) { ok: Rendered, failed
         return .{ .failed = try std.fmt.allocPrint(alloc, "'{s}' is not an agent name; a name is letters, digits, '.', '_' or '-' and names one definition file", .{name}) };
     }
     const entry = (try defs.find(alloc, ctx.io, ctx.env, name)) orelse {
-        const known = try defs.names(alloc, ctx.io, ctx.env);
+        const known = try availableAgentsSummary(alloc, ctx.io, ctx.env);
         return .{ .failed = if (known.len == 0)
             try std.fmt.allocPrint(
                 alloc,
@@ -143,7 +143,7 @@ fn render(ctx: *const Ctx, name: []const u8) !union(enum) { ok: Rendered, failed
                 .{ name, defs.project_dir },
             )
         else
-            try std.fmt.allocPrint(alloc, "no agent '{s}'. Available: {s}.", .{ name, try std.mem.join(alloc, ", ", known) }) };
+            try std.fmt.allocPrint(alloc, "no agent '{s}'. Available: {s}. For the full catalogue, run `nulya ext run agent list` with shell.", .{ name, known }) };
     };
 
     const def = entry.def;
@@ -159,6 +159,30 @@ fn render(ctx: *const Ctx, name: []const u8) !union(enum) { ok: Rendered, failed
     };
 
     return .{ .ok = .{ .def = def, .label = label, .path = path, .warnings = entry.warnings } };
+}
+
+fn availableAgentsSummary(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    env: *const std.process.Environ.Map,
+) ![]const u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    var shown: usize = 0;
+    var total: usize = 0;
+    for (try defs.discover(alloc, io, env)) |entry| {
+        if (entry.shadowed) continue;
+        total += 1;
+        if (shown >= 8) continue;
+        if (shown > 0) try out.writer.writeAll("; ");
+        if (entry.def.description.len == 0) {
+            try out.writer.writeAll(entry.def.name);
+        } else {
+            try out.writer.print("{s} — {s}", .{ entry.def.name, entry.def.description });
+        }
+        shown += 1;
+    }
+    if (total > shown) try out.writer.print("; … and {d} more", .{total - shown});
+    return try out.toOwnedSlice();
 }
 
 /// `render {name}` → the prompt file, and the arguments a driver needs to open a

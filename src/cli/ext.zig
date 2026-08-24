@@ -1545,6 +1545,9 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             \\  `default`, so one version can carry a different script per platform; the
             \\  object form is script-only, and a host this build has no entry for is a
             \\  named refusal rather than a silent skip); `tools[].name` / `.input` /
+            \\  `.surface` (`pin` = model-facing and independently pinnable; `with` =
+            \\  model-facing only when the package is explicitly composed with `--with`;
+            \\  `driver` = for `nulya ext run`, not the model face in fresh sessions) /
             \\  `.timeout_ms` (this tool's own cap on a MODEL-FACE call, default 30s,
             \\  ceiling 600s); `skills`; `system_prompts`. Nothing says how the runtime is
             \\  talked to, because there is one way: stdin is the call's arguments as one
@@ -1555,19 +1558,22 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             \\  A manifest cannot say which sessions carry it. That is two decisions, and
             \\  both are the person's, in config or on one command line: MEMBERSHIP
             \\  (`[extensions] with`, or `session new --with <id>[@<version>]`) and the
-            \\  TOOL FACE (`[registry] pinned_native_tools`, or `session new --pin
-            \\  ext:<id>/<tool>`, which brings its own package in). `nulya ext activate` is
-            \\  on neither axis: it says which version `<id>` means, and nothing else.
-            \\  `nulya config show` prints both standing lists; `session new --bare`
-            \\  ignores them and composes from its own flags alone.
+            \\  INDEPENDENT PIN FACE (`[registry] pinned_native_tools`, or `session new
+            \\  --pin ext:<id>/<tool>`, which accepts only `surface: pin` tools and brings
+            \\  its own package in). `surface: with` tools reach the model through explicit
+            \\  membership, not through a pin. `nulya ext activate` is on neither axis: it
+            \\  says which version `<id>` means, and nothing else. `nulya config show`
+            \\  prints both standing lists; `session new --bare` ignores them and composes
+            \\  from its own flags alone.
             \\
             \\  DRIVER DECLARATIONS, parsed, frozen into the version, and never enforced by
             \\  the kernel: a claim for whoever DRIVES a session (a front end, `nulya ext
             \\  run`, a script) to read and act on however it likes. Absent reads as null,
             \\  "the package did not say", never a default value: `tools[].readonly` (this
-            \\  tool only reads, in the package's own words); `tools[].audience` (`"model"`
-            \\  or `"driver"` — a closed pair, and an unrecognized word is refused rather
-            \\  than read as either one); `policy`, `{"readonly": true}` — one narrowing a
+            \\  tool only reads, in the package's own words); legacy `tools[].audience`
+            \\  (`"model"` or `"driver"`) is accepted for older manifests and folded into
+            \\  `surface` (`driver` stays driver, `model`/absent becomes `pin`; explicit
+            \\  `surface` wins); `policy`, `{"readonly": true}` — one narrowing a
             \\  package can ask an approval policy for while it is a session member. There
             \\  is no key that widens anything: a package that could add to an allow table
             \\  would gain authority just by being composed in.
@@ -1592,8 +1598,8 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             \\  and ignores the rest; a package with no key for it simply has no module
             \\  there.
             \\
-            \\  Wall clock is enforced on the model's tool face only: a call a pinned
-            \\  package puts in front of a model is killed at 30s unless the manifest's
+            \\  Wall clock is enforced on the model's tool face only: an extension tool
+            \\  placed in front of a model is killed at 30s unless the manifest's
             \\  `timeout_ms` says otherwise (600s maximum); `shell` there defaults to 120s
             \\  and accepts up to 600s. That field means nothing anywhere else, so a tool
             \\  that is only ever called by a driver has no reason to write one: `nulya ext
@@ -1671,9 +1677,9 @@ test "every manifest parse/validate error is a draft fault; a host fault is not"
         error.WrongType,                 error.UnsupportedSchema,  error.InvalidId,
         error.MissingRuntime,            error.InvalidEntry,       error.InvalidInterpreter,
         error.NoContributions,           error.InvalidToolName,    error.ReservedToolName,
-        error.DuplicateToolName,         error.InvalidTimeout,     error.InvalidAudience,
-        error.InvalidSkillPath,          error.DuplicateSkillPath, error.InvalidSystemPromptPath,
-        error.DuplicateSystemPromptPath, error.InvalidCommandName, error.DuplicateCommandName,
+        error.DuplicateToolName,         error.InvalidTimeout,     error.InvalidSurface,
+        error.InvalidAudience,           error.InvalidSkillPath,   error.DuplicateSkillPath,
+        error.InvalidSystemPromptPath,   error.DuplicateSystemPromptPath, error.InvalidCommandName,
         error.InvalidCommandAction,      error.UnknownCommandTool, error.InvalidUiHost,
         error.InvalidUiEntry,            error.InvalidUiApi,
     }) |err| {

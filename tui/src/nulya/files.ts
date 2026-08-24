@@ -95,16 +95,11 @@ export interface Contributions {
   id: string
   version: string
   tools: string[]
-  /**
-   * The subset of `tools` whose manifest says `"audience": "driver"` (DESIGN
-   * §7.2.1) — called with `nulya ext run` by whoever drives a session, never
-   * meant for the model's tool face.
-   *
-   * Silence is not on this list: a package that said nothing is read as `model`
-   * (`modelTools`), which is what every manifest written before the field
-   * existed means. The kernel records the claim and enforces nothing — pinning
-   * a driver tool still works; this is what makes the front end not do it.
-   */
+  /** The subset of `tools` whose surface is `pin`: model-facing and user-pinnable. */
+  pinTools: string[]
+  /** The subset of `tools` whose surface is `with`: model-facing when its package is composed. */
+  withTools: string[]
+  /** The subset of `tools` whose surface is `driver`: callable by drivers with `ext run`. */
   driverTools: string[]
   skills: string[]
   /**
@@ -218,6 +213,8 @@ export async function readContributions(
     id,
     version,
     tools: [],
+    pinTools: [],
+    withTools: [],
     driverTools: [],
     skills: [],
     systemPrompts: [],
@@ -269,6 +266,8 @@ function contributionsOf(
 ): Pick<
   Contributions,
   | "tools"
+  | "pinTools"
+  | "withTools"
   | "driverTools"
   | "systemPrompts"
   | "skills"
@@ -288,11 +287,13 @@ function contributionsOf(
     const render = toolUiOf(tool)["render"]
     if (typeof render === "string") toolRender[tool["name"] as string] = render
   }
+  const tools = named.map((tool) => tool["name"] as string)
+  const surfaces = new Map(named.map((tool) => [tool["name"] as string, toolSurfaceOf(tool)]))
   return {
-    tools: named.map((tool) => tool["name"] as string),
-    // The kernel refuses any other word, so only `"driver"` can be here; absent
-    // stays absent and `modelTools` is where silence is read.
-    driverTools: named.filter((tool) => tool["audience"] === "driver").map((tool) => tool["name"] as string),
+    tools,
+    pinTools: tools.filter((tool) => surfaces.get(tool) === "pin"),
+    withTools: tools.filter((tool) => surfaces.get(tool) === "with"),
+    driverTools: tools.filter((tool) => surfaces.get(tool) === "driver"),
     skills: stringList(contributes["skills"]),
     systemPrompts: stringList(contributes["system_prompts"]),
     commands: commandsOf(contributes["commands"]),
@@ -301,6 +302,15 @@ function contributionsOf(
     panelTools: named.filter((tool) => toolUiOf(tool)["panel"] === true).map((tool) => tool["name"] as string),
     ui: uiOf(contributes["ui"]),
   }
+}
+
+/** A tool's placement, folding legacy `audience` the same way the kernel does. */
+export type ToolSurface = "pin" | "with" | "driver"
+
+function toolSurfaceOf(tool: Record<string, unknown>): ToolSurface {
+  const surface = tool["surface"]
+  if (surface === "pin" || surface === "with" || surface === "driver") return surface
+  return tool["audience"] === "driver" ? "driver" : "pin"
 }
 
 /** A tool's `ui` object (`ToolSpec.ui`, DESIGN §7.2.1), or `{}` when absent or malformed. */
@@ -366,20 +376,19 @@ function policyOf(value: unknown): PackagePolicy | null {
 }
 
 /**
- * The tools of a package that belong on the MODEL's tool face — the ones a pin
- * is for (DESIGN §5.1, §7.2.1).
- *
- * This is the one place silence is read: a package that declared no `audience`
- * is taken to mean `model`, because that is what every manifest written before
- * the field existed says, and the kernel deliberately does not write the
- * default in for anybody. A package with no model tools at all (`compact`) is
- * not half-installed — it is fully on with nothing on the face, which is how a
- * driver's package works.
+ * The model-facing tools of a package: both independently pinnable tools and
+ * tools that appear through explicit package membership. Kept for older tests
+ * and readers that only need "not driver"; `pinTools` is the answer for writes.
  */
 export function modelTools(
   what: Pick<Contributions, "tools" | "driverTools">,
 ): string[] {
   return what.tools.filter((tool) => !what.driverTools.includes(tool))
+}
+
+/** The model-facing tools a person can independently pin. */
+export function pinTools(what: Pick<Contributions, "tools" | "pinTools" | "driverTools">): string[] {
+  return what.pinTools ?? what.tools.filter((tool) => !what.driverTools.includes(tool))
 }
 
 /**
@@ -656,7 +665,11 @@ export interface ExtensionEntry {
   versions: ExtensionVersion[]
   kind: ImplementationKind
   tools: string[]
-  /** The declared driver-audience subset of `tools` (DESIGN §7.2.1). */
+  /** The declared pin-surface subset of `tools` (DESIGN §7.2.1). */
+  pinTools: string[]
+  /** The declared with-surface subset of `tools` (DESIGN §7.2.1). */
+  withTools: string[]
+  /** The declared driver-surface subset of `tools` (DESIGN §7.2.1). */
   driverTools: string[]
   skills: string[]
   systemPrompts: string[]
@@ -691,7 +704,7 @@ function stringList(value: unknown): string[] {
 
 function manifestFacts(manifest: Record<string, unknown> | null): Pick<
   ExtensionEntry,
-  "kind" | "tools" | "driverTools" | "skills" | "systemPrompts" | "commands" | "ui"
+  "kind" | "tools" | "pinTools" | "withTools" | "driverTools" | "skills" | "systemPrompts" | "commands" | "ui"
 > {
   const runtime = manifest?.["runtime"] as Record<string, unknown> | undefined
   // `runtime.entry` is a string, or an object keyed by OS for a script that

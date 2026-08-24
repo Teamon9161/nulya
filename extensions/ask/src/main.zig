@@ -33,11 +33,11 @@
 //! Nobody can decide in advance that a question will come up: the model finds
 //! that out in the middle of a task, so a package that only lived in sessions
 //! somebody had already earmarked for questions would be a package that never
-//! fires. So this one belongs in the standing lists — `[extensions] with` plus
-//! a pin for its single tool, since whether it costs a `max_tools` slot is the
-//! OTHER axis's question (DESIGN §7.5), per-machine and reversible with one
-//! key. For one session only, `--with ask --pin ext:ask/ask` still does what it
-//! always did; the `/ask` command this manifest declares is that route.
+//! fires. So this one belongs in the standing membership list: `[extensions]
+//! with`. Its single tool declares `surface: "with"`, so explicit membership
+//! puts it on the model face; one key still removes both the membership and the
+//! tool slot. For one session only, `--with ask` is the route, and the `/ask`
+//! command this manifest declares uses that route.
 //!
 //! **Why compiled Zig rather than a script.** Identical to `handoff`: a question
 //! and a list of options to validate as a group, so one retry is informed. `sh`

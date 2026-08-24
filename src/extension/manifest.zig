@@ -118,20 +118,39 @@ pub fn implementationKind(m: Manifest) ImplementationKind {
     return if (isScript(rt)) .script else .compiled;
 }
 
-/// Who a tool is FOR — the only question about a tool that only its own package
-/// can answer (DESIGN §7.2.1).
-///
-///   - `model`  : it belongs on the model's tool face; pinning it is the point.
-///   - `driver` : it is an interface for whoever DRIVES a session (`nulya ext
-///                run`, a front end, a script). Putting it on the model's face
-///                would at best waste a slot and at worst deadlock — `compact`
-///                appends to and steps the very session it is called about.
+/// Legacy spelling for the old two-way tool placement. New manifests should
+/// write `surface`, because `audience: "model"` could not distinguish a tool
+/// that is pinnable from one that appears only when its package is explicitly
+/// composed.
 pub const Audience = enum {
     model,
     driver,
 
     pub fn fromString(s: []const u8) ?Audience {
         if (std.mem.eql(u8, s, "model")) return .model;
+        if (std.mem.eql(u8, s, "driver")) return .driver;
+        return null;
+    }
+};
+
+/// Where this tool belongs in a session's capability surface.
+///
+///   - `pin`    : model-facing, and may be independently pinned. This is the
+///                backward-compatible default for old manifests.
+///   - `with`   : model-facing only when the package is an explicit member of
+///                this session (`--with`, config `[extensions] with`, or a
+///                driver's equivalent). A pin that merely implies package
+///                membership does NOT unlock every `with` tool in that package.
+///   - `driver` : callable through `nulya ext run` by a driver, not exposed to
+///                the model.
+pub const Surface = enum {
+    pin,
+    with,
+    driver,
+
+    pub fn fromString(s: []const u8) ?Surface {
+        if (std.mem.eql(u8, s, "pin")) return .pin;
+        if (std.mem.eql(u8, s, "with")) return .with;
         if (std.mem.eql(u8, s, "driver")) return .driver;
         return null;
     }
@@ -184,23 +203,13 @@ pub const ToolSpec = struct {
     /// Absent means the package did not say, which is not the same as `false`
     /// and must not be read as one.
     readonly: ?bool = null,
-    /// The package's statement of who this tool is for — kept as WRITTEN, so
-    /// that an unrecognized word is a named `validate` refusal rather than a
-    /// silent default (`audienceOf`, `InvalidAudience`). Exactly the discipline
-    /// `timeout_ms` follows: a wrong TYPE is a parse error, a wrong VALUE is a
-    /// validate error.
-    ///
-    /// A DECLARATION, like `readonly` beside it: the kernel
-    /// parses it, freezes it into the version's manifest, and enforces nothing.
-    /// Nothing here filters a tool face or refuses a pin — pinning a `driver`
-    /// tool stays legal, it is simply not what a driver would do by default.
-    /// The consumers are a driver's own policies: which tools a standing pin
-    /// list holds, which ones a panel lists, which ones an approval rule is about.
-    ///
-    /// Absent is null, NOT `.model`. "The package did not say" and "the package
-    /// said model" are different facts; a reader is free to treat silence as
-    /// model (every manifest written before this field existed declares model
-    /// tools), but that reading is the reader's, made where it is used.
+    /// The new single placement field, kept as WRITTEN. `surfaceOf` folds it
+    /// with the legacy `audience` field: explicit `surface` wins, legacy
+    /// `audience:"driver"` maps to `.driver`, and silence maps to `.pin` for
+    /// backward compatibility with manifests written before either field.
+    surface: ?[]const u8 = null,
+    /// Legacy two-way placement. Kept so frozen and older manifests still parse;
+    /// new manifests should write `surface` instead.
     audience: ?[]const u8 = null,
     /// This tool's front-end rendering hints (see `ToolUi`), or null when the
     /// package made neither claim. Grouped under one FRONT-END key, distinct
@@ -214,6 +223,18 @@ pub const ToolSpec = struct {
     /// manifest null means only "did not say".
     pub fn audienceOf(self: ToolSpec) ?Audience {
         return Audience.fromString(self.audience orelse return null);
+    }
+
+    /// This tool's placement after folding the legacy field. `surface` is
+    /// authoritative when both fields are present; otherwise old
+    /// `audience:"driver"` keeps meaning driver-only, and every other old tool
+    /// defaults to a pinnable model-facing tool.
+    pub fn surfaceOf(self: ToolSpec) Surface {
+        if (self.surface) |s| return Surface.fromString(s).?;
+        return switch (self.audienceOf() orelse .model) {
+            .model => .pin,
+            .driver => .driver,
+        };
     }
 };
 
@@ -442,6 +463,9 @@ pub const Manifest = struct {
             // default: a package that meant `driver` and typed `drivers` would
             // otherwise land its tool on the model's face, which is the exact
             // outcome the field exists to prevent.
+            if (t.surface) |s| {
+                if (Surface.fromString(s) == null) return error.InvalidSurface;
+            }
             if (t.audience) |a| {
                 if (Audience.fromString(a) == null) return error.InvalidAudience;
             }
@@ -528,7 +552,9 @@ pub const ValidateError = error{
     DuplicateToolName,
     /// A tool's `timeout_ms` is zero or above `tool.Timeouts.extension_max_ms`.
     InvalidTimeout,
-    /// A tool's `audience` is a string, but not one of `model` / `driver`.
+    /// A tool's `surface` is a string, but not one of `pin` / `with` / `driver`.
+    InvalidSurface,
+    /// A legacy tool `audience` is a string, but not one of `model` / `driver`.
     InvalidAudience,
     InvalidSkillPath,
     DuplicateSkillPath,
@@ -739,6 +765,7 @@ fn dupTools(a: std.mem.Allocator, contributes: std.json.ObjectMap) ParseError![]
             .input_schema = if (to.get("input")) |iv| try compact(a, iv) else try a.dupe(u8, "{}"),
             .timeout_ms = try optionalU32(to, "timeout_ms"),
             .readonly = try optionalBool(to, "readonly"),
+            .surface = try optionalString(a, to, "surface"),
             .audience = try optionalString(a, to, "audience"),
             .ui = try dupToolUi(a, to),
         };
@@ -1266,7 +1293,7 @@ test "a tool may declare itself readonly; the kernel records the claim and enfor
     ));
 }
 
-test "a tool may declare who it is for; silence is not a claim and an unknown word is refused" {
+test "a tool may declare legacy audience; silence is not a claim and an unknown word is refused" {
     const alloc = std.testing.allocator;
     var m = try parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"ask","input":{},"audience":"model"},{"name":"drive","input":{},"audience":"driver"},{"name":"quiet","input":{}}]}}
@@ -1292,6 +1319,31 @@ test "a tool may declare who it is for; silence is not a claim and an unknown wo
     // And a wrong TYPE is a parse error, the same split `timeout_ms` makes.
     try std.testing.expectError(error.WrongType, parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"t","input":{},"audience":true}]}}
+    ));
+}
+
+test "a tool's surface declares pin, with or driver placement and overrides legacy audience" {
+    const alloc = std.testing.allocator;
+    var m = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"pinny","input":{},"surface":"pin"},{"name":"ask","input":{},"surface":"with"},{"name":"drive","input":{},"surface":"driver"},{"name":"legacy","input":{},"audience":"driver"},{"name":"override","input":{},"surface":"with","audience":"driver"},{"name":"quiet","input":{}}]}}
+    );
+    defer m.deinit();
+    try m.validate();
+    try std.testing.expectEqual(Surface.pin, m.tools[0].surfaceOf());
+    try std.testing.expectEqual(Surface.with, m.tools[1].surfaceOf());
+    try std.testing.expectEqual(Surface.driver, m.tools[2].surfaceOf());
+    try std.testing.expectEqual(Surface.driver, m.tools[3].surfaceOf());
+    try std.testing.expectEqual(Surface.with, m.tools[4].surfaceOf());
+    try std.testing.expectEqual(Surface.pin, m.tools[5].surfaceOf());
+
+    var typo = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"t","input":{},"surface":"public"}]}}
+    );
+    defer typo.deinit();
+    try std.testing.expectError(error.InvalidSurface, typo.validate());
+
+    try std.testing.expectError(error.WrongType, parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"t","input":{},"surface":true}]}}
     ));
 }
 

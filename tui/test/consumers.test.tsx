@@ -290,7 +290,7 @@ test.skipIf(!has_zig)("plan: /with puts the package AND its tools into the sessi
   // Membership: the version is in the composition, frozen.
   expect(started.composition.active.some((one) => one.startsWith("plan@"))).toBe(true)
   // …and the face: both model tools, beside the one builtin. `approve` is the
-  // package's own `audience: "driver"` and stays off it.
+  // package's own `surface: "driver"` and stays off it.
   expect(started.composition.native_tools).toContain("ext:plan/propose")
   expect(started.composition.native_tools).toContain("ext:plan/todo")
   expect(started.composition.native_tools).not.toContain("ext:plan/approve")

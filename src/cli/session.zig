@@ -528,6 +528,10 @@ pub fn createSession(
             try printPinFailure(alloc, io, pins, "names a tool its active version does not declare (see `nulya ext inspect <id>`)");
             return null;
         },
+        error.PinToolNotPinnable => {
+            try printPinFailure(alloc, io, pins, "names a tool whose manifest surface is not `pin`; compose the package with `--with` if it is surface `with`, or call it with `nulya ext run` if it is surface `driver`");
+            return null;
+        },
         error.InvalidStableToolId => {
             try printPinFailure(alloc, io, pins, "is not a stable tool id (want ext:<extension-id>/<tool-name>)");
             return null;

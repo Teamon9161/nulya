@@ -22,7 +22,7 @@
 //!                        `render: "checklist"` + `panel: true` so a front end
 //!                        with no plugin loaded still shows progress (D12).
 //!                        Also writes nothing: the call is the record.
-//!   `approve {…}`        `audience: "driver"`. The one tool here that touches
+//!   `approve {…}`        `surface: "driver"`. The one tool here that touches
 //!                        the disk: it renders an approved plan into
 //!                        `.nulya/handoffs/<session>-<n>.md` — byte-shaped like
 //!                        what `extensions/handoff` writes — and returns the
@@ -200,7 +200,7 @@ fn todo(alloc: std.mem.Allocator, args: std.json.ObjectMap) !rpc.Outcome {
 /// Freeze an approved plan into a brief on disk and report where it went.
 ///
 /// The session id arrives as an ARGUMENT rather than from `NULYA_SESSION`,
-/// because this tool is called by a driver (`nulya ext run`, `audience:
+/// because this tool is called by a driver (`nulya ext run`, `surface:
 /// "driver"`) and not from inside a step — the front end that just watched a
 /// person approve the plan is the one that knows which session it belongs to.
 fn approve(alloc: std.mem.Allocator, io: std.Io, args: std.json.ObjectMap) !rpc.Outcome {

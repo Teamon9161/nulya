@@ -31,7 +31,7 @@ import {
   type SyncLine,
   type SyncReport,
 } from "./nulya/cli.ts"
-import { modelTools, readContributions, rootsOf, type Contributions, type PackageCommand } from "./nulya/files.ts"
+import { pinTools, readContributions, rootsOf, type Contributions, type PackageCommand } from "./nulya/files.ts"
 import { builtin_tools, toolId } from "./pins.ts"
 import { userConfigDir } from "./state/settings.ts"
 import { loadTuiState, rememberSessionPins, saveTuiState, tuiStatePath } from "./state/tui_state.ts"
@@ -438,7 +438,7 @@ export function planStore(ws: Workspace, user: boolean): Promise<SyncReport> {
 // There used to be two hard-coded lists here saying which of them meant what:
 // one for "install means active everywhere", one for "these tools are a driver
 // interface". Both are gone (T34). The second is now the package's own words —
-// `contributes.tools[].audience` in the frozen manifest (DESIGN §7.2.1) — which
+// `contributes.tools[].surface` in the frozen manifest (DESIGN §7.2.1) — which
 // is the only place that knows, and works for a package this repository has
 // never heard of. The first turned out to be nothing twice over: activating is
 // a pointer move that composes nothing (DESIGN §5.1), and what a session
@@ -485,8 +485,8 @@ export const std_pins = [
  * half-anything: the switch is membership alone, and `nulya ext run` reaches
  * its tool without a pin, which is how `/compact` has always called it.
  */
-export function pinsOf(what: Pick<Contributions, "id" | "tools" | "driverTools">): string[] {
-  return modelTools(what).map((tool) => toolId(what.id, tool))
+export function pinsOf(what: Pick<Contributions, "id" | "tools" | "pinTools" | "driverTools">): string[] {
+  return pinTools(what).map((tool) => toolId(what.id, tool))
 }
 
 /**
@@ -544,10 +544,10 @@ export function derivedCommand(
  * saying what the pins already say, and a second thing to take back.
  */
 export function standingWith(
-  what: Pick<Contributions, "skills" | "systemPrompts" | "commands" | "ui">,
+  what: Pick<Contributions, "skills" | "systemPrompts" | "commands" | "ui" | "withTools">,
 ): boolean {
   if (what.systemPrompts.length > 0) return false
-  return what.skills.length > 0 || what.commands.length > 0 || what.ui !== null
+  return what.skills.length > 0 || what.commands.length > 0 || what.ui !== null || what.withTools.length > 0
 }
 
 /**
@@ -749,8 +749,6 @@ export async function adoptStdEditPin(ws: Workspace, statePath?: string): Promis
 export interface SessionMember {
   id: string
   version: string
-  /** One per tool this version puts on the model's face (`pinsOf`). */
-  pins: string[]
 }
 
 /**
@@ -776,7 +774,7 @@ export async function sessionMember(ws: Workspace, id: string): Promise<SessionM
   if (!version) {
     throw new Error(`${id} · no active version in any store · \`nulya ext build <path> --user\` then \`nulya ext activate --user ${id} <v>\``)
   }
-  return { id, version, pins: pinsOf(await readContributions(ws, id, version)) }
+  return { id, version }
 }
 
 /** Build the draft this binary ships for `id`, or null when it ships none. */

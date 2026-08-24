@@ -333,6 +333,33 @@ test("the binary's bundled drafts seed into a store — dry-run counts them, a s
   }
 })
 
+test("bundled ask and plan expose member-scoped tools without writing pins", async () => {
+  const store = tempWorkspace()
+  try {
+    await extSeed(store, { ids: ["ask", "plan"] })
+    const built = await extSync(store, { activate: true })
+    const root = syncRoot(store, false)
+    const askLine = built.lines.find((entry) => entry.id === "ask")!
+    const planLine = built.lines.find((entry) => entry.id === "plan")!
+    expect(askLine.state).not.toBe("failed")
+    expect(planLine.state).not.toBe("failed")
+    expect(askLine.version).toBeTruthy()
+    expect(planLine.version).toBeTruthy()
+
+    const ask = (await builtContributions(store, root, "ask", askLine.version!))!
+    const plan = (await builtContributions(store, root, "plan", planLine.version!))!
+    expect(ask.withTools).toEqual(["ask"])
+    expect(plan.withTools).toEqual(["propose", "todo"])
+    expect(plan.driverTools).toEqual(["approve"])
+    expect(pinsOf(ask)).toEqual([])
+    expect(pinsOf(plan)).toEqual([])
+    expect(standingWith(ask)).toBe(true)
+    expect(standingWith(plan)).toBe(false)
+  } finally {
+    store.cleanup()
+  }
+}, 120_000)
+
 /**
  * The bundled install is nobody's question any more (tui.md §11, T23), so the
  * whole of the consent lives in one rule: only what `ext seed` says arrived THIS
@@ -426,6 +453,7 @@ test("a package that contributes a system prompt never gets a standing with entr
     systemPrompts: [] as string[],
     commands: [],
     ui: null,
+    withTools: [] as string[],
     ...over,
   })
 
@@ -441,7 +469,10 @@ test("a package that contributes a system prompt never gets a standing with entr
   // Enter still never writes it standing, whatever else it contributes.
   expect(standingWith(what({ systemPrompts: ["prompts/identity.md"], skills: ["skills/guide"] }))).toBe(false)
 
-  // A pure tool package: `compact`, `handoff`, `ask`. Nothing here needs an
+  // A package with member-scoped model tools needs membership for those tools.
+  expect(standingWith(what({ withTools: ["ask"] }))).toBe(true)
+
+  // A pure pinnable-tool package: `compact`, `handoff`, old `ask`. Nothing here needs an
   // entry, because a pin brings the package in at `current` all by itself.
   expect(standingWith(what())).toBe(false)
 })
@@ -635,10 +666,10 @@ test("the edit pin migration adopts only once the active std can honour it, and 
 /**
  * The four hard-coded lists this file used to hold are gone (tui.md §11, T34):
  * which of a package's tools belong on the model's face is the package's own
- * word (`audience`, DESIGN §7.2.1), read out of the frozen manifest.
+ * word (`surface`, DESIGN §7.2.1), read out of the frozen manifest.
  */
 test("the pins an activation writes come from the manifest, per tool, for a package nobody here has heard of", () => {
-  const pkg = (id: string, tools: string[], driverTools: string[] = []) => ({ id, tools, driverTools })
+  const pkg = (id: string, tools: string[], driverTools: string[] = [], pinTools = tools.filter((tool) => !driverTools.includes(tool))) => ({ id, tools, pinTools, driverTools })
 
   // Silence is read as `model`, which is what every manifest written before the
   // field existed means — and the kernel deliberately does not write the
@@ -675,14 +706,13 @@ test("the pins an activation writes come from the manifest, per tool, for a pack
  * `pinsOf` is it.
  */
 test("the switch pins every model-facing tool a package declares, whatever kind of package it is", () => {
-  const pkg = (id: string, tools: string[]) => ({ id, tools, driverTools: [] })
+  const pkg = (id: string, tools: string[], pinTools = tools) => ({ id, tools, pinTools, driverTools: [] })
 
   expect(pinsOf(pkg("std", ["read", "edit"]))).toEqual(["ext:std/read", "ext:std/edit"])
-  // A mode is no exception. Its tools reach a face in every session the pin
-  // brings the package into — which is what the person asked for by pressing
-  // Enter on its row, and what `/ext` takes back by pressing it again.
-  expect(pinsOf(pkg("plan", ["propose", "todo"]))).toEqual(["ext:plan/propose", "ext:plan/todo"])
-  expect(pinsOf(pkg("ask", ["ask"]))).toEqual(["ext:ask/ask"])
+  // A mode's tools can opt into `surface:"with"`; those are model-facing, but
+  // membership exposes them and the switch does not pin them.
+  expect(pinsOf(pkg("plan", ["propose", "todo"], []))).toEqual([])
+  expect(pinsOf(pkg("ask", ["ask"], []))).toEqual([])
 })
 
 test("the std pin list is the frozen manifest's, with the literal only as a cold-start fallback", async () => {

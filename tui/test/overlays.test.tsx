@@ -377,8 +377,10 @@ test("/ext names the drift between what this session froze and what the store po
 
 test("the tools pane folds the driver half away and says how much it folded", async () => {
   // A real driver package in the store, and deliberately one this front end has
-  // never heard of: what makes it a driver tool is its own manifest saying
-  // `"audience": "driver"` (DESIGN §7.2.1), not its id being on a list in
+  // never heard of: this fixture deliberately uses the legacy placement field,
+  // so what makes it a driver tool is its own manifest saying
+  // `"audience": "driver"` and the surface-compat fold reading that as
+  // `surface:"driver"` (DESIGN §7.2.1), not its id being on a list in
   // `extensions.ts` — which is exactly what a third party could not do before
   // T34. `ext init --script` names the tool after the id, so this row is
   // `ext:patrol/patrol`, sorted above the pinnable one by the letter p.
@@ -425,7 +427,7 @@ test("a driver tool is listed with no checkbox: there is no pin for it to be wro
   // kernel's writer lock every time (DESIGN §3.4). A checkbox beside it offered
   // a state that cannot work; the row now says who calls it instead (T24).
   //
-  // WHICH tools those are is the package's own word since T34 (`audience`,
+  // WHICH tools those are is the package's own word since T34 (`surface`,
   // DESIGN §7.2.1) rather than a list of bundled ids here — so a package this
   // front end has never heard of gets the same treatment, and one that mixes
   // both kinds (the bundled `agent`) gets it per tool.
@@ -435,6 +437,8 @@ test("a driver tool is listed with no checkbox: there is no pin for it to be wro
     versions: [],
     kind: "compiled" as const,
     tools,
+    pinTools: tools.filter((tool) => !driverTools.includes(tool)),
+    withTools: [],
     driverTools,
     skills: [],
     systemPrompts: [],

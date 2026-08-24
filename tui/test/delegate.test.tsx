@@ -216,7 +216,7 @@ test("a session carries the agent tool when this workspace defines agents, and a
     await until(async () => (await sessionList(ws)).some((e) => e.composition.active.some((r) => r.startsWith("agent@"))), 120_000)
     const parent = (await sessionList(ws)).find((e) => e.composition.active.some((r) => r.startsWith("agent@")))!
     expect(parent.composition.native_tools).toContain("ext:agent/agent")
-    // …and ONLY that one. The package's other three declare `audience:
+    // …and ONLY that one. The package's other three declare `surface:
     // "driver"` in their manifest (DESIGN §7.2.1), and that is what keeps them
     // off the face — nothing here knows their names (tui.md §11, T34).
     for (const driver of ["ext:agent/run", "ext:agent/render", "ext:agent/list"]) {

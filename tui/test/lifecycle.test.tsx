@@ -9,7 +9,7 @@
  * still tested, because the paths that DO create one early still exist.
  */
 import { afterAll, beforeAll, expect, test } from "bun:test"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { testRender } from "@opentui/solid"
@@ -70,6 +70,58 @@ test("a draft creates nothing on disk; the screen says so and the store agrees",
     expect((await sessionList(ws)).map((entry) => entry.id)).toEqual(before)
   } finally {
     setup.renderer.destroy()
+  }
+}, 60_000)
+
+test("a draft counts surface-with tools from config-level extension membership", async () => {
+  const box = tempWorkspace()
+  try {
+    const root = join(box.dir, ".nulya", "extensions", "assist")
+    mkdirSync(join(root, "src"), { recursive: true })
+    writeFileSync(join(root, "src", "run.sh"), "#!/bin/sh\necho ok\n")
+    writeFileSync(
+      join(root, "extension.json"),
+      JSON.stringify({
+        schema: "nulya.extension/v2",
+        id: "assist",
+        runtime: { entry: "src/run.sh", interpreter: "sh" },
+        contributes: { tools: [{ name: "ask", input: {}, surface: "with" }] },
+      }),
+    )
+    const run = (args: string[]) => Bun.spawnSync({ cmd: [box.bin, ...args], cwd: box.dir, env: process.env })
+    const built = run(["ext", "build", ".nulya/extensions/assist"])
+    expect(built.exitCode).toBe(0)
+    const version = /v-[0-9a-zA-Z]+/.exec(built.stdout.toString())?.[0]
+    expect(version).toBeTruthy()
+    expect(run(["ext", "activate", "assist", version!]).exitCode).toBe(0)
+    mkdirSync(join(box.dir, ".nulya"), { recursive: true })
+    writeFileSync(join(box.dir, ".nulya", "config.toml"), '[extensions]\nwith = ["assist"]\n')
+
+    const noSync = createStyle(
+      { ...unsafe_settings, extensions: { ...unsafe_settings.extensions, sync_on_start: false, auto_activate: false } },
+      {},
+    )
+    const before = (await sessionList(box)).map((entry) => entry.id)
+    const setup = await testRender(
+      () => (
+        <App
+          ws={box}
+          pick={{ profile: "scripted", model: "scripted-demo" }}
+          style={noSync}
+          driver={{ env: scripted_env }}
+        />
+      ),
+      { width: 100, height: 36 },
+    )
+    try {
+      await settle(setup, 5)
+      expect(setup.captureCharFrame()).toContain("scripted-demo · tools 1+1")
+      expect((await sessionList(box)).map((entry) => entry.id)).toEqual(before)
+    } finally {
+      setup.renderer.destroy()
+    }
+  } finally {
+    box.cleanup()
   }
 }, 60_000)
 

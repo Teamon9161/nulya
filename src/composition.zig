@@ -2,17 +2,18 @@
 //!
 //! The composition freezes all session-scoped capability state at
 //! `AgentSession.init()`: the member extensions at their frozen versions, the
-//! pinned model-facing tool set, skills and system prompts. Tool, Skill, and
+//! model-facing extension tool set, skills and system prompts. Tool, Skill, and
 //! System Prompt snapshots stay strongly typed and keep their own semantics.
 //!
 //! Two independent decisions share no vocabulary here: which extension VERSION
 //! this session runs (frozen at `init`, `FrozenExtension`) and which extension
-//! tools take a NATIVE slot on the model's tool face ("pin",
-//! `Options.pinned_native_tools`). "Pin" means only the second.
+//! tools take a NATIVE slot on the model's tool face (`Options.pinned_native_tools`
+//! plus tools whose manifest says `surface:"with"` in explicitly composed
+//! members). "Pin" means only the user-pinnable half.
 //!
 //! Two phases, one intermediate value. `resolve` answers the request — a fresh
 //! session's named members, or a session header's frozen versions —
-//! and resolves the pins into bindings; `assemble` builds the frozen session
+//! and resolves the native tool ids into bindings; `assemble` builds the frozen session
 //! state out of that answer alone. Everything about WHY an extension or a tool
 //! is here is decided in the first phase and unrepresentable in the second, so
 //! `init` and `initFrozen` differ only in what they hand to `resolve`.
@@ -113,11 +114,12 @@ pub const FrozenExtension = struct {
 /// it never learns where these came from (DESIGN §9.5 keeps config at the
 /// session-setup boundary).
 pub const Options = struct {
-    /// Stable ids (`ext:<extension-id>/<tool-name>`) to expose natively this
-    /// session — `registry.pinned_native_tools` plus `session new --pin`
-    /// (DESIGN §5.1). The ONLY way an extension tool reaches the model's tool
-    /// face: usage facts never fill a slot by themselves. An unresolvable pin is
-    /// a hard error, never a silent skip.
+    /// Stable ids (`ext:<extension-id>/<tool-name>`) to expose natively because
+    /// a person or driver pinned them — `registry.pinned_native_tools` plus
+    /// `session new --pin` (DESIGN §5.1). Pins are only for tools whose manifest
+    /// surface is `pin`; explicitly composed members add their own
+    /// `surface:"with"` tools below. Usage facts never fill a slot by themselves.
+    /// An unresolvable or non-pinnable pin is a hard error, never a silent skip.
     ///
     /// A pin whose package is not already a member BRINGS IT IN, at `current`
     /// (`resolveFreshExtensions`): a tool cannot take a slot in a session its
@@ -133,9 +135,11 @@ pub const Options = struct {
     /// `nulya session new --with` ("this session"), exactly as
     /// `pinned_native_tools` joins the config pins with `--pin`.
     ///
-    /// Membership only: their skills enter the catalog, their system prompts
-    /// enter the system blocks, and their tools become invocable through the
-    /// CLI — whether a tool takes a native slot is still `pinned_native_tools`.
+    /// Membership: their skills enter the catalog, their system prompts enter
+    /// the system blocks, and their tools become invocable through the CLI. A
+    /// tool whose manifest says `surface:"with"` also takes a native slot from
+    /// this explicit membership; `surface:"pin"` tools still need a pin, and
+    /// `surface:"driver"` tools never join the model face in fresh sessions.
     /// A later mention of one id overrides an earlier one, so a `--with
     /// <id>@<version>` on the command line wins over the standing entry.
     with: []const WithRef = &.{},
@@ -170,6 +174,8 @@ pub const CompositionError = error{
     PinNamesUnknownExtension,
     /// The extension is a member, but its frozen manifest declares no such tool.
     PinToolNotDeclared,
+    /// A pin names a tool whose manifest surface is not `pin`.
+    PinToolNotPinnable,
     /// An extension named for this session has no built version to use: either
     /// no `current` at all, or the named version is in none of the store roots.
     /// Both `--with` and the membership a pin implies arrive here.
@@ -314,20 +320,17 @@ fn resolve(gpa: std.mem.Allocator, a: std.mem.Allocator, roots: *const roots_mod
     errdefer freeResolved(gpa, extensions);
     sortResolved(extensions);
 
-    const pins = switch (request) {
-        .fresh => |opts| opts.pinned_native_tools,
-        .frozen => |frozen| frozen.native_tools,
-    };
-    // The one input with no store side at all: a fresh session gets the bytes
-    // the caller read from `--prompt`, a resumed one the bytes the header
-    // froze, and neither path touches `roots`.
     const prompts = switch (request) {
         .fresh => |opts| opts.prompts,
         .frozen => |frozen| frozen.prompts,
     };
+    const bindings = switch (request) {
+        .fresh => |opts| try resolveFreshBindings(a, roots, extensions, opts),
+        .frozen => |frozen| try resolvePinnedBindings(a, roots, extensions, frozen.native_tools),
+    };
     return .{
         .extensions = extensions,
-        .bindings = try resolveBindings(a, roots, extensions, pins),
+        .bindings = bindings,
         .prompts = try copyInlinePrompts(a, prompts),
     };
 }
@@ -478,7 +481,9 @@ fn assemble(
 }
 
 /// The tool budget is provider-facing and counts the permanent builtins. Reject
-/// impossible budgets up front, before any filesystem work.
+/// impossible budgets up front, before any filesystem work. This early pass can
+/// only count explicit pins; `resolveFreshBindings` checks the final face again
+/// after `surface:"with"` tools are known.
 fn validateBudget(opts: Options) CompositionError!void {
     if (opts.max_tools < registry.builtin_count) return error.ToolBudgetTooSmall;
     const room_for_extensions = opts.max_tools - registry.builtin_count;
@@ -495,23 +500,64 @@ fn snapshotFromBindings(a: std.mem.Allocator, bindings: []ext_tools.Binding) !re
     return registry.snapshotWith(a, extras);
 }
 
-/// Resolve the session's extension-tool bindings from the explicit pins — the
-/// whole native selection, and strict: an unresolvable pin fails the session
-/// rather than quietly starting without the tool the operator asked for. The
-/// frozen entry path comes from `Roots.Resolved.entryPathAbs`: absolute,
-/// so it survives being spawned with the workspace as cwd, and built from the
-/// version frozen at composition time, so mid-session activation cannot move it.
-/// One pin, one binding, in pin order: the slice is allocated whole up front, so
-/// it is address-stable from the first binding on.
-fn resolveBindings(
+/// Resolve the session's extension-tool bindings for a fresh session. Explicit
+/// pins are strict and keep their historical behavior. Then every package the
+/// caller explicitly composed with `--with` contributes its `surface:"with"`
+/// tools to the model face. A package that entered only because a pin implied
+/// membership is deliberately absent from `opts.with`, so its `with` tools do
+/// not leak onto the face.
+fn resolveFreshBindings(
+    a: std.mem.Allocator,
+    roots: *const roots_mod.Roots,
+    resolved: []const roots_mod.Roots.Resolved,
+    opts: Options,
+) ![]ext_tools.Binding {
+    var out: std.ArrayList(ext_tools.Binding) = .empty;
+    errdefer out.deinit(a);
+
+    for (opts.pinned_native_tools) |pin| {
+        try out.append(a, try resolvePinnedBinding(a, roots, resolved, pin, .fresh_pin));
+    }
+
+    for (opts.with, 0..) |ref, i| {
+        for (opts.with[0..i]) |seen| {
+            if (std.mem.eql(u8, seen.id, ref.id)) break;
+        } else {
+            const r = findResolved(resolved, ref.id) orelse continue;
+            for (r.manifest.tools) |spec| {
+                if (spec.surfaceOf() != .with) continue;
+                const id = try std.fmt.allocPrint(a, "ext:{s}/{s}", .{ r.id, spec.name });
+                defer a.free(id);
+                if (bindingIdSeen(out.items, id)) continue;
+                try out.append(a, try bindingForSpec(a, roots, r, spec, id));
+            }
+        }
+    }
+
+    if (registry.builtin_count + out.items.len > opts.max_tools) return error.ToolBudgetExceeded;
+    return out.toOwnedSlice(a);
+}
+
+/// Resolve only the stable tool ids frozen in a session header. Resume never
+/// re-expands `surface:"with"`: the header already is the whole native face.
+fn resolvePinnedBindings(
     a: std.mem.Allocator,
     roots: *const roots_mod.Roots,
     resolved: []const roots_mod.Roots.Resolved,
     pins: []const []const u8,
 ) ![]ext_tools.Binding {
     const bindings = try a.alloc(ext_tools.Binding, pins.len);
-    for (pins, bindings) |pin, *b| b.* = try resolvePinnedBinding(a, roots, resolved, pin);
+    for (pins, bindings) |pin, *b| b.* = try resolvePinnedBinding(a, roots, resolved, pin, .frozen_header);
     return bindings;
+}
+
+const PinBindingMode = enum { fresh_pin, frozen_header };
+
+fn bindingIdSeen(bindings: []const ext_tools.Binding, id: []const u8) bool {
+    for (bindings) |b| {
+        if (std.mem.eql(u8, b.definition.id, id)) return true;
+    }
+    return false;
 }
 
 const StableToolId = struct { ext_id: []const u8, tool_name: []const u8 };
@@ -535,11 +581,25 @@ fn resolvePinnedBinding(
     roots: *const roots_mod.Roots,
     resolved: []const roots_mod.Roots.Resolved,
     pin: []const u8,
+    mode: PinBindingMode,
 ) !ext_tools.Binding {
     const parsed = try parseStableToolId(pin);
 
     const r = findResolved(resolved, parsed.ext_id) orelse return error.PinNamesUnknownExtension;
     const spec = findToolSpec(r.manifest, parsed.tool_name) orelse return error.PinToolNotDeclared;
+    if (mode == .fresh_pin and spec.surfaceOf() != .pin) return error.PinToolNotPinnable;
+    // `pin` already passed parseStableToolId, whose two segments reformat back
+    // to exactly `pin` (ids never contain `/`), so initOwned dupes it directly.
+    return bindingForSpec(a, roots, r, spec, pin);
+}
+
+fn bindingForSpec(
+    a: std.mem.Allocator,
+    roots: *const roots_mod.Roots,
+    r: roots_mod.Roots.Resolved,
+    spec: manifest.ToolSpec,
+    id: []const u8,
+) !ext_tools.Binding {
     // A validated manifest requires `runtime` whenever it declares tools
     // (manifest.validate -> MissingRuntime), so a found tool spec guarantees an
     // executable; there is no runtime-less tool state to defend against.
@@ -548,12 +608,10 @@ fn resolvePinnedBinding(
     const entry_abs = try r.entryPathAbs(a, roots);
     defer a.free(entry_abs);
 
-    // `pin` already passed parseStableToolId, whose two segments reformat back
-    // to exactly `pin` (ids never contain `/`), so initOwned dupes it directly.
     // The binding's strings are the arena's; `Binding.deinit` is for callers who
     // allocated it themselves, and the composition never needs it.
     return ext_tools.Binding.initOwned(a, .{
-        .id = pin,
+        .id = id,
         .name = spec.name,
         .description = spec.description,
         .input_schema = spec.input_schema,
@@ -1276,6 +1334,25 @@ test "budget rejects an impossible tool count before any filesystem work" {
     try validateBudget(.{ .max_tools = registry.builtin_count + 1, .pinned_native_tools = &.{"ext:web.search/web_search"} });
 }
 
+/// A runtime extension exposing arbitrary tool JSON. `marker` differentiates
+/// otherwise-identical versions so their content addresses differ.
+fn writeToolExtensionWithTools(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    root: std.Io.Dir,
+    id: []const u8,
+    tools_json: []const u8,
+    marker: []const u8,
+) ![]u8 {
+    const manifest_bytes = try std.fmt.allocPrint(alloc,
+        \\{{"schema":"nulya.extension/v2","id":"{s}","runtime":{{"entry":"bin/run"}},"contributes":{{"tools":{s}}}}}
+    , .{ id, tools_json });
+    defer alloc.free(manifest_bytes);
+    const main_src = try std.fmt.allocPrint(alloc, "pub fn main() void {{}} // {s}\n", .{marker});
+    defer alloc.free(main_src);
+    return testkit.writeFrozenVersion(alloc, io, root, id, manifest_bytes, &.{.{ .rel = "src/main.zig", .bytes = main_src }});
+}
+
 /// A runtime extension exposing one tool, `id`/`tool` configurable so tests can
 /// stand up name collisions. `marker` differentiates otherwise-identical
 /// versions so their content addresses differ.
@@ -1287,13 +1364,11 @@ fn writeToolExtension(
     tool_name: []const u8,
     marker: []const u8,
 ) ![]u8 {
-    const manifest_bytes = try std.fmt.allocPrint(alloc,
-        \\{{"schema":"nulya.extension/v2","id":"{s}","runtime":{{"entry":"bin/run"}},"contributes":{{"tools":[{{"name":"{s}","description":"a tool","input":{{"type":"object"}}}}]}}}}
-    , .{ id, tool_name });
-    defer alloc.free(manifest_bytes);
-    const main_src = try std.fmt.allocPrint(alloc, "pub fn main() void {{}} // {s}\n", .{marker});
-    defer alloc.free(main_src);
-    return testkit.writeFrozenVersion(alloc, io, root, id, manifest_bytes, &.{.{ .rel = "src/main.zig", .bytes = main_src }});
+    const tools_json = try std.fmt.allocPrint(alloc,
+        \\ [{{"name":"{s}","description":"a tool","input":{{"type":"object"}}}}]
+    , .{tool_name});
+    defer alloc.free(tools_json);
+    return writeToolExtensionWithTools(alloc, io, root, id, tools_json, marker);
 }
 
 /// Scripted environment for the executor-chain test: records the frozen entry
@@ -1611,12 +1686,165 @@ test "a member's tool is not natively visible without a pin" {
     try testkit.activate(alloc, io, tmp.dir, "web.search", v1);
 
     // No pins: the extension is a member (composition freezes its version), but
-    // its tool is reachable only through the CLI, never the model-facing set.
+    // its default pin-surface tool is reachable only through the CLI, never the
+    // model-facing set.
     var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "web.search" }} });
     defer comp.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 0), comp.extension_tool_bindings.len);
     try std.testing.expect(comp.tools.lookup("web_search") == null);
     try std.testing.expectEqual(@as(usize, 1), comp.extensions.len);
+}
+
+test "explicit --with exposes surface-with tools but not pin or driver tools" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmpPath(alloc, io, tmp.dir);
+    defer alloc.free(cwd);
+
+    const tools_json =
+        \\[
+        \\ {"name":"ask","description":"with","input":{"type":"object"},"surface":"with"},
+        \\ {"name":"search","description":"pin","input":{"type":"object"}},
+        \\ {"name":"run","description":"driver","input":{"type":"object"},"surface":"driver"}
+        \\]
+    ;
+    const v1 = try writeToolExtensionWithTools(alloc, io, tmp.dir, "assistant", tools_json, "v1");
+    defer alloc.free(v1);
+    try testkit.activate(alloc, io, tmp.dir, "assistant", v1);
+
+    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "assistant" }} });
+    defer comp.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), comp.extension_tool_bindings.len);
+    try std.testing.expect(comp.tools.lookup("ask") != null);
+    try std.testing.expect(comp.tools.lookup("search") == null);
+    try std.testing.expect(comp.tools.lookup("run") == null);
+}
+
+test "pin-implied membership does not expose a package's surface-with tools" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmpPath(alloc, io, tmp.dir);
+    defer alloc.free(cwd);
+
+    const tools_json =
+        \\[
+        \\ {"name":"call","description":"pin","input":{"type":"object"}},
+        \\ {"name":"extra","description":"with","input":{"type":"object"},"surface":"with"}
+        \\]
+    ;
+    const v1 = try writeToolExtensionWithTools(alloc, io, tmp.dir, "pkg", tools_json, "v1");
+    defer alloc.free(v1);
+    try testkit.activate(alloc, io, tmp.dir, "pkg", v1);
+
+    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .pinned_native_tools = &.{"ext:pkg/call"} });
+    defer comp.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), comp.extension_tool_bindings.len);
+    try std.testing.expect(comp.tools.lookup("call") != null);
+    try std.testing.expect(comp.tools.lookup("extra") == null);
+}
+
+test "explicit pins are only accepted for surface-pin tools" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmpPath(alloc, io, tmp.dir);
+    defer alloc.free(cwd);
+
+    const tools_json =
+        \\[
+        \\ {"name":"with_tool","description":"with","input":{"type":"object"},"surface":"with"},
+        \\ {"name":"driver_tool","description":"driver","input":{"type":"object"},"surface":"driver"}
+        \\]
+    ;
+    const v1 = try writeToolExtensionWithTools(alloc, io, tmp.dir, "pkg", tools_json, "v1");
+    defer alloc.free(v1);
+    try testkit.activate(alloc, io, tmp.dir, "pkg", v1);
+
+    try std.testing.expectError(error.PinToolNotPinnable, SessionComposition.init(alloc, io, cwd, one_root, .{ .pinned_native_tools = &.{"ext:pkg/with_tool"} }));
+    try std.testing.expectError(error.PinToolNotPinnable, SessionComposition.init(alloc, io, cwd, one_root, .{ .pinned_native_tools = &.{"ext:pkg/driver_tool"} }));
+}
+
+test "frozen resume accepts header native tools regardless of current surface" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmpPath(alloc, io, tmp.dir);
+    defer alloc.free(cwd);
+
+    const tools_json =
+        \\[
+        \\ {"name":"call","description":"with","input":{"type":"object"},"surface":"with"}
+        \\]
+    ;
+    const v1 = try writeToolExtensionWithTools(alloc, io, tmp.dir, "pkg", tools_json, "v1");
+    defer alloc.free(v1);
+    try testkit.activate(alloc, io, tmp.dir, "pkg", v1);
+
+    const frozen: ledger.FrozenComposition = .{
+        .active = &.{.{ .id = "pkg", .version = v1 }},
+        .native_tools = &.{"ext:pkg/call"},
+    };
+    var resumed = try SessionComposition.initFrozen(alloc, io, cwd, one_root, frozen);
+    defer resumed.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), resumed.extension_tool_bindings.len);
+    try std.testing.expect(resumed.tools.lookup("call") != null);
+}
+
+test "surface-with tools count against the tool budget" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmpPath(alloc, io, tmp.dir);
+    defer alloc.free(cwd);
+
+    const tools_json =
+        \\[
+        \\ {"name":"a","description":"with","input":{"type":"object"},"surface":"with"},
+        \\ {"name":"b","description":"with","input":{"type":"object"},"surface":"with"}
+        \\]
+    ;
+    const v1 = try writeToolExtensionWithTools(alloc, io, tmp.dir, "pkg", tools_json, "v1");
+    defer alloc.free(v1);
+    try testkit.activate(alloc, io, tmp.dir, "pkg", v1);
+
+    try std.testing.expectError(error.ToolBudgetExceeded, SessionComposition.init(alloc, io, cwd, one_root, .{
+        .with = &.{.{ .id = "pkg" }},
+        .max_tools = registry.builtin_count + 1,
+    }));
+}
+
+test "frozen resume uses header native tools only, not fresh surface expansion" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmpPath(alloc, io, tmp.dir);
+    defer alloc.free(cwd);
+
+    const tools_json =
+        \\[
+        \\ {"name":"call","description":"with","input":{"type":"object"},"surface":"with"}
+        \\]
+    ;
+    const v1 = try writeToolExtensionWithTools(alloc, io, tmp.dir, "pkg", tools_json, "v1");
+    defer alloc.free(v1);
+    try testkit.activate(alloc, io, tmp.dir, "pkg", v1);
+
+    const frozen: ledger.FrozenComposition = .{
+        .active = &.{.{ .id = "pkg", .version = v1 }},
+        .native_tools = &.{},
+    };
+    var resumed = try SessionComposition.initFrozen(alloc, io, cwd, one_root, frozen);
+    defer resumed.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 0), resumed.extension_tool_bindings.len);
+    try std.testing.expect(resumed.tools.lookup("call") == null);
 }
 
 test "two pinned tools sharing a model-facing name are rejected" {

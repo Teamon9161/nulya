@@ -77,10 +77,11 @@ export interface Settings {
     auto_activate: boolean
     /**
      * The packages every TOP-LEVEL session this TUI starts is composed with:
-     * `--with <id>@<v>`, plus a `--pin` for each tool that version puts on the
-     * model's face (`audience`, DESIGN §7.2.1). One list where there used to be
-     * one boolean per package (T34) — "which packages" is a list-shaped question,
-     * and a new one should not need a new key and a new branch in `App.tsx`.
+     * `--with <id>@<v>`. Tools in those packages that declare `surface:"with"`
+     * reach the model face through membership; they are not written as pins.
+     * One list where there used to be one boolean per package (T34) — "which
+     * packages" is a list-shaped question, and a new one should not need a new
+     * key and a new branch in `App.tsx`.
      *
      * Both defaults earn their place. `handoff`'s tool only ever WRITES A FILE
      * proposing a handover (DESIGN §11) — the fork is this front end's move and
