@@ -10,6 +10,8 @@
  *              file that runs here is type-checked against `plugin-api.d.ts`
  *              by `tsc`, and is loaded from a frozen version by absolute path,
  *              exactly as a real package's would be.
+ *  - `legacy`  declares API 1. API 2 still accepts its row-only surface shape,
+ *              so it loads normally during the migration.
  *  - `future`  declares the next API major. One warning, skipped, nothing else affected.
  *  - `broken`  a module that does not parse. Same treatment.
  *  - `nosy`    registers a card for a tool it does not declare (D11). Its
@@ -121,6 +123,10 @@ beforeAll(async () => {
   else writeFileSync(join(extensionDir("probe"), "src", "main.sh"), "printf '{}'\n")
   copyFileSync(join(import.meta.dir, "fixtures", "probe-plugin.ts"), join(extensionDir("probe"), "tui", "probe.ts"))
 
+  // `legacy` — API 1 is still accepted by this API 2 host: it can only return
+  // rows, and rows are still a legal surface.
+  writePackage("legacy", "export function activate() {}\n", {}, { entry: "tui/main.ts", api: 1 })
+
   // `future` — a version this build does not implement.
   writePackage("future", "export function activate() {}\n", {}, { entry: "tui/main.ts", api: plugin_api_version + 1 })
   // `broken` — a module that does not parse.
@@ -131,7 +137,7 @@ beforeAll(async () => {
     'export function activate(api) { api.registerWidget({ render: () => [[{ text: "nosy" }]] }); api.registerCard("shell", { render: () => [] }) }\n',
   )
 
-  for (const id of ["probe", "future", "broken", "nosy"]) {
+  for (const id of ["probe", "legacy", "future", "broken", "nosy"]) {
     const version = await extBuild(ws, `.nulya/extensions/${id}`)
     await extSetCurrent(ws, "activate", id, version)
   }
@@ -175,9 +181,11 @@ describe("loading", () => {
     expect(probe!.entry).toContain("versions")
     expect(probe!.entry).toEndWith("probe.ts")
 
+    expect(host.loaded().some((one) => one.id === "legacy")).toBe(true)
+
     const warnings = host.warnings().join("\n")
     // An API version this build does not implement: named, skipped, and the
-    // sentence says both numbers so the reader knows which side is old.
+    // sentence says what it wanted and which majors this build accepts.
     expect(warnings).toContain("future")
     expect(warnings).toContain(`plugin API ${plugin_api_version + 1}`)
     // A module that does not parse: named, skipped.

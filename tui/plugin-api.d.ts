@@ -44,9 +44,10 @@
  * (`PluginKey.text`) or that method missing, which a plugin already has to
  * tolerate for any optional part of this file. What is here so far:
  *
- *   2.0  rows, `PluginKey.text`, `PluginActions.compact`, and the transcript-card
- *        `DiffSurface` primitive. Adding a union variant is a major-version
- *        change because an older host cannot silently ignore it correctly.
+ *   1.x  row-based surfaces, `PluginKey.text`, and `PluginActions.compact`.
+ *   2.0  transcript-card `DiffSurface`. Adding a union variant is a
+ *        major-version change because an older host cannot silently ignore it
+ *        correctly.
  *
  * ── WHAT IS DELIBERATELY NOT HERE ─────────────────────────────────────────
  *
@@ -164,10 +165,10 @@ export interface PluginKey {
    * `"."`, `"7"` — and absent for every key that is a command rather than a
    * letter (`escape`, `up`, `f3`, anything with `ctrl` or `meta`).
    *
-   * Added in 1.1, for the one thing `name` cannot do: a panel that lets a
-   * person WRITE. `name` is a key's identity, lower-cased and shared by `a` and
-   * `A`; typing needs the byte, and reconstructing it from `name` + `shift` is
-   * a keyboard-layout guess. A panel accumulating `key.text` and handling
+   * Introduced before API 2 for the one thing `name` cannot do: a panel that
+   * lets a person WRITE. `name` is a key's identity, lower-cased and shared by
+   * `a` and `A`; typing needs the byte, and reconstructing it from `name` +
+   * `shift` is a keyboard-layout guess. A panel accumulating `key.text` and handling
    * `space` / `backspace` / `return` itself is the whole of a text field here.
    */
   text?: string
@@ -215,7 +216,7 @@ export interface CardView {
 export interface CardRenderer {
   render(view: CardView, width: number): Surface
   /**
-   * NOT CALLED IN 1.0, and it is honest to say so rather than let you wire one
+   * Not called today, and it is honest to say so rather than let you wire one
    * up and wonder. A transcript card has no focus of its own here: browse mode
    * owns the keys over cards (`j/k` to move, `Enter`/`Space` to fold), and
    * giving a card its own keyboard means inventing a third focus holder beside
@@ -370,7 +371,7 @@ export interface PluginActions {
 
   /**
    * `/compact` on the front tab's session — the person's own verb (tui.md
-   * §5.8, DESIGN §11), added in 1.1.
+   * §5.8, DESIGN §11).
    *
    * `briefFile` is a workspace-relative path to a brief that has already been
    * written; giving one skips the summarising round trip and leaves the old

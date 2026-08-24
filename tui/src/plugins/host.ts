@@ -67,11 +67,13 @@ import type {
 } from "nulya-tui/plugin-api"
 
 /**
- * The API major version this build implements. A package declares its own in
- * `contributes.ui.tui.api`; anything else is warn-and-skip (D10). One number,
- * and the reason it is a number rather than a word set is in the contract file.
+ * The newest API major this build implements. A package declares its own in
+ * `contributes.ui.tui.api`; unsupported majors are warn-and-skip (D10). API 2
+ * is backwards-compatible with API 1 because API 1 plugins only return rows,
+ * which remain a legal API 2 surface.
  */
 export const plugin_api_version = 2
+export const supported_plugin_api_versions: ReadonlySet<number> = new Set([1, plugin_api_version])
 
 /** Where a workspace store root is spelled in `ext list` output. */
 const workspace_root_spec = ".nulya/extensions"
@@ -135,9 +137,9 @@ export interface PluginHostSeams {
   /** `session append`, wrapped in the plugin sentinel (`extnote.ts`). */
   appendNote: (pkg: string, kind: string, text: string) => Promise<void>
   /**
-   * `/compact` on the front tab's session (`api.actions.compact`, contract 1.1).
-   * The same verb, the same guards and the same tab move a person gets; what
-   * differs is only who asked for it.
+   * `/compact` on the front tab's session (`api.actions.compact`). The same
+   * verb, the same guards and the same tab move a person gets; what differs is
+   * only who asked for it.
    */
   compact: (options: { briefFile?: string; focus?: string }) => Promise<CompactedView>
   openTab: (sessionId: string) => void
@@ -480,9 +482,9 @@ export function createPluginHost(seams: PluginHostSeams): PluginHost {
   const attempted = new Set<string>()
 
   async function loadOne(candidate: PluginCandidate): Promise<void> {
-    if (candidate.api !== plugin_api_version) {
+    if (!supported_plugin_api_versions.has(candidate.api)) {
       warn(
-        `${candidate.id}: its front-end module wants plugin API ${candidate.api}, this build has ${plugin_api_version} · skipped`,
+        `${candidate.id}: its front-end module wants plugin API ${candidate.api}, this build supports ${[...supported_plugin_api_versions].join(", ")} · skipped`,
       )
       return
     }

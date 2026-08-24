@@ -421,8 +421,10 @@ fn writeHunk(
 ) !void {
     const old_lines = try diffLines(alloc, old_text[ranges.old.start..ranges.old.end]);
     const new_lines = try diffLines(alloc, new_text[ranges.new.start..ranges.new.end]);
-    const old_start = lineNoAt(old_text, ranges.old.start);
-    const new_start = lineNoAt(new_text, ranges.new.start);
+    const old_start_raw = lineNoAt(old_text, ranges.old.start);
+    const new_start_raw = lineNoAt(new_text, ranges.new.start);
+    const old_start = if (old_lines.len == 0) old_start_raw -| 1 else old_start_raw;
+    const new_start = if (new_lines.len == 0) new_start_raw -| 1 else new_start_raw;
 
     try w.print("@@ -{d},{d} +{d},{d} @@\n", .{ old_start, old_lines.len, new_start, new_lines.len });
     try writeLineDiff(alloc, w, old_lines, new_lines);
@@ -956,8 +958,26 @@ test "edit diff: deleting a complete line does not mark the following line as ad
     try std.testing.expectEqualStrings(
         "--- a/a.txt\n" ++
             "+++ b/a.txt\n" ++
-            "@@ -2,1 +2,0 @@\n" ++
+            "@@ -2,1 +1,0 @@\n" ++
             "-b\n",
+        patch,
+    );
+}
+
+test "edit diff: deleting the first complete line uses line zero as the insertion point" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const old_text = "a\nb\n";
+    const plan = try expectPlan(alloc, old_text, "a\n", "");
+    const new_text = try replaceOnceAt(alloc, old_text, plan);
+    const patch = try unifiedReplacementDiff(alloc, "a.txt", old_text, new_text, plan, false);
+    try std.testing.expectEqualStrings(
+        "--- a/a.txt\n" ++
+            "+++ b/a.txt\n" ++
+            "@@ -1,1 +0,0 @@\n" ++
+            "-a\n",
         patch,
     );
 }

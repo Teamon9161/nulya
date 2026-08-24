@@ -136,7 +136,7 @@ async function stepOnce(sessionId: string, host?: PluginHost): Promise<void> {
   await step.exited
 }
 
-/** One keypress as the host hands it on (`pluginKeyOf`), including 1.1's `text`. */
+/** One keypress as the host hands it on (`pluginKeyOf`), including printable `text`. */
 function key(name: string, text?: string): PluginKey {
   return { name, ctrl: false, shift: false, meta: false, ...(text === undefined ? {} : { text }) }
 }
@@ -315,8 +315,8 @@ test.skipIf(!has_zig)(
     expect(bench.host.panel()?.pkg).toBe("plan")
     expect(panelText(bench.host)).toContain("## Phase 1 — read")
 
-    // ② A comment on a line, typed into the panel. `key.text` is contract 1.1;
-    // without it the letters here would be a keyboard-layout guess.
+    // ② A comment on a line, typed into the panel. `key.text` carries the
+    // printable character; without it the letters here would be a keyboard-layout guess.
     bench.host.handleKey(key("j"))
     bench.host.handleKey(key("j"))
     bench.host.handleKey(key("c"))

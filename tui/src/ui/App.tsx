@@ -1622,7 +1622,7 @@ export function App(props: AppProps) {
    * Two callers, and they differ only in who asked: the model's handoff
    * proposal below (`/compact`'s `brief_file` branch, DESIGN §11 — the summary
    * exists, so the old session is left byte-identical), and a plugin calling
-   * `api.actions.compact` (tui-plugin 1.1, `extensions/plan`'s approve step).
+   * `api.actions.compact` (`extensions/plan`'s approve step).
    * The guards, the tab move and the recovery when the lease was lost belong to
    * the act, not to whoever requested it, so they live here once.
    *
