@@ -26,8 +26,8 @@
  */
 import { Index, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import { useKeyboard } from "@opentui/solid"
+import type { ScrollBoxRenderable } from "@opentui/core"
 import { useScreen, useStyle } from "../../render/theme.ts"
-import { visibleRows, windowRange } from "../list.ts"
 import { displayWidth, fit } from "../columns.ts"
 import { createHover, onClick, rowBackground, rowGutter } from "../rows.ts"
 import { OverlayFooter, createKeyHelp } from "./Footer.tsx"
@@ -113,6 +113,7 @@ export function SessionsView(props: {
   const [leases, setLeases] = createSignal<Record<string, LeaseState>>({})
   const [cursor, setCursor] = createSignal(0)
   const [notice, setNotice] = createSignal<string | null>(null)
+  let list: ScrollBoxRenderable | null = null
   const hover = createHover()
   const help = createKeyHelp()
 
@@ -146,30 +147,28 @@ export function SessionsView(props: {
 
   /** The columns this overlay may draw in: the box pads one on each side. */
   const inner = () => Math.max(24, screen().width - 2)
+  /** Rows leave one column for ScrollBox's vertical track and one for air beside it. */
+  const rowInner = () => Math.max(24, screen().width - 4)
   const rows = () => sessionRows(entries())
-  // A workspace collects sessions; without a window the list draws straight
-  // through the rows below it once there are more than a screenful.
-  // The open key list costs rows, so the window has to know about it: a list
-  // sized for a one-line footer draws straight through a three-line one.
-  const range = createMemo(() =>
-    windowRange(rows().length, cursor(), visibleRows(screen().height, help.open() ? 2 : 0)),
-  )
+  const rowId = (id: string) => `session-row:${id}`
   createEffect(() => {
     const count = rows().length
     if (cursor() >= count) setCursor(Math.max(0, count - 1))
   })
+  createEffect(() => {
+    const row = rows()[cursor()]
+    if (row) list?.scrollChildIntoView(rowId(row.entry.id))
+  })
 
   /**
    * One width for every `ago` on screen, so they line up as a column instead of
-   * a ragged edge. Measured from what is actually drawn — `just now` and
-   * `3d ago` are not the same length, and neither is a number typed here once.
+   * a ragged edge. Measured from the mounted rows; ScrollBox decides which of
+   * them are visible.
    */
   const clock = createMemo(() => {
     const now = Date.now()
     let widest = 0
-    for (const row of rows().slice(range().start, range().end)) {
-      widest = Math.max(widest, displayWidth(ago(row.entry.created, now)))
-    }
+    for (const row of rows()) widest = Math.max(widest, displayWidth(ago(row.entry.created, now)))
     return widest
   })
 
@@ -227,31 +226,38 @@ export function SessionsView(props: {
         </text>
       </box>
       <box height={1} />
-      <box flexDirection="column" flexGrow={1} flexShrink={1}>
-        <Show when={range().start > 0}>
-          <text fg={style.theme.faint}>
-            {"  "}
-            {style.glyphs.foldClosed} {range().start} newer above
-          </text>
-        </Show>
+      <scrollbox
+        ref={(box: ScrollBoxRenderable) => (list = box)}
+        flexGrow={1}
+        flexShrink={1}
+        flexBasis={0}
+        width="100%"
+        scrollX={false}
+        viewportCulling
+        verticalScrollbarOptions={{
+          trackOptions: { foregroundColor: style.theme.hairline, backgroundColor: "transparent" },
+        }}
+        contentOptions={{ flexDirection: "column", width: "100%" }}
+      >
         {/*
           `Index`, not `For`: the list is re-read on a timer and `sessionRows`
           builds fresh objects each time, so `For` would destroy and rebuild
           every row every eight seconds — and a renderable that goes away
           between a press and its release takes the click with it. One
-          renderable per POSITION, and only what it says changes.
+          renderable per POSITION, and only what it says changes. ScrollBox owns
+          the viewport; the rows stay mounted by position and the cursor row is
+          scrolled into view.
         */}
-        <Index each={rows().slice(range().start, range().end)}>
-          {(item, offset) => {
+        <Index each={rows()}>
+          {(item, index) => {
             const row = () => item()
-            const index = () => range().start + offset
-            const selected = () => index() === cursor()
-            const tone = () => ({ selected: selected(), hovered: hover.at() === index() })
+            const selected = () => index === cursor()
+            const tone = () => ({ selected: selected(), hovered: hover.at() === index })
             const gutter = () => rowGutter(style, tone())
             const live = () => leases()[row().entry.id] === "held"
             const here = () => row().entry.id === props.currentId
             const verdict = () => row().entry.outcome?.verdict ?? null
-            const click = onClick(() => clickRow(index()))
+            const click = onClick(() => clickRow(index))
             const clock_cell = () => ` ${ago(row().entry.created).padStart(clock())}`
             /** The chips that sit at the end of the row, when they apply. */
             const chips = () =>
@@ -265,9 +271,10 @@ export function SessionsView(props: {
              * chip together are exactly the second row that garbles the first.
              */
             const said = () =>
-              Math.max(0, inner() - 2 - row().depth * 2 - displayWidth(clock_cell()) - displayWidth(chips()))
+              Math.max(0, rowInner() - 2 - row().depth * 2 - displayWidth(clock_cell()) - displayWidth(chips()))
             return (
               <box
+                id={rowId(row().entry.id)}
                 flexDirection="row"
                 width="100%"
                 height={1}
@@ -275,7 +282,7 @@ export function SessionsView(props: {
                 backgroundColor={rowBackground(style, tone())}
                 onMouseDown={click.onMouseDown}
                 onMouseUp={click.onMouseUp}
-                {...hover.row(index())}
+                {...hover.row(index)}
               >
                 <text fg={gutter().fg} flexShrink={0}>
                   {gutter().text}
@@ -329,12 +336,6 @@ export function SessionsView(props: {
             )
           }}
         </Index>
-        <Show when={range().end < rows().length}>
-          <text fg={style.theme.faint}>
-            {"  "}
-            {style.glyphs.foldOpen} {rows().length - range().end} older below
-          </text>
-        </Show>
         {/* An empty store is the one moment this view can teach something: what
             a session IS here, and that leaving is free. */}
         <Show when={rows().length === 0 && !notice()}>
@@ -343,7 +344,7 @@ export function SessionsView(props: {
             {fit("n starts one · a session freezes its model and tools at birth · nothing is ever deleted", inner())}
           </text>
         </Show>
-      </box>
+      </scrollbox>
       <Show when={notice()}>
         <text fg={style.theme.err}>{fit(notice()!, inner())}</text>
       </Show>

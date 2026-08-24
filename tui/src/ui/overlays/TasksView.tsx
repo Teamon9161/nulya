@@ -15,10 +15,10 @@
  * `k` kills without asking. The undo for a killed task is running the command
  * again; the undo for a task nobody could stop is nothing.
  */
-import { Index, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
+import { Index, Show, createEffect, createSignal, onCleanup, onMount } from "solid-js"
 import { useKeyboard } from "@opentui/solid"
+import type { ScrollBoxRenderable } from "@opentui/core"
 import { useScreen, useStyle } from "../../render/theme.ts"
-import { visibleRows, windowRange } from "../list.ts"
 import { displayWidth, fit } from "../columns.ts"
 import { createHover, onClick, rowBackground, rowGutter } from "../rows.ts"
 import { OverlayFooter, createKeyHelp } from "./Footer.tsx"
@@ -58,11 +58,13 @@ export function TasksView(props: {
   const [showLog, setShowLog] = createSignal(false)
   const [log, setLog] = createSignal("")
   const [notice, setNotice] = createSignal<string | null>(null)
+  let list: ScrollBoxRenderable | null = null
   const hover = createHover()
   const help = createKeyHelp()
 
   const rows = () => props.tasks
   const current = () => rows()[cursor()] ?? null
+  const rowId = (task: string) => `task-row:${task}`
 
   const readLog = async () => {
     const task = current()
@@ -85,6 +87,10 @@ export function TasksView(props: {
     const count = rows().length
     if (cursor() >= count) setCursor(Math.max(0, count - 1))
   })
+  createEffect(() => {
+    const task = current()
+    if (task) list?.scrollChildIntoView(rowId(task.task))
+  })
   // Opening the log, or moving to another row while it is open, reads at once
   // rather than at the next tick.
   createEffect(() => {
@@ -94,10 +100,9 @@ export function TasksView(props: {
   })
 
   const inner = () => Math.max(24, screen().width - 2)
+  /** Rows leave one column for ScrollBox's vertical track and one for air beside it. */
+  const rowInner = () => Math.max(24, screen().width - 4)
   const logRows = () => (showLog() ? Math.min(10, Math.max(3, Math.floor(screen().height / 3))) : 0)
-  const range = createMemo(() =>
-    windowRange(rows().length, cursor(), visibleRows(screen().height, (help.open() ? 2 : 0) + logRows())),
-  )
 
   const move = (delta: number) => {
     const count = rows().length
@@ -174,27 +179,33 @@ export function TasksView(props: {
         )}
       </text>
       <box height={1} />
-      <box flexDirection="column" flexGrow={1} flexShrink={1}>
-        <Show when={range().start > 0}>
-          <text fg={style.theme.faint}>
-            {"  "}
-            {style.glyphs.foldClosed} {range().start} above
-          </text>
-        </Show>
-        <Index each={rows().slice(range().start, range().end)}>
-          {(item, offset) => {
+      <scrollbox
+        ref={(box: ScrollBoxRenderable) => (list = box)}
+        flexGrow={1}
+        flexShrink={1}
+        flexBasis={0}
+        width="100%"
+        scrollX={false}
+        viewportCulling
+        verticalScrollbarOptions={{
+          trackOptions: { foregroundColor: style.theme.hairline, backgroundColor: "transparent" },
+        }}
+        contentOptions={{ flexDirection: "column", width: "100%" }}
+      >
+        <Index each={rows()}>
+          {(item, index) => {
             const row = () => item()
-            const index = () => range().start + offset
-            const tone = () => ({ selected: index() === cursor(), hovered: hover.at() === index() })
+            const tone = () => ({ selected: index === cursor(), hovered: hover.at() === index })
             const gutter = () => rowGutter(style, tone())
             const running = () => !taskIsDone(row())
             const note = () => outcome(row())
             /** name · state · elapsed · how it ended — then the command, cut to fit. */
             const lead = () => `${row().task}  ${row().state.padEnd(8)}  ${elapsed(row()).padStart(7)}  `
-            const room = () => Math.max(0, inner() - 2 - displayWidth(lead()) - displayWidth(note()) - 2)
-            const click = onClick(() => clickRow(index()))
+            const room = () => Math.max(0, rowInner() - 2 - displayWidth(lead()) - displayWidth(note()) - 2)
+            const click = onClick(() => clickRow(index))
             return (
               <box
+                id={rowId(row().task)}
                 flexDirection="row"
                 width="100%"
                 height={1}
@@ -202,7 +213,7 @@ export function TasksView(props: {
                 backgroundColor={rowBackground(style, tone())}
                 onMouseDown={click.onMouseDown}
                 onMouseUp={click.onMouseUp}
-                {...hover.row(index())}
+                {...hover.row(index)}
               >
                 <text fg={gutter().fg} flexShrink={0}>
                   {gutter().text}
@@ -223,12 +234,6 @@ export function TasksView(props: {
             )
           }}
         </Index>
-        <Show when={range().end < rows().length}>
-          <text fg={style.theme.faint}>
-            {"  "}
-            {style.glyphs.foldOpen} {rows().length - range().end} below
-          </text>
-        </Show>
         {/* Nothing here is the common case, and it is the one moment this panel
             can say what a background task IS and how one is started. */}
         <Show when={rows().length === 0}>
@@ -242,7 +247,7 @@ export function TasksView(props: {
             )}
           </text>
         </Show>
-      </box>
+      </scrollbox>
       <Show when={showLog() && current()}>
         {/* One row per line, each cut by us: a log line is as long as whatever
             wrote it, and a wrapped row here would push the footer off screen

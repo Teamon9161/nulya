@@ -405,3 +405,25 @@ test("F1 opens help and Esc closes it", async () => {
     setup.renderer.destroy()
   }
 }, 120_000)
+
+
+test("global overlay shortcuts keep working while an overlay is open", async () => {
+  const id = await sessionNew(ws, { profile: "scripted" })
+  const state = createSessionState(id)
+  const setup = await testRender(
+    () => <App ws={ws} id={id} state={state} style={style} driver={{ env: scripted_env }} />,
+    { width: 90, height: 40 },
+  )
+  try {
+    await settle(setup, 4)
+
+    setup.mockInput.pressKey("F2")
+    await until(() => setup.captureCharFrame().includes("extensions ·"), 15_000)
+
+    setup.mockInput.pressKey("F3")
+    await until(() => setup.captureCharFrame().includes("sessions ·"), 15_000)
+    expect(setup.captureCharFrame()).not.toContain("extensions ·")
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 120_000)

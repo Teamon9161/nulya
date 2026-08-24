@@ -335,10 +335,10 @@ exports[`opened, the composition card shows what this session froze 1`] = `
 exports[`edit renders its diff expanded by default 1`] = `
 "                                                                            
   ✎ src/emit.zig  (+2 -1) ▾                                                 
-       @@ -1,1 +1,2 @@                                                      
-    - pub const head_bytes = 4096;                                          
-    + pub const head_bytes = 4096; // default                               
-    + pub const tail_bytes = 2048;                                          
+     1 - pub const head_bytes = 4096;                                       
+     1 + pub const head_bytes = 4096; // default                            
+     2 + pub const tail_bytes = 2048;                                       
+                                                                            
                                                                             
                                                                             
                                                                             
@@ -611,10 +611,10 @@ exports[`ascii mode degrades every glyph 1`] = `
   + ext build · lint → v-3f2a91 >                                           
                                                                             
   ~ src/emit.zig  (+2 -1) v                                                 
-       @@ -1,1 +1,2 @@                                                      
-    - pub const head_bytes = 4096;                                          
-    + pub const head_bytes = 4096; // default                               
-    + pub const tail_bytes = 2048;                                          
+     1 - pub const head_bytes = 4096;                                       
+     1 + pub const head_bytes = 4096; // default                            
+     2 + pub const tail_bytes = 2048;                                       
+                                                                            
                                                                             
                                                                             
                                                                             

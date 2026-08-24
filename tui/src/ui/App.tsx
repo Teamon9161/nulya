@@ -1,5 +1,6 @@
 import { For, Match, Show, Switch, createEffect, createMemo, createSignal, onCleanup, onMount, untrack } from "solid-js"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
+import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
 import type { InputRenderable, KeyEvent, ScrollBoxRenderable, Selection } from "@opentui/core"
 import { Transcript, rowsBelow, transcriptRows } from "./Transcript.tsx"
 import { Composer, type ComposerApi } from "./Composer.tsx"
@@ -114,7 +115,7 @@ import {
   type AgentEntry,
   type RenderedAgent,
 } from "../agents.ts"
-import { createKeymap, matches } from "../keymap.ts"
+import { createKeymap, matches, type Action } from "../keymap.ts"
 import type { AttachOptions } from "../state/attach.ts"
 import type { SessionState, TranscriptItem } from "../state/session.ts"
 import type { Workspace } from "../nulya/bin.ts"
@@ -249,6 +250,7 @@ function foldable(rows: readonly TranscriptRow[]): { key: string; item: Transcri
  */
 export function App(props: AppProps) {
   const renderer = useRenderer()
+  const keymap = createDefaultOpenTuiKeymap(renderer)
   const screen = useTerminalDimensions()
   const folds = createFoldStore()
   const browse = createBrowseStore()
@@ -2353,7 +2355,40 @@ export function App(props: AppProps) {
     action()
   }
 
+  const shortcutLayerBlocked = () =>
+    Boolean(withPicker() || agentPicker() || modePicker() || pending() || browse.active() || plugins.panel())
+
+  onMount(() => {
+    const openers: readonly [Action, OverlayKind][] = [
+      ["ext", "ext"],
+      ["sessions", "sessions"],
+      ["model", "model"],
+      ["provider", "provider"],
+      ["tasks", "tasks"],
+      ["help", "help"],
+    ]
+    const warnings: string[] = []
+    const bindings = openers.flatMap(([action, kind]) => {
+      const key = keys[action]
+      try {
+        keymap.parseKeySequence(key)
+      } catch (error) {
+        warnings.push(`${action}=${key}`)
+        return []
+      }
+      return [{ key, cmd: () => openOverlay(kind) }]
+    })
+    if (warnings.length > 0) setNotice(`ignored invalid key binding${warnings.length === 1 ? "" : "s"}: ${warnings.join(", ")}`)
+    const off = keymap.registerLayer({
+      priority: 100,
+      enabled: () => !shortcutLayerBlocked(),
+      bindings,
+    })
+    onCleanup(off)
+  })
+
   useKeyboard((key) => {
+    if (key.propagationStopped) return
     /**
      * The agent picker, on the same terms as the mode picker below it: while a
      * dialog above the composer is up it holds the keyboard, so the list is a
@@ -2482,12 +2517,6 @@ export function App(props: AppProps) {
     // An overlay owns the keyboard while it is up; only the keys that open or
     // close one, and the quit key, stay global (tui.md §11, T2 reminder 3).
     if (overlay.active()) {
-      if (matches(keys.ext, key)) return consume(key, () => openOverlay("ext"))
-      if (matches(keys.sessions, key)) return consume(key, () => openOverlay("sessions"))
-      if (matches(keys.model, key)) return consume(key, () => openOverlay("model"))
-      if (matches(keys.provider, key)) return consume(key, () => openOverlay("provider"))
-      if (matches(keys.tasks, key)) return consume(key, () => openOverlay("tasks"))
-      if (matches(keys.help, key)) return consume(key, () => openOverlay("help"))
       if (matches(keys.quit, key)) quit()
       return
     }
@@ -2523,12 +2552,6 @@ export function App(props: AppProps) {
       }
       return
     }
-    if (matches(keys.sessions, key)) return consume(key, () => openOverlay("sessions"))
-    if (matches(keys.ext, key)) return consume(key, () => openOverlay("ext"))
-    if (matches(keys.model, key)) return consume(key, () => openOverlay("model"))
-    if (matches(keys.provider, key)) return consume(key, () => openOverlay("provider"))
-    if (matches(keys.tasks, key)) return consume(key, () => openOverlay("tasks"))
-    if (matches(keys.help, key)) return consume(key, () => openOverlay("help"))
     // Reading back. The composer is focused and keeps the keyboard, so these
     // have to be taken here or they are the textarea's cursor movement.
     if (matches(keys.scrollUp, key)) return consume(key, () => scrollBy(-1))
