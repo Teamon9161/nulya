@@ -211,7 +211,7 @@ session 开始时一次选定，整场冻结（`composition.zig` `SessionComposi
 1. builtin `shell`：永远在，位置最前。
 2. **model-facing extension 工具**（稳定 id `ext:<ext-id>/<tool>`），两条来路都会冻进 header 的 `native_tools` 并一起计入 `max_tools`（含 builtin，默认 20——上限度量的是整个工具面的真实成本：前缀 token + 模型的工具选择质量）：
    - **pin surface**：`tools[].surface` 缺省或写 `"pin"` 的 tool 才能被独立 pin。`registry.pinned_native_tools`（config，project 层也可以加——只花自己的槽，§9.5）与 `session new --pin`（driver，按场）同义、并集去重。pin 是决定：解析不到 → **硬失败** `PinNamesUnknownExtension` / `PinToolNotDeclared` / `InvalidStableToolId`；命名了非 `surface:"pin"` 的 tool → `PinToolNotPinnable`；总数越过 `max_tools` → `ToolBudgetExceeded`。
-   - **with surface**：一个**显式成员**（config `[extensions] with` 或 argv `--with`）的 manifest 里写了 `tools[].surface:"with"` 的 tool，也在 fresh session 开场时进 native 面。它不是 pin，不能单独写进 pin 列表；决定在成员那根轴上。
+   - **with surface**：一个由 config/argv 显式加入，或由 `activation:"always"` discovery 加入的成员，其 manifest 里写了 `tools[].surface:"with"` 的 tool，也在 fresh session 开场时进 native 面。它不是 pin，不能单独写进 pin 列表；决定在成员那根轴上。
 
 **pin 蕴含成员，但不蕴含 with surface。** 一个 tool 不可能在它的包不在场时占一个槽，所以 fresh 路（`composition.resolveFreshExtensions`）在显式成员之后，把每个 pin 的 `<id>` 里**还不是成员**的那些按 `current` 再 union 一次。这个隐式成员只服务这个 pin 自己：它不会额外展开该包的 `surface:"with"` tools。**排在最后且永不覆盖**：已经解析出的 id（config `[extensions] with` 或 `--with <id>@<version>` 点名的）保持它那个版本——pin 要的是 tool，不是版本。两种拒绝因此仍分得开：**任何 root 都不持有这个 id** → `PinNamesUnknownExtension`（这台机器上没建过），**持有但没有 `current`** → `WithVersionNotFound`（建过没 activate，出路是 `--with <id>@<version>` 或 `activate`；`session new` 的 stderr 会点名是哪些包由 pin 带进来的——命令行上没写过它们）。frozen 路（header `active` + `native_tools`）**不重推**：resume 只重放 header 冻下来的 native ids，不按今天的 manifest 重新展开 `surface:"with"`，也不重新判断一条旧 native id 现在还能不能 pin。
 
@@ -265,15 +265,17 @@ agent 在对话中经 shell `nulya ext build/activate` 造出新 extension 后�
 - CLI 子进程（`nulya ext activate`）在 `NULYA_SESSION` 命名了 session 文件时，把一条 `capability_note` **投递**进该 session 的 inbox 目录（`<stem>.inbox/`，一事件一文件；文本确定性，列出 tools + `nulya ext run <id> <tool> '<json>'` 用法 + skills + `nulya skill load <ref>`）。它绝不直接写 session 文件——那是单写者（§3.4）。
 - `session.prepareStep` 每步在 step 边界（补齐残尾之后、下一次 model 调用之前）**排干** inbox（`ledger.drainInbox`，机制通用于任何事件）：对 ledger 尚未宣告的 `id@version` append 一条 `capability_note`（note 文本由 `extension/notes.zig` 生成）。排干只在 step 边界发生，note 因此绝不插进一条 batch 中间。
 - 前缀不动，缓存继续命中；模型下一 step 经 shell 调用。
-- 下一场 session **若被 pin** 才进 `tools[]`（§5.1 第 2 档）；没人 pin 就一直是 CLI 形式。
+- 下一场 session 的 native face 仍只在开场决定：`surface:"pin"` 靠 pin，
+  `surface:"with"` 靠显式 membership 或 `activation:"always"` membership。
+  对话中途无论 activate 什么都只追加 note，不改本场 `tools[]`。
 
-> **晋升 = 下一场的 pin，对话中途只追加 note。**
+> **native 面的变化只发生在下一场；对话中途只追加 note。**
 
 （纯内存 session（`Ledger.init`）没有 inbox 可排；投递/排干只对 durable session 生效。）
 
 ### 5.4 为什么不做动态 promotion / eviction
 
-每次中途 activate / evict 都改 `tools[]` = 全量 cache miss，与头号诉求正面冲突。§5.1–5.3 让能力照常增长而零缓存代价：中途只 append note，工具面的改变一律等下一场——那时改的是一条 pin，而下一场本来就是新前缀。
+每次中途 activate / evict 若当场改 `tools[]` 都会造成全量 cache miss，与头号诉求正面冲突。§5.1–5.3 让能力照常增长而零缓存代价：中途只 append note；pin、显式 membership 或 always-membership 导致的工具面变化一律等下一场，而下一场本来就是新前缀。
 
 ### 5.5 Usage journal（evidence）
 
@@ -455,16 +457,28 @@ manifest 讲给三种不同的听众，字段按哪个听众读它分成三层�
 
 `tools[].input` schema 只在该 tool 进了模型的 native 工具面时才喂给模型；平时是可发现性元数据。`tools[].timeout_ms?` 是**这个 tool 自己**的 wall-clock 上限——但只在它被放到**模型的工具面**上的那次调用生效（缺省 = host 的 30s，§7.3；`nulya ext run` 不套用它，见 §7.3 的 timeout 讨论）：知道自己慢的 tool 在 manifest 里说出来，因为 manifest 就是关于一个 tool 的唯一真相。`tools[].surface?` 是**这个 tool 怎么到工具面**的闭合词表：缺省 / `"pin"` = model-facing 且可独立 pin；`"with"` = model-facing 但只随显式成员（`[extensions] with` / `session new --with`）进 fresh session；`"driver"` = 只给 driver / CLI 通过 `nulya ext run` 调，不进 fresh session 的模型面。`surface` 是 kernel 读并强制的字段：fresh pin 只接受 `pin`，fresh `--with` 只展开 `with`，resume 只重放 header `native_tools`。老 manifest 的 `audience:"driver"` 兼容读成 `surface:"driver"`，缺省或 `audience:"model"` 读成 `pin`；两者都写时 `surface` 权威。`skills` / `system_prompts` 是这个版本贡献的文件列表，随 build 冻结进快照。
 
-**manifest 说不出"我进哪些 session"。** 那是两个决定，两个都是人的，写在 config 或一次命令行上：成员（`[extensions] with` / `session new --with`）与可独立 pin 的工具面（`[registry] pinned_native_tools` / `session new --pin`），§5.1 那张 2×2。`surface:"with"` 只是说"如果这个包被显式列为成员，我的这个 tool 也属于那场的模型面"，不替任何人把包列进去。
+**manifest 可以声明 package 的默认 activation lifecycle，但不能取消人的选择。**
+顶层 `activation` 是封闭词表 `"always" | "on_request"`，**缺省 on_request**：
 
-这里曾经有一个字段 `activation`（`"always"` / `"on_request"`，缺省按形状），是内核唯一强制的 manifest 字段，答的是"activate 我之后接下来的 session 会怎样"。**已删**，两条理由：
+- `on_request`：`activate` 只移动 `current`；成员仍来自 config `with`、argv
+  `--with` 或 pin 蕴含。mode 默认就是这个形状。
+- `always`：当该 id 有生效 current 时，ordinary fresh session 自动把这个 package
+  收为成员；deactivate 后下一场消失。`session new --bare` 明确压掉这条 discovery，
+  所以 delegated/sub-agent 场不会继承机器上的 always 包。
+- config/argv 仍有最后决定权：`--with <id>@<version>` 可以在这一场覆盖 discovery
+  选到的版本；`--bare` 可以把全部 standing state 清空。
 
-- **reach 是人的决定，不是作者的**（physics #6）。当时的论证是"我是 policy 还是 mode 只有包自己答得出"——那句话现在看是把**包的性质**（它带一段 identity prompt 吗）和**它该进谁的 session**（一个 workspace 的决定）当成了同一个问题。前者确实只有作者知道，而它已经写在 `contributes` 里了；后者从来不是他能知道的。
-- **承诺已经漏了。** pin 蕴含成员之后（§5.1），config 里一条 `pinned_native_tools = ["ext:plan/propose"]` 就把一个 `on_request` 的包带进每一场，内核照办——一个只在某些路径上成立的保证不是保证，而前端只能绕着它走。
+这不是把旧的“每个 current 都自动进场”恢复回来。旧设计的问题正是 **current 本身
+等于 reach**；现在只有 manifest 显式写 always 才有 standing reach，旧 manifest
+以及所有没写 activation 的包都保持 on_request。这个 bit 表达的是 package 作者
+定义的生命周期类别（例如全局 identity/policy 与一次性 mode），而人仍可通过
+`--bare`、config、`--with` 决定具体 session。
 
-根因是 `current` 一个指针同时承担了两件事："`<id>` 指哪个版本"与"要不要进每一场"。现在它只承担第一件：**`nulya ext activate` = 原子改 `current`，一场 session 都不改变**（physics #5 一字未动，只是它现在是 activate 的全部）。
+`contributes.system_prompts` 同时支持两种写法：旧字符串 `"prompts/x.md"`，
+以及 `{"path":"prompts/x.md","position":"early|normal|late"}`。字符串等价
+`position:"normal"`；未知 position 是 `InvalidSystemPromptPosition`。position
+只决定 system block 序列化位置，绝不代表更高 authority，见 §5.6。
 
-**老 manifest 写了这个键的**：`parse` 当未知键**忽略**（不是错，连从前会被拒的 `"onrequest"` 与 `false` 都只是被忽略），`ext build` / `ext sync` 对这样的 draft 在 stderr 打一行 —— 静默忽略会让作者以为自己的包还在 opt out。唯一的读者就是那一行（`manifest.Manifest.legacy_activation`）。
 
 #### driver 声明
 
