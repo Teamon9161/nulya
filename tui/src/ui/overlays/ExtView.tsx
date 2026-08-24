@@ -469,7 +469,7 @@ export function ExtView(props: {
     setListed(entries)
     setComposedTools(
       entries
-        .filter((entry) => isActive(entry) && composedEverySession(entry.id))
+        .filter((entry) => isActive(entry) && composedEverySession(entry))
         .flatMap((entry) => entry.withTools.map((tool) => toolId(entry.id, tool))),
     )
     return entries
@@ -584,11 +584,11 @@ export function ExtView(props: {
   /** A current version exists in the winning root; membership is separate. */
   const isActive = (entry: ExtensionEntry) => entry.current !== null && !entry.shadowed
   /** Standing membership from manifest activation or one of the three user/config lists. */
-  const composedEverySession = (id: string) =>
-    listed().some((entry) => entry.id === id && isActive(entry) && entry.activation === "always") ||
-    configWith().includes(id) ||
-    standingWithIds(props.statePath).includes(id) ||
-    style.settings.extensions.session_with.includes(id)
+  const composedEverySession = (entry: ExtensionEntry) =>
+    entry.activation === "always" ||
+    configWith().includes(entry.id) ||
+    standingWithIds(props.statePath).includes(entry.id) ||
+    style.settings.extensions.session_with.includes(entry.id)
   /**
    * The pins this pane's switch writes for a row: one per `surface:"pin"` tool.
    * With-surface tools come from membership, and driver tools stay off the model
@@ -1636,7 +1636,7 @@ export function ExtView(props: {
                       fg={style.theme.warn}
                     />
                   </Show>
-                  <Show when={composedEverySession(entry.id)}>
+                  <Show when={composedEverySession(entry)}>
                     <Lines
                       text={`composed into every session started here · ${
                         configWith().includes(entry.id)
