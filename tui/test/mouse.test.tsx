@@ -203,11 +203,11 @@ test("/ext: clicking a pane name goes to it, clicking [x] pins the tool", async 
   const state = `${ws.dir}/tui-state.json`
   const setup = await mount(() => <ExtView ws={ws} header={null} statePath={state} onClose={() => {}} />, 120, 24)
   try {
-    await until(() => setup.captureCharFrame().includes("extensions  versions  tools  usage"), 20_000)
-    const strip = (await settle(setup, 6)).split("\n").findIndex((row) => row.includes("extensions  versions"))
+    await until(() => setup.captureCharFrame().includes("extensions  tools  usage"), 20_000)
+    const strip = (await settle(setup, 6)).split("\n").findIndex((row) => row.includes("extensions  tools"))
     expect(strip).toBeGreaterThanOrEqual(0)
 
-    // "tools" is the third word of the strip; click it rather than pressing `t`.
+    // "tools" is the second word of the strip; click it rather than pressing `t`.
     const line = (await settle(setup, 2)).split("\n")[strip]!
     await setup.mockMouse.click(line.indexOf("tools") + 2, strip)
     await until(() => setup.captureCharFrame().includes("[ ] ext:lint/lint"), 10_000)

@@ -213,8 +213,8 @@ test("/ext shows the version line, the current pointer and the usage counts", as
     expect(frame).toContain(version)
     expect(frame).toContain("current")
     expect(frame).toContain("▎ this session")
-    // The four panes name themselves; the store actions are one `?` away.
-    expect(frame).toContain("extensions  versions  tools  usage")
+    // The visible panes name themselves; the store actions are one `?` away.
+    expect(frame).toContain("extensions  tools  usage")
     expect(frame).toContain("Enter on/off · j/k move · h/l pane · Esc close · ? keys")
     expect(frame).not.toContain("a activate one named version")
     expect(stable(frame)).toMatchSnapshot()
@@ -230,8 +230,8 @@ test("/ext shows the version line, the current pointer and the usage counts", as
     expect(usage).toContain("tool usage · .nulya/tool-usage.jsonl")
     expect(usage).toContain("builtin.shell")
 
-    // The strip is a row of four, so sideways keys walk it — and they wrap both
-    // ways, which is the half `Tab` alone never had (T24).
+    // The strip is a row of visible panes, so sideways keys walk it — and they
+    // wrap both ways, which is the half `Tab` alone never had (T24).
     setup.mockInput.pressKey("h")
     expect(await settle(setup, 4)).toMatch(/tools 1\+0\/\d+/)
     setup.mockInput.pressKey("l")
@@ -245,7 +245,7 @@ test("/ext shows the version line, the current pointer and the usage counts", as
   }
 }, 60_000)
 
-test("/ext at eighty columns: all four panes cut to their columns, the version id never", async () => {
+test("/ext at eighty columns: visible panes cut to their columns, the version id never", async () => {
   // An id nobody sized a fixed column for. It is also its own tool's name, so
   // one package gives the id list, the detail pane and the pin panel each a
   // cell that no reasonable column can hold.
@@ -277,13 +277,12 @@ test("/ext at eighty columns: all four panes cut to their columns, the version i
     // about whether to move something, not about which build it is.
     expect(lines.slice(0, 5).join("\n")).not.toContain(long_version)
 
-    // Pane 2 — the version line. The full id is under the cursor and nowhere
-    // else: it is what somebody types into `ext activate`, whole or useless.
-    setup.mockInput.pressTab()
-    const versions = fits(await settle(setup, 4))
-    expect(versions).toContain(long_version)
+    // The version line is part of the extension detail. The full id is under
+    // the cursor and nowhere else: it is what somebody types into
+    // `ext activate`, whole or useless.
+    expect(ids).toContain(long_version)
 
-    // Pane 3 — the pin panel. The checkbox keeps its place while the tool id
+    // Pane 2 — the pin panel. The checkbox keeps its place while the tool id
     // beside it is cut.
     setup.mockInput.pressKey("t")
     const tools = fits(await settle(setup, 4))
@@ -291,7 +290,7 @@ test("/ext at eighty columns: all four panes cut to their columns, the version i
     expect(tools).not.toContain(`ext:${long_id}/${long_id}`)
     expect(tools).toContain("…")
 
-    // Pane 4 — the usage journal, counts in their own columns.
+    // Pane 3 — the usage journal, counts in their own columns.
     setup.mockInput.pressKey("u")
     const usage = fits(await settle(setup, 4))
     expect(usage).toContain("tool usage · .nulya/tool-usage.jsonl")
@@ -558,8 +557,6 @@ test("/ext's action keys move the store's current pointer, with a confirmation",
   const setup = await overlayFrame(() => <ExtView ws={ws} header={null} onClose={() => {}} />)
   try {
     await settle(setup, 6)
-    setup.mockInput.pressTab() // extensions → versions
-    await settle(setup, 2)
     expect(setup.captureCharFrame()).toContain("versions · 2 · oldest → newest")
     // The version line is oldest first, so the cursor starts on the first build
     // — and pointing `current` back at it is the same verb as pointing it

@@ -81,13 +81,16 @@ import type { SessionHeader } from "../../nulya/ledger.ts"
 
 type Pane = "extensions" | "versions" | "tools" | "usage"
 
+type VisiblePane = Exclude<Pane, "versions">
+
 /**
- * The four panes, in Tab order. They used to be reachable only by knowing that
- * `Tab` cycles and that `t` and `u` jump — which meant the usage table and the
- * pin panel were invisible until somebody read the footer. One strip of four
- * words costs a row and makes the whole view's shape legible (and clickable).
+ * The visible panes, in Tab order. They used to be reachable only by knowing
+ * that `Tab` cycles and that `t` and `u` jump — which meant the usage table and
+ * the pin panel were invisible until somebody read the footer. The version
+ * timeline now lives in the extension detail itself, where the id is already
+ * selected; `versions` remains only as an internal focus for that timeline.
  */
-const panes: Pane[] = ["extensions", "versions", "tools", "usage"]
+const panes: VisiblePane[] = ["extensions", "tools", "usage"]
 
 /**
  * An action waiting for `y`. Only two are left, and both name a VERSION: moving
@@ -424,9 +427,8 @@ export function ExtView(props: {
    * action; the notice now just points here.
    */
   const [outdated, setOutdated] = createSignal<readonly string[]>([])
-  // One hover slot per list: the four panes are never on screen together, so
-  // sharing one would be a highlight that follows the pointer into the wrong
-  // column.
+  // One hover slot per list: panes replace each other, so sharing one would be
+  // a highlight that follows the pointer into the wrong column.
   const idHover = createHover()
   const versionHover = createHover()
   const toolHover = createHover()
@@ -709,9 +711,11 @@ export function ExtView(props: {
     </For>
   )
 
-  /** Walk the pane strip, wrapping at both ends. */
+  /** Walk the visible pane strip, wrapping at both ends. */
   const step = (delta: number) => {
-    const at = panes.indexOf(pane())
+    const current = pane()
+    const visible: VisiblePane = current === "versions" ? "extensions" : current
+    const at = panes.indexOf(visible)
     setPane(panes[(at + delta + panes.length) % panes.length]!)
   }
 
@@ -1102,12 +1106,8 @@ export function ExtView(props: {
   const act = () => {
     const entry = selected()
     if (!entry) return
-    // The timeline's own keys: they name ONE build. Turning an extension on is
-    // Enter's job and picks the version itself.
-    if (pane() !== "versions") {
-      setNotice("Enter turns this extension on or off · Tab to the version line to point at one build")
-      return
-    }
+    // The timeline lives in the extension detail. It names ONE build; turning an
+    // extension on is Enter's job and picks a version itself.
     const version = selectedVersion()?.version
     if (!version) {
       setNotice("no version to point at · this id has never been built")
@@ -1193,7 +1193,7 @@ export function ExtView(props: {
     }
     if (help.consume(key)) return
     if (key.name === "escape") return props.onClose()
-    // The pane strip is a row of four, so the keys that walk it are the ones
+    // The visible pane strip is a row, so the keys that walk it are the ones
     // that mean sideways: h/l beside j/k, ←/→ beside ↑/↓, and Tab because a
     // strip of panes is a strip of tabs (T24). Shift+Tab and h go back — a
     // cycle you can only go forwards round is three presses to undo one.
@@ -1374,15 +1374,15 @@ export function ExtView(props: {
   )
 
   /**
-   * The four panes as a strip. It is the view's own table of contents: which
-   * pane is up, which others exist, and — since each word answers to a click —
-   * how to get to them without knowing that `Tab` cycles.
+   * The panes as a strip. It is the view's own table of contents: which pane is
+   * up, which others exist, and — since each word answers to a click — how to
+   * get to them without knowing that `Tab` cycles.
    */
   const PaneStrip = () => (
     <box flexDirection="row" width="100%" height={1} flexShrink={0}>
       <For each={panes}>
         {(name, index) => {
-          const here = () => pane() === name
+          const here = () => pane() === name || (name === "extensions" && pane() === "versions")
           const click = onClick(() => setPane(name))
           return (
             <>
@@ -1419,8 +1419,9 @@ export function ExtView(props: {
       <PaneStrip />
       <box height={1} />
 
-      {/* Two of the four panes share the id list / detail split; the other two
-          are whole-width tables of their own. */}
+      {/* The extension pane is the id list plus its detail; `versions` is that
+          same pane with the timeline focused. The other panes are whole-width
+          tables of their own. */}
       <Show
         when={pane() === "extensions" || pane() === "versions"}
         fallback={pane() === "tools" ? <ToolsPane /> : <UsageTable rows={usage()} width={inner()} />}

@@ -175,7 +175,15 @@ async function main() {
         agentsTrusted={agentsTrusted}
       />
     ),
-    { exitOnCtrlC: false, targetFps: 30 },
+    {
+      exitOnCtrlC: false,
+      targetFps: 30,
+      // OpenTUI's debug console is useful for library development, but in this
+      // app it is a trap: it steals focus, Esc only blurs it, and the user loses
+      // the TUI controls that would let them recover. Driver failures already
+      // have a first-class surface in the transcript (`ErrorNotice`).
+      openConsoleOnError: false,
+    },
   )
 }
 
