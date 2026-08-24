@@ -50,6 +50,30 @@ export interface Activity {
 }
 
 /**
+ * What part of the current step the user is waiting on. `activeTool` is still
+ * the kernel's direct "executor is inside this call" signal; the transcript
+ * tail fills in the two gaps around it: while the model is still spelling out a
+ * call, and while the just-finished result is being committed before the next
+ * model turn starts.
+ */
+export function stepActivity(snapshot: SessionSnapshot): string {
+  if (snapshot.activeTool) return `running ${snapshot.activeTool}`
+  for (let i = snapshot.items.length - 1; i >= 0; i--) {
+    const item = snapshot.items[i]!
+    if (item.kind === "tool" && !item.resolved) {
+      const tool = item.tool || "tool"
+      if (item.state === "running") return `running ${tool}`
+      if (item.state === "done") return `recording ${tool} result`
+      return `preparing ${tool}`
+    }
+    if (item.seq !== null) break
+    if (item.kind === "assistant" && item.text.length > 0) return "responding"
+    if (item.kind === "thinking" && item.text.length > 0) return "thinking"
+  }
+  return "waiting for model"
+}
+
+/**
  * The activity, from the facts — a pure function, so the rules are testable and
  * live in one place instead of in a chain of ternaries inside a render.
  *
@@ -80,10 +104,11 @@ export function activityOf(facts: {
     return null
   }
   if (facts.status === "canceling") return { text: "canceling", tone: "run", moving: true }
-  // The tool that is running, or the model itself when none is: the two halves
-  // of a step, and which one is being waited on is the whole question.
+  // The live phase of a step: model request, streamed answer, streamed tool
+  // call, executor, or result commit. `activeTool` alone only covered the
+  // executor and made every other part read as generic thinking.
   if (facts.status === "stepping") {
-    return { text: facts.snapshot.activeTool ?? "thinking", tone: "run", moving: true, cancelable: true }
+    return { text: stepActivity(facts.snapshot), tone: "run", moving: true, cancelable: true }
   }
   if (facts.status === "sending") return { text: "sending", tone: "run", moving: true }
   if (facts.snapshot.lastStopped === "budget") {

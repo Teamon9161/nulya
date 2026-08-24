@@ -11,11 +11,11 @@
  * not a chain of JSX ternaries.
  */
 import { expect, test } from "bun:test"
-import { activityOf, elapsedLabel } from "../src/ui/WorkingStatus.tsx"
+import { activityOf, elapsedLabel, stepActivity } from "../src/ui/WorkingStatus.tsx"
 import { noticeHold } from "../src/ui/App.tsx"
 import { shimmerColor, mixHex, createStyle } from "../src/render/theme.ts"
 import { default_settings } from "../src/state/settings.ts"
-import { no_snapshot, type SessionSnapshot } from "../src/state/session.ts"
+import { approachCount, no_snapshot, type SessionSnapshot, type ToolItem, type TranscriptItem } from "../src/state/session.ts"
 import type { DriverStatus } from "../src/state/driver.ts"
 import type { Role } from "../src/state/attach.ts"
 import { pickTip } from "../src/ui/Welcome.tsx"
@@ -37,6 +37,29 @@ function facts(over: {
     awaiting: over.awaiting ?? false,
     background: over.background ?? 0,
   }
+}
+
+function tool(over: Partial<ToolItem> & { tool: string; state: ToolItem["state"] }): ToolItem {
+  return {
+    key: "p0:tool:0",
+    seq: null,
+    kind: "tool",
+    callId: "c1",
+    args: "",
+    ok: null,
+    output: "",
+    spillPath: null,
+    resolved: false,
+    awaiting: false,
+    taskResult: null,
+    ...over,
+    tool: over.tool,
+    state: over.state,
+  }
+}
+
+function assistant(text: string): TranscriptItem {
+  return { key: "p0:assistant", seq: null, kind: "assistant", text, streaming: true }
 }
 
 test("activityOf: awaiting a gate verdict outranks everything, including an error and a run in flight", () => {
@@ -94,12 +117,21 @@ test("activityOf: driver — stepping outranks sending, a stale lastStopped, and
       background: 2,
     }),
   )
-  expect(withTool).toEqual({ text: "shell", tone: "run", moving: true, cancelable: true })
+  expect(withTool).toEqual({ text: "running shell", tone: "run", moving: true, cancelable: true })
 
-  // No active tool: the model itself is the thing being waited on.
+  // No stream yet: the model request itself is the thing being waited on.
   const thinking = activityOf(facts({ status: "stepping", snapshot: { activeTool: null } }))
-  expect(thinking?.text).toBe("thinking")
+  expect(thinking?.text).toBe("waiting for model")
   expect(thinking?.cancelable).toBe(true)
+})
+
+test("stepActivity: streamed transcript tail names the live phase before, during, and after a tool", () => {
+  expect(stepActivity({ ...no_snapshot, items: [assistant("hello")] })).toBe("responding")
+  expect(stepActivity({ ...no_snapshot, items: [tool({ tool: "shell", state: "pending" })] })).toBe("preparing shell")
+  expect(stepActivity({ ...no_snapshot, items: [tool({ tool: "shell", state: "running" })] })).toBe("running shell")
+  expect(stepActivity({ ...no_snapshot, items: [tool({ tool: "shell", state: "done" })] })).toBe(
+    "recording shell result",
+  )
 })
 
 test("activityOf: driver — sending outranks a stale lastStopped and background, but is not cancelable", () => {
@@ -142,6 +174,14 @@ test("elapsedLabel: seconds below the minute, and the minute boundary", () => {
   expect(elapsedLabel(59_999)).toBe("59s") // floors, does not round up into the next second
   expect(elapsedLabel(60_000)).toBe("1m00s")
   expect(elapsedLabel(100_000)).toBe("1m40s")
+})
+
+test("approachCount: activity-line counters move toward jumps instead of teleporting", () => {
+  expect(approachCount(0, 1)).toBe(1)
+  expect(approachCount(0, 500)).toBeGreaterThan(0)
+  expect(approachCount(0, 500)).toBeLessThan(500)
+  expect(approachCount(400, 380)).toBe(380)
+  expect(approachCount(999, 1_000_000)).toBeLessThan(1_000_000)
 })
 
 test("noticeHold: floors at the Ctrl+C-again window, scales with length, and caps at nine seconds", () => {

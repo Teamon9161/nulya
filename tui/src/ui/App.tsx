@@ -19,7 +19,7 @@ import { UsageView } from "./overlays/UsageView.tsx"
 import { ModelView } from "./overlays/ModelView.tsx"
 import { ProviderView } from "./overlays/ProviderView.tsx"
 import { TasksView } from "./overlays/TasksView.tsx"
-import { ScreenContext, StyleContext, useScreen, useStyle, type Style } from "../render/theme.ts"
+import { ScreenContext, FrameContext, StyleContext, useScreen, useStyle, type Style } from "../render/theme.ts"
 import { FoldContext, createFoldStore } from "../state/folds.ts"
 import { BrowseContext, createBrowseStore } from "../state/browse.ts"
 import { OverlayContext, createOverlayStore, type OverlayKind } from "../state/overlay.ts"
@@ -58,7 +58,7 @@ import { wrapApprovalNote } from "../approvalnote.ts"
 import { createProjectIndex } from "../references.ts"
 import { createSkillTable, skillTurn, splitSlash } from "../skills.ts"
 import { describeTool } from "../render/registry.ts"
-import { no_snapshot, usageLabel } from "../state/session.ts"
+import { no_snapshot, smoothUsageTotals, usageLabel, type UsageTotals } from "../state/session.ts"
 import type { NextSession } from "./Welcome.tsx"
 import {
   CliError,
@@ -329,6 +329,7 @@ export function App(props: AppProps) {
   /** Whether `/quit` has already said what happens to a running task. */
   const [tasksWarned, setTasksWarned] = createSignal(false)
   const [spinnerTick, setSpinnerTick] = createSignal(0)
+  const [displayUsage, setDisplayUsage] = createSignal<UsageTotals>({ ...no_snapshot.usage })
   const [ctrlCArmed, setCtrlCArmed] = createSignal(false)
   const [behind, setBehind] = createSignal(0)
   /**
@@ -812,6 +813,16 @@ export function App(props: AppProps) {
       background: runningTasks(),
     }),
   )
+
+  createEffect(() => {
+    const target = snapshot().usage
+    if (!props.style.motion || !activity()?.moving) {
+      setDisplayUsage({ ...target })
+      return
+    }
+    spinnerTick()
+    setDisplayUsage((current) => smoothUsageTotals(current, target))
+  })
 
   /**
    * `Date.now()`, resampled on the animation tick rather than read during a
@@ -2591,9 +2602,10 @@ export function App(props: AppProps) {
   return (
     <StyleContext.Provider value={props.style}>
       <ScreenContext.Provider value={screen}>
-        <FoldContext.Provider value={folds}>
-          <BrowseContext.Provider value={browse}>
-            <OverlayContext.Provider value={overlay}>
+        <FrameContext.Provider value={spinnerTick}>
+          <FoldContext.Provider value={folds}>
+            <BrowseContext.Provider value={browse}>
+              <OverlayContext.Provider value={overlay}>
               {/* The loaded plugins, for the one card that has to ask whether
                   a package draws its own tool call (`render/cards/ToolCard.tsx`,
                   tui-plugin D11). A context for the same reason the style is
@@ -2718,6 +2730,11 @@ export function App(props: AppProps) {
                   </Match>
                 </Switch>
 
+                {/* A deliberate seam between the record and the controls: the
+                    transcript/overlay scrolls above, while everything below is
+                    about what can happen next. */}
+                <box height={1} flexShrink={0} />
+
                 {/* The model's own proposal to hand over, between the
                     transcript and the box you answer it in (tui.md §5.8). Not
                     a transcript card: the brief is a file on disk, not a ledger
@@ -2797,7 +2814,7 @@ export function App(props: AppProps) {
                   spinnerFrame={spinnerFrame()}
                   since={live()?.attach.startedAt() ?? null}
                   now={clockNow()}
-                  usage={usageLabel(snapshot().usage)}
+                  usage={usageLabel(displayUsage())}
                   onOpenTasks={() => openOverlay("tasks")}
                 />
                 {/* `panel: true`'s degraded progress display (DESIGN §7.2.1,
@@ -2860,6 +2877,7 @@ export function App(props: AppProps) {
             </OverlayContext.Provider>
           </BrowseContext.Provider>
         </FoldContext.Provider>
+        </FrameContext.Provider>
       </ScreenContext.Provider>
     </StyleContext.Provider>
   )

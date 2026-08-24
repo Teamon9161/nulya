@@ -1,5 +1,5 @@
-import { Show, createSignal, type JSX } from "solid-js"
-import { useScreen, useStyle } from "../theme.ts"
+import { Index, Show, createContext, createSignal, useContext, type Accessor, type JSX } from "solid-js"
+import { shimmerColor, useFrame, useScreen, useStyle } from "../theme.ts"
 import { displayWidth, fit } from "../../ui/columns.ts"
 import { onClick } from "../../ui/rows.ts"
 import { useFolds } from "../../state/folds.ts"
@@ -11,6 +11,9 @@ import { useBrowse } from "../../state/browse.ts"
  * left to the two cases where something needs saying.
  */
 export type ChipTone = "err" | "warn" | "dim"
+
+/** True while the card under this provider represents work still in flight. */
+export const CardActivityContext = createContext<Accessor<boolean>>()
 
 /**
  * How much a call brought back, as the note says it: nothing at all when it
@@ -68,6 +71,8 @@ export function CardFrame(props: {
   const folds = useFolds()
   const browse = useBrowse()
   const screen = useScreen()
+  const frame = useFrame()
+  const contextualActive = useContext(CardActivityContext)
   const [hovered, setHovered] = createSignal(false)
 
   const open = () => props.foldable && folds.isOpen(props.itemKey, props.defaultOpen)
@@ -90,6 +95,9 @@ export function CardFrame(props: {
   const room = () => Math.min(screen().width, style.maxWidth) - 2 - 2 - (props.foldable ? 2 : 0)
   const note = () => fit(props.chip ?? "", Math.max(0, Math.floor(room() / 2)))
   const head = () => fit(props.head, Math.max(4, room() - (note().length > 0 ? displayWidth(note()) + 4 : 0)))
+  const headCells = () => Array.from(head())
+  const active = () => contextualActive?.() ?? false
+  const headBase = () => (props.headTone === "dim" ? style.theme.dim : style.theme.muted)
 
   const chipColor = () => {
     switch (props.chipTone ?? "dim") {
@@ -125,9 +133,21 @@ export function CardFrame(props: {
         {/* `muted`, not `fg`: a call is what the model DID, and the brightest
             text on screen should stay what it and the person SAID. The glyph
             already carries the role colour (tui.md §6). */}
-        <text fg={props.headTone === "dim" ? style.theme.dim : style.theme.muted} flexShrink={0}>
-          {head()}
-        </text>
+        <box flexDirection="row" flexShrink={0} height={1}>
+          <Index each={headCells()}>
+            {(ch, index) => (
+              <text
+                fg={
+                  active() && style.motion
+                    ? shimmerColor(frame(), index, headCells().length, headBase(), style.theme.lift)
+                    : headBase()
+                }
+              >
+                {ch()}
+              </text>
+            )}
+          </Index>
+        </box>
         <Show when={note().length > 0}>
           <text fg={chipColor()} flexShrink={0}>{`  (${note()})`}</text>
         </Show>

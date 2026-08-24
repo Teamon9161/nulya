@@ -167,6 +167,34 @@ export function usageLabel(u: UsageTotals): string | null {
   return `↑${compactCount(u.input)} ↓${compactCount(u.output)} cache ${cacheShare(u)}%`
 }
 
+/**
+ * Move a displayed counter toward the ledger/stream total without pretending the
+ * total itself is anything other than an integer fact. Small numbers advance in
+ * visible steps; large jumps are capped so a late provider usage event does not
+ * teleport a six-digit meter in one frame.
+ */
+export function approachCount(current: number, target: number): number {
+  const from = Math.max(0, Math.floor(current))
+  const to = Math.max(0, Math.floor(target))
+  if (to <= from) return to
+  const delta = to - from
+  if (delta <= 2) return from + 1
+  const cap = to < 1_000 ? 37 : to < 100_000 ? 997 : to < 1_000_000 ? 9_973 : 99_973
+  return Math.min(to, from + Math.max(1, Math.min(cap, Math.ceil(delta / 6))))
+}
+
+/** UI-only smoothing for the activity-line meter. */
+export function smoothUsageTotals(current: UsageTotals, target: UsageTotals): UsageTotals {
+  return {
+    input: approachCount(current.input, target.input),
+    output: approachCount(current.output, target.output),
+    cacheRead: approachCount(current.cacheRead, target.cacheRead),
+    cacheWrite: approachCount(current.cacheWrite, target.cacheWrite),
+    pricedSteps: target.pricedSteps,
+    lastPrompt: target.lastPrompt,
+  }
+}
+
 export interface SessionSnapshot {
   id: string
   header: SessionHeader | null

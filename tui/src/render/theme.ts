@@ -354,3 +354,14 @@ export const ScreenContext = createContext<Accessor<ScreenSize>>()
 export function useScreen(): Accessor<ScreenSize> {
   return useContext(ScreenContext) ?? useTerminalDimensions()
 }
+
+/**
+ * The top-level animation clock. Consumers that are at rest deliberately do not
+ * read it, so one 90 ms tick can drive the few moving rows without making every
+ * mounted card repaint.
+ */
+export const FrameContext = createContext<Accessor<number>>()
+
+export function useFrame(): Accessor<number> {
+  return useContext(FrameContext) ?? (() => 0)
+}

@@ -12,6 +12,7 @@ import { CanceledCard } from "./CanceledCard.tsx"
 import { ChecklistCard } from "./ChecklistCard.tsx"
 import { MarkdownToolCard } from "./MarkdownToolCard.tsx"
 import { PluginToolCard } from "./PluginToolCard.tsx"
+import { CardActivityContext } from "./CardFrame.tsx"
 import { usePlugins } from "../../plugins/context.ts"
 import type { ToolItem } from "../../state/session.ts"
 
@@ -44,46 +45,49 @@ export function ToolCard(props: { item: ToolItem; contributions?: Contributions[
     }),
   )
   const marker = createMemo(() => (props.item.output ? cancelMarkerOf(props.item.output) : null))
+  const active = () => props.item.awaiting || !props.item.resolved || props.item.state !== "done"
 
   return (
-    <Switch>
-      <Match when={marker() !== null}>
-        <CanceledCard item={props.item} presentation={presentation()} marker={marker()!} />
-      </Match>
-      <Match when={pluginCard() !== null}>
-        <PluginToolCard
-          item={props.item}
-          presentation={presentation()}
-          card={pluginCard()!}
-          revision={plugins?.revision() ?? 0}
-        />
-      </Match>
-      <Match when={presentation().kind === "edit"}>
-        <EditCard item={props.item} presentation={presentation()} />
-      </Match>
-      {/*
-        A call that opened a session of its own has its own card since T43: it
-        is the one kind whose story continues somewhere else, so it says how
-        that is going and offers a way in (`SubSessionCard`).
-      */}
-      <Match when={presentation().kind === "subsession"}>
-        <SubSessionCard item={props.item} presentation={presentation()} />
-      </Match>
-      <Match when={presentation().kind === "evolve"}>
-        <EvolveCard item={props.item} presentation={presentation()} />
-      </Match>
-      <Match when={presentation().kind === "checklist"}>
-        <ChecklistCard item={props.item} presentation={presentation()} />
-      </Match>
-      <Match when={presentation().kind === "markdown"}>
-        <MarkdownToolCard item={props.item} presentation={presentation()} />
-      </Match>
-      <Match when={presentation().kind === "ext"}>
-        <ExtToolCard item={props.item} presentation={presentation()} />
-      </Match>
-      <Match when={presentation().kind === "shell"}>
-        <ShellCard item={props.item} presentation={presentation()} />
-      </Match>
-    </Switch>
+    <CardActivityContext.Provider value={active}>
+      <Switch>
+        <Match when={marker() !== null}>
+          <CanceledCard item={props.item} presentation={presentation()} marker={marker()!} />
+        </Match>
+        <Match when={pluginCard() !== null}>
+          <PluginToolCard
+            item={props.item}
+            presentation={presentation()}
+            card={pluginCard()!}
+            revision={plugins?.revision() ?? 0}
+          />
+        </Match>
+        <Match when={presentation().kind === "edit"}>
+          <EditCard item={props.item} presentation={presentation()} />
+        </Match>
+        {/*
+          A call that opened a session of its own has its own card since T43: it
+          is the one kind whose story continues somewhere else, so it says how
+          that is going and offers a way in (`SubSessionCard`).
+        */}
+        <Match when={presentation().kind === "subsession"}>
+          <SubSessionCard item={props.item} presentation={presentation()} />
+        </Match>
+        <Match when={presentation().kind === "evolve"}>
+          <EvolveCard item={props.item} presentation={presentation()} />
+        </Match>
+        <Match when={presentation().kind === "checklist"}>
+          <ChecklistCard item={props.item} presentation={presentation()} />
+        </Match>
+        <Match when={presentation().kind === "markdown"}>
+          <MarkdownToolCard item={props.item} presentation={presentation()} />
+        </Match>
+        <Match when={presentation().kind === "ext"}>
+          <ExtToolCard item={props.item} presentation={presentation()} />
+        </Match>
+        <Match when={presentation().kind === "shell"}>
+          <ShellCard item={props.item} presentation={presentation()} />
+        </Match>
+      </Switch>
+    </CardActivityContext.Provider>
   )
 }
