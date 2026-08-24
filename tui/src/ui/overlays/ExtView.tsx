@@ -812,9 +812,10 @@ export function ExtView(props: {
   /**
    * The switch: `Enter` on an id, or a click on its marker (tui.md §11, T22).
    *
-   * ON is both axes at once — point `current` at a built version so its skills
-   * and system prompts join the composition, and pin every tool it declares so
-   * the model can call them. OFF is both back. Nothing here is irreversible and
+   * ON points `current` at a built version and pins its pinnable tools.
+   * Membership follows manifest/config: activation:"always" is standing, while
+   * on_request needs with or a pin-implied membership. OFF clears the pointer
+   * and this switch's pins. Nothing here is irreversible and
    * nothing here reaches the session already on screen (physics #2), which is
    * why neither direction asks for a `y`.
    *
@@ -1513,11 +1514,8 @@ export function ExtView(props: {
                         {fit(entry().id, idCols().id - 2)}
                       </text>
                     </box>
-                    {/* A package that contributes a system prompt is a MODE, and
-                        turning it on reaches every session this front end opens
-                        (T31/K8). Warn-coloured while it is on: that is the state
-                        somebody has to be able to spot without reading a
-                        detail pane. */}
+                    {/* A prompt package is a mode; activation decides whether
+                        current is standing reach or only enables /<id>. */}
                     <box width={idCols().mode} flexShrink={0}>
                       <text fg={on() === "off" ? style.theme.faint : style.theme.warn}>
                         {fit(modeCell(entry()), Math.max(0, idCols().mode - 2))}
@@ -1611,7 +1609,11 @@ export function ExtView(props: {
                       `tui.toml`. */}
                   <Show when={entry.systemPrompts.length > 0}>
                     <Lines
-                      text={`a mode · Enter gives it a \`/${entry.id}\` command that wears its prompt for one session · nothing here composes it standing`}
+                      text={
+                        entry.activation === "always"
+                          ? "an always mode · current puts its prompt in every ordinary new session · --bare opts out"
+                          : `an on-request mode · Enter gives it a \`/${entry.id}\` command that wears its prompt for one session`
+                      }
                       width={detailWidth()}
                       fg={style.theme.muted}
                     />
