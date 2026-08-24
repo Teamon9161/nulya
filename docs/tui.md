@@ -68,7 +68,7 @@
 | `.nulya/tool-usage.jsonl` | `/ext` 里的 usage 表：一行取 `tool_id` + `ok` → uses_total / recent / success_rate（**只投影，不重算排序**——排序是 kernel policy，TUI 不复刻）。行上还有 `at` / `session?` / `duration_ms?`（DESIGN §5.5），TUI 只挑它要的两列、其余原样忽略 |
 | header `composition.native_tools` / `active[]` | 本场冻结契约（§5.1）；与 store `current` 比对 → "下一场会变"的漂移提示 |
 | shell 结果形状 | `stdout` + `--- stderr ---` + `[exit N]`（`tools/shell.zig`）→ 状态 chip 解析 `[exit N]` |
-| `tool_results[].presentation` | UI-only JSON；`{kind:"diff", patch, filetype?}` 交给宿主 diff primitive。`std.edit` 的 diff 由 extension 从实际 `ReplacementPlan` 写入 sidecar；TUI 不解析 edit 参数、不跑 LCS 猜 diff |
+| `tool_results[].presentation` | UI-only JSON；`{kind:"diff", patch, path?, filetype?, added?, removed?}` 交给宿主 diff primitive。`std.edit` 的 diff 由 extension 从实际 `ReplacementPlan` + 旧/新文件字节写入 sidecar；TUI 不解析 edit 参数；语法高亮与 `+N -N` chip 由宿主从 surface 计算（或读 surface 显式字段） |
 | 取消标记文本 | `loop.zig` 四种 marker（interrupted / canceled executing / recording canceled / not executed）→ 识别成 canceled 卡片 |
 | `emit` 溢出 | `tool_results[].spill_path` → 卡片尾部 "full output → path"，`o` 打开（`$EDITOR` / 展开读文件） |
 
@@ -165,7 +165,7 @@ tui/
 | call `shell` `{background:true}` | ShellCard（后台变体） | `$ 命令  (background <sid>/t3 · running 12s) ▸`；报告到了换成 `(background <sid>/t3[ · exit N] · 41.8s)` | 回执原文（任务全名 + log 路径 + 三条命令） | **折叠**；**不加新 glyph**（还是那条命令，变的只有那一格 note） |
 | `task_finished` | TaskFinishedCard | `$ 命令  (background <sid>/t3[ · exit N][ · killed] · 41.8s) ▸`（`exit 0` 照 T26 省略） | 输出 tail + 尾行 `full log → <path>` | **折叠**；一条事件一张卡，不是回执那张卡的更新 |
 | 一串调用 | RunCard | `⋯ read ×3 · grep ×2 · shell ▸`（glyph 是 thinking 的三点、全程 dim、**没有 note**——一个 run 按构造就是"都成功了、没什么可给你看"，再写一格 `(6 calls)` 是同一句话说两遍，T26） | 展开就是原来那些卡，各自照旧折叠 | **折叠**；设定 `run_summary`。**进得去的**只有「跑完 + 成功 + 没有身体」的 `shell` / 扩展 tool，且至少两个；**进不去的**：还在跑的、失败的（含 `exit != 0`）、被取消的、回执型的（后台任务 / 子场）、`edit`、演化动作、`checklist`/`markdown`、包自己用代码画的卡，以及**任何声明了 `render` 的 tool**——那就是包说「我对这次调用长什么样有意见」，一个有画面要给的调用不该被概括（`render/runs.ts`） |
-| call `edit`（`std` 插件） | PluginToolCard + host diff surface | `⌘ edit · path  (+2 -1[· failed])` | `tool_results[].presentation` 里的 diff surface（OpenTUI `diff`，语法高亮）；无插件或无 presentation 时退回普通 ext 输出 | **展开**；设定 `edit_diff = expanded\|collapsed` |
+| diff surface（`std.edit`、`git_apply`、migration 等任意插件卡片） | PluginToolCard + host diff surface | `⌘ tool · path  (+2 -1[· failed])` | `tool_results[].presentation` 里的 diff surface（OpenTUI `diff`，语法高亮）；无插件或无 presentation 时退回普通 ext 输出 | **展开**；设定 `diff = expanded\|collapsed` |
 | call `ext:*` | ExtToolCard | `⌘ tool_name · 参数摘要  (N lines) ▸`（**第一个参数不写键名**——工具的第一个参数就是它的主语：路径、模式、命令，T26） | 输出 | 折叠 |
 | shell 命令前缀 `nulya src` / `nulya ext init\|build\|activate\|rollback\|run` / `nulya skill load` / `nulya session new\|append\|step\|events` | EvolveCard / SubSessionCard | 见 §5.2 / §5.5 | 原始输出可展开 | 折叠但头行信息量大 |
 | `capability_note` | CapabilityBanner | `⚡ capability · id@version · tools: …` | note 全文 | 展开 |
@@ -382,7 +382,7 @@ PLAN §3.2 早就把答案写死了——**一个 agent 就是 `session new` 的
 
 ```toml
 [transcript]
-edit_diff      = "expanded"    # expanded | collapsed
+diff           = "expanded"    # expanded | collapsed
 tool_output    = "collapsed"   # collapsed | expanded
 thinking       = "hidden"      # hidden | collapsed | expanded —— 默认不画 reasoning 卡（T43）
 run_summary    = true          # 一串跑完且成功的无身体调用折成一行（T43）；false = 一次调用一行
@@ -435,7 +435,7 @@ cancel = "escape"
 |---|---|---|
 | ~~**T0 · kernel `--stream`**~~ ✅ | §2.2：`StepContext.observer`、tee、tool begin/end、per-step 刷 ledger 行、`run done/error` 行、诊断 JSON 化；单测 + e2e 冒烟；DESIGN §14 同步 | `zig build test` / `e2e` 绿；`nulya session step <id> --stream` 在 scripted 下按 §2.2 行序输出；不带 `--stream` 行为不变 |
 | ~~**T1 · 骨架**~~ ✅ | `tui/` 包；`nulya/{bin,cli,ledger,files,diff}.ts`；`state/{session,driver,settings}`；App = transcript（User/Assistant 通用卡 + 通用 tool 卡）+ composer + 状态栏；driver 状态机；流式；Esc cancel；`--session` 回放；`bun test` 两条 | 在 nulya 仓库里用它对着真实 provider 完整跑一轮"读源码 → edit → zig build test"；关掉重开 `--session` 一致 |
-| ~~**T2 · 卡片与折叠**~~ ✅ | registry；Shell/Edit(diff)/ExtTool/Thinking/Canceled/spill；EvolveCard 全表；CapabilityBanner；CompositionCard；折叠交互；`tui.toml`；主题 tokens；ascii 降级 | §4.2 表每行一个快照测试；`edit_diff` 设定生效 |
+| ~~**T2 · 卡片与折叠**~~ ✅ | registry；Shell/Edit(diff)/ExtTool/Thinking/Canceled/spill；EvolveCard 全表；CapabilityBanner；CompositionCard；折叠交互；`tui.toml`；主题 tokens；ascii 降级 | §4.2 表每行一个快照测试；`diff` 设定生效 |
 | ~~**T3 · nulya 视图**~~ ✅ | `/sessions`（树 + live 标记 + 打开）；`/ext`（store / 版本线 / 漂移 / usage / 动作键）；SubSessionCard → 第二 tab；observer 模式（锁探测、`events --follow` 续接、take over） | 用 shell 在另一终端跑一个 driver 脚本 loop step，TUI 以 observer 附上并能 append |
 | ~~**T4 · 收尾**~~ ✅ | `/help` `/settings` `/usage`；keymap 覆盖；`bun build --compile` 出单文件；README（安装、`NULYA_BIN`、按键）；性能核对（长 session 回放 5k 事件不卡；scrollbox 视口裁剪 + `history_window`） | 5k 事件 session 打开 < 1s（实测 ~0.35s + 首帧 ~0.15s）；README 照做能跑 |
 | ~~**T5 · 模型选择**~~ ✅ | 内核外壳：`[[models]]` 目录 + profile `models[]`、`session new --profile/--model`、`step --effort`、`nulya config show --json`、DeepSeek `off`/`reasoning_content`；前端：`/model` 选择器（↑↓ ←→ Enter）、`/effort`、`tui-state.json`、无 key 时开屏即选择器（D10） | `zig build test`/`e2e` 绿；`bun test` 新增 `model.test.tsx` 8 条；开 `nulya`（无 key）第一屏就是选择器 + 原因 |
@@ -576,7 +576,7 @@ NULYA_SCRIPTED_MODE=finish bun run src/main.tsx --model scripted   # 离线
 二进制发现顺序：`NULYA_BIN` → workspace（或本包）向上找 `zig-out/bin/nulya[.exe]` → `PATH`。
 
 - `tui/test/cli.test.ts`：临时 workspace + **真实二进制**（scripted，无密钥无网络）。`new → append → step --stream` 对**整段行序**逐条断言（17 行的 tag 序列），并做类型化解析（`tool_use_start.name == "shell"`、`run done{steps:2,stopped:"end_turn"}`、seq 1..4）；`--since` 尾巴；cancel 路径用 `NULYA_SCRIPTED_MODE=loop --max-steps 20`，见到第一个 `step end` 就 `session cancel`，断言出现 `status:"canceled"` 且 `run done{stopped:"canceled"}` 且总步数远小于预算；最后一条断言 **events 回放的 items 投影 == live 流的 items 投影**。
-- `tui/test/render.test.tsx`：7 张卡片快照（user/queued、thinking 折叠、shell 折叠+exit chip、evolve、edit diff 展开、canceled marker、capability），外加 `edit_diff=collapsed` / `tool_output=expanded` 设定生效、窄屏隐藏右侧 chip、ascii 降级；然后是三条端到端（真实二进制 + test renderer + `mockInput`）：**同一 session live 与 replay 渲染出同一帧**、**打字 + Enter 真的驱动一次 step**（user turn 从 queued 转正、tool 卡出现、`stopped == "end_turn"`）、**关掉重开 `--session` 的 transcript 逐字相同**（对比两条 hairline 之间的行，避开状态栏计数）、**`Ctrl+O` 展开最近一张 tool 卡**。
+- `tui/test/render.test.tsx`：7 张卡片快照（user/queued、thinking 折叠、shell 折叠+exit chip、evolve、diff 展开、canceled marker、capability），外加 `diff=collapsed` / `tool_output=expanded` 设定生效、窄屏隐藏右侧 chip、ascii 降级；然后是三条端到端（真实二进制 + test renderer + `mockInput`）：**同一 session live 与 replay 渲染出同一帧**、**打字 + Enter 真的驱动一次 step**（user turn 从 queued 转正、tool 卡出现、`stopped == "end_turn"`）、**关掉重开 `--session` 的 transcript 逐字相同**（对比两条 hairline 之间的行，避开状态栏计数）、**`Ctrl+O` 展开最近一张 tool 卡**。
 
 **已知问题**
 
@@ -600,7 +600,7 @@ NULYA_SCRIPTED_MODE=finish bun run src/main.tsx --model scripted   # 离线
 
 ### T2 · 卡片与折叠
 
-**状态**：完成。`render/registry.ts` 填满 §4.2 / §5.2 全表；卡片拆成 `CardFrame` + `ShellCard` / `EditCard` / `ExtToolCard` / `EvolveCard` / `CanceledCard` / `CompositionCard`（`Thinking` / `CapabilityBanner` / `UserTurn` / `AssistantTurn` 沿用并加强）；折叠交互补齐鼠标点头行与 browse 模式（`state/browse.ts`）；`tui.toml` 的 `edit_diff` / `tool_output` / `thinking` / `ascii` 全部真的生效；主题 tokens 多一个 `bar` 字形并有 ascii 降级。**内核一行未改**（硬约束 1）。`bun test` 40 条全绿（`cli.test.ts` / **新增** `registry.test.ts` / `render.test.tsx`，14 张快照）；`zig build test` / `zig build e2e` 绿。
+**状态**：完成。`render/registry.ts` 填满 §4.2 / §5.2 全表；卡片拆成 `CardFrame` + `ShellCard` / `EditCard` / `ExtToolCard` / `EvolveCard` / `CanceledCard` / `CompositionCard`（`Thinking` / `CapabilityBanner` / `UserTurn` / `AssistantTurn` 沿用并加强）；折叠交互补齐鼠标点头行与 browse 模式（`state/browse.ts`）；`tui.toml` 的 `diff` / `tool_output` / `thinking` / `ascii` 全部真的生效；主题 tokens 多一个 `bar` 字形并有 ascii 降级。**内核一行未改**（硬约束 1）。`bun test` 40 条全绿（`cli.test.ts` / **新增** `registry.test.ts` / `render.test.tsx`，14 张快照）；`zig build test` / `zig build e2e` 绿。
 
 **关键决定与理由**
 
@@ -640,8 +640,8 @@ bun run src/main.tsx --session s-…           # 手工看一眼
 新增/改动的测试：
 
 - `tui/test/registry.test.ts`（**新**，11 条，无渲染器）：§5.2 每一行一条——`src` / `ext init`（含 `--script` 不当 id）/ `ext build`（`(built)` 与 `(already built)` 两种 stdout）/ `activate` / `rollback`（两个 glyph 不同）/ `ext run`（`--arg` 与位置 JSON 两种形态）/ `skill load` / `session new`（id 来自 stdout，没打印就是 `null`）/ `session step`；外加"读不懂的 `nulya` 命令退回 shell 卡"和"参数还在流式时显示原始 JSON 而不是瞎猜"。
-- `tui/test/render.test.tsx`：**§4.2 的每一行都有一张快照**——CompositionCard / UserTurn（含 queued）/ AssistantTurn / Thinking / ShellCard / EditCard / ExtToolCard / EvolveCard（§5.2 七种命令一帧）/ SubSession（两种）/ CapabilityBanner / CanceledCard（四种 marker 一帧）/ spill 尾行；另加 ascii 降级两帧（普通卡 + CompositionCard）、窄屏隐藏右侧 chip、`edit_diff=collapsed` / `tool_output=expanded`。
-- **`edit_diff` 设定生效有真文件为证**：`"a project tui.toml flips the edit diff default"` 在临时 workspace 里先断言默认展开，再写一个 `.nulya/tui.toml`（`edit_diff="collapsed"` + `thinking="expanded"`），重新 `loadSettings` 后同一张 edit 卡的 diff 消失、同一张 thinking 卡展开——两个方向都动，证明是设定而不是"全都折了"。
+- `tui/test/render.test.tsx`：**§4.2 的每一行都有一张快照**——CompositionCard / UserTurn（含 queued）/ AssistantTurn / Thinking / ShellCard / EditCard / ExtToolCard / EvolveCard（§5.2 七种命令一帧）/ SubSession（两种）/ CapabilityBanner / CanceledCard（四种 marker 一帧）/ spill 尾行；另加 ascii 降级两帧（普通卡 + CompositionCard）、窄屏隐藏右侧 chip、`diff=collapsed` / `tool_output=expanded`。
+- **`diff` 设定生效有真文件为证**：`"a project tui.toml flips the diff default"` 在临时 workspace 里先断言默认展开，再写一个 `.nulya/tui.toml`（`diff="collapsed"` + `thinking="expanded"`），重新 `loadSettings` 后同一张 diff 卡消失、同一张 thinking 卡展开——两个方向都动，证明是设定而不是"全都折了"。
 - **鼠标**：`"clicking a card's head line folds it"` 用 test renderer 的 `mockMouse.click(4, 0)` 点头行，展开→再点收起。
 - **browse 模式**：`"Esc on an empty composer opens browse mode, where Enter folds a card"` 跑真实二进制一轮 scripted step，然后 `Esc` 进 browse（状态栏出现提示）、`Enter` 展开最近一张卡（stdout 出现第二次）、`Esc` 退出。
 - T1 的四条不变量测试（live == replay、Enter 真的驱动一次 step、关掉重开逐字相同、`Ctrl+O`）全部保留且仍绿——CompositionCard 加在 transcript 顶部后也没破。

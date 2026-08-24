@@ -28,7 +28,7 @@ export function settingRows(settings: Settings): Array<{ key: string; value: str
     rows.push({ key, value: String(value), changed: value !== fallback })
   const t = settings.transcript
   const d = default_settings.transcript
-  add("transcript.edit_diff", t.edit_diff, d.edit_diff)
+  add("transcript.diff", t.diff, d.diff)
   add("transcript.tool_output", t.tool_output, d.tool_output)
   add("transcript.thinking", t.thinking, d.thinking)
   add("transcript.max_width", t.max_width, d.max_width)

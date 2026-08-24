@@ -1,6 +1,7 @@
-import { useStyle } from "../theme.ts"
+import { createMemo } from "solid-js"
+import { useScreen, useStyle } from "../theme.ts"
 import { CardFrame, sizeNote } from "./CardFrame.tsx"
-import { PluginSurface } from "../../plugins/surface.tsx"
+import { PluginCardSurface, diffStat, diffSurfaceOf, surfaceWidth } from "../../plugins/surface.tsx"
 import type { PluginCard } from "../../plugins/host.ts"
 import type { ToolItem } from "../../state/session.ts"
 import type { ToolPresentation } from "../registry.ts"
@@ -27,16 +28,39 @@ export function PluginToolCard(props: {
   revision: number
 }) {
   const style = useStyle()
+  const screen = useScreen()
+  const view = () => ({
+    tool: props.item.tool,
+    args: props.item.args,
+    output: props.item.output,
+    presentation: props.item.presentation ?? null,
+    ok: props.item.ok,
+    state: props.item.state,
+  })
+  const rendered = createMemo(() => {
+    void props.revision
+    try {
+      return {
+        surface: props.card.renderer.render(view(), surfaceWidth(style, screen().width, 0)),
+        failed: null as string | null,
+      }
+    } catch (error) {
+      return { surface: [], failed: error instanceof Error ? error.message : String(error) }
+    }
+  })
+  const diff = () => diffSurfaceOf(props.item.presentation ?? null) ?? diffSurfaceOf(rendered().surface)
   const chip = () => {
     if (props.item.state === "pending") return "…"
     if (props.item.state === "running") return "running"
+    const surface = diff()
+    if (surface) {
+      const stat = diffStat(surface)
+      const note = `+${stat.added} -${stat.removed}`
+      return props.item.ok === false ? `${note} · failed` : note
+    }
     const size = sizeNote(props.item.output)
     if (props.item.ok === false) return size.length > 0 ? `${size} · failed` : "failed"
     return size
-  }
-  const hasDiffPresentation = () => {
-    const value = props.item.presentation ?? null
-    return typeof value === "object" && value !== null && (value as { kind?: unknown }).kind === "diff"
   }
   return (
     <CardFrame
@@ -46,34 +70,22 @@ export function PluginToolCard(props: {
       head={props.presentation.head}
       chip={chip()}
       chipTone={props.item.ok === false ? "err" : "dim"}
-      defaultOpen={
-        hasDiffPresentation()
-          ? style.settings.transcript.edit_diff === "expanded"
-          : style.settings.transcript.tool_output === "expanded"
-      }
+      defaultOpen={diff() ? style.settings.transcript.diff === "expanded" : style.settings.transcript.tool_output === "expanded"}
       // Always foldable: a plugin card draws from the ARGUMENTS as well as the
       // output, so there is something to reveal before a call has returned —
       // which is the case the streaming half of a plan card exists for.
       foldable
       spillPath={props.item.spillPath}
     >
-      <PluginSurface
+      <PluginCardSurface
         pkg={props.card.pkg}
         revision={props.revision}
         indent={0}
-        render={(width) =>
-          props.card.renderer.render(
-            {
-              tool: props.item.tool,
-              args: props.item.args,
-              output: props.item.output,
-              presentation: props.item.presentation ?? null,
-              ok: props.item.ok,
-              state: props.item.state,
-            },
-            width,
-          )
-        }
+        render={() => {
+          const result = rendered()
+          if (result.failed !== null) throw new Error(result.failed)
+          return result.surface
+        }}
       />
     </CardFrame>
   )

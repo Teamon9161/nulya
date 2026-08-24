@@ -3,6 +3,7 @@ import type { CardView, Line, PluginApi, Surface } from "nulya-tui/plugin-api"
 interface DiffPresentation {
   kind: "diff"
   patch: string
+  path?: string
   filetype?: string
 }
 
@@ -11,7 +12,7 @@ export function activate(api: PluginApi) {
     render(view: CardView): Surface {
       const diff = diffOf(view.presentation)
       if (view.ok !== false && diff) {
-        return { kind: "diff", patch: diff.patch, filetype: diff.filetype }
+        return { kind: "diff", patch: diff.patch, ...(diff.path ? { path: diff.path } : {}), ...(diff.filetype ? { filetype: diff.filetype } : {}) }
       }
       return outputLines(view)
     },
@@ -25,6 +26,7 @@ function diffOf(value: unknown): DiffPresentation | null {
   return {
     kind: "diff",
     patch: record["patch"],
+    ...(typeof record["path"] === "string" ? { path: record["path"] } : {}),
     ...(typeof record["filetype"] === "string" ? { filetype: record["filetype"] } : {}),
   }
 }

@@ -135,11 +135,16 @@ export type Line = Span[]
 export interface DiffSurface {
   kind: "diff"
   patch: string
-  /** Syntax highlighter hint for the changed file, e.g. `zig` or `ts`. */
+  /** Changed file path, when known. The host uses it for labels and syntax hints. */
+  path?: string
+  /** Syntax highlighter hint for the changed file, e.g. `zig` or `typescript`. */
   filetype?: string
+  /** Optional precomputed stats. When absent, the host derives them from `patch`. */
+  added?: number
+  removed?: number
 }
 
-/** What a renderer may return. Rows stay the v1 default; surfaces are host-owned primitives. */
+/** Card bodies may return host-owned primitives; composer widgets and panels may not. */
 export type Surface = Line[] | DiffSurface
 
 /**
@@ -180,7 +185,9 @@ export interface PluginPkg {
 }
 
 /**
- * What a plugin renders: rows for a given width, and optionally keys.
+ * What a plugin row renderer draws: ordinary rows for a given width, and optionally keys.
+ * Diff surfaces are a transcript card primitive; widgets and panels stay rows
+ * so a legal plugin cannot return something the host silently drops.
  *
  * `onKey` is called only where the surface actually HOLDS the keyboard, which
  * today is a panel and only a panel (`PanelSpec`). A widget's is not called —
@@ -189,8 +196,13 @@ export interface PluginPkg {
  * panel from a command.
  */
 export interface LineRenderer {
-  render(width: number): Surface
+  render(width: number): Line[]
   onKey?(key: PluginKey): KeyResult
+}
+
+/** A renderer that may return a host-owned primitive such as a diff. */
+export interface SurfaceRenderer {
+  render(width: number): Surface
 }
 
 /** One tool call, as much of it as a card is allowed to see. */

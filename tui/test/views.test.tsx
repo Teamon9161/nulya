@@ -257,7 +257,7 @@ test("/settings shows the effective values and which file they came from", async
   // Written by the test above; this view's whole job is to name it.
   const settings = await loadSettings(ws.dir, {})
   const rows = settingRows(settings)
-  expect(rows.find((row) => row.key === "transcript.edit_diff")?.value).toBe("expanded")
+  expect(rows.find((row) => row.key === "transcript.diff")?.value).toBe("expanded")
   expect(rows.find((row) => row.key === "keys.help")?.value).toBe("ctrl+b")
 
   const setup = await overlay(() => <SettingsView ws={ws} onClose={() => {}} />, createStyle(settings, {}))

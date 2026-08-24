@@ -333,7 +333,7 @@ exports[`opened, the composition card shows what this session froze 1`] = `
 `;
 
 exports[`std edit plugin renders its diff expanded by default 1`] = `
-"  ⌘ edit · src/emit.zig  (1 line) ▾                                         
+"  ⌘ edit · src/emit.zig  (+2 -1) ▾                                          
      1 - pub const head_bytes = 4096;                                       
      1 + pub const head_bytes = 4096; // default                            
      2 + pub const tail_bytes = 2048;                                       

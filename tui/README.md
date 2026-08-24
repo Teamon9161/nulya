@@ -318,7 +318,7 @@ never writes them.
 
 ```toml
 [transcript]
-edit_diff      = "expanded"    # expanded | collapsed
+diff           = "expanded"    # expanded | collapsed
 tool_output    = "collapsed"   # collapsed | expanded
 thinking       = "collapsed"   # collapsed | hidden | expanded
 composition    = "collapsed"   # collapsed | expanded — the session card at the top

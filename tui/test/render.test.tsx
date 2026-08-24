@@ -298,7 +298,6 @@ const edit_item: ToolItem = {
   presentation: {
     kind: "diff",
     path: "src/emit.zig",
-    filetype: "zig",
     patch: [
       "--- a/src/emit.zig",
       "+++ b/src/emit.zig",
@@ -323,7 +322,15 @@ const edit_plugin_card: PluginCard = {
       if (typeof presentation === "object" && presentation !== null && (presentation as { kind?: unknown }).kind === "diff") {
         const patch = (presentation as { patch?: unknown }).patch
         const filetype = (presentation as { filetype?: unknown }).filetype
-        if (typeof patch === "string") return { kind: "diff", patch, ...(typeof filetype === "string" ? { filetype } : {}) }
+        const path = (presentation as { path?: unknown }).path
+        if (typeof patch === "string") {
+          return {
+            kind: "diff",
+            patch,
+            ...(typeof path === "string" ? { path } : {}),
+            ...(typeof filetype === "string" ? { filetype } : {}),
+          }
+        }
       }
       return view.output.split("\n").map((line) => [{ text: line }])
     },
@@ -821,9 +828,9 @@ test("std edit plugin renders its diff expanded by default", async () => {
   expect(frame).toMatchSnapshot()
 })
 
-test("edit_diff = collapsed hides a plugin diff", async () => {
+test("diff = collapsed hides a plugin diff", async () => {
   const collapsed = createStyle(
-    { ...default_settings, transcript: { ...default_settings.transcript, edit_diff: "collapsed" } },
+    { ...default_settings, transcript: { ...default_settings.transcript, diff: "collapsed" } },
     {},
   )
   const frame = await editPluginFrame(collapsed)
@@ -836,18 +843,18 @@ test("edit_diff = collapsed hides a plugin diff", async () => {
  * changes what the transcript looks like. Asserting on a hand-built settings
  * object would only test the renderer — this walks the actual path.
  */
-test("a project tui.toml flips the edit diff default", async () => {
+test("a project tui.toml flips the diff default", async () => {
   const dir = mkdtempSync(join(tmpdir(), "nulya-tui-cfg-"))
   try {
     const before = await loadSettings(dir, {})
-    expect(before.transcript.edit_diff).toBe("expanded")
+    expect(before.transcript.diff).toBe("expanded")
     expect(await editPluginFrame(createStyle(before, {}))).toContain("pub const tail_bytes = 2048;")
 
     mkdirSync(join(dir, ".nulya"), { recursive: true })
-    writeFileSync(join(dir, ".nulya", "tui.toml"), '[transcript]\nedit_diff = "collapsed"\nthinking = "expanded"\n')
+    writeFileSync(join(dir, ".nulya", "tui.toml"), '[transcript]\ndiff = "collapsed"\nthinking = "expanded"\n')
 
     const after = await loadSettings(dir, {})
-    expect(after.transcript.edit_diff).toBe("collapsed")
+    expect(after.transcript.diff).toBe("collapsed")
     expect(after.transcript.thinking).toBe("expanded")
     expect(after.sources.some((source) => source.endsWith("tui.toml"))).toBe(true)
 

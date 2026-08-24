@@ -333,10 +333,6 @@ fn writeDiffPresentation(
     try jw.write("diff");
     try jw.objectField("path");
     try jw.write(shown_path);
-    if (filetypeOf(shown_path)) |ft| {
-        try jw.objectField("filetype");
-        try jw.write(ft);
-    }
     try jw.objectField("patch");
     try jw.write(patch);
     try jw.endObject();
@@ -387,16 +383,79 @@ fn writeHunk(
     old_chunk: []const u8,
     new_chunk: []const u8,
 ) !void {
-    const old_start = std.mem.count(u8, old_text[0..old_at], "\n") + 1;
-    const new_start = std.mem.count(u8, new_text[0..new_at], "\n") + 1;
-    try w.print("@@ -{d},{d} +{d},{d} @@\n", .{ old_start, text.countLines(old_chunk), new_start, text.countLines(new_chunk) });
-    try writeDiffLines(alloc, w, '-', old_chunk);
-    try writeDiffLines(alloc, w, '+', new_chunk);
+    const old_range = affectedLineRange(old_text, old_at, old_chunk.len);
+    const new_range = if (new_chunk.len == 0 and old_range.start == old_at and old_range.end == old_at + old_chunk.len)
+        ByteRange{ .start = new_at, .end = new_at }
+    else
+        affectedLineRange(new_text, new_at, new_chunk.len);
+    const old_lines = try text.lines(alloc, old_text[old_range.start..old_range.end]);
+    const new_lines = try text.lines(alloc, new_text[new_range.start..new_range.end]);
+    const old_start = lineNoAt(old_text, old_range.start);
+    const new_start = lineNoAt(new_text, new_range.start);
+
+    try w.print("@@ -{d},{d} +{d},{d} @@\n", .{ old_start, old_lines.len, new_start, new_lines.len });
+    try writeLineDiff(alloc, w, old_lines, new_lines);
 }
 
-fn writeDiffLines(alloc: std.mem.Allocator, w: *std.Io.Writer, prefix: u8, chunk: []const u8) !void {
-    const ls = try text.lines(alloc, chunk);
-    for (ls) |line| try w.print("{c}{s}\n", .{ prefix, line });
+const ByteRange = struct { start: usize, end: usize };
+
+/// Expand the replacement bytes to complete file lines, so the patch is a real
+/// unified file hunk even when `old_string` matched only part of a line.
+fn affectedLineRange(s: []const u8, at: usize, len: usize) ByteRange {
+    std.debug.assert(at <= s.len);
+    std.debug.assert(at + len <= s.len);
+
+    var start = at;
+    while (start > 0 and s[start - 1] != '\n') start -= 1;
+
+    var end = at + len;
+    if (end > start and s[end - 1] == '\n') return .{ .start = start, .end = end };
+    while (end < s.len and s[end] != '\n') end += 1;
+    if (end < s.len and s[end] == '\n') end += 1;
+    return .{ .start = start, .end = end };
+}
+
+fn lineNoAt(s: []const u8, at: usize) usize {
+    return std.mem.count(u8, s[0..at], "\n") + 1;
+}
+
+fn writeLineDiff(alloc: std.mem.Allocator, w: *std.Io.Writer, old_lines: []const []const u8, new_lines: []const []const u8) !void {
+    const stride = new_lines.len + 1;
+    const cells = try alloc.alloc(usize, (old_lines.len + 1) * stride);
+    @memset(cells, 0);
+
+    var i = old_lines.len;
+    while (i > 0) {
+        i -= 1;
+        var j = new_lines.len;
+        while (j > 0) {
+            j -= 1;
+            const here = i * stride + j;
+            if (std.mem.eql(u8, old_lines[i], new_lines[j])) {
+                cells[here] = 1 + cells[(i + 1) * stride + (j + 1)];
+            } else {
+                cells[here] = @max(cells[(i + 1) * stride + j], cells[i * stride + (j + 1)]);
+            }
+        }
+    }
+
+    i = 0;
+    var j: usize = 0;
+    while (i < old_lines.len and j < new_lines.len) {
+        if (std.mem.eql(u8, old_lines[i], new_lines[j])) {
+            try w.print(" {s}\n", .{old_lines[i]});
+            i += 1;
+            j += 1;
+        } else if (cells[(i + 1) * stride + j] >= cells[i * stride + (j + 1)]) {
+            try w.print("-{s}\n", .{old_lines[i]});
+            i += 1;
+        } else {
+            try w.print("+{s}\n", .{new_lines[j]});
+            j += 1;
+        }
+    }
+    while (i < old_lines.len) : (i += 1) try w.print("-{s}\n", .{old_lines[i]});
+    while (j < new_lines.len) : (j += 1) try w.print("+{s}\n", .{new_lines[j]});
 }
 
 fn lenDelta(old_len: usize, new_len: usize) isize {
@@ -407,23 +466,6 @@ fn lenDelta(old_len: usize, new_len: usize) isize {
 fn addOffsetDelta(offset: usize, delta: isize) usize {
     if (delta >= 0) return offset + @as(usize, @intCast(delta));
     return offset - @as(usize, @intCast(-delta));
-}
-
-fn filetypeOf(path: []const u8) ?[]const u8 {
-    const dot = std.mem.lastIndexOfScalar(u8, path, '.') orelse return null;
-    if (dot + 1 >= path.len) return null;
-    const ext = path[dot + 1 ..];
-    if (std.mem.eql(u8, ext, "tsx")) return "tsx";
-    if (std.mem.eql(u8, ext, "ts")) return "typescript";
-    if (std.mem.eql(u8, ext, "jsx")) return "jsx";
-    if (std.mem.eql(u8, ext, "js")) return "javascript";
-    if (std.mem.eql(u8, ext, "zig")) return "zig";
-    if (std.mem.eql(u8, ext, "rs")) return "rust";
-    if (std.mem.eql(u8, ext, "py")) return "python";
-    if (std.mem.eql(u8, ext, "md")) return "markdown";
-    if (std.mem.eql(u8, ext, "json")) return "json";
-    if (std.mem.eql(u8, ext, "toml")) return "toml";
-    return ext;
 }
 
 // ------------------------------------------------------- normalized passes
@@ -770,6 +812,64 @@ fn expectPlan(arena: std.mem.Allocator, haystack: []const u8, old: []const u8, n
         return error.TestUnexpectedResult;
     }
     return result.found;
+}
+
+test "edit diff: sub-line replacements render complete file lines" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const old_text = "let x = foo();\n";
+    const plan = try expectPlan(alloc, old_text, "foo", "bar");
+    const new_text = try replaceOnceAt(alloc, old_text, plan);
+    const patch = try unifiedReplacementDiff(alloc, "src/app.ts", old_text, new_text, plan, false);
+    try std.testing.expectEqualStrings(
+        "--- a/src/app.ts\n" ++
+            "+++ b/src/app.ts\n" ++
+            "@@ -1,1 +1,1 @@\n" ++
+            "-let x = foo();\n" ++
+            "+let x = bar();\n",
+        patch,
+    );
+}
+
+test "edit diff: multi-line replacements use line diff instead of all red then all green" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const old_text = "one\ntwo\nthree\n";
+    const plan = try expectPlan(alloc, old_text, "one\ntwo\nthree\n", "one\nTWO\nthree\n");
+    const new_text = try replaceOnceAt(alloc, old_text, plan);
+    const patch = try unifiedReplacementDiff(alloc, "a.txt", old_text, new_text, plan, false);
+    try std.testing.expectEqualStrings(
+        "--- a/a.txt\n" ++
+            "+++ b/a.txt\n" ++
+            "@@ -1,3 +1,3 @@\n" ++
+            " one\n" ++
+            "-two\n" ++
+            "+TWO\n" ++
+            " three\n",
+        patch,
+    );
+}
+
+test "edit diff: deleting a complete line does not mark the following line as added" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const old_text = "a\nb\nc\n";
+    const plan = try expectPlan(alloc, old_text, "b\n", "");
+    const new_text = try replaceOnceAt(alloc, old_text, plan);
+    const patch = try unifiedReplacementDiff(alloc, "a.txt", old_text, new_text, plan, false);
+    try std.testing.expectEqualStrings(
+        "--- a/a.txt\n" ++
+            "+++ b/a.txt\n" ++
+            "@@ -2,1 +2,0 @@\n" ++
+            "-b\n",
+        patch,
+    );
 }
 
 test "edit plan: an LF old_string matches a CRLF file and the replacement keeps CRLF" {

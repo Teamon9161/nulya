@@ -4,7 +4,7 @@ import type { DiffSurface, Line, Surface, ThemeToken } from "nulya-tui/plugin-ap
 
 /**
  * Drawing what a plugin returned (tui-plugin D9): rows of coloured spans, and
- * nothing else.
+ * the transcript-card-only diff primitive.
  *
  * The whole reason the contract is LINES rather than components is here — this
  * file is the entire distance between a plugin and the screen. There is no
@@ -59,14 +59,85 @@ export function surfaceWidth(style: Style, screenWidth: number, indent: number):
   return Math.max(8, Math.min(screenWidth, style.maxWidth) - indent)
 }
 
+export interface DiffStat {
+  added: number
+  removed: number
+}
+
+export function diffSurfaceOf(value: unknown): DiffSurface | null {
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    (value as { kind?: unknown }).kind === "diff" &&
+    typeof (value as { patch?: unknown }).patch === "string"
+  ) {
+    const record = value as Record<string, unknown>
+    return {
+      kind: "diff",
+      patch: record["patch"] as string,
+      ...(typeof record["path"] === "string" ? { path: record["path"] } : {}),
+      ...(typeof record["filetype"] === "string" ? { filetype: record["filetype"] } : {}),
+      ...(typeof record["added"] === "number" && Number.isFinite(record["added"])
+        ? { added: Math.max(0, Math.trunc(record["added"])) }
+        : {}),
+      ...(typeof record["removed"] === "number" && Number.isFinite(record["removed"])
+        ? { removed: Math.max(0, Math.trunc(record["removed"])) }
+        : {}),
+    }
+  }
+  return null
+}
+
+export function diffStat(surface: DiffSurface): DiffStat {
+  if (typeof surface.added === "number" && typeof surface.removed === "number") {
+    return { added: Math.max(0, Math.trunc(surface.added)), removed: Math.max(0, Math.trunc(surface.removed)) }
+  }
+  let added = 0
+  let removed = 0
+  for (const line of surface.patch.split("\n")) {
+    if (line.startsWith("+++") || line.startsWith("---")) continue
+    if (line.startsWith("+")) added += 1
+    if (line.startsWith("-")) removed += 1
+  }
+  return { added, removed }
+}
+
+export function diffFiletype(surface: DiffSurface): string {
+  if (surface.filetype) return surface.filetype
+  const path = surface.path
+  if (!path) return "diff"
+  const ext = path.split(/[\\/]/).pop()?.split(".").pop()?.toLowerCase()
+  switch (ext) {
+    case "ts":
+      return "typescript"
+    case "js":
+      return "javascript"
+    case "rs":
+      return "rust"
+    case "py":
+      return "python"
+    case "md":
+      return "markdown"
+    case "zig":
+    case "tsx":
+    case "jsx":
+    case "json":
+    case "toml":
+      return ext
+    default:
+      return ext || "diff"
+  }
+}
+
 /**
- * One plugin surface. `revision` is read so the memo re-runs when the host
- * says a plugin's answer may have changed (`PluginHost.revision`) — a plain
- * function has no signals of its own to depend on.
+ * One ordinary plugin row surface. `revision` is read so the memo re-runs when
+ * the host says a plugin's answer may have changed (`PluginHost.revision`) — a
+ * plain function has no signals of its own to depend on.
  */
 export function PluginSurface(props: {
   /** Called with the width it has; must not throw, but may. */
-  render: (width: number) => Surface
+  render: (width: number) => Line[]
   /** The host's repaint counter; read to make this memo depend on it. */
   revision: number
   /** Left padding, in columns. */
@@ -82,17 +153,28 @@ export function PluginSurface(props: {
   /** Named in the message if `render` throws. */
   pkg: string
 }) {
+  return <PluginRows {...props} />
+}
+
+/** A transcript card body: rows by default, diff primitive when the card returns one. */
+export function PluginCardSurface(props: {
+  render: (width: number) => Surface
+  revision: number
+  indent?: number
+  maxRows?: number
+  pkg: string
+}) {
   const style = useStyle()
   const screen = useScreen()
   const indent = () => props.indent ?? 2
 
-  const lines = createMemo((): { rows: Line[]; diff: DiffSurface | null; cut: number; failed: string | null } => {
-    // Depend on the host's counter: a plugin's memory is invisible to Solid.
+  const drawn = createMemo((): { rows: Line[]; diff: DiffSurface | null; cut: number; failed: string | null } => {
     void props.revision
     try {
-      const drawn = props.render(surfaceWidth(style, screen().width, indent()))
-      if (isDiffSurface(drawn)) return { rows: [], diff: drawn, cut: 0, failed: null }
-      const rows = Array.isArray(drawn) ? drawn : []
+      const value = props.render(surfaceWidth(style, screen().width, indent()))
+      const diff = diffSurfaceOf(value)
+      if (diff) return { rows: [], diff, cut: 0, failed: null }
+      const rows = Array.isArray(value) ? value : []
       const cap = props.maxRows ?? rows.length
       return { rows: rows.slice(0, cap), diff: null, cut: Math.max(0, rows.length - cap), failed: null }
     } catch (error) {
@@ -102,54 +184,88 @@ export function PluginSurface(props: {
 
   return (
     <box flexDirection="column" width="100%" paddingLeft={indent()} flexShrink={0}>
-      {lines().diff ? (
+      {drawn().diff ? (
         <diff
-          diff={lines().diff!.patch}
-          filetype={lines().diff!.filetype ?? "diff"}
+          diff={drawn().diff!.patch}
+          filetype={diffFiletype(drawn().diff!)}
           syntaxStyle={style.syntax}
           fg={style.theme.fg}
           width="100%"
         />
       ) : null}
-      <Index each={lines().rows}>
-        {(line) => (
-          <box flexDirection="row" width="100%" height={1} flexShrink={0}>
-            <For each={spansOf(line())}>
-              {(span) => (
-                <text fg={tokenColor(style, span.token)} flexShrink={0}>
-                  {span.text}
-                </text>
-              )}
-            </For>
-          </box>
-        )}
-      </Index>
-      {/* What did not fit, counted rather than dropped in silence. */}
-      {lines().cut > 0 ? (
-        <text fg={style.theme.faint} height={1}>
-          {`+${lines().cut} more row${lines().cut === 1 ? "" : "s"} · ${props.pkg} drew more than fits here`}
-        </text>
-      ) : null}
-      {/* The failure, where the rows would have been. Said in the plugin's own
-          place rather than on the status line: this is what that surface is
-          doing right now, and it is not news that goes away. */}
-      {lines().failed !== null ? (
-        <text fg={style.theme.dim} height={1}>
-          {`${props.pkg} could not draw this · ${lines().failed}`}
-        </text>
-      ) : null}
+      <Rows rows={drawn().rows} />
+      <Cut rows={drawn().cut} pkg={props.pkg} />
+      <Failure failed={drawn().failed} pkg={props.pkg} />
     </box>
   )
 }
 
-function isDiffSurface(value: Surface): value is DiffSurface {
+function PluginRows(props: {
+  render: (width: number) => Line[]
+  revision: number
+  indent?: number
+  maxRows?: number
+  pkg: string
+}) {
+  const style = useStyle()
+  const screen = useScreen()
+  const indent = () => props.indent ?? 2
+
+  const drawn = createMemo((): { rows: Line[]; cut: number; failed: string | null } => {
+    void props.revision
+    try {
+      const rows = props.render(surfaceWidth(style, screen().width, indent()))
+      const cap = props.maxRows ?? rows.length
+      return { rows: rows.slice(0, cap), cut: Math.max(0, rows.length - cap), failed: null }
+    } catch (error) {
+      return { rows: [], cut: 0, failed: error instanceof Error ? error.message : String(error) }
+    }
+  })
+
   return (
-    typeof value === "object" &&
-    value !== null &&
-    !Array.isArray(value) &&
-    (value as { kind?: unknown }).kind === "diff" &&
-    typeof (value as { patch?: unknown }).patch === "string"
+    <box flexDirection="column" width="100%" paddingLeft={indent()} flexShrink={0}>
+      <Rows rows={drawn().rows} />
+      <Cut rows={drawn().cut} pkg={props.pkg} />
+      <Failure failed={drawn().failed} pkg={props.pkg} />
+    </box>
   )
+}
+
+function Rows(props: { rows: Line[] }) {
+  const style = useStyle()
+  return (
+    <Index each={props.rows}>
+      {(line) => (
+        <box flexDirection="row" width="100%" height={1} flexShrink={0}>
+          <For each={spansOf(line())}>
+            {(span) => (
+              <text fg={tokenColor(style, span.token)} flexShrink={0}>
+                {span.text}
+              </text>
+            )}
+          </For>
+        </box>
+      )}
+    </Index>
+  )
+}
+
+function Cut(props: { rows: number; pkg: string }) {
+  const style = useStyle()
+  return props.rows > 0 ? (
+    <text fg={style.theme.faint} height={1}>
+      {`+${props.rows} more row${props.rows === 1 ? "" : "s"} · ${props.pkg} drew more than fits here`}
+    </text>
+  ) : null
+}
+
+function Failure(props: { failed: string | null; pkg: string }) {
+  const style = useStyle()
+  return props.failed !== null ? (
+    <text fg={style.theme.dim} height={1}>
+      {`${props.pkg} could not draw this · ${props.failed}`}
+    </text>
+  ) : null
 }
 
 /**

@@ -27,7 +27,7 @@ export type ThinkingDefault = "expanded" | "collapsed" | "hidden"
 
 export interface Settings {
   transcript: {
-    edit_diff: FoldDefault
+    diff: FoldDefault
     tool_output: FoldDefault
     thinking: ThinkingDefault
     /**
@@ -134,7 +134,7 @@ export interface Settings {
 
 export const default_settings: Settings = {
   transcript: {
-    edit_diff: "expanded",
+    diff: "expanded",
     tool_output: "collapsed",
     thinking: "hidden",
     composition: "collapsed",
@@ -184,7 +184,8 @@ function mergeLayer(into: Settings, layer: unknown, source: string) {
   const record = layer as Record<string, unknown>
   const transcript = record["transcript"] as Record<string, unknown> | undefined
   if (transcript) {
-    into.transcript.edit_diff = pick(transcript["edit_diff"], ["expanded", "collapsed"], into.transcript.edit_diff)
+    into.transcript.diff = pick(transcript["edit_diff"], ["expanded", "collapsed"], into.transcript.diff)
+    into.transcript.diff = pick(transcript["diff"], ["expanded", "collapsed"], into.transcript.diff)
     into.transcript.tool_output = pick(transcript["tool_output"], ["expanded", "collapsed"], into.transcript.tool_output)
     into.transcript.thinking = pick(
       transcript["thinking"],
