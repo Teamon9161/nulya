@@ -1832,6 +1832,34 @@ test "explicit --with exposes surface-with tools but not pin or driver tools" {
     try std.testing.expect(comp.tools.lookup("run") == null);
 }
 
+test "activation always exposes surface-with tools in ordinary fresh sessions, but not bare" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmpPath(alloc, io, tmp.dir);
+    defer alloc.free(cwd);
+
+    const manifest_bytes =
+        \\{"schema":"nulya.extension/v2","id":"policy.tools","activation":"always","runtime":{"entry":"bin/run"},"contributes":{"tools":[{"name":"check","description":"with","input":{"type":"object"},"surface":"with"}]}}
+    ;
+    const version = try testkit.writeFrozenVersion(alloc, io, tmp.dir, "policy.tools", manifest_bytes, &.{
+        .{ .rel = "src/main.zig", .bytes = "pub fn main() void {}\n" },
+    });
+    defer alloc.free(version);
+    try testkit.activate(alloc, io, tmp.dir, "policy.tools", version);
+
+    var ordinary = try SessionComposition.init(alloc, io, cwd, one_root, .{});
+    defer ordinary.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), ordinary.extensions.len);
+    try std.testing.expect(ordinary.tools.lookup("check") != null);
+
+    var bare = try SessionComposition.init(alloc, io, cwd, one_root, .{ .include_activated = false });
+    defer bare.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 0), bare.extensions.len);
+    try std.testing.expect(bare.tools.lookup("check") == null);
+}
+
 test "pin-implied membership does not expose a package's surface-with tools" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
