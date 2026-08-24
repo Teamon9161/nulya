@@ -162,12 +162,11 @@ fn withRefs(
 
 /// `--bare`: compose from argv alone (DESIGN §14).
 ///
-/// The two standing config lists — `[extensions] with` and
-/// `registry.pinned_native_tools` — are how a person says "every session in this
-/// workspace gets this". A session opened FOR a job by something other than a
-/// person (a delegated sub-agent, whose whole tool face is its own definition)
-/// is not one of those, and inheriting a workspace's standing composition would
-/// give it capabilities its author never wrote down.
+/// The standing composition — activated packages declaring `always`, config
+/// `[extensions] with`, and `registry.pinned_native_tools` — is how an ordinary
+/// session inherits machine/workspace choices. A delegated sub-agent instead
+/// gets exactly what its definition names, so `--bare` suppresses all three
+/// standing sources and composes only from argv.
 ///
 /// `max_tools` is still read: it is a ceiling, not a selection, and a `--bare`
 /// session that could exceed it would be a way around the budget rather than a
@@ -459,10 +458,10 @@ pub fn createSession(
     // read as empty, and everything else about the session is unchanged.
     const bare = bareComposition(args);
 
-    // The session's members: config's standing `[extensions] with`, then every
-    // `--with <id>[@<version>]` on the command line (DESIGN §5.1, §14). A
-    // package joins a session only by being on this list or by being dragged in
-    // by a pin — activating one never puts it here.
+    // Explicit members: config's standing `[extensions] with`, then every
+    // `--with <id>[@<version>]` on the command line. Composition also discovers
+    // activated packages that explicitly declare activation:"always", unless
+    // --bare suppresses that standing source. Pins may imply membership too.
     const with = try withRefs(alloc, if (bare) &.{} else cfg.extensions.with, args);
     defer alloc.free(with);
 
@@ -486,6 +485,7 @@ pub fn createSession(
         .registry = .{
             .pinned_native_tools = pins,
             .max_tools = cfg.registry.max_tools,
+            .include_activated = !bare,
             .with = with,
             .prompts = prompts,
         },
@@ -508,12 +508,11 @@ pub fn createSession(
             try printPinImplied(alloc, io, pins, with);
             return null;
         },
-        // A member named without a version resolves through `current`, and that
-        // pointer led to something unusable. `composition.resolveCurrent` already
-        // named the offending `id@version` and the two ways back on stderr; this
-        // line only says what it cost.
+        // A member selected through current — explicit, pin-implied, or
+        // activation:"always" discovery — pointed at something unusable.
+        // composition already named the offending id@version on stderr.
         error.ActiveExtensionBroken => {
-            try printErrFmt(alloc, io, "session new failed: an extension this session names has a broken current version (see the line above)\n", .{});
+            try printErrFmt(alloc, io, "session new failed: an extension required by this composition has a broken current version (see the line above)\n", .{});
             return null;
         },
         // Same rule for pins: a session missing a tool the operator asked for is
