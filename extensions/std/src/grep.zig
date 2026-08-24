@@ -28,8 +28,9 @@ const walk = @import("walk.zig");
 const regex = @import("regex.zig");
 const globpat = @import("vendor/globpat.zig");
 
-// tcode search.rs constants, verbatim.
-pub const default_match_limit: usize = 200;
+// tcode search.rs constants (default_match_limit lowered from tcode's 200 —
+// nulya wants grep's cheap default to nudge narrow-then-widen over one big pull).
+pub const default_match_limit: usize = 50;
 /// Cap each matched line so a single giant line (minified JS, JSONL session
 /// transcripts, data blobs) cannot flood the context. head_limit bounds the
 /// match COUNT; this bounds the BYTES per match.

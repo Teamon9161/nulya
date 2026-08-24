@@ -31,7 +31,7 @@ pub const OutputBudget = struct {
 
 pub const StepOutputBudget = struct {
     /// Hard byte ceiling for all tool result text returned by one model step.
-    max_bytes: usize = 256 * 1024,
+    max_bytes: usize = 128 * 1024,
 };
 
 pub const Emitted = struct {

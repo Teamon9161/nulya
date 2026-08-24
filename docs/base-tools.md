@@ -78,7 +78,7 @@ fn emit(raw: []const u8, tool: []const u8, spill_key: SpillKey, ctx: *Ctx) Emitt
 | `DEFAULT_READ_LIMIT` | 2000 行 | read 默认窗口 |
 | `MIN_READ_WINDOW` | 120 行 | **把过小的 read 请求放大**到这个下限：多读几行很便宜，模型拿 10 行小窗一片片爬文件，每片一个 round-trip 才贵（直接违反"少交互"） |
 | `head_ratio` / `tail_ratio` | 如 25 / 75 | 溢出时头尾 byte budget；shell 结果尾部更重要，故尾 > 头。行数只能是 soft hint，不能突破 byte ceiling |
-| `MAX_STEP_OUTPUT_BYTES` | 256 KB（起点，可调） | 一整轮 batched tool_results 的硬上限；避免 10 个工具各 128KB 把下一轮 prompt 撑到 MB 级 |
+| `MAX_STEP_OUTPUT_BYTES` | 128 KB（起点，可调，2026-08 从 256 KB 下调——单个工具已能拿到 128KB，一整轮预算不该再放大一倍并行请求的空间） | 一整轮 batched tool_results 的硬上限；避免并行工具调用把下一轮 prompt 撑到 MB 级 |
 | `DEFAULT_TIMEOUT_MS` / `MAX` | 120s / 600s | shell 超时（**已实现**，`tool.Timeouts`）；模型给的 `timeout_ms` 夹进 `[1, MAX]`，超时 kill 子进程并把**被杀前已捕获的输出**一并返回（`shell.rs:append_partial_output`）。extension 的 oneshot 调用共用这张表（缺省 30s；tool 的 manifest 可以自己声明 `timeout_ms`，上限同为 600s，DESIGN §7.3） |
 
 > read 是否给行号：tcode 的结论是 **read 不加行号**（每行 7 字节、长会话累积不划算；edit 用精确串匹配不需要行号，footer 报窗口边界即可），只有 edit/append **回显改动片段**时才加行号。采纳。
