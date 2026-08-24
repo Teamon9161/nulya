@@ -1,9 +1,9 @@
-import { For, Show, createMemo } from "solid-js"
-import { useScreen, useStyle } from "../theme.ts"
+import { Show, createMemo } from "solid-js"
+import { RGBA, type TextChunk } from "@opentui/core"
+import { useStyle } from "../theme.ts"
 import { CardFrame } from "./CardFrame.tsx"
 import { ShellOutput } from "./ShellCard.tsx"
-import { diffStats, parseEditArgs, unifiedDiff } from "../../nulya/diff.ts"
-import { hardWrap } from "../../ui/columns.ts"
+import { diffStats, filetypeOf, parseEditArgs, unifiedDiff } from "../../nulya/diff.ts"
 import type { ToolItem } from "../../state/session.ts"
 import type { ToolPresentation } from "../registry.ts"
 
@@ -39,11 +39,11 @@ export function EditCard(props: { item: ToolItem; presentation: ToolPresentation
   }
 
   const tone = () => (props.item.ok === false ? "err" : "dim")
-  const screen = useScreen()
-  const diffWidth = () => Math.max(12, Math.min(screen().width, style.maxWidth) - 6)
-  const diffRows = createMemo(() => renderDiffRows(patch(), diffWidth(), style))
-  const visibleRows = () => diffRows().slice(0, 40)
-  const clipped = () => diffRows().length > visibleRows().length
+  const diff = createMemo(() => renderDiffCode(patch(), args()?.path ?? ""))
+  const visibleRows = createMemo(() => diff().rows.slice(0, 40))
+  const clipped = () => diff().rows.length > visibleRows().length
+  const content = () => visibleRows().map((row) => row.body).join("\n")
+  const onChunks = createMemo(() => diffChunkDecorator(visibleRows(), style))
 
   return (
     <CardFrame
@@ -62,13 +62,16 @@ export function EditCard(props: { item: ToolItem; presentation: ToolPresentation
       spillPath={props.item.spillPath}
     >
       <Show when={showDiff()} fallback={<ShellOutput output={props.item.output} />}>
-        <For each={visibleRows()}>
-          {(row) => (
-            <box height={1} width="100%" backgroundColor={row.bg}>
-              <text fg={row.fg} height={1}>{row.text}</text>
-            </box>
-          )}
-        </For>
+        <code
+          content={content()}
+          filetype={diff().filetype}
+          syntaxStyle={style.syntax}
+          fg={style.theme.fg}
+          width="100%"
+          height={visibleRows().length}
+          wrapMode="word"
+          onChunks={onChunks()}
+        />
         <Show when={clipped()}>
           <text fg={style.theme.dim} height={1}>… diff clipped after 40 rows</text>
         </Show>
@@ -77,26 +80,14 @@ export function EditCard(props: { item: ToolItem; presentation: ToolPresentation
   )
 }
 
-
-type DiffRow = { text: string; fg: string; bg: string }
-
 type DiffTone = "add" | "del" | "hunk" | "context"
 
-function rowColors(tone: DiffTone, style: ReturnType<typeof useStyle>): { fg: string; bg: string } {
-  switch (tone) {
-    case "add":
-      return { fg: style.theme.diff.add, bg: style.theme.diff.addBg }
-    case "del":
-      return { fg: style.theme.diff.del, bg: style.theme.diff.delBg }
-    case "hunk":
-      return { fg: style.theme.dim, bg: "transparent" }
-    default:
-      return { fg: style.theme.muted, bg: "transparent" }
-  }
-}
+type DiffCodeRow = { tone: DiffTone; prefix: string; body: string }
 
-function renderDiffRows(patch: string, width: number, style: ReturnType<typeof useStyle>): DiffRow[] {
-  const rows: DiffRow[] = []
+type DiffCode = { filetype: string | undefined; rows: DiffCodeRow[] }
+
+function renderDiffCode(patch: string, path: string): DiffCode {
+  const rows: DiffCodeRow[] = []
   for (const raw of patch.split("\n")) {
     if (raw.length === 0 || raw.startsWith("--- ") || raw.startsWith("+++ ")) continue
     const tone: DiffTone = raw.startsWith("+")
@@ -106,13 +97,74 @@ function renderDiffRows(patch: string, width: number, style: ReturnType<typeof u
         : raw.startsWith("@@")
           ? "hunk"
           : "context"
-    const prefix = tone === "hunk" ? "  " : raw.slice(0, 1)
-    const body = tone === "hunk" ? raw : raw.slice(1)
-    const colors = rowColors(tone, style)
-    const wrapped = hardWrap(body, Math.max(1, width - 2))
-    for (let i = 0; i < wrapped.length; i++) {
-      rows.push({ ...colors, text: `${i === 0 ? prefix : " "} ${wrapped[i] ?? ""}` })
-    }
+    rows.push({ tone, prefix: tone === "hunk" ? "  " : raw.slice(0, 1), body: tone === "hunk" ? raw : raw.slice(1) })
   }
-  return rows.length > 0 ? rows : [{ text: "", fg: style.theme.dim, bg: "transparent" }]
+  return {
+    filetype: filetypeOf(path) ?? "markdown",
+    rows: rows.length > 0 ? rows : [{ tone: "context", prefix: " ", body: "" }],
+  }
+}
+
+function diffChunkDecorator(rows: readonly DiffCodeRow[], style: ReturnType<typeof useStyle>) {
+  const addBg = color(style.theme.diff.addBg)
+  const delBg = color(style.theme.diff.delBg)
+  const addFg = color(style.theme.diff.add)
+  const delFg = color(style.theme.diff.del)
+  const dimFg = color(style.theme.dim)
+
+  return (chunks: TextChunk[]): TextChunk[] => {
+    const out: TextChunk[] = []
+    let line = 0
+    let atLineStart = true
+
+    for (const chunk of chunks) {
+      const parts = chunk.text.split("\n")
+      for (let i = 0; i < parts.length; i++) {
+        const row = rows[Math.min(line, rows.length - 1)] ?? rows[rows.length - 1]
+        if (atLineStart) {
+          out.push(gutterChunk(row, addFg, delFg, dimFg))
+          atLineStart = false
+        }
+        const part = parts[i]
+        if (part && row) out.push(styleChunk(chunk, part, row, addBg, delBg, dimFg))
+        if (i < parts.length - 1) {
+          out.push(styleChunk(chunk, "\n", row, addBg, delBg, dimFg))
+          line++
+          atLineStart = true
+        }
+      }
+    }
+
+    return out
+  }
+}
+
+function gutterChunk(row: DiffCodeRow | undefined, addFg: RGBA | undefined, delFg: RGBA | undefined, dimFg: RGBA | undefined): TextChunk {
+  const tone = row?.tone ?? "context"
+  return {
+    __isChunk: true,
+    text: `${row?.prefix ?? " "} `,
+    fg: tone === "add" ? addFg : tone === "del" ? delFg : dimFg,
+  }
+}
+
+function styleChunk(
+  chunk: TextChunk,
+  text: string,
+  row: DiffCodeRow | undefined,
+  addBg: RGBA | undefined,
+  delBg: RGBA | undefined,
+  dimFg: RGBA | undefined,
+): TextChunk {
+  const tone = row?.tone ?? "context"
+  return {
+    ...chunk,
+    text,
+    fg: tone === "hunk" ? dimFg : chunk.fg,
+    bg: tone === "add" ? addBg : tone === "del" ? delBg : chunk.bg,
+  }
+}
+
+function color(value: string): RGBA | undefined {
+  return value === "transparent" ? undefined : RGBA.fromHex(value)
 }
