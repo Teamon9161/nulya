@@ -385,7 +385,10 @@ fn resolveFreshExtensions(gpa: std.mem.Allocator, roots: *const roots_mod.Roots,
 /// package is then resolved with the full sealed-integrity check.
 fn resolveAlwaysExtensions(alloc: std.mem.Allocator, roots: *const roots_mod.Roots) ![]roots_mod.Roots.Resolved {
     var out: std.ArrayList(roots_mod.Roots.Resolved) = .empty;
-    errdefer freeResolved(alloc, out.items);
+    errdefer {
+        for (out.items) |r| r.deinit(alloc);
+        out.deinit(alloc);
+    }
 
     const active = try roots.listActive(alloc);
     defer roots_mod.Roots.freeActive(alloc, active);
