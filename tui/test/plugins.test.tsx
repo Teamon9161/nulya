@@ -124,8 +124,15 @@ beforeAll(async () => {
   copyFileSync(join(import.meta.dir, "fixtures", "probe-plugin.ts"), join(extensionDir("probe"), "tui", "probe.ts"))
 
   // `legacy` — API 1 is still accepted by this API 2 host: it can only return
-  // rows, and rows are still a legal surface.
-  writePackage("legacy", "export function activate() {}\n", {}, { entry: "tui/main.ts", api: 1 })
+  // rows, and rows are still a legal surface. It registers a widget so the
+  // test below proves the row it returns actually renders, not just that the
+  // version gate let the package through.
+  writePackage(
+    "legacy",
+    'export function activate(api) { api.registerWidget({ render: () => [[{ text: "legacy" }]] }) }\n',
+    {},
+    { entry: "tui/main.ts", api: 1 },
+  )
 
   // `future` — a version this build does not implement.
   writePackage("future", "export function activate() {}\n", {}, { entry: "tui/main.ts", api: plugin_api_version + 1 })
@@ -181,7 +188,11 @@ describe("loading", () => {
     expect(probe!.entry).toContain("versions")
     expect(probe!.entry).toEndWith("probe.ts")
 
-    expect(host.loaded().some((one) => one.id === "legacy")).toBe(true)
+    // Not just loaded: its API-1 row surface renders under this API-2 host.
+    const legacyWidget = host.widgets().find((one) => one.pkg === "legacy")
+    expect(legacyWidget).toBeDefined()
+    const legacyRow = legacyWidget!.renderer.render(80)[0] ?? []
+    expect(legacyRow.map((span) => span.text).join("")).toBe("legacy")
 
     const warnings = host.warnings().join("\n")
     // An API version this build does not implement: named, skipped, and the

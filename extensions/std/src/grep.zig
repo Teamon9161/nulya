@@ -28,8 +28,8 @@ const walk = @import("walk.zig");
 const regex = @import("regex.zig");
 const globpat = @import("vendor/globpat.zig");
 
-// tcode search.rs constants (default_match_limit lowered from tcode's 200 —
-// nulya wants grep's cheap default to nudge narrow-then-widen over one big pull).
+// tcode search.rs constants, except default_match_limit: kept small so the
+// cheap default nudges narrow-then-widen over one big pull.
 pub const default_match_limit: usize = 50;
 /// Cap each matched line so a single giant line (minified JS, JSONL session
 /// transcripts, data blobs) cannot flood the context. head_limit bounds the
@@ -762,6 +762,34 @@ test "grep run: bare match, context shape, before/after, --, smart case, paging 
     // A clipped page keeps the context of the matches it kept.
     try t.write("a.rs", "x1\nTARGET a\nx3\nx4\nTARGET b\nx6\nx7\nTARGET c\nx9\n");
     try std.testing.expectEqualStrings("a.rs:\n4- x4\n5: TARGET b\n6- x6\n[more matches beyond this page — raise head_limit or set offset=2]", try t.grep("{\"pattern\":\"TARGET\",\"context\":1,\"head_limit\":1,\"offset\":1}"));
+}
+
+test "grep run: an omitted head_limit pages at the default of 50" {
+    var t: TestCtx = undefined;
+    try t.init();
+    defer t.deinit();
+    const alloc = t.arena.allocator();
+
+    // 55 matches split across two files, each under the per-file cap, so only
+    // the head_limit paging is exercised.
+    var a: std.Io.Writer.Allocating = .init(alloc);
+    for (1..31) |i| try a.writer.print("TARGET {d}\n", .{i});
+    try t.write("a.rs", a.written());
+    var b: std.Io.Writer.Allocating = .init(alloc);
+    for (31..56) |i| try b.writer.print("TARGET {d}\n", .{i});
+    try t.write("b.rs", b.written());
+
+    const bare = try t.grep("{\"pattern\":\"TARGET\"}");
+    const explicit = try t.grep("{\"pattern\":\"TARGET\",\"head_limit\":50}");
+    try std.testing.expectEqualStrings(explicit, bare);
+    try std.testing.expect(std.mem.endsWith(u8, bare, "[more matches beyond this page — raise head_limit or set offset=50]"));
+
+    var shown: usize = 0;
+    var it = std.mem.splitScalar(u8, bare, '\n');
+    while (it.next()) |line| {
+        if (line.len > 0 and std.ascii.isDigit(line[0])) shown += 1;
+    }
+    try std.testing.expectEqual(@as(usize, default_match_limit), shown);
 }
 
 test "grep run: no matches / oversized / explicit file / invalid regex / missing path" {
