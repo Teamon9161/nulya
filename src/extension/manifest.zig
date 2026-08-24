@@ -413,12 +413,8 @@ pub const Manifest = struct {
 
     /// True when this manifest still writes the removed `permissions` key —
     /// `{fs, network, process}`, a claimed footprint the kernel parsed, froze,
-    /// and never read. It was kept for a sandbox that does not exist yet, and
-    /// an unenforced declaration ages into a false assurance. The shape a
-    /// sandbox needs will be decided by the sandbox (PLAN §3.8), not inherited
-    /// from a guess made before it. Same treatment as `legacy_activation`: an
-    /// unknown key now, with one build-time line so the author is not left
-    /// believing something reads it.
+    /// and never read. It is an unknown key now, with one build-time line so
+    /// the author is not left believing something enforces it.
     legacy_permissions: bool = false,
     /// True when some command wrote the pre-object `action` string form (see
     /// `Action`). `parse` folded it; this is what makes `ext build` say so.
@@ -433,8 +429,8 @@ pub const Manifest = struct {
     /// a mistyped value has the same answer as a mistyped word).
     ///
     /// There is one wire now, so a runtime does not choose one: `plain` is what
-    /// every call speaks (DESIGN §7.3). The key is unknown like `activation`
-    /// and `permissions` before it, but the two words a draft may still carry
+    /// every call speaks (DESIGN §7.3). The key is unknown like the removed
+    /// `permissions` key, but the two words a draft may still carry
     /// mean different things to their author — `"jsonrpc"` asked for an
     /// envelope that no longer exists, `"plain"` asked for exactly what happens
     /// anyway — so `ext build` answers each in its own words. The only reader
