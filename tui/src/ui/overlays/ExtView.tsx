@@ -451,7 +451,7 @@ export function ExtView(props: {
       const alwaysComposed = new Set([...view.extensions.with, ...standingWithIds(props.statePath), ...style.settings.extensions.session_with])
       setComposedTools(
         listed()
-          .filter((entry) => isActive(entry) && alwaysComposed.has(entry.id))
+          .filter((entry) => isActive(entry) && (entry.activation === "always" || alwaysComposed.has(entry.id)))
           .flatMap((entry) => entry.withTools.map((tool) => toolId(entry.id, tool))),
       )
       setUserPath(view.paths.user)
@@ -581,18 +581,11 @@ export function ExtView(props: {
   const foldClick = onClick(toggleFold)
   const quota = createMemo(() => quotaLine(maxTools(), nextFace(sources()).length))
 
-  /** An extension takes part in the next session: an active version, not shadowed. */
+  /** A current version exists in the winning root; membership is separate. */
   const isActive = (entry: ExtensionEntry) => entry.current !== null && !entry.shadowed
-  /**
-   * …and one that is a MEMBER of every session opened here, from any of the
-   * three lists that can say so (K8): the kernel's own `[extensions] with`,
-   * this front end's `tui-state.json` `standing_with` (what Enter writes), and
-   * `tui.toml`'s `session_with` (the packages it always brings, T42).
-   *
-   * Three sources and one question, because the row is drawn once. Which file
-   * a given id came from is in the detail pane below, where the answer differs.
-   */
+  /** Standing membership from manifest activation or one of the three user/config lists. */
   const composedEverySession = (id: string) =>
+    listed().some((entry) => entry.id === id && isActive(entry) && entry.activation === "always") ||
     configWith().includes(id) ||
     standingWithIds(props.statePath).includes(id) ||
     style.settings.extensions.session_with.includes(id)
@@ -941,7 +934,9 @@ export function ExtView(props: {
       // ext-review-2 §3b) — Enter no longer reaches every session from here,
       // so there is nothing scary left to say, only where the new command is.
       entry.systemPrompts.length > 0
-        ? `${entry.id} on · /${entry.id} opens a new tab wearing it for one session · Enter again takes the command away`
+        ? entry.activation === "always"
+          ? `${entry.id} on · enters every future non-bare session · Enter again turns it off`
+          : `${entry.id} on · /${entry.id} opens a new tab wearing it for one session · Enter again takes the command away`
         : `${entry.id} on · ${version}` +
           (ids.length > 0
             ? room
@@ -995,7 +990,9 @@ export function ExtView(props: {
       // from here alone (T1, ext-review-2 §3b), so what actually leaves is the
       // `/<id>` command Enter had given it.
       (entry.systemPrompts.length > 0
-        ? `${entry.id} off · /${entry.id} is gone`
+        ? entry.activation === "always"
+          ? `${entry.id} off · leaves future non-bare sessions`
+          : `${entry.id} off · /${entry.id} is gone`
         : `${entry.id} off · its skills leave the composition`) +
         ` · versions all stay${stuck ? ` · ${stuck}` : ""}`,
     )
