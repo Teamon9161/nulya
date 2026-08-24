@@ -129,6 +129,9 @@ pub const Options = struct {
     /// Provider-facing total tool count, the builtin included. `shell` always
     /// occupies `registry.builtin_count` of it.
     max_tools: u32 = 20,
+    /// Whether fresh composition discovers activated packages whose manifest
+    /// says `activation:"always"`. Ordinary sessions do; `--bare` does not.
+    include_activated: bool = true,
     /// The session's member extensions — the WHOLE list (DESIGN §5.1). Its two
     /// spellings mean the same thing and reach here already joined by the shell:
     /// config's `[extensions] with` ("in this workspace, every session") and
@@ -358,29 +361,60 @@ fn resolve(gpa: std.mem.Allocator, a: std.mem.Allocator, roots: *const roots_mod
 /// way in). The frozen path is untouched: a header's `active` already lists every
 /// member this rule brought in, so a resume never re-derives it.
 fn resolveFreshExtensions(gpa: std.mem.Allocator, roots: *const roots_mod.Roots, opts: Options) ![]roots_mod.Roots.Resolved {
-    // The base is EMPTY, and that is the whole membership rule: a session's
-    // members are the ones somebody named (`Options.with` = config's
-    // `[extensions] with` plus `--with`) and the ones a pin drags in. There used
-    // to be a third source — "every id with a `current`" — and it made
-    // `activate` mean two things at once: which version `<id>` resolves to, and
-    // whether the package is in every session from now on. The second is a
-    // decision about REACH and belongs to the person, in config, beside the pins
-    // (DESIGN §5.1, physics #6); the first is all `current` says now.
-    //
-    // An allocated empty slice rather than a stack array: `unionWith` hands the
-    // base back untouched when there is nothing to union, and that slice can
-    // escape as this function's result — a pointer into this frame, even at
-    // length zero, is not something to return. Freeing it is a no-op either way.
-    const named = try unionWith(gpa, roots, try gpa.alloc(roots_mod.Roots.Resolved, 0), opts.with);
-    // From here on `named` belongs to `unionWith`'s contract — it takes the base
-    // and releases it on any failure — so a failure in between has to release it
-    // by hand rather than through an errdefer that the tail call would double.
+    // Three membership sources, in override order: activated `always` packages,
+    // explicit/config `with`, then packages implied by pins. An explicit
+    // version therefore wins over discovery; a pin never moves an existing
+    // member off the version already chosen.
+    const base = if (opts.include_activated)
+        try resolveAlwaysExtensions(gpa, roots)
+    else
+        try gpa.alloc(roots_mod.Roots.Resolved, 0);
+    const named = try unionWith(gpa, roots, base, opts.with);
+
     const implied = pinImpliedRefs(gpa, roots, opts.pinned_native_tools, named) catch |err| {
         freeResolved(gpa, named);
         return err;
     };
     defer gpa.free(implied);
     return unionWith(gpa, roots, named, implied);
+}
+
+/// Discover the active packages that explicitly opt into every ordinary fresh
+/// session. We inspect the manifest structurally first so a broken on-request
+/// package is irrelevant to a session that never named it; only an `always`
+/// package is then resolved with the full sealed-integrity check.
+fn resolveAlwaysExtensions(alloc: std.mem.Allocator, roots: *const roots_mod.Roots) ![]roots_mod.Roots.Resolved {
+    var out: std.ArrayList(roots_mod.Roots.Resolved) = .empty;
+    errdefer freeResolved(alloc, out.items);
+
+    const active = try roots.listActive(alloc);
+    defer roots_mod.Roots.freeActive(alloc, active);
+
+    for (active) |entry| {
+        var preview = roots.resolveEntry(alloc, entry, .structural) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => {
+                if (!isExtensionFault(err)) return err;
+                try reportBrokenActive(roots.io, alloc, entry, err);
+                return error.ActiveExtensionBroken;
+            },
+        };
+        const always = preview.manifest.activationOf() == .always;
+        preview.deinit(alloc);
+        if (!always) continue;
+
+        const resolved = roots.resolveEntry(alloc, entry, .sealed) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => {
+                if (!isExtensionFault(err)) return err;
+                try reportBrokenActive(roots.io, alloc, entry, err);
+                return error.ActiveExtensionBroken;
+            },
+        };
+        errdefer resolved.deinit(alloc);
+        try out.append(alloc, resolved);
+    }
+    return out.toOwnedSlice(alloc);
 }
 
 /// The member refs a pin list implies: one per distinct `ext:<id>/…` id that
@@ -519,23 +553,32 @@ fn resolveFreshBindings(
         try out.append(a, try resolvePinnedBinding(a, roots, resolved, pin, .fresh_pin));
     }
 
-    for (opts.with, 0..) |ref, i| {
-        for (opts.with[0..i]) |seen| {
-            if (std.mem.eql(u8, seen.id, ref.id)) break;
-        } else {
-            const r = findResolved(resolved, ref.id) orelse continue;
-            for (r.manifest.tools) |spec| {
-                if (spec.surfaceOf() != .with) continue;
-                const id = try std.fmt.allocPrint(a, "ext:{s}/{s}", .{ r.id, spec.name });
-                defer a.free(id);
-                if (bindingIdSeen(out.items, id)) continue;
-                try out.append(a, try bindingForSpec(a, roots, r, spec, id));
-            }
+    // `surface:"with"` follows membership only when membership itself was
+    // explicit, or came from activation:"always". A package dragged in solely
+    // by a pin still contributes only that pin; --bare suppresses the activated
+    // path even when such a package happens to declare always.
+    for (resolved) |r| {
+        const composed_with = withContains(opts.with, r.id) or
+            (opts.include_activated and r.manifest.activationOf() == .always);
+        if (!composed_with) continue;
+        for (r.manifest.tools) |spec| {
+            if (spec.surfaceOf() != .with) continue;
+            const id = try std.fmt.allocPrint(a, "ext:{s}/{s}", .{ r.id, spec.name });
+            defer a.free(id);
+            if (bindingIdSeen(out.items, id)) continue;
+            try out.append(a, try bindingForSpec(a, roots, r, spec, id));
         }
     }
 
     if (registry.builtin_count + out.items.len > opts.max_tools) return error.ToolBudgetExceeded;
     return out.toOwnedSlice(a);
+}
+
+fn withContains(refs: []const WithRef, id: []const u8) bool {
+    for (refs) |ref| {
+        if (std.mem.eql(u8, ref.id, id)) return true;
+    }
+    return false;
 }
 
 /// Resolve only the stable tool ids frozen in a session header. Resume never
@@ -796,8 +839,35 @@ fn buildSystemPrompts(
     var blocks: std.ArrayList(prompt.SystemBlock) = .empty;
     try blocks.append(a, .{ .source = "kernel", .bytes = kernel_system_prompt });
 
+    try appendExtensionSystemPrompts(a, io, roots, resolved, &blocks, .early);
+    try appendExtensionSystemPrompts(a, io, roots, resolved, &blocks, .normal);
+
+    // Inline identity text remains between ordinary extension prompts and the
+    // skill catalog. Late extension prompts deliberately sit after both: they
+    // are tail disciplines/observers, not a numeric priority trick.
+    for (prompts) |p| try blocks.append(a, .{ .source = p.source, .bytes = p.text });
+
+    if (try skills.catalogText(a)) |catalog| {
+        try blocks.append(a, .{ .source = "skills:catalog", .bytes = catalog });
+    }
+
+    try appendExtensionSystemPrompts(a, io, roots, resolved, &blocks, .late);
+    return .{ .blocks = try blocks.toOwnedSlice(a) };
+}
+
+fn appendExtensionSystemPrompts(
+    a: std.mem.Allocator,
+    io: std.Io,
+    roots: *const roots_mod.Roots,
+    resolved: []const roots_mod.Roots.Resolved,
+    blocks: *std.ArrayList(prompt.SystemBlock),
+    position: manifest.SystemPromptPosition,
+) !void {
+    // `resolved` is already sorted by extension id. Iterating each manifest in
+    // declaration order gives a deterministic tie-break inside one position.
     for (resolved) |r| {
-        for (r.manifest.system_prompts) |prompt_path| {
+        for (r.manifest.system_prompts, 0..) |prompt_path, i| {
+            if (r.manifest.systemPromptPosition(i) != position) continue;
             const source = try std.fmt.allocPrint(a, "ext:{s}@{s}/{s}", .{ r.id, r.version, prompt_path });
             const rel = try std.fs.path.join(a, &.{ r.id, "versions", r.version, integrity.package_dir, prompt_path });
             defer a.free(rel);
@@ -805,18 +875,6 @@ fn buildSystemPrompts(
             try blocks.append(a, .{ .source = source, .bytes = bytes });
         }
     }
-
-    // Inline prompts sit after the members' and before the catalog: they are
-    // identity text like an extension's, so they belong on that side of the
-    // divide, and the catalog stays last (DESIGN §5). `source` is carried, never
-    // read — the kernel does not know what any label means.
-    for (prompts) |p| try blocks.append(a, .{ .source = p.source, .bytes = p.text });
-
-    if (try skills.catalogText(a)) |catalog| {
-        try blocks.append(a, .{ .source = "skills:catalog", .bytes = catalog });
-    }
-
-    return .{ .blocks = try blocks.toOwnedSlice(a) };
 }
 
 fn sortResolved(resolved: []roots_mod.Roots.Resolved) void {
@@ -1022,7 +1080,7 @@ test "duplicate skill names in one extension are rejected" {
     try std.testing.expectError(error.DuplicateSkillName, SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "finance" }} }));
 }
 
-test "activating a package composes nothing: a member is one somebody NAMED, and activate only says which version that is" {
+test "activation always joins ordinary fresh sessions; on_request and bare stay opt-in" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -1030,70 +1088,119 @@ test "activating a package composes nothing: a member is one somebody NAMED, and
     const cwd = try tmpPath(alloc, io, tmp.dir);
     defer alloc.free(cwd);
 
-    // Two packages, identical in every way that used to matter: both built,
-    // both activated, both contributing a system prompt. There is no field
-    // left that could make one of them join a session the other does not —
-    // reach is not the package's to declare (DESIGN §5.1, physics #6).
-    const bytes =
-        \\{"schema":"nulya.extension/v2","id":"ID","contributes":{"system_prompts":["prompts/base.md"]}}
+    const policy_manifest =
+        \\{"schema":"nulya.extension/v2","id":"policy","activation":"always","contributes":{"system_prompts":["prompts/base.md"]}}
     ;
-    const policy_bytes = try std.mem.replaceOwned(u8, alloc, bytes, "ID", "policy");
-    defer alloc.free(policy_bytes);
-    const mode_bytes = try std.mem.replaceOwned(u8, alloc, bytes, "ID", "mode");
-    defer alloc.free(mode_bytes);
-    const policy_v = try testkit.writeFrozenVersion(alloc, io, tmp.dir, "policy", policy_bytes, &.{.{ .rel = "prompts/base.md", .bytes = "POLICY" }});
+    const mode_manifest =
+        \\{"schema":"nulya.extension/v2","id":"mode","contributes":{"system_prompts":["prompts/base.md"]}}
+    ;
+    const policy_v = try testkit.writeFrozenVersion(alloc, io, tmp.dir, "policy", policy_manifest, &.{.{ .rel = "prompts/base.md", .bytes = "POLICY" }});
     defer alloc.free(policy_v);
-    const mode_v = try testkit.writeFrozenVersion(alloc, io, tmp.dir, "mode", mode_bytes, &.{.{ .rel = "prompts/base.md", .bytes = "MODE" }});
+    const mode_v = try testkit.writeFrozenVersion(alloc, io, tmp.dir, "mode", mode_manifest, &.{.{ .rel = "prompts/base.md", .bytes = "MODE" }});
     defer alloc.free(mode_v);
     try testkit.activate(alloc, io, tmp.dir, "policy", policy_v);
     try testkit.activate(alloc, io, tmp.dir, "mode", mode_v);
 
-    // A session that names nobody has nobody, however much is activated. This
-    // is the whole deletion: there is no discovery pass, so the store's content
-    // cannot reach a session on its own.
+    // Only the explicit always package is discovered.
     {
         var plain = try SessionComposition.init(alloc, io, cwd, one_root, .{});
         defer plain.deinit(alloc);
-        try std.testing.expectEqual(@as(usize, 0), plain.extensions.len);
-        try std.testing.expectEqual(@as(usize, 0), plain.skills.skills.len);
-        try std.testing.expectEqual(@as(usize, 1), plain.system_prompts.blocks.len); // kernel only
+        try std.testing.expectEqual(@as(usize, 1), plain.extensions.len);
+        try std.testing.expectEqualStrings("policy", plain.extensions[0].id);
+        try std.testing.expectEqualStrings("POLICY", plain.system_prompts.blocks[1].bytes);
     }
 
-    // Naming one brings it in WHOLE, at the version `current` points at — the
-    // caller needs no version, which is the entire thing activating bought.
+    // --bare is represented by include_activated=false: no global discovery.
+    {
+        var bare = try SessionComposition.init(alloc, io, cwd, one_root, .{ .include_activated = false });
+        defer bare.deinit(alloc);
+        try std.testing.expectEqual(@as(usize, 0), bare.extensions.len);
+        try std.testing.expectEqual(@as(usize, 1), bare.system_prompts.blocks.len);
+    }
+
+    // Naming an on-request mode adds it beside the always package. Same-position
+    // prompts keep the deterministic extension-id order.
     {
         var worn = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "mode" }} });
         defer worn.deinit(alloc);
-        try std.testing.expectEqual(@as(usize, 1), worn.extensions.len);
+        try std.testing.expectEqual(@as(usize, 2), worn.extensions.len);
         try std.testing.expectEqualStrings("mode", worn.extensions[0].id);
-        try std.testing.expectEqualStrings(mode_v, worn.extensions[0].version);
-        try std.testing.expectEqual(@as(usize, 2), worn.system_prompts.blocks.len);
+        try std.testing.expectEqualStrings("policy", worn.extensions[1].id);
         try std.testing.expectEqualStrings("MODE", worn.system_prompts.blocks[1].bytes);
+        try std.testing.expectEqualStrings("POLICY", worn.system_prompts.blocks[2].bytes);
     }
 
-    // Naming both — which is what config's `[extensions] with` and `--with`
-    // reach here as, already joined — brings both, sorted by id.
-    {
-        var both = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{ .{ .id = "policy" }, .{ .id = "mode" } } });
-        defer both.deinit(alloc);
-        try std.testing.expectEqual(@as(usize, 2), both.extensions.len);
-        try std.testing.expectEqualStrings("MODE", both.system_prompts.blocks[1].bytes);
-        try std.testing.expectEqualStrings("POLICY", both.system_prompts.blocks[2].bytes);
-    }
-
-    // Deactivating takes the BARE name away: `--with <id>` reads `current`, and
-    // that pointer is all `current` ever was.
+    // Deactivation removes the bare-name route, while an exact version remains
+    // composable and --bare still prevents the unrelated always package joining.
     try testkit.deactivate(alloc, io, tmp.dir, "mode");
     try std.testing.expectError(error.WithVersionNotFound, SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "mode" }} }));
-    // …while the exact version still composes, as it did before it was ever
-    // activated: naming a build never needed a pointer.
     {
-        var exact = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{.{ .id = "mode", .version = mode_v }} });
+        var exact = try SessionComposition.init(alloc, io, cwd, one_root, .{
+            .include_activated = false,
+            .with = &.{.{ .id = "mode", .version = mode_v }},
+        });
         defer exact.deinit(alloc);
-        try std.testing.expectEqual(@as(usize, 2), exact.system_prompts.blocks.len);
+        try std.testing.expectEqual(@as(usize, 1), exact.extensions.len);
+        try std.testing.expectEqualStrings("MODE", exact.system_prompts.blocks[1].bytes);
     }
 }
 
+test "system prompt positions are kernel, early, normal, inline, catalog, late" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmpPath(alloc, io, tmp.dir);
+    defer alloc.free(cwd);
+
+    const a_manifest =
+        \\{"schema":"nulya.extension/v2","id":"a.early","contributes":{"system_prompts":[{"path":"prompts/a.md","position":"early"}]}}
+    ;
+    const b_manifest =
+        \\{"schema":"nulya.extension/v2","id":"b.early","contributes":{"system_prompts":[{"path":"prompts/b.md","position":"early"}]}}
+    ;
+    const normal_manifest =
+        \\{"schema":"nulya.extension/v2","id":"m.normal","contributes":{"system_prompts":["prompts/n.md"],"skills":["skills/demo"]}}
+    ;
+    const late_manifest =
+        \\{"schema":"nulya.extension/v2","id":"z.late","contributes":{"system_prompts":[{"path":"prompts/z.md","position":"late"}]}}
+    ;
+
+    const av = try testkit.writeFrozenVersion(alloc, io, tmp.dir, "a.early", a_manifest, &.{.{ .rel = "prompts/a.md", .bytes = "A_EARLY" }});
+    defer alloc.free(av);
+    const bv = try testkit.writeFrozenVersion(alloc, io, tmp.dir, "b.early", b_manifest, &.{.{ .rel = "prompts/b.md", .bytes = "B_EARLY" }});
+    defer alloc.free(bv);
+    const nv = try testkit.writeFrozenVersion(alloc, io, tmp.dir, "m.normal", normal_manifest, &.{
+        .{ .rel = "prompts/n.md", .bytes = "NORMAL" },
+        .{ .rel = "skills/demo/SKILL.md", .bytes = "---\nname: demo\ndescription: demo skill\n---\nbody\n" },
+    });
+    defer alloc.free(nv);
+    const zv = try testkit.writeFrozenVersion(alloc, io, tmp.dir, "z.late", late_manifest, &.{.{ .rel = "prompts/z.md", .bytes = "LATE" }});
+    defer alloc.free(zv);
+
+    const members: []const WithRef = &.{
+        .{ .id = "z.late", .version = zv },
+        .{ .id = "m.normal", .version = nv },
+        .{ .id = "b.early", .version = bv },
+        .{ .id = "a.early", .version = av },
+    };
+    const inline: []const ledger.InlinePrompt = &.{.{ .source = "inline", .text = "INLINE" }};
+    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{
+        .include_activated = false,
+        .with = members,
+        .prompts = inline,
+    });
+    defer comp.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 7), comp.system_prompts.blocks.len);
+    try std.testing.expectEqualStrings("kernel", comp.system_prompts.blocks[0].source);
+    try std.testing.expectEqualStrings("A_EARLY", comp.system_prompts.blocks[1].bytes);
+    try std.testing.expectEqualStrings("B_EARLY", comp.system_prompts.blocks[2].bytes);
+    try std.testing.expectEqualStrings("NORMAL", comp.system_prompts.blocks[3].bytes);
+    try std.testing.expectEqualStrings("inline", comp.system_prompts.blocks[4].source);
+    try std.testing.expectEqualStrings("skills:catalog", comp.system_prompts.blocks[5].source);
+    try std.testing.expectEqualStrings("LATE", comp.system_prompts.blocks[6].bytes);
+}
 test "--with brings a built-but-inactive version into one session, overrides an active one, and refuses what does not exist" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
