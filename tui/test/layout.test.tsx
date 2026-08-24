@@ -25,11 +25,11 @@ beforeAll(() => {
 afterAll(() => ws.cleanup())
 
 /** A session whose transcript is far taller than any of these terminals. */
-async function crowded(height: number) {
+async function crowded(height: number, appStyle = style) {
   const id = await sessionNew(ws, { profile: "scripted" })
   const state = createSessionState(id)
   const setup = await testRender(
-    () => <App ws={ws} id={id} state={state} style={style} driver={{ env: scripted_env }} created />,
+    () => <App ws={ws} id={id} state={state} style={appStyle} driver={{ env: scripted_env }} created />,
     { width: 100, height },
   )
   await settle(setup, 2)
@@ -107,6 +107,23 @@ test("scrolling back says how far back it is, and one key comes home", async () 
 
     press(setup, shift_end)
     await untilFrame(setup, (frame) => !frame.includes("more below"))
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 120_000)
+
+test("a [keys] override moves transcript scrolling", async () => {
+  const rebound = createStyle({ ...unsafe_settings, keys: { ...unsafe_settings.keys, scrollUp: "ctrl+b" } }, {})
+  const { setup } = await crowded(24, rebound)
+  try {
+    await settle(setup, 6)
+    expect(setup.captureCharFrame()).not.toContain("more below")
+
+    setup.mockInput.pressKey("b", { ctrl: true })
+    setup.mockInput.pressKey("b", { ctrl: true })
+    await untilFrame(setup, (frame) => frame.includes("more below"))
+    expect(setup.captureCharFrame()).toContain("Shift+End")
+    expect(setup.captureCharFrame()).toContain("message nulya")
   } finally {
     setup.renderer.destroy()
   }

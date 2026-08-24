@@ -2355,10 +2355,73 @@ export function App(props: AppProps) {
     action()
   }
 
+  const handleGlobalCancel = () => {
+    // A proposal on screen is what Esc is about while it is there.
+    if (dismissHandoff()) return
+    const here = live()
+    if (here && here.attach.status() === "stepping") {
+      void here.attach.cancel()
+      return
+    }
+    // Nothing to stop and nothing typed: Esc means "go read" (tui.md §4.2).
+    if (composer?.isEmpty() ?? true) enterBrowse()
+  }
+
+  const handleGlobalQuit = () => {
+    if (overlay.active()) {
+      quit()
+      return
+    }
+    // Ctrl+C narrows from the nearest thing to stop to the furthest, and
+    // NEVER quits on its first press (tui.md §1.2 D6). Three truths about
+    // "stop", in the order a person means them: the draft in the box, the
+    // kernel's step, and last — only ever after having said so — this process.
+    // Losing a half-written message to a reflex, or the whole screen, is not
+    // something a second keystroke can undo.
+    if (!(composer?.isEmpty() ?? true)) {
+      composer?.clear()
+      setCtrlCArmed(false)
+      setNotice("input cleared · Ctrl+C twice to quit")
+      return
+    }
+    const here = live()
+    if (here && here.attach.status() === "stepping" && !ctrlCArmed()) {
+      here.attach.kill()
+      setCtrlCArmed(true)
+      setNotice("step killed · Ctrl+C again to quit")
+      return
+    }
+    if (!ctrlCArmed()) {
+      setCtrlCArmed(true)
+      setNotice("Ctrl+C again to quit")
+      return
+    }
+    quit()
+  }
+
   const shortcutLayerBlocked = () =>
     Boolean(withPicker() || agentPicker() || modePicker() || pending() || browse.active() || plugins.panel())
+  const normalShortcutLayerBlocked = () => shortcutLayerBlocked() || overlay.active()
 
   onMount(() => {
+    const warnings: string[] = []
+    const bind = (action: Action, run: () => void) => {
+      const key = keys[action]
+      try {
+        keymap.parseKeySequence(key)
+      } catch (error) {
+        warnings.push(`${action}=${key}`)
+        return []
+      }
+      return [{ key, cmd: run }]
+    }
+
+    const quitBindings = bind("quit", handleGlobalQuit)
+    const offQuit = keymap.registerLayer({
+      priority: 120,
+      bindings: quitBindings,
+    })
+
     const openers: readonly [Action, OverlayKind][] = [
       ["ext", "ext"],
       ["sessions", "sessions"],
@@ -2367,24 +2430,48 @@ export function App(props: AppProps) {
       ["tasks", "tasks"],
       ["help", "help"],
     ]
-    const warnings: string[] = []
-    const bindings = openers.flatMap(([action, kind]) => {
-      const key = keys[action]
-      try {
-        keymap.parseKeySequence(key)
-      } catch (error) {
-        warnings.push(`${action}=${key}`)
-        return []
-      }
-      return [{ key, cmd: () => openOverlay(kind) }]
-    })
-    if (warnings.length > 0) setNotice(`ignored invalid key binding${warnings.length === 1 ? "" : "s"}: ${warnings.join(", ")}`)
-    const off = keymap.registerLayer({
+    const openerBindings = openers.flatMap(([action, kind]) => bind(action, () => openOverlay(kind)))
+    const offOpeners = keymap.registerLayer({
       priority: 100,
       enabled: () => !shortcutLayerBlocked(),
-      bindings,
+      bindings: openerBindings,
     })
-    onCleanup(off)
+
+    const normalBindings = [
+      ...bind("scrollUp", () => scrollBy(-1)),
+      ...bind("scrollDown", () => scrollBy(1)),
+      ...bind("scrollEnd", scrollToEnd),
+      ...bind("nextTab", () => tabs.next()),
+      ...bind("redraw", () => renderer.requestRender()),
+    ]
+    const offNormal = keymap.registerLayer({
+      priority: 90,
+      enabled: () => !normalShortcutLayerBlocked(),
+      bindings: normalBindings,
+    })
+
+    const closeTabBindings = bind("closeTab", () => tabs.close(tab().key))
+    const offCloseTab = keymap.registerLayer({
+      priority: 85,
+      enabled: () => !normalShortcutLayerBlocked() && tabs.tabs().length > 1,
+      bindings: closeTabBindings,
+    })
+
+    const cancelBindings = bind("cancel", handleGlobalCancel)
+    const offCancel = keymap.registerLayer({
+      priority: 80,
+      enabled: () => !normalShortcutLayerBlocked(),
+      bindings: cancelBindings,
+    })
+
+    if (warnings.length > 0) setNotice(`ignored invalid key binding${warnings.length === 1 ? "" : "s"}: ${warnings.join(", ")}`)
+    onCleanup(() => {
+      offQuit()
+      offOpeners()
+      offNormal()
+      offCloseTab()
+      offCancel()
+    })
   })
 
   useKeyboard((key) => {
@@ -2514,12 +2601,9 @@ export function App(props: AppProps) {
       }
       return
     }
-    // An overlay owns the keyboard while it is up; only the keys that open or
-    // close one, and the quit key, stay global (tui.md §11, T2 reminder 3).
-    if (overlay.active()) {
-      if (matches(keys.quit, key)) quit()
-      return
-    }
+    // An overlay owns the keyboard while it is up; global shortcuts that remain
+    // available there are registered in OpenTUI keymap layers above.
+    if (overlay.active()) return
     /**
      * A plugin's panel owns the keyboard while it is up (tui-plugin D6) — on
      * exactly the terms every other composer dialog has, and no better ones:
@@ -2551,59 +2635,6 @@ export function App(props: AppProps) {
         return toggleSelected()
       }
       return
-    }
-    // Reading back. The composer is focused and keeps the keyboard, so these
-    // have to be taken here or they are the textarea's cursor movement.
-    if (matches(keys.scrollUp, key)) return consume(key, () => scrollBy(-1))
-    if (matches(keys.scrollDown, key)) return consume(key, () => scrollBy(1))
-    if (matches(keys.scrollEnd, key)) return consume(key, scrollToEnd)
-    if (matches(keys.nextTab, key)) return consume(key, () => tabs.next())
-    if (matches(keys.closeTab, key)) {
-      // With one tab there is nothing to close, and the composer keeps its own
-      // meaning for the key (Ctrl+W: delete the word behind the cursor).
-      if (tabs.tabs().length > 1) consume(key, () => tabs.close(tab().key))
-      return
-    }
-    if (matches(keys.cancel, key)) {
-      // A proposal on screen is what Esc is about while it is there.
-      if (dismissHandoff()) return
-      const here = live()
-      if (here && here.attach.status() === "stepping") {
-        void here.attach.cancel()
-        return
-      }
-      // Nothing to stop and nothing typed: Esc means "go read" (tui.md §4.2).
-      if (composer?.isEmpty() ?? true) enterBrowse()
-      return
-    }
-    if (matches(keys.redraw, key)) return consume(key, () => renderer.requestRender())
-    if (matches(keys.quit, key)) {
-      // Ctrl+C narrows from the nearest thing to stop to the furthest, and
-      // NEVER quits on its first press (tui.md §1.2 D6). Three truths about
-      // "stop", in the order a person means them: the draft in the box, the
-      // kernel's step, and last — only ever after having said so — this process.
-      // Losing a half-written message to a reflex, or the whole screen, is not
-      // something a second keystroke can undo.
-      if (!(composer?.isEmpty() ?? true)) {
-        return consume(key, () => {
-          composer?.clear()
-          setCtrlCArmed(false)
-          setNotice("input cleared · Ctrl+C twice to quit")
-        })
-      }
-      const here = live()
-      if (here && here.attach.status() === "stepping" && !ctrlCArmed()) {
-        here.attach.kill()
-        setCtrlCArmed(true)
-        setNotice("step killed · Ctrl+C again to quit")
-        return
-      }
-      if (!ctrlCArmed()) {
-        setCtrlCArmed(true)
-        setNotice("Ctrl+C again to quit")
-        return
-      }
-      quit()
     }
   })
 

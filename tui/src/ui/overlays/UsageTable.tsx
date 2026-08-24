@@ -12,20 +12,10 @@
  * both full-width (`/usage`) and inside `/ext`'s pane, and a cell sized against
  * the wrong box is a cell that wraps (`ui/columns.ts`).
  */
-import { For, Show, createEffect, createMemo } from "solid-js"
-import { extend } from "@opentui/solid"
-import { TextTableRenderable, parseColor, type TextTableContent } from "@opentui/core"
+import { For, Show, createMemo } from "solid-js"
 import { useStyle } from "../../render/theme.ts"
 import { columnWidth, fit, squeeze, wrapWords } from "../columns.ts"
 import type { ToolUsage } from "../../nulya/files.ts"
-
-declare module "@opentui/solid" {
-  interface OpenTUIComponents {
-    text_table: typeof TextTableRenderable
-  }
-}
-
-extend({ text_table: TextTableRenderable })
 
 const caption = "tool usage · .nulya/tool-usage.jsonl · evidence for a pin, not a queue"
 
@@ -49,23 +39,6 @@ export function UsageTable(props: { rows: ToolUsage[]; width: number }) {
     return { id: id!, uses: uses!, ok: ok! }
   })
 
-  let tableRenderable: TextTableRenderable | null = null
-  const tableContent = createMemo<TextTableContent>(() => {
-    const fg = parseColor(style.theme.fg)
-    const muted = parseColor(style.theme.muted)
-    const dim = parseColor(style.theme.dim)
-    return props.rows.map((row) => [
-      [{ __isChunk: true, text: fit(row.toolId, cols().id - 2), fg }],
-      [{ __isChunk: true, text: fit(usesOf(row), cols().uses - 2), fg: muted }],
-      [{ __isChunk: true, text: fit(okOf(row), cols().ok), fg: dim }],
-    ])
-  })
-
-  createEffect(() => {
-    const table = tableRenderable
-    if (table) table.content = tableContent()
-  })
-
   return (
     <box flexDirection="column" flexGrow={1}>
       <For each={wrapWords(caption, props.width)}>
@@ -76,24 +49,21 @@ export function UsageTable(props: { rows: ToolUsage[]; width: number }) {
         )}
       </For>
       <box height={1} />
-      <Show when={props.rows.length > 0}>
-        <text_table
-          ref={(table: TextTableRenderable) => {
-            tableRenderable = table
-            table.content = tableContent()
-          }}
-          width={props.width}
-          columnWidthMode="content"
-          wrapMode="none"
-          columnGap={2}
-          cellPadding={0}
-          showBorders={false}
-          border={false}
-          outerBorder={false}
-          fg={style.theme.fg}
-          flexShrink={0}
-        />
-      </Show>
+      <For each={props.rows}>
+        {(row) => (
+          <box flexDirection="row" width="100%" height={1} flexShrink={0}>
+            <box width={cols().id} flexShrink={0}>
+              <text fg={style.theme.fg}>{fit(row.toolId, cols().id - 2)}</text>
+            </box>
+            <box width={cols().uses} flexShrink={0}>
+              <text fg={style.theme.muted}>{fit(usesOf(row), cols().uses - 2)}</text>
+            </box>
+            <box width={cols().ok} flexShrink={0}>
+              <text fg={style.theme.dim}>{fit(okOf(row), cols().ok)}</text>
+            </box>
+          </box>
+        )}
+      </For>
       {/* Zero rows is the ordinary state of a fresh workspace, and the journal
           only ever grows from tools actually running — so say what would put a
           line in it rather than reporting the absence. */}
