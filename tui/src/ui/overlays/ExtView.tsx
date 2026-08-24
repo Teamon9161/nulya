@@ -914,15 +914,11 @@ export function ExtView(props: {
     }
     // Agreed: now the pin lists are written where the next `session new` reads.
     if (change) await applyPin(change, { reconcile: false })
-    // …and the MEMBERSHIP half, for a package that has something only a member
-    // can give and that Enter cannot already reach another way (`standingWith`).
-    // Activating alone composes nothing now (DESIGN §5.1), so without this line
-    // the switch would move a pointer and change nothing a person could see. A
-    // pure tool package needs no entry: its pins bring it in by themselves, and
-    // a second way of saying that is a second thing to take back. A package
-    // that contributes a SYSTEM PROMPT never gets one here (T1, ext-review-2
-    // §3b) — `derivedCommand` already gave it a `/<id>` below, and that is the
-    // per-session way in this row's Enter means now.
+    // …and the TUI-owned membership half when this package needs one.
+    // Prompt packages do not: activation:"always" already supplies standing
+    // membership, while on_request gets its derived /<id> one-session command.
+    // Pure pinned-tool packages also need no second bit because their pins imply
+    // membership. Skills/commands/ui packages without either route use this list.
     if (standingWith(entry)) {
       const held = standingWithIds(props.statePath)
       if (!held.includes(entry.id)) rememberStandingWith([...held, entry.id], props.statePath)
@@ -930,10 +926,7 @@ export function ExtView(props: {
     release(entry.id)
     props.onMembershipChanged?.()
     setNotice(
-      // A package that contributes a system prompt gets the sentence about the
-      // command Enter just gave it, instead of a version and a pin count (T1,
-      // ext-review-2 §3b) — Enter no longer reaches every session from here,
-      // so there is nothing scary left to say, only where the new command is.
+      // Prompt packages say which lifecycle the manifest chose.
       entry.systemPrompts.length > 0
         ? entry.activation === "always"
           ? `${entry.id} on · enters every future non-bare session · Enter again turns it off`
