@@ -47,14 +47,19 @@ pub const Timeouts = struct {
 
 /// Constant-size context handed to every tool call.
 ///
-/// INVARIANT: every field here is fixed-shape and executor-facing. Loop/session
-/// presentation data such as spill directories, event sequence numbers, and
-/// output budgets stays outside this type.
+/// INVARIANT: every field here is fixed-shape and executor-facing. Unbounded
+/// loop/session data such as spill directories, event sequence numbers, and
+/// output budgets stays outside this type; `presentation_file` is only a
+/// constant-size pointer to a side channel the loop owns.
 pub const ToolContext = struct {
     /// The process execution environment (DESIGN §8).
     environment: Environment,
     /// Working directory for filesystem-relative operations.
     cwd: []const u8,
+    /// Optional workspace-relative file where an executor may write UI-only
+    /// presentation JSON. The loop reads it after the call and records it in
+    /// the ledger, but PromptIR never projects it, so it is not model-visible.
+    presentation_file: ?[]const u8 = null,
 };
 
 /// A single tool invocation request. This is the entire input surface.

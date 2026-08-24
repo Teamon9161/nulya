@@ -137,6 +137,7 @@ pub fn run(ctx: *const rpc.Ctx, args: std.json.ObjectMap) anyerror!rpc.Outcome {
     // offset in the new text is the one the plan already found — no second
     // search of the file.
     const line_no = std.mem.count(u8, new_text[0..plan.at], "\n") + 1;
+    writeDiffPresentation(ctx, shown_path, body, new_text, plan, replace_all) catch {};
     const start = @max(line_no -| 3, 1);
     const window = text.countLines(plan.new) + 5;
     const all = try text.lines(alloc, new_text);
@@ -310,6 +311,119 @@ fn replaceOnceAt(alloc: std.mem.Allocator, haystack: []const u8, plan: Replaceme
     const end = plan.at + plan.old.len;
     std.debug.assert(std.mem.eql(u8, haystack[plan.at..end], plan.old));
     return std.mem.concat(alloc, u8, &.{ haystack[0..plan.at], plan.new, haystack[end..] });
+}
+
+fn writeDiffPresentation(
+    ctx: *const rpc.Ctx,
+    shown_path: []const u8,
+    old_text: []const u8,
+    new_text: []const u8,
+    plan: ReplacementPlan,
+    replace_all: bool,
+) !void {
+    const sidecar = ctx.env.get("NULYA_PRESENTATION_FILE") orelse return;
+    if (sidecar.len == 0) return;
+
+    const patch = try unifiedReplacementDiff(ctx.alloc, shown_path, old_text, new_text, plan, replace_all);
+    var json: std.Io.Writer.Allocating = .init(ctx.alloc);
+    errdefer json.deinit();
+    var jw: std.json.Stringify = .{ .writer = &json.writer };
+    try jw.beginObject();
+    try jw.objectField("kind");
+    try jw.write("diff");
+    try jw.objectField("path");
+    try jw.write(shown_path);
+    if (filetypeOf(shown_path)) |ft| {
+        try jw.objectField("filetype");
+        try jw.write(ft);
+    }
+    try jw.objectField("patch");
+    try jw.write(patch);
+    try jw.endObject();
+
+    const cwd = std.Io.Dir.cwd();
+    if (std.fs.path.dirname(sidecar)) |parent| try cwd.createDirPath(ctx.io, parent);
+    try cwd.writeFile(ctx.io, .{ .sub_path = sidecar, .data = json.written() });
+}
+
+fn unifiedReplacementDiff(
+    alloc: std.mem.Allocator,
+    shown_path: []const u8,
+    old_text: []const u8,
+    new_text: []const u8,
+    plan: ReplacementPlan,
+    replace_all: bool,
+) ![]const u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    try out.writer.print("--- a/{s}\n+++ b/{s}\n", .{ shown_path, shown_path });
+
+    if (!replace_all) {
+        try writeHunk(alloc, &out.writer, old_text, new_text, plan.at, plan.at, plan.old, plan.new);
+        return out.toOwnedSlice();
+    }
+
+    var search: usize = 0;
+    var offset_delta: isize = 0;
+    var emitted: usize = 0;
+    while (std.mem.indexOfPos(u8, old_text, search, plan.old)) |at| {
+        const new_at = addOffsetDelta(at, offset_delta);
+        try writeHunk(alloc, &out.writer, old_text, new_text, at, new_at, plan.old, plan.new);
+        emitted += 1;
+        search = at + plan.old.len;
+        offset_delta += lenDelta(plan.old.len, plan.new.len);
+        if (emitted == plan.count) break;
+    }
+    return out.toOwnedSlice();
+}
+
+fn writeHunk(
+    alloc: std.mem.Allocator,
+    w: *std.Io.Writer,
+    old_text: []const u8,
+    new_text: []const u8,
+    old_at: usize,
+    new_at: usize,
+    old_chunk: []const u8,
+    new_chunk: []const u8,
+) !void {
+    const old_start = std.mem.count(u8, old_text[0..old_at], "\n") + 1;
+    const new_start = std.mem.count(u8, new_text[0..new_at], "\n") + 1;
+    try w.print("@@ -{d},{d} +{d},{d} @@\n", .{ old_start, text.countLines(old_chunk), new_start, text.countLines(new_chunk) });
+    try writeDiffLines(alloc, w, '-', old_chunk);
+    try writeDiffLines(alloc, w, '+', new_chunk);
+}
+
+fn writeDiffLines(alloc: std.mem.Allocator, w: *std.Io.Writer, prefix: u8, chunk: []const u8) !void {
+    const ls = try text.lines(alloc, chunk);
+    for (ls) |line| try w.print("{c}{s}\n", .{ prefix, line });
+}
+
+fn lenDelta(old_len: usize, new_len: usize) isize {
+    if (new_len >= old_len) return @intCast(new_len - old_len);
+    return -@as(isize, @intCast(old_len - new_len));
+}
+
+fn addOffsetDelta(offset: usize, delta: isize) usize {
+    if (delta >= 0) return offset + @as(usize, @intCast(delta));
+    return offset - @as(usize, @intCast(-delta));
+}
+
+fn filetypeOf(path: []const u8) ?[]const u8 {
+    const dot = std.mem.lastIndexOfScalar(u8, path, '.') orelse return null;
+    if (dot + 1 >= path.len) return null;
+    const ext = path[dot + 1 ..];
+    if (std.mem.eql(u8, ext, "tsx")) return "tsx";
+    if (std.mem.eql(u8, ext, "ts")) return "typescript";
+    if (std.mem.eql(u8, ext, "jsx")) return "jsx";
+    if (std.mem.eql(u8, ext, "js")) return "javascript";
+    if (std.mem.eql(u8, ext, "zig")) return "zig";
+    if (std.mem.eql(u8, ext, "rs")) return "rust";
+    if (std.mem.eql(u8, ext, "py")) return "python";
+    if (std.mem.eql(u8, ext, "md")) return "markdown";
+    if (std.mem.eql(u8, ext, "json")) return "json";
+    if (std.mem.eql(u8, ext, "toml")) return "toml";
+    return ext;
 }
 
 // ------------------------------------------------------- normalized passes

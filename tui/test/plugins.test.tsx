@@ -279,12 +279,17 @@ describe("observe", () => {
     const host = hostWith()
     await host.load()
     const widget = host.widgets().find((row) => row.pkg === "probe")!
-    expect(widget.renderer.render(80)[0]!.map((span) => span.text).join("")).toContain("streams 0 · events 0")
+    const rowText = () => {
+      const surface = widget.renderer.render(80)
+      const rows = Array.isArray(surface) ? surface : []
+      return rows[0]?.map((span) => span.text).join("") ?? ""
+    }
+    expect(rowText()).toContain("streams 0 · events 0")
 
     host.observe({ kind: "stream", line: { stream: "model", event: "text_delta", text: "hi" } }, "s-1")
     host.observe({ kind: "stream", line: { stream: "model", event: "started" } }, "s-1")
     host.observe({ kind: "event", event: { seq: 3, kind: "user_text", text: "hello" } as unknown as LedgerEvent }, "s-1")
-    expect(widget.renderer.render(80)[0]!.map((span) => span.text).join("")).toContain("streams 2 · events 1")
+    expect(rowText()).toContain("streams 2 · events 1")
   }, 60_000)
 })
 

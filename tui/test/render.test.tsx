@@ -14,6 +14,9 @@ import { For, type JSX } from "solid-js"
 import { testRender } from "@opentui/solid"
 import { Transcript, gapBefore } from "../src/ui/Transcript.tsx"
 import { CompositionCard } from "../src/render/cards/CompositionCard.tsx"
+import { PluginToolCard } from "../src/render/cards/PluginToolCard.tsx"
+import { describeTool } from "../src/render/registry.ts"
+import type { PluginCard } from "../src/plugins/host.ts"
 import { App } from "../src/ui/App.tsx"
 import { StyleContext, createStyle, type Style } from "../src/render/theme.ts"
 import { FoldContext, createFoldStore } from "../src/state/folds.ts"
@@ -278,7 +281,7 @@ const header_fixture: SessionHeader = {
   created: "2026-08-16T14:02:11Z",
   composition: { active: [{ id: "lint", version: "v-3f2a91" }], native_tools: ["ext:lint/lint_zig"], prompts: [] },
 }
-const edit_item: TranscriptItem = {
+const edit_item: ToolItem = {
   key: "e6:c3",
   seq: 6,
   kind: "tool",
@@ -292,11 +295,57 @@ const edit_item: TranscriptItem = {
   state: "done",
   ok: true,
   output: "edited src/emit.zig",
+  presentation: {
+    kind: "diff",
+    path: "src/emit.zig",
+    filetype: "zig",
+    patch: [
+      "--- a/src/emit.zig",
+      "+++ b/src/emit.zig",
+      "@@ -1,1 +1,2 @@",
+      "-pub const head_bytes = 4096;",
+      "+pub const head_bytes = 4096; // default",
+      "+pub const tail_bytes = 2048;",
+      "",
+    ].join("\n"),
+  },
   spillPath: null,
   resolved: true,
   awaiting: false,
   taskResult: null,
 }
+const edit_plugin_card: PluginCard = {
+  pkg: "std",
+  tool: "edit",
+  renderer: {
+    render: (view) => {
+      const presentation = view.presentation
+      if (typeof presentation === "object" && presentation !== null && (presentation as { kind?: unknown }).kind === "diff") {
+        const patch = (presentation as { patch?: unknown }).patch
+        const filetype = (presentation as { filetype?: unknown }).filetype
+        if (typeof patch === "string") return { kind: "diff", patch, ...(typeof filetype === "string" ? { filetype } : {}) }
+      }
+      return view.output.split("\n").map((line) => [{ text: line }])
+    },
+  },
+}
+
+async function editPluginFrame(theme = style, width = 76, height = 24): Promise<string> {
+  return frameOfNode(
+    () => (
+      <PluginToolCard
+        item={edit_item}
+        presentation={describeTool({ tool: edit_item.tool, args: edit_item.args, output: edit_item.output }, theme.glyphs)}
+        card={edit_plugin_card}
+        revision={0}
+      />
+    ),
+    width,
+    height,
+    theme,
+  )
+}
+
 const canceled_item: TranscriptItem = {
   key: "e8:c4",
   seq: 8,
@@ -765,20 +814,20 @@ test("the fold default is a setting, and a click on the head line overrides it",
   }
 })
 
-test("edit renders its diff expanded by default", async () => {
-  const frame = await frameOf([edit_item])
-  expect(frame).toContain("✎ src/emit.zig")
+test("std edit plugin renders its diff expanded by default", async () => {
+  const frame = await editPluginFrame()
+  expect(frame).toContain("⌘ edit · src/emit.zig")
   expect(frame).toContain("pub const tail_bytes = 2048;")
   expect(frame).toMatchSnapshot()
 })
 
-test("edit_diff = collapsed hides the diff", async () => {
+test("edit_diff = collapsed hides a plugin diff", async () => {
   const collapsed = createStyle(
     { ...default_settings, transcript: { ...default_settings.transcript, edit_diff: "collapsed" } },
     {},
   )
-  const frame = await frameOf([edit_item], 76, 24, collapsed)
-  expect(frame).toContain("✎ src/emit.zig")
+  const frame = await editPluginFrame(collapsed)
+  expect(frame).toContain("⌘ edit · src/emit.zig")
   expect(frame).not.toContain("pub const tail_bytes = 2048;")
 })
 
@@ -792,7 +841,7 @@ test("a project tui.toml flips the edit diff default", async () => {
   try {
     const before = await loadSettings(dir, {})
     expect(before.transcript.edit_diff).toBe("expanded")
-    expect(await frameOf([edit_item], 76, 24, createStyle(before, {}))).toContain("pub const tail_bytes = 2048;")
+    expect(await editPluginFrame(createStyle(before, {}))).toContain("pub const tail_bytes = 2048;")
 
     mkdirSync(join(dir, ".nulya"), { recursive: true })
     writeFileSync(join(dir, ".nulya", "tui.toml"), '[transcript]\nedit_diff = "collapsed"\nthinking = "expanded"\n')
@@ -802,12 +851,13 @@ test("a project tui.toml flips the edit diff default", async () => {
     expect(after.transcript.thinking).toBe("expanded")
     expect(after.sources.some((source) => source.endsWith("tui.toml"))).toBe(true)
 
-    const frame = await frameOf([edit_item, thinking_item], 76, 24, createStyle(after, {}))
-    expect(frame).toContain("✎ src/emit.zig")
+    const frame = await editPluginFrame(createStyle(after, {}))
+    expect(frame).toContain("⌘ edit · src/emit.zig")
     expect(frame).not.toContain("pub const tail_bytes = 2048;")
+    const thinkingFrame = await frameOf([thinking_item], 76, 24, createStyle(after, {}))
     // The same file moves thinking the other way, so this is the setting and
     // not just "everything collapsed".
-    expect(frame).toContain("weigh the options")
+    expect(thinkingFrame).toContain("weigh the options")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -992,7 +1042,7 @@ test("ascii mode degrades every glyph", async () => {
   expect(frame).toContain("| make emit budgets configurable")
   expect(frame).toContain("! extension activated · lint@v-3f2a91")
   expect(frame).toContain("+ ext build · lint → v-3f2a91")
-  expect(frame).toContain("~ src/emit.zig")
+  expect(frame).toContain("# edit · src/emit.zig")
   expect(frame).not.toContain("›")
   expect(frame).not.toContain("⚙")
   expect(frame).toMatchSnapshot()

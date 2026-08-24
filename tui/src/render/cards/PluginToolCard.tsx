@@ -34,6 +34,10 @@ export function PluginToolCard(props: {
     if (props.item.ok === false) return size.length > 0 ? `${size} · failed` : "failed"
     return size
   }
+  const hasDiffPresentation = () => {
+    const value = props.item.presentation ?? null
+    return typeof value === "object" && value !== null && (value as { kind?: unknown }).kind === "diff"
+  }
   return (
     <CardFrame
       itemKey={props.item.key}
@@ -42,7 +46,11 @@ export function PluginToolCard(props: {
       head={props.presentation.head}
       chip={chip()}
       chipTone={props.item.ok === false ? "err" : "dim"}
-      defaultOpen={style.settings.transcript.tool_output === "expanded"}
+      defaultOpen={
+        hasDiffPresentation()
+          ? style.settings.transcript.edit_diff === "expanded"
+          : style.settings.transcript.tool_output === "expanded"
+      }
       // Always foldable: a plugin card draws from the ARGUMENTS as well as the
       // output, so there is something to reveal before a call has returned —
       // which is the case the streaming half of a plan card exists for.
@@ -59,6 +67,7 @@ export function PluginToolCard(props: {
               tool: props.item.tool,
               args: props.item.args,
               output: props.item.output,
+              presentation: props.item.presentation ?? null,
               ok: props.item.ok,
               state: props.item.state,
             },

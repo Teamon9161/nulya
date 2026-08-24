@@ -91,7 +91,7 @@ Ledger ──projection──▶ PromptIR { system_blocks, turns }
 ```
 user_text        { text, images: []Image{media_type, data} }            ← images 为空 = 纯文本 turn
 assistant        { reasoning, text, calls: []ToolCall{id, tool, args_json}, usage?, stop_reason }
-tool_results     []ToolResultEntry{call_id, ok, output, spill_path?}   ← 一条事件 = 一整批
+tool_results     []ToolResultEntry{call_id, ok, output, spill_path?, presentation?} ← 一条事件 = 一整批；presentation 是 UI-only JSON 字符串，不投影给模型
 capability_note  { id, version, text }                                  ← 中途新增能力的宣告（§5.3）
 task_finished    { task, exit_code, text }                              ← 后台命令跑完了（§6.1）
 ```
@@ -143,7 +143,7 @@ UI / trajectory / metrics 是 ledger 的投影，不持久化 mutable 状态。*
 {"kind":"header","v":1,"session":"s-…","parent":{"session":"s-…","seq":41}|null,"model":"openai","model_identity":{"provider":"openai","model":"gpt-4o-mini","base_url":"https://…","api_key_env":"OPENAI_API_KEY"},"created":"…","nulya":{"version":"0.0.0","kernel_hash":"f49f…"},"composition":{"active":[{"id":"web.search","version":"v-…"}],"native_tools":["ext:web.search/web_search"],"prompts":[{"source":"agent-explore","text":"You only read…"}]}}
 {"seq":1,"origin":"msg-….json","kind":"user_text","text":"…","images":[{"media_type":"image/png","data":"<base64>"}]}
 {"seq":2,"kind":"assistant","reasoning":"[{\"type\":\"thinking\",…}]","text":"…","calls":[{"id":"…","tool":"…","args":"…"}],"usage":{"input_tokens":1200,"output_tokens":80,"cache_read_tokens":1100,"cache_write_tokens":0},"stop_reason":"max_tokens"}
-{"seq":3,"kind":"tool_results","results":[{"call_id":"…","ok":true,"output":"…","spill_path":null}]}
+{"seq":3,"kind":"tool_results","results":[{"call_id":"…","ok":true,"output":"…","spill_path":null,"presentation":"{\"kind\":\"diff\",…}"}]}
 {"seq":4,"origin":"note-….json","kind":"capability_note","id":"…","version":"…","text":"…"}
 {"seq":5,"origin":"task-s-…-t3.json","kind":"task_finished","task":"s-…/t3","exit_code":0,"text":"[background task s-…/t3 finished] …"}
 ```
@@ -479,6 +479,7 @@ env     NULYA_TOOL=<tool name>；外加对每个**顶层**且值是 string / num
         数组 / 对象 / null 不导出，键名不在 `[A-Za-z0-9_]+` 里的也不导出——它们仍在 stdin 上。
 stdout  这个 tool 的输出，**原样**；它就是模型看到的字节，没有第二条规则。
         driver-facing 的 tool 在这里打 JSON——stdout 是字节，一种 wire 两种读者都服务得了。
+sidecar 若本次 native extension 调用给了 `NULYA_PRESENTATION_FILE`，tool 可向那个路径写一个 UI-only JSON 值；kernel 只校验非空且能 parse 为 JSON，原样存进 `tool_results[].presentation`，**不进 stdout、不投影给模型**。
 exit    0 = 成功；非 0 = 一次**失败的调用**，文本是 `exit <code>` + stderr（经 `emit.headTail` 的既有预算），
         stdout 若非空也附在后面。所以**包必须独占 stderr**：失败时它就是模型读到的那句话。
 ```
@@ -548,7 +549,7 @@ extension <id>: current points at <version>, which is broken (<err>); run 'nulya
 
 不给 ledger 的四条理由：模型是上下文路由器；大对话每次 spawn 序列化开销爆炸；最小权限；`args → result` 纯函数才可复现。
 
-**当前 tool 实际拿到的：** in-core builtin 拿 `ToolContext{ environment, cwd }`（`edit` 搬进 extension 之后没有 in-core tool 再读文件，那个 `fs` 抽象因此删掉了，§8）；extension 子进程只拿 **这次调用的 arguments + 净化后的 env + cwd**（`environment.runExtensionImpl`），没有别的。那份净化 env 里有两个 kernel 自己放的变量，都不是 secret、也不是 model-visible 状态：**`NULYA_EXE`**（`LocalEnvironment.init` 放的**本进程可执行文件绝对路径**——子进程要调 `nulya …` 时该调的是**正在跑的这个**二进制，而不是 PATH 上碰巧有的某个副本；取不到路径就不设，建 environment 永不因此失败）与 **`NULYA_SESSION`**（只有 `session step` 会放，见 §5.3：让 shell 子进程找得到活着的 session 文件去投 capability note）。前者是 driver 型 extension（`extensions/compact`，§11）能存在的前提；两者都不是权限，`ext:… ⊆ shell ⊆ session` 不变（§9）。一个恒定大小的显式 `ctx_header`（os / dialect / scratch / 预算 / 权限描述，经 env var 或 `_ctx` 注入）属 PLAN。
+**当前 tool 实际拿到的：** in-core builtin 拿 `ToolContext{ environment, cwd }`（`edit` 搬进 extension 之后没有 in-core tool 再读文件，那个 `fs` 抽象因此删掉了，§8）；extension 子进程只拿 **这次调用的 arguments + 净化后的 env + cwd**（`environment.runExtensionImpl`），没有别的。那份净化 env 里有三个 kernel 自己放的变量，都不是 secret、也不是 model-visible 状态：**`NULYA_EXE`**（`LocalEnvironment.init` 放的**本进程可执行文件绝对路径**——子进程要调 `nulya …` 时该调的是**正在跑的这个**二进制，而不是 PATH 上碰巧有的某个副本；取不到路径就不设，建 environment 永不因此失败）、**`NULYA_SESSION`**（只有 `session step` 会放，见 §5.3：让 shell 子进程找得到活着的 session 文件去投 capability note）与 **`NULYA_PRESENTATION_FILE`**（只在 native extension tool 调用时按 call 给一条 deterministic sidecar 路径；tool 写入的 JSON 是给 UI 的展示事实，存 ledger 的 `presentation` 列但不进 PromptIR）。前两者是 driver 型 extension（`extensions/compact`，§11）能存在的前提；三者都不是权限，`ext:… ⊆ shell ⊆ session` 不变（§9）。一个恒定大小的显式 `ctx_header`（os / dialect / scratch / 预算 / 权限描述，经 env var 或 `_ctx` 注入）属 PLAN。
 
 tool↔tool 共享知识只走两条路：**模型中转**（大结果落盘留指针，指针流动）与**磁盘制品**（`.nulya/cache/`）。禁止 tool 直接互调 / 共享内存态。
 
@@ -607,7 +608,7 @@ Tool 是"能执行的能力"，Skill 是"要遵循的方法 / 知识"；不同 r
 
 三个 tool 的分工是 §11 那条分界的直接推论：`propose{plan_md}` 与 `todo{items}` **什么都不写**——计划与清单在调用的参数里，而调用已经在 ledger 里，磁盘上再写一份就是第二份真相（physics #3）；`ask{question, options?}` 同理，且**不阻塞**（把一个 step 押在人的阅读速度上，还要撞 600 s 的 extension 天花板，同时让没人看着的 driver 挂死；答案作为下一条 user turn 到达，append-only 只付一轮增量）。唯一碰磁盘的是 `approve{session, plan_md}`（`surface: driver`）：它把批准的计划渲染成 `.nulya/handoffs/<session>-<n>.md`——**与 `handoff` 逐字节同形、同目录、同独占创建规则**，所以 `compact --arg brief_file=` 一个特例都不用加就能 fork 过去，而 `session new --parent` 不带 `--with`（composition 一律现解，不继承，§5.1），于是**计划过去了、写它的 persona 没过去**：执行场是一场能真正改东西的普通 session。
 
-**`edit` 是这个包里的第六个 tool，也是原 §6.2 的落点。** 设计要点原样成立，只是不再住在内核里：**精确串匹配**（`{path, old_string, new_string, replace_all?, target_line?}`）——唯一匹配才动手，歧义就报次数并给最多 5 个带行号的候选窗口，匹配不上就给相似行提示，让模型一轮纠正；**匹配本身就是校验**，不设 read-before-edit 门；**不做 fuzzy patch**（§17：apply 失败多一轮 round-trip，违反 §0.2）——所谓 recovery ladder（标点归一 → 逐行空白归一 → 跨行 reflow 归一）每一级都只在**唯一**命中时才动手，且回填的是文件的真实字节，多于一个候选一律报歧义，所以它是"把模型的排版漂移对回原文"，不是"猜一个位置打补丁"。原子写并保留可执行位。**D4 的已知代价随之消失**：`edit` 现在和 `read` / `write` / `append` 共用同一份 freshness 记录，它把回显的片段按新 hash 登记成一次 **read**（不是 write——write 会把整文件标成已看过，让之后的窗口读错误地回 unchanged），所以 read → edit → write 同一文件不再被拦一次要求重读（e2e 钉住新行为）。
+**`edit` 是这个包里的第六个 tool，也是原 §6.2 的落点。** 设计要点原样成立，只是不再住在内核里：**精确串匹配**（`{path, old_string, new_string, replace_all?, target_line?}`）——唯一匹配才动手，歧义就报次数并给最多 5 个带行号的候选窗口，匹配不上就给相似行提示，让模型一轮纠正；**匹配本身就是校验**，不设 read-before-edit 门；**不做 fuzzy patch**（§17：apply 失败多一轮 round-trip，违反 §0.2）——所谓 recovery ladder（标点归一 → 逐行空白归一 → 跨行 reflow 归一）每一级都只在**唯一**命中时才动手，且回填的是文件的真实字节，多于一个候选一律报歧义，所以它是"把模型的排版漂移对回原文"，不是"猜一个位置打补丁"。原子写并保留可执行位。成功后 stdout 仍是给模型读的小结果；给 TUI 的事实 diff 从实际 `ReplacementPlan` 写入 `NULYA_PRESENTATION_FILE` 指向的 JSON sidecar（`{kind:"diff", path, filetype, patch}`），kernel 原样存 `tool_results[].presentation`，不让前端解析 edit 参数或猜 diff。**D4 的已知代价随之消失**：`edit` 现在和 `read` / `write` / `append` 共用同一份 freshness 记录，它把回显的片段按新 hash 登记成一次 **read**（不是 write——write 会把整文件标成已看过，让之后的窗口读错误地回 unchanged），所以 read → edit → write 同一文件不再被拦一次要求重读（e2e 钉住新行为）。
 
 ---
 

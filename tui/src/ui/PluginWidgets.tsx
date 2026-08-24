@@ -14,8 +14,9 @@ import type { PluginWidget } from "../plugins/host.ts"
  * never say the same thing twice.
  *
  * The FIRST line a widget returns is its head and is always on screen; the
- * rest folds under it. That is the contract's `render(width) -> Line[]` and
- * nothing more — no extra field to declare a title, no second entry point.
+ * rest folds under it. That is the contract's `render(width) -> Surface`,
+ * with rows as the widget convention — no extra field to declare a title, no
+ * second entry point.
  * The head is drawn with the plugin's own spans (a progress widget's colours
  * are half of what it is saying), which is why this is its own small frame
  * rather than `CardFrame`, whose head is a string.

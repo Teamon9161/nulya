@@ -150,10 +150,9 @@ function type(host: PluginHost, text: string): void {
 function panelText(host: PluginHost): string {
   const open = host.panel()
   if (!open) return ""
-  return open.spec
-    .render(80)
-    .map((line) => line.map((span) => span.text).join(""))
-    .join("\n")
+  const surface = open.spec.render(80)
+  const rows = Array.isArray(surface) ? surface : []
+  return rows.map((line) => line.map((span) => span.text).join("")).join("\n")
 }
 
 /**

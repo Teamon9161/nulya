@@ -75,6 +75,8 @@ export interface ToolResultEntry {
   ok: boolean
   output: string
   spill_path: string | null
+  /** UI-only JSON string. It is a ledger fact for front ends, never PromptIR. */
+  presentation?: string | null
 }
 
 /**

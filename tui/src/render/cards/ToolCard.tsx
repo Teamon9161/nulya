@@ -4,7 +4,6 @@ import { describeTool } from "../registry.ts"
 import { cancelMarkerOf } from "../../nulya/ledger.ts"
 import { renderHintOf, type Contributions } from "../../nulya/files.ts"
 import { ShellCard } from "./ShellCard.tsx"
-import { EditCard } from "./EditCard.tsx"
 import { ExtToolCard } from "./ExtToolCard.tsx"
 import { EvolveCard } from "./EvolveCard.tsx"
 import { SubSessionCard } from "./SubSessionCard.tsx"
@@ -60,9 +59,6 @@ export function ToolCard(props: { item: ToolItem; contributions?: Contributions[
             card={pluginCard()!}
             revision={plugins?.revision() ?? 0}
           />
-        </Match>
-        <Match when={presentation().kind === "edit"}>
-          <EditCard item={props.item} presentation={presentation()} />
         </Match>
         {/*
           A call that opened a session of its own has its own card since T43: it

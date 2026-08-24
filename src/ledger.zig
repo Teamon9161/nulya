@@ -22,6 +22,9 @@ pub const ToolResultEntry = struct {
     ok: bool,
     output: []const u8,
     spill_path: ?[]const u8 = null,
+    /// UI-only presentation JSON supplied by the tool runtime. It is ledger
+    /// evidence for front ends, like `spill_path`, and PromptIR ignores it.
+    presentation: ?[]const u8 = null,
 };
 
 /// What one model step cost, as the provider reported it. A FACT about the turn
@@ -335,6 +338,7 @@ fn cloneToolResults(a: std.mem.Allocator, results: []const ToolResultEntry) ![]c
         .ok = result.ok,
         .output = try a.dupe(u8, result.output),
         .spill_path = if (result.spill_path) |path| try a.dupe(u8, path) else null,
+        .presentation = if (result.presentation) |p| try a.dupe(u8, p) else null,
     };
     return owned;
 }
@@ -768,6 +772,7 @@ pub fn encodeEventBody(jw: *std.json.Stringify, e: Event) !void {
                 try writeField(jw, "output", r.output);
                 try jw.objectField("spill_path");
                 if (r.spill_path) |p| try jw.write(p) else try jw.write(null);
+                if (r.presentation) |p| try writeField(jw, "presentation", p);
                 try jw.endObject();
             }
             try jw.endArray();
@@ -1064,6 +1069,10 @@ fn expectEventsEqual(a: []const Event, b: []const Event) !void {
                     try std.testing.expectEqualStrings(r.call_id, s.call_id);
                     try std.testing.expectEqual(r.ok, s.ok);
                     try std.testing.expectEqualStrings(r.output, s.output);
+                    try std.testing.expectEqual(r.spill_path != null, s.spill_path != null);
+                    if (r.spill_path) |p| try std.testing.expectEqualStrings(p, s.spill_path.?);
+                    try std.testing.expectEqual(r.presentation != null, s.presentation != null);
+                    if (r.presentation) |p| try std.testing.expectEqualStrings(p, s.presentation.?);
                 }
             },
             .capability_note => |n| {

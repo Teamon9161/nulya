@@ -40,6 +40,9 @@ pub const Options = struct {
     max_output_bytes: usize = 1 << 20,
     /// For a script extension, the interpreter to run the entry with.
     interpreter: ?[]const u8 = null,
+    /// Workspace-relative file where the child may write UI-only presentation
+    /// JSON. It is not stdout and never reaches the model.
+    presentation_file: ?[]const u8 = null,
 };
 
 /// One normalized invocation: the tool's stdout on success, a human-readable
@@ -78,6 +81,7 @@ pub fn invokeTool(
     var vars: protocol.PlainEnv = .empty;
     defer vars.deinit(alloc);
     try vars.add(alloc, "NULYA_TOOL", tool_name);
+    if (options.presentation_file) |path| try vars.add(alloc, "NULYA_PRESENTATION_FILE", path);
     try vars.addArguments(alloc, arguments);
 
     const outcome = try env.runExtension(alloc, .{

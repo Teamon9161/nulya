@@ -370,6 +370,7 @@ pub fn runStepWithPrompt(
         for (results[0..initialized_results]) |r| {
             alloc.free(r.output);
             if (r.spill_path) |p| alloc.free(p);
+            if (r.presentation) |p| alloc.free(p);
         }
         alloc.free(results);
     }
@@ -436,6 +437,7 @@ pub fn runStepWithPrompt(
                 const marker = try alloc.dupe(u8, tool_result_recording_canceled_output);
                 alloc.free(results[i].output);
                 if (results[i].spill_path) |p| alloc.free(p);
+                if (results[i].presentation) |p| alloc.free(p);
                 results[i] = canceledResult(call.id, marker);
                 canceled = true;
                 break;
@@ -553,16 +555,25 @@ fn execOne(
     // Zero when nothing ran: a name this session does not have never reaches an
     // executor, and never reaches the journal either (`AgentSession` skips it).
     var duration_ms: u64 = 0;
+    var presentation_file: ?[]u8 = null;
+    defer if (presentation_file) |p| alloc.free(p);
+
     const raw_output = blk: {
         const t = tool_snapshot.lookup(call.tool) orelse {
             break :blk try unknownToolMessage(alloc, tool_snapshot, call.tool);
         };
 
+        if (std.mem.startsWith(u8, t.definition.id, "ext:")) {
+            presentation_file = try preparePresentationFile(alloc, step_ctx.scratch_dir, event_seq, call_index);
+        }
+        var call_ctx = step_ctx.tool_context;
+        call_ctx.presentation_file = presentation_file;
+
         const started: std.Io.Timestamp = .now(io, .awake);
         // Measured on the failure path too: a call that errored still spent the
         // time, and the journal records failures as readily as successes.
         defer duration_ms = elapsedMs(io, started);
-        const res = t.executor.call(alloc, .{ .args_json = call.args_json, .ctx = step_ctx.tool_context }) catch |err| switch (err) {
+        const res = t.executor.call(alloc, .{ .args_json = call.args_json, .ctx = call_ctx }) catch |err| switch (err) {
             // Cancellation is not a tool failure — it is host execution control.
             // Propagate it to the step boundary, which records the whole batch as
             // canceled (DESIGN §4). Ordinary executor errors still teach as text.
@@ -574,6 +585,8 @@ fn execOne(
     };
     defer alloc.free(raw_output);
 
+    const presentation = readPresentationFile(alloc, io, presentation_file) catch null;
+    errdefer if (presentation) |p| alloc.free(p);
     const emitted = try emit.emit(alloc, io, raw_output, call.tool, event_seq, call_index, step_ctx.scratch_dir, step_ctx.budget);
     return .{
         .entry = .{
@@ -581,9 +594,40 @@ fn execOne(
             .ok = ok,
             .output = emitted.text,
             .spill_path = emitted.spill_path,
+            .presentation = presentation,
         },
         .duration_ms = duration_ms,
     };
+}
+
+const max_presentation_bytes: usize = 1 << 20;
+
+fn preparePresentationFile(
+    alloc: std.mem.Allocator,
+    scratch_dir: []const u8,
+    event_seq: u64,
+    call_index: usize,
+) ![]u8 {
+    const file_name = try std.fmt.allocPrint(alloc, "{d}-{d}.json", .{ event_seq, call_index });
+    defer alloc.free(file_name);
+    return emit.joinRel(alloc, &.{ scratch_dir, "tool-presentation", file_name });
+}
+
+fn readPresentationFile(alloc: std.mem.Allocator, io: std.Io, path: ?[]const u8) !?[]u8 {
+    const p = path orelse return null;
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, p, alloc, .limited(max_presentation_bytes)) catch return null;
+    errdefer alloc.free(bytes);
+    const trimmed = std.mem.trim(u8, bytes, " \t\r\n");
+    if (trimmed.len == 0) {
+        alloc.free(bytes);
+        return null;
+    }
+    const parsed = std.json.parseFromSlice(std.json.Value, alloc, trimmed, .{}) catch {
+        alloc.free(bytes);
+        return null;
+    };
+    parsed.deinit();
+    return bytes;
 }
 
 /// Milliseconds elapsed since `started` on the monotonic clock — never the wall

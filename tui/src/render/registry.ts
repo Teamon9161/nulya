@@ -12,13 +12,12 @@
  * best effort: a command this table cannot read falls back to the plain shell
  * presentation rather than failing (tui.md §5.2, "抽不到就退回 ShellCard").
  */
-import { parseEditArgs } from "../nulya/diff.ts"
 import type { Glyphs } from "./theme.ts"
 
 export type AccentRole = "tool" | "evolve"
-export type BodyKind = "diff" | "output" | "markdown"
+export type BodyKind = "output" | "markdown"
 /** Which card draws this call. Cards dispatch on this, never on the tool name. */
-export type CardKind = "shell" | "edit" | "ext" | "evolve" | "subsession" | "checklist" | "markdown"
+export type CardKind = "shell" | "ext" | "evolve" | "subsession" | "checklist" | "markdown"
 
 export type ChecklistState = "todo" | "doing" | "done"
 export interface ChecklistItem {
@@ -51,8 +50,6 @@ export interface ToolPresentation {
   head: string
   accent: AccentRole
   body: BodyKind
-  /** True when the card should carry the edit's unified diff. */
-  isEdit: boolean
   /** Reading, not acting: the chip counts output lines instead of ok/exit. */
   countsLines: boolean
   /** A session this call names (tui.md §5.5); T3 makes it openable. */
@@ -283,7 +280,6 @@ function make(part: Partial<ToolPresentation> & { glyph: string; head: string })
     kind: "evolve",
     accent: "evolve",
     body: "output",
-    isEdit: false,
     countsLines: false,
     sessionId: null,
     ...part,
@@ -419,7 +415,6 @@ function shellPresentation(head: string, glyphs: Glyphs): ToolPresentation {
     head,
     accent: "tool",
     body: "output",
-    isEdit: false,
     countsLines: true,
     sessionId: null,
   }
@@ -436,19 +431,6 @@ export function describeTool(view: ToolView, glyphs: Glyphs, hint: RenderHint = 
     // exist yet.
     if (isBackground(view.args)) return shellPresentation(firstLine(command, 200), glyphs)
     return evolvePresentation(command, view.output, glyphs) ?? shellPresentation(firstLine(command, 200), glyphs)
-  }
-  if (view.tool === "edit") {
-    const args = parseEditArgs(view.args)
-    return {
-      kind: "edit",
-      glyph: glyphs.edit,
-      head: args ? args.path : firstLine(view.args, 200),
-      accent: "tool",
-      body: args ? "diff" : "output",
-      isEdit: args !== null,
-      countsLines: false,
-      sessionId: null,
-    }
   }
   // Matching the BARE name is deliberate, not an oversight. What reaches here is
   // `ledger.ToolCall.tool`, and the kernel records the model-facing name there —
@@ -476,9 +458,9 @@ export function describeTool(view: ToolView, glyphs: Glyphs, hint: RenderHint = 
   const name = view.tool.startsWith("ext:") ? (view.tool.split("/").pop() ?? view.tool) : view.tool
   const summary = argsSummary(view.args, 120)
   const head = summary.length > 0 && summary !== "{}" ? `${name || "tool"} · ${summary}` : name || "tool"
-  // The manifest's own rendering claim (D12), only reachable here — shell,
-  // edit and the sub-session presentations above are kernel-recognised
-  // commands, never a package's declared tool, so they carry no such hint.
+  // The manifest's own rendering claim (D12), only reachable here — shell and
+  // the sub-session presentations above are kernel-recognised commands, never a
+  // package's declared tool, so they carry no such hint.
   switch (hint.render) {
     case "checklist": {
       const items = checklistOf(view)
@@ -491,7 +473,6 @@ export function describeTool(view: ToolView, glyphs: Glyphs, hint: RenderHint = 
           head,
           accent: "tool",
           body: "output",
-          isEdit: false,
           countsLines: false,
           sessionId: null,
           checklist: items,
@@ -506,7 +487,6 @@ export function describeTool(view: ToolView, glyphs: Glyphs, hint: RenderHint = 
         head,
         accent: "tool",
         body: "markdown",
-        isEdit: false,
         countsLines: false,
         sessionId: null,
       }
@@ -526,7 +506,6 @@ export function describeTool(view: ToolView, glyphs: Glyphs, hint: RenderHint = 
     head,
     accent: "tool",
     body: "output",
-    isEdit: false,
     countsLines: false,
     sessionId: null,
   }

@@ -107,6 +107,7 @@ fn call(ptr: ?*anyopaque, alloc: std.mem.Allocator, req: tool.ToolRequest) anyer
         .{
             .interpreter = self.interpreter,
             .timeout_ms = self.timeout_ms orelse invoke.Options.default_timeout_ms,
+            .presentation_file = req.ctx.presentation_file,
         },
     );
 

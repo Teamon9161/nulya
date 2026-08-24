@@ -95,6 +95,9 @@
           "required": ["pattern"]
         }
       }
-    ]
+    ],
+    "ui": {
+      "tui": { "entry": "tui/std.ts", "api": 1 }
+    }
   }
 }

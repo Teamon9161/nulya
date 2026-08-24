@@ -131,6 +131,17 @@ export interface Span {
  */
 export type Line = Span[]
 
+/** A host-rendered unified diff surface. Plugins provide data, not components. */
+export interface DiffSurface {
+  kind: "diff"
+  patch: string
+  /** Syntax highlighter hint for the changed file, e.g. `zig` or `ts`. */
+  filetype?: string
+}
+
+/** What a renderer may return. Rows stay the v1 default; surfaces are host-owned primitives. */
+export type Surface = Line[] | DiffSurface
+
 /**
  * A keypress, normalised. `name` is a lower-case key name: a single character
  * (`"a"`, `"1"`), or one of `return` / `escape` / `tab` / `space` /
@@ -178,7 +189,7 @@ export interface PluginPkg {
  * panel from a command.
  */
 export interface LineRenderer {
-  render(width: number): Line[]
+  render(width: number): Surface
   onKey?(key: PluginKey): KeyResult
 }
 
@@ -189,12 +200,14 @@ export interface CardView {
   args: string
   /** The recorded result, or `""` before there is one. */
   output: string
+  /** UI-only JSON presentation from the tool result. It is never model-visible. */
+  presentation: unknown | null
   ok: boolean | null
   state: "pending" | "running" | "done"
 }
 
 export interface CardRenderer {
-  render(view: CardView, width: number): Line[]
+  render(view: CardView, width: number): Surface
   /**
    * NOT CALLED IN 1.0, and it is honest to say so rather than let you wire one
    * up and wonder. A transcript card has no focus of its own here: browse mode

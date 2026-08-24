@@ -30,7 +30,7 @@
 | D2 | 流式传输 | v1：`step --stream` 写 **stdout**（TUI 拥有 step 子进程） | 最简、可调试。observer 模式（别人在 drive）要看 deltas 需 `<id>.live` sidecar——等第一个 driver 脚本出现再做（§5.6） |
 | D3 | 绑定 | Solid | opencode 同款；fine-grained 更新适合流式。React 也行，API 同形 |
 | D4 | 设定文件 | 独立 `tui.toml`，路径**镜像**内核 config 的目录（user 层 + `.nulya/tui.toml` 项目层），不放进内核 config | 内核不该认识 TUI 的键；同目录让"设定在哪"只有一个答案 |
-| D5 | 默认折叠 | `edit` diff **展开**；shell / 扩展工具输出 **折叠**；**thinking 默认 `hidden`**（T43，可设回 `collapsed`）；capability banner 展开；**一串跑完且成功的无身体调用折成一行 run 摘要**（T43，`run_summary`） | 你的要求 + 演化动作要显眼；reasoning 既不是模型说的也不是它做的，而「正在想」由输入框上面那一行说（T38） |
+| D5 | 默认折叠 | diff presentation **展开**；shell / 扩展工具输出 **折叠**；**thinking 默认 `hidden`**（T43，可设回 `collapsed`）；capability banner 展开；**一串跑完且成功的无身体调用折成一行 run 摘要**（T43，`run_summary`） | 你的要求 + 演化动作要显眼；reasoning 既不是模型说的也不是它做的，而「正在想」由输入框上面那一行说（T38） |
 | D6 | 取消 | `Esc` = `session cancel`（step 边界消化，当前工具跑完）；`Ctrl+C` 两下 = kill step 进程树（下一次 open 由 kernel `completeInterruptedToolBatch` 修复） | 两种语义都真实存在，都给；不发明第三种 |
 | D7 | sub-agent 谱系来源 | v1 从 transcript 推导（`nulya session new` 的输出 id、`session step <id>` 命令）；**不**改 header | `parent` 语义是 fork/compaction 的续接点，不是 spawned-by；等 subagent skill 真写出来再决定要不要 `spawned_by` header 字段（§10） |
 | D8 | 权限 / 审批 | **两档 mode + 三张规则表**（T24 推翻"v1 没有"）：内核给一个 gate 原语（`session step --gate`，DESIGN §4），前端答；deny 就是那个 call 的 tool_result，模型读得到 | 原来的理由是"kernel 没有可消费的东西，TUI 不发明审批"——对的一半：发明一个内核不知道的审批，模型永远不会知道自己被拒了。所以补的是**内核那一半**（一个语义：allow / deny+note），判断留在前端（§5.7） |
@@ -68,7 +68,7 @@
 | `.nulya/tool-usage.jsonl` | `/ext` 里的 usage 表：一行取 `tool_id` + `ok` → uses_total / recent / success_rate（**只投影，不重算排序**——排序是 kernel policy，TUI 不复刻）。行上还有 `at` / `session?` / `duration_ms?`（DESIGN §5.5），TUI 只挑它要的两列、其余原样忽略 |
 | header `composition.native_tools` / `active[]` | 本场冻结契约（§5.1）；与 store `current` 比对 → "下一场会变"的漂移提示 |
 | shell 结果形状 | `stdout` + `--- stderr ---` + `[exit N]`（`tools/shell.zig`）→ 状态 chip 解析 `[exit N]` |
-| `edit` 参数 | `{path, old_string, new_string, replace_all?}` → TUI 端 old→new 生成 unified diff 喂 OpenTUI `diff` 组件 |
+| `tool_results[].presentation` | UI-only JSON；`{kind:"diff", patch, filetype?}` 交给宿主 diff primitive。`std.edit` 的 diff 由 extension 从实际 `ReplacementPlan` 写入 sidecar；TUI 不解析 edit 参数、不跑 LCS 猜 diff |
 | 取消标记文本 | `loop.zig` 四种 marker（interrupted / canceled executing / recording canceled / not executed）→ 识别成 canceled 卡片 |
 | `emit` 溢出 | `tool_results[].spill_path` → 卡片尾部 "full output → path"，`o` 打开（`$EDITOR` / 展开读文件） |
 
@@ -94,9 +94,8 @@ tui/
 │   ├── nulya/                # ★ 唯一知道内核形状的目录
 │   │   ├── bin.ts            #   binary 发现：NULYA_BIN → <repo>/zig-out/bin/nulya[.exe] → PATH；版本探测（`nulya --version` 若有）
 │   │   ├── cli.ts            #   spawn：new(--profile/--model) / append(--file) / step --stream [--effort] / events / cancel / config show --json；--stream 行 → 类型化 StreamLine
-│   │   ├── ledger.ts         #   Header / Event 类型（DESIGN §3.4 形状）；events 行解析；四种 cancel marker 识别
-│   │   ├── files.ts          #   .nulya/ 布局：sessions 列表 / lock 探测 / extensions store / tool-usage 投影
-│   │   └── diff.ts           #   edit args → unified diff 文本
+│   │   ├── ledger.ts         #   Header / Event 类型（DESIGN §3.4 形状）；events 行解析；四种 cancel marker 识别；tool_results[].presentation 只是 UI-only JSON
+│   │   └── files.ts          #   .nulya/ 布局：sessions 列表 / lock 探测 / extensions store / tool-usage 投影
 │   ├── state/
 │   │   ├── session.ts        #   一场 session 的视图状态：items（seq 键）、in-flight turn、pending appends、usage 累计、role（driver|observer）
 │   │   ├── driver.ts         #   状态机 idle→appending→stepping→idle；run done 后若仍有 pending 未转正 → 再 step
@@ -105,7 +104,7 @@ tui/
 │   │   └── tabs.ts           #   一 tab 一场：attachment + tab 级 effort；replace() 让空场就地换模型
 │   ├── render/               #   渲染注册表：按 (tool, 命令前缀) 选卡片；这是唯一按名字 match 的地方
 │   │   ├── registry.ts
-│   │   ├── cards/            #   UserTurn / AssistantTurn / Thinking / ShellCard / EditCard / ExtToolCard / EvolveCard / CapabilityBanner / SubSessionCard / CompositionCard / CanceledCard
+│   │   ├── cards/            #   UserTurn / AssistantTurn / Thinking / ShellCard / ExtToolCard / PluginToolCard / EvolveCard / CapabilityBanner / SubSessionCard / CompositionCard / CanceledCard
 │   │   └── theme.ts          #   tokens（§6）
 │   ├── ui/                   #   App / Transcript / Composer / StatusBar / TabBar / columns.ts / list.ts / rows.ts（点击与 hover 的共享判断，T18）/ overlays(SessionsView, ExtView, ModelView, Help, Settings, Usage, Footer)
 │   └── keymap.ts
@@ -131,7 +130,7 @@ tui/
   ● 我先看一下 emit.zig 里预算的定义…                                                    (AssistantTurn, markdown)
     ▸ thinking · 1.2k chars                                                              (Thinking, 折叠)
     $ nulya src emit.zig                                            ▸ 212 lines · ok     (EvolveCard: 读内核源码)
-    ✎ src/emit.zig                                                              ok       (EditCard, diff 默认展开)
+    ⌘ edit · src/emit.zig                                                     (+2 -1)       (std plugin card, diff 默认展开)
       @@ -12,3 +12,4 @@
       -pub const head_bytes = 4096;
       +pub const head_bytes = 4096; // default, see OutputBudget
@@ -166,7 +165,7 @@ tui/
 | call `shell` `{background:true}` | ShellCard（后台变体） | `$ 命令  (background <sid>/t3 · running 12s) ▸`；报告到了换成 `(background <sid>/t3[ · exit N] · 41.8s)` | 回执原文（任务全名 + log 路径 + 三条命令） | **折叠**；**不加新 glyph**（还是那条命令，变的只有那一格 note） |
 | `task_finished` | TaskFinishedCard | `$ 命令  (background <sid>/t3[ · exit N][ · killed] · 41.8s) ▸`（`exit 0` 照 T26 省略） | 输出 tail + 尾行 `full log → <path>` | **折叠**；一条事件一张卡，不是回执那张卡的更新 |
 | 一串调用 | RunCard | `⋯ read ×3 · grep ×2 · shell ▸`（glyph 是 thinking 的三点、全程 dim、**没有 note**——一个 run 按构造就是"都成功了、没什么可给你看"，再写一格 `(6 calls)` 是同一句话说两遍，T26） | 展开就是原来那些卡，各自照旧折叠 | **折叠**；设定 `run_summary`。**进得去的**只有「跑完 + 成功 + 没有身体」的 `shell` / 扩展 tool，且至少两个；**进不去的**：还在跑的、失败的（含 `exit != 0`）、被取消的、回执型的（后台任务 / 子场）、`edit`、演化动作、`checklist`/`markdown`、包自己用代码画的卡，以及**任何声明了 `render` 的 tool**——那就是包说「我对这次调用长什么样有意见」，一个有画面要给的调用不该被概括（`render/runs.ts`） |
-| call `edit` | EditCard | `✎ path  (+2 -1[· failed])` | unified diff（`diff` 组件，语法高亮） | **展开**；设定 `edit_diff = expanded\|collapsed` |
+| call `edit`（`std` 插件） | PluginToolCard + host diff surface | `⌘ edit · path  (+2 -1[· failed])` | `tool_results[].presentation` 里的 diff surface（OpenTUI `diff`，语法高亮）；无插件或无 presentation 时退回普通 ext 输出 | **展开**；设定 `edit_diff = expanded\|collapsed` |
 | call `ext:*` | ExtToolCard | `⌘ tool_name · 参数摘要  (N lines) ▸`（**第一个参数不写键名**——工具的第一个参数就是它的主语：路径、模式、命令，T26） | 输出 | 折叠 |
 | shell 命令前缀 `nulya src` / `nulya ext init\|build\|activate\|rollback\|run` / `nulya skill load` / `nulya session new\|append\|step\|events` | EvolveCard / SubSessionCard | 见 §5.2 / §5.5 | 原始输出可展开 | 折叠但头行信息量大 |
 | `capability_note` | CapabilityBanner | `⚡ capability · id@version · tools: …` | note 全文 | 展开 |

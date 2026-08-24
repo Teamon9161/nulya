@@ -55,6 +55,8 @@ export interface ToolItem extends ItemBase {
   state: ToolRunState
   ok: boolean | null
   output: string
+  /** UI-only tool presentation JSON parsed from the ledger side channel. */
+  presentation?: unknown | null
   spillPath: string | null
   resolved: boolean
   /**
@@ -316,11 +318,21 @@ export function createSessionState(id: string): SessionState {
       state: "pending" as ToolRunState,
       ok: null,
       output: "",
+      presentation: null,
       spillPath: null,
       resolved: false,
       awaiting: false,
       taskResult: null,
     }))
+  }
+
+  function parsePresentation(raw: string | null | undefined): unknown | null {
+    if (typeof raw !== "string" || raw.trim().length === 0) return null
+    try {
+      return JSON.parse(raw) as unknown
+    } catch {
+      return null
+    }
   }
 
   // The highest seq already in `items`. A session can be fed from two mouths at
@@ -434,6 +446,7 @@ export function createSessionState(id: string): SessionState {
               target.state = "done"
               target.ok = result.ok
               target.output = result.output
+              target.presentation = parsePresentation(result.presentation)
               target.spillPath = result.spill_path
               target.resolved = true
             } else {
@@ -448,6 +461,7 @@ export function createSessionState(id: string): SessionState {
                   state: "done",
                   ok: result.ok,
                   output: result.output,
+                  presentation: parsePresentation(result.presentation),
                   spillPath: result.spill_path,
                   resolved: true,
                   awaiting: false,
@@ -553,6 +567,7 @@ export function createSessionState(id: string): SessionState {
               state: "pending",
               ok: null,
               output: "",
+              presentation: null,
               spillPath: null,
               resolved: false,
               awaiting: false,

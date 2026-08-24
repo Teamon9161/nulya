@@ -1,6 +1,6 @@
 import { For, Index, createMemo } from "solid-js"
 import { useScreen, useStyle, type Style } from "../render/theme.ts"
-import type { Line, ThemeToken } from "nulya-tui/plugin-api"
+import type { DiffSurface, Line, Surface, ThemeToken } from "nulya-tui/plugin-api"
 
 /**
  * Drawing what a plugin returned (tui-plugin D9): rows of coloured spans, and
@@ -66,7 +66,7 @@ export function surfaceWidth(style: Style, screenWidth: number, indent: number):
  */
 export function PluginSurface(props: {
   /** Called with the width it has; must not throw, but may. */
-  render: (width: number) => Line[]
+  render: (width: number) => Surface
   /** The host's repaint counter; read to make this memo depend on it. */
   revision: number
   /** Left padding, in columns. */
@@ -86,21 +86,31 @@ export function PluginSurface(props: {
   const screen = useScreen()
   const indent = () => props.indent ?? 2
 
-  const lines = createMemo((): { rows: Line[]; cut: number; failed: string | null } => {
+  const lines = createMemo((): { rows: Line[]; diff: DiffSurface | null; cut: number; failed: string | null } => {
     // Depend on the host's counter: a plugin's memory is invisible to Solid.
     void props.revision
     try {
       const drawn = props.render(surfaceWidth(style, screen().width, indent()))
+      if (isDiffSurface(drawn)) return { rows: [], diff: drawn, cut: 0, failed: null }
       const rows = Array.isArray(drawn) ? drawn : []
       const cap = props.maxRows ?? rows.length
-      return { rows: rows.slice(0, cap), cut: Math.max(0, rows.length - cap), failed: null }
+      return { rows: rows.slice(0, cap), diff: null, cut: Math.max(0, rows.length - cap), failed: null }
     } catch (error) {
-      return { rows: [], cut: 0, failed: error instanceof Error ? error.message : String(error) }
+      return { rows: [], diff: null, cut: 0, failed: error instanceof Error ? error.message : String(error) }
     }
   })
 
   return (
     <box flexDirection="column" width="100%" paddingLeft={indent()} flexShrink={0}>
+      {lines().diff ? (
+        <diff
+          diff={lines().diff!.patch}
+          filetype={lines().diff!.filetype ?? "diff"}
+          syntaxStyle={style.syntax}
+          fg={style.theme.fg}
+          width="100%"
+        />
+      ) : null}
       <Index each={lines().rows}>
         {(line) => (
           <box flexDirection="row" width="100%" height={1} flexShrink={0}>
@@ -129,6 +139,16 @@ export function PluginSurface(props: {
         </text>
       ) : null}
     </box>
+  )
+}
+
+function isDiffSurface(value: Surface): value is DiffSurface {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    (value as { kind?: unknown }).kind === "diff" &&
+    typeof (value as { patch?: unknown }).patch === "string"
   )
 }
 
