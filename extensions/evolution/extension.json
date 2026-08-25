@@ -3,6 +3,15 @@
   "id": "evolution",
   "contributes": {
     "system_prompts": ["prompts/evolution.md"],
-    "skills": ["skills/evolution"]
+    "skills": ["skills/evolution"],
+    "commands": [
+      {
+        "name": "evolve",
+        "description": "a new tab that reviews finished sessions and judges what is worth keeping or building; nothing is activated",
+        "action": {
+          "with": true
+        }
+      }
+    ]
   }
 }

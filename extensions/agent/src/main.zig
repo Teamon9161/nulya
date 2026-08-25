@@ -469,8 +469,14 @@ fn newDelegation(
     // pass work to. That one field is what makes a session a leaf or not, and it
     // is read in one place: a delegated session that cannot delegate simply does
     // not carry the tool, so there is nothing to refuse later.
+    //
+    // Membership is the whole of it: the `agent` tool is `surface: "auto"`, so
+    // naming the package IS putting it on that session's tool face (DESIGN
+    // §5.1) — and a pin at it would now be refused outright
+    // (`PinToolNotPinnable`). The other three tools are `internal`; they stay
+    // where they are, reached through `ext run`.
     if (m.def.agents.len != 0) {
-        try new_argv.appendSlice(alloc, &.{ "--with", self_ref, "--pin", "ext:agent/agent" });
+        try new_argv.appendSlice(alloc, &.{ "--with", self_ref });
     }
 
     const created = try run(alloc, ctx.io, new_argv.items);

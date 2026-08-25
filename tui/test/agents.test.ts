@@ -99,13 +99,23 @@ test("list is the one reading: three layers in search order, with what an earlie
   expect(all.some((entry) => entry.name === "broken")).toBe(false)
 }, 300_000)
 
-/** Nothing written anywhere: the personas that ship with the package are enough. */
+/**
+ * Nothing written anywhere: the personas that ship with the package are enough.
+ *
+ * A fresh WORKSPACE is what "no definition files" needs (its `.nulya/agents`
+ * has nothing in it, and creating one costs no compile). A fresh `NULYA_HOME`
+ * is not: `agent` is a compiled package, `buildAgentPackage` is a real `zig
+ * build-exe` the first time it runs, and this file's `beforeAll` already paid
+ * for it once. The only thing the earlier test left behind that matters HERE
+ * is its "review" definition, written to the shared home's user-layer agents
+ * dir — clearing that (not the whole home) gets the same bare answer for the
+ * one build this file already has.
+ */
 test("a workspace with no definition files still has the personas the package ships", async () => {
   const bare = tempWorkspace()
-  const mine = process.env["NULYA_HOME"]
-  process.env["NULYA_HOME"] = join(bare.dir, "home")
   try {
-    const pkg = await buildAgentPackage(bare)
+    rmSync(agentsDirOf(ws, "user"), { recursive: true, force: true })
+    const pkg = await buildAgentPackage(ws)
     const found = usableAgents(await listAgents(bare, pkg))
     expect(found.map((entry) => entry.name).sort()).toEqual(["explore", "general", "orchestrator", "plan"])
     // Exactly one of them may delegate; the rest are leaves, which is what makes
@@ -115,7 +125,6 @@ test("a workspace with no definition files still has the personas the package sh
     expect(coordinators[0]!.max_exchanges).toBeGreaterThan(0)
     expect(found.filter((entry) => entry.readonly).map((entry) => entry.name)).toEqual(["explore"])
   } finally {
-    if (mine) process.env["NULYA_HOME"] = mine
     bare.cleanup()
   }
 }, 300_000)

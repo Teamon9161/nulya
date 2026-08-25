@@ -24,7 +24,7 @@ import { createTaskWatch, type TaskWatch } from "./tasks.ts"
 import { sessionPins, type ModelPick } from "./tui_state.ts"
 import { discardIfUntouched, readActiveContributions, readHeader, type Contributions } from "../nulya/files.ts"
 import { sessionEvents, sessionNew } from "../nulya/cli.ts"
-import { withOptions, type WithRef } from "../evolve.ts"
+import { withOptions, type WithRef } from "../with.ts"
 import type { Workspace } from "../nulya/bin.ts"
 
 interface TabCommon {

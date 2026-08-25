@@ -490,36 +490,23 @@ export function pinsOf(what: Pick<Contributions, "id" | "manualTools">): string[
 }
 
 /**
- * The `/<id>` a package that contributes a SYSTEM PROMPT gets for free — "wear
- * this for the next session" — or null when it neither is one nor can be named
- * that way (M4).
+ * The one declared way to wear this package for a session — its first
+ * `{with: true}` command — or null when it declares none.
  *
- * The manifest does not have to declare it. A mode's whole shape already says
- * what typing its name would do: `--with <id>` is the only sensible verb for a
- * package whose contribution is a prompt, and a `commands` entry saying exactly
- * that was ceremony every such package had to copy. What a package still
- * declares is anything OTHER than the obvious — `ask` is a tool package, so
- * `/ask` is a real claim it makes; `plan` is a mode, so `/plan` needs no line
- * in its manifest.
- *
- * Null when the id is not a command name (`web.search` — command names are
- * `[a-z0-9-]+`, ids are wider): a name a person cannot type is not a command.
- * Built-ins are not checked here — `packageCommands.resolve` drops a package
- * row a built-in already holds, and this row goes through it like any other.
+ * A slash command exists exactly when the manifest declares it; nothing is
+ * derived. `/<id>` used to be handed to every prompt package for free (M4's
+ * `derivedCommand`), which meant the front end was inventing names the
+ * manifest never claimed and a package could end up with two equivalent
+ * commands (`/evolve` and a derived `/evolution`). The manifest is the single
+ * source of truth about a package (DESIGN §7.2.1), so the obvious three-line
+ * entry is now simply written where it is wanted — `plan` and `evolution`
+ * declare theirs — and a prompt package that declares nothing is still one
+ * `/with <id>` away.
  */
-export function derivedCommand(
-  what: Pick<Contributions, "id" | "systemPrompts" | "commands">,
+export function wearCommand(
+  what: Pick<Contributions, "commands">,
 ): PackageCommand | null {
-  if (what.systemPrompts.length === 0) return null
-  if (!/^[a-z0-9-]+$/.test(what.id)) return null
-  // The package's own entry of the same name wins: a declaration is more
-  // specific than a derivation, and it may well mean something else by it.
-  if (what.commands.some((command) => command.name === what.id)) return null
-  return {
-    name: what.id,
-    description: `a new tab wearing ${what.id}'s prompt; nothing is activated`,
-    action: { with: true },
-  }
+  return what.commands.find((command) => command.action.with === true) ?? null
 }
 
 /**
@@ -687,9 +674,10 @@ async function pinStdTools(
  *
  * Both halves are needed because membership is not a tool face. A version whose
  * tools are `surface: "auto"` reaches the model through the `--with` alone
- * (`handoff`); one that declares `manual` does not, and the pin has to travel in
- * the same argv (`agent`, whose `agent` tool is deliberately `manual` so that
- * whoever composes it decides whether the model may delegate).
+ * (`handoff`, `agent`); one that declares `manual` does not, and the pin has to
+ * travel in the same argv. Every package on this list happens to be `auto`
+ * today, so `pins` is usually empty — it stays because a package that moves a
+ * tool to `manual` must be followed without an edit here.
  */
 export interface SessionMember {
   id: string
@@ -776,10 +764,6 @@ export async function activeVersionOf(ws: Workspace, id: string): Promise<string
  * command that cannot work. Every other root (the user's own, or an
  * `extensions.paths` addition) needs no such gate (DESIGN §9, physics #6).
  *
- * Each package also gets whatever `derivedCommand` says its shape already
- * implies — `/<id>` for a mode — after its own declarations, so a package that
- * declared the same name keeps it.
- *
  * Returned in `ext list`'s own order — root by root, in kernel search order —
  * which is what lets a caller resolve a same-name collision between two
  * DIFFERENT packages by "first one in this list wins" (D8) without this
@@ -804,10 +788,6 @@ export async function packageCommands(
     if (entry.root === workspace_root_spec && !trusted) continue
     const contributions = await readContributions(ws, entry.id, entry.current, roots)
     for (const command of contributions.commands) out.push({ id: entry.id, command })
-    // A mode's own name, which it never had to declare (`derivedCommand`).
-    // Last, so the package's own entries keep their scan-order positions.
-    const derived = derivedCommand(contributions)
-    if (derived) out.push({ id: entry.id, command: derived })
   }
   return out
 }

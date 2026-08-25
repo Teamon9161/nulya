@@ -63,8 +63,7 @@ exports[`/help lists the bindings that are actually in force 1`] = `
                                   failed                                                            
  /with [<id>[@version]]           a new tab carrying a registered extension's prompt and skills;    
                                   nothing is activated. no argument lists what is registered        
-                                  (\`/as\` is the old name; \`/evolve\` still rebuilds and wears the    
-                                  shipped evolution package)                                        
+                                  (\`/as\` is the old name)                                           
  /agent [<name> <task…>]          delegate a task to an agent defined in .nulya/agents or           
                                   ~/.nulya/agents: a session of its own, in its own tab, whose      
                                   report comes back here. no name lists them                        
@@ -74,6 +73,7 @@ exports[`/help lists the bindings that are actually in force 1`] = `
  /fold                            collapse every card                                               
  /help                            every key and every command                                       
  /quit                            leave                                                             
+ /<package command>               declared by an active extension · /ext lists them                 
  /<skill> [args]                  load an active skill's body as a user turn                        
                                   \`nulya skill list\` names them                                     
  anything else after /            goes to the model verbatim                                        

@@ -5,6 +5,11 @@
   "contributes": {
     "system_prompts": ["prompts/plan.md"],
     "policy": { "readonly": true },
+    "commands": [{
+      "name": "plan",
+      "description": "a new tab wearing plan mode for one session: investigate read-only, then propose a reviewable plan",
+      "action": { "with": true }
+    }],
     "tools": [
       {
         "name": "propose",

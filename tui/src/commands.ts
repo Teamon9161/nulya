@@ -16,16 +16,20 @@
  *
  * The built-ins are tried first, so a skill can never take `/model` away.
  *
- * Four names dispatch without being listed: `/as` (what `/with` was called
- * until T36), `/evolve` (which rebuilds the shipped evolution draft before
- * wearing it), `/clear` (the word other harnesses use for what `/new` does) and
- * `/resume` (theirs for what `/sessions` does). All four keep working; none is
+ * Three names dispatch without being listed: `/as` (what `/with` was called
+ * until T36), `/clear` (the word other harnesses use for what `/new` does) and
+ * `/resume` (theirs for what `/sessions` does). All three keep working; none is
  * offered, because a command in this table is a command this front end says
- * exists — `/evolve` named ONE package whether or not this machine had it (the
- * confusion T37 set out to end), and the other two would each put a second word
- * on the table for a concept that already has one. `/clear` would also name the
- * one thing that never happens here: a ledger is append-only, nothing is
- * cleared, and a new session is a new session (physics #1, #4).
+ * exists, and each of these would put a second word on the table for a concept
+ * that already has one. `/clear` would also name the one thing that never
+ * happens here: a ledger is append-only, nothing is cleared, and a new session
+ * is a new session (physics #1, #4).
+ *
+ * `/evolve` was a fourth until T53. It is not an alias any more and it is not
+ * reserved: the evolution package declares it (`contributes.commands`), so it
+ * arrives through the package chain like `/ask` — which means it exists exactly
+ * when that package is built and active on this machine, and `/ext` is where it
+ * comes from. A name reserved here could never have fired.
  */
 export interface Command {
   name: string
@@ -62,7 +66,7 @@ export const commands: Command[] = [
   {
     name: "/with",
     args: "[<id>[@version]]",
-    what: "a new tab carrying a registered extension's prompt and skills; nothing is activated. no argument lists what is registered (`/as` is the old name; `/evolve` still rebuilds and wears the shipped evolution package)",
+    what: "a new tab carrying a registered extension's prompt and skills; nothing is activated. no argument lists what is registered (`/as` is the old name)",
   },
   {
     name: "/agent",
@@ -78,18 +82,18 @@ export const commands: Command[] = [
 
 /**
  * The names that dispatch but are NOT on the table, and what each one is — the
- * four in this file's header, in one place a reader can check the claim
+ * three in this file's header, in one place a reader can check the claim
  * against.
  *
  * `ui/App.tsx` decides what each one does (`/resume` shares its branch with
- * `/sessions`, `/clear` with `/new`; `/as` and `/evolve` have their own), but
- * the RESERVATION belongs here: an alias is dispatched before a package command
- * is even looked up, so a package allowed to claim `/clear` would register a
- * command that could never fire.
+ * `/sessions`, `/clear` with `/new`, `/as` with `/with`), but the RESERVATION
+ * belongs here: an alias is dispatched before a package command is even looked
+ * up, so a package allowed to claim `/clear` would register a command that could
+ * never fire. Which is exactly why `/evolve` left this table when the evolution
+ * package started declaring it (T53).
  */
 export const aliases: Readonly<Record<string, string>> = {
   as: "/with",
-  evolve: "/with, on the shipped evolution package",
   clear: "/new",
   resume: "/sessions",
 }

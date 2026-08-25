@@ -28,9 +28,9 @@ import { readdirSync } from "node:fs"
 import { join } from "node:path"
 import { extBuild, extRun, toolSaid } from "./nulya/cli.ts"
 import { bundledDraftPath } from "./extensions.ts"
-import { formatWithRef } from "./evolve.ts"
+import { formatWithRef } from "./with.ts"
 import { userConfigDir } from "./state/settings.ts"
-import type { WithRef } from "./evolve.ts"
+import type { WithRef } from "./with.ts"
 import type { ModelPick } from "./state/tui_state.ts"
 import type { Workspace } from "./nulya/bin.ts"
 
@@ -187,8 +187,10 @@ export const agent_id = "agent"
 /** The draft in nulya's own tree; elsewhere the binary's embedded copy is used. */
 export const agent_draft = "extensions/agent"
 
-/** The stable tool id a session must pin for the model to reach it (DESIGN §5.1). */
-export const agent_pin = "ext:agent/agent"
+// There is no pin constant here any more. The `agent` tool is `surface: "auto"`
+// (DESIGN §5.1), so composing the package IS putting it on that session's tool
+// face — and a pin naming it would now be refused by `session new`
+// (`PinToolNotPinnable`). Membership is the whole decision, in one flag.
 
 /**
  * Build the bundled `agent` package and name the version to compose in.

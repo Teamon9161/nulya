@@ -27,7 +27,7 @@ import {
   answerFor,
   builtContributions,
   checkoutFollowUp,
-  derivedCommand,
+  wearCommand,
   describeDrafts,
   draftColumn,
   failedIds,
@@ -462,42 +462,21 @@ test("only a package that asks to be in every session is kept off the start-up p
 })
 
 /**
- * A mode's own `/<id>`, which it never has to declare (M4).
- *
- * `--with <id>` is the only thing typing a prompt package's name could mean, so
- * every such package used to copy the same three-line `commands` entry into its
- * manifest to say it. What a package still declares is anything other than the
- * obvious.
+ * How a package is worn: only through a command it DECLARED. Nothing is
+ * derived — `/<id>` used to be handed to every prompt package for free, which
+ * had the front end inventing names the manifest never claimed.
  */
-test("a package that contributes a system prompt gets `/<id>` for free; anything else has to ask", () => {
-  const what = (over: Partial<Parameters<typeof derivedCommand>[0]> = {}) => ({
-    id: "plan",
-    systemPrompts: ["prompts/plan.md"],
-    commands: [] as PackageCommand[],
-    ...over,
-  })
+test("a slash command exists exactly when the manifest declares it; wearCommand finds the declared way in", () => {
+  const what = (commands: PackageCommand[] = []) => ({ commands })
 
-  expect(derivedCommand(what())).toEqual({
-    name: "plan",
-    description: "a new tab wearing plan's prompt; nothing is activated",
-    action: { with: true },
-  })
-
-  // A tool package is not a mode: `/ask` is a real claim `ask` makes, and it
-  // makes it in its manifest.
-  expect(derivedCommand(what({ id: "ask", systemPrompts: [] }))).toBeNull()
-
-  // The package's own entry of the same name wins — a declaration is more
-  // specific than a derivation, and may well mean something else by it.
-  expect(
-    derivedCommand(what({ commands: [{ name: "plan", description: "run it instead", action: { run: "propose" } }] })),
-  ).toBeNull()
-  // A DIFFERENT name it declares changes nothing.
-  expect(derivedCommand(what({ commands: [{ name: "review", description: "", action: { with: true } }] }))).not.toBeNull()
-
-  // An id a person cannot type after `/` is not a command name (`[a-z0-9-]+`).
-  expect(derivedCommand(what({ id: "web.search" }))).toBeNull()
-  expect(derivedCommand(what({ id: "My_Mode" }))).toBeNull()
+  // No declaration, no command — a prompt package included; `/with <id>` is
+  // still there.
+  expect(wearCommand(what())).toBeNull()
+  // The declared `{with: true}` entry is the answer, whatever its name.
+  const evolve = { name: "evolve", description: "", action: { with: true } }
+  expect(wearCommand(what([evolve]))).toEqual(evolve)
+  // A command with another verb is not a way to wear the package.
+  expect(wearCommand(what([{ name: "review", description: "", action: { run: "propose" } }]))).toBeNull()
 })
 
 /**

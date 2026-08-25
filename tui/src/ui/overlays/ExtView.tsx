@@ -55,7 +55,7 @@ import {
   extSetCurrent,
   type SyncLine,
 } from "../../nulya/cli.ts"
-import { draftColumn, pinsOf, planStore } from "../../extensions.ts"
+import { draftColumn, pinsOf, planStore, wearCommand } from "../../extensions.ts"
 import {
   builtin_tools,
   faceFullLine,
@@ -142,10 +142,10 @@ const switch_width = 2
  * was the best guess available while nothing could state its own reach: a
  * prompt is the contribution whose cost is paid in every session, so a package
  * with one was the package worth flagging. It reads the wrong package now — a
- * `manual` prompt package is one `/<id>` away and costs nothing until then,
- * while an `apply: "auto"` package of pure tools is in front of every model
- * here. The fact the old column carried is still on screen: the detail pane
- * lists prompts, and `derivedCommand` gives a prompt package its `/<id>`.
+ * `manual` prompt package is one declared command or `/with` away and costs
+ * nothing until then, while an `apply: "auto"` package of pure tools is in
+ * front of every model here. The fact the old column carried is still on
+ * screen: the detail pane lists prompts and the package's declared commands.
  */
 export function standingCell(entry: { apply: PackageApply }): string {
   return entry.apply === "auto" ? "standing" : ""
@@ -833,8 +833,8 @@ export function ExtView(props: {
    *
    * ON is both axes at once — point `current` at a built version, and pin every
    * `manual` tool it declares so the model can call them. What `current` then
-   * MEANS is the package's own word: `manual` makes it nameable (`/<id>`,
-   * `/with`, a pin), `auto` makes the kernel compose it into every fresh session
+   * MEANS is the package's own word: `manual` makes it nameable (a declared
+   * command, `/with`, a pin), `auto` makes the kernel compose it into every fresh session
    * here (DESIGN §5.1). OFF is both back. Nothing here is irreversible and
    * nothing here reaches the session already on screen (physics #2), which is
    * why neither direction asks for a `y`.
@@ -945,13 +945,13 @@ export function ExtView(props: {
     props.onMembershipChanged?.()
     setNotice(
       // Three shapes, and each one names what Enter just made reachable: a
-      // package that asked to be everywhere is everywhere now; a mode gets the
-      // `/<id>` command `derivedCommand` hands it; everything else gets the
-      // version and what its tools did.
+      // package that asked to be everywhere is everywhere now; a mode is worn
+      // through its own declared command, or `/with` when it declared none;
+      // everything else gets the version and what its tools did.
       entry.apply === "auto"
         ? `${entry.id} on · ${version} · composed into every session on this machine · Enter again takes it back`
         : entry.systemPrompts.length > 0
-          ? `${entry.id} on · /${entry.id} opens a new tab wearing it for one session · Enter again takes the command away`
+          ? `${entry.id} on · /${wearCommand(entry)?.name ?? `with ${entry.id}`} opens a new tab wearing it for one session · Enter again takes that away`
           : `${entry.id} on · ${version}` +
             (ids.length > 0
               ? room
@@ -1001,7 +1001,7 @@ export function ExtView(props: {
       (entry.apply === "auto"
         ? `${entry.id} off · it leaves every session composed here`
         : entry.systemPrompts.length > 0
-          ? `${entry.id} off · /${entry.id} is gone`
+          ? `${entry.id} off · ${wearCommand(entry) ? `/${wearCommand(entry)!.name} is gone` : `it can no longer be worn`}`
           : `${entry.id} off · its skills leave the composition`) +
         ` · versions all stay${stuck ? ` · ${stuck}` : ""}`,
     )
@@ -1611,14 +1611,15 @@ export function ExtView(props: {
                     fg={style.theme.muted}
                   />
                   {/* …and what that prompt count MEANS. For a `manual`
-                      package: Enter moves `current` and hands back a `/<id>`
-                      that wears the prompt for one session, and nothing here
-                      composes it standing (T1, ext-review-2 §3b). For an
+                      package: Enter moves `current`, and the way to wear the
+                      prompt for one session is the command the package itself
+                      declared — or `/with` when it declared none — and nothing
+                      here composes it standing (T1, ext-review-2 §3b). For an
                       `apply: "auto"` one the sentence below says the opposite,
                       so this one steps aside rather than saying both. */}
                   <Show when={entry.systemPrompts.length > 0 && entry.apply !== "auto"}>
                     <Lines
-                      text={`a mode · Enter gives it a \`/${entry.id}\` command that wears its prompt for one session · nothing here composes it standing`}
+                      text={`a mode · once on, \`/${wearCommand(entry)?.name ?? `with ${entry.id}`}\` wears its prompt for one session · nothing here composes it standing`}
                       width={detailWidth()}
                       fg={style.theme.muted}
                     />

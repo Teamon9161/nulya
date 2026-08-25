@@ -67,3 +67,4 @@
 
 - **`tui/` 跟随**：`tui/src/nulya/files.ts` 的 `toolSurfaceOf` 仍认 `pin` / `with` / `driver` 并把别的词折成 `pin`，所以新词下 `pinTools` / `withTools` / `driverTools` 三个投影全错（都落进 `pinTools`）；`Contributions` 也还没有 `apply`。`/ext` 的 tools pane 与 T33 的 driver 折叠都读这三个投影。
 - **`--with X --pin ext:X/tool` 这个组合在 TUI 里已经是坏的，与本轮无关**：`7b1612f`（improve tui）把 `handoff` / `plan` 的 tool 改成 `surface: "with"` 时没有同步 TUI 与 e2e，于是 `tests/e2e/extension.zig` 的 handoff / plan 两条在本轮之前就是红的（实测 `git stash` 后仍红）。本轮把那两条 e2e 改成 `--with`（正确的新写法）；TUI 侧 `tui.toml [extensions] session_with` 那条路径仍会传一个会被拒的 `--pin ext:handoff/handoff`，修法是删掉那个 pin。
+- ✅ 两条都已由主会话落地（tui.md T52 / T53）。**§1 A 关于 `agent/agent` 那句话被推翻了一半**：它当时写的是「`agent` 的入口 tool 加显式 `manual`，因为带不带它是 driver 每次的决定」——而 `--with` 已经把那个决定说完了（那个包对模型面的**全部**贡献就是这一个 tool），membership 之外再要一根 pin 只是同一句话说两遍。T53 把它翻成 `auto` 并删掉三处 `--pin ext:agent/agent`。留在 §1 / §3 里的原话不改：那是当时的判断，记录不因后来的修正而重写。

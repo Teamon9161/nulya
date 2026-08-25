@@ -58,8 +58,14 @@ const mouse: Array<[string, string]> = [
   ["drag over text", "select it; releasing copies it to the clipboard"],
 ]
 
-/** The two slash lines that are not commands: a skill, and everything else. */
+/**
+ * The slash lines that are not built-in commands: a package's own, a skill, and
+ * everything else. The first two exist only when something is active, which is
+ * why they are described by shape rather than listed by name — `/evolve` is one
+ * of them since T53, and it is there exactly when the evolution package is.
+ */
 const slashes: Array<[string, string]> = [
+  ["/<package command>", "declared by an active extension · /ext lists them"],
   ["/<skill> [args]", "load an active skill's body as a user turn · `nulya skill list` names them"],
   ["anything else after /", "goes to the model verbatim"],
 ]

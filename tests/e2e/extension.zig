@@ -2899,6 +2899,13 @@ test "bundled agent: only a persona with an agents whitelist carries the tool, i
 
     // A coordinator's session carries the tool; a leaf's does not — one field in
     // one place decides it, so a leaf has nothing to refuse later.
+    //
+    // MEMBERSHIP is the whole of that decision. `agent` is `surface: "auto"`
+    // (§5.1), so the one `--with` the delegation adds for a coordinator both
+    // freezes the package into `active` and puts its entry tool in the native
+    // face; no pin is passed, and one naming it would be refused. The three
+    // `internal` tools stay off that face — `--bare` means nothing else can put
+    // them there either, so the list is exactly one long.
     const boss_file = try delegateTo(alloc, io, ws, exe_abs, ref, in_parent, parent, "boss", "coordinate");
     defer alloc.free(boss_file);
     const worker_file = try delegateTo(alloc, io, ws, exe_abs, ref, in_parent, parent, "worker", "work");
@@ -2907,9 +2914,14 @@ test "bundled agent: only a persona with an agents whitelist carries the tool, i
         const boss_header = try support.readSessionFile(alloc, io, ws, std.fs.path.stem(boss_file));
         defer alloc.free(boss_header);
         try std.testing.expect(std.mem.indexOf(u8, boss_header, "\"native_tools\":[\"ext:agent/agent\"]") != null);
+        try std.testing.expect(std.mem.indexOf(u8, boss_header, "\"id\":\"agent\"") != null);
+        // A leaf is not a member at all, so the tool is nowhere in its header —
+        // neither as a frozen member nor as a native slot.
         const worker_header = try support.readSessionFile(alloc, io, ws, std.fs.path.stem(worker_file));
         defer alloc.free(worker_header);
         try std.testing.expect(std.mem.indexOf(u8, worker_header, "ext:agent/agent") == null);
+        try std.testing.expect(std.mem.indexOf(u8, worker_header, "\"id\":\"agent\"") == null);
+        try std.testing.expect(std.mem.indexOf(u8, worker_header, "\"native_tools\":[]") != null);
     }
 
     const in_boss: []const EnvPair = &.{

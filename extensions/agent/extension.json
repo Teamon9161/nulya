@@ -8,7 +8,7 @@
     "tools": [
       {
         "name": "agent",
-        "surface": "manual",
+        "surface": "auto",
         "description": "Delegate one self-contained piece of work to a sub-agent, or send another turn into one that already reported. A sub-agent runs in a session of its own — its own context, its own tool face — and ONLY its final report comes back to you, as a message a little later; nothing else from its session enters this conversation and it cannot see yours. Give `name` to START one: say the whole task, because it sees nothing of this conversation and cannot ask you anything. Give `session` INSTEAD to follow up on a report you already have — that session still holds everything it found, so a correction or a request for specifics costs one turn where starting over pays for the search again. Prefer it. Use delegation for work that is separable and worth a fresh context (a broad search, a focused review); not for something you could finish in a step or two yourself, and never for the same thing twice. Calling an unknown name lists a short catalogue; for the full catalogue, use shell: `nulya ext run agent list`. After it returns, end your turn: the work has not happened yet.",
         "timeout_ms": 120000,
         "input": {

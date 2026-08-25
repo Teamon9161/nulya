@@ -104,11 +104,10 @@ import { PluginContext } from "../plugins/context.ts"
 import { wrapExtNote } from "../extnote.ts"
 import { runCompact } from "../compact.ts"
 import { headline, nextHandoff, type HandoffFile } from "../handoff.ts"
-import { buildEvolution, formatWithRef, parseWithRef, type WithRef } from "../evolve.ts"
+import { formatWithRef, parseWithRef, type WithRef } from "../with.ts"
 import { orphanPins, resolvableStandingPins, toolId } from "../pins.ts"
 import {
   agent_id,
-  agent_pin,
   agentPick,
   listAgents,
   renderAgent,
@@ -1119,10 +1118,12 @@ export function App(props: AppProps) {
    * package that did NOT ask, which is this front end's line to write.
    *
    * `surface:"auto"` tools do not appear here as pins: the kernel derives those
-   * native tool slots from the membership itself. A member's `surface:"manual"`
-   * tools DO — membership is not a tool face, so a package composed here whose
-   * entry point is `manual` (`agent`) needs the pin in the same argv, and that
-   * is `SessionMember.pins`, read off the version being composed.
+   * native tool slots from the membership itself, which is how both packages on
+   * today's list (`handoff`, `agent`) reach the model — one flag each. A
+   * member's `surface:"manual"` tools DO need a pin in the same argv, since
+   * membership is not a tool face; that is `SessionMember.pins`, read off the
+   * version being composed, so a package that moves a tool between surfaces is
+   * followed without an edit here.
    *
    * A package that cannot be resolved costs the session nothing: it starts
    * without it and says so, rather than not starting.
@@ -1697,38 +1698,12 @@ export function App(props: AppProps) {
     return true
   }
 
-  /**
-   * `/evolve` — the slow loop, for one session (`evolve.ts`).
-   *
-   * It opens a NEW tab wearing the evolution package: an identity system prompt
-   * and a skill about reviewing sessions that are already finished and judging
-   * what is worth keeping or building. It is not "make this conversation start
-   * evolving", and it does not activate anything — `--with` is membership in one
-   * composition, where `activate` would put that identity in front of every
-   * model this machine runs (T31, the bug this wording came from).
-   *
-   * Not on THIS session either: composition freezes at `session new`
-   * (physics #2), so there is no way to hand the model a new system prompt
-   * mid-conversation, and pretending otherwise would be the one lie this front
-   * end must never tell.
-   */
-  const evolveNow = async () => {
-    setNotice("building the evolution package…")
-    try {
-      const ref = await buildEvolution(props.ws)
-      startDraft(undefined, false, ref)
-      // After `startDraft`, whose own line is about the model: this says which
-      // tab, what it is wearing, and — the part people got wrong — that nothing
-      // was activated and nothing has started yet.
-      setNotice(
-        `new tab · wearing ${formatWithRef(ref)} · review finished sessions, judge what to keep · nothing activated · your next message starts it`,
-      )
-    } catch (error) {
-      // Almost always "there is no extensions/evolution here": the package ships
-      // with nulya's source, and this is somebody else's workspace.
-      setNotice(error instanceof Error ? error.message : String(error))
-    }
-  }
+  // `/evolve` used to live here, as the one command this front end special-cased
+  // into a build (T53): it rebuilt the shipped evolution draft and wore the
+  // version it produced. It is now the evolution package's OWN declaration —
+  // `contributes.commands` with `{with: true}` — so it arrives through the same
+  // chain as `/ask` and `/plan` (`runPackageCommand`), and this file has stopped
+  // knowing one package's name.
 
   // ── `/agent` (tui.md §5.10) ───────────────────────────────────────────────
 
@@ -1810,10 +1785,12 @@ export function App(props: AppProps) {
         // delegated session that cannot delegate simply does not carry the tool.
         // The persona's OWN pins bring their packages in by themselves — that
         // implication is the kernel's (DESIGN §5.1), not a list assembled here.
+        //
+        // No pin goes with that `--with`: the `agent` tool is `surface: "auto"`,
+        // so membership already is its tool face, and a pin naming it would be
+        // refused (`PinToolNotPinnable`).
         ...(m.agents.length > 0 ? { with: [formatWithRef(pkg)] } : {}),
-        ...(m.pins.length > 0 || m.agents.length > 0
-          ? { pin: [...m.pins, ...(m.agents.length > 0 ? [agent_pin] : [])] }
-          : {}),
+        ...(m.pins.length > 0 ? { pin: m.pins } : {}),
         ...(m.max_steps > 0 ? { maxSteps: m.max_steps } : {}),
       })
       agentOf.set(child.id, m)
@@ -2179,10 +2156,6 @@ export function App(props: AppProps) {
     }
     if (command === "/outcome") {
       void judge(words[1], rest.slice(words[1]?.length ?? 0).trim())
-      return true
-    }
-    if (command === "/evolve") {
-      void evolveNow()
       return true
     }
     if (command === "/mode") {

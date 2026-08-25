@@ -720,7 +720,8 @@ test("/ext Enter on a prompt package moves current and writes no membership of i
       // No `standing` cell: this package did not ask to be in every session, so
       // the one word in the id list that is about reach stays empty (T52).
       expect(standingCell({ apply: "manual" })).toBe("")
-      expect(frame).toContain("a `/house.style` command")
+      // No declared command: the way in it names is `/with` (nothing derived).
+      expect(frame).toContain("`/with house.style` wears its prompt")
       expect(frame).toContain("nothing here composes it standing")
 
       setup.mockInput.pressEnter()
@@ -729,13 +730,13 @@ test("/ext Enter on a prompt package moves current and writes no membership of i
         20_000,
       )
       const on = await settle(setup, 4)
-      expect(on).toContain("/house.style opens a new tab wearing it for one session")
-      expect(on).toContain("Enter again takes the command away")
+      // The package declares no command, so nothing invents `/house.style`:
+      // the notice points at `/with` (T54 — commands exist only by declaration).
+      expect(on).toContain("/with house.style opens a new tab wearing it for one session")
+      expect(on).toContain("Enter again takes that away")
       // The pointer moved — `current` says which version `house.style` is now
       // — and NOTHING was written into this front end's state: no pins (the
-      // package declares no tool), and since T52 no membership list at all. The
-      // per-session `/house.style` command it just earned is `derivedCommand`
-      // reading `current`.
+      // package declares no tool), and since T52 no membership list at all.
       expect(loadTuiState(statePath).session_pins ?? []).toEqual([])
       expect(JSON.stringify(loadTuiState(statePath))).not.toContain("house.style")
 
@@ -745,7 +746,7 @@ test("/ext Enter on a prompt package moves current and writes no membership of i
         20_000,
       )
       const off = await settle(setup, 4)
-      expect(off).toContain("house.style off · /house.style is gone")
+      expect(off).toContain("house.style off · it can no longer be worn")
       expect(off).toContain("versions all stay")
       // Still nothing in this front end's state to take back.
       expect(JSON.stringify(loadTuiState(statePath))).not.toContain("house.style")
