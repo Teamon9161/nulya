@@ -82,6 +82,9 @@ nulya ext init my.helper do_thing             # draft in .nulya/extensions/my.he
 nulya ext build .nulya/extensions/my.helper   # prints v-<hash>
 nulya ext run my.helper@v-<hash> do_thing --arg name=world
 nulya ext activate my.helper v-<hash>
+nulya session new --with my.helper            # the tool is on the next session's
+                                              # face: the scaffold writes no
+                                              # `surface`, which means `auto`
 ```
 
 There is nothing between the script and the caller, so the script is the whole
@@ -103,17 +106,26 @@ printf 'hello %s\n' "${NULYA_ARG_name:-world}"
   may be written per OS — `{"windows": "src/run.ps1", "default": "src/run.sh"}`
   — so one version runs everywhere.
 - `contributes.tools[]` — `{name, description, input, surface?, timeout_ms?,
-  readonly?, ui?}`. `input` is the JSON Schema the model sees. `surface` says
-  how the tool can reach the model face: `pin` (default for old manifests) means
-  it may be named by `--pin` / `pinned_native_tools`; `with` means it appears
-  when the package is explicitly composed with `--with` / `[extensions] with`;
-  `driver` means front ends and scripts call it with `nulya ext run`, never as a
-  fresh session's native model tool. This manifest is the only source of truth
-  for a tool's shape and placement.
+  readonly?, ui?}`. `input` is the JSON Schema the model sees. `surface` answers
+  one question — *given that this package is a session member, does this tool
+  reach the model?* — with three words: `auto` (**the default**: it reaches the
+  model as soon as the package does, so a scaffolded tool works with nothing
+  but `--with`); `manual` (membership is not enough, someone must name this
+  tool — and it is the ONLY surface `--pin` / `pinned_native_tools` accepts);
+  `internal` (never on the model face; front ends and scripts call it with
+  `nulya ext run`). This manifest is the only source of truth for a tool's shape
+  and placement.
 - `contributes.skills[]` — directories holding a `SKILL.md`.
 - `contributes.system_prompts[]` — files that join the system blocks of every
-  session this package is a member of. Which sessions those are is not the
-  package's to say: see the two axes below.
+  session this package is a member of. Which sessions those are is mostly not
+  the package's to say: see the two axes below.
+- `apply` — top level, not under `contributes`, because it is not a
+  contribution: it is what the author thinks INSTALLING this package should
+  mean. `manual` (the default, and every manifest that omits it) means the
+  package joins the sessions that name it. `auto` means that while it has a
+  `current`, it is a member of every new session on this machine — what a mode
+  wants. It is a default and not a ceiling: `[extensions] with` still adds a
+  `manual` package, and `nulya ext deactivate <id>` still stops an `auto` one.
 - `nulya ext api manifest` lists every other field, grouped by who reads it.
 
 A tool receives its arguments, a working directory and a sanitized environment
@@ -122,33 +134,40 @@ model's tool face a call is killed at 30s unless the manifest raises
 `timeout_ms` (600000 maximum); `nulya ext run` applies no timeout unless given
 `--timeout-ms`.
 
-**Two independent axes, each with a standing form and a per-session one, and
-`activate` is on neither.** `activate` says which version `<id>` means; that is
-all it does.
+**Two independent axes, each with a standing form and a per-session one.**
+`activate` is on neither: it says which version `<id>` means, and that is all
+it does — except that for a package declaring `apply: "auto"`, having a
+`current` IS the standing membership, so `activate` says one line about that
+and points at `nulya ext deactivate`.
 
 - MEMBERSHIP — the package is in this session: its skills in the catalog, its
   system prompts in the system blocks, its tools callable through the CLI.
-  Standing: `[extensions] with` in config. One session: `nulya session new
-  --with <id>[@<version>]`.
-- TOOL FACE — a tool takes a native slot the model can call. For `surface:"pin"`
-  tools, standing form is `[registry] pinned_native_tools`; one-session form is
-  `nulya session new --pin ext:<id>/<tool>`. A pin brings its own package in, so
-  a pin alone is enough. For `surface:"with"` tools, the tool face follows the
-  membership axis instead: compose the package, and those tools appear without a
-  pin. `surface:"driver"` tools never join this face in fresh sessions.
+  Standing: `[extensions] with` in config, or the package's own `apply: "auto"`.
+  One session: `nulya session new --with <id>[@<version>]`. A `--with` naming an
+  id that a standing layer already brought in wins, version and all.
+- TOOL FACE — a tool takes a native slot the model can call. For
+  `surface:"manual"` tools, standing form is `[registry] pinned_native_tools`;
+  one-session form is `nulya session new --pin ext:<id>/<tool>`. A pin brings
+  its own package in, so a pin alone is enough. For `surface:"auto"` tools —
+  the default — the tool face follows the membership axis instead: compose the
+  package and those tools appear, with no pin and nothing else to write.
+  `surface:"internal"` tools never join this face.
 
 Both take effect from the next session onward; `nulya config show` prints the
-two standing lists. `nulya session new --bare` ignores both of them and composes
-from its own flags alone. Activating a new version mid-session changes what the
-CLI runs immediately; the natively exposed form changes only in the next
-session.
+two standing config lists, and `nulya ext list` marks an `apply: "auto"` package
+`standing`. `nulya session new --bare` reads none of the standing layers and
+composes from its own flags alone. Activating a new version mid-session changes
+what the CLI runs immediately; the natively exposed form changes only in the
+next session.
 
 Compile (Zig, a `bin/` entry) when the tool must parse JSON or behave
 identically under both shells. In a nulya checkout, `extensions/compact` and
 `extensions/handoff` are the worked examples, and `extensions/std` (read /
 write / append / edit / grep / glob as one package — build it `--user`,
-activate it, pin `ext:std/<tool>` for the ones you want) is the one to copy for
-a tool that returns text: whatever it prints reaches the model verbatim.
+activate it, pin `ext:std/<tool>` for the ones you want — its six tools are
+`surface:"manual"` precisely so you assemble that face yourself) is the one to
+copy for a tool that returns text: whatever it prints reaches the model
+verbatim.
 
 Store and scope:
 
@@ -188,10 +207,12 @@ Store and scope:
   recipes in the body — that is what makes a skill cheap to carry.
 - A `system_prompt` is the opposite: every byte joins the system blocks of
   every session that package is a member of, and is paid for on every step.
-- A mode is a data extension contributing a system prompt that is built and
-  activated but deliberately left OUT of `[extensions] with`, so it reaches
-  only the sessions that name it: `nulya session new --with <id>`. In a nulya
-  checkout, `extensions/evolution` is one.
+- A mode is a data extension contributing a system prompt. Left at the default
+  `apply: "manual"` and out of `[extensions] with`, it reaches only the sessions
+  that name it: `nulya session new --with <id>`. Written with `"apply": "auto"`,
+  activating it IS installing it — every new session carries it until `nulya ext
+  deactivate <id>`. In a nulya checkout, `extensions/evolution` is one of the
+  first kind.
 - An extension with only skills and prompts needs no compiler, and its version
   is a pure content hash — the same id on every machine.
 

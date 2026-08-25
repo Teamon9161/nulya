@@ -34,7 +34,6 @@ import {
   rememberMode,
   rememberSessionPins,
   sessionPins,
-  standingWithIds,
   type ModelPick,
 } from "../state/tui_state.ts"
 import {
@@ -76,12 +75,15 @@ import {
 import {
   activeVersionOf,
   adoptBundled,
+  autoActivatable,
+  builtContributions,
   failedIds,
   needsZigIds,
   planStore,
   seedBundled,
   sessionMember,
   summarize,
+  syncRoot,
   type SessionMember,
 } from "../extensions.ts"
 import { builtin_names } from "../commands.ts"
@@ -440,7 +442,7 @@ export function App(props: AppProps) {
   }
   const [composedWithTools, setComposedWithTools] = createSignal<string[]>([])
   /**
-   * The `surface:"with"` tools those composed packages will put on the face,
+   * The `surface:"auto"` tools those composed packages will put on the face,
    * known before the session exists (T42) — so the draft screen can count them.
    *
    * Read from the ACTIVE version's manifest plus config projection, not by
@@ -453,15 +455,14 @@ export function App(props: AppProps) {
     try {
       const [listed, config] = await Promise.all([listExtensions(props.ws), configShow(props.ws, props.driver?.env)])
       healStandingPins(listed)
-      const alwaysComposed = new Set([
-        ...config.extensions.with,
-        ...props.style.settings.extensions.session_with,
-        ...standingWithIds(props.statePath),
-      ])
+      // Three ways a package is in every session started here (T52): it asked
+      // (`apply: "auto"`, and then the KERNEL composes it), config named it, or
+      // this front end always brings it.
+      const named = new Set([...config.extensions.with, ...props.style.settings.extensions.session_with])
       setComposedWithTools(
         listed
-          .filter((entry) => entry.current && !entry.shadowed && alwaysComposed.has(entry.id))
-          .flatMap((entry) => entry.withTools.map((tool) => toolId(entry.id, tool))),
+          .filter((entry) => entry.current && !entry.shadowed && (named.has(entry.id) || entry.apply === "auto"))
+          .flatMap((entry) => entry.autoTools.map((tool) => toolId(entry.id, tool))),
       )
     } catch {
       // No listing is "unknown"; the pin files still say what they say.
@@ -568,11 +569,14 @@ export function App(props: AppProps) {
    * it produced itself, so a package somebody deliberately rolled back stays
    * where they put it.
    *
-   * It no longer asks WHAT a package contributes before pointing at it (K8).
-   * Activating is safe now — it says which version `<id>` means and composes
-   * nothing (DESIGN §5.1) — so the guard that used to keep `evolution`'s system
-   * prompt out of every session has nothing left to guard: composing is
-   * `[extensions] with` and `/ext`'s Enter, both of them a person's line.
+   * It asks the package ONE question before pointing at it (`autoActivatable`,
+   * T52): does it say `apply: "auto"`? For everything else activating composes
+   * nothing (DESIGN §5.1) and is safe to do unattended. For that one, activating
+   * IS composing — the kernel joins it to every fresh session here from that
+   * moment — and a background pass does not get to decide what every session on
+   * this machine carries. That is T31's bug in its current spelling: the guard
+   * used to be "does it contribute a system prompt", which was the closest thing
+   * to this question anybody could ask before a package could state its reach.
    */
   const syncStores = async () => {
     const plan = props.sync
@@ -623,6 +627,10 @@ export function App(props: AppProps) {
           setNotice(`syncing extensions… ${done}/${total}`)
         })
         let activated = 0
+        // Built, and deliberately left inactive: a package whose manifest says
+        // `apply: "auto"`. Named rather than counted — "1 not activated" is not
+        // something anybody can act on, and the id is one `/ext` Enter away.
+        const standing: string[] = []
         if (plan.activate) {
           for (const line of report.lines) {
             if (!line.version || line.activation === "active") continue
@@ -636,6 +644,14 @@ export function App(props: AppProps) {
             // did move forward in this run and the active pointer should follow
             // it just as it does when the version was newly built here.
             if (line.state !== "built" && !(root.user && refreshed.includes(line.id))) continue
+            // One manifest read, off the version this pass just produced: a
+            // package that asked to be in every session is named, not switched
+            // on (`autoActivatable`).
+            const built = await builtContributions(props.ws, syncRoot(props.ws, root.user), line.id, line.version)
+            if (built && !autoActivatable(built)) {
+              standing.push(line.id)
+              continue
+            }
             try {
               await extSetCurrent(props.ws, "activate", line.id, line.version, { user: root.user })
               activated += 1
@@ -666,13 +682,15 @@ export function App(props: AppProps) {
           failed.length === 0 &&
           needsZig.length === 0 &&
           activated === 0 &&
-          adopted.length === 0
+          adopted.length === 0 &&
+          standing.length === 0
         ) {
           continue
         }
         news.push(
           summarize(root.label, report) +
             (activated > 0 ? ` · ${activated} activated` : "") +
+            (standing.length > 0 ? ` · ${standing.join(" ")} built, not activated (every session) · /ext` : "") +
             adopted.map((part) => ` · ${part}`).join("") +
             (failed.length > 0 ? ` · ${failed.join(" ")} not built · /ext` : "") +
             // A different sentence, because it is a different repair: nothing
@@ -901,7 +919,7 @@ export function App(props: AppProps) {
     composer?.focus()
       // `/ext` may have moved a membership, pin, or activation while it was up,
       // and the draft card's tool face is read off those files plus the active
-      // manifests for composed `surface:"with"` tools.
+      // manifests for composed `surface:"auto"` tools.
     setPlanTick((tick) => tick + 1)
     void refreshComposedMembership()
   }
@@ -947,8 +965,8 @@ export function App(props: AppProps) {
 
   /**
    * What the next `session new` from this TUI would put on the model's face:
-   * the merged config pins, this TUI's own pin list, and `surface:"with"` tools
-   * from packages this TUI composes into every session.
+   * the merged config pins, this TUI's own pin list, and `surface:"auto"` tools
+   * from packages composed into every session started here.
    *
    * The composed entries are counted for display only. They are not passed as
    * `--pin`; the kernel derives them from the `--with` membership when the
@@ -1092,12 +1110,19 @@ export function App(props: AppProps) {
 
   /**
    * Everything the SCREEN adds to a top-level `session new`: one `--with` for
-   * each id in `[extensions] session_with`, plus `/ext`'s standing membership
-   * list (tui.md §5.8 / §5.10).
+   * each id in `[extensions] session_with` (tui.md §5.8 / §5.10).
    *
-   * `surface:"with"` tools do not appear here as pins. The kernel derives those
-   * native tool slots from the membership itself, so the TUI has one job: pass
-   * the membership it means.
+   * One list, where until T52 there were two — this one and `/ext`'s own
+   * `standing_with`. A package that belongs in every session says so in its
+   * manifest now (`apply: "auto"`), and the kernel composes it at `session new`
+   * whatever is driving; what is left here is the other direction, composing a
+   * package that did NOT ask, which is this front end's line to write.
+   *
+   * `surface:"auto"` tools do not appear here as pins: the kernel derives those
+   * native tool slots from the membership itself. A member's `surface:"manual"`
+   * tools DO — membership is not a tool face, so a package composed here whose
+   * entry point is `manual` (`agent`) needs the pin in the same argv, and that
+   * is `SessionMember.pins`, read off the version being composed.
    *
    * A package that cannot be resolved costs the session nothing: it starts
    * without it and says so, rather than not starting.
@@ -1110,6 +1135,7 @@ export function App(props: AppProps) {
    */
   const sessionExtras = async (): Promise<{ with?: string[]; pin?: string[] }> => {
     const withRefs: string[] = []
+    const pins: string[] = []
     const missing: string[] = []
     for (const id of props.style.settings.extensions.session_with) {
       const member = await sessionMemberOnce(id)
@@ -1118,18 +1144,12 @@ export function App(props: AppProps) {
         continue
       }
       withRefs.push(formatWithRef({ id: member.id, version: member.version }))
-    }
-    // …and this TUI's own standing membership list, the half of `/ext`'s Enter
-    // that composes packages into every session opened here (K8). BARE ids,
-    // unlike the bundled session_with entries above: those follow `current`
-    // exactly as the kernel's own `[extensions] with` does, so `/ext` rolling
-    // one back with `a` is honoured without touching this list.
-    for (const id of standingWithIds(props.statePath)) {
-      if (!withRefs.some((ref) => ref === id || ref.startsWith(`${id}@`))) withRefs.push(id)
+      for (const pin of member.pins) if (!pins.includes(pin)) pins.push(pin)
     }
     if (missing.length > 0) setNotice(`${missing.join(" & ")} not composed in · /ext for what it said`)
     return {
       ...(withRefs.length > 0 ? { with: withRefs } : {}),
+      ...(pins.length > 0 ? { pin: pins } : {}),
     }
   }
 

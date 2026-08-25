@@ -5,7 +5,7 @@
   "contributes": {
     "tools": [{
       "name": "ask",
-      "surface": "with",
+      "surface": "auto",
       "readonly": true,
       "description": "Ask the person driving this session one question, and stop. Call it only when the answer would change what you do next and you cannot find it yourself: a choice between two defensible paths, a fact only they have, a go-ahead for something you cannot take back. Ask the whole question in one message — they see this and nothing else of your reasoning — and give `options` when the answer is a choice, so it can be answered with one key. Nothing is decided by calling this and nothing waits on it: the answer arrives as the next message. Call it once, then end your turn; do not guess an answer and carry on.",
       "input": {

@@ -124,6 +124,10 @@ test "cli ext api: manifest and examples carry no document citations and walk sc
         "shell",     "NULYA_EXE", "NULYA_SESSION", "readonly",
         "commands",  "ui",        "timeout_ms",    "600",
         "ext trust",
+        // The membership axis's two words, and the placement vocabulary in
+        // full — the screen has to be readable without the docs.
+        "apply",     "auto",      "manual",        "internal",
+        "ext deactivate",
     }) |needle| {
         std.testing.expect(std.mem.indexOf(u8, perms.stdout, needle) != null) catch |err| {
             std.debug.print("`ext api manifest` never mentions '{s}'\n", .{needle});
@@ -131,12 +135,12 @@ test "cli ext api: manifest and examples carry no document citations and walk sc
         };
     }
 
-    // `permissions` was this topic's name; it still prints the same screen, so
-    // everything written against the old word keeps working for a version.
-    const alias = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "api", "permissions" });
-    defer alloc.free(alias.stdout);
-    try std.testing.expectEqual(@as(u8, 0), alias.code);
-    try std.testing.expectEqualStrings(perms.stdout, alias.stdout);
+    // `permissions` was this topic's name while the manifest had a field by
+    // that name. Both are gone, and so is the alias — a topic list that keeps
+    // every word it has ever used grows a museum in front of every reader.
+    const gone = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "api", "permissions" });
+    defer alloc.free(gone.stdout);
+    try std.testing.expect(!std.mem.eql(u8, perms.stdout, gone.stdout));
 
     const examples = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "api", "examples" });
     defer alloc.free(examples.stdout);

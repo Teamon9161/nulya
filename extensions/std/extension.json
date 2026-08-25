@@ -6,6 +6,7 @@
     "tools": [
       {
         "name": "read",
+        "surface": "manual",
         "readonly": true,
         "description": "Read a text file. Content comes back verbatim, without a line-number gutter: when you need to cite a line, count from the first line of the range the footer reports. Use offset/limit for large files: prefer a targeted window around code you have already located rather than reading an entire large file. Limits under 120 lines are widened to 120, so avoid tiny slices that would only require another round trip. If the tool reports the file unchanged since your last read, the content is already in your context — do not re-read; pass force=true only if you have a specific reason. Directories, binary files and files over 10 MB are refused with a hint.",
         "input": {
@@ -21,6 +22,7 @@
       },
       {
         "name": "write",
+        "surface": "manual",
         "description": "Create or overwrite a file. Prefer `edit` for modifying existing files. Overwriting an existing file requires having read its current version in full with `read` in this session (a file you wrote or appended to in this session already counts as read — no re-read needed); a file you have not read, have only partly read, or that changed on disk since you read it is refused with the reason.",
         "input": {
           "type": "object",
@@ -33,6 +35,7 @@
       },
       {
         "name": "append",
+        "surface": "manual",
         "description": "Append text to the end of a UTF-8 file, written exactly as given — no newline is added for you, so start with '\\n' if the file's last line must remain intact. Appending to an existing file requires having read its current version (a partial read counts, and so does having written or appended to it in this session); a missing file is created. For insertion in the middle of a file use `edit`.",
         "input": {
           "type": "object",
@@ -45,6 +48,7 @@
       },
       {
         "name": "edit",
+        "surface": "manual",
         "description": "Exact string replacement in a UTF-8 text file. `old_string` must match the current content exactly (whitespace included; LF and CRLF are reconciled with the file's own line endings) and must be unique unless replace_all is set — add surrounding context to make it unique rather than guessing. `target_line` selects one otherwise-ambiguous match by its 1-based starting line, taken from a previous ambiguous-match error; it cannot be combined with replace_all. Only edit text you have actually seen in this session — read or grep output both count — and whose surroundings you understand; if you are unsure of the exact content or of the impact of the change, read the file first. A separate read is not required when grep already showed you the exact text with enough context around it. The result echoes the edited region with line numbers, so there is no need to re-read the file afterwards.",
         "input": {
           "type": "object",
@@ -60,6 +64,7 @@
       },
       {
         "name": "grep",
+        "surface": "manual",
         "readonly": true,
         "description": "Search file contents with a regex (respects .gitignore). For a broad or unfamiliar search, start cheap: use files_only=true, or search without context and a small head_limit, to locate the relevant files first; once the likely file or directory is known, narrow with path/glob and then request context around the specific matches you need. Alternation (`foo|bar|baz`) is for closely related symbols that belong to the same targeted lookup, not for combining unrelated reconnaissance into one broad search — and avoid large context windows on directory-wide searches. An all-lowercase pattern matches case-insensitively; any uppercase in it makes the match exact. Pass fixed=true to search the pattern as a literal string (nothing to escape). Set files_only=true to list just the matching files with their match counts — the preferred first pass for a broad survey. Pull surrounding code with `context` (both sides), `before` or `after`. Filter files with `glob`; cap matches with head_limit (default 50) and page with offset. The regex is byte-level: classes, alternation, groups (including (?:)), quantifiers and anchors work; lookaround, backreferences and inline flags like (?i) do not — pass case_insensitive=true instead. Skips directory-scanned files over 512 KiB (an explicit file path may be up to 10 MiB), skips built/cache directories, and reports oversized skips when they explain an empty result.",
         "input": {
@@ -82,6 +87,7 @@
       },
       {
         "name": "glob",
+        "surface": "manual",
         "readonly": true,
         "description": "Find files by name pattern, e.g. **/*.zig or src/**/build.zig. Respects .gitignore and skips built/cache directories. Directory symlinks are skipped by default; set follow_symlinks=true to search their targets. Results sorted by modification time (newest first), capped at 200; page with offset.",
         "input": {

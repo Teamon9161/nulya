@@ -57,6 +57,10 @@ pub const plain_main_zig =
 /// minimal — one tool, an empty input schema — rather than
 /// `templates.manifestJson`, so the fixtures do not move when the scaffold's
 /// wording does.
+///
+/// `"surface": "manual"` because these fixtures exist for the PIN tests: only
+/// a `manual` tool can be pinned (DESIGN §5.1), and the default is `auto` —
+/// membership alone would put it on the face, which is a different test.
 fn fixtureManifestJson(alloc: std.mem.Allocator, id: []const u8, tool_name: []const u8) ![]u8 {
     return std.fmt.allocPrint(alloc,
         \\{{
@@ -66,6 +70,7 @@ fn fixtureManifestJson(alloc: std.mem.Allocator, id: []const u8, tool_name: []co
         \\  "contributes": {{
         \\    "tools": [{{
         \\      "name": "{s}",
+        \\      "surface": "manual",
         \\      "description": "A generated Nulya extension tool.",
         \\      "input": {{ "type": "object", "properties": {{}} }}
         \\    }}],

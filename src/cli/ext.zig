@@ -586,10 +586,39 @@ fn appendActivation(
     if (result.already_built and current != null) {
         return out.print(" (current stays {s})", .{current.?});
     }
+    // A package that declares `apply: "auto"` is a member of every new session
+    // the moment it HAS a `current` (DESIGN §5.1) — its system prompt in front
+    // of every model on this machine. `--activate` is a bulk convenience over a
+    // directory of drafts, and turning a mode on is not a bulk decision, so a
+    // package that has no `current` yet is built and left alone with the one
+    // command that says it out loud. (An id that already has one is not this
+    // case: it is already standing, and moving the pointer forward changes the
+    // version, not the reach.)
+    if (current == null and try declaresStandingMembership(alloc, io, root_dir, result)) {
+        return out.print(
+            " (not activated: it declares apply: auto, so activating makes it a member of every new session — `nulya ext activate {s}{s} {s}` says so)",
+            .{ if (mode.user) "--user " else "", result.id, result.version },
+        );
+    }
     try warnUserScope(alloc, io, result.id, result.version, mode.user);
     try st.activate(alloc, result.id, result.version);
     depositSessionNote(alloc, io, root_dir, result.id, result.version) catch {};
     try out.writeAll(" -> current");
+}
+
+/// Does the version just built declare `apply: "auto"` (DESIGN §5.1)? Read from
+/// the frozen manifest in the root it landed in. Unreadable reads as `false`:
+/// this decides whether to SKIP an activation, and a package that cannot say
+/// what it wants has not asked for the standing kind.
+fn declaresStandingMembership(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    root_dir: std.Io.Dir,
+    result: build_ext.BuildResult,
+) !bool {
+    var m = (try store.Store.init(io, root_dir).readVersionDeclaration(alloc, result.id, result.version)) orelse return false;
+    defer m.deinit();
+    return m.applyOf() == .auto;
 }
 
 /// `nulya ext prune [--user] [<id>] [--dry-run]` — drop the version directories a
@@ -1098,8 +1127,35 @@ fn extActivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     try printOut(alloc, io, "{s}: current -> {s} in {s}\n", .{ id, version, target });
     if (shadowed_by) |s| {
         try printOut(alloc, io, "note: not in effect — {s}@{s} in {s} shadows it\n", .{ id, s.version, search.roots.entries[s.root].spec });
+    } else {
+        try noteStandingMembership(alloc, io, ext_root, id, version);
     }
     return 0;
+}
+
+/// One stderr line when the package just activated declares `apply: "auto"`
+/// (DESIGN §5.1): activation is normally only "which version `<id>` means", and
+/// for this package it is also "every new session composes it from now on" —
+/// its system prompt in every prefix, its `surface: auto` tools on every face.
+/// The precedent is `warnUserScope`: the act is allowed and is not refused, but
+/// it must not be INVISIBLE. Said only when this copy is the one in effect, for
+/// the same reason the capability note is deposited only then.
+fn noteStandingMembership(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    ext_root: std.Io.Dir,
+    id: []const u8,
+    version: []const u8,
+) !void {
+    var m = (try store.Store.init(io, ext_root).readVersionDeclaration(alloc, id, version)) orelse return;
+    defer m.deinit();
+    if (m.applyOf() != .auto) return;
+    try printErrFmt(
+        alloc,
+        io,
+        "note: {s} declares apply: auto — every new session composes it as a standing member from now on; `nulya ext deactivate {s}` turns that off\n",
+        .{ id, id },
+    );
 }
 
 /// Say, on stderr, when a model running inside a session reaches OUT of that
@@ -1190,10 +1246,12 @@ fn extDeactivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
 ///
 /// Two more markers, and between them they answer "will a session have this?".
 /// `[tools skills prompt]` is what the version CONTRIBUTES, from its frozen
-/// manifest; `[with]` says this id is in the merged config's `[extensions] with`,
-/// which is the only standing way a package joins every session here (DESIGN
-/// §5.1). Without the second, `prompt` reads as a threat it is not: a system
-/// prompt costs a session nothing until something names its package.
+/// manifest, plus `standing` when that manifest says `apply: "auto"` — this
+/// package is in every new session for as long as it has a `current` (DESIGN
+/// §5.1). `[with]` says this id is in the merged config's `[extensions] with`,
+/// the person's own standing list. Without one of those two, `prompt` reads as
+/// a threat it is not: a system prompt costs a session nothing until something
+/// puts its package in one.
 /// Unreadable manifest → no contribution marker, never a failed listing.
 fn extList(alloc: std.mem.Allocator, io: std.Io) !u8 {
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -1267,7 +1325,8 @@ fn contributionMarker(alloc: std.mem.Allocator, roots: *const roots_mod.Roots, e
     const resolved = roots.resolveEntry(alloc, entry, .structural) catch return alloc.dupe(u8, "");
     defer resolved.deinit(alloc);
     const m = resolved.manifest;
-    if (m.tools.len == 0 and m.skills.len == 0 and m.system_prompts.len == 0) return alloc.dupe(u8, "");
+    const standing = m.applyOf() == .auto;
+    if (!standing and m.tools.len == 0 and m.skills.len == 0 and m.system_prompts.len == 0) return alloc.dupe(u8, "");
 
     var out: std.Io.Writer.Allocating = .init(alloc);
     errdefer out.deinit();
@@ -1277,6 +1336,9 @@ fn contributionMarker(alloc: std.mem.Allocator, roots: *const roots_mod.Roots, e
         .{ .on = m.tools.len != 0, .word = "tools" },
         .{ .on = m.skills.len != 0, .word = "skills" },
         .{ .on = m.system_prompts.len != 0, .word = "prompt" },
+        // Last, because it is not a contribution but what the package asks
+        // happen with the three before it.
+        .{ .on = standing, .word = "standing" },
     }) |part| {
         if (!part.on) continue;
         if (!first) try out.writer.writeByte(' ');
@@ -1509,13 +1571,11 @@ fn draftManifestAtPath(alloc: std.mem.Allocator, io: std.Io, arg: []const u8) !?
 /// from the code that implements it. `manifest` and `examples` stay short notes
 /// (authority, the manifest's three tiers, and CLI usage — not source that drifts).
 ///
-/// `permissions` was this topic's name while the manifest still had a
-/// `permissions` field. The field is gone and the topic is about the whole
-/// manifest, so the word moved; the old one keeps printing the same text for a
-/// version, because it is what everything written before this points at.
+/// The topic was called `permissions` while the manifest had a field by that
+/// name. Both are gone; `manifest` is what this is about.
 fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     const topic = if (args.len >= 1) args[0] else "protocol";
-    if (std.mem.eql(u8, topic, "manifest") or std.mem.eql(u8, topic, "permissions")) {
+    if (std.mem.eql(u8, topic, "manifest")) {
         try printRaw(io,
             \\Authority — what an extension tool may do, honestly:
             \\
@@ -1545,38 +1605,43 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             \\  `default`, so one version can carry a different script per platform; the
             \\  object form is script-only, and a host this build has no entry for is a
             \\  named refusal rather than a silent skip); `tools[].name` / `.input` /
-            \\  `.surface` (`pin` = model-facing and independently pinnable; `with` =
-            \\  model-facing only when the package is explicitly composed with `--with`;
-            \\  `driver` = for `nulya ext run`, not the model face in fresh sessions) /
-            \\  `.timeout_ms` (this tool's own cap on a MODEL-FACE call, default 30s,
-            \\  ceiling 600s); `skills`; `system_prompts`. Nothing says how the runtime is
-            \\  talked to, because there is one way: stdin is the call's arguments as one
-            \\  compact JSON object, NULYA_TOOL names the tool, stdout is the result taken
+            \\  `.surface`, three words about a tool in a package that IS a session
+            \\  member (`auto`, the default = it reaches the model as soon as the package
+            \\  does; `manual` = only when somebody pins this tool by name, and the only
+            \\  surface a pin accepts; `internal` = never on the model face, called
+            \\  through `nulya ext run`) / `.timeout_ms` (this tool's own cap on a
+            \\  MODEL-FACE call, default 30s, ceiling 600s); `apply` (`manual`, the
+            \\  default = this package joins the sessions that name it; `auto` = while it
+            \\  has a `current` it is a member of every new session on this machine —
+            \\  what a mode wants, and `nulya ext deactivate <id>` is how it stops);
+            \\  `skills`; `system_prompts`. Nothing says how the runtime is talked to,
+            \\  because there is one way: stdin is the call's arguments as one compact
+            \\  JSON object, NULYA_TOOL names the tool, stdout is the result taken
             \\  verbatim, and a non-zero exit is a failed call whose text is `exit <code>`
             \\  plus stderr — `nulya ext api protocol` is the whole contract.
             \\
-            \\  A manifest cannot say which sessions carry it. That is two decisions, and
-            \\  both are the person's, in config or on one command line: MEMBERSHIP
-            \\  (`[extensions] with`, or `session new --with <id>[@<version>]`) and the
-            \\  INDEPENDENT PIN FACE (`[registry] pinned_native_tools`, or `session new
-            \\  --pin ext:<id>/<tool>`, which accepts only `surface: pin` tools and brings
-            \\  its own package in). `surface: with` tools reach the model through explicit
-            \\  membership, not through a pin. `nulya ext activate` is on neither axis: it
-            \\  says which version `<id>` means, and nothing else. `nulya config show`
-            \\  prints both standing lists; `session new --bare` ignores them and composes
+            \\  Two axes decide what a session carries, and a manifest sits on neither:
+            \\  MEMBERSHIP (`[extensions] with`, or `session new --with <id>[@<version>]`)
+            \\  and the INDEPENDENT PIN FACE (`[registry] pinned_native_tools`, or
+            \\  `session new --pin ext:<id>/<tool>`, which accepts only `surface: manual`
+            \\  tools and brings its own package in). All `apply` does is give the
+            \\  MEMBERSHIP axis a default the author chose: `auto` means an activated
+            \\  package is a standing member here, and a person adds one the author left
+            \\  at `manual` with config just the same, or stops an `auto` one with `nulya
+            \\  ext deactivate <id>`. Reach is never something a package takes. `nulya ext
+            \\  activate` is otherwise only "which version `<id>` means". `nulya config
+            \\  show` prints both standing lists; `nulya ext list` marks a standing
+            \\  package `standing`; `session new --bare` reads none of it and composes
             \\  from its own flags alone.
             \\
             \\  DRIVER DECLARATIONS, parsed, frozen into the version, and never enforced by
             \\  the kernel: a claim for whoever DRIVES a session (a front end, `nulya ext
             \\  run`, a script) to read and act on however it likes. Absent reads as null,
             \\  "the package did not say", never a default value: `tools[].readonly` (this
-            \\  tool only reads, in the package's own words); legacy `tools[].audience`
-            \\  (`"model"` or `"driver"`) is accepted for older manifests and folded into
-            \\  `surface` (`driver` stays driver, `model`/absent becomes `pin`; explicit
-            \\  `surface` wins); `policy`, `{"readonly": true}` — one narrowing a
-            \\  package can ask an approval policy for while it is a session member. There
-            \\  is no key that widens anything: a package that could add to an allow table
-            \\  would gain authority just by being composed in.
+            \\  tool only reads, in the package's own words); `policy`, `{"readonly": true}`
+            \\  — one narrowing a package can ask an approval policy for while it is a
+            \\  session member. There is no key that widens anything: a package that could
+            \\  add to an allow table would gain authority just by being composed in.
             \\
             \\  FRONT-END DECLARATIONS, open vocabularies: the kernel checks only the
             \\  shape, never the word, so a word this build has never heard of is simply
@@ -1628,16 +1693,25 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             \\  nulya ext build .nulya/extensions/my.helper    # prints v-<hash>; the version is immutable
             \\  nulya ext run my.helper@v-<hash> do_thing --arg name=world    # try it before anything else sees it
             \\  nulya ext activate my.helper v-<hash>         # `current` points at it; CLI callers need nothing more
-            \\  nulya session new --pin ext:my.helper/do_thing  # the NEXT session carries it as a native tool
+            \\  nulya session new --with my.helper             # the NEXT session carries it: a scaffolded tool is
+            \\                                                 # `surface: auto`, so membership is all it needs
             \\  nulya ext activate my.helper v-<older>        # going back is the same verb: a pointer move, never a rebuild
             \\
+            \\  # A tool a person assembles by hand instead: write `"surface": "manual"` on
+            \\  # it, and membership alone will not put it in front of a model.
+            \\  nulya session new --pin ext:my.helper/do_thing  # the pin brings its package in too
+            \\
             \\  # A mode — a package a session should CHOOSE, not one every session lives in.
-            \\  # Nothing in the manifest marks it: it is simply left out of `[extensions]
-            \\  # with`, so it reaches only the sessions that name it.
+            \\  # Nothing in the manifest marks it: `apply` is absent, which means `manual`,
+            \\  # so it reaches only the sessions that name it.
             \\  nulya ext build extensions/evolution          # prints v-<hash>
             \\  nulya ext activate evolution v-<hash>         # `evolution` now means this version
             \\  nulya session new --with evolution            # this session wears it, at `current`
             \\  nulya session new --with evolution@v-<hash>   # or name a build, activated or not
+            \\
+            \\  # A mode you want everywhere: say `"apply": "auto"` at the top level of the
+            \\  # manifest, and activating it IS installing it — every new session composes
+            \\  # it until `nulya ext deactivate` says otherwise.
             \\
             \\  # Every workspace on this machine, and the one-time trust of a store.
             \\  nulya ext build extensions/guide --user
@@ -1673,15 +1747,15 @@ test "every manifest parse/validate error is a draft fault; a host fault is not"
     // The whole surface `manifest.parse` and `Manifest.validate` can produce,
     // so `ext build` answers with a sentence rather than a stack trace.
     for ([_]anyerror{
-        error.InvalidJson,               error.NotAnObject,        error.MissingField,
-        error.WrongType,                 error.UnsupportedSchema,  error.InvalidId,
-        error.MissingRuntime,            error.InvalidEntry,       error.InvalidInterpreter,
-        error.NoContributions,           error.InvalidToolName,    error.ReservedToolName,
-        error.DuplicateToolName,         error.InvalidTimeout,     error.InvalidSurface,
-        error.InvalidAudience,           error.InvalidSkillPath,   error.DuplicateSkillPath,
-        error.InvalidSystemPromptPath,   error.DuplicateSystemPromptPath, error.InvalidCommandName,
-        error.InvalidCommandAction,      error.UnknownCommandTool, error.InvalidUiHost,
-        error.InvalidUiEntry,            error.InvalidUiApi,
+        error.InvalidJson,             error.NotAnObject,               error.MissingField,
+        error.WrongType,               error.UnsupportedSchema,         error.InvalidId,
+        error.MissingRuntime,          error.InvalidEntry,              error.InvalidInterpreter,
+        error.NoContributions,         error.InvalidToolName,           error.ReservedToolName,
+        error.DuplicateToolName,       error.InvalidTimeout,            error.InvalidSurface,
+        error.InvalidApply,            error.InvalidSkillPath,          error.DuplicateSkillPath,
+        error.InvalidSystemPromptPath, error.DuplicateSystemPromptPath, error.InvalidCommandName,
+        error.InvalidCommandAction,    error.UnknownCommandTool,        error.InvalidUiHost,
+        error.InvalidUiEntry,          error.InvalidUiApi,
     }) |err| {
         std.testing.expect(isManifestFault(err)) catch |e| {
             std.debug.print("{s} should be reported as a bad manifest\n", .{@errorName(err)});

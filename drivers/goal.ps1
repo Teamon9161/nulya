@@ -1,5 +1,6 @@
-# `/goal` — the first nulya driver, and the first consumer of `--pin`. It pins the
-# bundled `handoff` tool into a new session and steps it one step at a time; when
+# `/goal` — the first nulya driver. It composes the bundled `handoff` package
+# into a new session — its one tool is `surface: auto`, so membership is the
+# whole of putting it in front of the model — and steps it one step at a time; when
 # the model proposes a handover (a file under .nulya/handoffs/<session>-*.md) it
 # forks through the bundled `compact` tool and carries on in the child: the model
 # proposes, the driver decides. Nothing here parses JSON.
@@ -27,7 +28,7 @@ if (-not $goal) { [Console]::Error.WriteLine('usage: goal.ps1 [--profile P] [--m
 if (-not $href) { $href = 'handoff@' + [regex]::Match((& $N ext build "$repo/extensions/handoff") -join "`n", 'v-[0-9a-f]+').Value }
 if (-not $cref) { $cref = 'compact@' + [regex]::Match((& $N ext build "$repo/extensions/compact") -join "`n", 'v-[0-9a-f]+').Value }
 $pargs = @(); if ($profileName) { $pargs = @('--profile', $profileName) }
-$id = (& $N session new @pargs --with $href --pin ("ext:" + ($href -replace '@.*$', '') + "/handoff")).Trim(); if (-not $id) { [Console]::Error.WriteLine('session new failed'); exit 1 }
+$id = (& $N session new @pargs --with $href).Trim(); if (-not $id) { [Console]::Error.WriteLine('session new failed'); exit 1 }
 Write-Output "session $id"
 & $N session append $id @"
 You have a tool named handoff. Work in phases: the ones this goal names, otherwise

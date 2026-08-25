@@ -115,6 +115,8 @@ test("shell and extension tools each get their own card", () => {
   expect(ext.kind).toBe("ext")
   // The first argument is the subject and loses its key (T26); the rest keep theirs.
   expect(ext.head).toBe("lint_zig · src")
+  // `{path, offset?, limit?}` is a file TARGET, not three arguments: it reads as
+  // one (`pathArgsSummary`), which is why the plumbing keys never appear.
   const two = describeTool(
     { tool: "read", args: JSON.stringify({ path: "src/emit.zig", offset: 40 }), output: "" },
     glyphs,

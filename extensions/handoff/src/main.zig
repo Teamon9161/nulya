@@ -20,8 +20,8 @@
 //! costs a `max_tools` slot and prefix tokens in sessions that will never use it
 //! (PLAN §3.4.1). It ships with the repo, DEFAULT-OFF; a driver that wants it
 //! composes the package explicitly: `session new --with handoff@<v>`. Its
-//! manifest declares `surface: "with"`, so that membership is what puts the tool
-//! on the model face.
+//! manifest declares `surface: "auto"`, so that membership is the whole of
+//! putting the tool on the model face — no second flag.
 //!
 //! **How a driver consumes it.** The file on disk IS the proposal. A driver
 //! (`drivers/goal.sh` / `drivers/goal.ps1`, PLAN §3.6) steps the session, then

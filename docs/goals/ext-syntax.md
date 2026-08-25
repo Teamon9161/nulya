@@ -1,0 +1,69 @@
+# Goal · ext-syntax：`surface` 三个新词、缺省 `auto`、包级 `apply`、legacy 全删（2026-08-25）
+
+> 这是一份**执行契约 + 落地记录**，不是设计文档。地图和 physics 在 [CLAUDE.md](../../CLAUDE.md)，现状在 [DESIGN.md](../DESIGN.md) §5.1 / §7.2.1 / §7.8 / §14。
+> 前两轮是 [ext-review.md](ext-review.md)（surface / wire / 三层听众）与 [ext-review-2.md](ext-review-2.md)（`activation` 删除、manifest 瘦身），本轮接着它们。
+> **项目 pre-release，本轮明确不要向后兼容**：旧语义的兼容代码一并删净，不打补丁。
+
+## 0. 结论（一段）
+
+两轮评审之后 manifest 的**结构**已经对了（三层听众、两根轴、一种 wire），剩下的是**词**和**缺省**两处不对：
+
+1. **`surface` 的三个词是按机制命名的，不是按问题命名的。** `pin` / `with` / `driver` 各自指向一条 CLI 路径（`--pin` / `--with` / `ext run`），于是同一个词在两个位置意思不同——`--with` 是一个动词（"把这个包组合进来"），`surface: "with"` 是一个属性（"我随成员上台"），而 `pin` 既是名词又是动词。新的三个词 `auto` / `manual` / `internal` 回答的是同一个问题：**这个包已经是成员了，这个 tool 怎么到模型面前**。
+2. **缺省 `pin` 是历史包袱。** 它是 `surface` 这个字段出现之前的兼容值（那时"model-facing 且可 pin"是唯一的形状）。今天它的效果是：`nulya ext init` 脚一个扩展出来、build、activate、`--with` 进一场——**模型看不见它**，还要再学会 `--pin ext:<id>/<tool>` 这条第二条路。缺省应该是 `auto`：一个人特意组合进来的包，它的 tool 就是他想用的那些。
+3. **manifest 说不出"装上我意味着什么"。** `activation` 被删是对的（reach 是人的决定），但它删掉的是**否决权**（默认在每一场里，包写 `on_request` 才退出来）。反过来那一半——一个纯 system prompt 的"模式"包，装上就是要它在每一场里——今天要人在 config 再写一行 `[extensions] with`，而这一行与"装它"是同一个意图的两半。`apply: "auto" | "manual"`（缺省 `manual`）给成员那根轴一个**作者写的缺省**，而人两个方向的覆盖都还在（加：`[extensions] with`；撤：`ext deactivate`）——所以它不是 `activation` 回来了。
+
+## 1. 已定决策
+
+### A · `surface` 改名 + 缺省变更
+
+- **`Surface` = `auto` | `manual` | `internal`**（原 `with` / `pin` / `driver`）。`fromString` **只认这三个**；旧词与任何别的词一样是 `InvalidSurface`。
+- **缺省 `auto`**（原 `pin`）。`ToolSpec.surfaceOf()` 无字段时回 `.auto`；这是一个**缺省**不是"没说"（与 `readonly` 的 `null ≠ false` 相反：每个 tool 都有一个位置，没有让 null 表示的东西）。
+- **`Audience` 整个删掉**：enum、`ToolSpec.audience`、`audienceOf`、`surfaceOf` 里的折叠、`InvalidAudience`。`audience` 从此是普通未知键。
+- 消费者：`composition.zig`（`!= .with` → `!= .auto`、`fresh_pin ... != .pin` → `!= .manual`）、`cli/session.zig` 的 `PinToolNotPinnable` 文案、`cli/ext.zig` 的 `ext api manifest`、`store.zig` 的注释。
+- 自带八个包：`{handoff, ask, plan}` 的 `"with"` → `"auto"`；`{plan, agent}` 的 `"driver"` → `"internal"`；`compact` 的 `"audience": "driver"` → `"surface": "internal"`；**`std` 六个 tool 各显式加 `"manual"`**（它们靠 `pinned_native_tools` 上台，缺省变了不写就不可 pin）；**`agent/agent` 也加 `"manual"`**（同一条理由：它由 driver 每次 `--pin` 决定带不带，缺省 `auto` 会让 `--with agent` 自动带上它，而那条 pin 会变成 `PinToolNotPinnable`）。
+- **模板不写 `surface`**（缺省 `auto` 正是想要的）：`ext init` 脚出来的扩展 `--with` 一下就在模型面前。`ext api examples` 的走查因此从 `--pin` 改成 `--with`，`--pin` 留一条单独的、点名 `surface: "manual"` 的例子。
+
+### B · 包级 `apply`
+
+- **manifest 顶层**新增可选 `apply: "auto" | "manual"`（缺省 `manual`），闭合词表，别的词是 `InvalidApply`。顶层而不是 `contributes` 下：它不是一项贡献，是作者对"装上我"的解释。随 manifest 一起冻结（它就在 manifest 里）。
+- **`composition.resolveFreshExtensions` 的第三个成员来源**（`resolveApplyAutoExtensions`），**排在最前**所以点名的能覆盖它（`unionWith` 后者胜）。
+- **两段式读**，这是本条的核心设计：`Roots.listActive` 拿到每个有 `current` 的 id（首个持有者胜）→ 对每个**只读一次冻结的 `extension.json`**（新的 `Store.readVersionDeclaration`：parse + validate，**不查 seal / 不重算 digest / 不查声明路径**）问 `apply` → 只有答 `auto` 的才走一次普通 `.sealed` 解析真正进 composition。理由：一屋子普通包的代价是每个一次小文件读；而**一个坏包不会因为这台机器"持有"它就让每一场 session 起不来**，那正是当年 discovery 被删的原因。
+- **失败纪律**：说了 `auto` 而 `current` 解析不出来 → `ActiveExtensionBroken` 硬失败，stderr 点名版本 + 两条出路（`ext activate <id> <older>` / **`ext deactivate <id>`**，后者是这一层特有的修法）。**manifest 都读不出来 → 跳过**（什么都没主张过，也没人点名）。
+- **`session new --bare` 关掉整层**（`composition.Options.apply_auto = false`）。
+- **header schema 一个字节不变**：header 记的是解析后的成员，`apply:auto` 进来的与 `--with` 进来的逐字节同形；resume 路径零改动。
+- **投影**：`ext list` 的 `[tools skills prompt]` 括号里多一个 `standing`；`ext inspect` 打的就是 manifest 原文，`apply` 自动在里面。
+- **`ext activate`** 对 `apply:auto` 的包在 stderr 多说一句后果 + 指 `ext deactivate`（只在这份拷贝**真的生效**时说，与 capability note 的投递条件同一判据）。先例是 `activate --user` 的跨 workspace 提示：不拦，但不许悄悄发生。
+- **`ext sync --activate` 永不激活一个 `apply:auto` 且当前无 `current` 的包**：`--activate` 是一次对一整个目录的批量便利，而"打开一个模式"不是批量决定（T31 那个 bug 的同一条理由）。被跳过的在自己那一行说明并给出显式命令。已经有 `current` 的不属于这一档（它已经常驻，移指针改的是版本不是 reach）。
+- **trust gate 不变**：`apply:auto` 不绕过任何门。
+
+### C · legacy 全删
+
+- 删 `Manifest.legacy_activation` / `legacy_permissions` / `legacy_command_action` / `legacy_ui` / `legacy_wire` 五个字段与它们的解析；删 `build_ext.noteLegacyShapes` 与调用点。`activation` / `permissions` / `runtime.wire` 从此就是普通未知键，**build 一个字都不说**。
+- 删 `commands[].action` 的字符串小语言（→ `WrongType`）；删 `contributes.ui` 的平铺形 `{entry, api}`（→ `WrongType`，读成"一个叫 `entry` 的宿主"）。
+- `ext api` 的 `permissions` 旧 topic 名删掉，只留 `manifest`。
+- 理由（写进 DESIGN §7.2.1 文末）：一个版本期的成本是**每个读 manifest 的人同时装两种形状**，而收益的对象不存在——仓库外还没有人写过 extension，仓库内的八个自带包与两个模板每次一起改。这是 §7.3 删掉 jsonrpc 那条路时的同一把尺子。
+
+## 2. 不做
+
+- 不改 header schema（`composition.active` 的键名照旧）。
+- 不改 `pinned_native_tools` / `[extensions] with` 的名字或语义。
+- **不碰 `tui/`**（前端跟随由主会话另行安排，见 §4 的遗留项）。
+- 不给 `apply` 加第三个词（`never` 之类）：`manual` 已经是"只有点名才进"，而"永远不进"没有 consumer。
+- 不为 `apply:auto` 造第二种 header 记法或第二种 resume 路径。
+
+## 3. 落地记录（2026-08-25）
+
+- **A · surface 三个词 + 缺省 auto** ✅ `manifest.zig`：`Surface{auto,manual,internal}`、`surfaceOf` 缺省 `.auto`、`Audience` / `ToolSpec.audience` / `audienceOf` / `InvalidAudience` 删除。`composition.zig` 两处判断 + 模块注释 + `Options` 文档；`cli/session.zig` 的 `PinToolNotPinnable` 文案改指 `--with`（tool 是 `auto`）/ `ext run`（tool 是 `internal`）。八个自带包按 §1 A 更新（含 `std` 六个与 `agent/agent` 的显式 `manual`）。模板不写 `surface`。
+- **A · 一处新推论** ✅ `composition.isFullMember`：`surface:"auto"` 只对**完全成员**展开——被人点名的（`opts.with`）或自己声明 `apply:"auto"` 的；pin 蕴含进来的那个成员**不是**完全成员（那条 pin 要的是一个 tool）。从前这个判断写成"遍历 `opts.with`"，现在多了第二种完全成员，所以抽成一个具名判据、`resolveFreshBindings` 改成遍历 `resolved` 一次。
+- **B · `apply`** ✅ `manifest.Apply` + `Manifest.apply`（顶层，as written）+ `applyOf()` + `InvalidApply`；`Store.readVersionDeclaration`（无 integrity 的声明读）；`composition.resolveApplyAutoExtensions` + `reportBrokenApplyAuto` + `Options.apply_auto`；`cli/session.zig` 的 `--bare` 关掉它；`cli/ext.zig` 的 `contributionMarker` 加 `standing`、`noteStandingMembership`（activate）、`declaresStandingMembership`（sync 跳过）。
+- **C · legacy 全删** ✅ 五个 `legacy_*` 字段、`legacyWire`、`noteLegacyShapes` 与 `build_ext.zig` 里 `builtin` 的最后一个用处；`dupAction` 的字符串分支、`dupUi` 的平铺分支；`ext api` 的 `permissions` 别名。
+- **D · 测试** ✅ `manifest.zig` 单测重写（surface 三词 + 旧词被拒 + apply 两词 + 退役键是普通未知键）；`composition.zig` 单测按新词改名与改值，`writeToolExtension` 这个**pin 夹具**显式写 `manual`；e2e：`support.fixtureManifestJson` / `gate_pin.buildScriptPackage` / `extension.scaffoldAndBuildScript` / `script_wire` 的 `elsewhere` 四个 pin 夹具显式写 `manual`，`script_wire` 的 wire 走查与 `extension.zig` 的 handoff / plan 走查改成 `--with`（那些包的 tool 是 `auto`），退役键的 e2e 从"build 说一句"改成"build 什么都不说"。新增 `tests/e2e/ext_cli.zig` 的四条 apply 覆盖。
+- **E · 文档** ✅ DESIGN §5.1（成员三条来路 + `apply` 语义与立场 + resolver 的两段式代价 + 更新后的表 + `--bare` + header 不变）· §7.2.1（`surface` 三词与缺省、顶层 `apply`、validate 清单、删掉 `audience` 段、新增文末"曾经有、为什么退场"表）· §7.8（八个包的 surface 现状）· §14（`ext api` 三个 topic、`--pin` / `--with` 两条、mode 三种投放）；`extensions/guide/skills/guide/SKILL.md`（surface 三词、`apply`、两根轴那段、mode 那条、最短配方多一行 `--with`）；`cli/ext.zig` 的 `ext api manifest` / `examples` 内嵌文本。**CLAUDE.md 由主会话统一更新**（本 lane 不动）。
+
+- **F · 收尾（同日第二轮）** ✅ `ext api manifest` 的 driver 声明段与 kernel 段重排（删掉旧 `audience` 那半留下的断行）；`cli/common.zig` 的一屏 usage 两行——`--bare` 改成"三张常驻表一张都不读"、`ext deactivate` 点出它同时关掉 `apply: auto`。仓库里最后一批旧词：`extensions/{handoff,ask}/src/main.zig` 与 `ask/README.md` 的 `surface: "with"` → `"auto"`、`extensions/plan/{src/main.zig,README.md}` 的 `"driver"` → `"internal"`（这三个包的 draft 因此换 version id，符合预期）；DESIGN §11 的 handoff 那条与 `drivers/goal.*` 那条不再写 `--pin ext:handoff/handoff`（它的 tool 是 `auto`，一个 flag 就够）；PLAN §3.4.1 / §1 M2c / §3.3 三处"`--pin` 的第一个真实 consumer"改成今天的真实名单（`std` 六个 + `agent/agent`）并注明修正日期。
+- **G · 新增 e2e** ✅ `tests/e2e/ext_cli.zig`：`apply: auto` 的包 `current` 坏掉 → `session new` **硬失败**且 stderr 点名 id / 版本 / `apply: auto` / `ext deactivate <id>`，而同样坏掉、但没说 `apply` 的包**照旧被跳过**——这正是两段式读（`Store.readVersionDeclaration` 无 integrity，只答"你说了吗"）买来的那条性质，之前只有设计文档说，没有钉子钉住。
+
+## 4. 遗留（本 lane 不做，交主会话）
+
+- **`tui/` 跟随**：`tui/src/nulya/files.ts` 的 `toolSurfaceOf` 仍认 `pin` / `with` / `driver` 并把别的词折成 `pin`，所以新词下 `pinTools` / `withTools` / `driverTools` 三个投影全错（都落进 `pinTools`）；`Contributions` 也还没有 `apply`。`/ext` 的 tools pane 与 T33 的 driver 折叠都读这三个投影。
+- **`--with X --pin ext:X/tool` 这个组合在 TUI 里已经是坏的，与本轮无关**：`7b1612f`（improve tui）把 `handoff` / `plan` 的 tool 改成 `surface: "with"` 时没有同步 TUI 与 e2e，于是 `tests/e2e/extension.zig` 的 handoff / plan 两条在本轮之前就是红的（实测 `git stash` 后仍红）。本轮把那两条 e2e 改成 `--with`（正确的新写法）；TUI 侧 `tui.toml [extensions] session_with` 那条路径仍会传一个会被拒的 `--pin ext:handoff/handoff`，修法是删掉那个 pin。

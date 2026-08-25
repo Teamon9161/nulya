@@ -34,7 +34,7 @@ import { createPluginHost, type PluginHost } from "../src/plugins/host.ts"
 import { parseExtNote, wrapExtNote } from "../src/extnote.ts"
 import { runCompact } from "../src/compact.ts"
 import { rememberModel } from "../src/state/tui_state.ts"
-import { builtContributions, bundledDraftPath, pinsOf, standingWith } from "../src/extensions.ts"
+import { autoActivatable, builtContributions, bundledDraftPath, pinsOf } from "../src/extensions.ts"
 import {
   extBuild,
   extSetCurrent,
@@ -191,49 +191,41 @@ const first_plan = [
 ].join("\n")
 
 /**
- * The two packages are a mode and a capability, and the SHAPE of each says so
- * — no manifest field does, because reach is not the package's to declare
- * (DESIGN §5.1, K8).
+ * The two packages are a mode and a capability, and the SHAPE of each says so.
  *
  * `plan` is a mode: it carries a system prompt, so wearing it says what THIS
  * session is — a persona and a read-only stance — and that is a decision
- * somebody makes before the work starts, one `/plan` (or `--with`) at a time
- * (T1, ext-review-2 §3b) — never `/ext`'s Enter, which would put it in front
- * of every session from this front end whether anybody asked for the persona
- * or not. `ask` is a capability: one tool, no prompt, because nobody can
- * decide in advance that a question will come up, and its `/ask` command
- * still needs standing membership the way a mode's `/<id>` no longer does.
+ * somebody makes before the work starts, one `/plan` (or `--with`) at a time.
+ * `ask` is a capability: one tool, no prompt, because nobody can decide in
+ * advance that a question will come up, and `/ask` is the command it declares
+ * to bring itself into the session that needs it.
  *
- * That difference is what `/ext` reads to decide whether its switch must also
- * compose the package (`standingWith`), so it is asserted against the real
- * frozen manifests rather than described.
+ * What NEITHER of them says is `apply: "auto"` (T52) — the one field that
+ * would put a package in every session on this machine — so `/ext`'s Enter on
+ * either is a pointer move and nothing else. Asserted against the real frozen
+ * manifests rather than described.
  */
-test.skipIf(!has_zig)("plan is a mode and ask is a capability, and their shapes say which", async () => {
+test.skipIf(!has_zig)("plan is a mode and ask is a capability, and neither asks to be in every session", async () => {
   const root = join(process.env["NULYA_HOME"]!, "extensions")
   const plan = (await builtContributions(ws, root, "plan", plan_version))!
   const ask = (await builtContributions(ws, root, "ask", ask_version))!
 
   expect(plan.systemPrompts.length).toBeGreaterThan(0)
-  // A prompt: `/ext`'s Enter must NEVER write a standing `with` entry for it,
-  // whatever else the package contributes (`plan` also has a `ui` panel here)
-  // — a mode's standing reach is a person's explicit config decision, not a
-  // keypress on this row (T1). The panel still works from a `/plan` tab: that
-  // session composes `plan` through its own `--with`, not through the
-  // standing list this switch used to write.
-  expect(standingWith(plan)).toBe(false)
-  expect(pinsOf(plan)).toEqual(["ext:plan/propose", "ext:plan/todo"])
+  expect(plan.apply).toBe("manual")
+  expect(autoActivatable(plan)).toBe(true)
+  // Its two model tools are `surface: "auto"`: they arrive with the membership
+  // `/plan` creates, and a pin naming one would be refused outright — so the
+  // switch writes none.
+  expect(plan.autoTools).toEqual(["propose", "todo"])
+  expect(pinsOf(plan)).toEqual([])
 
   expect(ask.systemPrompts).toEqual([])
-  // One key in `/ext` is "the model may ask me", in every session from now on.
-  expect(pinsOf(ask)).toEqual(["ext:ask/ask"])
-  // It gets a standing `with` entry too, for a different reason than a prompt
-  // would: not a system prompt, its `/ask` command. That entry is redundant
-  // with the pin — a pin brings its package in by itself — and harmless:
-  // naming one id twice composes it once (`composition.unionWith`). The
-  // alternative would be this front end deciding which of a package's
-  // member-only contributions "really" needs membership, which is a judgement
-  // it has no standing to make about a package it has never heard of.
-  expect(standingWith(ask)).toBe(true)
+  expect(ask.apply).toBe("manual")
+  // Same shape, one tool: `/ask` composes the package and the tool comes with
+  // it. Nothing to pin, and nothing standing — which is why `ask` is reached by
+  // typing its name rather than by a checkbox.
+  expect(ask.autoTools).toEqual(["ask"])
+  expect(pinsOf(ask)).toEqual([])
   expect(ask.commands.map((c) => c.name)).toEqual(["ask"])
 })
 
@@ -289,7 +281,7 @@ test.skipIf(!has_zig)("plan: /with puts the package AND its tools into the sessi
   // Membership: the version is in the composition, frozen.
   expect(started.composition.active.some((one) => one.startsWith("plan@"))).toBe(true)
   // …and the face: both model tools, beside the one builtin. `approve` is the
-  // package's own `surface: "driver"` and stays off it.
+  // package's own `surface: "internal"` and stays off it.
   expect(started.composition.native_tools).toContain("ext:plan/propose")
   expect(started.composition.native_tools).toContain("ext:plan/todo")
   expect(started.composition.native_tools).not.toContain("ext:plan/approve")

@@ -11,7 +11,6 @@
 //! ~90MB embed.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const manifest = @import("../manifest.zig");
 const integrity = @import("../integrity.zig");
 const ext_skills = @import("../skills.zig");
@@ -23,42 +22,6 @@ pub const exe_suffix = integrity.exe_suffix;
 const manifest_file = integrity.manifest_file;
 const package_dir = integrity.package_dir;
 const seal_file = integrity.seal_file;
-
-/// One line per manifest shape this draft writes that the current schema no
-/// longer does. Each is harmless to the build — a removed key is an unknown
-/// key, and an old spelling is folded by `manifest.parse` — but silence would
-/// leave the author believing something still reads what they wrote.
-///
-/// stderr, so `ext build`'s stdout stays the version id a caller parses, and
-/// `reportBrokenActive`'s reason: the id belongs in the sentence and an error
-/// code cannot carry it. Best effort — a note that cannot be printed never
-/// fails a build.
-fn noteLegacyShapes(alloc: std.mem.Allocator, io: std.Io, m: manifest.Manifest) !void {
-    // Unit tests build packages with these shapes on purpose to assert they
-    // are accepted; the real binary (e2e included) always prints them.
-    if (builtin.is_test) return;
-    // Reach is the person's decision now, not the author's (DESIGN §7.2.1).
-    if (m.legacy_activation) try noteLegacyShape(alloc, io, m.id, "still declares \"activation\"; that key is no longer read — a package joins every session only when [extensions] with in config names it");
-    // A declaration nothing enforced; the shape a sandbox needs is the
-    // sandbox's to decide (PLAN §3.8).
-    if (m.legacy_permissions) try noteLegacyShape(alloc, io, m.id, "still declares \"permissions\"; that key is no longer read — an unenforced footprint was ceremony, and a sandbox will define its own shape");
-    if (m.legacy_command_action) try noteLegacyShape(alloc, io, m.id, "writes a command \"action\" as a string; write the object instead — {\"with\": true}, {\"run\": \"<tool>\"}, {\"skill\": \"<ref>\"}. The string is read for one more version");
-    if (m.legacy_ui) try noteLegacyShape(alloc, io, m.id, "writes \"contributes.ui\" without a host; key it by front end instead — {\"tui\": {\"entry\": …, \"api\": …}}. The flat form is read as \"tui\" for one more version");
-    // One wire now, so a runtime no longer picks one. The two words a draft may
-    // still carry asked for different things, so each is answered in its own.
-    if (m.legacy_wire) |w| {
-        if (std.mem.eql(u8, w, "plain"))
-            try noteLegacyShape(alloc, io, m.id, "still declares \"runtime.wire\"; that key is no longer needed — plain is the one wire every call speaks")
-        else
-            try noteLegacyShape(alloc, io, m.id, "still declares \"runtime.wire\"; that wire is gone and this runtime will be called the plain way: stdin is the arguments object, stdout verbatim is the result, and the exit code is success — see `nulya ext api protocol`");
-    }
-}
-
-fn noteLegacyShape(alloc: std.mem.Allocator, io: std.Io, id: []const u8, what: []const u8) !void {
-    const line = try std.fmt.allocPrint(alloc, "note: {s} {s}\n", .{ id, what });
-    defer alloc.free(line);
-    std.Io.File.stderr().writeStreamingAll(io, line) catch {};
-}
 
 pub const BuildResult = struct {
     /// The manifest's id — which `<id>/` under the store root this landed in.
@@ -248,7 +211,6 @@ fn build(
     var m = try manifest.parse(alloc, manifest_bytes);
     defer m.deinit();
     try m.validate();
-    try noteLegacyShapes(alloc, io, m);
 
     const snapshot = try integrity.collectPackageSnapshot(alloc, io, workspace, ext_dir_rel, manifest_bytes, m);
     defer snapshot.deinit(alloc);

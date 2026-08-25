@@ -9,7 +9,7 @@
  * still tested, because the paths that DO create one early still exist.
  */
 import { afterAll, beforeAll, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { testRender } from "@opentui/solid"
@@ -31,6 +31,15 @@ beforeAll(() => {
   ws = tempWorkspace()
   const run = (args: string[]) => Bun.spawnSync({ cmd: [ws.bin, ...args], cwd: ws.dir, env: process.env })
   run(["ext", "init", "--script", "lint"])
+  // The template writes no `surface`, which now means `auto` — a tool that
+  // arrives with membership and that no pin may name (DESIGN §7.2.1, T52). The
+  // pin test below needs a pinnable one, so the fixture says `manual` out loud.
+  const draft = join(ws.dir, ".nulya", "extensions", "lint", "extension.json")
+  const manifest = JSON.parse(readFileSync(draft, "utf8")) as {
+    contributes: { tools: Array<Record<string, unknown>> }
+  }
+  manifest.contributes.tools[0]!["surface"] = "manual"
+  writeFileSync(draft, JSON.stringify(manifest, null, 2))
   const built = run(["ext", "build", ".nulya/extensions/lint"])
   lint_version = /v-[0-9a-zA-Z]+/.exec(built.stdout.toString())?.[0] ?? ""
   run(["ext", "activate", "lint", lint_version])
@@ -73,7 +82,7 @@ test("a draft creates nothing on disk; the screen says so and the store agrees",
   }
 }, 60_000)
 
-test("a draft counts surface-with tools from config-level extension membership", async () => {
+test("a draft counts surface-auto tools from config-level extension membership", async () => {
   const box = tempWorkspace()
   try {
     const root = join(box.dir, ".nulya", "extensions", "assist")
@@ -85,7 +94,7 @@ test("a draft counts surface-with tools from config-level extension membership",
         schema: "nulya.extension/v2",
         id: "assist",
         runtime: { entry: "src/run.sh", interpreter: "sh" },
-        contributes: { tools: [{ name: "ask", input: {}, surface: "with" }] },
+        contributes: { tools: [{ name: "ask", input: {}, surface: "auto" }] },
       }),
     )
     const run = (args: string[]) => Bun.spawnSync({ cmd: [box.bin, ...args], cwd: box.dir, env: process.env })

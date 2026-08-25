@@ -17,8 +17,9 @@
  *    session's `session new --pin`), so there is no "next" for a table to
  *    predict — these counts are the evidence for that judgement, not it.
  *  - the SWITCH. `Enter` on an id turns the extension on or off for the next
- *    session: on = point `current` at a built version AND pin every tool it
- *    declares; off = take those pins back and clear `current`. T12 §5 held the
+ *    session: on = point `current` at a built version AND pin every
+ *    `surface:"manual"` tool it declares; off = take those pins back and clear
+ *    `current`. Those are the only two things it writes (T52). T12 §5 held the
  *    two axes apart on principle and refused to merge them — that principle is
  *    right about the kernel and was wrong about the screen, where both keys were
  *    invisible and the state they moved was drawn nowhere (tui.md §11, T22). The
@@ -42,6 +43,7 @@ import {
   readToolUsage,
   rootsOf,
   type ExtensionEntry,
+  type PackageApply,
   type ToolUsage,
 } from "../../nulya/files.ts"
 import {
@@ -53,7 +55,7 @@ import {
   extSetCurrent,
   type SyncLine,
 } from "../../nulya/cli.ts"
-import { draftColumn, pinsOf, planStore, standingWith } from "../../extensions.ts"
+import { draftColumn, pinsOf, planStore } from "../../extensions.ts"
 import {
   builtin_tools,
   faceFullLine,
@@ -73,7 +75,7 @@ import {
   type PinSources,
   type PinState,
 } from "../../pins.ts"
-import { rememberSessionPins, rememberStandingWith, sessionPins, standingWithIds } from "../../state/tui_state.ts"
+import { rememberSessionPins, sessionPins } from "../../state/tui_state.ts"
 import { UsageTable } from "./UsageTable.tsx"
 import type { Workspace } from "../../nulya/bin.ts"
 import type { SessionHeader } from "../../nulya/ledger.ts"
@@ -130,25 +132,23 @@ export function switchState(active: boolean, tools: number, pinned: number): Swi
 const switch_width = 2
 
 /**
- * What a package that contributes a SYSTEM PROMPT is called in the id list
- * (tui.md §11, T31/T37).
+ * The one word in the id list that is about REACH rather than contents (T52):
+ * this package's manifest says `apply: "auto"`, so the moment it has a
+ * `current` the kernel composes it into every fresh session on this machine
+ * (DESIGN §5.1) — Enter on this row is not "make it available", it is "put it
+ * in everything".
  *
- * It is the one contribution whose reach is the whole machine: skills wait to be
- * loaded and tools wait to be called, but a system prompt is in front of every
- * model of every session that carries the package, before anybody says anything.
- * So it gets a word of its own in the list rather than the count of prompt files
- * that used to sit at the end of the detail line, four facts in.
- *
- * One word, not two. There used to be a second (`opt-in`) for a package that
- * had declared its prompt reached only the sessions naming it — the reach was
- * the package's to state, so the list had to repeat which of the two it had
- * chosen. Reach is the person's now (DESIGN §5.1), and this column says what
- * the package IS; what Enter does about it is a `/<id>` command, not a
- * standing decision (T1, ext-review-2 §3b) — wearing a mode in EVERY session
- * from this front end is still reachable, just not from this row.
+ * The column used to say `mode`, meaning "contributes a system prompt". That
+ * was the best guess available while nothing could state its own reach: a
+ * prompt is the contribution whose cost is paid in every session, so a package
+ * with one was the package worth flagging. It reads the wrong package now — a
+ * `manual` prompt package is one `/<id>` away and costs nothing until then,
+ * while an `apply: "auto"` package of pure tools is in front of every model
+ * here. The fact the old column carried is still on screen: the detail pane
+ * lists prompts, and `derivedCommand` gives a prompt package its `/<id>`.
  */
-export function modeCell(entry: { systemPrompts: string[] }): string {
-  return entry.systemPrompts.length === 0 ? "" : "mode"
+export function standingCell(entry: { apply: PackageApply }): string {
+  return entry.apply === "auto" ? "standing" : ""
 }
 
 /** One row of the tools pane: a declared tool, its placement, state, and evidence. */
@@ -159,10 +159,10 @@ export interface ToolRow {
   state: PinState
   uses: number
   ok: number
-  /** This tool is exposed by explicit package membership, not by a checkbox. */
-  with: boolean
-  /** This tool is a driver interface, not model-facing. */
-  driver: boolean
+  /** `surface:"auto"`: exposed by package membership, not by a checkbox. */
+  auto: boolean
+  /** `surface:"internal"`: an `ext run` interface, never model-facing. */
+  internal: boolean
 }
 
 /**
@@ -191,8 +191,8 @@ export function toolRows(
         state: pinState(id, sources),
         uses: row?.uses ?? 0,
         ok: row?.ok ?? 0,
-        with: entry.withTools.includes(tool),
-        driver: entry.driverTools.includes(tool),
+        auto: entry.autoTools.includes(tool),
+        internal: entry.internalTools.includes(tool),
       })
     }
   }
@@ -200,43 +200,49 @@ export function toolRows(
 }
 
 /**
- * A row the fold hides. A driver tool that somehow HAS a pin down is not one:
- * that is a state this pane can act on (`Space` takes it back), and the one
- * wrong checkbox in the list is the last thing to hide.
+ * A row the fold hides. An `internal` tool that somehow HAS a pin down is not
+ * one: that is a state this pane can act on (`Space` takes it back), and the
+ * one wrong checkbox in the list is the last thing to hide.
  */
 function isFolded(row: ToolRow): boolean {
-  return row.driver && row.state === "off"
+  return row.internal && row.state === "off"
 }
 
-/** The rows a driver calls and nobody can pin (tui.md §11, T33). */
+/** The rows `ext run` reaches and nobody can pin (tui.md §11, T33). */
 export function foldedRows(rows: readonly ToolRow[]): ToolRow[] {
   return rows.filter(isFolded)
 }
 
 /**
- * What the list draws. Collapsed, pinnable rows and with-surface rows stay in
- * view, while driver-only rows fold away.
+ * What the list draws. Collapsed, `manual` rows and `auto` rows stay in view,
+ * while `internal`-only rows fold away.
  *
- * The driver rows were listed beside them until T33, when there were six of
+ * The internal rows were listed beside them until T33, when there were six of
  * them to five pinnable ones — and, sorted by id, they came FIRST. The pinnable
- * half is capped by `registry.max_tools`; the driver half is capped by nothing,
- * so it grows the wrong way with every bundled package. They fold behind one
- * line (`foldLine`) instead of disappearing: what each of them costs a reader
- * is a row, not the fact of its existence.
+ * half is capped by `registry.max_tools`; the internal half is capped by
+ * nothing, so it grows the wrong way with every bundled package. They fold
+ * behind one line (`foldLine`) instead of disappearing: what each of them costs
+ * a reader is a row, not the fact of its existence.
  */
 export function shownRows(rows: readonly ToolRow[], expanded: boolean): ToolRow[] {
   return expanded ? [...rows] : rows.filter((row) => !isFolded(row))
 }
 
-/** The one line the folded half becomes, and the key that opens it. */
+/**
+ * The one line the folded half becomes, and the key that opens it.
+ *
+ * It says the package's own word (`internal`, T52) and then what that word
+ * means, because the word alone is a manifest field and the sentence is the
+ * reason the rows have no checkbox.
+ */
 export function foldLine(count: number, expanded: boolean): string {
-  const what = `${count} driver tool${count === 1 ? "" : "s"} · called with ext run, never on the model face`
+  const what = `${count} internal tool${count === 1 ? "" : "s"} · called with ext run, never on the model face`
   return `${what} · d ${expanded ? "folds" : "shows"}`
 }
 
   /**
    * What the NEXT session's face would carry: merged config pins, this TUI's
-   * own pins, and `surface:"with"` tools from packages composed every session.
+   * own pins, and `surface:"auto"` tools from packages composed every session.
    * It is the same face the draft status counts, even though the last group is
    * derived from membership rather than written as `--pin`.
    */
@@ -308,13 +314,13 @@ function stamp(mtime: number): string {
 }
 
 /**
- * What the state column says about a row. A driver tool's state is not a pin
- * state — it says who calls it, which is the answer to the question the empty
- * checkbox raises (T24).
+ * What the state column says about a row. An `internal` tool's state is not a
+ * pin state — it says who calls it, which is the answer to the question the
+ * empty checkbox raises (T24). An `auto` one says what puts it on the face.
  */
 export function labelOf(row: ToolRow): string {
-  if (row.with && row.state === "off") return "with · package/mode"
-  if (row.driver && row.state === "off") return "driver · ext run"
+  if (row.auto && row.state === "off") return "auto · with the package"
+  if (row.internal && row.state === "off") return "internal · ext run"
   return stateLabel(row.state)
 }
 
@@ -400,18 +406,18 @@ export function ExtView(props: {
   /**
    * The kernel's own standing membership list (`[extensions] with`, DESIGN
    * §5.1), read from the same projection the pins come from. This front end
-   * never writes it — its own standing list is `tui-state.json`'s
-   * `standing_with` — but a package config already composes is one whose row
-   * must not read as "off".
+   * never writes it — since T52 it keeps no standing list of its own at all —
+   * but a package config already composes is one whose row must not read as
+   * "off".
    */
   const [configWith, setConfigWith] = createSignal<string[]>([])
   const [userPath, setUserPath] = createSignal("")
   const [userPins, setUserPins] = createSignal<string[]>([])
   const [tuiPins, setTuiPins] = createSignal<string[]>(sessionPins(props.statePath))
   /**
-   * With-surface tool ids from packages that this front end composes into every
-   * session. They are native tools, but not pins; the kernel derives them from
-   * membership at `session new`.
+   * `surface:"auto"` tool ids from packages that every session started here is
+   * composed with. They are native tools, but not pins; the kernel derives them
+   * from membership at `session new`.
    */
   const [composedTools, setComposedTools] = createSignal<string[]>([])
   /**
@@ -448,11 +454,11 @@ export function ExtView(props: {
       setMaxTools(view.registry.max_tools)
       setMerged(view.registry.pinned_native_tools)
       setConfigWith(view.extensions.with)
-      const alwaysComposed = new Set([...view.extensions.with, ...standingWithIds(props.statePath), ...style.settings.extensions.session_with])
+      const named = new Set([...view.extensions.with, ...style.settings.extensions.session_with])
       setComposedTools(
         listed()
-          .filter((entry) => isActive(entry) && alwaysComposed.has(entry.id))
-          .flatMap((entry) => entry.withTools.map((tool) => toolId(entry.id, tool))),
+          .filter((entry) => isActive(entry) && (named.has(entry.id) || entry.apply === "auto"))
+          .flatMap((entry) => entry.autoTools.map((tool) => toolId(entry.id, tool))),
       )
       setUserPath(view.paths.user)
       setUserPins(readUserPins(view.paths.user))
@@ -469,8 +475,8 @@ export function ExtView(props: {
     setListed(entries)
     setComposedTools(
       entries
-        .filter((entry) => isActive(entry) && composedEverySession(entry.id))
-        .flatMap((entry) => entry.withTools.map((tool) => toolId(entry.id, tool))),
+        .filter((entry) => isActive(entry) && composedEverySession(entry))
+        .flatMap((entry) => entry.autoTools.map((tool) => toolId(entry.id, tool))),
     )
     return entries
   }
@@ -585,21 +591,27 @@ export function ExtView(props: {
   const isActive = (entry: ExtensionEntry) => entry.current !== null && !entry.shadowed
   /**
    * …and one that is a MEMBER of every session opened here, from any of the
-   * three lists that can say so (K8): the kernel's own `[extensions] with`,
-   * this front end's `tui-state.json` `standing_with` (what Enter writes), and
-   * `tui.toml`'s `session_with` (the packages it always brings, T42).
+   * three things that can say so (T52): the package's own `apply: "auto"`, the
+   * kernel's `[extensions] with`, and `tui.toml`'s `session_with` (the packages
+   * this front end always brings, T42).
    *
-   * Three sources and one question, because the row is drawn once. Which file
-   * a given id came from is in the detail pane below, where the answer differs.
+   * The first is new and the reason the list is no longer four: this front end
+   * kept a `standing_with` of its own until T52, written by Enter, and a
+   * package that wants to be everywhere says so itself now — one fact, in the
+   * manifest, honoured by the kernel for every driver rather than by each front
+   * end separately.
+   *
+   * Three sources and one question, because the row is drawn once. Which one a
+   * given id came from is in the detail pane below, where the answer differs.
    */
-  const composedEverySession = (id: string) =>
-    configWith().includes(id) ||
-    standingWithIds(props.statePath).includes(id) ||
-    style.settings.extensions.session_with.includes(id)
+  const composedEverySession = (entry: ExtensionEntry) =>
+    entry.apply === "auto" ||
+    configWith().includes(entry.id) ||
+    style.settings.extensions.session_with.includes(entry.id)
   /**
-   * The pins this pane's switch writes for a row: one per `surface:"pin"` tool.
-   * With-surface tools come from membership, and driver tools stay off the model
-   * face unless an old pin is being removed.
+   * The pins this pane's switch writes for a row: one per `surface:"manual"`
+   * tool. `auto` tools come with membership, and `internal` tools stay off the
+   * model face unless an old pin is being removed.
    */
   const pinnable = (entry: ExtensionEntry) => pinsOf(entry)
   const pinnedCount = (entry: ExtensionEntry) =>
@@ -632,10 +644,10 @@ export function ExtView(props: {
    */
   const idCols = createMemo(() => {
     const list = extensions()
-    const [id, mode, on, draft, shadow] = squeeze(
+    const [id, standing, on, draft, shadow] = squeeze(
       [
         columnWidth(list.map((entry) => entry.id), 2, 24),
-        columnWidth(list.map(modeCell), 2, 8),
+        columnWidth(list.map(standingCell), 2, 10),
         columnWidth(list.map(switchCell), 2, 12),
         columnWidth(
           list.map((entry) => (outdated().includes(entry.id) ? "differs" : draftColumn(draftOf(entry.id)))),
@@ -647,11 +659,11 @@ export function ExtView(props: {
       [8, 0, 0, 0, 0],
       Math.max(16, Math.floor(inner() / 2)) - 2,
     )
-    return { id: id!, mode: mode!, on: on!, draft: draft!, shadow: shadow! }
+    return { id: id!, standing: standing!, on: on!, draft: draft!, shadow: shadow! }
   })
   /** The whole left pane: the cursor gutter, the switch, and the five columns. */
   const idWidth = () =>
-    2 + switch_width + idCols().id + idCols().mode + idCols().on + idCols().draft + idCols().shadow
+    2 + switch_width + idCols().id + idCols().standing + idCols().on + idCols().draft + idCols().shadow
   /** What is left for the detail beside it, less its own two-column pad. */
   const detailWidth = () => Math.max(16, inner() - idWidth() - 2)
 
@@ -774,17 +786,17 @@ export function ExtView(props: {
    * One tool's pin, from wherever the decision came: `Space`, `Enter`, the
    * checkbox, a second click on the row.
    *
-   * A DRIVER tool has no pin to move — the answer is a sentence, not a state
+   * An INTERNAL tool has no pin to move — the answer is a sentence, not a state
    * change — unless one is somehow already down, in which case taking it back is
    * exactly what this should do.
    */
   const toggleTool = (row: ToolRow) => {
-    if (row.with && (row.state === "off" || row.state === "composed")) {
+    if (row.auto && (row.state === "off" || row.state === "composed")) {
       setNotice(`${row.id} comes with sessions that compose ${row.extension} · use /${row.extension} or /with, not a pin`)
       return
     }
-    if (row.driver && row.state === "off") {
-      setNotice(`${row.id} is called by a driver with ext run · a pin would put it on the model face, where it cannot run`)
+    if (row.internal && row.state === "off") {
+      setNotice(`${row.id} is called with ext run · a pin would put it on the model face, where it cannot run`)
       return
     }
     void applyPin(toggle(row.id, sources()))
@@ -796,12 +808,12 @@ export function ExtView(props: {
       const row = selectedTool()
       if (!row) return
       if (verb === "toggle") return toggleTool(row)
-      if (row.with) {
-        setNotice(`${row.id} is a with-surface tool · it reaches the model when ${row.extension} is composed`)
+      if (row.auto) {
+        setNotice(`${row.id} is an auto-surface tool · it reaches the model when ${row.extension} is composed`)
         return
       }
-      if (row.driver) {
-        setNotice(`${row.id} is a driver tool · there is nothing to promote · /compact and drivers call it with ext run`)
+      if (row.internal) {
+        setNotice(`${row.id} is an internal tool · there is nothing to promote · /compact and drivers call it with ext run`)
         return
       }
       return void applyPin(promote(row.id, sources()))
@@ -819,9 +831,11 @@ export function ExtView(props: {
   /**
    * The switch: `Enter` on an id, or a click on its marker (tui.md §11, T22).
    *
-   * ON is both axes at once — point `current` at a built version so its skills
-   * and system prompts join the composition, and pin every tool it declares so
-   * the model can call them. OFF is both back. Nothing here is irreversible and
+   * ON is both axes at once — point `current` at a built version, and pin every
+   * `manual` tool it declares so the model can call them. What `current` then
+   * MEANS is the package's own word: `manual` makes it nameable (`/<id>`,
+   * `/with`, a pin), `auto` makes the kernel compose it into every fresh session
+   * here (DESIGN §5.1). OFF is both back. Nothing here is irreversible and
    * nothing here reaches the session already on screen (physics #2), which is
    * why neither direction asks for a `y`.
    *
@@ -920,40 +934,36 @@ export function ExtView(props: {
     }
     // Agreed: now the pin lists are written where the next `session new` reads.
     if (change) await applyPin(change, { reconcile: false })
-    // …and the MEMBERSHIP half, for a package that has something only a member
-    // can give and that Enter cannot already reach another way (`standingWith`).
-    // Activating alone composes nothing now (DESIGN §5.1), so without this line
-    // the switch would move a pointer and change nothing a person could see. A
-    // pure tool package needs no entry: its pins bring it in by themselves, and
-    // a second way of saying that is a second thing to take back. A package
-    // that contributes a SYSTEM PROMPT never gets one here (T1, ext-review-2
-    // §3b) — `derivedCommand` already gave it a `/<id>` below, and that is the
-    // per-session way in this row's Enter means now.
-    if (standingWith(entry)) {
-      const held = standingWithIds(props.statePath)
-      if (!held.includes(entry.id)) rememberStandingWith([...held, entry.id], props.statePath)
-    }
+    // And that is the whole of it. Enter wrote a THIRD thing until T52 — an id
+    // on this front end's own `standing_with`, so that a package with skills or
+    // commands would actually be in a session — because `activate` alone
+    // composes nothing (DESIGN §5.1). A package says that for itself now
+    // (`apply: "auto"`), the kernel honours it for every driver, and a front
+    // end keeping a private membership list beside it would be a second answer
+    // to a question that now has one.
     release(entry.id)
     props.onMembershipChanged?.()
     setNotice(
-      // A package that contributes a system prompt gets the sentence about the
-      // command Enter just gave it, instead of a version and a pin count (T1,
-      // ext-review-2 §3b) — Enter no longer reaches every session from here,
-      // so there is nothing scary left to say, only where the new command is.
-      entry.systemPrompts.length > 0
-        ? `${entry.id} on · /${entry.id} opens a new tab wearing it for one session · Enter again takes the command away`
-        : `${entry.id} on · ${version}` +
-          (ids.length > 0
-            ? room
-              ? ` · ${ids.length} tool(s) pinned`
-              : ` · ${faceFullLine(maxTools(), face.length, added.length)}`
-            : entry.withTools.length > 0
-              ? ` · ${entry.withTools.length} tool(s) come with sessions that compose it`
-              : entry.tools.length > 0
-                ? // A package whose tools are a driver interface: it is fully on,
-                  // and none of it is on the model's face by design.
-                  ` · its ${entry.tools.length} tool(s) stay off the model face · /compact and drivers call them with ext run`
-                : ""),
+      // Three shapes, and each one names what Enter just made reachable: a
+      // package that asked to be everywhere is everywhere now; a mode gets the
+      // `/<id>` command `derivedCommand` hands it; everything else gets the
+      // version and what its tools did.
+      entry.apply === "auto"
+        ? `${entry.id} on · ${version} · composed into every session on this machine · Enter again takes it back`
+        : entry.systemPrompts.length > 0
+          ? `${entry.id} on · /${entry.id} opens a new tab wearing it for one session · Enter again takes the command away`
+          : `${entry.id} on · ${version}` +
+            (ids.length > 0
+              ? room
+                ? ` · ${ids.length} tool(s) pinned`
+                : ` · ${faceFullLine(maxTools(), face.length, added.length)}`
+              : entry.autoTools.length > 0
+                ? ` · ${entry.autoTools.length} tool(s) come with sessions that compose it`
+                : entry.tools.length > 0
+                  ? // A package whose tools are an `ext run` interface: it is
+                    // fully on, and none of it is on the model's face by design.
+                    ` · its ${entry.tools.length} tool(s) stay off the model face · /compact and drivers call them with ext run`
+                  : ""),
     )
     // The store has the last word, but it says it after the screen already moved.
     void reconcile()
@@ -982,21 +992,17 @@ export function ExtView(props: {
       release(entry.id)
       return
     }
-    // The membership half comes off with the pointer: unlike a pin, an id on
-    // this list that has no `current` makes `session new` refuse outright
-    // (`WithVersionNotFound`), so leaving it behind would be leaving a front
-    // end that cannot open a session at all.
-    const held = standingWithIds(props.statePath)
-    if (held.includes(entry.id)) rememberStandingWith(held.filter((id) => id !== entry.id), props.statePath)
     release(entry.id)
     props.onMembershipChanged?.()
     setNotice(
-      // Used to say the prompt "no longer enters new sessions" — it never did
-      // from here alone (T1, ext-review-2 §3b), so what actually leaves is the
-      // `/<id>` command Enter had given it.
-      (entry.systemPrompts.length > 0
-        ? `${entry.id} off · /${entry.id} is gone`
-        : `${entry.id} off · its skills leave the composition`) +
+      // What actually leaves, per shape. `ext deactivate` is the ONE way back
+      // for an `apply: "auto"` package (DESIGN §5.1) — with no `current` it is
+      // in nothing — so that is the sentence its row gets.
+      (entry.apply === "auto"
+        ? `${entry.id} off · it leaves every session composed here`
+        : entry.systemPrompts.length > 0
+          ? `${entry.id} off · /${entry.id} is gone`
+          : `${entry.id} off · its skills leave the composition`) +
         ` · versions all stay${stuck ? ` · ${stuck}` : ""}`,
     )
     void reconcile()
@@ -1291,8 +1297,8 @@ export function ExtView(props: {
                 {/* The same three colours the id list's switch uses: `ok` for on
                     and ours, `warn` for on but written somewhere we may not
                     edit, `faint` for off. One meaning, one colour (tui.md §6).
-                    A driver or with-surface tool has no box: there is no pin
-                    state this checkbox can honestly change. */}
+                    An internal or auto-surface tool has no box: there is no
+                    pin state this checkbox can honestly change. */}
                 <text
                   fg={
                     row().state === "other"
@@ -1302,7 +1308,7 @@ export function ExtView(props: {
                         : style.theme.faint
                   }
                 >
-                  {row().driver || row().with ? " ·  " : on() ? "[x] " : "[ ] "}
+                  {row().internal || row().auto ? " ·  " : on() ? "[x] " : "[ ] "}
                 </text>
               </box>
               <box width={toolCols().id} flexShrink={0}>
@@ -1333,7 +1339,7 @@ export function ExtView(props: {
           when={folded().length === 0}
           fallback={
             <Lines
-              text="nothing pinnable or with-scoped here · every active extension in this list declares driver tools only"
+              text="nothing pinnable or auto-surfaced here · every active extension in this list declares internal tools only"
               fg={style.theme.muted}
             />
           }
@@ -1516,14 +1522,13 @@ export function ExtView(props: {
                         {fit(entry().id, idCols().id - 2)}
                       </text>
                     </box>
-                    {/* A package that contributes a system prompt is a MODE, and
-                        turning it on reaches every session this front end opens
-                        (T31/K8). Warn-coloured while it is on: that is the state
-                        somebody has to be able to spot without reading a
-                        detail pane. */}
-                    <box width={idCols().mode} flexShrink={0}>
+                    {/* `apply: "auto"`: activating this package composes it into
+                        every session on this machine (T52). Warn-coloured while
+                        it is on — that is the state somebody has to be able to
+                        spot without reading a detail pane. */}
+                    <box width={idCols().standing} flexShrink={0}>
                       <text fg={on() === "off" ? style.theme.faint : style.theme.warn}>
-                        {fit(modeCell(entry()), Math.max(0, idCols().mode - 2))}
+                        {fit(standingCell(entry()), Math.max(0, idCols().standing - 2))}
                       </text>
                     </box>
                     {/* Half on: which half. `3/5 tools` and `pins only` are the
@@ -1577,8 +1582,8 @@ export function ExtView(props: {
                         ? ""
                         : pinnable(entry).length > 0
                           ? ` · tools ${pinnedCount(entry)}/${entry.tools.length} pinned`
-                          : entry.withTools.length > 0
-                            ? ` · tools ${entry.withTools.length}/${entry.tools.length} with package/mode`
+                          : entry.autoTools.length > 0
+                            ? ` · tools ${entry.autoTools.length}/${entry.tools.length} with the package`
                             : ` · tools ${entry.tools.length} · called with ext run, never on the model face`
                     } · current ${entry.current ? shortVersion(entry.current) : "(none)"}`}
                     width={detailWidth()}
@@ -1605,26 +1610,27 @@ export function ExtView(props: {
                     width={detailWidth()}
                     fg={style.theme.muted}
                   />
-                  {/* …and what that prompt count MEANS: a package this row's
-                      Enter never composes standing any more (T1, ext-review-2
-                      §3b) — it moves `current` and hands back a `/<id>`
-                      command that wears the prompt for one session. Standing
-                      reach for a mode is still there, just not from here:
-                      `[extensions] with` in config, or `session_with` in
-                      `tui.toml`. */}
-                  <Show when={entry.systemPrompts.length > 0}>
+                  {/* …and what that prompt count MEANS. For a `manual`
+                      package: Enter moves `current` and hands back a `/<id>`
+                      that wears the prompt for one session, and nothing here
+                      composes it standing (T1, ext-review-2 §3b). For an
+                      `apply: "auto"` one the sentence below says the opposite,
+                      so this one steps aside rather than saying both. */}
+                  <Show when={entry.systemPrompts.length > 0 && entry.apply !== "auto"}>
                     <Lines
                       text={`a mode · Enter gives it a \`/${entry.id}\` command that wears its prompt for one session · nothing here composes it standing`}
                       width={detailWidth()}
                       fg={style.theme.muted}
                     />
                   </Show>
-                  {/* A package this front end composes every session with
-                      (`[extensions] session_with`, T42). Its tools reach the
-                      model without ever being pinned here, so the row's `0/4
-                      tools` is true about THIS list and false about what the
-                      model can call — and that gap is exactly what made `agent`
-                      look switched off on a machine where every session had it. */}
+                  {/* A package every session started here is composed with.
+                      Its tools reach the model without ever being pinned here,
+                      so the row's `0/4 tools` is true about THIS list and false
+                      about what the model can call — and that gap is exactly
+                      what made `agent` look switched off on a machine where
+                      every session had it. WHICH of the three said so is the
+                      part worth printing, because they are undone in three
+                      different places (T52). */}
                   {/* The draft in the store is not the source this binary
                       carries, and seeding will not overwrite it on its own
                       (DESIGN §7.2): only a person knows whether that is their
@@ -1637,14 +1643,14 @@ export function ExtView(props: {
                       fg={style.theme.warn}
                     />
                   </Show>
-                  <Show when={composedEverySession(entry.id)}>
+                  <Show when={composedEverySession(entry)}>
                     <Lines
                       text={`composed into every session started here · ${
-                        configWith().includes(entry.id)
-                          ? "`[extensions] with` in config — `nulya config show`"
-                          : style.settings.extensions.session_with.includes(entry.id)
-                            ? "`[extensions] session_with` in tui.toml · its tools are on the face there, not from this list"
-                            : "this pane's switch put it there · Enter again takes it back"
+                        entry.apply === "auto"
+                          ? "`apply: \"auto\"` in its own manifest · the kernel composes it while it has a current · Enter again takes it back"
+                          : configWith().includes(entry.id)
+                            ? "`[extensions] with` in config — `nulya config show`"
+                            : "`[extensions] session_with` in tui.toml · its tools are on the face there, not from this list"
                       }`}
                       width={detailWidth()}
                       fg={style.theme.muted}
@@ -1751,7 +1757,7 @@ export function ExtView(props: {
         more={[
           "Enter activates the extension and pins its tools, again turns both off · a click on the row the cursor is already on does the same",
           "h/l ←/→ Tab move across the panes · j/k ↑/↓ move down a list",
-          "Space pin one tool · A promote it to always · d fold the driver tools in or out · b build the source · s take this binary's copy of a bundled draft (`differs`) · p prune old versions",
+          "Space pin one tool · A promote it to always · d fold the internal tools in or out · b build the source · s take this binary's copy of a bundled draft (`differs`) · p prune old versions",
           "a activate one named version, on the version line — an older one is the rollback · t tools · u usage",
         ]}
       />

@@ -163,11 +163,12 @@ fn withRefs(
 /// `--bare`: compose from argv alone (DESIGN §14).
 ///
 /// The two standing config lists — `[extensions] with` and
-/// `registry.pinned_native_tools` — are how a person says "every session in this
-/// workspace gets this". A session opened FOR a job by something other than a
-/// person (a delegated sub-agent, whose whole tool face is its own definition)
-/// is not one of those, and inheriting a workspace's standing composition would
-/// give it capabilities its author never wrote down.
+/// `registry.pinned_native_tools` — plus the store's own standing layer (every
+/// activated package that declares `apply: "auto"`, DESIGN §5.1) are how "every
+/// session on this machine gets this" gets said. A session opened FOR a job by
+/// something other than a person (a delegated sub-agent, whose whole tool face
+/// is its own definition) is not one of those, and inheriting a workspace's
+/// standing composition would give it capabilities its author never wrote down.
 ///
 /// `max_tools` is still read: it is a ceiling, not a selection, and a `--bare`
 /// session that could exceed it would be a way around the budget rather than a
@@ -456,7 +457,8 @@ pub fn createSession(
     defer launch.freeExtensionRoots(alloc, ext_roots);
 
     // `--bare` composes from argv alone: the two standing config lists below are
-    // read as empty, and everything else about the session is unchanged.
+    // read as empty, the store's own standing layer (`apply: "auto"`) is turned
+    // off, and everything else about the session is unchanged.
     const bare = bareComposition(args);
 
     // The session's members: config's standing `[extensions] with`, then every
@@ -487,6 +489,7 @@ pub fn createSession(
             .pinned_native_tools = pins,
             .max_tools = cfg.registry.max_tools,
             .with = with,
+            .apply_auto = !bare,
             .prompts = prompts,
         },
     }, .{
@@ -529,7 +532,7 @@ pub fn createSession(
             return null;
         },
         error.PinToolNotPinnable => {
-            try printPinFailure(alloc, io, pins, "names a tool whose manifest surface is not `pin`; compose the package with `--with` if it is surface `with`, or call it with `nulya ext run` if it is surface `driver`");
+            try printPinFailure(alloc, io, pins, "names a tool whose manifest surface is not `manual`; compose the package with `--with` if the tool is surface `auto`, or call it with `nulya ext run` if it is surface `internal`");
             return null;
         },
         error.InvalidStableToolId => {

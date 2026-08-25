@@ -202,6 +202,45 @@ pub const Store = struct {
         return integrity.openVersion(alloc, self.io, self.root, version_rel, version, id, level);
     }
 
+    /// The frozen manifest of a built version AS WRITTEN — parsed and
+    /// validated, with NO integrity check at all: not the seal, not the
+    /// re-digest, not the declared paths. Null when there is no readable
+    /// manifest there.
+    ///
+    /// The one question it answers is what a package DECLARES ABOUT ITSELF
+    /// before anybody has decided to compose it — today, `apply` (DESIGN §5.1).
+    /// That question has to be answerable for EVERY id with a `current`, and a
+    /// full `readManifest` on each of them would make one damaged package in
+    /// the store refuse every session on the machine, which is exactly the
+    /// strictness that took `activate`-means-membership down before. So the
+    /// cheap read decides who is being asked about, and the ordinary
+    /// `.sealed` path still decides what actually gets composed.
+    ///
+    /// NEVER a way to reach bytes that are about to RUN: whatever this says,
+    /// composing the version still goes through `readManifest` at `.sealed`.
+    /// `error.Canceled` propagates — a host fault is never "not there".
+    pub fn readVersionDeclaration(self: Store, alloc: std.mem.Allocator, id: []const u8, version: []const u8) !?manifest.Manifest {
+        validateIdentity(id, version) catch return null;
+        const sub = try self.versionManifestPath(alloc, id, version);
+        defer alloc.free(sub);
+        const bytes = self.root.readFileAlloc(self.io, sub, alloc, .limited(1 << 20)) catch |err| switch (err) {
+            error.Canceled => return err,
+            else => return null,
+        };
+        defer alloc.free(bytes);
+        var m = manifest.parse(alloc, bytes) catch return null;
+        errdefer m.deinit();
+        m.validate() catch {
+            m.deinit();
+            return null;
+        };
+        if (!std.mem.eql(u8, m.id, id)) {
+            m.deinit();
+            return null;
+        }
+        return m;
+    }
+
     /// The active version id, or null if the extension has none. Caller owns the
     /// returned slice.
     pub fn activeVersion(self: Store, alloc: std.mem.Allocator, id: []const u8) !?[]u8 {
@@ -248,7 +287,7 @@ pub const Store = struct {
 
 /// Store/manifest faults that mean "this directory is not a usable extension".
 /// What a caller does with one is the caller's rule: a read-only listing skips
-/// it, `composition.resolveActiveExtensions` fails the session on it, and a
+/// it, `composition.resolveApplyAutoExtensions` fails the session on it, and a
 /// version lookup (`Roots.resolveVersion`) skips that root and keeps searching.
 /// Anything else — host cancellation, `OutOfMemory`, real I/O failures — is a
 /// host fault and must propagate: an OOM must never masquerade as a broken
@@ -259,7 +298,7 @@ pub const Store = struct {
 /// `cli/ext.zig`'s `isManifestFault` uses — so a new `manifest.ValidateError`
 /// member is covered here automatically. A hand-written `switch` was the
 /// previous shape, and it had already drifted: `InvalidTimeout`,
-/// `InvalidAudience`, and `DuplicateSkillPath` had each
+/// `InvalidSurface`, and `DuplicateSkillPath` had each
 /// been added to `manifest.zig` without a matching case here, so a manifest
 /// that failed validation for one of those reasons was propagated as a host
 /// fault instead of being treated as a broken extension.

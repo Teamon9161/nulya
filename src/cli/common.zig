@@ -194,7 +194,7 @@ pub const ext_usage =
     \\  nulya ext seed [--user] [<id>…] [--force] [--dry-run]  write the drafts this binary ships into that root; sync builds them
     \\  nulya ext run <id>[@<ver>] <tool> [<json> | --arg k=v …] [--timeout-ms N]   run the version in effect, or exactly that one; no timeout unless asked
     \\  nulya ext activate [--user] <id> <ver>            point `current` at a version; activating an older one is the rollback
-    \\  nulya ext deactivate [--user] <id>                drop `current`; the versions stay
+    \\  nulya ext deactivate [--user] <id>                drop `current`; the versions stay, and an apply: auto package stops composing
     \\  nulya ext prune [--user] [<id>] [--dry-run]       delete the versions `current` does not name
     \\  nulya ext list | inspect <id>[@<ver>] | <path>     every extension, or one manifest: the version in effect, an exact one, or a draft named by path
     \\  nulya ext trust                                   allow this workspace's store once, if it came with a checkout
@@ -208,7 +208,7 @@ pub const session_usage =
     \\                                                    freeze composition + model, print a new session id; --with composes a built
     \\                                                    version in, --pin puts one of its tools on the model's tool face, --parent
     \\                                                    forks that session, --prompt freezes a file as this session's system prompt,
-    \\                                                    --bare ignores the config's standing [extensions] with and pinned_native_tools
+    \\                                                    --bare reads no standing layer: neither config list, nor apply: auto packages
     \\  nulya session append <id> [<text> | --file <p>] [--image <p>]…
     \\                                                    queue a user turn for the next step boundary; --image inlines a
     \\                                                    png/jpeg ≤5 MB, if the model's catalog entry says vision = true

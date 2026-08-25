@@ -89,6 +89,14 @@ test("listExtensions reads the version line, the current pointer and the manifes
   // compiler-independent (DESIGN §7.4).
   expect(lint.kind).toBe("script")
   expect(lint.tools.length).toBeGreaterThan(0)
+  // The template writes neither `surface` nor `apply`, so this reads the two
+  // kernel defaults through a real build (T52): a tool nobody placed is `auto`
+  // — model-facing with membership, never pinnable — and a package that said
+  // nothing about its reach is `manual`.
+  expect(lint.autoTools).toEqual(lint.tools)
+  expect(lint.manualTools).toEqual([])
+  expect(lint.internalTools).toEqual([])
+  expect(lint.apply).toBe("manual")
   // Which root it came from is the kernel's answer, not ours (DESIGN §7.2), and
   // the only copy here is the workspace one, so nothing shadows anything.
   expect(lint.root).toBe(".nulya/extensions")

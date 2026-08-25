@@ -185,19 +185,19 @@ test("rows come only from extensions a pin could actually resolve through", () =
   expect(nextFace(sources({ merged: ["a", "b"], session: ["b", "c"] }))).toEqual(["a", "b", "c"])
 })
 
-test("the list folds driver-only rows, while pinnable and with-surface rows stay visible", () => {
-  // The surfaces are the packages' own (`driverTools`, DESIGN §7.2.1) — which
-  // is why `agent` splits: one model tool, three driver ones. Before T34 the
-  // whole package was driver-only because its id was on a list here, and its
+test("the list folds internal-only rows, while manual and auto rows stay visible", () => {
+  // The surfaces are the packages' own (`internalTools`, DESIGN §7.2.1) — which
+  // is why `agent` splits: one pinnable tool, three internal ones. Before T34
+  // the whole package was internal because its id was on a list here, and its
   // delegation entry point was folded away with the rest.
   const entries: ExtensionEntry[] = [
-    { ...entry("agent", "v-1", ["agent", "list", "render", "run"]), pinTools: ["agent"], driverTools: ["list", "render", "run"] },
-    { ...entry("compact", "v-1", ["compact"]), pinTools: [], driverTools: ["compact"] },
+    { ...entry("agent", "v-1", ["agent", "list", "render", "run"]), manualTools: ["agent"], internalTools: ["list", "render", "run"] },
+    { ...entry("compact", "v-1", ["compact"]), manualTools: [], internalTools: ["compact"] },
     entry("std", "v-1", ["read", "grep"]),
   ]
   const rows = toolRows(entries, sources({ user: [toolId("std", "read")] }), [])
 
-  // Collapsed: the four driver tools are gone and every remaining row is a
+  // Collapsed: the four internal tools are gone and every remaining row is a
   // switch somebody can throw. Expanded: the same list as before T33.
   expect(shownRows(rows, false).map((row) => row.id)).toEqual([
     toolId("agent", "agent"),
@@ -206,10 +206,10 @@ test("the list folds driver-only rows, while pinnable and with-surface rows stay
   ])
   expect(shownRows(rows, true).map((row) => row.id)).toEqual(rows.map((row) => row.id))
   expect(foldedRows(rows)).toHaveLength(4)
-  expect(foldLine(4, false)).toContain("4 driver tools")
+  expect(foldLine(4, false)).toContain("4 internal tools")
   expect(foldLine(4, false)).toContain("ext run")
   expect(foldLine(4, false)).toContain("d shows")
-  expect(foldLine(1, true)).toContain("1 driver tool ")
+  expect(foldLine(1, true)).toContain("1 internal tool ")
   expect(foldLine(1, true)).toContain("d folds")
 
   // A driver tool with a pin somehow down stays visible: it is the one row here
@@ -293,9 +293,11 @@ test("the `this TUI` list becomes --pin, and the kernel freezes exactly it", asy
       id: "notes",
       runtime: { entry: "src/main.sh", interpreter: "sh" },
       contributes: {
+        // `surface: "manual"` out loud: the kernel's default is `auto` now, and
+        // only a `manual` tool may be named by a pin (DESIGN §7.2.1, T52).
         tools: [
-          { name: "append", description: "add a line", input: { type: "object", properties: {} } },
-          { name: "read", description: "read it back", input: { type: "object", properties: {} } },
+          { name: "append", description: "add a line", surface: "manual", input: { type: "object", properties: {} } },
+          { name: "read", description: "read it back", surface: "manual", input: { type: "object", properties: {} } },
         ],
       },
     }),
@@ -324,9 +326,10 @@ function entry(id: string, current: string, tools: string[]): ExtensionEntry {
     versions: [{ version: current, mtime: 0 }],
     kind: "script",
     tools,
-    pinTools: tools,
-    withTools: [],
-    driverTools: [],
+    manualTools: tools,
+    autoTools: [],
+    internalTools: [],
+    apply: "manual",
     skills: [],
     systemPrompts: [],
     commands: [],
@@ -336,8 +339,8 @@ function entry(id: string, current: string, tools: string[]): ExtensionEntry {
   }
 }
 
-test("a with-surface tool its package brings into every session reads as on, and this panel will not toggle it", () => {
-  // A composed package contributes `surface:\"with\"` tools to every session
+test("an auto-surface tool its package brings into every session reads as on, and this panel will not toggle it", () => {
+  // A composed package contributes `surface:\"auto\"` tools to every session
   // this front end starts. No pin list names them, so the panel must not draw
   // an empty checkbox about a tool the model can call.
   const sources = { user: [], session: ["ext:std/read"], merged: [], composed: ["ext:agent/agent"] }
@@ -365,22 +368,23 @@ test("a with-surface tool its package brings into every session reads as on, and
  * every session — and it went with the declaration (K8): reach is stated by the
  * person now, in `[extensions] with` or in `/ext`, both of them visible.
  */
-test("a package with a resolvable current offers only surface-pin tools a standing pin can name", () => {
+test("a package with a resolvable current offers only surface-manual tools a standing pin can name", () => {
   const entry = (
     id: string,
-    tools: string[],
-    pinTools = tools,
+    manualTools: string[],
     over: Partial<{ current: string | null; shadowed: boolean }> = {},
-  ) => ({ id, tools, pinTools, current: "v-1", shadowed: false, ...over })
+  ) => ({ id, manualTools, current: "v-1", shadowed: false, ...over })
 
   const available = resolvableStandingPins([
     entry("std", ["read", "edit"]),
-    entry("agent", ["agent", "run"], ["agent"]),
-    entry("plan", ["propose", "todo"], []),
+    // `run` is internal, `propose`/`todo` are auto: neither is pinnable, so
+    // neither may appear on a standing list.
+    entry("agent", ["agent"]),
+    entry("plan", []),
     // Nothing points at a version, and an earlier root already answers for this
     // id: neither can resolve either.
-    entry("guide", ["guide"], ["guide"], { current: null }),
-    entry("compact", ["compact"], [], { shadowed: true }),
+    entry("guide", ["guide"], { current: null }),
+    entry("compact", [], { shadowed: true }),
   ])
   expect(available).toEqual([
     "ext:std/read",
@@ -388,7 +392,7 @@ test("a package with a resolvable current offers only surface-pin tools a standi
     "ext:agent/agent",
   ])
 
-  // Lines for with-surface or inactive tools would make every `session new`
+  // Lines for auto-surface or inactive tools would make every `session new`
   // refuse, found by the same predicate that repairs them.
   expect(orphanPins(["ext:std/read", "ext:guide/guide", "ext:ask/ask", "ext:plan/propose"], available)).toEqual([
     "ext:guide/guide",

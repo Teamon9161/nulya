@@ -33,19 +33,18 @@ import {
   failedIds,
   needsZigIds,
   pinsOf,
-  standingWith,
+  autoActivatable,
   planCheckout,
   planProjectStore,
   promptText,
   std_pins,
-  stdEditPinDecision,
   summarize,
   syncRoot,
   type CheckoutAction,
 } from "../src/extensions.ts"
 import { planProjectAgents } from "../src/agents.ts"
 import { modelTools, readHeader, type PackageCommand } from "../src/nulya/files.ts"
-import { default_settings, loadSettings, withPackage } from "../src/state/settings.ts"
+import { default_settings, loadSettings } from "../src/state/settings.ts"
 import { draftHelp } from "../src/ui/overlays/ExtView.tsx"
 import { tempWorkspace, type TempWorkspace } from "./support.ts"
 
@@ -352,16 +351,20 @@ test("bundled ask, handoff, and plan expose member-scoped tools without writing 
     const ask = (await builtContributions(store, root, "ask", askLine.version!))!
     const handoff = (await builtContributions(store, root, "handoff", handoffLine.version!))!
     const plan = (await builtContributions(store, root, "plan", planLine.version!))!
-    expect(ask.withTools).toEqual(["ask"])
-    expect(handoff.withTools).toEqual(["handoff"])
-    expect(plan.withTools).toEqual(["propose", "todo"])
-    expect(plan.driverTools).toEqual(["approve"])
+    expect(ask.autoTools).toEqual(["ask"])
+    expect(handoff.autoTools).toEqual(["handoff"])
+    expect(plan.autoTools).toEqual(["propose", "todo"])
+    expect(plan.internalTools).toEqual(["approve"])
     expect(pinsOf(ask)).toEqual([])
     expect(pinsOf(handoff)).toEqual([])
     expect(pinsOf(plan)).toEqual([])
-    expect(standingWith(ask)).toBe(true)
-    expect(standingWith(handoff)).toBe(true)
-    expect(standingWith(plan)).toBe(false)
+    // None of the three asks to be in every session, so the start-up pass may
+    // point `current` at all of them without deciding anything for anybody —
+    // including `plan`, which contributes a system prompt (T52).
+    expect(ask.apply).toBe("manual")
+    expect(handoff.apply).toBe("manual")
+    expect(plan.apply).toBe("manual")
+    expect(autoActivatable(plan)).toBe(true)
   } finally {
     store.cleanup()
   }
@@ -441,47 +444,21 @@ test("a bundled mode that arrives is activated too, and the pointer really moves
 })
 
 /**
- * Which half of `/ext`'s switch a package needs (T1, ext-review-2 §3b).
+ * What an unattended pass may switch on (T52).
  *
- * Activating alone composes nothing (DESIGN §5.1), so the switch has to write a
- * standing MEMBERSHIP entry for anything only a member can give — a skill, a
- * slash command, a front-end module — and must not for a pure tool package,
- * whose pins bring it in by themselves (two ways of saying one thing would be
- * two things to take back). A package that contributes a SYSTEM PROMPT is the
- * one exception either way: it used to be the flagship case (wearing a mode in
- * EVERY session was the entire reason this entry existed), and it is now
- * excluded on purpose — Enter moves `current` and hands back a `/<id>`
- * command instead, and a mode's standing reach is a person's explicit config
- * decision (`[extensions] with`), never a keypress in this row.
+ * The question used to be "does this package contribute a system prompt", which
+ * was the nearest thing to a reach test available while a manifest could not
+ * state its reach: a prompt is the contribution paid for in every session, so a
+ * package with one was the one worth not activating behind somebody's back.
+ * That test reads the wrong package now. A `manual` prompt package composes
+ * nothing until it is named (DESIGN §5.1), while an `apply: "auto"` package of
+ * pure tools joins every fresh session on this machine the moment it has a
+ * `current` — so `apply` is the whole rule, and nothing else in the manifest
+ * takes part in it.
  */
-test("a package that contributes a system prompt never gets a standing with entry; skills, commands and ui still do", () => {
-  const what = (over: Partial<Parameters<typeof standingWith>[0]> = {}) => ({
-    skills: [] as string[],
-    systemPrompts: [] as string[],
-    commands: [],
-    ui: null,
-    withTools: [] as string[],
-    ...over,
-  })
-
-  // A mode: Enter reaches it through a per-session command now, not through
-  // standing membership — so this is `false` where it used to be `true`.
-  expect(standingWith(what({ systemPrompts: ["prompts/identity.md"] }))).toBe(false)
-  // A skill lands in the catalog only through membership, and so do a slash
-  // command and a front-end module — none of them has a pin to arrive by.
-  expect(standingWith(what({ skills: ["skills/guide"] }))).toBe(true)
-  expect(standingWith(what({ commands: [{ name: "plan", description: "", action: { with: true } }] }))).toBe(true)
-  expect(standingWith(what({ ui: { entry: "tui/plan.ts", api: 2 } }))).toBe(true)
-  // A package with BOTH a prompt and a skill: the prompt exclusion wins —
-  // Enter still never writes it standing, whatever else it contributes.
-  expect(standingWith(what({ systemPrompts: ["prompts/identity.md"], skills: ["skills/guide"] }))).toBe(false)
-
-  // A package with member-scoped model tools needs membership for those tools.
-  expect(standingWith(what({ withTools: ["ask"] }))).toBe(true)
-
-  // A pure pinnable-tool package: old `handoff`, old `ask`. Nothing here needs
-  // an entry, because a pin brings the package in at `current` all by itself.
-  expect(standingWith(what())).toBe(false)
+test("only a package that asks to be in every session is kept off the start-up pass", () => {
+  expect(autoActivatable({ apply: "auto" })).toBe(false)
+  expect(autoActivatable({ apply: "manual" })).toBe(true)
 })
 
 /**
@@ -643,31 +620,14 @@ test("what a built version contributes is read from the root that sync wrote it 
 
     const what = await builtContributions(store, root, "mode.pkg", line.version!)
     expect(what?.systemPrompts).toEqual(["prompts/identity.md"])
-    // A prompt reaches a session through membership, but Enter no longer
-    // writes a mode's membership standing (T1, ext-review-2 §3b) — it moves
-    // the pointer and hands back a `/<id>` command instead.
-    expect(standingWith(what!)).toBe(false)
+    // A manifest that says nothing about `apply` means `manual`, exactly as the
+    // kernel reads it — so contributing a prompt does not by itself keep this
+    // package off the start-up pass (T52).
+    expect(what!.apply).toBe("manual")
+    expect(autoActivatable(what!)).toBe(true)
   } finally {
     store.cleanup()
   }
-})
-
-test("the edit pin migration adopts only once the active std can honour it, and never twice", () => {
-  const five = std_pins.filter((pin) => pin !== "ext:std/edit")
-  const six_tools = ["read", "write", "append", "edit", "grep", "glob"]
-  // The case it exists for: a list written when `edit` was a builtin, on a
-  // machine whose std has since been rebuilt with it.
-  expect(stdEditPinDecision(five, six_tools)).toBe("adopt")
-  // Same list, but the std that is active here is the old build: a pin the
-  // kernel cannot resolve would refuse every `session new`, so wait.
-  expect(stdEditPinDecision(five, ["read", "write", "append", "grep", "glob"])).toBe("wait")
-  expect(stdEditPinDecision(five, null)).toBe("wait")
-  // Nothing to migrate: no std pins at all, or `edit` already there — and the
-  // answer does not depend on the store, so a fresh machine never lists it.
-  expect(stdEditPinDecision([], null)).toBe("done")
-  expect(stdEditPinDecision(["ext:std/read"], null)).toBe("done")
-  expect(stdEditPinDecision(std_pins, six_tools)).toBe("done")
-  expect(stdEditPinDecision(std_pins, null)).toBe("done")
 })
 
 /**
@@ -676,27 +636,28 @@ test("the edit pin migration adopts only once the active std can honour it, and 
  * word (`surface`, DESIGN §7.2.1), read out of the frozen manifest.
  */
 test("the pins an activation writes come from the manifest, per tool, for a package nobody here has heard of", () => {
-  const pkg = (id: string, tools: string[], driverTools: string[] = [], pinTools = tools.filter((tool) => !driverTools.includes(tool))) => ({ id, tools, pinTools, driverTools })
+  const pkg = (id: string, manualTools: string[], internalTools: string[] = []) => ({
+    id,
+    tools: [...manualTools, ...internalTools],
+    manualTools,
+    internalTools,
+  })
 
-  // Silence is read as `model`, which is what every manifest written before the
-  // field existed means — and the kernel deliberately does not write the
-  // default in for a package that said nothing.
+  // The only tools a pin is the way in for: `surface: "manual"`.
   expect(pinsOf(pkg("std", ["read", "edit"]))).toEqual(["ext:std/read", "ext:std/edit"])
   expect(modelTools(pkg("std", ["read", "edit"]))).toEqual(["read", "edit"])
 
-  // One package, both answers: the delegation entry point is the model's, the
-  // three commands a driver runs are not. A per-PACKAGE list could not say this.
-  expect(pinsOf(pkg("agent", ["agent", "list", "render", "run"], ["list", "render", "run"]))).toEqual([
-    "ext:agent/agent",
-  ])
+  // One package, both answers: the delegation entry point is pinned, the three
+  // commands `ext run` calls are not. A per-PACKAGE list could not say this.
+  expect(pinsOf(pkg("agent", ["agent"], ["list", "render", "run"]))).toEqual(["ext:agent/agent"])
 
-  // All driver: the switch is membership alone, and that is not half-anything —
-  // `nulya ext run` reaches the tool without a pin.
-  expect(pinsOf(pkg("compact", ["compact"], ["compact"]))).toEqual([])
+  // All internal: the switch is membership alone, and that is not half-anything
+  // — `nulya ext run` reaches the tool without a pin.
+  expect(pinsOf(pkg("compact", [], ["compact"]))).toEqual([])
 
   // And a package this repository never heard of gets the same answer, which is
   // the whole point of asking the manifest instead of a list of bundled ids.
-  expect(pinsOf(pkg("acme.patrol", ["watch", "sweep"], ["sweep"]))).toEqual(["ext:acme.patrol/watch"])
+  expect(pinsOf(pkg("acme.patrol", ["watch"], ["sweep"]))).toEqual(["ext:acme.patrol/watch"])
 })
 
 /**
@@ -712,16 +673,27 @@ test("the pins an activation writes come from the manifest, per tool, for a pack
  * pin is FOR. There is one answer to "which tools does the switch pin", and
  * `pinsOf` is it.
  */
-test("the switch pins every model-facing tool a package declares, whatever kind of package it is", () => {
-  const pkg = (id: string, tools: string[], pinTools = tools) => ({ id, tools, pinTools, driverTools: [] })
+test("the switch pins every pinnable tool a package declares, whatever kind of package it is", () => {
+  const pkg = (id: string, tools: string[], manualTools = tools) => ({ id, tools, manualTools })
 
   expect(pinsOf(pkg("std", ["read", "edit"]))).toEqual(["ext:std/read", "ext:std/edit"])
-  // A mode's tools can opt into `surface:"with"`; those are model-facing, but
-  // membership exposes them and the switch does not pin them.
+  // `surface:"auto"` tools are model-facing, but membership exposes them and a
+  // pin naming one is refused outright — so the switch writes none.
   expect(pinsOf(pkg("plan", ["propose", "todo"], []))).toEqual([])
   expect(pinsOf(pkg("ask", ["ask"], []))).toEqual([])
 })
 
+/**
+ * The three surface words, off a real built manifest — including the one a
+ * manifest does not write (T52).
+ *
+ * The default matters more than the words do. It used to be `pin`, so a tool
+ * that said nothing landed in the pinnable half; it is `auto` now, because a
+ * package somebody deliberately composed means its tools to be usable. A front
+ * end that kept the old default would offer a checkbox for a tool the model can
+ * already call — and, worse, write a pin the kernel refuses outright
+ * (`PinToolNotPinnable`), which is the whole session.
+ */
 test("the std pin list is the frozen manifest's, with the literal only as a cold-start fallback", async () => {
   const store = tempWorkspace()
   try {
@@ -736,11 +708,14 @@ test("the std pin list is the frozen manifest's, with the literal only as a cold
         runtime: { entry: "src/run.sh", interpreter: "sh" },
         contributes: {
           tools: [
-            { name: "read", input: {}, readonly: true },
-            { name: "edit", input: {} },
-            // A driver tool a future std might grow: it must not be pinned, and
-            // no edit to this file is needed for that to hold.
-            { name: "reindex", input: {}, audience: "driver" },
+            { name: "read", input: {}, surface: "manual", readonly: true },
+            { name: "edit", input: {}, surface: "manual" },
+            // An internal tool a future std might grow: it must not be pinned,
+            // and no edit to this file is needed for that to hold.
+            { name: "reindex", input: {}, surface: "internal" },
+            // …and one that says nothing at all: `auto`, the kernel's default,
+            // so it is model-facing through membership and never pinnable.
+            { name: "watch", input: {} },
           ],
         },
       }),
@@ -748,12 +723,15 @@ test("the std pin list is the frozen manifest's, with the literal only as a cold
     const built = await extSync(store)
     const line = built.lines.find((entry) => entry.id === "std")!
     const what = (await builtContributions(store, root, "std", line.version!))!
-    expect(what.driverTools).toEqual(["reindex"])
+    expect(what.manualTools).toEqual(["read", "edit"])
+    expect(what.internalTools).toEqual(["reindex"])
+    expect(what.autoTools).toEqual(["watch"])
     expect(pinsOf(what)).toEqual(["ext:std/read", "ext:std/edit"])
+    // Nothing said about `apply` either: `manual`, so activating it composes
+    // nothing by itself.
+    expect(what.apply).toBe("manual")
 
-    // The literal is still the answer when no manifest can be read at all — and
-    // it is still what the one-time `edit` migration is about, which is a claim
-    // about pin lists people wrote, not about what std declares today.
+    // The literal is still the answer when no manifest can be read at all.
     expect(await builtContributions(store, root, "std", "v-nosuchversion")).toBeNull()
     expect(std_pins).toContain("ext:std/edit")
   } finally {
@@ -761,35 +739,52 @@ test("the std pin list is the frozen manifest's, with the literal only as a cold
   }
 })
 
-test("session_with replaces two per-package booleans, and still reads them", async () => {
+/**
+ * A package that asks for standing membership, read off a real built manifest
+ * (T52). It is the one declaration that keeps the start-up pass from pointing
+ * `current` at it, so the fixture is a whole build rather than a literal.
+ */
+test("a manifest that says `apply: auto` is read as such, and kept off the unattended pass", async () => {
+  const store = tempWorkspace()
+  try {
+    const root = join(store.dir, ".nulya", "extensions")
+    writeDraft(store.dir, "house.mode", "the house style")
+    writeFileSync(
+      join(root, "house.mode", "extension.json"),
+      JSON.stringify({
+        schema: "nulya.extension/v2",
+        id: "house.mode",
+        apply: "auto",
+        contributes: { system_prompts: ["prompts/identity.md"] },
+      }),
+    )
+    mkdirSync(join(root, "house.mode", "prompts"), { recursive: true })
+    writeFileSync(join(root, "house.mode", "prompts", "identity.md"), "write like the house\n")
+
+    const built = await extSync(store)
+    const line = built.lines.find((entry) => entry.id === "house.mode")!
+    const what = (await builtContributions(store, root, "house.mode", line.version!))!
+    expect(what.apply).toBe("auto")
+    expect(autoActivatable(what)).toBe(false)
+  } finally {
+    store.cleanup()
+  }
+})
+
+test("session_with is one list, replaced rather than merged by a nearer layer", async () => {
   expect(default_settings.extensions.session_with).toEqual(["handoff", "agent"])
 
   const layer = tempWorkspace()
   try {
     mkdirSync(join(layer.dir, ".nulya"), { recursive: true })
-    // The old key, off: that id leaves the list and nothing else moves.
-    writeFileSync(join(layer.dir, ".nulya", "tui.toml"), "[extensions]\nhandoff = false\n")
-    expect((await loadSettings(layer.dir, {})).extensions.session_with).toEqual(["agent"])
+    writeFileSync(join(layer.dir, ".nulya", "tui.toml"), '[extensions]\nsession_with = ["handoff"]\n')
+    expect((await loadSettings(layer.dir, {})).extensions.session_with).toEqual(["handoff"])
 
-    // The old key, on, for a layer that had turned it off in the list: the
-    // boolean is read after the list, so it is the nearer statement.
-    writeFileSync(
-      join(layer.dir, ".nulya", "tui.toml"),
-      '[extensions]\nsession_with = ["handoff"]\nagent = true\n',
-    )
-    expect((await loadSettings(layer.dir, {})).extensions.session_with).toEqual(["handoff", "agent"])
-
-    // The list alone, replacing rather than merging: a nearer layer must be able
-    // to ask for FEWER packages, which a union could never express.
+    // Replacing rather than merging: a nearer layer must be able to ask for
+    // FEWER packages, which a union could never express.
     writeFileSync(join(layer.dir, ".nulya", "tui.toml"), "[extensions]\nsession_with = []\n")
     expect((await loadSettings(layer.dir, {})).extensions.session_with).toEqual([])
   } finally {
     layer.cleanup()
   }
-})
-
-test("withPackage adds, removes, and never reorders what it leaves", () => {
-  expect(withPackage(["handoff", "agent"], "handoff", false)).toEqual(["agent"])
-  expect(withPackage(["handoff", "agent"], "handoff", true)).toEqual(["agent", "handoff"])
-  expect(withPackage(["agent"], "handoff", false)).toEqual(["agent"])
 })

@@ -31,8 +31,7 @@ export interface TuiState {
    * The permission mode last chosen on screen (`/mode`, the status-line chip).
    * Program state, like the model pick and for the same reason: a person who
    * switched to `unsafe` yesterday should not have to find `tui.toml` today.
-   * `tui.toml`'s `[driver] mode` is the fallback when nothing was chosen. A file
-   * that still says `auto` is read as `unsafe` (`normalizeMode`).
+   * `tui.toml`'s `[driver] mode` is the fallback when nothing was chosen.
    */
   mode?: PermissionMode
   /**
@@ -67,25 +66,6 @@ export interface TuiState {
    * kernel's own `registry.pinned_native_tools` instead.
    */
   session_pins?: string[]
-  /**
-   * Extension ids this TUI composes into every session it starts, as bare ids
-   * resolved at `current` — the membership half of what `/ext`'s Enter turns on
-   * (K8), beside `session_pins`, which is the tool-face half.
-   *
-   * Program state for the same reason the pins are: trying a package out should
-   * cost nothing and leave nothing in a file somebody else reads. The permanent
-   * form is the kernel's own `[extensions] with` in config, which `nulya config
-   * show` projects and this TUI never writes.
-   */
-  standing_with?: string[]
-  /**
-   * Set once `edit` has been offered to an existing `session_pins` list — the
-   * tool moved out of the kernel and into `std` after some people already had
-   * the other std pins written here. The marker is what makes it a migration
-   * rather than a rule: someone who then unpins `edit` in `/ext` keeps it
-   * unpinned.
-   */
-  adopted_std_edit_pin?: boolean
   /**
    * One slot per plugin package, keyed by package id (tui-plugin U3,
    * `api.state`). PREFERENCES a plugin should remember between runs — not view
@@ -132,25 +112,11 @@ export function loadTuiState(path = tuiStatePath()): TuiState {
     if (Array.isArray(sessionPinsList)) {
       state.session_pins = sessionPinsList.filter((s): s is string => typeof s === "string")
     }
-    // `session_with` was this key's name until K8's rename to `standing_with`
-    // (S2, avoiding the collision with `extensions.ts`'s `standingWith`
-    // predicate) — a file written yesterday still has the old name. Read
-    // either for one version, folded into the new field; only `standing_with`
-    // is ever written back (`saveTuiState`).
-    const standingWithList = record["standing_with"] ?? record["session_with"]
-    if (Array.isArray(standingWithList)) {
-      state.standing_with = standingWithList.filter((s): s is string => typeof s === "string")
-    }
-    // `auto` was this mode's name until it was renamed to `unsafe`; the file
-    // written yesterday still says it, and `normalizeMode` is the one place that
-    // knows. Nothing is rewritten here — the next `rememberMode` writes the new
-    // word, and until then the old one keeps meaning what it meant.
     const mode = record["mode"]
     if (typeof mode === "string") {
       const known = normalizeMode(mode)
       if (known) state.mode = known
     }
-    if (record["adopted_std_edit_pin"] === true) state.adopted_std_edit_pin = true
     const plugins = record["plugins"]
     if (typeof plugins === "object" && plugins !== null && !Array.isArray(plugins)) {
       const slots: Record<string, Record<string, unknown>> = {}
@@ -162,9 +128,10 @@ export function loadTuiState(path = tuiStatePath()): TuiState {
       state.plugins = slots
     }
     // Every key is picked out by name, so a file written by an older build —
-    // `asked_bundled`, retired in T23 when the bundled question went away — is
-    // simply not read. An unknown key has never been an error here, and a state
-    // file that refused to load would cost the model pick and the pins as well.
+    // `asked_bundled`, `standing_with`, `adopted_std_edit_pin`, all retired —
+    // is simply not read. An unknown key has never been an error here, and a
+    // state file that refused to load would cost the model pick and the pins as
+    // well.
     return state
   } catch {
     return {}
@@ -196,17 +163,6 @@ export function sessionPins(path = tuiStatePath()): string[] {
 export function rememberSessionPins(pins: readonly string[], path = tuiStatePath()): void {
   const state = loadTuiState(path)
   state.session_pins = [...pins]
-  saveTuiState(state, path)
-}
-
-/** The `--with` list every `session new` from this TUI carries (K8). */
-export function standingWithIds(path = tuiStatePath()): string[] {
-  return loadTuiState(path).standing_with ?? []
-}
-
-export function rememberStandingWith(ids: readonly string[], path = tuiStatePath()): void {
-  const state = loadTuiState(path)
-  state.standing_with = [...ids]
   saveTuiState(state, path)
 }
 

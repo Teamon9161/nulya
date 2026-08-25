@@ -95,12 +95,24 @@ export interface Contributions {
   id: string
   version: string
   tools: string[]
-  /** The subset of `tools` whose surface is `pin`: model-facing and user-pinnable. */
-  pinTools: string[]
-  /** The subset of `tools` whose surface is `with`: model-facing when its package is composed. */
-  withTools: string[]
-  /** The subset of `tools` whose surface is `driver`: callable by drivers with `ext run`. */
-  driverTools: string[]
+  /** The subset of `tools` whose surface is `manual`: model-facing only when a pin names it. */
+  manualTools: string[]
+  /** The subset of `tools` whose surface is `auto`: model-facing as soon as its package is a member. */
+  autoTools: string[]
+  /** The subset of `tools` whose surface is `internal`: callable with `ext run`, never on the model face. */
+  internalTools: string[]
+  /**
+   * The package's own answer to "what does installing me mean" (`manifest.Apply`,
+   * DESIGN §5.1 / §7.2.1). `auto` = once it has a `current`, the kernel composes
+   * it into every fresh session that is not `--bare`; `manual` = it enters only
+   * the sessions somebody names it in.
+   *
+   * A DEFAULT, not "unsaid": a package that writes nothing means `manual`, the
+   * same way a tool that writes no `surface` means `auto`. So there is no null
+   * here to distinguish (unlike `tools[].readonly`, where nobody has claimed
+   * anything).
+   */
+  apply: PackageApply
   skills: string[]
   /**
    * Files whose text becomes a system block for any session carrying this
@@ -158,6 +170,19 @@ export interface Contributions {
   ui: PackageUi | null
 }
 
+/**
+ * What a package says installing it means (`manifest.Apply`, DESIGN §5.1).
+ *
+ * The one axis a manifest gets an opinion on that reaches beyond a single
+ * session: `auto` is a package asking to be a member of every fresh session on
+ * a machine that has activated it — which the KERNEL then does, at
+ * `session new`, so no front end has to write a standing list of its own. A
+ * person still overrides it in both directions (`ext deactivate` takes it back,
+ * `[extensions] with` adds a `manual` one), which is why it is a default rather
+ * than a veto.
+ */
+export type PackageApply = "auto" | "manual"
+
 /** One front end's module declaration (`manifest.UiHost`), for this host. */
 export interface PackageUi {
   /** Package-relative, checked safe by the kernel at build time. */
@@ -174,16 +199,16 @@ export interface PackageCommand {
   name: string
   description: string
   /**
-   * The verb, kept exactly as the manifest wrote it: the object form
-   * (`{"with": true}` / `{"run": "<tool>"}` / `{"skill": "<ref>"}`), or the
-   * string form that preceded it. `packageCommands.parseAction` is the one
-   * reader, and an unrecognised verb is its decision.
+   * The verb, kept exactly as the manifest wrote it: an object with exactly one
+   * key (`{"with": true}` / `{"run": "<tool>"}` / `{"skill": "<ref>"}`).
+   * `packageCommands.parseAction` is the one reader, and an unrecognised verb is
+   * its decision — the vocabulary is open, so this side never filters.
    */
   action: PackageActionValue
 }
 
-/** Either action spelling, unread (`PackageCommand.action`). */
-export type PackageActionValue = string | Record<string, unknown>
+/** An action object, unread (`PackageCommand.action`). */
+export type PackageActionValue = Record<string, unknown>
 
 /**
  * A package's approval-policy narrowing (`manifest.Policy`). One field, and it
@@ -213,9 +238,10 @@ export async function readContributions(
     id,
     version,
     tools: [],
-    pinTools: [],
-    withTools: [],
-    driverTools: [],
+    manualTools: [],
+    autoTools: [],
+    internalTools: [],
+    apply: "manual",
     skills: [],
     systemPrompts: [],
     commands: [],
@@ -266,9 +292,10 @@ function contributionsOf(
 ): Pick<
   Contributions,
   | "tools"
-  | "pinTools"
-  | "withTools"
-  | "driverTools"
+  | "manualTools"
+  | "autoTools"
+  | "internalTools"
+  | "apply"
   | "systemPrompts"
   | "skills"
   | "commands"
@@ -291,9 +318,12 @@ function contributionsOf(
   const surfaces = new Map(named.map((tool) => [tool["name"] as string, toolSurfaceOf(tool)]))
   return {
     tools,
-    pinTools: tools.filter((tool) => surfaces.get(tool) === "pin"),
-    withTools: tools.filter((tool) => surfaces.get(tool) === "with"),
-    driverTools: tools.filter((tool) => surfaces.get(tool) === "driver"),
+    manualTools: tools.filter((tool) => surfaces.get(tool) === "manual"),
+    autoTools: tools.filter((tool) => surfaces.get(tool) === "auto"),
+    internalTools: tools.filter((tool) => surfaces.get(tool) === "internal"),
+    // Top level, not under `contributes`: it is not a contribution, it is the
+    // author's reading of what activating the package means (DESIGN §7.2.1).
+    apply: applyOf(manifest?.["apply"]),
     skills: stringList(contributes["skills"]),
     systemPrompts: stringList(contributes["system_prompts"]),
     commands: commandsOf(contributes["commands"]),
@@ -304,13 +334,32 @@ function contributionsOf(
   }
 }
 
-/** A tool's placement, folding legacy `audience` the same way the kernel does. */
-export type ToolSurface = "pin" | "with" | "driver"
+/**
+ * Where a tool sits, given that its package is already a member of the session
+ * (`manifest.Surface`, DESIGN §7.2.1). All three words answer that one
+ * question, which is why none of them names a CLI flag any more:
+ *
+ *   - `auto`     — on the model's face as soon as the package is composed in.
+ *   - `manual`   — on it only when a pin names the tool (`pinned_native_tools`,
+ *                  `session new --pin`).
+ *   - `internal` — never on it; `nulya ext run` is how it is called.
+ *
+ * `auto` is also the DEFAULT, and matching the kernel there is the whole point
+ * of this function: a package somebody deliberately composed means its tools to
+ * be usable, and the front end that read a missing field as "pinnable" would
+ * draw an empty checkbox beside a tool the model can already call.
+ */
+export type ToolSurface = "auto" | "manual" | "internal"
 
 function toolSurfaceOf(tool: Record<string, unknown>): ToolSurface {
   const surface = tool["surface"]
-  if (surface === "pin" || surface === "with" || surface === "driver") return surface
-  return tool["audience"] === "driver" ? "driver" : "pin"
+  if (surface === "manual" || surface === "internal") return surface
+  return "auto"
+}
+
+/** `manifest.apply`, defaulting to `manual` exactly as the kernel does. */
+function applyOf(value: unknown): PackageApply {
+  return value === "auto" ? "auto" : "manual"
 }
 
 /** A tool's `ui` object (`ToolSpec.ui`, DESIGN §7.2.1), or `{}` when absent or malformed. */
@@ -326,17 +375,10 @@ function toolUiOf(tool: Record<string, unknown>): Record<string, unknown> {
  * package with no key for this one has no module here — read as "no code
  * layer", never as a warning. Both fields are required by the kernel's own
  * parse, so half a declaration reads the same way.
- *
- * A block written FLAT (`{entry, api}`, no host at all) is the spelling that
- * predated the host key, when this was the only front end there was. It is
- * still read as this host's for one version — frozen versions on disk keep the
- * bytes they were built with, so this reader meets the old shape long after a
- * draft stops writing it.
  */
 function uiOf(value: unknown): PackageUi | null {
   if (typeof value !== "object" || value === null) return null
-  const record = value as Record<string, unknown>
-  const mine = "entry" in record ? record : record[ui_host]
+  const mine = (value as Record<string, unknown>)[ui_host]
   if (typeof mine !== "object" || mine === null) return null
   const host = mine as Record<string, unknown>
   const entry = host["entry"]
@@ -354,9 +396,7 @@ function commandsOf(value: unknown): PackageCommand[] {
     const record = entry as Record<string, unknown>
     const action = record["action"]
     const written =
-      typeof action === "string" || (typeof action === "object" && action !== null && !Array.isArray(action))
-        ? (action as PackageActionValue)
-        : null
+      typeof action === "object" && action !== null && !Array.isArray(action) ? (action as PackageActionValue) : null
     if (typeof record["name"] !== "string" || written === null) continue
     out.push({
       name: record["name"],
@@ -376,19 +416,12 @@ function policyOf(value: unknown): PackagePolicy | null {
 }
 
 /**
- * The model-facing tools of a package: both independently pinnable tools and
- * tools that appear through explicit package membership. Kept for older tests
- * and readers that only need "not driver"; `pinTools` is the answer for writes.
+ * The model-facing tools of a package: the ones that arrive with membership and
+ * the ones a pin has to name, together. For readers that only need "not
+ * internal"; `manualTools` is the answer for anything that WRITES a pin.
  */
-export function modelTools(
-  what: Pick<Contributions, "tools" | "driverTools">,
-): string[] {
-  return what.tools.filter((tool) => !what.driverTools.includes(tool))
-}
-
-/** The model-facing tools a person can independently pin. */
-export function pinTools(what: Pick<Contributions, "tools" | "pinTools" | "driverTools">): string[] {
-  return what.pinTools ?? what.tools.filter((tool) => !what.driverTools.includes(tool))
+export function modelTools(what: Pick<Contributions, "tools" | "internalTools">): string[] {
+  return what.tools.filter((tool) => !what.internalTools.includes(tool))
 }
 
 /**
@@ -665,19 +698,20 @@ export interface ExtensionEntry {
   versions: ExtensionVersion[]
   kind: ImplementationKind
   tools: string[]
-  /** The declared pin-surface subset of `tools` (DESIGN §7.2.1). */
-  pinTools: string[]
-  /** The declared with-surface subset of `tools` (DESIGN §7.2.1). */
-  withTools: string[]
-  /** The declared driver-surface subset of `tools` (DESIGN §7.2.1). */
-  driverTools: string[]
+  /** The declared `manual`-surface subset of `tools` (DESIGN §7.2.1). */
+  manualTools: string[]
+  /** The declared `auto`-surface subset of `tools` (DESIGN §7.2.1). */
+  autoTools: string[]
+  /** The declared `internal`-surface subset of `tools` (DESIGN §7.2.1). */
+  internalTools: string[]
+  /** What the package says activating it means (DESIGN §5.1), defaulting to `manual`. */
+  apply: PackageApply
   skills: string[]
   systemPrompts: string[]
   /**
-   * The other two things only a MEMBER of a session can give (`standingWith`):
-   * this package's slash commands, and its front-end module. Already computed
-   * by `contributionsOf`; named here so `/ext` can ask one question — does
-   * turning this on have to compose it, or do its pins do that by themselves?
+   * The two things only a MEMBER of a session can give: this package's slash
+   * commands, and its front-end module. Already computed by `contributionsOf`;
+   * named here so `/ext` can say what a row's Enter is actually turning on.
    */
   commands: PackageCommand[]
   ui: PackageUi | null
@@ -704,7 +738,16 @@ function stringList(value: unknown): string[] {
 
 function manifestFacts(manifest: Record<string, unknown> | null): Pick<
   ExtensionEntry,
-  "kind" | "tools" | "pinTools" | "withTools" | "driverTools" | "skills" | "systemPrompts" | "commands" | "ui"
+  | "kind"
+  | "tools"
+  | "manualTools"
+  | "autoTools"
+  | "internalTools"
+  | "apply"
+  | "skills"
+  | "systemPrompts"
+  | "commands"
+  | "ui"
 > {
   const runtime = manifest?.["runtime"] as Record<string, unknown> | undefined
   // `runtime.entry` is a string, or an object keyed by OS for a script that

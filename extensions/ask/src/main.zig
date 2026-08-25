@@ -34,9 +34,9 @@
 //! that out in the middle of a task, so a package that only lived in sessions
 //! somebody had already earmarked for questions would be a package that never
 //! fires. So this one belongs in the standing membership list: `[extensions]
-//! with`. Its single tool declares `surface: "with"`, so explicit membership
-//! puts it on the model face; one key still removes both the membership and the
-//! tool slot. For one session only, `--with ask` is the route, and the `/ask`
+//! with`. Its single tool is `surface: "auto"` (the default, written out here
+//! because it is the point), so membership puts it on the model face; one key
+//! still removes both the membership and the tool slot. For one session only, `--with ask` is the route, and the `/ask`
 //! command this manifest declares uses that route.
 //!
 //! **Why compiled Zig rather than a script.** Identical to `handoff`: a question

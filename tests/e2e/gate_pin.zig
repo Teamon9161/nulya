@@ -36,7 +36,9 @@ fn buildScriptPackage(
     id: []const u8,
     tool_name: []const u8,
     /// JSON fragments spliced into the manifest: extra top-level keys, and extra
-    /// keys inside the one tool spec. Each begins with its own comma.
+    /// keys inside the one tool spec. Each begins with its own comma. The tool
+    /// is `surface: "manual"` because every test here pins it, and only a
+    /// `manual` tool can be pinned (DESIGN §5.1).
     top_extra: []const u8,
     tool_extra: []const u8,
 ) ![]u8 {
@@ -57,7 +59,7 @@ fn buildScriptPackage(
     try ws.writeFile(io, .{ .sub_path = script_rel, .data = script_body });
 
     const manifest_bytes = try std.fmt.allocPrint(alloc,
-        \\{{"schema":"nulya.extension/v2","id":"{s}"{s},"runtime":{{"entry":"{s}","interpreter":"{s}"}},"contributes":{{"tools":[{{"name":"{s}","description":"a tool","input":{{"type":"object"}}{s}}}]}}}}
+        \\{{"schema":"nulya.extension/v2","id":"{s}"{s},"runtime":{{"entry":"{s}","interpreter":"{s}"}},"contributes":{{"tools":[{{"name":"{s}","surface":"manual","description":"a tool","input":{{"type":"object"}}{s}}}]}}}}
     , .{ id, top_extra, entry, interpreter, tool_name, tool_extra });
     defer alloc.free(manifest_bytes);
     const manifest_rel = try std.fs.path.join(alloc, &.{ draft_rel, "extension.json" });

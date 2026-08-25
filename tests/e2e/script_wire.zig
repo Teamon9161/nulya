@@ -175,8 +175,10 @@ test "the wire: `ext init` scaffolds it, `ext run --arg` runs it, and a pinned s
     }
 
     // On the model's tool face: a real session, a real step, and the tool result
-    // the model reads is the script's stdout, byte for byte.
-    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--pin", "ext:greeter/greet" });
+    // the model reads is the script's stdout, byte for byte. `--with` and nothing
+    // else — the scaffold writes no `surface`, which means `auto`, so composing
+    // the package IS putting its tool in front of the model (DESIGN §7.2.1).
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--with", "greeter" });
     defer alloc.free(new.stdout);
     try std.testing.expectEqual(@as(u8, 0), new.code);
     const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
@@ -314,22 +316,32 @@ test "per-platform entry: one version, this host's script — and a version with
         try std.testing.expect(std.mem.startsWith(u8, run.stdout, if (windows) "from-ps1" else "from-sh"));
     }
 
-    // A version that names ONLY the other platform. It builds and activates
-    // fine — nothing about it is broken, it simply does not run here — and the
-    // declared file has to be in the snapshot even though this host never runs
-    // it.
-    try writeDraft(alloc, io, ws, "elsewhere",
-        \\{
+    // A version that names ONLY a platform this host is not. It builds and
+    // activates fine — nothing about it is broken, it simply does not run here
+    // — and the declared file has to be in the snapshot even though this host
+    // never runs it.
+    //
+    // The OS named is chosen AGAINST the host rather than hard-coded: a fixed
+    // `"linux"` here made the whole point of the test vanish on Linux (the
+    // entry resolved, the tool ran, and every "fails by name" assertion below
+    // was asserting the opposite of what happened).
+    const away_os = if (windows) "linux" else "windows";
+    const away_script = if (windows) "src/run.sh" else "src/run.ps1";
+    const away_interp = if (windows) "sh" else "powershell";
+    const away_manifest = try std.fmt.allocPrint(alloc,
+        \\{{
         \\  "schema": "nulya.extension/v2",
         \\  "id": "elsewhere",
-        \\  "runtime": {
-        \\    "entry": { "linux": "src/run.sh" },
-        \\    "interpreter": { "linux": "sh" }
-        \\  },
-        \\  "contributes": { "tools": [{ "name": "t", "input": { "type": "object" } }] }
-        \\}
-    , &.{
-        .{ .rel = "src/run.sh", .bytes = "#!/bin/sh\nprintf 'from-sh'\n" },
+        \\  "runtime": {{
+        \\    "entry": {{ "{s}": "{s}" }},
+        \\    "interpreter": {{ "{s}": "{s}" }}
+        \\  }},
+        \\  "contributes": {{ "tools": [{{ "name": "t", "surface": "manual", "input": {{ "type": "object" }} }}] }}
+        \\}}
+    , .{ away_os, away_script, away_os, away_interp });
+    defer alloc.free(away_manifest);
+    try writeDraft(alloc, io, ws, "elsewhere", away_manifest, &.{
+        .{ .rel = away_script, .bytes = "#!/bin/sh\nprintf 'from-sh'\n" },
     });
 
     const away_draft = ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "elsewhere";
@@ -403,7 +415,7 @@ test "per-platform entry: one version, this host's script — and a version with
     try std.testing.expectEqual(@as(u8, 1), missing_built.code);
 }
 
-test "a leftover runtime.wire builds and runs, and the build says the key is not read any more" {
+test "keys the schema retired — runtime.wire, activation, permissions — are ordinary unknown keys: the package builds, runs, and hears nothing about them" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -416,14 +428,17 @@ test "a leftover runtime.wire builds and runs, and the build says the key is not
     defer tmp.cleanup();
     const ws = tmp.dir;
 
-    // A package written against the wire that used to exist. It is not broken —
-    // there is one wire and it was always going to be spoken this way — so the
-    // build proceeds and the tool answers; what the author gets is a sentence
-    // saying their word is no longer read.
+    // A package written against three keys that are gone. Each was once parsed,
+    // frozen and read by something, and each spent a version being answered by a
+    // build-time note. The notes are gone with them: an unknown key is an
+    // unknown key, and a build that lectures about every word it has ever
+    // retired accumulates a museum in front of every author.
     try writeDraft(alloc, io, ws, "leftover",
         \\{
         \\  "schema": "nulya.extension/v2",
         \\  "id": "leftover",
+        \\  "activation": "on_request",
+        \\  "permissions": { "fs": [], "network": ["https"] },
         \\  "runtime": { "entry": "src/run.sh", "interpreter": "sh", "wire": "jsonrpc" },
         \\  "contributes": { "tools": [{ "name": "t", "input": { "type": "object" } }] }
         \\}
@@ -439,13 +454,15 @@ test "a leftover runtime.wire builds and runs, and the build says the key is not
     const version = try extractVersion(alloc, built.stdout);
     defer alloc.free(version);
 
-    // The note names the package and the key, on stderr so stdout stays the
-    // version id a caller parses.
+    // Nothing on stderr about any of them.
     const err_text = try runCliStderr(alloc, io, ws, &argv, &.{});
     defer alloc.free(err_text);
-    try std.testing.expect(std.mem.indexOf(u8, err_text, "leftover") != null);
-    try std.testing.expect(std.mem.indexOf(u8, err_text, "runtime.wire") != null);
-    try std.testing.expect(std.mem.indexOf(u8, err_text, ".zig:") == null);
+    for ([_][]const u8{ "runtime.wire", "activation", "permissions" }) |word| {
+        std.testing.expect(std.mem.indexOf(u8, err_text, word) == null) catch |err| {
+            std.debug.print("build still says something about '{s}':\n{s}\n", .{ word, err_text });
+            return err;
+        };
+    }
 
     if (windows) return; // no `sh` to run the entry with
     const ref = try std.fmt.allocPrint(alloc, "leftover@{s}", .{version});

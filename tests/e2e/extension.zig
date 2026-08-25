@@ -1407,10 +1407,11 @@ test "bundled handoff: a session that pins ext:handoff/handoff exposes it native
     const ref = try buildBundled(alloc, io, ws, exe_abs, "handoff");
     defer alloc.free(ref);
 
-    // Built, never activated: `--with` makes it a member of THIS session and
-    // `--pin` is the separate decision that gives it a native tool slot. Both
-    // axes at once, which is exactly how a driver composes it.
-    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--with", ref, "--pin", "ext:handoff/handoff" });
+    // Built, never activated: `--with` makes it a member of THIS session, and
+    // its one tool is `surface: auto`, so membership alone is what puts it on
+    // the model's face (DESIGN §5.1). No pin — a pin would be refused, because
+    // only `manual` tools take one.
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--with", ref });
     defer alloc.free(new.stdout);
     try std.testing.expectEqual(@as(u8, 0), new.code);
     const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
@@ -1965,7 +1966,7 @@ fn scaffoldAndBuildScript(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, 
         \\  "id": "{s}",
         \\  "runtime": {{ "entry": "{s}", "interpreter": "{s}" }},
         \\  "contributes": {{
-        \\    "tools": [{{ "name": "{s}", "description": "A script tool.", "input": {{ "type": "object", "properties": {{}} }} }}]
+        \\    "tools": [{{ "name": "{s}", "surface": "manual", "description": "A script tool.", "input": {{ "type": "object", "properties": {{}} }} }}]
         \\  }}
         \\}}
         \\
@@ -2054,7 +2055,7 @@ test "script extension: init(--script) -> build(seal) -> activate -> run -> pinn
     try std.testing.expect(std.mem.indexOf(u8, result.output, "hello from a Nulya script extension") != null);
 }
 
-test "manifest audience: the frozen version keeps what the draft declared, and an unknown word is refused before anything is built" {
+test "manifest surface: the frozen version keeps what the draft declared, and an unknown word is refused before anything is built" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -2074,8 +2075,8 @@ test "manifest audience: the frozen version keeps what the draft declared, and a
     const script_name = if (windows) "run.ps1" else "run.sh";
     const script_body = if (windows) greeter_script_ps1 else greeter_script_sh;
 
-    // A script package, so this costs no toolchain: three tools, one for each
-    // thing a package can say about who a tool is for.
+    // A script package, so this costs no toolchain: four tools, one for each
+    // thing a package can say about where a tool belongs, plus the silence.
     const draft_rel = ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "faces";
     const src_rel = draft_rel ++ std.fs.path.sep_str ++ "src";
     try ws.createDirPath(io, src_rel);
@@ -2085,8 +2086,9 @@ test "manifest audience: the frozen version keeps what the draft declared, and a
 
     const good = try std.fmt.allocPrint(alloc,
         \\{{"schema":"nulya.extension/v2","id":"faces","runtime":{{"entry":"{s}","interpreter":"{s}"}},"contributes":{{"tools":[
-        \\{{"name":"ask","input":{{}},"audience":"model"}},
-        \\{{"name":"drive","input":{{}},"audience":"driver"}},
+        \\{{"name":"ask","input":{{}},"surface":"auto"}},
+        \\{{"name":"pinny","input":{{}},"surface":"manual"}},
+        \\{{"name":"drive","input":{{}},"surface":"internal"}},
         \\{{"name":"quiet","input":{{}}}}
         \\]}}}}
     , .{ entry, interpreter });
@@ -2109,15 +2111,16 @@ test "manifest audience: the frozen version keeps what the draft declared, and a
     var frozen = try manifest_mod.parse(alloc, frozen_bytes);
     defer frozen.deinit();
     try frozen.validate();
-    try std.testing.expectEqual(@as(usize, 3), frozen.tools.len);
-    try std.testing.expectEqual(@as(?manifest_mod.Audience, .model), frozen.tools[0].audienceOf());
-    try std.testing.expectEqual(@as(?manifest_mod.Audience, .driver), frozen.tools[1].audienceOf());
-    // Silence survives as silence: the kernel never writes `model` in for a
-    // package that said nothing (DESIGN §7.2.1).
-    try std.testing.expect(frozen.tools[2].audience == null);
-
-    // The declaration changes NOTHING the kernel does: a session may still pin
-    // the driver-audience tool, and it executes like any other.
+    try std.testing.expectEqual(@as(usize, 4), frozen.tools.len);
+    try std.testing.expectEqual(manifest_mod.Surface.auto, frozen.tools[0].surfaceOf());
+    try std.testing.expectEqual(manifest_mod.Surface.manual, frozen.tools[1].surfaceOf());
+    try std.testing.expectEqual(manifest_mod.Surface.internal, frozen.tools[2].surfaceOf());
+    // Silence survives as silence in the FILE — the kernel writes nothing in —
+    // while the reading of it is `auto` (DESIGN §7.2.1).
+    try std.testing.expect(frozen.tools[3].surface == null);
+    try std.testing.expectEqual(manifest_mod.Surface.auto, frozen.tools[3].surfaceOf());
+    // And the kernel acts on it: only the `manual` tool takes a pin, while
+    // membership alone puts the `auto` one on the face and leaves the rest off.
     var ws_real: [std.fs.max_path_bytes]u8 = undefined;
     const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
     {
@@ -2125,20 +2128,30 @@ test "manifest audience: the frozen version keeps what the draft declared, and a
         defer ext_root.close(io);
         try store.Store.init(io, ext_root).activate(alloc, "faces", version);
     }
-    const pins = [_][]const u8{"ext:faces/drive"};
-    var comp = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{ .pinned_native_tools = &pins });
+    const pins = [_][]const u8{"ext:faces/pinny"};
+    var comp = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{
+        .pinned_native_tools = &pins,
+        .with = &.{.{ .id = "faces" }},
+    });
     defer comp.deinit(alloc);
-    try std.testing.expect(comp.tools.lookup("drive") != null);
+    try std.testing.expect(comp.tools.lookup("pinny") != null);
+    try std.testing.expect(comp.tools.lookup("ask") != null);
+    try std.testing.expect(comp.tools.lookup("quiet") != null);
+    try std.testing.expect(comp.tools.lookup("drive") == null);
+    try std.testing.expectError(error.PinToolNotPinnable, composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{
+        .pinned_native_tools = &[_][]const u8{"ext:faces/drive"},
+    }));
 
-    // A word outside the two is a manifest fault: `ext build` names it and
-    // writes no version at all.
+    // A word outside the three is a manifest fault: `ext build` names it and
+    // writes no version at all. The three words this vocabulary used to be
+    // spelled with are outside it too.
     const bad_rel = ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "typo";
     try ws.createDirPath(io, bad_rel ++ std.fs.path.sep_str ++ "src");
     const bad_script_rel = try std.fs.path.join(alloc, &.{ bad_rel, "src", script_name });
     defer alloc.free(bad_script_rel);
     try ws.writeFile(io, .{ .sub_path = bad_script_rel, .data = script_body });
     const bad = try std.fmt.allocPrint(alloc,
-        \\{{"schema":"nulya.extension/v2","id":"typo","runtime":{{"entry":"{s}","interpreter":"{s}"}},"contributes":{{"tools":[{{"name":"t","input":{{}},"audience":"drivers"}}]}}}}
+        \\{{"schema":"nulya.extension/v2","id":"typo","runtime":{{"entry":"{s}","interpreter":"{s}"}},"contributes":{{"tools":[{{"name":"t","input":{{}},"surface":"driver"}}]}}}}
     , .{ entry, interpreter });
     defer alloc.free(bad);
     try ws.writeFile(io, .{ .sub_path = bad_rel ++ std.fs.path.sep_str ++ "extension.json", .data = bad });
@@ -2148,7 +2161,7 @@ test "manifest audience: the frozen version keeps what the draft declared, and a
     try std.testing.expectEqual(@as(u8, 1), refused.code);
     const said = try runCliStderr(alloc, io, ws, &.{ exe_abs, "ext", "build", bad_rel }, &.{});
     defer alloc.free(said);
-    try std.testing.expect(std.mem.indexOf(u8, said, "InvalidAudience") != null);
+    try std.testing.expect(std.mem.indexOf(u8, said, "InvalidSurface") != null);
     try std.testing.expectError(error.FileNotFound, ws.access(io, bad_rel ++ std.fs.path.sep_str ++ "versions", .{}));
 }
 
@@ -3031,10 +3044,11 @@ test "bundled plan and ask: propose, todo and ask record without writing anythin
 
     // ③ A session wearing `plan`: the prompt is a frozen system block, the
     //    narrowing it asks for is frozen with the version (so "what this
-    //    session's permission stance was" stays answerable afterwards), and the
-    //    tools are on the model's face only because this session pinned them —
-    //    membership and pin are two axes (DESIGN §7.5).
-    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--with", plan_ref, "--pin", "ext:plan/propose" });
+    //    session's permission stance was" stays answerable afterwards), and
+    //    `propose` / `todo` are on the model's face because they are
+    //    `surface: auto` and this session is a member — while `approve`, which
+    //    is `internal`, is not (DESIGN §5.1).
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--with", plan_ref });
     defer alloc.free(new.stdout);
     try std.testing.expectEqual(@as(u8, 0), new.code);
     const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
@@ -3057,9 +3071,13 @@ test "bundled plan and ask: propose, todo and ask record without writing anythin
         }, .{ .workspace = ws, .session_path = spath });
         defer sess.deinit();
 
-        // `shell` plus the one pinned tool: `todo` and `approve` are declared
-        // and not pinned, which is the whole of the second axis.
-        try std.testing.expectEqual(@as(usize, 2), sess.composition.tools.tools.len);
+        // `shell` plus the two `surface: auto` tools. `approve` is `internal`
+        // and stays off the face however the package is composed — that is the
+        // whole of the second axis (DESIGN §5.1).
+        try std.testing.expectEqual(@as(usize, 3), sess.composition.tools.tools.len);
+        try std.testing.expect(sess.composition.tools.lookup("propose") != null);
+        try std.testing.expect(sess.composition.tools.lookup("todo") != null);
+        try std.testing.expect(sess.composition.tools.lookup("approve") == null);
         var saw_prompt = false;
         for (sess.composition.system_prompts.blocks) |b| {
             if (std.mem.indexOf(u8, b.source, "plan") != null) saw_prompt = true;

@@ -38,7 +38,7 @@ fn latestToolOutput(l: *const ledger.Ledger) ?[]const u8 {
     return null;
 }
 
-test "self-manufacture closed loop: a shell-only session builds its own extension; usage alone never promotes it; a pin — from config or --pin — makes it native in the next session" {
+test "self-manufacture closed loop: a shell-only session builds its own extension; usage alone never promotes it; composing it — from config or --with — makes it native in the next session" {
     // The milestone's first sentence, proven with no harness-built extension:
     //
     //   Session A exposes ONLY shell. A deterministic model, through that one
@@ -47,11 +47,15 @@ test "self-manufacture closed loop: a shell-only session builds its own extensio
     //   and records its usage. The tool never becomes native mid-session.
     //     -> Session B, opened with no pin, STILL sees only shell: the
     //        usage journal is evidence, never a decision (DESIGN §5.1, §5.5).
-    //     -> Promotion is someone writing a pin. Both spellings are exercised
-    //        through the real CLI: `[registry] pinned_native_tools` in the
-    //        project layer's `.nulya/config.toml`, and `session new --pin`.
-    //        Either way the header records it and the executor spawns the frozen
-    //        binary the model just built.
+    //     -> Promotion is someone naming the package. The scaffold writes no
+    //        `surface`, which means `auto` (DESIGN §7.2.1), so the axis that
+    //        promotes it is MEMBERSHIP — both spellings through the real CLI:
+    //        `[extensions] with` in the project layer's `.nulya/config.toml`,
+    //        and `session new --with`. Either way the header records the tool
+    //        and the executor spawns the frozen binary the model just built. A
+    //        `--pin` on the same tool is refused by name, because a pin is for
+    //        the OTHER surface — asserted here too, since "which axis does this
+    //        package take" is exactly what a manufacturing model must know.
     //
     // No real LLM: a scripted provider issues the exact shell commands a model
     // would. `NULYA_ZIG` is injected into the (non-secret) sanitized child env so
@@ -204,10 +208,10 @@ test "self-manufacture closed loop: a shell-only session builds its own extensio
         try std.testing.expect(comp_plain.tools.lookup("greet") == null);
     }
 
-    // --- Promotion = a pin. Spelling one: the project layer's config file. ---
+    // --- Promotion = naming the package. Spelling one: the project config. ---
     try ws.writeFile(io, .{ .sub_path = ".nulya/config.toml", .data =
-        \\[registry]
-        \\pinned_native_tools = ["ext:demo/greet"]
+        \\[extensions]
+        \\with = ["demo"]
         \\
     });
     {
@@ -225,10 +229,10 @@ test "self-manufacture closed loop: a shell-only session builds its own extensio
         try assertGreetRunsFromHeader(alloc, io, ws, ws_path, pinned_id);
     }
 
-    // --- Spelling two: `session new --pin`, with no config file at all. ---
+    // --- Spelling two: `session new --with`, with no config file at all. ---
     try ws.deleteFile(io, ".nulya/config.toml");
     {
-        const pinned = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--pin", "ext:demo/greet" });
+        const pinned = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--with", "demo" });
         defer alloc.free(pinned.stdout);
         try std.testing.expectEqual(@as(u8, 0), pinned.code);
         const pinned_id = try alloc.dupe(u8, std.mem.trim(u8, pinned.stdout, " \r\n"));
@@ -237,6 +241,21 @@ test "self-manufacture closed loop: a shell-only session builds its own extensio
         defer alloc.free(pinned_header);
         try std.testing.expect(std.mem.indexOf(u8, pinned_header, "\"native_tools\":[\"ext:demo/greet\"]") != null);
         try assertGreetRunsFromHeader(alloc, io, ws, ws_path, pinned_id);
+    }
+
+    // The other axis, refused by name: `greet` is `surface: auto`, and a pin is
+    // only for `manual` tools. The sentence has to say which axis to use, or the
+    // model that just built this package has nowhere to go.
+    {
+        const argv = [_][]const u8{ exe_abs, "session", "new", "--profile", "scripted", "--pin", "ext:demo/greet" };
+        const wrong_axis = try runCli(alloc, io, ws, &argv);
+        defer alloc.free(wrong_axis.stdout);
+        try std.testing.expectEqual(@as(u8, 1), wrong_axis.code);
+        const said = try runCliStderr(alloc, io, ws, &argv, &.{});
+        defer alloc.free(said);
+        try std.testing.expect(std.mem.indexOf(u8, said, "ext:demo/greet") != null);
+        try std.testing.expect(std.mem.indexOf(u8, said, "`manual`") != null);
+        try std.testing.expect(std.mem.indexOf(u8, said, "--with") != null);
     }
 
     // A pin that resolves to nothing fails the session rather than starting one
@@ -255,7 +274,7 @@ test "self-manufacture closed loop: a shell-only session builds its own extensio
 }
 
 /// Resume the session `id` the way `session step` does — composition rebuilt
-/// from the frozen header — and prove its pinned `greet` really executes.
+/// from the frozen header — and prove its native `greet` really executes.
 fn assertGreetRunsFromHeader(
     alloc: std.mem.Allocator,
     io: std.Io,

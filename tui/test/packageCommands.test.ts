@@ -30,31 +30,18 @@ test("parseAction reads the three verbs out of the object, keeping the run/skill
   expect(deprecatedActionNote({ run: "propose" })).toBeNull()
 })
 
-test("parseAction: the pre-M3 string form is folded by splitting at the first space, and named in a warning", () => {
-  expect(parseAction("with")).toEqual({ kind: "with" })
-  expect(parseAction("run propose")).toEqual({ kind: "run", tool: "propose" })
-  expect(parseAction("skill std/note")).toEqual({ kind: "skill", ref: "std/note" })
-  expect(parseAction("  with  ")).toEqual({ kind: "with" })
-  expect(deprecatedActionNote("with")).toContain("object")
-  expect(deprecatedActionNote("run propose")).toContain("object")
-})
-
-test("parseAction: `wear` is the pre-D4 spelling of `with`, folded into the same kind in either shape", () => {
-  expect(parseAction("wear")).toEqual({ kind: "with" })
+test("parseAction: `wear` is the pre-D4 spelling of `with`, folded into the same kind", () => {
   expect(parseAction({ wear: true })).toEqual({ kind: "with" })
   expect(deprecatedActionNote({ wear: true })).toContain("with")
 })
 
 test("parseAction: a verb this build does not know is `unknown`, verbatim — an open vocabulary (D1)", () => {
   expect(parseAction({ review: "changes" })).toEqual({ kind: "unknown", word: "review" })
-  expect(parseAction("review changes")).toEqual({ kind: "unknown", word: "review" })
   expect(parseAction({})).toEqual({ kind: "unknown", word: "" })
-  expect(parseAction("")).toEqual({ kind: "unknown", word: "" })
   // `run`/`skill` with no target are not the closed shape either — there is no
   // tool or ref to act on, so this is the reader's fallback too.
   expect(parseAction({ run: true })).toEqual({ kind: "unknown", word: "run" })
-  expect(parseAction("run")).toEqual({ kind: "unknown", word: "run" })
-  expect(parseAction("skill")).toEqual({ kind: "unknown", word: "skill" })
+  expect(parseAction({ skill: true })).toEqual({ kind: "unknown", word: "skill" })
 })
 
 test("runArgs: empty text is no arguments, literal JSON objects pass through verbatim", () => {
@@ -68,7 +55,7 @@ test("runArgs: free text is wrapped, because ext run's own CLI requires a JSON o
   expect(runArgs("find the parser")).toEqual({ text: "find the parser" })
 })
 
-function row(id: string, name: string, action = "with"): PackageCommandRow {
+function row(id: string, name: string, action: Record<string, unknown> = { with: true }): PackageCommandRow {
   return { id, name, description: `${name} from ${id}`, action }
 }
 

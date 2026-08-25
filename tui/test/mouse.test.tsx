@@ -10,6 +10,7 @@
  * key calls rather than a second copy of the behaviour.
  */
 import { afterAll, beforeAll, expect, test } from "bun:test"
+import { readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { For, createSignal, type JSX } from "solid-js"
 import { testRender } from "@opentui/solid"
@@ -49,6 +50,15 @@ beforeAll(async () => {
 
   const run = (args: string[]) => Bun.spawnSync({ cmd: [ws.bin, ...args], cwd: ws.dir, env: process.env })
   run(["ext", "init", "--script", "lint"])
+  // The template writes no `surface`, which now means `auto` — a tool the model
+  // gets with membership and that no pin may name (DESIGN §7.2.1, T52). These
+  // tests are about PINNING, so the fixture says `manual` out loud.
+  const lint_draft = join(ws.dir, ".nulya", "extensions", "lint", "extension.json")
+  const lint_manifest = JSON.parse(readFileSync(lint_draft, "utf8")) as {
+    contributes: { tools: Array<Record<string, unknown>> }
+  }
+  lint_manifest.contributes.tools[0]!["surface"] = "manual"
+  writeFileSync(lint_draft, JSON.stringify(lint_manifest, null, 2))
   const built = run(["ext", "build", ".nulya/extensions/lint"])
   const version = /v-[0-9a-zA-Z]+/.exec(built.stdout.toString())?.[0] ?? ""
   run(["ext", "activate", "lint", version])

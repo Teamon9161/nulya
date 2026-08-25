@@ -79,14 +79,12 @@ export function isMode(word: string): word is PermissionMode {
  * A mode word from OUTSIDE this process — `tui-state.json`, `tui.toml`, a
  * `/mode` argument — or null when it names no mode at all.
  *
- * `auto` was this mode's name until it was renamed, so it is read as `unsafe`
- * here and written back under the new name: a person who chose it yesterday
- * keeps what they chose, and a `tui.toml` written for an older build keeps
- * working. One place does the translation, so no reader learns the old word.
+ * One place turns text into a mode, so a reader never has to know how the word
+ * arrived, and a file that says something else costs its layer's opinion rather
+ * than the whole load.
  */
 export function normalizeMode(word: string): PermissionMode | null {
   const trimmed = word.trim()
-  if (trimmed === "auto") return "unsafe"
   return isMode(trimmed) ? trimmed : null
 }
 

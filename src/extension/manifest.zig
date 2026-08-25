@@ -118,40 +118,64 @@ pub fn implementationKind(m: Manifest) ImplementationKind {
     return if (isScript(rt)) .script else .compiled;
 }
 
-/// Legacy spelling for the old two-way tool placement. New manifests should
-/// write `surface`, because `audience: "model"` could not distinguish a tool
-/// that is pinnable from one that appears only when its package is explicitly
-/// composed.
-pub const Audience = enum {
-    model,
-    driver,
+/// Where this tool belongs in a session's capability surface — three words
+/// that answer one question: given that this package IS a member of a session,
+/// does this tool reach the model, and how?
+///
+///   - `auto`     : it reaches the model as soon as the package is a member
+///                  (`--with`, config `[extensions] with`, `apply: "auto"`, or
+///                  a driver's equivalent). THE DEFAULT: a package a person
+///                  composed in is a package whose tools they meant to use, and
+///                  a scaffolded extension should work the moment it is named.
+///                  A pin that merely IMPLIES membership does not unlock every
+///                  `auto` tool in that package — that pin asked for one tool.
+///   - `manual`   : membership is not enough; a person has to name this tool
+///                  (`session new --pin ext:<id>/<tool>`, config
+///                  `[registry] pinned_native_tools`). The only surface a pin
+///                  accepts, so it is what a package writes for a tool that
+///                  should take a native slot only when somebody says so —
+///                  `extensions/std`, whose six tools are a face a person
+///                  assembles, is the case that exists.
+///   - `internal` : never on the model face at all; called by outside code
+///                  through `nulya ext run`. A driver's tool.
+pub const Surface = enum {
+    auto,
+    manual,
+    internal,
 
-    pub fn fromString(s: []const u8) ?Audience {
-        if (std.mem.eql(u8, s, "model")) return .model;
-        if (std.mem.eql(u8, s, "driver")) return .driver;
+    pub fn fromString(s: []const u8) ?Surface {
+        if (std.mem.eql(u8, s, "auto")) return .auto;
+        if (std.mem.eql(u8, s, "manual")) return .manual;
+        if (std.mem.eql(u8, s, "internal")) return .internal;
         return null;
     }
 };
 
-/// Where this tool belongs in a session's capability surface.
+/// What ACTIVATING this package means for the sessions that follow (DESIGN
+/// §5.1) — the package author's DEFAULT on the membership axis, and the only
+/// thing a manifest may say about reach:
 ///
-///   - `pin`    : model-facing, and may be independently pinned. This is the
-///                backward-compatible default for old manifests.
-///   - `with`   : model-facing only when the package is an explicit member of
-///                this session (`--with`, config `[extensions] with`, or a
-///                driver's equivalent). A pin that merely implies package
-///                membership does NOT unlock every `with` tool in that package.
-///   - `driver` : callable through `nulya ext run` by a driver, not exposed to
-///                the model.
-pub const Surface = enum {
-    pin,
-    with,
-    driver,
+///   - `manual` : the default. Activation says which version `<id>` means and
+///                nothing more; the package joins the sessions that name it
+///                (config `[extensions] with`, `session new --with`, or a pin
+///                that implies membership).
+///   - `auto`   : while this package has a `current`, it is a standing member of
+///                every fresh, non-`--bare` session on this machine. What a
+///                "mode" package wants — a system prompt that is the point of
+///                installing it — and what a tool package that should always be
+///                there wants.
+///
+/// It is a DEFAULT, never a ceiling: config's `[extensions] with` can always
+/// add a package the author left at `manual`, and `nulya ext deactivate <id>`
+/// is how a person turns `auto` off. Reach stays the person's decision
+/// (physics #6); the author only gets to say what installing SHOULD mean.
+pub const Apply = enum {
+    auto,
+    manual,
 
-    pub fn fromString(s: []const u8) ?Surface {
-        if (std.mem.eql(u8, s, "pin")) return .pin;
-        if (std.mem.eql(u8, s, "with")) return .with;
-        if (std.mem.eql(u8, s, "driver")) return .driver;
+    pub fn fromString(s: []const u8) ?Apply {
+        if (std.mem.eql(u8, s, "auto")) return .auto;
+        if (std.mem.eql(u8, s, "manual")) return .manual;
         return null;
     }
 };
@@ -163,12 +187,12 @@ pub const Surface = enum {
 pub const ToolUi = struct {
     /// A rendering HINT for whoever draws this tool's calls — a word from an
     /// OPEN vocabulary (`"checklist"`, `"markdown"`, more later), kept as
-    /// WRITTEN and NEVER refused by `validate`. Unlike `audience` (a closed
-    /// two-word set the kernel can exhaustively check), this vocabulary is
+    /// WRITTEN and NEVER refused by `validate`. Unlike `surface` (a closed
+    /// three-word set the kernel can exhaustively check), this vocabulary is
     /// expected to grow, so an unrecognized word is the READER's decision —
     /// fall back to a plain card and move on — not a build-time refusal.
     /// Absent is null, not any particular word: the same "silence is not a
-    /// claim" discipline as `readonly` and `audience`.
+    /// claim" discipline as `readonly`.
     render: ?[]const u8 = null,
     /// The package's request that the LATEST call of this tool also be
     /// projected as a persistent, foldable widget above the input — the
@@ -203,38 +227,25 @@ pub const ToolSpec = struct {
     /// Absent means the package did not say, which is not the same as `false`
     /// and must not be read as one.
     readonly: ?bool = null,
-    /// The new single placement field, kept as WRITTEN. `surfaceOf` folds it
-    /// with the legacy `audience` field: explicit `surface` wins, legacy
-    /// `audience:"driver"` maps to `.driver`, and silence maps to `.pin` for
-    /// backward compatibility with manifests written before either field.
+    /// This tool's placement (see `Surface`), kept as WRITTEN. Read through
+    /// `surfaceOf`, which supplies the default.
     surface: ?[]const u8 = null,
-    /// Legacy two-way placement. Kept so frozen and older manifests still parse;
-    /// new manifests should write `surface` instead.
-    audience: ?[]const u8 = null,
     /// This tool's front-end rendering hints (see `ToolUi`), or null when the
     /// package made neither claim. Grouped under one FRONT-END key, distinct
-    /// from `readonly` / `audience` above: those two are read by the kernel's
+    /// from `readonly` / `surface` above: those two are read by the kernel's
     /// gate and by `--pin`/`--with` composition, this one only by whoever
     /// draws a call on a screen.
     ui: ?ToolUi = null,
 
-    /// The declared audience, decoded. Null when absent — and also when the
-    /// word is not one of the two, which `validate` refuses, so on a validated
-    /// manifest null means only "did not say".
-    pub fn audienceOf(self: ToolSpec) ?Audience {
-        return Audience.fromString(self.audience orelse return null);
-    }
-
-    /// This tool's placement after folding the legacy field. `surface` is
-    /// authoritative when both fields are present; otherwise old
-    /// `audience:"driver"` keeps meaning driver-only, and every other old tool
-    /// defaults to a pinnable model-facing tool.
+    /// This tool's placement, defaulting to `auto` — a tool in a package
+    /// somebody composed in is a tool they meant to have. Silence is a DEFAULT
+    /// here, not a "did not say" (unlike `readonly`): every tool has a
+    /// placement whether or not the manifest names one, so there is nothing for
+    /// a null to mean. `validate` refuses a word outside the three, so the
+    /// unwrap is safe on any validated manifest.
     pub fn surfaceOf(self: ToolSpec) Surface {
         if (self.surface) |s| return Surface.fromString(s).?;
-        return switch (self.audienceOf() orelse .model) {
-            .model => .pin,
-            .driver => .driver,
-        };
+        return .auto;
     }
 };
 
@@ -266,21 +277,17 @@ pub const Command = struct {
 /// this file's own shape rather than a member of the vocabulary.
 ///
 /// The object replaced a string mini-language (`"run propose"`), which had the
-/// reader splitting on a space to find out what it was holding. The string form
-/// is still ACCEPTED for one version — `parse` folds it into the same fields by
-/// taking the first word as the verb and the rest as the argument, and
-/// `ext build` says one line about it (`Manifest.legacy_command_action`).
+/// reader splitting on a space to find out what it was holding. That form is
+/// gone: a string `action` is a `WrongType` like any other mistyped field.
 pub const Action = struct {
-    /// The single key, or the first word of the legacy string form. Empty only
-    /// when the object had no keys at all, which `validate` refuses.
+    /// The single key. Empty only when the object had no keys at all, which
+    /// `validate` refuses.
     verb: []const u8,
-    /// The string under the key (`{"run": "propose"}` → `"propose"`), or the
-    /// rest of the legacy string. Null when the verb takes no argument
-    /// (`{"with": true}`).
+    /// The string under the key (`{"run": "propose"}` → `"propose"`). Null when
+    /// the verb takes no argument (`{"with": true}`).
     target: ?[]const u8 = null,
-    /// How many keys the object form wrote — the one thing `validate` asks
-    /// about an action's shape (exactly one). The string form is one verb by
-    /// construction, so folding it records 1.
+    /// How many keys the object wrote — the one thing `validate` asks about an
+    /// action's shape (exactly one).
     keys: usize = 1,
 
     /// The tool a `run` command names, or null for every other verb (including
@@ -293,7 +300,7 @@ pub const Action = struct {
 
 /// The narrowing this package asks an approval policy to apply while it is a
 /// member of a session's frozen composition (DESIGN §7.2.1, tui-plugin
-/// D2/D3). A DECLARATION exactly like `ToolSpec.readonly` / `.audience`
+/// D2/D3). A DECLARATION exactly like `ToolSpec.readonly`
 /// beside it: the kernel parses it, freezes it into the version, and
 /// enforces nothing — the consumer is a driver's own approval policy (TUI's
 /// `approvals.decide`).
@@ -365,50 +372,25 @@ pub const Manifest = struct {
     /// This package's front-end modules, one per host (see `UiHost`). Absent
     /// reads as empty — same convention as `skills` / `system_prompts`.
     ui: []const UiHost = &.{},
-    /// True when this manifest still writes the removed `activation` key.
-    ///
-    /// The key is an UNKNOWN key now, so parsing ignores it like any other and
-    /// nothing about the package changes. But a draft still carrying it was
-    /// written to mean something ("only the sessions that name me"), and that
-    /// meaning now lives in one place a package cannot reach: config's
-    /// `[extensions] with` (DESIGN §5.1) — reach is the person's decision, not
-    /// the author's. Silently ignoring the word would leave the author believing
-    /// their package still opts out, so `ext build` / `ext sync` say one line
-    /// about it. The only reader is that note; nothing in a session ever asks.
-    legacy_activation: bool = false,
-    /// True when this manifest still writes the removed `permissions` key —
-    /// `{fs, network, process}`, a claimed footprint the kernel parsed, froze,
-    /// and never read. It was kept for a sandbox that does not exist yet, and
-    /// an unenforced declaration ages into a false assurance. The shape a
-    /// sandbox needs will be decided by the sandbox (PLAN §3.8), not inherited
-    /// from a guess made before it. Same treatment as `legacy_activation`: an
-    /// unknown key now, with one build-time line so the author is not left
-    /// believing something reads it.
-    legacy_permissions: bool = false,
-    /// True when some command wrote the pre-object `action` string form (see
-    /// `Action`). `parse` folded it; this is what makes `ext build` say so.
-    legacy_command_action: bool = false,
-    /// True when `contributes.ui` was written in the pre-host FLAT form
-    /// (`{entry, api}` with no host key). `parse` folded it into a single
-    /// `tui` entry — the only front end that existed when the flat form did —
-    /// and this is what makes `ext build` say so.
-    legacy_ui: bool = false,
-    /// What this manifest still writes for the removed `runtime.wire` key, as
-    /// written (empty when it was not a string — the note is about the key, and
-    /// a mistyped value has the same answer as a mistyped word).
-    ///
-    /// There is one wire now, so a runtime does not choose one: `plain` is what
-    /// every call speaks (DESIGN §7.3). The key is unknown like `activation`
-    /// and `permissions` before it, but the two words a draft may still carry
-    /// mean different things to their author — `"jsonrpc"` asked for an
-    /// envelope that no longer exists, `"plain"` asked for exactly what happens
-    /// anyway — so `ext build` answers each in its own words. The only reader
-    /// is that note.
-    legacy_wire: ?[]const u8 = null,
+    /// What activating this package means for the sessions that follow (see
+    /// `Apply`), kept as WRITTEN. Read through `applyOf`, which supplies the
+    /// default. A TOP-LEVEL key rather than one under `contributes`: it is not
+    /// a contribution, it is what the author thinks installing the whole
+    /// package should mean.
+    apply: ?[]const u8 = null,
 
     pub fn deinit(self: *Manifest) void {
         self.arena.deinit();
         self.* = undefined;
+    }
+
+    /// This package's membership default, `manual` unless it says otherwise —
+    /// the conservative half, because the other one puts a system prompt in
+    /// front of every model on this machine. `validate` refuses a word outside
+    /// the two, so the unwrap is safe on any validated manifest.
+    pub fn applyOf(self: Manifest) Apply {
+        if (self.apply) |s| return Apply.fromString(s).?;
+        return .manual;
     }
 
     /// Enforce the deterministic kernel rules (DESIGN §7.4, §12). Whether a tool
@@ -416,6 +398,12 @@ pub const Manifest = struct {
     pub fn validate(self: Manifest) ValidateError!void {
         if (!std.mem.eql(u8, self.schema, schema_id)) return error.UnsupportedSchema;
         if (!isValidId(self.id)) return error.InvalidId;
+        // A closed two-word vocabulary, so a typo is refused rather than read
+        // as the default: `aply: "auot"` must not silently mean `manual` — the
+        // author would install a mode package and never see it in a session.
+        if (self.apply) |s| {
+            if (Apply.fromString(s) == null) return error.InvalidApply;
+        }
         if (self.tools.len == 0 and self.skills.len == 0 and self.system_prompts.len == 0 and
             self.commands.len == 0 and !policyContributes(self.policy) and self.ui.len == 0) return error.NoContributions;
 
@@ -459,15 +447,15 @@ pub const Manifest = struct {
             if (t.timeout_ms) |ms| {
                 if (ms == 0 or ms > tool.Timeouts.extension_max_ms) return error.InvalidTimeout;
             }
-            // A word outside the two is refused rather than read as the
-            // default: a package that meant `driver` and typed `drivers` would
-            // otherwise land its tool on the model's face, which is the exact
-            // outcome the field exists to prevent.
+            // A word outside the three is refused rather than read as the
+            // default: a package that meant `internal` and typed `internl`
+            // would otherwise land its driver tool on the model's face, which
+            // is the exact outcome the field exists to prevent. The words the
+            // three used to be spelled with (`pin` / `with` / `driver`) are
+            // refused by the same rule — a rename that silently kept reading
+            // the old word would leave two vocabularies in the wild.
             if (t.surface) |s| {
                 if (Surface.fromString(s) == null) return error.InvalidSurface;
-            }
-            if (t.audience) |a| {
-                if (Audience.fromString(a) == null) return error.InvalidAudience;
             }
             for (self.tools[i + 1 ..]) |other| {
                 if (std.mem.eql(u8, t.name, other.name)) return error.DuplicateToolName;
@@ -552,10 +540,11 @@ pub const ValidateError = error{
     DuplicateToolName,
     /// A tool's `timeout_ms` is zero or above `tool.Timeouts.extension_max_ms`.
     InvalidTimeout,
-    /// A tool's `surface` is a string, but not one of `pin` / `with` / `driver`.
+    /// A tool's `surface` is a string, but not one of `auto` / `manual` /
+    /// `internal`.
     InvalidSurface,
-    /// A legacy tool `audience` is a string, but not one of `model` / `driver`.
-    InvalidAudience,
+    /// The manifest's `apply` is a string, but not one of `auto` / `manual`.
+    InvalidApply,
     InvalidSkillPath,
     DuplicateSkillPath,
     InvalidSystemPromptPath,
@@ -605,11 +594,9 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!Manifest {
     const tools = try dupTools(a, contributes);
     const skills = try dupStringList(a, contributes, "skills");
     const system_prompts = try dupStringList(a, contributes, "system_prompts");
-    var legacy_command_action = false;
-    const commands = try dupCommands(a, contributes, &legacy_command_action);
+    const commands = try dupCommands(a, contributes);
     const policy = try readPolicy(contributes);
-    var legacy_ui = false;
-    const ui = try dupUi(a, contributes, &legacy_ui);
+    const ui = try dupUi(a, contributes);
     return .{
         .arena = arena,
         .schema = schema,
@@ -621,28 +608,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!Manifest {
         .commands = commands,
         .policy = policy,
         .ui = ui,
-        // Unknown keys and folded old shapes, read for one purpose: `ext build`
-        // says a line about each (see the fields). Nothing composed from this
-        // manifest is affected by any of them.
-        .legacy_activation = obj.get("activation") != null,
-        .legacy_permissions = obj.get("permissions") != null,
-        .legacy_command_action = legacy_command_action,
-        .legacy_ui = legacy_ui,
-        .legacy_wire = try legacyWire(a, obj),
-    };
-}
-
-/// What `runtime.wire` still says, for the one note that reads it. A non-string
-/// value reads as `""`: the key is what the note is about, and there is no word
-/// left to quote back.
-fn legacyWire(a: std.mem.Allocator, obj: std.json.ObjectMap) ParseError!?[]const u8 {
-    const runtime_obj = switch (obj.get("runtime") orelse return null) {
-        .object => |o| o,
-        else => return null,
-    };
-    return switch (runtime_obj.get("wire") orelse return null) {
-        .string => |s| try a.dupe(u8, s),
-        else => "",
+        .apply = try optionalString(a, obj, "apply"),
     };
 }
 
@@ -684,7 +650,7 @@ pub fn isValidId(s: []const u8) bool {
 /// An OS key in a per-OS `entry` / `interpreter` object: a `std.Target.Os.Tag`
 /// name, or `"default"`. A CLOSED vocabulary the kernel can enumerate, so a typo
 /// (`"win"`) is refused here rather than silently meaning "no entry on Windows"
-/// — the same reason `audience` refuses a word it cannot read, and the failure
+/// — the same reason `surface` refuses a word it cannot read, and the failure
 /// this catches would otherwise surface a session away, at `session new`.
 fn isKnownOsKey(key: []const u8) bool {
     if (std.mem.eql(u8, key, PlatformValue.default_key)) return true;
@@ -766,7 +732,6 @@ fn dupTools(a: std.mem.Allocator, contributes: std.json.ObjectMap) ParseError![]
             .timeout_ms = try optionalU32(to, "timeout_ms"),
             .readonly = try optionalBool(to, "readonly"),
             .surface = try optionalString(a, to, "surface"),
-            .audience = try optionalString(a, to, "audience"),
             .ui = try dupToolUi(a, to),
         };
     }
@@ -786,7 +751,7 @@ fn dupToolUi(a: std.mem.Allocator, to: std.json.ObjectMap) ParseError!?ToolUi {
     };
 }
 
-fn dupCommands(a: std.mem.Allocator, contributes: std.json.ObjectMap, legacy: *bool) ParseError![]const Command {
+fn dupCommands(a: std.mem.Allocator, contributes: std.json.ObjectMap) ParseError![]const Command {
     const commands_val = switch (contributes.get("commands") orelse return a.alloc(Command, 0)) {
         .array => |arr| arr,
         else => return error.WrongType,
@@ -800,35 +765,23 @@ fn dupCommands(a: std.mem.Allocator, contributes: std.json.ObjectMap, legacy: *b
         commands[i] = .{
             .name = try dupString(a, co, "name"),
             .description = try dupStringOr(a, co, "description", ""),
-            .action = try dupAction(a, co.get("action") orelse return error.MissingField, legacy),
+            .action = try dupAction(a, co.get("action") orelse return error.MissingField),
         };
     }
     return commands;
 }
 
-/// A command's `action`, in either shape (see `Action`).
+/// A command's `action` (see `Action`): one key, whose value is a bare `true`
+/// (the verb takes no argument) or a string (it does). Anything else under the
+/// key is a `WrongType` rather than a silently argument-less verb — the
+/// strictness `optionalU32` / `optionalBool` already apply, for their reason.
+/// The COUNT of keys is not checked here: `validate` owns that, so a caller
+/// that only parses still gets the object it was given.
 ///
-/// The object form is what a manifest writes today: one key, whose value is a
-/// bare `true` (the verb takes no argument) or a string (it does). Anything
-/// else under the key is a `WrongType` rather than a silently argument-less
-/// verb — the strictness `optionalU32` / `optionalBool` already apply, for
-/// their reason. The COUNT of keys is not checked here: `validate` owns that,
-/// so a caller that only parses still gets the object it was given.
-///
-/// The string form is the pre-M3 spelling, folded by splitting at the first
-/// space. `legacy` is raised so `ext build` can say one line about it.
-fn dupAction(a: std.mem.Allocator, value: std.json.Value, legacy: *bool) ParseError!Action {
+/// A string is a `WrongType` like any other mistyped field. It used to be a
+/// mini-language (`"run propose"`) folded by splitting at the first space.
+fn dupAction(a: std.mem.Allocator, value: std.json.Value) ParseError!Action {
     switch (value) {
-        .string => |s| {
-            legacy.* = true;
-            const trimmed = std.mem.trim(u8, s, " ");
-            const space = std.mem.indexOfScalar(u8, trimmed, ' ') orelse
-                return .{ .verb = try a.dupe(u8, trimmed) };
-            return .{
-                .verb = try a.dupe(u8, trimmed[0..space]),
-                .target = try a.dupe(u8, std.mem.trimStart(u8, trimmed[space + 1 ..], " ")),
-            };
-        },
         .object => |o| {
             if (o.count() == 0) return .{ .verb = "", .keys = 0 };
             var it = o.iterator();
@@ -858,29 +811,16 @@ fn readPolicy(contributes: std.json.ObjectMap) ParseError!?Policy {
     return .{ .readonly = try optionalBool(policy_obj, "readonly") };
 }
 
-/// `contributes.ui`, keyed by host (see `UiHost`).
-///
-/// The FLAT pre-M6 shape — `{"entry": …, "api": …}`, no host at all — is folded
-/// into a single `tui` entry for one version, because `tui` is the only front
-/// end that existed while that shape did. An `entry` key at the top level is
-/// what tells the two apart: a host name is `[a-z0-9-]+`, and `entry` is a
-/// word this object can only be holding in the flat form.
-fn dupUi(a: std.mem.Allocator, contributes: std.json.ObjectMap, legacy: *bool) ParseError![]const UiHost {
+/// `contributes.ui`, keyed by host (see `UiHost`). There is one shape: a FLAT
+/// `{"entry": …, "api": …}` (the pre-M6 spelling, before a second front end was
+/// conceivable) now reads as a host named `entry` whose value is a string, so
+/// `WrongType` — the schema does not name one concrete front end.
+fn dupUi(a: std.mem.Allocator, contributes: std.json.ObjectMap) ParseError![]const UiHost {
     const value = contributes.get("ui") orelse return a.alloc(UiHost, 0);
     const ui_obj = switch (value) {
         .object => |o| o,
         else => return error.WrongType,
     };
-    if (ui_obj.get("entry") != null) {
-        legacy.* = true;
-        const one = try a.alloc(UiHost, 1);
-        one[0] = .{
-            .host = try a.dupe(u8, "tui"),
-            .entry = try dupString(a, ui_obj, "entry"),
-            .api = try requiredU32(ui_obj, "api"),
-        };
-        return one;
-    }
     const hosts = try a.alloc(UiHost, ui_obj.count());
     var it = ui_obj.iterator();
     var i: usize = 0;
@@ -1015,8 +955,6 @@ test "parses and validates a script runtime with an interpreter" {
     try std.testing.expect(m.runtime != null);
     try std.testing.expect(isScript(m.runtime.?));
     try std.testing.expectEqualStrings("powershell", m.runtime.?.interpreter.?.forHost().?);
-    // Nothing about a wire: there is one, and a runtime does not pick it.
-    try std.testing.expect(m.legacy_wire == null);
 }
 
 test "a bin/ entry is a compiled runtime, not a script" {
@@ -1048,40 +986,20 @@ test "rejects an empty interpreter" {
     try std.testing.expectError(error.InvalidInterpreter, m.validate());
 }
 
-test "a leftover runtime.wire is an unknown key that still builds, and `ext build` can say which word was written" {
+test "keys the schema has retired — activation, permissions, runtime.wire — are ordinary unknown keys" {
     const alloc = std.testing.allocator;
-
-    // Whatever it says, the package is unaffected: one wire means a runtime has
-    // nothing to choose, so the key composes exactly like any other unknown one.
-    var plain = try parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"src/run.sh","interpreter":"sh","wire":"plain"},"contributes":{"tools":[{"name":"t","input":{}}]}}
+    // Each of the three was once parsed, frozen and read by something. Nothing
+    // reads them now, and nothing about a package carrying one changes: they
+    // are unknown keys, exactly like a key nobody has ever defined.
+    var m = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","activation":"on_request","permissions":{"fs":"rw"},
+        \\ "runtime":{"entry":"src/run.sh","interpreter":"sh","wire":"jsonrpc"},
+        \\ "contributes":{"tools":[{"name":"t","input":{}}]}}
     );
-    defer plain.deinit();
-    try plain.validate();
-    try std.testing.expectEqualStrings("plain", plain.legacy_wire.?);
-
-    var rpc = try parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a","wire":"jsonrpc"},"contributes":{"tools":[{"name":"t","input":{}}]}}
-    );
-    defer rpc.deinit();
-    try rpc.validate();
-    try std.testing.expectEqualStrings("jsonrpc", rpc.legacy_wire.?);
-
-    // A word nobody recognizes, and a value that is not even a word, both reach
-    // the same note: the key is what is being answered, not what it says.
-    var typo = try parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"src/run.sh","wire":"json-rpc"},"contributes":{"tools":[{"name":"t","input":{}}]}}
-    );
-    defer typo.deinit();
-    try typo.validate();
-    try std.testing.expectEqualStrings("json-rpc", typo.legacy_wire.?);
-
-    var mistyped = try parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"src/run.sh","wire":true},"contributes":{"tools":[{"name":"t","input":{}}]}}
-    );
-    defer mistyped.deinit();
-    try mistyped.validate();
-    try std.testing.expectEqualStrings("", mistyped.legacy_wire.?);
+    defer m.deinit();
+    try m.validate();
+    try std.testing.expectEqual(Apply.manual, m.applyOf());
+    try std.testing.expectEqual(Surface.auto, m.tools[0].surfaceOf());
 }
 
 test "entry and interpreter may be written per OS; the host picks, then `default`, then nothing" {
@@ -1293,98 +1211,77 @@ test "a tool may declare itself readonly; the kernel records the claim and enfor
     ));
 }
 
-test "a tool may declare legacy audience; silence is not a claim and an unknown word is refused" {
+test "a tool's surface is auto, manual or internal; silence means auto and an unknown word is refused" {
     const alloc = std.testing.allocator;
     var m = try parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"ask","input":{},"audience":"model"},{"name":"drive","input":{},"audience":"driver"},{"name":"quiet","input":{}}]}}
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"ask","input":{},"surface":"auto"},{"name":"pinny","input":{},"surface":"manual"},{"name":"drive","input":{},"surface":"internal"},{"name":"quiet","input":{}}]}}
     );
     defer m.deinit();
-    // Nothing in `validate` acts on it beyond refusing a word it cannot read:
-    // like `readonly`, the claim is recorded for a driver's policy to consult,
-    // and the kernel neither filters the tool face nor refuses a pin over it.
     try m.validate();
-    try std.testing.expectEqual(@as(?Audience, .model), m.tools[0].audienceOf());
-    try std.testing.expectEqual(@as(?Audience, .driver), m.tools[1].audienceOf());
-    // Absent is NOT `model`: the reading of silence belongs to whoever uses it.
-    try std.testing.expect(m.tools[2].audience == null);
-    try std.testing.expect(m.tools[2].audienceOf() == null);
+    try std.testing.expectEqual(Surface.auto, m.tools[0].surfaceOf());
+    try std.testing.expectEqual(Surface.manual, m.tools[1].surfaceOf());
+    try std.testing.expectEqual(Surface.internal, m.tools[2].surfaceOf());
+    // Silence is the DEFAULT, not "did not say": a scaffolded tool reaches the
+    // model as soon as its package is composed in, with nothing else to write.
+    try std.testing.expect(m.tools[3].surface == null);
+    try std.testing.expectEqual(Surface.auto, m.tools[3].surfaceOf());
 
-    // A word outside the two is a named refusal, not a default.
-    var typo = try parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"t","input":{},"audience":"drivers"}]}}
-    );
-    defer typo.deinit();
-    try std.testing.expectError(error.InvalidAudience, typo.validate());
+    // A word outside the three is a named refusal, not a default — including
+    // the three words this vocabulary used to be spelled with.
+    for ([_][]const u8{ "public", "pin", "with", "driver" }) |word| {
+        const src = try std.fmt.allocPrint(alloc,
+            \\{{"schema":"nulya.extension/v2","id":"a","runtime":{{"entry":"bin/a"}},"contributes":{{"tools":[{{"name":"t","input":{{}},"surface":"{s}"}}]}}}}
+        , .{word});
+        defer alloc.free(src);
+        var typo = try parse(alloc, src);
+        defer typo.deinit();
+        try std.testing.expectError(error.InvalidSurface, typo.validate());
+    }
 
     // And a wrong TYPE is a parse error, the same split `timeout_ms` makes.
-    try std.testing.expectError(error.WrongType, parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"t","input":{},"audience":true}]}}
-    ));
-}
-
-test "a tool's surface declares pin, with or driver placement and overrides legacy audience" {
-    const alloc = std.testing.allocator;
-    var m = try parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"pinny","input":{},"surface":"pin"},{"name":"ask","input":{},"surface":"with"},{"name":"drive","input":{},"surface":"driver"},{"name":"legacy","input":{},"audience":"driver"},{"name":"override","input":{},"surface":"with","audience":"driver"},{"name":"quiet","input":{}}]}}
-    );
-    defer m.deinit();
-    try m.validate();
-    try std.testing.expectEqual(Surface.pin, m.tools[0].surfaceOf());
-    try std.testing.expectEqual(Surface.with, m.tools[1].surfaceOf());
-    try std.testing.expectEqual(Surface.driver, m.tools[2].surfaceOf());
-    try std.testing.expectEqual(Surface.driver, m.tools[3].surfaceOf());
-    try std.testing.expectEqual(Surface.with, m.tools[4].surfaceOf());
-    try std.testing.expectEqual(Surface.pin, m.tools[5].surfaceOf());
-
-    var typo = try parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"t","input":{},"surface":"public"}]}}
-    );
-    defer typo.deinit();
-    try std.testing.expectError(error.InvalidSurface, typo.validate());
-
     try std.testing.expectError(error.WrongType, parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"t","input":{},"surface":true}]}}
     ));
 }
 
-test "the removed `activation` key is ignored, whatever it says, and only flagged for a build note" {
+test "apply says what activating this package means; silence means manual and an unknown word is refused" {
     const alloc = std.testing.allocator;
 
-    // A package that still writes it parses and validates exactly like one that
-    // does not. Which sessions it joins is not its decision any more: config's
-    // `[extensions] with` names the members, `--with` names them for one session
-    // (DESIGN §5.1), and both read the same `current` this key used to qualify.
-    var mode = try parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"evolution","activation":"on_request","contributes":{"system_prompts":["p.md"]}}
+    var auto = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"kong","apply":"auto","contributes":{"system_prompts":["p.md"]}}
     );
-    defer mode.deinit();
-    try mode.validate();
-    try std.testing.expect(mode.legacy_activation);
+    defer auto.deinit();
+    try auto.validate();
+    try std.testing.expectEqual(Apply.auto, auto.applyOf());
 
-    // Including a word the old enum would have refused: an unknown key has no
-    // vocabulary to be outside of, so `onrequest` is no more an error than
-    // `on_request` is — and neither is a wrong TYPE, which used to be one.
-    for ([_][]const u8{
-        \\{"schema":"nulya.extension/v2","id":"a","activation":"onrequest","contributes":{"skills":["s"]}}
-        ,
-        \\{"schema":"nulya.extension/v2","id":"a","activation":false,"contributes":{"skills":["s"]}}
-        ,
-    }) |src| {
-        var m = try parse(alloc, src);
-        defer m.deinit();
-        try m.validate();
-        try std.testing.expect(m.legacy_activation);
-    }
+    var manual = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"kong","apply":"manual","contributes":{"system_prompts":["p.md"]}}
+    );
+    defer manual.deinit();
+    try manual.validate();
+    try std.testing.expectEqual(Apply.manual, manual.applyOf());
 
-    // Silence is the ordinary case and says nothing at all — no default to
-    // infer from the package's shape, because there is no longer a question
-    // here for a shape to answer.
+    // Silence is the conservative half: a package nobody named is in no
+    // session, which is what every package written before this key assumed.
     var quiet = try parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"b","contributes":{"system_prompts":["p.md"]}}
     );
     defer quiet.deinit();
     try quiet.validate();
-    try std.testing.expect(!quiet.legacy_activation);
+    try std.testing.expect(quiet.apply == null);
+    try std.testing.expectEqual(Apply.manual, quiet.applyOf());
+
+    // A typo must not read as `manual`: the author would install a mode and
+    // never see it in a session, with nothing anywhere saying why.
+    var typo = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"b","apply":"always","contributes":{"system_prompts":["p.md"]}}
+    );
+    defer typo.deinit();
+    try std.testing.expectError(error.InvalidApply, typo.validate());
+
+    try std.testing.expectError(error.WrongType, parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"b","apply":true,"contributes":{"system_prompts":["p.md"]}}
+    ));
 }
 
 test "rejects entry that escapes the extension dir" {
@@ -1470,7 +1367,7 @@ test "round-trips commands, policy and ui, and a tool's ui hints" {
 
     try std.testing.expectEqualStrings("checklist", m.tools[0].ui.?.render.?);
     try std.testing.expectEqual(@as(?bool, true), m.tools[0].ui.?.panel);
-    // Absent is null, not any particular word — same as `audience`/`readonly`.
+    // Absent is null, not any particular word — same as `readonly`.
     try std.testing.expect(m.tools[1].ui == null);
 
     try std.testing.expectEqual(@as(usize, 2), m.commands.len);
@@ -1482,9 +1379,6 @@ test "round-trips commands, policy and ui, and a tool's ui hints" {
     try std.testing.expectEqualStrings("review", m.commands[1].name);
     try std.testing.expectEqualStrings("run", m.commands[1].action.verb);
     try std.testing.expectEqualStrings("propose", m.commands[1].action.runTarget().?);
-    // The object form is the current spelling, so nothing to note at build time.
-    try std.testing.expect(!m.legacy_command_action);
-    try std.testing.expect(!m.legacy_ui);
 
     try std.testing.expectEqual(@as(?bool, true), m.policy.?.readonly);
 
@@ -1530,6 +1424,11 @@ test "an action is one key: zero or two is a shape error, and its value is `true
         ,
         \\{"schema":"nulya.extension/v2","id":"a","contributes":{"commands":[{"name":"x","description":"","action":["with"]}]}}
         ,
+        // The string mini-language (`"run propose"`) is gone with the rest of
+        // the folded shapes: a reader that had to split on a space to find out
+        // what it was holding is one shape too many.
+        \\{"schema":"nulya.extension/v2","id":"a","contributes":{"commands":[{"name":"x","description":"","action":"run propose"}]}}
+        ,
     }) |src| {
         try std.testing.expectError(error.WrongType, parse(alloc, src));
     }
@@ -1538,59 +1437,6 @@ test "an action is one key: zero or two is a shape error, and its value is `true
     try std.testing.expectError(error.MissingField, parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","contributes":{"commands":[{"name":"x","description":""}]}}
     ));
-}
-
-test "the pre-object action string is folded into the same verb and argument, and flagged for a build note" {
-    const alloc = std.testing.allocator;
-    var m = try parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"propose","input":{}}],"commands":[
-        \\{"name":"one","description":"","action":"with"},
-        \\{"name":"two","description":"","action":"run propose"},
-        \\{"name":"three","description":"","action":"skill some/ref"},
-        \\{"name":"four","description":"","action":"wear"}]}}
-    );
-    defer m.deinit();
-    try m.validate();
-    try std.testing.expect(m.legacy_command_action);
-    try std.testing.expectEqualStrings("with", m.commands[0].action.verb);
-    try std.testing.expect(m.commands[0].action.target == null);
-    try std.testing.expectEqualStrings("propose", m.commands[1].action.runTarget().?);
-    try std.testing.expectEqualStrings("skill", m.commands[2].action.verb);
-    try std.testing.expectEqualStrings("some/ref", m.commands[2].action.target.?);
-    // `wear` was `with`'s name two reviews ago. The kernel does not police the
-    // vocabulary, so it folds the SHAPE and leaves the word to the reader.
-    try std.testing.expectEqualStrings("wear", m.commands[3].action.verb);
-
-    // The string form's own `run` check is the object form's, unchanged.
-    var missing = try parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"other","input":{}}],"commands":[{"name":"x","description":"","action":"run propose"}]}}
-    );
-    defer missing.deinit();
-    try std.testing.expectError(error.UnknownCommandTool, missing.validate());
-}
-
-test "the removed `permissions` key is ignored, and only flagged for a build note" {
-    const alloc = std.testing.allocator;
-    var m = try parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"a","contributes":{"skills":["s"]},"permissions":{"fs":[],"network":["https"],"process":[]}}
-    );
-    defer m.deinit();
-    try m.validate();
-    try std.testing.expect(m.legacy_permissions);
-
-    // Whatever it says, including a shape the old parser would have refused:
-    // an unknown key has no shape to be wrong about.
-    var junk = try parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"a","contributes":{"skills":["s"]},"permissions":"all of them"}
-    );
-    defer junk.deinit();
-    try junk.validate();
-    try std.testing.expect(junk.legacy_permissions);
-
-    var quiet = try parse(alloc, valid_manifest);
-    defer quiet.deinit();
-    try quiet.validate();
-    try std.testing.expect(!quiet.legacy_permissions);
 }
 
 test "a command name is [a-z0-9-]+ and may not repeat within a package" {
@@ -1729,32 +1575,22 @@ test "contributes.ui is keyed by host; each entry needs a safe path and a real a
     try std.testing.expectError(error.NoContributions, none.validate());
 }
 
-test "the pre-host flat ui block is folded into the one front end that existed, and flagged for a build note" {
-    const alloc = std.testing.allocator;
-    var m = try parse(alloc,
+test "the pre-host flat ui block is not a second shape: it reads as a host whose entry is a string" {
+    // `{"entry": …, "api": …}` was the spelling before a second front end was
+    // conceivable. There is one shape now, so the flat form is simply a host
+    // named `entry` whose value is not an object — a `WrongType`, like any
+    // other mistyped field. Nothing folds it, because the kernel's schema must
+    // not name one concrete front end (`UiHost`).
+    try std.testing.expectError(error.WrongType, parse(std.testing.allocator,
         \\{"schema":"nulya.extension/v2","id":"a","contributes":{"ui":{"entry":"tui/panel.ts","api":1}}}
-    );
-    defer m.deinit();
-    try m.validate();
-    try std.testing.expect(m.legacy_ui);
-    try std.testing.expectEqual(@as(usize, 1), m.ui.len);
-    try std.testing.expectEqualStrings("tui", m.ui[0].host);
-    try std.testing.expectEqualStrings("tui/panel.ts", m.ui[0].entry);
-
-    // The keyed form is the current spelling, whatever the host is called.
-    var keyed = try parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"a","contributes":{"ui":{"tui":{"entry":"tui/panel.ts","api":1}}}}
-    );
-    defer keyed.deinit();
-    try keyed.validate();
-    try std.testing.expect(!keyed.legacy_ui);
+    ));
 }
 
 test "a command, a policy with content, or a ui block each alone counts as a contribution" {
     const alloc = std.testing.allocator;
 
     var cmd = try parse(alloc,
-        \\{"schema":"nulya.extension/v2","id":"a","contributes":{"commands":[{"name":"plan","description":"","action":"with"}]}}
+        \\{"schema":"nulya.extension/v2","id":"a","contributes":{"commands":[{"name":"plan","description":"","action":{"with":true}}]}}
     );
     defer cmd.deinit();
     try cmd.validate();

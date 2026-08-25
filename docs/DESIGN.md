@@ -210,25 +210,47 @@ session 开始时一次选定，整场冻结（`composition.zig` `SessionComposi
 
 1. builtin `shell`：永远在，位置最前。
 2. **model-facing extension 工具**（稳定 id `ext:<ext-id>/<tool>`），两条来路都会冻进 header 的 `native_tools` 并一起计入 `max_tools`（含 builtin，默认 20——上限度量的是整个工具面的真实成本：前缀 token + 模型的工具选择质量）：
-   - **pin surface**：`tools[].surface` 缺省或写 `"pin"` 的 tool 才能被独立 pin。`registry.pinned_native_tools`（config，project 层也可以加——只花自己的槽，§9.5）与 `session new --pin`（driver，按场）同义、并集去重。pin 是决定：解析不到 → **硬失败** `PinNamesUnknownExtension` / `PinToolNotDeclared` / `InvalidStableToolId`；命名了非 `surface:"pin"` 的 tool → `PinToolNotPinnable`；总数越过 `max_tools` → `ToolBudgetExceeded`。
-   - **with surface**：一个**显式成员**（config `[extensions] with` 或 argv `--with`）的 manifest 里写了 `tools[].surface:"with"` 的 tool，也在 fresh session 开场时进 native 面。它不是 pin，不能单独写进 pin 列表；决定在成员那根轴上。
+   - **`surface: "manual"`**：只有写了 `"manual"` 的 tool 才能被独立 pin。`registry.pinned_native_tools`（config，project 层也可以加——只花自己的槽，§9.5）与 `session new --pin`（driver，按场）同义、并集去重。pin 是决定：解析不到 → **硬失败** `PinNamesUnknownExtension` / `PinToolNotDeclared` / `InvalidStableToolId`；命名了非 `surface:"manual"` 的 tool → `PinToolNotPinnable`；总数越过 `max_tools` → `ToolBudgetExceeded`。
+   - **`surface: "auto"`（缺省）**：一个**完全成员**的包里 surface 是 `auto` 的 tool，在 fresh session 开场时自动进 native 面。它不是 pin，不能单独写进 pin 列表；决定在成员那根轴上。
 
-**pin 蕴含成员，但不蕴含 with surface。** 一个 tool 不可能在它的包不在场时占一个槽，所以 fresh 路（`composition.resolveFreshExtensions`）在显式成员之后，把每个 pin 的 `<id>` 里**还不是成员**的那些按 `current` 再 union 一次。这个隐式成员只服务这个 pin 自己：它不会额外展开该包的 `surface:"with"` tools。**排在最后且永不覆盖**：已经解析出的 id（config `[extensions] with` 或 `--with <id>@<version>` 点名的）保持它那个版本——pin 要的是 tool，不是版本。两种拒绝因此仍分得开：**任何 root 都不持有这个 id** → `PinNamesUnknownExtension`（这台机器上没建过），**持有但没有 `current`** → `WithVersionNotFound`（建过没 activate，出路是 `--with <id>@<version>` 或 `activate`；`session new` 的 stderr 会点名是哪些包由 pin 带进来的——命令行上没写过它们）。frozen 路（header `active` + `native_tools`）**不重推**：resume 只重放 header 冻下来的 native ids，不按今天的 manifest 重新展开 `surface:"with"`，也不重新判断一条旧 native id 现在还能不能 pin。
+**`surface` 的三个词，问的都是同一个问题**：*这个包已经是本场成员了，这个 tool 到不到模型面前、怎么到？*
 
-只有这两条 fresh native 入口。**usage 自己绝不改 `tools[]`**——journal 是证据，晋升是有人写下一条 pin（§5.5），或有人把一个带 `surface:"with"` 工具的包列为成员。
+| `surface` | 成员即上模型面 | 可被 `--pin` | 谁调用 |
+|---|---|---|---|
+| `auto`（**缺省**） | 是 | 否 | 模型 |
+| `manual` | 否 | **是**（唯一可 pin 的） | 模型（被 pin 之后） |
+| `internal` | 否 | 否 | 外部代码 `nulya ext run` |
 
-**成员（membership）是另一根轴，形状与 pin 逐位对称**：一个包进这一场的 composition（skills 进 catalog、system prompts 进 system blocks、tools 经 CLI 可调；其中 `surface:"with"` 的 tools 也进 native 面）只有两种来路，同义、并集、后者胜——config 的 **`[extensions] with = ["<id>", …]`**（这个 workspace 的每一场；project 层也可以写，理由与 `pinned_native_tools` 同——它只能在这台机器**已经持有且已经信任**的包里挑，不像 `extensions.paths` 那样决定哪些目录可以供出代码，§9.5）与 **`session new --with <id>[@<version>]`**（这一场）。config 在前、argv 在后，所以命令行点名同一个 id（通常带版本）会覆盖常驻那条。
+**缺省是 `auto`**：一个人特意组合进来的包，它的 tool 就是他想用的那些；`nulya ext init` 脚出来的扩展 `--with` 一下就能用，不用先学会第二个字段。要人一个一个点名的（`extensions/std` 那六个：一张由人拼出来的工具面）才写 `manual`。三个词都不是缺省时的旧拼法（`pin` / `with` / `driver`）**一律被 `InvalidSurface` 拒**——改名而悄悄继续认旧词，等于让两套词表同时在野。
 
-**两根轴的 2×2 是全部：**
+**pin 蕴含成员，但不蕴含 `auto` 面。** 一个 tool 不可能在它的包不在场时占一个槽，所以 fresh 路（`composition.resolveFreshExtensions`）在其它成员之后，把每个 pin 的 `<id>` 里**还不是成员**的那些按 `current` 再 union 一次。这个隐式成员只服务这个 pin 自己：它**不是完全成员**（`composition.isFullMember`），所以不会额外展开该包的 `surface:"auto"` tools——那条 pin 要的是一个 tool。**排在最后且永不覆盖**：已经解析出的 id（config `[extensions] with` 或 `--with <id>@<version>` 点名的、`apply:"auto"` 带进来的）保持它那个版本——pin 要的是 tool，不是版本。两种拒绝因此仍分得开：**任何 root 都不持有这个 id** → `PinNamesUnknownExtension`（这台机器上没建过），**持有但没有 `current`** → `WithVersionNotFound`（建过没 activate，出路是 `--with <id>@<version>` 或 `activate`；`session new` 的 stderr 会点名是哪些包由 pin 带进来的——命令行上没写过它们）。frozen 路（header `active` + `native_tools`）**不重推**：resume 只重放 header 冻下来的 native ids，不按今天的 manifest 重新展开 `surface:"auto"`，也不重新判断一条旧 native id 现在还能不能 pin。
 
-| | 每一场（config） | 这一场（argv） |
+只有这两条 fresh native 入口。**usage 自己绝不改 `tools[]`**——journal 是证据，晋升是有人写下一条 pin（§5.5），或有人把一个带 `surface:"auto"` 工具的包变成成员。
+
+**成员（membership）是另一根轴**：一个包进这一场的 composition（skills 进 catalog、system prompts 进 system blocks、tools 经 CLI 可调；**完全成员**的 `surface:"auto"` tools 还进 native 面）有**三条来路**——
+
+1. config 的 **`[extensions] with = ["<id>", …]`**（这个 workspace 的每一场；project 层也可以写，理由与 `pinned_native_tools` 同——它只能在这台机器**已经持有且已经信任**的包里挑，不像 `extensions.paths` 那样决定哪些目录可以供出代码，§9.5）；
+2. **`session new --with <id>[@<version>]`**（这一场）；
+3. **包自己的 `apply: "auto"`**（manifest 顶层，§7.2.1）：只要这个包有 `current`，它就是本机每一场 fresh、非 `--bare` session 的常驻成员，取 `current` 那个版本。
+
+三条同义、并集、后者胜：`apply` 那层排在最前，所以 config 或 `--with` 点名同一个 id（通常带版本）会**替换**它——`unionWith` 取最后一次提及。
+
+**`apply` 是作者给的缺省，不是天花板。** 它只回答"activate 我，应该意味着什么"：`manual`（缺省，也是每一个没写这个键的老包）= 只进点名我的那些场；`auto` = 装上就是常驻。**人这一侧的两个动作照旧压得过它**——`[extensions] with` 永远能把一个作者写了 `manual` 的包加进来，`nulya ext deactivate <id>` 永远能把一个 `auto` 的包停掉（`current` 一撤，那条常驻成员就没了）。所以 reach 仍然是人的决定（physics #6），作者拿到的只是"装上默认什么意思"这一句；这与 §7.2.1 那句"manifest 说不出我进哪些 session"并不矛盾——一个**缺省**不是一个**主张**。
+
+**resolver 的形状与代价**（`composition.resolveApplyAutoExtensions`）：`Roots.listActive` 先按 root 顺序拿到每个有 `current` 的 id（首个持有者胜，只读 `current`，便宜）；对每一个**只读一次它冻结的 `extension.json`**（`Store.readVersionDeclaration`：解析 + validate，**不查 seal、不重算 digest、不查声明的路径**）问一句"你说了 `apply: auto` 吗"；只有说了的那些才走一次普通的 `.sealed` 解析真正进 composition。这个两段式是有意的：一屋子普通包的代价是每个一次小文件读，而**一个坏掉的包永远不会因为这台机器"持有"它就让每一场 session 起不来**——那正是当年那趟 discovery 被删掉的原因。说了 `apply:auto` 而 `current` 解析不出来的，**硬失败** `ActiveExtensionBroken`，stderr 点名版本并给出两条出路，其中一条是 `nulya ext deactivate <id>`（"把这个模式关掉"是这一层特有的修法）；连 manifest 都读不出来的，**跳过**——它什么都没主张过，也没人点过它的名。
+
+**两根轴的 2×2 仍是全部，`apply` 只是给左上角那一格添了第二种写法：**
+
+| | 每一场（常驻） | 这一场（argv） |
 |---|---|---|
-| 成员 | `[extensions] with` | `session new --with` |
+| 成员 | `[extensions] with`（人写在 config）· `apply: "auto"`（作者写在 manifest，`ext deactivate` 撤销） | `session new --with` |
 | 工具面 | `[registry] pinned_native_tools` | `session new --pin` |
 
-**`nulya ext activate` 不在这张表上。** 它只回答"`<id>` 现在指哪个版本"——`current` 是一个指针，一场 session 都不改变。从前它还回答第二个问题（"要不要进此后的每一场"）：fresh 路有一趟 discovery，把每个有 `current` 的包都收成成员。那趟 discovery **已删**（`composition.resolveActiveExtensions` 不存在了），连同它逼出来的那个 manifest 字段 `activation`——reach 是人的决定，不是包作者的（physics #6），而 pin 蕴含成员之后包作者那个 bit 也已经拦不住任何东西（config 里一条 `pinned_native_tools = ["ext:plan/propose"]` 就把它带进每一场）。老 manifest 写了 `activation` 的：`parse` 当未知键忽略，`ext build` / `ext sync` 在 stderr 提一行。
+**`nulya ext activate` 仍然只回答"`<id>` 现在指哪个版本"。** 对一个 `apply:"auto"` 的包，那个指针**同时**就是"此后每一场都带它"——所以 `ext activate` 对这样的包在 stderr 多说一句后果并指出 `ext deactivate`（先例是 `activate --user` 的跨 workspace 提示：不拦，但不许悄悄发生）。它从前还回答第二个问题的那种形式——一趟把每个有 `current` 的包都收成成员的 discovery——**已删且不会回来**：`apply` 要求包**写下来**才算，而 discovery 谁都不问。
 
-**`session new --bare`** 两张 config 表都不读，composition 只来自 argv（`--with` / `--pin` / `--prompt`）加 pin 蕴含。`max_tools` 照读——它是天花板不是选择。header 不记这个 flag（resume 读 header 冻的成员与 pins，本来就不重推）。用它的是 `extensions/agent` 委派出的子场：定义里的 `pins` 就是它的全部工具面，而两张常驻表是**人**对自己每一场说的话（§7.8）。
+**`session new --bare`** 两张 config 表都不读，**`apply:"auto"` 那一层也整个关掉**（`composition.Options.apply_auto = false`），composition 只来自 argv（`--with` / `--pin` / `--prompt`）加 pin 蕴含。`max_tools` 照读——它是天花板不是选择。header 不记这个 flag（resume 读 header 冻的成员与 pins，本来就不重推）。用它的是 `extensions/agent` 委派出的子场：定义里的 `pins` 就是它的全部工具面，而常驻的那几张表是**人**对自己每一场说的话（§7.8）。
+
+**header schema 一个字节没变。** `apply` 决定的是"谁是成员"，而 header 记的是**解析之后**的成员名单（`composition.active`）——一个 `apply:"auto"` 的包在里面与一个 `--with` 进来的包逐字节同形。resume 因此完全不动：它照旧只读 header，永不重扫 `current`（§7.5、physics #2）。
 
 第 1 档（那一个 builtin 的定义）与 kernel system prompt（§7.5）都是**二进制的编译期常量**，不由 header 冻结——所以它们的 hash 与 build 版本串一起记进 header 的 `nulya` stamp（§3.4），换了二进制 resume 时会警告。
 
@@ -345,13 +367,13 @@ Extension = 子进程；wire protocol 就是 ABI。不用 `.so/.dll`（ABI / Zig
 
 **wire 只有一种，所以 manifest 里没有选它的字段**（ext-review-3 D）——**stdin 是这次调用的 arguments 对象，env 里多出 `NULYA_TOOL` 与每个顶层标量参数的 `NULYA_ARG_<k>`，stdout 原样就是结果，退出码就是成败**——五行 `sh` 就是一个真 tool，编译的 Zig 也是同样被这样调用的（怎么跟一个进程说话，从来不是"这是什么进程"的属性）。契约写在 `protocol.zig` 的模块注释顶部（= `nulya ext api protocol` 打印的东西，零漂移），细节见 §7.3。**一次调用的其余一切**：同一个 `Environment.runExtension`、同一条超时与杀整棵树、同一份净化过的 env（含 `NULYA_EXE` / session 内 `NULYA_SESSION`）、同一个 cwd、同一种结果形状；`nulya ext run <id> <tool> --arg k=v` 与模型自己的调用走同一条路，脚本看不出是谁在调。
 
-**`runtime.wire` 是一个已删的键**（曾经取 `"jsonrpc"` / `"plain"`，退场理由见 §7.3 末尾）：`activation` / `permissions` 的同一条纪律——parse 当未知键忽略，包的行为一个字节都不变，`ext build` / `ext sync` 在 stderr 说一行（写 `"jsonrpc"` 的说"那种 wire 已经没有了，这个 runtime 会按今天这一种被调用"，写 `"plain"` 的说"这个键不再需要"）。唯一读者就是那行提示（`Manifest.legacy_wire`）。
+**`runtime.wire` 是一个已删的键**（曾经取 `"jsonrpc"` / `"plain"`，退场理由见 §7.3 末尾）：`activation` / `permissions` 的同一条纪律——parse 当未知键忽略，包的行为一个字节都不变，**没有任何提示**（§7.2.1 文末"曾经有、为什么退场"）。
 
 **`runtime.entry` / `runtime.interpreter` 各自既可以是字符串，也可以是按 OS 的对象**：`{ "<os>": "…", …, "default"?: "…" }`，`<os>` 用 Zig `builtin.os.tag` 的名字（`windows` / `linux` / `macos` / …）。解析顺序：**宿主 os → `default` → 没有**。
 
 - **一个包一个 version**：snapshot 本来就收整个 `src/**`，所以每个平台的变体都在**同一个内容寻址的版本**里，`v-…` 在每台机器上指同一个包，只有"跑哪个文件"不同。这正是要的——从前一个 manifest 只有一个 `interpreter`，`ps1` + `sh` 没法共用一个版本。
 - **对象形式只许 script kind**：所有变体都必须在 `src/` 下；对象里出现 `bin/`、或混着 `bin/` 与 `src/` → `InvalidEntry`（一个版本 id 说不出"这台机器上是编译的、那台是脚本"两件事）。编译 kind 的跨平台是**交叉编译**，不在这个字段里。`isScript` / `implementationKind` 因此看**全部变体**。
-- **OS 键是封闭词表**：不是 `std.Target.Os.Tag` 的名字、也不是 `default` → `InvalidEntry`（`audience` 那条纪律：写错 `"win"` 否则就等于"Windows 上没有入口"，而那个后果要到一场 session 之后才现形）。
+- **OS 键是封闭词表**：不是 `std.Target.Os.Tag` 的名字、也不是 `default` → `InvalidEntry`（`surface` / `apply` 那条纪律：写错 `"win"` 否则就等于"Windows 上没有入口"，而那个后果要到一场 session 之后才现形）。
 - **build 校验每个声明的变体都在 snapshot 里**（`validateScriptEntries`，与 `validateSystemPrompts` 检查 system prompt 文件存在同一先例）：建它的那台机器是唯一能发现"Windows 那个变体根本没写"的地方。
 - **本机没有入口 = 一个可命名的状态，不是坏包**：它照样 build、照样 activate；只有真要跑它时才失败——pin 它的 `session new` 以新错误 `EntryUnsupportedOnHost` **硬失败**（`roots.Resolved.entryPathAbs` 先往 stderr 点名 `<id>@<version>` 与宿主 os，`reportBrokenActive` 那条先例：Zig 错误没有 payload，而"哪个包、在哪个 host"正是读的人要知道的全部），`ext run` 打同一行然后 exit 1。判据只有一处实现（`store.versionRuntimeEntryPath`）。
 
@@ -378,7 +400,7 @@ extension 装在**多个 store root** 里，按固定顺序搜索（`extension/r
 - **三个作用于整个 root 的壳层动词**（`cli/ext.zig` 与 `cli/ext_seed.zig`，都不改任何语义）：`sync` / `prune` 逐个 `<id>/` 做同一件事，`seed` 把二进制自带的 draft 落进来（并在后来的二进制里把它们带上来）：
   - **`nulya ext seed [--user] [<id>…] [--force] [--dry-run]`**（`cli/ext_seed.zig`）= 把**这个二进制内嵌的自带 draft**（build.zig 把仓库自己的 `extensions/**` 按 `src_embed` 同一先例 `@embedFile` 进来，`src/bundled.zig` 投影；§7.8 的八个）写进该 root——**分发就是二进制本身**，一台从没见过这个 checkout 的机器也拿得到。只写**源码**：build 归 `ext sync`，trust / activate / pin 的每道门原样不动；版本目录不碰（physics #5）。
     - **它也是自带扩展的更新通道**，判据是一条记录而不是猜：seed 每写一个 draft 就在 `<root>/<id>/.seed` 记下自己写的那棵树的 digest（`{v,digest,nulya,at}`，一个目录自己的事实，不是第四条 journal；**不进 package snapshot**——snapshot 由 manifest 决定，所以 version id 不受影响）。于是四种答案：**没有** → seed；**与本二进制逐字节相同** → up to date（顺手补记录，好让下一个二进制能自动接手）；**记录仍描述盘上这棵树** = 这是本 harness 自己写的、没人动过的副本 → **自动刷新成新源码**（`updated`）；**记录对不上或根本没有记录** = 有人编辑过、或是记录出现之前的老 seed → **原样留着并点名**，`--force` 是唯一的覆盖入口。刷新会连该 draft 下 seed 不再提供的文件一起清掉（`versions/` / `current` / `.lock` / `.seed` 除外），所以刷新后的 draft 就是这个二进制的那一棵树。
-    - 为什么需要记录：升级二进制不该悄悄让一台机器停在第一次 seed 时的源码上（`agent` 的 `audience`、`evolution` 那时还写着的 `activation: on_request`——该字段现已删，§7.2.1——都是这样失效的），而"编辑过没有"没有第二种判法——内容 hash 不行（自演化每轮都改），询问也不行（这一步跑在开屏之前的后台）。**记录只授予覆盖权**：读不出、版本不认、不存在，一律落回"别动它"。
+    - 为什么需要记录：升级二进制不该悄悄让一台机器停在第一次 seed 时的源码上（`agent` 的 `audience`、`evolution` 那时还写着的 `activation: on_request`、以及 2026-08 那批 `surface: "with"` / `"driver"` 的旧词——三样都已删，§7.2.1——都是这样失效的），而"编辑过没有"没有第二种判法——内容 hash 不行（自演化每轮都改），询问也不行（这一步跑在开屏之前的后台）。**记录只授予覆盖权**：读不出、版本不认、不存在，一律落回"别动它"。
     - 点名不存在的 id → 报错并列出内嵌清单，exit 1。`--dry-run` 不写盘，连 root 目录都不建。
   - **`nulya ext sync [--user] [--activate] [--seed] [--dry-run]`** = 把这个 root 下的每个 **draft**（判据：`<root>/<id>/extension.json` 存在，就是 `ext init` 写 manifest 的位置；只认一层）走一遍 `ext build`。**装一个 extension 从此就是"把源码放进 `<root>/<id>/` 再 sync 一次"**——目录布局本来就是这样，缺的只是这个动词。drafts 之间彼此独立，所以**一个失败不中断其它**（每个 id 一行，坏 manifest 只报它自己；host fault 仍照原样传播），有任何一个没拿到版本就 exit 1。`--activate` 单独一档，因为 **build 是机械的、activate 是决定**（§7.4）：它只把 `current` 指向**这一趟新拿进来的版本**、以及**根本没有 `current` 的 id**；`current` 已经指着别处的一律不动（那是有人 rollback / activate 过）——所以一次 rollback 活得过下一次 sync。`--dry-run` 走同一条计算（`build_ext` 的 `Mode.plan`：同一份 manifest / snapshot / 搜索，写之前停手、也不拿 lease），因此它与真跑不可能对同一个 draft 说两样话。填满一个空 workspace store 时同样按 §9 记一条 birth trust——它就是本机 build。**`--seed`**（C3，ext-review-2 §2）= 先跑一次 `ext seed [--user]`（不带 `--force`：sync 不该替人覆盖一份被编辑过的 draft），复用 `cli/ext_seed.zig` 同一实现，再照常做上面这趟 sync——`--dry-run` 两步都 dry、两步的计划都打印，两个命令合成一个不是新语义，只是省一次调用。
   - **`nulya ext prune [--user] [<id>] [--dry-run]`** = 删这个 root 下**不是 `current`** 的版本目录（持同一个 `<id>/.lock`）。版本堆积是故意的（rollback 才只是移指针），代价是磁盘；**`current` 缺失的 id 一个都不删**——没有指针就没有"该留哪个"的依据，猜（最新？最大？）会删掉别人正要回滚到的那个。代价直说：冻在被删版本上的旧 session 无法 resume；恢复路径是 draft 还在（同源码重 build 得同一个 version id）。**不扫 session header 保护被引用的版本**（等真实需要）。
@@ -402,12 +424,13 @@ manifest 讲给三种不同的听众，字段按哪个听众读它分成三层�
 {
   "schema": "nulya.extension/v2",
   "id": "web.search",
+  "apply": "manual",
   "runtime": {
     "entry": { "windows": "src/run.ps1", "default": "src/run.sh" },
     "interpreter": { "windows": "powershell", "default": "sh" }
   },
   "contributes": {
-    "tools": [{ "name": "web_search", "description": "…", "input": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] }, "timeout_ms": 60000, "readonly": true, "surface": "pin", "ui": { "render": "checklist", "panel": true } }],
+    "tools": [{ "name": "web_search", "description": "…", "input": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] }, "timeout_ms": 60000, "readonly": true, "surface": "manual", "ui": { "render": "checklist", "panel": true } }],
     "skills": ["skills/risk-parity"],
     "system_prompts": ["prompts/finance.md"],
     "commands": [{ "name": "search", "description": "…", "action": { "run": "web_search" } }],
@@ -417,48 +440,68 @@ manifest 讲给三种不同的听众，字段按哪个听众读它分成三层�
 }
 ```
 
-校验（`manifest.zig`）：schema id 精确匹配；`id` 合法；**至少一种 contribution**（`NoContributions`——`tools` / `skills` / `system_prompts` / `commands` / 有内容的 `policy` / `ui` 任一非空即算；一个写了 `contributes.policy` 但 `readonly` 是 null 的 `{}`，与从没写过这个键是**同一件事**——`{}` 什么都没说，不是贡献，ext-review D5）；有 tool 时必须有 `runtime`（`MissingRuntime`）；tool 名不能是 `shell`（保留名只有这一个，§5.2）、不能重复；`timeout_ms` 若写了必须是正数且 ≤ `tool.Timeouts.extension_max_ms`（600s），否则 `InvalidTimeout`；`surface` 若写了必须是 `pin` / `with` / `driver` 之一，否则 `InvalidSurface`；老 manifest 的 `audience` 若写了仍必须是 `model` / `driver` 之一，否则 `InvalidAudience`；`entry` / `interpreter` 按平台声明成 `{"<os>": …, "default"?: …}` 时只许脚本实现（混进 `bin/` 是 `InvalidEntry`），且宿主的 os 必须能在其中选出一个变体（选不出是 `EntryUnsupportedOnHost`，在 pin 它的 `session new` 与点名它的 `ext run` 两处各自 hard fail，§7.1）；`entry` / skill / system_prompt / 每个 `ui` 条目的 `entry` 路径不能逃出包目录；命令 `name` 必须是 `[a-z0-9-]+` 且包内不重复（`InvalidCommandName` / `DuplicateCommandName`），`action` 必须**恰有一个键**（`InvalidCommandAction`），键是 `run` 时它的值必须是本包声明的 tool（`UnknownCommandTool`）；`ui` 的每个 host 键必须是 `[a-z0-9-]+`（`InvalidUiHost`）、它的 `api` 不能是 0（`InvalidUiApi`）。**manifest 是 schema 唯一真相**：绝不"启动 binary 再问它有什么"。
+校验（`manifest.zig`）：schema id 精确匹配；`id` 合法；**至少一种 contribution**（`NoContributions`——`tools` / `skills` / `system_prompts` / `commands` / 有内容的 `policy` / `ui` 任一非空即算；一个写了 `contributes.policy` 但 `readonly` 是 null 的 `{}`，与从没写过这个键是**同一件事**——`{}` 什么都没说，不是贡献，ext-review D5）；有 tool 时必须有 `runtime`（`MissingRuntime`）；tool 名不能是 `shell`（保留名只有这一个，§5.2）、不能重复；`timeout_ms` 若写了必须是正数且 ≤ `tool.Timeouts.extension_max_ms`（600s），否则 `InvalidTimeout`；`surface` 若写了必须是 `auto` / `manual` / `internal` 之一，否则 `InvalidSurface`（**旧的三个词 `pin` / `with` / `driver` 在这条规则的另一侧**——改名而继续认旧词等于让两套词表同时在野）；顶层 `apply` 若写了必须是 `auto` / `manual` 之一，否则 `InvalidApply`；`entry` / `interpreter` 按平台声明成 `{"<os>": …, "default"?: …}` 时只许脚本实现（混进 `bin/` 是 `InvalidEntry`），且宿主的 os 必须能在其中选出一个变体（选不出是 `EntryUnsupportedOnHost`，在 pin 它的 `session new` 与点名它的 `ext run` 两处各自 hard fail，§7.1）；`entry` / skill / system_prompt / 每个 `ui` 条目的 `entry` 路径不能逃出包目录；命令 `name` 必须是 `[a-z0-9-]+` 且包内不重复（`InvalidCommandName` / `DuplicateCommandName`），`action` 必须**恰有一个键**（`InvalidCommandAction`），键是 `run` 时它的值必须是本包声明的 tool（`UnknownCommandTool`）；`ui` 的每个 host 键必须是 `[a-z0-9-]+`（`InvalidUiHost`）、它的 `api` 不能是 0（`InvalidUiApi`）。**manifest 是 schema 唯一真相**：绝不"启动 binary 再问它有什么"。
 
 #### 内核强制
 
 `runtime.entry` / `.interpreter` 说的是**怎么跑这个 runtime**——各自既可以是字符串也可以是按 `builtin.os.tag` 键名的对象（选不中宿主时是硬失败，见上）。**怎么跟它说话不在 manifest 里**：只有一种（stdin 是这次调用参数的一个 compact JSON 对象、`NULYA_TOOL` 是 tool 名、stdout 原文就是结果、退出码即成败），§7.3。
 
-`tools[].input` schema 只在该 tool 进了模型的 native 工具面时才喂给模型；平时是可发现性元数据。`tools[].timeout_ms?` 是**这个 tool 自己**的 wall-clock 上限——但只在它被放到**模型的工具面**上的那次调用生效（缺省 = host 的 30s，§7.3；`nulya ext run` 不套用它，见 §7.3 的 timeout 讨论）：知道自己慢的 tool 在 manifest 里说出来，因为 manifest 就是关于一个 tool 的唯一真相。`tools[].surface?` 是**这个 tool 怎么到工具面**的闭合词表：缺省 / `"pin"` = model-facing 且可独立 pin；`"with"` = model-facing 但只随显式成员（`[extensions] with` / `session new --with`）进 fresh session；`"driver"` = 只给 driver / CLI 通过 `nulya ext run` 调，不进 fresh session 的模型面。`surface` 是 kernel 读并强制的字段：fresh pin 只接受 `pin`，fresh `--with` 只展开 `with`，resume 只重放 header `native_tools`。老 manifest 的 `audience:"driver"` 兼容读成 `surface:"driver"`，缺省或 `audience:"model"` 读成 `pin`；两者都写时 `surface` 权威。`skills` / `system_prompts` 是这个版本贡献的文件列表，随 build 冻结进快照。
+`tools[].input` schema 只在该 tool 进了模型的 native 工具面时才喂给模型；平时是可发现性元数据。`tools[].timeout_ms?` 是**这个 tool 自己**的 wall-clock 上限——但只在它被放到**模型的工具面**上的那次调用生效（缺省 = host 的 30s，§7.3；`nulya ext run` 不套用它，见 §7.3 的 timeout 讨论）：知道自己慢的 tool 在 manifest 里说出来，因为 manifest 就是关于一个 tool 的唯一真相。`tools[].surface?` 是**这个包已经是成员之后，这个 tool 到不到模型面前**的闭合词表（§5.1 那张三行表）：**缺省** / `"auto"` = 成员即上模型面；`"manual"` = 成员也不上，要人显式 pin（`--pin` / `pinned_native_tools`），也是**唯一可 pin** 的那一档；`"internal"` = 永不上模型面，只给外部代码经 `nulya ext run` 调。`surface` 是 kernel 读并强制的字段：fresh pin 只接受 `manual`，完全成员只展开 `auto`，resume 只重放 header `native_tools`。**缺省从 `pin` 换成了 `auto`**（旧词表整套退场，见上）：一个人特意组合进来的包，它的 tool 就是他想用的那些，而 `ext init` 脚出来的扩展应该 `--with` 一下就能用。
 
-**manifest 说不出"我进哪些 session"。** 那是两个决定，两个都是人的，写在 config 或一次命令行上：成员（`[extensions] with` / `session new --with`）与可独立 pin 的工具面（`[registry] pinned_native_tools` / `session new --pin`），§5.1 那张 2×2。`surface:"with"` 只是说"如果这个包被显式列为成员，我的这个 tool 也属于那场的模型面"，不替任何人把包列进去。
+`apply?`（**顶层**，不在 `contributes` 里——它不是一项贡献，而是作者认为"装上我"应该意味着什么）是闭合词表 `manual`（缺省）/ `auto`：`auto` 的包只要有 `current` 就是本机每一场 fresh、非 `--bare` session 的常驻成员（§5.1）。它是 kernel 读并强制的字段，也是**唯一一个与 reach 有关的 manifest 字段**——但它只给缺省，不设天花板：`[extensions] with` 永远加得进一个 `manual` 的包，`ext deactivate` 永远关得掉一个 `auto` 的包。
 
-这里曾经有一个字段 `activation`（`"always"` / `"on_request"`，缺省按形状），是内核唯一强制的 manifest 字段，答的是"activate 我之后接下来的 session 会怎样"。**已删**，两条理由：
+`skills` / `system_prompts` 是这个版本贡献的文件列表，随 build 冻结进快照。
 
-- **reach 是人的决定，不是作者的**（physics #6）。当时的论证是"我是 policy 还是 mode 只有包自己答得出"——那句话现在看是把**包的性质**（它带一段 identity prompt 吗）和**它该进谁的 session**（一个 workspace 的决定）当成了同一个问题。前者确实只有作者知道，而它已经写在 `contributes` 里了；后者从来不是他能知道的。
-- **承诺已经漏了。** pin 蕴含成员之后（§5.1），config 里一条 `pinned_native_tools = ["ext:plan/propose"]` 就把一个 `on_request` 的包带进每一场，内核照办——一个只在某些路径上成立的保证不是保证，而前端只能绕着它走。
+**manifest 说不出"我进哪一场 session"，只说得出"装上我默认什么意思"。** 决定仍是两个、仍是人的、仍写在 config 或一次命令行上：成员（`[extensions] with` / `session new --with`）与可独立 pin 的工具面（`[registry] pinned_native_tools` / `session new --pin`），§5.1 那张 2×2。`apply: "auto"` 是这条边界内侧唯一的一句话——它给成员那根轴一个**缺省**，而两个方向的人为覆盖都还在（加：config `with`；撤：`ext deactivate`）。`surface:"auto"` 同理：它说的是"如果这个包已经是成员，我这个 tool 也属于那场的模型面"，不替任何人把包变成成员。
 
-根因是 `current` 一个指针同时承担了两件事："`<id>` 指哪个版本"与"要不要进每一场"。现在它只承担第一件：**`nulya ext activate` = 原子改 `current`，一场 session 都不改变**（physics #5 一字未动，只是它现在是 activate 的全部）。
+这里曾经有一个字段 `activation`（`"always"` / `"on_request"`，缺省按形状），答的是"activate 我之后接下来的 session 会怎样"。它被删掉的两条理由，一条仍然成立、一条被 `apply` 直接回答了：
 
-**老 manifest 写了这个键的**：`parse` 当未知键**忽略**（不是错，连从前会被拒的 `"onrequest"` 与 `false` 都只是被忽略），`ext build` / `ext sync` 对这样的 draft 在 stderr 打一行 —— 静默忽略会让作者以为自己的包还在 opt out。唯一的读者就是那一行（`manifest.Manifest.legacy_activation`）。
+- **仍然成立**：reach 是人的决定，不是作者的（physics #6）。`apply` 因此**只是缺省**——它给不出一个人撤不掉的东西，而 `activation` 当年的形状（fresh 路一趟 discovery，把**每个**有 `current` 的包收成成员，包想不进也得靠自己写 `on_request` 拦）是反过来的：默认在里面，作者拿的是否决权。
+- **`activation` 的第二条理由（"承诺已经漏了"——pin 蕴含成员之后 `on_request` 拦不住任何东西）**说的是**否决权**漏了。`apply` 不主张否决权，所以这条对它不适用。
+
+真正的分界在**谁必须写下来**：discovery 谁都不问，一个包被 build + activate 就在每一场里；`apply: "auto"` 要求作者在 manifest 里说出来，而人随时可以 `ext deactivate`。所以 **`nulya ext activate` 仍然只是"原子改 `current`"**（physics #5 一字未动）——只不过对一个自称 `auto` 的包，那个指针本身就是"此后每一场都带它"，于是 `ext activate` 多在 stderr 说一句后果并指出 `ext deactivate`（`activate --user` 那条跨 workspace 提示的先例）。
+
+**老 manifest 写了 `activation` 的**：`parse` 当未知键**忽略**，与任何一个从来没有定义过的键完全一样——`ext build` 也不再为它说什么（见文末"曾经有、为什么退场"）。
 
 #### driver 声明
 
 `tools[].readonly?`（可选 bool）是这个包对**这个 tool 只读**的**声明**——§9 那句"没有一个 manifest 字段是安全边界"的第一个例子：kernel 解析它、把它冻进版本的 manifest、**一个字节都不强制**。消费者是 driver 的审批 policy（§4 的 gate；TUI 的 `[approvals] manifest_readonly`），它有权不信；真边界要等 OS 强制（PLAN §3.8），不是一个布尔值。**缺省是 null 不是 false**：包什么都没说，与包说了"不是只读"是两件事，读的人不许把沉默读成主张。类型不对（`"readonly": "yes"`）是 `WrongType` 而不是被悄悄忽略，与 `timeout_ms` 同一条纪律。
 
-`tools[].audience?` 是旧的二分 placement 字段（`"model"` / `"driver"`），只为兼容旧 manifest 保留。新 manifest 写 `tools[].surface`：它能区分可独立 pin 的 model tool（`pin`）与只随成员出现的 model tool（`with`）。旧字段仍按封闭词表校验；折叠规则在上一节：`audience:"driver"` → `surface:"driver"`，其余旧写法 → `pin`，而显式 `surface` 永远优先。
-
 `contributes.policy?`（可选，`{readonly: ?bool}`）是这个包要求一个审批 policy 在**它是本场冻结 composition 的成员期间**收窄的东西（tui-plugin §1 D2/D3）——与 `ToolSpec.readonly` 同级的**声明**：kernel 解析、冻进版本、**不强制**，消费者是 driver 自己的审批 policy（TUI 把它判在三张审批表**之前**，与 agent 天花板同一处，§7.8）。`policy` 整体可以不写（`null`——包完全没提这件事）；写了但内容为空的 `{}` 是**不同的值**，这个区别在解析出的数据里仍然读得出来，但对 `NoContributions` 而言两者算同一件事（ext-review D5）。
 
 **一个字段，而它只能收窄——这两件事现在是同一件事。** 从前这里有三个（`readonly` / `deny` / `ask`，与 `[approvals]` 的表同形），外加一条规矩：**没有 `allow`**，写了就在 parse 阶段拒（`PolicyAllowNotPermitted`）——因为一个包能往 allow 表里塞条目就是 authority 经成员关系隐式增长（physics #6，与 `mergeProject` "只能收窄"同一条纪律）。那条规矩没错，只是它得靠一条**规则**来守。删掉两张表之后**形状自己守它**：一个可选的 bool 说不出任何拓宽的话，于是 `allow` 与任何别的键一样只是未知键，`PolicyAllowNotPermitted` 与 `InvalidPolicyEntry` 都没有了检查对象。删这两张表的另一半理由是它们没有 `readonly` 答不出的用例：包点名某几个 tool 塞进人的审批表，是同一个天花板更弱、更啰嗦的写法。
 
-**`permissions` 已删。** 它曾经与 `contributes` 同层，是这个包对自己文件系统/网络/进程足迹的声明——kernel 解析、冻进版本、**零读者**，留着等一个沙箱。留了很久，而一条没有人执行的声明会慢慢被读成保证；沙箱真到的时候（PLAN §3.8），它需要的形状由**它**定，不该继承一个在它之前猜出来的形状。老 manifest 写了这个键的：`parse` 当未知键**忽略**，`ext build` / `ext sync` 在 stderr 打一行（与 `activation` 同一条纪律，唯一读者就是那一行）。
+**`permissions` 已删。** 它曾经与 `contributes` 同层，是这个包对自己文件系统/网络/进程足迹的声明——kernel 解析、冻进版本、**零读者**，留着等一个沙箱。留了很久，而一条没有人执行的声明会慢慢被读成保证；沙箱真到的时候（PLAN §3.8），它需要的形状由**它**定，不该继承一个在它之前猜出来的形状。老 manifest 写了这个键的：`parse` 当未知键**忽略**（见文末"曾经有、为什么退场"）。
 
 #### 前端声明
 
-`tools[].ui?`（可选，`{render: ?str, panel: ?bool}`）是给**画这个 tool 调用的人**的提示（tui-plugin §1 D12）。`render`（如 `"checklist"`）与 `surface` **不同**的是这一个词表**开放**：kernel 只管它是不是字符串，**从不因为值而拒绝**——`surface` / `audience` 这种封闭词表能穷举合法值，`render` 不能（今天是 `"checklist"` / `"markdown"`，以后会长），所以认不出的词是**读的人**的选择（退回一张普通卡），不是 build 拒绝。`panel: true` 是同一个块里的另一半：请求把这个 tool 最新一次调用**也**投影成输入框上方一个常驻可折叠 widget——没装代码插件的前端能给的最低限度进度显示。两个都是**声明**：kernel 解析、冻进版本、**不强制**；两者缺省都是 null，不是任何具体的词或 `false`；`ui` 整个块也可以不写。
+`tools[].ui?`（可选，`{render: ?str, panel: ?bool}`）是给**画这个 tool 调用的人**的提示（tui-plugin §1 D12）。`render`（如 `"checklist"`）与 `surface` **不同**的是这一个词表**开放**：kernel 只管它是不是字符串，**从不因为值而拒绝**——`surface` / `apply` 这种封闭词表能穷举合法值，`render` 不能（今天是 `"checklist"` / `"markdown"`，以后会长），所以认不出的词是**读的人**的选择（退回一张普通卡），不是 build 拒绝。`panel: true` 是同一个块里的另一半：请求把这个 tool 最新一次调用**也**投影成输入框上方一个常驻可折叠 widget——没装代码插件的前端能给的最低限度进度显示。两个都是**声明**：kernel 解析、冻进版本、**不强制**；两者缺省都是 null，不是任何具体的词或 `false`；`ui` 整个块也可以不写。
 
 `contributes.commands?`（可选，`[]{name, description, action}`）是这个包说给**驱动 session 的人/程序**听的斜杠命令（tui-plugin §1 D1/D2/D8）——JSON 就能写，任何 driver（不只是有屏幕的那个）都读得到，是没装代码插件时的降级地板。`name` 的字符集是 `[a-z0-9-]+`（比 `isValidId` 窄——命令是人在 `/` 后面敲的，不是不透明 id）、空串或超出字符集是 `InvalidCommandName`，包内重复是 `DuplicateCommandName`。`action` 是**一个对象，恰有一个键**：键是动词，值是它的参数（没有参数就写 `true`）——`{"with": true}` / `{"run": "<tool>"}` / `{"skill": "<ref>"}`。词表**开放、原样保留**（与 `ui.render` 同一条纪律）：认不出的动词是**读的人**的选择（warn-and-skip），不是 build 拒绝。kernel 只检查两件事：**恰一个键**（`InvalidCommandAction`——零个或两个动词说不出"敲这个命令做什么"，那是文件写错了，不是读者该猜的），以及键是 `run` 时它的值必须是**这同一份 manifest** 声明的 tool（`UnknownCommandTool`，一个包内闭合引用）。
 
-`action` 从前是一个字符串小语言（`"run propose"`），读的人要按空格切开才知道自己拿着什么，而"切开"这件事在每个 reader 里各写一遍。对象把动词与参数分成两样东西，形状检查因此只有一句话。**老的字符串形式认一个版本期**：`parse` 按第一个空格折成同一对字段（`"wear"` 于是仍然是一个动词，只不过是读的人认识的那个），`ext build` 在 stderr 提一句。
+`action` 从前是一个字符串小语言（`"run propose"`），读的人要按空格切开才知道自己拿着什么，而"切开"这件事在每个 reader 里各写一遍。对象把动词与参数分成两样东西，形状检查因此只有一句话。**字符串形式已经不认了**：它现在就是一个 `WrongType`，和任何一个写错类型的字段一样。
 
 `contributes.ui?`（可选，`{"<host>": {entry: str, api: u32}}`）是这个包**自己的前端模块**声明（tui-plugin §1 D1/D10），**按宿主键**：`"tui"` 是本仓库那个前端的键，别的前端有别的键，一个包可以同时给几个。宿主名是**开放词表**（`[a-z0-9-]+`，否则 `InvalidUiHost`）——内核的 schema 不该点名某一个具体前端；一个前端读自己那一条，没有就是"这个包对我没有插件"，是普通答案不是警告。kernel 只验证**形状**：每条的 `entry` 与 `system_prompts` 同一条路径安全检查（不能逃出包目录，否则 `InvalidUiEntry`），且在 `ext build` 收集包快照时要求这个文件**真的存在**（`validateUi`，与 `validateSystemPrompts` 同一先例，`UiEntryFileMissing`）——**每一条都查**，不只是本机这个前端的，因为一个版本要服务所有宿主，build 是唯一能发现"某个宿主的模块根本没写"的时刻（`validateScriptEntries` 同一理由）；`api`（插件宿主 API 版本）必须 ≥ 1，否则 `InvalidUiApi`。**kernel 从不加载或运行这些文件**：那是前端自己的事（tui-plugin U3）——这里只冻结指针、验证它们没有逃出包、build 时确实在场。
 
-老的**平铺**形式（`{entry, api}`，没有宿主键）认一个版本期：写它的时候只有一个前端，所以 `parse` 把它读成 `tui` 那一条，`ext build` 在 stderr 提一句。判据是顶层有没有 `entry` 键——宿主名是 `[a-z0-9-]+`，而 `entry` 只可能出现在平铺形式里。
+老的**平铺**形式（`{entry, api}`，没有宿主键）**不再是第二种形状**：写它的时候只有一个前端，而现在它只是"一个叫 `entry` 的宿主，它的值是个字符串"——`WrongType`。内核的 schema 不该点名某一个具体前端，所以也没有把它折进 `tui` 的道理。
+
+#### 曾经有、为什么退场（以及为什么不留兼容垫片）
+
+manifest 上有过五样东西，现在一样都不剩，读的人也不再被告知它们存在过。它们各有各的退场理由（写在上面各自的段落里），但**"连兼容垫片一起删"是同一个决定**：
+
+| 退场的 | 曾经是什么 | 今天写它会怎样 |
+|---|---|---|
+| `activation` | `"always"` / `"on_request"`：activate 之后进不进每一场 | 未知键，忽略 |
+| `permissions` | `{fs, network, process}` 声明，零读者 | 未知键，忽略 |
+| `runtime.wire` | `"jsonrpc"` / `"plain"`，选进程怎么被说话 | 未知键，忽略（§7.3） |
+| `tools[].audience` | `"model"` / `"driver"`，`surface` 的前身 | 未知键，忽略（`surface` 是唯一的 placement 字段） |
+| `tools[].surface` 的旧词 | `pin` / `with` / `driver` | **`InvalidSurface`** —— 这一个不同：键还在，词表换了，静默认旧词等于两套词表同时在野 |
+| `commands[].action` 的字符串形 | `"run propose"`，按空格切 | `WrongType` |
+| `contributes.ui` 的平铺形 | `{entry, api}`，没有宿主键 | `WrongType`（读成"一个叫 `entry` 的宿主"） |
+
+**为什么不留一个版本期。** 前四行原本都有一个 `Manifest.legacy_*` 字段和 `ext build` 的一行提示，后两行原本由 `parse` 折成新形状。那套东西的成本不是它的代码量，是**每一个读 manifest 的人要同时装下两种形状**，而收益的对象是**不存在的**：这个仓库外面还没有人写过 extension，仓库内的八个自带包与两个模板每次都被一起改。一个保护不了任何人的版本期，留下的只是内核里一整条没有读者的路——这是 §7.3 删掉 jsonrpc 那条路时用的同一把尺子。
+
+`ext build` 因此对一个写了退役键的 draft **什么都不说**：一个每次都要念一遍自己曾经删过什么的 build，念的次数会随时间单调增长，而每一句对 99% 的作者都是噪音。
 
 #### 三处 `readonly`，并排
 
@@ -565,20 +608,20 @@ Tool 是"能执行的能力"，Skill 是"要遵循的方法 / 知识"；不同 r
 
 ### 7.8 随仓库带的 extension（顶层 `extensions/`）
 
-都是普通 extension，走 §7.4 同一条 build → activate 路，**没有一个是内核层**；六个有 runtime 的都按 §7.3 那一种 wire 被调用（manifest 里没有一个字提它）：默认不在任何 composition 里（成员是 config `[extensions] with` 或 `session new --with`、工具面是 pin，§5.1 那张 2×2，全是用户或 driver 的决定；`activate` 只说 `<id>` 指哪个版本），随 checkout 到达的 store 照过 §9 的 trust gate。
+都是普通 extension，走 §7.4 同一条 build → activate 路，**没有一个是内核层**；六个有 runtime 的都按 §7.3 那一种 wire 被调用（manifest 里没有一个字提它）：**八个都不写 `apply`**（= `manual`），所以默认不在任何 composition 里（成员是 config `[extensions] with` 或 `session new --with`、工具面是 pin，§5.1 那张表，全是用户或 driver 的决定；`activate` 只说 `<id>` 指哪个版本），随 checkout 到达的 store 照过 §9 的 trust gate。
 
 **分发**：这八个 draft 的源码被 build.zig `@embedFile` 进二进制（`src_embed` 的同一先例，`src/bundled.zig` 投影），`nulya ext seed` 把它们写进任一 store root（§7.2）——所以拿到二进制就拿到了它们，不需要这个 checkout 在场；seed 之后走的路与手放源码毫无区别。**升级也走同一个动词**：seed 留下的 `.seed` 记录让它认得出"这份 draft 是我写的、之后没人动过"，那种就直接刷新成新二进制的源码，动过的则原样留着并点名（§7.2）——否则一台机器会永远停在第一次 seed 时的那版自带扩展。
 
 | id | kind | contribute | 谁消费 / 怎么进 session |
 |---|---|---|---|
-| `compact` | compiled | `compact` tool（§11，声明 `surface: driver`，§7.2.1） | TUI `/compact` 与 `drivers/goal.*` 经 `ext run` |
-| `agent` | compiled | `agent` / `render` / `list` / `run` 四个 tool（后三个声明 `surface: driver`，§7.2.1；`agent` 是 `surface: pin` 的模型委派入口）+ 自带四个 agent 定义（`explore` / `plan` / `general` / `orchestrator`，见下） | driver `session new --with agent@<v> --pin ext:agent/agent`（只带顶层场）；`render` / `list` / `run` 经 `ext run`。**它委派出的子场一律 `--bare`**（§5.1）：定义里的 `pins` 就是那一场的全部工具面，没写 `pins` 就只有 `shell`——两张常驻 config 表是**人**对自己每一场说的话，一个由模型开出来干一件活的场不在其中，继承它们会给子 agent 一些它作者从没写下的能力，并让同一个定义在两个 workspace 里行为不同 |
-| `handoff` | compiled | `handoff` tool（§11） | `drivers/goal.*` 的 `session new --with handoff@<v> --pin ext:handoff/handoff` |
+| `compact` | compiled | `compact` tool（§11，声明 `surface: internal`，§7.2.1） | TUI `/compact` 与 `drivers/goal.*` 经 `ext run` |
+| `agent` | compiled | `agent` / `render` / `list` / `run` 四个 tool（后三个声明 `surface: internal`，§7.2.1；`agent` 是 `surface: manual` 的模型委派入口——它进不进一场是 driver 每次的决定，不该随成员关系自动上台）+ 自带四个 agent 定义（`explore` / `plan` / `general` / `orchestrator`，见下） | driver `session new --with agent@<v> --pin ext:agent/agent`（只带顶层场）；`render` / `list` / `run` 经 `ext run`。**它委派出的子场一律 `--bare`**（§5.1）：定义里的 `pins` 就是那一场的全部工具面，没写 `pins` 就只有 `shell`——两张常驻 config 表是**人**对自己每一场说的话，一个由模型开出来干一件活的场不在其中，继承它们会给子 agent 一些它作者从没写下的能力，并让同一个定义在两个 workspace 里行为不同 |
+| `handoff` | compiled | `handoff` tool（§11，声明 `surface: auto`） | `drivers/goal.*` 的 `session new --with handoff@<v>`——它只有这一个 tool 而戴上它就是为了用它，所以成员即上台，不需要第二个 flag |
 | `evolution` | data | system prompt + skill | mode：`activate` 只说它指哪个版本；`session new --with evolution` 才戴上，或写进 config `[extensions] with` 让它常驻 |
-| `guide` | data | skill | 用户 `--user` 装一次，每场 `<available_skills>` 多一行 |
-| `std` | compiled | `read` / `write` / `append` / `edit` / `grep` / `glob` 六个 tool（`read` / `grep` / `glob` 声明 `readonly`，§7.2.1；缺省 `surface: pin`） | 用户 `ext build extensions/std --user` → `activate --user` → user config `[registry] pinned_native_tools`（builtin 1 + 6 = 7 ≤ `max_tools` 20） |
-| `plan` | compiled | system prompt + `policy{readonly}` + `propose` / `todo`（都声明 `readonly` 与 `surface: with`，`todo` 另带 `ui: {render: checklist, panel: true}`）/ `approve`（`surface: driver`）+ `contributes.ui.tui` | mode：`/plan`（贡献 prompt 的包自动得到自己名字那条命令，manifest 不写，tui.md T49）或 `session new --with plan` 戴一场；`propose` / `todo` 随这个显式成员进 native 面 |
-| `ask` | compiled | `ask` tool（声明 `readonly` 与 `surface: with`）+ `commands[/ask]`（它不贡献 prompt，所以这条命令是它自己的主张）+ `contributes.ui.tui` | 能力不是模式，所以它想常驻：user config `[extensions] with = ["ask"]`；只给一场用是 `session new --with ask`。`ask` tool 随这个显式成员进 native 面，不写 pin |
+| `guide` | data | skill | 用户 `--user` 装一次，每场 `<available_skills>` 多一行（它也是 `apply` 的第一个真实候选：写 `"apply": "auto"` 就不用再往 config 里加一行，但仓库里的版本不写——自带的八个一个都不替用户做这个决定） |
+| `std` | compiled | `read` / `write` / `append` / `edit` / `grep` / `glob` 六个 tool（`read` / `grep` / `glob` 声明 `readonly`，§7.2.1；六个都**显式**写 `surface: manual`——这是一张由人拼出来的工具面，缺省的 `auto` 会让"戴上 std"变成一次性把六个槽全占了） | 用户 `ext build extensions/std --user` → `activate --user` → user config `[registry] pinned_native_tools`（builtin 1 + 6 = 7 ≤ `max_tools` 20） |
+| `plan` | compiled | system prompt + `policy{readonly}` + `propose` / `todo`（都声明 `readonly` 与 `surface: auto`，`todo` 另带 `ui: {render: checklist, panel: true}`）/ `approve`（`surface: internal`）+ `contributes.ui.tui` | mode：`/plan`（贡献 prompt 的包自动得到自己名字那条命令，manifest 不写，tui.md T49）或 `session new --with plan` 戴一场；`propose` / `todo` 随成员进 native 面 |
+| `ask` | compiled | `ask` tool（声明 `readonly` 与 `surface: auto`）+ `commands[/ask]`（它不贡献 prompt，所以这条命令是它自己的主张）+ `contributes.ui.tui` | 能力不是模式，所以它想常驻：user config `[extensions] with = ["ask"]`；只给一场用是 `session new --with ask`。`ask` tool 随成员进 native 面，不写 pin |
 
 **`agent`：委派，靠已有的后台任务回路。** 四个 tool 一个二进制（`NULYA_TOOL` 分发）：`agent{name, task, model?}` 是**模型**在委派——渲染 persona、`session new --prompt` 出子场、`session append` 给任务、`task run` 起一个**属于父场**的后台任务去驱动它，返回一张点名子 session 的回执；`render{name}` 把一个定义文件的正文写成 `.nulya/scratch/agents/agent-<name>.md` 并回一整组 `session new` 参数（**写路径唯一实现**，所以 TUI 也调它——两份实现就是同一个 persona 的两种读法）；`list` 列出全部定义（含 `agents` / `max_exchanges` 两列；**读路径唯一实现**，driver-facing、永不 pin：模型不需要目录——名字写错时错误消息里就有名单——而 driver 要画 picker）；`run{session, agent?, readonly?, max_steps?}` 是那个后台任务跑的命令本身。
 
@@ -604,9 +647,9 @@ Tool 是"能执行的能力"，Skill 是"要遵循的方法 / 知识"；不同 r
 
 **`std` 不是 "std tool 层"**（PLAN §3.4.1 那句话仍成立）：叫 std 只因它装的是一场编码 session 最先伸手的那几样东西。行为逐条移植自 tcode（零猜测的错误文案、`read` 放大小读 + 自分页 + 无行号、`write` 不覆盖没读过的文件、`grep` smart-case + per-file 上限 + gitignore、`glob` 按 mtime）；它是 §7.3 "string result 原文进 emit" 的第一个 consumer；每个结果自守在 `emit` 预算之下（read ≤ 120 KB、grep ≤ 100 KB），所以 spill 对它们不触发。它唯一跨调用的状态——模型读过哪些文件、看到哪些行——按 §7.6 走**磁盘制品**：`.nulya/scratch/<session-id>/std-freshness.jsonl`（append-only，从 `NULYA_SESSION` 取 id，fork 之后自然是新文件；不在 session 里就没有去重也没有门）。regex 引擎是 vendored 的 mvzr（字节级、无 lookaround / backreference，smart-case 由 wrapper 补）；gitignore / glob 匹配移植自 zeegrep 的两个 core 模块；walker 单线程 + 10 s deadline。契约与进度在 `docs/goals/std.md`。
 
-**`plan` / `ask`：声明层与代码层的两个真实 consumer**（goals/tui-plugin.md U4；前端那一半在 tui.md §11 T41，不进这里）。两个包合起来把 §7.2.1 那几个字段一次用全：`plan` 的 manifest 说出它是什么（system prompt）、戴上它意味着什么权限立场（`policy.readonly`——gate 上先于一切审批表，`propose` / `todo` 因此各自声明 `readonly: true`）、它的 model tools 随成员出现而不是独立 pin（`surface:"with"`）、它的 tool 怎么画（`ui.render` / `ui.panel`）、以及它带了一段前端代码（`contributes.ui.tui`）；`ask` 补上剩下那一个——`commands`，因为它**不**贡献 prompt，`/ask` 于是是它自己说出来的（`plan` 的 `/plan` 是 driver 从形状推出来的，manifest 里没有这一条）。内核只读其中的 schema / runtime / `surface` / frozen composition 那些硬事实；其余声明读不读、怎么画、怎么问人，全是驱动方的事。
+**`plan` / `ask`：声明层与代码层的两个真实 consumer**（goals/tui-plugin.md U4；前端那一半在 tui.md §11 T41，不进这里）。两个包合起来把 §7.2.1 那几个字段一次用全：`plan` 的 manifest 说出它是什么（system prompt）、戴上它意味着什么权限立场（`policy.readonly`——gate 上先于一切审批表，`propose` / `todo` 因此各自声明 `readonly: true`）、它的 model tools 随成员出现而不是独立 pin（`surface:"auto"`）、它的 tool 怎么画（`ui.render` / `ui.panel`）、以及它带了一段前端代码（`contributes.ui.tui`）；`ask` 补上剩下那一个——`commands`，因为它**不**贡献 prompt，`/ask` 于是是它自己说出来的（`plan` 的 `/plan` 是 driver 从形状推出来的，manifest 里没有这一条）。内核只读其中的 schema / runtime / `surface` / frozen composition 那些硬事实；其余声明读不读、怎么画、怎么问人，全是驱动方的事。
 
-三个 tool 的分工是 §11 那条分界的直接推论：`propose{plan_md}` 与 `todo{items}` **什么都不写**——计划与清单在调用的参数里，而调用已经在 ledger 里，磁盘上再写一份就是第二份真相（physics #3）；`ask{question, options?}` 同理，且**不阻塞**（把一个 step 押在人的阅读速度上，还要撞 600 s 的 extension 天花板，同时让没人看着的 driver 挂死；答案作为下一条 user turn 到达，append-only 只付一轮增量）。唯一碰磁盘的是 `approve{session, plan_md}`（`surface: driver`）：它把批准的计划渲染成 `.nulya/handoffs/<session>-<n>.md`——**与 `handoff` 逐字节同形、同目录、同独占创建规则**，所以 `compact --arg brief_file=` 一个特例都不用加就能 fork 过去，而 `session new --parent` 不带 `--with`（composition 一律现解，不继承，§5.1），于是**计划过去了、写它的 persona 没过去**：执行场是一场能真正改东西的普通 session。
+三个 tool 的分工是 §11 那条分界的直接推论：`propose{plan_md}` 与 `todo{items}` **什么都不写**——计划与清单在调用的参数里，而调用已经在 ledger 里，磁盘上再写一份就是第二份真相（physics #3）；`ask{question, options?}` 同理，且**不阻塞**（把一个 step 押在人的阅读速度上，还要撞 600 s 的 extension 天花板，同时让没人看着的 driver 挂死；答案作为下一条 user turn 到达，append-only 只付一轮增量）。唯一碰磁盘的是 `approve{session, plan_md}`（`surface: internal`）：它把批准的计划渲染成 `.nulya/handoffs/<session>-<n>.md`——**与 `handoff` 逐字节同形、同目录、同独占创建规则**，所以 `compact --arg brief_file=` 一个特例都不用加就能 fork 过去，而 `session new --parent` 不带 `--with`（composition 一律现解，不继承，§5.1），于是**计划过去了、写它的 persona 没过去**：执行场是一场能真正改东西的普通 session。
 
 **`edit` 是这个包里的第六个 tool，也是原 §6.2 的落点。** 设计要点原样成立，只是不再住在内核里：**精确串匹配**（`{path, old_string, new_string, replace_all?, target_line?}`）——唯一匹配才动手，歧义就报次数并给最多 5 个带行号的候选窗口，匹配不上就给相似行提示，让模型一轮纠正；**匹配本身就是校验**，不设 read-before-edit 门；**不做 fuzzy patch**（§17：apply 失败多一轮 round-trip，违反 §0.2）——所谓 recovery ladder（标点归一 → 逐行空白归一 → 跨行 reflow 归一）每一级都只在**唯一**命中时才动手，且回填的是文件的真实字节，多于一个候选一律报歧义，所以它是"把模型的排版漂移对回原文"，不是"猜一个位置打补丁"。原子写并保留可执行位。成功后 stdout 仍是给模型读的小结果；给 TUI 的事实 diff 从实际 `ReplacementPlan`、旧文件字节与新文件字节写入 `NULYA_PRESENTATION_FILE` 指向的 JSON sidecar（`{kind:"diff", path, patch}`，patch 是完整文件行上的 unified hunk；TUI 可从 path 推断高亮并从 patch 计算 `+N -N`），kernel 原样存 `tool_results[].presentation`，不让前端解析 edit 参数或猜 diff。**D4 的已知代价随之消失**：`edit` 现在和 `read` / `write` / `append` 共用同一份 freshness 记录，它把回显的片段按新 hash 登记成一次 **read**（不是 write——write 会把整文件标成已看过，让之后的窗口读错误地回 unchanged），所以 read → edit → write 同一文件不再被拦一次要求重读（e2e 钉住新行为）。
 
@@ -716,10 +759,10 @@ resume 时 `cli/session.zig` 按 header 的 profile 名从 config 取 `api_key` 
 **换个触发者：模型主动的 handoff（`extensions/handoff` + `drivers/goal.*`）。** `/compact` 是 driver 因为"满了"发起；handoff 是**模型**因为"一个阶段做完了、剩下的工作不再需要过程细节"发起。动作完全相同——同一条 fork 路径、同一个 `<nulya:context-summary>` marker（**没有第三个 marker**）——只有触发者、信号、brief 侧重不同。**内核零改动**：`src/` 为这一整块加的只有 `launch.ScriptedProvider` 的第四档（离线替身，§13）。
 
 - **`extensions/handoff`**（与 `compact` / `evolution` 同层，compiled，理由同 `compact`：要把四个分节当一组校验，而一个 manifest 只有一个 interpreter，随仓库带的东西没法 ps1 + sh 各一份还共用一个 version）contribute 一个 `handoff{done, next_task, keep, drop?}` tool。**只 propose、不 fork**：它不调 `session new`，所以 `session new --parent` 在整个仓库里仍然只被 `extensions/compact/src/main.zig` 调用。它做三件事——校验三个必填节（缺 → 一次失败的调用，一次列全缺的，**不落盘**）、认 `NULYA_SESSION`（不在 session 里 → 错误，**不落盘**）、把 brief 渲染成 markdown 写进 `.nulya/handoffs/<session>-<n>.md`（`n` 取第一个空位、exclusive create，单调、不覆盖），然后回 `{recorded, message}`，message 就是"记录好了，别再调工具，结束本轮"。**那个文件就是提议**——driver 不必解析任何 JSON 也能看见它。
-- **`extensions/handoff` 默认不在任何 composition 里**，由需要它的 driver 在 `session new` 时带进来：`--with handoff@<v>` 让它成为成员、`--pin ext:handoff/handoff` 给它一个 native 槽（两根轴，§7.5）。这使 handoff 成为 **`--pin` 的第一个真实 consumer**。交互模式不给它：那时 driver 是人、人有 `/compact`，一个没人消费的 handoff 只会让 result 说"已记录"而什么都不发生。
+- **`extensions/handoff` 默认不在任何 composition 里**（它不写 `apply`，§5.1），由需要它的 driver 在 `session new` 时带进来——**一个 flag 就够**：`--with handoff@<v>`。它只有这一个 tool，而戴上它就是为了用它，所以那个 tool 写的是 `surface: "auto"`（§7.2.1），成员即上模型面；从前这里要第二句 `--pin ext:handoff/handoff`，那是 `surface` 缺省还是 `pin` 时代的写法。交互模式不给它：那时 driver 是人、人有 `/compact`，一个没人消费的 handoff 只会让 result 说"已记录"而什么都不发生。
 - **`compact` 的 `brief_file` 分支**：给了这个参数就**跳过七步里的 2–4**（不 append 请求、不 step 旧 session，旧文件**逐字节不变**），fork 点 = 旧 ledger 当前 tail（`session events <old>` 的最后一行 `seq`），brief = 文件内容；父一条事件都没有、或文件读不到 / 为空 → 报错不 fork。**两条路径**都由**代码**在 carried 文本末尾追加一段父指针（`Parent session: <id> (forked at seq N) … nulya session events <id>`）——不指望模型记得写；旧 ledger 还在盘上、新 session 有 shell，于是有损压缩退化成惰性检索。
 - **fork 不继承后台任务，compaction 继承。** `session new --parent` 对任务一无所知，这是对的：将来的 subagent 也走这条路，而一个子场不该抢走父场的工作。但压缩不是分叉——它是同一场对话换了个文件，把结果投进一个再没人读的 session 就是把结果丢了。所以**继承发生在 `extensions/compact` 里**（两条路径同一段代码，fork 成功之后、carry 之前）：`nulya task list --session <parent> --running --json` → 每个 `nulya task retarget <task> --to <child>` → carried 文本末尾由**代码**追加一行 `Background tasks still running when this session was forked: <sid>/t3 (<command>, 41s so far) … — nulya task status <sid>/t3; their results will arrive here when they finish.`（与 `parent_footer` 同一手法：模型没法记住一件它从不知道的事）。什么算"还在跑"由**内核**回答（`task list --running`，不在这里重算 `lost`）；**retarget 失败绝不让 fork 失败**——stderr 说一句、照常返回，那个任务照旧报告进父场的 inbox，找得到。§6.1 / §14。
-- **`drivers/goal.sh` + `drivers/goal.ps1`**（仓库顶层 `drivers/`，各 ≤ 70 行、逐行对齐）是**第一个 driver**，也是 PLAN §3.6 那段伪码的落地：`session new --with handoff@<v> --pin …` → `session append` 目标 + 一段"按阶段工作、阶段做完才调 handoff"的前言 → 循环 `session step --max-steps 1 --stream`；每步之后**先看盘**（`.nulya/handoffs/<id>-*.md` 出现了新文件 → `ext run compact@<v> compact --arg session=<id> --arg brief_file=<那个>` → 切到返回的子 id），否则看协议里的 `"stopped":"end_turn"` 收工。它**不是 extension**：一个 driver 一跑几十分钟，而 `ext run` 对 extension tool 强制 manifest 的 `timeout_ms`（上限 600s，§7.3）——driver 不是一次 tool call，不该被塞进那个形状；何况 script extension 一个 manifest 一个 interpreter，跨平台就得两个包。两份脚本都**不解析 JSON**：提议是文件、结束是协议自己的一行、只有一个正则从 compact 的结果里取新 id。`end_turn` 之后还要多问一句 `task wait --any --session <id>`（§14 的三个退出码正是为这一次调用设计的）：**0** = 有后台结果落地了 → `continue` 再 step 一次把它排干；**3** = 没有可等的 → 收工；其余 = 报错。于是"模型说完了"与"这件事做完了"分开——一个还在跑的 `zig build test` 不会让 driver 提前宣布结束。
+- **`drivers/goal.sh` + `drivers/goal.ps1`**（仓库顶层 `drivers/`，各 ≤ 70 行、逐行对齐）是**第一个 driver**，也是 PLAN §3.6 那段伪码的落地：`session new --with handoff@<v>` → `session append` 目标 + 一段"按阶段工作、阶段做完才调 handoff"的前言 → 循环 `session step --max-steps 1 --stream`；每步之后**先看盘**（`.nulya/handoffs/<id>-*.md` 出现了新文件 → `ext run compact@<v> compact --arg session=<id> --arg brief_file=<那个>` → 切到返回的子 id），否则看协议里的 `"stopped":"end_turn"` 收工。它**不是 extension**：一个 driver 一跑几十分钟，而 `ext run` 对 extension tool 强制 manifest 的 `timeout_ms`（上限 600s，§7.3）——driver 不是一次 tool call，不该被塞进那个形状；何况 script extension 一个 manifest 一个 interpreter，跨平台就得两个包。两份脚本都**不解析 JSON**：提议是文件、结束是协议自己的一行、只有一个正则从 compact 的结果里取新 id。`end_turn` 之后还要多问一句 `task wait --any --session <id>`（§14 的三个退出码正是为这一次调用设计的）：**0** = 有后台结果落地了 → `continue` 再 step 一次把它排干；**3** = 没有可等的 → 收工；其余 = 报错。于是"模型说完了"与"这件事做完了"分开——一个还在跑的 `zig build test` 不会让 driver 提前宣布结束。
 - **两个流两个受众**：driver 的 **stdout 只有控制行**（`session <id>` / `handoff <old> -> <new>` / `done <id>` / `evaluate: …`），**stderr 是 `session step --stream` 的行协议原样透传**。于是一个前端 spawn 这个脚本就能拿到实时 token delta（喂给它已有的 `--stream` 解析器）并按 stdout 开 / 切 tab，**不需要** `<id>.live` sidecar，也不需要内核长出任何东西。
 
 ---
@@ -831,7 +874,7 @@ nulya                       ← 无参数：同 `nulya help`（跑一个二进�
 ```
 
 - **`nulya help` = 自描述入口，`usage` 与上面这张表逐动词对齐是约定。** `cli/common.zig` 把 usage 拆成**按动词族**的常量（`ext_usage` / `session_usage` / `config_usage` / `skill_usage` / `src_usage` / `toolchain_usage`），`help` 拼成一屏，**bare `nulya ext` / `nulya session` / `nulya skill` / `nulya config` / `nulya toolchain` 各印自己那块**（`common.usageSection`）——同一份文本，两处不可能对同一个动词说两样话（原来 `cli/session.zig` 里那份独立的 session usage 已删）。加动词/加 flag 就同时改这张表和那几个常量。未知命令 → stderr `unknown command '<x>'; run \`nulya help\`` + exit 1（stdout 保持空）。**bare `nulya` 就是这一屏**（demo 搬去 `nulya demo`：跑一个不带参数的二进制不该开始写 session 文件，而"能做什么"正是那时唯一想知道的事；`zig build run` 改成传 `demo`，冒烟用法不变），bare `nulya src` 仍是列全树。整屏**一屏以内**是硬约束（模型每次读都在付 token；当前 52 行，e2e 钉预算，动它要有真能力到场——`--image` +2、`ext seed` +1、`config refresh` +1、`demo` +1、`task` 整个动词族 +6、`--bare` +1 是先例）。
-- **`nulya ext api` 三个 topic 的现状**：`protocol`（缺省）= 真实 `extension/protocol.zig` 源码；**`manifest`**（`permissions` 是它的旧名，保留一个版本期、打同一段）= 今天的 authority 与今天的 manifest（与 shell 同权、无 sandbox；子进程 env 净化后**加** `NULYA_EXE` / session 内 `NULYA_SESSION`；tool 拿不到对话；§7.2.1 那三层各说一次纪律，含 `commands[].action` 的对象形式与按宿主键的 `ui`；extension tool 默认 30s / `timeout_ms` 上限 600s **且只在模型面生效**、`shell` 默认 120s / 上限 600s；workspace store 的 trust gate）；`examples` = 一条完整路径（`ext init`（缺省脚本，连三行 `sh` 的样子一起给出）→ `build` → `run <id>@<v> --arg k=v` → `activate` → `session new --pin` → 故意不 activate 的包用 `--with <id>@<v>` → `--user` → `ext trust` → `session outcome`）。
+- **`nulya ext api` 三个 topic 的现状**：`protocol`（缺省）= 真实 `extension/protocol.zig` 源码；**`manifest`**（旧名 `permissions` 已删——那个字段没了，topic 也就没有别名了）= 今天的 authority 与今天的 manifest（与 shell 同权、无 sandbox；子进程 env 净化后**加** `NULYA_EXE` / session 内 `NULYA_SESSION`；tool 拿不到对话；§7.2.1 那三层各说一次纪律，含 `surface` 三个词与它的 `auto` 缺省、顶层 `apply`、`commands[].action` 的对象形式与按宿主键的 `ui`；extension tool 默认 30s / `timeout_ms` 上限 600s **且只在模型面生效**、`shell` 默认 120s / 上限 600s；workspace store 的 trust gate）；`examples` = 一条完整路径（`ext init`（缺省脚本，连三行 `sh` 的样子一起给出）→ `build` → `run <id>@<v> --arg k=v` → `activate` → **`session new --with`**（脚出来的 tool 是 `surface: auto`，成员即上台）→ 写了 `surface: "manual"` 的 tool 才 `--pin` → 故意不 activate 的包用 `--with <id>@<v>` → 想常驻就写 `"apply": "auto"` → `--user` → `ext trust` → `session outcome`）。
 - **model-facing 文本零文档引用**：kernel prompt（§7.5）、`usage`、`ext api` 的 `manifest` / `examples`、随仓库带的 `SKILL.md`——模型读得到的字只写行为与用法，**不出现 `DESIGN §x` / `PLAN §x` / 文件名**（模型读不到 docs，extension 还可能装到别的 workspace）。文档引用只待在代码注释与 docs 里；e2e 断言这几处不含 `DESIGN` / `PLAN`。
 
 - `session new --profile P [--model ID]`：`--profile` 是 config 里的 profile 名（默认 `active_profile`），`--model` 是该 profile 服务的一个 model id（默认 `ProviderProfile.defaultModel()`；接受任意 id，选择器只列目录里的）。不存在的 profile 直接拒绝（exit 1，提示 `nulya config show`）；存在但 credential 不可用的 profile 仍冻结为 scripted（离线替身，`resolveDescriptor` 的语义不变），但 stderr 明说。
@@ -843,12 +886,12 @@ nulya                       ← 无参数：同 `nulya help`（跑一个二进�
 
 - `nulya src`：build.zig 把整个 `src/**` `@embedFile` 进二进制（源码 ~200KB，紧挨 ~90MB 工具链，恒开无 gate）；`nulya src <path>` 按 `src/` 相对路径打印（`prompt.zig`、`extension/store.zig`），**默认剥 top-level `test` 块**（读结构/契约时不付测试 token），`--tests`/`--raw` 打印原样（Zig 风格参照）。剥离靠 zig-fmt 不变量：顶层 decl 的收尾 `}` 在第 0 列，无需 tokenizer（`source.zig`）。测试留在文件里（Zig 惯例、人可读、风格参照），改的只是**投影**不是**存储**——`src/` 一字未动。
 - `nulya ext api`：协议 topic 现在**打印真实 `extension/protocol.zig` 源码**（是 `nulya src` 的特例），wire ABI 与实现代码零漂移；`manifest` / `examples` 仍是短说明（策略与 CLI 用法，不随代码漂），内容见本节开头那条。
-- **`session new --pin ext:<id>/<tool>`（可重复）= 这一场独立 pin 的 native 工具。** 与 `registry.pinned_native_tools` **同义同严**，两者取并集去重（config 在前，`--pin` 按 argv 顺序在后）：config 说"这个 workspace 一直要"，`--pin` 说"这一场要"。解析不到就 exit 1 并打出这场的 pin 列表（`PinNamesUnknownExtension` / `PinToolNotDeclared` / `InvalidStableToolId` / `ToolBudgetExceeded` 各一句）；命名了 manifest 里非 `surface:"pin"` 的 tool 就 `PinToolNotPinnable`，文案指向 `--with` 或 `ext run`；绝不静默少一个工具地开场。结果与 `surface:"with"` 展开的 native tools 一起冻进 header 的 `native_tools`，`initFrozen` 只重放这张表。fork（`--parent`）**不继承** pin——composition 一律现解（§11），driver 要就再传一次。这也是"晋升"的全部含义：没有别的机制会把一个工具独立放上模型的工具面（§5.1、§5.5）。
-  - **一个 pin 顺带把它的包带进这一场**（§5.1 "pin 蕴含成员"）：`--pin ext:std/read` 不需要旁边一句 `--with std`。带进来的版本是 `current`，且**永不覆盖**已经被点名的版本；任何 root 都不持有那个 id 才是 `PinNamesUnknownExtension`，持有但没 `current` 是 `WithVersionNotFound`。这个隐式成员不会展开该包的 `surface:"with"` tools。
-- **`session new --with <id>[@<version>]`（可重复）= composition membership，并且展开 `surface:"with"` tools。** 把一个**已 built** 的版本 union 进这一场的 composition：它的 skills 进 catalog、system_prompts 进 system blocks、tools 可经 `nulya ext run <id>@<version>` 调用（点名冻结的版本，不依赖 `current`）；它的 `surface:"with"` tools 也在 fresh session 开场时进 native 面。`surface:"pin"` tools 仍要 pin，`surface:"driver"` tools 仍只给 driver / CLI。两根轴仍分开：`--with` 决定成员，pin 决定哪些可独立 pin 的 tool 常驻或按场出现。同 id 覆盖 discovery 的结果（这一场说了算），重复 `--with` 同一个 id 后者胜。版本解析：给了 `@version` 就用它，没给就用该 id 的 `current`——**没有 `current` 就 exit 1，内核不猜**（"只有一个 built 版本就用它"这类聪明会让同一条命令在第二次 build 之后含义漂移）。所以一个**故意不 activate** 的包（mode / evolution，activate 了就会进每一场 session 的 system blocks）要按 `--with <id>@<version>` 带入，version 由 `ext build` 打印。落地不需要新机制：`--with` 只改 `SessionComposition.init` 的输入，结果照常冻进 header 的 `active` / `native_tools`，所以 resume 自然重建同一份 composition 而不重新展开。fork（`--parent`）不继承——composition 一律现解（§11），要就再传一次。
+- **`session new --pin ext:<id>/<tool>`（可重复）= 这一场独立 pin 的 native 工具。** 与 `registry.pinned_native_tools` **同义同严**，两者取并集去重（config 在前，`--pin` 按 argv 顺序在后）：config 说"这个 workspace 一直要"，`--pin` 说"这一场要"。解析不到就 exit 1 并打出这场的 pin 列表（`PinNamesUnknownExtension` / `PinToolNotDeclared` / `InvalidStableToolId` / `ToolBudgetExceeded` 各一句）；命名了 manifest 里非 `surface:"manual"` 的 tool 就 `PinToolNotPinnable`，文案指向 `--with`（tool 是 `auto`）或 `ext run`（tool 是 `internal`）；绝不静默少一个工具地开场。结果与 `surface:"auto"` 展开的 native tools 一起冻进 header 的 `native_tools`，`initFrozen` 只重放这张表。fork（`--parent`）**不继承** pin——composition 一律现解（§11），driver 要就再传一次。这也是"晋升"的全部含义：没有别的机制会把一个工具独立放上模型的工具面（§5.1、§5.5）。
+  - **一个 pin 顺带把它的包带进这一场**（§5.1 "pin 蕴含成员"）：`--pin ext:std/read` 不需要旁边一句 `--with std`。带进来的版本是 `current`，且**永不覆盖**已经被点名的版本；任何 root 都不持有那个 id 才是 `PinNamesUnknownExtension`，持有但没 `current` 是 `WithVersionNotFound`。这个隐式成员不会展开该包的 `surface:"auto"` tools（`composition.isFullMember`：那条 pin 要的是一个 tool）。
+- **`session new --with <id>[@<version>]`（可重复）= composition membership，并且展开 `surface:"auto"` tools。** 把一个**已 built** 的版本 union 进这一场的 composition：它的 skills 进 catalog、system_prompts 进 system blocks、tools 可经 `nulya ext run <id>@<version>` 调用（点名冻结的版本，不依赖 `current`）；它的 `surface:"auto"` tools 也在 fresh session 开场时进 native 面。`surface:"manual"` tools 仍要 pin，`surface:"internal"` tools 仍只给 driver / CLI。两根轴仍分开：`--with` 决定成员，pin 决定哪些 `manual` tool 常驻或按场出现。同 id 覆盖常驻那一层的结果（config `[extensions] with` 或包自己的 `apply: "auto"`——这一场说了算），重复 `--with` 同一个 id 后者胜。版本解析：给了 `@version` 就用它，没给就用该 id 的 `current`——**没有 `current` 就 exit 1，内核不猜**（"只有一个 built 版本就用它"这类聪明会让同一条命令在第二次 build 之后含义漂移）。所以一个**故意不 activate** 的包（mode / evolution，activate 了就会进每一场 session 的 system blocks）要按 `--with <id>@<version>` 带入，version 由 `ext build` 打印。落地不需要新机制：`--with` 只改 `SessionComposition.init` 的输入，结果照常冻进 header 的 `active` / `native_tools`，所以 resume 自然重建同一份 composition 而不重新展开。fork（`--parent`）不继承——composition 一律现解（§11），要就再传一次。
 - **`session new --prompt <file>`（可重复）= 这一场自己的 system prompt，按字节冻进 header（§3.4、§5.6）。** 创建时读一次；缺文件 / 空文件 / 超 `prompt.max_system_prompt_bytes`（2 MiB，与成员包的 system prompt 同一个上限）→ stderr 点名那个文件 + exit 1，**什么都不创建**（与缺 credential 同一条纪律）。block 的 `source` 是文件 basename 去扩展名，**内核不解释它**：不去重、不加前缀、不按它排序。它与 `--with` 的分工就是 §5.6 那把尺子——`--with` 带的是**制品**（装得上、可 activate、可回滚），`--prompt` 带的是**参数**（只对这一场有意义的一段文本）。第一个 consumer 是 `extensions/agent`：一个 sub-agent 的 persona 从此不再材料化成 `agent-<name>` data extension，于是 `ext list` 不再长出派生包，`ext prune` 也再拿不走某一场赖以 resume 的身份文本。fork（`--parent`）**不继承**——与 `--with` 对称，要就再传一次。`session list --json` 只投影它的 `source` 与字节数，正文留在 session 文件里。
 - **`session new --bare` = 只按 argv 组合这一场（§5.1）。** 两张常驻 config 表都不读：`[extensions] with` 与 `registry.pinned_native_tools` 一律当空，composition 只来自 `--with` / `--pin` / `--prompt` 加 pin 蕴含。`max_tools` 照读——它是天花板不是选择，一个能绕过预算的 flag 就成了绕过预算的路。header **不记**这个 flag：resume 读的是 header 冻下来的成员与 `native_tools`，本来就不重推，记一个"当初是怎么算出来的"只会多一个要保持为真的事实。第一个 consumer 是 `extensions/agent` 委派出的子场（§7.8）。
-- **mode = 贡献 system_prompt 的 extension + 被点名。** 同一个包两种投放，都是人的决定：写进 config `[extensions] with` = 常驻（这个 workspace 每场都有）；只 `session new --with` = 按场。不为 mode 造别的机制——从前有一个（manifest 的 `activation`），已删，§7.2.1。
+- **mode = 贡献 system_prompt 的 extension + 成为成员。** 同一个包三种投放：写进 config `[extensions] with` = 这个 workspace 每场都有；`session new --with` = 按场；包自己写 `"apply": "auto"` = 装上就常驻（`ext deactivate` 撤销）。前两种是人的决定，第三种是作者给的**缺省**而人两个方向都覆盖得了（§5.1）。不为 mode 造别的机制——从前有一个（manifest 的 `activation`，一趟 discovery 把每个有 `current` 的包都收进来），已删，§7.2.1。
 - `nulya session list [--json]`：`.nulya/sessions/` 的**只读投影**，按 `created` 倒序（老 header 没有 `created`，退回按 id——id 本身时间有序）：`{sessions:[{id, created, parent, root, model, provider, model_id, nulya{version, kernel_hash}（创建它的二进制，§3.4；老 session 两项皆空）, events, composition{active:["id@version"], native_tools, system_prompts:["id@version/path"], prompts:[{source, bytes}]（`--prompt` 冻进来的，**只投 source 与字节数、不投正文**——列表说的是"哪一场是哪一场"，正文是那一场自己的内容）}, usage（每条 assistant 的 `usage` 求和，§3.1）, episode_usage, first_user_text（截断）, outcome{verdict,note,at,source,by}|null}]}`。定位同 `config show`：外壳投影，不决定任何事，也不写任何东西；第一批消费者是 evolution skill（一眼看完很多场而不必逐个读 ledger）与 TUI 的 `/sessions`。一个读不动的 session 文件被跳过而不是让整条命令失败。**`session new` 从此写 header 的 `created`**（RFC3339 UTC）。三个派生列：
   - **`root` / `episode_usage` = episode 的连接，只发生在这个投影里。** `/compact` 与 handoff 用 `--parent` 分叉（§11），所以一件事常常横跨一串文件；`root` 是沿 `parent` 链在**本次列出的** session 里能走到的最老祖先（走不到的父——别的 workspace、被删掉的文件——就让这个 session 自己当 root，绝不因此让列表失败），`episode_usage` 是同 `root` 的所有 session 的 `usage` 求和。**outcome journal 不参与**：一条 verdict 永远记在被点名的那个 id 上，"按 episode 理解"是消费者的事。文本形态只在 `root != id` 时多打一列 `root <id>`。
   - **`composition.system_prompts`** = 每个冻结 active 版本的 manifest 声明的 system prompt，写成 `<id>@<version>/<path>`（§7.5）。best-effort：这台机器读不出的版本就不列（"没列"= 不知道，不是"没有"），版本内容寻址故按 `id@version` 记一次读一次。会改写每一场 system blocks 的包，应该在列表里看得见。

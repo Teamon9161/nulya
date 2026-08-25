@@ -58,36 +58,35 @@ function context(over: Partial<ApprovalContext> = {}): ApprovalContext {
 /**
  * The rename (tui.md §11, T31). `auto` promised a judgement — tcode's `Auto` is
  * a classifier reviewing each action — where this mode makes none at all, so it
- * is `unsafe`, tcode's own name for the same stance. The old word survives in
- * exactly one place: reading what an older build wrote.
+ * is `unsafe`, tcode's own name for the same stance. The compatibility read
+ * that kept `auto` meaning `unsafe` is gone with every other pre-release shim
+ * (T52): there are two words, and anything else names no mode.
  */
-test("`unsafe` is the mode's name, and `auto` is still readable as it", () => {
+test("there are two modes, and a word that is neither names none", () => {
   expect(modes).toEqual(["ask", "unsafe"])
   expect(isMode("auto")).toBe(false)
-  // …but a word arriving from a file or a command line is normalized, so
-  // yesterday's state file and yesterday's tui.toml keep meaning what they said.
-  expect(normalizeMode("auto")).toBe("unsafe")
+  expect(normalizeMode("auto")).toBeNull()
   expect(normalizeMode("unsafe")).toBe("unsafe")
   expect(normalizeMode(" ask ")).toBe("ask")
   expect(normalizeMode("accept-edits")).toBeNull()
   expect(normalizeMode("")).toBeNull()
 })
 
-test("a state file written as `auto` comes back as `unsafe`, and is written back that way", () => {
+test("a state file's mode survives a round trip, and a word that is no mode is not remembered as one", () => {
   const path = join(mkdtempSync(join(tmpdir(), "nulya-tui-mode-")), "tui-state.json")
-  writeFileSync(path, JSON.stringify({ mode: "auto", model: { profile: "deepseek" } }))
-  // Migrated on the way in — and the model pick beside it is untouched: a
-  // rename must not cost the other thing this file remembers.
+  writeFileSync(path, JSON.stringify({ mode: "unsafe", model: { profile: "deepseek" } }))
+  // The pick beside it is untouched: reading one key must not cost the other
+  // thing this file remembers.
   expect(loadTuiState(path).mode).toBe("unsafe")
   expect(loadTuiState(path).model).toEqual({ profile: "deepseek" })
 
-  // …and the next write says the new word in the file itself, so the old one
-  // fades out on its own rather than being migrated forever.
-  rememberMode("unsafe", path)
-  expect(readFileSync(path, "utf8")).toContain(`"mode": "unsafe"`)
-  expect(readFileSync(path, "utf8")).not.toContain("auto")
+  rememberMode("ask", path)
+  expect(readFileSync(path, "utf8")).toContain(`"mode": "ask"`)
 
-  // A word that names no mode at all is not remembered as one.
+  // A word that names no mode at all is not remembered as one — including the
+  // one this mode used to be called.
+  saveTuiState({ mode: "auto" as never }, path)
+  expect(loadTuiState(path).mode).toBeUndefined()
   saveTuiState({ mode: "accept-edits" as never }, path)
   expect(loadTuiState(path).mode).toBeUndefined()
 })

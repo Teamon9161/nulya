@@ -4,15 +4,15 @@
 一段 system prompt（这一场是干什么的）、一条收窄的 `policy`（戴着它的时候能做什么）、
 三个 tool，以及一段前端代码（`tui/plan.ts`）。戴上它是 `/plan`，而 manifest **不写**
 这条命令：贡献 system prompt 的包，它的名字就是「戴上它」，由 driver 自己推出来
-（tui.md §11 T49）。`surface` 由内核用于把 `propose` / `todo` 随显式成员放上模型面；其余字段都是**声明**——读它的 driver 有权不信。
+（tui.md §11 T49）。`surface` 由内核用于把 `propose` / `todo` 随成员放上模型面；其余字段都是**声明**——读它的 driver 有权不信。
 
 ## 三个 tool
 
 | tool | 给谁 | 做什么 |
 |---|---|---|
-| `propose{plan_md}` | 模型（`surface: "with"`） | 把想好的计划**整篇**作为参数记下来，然后收尾。**不写盘、不 fork、不阻塞**——计划本身进 ledger，那就是唯一那份记录。 |
-| `todo{items}` | 模型（`surface: "with"`） | 当前的清单（`ui: {render: "checklist", panel: true}`）。同样不写盘，调用本身就是记录。 |
-| `approve{session, plan_md}` | driver（`surface: "driver"`） | 把**已被批准**的计划渲染成 `.nulya/handoffs/<session>-<n>.md`（与 `extensions/handoff` 逐字节同形），返回路径。 |
+| `propose{plan_md}` | 模型（`surface: "auto"`） | 把想好的计划**整篇**作为参数记下来，然后收尾。**不写盘、不 fork、不阻塞**——计划本身进 ledger，那就是唯一那份记录。 |
+| `todo{items}` | 模型（`surface: "auto"`） | 当前的清单（`ui: {render: "checklist", panel: true}`）。同样不写盘，调用本身就是记录。 |
+| `approve{session, plan_md}` | driver（`surface: "internal"`） | 把**已被批准**的计划渲染成 `.nulya/handoffs/<session>-<n>.md`（与 `extensions/handoff` 逐字节同形），返回路径。 |
 
 ## 装它
 

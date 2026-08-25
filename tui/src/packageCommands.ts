@@ -31,15 +31,12 @@ export interface PackageCommandRow extends PackageCommand {
  * hint (D12).
  *
  * A manifest writes an OBJECT with exactly one key: the verb, whose value is
- * its argument or a bare `true` when it takes none. Two older spellings are
- * still folded in here:
- *
- *   - the STRING form (`"run propose"`), a mini-language the reader had to
- *     split on a space. Read for one version, by that same split.
- *   - `"wear"`, which is what `"with"` was called before the review renamed it
- *     to the word `/with` and `session new --with` already use. Folded into the
- *     same `with` kind in either spelling; `deprecatedActionNote` is what
- *     lets a caller name the package in a warning.
+ * its argument or a bare `true` when it takes none. One older spelling is still
+ * folded in: `"wear"`, which is what `"with"` was called before the review
+ * renamed it to the word `/with` and `session new --with` already use. That is
+ * an ALIAS on an open vocabulary rather than a retired shape — the kernel would
+ * happily build either — so it stays, and `deprecatedActionNote` is what lets a
+ * caller name the package in a warning.
  */
 export type PackageAction =
   | { kind: "with" }
@@ -56,8 +53,8 @@ export function parseAction(action: PackageActionValue): PackageAction {
 }
 
 /**
- * An action in either spelling, reduced to the verb and its argument — the two
- * things every reader wants and neither shape hands over directly.
+ * An action reduced to the verb and its argument — the two things every reader
+ * wants and the object does not hand over directly.
  *
  * An object with no keys, or more than one, is a manifest the kernel's own
  * `validate` refuses (`InvalidCommandAction`), so it cannot reach a built
@@ -65,29 +62,20 @@ export function parseAction(action: PackageActionValue): PackageAction {
  * rather than a rule of its own.
  */
 function splitAction(action: PackageActionValue): { verb: string; target: string } {
-  if (typeof action !== "string") {
-    const [verb] = Object.keys(action)
-    if (verb === undefined) return { verb: "", target: "" }
-    const value = action[verb]
-    return { verb, target: typeof value === "string" ? value.trim() : "" }
-  }
-  const trimmed = action.trim()
-  const space = trimmed.indexOf(" ")
-  if (space < 0) return { verb: trimmed, target: "" }
-  return { verb: trimmed.slice(0, space), target: trimmed.slice(space + 1).trim() }
+  const [verb] = Object.keys(action)
+  if (verb === undefined) return { verb: "", target: "" }
+  const value = action[verb]
+  return { verb, target: typeof value === "string" ? value.trim() : "" }
 }
 
 /**
- * Whether `action`, as WRITTEN in a manifest, uses a spelling this build still
- * reads but no longer wants — the pre-object STRING form, or the `"wear"` verb
- * — so a caller that already has the row (and so the package id that declared
- * it) can name it in a warning, once, rather than this pure parser reaching for
- * a console of its own. Null when there is nothing to say.
+ * Whether `action`, as WRITTEN in a manifest, uses the `"wear"` verb — a
+ * spelling this build still reads but no longer wants — so a caller that
+ * already has the row (and so the package id that declared it) can name it in a
+ * warning, once, rather than this pure parser reaching for a console of its
+ * own. Null when there is nothing to say.
  */
 export function deprecatedActionNote(action: PackageActionValue): string | null {
-  if (typeof action === "string") {
-    return `write it as an object instead — {"with": true}, {"run": "<tool>"}, {"skill": "<ref>"}`
-  }
   return "wear" in action ? `rename the "wear" verb to "with"` : null
 }
 

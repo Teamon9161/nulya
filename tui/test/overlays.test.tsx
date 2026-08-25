@@ -17,11 +17,12 @@ import {
   frozenVersion,
   labelOf,
   shortVersion,
+  standingCell,
   toolRows,
 } from "../src/ui/overlays/ExtView.tsx"
 import { displayWidth } from "../src/ui/columns.ts"
 import { listExtensions, readHeader } from "../src/nulya/files.ts"
-import { sessionPins, standingWithIds } from "../src/state/tui_state.ts"
+import { loadTuiState, sessionPins } from "../src/state/tui_state.ts"
 import { App } from "../src/ui/App.tsx"
 import { StyleContext, createStyle, type Style } from "../src/render/theme.ts"
 import { FoldContext, createFoldStore } from "../src/state/folds.ts"
@@ -52,6 +53,15 @@ beforeAll(async () => {
 
   const run = (args: string[]) => Bun.spawnSync({ cmd: [ws.bin, ...args], cwd: ws.dir, env: process.env })
   run(["ext", "init", "--script", "lint"])
+  // The template writes no `surface`, which now means `auto` — a tool the model
+  // gets with membership and that no pin may name (DESIGN §7.2.1, T52). These
+  // tests are about PINNING, so the fixture says `manual` out loud.
+  const lint_draft = join(ws.dir, ".nulya", "extensions", "lint", "extension.json")
+  const lint_manifest = JSON.parse(readFileSync(lint_draft, "utf8")) as {
+    contributes: { tools: Array<Record<string, unknown>> }
+  }
+  lint_manifest.contributes.tools[0]!["surface"] = "manual"
+  writeFileSync(lint_draft, JSON.stringify(lint_manifest, null, 2))
   const built = run(["ext", "build", ".nulya/extensions/lint"])
   version = /v-[0-9a-zA-Z]+/.exec(built.stdout.toString())?.[0] ?? ""
   run(["ext", "activate", "lint", version])
@@ -374,14 +384,12 @@ test("/ext names the drift between what this session froze and what the store po
   }
 }, 60_000)
 
-test("the tools pane folds the driver half away and says how much it folded", async () => {
-  // A real driver package in the store, and deliberately one this front end has
-  // never heard of: this fixture deliberately uses the legacy placement field,
-  // so what makes it a driver tool is its own manifest saying
-  // `"audience": "driver"` and the surface-compat fold reading that as
-  // `surface:"driver"` (DESIGN §7.2.1), not its id being on a list in
-  // `extensions.ts` — which is exactly what a third party could not do before
-  // T34. `ext init --script` names the tool after the id, so this row is
+test("the tools pane folds the internal half away and says how much it folded", async () => {
+  // A real internal-tool package in the store, and deliberately one this front
+  // end has never heard of: what keeps its tool off the model's face is its own
+  // manifest saying `"surface": "internal"` (DESIGN §7.2.1), not its id being on
+  // a list in `extensions.ts` — which is exactly what a third party could not do
+  // before T34. `ext init --script` names the tool after the id, so this row is
   // `ext:patrol/patrol`, sorted above the pinnable one by the letter p.
   const run = (args: string[]) => Bun.spawnSync({ cmd: [ws.bin, ...args], cwd: ws.dir, env: process.env })
   run(["ext", "init", "--script", "patrol"])
@@ -389,11 +397,11 @@ test("the tools pane folds the driver half away and says how much it folded", as
   const manifest = JSON.parse(readFileSync(draft, "utf8")) as {
     contributes: { tools: Array<Record<string, unknown>> }
   }
-  manifest.contributes.tools[0]!["audience"] = "driver"
+  manifest.contributes.tools[0]!["surface"] = "internal"
   writeFileSync(draft, JSON.stringify(manifest, null, 2))
   const built = run(["ext", "build", ".nulya/extensions/patrol"])
-  const driver_version = /v-[0-9a-zA-Z]+/.exec(built.stdout.toString())?.[0] ?? ""
-  run(["ext", "activate", "patrol", driver_version])
+  const internal_version = /v-[0-9a-zA-Z]+/.exec(built.stdout.toString())?.[0] ?? ""
+  run(["ext", "activate", "patrol", internal_version])
 
   const setup = await overlayFrame(() => <ExtView ws={ws} header={null} onClose={() => {}} />, 100, 24)
   try {
@@ -402,12 +410,12 @@ test("the tools pane folds the driver half away and says how much it folded", as
     const folded = await settle(setup, 4)
     expect(folded).toContain("[ ] ext:lint/lint")
     expect(folded).not.toContain("ext:patrol/patrol")
-    expect(folded).toContain("1 driver tool · called with ext run, never on the model face · d shows")
+    expect(folded).toContain("1 internal tool · called with ext run, never on the model face · d shows")
 
     setup.mockInput.pressKey("d")
     const open = await settle(setup, 4)
     expect(open).toContain("ext:patrol/patrol")
-    expect(open).toContain("driver · ext run")
+    expect(open).toContain("internal · ext run")
     expect(open).toContain("d folds")
 
     setup.mockInput.pressKey("d")
@@ -420,7 +428,7 @@ test("the tools pane folds the driver half away and says how much it folded", as
   }
 }, 120_000)
 
-test("a driver tool is listed with no checkbox: there is no pin for it to be wrong about", () => {
+test("an internal tool is listed with no checkbox: there is no pin for it to be wrong about", () => {
   // `compact` drives the session it is called ABOUT — it appends to it and
   // steps it — so a model calling it from inside that session meets the
   // kernel's writer lock every time (DESIGN §3.4). A checkbox beside it offered
@@ -430,15 +438,16 @@ test("a driver tool is listed with no checkbox: there is no pin for it to be wro
   // DESIGN §7.2.1) rather than a list of bundled ids here — so a package this
   // front end has never heard of gets the same treatment, and one that mixes
   // both kinds (the bundled `agent`) gets it per tool.
-  const entry = (id: string, tools: string[], driverTools: string[] = []) => ({
+  const entry = (id: string, tools: string[], internalTools: string[] = []) => ({
     id,
     current: "v-1",
     versions: [],
     kind: "compiled" as const,
     tools,
-    pinTools: tools.filter((tool) => !driverTools.includes(tool)),
-    withTools: [],
-    driverTools,
+    manualTools: tools.filter((tool) => !internalTools.includes(tool)),
+    autoTools: [],
+    internalTools,
+    apply: "manual" as const,
     skills: [],
     systemPrompts: [],
     commands: [],
@@ -455,7 +464,7 @@ test("a driver tool is listed with no checkbox: there is no pin for it to be wro
     { user: [], session: [], merged: [] },
     [],
   )
-  expect(rows.map((row) => [row.id, row.driver])).toEqual([
+  expect(rows.map((row) => [row.id, row.internal])).toEqual([
     // One package, both answers: the delegation entry point is the model's, the
     // command its background task runs is not.
     ["ext:agent/agent", false],
@@ -463,7 +472,7 @@ test("a driver tool is listed with no checkbox: there is no pin for it to be wro
     ["ext:compact/compact", true],
     ["ext:std/read", false],
   ])
-  expect(labelOf(rows[1]!)).toBe("driver · ext run")
+  expect(labelOf(rows[1]!)).toBe("internal · ext run")
   expect(labelOf(rows[0]!)).toBe("")
   // Pinned anyway — by hand, or by a driver's `--pin` — and the row goes back to
   // saying what the pin says: the state is real, and taking it off must work.
@@ -670,21 +679,19 @@ test("/ext: Enter turns an extension on and off, and both axes move together", a
 }, 120_000)
 
 /**
- * A package that contributes a SYSTEM PROMPT is a MODE, and `/ext`'s Enter on
- * one means exactly one thing: this package is now USABLE (tui.md §11, T1,
- * ext-review-2 §3b).
+ * `/ext`'s Enter means exactly one thing: this package is now USABLE (tui.md
+ * §11, T1, ext-review-2 §3b) — and since T52 it writes exactly two things, a
+ * `current` and the package's `manual` pins.
  *
  * The bug T31 fixed: `evolution`'s prompt was in front of every model on the
- * machine, and nothing on the screen said so. The bug T1 fixes is what T31's
- * own fix grew into (K8): Enter on a mode wrote it onto the STANDING
- * `standing_with` list, so turning `plan` on meant every session from then on
- * paid for its prompt — almost never what pressing Enter on a row was asking
- * for, so the switch had to carry a scary sentence just to say what it had
- * done. Enter still moves `current` in one keypress with no `y` — it just
- * never reaches standing membership for a mode any more: what it hands back
- * is a `/<id>` command that wears the prompt for one session at a time.
+ * machine, and nothing on the screen said so. The bug T1 fixed is what T31's
+ * own fix grew into (K8): Enter on a mode wrote it onto a standing membership
+ * list this front end kept, so turning `plan` on meant every session from then
+ * on paid for its prompt. T52 removed that list outright — a package that
+ * belongs in every session says `apply: "auto"` and the kernel composes it, for
+ * every driver — so there is no third thing left for Enter to write.
  */
-test("/ext marks a package that contributes a system prompt as a mode, and Enter never composes it standing", async () => {
+test("/ext Enter on a prompt package moves current and writes no membership of its own", async () => {
   const shop = tempWorkspace()
   try {
     const run = (args: string[]) => Bun.spawnSync({ cmd: [shop.bin, ...args], cwd: shop.dir, env: process.env })
@@ -710,9 +717,9 @@ test("/ext marks a package that contributes a system prompt as a mode, and Enter
     try {
       await until(() => setup.captureCharFrame().includes("house.style"), 20_000)
       const frame = await settle(setup, 4)
-      // A word of its own in the id list — the reach of a system prompt is not
-      // a number at the end of the fourth fact on a detail line.
-      expect(frame).toContain("mode")
+      // No `standing` cell: this package did not ask to be in every session, so
+      // the one word in the id list that is about reach stays empty (T52).
+      expect(standingCell({ apply: "manual" })).toBe("")
       expect(frame).toContain("a `/house.style` command")
       expect(frame).toContain("nothing here composes it standing")
 
@@ -725,11 +732,12 @@ test("/ext marks a package that contributes a system prompt as a mode, and Enter
       expect(on).toContain("/house.style opens a new tab wearing it for one session")
       expect(on).toContain("Enter again takes the command away")
       // The pointer moved — `current` says which version `house.style` is now
-      // — but the notice's own claim is the one that matters: unlike before
-      // T1, Enter must NOT write a standing membership entry for a mode. The
+      // — and NOTHING was written into this front end's state: no pins (the
+      // package declares no tool), and since T52 no membership list at all. The
       // per-session `/house.style` command it just earned is `derivedCommand`
-      // reading `current`, not this list.
-      expect(standingWithIds(statePath)).not.toContain("house.style")
+      // reading `current`.
+      expect(loadTuiState(statePath).session_pins ?? []).toEqual([])
+      expect(JSON.stringify(loadTuiState(statePath))).not.toContain("house.style")
 
       setup.mockInput.pressEnter()
       await until(
@@ -739,9 +747,8 @@ test("/ext marks a package that contributes a system prompt as a mode, and Enter
       const off = await settle(setup, 4)
       expect(off).toContain("house.style off · /house.style is gone")
       expect(off).toContain("versions all stay")
-      // Still nothing on the standing list to take back — there was never
-      // anything there to begin with.
-      expect(standingWithIds(statePath)).not.toContain("house.style")
+      // Still nothing in this front end's state to take back.
+      expect(JSON.stringify(loadTuiState(statePath))).not.toContain("house.style")
     } finally {
       setup.renderer.destroy()
     }
@@ -765,6 +772,14 @@ test("/ext: a full tool face leaves the extension half on rather than refusing i
   try {
     const run = (args: string[]) => Bun.spawnSync({ cmd: [full.bin, ...args], cwd: full.dir, env: process.env })
     run(["ext", "init", "--script", "lint"])
+    // A pinnable tool, said out loud: the template's silence means `auto` now,
+    // and a quota is only about the pins (T52).
+    const draft = join(full.dir, ".nulya", "extensions", "lint", "extension.json")
+    const manifest = JSON.parse(readFileSync(draft, "utf8")) as {
+      contributes: { tools: Array<Record<string, unknown>> }
+    }
+    manifest.contributes.tools[0]!["surface"] = "manual"
+    writeFileSync(draft, JSON.stringify(manifest, null, 2))
     const built = run(["ext", "build", join(".nulya", "extensions", "lint")])
     expect(/v-[0-9a-zA-Z]+/.exec(built.stdout.toString())?.[0]).toBeDefined()
     // A face with no room in it at all: the builtin fills it.

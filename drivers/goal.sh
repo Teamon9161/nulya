@@ -1,6 +1,7 @@
 #!/bin/sh
-# `/goal` — the first nulya driver, and the first consumer of `--pin`. It pins the
-# bundled `handoff` tool into a new session and steps it one step at a time; when
+# `/goal` — the first nulya driver. It composes the bundled `handoff` package
+# into a new session — its one tool is `surface: auto`, so membership is the
+# whole of putting it in front of the model — and steps it one step at a time; when
 # the model proposes a handover (a file under .nulya/handoffs/<session>-*.md) it
 # forks through the bundled `compact` tool and carries on in the child: the model
 # proposes, the driver decides. Nothing here parses JSON.
@@ -27,7 +28,7 @@ done
 [ -n "$href" ] || href="handoff@$("$N" ext build "$repo/extensions/handoff" | grep -o 'v-[0-9a-f]*' | head -1)"
 [ -n "$cref" ] || cref="compact@$("$N" ext build "$repo/extensions/compact" | grep -o 'v-[0-9a-f]*' | head -1)"
 set --; if [ -n "$profile" ]; then set -- --profile "$profile"; fi
-id=$("$N" session new "$@" --with "$href" --pin "ext:${href%@*}/handoff")
+id=$("$N" session new "$@" --with "$href")
 echo "session $id"
 "$N" session append "$id" "You have a tool named handoff. Work in phases: the ones this goal names, otherwise
 explore, design, implement, verify. When a phase is genuinely finished and the rest

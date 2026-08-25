@@ -31,10 +31,10 @@ import {
   type SyncLine,
   type SyncReport,
 } from "./nulya/cli.ts"
-import { pinTools, readContributions, rootsOf, type Contributions, type PackageCommand } from "./nulya/files.ts"
+import { readContributions, rootsOf, type Contributions, type PackageCommand } from "./nulya/files.ts"
 import { builtin_tools, toolId } from "./pins.ts"
 import { userConfigDir } from "./state/settings.ts"
-import { loadTuiState, rememberSessionPins, saveTuiState, tuiStatePath } from "./state/tui_state.ts"
+import { loadTuiState, rememberSessionPins } from "./state/tui_state.ts"
 import type { Workspace } from "./nulya/bin.ts"
 import type { AgentTrustPlan } from "./agents.ts"
 
@@ -437,12 +437,11 @@ export function planStore(ws: Workspace, user: boolean): Promise<SyncReport> {
 //
 // There used to be two hard-coded lists here saying which of them meant what:
 // one for "install means active everywhere", one for "these tools are a driver
-// interface". Both are gone (T34). The second is now the package's own words —
-// `contributes.tools[].surface` in the frozen manifest (DESIGN §7.2.1) — which
-// is the only place that knows, and works for a package this repository has
-// never heard of. The first turned out to be nothing twice over: activating is
-// a pointer move that composes nothing (DESIGN §5.1), and what a session
-// carries is said by the person, in `[extensions] with` or in `/ext`'s Enter.
+// interface". Both are gone (T34) — and both questions are the package's own
+// words in the frozen manifest now: `contributes.tools[].surface` for the
+// second (DESIGN §7.2.1) and top-level `apply` for the first (DESIGN §5.1,
+// `autoActivatable`). That is the only place that knows, and it works for a
+// package this repository has never heard of.
 //
 // Since T23 nobody is asked about any of it: the user store is the person's own
 // directory, what lands in it came with the binary they ran, and the question
@@ -454,12 +453,10 @@ export function planStore(ws: Workspace, user: boolean): Promise<SyncReport> {
 /**
  * The six std tools, as the stable ids `session new --pin` takes.
  *
- * A COLD-START FALLBACK and a frozen historical record, not the truth. The
- * truth is the manifest of whichever `std` version is active on this machine
- * (`pinsOf`), because that is what the kernel will resolve the pins against.
- * This list is used in exactly two places: when no built version can be read at
- * all, and by the one-time `edit` migration below, whose whole subject is the
- * pin list people wrote when these six were the six.
+ * A COLD-START FALLBACK, not the truth. The truth is the manifest of whichever
+ * `std` version is active on this machine (`pinsOf`), because that is what the
+ * kernel will resolve the pins against. This list is read in exactly one place:
+ * when no built version can be read at all.
  */
 export const std_pins = [
   "ext:std/read",
@@ -471,22 +468,25 @@ export const std_pins = [
 ]
 
 /**
- * The pins turning a package on should write: one per tool its frozen manifest
- * puts on the MODEL's face (DESIGN §7.2.1).
+ * The pins turning a package on should write: one per tool whose frozen
+ * manifest says `surface: "manual"` (DESIGN §7.2.1) — the only tools a pin is
+ * the way in for.
  *
  * This replaces `pinsOnActivate(id)`, which answered per PACKAGE from a list of
  * names in this file. Per tool is the shape the question actually has — the
- * bundled `agent` package has one model tool and three driver ones — and asking
- * the package means a driver extension from outside this repository gets the
+ * bundled `agent` package has one manual tool and three internal ones — and
+ * asking the package means an extension from outside this repository gets the
  * same answer instead of arriving in the tools pane wearing a checkbox that
  * cannot work.
  *
- * A package with none (`compact`) yields an empty list, and that is not
- * half-anything: the switch is membership alone, and `nulya ext run` reaches
- * its tool without a pin, which is how `/compact` has always called it.
+ * An empty list is a perfectly ordinary answer, and it now has two shapes.
+ * `compact` declares only `internal` tools: `nulya ext run` reaches them
+ * without a pin, which is how `/compact` has always called it. `handoff`
+ * declares `auto` ones: they reach the model face through membership, and a
+ * pin naming one is refused outright (`PinToolNotPinnable`).
  */
-export function pinsOf(what: Pick<Contributions, "id" | "tools" | "pinTools" | "driverTools">): string[] {
-  return pinTools(what).map((tool) => toolId(what.id, tool))
+export function pinsOf(what: Pick<Contributions, "id" | "manualTools">): string[] {
+  return what.manualTools.map((tool) => toolId(what.id, tool))
 }
 
 /**
@@ -523,31 +523,26 @@ export function derivedCommand(
 }
 
 /**
- * Does turning this package on in `/ext` also mean composing it — a standing
- * entry in `tui-state.json`'s `standing_with`?
+ * May a background pass — the start-up sync, which nobody asked for and nobody
+ * is watching — point `current` at this package on its own?
  *
- * `false` for a package that contributes a SYSTEM PROMPT (T1, ext-review-2
- * §3b): wearing that prompt in EVERY session this front end opens is almost
- * never what pressing Enter on a mode means, and writing it silently is what
- * used to force a scary "reaches every session" sentence just to say what
- * Enter had done. Its `current` still moves (`switchOn`), and `derivedCommand`
- * gives it a `/<id>` that wears it for one session at a time — that is the
- * command Enter's notice now points to. Standing membership for a mode is
- * still reachable, just not from here: `[extensions] with` in config, or
- * `tui.toml`'s `session_with`, are the person's explicit, rare way to say a
- * prompt belongs in every session.
+ * `false` for `apply: "auto"`, and that is the whole rule. For such a package
+ * activating IS composing: the kernel joins it to every fresh non-`--bare`
+ * session on this machine from that moment (DESIGN §5.1), so a pass that moved
+ * the pointer would have decided what every session here carries, without a
+ * keypress. That is T31's bug exactly — `evolution` used to be activated on the
+ * way in, and every model on the machine then believed it was the slow loop —
+ * and this is the same guard the kernel puts on its own `ext sync --activate`.
  *
- * Otherwise `true` exactly when the package contributes something a session
- * can only get by being a MEMBER of it: skills, slash commands, a front-end
- * module. A pure tool package needs no such entry either way — its pins bring
- * it in by themselves (DESIGN §5.1) — so writing one would be a second way of
- * saying what the pins already say, and a second thing to take back.
+ * Everything else is `true`, including a package that contributes a SYSTEM
+ * PROMPT: since `activation` was deleted (ext-review-2 Lane K), a `manual`
+ * package's `current` says which version `<id>` means and nothing more. The
+ * prompt reaches a session only when somebody names it — `/<id>`, `/with`,
+ * `[extensions] with` — so the old "does it contribute a prompt" test was
+ * guarding a door that no longer opens onto anything.
  */
-export function standingWith(
-  what: Pick<Contributions, "skills" | "systemPrompts" | "commands" | "ui" | "withTools">,
-): boolean {
-  if (what.systemPrompts.length > 0) return false
-  return what.skills.length > 0 || what.commands.length > 0 || what.ui !== null || what.withTools.length > 0
+export function autoActivatable(what: Pick<Contributions, "apply">): boolean {
+  return what.apply !== "auto"
 }
 
 /**
@@ -598,10 +593,12 @@ export function seedBundled(ws: Workspace): Promise<SeedReport> {
  * what the build pass produced, and put the std tools on this TUI's pin list.
  *
  * Which ones get activated used to be a list of two names, then a rule about
- * system prompts. It is now every id that arrived: activating one says which
- * version it means and composes nothing (DESIGN §5.1), so there is no longer a
- * package this pass could switch on to somebody's cost. What a session actually
- * carries is `[extensions] with` and `/ext`'s Enter — a person's lines.
+ * system prompts. It is now every id that arrived AND says `apply: "manual"`
+ * (`autoActivatable`): for those, activating says which version `<id>` means
+ * and composes nothing (DESIGN §5.1), so there is nothing this pass could
+ * switch on to somebody's cost. A package that declares `apply: "auto"` is the
+ * one exception, because for it activating IS composing — it is named in the
+ * status line instead, with the key that turns it on.
  *
  * Returns the parts of the sentence the status line will say.
  */
@@ -613,14 +610,22 @@ export async function adoptBundled(
 ): Promise<string[]> {
   const parts: string[] = []
   const active: string[] = []
+  const standing: string[] = []
   const root = syncRoot(ws, true)
   let std: Contributions | null = null
   for (const id of arrived) {
     const line = report.lines.find((entry) => entry.id === id)
     if (!line?.version || line.state === "failed" || line.state === "needs zig") continue
-    if (id === "std") std = await builtContributions(ws, root, id, line.version)
+    const built = await builtContributions(ws, root, id, line.version)
+    if (id === "std") std = built
     if (line.activation === "active") {
       active.push(id)
+      continue
+    }
+    // A package whose manifest asks to be in every session is not something a
+    // background pass gets to say yes to on somebody's behalf.
+    if (built && !autoActivatable(built)) {
+      standing.push(id)
       continue
     }
     try {
@@ -632,6 +637,7 @@ export async function adoptBundled(
     }
   }
   if (active.length > 0) parts.push(`${active.join(" & ")} active`)
+  if (standing.length > 0) parts.push(`${standing.join(" & ")} built, not activated (every session) · /ext`)
   if (active.includes("std")) {
     parts.push(
       (await pinStdTools(ws, std, statePath))
@@ -676,79 +682,20 @@ async function pinStdTools(
 }
 
 /**
- * What the one-time `edit` pin migration should do, given the pin list on disk
- * and the tools the ACTIVE `std` on this machine declares (`null` = no active
- * std, or one this build could not read).
- *
- * - `done`: nothing to migrate — no std pins here, or `edit` already on the
- *   list. Mark it so this is never looked at again.
- * - `adopt`: the other std tools are pinned and the active std declares
- *   `edit` — add it and mark done.
- * - `wait`: the other std tools are pinned but the std that is active does
- *   not declare `edit` yet (an older build of the draft, a machine that has not
- *   rebuilt). A pin the kernel cannot resolve refuses the next `session new`
- *   outright (`PinToolNotDeclared`), so do nothing and look again next start.
- */
-export function stdEditPinDecision(
-  pins: readonly string[],
-  activeStdTools: readonly string[] | null,
-): "done" | "adopt" | "wait" {
-  const others = std_pins.filter((pin) => pin !== "ext:std/edit")
-  const wants = others.every((pin) => pins.includes(pin)) && !pins.includes("ext:std/edit")
-  if (!wants) return "done"
-  return activeStdTools?.includes("edit") ? "adopt" : "wait"
-}
-
-/**
- * One-time: put `ext:std/edit` on a pin list written before `edit` moved out of
- * the kernel and into `std`. Somebody who already had the other std tools
- * pinned asked for that face; the tool they used to get for free is now part of
- * it, and nothing else would ever add it for them.
- *
- * Once, and only once — the marker outlives the pins, so unpinning `edit`
- * afterwards sticks. Nothing to migrate (no state file, no std pins, `edit`
- * already there) still marks it done. But never before the active `std` can
- * honour the pin (`stdEditPinDecision`): a pin list that names a tool the
- * frozen version lacks stops every session from starting. Returns true when the
- * list changed.
- */
-export async function adoptStdEditPin(ws: Workspace, statePath?: string): Promise<boolean> {
-  const path = statePath ?? tuiStatePath()
-  if (!existsSync(path)) return false
-  const state = loadTuiState(path)
-  if (state.adopted_std_edit_pin) return false
-  const pins = state.session_pins ?? []
-  // Only consulted when there is something to migrate: a fresh state file must
-  // not cost an `ext list` on every start.
-  const needs_std = stdEditPinDecision(pins, null) !== "done"
-  let active_tools: string[] | null = null
-  if (needs_std) {
-    try {
-      const entry = (await extList(ws)).find((e) => e.id === "std" && e.current !== null && !e.shadowed)
-      if (entry?.current) active_tools = (await readContributions(ws, "std", entry.current)).tools
-    } catch {
-      // No listing is "unknown": the decision below waits, and tries again.
-    }
-  }
-  switch (stdEditPinDecision(pins, active_tools)) {
-    case "done":
-      saveTuiState({ ...state, adopted_std_edit_pin: true }, path)
-      return false
-    case "wait":
-      return false
-    case "adopt":
-      saveTuiState({ ...state, adopted_std_edit_pin: true, session_pins: [...pins, "ext:std/edit"] }, path)
-      return true
-  }
-}
-
-/**
  * One package this TUI composes a top-level session with (`[extensions]
  * session_with`): the exact version, and the pins its tools ask for.
+ *
+ * Both halves are needed because membership is not a tool face. A version whose
+ * tools are `surface: "auto"` reaches the model through the `--with` alone
+ * (`handoff`); one that declares `manual` does not, and the pin has to travel in
+ * the same argv (`agent`, whose `agent` tool is deliberately `manual` so that
+ * whoever composes it decides whether the model may delegate).
  */
 export interface SessionMember {
   id: string
   version: string
+  /** The `surface: "manual"` tool ids this exact version declares (`pinsOf`). */
+  pins: string[]
 }
 
 /**
@@ -774,7 +721,9 @@ export async function sessionMember(ws: Workspace, id: string): Promise<SessionM
   if (!version) {
     throw new Error(`${id} · no active version in any store · \`nulya ext build <path> --user\` then \`nulya ext activate --user ${id} <v>\``)
   }
-  return { id, version }
+  // The pins come off THAT version's frozen manifest, never from a list here:
+  // a package that moves a tool between surfaces is followed without an edit.
+  return { id, version, pins: pinsOf(await readContributions(ws, id, version)) }
 }
 
 /** Build the draft this binary ships for `id`, or null when it ships none. */

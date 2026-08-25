@@ -77,11 +77,17 @@ export interface Settings {
     auto_activate: boolean
     /**
      * The packages every TOP-LEVEL session this TUI starts is composed with:
-     * `--with <id>@<v>`. Tools in those packages that declare `surface:"with"`
+     * `--with <id>@<v>`. Tools in those packages that declare `surface:"auto"`
      * reach the model face through membership; they are not written as pins.
      * One list where there used to be one boolean per package (T34) — "which
      * packages" is a list-shaped question, and a new one should not need a new
      * key and a new branch in `App.tsx`.
+     *
+     * This is the FRONT END's list, and a package can now say the same thing
+     * for itself: `apply: "auto"` in its manifest makes the kernel compose it
+     * into every fresh session, whatever is driving (DESIGN §5.1). This key
+     * stays for the other direction — composing a package that did NOT ask,
+     * and doing it only here.
      *
      * Both defaults earn their place. `handoff`'s tool only ever WRITES A FILE
      * proposing a handover (DESIGN §11) — the fork is this front end's move and
@@ -91,10 +97,6 @@ export interface Settings {
      *
      * TOP-LEVEL only, and that is load-bearing for `agent`: a delegated session
      * composes itself (DESIGN §7.8), so this list never reaches one.
-     *
-     * The two booleans this replaces (`[extensions] handoff` / `agent`) are
-     * still read: `handoff = false` removes that id from the list, exactly as it
-     * used to mean. Nothing rewrites the file.
      */
     session_with: string[]
     /**
@@ -121,7 +123,7 @@ export interface Settings {
      * have no opinion about in front of a person, `unsafe` runs it.
      * `tui-state.json` (what was last chosen on screen) wins over this; the chip
      * on the status line and `/mode` change it for the run in flight
-     * (tui.md §5.7). A layer that still says `auto` is read as `unsafe`.
+     * (tui.md §5.7).
      */
     mode: PermissionMode
   }
@@ -170,15 +172,6 @@ function pick<T extends string>(value: unknown, allowed: readonly T[], fallback:
   return typeof value === "string" && (allowed as readonly string[]).includes(value) ? (value as T) : fallback
 }
 
-/**
- * The list with `id` present or absent, order otherwise untouched. What a
- * legacy per-package boolean turns into (`[extensions] handoff = false`).
- */
-export function withPackage(list: readonly string[], id: string, on: boolean): string[] {
-  const without = list.filter((entry) => entry !== id)
-  return on ? [...without, id] : without
-}
-
 function mergeLayer(into: Settings, layer: unknown, source: string) {
   if (typeof layer !== "object" || layer === null) return
   const record = layer as Record<string, unknown>
@@ -221,19 +214,9 @@ function mergeLayer(into: Settings, layer: unknown, source: string) {
     if (Array.isArray(extensions["session_with"])) {
       into.extensions.session_with = extensions["session_with"].filter((e): e is string => typeof e === "string")
     }
-    // The two per-package booleans this key replaced (T34). A layer that still
-    // writes one keeps meaning what it meant: `false` takes that id off the
-    // list, `true` puts it back. Read only — `tui.toml` is a person's file.
-    for (const legacy of ["handoff", "agent"] as const) {
-      if (typeof extensions[legacy] !== "boolean") continue
-      into.extensions.session_with = withPackage(into.extensions.session_with, legacy, extensions[legacy] as boolean)
-    }
   }
   const driver = record["driver"] as Record<string, unknown> | undefined
   if (driver && typeof driver["mode"] === "string") {
-    // A `tui.toml` written before the rename still says `auto`; it keeps
-    // meaning what it meant (`normalizeMode`). Nothing rewrites the file —
-    // `tui.toml` is a person's, and this only reads it.
     const mode = normalizeMode(driver["mode"])
     if (mode) into.driver.mode = mode
   }

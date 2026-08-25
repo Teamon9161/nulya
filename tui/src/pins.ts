@@ -22,11 +22,12 @@
  *                 project or system layer wrote it. Read-only here: this module
  *                 writes exactly one key in exactly one file (D3).
  *  - `composed` — no pin list has it, and it will be on the face anyway: its
- *                 package is one this front end brings into every session it
- *                 starts (`[extensions] session_with` or `/ext` standing
- *                 membership), and the tool declares `surface:"with"`. Read-only
- *                 here for the same reason `other` is — the decision is package
- *                 membership, not a checkbox in this panel.
+ *                 package is a member of every session started here (the
+ *                 kernel's `[extensions] with`, the package's own `apply:
+ *                 "auto"`, or `tui.toml`'s `session_with`), and the tool
+ *                 declares `surface:"auto"`. Read-only here for the same reason
+ *                 `other` is — the decision is package membership, not a
+ *                 checkbox in this panel.
  *
  * Everything below the write helpers is pure, because "what would the next
  * session's tool face be" is a question that should be answerable without a
@@ -55,7 +56,7 @@ export interface PinSources {
   session: readonly string[]
   merged: readonly string[]
   /**
-   * Tools that reach the face without any pin list naming them: `surface:"with"`
+   * Tools that reach the face without any pin list naming them: `surface:"auto"`
    * tools from packages composed into every session. Not a place a pin is
    * WRITTEN — a place the face gets one anyway — and this panel has to know
    * about it, because a row that reads `off` about a tool the model can call is
@@ -210,15 +211,15 @@ export function orphanPins(pins: readonly string[], available: readonly string[]
  * One condition is the kernel's: the extension has an active, un-shadowed
  * version — a pin brings its package in at `current` (DESIGN §5.1), and with no
  * `current` the session does not open. The second condition is the tool's
- * manifest surface: only `surface:"pin"` tools may be pinned. `surface:"with"`
- * tools arrive through explicit membership, and `surface:"driver"` tools are
- * for `nulya ext run`.
+ * manifest surface: only `surface:"manual"` tools may be pinned.
+ * `surface:"auto"` tools arrive with membership, and `surface:"internal"` tools
+ * are for `nulya ext run`; a pin naming either is refused outright
+ * (`PinToolNotPinnable`), which is the whole session, not one tool.
  */
 export function resolvableStandingPins(
   entries: readonly {
     id: string
-    tools: readonly string[]
-    pinTools?: readonly string[]
+    manualTools: readonly string[]
     current: string | null
     shadowed: boolean
   }[],
@@ -226,7 +227,7 @@ export function resolvableStandingPins(
   const ids: string[] = []
   for (const entry of entries) {
     if (!entry.current || entry.shadowed) continue
-    for (const tool of entry.pinTools ?? entry.tools) ids.push(toolId(entry.id, tool))
+    for (const tool of entry.manualTools) ids.push(toolId(entry.id, tool))
   }
   return ids
 }

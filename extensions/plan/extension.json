@@ -8,7 +8,7 @@
     "tools": [
       {
         "name": "propose",
-        "surface": "with",
+        "surface": "auto",
         "readonly": true,
         "description": "Record the implementation plan you have arrived at, in full, and stop. The plan itself is the argument, so it lands in this conversation and is reviewed there — this tool decides nothing, starts nothing and writes nothing. Call it once the investigation is done and the plan is complete: the phases in order, and for each one the files and symbols it changes, what it makes true, and how it is verified. Call it once, then end your turn. The review comes back as the next message — comments to fold in (revise and call this again with the WHOLE plan, not a diff), or approval, which continues the work in a fresh session carrying the plan.",
         "input": {
@@ -21,7 +21,7 @@
       },
       {
         "name": "todo",
-        "surface": "with",
+        "surface": "auto",
         "readonly": true,
         "ui": { "render": "checklist", "panel": true },
         "description": "Record the checklist you are working through, so the person watching can see where you are. Send the WHOLE list every time — each call replaces what is shown, and an item's state is how it stands right now. It changes nothing and ends nothing, so call it whenever something moves.",
@@ -46,7 +46,7 @@
       },
       {
         "name": "approve",
-        "surface": "driver",
+        "surface": "internal",
         "description": "Freeze an approved plan into a brief a new session can start from. For drivers: writes `.nulya/handoffs/<session>-<n>.md` — the file shape `ext run compact --arg brief_file=` takes — and returns its path. Never on a model's tool face; approval is a person's act.",
         "input": {
           "type": "object",
