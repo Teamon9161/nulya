@@ -111,15 +111,9 @@ printf 'hello %s\n' "${NULYA_ARG_name:-world}"
   fresh session's native model tool. This manifest is the only source of truth
   for a tool's shape and placement.
 - `contributes.skills[]` — directories holding a `SKILL.md`.
-- `contributes.system_prompts[]` — either a path string, or
-  `{"path":"prompts/x.md","position":"early|normal|late"}`. A string is
-  `normal`. The deterministic block order is kernel → early extension prompts
-  → normal extension prompts → per-session inline prompts → skills catalog →
-  late extension prompts; extension ids break ties, then manifest order.
-- `activation` — `"on_request"` (the default) or `"always"`. Activating
-  always selects which version the id means; `always` additionally makes that
-  current package a member of every ordinary fresh session. `--bare` suppresses
-  this automatic membership.
+- `contributes.system_prompts[]` — files that join the system blocks of every
+  session this package is a member of. Which sessions those are is not the
+  package's to say: see the two axes below.
 - `nulya ext api manifest` lists every other field, grouped by who reads it.
 
 A tool receives its arguments, a working directory and a sanitized environment
@@ -128,26 +122,26 @@ model's tool face a call is killed at 30s unless the manifest raises
 `timeout_ms` (600000 maximum); `nulya ext run` applies no timeout unless given
 `--timeout-ms`.
 
-There are still two questions: MEMBERSHIP and TOOL FACE. `activate` always
-moves the version pointer; only a manifest that explicitly says
-`activation:"always"` also uses that pointer as standing membership.
+**Two independent axes, each with a standing form and a per-session one, and
+`activate` is on neither.** `activate` says which version `<id>` means; that is
+all it does.
 
-- MEMBERSHIP — the package is in this session: its skills enter the catalog,
-  its system prompts enter the system blocks, and its tools are callable through
-  the CLI. Standing sources are an activated `activation:"always"` package and
-  `[extensions] with` in config. One-session source: `nulya session new --with
-  <id>[@<version>]`. A pin also implies membership for its own package.
+- MEMBERSHIP — the package is in this session: its skills in the catalog, its
+  system prompts in the system blocks, its tools callable through the CLI.
+  Standing: `[extensions] with` in config. One session: `nulya session new
+  --with <id>[@<version>]`.
 - TOOL FACE — a tool takes a native slot the model can call. For `surface:"pin"`
   tools, standing form is `[registry] pinned_native_tools`; one-session form is
-  `nulya session new --pin ext:<id>/<tool>`. For `surface:"with"` tools, the
-  tool face follows explicit membership and always-activation membership.
-  `surface:"driver"` tools never join this face in fresh sessions.
+  `nulya session new --pin ext:<id>/<tool>`. A pin brings its own package in, so
+  a pin alone is enough. For `surface:"with"` tools, the tool face follows the
+  membership axis instead: compose the package, and those tools appear without a
+  pin. `surface:"driver"` tools never join this face in fresh sessions.
 
-All of these choices take effect from the next session onward. `nulya session
-new --bare` ignores activated-always discovery plus the config's standing
-`with` and pins, and composes from its own flags alone. Activating a new version
-mid-session changes what the CLI runs immediately; the frozen native/tool/prompt
-composition changes only in the next session.
+Both take effect from the next session onward; `nulya config show` prints the
+two standing lists. `nulya session new --bare` ignores both of them and composes
+from its own flags alone. Activating a new version mid-session changes what the
+CLI runs immediately; the natively exposed form changes only in the next
+session.
 
 Compile (Zig, a `bin/` entry) when the tool must parse JSON or behave
 identically under both shells. In a nulya checkout, `extensions/compact` and
@@ -194,11 +188,10 @@ Store and scope:
   recipes in the body — that is what makes a skill cheap to carry.
 - A `system_prompt` is the opposite: every byte joins the system blocks of
   every session that package is a member of, and is paid for on every step.
-- An on-request mode is a data extension contributing a system prompt with the
-  default `activation:"on_request"`: activating it makes its id/version usable,
-  but only `--with <id>` (or config `with`) wears it. An always mode writes
-  `activation:"always"`; once current, its prompt enters every ordinary fresh
-  session until deactivated. `--bare` opts out of all always modes.
+- A mode is a data extension contributing a system prompt that is built and
+  activated but deliberately left OUT of `[extensions] with`, so it reaches
+  only the sessions that name it: `nulya session new --with <id>`. In a nulya
+  checkout, `extensions/evolution` is one.
 - An extension with only skills and prompts needs no compiler, and its version
   is a pure content hash — the same id on every machine.
 

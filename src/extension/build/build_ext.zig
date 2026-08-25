@@ -37,6 +37,8 @@ fn noteLegacyShapes(alloc: std.mem.Allocator, io: std.Io, m: manifest.Manifest) 
     // Unit tests build packages with these shapes on purpose to assert they
     // are accepted; the real binary (e2e included) always prints them.
     if (builtin.is_test) return;
+    // Reach is the person's decision now, not the author's (DESIGN §7.2.1).
+    if (m.legacy_activation) try noteLegacyShape(alloc, io, m.id, "still declares \"activation\"; that key is no longer read — a package joins every session only when [extensions] with in config names it");
     // A declaration nothing enforced; the shape a sandbox needs is the
     // sandbox's to decide (PLAN §3.8).
     if (m.legacy_permissions) try noteLegacyShape(alloc, io, m.id, "still declares \"permissions\"; that key is no longer read — an unenforced footprint was ceremony, and a sandbox will define its own shape");

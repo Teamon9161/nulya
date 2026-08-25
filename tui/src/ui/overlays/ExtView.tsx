@@ -451,7 +451,7 @@ export function ExtView(props: {
       const alwaysComposed = new Set([...view.extensions.with, ...standingWithIds(props.statePath), ...style.settings.extensions.session_with])
       setComposedTools(
         listed()
-          .filter((entry) => isActive(entry) && (entry.activation === "always" || alwaysComposed.has(entry.id)))
+          .filter((entry) => isActive(entry) && alwaysComposed.has(entry.id))
           .flatMap((entry) => entry.withTools.map((tool) => toolId(entry.id, tool))),
       )
       setUserPath(view.paths.user)
@@ -469,7 +469,7 @@ export function ExtView(props: {
     setListed(entries)
     setComposedTools(
       entries
-        .filter((entry) => isActive(entry) && composedEverySession(entry))
+        .filter((entry) => isActive(entry) && composedEverySession(entry.id))
         .flatMap((entry) => entry.withTools.map((tool) => toolId(entry.id, tool))),
     )
     return entries
@@ -581,14 +581,21 @@ export function ExtView(props: {
   const foldClick = onClick(toggleFold)
   const quota = createMemo(() => quotaLine(maxTools(), nextFace(sources()).length))
 
-  /** A current version exists in the winning root; membership is separate. */
+  /** An extension takes part in the next session: an active version, not shadowed. */
   const isActive = (entry: ExtensionEntry) => entry.current !== null && !entry.shadowed
-  /** Standing membership from manifest activation or one of the three user/config lists. */
-  const composedEverySession = (entry: ExtensionEntry) =>
-    entry.activation === "always" ||
-    configWith().includes(entry.id) ||
-    standingWithIds(props.statePath).includes(entry.id) ||
-    style.settings.extensions.session_with.includes(entry.id)
+  /**
+   * …and one that is a MEMBER of every session opened here, from any of the
+   * three lists that can say so (K8): the kernel's own `[extensions] with`,
+   * this front end's `tui-state.json` `standing_with` (what Enter writes), and
+   * `tui.toml`'s `session_with` (the packages it always brings, T42).
+   *
+   * Three sources and one question, because the row is drawn once. Which file
+   * a given id came from is in the detail pane below, where the answer differs.
+   */
+  const composedEverySession = (id: string) =>
+    configWith().includes(id) ||
+    standingWithIds(props.statePath).includes(id) ||
+    style.settings.extensions.session_with.includes(id)
   /**
    * The pins this pane's switch writes for a row: one per `surface:"pin"` tool.
    * With-surface tools come from membership, and driver tools stay off the model
@@ -812,10 +819,9 @@ export function ExtView(props: {
   /**
    * The switch: `Enter` on an id, or a click on its marker (tui.md §11, T22).
    *
-   * ON points `current` at a built version and pins its pinnable tools.
-   * Membership follows manifest/config: activation:"always" is standing, while
-   * on_request needs with or a pin-implied membership. OFF clears the pointer
-   * and this switch's pins. Nothing here is irreversible and
+   * ON is both axes at once — point `current` at a built version so its skills
+   * and system prompts join the composition, and pin every tool it declares so
+   * the model can call them. OFF is both back. Nothing here is irreversible and
    * nothing here reaches the session already on screen (physics #2), which is
    * why neither direction asks for a `y`.
    *
@@ -914,11 +920,15 @@ export function ExtView(props: {
     }
     // Agreed: now the pin lists are written where the next `session new` reads.
     if (change) await applyPin(change, { reconcile: false })
-    // …and the TUI-owned membership half when this package needs one.
-    // Prompt packages do not: activation:"always" already supplies standing
-    // membership, while on_request gets its derived /<id> one-session command.
-    // Pure pinned-tool packages also need no second bit because their pins imply
-    // membership. Skills/commands/ui packages without either route use this list.
+    // …and the MEMBERSHIP half, for a package that has something only a member
+    // can give and that Enter cannot already reach another way (`standingWith`).
+    // Activating alone composes nothing now (DESIGN §5.1), so without this line
+    // the switch would move a pointer and change nothing a person could see. A
+    // pure tool package needs no entry: its pins bring it in by themselves, and
+    // a second way of saying that is a second thing to take back. A package
+    // that contributes a SYSTEM PROMPT never gets one here (T1, ext-review-2
+    // §3b) — `derivedCommand` already gave it a `/<id>` below, and that is the
+    // per-session way in this row's Enter means now.
     if (standingWith(entry)) {
       const held = standingWithIds(props.statePath)
       if (!held.includes(entry.id)) rememberStandingWith([...held, entry.id], props.statePath)
@@ -926,11 +936,12 @@ export function ExtView(props: {
     release(entry.id)
     props.onMembershipChanged?.()
     setNotice(
-      // Prompt packages say which lifecycle the manifest chose.
+      // A package that contributes a system prompt gets the sentence about the
+      // command Enter just gave it, instead of a version and a pin count (T1,
+      // ext-review-2 §3b) — Enter no longer reaches every session from here,
+      // so there is nothing scary left to say, only where the new command is.
       entry.systemPrompts.length > 0
-        ? entry.activation === "always"
-          ? `${entry.id} on · enters every future non-bare session · Enter again turns it off`
-          : `${entry.id} on · /${entry.id} opens a new tab wearing it for one session · Enter again takes the command away`
+        ? `${entry.id} on · /${entry.id} opens a new tab wearing it for one session · Enter again takes the command away`
         : `${entry.id} on · ${version}` +
           (ids.length > 0
             ? room
@@ -984,9 +995,7 @@ export function ExtView(props: {
       // from here alone (T1, ext-review-2 §3b), so what actually leaves is the
       // `/<id>` command Enter had given it.
       (entry.systemPrompts.length > 0
-        ? entry.activation === "always"
-          ? `${entry.id} off · leaves future non-bare sessions`
-          : `${entry.id} off · /${entry.id} is gone`
+        ? `${entry.id} off · /${entry.id} is gone`
         : `${entry.id} off · its skills leave the composition`) +
         ` · versions all stay${stuck ? ` · ${stuck}` : ""}`,
     )
@@ -1507,8 +1516,11 @@ export function ExtView(props: {
                         {fit(entry().id, idCols().id - 2)}
                       </text>
                     </box>
-                    {/* A prompt package is a mode; activation decides whether
-                        current is standing reach or only enables /<id>. */}
+                    {/* A package that contributes a system prompt is a MODE, and
+                        turning it on reaches every session this front end opens
+                        (T31/K8). Warn-coloured while it is on: that is the state
+                        somebody has to be able to spot without reading a
+                        detail pane. */}
                     <box width={idCols().mode} flexShrink={0}>
                       <text fg={on() === "off" ? style.theme.faint : style.theme.warn}>
                         {fit(modeCell(entry()), Math.max(0, idCols().mode - 2))}
@@ -1602,11 +1614,7 @@ export function ExtView(props: {
                       `tui.toml`. */}
                   <Show when={entry.systemPrompts.length > 0}>
                     <Lines
-                      text={
-                        entry.activation === "always"
-                          ? "an always mode · current puts its prompt in every ordinary new session · --bare opts out"
-                          : `an on-request mode · Enter gives it a \`/${entry.id}\` command that wears its prompt for one session`
-                      }
+                      text={`a mode · Enter gives it a \`/${entry.id}\` command that wears its prompt for one session · nothing here composes it standing`}
                       width={detailWidth()}
                       fg={style.theme.muted}
                     />
@@ -1629,7 +1637,7 @@ export function ExtView(props: {
                       fg={style.theme.warn}
                     />
                   </Show>
-                  <Show when={composedEverySession(entry)}>
+                  <Show when={composedEverySession(entry.id)}>
                     <Lines
                       text={`composed into every session started here · ${
                         configWith().includes(entry.id)

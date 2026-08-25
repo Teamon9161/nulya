@@ -211,45 +211,24 @@ session 开始时一次选定，整场冻结（`composition.zig` `SessionComposi
 1. builtin `shell`：永远在，位置最前。
 2. **model-facing extension 工具**（稳定 id `ext:<ext-id>/<tool>`），两条来路都会冻进 header 的 `native_tools` 并一起计入 `max_tools`（含 builtin，默认 20——上限度量的是整个工具面的真实成本：前缀 token + 模型的工具选择质量）：
    - **pin surface**：`tools[].surface` 缺省或写 `"pin"` 的 tool 才能被独立 pin。`registry.pinned_native_tools`（config，project 层也可以加——只花自己的槽，§9.5）与 `session new --pin`（driver，按场）同义、并集去重。pin 是决定：解析不到 → **硬失败** `PinNamesUnknownExtension` / `PinToolNotDeclared` / `InvalidStableToolId`；命名了非 `surface:"pin"` 的 tool → `PinToolNotPinnable`；总数越过 `max_tools` → `ToolBudgetExceeded`。
-   - **with surface**：一个由 config/argv 显式加入，或由 `activation:"always"` discovery 加入的成员，其 manifest 里写了 `tools[].surface:"with"` 的 tool，也在 fresh session 开场时进 native 面。它不是 pin，不能单独写进 pin 列表；决定在成员那根轴上。
+   - **with surface**：一个**显式成员**（config `[extensions] with` 或 argv `--with`）的 manifest 里写了 `tools[].surface:"with"` 的 tool，也在 fresh session 开场时进 native 面。它不是 pin，不能单独写进 pin 列表；决定在成员那根轴上。
 
 **pin 蕴含成员，但不蕴含 with surface。** 一个 tool 不可能在它的包不在场时占一个槽，所以 fresh 路（`composition.resolveFreshExtensions`）在显式成员之后，把每个 pin 的 `<id>` 里**还不是成员**的那些按 `current` 再 union 一次。这个隐式成员只服务这个 pin 自己：它不会额外展开该包的 `surface:"with"` tools。**排在最后且永不覆盖**：已经解析出的 id（config `[extensions] with` 或 `--with <id>@<version>` 点名的）保持它那个版本——pin 要的是 tool，不是版本。两种拒绝因此仍分得开：**任何 root 都不持有这个 id** → `PinNamesUnknownExtension`（这台机器上没建过），**持有但没有 `current`** → `WithVersionNotFound`（建过没 activate，出路是 `--with <id>@<version>` 或 `activate`；`session new` 的 stderr 会点名是哪些包由 pin 带进来的——命令行上没写过它们）。frozen 路（header `active` + `native_tools`）**不重推**：resume 只重放 header 冻下来的 native ids，不按今天的 manifest 重新展开 `surface:"with"`，也不重新判断一条旧 native id 现在还能不能 pin。
 
 只有这两条 fresh native 入口。**usage 自己绝不改 `tools[]`**——journal 是证据，晋升是有人写下一条 pin（§5.5），或有人把一个带 `surface:"with"` 工具的包列为成员。
 
-**成员（membership）是另一根轴。** 一个包进这一场的 composition（skills
-进 catalog、system prompts 进 system blocks、tools 经 CLI 可调）有四条来源，按
-“自动默认 → 人的显式覆盖”组合：
+**成员（membership）是另一根轴，形状与 pin 逐位对称**：一个包进这一场的 composition（skills 进 catalog、system prompts 进 system blocks、tools 经 CLI 可调；其中 `surface:"with"` 的 tools 也进 native 面）只有两种来路，同义、并集、后者胜——config 的 **`[extensions] with = ["<id>", …]`**（这个 workspace 的每一场；project 层也可以写，理由与 `pinned_native_tools` 同——它只能在这台机器**已经持有且已经信任**的包里挑，不像 `extensions.paths` 那样决定哪些目录可以供出代码，§9.5）与 **`session new --with <id>[@<version>]`**（这一场）。config 在前、argv 在后，所以命令行点名同一个 id（通常带版本）会覆盖常驻那条。
 
-1. 生效中的 `current` 版本若 manifest 显式写 `activation:"always"`，普通 fresh
-   session 自动把它收为成员；缺省 / `"on_request"` 不 discovery。
-2. config `[extensions] with = ["<id>", …]` 是 workspace 的显式 standing membership。
-3. `session new --with <id>[@<version>]` 是这一场的显式 membership；同 id 的后写
-   版本覆盖前面的 discovery/config 选择。
-4. pin 蕴含自己的 package membership，但不额外展开 on-request 包的
-   `surface:"with"` tools。
+**两根轴的 2×2 是全部：**
 
-**工具面仍是独立轴**：
-
-| | standing | 这一场 |
+| | 每一场（config） | 这一场（argv） |
 |---|---|---|
-| 成员 | `activation:"always"` + current；`[extensions] with` | `session new --with` |
-| pin 工具面 | `[registry] pinned_native_tools` | `session new --pin` |
+| 成员 | `[extensions] with` | `session new --with` |
+| 工具面 | `[registry] pinned_native_tools` | `session new --pin` |
 
-`nulya ext activate` 永远先做同一件机械动作：移动 `current`。manifest 缺省
-`activation:"on_request"` 时到此为止；只有显式 `"always"` 才让这个 current
-同时成为后续普通 fresh session 的 standing member。这样 mode 默认仍是 opt-in，
-而 policy/identity 这类作者明确声明全局生命周期的包可以做到“activate 即生效”。
-当前 session 已冻结，activate 不会改它；deactivate 删除 current，always membership
-也随之从下一场消失。
+**`nulya ext activate` 不在这张表上。** 它只回答"`<id>` 现在指哪个版本"——`current` 是一个指针，一场 session 都不改变。从前它还回答第二个问题（"要不要进此后的每一场"）：fresh 路有一趟 discovery，把每个有 `current` 的包都收成成员。那趟 discovery **已删**（`composition.resolveActiveExtensions` 不存在了），连同它逼出来的那个 manifest 字段 `activation`——reach 是人的决定，不是包作者的（physics #6），而 pin 蕴含成员之后包作者那个 bit 也已经拦不住任何东西（config 里一条 `pinned_native_tools = ["ext:plan/propose"]` 就把它带进每一场）。老 manifest 写了 `activation` 的：`parse` 当未知键忽略，`ext build` / `ext sync` 在 stderr 提一行。
 
-**`session new --bare`** 抑制全部 standing composition：不 discovery
-`activation:"always"` 的 current，也不读 config 的 `[extensions] with` 与
-`pinned_native_tools`；composition 只来自 argv（`--with` / `--pin` /
-`--prompt`）加 pin 蕴含。 `max_tools` 照读——它是天花板不是选择。header 不记
-这个 flag（resume 读 header 已冻结的成员与 native ids，本来就不重推）。第一个
-consumer 仍是 `extensions/agent` 委派出的子场：定义里的 pins/with 就是它明确
-要求的能力，不会被用户机器上的 always mode/policy 悄悄带进去。
+**`session new --bare`** 两张 config 表都不读，composition 只来自 argv（`--with` / `--pin` / `--prompt`）加 pin 蕴含。`max_tools` 照读——它是天花板不是选择。header 不记这个 flag（resume 读 header 冻的成员与 pins，本来就不重推）。用它的是 `extensions/agent` 委派出的子场：定义里的 `pins` 就是它的全部工具面，而两张常驻表是**人**对自己每一场说的话（§7.8）。
 
 第 1 档（那一个 builtin 的定义）与 kernel system prompt（§7.5）都是**二进制的编译期常量**，不由 header 冻结——所以它们的 hash 与 build 版本串一起记进 header 的 `nulya` stamp（§3.4），换了二进制 resume 时会警告。
 
@@ -265,17 +244,15 @@ agent 在对话中经 shell `nulya ext build/activate` 造出新 extension 后�
 - CLI 子进程（`nulya ext activate`）在 `NULYA_SESSION` 命名了 session 文件时，把一条 `capability_note` **投递**进该 session 的 inbox 目录（`<stem>.inbox/`，一事件一文件；文本确定性，列出 tools + `nulya ext run <id> <tool> '<json>'` 用法 + skills + `nulya skill load <ref>`）。它绝不直接写 session 文件——那是单写者（§3.4）。
 - `session.prepareStep` 每步在 step 边界（补齐残尾之后、下一次 model 调用之前）**排干** inbox（`ledger.drainInbox`，机制通用于任何事件）：对 ledger 尚未宣告的 `id@version` append 一条 `capability_note`（note 文本由 `extension/notes.zig` 生成）。排干只在 step 边界发生，note 因此绝不插进一条 batch 中间。
 - 前缀不动，缓存继续命中；模型下一 step 经 shell 调用。
-- 下一场 session 的 native face 仍只在开场决定：`surface:"pin"` 靠 pin，
-  `surface:"with"` 靠显式 membership 或 `activation:"always"` membership。
-  对话中途无论 activate 什么都只追加 note，不改本场 `tools[]`。
+- 下一场 session **若被 pin** 才进 `tools[]`（§5.1 第 2 档）；没人 pin 就一直是 CLI 形式。
 
-> **native 面的变化只发生在下一场；对话中途只追加 note。**
+> **晋升 = 下一场的 pin，对话中途只追加 note。**
 
 （纯内存 session（`Ledger.init`）没有 inbox 可排；投递/排干只对 durable session 生效。）
 
 ### 5.4 为什么不做动态 promotion / eviction
 
-每次中途 activate / evict 若当场改 `tools[]` 都会造成全量 cache miss，与头号诉求正面冲突。§5.1–5.3 让能力照常增长而零缓存代价：中途只 append note；pin、显式 membership 或 always-membership 导致的工具面变化一律等下一场，而下一场本来就是新前缀。
+每次中途 activate / evict 都改 `tools[]` = 全量 cache miss，与头号诉求正面冲突。§5.1–5.3 让能力照常增长而零缓存代价：中途只 append note，工具面的改变一律等下一场——那时改的是一条 pin，而下一场本来就是新前缀。
 
 ### 5.5 Usage journal（evidence）
 
@@ -301,7 +278,7 @@ version-aware evidence / lineage / verify 见 PLAN §3.5。
 
 ### 5.6 System blocks 的三个来源
 
-`PromptIR.system_blocks` 在 session 开始一次冻结（`composition.buildSystemPrompts`），顺序固定 **kernel → early extension → normal extension → inline → `skills:catalog` → late extension**：
+`PromptIR.system_blocks` 在 session 开始一次冻结（`composition.buildSystemPrompts`），顺序固定 **kernel → extension → inline → `skills:catalog`**：
 
 | block | 来源 | 生命周期 | `source` |
 |---|---|---|---|
@@ -309,12 +286,6 @@ version-aware evidence / lineage / verify 见 PLAN §3.5。
 | extension | 成员包 manifest 的 `contributes.system_prompts`（activate 或 `--with`） | 跟着那个**冻结版本** | `ext:<id>@<v>/<path>` |
 | inline | `session new --prompt <file>`，创建时读字节冻进 header（§3.4） | **只有这一场** | CLI 给的 basename 去扩展名 |
 | skills catalog | 冻结 skill 集的渐进披露文本（§7.7） | 跟着成员 | `skills:catalog` |
-
-`contributes.system_prompts` 保留字符串写法（= `position:"normal"`），也接受
-`{"path":"prompts/x.md","position":"early|normal|late"}`。position 是**序列化位置，
-不是 authority**：extension 不能跑到 kernel 前；`late` 才在 catalog 后。每个
-position 内继续按 extension id 排序，同一 manifest 内按声明顺序，activate/install
-先后永不进入排序，所以同一 composition 的 system blocks 是确定的。
 
 **尺子：这段文本有没有独立于某一场 session 的生命周期。** 有（装得上、activate 得了、回滚有意义——`evolution` / `plan` / `handoff`）→ 它是个 extension；没有（一个 sub-agent 的 persona 正文、一份只发给这一场的 brief）→ 它是 `--prompt`。把后者做成 extension 的代价实测过：per-session 文本变成安装物，出现在 `ext list` 里，而 `ext prune` 能把某一场赖以 resume 的身份文本删掉。
 
@@ -398,10 +369,7 @@ extension 装在**多个 store root** 里，按固定顺序搜索（`extension/r
 
 - **同一个 id 在多个 root → 首个持有 active 版本（有 `current`）的 root 胜**（workspace 遮蔽 user）。"持有"看 `current` 不看目录：一个只有 `<id>/` 目录、没有 `current` 的 root（draft、或已 `deactivate` 的副本）**不参与遮蔽**——否则在 workspace `deactivate` 会静默藏起 user 那份而不是让它生效。同一定义贯穿 `Roots.listActive`（composition / `skill list`）、`Roots.firstActive`（`ext run`、`--with` 不带版本、`ext deactivate` 的落点）与 `ext list` 的 `(shadowed)` 标记；`ext deactivate` 作用于生效的那份，若因此让后面 root 的副本顶上来会打印一行 note。
 - **frozen 版本按 root 顺序找**（`initFrozen`、`skill load` 的 frozen ref、`ext run <id>@<version>` 的 entry）：version 是内容寻址的，integrity 照验，所以顺序只决定"在哪找到"，从不决定"跑什么"。精确地说：data / script 版本的 id 就是 snapshot 的 hash，任意 root 的副本**严格**同字节；compiled 版本的 id 是 `snapshot + compiler + target` 的 hash，二进制 digest 只进 seal 不进 id，所以"两个 root 各自编出的同 id 副本同字节"是**可复现构建不变量**（同源、同编译器、同 target），不是数学保证——不为此重构 build identity，只是别把它当定理。
-- **`--user` 从 session 里跑会说一句。** `ext activate --user` 在
-  `NULYA_SESSION` 存在时往 stderr 点名它改的是 machine-wide current，并明确说：
-  若该版本 manifest 声明 `activation=always`，后续 non-bare session 会自动包含它。
-  这只是可见性，不拦操作；真正是否 always 仍只由 composition 读取冻结 manifest 判断。
+- **`--user` 从 session 里跑会说一句。** `ext activate|rollback --user` 在 `NULYA_SESSION` 存在时（= 模型经 `shell` 调的），动手前往 **stderr** 打一行 `note: activating <id>@<version> in the user store from inside session <sid>: it becomes active for every workspace on this machine`，该版本若声明了 system_prompts 再接 ` and its system prompt enters every future session`。**照做，不拦**：模型有权这么做，在内核的外壳里长出一条 policy 才是错的；不许的是**悄悄**这么做。不带 `--user`、或不在 session 里，一个字不说。
 - **写端的落点：`activate` / `rollback` 作用于该 id 生效中的那个 root**（`Roots.firstActive`）：在那里激活才真的生效；在被遮蔽的 root 里激活会"成功"却改变不了任何 session 看到的东西。所以要激活的版本若不在生效 root 里 → 明确失败（并指出它建在哪个 root、可用 `--user` 显式打到 user store）；只有当该 id **在任何 root 都没有 active 副本**时才按 `firstWithVersion` 找首个持有该 built 版本的 root。操作完成后重新算一次 `firstActive`：只有生效的 `{root, version}` 真的是目标时才向 live session 投 capability_note（§5.3），否则打印 `note: not in effect — <id>@<v> in <root> shadows it`（`--user` 显式打进被遮蔽的 root 时会遇到）。`deactivate` 同样作用于生效的那份。
 - **每个 `<id>/` 的变更都在 `<root>/<id>/.lock` 下进行**（`Store.lease`：build 写 `versions/<v>`、activate / rollback 改 `current`、deactivate 删 `current`；阻塞式排他 advisory 锁，与 session 的 `<id>.lock` 同一原语）——user store 被这台机器上的每个 workspace 共写，两个进程同时 build / activate 同一个 id 不能互相撕对方的目录树或共用一个 `.current.tmp`。读端不拿锁：`current` 是原子 rename，版本目录靠 seal 校验。
 - **header 不记 root**（`active` 仍是 `{id, version}`）：记了就等于把一台机器的目录布局冻进会话，而那与"跑的是哪份字节"无关。
@@ -457,28 +425,16 @@ manifest 讲给三种不同的听众，字段按哪个听众读它分成三层�
 
 `tools[].input` schema 只在该 tool 进了模型的 native 工具面时才喂给模型；平时是可发现性元数据。`tools[].timeout_ms?` 是**这个 tool 自己**的 wall-clock 上限——但只在它被放到**模型的工具面**上的那次调用生效（缺省 = host 的 30s，§7.3；`nulya ext run` 不套用它，见 §7.3 的 timeout 讨论）：知道自己慢的 tool 在 manifest 里说出来，因为 manifest 就是关于一个 tool 的唯一真相。`tools[].surface?` 是**这个 tool 怎么到工具面**的闭合词表：缺省 / `"pin"` = model-facing 且可独立 pin；`"with"` = model-facing 但只随显式成员（`[extensions] with` / `session new --with`）进 fresh session；`"driver"` = 只给 driver / CLI 通过 `nulya ext run` 调，不进 fresh session 的模型面。`surface` 是 kernel 读并强制的字段：fresh pin 只接受 `pin`，fresh `--with` 只展开 `with`，resume 只重放 header `native_tools`。老 manifest 的 `audience:"driver"` 兼容读成 `surface:"driver"`，缺省或 `audience:"model"` 读成 `pin`；两者都写时 `surface` 权威。`skills` / `system_prompts` 是这个版本贡献的文件列表，随 build 冻结进快照。
 
-**manifest 可以声明 package 的默认 activation lifecycle，但不能取消人的选择。**
-顶层 `activation` 是封闭词表 `"always" | "on_request"`，**缺省 on_request**：
+**manifest 说不出"我进哪些 session"。** 那是两个决定，两个都是人的，写在 config 或一次命令行上：成员（`[extensions] with` / `session new --with`）与可独立 pin 的工具面（`[registry] pinned_native_tools` / `session new --pin`），§5.1 那张 2×2。`surface:"with"` 只是说"如果这个包被显式列为成员，我的这个 tool 也属于那场的模型面"，不替任何人把包列进去。
 
-- `on_request`：`activate` 只移动 `current`；成员仍来自 config `with`、argv
-  `--with` 或 pin 蕴含。mode 默认就是这个形状。
-- `always`：当该 id 有生效 current 时，ordinary fresh session 自动把这个 package
-  收为成员；deactivate 后下一场消失。`session new --bare` 明确压掉这条 discovery，
-  所以 delegated/sub-agent 场不会继承机器上的 always 包。
-- config/argv 仍有最后决定权：`--with <id>@<version>` 可以在这一场覆盖 discovery
-  选到的版本；`--bare` 可以把全部 standing state 清空。
+这里曾经有一个字段 `activation`（`"always"` / `"on_request"`，缺省按形状），是内核唯一强制的 manifest 字段，答的是"activate 我之后接下来的 session 会怎样"。**已删**，两条理由：
 
-这不是把旧的“每个 current 都自动进场”恢复回来。旧设计的问题正是 **current 本身
-等于 reach**；现在只有 manifest 显式写 always 才有 standing reach，旧 manifest
-以及所有没写 activation 的包都保持 on_request。这个 bit 表达的是 package 作者
-定义的生命周期类别（例如全局 identity/policy 与一次性 mode），而人仍可通过
-`--bare`、config、`--with` 决定具体 session。
+- **reach 是人的决定，不是作者的**（physics #6）。当时的论证是"我是 policy 还是 mode 只有包自己答得出"——那句话现在看是把**包的性质**（它带一段 identity prompt 吗）和**它该进谁的 session**（一个 workspace 的决定）当成了同一个问题。前者确实只有作者知道，而它已经写在 `contributes` 里了；后者从来不是他能知道的。
+- **承诺已经漏了。** pin 蕴含成员之后（§5.1），config 里一条 `pinned_native_tools = ["ext:plan/propose"]` 就把一个 `on_request` 的包带进每一场，内核照办——一个只在某些路径上成立的保证不是保证，而前端只能绕着它走。
 
-`contributes.system_prompts` 同时支持两种写法：旧字符串 `"prompts/x.md"`，
-以及 `{"path":"prompts/x.md","position":"early|normal|late"}`。字符串等价
-`position:"normal"`；未知 position 是 `InvalidSystemPromptPosition`。position
-只决定 system block 序列化位置，绝不代表更高 authority，见 §5.6。
+根因是 `current` 一个指针同时承担了两件事："`<id>` 指哪个版本"与"要不要进每一场"。现在它只承担第一件：**`nulya ext activate` = 原子改 `current`，一场 session 都不改变**（physics #5 一字未动，只是它现在是 activate 的全部）。
 
+**老 manifest 写了这个键的**：`parse` 当未知键**忽略**（不是错，连从前会被拒的 `"onrequest"` 与 `false` 都只是被忽略），`ext build` / `ext sync` 对这样的 draft 在 stderr 打一行 —— 静默忽略会让作者以为自己的包还在 opt out。唯一的读者就是那一行（`manifest.Manifest.legacy_activation`）。
 
 #### driver 声明
 

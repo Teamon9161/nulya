@@ -1109,10 +1109,12 @@ fn extActivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
 /// policy in the kernel's shell. What is not allowed is doing it INVISIBLY.
 /// Silent outside `--user`, and silent when no session is running.
 ///
-/// Activation always moves `current`. A package whose frozen manifest says
-/// `activation:"always"` also joins future non-bare sessions; on_request
-/// packages still need config/--with/a pin. We do not parse the manifest here:
-/// the note states that condition rather than duplicating composition's reader.
+/// The sentence used to have a second half about the package's system prompt
+/// entering every future session. That is no longer what activating does: a
+/// package joins a session only when somebody names it (config's `[extensions]
+/// with`, or `--with`, DESIGN §5.1), so this move changes WHICH VERSION those
+/// sessions get and nothing about who gets it. Which is why no manifest is read
+/// here any more.
 fn warnUserScope(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -1126,7 +1128,7 @@ fn warnUserScope(
 
     const line = try std.fmt.allocPrint(
         alloc,
-        "note: activating {s}@{s} in the user store from inside session {s}: {s} now means this version for every workspace on this machine; if it declares activation=always, future non-bare sessions include it\n",
+        "note: activating {s}@{s} in the user store from inside session {s}: {s} now means this version for every workspace on this machine\n",
         .{ id, version, sid, id },
     );
     defer alloc.free(line);
@@ -1186,11 +1188,13 @@ fn extDeactivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
 /// no built version either, in which case it is a bare writer lease, not an
 /// extension, and is skipped.
 ///
-/// The trailing markers separate declaration from reach. `[tools skills prompt]`
-/// reports contributions; `[always]` says the active manifest opts into every
-/// ordinary fresh session; `[with]` says config explicitly composes this id.
-/// `--bare` suppresses both standing membership routes. Unreadable manifest
-/// means no declaration markers, never a failed listing.
+/// Two more markers, and between them they answer "will a session have this?".
+/// `[tools skills prompt]` is what the version CONTRIBUTES, from its frozen
+/// manifest; `[with]` says this id is in the merged config's `[extensions] with`,
+/// which is the only standing way a package joins every session here (DESIGN
+/// §5.1). Without the second, `prompt` reads as a threat it is not: a system
+/// prompt costs a session nothing until something names its package.
+/// Unreadable manifest → no contribution marker, never a failed listing.
 fn extList(alloc: std.mem.Allocator, io: std.Io) !u8 {
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     var search = try RootSearch.open(alloc, io, try cwdRealPath(io, &cwd_buf));
@@ -1256,33 +1260,30 @@ fn extList(alloc: std.mem.Allocator, io: std.Io) !u8 {
 /// string when the version contributes nothing nameable or cannot be read.
 /// Caller owns the result.
 fn contributionMarker(alloc: std.mem.Allocator, roots: *const roots_mod.Roots, entry: roots_mod.Roots.ActiveEntry) ![]u8 {
-    // One structural manifest read supplies both what the version contributes
-    // and whether its active pointer gives it standing membership.
+    // `.structural`: this column reports what a version DECLARES. Re-digesting
+    // every megabyte of built binary to print `[tools]` made `ext list` cost
+    // most of a second in a store with a few compiled extensions — and a front
+    // end runs it constantly. What is about to run is checked where it runs.
     const resolved = roots.resolveEntry(alloc, entry, .structural) catch return alloc.dupe(u8, "");
     defer resolved.deinit(alloc);
     const m = resolved.manifest;
-    const has_contributions = m.tools.len != 0 or m.skills.len != 0 or m.system_prompts.len != 0;
-    const always = m.activationOf() == .always;
-    if (!has_contributions and !always) return alloc.dupe(u8, "");
+    if (m.tools.len == 0 and m.skills.len == 0 and m.system_prompts.len == 0) return alloc.dupe(u8, "");
 
     var out: std.Io.Writer.Allocating = .init(alloc);
     errdefer out.deinit();
-    if (has_contributions) {
-        try out.writer.writeAll("\t[");
-        var first = true;
-        for ([_]struct { on: bool, word: []const u8 }{
-            .{ .on = m.tools.len != 0, .word = "tools" },
-            .{ .on = m.skills.len != 0, .word = "skills" },
-            .{ .on = m.system_prompts.len != 0, .word = "prompt" },
-        }) |part| {
-            if (!part.on) continue;
-            if (!first) try out.writer.writeByte(' ');
-            try out.writer.writeAll(part.word);
-            first = false;
-        }
-        try out.writer.writeByte(']');
+    try out.writer.writeAll("\t[");
+    var first = true;
+    for ([_]struct { on: bool, word: []const u8 }{
+        .{ .on = m.tools.len != 0, .word = "tools" },
+        .{ .on = m.skills.len != 0, .word = "skills" },
+        .{ .on = m.system_prompts.len != 0, .word = "prompt" },
+    }) |part| {
+        if (!part.on) continue;
+        if (!first) try out.writer.writeByte(' ');
+        try out.writer.writeAll(part.word);
+        first = false;
     }
-    if (always) try out.writer.writeAll("\t[always]");
+    try out.writer.writeByte(']');
     return out.toOwnedSlice();
 }
 

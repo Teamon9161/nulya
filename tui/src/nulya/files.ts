@@ -91,13 +91,9 @@ export function rootsOf(ws: Workspace, listed: readonly { root: string }[]): str
  * the transcript shows; the manifest is the schema's single truth, so nothing
  * here ever runs a binary to ask what it has.
  */
-export type PackageActivation = "always" | "on_request"
-
 export interface Contributions {
   id: string
   version: string
-  /** Absent in the manifest reads as on_request, matching the kernel. */
-  activation: PackageActivation
   tools: string[]
   /** The subset of `tools` whose surface is `pin`: model-facing and user-pinnable. */
   pinTools: string[]
@@ -216,7 +212,6 @@ export async function readContributions(
   const empty: Contributions = {
     id,
     version,
-    activation: "on_request",
     tools: [],
     pinTools: [],
     withTools: [],
@@ -270,7 +265,6 @@ function contributionsOf(
   manifest: Record<string, unknown> | null,
 ): Pick<
   Contributions,
-  | "activation"
   | "tools"
   | "pinTools"
   | "withTools"
@@ -284,7 +278,6 @@ function contributionsOf(
   | "ui"
 > {
   const contributes = (manifest?.["contributes"] ?? {}) as Record<string, unknown>
-  const activation: PackageActivation = manifest?.["activation"] === "always" ? "always" : "on_request"
   const declared = Array.isArray(contributes["tools"]) ? (contributes["tools"] as Array<Record<string, unknown>>) : []
   const named = declared.filter((tool) => typeof tool?.["name"] === "string")
   const toolRender: Record<string, string> = {}
@@ -297,35 +290,18 @@ function contributionsOf(
   const tools = named.map((tool) => tool["name"] as string)
   const surfaces = new Map(named.map((tool) => [tool["name"] as string, toolSurfaceOf(tool)]))
   return {
-    activation,
     tools,
     pinTools: tools.filter((tool) => surfaces.get(tool) === "pin"),
     withTools: tools.filter((tool) => surfaces.get(tool) === "with"),
     driverTools: tools.filter((tool) => surfaces.get(tool) === "driver"),
     skills: stringList(contributes["skills"]),
-    systemPrompts: systemPromptPaths(contributes["system_prompts"]),
+    systemPrompts: stringList(contributes["system_prompts"]),
     commands: commandsOf(contributes["commands"]),
     policy: policyOf(contributes["policy"]),
     toolRender,
     panelTools: named.filter((tool) => toolUiOf(tool)["panel"] === true).map((tool) => tool["name"] as string),
     ui: uiOf(contributes["ui"]),
   }
-}
-
-/** Paths from both system prompt spellings: "p.md" and {path, position}. */
-function systemPromptPaths(value: unknown): string[] {
-  if (!Array.isArray(value)) return []
-  const out: string[] = []
-  for (const entry of value) {
-    if (typeof entry === "string") {
-      out.push(entry)
-      continue
-    }
-    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) continue
-    const path = (entry as Record<string, unknown>)["path"]
-    if (typeof path === "string") out.push(path)
-  }
-  return out
 }
 
 /** A tool's placement, folding legacy `audience` the same way the kernel does. */
@@ -688,8 +664,6 @@ export interface ExtensionEntry {
   current: string | null
   versions: ExtensionVersion[]
   kind: ImplementationKind
-  /** Manifest activation lifecycle; absent reads as on_request. */
-  activation: PackageActivation
   tools: string[]
   /** The declared pin-surface subset of `tools` (DESIGN §7.2.1). */
   pinTools: string[]
@@ -730,7 +704,7 @@ function stringList(value: unknown): string[] {
 
 function manifestFacts(manifest: Record<string, unknown> | null): Pick<
   ExtensionEntry,
-  "kind" | "activation" | "tools" | "pinTools" | "withTools" | "driverTools" | "skills" | "systemPrompts" | "commands" | "ui"
+  "kind" | "tools" | "pinTools" | "withTools" | "driverTools" | "skills" | "systemPrompts" | "commands" | "ui"
 > {
   const runtime = manifest?.["runtime"] as Record<string, unknown> | undefined
   // `runtime.entry` is a string, or an object keyed by OS for a script that
