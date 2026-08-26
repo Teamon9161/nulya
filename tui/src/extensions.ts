@@ -190,14 +190,33 @@ export function needsZigIds(report: SyncReport): string[] {
   return report.lines.filter((line) => line.state === "needs zig").map((line) => line.id)
 }
 
-/** What a draft line says in `/ext`'s draft column. */
-export function draftColumn(line: SyncLine | null | undefined): string {
+/**
+ * What a draft line says in `/ext`'s draft column: is the build of the source in
+ * this store directory the one that runs, and if not, why not.
+ *
+ * `current` is the id's ACTIVE version, from the store listing — not the plan
+ * line's own `activation`, which reports the same thing and goes stale. The
+ * listing is what a keypress updates (optimistically, then from the store);
+ * plans are re-read only on opening and on `b`/`p`, deliberately, because two
+ * `ext sync --dry-run` passes are the most expensive calls this view makes and a
+ * pointer move cannot change what a draft would BUILD to. But it does change
+ * which version is current — so a row activated with Enter went on saying
+ * `inactive` until the panel was closed and opened again. One question, one
+ * source.
+ *
+ * `inactive` rather than `built`: this column already says `active`, and the
+ * panel's word for the other half of that switch is `inactive` everywhere else
+ * (the on/off rename, DESIGN §5.1 review). `built` read as a rung on a ladder —
+ * a state on the way to being done — when what it means is "this build exists
+ * and is not the one in use".
+ */
+export function draftColumn(line: SyncLine | null | undefined, current: string | null): string {
   if (!line) return ""
   if (line.state === "failed") return "fails"
   if (line.state === "needs zig") return "needs zig"
-  if (line.activation === "active") return "active"
+  if (current !== null && current === line.version) return "active"
   if (line.state === "not built") return "not built"
-  return "built"
+  return "inactive"
 }
 
 export interface ProjectStoreDecision {

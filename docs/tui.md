@@ -1919,3 +1919,15 @@ T33 把 `internal` 行折起来时给的理由是**数量**（六个 driver tool
 **窄在"从来没有过 current"而不是"指针动了"**：版本前进时 pin 列表已经是人的了，按后者会把他 `Space` 掉的工具在下次 rebuild 时悄悄加回来——一个会自己撤销的开关不是开关。判据来自开屏**在 seed 之前**读的一次 `ext list`（`hadCurrent`），读不到就当作"全都已经装过"（写不出 pin 好过写在别人的选择上）；`adoptBundled` 收同一个集合作参数，两个调用点一个定义。`max_tools` 不够就一个都不写，让 `/ext` 去挑——开不起来的 session 比没上面的工具糟。
 
 **测试**：`extensions.test.ts` 三条——`apply:auto` 的包首次安装会被激活 + 只 pin `recommended` 的那个 + 汇总里点名它进每一场；仅重建的包一条 pin 都不写（人 `Space` 掉的留在原地）；`adoptBundled` 的那条改写成"arrived 里新装的那个才是 install"。`cd tui && bun test`：383 pass。**文档**：CLAUDE.md 三处（T31 那句"activate = 它的 prompt 进每一场"是 2026-08-25 之后的假话，正是它把这次排查带偏的）、`docs/BUGS.md` 第一条补了"真正修它的是什么"。
+
+### T62 · `/ext` 的 draft 列跟着 `current` 走，并改口叫 `inactive`（2026-08-26）
+
+**Bug**：在 `/ext` 里 activate 一个包，那一列不变，要关掉面板重开才显示 `active`。
+
+**根因是两个真相来源，而只有一个被刷新。** 这一列的 `active` 读的是 `drafts()` 里 `ext sync --dry-run` 报的 `activation`，而 activate 之后跑的 `reconcile` **故意不重跑 plans**——注释写着"a pointer move cannot change what a draft would build to"。那句话对**版本**成立（内容寻址，指针动了源码还是那份），但同一行上还有一个 `activation` 列，它说的正是 `current` 指向谁，而那恰恰是 activate 改的东西。于是乐观更新（`setLocalCurrent`）与 `reconcile` 都在更新 listing，屏幕上却有一列在读另一份没人刷新的数据。
+
+**修法不是多刷一次**（两趟 `ext sync --dry-run` 是这个面板最贵的调用，注释里避开它的理由完全成立），而是**让这一列别再回答那个问题**：`draftColumn(line, current)` 收 listing 里那个 id 的 `current`，`line.activation` 从此不被读。一个问题一个来源，于是"忘了刷新"这种 bug 在结构上不可能再出现。
+
+**`built` → `inactive`**：这一列本来就说 `active`，而这个面板另外半边开关的词早已是 `inactive`（2026-08-26 的 on/off 改名）。`built` 挨着 `active` 会被读成一个进度阶梯上的一格——"还没到"——而它的意思是"这个 build 在，但不是正在用的那个"。剩下四个词不变：`not built` / `fails` / `needs zig` / `differs`。
+
+**测试**：`draftColumn(one, null)` 在 `line.activation === "activated"` 时仍然回 `inactive`——plan 自己的那个词被忽略，这条断言就是不变量本身；另加"current 指着别的版本 → inactive"。`cd tui && bun test`：383 pass。

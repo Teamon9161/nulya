@@ -699,7 +699,7 @@ export function ExtView(props: {
         columnWidth(list.map(standingCell), 2, 10),
         columnWidth(list.map(switchCell), 2, 12),
         columnWidth(
-          list.map((entry) => (outdated().includes(entry.id) ? "differs" : draftColumn(draftOf(entry.id)))),
+          list.map((entry) => (outdated().includes(entry.id) ? "differs" : draftColumn(draftOf(entry.id), entry.current))),
           2,
           11,
         ),
@@ -936,7 +936,7 @@ export function ExtView(props: {
       planned && (planned.state === "built" || planned.state === "already built") ? planned.version : null
     const version = entry.current ?? fromDraft ?? entry.versions[entry.versions.length - 1]?.version ?? null
     if (!version) {
-      const why = draftColumn(planned)
+      const why = draftColumn(planned, entry.current)
       setNotice(`${entry.id} has no built version${why ? ` · ${why}` : ""} · b builds the source in its store directory`)
       return
     }
@@ -1508,7 +1508,7 @@ export function ExtView(props: {
                 // useless answer — while the fact worth acting on is that the
                 // code running is older than the binary running it (T42).
                 const draft = () =>
-                  outdated().includes(entry().id) ? "differs" : draftColumn(draftOf(entry().id))
+                  outdated().includes(entry().id) ? "differs" : draftColumn(draftOf(entry().id), entry().current)
                 const tone = () => ({
                   selected: here() && pane() === "extensions",
                   hovered: idHover.at() === index,

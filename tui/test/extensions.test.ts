@@ -86,7 +86,7 @@ test("a plan says what each draft would become and writes nothing; the pass then
   expect(plan.built).toBe(2)
   expect(plan.failed).toBe(1)
   // A plan is a plan: `/ext` opens on it, and nothing appears in the store.
-  expect(draftColumn(one)).toBe("not built")
+  expect(draftColumn(one, null)).toBe("not built")
 
   const done = await extSync(ws)
   expect(done.built).toBe(2)
@@ -105,12 +105,19 @@ test("--activate reports the three answers a pointer can have: moved, already th
   const activated = await extSync(ws, { activate: true })
   const one = activated.lines.find((line) => line.id === "one.mode")!
   expect(one.activation).toBe("activated")
-  expect(draftColumn(one)).toBe("built")
+  // The column follows `current` from the listing, not the plan's own word for
+  // what this pass did: "moved it here" and "was already here" are the same
+  // answer to "is this build the one that runs".
+  expect(draftColumn(one, one.version!)).toBe("active")
+  expect(draftColumn(one, null)).toBe("inactive")
 
   // Already the current one: a second pass has nothing to move.
   const settled = await extSync(ws, { activate: true })
   expect(settled.lines.find((line) => line.id === "one.mode")!.activation).toBe("active")
-  expect(draftColumn(settled.lines.find((line) => line.id === "one.mode")!)).toBe("active")
+  const settledOne = settled.lines.find((line) => line.id === "one.mode")!
+  expect(draftColumn(settledOne, settledOne.version!)).toBe("active")
+  // Current, but at some OTHER version: this build exists and is not in use.
+  expect(draftColumn(settledOne, "v-something-else")).toBe("inactive")
 
   // Somebody edits the draft and points `current` back at the older version:
   // the sync must not undo that decision.
