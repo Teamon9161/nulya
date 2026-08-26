@@ -33,6 +33,12 @@
 //!   `<d>/inbox/`         messages for a runner that has no inbox of its own.
 //!                        The nulya runner delivers into the child session's
 //!                        own inbox instead (D5), so this stays empty here.
+//!   `<d>/persona.md`     the persona frozen for this delegation, for a harness
+//!                        that is told its system prompt on every process.
+//!   `<d>/message.txt`    the one message a round is answering, staged where an
+//!                        EXTERNAL runner extension can read it (`external.zig`)
+//!                        — written only by whoever holds the lease, and only
+//!                        for as long as that round.
 //!
 //! Every entry point takes the workspace directory rather than assuming the
 //! process's own: the callers pass `std.Io.Dir.cwd()` (an extension is spawned
@@ -47,6 +53,12 @@ pub const record_name = "record.jsonl";
 pub const lock_name = ".runner.lock";
 pub const interrupt_name = "interrupt";
 pub const inbox_name = "inbox";
+
+/// Where one round's message is staged for a runner that reads it as a file
+/// (`external.zig`'s contract). A path rather than a value because a task is as
+/// long as it needs to be and a command line is not; whoever holds the lease is
+/// the only writer, so one name is enough.
+pub const message_name = "message.txt";
 
 const hex_len = 12;
 

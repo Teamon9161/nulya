@@ -17,14 +17,20 @@
 //! `drive` is the one that reads a protocol line by line, so it lives with the
 //! `run` tool that is its whole process (`runner.zig`); the other four are here.
 //!
-//! **Why an enum and a switch rather than a vtable.** The shape was written to
-//! the contract before the second arm existed, and the arms since have proved
-//! the point: Codex is JSON-RPC over a child's stdio, Claude is its own
-//! stream-json dialect over another, pi is a third — no amount of vtable would
-//! have prepared for any of them, and the three external ones share `send` and
-//! `pending` with each other and almost nothing else with the nulya one. When a
-//! runner moves OUT of this package (`runner: ext:<id>`, contract ar-g) the
-//! switch grows one arm that shells out; that is the design, not a fallback.
+//! **Why a tagged union and a switch rather than a vtable.** The shape was
+//! written to the contract before the second arm existed, and the arms since
+//! have proved the point: Codex is JSON-RPC over a child's stdio, Claude is its
+//! own stream-json dialect over another, pi is a third — no amount of vtable
+//! would have prepared for any of them, and the external ones share `send` and
+//! `pending` with each other and almost nothing else with the nulya one.
+//!
+//! **And the fifth arm is the one that ends the list.** `runner: ext:<id>` is a
+//! harness this package has never heard of, spoken to by an ordinary extension
+//! with one `agent_runner` tool in it (`external.zig`). Everything above the
+//! wire stays here — the lease, the record, the inbox, the interrupt marker, the
+//! report framing — so a runner that moves out of this package takes only its
+//! own dialect with it. That arm is the design, not a fallback: it is why no
+//! sixth harness ever needs to be compiled in here.
 //!
 //! What the arms DO share ends up in `record.zig` rather than in one of them:
 //! the per-delegation inbox, the minted uuid, the frozen persona. Adding the
@@ -36,8 +42,12 @@ const record = @import("record.zig");
 const codex = @import("codex.zig");
 const claude = @import("claude.zig");
 const pi = @import("pi.zig");
+const external = @import("external.zig");
 
-pub const Runner = enum {
+/// The prefix that says "this harness is somebody else's extension".
+pub const ext_prefix = "ext:";
+
+pub const Runner = union(enum) {
     /// This nulya: the delegation is a session of its own, driven by
     /// `session step --stream` in a background task.
     nulya,
@@ -53,16 +63,46 @@ pub const Runner = enum {
     /// (`pi.zig`).
     pi,
 
+    /// A harness some other extension knows how to talk to: `ext:<id>`, whose
+    /// `agent_runner` tool answers one round at a time (`external.zig`). The
+    /// payload is the whole word as written, because that word is what the
+    /// record freezes and what `list` reports; the id is the part after the
+    /// prefix.
+    ext: []const u8,
+
     /// The word a definition's `runner:` may say. Null is "not a runner this
     /// package knows", which costs the whole definition (a persona that would
     /// silently run on something other than what it asked for is worse than a
-    /// persona that is not there).
+    /// persona that is not there) — and `ext:` with nothing usable after it is
+    /// exactly as unknown as a misspelling.
     pub fn parse(text: []const u8) ?Runner {
-        return std.meta.stringToEnum(Runner, std.mem.trim(u8, text, " \t"));
+        const word = std.mem.trim(u8, text, " \t");
+        if (std.mem.startsWith(u8, word, ext_prefix)) {
+            return if (isPlainExtId(word[ext_prefix.len..])) .{ .ext = word } else null;
+        }
+        if (std.mem.eql(u8, word, "nulya")) return .nulya;
+        if (std.mem.eql(u8, word, "codex")) return .codex;
+        if (std.mem.eql(u8, word, "claude")) return .claude;
+        if (std.mem.eql(u8, word, "pi")) return .pi;
+        return null;
     }
 
+    /// The word as a definition writes it and as the record freezes it. One
+    /// spelling for both, so a delegation opened today is read back tomorrow by
+    /// the same name it was written with.
     pub fn label(self: Runner) []const u8 {
-        return @tagName(self);
+        return switch (self) {
+            .ext => |word| word,
+            else => @tagName(std.meta.activeTag(self)),
+        };
+    }
+
+    /// The extension id behind `ext:<id>`, for the arms that have to name it.
+    pub fn extId(self: Runner) []const u8 {
+        return switch (self) {
+            .ext => |word| word[ext_prefix.len..],
+            else => "",
+        };
     }
 
     /// Does this runner speak nulya's own model vocabulary — a profile and an id
@@ -73,12 +113,24 @@ pub const Runner = enum {
     pub fn usesNulyaModels(self: Runner) bool {
         return switch (self) {
             .nulya => true,
-            .codex, .claude, .pi => false,
+            .codex, .claude, .pi, .ext => false,
         };
     }
 };
 
 pub const default: Runner = .nulya;
+
+/// An extension id, by the kernel's own rule (`manifest.isValidId`) — checked
+/// here because `ext:<id>` becomes a store reference, and because "that is not
+/// an extension id" is a better answer than a lookup that finds nothing.
+fn isPlainExtId(id: []const u8) bool {
+    if (id.len == 0 or id.len > 64) return false;
+    for (id) |c| {
+        const ok = std.ascii.isAlphanumeric(c) or c == '.' or c == '_' or c == '-';
+        if (!ok) return false;
+    }
+    return true;
+}
 
 pub const StartOptions = struct {
     /// The nulya that spawned us (DESIGN §7.6) — never whichever copy is on PATH.
@@ -130,6 +182,44 @@ pub const Started = struct {
 /// a process was actually spawned to do it.
 pub fn start(r: Runner, alloc: std.mem.Allocator, io: std.Io, opts: StartOptions) !Started {
     switch (r) {
+        .ext => |word| {
+            const id = word[ext_prefix.len..];
+            // The version FIRST, before anything is written: it is what this
+            // delegation is nailed to for the rest of its life (D7), and a
+            // runner nobody activated is a definition that cannot run at all.
+            const version = switch (try external.resolveCurrent(alloc, io, opts.exe, id)) {
+                .failed => |f| return .{ .run = .{ .code = 1, .stdout = "", .stderr = @constCast(f) } },
+                .ok => |v| v,
+            };
+            // Then the persona, because `op=open` is handed its PATH — a runner
+            // that builds a thread out of it needs it to exist by then, and one
+            // frozen copy is what stops this delegation from following later
+            // edits to the definition file.
+            switch (try external.freezePersona(alloc, io, std.Io.Dir.cwd(), opts.delegation, opts.prompt)) {
+                .failed => |f| return .{ .run = .{ .code = 1, .stdout = "", .stderr = @constCast(f) } },
+                .ok => {},
+            }
+            // `pins` and `with_self` say nothing here, for the reason they say
+            // nothing to Codex: they are nulya composition.
+            const opened = try external.open(alloc, io, opts.exe, .{
+                .ref = try external.refOf(alloc, id, version),
+                .delegation = opts.delegation,
+                .persona = try record.pathIn(alloc, opts.delegation, record.persona_name),
+                .readonly = opts.readonly,
+                .model = opts.runner_model,
+            });
+            return .{
+                .run = switch (opened) {
+                    .ok => |remote| .{ .code = 0, .stdout = @constCast(remote), .stderr = "" },
+                    .failed => |f| .{ .code = 1, .stdout = "", .stderr = @constCast(f) },
+                },
+                // The frozen EXTENSION version, which is what "the same runner,
+                // at the same version, for every later round" means out here.
+                // Whatever the harness behind it calls its own version is that
+                // runner's business to record in its own space.
+                .version = version,
+            };
+        },
         .claude => {
             // Reachability first, and it costs one local process: a definition
             // naming a harness this machine does not have is refused HERE —
@@ -251,7 +341,7 @@ pub fn send(
 ) !proc.Run {
     switch (r) {
         .nulya => return proc.run(alloc, io, &.{ exe, "session", "append", remote, text }),
-        .codex, .claude, .pi => {
+        .codex, .claude, .pi, .ext => {
             // Always the file, never "steer if something is running": whether a
             // message arrives at the next natural boundary or is folded into the
             // turn in flight is the RUNNER's decision, made when it drains
@@ -287,6 +377,9 @@ pub fn remoteLabel(r: Runner, alloc: std.mem.Allocator, remote: []const u8) ![]c
         .codex => try std.fmt.allocPrint(alloc, "codex thread {s}", .{remote}),
         .claude => try std.fmt.allocPrint(alloc, "claude session {s}", .{remote}),
         .pi => try std.fmt.allocPrint(alloc, "pi session {s}", .{remote}),
+        // Whatever the runner named it. This side does not know what kind of
+        // thing that handle is, and saying "session" about it would be a guess.
+        .ext => |word| try std.fmt.allocPrint(alloc, "{s} conversation {s}", .{ word, remote }),
     };
 }
 
@@ -300,6 +393,9 @@ pub fn transcriptHint(r: Runner, alloc: std.mem.Allocator, remote: []const u8) !
         // resumes it by that name.
         .claude => try std.fmt.allocPrint(alloc, "It ran as claude session {s}; the whole of it is `claude --resume {s}`.", .{ remote, remote }),
         .pi => try std.fmt.allocPrint(alloc, "It ran as pi session {s}; the whole of it is `pi --session {s}`.", .{ remote, remote }),
+        // No command is offered: only that runner knows where its harness keeps
+        // a transcript, and a pointer that does not work is worse than none.
+        .ext => |word| try std.fmt.allocPrint(alloc, "It ran on {s} as {s}, which keeps its own transcript.", .{ word, remote }),
     };
 }
 
@@ -322,7 +418,7 @@ pub fn pending(
             const path = std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.inbox", .{remote}) catch return false;
             return holdsJson(io, base, path);
         },
-        .codex, .claude, .pi => return packageInboxPending(alloc, io, base, delegation),
+        .codex, .claude, .pi, .ext => return packageInboxPending(alloc, io, base, delegation),
     }
 }
 
@@ -372,7 +468,10 @@ pub fn stop(r: Runner, alloc: std.mem.Allocator, io: std.Io, exe: []const u8, re
         // Claude is the same shape for the same reason: its interrupt is a
         // control request written into the stdin of the process that is running
         // the turn, and only the driving process holds that pipe.
-        .codex, .claude, .pi => {},
+        //
+        // An external runner is told where the marker is and watches it itself
+        // (`external.zig`) — for the same reason again, one level further out.
+        .codex, .claude, .pi, .ext => {},
     }
 }
 
@@ -384,15 +483,32 @@ test "a runner is named by the definition, and an unknown word is not one" {
     try std.testing.expectEqual(Runner.pi, Runner.parse("pi").?);
     try std.testing.expect(Runner.parse("borges") == null);
     try std.testing.expect(Runner.parse("") == null);
-    try std.testing.expectEqualStrings("nulya", Runner.nulya.label());
-    try std.testing.expectEqualStrings("codex", Runner.codex.label());
-    try std.testing.expectEqualStrings("claude", Runner.claude.label());
-    try std.testing.expectEqualStrings("pi", Runner.pi.label());
+    try std.testing.expectEqualStrings("nulya", Runner.parse("nulya").?.label());
+    try std.testing.expectEqualStrings("codex", Runner.parse("codex").?.label());
+    try std.testing.expectEqualStrings("claude", Runner.parse("claude").?.label());
+    try std.testing.expectEqualStrings("pi", Runner.parse("pi").?.label());
+}
+
+test "a harness this package never heard of is named ext:<id>, and a shape that is not one is unknown" {
+    const named = Runner.parse("ext:my-runner").?;
+    try std.testing.expectEqualStrings("my-runner", named.extId());
+    // The word round-trips: it is what the record freezes and what `list` says.
+    try std.testing.expectEqualStrings("ext:my-runner", named.label());
+    try std.testing.expect(!named.usesNulyaModels());
+
+    // An id that could not name an extension is as unknown as a misspelling —
+    // it costs the whole definition rather than becoming a lookup that fails
+    // later, somewhere else.
+    try std.testing.expect(Runner.parse("ext:") == null);
+    try std.testing.expect(Runner.parse("ext:../std") == null);
+    try std.testing.expect(Runner.parse("ext:a/b") == null);
+    try std.testing.expect(Runner.parse("ext") == null);
 }
 
 test "only this nulya speaks nulya's model vocabulary" {
-    try std.testing.expect(Runner.nulya.usesNulyaModels());
-    try std.testing.expect(!Runner.codex.usesNulyaModels());
-    try std.testing.expect(!Runner.claude.usesNulyaModels());
-    try std.testing.expect(!Runner.pi.usesNulyaModels());
+    try std.testing.expect(Runner.parse("nulya").?.usesNulyaModels());
+    try std.testing.expect(!Runner.parse("codex").?.usesNulyaModels());
+    try std.testing.expect(!Runner.parse("claude").?.usesNulyaModels());
+    try std.testing.expect(!Runner.parse("pi").?.usesNulyaModels());
+    try std.testing.expect(!Runner.parse("ext:whatever").?.usesNulyaModels());
 }

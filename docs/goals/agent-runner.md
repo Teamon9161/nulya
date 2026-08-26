@@ -49,7 +49,7 @@
 - ~~**ar-d · Codex runner**~~ —— **已落地**（§6，2026-08-26）。App Server 的六个动词全部实测存在（`initialize` / `thread/start|resume` / `turn/start|steer|interrupt`），行分隔 JSON-RPC over stdio；`runner_model:` 已加。
 - ~~**ar-e · Pi runner**~~ —— **已落地**（§6，2026-08-26）。`pi --mode rpc` 的 JSONL 全部实测存在；`steer` / `follow_up` 存在但**不用**（理由见 §6），一轮的终点取 `agent_settled`。
 - ~~**ar-f · Claude runner**~~ —— **已落地**（§6，2026-08-26）。`claude -p --input-format stream-json --output-format stream-json --verbose` 双向 stdio + `control_request{subtype:"interrupt"}` 全部实测存在，**没有退化成 kill**；不用 Agent SDK（D12）。
-- **ar-g · 外置验证 + 契约定稿**：把一个内置 runner 搬成独立扩展（`runner: ext:<id>` + 固定 `internal` tool `agent_runner`，创建时解析并冻结版本进 record）；"搬出去 agent 几乎不用改"即边界正确；契约写进 guide skill 与本文件。
+- ~~**ar-g · 外置验证 + 契约定稿**~~ —— **已落地**（§6/§7，2026-08-26）。`runner: ext:<id>` + 固定 `internal` tool `agent_runner`（两个 op、版本开场冻死）；契约在 §7、`external.zig` 模块注释、DESIGN §7.8 与 guide skill。
 - **ar-t2 · TUI 跟随 d-\***：SubSessionCard 经 record 解析 d→remote（nulya 开 tab，外部看 task log）；`/agent` picker 显示 runner 列。
 
 **不做（明确越界）：**
@@ -129,3 +129,117 @@
   - **文档**：DESIGN §7.8 新增「第二个外部 runner：`runner: claude`」与「第三个外部 runner：`runner: pi`」两整段，并把 `runner:` 那段的「两个 arm」更新为四个 + `runner_version` 从占位变成有内容那句。guide skill 的 runner 词表补上 `claude` / `pi` 与「readonly 在每个 runner 上都算数」。CLAUDE.md 现状条目按派发范围留给 review 后统一收。
   - **一处交接给 review 的观察（本轮范围外，未动）**：ar-d 记的那条 TUI 缺口现在多了两个 arm——`tui/src/ui/App.tsx` 的 `startAgent` 仍然不看 `entry.runner`，一个写着 `runner: claude` / `runner: pi` 的 persona 从 TUI 的 `/agent` 起会被静默当成一场 nulya session 打开（从模型调 `agent{name}` 走的是正确的路）。另外：claude/pi 的 remote 是 UUID，而 `tui/src/render/registry.ts` 抽 delegation 用的那个 `d-` + 12 位十六进制的模式，在「第四段恰好以 d 结尾」的 uuid 上会有一次多余的匹配（回执里真正的 `d-…` 排在更前面，取首个匹配就没事）——两条都属 `tui/`，本轮硬性约束是 `tui/` 一字不改。
   - **review 核实（2026-08-26，随 ar-e/f 一起 commit）**：上面两条交接**都不需要动作**——① `startAgent` 的 runner 守卫在 ar-t2 的 commit `3739cf5` 里已经加了（非 nulya persona 从 `/agent` 起被当场拒绝并指路「在对话里委派」），两轮 agent 因被禁改 `tui/` 只是转抄了修复前的观察；② UUID 误匹配不成立：`\bd-` 要求 `d` 前面是非词字符，而 UUID 第四段里任何 `d` 的前一个字符必是十六进制（词字符），词边界不成立、不会匹配。另记一笔：全套 e2e 在一次与 `bun test` 并行的高负载运行中偶发失败过一次（未捕获到具体条目），随后连续三次全绿——与既知的「lease / 时序类测试高负载下会 flake」一致，复现时用 `-Dtest-filter` 定位。
+- 2026-08-26 · **ar-g 落地（外置 runner + 契约定稿）**。`runner: ext:<id>` 是第五个 arm，也是最后一个需要写在这个包里的：**契约见 §7**（两个 op、参数表、输出表、最短配方），同一份还写在 `extensions/agent/src/external.zig` 模块注释、DESIGN §7.8 与 guide skill。
+  - **形状判断**：① `Runner` 从 enum 变**tagged union**，`.ext` 带一个 payload——**存整个词** `"ext:<id>"` 而不是拆出来的 id，因为那个词正是 record 冻下来、`list`/`render` 报出去的东西，一个字段两处拼装就是两个答案（`extId()` 只是它的后缀）；`label()` 因此不需要 allocator。旁路字段（`Runner` 保持 enum + `Def.runner_ext`）被否掉：一个只在某个 tag 下有意义的字段是"一个决定在两层各做一遍"。② 解析纪律不变：`ext:` 后面不是一个合法 extension id（`manifest.isValidId` 的同一条规则）就是 `null` → `UnknownRunner` → **skip 整个定义**，与拼错一个词完全同价。③ **`agent_runner` 一个固定名 + 一个 `op` 参数**，不是两个 tool：D7 的原文就是"固定名 internal tool"，而"哪个 tool 驱动一轮"不该是定义要携带的决定。
+  - **契约的两处判断，都记在这里**：① **输出是 stdout 的 JSON 对象，不是"stdout 就是报告文本 + 退出码词表"**。理由是 ext-review-3 Lane W 那条纪律（退出码不做词表）在这里同样成立——一轮要回的是内置三个 arm 的 `RoundResult`（text / interrupted / failure），把 interrupted 编进第三个退出码会让"做成了但结果不同"和"没做成"共用一个数字；而 driver-facing 的 tool 打 compact JSON 在这个仓库里本来就是先例（`render` / `list` / `compact` / `handoff`）。于是：**exit 0/非 0 = wire 已有的两值语义**（非 0 时 stderr 就是话），细分在 JSON 里。派发说明里写的"stdout = 本轮报告文本；exit code 语义"因此只落实了一半，这是有意的偏离，理由如上。② **`message` 走文件（`message_file`）而不是 `--arg message=<64KB>`**：Windows 整条命令行 32 KiB，而 `max_task_bytes` 是 64 KiB——`--arg` 传任务在这台机器上会直接 spawn 失败。`persona` 本来就是路径，于是契约成一条干净的规矩：**两段文本走路径，其余走值**。`<d>/message.txt` 进 `record.zig` 的盘面注释（它是 delegation 布局的一部分，不是某个 arm 的私产）。
+  - **`idle` 不在契约里**：inbox 空时 agent 包**根本不调** `op=round`（消息是这边取的——取走才能让 `pending` 变假，D4 是这边的不变量），所以 runner 永远不需要表达"没什么可做"。这是"契约里少一个词"而不是"少一个能力"。
+  - **版本冻结的实现**：`current` 由 `external.resolveCurrent` 问**内核自己的 `ext list`**（第一列 id、第二列版本，`(shadowed)` 的行跳过），不在包里重造一份 root 顺序 / `current` 语义；两种失败分开说（没建过 → 指 `ext build`；建了没 activate → 指 `ext activate`），因为改法不同。纯函数 `versionIn` 抽出来带单测，`build.zig` 因此多了**第三个 agent 测试模块**（`external.zig` 自己做 root——`defs.zig` 够不着它，`record.zig` 的同一条先例）。
+  - **验收：这次外置改了 agent 包里的哪几行。** **`main.zig` 与 `defs.zig` 一个字未改**（0 行）——委派的入口、四道门、白名单、depth、render/list 的投影全都不需要知道有这么一个 arm。`record.zig` **+1 行代码**（`message_name` 常量）+ 布局注释。`runner.zig` **+36 行代码**：`Backend` 多一个 arm、`driveOnce` 多一个 case、`openBackend` 多一个分支、外加从 record 多读回一列 `runner_version`——**wake 不变量（租约 / release-and-recheck / 报告框架）一个字未改**。`runners.zig` **+81 行代码**，其中约一半是 `Runner` 那个词本身（union + `parse`/`label`/`extId` + 两条新单测），另一半是 `start` 的 `.ext` arm（解析版本 → 冻 persona → `op=open`）与四个 switch 上各加一个标签。新文件 `external.zig` 410 行 = 那个 arm 的方言，与 `pi.zig`（440）同量级——**"搬出去 agent 几乎不用改"成立的具体形状是：入口零改动，循环加一个分支，其余是新方言。**
+  - **一处如实记下的代价**：`op=open` 被拒绝时，`<d>/persona.md` 已经写下了（persona 必须先于 open 存在——runner 要拿它开对话）。所以 codex 那条 e2e 断言的"连 `.nulya/delegations/` 都不出现"在这一 arm 上不成立，改成断言**没有任何 record**——record 才是"这条 delegation 存在"的判据（`read` 回 null = 不存在），一个孤零零的 persona 文件不被任何东西读到。删掉那棵树是 3 行，但"失败路径上删目录"不值得为一个没有读者的文件引入。
+  - **测试**：e2e 里的 runner extension 是一个**脚本** extension（`run.ps1` / `run.sh`，`tests/e2e/extension.zig` 里写出来、经真实的 `ext build` + `ext activate` 装进 workspace store）——**这本身就是验收的一部分**：第三方接一个 harness 不需要 zig、不需要动这个仓库。三条新 e2e：① 全环 + **版本冻结**（开场冻 v1 → 中途 build+activate v2 → 追问仍由 v1 答出，log 里没有 `round v2`）+ record 三列 + persona 冻在 `<d>/` + 报告经 `task_finished` 回父场 + 消息走 `<d>/inbox/` + exchanges 从 record 数 ② readonly fail-closed（同一个定义，只有 runner 那侧的开关不同：拒绝时 exit ≠ 0、runner 自己那句话到得了模型、**没有任何 record**；接受时正常跑完）③ **interrupt 过界**（hold 住一轮 → 带 `interrupt:true` 送一条 → runner 取走标记、报 `{"interrupted":true}` → 下一轮答出那条消息，而被砍掉那一轮的答案不进报告）。结果：`zig build test` **501 pass / 2 skip**（499 → 501：`runners.zig` 的 `ext:` 词表、`external.zig` 的 `versionIn`）· `zig build e2e` **109 pass**（106 → 109）。**既有 106 条 e2e 逐字未改、语义未动；内核 `src/` 与 `tui/` 一个字未改**（`git diff --stat -- src/ tui/` 为空）。
+  - **文档**：本文件 §1（ar-g 划掉）与新 §7 · DESIGN §7.8 新增「runner 可以住在别的扩展里」整段并把 `runner:` 那段的"四个 arm"更新为五个 · guide skill 在 agent 定义那条 bullet 后面补一条完整配方（两个 op 的表 + manifest 骨架 + 装法与版本冻结那句）。CLAUDE.md 现状条目按前几轮的先例留给 review 后统一收。
+  - **交接给 review 的一点**：TUI 侧 `render/registry.ts` 与 `AgentPicker` 判断"非 nulya runner"用的是 `runner !== "nulya"` 的字符串比较，`ext:<id>` 天然落在正确的一侧（显示 runner 名、退化成 `/tasks` 提示、`startAgent` 当场拒绝），所以本轮 `tui/` 无需改动；但 `/ext` 那张表不会告诉任何人某个扩展是一个 runner（manifest 里也没有说"我是 runner"的字段——`agent_runner` 这个名字就是全部声明）。要不要让前端认出它，属于 ar-t 系列的下一轮判断。
+
+## 7. `agent_runner` 契约（ar-g 定稿）
+
+> 这一节是**给第三方看的**：接一个新 harness 要写的全部东西。同一份契约还写在
+> `extensions/agent/src/external.zig` 的模块注释（代码旁边那一份）、DESIGN §7.8（内核视角）
+> 与 guide skill（模型按需读到的那一份）。四处**同一件事只说一次的那部分不同**：这里是完整表格，
+> external.zig 是实现旁的契约，DESIGN 是它在这套系统里的位置，guide 是最短配方。
+
+### 7.1 一个 runner extension 是什么
+
+一个普通 extension（脚本或编译都行，脚本更常见——不需要 zig），**声明恰好一个 tool，
+名字必须是 `agent_runner`，`surface: "internal"`**（它是 driver 的工具，永不上模型面）。
+定义文件写 `runner: ext:<id>` 就用它。
+
+装法与别的扩展一模一样：`nulya ext build <path>` → `nulya ext activate <id> <version>`。
+**`current` 只在一条 delegation 开场时解析一次**，`v-…` 冻进 record 的 `runner_version`，
+之后那条 delegation 的每一轮都调那个确切版本——activate 新版本决定的是**下一条**
+delegation 跑在什么上（physics #2 在包外的推论）。
+
+调用形式（agent 包自己拼，第三方只要知道参数怎么到达）：
+
+```
+nulya ext run <id>@<v-…> agent_runner --arg op=… --arg delegation=… …
+```
+
+参数按 §7.3 的 plain wire 到达：**stdin 一个 JSON 对象**，同时 **`NULYA_ARG_<key>`
+进环境**（字符串原样、布尔是 `true`/`false` 的文本）。空值的参数**根本不传**，所以
+`NULYA_ARG_model` 不存在就是"这次没点名模型"。
+
+### 7.2 两个 op
+
+| 参数 | `op=open` | `op=round` | 是什么 |
+|---|---|---|---|
+| `op` | `open` | `round` | 这次要它做什么 |
+| `delegation` | ✓ | ✓ | `d-<12 hex>`；它的盘面在 `.nulya/delegations/<d>/` |
+| `persona` | ✓ | ✓ | **路径**：冻结的 system prompt（`<d>/persona.md`） |
+| `readonly` | ✓ | ✓ | `true` / `false`——一个**天花板**，管不了就拒绝（D10） |
+| `model` | 可选 | 可选 | 不透明模型字符串，那个 harness 自己的词汇（D9） |
+| `remote` | — | ✓ | `open` 回的那个 handle |
+| `message_file` | — | ✓ | **路径**：这一轮要答的**那一条**消息（`<d>/message.txt`） |
+| `interrupt` | — | ✓ | **路径**：一个标记文件，出现了就是"停下"（D6） |
+
+**输出**（stdout 一个紧凑 JSON 对象；未知键忽略，留给以后长）：
+
+| | 成功（exit 0） | 失败（exit ≠ 0） |
+|---|---|---|
+| `open` | `{"remote":"<handle>"}`——任何能让后来的一轮找回这场对话的字符串 | **拒绝整条委派**：stderr 就是原因，一路回到模型面；record 不写、delegation 不存在 |
+| `round` | `{"text":"<本轮最终答案>"}`，被打断时 `{"text":"","interrupted":true}` | 这一轮没跑成：stderr 是原因，**那条消息退回 `<d>/inbox/`** 等下一轮 |
+
+**两段文本走路径而不是值**：一个 persona 和一个任务想多长有多长，而 Windows 把整条命令行封在
+32 KiB。其余都是短标量。
+
+**exit code 不做词表**（ext-review-3 Lane W 的同一条纪律）：0 = 做成了，非 0 = 没做成、stderr 是话。
+`interrupted` / `idle` 这类"做成了但结果不同"的区别在 **stdout 的 JSON 里**，不在退出码里。
+（`idle` 根本不需要表达：没有消息时 agent 包不会调 `op=round`。）
+
+### 7.3 谁负责什么
+
+**留在 `extensions/agent` 的**（runner 一个字都不用管）：delegation 身份与 record（D2）·
+exchange 预算 · `<d>/inbox/` 与消息顺序（D5）· runner 租约与 release-and-recheck（D4）·
+"标记写在消息之后"（D6）· 报告框架与经 `task_finished` 回父场 · readonly 的**拒绝路径** ·
+persona 的冻结与消息的 staging。
+
+**归 runner 的**：怎么跟那个 harness 说话。仅此。
+
+**interrupt 是带内的**：能停下一轮的只有正在驱动它的那个进程，所以 `runners.stop` 在这一 arm
+上是空的，marker 路径交给 runner——它自己轮询、自己删、自己翻译成那个 harness 的停止动词。
+删掉标记就是"我接住了"；不删的 runner 不会崩，只是那一轮打不断（下一轮开始时 agent 包会清掉
+陈旧标记）。
+
+### 7.4 最短配方（一个 echo runner，POSIX sh）
+
+```sh
+#!/bin/sh
+cat >/dev/null                       # 参数也在 stdin 上；不读就把管道晾在那儿
+if [ "$NULYA_ARG_op" = "open" ]; then
+  [ "$NULYA_ARG_readonly" = "true" ] && { echo "cannot enforce read-only" >&2; exit 1; }
+  printf '{"remote":"%s"}' "$NULYA_ARG_delegation"; exit 0
+fi
+msg=$(cat "$NULYA_ARG_message_file")
+# …把 $msg 交给那个 harness，拿回它这一轮的最终答案…
+printf '{"text":"heard: %s"}' "$msg"
+```
+
+manifest 那一半：
+
+```json
+{ "schema": "nulya.extension/v2", "id": "my-runner",
+  "runtime": { "entry": "src/run.sh", "interpreter": "sh" },
+  "contributes": { "tools": [{ "name": "agent_runner", "surface": "internal",
+    "description": "Drive one round of a delegation on <harness>.",
+    "input": { "type": "object", "properties": {
+      "op": {"type":"string"}, "delegation": {"type":"string"},
+      "remote": {"type":"string"}, "persona": {"type":"string"},
+      "message_file": {"type":"string"}, "interrupt": {"type":"string"},
+      "model": {"type":"string"}, "readonly": {"type":"boolean"} },
+      "required": ["op"] } }] } }
+```
+
+用它：`.nulya/agents/<name>.md` 的 frontmatter 写 `runner: ext:my-runner`
+（模型可选的话再写 `runner_model:`），正文是 persona。`pins` / `agents` / `max_steps` /
+`model:` 描述的是一场 nulya session，写在这里会被丢掉并点名——`max_exchanges` 例外，
+它数的是 record 的 turn 行，每个 runner 都有。
+- 2026-08-26 · **review 附记（随 ar-g commit）**：全套 e2e 的偶发失败第二次出现（六次运行中两次），这次抓到部分现场——某条在测试里经 `ext build` 调宿主 zig 编译的用例报 `unable to read results of configure phase`，指向 zig 编译缓存层的偶发竞争（单次重跑即绿）。归入测试提速那一轮一并诊断（prebuilt 缓存的并发面 / 每次 compile 的 cache 目录隔离）。

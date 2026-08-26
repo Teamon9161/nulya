@@ -267,6 +267,28 @@ Store and scope:
   are dropped with a warning, and an unknown `runner:` costs the whole
   definition. `readonly: true` is honoured on every runner or the delegation is
   refused — none of them is allowed to run it wider than it asked for.
+- `runner: ext:<id>` holds the conversation on a harness NOBODY here has heard
+  of. That extension declares one `internal` tool named exactly `agent_runner`,
+  and answers two operations (its arguments arrive as `NULYA_ARG_<key>`, and as
+  JSON on stdin, like every other tool):
+
+  | | `op=open` | `op=round` |
+  |---|---|---|
+  | in | `delegation` `persona` `readonly` `model?` | those, plus `remote` `message_file` `interrupt` |
+  | out | `{"remote":"<handle>"}` | `{"text":"<this round's answer>"}` |
+  | exit ≠ 0 | refuses the whole delegation; stderr says why | this round failed; the message waits for the next one |
+
+  `persona` and `message_file` are PATHS (a task is as long as it needs to be).
+  `interrupt` is a marker file: while a turn is in flight, watch it — if it
+  appears, delete it, stop the turn however the harness allows, and answer
+  `{"text":"","interrupted":true}`. Refuse `op=open` when `readonly` is `true`
+  and the harness cannot be held to reading: that refusal is the ceiling.
+  Everything else — the delegation's identity and journal, its message queue,
+  the exchange budget, the report reaching the parent — is the `agent` package's
+  and needs nothing from you. Install it like any extension (`nulya ext build
+  <path>` then `nulya ext activate <id> <version>`); the version in effect when
+  a delegation opens is frozen into it, so activating a newer one changes what
+  the next delegation runs on, never a conversation already under way.
 - Handover is the model's half of that: a tool that writes a brief and stops,
   leaving the driver to decide whether to act on it. The shape is the same in
   any workspace even where those particular files are not.

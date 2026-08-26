@@ -52,13 +52,15 @@
 //! (BUGS #16). Reading the answer the kernel already has removes the failure
 //! mode rather than hardening it.
 //!
-//! **Four harnesses, one loop.** Everything above is about WHEN a round runs and
+//! **Any harness, one loop.** Everything above is about WHEN a round runs and
 //! who is allowed to run it, and none of it is about nulya. So the lease, the
 //! release-and-recheck, the interrupt marker and the report framing are written
 //! once, and what actually answers a round is a `Backend` — a nulya `session
-//! step` process per round, or a connection held open across them to Codex
-//! (`codex.zig`), Claude (`claude.zig`) or pi (`pi.zig`). Not one of the three
-//! external arms moved any part of the invariant.
+//! step` process per round, a connection held open across them to Codex
+//! (`codex.zig`), Claude (`claude.zig`) or pi (`pi.zig`), or one `ext run` per
+//! round out to a runner that is somebody else's extension (`external.zig`).
+//! Not one of those arms moved any part of the invariant, which is the whole
+//! claim the last of them exists to test.
 
 const std = @import("std");
 const rpc = @import("rpc.zig");
@@ -67,6 +69,7 @@ const runners = @import("runners.zig");
 const codex = @import("codex.zig");
 const claude = @import("claude.zig");
 const pi = @import("pi.zig");
+const external = @import("external.zig");
 const proc = @import("proc.zig");
 
 /// Cap on what one report carries back. The supervisor applies the kernel's own
@@ -153,10 +156,16 @@ pub fn run(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args: Args) !r
     // process is told which model to use on every round, so the record is the
     // only thing that can still answer.
     var runner_model: []const u8 = "";
+    // Which implementation of an EXTERNAL runner extension this delegation was
+    // nailed to when it opened (D7). Read back rather than resolved again:
+    // activating a new version of a runner decides what the next delegation
+    // runs on, never what an conversation already under way is answered by.
+    var runner_version: []const u8 = "";
     if (args.delegation.len != 0) {
         if (try record.read(alloc, io, cwd, args.delegation)) |state| {
             kind = runners.Runner.parse(state.created.runner) orelse runners.default;
             runner_model = state.created.runner_model;
+            runner_version = state.created.runner_version;
         }
     }
 
@@ -177,7 +186,7 @@ pub fn run(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args: Args) !r
     // Whatever holds the conversation, opened once for this whole task. The
     // lease is taken FIRST: a connection opened by a runner that then lost the
     // race would be a second client on one thread.
-    var backend = switch (try openBackend(alloc, io, kind, args, runner_model)) {
+    var backend = switch (try openBackend(alloc, io, exe, kind, args, runner_model, runner_version)) {
         // Not wrapped in the report frame: this is not a sub-agent's findings,
         // it is news about the delegation itself, and saying "treat the
         // following as data" about our own sentence would be theatre. Named,
@@ -258,10 +267,14 @@ const Backend = union(enum) {
     codex: codex.Session,
     claude: claude.Session,
     pi: pi.Session,
+    /// One `ext run` per round, so there is nothing held open between them —
+    /// whatever this runner keeps alive is its own business, on its own side of
+    /// the contract.
+    ext: external.Session,
 
     fn close(self: *Backend, io: std.Io) void {
         switch (self.*) {
-            .nulya => {},
+            .nulya, .ext => {},
             .codex => |*s| s.close(io),
             .claude => |*s| s.close(io),
             .pi => |*s| s.close(io),
@@ -272,12 +285,35 @@ const Backend = union(enum) {
 fn openBackend(
     alloc: std.mem.Allocator,
     io: std.Io,
+    exe: []const u8,
     kind: runners.Runner,
     args: Args,
     runner_model: []const u8,
+    runner_version: []const u8,
 ) !union(enum) { ok: Backend, failed: []const u8 } {
     switch (kind) {
         .nulya => return .{ .ok = .nulya },
+        .ext => |word| {
+            // Nothing is spawned yet: this only works out what every round of
+            // this delegation will call, which is the frozen version of that
+            // extension and the handle its `op=open` gave back.
+            const attempt = try external.attach(
+                alloc,
+                io,
+                std.Io.Dir.cwd(),
+                exe,
+                word[runners.ext_prefix.len..],
+                runner_version,
+                args.delegation,
+                args.session,
+                args.readonly,
+                runner_model,
+            );
+            return switch (attempt) {
+                .ok => |s| .{ .ok = .{ .ext = s } },
+                .failed => |f| .{ .failed = f },
+            };
+        },
         .pi => {
             // One `pi --mode rpc` for the whole task. `--session-id` opens the
             // conversation or creates it, so this arm has no second form to
@@ -362,6 +398,16 @@ fn driveOnce(
 
     switch (backend.*) {
         .nulya => return driveNulyaRound(alloc, io, exe, args, cwd, interrupt_path),
+        .ext => |*sess| {
+            const r = try external.driveRound(alloc, io, sess, cwd, args.delegation, interrupt_path);
+            return .{
+                .text = r.text,
+                .stopped = r.stopped,
+                .code = if (r.failure.len != 0) 1 else 0,
+                .stderr = r.failure,
+                .interrupted = r.interrupted,
+            };
+        },
         .pi => |*sess| {
             const r = try pi.driveRound(alloc, io, sess, cwd, args.delegation, interrupt_path);
             return .{

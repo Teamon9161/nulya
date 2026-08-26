@@ -4648,3 +4648,459 @@ test "bundled agent: a read-only pi delegation asks for the allow-list and stops
         try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "heard: go") != null);
     }
 }
+
+// ── ar-g: a runner that lives outside this package ──────────────────────────
+//
+// The four arms in `extensions/agent` are there because they were first;
+// nothing about them is privileged. `runner: ext:<id>` is the claim that a
+// fifth harness needs no code in that package at all — one extension with one
+// `agent_runner` tool, and the delegation world view comes with it. The fixture
+// below is that extension, written the way a third party would write one: a
+// SCRIPT, no Zig, no toolchain, answering the two operations of the contract
+// (`extensions/agent/src/external.zig`).
+//
+// It echoes rather than talks to a model — what these tests pin down is on this
+// side of the wire (which version is called, that the message is staged where
+// the contract says, that the interrupt marker crosses the boundary, that a
+// refusal at `op=open` costs the whole delegation), and a test that needed a
+// model is a test nobody runs. `$tag` is how a round says WHICH BUILD answered
+// it, which is the whole of the version-freeze assertion.
+
+fn runnerScriptPs1(alloc: std.mem.Allocator, tag: []const u8) ![]u8 {
+    return std.fmt.allocPrint(alloc,
+        \\$ErrorActionPreference = 'Stop'
+        \\$null = [Console]::In.ReadToEnd()
+        \\$tag = '{s}'
+        \\if ($env:ECHO_RUNNER_LOG) {{ Add-Content -Path $env:ECHO_RUNNER_LOG -Value "$($env:NULYA_ARG_op) $tag" }}
+        \\if ($env:NULYA_ARG_op -eq 'open') {{
+        \\  if ($env:NULYA_ARG_readonly -eq 'true' -and $env:ECHO_RUNNER_REFUSE_READONLY) {{
+        \\    [Console]::Error.Write('this runner cannot hold a sub-agent to reading only')
+        \\    exit 1
+        \\  }}
+        \\  [Console]::Out.Write('{{"remote":"echo-' + $env:NULYA_ARG_delegation + '"}}')
+        \\  exit 0
+        \\}}
+        \\$msg = (Get-Content -Raw -Path $env:NULYA_ARG_message_file).Trim()
+        \\if ($env:ECHO_RUNNER_HOLD) {{
+        \\  while (Test-Path $env:ECHO_RUNNER_HOLD) {{
+        \\    if ($env:NULYA_ARG_interrupt -and (Test-Path $env:NULYA_ARG_interrupt)) {{
+        \\      Remove-Item -Force $env:NULYA_ARG_interrupt
+        \\      [Console]::Out.Write('{{"text":"","interrupted":true}}')
+        \\      exit 0
+        \\    }}
+        \\    Start-Sleep -Milliseconds 50
+        \\  }}
+        \\}}
+        \\[Console]::Out.Write('{{"text":"heard: ' + $msg + ' (' + $tag + ')"}}')
+        \\
+    , .{tag});
+}
+
+fn runnerScriptSh(alloc: std.mem.Allocator, tag: []const u8) ![]u8 {
+    return std.fmt.allocPrint(alloc,
+        \\#!/bin/sh
+        \\cat >/dev/null
+        \\tag={s}
+        \\if [ -n "$ECHO_RUNNER_LOG" ]; then printf '%s %s\n' "$NULYA_ARG_op" "$tag" >> "$ECHO_RUNNER_LOG"; fi
+        \\if [ "$NULYA_ARG_op" = "open" ]; then
+        \\  if [ "$NULYA_ARG_readonly" = "true" ] && [ -n "$ECHO_RUNNER_REFUSE_READONLY" ]; then
+        \\    printf 'this runner cannot hold a sub-agent to reading only' >&2
+        \\    exit 1
+        \\  fi
+        \\  printf '{{"remote":"echo-%s"}}' "$NULYA_ARG_delegation"
+        \\  exit 0
+        \\fi
+        \\msg=$(cat "$NULYA_ARG_message_file")
+        \\if [ -n "$ECHO_RUNNER_HOLD" ]; then
+        \\  while [ -e "$ECHO_RUNNER_HOLD" ]; do
+        \\    if [ -n "$NULYA_ARG_interrupt" ] && [ -e "$NULYA_ARG_interrupt" ]; then
+        \\      rm -f "$NULYA_ARG_interrupt"
+        \\      printf '{{"text":"","interrupted":true}}'
+        \\      exit 0
+        \\    fi
+        \\    sleep 0.1
+        \\  done
+        \\fi
+        \\printf '{{"text":"heard: %s (%s)"}}' "$msg" "$tag"
+        \\
+    , .{tag});
+}
+
+const runner_id = "echo-runner";
+const runner_src = "runner-src";
+
+/// Write the runner extension's draft (manifest + host-appropriate script) at
+/// `runner-src`, with `tag` baked into what a round answers.
+fn writeRunnerDraft(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, tag: []const u8) !void {
+    const windows = @import("builtin").os.tag == .windows;
+    const entry = if (windows) "src/run.ps1" else "src/run.sh";
+    const interpreter = if (windows) "powershell" else "sh";
+
+    try ws.createDirPath(io, runner_src ++ std.fs.path.sep_str ++ "src");
+    const manifest_bytes = try std.fmt.allocPrint(alloc,
+        \\{{
+        \\  "schema": "nulya.extension/v2",
+        \\  "id": "{s}",
+        \\  "runtime": {{ "entry": "{s}", "interpreter": "{s}" }},
+        \\  "contributes": {{
+        \\    "tools": [{{
+        \\      "name": "agent_runner",
+        \\      "surface": "internal",
+        \\      "description": "Drive one round of a delegation on the harness this package speaks to.",
+        \\      "input": {{
+        \\        "type": "object",
+        \\        "properties": {{
+        \\          "op": {{ "type": "string" }},
+        \\          "delegation": {{ "type": "string" }},
+        \\          "remote": {{ "type": "string" }},
+        \\          "persona": {{ "type": "string" }},
+        \\          "message_file": {{ "type": "string" }},
+        \\          "interrupt": {{ "type": "string" }},
+        \\          "model": {{ "type": "string" }},
+        \\          "readonly": {{ "type": "boolean" }}
+        \\        }},
+        \\        "required": ["op"]
+        \\      }}
+        \\    }}]
+        \\  }}
+        \\}}
+        \\
+    , .{ runner_id, entry, interpreter });
+    defer alloc.free(manifest_bytes);
+    try ws.writeFile(io, .{ .sub_path = runner_src ++ std.fs.path.sep_str ++ "extension.json", .data = manifest_bytes });
+
+    const body = if (windows) try runnerScriptPs1(alloc, tag) else try runnerScriptSh(alloc, tag);
+    defer alloc.free(body);
+    const rel = if (windows)
+        runner_src ++ std.fs.path.sep_str ++ "src" ++ std.fs.path.sep_str ++ "run.ps1"
+    else
+        runner_src ++ std.fs.path.sep_str ++ "src" ++ std.fs.path.sep_str ++ "run.sh";
+    try ws.writeFile(io, .{ .sub_path = rel, .data = body });
+}
+
+/// Build that draft and make it `current`, the way anybody installing a runner
+/// would. Returns the built version; caller frees.
+fn buildAndActivateRunner(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, exe_abs: []const u8, tag: []const u8) ![]u8 {
+    try writeRunnerDraft(alloc, io, ws, tag);
+    const built = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "build", runner_src });
+    defer alloc.free(built.stdout);
+    if (built.code != 0) {
+        std.debug.print("runner extension failed to build:\n{s}\n", .{built.stdout});
+        return error.ExtensionBuildFailed;
+    }
+    const version = try extractVersion(alloc, built.stdout);
+    errdefer alloc.free(version);
+    const activated = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "activate", runner_id, version });
+    defer alloc.free(activated.stdout);
+    try std.testing.expectEqual(@as(u8, 0), activated.code);
+    return version;
+}
+
+/// Does any delegation on disk have a record? The question a refused `op=open`
+/// answers with "no": a delegation exists exactly when this journal says so.
+fn anyDelegationRecorded(io: std.Io, alloc: std.mem.Allocator, ws: std.Io.Dir) !bool {
+    var dir = ws.openDir(io, ".nulya/delegations", .{ .iterate = true }) catch return false;
+    defer dir.close(io);
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .directory) continue;
+        const path = try std.fmt.allocPrint(alloc, ".nulya/delegations/{s}/record.jsonl", .{entry.name});
+        defer alloc.free(path);
+        ws.access(io, path, .{}) catch continue;
+        return true;
+    }
+    return false;
+}
+
+test "bundled agent: a delegation can be held by a runner that is somebody else's extension — the version is frozen when it opens, every later round calls that same one, and the report comes back through the parent's inbox" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const ref = try buildBundled(alloc, io, ws, exe_abs, "agent");
+    defer alloc.free(ref);
+    const v1 = try buildAndActivateRunner(alloc, io, ws, exe_abs, "v1");
+    defer alloc.free(v1);
+
+    try ws.createDirPath(io, ".nulya/agents");
+    try ws.writeFile(io, .{
+        .sub_path = ".nulya/agents/outsider.md",
+        .data = "---\ndescription: runs on a harness nulya knows nothing about\nrunner: ext:echo-runner\nrunner_model: someone/else\n---\nYou are an outsider. Report what you found.\n",
+    });
+
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(new.stdout);
+    const parent = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(parent);
+    const session_file = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{parent});
+    defer alloc.free(session_file);
+    const with_runner: []const EnvPair = &.{
+        .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "ECHO_RUNNER_LOG", .value = "runner-log.txt" },
+        .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+    };
+
+    const started = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"outsider\",\"task\":\"find the parser\"}" }, with_runner);
+    defer alloc.free(started.stdout);
+    try std.testing.expectEqual(@as(u8, 0), started.code);
+    // The receipt names the runner as the delegation's own word for it, and does
+    // not call the handle a session — this side does not know what kind of thing
+    // it is (D2).
+    try std.testing.expect(std.mem.indexOf(u8, started.stdout, "ext:echo-runner conversation") != null);
+
+    const d = try delegationOf(alloc, started.stdout);
+    defer alloc.free(d);
+
+    // The record froze WHICH runner and WHICH VERSION of it (D7) — the whole
+    // point of resolving `current` once, at the moment the delegation opens.
+    {
+        const rows = try readRecord(alloc, io, ws, d);
+        defer alloc.free(rows);
+        try std.testing.expect(std.mem.indexOf(u8, rows, "\"runner\":\"ext:echo-runner\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rows, "\"runner_model\":\"someone/else\"") != null);
+        const frozen = try std.fmt.allocPrint(alloc, "\"runner_version\":\"{s}\"", .{v1});
+        defer alloc.free(frozen);
+        try std.testing.expect(std.mem.indexOf(u8, rows, frozen) != null);
+    }
+
+    // The persona is frozen into the delegation and handed over as a path: the
+    // runner is given something that cannot change under it.
+    {
+        const path = try std.fmt.allocPrint(alloc, ".nulya/delegations/{s}/persona.md", .{d});
+        defer alloc.free(path);
+        const frozen = try ws.readFileAlloc(io, path, alloc, .limited(1 << 20));
+        defer alloc.free(frozen);
+        try std.testing.expect(std.mem.indexOf(u8, frozen, "You are an outsider.") != null);
+    }
+
+    {
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", "120000" });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+    }
+
+    // The report reaches the parent the way every other delegation's does — the
+    // background task's `task_finished`, drained at the parent's next step.
+    {
+        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, &.{
+            .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+        });
+        defer alloc.free(stepped.stdout);
+        try std.testing.expectEqual(@as(u8, 0), stepped.code);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "\"kind\":\"task_finished\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "heard: find the parser (v1)") != null);
+    }
+
+    // Both operations of the contract were called, and by the build that was
+    // frozen.
+    {
+        const log = try ws.readFileAlloc(io, "runner-log.txt", alloc, .limited(1 << 20));
+        defer alloc.free(log);
+        try std.testing.expect(std.mem.indexOf(u8, log, "open v1") != null);
+        try std.testing.expect(std.mem.indexOf(u8, log, "round v1") != null);
+    }
+
+    // Now a NEWER version of the runner becomes `current`…
+    const v2 = try buildAndActivateRunner(alloc, io, ws, exe_abs, "v2");
+    defer alloc.free(v2);
+    try std.testing.expect(!std.mem.eql(u8, v1, v2));
+
+    // …and the delegation already under way is still answered by the one it
+    // froze. Activating a runner decides what the NEXT delegation runs on.
+    {
+        const args = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"and the lexer\"}}", .{d});
+        defer alloc.free(args);
+        const again = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", args }, with_runner);
+        defer alloc.free(again.stdout);
+        try std.testing.expectEqual(@as(u8, 0), again.code);
+
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", "120000" });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+
+        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, &.{
+            .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+        });
+        defer alloc.free(stepped.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "heard: and the lexer (v1)") != null);
+        // …and the message travelled through the delegation's own inbox (D5),
+        // which the round drained.
+        try std.testing.expect(try inboxEmpty(io, alloc, ws, d));
+    }
+
+    {
+        const log = try ws.readFileAlloc(io, "runner-log.txt", alloc, .limited(1 << 20));
+        defer alloc.free(log);
+        try std.testing.expect(std.mem.indexOf(u8, log, "round v2") == null);
+    }
+
+    // Exchanges are counted from the record, whatever runner is behind it.
+    {
+        const rows = try readRecord(alloc, io, ws, d);
+        defer alloc.free(rows);
+        try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, rows, "\"kind\":\"turn\""));
+    }
+}
+
+test "bundled agent: an outside runner that cannot hold a delegation to reading only refuses it at open, and nothing is recorded" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const ref = try buildBundled(alloc, io, ws, exe_abs, "agent");
+    defer alloc.free(ref);
+    const version = try buildAndActivateRunner(alloc, io, ws, exe_abs, "v1");
+    defer alloc.free(version);
+
+    try ws.createDirPath(io, ".nulya/agents");
+    try ws.writeFile(io, .{
+        .sub_path = ".nulya/agents/prober.md",
+        .data = "---\ndescription: only reads\nreadonly: true\nrunner: ext:echo-runner\n---\nYou only read.\n",
+    });
+
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(new.stdout);
+    const parent = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(parent);
+    const session_file = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{parent});
+    defer alloc.free(session_file);
+
+    // The ceiling reaches the runner at `op=open`, and a runner that cannot
+    // enforce it refuses the whole delegation rather than opening one that would
+    // run wider than it said (D10).
+    {
+        const refused = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"prober\",\"task\":\"go\"}" }, &.{
+            .{ .key = "NULYA_SESSION", .value = session_file },
+            .{ .key = "ECHO_RUNNER_REFUSE_READONLY", .value = "1" },
+            .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+        });
+        defer alloc.free(refused.stdout);
+        try std.testing.expect(refused.code != 0);
+        // The runner's own sentence reaches the model: it is the only thing that
+        // knows why.
+        try std.testing.expect(std.mem.indexOf(u8, refused.stdout, "reading only") != null);
+        // Nothing was recorded, so there is no delegation to send anything into.
+        try std.testing.expect(!(try anyDelegationRecorded(io, alloc, ws)));
+    }
+
+    // With a runner that accepts the ceiling, the same definition opens.
+    {
+        const opened = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"prober\",\"task\":\"go\"}" }, &.{
+            .{ .key = "NULYA_SESSION", .value = session_file },
+            .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+        });
+        defer alloc.free(opened.stdout);
+        try std.testing.expectEqual(@as(u8, 0), opened.code);
+        try std.testing.expect(try anyDelegationRecorded(io, alloc, ws));
+
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", "120000" });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+
+        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, &.{
+            .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+        });
+        defer alloc.free(stepped.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "heard: go (v1)") != null);
+    }
+}
+
+test "bundled agent: an interrupt crosses the contract — an outside runner takes the marker, stops the round, and the message behind it is answered by the next one" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const ref = try buildBundled(alloc, io, ws, exe_abs, "agent");
+    defer alloc.free(ref);
+    const version = try buildAndActivateRunner(alloc, io, ws, exe_abs, "v1");
+    defer alloc.free(version);
+
+    try ws.createDirPath(io, ".nulya/agents");
+    try ws.writeFile(io, .{
+        .sub_path = ".nulya/agents/outsider.md",
+        .data = "---\ndescription: runs elsewhere\nrunner: ext:echo-runner\n---\nYou are an outsider.\n",
+    });
+    try ws.writeFile(io, .{ .sub_path = "hold", .data = "" });
+
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(new.stdout);
+    const parent = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(parent);
+    const session_file = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{parent});
+    defer alloc.free(session_file);
+    const held: []const EnvPair = &.{
+        .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "ECHO_RUNNER_LOG", .value = "runner-log.txt" },
+        .{ .key = "ECHO_RUNNER_HOLD", .value = "hold" },
+        .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+    };
+
+    const started = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"outsider\",\"task\":\"go on for a while\"}" }, held);
+    defer alloc.free(started.stdout);
+    try std.testing.expectEqual(@as(u8, 0), started.code);
+    const d = try delegationOf(alloc, started.stdout);
+    defer alloc.free(d);
+
+    try waitForText(io, alloc, ws, "runner-log.txt", "round v1");
+
+    {
+        const args = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"STOP-SENTINEL\",\"interrupt\":true}}", .{d});
+        defer alloc.free(args);
+        const interrupted = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", args }, held);
+        defer alloc.free(interrupted.stdout);
+        try std.testing.expectEqual(@as(u8, 0), interrupted.code);
+        // The runner took the marker — that is the fact this waits for, rather
+        // than a length of time.
+        const marker = try std.fmt.allocPrint(alloc, ".nulya/delegations/{s}/interrupt", .{d});
+        defer alloc.free(marker);
+        try waitForGone(io, ws, marker);
+    }
+
+    // Let the next round through: it is a fresh process, so nothing about the
+    // hold is remembered across it.
+    try ws.deleteFile(io, "hold");
+
+    {
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", "120000" });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+    }
+
+    // The message the interrupt carried was answered rather than lost (D3/D6),
+    // and the answer the cut-short round was going to give is not reported.
+    {
+        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, &.{
+            .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+        });
+        defer alloc.free(stepped.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "heard: STOP-SENTINEL") != null);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "heard: go on for a while") == null);
+    }
+}

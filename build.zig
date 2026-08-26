@@ -112,6 +112,17 @@ pub fn build(b: *std.Build) void {
     const agent_record_tests = b.addTest(.{ .root_module = agent_record_mod, .filters = test_filters });
     test_step.dependOn(&b.addRunArtifact(agent_record_tests).step);
 
+    // …and the arm that lets a runner live OUTSIDE this package
+    // (`external.zig`): which frozen version a delegation is nailed to, read off
+    // the kernel's own listing. Its own root for the reason above.
+    const agent_external_mod = b.createModule(.{
+        .root_source_file = b.path("extensions/agent/src/external.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const agent_external_tests = b.addTest(.{ .root_module = agent_external_mod, .filters = test_filters });
+    test_step.dependOn(&b.addRunArtifact(agent_external_tests).step);
+
     // End-to-end closed-loop test (DESIGN §16 milestone): init -> build -> run.
     // It uses the host's own zig (no embed needed) via NULYA_TEST_ZIG, so it
     // actually compiles and runs a real extension. Everything reachable from
