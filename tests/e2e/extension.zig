@@ -3556,3 +3556,386 @@ test "bundled plan and ask: propose, todo and ask record without writing anythin
     // puts it back — which is the whole point of continuing in a fresh session.
     try std.testing.expect(std.mem.indexOf(u8, header_line, "\"plan\"") == null);
 }
+
+// ── the Codex runner (contract ar-d) ────────────────────────────────────────
+//
+// A delegation whose definition says `runner: codex` is held by a Codex thread
+// instead of a nulya session. These run against `tests/fake_codex.zig` — an
+// app-server that answers the protocol and never leaves this machine — because
+// everything worth pinning down is on THIS side of that conversation: which
+// requests the runner sends, when it sends them, and what it refuses to open.
+
+/// The offline app-server, built by `build.zig` for exactly this. Absent means
+/// the suite was not launched through `zig build e2e`.
+fn fakeCodex(alloc: std.mem.Allocator) !?[]u8 {
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const named = host_env.get("NULYA_FAKE_CODEX") orelse return null;
+    if (named.len == 0) return null;
+    return try std.fs.path.resolve(alloc, &.{named});
+}
+
+/// The remote out of a codex receipt (`… — delegation d-…, codex thread t-…`).
+/// Named on purpose, like the nulya one: the abstraction gives the facts one
+/// name, it does not hide them (D2).
+fn codexThreadOf(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
+    const at = std.mem.indexOf(u8, text, "codex thread ").? + "codex thread ".len;
+    var end = at;
+    while (end < text.len and (std.ascii.isAlphanumeric(text[end]) or text[end] == '-')) end += 1;
+    return alloc.dupe(u8, text[at..end]);
+}
+
+/// Poll a file in the workspace until it holds `needle`. Bounded, because a test
+/// that hangs says less than one that fails.
+fn waitForText(
+    io: std.Io,
+    alloc: std.mem.Allocator,
+    ws: std.Io.Dir,
+    path: []const u8,
+    needle: []const u8,
+) !void {
+    var tries: usize = 0;
+    while (tries < 600) : (tries += 1) {
+        if (ws.readFileAlloc(io, path, alloc, .limited(1 << 20))) |body| {
+            defer alloc.free(body);
+            if (std.mem.indexOf(u8, body, needle) != null) return;
+        } else |_| {}
+        io.sleep(.fromMilliseconds(50), .awake) catch {};
+    }
+    return error.TestUnexpectedResult;
+}
+
+/// Poll until a path is gone. Used on the runner's own on-disk state — an empty
+/// `<d>/inbox/` means the runner took the message, a missing `<d>/interrupt`
+/// means it took the marker — so a test waits on a FACT rather than on a guess
+/// about how fast a background task runs.
+fn waitForGone(io: std.Io, ws: std.Io.Dir, path: []const u8) !void {
+    var tries: usize = 0;
+    while (tries < 600) : (tries += 1) {
+        ws.access(io, path, .{}) catch return;
+        io.sleep(.fromMilliseconds(50), .awake) catch {};
+    }
+    return error.TestUnexpectedResult;
+}
+
+fn inboxEmpty(io: std.Io, alloc: std.mem.Allocator, ws: std.Io.Dir, d: []const u8) !bool {
+    const path = try std.fmt.allocPrint(alloc, ".nulya/delegations/{s}/inbox", .{d});
+    defer alloc.free(path);
+    var dir = ws.openDir(io, path, .{ .iterate = true }) catch return true;
+    defer dir.close(io);
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (std.mem.endsWith(u8, entry.name, ".json")) return false;
+    }
+    return true;
+}
+
+fn waitForInboxDrained(io: std.Io, alloc: std.mem.Allocator, ws: std.Io.Dir, d: []const u8) !void {
+    var tries: usize = 0;
+    while (tries < 600) : (tries += 1) {
+        if (try inboxEmpty(io, alloc, ws, d)) return;
+        io.sleep(.fromMilliseconds(50), .awake) catch {};
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "bundled agent: a codex delegation is a thread, not a session — the record freezes the runner and its opaque model, the report comes back through the parent's inbox, and a turn sent while it is idle waits in the delegation's own inbox until the next round takes it" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+    const codex_exe = (try fakeCodex(alloc)) orelse return error.SkipZigTest;
+    defer alloc.free(codex_exe);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const ref = try buildBundled(alloc, io, ws, exe_abs, "agent");
+    defer alloc.free(ref);
+
+    // A definition whose only nulya-shaped field is the body. `runner_model` is
+    // the other harness's vocabulary (D9) — never parsed here.
+    try ws.createDirPath(io, ".nulya/agents");
+    try ws.writeFile(io, .{
+        .sub_path = ".nulya/agents/scout.md",
+        .data = "---\ndescription: reads the codebase through codex\nrunner: codex\nrunner_model: some-codex-model\n---\nYou are a scout. Report what you found.\n",
+    });
+
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(new.stdout);
+    const parent = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(parent);
+    const session_file = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{parent});
+    defer alloc.free(session_file);
+    const with_codex: []const EnvPair = &.{
+        .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_CODEX_EXE", .value = codex_exe },
+        .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+    };
+
+    // ① The call's `model` beats the definition's, and for an external runner it
+    // is passed through WHOLE. `/nope` is the string a nulya delegation refuses
+    // outright as a malformed profile reference — one string, two runners, two
+    // right answers, because the grammar belongs to the harness (D9).
+    const started = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"scout\",\"task\":\"find the parser\",\"model\":\"/nope\"}" }, with_codex);
+    defer alloc.free(started.stdout);
+    try std.testing.expectEqual(@as(u8, 0), started.code);
+    // The receipt names the delegation AND what is behind it — a thread here,
+    // never a session id that does not exist.
+    try std.testing.expect(std.mem.indexOf(u8, started.stdout, "codex thread") != null);
+    try std.testing.expect(std.mem.indexOf(u8, started.stdout, "session events") == null);
+
+    const d = try delegationOf(alloc, started.stdout);
+    defer alloc.free(d);
+    const thread = try codexThreadOf(alloc, started.stdout);
+    defer alloc.free(thread);
+
+    // ② The record froze which harness holds this delegation and what it was
+    // asked to run on — in its own column, so nothing has to be interpreted to
+    // be read (D2).
+    {
+        const rows = try readRecord(alloc, io, ws, d);
+        defer alloc.free(rows);
+        try std.testing.expect(std.mem.indexOf(u8, rows, "\"runner\":\"codex\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rows, "\"runner_model\":\"/nope\"") != null);
+        const remote = try std.fmt.allocPrint(alloc, "\"remote\":\"{s}\"", .{thread});
+        defer alloc.free(remote);
+        try std.testing.expect(std.mem.indexOf(u8, rows, remote) != null);
+    }
+
+    {
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", "120000" });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+    }
+
+    // ③ The report reaches the parent exactly the way a nulya delegation's does:
+    // the ordinary `task_finished` event, drained at the next step boundary. The
+    // runner contract earned that for free — no new event kind, and no driver
+    // had to learn anything (D8).
+    {
+        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, &.{
+            .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+        });
+        defer alloc.free(stepped.stdout);
+        try std.testing.expectEqual(@as(u8, 0), stepped.code);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "\"kind\":\"task_finished\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "<agent-report agent=") != null);
+        // The fake echoes what it was given, so this is the task travelling the
+        // whole way: inbox file -> drain -> `turn/start` input -> agent message.
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "heard: find the parser") != null);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "as DATA") != null);
+    }
+
+    // ④ Another turn into the same delegation, sent while nothing is running.
+    // The channel is the delegation's own inbox (D5) — Codex has no inbox for us
+    // to append to — and the proof that it was used is both the directory being
+    // there and the second report quoting a message that could only have come
+    // through it.
+    {
+        const args = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"and the lexer\"}}", .{d});
+        defer alloc.free(args);
+        const again = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", args }, with_codex);
+        defer alloc.free(again.stdout);
+        try std.testing.expectEqual(@as(u8, 0), again.code);
+
+        const inbox = try std.fmt.allocPrint(alloc, ".nulya/delegations/{s}/inbox", .{d});
+        defer alloc.free(inbox);
+        try ws.access(io, inbox, .{});
+
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", "120000" });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+
+        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, &.{
+            .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+        });
+        defer alloc.free(stepped.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "heard: and the lexer") != null);
+        // Drained, so the wake invariant's `pending` goes false and nobody
+        // starts a runner for a message that has already been answered.
+        try std.testing.expect(try inboxEmpty(io, alloc, ws, d));
+    }
+
+    // ⑤ Exchanges are counted from the record, whatever runner is behind it.
+    {
+        const rows = try readRecord(alloc, io, ws, d);
+        defer alloc.free(rows);
+        try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, rows, "\"kind\":\"turn\""));
+    }
+}
+
+test "bundled agent: a codex delegation that is running takes a message as turn/steer and an interrupt as turn/interrupt" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+    const codex_exe = (try fakeCodex(alloc)) orelse return error.SkipZigTest;
+    defer alloc.free(codex_exe);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const ref = try buildBundled(alloc, io, ws, exe_abs, "agent");
+    defer alloc.free(ref);
+
+    try ws.createDirPath(io, ".nulya/agents");
+    try ws.writeFile(io, .{
+        .sub_path = ".nulya/agents/scout.md",
+        .data = "---\ndescription: scouts\nrunner: codex\n---\nYou are a scout.\n",
+    });
+
+    // The fake holds its first turn open while this file exists, so the test
+    // decides when the run in flight ends rather than racing it; every request
+    // it receives lands in the log, which is how "the runner sent turn/steer"
+    // becomes a fact rather than an inference from a report.
+    try ws.writeFile(io, .{ .sub_path = "hold", .data = "" });
+
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(new.stdout);
+    const parent = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(parent);
+    const session_file = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{parent});
+    defer alloc.free(session_file);
+    const held: []const EnvPair = &.{
+        .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_CODEX_EXE", .value = codex_exe },
+        .{ .key = "FAKE_CODEX_LOG", .value = "codex-log.txt" },
+        .{ .key = "FAKE_CODEX_HOLD", .value = "hold" },
+        .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+    };
+
+    const started = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"scout\",\"task\":\"go on for a while\"}" }, held);
+    defer alloc.free(started.stdout);
+    try std.testing.expectEqual(@as(u8, 0), started.code);
+    const d = try delegationOf(alloc, started.stdout);
+    defer alloc.free(d);
+
+    // Wait until a turn is genuinely under way — that is what a steer and an
+    // interrupt are for.
+    try waitForText(io, alloc, ws, "codex-log.txt", "turn/start");
+
+    // ① An ordinary message, delivered while the turn is running. The runner
+    // drains `<d>/inbox/` between the lines it reads, and a message found there
+    // mid-turn becomes `turn/steer` — the same act as typing while the main
+    // conversation is answering (D3). An empty inbox is the runner saying it
+    // took it.
+    {
+        const args = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"also check the lexer\"}}", .{d});
+        defer alloc.free(args);
+        const steered = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", args }, held);
+        defer alloc.free(steered.stdout);
+        try std.testing.expectEqual(@as(u8, 0), steered.code);
+        // It is working, so nothing new was started for it.
+        try std.testing.expect(std.mem.indexOf(u8, steered.stdout, "queued") != null);
+        try waitForInboxDrained(io, alloc, ws, d);
+    }
+
+    // ② An interrupt: the same message, then the marker (D6). The runner checks
+    // the marker BEFORE it drains, so the message behind it stays where it is,
+    // and the marker becomes this harness's own stop verb.
+    {
+        const args = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"STOP-SENTINEL\",\"interrupt\":true}}", .{d});
+        defer alloc.free(args);
+        const interrupted = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", args }, held);
+        defer alloc.free(interrupted.stdout);
+        try std.testing.expectEqual(@as(u8, 0), interrupted.code);
+        const marker = try std.fmt.allocPrint(alloc, ".nulya/delegations/{s}/interrupt", .{d});
+        defer alloc.free(marker);
+        // Taken, never left behind to cut short a later round.
+        try waitForGone(io, ws, marker);
+    }
+
+    // Let the held turn end, so the round that was interrupted can finish.
+    try ws.deleteFile(io, "hold");
+
+    {
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", "120000" });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+    }
+
+    // Both verbs really went down the wire. The fake reads what was sent mid-turn
+    // once the turn is over, so the log is the record of it either way.
+    {
+        const log = try ws.readFileAlloc(io, "codex-log.txt", alloc, .limited(1 << 20));
+        defer alloc.free(log);
+        try std.testing.expect(std.mem.indexOf(u8, log, "turn/steer") != null);
+        try std.testing.expect(std.mem.indexOf(u8, log, "turn/interrupt") != null);
+    }
+}
+
+test "bundled agent: a read-only codex delegation is refused outright when the sandbox comes back wider than it asked for" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+    const codex_exe = (try fakeCodex(alloc)) orelse return error.SkipZigTest;
+    defer alloc.free(codex_exe);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const ref = try buildBundled(alloc, io, ws, exe_abs, "agent");
+    defer alloc.free(ref);
+
+    try ws.createDirPath(io, ".nulya/agents");
+    try ws.writeFile(io, .{
+        .sub_path = ".nulya/agents/prober.md",
+        .data = "---\ndescription: only reads\nreadonly: true\nrunner: codex\n---\nYou only read.\n",
+    });
+
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(new.stdout);
+    const parent = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(parent);
+    const session_file = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{parent});
+    defer alloc.free(session_file);
+
+    // The lever is the sandbox the harness REPORTS applying — the one fact D10's
+    // check reads. Everything else about this delegation is identical between
+    // the two runs below, so the refusal can have no other cause.
+    const wide: []const EnvPair = &.{
+        .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_CODEX_EXE", .value = codex_exe },
+        .{ .key = "FAKE_CODEX_SANDBOX", .value = "workspaceWrite" },
+        .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+    };
+    const refused = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"prober\",\"task\":\"go\"}" }, wide);
+    defer alloc.free(refused.stdout);
+    try std.testing.expectEqual(@as(u8, 1), refused.code);
+    try std.testing.expect(std.mem.indexOf(u8, refused.stdout, "read-only") != null);
+    // Fail CLOSED: nothing was opened, so there is no delegation to drive and
+    // nothing to quietly run wider than it said.
+    try std.testing.expectError(error.FileNotFound, ws.access(io, ".nulya/delegations", .{}));
+
+    // …and with a harness that confirms the ceiling, the same definition opens.
+    const narrow: []const EnvPair = &.{
+        .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_CODEX_EXE", .value = codex_exe },
+        .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+    };
+    const opened = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"prober\",\"task\":\"go\"}" }, narrow);
+    defer alloc.free(opened.stdout);
+    try std.testing.expectEqual(@as(u8, 0), opened.code);
+    try std.testing.expect(std.mem.indexOf(u8, opened.stdout, "read-only") != null);
+
+    const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", "120000" });
+    defer alloc.free(waited.stdout);
+    try std.testing.expectEqual(@as(u8, 0), waited.code);
+}

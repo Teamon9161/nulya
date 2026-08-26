@@ -141,6 +141,29 @@ pub fn build(b: *std.Build) void {
     // The repo root, so a test can build the extensions this repo ships
     // (`extensions/evolution`) from their real source rather than a copy.
     run_e2e.setEnvironmentVariable("NULYA_REPO", b.build_root.path orelse ".");
+    // A `codex app-server` that answers the protocol offline (`tests/fake_codex.zig`).
+    // The Codex runner is a JSON-RPC conversation, and everything worth pinning
+    // down about it is on THIS side of that conversation — so the e2e suite
+    // points `NULYA_CODEX_EXE` at this instead of at a real Codex, and stays
+    // offline. Built like the binary under test and handed over the same way.
+    const fake_codex = b.addExecutable(.{
+        .name = "fake-codex",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/fake_codex.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    // Into a directory of its own, and only when the e2e step asks for it: it is
+    // a test fixture, not something this project ships.
+    const install_fake_codex = b.addInstallArtifact(fake_codex, .{
+        .dest_dir = .{ .override = .{ .custom = "test-bin" } },
+    });
+    run_e2e.step.dependOn(&install_fake_codex.step);
+    run_e2e.setEnvironmentVariable(
+        "NULYA_FAKE_CODEX",
+        b.getInstallPath(.{ .custom = "test-bin" }, fake_codex.out_filename),
+    );
     run_e2e.has_side_effects = true; // exercises the filesystem; always run
     const e2e_step = b.step("e2e", "Run the extension closed-loop end-to-end test");
     e2e_step.dependOn(&run_e2e.step);

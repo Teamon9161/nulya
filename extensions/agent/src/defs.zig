@@ -47,9 +47,22 @@ pub const Def = struct {
     /// not there, and the mistake is one word in one line to fix.
     runner: runners.Runner = runners.default,
     /// `--profile`; empty means "inherit whatever asked for the delegation".
+    /// Only the nulya runner has such a thing.
     profile: []const u8 = "",
     /// `--model` within that profile; empty means the profile's default.
     model: []const u8 = "",
+    /// What an EXTERNAL runner should run on, in that harness's own vocabulary
+    /// (contract D9) — `runner_model: gpt-5-codex`, say. Opaque here: this
+    /// package does not own the catalogue, so a parser for it could only ever be
+    /// a second, staler copy of somebody else's list, and an id it did not
+    /// recognise would be refused by the wrong side. Errors come back from the
+    /// harness, unedited.
+    ///
+    /// A definition writes ONE of these vocabularies, and which one is decided
+    /// by its `runner:`. The other is dropped with a warning when the front
+    /// matter has been read whole (`crossCheck`) — after, not during, because a
+    /// definition may write its fields in any order.
+    runner_model: []const u8 = "",
     /// `ext:<id>/<tool>` ids for `--pin`, on top of the session's usual face.
     pins: []const []const u8 = &.{},
     /// The agents this one may delegate to. **Empty is a leaf** — the default,
@@ -213,6 +226,8 @@ pub fn parse(
                 def.profile = ref.profile;
                 def.model = ref.model;
             } else try warn(alloc, warnings, source, "model must be <profile> or <profile>/<model-id>, ignored");
+        } else if (std.mem.eql(u8, key, "runner_model")) {
+            def.runner_model = unquote(value);
         } else if (std.mem.eql(u8, key, "max_steps")) {
             def.max_steps = std.fmt.parseInt(u32, unquote(value), 10) catch 0;
             if (def.max_steps == 0) try warn(alloc, warnings, source, "max_steps must be a positive whole number, ignored");
@@ -225,7 +240,67 @@ pub fn parse(
     if (!isPlainName(def.name)) return error.BadName;
     def.pins = pins.items;
     def.agents = agents.items;
+    try crossCheck(alloc, &def, warnings, source);
     return def;
+}
+
+/// The fields whose meaning depends on `runner:`, checked once the whole front
+/// matter has been read — a definition may name its runner after the field the
+/// runner decides, and a check done line by line would answer differently
+/// depending on the order somebody typed.
+///
+/// A field that belongs to the other harness is DROPPED and named, not honoured
+/// as if it were the local one: `model: openai/gpt-5` on a codex agent is a
+/// nulya profile reference, and passing it to Codex would name a model nobody
+/// serves. A warning rather than a refusal, because unlike an unknown `runner:`
+/// this cannot silently run the persona somewhere it did not ask for — it only
+/// runs it on the harness's default.
+///
+/// The rest of the front matter is nulya's own composition — a tool face made of
+/// pins, a step budget, a list of agents to pass work to — and an external
+/// harness composes its own. Those are CLEARED here for one reason: a field that
+/// silently does nothing is the failure this whole function exists to prevent,
+/// and `agents: [explore]` on a codex persona would otherwise read as "this one
+/// can delegate" when the tool is not there to delegate with.
+fn crossCheck(
+    alloc: std.mem.Allocator,
+    def: *Def,
+    warnings: *std.ArrayList([]const u8),
+    source: []const u8,
+) !void {
+    if (def.runner.usesNulyaModels()) {
+        if (def.runner_model.len != 0) {
+            try warn(alloc, warnings, source, "runner_model is for an external runner; this one is nulya, so it was ignored (use `model:`)");
+            def.runner_model = "";
+        }
+        return;
+    }
+    if (def.profile.len != 0 or def.model.len != 0) {
+        try warn(alloc, warnings, source, "model names a nulya profile, which this runner does not have; it was ignored (use `runner_model:`)");
+        def.profile = "";
+        def.model = "";
+    }
+    // One sentence for all of them: three warnings about the same mistake would
+    // bury the one thing the author has to change.
+    var inert: std.ArrayList([]const u8) = .empty;
+    if (def.pins.len != 0) {
+        try inert.append(alloc, "pins");
+        def.pins = &.{};
+    }
+    if (def.agents.len != 0) {
+        try inert.append(alloc, "agents");
+        def.agents = &.{};
+    }
+    if (def.max_steps != 0) {
+        try inert.append(alloc, "max_steps");
+        def.max_steps = 0;
+    }
+    if (inert.items.len == 0) return;
+    try warn(alloc, warnings, source, try std.fmt.allocPrint(
+        alloc,
+        "{s} describe a nulya session; the {s} runner composes its own, so they were ignored",
+        .{ try std.mem.join(alloc, ", ", inert.items), def.runner.label() },
+    ));
 }
 
 /// One entry of either list, validated by its own rule. A malformed one is
@@ -498,6 +573,51 @@ test "front matter reads into the arguments of one session new" {
     try std.testing.expectEqual(@as(usize, 0), warnings.items.len);
 }
 
+test "which model vocabulary a definition writes in is decided by its runner, whatever order the two are written in" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // An external runner takes an opaque string, and the nulya-shaped fields
+    // beside it are dropped rather than handed to a harness that has never
+    // heard of a profile. `runner:` is written AFTER them on purpose: the
+    // answer must not depend on the order somebody typed.
+    {
+        var warnings: std.ArrayList([]const u8) = .empty;
+        const def = try parseOne(
+            a,
+            "---\nmodel: deepseek/deepseek-v4-pro\npins: [ext:std/read]\nagents: [explore]\nmax_steps: 12\nmax_exchanges: 3\nrunner_model: gpt-5-codex\nrunner: codex\n---\nbody\n",
+            &warnings,
+        );
+        try std.testing.expectEqual(runners.Runner.codex, def.runner);
+        try std.testing.expectEqualStrings("gpt-5-codex", def.runner_model);
+        try std.testing.expectEqualStrings("", def.profile);
+        try std.testing.expectEqualStrings("", def.model);
+        // Nulya's own composition, cleared rather than left to look like it does
+        // something: a codex thread has its own tool face and its own budget.
+        try std.testing.expectEqual(@as(usize, 0), def.pins.len);
+        try std.testing.expectEqual(@as(usize, 0), def.agents.len);
+        try std.testing.expectEqual(@as(u32, 0), def.max_steps);
+        // …but exchanges are counted from the delegation's record, which every
+        // runner has, so that one survives.
+        try std.testing.expectEqual(@as(u32, 3), def.max_exchanges);
+        // One sentence for the model, one for the rest.
+        try std.testing.expectEqual(@as(usize, 2), warnings.items.len);
+    }
+
+    // …and the mirror: a nulya agent's `runner_model` names a harness it is not
+    // running on, so it goes the same way.
+    {
+        var warnings: std.ArrayList([]const u8) = .empty;
+        const def = try parseOne(a, "---\nrunner_model: gpt-5-codex\nmodel: deepseek\n---\nbody\n", &warnings);
+        try std.testing.expectEqual(runners.Runner.nulya, def.runner);
+        try std.testing.expectEqualStrings("", def.runner_model);
+        try std.testing.expectEqualStrings("deepseek", def.profile);
+        try std.testing.expectEqual(@as(usize, 1), warnings.items.len);
+    }
+}
+
 test "the block list form, the stem as a default name, and CRLF" {
     const alloc = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(alloc);
@@ -526,7 +646,7 @@ test "a file that is not a definition is refused; a bad field is a warning and a
     try std.testing.expectError(error.BadName, parseOne(a, "---\nname: ../etc/passwd\n---\nbody\n", &warnings));
     // A harness this package cannot talk to costs the whole definition: running
     // the persona on something other than what it named is the worse answer.
-    try std.testing.expectError(error.UnknownRunner, parseOne(a, "---\nrunner: codex\n---\nbody\n", &warnings));
+    try std.testing.expectError(error.UnknownRunner, parseOne(a, "---\nrunner: borges\n---\nbody\n", &warnings));
 
     // Everything else survives with a default and a sentence: losing a whole
     // persona over one bad line is the expensive answer.

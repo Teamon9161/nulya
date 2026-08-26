@@ -90,12 +90,23 @@ pub const Created = struct {
     runner: []const u8,
     runner_version: []const u8 = "",
     /// What the runner opened to hold this conversation — a session id for the
-    /// nulya runner, whatever the harness calls it for an external one.
+    /// nulya runner, a thread id for Codex, whatever the harness calls it.
     remote: []const u8,
     parent: []const u8,
     readonly: bool = false,
     profile: []const u8 = "",
     model: []const u8 = "",
+    /// What an EXTERNAL runner was asked to run on — an opaque string in that
+    /// harness's own vocabulary (D9), never a nulya profile/model pair.
+    ///
+    /// Its own column rather than reusing `model` on purpose: a row saying
+    /// `runner: "codex", model: "gpt-5"` would read as a nulya model id, and a
+    /// record that has to be interpreted before it can be read is the thing D2
+    /// says not to build. Written for the same reason `profile` and `model` are
+    /// — provenance somebody can read — and, like them, nothing reads it back:
+    /// what an external thread runs on was frozen into that thread when it
+    /// opened, so a later round has nothing to decide.
+    runner_model: []const u8 = "",
 };
 
 /// A delegation, as its journal describes it.
@@ -145,6 +156,10 @@ pub fn appendCreated(
     if (c.model.len != 0) {
         try jw.objectField("model");
         try jw.write(c.model);
+    }
+    if (c.runner_model.len != 0) {
+        try jw.objectField("runner_model");
+        try jw.write(c.runner_model);
     }
     try jw.endObject();
     try out.writer.writeByte('\n');
@@ -216,6 +231,7 @@ pub fn read(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const 
                 },
                 .profile = stringOf(obj, "profile") orelse "",
                 .model = stringOf(obj, "model") orelse "",
+                .runner_model = stringOf(obj, "runner_model") orelse "",
             } };
             continue;
         }
@@ -348,6 +364,127 @@ pub fn leaseHeld(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []c
     return true;
 }
 
+// ── the external runner's inbox (D5) ────────────────────────────────────────
+
+/// How many messages may wait for one round. A backstop on the name search
+/// below, not a budget: `max_exchanges` is where a delegation's turns are
+/// counted, and the runner drains everything it finds each round.
+const max_queued: usize = 4096;
+
+/// Deliver one message into `<d>/inbox/`.
+///
+/// The nulya runner never uses this — it appends straight into the child
+/// session's own inbox, which the kernel drains mid-run for free (D5). A runner
+/// whose harness has no inbox of its own reads this one at whatever granularity
+/// its protocol gives it.
+///
+/// `<12 digits>.json`, taking the first free number by EXCLUSIVE creation: the
+/// name sorts the same way it counts, so a reader gets the messages back in the
+/// order they were sent, and two senders racing cannot land on the same name.
+/// `.json` because a half-written message must not look like a whole one, and
+/// the extension is the same convention the kernel's own inbox uses.
+pub fn inboxPut(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    base: std.Io.Dir,
+    id: []const u8,
+    text: []const u8,
+) !void {
+    const dir = try pathIn(alloc, id, inbox_name);
+    try base.createDirPath(io, dir);
+
+    var body: std.Io.Writer.Allocating = .init(alloc);
+    var jw: std.json.Stringify = .{ .writer = &body.writer };
+    try jw.beginObject();
+    try jw.objectField("v");
+    try jw.write(1);
+    try jw.objectField("text");
+    try jw.write(text);
+    try jw.endObject();
+
+    var n: usize = try nextFree(io, base, dir);
+    while (n < max_queued) : (n += 1) {
+        const path = try std.fmt.allocPrint(alloc, "{s}/{d:0>12}.json", .{ dir, n });
+        // A `.tmp` first would be the kernel's own two-step; here one exclusive
+        // create is enough, because a reader only ever sees a name that was
+        // written whole — the file is closed before anybody is told about it,
+        // and the runner is woken by the lease probe, not by watching this
+        // directory.
+        const file = base.createFile(io, path, .{ .exclusive = true }) catch |err| switch (err) {
+            error.PathAlreadyExists => continue,
+            else => return err,
+        };
+        defer file.close(io);
+        try file.writeStreamingAll(io, body.writer.buffered());
+        return;
+    }
+    return error.InboxFull;
+}
+
+/// Where to start looking for a free name: one past the highest number already
+/// there. Without it a delegation with a thousand answered messages would try a
+/// thousand names for the next one — the numbers are never reused, because
+/// order is the only thing they carry.
+fn nextFree(io: std.Io, base: std.Io.Dir, dir: []const u8) !usize {
+    var d = base.openDir(io, dir, .{ .iterate = true }) catch return 1;
+    defer d.close(io);
+    var highest: usize = 0;
+    var it = d.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind == .directory) continue;
+        const stem = std.mem.sliceTo(entry.name, '.');
+        const n = std.fmt.parseInt(usize, stem, 10) catch continue;
+        if (n > highest) highest = n;
+    }
+    return highest + 1;
+}
+
+/// Every message waiting, in the order it was sent, taken as it is read.
+///
+/// Taking rather than reading: a message this returns has been handed to the
+/// runner, and the wake invariant counts on `pending` going false once somebody
+/// has it (D4). A file that cannot be read is deleted too — a message nobody can
+/// parse is not going to be answered by leaving it there for ever.
+pub fn inboxTake(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const u8) ![]const []const u8 {
+    const dir = try pathIn(alloc, id, inbox_name);
+    var names: std.ArrayList([]const u8) = .empty;
+    {
+        var d = base.openDir(io, dir, .{ .iterate = true }) catch return &.{};
+        defer d.close(io);
+        var it = d.iterate();
+        while (try it.next(io)) |entry| {
+            if (entry.kind == .directory) continue;
+            if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
+            try names.append(alloc, try alloc.dupe(u8, entry.name));
+        }
+    }
+    // Zero-padded names, so the order they sort in is the order they were sent.
+    std.mem.sort([]const u8, names.items, {}, struct {
+        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lessThan);
+
+    var out: std.ArrayList([]const u8) = .empty;
+    for (names.items) |name| {
+        const path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir, name });
+        const bytes = base.readFileAlloc(io, path, alloc, .limited(max_message_bytes)) catch null;
+        base.deleteFile(io, path) catch {};
+        const raw = bytes orelse continue;
+        const parsed = std.json.parseFromSlice(std.json.Value, alloc, raw, .{}) catch continue;
+        const obj = switch (parsed.value) {
+            .object => |o| o,
+            else => continue,
+        };
+        const text = stringOf(obj, "text") orelse continue;
+        if (text.len == 0) continue;
+        try out.append(alloc, text);
+    }
+    return out.items;
+}
+
+const max_message_bytes: usize = 4 << 20;
+
 // ── the interrupt marker (D6) ───────────────────────────────────────────────
 
 /// "Stop what you are doing and take the new message now." Written after the
@@ -435,6 +572,43 @@ test "the record opens once and counts every turn, and a torn tail is not a fact
     try std.testing.expectEqual(@as(u32, 2), (try read(a, io, ws, id)).?.turns);
     try appendTurn(a, io, ws, id, false);
     try std.testing.expectEqual(@as(u32, 3), (try read(a, io, ws, id)).?.turns);
+}
+
+test "an external runner's inbox hands messages back in the order they were sent, once each" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const id = "d-00000000cafe";
+    // Nothing queued is not an error: a runner asks this every round.
+    try std.testing.expectEqual(@as(usize, 0), (try inboxTake(a, io, ws, id)).len);
+
+    try inboxPut(a, io, ws, id, "first");
+    try inboxPut(a, io, ws, id, "second");
+    try inboxPut(a, io, ws, id, "third");
+
+    const taken = try inboxTake(a, io, ws, id);
+    try std.testing.expectEqual(@as(usize, 3), taken.len);
+    try std.testing.expectEqualStrings("first", taken[0]);
+    try std.testing.expectEqualStrings("third", taken[2]);
+
+    // Taken, not read: the wake invariant needs `pending` to go false once a
+    // runner has the message (D4), or a second runner is started for work that
+    // is already being done.
+    try std.testing.expectEqual(@as(usize, 0), (try inboxTake(a, io, ws, id)).len);
+
+    // Numbers are never reused, so a message queued after a drain still sorts
+    // after everything before it.
+    try inboxPut(a, io, ws, id, "fourth");
+    const later = try inboxTake(a, io, ws, id);
+    try std.testing.expectEqual(@as(usize, 1), later.len);
+    try std.testing.expectEqualStrings("fourth", later[0]);
 }
 
 test "the runner lease is exclusive while it is held, and the interrupt marker is taken once" {

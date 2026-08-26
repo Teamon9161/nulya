@@ -253,6 +253,16 @@ Store and scope:
   one step at a time, watch for a handover brief, fork through the bundled
   `compact` tool and carry on in the child, keeping control lines on stdout and
   the stream on stderr.
+- Where the bundled `agent` package is in play, a sub-agent is a markdown file:
+  `.nulya/agents/<name>.md` (or the same under this machine's nulya home). Its
+  front matter is a set of `session new` arguments — `readonly`, `pins`,
+  `model: <profile>[/<id>]`, `max_steps`, `max_exchanges`, `agents` — and its
+  body is the system prompt. `runner:` says which harness holds the
+  conversation: `nulya` (the default, a session of its own) or `codex` (a Codex
+  thread over `codex app-server`). An external runner has its own catalogue, so
+  it takes `runner_model:` — an opaque string in that harness's words — where a
+  nulya one takes `model:`; the fields for the other harness are dropped with a
+  warning, and an unknown `runner:` costs the whole definition.
 - Handover is the model's half of that: a tool that writes a brief and stops,
   leaving the driver to decide whether to act on it. The shape is the same in
   any workspace even where those particular files are not.

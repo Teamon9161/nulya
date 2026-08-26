@@ -254,6 +254,11 @@ fn renderTool(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
             try jw.write(m.def.profile);
             try jw.objectField("model");
             try jw.write(m.def.model);
+            // An external runner's opaque model string (D9). Beside the other
+            // two rather than folded into them: a driver reading this must not
+            // have to guess which vocabulary the value is in.
+            try jw.objectField("runner_model");
+            try jw.write(m.def.runner_model);
             try jw.objectField("max_steps");
             try jw.write(m.def.max_steps);
             try jw.objectField("max_exchanges");
@@ -322,6 +327,8 @@ fn list(ctx: *const Ctx) !rpc.Outcome {
         try jw.write(entry.def.profile);
         try jw.objectField("model");
         try jw.write(entry.def.model);
+        try jw.objectField("runner_model");
+        try jw.write(entry.def.runner_model);
         try jw.objectField("max_steps");
         try jw.write(entry.def.max_steps);
         try jw.objectField("max_exchanges");
@@ -433,16 +440,12 @@ fn delegate(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
             .{name},
         );
     }
-    const chosen: ?defs.ModelRef = if (asked_model.len == 0) null else defs.parseModelRef(asked_model) orelse {
-        return rpc.refuse(
-            alloc,
-            "model must be <profile> or <profile>/<model-id> (the same form a definition's `model:` takes) — got '{s}'. `nulya config show` lists the profiles and the model ids each one serves.",
-            .{asked_model},
-        );
-    };
-
     if (target.len != 0) return sendTurn(ctx, parent, target, task, interrupt, depth);
-    return newDelegation(ctx, parent, name, task, chosen, depth);
+    // `model` is NOT parsed here: what grammar it is written in depends on the
+    // runner the definition names, and the definition is not read until
+    // `newDelegation` renders it (D9). One string, two vocabularies, and the
+    // one place that knows which is the one that has the definition in hand.
+    return newDelegation(ctx, parent, name, task, asked_model, depth);
 }
 
 /// A fresh delegation: render the persona, open a session wearing it, give it
@@ -452,7 +455,7 @@ fn newDelegation(
     parent: []const u8,
     name: []const u8,
     task: []const u8,
-    chosen: ?defs.ModelRef,
+    asked_model: []const u8,
     depth: u32,
 ) !rpc.Outcome {
     const alloc = ctx.alloc;
@@ -487,15 +490,37 @@ fn newDelegation(
     // A pair, never a mix: `--model` is an id WITHIN a profile (DESIGN §9.5), so
     // taking the profile from one source and the id from another would name a
     // model that profile does not serve.
-    const inherited = parentIdentity(alloc, ctx.io, parent);
-    const identity: Identity = if (chosen) |ref|
-        .{ .profile = ref.profile, .model = ref.model }
-    else if (m.def.profile.len != 0)
-        .{ .profile = m.def.profile, .model = m.def.model }
-    else
-        inherited;
-    const profile = identity.profile;
-    const model = identity.model;
+    // An EXTERNAL runner has its own catalogue, so the same argument means a
+    // different thing (D9): an opaque string, in that harness's vocabulary,
+    // passed through untouched and with its errors coming back untouched.
+    // Nothing is inherited from the parent either — this nulya's profile is not
+    // a name Codex has ever heard.
+    var profile: []const u8 = "";
+    var model: []const u8 = "";
+    var runner_model: []const u8 = "";
+    var chosen = false;
+    if (m.def.runner.usesNulyaModels()) {
+        const ref: ?defs.ModelRef = if (asked_model.len == 0) null else defs.parseModelRef(asked_model) orelse {
+            return rpc.refuse(
+                alloc,
+                "model must be <profile> or <profile>/<model-id> (the same form a definition's `model:` takes) — got '{s}'. `nulya config show` lists the profiles and the model ids each one serves.",
+                .{asked_model},
+            );
+        };
+        chosen = ref != null;
+        // A pair, never a mix (see above).
+        const identity: Identity = if (ref) |r|
+            .{ .profile = r.profile, .model = r.model }
+        else if (m.def.profile.len != 0)
+            .{ .profile = m.def.profile, .model = m.def.model }
+        else
+            parentIdentity(alloc, ctx.io, parent);
+        profile = identity.profile;
+        model = identity.model;
+    } else {
+        chosen = asked_model.len != 0;
+        runner_model = if (asked_model.len != 0) asked_model else m.def.runner_model;
+    }
 
     const self_ref = try selfRef(alloc, ctx.io);
 
@@ -512,8 +537,16 @@ fn newDelegation(
     const created = try runners.start(m.def.runner, alloc, ctx.io, .{
         .exe = ctx.exe,
         .prompt = m.path,
+        .env = ctx.env,
         .profile = profile,
         .model = model,
+        .runner_model = runner_model,
+        // The read-only ceiling reaches the runner HERE, not only when a round
+        // is driven: a runner that cannot enforce it refuses the whole
+        // delegation rather than opening one that would run wider than it said
+        // (D10). For the nulya arm the gate does it at every call; for Codex the
+        // sandbox is asked for and its answer checked.
+        .readonly = m.def.readonly,
         .pins = m.def.pins,
         .with_self = if (m.def.agents.len != 0) self_ref else "",
     });
@@ -524,17 +557,17 @@ fn newDelegation(
         // The one thing added is where the model reference came from, and only
         // when it came from the CALL — the caller can retry without it, which is
         // not obvious from a message about a profile it did not know it named.
-        if (chosen != null) {
+        if (chosen) {
             return rpc.refuse(
                 alloc,
-                "could not open a session for '{s}' on the model you asked for: {s}\n(That was the `model` argument of this call. `nulya config show` lists the profiles that can run; dropping the argument runs '{s}' on its own default.)",
+                "could not open a conversation for '{s}' on the model you asked for: {s}\n(That was the `model` argument of this call. Dropping it runs '{s}' on its own default.)",
                 .{ m.def.name, detail(created), m.def.name },
             );
         }
-        return rpc.refuse(alloc, "could not open a session for '{s}': {s}", .{ m.def.name, detail(created) });
+        return rpc.refuse(alloc, "could not open a conversation for '{s}': {s}", .{ m.def.name, detail(created) });
     }
     const remote = std.mem.trim(u8, created.stdout, " \t\r\n");
-    if (remote.len == 0) return rpc.refuse(alloc, "session new printed no id for '{s}'", .{m.def.name});
+    if (remote.len == 0) return rpc.refuse(alloc, "the {s} runner opened no conversation for '{s}'", .{ m.def.runner.label(), m.def.name });
 
     // The delegation's own identity, and the journal that will hold everything
     // decided once about it — which runner, at what version, over which remote
@@ -549,6 +582,7 @@ fn newDelegation(
         .readonly = m.def.readonly,
         .profile = profile,
         .model = model,
+        .runner_model = runner_model,
     });
 
     const spec: Spec = .{
@@ -575,10 +609,18 @@ fn newDelegation(
 
     return .{ .text = try std.fmt.allocPrint(
         alloc,
-        "delegated to '{s}' — delegation {s}, session {s}, running as background task {s}{s}.\n" ++
-            "Do not call any more tools about this; end your turn. Its report will arrive here as a message when it finishes, and only its final answer comes back — nothing else from that session enters this conversation.\n" ++
-            "To press it for specifics, send a correction, or change its direction mid-run, call agent again with session={s} instead of starting a new one — it keeps everything it already found. Full transcript: nulya session events {s}",
-        .{ m.def.name, d, remote, started, if (m.def.readonly) " (read-only)" else "", d, remote },
+        "delegated to '{s}' — delegation {s}, {s}, running as background task {s}{s}.\n" ++
+            "Do not call any more tools about this; end your turn. Its report will arrive here as a message when it finishes, and only its final answer comes back — nothing else from that conversation enters this one.\n" ++
+            "To press it for specifics, send a correction, or change its direction mid-run, call agent again with session={s} instead of starting a new one — it keeps everything it already found. {s}",
+        .{
+            m.def.name,
+            d,
+            try runners.remoteLabel(m.def.runner, alloc, remote),
+            started,
+            if (m.def.readonly) " (read-only)" else "",
+            d,
+            try runners.transcriptHint(m.def.runner, alloc, remote),
+        },
     ) };
 }
 
@@ -717,7 +759,7 @@ fn deliver(
     interrupt: bool,
 ) !union(enum) { ok, failed: []const u8 } {
     const alloc = ctx.alloc;
-    const sent = try runners.send(spec.runner, alloc, ctx.io, ctx.exe, spec.remote, task);
+    const sent = try runners.send(spec.runner, alloc, ctx.io, std.Io.Dir.cwd(), ctx.exe, spec.remote, spec.delegation, task);
     if (sent.code != 0) {
         return .{ .failed = try failed(alloc, "could not send that turn to delegation {s}: {s}", .{ spec.delegation, detail(sent) }) };
     }
