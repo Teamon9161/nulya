@@ -55,6 +55,7 @@ function tool(over: Partial<ToolItem> & { tool: string; state: ToolItem["state"]
     spillPath: null,
     resolved: false,
     awaiting: false,
+    autoAllowed: false,
     taskResult: null,
     ...over,
     tool: over.tool,

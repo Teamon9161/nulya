@@ -40,6 +40,7 @@ function tool(over: Partial<ToolItem> & { key: string; tool: string; seq: number
     spillPath: null,
     resolved: true,
     awaiting: false,
+    autoAllowed: false,
     taskResult: null,
     ...over,
   }

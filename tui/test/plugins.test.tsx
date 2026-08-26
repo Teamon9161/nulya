@@ -360,6 +360,7 @@ const tool_item: ToolItem = {
   spillPath: null,
   resolved: true,
   awaiting: false,
+  autoAllowed: false,
   taskResult: null,
 }
 

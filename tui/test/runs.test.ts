@@ -21,6 +21,7 @@ function call(over: Partial<ToolItem> & { key: string; tool: string }): ToolItem
     spillPath: null,
     resolved: true,
     awaiting: false,
+    autoAllowed: false,
     taskResult: null,
     ...over,
   }

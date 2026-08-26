@@ -40,8 +40,8 @@ import {
 } from "../state/tui_state.ts"
 import {
   alwaysKey,
-  decide,
   describeKey,
+  judge as judgeCall,
   modes,
   normalizeMode,
   poolPolicy,
@@ -1355,12 +1355,14 @@ export function App(props: AppProps) {
    */
   const compositionPolicy = (asked: SessionTab | null) => poolPolicy(asked?.contributions() ?? [])
 
-  const decideNow = (request: GateRequest, asked: SessionTab | null) =>
-    decide(request, {
+  const judgeNow = (request: GateRequest, asked: SessionTab | null) =>
+    judgeCall(request, {
       mode: mode(),
       rules: props.style.settings.approvals,
       always: always(),
     })
+
+  const decideNow = (request: GateRequest, asked: SessionTab | null) => judgeNow(request, asked).decision
 
   /**
    * The calls of the batch the given session is in the middle of: every tool
@@ -1412,7 +1414,8 @@ export function App(props: AppProps) {
       )
       if (refusal) return Promise.resolve<GateVerdict>({ allow: false, note: refusal })
     }
-    const verdict = decideNow(request, asked)
+    const judged = judgeNow(request, asked)
+    const verdict = judged.decision
     if (verdict === "deny") {
       const what = describeCall(request)
       setNotice(`denied by a rule · ${request.tool}${what ? ` · ${what}` : ""}`)
@@ -1425,7 +1428,12 @@ export function App(props: AppProps) {
       setBatchAllowed(new Set([...batchAllowed()].filter((id) => id !== request.call_id)))
       return Promise.resolve<GateVerdict>({ allow: true })
     }
-    if (verdict === "allow") return Promise.resolve<GateVerdict>({ allow: true })
+    if (verdict === "allow") {
+      // The one layer that owes an explanation (T65): in `ask` mode a call went
+      // through without a question, and the card is where that is said.
+      if (judged.via === "readonly-command") asked?.state.markAutoAllowed(request.call_id)
+      return Promise.resolve<GateVerdict>({ allow: true })
+    }
     asked?.state.setAwaitingApproval(request.call_id)
     return new Promise<GateVerdict>((resolve) =>
       setPendingQueue([...pendingQueue(), { request, session, resolve }]),

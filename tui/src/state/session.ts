@@ -68,6 +68,14 @@ export interface ToolItem extends ItemBase {
    */
   awaiting: boolean
   /**
+   * The gate answered this call without asking, because the command it carries
+   * only reads (`readonlyshell.ts`, tui.md §11 T65). A view fact of the same
+   * genre as `awaiting`: nothing about the call changed, and what this records
+   * is that a question a person would expect to see was not asked. Silence
+   * would make `ask` mode look like it had quietly stopped working.
+   */
+  autoAllowed: boolean
+  /**
    * How the background task this call started ended, once its report landed
    * (tui.md §5.9). Set by the `task_finished` event, matched to this card by the
    * full task name in its own receipt — so a reopened session shows the same
@@ -230,6 +238,13 @@ export interface SessionState {
    * cannot survive a step that ended while a card was up.
    */
   setAwaitingApproval(callId: string | null): void
+  /**
+   * Mark a call the gate allowed on its own, without a question
+   * (`ToolItem.autoAllowed`). Additive and per call: unlike `awaiting`, several
+   * calls in one batch can each have been waved through, and none of them
+   * un-marks another.
+   */
+  markAutoAllowed(callId: string): void
 }
 
 /**
@@ -284,6 +299,17 @@ export function createSessionState(id: string): SessionState {
   // with the next step's.
   let turn = 0
 
+  /**
+   * Calls the gate waved through on its own (T65), by id rather than by item.
+   *
+   * A provisional card is REPLACED by the committed one when the assistant
+   * event lands (`dropInFlight`), and the gate answers somewhere either side of
+   * that moment — so a flag written onto whichever item happened to exist would
+   * survive or vanish depending on which of two lines arrived first. The set
+   * outlives both, and every item built for the call reads it.
+   */
+  const auto_allowed = new Set<string>()
+
   const edit = (fn: (draft: SessionSnapshot) => void) => setSnapshot(produce(fn))
 
   function insertCommitted(draft: SessionSnapshot, made: TranscriptItem[]) {
@@ -322,6 +348,7 @@ export function createSessionState(id: string): SessionState {
       spillPath: null,
       resolved: false,
       awaiting: false,
+      autoAllowed: auto_allowed.has(call.id),
       taskResult: null,
     }))
   }
@@ -465,6 +492,7 @@ export function createSessionState(id: string): SessionState {
                   spillPath: result.spill_path,
                   resolved: true,
                   awaiting: false,
+                  autoAllowed: false,
                   taskResult: null,
                 },
               ])
@@ -571,6 +599,7 @@ export function createSessionState(id: string): SessionState {
               spillPath: null,
               resolved: false,
               awaiting: false,
+              autoAllowed: auto_allowed.has(start.id),
               taskResult: null,
             })
             break
@@ -700,6 +729,14 @@ export function createSessionState(id: string): SessionState {
           if (item.kind !== "tool") continue
           const wants = callId !== null && item.callId === callId && !item.resolved
           if (item.awaiting !== wants) item.awaiting = wants
+        }
+      })
+    },
+    markAutoAllowed(callId) {
+      auto_allowed.add(callId)
+      edit((draft) => {
+        for (const item of draft.items) {
+          if (item.kind === "tool" && item.callId === callId) item.autoAllowed = true
         }
       })
     },

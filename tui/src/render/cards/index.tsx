@@ -10,7 +10,7 @@ import { extNoteBadge, extNoteOf } from "../../extnote.ts"
 import { AssistantTurn } from "./AssistantTurn.tsx"
 import { Thinking } from "./Thinking.tsx"
 import { ToolCard } from "./ToolCard.tsx"
-import { ApprovalPrompt } from "./ApprovalPrompt.tsx"
+import { ApprovalPrompt, AutoAllowedMark } from "./ApprovalPrompt.tsx"
 import { CapabilityBanner } from "./CapabilityBanner.tsx"
 import { TaskFinishedCard } from "./TaskFinishedCard.tsx"
 import { useStyle } from "../theme.ts"
@@ -90,6 +90,12 @@ export function Card(props: { item: TranscriptItem; contributions?: Contribution
           />
           <Show when={(props.item as Extract<TranscriptItem, { kind: "tool" }>).awaiting}>
             <ApprovalPrompt />
+          </Show>
+          {/* Or the opposite mark: the gate answered for the person because the
+              command only reads (T65). Never both — a call is either being asked
+              about or was not asked about. */}
+          <Show when={(props.item as Extract<TranscriptItem, { kind: "tool" }>).autoAllowed}>
+            <AutoAllowedMark />
           </Show>
         </box>
       </Match>

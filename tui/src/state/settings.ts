@@ -127,7 +127,7 @@ export interface Settings {
      */
     mode: PermissionMode
   }
-  /** The three tables and the `readonly` switch (`approvals.ts`). */
+  /** The three tables, the `readonly` switch, and the classifier's own list (`approvals.ts`). */
   approvals: ApprovalRules
   keys: Record<string, string>
   /** Files that actually contributed, nearest last (`/settings` shows these). */
@@ -231,6 +231,11 @@ function mergeLayer(into: Settings, layer: unknown, source: string) {
     }
     if (typeof approvals["manifest_readonly"] === "boolean") {
       into.approvals.manifest_readonly = approvals["manifest_readonly"]
+    }
+    // Same discipline as the three tables: replaced, so a nearer layer can take
+    // an entry back off the list.
+    if (Array.isArray(approvals["readonly_commands"])) {
+      into.approvals.readonly_commands = approvals["readonly_commands"].filter((e): e is string => typeof e === "string")
     }
   }
   const keys = record["keys"] as Record<string, unknown> | undefined

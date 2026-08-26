@@ -13,6 +13,7 @@ import {
   default_rules,
   describeKey,
   isMode,
+  judge,
   modes,
   normalizeMode,
   poolPolicy,
@@ -115,8 +116,45 @@ test("the mode picker opens on the mode in force and clamps at both ends", () =>
 })
 
 test("the mode is the fallback and only the fallback", () => {
-  expect(decide(shell("git status"), context({ mode: "ask" }))).toBe("ask")
-  expect(decide(shell("git status"), context({ mode: "unsafe" }))).toBe("allow")
+  // A command the classifier has no opinion about (T65), so what is being read
+  // here is the fallback itself and not the layer above it.
+  expect(decide(shell("rm -rf build"), context({ mode: "ask" }))).toBe("ask")
+  expect(decide(shell("rm -rf build"), context({ mode: "unsafe" }))).toBe("allow")
+})
+
+/**
+ * The classifier's place in the chain (T65). It is one layer, near the bottom:
+ * everything a person wrote outranks it, and it never speaks in `unsafe`, where
+ * the next line allows the call anyway and `via` would be claiming a reason
+ * that was not the reason.
+ */
+test("a read-only command is allowed in ask mode, under every rule a person wrote", () => {
+  expect(judge(shell("git status"), context({ mode: "ask" }))).toEqual({ decision: "allow", via: "readonly-command" })
+  expect(judge(shell("rm -rf ."), context({ mode: "ask" }))).toEqual({ decision: "ask", via: null })
+
+  // Both tables a person can write outrank it, in both directions.
+  const denied = context({ rules: { ...default_rules, deny: ["shell:git"] } })
+  expect(judge(shell("git status"), denied)).toEqual({ decision: "deny", via: null })
+  const checkpoint = context({ rules: { ...default_rules, ask: ["shell:git status"] } })
+  expect(judge(shell("git status"), checkpoint)).toEqual({ decision: "ask", via: null })
+
+  // In unsafe it allows for the ordinary reason, and says so.
+  expect(judge(shell("git status"), context({ mode: "unsafe" }))).toEqual({ decision: "allow", via: null })
+  // And it is about `shell` alone: an extension tool is judged by its manifest
+  // claim, never by anything that looks like a command line.
+  expect(judge(readWith(null), context({ mode: "ask" }))).toEqual({ decision: "ask", via: null })
+})
+
+test("`readonly_commands` adds to the classifier, and adds nothing to its vetoes", () => {
+  const rules = { ...default_rules, readonly_commands: ["cargo tree"] }
+  expect(decide(shell("cargo tree --depth 1"), context({ rules }))).toBe("allow")
+  // The prefix is a whole word, not a string prefix.
+  expect(decide(shell("cargo treeify"), context({ rules }))).toBe("ask")
+  // …and every veto the parser makes still stands over the entry.
+  expect(decide(shell("cargo tree > deps.txt"), context({ rules }))).toBe("ask")
+  expect(decide(shell("cargo tree && rm -rf ."), context({ rules }))).toBe("ask")
+  // A wrapper cannot be added: what it runs is exactly what was never seen.
+  expect(decide(shell("sh -c 'ls'"), context({ rules: { ...default_rules, readonly_commands: ["sh -c"] } }))).toBe("ask")
 })
 
 test("deny outranks everything; ask outranks the mode; allow only settles what nothing else claimed", () => {

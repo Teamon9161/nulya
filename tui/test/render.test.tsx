@@ -99,6 +99,7 @@ function shellItem(over: { key: string; command: string; output?: string; ok?: b
     spillPath: null,
     resolved: true,
     awaiting: false,
+    autoAllowed: false,
     taskResult: null,
   }
 }
@@ -120,6 +121,7 @@ const shell_item: TranscriptItem = {
   spillPath: null,
   resolved: true,
   awaiting: false,
+  autoAllowed: false,
   taskResult: null,
 }
 const evolve_item = shellItem({
@@ -140,6 +142,7 @@ const ext_tool_item: TranscriptItem = {
   spillPath: null,
   resolved: true,
   awaiting: false,
+  autoAllowed: false,
   taskResult: null,
 }
 // --- tui-plugin U2: `render`/`panel` (D12) ----------------------------------
@@ -186,6 +189,7 @@ function toolItem(over: Partial<ToolItem> & { key: string; tool: string; args: s
     spillPath: null,
     resolved: true,
     awaiting: false,
+    autoAllowed: false,
     taskResult: null,
     ...over,
   }
@@ -314,6 +318,7 @@ const edit_item: ToolItem = {
   spillPath: null,
   resolved: true,
   awaiting: false,
+  autoAllowed: false,
   taskResult: null,
 }
 const edit_plugin_card: PluginCard = {
@@ -369,6 +374,7 @@ const canceled_item: TranscriptItem = {
   spillPath: null,
   resolved: true,
   awaiting: false,
+  autoAllowed: false,
   taskResult: null,
 }
 const spill_item: TranscriptItem = {
@@ -384,6 +390,7 @@ const spill_item: TranscriptItem = {
   spillPath: ".nulya/scratch/spill-9.txt",
   resolved: true,
   awaiting: false,
+  autoAllowed: false,
   taskResult: null,
 }
 /** A `shell {background: true}` call: the result is a receipt, not an exit code. */
@@ -401,6 +408,7 @@ function backgroundItem(over: { key: string; task: string; result?: { exitCode: 
     spillPath: null,
     resolved: true,
     awaiting: false,
+    autoAllowed: false,
     taskResult: over.result ?? null,
   }
 }

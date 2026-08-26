@@ -19,7 +19,9 @@
  *   3. the `ask` table — a deliberate checkpoint. It prompts even in `unsafe`,
  *      which is the whole reason it exists as its own table rather than as the
  *      absence of an `allow` entry.
- *   4. the `allow` table, then the manifest's `readonly` claim, then the mode.
+ *   4. the `allow` table, then the manifest's `readonly` claim, then — for
+ *      `shell` in `ask` mode only — whether the command itself only reads
+ *      (`readonlyshell.ts`), and finally the mode.
  *
  * The `readonly` claim is a HINT, not a boundary (DESIGN §9): the package says
  * its tool only reads, the kernel records that and enforces nothing, and a
@@ -31,6 +33,7 @@
  * the claim into the tool definition at composition time and puts it, with the
  * stable id, on the line it asks with. Nothing here opens a manifest.
  */
+import { isReadOnlyShellCommand } from "./readonlyshell.ts"
 import type { Contributions } from "./nulya/files.ts"
 
 /**
@@ -99,9 +102,23 @@ export interface ApprovalRules {
   deny: string[]
   /** Trust a tool's own `"readonly": true` (DESIGN §7.2.1). */
   manifest_readonly: boolean
+  /**
+   * Extra simple commands the built-in read-only classifier should recognise
+   * (`readonlyshell.ts`) — `["cargo tree", "kubectl get"]`. Prefix-matched
+   * against one simple command, the same shape `shell:` entries use, and still
+   * subject to every veto the parser makes: a line with a substitution or a
+   * redirection in it is asked about however this list reads.
+   */
+  readonly_commands: string[]
 }
 
-export const default_rules: ApprovalRules = { allow: [], ask: [], deny: [], manifest_readonly: true }
+export const default_rules: ApprovalRules = {
+  allow: [],
+  ask: [],
+  deny: [],
+  manifest_readonly: true,
+  readonly_commands: [],
+}
 
 export interface ApprovalContext {
   mode: PermissionMode
@@ -194,15 +211,51 @@ function anyMatch(rules: readonly string[], request: GateRequest): boolean {
   return rules.some((rule) => matches(rule, request))
 }
 
-export function decide(request: GateRequest, ctx: ApprovalContext): Decision {
-  if (anyMatch(ctx.rules.deny, request)) return "deny"
-  if (ctx.always.has(alwaysKey(request))) return "allow"
-  if (anyMatch(ctx.rules.ask, request)) return "ask"
-  if (anyMatch(ctx.rules.allow, request)) return "allow"
+/**
+ * Which layer of the chain spoke. Only one of them is worth saying out loud on
+ * screen — the classifier, because an answer nobody gave should say why it was
+ * not asked (T65). The rest are `null`: a call that ran in `unsafe`, or under a
+ * rule a person wrote, needs no explanation the mode chip and `tui.toml` do not
+ * already give.
+ */
+export type Via = "readonly-command" | null
+
+export interface Judgement {
+  decision: Decision
+  via: Via
+}
+
+/**
+ * The whole chain, in one place, with its reason attached.
+ *
+ * `decide` is this without the reason, and both exist so the order is written
+ * down exactly once: a second copy of "is this a read-only command" living up
+ * in the UI, to draw the mark with, is a second place for the order to be
+ * wrong about a permission.
+ */
+export function judge(request: GateRequest, ctx: ApprovalContext): Judgement {
+  if (anyMatch(ctx.rules.deny, request)) return { decision: "deny", via: null }
+  if (ctx.always.has(alwaysKey(request))) return { decision: "allow", via: null }
+  if (anyMatch(ctx.rules.ask, request)) return { decision: "ask", via: null }
+  if (anyMatch(ctx.rules.allow, request)) return { decision: "allow", via: null }
   // The claim, believed only because `[approvals] manifest_readonly` says to.
   // `null` (the builtin, or a package that said nothing) is not `true`.
-  if (ctx.rules.manifest_readonly && request.readonly === true) return "allow"
-  return ctx.mode === "unsafe" ? "allow" : "ask"
+  if (ctx.rules.manifest_readonly && request.readonly === true) return { decision: "allow", via: null }
+  // `shell`, and only in `ask` (`readonlyshell.ts`). In `unsafe` the next line
+  // allows it anyway and the mark would be a lie about why; before the tables
+  // above it would outrank a person's own `deny`, which is the one thing no
+  // layer here may do.
+  if (ctx.mode === "ask") {
+    const command = shellCommand(request)
+    if (command !== null && isReadOnlyShellCommand(command, ctx.rules.readonly_commands)) {
+      return { decision: "allow", via: "readonly-command" }
+    }
+  }
+  return { decision: ctx.mode === "unsafe" ? "allow" : "ask", via: null }
+}
+
+export function decide(request: GateRequest, ctx: ApprovalContext): Decision {
+  return judge(request, ctx).decision
 }
 
 /** One line of preview for a card: what this call would actually do. */

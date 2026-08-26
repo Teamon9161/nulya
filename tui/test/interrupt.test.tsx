@@ -99,7 +99,10 @@ test("the queue lane draws nothing before the first message — no resting-state
   )
   try {
     await settle(setup, 3)
-    expect(setup.captureCharFrame()).not.toContain("queued")
+    // The lane's own glyph, not the word "queued": a randomly chosen welcome
+    // tip legitimately contains that word (it explains this very gesture), and
+    // what this test pins is that the LANE is not drawn at rest.
+    expect(setup.captureCharFrame()).not.toContain("⏸")
   } finally {
     setup.renderer.destroy()
   }

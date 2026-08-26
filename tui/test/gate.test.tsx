@@ -30,8 +30,19 @@ import {
   type TempWorkspace,
 } from "./support.ts"
 
-/** The default: a person answers. `unsafe_settings` is the other half of the pair. */
-const ask_style = createStyle(default_settings, {})
+/**
+ * The default: a person answers. `unsafe_settings` is the other half of the pair.
+ *
+ * With one addition, and it is load-bearing: the scripted provider's one call is
+ * `shell echo hello-from-nulya`, and `echo` is a command the read-only
+ * classifier waves through (T65). `[approvals] ask` is the table that says "stop
+ * for this anyway" — it outranks the classifier by construction — so a checkpoint
+ * on `echo` is how these tests keep asking the question they are about.
+ */
+const ask_style = createStyle(
+  { ...default_settings, approvals: { ...default_settings.approvals, ask: ["shell:echo"] } },
+  {},
+)
 
 let ws: TempWorkspace
 
@@ -144,6 +155,49 @@ test("`allow everything from here on` answers this call and switches the mode", 
     const call = state.snapshot.items.find((item) => item.kind === "tool" && item.resolved)!
     expect(call.kind === "tool" && call.output).toContain("hello-from-nulya")
     expect(setup.captureCharFrame()).toContain("unsafe")
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 120_000)
+
+/**
+ * The classifier, through the real gate (T65).
+ *
+ * The mode is `ask` and nobody presses anything: the scripted provider's call is
+ * `echo hello-from-nulya`, `echo` only reads, so the gate answers for the person
+ * and says on the card that it did. The other half of the boundary — a call the
+ * classifier does not clear still stops and waits — is what every other test in
+ * this file is, each of them running with `shell:echo` back on the `ask` table.
+ */
+test("in ask mode a read-only command runs unasked, and the card says why", async () => {
+  const id = await sessionNew(ws, { profile: "scripted" })
+  const state = createSessionState(id)
+  const setup = await testRender(
+    () => (
+      <App
+        ws={ws}
+        id={id}
+        state={state}
+        // `ask`, straight from the defaults: the classifier is the only reason
+        // this call is not a question.
+        style={createStyle({ ...default_settings, extensions: { ...default_settings.extensions, session_with: [] } }, {})}
+        driver={{ env: scripted_env }}
+        statePath={join(ws.dir, `tui-state-${id}.json`)}
+        created
+      />
+    ),
+    { width: 100, height: 24 },
+  )
+  try {
+    await settle(setup, 3)
+    await setup.mockInput.typeText("probe")
+    setup.mockInput.pressEnter()
+    await until(() => state.snapshot.items.some((item) => item.kind === "tool" && item.resolved), 60_000)
+    const call = state.snapshot.items.find((item) => item.kind === "tool" && item.resolved)!
+    expect(call.kind === "tool" && call.output).toContain("hello-from-nulya")
+    // Nobody was asked, and the mode did not change to say so.
+    expect(setup.captureCharFrame()).not.toContain("approve this call")
+    expect(call.kind === "tool" && call.autoAllowed).toBe(true)
   } finally {
     setup.renderer.destroy()
   }
