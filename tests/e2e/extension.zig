@@ -3939,3 +3939,712 @@ test "bundled agent: a read-only codex delegation is refused outright when the s
     defer alloc.free(waited.stdout);
     try std.testing.expectEqual(@as(u8, 0), waited.code);
 }
+
+// ── the Claude runner (contract ar-f) ───────────────────────────────────────
+//
+// A delegation whose definition says `runner: claude` is held by a Claude Code
+// session instead of a nulya one. These run against `tests/fake_claude.zig` — a
+// `claude -p` that answers the stream-json protocol and never leaves this
+// machine — because everything worth pinning down is on THIS side of that
+// conversation: which flags the runner passes, when it writes a message into
+// stdin, and what it refuses to run.
+
+/// The offline `claude`, built by `build.zig` for exactly this. Absent means the
+/// suite was not launched through `zig build e2e`.
+fn fakeClaude(alloc: std.mem.Allocator) !?[]u8 {
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const named = host_env.get("NULYA_FAKE_CLAUDE") orelse return null;
+    if (named.len == 0) return null;
+    return try std.fs.path.resolve(alloc, &.{named});
+}
+
+/// The remote out of a claude receipt (`… — delegation d-…, claude session <uuid>`).
+fn claudeSessionOf(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
+    const at = std.mem.indexOf(u8, text, "claude session ").? + "claude session ".len;
+    var end = at;
+    while (end < text.len and (std.ascii.isAlphanumeric(text[end]) or text[end] == '-')) end += 1;
+    return alloc.dupe(u8, text[at..end]);
+}
+
+test "bundled agent: a claude delegation is a claude session — the record freezes runner, version and opaque model, the persona is frozen beside it, the report comes back through the parent's inbox, and the next round resumes the session it opened" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+    const claude_exe = (try fakeClaude(alloc)) orelse return error.SkipZigTest;
+    defer alloc.free(claude_exe);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const ref = try buildBundled(alloc, io, ws, exe_abs, "agent");
+    defer alloc.free(ref);
+
+    try ws.createDirPath(io, ".nulya/agents");
+    try ws.writeFile(io, .{
+        .sub_path = ".nulya/agents/scout.md",
+        .data = "---\ndescription: reads the codebase through claude\nrunner: claude\nrunner_model: some-claude-model\n---\nYou are a scout. Report what you found.\n",
+    });
+
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(new.stdout);
+    const parent = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(parent);
+    const session_file = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{parent});
+    defer alloc.free(session_file);
+    const with_claude: []const EnvPair = &.{
+        .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_CLAUDE_EXE", .value = claude_exe },
+        .{ .key = "FAKE_CLAUDE_LOG", .value = "claude-log.txt" },
+        .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+    };
+
+    // ① The call's `model` beats the definition's, and for an external runner it
+    // is passed through WHOLE — `/nope` is the string a nulya delegation refuses
+    // outright as a malformed profile reference (D9).
+    const started = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"scout\",\"task\":\"find the parser\",\"model\":\"/nope\"}" }, with_claude);
+    defer alloc.free(started.stdout);
+    try std.testing.expectEqual(@as(u8, 0), started.code);
+    // The receipt names the delegation AND what is behind it — a claude session
+    // here, never a nulya session id that does not exist.
+    try std.testing.expect(std.mem.indexOf(u8, started.stdout, "claude session") != null);
+    try std.testing.expect(std.mem.indexOf(u8, started.stdout, "nulya session events") == null);
+
+    const d = try delegationOf(alloc, started.stdout);
+    defer alloc.free(d);
+    const remote = try claudeSessionOf(alloc, started.stdout);
+    defer alloc.free(remote);
+
+    // ② The record froze which harness holds this delegation, at what version,
+    // and what it was asked to run on — each in its own column, so nothing has to
+    // be interpreted to be read (D2/D7).
+    {
+        const rows = try readRecord(alloc, io, ws, d);
+        defer alloc.free(rows);
+        try std.testing.expect(std.mem.indexOf(u8, rows, "\"runner\":\"claude\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rows, "\"runner_model\":\"/nope\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rows, "\"runner_version\":") != null);
+        const named = try std.fmt.allocPrint(alloc, "\"remote\":\"{s}\"", .{remote});
+        defer alloc.free(named);
+        try std.testing.expect(std.mem.indexOf(u8, rows, named) != null);
+    }
+
+    // ③ The persona is frozen INTO the delegation, because claude rebuilds its
+    // prompt from flags on every round: without this copy the delegation would
+    // silently follow later edits to the definition file.
+    {
+        const path = try std.fmt.allocPrint(alloc, ".nulya/delegations/{s}/persona.md", .{d});
+        defer alloc.free(path);
+        const frozen = try ws.readFileAlloc(io, path, alloc, .limited(1 << 20));
+        defer alloc.free(frozen);
+        try std.testing.expect(std.mem.indexOf(u8, frozen, "You are a scout.") != null);
+    }
+
+    {
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", "120000" });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+    }
+
+    // ④ The report reaches the parent exactly the way a nulya delegation's does:
+    // the ordinary `task_finished` event, drained at the next step boundary. No
+    // new event kind, and no driver had to learn anything (D8).
+    {
+        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, &.{
+            .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+        });
+        defer alloc.free(stepped.stdout);
+        try std.testing.expectEqual(@as(u8, 0), stepped.code);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "\"kind\":\"task_finished\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "<agent-report agent=") != null);
+        // The fake echoes what it was given, so this is the task travelling the
+        // whole way: inbox file -> take -> stdin user message -> assistant text.
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "heard: find the parser") != null);
+    }
+
+    // ⑤ The first round OPENED the session under the name we minted, carrying the
+    // persona and the model straight through.
+    {
+        const log = try ws.readFileAlloc(io, "claude-log.txt", alloc, .limited(1 << 20));
+        defer alloc.free(log);
+        const opened = try std.fmt.allocPrint(alloc, "--session-id {s}", .{remote});
+        defer alloc.free(opened);
+        try std.testing.expect(std.mem.indexOf(u8, log, opened) != null);
+        try std.testing.expect(std.mem.indexOf(u8, log, "--append-system-prompt") != null);
+        try std.testing.expect(std.mem.indexOf(u8, log, "--model /nope") != null);
+        try std.testing.expect(std.mem.indexOf(u8, log, "--resume") == null);
+    }
+
+    // ⑥ Another turn, sent while nothing is running. The channel is the
+    // delegation's own inbox (D5), and the round that takes it RESUMES the
+    // session rather than opening a second one — which is what makes a follow-up
+    // cheap in the first place.
+    {
+        const args = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"and the lexer\"}}", .{d});
+        defer alloc.free(args);
+        const again = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", args }, with_claude);
+        defer alloc.free(again.stdout);
+        try std.testing.expectEqual(@as(u8, 0), again.code);
+
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", "120000" });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+
+        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, &.{
+            .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+        });
+        defer alloc.free(stepped.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "heard: and the lexer") != null);
+        // Drained, so the wake invariant's `pending` goes false and nobody starts
+        // a runner for a message that has already been answered.
+        try std.testing.expect(try inboxEmpty(io, alloc, ws, d));
+
+        const log = try ws.readFileAlloc(io, "claude-log.txt", alloc, .limited(1 << 20));
+        defer alloc.free(log);
+        const resumed = try std.fmt.allocPrint(alloc, "--resume {s}", .{remote});
+        defer alloc.free(resumed);
+        try std.testing.expect(std.mem.indexOf(u8, log, resumed) != null);
+    }
+
+    // ⑦ Exchanges are counted from the record, whatever runner is behind it.
+    {
+        const rows = try readRecord(alloc, io, ws, d);
+        defer alloc.free(rows);
+        try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, rows, "\"kind\":\"turn\""));
+    }
+}
+
+test "bundled agent: a claude delegation that is running takes an interrupt as a control request, and the message behind it is answered by the next round" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+    const claude_exe = (try fakeClaude(alloc)) orelse return error.SkipZigTest;
+    defer alloc.free(claude_exe);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const ref = try buildBundled(alloc, io, ws, exe_abs, "agent");
+    defer alloc.free(ref);
+
+    try ws.createDirPath(io, ".nulya/agents");
+    try ws.writeFile(io, .{
+        .sub_path = ".nulya/agents/scout.md",
+        .data = "---\ndescription: scouts\nrunner: claude\n---\nYou are a scout.\n",
+    });
+
+    // The fake holds its first turn open while this file exists, so the test
+    // decides when the run in flight ends rather than racing it; everything the
+    // runner sent lands in the log, which is how "it sent the interrupt" becomes
+    // a fact rather than an inference from a report.
+    try ws.writeFile(io, .{ .sub_path = "hold", .data = "" });
+
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(new.stdout);
+    const parent = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(parent);
+    const session_file = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{parent});
+    defer alloc.free(session_file);
+    const held: []const EnvPair = &.{
+        .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_CLAUDE_EXE", .value = claude_exe },
+        .{ .key = "FAKE_CLAUDE_LOG", .value = "claude-log.txt" },
+        .{ .key = "FAKE_CLAUDE_HOLD", .value = "hold" },
+        .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+    };
+
+    const started = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"scout\",\"task\":\"go on for a while\"}" }, held);
+    defer alloc.free(started.stdout);
+    try std.testing.expectEqual(@as(u8, 0), started.code);
+    const d = try delegationOf(alloc, started.stdout);
+    defer alloc.free(d);
+
+    // Wait until a turn is genuinely under way — that is what an interrupt is for.
+    try waitForText(io, alloc, ws, "claude-log.txt", "user ");
+
+    // The interrupt: the message first, then the marker (D6). The runner checks
+    // the marker between the lines it reads, so the message behind it stays in
+    // the inbox rather than being fed to a turn that is about to be cut short.
+    {
+        const args = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"STOP-SENTINEL\",\"interrupt\":true}}", .{d});
+        defer alloc.free(args);
+        const interrupted = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", args }, held);
+        defer alloc.free(interrupted.stdout);
+        try std.testing.expectEqual(@as(u8, 0), interrupted.code);
+        // It is working, so nothing new was started for it.
+        try std.testing.expect(std.mem.indexOf(u8, interrupted.stdout, "queued") != null);
+        const marker = try std.fmt.allocPrint(alloc, ".nulya/delegations/{s}/interrupt", .{d});
+        defer alloc.free(marker);
+        // Taken, never left behind to cut short a later round.
+        try waitForGone(io, ws, marker);
+    }
+
+    // Let the held turn end, so the round that was interrupted can finish.
+    try ws.deleteFile(io, "hold");
+
+    {
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", "120000" });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+    }
+
+    // The stop verb really went down the wire…
+    {
+        const log = try ws.readFileAlloc(io, "claude-log.txt", alloc, .limited(1 << 20));
+        defer alloc.free(log);
+        try std.testing.expect(std.mem.indexOf(u8, log, "control_request interrupt") != null);
+    }
+
+    // …and the message behind it was answered rather than lost: the interrupt is
+    // execution control, not a kind of message (D3).
+    {
+        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, &.{
+            .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+        });
+        defer alloc.free(stepped.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "heard: STOP-SENTINEL") != null);
+    }
+}
+
+test "bundled agent: a read-only claude delegation asks for the narrow shape and refuses the round when the session it gets back is wider" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+    const claude_exe = (try fakeClaude(alloc)) orelse return error.SkipZigTest;
+    defer alloc.free(claude_exe);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const ref = try buildBundled(alloc, io, ws, exe_abs, "agent");
+    defer alloc.free(ref);
+
+    try ws.createDirPath(io, ".nulya/agents");
+    try ws.writeFile(io, .{
+        .sub_path = ".nulya/agents/prober.md",
+        .data = "---\ndescription: only reads\nreadonly: true\nrunner: claude\n---\nYou only read.\n",
+    });
+
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(new.stdout);
+    const parent = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(parent);
+    const session_file = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{parent});
+    defer alloc.free(session_file);
+
+    // The lever is what the harness REPORTS its session having — the one fact
+    // D10's check can read, because unlike a sandbox nothing else comes back.
+    const wide: []const EnvPair = &.{
+        .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_CLAUDE_EXE", .value = claude_exe },
+        .{ .key = "FAKE_CLAUDE_LOG", .value = "claude-log.txt" },
+        .{ .key = "FAKE_CLAUDE_TOOLS", .value = "Read,Glob,Write" },
+        .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+    };
+    const started = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"prober\",\"task\":\"go\"}" }, wide);
+    defer alloc.free(started.stdout);
+    try std.testing.expectEqual(@as(u8, 0), started.code);
+    try std.testing.expect(std.mem.indexOf(u8, started.stdout, "read-only") != null);
+
+    {
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", "120000" });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+    }
+
+    // The round refused rather than ran: what comes back to the parent says the
+    // ceiling could not be held, and nothing the sub-agent might have said.
+    {
+        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, &.{
+            .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+        });
+        defer alloc.free(stepped.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "read-only") != null);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "heard: go") == null);
+    }
+
+    // …and the narrow shape really was asked for. The flags are the mechanism —
+    // availability, a permission mode that never asks, and no MCP server to add
+    // a tool nobody here has seen the name of — and the echo above is the check.
+    {
+        const log = try ws.readFileAlloc(io, "claude-log.txt", alloc, .limited(1 << 20));
+        defer alloc.free(log);
+        try std.testing.expect(std.mem.indexOf(u8, log, "--tools Read,Glob,Grep") != null);
+        try std.testing.expect(std.mem.indexOf(u8, log, "--permission-mode dontAsk") != null);
+        try std.testing.expect(std.mem.indexOf(u8, log, "--strict-mcp-config") != null);
+    }
+
+    // With a session that comes back inside the ceiling, the same definition runs.
+    {
+        const narrow: []const EnvPair = &.{
+            .{ .key = "NULYA_SESSION", .value = session_file },
+            .{ .key = "NULYA_CLAUDE_EXE", .value = claude_exe },
+            .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+        };
+        const opened = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"prober\",\"task\":\"go\"}" }, narrow);
+        defer alloc.free(opened.stdout);
+        try std.testing.expectEqual(@as(u8, 0), opened.code);
+
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", "120000" });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+
+        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, &.{
+            .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+        });
+        defer alloc.free(stepped.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "heard: go") != null);
+    }
+}
+
+// ── the Pi runner (contract ar-e) ───────────────────────────────────────────
+//
+// A delegation whose definition says `runner: pi` is held by a `pi --mode rpc`
+// session. These run against `tests/fake_pi.zig` — a process that answers the
+// documented RPC protocol offline — because everything worth pinning down is on
+// THIS side of it.
+
+/// The offline `pi`, built by `build.zig` for exactly this.
+fn fakePi(alloc: std.mem.Allocator) !?[]u8 {
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const named = host_env.get("NULYA_FAKE_PI") orelse return null;
+    if (named.len == 0) return null;
+    return try std.fs.path.resolve(alloc, &.{named});
+}
+
+/// The remote out of a pi receipt (`… — delegation d-…, pi session <uuid>`).
+fn piSessionOf(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
+    const at = std.mem.indexOf(u8, text, "pi session ").? + "pi session ".len;
+    var end = at;
+    while (end < text.len and (std.ascii.isAlphanumeric(text[end]) or text[end] == '-')) end += 1;
+    return alloc.dupe(u8, text[at..end]);
+}
+
+test "bundled agent: a pi delegation is a pi session — one flag opens or resumes it, the persona is frozen beside the record, and the report comes back through the parent's inbox" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+    const pi_exe = (try fakePi(alloc)) orelse return error.SkipZigTest;
+    defer alloc.free(pi_exe);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const ref = try buildBundled(alloc, io, ws, exe_abs, "agent");
+    defer alloc.free(ref);
+
+    try ws.createDirPath(io, ".nulya/agents");
+    try ws.writeFile(io, .{
+        .sub_path = ".nulya/agents/scout.md",
+        .data = "---\ndescription: reads the codebase through pi\nrunner: pi\nrunner_model: anthropic/some-model\n---\nYou are a scout. Report what you found.\n",
+    });
+
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(new.stdout);
+    const parent = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(parent);
+    const session_file = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{parent});
+    defer alloc.free(session_file);
+    const with_pi: []const EnvPair = &.{
+        .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_PI_EXE", .value = pi_exe },
+        .{ .key = "FAKE_PI_LOG", .value = "pi-log.txt" },
+        .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+    };
+
+    const started = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"scout\",\"task\":\"find the parser\"}" }, with_pi);
+    defer alloc.free(started.stdout);
+    try std.testing.expectEqual(@as(u8, 0), started.code);
+    try std.testing.expect(std.mem.indexOf(u8, started.stdout, "pi session") != null);
+
+    const d = try delegationOf(alloc, started.stdout);
+    defer alloc.free(d);
+    const remote = try piSessionOf(alloc, started.stdout);
+    defer alloc.free(remote);
+
+    // The record froze which harness holds this delegation, at what version, and
+    // what it was asked to run on — each in its own column (D2/D7).
+    {
+        const rows = try readRecord(alloc, io, ws, d);
+        defer alloc.free(rows);
+        try std.testing.expect(std.mem.indexOf(u8, rows, "\"runner\":\"pi\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rows, "\"runner_model\":\"anthropic/some-model\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rows, "\"runner_version\":") != null);
+    }
+
+    // The persona is frozen INTO the delegation, and handed over as a PATH — pi
+    // reads the file when the argument is one, so nothing has to fit on a command
+    // line.
+    {
+        const path = try std.fmt.allocPrint(alloc, ".nulya/delegations/{s}/persona.md", .{d});
+        defer alloc.free(path);
+        const frozen = try ws.readFileAlloc(io, path, alloc, .limited(1 << 20));
+        defer alloc.free(frozen);
+        try std.testing.expect(std.mem.indexOf(u8, frozen, "You are a scout.") != null);
+    }
+
+    {
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", "120000" });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+    }
+
+    // The report reaches the parent the way every other delegation's does.
+    {
+        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, &.{
+            .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+        });
+        defer alloc.free(stepped.stdout);
+        try std.testing.expectEqual(@as(u8, 0), stepped.code);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "\"kind\":\"task_finished\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "heard: find the parser") != null);
+    }
+
+    // One flag opens or resumes: `--session-id` is passed on every round, and
+    // there is no second form for this arm to choose between.
+    {
+        const log = try ws.readFileAlloc(io, "pi-log.txt", alloc, .limited(1 << 20));
+        defer alloc.free(log);
+        const named = try std.fmt.allocPrint(alloc, "--session-id {s}", .{remote});
+        defer alloc.free(named);
+        try std.testing.expect(std.mem.indexOf(u8, log, named) != null);
+        try std.testing.expect(std.mem.indexOf(u8, log, "--mode rpc") != null);
+        try std.testing.expect(std.mem.indexOf(u8, log, "--append-system-prompt") != null);
+        try std.testing.expect(std.mem.indexOf(u8, log, "--model anthropic/some-model") != null);
+    }
+
+    // Another turn, sent while nothing is running: the channel is the
+    // delegation's own inbox (D5) and the next round takes it.
+    {
+        const args = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"and the lexer\"}}", .{d});
+        defer alloc.free(args);
+        const again = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", args }, with_pi);
+        defer alloc.free(again.stdout);
+        try std.testing.expectEqual(@as(u8, 0), again.code);
+
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", "120000" });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+
+        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, &.{
+            .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+        });
+        defer alloc.free(stepped.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "heard: and the lexer") != null);
+        try std.testing.expect(try inboxEmpty(io, alloc, ws, d));
+    }
+
+    // Exchanges are counted from the record, whatever runner is behind it.
+    {
+        const rows = try readRecord(alloc, io, ws, d);
+        defer alloc.free(rows);
+        try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, rows, "\"kind\":\"turn\""));
+    }
+}
+
+test "bundled agent: a pi delegation that is running takes an interrupt as abort, and the message behind it is answered by the next round" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+    const pi_exe = (try fakePi(alloc)) orelse return error.SkipZigTest;
+    defer alloc.free(pi_exe);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const ref = try buildBundled(alloc, io, ws, exe_abs, "agent");
+    defer alloc.free(ref);
+
+    try ws.createDirPath(io, ".nulya/agents");
+    try ws.writeFile(io, .{
+        .sub_path = ".nulya/agents/scout.md",
+        .data = "---\ndescription: scouts\nrunner: pi\n---\nYou are a scout.\n",
+    });
+    try ws.writeFile(io, .{ .sub_path = "hold", .data = "" });
+
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(new.stdout);
+    const parent = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(parent);
+    const session_file = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{parent});
+    defer alloc.free(session_file);
+    const held: []const EnvPair = &.{
+        .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_PI_EXE", .value = pi_exe },
+        .{ .key = "FAKE_PI_LOG", .value = "pi-log.txt" },
+        .{ .key = "FAKE_PI_HOLD", .value = "hold" },
+        .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+    };
+
+    const started = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"scout\",\"task\":\"go on for a while\"}" }, held);
+    defer alloc.free(started.stdout);
+    try std.testing.expectEqual(@as(u8, 0), started.code);
+    const d = try delegationOf(alloc, started.stdout);
+    defer alloc.free(d);
+
+    try waitForText(io, alloc, ws, "pi-log.txt", "prompt");
+
+    {
+        const args = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"STOP-SENTINEL\",\"interrupt\":true}}", .{d});
+        defer alloc.free(args);
+        const interrupted = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", args }, held);
+        defer alloc.free(interrupted.stdout);
+        try std.testing.expectEqual(@as(u8, 0), interrupted.code);
+        try std.testing.expect(std.mem.indexOf(u8, interrupted.stdout, "queued") != null);
+        const marker = try std.fmt.allocPrint(alloc, ".nulya/delegations/{s}/interrupt", .{d});
+        defer alloc.free(marker);
+        try waitForGone(io, ws, marker);
+    }
+
+    try ws.deleteFile(io, "hold");
+
+    {
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", "120000" });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+    }
+
+    // The stop verb really went down the wire…
+    {
+        const log = try ws.readFileAlloc(io, "pi-log.txt", alloc, .limited(1 << 20));
+        defer alloc.free(log);
+        try std.testing.expect(std.mem.indexOf(u8, log, "abort") != null);
+    }
+
+    // …and the message behind it was answered rather than lost (D3).
+    {
+        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, &.{
+            .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+        });
+        defer alloc.free(stepped.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "heard: STOP-SENTINEL") != null);
+    }
+}
+
+test "bundled agent: a read-only pi delegation asks for the allow-list and stops the run when a tool outside it begins" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+    const pi_exe = (try fakePi(alloc)) orelse return error.SkipZigTest;
+    defer alloc.free(pi_exe);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const ref = try buildBundled(alloc, io, ws, exe_abs, "agent");
+    defer alloc.free(ref);
+
+    try ws.createDirPath(io, ".nulya/agents");
+    try ws.writeFile(io, .{
+        .sub_path = ".nulya/agents/prober.md",
+        .data = "---\ndescription: only reads\nreadonly: true\nrunner: pi\n---\nYou only read.\n",
+    });
+
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(new.stdout);
+    const parent = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(parent);
+    const session_file = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{parent});
+    defer alloc.free(session_file);
+
+    // Pi reports no tool list, so the lever is the one thing the protocol does
+    // say: a tool BEGINNING. `write` is not in the ceiling, so the run stops.
+    const wide: []const EnvPair = &.{
+        .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_PI_EXE", .value = pi_exe },
+        .{ .key = "FAKE_PI_LOG", .value = "pi-log.txt" },
+        .{ .key = "FAKE_PI_TOOL", .value = "write" },
+        .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+    };
+    const started = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"prober\",\"task\":\"go\"}" }, wide);
+    defer alloc.free(started.stdout);
+    try std.testing.expectEqual(@as(u8, 0), started.code);
+    try std.testing.expect(std.mem.indexOf(u8, started.stdout, "read-only") != null);
+
+    {
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", "120000" });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+    }
+
+    {
+        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, &.{
+            .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+        });
+        defer alloc.free(stepped.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "read-only") != null);
+        // Stopped rather than reported: whatever it was going on to say does not
+        // come back as a sub-agent's findings.
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "heard: go") == null);
+    }
+
+    // The allow-list really was asked for. (That `abort` went down the wire is
+    // pinned by the interrupt test above; here the process is closed right after
+    // the refusal, so the fake never gets to read it back — which is fine: the
+    // ceiling's job is that the round produces nothing, and that is asserted.)
+    {
+        const log = try ws.readFileAlloc(io, "pi-log.txt", alloc, .limited(1 << 20));
+        defer alloc.free(log);
+        try std.testing.expect(std.mem.indexOf(u8, log, "--tools read,grep,find,ls") != null);
+    }
+
+    // With a run that stays inside the ceiling, the same definition reports.
+    {
+        const narrow: []const EnvPair = &.{
+            .{ .key = "NULYA_SESSION", .value = session_file },
+            .{ .key = "NULYA_PI_EXE", .value = pi_exe },
+            .{ .key = "FAKE_PI_TOOL", .value = "read" },
+            .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+        };
+        const opened = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"prober\",\"task\":\"go\"}" }, narrow);
+        defer alloc.free(opened.stdout);
+        try std.testing.expectEqual(@as(u8, 0), opened.code);
+
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", "120000" });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+
+        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, &.{
+            .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+        });
+        defer alloc.free(stepped.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "heard: go") != null);
+    }
+}

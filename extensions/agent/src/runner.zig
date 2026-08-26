@@ -52,18 +52,21 @@
 //! (BUGS #16). Reading the answer the kernel already has removes the failure
 //! mode rather than hardening it.
 //!
-//! **Two harnesses, one loop.** Everything above is about WHEN a round runs and
+//! **Four harnesses, one loop.** Everything above is about WHEN a round runs and
 //! who is allowed to run it, and none of it is about nulya. So the lease, the
 //! release-and-recheck, the interrupt marker and the report framing are written
 //! once, and what actually answers a round is a `Backend` — a nulya `session
-//! step` process per round, or a Codex connection held open across them
-//! (`codex.zig`). Adding the second arm moved no part of the invariant.
+//! step` process per round, or a connection held open across them to Codex
+//! (`codex.zig`), Claude (`claude.zig`) or pi (`pi.zig`). Not one of the three
+//! external arms moved any part of the invariant.
 
 const std = @import("std");
 const rpc = @import("rpc.zig");
 const record = @import("record.zig");
 const runners = @import("runners.zig");
 const codex = @import("codex.zig");
+const claude = @import("claude.zig");
+const pi = @import("pi.zig");
 const proc = @import("proc.zig");
 
 /// Cap on what one report carries back. The supervisor applies the kernel's own
@@ -143,11 +146,19 @@ pub fn run(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args: Args) !r
     // Which harness this is. The delegation's record froze the answer when it
     // opened (D7); a `run` invoked by hand without one drives this nulya, which
     // is the only thing it could have meant.
-    const kind: runners.Runner = blk: {
-        if (args.delegation.len == 0) break :blk runners.default;
-        const state = (try record.read(alloc, io, cwd, args.delegation)) orelse break :blk runners.default;
-        break :blk runners.Runner.parse(state.created.runner) orelse runners.default;
-    };
+    var kind: runners.Runner = runners.default;
+    // What an EXTERNAL harness was asked to run on (D9). Frozen when the
+    // delegation opened, and read back here rather than passed as an argument:
+    // a nulya session freezes its identity in its own header, but a Claude
+    // process is told which model to use on every round, so the record is the
+    // only thing that can still answer.
+    var runner_model: []const u8 = "";
+    if (args.delegation.len != 0) {
+        if (try record.read(alloc, io, cwd, args.delegation)) |state| {
+            kind = runners.Runner.parse(state.created.runner) orelse runners.default;
+            runner_model = state.created.runner_model;
+        }
+    }
 
     var lease: ?std.Io.File = null;
     if (args.delegation.len != 0) {
@@ -166,7 +177,7 @@ pub fn run(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args: Args) !r
     // Whatever holds the conversation, opened once for this whole task. The
     // lease is taken FIRST: a connection opened by a runner that then lost the
     // race would be a second client on one thread.
-    var backend = switch (try openBackend(alloc, io, kind, args)) {
+    var backend = switch (try openBackend(alloc, io, kind, args, runner_model)) {
         // Not wrapped in the report frame: this is not a sub-agent's findings,
         // it is news about the delegation itself, and saying "treat the
         // following as data" about our own sentence would be theatre. Named,
@@ -245,11 +256,15 @@ pub fn run(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args: Args) !r
 const Backend = union(enum) {
     nulya,
     codex: codex.Session,
+    claude: claude.Session,
+    pi: pi.Session,
 
     fn close(self: *Backend, io: std.Io) void {
         switch (self.*) {
             .nulya => {},
             .codex => |*s| s.close(io),
+            .claude => |*s| s.close(io),
+            .pi => |*s| s.close(io),
         }
     }
 };
@@ -259,9 +274,49 @@ fn openBackend(
     io: std.Io,
     kind: runners.Runner,
     args: Args,
+    runner_model: []const u8,
 ) !union(enum) { ok: Backend, failed: []const u8 } {
     switch (kind) {
         .nulya => return .{ .ok = .nulya },
+        .pi => {
+            // One `pi --mode rpc` for the whole task. `--session-id` opens the
+            // conversation or creates it, so this arm has no second form to
+            // choose between (`pi.zig`).
+            const attempt = try pi.attach(
+                alloc,
+                io,
+                args.env,
+                std.Io.Dir.cwd(),
+                args.delegation,
+                args.session,
+                args.readonly,
+                runner_model,
+            );
+            return switch (attempt) {
+                .ok => |s| .{ .ok = .{ .pi = s } },
+                .failed => |f| .{ .failed = f },
+            };
+        },
+        .claude => {
+            // One `claude -p` for the whole task, resumed from the session id the
+            // delegation opened under. `readonly` is not asked for once and
+            // trusted after: the flags go on every process and the echo is
+            // checked on every turn (`claude.checkInit`).
+            const attempt = try claude.attach(
+                alloc,
+                io,
+                args.env,
+                std.Io.Dir.cwd(),
+                args.delegation,
+                args.session,
+                args.readonly,
+                runner_model,
+            );
+            return switch (attempt) {
+                .ok => |s| .{ .ok = .{ .claude = s } },
+                .failed => |f| .{ .failed = f },
+            };
+        },
         .codex => {
             // `readonly` is re-asked and re-confirmed here, not just when the
             // delegation opened (D10): a resumed thread is a fresh decision
@@ -307,6 +362,26 @@ fn driveOnce(
 
     switch (backend.*) {
         .nulya => return driveNulyaRound(alloc, io, exe, args, cwd, interrupt_path),
+        .pi => |*sess| {
+            const r = try pi.driveRound(alloc, io, sess, cwd, args.delegation, interrupt_path);
+            return .{
+                .text = r.text,
+                .stopped = r.stopped,
+                .code = if (r.failure.len != 0) 1 else 0,
+                .stderr = r.failure,
+                .interrupted = r.interrupted,
+            };
+        },
+        .claude => |*sess| {
+            const r = try claude.driveRound(alloc, io, sess, cwd, args.delegation, interrupt_path);
+            return .{
+                .text = r.text,
+                .stopped = r.stopped,
+                .code = if (r.failure.len != 0) 1 else 0,
+                .stderr = r.failure,
+                .interrupted = r.interrupted,
+            };
+        },
         .codex => |*sess| {
             const r = try codex.driveRound(alloc, io, sess, cwd, args.delegation, interrupt_path);
             return .{

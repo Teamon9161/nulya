@@ -18,17 +18,24 @@
 //! `run` tool that is its whole process (`runner.zig`); the other four are here.
 //!
 //! **Why an enum and a switch rather than a vtable.** The shape was written to
-//! the contract before the second arm existed, and the second arm proved the
-//! point: Codex is a JSON-RPC conversation over a child's stdio, which no amount
-//! of vtable would have prepared for — it shares `send` and `pending` with the
-//! nulya arm and shares nothing else. When a runner moves OUT of this package
-//! (`runner: ext:<id>`, contract ar-g) the switch grows one arm that shells out;
-//! that is the design, not a fallback.
+//! the contract before the second arm existed, and the arms since have proved
+//! the point: Codex is JSON-RPC over a child's stdio, Claude is its own
+//! stream-json dialect over another, pi is a third — no amount of vtable would
+//! have prepared for any of them, and the three external ones share `send` and
+//! `pending` with each other and almost nothing else with the nulya one. When a
+//! runner moves OUT of this package (`runner: ext:<id>`, contract ar-g) the
+//! switch grows one arm that shells out; that is the design, not a fallback.
+//!
+//! What the arms DO share ends up in `record.zig` rather than in one of them:
+//! the per-delegation inbox, the minted uuid, the frozen persona. Adding the
+//! third external arm needed no new shape there at all.
 
 const std = @import("std");
 const proc = @import("proc.zig");
 const record = @import("record.zig");
 const codex = @import("codex.zig");
+const claude = @import("claude.zig");
+const pi = @import("pi.zig");
 
 pub const Runner = enum {
     /// This nulya: the delegation is a session of its own, driven by
@@ -37,6 +44,14 @@ pub const Runner = enum {
 
     /// A Codex thread, spoken to over `codex app-server` (`codex.zig`).
     codex,
+
+    /// A Claude Code session, spoken to over `claude -p`'s bidirectional
+    /// stream-json stdio (`claude.zig`).
+    claude,
+
+    /// A pi session, spoken to over `pi --mode rpc`'s JSONL commands and events
+    /// (`pi.zig`).
+    pi,
 
     /// The word a definition's `runner:` may say. Null is "not a runner this
     /// package knows", which costs the whole definition (a persona that would
@@ -58,7 +73,7 @@ pub const Runner = enum {
     pub fn usesNulyaModels(self: Runner) bool {
         return switch (self) {
             .nulya => true,
-            .codex => false,
+            .codex, .claude, .pi => false,
         };
     }
 };
@@ -88,6 +103,23 @@ pub const StartOptions = struct {
     /// `--with <agent@version>` so the sub-agent can delegate onwards. Empty is
     /// a leaf, which is what every persona but a coordinator is.
     with_self: []const u8 = "",
+    /// The delegation this is being opened for, minted before the call so a
+    /// runner with per-delegation state on disk (the claude arm freezes the
+    /// persona there) has somewhere to put it. Empty for a caller with no
+    /// delegation, which only the nulya arm tolerates.
+    delegation: []const u8 = "",
+};
+
+/// What opening a conversation came back with.
+pub const Started = struct {
+    run: proc.Run,
+    /// What the harness says about its own version, to be frozen beside the
+    /// runner name (D7): every later round of this delegation goes to the same
+    /// harness, and a record that says which one it was is the only way to read
+    /// an old delegation afterwards. Empty where the harness does not say —
+    /// `codex app-server` reports no version of its own, and this nulya is the
+    /// binary running the record.
+    version: []const u8 = "",
 };
 
 /// Open the remote conversation. On success its stdout is the remote handle —
@@ -96,17 +128,67 @@ pub const StartOptions = struct {
 /// The `proc.Run` shape is the contract on purpose: "spawn something, read what
 /// it said" is what opening a conversation looks like from here whether or not
 /// a process was actually spawned to do it.
-pub fn start(r: Runner, alloc: std.mem.Allocator, io: std.Io, opts: StartOptions) !proc.Run {
+pub fn start(r: Runner, alloc: std.mem.Allocator, io: std.Io, opts: StartOptions) !Started {
     switch (r) {
+        .claude => {
+            // Reachability first, and it costs one local process: a definition
+            // naming a harness this machine does not have is refused HERE —
+            // before a record exists, before a receipt says work is under way.
+            // (Codex answers the same question by opening the thread; Claude has
+            // no "open a conversation" verb at all, so this is the moment.)
+            const version = switch (try claude.probe(alloc, io, opts.env)) {
+                .failed => |f| return .{ .run = .{ .code = 1, .stdout = "", .stderr = @constCast(f) } },
+                .ok => |v| v,
+            };
+            // The persona is frozen into the delegation rather than left in the
+            // rendered file: Claude rebuilds its prompt from flags on every
+            // round, so without a copy this delegation would silently follow
+            // edits to the definition (`claude.zig`).
+            switch (try claude.freezePersona(alloc, io, std.Io.Dir.cwd(), opts.delegation, opts.prompt)) {
+                .failed => |f| return .{ .run = .{ .code = 1, .stdout = "", .stderr = @constCast(f) } },
+                .ok => {},
+            }
+            // No process is started: a Claude session comes into being when the
+            // first `claude -p --session-id <uuid>` runs, and that happens in the
+            // background task that drives the first round. The name is what this
+            // opens, and it is enough to resume from ever after.
+            //
+            // `pins` and `with_self` say nothing here, for the reason they say
+            // nothing to Codex: they are nulya composition.
+            return .{
+                .run = .{ .code = 0, .stdout = try record.mintUuid(alloc, io), .stderr = "" },
+                .version = version,
+            };
+        },
+        .pi => {
+            // Reachability first, for the reason the claude arm does it: a
+            // definition naming a harness this machine does not have is refused
+            // before a record exists.
+            const version = switch (try pi.probe(alloc, io, opts.env)) {
+                .failed => |f| return .{ .run = .{ .code = 1, .stdout = "", .stderr = @constCast(f) } },
+                .ok => |v| v,
+            };
+            switch (try pi.freezePersona(alloc, io, std.Io.Dir.cwd(), opts.delegation, opts.prompt)) {
+                .failed => |f| return .{ .run = .{ .code = 1, .stdout = "", .stderr = @constCast(f) } },
+                .ok => {},
+            }
+            // No process is started: `pi --session-id <id>` creates the session
+            // under that name the first time a round runs it, so the name is the
+            // whole of what opening one means here.
+            return .{
+                .run = .{ .code = 0, .stdout = try record.mintUuid(alloc, io), .stderr = "" },
+                .version = version,
+            };
+        },
         .codex => {
             // The persona is a file because `session new --prompt` wants one;
             // Codex wants the bytes.
             const persona = std.Io.Dir.cwd().readFileAlloc(io, opts.prompt, alloc, .limited(max_persona_bytes)) catch |err| {
-                return .{
+                return .{ .run = .{
                     .code = 1,
                     .stdout = "",
                     .stderr = try std.fmt.allocPrint(alloc, "could not read the rendered persona at {s}: {s}", .{ opts.prompt, @errorName(err) }),
-                };
+                } };
             };
             // `pins` and `with_self` say nothing here: they are nulya
             // composition, and a Codex thread has its own tools. A definition
@@ -117,10 +199,10 @@ pub fn start(r: Runner, alloc: std.mem.Allocator, io: std.Io, opts: StartOptions
                 .model = opts.runner_model,
                 .readonly = opts.readonly,
             });
-            return switch (opened) {
+            return .{ .run = switch (opened) {
                 .ok => |thread| .{ .code = 0, .stdout = @constCast(thread), .stderr = "" },
                 .failed => |f| .{ .code = 1, .stdout = "", .stderr = @constCast(f) },
-            };
+            } };
         },
         .nulya => {
             var argv: std.ArrayList([]const u8) = .empty;
@@ -143,7 +225,7 @@ pub fn start(r: Runner, alloc: std.mem.Allocator, io: std.Io, opts: StartOptions
             // derived here would only be a second, slightly different copy of it.
             for (opts.pins) |pin| try argv.appendSlice(alloc, &.{ "--pin", pin });
             if (opts.with_self.len != 0) try argv.appendSlice(alloc, &.{ "--with", opts.with_self });
-            return proc.run(alloc, io, argv.items);
+            return .{ .run = try proc.run(alloc, io, argv.items) };
         },
     }
 }
@@ -169,12 +251,12 @@ pub fn send(
 ) !proc.Run {
     switch (r) {
         .nulya => return proc.run(alloc, io, &.{ exe, "session", "append", remote, text }),
-        .codex => {
+        .codex, .claude, .pi => {
             // Always the file, never "steer if something is running": whether a
             // message arrives at the next natural boundary or is folded into the
             // turn in flight is the RUNNER's decision, made when it drains
-            // (`codex.driveRound`). A sender that tried to decide it would be
-            // racing the runner for the answer.
+            // (`codex.driveRound`, `claude.driveRound`). A sender that tried to
+            // decide it would be racing the runner for the answer.
             record.inboxPut(alloc, io, base, delegation, text) catch |err| {
                 return .{
                     .code = 1,
@@ -203,6 +285,8 @@ pub fn remoteLabel(r: Runner, alloc: std.mem.Allocator, remote: []const u8) ![]c
     return switch (r) {
         .nulya => try std.fmt.allocPrint(alloc, "session {s}", .{remote}),
         .codex => try std.fmt.allocPrint(alloc, "codex thread {s}", .{remote}),
+        .claude => try std.fmt.allocPrint(alloc, "claude session {s}", .{remote}),
+        .pi => try std.fmt.allocPrint(alloc, "pi session {s}", .{remote}),
     };
 }
 
@@ -212,6 +296,10 @@ pub fn transcriptHint(r: Runner, alloc: std.mem.Allocator, remote: []const u8) !
     return switch (r) {
         .nulya => try std.fmt.allocPrint(alloc, "Its full transcript is `nulya session events {s}`.", .{remote}),
         .codex => try std.fmt.allocPrint(alloc, "It ran as codex thread {s}; its transcript is Codex's own.", .{remote}),
+        // A pointer that actually works: Claude keeps the whole conversation and
+        // resumes it by that name.
+        .claude => try std.fmt.allocPrint(alloc, "It ran as claude session {s}; the whole of it is `claude --resume {s}`.", .{ remote, remote }),
+        .pi => try std.fmt.allocPrint(alloc, "It ran as pi session {s}; the whole of it is `pi --session {s}`.", .{ remote, remote }),
     };
 }
 
@@ -234,7 +322,7 @@ pub fn pending(
             const path = std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.inbox", .{remote}) catch return false;
             return holdsJson(io, base, path);
         },
-        .codex => return packageInboxPending(alloc, io, base, delegation),
+        .codex, .claude, .pi => return packageInboxPending(alloc, io, base, delegation),
     }
 }
 
@@ -280,7 +368,11 @@ pub fn stop(r: Runner, alloc: std.mem.Allocator, io: std.Io, exe: []const u8, re
         // turn in flight — facts only the driving process holds. So the codex
         // arm interrupts IN BAND (`codex.driveRound`) and never calls this;
         // there is no marker a second process could leave that would reach it.
-        .codex => {},
+        //
+        // Claude is the same shape for the same reason: its interrupt is a
+        // control request written into the stdin of the process that is running
+        // the turn, and only the driving process holds that pipe.
+        .codex, .claude, .pi => {},
     }
 }
 
@@ -288,13 +380,19 @@ test "a runner is named by the definition, and an unknown word is not one" {
     try std.testing.expectEqual(Runner.nulya, Runner.parse("nulya").?);
     try std.testing.expectEqual(Runner.nulya, Runner.parse("  nulya ").?);
     try std.testing.expectEqual(Runner.codex, Runner.parse("codex").?);
-    try std.testing.expect(Runner.parse("claude") == null);
+    try std.testing.expectEqual(Runner.claude, Runner.parse("claude").?);
+    try std.testing.expectEqual(Runner.pi, Runner.parse("pi").?);
+    try std.testing.expect(Runner.parse("borges") == null);
     try std.testing.expect(Runner.parse("") == null);
     try std.testing.expectEqualStrings("nulya", Runner.nulya.label());
     try std.testing.expectEqualStrings("codex", Runner.codex.label());
+    try std.testing.expectEqualStrings("claude", Runner.claude.label());
+    try std.testing.expectEqualStrings("pi", Runner.pi.label());
 }
 
 test "only this nulya speaks nulya's model vocabulary" {
     try std.testing.expect(Runner.nulya.usesNulyaModels());
     try std.testing.expect(!Runner.codex.usesNulyaModels());
+    try std.testing.expect(!Runner.claude.usesNulyaModels());
+    try std.testing.expect(!Runner.pi.usesNulyaModels());
 }

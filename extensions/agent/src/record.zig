@@ -70,6 +70,32 @@ pub fn mint(alloc: std.mem.Allocator, io: std.Io) ![]u8 {
     return std.fmt.allocPrint(alloc, "d-{x:0>12}", .{std.mem.readInt(u48, &bytes, .little)});
 }
 
+/// A UUID (version 4), for a harness that names its conversations that way.
+///
+/// Minted HERE rather than read back from the harness, and for the same reason
+/// the delegation id is: the record has to be able to name the remote
+/// conversation before a single turn has run, so the name must be something this
+/// side chose. `claude --session-id` requires this exact shape; `pi --session-id`
+/// takes any string and gets one anyway, because two harnesses naming their
+/// sessions two different ways would be a difference with nothing behind it.
+pub fn mintUuid(alloc: std.mem.Allocator, io: std.Io) ![]u8 {
+    var b: [16]u8 = undefined;
+    io.random(&b);
+    b[6] = (b[6] & 0x0f) | 0x40; // version 4
+    b[8] = (b[8] & 0x3f) | 0x80; // variant 1
+    return std.fmt.allocPrint(
+        alloc,
+        "{x:0>8}-{x:0>4}-{x:0>4}-{x:0>4}-{x:0>12}",
+        .{
+            std.mem.readInt(u32, b[0..4], .big),
+            std.mem.readInt(u16, b[4..6], .big),
+            std.mem.readInt(u16, b[6..8], .big),
+            std.mem.readInt(u16, b[8..10], .big),
+            std.mem.readInt(u48, b[10..16], .big),
+        },
+    );
+}
+
 pub fn dirOf(alloc: std.mem.Allocator, id: []const u8) ![]u8 {
     return std.fmt.allocPrint(alloc, "{s}/{s}", .{ root, id });
 }
@@ -446,6 +472,27 @@ fn nextFree(io: std.Io, base: std.Io.Dir, dir: []const u8) !usize {
 /// has it (D4). A file that cannot be read is deleted too — a message nobody can
 /// parse is not going to be answered by leaving it there for ever.
 pub fn inboxTake(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const u8) ![]const []const u8 {
+    return inboxTakeUpTo(alloc, io, base, id, max_queued);
+}
+
+/// The oldest message waiting, taken, or null when there is none.
+///
+/// For a runner that answers one message per round and wants the guarantee that
+/// comes with it: a message it took is either answered or put straight back, so
+/// nothing is ever held inside a harness's own queue where a dying process would
+/// take it with them (`claude.zig`).
+pub fn inboxTakeOne(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const u8) !?[]const u8 {
+    const taken = try inboxTakeUpTo(alloc, io, base, id, 1);
+    return if (taken.len == 0) null else taken[0];
+}
+
+fn inboxTakeUpTo(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    base: std.Io.Dir,
+    id: []const u8,
+    limit: usize,
+) ![]const []const u8 {
     const dir = try pathIn(alloc, id, inbox_name);
     var names: std.ArrayList([]const u8) = .empty;
     {
@@ -467,6 +514,7 @@ pub fn inboxTake(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []c
 
     var out: std.ArrayList([]const u8) = .empty;
     for (names.items) |name| {
+        if (out.items.len >= limit) break;
         const path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir, name });
         const bytes = base.readFileAlloc(io, path, alloc, .limited(max_message_bytes)) catch null;
         base.deleteFile(io, path) catch {};
@@ -484,6 +532,44 @@ pub fn inboxTake(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []c
 }
 
 const max_message_bytes: usize = 4 << 20;
+
+// ── the frozen persona ──────────────────────────────────────────────────────
+
+/// The persona a delegation was opened with, frozen beside its journal.
+///
+/// The nulya runner does not need this — `session new --prompt` freezes those
+/// bytes into the session header (DESIGN §3) and Codex freezes them into the
+/// thread. A harness that is TOLD its system prompt on every process does: the
+/// rendered file follows the definition, and without a copy of its own a
+/// delegation would silently become somebody else the moment that file was
+/// edited. One delegation, one persona, whichever harness holds it.
+pub const persona_name = "persona.md";
+
+/// Copy the rendered persona in, once, when the delegation opens. `too_long` is
+/// handed back rather than worded here: what the limit is FOR is the runner's
+/// business (a command line, a wire), and only it can say so.
+pub fn freezePersona(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    base: std.Io.Dir,
+    id: []const u8,
+    rendered: []const u8,
+    limit: usize,
+) !union(enum) { ok, too_long: usize, failed: []const u8 } {
+    const body = base.readFileAlloc(io, rendered, alloc, .limited(limit + 1)) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        error.StreamTooLong => return .{ .too_long = limit + 1 },
+        else => return .{ .failed = try std.fmt.allocPrint(
+            alloc,
+            "could not read the rendered persona at {s}: {s}",
+            .{ rendered, @errorName(err) },
+        ) },
+    };
+    if (body.len > limit) return .{ .too_long = body.len };
+    try base.createDirPath(io, try dirOf(alloc, id));
+    try base.writeFile(io, .{ .sub_path = try pathIn(alloc, id, persona_name), .data = body });
+    return .ok;
+}
 
 // ── the interrupt marker (D6) ───────────────────────────────────────────────
 
@@ -527,6 +613,24 @@ test "a delegation id is checked because it becomes a path" {
     const minted = try mint(alloc, std.testing.io);
     defer alloc.free(minted);
     try std.testing.expect(isPlainId(minted));
+}
+
+test "a minted uuid is the shape a harness that names sessions that way demands" {
+    const alloc = std.testing.allocator;
+    const id = try mintUuid(alloc, std.testing.io);
+    defer alloc.free(id);
+
+    try std.testing.expectEqual(@as(usize, 36), id.len);
+    for (id, 0..) |c, i| {
+        switch (i) {
+            8, 13, 18, 23 => try std.testing.expectEqual(@as(u8, '-'), c),
+            else => try std.testing.expect(std.ascii.isHex(c)),
+        }
+    }
+    // Version and variant, which is what makes it a UUID rather than 32 hex
+    // digits with dashes in them — `claude --session-id` checks.
+    try std.testing.expectEqual(@as(u8, '4'), id[14]);
+    try std.testing.expect(id[19] == '8' or id[19] == '9' or id[19] == 'a' or id[19] == 'b');
 }
 
 test "the record opens once and counts every turn, and a torn tail is not a fact yet" {

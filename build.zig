@@ -164,6 +164,43 @@ pub fn build(b: *std.Build) void {
         "NULYA_FAKE_CODEX",
         b.getInstallPath(.{ .custom = "test-bin" }, fake_codex.out_filename),
     );
+    // …and the same for Claude Code (`tests/fake_claude.zig`), handed over as
+    // `NULYA_CLAUDE_EXE`. Offline for the reasons the Codex one is, and for one
+    // more: `claude` is the harness this repository is developed in, so an e2e
+    // that spawned a real one would be spending somebody's tokens on a fixture.
+    const fake_claude = b.addExecutable(.{
+        .name = "fake-claude",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/fake_claude.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const install_fake_claude = b.addInstallArtifact(fake_claude, .{
+        .dest_dir = .{ .override = .{ .custom = "test-bin" } },
+    });
+    run_e2e.step.dependOn(&install_fake_claude.step);
+    run_e2e.setEnvironmentVariable(
+        "NULYA_FAKE_CLAUDE",
+        b.getInstallPath(.{ .custom = "test-bin" }, fake_claude.out_filename),
+    );
+    // …and for pi (`tests/fake_pi.zig`), handed over as `NULYA_PI_EXE`.
+    const fake_pi = b.addExecutable(.{
+        .name = "fake-pi",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/fake_pi.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const install_fake_pi = b.addInstallArtifact(fake_pi, .{
+        .dest_dir = .{ .override = .{ .custom = "test-bin" } },
+    });
+    run_e2e.step.dependOn(&install_fake_pi.step);
+    run_e2e.setEnvironmentVariable(
+        "NULYA_FAKE_PI",
+        b.getInstallPath(.{ .custom = "test-bin" }, fake_pi.out_filename),
+    );
     run_e2e.has_side_effects = true; // exercises the filesystem; always run
     const e2e_step = b.step("e2e", "Run the extension closed-loop end-to-end test");
     e2e_step.dependOn(&run_e2e.step);

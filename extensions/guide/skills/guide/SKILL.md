@@ -258,11 +258,15 @@ Store and scope:
   front matter is a set of `session new` arguments — `readonly`, `pins`,
   `model: <profile>[/<id>]`, `max_steps`, `max_exchanges`, `agents` — and its
   body is the system prompt. `runner:` says which harness holds the
-  conversation: `nulya` (the default, a session of its own) or `codex` (a Codex
-  thread over `codex app-server`). An external runner has its own catalogue, so
-  it takes `runner_model:` — an opaque string in that harness's words — where a
-  nulya one takes `model:`; the fields for the other harness are dropped with a
-  warning, and an unknown `runner:` costs the whole definition.
+  conversation: `nulya` (the default, a session of its own), `codex` (a Codex
+  thread over `codex app-server`), `claude` (a Claude Code session over
+  `claude -p`'s stream-json stdio) or `pi` (a pi session over `pi --mode rpc`).
+  An external runner needs its own harness installed and on PATH, has its own
+  catalogue, and so takes `runner_model:` — an opaque string in that harness's
+  words — where a nulya one takes `model:`; the fields for the other harness
+  are dropped with a warning, and an unknown `runner:` costs the whole
+  definition. `readonly: true` is honoured on every runner or the delegation is
+  refused — none of them is allowed to run it wider than it asked for.
 - Handover is the model's half of that: a tool that writes a brief and stops,
   leaving the driver to decide whether to act on it. The shape is the same in
   any workspace even where those particular files are not.

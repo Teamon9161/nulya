@@ -524,6 +524,13 @@ fn newDelegation(
 
     const self_ref = try selfRef(alloc, ctx.io);
 
+    // The delegation's own identity, minted BEFORE the conversation is opened:
+    // a runner may need somewhere of its own to put what it freezes (the claude
+    // arm copies the persona into `<d>/`), and nothing about the id depends on
+    // what the runner answers. Nothing is written yet — the record's opening row
+    // is below, once there is a remote conversation for it to name.
+    const d = try record.mint(alloc, ctx.io);
+
     // …and this package itself, but ONLY for a persona that names somebody to
     // pass work to. That one field is what makes a session a leaf or not, and it
     // is read in one place: a delegated session that cannot delegate simply does
@@ -549,8 +556,9 @@ fn newDelegation(
         .readonly = m.def.readonly,
         .pins = m.def.pins,
         .with_self = if (m.def.agents.len != 0) self_ref else "",
+        .delegation = d,
     });
-    if (created.code != 0) {
+    if (created.run.code != 0) {
         // Straight through, including the credential refusal (DESIGN §9.5): the
         // kernel already says the whole way out, and a second sentence composed
         // here would be a second place that has an opinion about credentials.
@@ -561,22 +569,22 @@ fn newDelegation(
             return rpc.refuse(
                 alloc,
                 "could not open a conversation for '{s}' on the model you asked for: {s}\n(That was the `model` argument of this call. Dropping it runs '{s}' on its own default.)",
-                .{ m.def.name, detail(created), m.def.name },
+                .{ m.def.name, detail(created.run), m.def.name },
             );
         }
-        return rpc.refuse(alloc, "could not open a conversation for '{s}': {s}", .{ m.def.name, detail(created) });
+        return rpc.refuse(alloc, "could not open a conversation for '{s}': {s}", .{ m.def.name, detail(created.run) });
     }
-    const remote = std.mem.trim(u8, created.stdout, " \t\r\n");
+    const remote = std.mem.trim(u8, created.run.stdout, " \t\r\n");
     if (remote.len == 0) return rpc.refuse(alloc, "the {s} runner opened no conversation for '{s}'", .{ m.def.runner.label(), m.def.name });
 
-    // The delegation's own identity, and the journal that will hold everything
-    // decided once about it — which runner, at what version, over which remote
-    // conversation (D2/D7). Written BEFORE the first message, so a runner
-    // started by that message always finds a record describing what it drives.
-    const d = try record.mint(alloc, ctx.io);
+    // The journal that holds everything decided once about this delegation —
+    // which runner, at what version, over which remote conversation (D2/D7).
+    // Written BEFORE the first message, so a runner started by that message
+    // always finds a record describing what it drives.
     try record.appendCreated(alloc, ctx.io, std.Io.Dir.cwd(), d, .{
         .agent = m.def.name,
         .runner = m.def.runner.label(),
+        .runner_version = created.version,
         .remote = remote,
         .parent = parent,
         .readonly = m.def.readonly,
