@@ -47,6 +47,33 @@ export interface Activity {
   cancelable?: boolean
   /** The one entry here that is a place rather than a state: `/tasks`. */
   opens?: "tasks"
+  /**
+   * When THIS activity began, when that is not the driver's own clock. A step
+   * is the usual case and the caller passes `attach.startedAt()` for it; work
+   * that is not a step (the start-up extension pass) has its own start and
+   * would otherwise borrow the clock of a session that has not begun.
+   */
+  since?: number
+}
+
+/**
+ * A store pass in flight: which draft it is on, and how far along it is.
+ *
+ * It is here rather than in a notice because of what T35 made the notice: news
+ * that covers the row and then takes itself down (`noticeHold`, three seconds
+ * at the floor). The kernel reports a draft when that draft FINISHES, so a
+ * compiled one holds the count still for as long as zig takes — the notice
+ * expired mid-build and the screen went quiet for the rest of a minute, which
+ * is exactly the state a person reads as "nothing is happening". Progress is
+ * not news; it is what is happening, and that is this line.
+ */
+export interface SyncProgress {
+  /** The whole phrase, already built by the caller: `building std`. */
+  what: string
+  /** Drafts finished, and how many the plan found. `total = 0` prints no count. */
+  done: number
+  total: number
+  since: number
 }
 
 /**
@@ -89,6 +116,7 @@ export function activityOf(facts: {
   takeoverReady: boolean
   awaiting: boolean
   background: number
+  syncing?: SyncProgress | null
 }): Activity | null {
   // The kernel is stopped on a call, waiting for a verdict (tui.md §5.7). It
   // outranks everything: nothing else can be happening while it is true.
@@ -116,6 +144,20 @@ export function activityOf(facts: {
   }
   if (facts.snapshot.lastStopped === "max_tokens") {
     return { text: "reply cut off (max_tokens) · send a message to continue", tone: "warn", moving: false }
+  }
+  // Below every row above it on purpose: a store pass never blocks the
+  // conversation, so a step in flight, a spent budget or a waiting approval is
+  // always the more useful thing to be told. It outranks `background` only
+  // because it is the one of the two a person is likely to be waiting on before
+  // the first message.
+  if (facts.syncing) {
+    const { what, done, total, since } = facts.syncing
+    return {
+      text: total > 0 ? `${what} (${done}/${total})` : what,
+      tone: "run",
+      moving: true,
+      since,
+    }
   }
   // Last, and only when nothing else is running: a detached command outlives
   // the step that started it, so an idle driver with one going is the one case
@@ -190,7 +232,9 @@ export function WorkingStatus(props: {
   const tail = () => {
     const activity = props.activity
     if (!activity || !activity.moving) return ""
-    const since = props.since
+    // The activity's own clock when it has one: work that is not a step starts
+    // at a moment the driver knows nothing about (`Activity.since`).
+    const since = activity.since ?? props.since
     const age = since ? ` · ${elapsedLabel((props.now ?? Date.now()) - since)}` : ""
     const esc = activity.cancelable ? " · esc to cancel" : ""
     const spent = props.usage ? ` · ${props.usage}` : ""

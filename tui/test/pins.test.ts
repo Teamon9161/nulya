@@ -185,38 +185,45 @@ test("rows come only from extensions a pin could actually resolve through", () =
   expect(nextFace(sources({ merged: ["a", "b"], session: ["b", "c"] }))).toEqual(["a", "b", "c"])
 })
 
-test("the list folds internal-only rows, while manual and auto rows stay visible", () => {
-  // The surfaces are the packages' own (`internalTools`, DESIGN §7.2.1) — which
-  // is why `agent` splits: one pinnable tool, three internal ones. Before T34
-  // the whole package was internal because its id was on a list here, and its
-  // delegation entry point was folded away with the rest.
+test("collapsed, the list is the switches: `auto` and `internal` rows both fold away", () => {
+  // The surfaces are the packages' own (DESIGN §7.2.1) — which is why `agent`
+  // splits: one pinnable tool, three internal ones. Before T34 the whole package
+  // was internal because its id was on a list here, and its delegation entry
+  // point was folded away with the rest.
   const entries: ExtensionEntry[] = [
     { ...entry("agent", "v-1", ["agent", "list", "render", "run"]), manualTools: ["agent"], internalTools: ["list", "render", "run"] },
     { ...entry("compact", "v-1", ["compact"]), manualTools: [], internalTools: ["compact"] },
+    { ...entry("plan", "v-1", ["propose", "todo"]), manualTools: [], autoTools: ["propose", "todo"] },
     entry("std", "v-1", ["read", "grep"]),
   ]
   const rows = toolRows(entries, sources({ user: [toolId("std", "read")] }), [])
 
-  // Collapsed: the four internal tools are gone and every remaining row is a
-  // switch somebody can throw. Expanded: the same list as before T33.
+  // Collapsed: every remaining row is a switch somebody can throw. The `auto`
+  // pair is gone with the internal four — a checkbox no key in this pane can
+  // change is worse than no row (T59).
   expect(shownRows(rows, false).map((row) => row.id)).toEqual([
     toolId("agent", "agent"),
     toolId("std", "grep"),
     toolId("std", "read"),
   ])
   expect(shownRows(rows, true).map((row) => row.id)).toEqual(rows.map((row) => row.id))
-  expect(foldedRows(rows)).toHaveLength(4)
-  expect(foldLine(4, false)).toContain("4 internal tools")
-  expect(foldLine(4, false)).toContain("ext run")
-  expect(foldLine(4, false)).toContain("d shows")
-  expect(foldLine(1, true)).toContain("1 internal tool ")
-  expect(foldLine(1, true)).toContain("d folds")
+  expect(foldedRows(rows)).toHaveLength(6)
 
-  // A driver tool with a pin somehow down stays visible: it is the one row here
-  // that IS a state, and taking it back is what this pane is for.
+  // The line groups them by the word that explains each: they have no checkbox
+  // for two different reasons, and one count would say neither.
+  const line = foldLine(foldedRows(rows), false)
+  expect(line).toContain("2 auto")
+  expect(line).toContain("4 internal")
+  expect(line).toContain("d shows")
+  expect(foldLine(foldedRows(rows), true)).toContain("d folds")
+  // A fold holding one kind names only that kind.
+  expect(foldLine(foldedRows(toolRows([entries[1]!], sources({}), [])), false)).not.toContain("auto")
+
+  // A row with a pin somehow down stays visible whatever its surface: it is the
+  // one row here that IS a state, and taking it back is what this pane is for.
   const pinned = toolRows(entries, sources({ user: [toolId("compact", "compact")] }), [])
   expect(shownRows(pinned, false).map((row) => row.id)).toContain(toolId("compact", "compact"))
-  expect(foldedRows(pinned)).toHaveLength(3)
+  expect(foldedRows(pinned)).toHaveLength(5)
 })
 
 test("the config write replaces one line and leaves every other byte alone", () => {
@@ -327,6 +334,7 @@ function entry(id: string, current: string, tools: string[]): ExtensionEntry {
     kind: "script",
     tools,
     manualTools: tools,
+    recommendedTools: tools,
     autoTools: [],
     internalTools: [],
     apply: "manual",

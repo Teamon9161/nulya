@@ -280,6 +280,29 @@ pub const ToolSpec = struct {
     /// This tool's placement (see `Surface`), kept as WRITTEN. Read through
     /// `surfaceOf`, which supplies the default.
     surface: ?[]const u8 = null,
+    /// Should whoever INSTALLS this package switch this `manual` tool on?
+    ///
+    /// A DECLARATION addressed to the installer, not to the kernel: the kernel's
+    /// tool face is unchanged by it (a `manual` tool reaches the model when, and
+    /// only when, a pin names it — DESIGN §5.1). What reads it is the code that
+    /// turns a package on and has to decide WHICH pins to write: `/ext`'s Enter,
+    /// and anything else that materialises a recommended set.
+    ///
+    /// `true` — the default — is what `manual` means in practice: on once the
+    /// package is installed, and closable one tool at a time, which is the whole
+    /// difference from `auto` (on because the package is in, with no separate
+    /// switch because the package IS that capability). `false` is the one thing
+    /// this field exists to let a package say: an EXTRA, off until somebody asks
+    /// for it, in a package whose other tools are the point.
+    ///
+    /// Kept as WRITTEN and read through `recommendedOf`, which supplies the
+    /// default — the `surface` / `surfaceOf` shape, and for the same reason:
+    /// `validate` has to be able to tell "wrote `true`" from "wrote nothing" to
+    /// refuse the key on a non-`manual` tool (`InvalidRecommended`), where an
+    /// `auto` tool is already on and an `internal` one can never be pinned, so
+    /// the key could only mislead. The MEANING has no third state: every
+    /// `manual` tool is either recommended or not.
+    recommended: ?bool = null,
     /// This tool's front-end rendering hints (see `ToolUi`), or null when the
     /// package made neither claim. Grouped under one FRONT-END key, distinct
     /// from `readonly` / `surface` above: those two are read by the kernel's
@@ -296,6 +319,14 @@ pub const ToolSpec = struct {
     pub fn surfaceOf(self: ToolSpec) Surface {
         if (self.surface) |s| return Surface.fromString(s).?;
         return .auto;
+    }
+
+    /// Would an installer switch this tool on? Meaningful only for `manual`
+    /// tools — the other two surfaces answer the question by themselves — so
+    /// callers ask it about those, and `validate` is what keeps the key off the
+    /// rest.
+    pub fn recommendedOf(self: ToolSpec) bool {
+        return self.recommended orelse true;
     }
 };
 
@@ -509,6 +540,13 @@ pub const Manifest = struct {
             if (t.surface) |s| {
                 if (Surface.fromString(s) == null) return error.InvalidSurface;
             }
+            // `recommended` is advice about a pin, so it can only be said about
+            // a tool a pin is the way in for. On an `auto` tool it would read as
+            // a switch that does not exist, and on an `internal` one as a face
+            // it can never reach — both are a package believing something the
+            // installer will not do. Refused after `surface`, so a manifest with
+            // both wrong is told about the word it misspelled first.
+            if (t.recommended != null and t.surfaceOf() != .manual) return error.InvalidRecommended;
             for (self.tools[i + 1 ..]) |other| {
                 if (std.mem.eql(u8, t.name, other.name)) return error.DuplicateToolName;
             }
@@ -602,6 +640,9 @@ pub const ValidateError = error{
     /// A tool's `surface` is a string, but not one of `auto` / `manual` /
     /// `internal`.
     InvalidSurface,
+    /// A tool declares `recommended` without being `surface: "manual"` — advice
+    /// about a pin, on a tool no pin can name.
+    InvalidRecommended,
     /// The manifest's `apply` is a string, but not one of `auto` / `manual`.
     InvalidApply,
     InvalidSkillPath,
@@ -794,6 +835,7 @@ fn dupTools(a: std.mem.Allocator, contributes: std.json.ObjectMap) ParseError![]
             .timeout_ms = try optionalU32(to, "timeout_ms"),
             .readonly = try optionalBool(to, "readonly"),
             .surface = try optionalString(a, to, "surface"),
+            .recommended = try optionalBool(to, "recommended"),
             .ui = try dupToolUi(a, to),
         };
     }
@@ -1326,6 +1368,49 @@ test "a tool's surface is auto, manual or internal; silence means auto and an un
     // And a wrong TYPE is a parse error, the same split `timeout_ms` makes.
     try std.testing.expectError(error.WrongType, parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"t","input":{},"surface":true}]}}
+    ));
+}
+
+test "recommended is advice to whoever installs a manual tool, and cannot be said about the other two surfaces" {
+    const alloc = std.testing.allocator;
+
+    var m = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"kit","runtime":{"entry":"bin/kit"},"contributes":{"tools":[
+        \\  {"name":"core","input":{},"surface":"manual"},
+        \\  {"name":"extra","input":{},"surface":"manual","recommended":false},
+        \\  {"name":"also","input":{},"surface":"manual","recommended":true}
+        \\]}}
+    );
+    defer m.deinit();
+    try m.validate();
+    // Silence is the default and it points at ON: `manual` means a tool an
+    // installer switches on and a person can switch back off, which is the whole
+    // difference from `auto`. Only the extras have to say anything.
+    try std.testing.expect(m.tools[0].recommended == null);
+    try std.testing.expect(m.tools[0].recommendedOf());
+    try std.testing.expect(!m.tools[1].recommendedOf());
+    try std.testing.expect(m.tools[2].recommendedOf());
+
+    // On the other two surfaces the key could only mislead: an `auto` tool is
+    // already on, and no pin can ever name an `internal` one.
+    for ([_][]const u8{ "auto", "internal" }) |word| {
+        const src = try std.fmt.allocPrint(alloc,
+            \\{{"schema":"nulya.extension/v2","id":"a","runtime":{{"entry":"bin/a"}},"contributes":{{"tools":[{{"name":"t","input":{{}},"surface":"{s}","recommended":true}}]}}}}
+        , .{word});
+        defer alloc.free(src);
+        var bad = try parse(alloc, src);
+        defer bad.deinit();
+        try std.testing.expectError(error.InvalidRecommended, bad.validate());
+    }
+    // Including the default surface, which is `auto` without saying so.
+    var implicit = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"t","input":{},"recommended":false}]}}
+    );
+    defer implicit.deinit();
+    try std.testing.expectError(error.InvalidRecommended, implicit.validate());
+
+    try std.testing.expectError(error.WrongType, parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"t","input":{},"surface":"manual","recommended":"yes"}]}}
     ));
 }
 

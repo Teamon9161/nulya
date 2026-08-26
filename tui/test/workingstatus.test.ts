@@ -11,7 +11,7 @@
  * not a chain of JSX ternaries.
  */
 import { expect, test } from "bun:test"
-import { activityOf, elapsedLabel, stepActivity } from "../src/ui/WorkingStatus.tsx"
+import { activityOf, elapsedLabel, stepActivity, type SyncProgress } from "../src/ui/WorkingStatus.tsx"
 import { noticeHold } from "../src/ui/App.tsx"
 import { shimmerColor, mixHex, createStyle } from "../src/render/theme.ts"
 import { default_settings } from "../src/state/settings.ts"
@@ -28,6 +28,7 @@ function facts(over: {
   takeoverReady?: boolean
   awaiting?: boolean
   background?: number
+  syncing?: SyncProgress | null
 }) {
   return {
     status: over.status ?? "idle",
@@ -36,8 +37,11 @@ function facts(over: {
     takeoverReady: over.takeoverReady ?? false,
     awaiting: over.awaiting ?? false,
     background: over.background ?? 0,
+    syncing: over.syncing ?? null,
   }
 }
+
+const sync: SyncProgress = { what: "building std", done: 2, total: 8, since: 1000 }
 
 function tool(over: Partial<ToolItem> & { tool: string; state: ToolItem["state"] }): ToolItem {
   return {
@@ -156,6 +160,25 @@ test("activityOf: driver, idle, nothing else — background alone survives, movi
   const a = activityOf(facts({ background: 2 }))
   expect(a).toEqual({ text: "2 background", tone: "run", moving: true, opens: "tasks" })
   expect(a?.cancelable).toBeUndefined()
+})
+
+test("activityOf: a store pass names the draft it is on and carries its own clock", () => {
+  const a = activityOf(facts({ syncing: sync }))
+  expect(a).toEqual({ text: "building std (2/8)", tone: "run", moving: true, since: 1000 })
+  // A phase with nothing to count says only what it is doing — `(0/0)` would be
+  // a progress bar that never fills.
+  expect(activityOf(facts({ syncing: { ...sync, what: "installing", total: 0 } }))?.text).toBe("installing")
+})
+
+test("activityOf: a store pass never blocks the conversation, so every waiting-on-you row outranks it", () => {
+  // The pass runs on a timer of its own: whatever the person is actually
+  // waiting for is the more useful thing to be told while it goes.
+  expect(activityOf(facts({ syncing: sync, awaiting: true }))?.text).toBe("waiting for your answer")
+  expect(activityOf(facts({ syncing: sync, status: "stepping" }))?.text).toBe("waiting for model")
+  expect(activityOf(facts({ syncing: sync, snapshot: { lastStopped: "budget" } }))?.tone).toBe("warn")
+  // …and it beats the one row below it, which is the reason it sits there:
+  // before the first message a background count is the less pressing of the two.
+  expect(activityOf(facts({ syncing: sync, background: 2 }))?.text).toBe("building std (2/8)")
 })
 
 test("activityOf: a genuinely resting driver tab draws nothing — idle, finished, and canceled all resolve to null", () => {

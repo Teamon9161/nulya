@@ -1859,3 +1859,41 @@ T52 之后剩下两处「同一件事说两遍」，都是 `surface`/`apply` 那
 改法是 review 给的形状：`safeToActivateUnattended` = 候选 `auto` → false · `extList` 失败 → **false** · 没有 active 行 → true · 否则 `!entry.standing`（读 ① 的字段，不再读 manifest）；新的 `activateUnattended(ws, {id, version, root, user})` 是**唯一那道门**（`built` 读不出来 → `held`；政策说不 → `held`；`extSetCurrent` 抛 → `failed`），startup sync 与 `adoptBundled` 都只经它。**候选从哪来不是政策输入**：`arrived` 说的是这一轮谁落地了，与「移动这个指针会不会改变每一场 session 带什么」无关，两个调用者两份政策就是多了一份。被拦下的照常在状态栏点名，措辞从 `built, not activated (every session)` 收成 `built, not activated · /ext`——现在被拦有两种原因（reach 问题是活的 / store 答不出来），而分得清它们的是 `/ext` 那一行本身。
 
 **测试**：`files.test.ts` 一条真二进制 fixture（`apply:"auto"` 的 data 包：build 后 `standing` 是 `false`（没有 `current`）→ activate 后 `true` → deactivate 后又 `false`，而 `apply` 三次都是 `"auto"`——manifest 读法分不出这三态），并给既有那条加一句 `manual` 包恒 `false`；`extensions.test.ts` 三条——`ext list` 打不通时 helper 回 `false`（候选单独看是安全的）、候选 manifest 读不出时 `activateUnattended` 是 `held` 且 `current` 没动、以及 adoptBundled 场景（user store 里预置一个 `apply:"auto"` 已激活的 `kong` 与一个什么都没有的 `house.rule`，把 kong 的 draft 改成 `manual` 重 build，然后把两个 id 一起当成 `arrived`：kong 的指针没动且仍 standing、被点名，house.rule 照常激活）。T55 那两条一字未改地仍然成立——它们本来就只断言 helper 的答案与指针的位置。`cd tui && bun test`：382 pass，`bun run typecheck` 干净。
+
+### T57 · 一趟 sync 说得出自己在等谁（2026-08-26）
+
+开屏那趟后台 sync 在屏幕上几乎不存在：进度写在 `setNotice` 上，而 T35 之后 notice 是**新闻**——盖住那一行，然后按 `noticeHold`（下限 3 秒）自己下去。内核**在一个 draft 建完时**才报它，所以六个编译包里第一个跑 zig 的那几十秒里一次回调都不发：计数停在 `2/8`，三秒后整行消失，剩下的时间屏幕一个字都不说。这正是"卡住了"的样子，而人找到的修法是退出去手动再 build 一次。第二个半边：`/ext` 只在 `onMount` 读一次，开着它等 sync 的人看的是**开始之前**那份 plan，于是一个已经建好的 draft 继续写着 `not built`——同一件事的两种表现。内核零改动，第三点在 `cli/ext.zig` 的呈现层。
+
+**① 进度搬去 `WorkingStatus`。** 判据是 T38 自己划的那条线：notice 是新闻，输入框上面那一行是**正在发生什么**。`activityOf` 多一个事实 `syncing: SyncProgress | null`（`{what, done, total, since}`），画成 `⠋ building std (5/8) · 41s`；`total = 0` 不打计数（seed 那一段没有可数的东西，`(0/0)` 是一个永远填不满的进度条）。**排在最后一格之前**：一趟 store pass 从不挡住对话，所以等审批、跑着的 step、花完的预算全都比它更该被读到；它只压过 `background`，因为第一条消息之前那两者里它才是人在等的那个。`Activity` 因此多一个可选的 `since`——不是 step 的工作有自己的起点，否则它会去借一场还没开始的 session 的钟。
+
+**② 报的是 id 不是数字。** `syncStores` 本来就先跑一次 `planStore` 取总数，现在把**那份有序的 id 列表**留着：内核报的是"谁完成了"，正在做的就是同一张单子上的下一个。`building std` 与停住的 `5/8` 的区别，就是"在等谁"与"不知道还有没有在动"的区别。走完最后一个之后不再点名（还有指针要移、listing 要重读），收成 `syncing extensions (8/8)`。
+
+**③ 写完了就让屏幕重读。** `planTick` 这个"有人写了那些文件"的信号早就在，只是 sync 结束时只在 `adopted.length > 0` 那一支 bump。改成**无条件** bump 一次，并把它作为 `tick` 传给 `ExtView`，那边 `createEffect(on(…, {defer: true}))` 重跑 `refresh()`。于是"sync 跑完 `/ext` 还说 not built"消失——它从来不是 sync 的问题，是一张没人告诉它该重读的屏。
+
+**④ 不用编译器的 draft 排在前面**（`cli/ext.zig` 的 `draftIds`，DESIGN §14）：`data` / `script` 的 identity 只是 snapshot，建它们是拷贝加 digest，毫秒级；八个自带包里正好两个是这种。两组内各按 id 排序，所以"两次 sync 读起来一样"仍然成立，而计数**立刻**开始动，剩下的等待明确是在等编译。判 kind 要读一次 draft manifest（几百字节，读不出来的排进第一组——它的真实错误该当场报出来，而不是排在每一个编译之后）。下游不依赖顺序：每个 draft 独立 build，汇总是总数。
+
+**测试**：`workingstatus.test.ts` 两条——一条钉住它画出 id 与计数、`total = 0` 时不画计数、且带着自己的钟，一条钉住优先级（审批 / stepping / 花完的预算都压过它，而它压过 `background`）。顺序那一格没有断言：它是呈现，而 DESIGN §14 明说下游不依赖它。`cd tui && bun test`：384 pass，`bun run typecheck` 干净；`zig build test` / `zig build e2e -Dtest-filter="sync"` 干净。
+
+### T58 · 一个包说得出它推荐开哪几个工具（2026-08-26）
+
+`manual` 的含义一直只写了一半。它说的是"有 pin 才上模型面"——那是**内核**的规则，从来正确——但没有任何地方说过"装上这个包之后，这几个该不该开"。于是两个安装者各自在猜，而且猜得不一样：`/ext` 的 Enter 把**全部** `manual` tool 都 pin 上（`pinsOf`），手工 `nulya ext activate` 一条都不写。后者正是 `extensions/std` 的文档安装路径，六个工具因此全在模型面外，而屏幕上没有任何迹象说少了什么。
+
+补的是一个**给安装者的声明**：`contributes.tools[].recommended`（`manifest.ToolSpec`，缺省 `true`，DESIGN §5.1/§7.2.1）。内核解析、冻结、**零 enforce**——工具面的解析一个字没改，`manual` 仍然是"有 pin 才上"——读它的只有决定要写哪些 pin 的那一方。缺省是 `true` 因为那正是 `manual` 在实践中的意思：**装上就开、但可以逐个关**，而 `auto` 是"因为包在所以在、没有单独的开关"，两者的差别只在那个开关，不在默认。所以八个自带包一个字都不用改，行为逐位不变（`std` 的六个仍然全开——它是编译包，为一个恒等的默认值 bump 一次 version id 等于让每台机器重跑一次 zig）。
+
+**它买到的是混用型的包**：为之存在的能力写 `auto`，只有部分 session 想要的额外能力写 `manual` + `recommended: false`。在此之前，前端把全部 manual 都 pin 上，正好开的是作者标出来要留着关的那一半。写在非 `manual` 的 tool 上是 `InvalidRecommended`（`auto` 的本来就开着、`internal` 的永远上不了面，那个键在那儿只会骗人）。
+
+**"缺省开"不需要负号**，这是它能便宜落地的原因：默认被**物化**成一条条具体的 pin，不是内核在解析工具面时算出来的——关掉某一个就是删掉那一行，减法本来就存在。真需要负号的是"把一个 `auto` 关掉"，那件事没做。
+
+前端侧：`Contributions.recommendedTools` / `ExtensionEntry.recommendedTools`（`contributionsOf` 从 manifest 读，`recommended === false` 才排除），`pinsOf` 从"全部 manual"改成读它。CLI 侧：`ext activate` 生效的那一份多一行 stderr 点名推荐的 pin，并明说**这里不写任何配置**、出路是 `[registry] pinned_native_tools` 或 `session new --pin`（推荐集合为空则整行不打——`compact` 那样只有 internal tool 的包没有 pin 可建议）。
+
+**测试**：`manifest.zig` 一条（缺省 true、`false` 读得回、两种非 manual surface 与"没写 surface 等于 auto"都是 `InvalidRecommended`、类型错是 `WrongType`）；`extensions.test.ts` 两条——纯函数那条钉住"推荐的进 pin、没推荐的留在 `manualTools` 里等一次按键"，真二进制那条给 std fixture 加了一个 `recommended: false` 的 `demolish`，走一遍真 `ext sync` + `builtContributions`。`cd tui && bun test`：385 pass，`bun run typecheck` 干净；`zig build test` / `zig build e2e` 干净。
+
+### T59 · `/ext` 的工具面收起每一个按不动的开关（2026-08-26）
+
+T33 把 `internal` 行折起来时给的理由是**数量**（六个 driver tool 对五个可 pin 的，而后者有 `max_tools` 封顶、前者没有）。`auto` 行留在外面，理由是它们确实在模型面上。但那一列画的是 checkbox，而 `auto` 行的 checkbox **按不动**——`Space` 写的是 pin，pin 的入口只有 `manual` 一种（内核对指名 `auto` 的 pin 直接 `PinToolNotPinnable`）。于是这张表里混着两种长得一样的行：能按的和不能按的。
+
+判据因此从"是不是 internal"换成**"这一行这个面板能不能动它"**：`manual` 的能动；任何**已经有 pin 压着**的行也能动（不管什么 surface——把一条不该存在的 pin 取下来正是这个面板的用处，T33 那条例外原样保留并推广）；其余（`auto` 的 `composed` / `off`，`internal` 的 `off`）一律折起。**折起不是删掉**：它们仍在 `d` 后面，展开后每行的 `stateLabel` 已经说了 `with the package`。
+
+折起那一行按**包自己的词**分两组，各带一句为什么没有 checkbox：`2 auto · with their package · 4 internal · ext run only · d shows`。一行一个键（fold 是一个控件，而读者在问的是同一个问题：要不要打开）；措辞刻意短，因为这行要 `fit` 到面板宽度、计数必须活过窄终端。信号量名 `driversOpen` 随之改成 `foldOpen`——它折的已经不只是 driver tool。
+
+**测试**：`pins.test.ts` 那条改写成"collapsed 就是全部开关"（一个 `auto` 包 + 一个 `internal` 包 + 一个 `manual` 包：折 6 露 3；折起行同时点名两组；只有一种时不提另一种；压着 pin 的 `internal` 行仍然可见）。`overlays.test.tsx` 两处跟随：折起行的文案，以及 80 列那条把它的长 id 扩展改成 `manual`——它量的是"窄终端下 checkbox 守住格位、id 被切"，而脚手架出来的 tool 是 `auto`，会连着那个被切的格子一起折走。`cd tui && bun test`：385 pass，`bun run typecheck` 干净。

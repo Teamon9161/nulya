@@ -847,6 +847,8 @@ test("the pins an activation writes come from the manifest, per tool, for a pack
     id,
     tools: [...manualTools, ...internalTools],
     manualTools,
+    // Every manual tool, which is what `recommended` defaults to.
+    recommendedTools: manualTools,
     internalTools,
   })
 
@@ -881,13 +883,46 @@ test("the pins an activation writes come from the manifest, per tool, for a pack
  * `pinsOf` is it.
  */
 test("the switch pins every pinnable tool a package declares, whatever kind of package it is", () => {
-  const pkg = (id: string, tools: string[], manualTools = tools) => ({ id, tools, manualTools })
+  const pkg = (id: string, tools: string[], manualTools = tools) => ({
+    id,
+    tools,
+    manualTools,
+    recommendedTools: manualTools,
+  })
 
   expect(pinsOf(pkg("std", ["read", "edit"]))).toEqual(["ext:std/read", "ext:std/edit"])
   // `surface:"auto"` tools are model-facing, but membership exposes them and a
   // pin naming one is refused outright — so the switch writes none.
   expect(pinsOf(pkg("plan", ["propose", "todo"], []))).toEqual([])
   expect(pinsOf(pkg("ask", ["ask"], []))).toEqual([])
+})
+
+/**
+ * The one thing `recommended` exists to let a package say (DESIGN §5.1).
+ *
+ * `manual` means on-once-installed and closable one tool at a time — that is
+ * the whole difference from `auto`, where the tool is on because the package is
+ * and there is no separate switch. So the default is ON, and a package that
+ * says nothing gets every manual tool pinned, exactly as before the field.
+ *
+ * What it buys is the mixed package: the tools it is FOR are `auto`, the extras
+ * only some sessions want are `manual` with `recommended: false`. Before this,
+ * a front end pinning every manual tool turned on precisely the half the author
+ * had marked to keep off.
+ */
+test("turning a package on writes the pins it recommends, and an extra it does not is left for a keypress", () => {
+  const kit = {
+    id: "acme.kit",
+    manualTools: ["patrol", "sweep", "demolish"],
+    recommendedTools: ["patrol", "sweep"],
+  }
+  expect(pinsOf(kit)).toEqual(["ext:acme.kit/patrol", "ext:acme.kit/sweep"])
+  // Still pinnable, just not by the switch: the tools pane can name it.
+  expect(kit.manualTools).toContain("demolish")
+
+  // Every manual tool declining leaves the switch writing nothing at all — an
+  // ordinary answer, like a package of `internal` tools.
+  expect(pinsOf({ id: "acme.kit", recommendedTools: [] })).toEqual([])
 })
 
 /**
@@ -917,6 +952,9 @@ test("the std pin list is the frozen manifest's, with the literal only as a cold
           tools: [
             { name: "read", input: {}, surface: "manual", readonly: true },
             { name: "edit", input: {}, surface: "manual" },
+            // An extra: pinnable, but not something turning the package on
+            // should switch on for everybody (`recommended`, DESIGN §5.1).
+            { name: "demolish", input: {}, surface: "manual", recommended: false },
             // An internal tool a future std might grow: it must not be pinned,
             // and no edit to this file is needed for that to hold.
             { name: "reindex", input: {}, surface: "internal" },
@@ -930,9 +968,11 @@ test("the std pin list is the frozen manifest's, with the literal only as a cold
     const built = await extSync(store)
     const line = built.lines.find((entry) => entry.id === "std")!
     const what = (await builtContributions(store, root, "std", line.version!))!
-    expect(what.manualTools).toEqual(["read", "edit"])
+    expect(what.manualTools).toEqual(["read", "edit", "demolish"])
     expect(what.internalTools).toEqual(["reindex"])
     expect(what.autoTools).toEqual(["watch"])
+    // The switch writes the recommended ones; `demolish` stays pinnable and off.
+    expect(what.recommendedTools).toEqual(["read", "edit"])
     expect(pinsOf(what)).toEqual(["ext:std/read", "ext:std/edit"])
     // Nothing said about `apply` either: `manual`, so activating it composes
     // nothing by itself.

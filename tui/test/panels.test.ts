@@ -14,6 +14,7 @@ function contribution(over: Partial<Contributions> & Pick<Contributions, "id">):
     version: "v-0",
     tools: [],
     manualTools: [],
+    recommendedTools: [],
     autoTools: [],
     internalTools: [],
     apply: "manual" as const,

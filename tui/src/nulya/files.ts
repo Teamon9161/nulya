@@ -97,6 +97,16 @@ export interface Contributions {
   tools: string[]
   /** The subset of `tools` whose surface is `manual`: model-facing only when a pin names it. */
   manualTools: string[]
+  /**
+   * The `manual` tools this package recommends switching on when it is
+   * installed (`manifest.ToolSpec.recommended`, default true).
+   *
+   * Distinct from `manualTools`, and the distinction is the point: a pin can
+   * name any of the latter, but turning a package ON should write only these.
+   * A package whose other tools are the point may declare extras
+   * `recommended: false` — off until somebody asks, still one `Space` away.
+   */
+  recommendedTools: string[]
   /** The subset of `tools` whose surface is `auto`: model-facing as soon as its package is a member. */
   autoTools: string[]
   /** The subset of `tools` whose surface is `internal`: callable with `ext run`, never on the model face. */
@@ -239,6 +249,7 @@ export async function readContributions(
     version,
     tools: [],
     manualTools: [],
+    recommendedTools: [],
     autoTools: [],
     internalTools: [],
     apply: "manual",
@@ -293,6 +304,7 @@ function contributionsOf(
   Contributions,
   | "tools"
   | "manualTools"
+  | "recommendedTools"
   | "autoTools"
   | "internalTools"
   | "apply"
@@ -316,9 +328,17 @@ function contributionsOf(
   }
   const tools = named.map((tool) => tool["name"] as string)
   const surfaces = new Map(named.map((tool) => [tool["name"] as string, toolSurfaceOf(tool)]))
+  // `recommended` defaults to TRUE, which is what `manual` means in practice:
+  // on once the package is installed, and closable one tool at a time. Only a
+  // package with extras it wants left off writes anything (`manifest.ToolSpec`,
+  // DESIGN §5.1).
+  const declined = new Set(
+    named.filter((tool) => tool["recommended"] === false).map((tool) => tool["name"] as string),
+  )
   return {
     tools,
     manualTools: tools.filter((tool) => surfaces.get(tool) === "manual"),
+    recommendedTools: tools.filter((tool) => surfaces.get(tool) === "manual" && !declined.has(tool)),
     autoTools: tools.filter((tool) => surfaces.get(tool) === "auto"),
     internalTools: tools.filter((tool) => surfaces.get(tool) === "internal"),
     // Top level, not under `contributes`: it is not a contribution, it is the
@@ -700,6 +720,12 @@ export interface ExtensionEntry {
   tools: string[]
   /** The declared `manual`-surface subset of `tools` (DESIGN §7.2.1). */
   manualTools: string[]
+  /**
+   * The `manual` tools this version recommends switching on when the package is
+   * turned on (`Contributions.recommendedTools`). Every one of them unless the
+   * package declared an extra `recommended: false`.
+   */
+  recommendedTools: string[]
   /** The declared `auto`-surface subset of `tools` (DESIGN §7.2.1). */
   autoTools: string[]
   /** The declared `internal`-surface subset of `tools` (DESIGN §7.2.1). */
@@ -778,6 +804,7 @@ function manifestFacts(manifest: Record<string, unknown> | null): Pick<
   | "kind"
   | "tools"
   | "manualTools"
+  | "recommendedTools"
   | "autoTools"
   | "internalTools"
   | "apply"

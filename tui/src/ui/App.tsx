@@ -10,7 +10,7 @@ import { AgentPicker } from "./AgentPicker.tsx"
 import { WithPicker, type Wearable } from "./WithPicker.tsx"
 import { StatusBar } from "./StatusBar.tsx"
 import { pickTip } from "./Welcome.tsx"
-import { WorkingStatus, activityOf } from "./WorkingStatus.tsx"
+import { WorkingStatus, activityOf, type SyncProgress } from "./WorkingStatus.tsx"
 import { TabBar } from "./TabBar.tsx"
 import { SessionsView } from "./overlays/SessionsView.tsx"
 import { ExtView } from "./overlays/ExtView.tsx"
@@ -340,6 +340,11 @@ export function App(props: AppProps) {
    */
   const [planTick, setPlanTick] = createSignal(0)
   /**
+   * The start-up store pass while it is running (`WorkingStatus.SyncProgress`).
+   * Null at rest, which is what makes the activity line disappear on its own.
+   */
+  const [syncing, setSyncing] = createSignal<SyncProgress | null>(null)
+  /**
    * The permission mode (tui.md §5.7). Remembered on screen, like the model
    * pick: `tui-state.json` first (what was last chosen here), then `tui.toml`'s
    * `[driver] mode`, then `ask`.
@@ -606,7 +611,7 @@ export function App(props: AppProps) {
     let untouched: string[] = []
     if (plan.user && plan.bundled) {
       try {
-        setNotice("installing the bundled extensions…")
+        setSyncing({ what: "installing the bundled extensions", done: 0, total: 0, since: Date.now() })
         const seed = await seedBundled(props.ws)
         arrived = seed.ids
         refreshed = seed.updated
@@ -624,13 +629,28 @@ export function App(props: AppProps) {
     const news: string[] = []
     for (const root of roots) {
       try {
-        const total = (await planStore(props.ws, root.user)).lines.length
+        // The plan's ids IN ORDER, not just how many there are: the kernel
+        // reports a draft when it finishes, so the one being worked on is the
+        // next one in the same list `ext sync` is walking. Naming it is what
+        // turns a stalled counter into `building std` — the whole difference
+        // between a screen that looks stuck and one that says who it is waiting
+        // for (tui.md §11, T57).
+        const queue = (await planStore(props.ws, root.user)).lines.map((line) => line.id)
+        const total = queue.length
         if (total === 0) continue
         let done = 0
-        setNotice(`syncing extensions… 0/${total}`)
+        const since = Date.now()
+        // Past the last draft the pass is still going — pointers to move, a
+        // listing to re-read — so the line stays up and stops naming a draft
+        // rather than naming one that is already done.
+        const onDraft = () => {
+          const next = queue[done]
+          setSyncing({ what: next ? `building ${next}` : "syncing extensions", done, total, since })
+        }
+        onDraft()
         const report = await extSync(props.ws, { user: root.user }, () => {
           done += 1
-          setNotice(`syncing extensions… ${done}/${total}`)
+          onDraft()
         })
         let activated = 0
         // Built, and deliberately left where it was: the reach question is
@@ -724,7 +744,15 @@ export function App(props: AppProps) {
     // front of every model (T31). That state no longer exists — `current` says
     // which version an id means and composes nothing (DESIGN §5.1) — so there
     // is nothing to warn about and no list to compute.
+    setSyncing(null)
     setNotice(news.length > 0 ? news.join(" · ") : null)
+    // The pass wrote to the store, so every screen reading it from disk is now
+    // stale — including an `/ext` a person opened WHILE it ran, which used to
+    // keep showing the plan from before the build and made a finished sync look
+    // like one that never happened. `planTick` is the existing "something wrote
+    // those files" signal; the bump is unconditional because a pass that only
+    // moved a pointer changed the listing just as much as one that built.
+    setPlanTick((tick) => tick + 1)
   }
 
   // …and only then the code layer: a plugin lives in an ACTIVE version, and
@@ -834,6 +862,7 @@ export function App(props: AppProps) {
       takeoverReady: live()?.attach.takeoverReady() ?? false,
       awaiting: pending() !== null,
       background: runningTasks(),
+      syncing: syncing(),
     }),
   )
 
@@ -2724,6 +2753,7 @@ export function App(props: AppProps) {
                       // about either, which the null header already says.
                       sessionFile={live() ? `${sessions_dir}/${live()!.id}.jsonl` : undefined}
                       statePath={props.statePath}
+                      tick={planTick()}
                       onMembershipChanged={() => {
                         skills.invalidate()
                         // Activating or deactivating a package can add or

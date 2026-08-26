@@ -34,7 +34,7 @@
  * chose to make them, so every cell here is cut to its column and every sentence
  * is broken at its ` · ` joints by us rather than the terminal (`ui/columns.ts`).
  */
-import { For, Index, Show, createMemo, createSignal, onMount } from "solid-js"
+import { For, Index, Show, createEffect, createMemo, createSignal, on, onMount } from "solid-js"
 import { join } from "node:path"
 import { useKeyboard } from "@opentui/solid"
 import { useScreen, useStyle } from "../../render/theme.ts"
@@ -209,29 +209,43 @@ export function toolRows(
 }
 
 /**
- * A row the fold hides. An `internal` tool that somehow HAS a pin down is not
- * one: that is a state this pane can act on (`Space` takes it back), and the
- * one wrong checkbox in the list is the last thing to hide.
+ * A row the fold hides: one this pane cannot switch.
+ *
+ * `Space` writes and takes back PINS, and a pin is the way in for exactly one
+ * surface (`manual`, DESIGN §5.1). So the rows with a working checkbox are the
+ * `manual` ones — plus any row that somehow HAS a pin down, whatever its
+ * surface, because taking that back is a thing this pane can do and the one
+ * wrong checkbox in the list is the last thing to hide.
+ *
+ * Everything else is a row whose answer was decided elsewhere: an `auto` tool
+ * is on because its package is in the session, an `internal` one is never on
+ * the model face at all. Offering either a checkbox that does nothing is worse
+ * than not drawing it — the kernel refuses a pin naming them outright
+ * (`PinToolNotPinnable`), so there is no state here for a person to be in.
  */
 function isFolded(row: ToolRow): boolean {
-  return row.internal && row.state === "off"
+  if (!row.auto && !row.internal) return false
+  return row.state === "off" || row.state === "composed"
 }
 
-/** The rows `ext run` reaches and nobody can pin (tui.md §11, T33). */
+/** The rows nobody can switch here (tui.md §11, T33, T59). */
 export function foldedRows(rows: readonly ToolRow[]): ToolRow[] {
   return rows.filter(isFolded)
 }
 
 /**
- * What the list draws. Collapsed, `manual` rows and `auto` rows stay in view,
- * while `internal`-only rows fold away.
+ * What the list draws. Collapsed, the list is the switches and nothing else.
  *
  * The internal rows were listed beside them until T33, when there were six of
  * them to five pinnable ones — and, sorted by id, they came FIRST. The pinnable
  * half is capped by `registry.max_tools`; the internal half is capped by
- * nothing, so it grows the wrong way with every bundled package. They fold
- * behind one line (`foldLine`) instead of disappearing: what each of them costs
- * a reader is a row, not the fact of its existence.
+ * nothing, so it grows the wrong way with every bundled package. The `auto`
+ * rows joined them at T59 for a different reason: they are not noise, they are
+ * MISLEADING — a row in a column of checkboxes, sitting in the list a person
+ * came here to toggle things in, that no key in this pane can change.
+ *
+ * Both fold behind one line (`foldLine`) instead of disappearing: what each of
+ * them costs a reader is a row, not the fact of its existence.
  */
 export function shownRows(rows: readonly ToolRow[], expanded: boolean): ToolRow[] {
   return expanded ? [...rows] : rows.filter((row) => !isFolded(row))
@@ -240,13 +254,23 @@ export function shownRows(rows: readonly ToolRow[], expanded: boolean): ToolRow[
 /**
  * The one line the folded half becomes, and the key that opens it.
  *
- * It says the package's own word (`internal`, T52) and then what that word
- * means, because the word alone is a manifest field and the sentence is the
- * reason the rows have no checkbox.
+ * Grouped by the package's own word (`auto` / `internal`, T52) and each with
+ * what that word means, because the word alone is a manifest field and the
+ * sentence is the reason the rows have no checkbox. Two groups, one line and
+ * one key: the fold is a single control, and a reader deciding whether to open
+ * it is asking one question.
+ *
+ * The reasons are short on purpose — the line is `fit` to the pane, and the
+ * counts have to survive a narrow terminal. Anyone who opens it gets the longer
+ * answer per row, where `stateLabel` already says `with the package`.
  */
-export function foldLine(count: number, expanded: boolean): string {
-  const what = `${count} internal tool${count === 1 ? "" : "s"} · called with ext run, never on the model face`
-  return `${what} · d ${expanded ? "folds" : "shows"}`
+export function foldLine(rows: readonly ToolRow[], expanded: boolean): string {
+  const parts: string[] = []
+  const autos = rows.filter((row) => row.auto).length
+  const internals = rows.filter((row) => row.internal).length
+  if (autos > 0) parts.push(`${autos} auto · with their package`)
+  if (internals > 0) parts.push(`${internals} internal · ext run only`)
+  return `${parts.join(" · ")} · d ${expanded ? "folds" : "shows"}`
 }
 
   /**
@@ -355,6 +379,12 @@ export function ExtView(props: {
   /** Where `session_pins` is remembered; tests point it elsewhere. */
   statePath?: string
   /**
+   * Bumped by the host whenever something outside this view wrote to the store
+   * or the pin list. Every read here is a file read, so a number that changes
+   * is the only thing that can tell an open view to look again.
+   */
+  tick?: number
+  /**
    * An activate / deactivate landed: what the skill catalog holds
    * may have changed (`nulya skill list` lists ACTIVE extensions), and the
    * `/name` menu reads that. Pins never fire it — they are the other axis.
@@ -399,11 +429,11 @@ export function ExtView(props: {
   const [versionCursor, setVersionCursor] = createSignal(0)
   const [toolCursor, setToolCursor] = createSignal(0)
   /**
-   * Whether the driver half of the tools pane is unfolded. Deliberately NOT in
-   * `tui-state.json`: it is a moment's curiosity about what else is installed,
-   * not a setting about how this front end should look.
+   * Whether the unswitchable half of the tools pane is unfolded. Deliberately
+   * NOT in `tui-state.json`: it is a moment's curiosity about what else is
+   * installed, not a setting about how this front end should look.
    */
-  const [driversOpen, setDriversOpen] = createSignal(false)
+  const [foldOpen, setFoldOpen] = createSignal(false)
   const [pane, setPane] = createSignal<Pane>("extensions")
   const [notice, setNotice] = createSignal<string | null>(null)
   const [drafts, setDrafts] = createSignal<SyncLine[]>([])
@@ -563,6 +593,14 @@ export function ExtView(props: {
 
   onMount(() => void refresh())
 
+  // Somebody else wrote to the store while this view was open — in practice the
+  // start-up pass, which can still be building when a person opens `/ext` to
+  // watch it. Without this the view kept the plan it read on mount, so a draft
+  // that had since been built went on saying `not built` and the pass looked
+  // broken; the repair people found was to build it again by hand. Deferred, so
+  // opening does not immediately refresh what `onMount` just read.
+  createEffect(on(() => props.tick ?? 0, () => void refresh(), { defer: true }))
+
   const selected = createMemo(() => extensions()[Math.min(cursor(), Math.max(0, extensions().length - 1))] ?? null)
   const versions = createMemo(() => selected()?.versions ?? [])
   const selectedVersion = createMemo(() => versions()[Math.min(versionCursor(), Math.max(0, versions().length - 1))] ?? null)
@@ -577,7 +615,7 @@ export function ExtView(props: {
 
   const allTools = createMemo(() => toolRows(extensions(), sources(), usage()))
   /** The rows on screen: everything, or everything except folded driver rows. */
-  const tools = createMemo(() => shownRows(allTools(), driversOpen()))
+  const tools = createMemo(() => shownRows(allTools(), foldOpen()))
   const folded = createMemo(() => foldedRows(allTools()))
   const selectedTool = createMemo(() => tools()[Math.min(toolCursor(), Math.max(0, tools().length - 1))] ?? null)
   /**
@@ -587,8 +625,8 @@ export function ExtView(props: {
    */
   const toggleFold = () => {
     const row = selectedTool()
-    const next = !driversOpen()
-    setDriversOpen(next)
+    const next = !foldOpen()
+    setFoldOpen(next)
     const at = shownRows(allTools(), next).findIndex((entry) => entry.id === row?.id)
     setToolCursor(at >= 0 ? at : 0)
   }
@@ -1243,7 +1281,7 @@ export function ExtView(props: {
     if (key.name === "s") return void updateDraft()
     // Only where there is something to fold: `d` elsewhere in this view is a
     // key that appears to do nothing, which is worse than a key that is unbound.
-    if (key.name === "d" && pane() === "tools" && (driversOpen() || folded().length > 0)) return toggleFold()
+    if (key.name === "d" && pane() === "tools" && (foldOpen() || folded().length > 0)) return toggleFold()
     if (key.name === "p") return prune()
     if (key.name === "t") return setPane(pane() === "tools" ? "extensions" : "tools")
     if (key.name === "u") return setPane(pane() === "usage" ? "extensions" : "usage")
@@ -1376,7 +1414,7 @@ export function ExtView(props: {
         UNDER the list rather than in it: it has no checkbox and no cursor, and
         a row the cursor walks onto but cannot act on is the shape T33 took out.
       */}
-      <Show when={driversOpen() || folded().length > 0}>
+      <Show when={foldOpen() || folded().length > 0}>
         <box height={1} />
         <box
           flexDirection="row"
@@ -1390,9 +1428,9 @@ export function ExtView(props: {
           onMouseUp={foldClick.onMouseUp}
         >
           <box width={4} height={1} flexShrink={0}>
-            <text fg={style.theme.faint}>{` ${driversOpen() ? style.glyphs.foldOpen : style.glyphs.foldClosed}  `}</text>
+            <text fg={style.theme.faint}>{` ${foldOpen() ? style.glyphs.foldOpen : style.glyphs.foldClosed}  `}</text>
           </box>
-          <text fg={style.theme.dim}>{fit(foldLine(folded().length, driversOpen()), inner() - 4)}</text>
+          <text fg={style.theme.dim}>{fit(foldLine(folded(), foldOpen()), inner() - 4)}</text>
         </box>
       </Show>
     </box>

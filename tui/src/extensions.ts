@@ -468,9 +468,8 @@ export const std_pins = [
 ]
 
 /**
- * The pins turning a package on should write: one per tool whose frozen
- * manifest says `surface: "manual"` (DESIGN §7.2.1) — the only tools a pin is
- * the way in for.
+ * The pins turning a package on should write: one per `manual` tool the package
+ * RECOMMENDS (`manifest.ToolSpec.recommended`, DESIGN §5.1 / §7.2.1).
  *
  * This replaces `pinsOnActivate(id)`, which answered per PACKAGE from a list of
  * names in this file. Per tool is the shape the question actually has — the
@@ -479,14 +478,24 @@ export const std_pins = [
  * same answer instead of arriving in the tools pane wearing a checkbox that
  * cannot work.
  *
- * An empty list is a perfectly ordinary answer, and it now has two shapes.
+ * It used to be every `manual` tool, which is the same answer for every bundled
+ * package (they all recommend all of theirs, the default) and the WRONG one for
+ * a package that mixes: an author writes `auto` for the tools the package is
+ * for and `manual` for extras nobody wants by default, and a front end that
+ * pinned all the manual ones turned on exactly the half meant to stay off. The
+ * default is `true`, so nothing here changes for a package that says nothing —
+ * `manual` means on-once-installed and closable, which is the whole difference
+ * from `auto`.
+ *
+ * An empty list is a perfectly ordinary answer, and it now has three shapes.
  * `compact` declares only `internal` tools: `nulya ext run` reaches them
  * without a pin, which is how `/compact` has always called it. `handoff`
  * declares `auto` ones: they reach the model face through membership, and a
- * pin naming one is refused outright (`PinToolNotPinnable`).
+ * pin naming one is refused outright (`PinToolNotPinnable`). And a package may
+ * declare every one of its `manual` tools `recommended: false`.
  */
-export function pinsOf(what: Pick<Contributions, "id" | "manualTools">): string[] {
-  return what.manualTools.map((tool) => toolId(what.id, tool))
+export function pinsOf(what: Pick<Contributions, "id" | "recommendedTools">): string[] {
+  return what.recommendedTools.map((tool) => toolId(what.id, tool))
 }
 
 /**

@@ -775,13 +775,25 @@ fn treeSize(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, sub_path: []
 }
 
 /// Every draft directly under a store root: `<root>/<id>/extension.json` is the
-/// file `ext init` writes, so its presence IS the definition of a draft. Sorted,
-/// so a sync reads the same way twice. One level only — a version's frozen
-/// manifest lives further down and is not a draft. Caller owns the result.
+/// file `ext init` writes, so its presence IS the definition of a draft. One
+/// level only — a version's frozen manifest lives further down and is not a
+/// draft. Caller owns the result.
+///
+/// Ordered, so a sync reads the same way twice, and ordered in TWO groups: the
+/// drafts that need no compiler first (`data` / `script`, whose identity is the
+/// snapshot alone — DESIGN §7.4), then the compiled ones, alphabetically inside
+/// each. A pass over the bundled set is six compiled packages and two data ones,
+/// and a reader watching it has no way to tell a slow first build from a hung
+/// one; putting the instant answers first means the count starts moving at once
+/// and the wait that remains is visibly a compile. Nothing downstream depends on
+/// the order — each draft is built independently and the summary counts totals —
+/// so this is presentation, and it is here because this is where the sequence is
+/// decided.
 fn draftIds(alloc: std.mem.Allocator, io: std.Io, root_dir: std.Io.Dir) ![][]u8 {
-    var out: std.ArrayList([]u8) = .empty;
+    const Draft = struct { id: []u8, compiled: bool };
+    var out: std.ArrayList(Draft) = .empty;
     errdefer {
-        for (out.items) |d| alloc.free(d);
+        for (out.items) |d| alloc.free(d.id);
         out.deinit(alloc);
     }
     var it = root_dir.iterate();
@@ -790,15 +802,32 @@ fn draftIds(alloc: std.mem.Allocator, io: std.Io, root_dir: std.Io.Dir) ![][]u8 
         const manifest_rel = try std.fs.path.join(alloc, &.{ entry.name, "extension.json" });
         defer alloc.free(manifest_rel);
         root_dir.access(io, manifest_rel, .{}) catch continue;
-        try out.append(alloc, try alloc.dupe(u8, entry.name));
+        const id = try alloc.dupe(u8, entry.name);
+        errdefer alloc.free(id);
+        try out.append(alloc, .{ .id = id, .compiled = try draftNeedsCompiler(alloc, io, root_dir, manifest_rel) });
     }
-    const items = try out.toOwnedSlice(alloc);
-    std.mem.sort([]u8, items, {}, struct {
-        fn lessThan(_: void, a: []u8, b: []u8) bool {
-            return std.mem.lessThan(u8, a, b);
+    const drafts = try out.toOwnedSlice(alloc);
+    defer alloc.free(drafts);
+    std.mem.sort(Draft, drafts, {}, struct {
+        fn lessThan(_: void, a: Draft, b: Draft) bool {
+            if (a.compiled != b.compiled) return b.compiled;
+            return std.mem.lessThan(u8, a.id, b.id);
         }
     }.lessThan);
-    return items;
+    const ids = try alloc.alloc([]u8, drafts.len);
+    for (drafts, ids) |d, *slot| slot.* = d.id;
+    return ids;
+}
+
+/// Would building this draft need a compiler? A manifest this function cannot
+/// read answers `false` — it goes in the first group, where the build reports
+/// its real fault straight away instead of after every compile in the root.
+fn draftNeedsCompiler(alloc: std.mem.Allocator, io: std.Io, root_dir: std.Io.Dir, manifest_rel: []const u8) !bool {
+    const bytes = root_dir.readFileAlloc(io, manifest_rel, alloc, .limited(1 << 20)) catch return false;
+    defer alloc.free(bytes);
+    var m = manifest.parse(alloc, bytes) catch return false;
+    defer m.deinit();
+    return manifest.implementationKind(m) == .compiled;
 }
 
 const ext_run_usage = "usage: nulya ext run <id>[@<version>] <tool> [<json-args> | --arg k=v ...] [--timeout-ms N]\n";
@@ -1112,8 +1141,54 @@ fn extActivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         try printOut(alloc, io, "note: not in effect — {s}@{s} in {s} shadows it\n", .{ id, s.version, search.roots.entries[s.root].spec });
     } else {
         try noteStandingMembership(alloc, io, ext_root, id);
+        try noteRecommendedPins(alloc, io, &search.roots, id, version);
     }
     return 0;
+}
+
+/// One stderr line naming the `manual` tools this version recommends switching
+/// on (`manifest.ToolSpec.recommended`, DESIGN §5.1/§7.2.1).
+///
+/// It is a NOTE and not a write: which tools a person's sessions carry is their
+/// config, and no kernel verb edits that file. But activation used to say
+/// nothing at all here, so installing a package of `manual` tools by hand — the
+/// documented way to install `extensions/std` — left every one of them off the
+/// model face with no sign that anything was missing, while the same package
+/// activated from a front end came up with all six on. Two installers, two
+/// different outcomes, because neither had anything to read. Now the package
+/// says which ones, and both do the same thing with the answer.
+///
+/// Silent when the version recommends nothing: a package of `auto` or
+/// `internal` tools has no pin to suggest, and a line saying so is noise on
+/// every activation of every such package.
+fn noteRecommendedPins(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    roots: *const roots_mod.Roots,
+    id: []const u8,
+    version: []const u8,
+) !void {
+    // `.structural`: this reads what a version DECLARES, the same reason
+    // `contributionMarker` does — the bytes about to run are checked where they
+    // run, and the activation just above verified this version's seal.
+    const resolved = roots.resolveVersion(alloc, id, version, .structural) catch return;
+    defer resolved.deinit(alloc);
+
+    var line: std.Io.Writer.Allocating = .init(alloc);
+    defer line.deinit();
+    var any = false;
+    for (resolved.manifest.tools) |t| {
+        if (t.surfaceOf() != .manual or !t.recommendedOf()) continue;
+        try line.writer.print("{s}\"ext:{s}/{s}\"", .{ if (any) ", " else "", id, t.name });
+        any = true;
+    }
+    if (!any) return;
+    try printErrFmt(
+        alloc,
+        io,
+        "note: {s} recommends these tools on the model face; nothing here writes your config — add to [registry] pinned_native_tools, or pass `nulya session new --pin` for one session: {s}\n",
+        .{ id, line.written() },
+    );
 }
 
 /// One stderr line when the package just activated declares `apply: "auto"`

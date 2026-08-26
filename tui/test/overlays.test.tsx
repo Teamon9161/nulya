@@ -262,6 +262,15 @@ test("/ext at eighty columns: visible panes cut to their columns, the version id
   const long_id = "a-lint-with-a-very-long-extension-id"
   const run = (args: string[]) => Bun.spawnSync({ cmd: [ws.bin, ...args], cwd: ws.dir, env: process.env })
   run(["ext", "init", "--script", long_id])
+  // `manual`, so the row this test measures is one the pin panel actually
+  // draws: since T59 the collapsed list is the switches, and a scaffolded tool
+  // is `auto` — it would fold away and take the cut cell with it.
+  const long_draft = join(ws.dir, ".nulya", "extensions", long_id, "extension.json")
+  const long_manifest = JSON.parse(readFileSync(long_draft, "utf8")) as {
+    contributes: { tools: Array<Record<string, unknown>> }
+  }
+  long_manifest.contributes.tools[0]!["surface"] = "manual"
+  writeFileSync(long_draft, JSON.stringify(long_manifest, null, 2))
   const built = run(["ext", "build", join(".nulya", "extensions", long_id)])
   const long_version = /v-[0-9a-zA-Z]+/.exec(built.stdout.toString())?.[0] ?? ""
   expect(long_version).not.toBe("")
@@ -410,7 +419,7 @@ test("the tools pane folds the internal half away and says how much it folded", 
     const folded = await settle(setup, 4)
     expect(folded).toContain("[ ] ext:lint/lint")
     expect(folded).not.toContain("ext:patrol/patrol")
-    expect(folded).toContain("1 internal tool · called with ext run, never on the model face · d shows")
+    expect(folded).toContain("1 internal · ext run only · d shows")
 
     setup.mockInput.pressKey("d")
     const open = await settle(setup, 4)
@@ -445,6 +454,7 @@ test("an internal tool is listed with no checkbox: there is no pin for it to be 
     kind: "compiled" as const,
     tools,
     manualTools: tools.filter((tool) => !internalTools.includes(tool)),
+    recommendedTools: tools.filter((tool) => !internalTools.includes(tool)),
     autoTools: [],
     internalTools,
     apply: "manual" as const,

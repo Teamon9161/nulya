@@ -113,8 +113,18 @@ printf 'hello %s\n' "${NULYA_ARG_name:-world}"
   but `--with`); `manual` (membership is not enough, someone must name this
   tool — and it is the ONLY surface `--pin` / `pinned_native_tools` accepts);
   `internal` (never on the model face; front ends and scripts call it with
-  `nulya ext run`). This manifest is the only source of truth for a tool's shape
-  and placement.
+  `nulya ext run`). The word is per tool, so one package may use all three: the
+  tools it exists FOR are `auto` and arrive with membership, the extras only
+  some sessions want are `manual` and are turned on one at a time by whoever
+  wants them, and its plumbing is `internal`. That mix is how a package offers
+  a working default set without deciding the whole tool face for everyone.
+  This manifest is the only source of truth for a tool's shape and placement.
+  A `manual` tool may also say `recommended: false`: `manual` otherwise means
+  on-once-installed and closable one tool at a time (the difference from `auto`
+  is the switch, not the default), so this is how a package marks an extra that
+  should stay off until somebody asks for it. It is advice to whoever installs
+  the package — `nulya ext activate` names the recommended pins and writes no
+  config, and a front end's own switch writes exactly those.
 - `contributes.skills[]` — directories holding a `SKILL.md`.
 - `contributes.system_prompts[]` — files that join the system blocks of every
   session this package is a member of. Which sessions those are is mostly not
