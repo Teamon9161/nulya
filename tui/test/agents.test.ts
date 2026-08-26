@@ -83,6 +83,9 @@ test("list is the one reading: three layers in search order, with what an earlie
   expect(mine.max_steps).toBe(12)
   expect(mine.profile).toBe("scripted")
   expect(mine.model).toBe("scripted-demo")
+  // A definition that names no runner drives `nulya` (ar-c's default) — the
+  // one this build's picker leaves unsaid because it is the ordinary case.
+  expect(mine.runner).toBe("nulya")
   const shadowed = all.find((entry) => entry.name === "explore" && entry.layer === "builtin")!
   expect(shadowed.shadowed).toBe(true)
   expect(usable.some((entry) => entry.name === "explore" && entry.layer === "builtin")).toBe(false)

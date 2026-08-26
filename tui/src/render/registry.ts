@@ -54,6 +54,15 @@ export interface ToolPresentation {
   countsLines: boolean
   /** A session this call names (tui.md §5.5); T3 makes it openable. */
   sessionId: string | null
+  /**
+   * A delegation this call names, in the vocabulary every runner shares
+   * (`d-…`, goals/agent-runner.md D2) — present only for the `agent` tool.
+   * `sessionId` above stays the REMOTE conversation the receipt itself named
+   * (only the `nulya` runner has one, and only the first delegate() receipt
+   * repeats it); this is the delegation's own name, which `SubSessionCard`
+   * shows and falls back on when the receipt did not (ar-t2).
+   */
+  delegationId?: string | null
   /** Present only when `kind === "checklist"`: the parsed `items` (D12). */
   checklist?: ChecklistItem[]
 }
@@ -442,14 +451,24 @@ export function describeTool(view: ToolView, glyphs: Glyphs, hint: RenderHint = 
   // `agent` draws a sub-session card, which is a wrong picture and not a wrong
   // action. The stable id is accepted too, for a caller that has one.
   if (view.tool === "agent" || view.tool === "ext:agent/agent") {
-    const named = view.output.split("\n").map((line) => session_id.exec(line.trim())?.[0]).find(Boolean) ??
-      /\bs-[A-Za-z0-9._-]+\b/.exec(view.output)?.[0] ??
-      null
+    // The delegation's OWN name — every runner mints one (`d-…`,
+    // goals/agent-runner.md D2), so it is what a head line names and what
+    // `SubSessionCard` falls back on when the receipt itself has no remote to
+    // show (ar-t2).
+    const delegation = /\bd-[0-9a-f]{12}\b/.exec(view.output)?.[0] ?? null
+    // The remote conversation, ONLY when the receipt names one out loud: the
+    // first delegate() receipt says "… delegation d-…, session s-…, running as
+    // background task <owner>/tN…", but a follow-up's reply never repeats it
+    // (`sendTurn` only names the delegation and the task it started) — that
+    // case is `SubSessionCard`'s job, reading the delegation's own record.
+    const remote = /\bsession (s-[A-Za-z0-9._-]+)/.exec(view.output)?.[1] ?? null
+    const named = delegation ?? remote
     return make({
       kind: "subsession",
       glyph: glyphs.subSession,
       head: `agent · ${agentNameOf(view.args) ?? "(pending)"}${named ? ` → ${named}` : ""}`,
-      sessionId: named,
+      sessionId: remote,
+      delegationId: delegation,
     })
   }
   // Anything else is an extension tool promoted onto the model's tool face

@@ -69,6 +69,11 @@ export function AgentPicker(props: {
             // `builtin` is the answer to "I never wrote this, why is it here".
             if (def.agents.length > 0) parts.push("delegates")
             if (def.layer !== "workspace") parts.push(def.layer === "user" ? "this machine" : "builtin")
+            // The ordinary case (`nulya`) says nothing — every row would carry
+            // it otherwise; a non-`nulya` runner is said out loud because it is
+            // the one fact that changes what delegating here even means (no
+            // local session, no tab, ar-t2).
+            if (def.runner !== "nulya") parts.push(`runner: ${def.runner}`)
             return parts.join(" · ")
           }
           return (

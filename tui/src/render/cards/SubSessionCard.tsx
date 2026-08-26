@@ -1,4 +1,4 @@
-import { createMemo } from "solid-js"
+import { createMemo, createResource } from "solid-js"
 import { useStyle } from "../theme.ts"
 import { CardFrame } from "./CardFrame.tsx"
 import { ShellOutput } from "./ShellCard.tsx"
@@ -31,6 +31,15 @@ import type { ToolPresentation } from "../registry.ts"
  * the fold, so it is there whether or not the body is; it opens the same tab
  * the same way (`state/navigate.ts`), and following it is how you watch a
  * delegation work rather than waiting for its report.
+ *
+ * THREE, SINCE ar-t2, THE NAME ON SCREEN IS THE DELEGATION'S OWN. Every runner
+ * mints a `d-…` id (goals/agent-runner.md D2); only `nulya` also opens a local
+ * session a tab can show, and only the FIRST delegate() receipt says so out
+ * loud (`registry.ts`'s extraction). A follow-up turn's reply never repeats
+ * it, so the link falls back to the delegation's own record
+ * (`nulya/files.ts`'s `readDelegationRecord`) — and when that record names a
+ * runner that is not `nulya`, there is no local session to open at all, and
+ * the row says so rather than guessing at one.
  */
 export function SubSessionCard(props: { item: ToolItem; presentation: ToolPresentation }) {
   const style = useStyle()
@@ -52,6 +61,42 @@ export function SubSessionCard(props: { item: ToolItem; presentation: ToolPresen
   })
 
   const session = () => props.presentation.sessionId
+  const delegation = () => props.presentation.delegationId ?? null
+
+  /**
+   * The delegation's record, read only when the receipt itself named no
+   * remote — a follow-up's reply, or a "busy, queued" reply, neither of which
+   * repeats what the delegation opened. `navigate` is null in a screen with no
+   * tabs and its `delegationRecord` resolves to null with no workspace behind
+   * it (a render test with a bare `NavigateContext`); either way there is
+   * nothing to read.
+   */
+  const [record] = createResource(
+    () => (session() === null && delegation() !== null ? delegation() : null),
+    (id) => navigate?.delegationRecord(id) ?? Promise.resolve(null),
+  )
+
+  const remote = () => session() ?? record()?.remote ?? null
+  const foreignRunner = () => {
+    const found = record()
+    return found != null && found.runner !== "nulya"
+  }
+
+  const action = createMemo(() => {
+    if (!navigate) return null
+    // Whatever the runner opened is not a nulya session, so there is no tab to
+    // offer — the log its own task writes to is the one place to watch it
+    // (D10's readonly ceiling makes the same call one door over: a fact this
+    // package cannot translate is said plainly rather than guessed at).
+    if (foreignRunner()) {
+      return { text: `see its log in /tasks (runner: ${record()!.runner})`, onPress: () => navigate.openTasks() }
+    }
+    const target = remote()
+    // No session, no link: until it is known there is nothing to open, and a
+    // link to nowhere is worse than no link.
+    if (!target) return null
+    return { text: `open ${target} in a tab`, onPress: () => navigate.openSession(target) }
+  })
 
   return (
     <CardFrame
@@ -64,13 +109,7 @@ export function SubSessionCard(props: { item: ToolItem; presentation: ToolPresen
       defaultOpen={style.settings.transcript.tool_output === "expanded"}
       foldable={props.item.output.length > 0}
       spillPath={props.item.spillPath}
-      // No session, no link: until the call returns there is no id to open, and
-      // a link to nowhere is worse than no link.
-      action={
-        navigate && session()
-          ? { text: `open ${session()} in a tab`, onPress: () => navigate.openSession(session()!) }
-          : null
-      }
+      action={action()}
     >
       <ShellOutput output={props.item.output} />
     </CardFrame>

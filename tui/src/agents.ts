@@ -45,6 +45,15 @@ export interface AgentEntry {
   name: string
   description: string
   readonly: boolean
+  /**
+   * Which harness drives a delegation to this persona (`nulya`, `"nulya"` is
+   * the only one this build has — ar-c, goals/agent-runner.md D1/D7). The
+   * picker shows it only when it is not `nulya`: naming the ordinary case on
+   * every row would be noise, and the one thing a person needs to know before
+   * delegating to a non-`nulya` persona is that it will not be a session on
+   * this machine.
+   */
+  runner: string
   layer: AgentLayer
   /** An earlier layer defines this name, so this copy never runs. Still listed. */
   shadowed: boolean
@@ -88,6 +97,8 @@ export async function listAgents(ws: Workspace, pkg: WithRef): Promise<AgentEntr
     ...row,
     description: row.description ?? "",
     readonly: row.readonly === true,
+    // A build without the column (pre-ar-c) has only ever driven `nulya`.
+    runner: typeof row.runner === "string" && row.runner.length > 0 ? row.runner : "nulya",
     shadowed: row.shadowed === true,
     source: row.source ?? "",
     profile: row.profile ?? "",

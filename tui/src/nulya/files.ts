@@ -982,3 +982,74 @@ export async function readToolUsage(ws: Workspace): Promise<ToolUsage[]> {
   }
   return [...counts.values()].sort((a, b) => b.uses - a.uses || a.toolId.localeCompare(b.toolId))
 }
+
+// --- delegations (goals/agent-runner.md ar-a) -------------------------------
+
+export const delegations_dir = ".nulya/delegations"
+
+/** A delegation id: `d-<12 hex>` (`extensions/agent/src/record.zig`'s `isPlainId`). */
+export const delegation_id = /^d-[0-9a-f]{12}$/
+
+export function isDelegationId(id: string): boolean {
+  return delegation_id.test(id)
+}
+
+/**
+ * The one row a delegation's record opens with — what the package decided ONCE
+ * about who drives it and what it opened (`extensions/agent/src/record.zig`'s
+ * `Created`). This front end never writes here: it is the fallback for a
+ * follow-up receipt, whose text never repeats the remote conversation
+ * (`sendTurn`'s reply only names the delegation and the task it started, not
+ * what the delegation opened) — the first delegate() receipt is the only one
+ * that says "session <remote>" out loud (ar-t2).
+ */
+export interface DelegationRecord {
+  agent: string
+  runner: string
+  /** What the runner opened to hold this conversation — an `s-…` id only for the `nulya` runner. */
+  remote: string
+  readonly: boolean
+}
+
+/**
+ * Read `.nulya/delegations/<id>/record.jsonl` back, the same discipline
+ * `readToolUsage` above follows for the other append-only journal in this
+ * file — and the one `extensions/agent/src/record.zig` itself follows: a torn
+ * last line (an append in flight, or cut short by a crash) is dropped by
+ * finding the last `\n` rather than trusting the file's length, and a line
+ * that will not parse is skipped rather than failing the whole read. This side
+ * never writes the journal, so there is no lease to take for reading it.
+ */
+export async function readDelegationRecord(ws: Workspace, id: string): Promise<DelegationRecord | null> {
+  if (!isDelegationId(id)) return null
+  const path = join(ws.dir, delegations_dir, id, "record.jsonl")
+  let text: string
+  try {
+    text = await Bun.file(path).text()
+  } catch {
+    return null
+  }
+  const end = text.lastIndexOf("\n")
+  const whole = end === -1 ? "" : text.slice(0, end + 1)
+  for (const line of whole.split("\n")) {
+    const trimmed = line.trim()
+    if (trimmed.length === 0) continue
+    let value: unknown
+    try {
+      value = JSON.parse(trimmed)
+    } catch {
+      continue
+    }
+    if (typeof value !== "object" || value === null) continue
+    const row = value as Record<string, unknown>
+    // One delegation, one opening (`record.zig`'s own rule) — the first
+    // `created` row is the only one there will ever be.
+    if (row["kind"] !== "created") continue
+    const agent = row["agent"]
+    const runner = row["runner"]
+    const remote = row["remote"]
+    if (typeof agent !== "string" || typeof runner !== "string" || typeof remote !== "string") return null
+    return { agent, runner, remote, readonly: row["readonly"] === true }
+  }
+  return null
+}

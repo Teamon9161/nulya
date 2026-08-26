@@ -52,6 +52,7 @@ import {
 import { configShow, type GateVerdict } from "../nulya/cli.ts"
 import {
   listExtensions,
+  readDelegationRecord,
   sessionExists,
   sessions_dir,
   type Contributions,
@@ -1004,6 +1005,8 @@ export function App(props: AppProps) {
    * belongs to the tab that just came to the front.
    */
   const navigate: Navigate = {
+    delegationRecord: (id) => readDelegationRecord(props.ws, id),
+    openTasks: () => openOverlay("tasks"),
     openSession: (id) => {
       if (browse.active()) leaveBrowse()
       openSession(id)
@@ -1816,6 +1819,15 @@ export function App(props: AppProps) {
    * is a delegation somebody has to be able to watch, cancel and read afterwards.
    */
   const startAgent = async (entry: AgentEntry, task: string): Promise<SessionTab | null> => {
+    // This path IS the nulya runner, hand-driven: a tab needs a local session
+    // to step. A persona on another harness has no such session — opening one
+    // anyway would run it on a harness its definition did not name (the very
+    // thing defs.zig refuses a whole definition over). Delegating to it is the
+    // model's `agent` tool's job, not a tab's (goals/agent-runner.md D1).
+    if (entry.runner !== "nulya") {
+      setNotice(`'${entry.name}' runs on '${entry.runner}', which a tab cannot drive · delegate to it from a conversation instead`)
+      return null
+    }
     if (entry.layer === "workspace" && props.agentsTrusted === false) {
       setNotice(`'${entry.name}' came with this checkout and was not trusted · its prompt would enter a session here · answer the question again by clearing asked_agents in tui-state.json`)
       return null

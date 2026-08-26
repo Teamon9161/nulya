@@ -633,6 +633,10 @@ test("a sub-session names the session it drives", async () => {
  * A delegation is the one card whose story continues somewhere else (T43), so
  * it says how that is going and offers a way in. Without a `Navigate` there is
  * no link at all — a card in a screen with no tabs must not offer one.
+ *
+ * Since ar-t2 the name on the head line is the delegation's OWN (`d-…`, every
+ * runner mints one) rather than the remote session — only the `nulya` runner
+ * has one of those, and only the first delegate() receipt names it.
  */
 test("a delegation says how its background task is going, and offers the session", async () => {
   const delegated = toolItem({
@@ -640,17 +644,19 @@ test("a delegation says how its background task is going, and offers the session
     tool: "agent",
     args: JSON.stringify({ name: "explore", task: "find the writers" }),
     output:
-      "delegated to 'explore' — session s-1786815442964-8462dd, running as background task s-1/t1 (read-only).\nDo not call any more tools about this; end your turn.",
+      "delegated to 'explore' — delegation d-0123456789ab, session s-1786815442964-8462dd, running as background task s-1/t1 (read-only).\nDo not call any more tools about this; end your turn.",
   })
 
   const without = await frameOf([delegated], 76, 12)
-  expect(without).toContain("⤷ agent · explore → s-1786815442964-8462dd")
+  expect(without).toContain("⤷ agent · explore → d-0123456789ab")
   expect(without).not.toContain("open s-")
 
   let opened = null as string | null
   const setup = await testRender(
     () => (
-      <NavigateContext.Provider value={{ openSession: (id) => (opened = id) }}>
+      <NavigateContext.Provider
+        value={{ openSession: (id) => (opened = id), delegationRecord: async () => null, openTasks: () => {} }}
+      >
         <Harness items={[delegated]} tasks={[runningTask("s-1/t1", 42)]} />
       </NavigateContext.Provider>
     ),
@@ -666,6 +672,97 @@ test("a delegation says how its background task is going, and offers the session
     const at = rows.findIndex((row) => row.includes("↗ open"))
     await setup.mockMouse.click(6, at)
     expect(opened).toBe("s-1786815442964-8462dd")
+  } finally {
+    setup.renderer.destroy()
+  }
+})
+
+/**
+ * A follow-up turn's receipt (`sendTurn`) names the delegation and the task it
+ * started, but never repeats what it opened. The card falls back to the
+ * delegation's own record for the remote — `Navigate.delegationRecord`, which
+ * a real screen backs with `nulya/files.ts`'s `readDelegationRecord`
+ * (`files.test.ts` pins that reader against a fixture; this pins the card's
+ * use of it).
+ */
+test("a follow-up's receipt names no remote, so the card reads the delegation's own record for one", async () => {
+  const followUp = toolItem({
+    key: "d2",
+    tool: "agent",
+    args: JSON.stringify({ session: "d-0123456789ab", task: "and then?" }),
+    output: "sent to delegation d-0123456789ab ('explore'), running as background task s-1/t2.",
+  })
+
+  let opened = null as string | null
+  let asked = null as string | null
+  const setup = await testRender(
+    () => (
+      <NavigateContext.Provider
+        value={{
+          openSession: (id) => (opened = id),
+          delegationRecord: async (id) => {
+            asked = id
+            return { agent: "explore", runner: "nulya", remote: "s-1786815442964-8462dd", readonly: false }
+          },
+          openTasks: () => {},
+        }}
+      >
+        <Harness items={[followUp]} tasks={[runningTask("s-1/t2", 3)]} />
+      </NavigateContext.Provider>
+    ),
+    { width: 76, height: 12 },
+  )
+  try {
+    await until(async () => (await settle(setup)).includes("↗ open s-1786815442964-8462dd in a tab"))
+    expect(asked).toBe("d-0123456789ab")
+    const frame = await settle(setup)
+    const rows = frame.split("\n")
+    const at = rows.findIndex((row) => row.includes("↗ open"))
+    await setup.mockMouse.click(6, at)
+    expect(opened).toBe("s-1786815442964-8462dd")
+  } finally {
+    setup.renderer.destroy()
+  }
+})
+
+/**
+ * A record naming a runner other than `nulya` has no local session for a tab
+ * to show — the row degrades into a hint pointing at `/tasks`, which is where
+ * that runner's own driving task writes its log, instead of guessing at an id
+ * that would never open anything (ar-t2).
+ */
+test("a delegation record naming a foreign runner offers /tasks instead of a tab", async () => {
+  const followUp = toolItem({
+    key: "d3",
+    tool: "agent",
+    args: JSON.stringify({ session: "d-0123456789ab", task: "and then?" }),
+    output: "sent to delegation d-0123456789ab ('remote-explore'), running as background task s-1/t3.",
+  })
+
+  let openedTasks = false
+  const setup = await testRender(
+    () => (
+      <NavigateContext.Provider
+        value={{
+          openSession: () => {},
+          delegationRecord: async () => ({ agent: "remote-explore", runner: "codex", remote: "thread_abc", readonly: false }),
+          openTasks: () => (openedTasks = true),
+        }}
+      >
+        <Harness items={[followUp]} tasks={[runningTask("s-1/t3", 5)]} />
+      </NavigateContext.Provider>
+    ),
+    { width: 76, height: 12 },
+  )
+  try {
+    await until(async () => (await settle(setup)).includes("/tasks"))
+    const frame = await settle(setup)
+    expect(frame).toContain("runner: codex")
+    expect(frame).not.toContain("open thread_abc")
+    const rows = frame.split("\n")
+    const at = rows.findIndex((row) => row.includes("/tasks"))
+    await setup.mockMouse.click(6, at)
+    expect(openedTasks).toBe(true)
   } finally {
     setup.renderer.destroy()
   }

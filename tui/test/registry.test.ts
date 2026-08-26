@@ -151,25 +151,49 @@ test("a background `nulya …` call is a shell card, not an evolution one", () =
   expect(foreground.kind).toBe("evolve")
 })
 
-test("an agent call reads as a sub-session, and its receipt names the session to open", () => {
+/**
+ * The `agent` tool's receipt (goals/agent-runner.md ar-a/ar-t2): every runner
+ * mints a `d-…` delegation id, and only the FIRST delegate() receipt also
+ * names the `s-…` remote a `nulya` runner opened — a follow-up turn's reply
+ * (`sendTurn`) never repeats it, which is exactly the case `SubSessionCard`'s
+ * record fallback exists for (`render.test.tsx`).
+ */
+test("an agent call reads as a sub-session named by its delegation, and only the opening receipt also names the remote", () => {
   const glyphs = createStyle(default_settings, {}).glyphs
   const pending = describeTool({ tool: "agent", args: '{"name":"explore","task":"go"}', output: "" }, glyphs)
   expect(pending.kind).toBe("subsession")
   expect(pending.head).toContain("agent · explore")
   expect(pending.sessionId).toBeNull()
+  expect(pending.delegationId).toBeNull()
 
-  // The child does not exist until the call returns, so the id comes from the
-  // receipt — the same place `nulya session new` through `shell` reads it.
-  const done = describeTool(
+  // The first delegate() receipt names both — the delegation is what the head
+  // line shows, the remote is what `SubSessionCard` offers to open.
+  const opened = describeTool(
     {
       tool: "agent",
       args: '{"name":"explore","task":"go"}',
-      output: "delegated to 'explore' — session s-1234-ab, running as background task s-9/t1.",
+      output: "delegated to 'explore' — delegation d-0123456789ab, session s-1234-ab, running as background task s-9/t1.",
     },
     glyphs,
   )
-  expect(done.sessionId).toBe("s-1234-ab")
-  expect(done.head).toContain("→ s-1234-ab")
+  expect(opened.delegationId).toBe("d-0123456789ab")
+  expect(opened.sessionId).toBe("s-1234-ab")
+  expect(opened.head).toContain("→ d-0123456789ab")
+
+  // A follow-up's reply (`sendTurn`) names the delegation and the task it
+  // started, but never repeats what it opened — there is no "session s-…" to
+  // read, on purpose.
+  const followUp = describeTool(
+    {
+      tool: "agent",
+      args: '{"session":"d-0123456789ab","task":"and then?"}',
+      output: "sent to delegation d-0123456789ab ('explore'), running as background task s-1/t2.",
+    },
+    glyphs,
+  )
+  expect(followUp.delegationId).toBe("d-0123456789ab")
+  expect(followUp.sessionId).toBeNull()
+  expect(followUp.head).toContain("→ d-0123456789ab")
 })
 
 // --- tui-plugin U2: the manifest's per-tool `render` claim (D12) -----------
