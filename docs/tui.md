@@ -1928,6 +1928,6 @@ T33 把 `internal` 行折起来时给的理由是**数量**（六个 driver tool
 
 **修法不是多刷一次**（两趟 `ext sync --dry-run` 是这个面板最贵的调用，注释里避开它的理由完全成立），而是**让这一列别再回答那个问题**：`draftColumn(line, current)` 收 listing 里那个 id 的 `current`，`line.activation` 从此不被读。一个问题一个来源，于是"忘了刷新"这种 bug 在结构上不可能再出现。
 
-**`built` → `inactive`**：这一列本来就说 `active`，而这个面板另外半边开关的词早已是 `inactive`（2026-08-26 的 on/off 改名）。`built` 挨着 `active` 会被读成一个进度阶梯上的一格——"还没到"——而它的意思是"这个 build 在，但不是正在用的那个"。剩下四个词不变：`not built` / `fails` / `needs zig` / `differs`。
+**`built` 拆成两个词。** 它从前盖住了两个**修法不同**的状态：`current` 根本没有（包是关的，Enter 打开）与 `current` 指着**别的版本**（包在跑，只是这份源码的 build 不是它——`a` 在版本行上把 `current` 指过去）。合成一个词说，后者挨着同一行的 `standing` 就是自相矛盾：这个包进每一场 session，而这一列说它 inactive。所以现在是 `inactive` 与 `not current` 两个词，而 `built` 这个说法本身也退场——它挨着 `active` 会被读成进度阶梯上的一格「还没到」，而它的意思只是「这个 build 在」。detail 里对 `not current` 多一句点名那个键（`draftHelp` 收一个 `current` 参数；它是唯一一个既不是 `b` 也不是 Enter 能修的行状态）。其余四个词不变：`not built` / `fails` / `needs zig` / `differs`。
 
 **测试**：`draftColumn(one, null)` 在 `line.activation === "activated"` 时仍然回 `inactive`——plan 自己的那个词被忽略，这条断言就是不变量本身；另加"current 指着别的版本 → inactive"。`cd tui && bun test`：383 pass。

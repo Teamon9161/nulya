@@ -204,19 +204,32 @@ export function needsZigIds(report: SyncReport): string[] {
  * `inactive` until the panel was closed and opened again. One question, one
  * source.
  *
- * `inactive` rather than `built`: this column already says `active`, and the
- * panel's word for the other half of that switch is `inactive` everywhere else
- * (the on/off rename, DESIGN §5.1 review). `built` read as a rung on a ladder —
- * a state on the way to being done — when what it means is "this build exists
- * and is not the one in use".
+ * `built` used to be the word for every version that was not the current one,
+ * which put TWO states under one word. They are not the same state and they do
+ * not have the same repair:
+ *
+ *  - `inactive` — the id has no `current` at all. The package is off; Enter
+ *    turns it on.
+ *  - `not current` — the package IS on, at a different version than this source
+ *    builds to. Nothing is off; the source has simply moved ahead of the
+ *    pointer (or somebody rolled back). `a` on the version line points `current`
+ *    at the build under the cursor.
+ *
+ * Said as one word, the second reads as a contradiction beside the same row's
+ * `standing` marker — the package is in every session and the column calls it
+ * inactive. And `built`, the word before that, read as a rung on a ladder — a
+ * state on the way to being done — when what it meant was "this build exists".
  */
 export function draftColumn(line: SyncLine | null | undefined, current: string | null): string {
   if (!line) return ""
   if (line.state === "failed") return "fails"
   if (line.state === "needs zig") return "needs zig"
-  if (current !== null && current === line.version) return "active"
+  // Before the pointer questions: whether a build is the current one is not a
+  // question about a source that has no build.
   if (line.state === "not built") return "not built"
-  return "inactive"
+  if (current === null) return "inactive"
+  if (current === line.version) return "active"
+  return "not current"
 }
 
 export interface ProjectStoreDecision {

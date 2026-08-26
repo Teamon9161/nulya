@@ -326,8 +326,19 @@ export function driftLine(frozen: string | null, current: string | null): string
  * root has none, so it answers "no build.zig" and the draft looks unbuildable
  * while a perfectly good toolchain sits on the disk.
  */
-export function draftHelp(line: SyncLine | null): string[] {
+export function draftHelp(line: SyncLine | null, current?: string | null): string[] {
   if (!line) return []
+  // Not a fault, and the one row-state whose repair is neither `b` nor Enter:
+  // the package runs, at another build than the source here would produce.
+  if (
+    current !== undefined &&
+    current !== null &&
+    line.version !== null &&
+    current !== line.version &&
+    (line.state === "built" || line.state === "already built")
+  ) {
+    return ["this source builds to a version that is not the one in use · `a` on a version line points current at it"]
+  }
   if (line.state === "needs zig") {
     return [
       line.detail ?? "needs zig",
@@ -1649,7 +1660,7 @@ export function ExtView(props: {
                   />
                   {/* An id with source and no version: what stopped it, in the
                       kernel's own words, and the two ways out. */}
-                  <For each={draftHelp(draftOf(entry.id))}>
+                  <For each={draftHelp(draftOf(entry.id), entry.current)}>
                     {(line) => <Lines text={line} width={detailWidth()} fg={style.theme.warn} />}
                   </For>
                   {/* Which directory holds this copy: needed when two roots have

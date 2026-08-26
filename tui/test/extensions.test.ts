@@ -109,15 +109,18 @@ test("--activate reports the three answers a pointer can have: moved, already th
   // what this pass did: "moved it here" and "was already here" are the same
   // answer to "is this build the one that runs".
   expect(draftColumn(one, one.version!)).toBe("active")
+  // No pointer at all and a pointer somewhere else are two states, not one:
+  // the first is a package that is off, the second is one that runs at another
+  // build. `Enter` fixes the first, `a` on a version line the second.
   expect(draftColumn(one, null)).toBe("inactive")
+  expect(draftColumn(one, "v-000000000000")).toBe("not current")
 
   // Already the current one: a second pass has nothing to move.
   const settled = await extSync(ws, { activate: true })
   expect(settled.lines.find((line) => line.id === "one.mode")!.activation).toBe("active")
   const settledOne = settled.lines.find((line) => line.id === "one.mode")!
   expect(draftColumn(settledOne, settledOne.version!)).toBe("active")
-  // Current, but at some OTHER version: this build exists and is not in use.
-  expect(draftColumn(settledOne, "v-something-else")).toBe("inactive")
+  expect(draftColumn(settledOne, "v-000000000000")).toBe("not current")
 
   // Somebody edits the draft and points `current` back at the older version:
   // the sync must not undo that decision.
@@ -305,6 +308,13 @@ test("a draft with no version says what stopped it, in the kernel's own words", 
 
   expect(draftHelp(parseSyncLine("broken: failed: ManifestUnreadable"))[0]).toContain("ManifestUnreadable")
   expect(draftHelp(parseSyncLine("new: v-abc123456789 not built"))[0]).toContain("never been built")
+  // A built source whose version is not the pointer: not a fault, and its
+  // repair is the one key neither `b` nor Enter covers.
+  const behind = draftHelp(parseSyncLine("guide: v-abc123456789 already built"), "v-000000000000")[0]!
+  expect(behind).toContain("not the one in use")
+  expect(behind).toContain("`a`")
+  // The same line while it IS the pointer says nothing at all.
+  expect(draftHelp(parseSyncLine("guide: v-abc123456789 already built"), "v-abc123456789")).toEqual([])
 })
 
 test("the binary's bundled drafts seed into a store — dry-run counts them, a second pass leaves them alone", async () => {
