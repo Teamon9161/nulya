@@ -3,14 +3,26 @@
 //! **What it is.** Four tools in one binary, dispatched on `NULYA_TOOL`:
 //!
 //!   `agent {name, task}`   the model asking for one piece of work to be
-//!                          delegated. Renders the persona, creates the child
-//!                          session wearing it, and starts a BACKGROUND TASK
-//!                          that drives it. Returns a receipt naming the child.
+//!                          delegated. Renders the persona, opens a
+//!                          conversation wearing it, and starts a BACKGROUND
+//!                          TASK that drives it. Returns a receipt naming the
+//!                          DELEGATION (`d-…`, `record.zig`).
+//!   `agent {session, task}` another turn into one that is already going —
+//!                          including while it is working (`interrupt: true`
+//!                          says take it NOW rather than at its next natural
+//!                          boundary).
 //!   `render {name}`        a definition file → the prompt file and the whole
 //!                          set of `session new` arguments it asks for. The
 //!                          single writer of that rendering; the front end calls
 //!                          it too rather than keeping a second copy.
-//!   `run {session, …}`     the background command itself (`runner.zig`).
+//!   `run {delegation, …}`  the background command itself (`runner.zig`).
+//!
+//! **One world view, many runners.** The model names a DELEGATION, never the
+//! session that happens to be behind it: `d-…` is the conversation, and which
+//! harness holds it — this nulya today — is the definition's `runner:`, frozen
+//! into the delegation's record when it opens (`runners.zig`, contract D1/D7).
+//! The record is readable and the report still points at the remote transcript:
+//! the abstraction gives the facts one name, it does not hide them (D2).
 //!
 //! **Why the persona is not an extension.** It used to be: every delegation
 //! froze the body into an `agent-<name>` data extension and composed it in with
@@ -58,7 +70,15 @@ const std = @import("std");
 const rpc = @import("rpc.zig");
 const defs = @import("defs.zig");
 const runner = @import("runner.zig");
+const runners = @import("runners.zig");
+const record = @import("record.zig");
+const proc = @import("proc.zig");
 const header_mod = @import("header.zig");
+
+const Run = proc.Run;
+const run = proc.run;
+const detail = proc.detail;
+const firstLine = proc.firstLine;
 
 /// The largest task text this tool will pass on to a child session.
 const max_task_bytes: usize = 64 << 10;
@@ -104,6 +124,7 @@ fn dispatch(ctx: *const Ctx, name: []const u8, arguments: std.json.ObjectMap) !r
     if (std.mem.eql(u8, name, "list")) return list(ctx);
     if (std.mem.eql(u8, name, "run")) {
         return runner.run(ctx.alloc, ctx.io, ctx.exe, .{
+            .delegation = rpc.trimmedField(arguments, "delegation"),
             .session = rpc.trimmedField(arguments, "session"),
             .agent = rpc.trimmedField(arguments, "agent"),
             .readonly = rpc.boolField(arguments, "readonly"),
@@ -220,6 +241,13 @@ fn renderTool(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
             try jw.write(m.def.description);
             try jw.objectField("readonly");
             try jw.write(m.def.readonly);
+            // Which harness will hold the conversation (D1). A driver rendering
+            // a persona to open a session itself only ever sees `nulya`; the
+            // column is here because "what runs this" is part of what a
+            // definition asks for, and the answer must not be inferred from the
+            // absence of the field.
+            try jw.objectField("runner");
+            try jw.write(m.def.runner.label());
             try jw.objectField("layer");
             try jw.write(@tagName(m.def.layer));
             try jw.objectField("profile");
@@ -279,6 +307,8 @@ fn list(ctx: *const Ctx) !rpc.Outcome {
         try jw.write(entry.def.description);
         try jw.objectField("readonly");
         try jw.write(entry.def.readonly);
+        try jw.objectField("runner");
+        try jw.write(entry.def.runner.label());
         try jw.objectField("layer");
         try jw.write(@tagName(entry.def.layer));
         // Listed, not dropped: a definition that never runs because an earlier
@@ -326,14 +356,20 @@ fn list(ctx: *const Ctx) !rpc.Outcome {
 const max_depth: u32 = 3;
 
 /// `agent{name, task}` — a new delegation — or `agent{session, task}` — another
-/// turn in one that already reported.
+/// turn in one that is already going.
 ///
 /// The two are one tool because they are one act with one answer: the caller
 /// wants work done by somebody else and gets a report back. The second form is
-/// the cheaper one and the model should reach for it — a follow-up lands in a
-/// session that still holds everything it learned (append-only, so it hits its
-/// OWN prefix cache, DESIGN §1), where a fresh delegation pays for the
+/// the cheaper one and the model should reach for it — another turn lands in a
+/// conversation that still holds everything it learned (append-only, so it hits
+/// its OWN prefix cache, DESIGN §1), where a fresh delegation pays for the
 /// reconnaissance again.
+///
+/// The `session` argument names a DELEGATION (`d-…`), not the session that
+/// happens to be behind it. A delegation is the conversation; which harness
+/// holds it — this nulya, another one later — is the runner's business, and a
+/// model that had to name a session id could only ever address the one runner
+/// that has such things (D1/D11).
 fn delegate(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
     const alloc = ctx.alloc;
     const name = rpc.trimmedField(args, "name");
@@ -341,6 +377,7 @@ fn delegate(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
     const raw_task = rpc.trimmedField(args, "task");
     const task = raw_task[0..@min(raw_task.len, max_task_bytes)];
     const asked_model = rpc.trimmedField(args, "model");
+    const interrupt = rpc.boolField(args, "interrupt");
 
     if (task.len == 0) {
         return rpc.refuse(
@@ -383,8 +420,17 @@ fn delegate(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
     if (target.len != 0 and asked_model.len != 0) {
         return rpc.refuse(
             alloc,
-            "model applies to a NEW delegation only: session {s} froze what it runs on when it was created and append-only is what makes a follow-up cheap. Drop model to follow up, or start a fresh delegation with name + model.",
+            "model applies to a NEW delegation only: {s} froze what it runs on when it was created and append-only is what makes another turn cheap. Drop model to follow up, or start a fresh delegation with name + model.",
             .{target},
+        );
+    }
+    // `interrupt` is how a message is delivered, not a kind of message (D3), so
+    // it only means anything where there is something in flight to interrupt.
+    if (name.len != 0 and interrupt) {
+        return rpc.refuse(
+            alloc,
+            "interrupt applies to a delegation that is already going: there is nothing yet to interrupt in a new one. Drop interrupt to start '{s}'.",
+            .{name},
         );
     }
     const chosen: ?defs.ModelRef = if (asked_model.len == 0) null else defs.parseModelRef(asked_model) orelse {
@@ -395,7 +441,7 @@ fn delegate(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
         );
     };
 
-    if (target.len != 0) return followUp(ctx, parent, target, task, depth);
+    if (target.len != 0) return sendTurn(ctx, parent, target, task, interrupt, depth);
     return newDelegation(ctx, parent, name, task, chosen, depth);
 }
 
@@ -453,18 +499,6 @@ fn newDelegation(
 
     const self_ref = try selfRef(alloc, ctx.io);
 
-    var new_argv: std.ArrayList([]const u8) = .empty;
-    // The persona rides as BYTES the header freezes (DESIGN §3): nothing is
-    // installed, so this session's identity text cannot be pruned out from
-    // under its own resume.
-    try new_argv.appendSlice(alloc, &.{ ctx.exe, "session", "new", "--bare", "--prompt", m.path });
-    if (profile.len != 0) try new_argv.appendSlice(alloc, &.{ "--profile", profile });
-    if (model.len != 0) try new_argv.appendSlice(alloc, &.{ "--model", model });
-    // Just the pins. A pin brings its own package into the session at `current`
-    // (DESIGN §5.1) — the child composes from scratch, and the kernel is the one
-    // place that implication is made, so a `--with` derived here would only be a
-    // second, slightly different copy of it.
-    for (m.def.pins) |pin| try new_argv.appendSlice(alloc, &.{ "--pin", pin });
     // …and this package itself, but ONLY for a persona that names somebody to
     // pass work to. That one field is what makes a session a leaf or not, and it
     // is read in one place: a delegated session that cannot delegate simply does
@@ -475,11 +509,14 @@ fn newDelegation(
     // §5.1) — and a pin at it would now be refused outright
     // (`PinToolNotPinnable`). The other three tools are `internal`; they stay
     // where they are, reached through `ext run`.
-    if (m.def.agents.len != 0) {
-        try new_argv.appendSlice(alloc, &.{ "--with", self_ref });
-    }
-
-    const created = try run(alloc, ctx.io, new_argv.items);
+    const created = try runners.start(m.def.runner, alloc, ctx.io, .{
+        .exe = ctx.exe,
+        .prompt = m.path,
+        .profile = profile,
+        .model = model,
+        .pins = m.def.pins,
+        .with_self = if (m.def.agents.len != 0) self_ref else "",
+    });
     if (created.code != 0) {
         // Straight through, including the credential refusal (DESIGN §9.5): the
         // kernel already says the whole way out, and a second sentence composed
@@ -496,112 +533,231 @@ fn newDelegation(
         }
         return rpc.refuse(alloc, "could not open a session for '{s}': {s}", .{ m.def.name, detail(created) });
     }
-    const child = std.mem.trim(u8, created.stdout, " \t\r\n");
-    if (child.len == 0) return rpc.refuse(alloc, "session new printed no id for '{s}'", .{m.def.name});
+    const remote = std.mem.trim(u8, created.stdout, " \t\r\n");
+    if (remote.len == 0) return rpc.refuse(alloc, "session new printed no id for '{s}'", .{m.def.name});
 
-    const appended = try run(alloc, ctx.io, &.{ ctx.exe, "session", "append", child, task });
-    if (appended.code != 0) {
-        return rpc.refuse(alloc, "could not give '{s}' its task: {s}", .{ m.def.name, detail(appended) });
-    }
+    // The delegation's own identity, and the journal that will hold everything
+    // decided once about it — which runner, at what version, over which remote
+    // conversation (D2/D7). Written BEFORE the first message, so a runner
+    // started by that message always finds a record describing what it drives.
+    const d = try record.mint(alloc, ctx.io);
+    try record.appendCreated(alloc, ctx.io, std.Io.Dir.cwd(), d, .{
+        .agent = m.def.name,
+        .runner = m.def.runner.label(),
+        .remote = remote,
+        .parent = parent,
+        .readonly = m.def.readonly,
+        .profile = profile,
+        .model = model,
+    });
 
-    const started = try startRunner(ctx, parent, child, m.def, self_ref, depth);
-    if (started.code != 0) {
-        return rpc.refuse(alloc, "'{s}' has session {s} but its run could not be started: {s}", .{ m.def.name, child, detail(started) });
+    const spec: Spec = .{
+        .delegation = d,
+        .remote = remote,
+        .runner = m.def.runner,
+        .agent = m.def.name,
+        .readonly = m.def.readonly,
+        .max_steps = m.def.max_steps,
+    };
+
+    switch (try deliver(ctx, spec, task, false)) {
+        .failed => |f| return .{ .failed = f },
+        .ok => {},
     }
+    const started = switch (try wake(ctx, parent, spec, self_ref, depth)) {
+        .failed => |f| return rpc.refuse(alloc, "'{s}' has delegation {s} but its run could not be started: {s}", .{ m.def.name, d, f }),
+        // Nobody can hold the lease of a delegation that did not exist a moment
+        // ago, so this is unreachable in practice; saying the honest thing
+        // rather than asserting keeps one shape for both callers.
+        .busy => "(already running)",
+        .task => |t| t,
+    };
 
     return .{ .text = try std.fmt.allocPrint(
         alloc,
-        "delegated to '{s}' — session {s}, running as background task {s}{s}.\n" ++
+        "delegated to '{s}' — delegation {s}, session {s}, running as background task {s}{s}.\n" ++
             "Do not call any more tools about this; end your turn. Its report will arrive here as a message when it finishes, and only its final answer comes back — nothing else from that session enters this conversation.\n" ++
-            "To press it for specifics or send a correction afterwards, call agent again with session={s} instead of starting a new one — it keeps everything it already found. Full transcript: nulya session events {s}",
-        .{ m.def.name, child, firstLine(started.stdout), if (m.def.readonly) " (read-only)" else "", child, child },
+            "To press it for specifics, send a correction, or change its direction mid-run, call agent again with session={s} instead of starting a new one — it keeps everything it already found. Full transcript: nulya session events {s}",
+        .{ m.def.name, d, remote, started, if (m.def.readonly) " (read-only)" else "", d, remote },
     ) };
 }
 
-/// Another turn into a delegation that already reported.
+/// Everything about a delegation the sending and waking paths need. Read from
+/// the RECORD for a delegation that already exists, and from the definition for
+/// one being opened — the two are the same five facts, so they are one struct.
+const Spec = struct {
+    delegation: []const u8,
+    remote: []const u8,
+    runner: runners.Runner,
+    agent: []const u8,
+    readonly: bool,
+    max_steps: u32,
+};
+
+/// Another turn into a delegation that is already going.
 ///
 /// Append-only, so the sub-agent resumes with everything it learned still in
 /// front of it and hits its OWN prefix cache (DESIGN §1) — a correction costs
 /// one turn where a fresh delegation would pay for the reconnaissance again.
-/// Nothing new is created: same session, same frozen composition, same read-only
-/// ceiling (the runner recomputes it from that session's own header, so it
-/// cannot drift).
-fn followUp(ctx: *const Ctx, parent: []const u8, child: []const u8, task: []const u8, depth: u32) !rpc.Outcome {
+/// Nothing new is created: same conversation, same frozen composition, same
+/// read-only ceiling (the runner recomputes it from that session's own header,
+/// so it cannot drift).
+///
+/// **It is never refused for being busy.** It used to be: a turn appended while
+/// the sub-agent was working would be drained mid-run by the very step producing
+/// the report, and that was called a race. It is not one — it is exactly what
+/// the main conversation does when a person types while the model is answering
+/// (D3), and the kernel drains a session's inbox at every step boundary whether
+/// or not anybody is watching. What was missing was not a refusal but a
+/// guarantee that somebody eventually drives what was accepted, and that is the
+/// wake invariant below.
+fn sendTurn(
+    ctx: *const Ctx,
+    parent: []const u8,
+    target: []const u8,
+    task: []const u8,
+    interrupt: bool,
+    depth: u32,
+) !rpc.Outcome {
     const alloc = ctx.alloc;
-    if (!defs.isPlainSessionId(child)) {
-        return rpc.refuse(alloc, "'{s}' is not a session id (they look like s-…)", .{child});
-    }
 
-    // Is it a delegation at all? A session whose header froze an `agent-*`
-    // system prompt is one;
-    // anything else is somebody's conversation, and appending a task to it
-    // through this tool would be a delegation nobody asked for.
-    const worn = (try defs.wornPersona(alloc, ctx.io, child)) orelse {
-        return rpc.refuse(
-            alloc,
-            "session {s} is not a delegated agent session (its frozen composition wears no agent persona), so there is nothing here to follow up. Use agent with a name to start one.",
-            .{child},
-        );
-    };
-
-    // Still working? Its report has not arrived, and a turn appended now would
-    // be drained mid-run by the very step that is producing that report. Asked
-    // of the kernel's own projection of the background task driving it, not
-    // guessed: `task list` is the answer to "is it still going" (DESIGN §6.1).
-    if (try runnerRunning(ctx, parent, child)) {
-        return rpc.refuse(
-            alloc,
-            "'{s}' is still working on session {s}; wait for its report and then follow up.",
-            .{ worn, child },
-        );
-    }
-
-    const entry = (try defs.find(alloc, ctx.io, ctx.env, worn)) orelse {
-        return rpc.refuse(alloc, "session {s} wears the persona '{s}', which is no longer defined here.", .{ child, worn });
-    };
-    if (entry.def.max_exchanges != 0) {
-        // Every turn a caller has sent, which is what the limit is about — the
-        // sub-agent's own steps are `max_steps`, one bound per round.
-        const sent = try turnsSent(ctx, child);
-        if (sent >= entry.def.max_exchanges + 1) {
+    // ① The shape. A session id here is the OLD vocabulary, and a delegation
+    // opened under it has no record, so there is nothing to resume — say which
+    // word replaced it rather than reporting a missing directory (D11).
+    if (!record.isPlainId(target)) {
+        if (defs.isPlainSessionId(target)) {
             return rpc.refuse(
                 alloc,
-                "'{s}' allows {d} follow-up turn(s) per delegation and session {s} has had them all. Start a fresh delegation with what you now know, or do the rest yourself.",
-                .{ worn, entry.def.max_exchanges, child },
+                "'{s}' is a session id; this takes a delegation id (they look like d-…), which is what the receipt of a delegation names. A session is where one runner happens to keep the conversation — delegate again and use the id you get back.",
+                .{target},
             );
         }
+        return rpc.refuse(alloc, "'{s}' is not a delegation id (they look like d-…)", .{target});
     }
 
-    const appended = try run(alloc, ctx.io, &.{ ctx.exe, "session", "append", child, task });
-    if (appended.code != 0) {
-        return rpc.refuse(alloc, "could not send that turn to session {s}: {s}", .{ child, detail(appended) });
+    // ② Is it one of ours? The record is this package's own truth about the
+    // delegation — it says which persona is wearing it, which runner drives it
+    // and what that runner opened — where the session header could only ever
+    // answer for a nulya session.
+    const state = (try record.read(alloc, ctx.io, std.Io.Dir.cwd(), target)) orelse {
+        return rpc.refuse(
+            alloc,
+            "there is no delegation {s} here, so there is nothing to send a turn into. Call agent with a name to start one.",
+            .{target},
+        );
+    };
+    const worn = state.created.agent;
+    const runner_kind = runners.Runner.parse(state.created.runner) orelse {
+        return rpc.refuse(
+            alloc,
+            "delegation {s} was opened by a runner this build does not have ('{s}'), so it cannot be driven from here.",
+            .{ target, state.created.runner },
+        );
+    };
+
+    // ③ How many turns has it had? Counted from the record, which is the only
+    // place that can answer for every runner — counting a child session's user
+    // turns is a fact about nulya sessions and nothing else.
+    const entry = (try defs.find(alloc, ctx.io, ctx.env, worn)) orelse {
+        return rpc.refuse(alloc, "delegation {s} wears the persona '{s}', which is no longer defined here.", .{ target, worn });
+    };
+    if (entry.def.max_exchanges != 0 and state.turns >= entry.def.max_exchanges + 1) {
+        return rpc.refuse(
+            alloc,
+            "'{s}' allows {d} follow-up turn(s) per delegation and {s} has had them all. Start a fresh delegation with what you now know, or do the rest yourself.",
+            .{ worn, entry.def.max_exchanges, target },
+        );
+    }
+
+    const spec: Spec = .{
+        .delegation = target,
+        .remote = state.created.remote,
+        .runner = runner_kind,
+        .agent = worn,
+        .readonly = state.created.readonly,
+        .max_steps = entry.def.max_steps,
+    };
+
+    switch (try deliver(ctx, spec, task, interrupt)) {
+        .failed => |f| return .{ .failed = f },
+        .ok => {},
     }
 
     const self_ref = try selfRef(alloc, ctx.io);
-    const started = try startRunner(ctx, parent, child, entry.def, self_ref, depth);
-    if (started.code != 0) {
-        return rpc.refuse(alloc, "the turn is queued in session {s} but its run could not be started: {s}", .{ child, detail(started) });
-    }
+    const started = switch (try wake(ctx, parent, spec, self_ref, depth)) {
+        .failed => |f| return rpc.refuse(alloc, "the turn is queued in delegation {s} but a run could not be started for it: {s}", .{ target, f }),
+        .busy => return .{ .text = try std.fmt.allocPrint(
+            alloc,
+            "{s} for delegation {s} ('{s}') — it is working right now and will take this at its next turn.\n" ++
+                "Do not call any more tools about this; end your turn. Its next report will arrive here as a message.",
+            .{ if (interrupt) "interrupt queued" else "queued", target, worn },
+        ) },
+        .task => |t| t,
+    };
 
     return .{ .text = try std.fmt.allocPrint(
         alloc,
-        "follow-up sent to agent session {s} ('{s}'), running as background task {s}.\n" ++
+        "sent to delegation {s} ('{s}'), running as background task {s}.\n" ++
             "Do not call any more tools about this; end your turn. Its next report will arrive here as a message.",
-        .{ child, worn, firstLine(started.stdout) },
+        .{ target, worn, started },
     ) };
 }
 
-/// Start (or restart) the background task that drives one delegated session.
+/// Deliver one message, and record it. The record is written AFTER the message
+/// lands, so a turn that never reached the runner is never counted against the
+/// exchange budget.
+///
+/// An interrupt is the same message plus a marker written after it (D6): a
+/// runner that sees the marker always finds something behind it, where the other
+/// order would have it stop for a message that has not arrived.
+fn deliver(
+    ctx: *const Ctx,
+    spec: Spec,
+    task: []const u8,
+    interrupt: bool,
+) !union(enum) { ok, failed: []const u8 } {
+    const alloc = ctx.alloc;
+    const sent = try runners.send(spec.runner, alloc, ctx.io, ctx.exe, spec.remote, task);
+    if (sent.code != 0) {
+        return .{ .failed = try failed(alloc, "could not send that turn to delegation {s}: {s}", .{ spec.delegation, detail(sent) }) };
+    }
+    if (interrupt) try record.markInterrupt(alloc, ctx.io, std.Io.Dir.cwd(), spec.delegation);
+    try record.appendTurn(alloc, ctx.io, std.Io.Dir.cwd(), spec.delegation, interrupt);
+    return .ok;
+}
+
+/// The sender's half of the wake invariant (D4): after delivering, probe the
+/// runner's lease and start one only when nobody holds it.
+///
+/// Probing rather than "was a task running a moment ago" is the whole point.
+/// The runner's half is the mirror of this — it re-checks for messages AFTER
+/// letting the lease go — and between the two, a message delivered in any
+/// window is seen by somebody: either the holder finds it before it lets go, or
+/// it lets go and finds it, or it has already let go and this probe starts a
+/// fresh runner.
+fn wake(
+    ctx: *const Ctx,
+    parent: []const u8,
+    spec: Spec,
+    self_ref: []const u8,
+    depth: u32,
+) !union(enum) { task: []const u8, busy, failed: []const u8 } {
+    if (record.leaseHeld(ctx.alloc, ctx.io, std.Io.Dir.cwd(), spec.delegation)) return .busy;
+    const started = try startRunner(ctx, parent, spec, self_ref, depth);
+    if (started.code != 0) return .{ .failed = detail(started) };
+    return .{ .task = firstLine(started.stdout) };
+}
+
+/// Start the background task that drives one delegation.
 ///
 /// It belongs to the PARENT, so its `task_finished` is deposited into the
 /// parent's inbox when it ends (DESIGN §6.1) — the loop every driver already
-/// runs. A follow-up simply gets a new `t<N>`: nothing is reused, nothing is
-/// resumed, and the two reports are two events in the parent's ledger.
+/// runs. Each round simply gets a new `t<N>`: nothing is reused, nothing is
+/// resumed, and two reports are two events in the parent's ledger.
 fn startRunner(
     ctx: *const Ctx,
     parent: []const u8,
-    child: []const u8,
-    def: defs.Def,
+    spec: Spec,
     self_ref: []const u8,
     depth: u32,
 ) !Run {
@@ -609,63 +765,17 @@ fn startRunner(
     var cmd: std.Io.Writer.Allocating = .init(alloc);
     // Quoted: the executable path may contain spaces, and the command is handed
     // to a shell by the supervisor (`environment.shellArgv`).
-    try cmd.writer.print("\"{s}\" ext run {s} run --arg session={s} --arg agent={s} --arg depth={d}", .{ ctx.exe, self_ref, child, def.name, depth + 1 });
-    if (def.readonly) try cmd.writer.writeAll(" --arg readonly=true");
-    if (def.max_steps != 0) try cmd.writer.print(" --arg max_steps={d}", .{def.max_steps});
+    try cmd.writer.print(
+        "\"{s}\" ext run {s} run --arg delegation={s} --arg session={s} --arg agent={s} --arg depth={d}",
+        .{ ctx.exe, self_ref, spec.delegation, spec.remote, spec.agent, depth + 1 },
+    );
+    if (spec.readonly) try cmd.writer.writeAll(" --arg readonly=true");
+    if (spec.max_steps != 0) try cmd.writer.print(" --arg max_steps={d}", .{spec.max_steps});
 
     var task_argv: std.ArrayList([]const u8) = .empty;
     try task_argv.appendSlice(alloc, &.{ ctx.exe, "task", "run", "--session", parent, "--" });
     try task_argv.append(alloc, cmd.writer.buffered());
     return run(alloc, ctx.io, task_argv.items);
-}
-
-/// Whether a background task of `parent` is currently driving `child`.
-///
-/// The kernel's own projection answers it (`task list --json`, DESIGN §6.1):
-/// `starting` and `running` mean a runner is in flight, `done` and `lost` mean
-/// nobody is. Matched on the command, which names the session it drives — the
-/// same string this tool composed. One honest gap: a `starting` row has no
-/// `status.json` yet, so its command is still empty and it cannot say WHICH
-/// session it drives. It might be our runner in its first milliseconds, and
-/// letting the follow-up through would drop it into the very run that is
-/// producing the report — so an unattributable starting row counts as
-/// in-flight. Refusing is the safe direction: the caller is told to wait, and
-/// a moment later the row has a command and the answer is exact.
-fn runnerRunning(ctx: *const Ctx, parent: []const u8, child: []const u8) !bool {
-    const alloc = ctx.alloc;
-    const listed = try run(alloc, ctx.io, &.{ ctx.exe, "task", "list", "--session", parent, "--json" });
-    if (listed.code != 0) return false;
-    const parsed = std.json.parseFromSlice(std.json.Value, alloc, std.mem.trim(u8, listed.stdout, " \r\n"), .{}) catch return false;
-    const tasks = switch (parsed.value) {
-        .object => |o| switch (o.get("tasks") orelse return false) {
-            .array => |a| a,
-            else => return false,
-        },
-        else => return false,
-    };
-    const needle = try std.fmt.allocPrint(alloc, "session={s}", .{child});
-    var unattributable_start = false;
-    for (tasks.items) |item| {
-        const row = switch (item) {
-            .object => |o| o,
-            else => continue,
-        };
-        const command = rpc.stringField(row, "command") orelse continue;
-        const state = rpc.stringField(row, "state") orelse continue;
-        if (std.mem.indexOf(u8, command, needle) == null) {
-            if (command.len == 0 and std.mem.eql(u8, state, "starting")) unattributable_start = true;
-            continue;
-        }
-        if (std.mem.eql(u8, state, "starting") or std.mem.eql(u8, state, "running")) return true;
-    }
-    return unattributable_start;
-}
-
-/// How many turns a caller has sent into `child` — its `user_text` events.
-fn turnsSent(ctx: *const Ctx, child: []const u8) !u32 {
-    const listed = try run(ctx.alloc, ctx.io, &.{ ctx.exe, "session", "events", child });
-    if (listed.code != 0) return 0;
-    return @intCast(std.mem.count(u8, listed.stdout, "\"kind\":\"user_text\""));
 }
 
 /// The names this session may delegate to, or null when it is not a delegation
@@ -719,48 +829,6 @@ fn parentIdentity(alloc: std.mem.Allocator, io: std.Io, parent: []const u8) Iden
         }
     }
     return out;
-}
-
-// ── child processes ─────────────────────────────────────────────────────────
-
-const max_child_output: usize = 4 << 20;
-
-const Run = struct { code: u8, stdout: []u8, stderr: []u8 };
-
-/// One `nulya <args…>` invocation, in this process's working directory — which
-/// is the workspace, because that is where the host spawns an extension
-/// (DESIGN §7.6). Output is captured, never inherited: stdout here is data.
-fn run(alloc: std.mem.Allocator, io: std.Io, argv: []const []const u8) !Run {
-    const result = try std.process.run(alloc, io, .{
-        .argv = argv,
-        .stdout_limit = .limited(max_child_output),
-        .stderr_limit = .limited(max_child_output),
-    });
-    return .{
-        .code = switch (result.term) {
-            .exited => |c| c,
-            else => 1,
-        },
-        .stdout = result.stdout,
-        .stderr = result.stderr,
-    };
-}
-
-const max_detail_bytes: usize = 400;
-
-/// What a failed child said, trimmed to something quotable. stderr first (that
-/// is where the CLI writes diagnostics), stdout as the fallback.
-fn detail(r: Run) []const u8 {
-    const err = std.mem.trim(u8, r.stderr, " \t\r\n");
-    const said = if (err.len != 0) err else std.mem.trim(u8, r.stdout, " \t\r\n");
-    if (said.len == 0) return "no output";
-    return said[said.len -| max_detail_bytes..];
-}
-
-fn firstLine(text: []const u8) []const u8 {
-    const trimmed = std.mem.trim(u8, text, " \t\r\n");
-    const at = std.mem.indexOfScalar(u8, trimmed, '\n') orelse return trimmed;
-    return trimmed[0..at];
 }
 
 fn failed(alloc: std.mem.Allocator, comptime fmt: []const u8, args: anytype) ![]const u8 {

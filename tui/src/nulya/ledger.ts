@@ -258,7 +258,8 @@ export function backgroundStartOf(output: string): BackgroundStart | null {
 /**
  * `extensions/agent`'s own receipt names the task it started too — in its own
  * words, because that text is written for the model that called it
- * (`delegated to 'explore' — session s-…, running as background task s-…/t1`).
+ * (`delegated to 'explore' — delegation d-…, session s-…, running as background
+ * task s-…/t1`).
  */
 const delegation_started = /running as background task (\S+)/
 

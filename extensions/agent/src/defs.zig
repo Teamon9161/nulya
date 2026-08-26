@@ -23,6 +23,7 @@
 const std = @import("std");
 const builtin = @import("builtin.zig");
 const header_mod = @import("header.zig");
+const runners = @import("runners.zig");
 
 /// Which layer a definition came from, in search order. Workspace wins on a
 /// name collision — a checkout says what its own work needs, the machine's copy
@@ -37,6 +38,14 @@ pub const Def = struct {
     /// A hard ceiling on the tool face, enforced at the gate by whoever runs the
     /// delegation (`runner.zig`). A claim, not a sandbox (DESIGN §9).
     readonly: bool = false,
+    /// WHICH HARNESS holds this agent's conversation (contract D1/D7). The
+    /// default is this nulya — a session of its own, driven by a background
+    /// task — and every other field below is written in that vocabulary. An
+    /// unknown word costs the whole definition (`ParseError.UnknownRunner`)
+    /// rather than a warning and a default: a persona quietly running on
+    /// something other than the harness it asked for is worse than one that is
+    /// not there, and the mistake is one word in one line to fix.
+    runner: runners.Runner = runners.default,
     /// `--profile`; empty means "inherit whatever asked for the delegation".
     profile: []const u8 = "",
     /// `--model` within that profile; empty means the profile's default.
@@ -62,7 +71,7 @@ pub const Def = struct {
     source: []const u8,
 };
 
-pub const ParseError = error{ NoFrontMatter, NoBody, BadName, OutOfMemory };
+pub const ParseError = error{ NoFrontMatter, NoBody, BadName, UnknownRunner, OutOfMemory };
 
 /// One path component and the `/agent <name>` word: a name becomes `<name>.md`,
 /// so a separator or a `..` would be a lookup outside the two directories this
@@ -197,6 +206,8 @@ pub fn parse(
             if (std.mem.eql(u8, v, "true")) def.readonly = true else if (!std.mem.eql(u8, v, "false")) {
                 try warn(alloc, warnings, source, "readonly must be true or false, read as false");
             }
+        } else if (std.mem.eql(u8, key, "runner")) {
+            def.runner = runners.Runner.parse(unquote(value)) orelse return error.UnknownRunner;
         } else if (std.mem.eql(u8, key, "model")) {
             if (parseModelRef(unquote(value))) |ref| {
                 def.profile = ref.profile;
@@ -334,8 +345,9 @@ fn readDir(
         var warnings: std.ArrayList([]const u8) = .empty;
         const def = parse(alloc, text, file[0 .. file.len - ".md".len], layer, full, &warnings) catch |err| switch (err) {
             error.OutOfMemory => return err,
-            // The two ways to not be a definition, and a name nobody can use.
-            error.NoFrontMatter, error.NoBody, error.BadName => continue,
+            // The two ways to not be a definition, a name nobody can use, and a
+            // harness this package cannot talk to.
+            error.NoFrontMatter, error.NoBody, error.BadName, error.UnknownRunner => continue,
         };
         try append(alloc, out, .{ .def = def, .warnings = warnings.items });
     }
@@ -477,6 +489,8 @@ test "front matter reads into the arguments of one session new" {
     try std.testing.expectEqualStrings("deepseek", def.profile);
     try std.testing.expectEqualStrings("deepseek-v4-pro", def.model);
     try std.testing.expectEqual(@as(u32, 12), def.max_steps);
+    // Unwritten means this nulya, which is what every persona shipped here is.
+    try std.testing.expectEqual(runners.Runner.nulya, def.runner);
     try std.testing.expectEqual(@as(usize, 2), def.pins.len);
     try std.testing.expectEqualStrings("ext:std/read", def.pins[0]);
     // The body is the system prompt, verbatim and nothing else.
@@ -510,6 +524,9 @@ test "a file that is not a definition is refused; a bad field is a warning and a
     try std.testing.expectError(error.NoFrontMatter, parseOne(a, "just some notes\n", &warnings));
     try std.testing.expectError(error.NoBody, parseOne(a, "---\nname: empty\n---\n\n", &warnings));
     try std.testing.expectError(error.BadName, parseOne(a, "---\nname: ../etc/passwd\n---\nbody\n", &warnings));
+    // A harness this package cannot talk to costs the whole definition: running
+    // the persona on something other than what it named is the worse answer.
+    try std.testing.expectError(error.UnknownRunner, parseOne(a, "---\nrunner: codex\n---\nbody\n", &warnings));
 
     // Everything else survives with a default and a sentence: losing a whole
     // persona over one bad line is the expensive answer.

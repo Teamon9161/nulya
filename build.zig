@@ -99,6 +99,19 @@ pub fn build(b: *std.Build) void {
     const agent_ext_tests = b.addTest(.{ .root_module = agent_ext_mod, .filters = test_filters });
     test_step.dependOn(&b.addRunArtifact(agent_ext_tests).step);
 
+    // …and that package's delegation journal (`record.zig`): the id shape, the
+    // append-only rows the exchange budget is counted from, and the runner lease
+    // the wake invariant is built on (contract D4). Its own root because nothing
+    // the definition reader does reaches it — a test only runs where the file it
+    // lives in is analysed.
+    const agent_record_mod = b.createModule(.{
+        .root_source_file = b.path("extensions/agent/src/record.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const agent_record_tests = b.addTest(.{ .root_module = agent_record_mod, .filters = test_filters });
+    test_step.dependOn(&b.addRunArtifact(agent_record_tests).step);
+
     // End-to-end closed-loop test (DESIGN §16 milestone): init -> build -> run.
     // It uses the host's own zig (no embed needed) via NULYA_TEST_ZIG, so it
     // actually compiles and runs a real extension. Everything reachable from

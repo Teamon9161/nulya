@@ -2825,7 +2825,7 @@ test "bundled agent: the personas the package ships need no files — list layer
     }
 }
 
-test "bundled agent: a follow-up resumes the same delegated session rather than starting one; it is refused while the agent is still working, past max_exchanges, and outside a delegation" {
+test "bundled agent: a delegation is a d-id of its own — another turn goes into the same conversation, its exchange budget is counted from the delegation's record rather than the child's ledger, and a session id is refused with the word that replaced it" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -2846,7 +2846,7 @@ test "bundled agent: a follow-up resumes the same delegated session rather than 
     try ws.createDirPath(io, ".nulya/agents");
     try ws.writeFile(io, .{
         .sub_path = ".nulya/agents/worker.md",
-        .data = "---\ndescription: plain worker\nmax_exchanges: 1\n---\nDo the work.\n",
+        .data = "---\ndescription: plain worker\nmax_exchanges: 2\n---\nDo the work.\n",
     });
 
     const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
@@ -2860,28 +2860,33 @@ test "bundled agent: a follow-up resumes the same delegated session rather than 
         .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
     };
 
-    // ① The first delegation, and its report.
+    // ① The first delegation. The receipt names the DELEGATION — what the model
+    //    says back to this tool — and, because the abstraction does not hide
+    //    anything (D2), the remote conversation behind it as well.
     const first = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"worker\",\"task\":\"first\"}" }, in_parent);
     defer alloc.free(first.stdout);
     try std.testing.expectEqual(@as(u8, 0), first.code);
-    // The receipt teaches the cheaper move for next time.
-    try std.testing.expect(std.mem.indexOf(u8, first.stdout, "call agent again with session=") != null);
-    const child = blk: {
-        const at = std.mem.indexOf(u8, first.stdout, "session s-").? + "session ".len;
-        var end = at;
-        while (end < first.stdout.len and first.stdout[end] != ',' and first.stdout[end] != ' ') end += 1;
-        break :blk try alloc.dupe(u8, first.stdout[at..end]);
-    };
+    try std.testing.expect(std.mem.indexOf(u8, first.stdout, "call agent again with session=d-") != null);
+    const d = try delegationOf(alloc, first.stdout);
+    defer alloc.free(d);
+    const child = try remoteOf(alloc, first.stdout);
     defer alloc.free(child);
+
+    // The record is this package's own journal of it: one opening row naming the
+    // runner and what it opened, then one row per message.
+    {
+        const rows = try readRecord(alloc, io, ws, d);
+        defer alloc.free(rows);
+        try std.testing.expect(std.mem.indexOf(u8, rows, "\"kind\":\"created\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rows, "\"runner\":\"nulya\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rows, child) != null);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, rows, "\"kind\":\"turn\""));
+    }
     {
         const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", "60000" });
         defer alloc.free(waited.stdout);
         try std.testing.expectEqual(@as(u8, 0), waited.code);
     }
-
-    // ② A follow-up goes into THAT session — append-only, so the sub-agent
-    // resumes with everything it already found and hits its own prefix cache
-    // (DESIGN §1). No new session is created.
     // Read the first report, as a model would before following up — and as this
     // test must, since `task wait --any` counts a done task whose result nobody
     // has drained yet.
@@ -2890,104 +2895,363 @@ test "bundled agent: a follow-up resumes the same delegated session rather than 
         defer alloc.free(stepped.stdout);
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, stepped.stdout, "\"kind\":\"task_finished\""));
         try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "<agent-report agent=") != null);
+        // The frame names the delegation, and the sentence under it still points
+        // at the remote transcript.
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, d) != null);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "session events") != null);
+    }
+
+    // ② The exchange budget is the RECORD's turn count, not the child ledger's
+    //    user turns — the only count an external runner could ever answer too.
+    //    Two turns appended to the child directly, behind this tool's back, are
+    //    three user turns in that session and still one message in the
+    //    delegation: the budget must not move.
+    {
+        for ([_][]const u8{ "sideband one", "sideband two" }) |text| {
+            const said = try runCli(alloc, io, ws, &.{ exe_abs, "session", "append", child, text });
+            defer alloc.free(said.stdout);
+            try std.testing.expectEqual(@as(u8, 0), said.code);
+        }
     }
 
     const before = try runCli(alloc, io, ws, &.{ exe_abs, "session", "list" });
     defer alloc.free(before.stdout);
-    const follow_request = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"second, be specific\"}}", .{child});
+    const follow_request = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"second, be specific\"}}", .{d});
     defer alloc.free(follow_request);
     const again = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", follow_request }, in_parent);
     defer alloc.free(again.stdout);
     try std.testing.expectEqual(@as(u8, 0), again.code);
-    try std.testing.expect(std.mem.indexOf(u8, again.stdout, "follow-up sent to agent session") != null);
+    try std.testing.expect(std.mem.indexOf(u8, again.stdout, d) != null);
     {
         const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", "60000" });
         defer alloc.free(waited.stdout);
         try std.testing.expectEqual(@as(u8, 0), waited.code);
     }
+    // Nothing new was created: another turn goes into the conversation that
+    // already holds everything it found (DESIGN §1).
     const after = try runCli(alloc, io, ws, &.{ exe_abs, "session", "list" });
     defer alloc.free(after.stdout);
     try std.testing.expectEqual(std.mem.count(u8, before.stdout, "\n"), std.mem.count(u8, after.stdout, "\n"));
-
-    // Two turns in the child's ledger, and two reports in the parent's inbox —
-    // one background task each, the ordinary `task_finished` both times.
     {
         const events = try runCli(alloc, io, ws, &.{ exe_abs, "session", "events", child });
         defer alloc.free(events.stdout);
-        try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, events.stdout, "\"kind\":\"user_text\""));
         try std.testing.expect(std.mem.indexOf(u8, events.stdout, "second, be specific") != null);
+        try std.testing.expect(std.mem.indexOf(u8, events.stdout, "sideband two") != null);
     }
     {
         const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, in_parent);
         defer alloc.free(stepped.stdout);
-        // The second report, the same way as the first: an ordinary
-        // `task_finished`, one background task per turn.
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, stepped.stdout, "\"kind\":\"task_finished\""));
-        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "<agent-report agent=") != null);
     }
 
-    // ③ Past `max_exchanges`: named, with the number.
+    // ③ The budget itself. Two turns have been sent into the delegation and it
+    //    allows two follow-ups on top of the first, so a third goes through —
+    //    which the child's four user turns would already have refused — and the
+    //    fourth is named, with the number.
     {
-        const request = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"third\"}}", .{child});
+        const request = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"third\"}}", .{d});
+        defer alloc.free(request);
+        const within = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", request }, in_parent);
+        defer alloc.free(within.stdout);
+        try std.testing.expectEqual(@as(u8, 0), within.code);
+    }
+    {
+        const request = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"fourth\"}}", .{d});
         defer alloc.free(request);
         const over = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", request }, in_parent);
         defer alloc.free(over.stdout);
         try std.testing.expectEqual(@as(u8, 1), over.code);
-        try std.testing.expect(std.mem.indexOf(u8, over.stdout, "allows 1 follow-up turn") != null);
+        try std.testing.expect(std.mem.indexOf(u8, over.stdout, "follow-up turn") != null);
     }
 
-    // ④ Neither / both / a session that is not a delegation.
+    // ④ The vocabulary. A SESSION id is what this took before delegations had
+    //    ids of their own; it is refused with the word that replaced it rather
+    //    than with a missing directory (D11), and an id of the right shape that
+    //    names nothing is a different answer again.
+    {
+        const old_shape = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"x\"}}", .{child});
+        defer alloc.free(old_shape);
+        const refused = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", old_shape }, in_parent);
+        defer alloc.free(refused.stdout);
+        try std.testing.expectEqual(@as(u8, 1), refused.code);
+        try std.testing.expect(std.mem.indexOf(u8, refused.stdout, "d-") != null);
+
+        const unknown = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"session\":\"d-000000000000\",\"task\":\"x\"}" }, in_parent);
+        defer alloc.free(unknown.stdout);
+        try std.testing.expectEqual(@as(u8, 1), unknown.code);
+        try std.testing.expect(std.mem.indexOf(u8, unknown.stdout, "no delegation") != null);
+    }
+
+    // ⑤ Neither / both / interrupt without something to interrupt.
     {
         const neither = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"task\":\"x\"}" }, in_parent);
         defer alloc.free(neither.stdout);
         try std.testing.expect(std.mem.indexOf(u8, neither.stdout, "EITHER name") != null);
-        const both = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"worker\",\"session\":\"s-x\",\"task\":\"x\"}" }, in_parent);
+        const both = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"worker\",\"session\":\"d-000000000000\",\"task\":\"x\"}" }, in_parent);
         defer alloc.free(both.stdout);
         try std.testing.expect(std.mem.indexOf(u8, both.stdout, "not both") != null);
-        const plain_request = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"x\"}}", .{parent});
-        defer alloc.free(plain_request);
-        const plain = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", plain_request }, in_parent);
-        defer alloc.free(plain.stdout);
-        try std.testing.expect(std.mem.indexOf(u8, plain.stdout, "not a delegated agent session") != null);
+        const early = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"worker\",\"task\":\"x\",\"interrupt\":true}" }, in_parent);
+        defer alloc.free(early.stdout);
+        try std.testing.expectEqual(@as(u8, 1), early.code);
+        try std.testing.expect(std.mem.indexOf(u8, early.stdout, "interrupt applies") != null);
     }
 
-    // ⑤ While it is still working, a follow-up is refused rather than dropped
-    // into the run that is producing the report. `loop` never ends its turn, so
-    // the runner is still going when this is asked.
+    // Let the last runner finish before the workspace goes away.
     {
-        const busy_new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
-        defer alloc.free(busy_new.stdout);
-        const busy_parent = try alloc.dupe(u8, std.mem.trim(u8, busy_new.stdout, " \r\n"));
-        defer alloc.free(busy_parent);
-        const busy_file = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{busy_parent});
-        defer alloc.free(busy_file);
-        const busy_env: []const EnvPair = &.{
-            .{ .key = "NULYA_SESSION", .value = busy_file },
-            .{ .key = "NULYA_SCRIPTED_MODE", .value = "loop" },
-        };
-        const started = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"worker\",\"task\":\"a long one\"}" }, busy_env);
-        defer alloc.free(started.stdout);
-        try std.testing.expectEqual(@as(u8, 0), started.code);
-        const busy_child = blk: {
-            const at = std.mem.indexOf(u8, started.stdout, "session s-").? + "session ".len;
-            var end = at;
-            while (end < started.stdout.len and started.stdout[end] != ',' and started.stdout[end] != ' ') end += 1;
-            break :blk try alloc.dupe(u8, started.stdout[at..end]);
-        };
-        defer alloc.free(busy_child);
-
-        const hurry = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"hurry\"}}", .{busy_child});
-        defer alloc.free(hurry);
-        const refused = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", hurry }, busy_env);
-        defer alloc.free(refused.stdout);
-        try std.testing.expectEqual(@as(u8, 1), refused.code);
-        try std.testing.expect(std.mem.indexOf(u8, refused.stdout, "is still working") != null);
-
-        const task_name = try std.fmt.allocPrint(alloc, "{s}/t1", .{busy_parent});
-        defer alloc.free(task_name);
-        const killed = try runCli(alloc, io, ws, &.{ exe_abs, "task", "kill", task_name });
-        alloc.free(killed.stdout);
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", "60000" });
+        alloc.free(waited.stdout);
     }
+}
+
+test "bundled agent: the wake invariant — a turn sent while a runner holds the delegation's lease is queued rather than refused and starts nothing, a runner that loses the race for that lease reports nothing at all, and a turn sent once the lease is free starts a fresh runner that finds everything waiting" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const ref = try buildBundled(alloc, io, ws, exe_abs, "agent");
+    defer alloc.free(ref);
+
+    try ws.createDirPath(io, ".nulya/agents");
+    try ws.writeFile(io, .{
+        .sub_path = ".nulya/agents/worker.md",
+        .data = "---\ndescription: plain worker\n---\nDo the work.\n",
+    });
+
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(new.stdout);
+    const parent = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(parent);
+    const session_file = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{parent});
+    defer alloc.free(session_file);
+    const in_parent: []const EnvPair = &.{
+        .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+    };
+
+    const first = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"worker\",\"task\":\"first\"}" }, in_parent);
+    defer alloc.free(first.stdout);
+    try std.testing.expectEqual(@as(u8, 0), first.code);
+    const d = try delegationOf(alloc, first.stdout);
+    defer alloc.free(d);
+    const child = try remoteOf(alloc, first.stdout);
+    defer alloc.free(child);
+    {
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", "60000" });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, in_parent);
+        defer alloc.free(stepped.stdout);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, stepped.stdout, "\"kind\":\"task_finished\""));
+    }
+
+    const lock_path = try std.fmt.allocPrint(alloc, ".nulya/delegations/{s}/.runner.lock", .{d});
+    defer alloc.free(lock_path);
+
+    // ① A runner is driving. Its lease is what says so — an OS lock, so nothing
+    //    has to be believed about a process that may already be dead. A turn
+    //    sent now is ACCEPTED (D3: it is what a person typing mid-answer does),
+    //    queued into the conversation, and starts no second runner: the holder
+    //    will find it.
+    var held = try ws.createFile(io, lock_path, .{ .truncate = false, .read = true, .lock = .exclusive });
+    const tasks_before = try countTasks(alloc, io, ws, exe_abs, parent);
+    {
+        const request = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"queued one\"}}", .{d});
+        defer alloc.free(request);
+        const queued = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", request }, in_parent);
+        defer alloc.free(queued.stdout);
+        try std.testing.expectEqual(@as(u8, 0), queued.code);
+        try std.testing.expect(std.mem.indexOf(u8, queued.stdout, "working right now") != null);
+    }
+    try std.testing.expectEqual(tasks_before, try countTasks(alloc, io, ws, exe_abs, parent));
+
+    // ② A redundant runner — two senders probing at the same moment is the race
+    //    the lease exists for — loses it and says NOTHING. A report frame from a
+    //    runner that drove nothing would be a sub-agent's findings that no
+    //    sub-agent produced, arriving in the parent as an ordinary message.
+    {
+        const args = try std.fmt.allocPrint(alloc, "{{\"delegation\":\"{s}\",\"session\":\"{s}\",\"agent\":\"worker\"}}", .{ d, child });
+        defer alloc.free(args);
+        const lost = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "run", args }, in_parent);
+        defer alloc.free(lost.stdout);
+        try std.testing.expectEqual(@as(u8, 0), lost.code);
+        try std.testing.expect(std.mem.indexOf(u8, lost.stdout, "<agent-report") == null);
+    }
+
+    // ③ The lease is free again — the runner left, or was killed, and the OS
+    //    released it either way. The next turn starts a fresh runner, and that
+    //    runner finds BOTH messages: the one queued while the lease was held has
+    //    been waiting in the conversation all along.
+    held.close(io);
+    {
+        const request = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"queued two\"}}", .{d});
+        defer alloc.free(request);
+        const sent = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", request }, in_parent);
+        defer alloc.free(sent.stdout);
+        try std.testing.expectEqual(@as(u8, 0), sent.code);
+        try std.testing.expect(std.mem.indexOf(u8, sent.stdout, "background task") != null);
+    }
+    {
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", "60000" });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+    }
+    {
+        const events = try runCli(alloc, io, ws, &.{ exe_abs, "session", "events", child });
+        defer alloc.free(events.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, events.stdout, "queued one") != null);
+        try std.testing.expect(std.mem.indexOf(u8, events.stdout, "queued two") != null);
+    }
+}
+
+test "bundled agent: an interrupt stops the run in flight — the step is killed where it stands, the kernel repairs the batch it left, and the message the interrupt carried is taken up in the next round" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const ref = try buildBundled(alloc, io, ws, exe_abs, "agent");
+    defer alloc.free(ref);
+
+    // `loop` never ends its turn, so this delegation keeps stepping until its
+    // budget runs out — a run that is genuinely in flight to interrupt.
+    try ws.createDirPath(io, ".nulya/agents");
+    try ws.writeFile(io, .{
+        .sub_path = ".nulya/agents/slow.md",
+        .data = "---\ndescription: never finishes on its own\nmax_steps: 30\n---\nKeep going.\n",
+    });
+
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(new.stdout);
+    const parent = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(parent);
+    const session_file = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{parent});
+    defer alloc.free(session_file);
+    const looping: []const EnvPair = &.{
+        .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SCRIPTED_MODE", .value = "loop" },
+    };
+
+    const started = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"slow\",\"task\":\"go on for a while\"}" }, looping);
+    defer alloc.free(started.stdout);
+    try std.testing.expectEqual(@as(u8, 0), started.code);
+    const d = try delegationOf(alloc, started.stdout);
+    defer alloc.free(d);
+    const child = try remoteOf(alloc, started.stdout);
+    defer alloc.free(child);
+
+    // Wait until the run is actually under way: the first tool result in the
+    // child's ledger says a step is executing, which is what an interrupt is for.
+    try waitForEvent(alloc, io, ws, exe_abs, child, "\"kind\":\"tool_results\"");
+
+    const request = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"INTERRUPT-SENTINEL\",\"interrupt\":true}}", .{d});
+    defer alloc.free(request);
+    const interrupted = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", request }, looping);
+    defer alloc.free(interrupted.stdout);
+    try std.testing.expectEqual(@as(u8, 0), interrupted.code);
+
+    // An interrupt is a DELIVERY, not a kind of message (D3): the record holds
+    // one ordinary turn row, marked with how it was sent.
+    {
+        const rows = try readRecord(alloc, io, ws, d);
+        defer alloc.free(rows);
+        try std.testing.expect(std.mem.indexOf(u8, rows, "\"interrupt\":true") != null);
+        try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, rows, "\"kind\":\"turn\""));
+    }
+
+    {
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", "120000" });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+    }
+
+    {
+        const events = try runCli(alloc, io, ws, &.{ exe_abs, "session", "events", child });
+        defer alloc.free(events.stdout);
+        // The step that was running died where it stood, leaving a call batch
+        // with no results; the kernel closes it at the next step boundary, which
+        // is the next round of the very same runner (DESIGN §4).
+        try std.testing.expect(std.mem.indexOf(u8, events.stdout, "interrupted before Nulya recorded results") != null);
+        // …and the message the interrupt carried is in the conversation.
+        try std.testing.expect(std.mem.indexOf(u8, events.stdout, "INTERRUPT-SENTINEL") != null);
+    }
+    // The marker is consumed, never left behind to cut short a later round.
+    {
+        const marker = try std.fmt.allocPrint(alloc, ".nulya/delegations/{s}/interrupt", .{d});
+        defer alloc.free(marker);
+        try std.testing.expectError(error.FileNotFound, ws.access(io, marker, .{}));
+    }
+}
+
+/// The delegation id out of a receipt (`… — delegation d-…, session s-…`).
+fn delegationOf(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
+    const at = std.mem.indexOf(u8, text, "delegation d-").? + "delegation ".len;
+    var end = at;
+    while (end < text.len and (std.ascii.isAlphanumeric(text[end]) or text[end] == '-')) end += 1;
+    return alloc.dupe(u8, text[at..end]);
+}
+
+/// The remote conversation out of the same receipt — named on purpose: the
+/// abstraction gives the facts one name, it does not hide them (D2).
+fn remoteOf(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
+    const at = std.mem.indexOf(u8, text, "session s-").? + "session ".len;
+    var end = at;
+    while (end < text.len and text[end] != ',' and text[end] != ' ') end += 1;
+    return alloc.dupe(u8, text[at..end]);
+}
+
+fn readRecord(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, d: []const u8) ![]u8 {
+    const path = try std.fmt.allocPrint(alloc, ".nulya/delegations/{s}/record.jsonl", .{d});
+    defer alloc.free(path);
+    return ws.readFileAlloc(io, path, alloc, .limited(1 << 20));
+}
+
+fn countTasks(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    ws: std.Io.Dir,
+    exe_abs: []const u8,
+    parent: []const u8,
+) !usize {
+    const listed = try runCli(alloc, io, ws, &.{ exe_abs, "task", "list", "--session", parent, "--json" });
+    defer alloc.free(listed.stdout);
+    return std.mem.count(u8, listed.stdout, "\"full\"");
+}
+
+/// Poll a session's ledger until `needle` shows up. Bounded, because a test that
+/// hangs says less than one that fails.
+fn waitForEvent(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    ws: std.Io.Dir,
+    exe_abs: []const u8,
+    session_id: []const u8,
+    needle: []const u8,
+) !void {
+    var tries: usize = 0;
+    while (tries < 600) : (tries += 1) {
+        const events = try runCli(alloc, io, ws, &.{ exe_abs, "session", "events", session_id });
+        defer alloc.free(events.stdout);
+        if (std.mem.indexOf(u8, events.stdout, needle) != null) return;
+        io.sleep(.fromMilliseconds(50), .awake) catch {};
+    }
+    return error.TestUnexpectedResult;
 }
 
 test "bundled agent: only a persona with an agents whitelist carries the tool, it may reach only the names on that list, and the depth backstop stops an indirect cycle" {

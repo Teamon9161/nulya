@@ -9,7 +9,7 @@
       {
         "name": "agent",
         "surface": "auto",
-        "description": "Delegate one self-contained piece of work to a sub-agent, or send another turn into one that already reported. A sub-agent runs in a session of its own — its own context, its own tool face — and ONLY its final report comes back to you, as a message a little later; nothing else from its session enters this conversation and it cannot see yours. Give `name` to START one: say the whole task, because it sees nothing of this conversation and cannot ask you anything. Give `session` INSTEAD to follow up on a report you already have — that session still holds everything it found, so a correction or a request for specifics costs one turn where starting over pays for the search again. Prefer it. Use delegation for work that is separable and worth a fresh context (a broad search, a focused review); not for something you could finish in a step or two yourself, and never for the same thing twice. Calling an unknown name lists a short catalogue; for the full catalogue, use shell: `nulya ext run agent list`. After it returns, end your turn: the work has not happened yet.",
+        "description": "Delegate one self-contained piece of work to a sub-agent, or send another turn into a delegation that is already going. A sub-agent runs in a conversation of its own — its own context, its own tool face — and ONLY its report comes back to you, as a message a little later; nothing else from it enters this conversation and it cannot see yours. Give `name` to START one: say the whole task, because it sees nothing of this conversation and cannot ask you anything. Give `session` (the d-… id from a receipt or a report) INSTEAD to send it another turn — a correction, a request for specifics, a change of direction. That conversation still holds everything it found, so another turn costs one turn where starting over pays for the search again. Prefer it. It is accepted whether or not the sub-agent is working right now: by default it is taken at its next natural boundary, and `interrupt: true` stops what it is doing and has it take the message immediately. Use delegation for work that is separable and worth a fresh context (a broad search, a focused review); not for something you could finish in a step or two yourself, and never for the same thing twice. Calling an unknown name lists a short catalogue; for the full catalogue, use shell: `nulya ext run agent list`. After it returns, end your turn: the work has not happened yet.",
         "timeout_ms": 120000,
         "input": {
           "type": "object",
@@ -20,7 +20,7 @@
             },
             "session": {
               "type": "string",
-              "description": "An agent session that already reported, to send another turn into. Give this OR name, not both."
+              "description": "A delegation that is already going (`d-…`, as its receipt and its report name it), to send another turn into. Give this OR name, not both."
             },
             "task": {
               "type": "string",
@@ -29,6 +29,10 @@
             "model": {
               "type": "string",
               "description": "Which model runs this delegation: `<profile>` or `<profile>/<model-id>`. Only with name — a follow-up runs on what its session already froze. Omit unless you have a reason: without it the definition decides, and failing that the sub-agent runs on the same model you do. Give one when this piece of work is worth a different one than the conversation it came from. `nulya config show` lists what can run."
+            },
+            "interrupt": {
+              "type": "boolean",
+              "description": "Stop what the sub-agent is doing now and have it take this message immediately, instead of at its next natural boundary. Only with session — there is nothing to interrupt in a delegation that does not exist yet."
             }
           },
           "required": [
@@ -65,13 +69,17 @@
       {
         "name": "run",
         "surface": "internal",
-        "description": "Drive one delegated session to the end of its turn and print its report. For drivers: this is the command the background task started by `agent` runs; the report reaches the parent as that task's result.",
+        "description": "Drive one delegation until it has nothing left to answer, then print its report. For drivers: this is the command the background task started by `agent` runs; the report reaches the parent as that task's result.",
         "input": {
           "type": "object",
           "properties": {
+            "delegation": {
+              "type": "string",
+              "description": "The delegation to drive: whose runner lease this takes and whose interrupt marker it watches."
+            },
             "session": {
               "type": "string",
-              "description": "The delegated session to drive."
+              "description": "The remote conversation that delegation opened — the session to step."
             },
             "agent": {
               "type": "string",

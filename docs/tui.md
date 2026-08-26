@@ -1949,3 +1949,16 @@ T33 把 `internal` 行折起来时给的理由是**数量**（六个 driver tool
 **`/exit` 新增为 `/quit` 的别名**（其它 harness 的词）。只做带斜杠的那个：裸 `exit` 是一句普通文本，前端不该替模型截下它。别名进 `builtin_names`，所以包也夺不走这个名字。
 
 **测试**：`draftColumn(null, v)` / `draftColumn(null, null)` 两条（没有源码时的指针列）；别名补全一条（`/res` → `/resume`、那一行指向 `/sessions`、`/e` 的排序把列出的名字放前面）。`cd tui && bun test`：384 pass，`bunx tsc --noEmit` 干净。
+
+### T64 · queue lane 与 ctrl+j：排队的消息看得见，插队是一个手势（2026-08-26）
+
+**内核零改动**（goals/agent-runner.md ar-t1）。substrate 早就齐了：`session append` 投 inbox、内核每个 step 边界排干（T27 把报告时机也修准了）、Esc kill 这一步、T29 的 wake 在 idle tick 时把非空 inbox 排掉——所以"中断并投递"事实上一直可达，只是要两个手势加一个定时器 tick，且没人知道这条路存在。这一轮全是把它包装成**一个**看得见的动作。
+
+1. **queue lane（`ui/QueueLane.tsx`）**：`pendingCount() > 0` 时在输入框上方（WorkingStatus 同区——都是"此刻正在发生什么"，不是 session 的描述）画一行 `⏸ N queued — enter queues · ctrl+j interrupts & delivers`，底下逐条截一行列出排队消息；静息时**不画**（T35/T38 那条规矩：没有 `0 queued` 这一行）。点击任一行 = 下面的手势——inbox 是内核整体 FIFO 排干的，不假装能单条插队。lane 显示的是用户原话：mid-run 排队的消息在 wire 上套着 mid-task sentinel（midtask.ts），lane 用与 transcript 卡**同一个** `parseMidTask` 折回来。
+2. **手势（`Driver.interruptAndDeliver`）= 三个现有动词按顺序接线**：append（原样走 `send` 的排队路径，所以 `queued` 标记行为不变）→ kill（T27 既有的杀这一步）→ 等 `drive()` 的 `finally` 真正跑完（新内部 `idleOnce()`——不是"kill 信号发出"那一刻，否则第二个 `session step` 会撞上还没放的写者租约）→ 立即 `step()`。零新状态机。idle + composer 有字退化成普通 `send`；**idle + 空文本（lane 的点击落在 step 刚结束之后）走 `wake()`**——inbox 非空立即 step、为空仍是 no-op，绝不裸 step 空 inbox（那会把上一条 assistant 当 prefill 重发，DESIGN §4）。observer 没有自己的写者租约可杀，`Attachment.interruptAndDeliver` 对它退化成既有的排队 append。
+3. **ctrl+j 是有条件抢的键（keymap `interrupt`，`[keys]` 可覆盖）**。裸 ctrl+j 在非 Kitty 终端与换行**字节相同**（`@opentui/core` mock-keys 实测），而它正是 composer 的 Shift+Enter 退路——无条件抢会吃掉那批终端的换行。所以 App 的 layer 只在 `interruptRelevant()`（有步在跑，或已有排队）时 enable，静息时按键原样落进 composer——`closeTab`/ctrl+w 在单 tab 时放行 delete-word 的同一条先例。composer 侧 `triggerInterrupt()` 复用 `submit()` 的清空/历史/粘贴展开路径，`onSubmit` 只多一个 flag。
+4. **契约的一处偏离，记在案**：ar-t1 写"idle 时该手势等价普通发送"，字面执行意味着任何时候都抢 ctrl+j（见上），改为仅在有意义时抢；静息 + composer 有字时 Enter 本来就够。
+
+**测试**：`bun test` 393 pass（新增 `queuelane.test.tsx` 纯渲染 + 点击、`interrupt.test.tsx` 真二进制端到端 kill+redeliver 与静息态不画，`driver`/`observer` 各加 interruptAndDeliver 的分支条目），`tsc` 干净。
+
+**没做**：不给 lane 做单条删除或重排（inbox 在内核里没有这些动词，前端不该假装有）；`/agent` 子场的 d-* 跟随是 ar-t2。
