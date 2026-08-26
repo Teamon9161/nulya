@@ -330,6 +330,7 @@ function entry(id: string, current: string, tools: string[]): ExtensionEntry {
     autoTools: [],
     internalTools: [],
     apply: "manual",
+    standing: false,
     skills: [],
     systemPrompts: [],
     commands: [],

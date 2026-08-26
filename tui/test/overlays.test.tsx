@@ -448,6 +448,7 @@ test("an internal tool is listed with no checkbox: there is no pin for it to be 
     autoTools: [],
     internalTools,
     apply: "manual" as const,
+    standing: false,
     skills: [],
     systemPrompts: [],
     commands: [],
@@ -717,9 +718,10 @@ test("/ext Enter on a prompt package moves current and writes no membership of i
     try {
       await until(() => setup.captureCharFrame().includes("house.style"), 20_000)
       const frame = await settle(setup, 4)
-      // No `standing` cell: this package did not ask to be in every session, so
-      // the one word in the id list that is about reach stays empty (T52).
-      expect(standingCell({ apply: "manual" })).toBe("")
+      // No `standing` cell: nothing recorded this package as a standing member,
+      // so the one word in the id list that is about reach stays empty. The
+      // cell reports the kernel's record, never a manifest's `apply` (T52/T56).
+      expect(standingCell({ standing: false })).toBe("")
       // No declared command: the way in it names is `/with` (nothing derived).
       expect(frame).toContain("`/with house.style` wears its prompt")
       expect(frame).toContain("nothing here composes it standing")

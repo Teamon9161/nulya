@@ -47,7 +47,6 @@ import {
   readToolUsage,
   rootsOf,
   type ExtensionEntry,
-  type PackageApply,
   type ToolUsage,
 } from "../../nulya/files.ts"
 import {
@@ -138,10 +137,15 @@ const switch_width = 2
 
 /**
  * The one word in the id list that is about REACH rather than contents (T52):
- * this package's manifest says `apply: "auto"`, so the moment it has a
- * `current` the kernel composes it into every fresh session on this machine
- * (DESIGN §5.1) — Enter on this row is not "make it available", it is "put it
- * in everything".
+ * the kernel composes this package into every fresh session on this machine
+ * (DESIGN §5.1), so the row is not "available", it is "in everything".
+ *
+ * Read from the kernel's record (`ext list`'s `standing` marker) rather than
+ * from the current version's `apply` (T56). The manifest field is what a
+ * VERSION declares; the record is what the activation verified and what
+ * sessions actually get, and only the second is a state this column can report.
+ * A package that declares `apply: "auto"` and has no `current` is standing in
+ * nothing — the detail pane says what activating it would do instead.
  *
  * The column used to say `mode`, meaning "contributes a system prompt". That
  * was the best guess available while nothing could state its own reach: a
@@ -152,8 +156,8 @@ const switch_width = 2
  * front of every model here. The fact the old column carried is still on
  * screen: the detail pane lists prompts and the package's declared commands.
  */
-export function standingCell(entry: { apply: PackageApply }): string {
-  return entry.apply === "auto" ? "standing" : ""
+export function standingCell(entry: { standing: boolean }): string {
+  return entry.standing ? "standing" : ""
 }
 
 /** One row of the tools pane: a declared tool, its placement, state, and evidence. */
@@ -462,7 +466,7 @@ export function ExtView(props: {
       const named = new Set([...view.extensions.with, ...style.settings.extensions.session_with])
       setComposedTools(
         listed()
-          .filter((entry) => isActive(entry) && (named.has(entry.id) || entry.apply === "auto"))
+          .filter((entry) => isActive(entry) && (named.has(entry.id) || entry.standing))
           .flatMap((entry) => entry.autoTools.map((tool) => toolId(entry.id, tool))),
       )
       setUserPath(view.paths.user)
@@ -596,21 +600,23 @@ export function ExtView(props: {
   const isActive = (entry: ExtensionEntry) => entry.current !== null && !entry.shadowed
   /**
    * …and one that is a MEMBER of every session opened here, from any of the
-   * three things that can say so (T52): the package's own `apply: "auto"`, the
-   * kernel's `[extensions] with`, and `tui.toml`'s `session_with` (the packages
-   * this front end always brings, T42).
+   * three things that can say so (T52): the package asked and the kernel
+   * recorded it (`standing`), the kernel's `[extensions] with`, and `tui.toml`'s
+   * `session_with` (the packages this front end always brings, T42).
    *
    * The first is new and the reason the list is no longer four: this front end
    * kept a `standing_with` of its own until T52, written by Enter, and a
-   * package that wants to be everywhere says so itself now — one fact, in the
-   * manifest, honoured by the kernel for every driver rather than by each front
-   * end separately.
+   * package that wants to be everywhere says so itself now — one fact, honoured
+   * by the kernel for every driver rather than by each front end separately.
+   * Which is why it is read from the kernel's record and not from the current
+   * version's `apply` (T56): re-deriving it here would be a second answer to a
+   * question that has one.
    *
    * Three sources and one question, because the row is drawn once. Which one a
    * given id came from is in the detail pane below, where the answer differs.
    */
   const composedEverySession = (entry: ExtensionEntry) =>
-    entry.apply === "auto" ||
+    entry.standing ||
     configWith().includes(entry.id) ||
     style.settings.extensions.session_with.includes(entry.id)
   /**
@@ -954,6 +960,11 @@ export function ExtView(props: {
       // package that asked to be everywhere is everywhere now; a mode is worn
       // through its own declared command, or `/with` when it declared none;
       // everything else gets the version and what its tools did.
+      //
+      // `apply`, not `standing`: this sentence is about the version just
+      // pointed at, and the kernel's record for it does not exist until the
+      // activation that is finishing right now. `reconcile()` below brings the
+      // store's own answer back for the row to draw.
       entry.apply === "auto"
         ? `${entry.id} active · ${version} · composed into every session on this machine · Enter again takes it back`
         : entry.systemPrompts.length > 0
@@ -1002,9 +1013,12 @@ export function ExtView(props: {
     props.onMembershipChanged?.()
     setNotice(
       // What actually leaves, per shape. `ext deactivate` is the ONE way back
-      // for an `apply: "auto"` package (DESIGN §5.1) — with no `current` it is
-      // in nothing — so that is the sentence its row gets.
-      (entry.apply === "auto"
+      // for a standing package (DESIGN §5.1) — with no `current` it is in
+      // nothing — so that is the sentence its row gets. Read from the kernel's
+      // record: what this takes away is what the package HAD, and a manifest
+      // declaring `apply: "auto"` that no activation recorded was taking part
+      // in nothing to begin with.
+      (entry.standing
         ? `${entry.id} inactive · it leaves every session composed here`
         : entry.systemPrompts.length > 0
           ? `${entry.id} inactive · ${wearCommand(entry) ? `/${wearCommand(entry)!.name} is gone` : `it can no longer be worn`}`
@@ -1620,9 +1634,11 @@ export function ExtView(props: {
                       package: Enter moves `current`, and the way to wear the
                       prompt for one session is the command the package itself
                       declared — or `/with` when it declared none — and nothing
-                      here composes it standing (T1, ext-review-2 §3b). For an
-                      `apply: "auto"` one the sentence below says the opposite,
-                      so this one steps aside rather than saying both. */}
+                      here composes it standing (T1, ext-review-2 §3b). Keyed on
+                      the DECLARATION, because this sentence is about what Enter
+                      would do; a package declaring `apply: "auto"` has one of
+                      the two sentences below instead, whether or not it is
+                      standing yet. */}
                   <Show when={entry.systemPrompts.length > 0 && entry.apply !== "auto"}>
                     <Lines
                       text={`a mode · once on, \`/${wearCommand(entry)?.name ?? `with ${entry.id}`}\` wears its prompt for one session · nothing here composes it standing`}
@@ -1650,10 +1666,22 @@ export function ExtView(props: {
                       fg={style.theme.warn}
                     />
                   </Show>
+                  {/* Declared `apply: "auto"` and NOT standing: inactive, or a
+                      `current` written before the record existed. The column
+                      and the sentence below both report the kernel's answer
+                      about now, which is "in nothing" — but what Enter would do
+                      is the thing worth knowing before it is pressed. */}
+                  <Show when={entry.apply === "auto" && !entry.standing}>
+                    <Lines
+                      text={'`apply: "auto"` in its own manifest · activating it composes it into every session started here'}
+                      width={detailWidth()}
+                      fg={style.theme.muted}
+                    />
+                  </Show>
                   <Show when={composedEverySession(entry)}>
                     <Lines
                       text={`composed into every session started here · ${
-                        entry.apply === "auto"
+                        entry.standing
                           ? "`apply: \"auto\"` in its own manifest · the kernel composes it while it has a current · Enter again takes it back"
                           : configWith().includes(entry.id)
                             ? "`[extensions] with` in config — `nulya config show`"

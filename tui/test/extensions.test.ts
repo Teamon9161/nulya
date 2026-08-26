@@ -9,7 +9,8 @@
  * filesystem.
  */
 import { afterAll, beforeAll, expect, test } from "bun:test"
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
   extList,
@@ -23,6 +24,7 @@ import {
 } from "../src/nulya/cli.ts"
 import {
   actionFor,
+  activateUnattended,
   adoptBundled,
   answerFor,
   builtContributions,
@@ -558,6 +560,131 @@ test("an ordinary rebuild — manual active, manual candidate — is unaffected 
     expect(candidate?.apply).toBe("manual")
     expect(await safeToActivateUnattended(store, "house.rule", candidate!)).toBe(true)
   } finally {
+    store.cleanup()
+  }
+}, 120_000)
+
+/**
+ * A store that cannot be read is a REFUSAL (T56).
+ *
+ * `ext list` failing used to mean `true` — "I could not find out whether this
+ * package is standing today, so go ahead" — which reads an unknown as the safe
+ * answer for exactly the move that cannot be taken back quietly. The version is
+ * built either way and one `/ext` Enter away; not knowing is a reason to leave
+ * the pointer alone.
+ */
+test("a store that cannot answer holds the pointer: unknown is not the safe answer", async () => {
+  const store = tempWorkspace()
+  try {
+    const noBinary = { dir: store.dir, bin: join(store.dir, "no-such-nulya") }
+    // The candidate on its own looks entirely safe — that is the point.
+    expect(autoActivatable({ apply: "manual" })).toBe(true)
+    expect(await safeToActivateUnattended(noBinary, "kong", { apply: "manual" })).toBe(false)
+  } finally {
+    store.cleanup()
+  }
+})
+
+/**
+ * …and the same rule for a candidate whose own manifest cannot be read (T56).
+ *
+ * `builtContributions` returning null used to SKIP the guard: the caller asked
+ * `if (built && !safe(built))`, so a version this front end could not read at
+ * all was activated without anything having answered the reach question. The
+ * pointer must stay where it is, against a real store because the claim is
+ * about the pointer.
+ */
+test("a candidate whose manifest cannot be read is held, and current does not move", async () => {
+  const store = tempWorkspace()
+  try {
+    const root = syncRoot(store, false)
+    const dir = join(root, "house.rule")
+    mkdirSync(join(dir, "skills", "demo"), { recursive: true })
+    writeFileSync(
+      join(dir, "extension.json"),
+      JSON.stringify({ schema: "nulya.extension/v2", id: "house.rule", contributes: { skills: ["skills/demo"] } }),
+    )
+    writeFileSync(join(dir, "skills", "demo", "SKILL.md"), "---\nname: demo\ndescription: ordinary\n---\nbody\n")
+    const built = await extSync(store)
+    const version = built.lines.find((entry) => entry.id === "house.rule")!.version!
+    await extSetCurrent(store, "activate", "house.rule", version)
+
+    const held = await activateUnattended(store, {
+      id: "house.rule",
+      version: "v-nothingbuiltthis",
+      root,
+      user: false,
+    })
+    expect(held.built).toBeNull()
+    expect(held.outcome).toBe("held")
+    expect((await extList(store)).find((entry) => entry.id === "house.rule")!.current).toBe(version)
+  } finally {
+    store.cleanup()
+  }
+}, 120_000)
+
+/**
+ * The bundled path goes through the same door (T56).
+ *
+ * `adoptBundled` used to ask its own narrower question — only "does the
+ * CANDIDATE say `apply: auto`" — on the reasoning that an id `ext seed` calls
+ * "arrived" is new to this store and can have nothing active. But seed calls an
+ * id arrived when its DRAFT was missing, and `<id>/current` outlives a deleted
+ * draft perfectly well: a standing package could be pulled out of every session
+ * by the one path that never checked. That is the shape set up here — a
+ * standing `current`, no draft, a `manual` candidate — beside an ordinary id
+ * with nothing active, which must still be switched on exactly as before.
+ */
+test("an arrived id with a standing current is held; an arrived id with no current is activated", async () => {
+  const store = tempWorkspace()
+  const home = mkdtempSync(join(tmpdir(), "nulya-tui-adopt-"))
+  const previous = process.env["NULYA_HOME"]
+  // `adoptBundled` targets the USER store, and both this test and the binary
+  // it spawns resolve that from `NULYA_HOME`.
+  process.env["NULYA_HOME"] = home
+  try {
+    const root = syncRoot(store, true)
+    const draft = (id: string, apply: "auto" | "manual") => {
+      mkdirSync(join(root, id, "skills", "demo"), { recursive: true })
+      writeFileSync(
+        join(root, id, "extension.json"),
+        JSON.stringify({ schema: "nulya.extension/v2", id, apply, contributes: { skills: ["skills/demo"] } }),
+      )
+      writeFileSync(join(root, id, "skills", "demo", "SKILL.md"), `---\nname: demo\ndescription: ${id}\n---\nbody\n`)
+    }
+
+    draft("kong", "auto")
+    const first = await extSync(store, { user: true })
+    const standing = first.lines.find((entry) => entry.id === "kong")!.version!
+    await extSetCurrent(store, "activate", "kong", standing, { user: true })
+
+    // The new source `ext seed` would drop for the same id, turning `manual`.
+    // Whether a draft was there a moment ago is what makes seed call this id
+    // "arrived"; it says nothing about what the pointer is doing today.
+    draft("kong", "manual")
+    draft("house.rule", "manual")
+    const report = await extSync(store, { user: true })
+    const candidate = report.lines.find((entry) => entry.id === "kong")!.version!
+    const ordinary = report.lines.find((entry) => entry.id === "house.rule")!.version!
+    expect(candidate).not.toBe(standing)
+
+    const parts = await adoptBundled(
+      store,
+      ["kong", "house.rule"],
+      report,
+      join(store.dir, "adopt-guard.json"),
+    )
+    // Named on the status line rather than counted, and the pointer stayed.
+    expect(parts.some((part) => part.includes("kong") && part.includes("not activated"))).toBe(true)
+    expect(parts.some((part) => part.includes("house.rule active"))).toBe(true)
+    const listed = await extList(store)
+    expect(listed.find((entry) => entry.id === "kong")!.current).toBe(standing)
+    expect(listed.find((entry) => entry.id === "kong")!.standing).toBe(true)
+    expect(listed.find((entry) => entry.id === "house.rule")!.current).toBe(ordinary)
+  } finally {
+    if (previous === undefined) delete process.env["NULYA_HOME"]
+    else process.env["NULYA_HOME"] = previous
+    rmSync(home, { recursive: true, force: true })
     store.cleanup()
   }
 }, 120_000)

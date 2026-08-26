@@ -459,6 +459,16 @@ fn resolveApplyAutoExtensions(alloc: std.mem.Allocator, roots: *const roots_mod.
             },
         };
         errdefer r.deinit(alloc);
+        // The record decided WHO is worth checking; the sealed manifest must
+        // still prove the qualification. Without this line a `current` record
+        // doctored to `apply=auto` over a version whose sealed manifest says
+        // `manual` would grant standing reach — the one direction tampering
+        // must never win. (The other direction, `auto` doctored to `manual`,
+        // is fail-closed on its own: the package merely stays out.)
+        if (r.manifest.applyOf() != .auto) {
+            try reportBrokenApplyAuto(roots.io, alloc, entry, error.StandingRecordMismatch);
+            return error.ActiveExtensionBroken;
+        }
         try resolved.append(alloc, r);
     }
     return resolved.toOwnedSlice(alloc);

@@ -704,8 +704,25 @@ export interface ExtensionEntry {
   autoTools: string[]
   /** The declared `internal`-surface subset of `tools` (DESIGN §7.2.1). */
   internalTools: string[]
-  /** What the package says activating it means (DESIGN §5.1), defaulting to `manual`. */
+  /**
+   * What ONE VERSION declares about what activating it means (DESIGN §5.1),
+   * defaulting to `manual`. Read this about a version that is about to become
+   * `current` — a candidate — because no record exists for it yet.
+   *
+   * For "is this package standing right now" read `standing` below instead: a
+   * declaration is not a state, and the two answer different questions.
+   */
   apply: PackageApply
+  /**
+   * Whether the kernel composes this package into every fresh session on this
+   * machine right now (`ext list`'s `standing` marker, DESIGN §5.1).
+   *
+   * The kernel's own effective answer, written into the `current` record by the
+   * activation that verified the manifest — never re-derived here from a
+   * manifest's `apply`. An id with no `current` (a draft, a deactivated copy)
+   * is standing in nothing, whatever it declares.
+   */
+  standing: boolean
   skills: string[]
   systemPrompts: string[]
   /**
@@ -835,6 +852,10 @@ export async function listExtensions(ws: Workspace): Promise<ExtensionEntry[]> {
       versions,
       root: entry.root,
       shadowed: entry.shadowed,
+      // The kernel's word, carried straight through: what a session gets is
+      // its answer to give, and the manifest read below says only what a
+      // version declares.
+      standing: entry.standing,
       ...manifestFacts(manifest),
     })
   }
@@ -878,6 +899,9 @@ export async function draftEntries(
         // the same directory two different ways.
         root: root === workspace ? extensions_dir : root,
         shadowed: false,
+        // Source with no built version: no `current`, so no record, so this id
+        // is standing in nothing — whatever its draft manifest declares.
+        standing: false,
         ...manifestFacts(manifest),
       })
       break

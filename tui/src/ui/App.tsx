@@ -63,7 +63,6 @@ import type { NextSession } from "./Welcome.tsx"
 import {
   CliError,
   extRun,
-  extSetCurrent,
   extSync,
   isVerdict,
   sessionOutcome,
@@ -73,13 +72,12 @@ import {
   type TaskEntry,
 } from "../nulya/cli.ts"
 import {
+  activateUnattended,
   activeVersionOf,
   adoptBundled,
-  builtContributions,
   failedIds,
   needsZigIds,
   planStore,
-  safeToActivateUnattended,
   seedBundled,
   sessionMember,
   summarize,
@@ -455,12 +453,13 @@ export function App(props: AppProps) {
       const [listed, config] = await Promise.all([listExtensions(props.ws), configShow(props.ws, props.driver?.env)])
       healStandingPins(listed)
       // Three ways a package is in every session started here (T52): it asked
-      // (`apply: "auto"`, and then the KERNEL composes it), config named it, or
-      // this front end always brings it.
+      // and the kernel recorded it (`standing` — the kernel's own answer, never
+      // an `apply` re-read here, T56), config named it, or this front end always
+      // brings it.
       const named = new Set([...config.extensions.with, ...props.style.settings.extensions.session_with])
       setComposedWithTools(
         listed
-          .filter((entry) => entry.current && !entry.shadowed && (named.has(entry.id) || entry.apply === "auto"))
+          .filter((entry) => entry.current && !entry.shadowed && (named.has(entry.id) || entry.standing))
           .flatMap((entry) => entry.autoTools.map((tool) => toolId(entry.id, tool))),
       )
     } catch {
@@ -568,10 +567,11 @@ export function App(props: AppProps) {
    * it produced itself, so a package somebody deliberately rolled back stays
    * where they put it.
    *
-   * It asks the package TWO questions before pointing at it
-   * (`safeToActivateUnattended`, T52/T55): does the CANDIDATE say
-   * `apply: "auto"`, and — for an id that might already be active — does
-   * whatever IS active today say so too? For everything else activating
+   * Whether a pointer may move at all is not decided here. Every unattended
+   * move in this front end goes through `activateUnattended` (T56), which asks
+   * the reach question from both sides: does the CANDIDATE declare
+   * `apply: "auto"`, and is whatever is active today STANDING — the kernel's
+   * own record, not a manifest re-read here. For everything else activating
    * composes nothing (DESIGN §5.1) and is safe to do unattended. For an
    * `apply: "auto"` package on either side of the move, activating IS
    * composing — the kernel joins or drops it from every fresh session here
@@ -581,7 +581,8 @@ export function App(props: AppProps) {
    * contribute a system prompt", which was the closest thing to this
    * question anybody could ask before a package could state its reach; T55
    * closed the mirror case the single-sided version missed — a standing
-   * package whose newest draft quietly turned `manual`.
+   * package whose newest draft quietly turned `manual` — and T56 made a
+   * store that cannot answer a refusal rather than a yes.
    */
   const syncStores = async () => {
     const plan = props.sync
@@ -632,10 +633,11 @@ export function App(props: AppProps) {
           setNotice(`syncing extensions… ${done}/${total}`)
         })
         let activated = 0
-        // Built, and deliberately left inactive: a package whose manifest says
-        // `apply: "auto"`. Named rather than counted — "1 not activated" is not
-        // something anybody can act on, and the id is one `/ext` Enter away.
-        const standing: string[] = []
+        // Built, and deliberately left where it was: the reach question is
+        // live, or the store could not answer it. Named rather than counted —
+        // "1 not activated" is not something anybody can act on, and the id is
+        // one `/ext` Enter away.
+        const held: string[] = []
         if (plan.activate) {
           for (const line of report.lines) {
             if (!line.version || line.activation === "active") continue
@@ -649,24 +651,17 @@ export function App(props: AppProps) {
             // did move forward in this run and the active pointer should follow
             // it just as it does when the version was newly built here.
             if (line.state !== "built" && !(root.user && refreshed.includes(line.id))) continue
-            // One manifest read, off the version this pass just produced: a
-            // package that asked to be in every session is named, not switched
-            // on (`autoActivatable`). A second check guards the mirror case —
-            // a package already active as `apply: "auto"` whose freshly built
-            // draft turned `manual` — because moving the pointer there would
-            // just as quietly pull it OUT of every session (`safeToActivateUnattended`, T55).
-            const built = await builtContributions(props.ws, syncRoot(props.ws, root.user), line.id, line.version)
-            if (built && !(await safeToActivateUnattended(props.ws, line.id, built))) {
-              standing.push(line.id)
-              continue
-            }
-            try {
-              await extSetCurrent(props.ws, "activate", line.id, line.version, { user: root.user })
-              activated += 1
-            } catch {
-              // The version is built either way; `/ext`'s `a` can still point
-              // `current` at it, and a failed pointer move is not sync news.
-            }
+            // Whether the pointer may move is `activateUnattended`'s to answer,
+            // here and everywhere else this front end moves one with nobody
+            // watching (T56) — this loop only knows which version was built.
+            const { outcome } = await activateUnattended(props.ws, {
+              id: line.id,
+              version: line.version,
+              root: syncRoot(props.ws, root.user),
+              user: root.user,
+            })
+            if (outcome === "activated") activated += 1
+            else if (outcome === "held") held.push(line.id)
           }
         }
         const adopted =
@@ -691,14 +686,14 @@ export function App(props: AppProps) {
           needsZig.length === 0 &&
           activated === 0 &&
           adopted.length === 0 &&
-          standing.length === 0
+          held.length === 0
         ) {
           continue
         }
         news.push(
           summarize(root.label, report) +
             (activated > 0 ? ` · ${activated} activated` : "") +
-            (standing.length > 0 ? ` · ${standing.join(" ")} built, not activated (every session) · /ext` : "") +
+            (held.length > 0 ? ` · ${held.join(" ")} built, not activated · /ext` : "") +
             adopted.map((part) => ` · ${part}`).join("") +
             (failed.length > 0 ? ` · ${failed.join(" ")} not built · /ext` : "") +
             // A different sentence, because it is a different repair: nothing

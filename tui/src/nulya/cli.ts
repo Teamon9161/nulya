@@ -849,6 +849,32 @@ export interface ExtStoreEntry {
   root: string
   /** An earlier root already has this id active, so this copy is never used. */
   shadowed: boolean
+  /**
+   * The `standing` word in the contribution marker: the kernel composes this id
+   * into every fresh session for as long as it has a `current` (DESIGN §5.1).
+   *
+   * This is the EFFECTIVE state, and it comes from the `current` record the
+   * activation wrote after verifying the manifest — not from re-reading `apply`
+   * out of some version's manifest, which is only what that one version
+   * DECLARES. The two can differ (a pointer written before the record existed,
+   * a version directory edited by hand), and when they do the kernel's record
+   * is the one describing the sessions people are actually going to get.
+   */
+  standing: boolean
+}
+
+/**
+ * `standing` inside the `[tools skills prompt standing]` marker.
+ *
+ * The marker is a trailing field, not a fixed column — `[with]` and
+ * `(shadowed)` can follow it — so this reads whichever bracketed field carries
+ * the word rather than counting positions.
+ */
+function standingMarker(fields: readonly string[]): boolean {
+  return fields.some(
+    (field) =>
+      field.startsWith("[") && field.endsWith("]") && field.slice(1, -1).split(" ").includes("standing"),
+  )
 }
 
 /**
@@ -880,6 +906,7 @@ export async function extList(ws: Workspace): Promise<ExtStoreEntry[]> {
       // `[tools skills prompt]` and possibly `[with]`, so position would be the
       // wrong test.
       shadowed: fields.includes("(shadowed)"),
+      standing: standingMarker(fields),
     })
   }
   return entries

@@ -555,9 +555,19 @@ export function autoActivatable(what: Pick<Contributions, "apply">): boolean {
  * background sync never narrows OR widens reach on its own (T55) — both
  * directions are a person's `/ext` Enter.
  *
- * A store this cannot read (`ext list` failing, or no `current` for this id)
- * reads as "nothing is active today", the same default every other caller
- * here falls back to when the store cannot answer.
+ * What is active today is the KERNEL'S own answer — `ext list`'s `standing`
+ * marker, written into the `current` record by the activation that verified it
+ * (DESIGN §5.1) — not this front end re-reading `apply` out of the active
+ * version's manifest. A declaration is what a version asks for; the record is
+ * what sessions actually get, and only the second can say what a pointer move
+ * would take away.
+ *
+ * A store this cannot read is a REFUSAL, not a yes. `ext list` failing means
+ * this pass does not know whether it is about to pull a standing package out of
+ * every session here, and "I could not tell" is not a licence to move a pointer
+ * nobody asked it to move; the version is built either way and one `/ext` Enter
+ * away. An id the listing simply has no `current` for is a different answer —
+ * that one is known, and nothing is being taken away.
  */
 export async function safeToActivateUnattended(
   ws: Workspace,
@@ -569,12 +579,55 @@ export async function safeToActivateUnattended(
   try {
     listed = await extList(ws)
   } catch {
-    return true
+    return false
   }
   const entry = listed.find((e) => e.id === id && e.current !== null && !e.shadowed)
-  if (!entry?.current) return true
-  const active = await readContributions(ws, id, entry.current, rootsOf(ws, listed))
-  return autoActivatable(active)
+  if (!entry) return true
+  return !entry.standing
+}
+
+/** What an unattended pass did with one built version. */
+export type UnattendedOutcome =
+  /** `current` now points at it. */
+  | "activated"
+  /** The policy said no, or the manifest could not be read: the pointer stands. */
+  | "held"
+  /** The policy said yes and the kernel refused the move. */
+  | "failed"
+
+/**
+ * THE door every unattended pointer move goes through — the start-up sync, the
+ * ids `ext seed` just dropped, and anything later that builds in the background.
+ *
+ * Where a candidate came from is not a policy input. `adoptBundled` used to ask
+ * a narrower question than the sync loop beside it (only "does the candidate say
+ * `apply: auto`"), which was true of the ids it was written for and false in
+ * general: `ext seed` calls an id "arrived" when the DRAFT was missing, and a
+ * `<id>/current` can outlive a deleted draft perfectly well — so a standing
+ * package could be pulled out of every session by the one path that never asked.
+ * Two callers with two policies is one policy too many; the reach question is
+ * about the store, not about who is asking.
+ *
+ * An unreadable manifest is `held` for the same reason `ext list` failing is
+ * (`safeToActivateUnattended`): a pass that cannot read what it is about to
+ * point at has no business pointing at it. It used to be the opposite — a null
+ * from `builtContributions` skipped the guard and activated.
+ */
+export async function activateUnattended(
+  ws: Workspace,
+  what: { id: string; version: string; root: string; user: boolean },
+): Promise<{ outcome: UnattendedOutcome; built: Contributions | null }> {
+  const built = await builtContributions(ws, what.root, what.id, what.version)
+  if (!built) return { outcome: "held", built }
+  if (!(await safeToActivateUnattended(ws, what.id, built))) return { outcome: "held", built }
+  try {
+    await extSetCurrent(ws, "activate", what.id, what.version, { user: what.user })
+  } catch {
+    // The version is built either way, and `/ext`'s Enter still points at it;
+    // a pointer that would not move is not news for the status line.
+    return { outcome: "failed", built }
+  }
+  return { outcome: "activated", built }
 }
 
 /**
@@ -625,12 +678,10 @@ export function seedBundled(ws: Workspace): Promise<SeedReport> {
  * what the build pass produced, and put the std tools on this TUI's pin list.
  *
  * Which ones get activated used to be a list of two names, then a rule about
- * system prompts. It is now every id that arrived AND says `apply: "manual"`
- * (`autoActivatable`): for those, activating says which version `<id>` means
- * and composes nothing (DESIGN §5.1), so there is nothing this pass could
- * switch on to somebody's cost. A package that declares `apply: "auto"` is the
- * one exception, because for it activating IS composing — it is named in the
- * status line instead, with the key that turns it on.
+ * system prompts, then a rule of this function's own. It is now the same
+ * `activateUnattended` the start-up sync goes through, because "these ids
+ * arrived with the binary" says where a candidate came from and nothing about
+ * whether moving a pointer would change what every session here carries.
  *
  * Returns the parts of the sentence the status line will say.
  */
@@ -642,34 +693,27 @@ export async function adoptBundled(
 ): Promise<string[]> {
   const parts: string[] = []
   const active: string[] = []
-  const standing: string[] = []
+  const held: string[] = []
   const root = syncRoot(ws, true)
   let std: Contributions | null = null
   for (const id of arrived) {
     const line = report.lines.find((entry) => entry.id === id)
     if (!line?.version || line.state === "failed" || line.state === "needs zig") continue
-    const built = await builtContributions(ws, root, id, line.version)
-    if (id === "std") std = built
     if (line.activation === "active") {
+      if (id === "std") std = await builtContributions(ws, root, id, line.version)
       active.push(id)
       continue
     }
-    // A package whose manifest asks to be in every session is not something a
-    // background pass gets to say yes to on somebody's behalf.
-    if (built && !autoActivatable(built)) {
-      standing.push(id)
-      continue
-    }
-    try {
-      await extSetCurrent(ws, "activate", id, line.version, { user: true })
-      active.push(id)
-    } catch {
-      // The version is built either way, and `/ext`'s Enter still points at it;
-      // a pointer that would not move is not news for the status line.
-    }
+    const { outcome, built } = await activateUnattended(ws, { id, version: line.version, root, user: true })
+    if (id === "std") std = built
+    if (outcome === "activated") active.push(id)
+    else if (outcome === "held") held.push(id)
   }
   if (active.length > 0) parts.push(`${active.join(" & ")} active`)
-  if (standing.length > 0) parts.push(`${standing.join(" & ")} built, not activated (every session) · /ext`)
+  // Named, not counted, and without a reason attached: an id is held because
+  // the reach question is live or because the store could not answer it, and
+  // `/ext` is the one screen that can tell those apart on the row itself.
+  if (held.length > 0) parts.push(`${held.join(" & ")} built, not activated · /ext`)
   if (active.includes("std")) {
     parts.push(
       (await pinStdTools(ws, std, statePath))

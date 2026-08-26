@@ -764,6 +764,59 @@ test "editing a frozen manifest cannot turn a standing package off, nor an ordin
     }
 }
 
+test "a doctored current record cannot grant standing reach: the sealed manifest must agree" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_abs = try nulyaExe(alloc, &host_env);
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    // An ordinary activated package: the record honestly says `apply=manual`,
+    // and the sealed version underneath is intact — nothing about the version
+    // itself will ever fail integrity.
+    const version = try promptPackage(alloc, io, ws, exe_abs, "mode.sly", "SLY MODE\n");
+    defer alloc.free(version);
+
+    // Corrupt the RECORD, not the version: `current` now claims standing over
+    // a sealed manifest that never asked for it. The record decides who is
+    // worth checking; the sealed manifest must still prove the qualification —
+    // so this must refuse the session by name, never quietly grant reach.
+    const current_path = try std.fs.path.join(alloc, &.{ ".nulya", "extensions", "mode.sly", "current" });
+    defer alloc.free(current_path);
+    const doctored = try std.fmt.allocPrint(alloc, "{s} apply=auto", .{version});
+    defer alloc.free(doctored);
+    try ws.writeFile(io, .{ .sub_path = current_path, .data = doctored });
+
+    const argv = [_][]const u8{ exe_abs, "session", "new", "--profile", "scripted" };
+    const refused = try runCli(alloc, io, ws, &argv);
+    defer alloc.free(refused.stdout);
+    try std.testing.expectEqual(@as(u8, 1), refused.code);
+    const said = try runCliStderr(alloc, io, ws, &argv, &.{});
+    defer alloc.free(said);
+    for ([_][]const u8{ "mode.sly", "StandingRecordMismatch", "ext deactivate mode.sly" }) |needle| {
+        std.testing.expect(std.mem.indexOf(u8, said, needle) != null) catch |err| {
+            std.debug.print("refusal never mentions '{s}':\n{s}\n", .{ needle, said });
+            return err;
+        };
+    }
+
+    // Re-activating rewrites the record from the sealed truth; the session
+    // opens and the package is an ordinary member of nothing.
+    const repair = [_][]const u8{ exe_abs, "ext", "activate", "mode.sly", version };
+    const fixed = try runCli(alloc, io, ws, &repair);
+    defer alloc.free(fixed.stdout);
+    try std.testing.expectEqual(@as(u8, 0), fixed.code);
+    const header = (try newSessionHeader(alloc, io, ws, exe_abs, &.{})).?;
+    defer alloc.free(header);
+    try std.testing.expect(std.mem.indexOf(u8, header, "mode.sly") == null);
+}
+
 // ── 2. `ext run` timeout: none by default, `--timeout-ms` opts in (D6) ──────
 
 /// A host-appropriate script tool that sleeps ~2s before answering — long
