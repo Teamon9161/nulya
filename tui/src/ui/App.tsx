@@ -555,9 +555,15 @@ export function App(props: AppProps) {
 
   createEffect(() => {
     if (!props.style.motion) return
-    // A background task spins the same spinner while the driver rests: it is the
-    // one thing that keeps happening when nothing else is (tui.md §5.9).
-    if (status() === "idle" && runningTasks() === 0) return
+    // Every kind of work that draws a moving line, not just the driver's own.
+    // A background task spins while the driver rests (tui.md §5.9) — and so does
+    // the start-up store pass, which is the FIRST thing anybody sees and used to
+    // be the one moving line that did not move: it runs before there is a
+    // session to be stepping, so `idle` plus no tasks stopped the clock and
+    // `building std` sat there with a frozen glyph and a still shimmer for as
+    // long as zig took. The condition is the union of what `activityOf` calls
+    // `moving`, written from the same three facts.
+    if (status() === "idle" && runningTasks() === 0 && !syncing()) return
     const timer = setInterval(() => setSpinnerTick((tick) => tick + 1), 90)
     onCleanup(() => clearInterval(timer))
   })
@@ -2210,7 +2216,11 @@ export function App(props: AppProps) {
     const command = words[0]
     /** Everything after the command word, verbatim — a note keeps its spacing. */
     const rest = raw.slice(raw.indexOf(command!) + command!.length).trim()
-    if (command === "/quit") {
+    // `/exit` is the word other harnesses use for this, kept for the same
+    // reason `/clear` and `/resume` are (commands.ts): a muscle-memory `/exit`
+    // that fell through would be offered to the skill catalog and then sent to
+    // the model verbatim, which is the worst possible answer to "leave".
+    if (command === "/quit" || command === "/exit") {
       quit(true)
       return true
     }

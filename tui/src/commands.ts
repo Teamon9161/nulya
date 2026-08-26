@@ -16,14 +16,20 @@
  *
  * The built-ins are tried first, so a skill can never take `/model` away.
  *
- * Three names dispatch without being listed: `/as` (what `/with` was called
- * until T36), `/clear` (the word other harnesses use for what `/new` does) and
- * `/resume` (theirs for what `/sessions` does). All three keep working; none is
- * offered, because a command in this table is a command this front end says
- * exists, and each of these would put a second word on the table for a concept
- * that already has one. `/clear` would also name the one thing that never
- * happens here: a ledger is append-only, nothing is cleared, and a new session
- * is a new session (physics #1, #4).
+ * Four names dispatch without being listed: `/as` (what `/with` was called
+ * until T36), `/clear` (the word other harnesses use for what `/new` does),
+ * `/resume` (theirs for what `/sessions` does) and `/exit` (theirs for
+ * `/quit`). None is on the table, because a command in this table is a command
+ * this front end says exists, and each of these would put a second word on the
+ * table for a concept that already has one. `/clear` would also name the one
+ * thing that never happens here: a ledger is append-only, nothing is cleared,
+ * and a new session is a new session (physics #1, #4).
+ *
+ * They ARE completed, though (`alias_commands`), and that is not a
+ * contradiction: not listing is about what this front end advertises, and
+ * completing is about answering somebody who has already typed four characters
+ * of a word they know from somewhere else. The menu row says where the word
+ * goes, so the concept still has one name and the typist still gets an answer.
  *
  * `/evolve` was a fourth until T53. It is not an alias any more and it is not
  * reserved: the evolution package declares it (`contributes.commands`), so it
@@ -95,6 +101,7 @@ export const commands: Command[] = [
 export const aliases: Readonly<Record<string, string>> = {
   as: "/with",
   clear: "/new",
+  exit: "/quit",
   resume: "/sessions",
 }
 
@@ -120,8 +127,28 @@ export function completions(text: string): Command[] {
   if (!text.startsWith("/")) return []
   const head = text.split(/\s/)[0] ?? text
   if (head.length < text.length) {
-    const exact = commands.find((command) => command.name === head)
+    const exact = all_commands.find((command) => command.name === head)
     return exact ? [exact] : []
   }
-  return commands.filter((command) => command.name.startsWith(head))
+  return all_commands.filter((command) => command.name.startsWith(head))
 }
+
+/**
+ * The aliases as completions: offered, but never LISTED.
+ *
+ * The distinction the table's header draws still holds — `/help` and the
+ * command table name one word per concept, and `/clear` would advertise a verb
+ * nulya does not have. But refusing to complete them made a different claim:
+ * somebody typing `/res` from muscle memory got an empty menu, which is what
+ * this front end says when a command does not exist, and the honest answer is
+ * that it does and it is spelled `/sessions`. So an alias only shows up once
+ * somebody has started typing it, and what it says is where it goes.
+ *
+ * Behind the listed names on purpose: `/e` offers `/effort` before `/exit`,
+ * because the first is the concept and the second is a courtesy.
+ */
+const alias_commands: Command[] = Object.entries(aliases)
+  .map(([name, target]) => ({ name: `/${name}`, what: `another name for ${target}` }))
+  .sort((a, b) => a.name.localeCompare(b.name))
+
+const all_commands: Command[] = [...commands, ...alias_commands]

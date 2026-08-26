@@ -1931,3 +1931,21 @@ T33 把 `internal` 行折起来时给的理由是**数量**（六个 driver tool
 **`built` 拆成两个词。** 它从前盖住了两个**修法不同**的状态：`current` 根本没有（包是关的，Enter 打开）与 `current` 指着**别的版本**（包在跑，只是这份源码的 build 不是它——`a` 在版本行上把 `current` 指过去）。合成一个词说，后者挨着同一行的 `standing` 就是自相矛盾：这个包进每一场 session，而这一列说它 inactive。所以现在是 `inactive` 与 `not current` 两个词，而 `built` 这个说法本身也退场——它挨着 `active` 会被读成进度阶梯上的一格「还没到」，而它的意思只是「这个 build 在」。detail 里对 `not current` 多一句点名那个键（`draftHelp` 收一个 `current` 参数；它是唯一一个既不是 `b` 也不是 Enter 能修的行状态）。其余四个词不变：`not built` / `fails` / `needs zig` / `differs`。
 
 **测试**：`draftColumn(one, null)` 在 `line.activation === "activated"` 时仍然回 `inactive`——plan 自己的那个词被忽略，这条断言就是不变量本身；另加"current 指着别的版本 → inactive"。`cd tui && bun test`：383 pass。
+
+### T63 · 四处「说了半句」：开屏的静止动画、没有源码的包没有状态词、按不动的 tools chip、认得却不提示的别名（2026-08-26）
+
+四件互不相干的小事，共同点是**屏幕上已经有那个东西，只是它没把话说完**。
+
+**① 开屏那趟 sync 的动画是静止的。** `WorkingStatus` 对 `syncing` 活动照样给 `moving: true`（spinner + 高光扫带），但驱动这一切的 `spinnerTick` 定时器在 `App` 里的开启条件是 `status() !== "idle" || runningTasks() > 0`——而 store pass 跑在**还没有 session 可 step、也没有后台任务**的时刻，于是钟根本不走：glyph 冻在第一帧，扫带停在原地。这是这个前端上**第一个**被看见的动画，也是唯一一个不动的。条件补上 `|| syncing()`，写成 `activityOf` 里 `moving` 的那个并集。（`motion=false` 照旧全关。）
+
+**② `kong` / `dogfood` 在 `/ext` 里没有状态词。** 不是它们没 active——开关的 glyph 是绿的、detail 那行写着 `active`——是**列表那一行里没有任何一个词这么说**。`draftColumn(line, current)` 在 `line` 为 null 时回空串，而 `line` 来自 `ext sync --dry-run`，只有 store 目录里**有源码**的包才有。这两个是 `ext build <仓库外的路径> --user` 装进来的：`versions/` 与 `current` 都在，旁边没有 draft。于是整个列表里只有它们两行是空的，而旁边每一行都写着 `active`——空白被读成「关着」。T62 已经把这一列变成了**指针**的列（`active` / `inactive` / `not current` 三个词说的都是 `current`），所以没有源码时它照样答得出来：`current ? "active" : "inactive"`。有源码的四个词（`not built` / `fails` / `needs zig` / `differs`）一个不变。
+
+（顺带记一笔诊断结论：这两个包**不该**有 `standing` 列——nulya-kit 的 manifest 没写 `apply: "auto"`，所以内核的 `current` 记录里也没有那一列，`/ext` 报的是对的。）
+
+**③ 输入框下面的 `tools 1+N` 按不动。** 同一行上 mode chip、model、`◈ wearing` 三个都有 hover 高亮与点击（分别开 `/mode` / `/model` / `/ext`），而 `tools 1+N` ——一个数**每一个都能在 `/ext` 的 tools pane 里开关**的东西的计数——是纯文本。补上 hover + 点击进 `/ext`，`onOpenExt` 复用 wearing chip 已有的那个 prop。`· ` 分隔符留在可点区**外面**（chip 是那个事实，不是连接它的标点），所以 `tools_chip` 常量不再自带前缀，宽度预算里补回三列。
+
+**④ `/resume` 没有 Tab 提示。** 补全不是硬编码的，它读 `commands.ts` 的表；四个别名（`/as` `/clear` `/resume`，这次多一个 `/exit`）**故意不在表上**——一个概念一个词，`/help` 与命令表都只说那一个。但「不列出」和「不补全」是两件事被当成了一件：`/res` 打出来得到一个空菜单，而空菜单在这个前端里的意思是「没这个命令」，而它明明有，只是叫 `/sessions`。所以 `completions` 现在在列出的名字**后面**追加别名候选，那一行写的是 `another name for /sessions`——列出与否是这个前端**主张**什么，补全是回答一个已经打了四个字母的人。排在后面：`/e` 先给 `/effort` 与 `/ext`，再给 `/exit`。
+
+**`/exit` 新增为 `/quit` 的别名**（其它 harness 的词）。只做带斜杠的那个：裸 `exit` 是一句普通文本，前端不该替模型截下它。别名进 `builtin_names`，所以包也夺不走这个名字。
+
+**测试**：`draftColumn(null, v)` / `draftColumn(null, null)` 两条（没有源码时的指针列）；别名补全一条（`/res` → `/resume`、那一行指向 `/sessions`、`/e` 的排序把列出的名字放前面）。`cd tui && bun test`：384 pass，`bunx tsc --noEmit` 干净。

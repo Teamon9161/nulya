@@ -221,7 +221,14 @@ export function needsZigIds(report: SyncReport): string[] {
  * state on the way to being done — when what it meant was "this build exists".
  */
 export function draftColumn(line: SyncLine | null | undefined, current: string | null): string {
-  if (!line) return ""
+  // No source in this store directory, and that is an ordinary way for a
+  // package to arrive: `ext build <path>` outside a root, or a version copied
+  // from another machine, leaves `versions/` and `current` with nothing beside
+  // them. The column still has an answer, and it is the one that matters most —
+  // the pointer. It used to print nothing at all for these, so `kong` and
+  // `dogfood` were the only rows in the list with no state word on them, and a
+  // reader comparing them against a seeded package read the blank as "off".
+  if (!line) return current === null ? "inactive" : "active"
   if (line.state === "failed") return "fails"
   if (line.state === "needs zig") return "needs zig"
   // Before the pointer questions: whether a build is the current one is not a

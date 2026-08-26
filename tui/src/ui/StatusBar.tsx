@@ -86,8 +86,10 @@ export function StatusBar(props: {
   const behindClick = onClick(() => props.onScrollEnd?.())
   const modelClick = onClick(() => props.onPickModel?.())
   const [overWearing, setOverWearing] = createSignal(false)
+  const [overTools, setOverTools] = createSignal(false)
   const modeClick = onClick(() => props.onPickMode?.())
   const extClick = onClick(() => props.onOpenExt?.())
+  const toolsClick = onClick(() => props.onOpenExt?.())
 
   /**
    * How full the window is, after the last step. Nothing acts on this — nulya
@@ -164,10 +166,12 @@ export function StatusBar(props: {
     // (`nasknstep 1`, T27).
     const model = fit(modelText(), Math.max(8, budget - right))
     const room = Math.max(0, budget - displayWidth(model) - right)
-    const tools_chip = ` · tools ${builtin_tools}+${props.tools}`
+    // The word alone — the ` · ` in front of it is drawn outside the clickable
+    // box, so it is measured here and carried nowhere else.
+    const tools_chip = `tools ${builtin_tools}+${props.tools}`
     return {
       model,
-      tools: room >= displayWidth(tools_chip) ? tools_chip : "",
+      tools: room >= displayWidth(tools_chip) + 3 ? tools_chip : "",
     }
   })
 
@@ -230,10 +234,26 @@ export function StatusBar(props: {
                 in it still takes a column, and two of them side by side is how
                 `tools 1+0  · idle` grew the gap that made this line look
                 mis-aligned once the cost chip learned to be absent (T35). */}
+            {/* `tools 1+N` is a count of a thing that has a screen — `/ext`'s
+                tools pane is where each one of those N is switched on and off —
+                so it answers to a click, like the model and the mode beside it.
+                The separator stays outside the target: the chip is the fact,
+                not the punctuation that joins it to the model. */}
             <Show when={layout().tools.length > 0}>
               <text fg={style.theme.dim} flexShrink={0}>
-                {layout().tools}
+                {" · "}
               </text>
+              <box
+                flexShrink={0}
+                height={1}
+                backgroundColor={props.onOpenExt && overTools() ? style.theme.hover : undefined}
+                onMouseDown={props.onOpenExt ? toolsClick.onMouseDown : undefined}
+                onMouseUp={props.onOpenExt ? toolsClick.onMouseUp : undefined}
+                onMouseOver={() => setOverTools(true)}
+                onMouseOut={() => setOverTools(false)}
+              >
+                <text fg={style.theme.dim}>{layout().tools}</text>
+              </box>
             </Show>
           </box>
           {context() ? (

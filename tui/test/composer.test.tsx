@@ -115,6 +115,15 @@ test("completions: only the first word, and an exact name still explains itself"
   expect(completions("/write me a poem about /model")).toEqual([])
 })
 
+test("an alias completes, behind the listed names, and says where it goes", () => {
+  // Not on the table (`/help` names one word per concept) but not a dead end
+  // either: somebody typing another harness's word gets told where it lands.
+  expect(completions("/res").map((c) => c.name)).toEqual(["/resume"])
+  expect(completions("/resume")[0]?.what).toContain("/sessions")
+  // A listed name beats an alias for the same prefix: `/effort` is the concept.
+  expect(completions("/e").map((c) => c.name)).toEqual(["/effort", "/ext", "/exit"])
+})
+
 test("a `/` line lists the commands it could still be, and Tab finishes it", async () => {
   const sent: string[] = []
   const setup = await testRender(

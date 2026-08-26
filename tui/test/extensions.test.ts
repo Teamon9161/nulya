@@ -114,6 +114,12 @@ test("--activate reports the three answers a pointer can have: moved, already th
   // build. `Enter` fixes the first, `a` on a version line the second.
   expect(draftColumn(one, null)).toBe("inactive")
   expect(draftColumn(one, "v-000000000000")).toBe("not current")
+  // A package with no source in its store directory — built from a path
+  // elsewhere, or copied in — still has a pointer, and the pointer is what this
+  // column is for. Saying nothing left those rows as the only ones in `/ext`
+  // with no state word at all.
+  expect(draftColumn(null, one.version!)).toBe("active")
+  expect(draftColumn(null, null)).toBe("inactive")
 
   // Already the current one: a second pass has nothing to move.
   const settled = await extSync(ws, { activate: true })

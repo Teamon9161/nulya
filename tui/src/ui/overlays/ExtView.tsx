@@ -947,7 +947,10 @@ export function ExtView(props: {
       planned && (planned.state === "built" || planned.state === "already built") ? planned.version : null
     const version = entry.current ?? fromDraft ?? entry.versions[entry.versions.length - 1]?.version ?? null
     if (!version) {
-      const why = draftColumn(planned, entry.current)
+      // Only the SOURCE has anything to add here: with no version at all, the
+      // pointer word `draftColumn` now falls back to says `inactive`, which is
+      // the sentence's own first clause said twice.
+      const why = planned ? draftColumn(planned, entry.current) : ""
       setNotice(`${entry.id} has no built version${why ? ` · ${why}` : ""} · b builds the source in its store directory`)
       return
     }
