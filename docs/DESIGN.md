@@ -588,7 +588,7 @@ extension <id>: current points at <version>, which is broken (<err>); run 'nulya
 
 `session new` 再补一句 `session new failed: an extension this session names has a broken current version (see the line above)` 并 exit 1。**host fault 不在此列**：cancellation / OOM / 真的 I/O 错误照原样传播，绝不被当成"坏 extension"（`store.isExtensionFault` 是这条线）。与之无关的是 `Roots.resolveVersion` 对坏 root 的跳过（§7.2）——那是内容寻址的同一版本换个 root 找同一份字节，不是"少一个能力"。
 
-推论：session 中途 AI 重写出 `web.search` v2 并 activate，**当前 session 已 native 注册的仍是 v1**；v2 只能经 shell `nulya ext run` + note 告知；下一场 session native 才换。`tests/e2e.zig` 全环证明。
+推论：session 中途 AI 重写出 `web.search` v2 并 activate，**当前 session 已 native 注册的仍是 v1**；v2 只能经 shell `nulya ext run` + note 告知；下一场 session native 才换。`tests/e2e/` 全环证明。
 
 这不是新机制，是 §5.1 的 frozen snapshot 延伸到整个 Contribution 层。
 
@@ -688,7 +688,7 @@ Tool 是"能执行的能力"，Skill 是"要遵循的方法 / 知识"；不同 r
 - **两段文本走路径，其余走值**：`persona`（`<d>/persona.md`，开场冻一次——定义文件后来怎么改都不会让这条 delegation 悄悄变成别人）与 `message_file`（`<d>/message.txt`，只有持租约的那一方写）。理由是 Windows 把整条命令行封在 32 KiB，而一个任务想多长有多长。
 - **版本在开场冻死（D7）**：`current` 只在 `op=open` 那一刻解析一次（问的是内核自己的 `ext list`，不在这边重造一份 root 顺序），`v-…` 冻进 record 的 `runner_version`，之后每一轮都调那个确切版本。**activate 一个新版本决定的是下一条 delegation 跑在什么上，不是正在进行的那条**——与 session 冻 composition 同一条哲学（physics #2）。id 没建过 / 建了没 activate 是两句不同的错，因为改法不同。
 - **interrupt 是带内的**，理由与 codex / claude / pi 完全一样，只是又外了一层：能停下那一轮的只有正在驱动它的那个进程。所以 `runners.stop` 在这一 arm 上是空的，marker 路径作为 `interrupt` 参数交给 runner，由它自己轮询、自己删、自己翻译成那个 harness 的停止动词。
-- **离线可测**：e2e 里的 runner 就是一个**脚本** extension（`tests/e2e/extension.zig`，`run.ps1` / `run.sh`，不需要 zig），它 echo 而不是接模型——要钉住的事实全在这一侧：调的是哪个版本、消息staged 在哪、标记有没有过界、open 拒绝时**什么都没记**。
+- **离线可测**：e2e 里的 runner 就是一个**脚本** extension（`tests/e2e/agent.zig`，`run.ps1` / `run.sh`，不需要 zig），它 echo 而不是接模型——要钉住的事实全在这一侧：调的是哪个版本、消息staged 在哪、标记有没有过界、open 拒绝时**什么都没记**。
 
 **`model` 是这一次委派跑在什么上，第三个答案。** 形态与定义里的 `model:` 逐字相同（`<profile>` 或 `<profile>/<model-id>`，§9.5 的两个 flag），**一处解析**（`defs.parseModelRef`）：一个参数与一个 frontmatter 字段说的是同一件事，两个 parser 就是两套语法。优先级由近及远——**这次调用 > 定义 > 继承发起它的那一场**，且**取的是一对而不是拼一对**：`--model` 是 profile 之内的 id，从一处拿 profile、另一处拿 id 会点名一个那个 profile 根本不服务的模型。为什么让模型自己挑：定义说的是"这个 persona 一般跑在什么上"，而调用者知道定义不知道的那件事——**这一件活值多少**（一次宽搜配便宜模型、一次严审配贵的）。`session` 形态给 `model` 是一次失败的调用而不是静默忽略：那一场的身份在创建时就冻死了（physics #2 / §3.4），而 append-only 正是追问便宜的原因。解析不出的字符串当场报错并指 `nulya config show`；profile 名对不上则由内核那句拒绝原样上来，只多一句"这是你给的 `model` 参数"——调用者可以不带它重试，而那不是一句关于 profile 的话能说清的。
 
@@ -1040,7 +1040,7 @@ GapDetector · WorkflowMiner · ToolSynthesisManager · AutoRefactor · RewardMo
 
 > **Nulya 自带一个工具。第二个工具由 Nulya 自己创造。**
 
-`tests/e2e/`（真实 built binary，无 mock；`tests/e2e.zig` 只是聚合器）证明：一个只暴露 shell 的 session，由 deterministic 模型经这一个 builtin 跑 `nulya ext init/build/activate/run` 亲手造出新扩展并记录 usage，全程该工具不进 native 面；**光有 usage 的下一场仍然只有 shell**；给了 pin（`.nulya/config.toml` 的 `registry.pinned_native_tools` 或 `session new --pin`，两种都测）的下一场才把它放上 native 面并按冻结版本执行；mid-session activate v2 后 session native 仍 v1 / CLI live v2 / 新 session native v2。
+`tests/e2e/`（真实 built binary，无 mock；`tests/e2e_{ext,core,agent,std}.zig` 是四个聚合器，各自一个 `zig build e2e-*` step，`zig build e2e` 依赖全部四个）证明：一个只暴露 shell 的 session，由 deterministic 模型经这一个 builtin 跑 `nulya ext init/build/activate/run` 亲手造出新扩展并记录 usage，全程该工具不进 native 面；**光有 usage 的下一场仍然只有 shell**；给了 pin（`.nulya/config.toml` 的 `registry.pinned_native_tools` 或 `session new --pin`，两种都测）的下一场才把它放上 native 面并按冻结版本执行；mid-session activate v2 后 session native 仍 v1 / CLI live v2 / 新 session native v2。
 
 **已落地 / 未落地的一句话清单在 [CLAUDE.md](../CLAUDE.md)「现状一句话」；去向在 [PLAN.md](PLAN.md) §1 路线图。** 开发历史（底座 7 组提交等）见 `history/v0.1.md`。
 

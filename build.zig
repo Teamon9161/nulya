@@ -125,33 +125,17 @@ pub fn build(b: *std.Build) void {
 
     // End-to-end closed-loop test (DESIGN §16 milestone): init -> build -> run.
     // It uses the host's own zig (no embed needed) via NULYA_TEST_ZIG, so it
-    // actually compiles and runs a real extension. Everything reachable from
-    // e2e.zig lives in the single `support` facade module rooted under src/, so
-    // no file straddles two module graphs (Zig 0.16 forbids that); the facade's
-    // own anonymous `zig_archive` import covers build/toolchain.zig's @embedFile.
-    const e2e_mod = b.createModule(.{
-        .root_source_file = b.path("tests/e2e.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    e2e_mod.addAnonymousImport("zig_archive", .{ .root_source_file = zig_archive });
+    // actually compiles and runs a real extension. Everything reachable from a
+    // group root lives in the single `support` facade module rooted under src/,
+    // so no file straddles two module graphs (Zig 0.16 forbids that); the
+    // facade's own anonymous `zig_archive` import covers build/toolchain.zig's
+    // @embedFile.
     const e2e_support_mod = b.createModule(.{ .root_source_file = b.path("src/e2e_support.zig"), .target = target, .optimize = optimize });
     e2e_support_mod.addAnonymousImport("zig_archive", .{ .root_source_file = zig_archive });
     // The facade re-exports config.zig, which reads the baked-in default.toml.
     e2e_support_mod.addImport("toml", toml);
     e2e_support_mod.addOptions("config_options", config_options);
-    e2e_mod.addImport("support", e2e_support_mod);
-    const e2e_tests = b.addTest(.{ .root_module = e2e_mod, .filters = test_filters });
-    const run_e2e = b.addRunArtifact(e2e_tests);
-    run_e2e.setEnvironmentVariable("NULYA_TEST_ZIG", b.graph.zig_exe);
-    // The CLI tests spawn the real `nulya` binary (the runner's own stdout is
-    // the test protocol, so an in-process `cli.dispatch` would corrupt it).
-    // Point at the installed binary, relative to where `zig build` was run.
-    run_e2e.step.dependOn(b.getInstallStep());
-    run_e2e.setEnvironmentVariable("NULYA_EXE", b.getInstallPath(.bin, exe.out_filename));
-    // The repo root, so a test can build the extensions this repo ships
-    // (`extensions/evolution`) from their real source rather than a copy.
-    run_e2e.setEnvironmentVariable("NULYA_REPO", b.build_root.path orelse ".");
+
     // A `codex app-server` that answers the protocol offline (`tests/fake_codex.zig`).
     // The Codex runner is a JSON-RPC conversation, and everything worth pinning
     // down about it is on THIS side of that conversation — so the e2e suite
@@ -165,16 +149,11 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    // Into a directory of its own, and only when the e2e step asks for it: it is
-    // a test fixture, not something this project ships.
+    // Into a directory of its own, and only when a step asks for it: it is a
+    // test fixture, not something this project ships.
     const install_fake_codex = b.addInstallArtifact(fake_codex, .{
         .dest_dir = .{ .override = .{ .custom = "test-bin" } },
     });
-    run_e2e.step.dependOn(&install_fake_codex.step);
-    run_e2e.setEnvironmentVariable(
-        "NULYA_FAKE_CODEX",
-        b.getInstallPath(.{ .custom = "test-bin" }, fake_codex.out_filename),
-    );
     // …and the same for Claude Code (`tests/fake_claude.zig`), handed over as
     // `NULYA_CLAUDE_EXE`. Offline for the reasons the Codex one is, and for one
     // more: `claude` is the harness this repository is developed in, so an e2e
@@ -190,11 +169,6 @@ pub fn build(b: *std.Build) void {
     const install_fake_claude = b.addInstallArtifact(fake_claude, .{
         .dest_dir = .{ .override = .{ .custom = "test-bin" } },
     });
-    run_e2e.step.dependOn(&install_fake_claude.step);
-    run_e2e.setEnvironmentVariable(
-        "NULYA_FAKE_CLAUDE",
-        b.getInstallPath(.{ .custom = "test-bin" }, fake_claude.out_filename),
-    );
     // …and for pi (`tests/fake_pi.zig`), handed over as `NULYA_PI_EXE`.
     const fake_pi = b.addExecutable(.{
         .name = "fake-pi",
@@ -207,14 +181,94 @@ pub fn build(b: *std.Build) void {
     const install_fake_pi = b.addInstallArtifact(fake_pi, .{
         .dest_dir = .{ .override = .{ .custom = "test-bin" } },
     });
-    run_e2e.step.dependOn(&install_fake_pi.step);
-    run_e2e.setEnvironmentVariable(
-        "NULYA_FAKE_PI",
-        b.getInstallPath(.{ .custom = "test-bin" }, fake_pi.out_filename),
-    );
-    run_e2e.has_side_effects = true; // exercises the filesystem; always run
-    const e2e_step = b.step("e2e", "Run the extension closed-loop end-to-end test");
-    e2e_step.dependOn(&run_e2e.step);
+
+    // The suite is FOUR test binaries, not one: `zig build` runs independent run
+    // artifacts concurrently, and one binary is one core. The split is by what a
+    // group proves — `e2e-ext` the extension lifecycle, `e2e-core` the kernel
+    // session surface, `e2e-agent` delegation, `e2e-std` the bundled file/search
+    // package — and the four happen to be within a factor of two of each other
+    // in cost, so the wall clock is roughly the largest rather than the sum.
+    // `zig build e2e` depends on all four, so it is still the whole thing, and
+    // `-Dtest-filter` reaches every group.
+    //
+    // What the four share on disk is the compile-once cache under
+    // `.zig-cache/nulya-e2e-prebuilt` (tests/e2e/support.zig). Concurrent
+    // writers there are serialized by the store's own `<id>/.lock`, the same
+    // exclusive lease two `nulya ext build` processes take (DESIGN §7.4), so
+    // the group that gets there second waits and then finds the version built.
+    const e2e_step = b.step("e2e", "Run the whole end-to-end suite (ext + core + agent + std)");
+    const e2e_groups = [_]struct {
+        step: []const u8,
+        root: []const u8,
+        desc: []const u8,
+        /// The offline stand-ins for Codex / Claude / pi. Only the delegation
+        /// group speaks to them, and a group that does not should not have to
+        /// build them before it can start.
+        fakes: bool = false,
+    }{
+        .{
+            .step = "e2e-ext",
+            .root = "tests/e2e_ext.zig",
+            .desc = "Run the end-to-end extension lifecycle: build, store roots, the wire, self-manufacture",
+        },
+        .{
+            .step = "e2e-core",
+            .root = "tests/e2e_core.zig",
+            .desc = "Run the end-to-end kernel surface: the durable ledger, `session *`, the gate, background tasks",
+        },
+        .{
+            .step = "e2e-agent",
+            .root = "tests/e2e_agent.zig",
+            .desc = "Run the end-to-end delegation tests (the bundled `agent` package and its runners)",
+            .fakes = true,
+        },
+        .{
+            .step = "e2e-std",
+            .root = "tests/e2e_std.zig",
+            .desc = "Run the end-to-end tests for the bundled `std` extension",
+        },
+    };
+    for (e2e_groups) |group| {
+        const mod = b.createModule(.{
+            .root_source_file = b.path(group.root),
+            .target = target,
+            .optimize = optimize,
+        });
+        mod.addAnonymousImport("zig_archive", .{ .root_source_file = zig_archive });
+        mod.addImport("support", e2e_support_mod);
+        const group_tests = b.addTest(.{ .root_module = mod, .filters = test_filters });
+        const run_group = b.addRunArtifact(group_tests);
+        run_group.setEnvironmentVariable("NULYA_TEST_ZIG", b.graph.zig_exe);
+        // The CLI tests spawn the real `nulya` binary (the runner's own stdout
+        // is the test protocol, so an in-process `cli.dispatch` would corrupt
+        // it). Point at the installed binary, relative to where `zig build` was
+        // run.
+        run_group.step.dependOn(b.getInstallStep());
+        run_group.setEnvironmentVariable("NULYA_EXE", b.getInstallPath(.bin, exe.out_filename));
+        // The repo root, so a test can build the extensions this repo ships
+        // (`extensions/evolution`) from their real source rather than a copy.
+        run_group.setEnvironmentVariable("NULYA_REPO", b.build_root.path orelse ".");
+        if (group.fakes) {
+            run_group.step.dependOn(&install_fake_codex.step);
+            run_group.setEnvironmentVariable(
+                "NULYA_FAKE_CODEX",
+                b.getInstallPath(.{ .custom = "test-bin" }, fake_codex.out_filename),
+            );
+            run_group.step.dependOn(&install_fake_claude.step);
+            run_group.setEnvironmentVariable(
+                "NULYA_FAKE_CLAUDE",
+                b.getInstallPath(.{ .custom = "test-bin" }, fake_claude.out_filename),
+            );
+            run_group.step.dependOn(&install_fake_pi.step);
+            run_group.setEnvironmentVariable(
+                "NULYA_FAKE_PI",
+                b.getInstallPath(.{ .custom = "test-bin" }, fake_pi.out_filename),
+            );
+        }
+        run_group.has_side_effects = true; // exercises the filesystem; always run
+        b.step(group.step, group.desc).dependOn(&run_group.step);
+        e2e_step.dependOn(&run_group.step);
+    }
 
     // Live-provider checks (PLAN §1 M4 acceptance). Kept out of `test` / `e2e`,
     // which stay offline: this one talks to a real endpoint and skips itself

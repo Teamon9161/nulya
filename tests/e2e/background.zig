@@ -13,6 +13,21 @@ const ledger = support.ledger;
 const runCli = support.runCli;
 const runCliEnv = support.runCliEnv;
 
+/// How long a wait here sits before calling it a failure — as an argument to
+/// `nulya task wait`, and as a poll count at 50 ms in `waitUntilRunning`.
+///
+/// A budget, not a delay: every wait returns the instant the thing it waits for
+/// happens, so a large number costs nothing on a healthy run and is only paid
+/// when a test is already failing. A small one is paid whenever the machine is
+/// busy — as a red suite that says nothing about the code. The three other e2e
+/// groups run beside this one, so "busy" is the normal case
+/// (docs/goals/agent-runner.md §6, "测试提速").
+///
+/// The short, DELIBERATE budgets below (`--timeout-ms 300`, `1000`, `2000`) are
+/// not these: each is the subject of its own assertion.
+const wait_budget_ms = "180000";
+const wait_tries = 3600; // × 50 ms — the same budget, polled
+
 /// The dialect this machine's `nulya` will use for a task's command — the test
 /// has to speak the same shell the child does.
 fn dialect(alloc: std.mem.Allocator, io: std.Io) !environment.Dialect {
@@ -26,6 +41,48 @@ fn slowCommand(d: environment.Dialect) []const u8 {
         .bash => "echo slow-start; sleep 30",
         .powershell => "Write-Output slow-start; Start-Sleep -Seconds 30",
     };
+}
+
+/// A command that runs until the test says stop: it spins on `hold_rel` — a file
+/// the test wrote into the workspace before starting it — and prints `marker`
+/// once that file is gone. Caller owns the bytes.
+///
+/// This replaces `sleep N; echo MARKER`. Each test using it needs the task to be
+/// STILL RUNNING at a later, unrelated moment (a retarget, a cancel, a fork),
+/// and a fixed sleep only makes that LIKELY — it is a bet on how loaded the
+/// machine is, paid for with N seconds every single run. A file the test deletes
+/// when it is ready makes it certain and costs nothing.
+fn holdCommand(alloc: std.mem.Allocator, d: environment.Dialect, hold_rel: []const u8, marker: []const u8) ![]u8 {
+    return switch (d) {
+        .bash => std.fmt.allocPrint(alloc, "while [ -e '{s}' ]; do sleep 0.05; done; echo {s}", .{ hold_rel, marker }),
+        .powershell => std.fmt.allocPrint(alloc, "while (Test-Path '{s}') {{ Start-Sleep -Milliseconds 50 }}; Write-Output {s}", .{ hold_rel, marker }),
+    };
+}
+
+/// Write the file `holdCommand` spins on, so the task starts already held.
+fn takeHold(io: std.Io, ws: std.Io.Dir, hold_rel: []const u8) !void {
+    try ws.writeFile(io, .{ .sub_path = hold_rel, .data = "" });
+}
+
+/// Let a held task finish.
+fn releaseHold(io: std.Io, ws: std.Io.Dir, hold_rel: []const u8) !void {
+    try ws.deleteFile(io, hold_rel);
+}
+
+/// Block until the projection says the session has a task in `running` — the
+/// supervisor has taken its lease and written `status.json`. `task run` returns
+/// as soon as the supervisor is SPAWNED, so a test that wants to act "while it
+/// runs" would otherwise be racing `starting`. Answers false if it never got
+/// there, so the caller can assert rather than hang.
+fn waitUntilRunning(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, exe: []const u8, id: []const u8) !bool {
+    var tries: usize = 0;
+    while (tries < wait_tries) : (tries += 1) {
+        const live = try runCli(alloc, io, ws, &.{ exe, "task", "list", "--session", id, "--running" });
+        defer alloc.free(live.stdout);
+        if (std.mem.indexOf(u8, live.stdout, "running") != null) return true;
+        std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
+    }
+    return false;
 }
 
 fn nulyaExe(alloc: std.mem.Allocator) !?[]u8 {
@@ -89,7 +146,7 @@ test "background task: a detached command runs, finishes, and deposits its repor
 
     const name = try taskName(alloc, id, "t1");
     defer alloc.free(name);
-    const waited = try runCli(alloc, io, ws, &.{ exe, "task", "wait", name, "--timeout-ms", "20000" });
+    const waited = try runCli(alloc, io, ws, &.{ exe, "task", "wait", name, "--timeout-ms", wait_budget_ms });
     defer alloc.free(waited.stdout);
     try std.testing.expectEqual(@as(u8, 0), waited.code);
 
@@ -149,25 +206,14 @@ test "background task: kill ends the whole tree at once, and the report says so"
 
     // It really is running: the supervisor holds the lease, so the projection
     // says `running` rather than `lost`.
-    var seen_running = false;
-    var tries: usize = 0;
-    while (tries < 40) : (tries += 1) {
-        const live = try runCli(alloc, io, ws, &.{ exe, "task", "list", "--session", id, "--running" });
-        defer alloc.free(live.stdout);
-        if (std.mem.indexOf(u8, live.stdout, "running") != null) {
-            seen_running = true;
-            break;
-        }
-        std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
-    }
-    try std.testing.expect(seen_running);
+    try std.testing.expect(try waitUntilRunning(alloc, io, ws, exe, id));
 
     const began = std.Io.Timestamp.now(io, .awake);
     const killed = try runCli(alloc, io, ws, &.{ exe, "task", "kill", name });
     defer alloc.free(killed.stdout);
     try std.testing.expectEqual(@as(u8, 0), killed.code);
 
-    const waited = try runCli(alloc, io, ws, &.{ exe, "task", "wait", name, "--timeout-ms", "20000" });
+    const waited = try runCli(alloc, io, ws, &.{ exe, "task", "wait", name, "--timeout-ms", wait_budget_ms });
     defer alloc.free(waited.stdout);
     try std.testing.expectEqual(@as(u8, 0), waited.code);
     // The command asked for 30 s. Ending well inside that is the proof the whole
@@ -207,7 +253,7 @@ test "background task: a timeout is enforced by the supervisor and named on the 
     defer alloc.free(started.stdout);
     try std.testing.expectEqual(@as(u8, 0), started.code);
 
-    const waited = try runCli(alloc, io, ws, &.{ exe, "task", "wait", name, "--timeout-ms", "20000" });
+    const waited = try runCli(alloc, io, ws, &.{ exe, "task", "wait", name, "--timeout-ms", wait_budget_ms });
     defer alloc.free(waited.stdout);
     try std.testing.expectEqual(@as(u8, 0), waited.code);
 
@@ -255,7 +301,7 @@ test "background task: `wait --any` answers in three ways, one call, one branch 
 
     // 0: something finished and its result has not been read yet.
     {
-        const landed = try runCli(alloc, io, ws, &.{ exe, "task", "wait", "--any", "--session", id, "--timeout-ms", "20000" });
+        const landed = try runCli(alloc, io, ws, &.{ exe, "task", "wait", "--any", "--session", id, "--timeout-ms", wait_budget_ms });
         defer alloc.free(landed.stdout);
         try std.testing.expectEqual(@as(u8, 0), landed.code);
         try std.testing.expect(std.mem.indexOf(u8, landed.stdout, "[background task ") != null);
@@ -289,15 +335,16 @@ test "background task: retarget delivers the result to another session, before o
 
     // ── retargeted BEFORE the supervisor deposits ───────────────────────────
     const d = try dialect(alloc, io);
-    const lingering = switch (d) {
-        .bash => "sleep 2; echo LATE-ONE",
-        .powershell => "Start-Sleep -Seconds 2; Write-Output LATE-ONE",
-    };
+    const hold = "hold-t1";
+    try takeHold(io, ws, hold);
+    const lingering = try holdCommand(alloc, d, hold, "LATE-ONE");
+    defer alloc.free(lingering);
     {
         const started = try runCli(alloc, io, ws, &.{ exe, "task", "run", "--session", parent, "--", lingering });
         defer alloc.free(started.stdout);
         try std.testing.expectEqual(@as(u8, 0), started.code);
     }
+    try std.testing.expect(try waitUntilRunning(alloc, io, ws, exe, parent));
     const first = try taskName(alloc, parent, "t1");
     defer alloc.free(first);
     {
@@ -305,8 +352,9 @@ test "background task: retarget delivers the result to another session, before o
         defer alloc.free(moved.stdout);
         try std.testing.expectEqual(@as(u8, 0), moved.code);
     }
+    try releaseHold(io, ws, hold);
     {
-        const waited = try runCli(alloc, io, ws, &.{ exe, "task", "wait", first, "--timeout-ms", "30000" });
+        const waited = try runCli(alloc, io, ws, &.{ exe, "task", "wait", first, "--timeout-ms", wait_budget_ms });
         defer alloc.free(waited.stdout);
         try std.testing.expectEqual(@as(u8, 0), waited.code);
     }
@@ -335,7 +383,7 @@ test "background task: retarget delivers the result to another session, before o
     const second = try taskName(alloc, parent, "t2");
     defer alloc.free(second);
     {
-        const waited = try runCli(alloc, io, ws, &.{ exe, "task", "wait", second, "--timeout-ms", "20000" });
+        const waited = try runCli(alloc, io, ws, &.{ exe, "task", "wait", second, "--timeout-ms", wait_budget_ms });
         defer alloc.free(waited.stdout);
         try std.testing.expectEqual(@as(u8, 0), waited.code);
     }
@@ -389,7 +437,7 @@ test "background task: `task run` outside a session refuses, and names the two w
     try std.testing.expectEqual(@as(u8, 0), inherited.code);
     try std.testing.expect(std.mem.indexOf(u8, inherited.stdout, id) != null);
     // And the short name works there too.
-    const waited = try runCliEnv(alloc, io, tmp.dir, &.{ exe, "task", "wait", "t1", "--timeout-ms", "20000" }, "NULYA_SESSION", spath);
+    const waited = try runCliEnv(alloc, io, tmp.dir, &.{ exe, "task", "wait", "t1", "--timeout-ms", wait_budget_ms }, "NULYA_SESSION", spath);
     defer alloc.free(waited.stdout);
     try std.testing.expectEqual(@as(u8, 0), waited.code);
 }
@@ -431,7 +479,7 @@ test "background shell: the model starts a task, is told so, and reads the repor
     try std.testing.expect(std.mem.indexOf(u8, first.stdout, "waiting") != null);
 
     {
-        const waited = try runCli(alloc, io, ws, &.{ exe, "task", "wait", name, "--timeout-ms", "20000" });
+        const waited = try runCli(alloc, io, ws, &.{ exe, "task", "wait", name, "--timeout-ms", wait_budget_ms });
         defer alloc.free(waited.stdout);
         try std.testing.expectEqual(@as(u8, 0), waited.code);
     }
@@ -512,7 +560,7 @@ test "background shell: the gate sees the real command, not a wrapper" {
     try std.testing.expect(saw_request);
 
     // Allowed, so it really started; leave nothing running behind us.
-    const waited = try runCli(alloc, io, ws, &.{ exe, "task", "wait", name, "--timeout-ms", "20000" });
+    const waited = try runCli(alloc, io, ws, &.{ exe, "task", "wait", name, "--timeout-ms", wait_budget_ms });
     defer alloc.free(waited.stdout);
     try std.testing.expectEqual(@as(u8, 0), waited.code);
 }
@@ -532,15 +580,16 @@ test "background shell: cancelling a step does not touch a task it already start
     const name = try taskName(alloc, id, "t1");
     defer alloc.free(name);
 
-    const lingering = switch (try dialect(alloc, io)) {
-        .bash => "sleep 2; echo CANCEL-SURVIVOR",
-        .powershell => "Start-Sleep -Seconds 2; Write-Output CANCEL-SURVIVOR",
-    };
+    const hold = "hold-t1";
+    try takeHold(io, ws, hold);
+    const lingering = try holdCommand(alloc, try dialect(alloc, io), hold, "CANCEL-SURVIVOR");
+    defer alloc.free(lingering);
     {
         const started = try runCli(alloc, io, ws, &.{ exe, "task", "run", "--session", id, "--", lingering });
         defer alloc.free(started.stdout);
         try std.testing.expectEqual(@as(u8, 0), started.code);
     }
+    try std.testing.expect(try waitUntilRunning(alloc, io, ws, exe, id));
 
     // Cancellation is about the STEP, and the only thing that ends a task is
     // `nulya task kill` (DESIGN §4/§6.1). The step consumes the marker and does
@@ -553,8 +602,9 @@ test "background shell: cancelling a step does not touch a task it already start
         defer alloc.free(stepped.stdout);
         try std.testing.expectEqual(@as(u8, 0), stepped.code);
     }
+    try releaseHold(io, ws, hold);
 
-    const waited = try runCli(alloc, io, ws, &.{ exe, "task", "wait", name, "--timeout-ms", "20000" });
+    const waited = try runCli(alloc, io, ws, &.{ exe, "task", "wait", name, "--timeout-ms", wait_budget_ms });
     defer alloc.free(waited.stdout);
     try std.testing.expectEqual(@as(u8, 0), waited.code);
 
@@ -592,15 +642,18 @@ test "background task: compact retargets the parent's running tasks and says so 
         defer alloc.free(step.stdout);
         try std.testing.expectEqual(@as(u8, 0), step.code);
     }
-    const lingering = switch (try dialect(alloc, io)) {
-        .bash => "sleep 3; echo FORK-SURVIVOR",
-        .powershell => "Start-Sleep -Seconds 3; Write-Output FORK-SURVIVOR",
-    };
+    const hold = "hold-t1";
+    try takeHold(io, ws, hold);
+    const lingering = try holdCommand(alloc, try dialect(alloc, io), hold, "FORK-SURVIVOR");
+    defer alloc.free(lingering);
     {
         const started = try runCli(alloc, io, ws, &.{ exe, "task", "run", "--session", parent, "--", lingering });
         defer alloc.free(started.stdout);
         try std.testing.expectEqual(@as(u8, 0), started.code);
     }
+    // The fork below must find it RUNNING — that is the whole subject of this
+    // test, so it is waited for rather than assumed.
+    try std.testing.expect(try waitUntilRunning(alloc, io, ws, exe, parent));
     const task = try taskName(alloc, parent, "t1");
     defer alloc.free(task);
 
@@ -634,8 +687,9 @@ test "background task: compact retargets the parent's running tasks and says so 
     }
 
     // …and the result really arrives THERE. The parent's inbox stays empty.
+    try releaseHold(io, ws, hold);
     {
-        const waited = try runCli(alloc, io, ws, &.{ exe, "task", "wait", task, "--timeout-ms", "30000" });
+        const waited = try runCli(alloc, io, ws, &.{ exe, "task", "wait", task, "--timeout-ms", wait_budget_ms });
         defer alloc.free(waited.stdout);
         try std.testing.expectEqual(@as(u8, 0), waited.code);
     }
