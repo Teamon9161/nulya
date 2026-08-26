@@ -1,7 +1,7 @@
 ---
 name: explore
 description: Read-only reconnaissance that returns a report
-readonly: true
+permissions: readonly
 pins: [ext:std/read, ext:std/grep, ext:std/glob]
 max_steps: 12
 ---

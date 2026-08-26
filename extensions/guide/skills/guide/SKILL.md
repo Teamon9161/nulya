@@ -255,7 +255,7 @@ Store and scope:
   the stream on stderr.
 - Where the bundled `agent` package is in play, a sub-agent is a markdown file:
   `.nulya/agents/<name>.md` (or the same under this machine's nulya home). Its
-  front matter is a set of `session new` arguments — `readonly`, `pins`,
+  front matter is a set of `session new` arguments — `permissions`, `pins`,
   `model: <profile>[/<id>]`, `max_steps`, `max_exchanges`, `agents` — and its
   body is the system prompt. `runner:` says which harness holds the
   conversation: `nulya` (the default, a session of its own), `codex` (a Codex
@@ -265,8 +265,38 @@ Store and scope:
   catalogue, and so takes `runner_model:` — an opaque string in that harness's
   words — where a nulya one takes `model:`; the fields for the other harness
   are dropped with a warning, and an unknown `runner:` costs the whole
-  definition. `readonly: true` is honoured on every runner or the delegation is
-  refused — none of them is allowed to run it wider than it asked for.
+  definition.
+- `permissions:` is how much a delegation may do, in three words, and every
+  runner translates it into its own harness's terms:
+
+  | | `readonly` | `default` (the unwritten one) | `unsafe` |
+  |---|---|---|---|
+  | `nulya` | gated: only tools declaring `readonly` run | no gate | no gate |
+  | `codex` | `read-only` sandbox, confirmed | `workspace-write` | `danger-full-access` |
+  | `claude` | read-only tools + `dontAsk`, confirmed | `acceptEdits` | `bypassPermissions` |
+  | `pi` | `--tools read,grep,find,ls` | everything built in | everything built in |
+
+  Only `readonly` is a CEILING: a runner that cannot hold its harness to
+  reading refuses the delegation rather than run it wider than it asked for.
+  `unsafe` is reached only because a definition or an `agent` call wrote the
+  word — never inherited from a parent, a front end's mode, or the
+  environment — and that call passes the parent session's own approval gate, so
+  a person may see it and say no. A word that is not one of the three, or the
+  older `readonly: true` this field replaced, costs the whole definition:
+  reading a persona that asked to be held to reading as an ordinary one is
+  exactly what the field exists to prevent. On the nulya runner `default` and
+  `unsafe` behave the same today (there is no gate between them — real
+  isolation is a sandbox, not a guess at command strings); the difference is
+  frozen into the delegation's record either way.
+- **Standing widenings belong in each harness's own configuration, not here.**
+  `permissions` says what a delegation may reach for; how a harness answers the
+  things it is asked to approve is that harness's own setting, and it applies
+  to every agent that runs there. In Claude Code that is `permissions.allow`
+  rules in `.claude/settings.json` (or `settings.local.json` for one machine);
+  in Codex it is `~/.codex/config.toml`'s sandbox and approval keys; in nulya's
+  own TUI it is `tui.toml`'s `[approvals]` tables plus `/mode`. Reach for those
+  when the same command is being approved over and over — and for `unsafe` only
+  when a single delegation genuinely needs the guard rails off.
 - `runner: ext:<id>` holds the conversation on a harness NOBODY here has heard
   of. That extension declares one `internal` tool named exactly `agent_runner`,
   and answers two operations (its arguments arrive as `NULYA_ARG_<key>`, and as
@@ -274,15 +304,18 @@ Store and scope:
 
   | | `op=open` | `op=round` |
   |---|---|---|
-  | in | `delegation` `persona` `readonly` `model?` | those, plus `remote` `message_file` `interrupt` |
+  | in | `delegation` `persona` `permissions` `model?` | those, plus `remote` `message_file` `interrupt` |
   | out | `{"remote":"<handle>"}` | `{"text":"<this round's answer>"}` |
   | exit ≠ 0 | refuses the whole delegation; stderr says why | this round failed; the message waits for the next one |
 
   `persona` and `message_file` are PATHS (a task is as long as it needs to be).
   `interrupt` is a marker file: while a turn is in flight, watch it — if it
   appears, delete it, stop the turn however the harness allows, and answer
-  `{"text":"","interrupted":true}`. Refuse `op=open` when `readonly` is `true`
-  and the harness cannot be held to reading: that refusal is the ceiling.
+  `{"text":"","interrupted":true}`. `permissions` is one of `readonly`,
+  `default`, `unsafe`: refuse `op=open` when it is `readonly` and the harness
+  cannot be held to reading — that refusal is the ceiling — and refuse a word
+  you do not recognise, because reading a level you never understood as your
+  own default is how a ceiling gets quietly widened.
   Everything else — the delegation's identity and journal, its message queue,
   the exchange budget, the report reaching the parent — is the `agent` package's
   and needs nothing from you. Install it like any extension (`nulya ext build

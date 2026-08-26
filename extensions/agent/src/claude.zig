@@ -116,10 +116,25 @@ const readonly_mode = "dontAsk";
 /// …and what an ordinary one runs as. `acceptEdits` is Claude's own posture for
 /// an agent working in a checkout: it writes files without asking, and anything
 /// beyond the read-only command set still needs a rule, so a background task
-/// cannot reach for something nobody granted. `bypassPermissions` was the other
-/// candidate and is what `danger-full-access` is on the Codex side — a grant
-/// wider than any definition asked for.
+/// cannot reach for something nobody granted.
 const default_mode = "acceptEdits";
+
+/// …and what `permissions: unsafe` asks for (contract ar-h). This is the Codex
+/// arm's `danger-full-access`: everything the harness can do, guard rails off.
+/// It is reached only by a definition or an `agent` call that says the word —
+/// never by omission, never inherited from anything about the parent.
+const unsafe_mode = "bypassPermissions";
+
+/// Claude's own word for each of the three. Only `readonly` also narrows the
+/// tool face and is checked against the echo (`checkInit`); the other two are
+/// permission modes and nothing else.
+fn modeWord(permissions: record.Permissions) []const u8 {
+    return switch (permissions) {
+        .readonly => readonly_mode,
+        .default => default_mode,
+        .unsafe => unsafe_mode,
+    };
+}
 
 // ── opening ─────────────────────────────────────────────────────────────────
 
@@ -180,8 +195,10 @@ pub const Session = struct {
     reader: std.Io.File.Reader,
     write_buf: [4096]u8 = undefined,
     next_control: u32 = 1,
-    /// The ceiling this process must hold to, re-checked against the echo of
-    /// every session start (see `checkInit`).
+    /// Is there a ceiling to hold this process to — re-checked against the echo
+    /// of every session start (see `checkInit`)? A bool rather than the three
+    /// words on purpose: `readonly` is the only one of them that is checked,
+    /// and the other two have nothing left to say once the flags are written.
     readonly: bool = false,
     /// Has an `init` for this process been seen and accepted yet?
     confirmed: bool = false,
@@ -214,7 +231,7 @@ pub fn attach(
     base: std.Io.Dir,
     delegation: []const u8,
     session_id: []const u8,
-    readonly: bool,
+    permissions: record.Permissions,
     model: []const u8,
 ) !Attempt {
     if (delegation.len == 0) {
@@ -254,17 +271,15 @@ pub fn attach(
     try argv.append(alloc, session_id);
     try argv.appendSlice(alloc, &.{ "--append-system-prompt", persona });
     if (model.len != 0) try argv.appendSlice(alloc, &.{ "--model", model });
-    if (readonly) {
+    try argv.appendSlice(alloc, &.{ "--permission-mode", modeWord(permissions) });
+    if (permissions.isReadonly()) {
         // Availability, not approval: a tool that is not in the session cannot
         // be reached, and it is the half `system/init` reports back.
         try argv.appendSlice(alloc, &.{ "--tools", try std.mem.join(alloc, ",", &readonly_tools) });
-        try argv.appendSlice(alloc, &.{ "--permission-mode", readonly_mode });
         // No `--mcp-config`, so this leaves the session with no MCP servers at
         // all — a configured one could otherwise contribute a tool nobody here
         // has ever seen the name of.
         try argv.append(alloc, "--strict-mcp-config");
-    } else {
-        try argv.appendSlice(alloc, &.{ "--permission-mode", default_mode });
     }
 
     var child = std.process.spawn(io, .{
@@ -287,7 +302,7 @@ pub fn attach(
         .child = child,
         .buf = buf,
         .reader = child.stdout.?.readerStreaming(io, buf),
-        .readonly = readonly,
+        .readonly = permissions.isReadonly(),
     } };
 }
 

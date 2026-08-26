@@ -64,7 +64,7 @@ test "bundled agent: render writes a persona nothing installs; a delegation open
         .data =
         \\---
         \\description: a read-only prober
-        \\readonly: true
+        \\permissions: readonly
         \\max_steps: 2
         \\pins: [nonsense]
         \\---
@@ -597,10 +597,142 @@ test "bundled agent: a delegation is a d-id of its own — another turn goes int
         defer alloc.free(early.stdout);
         try std.testing.expectEqual(@as(u8, 1), early.code);
         try std.testing.expect(std.mem.indexOf(u8, early.stdout, "interrupt applies") != null);
+
+        // A ceiling is frozen when a delegation opens, so a follow-up cannot
+        // carry one — the same reasoning `model` is refused on that form with,
+        // and here the cost of quietly ignoring it would be a widened ceiling.
+        const late = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"session\":\"d-000000000000\",\"task\":\"x\",\"permissions\":\"unsafe\"}" }, in_parent);
+        defer alloc.free(late.stdout);
+        try std.testing.expectEqual(@as(u8, 1), late.code);
+        try std.testing.expect(std.mem.indexOf(u8, late.stdout, "permissions applies to a NEW delegation") != null);
+
+        // …and a word that is not one of the three is refused rather than read
+        // as the nearest thing: never as `default`, which would be a ceiling
+        // widened by a typo.
+        const garbled = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"worker\",\"task\":\"x\",\"permissions\":\"yolo\"}" }, in_parent);
+        defer alloc.free(garbled.stdout);
+        try std.testing.expectEqual(@as(u8, 1), garbled.code);
+        try std.testing.expect(std.mem.indexOf(u8, garbled.stdout, "readonly, default, unsafe") != null);
     }
 
     // Let the last runner finish before the workspace goes away.
     {
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", wait_budget_ms });
+        alloc.free(waited.stdout);
+    }
+}
+
+test "bundled agent: the permission ladder is one word frozen into the delegation — the definition names it, the call may narrow or widen it, and both projections say which rung it is" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const ref = try buildBundled(alloc, io, ws, exe_abs, "agent");
+    defer alloc.free(ref);
+
+    try ws.createDirPath(io, ".nulya/agents");
+    try ws.writeFile(io, .{
+        .sub_path = ".nulya/agents/bold.md",
+        .data = "---\ndescription: needs the guard rails off\npermissions: unsafe\n---\nDo the work.\n",
+    });
+    try ws.writeFile(io, .{
+        .sub_path = ".nulya/agents/plain.md",
+        .data = "---\ndescription: an ordinary worker\n---\nDo the work.\n",
+    });
+    // The word this field replaced. Refused whole rather than read as an
+    // ordinary delegation: reading a definition that asked for read-only as
+    // something wider is the one outcome the ladder exists to prevent, so it
+    // does not appear in the catalogue at all.
+    try ws.writeFile(io, .{
+        .sub_path = ".nulya/agents/old.md",
+        .data = "---\ndescription: written before the ladder\nreadonly: true\n---\nDo the work.\n",
+    });
+
+    // Both projections carry the word AND the one bit every existing reader
+    // asks of it, so a driver that only wants "may this touch anything" is not
+    // made to learn three words to ask one question.
+    {
+        const listed = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "list", "{}" });
+        defer alloc.free(listed.stdout);
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, std.mem.trim(u8, listed.stdout, " \r\n"), .{});
+        defer parsed.deinit();
+        var seen: usize = 0;
+        for (parsed.value.array.items) |row| {
+            const name = row.object.get("name").?.string;
+            const word = row.object.get("permissions").?.string;
+            const bit = row.object.get("readonly").?.bool;
+            try std.testing.expectEqual(std.mem.eql(u8, word, "readonly"), bit);
+            if (std.mem.eql(u8, name, "bold")) {
+                try std.testing.expectEqualStrings("unsafe", word);
+                seen += 1;
+            } else if (std.mem.eql(u8, name, "plain")) {
+                // Unwritten is an ordinary delegation.
+                try std.testing.expectEqualStrings("default", word);
+                seen += 1;
+            }
+            try std.testing.expect(!std.mem.eql(u8, name, "old"));
+        }
+        try std.testing.expectEqual(@as(usize, 2), seen);
+
+        const rendered = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "render", "{\"name\":\"bold\"}" });
+        defer alloc.free(rendered.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, rendered.stdout, "\"permissions\":\"unsafe\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered.stdout, "\"readonly\":false") != null);
+    }
+
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(new.stdout);
+    const parent = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(parent);
+    const session_file = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{parent});
+    defer alloc.free(session_file);
+    const in_parent: []const EnvPair = &.{
+        .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+    };
+
+    // ① What the definition asked for is what the record freezes, and the
+    //    receipt says the widest rung out loud — the model reads that sentence
+    //    and so does whoever is watching the conversation it came from.
+    {
+        const started = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"bold\",\"task\":\"go\"}" }, in_parent);
+        defer alloc.free(started.stdout);
+        try std.testing.expectEqual(@as(u8, 0), started.code);
+        try std.testing.expect(std.mem.indexOf(u8, started.stdout, "unsafe") != null);
+        const d = try delegationOf(alloc, started.stdout);
+        defer alloc.free(d);
+        const rows = try readRecord(alloc, io, ws, d);
+        defer alloc.free(rows);
+        try std.testing.expect(std.mem.indexOf(u8, rows, "\"permissions\":\"unsafe\"") != null);
+    }
+
+    // ② …and the call is nearer than the definition, in both directions: an
+    //    ordinary persona delegated with `readonly` is held to reading, and it
+    //    is the RECORD that says so, because the record is what every later
+    //    round of that delegation is driven from.
+    {
+        const started = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"plain\",\"task\":\"go\",\"permissions\":\"readonly\"}" }, in_parent);
+        defer alloc.free(started.stdout);
+        try std.testing.expectEqual(@as(u8, 0), started.code);
+        try std.testing.expect(std.mem.indexOf(u8, started.stdout, "read-only") != null);
+        const d = try delegationOf(alloc, started.stdout);
+        defer alloc.free(d);
+        const rows = try readRecord(alloc, io, ws, d);
+        defer alloc.free(rows);
+        try std.testing.expect(std.mem.indexOf(u8, rows, "\"permissions\":\"readonly\"") != null);
+    }
+
+    // Let both runners finish before the workspace goes away.
+    for (0..2) |_| {
         const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", wait_budget_ms });
         alloc.free(waited.stdout);
     }
@@ -1299,10 +1431,14 @@ test "bundled agent: a codex delegation that is running takes a message as turn/
         defer alloc.free(log);
         try std.testing.expect(std.mem.indexOf(u8, log, "turn/steer") != null);
         try std.testing.expect(std.mem.indexOf(u8, log, "turn/interrupt") != null);
+        // This definition names no ceiling, so it is an ordinary delegation —
+        // and Codex's word for that is `workspace-write`, asked for on every
+        // `thread/start` and `thread/resume` alike.
+        try std.testing.expect(std.mem.indexOf(u8, log, "\"sandbox\":\"workspace-write\"") != null);
     }
 }
 
-test "bundled agent: a read-only codex delegation is refused outright when the sandbox comes back wider than it asked for" {
+test "bundled agent: the three rungs reach codex as its own three sandboxes, and a read-only delegation is refused outright when the one that comes back is wider than it asked for" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -1324,7 +1460,7 @@ test "bundled agent: a read-only codex delegation is refused outright when the s
     try ws.createDirPath(io, ".nulya/agents");
     try ws.writeFile(io, .{
         .sub_path = ".nulya/agents/prober.md",
-        .data = "---\ndescription: only reads\nreadonly: true\nrunner: codex\n---\nYou only read.\n",
+        .data = "---\ndescription: only reads\npermissions: readonly\nrunner: codex\n---\nYou only read.\n",
     });
 
     const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
@@ -1355,6 +1491,7 @@ test "bundled agent: a read-only codex delegation is refused outright when the s
     const narrow: []const EnvPair = &.{
         .{ .key = "NULYA_SESSION", .value = session_file },
         .{ .key = "NULYA_CODEX_EXE", .value = codex_exe },
+        .{ .key = "FAKE_CODEX_LOG", .value = "codex-log.txt" },
         .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
     };
     const opened = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"prober\",\"task\":\"go\"}" }, narrow);
@@ -1362,9 +1499,36 @@ test "bundled agent: a read-only codex delegation is refused outright when the s
     try std.testing.expectEqual(@as(u8, 0), opened.code);
     try std.testing.expect(std.mem.indexOf(u8, opened.stdout, "read-only") != null);
 
-    const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", wait_budget_ms });
-    defer alloc.free(waited.stdout);
-    try std.testing.expectEqual(@as(u8, 0), waited.code);
+    {
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", wait_budget_ms });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+    }
+
+    // The widest rung, asked for in Codex's own widest word. It reaches a thread
+    // exactly one way — because a definition or a call said `unsafe` — and it is
+    // the same `sandbox` field the narrow rung travels on, which is why this arm
+    // needs no judgement of its own about what the three words mean.
+    try ws.writeFile(io, .{
+        .sub_path = ".nulya/agents/bold.md",
+        .data = "---\ndescription: needs the guard rails off\npermissions: unsafe\nrunner: codex\n---\nDo the work.\n",
+    });
+    {
+        const bold_run = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"bold\",\"task\":\"go\"}" }, narrow);
+        defer alloc.free(bold_run.stdout);
+        try std.testing.expectEqual(@as(u8, 0), bold_run.code);
+        try std.testing.expect(std.mem.indexOf(u8, bold_run.stdout, "unsafe") != null);
+
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", wait_budget_ms });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+    }
+    {
+        const log = try ws.readFileAlloc(io, "codex-log.txt", alloc, .limited(1 << 20));
+        defer alloc.free(log);
+        try std.testing.expect(std.mem.indexOf(u8, log, "\"sandbox\":\"read-only\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, log, "\"sandbox\":\"danger-full-access\"") != null);
+    }
 }
 
 // ── the Claude runner (contract ar-f) ───────────────────────────────────────
@@ -1506,6 +1670,11 @@ test "bundled agent: a claude delegation is a claude session — the record free
         try std.testing.expect(std.mem.indexOf(u8, log, "--append-system-prompt") != null);
         try std.testing.expect(std.mem.indexOf(u8, log, "--model /nope") != null);
         try std.testing.expect(std.mem.indexOf(u8, log, "--resume") == null);
+        // This definition names no ceiling, so it is an ordinary delegation, and
+        // Claude's word for that is `acceptEdits` — nothing is being held to
+        // anything, so none of the read-only rung's flags are here.
+        try std.testing.expect(std.mem.indexOf(u8, log, "--permission-mode acceptEdits") != null);
+        try std.testing.expect(std.mem.indexOf(u8, log, "--strict-mcp-config") == null);
     }
 
     // ⑥ Another turn, sent while nothing is running. The channel is the
@@ -1645,7 +1814,7 @@ test "bundled agent: a claude delegation that is running takes an interrupt as a
     }
 }
 
-test "bundled agent: a read-only claude delegation asks for the narrow shape and refuses the round when the session it gets back is wider" {
+test "bundled agent: the three rungs reach claude as its own three permission modes, and a read-only delegation asks for the narrow shape and refuses the round when the session it gets back is wider" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -1667,7 +1836,7 @@ test "bundled agent: a read-only claude delegation asks for the narrow shape and
     try ws.createDirPath(io, ".nulya/agents");
     try ws.writeFile(io, .{
         .sub_path = ".nulya/agents/prober.md",
-        .data = "---\ndescription: only reads\nreadonly: true\nrunner: claude\n---\nYou only read.\n",
+        .data = "---\ndescription: only reads\npermissions: readonly\nrunner: claude\n---\nYou only read.\n",
     });
 
     const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
@@ -1720,12 +1889,13 @@ test "bundled agent: a read-only claude delegation asks for the narrow shape and
     }
 
     // With a session that comes back inside the ceiling, the same definition runs.
+    const narrow: []const EnvPair = &.{
+        .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_CLAUDE_EXE", .value = claude_exe },
+        .{ .key = "FAKE_CLAUDE_LOG", .value = "claude-log.txt" },
+        .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+    };
     {
-        const narrow: []const EnvPair = &.{
-            .{ .key = "NULYA_SESSION", .value = session_file },
-            .{ .key = "NULYA_CLAUDE_EXE", .value = claude_exe },
-            .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
-        };
         const opened = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"prober\",\"task\":\"go\"}" }, narrow);
         defer alloc.free(opened.stdout);
         try std.testing.expectEqual(@as(u8, 0), opened.code);
@@ -1739,6 +1909,41 @@ test "bundled agent: a read-only claude delegation asks for the narrow shape and
         });
         defer alloc.free(stepped.stdout);
         try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "heard: go") != null);
+    }
+
+    // The widest rung is `bypassPermissions` — this side's `danger-full-access`,
+    // reached only because a definition or a call wrote the word. The narrow
+    // rung's extra flags come off with it: there is no tool list to hold and no
+    // MCP server to keep out when nothing is being held to anything.
+    try ws.writeFile(io, .{
+        .sub_path = ".nulya/agents/bold.md",
+        .data = "---\ndescription: needs the guard rails off\npermissions: unsafe\nrunner: claude\n---\nDo the work.\n",
+    });
+    {
+        const bold_run = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"bold\",\"task\":\"go\"}" }, narrow);
+        defer alloc.free(bold_run.stdout);
+        try std.testing.expectEqual(@as(u8, 0), bold_run.code);
+        try std.testing.expect(std.mem.indexOf(u8, bold_run.stdout, "unsafe") != null);
+
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", wait_budget_ms });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+    }
+    {
+        const log = try ws.readFileAlloc(io, "claude-log.txt", alloc, .limited(1 << 20));
+        defer alloc.free(log);
+        try std.testing.expect(std.mem.indexOf(u8, log, "--permission-mode bypassPermissions") != null);
+        // …and that launch carried neither of the narrow rung's flags. Counted
+        // rather than searched for: the read-only launches above are in this
+        // same log, so "does the word appear" would answer about them.
+        try std.testing.expectEqual(
+            std.mem.count(u8, log, "--permission-mode dontAsk"),
+            std.mem.count(u8, log, "--strict-mcp-config"),
+        );
+        try std.testing.expectEqual(
+            std.mem.count(u8, log, "--permission-mode dontAsk"),
+            std.mem.count(u8, log, "--tools "),
+        );
     }
 }
 
@@ -1863,6 +2068,9 @@ test "bundled agent: a pi delegation is a pi session — one flag opens or resum
         try std.testing.expect(std.mem.indexOf(u8, log, "--mode rpc") != null);
         try std.testing.expect(std.mem.indexOf(u8, log, "--append-system-prompt") != null);
         try std.testing.expect(std.mem.indexOf(u8, log, "--model anthropic/some-model") != null);
+        // This definition names no ceiling, so nothing narrows pi's tool face:
+        // an allow-list only appears for the read-only rung.
+        try std.testing.expect(std.mem.indexOf(u8, log, "--tools") == null);
     }
 
     // Another turn, sent while nothing is running: the channel is the
@@ -1979,7 +2187,7 @@ test "bundled agent: a pi delegation that is running takes an interrupt as abort
     }
 }
 
-test "bundled agent: a read-only pi delegation asks for the allow-list and stops the run when a tool outside it begins" {
+test "bundled agent: a read-only pi delegation asks for the allow-list and stops the run when a tool outside it begins, and the two rungs above it are one rung on this harness" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -2001,7 +2209,7 @@ test "bundled agent: a read-only pi delegation asks for the allow-list and stops
     try ws.createDirPath(io, ".nulya/agents");
     try ws.writeFile(io, .{
         .sub_path = ".nulya/agents/prober.md",
-        .data = "---\ndescription: only reads\nreadonly: true\nrunner: pi\n---\nYou only read.\n",
+        .data = "---\ndescription: only reads\npermissions: readonly\nrunner: pi\n---\nYou only read.\n",
     });
 
     const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
@@ -2074,6 +2282,49 @@ test "bundled agent: a read-only pi delegation asks for the allow-list and stops
         defer alloc.free(stepped.stdout);
         try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "heard: go") != null);
     }
+
+    // Pi has no level above its own default — no bypass, nothing to switch off
+    // — so `unsafe` and `default` are the same run here: the allow-list simply
+    // comes off. The record still says which was asked for (`runners.zig`), and
+    // that difference is the one this test can see from outside.
+    try ws.writeFile(io, .{
+        .sub_path = ".nulya/agents/bold.md",
+        .data = "---\ndescription: needs the guard rails off\npermissions: unsafe\nrunner: pi\n---\nDo the work.\n",
+    });
+    {
+        const bold: []const EnvPair = &.{
+            .{ .key = "NULYA_SESSION", .value = session_file },
+            .{ .key = "NULYA_PI_EXE", .value = pi_exe },
+            .{ .key = "FAKE_PI_LOG", .value = "bold-log.txt" },
+            .{ .key = "FAKE_PI_TOOL", .value = "write" },
+            .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+        };
+        const bold_run = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"bold\",\"task\":\"go\"}" }, bold);
+        defer alloc.free(bold_run.stdout);
+        try std.testing.expectEqual(@as(u8, 0), bold_run.code);
+        const d = try delegationOf(alloc, bold_run.stdout);
+        defer alloc.free(d);
+
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", wait_budget_ms });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+
+        // No allow-list on the command line, and `write` — the tool the ceiling
+        // stopped the run for above — does not stop this one.
+        const log = try ws.readFileAlloc(io, "bold-log.txt", alloc, .limited(1 << 20));
+        defer alloc.free(log);
+        try std.testing.expect(std.mem.indexOf(u8, log, "--tools") == null);
+
+        const rows = try readRecord(alloc, io, ws, d);
+        defer alloc.free(rows);
+        try std.testing.expect(std.mem.indexOf(u8, rows, "\"permissions\":\"unsafe\"") != null);
+
+        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, &.{
+            .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+        });
+        defer alloc.free(stepped.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "heard: go") != null);
+    }
 }
 
 // ── ar-g: a runner that lives outside this package ──────────────────────────
@@ -2098,9 +2349,13 @@ fn runnerScriptPs1(alloc: std.mem.Allocator, tag: []const u8) ![]u8 {
         \\$ErrorActionPreference = 'Stop'
         \\$null = [Console]::In.ReadToEnd()
         \\$tag = '{s}'
-        \\if ($env:ECHO_RUNNER_LOG) {{ Add-Content -Path $env:ECHO_RUNNER_LOG -Value "$($env:NULYA_ARG_op) $tag" }}
+        \\if ($env:ECHO_RUNNER_LOG) {{ Add-Content -Path $env:ECHO_RUNNER_LOG -Value "$($env:NULYA_ARG_op) $tag $($env:NULYA_ARG_permissions)" }}
         \\if ($env:NULYA_ARG_op -eq 'open') {{
-        \\  if ($env:NULYA_ARG_readonly -eq 'true' -and $env:ECHO_RUNNER_REFUSE_READONLY) {{
+        \\  if ($env:NULYA_ARG_permissions -notin @('readonly','default','unsafe')) {{
+        \\    [Console]::Error.Write('this runner does not know the permission level ' + $env:NULYA_ARG_permissions)
+        \\    exit 1
+        \\  }}
+        \\  if ($env:NULYA_ARG_permissions -eq 'readonly' -and $env:ECHO_RUNNER_REFUSE_READONLY) {{
         \\    [Console]::Error.Write('this runner cannot hold a sub-agent to reading only')
         \\    exit 1
         \\  }}
@@ -2128,9 +2383,13 @@ fn runnerScriptSh(alloc: std.mem.Allocator, tag: []const u8) ![]u8 {
         \\#!/bin/sh
         \\cat >/dev/null
         \\tag={s}
-        \\if [ -n "$ECHO_RUNNER_LOG" ]; then printf '%s %s\n' "$NULYA_ARG_op" "$tag" >> "$ECHO_RUNNER_LOG"; fi
+        \\if [ -n "$ECHO_RUNNER_LOG" ]; then printf '%s %s %s\n' "$NULYA_ARG_op" "$tag" "$NULYA_ARG_permissions" >> "$ECHO_RUNNER_LOG"; fi
         \\if [ "$NULYA_ARG_op" = "open" ]; then
-        \\  if [ "$NULYA_ARG_readonly" = "true" ] && [ -n "$ECHO_RUNNER_REFUSE_READONLY" ]; then
+        \\  case "$NULYA_ARG_permissions" in
+        \\    readonly|default|unsafe) ;;
+        \\    *) printf 'this runner does not know the permission level %s' "$NULYA_ARG_permissions" >&2; exit 1 ;;
+        \\  esac
+        \\  if [ "$NULYA_ARG_permissions" = "readonly" ] && [ -n "$ECHO_RUNNER_REFUSE_READONLY" ]; then
         \\    printf 'this runner cannot hold a sub-agent to reading only' >&2
         \\    exit 1
         \\  fi
@@ -2184,7 +2443,7 @@ fn writeRunnerDraft(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, tag: [
         \\          "message_file": {{ "type": "string" }},
         \\          "interrupt": {{ "type": "string" }},
         \\          "model": {{ "type": "string" }},
-        \\          "readonly": {{ "type": "boolean" }}
+        \\          "permissions": {{ "type": "string" }}
         \\        }},
         \\        "required": ["op"]
         \\      }}
@@ -2332,8 +2591,11 @@ test "bundled agent: a delegation can be held by a runner that is somebody else'
     {
         const log = try ws.readFileAlloc(io, "runner-log.txt", alloc, .limited(1 << 20));
         defer alloc.free(log);
-        try std.testing.expect(std.mem.indexOf(u8, log, "open v1") != null);
-        try std.testing.expect(std.mem.indexOf(u8, log, "round v1") != null);
+        // …and both were handed the ladder's word, not a boolean: this
+        // definition names no ceiling, so the level is `default` on the open
+        // and on every round after it.
+        try std.testing.expect(std.mem.indexOf(u8, log, "open v1 default") != null);
+        try std.testing.expect(std.mem.indexOf(u8, log, "round v1 default") != null);
     }
 
     // Now a NEWER version of the runner becomes `current`…
@@ -2378,7 +2640,7 @@ test "bundled agent: a delegation can be held by a runner that is somebody else'
     }
 }
 
-test "bundled agent: an outside runner that cannot hold a delegation to reading only refuses it at open, and nothing is recorded" {
+test "bundled agent: the permission ladder crosses the contract as one word — an outside runner that cannot hold a delegation to reading only refuses it at open and nothing is recorded, and a level it does not know is refused too" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -2400,7 +2662,7 @@ test "bundled agent: an outside runner that cannot hold a delegation to reading 
     try ws.createDirPath(io, ".nulya/agents");
     try ws.writeFile(io, .{
         .sub_path = ".nulya/agents/prober.md",
-        .data = "---\ndescription: only reads\nreadonly: true\nrunner: ext:echo-runner\n---\nYou only read.\n",
+        .data = "---\ndescription: only reads\npermissions: readonly\nrunner: ext:echo-runner\n---\nYou only read.\n",
     });
 
     const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
@@ -2428,10 +2690,30 @@ test "bundled agent: an outside runner that cannot hold a delegation to reading 
         try std.testing.expect(!(try anyDelegationRecorded(io, alloc, ws)));
     }
 
+    // The word crosses the boundary as itself, never as a boolean: what the
+    // runner is handed is one of exactly three strings, and a runner that is
+    // handed a fourth refuses rather than guessing at what it means — the
+    // vocabulary may grow, and a runner reading a future level as its own
+    // default would be widening a ceiling it never understood.
+    {
+        const runner_ref = try std.fmt.allocPrint(alloc, "{s}@{s}", .{ runner_id, version });
+        defer alloc.free(runner_ref);
+        const unknown = try runCli(alloc, io, ws, &.{
+            exe_abs,                     "ext",   "run",                runner_ref,
+            "agent_runner",              "--arg", "op=open",            "--arg",
+            "delegation=d-000000000000", "--arg", "persona=persona.md", "--arg",
+            "permissions=godmode",
+        });
+        defer alloc.free(unknown.stdout);
+        try std.testing.expect(unknown.code != 0);
+        try std.testing.expect(std.mem.indexOf(u8, unknown.stdout, "does not know the permission level") != null);
+    }
+
     // With a runner that accepts the ceiling, the same definition opens.
     {
         const opened = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"prober\",\"task\":\"go\"}" }, &.{
             .{ .key = "NULYA_SESSION", .value = session_file },
+            .{ .key = "ECHO_RUNNER_LOG", .value = "runner-log.txt" },
             .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
         });
         defer alloc.free(opened.stdout);

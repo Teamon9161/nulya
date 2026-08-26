@@ -127,7 +127,11 @@ fn dispatch(ctx: *const Ctx, name: []const u8, arguments: std.json.ObjectMap) !r
             .delegation = rpc.trimmedField(arguments, "delegation"),
             .session = rpc.trimmedField(arguments, "session"),
             .agent = rpc.trimmedField(arguments, "agent"),
-            .readonly = rpc.boolField(arguments, "readonly"),
+            // Absent says nothing about a ceiling (a `run` invoked by hand), so
+            // it is `default`; a word this build cannot read is `readonly`,
+            // because a run that cannot tell what it was granted has not been
+            // granted anything.
+            .permissions = permissionsArg(arguments),
             .max_steps = rpc.intField(arguments, "max_steps") orelse 0,
             .depth = rpc.intField(arguments, "depth") orelse 1,
             .env = ctx.env,
@@ -239,8 +243,15 @@ fn renderTool(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
             try jw.write(m.label);
             try jw.objectField("description");
             try jw.write(m.def.description);
+            // Two columns, one answer. `permissions` is the field a definition
+            // writes and the record freezes; `readonly` is that same answer as
+            // the one bit every existing reader asks for, kept so a driver that
+            // only ever wanted "may this touch anything" is not made to learn
+            // three words to ask one question.
+            try jw.objectField("permissions");
+            try jw.write(m.def.permissions.label());
             try jw.objectField("readonly");
-            try jw.write(m.def.readonly);
+            try jw.write(m.def.permissions.isReadonly());
             // Which harness will hold the conversation (D1). A driver rendering
             // a persona to open a session itself only ever sees `nulya`; the
             // column is here because "what runs this" is part of what a
@@ -310,8 +321,11 @@ fn list(ctx: *const Ctx) !rpc.Outcome {
         try jw.write(entry.def.name);
         try jw.objectField("description");
         try jw.write(entry.def.description);
+        try jw.objectField("permissions");
+        try jw.write(entry.def.permissions.label());
+        // The derived bit, beside the word it comes from (see `render`).
         try jw.objectField("readonly");
-        try jw.write(entry.def.readonly);
+        try jw.write(entry.def.permissions.isReadonly());
         try jw.objectField("runner");
         try jw.write(entry.def.runner.label());
         try jw.objectField("layer");
@@ -384,6 +398,7 @@ fn delegate(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
     const raw_task = rpc.trimmedField(args, "task");
     const task = raw_task[0..@min(raw_task.len, max_task_bytes)];
     const asked_model = rpc.trimmedField(args, "model");
+    const asked_permissions = rpc.trimmedField(args, "permissions");
     const interrupt = rpc.boolField(args, "interrupt");
 
     if (task.len == 0) {
@@ -431,6 +446,18 @@ fn delegate(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
             .{target},
         );
     }
+    // The ceiling is frozen into the delegation's record when it opens, for the
+    // same reason a model is frozen into a session header: everything about
+    // what a conversation may do was settled before it said its first word, and
+    // a follow-up that could widen it would make the ceiling a suggestion. So
+    // this argument only means anything on the form that CREATES something.
+    if (target.len != 0 and asked_permissions.len != 0) {
+        return rpc.refuse(
+            alloc,
+            "permissions applies to a NEW delegation only: {s} froze what it may do when it was opened, and a follow-up that could widen that would make it no ceiling at all. Drop permissions to follow up, or start a fresh delegation with name + permissions.",
+            .{target},
+        );
+    }
     // `interrupt` is how a message is delivered, not a kind of message (D3), so
     // it only means anything where there is something in flight to interrupt.
     if (name.len != 0 and interrupt) {
@@ -445,7 +472,20 @@ fn delegate(ctx: *const Ctx, args: std.json.ObjectMap) !rpc.Outcome {
     // runner the definition names, and the definition is not read until
     // `newDelegation` renders it (D9). One string, two vocabularies, and the
     // one place that knows which is the one that has the definition in hand.
-    return newDelegation(ctx, parent, name, task, asked_model, depth);
+    // Nearest first, and only two answers: what THIS call asked for, then what
+    // the definition says. Nothing is inherited — not from the parent session,
+    // not from a front end's mode, not from the environment. `unsafe` is only
+    // ever reached because somebody wrote the word in one of those two places,
+    // and this call is itself a tool call the parent's own gate rules on, so a
+    // person watching an `ask`-mode conversation sees it before it runs.
+    const permissions: ?record.Permissions = if (asked_permissions.len == 0) null else record.Permissions.parse(asked_permissions) orelse {
+        return rpc.refuse(
+            alloc,
+            "permissions must be one of {s} — got '{s}'. readonly holds the sub-agent to tools that only read; default is ordinary work in this checkout; unsafe takes the harness's guard rails off and is worth a sentence in your task saying why it is needed.",
+            .{ record.permission_words, asked_permissions },
+        );
+    };
+    return newDelegation(ctx, parent, name, task, asked_model, permissions, depth);
 }
 
 /// A fresh delegation: render the persona, open a session wearing it, give it
@@ -456,6 +496,7 @@ fn newDelegation(
     name: []const u8,
     task: []const u8,
     asked_model: []const u8,
+    asked_permissions: ?record.Permissions,
     depth: u32,
 ) !rpc.Outcome {
     const alloc = ctx.alloc;
@@ -522,6 +563,12 @@ fn newDelegation(
         runner_model = if (asked_model.len != 0) asked_model else m.def.runner_model;
     }
 
+    // The ceiling, nearest answer first and nothing behind the two: the call, or
+    // the definition. There is no third source on purpose (contract ar-h) — an
+    // escalation that could be inherited from the parent, the front end's mode
+    // or the environment would be an escalation nobody wrote down.
+    const permissions = asked_permissions orelse m.def.permissions;
+
     const self_ref = try selfRef(alloc, ctx.io);
 
     // The delegation's own identity, minted BEFORE the conversation is opened:
@@ -548,12 +595,12 @@ fn newDelegation(
         .profile = profile,
         .model = model,
         .runner_model = runner_model,
-        // The read-only ceiling reaches the runner HERE, not only when a round
-        // is driven: a runner that cannot enforce it refuses the whole
+        // The ceiling reaches the runner HERE, not only when a round is driven:
+        // a runner that cannot enforce the read-only one refuses the whole
         // delegation rather than opening one that would run wider than it said
         // (D10). For the nulya arm the gate does it at every call; for Codex the
         // sandbox is asked for and its answer checked.
-        .readonly = m.def.readonly,
+        .permissions = permissions,
         .pins = m.def.pins,
         .with_self = if (m.def.agents.len != 0) self_ref else "",
         .delegation = d,
@@ -587,7 +634,7 @@ fn newDelegation(
         .runner_version = created.version,
         .remote = remote,
         .parent = parent,
-        .readonly = m.def.readonly,
+        .permissions = permissions,
         .profile = profile,
         .model = model,
         .runner_model = runner_model,
@@ -598,7 +645,7 @@ fn newDelegation(
         .remote = remote,
         .runner = m.def.runner,
         .agent = m.def.name,
-        .readonly = m.def.readonly,
+        .permissions = permissions,
         .max_steps = m.def.max_steps,
     };
 
@@ -625,7 +672,11 @@ fn newDelegation(
             d,
             try runners.remoteLabel(m.def.runner, alloc, remote),
             started,
-            if (m.def.readonly) " (read-only)" else "",
+            switch (permissions) {
+                .readonly => " (read-only)",
+                .default => "",
+                .unsafe => " (unsafe: its harness's guard rails are off)",
+            },
             d,
             try runners.transcriptHint(m.def.runner, alloc, remote),
         },
@@ -640,7 +691,7 @@ const Spec = struct {
     remote: []const u8,
     runner: runners.Runner,
     agent: []const u8,
-    readonly: bool,
+    permissions: record.Permissions,
     max_steps: u32,
 };
 
@@ -724,7 +775,10 @@ fn sendTurn(
         .remote = state.created.remote,
         .runner = runner_kind,
         .agent = worn,
-        .readonly = state.created.readonly,
+        // From the RECORD, never from the definition as it reads today: the
+        // ceiling was settled when this delegation opened, and a definition
+        // edited since must not widen a conversation already under way.
+        .permissions = state.created.permissions,
         .max_steps = entry.def.max_steps,
     };
 
@@ -819,7 +873,7 @@ fn startRunner(
         "\"{s}\" ext run {s} run --arg delegation={s} --arg session={s} --arg agent={s} --arg depth={d}",
         .{ ctx.exe, self_ref, spec.delegation, spec.remote, spec.agent, depth + 1 },
     );
-    if (spec.readonly) try cmd.writer.writeAll(" --arg readonly=true");
+    try cmd.writer.print(" --arg permissions={s}", .{spec.permissions.label()});
     if (spec.max_steps != 0) try cmd.writer.print(" --arg max_steps={d}", .{spec.max_steps});
 
     var task_argv: std.ArrayList([]const u8) = .empty;
@@ -879,6 +933,19 @@ fn parentIdentity(alloc: std.mem.Allocator, io: std.Io, parent: []const u8) Iden
         }
     }
     return out;
+}
+
+/// The `run` tool's ceiling, off the wire it arrives on.
+///
+/// Two absences, two answers. NOTHING said is `default` — `run` can be invoked
+/// by hand, and it always could be, and a hand call that named no ceiling never
+/// meant the narrowest one. Something said that this build cannot read is
+/// `readonly`: the caller had an answer, it did not survive, and a run that
+/// cannot tell what it was granted has not been granted anything.
+fn permissionsArg(args: std.json.ObjectMap) record.Permissions {
+    const raw = rpc.trimmedField(args, "permissions");
+    if (raw.len == 0) return record.default_permissions;
+    return record.Permissions.parse(raw) orelse .readonly;
 }
 
 fn failed(alloc: std.mem.Allocator, comptime fmt: []const u8, args: anytype) ![]const u8 {

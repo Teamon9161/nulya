@@ -72,13 +72,16 @@ pub const OpenOptions = struct {
     /// here on purpose: a model id is a fact about that harness, and a parser
     /// on this side could only ever be a second, staler copy of its catalogue.
     model: []const u8 = "",
-    readonly: bool = false,
+    /// How much this delegation may do, in the one vocabulary every arm reads
+    /// (`record.Permissions`). Codex has a word for each of the three, which is
+    /// why the sandbox below is a straight translation rather than a choice.
+    permissions: record.Permissions = record.default_permissions,
 };
 
-/// A connection with a thread on the other end of it. There is no `readonly`
+/// A connection with a thread on the other end of it. There is no `permissions`
 /// here: the ceiling was settled by the exchange that opened this (`attach`
 /// refuses rather than returns when the sandbox comes back wider), so carrying
-/// the flag on would be a second copy of an answer already given.
+/// the word on would be a second copy of an answer already given.
 pub const Session = struct {
     client: Client,
     thread_id: []const u8,
@@ -123,7 +126,7 @@ pub fn open(
     // No `cwd`: the app-server inherits this process's working directory, which
     // is the workspace (DESIGN §7.6). Naming it here would be a second answer
     // to a question the spawn already answered.
-    try writeSandbox(&jw, opts.readonly);
+    try writeSandbox(&jw, opts.permissions);
     if (opts.persona.len != 0) {
         try jw.objectField("developerInstructions");
         try jw.write(opts.persona);
@@ -139,7 +142,7 @@ pub fn open(
         .failed => |f| return .{ .failed = try std.fmt.allocPrint(alloc, "codex refused to start a thread: {s}", .{f}) },
         .ok => |o| o,
     };
-    if (try sandboxRefusal(alloc, result, opts.readonly)) |refusal| return .{ .failed = refusal };
+    if (try sandboxRefusal(alloc, result, opts.permissions)) |refusal| return .{ .failed = refusal };
 
     const thread = switch (result.get("thread") orelse std.json.Value{ .null = {} }) {
         .object => |o| o,
@@ -157,7 +160,7 @@ pub fn attach(
     io: std.Io,
     env: *const std.process.Environ.Map,
     thread_id: []const u8,
-    readonly: bool,
+    permissions: record.Permissions,
 ) !Attempt {
     var client = spawn(alloc, io, env) catch |err| {
         return .{ .failed = try std.fmt.allocPrint(
@@ -183,7 +186,7 @@ pub fn attach(
     // Asked for again on every round, and checked again: a resumed thread is a
     // fresh decision about what it may do, and a read-only delegation that came
     // back writable would be a ceiling that quietly stopped applying.
-    try writeSandbox(&jw, readonly);
+    try writeSandbox(&jw, permissions);
     try jw.endObject();
 
     const reply = try request(alloc, io, &client, "thread/resume", params.writer.buffered());
@@ -191,19 +194,30 @@ pub fn attach(
         .failed => |f| return .{ .failed = try std.fmt.allocPrint(alloc, "codex could not resume thread {s}: {s}", .{ thread_id, f }) },
         .ok => |o| o,
     };
-    if (try sandboxRefusal(alloc, result, readonly)) |refusal| return .{ .failed = refusal };
+    if (try sandboxRefusal(alloc, result, permissions)) |refusal| return .{ .failed = refusal };
 
     handed_over = true;
     return .{ .ok = .{ .client = client, .thread_id = thread_id } };
 }
 
-fn writeSandbox(jw: *std.json.Stringify, readonly: bool) !void {
+/// Codex's own word for each of the three (contract ar-h). A straight
+/// translation, and the reason this arm needs no judgement of its own: the
+/// harness already draws the line in the same three places.
+///
+/// `workspace-write` is Codex's posture for a non-interactive run and the
+/// honest reading of "an agent working in this checkout"; `danger-full-access`
+/// is what a definition asks for by writing `unsafe` and never by omission.
+fn sandboxWord(permissions: record.Permissions) []const u8 {
+    return switch (permissions) {
+        .readonly => "read-only",
+        .default => "workspace-write",
+        .unsafe => "danger-full-access",
+    };
+}
+
+fn writeSandbox(jw: *std.json.Stringify, permissions: record.Permissions) !void {
     try jw.objectField("sandbox");
-    // `workspace-write` for an ordinary delegation: Codex's own posture for a
-    // non-interactive run, and the honest reading of "an agent working in this
-    // checkout". `danger-full-access` would be a wider grant than any definition
-    // asked for.
-    try jw.write(if (readonly) "read-only" else "workspace-write");
+    try jw.write(sandboxWord(permissions));
     // Nobody is at the keyboard: a background task cannot answer an approval
     // request, and a turn that blocks on one would hang until the task is
     // killed. Refusing is the answer a person would not be there to give.
@@ -214,8 +228,13 @@ fn writeSandbox(jw: *std.json.Stringify, readonly: bool) !void {
 /// The fail-closed half of D10: `thread/start` and `thread/resume` both report
 /// the policy they applied, so a read-only delegation can be CONFIRMED rather
 /// than hoped for.
-fn sandboxRefusal(alloc: std.mem.Allocator, result: std.json.ObjectMap, readonly: bool) !?[]const u8 {
-    if (!readonly) return null;
+///
+/// Only `readonly` is checked. The other two are not ceilings — a Codex that
+/// applied something NARROWER than asked has made the delegation less capable,
+/// which is a disappointment and not a breach, and refusing it would turn a
+/// harness's own caution into a failure.
+fn sandboxRefusal(alloc: std.mem.Allocator, result: std.json.ObjectMap, permissions: record.Permissions) !?[]const u8 {
+    if (!permissions.isReadonly()) return null;
     const applied: ?[]const u8 = switch (result.get("sandbox") orelse std.json.Value{ .null = {} }) {
         .object => |o| stringOf(o, "type"),
         .string => |s| s,

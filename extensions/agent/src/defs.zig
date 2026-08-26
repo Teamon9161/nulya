@@ -23,6 +23,7 @@
 const std = @import("std");
 const builtin = @import("builtin.zig");
 const header_mod = @import("header.zig");
+const record = @import("record.zig");
 const runners = @import("runners.zig");
 
 /// Which layer a definition came from, in search order. Workspace wins on a
@@ -35,9 +36,18 @@ pub const Layer = enum { workspace, user, builtin };
 pub const Def = struct {
     name: []const u8,
     description: []const u8 = "",
-    /// A hard ceiling on the tool face, enforced at the gate by whoever runs the
-    /// delegation (`runner.zig`). A claim, not a sandbox (DESIGN §9).
-    readonly: bool = false,
+    /// How much this agent may do: `readonly`, `default` or `unsafe`
+    /// (`record.Permissions`). A ceiling every runner translates into its own
+    /// harness's terms and refuses the delegation rather than exceed (D10) — a
+    /// policy, not a sandbox (DESIGN §9).
+    ///
+    /// It replaced `readonly: true`, which said one thing and left the other
+    /// two grants sharing a word. A definition still writing the old field is
+    /// REFUSED whole, not read as `default`: that is the same reasoning an
+    /// unknown `runner:` gets, and here it is sharper — silently reading a
+    /// definition that asked for read-only as an ordinary one is exactly the
+    /// widening the field exists to prevent.
+    permissions: record.Permissions = record.default_permissions,
     /// WHICH HARNESS holds this agent's conversation (contract D1/D7). The
     /// default is this nulya — a session of its own, driven by a background
     /// task — and every other field below is written in that vocabulary. An
@@ -84,7 +94,17 @@ pub const Def = struct {
     source: []const u8,
 };
 
-pub const ParseError = error{ NoFrontMatter, NoBody, BadName, UnknownRunner, OutOfMemory };
+pub const ParseError = error{
+    NoFrontMatter,
+    NoBody,
+    BadName,
+    UnknownRunner,
+    /// A `permissions:` this package cannot read, or the `readonly:` it
+    /// replaced. Fatal for the reason `UnknownRunner` is: the alternative is
+    /// running a persona at a ceiling nobody wrote down.
+    UnknownPermissions,
+    OutOfMemory,
+};
 
 /// One path component and the `/agent <name>` word: a name becomes `<name>.md`,
 /// so a separator or a `..` would be a lookup outside the two directories this
@@ -214,11 +234,13 @@ pub fn parse(
             def.name = unquote(value);
         } else if (std.mem.eql(u8, key, "description")) {
             def.description = unquote(value);
+        } else if (std.mem.eql(u8, key, "permissions")) {
+            def.permissions = record.Permissions.parse(unquote(value)) orelse return error.UnknownPermissions;
         } else if (std.mem.eql(u8, key, "readonly")) {
-            const v = unquote(value);
-            if (std.mem.eql(u8, v, "true")) def.readonly = true else if (!std.mem.eql(u8, v, "false")) {
-                try warn(alloc, warnings, source, "readonly must be true or false, read as false");
-            }
+            // The word this field replaced. Refused rather than translated: a
+            // ceiling is the one thing that must not be read approximately, and
+            // `permissions: readonly` is one line to write.
+            return error.UnknownPermissions;
         } else if (std.mem.eql(u8, key, "runner")) {
             def.runner = runners.Runner.parse(unquote(value)) orelse return error.UnknownRunner;
         } else if (std.mem.eql(u8, key, "model")) {
@@ -420,9 +442,17 @@ fn readDir(
         var warnings: std.ArrayList([]const u8) = .empty;
         const def = parse(alloc, text, file[0 .. file.len - ".md".len], layer, full, &warnings) catch |err| switch (err) {
             error.OutOfMemory => return err,
-            // The two ways to not be a definition, a name nobody can use, and a
-            // harness this package cannot talk to.
-            error.NoFrontMatter, error.NoBody, error.BadName, error.UnknownRunner => continue,
+            // The two ways to not be a definition, a name nobody can use, a
+            // harness this package cannot talk to, and a ceiling it cannot
+            // read. The last two cost the whole definition for one reason: a
+            // persona that runs somewhere — or at some width — nobody asked
+            // for is worse than a persona that is not there.
+            error.NoFrontMatter,
+            error.NoBody,
+            error.BadName,
+            error.UnknownRunner,
+            error.UnknownPermissions,
+            => continue,
         };
         try append(alloc, out, .{ .def = def, .warnings = warnings.items });
     }
@@ -549,7 +579,7 @@ test "front matter reads into the arguments of one session new" {
         \\# a comment
         \\name: explore
         \\description: "Read-only, and thorough"
-        \\readonly: true
+        \\permissions: readonly
         \\model: deepseek/deepseek-v4-pro
         \\pins: [ext:std/read, ext:std/grep]
         \\max_steps: 12
@@ -560,7 +590,7 @@ test "front matter reads into the arguments of one session new" {
     try std.testing.expectEqualStrings("explore", def.name);
     // The quotes come off and the comma inside them is not a separator.
     try std.testing.expectEqualStrings("Read-only, and thorough", def.description);
-    try std.testing.expect(def.readonly);
+    try std.testing.expectEqual(record.Permissions.readonly, def.permissions);
     try std.testing.expectEqualStrings("deepseek", def.profile);
     try std.testing.expectEqualStrings("deepseek-v4-pro", def.model);
     try std.testing.expectEqual(@as(u32, 12), def.max_steps);
@@ -629,7 +659,8 @@ test "the block list form, the stem as a default name, and CRLF" {
     try std.testing.expectEqualStrings("stem", def.name);
     try std.testing.expectEqual(@as(usize, 2), def.pins.len);
     try std.testing.expectEqualStrings("ext:std/glob", def.pins[1]);
-    try std.testing.expect(!def.readonly);
+    // An unwritten ceiling is an ordinary delegation.
+    try std.testing.expectEqual(record.Permissions.default, def.permissions);
     try std.testing.expectEqual(@as(u32, 0), def.max_steps);
 }
 
@@ -647,12 +678,17 @@ test "a file that is not a definition is refused; a bad field is a warning and a
     // A harness this package cannot talk to costs the whole definition: running
     // the persona on something other than what it named is the worse answer.
     try std.testing.expectError(error.UnknownRunner, parseOne(a, "---\nrunner: borges\n---\nbody\n", &warnings));
+    // …and so does a ceiling nobody can read. Both spellings: a word that is
+    // not one of the three, and the `readonly:` flag this field replaced —
+    // reading either one as "default" is the widening it exists to prevent.
+    try std.testing.expectError(error.UnknownPermissions, parseOne(a, "---\npermissions: none\n---\nbody\n", &warnings));
+    try std.testing.expectError(error.UnknownPermissions, parseOne(a, "---\nreadonly: true\n---\nbody\n", &warnings));
+    try std.testing.expectError(error.UnknownPermissions, parseOne(a, "---\nreadonly: false\n---\nbody\n", &warnings));
 
     // Everything else survives with a default and a sentence: losing a whole
     // persona over one bad line is the expensive answer.
     const def = try parseOne(a,
         \\---
-        \\readonly: yes
         \\model: /nope
         \\pins: [read, ext:std/read]
         \\max_steps: soon
@@ -660,14 +696,13 @@ test "a file that is not a definition is refused; a bad field is a warning and a
         \\body
         \\
     , &warnings);
-    try std.testing.expect(!def.readonly);
     try std.testing.expectEqualStrings("", def.profile);
     try std.testing.expectEqual(@as(u32, 0), def.max_steps);
     // The bad pin is dropped and the good one kept — an unresolvable pin refuses
     // the whole `session new`, so it must never reach one.
     try std.testing.expectEqual(@as(usize, 1), def.pins.len);
     try std.testing.expectEqualStrings("ext:std/read", def.pins[0]);
-    try std.testing.expectEqual(@as(usize, 4), warnings.items.len);
+    try std.testing.expectEqual(@as(usize, 3), warnings.items.len);
 }
 
 test "the spawn whitelist and the exchange budget, and what a bad entry costs" {
@@ -836,7 +871,10 @@ test "the bundled personas parse, and explore is the read-only one" {
         try std.testing.expectEqualStrings("", def.profile);
     }
     var w: std.ArrayList([]const u8) = .empty;
-    try std.testing.expect((try parse(a, builtin.find("explore").?.text, "explore", .builtin, "b", &w)).readonly);
+    try std.testing.expectEqual(
+        record.Permissions.readonly,
+        (try parse(a, builtin.find("explore").?.text, "explore", .builtin, "b", &w)).permissions,
+    );
     // Exactly one of them coordinates, and it is the only one that is not a leaf.
     var coordinators: usize = 0;
     for (builtin.all) |b| {

@@ -28,16 +28,17 @@
 //! It answers two operations, told apart by `op`:
 //!
 //!   `op=open`   Open a conversation. Arguments: `delegation` (the `d-…` this is
-//!               for), `persona` (PATH of the frozen system prompt), `readonly`
-//!               (`true`/`false`), `model` (opaque, omitted when the definition
-//!               named none). On success print `{"remote":"<handle>"}` — any
+//!               for), `persona` (PATH of the frozen system prompt),
+//!               `permissions` (`readonly` / `default` / `unsafe`), `model`
+//!               (opaque, omitted when the definition named none). On success
+//!               print `{"remote":"<handle>"}` — any
 //!               string that lets a later round find the conversation again —
 //!               and exit 0. Exit non-zero to REFUSE the whole delegation:
 //!               stderr is the reason and reaches the model, and nothing is
 //!               recorded.
 //!
 //!   `op=round`  Answer exactly one message. Arguments: `delegation`, `persona`,
-//!               `readonly`, `model` as above, plus `remote` (what `open` gave
+//!               `permissions`, `model` as above, plus `remote` (what `open` gave
 //!               back), `message_file` (PATH of the one message to answer) and
 //!               `interrupt` (PATH of a marker file). On success print
 //!               `{"text":"<the harness's final answer for this round>"}` and
@@ -56,10 +57,15 @@
 //! put either (Windows caps the whole of one at 32 KiB). Everything else is a
 //! short scalar.
 //!
-//! **`readonly` is a ceiling, not a preference (D10).** A runner that cannot
-//! hold its harness to reading must refuse at `op=open`; there is no third
-//! answer, and silently running wider than the definition asked for is the one
-//! outcome this whole field exists to prevent.
+//! **`permissions` is three words, and the narrow one is a ceiling (D10,
+//! contract ar-h).** `readonly` means the harness must be held to reading: a
+//! runner that cannot do that must refuse at `op=open`, because silently
+//! running wider than the definition asked for is the one outcome this whole
+//! field exists to prevent. `default` is ordinary work in this checkout;
+//! `unsafe` is everything the harness can do, and it only ever arrives because
+//! somebody wrote the word. **A word this runner does not recognise is refused
+//! too** — the vocabulary may grow, and a runner that read a future level as
+//! its own default would be widening a ceiling it never understood.
 //!
 //! **The version is frozen when the delegation opens (D7).** `current` is
 //! resolved once, at `open`, and every later round of that delegation calls that
@@ -182,7 +188,7 @@ pub const OpenOptions = struct {
     ref: []const u8,
     delegation: []const u8,
     persona: []const u8,
-    readonly: bool,
+    permissions: record.Permissions,
     model: []const u8,
 };
 
@@ -199,7 +205,7 @@ pub fn open(
     try appendArg(alloc, &argv, "op", "open");
     try appendArg(alloc, &argv, "delegation", opts.delegation);
     try appendArg(alloc, &argv, "persona", opts.persona);
-    try appendArg(alloc, &argv, "readonly", if (opts.readonly) "true" else "false");
+    try appendArg(alloc, &argv, "permissions", opts.permissions.label());
     if (opts.model.len != 0) try appendArg(alloc, &argv, "model", opts.model);
 
     const said = proc.run(alloc, io, argv.items) catch |err| {
@@ -236,7 +242,7 @@ pub const Session = struct {
     remote: []const u8,
     persona: []const u8,
     model: []const u8,
-    readonly: bool = false,
+    permissions: record.Permissions = record.default_permissions,
 };
 
 pub const Attempt = union(enum) { ok: Session, failed: []const u8 };
@@ -251,7 +257,7 @@ pub fn attach(
     version: []const u8,
     delegation: []const u8,
     remote: []const u8,
-    readonly: bool,
+    permissions: record.Permissions,
     model: []const u8,
 ) !Attempt {
     if (delegation.len == 0) {
@@ -274,7 +280,7 @@ pub fn attach(
         .remote = remote,
         .persona = persona,
         .model = model,
-        .readonly = readonly,
+        .permissions = permissions,
     } };
 }
 
@@ -325,7 +331,7 @@ pub fn driveRound(
     try appendArg(alloc, &argv, "remote", sess.remote);
     try appendArg(alloc, &argv, "persona", sess.persona);
     try appendArg(alloc, &argv, "message_file", message_path);
-    try appendArg(alloc, &argv, "readonly", if (sess.readonly) "true" else "false");
+    try appendArg(alloc, &argv, "permissions", sess.permissions.label());
     if (sess.model.len != 0) try appendArg(alloc, &argv, "model", sess.model);
     // Only when there is a delegation to interrupt. A runner that is handed no
     // marker path is being told there is nothing to watch, rather than being

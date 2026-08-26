@@ -60,6 +60,72 @@ pub const inbox_name = "inbox";
 /// the only writer, so one name is enough.
 pub const message_name = "message.txt";
 
+// ── how much a delegation may do (contract ar-h / D13) ──────────────────────
+
+/// The one ceiling a delegation carries, in three words.
+///
+/// **Why three and not a flag.** `readonly` answered one question — "may this
+/// sub-agent change anything" — and every harness has an answer for it. But the
+/// other side of that flag was doing two jobs at once: "work in this checkout
+/// the way an agent normally does" and "do whatever you are able to", and those
+/// are not the same grant. A definition that needs the second one had no way to
+/// say so, and a driver reading the record had no way to tell which one it got.
+///
+/// **`default` and `unsafe` are the same thing on the nulya arm today (D13).**
+/// There is no gate between them and there is not going to be one built out of
+/// guessing at command strings: a ceiling made of string classification is a
+/// ceiling that reads convincingly and holds nothing (agents-and-review §1).
+/// Real separation is the sandbox (PLAN §3.8). What the two words DO differ in
+/// right now is what the record says, and that is not nothing — it is the
+/// frozen answer a sandbox will read when there is one, and it is what an
+/// external harness that HAS the distinction is told (Codex and Claude both do).
+///
+/// **Escalation is never inherited.** `unsafe` reaches a delegation from its
+/// definition or from the `agent` call that opened it, and nowhere else: no
+/// front end's mode, no environment variable, nothing about the parent. The
+/// call itself passes through the parent session's own gate, so a person
+/// watching an `ask`-mode conversation sees the word and can refuse it.
+pub const Permissions = enum {
+    /// Reads and nothing else. A hard ceiling every runner must be able to
+    /// enforce or refuse the delegation for (D10).
+    readonly,
+    /// What an agent working in this checkout ordinarily does: read, write,
+    /// run things. The default, and what an unwritten field means.
+    default,
+    /// Everything the harness is able to do, with its own guard rails off.
+    /// Written on purpose, by somebody who meant it.
+    unsafe,
+
+    /// The word as a definition writes it and as the record freezes it. Null is
+    /// "not one of the three", which is never read as a default: a misspelling
+    /// that fell back to `default` would be a ceiling quietly widened, which is
+    /// the one outcome this field exists to prevent.
+    pub fn parse(text: []const u8) ?Permissions {
+        const word = std.mem.trim(u8, text, " \t");
+        if (std.mem.eql(u8, word, "readonly")) return .readonly;
+        if (std.mem.eql(u8, word, "default")) return .default;
+        if (std.mem.eql(u8, word, "unsafe")) return .unsafe;
+        return null;
+    }
+
+    pub fn label(self: Permissions) []const u8 {
+        return @tagName(self);
+    }
+
+    /// The read-only ceiling, asked as the one question the runners' own
+    /// mechanisms answer. A named predicate rather than `== .readonly` spelled
+    /// out in five files: the arms all ask this one thing.
+    pub fn isReadonly(self: Permissions) bool {
+        return self == .readonly;
+    }
+};
+
+/// What an unwritten field means: an ordinary delegation.
+pub const default_permissions: Permissions = .default;
+
+/// The three words, for the messages that have to list them.
+pub const permission_words = "readonly, default, unsafe";
+
 const hex_len = 12;
 
 /// A delegation id, checked because it becomes a path — and because "that is
@@ -131,7 +197,11 @@ pub const Created = struct {
     /// nulya runner, a thread id for Codex, whatever the harness calls it.
     remote: []const u8,
     parent: []const u8,
-    readonly: bool = false,
+    /// The ceiling this delegation was opened at, frozen with everything else
+    /// decided once. A row with no such column is not a row this build wrote,
+    /// and it is read back as `readonly` — the narrowest answer, because a
+    /// record that cannot say what it granted has not granted anything.
+    permissions: Permissions = .readonly,
     profile: []const u8 = "",
     model: []const u8 = "",
     /// What an EXTERNAL runner was asked to run on — an opaque string in that
@@ -185,8 +255,8 @@ pub fn appendCreated(
     try jw.write(c.remote);
     try jw.objectField("parent");
     try jw.write(c.parent);
-    try jw.objectField("readonly");
-    try jw.write(c.readonly);
+    try jw.objectField("permissions");
+    try jw.write(c.permissions.label());
     if (c.profile.len != 0) {
         try jw.objectField("profile");
         try jw.write(c.profile);
@@ -257,20 +327,22 @@ pub fn read(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const 
         const kind = stringOf(obj, "kind") orelse continue;
         if (std.mem.eql(u8, kind, "created")) {
             if (state != null) continue; // one delegation, one opening
-            state = .{ .created = .{
-                .agent = stringOf(obj, "agent") orelse "",
-                .runner = stringOf(obj, "runner") orelse "",
-                .runner_version = stringOf(obj, "runner_version") orelse "",
-                .remote = stringOf(obj, "remote") orelse "",
-                .parent = stringOf(obj, "parent") orelse "",
-                .readonly = switch (obj.get("readonly") orelse std.json.Value{ .null = {} }) {
-                    .bool => |b| b,
-                    else => false,
+            state = .{
+                .created = .{
+                    .agent = stringOf(obj, "agent") orelse "",
+                    .runner = stringOf(obj, "runner") orelse "",
+                    .runner_version = stringOf(obj, "runner_version") orelse "",
+                    .remote = stringOf(obj, "remote") orelse "",
+                    .parent = stringOf(obj, "parent") orelse "",
+                    // Missing or unreadable is `readonly`, the narrowest of the
+                    // three: a delegation whose record cannot say what it was
+                    // opened at is not one to keep driving at the wider setting.
+                    .permissions = Permissions.parse(stringOf(obj, "permissions") orelse "") orelse .readonly,
+                    .profile = stringOf(obj, "profile") orelse "",
+                    .model = stringOf(obj, "model") orelse "",
+                    .runner_model = stringOf(obj, "runner_model") orelse "",
                 },
-                .profile = stringOf(obj, "profile") orelse "",
-                .model = stringOf(obj, "model") orelse "",
-                .runner_model = stringOf(obj, "runner_model") orelse "",
-            } };
+            };
             continue;
         }
         if (std.mem.eql(u8, kind, "turn")) {
@@ -665,7 +737,7 @@ test "the record opens once and counts every turn, and a torn tail is not a fact
         .runner = "nulya",
         .remote = "s-1-abc",
         .parent = "s-0-def",
-        .readonly = true,
+        .permissions = .readonly,
     });
     try appendTurn(a, io, ws, id, false);
     try appendTurn(a, io, ws, id, true);
@@ -674,7 +746,7 @@ test "the record opens once and counts every turn, and a torn tail is not a fact
     try std.testing.expectEqualStrings("explore", state.created.agent);
     try std.testing.expectEqualStrings("nulya", state.created.runner);
     try std.testing.expectEqualStrings("s-1-abc", state.created.remote);
-    try std.testing.expect(state.created.readonly);
+    try std.testing.expectEqual(Permissions.readonly, state.created.permissions);
     try std.testing.expectEqual(@as(u32, 2), state.turns);
 
     // An append cut short mid-line is dropped rather than glued onto the next
@@ -688,6 +760,40 @@ test "the record opens once and counts every turn, and a torn tail is not a fact
     try std.testing.expectEqual(@as(u32, 2), (try read(a, io, ws, id)).?.turns);
     try appendTurn(a, io, ws, id, false);
     try std.testing.expectEqual(@as(u32, 3), (try read(a, io, ws, id)).?.turns);
+}
+
+test "the ceiling is one of three words, and anything else is the narrowest one" {
+    try std.testing.expectEqual(Permissions.readonly, Permissions.parse("readonly").?);
+    try std.testing.expectEqual(Permissions.default, Permissions.parse(" default ").?);
+    try std.testing.expectEqual(Permissions.unsafe, Permissions.parse("unsafe").?);
+    // Never a default: a misspelling that widened the ceiling is the one
+    // outcome this field exists to prevent.
+    try std.testing.expect(Permissions.parse("true") == null);
+    try std.testing.expect(Permissions.parse("read-only") == null);
+    try std.testing.expect(Permissions.parse("") == null);
+    try std.testing.expectEqualStrings("unsafe", Permissions.unsafe.label());
+    try std.testing.expect(Permissions.readonly.isReadonly());
+    try std.testing.expect(!Permissions.default.isReadonly());
+}
+
+test "a created row this build did not write grants nothing" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const id = "d-000000000fa1";
+    try ws.createDirPath(io, try dirOf(a, id));
+    try ws.writeFile(io, .{
+        .sub_path = try pathIn(a, id, record_name),
+        .data = "{\"v\":1,\"kind\":\"created\",\"agent\":\"x\",\"runner\":\"nulya\",\"remote\":\"s-1\",\"parent\":\"s-0\"}\n",
+    });
+    try std.testing.expectEqual(Permissions.readonly, (try read(a, io, ws, id)).?.created.permissions);
 }
 
 test "an external runner's inbox hands messages back in the order they were sent, once each" {

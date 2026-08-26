@@ -52,6 +52,15 @@
 //! (BUGS #16). Reading the answer the kernel already has removes the failure
 //! mode rather than hardening it.
 //!
+//! **`default` and `unsafe` both run without a gate at all, on purpose (D13).**
+//! The step is spawned exactly as it always was — the kernel's own "not gated
+//! is byte-identical" property, kept on this side too. There is no middle
+//! policy between them because the only thing that could be one is a classifier
+//! guessing at command strings, and a ceiling made of string classification
+//! reads convincingly and holds nothing (agents-and-review §1). What separates
+//! the two words today is what the record froze; what will separate them for
+//! real is a sandbox (PLAN §3.8), and it will read that record.
+//!
 //! **Any harness, one loop.** Everything above is about WHEN a round runs and
 //! who is allowed to run it, and none of it is about nulya. So the lease, the
 //! release-and-recheck, the interrupt marker and the report framing are written
@@ -105,7 +114,11 @@ pub const Args = struct {
     /// Which persona it is, for the report's own framing. Empty is legal — the
     /// report then names the delegation only.
     agent: []const u8 = "",
-    readonly: bool = false,
+    /// How much this delegation may do (`record.Permissions`, contract ar-h),
+    /// as the `agent` tool froze it into the record and passed it here. Absent
+    /// is `default` — a `run` invoked by hand said nothing about a ceiling —
+    /// while a word this build cannot read is `readonly`, the narrowest one.
+    permissions: record.Permissions = record.default_permissions,
     /// 0 = the kernel's own budget.
     max_steps: u32 = 0,
     /// How deep this delegation sits. Passed to the step it drives as
@@ -306,7 +319,7 @@ fn openBackend(
                 runner_version,
                 args.delegation,
                 args.session,
-                args.readonly,
+                args.permissions,
                 runner_model,
             );
             return switch (attempt) {
@@ -325,7 +338,7 @@ fn openBackend(
                 std.Io.Dir.cwd(),
                 args.delegation,
                 args.session,
-                args.readonly,
+                args.permissions,
                 runner_model,
             );
             return switch (attempt) {
@@ -345,7 +358,7 @@ fn openBackend(
                 std.Io.Dir.cwd(),
                 args.delegation,
                 args.session,
-                args.readonly,
+                args.permissions,
                 runner_model,
             );
             return switch (attempt) {
@@ -358,7 +371,7 @@ fn openBackend(
             // delegation opened (D10): a resumed thread is a fresh decision
             // about what it may do, and a ceiling that stopped applying after
             // round one would be worse than no ceiling at all.
-            const attempt = try codex.attach(alloc, io, args.env, args.session, args.readonly);
+            const attempt = try codex.attach(alloc, io, args.env, args.session, args.permissions);
             return switch (attempt) {
                 .ok => |s| .{ .ok = .{ .codex = s } },
                 .failed => |f| .{ .failed = f },
@@ -457,7 +470,7 @@ fn driveNulyaRound(
     // `--gate` only when there is something to refuse. Without it the step runs
     // exactly as it always has — the kernel's own "not gated is byte-identical"
     // property, kept on this side too.
-    if (args.readonly) try argv.append(alloc, "--gate");
+    if (args.permissions.isReadonly()) try argv.append(alloc, "--gate");
 
     // The step inherits this process's environment plus the depth. A `Map` copy
     // rather than `setenv`: the variable belongs to the child, and mutating our
@@ -472,7 +485,7 @@ fn driveNulyaRound(
     var child = try std.process.spawn(io, .{
         .argv = argv.items,
         .environ_map = &child_env,
-        .stdin = if (args.readonly) .pipe else .ignore,
+        .stdin = if (args.permissions.isReadonly()) .pipe else .ignore,
         .stdout = .pipe,
         .stderr = .pipe,
     });
@@ -495,7 +508,7 @@ fn driveNulyaRound(
         defer alloc.free(out_buf);
         var reader = child.stdout.?.readerStreaming(io, out_buf);
         var in_buf: [256]u8 = undefined;
-        var writer = if (args.readonly) child.stdin.?.writerStreaming(io, &in_buf) else null;
+        var writer = if (args.permissions.isReadonly()) child.stdin.?.writerStreaming(io, &in_buf) else null;
 
         // One line at a time, in arrival order. The gate is strictly
         // request-then-answer — the kernel is blocked on our verdict while we

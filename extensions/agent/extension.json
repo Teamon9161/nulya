@@ -30,6 +30,10 @@
               "type": "string",
               "description": "Which model runs this delegation: `<profile>` or `<profile>/<model-id>`. Only with name — a follow-up runs on what its session already froze. Omit unless you have a reason: without it the definition decides, and failing that the sub-agent runs on the same model you do. Give one when this piece of work is worth a different one than the conversation it came from. `nulya config show` lists what can run."
             },
+            "permissions": {
+              "type": "string",
+              "description": "How much this delegation may do: `readonly` (tools that only read — anything else is refused before it runs), `default` (ordinary work in this checkout: read, write, run things) or `unsafe` (everything its harness can do, with its own guard rails off). Only with name — a follow-up runs at the ceiling its delegation froze when it opened. Omit unless you have a reason: the definition already chose, and it usually chose right. `unsafe` is never inherited from anything — it happens because you write it here — so write it only when the task genuinely needs it and say why in the task itself; the person whose machine this is may be asked to approve this call and that sentence is what they read."
+            },
             "interrupt": {
               "type": "boolean",
               "description": "Stop what the sub-agent is doing now and have it take this message immediately, instead of at its next natural boundary. Only with session — there is nothing to interrupt in a delegation that does not exist yet."
@@ -85,9 +89,9 @@
               "type": "string",
               "description": "Which definition it is running, for the report's framing."
             },
-            "readonly": {
-              "type": "boolean",
-              "description": "Hold it to tools that declare themselves read-only, refusing everything else at the kernel's gate."
+            "permissions": {
+              "type": "string",
+              "description": "The ceiling this delegation was opened at — `readonly`, `default` or `unsafe`, as its record froze it. `readonly` holds the run to tools that declare themselves read-only, refusing everything else at the kernel's gate."
             },
             "max_steps": {
               "type": "integer",

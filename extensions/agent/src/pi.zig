@@ -50,6 +50,13 @@
 //! catches a breach at the first tool rather than before the first word — and it
 //! is the strongest thing this protocol offers. Recorded as such rather than
 //! dressed up: contract §6.
+//!
+//! **And there is no `unsafe` here to reach for.** Pi's other two levels are
+//! one level: it has no bypass mode, nothing to switch off, no grant above the
+//! set it already takes. So a delegation asking for `unsafe` runs exactly as a
+//! `default` one does on this arm, and the record still freezes the word that
+//! was asked for — what a definition wanted and what a harness could give are
+//! two facts, and collapsing them would lose the one a later sandbox reads.
 
 const std = @import("std");
 const proc = @import("proc.zig");
@@ -157,7 +164,7 @@ pub fn attach(
     base: std.Io.Dir,
     delegation: []const u8,
     session_id: []const u8,
-    readonly: bool,
+    permissions: record.Permissions,
     model: []const u8,
 ) !Attempt {
     if (delegation.len == 0) {
@@ -186,7 +193,13 @@ pub fn attach(
     if (model.len != 0) try argv.appendSlice(alloc, &.{ "--model", model });
     // The allowlist covers built-in, extension and custom tools alike, which is
     // what makes it the ceiling rather than a preference.
-    if (readonly) try argv.appendSlice(alloc, &.{ "--tools", try std.mem.join(alloc, ",", &readonly_tools) });
+    //
+    // Only `readonly` narrows anything here. Pi has NO level above its own
+    // default — no bypass, no way to hand it more than it already takes — so
+    // `unsafe` runs exactly as `default` does on this arm. The record still
+    // says `unsafe`, because what was asked for is a different fact from what
+    // this harness was able to grant (`runners.zig`, contract ar-h).
+    if (permissions.isReadonly()) try argv.appendSlice(alloc, &.{ "--tools", try std.mem.join(alloc, ",", &readonly_tools) });
 
     var child = std.process.spawn(io, .{
         .argv = argv.items,
@@ -204,7 +217,7 @@ pub fn attach(
         .child = child,
         .buf = buf,
         .reader = child.stdout.?.readerStreaming(io, buf),
-        .readonly = readonly,
+        .readonly = permissions.isReadonly(),
     } };
 }
 

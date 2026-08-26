@@ -54,7 +54,7 @@ function writeDef(dir: string, name: string, text: string): void {
 const explore = `---
 name: explore
 description: Read-only reconnaissance that returns a report
-readonly: true
+permissions: readonly
 model: scripted/scripted-demo
 max_steps: 12
 ---
@@ -146,7 +146,7 @@ test("render writes a definition's body to a file a session can wear, installs n
   mkdirSync(dir, { recursive: true })
   writeFileSync(
     join(dir, "probe.md"),
-    "---\nname: probe\ndescription: a prober\nreadonly: true\nmax_steps: 4\npins: [nonsense]\n---\nfirst prompt\n",
+    "---\nname: probe\ndescription: a prober\npermissions: readonly\nmax_steps: 4\npins: [nonsense]\n---\nfirst prompt\n",
   )
   const pkg = await buildAgentPackage(ws)
   expect(pkg.id).toBe("agent")

@@ -175,7 +175,7 @@ nulya ext run <id>@<v-…> agent_runner --arg op=… --arg delegation=… …
 | `op` | `open` | `round` | 这次要它做什么 |
 | `delegation` | ✓ | ✓ | `d-<12 hex>`；它的盘面在 `.nulya/delegations/<d>/` |
 | `persona` | ✓ | ✓ | **路径**：冻结的 system prompt（`<d>/persona.md`） |
-| `readonly` | ✓ | ✓ | `true` / `false`——一个**天花板**，管不了就拒绝（D10） |
+| `permissions` | ✓ | ✓ | `readonly` / `default` / `unsafe`（ar-h）。`readonly` 是一个**天花板**，管不了就拒绝（D10）；**认不出的词也要拒**——把没见过的档读成自己的缺省，就是放宽一个没看懂的天花板 |
 | `model` | 可选 | 可选 | 不透明模型字符串，那个 harness 自己的词汇（D9） |
 | `remote` | — | ✓ | `open` 回的那个 handle |
 | `message_file` | — | ✓ | **路径**：这一轮要答的**那一条**消息（`<d>/message.txt`） |
@@ -199,7 +199,7 @@ nulya ext run <id>@<v-…> agent_runner --arg op=… --arg delegation=… …
 
 **留在 `extensions/agent` 的**（runner 一个字都不用管）：delegation 身份与 record（D2）·
 exchange 预算 · `<d>/inbox/` 与消息顺序（D5）· runner 租约与 release-and-recheck（D4）·
-"标记写在消息之后"（D6）· 报告框架与经 `task_finished` 回父场 · readonly 的**拒绝路径** ·
+"标记写在消息之后"（D6）· 报告框架与经 `task_finished` 回父场 · 权限档的**拒绝路径** ·
 persona 的冻结与消息的 staging。
 
 **归 runner 的**：怎么跟那个 harness 说话。仅此。
@@ -215,7 +215,11 @@ persona 的冻结与消息的 staging。
 #!/bin/sh
 cat >/dev/null                       # 参数也在 stdin 上；不读就把管道晾在那儿
 if [ "$NULYA_ARG_op" = "open" ]; then
-  [ "$NULYA_ARG_readonly" = "true" ] && { echo "cannot enforce read-only" >&2; exit 1; }
+  case "$NULYA_ARG_permissions" in
+    readonly) echo "cannot enforce read-only" >&2; exit 1 ;;   # 管不了就拒绝（D10）
+    default|unsafe) ;;                                         # 翻译成这个 harness 的说法
+    *) echo "unknown permission level" >&2; exit 1 ;;          # 没见过的档也拒
+  esac
   printf '{"remote":"%s"}' "$NULYA_ARG_delegation"; exit 0
 fi
 msg=$(cat "$NULYA_ARG_message_file")
@@ -234,7 +238,7 @@ manifest 那一半：
       "op": {"type":"string"}, "delegation": {"type":"string"},
       "remote": {"type":"string"}, "persona": {"type":"string"},
       "message_file": {"type":"string"}, "interrupt": {"type":"string"},
-      "model": {"type":"string"}, "readonly": {"type":"boolean"} },
+      "model": {"type":"string"}, "permissions": {"type":"string"} },
       "required": ["op"] } }] } }
 ```
 
@@ -252,3 +256,12 @@ manifest 那一半：
 - 2026-08-26 · **flake 根因（承接上一条 §6 里那句"`unable to read results of configure phase`，归入测试提速那一轮一并诊断"）**：**那句话与 `ext build` 无关，也不是 zig 编译缓存的竞争**——它是 `zig build` 前端在**掩盖 build runner 的崩溃**。链条是死的：① 这句字符串在 `zig.exe` 里（`strings` 可见），不在 `lib/` 里，属于 `zig build` 前端；② 它读的是 `<local cache>/tmp/<nonce>`，而写这个文件的**唯一**地方是 `lib/compiler/build_runner.zig:474`，紧跟着 `process.exit(3) // Indicate configure phase failed with meaningful stdout`，条件是 `graph.needed_lazy_dependencies.entries.len != 0`——**本仓库没有 lazy dependency，这条路永不执行**；③ build runner 的正常出口只有 0 / 1 / 2（`build_runner.zig` 尾部那个 `code:` 块）；④ 而 **Windows 上 `std.process.abort()` 就是 `RtlExitUserProcess(3)`**（`lib/std/process.zig:806`），任何 panic 最终走到它。于是 **exit 3 = build runner 崩了**，前端把它误读成"configure phase 有话说"，再因为那个 nonce 文件根本不存在而打出这一句。⑤ 反向也成立：`ext build` 调的是 `zig build-exe`，**没有 configure phase**，它不可能产生这句话；nulya 自己杀进程树用的是 `TerminateJobObject(job, 1)`，也不是 3。**结论：下次见到它，要看的是这句话前面 build runner 打了什么，不是扩展缓存。**
   - **另一类 flake 确实在测试里，且可复现**：16 个 busy loop 压满 20 核之后跑全套，第一次就红——`bundled agent: a codex delegation that is running takes …` 与 `bundled agent: render writes a persona …` 都停在 `task wait --any --timeout-ms 60000` 返回 2（预算到点，不是断言错）。上一条 ③ 把预算提到 180s 之后，同样负载下三次里两次全绿；剩下那次是真的在 180s 里没等到（整轮跑了 233s，约 90 倍降速），那已经超出值得防的条件。
   - **顺带记下的两个事实**（不是本轮的问题，但下一个人会撞上）：`std.testing.tmpDir` 把每个 e2e workspace 建在 **`<repo>/.zig-cache/tmp/<hex>`**，也就是 zig 自己的缓存目录里；`.zig-cache/tmp` 下现有约 140 个**空的**残留目录，说明 `cleanup()` 的 `deleteTree` 偶尔删得掉内容删不掉目录（Windows 上通常意味着还有人把它当 cwd 开着）。频率约每轮 0.5 个，无害，但它是"某个子进程活得比测试久"的唯一可见痕迹。
+- 2026-08-27 · **ar-h 落地（三档权限阶梯，内核 `src/` 零改动、`tui/` 源码零改动）**。`readonly: true` 变成 **`permissions: readonly | default | unsafe`**（缺省 `default`），一个词走完定义 → 调用 → record → 五个 arm。
+  - **字段最终形状**：`record.Permissions`（enum + `parse` / `label` / `isReadonly` + `default_permissions` + `permission_words`）住在 `record.zig` 而不是 `defs.zig` 或 `runners.zig`——它是**冻进 record 的那一列**，而 `record.zig` 又恰好是四个 arm 与 `defs.zig` 都够得着的那个模块（`runners.zig` import 各个 arm，arm 不能反向 import 它）。**老词直接拒**：`readonly:`（`true` 与 `false` 都算）与任何不认识的档位都是 `ParseError.UnknownPermissions` → **warn-and-skip 整个定义**，与 `UnknownRunner` 同一条纪律走同一处 `continue`。选"拒"而不是"warn + 缺省"的理由是这个字段本身的理由：把"要求只读"读成"普通委派"正是它存在要拦的那件事，而一个静默放宽的天花板比一个不存在的 persona 糟。自带的 `explore.md` 与两个 `tui/test` 的 fixture 一并改写成新词。
+  - **调用参数** `agent{permissions?}`：只在**开新委派**时接受（`session` 形态给它 → 拒绝并指路，与 `model` 逐位同构：档位与身份一样在开场冻死）；认不出的词当场拒并列出三个（`record.permission_words`）。优先级 **调用 > 定义**，**没有第三层**——父场档位、前端 mode、环境变量一概不参与；提权的授权点是 `agent{…}` 这个 call 本身要过的**父场 gate**。
+  - **各 arm 映射**（表在 `runners.zig` 模块注释顶部、DESIGN §7.8「三档权限阶梯」、guide skill 三处同形）：`nulya` = `readonly` 挂 `--gate` 机械应答 / 另外两档不挂门（D13，`default` 与 `unsafe` 在这个 arm 上行为相同，差别只在 record 冻下的那一列）· `codex` = `read-only`（验回报）/ `workspace-write` / `danger-full-access`（`codex.sandboxWord`，只有 readonly 验回报——回报得更窄不是违约）· `claude` = 窄 `--tools` + `dontAsk` + `--strict-mcp-config`（验 `system/init`）/ `acceptEdits` / `bypassPermissions`（`claude.modeWord`；窄档那两个额外 flag 只随 readonly 出现）· `pi` = `--tools read,grep,find,ls` / 全部内建 / **同 default**（pi 没有更宽的档，如实按 default 跑并在 `pi.zig` 模块注释、DESIGN、guide 三处写明，record 仍冻 `unsafe`——"要什么"与"给得出什么"是两个事实）· `ext:<id>` = `--arg permissions=<三词>` 原样透传（不是 bool），契约同步到 `external.zig` 模块注释 / §7.2 表 / §7.4 配方 / DESIGN §7.8 / guide skill，并写明**认不出的档要拒**（fail-closed 纪律不变）。
+  - **record 变化**：`created` 行的 `readonly` 布尔列 → **`permissions` 字符串列**（总是写，不是"非默认才写"——它是这条 delegation 的中心事实）。读回**没有这一列或读不出**一律 `readonly`：一份说不出自己授了什么的 record，就是什么都没授。`run` tool 的参数同样从 `readonly: bool` 变 `permissions: string`，两种缺失分开答——**没写** = `default`（手工调 `run` 从来不意味着最窄），**写了但读不出** = `readonly`。
+  - **投影兼容**：`list` / `render` 各多一列 `permissions`（词），**同时保留派生的 `readonly` bool**（= `permissions == "readonly"`），所以 `tui/` 源码一行未改——`/agent` picker、`startAgent` 的 readonly 天花板、`AgentEntry` 都照旧读那一列。**TUI 跟随（把三档画出来、`/agent` 显示档位）属后续轮次**，本轮不做。
+  - **一处对"`tui/` 一字不改"的偏离，只在 fixture**：`tui/test/agents.test.ts` 与 `tui/test/delegate.test.tsx` 各有一份用旧词写的 agent 定义 fixture，它们经真实二进制的 `ext run agent list`，改词之后那两份定义被整份 skip，6 条测试红。改动是**两个 fixture 字符串**（`readonly: true` → `permissions: readonly`），与自带 `explore.md` 完全同类的数据改写，`tui/src/**` 一个字节未动。
+  - **测试**：`zig build test` **510 pass / 2 skip**（`record.zig` 新增两条：三个词的解析与"不是这三个就是最窄"、以及一条没有 `permissions` 列的 created 行读回 `readonly`；`defs.zig` 的错误表补 `permissions: none` / `readonly: true` / `readonly: false` 三句）· `zig build e2e` **110 pass**（109 → 110）· `zig build e2e-agent` **19 pass / 40s** · `cd tui && bun test test/agents.test.ts test/delegate.test.tsx` **11 pass**。新 e2e 一条（`the permission ladder is one word frozen into the delegation`：两个投影的两列一致 · 老词定义根本不出现在目录里 · 定义的 `unsafe` 冻进 record 且回执说出口 · 调用的 `readonly` 压过定义的缺省）；其余映射断言**长在既有测试里**，不新起炉灶——codex / claude / pi 三条 readonly 测试各多跑一次 `unsafe` 委派并断言 log 里的 `danger-full-access` / `bypassPermissions` / 没有 `--tools`，三条全环测试各多一句 `default` 的断言（`workspace-write` / `acceptEdits` / 没有 `--tools`），外置契约那条多两块（`open v1 default` / `round v1 default` 的透传，与直接 `ext run … --arg permissions=godmode` 被 runner 拒）。`tests/fake_codex.zig` 改了一行：日志从只记 method 改成记**整条请求**——`sandbox` 是一个参数，而它正是这套映射从外面唯一能验的东西。
+  - **本轮外的两点**：① 跑测试前撞上两个**上一轮遗留的** `nulya task supervise` 进程（cwd 指向早已删掉的 `.zig-cache/tmp/…`）攥着 `zig-out/bin/nulya.exe`，`zig build` 报 `AccessDenied`——正是 §6 末尾"某个子进程活得比测试久"那条痕迹的具体形态，杀掉即可。② 一次全量 `zig build e2e` 里 codex steer 那条测试红过一次、单跑与随后两次全量都绿，与既知的高负载 flake 一致（我新加的 `workspace-write` 断言读的是 `thread/start` 的同步日志，不参与那条时序）。

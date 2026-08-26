@@ -54,7 +54,7 @@ beforeAll(() => {
   // Read-only, so the scripted provider's one `shell` call meets the ceiling.
   writeFileSync(
     join(dir, "probe.md"),
-    "---\ndescription: a read-only prober\nreadonly: true\nmax_steps: 2\n---\nYou only read. Report what you found.\n",
+    "---\ndescription: a read-only prober\npermissions: readonly\nmax_steps: 2\n---\nYou only read. Report what you found.\n",
   )
   writeFileSync(join(dir, "writer.md"), "---\ndescription: an ordinary one\n---\nYou may do anything the tab may.\n")
 })

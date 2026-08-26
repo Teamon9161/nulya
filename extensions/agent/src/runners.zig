@@ -35,6 +35,34 @@
 //! What the arms DO share ends up in `record.zig` rather than in one of them:
 //! the per-delegation inbox, the minted uuid, the frozen persona. Adding the
 //! third external arm needed no new shape there at all.
+//!
+//! ── the three words, per harness (contract ar-h) ────────────────────────────
+//!
+//! A definition says `permissions: readonly | default | unsafe`
+//! (`record.Permissions`) and every arm translates the same three words into
+//! whatever its harness has. `readonly` is the only one that is a CEILING — a
+//! runner that cannot hold its harness to reading refuses the delegation (D10)
+//! — and the only one with a confirmation step where the protocol offers one.
+//!
+//!   |          | `readonly`                    | `default`         | `unsafe`             |
+//!   |----------|-------------------------------|-------------------|----------------------|
+//!   | `nulya`  | `--gate`, answered mechanically | no gate           | no gate (D13)        |
+//!   | `codex`  | `sandbox: read-only` + echo   | `workspace-write` | `danger-full-access` |
+//!   | `claude` | narrow `--tools` + `dontAsk` + echo | `acceptEdits` | `bypassPermissions`  |
+//!   | `pi`     | `--tools read,grep,find,ls`   | everything built in | everything built in |
+//!   | `ext:…`  | `permissions=readonly`        | `permissions=default` | `permissions=unsafe` |
+//!
+//! **The nulya row is deliberate, not unfinished (D13).** There is no gate
+//! between `default` and `unsafe` because the only thing that could go there is
+//! a classifier guessing at command strings, and a ceiling made of string
+//! classification reads convincingly and holds nothing (agents-and-review §1).
+//! Real separation is the sandbox (PLAN §3.8). What the two words differ in on
+//! this arm today is the record — the frozen answer that sandbox will read.
+//!
+//! **The pi row is an honest shortfall.** Pi has no level wider than its own
+//! default: no bypass, no "off" for whatever guard rails it applies. An
+//! `unsafe` delegation there runs exactly as a `default` one does, and the
+//! record still says `unsafe` — what was asked for, not what was granted.
 
 const std = @import("std");
 const proc = @import("proc.zig");
@@ -147,10 +175,12 @@ pub const StartOptions = struct {
     /// The opaque model string for an external runner (D9). Never both this and
     /// `profile`/`model`: which pair applies is decided by the runner, once.
     runner_model: []const u8 = "",
-    /// A hard ceiling this runner must be able to enforce, or refuse the whole
-    /// delegation for (D10). The nulya arm answers the kernel's gate; an
-    /// external one translates it into its own sandbox and CONFIRMS it.
-    readonly: bool = false,
+    /// How much this delegation may do, in the one vocabulary every arm
+    /// translates (`record.Permissions`, contract ar-h). `readonly` is a hard
+    /// ceiling a runner must be able to enforce or refuse the whole delegation
+    /// for (D10); the other two are grants each harness has its own word for
+    /// (§ "the three words, per harness", below).
+    permissions: record.Permissions = record.default_permissions,
     pins: []const []const u8 = &.{},
     /// `--with <agent@version>` so the sub-agent can delegate onwards. Empty is
     /// a leaf, which is what every persona but a coordinator is.
@@ -205,7 +235,7 @@ pub fn start(r: Runner, alloc: std.mem.Allocator, io: std.Io, opts: StartOptions
                 .ref = try external.refOf(alloc, id, version),
                 .delegation = opts.delegation,
                 .persona = try record.pathIn(alloc, opts.delegation, record.persona_name),
-                .readonly = opts.readonly,
+                .permissions = opts.permissions,
                 .model = opts.runner_model,
             });
             return .{
@@ -287,7 +317,7 @@ pub fn start(r: Runner, alloc: std.mem.Allocator, io: std.Io, opts: StartOptions
             const opened = try codex.open(alloc, io, opts.env, .{
                 .persona = persona,
                 .model = opts.runner_model,
-                .readonly = opts.readonly,
+                .permissions = opts.permissions,
             });
             return .{ .run = switch (opened) {
                 .ok => |thread| .{ .code = 0, .stdout = @constCast(thread), .stderr = "" },

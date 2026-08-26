@@ -35,7 +35,9 @@
 //!                         applying, whatever was asked for. The lever for
 //!                         D10's fail-closed check: set it to `workspaceWrite`
 //!                         and a read-only delegation must be refused.
-//!   `FAKE_CODEX_LOG`      a file to append one line per request to.
+//!   `FAKE_CODEX_LOG`      a file to append one line per request to — the whole
+//!                         request, so the sandbox a thread ASKED for can be
+//!                         read as well as the one it was told it got.
 //!   `FAKE_CODEX_HOLD`     a path whose EXISTENCE holds the first turn open:
 //!                         while it is there the turn emits deltas and does not
 //!                         finish, which is what gives a test a run in flight to
@@ -74,7 +76,10 @@ pub fn main(init: std.process.Init) !void {
             else => continue,
         };
         const method = stringOf(obj, "method") orelse continue;
-        try state.note(method);
+        // The WHOLE request, not just its method: the sandbox a thread was
+        // asked for is a parameter, and it is the one fact the permission
+        // ladder's mapping can be checked against from outside.
+        try state.note(trimmed);
         try state.handle(method, idOf(obj), obj);
     }
 }
