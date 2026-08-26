@@ -75,11 +75,11 @@ import {
 import {
   activeVersionOf,
   adoptBundled,
-  autoActivatable,
   builtContributions,
   failedIds,
   needsZigIds,
   planStore,
+  safeToActivateUnattended,
   seedBundled,
   sessionMember,
   summarize,
@@ -568,14 +568,20 @@ export function App(props: AppProps) {
    * it produced itself, so a package somebody deliberately rolled back stays
    * where they put it.
    *
-   * It asks the package ONE question before pointing at it (`autoActivatable`,
-   * T52): does it say `apply: "auto"`? For everything else activating composes
-   * nothing (DESIGN §5.1) and is safe to do unattended. For that one, activating
-   * IS composing — the kernel joins it to every fresh session here from that
-   * moment — and a background pass does not get to decide what every session on
-   * this machine carries. That is T31's bug in its current spelling: the guard
-   * used to be "does it contribute a system prompt", which was the closest thing
-   * to this question anybody could ask before a package could state its reach.
+   * It asks the package TWO questions before pointing at it
+   * (`safeToActivateUnattended`, T52/T55): does the CANDIDATE say
+   * `apply: "auto"`, and — for an id that might already be active — does
+   * whatever IS active today say so too? For everything else activating
+   * composes nothing (DESIGN §5.1) and is safe to do unattended. For an
+   * `apply: "auto"` package on either side of the move, activating IS
+   * composing — the kernel joins or drops it from every fresh session here
+   * from that moment — and a background pass does not get to decide what
+   * every session on this machine carries, in either direction. That is
+   * T31's bug in its current spelling: the guard used to be "does it
+   * contribute a system prompt", which was the closest thing to this
+   * question anybody could ask before a package could state its reach; T55
+   * closed the mirror case the single-sided version missed — a standing
+   * package whose newest draft quietly turned `manual`.
    */
   const syncStores = async () => {
     const plan = props.sync
@@ -645,9 +651,12 @@ export function App(props: AppProps) {
             if (line.state !== "built" && !(root.user && refreshed.includes(line.id))) continue
             // One manifest read, off the version this pass just produced: a
             // package that asked to be in every session is named, not switched
-            // on (`autoActivatable`).
+            // on (`autoActivatable`). A second check guards the mirror case —
+            // a package already active as `apply: "auto"` whose freshly built
+            // draft turned `manual` — because moving the pointer there would
+            // just as quietly pull it OUT of every session (`safeToActivateUnattended`, T55).
             const built = await builtContributions(props.ws, syncRoot(props.ws, root.user), line.id, line.version)
-            if (built && !autoActivatable(built)) {
+            if (built && !(await safeToActivateUnattended(props.ws, line.id, built))) {
               standing.push(line.id)
               continue
             }

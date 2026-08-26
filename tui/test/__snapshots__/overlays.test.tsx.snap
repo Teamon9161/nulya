@@ -44,6 +44,6 @@ exports[`/ext shows the version line, the current pointer and the usage counts 1
 
 
 
- Enter on/off · j/k move · h/l pane · Esc close · ? keys
+ Enter active/inactive · j/k move · h/l pane · Esc close · ? keys
 "
 `;

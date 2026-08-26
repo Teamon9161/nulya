@@ -128,9 +128,9 @@ test("the switch moves a whole package: on only adds, off clears both lists it o
 
 test("the switch state is the two axes read together, and `partial` is what it is called", () => {
   // Both axes agree.
-  expect(switchState(true, 2, 2)).toBe("on")
-  expect(switchState(true, 0, 0)).toBe("on") // a data package: no tools to pin
-  expect(switchState(false, 2, 0)).toBe("off")
+  expect(switchState(true, 2, 2)).toBe("active")
+  expect(switchState(true, 0, 0)).toBe("active") // a data package: no tools to pin
+  expect(switchState(false, 2, 0)).toBe("inactive")
   // Active, half its face pinned — the state the panel used to draw nowhere.
   expect(switchState(true, 5, 3)).toBe("partial")
   // Pinned but no longer active: the one that makes `session new` refuse.

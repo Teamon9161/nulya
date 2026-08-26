@@ -68,3 +68,35 @@
 - **`tui/` 跟随**：`tui/src/nulya/files.ts` 的 `toolSurfaceOf` 仍认 `pin` / `with` / `driver` 并把别的词折成 `pin`，所以新词下 `pinTools` / `withTools` / `driverTools` 三个投影全错（都落进 `pinTools`）；`Contributions` 也还没有 `apply`。`/ext` 的 tools pane 与 T33 的 driver 折叠都读这三个投影。
 - **`--with X --pin ext:X/tool` 这个组合在 TUI 里已经是坏的，与本轮无关**：`7b1612f`（improve tui）把 `handoff` / `plan` 的 tool 改成 `surface: "with"` 时没有同步 TUI 与 e2e，于是 `tests/e2e/extension.zig` 的 handoff / plan 两条在本轮之前就是红的（实测 `git stash` 后仍红）。本轮把那两条 e2e 改成 `--with`（正确的新写法）；TUI 侧 `tui.toml [extensions] session_with` 那条路径仍会传一个会被拒的 `--pin ext:handoff/handoff`，修法是删掉那个 pin。
 - ✅ 两条都已由主会话落地（tui.md T52 / T53）。**§1 A 关于 `agent/agent` 那句话被推翻了一半**：它当时写的是「`agent` 的入口 tool 加显式 `manual`，因为带不带它是 driver 每次的决定」——而 `--with` 已经把那个决定说完了（那个包对模型面的**全部**贡献就是这一个 tool），membership 之外再要一根 pin 只是同一句话说两遍。T53 把它翻成 `auto` 并删掉三处 `--pin ext:agent/agent`。留在 §1 / §3 里的原话不改：那是当时的判断，记录不因后来的修正而重写。
+
+## 5. 本轮之后的修正（外部 review，2026-08-26）
+
+一份外部 review 读了 §1 B 落地后的代码，指出两处。两处都不是新功能，是把这一轮已定的语义**做对**，内核 physics 一条未动。
+
+### 5.1 `ext sync --activate` 回归字面语义 ✅
+
+§1 B 最后一条（"`ext sync --activate` 永不激活一个 `apply:auto` 且当前无 `current` 的包"）**推翻**。守卫删掉：`--activate` 现在真正激活它动的每一个 id，`apply:auto` 的包不例外，并在 stderr 说 `ext activate` 那同一句后果 + `ext deactivate`（`cli/ext.zig` 的 `noteStandingMembership` 现在两个调用点共用；`declaresStandingMembership` 随之删除）。两条理由：
+
+- **那条守卫有洞，且是个堵不上的洞。** `apply` 是**版本化**字段，而守卫只看"现在有没有 `current`"：v1（`manual`，已有 `current`）→ v2（`auto`）的升级从"已经有 current"那条分支照样走进每一场 session，反向（`auto` → `manual`）也悄悄退出。代码注释里"moving the pointer changes the version, not the reach"这句话跨 `apply` 变化时是**假的**。
+- **认错了对象。** `--activate` 是人打出来的一个 flag，不该变成"激活除了 `apply:auto` 以外的东西"。T31 真正要防的是**前端无人值守的后台 sync**，而有这个问题的那个前端（TUI 开屏那趟）自己带着 `extensions.autoActivatable()` 守卫——policy 在 driver，不在内核的动词里。
+
+e2e 从"断言拒绝"改写成"断言激活 + 告知行 + `deactivate` 之后下一次 sync 把它开回来"（`tests/e2e/ext_cli.zig`）。
+
+### 5.2 `apply:auto` discovery 不再读一个没有 integrity 的 manifest ✅
+
+§1 B 的**两段式读**（`Store.readVersionDeclaration`：无 seal、无 re-digest 地读冻结的 `extension.json` 问 `apply`）有一个不对称的缺口：把一个**已激活的 `apply:auto` 包**的冻结 `extension.json` 篡改/损坏成 `manual`（或改成解析不出来），discovery 就静默跳过它——**corruption 能悄悄关掉一段常驻 system prompt**，任何一环都不报错；反方向（`manual` 改成 `auto`）反而会进 `.sealed` 校验被抓。
+
+**采纳 review 的第一条路（activate 时记录），第二条（廉价 per-file digest）不可行**：`seal.json` 只有整棵树的 `package_digest`，而它唯一的锚是"重算出来的版本 id 必须等于版本目录名"（`integrity.openVersion`）——没有 Merkle 结构，单独验 `extension.json` 一个文件锚不到任何东西，往 seal 里加一列 `manifest_digest` 也只是加一个同样可被一起篡改、且谁都证明不了的数。
+
+落点选了**扩展 `current` 文件本身**而不是旁边加一个小文件：`<id>/current` 从 `v-<hash>` 变成 `v-<hash> apply=<auto|manual>`，由 `activate` 在 `.sealed` 校验之后、**同一次原子 rename** 里写下。一个文件的好处不是省一个 inode，是**没有第二个状态要维护**：不存在"记录写了、指针没写"的崩溃窗口，不存在记录与指针不同步的陈旧类，`deactivate` 一如既往只删一个文件。
+
+- `store.Active{version, standing}` + `Store.readCurrent`（唯一读 `current` 的地方，`activeVersion` 成了它的 wrapper）；`Roots.ActiveEntry` 多带一位 `standing`，来自 `listActive` 那次本来就要做的读——**这一层因此一个字节都没变贵**。
+- `composition.resolveApplyAutoExtensions` 只信记录：`standing` 为真才走 `.sealed`。两条既有性质都保住了——没被记录的坏包（含坏 `manual` 包）**只跳过、不挡 session**；`manual` 被篡改成 `auto` **授不了 reach**（没人问它）。新增的那条：被记录的包一旦被动过，`.sealed` 当场失败 → 响亮拒绝（`reportBrokenApplyAuto` 原样复用）。
+- `Store.readVersionDeclaration` 删除（三个调用点全部消失）。`ext list` 的 `standing` 那一列也改读记录（`contributionMarker` 的 `entry.standing`）：那一列答的是"这一场会不会有它"，而这个答案从此只有一个来源。
+- **旧 store 的语义写明白**：没有 `apply=` 列的 `current`（这一列出现之前写的）读作**不常驻**——unknown 不是主张——修法是重跑一次 `nulya ext activate <id> <version>`。pre-release，不为它造迁移。
+- e2e 新增两条（`tests/e2e/ext_cli.zig`）：已激活 `apply:auto` 包的冻结 manifest 被改成 `manual` / 改成非 JSON → `session new` 硬失败并点名 id / 版本 / `ext deactivate`；`manual` 包的冻结 manifest 被改成 `auto` → 不进 session、session 正常开。单测一条（`store.zig`）钉住记录的读写与"编辑 manifest 改不动记录、但会让 `.sealed` 失败"。
+
+### 5.3 记账：两条 design debt（**记录，不实现**）
+
+- **prompt position。** `contributes.system_prompts[]` 今天是一串路径，顺序即数组顺序，包与包之间由 §5.6 的 block 顺序（kernel → extension → inline → catalog）决定。将来一个条目可以写成 `{path, position: early|normal|late}`——**纯包内排序元数据**，不动 membership、不动 freeze、不进 header schema（冻的仍是文本）。等第一个真实需求（两个 mode 包同场、其中一个要收尾）再做。
+- **pin 蕴含成员的"半成员"不对称。** 一条 pin 把它的包 union 进 composition，那个包的 skills 与 system_prompts **会**进这一场，但 `composition.isFullMember` 不展开它其它的 `surface:"auto"` tools（DESIGN §5.1）。所以"半成员"这个词只对 tool 面成立，对 prompt / skill 面不成立——两边的直觉会打架。现实里唯一的 consumer 是 `std`（六个 tool、无 prompt 无 skill），所以**没有实际 bug**。真要收口有两条路（pin 蕴含的成员也不带 prompts/skills；或者展开全部 auto tools），两条都要往 freeze schema 里加"这个成员是怎么进来的"，而今天没有一个用例值这个价——先记账。

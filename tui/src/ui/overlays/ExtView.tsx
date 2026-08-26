@@ -16,10 +16,14 @@
  *    pin (the operator's `registry.pinned_native_tools`, or an evolution
  *    session's `session new --pin`), so there is no "next" for a table to
  *    predict — these counts are the evidence for that judgement, not it.
- *  - the SWITCH. `Enter` on an id turns the extension on or off for the next
- *    session: on = point `current` at a built version AND pin every
- *    `surface:"manual"` tool it declares; off = take those pins back and clear
- *    `current`. Those are the only two things it writes (T52). T12 §5 held the
+ *  - the SWITCH. `Enter` on an id makes the extension active or inactive for
+ *    the next session: active = point `current` at a built version AND pin
+ *    every `surface:"manual"` tool it declares; inactive = take those pins
+ *    back and clear `current`. Those are the only two things it writes (T52).
+ *    "Active" names what THIS store root points at, not whether the next
+ *    session actually carries it — a `manual` package still needs naming
+ *    (`/with`, a declared command, `[extensions] with`) to reach one; only
+ *    `standing` (`apply: "auto"`) answers that (T55). T12 §5 held the
  *    two axes apart on principle and refused to merge them — that principle is
  *    right about the kernel and was wrong about the screen, where both keys were
  *    invisible and the state they moved was drawn nowhere (tui.md §11, T22). The
@@ -96,8 +100,8 @@ const panes: VisiblePane[] = ["extensions", "tools", "usage"]
 /**
  * An action waiting for `y`. Only two are left, and both name a VERSION: moving
  * the pointer along the timeline by hand, and the one action here that deletes
- * something. The on/off switch asks nothing — it moves a pointer and a pin list,
- * both of which the same key puts back (tui.md §11, T22).
+ * something. The active/inactive switch asks nothing — it moves a pointer and a
+ * pin list, both of which the same key puts back (tui.md §11, T22).
  */
 type Pending =
   | { kind: "activate"; id: string; version: string }
@@ -111,20 +115,21 @@ function confirmLine(pending: Pending): string {
 }
 
 /**
- * Whether an extension is ON for the next session, and — when the answer is
- * "half" — which half is missing.
+ * Whether an extension is ACTIVE for the next session, and — when the answer
+ * is "half" — which half is missing.
  *
- * `on` means both axes agree: an active version, and every tool it declares on
- * the face. `partial` is the honest name for the states the kernel can be left
- * in — pinned but no longer active (a pointer moved back), active with only some of its
- * tools pinned (`Space` on one row) — and it is warn-coloured because the first
- * of those is what makes `session new` refuse.
+ * `active` means both axes agree: an active version, and every tool it
+ * declares on the face. `partial` is the honest name for the states the
+ * kernel can be left in — pinned but no longer active (a pointer moved back),
+ * active with only some of its tools pinned (`Space` on one row) — and it is
+ * warn-coloured because the first of those is what makes `session new`
+ * refuse.
  */
-export type SwitchState = "on" | "partial" | "off"
+export type SwitchState = "active" | "partial" | "inactive"
 
 export function switchState(active: boolean, tools: number, pinned: number): SwitchState {
-  if (active && pinned === tools) return "on"
-  if (!active && pinned === 0) return "off"
+  if (active && pinned === tools) return "active"
+  if (!active && pinned === 0) return "inactive"
   return "partial"
 }
 
@@ -408,7 +413,7 @@ export function ExtView(props: {
    * §5.1), read from the same projection the pins come from. This front end
    * never writes it — since T52 it keeps no standing list of its own at all —
    * but a package config already composes is one whose row must not read as
-   * "off".
+   * "inactive".
    */
   const [configWith, setConfigWith] = createSignal<string[]>([])
   const [userPath, setUserPath] = createSignal("")
@@ -618,14 +623,14 @@ export function ExtView(props: {
     pinnable(entry).filter((id) => pinState(id, sources()) !== "off").length
   const stateOf = (entry: ExtensionEntry): SwitchState =>
     switchState(isActive(entry), pinnable(entry).length, pinnedCount(entry))
-  /** The short cell beside a half-on package: which half. */
+  /** The short cell beside a half-active package: which half. */
   const switchCell = (entry: ExtensionEntry): string => {
     if (stateOf(entry) !== "partial") return ""
     if (!isActive(entry)) return "pins only"
     return `${pinnedCount(entry)}/${pinnable(entry).length} tools`
   }
   const switchColor = (state: SwitchState) =>
-    state === "on" ? style.theme.ok : state === "partial" ? style.theme.warn : style.theme.faint
+    state === "active" ? style.theme.ok : state === "partial" ? style.theme.warn : style.theme.faint
 
   /** The columns this overlay may draw in: the box pads one on each side. */
   const inner = () => Math.max(24, screen().width - 2)
@@ -825,19 +830,20 @@ export function ExtView(props: {
       setNotice("A promotes one tool · Tab to the tools pane and pick it")
       return
     }
-    setNotice("Enter turns the whole extension on or off · Space pins one tool, in the tools pane")
+    setNotice("Enter activates or deactivates the whole extension · Space pins one tool, in the tools pane")
   }
 
   /**
    * The switch: `Enter` on an id, or a click on its marker (tui.md §11, T22).
    *
-   * ON is both axes at once — point `current` at a built version, and pin every
-   * `manual` tool it declares so the model can call them. What `current` then
-   * MEANS is the package's own word: `manual` makes it nameable (a declared
-   * command, `/with`, a pin), `auto` makes the kernel compose it into every fresh session
-   * here (DESIGN §5.1). OFF is both back. Nothing here is irreversible and
-   * nothing here reaches the session already on screen (physics #2), which is
-   * why neither direction asks for a `y`.
+   * ACTIVE is both axes at once — point `current` at a built version, and pin
+   * every `manual` tool it declares so the model can call them. What
+   * `current` then MEANS is the package's own word: `manual` makes it
+   * nameable (a declared command, `/with`, a pin), `auto` makes the kernel
+   * compose it into every fresh session here (DESIGN §5.1). INACTIVE is both
+   * back. Nothing here is irreversible and nothing here reaches the session
+   * already on screen (physics #2), which is why neither direction asks for a
+   * `y`.
    *
    * Both directions are OPTIMISTIC (tui.md §11, T23): the row moves on the
    * keypress, the notice says the work is in flight, and the subprocess that
@@ -859,11 +865,11 @@ export function ExtView(props: {
       setNotice(`${entry.id} · still working on the last press`)
       return
     }
-    if (stateOf(entry) === "on") {
-      await switchOff(entry, ids)
+    if (stateOf(entry) === "active") {
+      await deactivateExtension(entry, ids)
       return
     }
-    await switchOn(entry, ids)
+    await activateExtension(entry, ids)
   }
 
   /**
@@ -877,7 +883,7 @@ export function ExtView(props: {
     await applyPin({ user: before.user, session: before.session, notice: "" }, { reconcile: false })
   }
 
-  const switchOn = async (entry: ExtensionEntry, ids: string[]) => {
+  const activateExtension = async (entry: ExtensionEntry, ids: string[]) => {
     // The version to point at: what the draft would build to when the plan says
     // it is there, else the newest build in the store. `not built` names a
     // version that does not exist yet, which is what `b` is for.
@@ -907,12 +913,12 @@ export function ExtView(props: {
     const change = room && ids.length > 0 ? pinAll(ids, sources()) : null
     hold(entry.id)
     const before = { current: entry.current, pins: pinSnapshot() }
-    setNotice(`${entry.id} on…`)
+    setNotice(`activating ${entry.id}…`)
     // Optimistic on the SCREEN, and only there: both halves of the switch move
     // now, and neither is written until the kernel has agreed to the half it
     // owns. A pin naming an extension with no `current` is what makes
     // `session new` refuse to start at all, so it must never outlive a failed
-    // activate — which is the same reason OFF writes its pins first.
+    // activate — which is the same reason deactivating writes its pins first.
     setLocalCurrent(entry.id, version)
     if (change?.session) setTuiPins(change.session)
     if (change?.user) setUserPins(change.user)
@@ -949,10 +955,10 @@ export function ExtView(props: {
       // through its own declared command, or `/with` when it declared none;
       // everything else gets the version and what its tools did.
       entry.apply === "auto"
-        ? `${entry.id} on · ${version} · composed into every session on this machine · Enter again takes it back`
+        ? `${entry.id} active · ${version} · composed into every session on this machine · Enter again takes it back`
         : entry.systemPrompts.length > 0
-          ? `${entry.id} on · /${wearCommand(entry)?.name ?? `with ${entry.id}`} opens a new tab wearing it for one session · Enter again takes that away`
-          : `${entry.id} on · ${version}` +
+          ? `${entry.id} active · /${wearCommand(entry)?.name ?? `with ${entry.id}`} opens a new tab wearing it for one session · Enter again takes that away`
+          : `${entry.id} active · ${version}` +
             (ids.length > 0
               ? room
                 ? ` · ${ids.length} tool(s) pinned`
@@ -961,7 +967,7 @@ export function ExtView(props: {
                 ? ` · ${entry.autoTools.length} tool(s) come with sessions that compose it`
                 : entry.tools.length > 0
                   ? // A package whose tools are an `ext run` interface: it is
-                    // fully on, and none of it is on the model's face by design.
+                    // fully active, and none of it is on the model's face by design.
                     ` · its ${entry.tools.length} tool(s) stay off the model face · /compact and drivers call them with ext run`
                   : ""),
     )
@@ -969,13 +975,13 @@ export function ExtView(props: {
     void reconcile()
   }
 
-  const switchOff = async (entry: ExtensionEntry, ids: string[]) => {
+  const deactivateExtension = async (entry: ExtensionEntry, ids: string[]) => {
     // Pins first. A pin naming an extension with no `current` is refused by
     // `session new` outright, so the order that leaves a legal world at every
     // point is: take the pins away, then the pointer.
     hold(entry.id)
     const before = { current: entry.current, pins: pinSnapshot() }
-    setNotice(`${entry.id} off…`)
+    setNotice(`deactivating ${entry.id}…`)
     let stuck = ""
     if (ids.length > 0) {
       const change = unpinAll(ids, sources())
@@ -999,10 +1005,10 @@ export function ExtView(props: {
       // for an `apply: "auto"` package (DESIGN §5.1) — with no `current` it is
       // in nothing — so that is the sentence its row gets.
       (entry.apply === "auto"
-        ? `${entry.id} off · it leaves every session composed here`
+        ? `${entry.id} inactive · it leaves every session composed here`
         : entry.systemPrompts.length > 0
-          ? `${entry.id} off · ${wearCommand(entry) ? `/${wearCommand(entry)!.name} is gone` : `it can no longer be worn`}`
-          : `${entry.id} off · its skills leave the composition`) +
+          ? `${entry.id} inactive · ${wearCommand(entry) ? `/${wearCommand(entry)!.name} is gone` : `it can no longer be worn`}`
+          : `${entry.id} inactive · its skills leave the composition`) +
         ` · versions all stay${stuck ? ` · ${stuck}` : ""}`,
     )
     void reconcile()
@@ -1495,9 +1501,9 @@ export function ExtView(props: {
                     <text fg={gutter().fg} flexShrink={0}>
                       {gutter().text}
                     </text>
-                    {/* Is this extension on for the next session? Two shapes and
-                        three colours, so the answer survives a terminal with no
-                        colour at all (tui.md §11, T22). */}
+                    {/* Is this extension active for the next session? Two shapes
+                        and three colours, so the answer survives a terminal with
+                        no colour at all (tui.md §11, T22). */}
                     <box
                       width={switch_width}
                       height={1}
@@ -1506,7 +1512,7 @@ export function ExtView(props: {
                       onMouseUp={flip.onMouseUp}
                     >
                       <text fg={switchColor(on())}>
-                        {on() === "off" ? style.glyphs.switchOff : style.glyphs.switchOn}{" "}
+                        {on() === "inactive" ? style.glyphs.switchOff : style.glyphs.switchOn}{" "}
                       </text>
                     </box>
                     <box width={idCols().id} flexShrink={0}>
@@ -1514,7 +1520,7 @@ export function ExtView(props: {
                         fg={
                           entry().shadowed
                             ? style.theme.dim
-                            : on() === "on" || here()
+                            : on() === "active" || here()
                               ? style.theme.fg
                               : style.theme.muted
                         }
@@ -1524,15 +1530,15 @@ export function ExtView(props: {
                     </box>
                     {/* `apply: "auto"`: activating this package composes it into
                         every session on this machine (T52). Warn-coloured while
-                        it is on — that is the state somebody has to be able to
-                        spot without reading a detail pane. */}
+                        it is active — that is the state somebody has to be able
+                        to spot without reading a detail pane. */}
                     <box width={idCols().standing} flexShrink={0}>
-                      <text fg={on() === "off" ? style.theme.faint : style.theme.warn}>
+                      <text fg={on() === "inactive" ? style.theme.faint : style.theme.warn}>
                         {fit(standingCell(entry()), Math.max(0, idCols().standing - 2))}
                       </text>
                     </box>
-                    {/* Half on: which half. `3/5 tools` and `pins only` are the
-                        two ways the kernel's two axes come apart. */}
+                    {/* Half active: which half. `3/5 tools` and `pins only` are
+                        the two ways the kernel's two axes come apart. */}
                     <box width={idCols().on} flexShrink={0}>
                       <text fg={style.theme.warn}>{fit(switchCell(entry()), Math.max(0, idCols().on - 2))}</text>
                     </box>
@@ -1754,9 +1760,9 @@ export function ExtView(props: {
         width={inner()}
         help={help}
         notice={confirm() ? null : notice()}
-        brief="Enter on/off · j/k move · h/l pane · Esc close"
+        brief="Enter active/inactive · j/k move · h/l pane · Esc close"
         more={[
-          "Enter activates the extension and pins its tools, again turns both off · a click on the row the cursor is already on does the same",
+          "Enter activates the extension and pins its tools, again makes both inactive · a click on the row the cursor is already on does the same",
           "h/l ←/→ Tab move across the panes · j/k ↑/↓ move down a list",
           "Space pin one tool · A promote it to always · d fold the internal tools in or out · b build the source · s take this binary's copy of a bundled draft (`differs`) · p prune old versions",
           "a activate one named version, on the version line — an older one is the rollback · t tools · u usage",

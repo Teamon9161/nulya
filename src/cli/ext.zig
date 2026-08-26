@@ -586,39 +586,22 @@ fn appendActivation(
     if (result.already_built and current != null) {
         return out.print(" (current stays {s})", .{current.?});
     }
-    // A package that declares `apply: "auto"` is a member of every new session
-    // the moment it HAS a `current` (DESIGN §5.1) — its system prompt in front
-    // of every model on this machine. `--activate` is a bulk convenience over a
-    // directory of drafts, and turning a mode on is not a bulk decision, so a
-    // package that has no `current` yet is built and left alone with the one
-    // command that says it out loud. (An id that already has one is not this
-    // case: it is already standing, and moving the pointer forward changes the
-    // version, not the reach.)
-    if (current == null and try declaresStandingMembership(alloc, io, root_dir, result)) {
-        return out.print(
-            " (not activated: it declares apply: auto, so activating makes it a member of every new session — `nulya ext activate {s}{s} {s}` says so)",
-            .{ if (mode.user) "--user " else "", result.id, result.version },
-        );
-    }
+    // `--activate` activates. It used to refuse this one case — a package
+    // declaring `apply: "auto"` with no `current` yet — on the grounds that
+    // turning a mode on is not a bulk decision. Two things were wrong with
+    // that. The guard had a hole it could not close: `apply` is a per-version
+    // field, so v1 (manual, current) -> v2 (auto) walked in through the branch
+    // above, and auto -> manual walked out, both silently — "moving the pointer
+    // changes the version, not the reach" is simply false across a change of
+    // `apply`. And the flag is typed by a person: an unattended sync is a
+    // FRONT END's problem, and the one that has it (the TUI's start-up sync)
+    // has its own guard. So this verb means the same thing as `ext activate`
+    // now, and says the same sentence when the consequence is a standing one.
     try warnUserScope(alloc, io, result.id, result.version, mode.user);
     try st.activate(alloc, result.id, result.version);
     depositSessionNote(alloc, io, root_dir, result.id, result.version) catch {};
+    try noteStandingMembership(alloc, io, root_dir, result.id);
     try out.writeAll(" -> current");
-}
-
-/// Does the version just built declare `apply: "auto"` (DESIGN §5.1)? Read from
-/// the frozen manifest in the root it landed in. Unreadable reads as `false`:
-/// this decides whether to SKIP an activation, and a package that cannot say
-/// what it wants has not asked for the standing kind.
-fn declaresStandingMembership(
-    alloc: std.mem.Allocator,
-    io: std.Io,
-    root_dir: std.Io.Dir,
-    result: build_ext.BuildResult,
-) !bool {
-    var m = (try store.Store.init(io, root_dir).readVersionDeclaration(alloc, result.id, result.version)) orelse return false;
-    defer m.deinit();
-    return m.applyOf() == .auto;
 }
 
 /// `nulya ext prune [--user] [<id>] [--dry-run]` — drop the version directories a
@@ -1128,7 +1111,7 @@ fn extActivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     if (shadowed_by) |s| {
         try printOut(alloc, io, "note: not in effect — {s}@{s} in {s} shadows it\n", .{ id, s.version, search.roots.entries[s.root].spec });
     } else {
-        try noteStandingMembership(alloc, io, ext_root, id, version);
+        try noteStandingMembership(alloc, io, ext_root, id);
     }
     return 0;
 }
@@ -1138,18 +1121,21 @@ fn extActivate(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
 /// for this package it is also "every new session composes it from now on" —
 /// its system prompt in every prefix, its `surface: auto` tools on every face.
 /// The precedent is `warnUserScope`: the act is allowed and is not refused, but
-/// it must not be INVISIBLE. Said only when this copy is the one in effect, for
-/// the same reason the capability note is deposited only then.
+/// it must not be INVISIBLE. `ext activate` says it only when this copy is the
+/// one in effect, for the same reason the capability note is deposited only
+/// then; `ext sync --activate` says it for each id it just switched on.
+///
+/// Read from the pointer this activation just wrote (`Store.readCurrent`),
+/// which is where the answer now lives — not from the manifest a second time.
 fn noteStandingMembership(
     alloc: std.mem.Allocator,
     io: std.Io,
     ext_root: std.Io.Dir,
     id: []const u8,
-    version: []const u8,
 ) !void {
-    var m = (try store.Store.init(io, ext_root).readVersionDeclaration(alloc, id, version)) orelse return;
-    defer m.deinit();
-    if (m.applyOf() != .auto) return;
+    const active = (try store.Store.init(io, ext_root).readCurrent(alloc, id)) orelse return;
+    defer alloc.free(active.version);
+    if (!active.standing) return;
     try printErrFmt(
         alloc,
         io,
@@ -1270,11 +1256,11 @@ fn extList(alloc: std.mem.Allocator, io: std.Io) !u8 {
         while (try it.next(io)) |dir_entry| {
             if (dir_entry.kind != .directory) continue;
             const st = store.Store.init(io, entry.dir);
-            const active = (st.activeVersion(alloc, dir_entry.name) catch |err| switch (err) {
+            const active = (st.readCurrent(alloc, dir_entry.name) catch |err| switch (err) {
                 error.InvalidId => continue,
                 else => return err,
             });
-            defer if (active) |a| alloc.free(a);
+            defer if (active) |a| alloc.free(a.version);
             // A directory with neither an active pointer nor a built version is
             // not an extension — it is where `<id>/.lock` lives. Both `ext build`
             // and `ext activate` take that lease before they validate anything, so
@@ -1294,15 +1280,15 @@ fn extList(alloc: std.mem.Allocator, io: std.Io) !u8 {
             }
             const shadowed = active != null and sliceHasString(seen_active.items, dir_entry.name);
             if (active != null and !shadowed) try seen_active.append(alloc, try alloc.dupe(u8, dir_entry.name));
-            const contributes = if (active) |v|
-                try contributionMarker(alloc, &search.roots, .{ .id = dir_entry.name, .root = root_index, .version = v })
+            const contributes = if (active) |a|
+                try contributionMarker(alloc, &search.roots, .{ .id = dir_entry.name, .root = root_index, .version = a.version, .standing = a.standing })
             else
                 try alloc.dupe(u8, "");
             defer alloc.free(contributes);
             printed += 1;
             try printOut(alloc, io, "{s}\t{s}\t{s}{s}{s}{s}\n", .{
                 dir_entry.name,
-                active orelse "(no current)",
+                if (active) |a| a.version else "(no current)",
                 entry.spec,
                 contributes,
                 if (sliceHasString(search.with, dir_entry.name)) "\t[with]" else "",
@@ -1325,7 +1311,14 @@ fn contributionMarker(alloc: std.mem.Allocator, roots: *const roots_mod.Roots, e
     const resolved = roots.resolveEntry(alloc, entry, .structural) catch return alloc.dupe(u8, "");
     defer resolved.deinit(alloc);
     const m = resolved.manifest;
-    const standing = m.applyOf() == .auto;
+    // The one word here that is NOT read from the manifest: this column answers
+    // "will a session have this?", and the answer to that lives in `current`,
+    // written when the activation verified it (`store.Active`, DESIGN §5.1). A
+    // manifest declaring `apply: "auto"` that no activation ever recorded — an
+    // edited version directory, a pointer written before the record existed —
+    // is not standing, and a listing that said otherwise would be describing a
+    // session nobody is going to get.
+    const standing = entry.standing;
     if (!standing and m.tools.len == 0 and m.skills.len == 0 and m.system_prompts.len == 0) return alloc.dupe(u8, "");
 
     var out: std.Io.Writer.Allocating = .init(alloc);

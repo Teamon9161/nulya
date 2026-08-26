@@ -421,7 +421,7 @@ test "apply: auto — activating IS installing; every fresh session composes it,
     }
 }
 
-test "ext sync --activate never turns a standing package on, and says why" {
+test "ext sync --activate activates, standing packages included, and says so" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -434,8 +434,10 @@ test "ext sync --activate never turns a standing package on, and says why" {
     defer tmp.cleanup();
     const ws = tmp.dir;
 
-    // Two drafts in the store root, neither ever built. `--activate` is a bulk
-    // convenience over a directory; turning a mode on is not a bulk decision.
+    // Two drafts in the store root, neither ever built. `--activate` is one
+    // person typing one flag, and it means what `ext activate` means for each
+    // id it touches — a standing package included. What it owes is the sentence,
+    // not a refusal.
     for ([_]struct { id: []const u8, apply: []const u8 }{
         .{ .id = "mode.kong", .apply = "\"apply\":\"auto\"," },
         .{ .id = "plain.one", .apply = "" },
@@ -457,32 +459,45 @@ test "ext sync --activate never turns a standing package on, and says why" {
         try ws.writeFile(io, .{ .sub_path = tone_path, .data = "TONE\n" });
     }
 
-    const synced = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "sync", "--activate" });
-    defer alloc.free(synced.stdout);
-    try std.testing.expectEqual(@as(u8, 0), synced.code);
+    const argv = [_][]const u8{ exe_abs, "ext", "sync", "--activate" };
 
-    // Both built; only the one that asked for nothing standing got `current`.
-    var kong_line: []const u8 = "";
-    var it = std.mem.splitScalar(u8, synced.stdout, '\n');
-    while (it.next()) |line| {
-        if (std.mem.indexOf(u8, line, "mode.kong") != null) kong_line = line;
-        if (std.mem.indexOf(u8, line, "plain.one") != null) {
-            try std.testing.expect(std.mem.indexOf(u8, line, "-> current") != null);
+    // One pass: both built, both activated — and the consequence peculiar to the
+    // standing one is said out loud, naming it and the verb that undoes it. The
+    // same sentence `ext activate` says, about the only id it is true of.
+    {
+        const said = try runCliStderr(alloc, io, ws, &argv, &.{});
+        defer alloc.free(said);
+        for ([_][]const u8{ "mode.kong", "apply: auto", "ext deactivate mode.kong" }) |needle| {
+            std.testing.expect(std.mem.indexOf(u8, said, needle) != null) catch |err| {
+                std.debug.print("sync never says '{s}':\n{s}\n", .{ needle, said });
+                return err;
+            };
         }
+        try std.testing.expect(std.mem.indexOf(u8, said, "plain.one") == null);
     }
-    for ([_][]const u8{ "not activated", "apply: auto", "ext activate mode.kong" }) |needle| {
-        std.testing.expect(std.mem.indexOf(u8, kong_line, needle) != null) catch |err| {
-            std.debug.print("sync line never says '{s}':\n{s}\n", .{ needle, kong_line });
-            return err;
-        };
-    }
-
-    // And it really is off: a fresh session has neither the skipped package nor
-    // any surprise from it.
     {
         const header = (try newSessionHeader(alloc, io, ws, exe_abs, &.{})).?;
         defer alloc.free(header);
-        try std.testing.expect(std.mem.indexOf(u8, header, "mode.kong") == null);
+        try std.testing.expect(std.mem.indexOf(u8, header, "mode.kong") != null);
+        try std.testing.expect(std.mem.indexOf(u8, header, "plain.one") == null); // activated, but not standing
+    }
+
+    // It is an activation like any other, so `ext deactivate` still ends it —
+    // and the next sync, which is the same flag again, turns it back on.
+    {
+        const off = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "deactivate", "mode.kong" });
+        defer alloc.free(off.stdout);
+        try std.testing.expectEqual(@as(u8, 0), off.code);
+
+        const again = try runCli(alloc, io, ws, &argv);
+        defer alloc.free(again.stdout);
+        try std.testing.expectEqual(@as(u8, 0), again.code);
+        // Only the deactivated one moves: an id whose `current` already names
+        // something keeps it (that pointer was somebody's decision).
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, again.stdout, "-> current"));
+        const header = (try newSessionHeader(alloc, io, ws, exe_abs, &.{})).?;
+        defer alloc.free(header);
+        try std.testing.expect(std.mem.indexOf(u8, header, "mode.kong") != null);
     }
 }
 
@@ -645,10 +660,10 @@ test "a broken current under apply: auto fails the session by name, while a brok
     }
 
     // And it really is that ONE package: a package that never claimed anything
-    // is skipped when it is broken, exactly as before. The two-stage read is
-    // what buys this — the cheap declaration read decides who is being asked
-    // about, and a package that said nothing is never the reason a session
-    // cannot start.
+    // is skipped when it is broken, exactly as before. What buys this is that
+    // `current` records the answer — the pointer says who is being asked about,
+    // and a package that never asked is never the reason a session cannot
+    // start.
     {
         const off = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "deactivate", "mode.kong" });
         defer alloc.free(off.stdout);
@@ -663,6 +678,89 @@ test "a broken current under apply: auto fails the session by name, while a brok
         const header = (try newSessionHeader(alloc, io, ws, exe_abs, &.{})).?;
         defer alloc.free(header);
         try std.testing.expect(std.mem.indexOf(u8, header, "mode.quiet") == null);
+    }
+}
+
+/// The frozen `extension.json` of `id@version` in the workspace store. Caller
+/// owns it.
+fn frozenManifestPath(alloc: std.mem.Allocator, id: []const u8, version: []const u8) ![]u8 {
+    return std.fs.path.join(alloc, &.{ ".nulya", "extensions", id, "versions", version, "extension.json" });
+}
+
+test "editing a frozen manifest cannot turn a standing package off, nor an ordinary one on" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_abs = try nulyaExe(alloc, &host_env);
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    // Whether a package joins every session was, for one release, answered by
+    // reading its frozen manifest without integrity — the read has to be cheap
+    // enough to do for a whole store. That made corruption an ANSWER: an edit
+    // turning `auto` into `manual` took a standing system prompt out of every
+    // session with nothing anywhere failing. So `activate` records the answer
+    // in `current`, where the edit cannot reach it.
+    const standing = try standingPromptPackage(alloc, io, ws, exe_abs, "mode.kong", "KONG MODE\n");
+    defer alloc.free(standing);
+    const kong_manifest = try frozenManifestPath(alloc, "mode.kong", standing);
+    defer alloc.free(kong_manifest);
+    const original = try ws.readFileAlloc(io, kong_manifest, alloc, .limited(1 << 20));
+    defer alloc.free(original);
+
+    // Both directions of damage — a plausible edit that says something else, and
+    // bytes that say nothing at all — are LOUD, and the sentence is the one that
+    // names the package and the way out.
+    for ([_][]const u8{
+        \\{"schema":"nulya.extension/v2","id":"mode.kong","apply":"manual","contributes":{"system_prompts":["prompts/tone.md"]}}
+        ,
+        "not json at all",
+    }) |doctored| {
+        try ws.writeFile(io, .{ .sub_path = kong_manifest, .data = doctored });
+        const argv = [_][]const u8{ exe_abs, "session", "new", "--profile", "scripted" };
+        const refused = try runCli(alloc, io, ws, &argv);
+        defer alloc.free(refused.stdout);
+        try std.testing.expectEqual(@as(u8, 1), refused.code);
+        const said = try runCliStderr(alloc, io, ws, &argv, &.{});
+        defer alloc.free(said);
+        for ([_][]const u8{ "mode.kong", standing, "ext deactivate mode.kong" }) |needle| {
+            std.testing.expect(std.mem.indexOf(u8, said, needle) != null) catch |err| {
+                std.debug.print("refusal never mentions '{s}':\n{s}\n", .{ needle, said });
+                return err;
+            };
+        }
+    }
+
+    // Put it back and the session composes it again: the record was right about
+    // this package the whole time.
+    try ws.writeFile(io, .{ .sub_path = kong_manifest, .data = original });
+    {
+        const header = (try newSessionHeader(alloc, io, ws, exe_abs, &.{})).?;
+        defer alloc.free(header);
+        try std.testing.expect(std.mem.indexOf(u8, header, "mode.kong") != null);
+    }
+
+    // The other direction is the half that must stay SILENT: an ordinary
+    // activated package whose frozen manifest is edited to claim `apply: auto`
+    // is not composed — nobody activated that claim — and the session opens as
+    // if nothing had happened.
+    const quiet = try promptPackage(alloc, io, ws, exe_abs, "mode.quiet", "QUIET MODE\n");
+    defer alloc.free(quiet);
+    const quiet_manifest = try frozenManifestPath(alloc, "mode.quiet", quiet);
+    defer alloc.free(quiet_manifest);
+    try ws.writeFile(io, .{ .sub_path = quiet_manifest, .data =
+        \\{"schema":"nulya.extension/v2","id":"mode.quiet","apply":"auto","contributes":{"system_prompts":["prompts/tone.md"]}}
+    });
+    {
+        const header = (try newSessionHeader(alloc, io, ws, exe_abs, &.{})).?;
+        defer alloc.free(header);
+        try std.testing.expect(std.mem.indexOf(u8, header, "mode.quiet") == null);
+        try std.testing.expect(std.mem.indexOf(u8, header, "mode.kong") != null);
     }
 }
 

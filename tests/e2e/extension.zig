@@ -1857,13 +1857,16 @@ test "cli ext prune: every version but `current` goes, an id without one keeps a
     }
 }
 
-/// The `current` pointer of `id` in a store root under `ws`. Caller owns it.
+/// The version `current` names for `id` in a store root under `ws` — the file's
+/// first field; the rest of the line is what activation recorded about `apply`
+/// (`store.Active`). Caller owns it.
 fn readActive(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, root_rel: []const u8, id: []const u8) ![]u8 {
     const rel = try std.fs.path.join(alloc, &.{ root_rel, id, "current" });
     defer alloc.free(rel);
     const raw = try ws.readFileAlloc(io, rel, alloc, .limited(256));
     defer alloc.free(raw);
-    return alloc.dupe(u8, std.mem.trim(u8, raw, " \t\r\n"));
+    var fields = std.mem.tokenizeAny(u8, raw, " \t\r\n");
+    return alloc.dupe(u8, fields.next() orelse "");
 }
 
 /// Write a script extension DRAFT under `root_rel`; no build. Exactly what

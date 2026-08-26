@@ -225,7 +225,7 @@ test("/ext shows the version line, the current pointer and the usage counts", as
     expect(frame).toContain("▎ this session")
     // The visible panes name themselves; the store actions are one `?` away.
     expect(frame).toContain("extensions  tools  usage")
-    expect(frame).toContain("Enter on/off · j/k move · h/l pane · Esc close · ? keys")
+    expect(frame).toContain("Enter active/inactive · j/k move · h/l pane · Esc close · ? keys")
     expect(frame).not.toContain("a activate one named version")
     expect(stable(frame)).toMatchSnapshot()
 
@@ -746,7 +746,7 @@ test("/ext Enter on a prompt package moves current and writes no membership of i
         20_000,
       )
       const off = await settle(setup, 4)
-      expect(off).toContain("house.style off · it can no longer be worn")
+      expect(off).toContain("house.style inactive · it can no longer be worn")
       expect(off).toContain("versions all stay")
       // Still nothing in this front end's state to take back.
       expect(JSON.stringify(loadTuiState(statePath))).not.toContain("house.style")

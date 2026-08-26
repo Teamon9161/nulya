@@ -143,12 +143,12 @@ pub const Options = struct {
     /// A later mention of one id overrides an earlier one, so a `--with
     /// <id>@<version>` on the command line wins over the standing entry.
     with: []const WithRef = &.{},
-    /// Whether the STORE's own standing members join: every id with a `current`
-    /// whose frozen manifest says `apply: "auto"` (DESIGN §5.1,
-    /// `resolveApplyAutoExtensions`). True for an ordinary session; `session new
-    /// --bare` sets it false, exactly as it passes the two standing config lists
-    /// as empty — bare composes from argv alone, and this is the third standing
-    /// list, kept in the store rather than in config.
+    /// Whether the STORE's own standing members join: every id whose `current`
+    /// records `apply: "auto"` (DESIGN §5.1, `resolveApplyAutoExtensions`).
+    /// True for an ordinary session; `session new --bare` sets it false, exactly
+    /// as it passes the two standing config lists as empty — bare composes from
+    /// argv alone, and this is the third standing list, kept in the store rather
+    /// than in config.
     ///
     /// Named members always win over it: an `apply: auto` package that config or
     /// `--with` also names is taken at the version THEY asked for.
@@ -406,30 +406,31 @@ fn resolveFreshExtensions(gpa: std.mem.Allocator, roots: *const roots_mod.Roots,
     return unionWith(gpa, roots, named, implied);
 }
 
-/// The store's own standing members: every id with a `current` whose frozen
-/// manifest declares `apply: "auto"` (DESIGN §5.1), at that `current`, in
-/// search order (`Roots.listActive` has already applied first-root-wins).
+/// The store's own standing members: every id whose `current` RECORDS that the
+/// version it names declared `apply: "auto"` (DESIGN §5.1), at that `current`,
+/// in search order (`Roots.listActive` has already applied first-root-wins).
 ///
-/// TWO READS PER ACTIVE ID, and the split is the whole design. The first is a
-/// bare `extension.json` read (`Store.readVersionDeclaration`) that answers
-/// only "did this package ask for this?" — no seal, no re-digest, no path
-/// checks. The second is the ordinary `.sealed` resolve, and it runs ONLY for
-/// the packages that said yes. So the cost of a store full of ordinary
-/// packages is one small file read each, and a package the machine merely
-/// HOLDS is never the reason a session cannot start — which is the strictness
-/// that took the old "every id with a `current` is a member" layer down.
+/// WHO IS ASKED ABOUT COMES FROM THE POINTER, NOT FROM THE PACKAGE. `current`
+/// carries the `apply` its version declared, written by `activate` from a
+/// manifest it had just verified against the seal (`Store.readCurrent`), so
+/// this layer costs one small file read per active id — the read it needed
+/// anyway — and reads nothing that a later edit of the version directory could
+/// have answered. Only the ids the record names go on to the ordinary `.sealed`
+/// resolve. A package the machine merely HOLDS is therefore never the reason a
+/// session cannot start, which is the strictness that took the old "every id
+/// with a `current` is a member" layer down; and tampering cannot move a
+/// package in either direction — an unrecorded package doctored to say `auto`
+/// is never asked about, and a recorded one doctored at all breaks its seal
+/// below, loudly, instead of quietly reading as `manual`.
 ///
-/// A package that DID ask, and whose `current` then does not resolve, FAILS THE
-/// SESSION. `apply: "auto"` is the most explicit thing a package can say about
-/// wanting to be in every session, so it gets `--with`'s strictness: starting
-/// quietly without it is not the session that was asked for, and for a mode
-/// package — a system prompt — the difference is invisible from the inside. The
-/// stderr line names the version AND `ext deactivate`, because "turn this mode
-/// off" is the repair a person is most likely to want and it is not the repair
+/// A recorded package whose `current` then does not resolve FAILS THE SESSION.
+/// `apply: "auto"` is the most explicit thing a package can say about wanting
+/// to be in every session, so it gets `--with`'s strictness: starting quietly
+/// without it is not the session that was asked for, and for a mode package — a
+/// system prompt — the difference is invisible from the inside. The stderr line
+/// names the version AND `ext deactivate`, because "turn this mode off" is the
+/// repair a person is most likely to want and it is not the repair
 /// `reportBrokenActive` offers.
-///
-/// A package whose manifest itself cannot be read or validated is SKIPPED, not
-/// refused: nothing there claimed anything, and nobody named it.
 fn resolveApplyAutoExtensions(alloc: std.mem.Allocator, roots: *const roots_mod.Roots) ![]roots_mod.Roots.Resolved {
     var resolved: std.ArrayList(roots_mod.Roots.Resolved) = .empty;
     errdefer freeResolved(alloc, resolved.items);
@@ -438,10 +439,7 @@ fn resolveApplyAutoExtensions(alloc: std.mem.Allocator, roots: *const roots_mod.
     defer roots_mod.Roots.freeActive(alloc, active);
 
     for (active) |entry| {
-        var declared = (try roots.store(entry.root).readVersionDeclaration(alloc, entry.id, entry.version)) orelse continue;
-        const wants_in = declared.applyOf() == .auto;
-        declared.deinit();
-        if (!wants_in) continue;
+        if (!entry.standing) continue;
 
         // A host fault — cancellation, OOM, a real I/O failure — must propagate
         // as itself, never be reported as a broken extension (isExtensionFault).

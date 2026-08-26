@@ -527,9 +527,54 @@ export function wearCommand(
  * prompt reaches a session only when somebody names it — `/<id>`, `/with`,
  * `[extensions] with` — so the old "does it contribute a prompt" test was
  * guarding a door that no longer opens onto anything.
+ *
+ * Reads only the CANDIDATE — the version about to become `current`. A caller
+ * moving the pointer for an id that may already be active needs the other
+ * half too (`safeToActivateUnattended`, below): a candidate that dropped
+ * `apply: "auto"` is not by itself proof the move is safe unattended.
  */
 export function autoActivatable(what: Pick<Contributions, "apply">): boolean {
   return what.apply !== "auto"
+}
+
+/**
+ * May a background pass move `current` from whatever is active TODAY onto
+ * CANDIDATE, without a keypress?
+ *
+ * `autoActivatable(candidate)` alone only reads the version about to become
+ * `current` — but a reach change can arrive from either side of a rebuild. A
+ * package active right now with `apply: "auto"` (composed into every fresh
+ * session on this machine, DESIGN §5.1) can draft a new version that turns
+ * `apply: "manual"`; a pass that pointed `current` at it anyway would
+ * silently pull a standing package out of every session nobody asked it to
+ * leave — the mirror image of the bug `autoActivatable` already guards
+ * (`evolution` activated on the way in, T31). So this also reads whatever
+ * version IS active today, if any, and refuses the move unless ITS `apply`
+ * agrees the reach question is not live either: an unattended pass may move
+ * the pointer only when NEITHER side of the move is `apply: "auto"`. A
+ * background sync never narrows OR widens reach on its own (T55) — both
+ * directions are a person's `/ext` Enter.
+ *
+ * A store this cannot read (`ext list` failing, or no `current` for this id)
+ * reads as "nothing is active today", the same default every other caller
+ * here falls back to when the store cannot answer.
+ */
+export async function safeToActivateUnattended(
+  ws: Workspace,
+  id: string,
+  candidate: Pick<Contributions, "apply">,
+): Promise<boolean> {
+  if (!autoActivatable(candidate)) return false
+  let listed: Awaited<ReturnType<typeof extList>> = []
+  try {
+    listed = await extList(ws)
+  } catch {
+    return true
+  }
+  const entry = listed.find((e) => e.id === id && e.current !== null && !e.shadowed)
+  if (!entry?.current) return true
+  const active = await readContributions(ws, id, entry.current, rootsOf(ws, listed))
+  return autoActivatable(active)
 }
 
 /**

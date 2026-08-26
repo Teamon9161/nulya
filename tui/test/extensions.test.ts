@@ -37,6 +37,7 @@ import {
   planCheckout,
   planProjectStore,
   promptText,
+  safeToActivateUnattended,
   std_pins,
   summarize,
   syncRoot,
@@ -460,6 +461,106 @@ test("only a package that asks to be in every session is kept off the start-up p
   expect(autoActivatable({ apply: "auto" })).toBe(false)
   expect(autoActivatable({ apply: "manual" })).toBe(true)
 })
+
+/**
+ * The mirror case `autoActivatable` alone cannot see (T55): a package already
+ * active as `apply: "auto"` — composed into every session on this machine
+ * right now — whose newest draft turned `apply: "manual"`. The candidate
+ * alone reads as safe; only reading what is active TODAY catches that moving
+ * the pointer would silently drop a standing package out of every session
+ * nobody asked it to leave. Against a real store, because the claim is that
+ * `current` really does NOT move.
+ */
+test("a package active as `apply: auto` is not moved onto a `manual` rebuild by an unattended pass", async () => {
+  const store = tempWorkspace()
+  try {
+    const root = syncRoot(store, false)
+    const dir = join(root, "kong")
+    mkdirSync(join(dir, "skills", "demo"), { recursive: true })
+    writeFileSync(
+      join(dir, "extension.json"),
+      JSON.stringify({
+        schema: "nulya.extension/v2",
+        id: "kong",
+        apply: "auto",
+        contributes: { skills: ["skills/demo"] },
+      }),
+    )
+    writeFileSync(join(dir, "skills", "demo", "SKILL.md"), "---\nname: demo\ndescription: a standing mode\n---\nbody\n")
+    const built = await extSync(store)
+    const activeLine = built.lines.find((entry) => entry.id === "kong")!
+    expect(activeLine.version).toMatch(/^v-/)
+    await extSetCurrent(store, "activate", "kong", activeLine.version!)
+
+    // A new draft — same id, `apply` flipped to `manual` — hashes to a
+    // different version, exactly as any other content change would.
+    writeFileSync(
+      join(dir, "extension.json"),
+      JSON.stringify({
+        schema: "nulya.extension/v2",
+        id: "kong",
+        apply: "manual",
+        contributes: { skills: ["skills/demo"] },
+      }),
+    )
+    const rebuilt = await extSync(store)
+    const candidateLine = rebuilt.lines.find((entry) => entry.id === "kong")!
+    expect(candidateLine.version).toMatch(/^v-/)
+    expect(candidateLine.version).not.toBe(activeLine.version)
+
+    const candidate = await builtContributions(store, root, "kong", candidateLine.version!)
+    expect(candidate?.apply).toBe("manual")
+    // The candidate by itself says the move looks safe — it cannot see what
+    // is active today.
+    expect(autoActivatable(candidate!)).toBe(true)
+    // But `kong` is active right now as `apply: "auto"`, so an unattended
+    // pass must refuse: moving the pointer would quietly pull it out of every
+    // session on this machine.
+    expect(await safeToActivateUnattended(store, "kong", candidate!)).toBe(false)
+    // And `current` really did stay where it was.
+    expect((await extList(store)).find((entry) => entry.id === "kong")!.current).toBe(activeLine.version)
+  } finally {
+    store.cleanup()
+  }
+}, 120_000)
+
+/**
+ * The ordinary case, for contrast: neither side of the move is `apply:
+ * "auto"`, so nothing about reach is changing and an unattended pass may
+ * proceed exactly as it always has.
+ */
+test("an ordinary rebuild — manual active, manual candidate — is unaffected by the guard", async () => {
+  const store = tempWorkspace()
+  try {
+    const root = syncRoot(store, false)
+    const dir = join(root, "house.rule")
+    mkdirSync(join(dir, "skills", "demo"), { recursive: true })
+    writeFileSync(
+      join(dir, "extension.json"),
+      JSON.stringify({ schema: "nulya.extension/v2", id: "house.rule", contributes: { skills: ["skills/demo"] } }),
+    )
+    writeFileSync(join(dir, "skills", "demo", "SKILL.md"), "---\nname: demo\ndescription: an ordinary package\n---\nbody\n")
+    const built = await extSync(store)
+    const first = built.lines.find((entry) => entry.id === "house.rule")!
+    await extSetCurrent(store, "activate", "house.rule", first.version!)
+
+    // Edit the body, not `apply`: a new version, the same (default) `manual`
+    // reach on both sides of the move.
+    writeFileSync(
+      join(dir, "skills", "demo", "SKILL.md"),
+      "---\nname: demo\ndescription: an edited package\n---\nbody\n",
+    )
+    const rebuilt = await extSync(store)
+    const second = rebuilt.lines.find((entry) => entry.id === "house.rule")!
+    expect(second.version).not.toBe(first.version)
+
+    const candidate = await builtContributions(store, root, "house.rule", second.version!)
+    expect(candidate?.apply).toBe("manual")
+    expect(await safeToActivateUnattended(store, "house.rule", candidate!)).toBe(true)
+  } finally {
+    store.cleanup()
+  }
+}, 120_000)
 
 /**
  * How a package is worn: only through a command it DECLARED. Nothing is
