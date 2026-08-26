@@ -110,6 +110,89 @@ test("a killed step is not reported as a failure and is not re-stepped", async (
   }
 }, 120_000)
 
+/**
+ * Interrupt-and-deliver (agent-runner ar-t1): kill the step this tab is
+ * driving and re-step the moment it has actually exited, instead of letting
+ * the loop mode's never-ending turn run out its whole `--max-steps` budget.
+ *
+ * There is no idle-poll timer anywhere in `driver.ts` — `wake()` is the only
+ * thing that polls, and it lives in `attach.ts` — so a `createDriver` alone
+ * resolving this at all is itself the proof that the redelivery came from the
+ * explicit kill → wait-for-exit → step chain and not from some background
+ * loop noticing the inbox later.
+ */
+test("interruptAndDeliver kills the running step, then redelivers the queued turn on its own — no hang, no crash, no lost or duplicated message", async () => {
+  const id = await sessionNew(ws, { profile: "scripted" })
+  const state = createSessionState(id)
+  // `loop` never ends its own turn — a real model would likely comply with
+  // "stop now" at its very next turn, but this scripted stand-in cannot, so a
+  // generous budget is what stands in for "a run that would otherwise keep
+  // going for a while" without the test depending on wall-clock timing.
+  const driver = createDriver(ws, id, state, { env: scripted_loop_env, maxSteps: 40 })
+  try {
+    void driver.send("keep going")
+    // Under way for real: at least one tool call has actually resolved.
+    await until(() => state.snapshot.items.some((item) => item.kind === "tool" && item.resolved), 60_000)
+
+    await driver.interruptAndDeliver("stop and summarize instead")
+
+    // Resolved at all — rather than hanging on a `step()` nobody ever called —
+    // is itself most of what this proves: `createDriver` has no idle-poll
+    // timer anywhere (`wake()`, the only thing that polls, lives in
+    // `attach.ts` and was never constructed here), so the redelivery can only
+    // have come from `interruptAndDeliver`'s own kill → wait-for-exit → step
+    // chain.
+    expect(driver.status()).toBe("idle")
+    // A kill mid-gesture is not a crash, whichever run it lands in.
+    expect(state.snapshot.error).toBeNull()
+    // Everything queued has actually been drained: no leftover pending turn.
+    expect(state.pendingCount()).toBe(0)
+
+    const events = await sessionEvents(ws, id)
+    const users = events.filter((event) => event.kind === "user_text") as Array<{ kind: "user_text"; text: string }>
+    // Exactly once each — not lost to the kill, and not duplicated by a
+    // process that drained it just before dying AND a fresh one after.
+    expect(users.length).toBe(2)
+    expect(users[0]!.text).toBe("keep going")
+    // Mid-run, so it carries the same mid-task framing an ordinary `send`
+    // would have (this gesture's append path is exactly `send`'s).
+    expect(users[1]!.text).toContain("stop and summarize instead")
+  } finally {
+    driver.dispose()
+  }
+}, 120_000)
+
+test("interruptAndDeliver on an idle driver is an ordinary send", async () => {
+  const id = await sessionNew(ws, { profile: "scripted" })
+  const state = createSessionState(id)
+  const driver = createDriver(ws, id, state, { env: scripted_env })
+  try {
+    await driver.interruptAndDeliver("hello")
+    expect(driver.status()).toBe("idle")
+    expect(state.snapshot.error).toBeNull()
+    const events = await sessionEvents(ws, id)
+    const users = events.filter((event) => event.kind === "user_text") as Array<{ kind: "user_text"; text: string }>
+    expect(users.length).toBe(1)
+    expect(users[0]!.text).toBe("hello")
+  } finally {
+    driver.dispose()
+  }
+}, 60_000)
+
+test("interruptAndDeliver with nothing typed and nothing running is a no-op, not an empty send", async () => {
+  const id = await sessionNew(ws, { profile: "scripted" })
+  const state = createSessionState(id)
+  const driver = createDriver(ws, id, state, {})
+  try {
+    await driver.interruptAndDeliver("   ")
+    expect(driver.status()).toBe("idle")
+    const events = await sessionEvents(ws, id)
+    expect(events.length).toBe(0)
+  } finally {
+    driver.dispose()
+  }
+}, 30_000)
+
 test("a step that dies without a `run error` line still surfaces its stderr", async () => {
   const id = await sessionNew(ws, { profile: "scripted" })
   const state = createSessionState(id)

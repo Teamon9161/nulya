@@ -76,6 +76,15 @@ export function wrappedRows(text: string, width: number): number {
  * Sending while a step runs is allowed and does not interrupt it — the turn is
  * queued and the kernel drains it at its next step boundary (tui.md §4.4).
  *
+ * A step ALREADY running can also be interrupted (agent-runner ar-t1): `App`
+ * claims Ctrl+J for that at the screen level, but only while there is
+ * something to interrupt or already queued — otherwise the key is left alone
+ * and reaches the textarea's own newline binding above unchanged. That gesture
+ * calls `ComposerApi.triggerInterrupt()` rather than reading the buffer itself,
+ * so it goes through the exact same clear/history/paste-expansion path Enter
+ * does; `onSubmit`'s second argument is the only thing that tells them apart.
+ *
+
  * Two menus can appear above the box, and neither ever changes what Enter
  * means. A line beginning with `/` lists the matching commands; an `@` at a word
  * boundary lists project paths (tui.md §11, T13), where `↑↓` move the selection
@@ -110,10 +119,18 @@ export interface ComposerApi {
    * composer would invite it to be sent twice.
    */
   restore(text: string): void
+  /**
+   * Submit whatever is typed, flagged as the interrupt-and-deliver gesture
+   * (agent-runner ar-t1). Goes through the exact same path Enter does — paste
+   * expansion, history, clearing — so the only difference `onSubmit` sees is
+   * the second argument; a global key handler outside the composer has no
+   * other way to reach that path without duplicating it.
+   */
+  triggerInterrupt(): void
 }
 
 export function Composer(props: {
-  onSubmit: (text: string) => void
+  onSubmit: (text: string, interrupt?: boolean) => void
   /**
    * Enter on an empty composer. Returns true when it meant something — the
    * take-over gesture of observer mode (tui.md §5.6) — and false when Enter on
@@ -388,6 +405,7 @@ export function Composer(props: {
         area.insertText(text)
         sync()
       },
+      triggerInterrupt: () => submit(true),
     })
   })
 
@@ -398,7 +416,7 @@ export function Composer(props: {
     sync()
   }
 
-  const submit = () => {
+  const submit = (interrupt = false) => {
     const text = area?.plainText ?? ""
     clear()
     shown = null
@@ -411,7 +429,7 @@ export function Composer(props: {
     // stood for. The expansion happens only on the way out.
     history.push(text)
     cursor = history.length
-    props.onSubmit(expandPastes(text, attachments()))
+    props.onSubmit(expandPastes(text, attachments()), interrupt)
   }
 
   /**
@@ -596,7 +614,9 @@ export function Composer(props: {
           focusedTextColor={style.theme.fg}
           cursorColor={style.theme.accent.user}
           selectionBg={style.theme.selection}
-          onSubmit={submit}
+          // `submit` now takes an `interrupt` flag (ar-t1); the textarea's own
+          // Enter binding must not pass its `SubmitEvent` into that slot.
+          onSubmit={() => submit()}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
           keyBindings={[

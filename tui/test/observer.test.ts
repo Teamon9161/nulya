@@ -130,3 +130,46 @@ test("a refused step flips the role to observer instead of raising an error", as
     attach.dispose()
   }
 }, 120_000)
+
+/**
+ * Interrupt-and-deliver (agent-runner ar-t1) as an observer: there is no
+ * writer lease of ours to kill, so the gesture has to degrade to exactly the
+ * queued `send` an observer already does — it must NOT try to kill the other
+ * writer's process (there is no handle to it at all) or attempt a step of its
+ * own (which the kernel would refuse, same as above).
+ */
+test("interruptAndDeliver as an observer only appends — there is no lease of ours to interrupt", async () => {
+  const id = await sessionNew(ws, { profile: "scripted" })
+  await sessionAppend(ws, id, "hold the lease")
+
+  const holder = sessionStep(ws, id, { env: scripted_loop_env, maxSteps: 6 })
+  let holding = false
+  const drain = (async () => {
+    for await (const _ of holder.lines) holding = true
+  })()
+
+  const state = createSessionState(id)
+  const attach = createAttachment(ws, id, state, { pollMs: 600_000, freeProbesToOffer: 3 })
+  try {
+    await until(() => holding, 30_000)
+    await attach.step()
+    expect(attach.role()).toBe("observer")
+
+    await attach.interruptAndDeliver("please wrap up")
+    // Queued, exactly like an ordinary observer `send` — not a crash, and the
+    // role has not been disturbed by trying (and failing) to drive.
+    expect(state.snapshot.items.some((item) => item.kind === "user" && item.queued)).toBe(true)
+    expect(attach.role()).toBe("observer")
+    expect(state.snapshot.error).toBeNull()
+
+    // The OTHER writer drains it at its own next step boundary — nothing here
+    // forced that; the holder's loop was already running before the message
+    // was ever sent.
+    await until(() => state.snapshot.items.some((item) => item.kind === "user" && !item.queued), 60_000)
+  } finally {
+    holder.kill()
+    await holder.exited
+    await drain
+    attach.dispose()
+  }
+}, 120_000)

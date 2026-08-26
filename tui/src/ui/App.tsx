@@ -11,6 +11,8 @@ import { WithPicker, type Wearable } from "./WithPicker.tsx"
 import { StatusBar } from "./StatusBar.tsx"
 import { pickTip } from "./Welcome.tsx"
 import { WorkingStatus, activityOf, type SyncProgress } from "./WorkingStatus.tsx"
+import { QueueLane } from "./QueueLane.tsx"
+import { parseMidTask } from "../midtask.ts"
 import { TabBar } from "./TabBar.tsx"
 import { SessionsView } from "./overlays/SessionsView.tsx"
 import { ExtView } from "./overlays/ExtView.tsx"
@@ -2374,7 +2376,12 @@ export function App(props: AppProps) {
    * composer has already cleared itself by the time this runs, so a refusal puts
    * the typed line back in the box.
    */
-  const sendTurn = async (text: string) => {
+  /**
+   * `interrupt`: this turn came from the interrupt-and-deliver gesture
+   * (agent-runner ar-t1) rather than a plain Enter — the only thing that
+   * changes is which `Attachment` verb the turn ends up going through.
+   */
+  const sendTurn = async (text: string, interrupt = false) => {
     let turn = text
     if (text.startsWith("/")) {
       if (await runPluginCommand(text)) return
@@ -2391,13 +2398,66 @@ export function App(props: AppProps) {
       composer?.restore(text)
       return
     }
-    await here.attach.send(turn)
+    if (interrupt) await here.attach.interruptAndDeliver(turn)
+    else await here.attach.send(turn)
   }
 
-  const submit = (text: string) => {
+  const submit = (text: string, interrupt = false) => {
     setNotice(null)
     if (runCommand(text)) return
-    void sendTurn(text)
+    void sendTurn(text, interrupt)
+  }
+
+  /**
+   * "Flush the queue" — the interrupt-and-deliver gesture with nothing NEW to
+   * say: a click on the queue lane, or `ctrl+j` over an empty composer while
+   * something is already queued. There is no composer text to route through
+   * `sendTurn`'s command/skill dispatch here, so this goes straight to the
+   * attachment (agent-runner ar-t1).
+   */
+  const flushQueue = () => {
+    const here = live()
+    if (here) void here.attach.interruptAndDeliver("")
+  }
+
+  /**
+   * The turns sitting in the inbox, not yet drained into the ledger — the
+   * queue lane's own content (`QueueLane.tsx`, ar-t1). Read straight off the
+   * transcript items `enqueueUser` pushes, which is the same source
+   * `pendingCount()` counts from; a draft tab has no session and therefore
+   * nothing queued.
+   */
+  const queuedMessages = (): { key: string; text: string }[] =>
+    snapshot().items.filter((item): item is Extract<TranscriptItem, { kind: "user" }> => item.kind === "user" && item.queued)
+      // A mid-run append rides inside the mid-task sentinel (midtask.ts); the
+      // lane shows the user's own words, the same fold the transcript card does.
+      .map((item) => ({ key: item.key, text: parseMidTask(item.text)?.text ?? item.text }))
+
+  /**
+   * Whether `ctrl+j` currently means anything (`keymap.ts` `interrupt`,
+   * ar-t1): a step this tab is driving, or a turn already queued behind one
+   * that just ended. Everywhere else the key is left alone, so it still falls
+   * through to the composer's own Ctrl+J-makes-a-newline binding (the
+   * non-Kitty `Shift+Enter` fallback, `Composer.tsx`) — claiming it
+   * unconditionally would break that for every terminal that needs it.
+   */
+  const interruptRelevant = () => {
+    const here = live()
+    if (!here) return false
+    return here.attach.status() !== "idle" || here.state.pendingCount() > 0
+  }
+
+  /**
+   * `ctrl+j`: with something typed, submit it flagged as an interrupt (through
+   * the composer's own path, so paste-expansion and history still apply);
+   * with nothing typed, it is the queue lane's own "flush" gesture (ar-t1).
+   */
+  const handleInterruptAndDeliver = () => {
+    if (composer?.isEmpty() ?? true) {
+      flushQueue()
+      return
+    }
+    composer?.triggerInterrupt()
   }
 
   /** Take the answer the cursor is on, with whatever is in the note field. */
@@ -2520,6 +2580,19 @@ export function App(props: AppProps) {
       bindings: closeTabBindings,
     })
 
+    // Same trick as `closeTab` above: this layer only claims its key while it
+    // actually means something (agent-runner ar-t1). Ctrl+J is also the
+    // composer's own non-Kitty newline fallback (`Composer.tsx`), so at rest —
+    // nothing running, nothing queued — this layer stays disabled and the key
+    // reaches the textarea unchanged, exactly as `closeTab` leaves Ctrl+W's
+    // delete-word binding alone on a single tab.
+    const interruptBindings = bind("interrupt", handleInterruptAndDeliver)
+    const offInterrupt = keymap.registerLayer({
+      priority: 82,
+      enabled: () => !normalShortcutLayerBlocked() && interruptRelevant(),
+      bindings: interruptBindings,
+    })
+
     const cancelBindings = bind("cancel", handleGlobalCancel)
     const offCancel = keymap.registerLayer({
       priority: 80,
@@ -2533,6 +2606,7 @@ export function App(props: AppProps) {
       offOpeners()
       offNormal()
       offCloseTab()
+      offInterrupt()
       offCancel()
     })
   })
@@ -2935,6 +3009,12 @@ export function App(props: AppProps) {
                   usage={usageLabel(displayUsage())}
                   onOpenTasks={() => openOverlay("tasks")}
                 />
+                {/* The inbox, drawn out (agent-runner ar-t1): turns waiting on
+                    a step boundary to drain them. Same region as the activity
+                    line above it — both are "what is happening right now",
+                    not a description of the session — and empty draws
+                    nothing, the same T35/T38 rule `WorkingStatus` follows. */}
+                <QueueLane messages={queuedMessages()} onSelect={flushQueue} />
                 {/* `panel: true`'s degraded progress display (DESIGN §7.2.1,
                     tui-plugin D12): the latest call of a declaring tool, so it
                     is visible whether or not its own card is still on screen.

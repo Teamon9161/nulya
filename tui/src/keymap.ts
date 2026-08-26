@@ -26,6 +26,7 @@ export type Action =
   | "scrollUp"
   | "scrollDown"
   | "scrollEnd"
+  | "interrupt"
 
 export const default_keys: Record<Action, string> = {
   cancel: "escape",
@@ -48,6 +49,13 @@ export const default_keys: Record<Action, string> = {
   scrollDown: "pagedown",
   // Back to the live end of the transcript, wherever reading left off.
   scrollEnd: "shift+end",
+  // Interrupt-and-deliver (agent-runner ar-t1, tui.md §4.4b/§5): kill the step
+  // this tab is driving and re-step at once, instead of waiting for it to
+  // reach its own next boundary. This layer only claims the key while there is
+  // actually something to interrupt or already queued (`App.tsx`'s
+  // `interruptRelevant`) — at rest, plain Ctrl+J falls through untouched to the
+  // composer's own newline binding (the non-Kitty `Shift+Enter` fallback).
+  interrupt: "ctrl+j",
 }
 
 export type Keymap = Record<Action, string>

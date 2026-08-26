@@ -44,6 +44,15 @@ export interface Attachment {
   step(): Promise<void>
   cancel(): Promise<void>
   kill(): void
+  /**
+   * Ctrl+J (goals/agent-runner.md ar-t1). As a driver this is exactly
+   * `Driver.interruptAndDeliver` — append, kill the running step, re-step the
+   * moment it has actually exited. As an OBSERVER there is no writer lease of
+   * ours to kill, so the gesture degrades to the same queued `send` the
+   * composer already does while observing: the append lands in the inbox and
+   * the other writer drains it at its own next step boundary.
+   */
+  interruptAndDeliver(text: string, framed?: boolean): Promise<void>
   /** Stop observing and try to drive again (tui.md §5.6, "press ↵ to take over"). */
   takeOver(): void
   dispose(): void
@@ -171,72 +180,103 @@ export function createAttachment(
     if (role() === "driver" && driven) void driver.wake()
   }, pollMs)
 
+  // Named rather than object-literal methods, so `interruptAndDeliver` below
+  // can call `send` directly instead of a second copy of the observer's
+  // append path.
+  async function send(text: string, framed = false): Promise<void> {
+    const trimmed = text.trim()
+    if (trimmed.length === 0) return
+    if (role() === "driver") {
+      driven = true
+      await driver.send(trimmed, framed)
+      return
+    }
+    // Observer: append only. The turn is deposited in the inbox and the other
+    // writer drains it at its next step boundary (DESIGN §3.4) — we must not
+    // start a step of our own, and we could not if we tried. When the probe
+    // can see that writer actually holding the lease, its run is in flight
+    // and the turn carries the mid-task framing (midtask.ts); "free" and
+    // "unknown" claim nothing, so they wrap nothing.
+    const wire = !framed && probeWriterLease(ws, id) === "held" ? wrapMidTask(trimmed) : trimmed
+    state.enqueueUser(wire)
+    setSending(true)
+    setQueuedAt(Date.now())
+    try {
+      await sessionAppend(ws, id, wire)
+    } catch (error) {
+      state.setError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setSending(false)
+      setQueuedAt(null)
+    }
+  }
+
+  async function step(): Promise<void> {
+    if (role() === "observer") return
+    driven = true
+    await driver.step()
+  }
+
+  async function cancel(): Promise<void> {
+    // Cancellation is a kernel semantic, not a process one: the marker is
+    // consumed at a step boundary by whoever holds the lease (physics #7), so
+    // an observer may ask for it too — it just is not our step that stops.
+    if (role() === "driver") {
+      await driver.cancel()
+      return
+    }
+    try {
+      await sessionCancel(ws, id)
+    } catch (error) {
+      state.setError(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  function kill(): void {
+    driver.kill()
+  }
+
+  /**
+   * ar-t1's gesture, at this layer: a driver has a real step and a real lease
+   * to kill, so it is exactly `Driver.interruptAndDeliver`. An observer has
+   * neither — `driver` here has never been stepped and killing it would be
+   * killing nothing — so the honest degradation is the same queued append
+   * `send` already does while observing (D3): the message joins the inbox and
+   * whoever actually holds the lease drains it at its own next boundary.
+   */
+  async function interruptAndDeliver(text: string, framed = false): Promise<void> {
+    if (role() === "driver") {
+      driven = true
+      await driver.interruptAndDeliver(text, framed)
+      return
+    }
+    await send(text, framed)
+  }
+
+  function takeOver(): void {
+    stopFollow()
+    freeProbes = 0
+    setTakeoverReady(false)
+    setRole("driver")
+    driven = true
+    // A turn we queued as observer is still in the inbox if the other writer
+    // left before draining it. Taking over is the user saying "drive", and the
+    // one mechanical re-step tui.md §4.3 allows is exactly this case: our own
+    // pending turn, nobody else to drain it.
+    if (state.pendingCount() > 0) void driver.step()
+  }
+
   return {
     role,
     takeoverReady,
     status: () => (role() === "observer" ? (sending() ? "sending" : "idle") : driver.status()),
     startedAt: () => (role() === "observer" ? queuedAt() : driver.startedAt()),
-    async send(text, framed = false) {
-      const trimmed = text.trim()
-      if (trimmed.length === 0) return
-      if (role() === "driver") {
-        driven = true
-        await driver.send(trimmed, framed)
-        return
-      }
-      // Observer: append only. The turn is deposited in the inbox and the other
-      // writer drains it at its next step boundary (DESIGN §3.4) — we must not
-      // start a step of our own, and we could not if we tried. When the probe
-      // can see that writer actually holding the lease, its run is in flight
-      // and the turn carries the mid-task framing (midtask.ts); "free" and
-      // "unknown" claim nothing, so they wrap nothing.
-      const wire = !framed && probeWriterLease(ws, id) === "held" ? wrapMidTask(trimmed) : trimmed
-      state.enqueueUser(wire)
-      setSending(true)
-      setQueuedAt(Date.now())
-      try {
-        await sessionAppend(ws, id, wire)
-      } catch (error) {
-        state.setError(error instanceof Error ? error.message : String(error))
-      } finally {
-        setSending(false)
-        setQueuedAt(null)
-      }
-    },
-    async step() {
-      if (role() === "observer") return
-      driven = true
-      await driver.step()
-    },
-    async cancel() {
-      // Cancellation is a kernel semantic, not a process one: the marker is
-      // consumed at a step boundary by whoever holds the lease (physics #7), so
-      // an observer may ask for it too — it just is not our step that stops.
-      if (role() === "driver") {
-        await driver.cancel()
-        return
-      }
-      try {
-        await sessionCancel(ws, id)
-      } catch (error) {
-        state.setError(error instanceof Error ? error.message : String(error))
-      }
-    },
-    kill() {
-      driver.kill()
-    },
-    takeOver() {
-      stopFollow()
-      freeProbes = 0
-      setTakeoverReady(false)
-      setRole("driver")
-      driven = true
-      // A turn we queued as observer is still in the inbox if the other writer
-      // left before draining it. Taking over is the user saying "drive", and the
-      // one mechanical re-step tui.md §4.3 allows is exactly this case: our own
-      // pending turn, nobody else to drain it.
-      if (state.pendingCount() > 0) void driver.step()
-    },
+    send,
+    step,
+    cancel,
+    kill,
+    interruptAndDeliver,
+    takeOver,
     dispose() {
       disposed = true
       clearInterval(timer)

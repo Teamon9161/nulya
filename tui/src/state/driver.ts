@@ -74,6 +74,19 @@ export interface Driver {
   cancel(): Promise<void>
   /** Ctrl+C twice: kill the step process; the kernel repairs the tail next open. */
   kill(): void
+  /**
+   * Ctrl+J (goals/agent-runner.md ar-t1): append `text`, then — if a step is
+   * actually running — kill it and re-step the moment it has actually exited,
+   * rather than waiting for it to reach its own next boundary or for some
+   * idle-poll timer to notice the inbox is non-empty.
+   *
+   * At rest this is exactly `send`: there is nothing to interrupt, so the turn
+   * just starts a step as usual. `text` may be empty — that is the "nothing
+   * new to say, just stop waiting for the current step to get around to what
+   * is already queued" gesture (a click on the queue lane), and it still
+   * forces the kill-and-immediate-restep when a step is running.
+   */
+  interruptAndDeliver(text: string, framed?: boolean): Promise<void>
   dispose(): void
 }
 
@@ -169,6 +182,17 @@ export function createDriver(
   // interrupt contract attached: later ones carry the sentinel alone
   // (midtask.ts). Reset when the run ends — the next run explains itself anew.
   let noted = false
+  // Resolved once, in `drive()`'s own `finally`, the moment `driving` goes
+  // back to false — i.e. the step process has actually exited and the status
+  // is genuinely idle again. `interruptAndDeliver` is the one caller that
+  // needs to know this precisely (ar-t1): re-stepping before it is true would
+  // either spawn a second `session step` against the lease the dying one still
+  // holds, or (worse) race `step()`'s own `status() !== "idle"` guard.
+  let idleWaiters: Array<() => void> = []
+  function idleOnce(): Promise<void> {
+    if (!driving) return Promise.resolve()
+    return new Promise((resolve) => idleWaiters.push(resolve))
+  }
 
   async function drive(): Promise<void> {
     if (disposed || driving) return
@@ -247,68 +271,124 @@ export function createDriver(
       driving = false
       noted = false
       if (!disposed) setStatus("idle")
+      const waiters = idleWaiters
+      idleWaiters = []
+      for (const resolve of waiters) resolve()
     }
+  }
+
+  // Named rather than object-literal methods, so `interruptAndDeliver` below
+  // can call `send`/`kill`/`step` directly instead of reaching for `this` on
+  // an object that has not finished being built yet.
+  async function send(text: string, framed = false): Promise<void> {
+    const trimmed = text.trim()
+    if (trimmed.length === 0) return
+    // A step in flight means the model is mid-task, and a bare user turn
+    // after tool results reads like a stop signal — so the turn carries its
+    // own framing (midtask.ts). "sending" is not mid-task: that run has not
+    // started yet, the turn just joins its opening batch unwrapped. The
+    // contract rides once per run; later messages carry the tag alone.
+    const midTask = !framed && (status() === "stepping" || status() === "canceling")
+    const wire = midTask ? wrapMidTask(trimmed, !noted) : trimmed
+    if (midTask) noted = true
+    state.enqueueUser(wire)
+    // Anything but idle means a step is running or about to: the turn is
+    // appended and the run in flight (or the one the earlier send is about to
+    // start) drains it at its next step boundary. Starting a second `drive()`
+    // here would spawn a second step process against the same session.
+    const running = status() !== "idle"
+    if (!running) setStatus("sending")
+    try {
+      await sessionAppend(ws, id, wire)
+    } catch (error) {
+      state.setError(error instanceof Error ? error.message : String(error))
+      if (!running) setStatus("idle")
+      return
+    }
+    // Mid-run appends are not interruptions: the kernel drains the inbox at
+    // its next step boundary (DESIGN §3.4), so the turn joins the run itself.
+    if (running) return
+    await drive()
+  }
+
+  async function step(): Promise<void> {
+    if (status() !== "idle") return
+    await drive()
+  }
+
+  async function wake(): Promise<void> {
+    if (disposed || driving || status() !== "idle") return
+    if (!inboxPending(ws, id)) return
+    await drive()
+  }
+
+  async function cancel(): Promise<void> {
+    if (status() !== "stepping") return
+    setStatus("canceling")
+    try {
+      await sessionCancel(ws, id)
+    } catch (error) {
+      state.setError(error instanceof Error ? error.message : String(error))
+    }
+    // The kernel consumes the marker at the step boundary; `drive()` returns
+    // to idle when the run ends, so no status is forced here.
+    if (status() === "canceling") setStatus("stepping")
+  }
+
+  function kill(): void {
+    if (!handle) return
+    killed = true
+    handle.kill()
+  }
+
+  /**
+   * ar-t1's whole gesture, in three existing verbs: append, kill, step — no new
+   * state machine, just the order they run in.
+   *
+   * At rest (`status() === "idle"`) there is no step to interrupt, so this
+   * degrades to an ordinary `send`; blank text at rest is the queue lane's
+   * "deliver what is already queued" click landing after the step ended, and
+   * that is exactly `wake` — inbox non-empty steps now instead of waiting for
+   * the idle-poll timer, inbox empty stays a no-op (a bare step against an
+   * empty inbox would re-send the last assistant turn as prefill, DESIGN §4).
+   * Otherwise: append now (mirroring `send`'s queued-append path exactly, so
+   * the transcript's `queued` marker behaves the same as any other mid-run
+   * message), kill whatever step is running, wait for `drive()` to actually
+   * finish (not just for the kill signal to be sent), and start a fresh step
+   * the instant that is true — never the idle-poll timer, because there isn't
+   * one here to wait for.
+   *
+   * Blank `text` is deliberately allowed through past the `send` no-op: it is
+   * the "nothing new to say, just stop waiting and deliver what is already
+   * queued" gesture (the queue lane's own click), and it still has to kill and
+   * re-step when a step is running.
+   */
+  async function interruptAndDeliver(text: string, framed = false): Promise<void> {
+    const trimmed = text.trim()
+    if (status() === "idle") {
+      if (trimmed.length === 0) {
+        await wake()
+        return
+      }
+      await send(trimmed, framed)
+      return
+    }
+    if (trimmed.length > 0) await send(trimmed, framed)
+    kill()
+    await idleOnce()
+    if (disposed) return
+    await step()
   }
 
   return {
     status,
     startedAt,
-    async send(text, framed = false) {
-      const trimmed = text.trim()
-      if (trimmed.length === 0) return
-      // A step in flight means the model is mid-task, and a bare user turn
-      // after tool results reads like a stop signal — so the turn carries its
-      // own framing (midtask.ts). "sending" is not mid-task: that run has not
-      // started yet, the turn just joins its opening batch unwrapped. The
-      // contract rides once per run; later messages carry the tag alone.
-      const midTask = !framed && (status() === "stepping" || status() === "canceling")
-      const wire = midTask ? wrapMidTask(trimmed, !noted) : trimmed
-      if (midTask) noted = true
-      state.enqueueUser(wire)
-      // Anything but idle means a step is running or about to: the turn is
-      // appended and the run in flight (or the one the earlier send is about to
-      // start) drains it at its next step boundary. Starting a second `drive()`
-      // here would spawn a second step process against the same session.
-      const running = status() !== "idle"
-      if (!running) setStatus("sending")
-      try {
-        await sessionAppend(ws, id, wire)
-      } catch (error) {
-        state.setError(error instanceof Error ? error.message : String(error))
-        if (!running) setStatus("idle")
-        return
-      }
-      // Mid-run appends are not interruptions: the kernel drains the inbox at
-      // its next step boundary (DESIGN §3.4), so the turn joins the run itself.
-      if (running) return
-      await drive()
-    },
-    async step() {
-      if (status() !== "idle") return
-      await drive()
-    },
-    async wake() {
-      if (disposed || driving || status() !== "idle") return
-      if (!inboxPending(ws, id)) return
-      await drive()
-    },
-    async cancel() {
-      if (status() !== "stepping") return
-      setStatus("canceling")
-      try {
-        await sessionCancel(ws, id)
-      } catch (error) {
-        state.setError(error instanceof Error ? error.message : String(error))
-      }
-      // The kernel consumes the marker at the step boundary; `drive()` returns
-      // to idle when the run ends, so no status is forced here.
-      if (status() === "canceling") setStatus("stepping")
-    },
-    kill() {
-      if (!handle) return
-      killed = true
-      handle.kill()
-    },
+    send,
+    step,
+    wake,
+    cancel,
+    interruptAndDeliver,
+    kill,
     dispose() {
       disposed = true
       handle?.kill()
