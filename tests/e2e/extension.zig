@@ -705,6 +705,128 @@ test "cli: activating into the user store from inside a session says so on stder
     try std.testing.expect(std.mem.indexOf(u8, list.stdout, "[prompt]") != null);
 }
 
+test "cli: a system prompt's declared position orders the extension band, and a resume rebuilds the same bytes from the frozen manifests" {
+    // DESIGN §5.6. `position` is package-authored metadata frozen with the rest
+    // of the manifest, so the two paths that build system blocks — fresh
+    // composition at `session new` and frozen composition at resume — have to
+    // agree without either of them recording an order anywhere. Deliberately
+    // adversarial to the old rule (member id order): the package that must come
+    // FIRST is the one that sorts LAST.
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var ws_real: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
+
+    // `a.tail` sorts first and asks to be LAST; `z.head` sorts last and asks to
+    // be FIRST; `m.body` never mentions position at all.
+    const Pkg = struct { id: []const u8, manifest: []const u8, body: []const u8 };
+    const pkgs = [_]Pkg{
+        .{
+            .id = "a.tail",
+            .manifest =
+            \\{"schema":"nulya.extension/v2","id":"a.tail","contributes":{"system_prompts":[{"path":"p.md","position":"late"}]}}
+            ,
+            .body = "TAIL\n",
+        },
+        .{
+            .id = "m.body",
+            .manifest =
+            \\{"schema":"nulya.extension/v2","id":"m.body","contributes":{"system_prompts":["p.md"]}}
+            ,
+            .body = "BODY\n",
+        },
+        .{
+            .id = "z.head",
+            .manifest =
+            \\{"schema":"nulya.extension/v2","id":"z.head","contributes":{"system_prompts":[{"path":"p.md","position":"early"}]}}
+            ,
+            .body = "HEAD\n",
+        },
+    };
+
+    var with_args: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (with_args.items) |s| alloc.free(s);
+        with_args.deinit(alloc);
+    }
+    for (pkgs) |p| {
+        const draft = try std.fs.path.join(alloc, &.{ ".nulya", "extensions", p.id });
+        defer alloc.free(draft);
+        try ws.createDirPath(io, draft);
+        const manifest_rel = try std.fs.path.join(alloc, &.{ draft, "extension.json" });
+        defer alloc.free(manifest_rel);
+        try ws.writeFile(io, .{ .sub_path = manifest_rel, .data = p.manifest });
+        const body_rel = try std.fs.path.join(alloc, &.{ draft, "p.md" });
+        defer alloc.free(body_rel);
+        try ws.writeFile(io, .{ .sub_path = body_rel, .data = p.body });
+
+        const built = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "build", draft });
+        defer alloc.free(built.stdout);
+        try std.testing.expectEqual(@as(u8, 0), built.code);
+        const version = try extractVersion(alloc, built.stdout);
+        defer alloc.free(version);
+        const activated = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "activate", p.id, version });
+        defer alloc.free(activated.stdout);
+        try std.testing.expectEqual(@as(u8, 0), activated.code);
+        try with_args.append(alloc, try alloc.dupe(u8, p.id));
+    }
+
+    // Fresh path, named in yet another order so nothing can be reading argv.
+    const named: []const composition.WithRef = &.{
+        .{ .id = "m.body" },
+        .{ .id = "z.head" },
+        .{ .id = "a.tail" },
+    };
+    var fresh = try composition.SessionComposition.init(alloc, io, ws_path, &.{".nulya/extensions"}, .{ .with = named });
+    defer fresh.deinit(alloc);
+
+    const expected = [_][]const u8{ "HEAD\n", "BODY\n", "TAIL\n" };
+    try std.testing.expectEqual(@as(usize, 1 + expected.len), fresh.system_prompts.blocks.len);
+    try std.testing.expectEqualStrings("kernel", fresh.system_prompts.blocks[0].source);
+    for (expected, fresh.system_prompts.blocks[1..]) |want, block| {
+        try std.testing.expectEqualStrings(want, block.bytes);
+    }
+
+    // …and the frozen path, from a session the real binary created and a second
+    // process reopened: byte-identical blocks, sources included.
+    const args = [_][]const u8{ exe_abs, "session", "new", "--profile", "scripted", "--with", "m.body", "--with", "z.head", "--with", "a.tail" };
+    const created = try runCli(alloc, io, ws, &args);
+    defer alloc.free(created.stdout);
+    try std.testing.expectEqual(@as(u8, 0), created.code);
+    const sid = std.mem.trim(u8, created.stdout, " \r\n");
+
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+    var model = EndTurnModel{};
+    const spath = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{sid});
+    defer alloc.free(spath);
+    var resumed = try session.AgentSession.openDurable(alloc, .{
+        .model = .{ .ptr = &model, .vtable = &EndTurnModel.vtable },
+        .step_ctx = .{
+            .tool_context = .{ .environment = lenv.environment(), .cwd = ws_path },
+            .scratch_dir = ".nulya/scratch",
+        },
+    }, .{ .workspace = ws, .session_path = spath });
+    defer resumed.deinit();
+
+    const rebuilt = resumed.composition.system_prompts.blocks;
+    try std.testing.expectEqual(fresh.system_prompts.blocks.len, rebuilt.len);
+    for (fresh.system_prompts.blocks, rebuilt) |a_block, b_block| {
+        try std.testing.expectEqualStrings(a_block.source, b_block.source);
+        try std.testing.expectEqualStrings(a_block.bytes, b_block.bytes);
+    }
+}
+
 test "cli: a workspace store that arrived with a checkout is refused until `ext trust`; one this machine built is trusted by birth" {
     // DESIGN §9. `.nulya/extensions` is checkout content AND the first store root,
     // so cloning a repo used to be enough to put its active versions into every

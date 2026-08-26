@@ -628,8 +628,8 @@ fn writeSeal(
 /// stay consumable by session composition, which reads each prompt with the
 /// same byte limit and needs valid UTF-8 for provider JSON serialization.
 fn validateSystemPrompts(alloc: std.mem.Allocator, m: manifest.Manifest, snapshot: integrity.PackageSnapshot) !void {
-    for (m.system_prompts) |prompt_path| {
-        const rel = try integrity.canonicalRel(alloc, prompt_path);
+    for (m.system_prompts) |p| {
+        const rel = try integrity.canonicalRel(alloc, p.path);
         defer alloc.free(rel);
         const bytes = integrity.findSnapshotFile(snapshot, rel) orelse return error.SystemPromptFileMissing;
         if (bytes.len > prompt.max_system_prompt_bytes) return error.SystemPromptTooLarge;

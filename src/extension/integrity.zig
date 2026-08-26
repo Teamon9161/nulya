@@ -143,10 +143,10 @@ pub fn collectPackageSnapshot(
         try collectTree(alloc, io, root, skill_fs, skill_rel, &files);
     }
 
-    for (m.system_prompts) |prompt_path| {
-        const prompt_fs = try std.fs.path.join(alloc, &.{ ext_dir_rel, prompt_path });
+    for (m.system_prompts) |p| {
+        const prompt_fs = try std.fs.path.join(alloc, &.{ ext_dir_rel, p.path });
         defer alloc.free(prompt_fs);
-        const prompt_rel = try canonicalRel(alloc, prompt_path);
+        const prompt_rel = try canonicalRel(alloc, p.path);
         defer alloc.free(prompt_rel);
         try collectFile(alloc, io, root, prompt_fs, prompt_rel, &files);
     }
@@ -189,10 +189,10 @@ pub fn collectFrozenSnapshot(
         try collectTree(alloc, io, root, skill_fs, skill_rel, &files);
     }
 
-    for (m.system_prompts) |prompt_path| {
-        const prompt_fs = try std.fs.path.join(alloc, &.{ version_rel, package_dir, prompt_path });
+    for (m.system_prompts) |p| {
+        const prompt_fs = try std.fs.path.join(alloc, &.{ version_rel, package_dir, p.path });
         defer alloc.free(prompt_fs);
-        const prompt_rel = try canonicalRel(alloc, prompt_path);
+        const prompt_rel = try canonicalRel(alloc, p.path);
         defer alloc.free(prompt_rel);
         try collectFile(alloc, io, root, prompt_fs, prompt_rel, &files);
     }
@@ -419,7 +419,7 @@ fn requireDeclaredPaths(
 ) !void {
     if (m.runtime != null) try requirePackagePath(alloc, io, root, version_rel, "src");
     for (m.skills) |skill_path| try requirePackagePath(alloc, io, root, version_rel, skill_path);
-    for (m.system_prompts) |prompt_path| try requirePackagePath(alloc, io, root, version_rel, prompt_path);
+    for (m.system_prompts) |p| try requirePackagePath(alloc, io, root, version_rel, p.path);
     for (m.ui) |u| try requirePackagePath(alloc, io, root, version_rel, u.entry);
 }
 

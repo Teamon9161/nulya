@@ -127,8 +127,9 @@ pub fn implementationKind(m: Manifest) ImplementationKind {
 ///                  a driver's equivalent). THE DEFAULT: a package a person
 ///                  composed in is a package whose tools they meant to use, and
 ///                  a scaffolded extension should work the moment it is named.
-///                  A pin that merely IMPLIES membership does not unlock every
-///                  `auto` tool in that package — that pin asked for one tool.
+///                  Membership is membership: a package a pin brought in is a
+///                  member like any other, so its `auto` tools reach the model
+///                  too (DESIGN §5.1).
 ///   - `manual`   : membership is not enough; a person has to name this tool
 ///                  (`session new --pin ext:<id>/<tool>`, config
 ///                  `[registry] pinned_native_tools`). The only surface a pin
@@ -177,6 +178,55 @@ pub const Apply = enum {
         if (std.mem.eql(u8, s, "auto")) return .auto;
         if (std.mem.eql(u8, s, "manual")) return .manual;
         return null;
+    }
+};
+
+/// Where this package's system prompt block sits among the OTHER packages'
+/// (DESIGN §5.6) — the one thing a manifest may say about system-prompt order,
+/// and a closed three-word vocabulary like `surface` and `apply`:
+///
+///   - `early`  : before the packages that said nothing. Framing a later prompt
+///                is meant to be read against.
+///   - `normal` : THE DEFAULT. Member order decides, as it always did.
+///   - `late`   : after the packages that said nothing. The closing word a mode
+///                package wants when another package's prompt is the body.
+///
+/// Its scope is exactly the extension band of `PromptIR.system_blocks`: the
+/// kernel block stays first, `--prompt` inline text stays after every extension,
+/// and `skills:catalog` stays last (`composition.buildSystemPrompts`). Within one
+/// position the existing member order is untouched, so this is a partition of the
+/// band, not a sort key a package can use to jump the kernel.
+pub const PromptPosition = enum {
+    early,
+    normal,
+    late,
+
+    pub fn fromString(s: []const u8) ?PromptPosition {
+        if (std.mem.eql(u8, s, "early")) return .early;
+        if (std.mem.eql(u8, s, "normal")) return .normal;
+        if (std.mem.eql(u8, s, "late")) return .late;
+        return null;
+    }
+};
+
+/// One entry of `contributes.system_prompts`, written either as a bare path or
+/// as an object that also carries a `position` (see `PromptPosition`):
+///
+///     "system_prompts": ["prompts/base.md", {"path": "prompts/tail.md", "position": "late"}]
+///
+/// The bare string stays legal and means `normal` — it is what every package in
+/// this repository writes, and a field nobody needs should not have to be typed.
+pub const SystemPromptSpec = struct {
+    path: []const u8,
+    /// This prompt's band, kept as WRITTEN. Read through `positionOf`, which
+    /// supplies the default. Silence is a DEFAULT, not a "did not say" (the same
+    /// reasoning as `ToolSpec.surface`): every block lands somewhere whether or
+    /// not the manifest names a band.
+    position: ?[]const u8 = null,
+
+    pub fn positionOf(self: SystemPromptSpec) PromptPosition {
+        if (self.position) |s| return PromptPosition.fromString(s).?;
+        return .normal;
     }
 };
 
@@ -358,7 +408,9 @@ pub const Manifest = struct {
     runtime: ?Runtime,
     tools: []const ToolSpec,
     skills: []const []const u8,
-    system_prompts: []const []const u8,
+    /// This package's static system prompt contributions (see
+    /// `SystemPromptSpec`), in the order the manifest wrote them.
+    system_prompts: []const SystemPromptSpec,
     /// This package's slash commands (see `Command`). Absent reads as empty —
     /// same convention as `skills` / `system_prompts`.
     commands: []const Command = &.{},
@@ -469,10 +521,17 @@ pub const Manifest = struct {
             }
         }
 
-        for (self.system_prompts, 0..) |prompt_path, i| {
-            if (!isSafeRelPath(prompt_path)) return error.InvalidSystemPromptPath;
+        for (self.system_prompts, 0..) |p, i| {
+            if (!isSafeRelPath(p.path)) return error.InvalidSystemPromptPath;
+            // A closed vocabulary refused rather than read as the default, for
+            // `surface`'s reason: a package that meant `late` and typed `latte`
+            // would silently land in the middle of the band, and the author
+            // would see a wrong prompt order with nothing to explain it.
+            if (p.position) |s| {
+                if (PromptPosition.fromString(s) == null) return error.InvalidPromptPosition;
+            }
             for (self.system_prompts[i + 1 ..]) |other| {
-                if (std.mem.eql(u8, prompt_path, other)) return error.DuplicateSystemPromptPath;
+                if (std.mem.eql(u8, p.path, other.path)) return error.DuplicateSystemPromptPath;
             }
         }
 
@@ -549,6 +608,9 @@ pub const ValidateError = error{
     DuplicateSkillPath,
     InvalidSystemPromptPath,
     DuplicateSystemPromptPath,
+    /// A system prompt entry's `position` is a string, but not one of `early` /
+    /// `normal` / `late`.
+    InvalidPromptPosition,
     /// A command's `name` is empty or outside `[a-z0-9-]+`.
     InvalidCommandName,
     DuplicateCommandName,
@@ -593,7 +655,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!Manifest {
     const runtime = try dupRuntime(a, obj);
     const tools = try dupTools(a, contributes);
     const skills = try dupStringList(a, contributes, "skills");
-    const system_prompts = try dupStringList(a, contributes, "system_prompts");
+    const system_prompts = try dupSystemPrompts(a, contributes);
     const commands = try dupCommands(a, contributes);
     const policy = try readPolicy(contributes);
     const ui = try dupUi(a, contributes);
@@ -736,6 +798,29 @@ fn dupTools(a: std.mem.Allocator, contributes: std.json.ObjectMap) ParseError![]
         };
     }
     return tools;
+}
+
+/// `contributes.system_prompts` (see `SystemPromptSpec`): each entry is a bare
+/// path or an object carrying `path` plus an optional `position`. Anything else
+/// is a `WrongType` — a mistyped entry must not read as "absent", the strictness
+/// every other manifest field applies.
+fn dupSystemPrompts(a: std.mem.Allocator, contributes: std.json.ObjectMap) ParseError![]const SystemPromptSpec {
+    const list = switch (contributes.get("system_prompts") orelse return a.alloc(SystemPromptSpec, 0)) {
+        .array => |arr| arr,
+        else => return error.WrongType,
+    };
+    const out = try a.alloc(SystemPromptSpec, list.items.len);
+    for (list.items, 0..) |v, i| {
+        out[i] = switch (v) {
+            .string => |s| .{ .path = try a.dupe(u8, s) },
+            .object => |o| .{
+                .path = try dupString(a, o, "path"),
+                .position = try optionalString(a, o, "position"),
+            },
+            else => return error.WrongType,
+        };
+    }
+    return out;
 }
 
 /// A tool's `ui` block (see `ToolUi`), or null when the tool wrote none.
@@ -1319,7 +1404,7 @@ test "validates a prompt-only package without runtime" {
     try std.testing.expect(m.runtime == null);
     try std.testing.expectEqual(@as(usize, 0), m.tools.len);
     try std.testing.expectEqual(@as(usize, 0), m.skills.len);
-    try std.testing.expectEqualStrings("prompts/finance.md", m.system_prompts[0]);
+    try std.testing.expectEqualStrings("prompts/finance.md", m.system_prompts[0].path);
 }
 
 test "rejects invalid and duplicate system prompt paths" {
@@ -1336,6 +1421,54 @@ test "rejects invalid and duplicate system prompt paths" {
     var b = try parse(std.testing.allocator, dup);
     defer b.deinit();
     try std.testing.expectError(error.DuplicateSystemPromptPath, b.validate());
+}
+
+test "a system prompt entry is a bare path or an object with a position; silence means normal and an unknown word is refused" {
+    const alloc = std.testing.allocator;
+
+    const mixed =
+        \\{"schema":"nulya.extension/v2","id":"p","contributes":{"system_prompts":["a.md",{"path":"b.md","position":"early"},{"path":"c.md","position":"late"},{"path":"d.md"}]}}
+    ;
+    var m = try parse(alloc, mixed);
+    defer m.deinit();
+    try m.validate();
+    try std.testing.expectEqualStrings("a.md", m.system_prompts[0].path);
+    try std.testing.expectEqual(PromptPosition.normal, m.system_prompts[0].positionOf());
+    try std.testing.expectEqual(PromptPosition.early, m.system_prompts[1].positionOf());
+    try std.testing.expectEqual(PromptPosition.late, m.system_prompts[2].positionOf());
+    // The object form without the key is silent, exactly like the bare string.
+    try std.testing.expect(m.system_prompts[3].position == null);
+    try std.testing.expectEqual(PromptPosition.normal, m.system_prompts[3].positionOf());
+
+    // A word outside the three is a refusal, not a silent `normal`.
+    const typo =
+        \\{"schema":"nulya.extension/v2","id":"p","contributes":{"system_prompts":[{"path":"a.md","position":"latte"}]}}
+    ;
+    var t = try parse(alloc, typo);
+    defer t.deinit();
+    try std.testing.expectError(error.InvalidPromptPosition, t.validate());
+
+    // The path rules still apply through the object form.
+    const escape =
+        \\{"schema":"nulya.extension/v2","id":"p","contributes":{"system_prompts":[{"path":"../evil.md","position":"late"}]}}
+    ;
+    var e = try parse(alloc, escape);
+    defer e.deinit();
+    try std.testing.expectError(error.InvalidSystemPromptPath, e.validate());
+
+    // Duplicates are duplicates whichever form each was written in.
+    const dup =
+        \\{"schema":"nulya.extension/v2","id":"p","contributes":{"system_prompts":["a.md",{"path":"a.md","position":"late"}]}}
+    ;
+    var d = try parse(alloc, dup);
+    defer d.deinit();
+    try std.testing.expectError(error.DuplicateSystemPromptPath, d.validate());
+
+    // A mistyped entry is a WrongType, never "absent".
+    const wrong =
+        \\{"schema":"nulya.extension/v2","id":"p","contributes":{"system_prompts":[42]}}
+    ;
+    try std.testing.expectError(error.WrongType, parse(alloc, wrong));
 }
 
 // --- tui-plugin U1: `commands` / `policy` / a tool's `ui` / the package `ui` -----

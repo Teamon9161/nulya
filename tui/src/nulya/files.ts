@@ -325,7 +325,7 @@ function contributionsOf(
     // author's reading of what activating the package means (DESIGN §7.2.1).
     apply: applyOf(manifest?.["apply"]),
     skills: stringList(contributes["skills"]),
-    systemPrompts: stringList(contributes["system_prompts"]),
+    systemPrompts: promptPathList(contributes["system_prompts"]),
     commands: commandsOf(contributes["commands"]),
     policy: policyOf(contributes["policy"]),
     toolRender,
@@ -734,6 +734,26 @@ function readManifest(path: string): Record<string, unknown> | null {
 
 function stringList(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : []
+}
+
+/**
+ * `contributes.system_prompts`, whose entries are a bare path or an object
+ * carrying `path` plus an optional `position` (`manifest.SystemPromptSpec`,
+ * DESIGN §5.6). Only the path is projected: `position` orders one session's
+ * system blocks, and this front end counts prompt files and names their source
+ * — it never assembles the blocks itself.
+ */
+function promptPathList(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  const out: string[] = []
+  for (const entry of value) {
+    if (typeof entry === "string") out.push(entry)
+    else if (entry !== null && typeof entry === "object") {
+      const path = (entry as Record<string, unknown>)["path"]
+      if (typeof path === "string") out.push(path)
+    }
+  }
+  return out
 }
 
 function manifestFacts(manifest: Record<string, unknown> | null): Pick<

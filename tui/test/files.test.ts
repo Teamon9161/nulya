@@ -17,6 +17,7 @@ import {
 import { sessionAppend, sessionList, sessionNew, sessionStep } from "../src/nulya/cli.ts"
 import { scripted_env, scripted_loop_env, tempWorkspace, until, type TempWorkspace } from "./support.ts"
 import { join } from "node:path"
+import { mkdirSync, writeFileSync } from "node:fs"
 
 let ws: TempWorkspace
 
@@ -103,6 +104,34 @@ test("listExtensions reads the version line, the current pointer and the manifes
   expect(lint.shadowed).toBe(false)
   // The workspace root is always first in the search order.
   expect((await storeRoots(ws))[0]).toBe(join(ws.dir, ".nulya", "extensions"))
+}, 120_000)
+
+test("a system prompt entry projects its path in either form, bare or with a position", async () => {
+  // `contributes.system_prompts` entries may be a bare path or an object
+  // carrying `path` plus an optional `position` (DESIGN §5.6). `position`
+  // orders one session's system blocks — the kernel's business — so this
+  // projection takes the path from both forms and nothing else.
+  const dir = join(ws.dir, ".nulya", "extensions", "mode.two")
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(
+    join(dir, "extension.json"),
+    JSON.stringify({
+      schema: "nulya.extension/v2",
+      id: "mode.two",
+      contributes: { system_prompts: ["head.md", { path: "tail.md", position: "late" }] },
+    }),
+  )
+  writeFileSync(join(dir, "head.md"), "head\n")
+  writeFileSync(join(dir, "tail.md"), "tail\n")
+
+  const run = (args: string[]) => Bun.spawnSync({ cmd: [ws.bin, ...args], cwd: ws.dir, env: process.env })
+  const built = run(["ext", "build", ".nulya/extensions/mode.two"])
+  expect(built.exitCode).toBe(0)
+  const version = /v-[0-9a-zA-Z]+/.exec(built.stdout.toString())?.[0]
+  expect(run(["ext", "activate", "mode.two", version!]).exitCode).toBe(0)
+
+  const entry = (await listExtensions(ws)).find((e) => e.id === "mode.two")!
+  expect(entry.systemPrompts).toEqual(["head.md", "tail.md"])
 }, 120_000)
 
 test("readToolUsage projects the journal without ranking it", async () => {

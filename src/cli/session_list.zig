@@ -254,7 +254,7 @@ const PromptIndex = struct {
         // The manifest owns its strings; the listing outlives it, so copy while
         // stamping each one with the version it came from.
         for (resolved.manifest.system_prompts, paths) |p, *slot| {
-            slot.* = try std.fmt.allocPrint(a, "{s}/{s}", .{ key, p });
+            slot.* = try std.fmt.allocPrint(a, "{s}/{s}", .{ key, p.path });
         }
         gop.value_ptr.* = paths;
         return paths;

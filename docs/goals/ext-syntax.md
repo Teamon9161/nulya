@@ -96,7 +96,24 @@ e2e 从"断言拒绝"改写成"断言激活 + 告知行 + `deactivate` 之后下
 - **旧 store 的语义写明白**：没有 `apply=` 列的 `current`（这一列出现之前写的）读作**不常驻**——unknown 不是主张——修法是重跑一次 `nulya ext activate <id> <version>`。pre-release，不为它造迁移。
 - e2e 新增两条（`tests/e2e/ext_cli.zig`）：已激活 `apply:auto` 包的冻结 manifest 被改成 `manual` / 改成非 JSON → `session new` 硬失败并点名 id / 版本 / `ext deactivate`；`manual` 包的冻结 manifest 被改成 `auto` → 不进 session、session 正常开。单测一条（`store.zig`）钉住记录的读写与"编辑 manifest 改不动记录、但会让 `.sealed` 失败"。
 
-### 5.3 记账：两条 design debt（**记录，不实现**）
+### 5.3 两条 design debt（**2026-08-26 两条均已落地**）
 
-- **prompt position。** `contributes.system_prompts[]` 今天是一串路径，顺序即数组顺序，包与包之间由 §5.6 的 block 顺序（kernel → extension → inline → catalog）决定。将来一个条目可以写成 `{path, position: early|normal|late}`——**纯包内排序元数据**，不动 membership、不动 freeze、不进 header schema（冻的仍是文本）。等第一个真实需求（两个 mode 包同场、其中一个要收尾）再做。
-- **pin 蕴含成员的"半成员"不对称。** 一条 pin 把它的包 union 进 composition，那个包的 skills 与 system_prompts **会**进这一场，但 `composition.isFullMember` 不展开它其它的 `surface:"auto"` tools（DESIGN §5.1）。所以"半成员"这个词只对 tool 面成立，对 prompt / skill 面不成立——两边的直觉会打架。现实里唯一的 consumer 是 `std`（六个 tool、无 prompt 无 skill），所以**没有实际 bug**。真要收口有两条路（pin 蕴含的成员也不带 prompts/skills；或者展开全部 auto tools），两条都要往 freeze schema 里加"这个成员是怎么进来的"，而今天没有一个用例值这个价——先记账。
+原文是"记录，不实现"。同日主会话把两条都做了，内核 physics 一条未动、freeze schema 一个字节未变。
+
+#### prompt position ✅
+
+`contributes.system_prompts[]` 的条目从纯路径扩成 `"path"` 或 `{"path", "position": "early"|"normal"|"late"}`。
+
+- **落点**：`manifest.PromptPosition` + `manifest.SystemPromptSpec`（`path` + as-written 的 `position` + `positionOf()`）+ `Manifest.system_prompts` 换成 `[]const SystemPromptSpec` + `dupSystemPrompts`（string 或 object，别的是 `WrongType`）+ validate 的 `InvalidPromptPosition`（闭合词表，`surface` / `apply` 的同一条纪律）；`composition.buildSystemPrompts` 的 extension 那一段从一趟遍历变成 early / normal / late **三趟**（同一段内保持既有成员顺序，稳定性由构造保证而不靠排序函数）。裸字符串形永远合法（= `normal`），八个自带包一个字都没改。
+- **作用域只有一个**：extension 那一带内部。kernel 块仍最前、inline `--prompt` 仍在全部 extension 之后、`skills:catalog` 仍最后（DESIGN §5.6）。
+- **不动 freeze schema、不动 membership**：`position` 就在 manifest 里，随版本一起冻结，所以 fresh 与 frozen 两条路跑同一段代码读同一批字节。
+- 消费者跟随：`integrity.zig`（三处）、`build_ext.validateSystemPrompts`、`cli/session_list.zig` 的投影、`tui/src/nulya/files.ts` 的 `promptPathList`（只取 path，TUI 只数数与显示 source）。
+- 钉子：`manifest.zig` 一条单测（两种形 + 缺省 normal + 拼错的词被拒 + 路径规则与去重跨两种形仍生效 + 数字条目是 `WrongType`）；`composition.zig` 一条单测（id 序与 position 序相反 + fresh/frozen 逐块相等）；`tests/e2e/extension.zig` 一条（真实二进制建三个包，**id 排最后的写 `early`、排最前的写 `late`**，fresh 与 resume 的 blocks 逐字节相等）；`tui/test/files.test.ts` 一条（两种形都投影出 path）。
+
+#### pin 蕴含成员的"半成员"不对称 ✅ ——**取消半成员，成员一律全员**
+
+- **定稿规则**：成员 = 一组 (id, version)，**来源不影响权利**。每个成员贡献 manifest 说的一切（prompts、skills、全部 `surface:"auto"` tools）；模型面 = 成员的全部 auto tools ∪ 被 pin 的 manual tools，`internal` 恒不上。
+- **为什么选宽的那条**：窄到底（pin 蕴含的成员连 prompt / skill 也不给）需要冻结 header 记下"这个成员是怎么进来的"——一个新的 freeze schema 字段；宽到底什么都不需要，fresh 与 frozen 两条路对所有成员读同一条规则、零新状态。
+- **落点**：`composition.isFullMember` 与 `resolveFreshBindings` 里那一行 `continue` 删除；模块注释、`Options` 文档、`manifest.Surface` 文档、DESIGN §5.1 / §7.2.1、guide SKILL.md 同步。
+- **今天零行为变化**：`extensions/std` 六个 tool 全 `manual`、无 prompt 无 skill；`extensions/agent` 的入口 tool 已经是 `auto` 且不再被 pin（§4 那条修正）。
+- 钉子：`composition.zig` 那条原来叫"pin-implied membership does not expose a package's surface-auto tools"的单测改写成正面钉子——pin 一个 `manual` tool，同包的 `auto` tool 也在模型面。

@@ -118,7 +118,11 @@ printf 'hello %s\n' "${NULYA_ARG_name:-world}"
 - `contributes.skills[]` — directories holding a `SKILL.md`.
 - `contributes.system_prompts[]` — files that join the system blocks of every
   session this package is a member of. Which sessions those are is mostly not
-  the package's to say: see the two axes below.
+  the package's to say: see the two axes below. An entry is a bare path, or
+  `{"path": "<p>", "position": "early"|"normal"|"late"}` when this text has to
+  sit before or after what other packages contribute (`normal` is the default).
+  That is its whole scope — the kernel's own block stays first, `session new
+  --prompt` text stays after every package's, and the skills catalog stays last.
 - `apply` — top level, not under `contributes`, because it is not a
   contribution: it is what the author thinks INSTALLING this package should
   mean. `manual` (the default, and every manifest that omits it) means the
@@ -141,14 +145,17 @@ it does — except that for a package declaring `apply: "auto"`, having a
 and points at `nulya ext deactivate`.
 
 - MEMBERSHIP — the package is in this session: its skills in the catalog, its
-  system prompts in the system blocks, its tools callable through the CLI.
+  system prompts in the system blocks, its `surface:"auto"` tools on the model
+  face, its tools callable through the CLI. However a package became a member,
+  it contributes all of that: there is no lesser kind of membership.
   Standing: `[extensions] with` in config, or the package's own `apply: "auto"`.
   One session: `nulya session new --with <id>[@<version>]`. A `--with` naming an
   id that a standing layer already brought in wins, version and all.
 - TOOL FACE — a tool takes a native slot the model can call. For
   `surface:"manual"` tools, standing form is `[registry] pinned_native_tools`;
   one-session form is `nulya session new --pin ext:<id>/<tool>`. A pin brings
-  its own package in, so a pin alone is enough. For `surface:"auto"` tools —
+  its own package in — as a full member, so that package's `surface:"auto"`
+  tools arrive with it — so a pin alone is enough. For `surface:"auto"` tools —
   the default — the tool face follows the membership axis instead: compose the
   package and those tools appear, with no pin and nothing else to write.
   `surface:"internal"` tools never join this face.

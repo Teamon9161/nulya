@@ -124,7 +124,8 @@ pub const Options = struct {
     /// A pin whose package is not already a member BRINGS IT IN, at `current`
     /// (`resolveFreshExtensions`): a tool cannot take a slot in a session its
     /// package is absent from, so membership was always implied and only the
-    /// saying of it was left to each caller.
+    /// saying of it was left to each caller. What it brings in is a FULL member,
+    /// the same as any other — see `resolveFreshBindings`.
     pinned_native_tools: []const []const u8 = &.{},
     /// Provider-facing total tool count, the builtin included. `shell` always
     /// occupies `registry.builtin_count` of it.
@@ -138,8 +139,9 @@ pub const Options = struct {
     /// Membership: their skills enter the catalog, their system prompts enter
     /// the system blocks, and their tools become invocable through the CLI. A
     /// tool whose manifest says `surface:"auto"` also takes a native slot from
-    /// this explicit membership; `surface:"manual"` tools still need a pin, and
-    /// `surface:"internal"` tools never join the model face in fresh sessions.
+    /// membership — from ANY membership, this list or a pin's implication;
+    /// `surface:"manual"` tools still need a pin, and `surface:"internal"` tools
+    /// never join the model face in fresh sessions.
     /// A later mention of one id overrides an earlier one, so a `--with
     /// <id>@<version>` on the command line wins over the standing entry.
     with: []const WithRef = &.{},
@@ -370,6 +372,11 @@ fn resolve(gpa: std.mem.Allocator, a: std.mem.Allocator, roots: *const roots_mod
 /// asks for the tool, not for a version, so it must not quietly move a session
 /// off the version somebody named.
 ///
+/// What a pin-implied member IS, though, is an ordinary member: the three layers
+/// produce one set of (id, version) pairs and nothing downstream can tell them
+/// apart, so such a package contributes its system prompts, its skills and all
+/// its `surface:"auto"` tools like any other (`resolveFreshBindings`).
+///
 /// Only ids some root actually HOLDS are implied. That keeps the two refusals
 /// distinguishable: nothing anywhere holds this id → `PinNamesUnknownExtension`
 /// (it was never built here), held but no `current` → `WithVersionNotFound`
@@ -597,11 +604,22 @@ fn snapshotFromBindings(a: std.mem.Allocator, bindings: []ext_tools.Binding) !re
 }
 
 /// Resolve the session's extension-tool bindings for a fresh session. Explicit
-/// pins are strict and keep their historical behavior. Then every package the
-/// caller composed as a member contributes its `surface:"auto"` tools to the
-/// model face. A package that entered only because a pin implied membership is
-/// deliberately absent from `opts.with`, so its `auto` tools do not leak onto
-/// the face — that pin asked for one tool.
+/// pins are strict and keep their historical behavior. Then EVERY member —
+/// however it got here — contributes its `surface:"auto"` tools to the model
+/// face.
+///
+/// **A member is a member.** Membership is a set of (id, version) pairs, and
+/// where a pair came from (config `[extensions] with`, `--with`, `apply:"auto"`,
+/// or a pin that implied it) buys no different rights: each member contributes
+/// everything its manifest declares — system prompts, skills, and all its `auto`
+/// tools. There was briefly a narrower rule where a pin-implied member gave its
+/// prompts and skills but not its other `auto` tools, and it was an asymmetry
+/// with no home: narrowing it the rest of the way (prompts and skills too) needs
+/// the frozen header to record HOW each member arrived, which is a freeze-schema
+/// field; widening needs nothing at all, and both fresh and frozen paths then
+/// read one rule for every member. Today's real consumers are unaffected either
+/// way (`extensions/std` is six `manual` tools with no prompt or skill;
+/// `extensions/agent`'s entry tool is `auto` and no longer pinned).
 fn resolveFreshBindings(
     a: std.mem.Allocator,
     roots: *const roots_mod.Roots,
@@ -616,7 +634,6 @@ fn resolveFreshBindings(
     }
 
     for (resolved) |r| {
-        if (!isFullMember(r, opts)) continue;
         for (r.manifest.tools) |spec| {
             if (spec.surfaceOf() != .auto) continue;
             const id = try std.fmt.allocPrint(a, "ext:{s}/{s}", .{ r.id, spec.name });
@@ -628,25 +645,6 @@ fn resolveFreshBindings(
 
     if (registry.builtin_count + out.items.len > opts.max_tools) return error.ToolBudgetExceeded;
     return out.toOwnedSlice(a);
-}
-
-/// Is this member here because somebody WANTED THE PACKAGE, rather than because
-/// one of its tools was pinned? Only then do its `surface:"auto"` tools take
-/// native slots — a pin asked for one tool, and unlocking the rest of the
-/// package would make `--pin` quietly wider than what was typed.
-///
-/// Two ways to want the package, and they are the same want: a person named it
-/// (config's `[extensions] with`, `--with`), or the package itself declared
-/// `apply: "auto"` and this session reads that standing layer at all. The
-/// second half re-reads the manifest already in hand rather than being told:
-/// "did this package ask to be everywhere" has exactly one answer and it is
-/// written in the file, so carrying a parallel list of ids would be a second
-/// copy of it that could disagree.
-fn isFullMember(r: roots_mod.Roots.Resolved, opts: Options) bool {
-    for (opts.with) |ref| {
-        if (std.mem.eql(u8, ref.id, r.id)) return true;
-    }
-    return opts.apply_auto and r.manifest.applyOf() == .auto;
 }
 
 /// Resolve only the stable tool ids frozen in a session header. Resume never
@@ -907,13 +905,22 @@ fn buildSystemPrompts(
     var blocks: std.ArrayList(prompt.SystemBlock) = .empty;
     try blocks.append(a, .{ .source = "kernel", .bytes = kernel_system_prompt });
 
-    for (resolved) |r| {
-        for (r.manifest.system_prompts) |prompt_path| {
-            const source = try std.fmt.allocPrint(a, "ext:{s}@{s}/{s}", .{ r.id, r.version, prompt_path });
-            const rel = try std.fs.path.join(a, &.{ r.id, "versions", r.version, integrity.package_dir, prompt_path });
-            defer a.free(rel);
-            const bytes = try roots.entries[r.root].dir.readFileAlloc(io, rel, a, .limited(prompt.max_system_prompt_bytes));
-            try blocks.append(a, .{ .source = source, .bytes = bytes });
+    // The extension band, partitioned by each entry's declared position
+    // (`manifest.PromptPosition`, DESIGN §5.6). Three passes rather than a sort:
+    // within one band the existing member order has to survive exactly, and
+    // three passes say that by construction instead of relying on a comparison
+    // function's stability. Both paths — fresh and frozen — run this same code
+    // over the same frozen manifests, so a resume rebuilds byte-identical blocks.
+    for ([_]manifest.PromptPosition{ .early, .normal, .late }) |band| {
+        for (resolved) |r| {
+            for (r.manifest.system_prompts) |spec| {
+                if (spec.positionOf() != band) continue;
+                const source = try std.fmt.allocPrint(a, "ext:{s}@{s}/{s}", .{ r.id, r.version, spec.path });
+                const rel = try std.fs.path.join(a, &.{ r.id, "versions", r.version, integrity.package_dir, spec.path });
+                defer a.free(rel);
+                const bytes = try roots.entries[r.root].dir.readFileAlloc(io, rel, a, .limited(prompt.max_system_prompt_bytes));
+                try blocks.append(a, .{ .source = source, .bytes = bytes });
+            }
         }
     }
 
@@ -1332,6 +1339,60 @@ test "system prompt ordering is deterministic by pinned extension id and manifes
     try std.testing.expectEqualStrings("A1", comp.system_prompts.blocks[1].bytes);
     try std.testing.expectEqualStrings("A2", comp.system_prompts.blocks[2].bytes);
     try std.testing.expectEqualStrings("B1", comp.system_prompts.blocks[3].bytes);
+}
+
+test "prompt position partitions the extension band into early, normal and late, keeping member order inside each" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmpPath(alloc, io, tmp.dir);
+    defer alloc.free(cwd);
+
+    // `z` sorts LAST by id but declares `early`, and `a` sorts first but is
+    // silent (`normal`): position beats id order, which is the whole point.
+    const manifest_a =
+        \\{"schema":"nulya.extension/v2","id":"a","contributes":{"system_prompts":["a1.md",{"path":"a2.md","position":"late"}]}}
+    ;
+    const manifest_z =
+        \\{"schema":"nulya.extension/v2","id":"z","contributes":{"system_prompts":[{"path":"z1.md","position":"early"},"z2.md"]}}
+    ;
+    const va = try testkit.writeFrozenVersion(alloc, io, tmp.dir, "a", manifest_a, &.{
+        .{ .rel = "a1.md", .bytes = "A1" },
+        .{ .rel = "a2.md", .bytes = "A2" },
+    });
+    defer alloc.free(va);
+    const vz = try testkit.writeFrozenVersion(alloc, io, tmp.dir, "z", manifest_z, &.{
+        .{ .rel = "z1.md", .bytes = "Z1" },
+        .{ .rel = "z2.md", .bytes = "Z2" },
+    });
+    defer alloc.free(vz);
+    try testkit.activate(alloc, io, tmp.dir, "a", va);
+    try testkit.activate(alloc, io, tmp.dir, "z", vz);
+
+    const expected = [_][]const u8{ "Z1", "A1", "Z2", "A2" };
+
+    var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .with = &.{ .{ .id = "a" }, .{ .id = "z" } } });
+    defer comp.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1 + expected.len), comp.system_prompts.blocks.len);
+    try std.testing.expectEqualStrings("kernel", comp.system_prompts.blocks[0].source);
+    for (expected, comp.system_prompts.blocks[1..]) |want, block| {
+        try std.testing.expectEqualStrings(want, block.bytes);
+    }
+
+    // Resume reads position out of the same frozen manifests, so the band is
+    // rebuilt, not remembered.
+    const frozen: ledger.FrozenComposition = .{ .active = &.{
+        .{ .id = "a", .version = va },
+        .{ .id = "z", .version = vz },
+    } };
+    var resumed = try SessionComposition.initFrozen(alloc, io, cwd, one_root, frozen);
+    defer resumed.deinit(alloc);
+    try std.testing.expectEqual(comp.system_prompts.blocks.len, resumed.system_prompts.blocks.len);
+    for (comp.system_prompts.blocks, resumed.system_prompts.blocks) |a_block, b_block| {
+        try std.testing.expectEqualStrings(a_block.source, b_block.source);
+        try std.testing.expectEqualStrings(a_block.bytes, b_block.bytes);
+    }
 }
 
 test "inline prompts land after every member's block and before the skills catalog, in argv order" {
@@ -1836,7 +1897,7 @@ test "membership exposes surface-auto tools but not manual or internal ones" {
     try std.testing.expect(comp.tools.lookup("run") == null);
 }
 
-test "pin-implied membership does not expose a package's surface-auto tools" {
+test "a pin-implied member is a full member: its surface-auto tools reach the model too" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -1854,11 +1915,14 @@ test "pin-implied membership does not expose a package's surface-auto tools" {
     defer alloc.free(v1);
     try testkit.activate(alloc, io, tmp.dir, "pkg", v1);
 
+    // Nobody wrote `--with pkg`: the only reason this package is in the session
+    // is the pin. That still makes it an ordinary member, so `extra` is on the
+    // face next to the pinned `call`.
     var comp = try SessionComposition.init(alloc, io, cwd, one_root, .{ .pinned_native_tools = &.{"ext:pkg/call"} });
     defer comp.deinit(alloc);
-    try std.testing.expectEqual(@as(usize, 1), comp.extension_tool_bindings.len);
+    try std.testing.expectEqual(@as(usize, 2), comp.extension_tool_bindings.len);
     try std.testing.expect(comp.tools.lookup("call") != null);
-    try std.testing.expect(comp.tools.lookup("extra") == null);
+    try std.testing.expect(comp.tools.lookup("extra") != null);
 }
 
 test "explicit pins are only accepted for surface-manual tools" {

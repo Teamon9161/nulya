@@ -1607,7 +1607,12 @@ fn extApi(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             \\  default = this package joins the sessions that name it; `auto` = while it
             \\  has a `current` it is a member of every new session on this machine —
             \\  what a mode wants, and `nulya ext deactivate <id>` is how it stops);
-            \\  `skills`; `system_prompts`. Nothing says how the runtime is talked to,
+            \\  `skills`; `system_prompts`, whose entries are a bare path or
+            \\  `{"path": "<p>", "position": "early"|"normal"|"late"}` — `normal` is the
+            \\  default, and the three words order this package's blocks against the
+            \\  OTHER packages' only: the kernel's own block stays first, `session new
+            \\  --prompt` text stays after every package's, and the skills catalog stays
+            \\  last. Nothing says how the runtime is talked to,
             \\  because there is one way: stdin is the call's arguments as one compact
             \\  JSON object, NULYA_TOOL names the tool, stdout is the result taken
             \\  verbatim, and a non-zero exit is a failed call whose text is `exit <code>`
