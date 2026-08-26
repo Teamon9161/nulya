@@ -1897,3 +1897,25 @@ T33 把 `internal` 行折起来时给的理由是**数量**（六个 driver tool
 折起那一行按**包自己的词**分两组，各带一句为什么没有 checkbox：`2 auto · with their package · 4 internal · ext run only · d shows`。一行一个键（fold 是一个控件，而读者在问的是同一个问题：要不要打开）；措辞刻意短，因为这行要 `fit` 到面板宽度、计数必须活过窄终端。信号量名 `driversOpen` 随之改成 `foldOpen`——它折的已经不只是 driver tool。
 
 **测试**：`pins.test.ts` 那条改写成"collapsed 就是全部开关"（一个 `auto` 包 + 一个 `internal` 包 + 一个 `manual` 包：折 6 露 3；折起行同时点名两组；只有一种时不提另一种；压着 pin 的 `internal` 行仍然可见）。`overlays.test.tsx` 两处跟随：折起行的文案，以及 80 列那条把它的长 id 扩展改成 `manual`——它量的是"窄终端下 checkbox 守住格位、id 被切"，而脚手架出来的 tool 是 `auto`，会连着那个被切的格子一起折走。`cd tui && bun test`：385 pass，`bun run typecheck` 干净。
+
+### T60 · 无人值守激活的守卫删除（2026-08-26）
+
+`autoActivatable` / `safeToActivateUnattended`（T31 → T55 → T56）整个删掉，`activateUnattended` 只剩一条 **fail-closed**：读不出这个版本的 manifest 就不动指针——那不是 policy，是「别对读不出来的数据动手」。
+
+**为什么它该走**。守卫的出身是 [BUGS.md](BUGS.md) 第一条：`evolution` 被开屏 sync 悄悄激活，于是每个模型都以为自己是 slow loop。但**让那件事成为可能的是 discovery**——activate 蕴含成员关系——而 discovery 在 2026-08-25 随 `activation` 一起删了（ext-syntax Lane K）。今天 `evolution` 是 `apply: "manual"`，与 `plan` 同形：把 `current` 指向它，它进不了任何一场 session，prompt 只在 `/evolve` 开的那一场里生效。**结构性修复早就落地了，守卫却又活了很久。**
+
+于是它的实际战果反了过来：`autoActivatable = apply !== "auto"` 对 plan / evolution / std 全部放行，自带包里**唯一被它拦住的是 `guide`**——整个贡献只有一行 skill catalog 的那个。而它写来要防的形状（`apply: "auto"` **加** system prompt，也就是一个「模式」）恰恰是 `apply` 这个字段存在的意义（nulya-kit 的 kong / dogfood），且只会因为**有人装了它**才出现。一道为了防止改写模型身份而建的门，最后只挡住了全套里最便宜的包，代价是「装了 nulya，guide 却不生效」。
+
+**为什么删掉是安全的**。进得到自动激活的只有三条路，每一条都已经过了一个人：装这个二进制（`ext seed`）、自己往 user store 写源码、亲口回答 checkout 的信任问句——而那个问句本来就提供 `s` = 只 build 不激活（DESIGN §9）。守卫是在这些之后**再**替人否决一次。
+
+**换掉它的是可见**（`warnUserScope` 那条先例：允许、不拦、但绝不能不可见）：`adoptInstalled` 把「这些包从此进每一场 session · /ext」写进开屏那行汇总，`/ext` 的 `standing` 列与 Enter 是收回的地方。
+
+### T61 · 首次安装才替人写 pin（2026-08-26）
+
+配套的另一半，也是 T58 `recommended` 缺的那个时机。从前只有两处会写 pin：`/ext` 的 Enter，和 `adoptBundled` 里**写死 `id === "std"`** 的一支。于是"开屏 sync 激活了一个包"与"这个包的工具上不上模型面"是两件互不相干的事——实测状态就是 `std · active · 0/6 tools`，`session_pins: []`。
+
+新规则一句话：**一个包这一趟拿到它的第一个 `current` 时**（`adoptInstalled` → `pinRecommended`），按它自己声明的 `recommended` 写 pin；`std` 那个 id 判断随之删除（T34 那批硬编码名单的最后一条）。
+
+**窄在"从来没有过 current"而不是"指针动了"**：版本前进时 pin 列表已经是人的了，按后者会把他 `Space` 掉的工具在下次 rebuild 时悄悄加回来——一个会自己撤销的开关不是开关。判据来自开屏**在 seed 之前**读的一次 `ext list`（`hadCurrent`），读不到就当作"全都已经装过"（写不出 pin 好过写在别人的选择上）；`adoptBundled` 收同一个集合作参数，两个调用点一个定义。`max_tools` 不够就一个都不写，让 `/ext` 去挑——开不起来的 session 比没上面的工具糟。
+
+**测试**：`extensions.test.ts` 三条——`apply:auto` 的包首次安装会被激活 + 只 pin `recommended` 的那个 + 汇总里点名它进每一场；仅重建的包一条 pin 都不写（人 `Space` 掉的留在原地）；`adoptBundled` 的那条改写成"arrived 里新装的那个才是 install"。`cd tui && bun test`：383 pass。**文档**：CLAUDE.md 三处（T31 那句"activate = 它的 prompt 进每一场"是 2026-08-25 之后的假话，正是它把这次排查带偏的）、`docs/BUGS.md` 第一条补了"真正修它的是什么"。

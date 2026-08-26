@@ -34,7 +34,7 @@ import { createPluginHost, type PluginHost } from "../src/plugins/host.ts"
 import { parseExtNote, wrapExtNote } from "../src/extnote.ts"
 import { runCompact } from "../src/compact.ts"
 import { rememberModel } from "../src/state/tui_state.ts"
-import { autoActivatable, builtContributions, bundledDraftPath, pinsOf } from "../src/extensions.ts"
+import { builtContributions, bundledDraftPath, pinsOf } from "../src/extensions.ts"
 import {
   extBuild,
   extSetCurrent,
@@ -212,7 +212,6 @@ test.skipIf(!has_zig)("plan is a mode and ask is a capability, and neither asks 
 
   expect(plan.systemPrompts.length).toBeGreaterThan(0)
   expect(plan.apply).toBe("manual")
-  expect(autoActivatable(plan)).toBe(true)
   // Its two model tools are `surface: "auto"`: they arrive with the membership
   // `/plan` creates, and a pin naming one would be refused outright — so the
   // switch writes none.

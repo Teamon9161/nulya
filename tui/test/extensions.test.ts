@@ -34,12 +34,11 @@ import {
   draftColumn,
   failedIds,
   needsZigIds,
+  adoptInstalled,
   pinsOf,
-  autoActivatable,
   planCheckout,
   planProjectStore,
   promptText,
-  safeToActivateUnattended,
   std_pins,
   summarize,
   syncRoot,
@@ -47,6 +46,7 @@ import {
 } from "../src/extensions.ts"
 import { planProjectAgents } from "../src/agents.ts"
 import { modelTools, readHeader, type PackageCommand } from "../src/nulya/files.ts"
+import { rememberSessionPins } from "../src/state/tui_state.ts"
 import { default_settings, loadSettings } from "../src/state/settings.ts"
 import { draftHelp } from "../src/ui/overlays/ExtView.tsx"
 import { tempWorkspace, type TempWorkspace } from "./support.ts"
@@ -367,7 +367,6 @@ test("bundled ask, handoff, and plan expose member-scoped tools without writing 
     expect(ask.apply).toBe("manual")
     expect(handoff.apply).toBe("manual")
     expect(plan.apply).toBe("manual")
-    expect(autoActivatable(plan)).toBe(true)
   } finally {
     store.cleanup()
   }
@@ -447,33 +446,24 @@ test("a bundled mode that arrives is activated too, and the pointer really moves
 })
 
 /**
- * What an unattended pass may switch on (T52).
+ * The guard that used to live here is gone, and what it was for is worth
+ * keeping written down.
  *
- * The question used to be "does this package contribute a system prompt", which
- * was the nearest thing to a reach test available while a manifest could not
- * state its reach: a prompt is the contribution paid for in every session, so a
- * package with one was the one worth not activating behind somebody's back.
- * That test reads the wrong package now. A `manual` prompt package composes
- * nothing until it is named (DESIGN §5.1), while an `apply: "auto"` package of
- * pure tools joins every fresh session on this machine the moment it has a
- * `current` — so `apply` is the whole rule, and nothing else in the manifest
- * takes part in it.
+ * `autoActivatable` / `safeToActivateUnattended` refused to let a background
+ * pass activate an `apply: "auto"` package, because of T31: `evolution` was
+ * activated on the way in and every model on the machine then believed it was
+ * the slow loop. But the thing that made that possible was DISCOVERY —
+ * activation implying membership — and discovery went away with `activation`
+ * (ext-review-2 Lane K). `evolution` is `apply: "manual"` today and shaped like
+ * `plan`: activating it composes it into nothing.
+ *
+ * So the guard ended up holding exactly one bundled package — `guide`, whose
+ * whole contribution is a line in the skill catalog — while the shape it was
+ * written against (`apply: "auto"` plus a system prompt) is what the field is
+ * FOR, and only ever arrives because somebody installed it. What replaces it is
+ * saying so: the pass names what now reaches every session.
  */
-test("only a package that asks to be in every session is kept off the start-up pass", () => {
-  expect(autoActivatable({ apply: "auto" })).toBe(false)
-  expect(autoActivatable({ apply: "manual" })).toBe(true)
-})
-
-/**
- * The mirror case `autoActivatable` alone cannot see (T55): a package already
- * active as `apply: "auto"` — composed into every session on this machine
- * right now — whose newest draft turned `apply: "manual"`. The candidate
- * alone reads as safe; only reading what is active TODAY catches that moving
- * the pointer would silently drop a standing package out of every session
- * nobody asked it to leave. Against a real store, because the claim is that
- * `current` really does NOT move.
- */
-test("a package active as `apply: auto` is not moved onto a `manual` rebuild by an unattended pass", async () => {
+test("a first install is activated, pinned as the package asks, and named for what it now reaches", async () => {
   const store = tempWorkspace()
   try {
     const root = syncRoot(store, false)
@@ -485,105 +475,87 @@ test("a package active as `apply: auto` is not moved onto a `manual` rebuild by 
         schema: "nulya.extension/v2",
         id: "kong",
         apply: "auto",
-        contributes: { skills: ["skills/demo"] },
+        runtime: { entry: "src/run.sh", interpreter: "sh" },
+        contributes: {
+          skills: ["skills/demo"],
+          tools: [
+            { name: "core", input: {}, surface: "manual" },
+            { name: "extra", input: {}, surface: "manual", recommended: false },
+          ],
+        },
       }),
     )
+    mkdirSync(join(dir, "src"), { recursive: true })
+    writeFileSync(join(dir, "src", "run.sh"), "#!/bin/sh\necho '{}'\n")
     writeFileSync(join(dir, "skills", "demo", "SKILL.md"), "---\nname: demo\ndescription: a standing mode\n---\nbody\n")
+
     const built = await extSync(store)
-    const activeLine = built.lines.find((entry) => entry.id === "kong")!
-    expect(activeLine.version).toMatch(/^v-/)
-    await extSetCurrent(store, "activate", "kong", activeLine.version!)
+    const line = built.lines.find((entry) => entry.id === "kong")!
+    const { outcome, built: what } = await activateUnattended(store, {
+      id: "kong",
+      version: line.version!,
+      root,
+      user: false,
+    })
+    // `apply: "auto"` is no longer a refusal: nothing got here without a person.
+    expect(outcome).toBe("activated")
+    expect((await extList(store)).find((entry) => entry.id === "kong")!.current).toBe(line.version)
 
-    // A new draft — same id, `apply` flipped to `manual` — hashes to a
-    // different version, exactly as any other content change would.
-    writeFileSync(
-      join(dir, "extension.json"),
-      JSON.stringify({
-        schema: "nulya.extension/v2",
-        id: "kong",
-        apply: "manual",
-        contributes: { skills: ["skills/demo"] },
-      }),
-    )
-    const rebuilt = await extSync(store)
-    const candidateLine = rebuilt.lines.find((entry) => entry.id === "kong")!
-    expect(candidateLine.version).toMatch(/^v-/)
-    expect(candidateLine.version).not.toBe(activeLine.version)
-
-    const candidate = await builtContributions(store, root, "kong", candidateLine.version!)
-    expect(candidate?.apply).toBe("manual")
-    // The candidate by itself says the move looks safe — it cannot see what
-    // is active today.
-    expect(autoActivatable(candidate!)).toBe(true)
-    // But `kong` is active right now as `apply: "auto"`, so an unattended
-    // pass must refuse: moving the pointer would quietly pull it out of every
-    // session on this machine.
-    expect(await safeToActivateUnattended(store, "kong", candidate!)).toBe(false)
-    // And `current` really did stay where it was.
-    expect((await extList(store)).find((entry) => entry.id === "kong")!.current).toBe(activeLine.version)
+    const statePath = join(store.dir, "adopt-state.json")
+    const said = await adoptInstalled(store, [what!], statePath)
+    // The recommended tool is pinned; the extra the package declined is not.
+    const pins = JSON.parse(readFileSync(statePath, "utf8")).session_pins as string[]
+    expect(pins).toEqual(["ext:kong/core"])
+    // And the reach is SAID, which is what stands in for refusing.
+    expect(said.join(" · ")).toContain("kong")
+    expect(said.some((part) => part.includes("every session"))).toBe(true)
   } finally {
     store.cleanup()
   }
 }, 120_000)
 
 /**
- * The ordinary case, for contrast: neither side of the move is `apply:
- * "auto"`, so nothing about reach is changing and an unattended pass may
- * proceed exactly as it always has.
+ * The other half of the same rule: after the first install, the pin list is the
+ * person's. A later pass may move `current` forward, and must not put back a
+ * tool they took off — a switch that undoes itself is not a switch. So writing
+ * pins is keyed on "this package had no `current`", never on "a pointer moved".
  */
-test("an ordinary rebuild — manual active, manual candidate — is unaffected by the guard", async () => {
+test("a package that is merely rebuilt gets no pins written for it", async () => {
   const store = tempWorkspace()
   try {
+    const statePath = join(store.dir, "rebuild-state.json")
     const root = syncRoot(store, false)
-    const dir = join(root, "house.rule")
-    mkdirSync(join(dir, "skills", "demo"), { recursive: true })
-    writeFileSync(
-      join(dir, "extension.json"),
-      JSON.stringify({ schema: "nulya.extension/v2", id: "house.rule", contributes: { skills: ["skills/demo"] } }),
-    )
-    writeFileSync(join(dir, "skills", "demo", "SKILL.md"), "---\nname: demo\ndescription: an ordinary package\n---\nbody\n")
-    const built = await extSync(store)
-    const first = built.lines.find((entry) => entry.id === "house.rule")!
-    await extSetCurrent(store, "activate", "house.rule", first.version!)
+    const dir = join(root, "kit")
+    mkdirSync(join(dir, "src"), { recursive: true })
+    const manifest = (body: string) => ({
+      schema: "nulya.extension/v2",
+      id: "kit",
+      runtime: { entry: "src/run.sh", interpreter: "sh" },
+      contributes: { tools: [{ name: body, input: {}, surface: "manual" }] },
+    })
+    writeFileSync(join(dir, "src", "run.sh"), "#!/bin/sh\necho '{}'\n")
+    writeFileSync(join(dir, "extension.json"), JSON.stringify(manifest("core")))
+    const first = await extSync(store)
+    const v1 = first.lines.find((entry) => entry.id === "kit")!.version!
+    await extSetCurrent(store, "activate", "kit", v1)
 
-    // Edit the body, not `apply`: a new version, the same (default) `manual`
-    // reach on both sides of the move.
-    writeFileSync(
-      join(dir, "skills", "demo", "SKILL.md"),
-      "---\nname: demo\ndescription: an edited package\n---\nbody\n",
-    )
-    const rebuilt = await extSync(store)
-    const second = rebuilt.lines.find((entry) => entry.id === "house.rule")!
-    expect(second.version).not.toBe(first.version)
+    // Somebody takes the one tool off in `/ext`.
+    rememberSessionPins([], statePath)
 
-    const candidate = await builtContributions(store, root, "house.rule", second.version!)
-    expect(candidate?.apply).toBe("manual")
-    expect(await safeToActivateUnattended(store, "house.rule", candidate!)).toBe(true)
+    writeFileSync(join(dir, "extension.json"), JSON.stringify(manifest("core2")))
+    const second = await extSync(store)
+    const v2 = second.lines.find((entry) => entry.id === "kit")!.version!
+    expect(v2).not.toBe(v1)
+    const { built: what } = await activateUnattended(store, { id: "kit", version: v2, root, user: false })
+    // The caller is what decides this is not an install — `kit` already had a
+    // `current` — so nothing is handed to `adoptInstalled` and nothing is written.
+    expect(await adoptInstalled(store, [], statePath)).toEqual([])
+    expect(JSON.parse(readFileSync(statePath, "utf8")).session_pins).toEqual([])
+    expect(what?.recommendedTools).toEqual(["core2"])
   } finally {
     store.cleanup()
   }
 }, 120_000)
-
-/**
- * A store that cannot be read is a REFUSAL (T56).
- *
- * `ext list` failing used to mean `true` — "I could not find out whether this
- * package is standing today, so go ahead" — which reads an unknown as the safe
- * answer for exactly the move that cannot be taken back quietly. The version is
- * built either way and one `/ext` Enter away; not knowing is a reason to leave
- * the pointer alone.
- */
-test("a store that cannot answer holds the pointer: unknown is not the safe answer", async () => {
-  const store = tempWorkspace()
-  try {
-    const noBinary = { dir: store.dir, bin: join(store.dir, "no-such-nulya") }
-    // The candidate on its own looks entirely safe — that is the point.
-    expect(autoActivatable({ apply: "manual" })).toBe(true)
-    expect(await safeToActivateUnattended(noBinary, "kong", { apply: "manual" })).toBe(false)
-  } finally {
-    store.cleanup()
-  }
-})
 
 /**
  * …and the same rule for a candidate whose own manifest cannot be read (T56).
@@ -624,18 +596,17 @@ test("a candidate whose manifest cannot be read is held, and current does not mo
 }, 120_000)
 
 /**
- * The bundled path goes through the same door (T56).
+ * The bundled path goes through the same door, and knows the same one thing
+ * about each id: is this an INSTALL?
  *
- * `adoptBundled` used to ask its own narrower question — only "does the
- * CANDIDATE say `apply: auto`" — on the reasoning that an id `ext seed` calls
- * "arrived" is new to this store and can have nothing active. But seed calls an
- * id arrived when its DRAFT was missing, and `<id>/current` outlives a deleted
- * draft perfectly well: a standing package could be pulled out of every session
- * by the one path that never checked. That is the shape set up here — a
- * standing `current`, no draft, a `manual` candidate — beside an ordinary id
- * with nothing active, which must still be switched on exactly as before.
+ * `ext seed` calls an id "arrived" when its DRAFT was missing, and `<id>/current`
+ * outlives a deleted draft perfectly well — so "arrived" says nothing about
+ * whether anybody has already made a decision about this package. Both ids here
+ * are arrived; only one of them is new. The one with a pointer already set gets
+ * moved forward and nothing written on its behalf, because by then the pin list
+ * belongs to whoever has been using it.
  */
-test("an arrived id with a standing current is held; an arrived id with no current is activated", async () => {
+test("an arrived id that is new is installed; an arrived id that already had a current only moves forward", async () => {
   const store = tempWorkspace()
   const home = mkdtempSync(join(tmpdir(), "nulya-tui-adopt-"))
   const previous = process.env["NULYA_HOME"]
@@ -673,13 +644,15 @@ test("an arrived id with a standing current is held; an arrived id with no curre
       ["kong", "house.rule"],
       report,
       join(store.dir, "adopt-guard.json"),
+      new Set(["kong"]),
     )
-    // Named on the status line rather than counted, and the pointer stayed.
-    expect(parts.some((part) => part.includes("kong") && part.includes("not activated"))).toBe(true)
     expect(parts.some((part) => part.includes("house.rule active"))).toBe(true)
+    // `house.rule` is the install, so it is the one named for its reach; `kong`
+    // was already somebody's, so moving it forward is not news of that kind.
+    expect(parts.some((part) => part.includes("kong") && part.includes("every session"))).toBe(false)
     const listed = await extList(store)
-    expect(listed.find((entry) => entry.id === "kong")!.current).toBe(standing)
-    expect(listed.find((entry) => entry.id === "kong")!.standing).toBe(true)
+    // Both pointers followed their newest build — the pass no longer refuses.
+    expect(listed.find((entry) => entry.id === "kong")!.current).toBe(candidate)
     expect(listed.find((entry) => entry.id === "house.rule")!.current).toBe(ordinary)
   } finally {
     if (previous === undefined) delete process.env["NULYA_HOME"]
@@ -831,7 +804,6 @@ test("what a built version contributes is read from the root that sync wrote it 
     // kernel reads it — so contributing a prompt does not by itself keep this
     // package off the start-up pass (T52).
     expect(what!.apply).toBe("manual")
-    expect(autoActivatable(what!)).toBe(true)
   } finally {
     store.cleanup()
   }
@@ -1012,7 +984,6 @@ test("a manifest that says `apply: auto` is read as such, and kept off the unatt
     const line = built.lines.find((entry) => entry.id === "house.mode")!
     const what = (await builtContributions(store, root, "house.mode", line.version!))!
     expect(what.apply).toBe("auto")
-    expect(autoActivatable(what)).toBe(false)
   } finally {
     store.cleanup()
   }

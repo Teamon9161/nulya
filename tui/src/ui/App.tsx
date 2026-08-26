@@ -52,6 +52,7 @@ import {
   listExtensions,
   sessionExists,
   sessions_dir,
+  type Contributions,
   type ExtensionEntry,
 } from "../nulya/files.ts"
 import { wrapApprovalNote } from "../approvalnote.ts"
@@ -75,6 +76,7 @@ import {
   activateUnattended,
   activeVersionOf,
   adoptBundled,
+  adoptInstalled,
   failedIds,
   needsZigIds,
   planStore,
@@ -606,6 +608,21 @@ export function App(props: AppProps) {
     // the directory. Drafts that were edited are left alone and named
     // below; the ids seeding moved are ordinary changed drafts to the pass that
     // follows, which builds them and points `current` at what it built.
+    // Which ids already had a `current` BEFORE this pass — read once, before
+    // seeding writes anything. It is what separates "installed" from "moved
+    // forward", and only the first may write pins on somebody's behalf. An
+    // unreadable listing leans towards "already had one", so a pass that cannot
+    // tell writes no pins rather than writing them over a person's choices.
+    const hadCurrent = new Set<string>()
+    let listedBefore: ExtensionEntry[] | null = null
+    try {
+      listedBefore = await listExtensions(props.ws)
+    } catch {
+      listedBefore = null
+    }
+    for (const entry of listedBefore ?? []) if (entry.current !== null) hadCurrent.add(entry.id)
+    const canTellInstalls = listedBefore !== null
+
     let arrived: string[] = []
     let refreshed: string[] = []
     let untouched: string[] = []
@@ -653,11 +670,16 @@ export function App(props: AppProps) {
           onDraft()
         })
         let activated = 0
-        // Built, and deliberately left where it was: the reach question is
-        // live, or the store could not answer it. Named rather than counted —
-        // "1 not activated" is not something anybody can act on, and the id is
-        // one `/ext` Enter away.
+        // Built, and left where it was: the store could not answer what the
+        // pointer was about to name. Named rather than counted — "1 not
+        // activated" is not something anybody can act on, and the id is one
+        // `/ext` Enter away.
         const held: string[] = []
+        // Packages this pass INSTALLED — gave a first `current` — and what they
+        // now reach. A first install is the one moment the pins a package
+        // recommends may be written for somebody (`pinRecommended`); after that
+        // the pin list is theirs.
+        const installed: Contributions[] = []
         if (plan.activate) {
           for (const line of report.lines) {
             if (!line.version || line.activation === "active") continue
@@ -671,25 +693,30 @@ export function App(props: AppProps) {
             // did move forward in this run and the active pointer should follow
             // it just as it does when the version was newly built here.
             if (line.state !== "built" && !(root.user && refreshed.includes(line.id))) continue
-            // Whether the pointer may move is `activateUnattended`'s to answer,
-            // here and everywhere else this front end moves one with nobody
-            // watching (T56) — this loop only knows which version was built.
-            const { outcome } = await activateUnattended(props.ws, {
+            // Every unattended pointer move goes through the one door, here and
+            // everywhere else this front end moves one with nobody watching —
+            // this loop only knows which version was built.
+            const { outcome, built } = await activateUnattended(props.ws, {
               id: line.id,
               version: line.version,
               root: syncRoot(props.ws, root.user),
               user: root.user,
             })
-            if (outcome === "activated") activated += 1
-            else if (outcome === "held") held.push(line.id)
+            if (outcome === "activated") {
+              activated += 1
+              if (built && canTellInstalls && !hadCurrent.has(line.id)) installed.push(built)
+            } else if (outcome === "held") held.push(line.id)
           }
         }
         const adopted =
           root.user && arrived.length > 0 && plan.activate
-            ? await adoptBundled(props.ws, arrived, report, props.statePath)
+            ? await adoptBundled(props.ws, arrived, report, props.statePath, canTellInstalls ? hadCurrent : undefined)
             : []
-        // The std pins land in `tui-state.json`, which the draft card and the
-        // status line read from disk: this is what tells them to look again.
+        // The same two sentences for the ids this loop installed, from the one
+        // place that knows what a first `current` is worth saying about.
+        adopted.push(...(await adoptInstalled(props.ws, installed, props.statePath)))
+        // Pins land in `tui-state.json`, which the draft card and the status
+        // line read from disk: this is what tells them to look again.
         if (adopted.length > 0) setPlanTick((tick) => tick + 1)
         // A count of failures is not news anybody can act on. Name them, and
         // point at the one screen that says why and offers the way out — and

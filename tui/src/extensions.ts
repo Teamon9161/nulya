@@ -439,9 +439,9 @@ export function planStore(ws: Workspace, user: boolean): Promise<SyncReport> {
 // one for "install means active everywhere", one for "these tools are a driver
 // interface". Both are gone (T34) — and both questions are the package's own
 // words in the frozen manifest now: `contributes.tools[].surface` for the
-// second (DESIGN §7.2.1) and top-level `apply` for the first (DESIGN §5.1,
-// `autoActivatable`). That is the only place that knows, and it works for a
-// package this repository has never heard of.
+// second (DESIGN §7.2.1) and top-level `apply` for the first (DESIGN §5.1).
+// That is the only place that knows, and it works for a package this repository
+// has never heard of.
 //
 // Since T23 nobody is asked about any of it: the user store is the person's own
 // directory, what lands in it came with the binary they ran, and the question
@@ -518,109 +518,43 @@ export function wearCommand(
   return what.commands.find((command) => command.action.with === true) ?? null
 }
 
-/**
- * May a background pass — the start-up sync, which nobody asked for and nobody
- * is watching — point `current` at this package on its own?
- *
- * `false` for `apply: "auto"`, and that is the whole rule. For such a package
- * activating IS composing: the kernel joins it to every fresh non-`--bare`
- * session on this machine from that moment (DESIGN §5.1), so a pass that moved
- * the pointer would have decided what every session here carries, without a
- * keypress. That is T31's bug exactly — `evolution` used to be activated on the
- * way in, and every model on the machine then believed it was the slow loop —
- * and this is the same guard the kernel puts on its own `ext sync --activate`.
- *
- * Everything else is `true`, including a package that contributes a SYSTEM
- * PROMPT: since `activation` was deleted (ext-review-2 Lane K), a `manual`
- * package's `current` says which version `<id>` means and nothing more. The
- * prompt reaches a session only when somebody names it — `/<id>`, `/with`,
- * `[extensions] with` — so the old "does it contribute a prompt" test was
- * guarding a door that no longer opens onto anything.
- *
- * Reads only the CANDIDATE — the version about to become `current`. A caller
- * moving the pointer for an id that may already be active needs the other
- * half too (`safeToActivateUnattended`, below): a candidate that dropped
- * `apply: "auto"` is not by itself proof the move is safe unattended.
- */
-export function autoActivatable(what: Pick<Contributions, "apply">): boolean {
-  return what.apply !== "auto"
-}
-
-/**
- * May a background pass move `current` from whatever is active TODAY onto
- * CANDIDATE, without a keypress?
- *
- * `autoActivatable(candidate)` alone only reads the version about to become
- * `current` — but a reach change can arrive from either side of a rebuild. A
- * package active right now with `apply: "auto"` (composed into every fresh
- * session on this machine, DESIGN §5.1) can draft a new version that turns
- * `apply: "manual"`; a pass that pointed `current` at it anyway would
- * silently pull a standing package out of every session nobody asked it to
- * leave — the mirror image of the bug `autoActivatable` already guards
- * (`evolution` activated on the way in, T31). So this also reads whatever
- * version IS active today, if any, and refuses the move unless ITS `apply`
- * agrees the reach question is not live either: an unattended pass may move
- * the pointer only when NEITHER side of the move is `apply: "auto"`. A
- * background sync never narrows OR widens reach on its own (T55) — both
- * directions are a person's `/ext` Enter.
- *
- * What is active today is the KERNEL'S own answer — `ext list`'s `standing`
- * marker, written into the `current` record by the activation that verified it
- * (DESIGN §5.1) — not this front end re-reading `apply` out of the active
- * version's manifest. A declaration is what a version asks for; the record is
- * what sessions actually get, and only the second can say what a pointer move
- * would take away.
- *
- * A store this cannot read is a REFUSAL, not a yes. `ext list` failing means
- * this pass does not know whether it is about to pull a standing package out of
- * every session here, and "I could not tell" is not a licence to move a pointer
- * nobody asked it to move; the version is built either way and one `/ext` Enter
- * away. An id the listing simply has no `current` for is a different answer —
- * that one is known, and nothing is being taken away.
- */
-export async function safeToActivateUnattended(
-  ws: Workspace,
-  id: string,
-  candidate: Pick<Contributions, "apply">,
-): Promise<boolean> {
-  if (!autoActivatable(candidate)) return false
-  let listed: Awaited<ReturnType<typeof extList>> = []
-  try {
-    listed = await extList(ws)
-  } catch {
-    return false
-  }
-  const entry = listed.find((e) => e.id === id && e.current !== null && !e.shadowed)
-  if (!entry) return true
-  return !entry.standing
-}
-
 /** What an unattended pass did with one built version. */
 export type UnattendedOutcome =
   /** `current` now points at it. */
   | "activated"
-  /** The policy said no, or the manifest could not be read: the pointer stands. */
+  /** The manifest could not be read, so the pointer stands. */
   | "held"
-  /** The policy said yes and the kernel refused the move. */
+  /** The kernel refused the move. */
   | "failed"
 
 /**
  * THE door every unattended pointer move goes through — the start-up sync, the
  * ids `ext seed` just dropped, and anything later that builds in the background.
  *
- * Where a candidate came from is not a policy input. `adoptBundled` used to ask
- * a narrower question than the sync loop beside it (only "does the candidate say
- * `apply: auto`"), which was true of the ids it was written for and false in
- * general: `ext seed` calls an id "arrived" when the DRAFT was missing, and a
- * `<id>/current` can outlive a deleted draft perfectly well — so a standing
- * package could be pulled out of every session by the one path that never asked.
- * Two callers with two policies is one policy too many; the reach question is
- * about the store, not about who is asking.
+ * It carries no policy any more, and the reason it once did is worth keeping.
+ * `autoActivatable` / `safeToActivateUnattended` refused to activate a package
+ * declaring `apply: "auto"`, because of T31's bug: `evolution` was activated on
+ * the way in and every model on the machine then believed it was the slow loop.
+ * But what made that bug possible was DISCOVERY — activation implying membership
+ * — and discovery was deleted with `activation` (ext-review-2 Lane K). Today
+ * `evolution` is `apply: "manual"` and shaped exactly like `plan`: pointing
+ * `current` at it composes it into nothing, and its prompt reaches only the tab
+ * somebody opens with `/evolve`.
  *
- * An unreadable manifest is `held` for the same reason `ext list` failing is
- * (`safeToActivateUnattended`): a pass that cannot read what it is about to
- * point at has no business pointing at it. It used to be the opposite — a null
- * from `builtContributions` skipped the guard and activated.
+ * So by the end the guard held exactly one bundled package — `guide`, whose
+ * entire contribution is one line in the skill catalog — while the shape it was
+ * written to stop (`apply: "auto"` PLUS a system prompt: a mode) is the shape
+ * the field exists to serve, and arrives only by someone installing it. Every
+ * route into this function already passes a person: installing this binary,
+ * writing source into their own store, or answering the checkout trust question,
+ * which offers "build but do not activate" in as many words (DESIGN §9).
+ *
+ * What replaces it is VISIBILITY, the `warnUserScope` precedent: the pass says
+ * which packages now reach every session, and `/ext`'s `standing` column and
+ * Enter take one back.
+ *
+ * An unreadable manifest is still `held`, and that is not policy: a pass that
+ * cannot read what it is about to point at has no business pointing at it.
  */
 export async function activateUnattended(
   ws: Workspace,
@@ -628,7 +562,6 @@ export async function activateUnattended(
 ): Promise<{ outcome: UnattendedOutcome; built: Contributions | null }> {
   const built = await builtContributions(ws, what.root, what.id, what.version)
   if (!built) return { outcome: "held", built }
-  if (!(await safeToActivateUnattended(ws, what.id, built))) return { outcome: "held", built }
   try {
     await extSetCurrent(ws, "activate", what.id, what.version, { user: what.user })
   } catch {
@@ -699,55 +632,91 @@ export async function adoptBundled(
   arrived: readonly string[],
   report: SyncReport,
   statePath?: string,
+  /**
+   * The ids that already had a `current` before this pass. Only an id absent
+   * from it is an INSTALL, and only an install may have pins written for it
+   * (`adoptInstalled`). Omitted means "not known", which counts every id as
+   * already installed: a pass that cannot tell must not write over choices.
+   */
+  hadCurrent?: ReadonlySet<string>,
 ): Promise<string[]> {
   const parts: string[] = []
   const active: string[] = []
   const held: string[] = []
+  const installed: Contributions[] = []
   const root = syncRoot(ws, true)
-  let std: Contributions | null = null
   for (const id of arrived) {
     const line = report.lines.find((entry) => entry.id === id)
     if (!line?.version || line.state === "failed" || line.state === "needs zig") continue
     if (line.activation === "active") {
-      if (id === "std") std = await builtContributions(ws, root, id, line.version)
       active.push(id)
       continue
     }
     const { outcome, built } = await activateUnattended(ws, { id, version: line.version, root, user: true })
-    if (id === "std") std = built
-    if (outcome === "activated") active.push(id)
-    else if (outcome === "held") held.push(id)
+    if (outcome === "activated") {
+      active.push(id)
+      if (built && hadCurrent !== undefined && !hadCurrent.has(id)) installed.push(built)
+    } else if (outcome === "held") held.push(id)
   }
   if (active.length > 0) parts.push(`${active.join(" & ")} active`)
-  // Named, not counted, and without a reason attached: an id is held because
-  // the reach question is live or because the store could not answer it, and
-  // `/ext` is the one screen that can tell those apart on the row itself.
+  // Named, not counted: an id is held because the store could not answer what it
+  // was about to point at, and `/ext` is the one screen that says so on the row.
   if (held.length > 0) parts.push(`${held.join(" & ")} built, not activated · /ext`)
-  if (active.includes("std")) {
-    parts.push(
-      (await pinStdTools(ws, std, statePath))
-        ? "std tools pinned"
-        : "std tools not pinned (tool face full — `/ext` to choose)",
-    )
-  }
+  parts.push(...(await adoptInstalled(ws, installed, statePath)))
   return parts
 }
 
 /**
- * Put the std tools on this TUI's session pin list, unless that would blow the
- * kernel's `max_tools` quota at the next `session new` — a session that refuses
- * to start is worse than an unpinned tool.
+ * What a pass says about the packages it just INSTALLED: the pins they asked
+ * for, and the reach they now have.
  *
- * WHICH tools comes from the version that was just built (`pinsOf`), so a `std`
- * that grew or lost one is followed without editing this file; the frozen list
- * is only the answer for a build whose manifest could not be read at all.
+ * Both halves belong to the same moment and to no other. A first `current` is
+ * the one time a package's recommended pins may be written for somebody
+ * (`pinRecommended`), and it is the one time "this is now in every session"
+ * is news rather than a fact they already know.
+ *
+ * The second half is the `warnUserScope` precedent, and it is what stands in
+ * for the guard this front end used to carry: an unattended pass may turn a
+ * standing package on, and it may not do so invisibly. `/ext`'s `standing`
+ * column and its Enter are where one is taken back.
  */
-async function pinStdTools(
+export async function adoptInstalled(
   ws: Workspace,
-  std: Contributions | null,
+  installed: readonly Contributions[],
   statePath?: string,
-): Promise<boolean> {
-  const wanted = std ? pinsOf(std) : std_pins
+): Promise<string[]> {
+  const parts: string[] = []
+  const pinned = await pinRecommended(ws, installed, statePath)
+  if (pinned.length > 0) parts.push(`${pinned.join(" & ")} tools pinned`)
+  const standing = installed.filter((what) => what.apply === "auto").map((what) => what.id)
+  if (standing.length > 0) parts.push(`${standing.join(" & ")} now in every session · /ext`)
+  return parts
+}
+
+/**
+ * Put the recommended tools of packages this pass just INSTALLED on this TUI's
+ * session pin list, and report which packages got any.
+ *
+ * "Installed" is the narrow word on purpose: this runs only where a package
+ * received its first `current`. A pass that merely moved a package FORWARD must
+ * not touch the pin list, because by then the list is a person's — a tool they
+ * took off with `Space` would come back on the next rebuild, and a switch that
+ * undoes itself is not a switch.
+ *
+ * WHICH tools is the package's own word (`pinsOf` → `recommended`, DESIGN §5.1),
+ * so a package that grew, lost, or declined one is followed without editing this
+ * file. The quota is checked against the whole prospective face at once: a
+ * `session new` that refuses to start is worse than an unpinned tool, so if the
+ * lot will not fit, none of it is written and `/ext` is where the choosing
+ * happens.
+ */
+async function pinRecommended(
+  ws: Workspace,
+  installed: readonly Contributions[],
+  statePath?: string,
+): Promise<string[]> {
+  const wanted = installed.flatMap((what) => pinsOf(what))
+  if (wanted.length === 0) return []
   const current = loadTuiState(statePath).session_pins ?? []
   let merged_config: string[] = []
   let max_tools = 8
@@ -760,10 +729,9 @@ async function pinStdTools(
     // have the last word.
   }
   const face = new Set([...merged_config, ...current, ...wanted])
-  if (builtin_tools + face.size > max_tools) return false
-  const mine = new Set([...current, ...wanted])
-  rememberSessionPins([...mine], statePath)
-  return true
+  if (builtin_tools + face.size > max_tools) return []
+  rememberSessionPins([...new Set([...current, ...wanted])], statePath)
+  return installed.filter((what) => pinsOf(what).length > 0).map((what) => what.id)
 }
 
 /**

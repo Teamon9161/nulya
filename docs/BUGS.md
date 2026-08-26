@@ -5,7 +5,9 @@ ai回复:
 另外，创建新 tool 需要实际需求和至少 3 个会话的证据；目前没有这样的证据，贸然创建会违反“不要为了有提案而制造提案”的规则。若要测试完整的“创建工具 → 激活 → 使用 → transfer”流程，应交给普通执行型 agent/session。
 我没启动任务evolution， 帮我排查一下
 
-**已修（TUI 层，tui.md §11 T31）。** 根因：`~/.nulya/extensions/evolution/current` 被指到了一个版本上，而 `evolution` contribute 的是 `[skills prompt]`——activate = 它的 identity system prompt 进**每一场** session 的 system blocks（DESIGN §5.3 / §7.8），于是每个模型都以为自己是 slow loop。谁指的：`App.syncStores` 的 auto-activate 循环只用 `arrived.includes(id)` 挡，那只挡得住 `ext seed` 落源码的**那一次**启动，之后 draft 一重建就会被这个循环 activate。修法是把"带 system prompt 的包 = 模式，后台永不 activate"写成一个纯函数（`extensions.autoActivatable`），并把这件事在三个地方说出来：`/ext` 的 `mode` 列 + Enter 的后果文案、开屏发现 active 的 mode 包就在状态栏点名并指路 `/ext`、`/evolve` 与 `/help` 讲清它是"开一个新 tab 戴上它、什么都不 activate"。
+**已修（TUI 层，tui.md §11 T31）。2026-08-25 之后这个失败模式已经不可能出现，修它的不是那道守卫，见本条末尾。** 根因：`~/.nulya/extensions/evolution/current` 被指到了一个版本上，而 `evolution` contribute 的是 `[skills prompt]`——activate = 它的 identity system prompt 进**每一场** session 的 system blocks（DESIGN §5.3 / §7.8），于是每个模型都以为自己是 slow loop。谁指的：`App.syncStores` 的 auto-activate 循环只用 `arrived.includes(id)` 挡，那只挡得住 `ext seed` 落源码的**那一次**启动，之后 draft 一重建就会被这个循环 activate。修法是把"带 system prompt 的包 = 模式，后台永不 activate"写成一个纯函数（`extensions.autoActivatable`），并把这件事在三个地方说出来：`/ext` 的 `mode` 列 + Enter 的后果文案、开屏发现 active 的 mode 包就在状态栏点名并指路 `/ext`、`/evolve` 与 `/help` 讲清它是"开一个新 tab 戴上它、什么都不 activate"。
+
+**后续（2026-08-26）**：真正让这个 bug 不可能再发生的**不是** T31 那道守卫，而是 2026-08-25 的 ext-syntax——`activation` 与 fresh 路的 discovery 一起删掉之后，**activate 不再蕴含成员关系**。`evolution` 今天是 `apply: "manual"`，与 `plan` 同形：把 `current` 指向它，它进不了任何一场 session，prompt 只在有人 `/evolve` 戴上的那一场里生效。守卫因此在结构性修复之后又存活了很久，而它最后拦住的只有 `guide`（只贡献一行 skill catalog），代价是"装了 nulya，guide 却不生效"。守卫已于 2026-08-26 删除（tui.md T60），换成把「哪些包从此进每一场 session」在开屏说出来（`warnUserScope` 那条先例）。
 
 2. auto模式我觉得直接叫unsafe更好，其实不是真正的auto吧， 然后切换模式的时候不需要解释了，解释会导致ui挤到一起，然后模式最好能支持点击跳出个面板切换，类似tcode那样， 不过现在nulya model也是点击跳出的面板在上面，这块能不能像tcode那样跳出个好看点的panel， mode也是， 可以mode panel那边稍微说明一下模式，这样更好
 
