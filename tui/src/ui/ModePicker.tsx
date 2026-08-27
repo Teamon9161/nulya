@@ -1,7 +1,8 @@
 import { For } from "solid-js"
 import { useScreen, useStyle } from "../render/theme.ts"
 import { createHover, onClick, rowBackground, rowGutter } from "./rows.ts"
-import { fit, wrapWords } from "./columns.ts"
+import { fit } from "./columns.ts"
+import { DialogHint, DialogTitle } from "./Dialog.tsx"
 import { modes, type PermissionMode } from "../approvals.ts"
 
 /**
@@ -75,14 +76,11 @@ export function ModePicker(props: {
 
   return (
     <box flexDirection="column" width="100%" maxWidth={style.maxWidth} paddingLeft={1} paddingRight={1} flexShrink={0}>
-      <box flexDirection="row" width="100%" height={1}>
-        <text fg={style.theme.accent.evolve} flexShrink={0}>
-          {style.glyphs.picker} permission mode
-        </text>
-        <text fg={style.theme.dim} flexShrink={0}>
-          {" · what happens to a call no rule settles"}
-        </text>
-      </box>
+      <DialogTitle
+        glyph={style.glyphs.picker}
+        name="permission mode"
+        caption="what happens to a call no rule settles"
+      />
 
       <For each={mode_choices}>
         {(choice, index) => {
@@ -107,7 +105,7 @@ export function ModePicker(props: {
               onMouseOut={hover.row(index()).onMouseOut}
             >
               <text fg={rowGutter(style, tone()).fg} flexShrink={0}>
-                {`  ${rowGutter(style, tone()).text}`}
+                {rowGutter(style, tone()).text}
               </text>
               <box width={nameCol()} flexShrink={0}>
                 <text
@@ -123,7 +121,7 @@ export function ModePicker(props: {
                 </text>
               </box>
               <text fg={style.theme.dim} flexShrink={0}>
-                {fit(choice.what, Math.max(0, room() - nameCol() - 6))}
+                {fit(choice.what, Math.max(0, room() - nameCol() - 4))}
               </text>
               <text fg={style.theme.ok} flexShrink={0}>
                 {here() ? ` ${style.glyphs.check}` : ""}
@@ -133,13 +131,7 @@ export function ModePicker(props: {
         }}
       </For>
 
-      <For each={wrapWords("↑↓ choose · click a mode · Enter apply · Esc close", room())}>
-        {(line) => (
-          <text fg={style.theme.dim} height={1}>
-            {`  ${line}`}
-          </text>
-        )}
-      </For>
+      <DialogHint text="↑↓ choose · click a mode · Enter apply · Esc close" width={room()} />
     </box>
   )
 }

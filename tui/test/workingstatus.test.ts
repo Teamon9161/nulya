@@ -16,6 +16,7 @@ import { noticeHold } from "../src/ui/App.tsx"
 import { shimmerColor, mixHex, createStyle } from "../src/render/theme.ts"
 import { default_settings } from "../src/state/settings.ts"
 import { approachCount, no_snapshot, type SessionSnapshot, type ToolItem, type TranscriptItem } from "../src/state/session.ts"
+import { seconds } from "../src/state/tasks.ts"
 import type { DriverStatus } from "../src/state/driver.ts"
 import type { Role } from "../src/state/attach.ts"
 import { pickTip } from "../src/ui/Welcome.tsx"
@@ -196,8 +197,10 @@ test("elapsedLabel: seconds below the minute, and the minute boundary", () => {
   expect(elapsedLabel(0)).toBe("0s")
   expect(elapsedLabel(59_000)).toBe("59s")
   expect(elapsedLabel(59_999)).toBe("59s") // floors, does not round up into the next second
-  expect(elapsedLabel(60_000)).toBe("1m00s")
-  expect(elapsedLabel(100_000)).toBe("1m40s")
+  // One format for a duration in this front end, so this is the same function
+  // `/tasks` and a background card's note go through (tui.md §6).
+  expect(elapsedLabel(60_000)).toBe(seconds(60))
+  expect(elapsedLabel(100_000)).toBe(seconds(100))
 })
 
 test("approachCount: activity-line counters move toward jumps instead of teleporting", () => {

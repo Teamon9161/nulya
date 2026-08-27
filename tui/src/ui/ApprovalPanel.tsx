@@ -3,6 +3,7 @@ import type { InputRenderable } from "@opentui/core"
 import { useScreen, useStyle } from "../render/theme.ts"
 import { createHover, onClick, rowBackground, rowGutter } from "./rows.ts"
 import { fit, wrapWords } from "./columns.ts"
+import { DialogBody, DialogHint, DialogTitle, dialog_gutter } from "./Dialog.tsx"
 
 /**
  * One answer a person can give. `tone` colours the label, not the row: the row
@@ -71,7 +72,7 @@ export function ApprovalPanel(props: {
   const summaryRows = createMemo(() => {
     const rows = props.summary
       .split("\n")
-      .flatMap((line) => wrapWords(line, room() - 2))
+      .flatMap((line) => wrapWords(line, room() - dialog_gutter))
       .filter((line) => line.length > 0)
     return rows.length > 6 ? [...rows.slice(0, 6), `… +${rows.length - 6} more lines`] : rows
   })
@@ -88,22 +89,16 @@ export function ApprovalPanel(props: {
 
   return (
     <box flexDirection="column" width="100%" maxWidth={style.maxWidth} paddingLeft={1} paddingRight={1} flexShrink={0}>
-      <box flexDirection="row" width="100%" height={1}>
-        <text fg={style.theme.warn} flexShrink={0}>
-          {style.glyphs.bar} approve this call
-        </text>
-        <text fg={style.theme.dim} flexShrink={0}>
-          {` · ${props.tool}`}
-          {props.batch > 1 ? ` · ${props.position} of ${props.batch} in this batch` : ""}
-        </text>
-      </box>
-      <For each={summaryRows()}>
-        {(line) => (
-          <text fg={style.theme.muted} height={1}>
-            {`  ${line}`}
-          </text>
-        )}
-      </For>
+      {/* No glyph, deliberately (tui.md §6): `◈` is the mark of choosing what a
+          session runs AS, and this is not that — it is one call being judged.
+          The warn colour is what says so, the way an overlay's bare title says
+          "this is a place". */}
+      <DialogTitle
+        name="approve this call"
+        tone={style.theme.warn}
+        caption={`${props.tool}${props.batch > 1 ? ` · ${props.position} of ${props.batch} in this batch` : ""}`}
+      />
+      <DialogBody lines={summaryRows()} />
 
       {/* The answers. Every row is a click target and the pointer moves the
           cursor onto it, so the mouse alone gets all the way through this
@@ -130,13 +125,13 @@ export function ApprovalPanel(props: {
               onMouseOut={hover.row(index()).onMouseOut}
             >
               <text fg={rowGutter(style, tone()).fg} flexShrink={0}>
-                {`  ${rowGutter(style, tone()).text}`}
+                {rowGutter(style, tone()).text}
               </text>
               <text fg={style.theme.dim} flexShrink={0}>
                 {`${index() + 1}  `}
               </text>
               <text fg={tone().selected ? toneColor(choice.tone) : style.theme.muted} flexShrink={0}>
-                {fit(choice.label, room() - 6)}
+                {fit(choice.label, room() - dialog_gutter - 3)}
               </text>
             </box>
           )
@@ -154,8 +149,10 @@ export function ApprovalPanel(props: {
         onMouseDown={noteClick.onMouseDown}
         onMouseUp={noteClick.onMouseUp}
       >
+        {/* On the answers' own content column, so the note reads as one more
+            thing in the same list rather than a stray field under it. */}
         <text fg={props.noteFocused ? style.theme.accent.user : style.theme.faint} flexShrink={0}>
-          {"    note  "}
+          {`${" ".repeat(dialog_gutter)}note  `}
         </text>
         <input
           ref={(el: InputRenderable) => {
@@ -171,20 +168,14 @@ export function ApprovalPanel(props: {
         />
       </box>
 
-      <For
-        each={wrapWords(
+      <DialogHint
+        width={room()}
+        text={
           props.noteFocused
             ? "Enter answers with this note · Tab back to the list · Esc clears it"
-            : `↑↓ or 1-${props.choices.length} choose · click an answer · Tab writes a note · Enter answers · Esc denies`,
-          room(),
-        )}
-      >
-        {(line) => (
-          <text fg={style.theme.dim} height={1}>
-            {`  ${line}`}
-          </text>
-        )}
-      </For>
+            : `↑↓ or 1-${props.choices.length} choose · click an answer · Tab writes a note · Enter answers · Esc denies`
+        }
+      />
     </box>
   )
 }

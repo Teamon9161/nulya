@@ -360,21 +360,138 @@ PLAN §3.2 早就把答案写死了——**一个 agent 就是 `session new` 的
 - **pin 蕴含成员（2026-08-23，ext-review lane B）**：一个 pin 把它自己的包带进 composition（取 `current`，DESIGN §5.1），所以委派**不再**为 pins 派生 `--with`、`render` 也不再预验证它们——从前那段派生与 `ext list` 预检（T32 第三期）整个删掉了。包没有 `current` 时是内核的 `session new` 在 stderr 点名"这些是 pin 带进来的、其中一个没有 `current`"并给出 `--with <id>@<v>` / `ext activate` 两条出路；TS 侧只是把那句原样转述。两条委派路径（模型的 `agent` tool 与 `/agent`）因此都不再有自己的一份"包装好了没有"判断。
 - **`◈ agent-<name>` 白拿**：戴着的东西在 tab 标题与状态栏那个 chip 上本来就看得见（T31 的机制），不需要为 sub-agent 加第二套显示。T44 之后 `wearing()` 多读一处——header 冻的 `composition.prompts[].source`——因为按同一把尺子，那也是这一场戴着的一段 system prompt，只是它不属于任何包。
 
-## 6. 视觉规范
+## 6. 视觉规范（设计语言）
 
-克制是终端里的美观。规则：
-- **一处颜色一个含义**：角色色只用于左侧 glyph；卡片头行是 `muted`（说出来的话才是最亮的那一档）。**成功是沉默的**（T26）：一次调用只说它带回来多少（`(121 lines)`、`(+2 -1)`），出事才说词（`exit 1` / `failed`，err 色）——每一行都写个 `ok` 只是噪音，而且把颜色用光了。
-- **四档明度是一个层级，不是一块调色板**（T18）：一段文字用哪一档由它**是什么**决定，不由它该多显眼决定——`fg` 这个东西本身（卡片头行、选中行、值）· `muted` 它由什么构成（id 旁的 label、计数、状态）· `dim` 关于它写的话（说明、hint、footer、列名）· `faint` 家具（hover 记号、空 gutter、失效格）。
-- **头行从左往右读**（T26）：`glyph 头行  (note) ▸`，note 在括号里紧跟头行、fold 记号在文字末尾。原来 note 是**右对齐 chip**，于是第 98 列上挂着一个 `ok`、和它说的那次调用之间隔着三十个空列——第二列小字，也是一屏调用看起来像表单而不像叙述的主要原因。行内没有任何东西会被 flex 压缩：头行由我们 `fit` 到 note 与记号剩下的宽度（窄屏切头行，**不切状态词**）。
-- **无边框 transcript**：垂直节奏靠空行，而且节奏是**三档**（T26，`Transcript.gapBefore` 一个纯函数说了算）——**一次 run 里的调用之间 0**（六次调用是一块，像 tcode 的 `Read 5 ranges`；T43 起它们多半根本折成了一行）、**beat 之间 1**、**人开口之前 2**（换一轮对话不只是换一个 beat）。卡片体缩进 +2。**T43 把 thinking→assistant 那条 0 收回了**：屏幕上那是两张卡贴在一起（一个带 glyph 与 fold 记号的头行，紧接着一段 markdown），而「属于后面那句话」由顺序和 dim 已经说完；空行在这一屏的语法里就是 beat 边界。
-- **整屏只有一个有边框的东西：输入框**（T26）。原来是三条通栏 hairline 围出四个区，其中两条隔开的正是输入框自己的上下边，第三条在只有一个 tab 时上面什么都没有。现在 transcript / 输入框 / 状态行之间只有输入框那个圆角框（ascii 用 `+-|`），它同时是"在这里打字"的邀请与**键盘在不在这里**的唯一信号（有焦点 = `accent.user`，browse 模式或 overlay 拿走键盘 = `hairline`）。框**随内容长高**（1–8 行，超出由 textarea 自己滚）。
-- **diff 静**：仅前景色的 add/del，无背景块；上下文行 dim。
-- **动效只在一行上**（T38/T43）：输入框**上面**那一行的 braille spinner + 扫光（`WorkingStatus`），`motion = false` 全关。transcript 里没有任何会动的东西——流式末尾那个 `▍` 光标 T43 删掉了：它是拼进 markdown **content** 的，于是每个 delta 都在重新解析一份多一个字形的文档，而在块边界上那个字形会被吞掉或独占一行（实测三个 delta 内 7→6→7 行地抖），sticky-bottom 的 scrollbox 每抖一次就是整屏重排。
-- **符号集**（Windows Terminal / 常见等宽字体都有）：`›` user · `●` assistant · `$` shell · `✎` edit · `⌘` ext tool · `⚙` build/init · `⚡` capability/activate · `↺` rollback · `⌕` read kernel · `☰` skill · `⤷` sub-session · `⊘` canceled · `▎` composition · `▸ ▾` fold · `·` pointer（鼠标所在的行）· `⠋` spinner · **`✻` tip**（开屏那一条，T38——一个记号一个意思：`⚡` 是某个 extension 得到了能力，tip 不是事件，是屏幕在跟人说话）· **`◈` picker**（`/model` 与 `/mode` 的标题，以及状态栏那个「戴着谁」的 chip——只给「选择」用；列 store 或 journal 的面板是「地方」，标题照旧不带记号，T31）· `‹ ›` effort 转盘 · `✓` 当前 · `● ○` `/ext` 开关；`ascii = true` 时降级为 `> * $ ~ # + ! < ? = > x . | #`。
-- **主题 tokens**（`render/theme.ts`；`nulya-dark` 默认、`nulya-light`；尊重 `NO_COLOR`）：`fg muted dim faint accent.user accent.assistant accent.tool accent.evolve ok err warn diff.add diff.del hairline selection hover`。语法高亮用 OpenTUI `SyntaxStyle`，同一套 tokens 派生。
-- **光标与指针是两套记号**：光标行 `▾` + `selection` 底色，指针行 `·` + 更淡的 `hover` 底色。形状不同，所以没有颜色时也分得开。
-- **overlay 的底部只有一行键**（T18）：常驻两三个重点 + `? keys`，`?` 展开其余；没有更多键的面板不写 `? keys`。
-- **宽度**：内容 ≤ `max_width`（默认 100），左对齐；窄于 60 列时隐藏状态栏右半（卡片的 note 不再隐藏——T26 起它切的是头行，因为 `exit 1` 正是窄屏上最该留下的那一格）。
+**简约但精致——美来自对齐、克制与节奏，不来自装饰。**
+终端里没有阴影、没有圆角、没有字号：能用来造出秩序的只有**位置、明度、空行、字形**四样，
+所以每一样都必须被当成语法而不是品味来用。下面九条是法条，**新写的每一块屏幕都要逐条过一遍**；
+后面四张表（明度与颜色角色 · glyph 词表 · 间距节奏 · 两类面的骨架）是这九条的可执行形式。
+标了 T 号的是既有决定被收编进来的位置，不是新规矩。
+
+### 6.1 九条
+
+1. **颜色克制。** dim 是主力；**accent 只用于语义**——`accent.user`（人）· `accent.assistant`（模型的这一轮）·
+   `accent.evolve`（演化动作、标题、可点的去处）· `ok/warn/err`（判决）· `◈` 的归属。
+   **一屏同时出现的 accent ≤ 3 种**，没有纯装饰色。**成功是沉默的**（T26）：一次调用只说它带回来多少
+   （`(121 lines)` / `(+2 -1)`），出事才说词（`exit 1` / `failed`，err 色）——每行写个 `ok` 只是噪音，
+   而且把颜色用光了。**`NO_COLOR` 下必须依然可读**：凡是只靠颜色区分的两件事，都要另有一个**形状**上的区别
+   （光标 `▾` / 指针 `·`、开关 `●` / `○`），这条否决权大于任何配色上的方便。
+2. **对齐是第一美学。** 同屏的列必须**真的**对齐：宽度一律用 `displayWidth`（CJK 双宽、`⚡` 这类默认 emoji 宽度、
+   组合字符都在 `ui/columns.ts` 里算过），**列宽从内容算**（`columnWidth` / `squeeze`），不写死数字。
+   **数字右对齐**——`9 uses` / `1041 uses` 左对齐是四条参差的边，而人扫一列计数靠的是**末位数字**
+   （`UsageTable`、`/usage` 的 token 块）。同类行的字段起始列一致：一个面里只允许**一个**左边缘（§6.5）。
+   粗糙感十有八九出在这一条上，审计时逐屏先量它。
+3. **留白是结构。** 空行是这一屏的语法，不是喘气：transcript 三档由 `Transcript.gapBefore` 一个纯函数说了算
+   （T26/T43，§6.4），overlay 与 composer 对话框各有自己那一套骨架（§6.5）。
+   **同一类面只允许一种密度**——两个 overlay 用两种节奏，是屏幕在说它们是两个产品。
+4. **没有的东西不占列**（T35）。空值不画占位词（没花过钱不写 `no usage yet`、没跑过步不写 `step 0`、
+   是写者不写 `driver`——**只有例外说自己**）；画不出内容的元素不占行（`thinking = hidden` 时它离开 item 列表，
+   T43，否则前面那一行 `gapBefore` 的空白还留着）。空的 `<text>` **也占一列**，所以可能为空的段一律 `<Show>` 包住。
+5. **边框词表最小化。** box-drawing 只在「归属需要被说出来」的时候用。**整屏只有一个有边框的东西：输入框**
+   （T26，圆角，ascii 降级 `+-|`）——它同时是「在这里打字」的邀请与**键盘在不在这里**的唯一信号
+   （有焦点 `accent.user`，browse / overlay 拿走键盘时退回 `hairline`），并**随内容长高**（1–8 行）。
+   列表与页面**用缩进和留白分组，不画框线**；transcript 无边框，卡片体缩进 +2。全仓库只有这一种框风格。
+6. **glyph 词表封闭**（表在 §6.3）。每个 glyph 在表里写明它唯一的语义；
+   **一个 glyph 在同一块面（transcript / overlay / composer 区）里只允许一个意思**，跨面复用必须在表里把两处各写一句。
+   新 glyph 必须**先进表**（这条硬约束从 T4 起就有）；同一语义不许两个 glyph
+   （`▾ N more below` 与折叠记号曾经是同一个字形，现在是 `↓`）。`ascii = true` 有一份逐位对应的降级表。
+7. **截断用 `…`，绝不换行挤压布局。** 一格放不下就 `fit` 到列宽（**从末尾切**，窄屏切的是头行、命令、路径，
+   **不切状态词**——`exit 1` 正是窄屏上最该留下的那一格，T26），一句话由**我们**在 ` · ` 关节处折
+   （`wrapWords`，一行一个 `<text>`）。理由不是整洁而是正确：`<text>` 只画自己字形落到的格子，
+   空格底下留的是**上一帧**的字符，所以一个换行会变的行会**糊**（`ui/columns.ts` 顶上那段）。
+   **数字格式统一**：一眼看的计数走 `compactCount`（`12.3k` / `1.2M`）；账面（`/usage`）写全数、右对齐；
+   **时长只有一种写法**（`state/tasks.seconds`：`41s` / `2m 05s`），`WorkingStatus` 与 `/tasks` 与后台卡共用它，
+   唯一的例外是内核自己报出来的 `41.8s`——那是**引用**，不重排。
+8. **每屏一行 dim 的「我能做什么」。** overlay 用 `overlays/Footer.tsx`（常驻两三个重点 + `? keys`，
+   `?` 展开其余；没有更多键的面板不写 `? keys`，T18）；composer 区的对话框用 `ui/Dialog.tsx` 的 `DialogHint`。
+   两处都是**最后一行、dim、在 ` · ` 关节处折**——一个面只有一行这样的话，它就永远在同一个地方。
+9. **动效只在一行上**（T38/T43）：输入框**上面**那一行的 braille spinner + 高斯扫光（`WorkingStatus`），
+   `motion = false` 全关。transcript 里没有任何会动的东西——流式末尾那个 `▍` 光标 T43 删掉了：
+   它拼进的是 markdown 的 **content**，每个 delta 都要重解析一份多一个字形的文档，
+   块边界上它被吞掉或独占一行（实测三个 delta 内 7→6→7 行地抖），而 sticky-bottom 的 scrollbox 每抖一次就是整屏重排。
+   **不加新动效。**
+
+### 6.2 明度与颜色角色
+
+**四档明度是一个层级，不是一块调色板**（T18）：一段文字用哪一档由它**是什么**决定，不由它该多显眼决定。
+
+| token | 它是什么 | 画在哪 |
+|---|---|---|
+| `fg` | 这个东西本身 | 人说的话、模型说的话、一行的值、选中行 |
+| `muted` | 它由什么构成 | 卡片头行（说出来的话才是最亮的那一档）、id 旁的 label、计数、状态词 |
+| `dim` | **关于**它写的话 | 说明、hint、footer、列名、note 里的括号、run 摘要整行 |
+| `faint` | 家具 | 折叠记号、指针记号、空 gutter、失效格、note 字段的占位 |
+
+| accent | 唯一语义 |
+|---|---|
+| `accent.user` | 人：`▎` 左规线、输入框有焦点时的边框与光标、`/ext` 版本线上的 `▎ this session` |
+| `accent.assistant` | 模型正在进行的这一轮：`●` 头、`WorkingStatus` 跑动时的主段 |
+| `accent.tool` | 一次普通的 tool 调用的 glyph（`$` / `⌘` / `✎`） |
+| `accent.evolve` | 演化与去处：`⚙ ⚡ ↺ ⌕ ☰ ⤷` 的 glyph、面的标题、`↗` 可点行、状态栏 `◈`、`↓ N more below` |
+| `ok` / `warn` / `err` | 判决：`✓ current` / `unsafe`·等你回答·漂移 / `exit 1`·`✗`·deny |
+| `diff.add` / `diff.del` | **只有前景色**，无背景块；上下文行 dim |
+| `hairline` `selection` `hover` `lift` | 家具底色：框线 · 光标行 · 指针行（永远比光标那档更淡）· 扫光抬起的方向（主题自报，`NO_COLOR` 即 `fg`，扫光变成 no-op） |
+
+语法高亮由同一套 tokens 派生（OpenTUI `SyntaxStyle`），所以代码块不可能和主题脱节。
+主题：`nulya-dark`（默认）/ `nulya-light` / `NO_COLOR` 全塌成终端自己的前景色。
+
+### 6.3 glyph 词表（封闭）
+
+| glyph | ascii | 唯一语义 |
+|---|---|---|
+| `›` | `>` | **输入点**：还没说出口的话——composer 提示符、Welcome 的邀请、`/provider` 的输入字段、SkillEcho 回显的那条 `/name args` |
+| `▎` | `\|` | **左规线**：把一整块标成「这是谁的」（UserTurn 每一行、CompositionCard 每一行），或在一行里标出「就是眼前这一个」（`▎ this tab` / `▎ this session`） |
+| `●` | `*` | transcript 面：模型说的话。overlay 面：`● ○` 开关里亮着的那半（`/ext`）、`● live`（别人正持着写者租约） |
+| `○` | `-` | overlay 面：`● ○` 开关灭着的那半 |
+| `⋯` | `...` | **折起来的一段过程，你只被给到这一行**：thinking 卡、run 摘要（T43；曾经是 `●`，与它上面那句话同字形） |
+| `$` | `$` | shell 调用 |
+| `✎` | `~` | 一次 edit（diff 卡） |
+| `⌘` | `#` | extension tool 调用 |
+| `⚙` | `+` | build / init |
+| `⚡` | `!` | **一次能力的获得**：`ext activate` 与它配对的 capability note；Welcome 与 CompositionCard 里 pin 上去的 tool 名前缀 |
+| `↺` | `<` | rollback |
+| `⌕` | `?` | 读内核源码（`nulya src`） |
+| `☰` | `=` | skill |
+| `⤷` | `>` | sub-session |
+| `⊘` | `x` | 被取消的调用 |
+| `✗` | `!` | driver 侧的失败（`ErrorNotice`）——不是 tool 的失败，那个说 `exit N` |
+| `▸` `▾` | `>` `v` | 折叠：关 / 开；`▾` 同时是**列表里光标所在的那一行**（两处都是「这一个展开着 / 就在这儿」） |
+| `·` | `.` | 指针所在的那一行（形状与光标不同，所以没有颜色时也分得开） |
+| `↓` | `v` | **下面还有**：`↓ N more below`（方向，不是状态——所以不是 `▾`） |
+| `↗` | `->` | 去别处：卡片上唯一那条可点的链接（`open <id> in a tab`，T43） |
+| `⠋` | `-\|/` | spinner（只在 `WorkingStatus`） |
+| `✻` | `*` | tip：屏幕在跟人说话，不是发生了什么（T38） |
+| `◈` | `#` | **这一场以什么身份/档位在跑**：选它的那些对话框标题（`/model` `/mode` `/agent` `/with`）、状态栏「戴着谁」的 chip、包自己的 panel 标题。列 store 或 journal 的面板是「地方」，标题**不带记号**（T31）；审批对话框也不带——它不是选身份，是**一个 call 被裁决**，颜色（warn）说完了 |
+| `‹ ›` | `<` `>` | `/model` 的 effort 转盘 |
+| `✓` | `*` | **现在生效的那一个**：`/model` 的 current model、`/ext` 版本线的 `✓ current`、`/mode` 当前档（一律 `ok` 色） |
+
+### 6.4 transcript 的节奏
+
+- **头行从左往右读**（T26）：`glyph 头行  (note) ▸`——note 在括号里紧跟头行、fold 记号在文字末尾。
+  原来 note 是**右对齐 chip**，于是第 98 列挂着一个 `ok`、和它说的那次调用之间隔着三十个空列。
+  行内没有任何节点会被 flex 压缩：头行由我们 `fit` 到 note 与记号剩下的宽度。
+- **卡片体缩进 +2**；spill 指针（`full output → …`）与 `↗` 动作行在**折叠之外**，与体同缩进，都 `fit` 到行宽。
+- **空行三档**（`Transcript.gapBefore`，一个纯函数）：**一次 run 里的调用之间 0**（六次调用是一块）·
+  **beat 之间 1** · **人开口之前 2**（换一轮对话不只是换一个 beat）。
+  T43 把 `thinking → assistant` 那条 0 收回了：屏幕上那是两张卡贴在一起，而「属于后面那句话」由顺序和 dim 已经说完。
+- **宽度**：内容 ≤ `max_width`（默认 100），左对齐；窄于 60 列时隐藏状态栏右半。
+
+### 6.5 两类面，两套骨架，一个左边缘
+
+**这两类是词表的全部**：一个新面必须是其中之一，不许发明第三种密度。两类共用同一条铁律——
+**盒子左padding 1 格，gutter 占第 1–2 列，一切内容从第 3 列起**。所以标题的 glyph 恰好两格宽
+（`◈ ` 就是标题自己的 gutter），行的名字、标题的字、body 的字，全落在同一列上。
+
+| | overlay（整屏，`/ext` `/sessions` `/model` `/provider` `/tasks` `/usage` `/settings` `/help`） | composer 区对话框（`ui/Dialog.tsx`：`/mode` `/agent` `/with`、审批） |
+|---|---|---|
+| 标题 | 一行，`accent.evolve`；**列 store / journal 的面不带 glyph**（它是「地方」），只有本身是一次「选身份/档位」的才带 `◈`（`/model`） | 一行，`◈ <名> · <一句它是干什么的>`；审批那个不带 glyph、整行 warn |
+| 标题之后 | **一个空行** | **不空行**（它长在输入框上面，一行就是一行） |
+| 主体 | 行的 gutter 走 `ui/rows.ts` 的 `rowGutter`（永远两格宽） | 同一个 `rowGutter` |
+| 底部 | `OverlayFooter`：notice → warning → 一行键（+ `? keys`） | `DialogHint`：一行键 |
+| 内容超屏 | 装进 `scrollbox`（`flexBasis: 0`，否则盒子按内容高度起步、把 footer 挤成 0 行然后**画在最后一行上面**） | 不会超屏（对话框自己有上限：审批的命令摘要封顶 6 行 + 一行 `… +N more lines`） |
+
+`/ext` 是 overlay 里唯一分栏的（左列 id / 右栏详情 / 下面 tools 与 usage 两个 pane），
+分栏也只是把同一套骨架放进两个盒子——**每个盒子里仍然只有一个左边缘**。
 
 ## 7. 设定 `tui.toml`
 
@@ -1996,3 +2113,20 @@ T33 把 `internal` 行折起来时给的理由是**数量**（六个 driver tool
 3. **调用点只有一个：`sessionExtras()`**，`ensureSession` 里 draft 变成 session 的那一刻，**排在 `session_with` 之后**——事实在 `session new` 冻结它们之前的最后一刻才读。版本解析借的是 `sessionMemberOnce`（自带 draft 就地 build、否则取 `current`，与别的自带包同一条路），拿到的只是版本。
 4. **失败不挡开场，但两种失败分开说**：包解析不出来 → `not composed in · /ext for what it said`（`/ext` 确实答得了）；`render` 自己失败 → **把它的话原样显示**（`renderSessionPrompt` 认真整理了 stderr/stdout，第一版却在调用点 `.catch(() => null)` 全吞掉，然后把人指向一个对这件事无话可说的屏幕）。两种都照开 session。
 4. **没做**：没有 `/ground` 命令（它不是一个模式，没有可穿脱的东西）；没有把渲染结果画在 transcript 上（它是 system block，`/sessions` 的 composition 里看得见）；没有让它跟着每一步刷新（`--prompt` 冻在 header 里正是它该待的地方——重渲染一次就是把缓存前缀换掉）。
+
+### T67 · §6 从一段规则写成一份设计语言，屏幕逐个对齐到它（2026-08-27）
+
+**内核零改动**，`tui/` 十二个文件，**行为一个字没动**（按键、slash、状态机、审批链、driver policy 全不变）。起因是把整套屏幕当成一件东西看：单张看都对，摆在一起就有一层廉价感——而它不来自配色，来自**同一个决定在不同屏幕上做了两遍**。所以先把 §6 写成能逐条检查的九条法条 + 四张表（明度与颜色角色 · glyph 词表 · transcript 节奏 · 两类面的骨架），再拿它当审计单把每块屏幕过一遍。既有的审美决定（T18 四档明度 · T26 头行与三档空行 · T35「没有的东西不占列」· T38 动效只在一行 · T43 run 摘要与 thinking 离场）**是被收编进法条，不是被推翻**。
+
+改的六处，每一处都是一条法条在某个屏幕上没被守住：
+
+1. **一个左边缘**（第 2 条）。四个 composer 区对话框（`/mode` `/agent` `/with`、审批）是同一个东西的四份手抄，于是**一个对话框里有三个左边缘**：标题在第 1 列、光标 gutter 在第 3 列、hint 又在第 3 列却比它该领的标题右两格。新 `ui/Dialog.tsx`（`DialogTitle` / `DialogBody` / `DialogHint` + `dialog_gutter`）把骨架收成一处，规矩与 overlay 逐位相同：**盒子 padding 1、gutter 占第 1–2 列、一切内容从第 3 列起**（标题 glyph 恰好两格宽，`◈ ` 就是标题自己的 gutter）。
+2. **`●` 在 transcript 面有两个意思**（第 6 条）。`● Reading emit.zig first.`（模型说的话）与它正下方的 `● Run 2 commands`（run 摘要）——两种永远相邻的行、同一个字形，NO_COLOR 下只差两格缩进。run 摘要改回 §4.2 一直写着的 `⋯`（thinking 与它说的是同一句话：**一段折起来的过程，你只被给到这一行**），并按 §4.2 全程 dim（原来 glyph 是 `accent.tool`，那是把「成功了、没什么可看」画成了一次调用的亮度）。
+3. **`▾ N more below` 是方向不是状态**（第 6 条）。状态栏借了折叠记号，而 `▾` 在这个前端里的意思是「这张卡开着 / 光标在这一行」。新 glyph `below` = `↓`（ascii `v`），也正是 §4.5 一直写着的那个。
+4. **`⚡ current` 说错了话**（第 1、6 条）。`/ext` 版本线上「store 指针指着哪个版本」用的是 `⚡`——而 `⚡` 是**一次能力的获得**。改成 `✓ current`、`ok` 色，与 `/model` 的 `✓ current` **同字形同颜色同含义**：这是现在生效的那一个。
+5. **数字右对齐 + 一种时长**（第 2、7 条）。`UsageTable` 的 `9 uses` / `1041 uses` 与 `94% ok` / `100% ok` 左对齐是四条参差的边，而扫一列计数靠的是末位数字——数字按当屏最宽的那个补左空格，词跟着一起对齐；`/usage` 的 token 块同办法（后面那句 `· 88% of prompt` 降成 dim 的旁注，它本来就是关于那个数的话）。时长原本有**三种**写法：`WorkingStatus` 的 `1m40s`、`/tasks` 与后台卡的 `1m 05s`、还有内核报的 `41.8s`——`elapsedLabel` 现在就是 `state/tasks.seconds`，我们自己数的一律一种写法，内核那个是**引用**，不重排。
+6. **两处会换行的行**（第 7 条）与**一处会盖住自己的面**（第 3、5 条）。卡片的 spill 指针（`full output → <长路径>`）与 `↗` 动作行都不过 `fit`；`/usage` 的主体不在 scrollbox 里，于是 token 块 + 工具日志一超屏，`OverlayFooter` 就**画在最后一行上面**（实测 `rxrefresh/·gEsc closees   100% ok`——正是 `ui/columns.ts` 顶上那段说的「空格底下留着上一帧的字符」）。主体收进 `scrollbox`（`flexBasis: 0`），`HelpView` 与 `TasksView` 早就是这么写的，`/usage` 是漏掉的那个。顺带 `/help` 的 footer 也改走 `OverlayFooter`（第 8 条：一个面只有一行这样的话，写在同一个地方；它原本是裸 `<text>`，窄屏会糊），并补上它第一组键的 `keys` 小标题——四组里只有它没有，读起来像标题的一部分。
+
+**没做**：不动 pane / 布局（那是 `goals/tui-shell.md` 的 S1）；不加任何动效（第 9 条）；不改 `▎` 与 `›` 的现有分工（`▎` 是左规线与「就是这一个」，`›` 是输入点——两条都写进 §6.3 的表里，不是靠记）；不给 `/ext` 详情里那句 `lint · 0 uses · —` 改成表（它是一行事实不是一列数，等真有第二个读者再说）。**审批对话框的标题去掉了 `▎`**：`◈` 是「选身份/档位」的记号而它不是，颜色（warn）已经说完了这件事——`▎` 因此在 composer 区一个用法都不剩。
+
+**测试**：`bun test` 500 pass（`tsc` 干净，内核未动）。四处断言随新样子更新，其中三处顺手改成守机制而不是守字形——run 摘要那条从 `toContain("● Run 2 commands")` 改成「那一行**不含**assistant 的 glyph」（它要守的本来就是这个）、`elapsedLabel` 的 `1m00s` 改成「与 `seconds()` 逐位相等」（一种写法才是被钉的东西）、`/usage` 的「两个值同一个起始列」改成「同一个**结束**列」（右对齐之后那才是对齐的定义）。三份快照重出（`/ext` 的 `✓ current`、run 摘要那一帧、`/help` 多一行小标题与新 footer）。

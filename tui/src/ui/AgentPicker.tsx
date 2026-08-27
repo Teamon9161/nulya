@@ -2,6 +2,7 @@ import { For, Show } from "solid-js"
 import { useScreen, useStyle } from "../render/theme.ts"
 import { createHover, onClick, rowBackground, rowGutter } from "./rows.ts"
 import { fit, wrapWords } from "./columns.ts"
+import { DialogHint, DialogTitle, dialog_gutter } from "./Dialog.tsx"
 import type { AgentEntry } from "../agents.ts"
 
 /**
@@ -35,20 +36,22 @@ export function AgentPicker(props: {
 
   return (
     <box flexDirection="column" width="100%" maxWidth={style.maxWidth} paddingLeft={1} paddingRight={1} flexShrink={0}>
-      <box flexDirection="row" width="100%" height={1}>
-        <text fg={style.theme.accent.evolve} flexShrink={0}>
-          {style.glyphs.picker} agents
-        </text>
-        <text fg={style.theme.dim} flexShrink={0}>
-          {" · each one is a session of its own; only its report comes back"}
-        </text>
-      </box>
+      <DialogTitle
+        glyph={style.glyphs.picker}
+        name="agents"
+        caption="each one is a session of its own; only its report comes back"
+      />
 
       <Show when={props.defs.length === 0}>
-        <For each={wrapWords(`no agent definitions · write one as a markdown file in .nulya/agents/ or ~/.nulya/agents/ — front matter (name, description, readonly, model, pins, max_steps) and a body that is its system prompt`, room())}>
+        <For
+          each={wrapWords(
+            `no agent definitions · write one as a markdown file in .nulya/agents/ or ~/.nulya/agents/ — front matter (name, description, readonly, model, pins, max_steps) and a body that is its system prompt`,
+            room() - dialog_gutter,
+          )}
+        >
           {(line) => (
             <text fg={style.theme.dim} height={1}>
-              {`  ${line}`}
+              {`${" ".repeat(dialog_gutter)}${line}`}
             </text>
           )}
         </For>
@@ -92,26 +95,20 @@ export function AgentPicker(props: {
               onMouseOut={hover.row(index()).onMouseOut}
             >
               <text fg={rowGutter(style, tone()).fg} flexShrink={0}>
-                {`  ${rowGutter(style, tone()).text}`}
+                {rowGutter(style, tone()).text}
               </text>
               <box width={nameCol()} flexShrink={0}>
                 <text fg={tone().selected ? style.theme.fg : style.theme.muted}>{fit(def.name, nameCol() - 1)}</text>
               </box>
               <text fg={style.theme.dim} flexShrink={0}>
-                {fit(what(), Math.max(0, room() - nameCol() - 4))}
+                {fit(what(), Math.max(0, room() - nameCol() - dialog_gutter))}
               </text>
             </box>
           )
         }}
       </For>
 
-      <For each={wrapWords("↑↓ choose · Enter writes /agent <name> · then type the task · Esc close", room())}>
-        {(line) => (
-          <text fg={style.theme.dim} height={1}>
-            {`  ${line}`}
-          </text>
-        )}
-      </For>
+      <DialogHint text="↑↓ choose · Enter writes /agent <name> · then type the task · Esc close" width={room()} />
     </box>
   )
 }

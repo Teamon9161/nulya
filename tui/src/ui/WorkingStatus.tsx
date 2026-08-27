@@ -22,6 +22,7 @@ import { Index, Show, createSignal } from "solid-js"
 import { shimmerColor, useScreen, useStyle } from "../render/theme.ts"
 import { onClick } from "./rows.ts"
 import { displayWidth, fit } from "./columns.ts"
+import { seconds } from "../state/tasks.ts"
 import type { DriverStatus } from "../state/driver.ts"
 import type { Role } from "../state/attach.ts"
 import type { SessionSnapshot } from "../state/session.ts"
@@ -168,11 +169,17 @@ export function activityOf(facts: {
   return null
 }
 
-/** `12s`, `1m40s` — how long this has been going on. */
+/**
+ * How long this has been going on, in the ONE format this front end uses for a
+ * duration (`state/tasks.seconds`, tui.md §6).
+ *
+ * It used to have its own — `1m40s` here, `1m 40s` in `/tasks` and on a
+ * background card's note — which is two spellings of the same fact on two rows
+ * of the same screen. The kernel's own `41.8s` on a finished task's report is
+ * quoted, not reformatted; everything we count ourselves counts the same way.
+ */
 export function elapsedLabel(ms: number): string {
-  const total = Math.max(0, Math.floor(ms / 1000))
-  if (total < 60) return `${total}s`
-  return `${Math.floor(total / 60)}m${String(total % 60).padStart(2, "0")}s`
+  return seconds(Math.max(0, Math.floor(ms / 1000)))
 }
 
 export function WorkingStatus(props: {

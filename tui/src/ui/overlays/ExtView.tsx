@@ -741,7 +741,7 @@ export function ExtView(props: {
     const list = versions()
     const frozen = props.header ? frozenVersion(props.header, selected()?.id ?? "") : null
     const budget = Math.max(8, detailWidth() - 2)
-    const current_w = columnWidth([selected()?.current ? `${style.glyphs.capability} current` : ""], 2, 12)
+    const current_w = columnWidth([selected()?.current ? `${style.glyphs.check} current` : ""], 2, 12)
     const mine_w = columnWidth([frozen ? `${style.glyphs.bar} this session` : ""], 0, 15)
     const full_w = columnWidth(list.map((entry) => entry.version), 2, 28)
     const full = full_w + current_w + mine_w <= budget
@@ -1788,8 +1788,13 @@ export function ExtView(props: {
                             <text fg={style.theme.dim}>{fit(stamp(version.mtime), versionCols().when - 2)}</text>
                           </box>
                           <box width={versionCols().current} flexShrink={0}>
-                            <text fg={style.theme.accent.evolve}>
-                              {isCurrent() ? fit(`${style.glyphs.capability} current`, versionCols().current - 2) : ""}
+                            {/* `✓ current` is the same mark in the same colour as
+                                `/model`'s (tui.md §6): one glyph, one colour, one
+                                meaning — "this is the one in force". It used to be
+                                `⚡`, which is what an extension GAINED, not which
+                                build it points at. */}
+                            <text fg={style.theme.ok}>
+                              {isCurrent() ? fit(`${style.glyphs.check} current`, versionCols().current - 2) : ""}
                             </text>
                           </box>
                           <box width={versionCols().mine} flexShrink={0}>

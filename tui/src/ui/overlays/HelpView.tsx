@@ -15,6 +15,7 @@ import { useKeyboard } from "@opentui/solid"
 import type { ScrollBoxRenderable } from "@opentui/core"
 import { useScreen, useStyle } from "../../render/theme.ts"
 import { columnWidth, fit, wrapWords } from "../columns.ts"
+import { OverlayFooter } from "./Footer.tsx"
 import { commands } from "../../commands.ts"
 import { default_keys, type Action, type Keymap } from "../../keymap.ts"
 
@@ -170,6 +171,12 @@ export function HelpView(props: { keys: Keymap; onClose: () => void }) {
         }}
         contentOptions={{ flexDirection: "column", width: "100%" }}
       >
+        {/* Every group on this page is a `muted` heading and its rows; these
+            two were the exception, and an unlabelled block above three labelled
+            ones reads as part of the title rather than as a section of its own. */}
+        <text fg={style.theme.muted} height={1}>
+          keys
+        </text>
         <For each={actions}>
           {([action, what]) => (
             <Row left={props.keys[action]} right={what} changed={props.keys[action] !== default_keys[action]} />
@@ -200,9 +207,11 @@ export function HelpView(props: { keys: Keymap; onClose: () => void }) {
           )}
         </For>
       </scrollbox>
-      <text fg={style.theme.dim} height={1}>
-        j/k · PgUp/PgDn scroll · Esc close
-      </text>
+      {/* The same footer every other overlay has (tui.md §6): one dim line, in
+          one place, broken at its own joints — it used to be a bare `<text>`
+          here, which is the one panel where the line could not wrap and
+          therefore the one panel where a narrow terminal garbled it. */}
+      <OverlayFooter width={inner()} brief="j/k · PgUp/PgDn scroll · Esc close" />
     </box>
   )
 }

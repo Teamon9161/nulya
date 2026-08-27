@@ -134,6 +134,13 @@ export interface Glyphs {
   foldClosed: string
   foldOpen: string
   /**
+   * "There is more of this below you" — the status line's `↓ N more below`.
+   * Deliberately NOT the open-fold mark: `▾` is a state (this card is open,
+   * the cursor is on this row) and this is a direction. They were the same
+   * glyph, on a line three rows under a transcript full of the other one.
+   */
+  below: string
+  /**
    * The gutter mark of a row the pointer is over. Deliberately not the same
    * shape as the cursor's: hover says "this row answers to a click", the cursor
    * says "this row answers to Enter", and one glyph for both would make the two
@@ -188,6 +195,7 @@ const unicode_glyphs: Glyphs = {
   failed: "✗",
   foldClosed: "▸",
   foldOpen: "▾",
+  below: "↓",
   pointer: "·",
   hairline: "─",
   bar: "▎",
@@ -218,6 +226,7 @@ const ascii_glyphs: Glyphs = {
   failed: "!",
   foldClosed: ">",
   foldOpen: "v",
+  below: "v",
   pointer: ".",
   hairline: "-",
   bar: "|",

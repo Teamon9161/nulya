@@ -169,9 +169,12 @@ export function CardFrame(props: {
         <ActionRow action={props.action!} />
       </Show>
 
+      {/* Cut, never wrapped (tui.md §6): a spill path is as long as the scratch
+          directory made it, and a second row of path under every long-output
+          card is the transcript's rhythm broken by a pointer nobody reads twice. */}
       <Show when={props.spillPath}>
         <box paddingLeft={2}>
-          <text fg={style.theme.dim}>full output → {props.spillPath}</text>
+          <text fg={style.theme.dim}>{fit(`full output → ${props.spillPath}`, Math.max(8, room()))}</text>
         </box>
       </Show>
     </box>
@@ -187,8 +190,11 @@ export function CardFrame(props: {
  */
 function ActionRow(props: { action: { text: string; onPress: () => void } }) {
   const style = useStyle()
+  const screen = useScreen()
   const [hovered, setHovered] = createSignal(false)
   const click = onClick(() => props.action.onPress())
+  /** Cut like every other row: a session id is long and a wrapped link is two rows. */
+  const room = () => Math.max(8, Math.min(screen().width, style.maxWidth) - 6)
   return (
     <box
       paddingLeft={2}
@@ -200,7 +206,7 @@ function ActionRow(props: { action: { text: string; onPress: () => void } }) {
       onMouseOut={() => setHovered(false)}
     >
       <text fg={style.theme.accent.evolve} flexShrink={0}>
-        {style.glyphs.open} {props.action.text}
+        {fit(`${style.glyphs.open} ${props.action.text}`, room())}
       </text>
     </box>
   )

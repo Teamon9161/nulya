@@ -14,9 +14,12 @@ import type { Contributions } from "../../nulya/files.ts"
  * is exactly the cards that were there before, each still folding on its own:
  * nothing is summarised away, and one keypress gets all of it back.
  *
- * The glyph is the assistant dot in the tool accent: this is work performed for
- * the answer, not hidden thinking. It should read like a compact activity line,
- * not like an ellipsis whose subject must be decoded.
+ * The glyph is the ellipsis, all of it dim (tui.md §4.2). It used to be the
+ * assistant dot in the tool accent, which put the SAME glyph on two kinds of
+ * row that sit next to each other constantly — what the model said, and the
+ * calls it made under it — with nothing but two columns of indent between them
+ * once a terminal has no colour. `⋯` says the one thing both this card and the
+ * thinking card say: a stretch you are being given one line of.
  *
  * NO NOTE. Every other card's note says how much came back or what went wrong
  * (T26), and a run is by construction the calls that worked and brought back
@@ -28,9 +31,10 @@ export function RunCard(props: { items: ToolItem[]; itemKey: string; contributio
   return (
     <CardFrame
       itemKey={props.itemKey}
-      glyph={style.glyphs.assistant}
-      accent={style.theme.accent.tool}
+      glyph={style.glyphs.thinking}
+      accent={style.theme.dim}
       head={runSummary(props.items)}
+      headTone="dim"
       defaultOpen={style.settings.transcript.tool_output === "expanded"}
       foldable
     >

@@ -194,10 +194,12 @@ test("/usage at eighty columns: the label column holds, the caveat is broken, a 
       const lines = frameLines(frame)
       for (const line of lines) expect(displayWidth(line)).toBeLessThanOrEqual(76)
 
-      // The token block is a table: two labels put their value at one offset.
+      // The token block is a table, and its numbers are RIGHT-aligned: what
+      // lines up is the last digit, because that is the digit that says whether
+      // this is a hundred or a million (tui.md §6).
       const input = lines.find((line) => line.includes("input tokens"))!
       const output = lines.find((line) => line.includes("output tokens"))!
-      expect(input.indexOf("1200")).toBe(output.indexOf("80"))
+      expect(input.indexOf("1200") + "1200".length).toBe(output.indexOf("80") + "80".length)
       expect(input).toMatch(/input tokens {2,}1200/)
 
       // The caveat is two lines broken at a joint, not one wrapped line.

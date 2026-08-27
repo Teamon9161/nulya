@@ -790,7 +790,12 @@ test("a run of successful calls becomes one line, and a failure stays out of it"
     shellItem({ key: "r5", command: "grep -n emit src/emit.zig" }),
   ]
   const frame = await frameOf(items, 76, 20)
-  expect(frame).toContain("● Run 2 commands")
+  expect(frame).toContain("Run 2 commands")
+  // And it does NOT wear the assistant's glyph. The summary sits directly under
+  // the sentence the model said; one glyph on two kinds of row that are always
+  // neighbours is a glyph that says nothing (tui.md §6).
+  const summary = frame.split("\n").find((line) => line.includes("Run 2 commands"))!
+  expect(summary).not.toContain(style.glyphs.assistant)
   // The failure keeps its own row, its own command and its own exit.
   expect(frame).toContain("$ cat missing")
   expect(frame).toContain("exit 1")

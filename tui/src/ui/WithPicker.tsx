@@ -2,6 +2,7 @@ import { For, Show } from "solid-js"
 import { useScreen, useStyle } from "../render/theme.ts"
 import { createHover, onClick, rowBackground, rowGutter } from "./rows.ts"
 import { fit, wrapWords } from "./columns.ts"
+import { DialogHint, DialogTitle, dialog_gutter } from "./Dialog.tsx"
 
 /** One package this machine has REGISTERED and a session may therefore name. */
 export interface Wearable {
@@ -45,25 +46,22 @@ export function WithPicker(props: {
 
   return (
     <box flexDirection="column" width="100%" maxWidth={style.maxWidth} paddingLeft={1} paddingRight={1} flexShrink={0}>
-      <box flexDirection="row" width="100%" height={1}>
-        <text fg={style.theme.accent.evolve} flexShrink={0}>
-          {style.glyphs.picker} wear
-        </text>
-        <text fg={style.theme.dim} flexShrink={0}>
-          {" · a new tab carrying this package; nothing is activated"}
-        </text>
-      </box>
+      <DialogTitle
+        glyph={style.glyphs.picker}
+        name="wear"
+        caption="a new tab carrying this package; nothing is activated"
+      />
 
       <Show when={props.wearables.length === 0}>
         <For
           each={wrapWords(
             "nothing to wear · a package with a system prompt appears here once it is built and activated in /ext · or name a build directly with /with <id>@<version>",
-            room(),
+            room() - dialog_gutter,
           )}
         >
           {(line) => (
             <text fg={style.theme.dim} height={1}>
-              {`  ${line}`}
+              {`${" ".repeat(dialog_gutter)}${line}`}
             </text>
           )}
         </For>
@@ -97,26 +95,20 @@ export function WithPicker(props: {
               onMouseOut={hover.row(index()).onMouseOut}
             >
               <text fg={rowGutter(style, tone()).fg} flexShrink={0}>
-                {`  ${rowGutter(style, tone()).text}`}
+                {rowGutter(style, tone()).text}
               </text>
               <box width={idCol()} flexShrink={0}>
                 <text fg={tone().selected ? style.theme.fg : style.theme.muted}>{fit(one.id, idCol() - 1)}</text>
               </box>
               <text fg={style.theme.dim} flexShrink={0}>
-                {fit(what(), Math.max(0, room() - idCol() - 4))}
+                {fit(what(), Math.max(0, room() - idCol() - dialog_gutter))}
               </text>
             </box>
           )
         }}
       </For>
 
-      <For each={wrapWords("↑↓ choose · Enter opens a tab wearing it · Esc close", room())}>
-        {(line) => (
-          <text fg={style.theme.dim} height={1}>
-            {`  ${line}`}
-          </text>
-        )}
-      </For>
+      <DialogHint text="↑↓ choose · Enter opens a tab wearing it · Esc close" width={room()} />
     </box>
   )
 }

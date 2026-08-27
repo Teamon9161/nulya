@@ -33,7 +33,7 @@ exports[`/ext shows the version line, the current pointer and the usage counts 1
                                   tools lint · skills — · prompts —
 
                                   versions · 1
-                                    v-<hash>  <built>  ⚡ current  ▎ this session
+                                    v-<hash>  <built>  ✓ current  ▎ this session
 
                                   usage
                                     lint · 0 uses · —

@@ -272,11 +272,11 @@ exports[`a run of successful calls becomes one line, and a failure stays out of 
 "                                                                            
 ● Reading emit.zig first.                                                   
                                                                             
-  ● Run 2 commands ▸                                                        
+  ⋯ Run 2 commands ▸                                                        
                                                                             
   $ cat missing  (2 lines · exit 1) ▸                                       
                                                                             
-  ● Run 2 commands ▸                                                        
+  ⋯ Run 2 commands ▸                                                        
                                                                             
                                                                             
                                                                             

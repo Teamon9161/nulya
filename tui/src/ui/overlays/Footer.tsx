@@ -56,7 +56,8 @@ export function OverlayFooter(props: {
   warning?: string
   /** The result of the last action, if any. */
   notice?: string | null
-  help: KeyHelp
+  /** Absent on a panel with no second page of keys (`/help` is its own key list). */
+  help?: KeyHelp
 }) {
   const style = useStyle()
   const lines = (text: string) => wrapWords(text, props.width)
@@ -84,7 +85,7 @@ export function OverlayFooter(props: {
           with two keys that advertises a way to see more keys is a lie the
           first time somebody presses it. */}
       <Show
-        when={props.help.open() && (props.more ?? []).length > 0}
+        when={props.help?.open() && (props.more ?? []).length > 0}
         fallback={
           <For each={lines((props.more ?? []).length > 0 ? `${props.brief} · ? keys` : props.brief)}>
             {(line) => (

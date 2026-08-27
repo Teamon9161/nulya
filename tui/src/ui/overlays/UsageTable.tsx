@@ -19,19 +19,43 @@ import type { ToolUsage } from "../../nulya/files.ts"
 
 const caption = "tool usage · .nulya/tool-usage.jsonl · evidence for a pin, not a queue"
 
-const usesOf = (row: ToolUsage) => `${row.uses} uses`
-const okOf = (row: ToolUsage) => (row.uses > 0 ? `${Math.round((row.ok / row.uses) * 100)}% ok` : "—")
+/**
+ * The numerals line up, the words after them line up too (tui.md §6).
+ *
+ * `9 uses` / `128 uses` / `1041 uses` left-aligned is four ragged columns where
+ * there should be two: the eye scans a count by its last digit, and a table
+ * whose digits start in a different place on every row cannot be scanned at
+ * all. So the number is padded to the widest number on screen — which is a fact
+ * about these rows, not a constant somebody typed once and outgrew.
+ */
+const countOf = (row: ToolUsage) => String(row.uses)
+const percentOf = (row: ToolUsage) => (row.uses > 0 ? `${Math.round((row.ok / row.uses) * 100)}%` : "—")
+const padLeft = (text: string, width: number) => " ".repeat(Math.max(0, width - text.length)) + text
+const widest = (values: readonly string[]) => values.reduce((most, one) => Math.max(most, one.length), 0)
 
 export function UsageTable(props: { rows: ToolUsage[]; width: number }) {
   const style = useStyle()
+
+  /** Each row's two numbers, right-aligned against the widest of each on screen. */
+  const cells = createMemo(() => {
+    const counts = props.rows.map(countOf)
+    const percents = props.rows.map(percentOf)
+    const countTo = widest(counts)
+    const percentTo = widest(percents)
+    return props.rows.map((row, at) => ({
+      row,
+      uses: `${padLeft(counts[at]!, countTo)} uses`,
+      ok: `${padLeft(percents[at]!, percentTo)} ok`,
+    }))
+  })
 
   /** A tool id is the column that grows without bound, so it is the one capped. */
   const cols = createMemo(() => {
     const [id, uses, ok] = squeeze(
       [
         columnWidth(props.rows.map((row) => row.toolId), 2, 44),
-        columnWidth(props.rows.map(usesOf), 2, 12),
-        columnWidth(props.rows.map(okOf), 0, 8),
+        columnWidth(cells().map((cell) => cell.uses), 2, 14),
+        columnWidth(cells().map((cell) => cell.ok), 0, 8),
       ],
       [10, 4, 0],
       props.width,
@@ -49,17 +73,17 @@ export function UsageTable(props: { rows: ToolUsage[]; width: number }) {
         )}
       </For>
       <box height={1} />
-      <For each={props.rows}>
-        {(row) => (
+      <For each={cells()}>
+        {(cell) => (
           <box flexDirection="row" width="100%" height={1} flexShrink={0}>
             <box width={cols().id} flexShrink={0}>
-              <text fg={style.theme.fg}>{fit(row.toolId, cols().id - 2)}</text>
+              <text fg={style.theme.fg}>{fit(cell.row.toolId, cols().id - 2)}</text>
             </box>
             <box width={cols().uses} flexShrink={0}>
-              <text fg={style.theme.muted}>{fit(usesOf(row), cols().uses - 2)}</text>
+              <text fg={style.theme.muted}>{fit(cell.uses, cols().uses - 2)}</text>
             </box>
             <box width={cols().ok} flexShrink={0}>
-              <text fg={style.theme.dim}>{fit(okOf(row), cols().ok)}</text>
+              <text fg={style.theme.dim}>{fit(cell.ok, cols().ok)}</text>
             </box>
           </box>
         )}

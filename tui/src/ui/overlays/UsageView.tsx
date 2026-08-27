@@ -54,13 +54,35 @@ export function UsageView(props: { ws: Workspace; snapshot: SessionSnapshot; onC
   /** The columns this overlay may draw in: the box pads one on each side. */
   const inner = () => Math.max(20, screen().width - 2)
   const label = createMemo(() => columnWidth(labels, 2, 20))
+  /** Every number this block draws, so the amount column is sized by them. */
+  const values = () => [
+    String(usage().pricedSteps),
+    String(usage().input),
+    String(usage().output),
+    String(usage().cacheRead),
+    String(usage().cacheWrite),
+    String(usage().lastPrompt),
+  ]
+  const padLeft = (text: string, width: number) => " ".repeat(Math.max(0, width - text.length)) + text
 
-  const Row = (row: { left: string; right: string }) => (
+  /**
+   * The numbers are a column of their own, right-aligned (tui.md §6).
+   *
+   * Six counts left-aligned under one another is six different places for the
+   * last digit, and the last digit is what says whether this is a hundred or a
+   * million. What follows a number here is a remark about it (`· 88% of
+   * prompt`), so it is dim and it starts where every other remark starts.
+   */
+  const amount = createMemo(() => columnWidth(values(), 1, 14))
+  const Row = (row: { left: string; value: string; note?: string }) => (
     <box flexDirection="row" width="100%" height={1} flexShrink={0}>
       <box width={label()} flexShrink={0}>
         <text fg={style.theme.dim}>{fit(row.left, label() - 2)}</text>
       </box>
-      <text fg={style.theme.fg}>{fit(row.right, inner() - label())}</text>
+      <box width={amount()} flexShrink={0}>
+        <text fg={style.theme.fg}>{padLeft(row.value, amount() - 1)}</text>
+      </box>
+      <text fg={style.theme.dim}>{fit(row.note ?? "", Math.max(0, inner() - label() - amount()))}</text>
     </box>
   )
 
@@ -85,18 +107,35 @@ export function UsageView(props: { ws: Workspace; snapshot: SessionSnapshot; onC
       </For>
       <box height={1} />
 
-      <Row left="steps priced" right={`${usage().pricedSteps} · ${props.snapshot.steps} watched here`} />
-      <Row left="input tokens" right={String(usage().input)} />
-      <Row left="output tokens" right={String(usage().output)} />
-      <Row left="cache read" right={`${usage().cacheRead} · ${cacheShare(usage())}% of prompt`} />
-      <Row left="cache write" right={String(usage().cacheWrite)} />
-      <Row left="last prompt" right={String(usage().lastPrompt)} />
-      <box height={1} />
-      <Sentence text={caveat} />
-      <box height={1} />
+      {/* The body scrolls, as `/help`'s does and for the same reason it had to
+          (`HelpView`): this panel's height is the token block plus however many
+          tools the workspace journal has learned, and when that ran past the
+          screen the footer was drawn ON TOP of the last row — the two texts
+          interleaved cell by cell, which is what a `<text>` does to whatever
+          was under its blanks (`ui/columns.ts`). `flexBasis: 0` so the box is
+          sized from the space that is left, not from its own content. */}
+      <scrollbox
+        flexGrow={1}
+        flexShrink={1}
+        flexBasis={0}
+        width="100%"
+        verticalScrollbarOptions={{
+          trackOptions: { foregroundColor: style.theme.hairline, backgroundColor: "transparent" },
+        }}
+        contentOptions={{ flexDirection: "column", width: "100%" }}
+      >
+        <Row left="steps priced" value={String(usage().pricedSteps)} note={`· ${props.snapshot.steps} watched here`} />
+        <Row left="input tokens" value={String(usage().input)} />
+        <Row left="output tokens" value={String(usage().output)} />
+        <Row left="cache read" value={String(usage().cacheRead)} note={`· ${cacheShare(usage())}% of prompt`} />
+        <Row left="cache write" value={String(usage().cacheWrite)} />
+        <Row left="last prompt" value={String(usage().lastPrompt)} />
+        <box height={1} />
+        <Sentence text={caveat} />
+        <box height={1} />
 
-      <UsageTable rows={rows()} width={inner()} />
-      <box flexGrow={1} />
+        <UsageTable rows={rows()} width={inner() - 1} />
+      </scrollbox>
       <OverlayFooter width={inner()} help={help} brief="r refresh · Esc close" />
     </box>
   )

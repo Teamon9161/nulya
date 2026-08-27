@@ -3,6 +3,7 @@
 exports[`/help lists the bindings that are actually in force 1`] = `
 " help · keys and commands                                                                           
                                                                                                     
+ keys                                                                                             █ 
  escape                           cancel the step (kernel stops at its next step boundary)        █ 
                                   browse when idle                                                █ 
  f2                               /ext — the extension store                                      █ 
@@ -43,8 +44,8 @@ exports[`/help lists the bindings that are actually in force 1`] = `
  drag over text                   select it; releasing copies it to the clipboard                 █ 
                                                                                                   █ 
  slash commands                                                                                   █ 
- /model                           pick the model the next session runs on                         █ 
- /mode [ask|unsafe]               ask before every tool call, or run them all unreviewed; no      █ 
+ /model                           pick the model the next session runs on                           
+ /mode [ask|unsafe]               ask before every tool call, or run them all unreviewed; no        
                                   argument opens the picker                                         
  /provider                        endpoints and their keys                                          
                                   add an OpenAI- or Anthropic-compatible one                        
@@ -76,7 +77,6 @@ exports[`/help lists the bindings that are actually in force 1`] = `
  /<package command>               declared by an active extension · /ext lists them                 
  /<skill> [args]                  load an active skill's body as a user turn                        
                                   \`nulya skill list\` names them                                     
- anything else after /            goes to the model verbatim                                        
  j/k · PgUp/PgDn scroll · Esc close                                                                 
 "
 `;

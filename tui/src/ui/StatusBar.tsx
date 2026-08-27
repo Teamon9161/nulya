@@ -115,7 +115,7 @@ export function StatusBar(props: {
   /** The right-hand chips, as strings first, so the middle can be cut to what they leave. */
   const contextChip = () => (context() ? ` ctx ${context()!.percent}% · /compact` : "")
   const behindChip = () =>
-    (props.behind ?? 0) > 0 ? ` ${style.glyphs.foldOpen} ${props.behind} more below · Shift+End` : ""
+    (props.behind ?? 0) > 0 ? ` ${style.glyphs.below} ${props.behind} more below · Shift+End` : ""
   /**
    * `ask` / `unsafe`, at the head of the line (T35).
    *
