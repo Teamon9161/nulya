@@ -500,7 +500,7 @@ test("picking in /model writes the draft, not a session; on a started tab it ope
     for (let i = 0; i < 40; i++) setup.mockInput.pressKey("j")
     await settle(setup, 2)
     setup.mockInput.pressEnter()
-    await until(() => setup.captureCharFrame().includes("⤷ scripted-demo (new)"), 15_000)
+    await until(() => setup.captureCharFrame().includes("scripted-demo (new)"), 15_000)
     expect((await sessionList(ws)).length).toBe(before + 1)
   } finally {
     setup.renderer.destroy()

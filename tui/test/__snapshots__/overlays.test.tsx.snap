@@ -20,7 +20,7 @@ exports[`/sessions lists the store and opens the highlighted session 1`] = `
 
 
 
- j/k move · Enter open · Esc close · ? keys
+ j/k move · Enter go there · t new tab · Esc close · ? keys
 "
 `;
 

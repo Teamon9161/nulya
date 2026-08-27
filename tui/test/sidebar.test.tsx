@@ -12,10 +12,18 @@
  * snapshots hold the frames; these tests hold the rules.
  */
 import { afterAll, beforeAll, expect, test } from "bun:test"
+import { writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { testRender } from "@opentui/solid"
 import { App } from "../src/ui/App.tsx"
-import { SessionsView, sidebarRowPlan, min_said } from "../src/ui/overlays/SessionsView.tsx"
+import { personaOf } from "../src/agents.ts"
+import {
+  SessionsView,
+  partitionSessions,
+  railFooter,
+  sidebarRowPlan,
+  min_said,
+} from "../src/ui/overlays/SessionsView.tsx"
 import { createStyle } from "../src/render/theme.ts"
 import { createSessionState } from "../src/state/session.ts"
 import { createPaneStore, main_surface, overlayAdapter, sidebar_surface } from "../src/state/panes.ts"
@@ -106,25 +114,63 @@ test("how wide the rail is drawn is measured through the layout, not guessed", (
 })
 
 test("a rail row gives up its cells from the outside in, and never starves the sentence", () => {
-  const cells = { indent: 0, here: " |", live: " *", verdict: " +", clock: " just now" }
+  const cells = { indent: 0, here: " |", live: " *", verdict: " +", persona: " #", clock: " just now" }
   // Wide: everything fits.
   const wide = sidebarRowPlan(40, cells)
   expect(wide.clock).toBe(" just now")
   expect(wide.said).toBeGreaterThanOrEqual(min_said)
 
   // Narrow: the clock is the first thing that goes, then the verdict, then the
-  // live marker — and "which one am I in" is the last to go, because a list of
-  // conversations that cannot say that is not a list of your conversations.
-  const narrow = sidebarRowPlan(16, cells)
+  // live marker — and the two that say what KIND of row this is (a delegation,
+  // the one you are in) are the last, because a list of conversations that
+  // cannot say either is not a list of your conversations.
+  const narrow = sidebarRowPlan(18, cells)
   expect(narrow.clock).toBe("")
   expect(narrow.here).toBe(" |")
+  expect(narrow.persona).toBe(" #")
   expect(narrow.said).toBeGreaterThanOrEqual(min_said)
 
   // Narrower than any of it: the sentence still gets whatever is left, and
   // nothing here can return a negative width for `fit` to choke on.
   const squeezed = sidebarRowPlan(6, cells)
-  expect(squeezed).toMatchObject({ here: "", live: "", verdict: "", clock: "" })
+  expect(squeezed).toMatchObject({ here: "", live: "", verdict: "", clock: "", persona: "" })
   expect(squeezed.said).toBeGreaterThanOrEqual(0)
+})
+
+test("a session an agent was handed is told apart by the prompt it wears, not by a second rule", () => {
+  const row = (id: string, ...sources: string[]) =>
+    ({ id, composition: { prompts: sources.map((source) => ({ source, bytes: 1 })) } }) as never
+  const { own, delegated } = partitionSessions([
+    row("s-1"),
+    row("s-2", "agent-explore"),
+    // A per-session prompt that is NOT a persona: `--prompt` is a general
+    // kernel feature (DESIGN §5.6) and only the `agent-` label is the agent
+    // package's (`personaOf`).
+    row("s-3", "house-style"),
+    row("s-4", "house-style", "agent-plan"),
+  ])
+  expect(own.map((entry) => entry.id)).toEqual(["s-1", "s-3"])
+  expect(delegated.map((entry) => entry.id)).toEqual(["s-2", "s-4"])
+  expect(personaOf([{ source: "agent-explore" }])).toBe("explore")
+  expect(personaOf([{ source: "house-style" }])).toBeNull()
+  expect(personaOf([])).toBeNull()
+})
+
+test("the rail's one dim line is chosen for the width it has, and the count outlives the keys", () => {
+  // Focused and nothing hidden: the long form while it fits, the short one after.
+  expect(railFooter(40, true, 0)).toContain("t tab")
+  expect(railFooter(18, true, 0)).toBe("j/k · Enter · Esc")
+  // Nothing at all to say, and no line: an unfocused rail with every session
+  // showing has no keys that are true and nothing it is holding back.
+  expect(railFooter(40, false, 0)).toBe("")
+  // With rows hidden, the count is what survives the squeeze — a key missing
+  // from this line is still in `/sessions`, a hidden row is nowhere else.
+  expect(railFooter(60, true, 3)).toContain("3 agent")
+  expect(railFooter(18, true, 3)).toContain("3 agent")
+  expect(railFooter(18, false, 3)).toBe("3 agent hidden")
+  // Narrower than any candidate: nothing, rather than a truncated key list
+  // that would teach the wrong key.
+  expect(railFooter(4, true, 3)).toBe("")
 })
 
 test("a full-screen view opens in the main pane even when the keyboard is in the sidebar", () => {
@@ -361,19 +407,23 @@ test("the keyboard goes to the rail only when it is sent there, and Esc sends it
     expect(await settle(setup, 2)).toContain("before and after!")
 
     // The mouse is the third way out: a click on the transcript takes the
-    // keyboard out of the rail. (Whether the BOX then has it is a separate,
-    // older question — clicking the transcript blurs the composer with one
-    // pane on screen too, and always has.)
+    // keyboard out of the rail — and, since T70, hands it all the way back to
+    // the box rather than to the scrollbox that used to swallow it.
     press(setup, ctrl_left)
     expect(cursorInRail(await settle(setup, 3))).toBe(true)
     await setup.mockMouse.click(60, 15)
     expect(cursorInRail(await settle(setup, 3))).toBe(false)
+    await setup.mockInput.typeText("?")
+    expect(await settle(setup, 2)).toContain("before and after!?")
   } finally {
     setup.renderer.destroy()
   }
 }, 120_000)
 
-test("clicking a row in the rail goes to that session, through the same verb Enter uses", async () => {
+test("one click in the rail goes to that session in this tab, and the strip does not grow", async () => {
+  // T70's whole point: "show me that conversation" is one press, and it does
+  // NOT open a second tab — which is what the tab strip's absence says here,
+  // since the strip only exists once there is more than one tab (T22).
   const { setup } = await screen(80, 24, { open: true, ratio: default_sidebar_ratio })
   try {
     await until(() => setup.captureCharFrame().includes("older one"), 30_000)
@@ -381,13 +431,32 @@ test("clicking a row in the rail goes to that session, through the same verb Ent
     const at = rows.findIndex((row) => row.includes("older one"))
     expect(at).toBeGreaterThanOrEqual(0)
 
-    // Once to land the cursor (and to bring the keyboard into the pane), again
-    // for what Enter does — the two-press rule every list in this front end
-    // follows, so the mouse is not a second path to a second behaviour.
     await setup.mockMouse.click(4, at)
-    await settle(setup, 2)
+    await until(() => setup.captureCharFrame().includes(`switched to ${other}`), 30_000)
+    // One tab still: a switch replaces what was in front rather than adding to
+    // it, so nothing has to be closed afterwards.
+    expect(await settle(setup, 3)).not.toContain("(observer)")
+    expect((await settle(setup, 2)).split("\n")[0]).not.toContain(style.glyphs.closeTab)
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 120_000)
+
+test("two clicks in the rail give that session a tab of its own", async () => {
+  const { setup } = await screen(80, 24, { open: true, ratio: default_sidebar_ratio })
+  try {
+    await until(() => setup.captureCharFrame().includes("older one"), 30_000)
+    const rows = setup.captureCharFrame().split("\n")
+    const at = rows.findIndex((row) => row.includes("older one"))
+    expect(at).toBeGreaterThanOrEqual(0)
+
+    await setup.mockMouse.click(4, at)
     await setup.mockMouse.click(4, at)
     await until(() => setup.captureCharFrame().includes(`opened ${other}`), 30_000)
+    // …and NOW there are two, which is what the strip appearing means.
+    const strip = (await settle(setup, 3)).split("\n")[0]!
+    expect(strip).toContain(style.glyphs.closeTab)
+    expect(strip).toContain(style.glyphs.newTab)
   } finally {
     setup.renderer.destroy()
   }
@@ -406,7 +475,7 @@ test("an unfocused rail draws no cursor row, because Enter would not act on it",
           width={20}
           currentId={mine}
           focused={focused}
-          onOpen={() => {}}
+          onSwitch={() => {}} onOpenTab={() => {}}
           onNew={() => {}}
           onClose={() => {}}
         />
@@ -423,5 +492,48 @@ test("an unfocused rail draws no cursor row, because Enter would not act on it",
   } finally {
     off.renderer.destroy()
     on.renderer.destroy()
+  }
+}, 120_000)
+
+test("the list is about the sessions a person is having, and says how many it is not showing", async () => {
+  // A delegated session is a real session with a real ledger — `session list`
+  // is right to project it — and it is not a conversation anybody started, nor
+  // one to send a message to from here. The frozen `agent-<name>` prompt is the
+  // whole test, and it is the same one `wearing()` reads (T70).
+  const persona = join(ws.dir, "agent-explore.md")
+  writeFileSync(persona, "you are the scout\n")
+  const handed = await sessionNew(ws, { profile: "scripted", prompt: [persona] })
+  await sessionAppend(ws, handed, "go and look")
+  const step = sessionStep(ws, handed, { env: scripted_env })
+  for await (const _ of step.lines) {
+    // Drain: the opening line only reaches `session list` once a step has run.
+  }
+  await step.exited
+
+  const setup = await testRender(
+    () => (
+      <SessionsView ws={ws} currentId={mine} onSwitch={() => {}} onOpenTab={() => {}} onNew={() => {}} onClose={() => {}} />
+    ),
+    { width: 110, height: 20 },
+  )
+  try {
+    await until(() => setup.captureCharFrame().includes("budgets"), 30_000)
+    const hiding = await settle(setup, 4)
+    expect(hiding).not.toContain("go and look")
+    // …and it says so, on the one dim line it already had (§6.1 rule 8).
+    expect(hiding).toContain("1 agent session hidden · a shows")
+
+    // `a` shows them, and a shown one says which persona it is wearing rather
+    // than passing for a conversation.
+    setup.mockInput.pressKey("a")
+    const showing = await settle(setup, 4)
+    expect(showing).toContain("go and look")
+    expect(showing).toContain(`${style.glyphs.picker} explore`)
+    expect(showing).not.toContain("hidden")
+
+    setup.mockInput.pressKey("a")
+    expect(await settle(setup, 4)).not.toContain("go and look")
+  } finally {
+    setup.renderer.destroy()
   }
 }, 120_000)

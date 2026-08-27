@@ -955,7 +955,7 @@ export function App(props: AppProps) {
   onCleanup(() => tabs.disposeAll())
 
   /** One tip per launch, chosen here so re-rendering the screen cannot reroll it. */
-  const tip = pickTip()
+  const tip = pickTip(props.style.glyphs)
 
   const spinnerFrame = () => props.style.spinner[spinnerTick() % props.style.spinner.length]!
 
@@ -1122,6 +1122,31 @@ export function App(props: AppProps) {
     tabs.open(id, { created })
     closeOverlay()
     setNotice(`opened ${id}`)
+  }
+
+  /**
+   * Go to a session HERE: the tab in front becomes that session (T70).
+   *
+   * The list's primary action, and the reason it needed a second verb at all.
+   * `openSession` grows the tab strip by one every time, which is right when
+   * somebody asked for a second window on something and wrong for the gesture
+   * people make constantly — "show me that conversation". A browser tab does
+   * not clone itself when you click a bookmark.
+   *
+   * `tabs.replace` is exactly this move and already existed: a session already
+   * open is brought to the front (so the strip never grows for a switch), and
+   * otherwise the front tab gives up its place. What it gives up is what
+   * closing that tab would have given up — a draft is nothing on disk, and a
+   * session this process created and nobody ever said anything in is discarded
+   * by the same `discardIfUntouched` (`state/tabs.ts`). Nothing running is
+   * killed: a step is a kernel process with its own ledger, and leaving it is
+   * leaving it, not stopping it.
+   */
+  const switchToSession = (id: string) => {
+    if (live()?.id === id) return closeOverlay()
+    tabs.replace(tabs.active().key, id)
+    closeOverlay()
+    setNotice(`switched to ${id}`)
   }
 
   /**
@@ -2492,7 +2517,11 @@ export function App(props: AppProps) {
         setNotice(`no session '${id}' in ${sessions_dir} · ${command} with no id lists them`)
         return true
       }
-      openSession(id)
+      // The named form of what `Enter` in that list does, so it follows it
+      // (T45 said so, and T70 changed what `Enter` does): naming a session goes
+      // to it here rather than growing the strip by one — `/sessions` with no
+      // id is one keystroke away for the other verb.
+      switchToSession(id)
       return true
     }
     if (command === "/tasks") {
@@ -3096,7 +3125,8 @@ export function App(props: AppProps) {
         ws={props.ws}
         currentId={live()?.id ?? ""}
         focused={mount.focused}
-        onOpen={openSession}
+        onSwitch={switchToSession}
+        onOpenTab={openSession}
         onNew={() => startDraft()}
         onClose={closeOverlay}
       />
@@ -3117,7 +3147,8 @@ export function App(props: AppProps) {
         width={sidebarWidth(panes.tree(), screen().width)}
         currentId={live()?.id ?? ""}
         focused={mount.focused}
-        onOpen={openSession}
+        onSwitch={switchToSession}
+        onOpenTab={openSession}
         onNew={() => startDraft()}
         onClose={() => {
           panes.focusOn(panes.main())
@@ -3221,7 +3252,19 @@ export function App(props: AppProps) {
                   the composer where they are looking, and the id it used to lead
                   with was a string nobody reads (T22). */}
               <box flexDirection="column" width="100%" height="100%">
-                <TabBar tabs={tabs.tabs()} activeIndex={tabs.activeIndex()} onSelect={(index) => tabs.select(index)} />
+                {/* The mouse's half of the two verbs the keyboard already has
+                    (T70): `✕` is Ctrl+W's `tabs.close`, `+` is the draft a
+                    bare `/new` opens. */}
+                <TabBar
+                  tabs={tabs.tabs()}
+                  activeIndex={tabs.activeIndex()}
+                  onSelect={(index) => tabs.select(index)}
+                  onClose={(index) => {
+                    const closing = tabs.tabs()[index]
+                    if (closing) tabs.close(closing.key)
+                  }}
+                  onNew={() => startDraft()}
+                />
                 <Show when={tabs.tabs().length > 1}>
                   <Hairline />
                 </Show>

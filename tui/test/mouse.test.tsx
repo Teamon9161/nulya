@@ -16,7 +16,7 @@ import { For, createSignal, type JSX } from "solid-js"
 import { testRender } from "@opentui/solid"
 import { App } from "../src/ui/App.tsx"
 import { Card } from "../src/render/cards/index.tsx"
-import { TabBar } from "../src/ui/TabBar.tsx"
+import { TabBar, stripPlan, min_tab_label } from "../src/ui/TabBar.tsx"
 import { SessionsView } from "../src/ui/overlays/SessionsView.tsx"
 import { ExtView } from "../src/ui/overlays/ExtView.tsx"
 import { StyleContext, createStyle, type Style } from "../src/render/theme.ts"
@@ -154,11 +154,17 @@ test("a click lands on the card under it after the transcript has scrolled", asy
   }
 }, 60_000)
 
-test("/sessions: a click selects the row, a second click opens it", async () => {
-  const [opened, setOpened] = createSignal<string | null>(null)
+test("/sessions: one click goes to that session, two give it a tab of its own", async () => {
+  // T70 turned this pair around. It used to be "click to select, click again to
+  // open a tab", which spent the gesture people make constantly on the outcome
+  // they wanted least. What is pinned here is that the two gestures are two
+  // DIFFERENT verbs — the reason the single click has to wait out the double
+  // click window rather than firing and being amended.
+  const [went, setWent] = createSignal<string | null>(null)
+  const [tabbed, setTabbed] = createSignal<string | null>(null)
   const setup = await mount(
     () => (
-      <SessionsView ws={ws} currentId={first} onOpen={setOpened} onNew={() => {}} onClose={() => {}} />
+      <SessionsView ws={ws} currentId={first} onSwitch={setWent} onOpenTab={setTabbed} onNew={() => {}} onClose={() => {}} />
     ),
     120,
     20,
@@ -172,16 +178,23 @@ test("/sessions: a click selects the row, a second click opens it", async () => 
     expect(at).toBeGreaterThanOrEqual(0)
     expect(rows[at]!.trimStart().startsWith("▾")).toBe(false)
 
-    // One click moves the cursor there and opens nothing…
+    // The cursor lands on the press — the click is acknowledged in the same
+    // frame — and the switch follows once the window for a second press closes.
     await setup.mockMouse.click(30, at)
-    const moved = await settle(setup, 4)
-    expect(moved.split("\n")[at]!.trimStart().startsWith("▾")).toBe(true)
-    expect(opened()).toBeNull()
+    expect((await settle(setup, 2)).split("\n")[at]!.trimStart().startsWith("▾")).toBe(true)
+    await until(() => went() !== null, 10_000)
+    expect(went()).toBe(first)
+    expect(tabbed()).toBeNull()
 
-    // …a second one does what Enter does.
+    // Two presses inside the window are the other verb, and ONLY the other
+    // verb: no switch is fired on the way through.
+    setWent(null)
     await setup.mockMouse.click(30, at)
-    await until(() => opened() !== null, 10_000)
-    expect(opened()).toBe(first)
+    await setup.mockMouse.click(30, at)
+    await until(() => tabbed() !== null, 10_000)
+    expect(tabbed()).toBe(first)
+    await settle(setup, 6)
+    expect(went()).toBeNull()
   } finally {
     setup.renderer.destroy()
   }
@@ -189,7 +202,7 @@ test("/sessions: a click selects the row, a second click opens it", async () => 
 
 test("/sessions: the pointer marks the row it is over, and lets go of it", async () => {
   const setup = await mount(
-    () => <SessionsView ws={ws} currentId={first} onOpen={() => {}} onNew={() => {}} onClose={() => {}} />,
+    () => <SessionsView ws={ws} currentId={first} onSwitch={() => {}} onOpenTab={() => {}} onNew={() => {}} onClose={() => {}} />,
     120,
     20,
   )
@@ -271,6 +284,82 @@ test("the tab bar answers to a click, with the same select F4 uses", async () =>
     setup.renderer.destroy()
   }
 }, 60_000)
+
+test("the tab strip's own two controls: ✕ closes that tab, + starts one", async () => {
+  const [active, setActive] = createSignal(0)
+  const [closed, setClosed] = createSignal(-1)
+  const [made, setMade] = createSignal(0)
+  const tab = (model: string) =>
+    ({
+      kind: "session",
+      key: model,
+      id: `s-${model}`,
+      attach: { role: () => "driver" },
+      state: { snapshot: { header: { model, model_identity: { model } } } },
+    }) as unknown as SessionTab
+  const tabs = [tab("alpha-1"), tab("beta-2")]
+  const setup = await mount(
+    () => (
+      <TabBar
+        tabs={tabs}
+        activeIndex={active()}
+        onSelect={setActive}
+        onClose={setClosed}
+        onNew={() => setMade((n) => n + 1)}
+      />
+    ),
+    60,
+    4,
+  )
+  try {
+    const line = (await settle(setup, 4)).split("\n")[0]!
+    // Which one is in front is a SHAPE (T70): `▎` on it, blanks on the rest,
+    // so a terminal with no colours still says it. It used to be `⤷` on every
+    // tab, which said nothing about any of them.
+    expect(line).toContain(`${style.glyphs.bar} alpha-1`)
+    expect(line).not.toContain(`${style.glyphs.bar} beta-2`)
+
+    // The close button is its own target: it closes that tab and does NOT let
+    // the tab under it select itself on the way through.
+    const cross = line.indexOf(style.glyphs.closeTab)
+    expect(cross).toBeGreaterThan(0)
+    await setup.mockMouse.click(cross, 0)
+    await until(() => closed() === 0, 5_000)
+    expect(active()).toBe(0)
+
+    await setup.mockMouse.click(line.lastIndexOf(style.glyphs.newTab), 0)
+    await until(() => made() === 1, 5_000)
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 60_000)
+
+test("a tab strip fits the row it has: names shrink, and the buttons go before the names do", () => {
+  // The one row on the screen whose contents are decided by the person, not by
+  // the layout. What is pinned is the INVARIANT — everything drawn fits between
+  // the margins — because the failure it replaces is silent: a strip that runs
+  // past the edge loses the `+` and cuts the last tab in half.
+  const cost = { marker: 2, close: 2, gap: 2, plus: 3 }
+  const drawn = (width: number, tabs: number) => {
+    const plan = stripPlan(width, tabs, cost)
+    return tabs * (cost.marker + (plan.closes ? cost.close : 0) + plan.label) + (tabs - 1) * cost.gap + cost.plus
+  }
+  // Every width where a plan exists at all — `marker + 1 + gap` per tab, the
+  // limit `stripPlan` writes down. Past it no share of anything fits and the
+  // row clips, which is a fold, not a width.
+  for (const [width, tabs] of [[120, 2], [100, 5], [80, 4], [60, 5], [40, 4], [30, 4]] as [number, number][]) {
+    expect(drawn(width, tabs)).toBeLessThanOrEqual(width - 2)
+  }
+
+  // Room to spare: names get the room and every tab keeps its ✕.
+  expect(stripPlan(120, 2, cost)).toMatchObject({ closes: true })
+  expect(stripPlan(120, 2, cost).label).toBeGreaterThan(stripPlan(60, 5, cost).label)
+  // Too tight for a name to be a name: the button is what goes, not the name.
+  // Ctrl+W is still the verb; a strip of one-letter stubs is not a strip.
+  const tight = stripPlan(60, 5, cost)
+  expect(tight.closes).toBe(false)
+  expect(tight.label).toBeGreaterThan(stripPlan(60, 5, { ...cost, marker: 6 }).label)
+})
 
 test("an open overlay is not a hole: a click where a card was folds nothing", async () => {
   const id = await sessionNew(ws, { profile: "scripted" })
@@ -357,6 +446,40 @@ test("clicking the input box leaves browse mode", async () => {
   }
 }, 120_000)
 
+test("clicking empty transcript does not take the keyboard away from the box", async () => {
+  // The bug T70 fixed, and the reason it was invisible for so long: nothing on
+  // screen changes. `ScrollBoxRenderable` is focusable, OpenTUI's autoFocus
+  // walks up from a mouse-down to the first focusable ancestor, and the
+  // transcript is that ancestor for every cell of itself — so a click on empty
+  // space left the composer bordered, blinking and deaf.
+  const id = await sessionNew(ws, { profile: "scripted" })
+  const state = createSessionState(id)
+  const setup = await testRender(
+    () => <App ws={ws} id={id} state={state} style={style} driver={{ env: scripted_env }} created />,
+    { width: 100, height: 24 },
+  )
+  try {
+    await settle(setup, 3)
+    state.applyEvents([{ seq: 1, kind: "user_text", text: "run the tests" } as never])
+    await until(() => setup.captureCharFrame().includes("run the tests"), 15_000)
+
+    const rows = (await settle(setup, 4)).split("\n")
+    const box = rows.findIndex((row) => row.includes("message nulya"))
+    expect(box).toBeGreaterThan(0)
+    // A row inside the transcript with nothing drawn on it: no card, no head
+    // line, nothing that answers a click at all.
+    const blank = rows.slice(0, box - 2).findIndex((row) => row.trim().length === 0)
+    expect(blank).toBeGreaterThanOrEqual(0)
+
+    await setup.mockMouse.click(60, blank)
+    await settle(setup, 3)
+    await setup.mockInput.typeText("still mine")
+    expect(await settle(setup, 3)).toContain("still mine")
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 120_000)
+
 test("the model is a click target wherever it is written: the line under the composer, the composition card — and the welcome rows and /help", async () => {
   const id = await sessionNew(ws, { profile: "scripted" })
   const state = createSessionState(id)
@@ -416,7 +539,7 @@ test("the model is a click target wherever it is written: the line under the com
     expect(await settle(setup, 4)).toContain("frozen composition")
 
     // A welcome row runs its command exactly as typing it would.
-    const sessionsRow = rows.findIndex((row) => row.includes("/sessions") && row.includes("everything in .nulya/sessions"))
+    const sessionsRow = rows.findIndex((row) => row.includes("/sessions") && row.includes("every session here"))
     expect(sessionsRow).toBeGreaterThan(0)
     await setup.mockMouse.click(4, sessionsRow)
     await until(() => setup.captureCharFrame().includes("sessions ·"), 10_000)

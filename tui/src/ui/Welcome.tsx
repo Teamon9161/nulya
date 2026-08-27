@@ -28,7 +28,7 @@
  * do not light up.
  */
 import { For, Show, createSignal } from "solid-js"
-import { useScreen, useStyle } from "../render/theme.ts"
+import { useScreen, useStyle, type Glyphs } from "../render/theme.ts"
 import { onClick } from "./rows.ts"
 import { Fact, label_width } from "./Fact.tsx"
 import { fit, wrapWords } from "./columns.ts"
@@ -60,32 +60,55 @@ export interface NextSession {
  *
  * Every entry must describe behaviour that is real TODAY — a stale tip is worse
  * than no tip, because it is the one line a newcomer believes.
+ *
+ * Built from the glyph set rather than written out, because one of them names a
+ * glyph (T70) and this front end has a byte-for-byte ascii fallback for every
+ * one of those (§6.3). A tip that printed `◧` on a terminal that draws `[` would
+ * be pointing at a control that is not there.
  */
-const tips: string[] = [
-  "Esc stops a running step · on an empty box it opens browse, where j/k walk the cards",
-  "click a card's head line to open or close it · /fold closes all of them",
-  "type while a step runs: the turn is queued and joins it at the next step boundary",
-  "/model picks what the NEXT session runs on · ←→ on a row changes its effort",
-  "/mode switches between asking about every tool call and not asking at all",
-  "/compact hands this conversation to a fresh session with a summary in front",
-  "/ext is the store: what is built, what is active, and which tools are pinned",
-  "/agent delegates to a sub-agent in a tab of its own · bare /agent lists them",
-  "shell {background:true} outlives the step · /tasks shows what is still running",
-  "/outcome success|partial|failure records how a session went · nothing recorded is not failure",
-  "Ctrl+C stops the step and never exits on the first press",
-  "/sidebar docks the session list down the left edge · click a row twice to go there",
-]
+function tipsOf(glyphs: Glyphs): string[] {
+  return [
+    "Esc stops a running step · on an empty box it opens browse, where j/k walk the cards",
+    "click a card's head line to open or close it · /fold closes all of them",
+    "type while a step runs: the turn is queued and joins it at the next step boundary",
+    "/model picks what the NEXT session runs on · ←→ on a row changes its effort",
+    "/mode switches between asking about every tool call and not asking at all",
+    "/compact hands this conversation to a fresh session with a summary in front",
+    "/ext is the store: what is built, what is active, and which tools are pinned",
+    "/agent delegates to a sub-agent in a tab of its own · bare /agent lists them",
+    "shell {background:true} outlives the step · /tasks shows what is still running",
+    "/outcome success|partial|failure records how a session went · nothing recorded is not failure",
+    "Ctrl+C stops the step and never exits on the first press",
+    // Three ways into one pane, in one line, because the report that prompted
+    // T70 was "I never found the sidebar at all". The handle is named as well
+    // as pointed at: it is the only one of the three that can be seen without
+    // already knowing it is there, and the only one that needs teaching.
+    `/sidebar or F8 docks the session list down the left edge · so does the ${glyphs.sidebar} at the start of the line below`,
+    "in the session list a click goes to that session here · a double click gives it a tab of its own",
+  ]
+}
 
-/** The tip for this launch. Picked once by the caller, never during a render. */
-export function pickTip(random: () => number = Math.random): string {
-  return tips[Math.min(tips.length - 1, Math.floor(random() * tips.length))]!
+/**
+ * The tip for this launch. Picked once by the caller, never during a render.
+ *
+ * The glyph set is required rather than defaulted to the unicode one: a default
+ * here would be a second place that decides what `◧` is drawn as, and the whole
+ * point of taking the argument is that there is only one.
+ */
+export function pickTip(glyphs: Glyphs, random: () => number = Math.random): string {
+  const all = tipsOf(glyphs)
+  return all[Math.min(all.length - 1, Math.floor(random() * all.length))]!
 }
 
 /** The `/` commands worth knowing before you have typed anything. */
 const openings: Array<[string, string]> = [
   ["/model", "pick what the next session runs on"],
   ["/provider", "endpoints and their keys · add a compatible one"],
-  ["/sessions", "everything in .nulya/sessions, and open one"],
+  // Two ways into one list, on the row that is about that list (T70). The rail
+  // does not get a row of its own: it would be the same content twice on a
+  // screen whose whole job is to be short, and this is the row a person reads
+  // when they are looking for their other conversations anyway.
+  ["/sessions", "every session here · /sidebar docks the same list on the left"],
   ["/ext", "extensions: versions, what is active, what it is used for"],
   ["/help", "every key and every command"],
 ]
@@ -197,7 +220,7 @@ export function Welcome(props: {
         <text fg={style.theme.accent.evolve} flexShrink={0}>
           {`${style.glyphs.tip} `}
         </text>
-        <text fg={style.theme.dim}>{fit(`tip: ${props.tip ?? tips[0]!}`, Math.max(10, screen().width - 5))}</text>
+        <text fg={style.theme.dim}>{fit(`tip: ${props.tip ?? tipsOf(style.glyphs)[0]!}`, Math.max(10, screen().width - 5))}</text>
       </box>
     </box>
   )

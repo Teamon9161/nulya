@@ -217,6 +217,33 @@ export async function buildAgentPackage(ws: Workspace): Promise<WithRef> {
   return { id: agent_id, version: await extBuild(ws, draft) }
 }
 
+/**
+ * The prefix the `agent` package labels a persona's system block with.
+ *
+ * It is that package's own convention — writer and reader are both inside it
+ * (DESIGN §5.6: the kernel never interprets a prompt's `source`) — and this
+ * side reads it in exactly one place, below. The value is here rather than
+ * spelled out at each use so that `renderAgent`'s fallback label and every
+ * projection that asks "is this a delegated session" cannot come apart.
+ */
+export const persona_prompt_prefix = "agent-"
+
+/**
+ * Which persona a session is wearing, from the inline prompts frozen into its
+ * header — null for an ordinary conversation (T70).
+ *
+ * ONE implementation, because there is one convention. `session list --json`
+ * projects `composition.prompts[].source` and so does a header read, so the
+ * sessions list, the sidebar and anything later that has to tell a delegated
+ * session from one a person is having all ask the same function. A second copy
+ * of `startsWith("agent-")` somewhere else is how a filter and a label start
+ * disagreeing about which rows are which.
+ */
+export function personaOf(prompts: readonly { source: string }[]): string | null {
+  const worn = prompts.find((prompt) => prompt.source.startsWith(persona_prompt_prefix))
+  return worn ? worn.source.slice(persona_prompt_prefix.length) : null
+}
+
 /** What `render` answers: the prompt file, and the session arguments. */
 export interface RenderedAgent {
   name: string
@@ -276,7 +303,7 @@ export async function renderAgent(
   return {
     name: m.name ?? name,
     prompt: m.prompt,
-    label: m.label ?? `agent-${m.name ?? name}`,
+    label: m.label ?? `${persona_prompt_prefix}${m.name ?? name}`,
     description: m.description ?? "",
     readonly: m.readonly === true,
     layer: m.layer === "workspace" || m.layer === "user" ? m.layer : "builtin",

@@ -31,6 +31,7 @@ import { useScreen, useStyle } from "../../render/theme.ts"
 import { displayWidth, fit } from "../columns.ts"
 import { createHover, onClick, rowBackground, rowGutter } from "../rows.ts"
 import { OverlayFooter, createKeyHelp } from "./Footer.tsx"
+import { personaOf } from "../../agents.ts"
 import { sessionList, type SessionListEntry, type Verdict } from "../../nulya/cli.ts"
 import { probeWriterLease, type LeaseState } from "../../nulya/files.ts"
 import type { Workspace } from "../../nulya/bin.ts"
@@ -90,6 +91,71 @@ export function ago(created: string, now: number = Date.now()): string {
 const verdict_glyph: Record<Verdict, string> = { success: "+", partial: "~", failure: "!" }
 
 /**
+ * How long two presses may be apart and still be one gesture (T70).
+ *
+ * The number every desktop uses, and the one thing about a double click that
+ * is not ours to invent — a terminal sends two independent releases and
+ * nothing else, so the window IS the gesture.
+ */
+export const double_click_ms = 350
+
+/**
+ * The sessions a person is HAVING, and the ones an agent was given (T70).
+ *
+ * A delegated session is a real session with a real ledger, and `session list`
+ * is right to project it — but it is not a conversation anybody chose to start,
+ * nobody should send it a message from here (its runner is driving it), and in
+ * a workspace that delegates at all they outnumber the real rows several to
+ * one. So the list is about the first kind by default and says how many of the
+ * second it is not showing.
+ *
+ * The test is `personaOf`, the one the front end already uses for "what is this
+ * session wearing" — a delegated session is exactly one whose frozen header
+ * carries an `agent-<name>` prompt, and this side does not get a second opinion
+ * about that. It is a filter over a projection: nothing is hidden from the
+ * kernel, from `session list`, or from `/sessions <id>`.
+ */
+export function partitionSessions(entries: readonly SessionListEntry[]): {
+  own: SessionListEntry[]
+  delegated: SessionListEntry[]
+} {
+  const own: SessionListEntry[] = []
+  const delegated: SessionListEntry[] = []
+  for (const entry of entries) {
+    ;(personaOf(entry.composition.prompts) === null ? own : delegated).push(entry)
+  }
+  return { own, delegated }
+}
+
+/**
+ * The one dim line at the bottom of the rail (§6.1 rule 8), at whatever width
+ * the rail happens to be.
+ *
+ * Eighteen columns at 80 and twenty-eight at 120, so this cannot be one string
+ * cut with `fit` — a truncated key list teaches the wrong key. Candidates,
+ * longest first, and the first that fits wins: the same "give up cells from the
+ * outside in" rule `sidebarRowPlan` follows one function up.
+ *
+ * The keys are only true while the rail holds the keyboard; the hidden count is
+ * true either way, because a list that is quietly shorter than the store is a
+ * list that is lying, focused or not.
+ */
+export function railFooter(width: number, focused: boolean, hidden: number): string {
+  const candidates =
+    hidden > 0
+      ? focused
+        ? [`j/k · Enter · Esc · ${hidden} agent · a`, `${hidden} agent hidden · a`, `${hidden} agent · a`]
+        : [`${hidden} agent hidden`, `${hidden} agent`]
+      : focused
+        ? ["j/k · Enter go · t tab · Esc", "j/k · Enter · Esc"]
+        : []
+  // When both cannot fit, the count wins: a key that is missing from this line
+  // is still in `/sessions` and in `/help`, while a list that is quietly
+  // shorter than the store has nowhere else to say so.
+  return candidates.find((line) => displayWidth(line) <= width) ?? ""
+}
+
+/**
  * The line that makes a row recognisable: what was asked of it first.
  *
  * A session with nothing in it says so in words. It is the one row whose
@@ -111,19 +177,36 @@ export function title(entry: SessionListEntry): string {
  * The order is an argument about what a person is looking at a docked list for.
  * The clock goes first: it orders rows, and they are already in order. Then the
  * verdict, then `live` — facts about a session that the full view still tells
- * in full. `▎ this one` is last, because a list of conversations that cannot
- * say which one you are in is not a list of your conversations.
+ * in full. Last two: `◈`, which is the only thing saying a row is a delegation
+ * rather than a conversation (T70, and it is only ever present in the mode a
+ * person turned on), and `▎ this one`, because a list of conversations that
+ * cannot say which one you are in is not a list of your conversations.
  *
  * Every cell arrives with its own leading space, so an absent one costs nothing
  * (§6.1 rule 4) and this function never has to know which glyph it is holding.
  */
 export const min_said = 8
 
+interface RowCells {
+  here: string
+  live: string
+  verdict: string
+  clock: string
+  /** `◈ ` — this row is a session an agent was handed, not one somebody started. */
+  persona: string
+}
+
 export function sidebarRowPlan(
   inner: number,
-  cells: { indent: number; here: string; live: string; verdict: string; clock: string },
-): { here: string; live: string; verdict: string; clock: string; said: number } {
-  const plan = { here: cells.here, live: cells.live, verdict: cells.verdict, clock: cells.clock }
+  cells: RowCells & { indent: number },
+): RowCells & { said: number } {
+  const plan: RowCells = {
+    here: cells.here,
+    live: cells.live,
+    verdict: cells.verdict,
+    clock: cells.clock,
+    persona: cells.persona,
+  }
   // Two for the gutter every row in this front end starts with (§6.5).
   const room = () =>
     inner -
@@ -132,8 +215,9 @@ export function sidebarRowPlan(
     displayWidth(plan.here) -
     displayWidth(plan.live) -
     displayWidth(plan.verdict) -
-    displayWidth(plan.clock)
-  for (const cell of ["clock", "verdict", "live", "here"] as const) {
+    displayWidth(plan.clock) -
+    displayWidth(plan.persona)
+  for (const cell of ["clock", "verdict", "live", "persona", "here"] as const) {
     if (room() >= min_said) break
     plan[cell] = ""
   }
@@ -144,7 +228,19 @@ export function SessionsView(props: {
   ws: Workspace
   /** The session in front, so the list can say which one that is. */
   currentId: string
-  onOpen: (id: string) => void
+  /**
+   * Go to that session HERE: this view's primary action, and what a single
+   * click and `Enter` both do (T70).
+   *
+   * It used to be `onOpen`, and it used to mean "a tab of its own" — which is
+   * the wrong default for the gesture people make most. Clicking a row in a
+   * list of conversations means "show me that one", the way clicking a mail
+   * folder or a chat does; growing the tab strip by one every time somebody
+   * looks at an old session is the thing a person then has to undo.
+   */
+  onSwitch: (id: string) => void
+  /** …and the deliberate one: keep what is here and give that session a tab too. */
+  onOpenTab: (id: string) => void
   onNew: () => void
   onClose: () => void
   /**
@@ -171,6 +267,8 @@ export function SessionsView(props: {
   const [leases, setLeases] = createSignal<Record<string, LeaseState>>({})
   const [cursor, setCursor] = createSignal(0)
   const [notice, setNotice] = createSignal<string | null>(null)
+  /** `a`: show the delegated sessions too, this mount only (T70). */
+  const [showAgents, setShowAgents] = createSignal(false)
   let list: ScrollBoxRenderable | null = null
   const hover = createHover()
   const help = createKeyHelp()
@@ -241,7 +339,15 @@ export function SessionsView(props: {
   const inner = () => Math.max(docked() ? 10 : 24, outer() - (docked() ? 3 : 2))
   /** Rows leave one column for ScrollBox's vertical track and one for air beside it. */
   const rowInner = () => Math.max(docked() ? 10 : 24, inner() - 2)
-  const rows = () => sessionRows(entries())
+  const split = createMemo(() => partitionSessions(entries()))
+  /** How many rows the list is not drawing — 0 while `a` is on. */
+  const hidden = () => (showAgents() ? 0 : split().delegated.length)
+  /**
+   * Filtered BEFORE the tree is built, not after: `sessionRows` nests a child
+   * under its parent only when the parent is in the same list, so a hidden
+   * parent leaves its children as roots rather than as an indent under nothing.
+   */
+  const rows = createMemo(() => sessionRows(showAgents() ? entries() : split().own))
   const rowId = (id: string) => `session-row:${id}`
   createEffect(() => {
     const count = rows().length
@@ -267,26 +373,70 @@ export function SessionsView(props: {
   /** The id of the row the cursor is on: unreadable, occasionally needed, printed once. */
   const pointed = () => rows()[cursor()]?.entry.id ?? ""
 
+  /**
+   * What the full view's key line adds about the rows it is not drawing (T70),
+   * or nothing at all when there are none to speak of (§6.1 rule 4). Both
+   * states name the key, because "these are showing" is as worth undoing as
+   * "these are hidden".
+   */
+  const asideText = () => {
+    if (showAgents()) return split().delegated.length > 0 ? " · a hides delegated sessions" : ""
+    const n = hidden()
+    return n > 0 ? ` · ${n} agent ${n === 1 ? "session" : "sessions"} hidden · a shows` : ""
+  }
+
   const move = (delta: number) => {
     const count = rows().length
     if (count === 0) return
     setCursor(Math.min(Math.max(cursor() + delta, 0), count - 1))
   }
 
-  const open = () => {
-    const row = rows()[cursor()]
-    if (row) props.onOpen(row.entry.id)
+  const act = (index: number, take: (id: string) => void) => {
+    const row = rows()[index]
+    if (row) take(row.entry.id)
   }
+  const go = () => act(cursor(), props.onSwitch)
+  const goToTab = () => act(cursor(), props.onOpenTab)
 
   /**
-   * A click lands the cursor; a click on the row the cursor is already on does
-   * what Enter does. Two presses for something irreversible-ish (a second tab,
-   * a second attachment) rather than one, and the same `open` either way — the
-   * mouse must not be a second path to a second behaviour.
+   * ONE CLICK GOES THERE, TWO GIVE IT A TAB (T70).
+   *
+   * A terminal has no double click, only two releases and a clock, so the
+   * window is ours to draw (`double_click_ms`). What is NOT free is the order:
+   * the single-click action is deferred until the window closes, and it has to
+   * be.
+   *
+   * The tempting alternative is to switch at once and let a second press "also
+   * open a tab" — no wait, snappier. It cannot work here, and not because of
+   * feel: switching in place CONSUMES the tab the second press is trying to
+   * preserve. After the first click this tab already holds that session, so
+   * `onOpenTab` finds it open and merely selects it; to make the pair mean
+   * anything the view would have to put back what it had just replaced, which
+   * for a draft tab is not restorable at all and for a session tab costs a
+   * fresh `session events` replay. One gesture, one action, neither undoing the
+   * other — so the switch waits, and what does not wait is the cursor, which
+   * lands on the press so the click is acknowledged in the same frame.
+   *
+   * A third press inside a window starts a new one rather than firing again:
+   * repeated clicking is somebody who has not seen anything happen yet, and
+   * opening a tab per press is the least helpful reading of that.
    */
+  let pending: { index: number; timer: ReturnType<typeof setTimeout> } | null = null
+  const forget = () => {
+    if (pending) clearTimeout(pending.timer)
+    pending = null
+  }
+  onCleanup(forget)
   const clickRow = (index: number) => {
-    if (cursor() === index) return open()
     setCursor(index)
+    const twice = pending?.index === index
+    forget()
+    if (twice) return act(index, props.onOpenTab)
+    const timer = setTimeout(() => {
+      pending = null
+      act(index, props.onSwitch)
+    }, double_click_ms)
+    pending = { index, timer }
   }
 
   /**
@@ -331,9 +481,15 @@ export function SessionsView(props: {
             const here = () => row().entry.id === props.currentId
             const verdict = () => row().entry.outcome?.verdict ?? null
             const click = onClick(() => clickRow(index))
+            const persona = () => personaOf(row().entry.composition.prompts)
             const plan = () =>
               sidebarRowPlan(rowInner(), {
                 indent: row().depth * 2,
+                // The glyph alone: at eighteen columns a persona's name would
+                // be taken out of the sentence, and what the rail has to say
+                // is that this row is a different KIND of thing. The full view
+                // beside it names which one.
+                persona: persona() ? ` ${style.glyphs.picker}` : "",
                 here: here() ? ` ${style.glyphs.bar}` : "",
                 live: leases()[row().entry.id] === "held" ? ` ${style.glyphs.assistant}` : "",
                 verdict: verdict() ? ` ${verdict_glyph[verdict()!]}` : "",
@@ -371,6 +527,11 @@ export function SessionsView(props: {
                     {fit(title(row().entry), plan().said)}
                   </text>
                 </box>
+                <Show when={plan().persona.length > 0}>
+                  <text fg={style.theme.accent.evolve} flexShrink={0}>
+                    {plan().persona}
+                  </text>
+                </Show>
                 <Show when={plan().here.length > 0}>
                   <text fg={style.theme.accent.user} flexShrink={0}>
                     {plan().here}
@@ -411,12 +572,13 @@ export function SessionsView(props: {
       <Show when={notice()}>
         <text fg={style.theme.err}>{fit(notice()!, inner())}</text>
       </Show>
-      {/* The one dim line saying what can be done here (§6.1 rule 8) — and only
-          while the keyboard is here, because that is the only time any of these
-          are true. Closed, the rail is a list you look at and click. */}
-      <Show when={owns_keys()}>
+      {/* The one dim line saying what can be done here (§6.1 rule 8), chosen
+          for this width and this state by `railFooter`. The keys are only true
+          while the keyboard is here; the count of what is not being shown is
+          true either way (T70). */}
+      <Show when={railFooter(inner(), owns_keys(), hidden()).length > 0}>
         <text fg={style.theme.dim} height={1} flexShrink={0}>
-          {fit("j/k · Enter · Esc", inner())}
+          {railFooter(inner(), owns_keys(), hidden())}
         </text>
       </Show>
     </box>
@@ -432,7 +594,12 @@ export function SessionsView(props: {
     if (key.name === "k" || key.name === "up") return move(-1)
     if (key.name === "n") return props.onNew()
     if (key.name === "r") return void refresh().then(probe)
-    if (key.name === "return") return open()
+    // The two halves of the mouse's one-and-two, on the keyboard: `Enter` is
+    // the single click and `t` is the double, so neither input is a second
+    // path to a behaviour the other cannot reach (T70).
+    if (key.name === "t") return goToTab()
+    if (key.name === "a") return setShowAgents((now) => !now)
+    if (key.name === "return") return go()
   })
 
   // The docked variant, chosen once — a mount is one presentation or the other
@@ -496,8 +663,10 @@ export function SessionsView(props: {
             const verdict = () => row().entry.outcome?.verdict ?? null
             const click = onClick(() => clickRow(index))
             const clock_cell = () => ` ${ago(row().entry.created).padStart(clock())}`
+            const persona = () => personaOf(row().entry.composition.prompts)
             /** The chips that sit at the end of the row, when they apply. */
             const chips = () =>
+              (persona() ? ` ${style.glyphs.picker} ${persona()}` : "") +
               (here() ? ` ${style.glyphs.bar} this tab` : "") +
               (verdict() ? ` ${verdict_glyph[verdict()!]} ${verdict()}` : "") +
               (live() ? ` ${style.glyphs.assistant} live` : "")
@@ -539,6 +708,16 @@ export function SessionsView(props: {
                     {fit(title(row().entry), said())}
                   </text>
                 </box>
+                {/* Which persona this session was handed, when it is one an
+                    agent was given rather than a conversation (T70). `◈` is
+                    already "the identity this one is running as" (§6.3) — the
+                    same mark the status bar wears it with. */}
+                <Show when={persona()}>
+                  <text fg={style.theme.accent.evolve} flexShrink={0}>
+                    {" "}
+                    {style.glyphs.picker} {persona()}
+                  </text>
+                </Show>
                 {/* Which one is on screen right now: a colour alone cannot say it
                     where there are no colours (NO_COLOR, a mono terminal). */}
                 <Show when={here()}>
@@ -585,11 +764,18 @@ export function SessionsView(props: {
       <Show when={notice()}>
         <text fg={style.theme.err}>{fit(notice()!, inner())}</text>
       </Show>
+      {/* One dim line, and the count of what is not on it rides in it rather
+          than taking a second (T70): `wrapWords` folds at the ` · ` joints, so
+          a narrow terminal gets whole phrases instead of a second footer. */}
       <OverlayFooter
         width={inner()}
         help={help}
-        brief="j/k move · Enter open · Esc close"
-        more={["n new · r refresh · click a row to select it, again to open it", "/outcome records how this one went"]}
+        brief={`j/k move · Enter go there · t new tab · Esc close${asideText()}`}
+        more={[
+          "n new · r refresh · click a row to go there, twice for a tab of its own",
+          "a shows the sessions agents were delegated — they are driven by their runner, not from here",
+          "/outcome records how this one went",
+        ]}
       />
     </box>
   )

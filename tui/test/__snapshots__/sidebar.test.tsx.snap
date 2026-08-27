@@ -52,6 +52,6 @@ exports[`a wider terminal spends the room on the rail's own columns 1`] = `
 ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
 │ › message nulya  ·  / for commands  ·  @ for files                                                                   │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
- ◧ unsafe · scripted-demo · tools 1+0                                                                                   
+ ◧ sessions  unsafe · scripted-demo · tools 1+0                                                                         
 "
 `;

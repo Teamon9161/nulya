@@ -166,6 +166,31 @@ export function Transcript(props: {
   /** Handed to `App` so PgUp/PgDn and the "more below" hint have something to act on. */
   ref?: (box: ScrollBoxRenderable) => void
 }) {
+  /**
+   * THE TRANSCRIPT DOES NOT TAKE THE KEYBOARD (T70).
+   *
+   * `ScrollBoxRenderable` sets `focusable = true` on itself, and OpenTUI's
+   * `autoFocus` walks up from whatever a mouse-down hit to the first focusable
+   * ancestor and focuses it — which blurs whatever held focus before, i.e. the
+   * textarea. So every click anywhere in the transcript, including the empty
+   * space under the last card and the head line of a card being folded, left
+   * the composer enabled, blinking, and not listening: the box was still the
+   * place to type and typing went nowhere.
+   *
+   * Turning it off is not a workaround, it is the truth about this box. Nothing
+   * here has ever been driven by the scrollbox's own key bindings — PgUp/PgDn,
+   * Shift+End and browse mode all go through the host's keymap and act on this
+   * ref — so the one thing focus bought was the ability to take it away from
+   * the only widget on the screen that needs it.
+   *
+   * The other scrollboxes in this front end are not the same case: each of them
+   * lives in a surface that claims the keyboard anyway (an overlay, the docked
+   * rail), so there focusing IS what the person asked for.
+   */
+  const takeRef = (box: ScrollBoxRenderable) => {
+    box.focusable = false
+    props.ref?.(box)
+  }
   const style = useStyle()
   const plugins = usePlugins()
   const drawable = () => visibleItems(props.items, style.settings.transcript.thinking)
@@ -183,7 +208,7 @@ export function Transcript(props: {
   const capabilityPrevious = createMemo(() => capabilityPreviousVersions(props.items, props.header))
   return (
     <scrollbox
-      ref={props.ref}
+      ref={takeRef}
       flexGrow={1}
       flexShrink={1}
       width="100%"

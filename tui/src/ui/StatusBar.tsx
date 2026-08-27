@@ -113,6 +113,35 @@ export function StatusBar(props: {
    * columns saying nothing (§6.1 rule 4).
    */
   const sidebarHandle = () => Boolean(props.onToggleSidebar) && screen().width >= 60
+  /**
+   * …and on a wide terminal it says its own name (T70).
+   *
+   * A bare `◧` was two columns of a glyph nobody had met, at the one edge of
+   * the screen the eye does not sweep, for a pane that had never been on it —
+   * the first person to use it reported never finding the sidebar at all. A
+   * word is what makes a control findable; the glyph alone only works once you
+   * know what it opens.
+   *
+   * Only where there is room to spend: 100 columns is where `layout()` below
+   * still has slack after the model, the mode and the chips, so the label is
+   * never bought with the model id. Under it the handle goes back to the glyph,
+   * which is exactly the fallback `sidebarRowPlan` uses one pane over — the
+   * thing that must survive every width is the thing the row is FOR.
+   *
+   * The trailing gap is inside the target on purpose — a handle is easier to
+   * hit than it is to read — and it is two columns rather than the ` · ` the
+   * rest of the line joins with, because this is not one of those chips: it is
+   * host chrome sitting ahead of everything a package will ever be allowed to
+   * put here (goals/tui-shell.md §4). Air says "different thing"; a joint would
+   * say "next thing".
+   */
+  const sidebar_label_width = 100
+  const sidebarChip = () =>
+    !sidebarHandle()
+      ? ""
+      : screen().width >= sidebar_label_width
+        ? `${style.glyphs.sidebar} sessions  `
+        : `${style.glyphs.sidebar} `
 
   /**
    * How full the window is, after the last step. Nothing acts on this — nulya
@@ -177,7 +206,7 @@ export function StatusBar(props: {
    * the composition card above says the same thing at length.
    */
   const layout = createMemo(() => {
-    const budget = Math.max(0, screen().width - 2 - (sidebarHandle() ? 2 : 0) - displayWidth(modeLead()))
+    const budget = Math.max(0, screen().width - 2 - displayWidth(sidebarChip()) - displayWidth(modeLead()))
     const right =
       displayWidth(contextChip()) +
       displayWidth(behindChip()) +
@@ -222,8 +251,14 @@ export function StatusBar(props: {
               being on screen is already the state and a glyph that repeated it
               would be a second answer to a question the screen has answered at
               full size (§6.1 rule 1's shape rule is about facts that would
-              OTHERWISE be invisible). */}
-          {sidebarHandle() ? (
+              OTHERWISE be invisible).
+
+              What DOES change with width is whether it says its own name
+              (T70): a glyph nobody has met, at the one edge of the line the
+              eye does not sweep, is a control that is never found. Under the
+              pointer it takes `hover`, like every other clickable thing in
+              this front end. */}
+          {sidebarChip().length > 0 ? (
             <box
               flexShrink={0}
               height={1}
@@ -233,9 +268,7 @@ export function StatusBar(props: {
               onMouseOver={() => setOverSidebar(true)}
               onMouseOut={() => setOverSidebar(false)}
             >
-              <text fg={props.sidebarOpen ? style.theme.accent.evolve : style.theme.faint}>
-                {style.glyphs.sidebar}{" "}
-              </text>
+              <text fg={props.sidebarOpen ? style.theme.accent.evolve : style.theme.faint}>{sidebarChip()}</text>
             </box>
           ) : null}
           {/* The permission mode leads the line, and the click opens its picker

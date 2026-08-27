@@ -112,7 +112,7 @@ test("/sessions lists the store and opens the highlighted session", async () => 
     <SessionsView
       ws={ws}
       currentId={first}
-      onOpen={setOpened}
+      onSwitch={setOpened} onOpenTab={() => {}}
       onNew={() => {}}
       onClose={() => {}}
     />
@@ -129,7 +129,7 @@ test("/sessions lists the store and opens the highlighted session", async () => 
     expect(frame).not.toContain(first)
     expect(frame).not.toContain("events")
     // One line of keys, the rest behind `?` (tui.md §11, T18).
-    expect(frame).toContain("j/k move · Enter open · Esc close · ? keys")
+    expect(frame).toContain("j/k move · Enter go there · t new tab · Esc close · ? keys")
     expect(frame).not.toContain("n new")
     expect(stable(frame)).toMatchSnapshot()
 
@@ -138,8 +138,8 @@ test("/sessions lists the store and opens the highlighted session", async () => 
     setup.mockInput.pressKey("?")
     expect(await settle(setup, 3)).not.toContain("n new")
 
-    // Newest first, so the second (untouched) session leads; j then Enter opens
-    // the one below it.
+    // Newest first, so the second (untouched) session leads; j then Enter goes
+    // to the one below it.
     setup.mockInput.pressKey("j")
     // The title line follows the cursor, so this is where the id of the session
     // about to be opened becomes readable (and pasteable).
@@ -183,7 +183,7 @@ test("/sessions marks a session somebody else is driving as live", async () => {
   await until(() => holding, 30_000)
 
   const setup = await overlayFrame(() => (
-    <SessionsView ws={ws} currentId={first} onOpen={() => {}} onNew={() => {}} onClose={() => {}} />
+    <SessionsView ws={ws} currentId={first} onSwitch={() => {}} onOpenTab={() => {}} onNew={() => {}} onClose={() => {}} />
   ))
   try {
     // The marker comes from the lease probe — a byte-range read on Windows, a
@@ -498,16 +498,16 @@ test("F3 opens the sessions view and Esc closes it", async () => {
   })
   try {
     await settle(setup, 4)
-    expect(setup.captureCharFrame()).not.toContain("j/k move · Enter open")
+    expect(setup.captureCharFrame()).not.toContain("j/k move · Enter go there")
 
     setup.mockInput.pressKey("F3")
     const open = await settle(setup, 4)
     expect(open).toContain("sessions ·")
-    expect(open).toContain("j/k move · Enter open")
+    expect(open).toContain("j/k move · Enter go there")
 
     setup.mockInput.pressEscape()
     const closed = await settle(setup, 4)
-    expect(closed).not.toContain("j/k move · Enter open")
+    expect(closed).not.toContain("j/k move · Enter go there")
   } finally {
     setup.renderer.destroy()
   }
@@ -540,17 +540,18 @@ test("Enter on a sub-session card opens it as a second tab, attached as an obser
   try {
     await settle(setup, 4)
     expect(setup.captureCharFrame()).toContain(`sub-session · ${child}`)
-    // One session open: no tab bar at all.
-    expect(setup.captureCharFrame()).not.toContain("⤷ scripted-demo")
+    // One session open: no tab bar at all, so the top row is not a strip.
+    expect(setup.captureCharFrame().split("\n")[0]).not.toContain("scripted-demo")
 
     setup.mockInput.pressEscape()
     await settle(setup, 3)
     setup.mockInput.pressEnter()
     const frame = await settle(setup, 6)
     // Two tabs, named by what they run on — the same model, so the `#n` that
-    // tells them apart (tui.md §11, T22). Neither shows a session id.
-    expect(frame).toContain("⤷ scripted-demo #1")
-    expect(frame).toContain("⤷ scripted-demo #2")
+    // tells them apart (tui.md §11, T22). Neither shows a session id, and the
+    // one in front wears the left rule rather than a colour (T70).
+    expect(frame).toContain("scripted-demo #1")
+    expect(frame).toContain(`${style.glyphs.bar} scripted-demo #2`)
     expect(frame.split("\n")[0]).not.toContain(parent)
     // The tab that opened is the one in front: its transcript is the one drawn,
     // and the child has no cards of its own.

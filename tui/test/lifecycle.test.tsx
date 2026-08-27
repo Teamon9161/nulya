@@ -304,7 +304,9 @@ test("/resume opens a past session by id; /clear steps away without touching it"
 
     await setup.mockInput.typeText(`/resume ${id}`)
     setup.mockInput.pressEnter()
-    await until(() => setup.captureCharFrame().includes(`opened ${id}`), 20_000)
+    // Named, it is the same action `Enter` in that list performs — which since
+    // T70 is "go there in this tab", not "open a second one".
+    await until(() => setup.captureCharFrame().includes(`switched to ${id}`), 20_000)
 
     await setup.mockInput.typeText("/clear")
     setup.mockInput.pressEnter()

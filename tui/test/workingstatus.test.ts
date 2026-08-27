@@ -271,10 +271,11 @@ test("mixHex: t=0 is the start colour, t=1 is the end colour, t=0.5 is the midpo
 })
 
 test("pickTip: deterministic for a fixed source, and reaches both ends of the list", () => {
+  const glyphs = createStyle(default_settings, {}).glyphs
   // Same source, called twice: the opening screen picks once per launch, not
   // once per render, so the underlying pick must not itself be flaky.
-  const first = pickTip(() => 0)
-  expect(pickTip(() => 0)).toBe(first)
+  const first = pickTip(glyphs, () => 0)
+  expect(pickTip(glyphs, () => 0)).toBe(first)
   expect(typeof first).toBe("string")
   expect(first.length).toBeGreaterThan(0)
 
@@ -282,7 +283,17 @@ test("pickTip: deterministic for a fixed source, and reaches both ends of the li
   // actually depends on the argument instead of being hardcoded to one line —
   // and `random() === 1` (which `Math.random()` itself never returns) still
   // lands on the last tip rather than reading past the end of the array.
-  const last = pickTip(() => 0.999999)
+  const last = pickTip(glyphs, () => 0.999999)
   expect(last).not.toBe(first)
-  expect(pickTip(() => 1)).toBe(last)
+  expect(pickTip(glyphs, () => 1)).toBe(last)
+
+  // Every tip is written for one glyph set (T70): the one that names the
+  // sidebar handle has to name the handle this terminal actually draws, or it
+  // is pointing at a control that is not on the screen.
+  const ascii = createStyle({ ...default_settings, transcript: { ...default_settings.transcript, ascii: true } }, {})
+  const named = (set: typeof glyphs) =>
+    Array.from({ length: 40 }, (_, i) => pickTip(set, () => i / 40)).find((tip) => tip.includes("/sidebar"))!
+  expect(named(glyphs)).toContain(glyphs.sidebar)
+  expect(named(ascii.glyphs)).toContain(ascii.glyphs.sidebar)
+  expect(named(ascii.glyphs)).not.toContain(glyphs.sidebar)
 })

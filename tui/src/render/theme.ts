@@ -186,6 +186,19 @@ export interface Glyphs {
    * answered at full size (§6.1 rule 4).
    */
   sidebar: string
+  /**
+   * The tab strip's two controls (T70), and the only two glyphs in this table
+   * that belong to the host's chrome rather than to the transcript or a list.
+   *
+   * `closeTab` is `✕` and not `⊘` or `✗`: those two are things that HAPPENED to
+   * a tool call (cancelled, failed) and they live in the transcript. This one is
+   * a button, and a button is named by what it does. The ascii fallbacks (`x`,
+   * `+`) collide with `canceled` and `build` in the same way every ascii
+   * fallback in this table collides with something — the rule (§6.1 rule 6) is
+   * one meaning per glyph per FACE, and no card is ever drawn in the tab strip.
+   */
+  closeTab: string
+  newTab: string
 }
 
 const unicode_glyphs: Glyphs = {
@@ -218,6 +231,8 @@ const unicode_glyphs: Glyphs = {
   switchOff: "○",
   tip: "✻",
   sidebar: "◧",
+  closeTab: "✕",
+  newTab: "+",
 }
 
 const ascii_glyphs: Glyphs = {
@@ -250,6 +265,8 @@ const ascii_glyphs: Glyphs = {
   switchOff: "-",
   tip: "*",
   sidebar: "[",
+  closeTab: "x",
+  newTab: "+",
 }
 
 export interface Style {
