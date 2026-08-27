@@ -30,6 +30,8 @@
 //!   e2e/gate_pin.zig     the gate request's frozen columns, and pin ⇒ membership
 //!   e2e/cli.zig          the self-description entry: `nulya help`, `ext api`
 //!                        topics, the kernel prompt's bootstrap sentence, guide
+//!   e2e/journal.zig      `nulya journal append|read`: the append-only JSONL
+//!                        discipline exposed as a CLI verb
 //!
 //! The other groups are `e2e-ext` (tests/e2e_ext.zig), `e2e-agent`
 //! (tests/e2e_agent.zig) and `e2e-std` (tests/e2e_std.zig). `zig build e2e`
@@ -43,4 +45,5 @@ comptime {
     _ = @import("e2e/background.zig");
     _ = @import("e2e/gate_pin.zig");
     _ = @import("e2e/cli.zig");
+    _ = @import("e2e/journal.zig");
 }

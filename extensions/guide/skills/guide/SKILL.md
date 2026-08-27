@@ -354,6 +354,30 @@ Store and scope:
       if last and not last[-1].get("calls"): break     # end of turn: decide, append, or stop
   ```
 
+## Persisting state across calls
+
+A tool is a fresh process every call — nothing survives between them except
+what you write to disk. If that state needs the same discipline the three
+kernel journals use (one complete JSON line per event, safe under concurrent
+writers, a crash-torn tail repaired rather than glued onto), reach for
+`"$NULYA_EXE" journal append/read` instead of writing your own file lock:
+
+```sh
+# append: the record comes from STDIN, not argv — one line, valid JSON, or
+# nothing is written at all.
+echo '{"seen":"'"$NULYA_TOOL"'"}' | "$NULYA_EXE" journal append .nulya/scratch/my.log.jsonl
+
+# read: every complete line back; a file that was never written to is empty
+# output, exit 0 — not an error to special-case.
+"$NULYA_EXE" journal read .nulya/scratch/my.log.jsonl
+```
+
+Concurrent callers are safe: `append` holds that file's own lease for the
+length of one write, so two calls racing the same path serialize instead of
+tearing a line. There is no `put`/`peek`/`ack` — that stronger, consumed-once
+contract is what `extensions/agent`'s own mailbox needed and built for itself;
+reach for `journal` when a plain fact log is enough.
+
 ## Evidence
 
 - `.nulya/tool-usage.jsonl` — one line per tool call: stable id, ok, duration.

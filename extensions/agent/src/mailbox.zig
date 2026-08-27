@@ -22,8 +22,14 @@
 //! two orders can disagree: two senders can take 1 and 2, and the one holding 2
 //! can finish first, so a reader sees 2 published, delivers it, and only then
 //! sees 1. Unique numbers were never the hard part — agreeing on an order was.
-//! Concurrency here is a handful of processes at most, so one advisory lock is
-//! a smaller thing to be sure about than a lock-free argument.
+//!
+//! As it happens the layers above hand this file one sender at a time: only the
+//! session a delegation belongs to may send into it (`main.sendTurn` checks the
+//! frozen `parent`), and the kernel lets one `session step` process write a
+//! session at a time. That is an argument about two other files, so this one
+//! does not lean on it — the lock is also what makes it safe to clear a dead
+//! sender's `.tmp`, and one advisory lock over a handful of processes is a
+//! smaller thing to be sure about than a proof that reaches that far.
 //!
 //! **2. Publishing is a rename.** A directory entry exists the moment a file is
 //! created, not when it is closed, so the body goes into `<n>.tmp` and the
@@ -35,6 +41,14 @@
 //! So an unfinished round changes nothing, a killed runner leaves its message
 //! for the next one, and the failure direction is "delivered twice" rather than
 //! "gone". **At-least-once**, said out loud.
+//!
+//! Which means a reader that cannot read a message must LEAVE it — the only
+//! thing `peek` ever drops is a file that has been read and proved to be no
+//! message at all. An unreadable one stops the peek where it stands, so the
+//! delegation stalls loudly (its runner finds work it cannot do and eventually
+//! reports itself stranded) instead of quietly answering the message behind it
+//! and never the one in front. `put` refuses a body this side could not read
+//! back, so the one permanent way to write such a file is closed at the source.
 //!
 //! **4. How a message was sent travels with it.** `interrupt` is not a kind of
 //! message — the text is an ordinary user turn either way (D3) — it is a fact
@@ -58,10 +72,15 @@ pub const writer_lock_name = ".writer.lock";
 /// lease is the only writer, so one name is enough.
 pub const message_name = "message.txt";
 
-/// How many messages may wait. A backstop on the name search, not a budget:
-/// `max_exchanges` is where a delegation's turns are counted.
+/// How many messages may WAIT — the count of them, not the highest number one
+/// of them happens to carry. A backstop against a directory nobody is draining,
+/// not a budget: `max_exchanges` is where a delegation's turns are counted.
 const max_queued: usize = 4096;
 
+/// The largest body a reader will read back, and therefore the largest one a
+/// sender may write. One constant, enforced on both sides: a message this side
+/// could publish and could not then read is a message that would have to be
+/// either delivered or abandoned by a rule made up on the spot (rule 3).
 const max_message_bytes: usize = 4 << 20;
 
 /// One message waiting for a runner, and how it was sent.
@@ -114,11 +133,6 @@ pub fn put(
     var lease = try base.createFile(io, lock_path, .{ .truncate = false, .read = true, .lock = .exclusive });
     defer lease.close(io);
 
-    // Holding the lock means no other sender is part way through one, so every
-    // `.tmp` here belongs to a sender that died mid-write. Nobody will ever read
-    // one, and left alone each costs a number for ever.
-    sweepStaged(io, base, dir);
-
     var body: std.Io.Writer.Allocating = .init(alloc);
     var jw: std.json.Stringify = .{ .writer = &body.writer };
     try jw.beginObject();
@@ -134,24 +148,25 @@ pub fn put(
     }
     try jw.endObject();
 
-    var n: usize = try nextFree(io, base, dir);
-    while (n < max_queued) : (n += 1) {
-        const staged = try std.fmt.allocPrint(alloc, "{s}/{d:0>12}.tmp", .{ dir, n });
-        const path = try std.fmt.allocPrint(alloc, "{s}/{d:0>12}.json", .{ dir, n });
-        // Exclusive under a lock that already makes the name unique: a backstop
-        // against a name this process did not put there, not the mechanism.
-        const file = base.createFile(io, staged, .{ .exclusive = true }) catch |err| switch (err) {
-            error.PathAlreadyExists => continue,
-            else => return err,
-        };
-        {
-            defer file.close(io);
-            try file.writeStreamingAll(io, body.writer.buffered());
-        }
-        try base.rename(staged, base, path, io);
-        return;
+    // Refused before a number is taken, because the alternative is a file the
+    // reader can never read: `peek` reads back through the same limit, and
+    // rule 3 leaves what it cannot read exactly where it is. Better a sender
+    // that is told no than a queue with a permanent blockage at the head of it.
+    if (body.writer.buffered().len > max_message_bytes) return error.MessageTooLarge;
+
+    const n = try scanForPut(io, base, dir);
+    const staged = try std.fmt.allocPrint(alloc, "{s}/{d:0>12}.tmp", .{ dir, n });
+    const path = try std.fmt.allocPrint(alloc, "{s}/{d:0>12}.json", .{ dir, n });
+    // Exclusive because the name is supposed to be free: the scan just proved
+    // it is past every number in the directory, and the lock says nobody else
+    // is adding one. `PathAlreadyExists` here means one of those two is not
+    // true, which is worth hearing about rather than working around.
+    const file = try base.createFile(io, staged, .{ .exclusive = true });
+    {
+        defer file.close(io);
+        try file.writeStreamingAll(io, body.writer.buffered());
     }
-    return error.InboxFull;
+    try base.rename(staged, base, path, io);
 }
 
 /// Every message waiting whose number is past `after`, oldest first.
@@ -166,10 +181,15 @@ pub fn put(
 ///
 /// Pass `0` for everything.
 ///
-/// A file that cannot be parsed IS deleted here, and it is the only thing that
-/// is. It cannot be half-written (a `.json` name was published by a rename), so
-/// it will never parse — and leaving it would hold `pending` true for ever,
-/// which is a delegation whose every future runner spins until it gives up.
+/// A file that was READ and proved to be no message is deleted here, and it is
+/// the only thing that is. It cannot be half-written (a `.json` name was
+/// published by a rename), so it will never parse — and leaving it would hold
+/// `pending` true for ever, which is a delegation whose every future runner
+/// spins until it gives up.
+///
+/// A file that could not be read AT ALL is a different answer and gets the
+/// opposite treatment: it stays, and the peek stops there rather than reaching
+/// past it (rule 3).
 pub fn peekAfter(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -250,12 +270,18 @@ fn peekUpTo(
     for (found.items) |entry| {
         if (out.items.len >= limit) break;
         const path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir, entry.name });
-        // Anything that is not a message is dropped as it is found; a message is
-        // left exactly where it is until somebody acks it.
-        const raw = base.readFileAlloc(io, path, alloc, .limited(max_message_bytes)) catch {
-            base.deleteFile(io, path) catch {};
-            continue;
-        };
+        // Could not read it — out of memory, a handle this process could not
+        // get, a body past the limit `put` refuses to write. Every one of those
+        // says nothing about whether it is a message, so it is left where it is:
+        // deleting here would drop a message that has been accepted and told the
+        // sender so, which is the one direction rule 3 exists to forbid.
+        //
+        // And the peek STOPS, rather than skipping to the next one. Rule 1 is an
+        // order, and reaching past a message this round would deliver it after
+        // messages sent later. A transient failure costs a round; a permanent one
+        // strands the delegation loudly, which is the loss this trades for.
+        const raw = base.readFileAlloc(io, path, alloc, .limited(max_message_bytes)) catch break;
+        // Read, and not a message. It never will be, so it goes.
         const parsed = std.json.parseFromSlice(std.json.Value, alloc, raw, .{}) catch {
             base.deleteFile(io, path) catch {};
             continue;
@@ -281,38 +307,44 @@ fn peekUpTo(
     return out.items;
 }
 
-/// Where to start looking for a free name: one past the highest number already
-/// there. Without it a delegation with a thousand answered messages would try a
-/// thousand names for the next one.
+/// One pass over the inbox on behalf of a sender that holds the lock: clear the
+/// wreckage, count what is waiting, and answer with the number to publish under.
+/// It is one pass rather than two because a sender needs both answers and the
+/// lock is what makes either of them true — separating them only made it easy
+/// to compare the wrong one against `max_queued`.
 ///
-/// So a number IS handed out again once the directory empties, and that is fine
-/// for what the numbers carry — order only has to hold among messages that
-/// coexist, and an empty inbox is one where everything before was answered.
-fn nextFree(io: std.Io, base: std.Io.Dir, dir: []const u8) !usize {
+/// **The count is of messages, not of numbers.** `max_queued` used to be checked
+/// against the number about to be handed out, which is a different quantity: an
+/// inbox that had once reached 4095 and been answered down to a single message
+/// was refused, and only 4095 messages could ever be sent through one at all.
+///
+/// **The `.tmp` files go.** Holding the lock means no live sender is part way
+/// through one, so every one of them belongs to a sender that died mid-write.
+/// Nobody will ever read one, and left alone each holds a number for ever.
+///
+/// The number handed back is one past the highest still present, so a number IS
+/// used again once the directory empties. That is fine for what the numbers
+/// carry — order only has to hold among messages that coexist, and an empty
+/// inbox is one where everything before it was answered.
+fn scanForPut(io: std.Io, base: std.Io.Dir, dir: []const u8) !usize {
     var d = base.openDir(io, dir, .{ .iterate = true }) catch return 1;
     defer d.close(io);
     var highest: usize = 0;
+    var queued: usize = 0;
     var it = d.iterate();
     while (try it.next(io)) |entry| {
         if (entry.kind == .directory) continue;
-        const stem = std.mem.sliceTo(entry.name, '.');
-        const n = std.fmt.parseInt(usize, stem, 10) catch continue;
+        if (std.mem.endsWith(u8, entry.name, ".tmp")) {
+            d.deleteFile(io, entry.name) catch {};
+            continue;
+        }
+        if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
+        queued += 1;
+        const n = std.fmt.parseInt(usize, std.mem.sliceTo(entry.name, '.'), 10) catch continue;
         if (n > highest) highest = n;
     }
+    if (queued >= max_queued) return error.InboxFull;
     return highest + 1;
-}
-
-/// Drop every `<n>.tmp`. Only ever called with the writer lock held, which is
-/// what makes it safe: no live sender can be part way through one.
-fn sweepStaged(io: std.Io, base: std.Io.Dir, dir: []const u8) void {
-    var d = base.openDir(io, dir, .{ .iterate = true }) catch return;
-    defer d.close(io);
-    var it = d.iterate();
-    while (it.next(io) catch return) |entry| {
-        if (entry.kind == .directory) continue;
-        if (!std.mem.endsWith(u8, entry.name, ".tmp")) continue;
-        d.deleteFile(io, entry.name) catch {};
-    }
 }
 
 // ── the interrupt marker (D6) ───────────────────────────────────────────────
@@ -555,6 +587,73 @@ test "a file in the inbox that can never be a message is dropped rather than lef
         error.FileNotFound,
         ws.access(io, try std.fmt.allocPrint(a, "{s}/000000000001.json", .{dir}), .{}),
     );
+}
+
+test "a message that cannot be read is left alone, and nothing behind it overtakes it" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    // Read failure and "read it, and it is no message" are two different
+    // answers, and only the second one may delete. This used to be one branch:
+    // any error at all dropped the file, so a message that had been accepted —
+    // and whose sender had been told so — could disappear without ever reaching
+    // a harness. That is the one failure direction rule 3 exists to forbid.
+    //
+    // A body past the reader's limit is that failure, reachably: `put` refuses
+    // to write one now, but a file already on disk still has to be handled.
+    const id = "d-00000000f00d";
+    const dir = try record.pathIn(a, id, inbox_name);
+    try ws.createDirPath(io, dir);
+    const huge_path = try std.fmt.allocPrint(a, "{s}/000000000001.json", .{dir});
+    const huge = try a.alloc(u8, max_message_bytes + 1);
+    @memset(huge, 'x');
+    try ws.writeFile(io, .{ .sub_path = huge_path, .data = huge });
+
+    try put(a, io, ws, id, .{ .text = "behind it" });
+
+    // The peek stops where it cannot read: answering the second message now
+    // would put it ahead of one sent before it, and the first would arrive
+    // afterwards if it ever became readable (rule 1).
+    try std.testing.expectEqual(@as(usize, 0), (try peekAfter(a, io, ws, id, 0)).len);
+    // Still there. The delegation stalls, loudly, rather than answering the
+    // wrong message and calling the other one delivered.
+    try ws.access(io, huge_path, .{});
+    try std.testing.expect(pending(a, io, ws, id));
+}
+
+test "a body the reader could not read back is refused before it is queued" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    // One limit, both sides. Writing a body this side cannot read back would
+    // queue a message that can only ever block the queue it is at the head of,
+    // with its sender told it was accepted.
+    const id = "d-00000000ba55";
+    const oversized = try a.alloc(u8, max_message_bytes + 1);
+    @memset(oversized, 'x');
+    try std.testing.expectError(error.MessageTooLarge, put(a, io, ws, id, .{ .text = oversized }));
+    try std.testing.expect(!pending(a, io, ws, id));
+
+    // And nothing was left behind that would hold a number or look like a
+    // message: a refusal happens before a name is taken.
+    try put(a, io, ws, id, .{ .text = "an ordinary one" });
+    const seen = try peekAfter(a, io, ws, id, 0);
+    try std.testing.expectEqual(@as(usize, 1), seen.len);
+    try std.testing.expectEqualStrings("an ordinary one", seen[0].msg.text);
 }
 
 test "the interrupt marker is taken once" {
