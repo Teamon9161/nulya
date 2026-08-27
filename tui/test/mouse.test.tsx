@@ -164,7 +164,7 @@ test("/sessions: one click goes to that session, two give it a tab of its own", 
   const [tabbed, setTabbed] = createSignal<string | null>(null)
   const setup = await mount(
     () => (
-      <SessionsView ws={ws} currentId={first} onSwitch={setWent} onOpenTab={setTabbed} onNew={() => {}} onClose={() => {}} />
+      <SessionsView workspaces={[ws]} currentId={first} onSwitch={setWent} onOpenTab={setTabbed} onNew={() => {}} onClose={() => {}} />
     ),
     120,
     20,
@@ -202,7 +202,7 @@ test("/sessions: one click goes to that session, two give it a tab of its own", 
 
 test("/sessions: the pointer marks the row it is over, and lets go of it", async () => {
   const setup = await mount(
-    () => <SessionsView ws={ws} currentId={first} onSwitch={() => {}} onOpenTab={() => {}} onNew={() => {}} onClose={() => {}} />,
+    () => <SessionsView workspaces={[ws]} currentId={first} onSwitch={() => {}} onOpenTab={() => {}} onNew={() => {}} onClose={() => {}} />,
     120,
     20,
   )

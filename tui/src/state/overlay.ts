@@ -8,7 +8,17 @@
  */
 import { createContext, createSignal, useContext } from "solid-js"
 
-export type OverlayKind = "sessions" | "ext" | "help" | "settings" | "usage" | "model" | "provider" | "tasks"
+export type OverlayKind =
+  | "sessions"
+  | "ext"
+  | "help"
+  | "settings"
+  | "usage"
+  | "model"
+  | "provider"
+  | "tasks"
+  /** The directory browser: which workspace this tab works in (§5.3b). */
+  | "cwd"
 
 export interface OverlayStore {
   kind(): OverlayKind | null

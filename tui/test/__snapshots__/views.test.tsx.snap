@@ -45,10 +45,10 @@ exports[`/help lists the bindings that are actually in force 1`] = `
  click a tab / a pane             go to it                                                        █ 
  click the sidebar mark           at the head of the line under the composer: show or hide the    █ 
                                   session list                                                    █ 
- click [x]                        in /ext's tools pane: pin or unpin that tool                    ▀ 
- drag over text                   select it; releasing copies it to the clipboard                   
-                                                                                                    
- slash commands                                                                                     
+ click [x]                        in /ext's tools pane: pin or unpin that tool                    █ 
+ drag over text                   select it; releasing copies it to the clipboard                 █ 
+                                                                                                  █ 
+ slash commands                                                                                   █ 
  /model                           pick the model the next session runs on                           
  /mode [ask|unsafe]               ask before every tool call, or run them all unreviewed; no        
                                   argument opens the picker                                         
@@ -59,6 +59,8 @@ exports[`/help lists the bindings that are actually in force 1`] = `
                                   \`/clear\` is another name for it                                   
  /sessions [<id>]                 everything in .nulya/sessions · Enter opens one                   
                                   an id opens that one · \`/resume\` is another name for it           
+ /cwd [<path>]                    which directory this tab works in                                 
+                                  no argument opens the browser · \`no project\` needs none           
  /sidebar [<percent>]             the session list, docked down the left edge                       
                                   a number sets its width                                           
  /ext                             extensions: versions, what is active, what it is used for         
@@ -82,6 +84,8 @@ exports[`/help lists the bindings that are actually in force 1`] = `
  /help                            every key and every command                                       
  /quit                            leave                                                             
  /<package command>               declared by an active extension · /ext lists them                 
+ /<skill> [args]                  load an active skill's body as a user turn                        
+                                  \`nulya skill list\` names them                                     
  j/k · PgUp/PgDn scroll · Esc close                                                                 
 "
 `;

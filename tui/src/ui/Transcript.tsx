@@ -157,6 +157,8 @@ export function Transcript(props: {
   error?: string | null
   /** The workspace this session's `.nulya/` lives in — the welcome screen says so. */
   cwd?: string
+  /** Clicking the `cwd` row opens the directory browser (§5.3b). */
+  onPickCwd?: () => void
   /** The model line of the composition card was clicked: open `/model`. */
   onPickModel?: () => void
   /** A `/command` on the welcome screen was clicked: run it as if typed. */
@@ -239,7 +241,13 @@ export function Transcript(props: {
       {/* An empty session is the one screen with nothing to report; it says
           what this session is and what to do, rather than a blank rectangle. */}
       <Show when={props.items.length === 0}>
-        <Welcome cwd={props.cwd} plan={props.plan} onCommand={props.onCommand} tip={props.tip} />
+        <Welcome
+          cwd={props.cwd}
+          plan={props.plan}
+          onCommand={props.onCommand}
+          onPickCwd={props.onPickCwd}
+          tip={props.tip}
+        />
       </Show>
       {/* `Index` rather than `For`: the gap is a property of a row's PLACE in
           the list, so keying by identity would rebuild a card whenever the row

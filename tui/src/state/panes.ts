@@ -131,6 +131,7 @@ export const overlay_surfaces: Readonly<Record<OverlayKind, SurfaceId>> = {
   model: "host:model",
   provider: "host:provider",
   tasks: "host:tasks",
+  cwd: "host:cwd",
 }
 
 const overlay_kinds = Object.entries(overlay_surfaces) as [OverlayKind, SurfaceId][]

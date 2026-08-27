@@ -221,6 +221,7 @@ test("every overlay name maps to a surface and back", () => {
 
 const nobody: FocusState = {
   modified: false,
+  checkout: false,
   withPicker: false,
   agentPicker: false,
   modePicker: false,

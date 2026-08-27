@@ -110,7 +110,7 @@ test("/sessions lists the store and opens the highlighted session", async () => 
   const [opened, setOpened] = createSignal<string | null>(null)
   const setup = await overlayFrame(() => (
     <SessionsView
-      ws={ws}
+      workspaces={[ws]}
       currentId={first}
       onSwitch={setOpened} onOpenTab={() => {}}
       onNew={() => {}}
@@ -183,7 +183,7 @@ test("/sessions marks a session somebody else is driving as live", async () => {
   await until(() => holding, 30_000)
 
   const setup = await overlayFrame(() => (
-    <SessionsView ws={ws} currentId={first} onSwitch={() => {}} onOpenTab={() => {}} onNew={() => {}} onClose={() => {}} />
+    <SessionsView workspaces={[ws]} currentId={first} onSwitch={() => {}} onOpenTab={() => {}} onNew={() => {}} onClose={() => {}} />
   ))
   try {
     // The marker comes from the lease probe — a byte-range read on Windows, a

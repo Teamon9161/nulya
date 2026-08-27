@@ -153,6 +153,8 @@ tui/
 
 四块：transcript（`scrollbox`，sticky bottom，鼠标滚轮 / PgUp / PgDn；离开底部时状态栏出现 `↓ new` 提示）、**输入框上面那一行**（0 或 1 行，只在有事发生时存在，§4.4b）、composer（`textarea`）、**输入框下面那一行**（1 行，§4.5）。没有边框，用两条 hairline 分隔；空状态首屏是一个小 wordmark（`ascii-font`）+ cwd + 几条 `/` 命令 + **一条 tip**（T38）。
 
+**每个 tab 有自己的 workspace**（T71，goals/tui-shell.md §5.3b）：tab = (workspace, session)，这个 tab 的每一次 spawn（`session new|step|append|events`、`ext run`、`task list` 轮询、compact、agent render）都跑在它自己的目录里。**空状态那一行 `cwd` 从此是个控件**——点它开 `/cwd` 的目录浏览器（整屏 overlay，§5.11），因为那正是这个 tab 的目录还是个**决定**的那一屏。第一条消息之后接手的是状态行上的 workspace chip，而**它只在说得出新东西时才占列**（§6.1 第 4 条）：屏幕上开着第二个 workspace，或者这个 tab 就是 `no project` 那一个。只有一个目录时——也就是今天每一个人的屏幕——那一格不存在，这一行逐位不变。
+
 **只有一条线，是输入框自己的边框**（T26）：TabBar（>1 个 tab 时）· transcript · 输入框 · 状态行，四块之间原来有三条通栏 hairline，现在一条都没有——见 §6。**没有标题行**（T22）。原来那行是 `nulya · <session id> · <profile> · <model> · effort · tools · skills`：给程序看的，不是给人看的——session id 人读不出也用不上（要它就去 `/sessions`），`nulya` 是废话，provider 名字紧挨着 model id 也是。它说的唯一有用的东西是**模型**，而模型该在人打字时看得见的地方——输入框底下，tcode 就是这么放的。TabBar 仍在（>1 个 tab 时），但 tab 名是**模型 + 需要时 `#n`**、draft 标 `(new)`，不是 session id。
 **tab 条是鼠标也走得通的**（T70）：当前那个戴 `▎`（其余两格空白——**形状**，所以 NO_COLOR 下也分得开；从前每个 tab 都戴 `⤷` 而 `⤷` 是 sub-session 的字形，等于每一行都在说一件与它无关的事），每个 tab 尾巴上一个 `✕`（faint，悬停变 err，点它 = `Ctrl+W` 的 `tabs.close`），整条末尾一个 `+`（= 裸 `/new` 的 `startDraft`）。名字按剩余宽度均分并 `fit` 截断，**绝不换行**——这一条的内容数量是人决定的，而一条会长成两行的 chrome 每开一个 tab 就把整屏往下推一行。`◧` 与将来的包 chip 都不在这条上（前者在状态行行首，后者在 composer 下面那条带，goals/tui-shell.md §4）。
 
@@ -368,6 +370,19 @@ PLAN §3.2 早就把答案写死了——**一个 agent 就是 `session new` 的
 - **pin 蕴含成员（2026-08-23，ext-review lane B）**：一个 pin 把它自己的包带进 composition（取 `current`，DESIGN §5.1），所以委派**不再**为 pins 派生 `--with`、`render` 也不再预验证它们——从前那段派生与 `ext list` 预检（T32 第三期）整个删掉了。包没有 `current` 时是内核的 `session new` 在 stderr 点名"这些是 pin 带进来的、其中一个没有 `current`"并给出 `--with <id>@<v>` / `ext activate` 两条出路；TS 侧只是把那句原样转述。两条委派路径（模型的 `agent` tool 与 `/agent`）因此都不再有自己的一份"包装好了没有"判断。
 - **`◈ agent-<name>` 白拿**：戴着的东西在 tab 标题与状态栏那个 chip 上本来就看得见（T31 的机制），不需要为 sub-agent 加第二套显示。T44 之后 `wearing()` 多读一处——header 冻的 `composition.prompts[].source`——因为按同一把尺子，那也是这一场戴着的一段 system prompt，只是它不属于任何包。
 
+### 5.11 每个 tab 一个 workspace `[T71]`
+
+跨目录的对话（goals/tui-shell.md §5.3b）。**内核零改动**——session 本来就属于它被创建的那个目录，`Workspace` 一直是 `nulya/cli.ts` 每个调用的显式参数，S1c 只是把它从 store 级下放到 tab 级。
+
+- **tab = (workspace, session)**：`TabCommon.ws`。session tab 的目录永不改变（它的文件在那儿）；draft 可以被重新指向，`TabStore.retarget` 就是浏览器按的那个动词——它换掉整个 tab 对象而不是改一个字段，因为 `ws` 是通过 `tabs.active()` 到处被读的。
+- **`/cwd`**：裸的开目录浏览器（整屏 overlay `host:cwd`，§6.5 的第一类骨架 —— 它是个**地方**所以标题不带 glyph，列表可能超屏所以是 scrollbox）；带参数直接选定，是「拿一行」的点名形态（与 `/resume <id>` 之于 `Enter` 同一条先例）。三个入口：`/cwd` · 空状态那一行 `cwd`（可点）· 状态行上的 workspace chip（只在它说得出新东西时存在）。
+- **浏览器只有一个动词**：`Enter` 永远拿光标那一行——目录行是**进去**，`no project` / recent / `use this directory` 是**选定**。打字不需要第二个确认手势，因为**打字把光标放到 `use this directory` 上**：「在输入框按 Enter」和「在一行上按 Enter」于是是同一次击键做同一件事。路径框全程持有键盘（能粘贴路径是终端用户第一个要的东西），所以光标只认 `↑↓`——`j`/`k` 是路径里的字母。列表：`no project` 恒第一行 · recents 段 · `use this directory` · `..` 段首 + 子目录（只列目录、隐藏点目录、按名排序、含 `.nulya/` 的带 `▪`）。**不做**文件预览、多选、新建目录。
+- **无项目 session**：家 workspace = `<NULYA_HOME | ~/.nulya>/home/`。**不是 `~` 本身**——`~/.nulya` 是 user 层，塌在一起会让 user extension store 被内核 trust gate 误认成未信任的 workspace store 而拒开 session（DESIGN §9）。这一场跳过 `[extensions] session_prompts`：那些 renderer 画的是**项目**（布局、instruction 文件、这个分支、这棵工作树），而 `no project` 的答案正是「没有项目」，每一段都会是空话，而且它进的是缓存前缀、每一步都在付。侧边栏与 chip 上它叫 `no project`。
+- **列表按 workspace 分组**：打开的 tab 的 workspace 全列，每组各跑一次 `session list --json`，当前 front tab 的组在前，组头 = 目录名 + 宽度够时的 dim 全路径（`min_path`，rail 上放不下就整个不画）。**只有第二个 workspace 出现时才有组头**（`groupedRows`）——单 workspace 的屏幕逐位等于 T70 结束时那一帧，快照钉住了这一点。光标只停在 session 行上（`nextSelectable`）：组头按 `Enter` 没有事可做。T70 的 persona 过滤每组照用。
+- **信任与开屏流程按 workspace 首次进入时走**：launch workspace 仍由 `main.tsx` 在裸终端上问（那一刻还没有屏幕）；此后**第一个进入某个目录的 tab** 触发 `enterWorkspace` —— 同样的 `planProjectStore` / `planProjectAgents` / `planCheckout`，答案改在屏幕上给（`ui/CheckoutPrompt.tsx`，输入框上面的对话框，**trusted zone**，`resolveFocus` 里排在最外层：它是唯一一个**授权**而不是选择的对话框）。内核 trust gate 的硬拒照旧原样显示在那个 tab 里（`refusal`，T46）。
+- **recents 在 user 层**：`<NULYA_HOME | ~/.nulya>/tui-recents.json`（§7）。**建场成功时才记**——浏览过不等于在那儿工作过，一个记下光标走过的地方的清单是点击史不是地点表。`no project` 不进 recents（它有恒定的第一行）。
+- **持久与恢复**：`tui-state.json` 的 `tabs`（§7）。恢复**只做第一个之后的那些**：第一个 tab 仍由这一趟启动决定（`--session`，否则 draft，T22），所以单 tab 的屏幕逐帧不变；draft 不记（盘上什么都没有），文件已经不在的 session 跳过。
+
 ## 6. 视觉规范（设计语言）
 
 **简约但精致——美来自对齐、克制与节奏，不来自装饰。**
@@ -470,6 +485,7 @@ PLAN §3.2 早就把答案写死了——**一个 agent 就是 `session new` 的
 | `⠋` | `-\|/` | spinner（只在 `WorkingStatus`） |
 | `✻` | `*` | tip：屏幕在跟人说话，不是发生了什么（T38） |
 | `◧` | `[` | **sessions 侧边栏的把手**（T69）：左半填实的方块 = 屏幕左边缘停着一块 pane。只画在状态行行首那两格，点它开/关。**它不说侧边栏是开是关**——侧边栏在不在屏幕上是它自己以整块宽度回答的问题，把手再答一遍就是同一个问题的第二个答案（§6.1 第 4 条）。**≥100 列时它后面跟着自己的名字** `◧ sessions`（T70）：一个没人见过的字形、画在这一行最不被扫到的那一端、开的又是一块从没在屏幕上出现过的 pane——第一个用它的人报告说完全没找到侧边栏。窄屏退回纯字形（`sidebarRowPlan` 的同一条让位规则）|
+| `▪` | `*` | **这个目录已经是一个 workspace**（T71，只在 `/cwd` 的目录浏览器里）：里面已经有 `.nulya/`，选它是走进已经存在的工作而不是开一个目录的第一场。**不是 `⚡`**——那个说的是「刚刚获得了一样能力」（`ext activate` 与 pin 上去的 tool 名），一个以前被工作过的目录此刻什么都没获得 |
 | `✕` | `x` | **关掉这个 tab**（T70，只在 tab 条上）：`⊘`/`✗` 说的是一次调用**发生了什么**（被取消、失败）、住在 transcript 里；这一个是个**按钮**，按钮以它做的事命名 |
 | `+` | `+` | **新开一个 tab**（T70，只在 tab 条上） |
 | `◈` | `#` | **这一场以什么身份/档位在跑**：选它的那些对话框标题（`/model` `/mode` `/agent` `/with`）、状态栏「戴着谁」的 chip、包自己的 panel 标题。列 store 或 journal 的面板是「地方」，标题**不带记号**（T31）；审批对话框也不带——它不是选身份，是**一个 call 被裁决**，颜色（warn）说完了 |
@@ -539,7 +555,8 @@ auto_activate = true        # 让那一趟把 `current` 指到它刚建出来的
 session_with  = ["handoff", "agent"]  # 这个前端给它开的每个顶层 tab 额外带上的包（`--with` + `--pin`，§5.8 / §5.10）；旧的 `handoff = false` 仍认
 session_prompts = ["ground"] # 每场开场前问一次「这一场的开场文本」的包（T66）：跑它的 internal `render`、
                             # 读回 `{"prompt": "<路径>"}`、把路径喂给 `session new --prompt`。不是成员——
-                            # 进 session 的是它写出来的那个文件（`goals/session-prompt.md` 的那条线）
+                            # 进 session 的是它写出来的那个文件（`goals/session-prompt.md` 的那条线）。
+                            # `no project` 那个 workspace 整段跳过（T71，§5.11）
 plugins       = true        # 代码层总开关（T40）：加载 trusted + 已激活/本场戴着的包的 `contributes.ui.tui.entry`
                             # false = 只剩声明层（commands / policy / 每个 tool 的 ui 照常，逐字节等于 T39 结束时）
 
@@ -551,7 +568,9 @@ cancel = "escape"
 
 `/settings` 只显示当前生效值与来源文件；不在 TUI 里写配置（编辑器改文件即可，第二个诉求出现再做）。
 
-**`tui-state.json`（D10；T5 起）**：同目录（user 层）下**唯一由程序写**的文件，JSON：`{"model":{"profile":"deepseek","model":"deepseek-v4-flash","effort":"high"},"mode":"ask"}`（`mode` 是 T24 的权限档，同一条理由：人在屏幕上做的选择由程序记）——`/model` 的 Enter 与 `/effort` 会更新它；启动无 `--profile` 时的默认选择就是它（`launch.planLaunch`：命令行 > 上次选择 > 内核 `active_profile`；每一层都要 `config show` 说它有 credential 才算数，否则落到离线 scripted 并开屏弹选择器讲原因）。缺失或损坏 = 没记住，永不阻止启动。为什么不放进 `tui.toml`：那是人写的；程序回写人的文件会碰注释与排版（tcode 用 toml_edit 才做到），这里不值得。为什么不进内核 config：内核不需要知道"上次选了谁"（不是 substrate）。
+**`tui-recents.json`（T71）**：user 层下**第二个**由程序写的文件，JSON `{"recent": ["<绝对路径>", …]}`（新的在前，上限 12）。为什么不是 `tui-state.json` 的一个键：那个文件在其它每一处都是 **workspace 层**的事实（这个项目的 pin、它的侧边栏、它的档），而这一条是**关于好几个目录**的事实——一份别的目录的清单不能住在其中一个目录里面（`trusted-stores.jsonl` 因为同一个理由在 user 层，DESIGN §9）。**只在真的建起一场 session 时写**：浏览到一个地方不等于在那儿工作过。读不出来 = 没记住，永不阻止启动。
+
+**`tui-state.json`（D10；T5 起）**：同目录（user 层）下由程序写的文件，JSON：`{"model":{"profile":"deepseek","model":"deepseek-v4-flash","effort":"high"},"mode":"ask"}`（`mode` 是 T24 的权限档，同一条理由：人在屏幕上做的选择由程序记；`tabs: [{"ws": "<目录>", "session": "<id>?"}]` 是 T71 的「上一趟开着哪些 tab、各自在哪个目录」——tab 是一对，所以记也得记一对：一个 id 说不出它是从哪个 `.nulya/sessions/` 里来的。恢复只做**第一个之后的那些**，第一个仍由这一趟启动决定）——`/model` 的 Enter 与 `/effort` 会更新它；启动无 `--profile` 时的默认选择就是它（`launch.planLaunch`：命令行 > 上次选择 > 内核 `active_profile`；每一层都要 `config show` 说它有 credential 才算数，否则落到离线 scripted 并开屏弹选择器讲原因）。缺失或损坏 = 没记住，永不阻止启动。为什么不放进 `tui.toml`：那是人写的；程序回写人的文件会碰注释与排版（tcode 用 toml_edit 才做到），这里不值得。为什么不进内核 config：内核不需要知道"上次选了谁"（不是 substrate）。
 
 ## 8. 测试
 
@@ -2260,3 +2279,28 @@ tab 条的 `✕`/`+`/`▎`；`stripPlan` 的**不变量**"画出来的一切都�
 单击就地切且 strip 不变长 · 双击多一个 tab · 隐藏计数与 `a` 的开关 · rail 的让位顺序多一格 persona），
 `test/workingstatus.test.ts` 的 `pickTip` 多一条"每条 tip 说的是这套字形"（ascii 下那条不许印 `◧`）。
 跟着改的：`/resume` 的回执文案、`/sessions` 的键行、tab 条不再有 `⤷`、Welcome 的 `/sessions` 说明。两张快照更新。
+
+### T71 · S1c：每个 tab 一个 workspace——目录浏览器、无项目 session、按目录分组的列表（`goals/tui-shell.md` §5.3b，2026-08-28）
+
+**内核零改动**（`src/` 一个字节没动），`tui/plugin-api.d.ts` 一个字节没动；`bun test` 550 → 571 pass（新 22 条）、`tsc` 干净、**既有 33 份快照里只有 `/help` 那一份变了**（多了一条命令，一条命令不出现在那一页上就等于不存在——`commands.ts` 的契约）。做的是 §5.3b 的六点。
+
+**尺子**：S1b 的验收标准是「侧边栏不是宿主里的一个新概念」；S1c 的是**「跨目录不是宿主里的一个新概念，是 `Workspace` 这个已经存在的参数换了个出处」**。`nulya/cli.ts` 从第一天起每个调用就带着 `Workspace`；被 `createTabStore(ws, …)` 收成全局的是它，而不是内核里的什么东西。所以这一轮的形状是**下放**，不是新增：`TabCommon.ws`，然后把 `props.ws` 在每一个「对某一场 session 动手」的调用点换成 `ws()`。
+
+**八块：**
+
+1. **tab = (workspace, session)**（`state/tabs.ts`）。`ws` 是 tab 的字段，`open`/`replace` 的「是不是已经开着」比**两半**（两个目录是两份 session 存放处，只问一半正是让错的 tab 被前置的方式），`release` 用 tab 自己的 `ws` 去 `discardIfUntouched`（对着进程的启动目录去 discard 要么落空、要么点名别人的文件），`materialize` 用 `draft.ws` 去 `session new`——**那一行就是一个 tab 的目录成为真的地方**。session tab 的目录永不改变；draft 可以被重新指向，新动词 `retarget` 换掉整个 tab 对象而不是改一个字段（`ws` 是通过 `tabs.active()` 到处被读的，改字段等于让每一处读到新值而没有一处被通知）。
+2. **三张按目录的表**（`App.perWorkspace`）：`@` 路径索引、skill 目录、包命令表——它们都是**关于一个目录**的。按 `ws.dir` 建一次留着，不是每次读重建：路径索引要走一遍仓库，另外两个各要 spawn 一次二进制。`sessionMemberOnce` 的缓存键同理多了一维（同一个 id 在两个目录里诚实地可以是两个版本，store 搜索顺序是 workspace 的）。
+3. **目录浏览器**（`browsedir.ts` 纯函数 + `ui/overlays/DirBrowser.tsx`）。**overlay 而不是 composer 对话框**：§6.5 把这条线画在一个地方——输入框上面的对话框永不许超屏，而一个目录的列表显然会，所以它拿 overlay 的骨架（标题 · 一个空行 · 主体 · 最后一行 dim 的键）并且主体是 scrollbox；标题**不带 glyph**，它是一个**地方**。**只有一个动词**：`Enter` 永远拿光标那一行（目录进去，`no project`/recent/`use this directory` 选定）——两个显然的动词会打架，而**打字把光标放到 `use this directory` 上**这一条让「在输入框按 Enter」和「在一行上按 Enter」变成同一次击键做同一件事，不是两条要分开记的规则。路径框全程持键盘（能粘贴路径是终端用户第一个要的东西），所以光标只认 `↑↓`——`j`/`k` 是路径里的字母。纯函数那半（`expandPath` / `resolveTyped` / `visibleChildren` / `browserRows`）不碰磁盘也不碰终端，于是「在这个前缀上会画出哪些行」是一个测得出的问题。**打字是收窄而不是清空**：`~/src/nul` 列 `~/src` 里以 `nul` 开头的，这正是「打几个字、然后点」能成立的原因。
+4. **无项目 session**：家 workspace = `<NULYA_HOME | ~/.nulya>/home/`，经 `userConfigDir` 解析（`NULYA_HOME` 只有一处读，测试的 preload 因此带得动它）。**不是 `~` 本身**，理由是结构性的而不是整洁：`~/.nulya` 是 user 层，塌在一起会让 user extension store 被内核 trust gate 误认成未信任的 workspace store 而**拒开 session**（DESIGN §9）。往下一层，两层还是两层。这一场**整段跳过 `[extensions] session_prompts`**：那些 renderer 画的是项目（布局、instruction 文件、这个分支、这棵工作树），而 `no project` 的答案正是「没有项目」——每一段都会是空话，而且它进的是缓存前缀、每一步都在付。**不是「问了然后忽略」**：这里没有让它答对的东西。测试用一个**不存在的** renderer 把这条钉住：普通 workspace 会说 `not composed in`，家 workspace 的**沉默**因此是「那个循环没跑」的证据而不是「碰巧成功了」。
+5. **列表按 workspace 分组**（`SessionsView.groupedRows`）。打开的 tab 的 workspace 全列，每组各跑一次 `session list --json`（一个目录答不上来变成一个空组加一句 notice，而不是整屏没有——别的组还是真的）。**只有第二个 workspace 出现时才有组头**：单 workspace 的屏幕逐位等于 T70 结束时那一帧，快照钉住了这一点。空组也保留自己的组头——一个刚走进去还没说过话的目录，恰恰是最需要看见它在那儿的那个。组头是**画得出但停不上去**的行（`nextSelectable`）：`Enter` 在组头上没有事可做，而一个会停在按不动的行上的光标是要按两次的光标。组头的 dim 全路径在放不下时**整个不画**（`min_path`，rail 上就是这样）——`C:\U…` 不是消歧，是那个真正干活的词前面的四格噪音。
+6. **信任与开屏流程按 workspace 首次进入时走**。launch workspace 仍由 `main.tsx` 在裸终端上问——那一刻还没有屏幕，那仍是对的地方；此后**第一个进入某个目录的 tab** 触发 `enterWorkspace`，用的是同一批纯函数（`planProjectStore` / `planProjectAgents` / `planCheckout`），差别只在答案在哪儿给。`ui/CheckoutPrompt.tsx` 是输入框上面的对话框、**trusted zone**、在 `resolveFocus` 里排在最外层——它是唯一一个**授予权限**而不是选一样东西的对话框。它一个字都不自己写：文案、键、每个键的含义全是 `planCheckout` 的，所以两处问法不可能漂移成两笔不同的交易。`syncStores` 因此收了两个参数（`where` + `SyncPlan`）而不是复制二十行。内核 trust gate 的硬拒照旧原样显示在那个 tab 里（`refusal`，T46 那条通道一个字没改）。
+7. **recents 在 user 层**（`state/recents.ts`，`tui-recents.json`）。为什么是第二个文件而不是 `tui-state.json` 的一个键：那个文件在其它每一处都是 **workspace 层**的事实，而这一条是**关于好几个目录**的——一份别的目录的清单不能住在其中一个目录里面（`trusted-stores.jsonl` 因为同一个理由在 user 层）。**建场成功时才记**，浏览到不算。家 workspace 不记（它有恒定的第一行，再来一条就是同一个地方被给了两次）。
+8. **持久与恢复**（`tui-state.json` 的 `tabs`）。tab 是一对所以记也记一对：一个 id 说不出它是从哪个 `.nulya/sessions/` 里来的。恢复**只做第一个之后的那些**——第一个仍由这一趟启动决定（`--session`，否则 draft，T22），所以单 tab 的屏幕逐帧不变，而把四场对话开在两个仓库里的人回来时东西还在原处。恢复不创建任何东西（draft 不记，文件已经不在的 session 跳过），写是一个普通 effect 而不是退出时保存：`Ctrl+C`、被杀的终端、崩溃都不走退出路径，而一份只在干净退出时写的记录，恰好在最需要它的时候是错的。
+
+**设计语言（§6 九条）**：新的可见物只有四样——浏览器整面、组头、workspace chip、checkout 对话框。① 颜色：`no project` / `use this directory` 用 `accent.evolve`（可点的去处），`..` 用 `faint`（家具），组头名字 `accent.evolve` + 路径 `dim`，checkout 整行 `warn`（这个前端里「等你回答」的那一档）；一屏 accent 仍 ≤3。② 对齐：浏览器每行 gutter 两格、内容第 3 列起，`▪` 成列在右边距；组头与 session 行同一个左边缘。③ 留白：不发明第三种密度——浏览器是 overlay 那套（标题 · 空行 · 主体 · 底部一行），checkout 是对话框那套（标题 · 主体 · 一行键，不空行）。④ **没有的东西不占列**：workspace chip 只在说得出新东西时存在（第二个 workspace 在场，或这个 tab 是 `no project`），组头只在有第二组时存在，组头的路径放不下就整个不画，`..` 在文件系统根上不存在。⑤ 无新边框。⑥ **新 glyph `▪` 已进 §6.3 表**，并写明它为什么**不是** `⚡`（那个说的是「刚刚获得了一样能力」）。⑦ 全部 `fit`，不换行；快照断言了每一行都在两条边距之内。⑧ 每面仍只有一行 dim 的「我能做什么」。⑨ 没有新动效。
+
+**测试**（`test/workspace.test.tsx`，22 条）。模型那半不开终端：家 workspace 的解析经 `NULYA_HOME`（且**不是** `~/.nulya` 本身）· `expandPath` 的 `~` / 盘符 / 相对 · `resolveTyped` 的收窄与结尾分隔符 · `browserRows` 的四条（`no project` 恒第一、`..` 段首、点目录不列、同一个地方不出现两次）· recents 的读写与「家 workspace 不记」· `groupedRows` 的「一个 workspace 没有组头 / 第二个才有 / 空组保留组头」与 `nextSelectable` 跨过组头 · `promptLines` / `choiceHint` 只是把 plan 重讲一遍。屏幕那半花真二进制：**`/cwd` 之后 session 落在那个目录里、这边一场都没有**（S1c 的全部主张）· `no project` 落在 `NULYA_HOME/home` 且不问 renderer · `+` 继承 front tab 的目录 · 记住的 tab 带着自己的目录回来 · 文件已经不在的那条被跳过 · 浏览器 80/120 两帧快照（临时路径**按等宽掩码**再存——快照是拿来钉版式的，一个会缩短行的掩码就是钉了一个没人见过的版式）。
+
+**给 S1d（`goals/tui-shell.md` §5.3c，sub-agent pane）的接口提醒**：① 那棵「tab 内容区自己的 pane 树」要挂在 tab 上，而 tab 现在已经是一对了——`TabCommon` 是它的家，和 `ws` 并排；② 子 pane 的 observer transcript 必须用**父 tab 的 `ws`**（委派出去的子场就在那个目录里，`navigate.openSession` 这一轮已经按这条改了）；③ `openWorkspaces()` 是「屏幕上有哪些目录」的唯一答案，pane 树多一层不该给它第二个；④ 焦点仲裁器已经有 `checkout` 这一档在最外层，S1d 的 pane 走的仍是 `surface` 那一档，不需要新的枚举值。
+
+**没做**：pane 树里的 workspace（一个 tab 的所有 pane 共用它的目录——S1d 的子 pane 观察的是这一场委派出去的子场，同目录）· 插件宿主仍按**启动目录**加载与 `extRun`（`createPluginHost` 是每进程一个，契约上就是这么写的；把它变成每 tab 一个是 S2 的事，那时 `tui/plugin-api.d.ts` 才会动）· 跨 workspace 的 `session list` 合并（每组各答各的，内核一次只投影一个 `.nulya/sessions/`）· 目录浏览器的新建目录 / 文件预览 / 多选（§5.3b 明说不做）。

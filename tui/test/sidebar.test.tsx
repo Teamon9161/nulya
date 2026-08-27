@@ -470,7 +470,7 @@ test("an unfocused rail draws no cursor row, because Enter would not act on it",
     testRender(
       () => (
         <SessionsView
-          ws={ws}
+          workspaces={[ws]}
           variant="sidebar"
           width={20}
           currentId={mine}
@@ -512,7 +512,7 @@ test("the list is about the sessions a person is having, and says how many it is
 
   const setup = await testRender(
     () => (
-      <SessionsView ws={ws} currentId={mine} onSwitch={() => {}} onOpenTab={() => {}} onNew={() => {}} onClose={() => {}} />
+      <SessionsView workspaces={[ws]} currentId={mine} onSwitch={() => {}} onOpenTab={() => {}} onNew={() => {}} onClose={() => {}} />
     ),
     { width: 110, height: 20 },
   )

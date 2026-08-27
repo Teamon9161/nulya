@@ -126,11 +126,29 @@ export function Welcome(props: {
    * under the eye while the eye is on it is not a tip, it is a distraction.
    */
   tip?: string
+  /**
+   * The `cwd` row is a control: clicking it opens the directory browser
+   * (goals/tui-shell.md §5.3b point 2). It is here rather than anywhere else
+   * because this is the screen a tab shows while its directory is still a
+   * DECISION — the row was already saying which directory, and the only thing
+   * it was missing was that you can change it.
+   *
+   * Without the callback — a card rendered on its own, a test — it is the
+   * plain fact it always was and does not light up, exactly as the `/` rows
+   * below behave without `onCommand`.
+   */
+  onPickCwd?: () => void
 }) {
   const style = useStyle()
   const screen = useScreen()
   const wide = () => screen().width >= 60
   const [hovered, setHovered] = createSignal(-1)
+  /**
+   * The `cwd` row's slot in the same hover signal the command rows use. A
+   * negative index because those are 0..n over `openings` and this row is not
+   * one of them — one signal, so two rows can never be lit at once.
+   */
+  const cwd_row = -2
   /** The width a value has beside its label, less the box's own left pad. */
   const valueWidth = () => Math.max(8, screen().width - 2 - label_width - 1)
 
@@ -163,7 +181,23 @@ export function Welcome(props: {
           after this screen is gone, so it is not repeated here; the workspace
           and the face are the two facts nothing else on screen says at length. */}
       <Show when={props.cwd}>
-        <Fact label="cwd" value={props.cwd!} width={valueWidth()} />
+        {(() => {
+          const click = onClick(() => props.onPickCwd?.())
+          const live = () => props.onPickCwd !== undefined
+          return (
+            <box
+              flexDirection="column"
+              width="100%"
+              backgroundColor={live() && hovered() === cwd_row ? style.theme.hover : undefined}
+              onMouseDown={live() ? click.onMouseDown : undefined}
+              onMouseUp={live() ? click.onMouseUp : undefined}
+              onMouseOver={() => setHovered(cwd_row)}
+              onMouseOut={() => setHovered((now) => (now === cwd_row ? -1 : now))}
+            >
+              <Fact label="cwd" value={props.cwd!} width={valueWidth()} />
+            </box>
+          )
+        })()}
       </Show>
       <Show when={props.plan}>
         <Fact label="tools" value={tools()} width={valueWidth()} fg={style.theme.fg} />

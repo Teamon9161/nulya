@@ -33,6 +33,7 @@ import { createHover, onClick, rowBackground, rowGutter } from "../rows.ts"
 import { OverlayFooter, createKeyHelp } from "./Footer.tsx"
 import { personaOf } from "../../agents.ts"
 import { sessionList, type SessionListEntry, type Verdict } from "../../nulya/cli.ts"
+import { workspaceLabel } from "../../workspaces.ts"
 import { probeWriterLease, type LeaseState } from "../../nulya/files.ts"
 import type { Workspace } from "../../nulya/bin.ts"
 
@@ -165,6 +166,76 @@ export function title(entry: SessionListEntry): string {
   return entry.first_user_text.length > 0 ? entry.first_user_text : "nothing said yet"
 }
 
+/** One workspace's sessions, as the list holds them (§5.3b point 4). */
+export interface SessionGroup {
+  readonly ws: Workspace
+  readonly entries: readonly SessionListEntry[]
+}
+
+/**
+ * A row of the list: a workspace heading, or a session under one.
+ *
+ * Sessions carry their own workspace because that is what acting on one needs
+ * — a session in another directory is opened with THAT directory's cwd or it
+ * is not opened at all.
+ */
+export type ListRow =
+  | { readonly kind: "group"; readonly ws: Workspace }
+  | { readonly kind: "session"; readonly ws: Workspace; readonly entry: SessionListEntry; readonly depth: number }
+
+/**
+ * Every row, in order: the front tab's workspace first, and a heading per
+ * group ONLY when there is more than one.
+ *
+ * The condition is the whole of how this feature stays invisible until it is
+ * used (§6.1 rule 4: what is not there does not take a row). With one
+ * workspace open — which is every session anybody has had until they open a
+ * second directory — this returns exactly what it returned before S1c, so the
+ * screen is unchanged down to the cell.
+ *
+ * A group with no sessions still gets its heading: a directory somebody just
+ * walked into and has not said anything in yet is precisely the one they need
+ * to see is there.
+ */
+export function groupedRows(groups: readonly SessionGroup[], showAgents: boolean): ListRow[] {
+  const many = groups.length > 1
+  const out: ListRow[] = []
+  for (const group of groups) {
+    const shown = showAgents ? group.entries : partitionSessions(group.entries).own
+    if (many) out.push({ kind: "group", ws: group.ws })
+    for (const row of sessionRows(shown)) {
+      out.push({ kind: "session", ws: group.ws, entry: row.entry, depth: row.depth })
+    }
+  }
+  return out
+}
+
+/**
+ * The next row the cursor may land on, walking in `delta`'s direction.
+ *
+ * Headings are drawn but never selected: `Enter` on one has nothing to do, and
+ * a cursor that stops on rows it cannot act on is a cursor that has to be
+ * pressed twice. Returns `at` unchanged when there is nothing further that way,
+ * which is what makes `j` at the bottom a no-op rather than a wrap.
+ */
+export function nextSelectable(rows: readonly ListRow[], at: number, delta: number): number {
+  const step = delta > 0 ? 1 : -1
+  let index = at
+  for (let moved = 0; moved < Math.abs(delta) || rows[index]?.kind !== "session"; ) {
+    const candidate = index + step
+    if (candidate < 0 || candidate >= rows.length) break
+    index = candidate
+    if (rows[index]?.kind === "session") moved += 1
+  }
+  return rows[index]?.kind === "session" ? index : at
+}
+
+/** The first row a cursor may sit on, or 0 when the list has none. */
+export function firstSelectable(rows: readonly ListRow[]): number {
+  const at = rows.findIndex((row) => row.kind === "session")
+  return at < 0 ? 0 : at
+}
+
 /**
  * What fits in one row of the narrow variant, from the outside in (T69).
  *
@@ -224,8 +295,85 @@ export function sidebarRowPlan(
   return { ...plan, said: Math.max(0, room()) }
 }
 
+/**
+ * A row's session, and its depth, for the two row bodies below.
+ *
+ * A heading row has neither, and both bodies read the fields unconditionally —
+ * they are inside a `<Show>` that never draws them for a heading, but Solid's
+ * accessors are still evaluated while the fallback is chosen. An empty session
+ * rather than a guard at every field: nothing is drawn from it, and the
+ * alternative is twenty `row().kind === "session" &&` in a row that already
+ * knows what it is.
+ */
+const no_session: SessionListEntry = {
+  id: "",
+  created: "",
+  first_user_text: "",
+  events: 0,
+  composition: { active: [], native_tools: [], prompts: [] },
+} as unknown as SessionListEntry
+
+function sessionOf(row: ListRow): SessionListEntry {
+  return row.kind === "session" ? row.entry : no_session
+}
+
+function depthOf(row: ListRow): number {
+  return row.kind === "session" ? row.depth : 0
+}
+
+/**
+ * A workspace heading (§5.3b point 4): its name, then its path in the room
+ * that is left.
+ *
+ * Drawn ONLY when more than one workspace is open (`groupedRows`), so a screen
+ * with one directory has never seen this row. The name is what a person
+ * recognises; the path is the disambiguation for the day two checkouts of the
+ * same repository are open, which is why it is dim and cut rather than absent.
+ * The gutter is two blank columns like every other row's, so the name starts on
+ * the same column the sentences below it do (§6.5).
+ */
+/**
+ * The narrowest a path may be cut to and still be worth its columns.
+ *
+ * On the rail there is room for the NAME and nothing else, and a five-column
+ * stub of a path is not a disambiguation — it is noise in front of the one
+ * word that does the work. Under this the path is not drawn at all (§6.1 rule
+ * 4), which is the same "give up cells from the outside in" rule
+ * `sidebarRowPlan` follows one screen over.
+ */
+const min_path = 16
+
+function GroupHeading(props: { ws: Workspace; width: number }) {
+  const style = useStyle()
+  const name = () => workspaceLabel(props.ws.dir)
+  const room = () => Math.max(0, props.width - 2 - displayWidth(name()) - 2)
+  return (
+    <box flexDirection="row" width="100%" height={1} flexShrink={0}>
+      <text fg={style.theme.faint} flexShrink={0}>
+        {"  "}
+      </text>
+      <text fg={style.theme.accent.evolve} flexShrink={0}>
+        {name()}
+      </text>
+      <text fg={style.theme.dim} flexShrink={1}>
+        {room() >= min_path ? `  ${fit(props.ws.dir, room())}` : ""}
+      </text>
+    </box>
+  )
+}
+
 export function SessionsView(props: {
-  ws: Workspace
+  /**
+   * The workspaces to list, the front tab's first (§5.3b point 4).
+   *
+   * A LIST rather than one workspace, because a tab is (workspace, session)
+   * now and the point of the sessions list is finding the conversation you
+   * want — which is as likely to be in the other repository you have a tab in.
+   * Each group is its own `session list --json`: the kernel projects one
+   * `.nulya/sessions/` at a time, and nothing here merges two directories into
+   * one store.
+   */
+  workspaces: readonly Workspace[]
   /** The session in front, so the list can say which one that is. */
   currentId: string
   /**
@@ -238,9 +386,9 @@ export function SessionsView(props: {
    * folder or a chat does; growing the tab strip by one every time somebody
    * looks at an old session is the thing a person then has to undo.
    */
-  onSwitch: (id: string) => void
+  onSwitch: (id: string, ws: Workspace) => void
   /** …and the deliberate one: keep what is here and give that session a tab too. */
-  onOpenTab: (id: string) => void
+  onOpenTab: (id: string, ws: Workspace) => void
   onNew: () => void
   onClose: () => void
   /**
@@ -263,7 +411,8 @@ export function SessionsView(props: {
 }) {
   const style = useStyle()
   const screen = useScreen()
-  const [entries, setEntries] = createSignal<SessionListEntry[]>([])
+  const [groups, setGroups] = createSignal<SessionGroup[]>([])
+  const entries = () => groups().flatMap((group) => group.entries)
   const [leases, setLeases] = createSignal<Record<string, LeaseState>>({})
   const [cursor, setCursor] = createSignal(0)
   const [notice, setNotice] = createSignal<string | null>(null)
@@ -273,19 +422,36 @@ export function SessionsView(props: {
   const hover = createHover()
   const help = createKeyHelp()
 
+  /**
+   * One `session list --json` per workspace. A directory that will not answer
+   * becomes an empty group and a notice rather than an empty screen: the other
+   * groups are still true, and losing all of them because one path went away
+   * (an unmounted drive, a deleted checkout) is the wrong trade.
+   */
   const refresh = async () => {
-    try {
-      setEntries(await sessionList(props.ws))
-      setNotice(null)
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error))
+    const found: SessionGroup[] = []
+    const failures: string[] = []
+    for (const one of props.workspaces) {
+      try {
+        found.push({ ws: one, entries: await sessionList(one) })
+      } catch (error) {
+        found.push({ ws: one, entries: [] })
+        failures.push(`${workspaceLabel(one.dir)}: ${error instanceof Error ? error.message : String(error)}`)
+      }
     }
+    setGroups(found)
+    setNotice(failures[0] ?? null)
   }
+
+  /** A lease is per (workspace, session): the lock file is beside the session file. */
+  const leaseKey = (ws: Workspace, id: string) => `${ws.dir}|${id}`
 
   /** Cheap, file-only, and the one thing the projection cannot carry: who is writing now. */
   const probe = () => {
     const seen: Record<string, LeaseState> = {}
-    for (const entry of entries()) seen[entry.id] = probeWriterLease(props.ws, entry.id)
+    for (const group of groups()) {
+      for (const entry of group.entries) seen[leaseKey(group.ws, entry.id)] = probeWriterLease(group.ws, entry.id)
+    }
     setLeases(seen)
   }
 
@@ -313,8 +479,11 @@ export function SessionsView(props: {
   // so a session was just started or opened and the list is a beat behind the
   // thing it is a list of.
   createEffect((seen: string | undefined) => {
-    const now = props.currentId
-    if (seen !== undefined && seen !== now && docked()) void refresh().then(probe)
+    const now = `${props.currentId}|${props.workspaces.map((one) => one.dir).join("|")}`
+    // …and the same beat for a workspace arriving or leaving: a tab that just
+    // walked into a directory adds a whole group, and waiting twenty seconds
+    // for it would make the sidebar look like it had not noticed.
+    if (seen !== undefined && seen !== now) void refresh().then(probe)
     return now
   })
 
@@ -347,15 +516,15 @@ export function SessionsView(props: {
    * under its parent only when the parent is in the same list, so a hidden
    * parent leaves its children as roots rather than as an indent under nothing.
    */
-  const rows = createMemo(() => sessionRows(showAgents() ? entries() : split().own))
-  const rowId = (id: string) => `session-row:${id}`
+  const rows = createMemo(() => groupedRows(groups(), showAgents()))
+  /** Positional, because `<Index>` is: one renderable per slot, contents change. */
+  const rowId = (index: number) => `session-row:${index}`
   createEffect(() => {
-    const count = rows().length
-    if (cursor() >= count) setCursor(Math.max(0, count - 1))
+    const list_rows = rows()
+    if (list_rows[cursor()]?.kind !== "session") setCursor(firstSelectable(list_rows))
   })
   createEffect(() => {
-    const row = rows()[cursor()]
-    if (row) list?.scrollChildIntoView(rowId(row.entry.id))
+    if (rows()[cursor()]) list?.scrollChildIntoView(rowId(cursor()))
   })
 
   /**
@@ -366,12 +535,17 @@ export function SessionsView(props: {
   const clock = createMemo(() => {
     const now = Date.now()
     let widest = 0
-    for (const row of rows()) widest = Math.max(widest, displayWidth(ago(row.entry.created, now)))
+    for (const row of rows()) {
+      if (row.kind === "session") widest = Math.max(widest, displayWidth(ago(row.entry.created, now)))
+    }
     return widest
   })
 
   /** The id of the row the cursor is on: unreadable, occasionally needed, printed once. */
-  const pointed = () => rows()[cursor()]?.entry.id ?? ""
+  const pointed = () => {
+    const row = rows()[cursor()]
+    return row?.kind === "session" ? row.entry.id : ""
+  }
 
   /**
    * What the full view's key line adds about the rows it is not drawing (T70),
@@ -386,17 +560,16 @@ export function SessionsView(props: {
   }
 
   const move = (delta: number) => {
-    const count = rows().length
-    if (count === 0) return
-    setCursor(Math.min(Math.max(cursor() + delta, 0), count - 1))
+    if (rows().length === 0) return
+    setCursor(nextSelectable(rows(), cursor(), delta))
   }
 
-  const act = (index: number, take: (id: string) => void) => {
+  const act = (index: number, take: (id: string, ws: Workspace) => void) => {
     const row = rows()[index]
-    if (row) take(row.entry.id)
+    if (row?.kind === "session") take(row.entry.id, row.ws)
   }
-  const go = () => act(cursor(), props.onSwitch)
-  const goToTab = () => act(cursor(), props.onOpenTab)
+  const go = () => act(cursor(), (id, where) => props.onSwitch(id, where))
+  const goToTab = () => act(cursor(), (id, where) => props.onOpenTab(id, where))
 
   /**
    * ONE CLICK GOES THERE, TWO GIVE IT A TAB (T70).
@@ -428,13 +601,14 @@ export function SessionsView(props: {
   }
   onCleanup(forget)
   const clickRow = (index: number) => {
+    if (rows()[index]?.kind !== "session") return
     setCursor(index)
     const twice = pending?.index === index
     forget()
-    if (twice) return act(index, props.onOpenTab)
+    if (twice) return act(index, (id, where) => props.onOpenTab(id, where))
     const timer = setTimeout(() => {
       pending = null
-      act(index, props.onSwitch)
+      act(index, (id, where) => props.onSwitch(id, where))
     }, double_click_ms)
     pending = { index, timer }
   }
@@ -476,31 +650,33 @@ export function SessionsView(props: {
         <Index each={rows()}>
           {(item, index) => {
             const row = () => item()
+            const entry = () => sessionOf(row())
             const tone = () => ({ selected: owns_keys() && index === cursor(), hovered: hover.at() === index })
             const gutter = () => rowGutter(style, tone())
-            const here = () => row().entry.id === props.currentId
-            const verdict = () => row().entry.outcome?.verdict ?? null
+            const here = () => entry().id === props.currentId
+            const verdict = () => entry().outcome?.verdict ?? null
             const click = onClick(() => clickRow(index))
-            const persona = () => personaOf(row().entry.composition.prompts)
+            const persona = () => personaOf(entry().composition.prompts)
             const plan = () =>
               sidebarRowPlan(rowInner(), {
-                indent: row().depth * 2,
+                indent: depthOf(row()) * 2,
                 // The glyph alone: at eighteen columns a persona's name would
                 // be taken out of the sentence, and what the rail has to say
                 // is that this row is a different KIND of thing. The full view
                 // beside it names which one.
                 persona: persona() ? ` ${style.glyphs.picker}` : "",
                 here: here() ? ` ${style.glyphs.bar}` : "",
-                live: leases()[row().entry.id] === "held" ? ` ${style.glyphs.assistant}` : "",
+                live: leases()[leaseKey(row().ws, entry().id)] === "held" ? ` ${style.glyphs.assistant}` : "",
                 verdict: verdict() ? ` ${verdict_glyph[verdict()!]}` : "",
                 // Padded to the width of the widest one on screen, the same
                 // way the full view does it: a clock that starts in a
                 // different column on every row is not a column (§6.1 rule 2).
-                clock: ` ${ago(row().entry.created).padStart(clock())}`,
+                clock: ` ${ago(entry().created).padStart(clock())}`,
               })
             return (
+              <Show when={row().kind === "session"} fallback={<GroupHeading ws={row().ws} width={rowInner()} />}>
               <box
-                id={rowId(row().entry.id)}
+                id={rowId(index)}
                 flexDirection="row"
                 width="100%"
                 height={1}
@@ -512,19 +688,19 @@ export function SessionsView(props: {
               >
                 <text fg={gutter().fg} flexShrink={0}>
                   {gutter().text}
-                  {"  ".repeat(row().depth)}
+                  {"  ".repeat(depthOf(row()))}
                 </text>
                 <box flexDirection="row" flexGrow={1} flexShrink={1} flexBasis={0}>
                   <text
                     fg={
-                      row().entry.first_user_text.length === 0
+                      entry().first_user_text.length === 0
                         ? style.theme.faint
                         : here()
                           ? style.theme.accent.user
                           : style.theme.fg
                     }
                   >
-                    {fit(title(row().entry), plan().said)}
+                    {fit(title(entry()), plan().said)}
                   </text>
                 </box>
                 <Show when={plan().persona.length > 0}>
@@ -562,6 +738,7 @@ export function SessionsView(props: {
                   </text>
                 </Show>
               </box>
+              </Show>
             )
           }}
         </Index>
@@ -656,14 +833,15 @@ export function SessionsView(props: {
             // that would not answer `Enter` is a promise the screen cannot keep
             // (T69, and the same reason the docked variant withholds it).
             const selected = () => owns_keys() && index === cursor()
+            const entry = () => sessionOf(row())
             const tone = () => ({ selected: selected(), hovered: hover.at() === index })
             const gutter = () => rowGutter(style, tone())
-            const live = () => leases()[row().entry.id] === "held"
-            const here = () => row().entry.id === props.currentId
-            const verdict = () => row().entry.outcome?.verdict ?? null
+            const live = () => leases()[leaseKey(row().ws, entry().id)] === "held"
+            const here = () => entry().id === props.currentId
+            const verdict = () => entry().outcome?.verdict ?? null
             const click = onClick(() => clickRow(index))
-            const clock_cell = () => ` ${ago(row().entry.created).padStart(clock())}`
-            const persona = () => personaOf(row().entry.composition.prompts)
+            const clock_cell = () => ` ${ago(entry().created).padStart(clock())}`
+            const persona = () => personaOf(entry().composition.prompts)
             /** The chips that sit at the end of the row, when they apply. */
             const chips = () =>
               (persona() ? ` ${style.glyphs.picker} ${persona()}` : "") +
@@ -677,10 +855,11 @@ export function SessionsView(props: {
              * chip together are exactly the second row that garbles the first.
              */
             const said = () =>
-              Math.max(0, rowInner() - 2 - row().depth * 2 - displayWidth(clock_cell()) - displayWidth(chips()))
+              Math.max(0, rowInner() - 2 - depthOf(row()) * 2 - displayWidth(clock_cell()) - displayWidth(chips()))
             return (
+              <Show when={row().kind === "session"} fallback={<GroupHeading ws={row().ws} width={rowInner()} />}>
               <box
-                id={rowId(row().entry.id)}
+                id={rowId(index)}
                 flexDirection="row"
                 width="100%"
                 height={1}
@@ -692,20 +871,20 @@ export function SessionsView(props: {
               >
                 <text fg={gutter().fg} flexShrink={0}>
                   {gutter().text}
-                  {"  ".repeat(row().depth)}
+                  {"  ".repeat(depthOf(row()))}
                 </text>
                 {/* The subject of the row, and the reason the row exists. */}
                 <box flexDirection="row" flexGrow={1} flexShrink={1} flexBasis={0}>
                   <text
                     fg={
-                      row().entry.first_user_text.length === 0
+                      entry().first_user_text.length === 0
                         ? style.theme.faint
                         : here()
                           ? style.theme.accent.user
                           : style.theme.fg
                     }
                   >
-                    {fit(title(row().entry), said())}
+                    {fit(title(entry()), said())}
                   </text>
                 </box>
                 {/* Which persona this session was handed, when it is one an
@@ -749,6 +928,7 @@ export function SessionsView(props: {
                   {clock_cell()}
                 </text>
               </box>
+              </Show>
             )
           }}
         </Index>

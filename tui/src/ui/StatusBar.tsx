@@ -91,6 +91,15 @@ export function StatusBar(props: {
    */
   sidebarOpen?: boolean
   onToggleSidebar?: () => void
+  /**
+   * Which directory this tab works in, when saying so distinguishes anything
+   * (§5.3b). Absent on the single-workspace screen — the one everybody has
+   * until they open a second directory — so no column is taken and this line
+   * is unchanged.
+   */
+  workspace?: string
+  /** The mouse half of `/cwd`: open the directory browser. */
+  onPickCwd?: () => void
 }) {
   const style = useStyle()
   const screen = useScreen()
@@ -105,7 +114,9 @@ export function StatusBar(props: {
   const extClick = onClick(() => props.onOpenExt?.())
   const toolsClick = onClick(() => props.onOpenExt?.())
   const [overSidebar, setOverSidebar] = createSignal(false)
+  const [overCwd, setOverCwd] = createSignal(false)
   const sidebarClick = onClick(() => props.onToggleSidebar?.())
+  const cwdClick = onClick(() => props.onPickCwd?.())
   /**
    * The handle is there whenever the sidebar could be. Under 60 columns it
    * cannot open at all (`sidebar_min_width`, the same width the chips on the
@@ -177,8 +188,22 @@ export function StatusBar(props: {
    * model, for the same reason the model reads before the cost.
    */
   const modeChip = () => (props.mode && screen().width >= 60 ? props.mode : "")
+  /**
+   * Which directory this tab works in — but ONLY when that is news (§5.3b,
+   * §6.1 rule 4).
+   *
+   * `App` passes it when the answer is not the one and only answer: a second
+   * workspace has a tab open, or this tab is the `no project` one. On the
+   * screen everybody has had until now — one directory, the one they launched
+   * in — this is empty, no column is taken, and the line is byte for byte the
+   * line it was. The cwd row on the welcome screen says it at length while a
+   * tab is still a draft; this is what survives the first message.
+   */
+  const cwdChip = () => (props.workspace && screen().width >= 60 ? props.workspace : "")
   /** The separator belongs outside the clickable box, so the chip is the word. */
   const modeLead = () => (modeChip() ? `${modeChip()} · ` : "")
+  /** The chip plus its joint, for the width arithmetic above. */
+  const cwdLead = () => (cwdChip().length > 0 ? `${cwdChip()} · ` : "")
   /** ` ◈ evolution` — the mode this session is WEARING, not the permission one. */
   const wearingChip = () => {
     const worn = props.wearing ?? []
@@ -206,7 +231,10 @@ export function StatusBar(props: {
    * the composition card above says the same thing at length.
    */
   const layout = createMemo(() => {
-    const budget = Math.max(0, screen().width - 2 - displayWidth(sidebarChip()) - displayWidth(modeLead()))
+    const budget = Math.max(
+      0,
+      screen().width - 2 - displayWidth(sidebarChip()) - displayWidth(modeLead()) - displayWidth(cwdLead()),
+    )
     const right =
       displayWidth(contextChip()) +
       displayWidth(behindChip()) +
@@ -293,6 +321,30 @@ export function StatusBar(props: {
               {" · "}
             </text>
           </Show>
+          {/* Where this tab works, when there is more than one answer on this
+              screen (§5.3b). After the mode and before the model, which is the
+              order the three of them frame a turn in: how a call will be
+              judged, where it will run, what is being asked. A click opens the
+              directory browser — the mouse half of `/cwd`, exactly as the mode
+              chip is the mouse half of `/mode`. */}
+          {cwdChip().length > 0 ? (
+            <>
+              <box
+                flexShrink={0}
+                height={1}
+                backgroundColor={props.onPickCwd && overCwd() ? style.theme.hover : undefined}
+                onMouseDown={props.onPickCwd ? cwdClick.onMouseDown : undefined}
+                onMouseUp={props.onPickCwd ? cwdClick.onMouseUp : undefined}
+                onMouseOver={() => setOverCwd(true)}
+                onMouseOut={() => setOverCwd(false)}
+              >
+                <text fg={style.theme.dim}>{cwdChip()}</text>
+              </box>
+              <text fg={style.theme.dim} flexShrink={0}>
+                {" · "}
+              </text>
+            </>
+          ) : null}
           <box flexDirection="row" flexGrow={1} flexShrink={1} flexBasis={0}>
             {/* The model is the subject of this line and the one thing on it that
                 answers to a click — it opens `/model`, the way tcode's model line

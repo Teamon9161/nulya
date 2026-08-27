@@ -49,6 +49,7 @@ export interface HostViews {
   usage: (mount: SurfaceMount) => JSX.Element
   model: (mount: SurfaceMount) => JSX.Element
   provider: (mount: SurfaceMount) => JSX.Element
+  cwd: (mount: SurfaceMount) => JSX.Element
 }
 
 function surface(
@@ -87,5 +88,13 @@ export function hostSurfaces(views: HostViews): SurfaceDefinition<JSX.Element>[]
     surface(overlay_surfaces.usage, "usage", true, views.usage),
     surface(overlay_surfaces.model, "model", true, views.model),
     surface(overlay_surfaces.provider, "providers", true, views.provider),
+    /**
+     * The directory browser (§5.3b). A PLACE rather than an identity, so its
+     * title carries no glyph (§6.5) — and an overlay rather than a composer
+     * dialog because it is a list that can outgrow the screen and therefore
+     * needs a scrollbox, which is the line §6.5 draws between the two
+     * skeletons.
+     */
+    surface(overlay_surfaces.cwd, "directory", true, views.cwd),
   ]
 }

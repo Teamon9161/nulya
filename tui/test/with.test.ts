@@ -51,6 +51,7 @@ test("a draft tab is named by what it wears as well as what it runs on", () => {
   const draft = (model: string, bring?: WithRef): Tab => ({
     kind: "draft",
     key: `draft-${model}-${bring?.id ?? ""}`,
+    ws: { dir: "/w", bin: "/w/nulya" },
     pick: () => ({ profile: "scripted", model }),
     setPick: () => {},
     bring: () => bring,

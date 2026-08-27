@@ -93,6 +93,23 @@ export interface TuiState {
    * is wide enough.
    */
   sidebar?: { open: boolean; ratio: number }
+  /**
+   * The tabs that were open, in order, each with the directory it works in
+   * (goals/tui-shell.md §5.3b point 8).
+   *
+   * A tab is (workspace, session), so remembering one means remembering both —
+   * an id alone cannot say which `.nulya/sessions/` it came out of once a
+   * screen can hold tabs in two directories.
+   *
+   * What is done with it on the next launch is deliberately narrow: the FIRST
+   * tab is decided exactly as it always was (`--session`, else a draft, T22),
+   * and only the tabs BEYOND it come back. So the single-tab screen everybody
+   * has is unchanged down to the frame, and the person who left four
+   * conversations open in two repositories finds them where they left them.
+   * Nothing is created by restoring: a draft is not remembered (it is nothing
+   * on disk), and a session whose file has since gone is skipped.
+   */
+  tabs?: { ws: string; session?: string }[]
 }
 
 export function tuiStatePath(env: Record<string, string | undefined> = process.env): string {
@@ -147,6 +164,18 @@ export function loadTuiState(path = tuiStatePath()): TuiState {
         ratio: typeof ratio === "number" && Number.isFinite(ratio) ? ratio : default_sidebar_ratio,
       }
     }
+    const tabs = record["tabs"]
+    if (Array.isArray(tabs)) {
+      const kept: { ws: string; session?: string }[] = []
+      for (const slot of tabs) {
+        if (typeof slot !== "object" || slot === null || Array.isArray(slot)) continue
+        const where = (slot as Record<string, unknown>)["ws"]
+        if (typeof where !== "string" || where.length === 0) continue
+        const session = (slot as Record<string, unknown>)["session"]
+        kept.push({ ws: where, ...(typeof session === "string" && session.length > 0 ? { session } : {}) })
+      }
+      state.tabs = kept
+    }
     const plugins = record["plugins"]
     if (typeof plugins === "object" && plugins !== null && !Array.isArray(plugins)) {
       const slots: Record<string, Record<string, unknown>> = {}
@@ -200,6 +229,13 @@ export function rememberSessionPins(pins: readonly string[], path = tuiStatePath
 export function rememberSidebar(sidebar: { open: boolean; ratio: number }, path = tuiStatePath()): void {
   const state = loadTuiState(path)
   state.sidebar = sidebar
+  saveTuiState(state, path)
+}
+
+/** Remember which tabs were open and where each one works (§5.3b point 8). */
+export function rememberTabs(tabs: readonly { ws: string; session?: string }[], path = tuiStatePath()): void {
+  const state = loadTuiState(path)
+  state.tabs = tabs.map((tab) => ({ ws: tab.ws, ...(tab.session ? { session: tab.session } : {}) }))
   saveTuiState(state, path)
 }
 

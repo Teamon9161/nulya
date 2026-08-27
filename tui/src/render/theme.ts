@@ -187,6 +187,21 @@ export interface Glyphs {
    */
   sidebar: string
   /**
+   * A directory that already holds a `.nulya/` (T71, `/cwd`'s browser).
+   *
+   * It says one thing and it is a fact about a place, not an event: there is
+   * already a workspace here, so choosing it walks into work that exists
+   * rather than starting a directory's first session. Deliberately NOT
+   * `capability` (`⚡`), which is "an ability was just gained" and belongs to
+   * `ext activate` and to a pinned tool's name; a directory that has been
+   * worked in before gained nothing just now.
+   *
+   * It lives only on the browser's face, so its ascii fallback is free to be a
+   * character other glyphs use elsewhere — the rule (§6.1 rule 6) is one
+   * meaning per glyph per FACE, and nothing else is ever drawn in this list.
+   */
+  workspaceMark: string
+  /**
    * The tab strip's two controls (T70), and the only two glyphs in this table
    * that belong to the host's chrome rather than to the transcript or a list.
    *
@@ -231,6 +246,7 @@ const unicode_glyphs: Glyphs = {
   switchOff: "○",
   tip: "✻",
   sidebar: "◧",
+  workspaceMark: "▪",
   closeTab: "✕",
   newTab: "+",
 }
@@ -265,6 +281,7 @@ const ascii_glyphs: Glyphs = {
   switchOff: "-",
   tip: "*",
   sidebar: "[",
+  workspaceMark: "*",
   closeTab: "x",
   newTab: "+",
 }

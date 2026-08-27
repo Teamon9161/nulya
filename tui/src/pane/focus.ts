@@ -12,9 +12,10 @@
  *
  * The order, outermost first:
  *
- *  1. the composer dialogs the host owns — `/with`, `/agent`, `/mode`, and the
- *     approval question. These are the TRUSTED ZONE (§1.1): the screens that
- *     would be a security incident if a package could imitate or outrank them.
+ *  1. the composer dialogs the host owns — the checkout question, `/with`,
+ *     `/agent`, `/mode`, and the approval question. These are the TRUSTED ZONE
+ *     (§1.1): the screens that would be a security incident if a package could
+ *     imitate or outrank them.
  *  2. the focused pane, when its surface claims the keyboard (a full-screen
  *     view: `/ext`, `/sessions`, …). Before T68 this was `overlay.active()`.
  *  3. a plugin's panel.
@@ -35,7 +36,7 @@
  */
 import type { PaneId, SurfaceId } from "./tree.ts"
 
-export type DialogKind = "with" | "agent" | "mode" | "approval"
+export type DialogKind = "checkout" | "with" | "agent" | "mode" | "approval"
 
 export type FocusOwner =
   | { readonly kind: "dialog"; readonly dialog: DialogKind }
@@ -47,6 +48,14 @@ export type FocusOwner =
 export interface FocusState {
   /** Ctrl or Meta is held: the chord outranks every claim below (see above). */
   readonly modified: boolean
+  /**
+   * A directory this screen just walked into is asking to be trusted
+   * (goals/tui-shell.md §5.3b point 6, DESIGN §9). Outermost of the dialogs
+   * because it is the only one that grants AUTHORITY rather than choosing
+   * something: it is put once per directory, and until it is answered the
+   * things it is about take no part in any session.
+   */
+  readonly checkout: boolean
   readonly withPicker: boolean
   readonly agentPicker: boolean
   readonly modePicker: boolean
@@ -64,6 +73,7 @@ export function resolveFocus(state: FocusState): FocusOwner {
     // only ever opened on purpose, while the mode picker can be opened FROM the
     // approval dialog by clicking the chip — the one moment two of these are on
     // screen at once (tui.md §5.7, T31).
+    if (state.checkout) return { kind: "dialog", dialog: "checkout" }
     if (state.withPicker) return { kind: "dialog", dialog: "with" }
     if (state.agentPicker) return { kind: "dialog", dialog: "agent" }
     if (state.modePicker) return { kind: "dialog", dialog: "mode" }

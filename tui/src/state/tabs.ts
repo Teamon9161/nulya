@@ -25,6 +25,7 @@ import { sessionPins, type ModelPick } from "./tui_state.ts"
 import { discardIfUntouched, readActiveContributions, readHeader, type Contributions } from "../nulya/files.ts"
 import { sessionEvents, sessionNew } from "../nulya/cli.ts"
 import { withOptions, type WithRef } from "../with.ts"
+import { sameWorkspace } from "../workspaces.ts"
 import type { Workspace } from "../nulya/bin.ts"
 
 interface TabCommon {
@@ -34,6 +35,22 @@ interface TabCommon {
    * takes a key rather than an id, which is the whole reason this exists.
    */
   key: string
+  /**
+   * The directory this tab works in (goals/tui-shell.md §5.3b).
+   *
+   * A TAB IS (WORKSPACE, SESSION). The kernel has always said a session belongs
+   * to the directory it was created in — `.nulya/sessions/`, `.nulya/scratch/`,
+   * the journals and the workspace extension store are all relative to it — and
+   * `Workspace` has always been an explicit argument to every CLI call
+   * (`nulya/cli.ts`). S1c only moved where that argument comes from: it was the
+   * process, and it is now this field. Every spawn a tab makes runs with it.
+   *
+   * It never changes for a SESSION tab: the session's file is in that
+   * directory, and pointing the same tab at another one would be a session that
+   * moved house. A draft can be re-pointed until the moment it becomes a
+   * session, which is exactly what the directory browser does.
+   */
+  ws: Workspace
   /**
    * The reasoning effort this tab's steps run with (`session step --effort`).
    * Per tab, not per session file: it is a generation option the driver
@@ -86,6 +103,8 @@ export type Tab = DraftTab | SessionTab
 export interface OpenOptions {
   created?: boolean
   effort?: string
+  /** Which directory this session lives in; the store's default when absent. */
+  ws?: Workspace
   /**
    * `session step --max-steps` for this tab's steps. Per tab because it is a
    * per-run budget the kernel clamps (`session.max_steps_ceiling`), not part of
@@ -122,6 +141,12 @@ export interface DraftOptions {
   pick?: ModelPick
   bring?: WithRef
   effort?: string
+  /**
+   * Which directory the session this draft becomes will live in. Absent means
+   * the store's default — the workspace the process was launched in — which is
+   * what `+` and a bare `/new` want on the very first tab.
+   */
+  ws?: Workspace
 }
 
 export type FirstTab =
@@ -155,6 +180,22 @@ export interface TabStore {
    * and it is still empty).
    */
   replace(oldKey: string, id: string, options?: OpenOptions): SessionTab
+  /**
+   * Point a DRAFT tab at another directory (goals/tui-shell.md §5.3b).
+   *
+   * Only a draft, and that is the invariant rather than a restriction: a
+   * session's file lives in one directory, so re-pointing a started tab would
+   * be a session that moved house. A draft is nothing on disk until
+   * `materialize`, which is exactly why it is the thing the browser edits.
+   *
+   * It replaces the tab OBJECT rather than mutating a field, because `ws` is
+   * read all over the screen through `tabs.active()` — a mutated field would
+   * change what every one of those reads returns without telling any of them.
+   * The draft's own signals (its pick, its `--with`, its effort) are carried
+   * across by identity: the accessors are the same functions, so nothing that
+   * was chosen for this draft is lost by moving it.
+   */
+  retarget(key: string, ws: Workspace): void
   select(index: number): void
   next(): void
   /** Close a tab and its attachment; the last remaining tab never closes. */
@@ -190,7 +231,12 @@ export interface TabStoreOptions extends AttachOptions {
   statePath?: string
 }
 
-export function createTabStore(ws: Workspace, first: FirstTab, options: TabStoreOptions = {}): TabStore {
+/**
+ * `home` is the workspace a tab gets when nobody names one: the directory the
+ * process was launched in. Every tab still carries its own (`TabCommon.ws`) —
+ * this is the default, not a global.
+ */
+export function createTabStore(home: Workspace, first: FirstTab, options: TabStoreOptions = {}): TabStore {
   const [tabs, setTabs] = createSignal<Tab[]>([])
   const [activeIndex, setActiveIndex] = createSignal(0)
   const { statePath, ...attachOptions } = options
@@ -203,6 +249,7 @@ export function createTabStore(ws: Workspace, first: FirstTab, options: TabStore
     return {
       kind: "draft",
       key: `draft-${nextDraft++}`,
+      ws: opened.ws ?? home,
       pick,
       setPick: (value) => setPick(() => value),
       bring,
@@ -213,6 +260,7 @@ export function createTabStore(ws: Workspace, first: FirstTab, options: TabStore
   }
 
   function makeTab(id: string, state: SessionState, opened: OpenOptions): SessionTab {
+    const ws = opened.ws ?? home
     const [contributions, setContributions] = createSignal<Contributions[]>([])
     const [effort, setEffort] = createSignal<string | undefined>(opened.effort)
     // The attachment exists immediately (so the lease probe and the follower
@@ -224,6 +272,7 @@ export function createTabStore(ws: Workspace, first: FirstTab, options: TabStore
     const tab: SessionTab = {
       kind: "session",
       key: id,
+      ws,
       id,
       state,
       // `driven`: a session this process created is ours to wake from the first
@@ -251,7 +300,10 @@ export function createTabStore(ws: Workspace, first: FirstTab, options: TabStore
     if (tab.kind !== "session") return // a draft is nothing on disk; there is nothing to let go of
     tab.attach.dispose()
     tab.tasks.dispose()
-    if (tab.created) discardIfUntouched(ws, tab.id)
+    // The tab's OWN workspace: the session file is in that directory and
+    // nowhere else, so a discard aimed at the process's launch directory would
+    // either miss or, worse, name somebody else's file.
+    if (tab.created) discardIfUntouched(tab.ws, tab.id)
   }
 
   setTabs([
@@ -260,8 +312,20 @@ export function createTabStore(ws: Workspace, first: FirstTab, options: TabStore
       : makeTab(first.id, first.state, { created: first.created, effort: first.effort }),
   ])
 
+  /**
+   * Is this tab already the session `id` in the workspace `opened` names?
+   *
+   * Both halves, because a tab is a pair now: two directories are two stores of
+   * sessions, and the answer to "is it already open" is only the same answer
+   * when it is the same file. (Two ids colliding across workspaces is not the
+   * case this guards — `s-<hash>` makes that vanishingly unlikely — it is that
+   * asking about only one half of a pair is how the wrong tab gets focused.)
+   */
+  const isOpenHere = (tab: Tab, id: string, opened: OpenOptions) =>
+    tab.kind === "session" && tab.id === id && sameWorkspace(tab.ws, opened.ws ?? home)
+
   function open(id: string, opened: OpenOptions = {}): SessionTab {
-    const at = tabs().findIndex((tab) => tab.kind === "session" && tab.id === id)
+    const at = tabs().findIndex((tab) => isOpenHere(tab, id, opened))
     if (at >= 0) {
       setActiveIndex(at)
       return tabs()[at] as SessionTab
@@ -276,7 +340,7 @@ export function createTabStore(ws: Workspace, first: FirstTab, options: TabStore
     const list = tabs()
     const at = list.findIndex((tab) => tab.key === oldKey)
     if (at < 0) return open(id, opened)
-    const existing = list.findIndex((tab) => tab.kind === "session" && tab.id === id)
+    const existing = list.findIndex((tab) => isOpenHere(tab, id, opened))
     if (existing >= 0) {
       setActiveIndex(existing)
       return list[existing] as SessionTab
@@ -310,7 +374,11 @@ export function createTabStore(ws: Workspace, first: FirstTab, options: TabStore
       const pins = [...sessionPins(statePath)]
       for (const pin of extra.pin ?? []) if (!pins.includes(pin)) pins.push(pin)
       const members = [...(bring ? withOptions(bring).with ?? [] : []), ...(extra.with ?? [])]
-      const id = await sessionNew(ws, {
+      // The DRAFT's workspace, which is the one the browser may have re-pointed
+      // it at a moment ago. This is the line that makes a tab's directory real:
+      // `session new` runs with that cwd, so the file, the journals and the
+      // scratch all land there and the session belongs to it from birth.
+      const id = await sessionNew(draft.ws, {
         ...(pick ? { profile: pick.profile, model: pick.model } : {}),
         ...(members.length > 0 ? { with: members } : {}),
         ...(pins.length > 0 ? { pin: pins } : {}),
@@ -318,9 +386,17 @@ export function createTabStore(ws: Workspace, first: FirstTab, options: TabStore
       })
       return replace(draft.key, id, {
         created: true,
+        ws: draft.ws,
         effort: draft.effort(),
         ...(extra.maxSteps !== undefined ? { maxSteps: extra.maxSteps } : {}),
       })
+    },
+    retarget(key, where) {
+      const list = tabs()
+      const at = list.findIndex((one) => one.key === key)
+      const found = list[at]
+      if (!found || found.kind !== "draft") return
+      setTabs(list.map((old, index) => (index === at ? { ...old, ws: where } : old)))
     },
     select(index) {
       if (index >= 0 && index < tabs().length) setActiveIndex(index)

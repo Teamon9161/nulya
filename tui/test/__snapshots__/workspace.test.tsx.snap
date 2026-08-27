@@ -1,0 +1,57 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`the directory browser draws its sections at 80 and at 120: browser-80 1`] = `
+" directory · <dir>                                                              
+                                                                                
+ › <dir>                                                                        
+                                                                                
+   no project                                                                   
+   recent                                                                       
+   <elsewhere>-name                                                             
+ ▾ use this directory                                                           
+   ..                                                                           
+   alpha                                                                      ▪ 
+   beta                                                                         
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ ↑↓ move · Enter take the row · Esc close · ? keys                              
+"
+`;
+
+exports[`the directory browser draws its sections at 80 and at 120: browser-120 1`] = `
+" directory · <dir>                                                                                                      
+                                                                                                                        
+ › <dir>                                                                                                                
+                                                                                                                        
+   no project                                                                                                           
+   recent                                                                                                               
+   <elsewhere>-name                                                                                                     
+ ▾ use this directory                                                                                                   
+   ..                                                                                                                   
+   alpha                                                                                                              ▪ 
+   beta                                                                                                                 
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+ ↑↓ move · Enter take the row · Esc close · ? keys                                                                      
+"
+`;

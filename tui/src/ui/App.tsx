@@ -63,6 +63,7 @@ import {
   rememberMode,
   rememberSessionPins,
   rememberSidebar,
+  rememberTabs,
   sessionPins,
   type ModelPick,
 } from "../state/tui_state.ts"
@@ -149,6 +150,30 @@ import {
   type RenderedAgent,
 } from "../agents.ts"
 import { createKeymap, matches, type Action } from "../keymap.ts"
+import { expandPath } from "../browsedir.ts"
+import { DirBrowser } from "./overlays/DirBrowser.tsx"
+import { CheckoutPrompt } from "./CheckoutPrompt.tsx"
+import {
+  homeWorkspaceDir,
+  isHomeWorkspaceDir,
+  openWorkspaceAt,
+  sameWorkspace,
+  workspaceLabel,
+} from "../workspaces.ts"
+import { loadRecents, rememberRecent } from "../state/recents.ts"
+import {
+  applyStoreAction,
+  inventory,
+  planCheckout,
+  planProjectStore,
+  samePath,
+  storeTrusted,
+  workspaceStorePath,
+  type CheckoutAction,
+  type CheckoutPlan,
+} from "../extensions.ts"
+import { agentsDirOf, planProjectAgents, workspaceAgentFiles } from "../agents.ts"
+import { rememberAgentsAnswer, rememberStoreAsked } from "../state/tui_state.ts"
 import type { AttachOptions } from "../state/attach.ts"
 import type { SessionState, TranscriptItem } from "../state/session.ts"
 import type { Workspace } from "../nulya/bin.ts"
@@ -214,7 +239,7 @@ export interface AppProps {
    * (tui.md §11, T23). Both it and `user` are `[extensions] sync_on_start`;
    * `activate` is `auto_activate`, and it gates the pointer moves in both.
    */
-  sync?: { user: boolean; project: boolean; activate: boolean; bundled: boolean }
+  sync?: SyncPlan
   /**
    * Whether the agent definitions that came with this CHECKOUT may be used
    * (tui.md §5.10). Asked once before this screen exists, exactly as the store
@@ -225,6 +250,23 @@ export interface AppProps {
    * without the person putting it there.
    */
   agentsTrusted?: boolean
+}
+
+/**
+ * Which store roots a start-up pass touches, and whether it may move `current`
+ * (tui.md §11, T11).
+ *
+ * Named since S1c because there are two callers now: the process's own pass
+ * over the launch workspace, and the pass a tab makes the first time it walks
+ * into a workspace nobody has been in yet (§5.3b point 6). The second one asks
+ * for the project root alone — the user store is the machine's, and it is
+ * synced once per process, not once per directory.
+ */
+export interface SyncPlan {
+  user: boolean
+  project: boolean
+  activate: boolean
+  bundled: boolean
 }
 
 /**
@@ -359,24 +401,46 @@ export function App(props: AppProps) {
     onLine: (line, session) => plugins.observe(line, session),
   })
 
+  /**
+   * One instance per workspace of the three tables that are ABOUT a directory:
+   * the `@` path index, the skill catalog and the package command table.
+   *
+   * They used to be one each, built from the process's workspace, which was
+   * right while there was one. Keyed and kept, rather than rebuilt per read:
+   * the path index walks a repository (T13) and the other two spawn the binary,
+   * so a memo that ran on every frame would be a process per frame. A workspace
+   * a tab still holds keeps its table; there is no eviction because the number
+   * of directories a person has tabs in is the number of tabs.
+   */
+  const perWorkspace = <T,>(make: (where: Workspace) => T) => {
+    const held = new Map<string, T>()
+    return (where: Workspace): T => {
+      let made = held.get(where.dir)
+      if (!made) {
+        made = make(where)
+        held.set(where.dir, made)
+      }
+      return made
+    }
+  }
   // The workspace's paths, for `@` completion (tui.md §11, T13). Built in the
   // background from the moment the screen exists: the first `@` before it
   // finishes shows nothing and the next one shows everything, which beats a
   // composer that stops accepting characters while git walks a monorepo.
-  const references = createProjectIndex(props.ws.dir)
+  const referencesFor = perWorkspace((where) => createProjectIndex(where.dir))
   /**
    * The skill catalog behind `/name` (tui.md §11, T15). It goes stale exactly
    * when an extension is activated or deactivated, which is why `/ext` hands
    * back `invalidate` rather than this polling for it.
    */
-  const skills = createSkillTable(props.ws)
+  const skillsFor = perWorkspace((where) => createSkillTable(where))
   /**
    * Package-declared slash commands (tui-plugin D1/D2/D8), same staleness
    * contract as `skills` above — `/ext` invalidates both on a membership
    * change, since activating or deactivating a package can add or remove
    * either kind of thing it offers.
    */
-  const packageCmds = createPackageCommandTable(props.ws)
+  const packageCmdsFor = perWorkspace((where) => createPackageCommandTable(where))
 
   /**
    * The line under the composer, when it has news (T35).
@@ -506,19 +570,27 @@ export function App(props: AppProps) {
    * `agent` are two entries in `[extensions] session_with`, and `agentPackage`
    * below reads the same entry the composition does rather than building the
    * same draft a second time.
+   *
+   * KEYED BY WORKSPACE as well as by id (S1c). A version resolved here is a
+   * version in a particular store, and the store search order is the
+   * workspace's (`.nulya/extensions` first, DESIGN §5.5) — so the same id in
+   * two directories can honestly be two versions, and a cache that remembered
+   * only the id would compose the second workspace's session out of the first
+   * one's build.
    */
   const memberBuilds = new Map<string, Promise<SessionMember | null>>()
-  const sessionMemberOnce = (id: string): Promise<SessionMember | null> => {
-    let started = memberBuilds.get(id)
+  const sessionMemberOnce = (where: Workspace, id: string): Promise<SessionMember | null> => {
+    const key = `${where.dir}::${id}`
+    let started = memberBuilds.get(key)
     if (!started) {
-      started = sessionMember(props.ws, id).catch(() => null)
-      memberBuilds.set(id, started)
+      started = sessionMember(where, id).catch(() => null)
+      memberBuilds.set(key, started)
     }
     return started
   }
   /** The `agent` package, for the delegation paths that need its version. */
   const agentPackage = async (): Promise<WithRef | null> => {
-    const member = await sessionMemberOnce(agent_id)
+    const member = await sessionMemberOnce(ws(), agent_id)
     return member ? { id: member.id, version: member.version } : null
   }
   const [composedWithTools, setComposedWithTools] = createSignal<string[]>([])
@@ -534,7 +606,7 @@ export function App(props: AppProps) {
    */
   const refreshComposedMembership = async () => {
     try {
-      const [listed, config] = await Promise.all([listExtensions(props.ws), configShow(props.ws, props.driver?.env)])
+      const [listed, config] = await Promise.all([listExtensions(ws()), configShow(ws(), props.driver?.env)])
       healStandingPins(listed)
       // Three ways a package is in every session started here (T52): it asked
       // and the kernel recorded it (`standing` — the kernel's own answer, never
@@ -601,6 +673,51 @@ export function App(props: AppProps) {
   let scroll: ScrollBoxRenderable | null = null
 
   const tab = () => tabs.active()
+  /**
+   * The directory the front tab works in (goals/tui-shell.md §5.3b).
+   *
+   * Everything below that acts on a session, reads a store, or spawns anything
+   * at all goes through this rather than `props.ws` — which now means only "the
+   * workspace the PROCESS was launched in": the default a new tab inherits, and
+   * the one whose start-up questions `main` already asked on a bare terminal.
+   */
+  const ws = (): Workspace => tab().ws
+  /**
+   * The distinct workspaces with a tab open, the front tab's first.
+   *
+   * The sessions list is grouped by this (§5.3b point 4), and the ordering is
+   * the whole of that policy: the group somebody is working in is the one they
+   * are looking for. On a screen with one workspace this has one entry and the
+   * list draws no headings at all — which is what keeps the whole feature
+   * invisible until a second directory is actually open.
+   */
+  const openWorkspaces = (): Workspace[] => {
+    const out: Workspace[] = [tab().ws]
+    for (const one of tabs.tabs()) {
+      if (!out.some((known) => sameWorkspace(known, one.ws))) out.push(one.ws)
+    }
+    return out
+  }
+  /**
+   * What the status line says about this tab's directory, or nothing at all.
+   *
+   * Nothing is the normal case and the reason this is a function rather than a
+   * chip that is always drawn (§6.1 rule 4): on a screen working in one
+   * directory the answer is the same for every tab and for the whole program,
+   * so a column spent repeating it is a column spent saying nothing. It earns
+   * its place exactly twice — when a second workspace has a tab open and the
+   * answer therefore varies, and on the `no project` tab, whose whole point is
+   * that it is not the directory you launched in.
+   */
+  const workspaceChip = (): string | undefined => {
+    const here = ws()
+    if (isHomeWorkspaceDir(here.dir)) return workspaceLabel(here.dir)
+    return openWorkspaces().length > 1 ? workspaceLabel(here.dir) : undefined
+  }
+  /** The three per-directory tables, for the tab in front. */
+  const references = () => referencesFor(ws())
+  const skills = () => skillsFor(ws())
+  const packageCmds = () => packageCmdsFor(ws())
   /**
    * The front tab's session, or null while it is still a draft. Everything that
    * would DO something to a session goes through this; everything that only
@@ -674,8 +791,8 @@ export function App(props: AppProps) {
    * package whose newest draft quietly turned `manual` — and T56 made a
    * store that cannot answer a refusal rather than a yes.
    */
-  const syncStores = async () => {
-    const plan = props.sync
+  const syncStores = async (where: Workspace = props.ws, asked?: SyncPlan) => {
+    const plan = asked ?? props.sync
     if (!plan) return
     // The drafts the BINARY ships, into the user store, before the pass that
     // builds them: seeding writes source only (DESIGN §7.8), so the one pass
@@ -699,7 +816,7 @@ export function App(props: AppProps) {
     const hadCurrent = new Set<string>()
     let listedBefore: ExtensionEntry[] | null = null
     try {
-      listedBefore = await listExtensions(props.ws)
+      listedBefore = await listExtensions(where)
     } catch {
       listedBefore = null
     }
@@ -712,7 +829,7 @@ export function App(props: AppProps) {
     if (plan.user && plan.bundled) {
       try {
         setSyncing({ what: "installing the bundled extensions", done: 0, total: 0, since: Date.now() })
-        const seed = await seedBundled(props.ws)
+        const seed = await seedBundled(where)
         arrived = seed.ids
         refreshed = seed.updated
         untouched = seed.mine
@@ -722,7 +839,13 @@ export function App(props: AppProps) {
     }
     const roots = [
       ...(plan.user ? [{ label: "user store", user: true }] : []),
-      ...(plan.project ? [{ label: "this checkout", user: false }] : []),
+      // The launch workspace is "this checkout" because that is what it is to
+      // the person who started the program here. A workspace a TAB walked into
+      // is named, because by then there is more than one and "this checkout"
+      // stops picking one out (§5.3b point 6).
+      ...(plan.project
+        ? [{ label: sameWorkspace(where, props.ws) ? "this checkout" : workspaceLabel(where.dir), user: false }]
+        : []),
     ]
     // One line of news for the whole pass, across roots: a quiet second root
     // must not wipe what the first one had to say.
@@ -735,7 +858,7 @@ export function App(props: AppProps) {
         // turns a stalled counter into `building std` — the whole difference
         // between a screen that looks stuck and one that says who it is waiting
         // for (tui.md §11, T57).
-        const queue = (await planStore(props.ws, root.user)).lines.map((line) => line.id)
+        const queue = (await planStore(where, root.user)).lines.map((line) => line.id)
         const total = queue.length
         if (total === 0) continue
         let done = 0
@@ -748,7 +871,7 @@ export function App(props: AppProps) {
           setSyncing({ what: next ? `building ${next}` : "syncing extensions", done, total, since })
         }
         onDraft()
-        const report = await extSync(props.ws, { user: root.user }, () => {
+        const report = await extSync(where, { user: root.user }, () => {
           done += 1
           onDraft()
         })
@@ -779,10 +902,10 @@ export function App(props: AppProps) {
             // Every unattended pointer move goes through the one door, here and
             // everywhere else this front end moves one with nobody watching —
             // this loop only knows which version was built.
-            const { outcome, built } = await activateUnattended(props.ws, {
+            const { outcome, built } = await activateUnattended(where, {
               id: line.id,
               version: line.version,
-              root: syncRoot(props.ws, root.user),
+              root: syncRoot(where, root.user),
               user: root.user,
             })
             if (outcome === "activated") {
@@ -793,11 +916,11 @@ export function App(props: AppProps) {
         }
         const adopted =
           root.user && arrived.length > 0 && plan.activate
-            ? await adoptBundled(props.ws, arrived, report, props.statePath, canTellInstalls ? hadCurrent : undefined)
+            ? await adoptBundled(where, arrived, report, props.statePath, canTellInstalls ? hadCurrent : undefined)
             : []
         // The same two sentences for the ids this loop installed, from the one
         // place that knows what a first `current` is worth saying about.
-        adopted.push(...(await adoptInstalled(props.ws, installed, props.statePath)))
+        adopted.push(...(await adoptInstalled(where, installed, props.statePath)))
         // Pins land in `tui-state.json`, which the draft card and the status
         // line read from disk: this is what tells them to look again.
         if (adopted.length > 0) setPlanTick((tick) => tick + 1)
@@ -863,6 +986,147 @@ export function App(props: AppProps) {
     // those files" signal; the bump is unconditional because a pass that only
     // moved a pointer changed the listing just as much as one that built.
     setPlanTick((tick) => tick + 1)
+  }
+
+  // ── Walking into a workspace for the first time (§5.3b point 6) ───────────
+
+  /**
+   * Directories this process has already put the checkout question for.
+   *
+   * The launch workspace is in it from the start: `main` asked about that one
+   * on the bare terminal, before the alternate screen, which is still the right
+   * place for it — it is the only workspace that exists before the screen does.
+   * Every other one is walked into by a TAB, and a question asked on a bare
+   * terminal at that point would be a question asked underneath the screen.
+   */
+  const entered = new Set<string>([props.ws.dir])
+  /**
+   * Whether the agent definitions that came with a CHECKOUT may be used, per
+   * workspace (tui.md §5.10).
+   *
+   * A map rather than the single prop it used to be, for the same reason
+   * everything else in S1c became one: this is a fact about a directory, and
+   * the screen now holds tabs in several. `props.agentsTrusted` is the launch
+   * workspace's answer, already given.
+   */
+  const [agentsTrust, setAgentsTrust] = createSignal<ReadonlyMap<string, boolean>>(
+    new Map(props.agentsTrusted === undefined ? [] : [[props.ws.dir, props.agentsTrusted]]),
+  )
+  const noteAgentsTrust = (where: Workspace, trusted: boolean) =>
+    setAgentsTrust((now) => new Map([...now, [where.dir, trusted]]))
+  /**
+   * `undefined` is "never asked", which is NOT "refused" — the same shape the
+   * prop had, so `startAgent`'s `=== false` test still means what it meant.
+   */
+  const agentsTrustedIn = (where: Workspace): boolean | undefined => agentsTrust().get(where.dir)
+
+  /** The checkout question, waiting for a key (`ui/CheckoutPrompt.tsx`). */
+  const [checkout, setCheckout] = createSignal<{
+    ws: Workspace
+    plan: Extract<CheckoutPlan, { kind: "ask" }>
+    store: string
+    agentsDir: string
+    storeAsked: boolean
+    agentsAsked: boolean
+  } | null>(null)
+
+  /**
+   * The start-up flow, per workspace rather than per launch (§5.3b point 6).
+   *
+   * Everything `main.tsx` does before the screen exists — the workspace store's
+   * trust question, the `.nulya/agents` question, and then the project store's
+   * build pass — happens here for every OTHER directory a tab walks into. The
+   * plans themselves are the same pure functions `main` uses (`planProjectStore`,
+   * `planProjectAgents`, `planCheckout`); what differs is only where the answer
+   * is typed, and that difference is why this exists at all.
+   *
+   * The kernel's own gate is untouched and still has the last word: a store
+   * this refuses to trust makes `session new` fail in that tab, with the
+   * kernel's paragraph shown in full where the draft is (`refusal`, T46).
+   */
+  const enterWorkspace = async (where: Workspace) => {
+    if (entered.has(where.dir)) return
+    entered.add(where.dir)
+    const store = workspaceStorePath(where)
+    let storePlan = (await (async () => {
+      if (!props.style.settings.extensions.sync_on_start) return { kind: "none" as const }
+      try {
+        return planProjectStore(
+          store,
+          await inventory(where, false),
+          storeTrusted(store),
+          loadTuiState(props.statePath).asked_stores ?? [],
+        )
+      } catch {
+        // No store, no binary answer — the session's own gate still speaks.
+        return { kind: "none" as const }
+      }
+    })())
+    const agentsDir = agentsDirOf(where, "workspace")
+    const state = loadTuiState(props.statePath)
+    const trustedAlready = (state.trusted_agents ?? []).some((known) => samePath(known, agentsDir))
+    const agentsPlan = planProjectAgents(
+      agentsDir,
+      workspaceAgentFiles(where),
+      trustedAlready,
+      state.asked_agents ?? [],
+      samePath,
+    )
+    const plan = planCheckout(storePlan, agentsPlan)
+    if (plan.kind !== "ask") {
+      noteAgentsTrust(where, agentsPlan.kind === "ready")
+      if (storePlan.kind === "ready") await syncEntered(where)
+      return
+    }
+    setCheckout({
+      ws: where,
+      plan,
+      store,
+      agentsDir,
+      storeAsked: storePlan.kind === "ask",
+      agentsAsked: agentsPlan.kind === "ask",
+    })
+  }
+
+  /** That workspace's project store, built on the same pass the launch one gets. */
+  const syncEntered = (where: Workspace) =>
+    syncStores(where, {
+      user: false, // the machine's store is synced once per process, not per directory
+      project: props.style.settings.extensions.sync_on_start,
+      activate: props.style.settings.extensions.auto_activate,
+      bundled: false, // what the binary ships goes to the user store, once
+    }).then(refreshComposedMembership)
+
+  /**
+   * One key at the checkout question. An answer the plan does not recognise
+   * leaves the dialog exactly where it is — `apply` is what decides which keys
+   * are answers, here as on the bare terminal.
+   */
+  const answerCheckout = async (key: string) => {
+    const asking = checkout()
+    if (!asking) return
+    const action: CheckoutAction | null = asking.plan.apply(key)
+    if (!action) return
+    setCheckout(null)
+    if (asking.storeAsked) rememberStoreAsked(asking.store, props.statePath)
+    if (asking.agentsAsked) rememberAgentsAnswer(asking.agentsDir, action.agentsTrust, props.statePath)
+    noteAgentsTrust(asking.ws, action.agentsTrust || !asking.agentsAsked)
+    const where = workspaceLabel(asking.ws.dir)
+    if (!action.store.trust && !action.store.sync) {
+      setNotice(`${where} · left alone · \`nulya ext trust\` whenever you mean to`)
+      return
+    }
+    try {
+      setSyncing({ what: `installing ${where}`, done: 0, total: 0, since: Date.now() })
+      const report = await applyStoreAction(asking.ws, action.store)
+      setSyncing(null)
+      setNotice(report ? summarize(where, report) : `${where} · trusted`)
+      setPlanTick((tick) => tick + 1)
+      void refreshComposedMembership()
+    } catch (error) {
+      setSyncing(null)
+      setNotice(`${where} · ${error instanceof Error ? error.message : String(error)}`)
+    }
   }
 
   // …and only then the code layer: a plugin lives in an ACTIVE version, and
@@ -953,6 +1217,62 @@ export function App(props: AppProps) {
   })
 
   onCleanup(() => tabs.disposeAll())
+
+  /**
+   * The tabs this screen had last time, read ONCE and before any effect writes
+   * over them (§5.3b point 8).
+   *
+   * Captured at component construction rather than in `onMount`, because the
+   * effect below writes the current tab list as soon as it runs and would
+   * otherwise have replaced the record with "one tab" before anything read it.
+   */
+  const remembered_tabs = loadTuiState(props.statePath).tabs ?? []
+
+  /**
+   * Bring back the tabs BEYOND the first, each in its own directory.
+   *
+   * The first tab is whatever this launch decided it is (`--session`, else a
+   * draft) — untouched, so the screen a person opens in one directory with one
+   * conversation is the screen they have always opened. Only sessions come
+   * back: a draft is nothing on disk, and one whose file has gone (a checkout
+   * deleted, a drive unmounted) is skipped rather than opened into an error.
+   *
+   * Restoring does not step anything and creates nothing: `tabs.open` is the
+   * same verb `/sessions` uses, and `created: false` means this process will
+   * not discard those sessions when they close.
+   */
+  onMount(() => {
+    let restored = 0
+    for (const slot of remembered_tabs.slice(1)) {
+      if (!slot.session) continue
+      try {
+        const where = openWorkspaceAt(slot.ws)
+        if (!sessionExists(where, slot.session)) continue
+        tabs.open(slot.session, { ws: where })
+        restored += 1
+        void enterWorkspace(where)
+      } catch {
+        // A remembered directory that will not open is one fewer tab, never a
+        // screen that will not open.
+      }
+    }
+    // Back to the tab this launch is about: restoring focuses each one it
+    // opens, and the person asked for the first.
+    if (restored > 0) tabs.select(0)
+  })
+
+  /**
+   * …and write the record whenever the tabs change. A plain effect rather than
+   * a save on exit: `Ctrl+C`, a killed terminal and a crash all end this
+   * process without an exit path, and a record only written on a clean quit is
+   * a record that is wrong exactly when it is needed.
+   */
+  createEffect(() => {
+    rememberTabs(
+      tabs.tabs().map((one) => ({ ws: one.ws.dir, ...(one.kind === "session" ? { session: one.id } : {}) })),
+      props.statePath,
+    )
+  })
 
   /** One tip per launch, chosen here so re-rendering the screen cannot reroll it. */
   const tip = pickTip(props.style.glyphs)
@@ -1118,9 +1438,43 @@ export function App(props: AppProps) {
     void refreshComposedMembership()
   }
 
-  const openSession = (id: string, created = false) => {
-    tabs.open(id, { created })
+  /**
+   * Take a directory as this tab's workspace (goals/tui-shell.md §5.3b).
+   *
+   * A DRAFT is re-pointed in place: it is nothing on disk, so its directory is
+   * still a decision, and the next message is what freezes it. A tab that
+   * already has a session gets a NEW tab instead — a session's file lives in
+   * one directory, and moving the tab would be claiming the session moved with
+   * it. Same rule, same reason, as switching model on a started session
+   * (`startDraft`): what is frozen is frozen, and the honest way to work
+   * somewhere else is somewhere else.
+   *
+   * The first tab into a directory is what runs that directory's start-up flow
+   * (`enterWorkspace`): its trust question, its agent-definitions question and
+   * its project store build, all of which used to happen once per launch.
+   */
+  const chooseWorkspace = (dir: string) => {
+    const where = openWorkspaceAt(dir)
     closeOverlay()
+    const here = tab()
+    if (here.kind === "draft") tabs.retarget(here.key, where)
+    else tabs.draft({ ws: where, ...(currentPick() ? { pick: currentPick()! } : {}) })
+    setNotice(`${workspaceLabel(where.dir)} · ${where.dir} · your next message starts a session here`)
+    void enterWorkspace(where)
+  }
+
+  /**
+   * A tab of its own for that session, in ITS OWN directory (§5.3b).
+   *
+   * `where` defaults to this tab's workspace, which is what every caller that
+   * names a session of the current conversation means (a delegation card's
+   * link, a plugin's `openTab`). The sessions list passes the group's, because
+   * across groups the id alone does not say which `.nulya/sessions/` it is in.
+   */
+  const openSession = (id: string, where: Workspace = ws(), created = false) => {
+    tabs.open(id, { created, ws: where })
+    closeOverlay()
+    void enterWorkspace(where)
     setNotice(`opened ${id}`)
   }
 
@@ -1142,10 +1496,11 @@ export function App(props: AppProps) {
    * killed: a step is a kernel process with its own ledger, and leaving it is
    * leaving it, not stopping it.
    */
-  const switchToSession = (id: string) => {
-    if (live()?.id === id) return closeOverlay()
-    tabs.replace(tabs.active().key, id)
+  const switchToSession = (id: string, where: Workspace = ws()) => {
+    if (live()?.id === id && sameWorkspace(ws(), where)) return closeOverlay()
+    tabs.replace(tabs.active().key, id, { ws: where })
     closeOverlay()
+    void enterWorkspace(where)
     setNotice(`switched to ${id}`)
   }
 
@@ -1156,11 +1511,13 @@ export function App(props: AppProps) {
    * belongs to the tab that just came to the front.
    */
   const navigate: Navigate = {
-    delegationRecord: (id) => readDelegationRecord(props.ws, id),
+    delegationRecord: (id) => readDelegationRecord(ws(), id),
     openTasks: () => openOverlay("tasks"),
     openSession: (id) => {
       if (browse.active()) leaveBrowse()
-      openSession(id)
+      // A card's link names a session of THIS conversation — a delegation this
+      // tab started — so it is in this tab's directory by construction.
+      openSession(id, ws())
     },
   }
 
@@ -1294,7 +1651,15 @@ export function App(props: AppProps) {
       if (chosen?.effort !== undefined) here.setEffort(chosen.effort)
       if (bring) here.setBring(bring)
     } else {
-      tabs.draft({ ...(chosen ? { pick: chosen } : {}), ...(bring ? { bring } : {}), ...(chosen?.effort ? { effort: chosen.effort } : {}) })
+      // The new tab starts in the directory the front one works in (§5.3b): a
+      // person who opened a second repository and pressed `+` meant another tab
+      // THERE, not one back where the process happened to be launched.
+      tabs.draft({
+        ws: ws(),
+        ...(chosen ? { pick: chosen } : {}),
+        ...(bring ? { bring } : {}),
+        ...(chosen?.effort ? { effort: chosen.effort } : {}),
+      })
     }
     closeOverlay()
     setGuide(null)
@@ -1318,9 +1683,13 @@ export function App(props: AppProps) {
     if (here.kind === "session") return here
     setRefusal(null)
     try {
-      const extras = await sessionExtras()
+      const extras = await sessionExtras(here.ws)
       const tab = await tabs.materialize(here, extras)
       setPlanTick((tick) => tick + 1)
+      // A directory somebody actually started a session in — the one event
+      // worth remembering across runs (`state/recents.ts`). Browsing to a
+      // place is not working in it, so this is here and not in `chooseWorkspace`.
+      rememberRecent(here.ws.dir)
       return tab
     } catch (error) {
       setRefusal(error instanceof CliError ? error.detail : error instanceof Error ? error.message : String(error))
@@ -1356,12 +1725,14 @@ export function App(props: AppProps) {
    * §1, `SpawnPolicy` in its minimal form). Which is why this lives here and not
    * in `startAgent`, the thing that composes a child.
    */
-  const sessionExtras = async (): Promise<{ with?: string[]; pin?: string[]; prompt?: string[] }> => {
+  const sessionExtras = async (
+    target: Workspace,
+  ): Promise<{ with?: string[]; pin?: string[]; prompt?: string[] }> => {
     const withRefs: string[] = []
     const pins: string[] = []
     const missing: string[] = []
     for (const id of props.style.settings.extensions.session_with) {
-      const member = await sessionMemberOnce(id)
+      const member = await sessionMemberOnce(target, id)
       if (!member) {
         missing.push(id)
         continue
@@ -1375,14 +1746,22 @@ export function App(props: AppProps) {
     // at the latest possible moment before `session new` freezes it.
     const prompts: string[] = []
     const broke: string[] = []
-    for (const id of props.style.settings.extensions.session_prompts) {
-      const member = await sessionMemberOnce(id)
+    // …and not at all in the home workspace (§5.3b point 5). What these
+    // renderers write is a picture of a PROJECT — its layout, its instruction
+    // files, this branch, this working tree — and `no project` is the answer
+    // "there is no project": every one of those paragraphs would be an empty
+    // section, paid for on every step of the session because it rides in the
+    // cached prefix. The renderer is not asked rather than asked and ignored:
+    // there is nothing here for it to be right about.
+    const grounded = !isHomeWorkspaceDir(target.dir)
+    for (const id of grounded ? props.style.settings.extensions.session_prompts : []) {
+      const member = await sessionMemberOnce(target, id)
       if (!member) {
         missing.push(id)
         continue
       }
       try {
-        prompts.push(await renderSessionPrompt(props.ws, { id: member.id, version: member.version }))
+        prompts.push(await renderSessionPrompt(target, { id: member.id, version: member.version }))
       } catch (error) {
         // Kept apart from `missing`, because they are different failures with
         // different fixes: a package that would not resolve is answered by
@@ -1424,7 +1803,12 @@ export function App(props: AppProps) {
    * just a mess. Nothing is being protected there.
    */
   const dialogUp = (): boolean =>
-    pending() !== null || modePicker() || withPicker() || agentPicker() || overlay.kind() === "provider"
+    pending() !== null ||
+    checkout() !== null ||
+    modePicker() ||
+    withPicker() ||
+    agentPicker() ||
+    overlay.kind() === "provider"
 
   /** The front tab's session, in the read-only shape the contract projects. */
   const pluginSession = () => {
@@ -1759,6 +2143,7 @@ export function App(props: AppProps) {
         !modePicker() &&
         !agentPicker() &&
         !withPicker() &&
+        checkout() === null &&
         !plugins.panel()
       ) {
         composer?.focus()
@@ -1776,7 +2161,7 @@ export function App(props: AppProps) {
    * choose from if `j` goes into the composer behind it.
    */
   createEffect(() => {
-    if (modePicker() || agentPicker() || withPicker()) composer?.blur()
+    if (modePicker() || agentPicker() || withPicker() || checkout() !== null) composer?.blur()
     else if (!pending() && !overlay.active() && !browse.active() && !plugins.panel()) composer?.focus()
   })
 
@@ -1873,7 +2258,7 @@ export function App(props: AppProps) {
   const checkHandoff = () => {
     const here = live()
     if (!here || handoff()) return
-    const found = nextHandoff(props.ws, here.id, handoffsSeen())
+    const found = nextHandoff(here.ws, here.id, handoffsSeen())
     if (!found) return
     if (mode() === "unsafe") {
       setHandoffsSeen(new Set([...handoffsSeen(), found.path]))
@@ -1933,7 +2318,7 @@ export function App(props: AppProps) {
     if (source.attach.status() !== "idle") throw new Error("a step is running · fork when it stops")
     setNotice(options.briefFile ? `forking on ${options.briefFile}…` : "compacting…")
     try {
-      const result = await runCompact(props.ws, source.id, options)
+      const result = await runCompact(source.ws, source.id, options)
       tabs.replace(source.id, result.session, { created: true, effort: source.effort() })
       setNotice(`continued in ${result.session} · ${source.id} kept on disk`)
       return result
@@ -1994,7 +2379,7 @@ export function App(props: AppProps) {
     const pkg = await agentPackage()
     if (!pkg) return []
     try {
-      const found = await listAgents(props.ws, pkg)
+      const found = await listAgents(ws(), pkg)
       setAgentDefs(usableAgents(found))
       setAgentWarnings(found.flatMap((entry) => entry.warnings))
       return agentDefs()
@@ -2034,7 +2419,7 @@ export function App(props: AppProps) {
       setNotice(`'${entry.name}' runs on '${entry.runner}', which a tab cannot drive · delegate to it from a conversation instead`)
       return null
     }
-    if (entry.layer === "workspace" && props.agentsTrusted === false) {
+    if (entry.layer === "workspace" && agentsTrustedIn(ws()) === false) {
       setNotice(`'${entry.name}' came with this checkout and was not trusted · its prompt would enter a session here · answer the question again by clearing asked_agents in tui-state.json`)
       return null
     }
@@ -2049,7 +2434,7 @@ export function App(props: AppProps) {
       // The package renders the definition and checks that the packages its
       // pins name can be brought in — one implementation of both, and the same
       // one the model reaches through the `agent` tool.
-      m = await renderAgent(props.ws, pkg, entry.name)
+      m = await renderAgent(ws(), pkg, entry.name)
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error))
       return null
@@ -2151,7 +2536,7 @@ export function App(props: AppProps) {
    * `resolve`). Recomputed on every read rather than cached again: the table
    * itself is already cached (`packageCmds`), and this is a pure fold over it.
    */
-  const resolvedPackageCommands = () => resolvePackageCommands(packageCmds.entries(), builtin_names)
+  const resolvedPackageCommands = () => resolvePackageCommands(packageCmds().entries(), builtin_names)
 
   /**
    * `/name` where a loaded PLUGIN registered it (`api.registerCommand`).
@@ -2204,19 +2589,19 @@ export function App(props: AppProps) {
         startDraft(undefined, false, { id: row.id })
         return true
       case "run": {
-        const version = await activeVersionOf(props.ws, row.id)
+        const version = await activeVersionOf(ws(), row.id)
         if (!version) {
           setNotice(`${row.id} has no active version · run \`nulya ext build\` then \`nulya ext activate\` first`)
           return true
         }
-        const result = await extRun(props.ws, `${row.id}@${version}`, action.tool, runArgs(args))
+        const result = await extRun(ws(), `${row.id}@${version}`, action.tool, runArgs(args))
         const said = (result.stdout.trim() || result.stderr.trim() || `exit ${result.code}`).split("\n")[0]
         setNotice(`${row.id} ${action.tool} · ${said}`)
         return true
       }
       case "skill": {
         try {
-          const turn = await skillTurn(props.ws, skills.entries(), `/${action.ref} ${args}`.trim())
+          const turn = await skillTurn(ws(), skills().entries(), `/${action.ref} ${args}`.trim())
           if (turn === null) {
             setNotice(`${row.id} · '/${row.name}' names skill '${action.ref}', which is not in the active catalog`)
             return true
@@ -2283,7 +2668,7 @@ export function App(props: AppProps) {
   const openWithPicker = async () => {
     let listed: Wearable[] = []
     try {
-      listed = (await listExtensions(props.ws))
+      listed = (await listExtensions(ws()))
         .filter((entry) => entry.current !== null && !entry.shadowed && entry.systemPrompts.length > 0)
         .map((entry) => ({
           id: entry.id,
@@ -2332,7 +2717,7 @@ export function App(props: AppProps) {
       return
     }
     try {
-      await sessionOutcome(props.ws, here.id, word, note)
+      await sessionOutcome(here.ws, here.id, word, note)
       setSettled([...settled(), here.id])
       setNotice(`${here.id}: ${word}${note ? ` · ${note}` : ""}`)
     } catch (error) {
@@ -2375,7 +2760,7 @@ export function App(props: AppProps) {
     }
     setNotice("compacting · asking this session for a continuation brief…")
     try {
-      const result = await runCompact(props.ws, source.id, { ...(focus ? { focus } : {}) })
+      const result = await runCompact(source.ws, source.id, { ...(focus ? { focus } : {}) })
       tabs.replace(source.id, result.session, { created: true, effort: source.effort() })
       setNotice(`compacted into ${result.session} · ${source.id} kept on disk`)
     } catch (error) {
@@ -2513,7 +2898,7 @@ export function App(props: AppProps) {
         openOverlay("sessions")
         return true
       }
-      if (!sessionExists(props.ws, id)) {
+      if (!sessionExists(ws(), id)) {
         setNotice(`no session '${id}' in ${sessions_dir} · ${command} with no id lists them`)
         return true
       }
@@ -2549,6 +2934,20 @@ export function App(props: AppProps) {
     }
     if (command === "/ext") {
       openOverlay("ext")
+      return true
+    }
+    // Which directory this tab works in (§5.3b). Bare, the browser; with an
+    // argument, that directory straight away — the named form of what taking a
+    // row does, exactly as `/resume <id>` is the named form of `Enter` in the
+    // sessions list (T45/T70). `~` and a relative path both work, because a
+    // person typing a path types the one they would type in a shell.
+    if (command === "/cwd") {
+      const said = rest.trim()
+      if (said.length === 0) {
+        openOverlay("cwd")
+        return true
+      }
+      chooseWorkspace(expandPath(said, ws().dir))
       return true
     }
     // `/clear` is `/new` under the name other harnesses use for it, and an alias
@@ -2628,7 +3027,7 @@ export function App(props: AppProps) {
       if (await runPluginCommand(text)) return
       if (await runPackageCommand(text)) return
       try {
-        turn = (await skillTurn(props.ws, skills.entries(), text)) ?? text
+        turn = (await skillTurn(ws(), skills().entries(), text)) ?? text
       } catch (error) {
         setNotice(error instanceof Error ? error.message : String(error))
         return
@@ -2769,7 +3168,15 @@ export function App(props: AppProps) {
   }
 
   const shortcutLayerBlocked = () =>
-    Boolean(withPicker() || agentPicker() || modePicker() || pending() || browse.active() || plugins.panel())
+    Boolean(
+      checkout() !== null ||
+        withPicker() ||
+        agentPicker() ||
+        modePicker() ||
+        pending() ||
+        browse.active() ||
+        plugins.panel(),
+    )
   const normalShortcutLayerBlocked = () => shortcutLayerBlocked() || overlay.active()
 
   onMount(() => {
@@ -2898,6 +3305,7 @@ export function App(props: AppProps) {
   const focusOwner = (key: KeyEvent) =>
     resolveFocus({
       modified: Boolean(key.ctrl || key.meta),
+      checkout: checkout() !== null,
       withPicker: withPicker(),
       agentPicker: agentPicker(),
       modePicker: modePicker(),
@@ -2916,6 +3324,17 @@ export function App(props: AppProps) {
      * list you can actually choose from (T28). It is the outermost of the three
      * because it is the one that can only be opened deliberately.
      */
+    /**
+     * The checkout question, outermost (§5.3b point 6). Every printable key is
+     * offered to `plan.apply`, which is the only thing that decides which of
+     * them are answers — the same function the bare-terminal asking uses. A key
+     * it does not accept changes nothing and is swallowed, so a stray keystroke
+     * cannot answer a question about trust by accident.
+     */
+    if (owner.kind === "dialog" && owner.dialog === "checkout") {
+      const said = key.name === "return" ? "return" : matches(keys.cancel, key) ? "escape" : (key.name ?? "")
+      return consume(key, () => void answerCheckout(said.toLowerCase()))
+    }
     if (owner.kind === "dialog" && owner.dialog === "with") {
       const count = wearables().length
       if (matches(keys.cancel, key)) return consume(key, closeWithPicker)
@@ -3113,7 +3532,8 @@ export function App(props: AppProps) {
         // draft rides the same channel a live session's driver failure does —
         // one notice, one place to read a failure in full.
         error={snapshot().error ?? refusal()}
-        cwd={props.ws.dir}
+        cwd={ws().dir}
+        onPickCwd={() => openOverlay("cwd")}
         onPickModel={() => openOverlay("model")}
         onCommand={submit}
         tip={tip}
@@ -3122,11 +3542,11 @@ export function App(props: AppProps) {
     ),
     sessions: (mount: SurfaceMount) => (
       <SessionsView
-        ws={props.ws}
+        workspaces={openWorkspaces()}
         currentId={live()?.id ?? ""}
         focused={mount.focused}
         onSwitch={switchToSession}
-        onOpenTab={openSession}
+        onOpenTab={(id, where) => openSession(id, where)}
         onNew={() => startDraft()}
         onClose={closeOverlay}
       />
@@ -3142,13 +3562,13 @@ export function App(props: AppProps) {
      */
     sidebar: (mount: SurfaceMount) => (
       <SessionsView
-        ws={props.ws}
+        workspaces={openWorkspaces()}
         variant="sidebar"
         width={sidebarWidth(panes.tree(), screen().width)}
         currentId={live()?.id ?? ""}
         focused={mount.focused}
         onSwitch={switchToSession}
-        onOpenTab={openSession}
+        onOpenTab={(id, where) => openSession(id, where)}
         onNew={() => startDraft()}
         onClose={() => {
           panes.focusOn(panes.main())
@@ -3167,11 +3587,11 @@ export function App(props: AppProps) {
         statePath={props.statePath}
         tick={planTick()}
         onMembershipChanged={() => {
-          skills.invalidate()
+          skills().invalidate()
           // Activating or deactivating a package can add or remove a `/name`
           // it declares just as easily as a skill (tui-plugin D1/D8): same
           // staleness, same fix.
-          packageCmds.invalidate()
+          packageCmds().invalidate()
           // A package that was just activated may ship a front end. The other
           // direction is not symmetric and says so in `host.ts`: a module that
           // has run has run, so deactivating takes effect at the next start.
@@ -3190,8 +3610,8 @@ export function App(props: AppProps) {
       />
     ),
     help: () => <HelpView keys={keys} onClose={closeOverlay} />,
-    settings: () => <SettingsView ws={props.ws} onClose={closeOverlay} />,
-    usage: () => <UsageView ws={props.ws} snapshot={snapshot()} onClose={closeOverlay} />,
+    settings: () => <SettingsView ws={ws()} onClose={closeOverlay} />,
+    usage: () => <UsageView ws={ws()} snapshot={snapshot()} onClose={closeOverlay} />,
     model: () => (
       <ModelView
         ws={props.ws}
@@ -3201,6 +3621,14 @@ export function App(props: AppProps) {
         onPick={(pick) => startDraft(pick)}
         onNotice={setNotice}
         onOpenProviders={() => openOverlay("provider")}
+        onClose={closeOverlay}
+      />
+    ),
+    cwd: () => (
+      <DirBrowser
+        start={ws().dir}
+        recents={loadRecents()}
+        onChoose={chooseWorkspace}
         onClose={closeOverlay}
       />
     ),
@@ -3286,6 +3714,14 @@ export function App(props: AppProps) {
                     event, and this front end shows only what the ledger holds. */}
                 <Show when={handoff()}>
                   <HandoffPanel file={handoff()!} />
+                </Show>
+                {/* A directory this screen has just walked into, asking to be
+                    trusted before anything in it takes part in a session
+                    (DESIGN §9, §5.3b point 6). Outermost of the dialogs: it is
+                    the only one that grants authority rather than choosing
+                    something. */}
+                <Show when={checkout()}>
+                  <CheckoutPrompt where={workspaceLabel(checkout()!.ws.dir)} plan={checkout()!.plan} />
                 </Show>
                 <Show when={withPicker()}>
                   <WithPicker
@@ -3394,9 +3830,9 @@ export function App(props: AppProps) {
                   onActivate={() => {
                     if (browse.active()) leaveBrowse()
                   }}
-                  references={references}
-                  skills={skills}
-                  packages={packageCmds}
+                  references={references()}
+                  skills={skills()}
+                  packages={packageCmds()}
                   pluginCommands={plugins.commands}
                   disabled={overlay.active()}
                   onReady={(api) => {
@@ -3422,6 +3858,8 @@ export function App(props: AppProps) {
                   onScrollEnd={scrollToEnd}
                   sidebarOpen={sidebarOpen()}
                   onToggleSidebar={toggleSidebar}
+                  workspace={workspaceChip()}
+                  onPickCwd={() => openOverlay("cwd")}
                 />
               </box>
               </NavigateContext.Provider>
