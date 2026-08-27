@@ -16,9 +16,20 @@
 //! **Why it loops, and why it holds a lock while it does.** A message may be
 //! sent into a delegation at any moment, including while this is driving it
 //! (D3) — so "drive one round and exit" would leave messages that arrived
-//! during the round with nobody to answer them. The invariant is: *every
-//! accepted message is eventually driven by somebody* (D4), and it is closed
-//! from both ends.
+//! during the round with nobody to answer them. The invariant (D4) is:
+//!
+//!   *Every accepted message is either eventually driven, or left durably
+//!   pending with a terminal failure to drive it surfaced to the parent.*
+//!
+//! The second half is not a weakening bolted on afterwards, it is the honest
+//! half: a message can be accepted into a delegation whose remote cannot be
+//! made to answer, and "eventually driven" states a liveness guarantee nothing
+//! here can keep. Written the short way it invites exactly one repair — have a
+//! runner that is giving up start another runner — and that is an unattended
+//! loop spending real money on a dead end. What IS guaranteed, unconditionally,
+//! is the part that is about this code rather than about the remote: **on a
+//! path that can run at all, no wake is lost to the lease/send race.** That is
+//! what the pair below closes, and it is closed from both ends.
 //!
 //!   * This side holds `<d>/.runner.lock` — an OS ADVISORY LOCK, so a runner
 //!     that dies cannot leave the delegation locked for ever — and on the way
@@ -36,15 +47,16 @@
 //! runner has driven nothing, and a report-shaped answer from it would be a
 //! sub-agent's findings that no sub-agent produced.
 //!
-//! **What the invariant does NOT cover, said plainly.** The pair above closes
-//! every window in an ORDERLY exit. It does not make this crash-recoverable: an
-//! advisory lock released by a dying process frees the delegation, it does not
-//! arrange for anyone to drive what that process was holding, so a runner killed
-//! with a message pending leaves it pending until the next message arrives and
-//! wakes a fresh runner. The two give-up exits below (`stranded`) are the same
-//! shape and at least SAY so in the report. Turning that into a real
-//! crash-recovery guarantee needs something neither end has today — a sweep, or
-//! a lease with an owner to check on — and it is not what the lock is.
+//! **Where the second half of D4 is reached.** Three ways, and two of them say
+//! so. A round that cannot run at all and a run that keeps running without ever
+//! answering both stop and report it (`stranded_note`) — the message stays in
+//! the inbox, intact, and the next turn sent into the delegation starts a fresh
+//! runner that takes both. The third is a crash: an advisory lock released by a
+//! dying process frees the delegation, it does not arrange for anybody to drive
+//! what that process was holding, so a killed runner leaves its pending message
+//! waiting with nothing to surface. Turning that one into a real crash-recovery
+//! guarantee needs something neither end has today — a sweep, or a lease with an
+//! owner to check on — and it is not what the lock is.
 //!
 //! **The gate.** A `readonly` agent is held to its word by answering the
 //! kernel's own per-call gate (`session step --gate`, DESIGN §4): one request
@@ -223,7 +235,19 @@ pub fn run(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args: Args) !r
         // the facts above would have to be invented, starting with which
         // harness — and inventing THAT means driving a Codex thread id through
         // `nulya session step`.
-        const state = (try record.read(alloc, io, cwd, args.delegation)) orelse {
+        const found = record.read(alloc, io, cwd, args.delegation) catch |err| switch (err) {
+            // Damaged rather than absent, and the difference is worth a word:
+            // one means "no such delegation", the other means "this one exists
+            // and its budget and ceiling can no longer be read" (`record.read`).
+            // Neither is a thing to drive.
+            record.Corrupt.CorruptDelegationRecord => return .{ .text = try std.fmt.allocPrint(
+                alloc,
+                "delegation {s} could not be picked up: its record is damaged, so what it may do and how much of it is left can no longer be read.\nNothing was run for it. Its earlier turns are unaffected.\n",
+                .{args.delegation},
+            ) },
+            else => return err,
+        };
+        const state = found orelse {
             return .{ .text = try std.fmt.allocPrint(
                 alloc,
                 "delegation {s} could not be picked up: it has no record here, so there is nothing that says which harness holds it or what it may do.\nNothing was run for it.\n",

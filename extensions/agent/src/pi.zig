@@ -260,7 +260,7 @@ pub fn driveRound(
         record.inboxPut(alloc, io, base, delegation, message) catch {};
     };
 
-    prompt(alloc, io, sess, message) catch |err| {
+    prompt(alloc, io, sess, message.text) catch |err| {
         out.failure = try std.fmt.allocPrint(alloc, "could not hand that turn to pi ({s})", .{@errorName(err)});
         return out;
     };

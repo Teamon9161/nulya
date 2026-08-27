@@ -359,7 +359,7 @@ pub fn driveRound(
         record.inboxPut(alloc, io, base, delegation, message) catch {};
     };
 
-    writeUserMessage(alloc, io, sess, message) catch |err| {
+    writeUserMessage(alloc, io, sess, message.text) catch |err| {
         out.failure = try std.fmt.allocPrint(
             alloc,
             "could not hand that turn to claude ({s})",

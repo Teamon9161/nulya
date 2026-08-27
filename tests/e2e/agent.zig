@@ -1577,6 +1577,116 @@ test "bundled agent: a codex delegation that is running takes a message as turn/
     }
 }
 
+test "bundled agent: a message that asks to interrupt is never steered into the turn it is about to stop, even when the marker has not been written yet" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+    const codex_exe = (try fakeCodex(alloc)) orelse return error.SkipZigTest;
+    defer alloc.free(codex_exe);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const ref = try buildBundled(alloc, io, ws, exe_abs, "agent");
+    defer alloc.free(ref);
+
+    try ws.createDirPath(io, ".nulya/agents");
+    try ws.writeFile(io, .{
+        .sub_path = ".nulya/agents/scout.md",
+        .data = "---\ndescription: scouts\nrunner: codex\n---\nYou are a scout.\n",
+    });
+    try ws.writeFile(io, .{ .sub_path = "hold", .data = "" });
+
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(new.stdout);
+    const parent = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(parent);
+    const session_file = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{parent});
+    defer alloc.free(session_file);
+    const held: []const EnvPair = &.{
+        .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_CODEX_EXE", .value = codex_exe },
+        .{ .key = "FAKE_CODEX_LOG", .value = "codex-log.txt" },
+        .{ .key = "FAKE_CODEX_HOLD", .value = "hold" },
+        .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+    };
+
+    const started = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"scout\",\"task\":\"go on for a while\"}" }, held);
+    defer alloc.free(started.stdout);
+    try std.testing.expectEqual(@as(u8, 0), started.code);
+    const d = try delegationOf(alloc, started.stdout);
+    defer alloc.free(d);
+
+    try waitForText(io, alloc, ws, "codex-log.txt", "turn/start");
+
+    // THE WINDOW, staged exactly. `agent {interrupt:true}` publishes the message
+    // and then writes the marker, so between those two writes the delegation
+    // holds an interrupt whose marker does not exist yet — and this arm drains
+    // a running turn, so it can arrive right there. The sender is skipped and
+    // the inbox written by hand to sit in that state deliberately: the existing
+    // interrupt test proves the marker works, which is a different fact.
+    //
+    // Published the way `record.inboxPut` publishes, because that is the other
+    // half of the same discipline: a name ending `.json` only ever appears by
+    // rename, never part-written.
+    {
+        const dir = try std.fmt.allocPrint(alloc, ".nulya/delegations/{s}/inbox", .{d});
+        defer alloc.free(dir);
+        try ws.createDirPath(io, dir);
+        const staged = try std.fmt.allocPrint(alloc, "{s}/000000009001.tmp", .{dir});
+        defer alloc.free(staged);
+        const final = try std.fmt.allocPrint(alloc, "{s}/000000009001.json", .{dir});
+        defer alloc.free(final);
+        try ws.writeFile(io, .{
+            .sub_path = staged,
+            .data = "{\"v\":1,\"text\":\"RACE-SENTINEL\",\"interrupt\":true}",
+        });
+        try ws.rename(staged, ws, final, io);
+    }
+    try waitForInboxDrained(io, alloc, ws, d);
+
+    try ws.deleteFile(io, "hold");
+    {
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", wait_budget_ms });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+    }
+
+    {
+        const log = try ws.readFileAlloc(io, "codex-log.txt", alloc, .limited(1 << 20));
+        defer alloc.free(log);
+        // It stopped the turn…
+        try std.testing.expect(std.mem.indexOf(u8, log, "turn/interrupt") != null);
+        // …and the message itself never went into it. The log holds whole
+        // requests, so a steer carrying this text would be visible here; if it
+        // had been, the message would have been folded into an answer that was
+        // then thrown away.
+        var lines = std.mem.splitScalar(u8, log, '\n');
+        while (lines.next()) |line| {
+            if (std.mem.indexOf(u8, line, "turn/steer") == null) continue;
+            try std.testing.expect(std.mem.indexOf(u8, line, "RACE-SENTINEL") == null);
+        }
+        // Not lost either: a later turn was started with it, which is the whole
+        // point of leaving it in the inbox (D4).
+        try std.testing.expect(std.mem.indexOf(u8, log, "RACE-SENTINEL") != null);
+    }
+
+    // And the parent hears the answer to it.
+    {
+        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, &.{
+            .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+        });
+        defer alloc.free(stepped.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "heard: RACE-SENTINEL") != null);
+    }
+}
+
 test "bundled agent: the three rungs reach codex as its own three sandboxes, and a read-only delegation is refused outright when the one that comes back is wider than it asked for" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;

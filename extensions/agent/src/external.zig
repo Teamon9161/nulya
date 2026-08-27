@@ -319,7 +319,7 @@ pub fn driveRound(
     };
 
     const message_path = try record.pathIn(alloc, delegation, record.message_name);
-    base.writeFile(io, .{ .sub_path = message_path, .data = message }) catch |err| {
+    base.writeFile(io, .{ .sub_path = message_path, .data = message.text }) catch |err| {
         out.failure = try std.fmt.allocPrint(alloc, "could not stage that turn for {s} ({s})", .{ sess.ref, @errorName(err) });
         return out;
     };

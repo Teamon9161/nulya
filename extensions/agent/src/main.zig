@@ -748,7 +748,19 @@ fn sendTurn(
     // delegation — it says which persona is wearing it, which runner drives it
     // and what that runner opened — where the session header could only ever
     // answer for a nulya session.
-    const state = (try record.read(alloc, ctx.io, std.Io.Dir.cwd(), target)) orelse {
+    const state = (record.read(alloc, ctx.io, std.Io.Dir.cwd(), target) catch |err| switch (err) {
+        // A record that is there but cannot be believed is not a delegation to
+        // send another turn into: what it may do and how much of it is left are
+        // both in that file (`record.read`). Named rather than folded into "no
+        // delegation" — the two have different repairs, and only one of them is
+        // "start a fresh one".
+        record.Corrupt.CorruptDelegationRecord => return rpc.refuse(
+            alloc,
+            "delegation {s} has a damaged record ({s}/{s}/{s}), so what it was allowed to do can no longer be read. Nothing was sent. Start a fresh delegation for this work.",
+            .{ target, record.root, target, record.record_name },
+        ),
+        else => return err,
+    }) orelse {
         return rpc.refuse(
             alloc,
             "there is no delegation {s} here, so there is nothing to send a turn into. Call agent with a name to start one.",
@@ -773,7 +785,11 @@ fn sendTurn(
     // DELETED since must not strand a conversation whose persona, remote and
     // ceiling are all still right here.
     const allowed_exchanges = state.created.max_exchanges;
-    if (allowed_exchanges != 0 and state.turns >= allowed_exchanges + 1) {
+    // `>` rather than `>= allowed + 1`, which is the same thing without an
+    // addition that overflows on a definition asking for the largest budget
+    // there is: `turns` counts the opening task too, so "has had them all" is
+    // exactly "more turns than follow-ups allowed".
+    if (allowed_exchanges != 0 and state.turns > allowed_exchanges) {
         return rpc.refuse(
             alloc,
             "'{s}' allows {d} follow-up turn(s) per delegation and {s} has had them all. Start a fresh delegation with what you now know, or do the rest yourself.",
@@ -820,9 +836,13 @@ fn sendTurn(
 /// lands, so a turn that never reached the runner is never counted against the
 /// exchange budget.
 ///
-/// An interrupt is the same message plus a marker written after it (D6): a
-/// runner that sees the marker always finds something behind it, where the other
-/// order would have it stop for a message that has not arrived.
+/// An interrupt is the same message, sent saying so (D6). On the arms with an
+/// inbox that word travels IN the message, atomically, because two writes is a
+/// race in either order (`record.Message`); the `<d>/interrupt` marker is
+/// written as well, and is what stops a turn on the nulya arm — which has no
+/// inbox of its own — and on the arms that do not drain mid-turn. Both orders
+/// are correct now, so the marker goes after, where a runner that sees it always
+/// finds something behind it.
 fn deliver(
     ctx: *const Ctx,
     spec: Spec,
@@ -830,7 +850,16 @@ fn deliver(
     interrupt: bool,
 ) !union(enum) { ok, failed: []const u8 } {
     const alloc = ctx.alloc;
-    const sent = try runners.send(spec.runner, alloc, ctx.io, std.Io.Dir.cwd(), ctx.exe, spec.remote, spec.delegation, task);
+    const sent = try runners.send(
+        spec.runner,
+        alloc,
+        ctx.io,
+        std.Io.Dir.cwd(),
+        ctx.exe,
+        spec.remote,
+        spec.delegation,
+        .{ .text = task, .interrupt = interrupt },
+    );
     if (sent.code != 0) {
         return .{ .failed = try failed(alloc, "could not send that turn to delegation {s}: {s}", .{ spec.delegation, detail(sent) }) };
     }
@@ -892,10 +921,13 @@ fn allowedHere(ctx: *const Ctx, parent: []const u8) !?[]const []const u8 {
     const worn = (try defs.wornPersona(ctx.alloc, ctx.io, parent)) orelse return null;
     const d = std.mem.trim(u8, ctx.env.get(record.delegation_var) orelse "", " \t\r\n");
     if (record.isPlainId(d)) {
-        if (try record.read(ctx.alloc, ctx.io, std.Io.Dir.cwd(), d)) |state| return state.created.agents;
-        // A delegation was named and its record cannot be read: that is not a
-        // hand-driven session, it is a delegated one whose frozen answer is
-        // missing, and the narrow answer is the only honest one.
+        const found = record.read(ctx.alloc, ctx.io, std.Io.Dir.cwd(), d) catch null;
+        if (found) |state| return state.created.agents;
+        // A delegation was named and its record is missing or damaged: that is
+        // not a hand-driven session, it is a delegated one whose frozen answer
+        // cannot be read, and `leaf` is the only honest answer. No refusal is
+        // needed here because this IS the refusal — the caller turns an empty
+        // list into "this agent cannot delegate".
         return &.{};
     }
     const entry = (try defs.find(ctx.alloc, ctx.io, ctx.env, worn)) orelse return &.{};

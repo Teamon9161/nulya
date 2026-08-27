@@ -252,10 +252,13 @@ pub const Created = struct {
     /// Its own column rather than reusing `model` on purpose: a row saying
     /// `runner: "codex", model: "gpt-5"` would read as a nulya model id, and a
     /// record that has to be interpreted before it can be read is the thing D2
-    /// says not to build. Written for the same reason `profile` and `model` are
-    /// — provenance somebody can read — and, like them, nothing reads it back:
-    /// what an external thread runs on was frozen into that thread when it
-    /// opened, so a later round has nothing to decide.
+    /// says not to build.
+    ///
+    /// Unlike `profile` and `model`, this one IS read back: claude, pi and an
+    /// external runner are told which model to use on every round, so each
+    /// `attach` takes it from here (`runner.run`). Codex is the exception it was
+    /// first written for — a thread froze its model when it was created, so a
+    /// later round has nothing to say.
     runner_model: []const u8 = "",
     /// How many follow-up turns this delegation may have. Zero is "no limit",
     /// which is what an unwritten `max_exchanges:` means — and what a row from
@@ -372,9 +375,44 @@ pub fn appendTurn(
     try appendLine(alloc, io, base, id, out.writer.buffered());
 }
 
+/// A row that is there but cannot be believed. Distinct from "no delegation by
+/// that name" (null) on purpose — see the discipline on `read`.
+pub const Corrupt = error{CorruptDelegationRecord};
+
 /// Read the journal back. Null when there is no delegation by that name, or
 /// when its journal has no `created` row yet — both mean "this tool has never
 /// opened a delegation called that", which is the one answer a caller needs.
+///
+/// ── three answers, and which fields get which ──────────────────────────────
+///
+/// A TORN FINAL LINE is ignored: an append that was interrupted, or one in
+/// flight right now, is not a fact yet. That has not changed.
+///
+/// An ABSENT field reads as its default, because that is what a row written
+/// before the column existed means and those delegations have been running
+/// under that answer all along.
+///
+/// A field that is PRESENT AND UNREADABLE is where this record stopped being
+/// provenance and became an authority, and the answer depends on which
+/// direction its default points:
+///
+///   | field                       | fallback | direction |
+///   |-----------------------------|----------|-----------|
+///   | `permissions`               | readonly | narrowest |
+///   | `agents`                    | leaf     | narrowest |
+///   | `max_exchanges` `max_steps` | 0        | UNLIMITED |
+///
+/// The first two can fall back, and do: corruption there can only ever take a
+/// capability away, which is the same discipline the kernel's own standing
+/// records follow (DESIGN §5.1). The two budgets have no narrow reading
+/// available — zero means "no limit" and "the kernel's own" — so a damaged one
+/// cannot be read at all, and the whole record is refused instead. Reading
+/// `"max_exchanges": "2"` as "unlimited follow-ups" is precisely the fail-open
+/// this distinction exists to prevent.
+///
+/// A complete line that is not JSON is corruption for the same reason: a
+/// damaged `turn` row silently lowers the exchange count, and the count is what
+/// enforces the budget.
 pub fn read(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const u8) !?State {
     const path = try pathIn(alloc, id, record_name);
     const bytes = base.readFileAlloc(io, path, alloc, .limited(max_record_bytes)) catch |err| switch (err) {
@@ -390,12 +428,12 @@ pub fn read(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const 
     while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \t\r\n");
         if (trimmed.len == 0) continue;
-        const parsed = std.json.parseFromSlice(std.json.Value, alloc, trimmed, .{}) catch continue;
+        const parsed = std.json.parseFromSlice(std.json.Value, alloc, trimmed, .{}) catch return Corrupt.CorruptDelegationRecord;
         const obj = switch (parsed.value) {
             .object => |o| o,
-            else => continue,
+            else => return Corrupt.CorruptDelegationRecord,
         };
-        const kind = stringOf(obj, "kind") orelse continue;
+        const kind = stringOf(obj, "kind") orelse return Corrupt.CorruptDelegationRecord;
         if (std.mem.eql(u8, kind, "created")) {
             if (state != null) continue; // one delegation, one opening
             state = .{
@@ -412,8 +450,8 @@ pub fn read(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const 
                     .profile = stringOf(obj, "profile") orelse "",
                     .model = stringOf(obj, "model") orelse "",
                     .runner_model = stringOf(obj, "runner_model") orelse "",
-                    .max_exchanges = intOf(obj, "max_exchanges"),
-                    .max_steps = intOf(obj, "max_steps"),
+                    .max_exchanges = try budgetOf(obj, "max_exchanges"),
+                    .max_steps = try budgetOf(obj, "max_steps"),
                     .agents = try stringsOf(alloc, obj, "agents"),
                 },
             };
@@ -426,18 +464,22 @@ pub fn read(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const 
     return state;
 }
 
-/// A non-negative whole number, or zero for anything else. Zero is what an
-/// absent policy column means anyway, so a value that is not one is read as
-/// "nothing was said" rather than as an error nobody could act on.
-fn intOf(obj: std.json.ObjectMap, key: []const u8) u32 {
+/// One of the two budget columns. Absent is zero — no limit, the answer every
+/// row written before these columns existed carries. Anything else present is
+/// CORRUPTION rather than zero: zero is the widest reading there is here, so
+/// falling back to it would let a damaged row hand out an unlimited one (see
+/// the table on `read`).
+fn budgetOf(obj: std.json.ObjectMap, key: []const u8) !u32 {
     return switch (obj.get(key) orelse return 0) {
-        .integer => |i| if (i > 0 and i <= std.math.maxInt(u32)) @intCast(i) else 0,
-        else => 0,
+        .integer => |i| if (i > 0 and i <= std.math.maxInt(u32)) @intCast(i) else Corrupt.CorruptDelegationRecord,
+        else => Corrupt.CorruptDelegationRecord,
     };
 }
 
 /// A list of strings, skipping anything in it that is not one. An absent column
-/// and an empty list are the same answer, which is what the callers want.
+/// and an empty list are the same answer, which is what the callers want — and
+/// an unreadable one is that answer too, because here it is the NARROW one: a
+/// delegation that cannot say who it may delegate to is a leaf.
 fn stringsOf(alloc: std.mem.Allocator, obj: std.json.ObjectMap, key: []const u8) ![]const []const u8 {
     const items = switch (obj.get(key) orelse return &.{}) {
         .array => |a| a.items,
@@ -451,6 +493,13 @@ fn stringsOf(alloc: std.mem.Allocator, obj: std.json.ObjectMap, key: []const u8)
         }
     }
     return out.items;
+}
+
+fn boolOf(obj: std.json.ObjectMap, key: []const u8) bool {
+    return switch (obj.get(key) orelse return false) {
+        .bool => |b| b,
+        else => false,
+    };
 }
 
 fn stringOf(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
@@ -582,6 +631,33 @@ pub fn leaseHeld(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []c
 /// counted, and the runner drains everything it finds each round.
 const max_queued: usize = 4096;
 
+/// One message waiting for a runner, and how it was sent.
+///
+/// **Why `interrupt` rides in the envelope.** It is not a kind of message — the
+/// text is an ordinary user turn either way (D3) — it is a fact about DELIVERY:
+/// take this now rather than at the next natural boundary. It has to travel
+/// WITH the message because the alternative is two writes, and two writes is a
+/// race whichever order they go in:
+///
+///   * message first, then the marker (what this used to do): a runner that
+///     drains mid-turn — the codex arm does, that is what `turn/steer` is for —
+///     can take the message in the gap and steer it INTO the very turn the
+///     marker is about to cut down. The message is then inside an answer that
+///     is being thrown away.
+///   * marker first, then the message: a sender that dies in the gap has cut a
+///     turn short and delivered no new direction to replace it.
+///
+/// One atomic rename carries both, and the ambiguity is gone rather than moved.
+/// The `<d>/interrupt` marker still exists and is still what stops a turn on
+/// the arms that do NOT drain mid-turn (claude, pi, an external runner): they
+/// take their one message at the start of a round and watch the marker while it
+/// runs, so nothing there can be steered into a doomed turn. Belt and braces on
+/// the codex arm, where either order is now correct.
+pub const Message = struct {
+    text: []const u8,
+    interrupt: bool = false,
+};
+
 /// Deliver one message into `<d>/inbox/`.
 ///
 /// The nulya runner never uses this — it appends straight into the child
@@ -617,7 +693,7 @@ pub fn inboxPut(
     io: std.Io,
     base: std.Io.Dir,
     id: []const u8,
-    text: []const u8,
+    msg: Message,
 ) !void {
     const dir = try pathIn(alloc, id, inbox_name);
     try base.createDirPath(io, dir);
@@ -628,7 +704,13 @@ pub fn inboxPut(
     try jw.objectField("v");
     try jw.write(1);
     try jw.objectField("text");
-    try jw.write(text);
+    try jw.write(msg.text);
+    // Only when it is one, so an ordinary message is the same bytes it always
+    // was and an older reader sees exactly what it saw before.
+    if (msg.interrupt) {
+        try jw.objectField("interrupt");
+        try jw.write(true);
+    }
     try jw.endObject();
 
     var n: usize = try nextFree(io, base, dir);
@@ -675,7 +757,7 @@ fn nextFree(io: std.Io, base: std.Io.Dir, dir: []const u8) !usize {
 /// parse is not going to be answered by leaving it there for ever, and it cannot
 /// be a half-written one: a name ending `.json` was published by a rename, so
 /// whatever is behind it is whole (`inboxPut`).
-pub fn inboxTake(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const u8) ![]const []const u8 {
+pub fn inboxTake(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const u8) ![]const Message {
     return inboxTakeUpTo(alloc, io, base, id, max_queued);
 }
 
@@ -685,7 +767,7 @@ pub fn inboxTake(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []c
 /// comes with it: a message it took is either answered or put straight back, so
 /// nothing is ever held inside a harness's own queue where a dying process would
 /// take it with them (`claude.zig`).
-pub fn inboxTakeOne(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const u8) !?[]const u8 {
+pub fn inboxTakeOne(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const u8) !?Message {
     const taken = try inboxTakeUpTo(alloc, io, base, id, 1);
     return if (taken.len == 0) null else taken[0];
 }
@@ -696,7 +778,7 @@ fn inboxTakeUpTo(
     base: std.Io.Dir,
     id: []const u8,
     limit: usize,
-) ![]const []const u8 {
+) ![]const Message {
     const dir = try pathIn(alloc, id, inbox_name);
     var names: std.ArrayList([]const u8) = .empty;
     {
@@ -716,7 +798,7 @@ fn inboxTakeUpTo(
         }
     }.lessThan);
 
-    var out: std.ArrayList([]const u8) = .empty;
+    var out: std.ArrayList(Message) = .empty;
     for (names.items) |name| {
         if (out.items.len >= limit) break;
         const path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir, name });
@@ -730,7 +812,7 @@ fn inboxTakeUpTo(
         };
         const text = stringOf(obj, "text") orelse continue;
         if (text.len == 0) continue;
-        try out.append(alloc, text);
+        try out.append(alloc, .{ .text = text, .interrupt = boolOf(obj, "interrupt") });
     }
     return out.items;
 }
@@ -970,14 +1052,14 @@ test "an external runner's inbox hands messages back in the order they were sent
     // Nothing queued is not an error: a runner asks this every round.
     try std.testing.expectEqual(@as(usize, 0), (try inboxTake(a, io, ws, id)).len);
 
-    try inboxPut(a, io, ws, id, "first");
-    try inboxPut(a, io, ws, id, "second");
-    try inboxPut(a, io, ws, id, "third");
+    try inboxPut(a, io, ws, id, .{ .text = "first" });
+    try inboxPut(a, io, ws, id, .{ .text = "second" });
+    try inboxPut(a, io, ws, id, .{ .text = "third" });
 
     const taken = try inboxTake(a, io, ws, id);
     try std.testing.expectEqual(@as(usize, 3), taken.len);
-    try std.testing.expectEqualStrings("first", taken[0]);
-    try std.testing.expectEqualStrings("third", taken[2]);
+    try std.testing.expectEqualStrings("first", taken[0].text);
+    try std.testing.expectEqualStrings("third", taken[2].text);
 
     // Taken, not read: the wake invariant needs `pending` to go false once a
     // runner has the message (D4), or a second runner is started for work that
@@ -986,10 +1068,83 @@ test "an external runner's inbox hands messages back in the order they were sent
 
     // Numbers are never reused, so a message queued after a drain still sorts
     // after everything before it.
-    try inboxPut(a, io, ws, id, "fourth");
+    try inboxPut(a, io, ws, id, .{ .text = "fourth" });
     const later = try inboxTake(a, io, ws, id);
     try std.testing.expectEqual(@as(usize, 1), later.len);
-    try std.testing.expectEqualStrings("fourth", later[0]);
+    try std.testing.expectEqualStrings("fourth", later[0].text);
+}
+
+test "how a message was sent travels with it, in the same atomic write" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const id = "d-0000000000e1";
+    try inboxPut(a, io, ws, id, .{ .text = "carry on" });
+    try inboxPut(a, io, ws, id, .{ .text = "stop", .interrupt = true });
+
+    const taken = try inboxTake(a, io, ws, id);
+    try std.testing.expectEqual(@as(usize, 2), taken.len);
+    try std.testing.expect(!taken[0].interrupt);
+    try std.testing.expect(taken[1].interrupt);
+
+    // It survives a requeue, which is how a message put back by a refused steer
+    // or an unfinished round reaches the next one: what goes back in has to be
+    // what came out, or an interrupt quietly becomes an ordinary turn.
+    try inboxPut(a, io, ws, id, taken[1]);
+    const again = try inboxTake(a, io, ws, id);
+    try std.testing.expectEqual(@as(usize, 1), again.len);
+    try std.testing.expectEqualStrings("stop", again[0].text);
+    try std.testing.expect(again[0].interrupt);
+}
+
+test "a policy column that cannot be read refuses the record rather than reading as unlimited" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const head = "{\"v\":1,\"kind\":\"created\",\"agent\":\"x\",\"runner\":\"nulya\",\"remote\":\"s-1\",\"parent\":\"s-0\",\"permissions\":\"default\"";
+
+    // Zero is the WIDEST reading of these two columns, so a damaged one must not
+    // fall back to it: "2" as a string, or a negative, would otherwise hand out
+    // unlimited follow-ups.
+    for ([_][]const u8{
+        ",\"max_exchanges\":\"2\"}\n",
+        ",\"max_exchanges\":-1}\n",
+        ",\"max_steps\":null}\n",
+    }, 0..) |tail, i| {
+        const id = try std.fmt.allocPrint(a, "d-00000000d1{d:0>2}", .{i});
+        try ws.createDirPath(io, try dirOf(a, id));
+        try ws.writeFile(io, .{
+            .sub_path = try pathIn(a, id, record_name),
+            .data = try std.mem.concat(a, u8, &.{ head, tail }),
+        });
+        try std.testing.expectError(Corrupt.CorruptDelegationRecord, read(a, io, ws, id));
+    }
+
+    // A complete line that is not a row at all is corruption too: a damaged
+    // `turn` row silently lowers the count the budget is enforced against.
+    {
+        const id = "d-00000000d199";
+        try ws.createDirPath(io, try dirOf(a, id));
+        try ws.writeFile(io, .{
+            .sub_path = try pathIn(a, id, record_name),
+            .data = try std.mem.concat(a, u8, &.{ head, ",\"max_exchanges\":2}\n{not json}\n" }),
+        });
+        try std.testing.expectError(Corrupt.CorruptDelegationRecord, read(a, io, ws, id));
+    }
 }
 
 test "a message is published by a rename, so a reader never takes one that is still being written" {
@@ -1018,10 +1173,10 @@ test "a message is published by a rename, so a reader never takes one that is st
 
     // A number a half-written message claimed is not handed out again either:
     // the next sender takes the one after it, so order still counts up.
-    try inboxPut(a, io, ws, id, "after");
+    try inboxPut(a, io, ws, id, .{ .text = "after" });
     const taken = try inboxTake(a, io, ws, id);
     try std.testing.expectEqual(@as(usize, 1), taken.len);
-    try std.testing.expectEqualStrings("after", taken[0]);
+    try std.testing.expectEqualStrings("after", taken[0].text);
 }
 
 test "the runner lease is exclusive while it is held, and the interrupt marker is taken once" {

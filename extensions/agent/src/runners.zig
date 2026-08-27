@@ -369,17 +369,22 @@ pub fn send(
     exe: []const u8,
     remote: []const u8,
     delegation: []const u8,
-    text: []const u8,
+    msg: record.Message,
 ) !proc.Run {
     switch (r) {
-        .nulya => return proc.run(alloc, io, &.{ exe, "session", "append", remote, text }),
+        .nulya => return proc.run(alloc, io, &.{ exe, "session", "append", remote, msg.text }),
         .codex, .claude, .pi, .ext => {
             // Always the file, never "steer if something is running": whether a
             // message arrives at the next natural boundary or is folded into the
             // turn in flight is the RUNNER's decision, made when it drains
             // (`codex.driveRound`, `claude.driveRound`). A sender that tried to
             // decide it would be racing the runner for the answer.
-            record.inboxPut(alloc, io, base, delegation, text) catch |err| {
+            //
+            // How it was sent goes in with it rather than beside it: an
+            // interrupt written as a second file is a window in which a runner
+            // can take the message and fold it into the turn that interrupt is
+            // about to cut short (`record.Message`).
+            record.inboxPut(alloc, io, base, delegation, msg) catch |err| {
                 return .{
                     .code = 1,
                     .stdout = "",
