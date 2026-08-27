@@ -309,14 +309,15 @@ pub fn driveRound(
 ) !RoundResult {
     var out: RoundResult = .{};
 
-    const message = (try record.inboxTakeOne(alloc, io, base, delegation)) orelse {
+    const entry = (try record.inboxPeekOne(alloc, io, base, delegation)) orelse {
         out.stopped = "idle";
         return out;
     };
+    const message = entry.msg;
+    // Left in the inbox until the round settles, and dropped only then — every
+    // early return goes through here having acked nothing (`record.inboxPeek`).
     var answered = false;
-    defer if (!answered) {
-        record.inboxPut(alloc, io, base, delegation, message) catch {};
-    };
+    defer if (answered) record.inboxAck(alloc, io, base, delegation, entry.name);
 
     const message_path = try record.pathIn(alloc, delegation, record.message_name);
     base.writeFile(io, .{ .sub_path = message_path, .data = message.text }) catch |err| {

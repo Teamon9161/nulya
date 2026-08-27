@@ -297,7 +297,28 @@ pub fn driveRound(
 ) !RoundResult {
     var out: RoundResult = .{};
 
-    const first = try record.inboxTake(alloc, io, base, delegation);
+    // Every message this round has offered the turn, by inbox name. Peeking does
+    // not consume (`record.inboxPeek`), and this arm peeks again on every pass of
+    // the read loop — so without this a steer still in flight, or one already
+    // refused, would be offered to the same turn over and over.
+    var offered: std.ArrayList([]const u8) = .empty;
+    // The ones the harness confirmed, dropped when the round is over and NOT
+    // before. Two reasons, and the second one is not optional:
+    //
+    //   * an ack is a delivery receipt, and a round that ends badly should not
+    //     have been handing them out as it went;
+    //   * a name that is freed mid-round can be HANDED OUT AGAIN. `nextFree`
+    //     takes one past the highest number present, so acking the message that
+    //     started the turn empties the directory and the next message sent lands
+    //     on that same name — which `offered` above would then read as "already
+    //     given to this turn" and skip for the rest of the round. That is a
+    //     message silently held back until the next one, and it is exactly what
+    //     it looked like: a mid-turn message arriving as a fresh `turn/start`
+    //     instead of a `turn/steer`.
+    var confirmed: std.ArrayList([]const u8) = .empty;
+    defer for (confirmed.items) |name| record.inboxAck(alloc, io, base, delegation, name);
+
+    const first = try record.inboxPeek(alloc, io, base, delegation);
     if (first.len == 0) {
         // Nothing to answer. Not a failure and not a report: the caller's
         // pending check decides whether to go round again.
@@ -315,18 +336,26 @@ pub fn driveRound(
     // The envelope says nothing here: a message that asked to interrupt has
     // nothing to interrupt when it is the one STARTING the turn. (`driveOnce`
     // clears a stale marker before each round for the same reason.)
-    for (first) |msg| try writeTextInput(&jw, msg.text);
+    for (first) |entry| {
+        try writeTextInput(&jw, entry.msg.text);
+        try offered.append(alloc, entry.name);
+    }
     try jw.endArray();
     try jw.endObject();
 
     const reply = try request(alloc, io, &sess.client, "turn/start", params.writer.buffered());
     const result = switch (reply) {
         .failed => |f| {
+            // Nothing acked: a turn that never started did not take them, and
+            // they wait for the next round rather than disappearing with this
+            // one.
             out.failure = try std.fmt.allocPrint(alloc, "codex refused the turn: {s}", .{f});
             return out;
         },
         .ok => |o| o,
     };
+    // The turn has them: delivered, and dropped when this round is done.
+    for (first) |entry| try confirmed.append(alloc, entry.name);
     const turn_id = blk: {
         const turn = switch (result.get("turn") orelse std.json.Value{ .null = {} }) {
             .object => |o| o,
@@ -358,7 +387,7 @@ pub fn driveRound(
                 // Read on until the turn actually ends, so the connection is
                 // closed with nothing half-said on it — and so that any steer
                 // still in flight is settled rather than abandoned.
-                try drainToEnd(alloc, io, base, delegation, &sess.client, &steered);
+                try drainToEnd(alloc, io, &sess.client, &steered, &confirmed);
                 return out;
             }
         }
@@ -373,20 +402,21 @@ pub fn driveRound(
         // first and steer it into a turn that is about to be cut down. Whoever
         // gets here first, the answer is the same: put it back untouched and
         // stop the turn (`record.Message`).
-        const batch = try record.inboxTake(alloc, io, base, delegation);
-        for (batch, 0..) |msg, i| {
-            if (msg.interrupt) {
-                // It and everything queued behind it, in order: they were taken
-                // on the promise that somebody answers them, and the next round
-                // is who (D4).
-                for (batch[i..]) |back| try record.inboxPut(alloc, io, base, delegation, back);
+        const batch = try record.inboxPeek(alloc, io, base, delegation);
+        for (batch) |entry| {
+            if (alreadyOffered(offered.items, entry.name)) continue;
+            if (entry.msg.interrupt) {
+                // It and everything queued behind it stay exactly where they
+                // are — nothing was taken, so there is nothing to give back, and
+                // the next round finds them in the order they were sent (D4).
                 try interrupt(alloc, io, &sess.client, sess.thread_id, turn);
                 out.interrupted = true;
-                try drainToEnd(alloc, io, base, delegation, &sess.client, &steered);
+                try drainToEnd(alloc, io, &sess.client, &steered, &confirmed);
                 return out;
             }
-            const sid = try steer(alloc, io, &sess.client, sess.thread_id, turn, msg.text);
-            try steered.append(alloc, .{ .id = sid, .msg = msg });
+            const sid = try steer(alloc, io, &sess.client, sess.thread_id, turn, entry.msg.text);
+            try steered.append(alloc, .{ .id = sid, .name = entry.name });
+            try offered.append(alloc, entry.name);
         }
 
         const msg = (try next(alloc, &sess.client)) orelse {
@@ -398,7 +428,7 @@ pub fn driveRound(
             // the turn ended under the message, and it goes BACK to the inbox
             // so the next round answers it rather than nobody.
             .response => |r| {
-                try settleSteer(alloc, io, base, delegation, &steered, r);
+                try settleSteer(alloc, &steered, &confirmed, r);
                 continue;
             },
             .server_request => |req| {
@@ -421,7 +451,7 @@ pub fn driveRound(
                     // Steers still unanswered are messages in limbo: returning
                     // now would let a refusal after this line lose the message
                     // unheard.
-                    try settleOutstanding(alloc, io, base, delegation, &sess.client, &steered);
+                    try settleOutstanding(alloc, io, &sess.client, &steered, &confirmed);
                     return out;
                 }
                 if (std.mem.eql(u8, note.method, "error")) {
@@ -473,26 +503,28 @@ fn steer(
     return try send(alloc, io, client, "turn/steer", params.writer.buffered());
 }
 
-/// A steer whose reply has not come back yet, still owning the message. The
-/// whole `Message` rather than just its text: whatever goes back into the inbox
-/// has to be what came out of it, and a requeue that quietly dropped the
-/// envelope would turn an interrupt into an ordinary turn.
-const Steered = struct { id: i64, msg: record.Message };
+/// A steer whose reply has not come back yet, and the inbox name it is for.
+const Steered = struct { id: i64, name: []const u8 };
 
-/// Match a reply to an outstanding steer. Confirmed is done with; a refusal
-/// puts the message back in `<d>/inbox/`, where the pending check and the next
-/// round find it — the message was taken on the promise somebody answers it.
+fn alreadyOffered(offered: []const []const u8, name: []const u8) bool {
+    for (offered) |seen| {
+        if (std.mem.eql(u8, seen, name)) return true;
+    }
+    return false;
+}
+
+/// Match a reply to an outstanding steer. Confirmed means the turn took it, so
+/// it is acked; a refusal — the turn ended under it — leaves it in `<d>/inbox/`,
+/// where the pending check and the next round find it, in its original place.
 fn settleSteer(
     alloc: std.mem.Allocator,
-    io: std.Io,
-    base: std.Io.Dir,
-    delegation: []const u8,
     steered: *std.ArrayList(Steered),
+    confirmed: *std.ArrayList([]const u8),
     r: anytype,
 ) !void {
     for (steered.items, 0..) |s, i| {
         if (s.id != r.id) continue;
-        if (r.failure != null) try record.inboxPut(alloc, io, base, delegation, s.msg);
+        if (r.failure == null) try confirmed.append(alloc, s.name);
         _ = steered.swapRemove(i);
         return;
     }
@@ -515,20 +547,17 @@ fn interrupt(alloc: std.mem.Allocator, io: std.Io, client: *Client, thread_id: [
 /// only makes sure the connection is left in a state nobody is waiting on.
 ///
 /// **And that every steer is settled.** This used to discard replies (`.response
-/// => {}`), which quietly lost a message: a steer whose reply had not come back
-/// yet still owns its text, and a REFUSED one is only put back by
-/// `settleSteer`. Cutting the turn short is exactly when a steer is most likely
-/// to be refused — the turn it was aimed at is ending — so the interrupt path
-/// was the one that needed this most and the one that did not have it. The
-/// `turn/completed` path has always finished its outstanding steers before
-/// returning; this is the same discipline, in the other exit.
+/// => {}`), which quietly lost a message: back when a steered message had been
+/// TAKEN from the inbox, a refusal was the only thing that put it back. Peeking
+/// makes that failure impossible rather than handled — an unsettled steer now
+/// costs a message being delivered twice, never a message gone. Reading the
+/// replies is still what tells the two apart, so it stays.
 fn drainToEnd(
     alloc: std.mem.Allocator,
     io: std.Io,
-    base: std.Io.Dir,
-    delegation: []const u8,
     client: *Client,
     steered: *std.ArrayList(Steered),
+    confirmed: *std.ArrayList([]const u8),
 ) !void {
     while (try next(alloc, client)) |msg| {
         switch (msg) {
@@ -536,10 +565,10 @@ fn drainToEnd(
             .notification => |note| {
                 if (std.mem.eql(u8, note.method, "turn/completed")) break;
             },
-            .response => |r| try settleSteer(alloc, io, base, delegation, steered, r),
+            .response => |r| try settleSteer(alloc, steered, confirmed, r),
         }
     }
-    try settleOutstanding(alloc, io, base, delegation, client, steered);
+    try settleOutstanding(alloc, io, client, steered, confirmed);
 }
 
 /// Read on until no steer is still waiting for its reply. A message in limbo is
@@ -549,15 +578,14 @@ fn drainToEnd(
 fn settleOutstanding(
     alloc: std.mem.Allocator,
     io: std.Io,
-    base: std.Io.Dir,
-    delegation: []const u8,
     client: *Client,
     steered: *std.ArrayList(Steered),
+    confirmed: *std.ArrayList([]const u8),
 ) !void {
     while (steered.items.len != 0) {
         const more = (try next(alloc, client)) orelse break;
         switch (more) {
-            .response => |r| try settleSteer(alloc, io, base, delegation, steered, r),
+            .response => |r| try settleSteer(alloc, steered, confirmed, r),
             .server_request => |req| try declineRequest(alloc, io, client, req.id),
             .notification => {},
         }

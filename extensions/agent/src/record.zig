@@ -410,9 +410,19 @@ pub const Corrupt = error{CorruptDelegationRecord};
 /// `"max_exchanges": "2"` as "unlimited follow-ups" is precisely the fail-open
 /// this distinction exists to prevent.
 ///
-/// A complete line that is not JSON is corruption for the same reason: a
-/// damaged `turn` row silently lowers the exchange count, and the count is what
-/// enforces the budget.
+/// ── and the shape of the journal itself ────────────────────────────────────
+///
+/// Read as a two-state machine, because that is all it is: BEFORE the opening
+/// row only a `created` is legal, and after it only a `turn`. Anything else — a
+/// second `created`, a `kind` this build does not know, a line that is not JSON,
+/// a `v` from a schema that is not this one — refuses the whole record.
+///
+/// Strict rather than skipping, and for the reason the budget columns are: every
+/// row this cannot read LOWERS the exchange count, and a lower count is a wider
+/// budget. `{"kind":"turm"}` used to fall through both arms in silence and hand
+/// the delegation a free follow-up. The `v` check is the same rule pointed
+/// forward: a v2 row read by a v1 build would be guessed at rather than
+/// understood, and this file is an authority.
 pub fn read(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const u8) !?State {
     const path = try pathIn(alloc, id, record_name);
     const bytes = base.readFileAlloc(io, path, alloc, .limited(max_record_bytes)) catch |err| switch (err) {
@@ -433,9 +443,15 @@ pub fn read(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const 
             .object => |o| o,
             else => return Corrupt.CorruptDelegationRecord,
         };
+        // The schema this build reads. A row from another one is not guessed at.
+        switch (obj.get("v") orelse std.json.Value{ .null = {} }) {
+            .integer => |v| if (v != 1) return Corrupt.CorruptDelegationRecord,
+            else => return Corrupt.CorruptDelegationRecord,
+        }
         const kind = stringOf(obj, "kind") orelse return Corrupt.CorruptDelegationRecord;
-        if (std.mem.eql(u8, kind, "created")) {
-            if (state != null) continue; // one delegation, one opening
+        if (state == null) {
+            // Before the opening row, only an opening row is legal.
+            if (!std.mem.eql(u8, kind, "created")) return Corrupt.CorruptDelegationRecord;
             state = .{
                 .created = .{
                     .agent = stringOf(obj, "agent") orelse "",
@@ -457,9 +473,9 @@ pub fn read(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const 
             };
             continue;
         }
-        if (std.mem.eql(u8, kind, "turn")) {
-            if (state) |*s| s.turns += 1;
-        }
+        // After it, only a turn is — a delegation opens once.
+        if (!std.mem.eql(u8, kind, "turn")) return Corrupt.CorruptDelegationRecord;
+        state.?.turns += 1;
     }
     return state;
 }
@@ -681,9 +697,9 @@ pub const Message = struct {
 /// The second one is the kernel's own discipline (`ledger.depositEvent`) and it
 /// is not optional here either: a directory entry exists the moment the file is
 /// created, not when it is closed, so a reader scanning for `.json` between the
-/// create and the write would take a name with nothing behind it — and the
-/// reader deletes what it takes. That is a message accepted and then lost, which
-/// is the one thing the wake invariant (D4) is for.
+/// create and the write would find a name with nothing behind it — and an empty
+/// file is not a message, so the reader would drop it (`inboxPeek`). That is a
+/// message accepted and then lost, which is the one thing D4 is for.
 ///
 /// A `.tmp` left behind by a sender that died mid-write costs its number and
 /// nothing else: `nextFree` counts it (it reads the stem, before any extension)
@@ -733,8 +749,14 @@ pub fn inboxPut(
 
 /// Where to start looking for a free name: one past the highest number already
 /// there. Without it a delegation with a thousand answered messages would try a
-/// thousand names for the next one — the numbers are never reused, because
-/// order is the only thing they carry.
+/// thousand names for the next one.
+///
+/// So a number IS handed out again once the directory empties, and that is fine
+/// for what the numbers carry — order only has to hold among messages that
+/// coexist, and an empty inbox is one where everything before was answered. It
+/// is not fine for a reader that remembers names ACROSS an ack, which is why the
+/// one runner that offers several messages into a single turn holds its
+/// acknowledgements to the end of the round (`codex.driveRound`).
 fn nextFree(io: std.Io, base: std.Io.Dir, dir: []const u8) !usize {
     var d = base.openDir(io, dir, .{ .iterate = true }) catch return 1;
     defer d.close(io);
@@ -749,36 +771,72 @@ fn nextFree(io: std.Io, base: std.Io.Dir, dir: []const u8) !usize {
     return highest + 1;
 }
 
-/// Every message waiting, in the order it was sent, taken as it is read.
+/// One message waiting, under the name it waits by.
+pub const Entry = struct {
+    /// Its file name inside `<d>/inbox/`. Two jobs: it is the handle `inboxAck`
+    /// is given, and it is what a runner offering several messages into one turn
+    /// remembers so it does not offer the same one twice (`codex.zig`).
+    name: []const u8,
+    msg: Message,
+};
+
+/// Every message waiting, in the order it was sent — READ, not taken.
 ///
-/// Taking rather than reading: a message this returns has been handed to the
-/// runner, and the wake invariant counts on `pending` going false once somebody
-/// has it (D4). A file that cannot be read is deleted too — a message nobody can
-/// parse is not going to be answered by leaving it there for ever, and it cannot
-/// be a half-written one: a name ending `.json` was published by a rename, so
-/// whatever is behind it is whole (`inboxPut`).
-pub fn inboxTake(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const u8) ![]const Message {
-    return inboxTakeUpTo(alloc, io, base, id, max_queued);
+/// **Why peek and ack rather than take and put back.** A message used to be
+/// deleted the moment a runner read it, and put back with a fresh number if the
+/// round could not use it after all — a refused `turn/steer`, a harness that
+/// would not start. That cost three things:
+///
+///   * ORDER. A put-back takes the next free number, so a message that arrived
+///     while the first one was in flight now sorts ahead of it. The order this
+///     directory exists to keep was kept only when nothing went wrong.
+///   * THE MESSAGE ITSELF, sometimes. Every put-back was a write that could
+///     fail, and all three of them failed quietly (`catch {}`) — an accepted
+///     message vanishing is the one outcome D4 exists to prevent.
+///   * EVERY MESSAGE A RUNNER WAS HOLDING, on a crash. A killed process took
+///     with it whatever it had taken and not yet answered.
+///
+/// Reading and then deleting on success has none of those. Nothing moves, so
+/// nothing reorders; the failure direction flips from "lost" to "delivered
+/// twice", which a sub-agent answers again and a person can see; and a runner
+/// that dies leaves its message exactly where the next one will find it. The
+/// cost is stated plainly: this is AT LEAST once, not exactly once.
+///
+/// A file that cannot be parsed IS deleted here, and it is the only thing that
+/// is. It cannot be half-written (a `.json` name was published by a rename, so
+/// whatever is behind it is whole), so it will never parse — and leaving it
+/// would hold `pending` true for ever, which is a delegation whose every future
+/// runner spins until it gives up.
+pub fn inboxPeek(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const u8) ![]const Entry {
+    return inboxPeekUpTo(alloc, io, base, id, max_queued);
 }
 
-/// The oldest message waiting, taken, or null when there is none.
-///
-/// For a runner that answers one message per round and wants the guarantee that
-/// comes with it: a message it took is either answered or put straight back, so
-/// nothing is ever held inside a harness's own queue where a dying process would
-/// take it with them (`claude.zig`).
-pub fn inboxTakeOne(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const u8) !?Message {
-    const taken = try inboxTakeUpTo(alloc, io, base, id, 1);
-    return if (taken.len == 0) null else taken[0];
+/// The oldest message waiting, or null when there is none. For a runner that
+/// answers one message per round (claude, pi, an external one).
+pub fn inboxPeekOne(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const u8) !?Entry {
+    const found = try inboxPeekUpTo(alloc, io, base, id, 1);
+    return if (found.len == 0) null else found[0];
 }
 
-fn inboxTakeUpTo(
+/// This message has been delivered: drop it.
+///
+/// Best effort, and the direction of that is the point. An ack that does not
+/// land leaves the message for the next round, which delivers it twice; the
+/// alternative — deleting before delivery is certain — loses it. Of the two, the
+/// one that can be seen and answered again is the one to choose.
+pub fn inboxAck(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const u8, name: []const u8) void {
+    const dir = pathIn(alloc, id, inbox_name) catch return;
+    const path = std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir, name }) catch return;
+    base.deleteFile(io, path) catch {};
+}
+
+fn inboxPeekUpTo(
     alloc: std.mem.Allocator,
     io: std.Io,
     base: std.Io.Dir,
     id: []const u8,
     limit: usize,
-) ![]const Message {
+) ![]const Entry {
     const dir = try pathIn(alloc, id, inbox_name);
     var names: std.ArrayList([]const u8) = .empty;
     {
@@ -798,21 +856,36 @@ fn inboxTakeUpTo(
         }
     }.lessThan);
 
-    var out: std.ArrayList(Message) = .empty;
+    var out: std.ArrayList(Entry) = .empty;
     for (names.items) |name| {
         if (out.items.len >= limit) break;
         const path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir, name });
-        const bytes = base.readFileAlloc(io, path, alloc, .limited(max_message_bytes)) catch null;
-        base.deleteFile(io, path) catch {};
-        const raw = bytes orelse continue;
-        const parsed = std.json.parseFromSlice(std.json.Value, alloc, raw, .{}) catch continue;
+        // Anything that is not a message is dropped as it is found; a message is
+        // left exactly where it is until somebody acks it (see `inboxPeek`).
+        const raw = base.readFileAlloc(io, path, alloc, .limited(max_message_bytes)) catch {
+            base.deleteFile(io, path) catch {};
+            continue;
+        };
+        const parsed = std.json.parseFromSlice(std.json.Value, alloc, raw, .{}) catch {
+            base.deleteFile(io, path) catch {};
+            continue;
+        };
         const obj = switch (parsed.value) {
             .object => |o| o,
-            else => continue,
+            else => {
+                base.deleteFile(io, path) catch {};
+                continue;
+            },
         };
-        const text = stringOf(obj, "text") orelse continue;
-        if (text.len == 0) continue;
-        try out.append(alloc, .{ .text = text, .interrupt = boolOf(obj, "interrupt") });
+        const text = stringOf(obj, "text") orelse "";
+        if (text.len == 0) {
+            base.deleteFile(io, path) catch {};
+            continue;
+        }
+        try out.append(alloc, .{
+            .name = name,
+            .msg = .{ .text = text, .interrupt = boolOf(obj, "interrupt") },
+        });
     }
     return out.items;
 }
@@ -1037,7 +1110,7 @@ test "the policy a delegation opens with is frozen in its record, whatever the d
     try std.testing.expectEqualStrings("plan", state.created.agents[1]);
 }
 
-test "an external runner's inbox hands messages back in the order they were sent, once each" {
+test "an external runner's inbox hands messages back in the order they were sent, and keeps them until they are acked" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var arena = std.heap.ArenaAllocator.init(alloc);
@@ -1050,28 +1123,64 @@ test "an external runner's inbox hands messages back in the order they were sent
 
     const id = "d-00000000cafe";
     // Nothing queued is not an error: a runner asks this every round.
-    try std.testing.expectEqual(@as(usize, 0), (try inboxTake(a, io, ws, id)).len);
+    try std.testing.expectEqual(@as(usize, 0), (try inboxPeek(a, io, ws, id)).len);
 
     try inboxPut(a, io, ws, id, .{ .text = "first" });
     try inboxPut(a, io, ws, id, .{ .text = "second" });
     try inboxPut(a, io, ws, id, .{ .text = "third" });
 
-    const taken = try inboxTake(a, io, ws, id);
-    try std.testing.expectEqual(@as(usize, 3), taken.len);
-    try std.testing.expectEqualStrings("first", taken[0].text);
-    try std.testing.expectEqualStrings("third", taken[2].text);
+    const seen = try inboxPeek(a, io, ws, id);
+    try std.testing.expectEqual(@as(usize, 3), seen.len);
+    try std.testing.expectEqualStrings("first", seen[0].msg.text);
+    try std.testing.expectEqualStrings("third", seen[2].msg.text);
 
-    // Taken, not read: the wake invariant needs `pending` to go false once a
-    // runner has the message (D4), or a second runner is started for work that
-    // is already being done.
-    try std.testing.expectEqual(@as(usize, 0), (try inboxTake(a, io, ws, id)).len);
+    // Reading is not taking: a round that died here would leave all three where
+    // the next runner finds them, which is the half of D4 a crash used to lose.
+    try std.testing.expectEqual(@as(usize, 3), (try inboxPeek(a, io, ws, id)).len);
 
-    // Numbers are never reused, so a message queued after a drain still sorts
-    // after everything before it.
+    inboxAck(a, io, ws, id, seen[0].name);
+    inboxAck(a, io, ws, id, seen[1].name);
+    const left = try inboxPeek(a, io, ws, id);
+    try std.testing.expectEqual(@as(usize, 1), left.len);
+    try std.testing.expectEqualStrings("third", left[0].msg.text);
+
+    // Numbers are never reused, so a message queued later still sorts after one
+    // that is still waiting.
     try inboxPut(a, io, ws, id, .{ .text = "fourth" });
-    const later = try inboxTake(a, io, ws, id);
-    try std.testing.expectEqual(@as(usize, 1), later.len);
-    try std.testing.expectEqualStrings("fourth", later[0].text);
+    const both = try inboxPeek(a, io, ws, id);
+    try std.testing.expectEqual(@as(usize, 2), both.len);
+    try std.testing.expectEqualStrings("third", both[0].msg.text);
+    try std.testing.expectEqualStrings("fourth", both[1].msg.text);
+}
+
+test "a message nobody could use stays in its place, so a later one cannot overtake it" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    // The order this directory exists to keep, in the case that used to break
+    // it: a message is read, the round cannot use it (a refused steer, a harness
+    // that would not start), and a second message arrives before the first is
+    // dealt with. Taking and putting back gave the first message a NEW number,
+    // behind the second; reading leaves it in front, where it was sent.
+    const id = "d-0000000000f0";
+    try inboxPut(a, io, ws, id, .{ .text = "A" });
+    const first = (try inboxPeekOne(a, io, ws, id)).?;
+    try std.testing.expectEqualStrings("A", first.msg.text);
+
+    try inboxPut(a, io, ws, id, .{ .text = "B" });
+
+    // Not acked — the round did nothing with it.
+    const next_round = try inboxPeek(a, io, ws, id);
+    try std.testing.expectEqual(@as(usize, 2), next_round.len);
+    try std.testing.expectEqualStrings("A", next_round[0].msg.text);
+    try std.testing.expectEqualStrings("B", next_round[1].msg.text);
 }
 
 test "how a message was sent travels with it, in the same atomic write" {
@@ -1089,19 +1198,19 @@ test "how a message was sent travels with it, in the same atomic write" {
     try inboxPut(a, io, ws, id, .{ .text = "carry on" });
     try inboxPut(a, io, ws, id, .{ .text = "stop", .interrupt = true });
 
-    const taken = try inboxTake(a, io, ws, id);
-    try std.testing.expectEqual(@as(usize, 2), taken.len);
-    try std.testing.expect(!taken[0].interrupt);
-    try std.testing.expect(taken[1].interrupt);
+    const seen = try inboxPeek(a, io, ws, id);
+    try std.testing.expectEqual(@as(usize, 2), seen.len);
+    try std.testing.expect(!seen[0].msg.interrupt);
+    try std.testing.expect(seen[1].msg.interrupt);
 
-    // It survives a requeue, which is how a message put back by a refused steer
-    // or an unfinished round reaches the next one: what goes back in has to be
-    // what came out, or an interrupt quietly becomes an ordinary turn.
-    try inboxPut(a, io, ws, id, taken[1]);
-    const again = try inboxTake(a, io, ws, id);
+    // And it is still an interrupt when a round that could not act on it leaves
+    // it for the next one: nothing is rewritten, so nothing can be dropped on
+    // the way — an interrupt cannot quietly become an ordinary turn.
+    inboxAck(a, io, ws, id, seen[0].name);
+    const again = try inboxPeek(a, io, ws, id);
     try std.testing.expectEqual(@as(usize, 1), again.len);
-    try std.testing.expectEqualStrings("stop", again[0].text);
-    try std.testing.expect(again[0].interrupt);
+    try std.testing.expectEqualStrings("stop", again[0].msg.text);
+    try std.testing.expect(again[0].msg.interrupt);
 }
 
 test "a policy column that cannot be read refuses the record rather than reading as unlimited" {
@@ -1134,14 +1243,37 @@ test "a policy column that cannot be read refuses the record rather than reading
         try std.testing.expectError(Corrupt.CorruptDelegationRecord, read(a, io, ws, id));
     }
 
-    // A complete line that is not a row at all is corruption too: a damaged
-    // `turn` row silently lowers the count the budget is enforced against.
-    {
-        const id = "d-00000000d199";
+    // Every row this build cannot read is a row that LOWERS the turn count, and
+    // a lower count is a wider budget — so none of them may be skipped, whatever
+    // shape the damage takes.
+    for ([_][]const u8{
+        // Not JSON at all.
+        "{not json}\n",
+        // JSON, and a `kind` nothing answers to: this is the one that used to
+        // fall through both arms in silence and hand out a free follow-up.
+        "{\"v\":1,\"kind\":\"turm\"}\n",
+        // A second opening row. A delegation opens once.
+        "{\"v\":1,\"kind\":\"created\",\"agent\":\"y\",\"runner\":\"nulya\",\"remote\":\"s-9\",\"parent\":\"s-0\"}\n",
+        // A schema this build does not know: guessed at, or refused.
+        "{\"v\":2,\"kind\":\"turn\"}\n",
+        "{\"kind\":\"turn\"}\n",
+    }, 0..) |tail, i| {
+        const id = try std.fmt.allocPrint(a, "d-00000000d2{d:0>2}", .{i});
         try ws.createDirPath(io, try dirOf(a, id));
         try ws.writeFile(io, .{
             .sub_path = try pathIn(a, id, record_name),
-            .data = try std.mem.concat(a, u8, &.{ head, ",\"max_exchanges\":2}\n{not json}\n" }),
+            .data = try std.mem.concat(a, u8, &.{ head, ",\"max_exchanges\":2}\n{\"v\":1,\"kind\":\"turn\"}\n", tail }),
+        });
+        try std.testing.expectError(Corrupt.CorruptDelegationRecord, read(a, io, ws, id));
+    }
+
+    // And a row before the opening one is not a record either.
+    {
+        const id = "d-00000000d299";
+        try ws.createDirPath(io, try dirOf(a, id));
+        try ws.writeFile(io, .{
+            .sub_path = try pathIn(a, id, record_name),
+            .data = try std.mem.concat(a, u8, &.{ "{\"v\":1,\"kind\":\"turn\"}\n", head, "}\n" }),
         });
         try std.testing.expectError(Corrupt.CorruptDelegationRecord, read(a, io, ws, id));
     }
@@ -1167,16 +1299,48 @@ test "a message is published by a rename, so a reader never takes one that is st
     // name, delete it, fail to parse it, and the message would be gone.
     try ws.writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}/000000000001.tmp", .{dir}), .data = "" });
 
-    try std.testing.expectEqual(@as(usize, 0), (try inboxTake(a, io, ws, id)).len);
+    try std.testing.expectEqual(@as(usize, 0), (try inboxPeek(a, io, ws, id)).len);
     // …and it is still there afterwards, because the reader never looked at it.
     try ws.access(io, try std.fmt.allocPrint(a, "{s}/000000000001.tmp", .{dir}), .{});
 
     // A number a half-written message claimed is not handed out again either:
     // the next sender takes the one after it, so order still counts up.
     try inboxPut(a, io, ws, id, .{ .text = "after" });
-    const taken = try inboxTake(a, io, ws, id);
-    try std.testing.expectEqual(@as(usize, 1), taken.len);
-    try std.testing.expectEqualStrings("after", taken[0].text);
+    const seen = try inboxPeek(a, io, ws, id);
+    try std.testing.expectEqual(@as(usize, 1), seen.len);
+    try std.testing.expectEqualStrings("after", seen[0].msg.text);
+}
+
+test "a file in the inbox that can never be a message is dropped rather than left to spin" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    // Published by a rename, so it is whole — and it will never parse. Leaving
+    // it would hold `pending` true for ever: every future runner would find work
+    // it cannot do, go round again, and give up after the idle cap.
+    const id = "d-00000000ba17";
+    const dir = try pathIn(a, id, inbox_name);
+    try ws.createDirPath(io, dir);
+    try ws.writeFile(io, .{
+        .sub_path = try std.fmt.allocPrint(a, "{s}/000000000001.json", .{dir}),
+        .data = "not json at all",
+    });
+    try inboxPut(a, io, ws, id, .{ .text = "the real one" });
+
+    const seen = try inboxPeek(a, io, ws, id);
+    try std.testing.expectEqual(@as(usize, 1), seen.len);
+    try std.testing.expectEqualStrings("the real one", seen[0].msg.text);
+    try std.testing.expectError(
+        error.FileNotFound,
+        ws.access(io, try std.fmt.allocPrint(a, "{s}/000000000001.json", .{dir}), .{}),
+    );
 }
 
 test "the runner lease is exclusive while it is held, and the interrupt marker is taken once" {

@@ -347,17 +347,19 @@ pub fn driveRound(
 ) !RoundResult {
     var out: RoundResult = .{};
 
-    const message = (try record.inboxTakeOne(alloc, io, base, delegation)) orelse {
+    const entry = (try record.inboxPeekOne(alloc, io, base, delegation)) orelse {
         // Nothing to answer. Not a failure and not a report: the caller's pending
         // check decides whether to come round again.
         out.stopped = "idle";
         return out;
     };
-    // Held until the turn ends. Every early return goes through here.
+    const message = entry.msg;
+    // Left in the inbox until the turn ends, and dropped only then. Every early
+    // return goes through here having acked nothing, so a round that could not
+    // use the message leaves it where the next round finds it — in its place, in
+    // order, and still there if this process is killed (`record.inboxPeek`).
     var answered = false;
-    defer if (!answered) {
-        record.inboxPut(alloc, io, base, delegation, message) catch {};
-    };
+    defer if (answered) record.inboxAck(alloc, io, base, delegation, entry.name);
 
     writeUserMessage(alloc, io, sess, message.text) catch |err| {
         out.failure = try std.fmt.allocPrint(

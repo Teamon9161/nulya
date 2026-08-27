@@ -832,17 +832,25 @@ fn sendTurn(
     ) };
 }
 
-/// Deliver one message, and record it. The record is written AFTER the message
-/// lands, so a turn that never reached the runner is never counted against the
-/// exchange budget.
+/// Record one message, then deliver it.
+///
+/// **The turn is written down FIRST, and that order is the fail-closed one.**
+/// The two writes can only be made atomic by a transaction neither of them is
+/// worth, so one of them can land alone, and the question is which way that
+/// leans. Sending first leaned the wrong way: a delivered message whose row
+/// failed to append is one the sub-agent will actually answer, uncounted, with
+/// the caller told it failed — three things wrong at once, and `max_exchanges`
+/// quietly widened by one, which is the number this row exists to enforce.
+/// Recording first can only ever spend an exchange on a message that did not
+/// go, and the caller is told exactly that.
 ///
 /// An interrupt is the same message, sent saying so (D6). On the arms with an
 /// inbox that word travels IN the message, atomically, because two writes is a
 /// race in either order (`record.Message`); the `<d>/interrupt` marker is
 /// written as well, and is what stops a turn on the nulya arm — which has no
 /// inbox of its own — and on the arms that do not drain mid-turn. Both orders
-/// are correct now, so the marker goes after, where a runner that sees it always
-/// finds something behind it.
+/// are correct now, so the marker goes after the message, where a runner that
+/// sees it always finds something behind it.
 fn deliver(
     ctx: *const Ctx,
     spec: Spec,
@@ -850,6 +858,7 @@ fn deliver(
     interrupt: bool,
 ) !union(enum) { ok, failed: []const u8 } {
     const alloc = ctx.alloc;
+    try record.appendTurn(alloc, ctx.io, std.Io.Dir.cwd(), spec.delegation, interrupt);
     const sent = try runners.send(
         spec.runner,
         alloc,
@@ -864,7 +873,6 @@ fn deliver(
         return .{ .failed = try failed(alloc, "could not send that turn to delegation {s}: {s}", .{ spec.delegation, detail(sent) }) };
     }
     if (interrupt) try record.markInterrupt(alloc, ctx.io, std.Io.Dir.cwd(), spec.delegation);
-    try record.appendTurn(alloc, ctx.io, std.Io.Dir.cwd(), spec.delegation, interrupt);
     return .ok;
 }
 
@@ -917,8 +925,14 @@ fn wake(
 /// that): nothing was ever frozen for it, so there is no frozen answer to
 /// contradict, and holding it to `leaf` would take a coordinator's whole reason
 /// for existing away from the one caller who can watch what it does.
+///
+/// **The delegation is asked FIRST, and the header is not asked at all on that
+/// path.** A delegated session's authority is its record; the header could only
+/// ever corroborate it. Asking the header first meant an unreadable one answered
+/// `null` — "not a delegation, nothing is restricted" — for a session that
+/// plainly IS one, which is the widest possible answer taken from the least
+/// authoritative source.
 fn allowedHere(ctx: *const Ctx, parent: []const u8) !?[]const []const u8 {
-    const worn = (try defs.wornPersona(ctx.alloc, ctx.io, parent)) orelse return null;
     const d = std.mem.trim(u8, ctx.env.get(record.delegation_var) orelse "", " \t\r\n");
     if (record.isPlainId(d)) {
         const found = record.read(ctx.alloc, ctx.io, std.Io.Dir.cwd(), d) catch null;
@@ -930,16 +944,25 @@ fn allowedHere(ctx: *const Ctx, parent: []const u8) !?[]const []const u8 {
         // list into "this agent cannot delegate".
         return &.{};
     }
+    // No delegation, so this is a person driving a persona by hand — or an
+    // ordinary conversation, which nothing restricts.
+    const worn = (try defs.wornPersona(ctx.alloc, ctx.io, parent)) orelse return null;
     const entry = (try defs.find(ctx.alloc, ctx.io, ctx.env, worn)) orelse return &.{};
     return entry.def.agents;
 }
 
 /// The delegation depth this session is running at (`NULYA_AGENT_DEPTH`, set by
-/// the runner for the step it drives). Absent — a top-level conversation, or a
-/// person driving a delegated session from a front end — is zero.
+/// the runner for the step it drives).
+///
+/// Two absences, two answers, as everywhere else here. ABSENT is zero: a
+/// top-level conversation, or a person driving a delegated session from a front
+/// end, and neither of those is deep in anything. Present and UNREADABLE is the
+/// ceiling: somebody set it, this build cannot tell what to, and the one thing
+/// the variable exists to stop is a chain that does not know how long it is.
+/// Reading it as zero says "top level" about a session that certainly is not.
 fn currentDepth(env: *const std.process.Environ.Map) u32 {
     const raw = env.get("NULYA_AGENT_DEPTH") orelse return 0;
-    return std.fmt.parseInt(u32, std.mem.trim(u8, raw, " \t\r\n"), 10) catch 0;
+    return std.fmt.parseInt(u32, std.mem.trim(u8, raw, " \t\r\n"), 10) catch max_depth;
 }
 
 const Identity = struct { profile: []const u8 = "", model: []const u8 = "" };

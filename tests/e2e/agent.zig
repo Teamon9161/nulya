@@ -1328,15 +1328,6 @@ fn inboxEmpty(io: std.Io, alloc: std.mem.Allocator, ws: std.Io.Dir, d: []const u
     return true;
 }
 
-fn waitForInboxDrained(io: std.Io, alloc: std.mem.Allocator, ws: std.Io.Dir, d: []const u8) !void {
-    var tries: usize = 0;
-    while (tries < wait_tries) : (tries += 1) {
-        if (try inboxEmpty(io, alloc, ws, d)) return;
-        io.sleep(.fromMilliseconds(50), .awake) catch {};
-    }
-    return error.TestUnexpectedResult;
-}
-
 test "bundled agent: a codex delegation is a thread, not a session — the record freezes the runner and its opaque model, the report comes back through the parent's inbox, and a turn sent while it is idle waits in the delegation's own inbox until the next round takes it" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
@@ -1524,10 +1515,9 @@ test "bundled agent: a codex delegation that is running takes a message as turn/
     try waitForText(io, alloc, ws, "codex-log.txt", "turn/start");
 
     // ① An ordinary message, delivered while the turn is running. The runner
-    // drains `<d>/inbox/` between the lines it reads, and a message found there
-    // mid-turn becomes `turn/steer` — the same act as typing while the main
-    // conversation is answering (D3). An empty inbox is the runner saying it
-    // took it.
+    // reads `<d>/inbox/` between the lines of the stream, and a message found
+    // there mid-turn becomes `turn/steer` — the same act as typing while the
+    // main conversation is answering (D3).
     {
         const args = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"also check the lexer\"}}", .{d});
         defer alloc.free(args);
@@ -1536,12 +1526,49 @@ test "bundled agent: a codex delegation that is running takes a message as turn/
         try std.testing.expectEqual(@as(u8, 0), steered.code);
         // It is working, so nothing new was started for it.
         try std.testing.expect(std.mem.indexOf(u8, steered.stdout, "queued") != null);
-        try waitForInboxDrained(io, alloc, ws, d);
     }
 
-    // ② An interrupt: the same message, then the marker (D6). The runner checks
-    // the marker BEFORE it drains, so the message behind it stays where it is,
-    // and the marker becomes this harness's own stop verb.
+    // Let the held turn end. The fake reads what was sent mid-turn only once the
+    // turn is over, so this is the moment the steer reaches its log — and the
+    // moment the runner learns the steer was accepted, which is what lets it
+    // drop the message (`record.inboxPeek`: read now, acknowledge on delivery).
+    try ws.deleteFile(io, "hold");
+    try waitForText(io, alloc, ws, "codex-log.txt", "turn/steer");
+    {
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", wait_budget_ms });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+        // The message went INTO the running turn, not into a turn of its own.
+        const log = try ws.readFileAlloc(io, "codex-log.txt", alloc, .limited(1 << 20));
+        defer alloc.free(log);
+        try std.testing.expect(std.mem.indexOf(u8, log, "\"method\":\"turn/steer\"") != null);
+        var lines = std.mem.splitScalar(u8, log, '\n');
+        while (lines.next()) |line| {
+            if (std.mem.indexOf(u8, line, "also check the lexer") == null) continue;
+            try std.testing.expect(std.mem.indexOf(u8, line, "turn/start") == null);
+        }
+        // Read the report out of the parent's inbox, so the wait below is about
+        // the task this test starts next and nothing else.
+        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, &.{
+            .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+        });
+        defer alloc.free(stepped.stdout);
+    }
+
+    // ② An interrupt, against a turn of its own. A fresh task means a fresh
+    // fake, which holds ITS first turn — and the interrupt has to arrive while
+    // something is actually running, or the marker is a stale one that the next
+    // round is right to throw away (`runner.driveOnce`).
+    try ws.writeFile(io, .{ .sub_path = "hold", .data = "" });
+    {
+        const args = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"keep going\"}}", .{d});
+        defer alloc.free(args);
+        const again = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", args }, held);
+        defer alloc.free(again.stdout);
+        try std.testing.expectEqual(@as(u8, 0), again.code);
+    }
+    try waitForText(io, alloc, ws, "codex-log.txt", "keep going");
+
     {
         const args = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"STOP-SENTINEL\",\"interrupt\":true}}", .{d});
         defer alloc.free(args);
@@ -1554,21 +1581,17 @@ test "bundled agent: a codex delegation that is running takes a message as turn/
         try waitForGone(io, ws, marker);
     }
 
-    // Let the held turn end, so the round that was interrupted can finish.
+    // Let the interrupted turn end, so the round that was cut short can finish.
     try ws.deleteFile(io, "hold");
-
     {
         const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", wait_budget_ms });
         defer alloc.free(waited.stdout);
         try std.testing.expectEqual(@as(u8, 0), waited.code);
     }
 
-    // Both verbs really went down the wire. The fake reads what was sent mid-turn
-    // once the turn is over, so the log is the record of it either way.
     {
         const log = try ws.readFileAlloc(io, "codex-log.txt", alloc, .limited(1 << 20));
         defer alloc.free(log);
-        try std.testing.expect(std.mem.indexOf(u8, log, "turn/steer") != null);
         try std.testing.expect(std.mem.indexOf(u8, log, "turn/interrupt") != null);
         // This definition names no ceiling, so it is an ordinary delegation —
         // and Codex's word for that is `workspace-write`, asked for on every
@@ -1649,7 +1672,12 @@ test "bundled agent: a message that asks to interrupt is never steered into the 
         });
         try ws.rename(staged, ws, final, io);
     }
-    try waitForInboxDrained(io, alloc, ws, d);
+    // The runner has seen it and stopped the turn. Waiting on the inbox instead
+    // would deadlock, and for the reason this whole change is about: a message
+    // that was READ but not used stays exactly where it is, so the entry only
+    // goes away when a later turn is started with it — which cannot happen
+    // until the held turn below is let go.
+    try waitForText(io, alloc, ws, "codex-log.txt", "turn/interrupt");
 
     try ws.deleteFile(io, "hold");
     {

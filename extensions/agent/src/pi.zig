@@ -250,15 +250,15 @@ pub fn driveRound(
 ) !RoundResult {
     var out: RoundResult = .{};
 
-    const message = (try record.inboxTakeOne(alloc, io, base, delegation)) orelse {
+    const entry = (try record.inboxPeekOne(alloc, io, base, delegation)) orelse {
         out.stopped = "idle";
         return out;
     };
-    // Held until the run settles. Every early return goes through here.
+    const message = entry.msg;
+    // Left in the inbox until the run settles, and dropped only then — every
+    // early return goes through here having acked nothing (`record.inboxPeek`).
     var answered = false;
-    defer if (!answered) {
-        record.inboxPut(alloc, io, base, delegation, message) catch {};
-    };
+    defer if (answered) record.inboxAck(alloc, io, base, delegation, entry.name);
 
     prompt(alloc, io, sess, message.text) catch |err| {
         out.failure = try std.fmt.allocPrint(alloc, "could not hand that turn to pi ({s})", .{@errorName(err)});
