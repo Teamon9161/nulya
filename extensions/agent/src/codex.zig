@@ -313,7 +313,7 @@ pub fn driveRound(
     //
     //   * an ack is a delivery receipt, and a round that ends badly should not
     //     have been handing them out as it went;
-    //   * a name that is freed mid-round can be HANDED OUT AGAIN. `nextFree`
+    //   * a name that is freed mid-round can be HANDED OUT AGAIN. `scanForPut`
     //     takes one past the highest number present, so acking the message that
     //     started the turn empties the directory and the next message sent lands
     //     on that same number — behind the cursor, and therefore never offered
@@ -374,12 +374,13 @@ pub fn driveRound(
     }
     const turn = try alloc.dupe(u8, turn_id);
 
-    // Steers whose reply has not come back yet. A steered message was TAKEN
-    // from the inbox, and a steer aimed at a turn that has just ended is
-    // refused — the one way a delivered message could vanish. So every steer
-    // is tracked until its reply lands, and a refusal puts the message back
-    // in the inbox for the next round (the wake invariant, D4, held on this
-    // side too).
+    // Steers whose reply has not come back yet. A steered message is still in
+    // the inbox — nothing is taken there (`mailbox.peekAfter`) — so what the
+    // reply decides is whether it is ever ACKED: confirmed, and it goes on the
+    // list above; refused, because the turn ended under it, and it is simply
+    // left untouched for the next round to offer again (the wake invariant, D4,
+    // held on this side too). Each is tracked until its reply lands because
+    // that is the only thing that tells the two apart.
     var steered: std.ArrayList(Steered) = .empty;
 
     while (true) {
@@ -426,9 +427,9 @@ pub fn driveRound(
             return out;
         };
         switch (msg) {
-            // A reply to `turn/steer`. Confirmed is done with; refused means
-            // the turn ended under the message, and it goes BACK to the inbox
-            // so the next round answers it rather than nobody.
+            // A reply to `turn/steer`. Confirmed means the message may be
+            // acked when the round ends; refused means the turn ended under it,
+            // so it is left in the inbox for the next round to answer.
             .response => |r| {
                 try settleSteer(alloc, &steered, &confirmed, r);
                 continue;
