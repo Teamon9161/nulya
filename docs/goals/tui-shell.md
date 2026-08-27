@@ -129,6 +129,25 @@ surface 契约设计成 host 中立（T0/T1 数据契约 + T2 面注册），则
 所以投资顺序：**先定 surface 契约（§2–§4），WM 保持薄**；tcode app 接入时摸清它
 "前端 ⇄ agent 后端"的协议面，适配器厚度取决于那个协议（PLAN §3.11 / M8 的形状）。
 
+### 5.3b 每 tab 一个 workspace（S1c）
+
+需求（2026-08-27，用户）：侧边栏最重要的用途是**跨目录**的对话——new 的时候能选目录，列表能看到别的项目的会话。
+现状：一个 TUI 进程 = 一个 workspace（启动时的 cwd），session / store / trust / journal 全是 `.nulya/` 相对；
+这正是 PLAN §4 挂着的"session 与 workspace 的关系"开放问题的前端半边。
+
+**内核零改动**：session 本来就是"哪个目录下建的就属于哪个目录"，`nulya session *` 带着那个 cwd 跑就行；
+TUI 侧 `Workspace` 已经是每个 CLI 调用的显式参数（`nulya/cli.ts`），只是被 `createTabStore(ws,…)` 收成了全局。要做的：
+
+1. **tab = (workspace, session)**：workspace 从 store 级下放到 tab 级，所有 spawn 用本 tab 的 ws。
+2. **draft tab 选目录**：默认当前 workspace；一个 recent 列表 + 直接输路径（不做文件浏览器）。
+3. **recent workspaces 持久在 user 层**（`~/.nulya/` 下；`tui-state.json` 是 workspace 层的，装不下跨目录的事实——
+   先例：`trusted-stores.jsonl` 因为同样的理由在 user 层）。
+4. **侧边栏按 workspace 分组**：当前 workspace 的会话 + recent 段；选中一个 workspace 就对那个目录跑
+   `session list --json`。sub-agent 过滤（T70）每组照用。
+5. **信任与开屏流程按 workspace 首次使用时走**：trust gate / `ext sync` / `.nulya/agents` 问句这些今天发生在开屏，
+   改为发生在"第一个进入该 workspace 的 tab"上，拒绝显示在那个 tab 里。
+6. 观察者 / `<id>.lock` / SessionBusy 语义不变（全是 per-session 文件的事实）。
+
 ### 5.4 里程碑草案（未排期）
 
 - **S1**：宪章落进 tui.md（§1–§4 定稿）；pane 树 + 焦点 + 鼠标路由进宿主，现有屏幕
@@ -136,6 +155,7 @@ surface 契约设计成 host 中立（T0/T1 数据契约 + T2 面注册），则
 - **S2**：plugin API 补 T2（page/pane 注册 + 焦点内 onKey + 点击回调 + 降级声明）+ chip 模型；
   第一批 consumer = 把 agent 委派卡与 plan 评审面板迁进各自的包（验收："两个包各有 T2 面、
   互不知情、不打架"）。
+- **S1c**：每 tab 一个 workspace（§5.3b）——排在 T70 反馈修整落地之后（同一批文件）。
 - **S3**：utility pane：图片预览（带降级）。内嵌终端不做（§5.1b）。
 - 每步的尺子：加进宿主的每样东西对着 §1 四类过一遍；API 增补要有现成 consumer。
 
