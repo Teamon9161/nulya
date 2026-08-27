@@ -700,6 +700,15 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!Manifest {
     const commands = try dupCommands(a, contributes);
     const policy = try readPolicy(contributes);
     const ui = try dupUi(a, contributes);
+    // Every field is read into a local BEFORE the result is built, and `apply`
+    // is not an exception it can afford to be. `.arena = arena` copies the
+    // arena's state by value, and struct fields are evaluated in written order,
+    // so an allocation made through `a` in a LATER field mutates the local
+    // arena the copy has already snapshotted: if that allocation needs a fresh
+    // chunk, the chunk is not in the returned arena and nothing ever frees it.
+    // Invisible whenever the current chunk happens to have room, which is why
+    // it looked like it depended on how long the declared paths were.
+    const apply = try optionalString(a, obj, "apply");
     return .{
         .arena = arena,
         .schema = schema,
@@ -711,7 +720,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) ParseError!Manifest {
         .commands = commands,
         .policy = policy,
         .ui = ui,
-        .apply = try optionalString(a, obj, "apply"),
+        .apply = apply,
     };
 }
 
@@ -1412,6 +1421,32 @@ test "recommended is advice to whoever installs a manual tool, and cannot be sai
     try std.testing.expectError(error.WrongType, parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","runtime":{"entry":"bin/a"},"contributes":{"tools":[{"name":"t","input":{},"surface":"manual","recommended":"yes"}]}}
     ));
+}
+
+// A parsed manifest owns ONE arena and `deinit` is the whole story, so nothing
+// `parse` allocates may escape it. The way that broke was invisible at any
+// single size: `apply` was read inside the result's initializer, after the
+// arena had been copied by value, so its allocation landed in a chunk the
+// returned arena did not know about — but only when it needed a NEW chunk, so
+// whether a package leaked depended on how much the fields before it happened
+// to allocate. Hence the sweep rather than one manifest: the sizes are here to
+// cross a chunk boundary somewhere, not because any particular one matters.
+test "parse allocates nothing outside the arena it returns, at any size" {
+    const alloc = std.testing.allocator;
+    var len: usize = 1;
+    while (len <= 96) : (len += 1) {
+        const path = try alloc.alloc(u8, len);
+        defer alloc.free(path);
+        @memset(path, 'p');
+        const text = try std.fmt.allocPrint(
+            alloc,
+            "{{\"schema\":\"nulya.extension/v2\",\"id\":\"a\",\"apply\":\"auto\",\"contributes\":{{\"system_prompts\":[\"{s}\"]}}}}",
+            .{path},
+        );
+        defer alloc.free(text);
+        var m = try parse(alloc, text);
+        m.deinit();
+    }
 }
 
 test "apply says what activating this package means; silence means manual and an unknown word is refused" {
