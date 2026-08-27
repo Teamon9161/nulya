@@ -305,7 +305,7 @@ pub fn driveRound(
     sess: *Session,
     base: std.Io.Dir,
     delegation: []const u8,
-    interrupt_path: ?[]const u8,
+    interrupt_path: []const u8,
 ) !RoundResult {
     var out: RoundResult = .{};
 
@@ -334,10 +334,7 @@ pub fn driveRound(
     try appendArg(alloc, &argv, "message_file", message_path);
     try appendArg(alloc, &argv, "permissions", sess.permissions.label());
     if (sess.model.len != 0) try appendArg(alloc, &argv, "model", sess.model);
-    // Only when there is a delegation to interrupt. A runner that is handed no
-    // marker path is being told there is nothing to watch, rather than being
-    // left to guess at a path of its own.
-    if (interrupt_path) |path| try appendArg(alloc, &argv, "interrupt", path);
+    try appendArg(alloc, &argv, "interrupt", interrupt_path);
 
     const said = proc.run(alloc, io, argv.items) catch |err| {
         out.failure = try std.fmt.allocPrint(alloc, "could not run {s} ({s})", .{ sess.ref, @errorName(err) });

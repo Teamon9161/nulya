@@ -6,16 +6,18 @@
 //! property of the DEFINITION (`runner:`), frozen into the delegation's record
 //! when it opens (D7), and never something the model has to know or say.
 //!
-//! **Five verbs, one switch each.** A runner is whatever can answer:
+//! **Four verbs, one switch each.** A runner is whatever can answer:
 //!
 //!   `start`      open a conversation and give back a handle for it
 //!   `send`       deliver one message into it
 //!   `pending`    is there a message nobody has picked up yet?
-//!   `stop`       stop the round in flight so a new message is taken now
 //!   `drive`      run it until it has nothing more to say, and report
 //!
 //! `drive` is the one that reads a protocol line by line, so it lives with the
-//! `run` tool that is its whole process (`runner.zig`); the other four are here.
+//! `run` tool that is its whole process (`runner.zig`); the other three are
+//! here. There is no `stop`: an interrupt reaches a turn on the connection that
+//! is running it, which only the driving code holds, so every arm's stop verb
+//! lives in its own `driveRound` (D6).
 //!
 //! **Why a tagged union and a switch rather than a vtable.** The shape was
 //! written to the contract before the second arm existed, and the arms since
@@ -483,33 +485,6 @@ fn holdsJson(io: std.Io, base: std.Io.Dir, path: []const u8) bool {
         if (std.mem.endsWith(u8, entry.name, ".json")) return true;
     }
     return false;
-}
-
-/// Stop the round in flight, in this harness's own dialect (D6).
-///
-/// For nulya that is the cancel marker the kernel already understands: it is
-/// consumed at the session's next step boundary, where the ledger is in a legal
-/// state. The runner kills the step process on top of this — killing is what
-/// makes an interrupt immediate, and the marker is what makes a step that is
-/// between two steps stop by itself. Best effort by design: the kill is the
-/// guarantee, this is the polite half.
-pub fn stop(r: Runner, alloc: std.mem.Allocator, io: std.Io, exe: []const u8, remote: []const u8) void {
-    switch (r) {
-        .nulya => _ = proc.run(alloc, io, &.{ exe, "session", "cancel", remote }) catch return,
-        // Nothing to do from out here. A Codex turn is stopped by
-        // `turn/interrupt` on the very connection that is driving it, naming the
-        // turn in flight — facts only the driving process holds. So the codex
-        // arm interrupts IN BAND (`codex.driveRound`) and never calls this;
-        // there is no marker a second process could leave that would reach it.
-        //
-        // Claude is the same shape for the same reason: its interrupt is a
-        // control request written into the stdin of the process that is running
-        // the turn, and only the driving process holds that pipe.
-        //
-        // An external runner is told where the marker is and watches it itself
-        // (`external.zig`) — for the same reason again, one level further out.
-        .codex, .claude, .pi, .ext => {},
-    }
 }
 
 test "a runner is named by the definition, and an unknown word is not one" {

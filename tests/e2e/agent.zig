@@ -1018,10 +1018,13 @@ test "bundled agent: the record is what a delegation is driven by — its budget
         try std.testing.expect(std.mem.indexOf(u8, over.stdout, "follow-up turn") != null);
     }
 
-    // ② The ceiling is not an argument. `run` is an internal tool, so this is a
-    //    call by hand — and it names the widest rung there is, plus a remote
-    //    conversation that does not exist. Both are ignored: the record says
-    //    `readonly` and it says which conversation this delegation IS.
+    // ② The ceiling is not an argument, and neither is anything else about a
+    //    delegation. `run` is an internal tool, so this is a call by hand — and
+    //    it names the widest rung there is, plus a remote conversation that does
+    //    not exist. Neither word is read at all now: `run` takes a delegation
+    //    and a depth, and the record answers everything else. Still asserted
+    //    from outside, because "argv cannot say this" is the claim, not "the
+    //    struct happens not to have a field for it".
     //
     //    `loop` so the child asks for a shell call on every step it takes; the
     //    frozen `max_steps: 1` (also from the record — it is not on this command

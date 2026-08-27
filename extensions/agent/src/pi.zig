@@ -246,7 +246,7 @@ pub fn driveRound(
     sess: *Session,
     base: std.Io.Dir,
     delegation: []const u8,
-    interrupt_path: ?[]const u8,
+    interrupt_path: []const u8,
 ) !RoundResult {
     var out: RoundResult = .{};
 
@@ -266,17 +266,15 @@ pub fn driveRound(
     };
 
     while (true) {
-        if (interrupt_path) |path| {
-            if (record.takeInterruptAt(io, base, path)) {
-                abort(alloc, io, sess) catch {};
-                out.interrupted = true;
-                // The run this cut short consumed the message, and its answer is
-                // being thrown away on purpose — the interrupt IS the new
-                // direction, and the message behind it is still in the inbox.
-                answered = true;
-                drainToSettled(alloc, sess);
-                return out;
-            }
+        if (record.takeInterruptAt(io, base, interrupt_path)) {
+            abort(alloc, io, sess) catch {};
+            out.interrupted = true;
+            // The run this cut short consumed the message, and its answer is
+            // being thrown away on purpose — the interrupt IS the new direction,
+            // and the message behind it is still in the inbox.
+            answered = true;
+            drainToSettled(alloc, sess);
+            return out;
         }
 
         const msg = (try next(alloc, sess)) orelse {

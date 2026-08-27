@@ -73,35 +73,22 @@
       {
         "name": "run",
         "surface": "internal",
-        "description": "Drive one delegation until it has nothing left to answer, then print its report. For drivers: this is the command the background task started by `agent` runs; the report reaches the parent as that task's result. Give it `delegation` and everything else — which harness, which remote conversation, what it may do — is read from that delegation's record, which is where those facts were frozen.",
+        "description": "Drive one delegation until it has nothing left to answer, then print its report. For drivers: this is the command the background task started by `agent` runs; the report reaches the parent as that task's result. Everything about the delegation — which harness, which remote conversation, what it may do, how much of it is left — is read from its record, which is where those facts were frozen.",
         "input": {
           "type": "object",
           "properties": {
             "delegation": {
               "type": "string",
-              "description": "The delegation to drive: whose runner lease this takes, whose interrupt marker it watches, and whose record says what it is. The ordinary form."
-            },
-            "session": {
-              "type": "string",
-              "description": "A remote conversation to drive directly, WITHOUT a delegation — one round, by hand, against a bare session. Ignored when `delegation` is given: a delegation's facts come from its record."
-            },
-            "agent": {
-              "type": "string",
-              "description": "Which definition it is running, for the report's framing. Hand-call form only (see `session`)."
-            },
-            "permissions": {
-              "type": "string",
-              "description": "The ceiling for a hand call — `readonly`, `default` or `unsafe`. Hand-call form only: a delegation's ceiling was frozen into its record when it opened, and one that could be named here would be no ceiling at all."
-            },
-            "max_steps": {
-              "type": "integer",
-              "description": "Step budget for a hand call; omitted means the kernel's own. Hand-call form only (see `permissions`)."
+              "description": "The delegation to drive: whose runner lease this takes, whose interrupt marker it watches, and whose record says what it is."
             },
             "depth": {
               "type": "integer",
-              "description": "How deep this delegation sits; the step it drives is told, so an indirect cycle of personas cannot recurse for ever. A fact about the chain rather than about the delegation, which is why it is still an argument."
+              "description": "How deep this delegation sits; the step it drives is told, so an indirect cycle of personas cannot recurse for ever. A fact about the chain rather than about the delegation, which is why it is an argument at all."
             }
-          }
+          },
+          "required": [
+            "delegation"
+          ]
         }
       }
     ]

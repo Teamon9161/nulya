@@ -125,14 +125,6 @@ fn dispatch(ctx: *const Ctx, name: []const u8, arguments: std.json.ObjectMap) !r
     if (std.mem.eql(u8, name, "run")) {
         return runner.run(ctx.alloc, ctx.io, ctx.exe, .{
             .delegation = rpc.trimmedField(arguments, "delegation"),
-            .session = rpc.trimmedField(arguments, "session"),
-            .agent = rpc.trimmedField(arguments, "agent"),
-            // Absent says nothing about a ceiling (a `run` invoked by hand), so
-            // it is `default`; a word this build cannot read is `readonly`,
-            // because a run that cannot tell what it was granted has not been
-            // granted anything.
-            .permissions = permissionsArg(arguments),
-            .max_steps = rpc.intField(arguments, "max_steps") orelse 0,
             .depth = rpc.intField(arguments, "depth") orelse 1,
             .env = ctx.env,
         });
@@ -650,8 +642,6 @@ fn newDelegation(
         .delegation = d,
         .remote = remote,
         .runner = m.def.runner,
-        .agent = m.def.name,
-        .permissions = permissions,
     };
 
     switch (try deliver(ctx, spec, task, false)) {
@@ -694,13 +684,14 @@ fn newDelegation(
 ///
 /// It is this short because the background command is: what a round is driven
 /// WITH is read from the record by the process that drives it
-/// (`proc.startDelegationTask`), so nothing here has to be carried there.
+/// (`proc.startDelegationTask`), so nothing here has to be carried there — and
+/// what is left is exactly what DELIVERING a message needs. The ceiling and the
+/// persona name used to be here too; both were read from the record by then and
+/// nothing on this side looked at the copies.
 const Spec = struct {
     delegation: []const u8,
     remote: []const u8,
     runner: runners.Runner,
-    agent: []const u8,
-    permissions: record.Permissions,
 };
 
 /// Another turn into a delegation that is already going.
@@ -801,11 +792,6 @@ fn sendTurn(
         .delegation = target,
         .remote = state.created.remote,
         .runner = runner_kind,
-        .agent = worn,
-        // From the RECORD, never from the definition as it reads today: the
-        // ceiling was settled when this delegation opened, and a definition
-        // edited since must not widen a conversation already under way.
-        .permissions = state.created.permissions,
     };
 
     switch (try deliver(ctx, spec, task, interrupt)) {
@@ -980,19 +966,6 @@ fn parentIdentity(alloc: std.mem.Allocator, io: std.Io, parent: []const u8) Iden
         }
     }
     return out;
-}
-
-/// The `run` tool's ceiling, off the wire it arrives on.
-///
-/// Two absences, two answers. NOTHING said is `default` — `run` can be invoked
-/// by hand, and it always could be, and a hand call that named no ceiling never
-/// meant the narrowest one. Something said that this build cannot read is
-/// `readonly`: the caller had an answer, it did not survive, and a run that
-/// cannot tell what it was granted has not been granted anything.
-fn permissionsArg(args: std.json.ObjectMap) record.Permissions {
-    const raw = rpc.trimmedField(args, "permissions");
-    if (raw.len == 0) return record.default_permissions;
-    return record.Permissions.parse(raw) orelse .readonly;
 }
 
 fn failed(alloc: std.mem.Allocator, comptime fmt: []const u8, args: anytype) ![]const u8 {

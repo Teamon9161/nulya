@@ -293,7 +293,7 @@ pub fn driveRound(
     sess: *Session,
     base: std.Io.Dir,
     delegation: []const u8,
-    interrupt_path: ?[]const u8,
+    interrupt_path: []const u8,
 ) !RoundResult {
     var out: RoundResult = .{};
 
@@ -380,16 +380,14 @@ pub fn driveRound(
     while (true) {
         // ① The interrupt marker, before anything else this round could do with
         // a message. See the note on this function.
-        if (interrupt_path) |path| {
-            if (record.takeInterruptAt(io, base, path)) {
-                try interrupt(alloc, io, &sess.client, sess.thread_id, turn);
-                out.interrupted = true;
-                // Read on until the turn actually ends, so the connection is
-                // closed with nothing half-said on it — and so that any steer
-                // still in flight is settled rather than abandoned.
-                try drainToEnd(alloc, io, &sess.client, &steered, &confirmed);
-                return out;
-            }
+        if (record.takeInterruptAt(io, base, interrupt_path)) {
+            try interrupt(alloc, io, &sess.client, sess.thread_id, turn);
+            out.interrupted = true;
+            // Read on until the turn actually ends, so the connection is closed
+            // with nothing half-said on it — and so that any steer still in
+            // flight is settled rather than abandoned.
+            try drainToEnd(alloc, io, &sess.client, &steered, &confirmed);
+            return out;
         }
         // ② Anything that arrived while this turn has been running goes INTO
         // it. That is what `turn/steer` is for, and it is the same act as
