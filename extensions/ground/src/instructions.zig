@@ -14,9 +14,15 @@
 const std = @import("std");
 const git = @import("git.zig");
 
-/// First one present in a directory wins. `.nulya/AGENTS.md` first so a project
-/// can keep harness-specific instructions out of the file every other tool
-/// reads.
+/// First readable, non-empty one in a directory wins. `.nulya/AGENTS.md` first
+/// so a project can keep harness-specific instructions out of the file every
+/// other tool reads.
+///
+/// "Readable" is doing real work in that sentence: a candidate that cannot be
+/// read, or is larger than `max_file_bytes`, is passed over for the next name
+/// rather than ending the search. The alternative — stat first, then decide
+/// whether an unreadable winner should silence the others — is machinery for a
+/// case nobody has: an `AGENTS.md` over a megabyte.
 const candidates = [_][]const u8{ ".nulya/AGENTS.md", "AGENTS.md", "CLAUDE.md" };
 
 /// Total bytes of instruction text this section may spend. It is the cached
@@ -59,53 +65,63 @@ pub fn render(alloc: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, repo: git
             );
             break;
         }
-        // Fenced, with a fence longer than the longest backtick run inside.
-        //
-        // The reason is document structure, not defence. These files carry
-        // their own `#` headings — this repository's CLAUDE.md opens with one —
-        // and unfenced they land at the same level as this document's own
-        // sections, so `# Nulya …` ends up sitting between `# Project
-        // instructions` and `# Environment` as though it were one of them. That
-        // is confusing to any reader before it is useful to an adversarial one.
-        //
-        // It is NOT a security boundary and must not be read as one: a file
-        // saying "ignore your instructions" says it just as loudly inside a
-        // fence, and it could say it in ordinary prose anyway. What answers
-        // that is the paragraph above, plus `extensions/coding`.
-        const fence_len = fenceFor(source.text);
-        var clipped: ?struct { shown: usize, total: usize, display: []const u8 } = null;
-        try w.print("## {s}\n\n", .{source.display});
-        try openFence(w, fence_len);
-        const remaining = budget - spent;
-        if (source.text.len <= remaining) {
-            try w.writeAll(source.text);
-            spent += source.text.len;
-        } else {
-            // A silently halved instruction file is worse than none: the model
-            // follows what it read and never learns the rest exists. Same
-            // self-describing-marker rule `read`/`grep` follow for clipped
-            // output — a bare "(truncated)" does not say what is missing.
-            const end = boundaryAtOrBefore(source.text, remaining);
-            try w.writeAll(source.text[0..end]);
-            clipped = .{ .shown = end, .total = source.text.len, .display = source.display };
-            spent = budget;
-        }
-        // The marker goes OUTSIDE the fence: it is this harness speaking about
-        // the file, not a line the project wrote.
-        try w.writeByte('\n');
-        try w.splatByteAll('`', fence_len);
-        try w.writeByte('\n');
-        if (clipped) |cut| {
-            try w.print(
-                "[truncated: {d} of {d} bytes of this file are shown; the instruction " ++
-                    "budget ran out here. Read {s} directly if the task touches an area the " ++
-                    "loaded part does not cover.]\n",
-                .{ cut.shown, cut.total, cut.display },
-            );
-        }
+        spent += try one(w, source, budget - spent);
         try w.writeAll("\n");
     }
     return true;
+}
+
+/// One file, quoted, clipped to what is left of the budget. Answers how much of
+/// the budget it spent — all of what it was offered when it had to clip, so a
+/// caller stops there rather than opening a near-empty section for whatever
+/// comes next.
+fn one(w: *std.Io.Writer, source: Source, remaining: usize) !usize {
+    // The bytes are chosen BEFORE anything is measured against them, and that
+    // order is the whole of this function's correctness. The fence has to be
+    // longer than the longest backtick run in what is quoted, and what is
+    // quoted is the clipped body, never the file: `max_file_bytes` allows a
+    // megabyte, so measuring the file let a megabyte of backticks past the cut
+    // wrap 16 KB of text in two megabyte-long fences. The document then ran
+    // past `prompt.max_system_prompt_bytes` and `session new --prompt` refused
+    // a session that `render` had just reported as fine — a failure landing on
+    // somebody who could not see where it came from.
+    const clipped = source.text.len > remaining;
+    const end = if (clipped) boundaryAtOrBefore(source.text, remaining) else source.text.len;
+    const body = source.text[0..end];
+
+    // Fencing is about document structure, not defence. These files carry their
+    // own `#` headings — this repository's CLAUDE.md opens with one — and
+    // unfenced they land at the same level as this document's own sections, so
+    // `# Nulya …` ends up sitting between `# Project instructions` and
+    // `# Environment` as though it were one of them. That is confusing to any
+    // reader before it is useful to an adversarial one.
+    //
+    // It is NOT a security boundary and must not be read as one: a file saying
+    // "ignore your instructions" says it just as loudly inside a fence, and it
+    // could say it in ordinary prose anyway. What answers that is the framing
+    // paragraph above, plus `extensions/coding`.
+    const fence_len = fenceFor(body);
+    try w.print("## {s}\n\n", .{source.display});
+    try openFence(w, fence_len);
+    try w.writeAll(body);
+
+    // The marker goes OUTSIDE the fence: it is this harness speaking about the
+    // file, not a line the project wrote. And a silently halved instruction
+    // file is worse than none — the model follows what it read and never learns
+    // the rest exists — so it says what is missing, the same self-describing
+    // rule `read`/`grep` follow for clipped output.
+    try w.writeByte('\n');
+    try w.splatByteAll('`', fence_len);
+    try w.writeByte('\n');
+    if (clipped) {
+        try w.print(
+            "[truncated: {d} of {d} bytes of this file are shown; the instruction " ++
+                "budget ran out here. Read {s} directly if the task touches an area the " ++
+                "loaded part does not cover.]\n",
+            .{ end, source.text.len, source.display },
+        );
+    }
+    return if (clipped) remaining else end;
 }
 
 /// Root first, this directory last, so a nearer file has the last word.
@@ -143,11 +159,16 @@ fn consider(
     for (candidates) |candidate| {
         const path = try std.fmt.allocPrint(alloc, "{s}{s}", .{ read_at, candidate });
         const raw = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(max_file_bytes)) catch continue;
-        const text = std.mem.trim(u8, raw, " \t\r\n");
-        if (text.len == 0) continue;
+        // Trimmed to decide whether the file says anything; quoted from the
+        // END only. Trailing whitespace before a closing fence is not content,
+        // and dropping it is what lets exactly one newline be written there.
+        // Leading whitespace is a different matter — indentation on the first
+        // line can be markdown structure — so what the project wrote at the
+        // front is what gets quoted.
+        if (std.mem.trim(u8, raw, " \t\r\n").len == 0) continue;
         try out.append(alloc, .{
             .display = try std.fmt.allocPrint(alloc, "{s}{s}", .{ show_at, candidate }),
-            .text = text,
+            .text = std.mem.trimEnd(u8, raw, " \t\r\n"),
         });
         return;
     }
@@ -200,6 +221,29 @@ test "a file cannot close the fence it is quoted in, at any length" {
     const long = try arena.allocator().alloc(u8, 400);
     @memset(long, '`');
     try std.testing.expectEqual(@as(usize, 401), fenceFor(long));
+}
+
+test "bytes past the cut cannot set the size of what is written" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    // A short instruction file with a megabyte-scale run of backticks after the
+    // point the budget cuts at. None of that run is quoted, so none of it may
+    // reach the document — the fence is measured against the body, not the
+    // file. Measured against the file, the two fences alone are twice the run.
+    const text = "# Notes\nkeep it short.\n" ++ ("`" ** 5000);
+    var out: std.Io.Writer.Allocating = .init(arena.allocator());
+    const spent = try one(&out.writer, .{ .display = "AGENTS.md", .text = text }, 12);
+
+    const written = out.writer.buffered();
+    try std.testing.expectEqual(@as(usize, 12), spent);
+    try std.testing.expect(written.len < text.len);
+    // The body it quoted holds no backticks at all, so nothing in the document
+    // may hold a run longer than the shortest fence there is.
+    try std.testing.expect(std.mem.indexOf(u8, written, "````") == null);
+    // …and the file's real size is still reported, which is the whole reason
+    // the marker sits outside the fence.
+    try std.testing.expect(std.mem.indexOf(u8, written, "truncated") != null);
 }
 
 test "a cut never splits a multi-byte character" {

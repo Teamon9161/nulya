@@ -30,7 +30,7 @@ nulya session new --prompt <答出来的那个路径>
 | 段 | 内容 | 来源 |
 |---|---|---|
 | `# Project layout` | 两层、gitignore-aware 的目录树；每目录 20 条、总共 80 条封顶 | git 仓库里是 `git ls-files --cached --others --exclude-standard`（gitignore 由 git 自己算，不重新实现）；不在仓库里就 readdir 两层 + 一张小跳过表 |
-| `# Project instructions` | 从 repo root 逐级下降到 cwd，每层第一个存在的 `.nulya/AGENTS.md` → `AGENTS.md` → `CLAUDE.md` | 层级由 `git rev-parse --show-cdup` / `--show-prefix` 给出（不需要 realpath） |
+| `# Project instructions` | 从 repo root 逐级下降到 cwd，每层第一个**读得出、非空**的 `.nulya/AGENTS.md` → `AGENTS.md` → `CLAUDE.md`（读不出或超过 1 MiB 的候选**跳到下一个名字**，不终止这一层的搜索——为一个没人有的场景（超过一兆的 `AGENTS.md`）造 stat 机制不值得） | 层级由 `git rev-parse --show-cdup` / `--show-prefix` 给出（不需要 realpath） |
 | `# Environment` | cwd · platform（Linux 上带 `/etc/os-release` 的 `PRETTY_NAME`）· `shell` tool 实际用的命令行 · 日期 | `std.process.currentPathAlloc` + `builtin.os.tag` |
 | `# Git` | branch · 最后一个 commit · 工作树干净与否 + 最多 15 行 `--porcelain` 预览 | `git branch --show-current` / `log -1` / `status --porcelain` |
 
@@ -50,7 +50,16 @@ nulya session new --prompt <答出来的那个路径>
 **它不是安全边界，也绝不该被这么读**：写着 "ignore your instructions" 的文件在 fence 里照样说得一样响，
 而且它本来就可以用普通散文说；答它的是上面那句框定加 `coding`。
 长度**不封顶**（第一版是 `("`" ** 32)[0..n]`，到 32 根反引号就悄悄不再比正文长——一个恰好在有人故意构造时
-失效的上限）。截断标记写在 fence **外面**：那是 harness 在讲这个文件，不是文件里的一行。
+失效的上限），而且量的是**裁剪之后**的正文、不是整个文件。后面这条是同一个上限的另一头：
+单文件读到 1 MiB 而预算是 16 KB，量整个文件就等于让**没进 prompt 的字节决定 prompt 的大小**——
+一个「前 16 KB 正常 + 尾部一兆反引号」的文件会把 16 KB 正文裹进两条一兆长的 fence，
+文档冲破 `prompt.max_system_prompt_bytes`，于是 `render` 报成功、失败落在后面的 `session new --prompt` 上，
+砸的正是「ground 出问题不该拦住 session 开场」这条性质。所以顺序是**先定要写哪些字节，再拿它们量 fence**
+（`one()`：裁剪 → `fenceFor(body)`），回归测试钉的就是这个顺序。
+截断标记写在 fence **外面**：那是 harness 在讲这个文件，不是文件里的一行，而且它报的是文件的**真实**大小。
+
+正文只**裁尾**不裁头：闭合 fence 前要恰好一个换行，行尾空白不是内容；而首行的缩进在 markdown 里可能是结构，
+所以项目写在开头的字节原样进去。trim 只用来判断这个文件是不是空的。
 
 **② 预算 16 KB，截断要自报家门。** 移植 tcode 的规则：被腰斩的 instruction 文件比没有更糟——
 模型照着读到的那一半做，永远不知道还有另一半。所以截断处写明「显示了 N / 共 M 字节，budget 到此为止，
