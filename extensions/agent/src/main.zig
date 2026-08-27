@@ -72,6 +72,7 @@ const defs = @import("defs.zig");
 const runner = @import("runner.zig");
 const runners = @import("runners.zig");
 const record = @import("record.zig");
+const mailbox = @import("mailbox.zig");
 const proc = @import("proc.zig");
 const header_mod = @import("header.zig");
 
@@ -767,7 +768,28 @@ fn sendTurn(
         );
     };
 
-    // ③ How many turns has it had, and how many was it opened with? Both come
+    // ③ Is it OURS? A delegation belongs to the conversation that opened it, and
+    // that is what the frozen `parent` says. It used to be provenance only: the
+    // check was missing and `wake` starts the background task under whichever
+    // session is calling, so a second session that learned the id could take a
+    // delegation over and have its next report land somewhere else. Then
+    // "a sub-agent reports back to its parent" would mean "to whoever spoke to
+    // it last", and the record's own column would be describing something that
+    // was no longer true.
+    //
+    // A fork is a different conversation by this rule, and that is consistent
+    // rather than incidental: `session new --parent` inherits no composition, no
+    // prompts and no images either (DESIGN §11) — everything in this system
+    // treats a fork as a boundary, and a delegation is not the one exception.
+    if (!std.mem.eql(u8, parent, state.created.parent)) {
+        return rpc.refuse(
+            alloc,
+            "delegation {s} belongs to another conversation (it was opened by session {s}), and a sub-agent reports back to the one that opened it. Start a fresh delegation for this work.",
+            .{ target, state.created.parent },
+        );
+    }
+
+    // ④ How many turns has it had, and how many was it opened with? Both come
     // from the record. The count, because it is the only one an external runner
     // can answer too — counting a child session's user turns is a fact about
     // nulya sessions and nothing else. The budget, because the definition is
@@ -832,7 +854,7 @@ fn sendTurn(
 ///
 /// An interrupt is the same message, sent saying so (D6). On the arms with an
 /// inbox that word travels IN the message, atomically, because two writes is a
-/// race in either order (`record.Message`); the `<d>/interrupt` marker is
+/// race in either order (`mailbox.Message`); the `<d>/interrupt` marker is
 /// written as well, and is what stops a turn on the nulya arm — which has no
 /// inbox of its own — and on the arms that do not drain mid-turn. Both orders
 /// are correct now, so the marker goes after the message, where a runner that
@@ -858,7 +880,7 @@ fn deliver(
     if (sent.code != 0) {
         return .{ .failed = try failed(alloc, "could not send that turn to delegation {s}: {s}", .{ spec.delegation, detail(sent) }) };
     }
-    if (interrupt) try record.markInterrupt(alloc, ctx.io, std.Io.Dir.cwd(), spec.delegation);
+    if (interrupt) try mailbox.markInterrupt(alloc, ctx.io, std.Io.Dir.cwd(), spec.delegation);
     return .ok;
 }
 

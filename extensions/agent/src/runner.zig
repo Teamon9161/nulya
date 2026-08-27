@@ -18,18 +18,22 @@
 //! (D3) — so "drive one round and exit" would leave messages that arrived
 //! during the round with nobody to answer them. The invariant (D4) is:
 //!
-//!   *Every accepted message is either eventually driven, or left durably
-//!   pending with a terminal failure to drive it surfaced to the parent.*
+//!   *On an orderly path, every accepted message is either driven, or left
+//!   durably pending with a terminal failure to drive it surfaced to the
+//!   parent. A runner that is killed preserves the pending work but does not by
+//!   itself arrange for anybody to take it up.*
 //!
-//! The second half is not a weakening bolted on afterwards, it is the honest
-//! half: a message can be accepted into a delegation whose remote cannot be
-//! made to answer, and "eventually driven" states a liveness guarantee nothing
-//! here can keep. Written the short way it invites exactly one repair — have a
-//! runner that is giving up start another runner — and that is an unattended
-//! loop spending real money on a dead end. What IS guaranteed, unconditionally,
-//! is the part that is about this code rather than about the remote: **on a
-//! path that can run at all, no wake is lost to the lease/send race.** That is
-//! what the pair below closes, and it is closed from both ends.
+//! Both qualifications are load-bearing. The second half of the first sentence
+//! is the honest half: a message can be accepted into a delegation whose remote
+//! cannot be made to answer, and "eventually driven" states a liveness
+//! guarantee nothing here can keep. Written the short way it invites exactly
+//! one repair — have a runner that is giving up start another runner — and that
+//! is an unattended loop spending real money on a dead end. The second sentence
+//! is the crash case, which the lock cannot cover (see below) and which no
+//! wording should be allowed to imply it does. What IS guaranteed
+//! unconditionally is the part that is about this code rather than about the
+//! remote or the OS: **on a path that runs at all, no wake is lost to the
+//! lease/send race.** That is what the pair below closes, from both ends.
 //!
 //!   * This side holds `<d>/.runner.lock` — an OS ADVISORY LOCK, so a runner
 //!     that dies cannot leave the delegation locked for ever — and on the way
@@ -96,6 +100,7 @@
 const std = @import("std");
 const rpc = @import("rpc.zig");
 const record = @import("record.zig");
+const mailbox = @import("mailbox.zig");
 const runners = @import("runners.zig");
 const codex = @import("codex.zig");
 const claude = @import("claude.zig");
@@ -292,7 +297,7 @@ pub fn run(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args: Args) !r
     };
     defer backend.close(io);
 
-    const interrupt_path = try record.pathIn(alloc, settled.delegation, record.interrupt_name);
+    const interrupt_path = try record.pathIn(alloc, settled.delegation, mailbox.interrupt_name);
 
     var report: []const u8 = "";
     var last: Round = .{};
@@ -531,7 +536,7 @@ fn driveOnce(
     // Clearing it here is what makes "send with interrupt while nobody is
     // driving" cost one round rather than two — the round it spawned, and then
     // the round that actually reads the message.
-    _ = record.takeInterruptAt(io, cwd, interrupt_path);
+    _ = mailbox.takeInterruptAt(io, cwd, interrupt_path);
 
     const d = args.delegation;
     return switch (backend.*) {
@@ -630,7 +635,7 @@ fn driveNulyaRound(
             // checked many times a second while there is anything to interrupt.
             // Between lines rather than mid-line, so a verdict is never half
             // written when the round ends.
-            if (record.takeInterruptAt(io, cwd, interrupt_path)) {
+            if (mailbox.takeInterruptAt(io, cwd, interrupt_path)) {
                 out.interrupted = true;
                 break;
             }

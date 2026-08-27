@@ -77,6 +77,7 @@
 const std = @import("std");
 const proc = @import("proc.zig");
 const record = @import("record.zig");
+const mailbox = @import("mailbox.zig");
 
 /// The one tool name a runner extension must declare. Fixed rather than
 /// configurable: "which tool drives a round" is not a decision a definition
@@ -294,11 +295,11 @@ pub const RoundResult = struct {
 
 /// Answer the next message waiting for this delegation.
 ///
-/// The message is taken from the inbox HERE rather than out there: taking it is
-/// what makes `pending` go false, and the wake invariant (D4) is this package's
-/// to keep. It is written to a file the runner reads, and put straight back if
-/// the round does not answer it — so a runner that crashes, or a harness that is
-/// not installed, costs a retry rather than a message.
+/// The message is read from the inbox HERE rather than out there: the wake
+/// invariant (D4) is this package's to keep, and a runner on the far side of a
+/// contract cannot be trusted with it. It is copied to a file the runner reads,
+/// and acked only once the round answers — so a runner that crashes, or a
+/// harness that is not installed, costs a retry rather than a message.
 pub fn driveRound(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -309,17 +310,17 @@ pub fn driveRound(
 ) !RoundResult {
     var out: RoundResult = .{};
 
-    const entry = (try record.inboxPeekOne(alloc, io, base, delegation)) orelse {
+    const entry = (try mailbox.peekOne(alloc, io, base, delegation)) orelse {
         out.stopped = "idle";
         return out;
     };
     const message = entry.msg;
     // Left in the inbox until the round settles, and dropped only then — every
-    // early return goes through here having acked nothing (`record.inboxPeek`).
+    // early return goes through here having acked nothing (`mailbox.peekAfter`).
     var answered = false;
-    defer if (answered) record.inboxAck(alloc, io, base, delegation, entry.name);
+    defer if (answered) mailbox.ack(alloc, io, base, delegation, entry.name);
 
-    const message_path = try record.pathIn(alloc, delegation, record.message_name);
+    const message_path = try record.pathIn(alloc, delegation, mailbox.message_name);
     base.writeFile(io, .{ .sub_path = message_path, .data = message.text }) catch |err| {
         out.failure = try std.fmt.allocPrint(alloc, "could not stage that turn for {s} ({s})", .{ sess.ref, @errorName(err) });
         return out;

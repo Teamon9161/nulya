@@ -42,6 +42,7 @@
 
 const std = @import("std");
 const record = @import("record.zig");
+const mailbox = @import("mailbox.zig");
 
 /// Which binary to talk to. `codex` on PATH is the answer on a real machine;
 /// the variable exists so a test can point at one that answers the protocol
@@ -284,7 +285,7 @@ pub const RoundResult = struct {
 /// (②) — and the second one is not belt and braces, it is the load-bearing one
 /// on this arm. The marker is a separate file written just after the message, so
 /// a drain landing in that gap sees a message that looks ordinary; only the
-/// envelope is atomic with the text (`record.Message`). Every other arm takes
+/// envelope is atomic with the text (`mailbox.Message`). Every other arm takes
 /// its one message at the start of a round and never drains a running turn, so
 /// the marker alone is enough there.
 pub fn driveRound(
@@ -297,11 +298,16 @@ pub fn driveRound(
 ) !RoundResult {
     var out: RoundResult = .{};
 
-    // Every message this round has offered the turn, by inbox name. Peeking does
-    // not consume (`record.inboxPeek`), and this arm peeks again on every pass of
-    // the read loop — so without this a steer still in flight, or one already
-    // refused, would be offered to the same turn over and over.
-    var offered: std.ArrayList([]const u8) = .empty;
+    // How far into the inbox this round has already offered. Peeking does not
+    // consume (`mailbox.peekAfter`) and this arm peeks again on every pass of
+    // the read loop, so without a cursor the same message would be steered into
+    // the same turn over and over — and every pass would re-read and re-parse
+    // every file still waiting, once per streamed notification.
+    //
+    // A number rather than a set of names, and that is what rule 1 of the
+    // mailbox buys: senders publish under a lock, so a message that arrives
+    // during this round has a number past everything already seen.
+    var cursor: usize = 0;
     // The ones the harness confirmed, dropped when the round is over and NOT
     // before. Two reasons, and the second one is not optional:
     //
@@ -310,15 +316,14 @@ pub fn driveRound(
     //   * a name that is freed mid-round can be HANDED OUT AGAIN. `nextFree`
     //     takes one past the highest number present, so acking the message that
     //     started the turn empties the directory and the next message sent lands
-    //     on that same name — which `offered` above would then read as "already
-    //     given to this turn" and skip for the rest of the round. That is a
-    //     message silently held back until the next one, and it is exactly what
-    //     it looked like: a mid-turn message arriving as a fresh `turn/start`
-    //     instead of a `turn/steer`.
+    //     on that same number — behind the cursor, and therefore never offered
+    //     at all. That is a message silently held back until the next round, and
+    //     it is exactly what it looked like: a mid-turn message arriving as a
+    //     fresh `turn/start` instead of a `turn/steer`.
     var confirmed: std.ArrayList([]const u8) = .empty;
-    defer for (confirmed.items) |name| record.inboxAck(alloc, io, base, delegation, name);
+    defer for (confirmed.items) |name| mailbox.ack(alloc, io, base, delegation, name);
 
-    const first = try record.inboxPeek(alloc, io, base, delegation);
+    const first = try mailbox.peekAfter(alloc, io, base, delegation, cursor);
     if (first.len == 0) {
         // Nothing to answer. Not a failure and not a report: the caller's
         // pending check decides whether to go round again.
@@ -338,7 +343,7 @@ pub fn driveRound(
     // clears a stale marker before each round for the same reason.)
     for (first) |entry| {
         try writeTextInput(&jw, entry.msg.text);
-        try offered.append(alloc, entry.name);
+        cursor = entry.seq;
     }
     try jw.endArray();
     try jw.endObject();
@@ -380,7 +385,7 @@ pub fn driveRound(
     while (true) {
         // ① The interrupt marker, before anything else this round could do with
         // a message. See the note on this function.
-        if (record.takeInterruptAt(io, base, interrupt_path)) {
+        if (mailbox.takeInterruptAt(io, base, interrupt_path)) {
             try interrupt(alloc, io, &sess.client, sess.thread_id, turn);
             out.interrupted = true;
             // Read on until the turn actually ends, so the connection is closed
@@ -399,10 +404,9 @@ pub fn driveRound(
         // arm — the only one that drains a running turn — can reach the message
         // first and steer it into a turn that is about to be cut down. Whoever
         // gets here first, the answer is the same: put it back untouched and
-        // stop the turn (`record.Message`).
-        const batch = try record.inboxPeek(alloc, io, base, delegation);
+        // stop the turn (`mailbox.Message`).
+        const batch = try mailbox.peekAfter(alloc, io, base, delegation, cursor);
         for (batch) |entry| {
-            if (alreadyOffered(offered.items, entry.name)) continue;
             if (entry.msg.interrupt) {
                 // It and everything queued behind it stay exactly where they
                 // are — nothing was taken, so there is nothing to give back, and
@@ -414,7 +418,7 @@ pub fn driveRound(
             }
             const sid = try steer(alloc, io, &sess.client, sess.thread_id, turn, entry.msg.text);
             try steered.append(alloc, .{ .id = sid, .name = entry.name });
-            try offered.append(alloc, entry.name);
+            cursor = entry.seq;
         }
 
         const msg = (try next(alloc, &sess.client)) orelse {
@@ -503,13 +507,6 @@ fn steer(
 
 /// A steer whose reply has not come back yet, and the inbox name it is for.
 const Steered = struct { id: i64, name: []const u8 };
-
-fn alreadyOffered(offered: []const []const u8, name: []const u8) bool {
-    for (offered) |seen| {
-        if (std.mem.eql(u8, seen, name)) return true;
-    }
-    return false;
-}
 
 /// Match a reply to an outstanding steer. Confirmed means the turn took it, so
 /// it is acked; a refusal — the turn ended under it — leaves it in `<d>/inbox/`,

@@ -31,9 +31,9 @@
 //! id IS the whole of how its conversation is found again.
 //!
 //! **One process per task, one turn per round** — the same shape as the Claude
-//! arm, for the same reason (`claude.zig`): a message leaves `<d>/inbox/` only to
-//! be written immediately, and anything that goes wrong before its turn settles
-//! puts it back. Pi has `steer` and `follow_up` commands for a message that
+//! arm, for the same reason (`claude.zig`): a message is READ from `<d>/inbox/`
+//! and left there, and anything that goes wrong before its turn settles simply
+//! never acks it. Pi has `steer` and `follow_up` commands for a message that
 //! arrives mid-run, and this uses neither: both would hand the message to a queue
 //! inside a process that could die with it, where our inbox is a file. What they
 //! buy — delivery after the current turn — is what waiting in the inbox already
@@ -61,6 +61,7 @@
 const std = @import("std");
 const proc = @import("proc.zig");
 const record = @import("record.zig");
+const mailbox = @import("mailbox.zig");
 
 /// Which binary to talk to. `pi` on PATH is the answer on a real machine; the
 /// variable exists so a test can point at one that answers the protocol without a
@@ -250,15 +251,15 @@ pub fn driveRound(
 ) !RoundResult {
     var out: RoundResult = .{};
 
-    const entry = (try record.inboxPeekOne(alloc, io, base, delegation)) orelse {
+    const entry = (try mailbox.peekOne(alloc, io, base, delegation)) orelse {
         out.stopped = "idle";
         return out;
     };
     const message = entry.msg;
     // Left in the inbox until the run settles, and dropped only then — every
-    // early return goes through here having acked nothing (`record.inboxPeek`).
+    // early return goes through here having acked nothing (`mailbox.peekAfter`).
     var answered = false;
-    defer if (answered) record.inboxAck(alloc, io, base, delegation, entry.name);
+    defer if (answered) mailbox.ack(alloc, io, base, delegation, entry.name);
 
     prompt(alloc, io, sess, message.text) catch |err| {
         out.failure = try std.fmt.allocPrint(alloc, "could not hand that turn to pi ({s})", .{@errorName(err)});
@@ -266,7 +267,7 @@ pub fn driveRound(
     };
 
     while (true) {
-        if (record.takeInterruptAt(io, base, interrupt_path)) {
+        if (mailbox.takeInterruptAt(io, base, interrupt_path)) {
             abort(alloc, io, sess) catch {};
             out.interrupted = true;
             // The run this cut short consumed the message, and its answer is

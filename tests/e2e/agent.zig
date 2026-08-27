@@ -585,7 +585,33 @@ test "bundled agent: a delegation is a d-id of its own — another turn goes int
         try std.testing.expect(std.mem.indexOf(u8, unknown.stdout, "no delegation") != null);
     }
 
-    // ⑤ Neither / both / interrupt without something to interrupt.
+    // ⑤ A delegation belongs to the conversation that opened it. Another session
+    //    that knows the id cannot take it over — if it could, the next report
+    //    would arrive there instead, and "a sub-agent reports back to its parent"
+    //    would mean "to whoever spoke to it last".
+    {
+        const other = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+        defer alloc.free(other.stdout);
+        const stranger = try alloc.dupe(u8, std.mem.trim(u8, other.stdout, " \r\n"));
+        defer alloc.free(stranger);
+        const stranger_file = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{stranger});
+        defer alloc.free(stranger_file);
+
+        const request = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"mine now\"}}", .{d});
+        defer alloc.free(request);
+        const taken = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", request }, &.{
+            .{ .key = "NULYA_SESSION", .value = stranger_file },
+            .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+        });
+        defer alloc.free(taken.stdout);
+        try std.testing.expectEqual(@as(u8, 1), taken.code);
+        try std.testing.expect(std.mem.indexOf(u8, taken.stdout, "another conversation") != null);
+        // Nothing was queued for it either: a refusal that still delivered would
+        // be the takeover with an error message on top.
+        try std.testing.expect(try inboxEmpty(io, alloc, ws, d));
+    }
+
+    // ⑥ Neither / both / interrupt without something to interrupt.
     {
         const neither = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"task\":\"x\"}" }, in_parent);
         defer alloc.free(neither.stdout);

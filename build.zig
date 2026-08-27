@@ -112,6 +112,18 @@ pub fn build(b: *std.Build) void {
     const agent_record_tests = b.addTest(.{ .root_module = agent_record_mod, .filters = test_filters });
     test_step.dependOn(&b.addRunArtifact(agent_record_tests).step);
 
+    // …and the queue that journal sits beside (`mailbox.zig`): the publish
+    // order, the cursor a round offers messages by, and the at-least-once
+    // acknowledgement. Its own root for the reason above — `record.zig` does not
+    // import it, the traffic goes the other way.
+    const agent_mailbox_mod = b.createModule(.{
+        .root_source_file = b.path("extensions/agent/src/mailbox.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const agent_mailbox_tests = b.addTest(.{ .root_module = agent_mailbox_mod, .filters = test_filters });
+    test_step.dependOn(&b.addRunArtifact(agent_mailbox_tests).step);
+
     // …and the arm that lets a runner live OUTSIDE this package
     // (`external.zig`): which frozen version a delegation is nailed to, read off
     // the kernel's own listing. Its own root for the reason above.

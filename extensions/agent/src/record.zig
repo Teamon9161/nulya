@@ -33,6 +33,9 @@
 //!   `<d>/inbox/`         messages for a runner that has no inbox of its own.
 //!                        The nulya runner delivers into the child session's
 //!                        own inbox instead (D5), so this stays empty here.
+//!
+//! The last two are a queue with a delivery contract rather than a record of
+//! what happened, so they live next door in `mailbox.zig`.
 //!   `<d>/persona.md`     the persona frozen for this delegation, for a harness
 //!                        that is told its system prompt on every process.
 //!   `<d>/message.txt`    the one message a round is answering, staged where an
@@ -59,14 +62,6 @@ pub const delegation_var = "NULYA_AGENT_DELEGATION";
 
 pub const record_name = "record.jsonl";
 pub const lock_name = ".runner.lock";
-pub const interrupt_name = "interrupt";
-pub const inbox_name = "inbox";
-
-/// Where one round's message is staged for a runner that reads it as a file
-/// (`external.zig`'s contract). A path rather than a value because a task is as
-/// long as it needs to be and a command line is not; whoever holds the lease is
-/// the only writer, so one name is enough.
-pub const message_name = "message.txt";
 
 // ── how much a delegation may do (contract ar-h / D13) ──────────────────────
 
@@ -511,13 +506,6 @@ fn stringsOf(alloc: std.mem.Allocator, obj: std.json.ObjectMap, key: []const u8)
     return out.items;
 }
 
-fn boolOf(obj: std.json.ObjectMap, key: []const u8) bool {
-    return switch (obj.get(key) orelse return false) {
-        .bool => |b| b,
-        else => false,
-    };
-}
-
 fn stringOf(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
     return switch (obj.get(key) orelse return null) {
         .string => |s| s,
@@ -640,258 +628,6 @@ pub fn leaseHeld(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []c
     return true;
 }
 
-// ── the external runner's inbox (D5) ────────────────────────────────────────
-
-/// How many messages may wait for one round. A backstop on the name search
-/// below, not a budget: `max_exchanges` is where a delegation's turns are
-/// counted, and the runner drains everything it finds each round.
-const max_queued: usize = 4096;
-
-/// One message waiting for a runner, and how it was sent.
-///
-/// **Why `interrupt` rides in the envelope.** It is not a kind of message — the
-/// text is an ordinary user turn either way (D3) — it is a fact about DELIVERY:
-/// take this now rather than at the next natural boundary. It has to travel
-/// WITH the message because the alternative is two writes, and two writes is a
-/// race whichever order they go in:
-///
-///   * message first, then the marker (what this used to do): a runner that
-///     drains mid-turn — the codex arm does, that is what `turn/steer` is for —
-///     can take the message in the gap and steer it INTO the very turn the
-///     marker is about to cut down. The message is then inside an answer that
-///     is being thrown away.
-///   * marker first, then the message: a sender that dies in the gap has cut a
-///     turn short and delivered no new direction to replace it.
-///
-/// One atomic rename carries both, and the ambiguity is gone rather than moved.
-/// The `<d>/interrupt` marker still exists and is still what stops a turn on
-/// the arms that do NOT drain mid-turn (claude, pi, an external runner): they
-/// take their one message at the start of a round and watch the marker while it
-/// runs, so nothing there can be steered into a doomed turn. Belt and braces on
-/// the codex arm, where either order is now correct.
-pub const Message = struct {
-    text: []const u8,
-    interrupt: bool = false,
-};
-
-/// Deliver one message into `<d>/inbox/`.
-///
-/// The nulya runner never uses this — it appends straight into the child
-/// session's own inbox, which the kernel drains mid-run for free (D5). A runner
-/// whose harness has no inbox of its own reads this one at whatever granularity
-/// its protocol gives it.
-///
-/// `<12 digits>.json`, taking the first free number by EXCLUSIVE creation: the
-/// name sorts the same way it counts, so a reader gets the messages back in the
-/// order they were sent, and two senders racing cannot land on the same name.
-/// `.json` because a half-written message must not look like a whole one, and
-/// the extension is the same convention the kernel's own inbox uses.
-///
-/// TWO steps, both of them load-bearing, and for two different races:
-///
-///   * the exclusive create of `<n>.tmp` claims the NUMBER, against another
-///     sender picking the same one;
-///   * the rename to `<n>.json` publishes the CONTENT, against a runner that is
-///     draining this directory right now.
-///
-/// The second one is the kernel's own discipline (`ledger.depositEvent`) and it
-/// is not optional here either: a directory entry exists the moment the file is
-/// created, not when it is closed, so a reader scanning for `.json` between the
-/// create and the write would find a name with nothing behind it — and an empty
-/// file is not a message, so the reader would drop it (`inboxPeek`). That is a
-/// message accepted and then lost, which is the one thing D4 is for.
-///
-/// A `.tmp` left behind by a sender that died mid-write costs its number and
-/// nothing else: `nextFree` counts it (it reads the stem, before any extension)
-/// and no reader will ever look at it.
-pub fn inboxPut(
-    alloc: std.mem.Allocator,
-    io: std.Io,
-    base: std.Io.Dir,
-    id: []const u8,
-    msg: Message,
-) !void {
-    const dir = try pathIn(alloc, id, inbox_name);
-    try base.createDirPath(io, dir);
-
-    var body: std.Io.Writer.Allocating = .init(alloc);
-    var jw: std.json.Stringify = .{ .writer = &body.writer };
-    try jw.beginObject();
-    try jw.objectField("v");
-    try jw.write(1);
-    try jw.objectField("text");
-    try jw.write(msg.text);
-    // Only when it is one, so an ordinary message is the same bytes it always
-    // was and an older reader sees exactly what it saw before.
-    if (msg.interrupt) {
-        try jw.objectField("interrupt");
-        try jw.write(true);
-    }
-    try jw.endObject();
-
-    var n: usize = try nextFree(io, base, dir);
-    while (n < max_queued) : (n += 1) {
-        const staged = try std.fmt.allocPrint(alloc, "{s}/{d:0>12}.tmp", .{ dir, n });
-        const path = try std.fmt.allocPrint(alloc, "{s}/{d:0>12}.json", .{ dir, n });
-        const file = base.createFile(io, staged, .{ .exclusive = true }) catch |err| switch (err) {
-            error.PathAlreadyExists => continue,
-            else => return err,
-        };
-        {
-            defer file.close(io);
-            try file.writeStreamingAll(io, body.writer.buffered());
-        }
-        try base.rename(staged, base, path, io);
-        return;
-    }
-    return error.InboxFull;
-}
-
-/// Where to start looking for a free name: one past the highest number already
-/// there. Without it a delegation with a thousand answered messages would try a
-/// thousand names for the next one.
-///
-/// So a number IS handed out again once the directory empties, and that is fine
-/// for what the numbers carry — order only has to hold among messages that
-/// coexist, and an empty inbox is one where everything before was answered. It
-/// is not fine for a reader that remembers names ACROSS an ack, which is why the
-/// one runner that offers several messages into a single turn holds its
-/// acknowledgements to the end of the round (`codex.driveRound`).
-fn nextFree(io: std.Io, base: std.Io.Dir, dir: []const u8) !usize {
-    var d = base.openDir(io, dir, .{ .iterate = true }) catch return 1;
-    defer d.close(io);
-    var highest: usize = 0;
-    var it = d.iterate();
-    while (try it.next(io)) |entry| {
-        if (entry.kind == .directory) continue;
-        const stem = std.mem.sliceTo(entry.name, '.');
-        const n = std.fmt.parseInt(usize, stem, 10) catch continue;
-        if (n > highest) highest = n;
-    }
-    return highest + 1;
-}
-
-/// One message waiting, under the name it waits by.
-pub const Entry = struct {
-    /// Its file name inside `<d>/inbox/`. Two jobs: it is the handle `inboxAck`
-    /// is given, and it is what a runner offering several messages into one turn
-    /// remembers so it does not offer the same one twice (`codex.zig`).
-    name: []const u8,
-    msg: Message,
-};
-
-/// Every message waiting, in the order it was sent — READ, not taken.
-///
-/// **Why peek and ack rather than take and put back.** A message used to be
-/// deleted the moment a runner read it, and put back with a fresh number if the
-/// round could not use it after all — a refused `turn/steer`, a harness that
-/// would not start. That cost three things:
-///
-///   * ORDER. A put-back takes the next free number, so a message that arrived
-///     while the first one was in flight now sorts ahead of it. The order this
-///     directory exists to keep was kept only when nothing went wrong.
-///   * THE MESSAGE ITSELF, sometimes. Every put-back was a write that could
-///     fail, and all three of them failed quietly (`catch {}`) — an accepted
-///     message vanishing is the one outcome D4 exists to prevent.
-///   * EVERY MESSAGE A RUNNER WAS HOLDING, on a crash. A killed process took
-///     with it whatever it had taken and not yet answered.
-///
-/// Reading and then deleting on success has none of those. Nothing moves, so
-/// nothing reorders; the failure direction flips from "lost" to "delivered
-/// twice", which a sub-agent answers again and a person can see; and a runner
-/// that dies leaves its message exactly where the next one will find it. The
-/// cost is stated plainly: this is AT LEAST once, not exactly once.
-///
-/// A file that cannot be parsed IS deleted here, and it is the only thing that
-/// is. It cannot be half-written (a `.json` name was published by a rename, so
-/// whatever is behind it is whole), so it will never parse — and leaving it
-/// would hold `pending` true for ever, which is a delegation whose every future
-/// runner spins until it gives up.
-pub fn inboxPeek(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const u8) ![]const Entry {
-    return inboxPeekUpTo(alloc, io, base, id, max_queued);
-}
-
-/// The oldest message waiting, or null when there is none. For a runner that
-/// answers one message per round (claude, pi, an external one).
-pub fn inboxPeekOne(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const u8) !?Entry {
-    const found = try inboxPeekUpTo(alloc, io, base, id, 1);
-    return if (found.len == 0) null else found[0];
-}
-
-/// This message has been delivered: drop it.
-///
-/// Best effort, and the direction of that is the point. An ack that does not
-/// land leaves the message for the next round, which delivers it twice; the
-/// alternative — deleting before delivery is certain — loses it. Of the two, the
-/// one that can be seen and answered again is the one to choose.
-pub fn inboxAck(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const u8, name: []const u8) void {
-    const dir = pathIn(alloc, id, inbox_name) catch return;
-    const path = std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir, name }) catch return;
-    base.deleteFile(io, path) catch {};
-}
-
-fn inboxPeekUpTo(
-    alloc: std.mem.Allocator,
-    io: std.Io,
-    base: std.Io.Dir,
-    id: []const u8,
-    limit: usize,
-) ![]const Entry {
-    const dir = try pathIn(alloc, id, inbox_name);
-    var names: std.ArrayList([]const u8) = .empty;
-    {
-        var d = base.openDir(io, dir, .{ .iterate = true }) catch return &.{};
-        defer d.close(io);
-        var it = d.iterate();
-        while (try it.next(io)) |entry| {
-            if (entry.kind == .directory) continue;
-            if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
-            try names.append(alloc, try alloc.dupe(u8, entry.name));
-        }
-    }
-    // Zero-padded names, so the order they sort in is the order they were sent.
-    std.mem.sort([]const u8, names.items, {}, struct {
-        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
-            return std.mem.lessThan(u8, a, b);
-        }
-    }.lessThan);
-
-    var out: std.ArrayList(Entry) = .empty;
-    for (names.items) |name| {
-        if (out.items.len >= limit) break;
-        const path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir, name });
-        // Anything that is not a message is dropped as it is found; a message is
-        // left exactly where it is until somebody acks it (see `inboxPeek`).
-        const raw = base.readFileAlloc(io, path, alloc, .limited(max_message_bytes)) catch {
-            base.deleteFile(io, path) catch {};
-            continue;
-        };
-        const parsed = std.json.parseFromSlice(std.json.Value, alloc, raw, .{}) catch {
-            base.deleteFile(io, path) catch {};
-            continue;
-        };
-        const obj = switch (parsed.value) {
-            .object => |o| o,
-            else => {
-                base.deleteFile(io, path) catch {};
-                continue;
-            },
-        };
-        const text = stringOf(obj, "text") orelse "";
-        if (text.len == 0) {
-            base.deleteFile(io, path) catch {};
-            continue;
-        }
-        try out.append(alloc, .{
-            .name = name,
-            .msg = .{ .text = text, .interrupt = boolOf(obj, "interrupt") },
-        });
-    }
-    return out.items;
-}
-
-const max_message_bytes: usize = 4 << 20;
-
 // ── the frozen persona ──────────────────────────────────────────────────────
 
 /// The persona a delegation was opened with, frozen beside its journal.
@@ -928,34 +664,6 @@ pub fn freezePersona(
     try base.createDirPath(io, try dirOf(alloc, id));
     try base.writeFile(io, .{ .sub_path = try pathIn(alloc, id, persona_name), .data = body });
     return .ok;
-}
-
-// ── the interrupt marker (D6) ───────────────────────────────────────────────
-
-/// "Stop what you are doing and take the new message now." Written after the
-/// message, so a runner that sees the marker always finds something behind it.
-pub fn markInterrupt(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const u8) !void {
-    const dir = try dirOf(alloc, id);
-    try base.createDirPath(io, dir);
-    const path = try pathIn(alloc, id, interrupt_name);
-    try base.writeFile(io, .{ .sub_path = path, .data = "" });
-}
-
-/// Take the marker if it is there. Taking rather than reading, so a runner
-/// cannot see the same interrupt twice and cut short the round it started
-/// BECAUSE of it.
-pub fn takeInterrupt(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const u8) bool {
-    const path = pathIn(alloc, id, interrupt_name) catch return false;
-    return takeInterruptAt(io, base, path);
-}
-
-/// The same, with the path worked out once. The runner polls between stream
-/// lines — thousands of times in a turn — and a delegation's interrupt path
-/// does not change while it is being driven.
-pub fn takeInterruptAt(io: std.Io, base: std.Io.Dir, path: []const u8) bool {
-    base.access(io, path, .{}) catch return false;
-    base.deleteFile(io, path) catch return false;
-    return true;
 }
 
 // ── tests ───────────────────────────────────────────────────────────────────
@@ -1110,109 +818,6 @@ test "the policy a delegation opens with is frozen in its record, whatever the d
     try std.testing.expectEqualStrings("plan", state.created.agents[1]);
 }
 
-test "an external runner's inbox hands messages back in the order they were sent, and keeps them until they are acked" {
-    const alloc = std.testing.allocator;
-    const io = std.testing.io;
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const ws = tmp.dir;
-
-    const id = "d-00000000cafe";
-    // Nothing queued is not an error: a runner asks this every round.
-    try std.testing.expectEqual(@as(usize, 0), (try inboxPeek(a, io, ws, id)).len);
-
-    try inboxPut(a, io, ws, id, .{ .text = "first" });
-    try inboxPut(a, io, ws, id, .{ .text = "second" });
-    try inboxPut(a, io, ws, id, .{ .text = "third" });
-
-    const seen = try inboxPeek(a, io, ws, id);
-    try std.testing.expectEqual(@as(usize, 3), seen.len);
-    try std.testing.expectEqualStrings("first", seen[0].msg.text);
-    try std.testing.expectEqualStrings("third", seen[2].msg.text);
-
-    // Reading is not taking: a round that died here would leave all three where
-    // the next runner finds them, which is the half of D4 a crash used to lose.
-    try std.testing.expectEqual(@as(usize, 3), (try inboxPeek(a, io, ws, id)).len);
-
-    inboxAck(a, io, ws, id, seen[0].name);
-    inboxAck(a, io, ws, id, seen[1].name);
-    const left = try inboxPeek(a, io, ws, id);
-    try std.testing.expectEqual(@as(usize, 1), left.len);
-    try std.testing.expectEqualStrings("third", left[0].msg.text);
-
-    // Numbers are never reused, so a message queued later still sorts after one
-    // that is still waiting.
-    try inboxPut(a, io, ws, id, .{ .text = "fourth" });
-    const both = try inboxPeek(a, io, ws, id);
-    try std.testing.expectEqual(@as(usize, 2), both.len);
-    try std.testing.expectEqualStrings("third", both[0].msg.text);
-    try std.testing.expectEqualStrings("fourth", both[1].msg.text);
-}
-
-test "a message nobody could use stays in its place, so a later one cannot overtake it" {
-    const alloc = std.testing.allocator;
-    const io = std.testing.io;
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const ws = tmp.dir;
-
-    // The order this directory exists to keep, in the case that used to break
-    // it: a message is read, the round cannot use it (a refused steer, a harness
-    // that would not start), and a second message arrives before the first is
-    // dealt with. Taking and putting back gave the first message a NEW number,
-    // behind the second; reading leaves it in front, where it was sent.
-    const id = "d-0000000000f0";
-    try inboxPut(a, io, ws, id, .{ .text = "A" });
-    const first = (try inboxPeekOne(a, io, ws, id)).?;
-    try std.testing.expectEqualStrings("A", first.msg.text);
-
-    try inboxPut(a, io, ws, id, .{ .text = "B" });
-
-    // Not acked — the round did nothing with it.
-    const next_round = try inboxPeek(a, io, ws, id);
-    try std.testing.expectEqual(@as(usize, 2), next_round.len);
-    try std.testing.expectEqualStrings("A", next_round[0].msg.text);
-    try std.testing.expectEqualStrings("B", next_round[1].msg.text);
-}
-
-test "how a message was sent travels with it, in the same atomic write" {
-    const alloc = std.testing.allocator;
-    const io = std.testing.io;
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const ws = tmp.dir;
-
-    const id = "d-0000000000e1";
-    try inboxPut(a, io, ws, id, .{ .text = "carry on" });
-    try inboxPut(a, io, ws, id, .{ .text = "stop", .interrupt = true });
-
-    const seen = try inboxPeek(a, io, ws, id);
-    try std.testing.expectEqual(@as(usize, 2), seen.len);
-    try std.testing.expect(!seen[0].msg.interrupt);
-    try std.testing.expect(seen[1].msg.interrupt);
-
-    // And it is still an interrupt when a round that could not act on it leaves
-    // it for the next one: nothing is rewritten, so nothing can be dropped on
-    // the way — an interrupt cannot quietly become an ordinary turn.
-    inboxAck(a, io, ws, id, seen[0].name);
-    const again = try inboxPeek(a, io, ws, id);
-    try std.testing.expectEqual(@as(usize, 1), again.len);
-    try std.testing.expectEqualStrings("stop", again[0].msg.text);
-    try std.testing.expect(again[0].msg.interrupt);
-}
-
 test "a policy column that cannot be read refuses the record rather than reading as unlimited" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
@@ -1279,71 +884,7 @@ test "a policy column that cannot be read refuses the record rather than reading
     }
 }
 
-test "a message is published by a rename, so a reader never takes one that is still being written" {
-    const alloc = std.testing.allocator;
-    const io = std.testing.io;
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const ws = tmp.dir;
-
-    const id = "d-00000000beef";
-    const dir = try pathIn(a, id, inbox_name);
-    try ws.createDirPath(io, dir);
-
-    // A sender part way through: the number is claimed, the body is not there
-    // yet. This is the state the reader used to walk into — it would take the
-    // name, delete it, fail to parse it, and the message would be gone.
-    try ws.writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}/000000000001.tmp", .{dir}), .data = "" });
-
-    try std.testing.expectEqual(@as(usize, 0), (try inboxPeek(a, io, ws, id)).len);
-    // …and it is still there afterwards, because the reader never looked at it.
-    try ws.access(io, try std.fmt.allocPrint(a, "{s}/000000000001.tmp", .{dir}), .{});
-
-    // A number a half-written message claimed is not handed out again either:
-    // the next sender takes the one after it, so order still counts up.
-    try inboxPut(a, io, ws, id, .{ .text = "after" });
-    const seen = try inboxPeek(a, io, ws, id);
-    try std.testing.expectEqual(@as(usize, 1), seen.len);
-    try std.testing.expectEqualStrings("after", seen[0].msg.text);
-}
-
-test "a file in the inbox that can never be a message is dropped rather than left to spin" {
-    const alloc = std.testing.allocator;
-    const io = std.testing.io;
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const ws = tmp.dir;
-
-    // Published by a rename, so it is whole — and it will never parse. Leaving
-    // it would hold `pending` true for ever: every future runner would find work
-    // it cannot do, go round again, and give up after the idle cap.
-    const id = "d-00000000ba17";
-    const dir = try pathIn(a, id, inbox_name);
-    try ws.createDirPath(io, dir);
-    try ws.writeFile(io, .{
-        .sub_path = try std.fmt.allocPrint(a, "{s}/000000000001.json", .{dir}),
-        .data = "not json at all",
-    });
-    try inboxPut(a, io, ws, id, .{ .text = "the real one" });
-
-    const seen = try inboxPeek(a, io, ws, id);
-    try std.testing.expectEqual(@as(usize, 1), seen.len);
-    try std.testing.expectEqualStrings("the real one", seen[0].msg.text);
-    try std.testing.expectError(
-        error.FileNotFound,
-        ws.access(io, try std.fmt.allocPrint(a, "{s}/000000000001.json", .{dir}), .{}),
-    );
-}
-
-test "the runner lease is exclusive while it is held, and the interrupt marker is taken once" {
+test "the runner lease is exclusive while it is held" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var arena = std.heap.ArenaAllocator.init(alloc);
@@ -1364,9 +905,4 @@ test "the runner lease is exclusive while it is held, and the interrupt marker i
 
     held.close(io);
     try std.testing.expect(!leaseHeld(a, io, ws, id));
-
-    try std.testing.expect(!takeInterrupt(a, io, ws, id));
-    try markInterrupt(a, io, ws, id);
-    try std.testing.expect(takeInterrupt(a, io, ws, id));
-    try std.testing.expect(!takeInterrupt(a, io, ws, id));
 }

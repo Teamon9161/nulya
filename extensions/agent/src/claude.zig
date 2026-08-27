@@ -70,6 +70,7 @@
 const std = @import("std");
 const proc = @import("proc.zig");
 const record = @import("record.zig");
+const mailbox = @import("mailbox.zig");
 
 /// Which binary to talk to. `claude` on PATH is the answer on a real machine;
 /// the variable exists so a test can point at one that answers the protocol
@@ -328,10 +329,12 @@ pub const RoundResult = struct {
 
 /// Answer the next message waiting for this delegation.
 ///
-/// **One message, written and read to the end.** It leaves `<d>/inbox/` only to
-/// go straight down the pipe, and every way out of here that is not "the turn
-/// ended" puts it back (D4): a message this took is either answered or waiting
-/// again, never inside a queue that died with a process.
+/// **One message, read and answered before it is dropped.** It is READ from
+/// `<d>/inbox/` and stays there; only "the turn ended" acks it (D4). So every
+/// other way out of here — an error, an interrupt, a killed process — leaves it
+/// exactly where it was, never inside a queue that died with a process. The
+/// cost is at-least-once: an ack that does not land means the next round hands
+/// the same message over again (`mailbox.zig`).
 ///
 /// **Marker before message, always.** An interrupt delivers its message and THEN
 /// writes the marker (D6), so both are on disk at once. Checking the marker first
@@ -347,7 +350,7 @@ pub fn driveRound(
 ) !RoundResult {
     var out: RoundResult = .{};
 
-    const entry = (try record.inboxPeekOne(alloc, io, base, delegation)) orelse {
+    const entry = (try mailbox.peekOne(alloc, io, base, delegation)) orelse {
         // Nothing to answer. Not a failure and not a report: the caller's pending
         // check decides whether to come round again.
         out.stopped = "idle";
@@ -357,9 +360,9 @@ pub fn driveRound(
     // Left in the inbox until the turn ends, and dropped only then. Every early
     // return goes through here having acked nothing, so a round that could not
     // use the message leaves it where the next round finds it — in its place, in
-    // order, and still there if this process is killed (`record.inboxPeek`).
+    // order, and still there if this process is killed (`mailbox.peekAfter`).
     var answered = false;
-    defer if (answered) record.inboxAck(alloc, io, base, delegation, entry.name);
+    defer if (answered) mailbox.ack(alloc, io, base, delegation, entry.name);
 
     writeUserMessage(alloc, io, sess, message.text) catch |err| {
         out.failure = try std.fmt.allocPrint(
@@ -373,7 +376,7 @@ pub fn driveRound(
     while (true) {
         // ① The interrupt marker, at the granularity the stream gives for free:
         // a model answering produces lines constantly.
-        if (record.takeInterruptAt(io, base, interrupt_path)) {
+        if (mailbox.takeInterruptAt(io, base, interrupt_path)) {
             interrupt(alloc, io, sess) catch {};
             out.interrupted = true;
             // The turn this cut short consumed the message, and its answer is

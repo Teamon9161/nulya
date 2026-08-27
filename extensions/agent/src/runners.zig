@@ -69,6 +69,7 @@
 const std = @import("std");
 const proc = @import("proc.zig");
 const record = @import("record.zig");
+const mailbox = @import("mailbox.zig");
 const codex = @import("codex.zig");
 const claude = @import("claude.zig");
 const pi = @import("pi.zig");
@@ -371,7 +372,7 @@ pub fn send(
     exe: []const u8,
     remote: []const u8,
     delegation: []const u8,
-    msg: record.Message,
+    msg: mailbox.Message,
 ) !proc.Run {
     switch (r) {
         .nulya => return proc.run(alloc, io, &.{ exe, "session", "append", remote, msg.text }),
@@ -385,8 +386,8 @@ pub fn send(
             // How it was sent goes in with it rather than beside it: an
             // interrupt written as a second file is a window in which a runner
             // can take the message and fold it into the turn that interrupt is
-            // about to cut short (`record.Message`).
-            record.inboxPut(alloc, io, base, delegation, msg) catch |err| {
+            // about to cut short (`mailbox.Message`).
+            mailbox.put(alloc, io, base, delegation, msg) catch |err| {
                 return .{
                     .code = 1,
                     .stdout = "",
@@ -457,21 +458,10 @@ pub fn pending(
             const path = std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.inbox", .{remote}) catch return false;
             return holdsJson(io, base, path);
         },
-        .codex, .claude, .pi, .ext => return packageInboxPending(alloc, io, base, delegation),
+        // `<d>/inbox/` — a fact about the DELEGATION, where the nulya arm's is a
+        // fact about a session.
+        .codex, .claude, .pi, .ext => return mailbox.pending(alloc, io, base, delegation),
     }
-}
-
-/// `<d>/inbox/` — where an external runner's messages wait. Unused by the nulya
-/// arm (it has the kernel's own inbox), and named separately because it is a
-/// fact about the DELEGATION where the other is a fact about a session.
-pub fn packageInboxPending(
-    alloc: std.mem.Allocator,
-    io: std.Io,
-    base: std.Io.Dir,
-    delegation: []const u8,
-) bool {
-    const path = record.pathIn(alloc, delegation, record.inbox_name) catch return false;
-    return holdsJson(io, base, path);
 }
 
 fn holdsJson(io: std.Io, base: std.Io.Dir, path: []const u8) bool {
