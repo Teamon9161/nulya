@@ -5,6 +5,11 @@
 //! nested `.gitignore`, `core.excludesFile`, `.git/info/exclude` — and a second
 //! implementation of it would be a second set of answers), and **where the repo
 //! root is relative to here**, which `rev-parse` gives without a realpath.
+//!
+//! Nothing here ever fails a render. Every question has exactly two outcomes:
+//! an answer, or no answer — and "no answer" is passed upward as such, never
+//! flattened into an empty string, because for two of these questions the empty
+//! string is itself a meaningful answer ("detached head", "working tree clean").
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -17,25 +22,27 @@ const max_output: usize = 4 << 20;
 /// the working tree (`ls-files --others` and `status --porcelain`), and that
 /// walk is not always finite: on Windows git descends a directory junction as
 /// if it were an ordinary directory, so a junction cycle — nested `node_modules`
-/// links are the known way to get one — is an endless descent. Without a
-/// bound the symptom is the worst kind there is: a session that never starts,
-/// with nothing on screen to say why, because this runs before the first
-/// message. With one, it becomes the case this file already handles everywhere
-/// else — git did not answer, so that section says less.
+/// links are the known way to get one — is an endless descent. Without a bound
+/// the symptom is the worst kind there is: a session that never starts, with
+/// nothing on screen to say why, because this runs before the first message.
+/// With one, it becomes the case every caller here already handles — git did
+/// not answer, so that section says less.
 ///
 /// Generous on purpose. A healthy render is tens of milliseconds; anything near
 /// this is already pathological.
 const deadline_ms: u32 = 4000;
 
 /// One `git <args…>` in this process's working directory — the workspace, which
-/// is where the host spawns an extension (DESIGN §7.6).
-///
-/// Null covers every way this can fail to answer, and none of them is an error
-/// here: a session still has to start, and a section that could not get its
-/// answer simply says less. Nothing in this package retries, and nothing fails
-/// because git did.
+/// is where the host spawns an extension (DESIGN §7.6). Trimmed, since every
+/// caller outside this file wants one value; `locate` needs the raw bytes and
+/// goes through `whether` for them.
 pub fn ask(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) ?[]const u8 {
-    return askWhy(alloc, io, args).answer;
+    const raw = whether(alloc, io, args).answer orelse return null;
+    // The END only. `git status --porcelain` puts each entry's two status
+    // columns at the start of its line, so trimming the front eats the first
+    // entry's — one line out of every listing silently a character narrower
+    // than the rest. Nothing here has leading whitespace worth removing.
+    return std.mem.trimEnd(u8, raw, " \t\r\n");
 }
 
 pub const Answer = struct {
@@ -43,15 +50,66 @@ pub const Answer = struct {
     /// The one distinction worth keeping: git could not be run at all, as
     /// opposed to git running and saying no. "Not a git repository" is a claim
     /// about the directory, and a machine without git is in no position to make
-    /// it — the sections below report the two differently.
+    /// it — `renderGit` reports the two in different sentences.
     missing: bool = false,
 };
 
-pub fn askWhy(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) Answer {
+fn whether(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) Answer {
     var argv: std.ArrayList([]const u8) = .empty;
     argv.append(alloc, "git") catch return .{};
     argv.appendSlice(alloc, args) catch return .{};
     return bounded(alloc, io, argv.items, deadline_ms);
+}
+
+/// Where this working directory sits in its repository.
+///
+/// A union rather than a record with an `inside` flag: there is no such thing
+/// as half of an answer here, and a shape that cannot express one is better
+/// than a comment promising nobody will construct one.
+pub const Repo = union(enum) {
+    /// git could not be run on this machine at all.
+    no_git,
+    /// git ran and said this is not a working tree — or said something this
+    /// package could not read, which comes to the same thing: no descent.
+    outside,
+    inside: Inside,
+
+    pub const Inside = struct {
+        /// `rev-parse --show-cdup`: the path from here UP to the root, with a
+        /// trailing separator (`"../../"`). Empty when this directory is the
+        /// root.
+        cdup: []const u8,
+        /// `rev-parse --show-prefix`: the path from the root DOWN to here, with
+        /// a trailing separator (`"crates/foo/"`). Empty at the root. Together
+        /// with `cdup` it names every directory between, without resolving a
+        /// single absolute path.
+        prefix: []const u8,
+    };
+
+    pub fn within(self: Repo) ?Inside {
+        return switch (self) {
+            .inside => |i| i,
+            else => null,
+        };
+    }
+};
+
+/// Asked as ONE command, and that is what makes the union honest: two calls
+/// could return one answer and one failure, and there would be a state to
+/// invent a meaning for. `rev-parse` prints one line per flag — two empty lines
+/// at the repository root — so the untrimmed output says which is which and a
+/// short answer is simply not an answer.
+pub fn locate(alloc: std.mem.Allocator, io: std.Io) Repo {
+    const asked = whether(alloc, io, &.{ "rev-parse", "--show-cdup", "--show-prefix" });
+    const raw = asked.answer orelse return if (asked.missing) .no_git else .outside;
+
+    var lines = std.mem.splitScalar(u8, raw, '\n');
+    const cdup = lines.next() orelse return .outside;
+    const prefix = lines.next() orelse return .outside;
+    return .{ .inside = .{
+        .cdup = std.mem.trim(u8, cdup, " \t\r"),
+        .prefix = std.mem.trim(u8, prefix, " \t\r"),
+    } };
 }
 
 /// Spawn, drain with a deadline, read the exit code — the whole of how this
@@ -113,7 +171,7 @@ fn bounded(alloc: std.mem.Allocator, io: std.Io, argv: []const []const u8, ms: u
         .exited => |code| if (code != 0) return .{},
         else => return .{},
     }
-    return .{ .answer = std.mem.trim(u8, text, " \t\r\n") };
+    return .{ .answer = text };
 }
 
 test "a command that would never finish is given up on, not waited for" {
@@ -147,36 +205,18 @@ test "a program that is not installed is told apart from one that says no" {
     if (builtin.os.tag == .windows) return;
     // Present, ran, exited non-zero: no answer, and nothing to say about the
     // machine — the distinction `# Git` reports in two different sentences.
-    const refused = bounded(alloc, io, &.{ "false" }, 1000);
+    const refused = bounded(alloc, io, &.{"false"}, 1000);
     try std.testing.expect(refused.answer == null and !refused.missing);
 }
 
-/// Where this working directory sits in its repository.
-pub const Repo = struct {
-    inside: bool = false,
-    /// git could not be run on this machine. Distinct from `inside == false`,
-    /// which is git's own answer about this directory.
-    no_git: bool = false,
-    /// `rev-parse --show-cdup`: the path from here UP to the root, with a
-    /// trailing separator (`"../../"`). Empty when this directory is the root.
-    cdup: []const u8 = "",
-    /// `rev-parse --show-prefix`: the path from the root DOWN to here, with a
-    /// trailing separator (`"crates/foo/"`). Empty when this directory is the
-    /// root. Together with `cdup` it names every intermediate directory without
-    /// resolving a single absolute path.
-    prefix: []const u8 = "",
-};
-
-pub fn locate(alloc: std.mem.Allocator, io: std.Io) Repo {
-    // Asked as two commands rather than one: at the repository root both answers
-    // are the empty string, and one invocation would return them as a single
-    // blank line with no way to tell "root" from "git said nothing".
-    const cdup = askWhy(alloc, io, &.{ "rev-parse", "--show-cdup" });
-    const found = cdup.answer orelse return .{ .no_git = cdup.missing };
-    // The first answer already settled that this IS a working tree, so a second
-    // one that does not come back cannot unsettle it: the descent simply stops
-    // at this directory rather than the whole thing turning into "not a
-    // repository", which by then would be a claim we know to be false.
-    const prefix = ask(alloc, io, &.{ "rev-parse", "--show-prefix" }) orelse "";
-    return .{ .inside = true, .cdup = found, .prefix = prefix };
+test "an empty answer is an answer: a clean tree is not a failure" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    // The distinction the whole file turns on, and the one `orelse ""` at a
+    // call site would destroy: `git status --porcelain` says "clean" by
+    // printing nothing, and that is not the same as not answering.
+    const said = bounded(arena.allocator(), std.testing.io, &.{ "true" }, 1000);
+    try std.testing.expect(said.answer != null);
+    try std.testing.expectEqualStrings("", said.answer.?);
 }

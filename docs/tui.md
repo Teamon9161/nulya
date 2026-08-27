@@ -409,6 +409,9 @@ manifest_readonly = true    # 信一个 tool 自己声明的 `"readonly": true`�
 sync_on_start = true        # 开屏时后台 build 各 store root 下的 draft（`nulya ext sync`）
 auto_activate = true        # 让那一趟把 `current` 指到它刚建出来的版本上（activate 只是移指针，T50）
 session_with  = ["handoff", "agent"]  # 这个前端给它开的每个顶层 tab 额外带上的包（`--with` + `--pin`，§5.8 / §5.10）；旧的 `handoff = false` 仍认
+session_prompts = ["ground"] # 每场开场前问一次「这一场的开场文本」的包（T66）：跑它的 internal `render`、
+                            # 读回 `{"prompt": "<路径>"}`、把路径喂给 `session new --prompt`。不是成员——
+                            # 进 session 的是它写出来的那个文件（`goals/session-prompt.md` 的那条线）
 plugins       = true        # 代码层总开关（T40）：加载 trusted + 已激活/本场戴着的包的 `contributes.ui.tui.entry`
                             # false = 只剩声明层（commands / policy / 每个 tool 的 ui 照常，逐字节等于 T39 结束时）
 
@@ -1984,7 +1987,8 @@ T33 把 `internal` 行折起来时给的理由是**数量**（六个 driver tool
 
 **内核零改动**，前端只多一个模块与一次调用。起因是 kernel prompt 只有五句 harness 事实、`coding` 补了工作纪律，而**这一场具体跑在哪**（哪个目录、什么平台、今天几号、git 什么状态、项目长什么样、这个 checkout 自己写了什么规矩）一个字都没有——于是每场开头的头几个 tool call 都在问「我在哪」。
 
-1. **`ground` 不是 `session_with` 的一员**，所以它没有进那张列表。membership 带进 session 的是**冻在版本里的同一批字节**；这些是今天的日期、这个分支、这个目录，生命周期恰好一场 session——`--prompt` 那一侧（`goals/session-prompt.md` 的尺子）。所以开关是 `[extensions] ground`（布尔，缺省 `true`），不是列表里的一个 id。
-2. **调用点只有一个：`sessionExtras()`**，`ensureSession` 里 draft 变成 session 的那一刻，**排在 `session_with` 之后**——事实在 `session new` 冻结它们之前的最后一刻才读。版本解析借的是 `sessionMemberOnce`（自带 draft 就地 build、否则取 `current`，与别的自带包同一条路），拿到的只是版本；`renderGround`（`src/ground.ts`）跑 `ext run ground@<v> render`、读回 `{prompt}`，那个路径进 `SessionExtras.prompt`。
-3. **失败不挡开场**：渲染不出来就落进 `session_with` 那句同样的 `not composed in` 提示，session 照开，只是不带 context——与一个解析不了的成员包同一个态度。
+1. **`ground` 不是 `session_with` 的一员**，所以它没有进那张列表。membership 带进 session 的是**冻在版本里的同一批字节**；这些是今天的日期、这个分支、这个目录，生命周期恰好一场 session——`--prompt` 那一侧（`goals/session-prompt.md` 的尺子）。它是另一根轴：**`[extensions] session_prompts`**，一张**列表**（缺省 `["ground"]`），与 `session_with` 逐位对称、同样是「近的一层可以整张换掉」。
+2. **前端不认识 `ground` 这个名字。** 契约就一句：列表里的每个 id，跑它的 internal tool `render`，读回 `{"prompt": "<路径>"}`（`src/sessionprompt.ts`，模块里没有一个包名）。第一版是 `ground_id` 常量 + `extensions.ground` 布尔 + `renderGround()` 函数——三份 ground 专属知识长在一个「一切能力都是扩展」的前端里，等于把刚买来的抽象又绕回去；而第二个 renderer（workspace memory、repo policy）该是配置里多一行，不是这里多一个 `renderFoo()`。
+3. **调用点只有一个：`sessionExtras()`**，`ensureSession` 里 draft 变成 session 的那一刻，**排在 `session_with` 之后**——事实在 `session new` 冻结它们之前的最后一刻才读。版本解析借的是 `sessionMemberOnce`（自带 draft 就地 build、否则取 `current`，与别的自带包同一条路），拿到的只是版本。
+4. **失败不挡开场，但两种失败分开说**：包解析不出来 → `not composed in · /ext for what it said`（`/ext` 确实答得了）；`render` 自己失败 → **把它的话原样显示**（`renderSessionPrompt` 认真整理了 stderr/stdout，第一版却在调用点 `.catch(() => null)` 全吞掉，然后把人指向一个对这件事无话可说的屏幕）。两种都照开 session。
 4. **没做**：没有 `/ground` 命令（它不是一个模式，没有可穿脱的东西）；没有把渲染结果画在 transcript 上（它是 system block，`/sessions` 的 composition 里看得见）；没有让它跟着每一步刷新（`--prompt` 冻在 header 里正是它该待的地方——重渲染一次就是把缓存前缀换掉）。

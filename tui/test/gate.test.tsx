@@ -181,7 +181,7 @@ test("in ask mode a read-only command runs unasked, and the card says why", asyn
         // `ask`, straight from the defaults: the classifier is the only reason
         // this call is not a question.
         style={createStyle(
-          { ...default_settings, extensions: { ...default_settings.extensions, session_with: [], ground: false } },
+          { ...default_settings, extensions: { ...default_settings.extensions, session_with: [], session_prompts: [] } },
           {},
         )}
         driver={{ env: scripted_env }}

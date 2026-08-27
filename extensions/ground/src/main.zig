@@ -7,8 +7,8 @@
 //! before `session new` and passes the path to `--prompt`:
 //!
 //! ```
-//! nulya ext run ground@<v> render
-//! nulya session new --prompt .nulya/scratch/ground/context.md
+//! nulya ext run ground@<v> render      → {"prompt": ".nulya/scratch/ground/<n>/ground.md"}
+//! nulya session new --prompt <that path>
 //! ```
 //!
 //! **Why `--prompt` and not a contributed system prompt.** A contributed prompt
@@ -36,16 +36,23 @@ const git = @import("git.zig");
 const instructions = @import("instructions.zig");
 const layout = @import("layout.zig");
 
-/// Under `.nulya/scratch/`, where this repository already stages things that
-/// belong to a run rather than to the source tree — and deliberately not in a
-/// store root, which holds installed code (`extensions/agent` renders personas
-/// to `.nulya/scratch/agents/` for the same reason).
-const out_dir = ".nulya/scratch/ground";
-/// Named after the package, not after what it holds: the kernel takes a prompt
-/// block's `source` from the file's stem, so this is the word that labels the
-/// block for the life of the session and shows up in `session list`. "ground"
-/// says which package put it there; "context" would say nothing.
-const out_path = out_dir ++ "/ground.md";
+/// A directory per invocation, holding a file with a fixed name, under
+/// `.nulya/scratch/` — where this repository already stages what belongs to a
+/// run rather than to the source tree, and deliberately not in a store root,
+/// which holds installed code.
+///
+/// The name is fixed because the kernel takes a prompt block's `source` from
+/// the file's stem, so `ground.md` is the word that labels the block for the
+/// life of the session and shows up in `session list` — "ground" says which
+/// package put it there, "context" would say nothing.
+///
+/// The DIRECTORY is unique because the file is read by somebody else, later:
+/// this process writes it and answers a path, and `session new --prompt` opens
+/// it afterwards. One shared name means two sessions starting at once in the
+/// same workspace race — the second render overwrites the first, and the first
+/// session freezes facts that were measured for the second. A workspace with
+/// two front ends on it is a thing nulya supports, so this is not hypothetical.
+const out_root = ".nulya/scratch/ground";
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -62,15 +69,16 @@ pub fn main(init: std.process.Init) !void {
     _ = reader.interface.allocRemaining(alloc, .limited(1 << 20)) catch {};
 
     const document = render(alloc, io) catch |err| return fail(io, alloc, err);
-    write(io, document) catch |err| return fail(io, alloc, err);
+    const written_at = write(alloc, io, document) catch |err| return fail(io, alloc, err);
 
+    // One field, because one is all a caller uses: the path. A byte count rode
+    // along at first and nothing ever read it — an interface nobody consumes is
+    // a promise to keep it working for no one.
     var out: std.Io.Writer.Allocating = .init(alloc);
     var jw: std.json.Stringify = .{ .writer = &out.writer };
     try jw.beginObject();
     try jw.objectField("prompt");
-    try jw.write(out_path);
-    try jw.objectField("bytes");
-    try jw.write(document.len);
+    try jw.write(written_at);
     try jw.endObject();
     try std.Io.File.stdout().writeStreamingAll(io, out.writer.buffered());
 }
@@ -94,16 +102,34 @@ fn render(alloc: std.mem.Allocator, io: std.Io) ![]const u8 {
     return out.toOwnedSlice();
 }
 
-fn write(io: std.Io, document: []const u8) !void {
+/// Write the document into a directory this invocation owns, and answer where.
+///
+/// Exclusive creation is what makes it ours: whoever wins the name gets it, and
+/// a loser simply tries the next one. The counter starts from the clock so two
+/// processes are unlikely to collide at all, and correctness does not rest on
+/// that — it rests on `O_EXCL`.
+fn write(alloc: std.mem.Allocator, io: std.Io, document: []const u8) ![]const u8 {
     const cwd = std.Io.Dir.cwd();
-    try cwd.createDirPath(io, out_dir);
-    // Whole-file replacement, not an append: this is a snapshot of right now,
-    // and the previous session's snapshot has no claim on it. `session new`
-    // reads the bytes and freezes them, so a later overwrite cannot reach back
-    // into a session that already started.
-    var file = try cwd.createFile(io, out_path, .{});
-    defer file.close(io);
-    try file.writeStreamingAll(io, document);
+    try cwd.createDirPath(io, out_root);
+
+    var n: u64 = @bitCast(std.Io.Timestamp.now(io, .real).toMilliseconds());
+    var tries: usize = 0;
+    while (tries < 1000) : ({
+        tries += 1;
+        n +%= 1;
+    }) {
+        const dir = try std.fmt.allocPrint(alloc, "{s}/{x}", .{ out_root, n });
+        cwd.createDir(io, dir, .default_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => continue,
+            else => return err,
+        };
+        const path = try std.fmt.allocPrint(alloc, "{s}/ground.md", .{dir});
+        var file = try cwd.createFile(io, path, .{});
+        defer file.close(io);
+        try file.writeStreamingAll(io, document);
+        return path;
+    }
+    return error.NoFreeGroundDirectory;
 }
 
 /// On the plain wire stderr is the failure message and the exit code is what

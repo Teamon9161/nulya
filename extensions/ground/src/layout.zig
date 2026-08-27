@@ -67,12 +67,17 @@ const Tree = struct {
             const children = self.tops.get(name).?;
             if (children.count() != 0) {
                 const kids = try sortedKeys(self.alloc, children.keys());
-                for (kids[0..@min(kids.len, max_per_dir)]) |kid| {
-                    try w.print("  {s}\n", .{kid});
+                var shown: usize = 0;
+                // Checked before each child, not once per top-level entry. The
+                // ported version checked after the whole child loop, so one
+                // crowded directory could carry the count from 79 to 99 and the
+                // "overall budget" was not one.
+                while (shown < kids.len and shown < max_per_dir and written < max_entries) : (shown += 1) {
+                    try w.print("  {s}\n", .{kids[shown]});
                     written += 1;
                 }
-                if (kids.len > max_per_dir)
-                    try w.print("  … (+{d} more)\n", .{kids.len - max_per_dir});
+                if (kids.len > shown)
+                    try w.print("  … (+{d} more)\n", .{kids.len - shown});
             }
             if (written >= max_entries) {
                 try w.writeAll("… (truncated)\n");
@@ -89,7 +94,7 @@ const Tree = struct {
 pub fn render(alloc: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, repo: git.Repo) !bool {
     var tree: Tree = .{ .alloc = alloc };
 
-    if (repo.inside) {
+    if (repo.within() != null) {
         // Tracked plus untracked-but-not-ignored, which is exactly "the files
         // somebody working here would see". Paths come back relative to this
         // directory, which is what a map of this directory wants.
@@ -110,7 +115,7 @@ pub fn render(alloc: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, repo: git
     // stand-in below skips what a checkout usually ignores, but it is guessing,
     // and a map that overstates how it was made is worse than one that does not
     // say.
-    try w.writeAll(if (repo.inside)
+    try w.writeAll(if (repo.within() != null)
         "# Project layout (2 levels, gitignore-aware)\n\n"
     else
         "# Project layout (2 levels)\n\n");
@@ -187,6 +192,35 @@ test "a path deeper than two levels folds into the directory it lives in" {
     // Two top-level entries, and the third level is represented by `cli/`
     // rather than by any of the files under it.
     try std.testing.expectEqualStrings("build.zig\nsrc/\n  cli/\n  main.zig\n", out.writer.buffered());
+}
+
+test "the overall cap is a cap: no directory carries the count past it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var tree: Tree = .{ .alloc = alloc };
+
+    // Enough top-level directories, each full, that the count reaches the
+    // ceiling in the middle of one of them.
+    for (0..max_per_dir) |d| {
+        for (0..max_per_dir) |f| {
+            try tree.addPath(try std.fmt.allocPrint(alloc, "d{d:0>2}/f{d:0>2}.txt", .{ d, f }));
+        }
+    }
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    try tree.write(&out.writer);
+
+    // Every line is one entry except the marker lines this counts by hand, so
+    // the assertion is on the thing the constant claims: it is an upper bound.
+    var entries: usize = 0;
+    var lines = std.mem.splitScalar(u8, out.writer.buffered(), '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        if (std.mem.indexOf(u8, line, "…") != null) continue;
+        entries += 1;
+    }
+    try std.testing.expect(entries <= max_entries);
 }
 
 test "one crowded directory cannot spend the whole budget" {

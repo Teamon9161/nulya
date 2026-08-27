@@ -1569,9 +1569,11 @@ test "bundled handoff: a session that pins ext:handoff/handoff exposes it native
 test "bundled ground: render answers a context file carrying this directory's own instructions but not a subdirectory's, and that file composes into a session as a frozen inline prompt" {
     // `docs/goals/ground.md`. Two things are being pinned, and neither is the
     // wording of a section. First, WHICH instruction files a rendered context
-    // may carry: root down to cwd, never below — that line is what lets the
-    // deeper layers live in `extensions/std` later without the two packages
-    // sharing any state. Second, that what `render` answers is a path a driver
+    // may carry: root down to cwd, never below. That is the whole region — the
+    // deeper layers are read by the model when the work reaches them, because
+    // delivering them mechanically would mean a second package holding a copy
+    // of this one's policy (goals/ground.md §4). Second, that what `render`
+    // answers is a path a driver
     // can hand straight to `session new --prompt`, which is the whole of how
     // this package reaches a session.
     const alloc = std.testing.allocator;
@@ -1615,8 +1617,10 @@ test "bundled ground: render answers a context file carrying this directory's ow
     const context = try ws.readFileAlloc(io, written_at, alloc, .unlimited);
     defer alloc.free(context);
     try std.testing.expect(std.mem.indexOf(u8, context, "GROUND-HERE-SENTINEL") != null);
-    // The layer below cwd is not this package's to load: which of those matter
-    // depends on which files the work turns out to touch.
+    // The layer below cwd is not this package's to load, and not anything
+    // else's either: which of those matter depends on which files the work
+    // turns out to touch, so they are read by the model when it gets there
+    // (`extensions/coding` says so), not delivered by the harness.
     try std.testing.expect(std.mem.indexOf(u8, context, "GROUND-BELOW-SENTINEL") == null);
     for ([_][]const u8{ "# Project instructions", "# Environment", "# Git" }) |needle| {
         try std.testing.expect(std.mem.indexOf(u8, context, needle) != null);

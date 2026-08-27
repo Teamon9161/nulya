@@ -37,24 +37,38 @@ pub fn renderEnvironment(alloc: std.mem.Allocator, io: std.Io, w: *std.Io.Writer
 
 pub fn renderGit(alloc: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, repo: git.Repo) !void {
     try w.writeAll("# Git\n\n");
-    if (repo.no_git) {
+    switch (repo) {
         // Not "not a repository": this machine has no git to ask, and saying
         // the checkout is unversioned would be a claim we cannot support.
-        try w.writeAll("git is not installed here, so nothing is known about version control.\n");
-        return;
-    }
-    if (!repo.inside) {
-        try w.writeAll("Not a git repository.\n");
-        return;
+        .no_git => {
+            try w.writeAll("git is not installed here, so nothing is known about version control.\n");
+            return;
+        },
+        .outside => {
+            try w.writeAll("Not a git repository.\n");
+            return;
+        },
+        .inside => {},
     }
 
-    const branch = git.ask(alloc, io, &.{ "branch", "--show-current" }) orelse "";
-    try w.print("branch: {s}\n", .{if (branch.len == 0) "(detached HEAD)" else branch});
+    // Each of these keeps "git did not answer" separate from what an empty
+    // answer MEANS, because for two of them the empty answer is the
+    // interesting one. `git branch --show-current` prints nothing on a
+    // detached head; `git status --porcelain` prints nothing when the tree is
+    // clean. An `orelse ""` here would report a timed-out git as a detached
+    // head and a hung one as a clean tree — the exact false statements the
+    // deadline was added to avoid.
+    if (git.ask(alloc, io, &.{ "branch", "--show-current" })) |branch| {
+        try w.print("branch: {s}\n", .{if (branch.len == 0) "(detached HEAD)" else branch});
+    }
     if (git.ask(alloc, io, &.{ "log", "-1", "--format=%h %s" })) |head| {
         if (head.len != 0) try w.print("last commit: {s}\n", .{head});
     }
 
-    const status = git.ask(alloc, io, &.{ "status", "--porcelain" }) orelse "";
+    const status = git.ask(alloc, io, &.{ "status", "--porcelain" }) orelse {
+        try w.writeAll("working tree: unknown (git did not answer)\n");
+        return;
+    };
     if (status.len == 0) {
         try w.writeAll("working tree: clean\n");
         return;

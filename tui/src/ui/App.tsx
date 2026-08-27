@@ -106,8 +106,8 @@ import { createPluginHost, pluginKeyOf } from "../plugins/host.ts"
 import { PluginContext } from "../plugins/context.ts"
 import { wrapExtNote } from "../extnote.ts"
 import { runCompact } from "../compact.ts"
-import { ground_id, renderGround } from "../ground.ts"
 import { headline, nextHandoff, type HandoffFile } from "../handoff.ts"
+import { renderSessionPrompt } from "../sessionprompt.ts"
 import { formatWithRef, parseWithRef, type WithRef } from "../with.ts"
 import { orphanPins, resolvableStandingPins, toolId } from "../pins.ts"
 import {
@@ -1219,20 +1219,31 @@ export function App(props: AppProps) {
       withRefs.push(formatWithRef({ id: member.id, version: member.version }))
       for (const pin of member.pins) if (!pins.includes(pin)) pins.push(pin)
     }
-    // `ground` is resolved by the same machinery and composed by none of it: it
-    // renders a file, and the FILE is what the session gets (`ground.ts`).
-    // Deliberately last, so the facts are read at the latest possible moment
-    // before `session new` freezes them.
+    // The renderers: resolved by the same machinery, composed by none of it —
+    // each writes a file and the FILE is what the session gets
+    // (`sessionprompt.ts`). Deliberately last, so whatever they report is read
+    // at the latest possible moment before `session new` freezes it.
     const prompts: string[] = []
-    if (props.style.settings.extensions.ground) {
-      const member = await sessionMemberOnce(ground_id)
-      const rendered = member
-        ? await renderGround(props.ws, { id: member.id, version: member.version }).catch(() => null)
-        : null
-      if (rendered) prompts.push(rendered)
-      else missing.push(ground_id)
+    const broke: string[] = []
+    for (const id of props.style.settings.extensions.session_prompts) {
+      const member = await sessionMemberOnce(id)
+      if (!member) {
+        missing.push(id)
+        continue
+      }
+      try {
+        prompts.push(await renderSessionPrompt(props.ws, { id: member.id, version: member.version }))
+      } catch (error) {
+        // Kept apart from `missing`, because they are different failures with
+        // different fixes: a package that would not resolve is answered by
+        // `/ext`, while one whose `render` failed has its own reason, and
+        // pointing at `/ext` for that one sends somebody to a screen that has
+        // nothing to say about it.
+        broke.push(error instanceof Error ? error.message : String(error))
+      }
     }
     if (missing.length > 0) setNotice(`${missing.join(" & ")} not composed in · /ext for what it said`)
+    else if (broke.length > 0) setNotice(broke.join(" · "))
     return {
       ...(withRefs.length > 0 ? { with: withRefs } : {}),
       ...(pins.length > 0 ? { pin: pins } : {}),

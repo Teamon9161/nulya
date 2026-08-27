@@ -100,17 +100,20 @@ export interface Settings {
      */
     session_with: string[]
     /**
-     * Whether each new session starts knowing where it is: the bundled `ground`
-     * package renders this workspace's layout, instruction files, environment
-     * and git state, and the path goes to `session new --prompt`
-     * (`docs/goals/ground.md`).
+     * Packages asked to RENDER this session's opening text: each one's internal
+     * `render` tool is run just before `session new`, and what it answers goes
+     * to `--prompt` (`sessionprompt.ts`).
      *
-     * Its own switch rather than an entry in `session_with`, because it is not
-     * membership: nothing about `ground` is composed into the session. What
-     * lands there is a file of facts with a one-session lifetime, which is the
-     * side of the line `--prompt` serves (`docs/goals/session-prompt.md`).
+     * A list and not a boolean, and a sibling of `session_with` rather than a
+     * special case beside it. These packages are not members — nothing about
+     * them is composed into the session; what lands there is the FILE they
+     * wrote, with a one-session lifetime, which is the side of the line
+     * `--prompt` serves (`docs/goals/session-prompt.md`).
+     *
+     * The bundled `ground` reports where the session is running: project
+     * layout, the project's own instruction files, environment, git state.
      */
-    ground: boolean
+    session_prompts: string[]
     /**
      * The CODE layer's one switch (tui-plugin U3): whether a trusted, active
      * package's `contributes.ui` module is loaded into this process at all.
@@ -158,7 +161,13 @@ export const default_settings: Settings = {
     history_window: 400,
   },
   ui: { theme: "nulya-dark", motion: true },
-  extensions: { sync_on_start: true, auto_activate: true, session_with: ["handoff", "agent"], ground: true, plugins: true },
+  extensions: {
+    sync_on_start: true,
+    auto_activate: true,
+    session_with: ["handoff", "agent"],
+    session_prompts: ["ground"],
+    plugins: true,
+  },
   driver: { mode: "ask" },
   approvals: { ...default_rules },
   keys: {},
@@ -221,7 +230,11 @@ function mergeLayer(into: Settings, layer: unknown, source: string) {
     if (typeof extensions["sync_on_start"] === "boolean") into.extensions.sync_on_start = extensions["sync_on_start"]
     if (typeof extensions["auto_activate"] === "boolean") into.extensions.auto_activate = extensions["auto_activate"]
     if (typeof extensions["plugins"] === "boolean") into.extensions.plugins = extensions["plugins"]
-    if (typeof extensions["ground"] === "boolean") into.extensions.ground = extensions["ground"]
+    // Replaced, not merged — same discipline as `session_with`: a nearer
+    // layer that wants FEWER renderers must be able to say so.
+    if (Array.isArray(extensions["session_prompts"])) {
+      into.extensions.session_prompts = extensions["session_prompts"].filter((e): e is string => typeof e === "string")
+    }
     // Replaced, not merged — the same discipline as the approval tables: a
     // nearer layer that wants FEWER packages must be able to say so.
     if (Array.isArray(extensions["session_with"])) {
