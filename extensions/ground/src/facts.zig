@@ -44,8 +44,12 @@ pub fn renderGit(alloc: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, repo: 
             try w.writeAll("git is not installed here, so nothing is known about version control.\n");
             return;
         },
-        .outside => {
-            try w.writeAll("Not a git repository.\n");
+        // Says what was observed rather than what it usually means. This is
+        // almost always "not a repository", but it is also where a timed-out or
+        // refusing `rev-parse` lands, and those have told us nothing about the
+        // directory — the same reason a hung `status` is not reported as clean.
+        .unknown => {
+            try w.writeAll("git did not report a working tree here — either this is not a repository, or git could not answer.\n");
             return;
         },
         .inside => {},

@@ -61,15 +61,20 @@ nulya session new --prompt <答出来的那个路径>
 要分开说**：后者是关于这个目录的主张，一台没有 git 的机器没有资格做。同理，退回 readdir 时标题里那句
 "gitignore-aware" **也跟着不写**——一张说不清自己怎么画出来的地图比不画更糟。
 
-**「没答上来」绝不许在调用点塌成空字符串**，因为这里有两个问题的**空答案本身就是答案**：
-`git branch --show-current` 在 detached head 上什么都不打，`git status --porcelain` 在干净工作树上什么都不打。
-第一版两处都写了 `orelse ""`，于是**超时的 git 被报成 detached HEAD、挂住的 git 被报成 working tree clean**——
-恰好是加 deadline 要避免的那两句假话。现在 `null`（没答）与 `""`（答了，空的）一路分开，
-status 没答就写 `working tree: unknown (git did not answer)`。
+**「没答上来」绝不许在调用点塌成空字符串，也绝不许塌成一个关于这个目录的结论。**
+前者是因为这里有两个问题的**空答案本身就是答案**：`git branch --show-current` 在 detached head 上什么都不打，
+`git status --porcelain` 在干净工作树上什么都不打。第一版两处都写了 `orelse ""`，于是**超时的 git 被报成
+detached HEAD、挂住的 git 被报成 working tree clean**——恰好是加 deadline 要避免的那两句假话。
+后者是同一个错误的最后一个藏身处：`rev-parse` 非 0 曾被直接读成 `.outside` → 「Not a git repository.」，
+可是超时、unsafe repository、读不懂的输出全都从这条路进来，而它们对这个目录**什么都没说**。
+现在三种答案分开（`Answer` 是 `union(enum){ok, missing, failed}`，非法状态不存在），
+`Repo` 的那一档叫 **`unknown`**，`# Git` 写的是观察到的事（"git did not report a working tree here —
+either this is not a repository, or git could not answer."）而不是它通常意味着什么。
+`failed` **不带原因码**：每个调用点对四种失败说的话完全一样，一个没人分支的字段就是没人读的字段。
 
 **`locate` 只问一次。** `rev-parse --show-cdup --show-prefix` 一次打两行（仓库根上是两个空行，
 所以**不许 trim**、按行数判断即可）。两次调用会产生「一个成功一个失败」这种半个答案，而半个答案要么被当成
-完整的 repo（错），要么要发明一个含义。问一次 + `Repo` 是 `union(enum){no_git, outside, inside{cdup,prefix}}`，
+完整的 repo（错），要么要发明一个含义。问一次 + `Repo` 是 `union(enum){no_git, unknown, inside{cdup,prefix}}`，
 那个状态从此**不存在**，而不是靠注释保证没人构造它。
 
 **每条 git 命令 4 s 封顶**（`git.zig` 的 `bounded`），这是第四种「答不上来」，也是唯一一种没有症状的：
@@ -111,6 +116,6 @@ nulya 的内核没有这个钩子，**也不该有**（physics #8：那是 polic
   仓库里有 `AGENTS.md` 时含 `# Project instructions` 与它的正文。
 - 那个路径喂给 `session new --prompt` 之后，`session list --json` 的 `composition.prompts` 里有它，
   `source` 是 `ground`（文件名取自包名，所以一场 session 说得出这个 block 是谁放进去的）。
-- 不在 git 仓库里也答得出文件、exit 0（layout 走 readdir、标题不写 gitignore，`# Git` 说 not a git repository）；
-  git 根本没装时同样 exit 0，而 `# Git` 说的是「这台机器没有 git」而不是「这不是仓库」。
+- 不在 git 仓库里也答得出文件、exit 0（layout 走 readdir、标题不写 gitignore，`# Git` 说 git 没报出 working tree）；
+  git 根本没装时同样 exit 0，而 `# Git` 说的是「这台机器没有 git」——三种情况三句话，谁都不冒充谁。
 - **cwd 以下的 `AGENTS.md` 不进来**——那条分界是 §4 的全部依据，e2e 用两个 sentinel 钉住。

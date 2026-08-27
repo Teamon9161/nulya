@@ -1242,8 +1242,13 @@ export function App(props: AppProps) {
         broke.push(error instanceof Error ? error.message : String(error))
       }
     }
-    if (missing.length > 0) setNotice(`${missing.join(" & ")} not composed in · /ext for what it said`)
-    else if (broke.length > 0) setNotice(broke.join(" · "))
+    // Both kinds, when both happened. An `else if` here would have undone the
+    // split above: one unresolvable package would swallow a second package's
+    // real diagnostic, which is the thing keeping them apart was for.
+    const notices = missing.length > 0
+      ? [`${missing.join(" & ")} not composed in · /ext for what it said`, ...broke]
+      : broke
+    if (notices.length > 0) setNotice(notices.join(" · "))
     return {
       ...(withRefs.length > 0 ? { with: withRefs } : {}),
       ...(pins.length > 0 ? { pin: pins } : {}),

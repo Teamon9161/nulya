@@ -4,13 +4,12 @@
 //! Ported from tcode's `memory.rs` (`instruction_sources` + `append_sources`),
 //! minus the auto-memory half, which is a separate feature and not this one.
 //!
-//! **Why only root → cwd.** The layers BELOW this directory cannot be chosen
-//! here: which of them matter depends on which files the work turns out to
-//! touch, and that is not known until a tool touches one. That half belongs in
-//! whichever tool already holds the path — `extensions/std`, which also already
-//! keeps per-session state on disk (`docs/goals/ground.md` §4). The split is
-//! stateless on purpose: this package covers root → cwd inclusive, that one
-//! covers strictly below, and neither has to tell the other what it did.
+//! **Only root → cwd, and that is the whole design.** The layers below this
+//! directory cannot be chosen here — which of them matter depends on which
+//! files the work turns out to touch — and nothing delivers them mechanically:
+//! the agent reads a deeper `AGENTS.md` itself when work first enters that
+//! area, prompted by `extensions/coding`. `docs/goals/ground.md` §4 records why
+//! the mechanical version was written and then withdrawn.
 
 const std = @import("std");
 const git = @import("git.zig");

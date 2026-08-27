@@ -6,10 +6,12 @@
 //! implementation of it would be a second set of answers), and **where the repo
 //! root is relative to here**, which `rev-parse` gives without a realpath.
 //!
-//! Nothing here ever fails a render. Every question has exactly two outcomes:
-//! an answer, or no answer — and "no answer" is passed upward as such, never
-//! flattened into an empty string, because for two of these questions the empty
-//! string is itself a meaningful answer ("detached head", "working tree clean").
+//! Nothing here ever fails a render. Every question has three outcomes: an
+//! answer, no git to ask, or no answer — and "no answer" is passed upward as
+//! such, never flattened into an empty string, because for two of these
+//! questions the empty string is itself a meaningful answer ("detached head",
+//! "working tree clean"), and never into a conclusion about the directory,
+//! because a question that timed out has told us nothing about it.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -37,7 +39,10 @@ const deadline_ms: u32 = 4000;
 /// caller outside this file wants one value; `locate` needs the raw bytes and
 /// goes through `whether` for them.
 pub fn ask(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) ?[]const u8 {
-    const raw = whether(alloc, io, args).answer orelse return null;
+    const raw = switch (whether(alloc, io, args)) {
+        .ok => |text| text,
+        else => return null,
+    };
     // The END only. `git status --porcelain` puts each entry's two status
     // columns at the start of its line, so trimming the front eats the first
     // entry's — one line out of every listing silently a character narrower
@@ -45,19 +50,28 @@ pub fn ask(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) ?[]co
     return std.mem.trimEnd(u8, raw, " \t\r\n");
 }
 
-pub const Answer = struct {
-    answer: ?[]const u8 = null,
-    /// The one distinction worth keeping: git could not be run at all, as
-    /// opposed to git running and saying no. "Not a git repository" is a claim
-    /// about the directory, and a machine without git is in no position to make
-    /// it — `renderGit` reports the two in different sentences.
-    missing: bool = false,
+/// What came back, as a union so that "answered" and "did not" cannot both be
+/// half-true at once.
+pub const Answer = union(enum) {
+    /// git ran, exited zero, and this is what it printed — possibly nothing,
+    /// which for two of these questions is the interesting answer.
+    ok: []const u8,
+    /// git could not be run at all. The one distinction worth keeping, because
+    /// "not a git repository" is a claim about the directory and a machine
+    /// without git is in no position to make it — `renderGit` reports this in
+    /// its own sentence.
+    missing,
+    /// git ran and did not answer: non-zero exit, the deadline, output past the
+    /// cap, a failed wait. Deliberately one case rather than a reason code —
+    /// every caller says the same thing for all of them, and a reason nobody
+    /// branches on is a field nobody reads.
+    failed,
 };
 
 fn whether(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) Answer {
     var argv: std.ArrayList([]const u8) = .empty;
-    argv.append(alloc, "git") catch return .{};
-    argv.appendSlice(alloc, args) catch return .{};
+    argv.append(alloc, "git") catch return .failed;
+    argv.appendSlice(alloc, args) catch return .failed;
     return bounded(alloc, io, argv.items, deadline_ms);
 }
 
@@ -69,9 +83,12 @@ fn whether(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) Answe
 pub const Repo = union(enum) {
     /// git could not be run on this machine at all.
     no_git,
-    /// git ran and said this is not a working tree — or said something this
-    /// package could not read, which comes to the same thing: no descent.
-    outside,
+    /// git did not report a working tree here. Not the same as "this is not a
+    /// repository", and deliberately not narrowed to it: a non-zero `rev-parse`
+    /// is usually that, but it is also how a timeout, an unsafe-repository
+    /// refusal and an unreadable answer arrive. The common case reads fine as
+    /// "no descent, say less"; the rare ones would read as a false claim.
+    unknown,
     inside: Inside,
 
     pub const Inside = struct {
@@ -100,12 +117,15 @@ pub const Repo = union(enum) {
 /// at the repository root — so the untrimmed output says which is which and a
 /// short answer is simply not an answer.
 pub fn locate(alloc: std.mem.Allocator, io: std.Io) Repo {
-    const asked = whether(alloc, io, &.{ "rev-parse", "--show-cdup", "--show-prefix" });
-    const raw = asked.answer orelse return if (asked.missing) .no_git else .outside;
+    const raw = switch (whether(alloc, io, &.{ "rev-parse", "--show-cdup", "--show-prefix" })) {
+        .ok => |text| text,
+        .missing => return .no_git,
+        .failed => return .unknown,
+    };
 
     var lines = std.mem.splitScalar(u8, raw, '\n');
-    const cdup = lines.next() orelse return .outside;
-    const prefix = lines.next() orelse return .outside;
+    const cdup = lines.next() orelse return .unknown;
+    const prefix = lines.next() orelse return .unknown;
     return .{ .inside = .{
         .cdup = std.mem.trim(u8, cdup, " \t\r"),
         .prefix = std.mem.trim(u8, prefix, " \t\r"),
@@ -133,7 +153,7 @@ fn bounded(alloc: std.mem.Allocator, io: std.Io, argv: []const []const u8, ms: u
         // once it fills.
         .stderr = .ignore,
         .stdout = .pipe,
-    }) catch |err| return .{ .missing = err == error.FileNotFound };
+    }) catch |err| return if (err == error.FileNotFound) .missing else .failed;
 
     var streams: std.Io.File.MultiReader.Buffer(1) = undefined;
     var drain: std.Io.File.MultiReader = undefined;
@@ -150,7 +170,7 @@ fn bounded(alloc: std.mem.Allocator, io: std.Io, argv: []const []const u8, ms: u
     while (drain.fill(64, timeout)) |_| {
         if (out.buffered().len > max_output) {
             child.kill(io);
-            return .{};
+            return .failed;
         }
     } else |err| switch (err) {
         error.EndOfStream => {},
@@ -158,20 +178,20 @@ fn bounded(alloc: std.mem.Allocator, io: std.Io, argv: []const []const u8, ms: u
         // way git did not answer, so every caller already handles it.
         else => {
             child.kill(io);
-            return .{};
+            return .failed;
         },
     }
 
-    const term = child.wait(io) catch return .{};
-    const text = drain.toOwnedSlice(0) catch return .{};
+    const term = child.wait(io) catch return .failed;
+    const text = drain.toOwnedSlice(0) catch return .failed;
     drain.deinit();
     draining = false;
 
     switch (term) {
-        .exited => |code| if (code != 0) return .{},
-        else => return .{},
+        .exited => |code| if (code != 0) return .failed,
+        else => return .failed,
     }
-    return .{ .answer = text };
+    return .{ .ok = text };
 }
 
 test "a command that would never finish is given up on, not waited for" {
@@ -187,9 +207,10 @@ test "a command that would never finish is given up on, not waited for" {
     const answer = bounded(arena.allocator(), io, &.{ "sleep", "60" }, 150);
     const spent = std.Io.Timestamp.now(io, .awake).toMilliseconds() - started;
 
-    // No answer, not `missing` — the program was there, it just never finished.
-    try std.testing.expect(answer.answer == null);
-    try std.testing.expect(!answer.missing);
+    // `failed`, not `missing` — the program was there, it just never finished,
+    // and the difference is what keeps a hung git from being reported as a
+    // machine without git.
+    try std.testing.expect(answer == .failed);
     // Generous: what would fail here is waiting for the child, not being a
     // second or two slow under load.
     try std.testing.expect(spent < 30_000);
@@ -201,12 +222,11 @@ test "a program that is not installed is told apart from one that says no" {
     const alloc = arena.allocator();
     const io = std.testing.io;
 
-    try std.testing.expect(bounded(alloc, io, &.{"nulya-no-such-program-anywhere"}, 1000).missing);
+    try std.testing.expect(bounded(alloc, io, &.{"nulya-no-such-program-anywhere"}, 1000) == .missing);
     if (builtin.os.tag == .windows) return;
     // Present, ran, exited non-zero: no answer, and nothing to say about the
     // machine — the distinction `# Git` reports in two different sentences.
-    const refused = bounded(alloc, io, &.{"false"}, 1000);
-    try std.testing.expect(refused.answer == null and !refused.missing);
+    try std.testing.expect(bounded(alloc, io, &.{"false"}, 1000) == .failed);
 }
 
 test "an empty answer is an answer: a clean tree is not a failure" {
@@ -216,7 +236,7 @@ test "an empty answer is an answer: a clean tree is not a failure" {
     // The distinction the whole file turns on, and the one `orelse ""` at a
     // call site would destroy: `git status --porcelain` says "clean" by
     // printing nothing, and that is not the same as not answering.
-    const said = bounded(arena.allocator(), std.testing.io, &.{ "true" }, 1000);
-    try std.testing.expect(said.answer != null);
-    try std.testing.expectEqualStrings("", said.answer.?);
+    const said = bounded(arena.allocator(), std.testing.io, &.{"true"}, 1000);
+    try std.testing.expect(said == .ok);
+    try std.testing.expectEqualStrings("", said.ok);
 }
