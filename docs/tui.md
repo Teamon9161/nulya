@@ -2130,3 +2130,24 @@ T33 把 `internal` 行折起来时给的理由是**数量**（六个 driver tool
 **没做**：不动 pane / 布局（那是 `goals/tui-shell.md` 的 S1）；不加任何动效（第 9 条）；不改 `▎` 与 `›` 的现有分工（`▎` 是左规线与「就是这一个」，`›` 是输入点——两条都写进 §6.3 的表里，不是靠记）；不给 `/ext` 详情里那句 `lint · 0 uses · —` 改成表（它是一行事实不是一列数，等真有第二个读者再说）。**审批对话框的标题去掉了 `▎`**：`◈` 是「选身份/档位」的记号而它不是，颜色（warn）已经说完了这件事——`▎` 因此在 composer 区一个用法都不剩。
 
 **测试**：`bun test` 500 pass（`tsc` 干净，内核未动）。四处断言随新样子更新，其中三处顺手改成守机制而不是守字形——run 摘要那条从 `toContain("● Run 2 commands")` 改成「那一行**不含**assistant 的 glyph」（它要守的本来就是这个）、`elapsedLabel` 的 `1m00s` 改成「与 `seconds()` 逐位相等」（一种写法才是被钉的东西）、`/usage` 的「两个值同一个起始列」改成「同一个**结束**列」（右对齐之后那才是对齐的定义）。三份快照重出（`/ext` 的 `✓ current`、run 摘要那一帧、`/help` 多一行小标题与新 footer）。
+
+### T68 · S1a：pane 骨架——今天这块屏幕是新模型的退化形（2026-08-27）
+
+**内核零改动**（`src/` 一个字节没动），`tui/` 五个新文件 + `App.tsx` 一处，**行为与外观零改变**：`bun test` 527 pass、**32 份快照零 diff**、`tsc` 干净。做的是 `goals/tui-shell.md` §5.4 的 **S1 前一半**：把 pane 树 + 焦点单一仲裁 + 鼠标路由引进宿主，现有屏幕改挂成 surface。不做 S2（plugin API T2 / chip），不做侧边栏（S1b）。
+
+**尺子**：宪章 §5.1 说「宿主自己当第一个 consumer，API 才诚实」——所以验收标准不是"能分屏了"，是**分屏能力加进来之后屏幕上一个像素都没动**。今天这块屏幕必须是新模型的**退化形**（一个 pane），而不是新模型的一个特例。
+
+**四块，四个文件**：
+
+1. **`src/pane/tree.ts`——pane 树本体**（纯函数，不 import solid）。节点 = 叶（一个 surface）或 split（方向 + 比例 + 两个孩子）；`singlePane` / `setSurface` / `splitPane` / `closePane` / `resizeSplit` / `focusPane` / `layout` / `paneAt` / `moveFocus`。两条不变量由测试钉住：**`focus` 永远指着一个真实存在的叶**（关掉聚焦的 pane 时焦点交给兄弟）、**split 永远有两个孩子**（删掉一个就把 split 塌成另一个，"空 split"这个状态不存在，于是没有 consumer 需要处理它）。三个决定：① **方向词用 flexbox 的词**（`row` = 并排 / `column` = 上下），模型与画面不会用同一个词说两件事；② **`ratio` 是新 pane 的份额**，不是 first child 的——问侧边栏宽度的人问的是侧边栏的宽度，"`place` 有没有把这个数翻过来"正是那种会在两个调用点算出两种结果的算术，转换在 `splitPane` 里做一次；③ **关掉最后一个 pane 被拒绝**（原样返回），"没有 pane 时该显示什么"是宿主 policy 不是模型的性质，一个能表示"空"的模型让每个 consumer 都得处理一个谁都不想要的状态。
+2. **`src/pane/registry.ts`——surface 注册表**。一个 surface = 一整屏内容 + 一个**属主**。三个字段现在就在，因为它们是宿主必须推理的东西而不是便利：`owner`（host / package——§1 推论一「包不许画 chrome」要可执行，"这是宿主的"就必须是表里的一个事实而不是命名约定）· `claimsKeyboard`（聚焦这个 pane 会不会把键盘从 composer 拿走——**这正是 `overlay.active()` 一直以来的含义**）· `onKey`（可选；宿主自带的面自己听 OpenTUI，这个字段是给 S2 的包的——它们装不了全局监听器）。撞名走 store roots 那条老规则（§3.3）：**首个持有者胜、输的被记下来而不是悄悄丢掉**；宿主先注册，所以没有包能把 `host:*` 从一块人必须信任的屏幕底下抽走。
+3. **`src/pane/focus.ts`——焦点单一仲裁**。`resolveFocus(state) -> FocusOwner`：`dialog(with|agent|mode|approval)` → `surface` → `plugin-panel` → `browse` → `composer`。**顺序一个字没改**——T68 之前它是 `App.tsx` 里一串各自正确、却没有任何一处写出"顺序是什么"的 `if`；现在它是一个纯函数、一份能读能测的值，也是 S2 问"我的 surface 能拿键盘吗"时唯一要满足的东西（答案：只有人把焦点给了它、且没有 trusted zone 在场）。**修饰键不参与仲裁**（`modified` 是入参而不是调用方先过滤掉的东西——例外该写在它例外的那条规则旁边）：审批对话框在场时 Ctrl+C 仍要能杀掉那一步。**Esc / Ctrl+C 根本不出现在这个文件里**——它们是宿主注册的 keymap layer，在仲裁被咨询之前就答完了，「Esc/Ctrl+C 永远归宿主」因此是**结构上**成立而不是靠一条分支。
+4. **`src/ui/PaneHost.tsx`——挂载与鼠标路由**。两条规则：**一个 pane 画成它自己**（单叶树渲染 surface 时**外面没有任何 wrapper box**，与它取代的 `<Switch>` 逐节点相同——这不是优化，这就是 S1a 的验收标准；一个 wrapper 就是旧布局没有的一个 flex 容器，而它把孩子的尺寸继承错了正是"外观没变"悄悄不成立的方式）；**命中测试就是 renderable 树**——split 里的 pane 各有一个自己的盒子、`onMouseDown` 挂在上面，盒子里任何一次点击都冒泡到它，于是**"点击落在哪个 pane"由画出它的那次布局决定，两者不可能各说各话**。`pane/tree.ts` 仍然建模几何（`layout` / `paneAt`），因为**方向性焦点移动是只有摆放才答得出的问题**，也因为 S2 的 surface 会要 pane 局部坐标——但一次真实点击的路由**不经过第二份可能与画面漂移的布局**。wrapper 永不认领事件：`ui/rows.ts` 已经定义了什么**是**一次点击（同一格按下并松开），聚焦一个 pane 是发生在按下那一路上的、严格更弱的一件事，不许挡住下面那一行也对同一次点击做出反应。
+
+**迁移（`App.tsx` 一处，+177 −106）**：`state/overlay.ts` 的 `OverlayStore` **一个字节没改，也没有第二个真相**——它变成 pane 树的一个投影（`state/panes.ts` 的 `overlayAdapter`）。理由：那个 store 的真实内容从来不是"哪个 overlay"，而是**这一个 pane 显示哪个 surface**，而 `active()` 从来就是**那个 surface 拿不拿键盘**。于是 `kind()` 读树、`open()` 写树，每个调用点（`openOverlay` / `closeOverlay` / `shortcutLayerBlocked` / 三个 `createEffect` 的 composer 焦点条件）**拼写一个字都没动**。屏幕上那段 `<Switch>` 换成 `<PaneHost>`，八个 overlay 的 JSX **原样搬进** `ui/surfaces.tsx` 声明的九个 host surface 的 thunk 里（JSX 留在 `App`：这些屏幕每个要十来个 props、把它们穿过注册表只会买来第二套类型；一个 definition 是**一个身份加一个画它的 thunk**）。`useKeyboard` 那串 `if` 换成先算一次 `owner` 再分派——**唯一一处读信号而不读裁决的是 browse**：plugin panel **拒绝**了这个键时仍要落到 browse，仲裁器只报一个属主，而旧的链条里唯一不在第一个认领者处停下的就是这里，注释写明了。
+
+**为什么 `claimsKeyboard` 不写成"surface 不是 transcript"**：S1b 的 sessions 侧边栏正是那种**画得出、聚得了焦、却没有理由拦住人打字**的面。写成"不是 transcript"会在它到来的那天变成一个 bug，而写成一个属主自己声明的布尔，那天什么都不用改。
+
+**测试（+27，两份新文件）**：`test/panes.test.ts` 钉纯模型三样——树（操作不会留下画不出来的树；两个 pane 摆放的几何就是那条缝所在的几何；小到分不开的盒子给一个 pane 零格而不是撒谎）· 注册表（首个持有者胜；没注册的 surface 一个键都不认领——包加载失败不该能吞掉每一次击键）· 仲裁器（**顺序**本身；chord 越过所有认领者）。`test/panehost.test.tsx` 钉两条模型自己说不出的话：**单叶树与直接渲染那个 surface 逐帧相同**（对着一次**参考渲染**断言而不是对着一份存下来的帧——这样即使全套快照都围着一个 wrapper 重录过，它依然会红），以及**点击落进画在那里的那个 pane、且下面那一行照样收到同一次点击**。
+
+**没做**（都是 S1b / S2）：侧边栏与任何新 UI（理想情况下 S1a 不产生新像素，所以 §6 九条这轮没有新的适用对象）· plugin API 的 T2 与 chip（`tui/plugin-api.d.ts` 一个字节没动）· detach / tab-in-pane / 浮动（§5.1b 写死的边界）· 分屏的按键与 `tui.toml` 语法（没有第一个 consumer 之前，一个开分屏的键盘手势是在给一个还不存在的布局起名字）。**给 S1b 的提醒**：`ui/rows.ts` 的 `onClick(action, stop = true)`（`/ext` 的 checkbox 是唯一一处）会 `stopPropagation`，所以点在它上面**不会**顺带聚焦那个 pane——真开出第二个 pane 时这是要补的一处，判据是"聚焦发生在按下那一路上"。

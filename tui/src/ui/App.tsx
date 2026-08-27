@@ -1,4 +1,16 @@
-import { For, Match, Show, Switch, createEffect, createMemo, createSignal, onCleanup, onMount, untrack } from "solid-js"
+import {
+  For,
+  Match,
+  Show,
+  Switch,
+  createEffect,
+  createMemo,
+  createSignal,
+  onCleanup,
+  onMount,
+  untrack,
+  type JSX,
+} from "solid-js"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
 import type { InputRenderable, KeyEvent, ScrollBoxRenderable, Selection } from "@opentui/core"
@@ -25,7 +37,12 @@ import { TasksView } from "./overlays/TasksView.tsx"
 import { ScreenContext, FrameContext, StyleContext, useScreen, useStyle, type Style } from "../render/theme.ts"
 import { FoldContext, createFoldStore } from "../state/folds.ts"
 import { BrowseContext, createBrowseStore } from "../state/browse.ts"
-import { OverlayContext, createOverlayStore, type OverlayKind } from "../state/overlay.ts"
+import { OverlayContext, type OverlayKind } from "../state/overlay.ts"
+import { createPaneStore, main_surface, overlayAdapter } from "../state/panes.ts"
+import { claimsKeyboard, createSurfaceRegistry } from "../pane/registry.ts"
+import { resolveFocus } from "../pane/focus.ts"
+import { PaneHost } from "./PaneHost.tsx"
+import { hostSurfaces } from "./surfaces.tsx"
 import { TasksContext } from "../state/tasks.ts"
 import { NavigateContext, type Navigate } from "../state/navigate.ts"
 import type { TranscriptRow } from "../render/runs.ts"
@@ -259,7 +276,19 @@ export function App(props: AppProps) {
   const screen = useTerminalDimensions()
   const folds = createFoldStore()
   const browse = createBrowseStore()
-  const overlay = createOverlayStore()
+  /**
+   * The content area is a pane tree (goals/tui-shell.md §5.1). Today it holds
+   * exactly one pane, which is why nothing on screen moved when T68 landed: the
+   * screen this front end has always drawn is that model's degenerate case.
+   *
+   * `overlay` is the same store every call site below already used, answered
+   * from the tree instead of from a signal of its own — "which overlay is in
+   * front" was always "which surface the one pane shows", and `active()` was
+   * always "does that surface take the keyboard" (`state/panes.ts`).
+   */
+  const surfaces = createSurfaceRegistry<JSX.Element>()
+  const panes = createPaneStore(main_surface)
+  const overlay = overlayAdapter(panes, (surface) => claimsKeyboard(surfaces, surface))
   const keys = createKeymap(props.style.settings)
   // Opened by name, or a draft. Nothing else creates a session on the way in:
   // composition freezes at `session new` (physics #2), so a session made before
@@ -2662,15 +2691,40 @@ export function App(props: AppProps) {
     })
   })
 
+  /**
+   * Who holds the keyboard for this keystroke (`pane/focus.ts`).
+   *
+   * The order this returns is the order the branches below used to state one
+   * `if` at a time; putting it in one pure function is the whole of T68's focus
+   * half — there is now a single place to read the answer, and a single place
+   * S2 has to satisfy to give a package's surface the keyboard.
+   *
+   * `modified` is passed in rather than filtered out beforehand because the
+   * exception belongs beside the rule: a chord skips every claimant so that
+   * Ctrl+C still kills a step while the approval dialog is up.
+   */
+  const focusOwner = (key: KeyEvent) =>
+    resolveFocus({
+      modified: Boolean(key.ctrl || key.meta),
+      withPicker: withPicker(),
+      agentPicker: agentPicker(),
+      modePicker: modePicker(),
+      approval: pending() !== null,
+      keyboardPane: overlay.active() ? { pane: panes.focus(), surface: panes.surface() ?? "" } : null,
+      pluginPanel: Boolean(plugins.panel()),
+      browse: browse.active(),
+    })
+
   useKeyboard((key) => {
     if (key.propagationStopped) return
+    const owner = focusOwner(key)
     /**
      * The agent picker, on the same terms as the mode picker below it: while a
      * dialog above the composer is up it holds the keyboard, so the list is a
      * list you can actually choose from (T28). It is the outermost of the three
      * because it is the one that can only be opened deliberately.
      */
-    if (withPicker() && !key.ctrl && !key.meta) {
+    if (owner.kind === "dialog" && owner.dialog === "with") {
       const count = wearables().length
       if (matches(keys.cancel, key)) return consume(key, closeWithPicker)
       if (key.name === "up" || key.name === "k") {
@@ -2688,7 +2742,7 @@ export function App(props: AppProps) {
       }
       return consume(key, () => {})
     }
-    if (agentPicker() && !key.ctrl && !key.meta) {
+    if (owner.kind === "dialog" && owner.dialog === "agent") {
       const count = agentDefs().length
       if (matches(keys.cancel, key)) return consume(key, closeAgentPicker)
       if (key.name === "up" || key.name === "k") {
@@ -2712,7 +2766,7 @@ export function App(props: AppProps) {
      * the one moment two dialogs are on screen at once (tui.md §5.7, T31).
      * Answering it re-judges that waiting call on the spot (`chooseMode`).
      */
-    if (modePicker() && !key.ctrl && !key.meta) {
+    if (owner.kind === "dialog" && owner.dialog === "mode") {
       if (matches(keys.cancel, key)) return consume(key, closeModePicker)
       if (key.name === "up" || key.name === "k") return consume(key, () => setModeChoice((at) => moveChoice(at, -1)))
       if (key.name === "down" || key.name === "j") return consume(key, () => setModeChoice((at) => moveChoice(at, 1)))
@@ -2745,7 +2799,7 @@ export function App(props: AppProps) {
     // …but never the modified keys: Ctrl+C has to keep working while a call
     // waits, and killing the step is one of the two ways out of a dialog whose
     // question nobody wants to answer.
-    if (pending() && !key.ctrl && !key.meta) {
+    if (owner.kind === "dialog" && owner.dialog === "approval") {
       const choices = approvalChoices()
       if (key.name === "tab") return consume(key, () => setNoteFocused(!noteFocused()))
       if (key.name === "return") return consume(key, takeChoice)
@@ -2789,9 +2843,12 @@ export function App(props: AppProps) {
       }
       return
     }
-    // An overlay owns the keyboard while it is up; global shortcuts that remain
-    // available there are registered in OpenTUI keymap layers above.
-    if (overlay.active()) return
+    // The focused pane's surface owns the keyboard while it claims it (every
+    // full-screen view does); global shortcuts that remain available there are
+    // registered in OpenTUI keymap layers above. The surfaces the host ships
+    // listen for themselves, which is why there is nothing to hand the key to
+    // here — S2's packages get `SurfaceDefinition.onKey` instead.
+    if (owner.kind === "surface") return
     /**
      * A plugin's panel owns the keyboard while it is up (tui-plugin D6) — on
      * exactly the terms every other composer dialog has, and no better ones:
@@ -2800,9 +2857,13 @@ export function App(props: AppProps) {
      * (`PluginHost.handleKey` refuses it, and the branch below still runs).
      * `Esc` takes the panel down whether or not the plugin wants it.
      */
-    if (plugins.panel() && !key.ctrl && !key.meta) {
+    if (owner.kind === "plugin-panel") {
       if (plugins.handleKey(pluginKeyOf(key))) return consume(key, () => {})
     }
+    // Read from the signal rather than from the verdict above, because a plugin
+    // panel that DECLINED the key still falls through to browse mode — the
+    // arbiter names one owner, and the one place the old chain did not stop at
+    // the first claimant is here.
     if (browse.active()) {
       // The composer is blurred while browsing, so these keys are ours alone.
       if (matches(keys.cancel, key)) {
@@ -2836,6 +2897,106 @@ export function App(props: AppProps) {
     here.attach.takeOver()
     setNotice("took over · driving this session")
     return true
+  }
+
+  /**
+   * The host's screens, into the table a package will register into next (S2).
+   *
+   * Registered here rather than beside the store because a definition is an
+   * identity plus a thunk that draws it, and these draw from most of what this
+   * component holds — the thunks are only ever called by a mounted pane, which
+   * is long after every handle above exists.
+   *
+   * The bodies are the ones the `<Switch>` held before T68, moved verbatim: the
+   * point of S1a is that the skeleton changed and nothing else did.
+   */
+  for (const definition of hostSurfaces({
+    transcript: () => (
+      <Transcript
+        items={snapshot().items}
+        header={snapshot().header}
+        contributions={live()?.contributions() ?? []}
+        plan={plan()}
+        // A draft has no snapshot to carry one, so the refusal that kept it a
+        // draft rides the same channel a live session's driver failure does —
+        // one notice, one place to read a failure in full.
+        error={snapshot().error ?? refusal()}
+        cwd={props.ws.dir}
+        onPickModel={() => openOverlay("model")}
+        onCommand={submit}
+        tip={tip}
+        ref={(box) => (scroll = box)}
+      />
+    ),
+    sessions: () => (
+      <SessionsView
+        ws={props.ws}
+        currentId={live()?.id ?? ""}
+        onOpen={openSession}
+        onNew={() => startDraft()}
+        onClose={closeOverlay}
+      />
+    ),
+    ext: () => (
+      <ExtView
+        ws={props.ws}
+        header={snapshot().header}
+        // A draft has no session for the kernel to deposit a capability note
+        // into — and no frozen tool face to warn about either, which the null
+        // header already says.
+        sessionFile={live() ? `${sessions_dir}/${live()!.id}.jsonl` : undefined}
+        statePath={props.statePath}
+        tick={planTick()}
+        onMembershipChanged={() => {
+          skills.invalidate()
+          // Activating or deactivating a package can add or remove a `/name`
+          // it declares just as easily as a skill (tui-plugin D1/D8): same
+          // staleness, same fix.
+          packageCmds.invalidate()
+          // A package that was just activated may ship a front end. The other
+          // direction is not symmetric and says so in `host.ts`: a module that
+          // has run has run, so deactivating takes effect at the next start.
+          void loadPlugins()
+        }}
+        onClose={closeOverlay}
+      />
+    ),
+    tasks: () => (
+      <TasksView
+        ws={props.ws}
+        sessionId={live()?.id ?? ""}
+        tasks={tasks()}
+        onRefresh={() => void live()?.tasks.refresh()}
+        onClose={closeOverlay}
+      />
+    ),
+    help: () => <HelpView keys={keys} onClose={closeOverlay} />,
+    settings: () => <SettingsView ws={props.ws} onClose={closeOverlay} />,
+    usage: () => <UsageView ws={props.ws} snapshot={snapshot()} onClose={closeOverlay} />,
+    model: () => (
+      <ModelView
+        ws={props.ws}
+        current={currentPick()}
+        notice={guide() ?? undefined}
+        focusProfile={focusProfile()}
+        onPick={(pick) => startDraft(pick)}
+        onNotice={setNotice}
+        onOpenProviders={() => openOverlay("provider")}
+        onClose={closeOverlay}
+      />
+    ),
+    provider: () => (
+      <ProviderView
+        ws={props.ws}
+        current={currentPick()}
+        notice={guide() ?? undefined}
+        onShowModels={showModelsOf}
+        onNotice={setNotice}
+        onClose={closeOverlay}
+      />
+    ),
+  })) {
+    surfaces.register(definition)
   }
 
   // Opened by `main` with a reason: show that screen before anything else.
@@ -2877,101 +3038,11 @@ export function App(props: AppProps) {
                   <Hairline />
                 </Show>
 
-                <Switch
-                  fallback={
-                    <Transcript
-                      items={snapshot().items}
-                      header={snapshot().header}
-                      contributions={live()?.contributions() ?? []}
-                      plan={plan()}
-                      // A draft has no snapshot to carry one, so the refusal
-                      // that kept it a draft rides the same channel a live
-                      // session's driver failure does — one notice, one place
-                      // to read a failure in full.
-                      error={snapshot().error ?? refusal()}
-                      cwd={props.ws.dir}
-                      onPickModel={() => openOverlay("model")}
-                      onCommand={submit}
-                      tip={tip}
-                      ref={(box) => (scroll = box)}
-                    />
-                  }
-                >
-                  <Match when={overlay.kind() === "sessions"}>
-                    <SessionsView
-                      ws={props.ws}
-                      currentId={live()?.id ?? ""}
-                      onOpen={openSession}
-                      onNew={() => startDraft()}
-                      onClose={closeOverlay}
-                    />
-                  </Match>
-                  <Match when={overlay.kind() === "ext"}>
-                    <ExtView
-                      ws={props.ws}
-                      header={snapshot().header}
-                      // A draft has no session for the kernel to deposit a
-                      // capability note into — and no frozen tool face to warn
-                      // about either, which the null header already says.
-                      sessionFile={live() ? `${sessions_dir}/${live()!.id}.jsonl` : undefined}
-                      statePath={props.statePath}
-                      tick={planTick()}
-                      onMembershipChanged={() => {
-                        skills.invalidate()
-                        // Activating or deactivating a package can add or
-                        // remove a `/name` it declares just as easily as a
-                        // skill (tui-plugin D1/D8): same staleness, same fix.
-                        packageCmds.invalidate()
-                        // A package that was just activated may ship a front
-                        // end. The other direction is not symmetric and says
-                        // so in `host.ts`: a module that has run has run, so
-                        // deactivating takes effect at the next start.
-                        void loadPlugins()
-                      }}
-                      onClose={closeOverlay}
-                    />
-                  </Match>
-                  <Match when={overlay.kind() === "tasks"}>
-                    <TasksView
-                      ws={props.ws}
-                      sessionId={live()?.id ?? ""}
-                      tasks={tasks()}
-                      onRefresh={() => void live()?.tasks.refresh()}
-                      onClose={closeOverlay}
-                    />
-                  </Match>
-                  <Match when={overlay.kind() === "help"}>
-                    <HelpView keys={keys} onClose={closeOverlay} />
-                  </Match>
-                  <Match when={overlay.kind() === "settings"}>
-                    <SettingsView ws={props.ws} onClose={closeOverlay} />
-                  </Match>
-                  <Match when={overlay.kind() === "usage"}>
-                    <UsageView ws={props.ws} snapshot={snapshot()} onClose={closeOverlay} />
-                  </Match>
-                  <Match when={overlay.kind() === "model"}>
-                    <ModelView
-                      ws={props.ws}
-                      current={currentPick()}
-                      notice={guide() ?? undefined}
-                      focusProfile={focusProfile()}
-                      onPick={(pick) => startDraft(pick)}
-                      onNotice={setNotice}
-                      onOpenProviders={() => openOverlay("provider")}
-                      onClose={closeOverlay}
-                    />
-                  </Match>
-                  <Match when={overlay.kind() === "provider"}>
-                    <ProviderView
-                      ws={props.ws}
-                      current={currentPick()}
-                      notice={guide() ?? undefined}
-                      onShowModels={showModelsOf}
-                      onNotice={setNotice}
-                      onClose={closeOverlay}
-                    />
-                  </Match>
-                </Switch>
+                {/* The content area, mounted through the surface registry
+                    rather than a switch over overlay names (goals/tui-shell.md
+                    §5.1, T68). One pane today, so what this draws is what the
+                    `<Switch>` before it drew, node for node. */}
+                <PaneHost tree={panes.tree()} registry={surfaces} onFocusPane={panes.focusOn} />
 
                 {/* A deliberate seam between the record and the controls: the
                     transcript/overlay scrolls above, while everything below is
