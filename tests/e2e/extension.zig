@@ -2350,7 +2350,11 @@ test "cli ext seed: the binary's own drafts land in a store root, move forward w
         defer alloc.free(dry.stdout);
         try std.testing.expectEqual(@as(u8, 0), dry.code);
         try std.testing.expect(std.mem.indexOf(u8, dry.stdout, "std: would seed") != null);
-        try std.testing.expect(std.mem.indexOf(u8, dry.stdout, "8 seeded, 0 updated, 0 up to date, 0 left alone") != null);
+        // Deliberately not the count: how many drafts this binary ships is not
+        // what a plan is about, and pinning it here taxes every package the repo
+        // adds. What the summary has to say is that an empty root means every id
+        // is NEW — nothing updated, nothing already there, nothing left alone.
+        try std.testing.expect(std.mem.indexOf(u8, dry.stdout, " seeded, 0 updated, 0 up to date, 0 left alone") != null);
         try std.testing.expectError(error.FileNotFound, ws.access(io, ws_store, .{}));
     }
 
@@ -2392,7 +2396,8 @@ test "cli ext seed: the binary's own drafts land in a store root, move forward w
         try std.testing.expectEqual(@as(u8, 0), seeded.code);
         try std.testing.expect(std.mem.indexOf(u8, seeded.stdout, "guide: differs from this build, left alone") != null);
         try std.testing.expect(std.mem.indexOf(u8, seeded.stdout, "--force guide") != null);
-        try std.testing.expect(std.mem.indexOf(u8, seeded.stdout, "7 seeded, 0 updated, 0 up to date, 1 left alone") != null);
+        // `1 left alone` is the claim; the seeded count beside it is incidental.
+        try std.testing.expect(std.mem.indexOf(u8, seeded.stdout, " seeded, 0 updated, 0 up to date, 1 left alone") != null);
 
         const kept = try ws.readFileAlloc(io, guide_manifest, alloc, .limited(1 << 16));
         defer alloc.free(kept);

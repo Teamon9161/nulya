@@ -199,7 +199,7 @@ Store and scope:
   what it just built (and at ids that have none) — it never moves a `current`
   that names something else, so going back to an older version survives. `--dry-run` says what it
   would do and writes nothing. Add `--seed` to bring in this binary's own
-  bundled drafts (`extensions/{agent,ask,compact,evolution,guide,handoff,plan,std}`
+  bundled drafts (`extensions/{agent,ask,coding,compact,evolution,guide,handoff,plan,std}`
   and any later ones) first — `nulya ext sync --seed --user` on a machine that
   has never seen this checkout writes and builds all of them in one call.
 - A build takes a copy instead of compiling when another root already holds that

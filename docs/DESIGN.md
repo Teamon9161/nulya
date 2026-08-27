@@ -221,7 +221,7 @@ session 开始时一次选定，整场冻结（`composition.zig` `SessionComposi
 | `manual` | 否 | **是**（唯一可 pin 的） | 模型（被 pin 之后） |
 | `internal` | 否 | 否 | 外部代码 `nulya ext run` |
 
-**这个词是逐 tool 的，所以一个包里三种可以同时出现**——而那正是"默认给几个、其余等人来开"的写法：这个包**为之存在**的那些写 `auto`（成员即上、没有单独的开关，因为包就是这个能力），只有部分 session 想要的额外能力写 `manual`（一条 pin 开一个），它自己的管道写 `internal`。八个自带包碰巧各自只用一个词（`std` 全 `manual`、`handoff` 全 `auto`、`compact` 全 `internal`），那是它们各自的形状，不是规则。
+**这个词是逐 tool 的，所以一个包里三种可以同时出现**——而那正是"默认给几个、其余等人来开"的写法：这个包**为之存在**的那些写 `auto`（成员即上、没有单独的开关，因为包就是这个能力），只有部分 session 想要的额外能力写 `manual`（一条 pin 开一个），它自己的管道写 `internal`。自带包碰巧各自只用一个词（`std` 全 `manual`、`handoff` 全 `auto`、`compact` 全 `internal`），那是它们各自的形状，不是规则。
 
 **`manual` 的含义是"装上就开、但你可以关"**，`auto` 是"因为包在所以在"——两者的差别只在那个开关，不在默认。所以 `manual` 的 tool 多一个**给安装者的声明** `recommended`（`manifest.ToolSpec`，**缺省 `true`**）：**内核的工具面一个字都不受它影响**（`manual` 仍然是"有 pin 才上"），读它的是**决定要写哪些 pin 的那一方**——`/ext` 的 Enter，以及任何别的把推荐集合物化出来的代码。它存在只为让一个包说出一件事：`recommended: false` = 这是个**额外**能力，装上之后仍然关着，等人来开。写在非 `manual` 的 tool 上是 `InvalidRecommended`（`auto` 的本来就开着、`internal` 的永远上不了面，这个键在那儿只会骗人）。
 
@@ -321,7 +321,7 @@ version-aware evidence / lineage / verify 见 PLAN §3.5。
 
 **尺子：这段文本有没有独立于某一场 session 的生命周期。** 有（装得上、activate 得了、回滚有意义——`evolution` / `plan` / `handoff`）→ 它是个 extension；没有（一个 sub-agent 的 persona 正文、一份只发给这一场的 brief）→ 它是 `--prompt`。把后者做成 extension 的代价实测过：per-session 文本变成安装物，出现在 `ext list` 里，而 `ext prune` 能把某一场赖以 resume 的身份文本删掉。
 
-**extension 带内部再按 `position` 分三段。** `contributes.system_prompts` 的每个条目可以写成裸路径，也可以写成 `{"path": "...", "position": "early"|"normal"|"late"}`（缺省 `normal`，闭合词表，别的词是 `InvalidPromptPosition`——`surface` / `apply` 的同一条纪律；裸字符串永远合法，八个自带包一个字都不用改）。它的**作用域只有一个**：extension 那一带内部的先后。kernel 块仍最前、inline `--prompt` 仍在全部 extension 之后、`skills:catalog` 仍最后——`position` 不是一把能越过 kernel 的排序键，是这一带的**划分**。同一段内部保持既有的成员顺序（按 id 排序、同包按 manifest 数组顺序），实现是三趟遍历而不是一次排序：稳定性由构造保证，不靠比较函数的性质。第一个真实需求是两个 mode 包同场、其中一个要收尾（kong / dogfood）。
+**extension 带内部再按 `position` 分三段。** `contributes.system_prompts` 的每个条目可以写成裸路径，也可以写成 `{"path": "...", "position": "early"|"normal"|"late"}`（缺省 `normal`，闭合词表，别的词是 `InvalidPromptPosition`——`surface` / `apply` 的同一条纪律；裸字符串永远合法，既有的自带包一个字都不用改）。它的**作用域只有一个**：extension 那一带内部的先后。kernel 块仍最前、inline `--prompt` 仍在全部 extension 之后、`skills:catalog` 仍最后——`position` 不是一把能越过 kernel 的排序键，是这一带的**划分**。同一段内部保持既有的成员顺序（按 id 排序、同包按 manifest 数组顺序），实现是三趟遍历而不是一次排序：稳定性由构造保证，不靠比较函数的性质。第一个真实需求是两个 mode 包同场、其中一个要收尾（kong / dogfood）。
 
 `position` 随 manifest 一起冻结，所以 **fresh 与 frozen 两条路跑的是同一段代码、读的是同一批冻结 manifest**（`composition.buildSystemPrompts`），resume 重建出的 blocks 与开场时逐字节相同；**freeze schema 一个字节没变**（header 记的是成员，不是块顺序），membership 也不受影响。
 
@@ -412,7 +412,7 @@ extension 装在**多个 store root** 里，按固定顺序搜索（`extension/r
 - 不存在的 root 是**缺席**不是错误（多数机器没有 user store）；写端（`ext init --user` / `ext build --user`）需要时才创建。
 - **为什么 project 层不能加 root**：一个 root 决定"这台机器上哪些目录可以供出 `current`"，即哪些代码可以被跑起来——checkout 能加就是拓宽权限，正是 §9.5 "只能收窄"禁止的事。同一条理由的另一面是 **workspace root 自己就在 checkout 里**，所以它有一道一次性的 trust gate（§9）：随 clone 到达的 store 要被人信任一次（`nulya ext trust`）才进 composition，本机 `ext build` 建出来的则自动可信。只读投影不过门。
 - **三个作用于整个 root 的壳层动词**（`cli/ext.zig` 与 `cli/ext_seed.zig`，都不改任何语义）：`sync` / `prune` 逐个 `<id>/` 做同一件事，`seed` 把二进制自带的 draft 落进来（并在后来的二进制里把它们带上来）：
-  - **`nulya ext seed [--user] [<id>…] [--force] [--dry-run]`**（`cli/ext_seed.zig`）= 把**这个二进制内嵌的自带 draft**（build.zig 把仓库自己的 `extensions/**` 按 `src_embed` 同一先例 `@embedFile` 进来，`src/bundled.zig` 投影；§7.8 的八个）写进该 root——**分发就是二进制本身**，一台从没见过这个 checkout 的机器也拿得到。只写**源码**：build 归 `ext sync`，trust / activate / pin 的每道门原样不动；版本目录不碰（physics #5）。
+  - **`nulya ext seed [--user] [<id>…] [--force] [--dry-run]`**（`cli/ext_seed.zig`）= 把**这个二进制内嵌的自带 draft**（build.zig 把仓库自己的 `extensions/**` 按 `src_embed` 同一先例 `@embedFile` 进来，`src/bundled.zig` 投影；§7.8 那一批）写进该 root——**分发就是二进制本身**，一台从没见过这个 checkout 的机器也拿得到。只写**源码**：build 归 `ext sync`，trust / activate / pin 的每道门原样不动；版本目录不碰（physics #5）。
     - **它也是自带扩展的更新通道**，判据是一条记录而不是猜：seed 每写一个 draft 就在 `<root>/<id>/.seed` 记下自己写的那棵树的 digest（`{v,digest,nulya,at}`，一个目录自己的事实，不是第四条 journal；**不进 package snapshot**——snapshot 由 manifest 决定，所以 version id 不受影响）。于是四种答案：**没有** → seed；**与本二进制逐字节相同** → up to date（顺手补记录，好让下一个二进制能自动接手）；**记录仍描述盘上这棵树** = 这是本 harness 自己写的、没人动过的副本 → **自动刷新成新源码**（`updated`）；**记录对不上或根本没有记录** = 有人编辑过、或是记录出现之前的老 seed → **原样留着并点名**，`--force` 是唯一的覆盖入口。刷新会连该 draft 下 seed 不再提供的文件一起清掉（`versions/` / `current` / `.lock` / `.seed` 除外），所以刷新后的 draft 就是这个二进制的那一棵树。
     - 为什么需要记录：升级二进制不该悄悄让一台机器停在第一次 seed 时的源码上（`agent` 的 `audience`、`evolution` 那时还写着的 `activation: on_request`、以及 2026-08 那批 `surface: "with"` / `"driver"` 的旧词——三样都已删，§7.2.1——都是这样失效的），而"编辑过没有"没有第二种判法——内容 hash 不行（自演化每轮都改），询问也不行（这一步跑在开屏之前的后台）。**记录只授予覆盖权**：读不出、版本不认、不存在，一律落回"别动它"。
     - 点名不存在的 id → 报错并列出内嵌清单，exit 1。`--dry-run` 不写盘，连 root 目录都不建。
@@ -622,9 +622,9 @@ Tool 是"能执行的能力"，Skill 是"要遵循的方法 / 知识"；不同 r
 
 ### 7.8 随仓库带的 extension（顶层 `extensions/`）
 
-都是普通 extension，走 §7.4 同一条 build → activate 路，**没有一个是内核层**；六个有 runtime 的都按 §7.3 那一种 wire 被调用（manifest 里没有一个字提它）：**八个里只有 `guide` 写 `apply: "auto"`**（一个 skill 目录条目，常驻才有意义；装上它的那一下——`ext activate` 或 `ext sync --activate`——都会在 stderr 说一句后果并指出 `ext deactivate`），其余七个不写（= `manual`）、默认不在任何 composition 里（成员是 config `[extensions] with` 或 `session new --with`、工具面是 pin，§5.1 那张表，全是用户或 driver 的决定；`activate` 只说 `<id>` 指哪个版本），随 checkout 到达的 store 照过 §9 的 trust gate。
+都是普通 extension，走 §7.4 同一条 build → activate 路，**没有一个是内核层**；六个有 runtime 的都按 §7.3 那一种 wire 被调用（manifest 里没有一个字提它）：**只有 `guide` 与 `coding` 写 `apply: "auto"`**（前者是一个 skill 目录条目、后者是一段工作纪律，两个都是常驻才有意义的东西；装上它们的那一下——`ext activate` 或 `ext sync --activate`——都会在 stderr 说一句后果并指出 `ext deactivate`），其余不写（= `manual`）、默认不在任何 composition 里（成员是 config `[extensions] with` 或 `session new --with`、工具面是 pin，§5.1 那张表，全是用户或 driver 的决定；`activate` 只说 `<id>` 指哪个版本），随 checkout 到达的 store 照过 §9 的 trust gate。
 
-**分发**：这八个 draft 的源码被 build.zig `@embedFile` 进二进制（`src_embed` 的同一先例，`src/bundled.zig` 投影），`nulya ext seed` 把它们写进任一 store root（§7.2）——所以拿到二进制就拿到了它们，不需要这个 checkout 在场；seed 之后走的路与手放源码毫无区别。**升级也走同一个动词**：seed 留下的 `.seed` 记录让它认得出"这份 draft 是我写的、之后没人动过"，那种就直接刷新成新二进制的源码，动过的则原样留着并点名（§7.2）——否则一台机器会永远停在第一次 seed 时的那版自带扩展。
+**分发**：这些 draft 的源码被 build.zig `@embedFile` 进二进制（`src_embed` 的同一先例，`src/bundled.zig` 投影），`nulya ext seed` 把它们写进任一 store root（§7.2）——所以拿到二进制就拿到了它们，不需要这个 checkout 在场；seed 之后走的路与手放源码毫无区别。**升级也走同一个动词**：seed 留下的 `.seed` 记录让它认得出"这份 draft 是我写的、之后没人动过"，那种就直接刷新成新二进制的源码，动过的则原样留着并点名（§7.2）——否则一台机器会永远停在第一次 seed 时的那版自带扩展。
 
 | id | kind | contribute | 谁消费 / 怎么进 session |
 |---|---|---|---|
@@ -633,6 +633,7 @@ Tool 是"能执行的能力"，Skill 是"要遵循的方法 / 知识"；不同 r
 | `handoff` | compiled | `handoff` tool（§11，声明 `surface: auto`） | `drivers/goal.*` 的 `session new --with handoff@<v>`——它只有这一个 tool 而戴上它就是为了用它，所以成员即上台，不需要第二个 flag |
 | `evolution` | data | system prompt + skill + 一条 `commands` 声明（`evolve` → `{with: true}`，§7.2.1 的前端声明层） | mode：`activate` 只说它指哪个版本；`session new --with evolution` 才戴上，或写进 config `[extensions] with` 让它常驻。那条命令是同一件事的驱动者形式——TUI 的 `/evolve` 从此是这个包自己声明的一行，而不是前端硬编码的一个包名（tui.md T53） |
 | `guide` | data | skill | 用户 `--user` 装一次，每场 `<available_skills>` 多一行（`apply` 的第一个真实 consumer：写着 `"apply": "auto"`，activate 之后不用再往 config 里加一行；无论经 `ext activate` 还是 `ext sync --activate`，那一下都会在 stderr 说出后果） |
+| `coding` | data | system prompt（`position: normal`） | 用户 `--user` 装一次，之后每场 session 都带着它（`"apply": "auto"`）。kernel prompt 只说 harness 的事实，这个包说**怎么工作**：信任与授权、探索纪律、批量、输出量、沟通、代码质量、验证、git。它**不点名任何别的包的 tool**——一个独立的包不知道这一场有没有 `std`、有没有 `agent`，所以它只写跨工具的纪律，点名的只有 `shell`（内核保证它在）；委派的建议属于 `agent` 自己 |
 | `std` | compiled | `read` / `write` / `append` / `edit` / `grep` / `glob` 六个 tool（`read` / `grep` / `glob` 声明 `readonly`，§7.2.1；六个都**显式**写 `surface: manual`——这是一张由人拼出来的工具面，缺省的 `auto` 会让"戴上 std"变成一次性把六个槽全占了） | 用户 `ext build extensions/std --user` → `activate --user` → user config `[registry] pinned_native_tools`（builtin 1 + 6 = 7 ≤ `max_tools` 20） |
 | `plan` | compiled | system prompt + `policy{readonly}` + `propose` / `todo`（都声明 `readonly` 与 `surface: auto`，`todo` 另带 `ui: {render: checklist, panel: true}`）/ `approve`（`surface: internal`）+ `contributes.ui.tui` | mode：`/plan`（manifest `commands` 声明的 `{with: true}` 命令——命令只因声明而存在，tui.md T54）或 `session new --with plan` 戴一场；`propose` / `todo` 随成员进 native 面 |
 | `ask` | compiled | `ask` tool（声明 `readonly` 与 `surface: auto`）+ `commands[/ask]`（它不贡献 prompt，所以这条命令是它自己的主张）+ `contributes.ui.tui` | 能力不是模式，所以它想常驻：user config `[extensions] with = ["ask"]`；只给一场用是 `session new --with ask`。`ask` tool 随成员进 native 面，不写 pin |

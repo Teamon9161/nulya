@@ -1,0 +1,13 @@
+{
+  "schema": "nulya.extension/v2",
+  "id": "coding",
+  "apply": "auto",
+  "contributes": {
+    "system_prompts": [
+      {
+        "path": "prompts/coding.md",
+        "position": "normal"
+      }
+    ]
+  }
+}
