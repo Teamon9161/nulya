@@ -153,6 +153,30 @@ TUI 侧 `Workspace` 已经是每个 CLI 调用的显式参数（`nulya/cli.ts`�
    改为发生在"第一个进入该 workspace 的 tab"上，拒绝显示在那个 tab 里。
 6. 观察者 / `<id>.lock` / SessionBusy 语义不变（全是 per-session 文件的事实）。
 
+### 5.3c sub-agent 视图从属于父 tab（S1d）
+
+需求（2026-08-27，用户）：从委派卡 `↗ open <id> in a tab` 开出来的 sub-agent 观察 tab 不该是 tab 条上的
+平级兄弟——它从属于发起委派的那场对话。
+
+**答案不是嵌套 tab，是 pane**：tab 条是水平的，画不好层级（缩进在横条上没有形状）；而 pane 骨架（S1a）
+正好给了从属关系一个自然的家——**sub-agent 的观察 surface 以 split pane 打开在父 tab 内部**
+（宽屏 row split、窄屏 column split），关闭 = 关 pane，关父 tab = 子 pane 一起走，tab 条上只剩顶层对话。
+它过得了 §5.1b 的 litmus test（观察的是本对话委派出去的子场，离开 nulya 毫无意义）。
+与 T70 的列表过滤正好互补：sub-agent 会话不进 sessions 列表，它唯一的呈现处就是父 tab 内的 pane。
+
+实现要点：
+
+1. **pane 树分两层**：app 层一棵（sidebar | tab 内容区），tab 内容区挂**当前 tab 自己的**一棵
+   （每个 tab 记住自己的布局，切 tab 换树）——sidebar 是跨 tab 的、sub-agent pane 是 tab 的，
+   两层各自都小，不做一棵大树里"哪些叶子跟着 tab 走"的标记。
+2. 委派卡的 `↗` 默认开 pane；保留一个显式"开成 tab"的出路（全屏细看时用），或后续做 pane→tab 提升手势。
+3. sub-agent surface = 现有 observer 模式的 transcript（只读跟随、`claimsKeyboard: true` 聚焦时可滚动），
+   语义一概不变。
+4. **UI 细节到实现时专门过一遍**（用户点名）：子 pane 要一眼读出"我从属于谁、我是只读的"——
+   头一行归属（`⤷ <agent> · <d-id> · observing`，§6.3 的 `⤷` 正是 sub-session 的记号）、
+   与父 transcript 的密度一致、分界线走 `hairline` 不画重框；快照进报告后再定稿。
+5. 排在 S1c 之后（同一批文件）。
+
 ### 5.4 里程碑草案（未排期）
 
 - **S1**：宪章落进 tui.md（§1–§4 定稿）；pane 树 + 焦点 + 鼠标路由进宿主，现有屏幕
