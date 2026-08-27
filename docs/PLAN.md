@@ -339,6 +339,21 @@ base-tools.md §4 当年留下的 "later hardening：`run_in_background`"。执�
 - **注入只加卫生不加边界**：kernel prompt 一句关于 ledger 角色的事实（内核自己把机器事件投成 user role，它得说清）+ `task_finished` 模板自带分隔框 + `tool_results` 不包装；边界仍是 §3.8.1 的 gate 与 §3.8 的 sandbox。
 - **分界一句话**：core 只动 `ledger` / `prompt` / 三 provider / `tools/shell` / `environment` / kernel prompt 那一句；supervisor 与 `nulya task list|status|wait|kill|run|retarget` 在 `cli/task.zig`；retarget 的调用者是 `extensions/compact`；唤醒、显示、kill UI、退出提示全在 TUI（tui.md T29）。
 
+### 3.14 反应式扩展行为：watcher 协议 `[占位 · 等真实失效证据]`
+
+今天的 extension 只能表达两类东西：**被动贡献**（冻结的 prompt / skill 字节）与**被调用的能力**（tool）。表达不了第三类——**未经请求、对对话主动开口的反应式行为**（"看见 X 发生就说 Y"）：auto-context 注入（进新目录 → 提示读 `AGENTS.md`）、memory 召回、预算警告、自动触发 compact，全是这个形状。tcode 把这类行为写死在自己的 loop 里（`grounding.rs` / `memory.rs`），它的第三方同样 hook 不了；nulya 今天的答案是 prompt 纪律（baseline，处处成立）+ per-host 的 TUI plugin（`observe.onEvent` + `actions.appendNote`，只在 TUI 存在）。
+
+**内核批次钩子（manifest 声明"每步之后运行我"、kernel 调用）已明确拒绝**，理由四条，都记录在案（[goals/ground.md](goals/ground.md) §4 与 CLAUDE.md 2026-08-27 的讨论）：① 创造第五种写者——没人请求、每步执行、有 append 权的代码，正是 ext-syntax 那轮从包作者手里收回 reach 的反面（physics #6）；② substrate 是 oneshot 进程，每步钩子 = 热路径上 N 次 spawn；③ 内核要替它回答 block / 超时 / env / 顺序 / 预算一堆 policy 问题，已知 consumer 是一个；④ 不必要——driver 拿着 observer + append 今天就能组合出同样的行为。**证据到来时也不要重新想它。**
+
+**该做的形状是 driver 中立的 watcher 协议**（不违反任何一条 physics，内核核心零改动）：
+
+- manifest 声明 `contributes.watcher{entry}`——一个进程，说行协议：stdin 喂 `--stream` 那套**已经存在**的行，stdout 吐 append 提案。
+- driver 只对**戴着的包**（成员）的 watcher 喂流；提案经普通 `session append` 落成带 `<ext-note pkg="…">` 出处的 user turn。跑不跑是两次人的同意（activate / `--with` + driver 决定喂它），与 gate 的"该不该问是 driver 的 policy"同构。
+- 写者仍可枚举、每句话进 ledger 可回放；成本只在 opt-in 时发生（每步 spawn 一次、活过整步被流式喂，不是每 call 冷启动）。
+- 落点是 driver 之间的**约定**（像 `--stream` 行协议本身），最多在 `cli/` 壳层长一个便利；`composition` / `loop` 不知道它存在——trust gate 的同一层级。比 TUI plugin 好在一份协议对所有 driver（`goal.*` 原则上也接得上），比内核钩子好在权力故事完整。
+
+**触发条件**：转录里出现真实失效——模型在 prompt 纪律下确实漏掉了这类反应（如漏读深层 `AGENTS.md` 造成实际错误）。在那之前不做：nulya 在这里与 tcode 压的是相反的注——模型本身就是反应层，纪律进 prompt、事实留盘上，这个赌注随模型变强升值、机械层贬值。另外两条已否决的落点也别再走：把发现塞进 `std` 的 tool（goals/ground.md §4 撤过一版：策略抄两份、分界无执行者、拓宽 read 契约）；中性 territory 信号（"首触新目录"每个目录都响，噪音与探索量成正比、收益与约定文件在场成正比，两者不相关）。
+
 ---
 
 ## 4. 开放问题

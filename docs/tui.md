@@ -478,6 +478,10 @@ cancel = "escape"
 8. ~~**header 的 `created` 现在是空串**~~ **已落地（M5f）**：`session new` 写 RFC3339 UTC，`session list --json` 按它倒序；CompositionCard 可以显示时间了（老 session 仍是空串，退回按 id 排）。
 9. ~~**"这个 tool 是给 driver 的"今天是前端的一张硬编码名单**（`bundled_driver_only` → `pinsOnActivate`，T24/T33）。~~ **已落地（T34）**：manifest per-tool 的 `audience`（`"model" | "driver"`，DESIGN §7.2.1，与 `readonly?` 同级：解析、冻结、不强制），前端四张名单（`bundled_driver_only` / `pinsOnActivate` / `bundled_active` / 字面量 `std_pins`）随之消失，第三方的 driver 型 extension 现在说得出这件事。
 
+10. **宿主宪章 + 扩展 UI 自由度模型 + app 化（鼠标优先 / pane 平铺）**：整份设计讨论记录在
+   [goals/tui-shell.md](goals/tui-shell.md)（宪章四类、三层自由度、五条不打架规则、chip 模型、
+   核心 vs 扩展切法、里程碑草案 S1–S3）。**未排期**；动宿主骨架或 plugin API 前先读它。
+
 ## 11. 实施日志
 
 > 每个里程碑追加一小节，只追加不改写。格式：状态 / 关键决定与理由 / 偏离设计之处 / 怎么运行与测试 / 已知问题 / 给下一里程碑的提醒。
