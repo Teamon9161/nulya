@@ -181,7 +181,13 @@ test("a full-screen view opens in the main pane even when the keyboard is in the
   define(sidebar_surface, true)
   define("host:ext", true)
   const panes = createPaneStore(main_surface, "main")
-  const overlay = overlayAdapter(panes, (surface) => claimsKeyboard(surfaces, surface))
+  // One tree here, standing in for both layers: the adapter reads whichever
+  // store it is handed, and composing the two is T72's own test.
+  const overlay = overlayAdapter(
+    () => panes,
+    () => ({ pane: panes.focus(), surface: panes.surface() }),
+    (surface) => claimsKeyboard(surfaces, surface),
+  )
 
   panes.apply((tree) => openSidebar(tree, panes.main()))
   // Merely open: the composer still has the keyboard.

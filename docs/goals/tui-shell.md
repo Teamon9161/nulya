@@ -1,6 +1,6 @@
 # TUI shell — 宿主宪章、扩展 UI 的自由度模型、app 化方向
 
-状态：**§1–§4 定稿，§5.4 的 S1 与 §5.3b 的 S1c 已落地**（pane 骨架 = tui.md T68，sessions 侧边栏 = T69，每 tab 一个 workspace = T71）；**S1d / S2 / S3 待议**。
+状态：**§1–§4 定稿，§5.4 的 S1、§5.3b 的 S1c 与 §5.3c 的 S1d 已落地**（pane 骨架 = tui.md T68，sessions 侧边栏 = T69，每 tab 一个 workspace = T71，sub-agent pane = T72）；**S2 / S3 待议**。
 （2026-08-27 与 Fable 的设计讨论记录；实施日志在 tui.md §11，本文只写宪章与方向。）
 这份文档回答三个问题：宿主该拥有什么（§1 宪章）、扩展前端的自由度怎么给才不打架（§2–§4）、
 以及"把鼠标优先的 app 模式带进终端"这个大方向怎么切核心与扩展（§5）。
@@ -161,7 +161,7 @@ TUI 侧 `Workspace` 已经是每个 CLI 调用的显式参数（`nulya/cli.ts`�
    改为发生在"第一个进入该 workspace 的 tab"上，拒绝显示在那个 tab 里。
 7. 观察者 / `<id>.lock` / SessionBusy 语义不变（全是 per-session 文件的事实）。
 
-### 5.3c sub-agent 视图从属于父 tab（S1d）
+### 5.3c sub-agent 视图从属于父 tab（S1d）`[已落地 · tui.md T72]`
 
 需求（2026-08-27，用户）：从委派卡 `↗ open <id> in a tab` 开出来的 sub-agent 观察 tab 不该是 tab 条上的
 平级兄弟——它从属于发起委派的那场对话。
@@ -185,6 +185,13 @@ TUI 侧 `Workspace` 已经是每个 CLI 调用的显式参数（`nulya/cli.ts`�
    与父 transcript 的密度一致、分界线走 `hairline` 不画重框；快照进报告后再定稿。
 5. 排在 S1c 之后（同一批文件）。
 
+**落地记录（T72）**：两棵树一个 portal（app 树的一个叶 `host:tab` 用同一个 `PaneHost` 画出前台 tab 自己的树），
+焦点只多一跳（`state/panes.ts` 的 `focusThrough` 是唯一知道它们嵌套的函数），方向移动由内往外。
+点 2 的「显式开成 tab」落地成 **browse 的 `t`** 而不是卡上第二行（理由与取舍见 tui.md T72 的偏离那节）；
+点 4 的 `observing` 是常量（它说的是这块 pane 只读，不是那一刻的租约角色）。
+子 pane **不落盘**：观察面是临时的，恢复它等于替人做一个他没做过的决定。
+pane→tab 提升手势仍未做——等第一个真实需求。
+
 ### 5.4 里程碑草案（未排期）
 
 - **S1**：宪章落进 tui.md（§1–§4 定稿）；pane 树 + 焦点 + 鼠标路由进宿主，现有屏幕
@@ -193,6 +200,7 @@ TUI 侧 `Workspace` 已经是每个 CLI 调用的显式参数（`nulya/cli.ts`�
   第一批 consumer = 把 agent 委派卡与 plan 评审面板迁进各自的包（验收："两个包各有 T2 面、
   互不知情、不打架"）。
 - **S1c** `[已落地 · T71]`：每 tab 一个 workspace（§5.3b）——排在 T70 反馈修整落地之后（同一批文件）。
+- **S1d** `[已落地 · T72]`：sub-agent 视图从属于父 tab（§5.3c）——两层 pane 树、委派卡的 `↗` 默认开 pane。
 - **S3**：utility pane：图片预览（带降级）。内嵌终端不做（§5.1b）。
 - 每步的尺子：加进宿主的每样东西对着 §1 四类过一遍；API 增补要有现成 consumer。
 

@@ -95,7 +95,24 @@ export function SubSessionCard(props: { item: ToolItem; presentation: ToolPresen
     // No session, no link: until it is known there is nothing to open, and a
     // link to nowhere is worse than no link.
     if (!target) return null
-    return { text: `open ${target} in a tab`, onPress: () => navigate.openSession(target) }
+    /**
+     * FOUR, SINCE T72 IT OPENS BESIDE THIS CONVERSATION, NOT INSTEAD OF IT.
+     * A delegation is subordinate to the turn that made it, and a tab of its
+     * own said the opposite — a peer on the strip, with nothing on screen
+     * relating the two. So the one row this card offers is the one gesture
+     * people make ("let me watch that"), and it splits the tab.
+     *
+     * The tab is still reachable and is deliberately NOT a second row here:
+     * a card would then carry two links of near-identical text for one
+     * destination, on every delegation in the transcript. It is `t` in browse
+     * mode instead — the same word `/sessions` already uses for "and give it
+     * a tab" (T70), so the vocabulary is one and the rare gesture costs no
+     * pixels.
+     */
+    return {
+      text: `watch ${delegation() ?? target} here`,
+      onPress: () => navigate.watchSession(target, delegation() ?? undefined),
+    }
   })
 
   return (

@@ -659,11 +659,17 @@ test("a delegation says how its background task is going, and offers the session
   expect(without).toContain("⤷ agent · explore → d-0123456789ab")
   expect(without).not.toContain("open s-")
 
+  let watched = null as string | null
   let opened = null as string | null
   const setup = await testRender(
     () => (
       <NavigateContext.Provider
-        value={{ openSession: (id) => (opened = id), delegationRecord: async () => null, openTasks: () => {} }}
+        value={{
+          watchSession: (id) => (watched = id),
+          openSession: (id) => (opened = id),
+          delegationRecord: async () => null,
+          openTasks: () => {},
+        }}
       >
         <Harness items={[delegated]} tasks={[runningTask("s-1/t1", 42)]} />
       </NavigateContext.Provider>
@@ -674,12 +680,16 @@ test("a delegation says how its background task is going, and offers the session
     const frame = await settle(setup)
     // The live projection, in the same words a background shell call uses.
     expect(frame).toContain("s-1/t1 · running 42s")
-    expect(frame).toContain("↗ open s-1786815442964-8462dd in a tab")
+    // The one row the card offers goes to a PANE of this tab, not to a tab of
+    // its own (T72), and it names the delegation because that is the name on
+    // the head line right above it.
+    expect(frame).toContain("↗ watch d-0123456789ab here")
     // …and the row is the affordance, not decoration: clicking it navigates.
     const rows = frame.split("\n")
-    const at = rows.findIndex((row) => row.includes("↗ open"))
+    const at = rows.findIndex((row) => row.includes("↗ watch"))
     await setup.mockMouse.click(6, at)
-    expect(opened).toBe("s-1786815442964-8462dd")
+    expect(watched).toBe("s-1786815442964-8462dd")
+    expect(opened).toBeNull()
   } finally {
     setup.renderer.destroy()
   }
@@ -701,12 +711,14 @@ test("a follow-up's receipt names no remote, so the card reads the delegation's 
     output: "sent to delegation d-0123456789ab ('explore'), running as background task s-1/t2.",
   })
 
+  let watched = null as string | null
   let opened = null as string | null
   let asked = null as string | null
   const setup = await testRender(
     () => (
       <NavigateContext.Provider
         value={{
+          watchSession: (id) => (watched = id),
           openSession: (id) => (opened = id),
           delegationRecord: async (id) => {
             asked = id
@@ -721,13 +733,16 @@ test("a follow-up's receipt names no remote, so the card reads the delegation's 
     { width: 76, height: 12 },
   )
   try {
-    await until(async () => (await settle(setup)).includes("↗ open s-1786815442964-8462dd in a tab"))
+    await until(async () => (await settle(setup)).includes("↗ watch d-0123456789ab here"))
     expect(asked).toBe("d-0123456789ab")
     const frame = await settle(setup)
     const rows = frame.split("\n")
-    const at = rows.findIndex((row) => row.includes("↗ open"))
+    const at = rows.findIndex((row) => row.includes("↗ watch"))
     await setup.mockMouse.click(6, at)
-    expect(opened).toBe("s-1786815442964-8462dd")
+    // The row NAMES the delegation and FOLLOWS the record's remote: one is
+    // what a person calls it, the other is the ledger there is to tail.
+    expect(watched).toBe("s-1786815442964-8462dd")
+    expect(opened).toBeNull()
   } finally {
     setup.renderer.destroy()
   }
@@ -752,6 +767,7 @@ test("a delegation record naming a foreign runner offers /tasks instead of a tab
     () => (
       <NavigateContext.Provider
         value={{
+          watchSession: () => {},
           openSession: () => {},
           delegationRecord: async () => ({ agent: "remote-explore", runner: "codex", remote: "thread_abc", readonly: false }),
           openTasks: () => (openedTasks = true),
@@ -766,7 +782,7 @@ test("a delegation record naming a foreign runner offers /tasks instead of a tab
     await until(async () => (await settle(setup)).includes("/tasks"))
     const frame = await settle(setup)
     expect(frame).toContain("runner: codex")
-    expect(frame).not.toContain("open thread_abc")
+    expect(frame).not.toContain("watch thread_abc")
     const rows = frame.split("\n")
     const at = rows.findIndex((row) => row.includes("/tasks"))
     await setup.mockMouse.click(6, at)

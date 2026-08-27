@@ -513,7 +513,7 @@ test("F3 opens the sessions view and Esc closes it", async () => {
   }
 }, 120_000)
 
-test("Enter on a sub-session card opens it as a second tab, attached as an observer", async () => {
+test("t on a sub-session card opens it as a second tab, attached as an observer", async () => {
   // A parent with no transcript of its own, so the only cards on screen are the
   // two injected below.
   const parent = await sessionNew(ws, { profile: "scripted" })
@@ -545,7 +545,10 @@ test("Enter on a sub-session card opens it as a second tab, attached as an obser
 
     setup.mockInput.pressEscape()
     await settle(setup, 3)
-    setup.mockInput.pressEnter()
+    // `t`, not `Enter`: since T72 the primary gesture on this card watches the
+    // session in a pane of THIS tab, and `t` is the one that gives it a tab —
+    // the same pair of words the sessions list uses (T70).
+    await setup.mockInput.typeText("t")
     const frame = await settle(setup, 6)
     // Two tabs, named by what they run on — the same model, so the `#n` that
     // tells them apart (tui.md §11, T22). Neither shows a session id, and the

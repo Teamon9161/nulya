@@ -17,6 +17,20 @@ import { createContext, useContext } from "solid-js"
 import type { DelegationRecord } from "../nulya/files.ts"
 
 export interface Navigate {
+  /**
+   * Follow this session in a pane of THIS tab (goals/tui-shell.md §5.3c, T72).
+   *
+   * The default of the two, because it is what the link is for: a delegation
+   * belongs to the conversation that made it, and watching it work is something
+   * you do beside that conversation rather than instead of it. The pane splits
+   * the tab's content area — sideways on a wide terminal, stacked on a narrow
+   * one — and closes with Esc, its own `✕`, or the tab.
+   *
+   * `label` is what the delegation calls itself (`d-…`) when the card knows it;
+   * the pane says that rather than the local session id, because the id a
+   * person was just reading is the one they should recognise.
+   */
+  watchSession(id: string, label?: string): void
   /** Open this session in a tab of its own, and put it in front. */
   openSession(id: string): void
   /**

@@ -1,0 +1,57 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`a wide terminal puts the delegation beside the conversation that made it 1`] = `
+"                                                                        │ ⤷ ###################### · observing         ✕
+▎ session · ---------------- · frozen composition                     ▸ │                                               
+▎ model    scripted/scripted-demo · tools 1+0                           │ ▎ session · ---------------- · frozen       ▸ 
+                                                                        │ ▎ model    scripted/scripted-demo · tools 1+0 
+● spawning a sub-session                                                │                                               
+                                                                        │ ▎ what did the delegate find                  
+  ⤷ sub-session · ###################### ▸                              │                                               
+    ↗ watch ###################### here                                 │ ● Let me probe the environment.               
+                                                                        │                                               
+                                                                        │   $ echo hello-from-nulya  (2 lines) ▸        
+                                                                        │                                               
+                                                                        │ ● done                                        
+                                                                        │                                               
+                                                                        │                                               
+                                                                        │                                               
+                                                                        │                                               
+                                                                        │                                               
+                                                                        │                                               
+                                                                        │                                               
+                                                                                                                        
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ › still typing here                                                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ watching ###################### · Ctrl+arrow to go there · Esc there closes it                                         
+"
+`;
+
+exports[`a narrow terminal stacks them instead, and the rule turns with the split 1`] = `
+"                                                                                
+▎ session · ---------------- · frozen composition                             ▸ 
+▎ model    scripted/scripted-demo · tools 1+0                                   
+                                                                                
+● spawning a sub-session                                                        
+                                                                                
+  ⤷ sub-session · ###################### ▸                                      
+    ↗ watch ###################### here                                         
+                                                                                
+                                                                                
+                                                                                
+────────────────────────────────────────────────────────────────────────────────
+⤷ ###################### · observing                                           ✕
+                                                                                
+● Let me probe the environment.                                                 
+                                                                                
+  $ echo hello-from-nulya  (2 lines) ▸                                          
+                                                                                
+● done                                                                         █
+                                                                                
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ › message nulya  ·  / for commands  ·  @ for files                           │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ watching ###################### · Ctrl+arrow to go there · Esc there closes it 
+"
+`;

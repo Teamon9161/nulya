@@ -14,6 +14,7 @@ import { parseAction } from "../src/packageCommands.ts"
 import { extBuild, extList, extSetCurrent, sessionList, sessionNew } from "../src/nulya/cli.ts"
 import { tabLabels } from "../src/ui/TabBar.tsx"
 import { tempWorkspace, type TempWorkspace } from "./support.ts"
+import { createPaneStore, main_surface } from "../src/state/panes.ts"
 import type { Tab } from "../src/state/tabs.ts"
 
 let ws: TempWorkspace
@@ -52,6 +53,7 @@ test("a draft tab is named by what it wears as well as what it runs on", () => {
     kind: "draft",
     key: `draft-${model}-${bring?.id ?? ""}`,
     ws: { dir: "/w", bin: "/w/nulya" },
+    panes: createPaneStore(main_surface),
     pick: () => ({ profile: "scripted", model }),
     setPick: () => {},
     bring: () => bring,

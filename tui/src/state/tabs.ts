@@ -26,6 +26,7 @@ import { discardIfUntouched, readActiveContributions, readHeader, type Contribut
 import { sessionEvents, sessionNew } from "../nulya/cli.ts"
 import { withOptions, type WithRef } from "../with.ts"
 import { sameWorkspace } from "../workspaces.ts"
+import { createPaneStore, main_surface, type PaneStore } from "./panes.ts"
 import type { Workspace } from "../nulya/bin.ts"
 
 interface TabCommon {
@@ -52,6 +53,18 @@ interface TabCommon {
    */
   ws: Workspace
   /**
+   * This tab's own pane tree — the content area, split however this tab has it
+   * (goals/tui-shell.md §5.3c point 1, T72).
+   *
+   * Beside `ws` because it is the same kind of fact: something the whole screen
+   * used to hold once, which turned out to belong to a tab. Switching tabs
+   * therefore switches trees, and a tab that was watching a delegation is still
+   * watching it when you come back. What is ACROSS tabs — the sidebar — stays
+   * in the app's own tree, so neither tree needs a mark saying which leaves
+   * follow the front tab.
+   */
+  panes: PaneStore
+  /**
    * The reasoning effort this tab's steps run with (`session step --effort`).
    * Per tab, not per session file: it is a generation option the driver
    * chooses each step, never part of the frozen identity (DESIGN §3).
@@ -77,11 +90,50 @@ export interface DraftTab extends TabCommon {
   setBring(ref: WithRef | undefined): void
 }
 
+/**
+ * A session this tab is WATCHING rather than having: a delegation followed in a
+ * pane of its own (goals/tui-shell.md §5.3c, T72).
+ *
+ * The same machinery a tab gets — state, attachment, task watch, replayed
+ * header — minus the strip. It is made through the same private factory a tab
+ * is, so "how this front end attaches to a session" has one implementation:
+ * the observer role is not chosen here either, it is what the lease says
+ * (`state/attach.ts`), and `driven: false` is exactly what a tab opened on
+ * somebody else's session already passes.
+ */
+export interface SubView {
+  /** The leaf in this tab's tree that draws it. The view is keyed by it. */
+  pane: string
+  id: string
+  /**
+   * What the delegation calls itself (`d-…`), when the card that opened this
+   * knew it. The pane says this rather than the local session id, because it
+   * is the name the person was just reading (goals/agent-runner.md D2).
+   */
+  label?: string
+  ws: Workspace
+  state: SessionState
+  attach: Attachment
+  tasks: TaskWatch
+  contributions: Accessor<Contributions[]>
+}
+
 export interface SessionTab extends TabCommon {
   kind: "session"
   id: string
   state: SessionState
   attach: Attachment
+  /** The delegations this tab has open in panes of its own (T72). */
+  subs: Accessor<SubView[]>
+  /**
+   * Follow `id` in the pane `pane`. Idempotent per pane; a session already
+   * being watched in this tab is returned rather than attached twice, because
+   * two followers of one ledger is two `events --follow` processes saying the
+   * same thing.
+   */
+  watch(pane: string, id: string, label?: string): SubView
+  /** Stop following whatever `pane` held. Unknown panes are ignored. */
+  unwatch(pane: string): void
   /**
    * The background tasks this session has, re-read on a beat (tui.md §5.9).
    * Per tab because a task belongs to a session and outlives every step of it —
@@ -250,6 +302,7 @@ export function createTabStore(home: Workspace, first: FirstTab, options: TabSto
       kind: "draft",
       key: `draft-${nextDraft++}`,
       ws: opened.ws ?? home,
+      panes: createPaneStore(main_surface),
       pick,
       setPick: (value) => setPick(() => value),
       bring,
@@ -263,6 +316,7 @@ export function createTabStore(home: Workspace, first: FirstTab, options: TabSto
     const ws = opened.ws ?? home
     const [contributions, setContributions] = createSignal<Contributions[]>([])
     const [effort, setEffort] = createSignal<string | undefined>(opened.effort)
+    const [subs, setSubs] = createSignal<SubView[]>([])
     // The attachment exists immediately (so the lease probe and the follower
     // start at once), but its first step waits for the replay: events from a
     // step that ran first would make the tail look "already seen" and the
@@ -273,8 +327,23 @@ export function createTabStore(home: Workspace, first: FirstTab, options: TabSto
       kind: "session",
       key: id,
       ws,
+      panes: createPaneStore(main_surface),
       id,
       state,
+      subs,
+      watch(pane, watched, label) {
+        const already = subs().find((sub) => sub.pane === pane)
+        if (already) return already
+        const sub = makeSub(ws, pane, watched, label)
+        setSubs([...subs(), sub])
+        return sub
+      },
+      unwatch(pane) {
+        const going = subs().find((sub) => sub.pane === pane)
+        if (!going) return
+        setSubs(subs().filter((sub) => sub !== going))
+        releaseSub(going)
+      },
       // `driven`: a session this process created is ours to wake from the first
       // probe; one merely opened here (a sub-session, `/sessions`) is not, until
       // someone drives it from this tab (attach.ts).
@@ -295,9 +364,47 @@ export function createTabStore(home: Workspace, first: FirstTab, options: TabSto
     return tab
   }
 
+  /**
+   * A delegation followed in one of this tab's panes (T72).
+   *
+   * `driven: false` is not a policy this makes up — it is what every session
+   * opened here rather than created here already passes, and the reason a
+   * delegation's pane observes: the sub-session's writer is the background task
+   * driving it, so the lease decides and this never spawns a step of its own
+   * (`state/attach.ts`, tui.md §5.6). Nothing here is created on disk, so
+   * letting go is only detaching.
+   */
+  function makeSub(ws: Workspace, pane: string, id: string, label?: string): SubView {
+    const state = createSessionState(id)
+    const [contributions, setContributions] = createSignal<Contributions[]>([])
+    let settle!: () => void
+    const ready = new Promise<void>((resolve) => (settle = resolve))
+    const sub: SubView = {
+      pane,
+      id,
+      ...(label ? { label } : {}),
+      ws,
+      state,
+      attach: createAttachment(ws, id, state, { ...attachOptions, ready, driven: false }),
+      tasks: createTaskWatch(ws, id, { ...(attachOptions.env ? { env: attachOptions.env } : {}) }),
+      contributions,
+    }
+    void hydrate(ws, id, state, setContributions).then(settle, settle)
+    return sub
+  }
+
+  function releaseSub(sub: SubView) {
+    sub.attach.dispose()
+    sub.tasks.dispose()
+  }
+
   /** Let go of a tab: stop its attachment, and un-create it if it never held anything. */
   function release(tab: Tab) {
     if (tab.kind !== "session") return // a draft is nothing on disk; there is nothing to let go of
+    // Panes go with the tab that owns them: a delegation was never watched
+    // anywhere else, so closing the conversation closes the window onto it
+    // (§5.3c point 4).
+    for (const sub of tab.subs()) releaseSub(sub)
     tab.attach.dispose()
     tab.tasks.dispose()
     // The tab's OWN workspace: the session file is in that directory and

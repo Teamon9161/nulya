@@ -38,7 +38,13 @@ import { ScreenContext, FrameContext, StyleContext, useScreen, useStyle, type St
 import { FoldContext, createFoldStore } from "../state/folds.ts"
 import { BrowseContext, createBrowseStore } from "../state/browse.ts"
 import { OverlayContext, type OverlayKind } from "../state/overlay.ts"
-import { createPaneStore, main_surface, overlayAdapter } from "../state/panes.ts"
+import { createPaneStore, focusThrough, main_surface, overlayAdapter, tab_surface } from "../state/panes.ts"
+import {
+  closeSubPane,
+  openSubPane,
+  subSplitDirection,
+  subSplitOf,
+} from "../state/subpanes.ts"
 import {
   closeSidebar,
   default_sidebar_ratio,
@@ -49,14 +55,16 @@ import {
   sidebar_min_width,
 } from "../state/sidebar.ts"
 import { claimsKeyboard, createSurfaceRegistry, type SurfaceMount } from "../pane/registry.ts"
-import { isSingle } from "../pane/tree.ts"
+import { leaves, nextPaneId, type FocusDirection } from "../pane/tree.ts"
 import { resolveFocus } from "../pane/focus.ts"
 import { PaneHost } from "./PaneHost.tsx"
+import { SubAgentPane } from "./SubAgentPane.tsx"
 import { hostSurfaces } from "./surfaces.tsx"
 import { TasksContext } from "../state/tasks.ts"
 import { NavigateContext, type Navigate } from "../state/navigate.ts"
 import type { TranscriptRow } from "../render/runs.ts"
 import { createTabStore, type DraftTab, type FirstTab, type SessionTab } from "../state/tabs.ts"
+import type { PaneStore } from "../state/panes.ts"
 import {
   loadTuiState,
   rememberModel,
@@ -340,8 +348,20 @@ export function App(props: AppProps) {
    * always "does that surface take the keyboard" (`state/panes.ts`).
    */
   const surfaces = createSurfaceRegistry<JSX.Element>()
-  const panes = createPaneStore(main_surface)
-  const overlay = overlayAdapter(panes, (surface) => claimsKeyboard(surfaces, surface))
+  /**
+   * The APP tree (T72): what is on screen across tabs. One leaf today — the
+   * portal — with the sessions sidebar splitting off beside it.
+   */
+  const panes = createPaneStore(tab_surface)
+  /** The front tab's own tree: the transcript, a full-screen view, a sub-agent. */
+  const tabPanes = (): PaneStore => tabs.active().panes
+  /**
+   * The leaf the keyboard is really in, resolved through the portal. Every
+   * reader of "where is the keyboard" goes through this, so the fact that
+   * there are two trees is known in exactly one place (`state/panes.ts`).
+   */
+  const keyboardLeaf = () => focusThrough(panes, tabPanes())
+  const overlay = overlayAdapter(tabPanes, keyboardLeaf, (surface) => claimsKeyboard(surfaces, surface))
   /**
    * The sessions sidebar (T69) — the first real split, and the first thing on
    * this screen whose state is NOT the pane tree.
@@ -367,6 +387,15 @@ export function App(props: AppProps) {
    * a uniform vertical offset cannot change.
    */
   const screenRect = () => ({ x: 0, y: 0, width: screen().width, height: screen().height })
+  /**
+   * The portal's box: where the front tab's own tree is laid out (T72).
+   *
+   * Measured through the app tree's `layout` rather than recomputed from the
+   * sidebar ratio, for the reason `sidebarWidth` is (T69): a second copy of the
+   * same arithmetic is a second answer waiting to disagree with the seam.
+   */
+  const portalRect = () =>
+    panes.boxes(screenRect()).find((box) => box.surface === tab_surface)?.rect ?? screenRect()
   createEffect(() => {
     const want = sidebarWanted() && sidebarFits()
     if (want === sidebarOpen()) return
@@ -1377,14 +1406,58 @@ export function App(props: AppProps) {
    * blank and not listening. Every OTHER way of leaving a pane already tells
    * the composer by hand (`closeOverlay`); these two are the ways T69 added.
    */
+  const settleKeyboard = () => {
+    if (!overlay.active()) composer?.focus()
+  }
   const goToPane = (pane: string) => {
     panes.focusOn(pane)
-    if (!overlay.active()) composer?.focus()
+    settleKeyboard()
   }
-  const moveKeyboard = (direction: "left" | "right") => {
+  /**
+   * A click landed in one of the FRONT TAB's panes (T72).
+   *
+   * Both hops, in the order the mouse makes them: the app tree has to be
+   * pointing at the portal for the inner focus to be the one that answers, and
+   * when the sidebar is open the wrapper around the portal will bubble the very
+   * same press into `goToPane` a moment later — which is the same assignment,
+   * so the two cannot disagree.
+   */
+  const goToTabPane = (pane: string) => {
+    panes.focusOn(panes.main())
+    tabPanes().focusOn(pane)
+    settleKeyboard()
+  }
+  /** Back to the pane this tab's screen is about, in both trees. */
+  const goToMain = () => {
+    panes.focusOn(panes.main())
+    tabPanes().focusOn(tabPanes().main())
+  }
+  /**
+   * Move the keyboard one pane in a direction, INNERMOST FIRST (T72).
+   *
+   * A tiling window manager's rule for nested containers, and the only one that
+   * composes without either tree learning about the other: try the tab's own
+   * neighbours inside the portal's box, and fall out to the app tree only when
+   * there is nothing that way in here. So `Ctrl+→` from the transcript reaches
+   * the sub-agent beside it, and `Ctrl+←` from the sub-agent passes the
+   * transcript on its way to the sidebar rather than jumping over it.
+   */
+  const moveKeyboard = (direction: FocusDirection) => {
+    const inner = tabPanes()
+    if (panes.surface() === tab_surface) {
+      const before = inner.focus()
+      inner.move(direction, portalRect())
+      if (inner.focus() !== before) return settleKeyboard()
+    }
     panes.move(direction, screenRect())
-    if (!overlay.active()) composer?.focus()
+    settleKeyboard()
   }
+  /**
+   * How many panes are on screen at all, across both trees — the portal counted
+   * once, as the tab tree it stands for. What decides whether `Ctrl+←/→/↑/↓`
+   * mean anything, and therefore whether that layer claims them at all.
+   */
+  const paneCount = () => leaves(panes.tree().root).length + leaves(tabPanes().tree().root).length - 1
 
   /** `/sidebar <percent>`: drag the seam by saying where it should be. */
   const setSidebarPercent = (percent: number) => {
@@ -1399,8 +1472,9 @@ export function App(props: AppProps) {
     if (browse.active()) leaveBrowse()
     // A full-screen view is about the main pane, so that is where the keyboard
     // has to be for it to be answerable — F2 pressed with the keyboard in the
-    // sidebar opens `/ext` in front of the transcript, not beside it.
-    panes.focusOn(panes.main())
+    // sidebar (or in a sub-agent pane, T72) opens `/ext` in front of the
+    // transcript, not beside it.
+    goToMain()
     const opening = overlay.kind() !== kind
     overlay.toggle(kind)
     if (opening) composer?.blur()
@@ -1429,7 +1503,7 @@ export function App(props: AppProps) {
     overlay.close()
     // "Back to the transcript" includes bringing the keyboard back with it:
     // this is also how a click in the sidebar ends (T69).
-    panes.focusOn(panes.main())
+    goToMain()
     composer?.focus()
       // `/ext` may have moved a membership, pin, or activation while it was up,
       // and the draft card's tool face is read off those files plus the active
@@ -1510,9 +1584,58 @@ export function App(props: AppProps) {
    * and cannot drift; browse mode steps aside first, because the keyboard
    * belongs to the tab that just came to the front.
    */
+  /**
+   * Follow a delegation in a pane of the tab that made it (§5.3c, T72).
+   *
+   * The default of the card's two routes, and the one that says what a
+   * delegation IS: subordinate to this conversation. A pane rather than a tab
+   * because the strip is horizontal and has no shape for "under" — and because
+   * closing the conversation should close the window onto its delegation, which
+   * a sibling tab could never express (`state/tabs.ts` releases them together).
+   *
+   * The direction is decided here and not remembered: at 100 columns and up
+   * there is room to read two conversations side by side, and below it the
+   * terminal's other axis is the one with room to spare.
+   */
+  const watchSession = (id: string, label?: string) => {
+    if (browse.active()) leaveBrowse()
+    const here = tab()
+    // A draft has delegated nothing, so nothing can name a session of its own
+    // here. Opening a tab is the honest fallback rather than a silent no-op.
+    if (here.kind !== "session") return openSession(id, ws())
+    // A full-screen view is in front of the very pane we are about to split;
+    // this is the same "back to the transcript" the link's other route does.
+    if (overlay.kind() !== null) closeOverlay()
+    const already = here.subs().find((sub) => sub.id === id)
+    if (already) {
+      goToTabPane(already.pane)
+      setNotice(`following ${label ?? id}`)
+      return
+    }
+    const pane = nextPaneId()
+    here.watch(pane, id, label)
+    here.panes.apply((tree) =>
+      openSubPane(tree, here.panes.main(), { direction: subSplitDirection(screen().width), id: pane }),
+    )
+    setNotice(`watching ${label ?? id} · Ctrl+arrow to go there · Esc there closes it`)
+  }
+
+  /** Stop watching: the pane goes, its follower is detached, the box comes back. */
+  const closeSub = (pane: string) => {
+    const here = tab()
+    if (here.kind !== "session") return
+    here.unwatch(pane)
+    // `closePane` hands the focus to whatever takes the box, so the keyboard is
+    // never left naming a pane that is gone — but the composer still has to be
+    // told by hand, for the reason `goToPane` spells out.
+    here.panes.apply((tree) => closeSubPane(tree, pane))
+    settleKeyboard()
+  }
+
   const navigate: Navigate = {
     delegationRecord: (id) => readDelegationRecord(ws(), id),
     openTasks: () => openOverlay("tasks"),
+    watchSession: (id, label) => watchSession(id, label),
     openSession: (id) => {
       if (browse.active()) leaveBrowse()
       // A card's link names a session of THIS conversation — a delegation this
@@ -3231,10 +3354,12 @@ export function App(props: AppProps) {
     const focusBindings = [
       ...bind("focusLeft", () => moveKeyboard("left")),
       ...bind("focusRight", () => moveKeyboard("right")),
+      ...bind("focusUp", () => moveKeyboard("up")),
+      ...bind("focusDown", () => moveKeyboard("down")),
     ]
     const offFocus = keymap.registerLayer({
       priority: 95,
-      enabled: () => !shortcutLayerBlocked() && !isSingle(panes.tree()),
+      enabled: () => !shortcutLayerBlocked() && paneCount() > 1,
       bindings: focusBindings,
     })
 
@@ -3310,7 +3435,7 @@ export function App(props: AppProps) {
       agentPicker: agentPicker(),
       modePicker: modePicker(),
       approval: pending() !== null,
-      keyboardPane: overlay.active() ? { pane: panes.focus(), surface: panes.surface() ?? "" } : null,
+      keyboardPane: overlay.active() ? { pane: keyboardLeaf().pane, surface: keyboardLeaf().surface ?? "" } : null,
       pluginPanel: Boolean(plugins.panel()),
       browse: browse.active(),
     })
@@ -3484,12 +3609,21 @@ export function App(props: AppProps) {
       if (key.name === "j" || key.name === "down") return moveBrowse(1)
       if (key.name === "k" || key.name === "up") return moveBrowse(-1)
       if (key.name === "space") return toggleSelected()
+      // The card's `↗` row, on the keyboard (T72): `Enter` watches it here
+      // and `t` gives it a tab, the same two words `/sessions` uses for the
+      // same pair of gestures (T70). One vocabulary, and neither input can
+      // reach a behaviour the other cannot.
+      if (key.name === "t") {
+        const id = sessionOf(selectedItem())
+        if (id) return navigate.openSession(id)
+        return
+      }
       if (key.name === "return") {
         // A card that names a session opens it; every other card folds. The
         // sub-session link is the one place Enter means something else.
         const id = sessionOf(selectedItem())
         if (id) {
-          navigate.openSession(id)
+          navigate.watchSession(id)
           return
         }
         return toggleSelected()
@@ -3522,6 +3656,39 @@ export function App(props: AppProps) {
    * point of S1a is that the skeleton changed and nothing else did.
    */
   for (const definition of hostSurfaces({
+    /**
+     * The portal (T72): the front tab's own tree, drawn by the SAME `PaneHost`
+     * the app tree is. That reuse is the whole of the two-layer composition —
+     * mounting, the hit test and pane-local focus each stay one implementation,
+     * used twice, and a single-leaf tab tree still renders its surface with no
+     * wrapper at all, so a screen with no sub-agent is byte-identical to the
+     * screen before this existed.
+     */
+    tab: () => <PaneHost tree={tabPanes().tree()} registry={surfaces} onFocusPane={goToTabPane} />,
+    /**
+     * A delegation, followed (T72). The view is looked up by the PANE, because
+     * that is what a sub-agent surface is keyed by: one registration serves
+     * every pane, and two tabs watching the same session are two panes with two
+     * followers, which a per-session-id registration could not have expressed.
+     */
+    subagent: (mount: SurfaceMount) => {
+      const here = tab()
+      if (here.kind !== "session") return null
+      const view = here.subs().find((sub) => sub.pane === mount.pane)
+      if (!view) return null
+      return (
+        <SubAgentPane
+          view={view}
+          label={view.label}
+          direction={subSplitOf(here.panes.tree(), mount.pane) ?? "row"}
+          focused={mount.focused}
+          width={
+            here.panes.boxes(portalRect()).find((box) => box.pane === mount.pane)?.rect.width ?? portalRect().width
+          }
+          onClose={() => closeSub(mount.pane)}
+        />
+      )
+    },
     transcript: () => (
       <Transcript
         items={snapshot().items}

@@ -16,6 +16,8 @@ exports[`/help lists the bindings that are actually in force 1`] = `
  f8                               /sidebar — the session list, docked beside the transcript       █ 
  ctrl+left                        keyboard to the pane on the left · Esc sends it back            █ 
  ctrl+right                       keyboard to the pane on the right                               █ 
+ ctrl+up                          keyboard to the pane above                                      █ 
+ ctrl+down                        keyboard to the pane below                                      █ 
  f1                               this page                                                       █ 
  pageup                           scroll the transcript back a page                               █ 
  pagedown                         scroll it forward a page                                        █ 
@@ -25,8 +27,9 @@ exports[`/help lists the bindings that are actually in force 1`] = `
  ctrl+l                           redraw the screen                                               █ 
  ctrl+c                           kill the running step; press again to quit                      █ 
                                                                                                   █ 
- Enter                            send · in browse, open a sub-session or fold                    █ 
+ Enter                            send · in browse, watch a sub-session here or fold              █ 
                                   as observer on an empty composer, take over                     █ 
+ t                                in browse: give the selected sub-session a tab of its own       █ 
  ↑↓ / 1-9, Tab                    in the approval dialog: choose an answer, or write a note that  █ 
                                   rides on it                                                     █ 
  Shift+Enter / Ctrl+J             newline                                                         █ 
@@ -49,7 +52,7 @@ exports[`/help lists the bindings that are actually in force 1`] = `
  drag over text                   select it; releasing copies it to the clipboard                 █ 
                                                                                                   █ 
  slash commands                                                                                   █ 
- /model                           pick the model the next session runs on                           
+ /model                           pick the model the next session runs on                         ▀ 
  /mode [ask|unsafe]               ask before every tool call, or run them all unreviewed; no        
                                   argument opens the picker                                         
  /provider                        endpoints and their keys                                          
@@ -86,6 +89,7 @@ exports[`/help lists the bindings that are actually in force 1`] = `
  /<package command>               declared by an active extension · /ext lists them                 
  /<skill> [args]                  load an active skill's body as a user turn                        
                                   \`nulya skill list\` names them                                     
+ anything else after /            goes to the model verbatim                                        
  j/k · PgUp/PgDn scroll · Esc close                                                                 
 "
 `;

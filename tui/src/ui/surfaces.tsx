@@ -27,7 +27,7 @@
  */
 import type { JSX } from "solid-js"
 import { host_owner, type SurfaceMount, type SurfaceDefinition } from "../pane/registry.ts"
-import { main_surface, overlay_surfaces, sidebar_surface } from "../state/panes.ts"
+import { main_surface, overlay_surfaces, sidebar_surface, subagent_surface, tab_surface } from "../state/panes.ts"
 
 /**
  * One thunk per screen, in the host's own vocabulary.
@@ -39,7 +39,11 @@ import { main_surface, overlay_surfaces, sidebar_surface } from "../state/panes.
  * a screen that does not care is written as though it had never been offered.
  */
 export interface HostViews {
+  /** The portal: the active tab's own pane tree, drawn (T72). */
+  tab: (mount: SurfaceMount) => JSX.Element
   transcript: (mount: SurfaceMount) => JSX.Element
+  /** One delegation, followed in a pane of the tab that made it (T72). */
+  subagent: (mount: SurfaceMount) => JSX.Element
   sessions: (mount: SurfaceMount) => JSX.Element
   sidebar: (mount: SurfaceMount) => JSX.Element
   ext: (mount: SurfaceMount) => JSX.Element
@@ -63,9 +67,26 @@ function surface(
 
 export function hostSurfaces(views: HostViews): SurfaceDefinition<JSX.Element>[] {
   return [
+    /**
+     * The portal into the front tab's own tree (T72).
+     *
+     * `claimsKeyboard: false`, and it is never consulted: `focusThrough`
+     * resolves the app tree's focus one hop further whenever it lands here, so
+     * the answer always comes from the leaf that is actually being typed at.
+     * The honest value for a surface that is a hole in the screen is "claims
+     * nothing", and saying it here means no reader has to special-case the id.
+     */
+    surface(tab_surface, "tab", false, views.tab),
     // The one surface that does not claim the keyboard: what is typed while it
     // is up belongs to the composer below it.
     surface(main_surface, "transcript", false, views.transcript),
+    /**
+     * A delegation, watched (T72). It CLAIMS the keyboard for the reason the
+     * docked rail does: focusing it is how you scroll back through what the
+     * sub-agent has been doing, and a pane that answers `j` while the composer
+     * still blinks is the trap that boolean exists to prevent.
+     */
+    surface(subagent_surface, "sub-agent", true, views.subagent),
     /**
      * The sessions list, docked (T69).
      *

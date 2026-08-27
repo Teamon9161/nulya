@@ -239,8 +239,15 @@ export function Transcript(props: {
         </text>
       </Show>
       {/* An empty session is the one screen with nothing to report; it says
-          what this session is and what to do, rather than a blank rectangle. */}
-      <Show when={props.items.length === 0}>
+          what this session is and what to do, rather than a blank rectangle.
+
+          Only where there is a composer under it (T72). The welcome screen is
+          the composer's invitation — slash commands to run, a directory to
+          change, a tip about a key — and a read-only pane watching somebody
+          else's delegation can act on none of it. `onCommand` is exactly the
+          fact "something here can run what this offers", so it is the
+          condition rather than a second prop saying the same thing. */}
+      <Show when={props.items.length === 0 && props.onCommand}>
         <Welcome
           cwd={props.cwd}
           plan={props.plan}

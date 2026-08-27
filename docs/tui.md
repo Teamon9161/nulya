@@ -295,10 +295,15 @@ registry 按 shell 命令前缀识别，头行抽关键事实（抽不到就退�
 
 ### 5.5 Sub-agent
 
-现状：subagent = 自调用（PLAN §3.2），尚无 consumer；TUI 只做"看得见"：
-- SubSessionCard（§5.2）里的 id 可 `Enter` 打开为**第二个 tab**（顶部 `tab-select` 仅在 >1 个 session 打开时出现），子 session 正在被父 step 里的 shell 写 → 子 tab 自动进 observer 模式（§5.6），只 tail。
-- `/sessions` 树用 `parent`；SubSessionCard 的链接是 transcript 推导（D7）。
-- 不做：父子之间的消息转发、trace 视图嵌套折叠——等第一个 subagent skill。
+**委派从属于开它的那场对话，所以它的观察面是父 tab 里的一块 pane，不是 tab 条上的兄弟**（T72，`goals/tui-shell.md` §5.3c）。
+
+- SubSessionCard（§5.2）上那一行 `↗ watch <d-id 或 s-id> here` 是**默认路线**：在**当前 tab 内部**开一块 sub-agent pane（≥100 列左右分、窄屏上下分，子面 0.4），browse 模式 `Enter` 同语义。**显式开成 tab 仍在**：browse 模式的 `t`——与 `/sessions` 里「`Enter` 就地切换 / `t` 给它一个 tab」同一套词（T70）。卡上不放第二条链接：一张卡为同一个去处挂两条几乎同文的行，每个委派都要付。
+- pane = **现有 observer transcript**（§5.6）：只读跟随、`claimsKeyboard: true`（聚焦才拿键盘，开出来不拿）、`<id>.lock` 探针与 `SessionBusy` 语义一概不变，workspace 用**父 tab 的**（委派出去的子场就在那个目录里）。
+- **归属写在头一行**：`⤷ <persona> · <d-id 或 s-id> · observing`（dim；persona 从子场冻结 header 的 `agent-*` prompt 经 `personaOf` 读出来——与 T70 的列表过滤同一处实现）。`observing` 是**常量**，说的是这块 pane（没有输入框、什么都送不出去），不是那一刻的租约角色。
+- **分界是一条单边 hairline**：row split 画在子面左缘、column split 画在它上缘，`ascii` 有逐位降级。侧边栏那条「两个 pane 之间不画线」（T69）说的是两个**互相独立的地方**，这条说的是**从属**——它不是框（一条边不是四条边，整屏仍只有输入框一个有边框的东西）。
+- **关闭**：聚焦时 `Esc`、头行右端的 `✕`（与 tab 条同一个词），或者关掉父 tab——`state/tabs.ts` 的 `release` 顺手把它的 follower 一起停掉，因为它本来就没有第二个存在的地方。
+- `/sessions` 树用 `parent`；SubSessionCard 的链接是 transcript 推导（D7）；**子场不进 sessions 列表**（T70），父 tab 里的这块 pane 就是它唯一的呈现处。
+- 不做：父子之间的消息转发、trace 视图嵌套折叠、pane→tab 提升手势——等真实使用证据。
 
 ### 5.6 Driver / observer 两种角色
 
@@ -475,7 +480,7 @@ PLAN §3.2 早就把答案写死了——**一个 agent 就是 `session new` 的
 | `↺` | `<` | rollback |
 | `⌕` | `?` | 读内核源码（`nulya src`） |
 | `☰` | `=` | skill |
-| `⤷` | `>` | sub-session |
+| `⤷` | `>` | sub-session。transcript 面：一次开了自己那场对话的调用（委派卡）。**pane 面**：sub-agent 观察 pane 的归属行行首（T72）——同一个意思的两处，一处说「有这么一场」，一处说「就是它」 |
 | `⊘` | `x` | 被取消的调用 |
 | `✗` | `!` | driver 侧的失败（`ErrorNotice`）——不是 tool 的失败，那个说 `exit N` |
 | `▸` `▾` | `>` `v` | 折叠：关 / 开；`▾` 同时是**列表里光标所在的那一行**（两处都是「这一个展开着 / 就在这儿」） |
@@ -486,7 +491,7 @@ PLAN §3.2 早就把答案写死了——**一个 agent 就是 `session new` 的
 | `✻` | `*` | tip：屏幕在跟人说话，不是发生了什么（T38） |
 | `◧` | `[` | **sessions 侧边栏的把手**（T69）：左半填实的方块 = 屏幕左边缘停着一块 pane。只画在状态行行首那两格，点它开/关。**它不说侧边栏是开是关**——侧边栏在不在屏幕上是它自己以整块宽度回答的问题，把手再答一遍就是同一个问题的第二个答案（§6.1 第 4 条）。**≥100 列时它后面跟着自己的名字** `◧ sessions`（T70）：一个没人见过的字形、画在这一行最不被扫到的那一端、开的又是一块从没在屏幕上出现过的 pane——第一个用它的人报告说完全没找到侧边栏。窄屏退回纯字形（`sidebarRowPlan` 的同一条让位规则）|
 | `▪` | `*` | **这个目录已经是一个 workspace**（T71，只在 `/cwd` 的目录浏览器里）：里面已经有 `.nulya/`，选它是走进已经存在的工作而不是开一个目录的第一场。**不是 `⚡`**——那个说的是「刚刚获得了一样能力」（`ext activate` 与 pin 上去的 tool 名），一个以前被工作过的目录此刻什么都没获得 |
-| `✕` | `x` | **关掉这个 tab**（T70，只在 tab 条上）：`⊘`/`✗` 说的是一次调用**发生了什么**（被取消、失败）、住在 transcript 里；这一个是个**按钮**，按钮以它做的事命名 |
+| `✕` | `x` | **关掉眼前这一块**（T70 在 tab 条上，T72 在 sub-agent pane 的归属行末尾——同一个按钮，作用在它所在的那块东西上）：`⊘`/`✗` 说的是一次调用**发生了什么**（被取消、失败）、住在 transcript 里；这一个是个**按钮**，按钮以它做的事命名 |
 | `+` | `+` | **新开一个 tab**（T70，只在 tab 条上） |
 | `◈` | `#` | **这一场以什么身份/档位在跑**：选它的那些对话框标题（`/model` `/mode` `/agent` `/with`）、状态栏「戴着谁」的 chip、包自己的 panel 标题。列 store 或 journal 的面板是「地方」，标题**不带记号**（T31）；审批对话框也不带——它不是选身份，是**一个 call 被裁决**，颜色（warn）说完了 |
 | `‹ ›` | `<` `>` | `/model` 的 effort 转盘 |
@@ -2304,3 +2309,31 @@ tab 条的 `✕`/`+`/`▎`；`stripPlan` 的**不变量**"画出来的一切都�
 **给 S1d（`goals/tui-shell.md` §5.3c，sub-agent pane）的接口提醒**：① 那棵「tab 内容区自己的 pane 树」要挂在 tab 上，而 tab 现在已经是一对了——`TabCommon` 是它的家，和 `ws` 并排；② 子 pane 的 observer transcript 必须用**父 tab 的 `ws`**（委派出去的子场就在那个目录里，`navigate.openSession` 这一轮已经按这条改了）；③ `openWorkspaces()` 是「屏幕上有哪些目录」的唯一答案，pane 树多一层不该给它第二个；④ 焦点仲裁器已经有 `checkout` 这一档在最外层，S1d 的 pane 走的仍是 `surface` 那一档，不需要新的枚举值。
 
 **没做**：pane 树里的 workspace（一个 tab 的所有 pane 共用它的目录——S1d 的子 pane 观察的是这一场委派出去的子场，同目录）· 插件宿主仍按**启动目录**加载与 `extRun`（`createPluginHost` 是每进程一个，契约上就是这么写的；把它变成每 tab 一个是 S2 的事，那时 `tui/plugin-api.d.ts` 才会动）· 跨 workspace 的 `session list` 合并（每组各答各的，内核一次只投影一个 `.nulya/sessions/`）· 目录浏览器的新建目录 / 文件预览 / 多选（§5.3b 明说不做）。
+
+### T72 · S1d：sub-agent 视图从属于父 tab——两层 pane 树，一个 portal（`goals/tui-shell.md` §5.3c，2026-08-28）
+
+**内核零改动**（`src/` 一个字节没动），`tui/plugin-api.d.ts` 一个字节没动；`bun test` 572 → 582 pass（新 10 条）、`tsc` 干净、**既有 35 份快照里只有 `/help` 那一份变了**（多了 `ctrl+up` / `ctrl+down` / browse 的 `t` 三行，页面因此长了三行、那个测试的视口从 86 抬到 90——它的注释早就写着"tall enough for the whole page"）。做的是 §5.3c 的五点。
+
+**尺子**：S1b 的验收标准是「侧边栏不是宿主里的一个新概念」；S1d 的是**「两层树不是两套机制」**——`PaneHost`、命中测试、焦点仲裁各自仍然只有一份实现，被用了两次。
+
+**架构：两棵树，一个 portal。**
+① **app 树**（`App` 自己那个 store）holds 跨 tab 的东西：sessions 侧边栏，以及**一个 portal 叶** `host:tab`。
+② **tab 树**（`TabCommon.panes`，挨着 `ws`）holds 属于这场对话的东西：transcript、当前在前面的整屏视图、任意个 sub-agent pane。
+③ 它们只经**一个 surface id** 相接：portal 这个 surface 的 render 就是 `<PaneHost tree={前台 tab 的树}>`——**同一个组件递归用一次**，于是挂载、鼠标路由（split 里的每个 pane 各有一个盒子，`onMouseDown` 挂在上面、不 stop，所以内层先聚焦 tab 内的 pane、外层再聚焦 portal，两次赋值同一件事）、以及「单叶树画成它自己、外面没有 wrapper」这条 S1a 的验收标准，全部原样继承。今天没有 sub-agent 的屏幕因此是 app 单叶 → portal → tab 单叶 → transcript，**一个 wrapper 都没有**，快照零 diff 正是这条的证据。
+④ **焦点只多一跳**：`state/panes.ts` 的 `focusThrough(app, tab)`——app 树指着的叶，除非那是 portal，那就再往里一跳。**它是唯一知道两棵树是嵌套的函数**；`overlay.active()`、composer 的 blur、`resolveFocus` 的 `keyboardPane` 全读它，`pane/focus.ts` **一个字没改**（S1d 走的仍是 `surface` 那一档，T71 的提醒说对了）。
+⑤ **方向移动由内往外**：`moveKeyboard` 先在 portal 的盒子里问 tab 树，动不了才问 app 树。所以 `Ctrl+→` 从 transcript 到旁边的 sub-agent，`Ctrl+←` 从 sub-agent 会**先经过** transcript 再到侧边栏，而不是从它头上跳过去。portal 的盒子由 app 树自己的 `layout` 量出来（`sidebarWidth` 的同一条纪律：第二份同样的算术就是第二个会跟画面吵架的答案）。
+⑥ **为什么不做一棵大树**：那样每个叶子都要带一个「我跟不跟前台 tab 走」的标记，而每个操作都得尊重这个标记；两棵小树谁都不需要它，因为这个问题根本不会被问到。**overlay 也因此下放到 tab 树**——F2 在这个 tab 开 `/ext`，不该动另一个 tab 正在看的东西。
+
+**pane 里装的是什么**：`state/tabs.ts` 的 `SubView` = 一个 tab 得到的全套（`SessionState` + `Attachment` + `TaskWatch` + 同一个 `hydrate` 的 header/contributions），**减掉 tab 条**。observer 不是这里选的——`driven: false` 正是「在这儿打开的、不是在这儿创建的」那一档已经传的值，角色由租约说了算（§5.6）。`watch(pane, id, label)` / `unwatch(pane)` 挂在 `SessionTab` 上，`release` 顺手 dispose 它们：委派没有第二个存在的地方，关掉对话就是关掉看它的窗。**一次注册服务所有 pane**：surface id 是 `host:subagent`，view 按 **pane** 反查（mount 本来就带着 pane id）——按 session id 注册的话，两个 tab 看同一场就是「首个持有者胜」，第二块 pane 什么都画不出来。
+
+**设计语言（§6 九条）**：新的可见物只有三样——分界线、归属行、pane 的那行键。① 颜色：`⤷` 用 `accent.evolve`（去处），归属的话 `dim`（**关于**这块 pane 写的话），`✕` faint→err 只在悬停时；一屏 accent 仍 ≤3。② 对齐：row split 时子面在竖线右边留一格空气、column split 时**一格都不留**——上下叠的两个 transcript 必须共用同一条左边缘，差一列就是 §6.2 那条最该量的粗糙。③ 留白：不发明新密度，pane 里就是 transcript 自己那套（§6.4）。④ **没有的东西不占列**：那行键只在这块 pane 拿着键盘时画；`Welcome` **离开了**没有输入框的 transcript（判据就是 `onCommand` 在不在——欢迎屏是输入框的邀请，一个说不出话的面没有东西可邀请），所以刚开出来还没 replay 完的 pane 是空的而不是一屏 slash 命令。⑤ **边框**：这是这个前端第二样带 box-drawing 的东西，理由写在 §6.1 第 5 条自己的措辞里——「归属需要被说出来」的时候才用，而侧边栏那条空气分界说的是两个**独立的地方**（T69），这条说的是**从属**；**一条边不是一个框**，整屏仍然只有输入框一个「看起来像控件」的东西。⑥ 无新 glyph：`⤷` 与 `✕` 各在 §6.3 表里多写了一句它的第二处。⑦ 全部 `fit`，不换行。⑧ 每面一行 dim 的「我能做什么」。⑨ 没有新动效。
+
+**两条键**：`focusUp` / `focusDown`（`ctrl+up` / `ctrl+down`）。不是补齐对称，是**窄屏上子面在上下**——只给左右，恰好在最需要键盘的那些终端上到不了那块 pane。与 `focusLeft/Right` 同一层，仍然只在**不止一个 pane**时才认领这四个键（`paneCount()` 现在数两棵树，portal 只算一次）。
+
+**测试**（572 → 582）。模型那半不开终端：split 落在 transcript 之后且不抢键盘 · 100 列是那条分界线（≥ row，< column） · 方向从树上读回来而不是从开的时候记住（终端后来被拖窄，不能留一条身后没有邻居的线） · 关掉聚焦着的子面之后焦点仍指着一个真实存在的叶 · **`focusThrough` 的两种答案**（portal → 往里一跳；侧边栏 → 自己答） · 两个 tab 的树互不相干 · 归属那句话。屏幕那半对着真 workspace 的真帧：120 列左右分（断言**同一行**上既有父面的链接行又有那条竖线——那是 row split 唯一的签名）+ 输入框照样收字 · 80 列上下叠（归属行**上面一行**是横线，且没有任何一行同时有父面内容与竖线） · `Ctrl+→` 进去、那行键出现、`Esc` 关掉且**键盘一路回到框里** · 一个 tab 记得自己的布局（`/new` 开第二个 → 子面不在，`F4` 回来 → 还在），`Ctrl+W` 关掉父 tab 连它一起走。两张快照（120 / 80），**先把会走的东西掩掉**（session id 与日期，按等宽掩码）。既有的那条「`Enter` 开成第二个 tab」改成 `t`，断言一字未减——两条路都还在，只是主次换了。
+
+**偏离 prompt 的两处，写清楚**：① prompt 说「保留显式开成 tab：卡上第二个动作或修饰键」——落地成 **browse 的 `t`**，卡上不加第二行。理由是这一行的成本是**每一个委派卡都要付**的两行几乎同文的链接，而 `t` 在这块屏幕上已经是「给它一个 tab」的那个词（T70 的 `/sessions`），`/help` 里也就多一行而不是多一个概念；修饰键点击则被否掉，因为终端对 modifier+click 的支持参差，而这条出路必须在每个终端上都在。② prompt 说 pane 头一行写 `⤷ <agent> · <d-id> · observing`，我把 `observing` 定成**常量**而不是跟着 `attach.role()` 变：这块 pane 结构上就是只读的（底下没有输入框，什么都送不出去），而租约角色是世界的状态、会在背景任务跑完的那一刻翻成 `driving`——那个词在这里读起来像许可。租约要说话的地方是状态栏的 `observer · driven elsewhere`（§5.6），不是这一行。
+
+**没做**：pane→tab 提升手势（§5.3c 点 2 说「或后续做」，第一个真实需求还没出现）· 子 pane 落进 `tui-state.json`（观察面是临时的：它跟着一次「我想看看那个」而来，重开一场时那个委派多半已经结束，恢复它等于替人做一个他没做过的决定；tab 的 `tabs` 状态照旧只记 tab）· 拖拽调整 seam（没有第一个 consumer 的手势）· 子 pane 自己的 workspace（一个 tab 的所有 pane 共用它的目录——`openWorkspaces()` 因此仍然是「屏幕上有哪些目录」的唯一答案，T71 的提醒说对了，它一个字没改）。
+
+**给 S2 的提醒**：① 包的 T2 面走的是**同一条路**——注册一个 surface，让 tab 树的一个叶指着它；`host:subagent` 就是宿主自己当第一个 consumer 的那个例子（按 **pane** 反查内容、`claimsKeyboard: true`、自己按 `mount.focused` 关掉监听）。② 但它是**宿主自己的面**，所以还留着一个 S2 必须补的洞：包的面装不了全局 `useKeyboard`，键要从 `SurfaceDefinition.onKey` 走——那个字段从 T68 起就在，今天仍然零 consumer。③ 一块 pane 的宽度**从 pane 拿**（`panes.boxes(portalRect())`），`useScreen()` 答的是终端；S1d 又多了一层，所以「portal 的盒子」是包的面该问的那个矩形。④ 打开一个面 ≠ 把键盘送过去（`focusNew: false`），送过去的那一半记得把输入框还回来。

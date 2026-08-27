@@ -30,6 +30,8 @@ const actions: Array<[Action, string]> = [
   ["sidebar", "/sidebar — the session list, docked beside the transcript"],
   ["focusLeft", "keyboard to the pane on the left · Esc sends it back"],
   ["focusRight", "keyboard to the pane on the right"],
+  ["focusUp", "keyboard to the pane above"],
+  ["focusDown", "keyboard to the pane below"],
   ["help", "this page"],
   ["scrollUp", "scroll the transcript back a page"],
   ["scrollDown", "scroll it forward a page"],
@@ -41,7 +43,8 @@ const actions: Array<[Action, string]> = [
 ]
 
 const fixed: Array<[string, string]> = [
-  ["Enter", "send · in browse, open a sub-session or fold · as observer on an empty composer, take over"],
+  ["Enter", "send · in browse, watch a sub-session here or fold · as observer on an empty composer, take over"],
+  ["t", "in browse: give the selected sub-session a tab of its own"],
   ["↑↓ / 1-9, Tab", "in the approval dialog: choose an answer, or write a note that rides on it"],
   ["Shift+Enter / Ctrl+J", "newline"],
   ["/ then Tab", "complete a slash command; Enter always sends what is written"],

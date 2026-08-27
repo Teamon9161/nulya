@@ -24,6 +24,8 @@ export type Action =
   | "sidebar"
   | "focusLeft"
   | "focusRight"
+  | "focusUp"
+  | "focusDown"
   | "nextTab"
   | "closeTab"
   | "scrollUp"
@@ -60,6 +62,13 @@ export const default_keys: Record<Action, string> = {
   // (the `closeTab` precedent: claim a key only while it means something).
   focusLeft: "ctrl+left",
   focusRight: "ctrl+right",
+  // The other axis, which S1d made reachable rather than theoretical (T72): a
+  // sub-agent pane splits sideways on a wide terminal and STACKS on a narrow
+  // one, so on the terminals where the keyboard is most needed the neighbour
+  // is above or below. Same layer, same rule — the four of them are claimed
+  // only while there is a second pane to move to.
+  focusUp: "ctrl+up",
+  focusDown: "ctrl+down",
   nextTab: "f4",
   closeTab: "ctrl+w",
   scrollUp: "pageup",
