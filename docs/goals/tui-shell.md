@@ -139,7 +139,12 @@ surface 契约设计成 host 中立（T0/T1 数据契约 + T2 面注册），则
 TUI 侧 `Workspace` 已经是每个 CLI 调用的显式参数（`nulya/cli.ts`），只是被 `createTabStore(ws,…)` 收成了全局。要做的：
 
 1. **tab = (workspace, session)**：workspace 从 store 级下放到 tab 级，所有 spawn 用本 tab 的 ws。
-2. **draft tab 选目录**：默认当前 workspace；一个 recent 列表 + 直接输路径（不做文件浏览器）。
+2. **draft tab 选目录**：默认当前 workspace；选择器是一个**极简目录浏览对话框**（2026-08-27 用户定的形状）——
+   顶部一个路径输入框（可打字/粘贴，`~` 展开，Windows 盘符路径可用；边输入边把下面的列表换成该路径的内容），
+   下面是列表：recent workspaces 一段（user 层记录）+ 当前路径的子目录一段，`..` 恒在子目录段首；
+   **只列目录不列文件**、隐藏点目录（`..` 除外）、按名排序、含 `.nulya/` 的目录带一个"已是 workspace"的标记。
+   单击/Enter 一个目录 = 进入它继续浏览；确认动作（如 Enter 在输入框、或一行 `use this directory`）= 选定。
+   骨架走 `ui/Dialog.tsx` 或 overlay（按 §6 的两类面选一个，超屏要 scrollbox）；**不做**文件预览、多选、新建目录。
 3. **recent workspaces 持久在 user 层**（`~/.nulya/` 下；`tui-state.json` 是 workspace 层的，装不下跨目录的事实——
    先例：`trusted-stores.jsonl` 因为同样的理由在 user 层）。
 4. **侧边栏按 workspace 分组**：当前 workspace 的会话 + recent 段；选中一个 workspace 就对那个目录跑
