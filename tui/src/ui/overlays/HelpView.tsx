@@ -27,6 +27,9 @@ const actions: Array<[Action, string]> = [
   ["model", "/model — the models that can run; Enter starts a session on one"],
   ["provider", "/provider — endpoints and their keys; Enter on a ready one goes to its models"],
   ["tasks", "/tasks — background commands still running, their logs, k to stop one"],
+  ["sidebar", "/sidebar — the session list, docked beside the transcript"],
+  ["focusLeft", "keyboard to the pane on the left · Esc sends it back"],
+  ["focusRight", "keyboard to the pane on the right"],
   ["help", "this page"],
   ["scrollUp", "scroll the transcript back a page"],
   ["scrollDown", "scroll it forward a page"],
@@ -55,6 +58,7 @@ const mouse: Array<[string, string]> = [
   ["click the model", "in the line under the composer or the composition card: open /model"],
   ["click ask / unsafe", "open the permission-mode picker, the same as /mode"],
   ["click a tab / a pane", "go to it"],
+  ["click the sidebar mark", "at the head of the line under the composer: show or hide the session list"],
   ["click [x]", "in /ext's tools pane: pin or unpin that tool"],
   ["drag over text", "select it; releasing copies it to the clipboard"],
 ]

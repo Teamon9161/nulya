@@ -14,6 +14,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { normalizeMode, type PermissionMode } from "../approvals.ts"
+import { default_sidebar_ratio } from "./sidebar.ts"
 import { userConfigDir } from "./settings.ts"
 
 /** The last (profile, model, effort) picked in `/model`, or by `/effort`. */
@@ -77,6 +78,21 @@ export interface TuiState {
    * make sense of is still not a reason to lose the model pick.
    */
   plugins?: Record<string, Record<string, unknown>>
+  /**
+   * The sessions sidebar: whether it was up, and how wide (T69).
+   *
+   * Program state for the same reason the model pick is: a person who pulled
+   * the sidebar out yesterday should find it there today without editing a
+   * file, and a person who put it away should not have to put it away again
+   * every morning. Not `tui.toml`, which is what a person writes to say how the
+   * screen should look — this is what the screen remembers about being used.
+   *
+   * `open` is what was ASKED for, not what was on screen: a narrow terminal
+   * hides the sidebar (`sidebar_min_width`) without anybody deciding to, and
+   * remembering that as "closed" would lose the answer to the next window that
+   * is wide enough.
+   */
+  sidebar?: { open: boolean; ratio: number }
 }
 
 export function tuiStatePath(env: Record<string, string | undefined> = process.env): string {
@@ -116,6 +132,20 @@ export function loadTuiState(path = tuiStatePath()): TuiState {
     if (typeof mode === "string") {
       const known = normalizeMode(mode)
       if (known) state.mode = known
+    }
+    const sidebar = record["sidebar"]
+    if (typeof sidebar === "object" && sidebar !== null && !Array.isArray(sidebar)) {
+      const slot = sidebar as Record<string, unknown>
+      const ratio = slot["ratio"]
+      // Each half read on its own terms: a file that remembers the width but
+      // not the answer, or the other way round, still gives back what it does
+      // know. `clampRatio` is not applied here — the model clamps every ratio
+      // it is handed, and doing it twice would be two places deciding how thin
+      // a pane may be.
+      state.sidebar = {
+        open: slot["open"] === true,
+        ratio: typeof ratio === "number" && Number.isFinite(ratio) ? ratio : default_sidebar_ratio,
+      }
     }
     const plugins = record["plugins"]
     if (typeof plugins === "object" && plugins !== null && !Array.isArray(plugins)) {
@@ -163,6 +193,13 @@ export function sessionPins(path = tuiStatePath()): string[] {
 export function rememberSessionPins(pins: readonly string[], path = tuiStatePath()): void {
   const state = loadTuiState(path)
   state.session_pins = [...pins]
+  saveTuiState(state, path)
+}
+
+/** Remember whether the sessions sidebar was up, and how wide (T69). */
+export function rememberSidebar(sidebar: { open: boolean; ratio: number }, path = tuiStatePath()): void {
+  const state = loadTuiState(path)
+  state.sidebar = sidebar
   saveTuiState(state, path)
 }
 

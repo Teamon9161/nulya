@@ -21,6 +21,9 @@ export type Action =
   | "model"
   | "provider"
   | "tasks"
+  | "sidebar"
+  | "focusLeft"
+  | "focusRight"
   | "nextTab"
   | "closeTab"
   | "scrollUp"
@@ -43,6 +46,20 @@ export const default_keys: Record<Action, string> = {
   // read the same way they are: something the screen can tell you about the
   // session without you having to ask the model.
   tasks: "f7",
+  // The sessions sidebar (T69). In the F-row because it belongs to the same
+  // family — "show me this" — and, more to the point, because it is the only
+  // family that steals nothing: `ctrl+b` is the sidebar key everywhere else,
+  // but the composer's textarea already binds it to move-left, and this layer
+  // could never be disabled the way `closeTab` and `interrupt` disable
+  // themselves when their key means nothing. A permanent theft is not a
+  // default; a person who wants Ctrl+B can write it in `tui.toml`.
+  sidebar: "f8",
+  // Move the keyboard between panes — a tiling window manager's gesture, and
+  // useless until there are two panes, which is exactly when this layer turns
+  // itself on. Ctrl+←/→ are the textarea's word-motion the rest of the time
+  // (the `closeTab` precedent: claim a key only while it means something).
+  focusLeft: "ctrl+left",
+  focusRight: "ctrl+right",
   nextTab: "f4",
   closeTab: "ctrl+w",
   scrollUp: "pageup",

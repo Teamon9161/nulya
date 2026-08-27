@@ -175,6 +175,17 @@ export interface Glyphs {
    * an event — it is the screen talking to the person.
    */
   tip: string
+  /**
+   * The handle of the sessions sidebar (T69): a square whose left half is
+   * filled — the screen with a pane docked down its left edge, which is the one
+   * thing the glyph has to depict.
+   *
+   * It says nothing about whether the sidebar is open, and does not need to:
+   * the sidebar is either on the screen or it is not, and a mark that repeated
+   * that would be the second answer to a question the screen has already
+   * answered at full size (§6.1 rule 4).
+   */
+  sidebar: string
 }
 
 const unicode_glyphs: Glyphs = {
@@ -206,6 +217,7 @@ const unicode_glyphs: Glyphs = {
   switchOn: "●",
   switchOff: "○",
   tip: "✻",
+  sidebar: "◧",
 }
 
 const ascii_glyphs: Glyphs = {
@@ -237,6 +249,7 @@ const ascii_glyphs: Glyphs = {
   switchOn: "*",
   switchOff: "-",
   tip: "*",
+  sidebar: "[",
 }
 
 export interface Style {

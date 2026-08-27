@@ -54,6 +54,17 @@ export function createHover(): Hover {
  * `stop` claims the event so an enclosing row does not also act on it — the
  * checkbox inside a pin row is the one place where two nested targets both want
  * the same click and mean different things.
+ *
+ * IT CLAIMS THE RELEASE, NOT THE PRESS (T69). What `stop` protects against is
+ * the enclosing row ACTING, and a row acts on the release — a click is press
+ * and release in the same cell, and nothing above has decided anything yet on
+ * the way down. Stopping the press as well used to cost nothing because the
+ * only thing above a row was another row; with a second pane on screen, the
+ * thing above is the pane, which focuses itself on mouse-down (`PaneHost`).
+ * Clicking a checkbox in an unfocused pane would then tick the box without the
+ * keyboard ever arriving — the one gesture that is unambiguously "I am working
+ * here". The enclosing row still sees the press, sets its own start cell, and
+ * never gets the release, so it still does not act.
  */
 export function onClick(action: () => void, stop = false): {
   onMouseDown: (event: MouseEvent) => void
@@ -63,7 +74,6 @@ export function onClick(action: () => void, stop = false): {
   return {
     onMouseDown: (event: MouseEvent) => {
       from = { x: event.x, y: event.y }
-      if (stop) event.stopPropagation()
     },
     onMouseUp: (event: MouseEvent) => {
       const start = from

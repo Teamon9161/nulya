@@ -211,6 +211,24 @@ function nearestLeafOf(root: PaneNode, _closed: PaneId): PaneId | null {
   return all.length > 0 ? all[0]!.id : null
 }
 
+/**
+ * The split a leaf hangs directly under, or null at the root of a single pane.
+ *
+ * `resizeSplit` names the SPLIT rather than either child, because a seam
+ * belongs to neither of the panes it separates. A caller only ever holds the
+ * pane it cares about ("make the sidebar wider"), so the walk from the one it
+ * knows to the one it must name has to exist somewhere — here, once, rather
+ * than in each consumer that wants to drag a seam.
+ */
+export function parentSplit(tree: PaneTree, pane: PaneId): (PaneNode & { kind: "split" }) | null {
+  const walk = (node: PaneNode): (PaneNode & { kind: "split" }) | null => {
+    if (node.kind === "leaf") return null
+    if (node.first.id === pane || node.second.id === pane) return node
+    return walk(node.first) ?? walk(node.second)
+  }
+  return walk(tree.root)
+}
+
 export function clampRatio(ratio: number): number {
   if (!Number.isFinite(ratio)) return 0.5
   return Math.min(Math.max(ratio, min_ratio), max_ratio)

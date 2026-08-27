@@ -77,6 +77,20 @@ export function StatusBar(props: {
   onPickModel?: () => void
   /** Clicking the "N more below" marker: the mouse half of Shift+End. */
   onScrollEnd?: () => void
+  /**
+   * The sessions sidebar's handle (T69): the standing, clickable way in and out
+   * of it, beside `/sidebar` and its key.
+   *
+   * It leads the line, in the two columns every list row in this front end
+   * gives its gutter (§6.5) — and at the far left because that is where the
+   * thing it opens appears. Position is one of the four things a terminal has
+   * to build order out of, so a handle for a left-hand pane belongs at the left
+   * hand edge and nowhere else. It is also deliberately AHEAD of everything a
+   * package will ever be able to put on this line (goals/tui-shell.md §4's chip
+   * strip): host chrome does not queue behind extensions for a slot.
+   */
+  sidebarOpen?: boolean
+  onToggleSidebar?: () => void
 }) {
   const style = useStyle()
   const screen = useScreen()
@@ -90,6 +104,15 @@ export function StatusBar(props: {
   const modeClick = onClick(() => props.onPickMode?.())
   const extClick = onClick(() => props.onOpenExt?.())
   const toolsClick = onClick(() => props.onOpenExt?.())
+  const [overSidebar, setOverSidebar] = createSignal(false)
+  const sidebarClick = onClick(() => props.onToggleSidebar?.())
+  /**
+   * The handle is there whenever the sidebar could be. Under 60 columns it
+   * cannot open at all (`sidebar_min_width`, the same width the chips on the
+   * right give up at), and a control for something that cannot happen is two
+   * columns saying nothing (§6.1 rule 4).
+   */
+  const sidebarHandle = () => Boolean(props.onToggleSidebar) && screen().width >= 60
 
   /**
    * How full the window is, after the last step. Nothing acts on this — nulya
@@ -154,7 +177,7 @@ export function StatusBar(props: {
    * the composition card above says the same thing at length.
    */
   const layout = createMemo(() => {
-    const budget = Math.max(0, screen().width - 2 - displayWidth(modeLead()))
+    const budget = Math.max(0, screen().width - 2 - (sidebarHandle() ? 2 : 0) - displayWidth(modeLead()))
     const right =
       displayWidth(contextChip()) +
       displayWidth(behindChip()) +
@@ -192,6 +215,29 @@ export function StatusBar(props: {
         <text fg={style.theme.fg}>{noticeText()}</text>
       ) : (
         <box flexDirection="row" width="100%" height={1}>
+          {/* The sessions sidebar's handle, in this line's own two-column
+              gutter — the left edge of the screen, which is where the pane it
+              opens appears (T69). Lit while the sidebar is up and furniture
+              while it is not; the shape never changes, because the sidebar
+              being on screen is already the state and a glyph that repeated it
+              would be a second answer to a question the screen has answered at
+              full size (§6.1 rule 1's shape rule is about facts that would
+              OTHERWISE be invisible). */}
+          {sidebarHandle() ? (
+            <box
+              flexShrink={0}
+              height={1}
+              backgroundColor={overSidebar() ? style.theme.hover : undefined}
+              onMouseDown={sidebarClick.onMouseDown}
+              onMouseUp={sidebarClick.onMouseUp}
+              onMouseOver={() => setOverSidebar(true)}
+              onMouseOut={() => setOverSidebar(false)}
+            >
+              <text fg={props.sidebarOpen ? style.theme.accent.evolve : style.theme.faint}>
+                {style.glyphs.sidebar}{" "}
+              </text>
+            </box>
+          ) : null}
           {/* The permission mode leads the line, and the click opens its picker
               — the mouse half of `/mode`. `unsafe` is warn-coloured: it is the
               stance where tool calls run without anybody looking, and that

@@ -1,0 +1,57 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`the sidebar comes up docked, beside a transcript that is still there 1`] = `
+" sessions · 2                                                                   
+                    ▎ session · ---------------- · frozen composition         ▸ 
+   budgets       ▎  ▎ model    scripted/scripted-demo · tools 1+0               
+   older one                                                                    
+                    ▎ budgets                                                   
+                                                                                
+                    ● Let me probe the environment.                             
+                                                                                
+                      $ echo hello-from-nulya  (2 lines) ▸                      
+                                                                                
+                    ● done                                                      
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ › message nulya  ·  / for commands  ·  @ for files                           │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ ◧ unsafe · scripted-demo · tools 1+0                                           
+"
+`;
+
+exports[`a wider terminal spends the room on the rail's own columns 1`] = `
+" sessions · 2                                                                                                           
+                              ▎ session · ---------------- · frozen composition                                       ▸ 
+   budgets        ▎ ~~~~~~~~  ▎ model    scripted/scripted-demo · tools 1+0                                             
+   older one        ~~~~~~~~                                                                                            
+                              ▎ budgets                                                                                 
+                                                                                                                        
+                              ● Let me probe the environment.                                                           
+                                                                                                                        
+                                $ echo hello-from-nulya  (2 lines) ▸                                                    
+                                                                                                                        
+                              ● done                                                                                    
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ › message nulya  ·  / for commands  ·  @ for files                                                                   │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ ◧ unsafe · scripted-demo · tools 1+0                                                                                   
+"
+`;

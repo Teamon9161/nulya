@@ -106,7 +106,7 @@ test("Up walks the whole history, not just the last message", async () => {
 test("completions: only the first word, and an exact name still explains itself", () => {
   expect(completions("")).toEqual([])
   expect(completions("hello")).toEqual([])
-  expect(completions("/s").map((c) => c.name)).toEqual(["/sessions", "/settings", "/step"])
+  expect(completions("/s").map((c) => c.name)).toEqual(["/sessions", "/sidebar", "/settings", "/step"])
   expect(completions("/mo").map((c) => c.name)).toEqual(["/model", "/mode"])
   expect(completions("/model").map((c) => c.name)).toEqual(["/model"])
   expect(completions("/nope")).toEqual([])

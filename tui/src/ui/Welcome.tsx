@@ -73,6 +73,7 @@ const tips: string[] = [
   "shell {background:true} outlives the step · /tasks shows what is still running",
   "/outcome success|partial|failure records how a session went · nothing recorded is not failure",
   "Ctrl+C stops the step and never exits on the first press",
+  "/sidebar docks the session list down the left edge · click a row twice to go there",
 ]
 
 /** The tip for this launch. Picked once by the caller, never during a render. */

@@ -39,7 +39,17 @@ import { FoldContext, createFoldStore } from "../state/folds.ts"
 import { BrowseContext, createBrowseStore } from "../state/browse.ts"
 import { OverlayContext, type OverlayKind } from "../state/overlay.ts"
 import { createPaneStore, main_surface, overlayAdapter } from "../state/panes.ts"
-import { claimsKeyboard, createSurfaceRegistry } from "../pane/registry.ts"
+import {
+  closeSidebar,
+  default_sidebar_ratio,
+  isSidebarOpen,
+  openSidebar,
+  resizeSidebar,
+  sidebarWidth,
+  sidebar_min_width,
+} from "../state/sidebar.ts"
+import { claimsKeyboard, createSurfaceRegistry, type SurfaceMount } from "../pane/registry.ts"
+import { isSingle } from "../pane/tree.ts"
 import { resolveFocus } from "../pane/focus.ts"
 import { PaneHost } from "./PaneHost.tsx"
 import { hostSurfaces } from "./surfaces.tsx"
@@ -52,6 +62,7 @@ import {
   rememberModel,
   rememberMode,
   rememberSessionPins,
+  rememberSidebar,
   sessionPins,
   type ModelPick,
 } from "../state/tui_state.ts"
@@ -289,6 +300,39 @@ export function App(props: AppProps) {
   const surfaces = createSurfaceRegistry<JSX.Element>()
   const panes = createPaneStore(main_surface)
   const overlay = overlayAdapter(panes, (surface) => claimsKeyboard(surfaces, surface))
+  /**
+   * The sessions sidebar (T69) — the first real split, and the first thing on
+   * this screen whose state is NOT the pane tree.
+   *
+   * What is remembered is what was ASKED for, and the tree is reconciled to it.
+   * They come apart on a narrow terminal, where the sidebar hides itself
+   * without anybody deciding to: storing "is it open" in the tree alone would
+   * turn a window somebody dragged narrow into an answer they never gave, and
+   * the next wide window would open without it.
+   */
+  const remembered_sidebar = loadTuiState(props.statePath).sidebar
+  const [sidebarWanted, setSidebarWanted] = createSignal(remembered_sidebar?.open ?? false)
+  const [sidebarShare, setSidebarShare] = createSignal(remembered_sidebar?.ratio ?? default_sidebar_ratio)
+  const sidebarFits = () => screen().width >= sidebar_min_width
+  const sidebarOpen = () => isSidebarOpen(panes.tree())
+  /**
+   * The box the panes are laid out in, for the one question only placement can
+   * answer: which pane is to the left of this one (`moveFocus`).
+   *
+   * The terminal's own rectangle. The content area is narrower than the screen
+   * by the rows above and below it, but a row split divides the WIDTH and those
+   * rows take height — and a direction is decided by relative positions, which
+   * a uniform vertical offset cannot change.
+   */
+  const screenRect = () => ({ x: 0, y: 0, width: screen().width, height: screen().height })
+  createEffect(() => {
+    const want = sidebarWanted() && sidebarFits()
+    if (want === sidebarOpen()) return
+    // Closing hands the focus to whatever takes the box (`closePane`), so a
+    // sidebar that goes away while the keyboard is in it does not leave the
+    // keyboard nowhere.
+    panes.apply((tree) => (want ? openSidebar(tree, panes.main(), sidebarShare()) : closeSidebar(tree)))
+  })
   const keys = createKeymap(props.style.settings)
   // Opened by name, or a draft. Nothing else creates a session on the way in:
   // composition freezes at `session new` (physics #2), so a session made before
@@ -986,8 +1030,57 @@ export function App(props: AppProps) {
     if (key) folds.toggle(key, false)
   }
 
+  /**
+   * Show the sessions list beside the transcript, or put it away (T69).
+   *
+   * Three ways in, one verb: `/sidebar`, the key, and the handle on the status
+   * line. Nothing here touches the focus — showing a list and going to it are
+   * two gestures, and the one people do all day is the first.
+   */
+  const toggleSidebar = () => {
+    const next = !sidebarWanted()
+    setSidebarWanted(next)
+    rememberSidebar({ open: next, ratio: sidebarShare() }, props.statePath)
+    if (next && !sidebarFits()) {
+      setNotice(`the sessions sidebar needs ${sidebar_min_width} columns · it comes back when there is room`)
+    }
+  }
+
+  /**
+   * Move the keyboard to a pane, and hand it back to the box if that pane does
+   * not want it (T69).
+   *
+   * The second half cannot be left to the effect above. Solid flushes effects
+   * while the signal is still settling, and at that instant the composer's own
+   * `disabled` effect has not yet made the textarea focusable again — so a
+   * `focus()` from inside the flush is refused, and the box ends up enabled,
+   * blank and not listening. Every OTHER way of leaving a pane already tells
+   * the composer by hand (`closeOverlay`); these two are the ways T69 added.
+   */
+  const goToPane = (pane: string) => {
+    panes.focusOn(pane)
+    if (!overlay.active()) composer?.focus()
+  }
+  const moveKeyboard = (direction: "left" | "right") => {
+    panes.move(direction, screenRect())
+    if (!overlay.active()) composer?.focus()
+  }
+
+  /** `/sidebar <percent>`: drag the seam by saying where it should be. */
+  const setSidebarPercent = (percent: number) => {
+    const share = percent / 100
+    setSidebarShare(share)
+    setSidebarWanted(true)
+    panes.apply((tree) => resizeSidebar(tree, share))
+    rememberSidebar({ open: true, ratio: share }, props.statePath)
+  }
+
   const openOverlay = (kind: OverlayKind) => {
     if (browse.active()) leaveBrowse()
+    // A full-screen view is about the main pane, so that is where the keyboard
+    // has to be for it to be answerable — F2 pressed with the keyboard in the
+    // sidebar opens `/ext` in front of the transcript, not beside it.
+    panes.focusOn(panes.main())
     const opening = overlay.kind() !== kind
     overlay.toggle(kind)
     if (opening) composer?.blur()
@@ -1014,6 +1107,9 @@ export function App(props: AppProps) {
 
   const closeOverlay = () => {
     overlay.close()
+    // "Back to the transcript" includes bringing the keyboard back with it:
+    // this is also how a click in the sidebar ends (T69).
+    panes.focusOn(panes.main())
     composer?.focus()
       // `/ext` may have moved a membership, pin, or activation while it was up,
       // and the draft card's tool face is read off those files plus the active
@@ -1667,6 +1763,23 @@ export function App(props: AppProps) {
   createEffect(() => {
     if (plugins.panel()) composer?.blur()
     else if (!pending() && !overlay.active() && !browse.active() && !modePicker() && !agentPicker() && !withPicker()) {
+      composer?.focus()
+    }
+  })
+
+  /**
+   * The keyboard moved INTO a pane, or back out of it (T69).
+   *
+   * Until there was a second pane, every way of putting the keyboard in one
+   * went through `openOverlay`, which blurred the composer on the spot. Focus
+   * can now move on its own — Ctrl+←/→, a click in the sidebar — so the rule
+   * lives where the fact does: while a focused pane claims the keyboard, the
+   * box must stop saying "type here" (T28), and when it stops, the box gets it
+   * back if nothing else has taken it meanwhile.
+   */
+  createEffect(() => {
+    if (overlay.active()) composer?.blur()
+    else if (!pending() && !browse.active() && !modePicker() && !agentPicker() && !withPicker() && !plugins.panel()) {
       composer?.focus()
     }
   })
@@ -2386,6 +2499,25 @@ export function App(props: AppProps) {
       openOverlay("tasks")
       return true
     }
+    // Bare, the sidebar goes up or comes down. With a number it is a width —
+    // which is also the only way to say "and put it up", so a person who types
+    // `/sidebar 35` gets the sidebar rather than a remembered number and no
+    // list. The kernel of this is `resizeSidebar`, and the model clamps: 3 and
+    // 300 both land on a pane that can still be drawn.
+    if (command === "/sidebar") {
+      const width = words[1]
+      if (!width) {
+        toggleSidebar()
+        return true
+      }
+      const percent = Number(width.replace(/%$/, ""))
+      if (!Number.isFinite(percent)) {
+        setNotice(`/sidebar <percent> · a number between 10 and 90, or no argument to show or hide it`)
+        return true
+      }
+      setSidebarPercent(percent)
+      return true
+    }
     if (command === "/ext") {
       openOverlay("ext")
       return true
@@ -2571,7 +2703,12 @@ export function App(props: AppProps) {
   }
 
   const handleGlobalQuit = () => {
-    if (overlay.active()) {
+    // A FULL-SCREEN view is up, so there is nothing on this screen to stop and
+    // Ctrl+C is about leaving. Deliberately `kind()` rather than `active()`
+    // since T69: a focused sidebar also takes the keyboard, but the transcript
+    // and its step are still right there beside it, and the narrowing below —
+    // clear the draft, kill the step, then quit — is what Ctrl+C means then.
+    if (overlay.kind() !== null) {
       quit()
       return
     }
@@ -2633,11 +2770,36 @@ export function App(props: AppProps) {
       ["tasks", "tasks"],
       ["help", "help"],
     ]
-    const openerBindings = openers.flatMap(([action, kind]) => bind(action, () => openOverlay(kind)))
+    const openerBindings = [
+      ...openers.flatMap(([action, kind]) => bind(action, () => openOverlay(kind))),
+      // The sidebar is in this layer rather than the one below it because it is
+      // the same kind of gesture — "show me this" — and, like the openers, it
+      // still means something while a full-screen view is up: putting the rail
+      // away is exactly what somebody in `/sessions` might want to do.
+      ...bind("sidebar", toggleSidebar),
+    ]
     const offOpeners = keymap.registerLayer({
       priority: 100,
       enabled: () => !shortcutLayerBlocked(),
       bindings: openerBindings,
+    })
+
+    /**
+     * Move the keyboard between panes (T69).
+     *
+     * A layer of its own so it can be OFF while there is only one pane: Ctrl+←
+     * and Ctrl+→ are the composer's word-motion, and taking them permanently
+     * for a gesture that has nowhere to go would be the theft `closeTab`
+     * carefully avoids on a single tab.
+     */
+    const focusBindings = [
+      ...bind("focusLeft", () => moveKeyboard("left")),
+      ...bind("focusRight", () => moveKeyboard("right")),
+    ]
+    const offFocus = keymap.registerLayer({
+      priority: 95,
+      enabled: () => !shortcutLayerBlocked() && !isSingle(panes.tree()),
+      bindings: focusBindings,
     })
 
     const normalBindings = [
@@ -2684,6 +2846,7 @@ export function App(props: AppProps) {
     onCleanup(() => {
       offQuit()
       offOpeners()
+      offFocus()
       offNormal()
       offCloseTab()
       offInterrupt()
@@ -2928,13 +3091,38 @@ export function App(props: AppProps) {
         ref={(box) => (scroll = box)}
       />
     ),
-    sessions: () => (
+    sessions: (mount: SurfaceMount) => (
       <SessionsView
         ws={props.ws}
         currentId={live()?.id ?? ""}
+        focused={mount.focused}
         onOpen={openSession}
         onNew={() => startDraft()}
         onClose={closeOverlay}
+      />
+    ),
+    /**
+     * The same list, docked (T69). Its `onClose` is not "close the view" — it
+     * is "give the keyboard back", which is what Esc means in a pane that is
+     * still on screen after you leave it.
+     *
+     * The width is measured through the pane model rather than guessed from the
+     * ratio, so what the rail lays its columns out in is what the seam is at
+     * (`state/sidebar.ts`).
+     */
+    sidebar: (mount: SurfaceMount) => (
+      <SessionsView
+        ws={props.ws}
+        variant="sidebar"
+        width={sidebarWidth(panes.tree(), screen().width)}
+        currentId={live()?.id ?? ""}
+        focused={mount.focused}
+        onOpen={openSession}
+        onNew={() => startDraft()}
+        onClose={() => {
+          panes.focusOn(panes.main())
+          composer?.focus()
+        }}
       />
     ),
     ext: () => (
@@ -3042,7 +3230,7 @@ export function App(props: AppProps) {
                     rather than a switch over overlay names (goals/tui-shell.md
                     §5.1, T68). One pane today, so what this draws is what the
                     `<Switch>` before it drew, node for node. */}
-                <PaneHost tree={panes.tree()} registry={surfaces} onFocusPane={panes.focusOn} />
+                <PaneHost tree={panes.tree()} registry={surfaces} onFocusPane={goToPane} />
 
                 {/* A deliberate seam between the record and the controls: the
                     transcript/overlay scrolls above, while everything below is
@@ -3189,6 +3377,8 @@ export function App(props: AppProps) {
                   contextWindow={contextWindow()}
                   onPickModel={() => openOverlay("model")}
                   onScrollEnd={scrollToEnd}
+                  sidebarOpen={sidebarOpen()}
+                  onToggleSidebar={toggleSidebar}
                 />
               </box>
               </NavigateContext.Provider>

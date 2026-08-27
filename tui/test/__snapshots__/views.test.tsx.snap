@@ -13,6 +13,9 @@ exports[`/help lists the bindings that are actually in force 1`] = `
                                   to its models                                                   █ 
  f7                               /tasks — background commands still running, their logs, k to    █ 
                                   stop one                                                        █ 
+ f8                               /sidebar — the session list, docked beside the transcript       █ 
+ ctrl+left                        keyboard to the pane on the left · Esc sends it back            █ 
+ ctrl+right                       keyboard to the pane on the right                               █ 
  f1                               this page                                                       █ 
  pageup                           scroll the transcript back a page                               █ 
  pagedown                         scroll it forward a page                                        █ 
@@ -40,10 +43,12 @@ exports[`/help lists the bindings that are actually in force 1`] = `
                                   /model                                                          █ 
  click ask / unsafe               open the permission-mode picker, the same as /mode              █ 
  click a tab / a pane             go to it                                                        █ 
- click [x]                        in /ext's tools pane: pin or unpin that tool                    █ 
- drag over text                   select it; releasing copies it to the clipboard                 █ 
-                                                                                                  █ 
- slash commands                                                                                   █ 
+ click the sidebar mark           at the head of the line under the composer: show or hide the    █ 
+                                  session list                                                    █ 
+ click [x]                        in /ext's tools pane: pin or unpin that tool                    ▀ 
+ drag over text                   select it; releasing copies it to the clipboard                   
+                                                                                                    
+ slash commands                                                                                     
  /model                           pick the model the next session runs on                           
  /mode [ask|unsafe]               ask before every tool call, or run them all unreviewed; no        
                                   argument opens the picker                                         
@@ -54,6 +59,8 @@ exports[`/help lists the bindings that are actually in force 1`] = `
                                   \`/clear\` is another name for it                                   
  /sessions [<id>]                 everything in .nulya/sessions · Enter opens one                   
                                   an id opens that one · \`/resume\` is another name for it           
+ /sidebar [<percent>]             the session list, docked down the left edge                       
+                                  a number sets its width                                           
  /ext                             extensions: versions, what is active, what it is used for         
  /tasks                           background commands: what is running, its log, k stops one        
  /usage                           what this session cost, and the workspace's tool-usage journal    
@@ -75,8 +82,6 @@ exports[`/help lists the bindings that are actually in force 1`] = `
  /help                            every key and every command                                       
  /quit                            leave                                                             
  /<package command>               declared by an active extension · /ext lists them                 
- /<skill> [args]                  load an active skill's body as a user turn                        
-                                  \`nulya skill list\` names them                                     
  j/k · PgUp/PgDn scroll · Esc close                                                                 
 "
 `;

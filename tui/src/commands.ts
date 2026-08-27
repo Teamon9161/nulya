@@ -63,6 +63,11 @@ export const commands: Command[] = [
     args: "[<id>]",
     what: "everything in .nulya/sessions · Enter opens one · an id opens that one · `/resume` is another name for it",
   },
+  {
+    name: "/sidebar",
+    args: "[<percent>]",
+    what: "the session list, docked down the left edge · a number sets its width",
+  },
   { name: "/ext", what: "extensions: versions, what is active, what it is used for" },
   { name: "/tasks", what: "background commands: what is running, its log, k stops one" },
   { name: "/usage", what: "what this session cost, and the workspace's tool-usage journal" },

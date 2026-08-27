@@ -149,6 +149,8 @@ tui/
  unsafe · claude-sonnet-5 (high) · tools 1+3                                       ctx 61% · step 4
 ```
 
+**内容区是一棵 pane 树**（T68/T69，goals/tui-shell.md §5.1）：上面画的是它的退化形——一个 pane，一个 surface。`/sidebar`（`F8`，或状态行行首那个 `◧`）在它左边劈出第二个 pane，装 sessions 列表的窄宽变体（§5.4）；`Ctrl+←/→` 在 pane 之间移动键盘，`Esc` 从侧边栏回主 pane。**开侧边栏不移动焦点**，所以打字照常进输入框；只有人把键盘送进去，它才拿键盘（那一刻输入框的边框退回 `hairline`，§6.1 第 5 条那个唯一信号照常成立）。整屏 overlay（`F2`/`F3`/…）永远开在**主 pane**里，与键盘当时在哪无关。
+
 四块：transcript（`scrollbox`，sticky bottom，鼠标滚轮 / PgUp / PgDn；离开底部时状态栏出现 `↓ new` 提示）、**输入框上面那一行**（0 或 1 行，只在有事发生时存在，§4.4b）、composer（`textarea`）、**输入框下面那一行**（1 行，§4.5）。没有边框，用两条 hairline 分隔；空状态首屏是一个小 wordmark（`ascii-font`）+ cwd + 几条 `/` 命令 + **一条 tip**（T38）。
 
 **只有一条线，是输入框自己的边框**（T26）：TabBar（>1 个 tab 时）· transcript · 输入框 · 状态行，四块之间原来有三条通栏 hairline，现在一条都没有——见 §6。**没有标题行**（T22）。原来那行是 `nulya · <session id> · <profile> · <model> · effort · tools · skills`：给程序看的，不是给人看的——session id 人读不出也用不上（要它就去 `/sessions`），`nulya` 是废话，provider 名字紧挨着 model id 也是。它说的唯一有用的东西是**模型**，而模型该在人打字时看得见的地方——输入框底下，tcode 就是这么放的。TabBar 仍在（>1 个 tab 时），但 tab 名是**模型 + 需要时 `#n`**、draft 标 `(new)`，不是 session id。
@@ -282,6 +284,7 @@ registry 按 shell 命令前缀识别，头行抽关键事实（抽不到就退�
 **id 不在行里，印在标题行上**（T47）：它是这张表里唯一一样人读不出、却偶尔必须粘贴的东西（`nulya session events <id>` / `/outcome` / 发给别人），所以只印**光标那一行**的那一个，跟着 `j`/`k` 走。它挨着 `sessions · N` 而不是靠右边距：id 的 hash 不定长，右对齐等于光标每动一下整行跟着动（T12 那个尾空格 bug 的同一个形状，往上挪了一行）。
 **时间改成「多久以前」，并画在整行最右**（T47）：`08-16 09:12` 是个时间戳——正确，而读的人还得拿它减一次今天，才能得到他唯一想要的那个答案；一周以内说距离，超过一周距离不再好记，退回 `MM-DD`。画在 chip **后面**是为了让它真的是一列：chip 时有时无，一个会被 chip 挤得左右移动的钟不是列。列宽取当屏所有行里最宽的那个（`just now` 与 `3d ago` 不一样长，写死一个数字迟早对不上）。
 列表本身一次进程 + 读全部 session 文件，所以 8s 刷一次；`● live` 只是锁探针（不开进程），1.5s 刷一次。
+**同一张表还有第二种呈现：docked 变体**（T69）——`/sidebar` / `F8` / 状态行的 `◧` 把它停在屏幕左边缘的一个 pane 里（缺省宽度 1/4，`/sidebar <percent>` 改）。同一个组件、同一批 rows、同一个光标、同一条两次点击的法条；变的只有宽度，以及**宽度决定一行上还剩什么**（`sidebarRowPlan`：钟 → verdict → `● live` → `▎ 就是这一个`，按这个顺序让位，第一句话永远留得下 8 格）。它**不**替代整屏那一个：整屏是键盘的读法，rail 是鼠标与余光的读法。刷新更慢（列表 20s、锁探针 3s——overlay 只在有人看的时候在，rail 整天都在），但前面那个 tab 一换就立刻重读。
 
 ### 5.5 Sub-agent
 
@@ -461,6 +464,7 @@ PLAN §3.2 早就把答案写死了——**一个 agent 就是 `session new` 的
 | `↗` | `->` | 去别处：卡片上唯一那条可点的链接（`open <id> in a tab`，T43） |
 | `⠋` | `-\|/` | spinner（只在 `WorkingStatus`） |
 | `✻` | `*` | tip：屏幕在跟人说话，不是发生了什么（T38） |
+| `◧` | `[` | **sessions 侧边栏的把手**（T69）：左半填实的方块 = 屏幕左边缘停着一块 pane。只画在状态行行首那两格，点它开/关。**它不说侧边栏是开是关**——侧边栏在不在屏幕上是它自己以整块宽度回答的问题，把手再答一遍就是同一个问题的第二个答案（§6.1 第 4 条） |
 | `◈` | `#` | **这一场以什么身份/档位在跑**：选它的那些对话框标题（`/model` `/mode` `/agent` `/with`）、状态栏「戴着谁」的 chip、包自己的 panel 标题。列 store 或 journal 的面板是「地方」，标题**不带记号**（T31）；审批对话框也不带——它不是选身份，是**一个 call 被裁决**，颜色（warn）说完了 |
 | `‹ ›` | `<` `>` | `/model` 的 effort 转盘 |
 | `✓` | `*` | **现在生效的那一个**：`/model` 的 current model、`/ext` 版本线的 `✓ current`、`/mode` 当前档（一律 `ok` 色） |
@@ -2151,3 +2155,30 @@ T33 把 `internal` 行折起来时给的理由是**数量**（六个 driver tool
 **测试（+27，两份新文件）**：`test/panes.test.ts` 钉纯模型三样——树（操作不会留下画不出来的树；两个 pane 摆放的几何就是那条缝所在的几何；小到分不开的盒子给一个 pane 零格而不是撒谎）· 注册表（首个持有者胜；没注册的 surface 一个键都不认领——包加载失败不该能吞掉每一次击键）· 仲裁器（**顺序**本身；chord 越过所有认领者）。`test/panehost.test.tsx` 钉两条模型自己说不出的话：**单叶树与直接渲染那个 surface 逐帧相同**（对着一次**参考渲染**断言而不是对着一份存下来的帧——这样即使全套快照都围着一个 wrapper 重录过，它依然会红），以及**点击落进画在那里的那个 pane、且下面那一行照样收到同一次点击**。
 
 **没做**（都是 S1b / S2）：侧边栏与任何新 UI（理想情况下 S1a 不产生新像素，所以 §6 九条这轮没有新的适用对象）· plugin API 的 T2 与 chip（`tui/plugin-api.d.ts` 一个字节没动）· detach / tab-in-pane / 浮动（§5.1b 写死的边界）· 分屏的按键与 `tui.toml` 语法（没有第一个 consumer 之前，一个开分屏的键盘手势是在给一个还不存在的布局起名字）。**给 S1b 的提醒**：`ui/rows.ts` 的 `onClick(action, stop = true)`（`/ext` 的 checkbox 是唯一一处）会 `stopPropagation`，所以点在它上面**不会**顺带聚焦那个 pane——真开出第二个 pane 时这是要补的一处，判据是"聚焦发生在按下那一路上"。
+
+### T69 · S1b：sessions 侧边栏——pane 骨架的第一个消费者（2026-08-27）
+
+**内核零改动**（`src/` 一个字节没动），`tui/plugin-api.d.ts` 一个字节没动；`bun test` 527 → 543 pass（新 16 条）、`tsc` 干净。做的是 `goals/tui-shell.md` §5.4 的 **S1 后一半**：第一个真实的 split，也是 T68 那套 pane 树 / registry / 焦点仲裁 / `PaneHost` 的第一次被使用。不做 S2（chip / 包的 T2 面）。
+
+**尺子**：S1a 的验收标准是"分屏能力加进来之后屏幕上一个像素都没动"；S1b 的是**"侧边栏不是宿主里的一个新概念"**——它必须整个是"有一个 row split，第一个孩子显示 `host:sidebar`"，没有 `PaneHost` 的特判、没有第二套布局、没有一个 `if (sidebar)`。`state/sidebar.ts` 因此全是 `PaneTree → PaneTree` 的纯函数，宿主只拿着一个"人要不要它"的布尔去 reconcile。
+
+**六块**：
+
+1. **`state/sidebar.ts`——侧边栏是一次 pane 操作**（纯函数，`openSidebar` / `closeSidebar` / `sidebarRatio` / `resizeSidebar` / `sidebarWidth` / `sidebar_min_width`）。两个决定：① **`openSidebar` 带 `focusNew: false`**——这就是 T68 那句"侧边栏没有理由拦住人打字"落地的地方（见下面那条偏离）；② **`sidebarWidth` 用 `layout()` 量，不自己算** `round(width × ratio)`：第二份同样的算术就是第二个迟早会和画面吵架的答案，而窄宽变体的列宽全靠这个数。`PaneStore` 为此多一个 `apply(op)`——纯操作住在别处，store 只提供那一道通往 signal 的门，否则每来一个手势就要给 store 加一个动词。
+2. **`host:sidebar` 是第二个 surface，不是 `host:sessions` 的第二次挂载**。两者宽度不同、画的东西不同，而**决定性的那一样是"显示它要不要拿走键盘"**——那是注册表里的一个字段，一个 id 只能有一个答案。
+3. **窄宽变体在 `SessionsView` 里，不是第二个组件**（`variant="sidebar"`）：rows、光标、刷新、两次点击的法条全是同一份；两个组件就是这些全都有两个答案。变的只有宽度，以及纯函数 **`sidebarRowPlan`**——一行从外往里让位（钟 → verdict → `live` → `▎`），第一句话保底 8 格。理由写在函数头上：一行**就是**那一场的第一句话（T47），所以让位的只能是它周围的格子。**一处翻车**：`if (docked()) return dockedBody()` 一开始写在 `useKeyboard` **上面**，于是 rail 一个键都不认——`j`/`Esc` 全落空而光标照画（光标只看 focus）。现在那一行在 `useKeyboard` 下面，并且注释写明了为什么。
+4. **三个入口**：`/sidebar`（裸的开关，`<percent>` 顺带改宽度并打开）· **`F8`** · **状态行行首的 `◧`**。为什么是 F8 而不是人人都会的 `ctrl+b`：composer 的 textarea 默认把 `ctrl+b` 绑成 move-left，而这个开关**永远有意义**，没法像 `closeTab` / `interrupt` 那样"没意义时把键让回去"——一次永久的抢键不该是缺省（想要的人在 `tui.toml` 写一行）。同理 `Ctrl+←/→`（pane 间移动键盘）挂的那一层 **只在不止一个 pane 时开**，平时它们仍是 textarea 的 word-motion。
+5. **把手为什么在状态行行首**：`◧` 开的是屏幕**左边缘**那块 pane，而位置是终端仅有的四样语法之一，所以它只能在最左边；顺带让状态行也有了每个 list 行都有的那两格 gutter（§6.5"内容从第 3 列起"），mode chip 因此右移两格。还有一条不是审美的理由：`goals/tui-shell.md` §4 把 `below-left`/`below-right` 那条 chip 带留给**包**，而宿主 chrome 不排在扩展后面等位置（§1 推论一）——它在包永远够不到的地方。**它不表示开还是关**：侧边栏在不在，屏幕已经用四分之一的宽度回答了。<60 列时把手不画，因为那时侧边栏根本开不出来。
+6. **状态：人要什么 vs 屏幕上是什么**。`tui-state.json` 记的是 `{open, ratio}` = **要什么**；窄终端（<60 列）自己把 rail 收起来，宽回去再放出来。把"收起来了"当成人的答案记下去，就把一次拖窗口变成了一个从没做过的决定。
+
+**T68 点名的那个洞**（`ui/rows.ts`）：`onClick(action, stop)` 从此**只认领松开、不认领按下**。判据是 T68 自己给的那条——聚焦发生在按下那一路上，而 `stop` 要防的是**外层行动作**，行是在松开时才动作的。从前多停一次按下不花钱，因为行上面只有行；现在行上面是 pane，于是"在没聚焦的 pane 里点一个 checkbox"会把框打上而键盘没跟过来，而点一下正是"我在这儿工作"最明确的手势。外层照旧收到按下、记下起点、收不到松开，所以照旧不动作。回归测试验证过在旧代码上会红。
+
+**偏离 prompt 的一处，写清楚**：prompt（与 T68 的预告）说侧边栏 `claimsKeyboard: false`；落地成 **`true`**。理由是这个字段自己的定义——"聚焦这个 pane 会不会把键盘从 composer 拿走"——而一个用 `j` 驱动的列表，诚实答案是会。写成 `false` 又要 `j/k/Enter/Esc` 能用，等于**输入框还在闪、而 `j` 被别人吃掉**：那不是折中，是陷阱。T68 真正要保的那句"没有理由拦住人打字"落在**焦点的放置**上而不是这个布尔上：`openSidebar` 用 `focusNew: false`，所以键盘只会因为有人送它过去才过去，`Esc` 送回来。连带三处：`overlayAdapter` 的 `kind()/open()/close()` 改读**主 pane**（哪个整屏视图在前面是主 pane 的事实，F2 不该开在键盘碰巧待着的那条 rail 里），`active()` 仍读**焦点 pane**（它答的是"输入框还有没有键盘"）；`handleGlobalQuit` 的 `overlay.active()` 改成 `overlay.kind() !== null`——整屏视图在前面时没有东西可停，Ctrl+C 是"离开"，而一条被聚焦的 rail 旁边 transcript 和它的 step 还在，那时 Ctrl+C 仍该走"清草稿 → 杀 step → 才是退出"那条收窄。
+
+**顺手修的一个真 bug**：键盘**离开** pane 时输入框拿不回来。Solid 的 effect 在信号还在结算时就 flush，那一刻 composer 自己的 `disabled` effect 还没把 textarea 变回 focusable，于是从 effect 里发的 `focus()` 被拒——盒子变成"能用、空的、不听键"。别的每一条离开 pane 的路本来就手动通知 composer（`closeOverlay`），补的是 T69 新加的那两条（`goToPane` / `moveKeyboard`）。**另一件事没修，因为不是这一轮的**：点 transcript 空白处会让输入框失焦——单 pane、没有侧边栏、S1b 之前就如此。
+
+**设计语言（§6 九条）**：新东西只有三样——rail、把手、rail 的 footer。① 颜色：把手开着 `accent.evolve`（可点的去处）/ 关着 `faint`（家具），一屏 accent 仍 ≤3；NO_COLOR 下把手形状不变而**状态由 rail 本身说**，没有只靠颜色区分的两件事。② 对齐：钟按当屏最宽的那个补齐（不然它不是列），marker 靠右成列，rail 的 gutter 两格、内容第 3 列起。③ 留白：**两个 pane 之间不画线**——这个前端只有一样有边框的东西（§6.1 第 5 条），所以边界只能是空气，而**一格空气不是边界**，rail 因此右侧留 2 格。④ 没有的不占列：footer 只在 rail 拿着键盘时画（那时那三个键才是真的），把手 <60 列不画，钟/verdict/live 放不下就整格消失。⑤⑥ 无新边框；新 glyph `◧` 已进 §6.3 表。⑦ 全部 `fit`，不换行。⑧ rail 有自己那一行 dim 的 `j/k · Enter · Esc`。⑨ 没有新动效。§6.5 上 rail 用的是 **overlay 那套骨架**（标题 · 一个空行 · 主体 · 底部一行），不发明第三种密度。
+
+**测试**（`test/sidebar.test.tsx` 15 条 + `test/panehost.test.tsx` 1 条）。模型那半不开终端：开/关/再开的幂等、关掉时焦点交给谁、seam 两边都认同一个 `share`、`sidebarWidth` 与 `layout` 同源、`sidebarRowPlan` 的让位顺序与保底、**`overlayAdapter` 的两个 pane 分工**、`tui-state` 的半个 slot 也读得回。屏幕那半对着真 workspace 的真帧：rail 与 transcript 同屏且盒子照样收字、120 列多出钟而 80 列没有、窄终端不画且没忘记、记住的状态开屏就在、点两下换 session、**键盘只在被送进去时才在 rail**（`Ctrl+←` → `j` 动光标 → `Esc` 回来 → 草稿一个字没丢）。快照两帧（80 / 120），**先把帧里的钟停掉**（composition 卡的日期与 `just now`）——快照是拿来钉版式的，钉上一只走着的表就是每分钟红一次。
+
+**给 S2 的提醒**：① 侧边栏是**第一个不是整屏、却会拿键盘的面**，包的 T2 面是第二个——`claimsKeyboard` 就是"聚焦时拿不拿"，别把它读成"是不是整屏"；"是不是整屏"今天由 `overlay_surfaces` 这张表回答，真需要时再给 surface 加字段，别把两件事挤进一个布尔。② 一个包的面要拿键盘，就必须像 `SessionsView` 这样**自己按 `mount.focused` 关掉自己的监听**：`useKeyboard` 是全局的，同屏两个面各听各的键会同时开火（`SurfaceDefinition.onKey` 存在正是为了让包不必装全局监听器）。③ 任何搬进 pane 的面都要**从 pane 拿宽度**（`sidebarWidth` 这条路），`useScreen()` 从现在起答的是终端不是它的盒子。④ 打开一个面 ≠ 把键盘送过去，这两件事分开写；送过去的那一半记得把输入框还回来（`goToPane`）。

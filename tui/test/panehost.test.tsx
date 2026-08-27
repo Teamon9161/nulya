@@ -19,6 +19,7 @@ import { testRender } from "@opentui/solid"
 import { PaneHost } from "../src/ui/PaneHost.tsx"
 import { createSurfaceRegistry, host_owner, type SurfaceRegistry } from "../src/pane/registry.ts"
 import { singlePane, splitPane, type PaneTree } from "../src/pane/tree.ts"
+import { onClick } from "../src/ui/rows.ts"
 import { settle } from "./support.ts"
 
 /** Two surfaces that say which one they are and nothing else. */
@@ -107,6 +108,46 @@ test("a click focuses the pane it landed in, and the row under it still acts on 
     await setup.mockMouse.click(width - 2, 0)
     await settle(setup)
     expect(tree().focus).toBe("two")
+  } finally {
+    setup.renderer.destroy()
+  }
+})
+
+test("a row action that claims the click still lets the pane under it take the keyboard", async () => {
+  // The hole T68 left for S1b: `onClick(action, true)` — the `/ext` checkbox —
+  // used to stop propagation on the way DOWN as well, which is where a pane
+  // focuses itself. Ticking a box in an unfocused pane would then leave the
+  // keyboard behind, and the fix is that `stop` claims the RELEASE: nothing
+  // above has acted yet on the press.
+  const ticks: string[] = []
+  const registry = createSurfaceRegistry<JSX.Element>()
+  for (const id of ["left", "right"]) {
+    registry.register({
+      id,
+      title: id,
+      owner: host_owner,
+      claimsKeyboard: false,
+      render: () => (
+        <box flexGrow={1} flexDirection="column">
+          <text {...onClick(() => ticks.push(id), true)}>[x] {id}</text>
+        </box>
+      ),
+    })
+  }
+  const [tree, setTree] = createSignal<PaneTree>(
+    splitPane(singlePane("left", "one"), "one", { direction: "row", surface: "right", id: "two", splitId: "s" }),
+  )
+  const setup = await mount(() => (
+    <PaneHost tree={tree()} registry={registry} onFocusPane={(pane) => setTree((now) => ({ ...now, focus: pane }))} />
+  ))
+  try {
+    await settle(setup)
+    expect(tree().focus).toBe("two")
+    await setup.mockMouse.click(2, 0)
+    await settle(setup)
+    // The box was ticked AND the keyboard came with the click.
+    expect(ticks).toEqual(["left"])
+    expect(tree().focus).toBe("one")
   } finally {
     setup.renderer.destroy()
   }
