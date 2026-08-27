@@ -166,6 +166,13 @@ fn consider(
         // line can be markdown structure — so what the project wrote at the
         // front is what gets quoted.
         if (std.mem.trim(u8, raw, " \t\r\n").len == 0) continue;
+        // Passed over rather than refused, and that is the difference between
+        // the two checks: `session new --prompt` rejects a file that is not
+        // text because nothing downstream can carry it, while here a project
+        // whose `AGENTS.md` is somehow binary should still get a session — one
+        // unusable instruction file costs a section, not a session. It is also
+        // what `read_to_string` gives tcode for free.
+        if (!std.unicode.utf8ValidateSlice(raw)) continue;
         try out.append(alloc, .{
             .display = try std.fmt.allocPrint(alloc, "{s}{s}", .{ show_at, candidate }),
             .text = std.mem.trimEnd(u8, raw, " \t\r\n"),

@@ -1316,6 +1316,19 @@ test "session cli: --prompt freezes a file's bytes into the header, blocks land 
         const empty = try runCliStderr(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--prompt", "empty.md" }, &.{});
         defer alloc.free(empty);
         try std.testing.expect(std.mem.indexOf(u8, empty, "empty.md") != null);
+
+        // A `--prompt` that is not text is refused for the same reason and at
+        // the same moment. It has to be caught HERE: `std.json.Stringify`
+        // writes invalid UTF-8 as an array of numbers rather than a string, so
+        // accepting it produces a header that no longer matches the schema and
+        // a provider request body no real model API will take — a session that
+        // creates, resumes, and can never take a step.
+        try ws.writeFile(io, .{ .sub_path = "binary.md", .data = "system prompt\xff\xfe\n" });
+        const binary = try runCliStderr(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--prompt", "binary.md" }, &.{});
+        defer alloc.free(binary);
+        try std.testing.expect(std.mem.indexOf(u8, binary, "binary.md") != null);
+        try std.testing.expect(std.mem.indexOf(u8, binary, "UTF-8") != null);
+
         try std.testing.expectEqual(before, try countSessions(io, ws));
 
         const run = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--prompt", "nope.md" });

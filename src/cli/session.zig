@@ -243,6 +243,22 @@ fn promptRefs(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !?
             try printErrFmt(alloc, io, "--prompt {s}: file is empty\n", .{path});
             return null;
         }
+        // Text, not bytes — and the boundary is here because everything
+        // downstream of it assumes so. `std.json.Stringify` writes a `[]const
+        // u8` that is not valid UTF-8 as an ARRAY OF NUMBERS rather than a
+        // string, and it does that in both places these bytes are serialized:
+        // the durable header stops being what §3's schema says it is (readable
+        // only by a parser that happens to accept the same fallback, so not by
+        // anything else looking at the file), and the provider request body
+        // carries `"text":[89,111,…]`, which every real model API rejects.
+        // Refusing costs a message; accepting creates a session that looks
+        // fine, resumes fine, and cannot take a single step against a real
+        // model.
+        if (!std.unicode.utf8ValidateSlice(bytes)) {
+            alloc.free(bytes);
+            try printErrFmt(alloc, io, "--prompt {s}: not valid UTF-8\n", .{path});
+            return null;
+        }
         // The label the block carries for the rest of the session's life. The
         // kernel never reads it; whoever wrote the file decides what it means.
         try out.append(alloc, .{ .source = try alloc.dupe(u8, std.fs.path.stem(path)), .text = bytes });

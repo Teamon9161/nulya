@@ -65,7 +65,15 @@ pub fn renderGit(alloc: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, repo: 
     if (git.ask(alloc, io, &.{ "branch", "--show-current" })) |branch| {
         try w.print("branch: {s}\n", .{if (branch.len == 0) "(detached HEAD)" else branch});
     }
-    if (git.ask(alloc, io, &.{ "log", "-1", "--format=%h %s" })) |head| {
+    // The subject is truncated BY GIT, in the format string. It is the one
+    // field here with no bound of its own — a commit subject can be megabytes,
+    // `bounded` allows four of them, and this section writes what it gets — so
+    // without this a single absurd commit produces a document past
+    // `prompt.max_system_prompt_bytes`: `render` succeeds and `session new
+    // --prompt` then refuses, the same shape as the fence bug in
+    // `instructions.zig`. `%<(n,trunc)` cuts at n columns and says so with
+    // `..`; the padding it adds to shorter subjects is removed by `ask`.
+    if (git.ask(alloc, io, &.{ "log", "-1", "--format=%h %<(240,trunc)%s" })) |head| {
         if (head.len != 0) try w.print("last commit: {s}\n", .{head});
     }
 
