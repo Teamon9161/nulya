@@ -120,7 +120,7 @@ task_finished    { task, exit_code, text }                              ← 后�
 
 ### 3.3 派生视图
 
-UI / trajectory / metrics 是 ledger 的投影，不持久化 mutable 状态。**证据走 ledger 之外的 journal**，本节这两条都是 append-only JSONL、都在 workspace 的 `.nulya/` 下（第三条 `trusted-stores.jsonl` 记的不是证据而是一次授权，因此在 **user** 层，§9），共用同一套文件纪律（`journals/journal.zig`：一行一条；**多写者**——每个 `session step` / `ext run` / `session outcome` 进程都写同一个文件，所以 append 全程持有旁车 `<journal>.lock` 的排他 lease（阻塞式，临界区只有一次 stat + 一次写），两个 append 不可能落到同一 offset；append 前修残尾；**读端不拿锁、忽略最后一个 `\n` 之后的残尾**（被打断或正在进行的那次 append），完整但畸形的行仍是 consumer 的显式错误——宽恕的是被打断的写、不是坏 journal，所以 `session list` 不会在一次 crash 后到下一次写之前一直失败；文件不存在 = 还没有事实；schema 各自持有；目录不存在意味着什么由各 journal 自己定——workspace journal 当 host fault，user 层的 trust journal 当"还没有记过"）**与同一个时钟**（`journal.rfc3339Now`：三条 journal 的 `at` 与 session header 的 `created` 是同一个格式的同一个函数，所以它们读得进同一条时间轴）：
+UI / trajectory / metrics 是 ledger 的投影，不持久化 mutable 状态。**证据走 ledger 之外的 journal**，本节这两条都是 append-only JSONL、都在 workspace 的 `.nulya/` 下（第三条 `trusted-stores.jsonl` 记的不是证据而是一次授权，因此在 **user** 层，§9），共用同一套文件纪律（`journals/journal.zig`：一行一条；**多写者**——每个 `session step` / `ext run` / `session outcome` 进程都写同一个文件，所以 append 全程持有旁车 `<journal>.lock` 的排他 lease（阻塞式，临界区只有一次 stat + 一次写），两个 append 不可能落到同一 offset；append 前修残尾；**读端不拿锁、忽略最后一个 `\n` 之后的残尾**（被打断或正在进行的那次 append），完整但畸形的行仍是 consumer 的显式错误——宽恕的是被打断的写、不是坏 journal，所以 `session list` 不会在一次 crash 后到下一次写之前一直失败；文件不存在 = 还没有事实；schema 各自持有；目录不存在意味着什么由各 journal 自己定——workspace journal 当 host fault，user 层的 trust journal 当"还没有记过"）**与同一个时钟**（`journal.rfc3339Now`：三条 journal 的 `at` 与 session header 的 `created` 是同一个格式的同一个函数，所以它们读得进同一条时间轴）。**这套纪律经 `nulya journal append|read`（§14）暴露给 extension**：`journals/journal.zig` 是 `src/` 内部模块，独立进程写的 extension（尤其脚本 extension）import 不到它——`extensions/agent/src/record.zig` 的第四条 journal 就是手抄这份纪律实现的（模块头注释写着「纪律照抄 `src/journals/journal.zig` 但不 import `src/`」）。`journal append <path>` 从 stdin 读一整条记录（不走 argv——同 `extensions/agent` 的 message-file 先例，Windows 命令行有上限）、要求它去掉结尾换行后是单行合法 JSON，否则原封不动拒绝、不写一个字节；`journal read <path>` 按同一套读纪律打印全部完整行，文件不存在是空输出、exit 0。CLI 只是这两个函数的直接调用（`cli/journal.zig`），没有第三个动词——mailbox 那套 put/peek/ack 是更强的投递契约，等第二个消费者出现再抽象。
 
 | journal | 一行 | 谁写 | 为什么不是 ledger 事件 |
 |---|---|---|---|
@@ -944,6 +944,8 @@ nulya task run [--session <id>] [--cwd <dir>] [--timeout-ms N] -- <command>
           | kill <task>                                   ← 写 kill 标记（幂等）；supervisor 杀整棵树
           | retarget <task> --to <id>                     ← 把结果改投另一场 session（`extensions/compact` 的用法）
           | supervise …                                   ← internal：`startShellTask` 起的那个进程，不给人用
+nulya journal append <path>                               ← stdin 读一条记录（去掉结尾换行后须是单行合法 JSON），持锁 append；不满足即拒、不写一个字节
+          | read <path>                                   ← 打印全部完整行，忽略残尾；文件不存在 = 空输出、exit 0
 nulya config show [--json]                               ← 有效配置链的投影：profiles（含 credential 是否可用）+ 模型目录；无 secret，一个字节都不联网
 nulya config refresh [--json]                            ← 先向订阅端点要一次今天的模型表（唯一联网的一步），再照打同一份投影
 nulya src [path] [--tests]                               ← 打印本二进制内嵌的 src 源码（无参数 = 列全树）

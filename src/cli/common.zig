@@ -233,6 +233,12 @@ pub const task_usage =
     \\
 ;
 
+pub const journal_usage =
+    \\  nulya journal append <path>                       append one JSON-line record read from stdin, lease-serialized
+    \\  nulya journal read <path>                         print every complete line; a missing file is empty output, exit 0
+    \\
+;
+
 pub const config_usage =
     \\  nulya config show [--json]                        effective profiles, model catalog and pins; never a secret
     \\  nulya config refresh [--json]                     ask a subscription endpoint for today's models, then show
@@ -265,7 +271,7 @@ pub fn usage(io: std.Io) !u8 {
         \\
         \\sessions — composition freezes at `new` and never changes; only `step` writes the file
         \\
-    ++ session_usage ++ task_usage ++
+    ++ session_usage ++ task_usage ++ journal_usage ++
         \\
         \\reading this harness
         \\

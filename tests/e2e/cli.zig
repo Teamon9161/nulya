@@ -53,7 +53,7 @@ test "cli help: help / --help / -h print the same usage covering every verb fami
         "session cancel", "outcome",    "session list", "--image",    "config show",
         "config refresh", "skill load", "src",          "toolchain",  "help",
         "demo",           "task run",   "task list",    "wait",       "retarget",
-        "--running",
+        "--running",      "journal append", "journal read",
     }) |needle| {
         std.testing.expect(std.mem.indexOf(u8, help.stdout, needle) != null) catch |err| {
             std.debug.print("`nulya help` never mentions '{s}'\n", .{needle});
@@ -68,8 +68,10 @@ test "cli help: help / --help / -h print the same usage covering every verb fami
     // family, compressed to two entries whose continuation lines still have to
     // carry `wait`'s three exit codes, which is the one thing a driver cannot
     // guess; `session new --bare`, +1 — a session that ignores the config's two
-    // standing lists cannot be inferred from the other flags).
-    try std.testing.expect(std.mem.count(u8, help.stdout, "\n") <= 52);
+    // standing lists cannot be inferred from the other flags; `nulya journal`,
+    // +2 — the append-only JSONL discipline exposed to extensions, one line per
+    // verb since neither takes a flag worth documenting).
+    try std.testing.expect(std.mem.count(u8, help.stdout, "\n") <= 54);
 
     // The two flag spellings a terminal user reaches for reach the same text.
     for ([_][]const u8{ "--help", "-h" }) |flag| {
