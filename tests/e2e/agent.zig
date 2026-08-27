@@ -934,6 +934,145 @@ test "bundled agent: an interrupt stops the run in flight — the step is killed
     }
 }
 
+test "bundled agent: the record is what a delegation is driven by — its budget and ceiling survive the definition being deleted, and a hand-written run cannot widen that ceiling or point it at another conversation" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const ref = try buildBundled(alloc, io, ws, exe_abs, "agent");
+    defer alloc.free(ref);
+
+    // One read-only persona with a budget of one follow-up. Every number here is
+    // read from this file EXACTLY once — when the delegation opens.
+    try ws.createDirPath(io, ".nulya/agents");
+    try ws.writeFile(io, .{
+        .sub_path = ".nulya/agents/frozen.md",
+        .data = "---\ndescription: a frozen worker\npermissions: readonly\nmax_exchanges: 1\nmax_steps: 1\n---\nYou only read.\n",
+    });
+
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(new.stdout);
+    const parent = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(parent);
+    const session_file = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{parent});
+    defer alloc.free(session_file);
+    const in_parent: []const EnvPair = &.{
+        .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SCRIPTED_MODE", .value = "finish" },
+    };
+
+    const opened = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"frozen\",\"task\":\"first\"}" }, in_parent);
+    defer alloc.free(opened.stdout);
+    try std.testing.expectEqual(@as(u8, 0), opened.code);
+    const d = try delegationOf(alloc, opened.stdout);
+    defer alloc.free(d);
+    const child = try remoteOf(alloc, opened.stdout);
+    defer alloc.free(child);
+    {
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", wait_budget_ms });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+    }
+    // The opening row froze the policy, not just the identity.
+    {
+        const rows = try readRecord(alloc, io, ws, d);
+        defer alloc.free(rows);
+        try std.testing.expect(std.mem.indexOf(u8, rows, "\"permissions\":\"readonly\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rows, "\"max_exchanges\":1") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rows, "\"max_steps\":1") != null);
+    }
+
+    // ① The definition is gone. A delegation is a conversation that already
+    //    exists — its persona is in the child's header, its ceiling and its
+    //    budget are in the record — so deleting the file it was BORN from ends
+    //    nothing. (It used to: the follow-up path looked the persona up by name
+    //    and refused when it was not there.)
+    try ws.deleteFile(io, ".nulya/agents/frozen.md");
+
+    {
+        const request = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"second\"}}", .{d});
+        defer alloc.free(request);
+        const again = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", request }, in_parent);
+        defer alloc.free(again.stdout);
+        try std.testing.expectEqual(@as(u8, 0), again.code);
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", wait_budget_ms });
+        defer alloc.free(waited.stdout);
+    }
+    // …and the budget that bites is the frozen one, counted off the record: one
+    // follow-up was allowed and has been used.
+    {
+        const request = try std.fmt.allocPrint(alloc, "{{\"session\":\"{s}\",\"task\":\"third\"}}", .{d});
+        defer alloc.free(request);
+        const over = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", request }, in_parent);
+        defer alloc.free(over.stdout);
+        try std.testing.expectEqual(@as(u8, 1), over.code);
+        try std.testing.expect(std.mem.indexOf(u8, over.stdout, "follow-up turn") != null);
+    }
+
+    // ② The ceiling is not an argument. `run` is an internal tool, so this is a
+    //    call by hand — and it names the widest rung there is, plus a remote
+    //    conversation that does not exist. Both are ignored: the record says
+    //    `readonly` and it says which conversation this delegation IS.
+    //
+    //    `loop` so the child asks for a shell call on every step it takes; the
+    //    frozen `max_steps: 1` (also from the record — it is not on this command
+    //    line either) stops it after one.
+    {
+        const before = try runCli(alloc, io, ws, &.{ exe_abs, "session", "events", child });
+        defer alloc.free(before.stdout);
+        const denials_before = std.mem.count(u8, before.stdout, "cannot run shell");
+
+        const arg_d = try std.fmt.allocPrint(alloc, "delegation={s}", .{d});
+        defer alloc.free(arg_d);
+        const forced = try runCliEnvs(alloc, io, ws, &.{
+            exe_abs, "ext",   "run",
+            ref,     "run",   "--arg",
+            arg_d,   "--arg", "permissions=unsafe",
+            "--arg", "session=s-000000000000",
+        }, &.{
+            .{ .key = "NULYA_SCRIPTED_MODE", .value = "loop" },
+        });
+        defer alloc.free(forced.stdout);
+        try std.testing.expectEqual(@as(u8, 0), forced.code);
+
+        const after = try runCli(alloc, io, ws, &.{ exe_abs, "session", "events", child });
+        defer alloc.free(after.stdout);
+        // It drove THIS conversation — the one the record names, not the one the
+        // command line did — and the session that command line invented was
+        // never touched.
+        try std.testing.expect(std.mem.count(u8, after.stdout, "cannot run shell") > denials_before);
+        // And it drove it read-only, whatever the command line asked for.
+        // Nothing this delegation ever calls can succeed: every tool result in
+        // its ledger is a refusal. One `"ok":true` would be a call that ran —
+        // which is exactly what dropping the gate for `unsafe` would produce,
+        // since the scripted provider asks for `shell` on every step.
+        try std.testing.expect(std.mem.indexOf(u8, after.stdout, "\"ok\":true") == null);
+    }
+
+    // ③ A delegation with no record is not one to guess at: every fact about it
+    //    would have to be invented, starting with which harness holds it.
+    {
+        const missing = try runCli(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "run", "--arg", "delegation=d-000000000000" });
+        defer alloc.free(missing.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, missing.stdout, "no record") != null);
+        try std.testing.expect(std.mem.indexOf(u8, missing.stdout, "Nothing was run") != null);
+    }
+
+    {
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", wait_budget_ms });
+        alloc.free(waited.stdout);
+    }
+}
+
 /// The delegation id out of a receipt (`… — delegation d-…, session s-…`).
 fn delegationOf(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
     const at = std.mem.indexOf(u8, text, "delegation d-").? + "delegation ".len;

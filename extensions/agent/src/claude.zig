@@ -142,8 +142,14 @@ fn modeWord(permissions: record.Permissions) []const u8 {
 /// definition naming a harness this machine does not have is refused THEN —
 /// before a record exists and before a receipt says work is under way.
 ///
-/// It is also where `runner_version` comes from: a version the harness states
-/// about itself is worth freezing beside the runner name (D7).
+/// It is also where `runner_version` comes from — and on this arm that column
+/// is OBSERVED PROVENANCE, not a pin (D7). What is recorded is what `--version`
+/// said on this machine at this moment; later rounds run whatever `claude`
+/// resolves to on PATH then. There is nothing to pin: an upgrade replaces the
+/// binary, so the recorded version is usually gone, and refusing a resume over
+/// a mismatch would kill a conversation that would have continued fine without
+/// restoring any reproducibility. Only `runner: ext:<id>` can pin, because only
+/// there does the old implementation still exist (`record.Created`).
 pub fn probe(
     alloc: std.mem.Allocator,
     io: std.Io,

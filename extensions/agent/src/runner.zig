@@ -21,13 +21,13 @@
 //! from both ends.
 //!
 //!   * This side holds `<d>/.runner.lock` — an OS ADVISORY LOCK, so a runner
-//!     that is killed releases it and the delegation is never stranded — and on
-//!     the way out it checks for pending messages, RELEASES, and checks AGAIN.
-//!     The second check is the point: a message that landed between the first
-//!     check and the release would otherwise be seen by nobody, because the
-//!     sender's probe (below) saw the lock still held. If that second check
-//!     finds something, this takes the lock back and keeps going; if somebody
-//!     else took it first, that runner will find the message and this leaves.
+//!     that dies cannot leave the delegation locked for ever — and on the way
+//!     out it checks for pending messages, RELEASES, and checks AGAIN. The
+//!     second check is the point: a message that landed between the first check
+//!     and the release would otherwise be seen by nobody, because the sender's
+//!     probe (below) saw the lock still held. If that second check finds
+//!     something, this takes the lock back and keeps going; if somebody else
+//!     took it first, that runner will find the message and this leaves.
 //!   * The sender's side delivers the message FIRST and probes the lock second
 //!     (`main.wake`). Ordered that way, a runner that is about to release
 //!     cannot miss a message the sender has already delivered.
@@ -35,6 +35,16 @@
 //! Losing the race to take the lock at startup prints NOTHING. A redundant
 //! runner has driven nothing, and a report-shaped answer from it would be a
 //! sub-agent's findings that no sub-agent produced.
+//!
+//! **What the invariant does NOT cover, said plainly.** The pair above closes
+//! every window in an ORDERLY exit. It does not make this crash-recoverable: an
+//! advisory lock released by a dying process frees the delegation, it does not
+//! arrange for anyone to drive what that process was holding, so a runner killed
+//! with a message pending leaves it pending until the next message arrives and
+//! wakes a fresh runner. The two give-up exits below (`stranded`) are the same
+//! shape and at least SAY so in the report. Turning that into a real
+//! crash-recovery guarantee needs something neither end has today — a sweep, or
+//! a lease with an owner to check on — and it is not what the lock is.
 //!
 //! **The gate.** A `readonly` agent is held to its word by answering the
 //! kernel's own per-call gate (`session step --gate`, DESIGN §4): one request
@@ -94,32 +104,38 @@ const max_stream_bytes: usize = 8 << 20;
 /// reasoning item.
 const max_line_bytes: usize = 4 << 20;
 
-/// How many rounds one background task will drive before it stops and reports
-/// what it has. Not a budget on the conversation — a delegation fed faster than
-/// it answers simply gets another task when the next message is sent — but a
-/// backstop, so a remote that cannot consume its inbox (a session another
-/// process holds the write lock on, say) cannot spin for ever inside one task.
-const max_rounds: u32 = 64;
+/// How many rounds in a row may achieve NOTHING before the task gives up.
+///
+/// Not a budget on the conversation, and deliberately not a count of rounds: a
+/// delegation being fed faster than it answers is a task doing its job, and one
+/// that stopped in the middle of that would leave accepted messages with nobody
+/// driving them (D4). What this counts is rounds that said nothing and consumed
+/// nothing — a remote that cannot take its inbox, spinning.
+const max_idle_rounds: u32 = 64;
 
 pub const Args = struct {
     /// The delegation being driven: whose lease this takes, whose interrupt
-    /// marker it watches. Empty is a call by hand — it drives one round and
-    /// reports, which is the old behaviour and a useful thing to be able to do.
+    /// marker it watches — and, when it is given, the ONLY thing this reads its
+    /// facts from. Empty is a call by hand against a bare session: it drives one
+    /// round and reports, which is the old behaviour and a useful thing to be
+    /// able to do.
     delegation: []const u8 = "",
-    /// The remote conversation the runner opened for it — a session id for the
-    /// nulya arm, a thread id for Codex. Still called `session` because it is the
-    /// argument name the background command was written with, and the record
-    /// beside it says which runner reads it.
-    session: []const u8,
-    /// Which persona it is, for the report's own framing. Empty is legal — the
-    /// report then names the delegation only.
+    /// The remote conversation to drive, for the hand-call form only. When a
+    /// delegation is named this is ignored in favour of the record: a handle an
+    /// external runner minted may be any string at all, and one that reached
+    /// here through a command line would have had to be shell-safe as well.
+    session: []const u8 = "",
+    /// Which persona it is, for the report's own framing — hand-call form only,
+    /// as above. Empty is legal: the report then names the delegation.
     agent: []const u8 = "",
-    /// How much this delegation may do (`record.Permissions`, contract ar-h),
-    /// as the `agent` tool froze it into the record and passed it here. Absent
-    /// is `default` — a `run` invoked by hand said nothing about a ceiling —
-    /// while a word this build cannot read is `readonly`, the narrowest one.
+    /// How much this may do (`record.Permissions`, contract ar-h) — hand-call
+    /// form only. Absent is `default` (a `run` invoked by hand said nothing
+    /// about a ceiling); a word this build cannot read is `readonly`, the
+    /// narrowest one. A delegation's ceiling comes from its record and from
+    /// nowhere else: one that could be named on the command line would be a
+    /// ceiling the record only claims to hold.
     permissions: record.Permissions = record.default_permissions,
-    /// 0 = the kernel's own budget.
+    /// 0 = the kernel's own budget. Hand-call form only, as above.
     max_steps: u32 = 0,
     /// How deep this delegation sits. Passed to the step it drives as
     /// `NULYA_AGENT_DEPTH`, which is what stops an indirect cycle of personas
@@ -128,6 +144,22 @@ pub const Args = struct {
     /// gets (DESIGN §7.6) — which is the whole reason it can be a variable.
     depth: u32 = 1,
     /// This process's environment, to hand on to that step with the depth added.
+    env: *const std.process.Environ.Map,
+};
+
+/// The same facts once they have been settled: read from the record for a
+/// delegation, taken from the arguments for a hand call. Everything below this
+/// point takes THIS rather than `Args`, so there is no second chance for a
+/// command-line value to be consulted where a frozen one exists.
+const Settled = struct {
+    delegation: []const u8,
+    /// The remote conversation this drives — a session id for the nulya arm, a
+    /// thread id for Codex, whatever an external harness minted.
+    remote: []const u8,
+    agent: []const u8,
+    permissions: record.Permissions,
+    max_steps: u32,
+    depth: u32,
     env: *const std.process.Environ.Map,
 };
 
@@ -155,32 +187,84 @@ const report_contract =
     "{s}\n";
 
 pub fn run(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args: Args) !rpc.Outcome {
-    if (args.session.len == 0) {
-        return rpc.refuse(alloc, "run needs a session id (the remote conversation to drive)", .{});
-    }
     const cwd = std.Io.Dir.cwd();
-    // Which harness this is. The delegation's record froze the answer when it
-    // opened (D7); a `run` invoked by hand without one drives this nulya, which
-    // is the only thing it could have meant.
+
+    // What this round is driven with. When a delegation is named, ALL of it
+    // comes from the record and none of it from the arguments (D2/D7): the
+    // record is where a delegation's facts were settled, and a fact that could
+    // also arrive on a command line is a fact the record only claims to hold.
+    // A `permissions` argument beside a `d-…` was exactly that — a delegation
+    // frozen at `readonly` could be driven at `unsafe` by anybody who could
+    // spell `ext run` — and a remote handle on a command line was a second
+    // problem, because an external runner may mint one containing anything at
+    // all (`external.zig`) and that command is handed to a shell.
+    //
+    // Without a delegation this is a call by hand against a bare session, and
+    // then the arguments ARE the whole of what was said.
     var kind: runners.Runner = runners.default;
-    // What an EXTERNAL harness was asked to run on (D9). Frozen when the
-    // delegation opened, and read back here rather than passed as an argument:
-    // a nulya session freezes its identity in its own header, but a Claude
-    // process is told which model to use on every round, so the record is the
-    // only thing that can still answer.
+    var remote: []const u8 = args.session;
+    var agent: []const u8 = args.agent;
+    var permissions: record.Permissions = args.permissions;
+    var max_steps: u32 = args.max_steps;
+    // What an EXTERNAL harness was asked to run on (D9), and which
+    // implementation of it answers for this delegation. Neither has an argument
+    // to fall back to: a nulya session freezes its identity in its own header,
+    // but an external harness is told both on every round.
+    //
+    // `runner_version` is only load-bearing on the `ext:<id>` arm, where it
+    // names the exact frozen extension every round calls. For claude and pi it
+    // is what `--version` said when this opened and nothing more — those arms
+    // run whatever is on PATH now, and `record.Created` says why that is the
+    // honest answer rather than a gap.
     var runner_model: []const u8 = "";
-    // Which implementation of an EXTERNAL runner extension this delegation was
-    // nailed to when it opened (D7). Read back rather than resolved again:
-    // activating a new version of a runner decides what the next delegation
-    // runs on, never what an conversation already under way is answered by.
     var runner_version: []const u8 = "";
     if (args.delegation.len != 0) {
-        if (try record.read(alloc, io, cwd, args.delegation)) |state| {
-            kind = runners.Runner.parse(state.created.runner) orelse runners.default;
-            runner_model = state.created.runner_model;
-            runner_version = state.created.runner_version;
-        }
+        // A delegation that cannot be read is not one to guess at. Every one of
+        // the facts above would have to be invented, starting with which
+        // harness — and inventing THAT means driving a Codex thread id through
+        // `nulya session step`.
+        const state = (try record.read(alloc, io, cwd, args.delegation)) orelse {
+            return .{ .text = try std.fmt.allocPrint(
+                alloc,
+                "delegation {s} could not be picked up: it has no record here, so there is nothing that says which harness holds it or what it may do.\nNothing was run for it.\n",
+                .{args.delegation},
+            ) };
+        };
+        // Unknown runner word: refuse, never fall back. This used to read
+        // `orelse runners.default`, which answered "a harness this build has
+        // never heard of" with "then it is this nulya" — the one answer that is
+        // certainly wrong. `sendTurn` has always refused it; this is the same
+        // fact getting the same answer on both sides.
+        kind = runners.Runner.parse(state.created.runner) orelse {
+            return .{ .text = try std.fmt.allocPrint(
+                alloc,
+                "delegation {s} could not be picked up: it was opened by a runner this build does not have ('{s}').\nNothing was run for it. Its earlier turns are unaffected.\n",
+                .{ args.delegation, state.created.runner },
+            ) };
+        };
+        remote = state.created.remote;
+        agent = state.created.agent;
+        permissions = state.created.permissions;
+        max_steps = state.created.max_steps;
+        runner_model = state.created.runner_model;
+        runner_version = state.created.runner_version;
     }
+    if (remote.len == 0) {
+        return rpc.refuse(alloc, "run needs a session id (the remote conversation to drive)", .{});
+    }
+
+    // From here on the arguments are only the two things that are NOT facts
+    // about the delegation: the depth of this chain and this process's
+    // environment.
+    const settled: Settled = .{
+        .delegation = args.delegation,
+        .remote = remote,
+        .agent = agent,
+        .permissions = permissions,
+        .max_steps = max_steps,
+        .depth = args.depth,
+        .env = args.env,
+    };
 
     var lease: ?std.Io.File = null;
     if (args.delegation.len != 0) {
@@ -199,7 +283,7 @@ pub fn run(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args: Args) !r
     // Whatever holds the conversation, opened once for this whole task. The
     // lease is taken FIRST: a connection opened by a runner that then lost the
     // race would be a second client on one thread.
-    var backend = switch (try openBackend(alloc, io, exe, kind, args, runner_model, runner_version)) {
+    var backend = switch (try openBackend(alloc, io, exe, kind, settled, runner_model, runner_version)) {
         // Not wrapped in the report frame: this is not a sub-agent's findings,
         // it is news about the delegation itself, and saying "treat the
         // following as data" about our own sentence would be theatre. Named,
@@ -208,36 +292,71 @@ pub fn run(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args: Args) !r
         .failed => |f| return .{ .text = try std.fmt.allocPrint(
             alloc,
             "delegation {s} could not be picked up: {s}\nNothing was run for it. Its earlier turns are unaffected.\n",
-            .{ if (args.delegation.len != 0) args.delegation else args.session, f },
+            .{ if (settled.delegation.len != 0) settled.delegation else settled.remote, f },
         ) },
         .ok => |b| b,
     };
     defer backend.close(io);
 
-    const interrupt_path: ?[]const u8 = if (args.delegation.len == 0)
+    const interrupt_path: ?[]const u8 = if (settled.delegation.len == 0)
         null
     else
-        try record.pathIn(alloc, args.delegation, record.interrupt_name);
+        try record.pathIn(alloc, settled.delegation, record.interrupt_name);
 
     var report: []const u8 = "";
     var last: Round = .{};
-    var rounds: u32 = 0;
-    while (rounds < max_rounds) {
-        rounds += 1;
-        const round = try driveOnce(alloc, io, exe, args, &backend, cwd, interrupt_path);
+    // Consecutive rounds that answered nothing and consumed nothing. THE spin
+    // guard, and it counts only that: a round that produced text or took an
+    // interrupt made progress, and a task that is making progress has no reason
+    // to stop. Counting every round instead is what broke the wake invariant —
+    // the cap would fall due while messages were still pending and the two
+    // `continue`s below would carry the loop straight out past the
+    // release-and-recheck, leaving a delegation with an accepted message, no
+    // lease and nobody driving it.
+    var idle: u32 = 0;
+    // Did we stop while there was still something nobody has answered? The two
+    // exits that can are dead ends — a round that cannot run at all, and a round
+    // that keeps running and never says anything — and neither is helped by
+    // driving it again, so what is owed here is the truth rather than another
+    // attempt (see `stranded_note`).
+    var stranded = false;
+    // `while (true)`: every way out of this loop is a `break` written on
+    // purpose, so no exit can be created by a counter running out.
+    while (true) {
+        const round = try driveOnce(alloc, io, exe, settled, &backend, cwd, interrupt_path);
         if (round.text.len != 0) report = round.text;
         last = round;
+
+        // A hand call drives exactly one round: there is no lease, no inbox and
+        // nothing that could still be pending.
+        if (settled.delegation.len == 0) break;
+
+        // A round that could not run at all (a busy session, a bad id). Running
+        // it again would be the same failure at the same speed for ever.
+        if (round.code != 0 and round.text.len == 0) {
+            stranded = runners.pending(kind, alloc, io, cwd, settled.remote, settled.delegation);
+            break;
+        }
+
+        if (round.text.len != 0 or round.interrupted) {
+            idle = 0;
+        } else if (runners.pending(kind, alloc, io, cwd, settled.remote, settled.delegation)) {
+            // Nothing said, and what it was given is still there: this round
+            // moved nothing.
+            idle += 1;
+            if (idle >= max_idle_rounds) {
+                stranded = true;
+                break;
+            }
+        } else {
+            idle = 0;
+        }
 
         // An interrupt is a new direction, and the message behind it was
         // delivered before the marker was written (D6) — so there is always
         // something to take up, without asking.
         if (round.interrupted) continue;
-        // A step that could not run at all (a busy session, a bad id) would
-        // otherwise leave its message pending for ever and spin here.
-        if (round.code != 0 and round.text.len == 0) break;
-        if (args.delegation.len == 0) break;
-
-        if (runners.pending(kind, alloc, io, cwd, args.session, args.delegation)) continue;
+        if (runners.pending(kind, alloc, io, cwd, settled.remote, settled.delegation)) continue;
 
         // The release-and-recheck (D4). Everything above ran while holding the
         // lease, so a sender that delivered in that window saw the lease held
@@ -247,8 +366,8 @@ pub fn run(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args: Args) !r
             f.close(io);
             lease = null;
         }
-        if (!runners.pending(kind, alloc, io, cwd, args.session, args.delegation)) break;
-        lease = (try record.takeLease(alloc, io, cwd, args.delegation)) orelse break;
+        if (!runners.pending(kind, alloc, io, cwd, settled.remote, settled.delegation)) break;
+        lease = (try record.takeLease(alloc, io, cwd, settled.delegation)) orelse break;
     }
 
     const body = if (report.len != 0)
@@ -260,14 +379,32 @@ pub fn run(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args: Args) !r
     else
         "the delegated session ended without a final message.";
 
-    const named = if (args.delegation.len != 0) args.delegation else args.session;
+    const named = if (settled.delegation.len != 0) settled.delegation else settled.remote;
     var out: std.Io.Writer.Allocating = .init(alloc);
-    try out.writer.print(report_open, .{ if (args.agent.len != 0) args.agent else "agent", named });
+    try out.writer.print(report_open, .{ if (settled.agent.len != 0) settled.agent else "agent", named });
     try out.writer.writeAll(body);
+    if (stranded) try out.writer.writeAll(stranded_note);
     try out.writer.writeAll(report_close);
-    try out.writer.print(report_contract, .{ named, try runners.transcriptHint(kind, alloc, args.session) });
+    try out.writer.print(report_contract, .{ named, try runners.transcriptHint(kind, alloc, settled.remote) });
     return .{ .text = try out.toOwnedSlice() };
 }
+
+/// What a report says when the task gave up with a message still unanswered.
+///
+/// **Why this and not a successor task.** The tidy-looking answer is for a
+/// runner that stops with work pending to start another one, so D4 holds
+/// mechanically. But both exits that can reach here are dead ends the next
+/// runner would arrive at just as fast — a session somebody else holds the write
+/// lock on, a remote that answers nothing — and a runner that spawns its own
+/// replacement on a dead end is an unattended loop spending real money for as
+/// long as nobody notices. So the process stops, and the one thing it owes the
+/// parent is the fact: the message is still queued, the delegation is intact,
+/// and another turn (or whatever fixed the underlying problem) picks it up.
+const stranded_note =
+    "\n\n[Something sent to this delegation has not been answered yet: this run " ++
+    "stopped before it could. Nothing was lost — the message is still queued and " ++
+    "the delegation still holds everything it had. Sending another turn into it " ++
+    "starts a fresh run that will take both.]";
 
 /// What actually answers a round, for the whole of this task.
 ///
@@ -300,7 +437,7 @@ fn openBackend(
     io: std.Io,
     exe: []const u8,
     kind: runners.Runner,
-    args: Args,
+    args: Settled,
     runner_model: []const u8,
     runner_version: []const u8,
 ) !union(enum) { ok: Backend, failed: []const u8 } {
@@ -318,7 +455,7 @@ fn openBackend(
                 word[runners.ext_prefix.len..],
                 runner_version,
                 args.delegation,
-                args.session,
+                args.remote,
                 args.permissions,
                 runner_model,
             );
@@ -337,7 +474,7 @@ fn openBackend(
                 args.env,
                 std.Io.Dir.cwd(),
                 args.delegation,
-                args.session,
+                args.remote,
                 args.permissions,
                 runner_model,
             );
@@ -357,7 +494,7 @@ fn openBackend(
                 args.env,
                 std.Io.Dir.cwd(),
                 args.delegation,
-                args.session,
+                args.remote,
                 args.permissions,
                 runner_model,
             );
@@ -371,7 +508,7 @@ fn openBackend(
             // delegation opened (D10): a resumed thread is a fresh decision
             // about what it may do, and a ceiling that stopped applying after
             // round one would be worse than no ceiling at all.
-            const attempt = try codex.attach(alloc, io, args.env, args.session, args.permissions);
+            const attempt = try codex.attach(alloc, io, args.env, args.remote, args.permissions);
             return switch (attempt) {
                 .ok => |s| .{ .ok = .{ .codex = s } },
                 .failed => |f| .{ .failed = f },
@@ -396,7 +533,7 @@ fn driveOnce(
     alloc: std.mem.Allocator,
     io: std.Io,
     exe: []const u8,
-    args: Args,
+    args: Settled,
     backend: *Backend,
     cwd: std.Io.Dir,
     interrupt_path: ?[]const u8,
@@ -458,12 +595,12 @@ fn driveNulyaRound(
     alloc: std.mem.Allocator,
     io: std.Io,
     exe: []const u8,
-    args: Args,
+    args: Settled,
     cwd: std.Io.Dir,
     interrupt_path: ?[]const u8,
 ) !Round {
     var argv: std.ArrayList([]const u8) = .empty;
-    try argv.appendSlice(alloc, &.{ exe, "session", "step", args.session, "--stream" });
+    try argv.appendSlice(alloc, &.{ exe, "session", "step", args.remote, "--stream" });
     if (args.max_steps != 0) {
         try argv.appendSlice(alloc, &.{ "--max-steps", try std.fmt.allocPrint(alloc, "{d}", .{args.max_steps}) });
     }
@@ -472,15 +609,23 @@ fn driveNulyaRound(
     // property, kept on this side too.
     if (args.permissions.isReadonly()) try argv.append(alloc, "--gate");
 
-    // The step inherits this process's environment plus the depth. A `Map` copy
-    // rather than `setenv`: the variable belongs to the child, and mutating our
-    // own environment to communicate with it would leak into everything else
-    // this process spawns.
+    // The step inherits this process's environment plus two facts about the
+    // chain it is running in: how deep it is, and which delegation it IS. A
+    // `Map` copy rather than `setenv`: the variables belong to the child, and
+    // mutating our own environment to communicate with it would leak into
+    // everything else this process spawns.
+    //
+    // The delegation is there so a sub-agent that delegates onwards reads its
+    // OWN frozen whitelist (`main.allowedHere`) rather than the definition file
+    // as it reads at that moment. Neither variable is a secret or shaped like
+    // one, so both survive the sanitising every child gets (DESIGN §7.6) — which
+    // is the whole reason they can be variables.
     var child_env: std.process.Environ.Map = .init(alloc);
     defer child_env.deinit();
     var it = args.env.iterator();
     while (it.next()) |entry| try child_env.put(entry.key_ptr.*, entry.value_ptr.*);
     try child_env.put("NULYA_AGENT_DEPTH", try std.fmt.allocPrint(alloc, "{d}", .{args.depth}));
+    if (args.delegation.len != 0) try child_env.put(record.delegation_var, args.delegation);
 
     var child = try std.process.spawn(io, .{
         .argv = argv.items,
@@ -587,7 +732,7 @@ fn driveNulyaRound(
         //
         // `kill` reaps the process and closes every pipe with it, so nothing
         // below reads this child again.
-        runners.stop(.nulya, alloc, io, exe, args.session);
+        runners.stop(.nulya, alloc, io, exe, args.remote);
         child.kill(io);
         return out;
     }

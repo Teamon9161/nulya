@@ -569,7 +569,7 @@ fn newDelegation(
     // or the environment would be an escalation nobody wrote down.
     const permissions = asked_permissions orelse m.def.permissions;
 
-    const self_ref = try selfRef(alloc, ctx.io);
+    const self_ref = try proc.selfRef(alloc, ctx.io);
 
     // The delegation's own identity, minted BEFORE the conversation is opened:
     // a runner may need somewhere of its own to put what it freezes (the claude
@@ -638,6 +638,12 @@ fn newDelegation(
         .profile = profile,
         .model = model,
         .runner_model = runner_model,
+        // The policy this delegation lives under for the rest of its life. Read
+        // from the definition HERE and never again: this is the moment the
+        // definition has a say, and everything after it reads the record.
+        .max_exchanges = m.def.max_exchanges,
+        .max_steps = m.def.max_steps,
+        .agents = m.def.agents,
     });
 
     const spec: Spec = .{
@@ -646,14 +652,13 @@ fn newDelegation(
         .runner = m.def.runner,
         .agent = m.def.name,
         .permissions = permissions,
-        .max_steps = m.def.max_steps,
     };
 
     switch (try deliver(ctx, spec, task, false)) {
         .failed => |f| return .{ .failed = f },
         .ok => {},
     }
-    const started = switch (try wake(ctx, parent, spec, self_ref, depth)) {
+    const started = switch (try wake(ctx, parent, spec, depth)) {
         .failed => |f| return rpc.refuse(alloc, "'{s}' has delegation {s} but its run could not be started: {s}", .{ m.def.name, d, f }),
         // Nobody can hold the lease of a delegation that did not exist a moment
         // ago, so this is unreachable in practice; saying the honest thing
@@ -685,14 +690,17 @@ fn newDelegation(
 
 /// Everything about a delegation the sending and waking paths need. Read from
 /// the RECORD for a delegation that already exists, and from the definition for
-/// one being opened — the two are the same five facts, so they are one struct.
+/// one being opened — the two are the same facts, so they are one struct.
+///
+/// It is this short because the background command is: what a round is driven
+/// WITH is read from the record by the process that drives it
+/// (`proc.startDelegationTask`), so nothing here has to be carried there.
 const Spec = struct {
     delegation: []const u8,
     remote: []const u8,
     runner: runners.Runner,
     agent: []const u8,
     permissions: record.Permissions,
-    max_steps: u32,
 };
 
 /// Another turn into a delegation that is already going.
@@ -756,17 +764,20 @@ fn sendTurn(
         );
     };
 
-    // ③ How many turns has it had? Counted from the record, which is the only
-    // place that can answer for every runner — counting a child session's user
-    // turns is a fact about nulya sessions and nothing else.
-    const entry = (try defs.find(alloc, ctx.io, ctx.env, worn)) orelse {
-        return rpc.refuse(alloc, "delegation {s} wears the persona '{s}', which is no longer defined here.", .{ target, worn });
-    };
-    if (entry.def.max_exchanges != 0 and state.turns >= entry.def.max_exchanges + 1) {
+    // ③ How many turns has it had, and how many was it opened with? Both come
+    // from the record. The count, because it is the only one an external runner
+    // can answer too — counting a child session's user turns is a fact about
+    // nulya sessions and nothing else. The budget, because the definition is
+    // consulted when a delegation is CREATED and never again: one edited since
+    // must not change what a conversation already under way is allowed, and one
+    // DELETED since must not strand a conversation whose persona, remote and
+    // ceiling are all still right here.
+    const allowed_exchanges = state.created.max_exchanges;
+    if (allowed_exchanges != 0 and state.turns >= allowed_exchanges + 1) {
         return rpc.refuse(
             alloc,
             "'{s}' allows {d} follow-up turn(s) per delegation and {s} has had them all. Start a fresh delegation with what you now know, or do the rest yourself.",
-            .{ worn, entry.def.max_exchanges, target },
+            .{ worn, allowed_exchanges, target },
         );
     }
 
@@ -779,7 +790,6 @@ fn sendTurn(
         // ceiling was settled when this delegation opened, and a definition
         // edited since must not widen a conversation already under way.
         .permissions = state.created.permissions,
-        .max_steps = entry.def.max_steps,
     };
 
     switch (try deliver(ctx, spec, task, interrupt)) {
@@ -787,8 +797,7 @@ fn sendTurn(
         .ok => {},
     }
 
-    const self_ref = try selfRef(alloc, ctx.io);
-    const started = switch (try wake(ctx, parent, spec, self_ref, depth)) {
+    const started = switch (try wake(ctx, parent, spec, depth)) {
         .failed => |f| return rpc.refuse(alloc, "the turn is queued in delegation {s} but a run could not be started for it: {s}", .{ target, f }),
         .busy => return .{ .text = try std.fmt.allocPrint(
             alloc,
@@ -843,53 +852,52 @@ fn wake(
     ctx: *const Ctx,
     parent: []const u8,
     spec: Spec,
-    self_ref: []const u8,
     depth: u32,
 ) !union(enum) { task: []const u8, busy, failed: []const u8 } {
     if (record.leaseHeld(ctx.alloc, ctx.io, std.Io.Dir.cwd(), spec.delegation)) return .busy;
-    const started = try startRunner(ctx, parent, spec, self_ref, depth);
+    const started = try proc.startDelegationTask(
+        ctx.alloc,
+        ctx.io,
+        ctx.exe,
+        try proc.selfRef(ctx.alloc, ctx.io),
+        parent,
+        spec.delegation,
+        depth + 1,
+    );
     if (started.code != 0) return .{ .failed = detail(started) };
     return .{ .task = firstLine(started.stdout) };
-}
-
-/// Start the background task that drives one delegation.
-///
-/// It belongs to the PARENT, so its `task_finished` is deposited into the
-/// parent's inbox when it ends (DESIGN §6.1) — the loop every driver already
-/// runs. Each round simply gets a new `t<N>`: nothing is reused, nothing is
-/// resumed, and two reports are two events in the parent's ledger.
-fn startRunner(
-    ctx: *const Ctx,
-    parent: []const u8,
-    spec: Spec,
-    self_ref: []const u8,
-    depth: u32,
-) !Run {
-    const alloc = ctx.alloc;
-    var cmd: std.Io.Writer.Allocating = .init(alloc);
-    // Quoted: the executable path may contain spaces, and the command is handed
-    // to a shell by the supervisor (`environment.shellArgv`).
-    try cmd.writer.print(
-        "\"{s}\" ext run {s} run --arg delegation={s} --arg session={s} --arg agent={s} --arg depth={d}",
-        .{ ctx.exe, self_ref, spec.delegation, spec.remote, spec.agent, depth + 1 },
-    );
-    try cmd.writer.print(" --arg permissions={s}", .{spec.permissions.label()});
-    if (spec.max_steps != 0) try cmd.writer.print(" --arg max_steps={d}", .{spec.max_steps});
-
-    var task_argv: std.ArrayList([]const u8) = .empty;
-    try task_argv.appendSlice(alloc, &.{ ctx.exe, "task", "run", "--session", parent, "--" });
-    try task_argv.append(alloc, cmd.writer.buffered());
-    return run(alloc, ctx.io, task_argv.items);
 }
 
 /// The names this session may delegate to, or null when it is not a delegation
 /// and nothing is restricted.
 ///
-/// Read from the persona this session is WEARING (its frozen header), not from
-/// an argument: what a session may do is a property of what it was composed as,
-/// and the header is the only thing that cannot have changed since.
+/// Two questions, and the frozen answer to each. IS this a delegation: the
+/// persona in the session's own header says so, and a header cannot have changed
+/// since. WHICH names: the delegation's record, frozen when it opened — not the
+/// definition as it reads today, which would let an edit widen (or empty) the
+/// whitelist of a conversation already under way.
+///
+/// The runner tells the step it drives which delegation it is
+/// (`record.delegation_var`), for the same reason it tells it the depth: it is a
+/// fact about this chain, it is not secret-shaped, and it survives the
+/// environment sanitising every child gets (DESIGN §7.6).
+///
+/// Without it, the definition answers — and that is not the leak this function
+/// was changed to close. A session wearing a persona with no delegation behind
+/// it is a person driving one by hand from a front end (`/agent` opens exactly
+/// that): nothing was ever frozen for it, so there is no frozen answer to
+/// contradict, and holding it to `leaf` would take a coordinator's whole reason
+/// for existing away from the one caller who can watch what it does.
 fn allowedHere(ctx: *const Ctx, parent: []const u8) !?[]const []const u8 {
     const worn = (try defs.wornPersona(ctx.alloc, ctx.io, parent)) orelse return null;
+    const d = std.mem.trim(u8, ctx.env.get(record.delegation_var) orelse "", " \t\r\n");
+    if (record.isPlainId(d)) {
+        if (try record.read(ctx.alloc, ctx.io, std.Io.Dir.cwd(), d)) |state| return state.created.agents;
+        // A delegation was named and its record cannot be read: that is not a
+        // hand-driven session, it is a delegated one whose frozen answer is
+        // missing, and the narrow answer is the only honest one.
+        return &.{};
+    }
     const entry = (try defs.find(ctx.alloc, ctx.io, ctx.env, worn)) orelse return &.{};
     return entry.def.agents;
 }
@@ -900,22 +908,6 @@ fn allowedHere(ctx: *const Ctx, parent: []const u8) !?[]const []const u8 {
 fn currentDepth(env: *const std.process.Environ.Map) u32 {
     const raw = env.get("NULYA_AGENT_DEPTH") orelse return 0;
     return std.fmt.parseInt(u32, std.mem.trim(u8, raw, " \t\r\n"), 10) catch 0;
-}
-
-/// `agent@<version>` for the version running right now.
-///
-/// A frozen extension binary lives at `<root>/<id>/versions/<v>/bin/<id>`, so
-/// the version is two directories up from this executable. Named rather than
-/// left to `current`: this package is deliberately never activated (it is
-/// brought into a session with `--with`), so there is no `current` to fall back
-/// on — the same reason `/compact` names its version.
-fn selfRef(alloc: std.mem.Allocator, io: std.Io) ![]const u8 {
-    const exe = std.process.executablePathAlloc(io, alloc) catch return "agent";
-    const bin_dir = std.fs.path.dirname(exe) orelse return "agent";
-    const version_dir = std.fs.path.dirname(bin_dir) orelse return "agent";
-    const version = std.fs.path.basename(version_dir);
-    if (!std.mem.startsWith(u8, version, "v-")) return "agent";
-    return std.fmt.allocPrint(alloc, "agent@{s}", .{version});
 }
 
 const Identity = struct { profile: []const u8 = "", model: []const u8 = "" };

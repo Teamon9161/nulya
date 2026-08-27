@@ -266,6 +266,10 @@ Store and scope:
   words — where a nulya one takes `model:`; the fields for the other harness
   are dropped with a warning, and an unknown `runner:` costs the whole
   definition.
+  The file is read ONCE, when a delegation opens: everything it asked for is
+  frozen into that delegation's record. So editing it changes the next
+  delegation and never one already under way, and deleting it strands nothing —
+  a conversation that exists keeps its own persona, ceiling and budget.
 - `permissions:` is how much a delegation may do, in three words, and every
   runner translates it into its own harness's terms:
 

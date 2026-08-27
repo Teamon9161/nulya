@@ -49,6 +49,14 @@ const std = @import("std");
 /// Where delegations live, relative to the workspace.
 pub const root = ".nulya/delegations";
 
+/// How a step knows which delegation it is running as. Set by the runner on the
+/// process it drives, beside `NULYA_AGENT_DEPTH` and for the same reasons: it is
+/// a fact about this chain rather than a secret, so it survives the environment
+/// sanitising every child gets (DESIGN §7.6), and it is what lets a delegated
+/// session read its OWN frozen policy instead of a definition file that may have
+/// been edited since (`main.allowedHere`).
+pub const delegation_var = "NULYA_AGENT_DELEGATION";
+
 pub const record_name = "record.jsonl";
 pub const lock_name = ".runner.lock";
 pub const interrupt_name = "interrupt";
@@ -186,12 +194,46 @@ pub fn pathIn(alloc: std.mem.Allocator, id: []const u8, name: []const u8) ![]u8 
 
 /// The row a delegation opens with: everything about it that is decided once.
 ///
-/// `runner` and `runner_version` are FROZEN here for the same reason a session
-/// freezes its composition (physics #2): every later turn goes to the same
-/// harness, at the same version, however the definition file has changed since.
+/// Everything here is FROZEN for the same reason a session freezes its
+/// composition (physics #2): a delegation already under way is not re-decided by
+/// a file somebody edited since. The definition's job is to create NEW
+/// delegations; it is never consulted again about one that exists.
+///
+/// That covers the runner (every later turn goes to the same harness), the
+/// ceiling (a follow-up must not be able to widen it) and the three POLICY
+/// numbers below — how many turns this delegation may have, how many steps one
+/// of its rounds may take, and who it may pass work to. Those three used to be
+/// read from the definition as it reads TODAY, which made a live delegation's
+/// budget follow an edit and made deleting a definition file strand every
+/// conversation wearing it.
+///
+/// `runner_version` is the one column that is NOT uniformly a freeze, and the
+/// difference is written down rather than smoothed over (see it below).
 pub const Created = struct {
     agent: []const u8,
     runner: []const u8,
+    /// Which implementation of the runner this delegation opened on. **Two
+    /// strengths, one column, and only one of them is a pin.**
+    ///
+    ///   * `ext:<id>` — a PINNED EXECUTION IDENTITY. `current` is resolved once
+    ///     at `op=open` and the `v-…` frozen here is what every later round
+    ///     actually calls. It can be a pin because the old version is still in
+    ///     the store: activating a new one decides what the NEXT delegation runs
+    ///     on, never what this conversation is answered by.
+    ///   * `claude` / `pi` — OBSERVED PROVENANCE. What `--version` said on the
+    ///     machine at the moment this opened, and nothing more: later rounds run
+    ///     whatever that name resolves to on PATH now. There is no pin available
+    ///     to make — an upgrade replaces the binary, and the version this names
+    ///     is usually no longer on the machine at all. Refusing on a mismatch
+    ///     would not restore reproducibility; it would only kill conversations
+    ///     that would have resumed perfectly well.
+    ///   * `codex` (no version of its own over app-server) and `nulya` (this
+    ///     binary is the one writing the record) leave it empty.
+    ///
+    /// The rule the two follow is one rule: **claim only the freeze that can
+    /// actually be enforced.** A field that reads as a guarantee everywhere and
+    /// holds in one place out of three is worse than a field that says which is
+    /// which.
     runner_version: []const u8 = "",
     /// What the runner opened to hold this conversation — a session id for the
     /// nulya runner, a thread id for Codex, whatever the harness calls it.
@@ -215,6 +257,19 @@ pub const Created = struct {
     /// what an external thread runs on was frozen into that thread when it
     /// opened, so a later round has nothing to decide.
     runner_model: []const u8 = "",
+    /// How many follow-up turns this delegation may have. Zero is "no limit",
+    /// which is what an unwritten `max_exchanges:` means — and what a row from
+    /// before this column means, which is the same answer those delegations
+    /// have been running under all along.
+    max_exchanges: u32 = 0,
+    /// The step budget one round of it may spend. Zero is the kernel's own.
+    max_steps: u32 = 0,
+    /// The personas this delegation may pass work to (`agents:`). Empty is a
+    /// LEAF — the narrow answer, and the right one for a row that predates this
+    /// column: a delegation opened before it was written froze no whitelist, and
+    /// inventing a wide one from today's definition is exactly the drift this
+    /// column exists to stop.
+    agents: []const []const u8 = &.{},
 };
 
 /// A delegation, as its journal describes it.
@@ -268,6 +323,22 @@ pub fn appendCreated(
     if (c.runner_model.len != 0) {
         try jw.objectField("runner_model");
         try jw.write(c.runner_model);
+    }
+    // The policy columns, written only when they say something. A delegation
+    // with no limits and no whitelist writes the same row it always did.
+    if (c.max_exchanges != 0) {
+        try jw.objectField("max_exchanges");
+        try jw.write(c.max_exchanges);
+    }
+    if (c.max_steps != 0) {
+        try jw.objectField("max_steps");
+        try jw.write(c.max_steps);
+    }
+    if (c.agents.len != 0) {
+        try jw.objectField("agents");
+        try jw.beginArray();
+        for (c.agents) |one| try jw.write(one);
+        try jw.endArray();
     }
     try jw.endObject();
     try out.writer.writeByte('\n');
@@ -341,6 +412,9 @@ pub fn read(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const 
                     .profile = stringOf(obj, "profile") orelse "",
                     .model = stringOf(obj, "model") orelse "",
                     .runner_model = stringOf(obj, "runner_model") orelse "",
+                    .max_exchanges = intOf(obj, "max_exchanges"),
+                    .max_steps = intOf(obj, "max_steps"),
+                    .agents = try stringsOf(alloc, obj, "agents"),
                 },
             };
             continue;
@@ -350,6 +424,33 @@ pub fn read(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const 
         }
     }
     return state;
+}
+
+/// A non-negative whole number, or zero for anything else. Zero is what an
+/// absent policy column means anyway, so a value that is not one is read as
+/// "nothing was said" rather than as an error nobody could act on.
+fn intOf(obj: std.json.ObjectMap, key: []const u8) u32 {
+    return switch (obj.get(key) orelse return 0) {
+        .integer => |i| if (i > 0 and i <= std.math.maxInt(u32)) @intCast(i) else 0,
+        else => 0,
+    };
+}
+
+/// A list of strings, skipping anything in it that is not one. An absent column
+/// and an empty list are the same answer, which is what the callers want.
+fn stringsOf(alloc: std.mem.Allocator, obj: std.json.ObjectMap, key: []const u8) ![]const []const u8 {
+    const items = switch (obj.get(key) orelse return &.{}) {
+        .array => |a| a.items,
+        else => return &.{},
+    };
+    var out: std.ArrayList([]const u8) = .empty;
+    for (items) |item| {
+        switch (item) {
+            .string => |s| try out.append(alloc, s),
+            else => continue,
+        }
+    }
+    return out.items;
 }
 
 fn stringOf(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
@@ -493,6 +594,24 @@ const max_queued: usize = 4096;
 /// order they were sent, and two senders racing cannot land on the same name.
 /// `.json` because a half-written message must not look like a whole one, and
 /// the extension is the same convention the kernel's own inbox uses.
+///
+/// TWO steps, both of them load-bearing, and for two different races:
+///
+///   * the exclusive create of `<n>.tmp` claims the NUMBER, against another
+///     sender picking the same one;
+///   * the rename to `<n>.json` publishes the CONTENT, against a runner that is
+///     draining this directory right now.
+///
+/// The second one is the kernel's own discipline (`ledger.depositEvent`) and it
+/// is not optional here either: a directory entry exists the moment the file is
+/// created, not when it is closed, so a reader scanning for `.json` between the
+/// create and the write would take a name with nothing behind it — and the
+/// reader deletes what it takes. That is a message accepted and then lost, which
+/// is the one thing the wake invariant (D4) is for.
+///
+/// A `.tmp` left behind by a sender that died mid-write costs its number and
+/// nothing else: `nextFree` counts it (it reads the stem, before any extension)
+/// and no reader will ever look at it.
 pub fn inboxPut(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -514,18 +633,17 @@ pub fn inboxPut(
 
     var n: usize = try nextFree(io, base, dir);
     while (n < max_queued) : (n += 1) {
+        const staged = try std.fmt.allocPrint(alloc, "{s}/{d:0>12}.tmp", .{ dir, n });
         const path = try std.fmt.allocPrint(alloc, "{s}/{d:0>12}.json", .{ dir, n });
-        // A `.tmp` first would be the kernel's own two-step; here one exclusive
-        // create is enough, because a reader only ever sees a name that was
-        // written whole — the file is closed before anybody is told about it,
-        // and the runner is woken by the lease probe, not by watching this
-        // directory.
-        const file = base.createFile(io, path, .{ .exclusive = true }) catch |err| switch (err) {
+        const file = base.createFile(io, staged, .{ .exclusive = true }) catch |err| switch (err) {
             error.PathAlreadyExists => continue,
             else => return err,
         };
-        defer file.close(io);
-        try file.writeStreamingAll(io, body.writer.buffered());
+        {
+            defer file.close(io);
+            try file.writeStreamingAll(io, body.writer.buffered());
+        }
+        try base.rename(staged, base, path, io);
         return;
     }
     return error.InboxFull;
@@ -554,7 +672,9 @@ fn nextFree(io: std.Io, base: std.Io.Dir, dir: []const u8) !usize {
 /// Taking rather than reading: a message this returns has been handed to the
 /// runner, and the wake invariant counts on `pending` going false once somebody
 /// has it (D4). A file that cannot be read is deleted too — a message nobody can
-/// parse is not going to be answered by leaving it there for ever.
+/// parse is not going to be answered by leaving it there for ever, and it cannot
+/// be a half-written one: a name ending `.json` was published by a rename, so
+/// whatever is behind it is whole (`inboxPut`).
 pub fn inboxTake(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const u8) ![]const []const u8 {
     return inboxTakeUpTo(alloc, io, base, id, max_queued);
 }
@@ -793,7 +913,46 @@ test "a created row this build did not write grants nothing" {
         .sub_path = try pathIn(a, id, record_name),
         .data = "{\"v\":1,\"kind\":\"created\",\"agent\":\"x\",\"runner\":\"nulya\",\"remote\":\"s-1\",\"parent\":\"s-0\"}\n",
     });
-    try std.testing.expectEqual(Permissions.readonly, (try read(a, io, ws, id)).?.created.permissions);
+    const state = (try read(a, io, ws, id)).?;
+    try std.testing.expectEqual(Permissions.readonly, state.created.permissions);
+    // The policy columns are just as narrow when they are not there. Zero is
+    // "no limit" for the two budgets, which is what those delegations have been
+    // running under all along; an empty whitelist is a LEAF, because a row that
+    // froze no list must not be handed one invented from today's definition.
+    try std.testing.expectEqual(@as(u32, 0), state.created.max_exchanges);
+    try std.testing.expectEqual(@as(u32, 0), state.created.max_steps);
+    try std.testing.expectEqual(@as(usize, 0), state.created.agents.len);
+}
+
+test "the policy a delegation opens with is frozen in its record, whatever the definition says later" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const id = "d-0000000000b0";
+    try appendCreated(a, io, ws, id, .{
+        .agent = "coordinator",
+        .runner = "nulya",
+        .remote = "s-1",
+        .parent = "s-0",
+        .permissions = .default,
+        .max_exchanges = 4,
+        .max_steps = 12,
+        .agents = &.{ "explore", "plan" },
+    });
+
+    const state = (try read(a, io, ws, id)).?;
+    try std.testing.expectEqual(@as(u32, 4), state.created.max_exchanges);
+    try std.testing.expectEqual(@as(u32, 12), state.created.max_steps);
+    try std.testing.expectEqual(@as(usize, 2), state.created.agents.len);
+    try std.testing.expectEqualStrings("explore", state.created.agents[0]);
+    try std.testing.expectEqualStrings("plan", state.created.agents[1]);
 }
 
 test "an external runner's inbox hands messages back in the order they were sent, once each" {
@@ -831,6 +990,38 @@ test "an external runner's inbox hands messages back in the order they were sent
     const later = try inboxTake(a, io, ws, id);
     try std.testing.expectEqual(@as(usize, 1), later.len);
     try std.testing.expectEqualStrings("fourth", later[0]);
+}
+
+test "a message is published by a rename, so a reader never takes one that is still being written" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const id = "d-00000000beef";
+    const dir = try pathIn(a, id, inbox_name);
+    try ws.createDirPath(io, dir);
+
+    // A sender part way through: the number is claimed, the body is not there
+    // yet. This is the state the reader used to walk into — it would take the
+    // name, delete it, fail to parse it, and the message would be gone.
+    try ws.writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}/000000000001.tmp", .{dir}), .data = "" });
+
+    try std.testing.expectEqual(@as(usize, 0), (try inboxTake(a, io, ws, id)).len);
+    // …and it is still there afterwards, because the reader never looked at it.
+    try ws.access(io, try std.fmt.allocPrint(a, "{s}/000000000001.tmp", .{dir}), .{});
+
+    // A number a half-written message claimed is not handed out again either:
+    // the next sender takes the one after it, so order still counts up.
+    try inboxPut(a, io, ws, id, "after");
+    const taken = try inboxTake(a, io, ws, id);
+    try std.testing.expectEqual(@as(usize, 1), taken.len);
+    try std.testing.expectEqualStrings("after", taken[0]);
 }
 
 test "the runner lease is exclusive while it is held, and the interrupt marker is taken once" {

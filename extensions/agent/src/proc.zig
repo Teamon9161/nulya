@@ -48,3 +48,62 @@ pub fn firstLine(text: []const u8) []const u8 {
     const at = std.mem.indexOfScalar(u8, trimmed, '\n') orelse return trimmed;
     return trimmed[0..at];
 }
+
+// ── starting the task that drives a delegation ──────────────────────────────
+
+/// `agent@<version>` for the version running right now.
+///
+/// A frozen extension binary lives at `<root>/<id>/versions/<v>/bin/<id>`, so
+/// the version is two directories up from this executable. Named rather than
+/// left to `current`: this package is deliberately never activated (it is
+/// brought into a session with `--with`), so there is no `current` to fall back
+/// on — the same reason `/compact` names its version.
+pub fn selfRef(alloc: std.mem.Allocator, io: std.Io) ![]const u8 {
+    const exe = std.process.executablePathAlloc(io, alloc) catch return "agent";
+    const bin_dir = std.fs.path.dirname(exe) orelse return "agent";
+    const version_dir = std.fs.path.dirname(bin_dir) orelse return "agent";
+    const version = std.fs.path.basename(version_dir);
+    if (!std.mem.startsWith(u8, version, "v-")) return "agent";
+    return std.fmt.allocPrint(alloc, "agent@{s}", .{version});
+}
+
+/// Start the background task that drives one delegation.
+///
+/// It belongs to the PARENT, so its `task_finished` is deposited into the
+/// parent's inbox when it ends (DESIGN §6.1) — the loop every driver already
+/// runs. Each round simply gets a new `t<N>`: nothing is reused, nothing is
+/// resumed, and two reports are two events in the parent's ledger.
+///
+/// **Two arguments, and that is the whole command.** Everything else about a
+/// delegation — which harness, which remote conversation, what it may do, how
+/// many steps a round may take — is in its RECORD, and `runner.run` reads it
+/// from there (contract D2/D7). Copying those facts onto a command line made
+/// the record advisory (a hand-written `--arg permissions=unsafe` drove a
+/// delegation frozen at `readonly`) and it made the remote handle — which an
+/// external runner may return as ANY string (`external.zig`) — a substring of a
+/// shell command. Both of those stop being possible when the command carries
+/// only a name.
+///
+/// `depth` is the exception and stays an argument: it is a fact about this
+/// CHAIN of delegations, not about the one being driven, and the same
+/// delegation driven from two depths is two different answers to "is this a
+/// cycle" (`main.max_depth`).
+pub fn startDelegationTask(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    exe: []const u8,
+    self_ref: []const u8,
+    parent: []const u8,
+    delegation: []const u8,
+    depth: u32,
+) !Run {
+    // Quoted: the executable path may contain spaces, and the command is handed
+    // to a shell by the supervisor (`environment.shellArgv`). Nothing else in
+    // it can carry one — a delegation id is `d-<hex>` and a depth is a number.
+    const cmd = try std.fmt.allocPrint(
+        alloc,
+        "\"{s}\" ext run {s} run --arg delegation={s} --arg depth={d}",
+        .{ exe, self_ref, delegation, depth },
+    );
+    return run(alloc, io, &.{ exe, "task", "run", "--session", parent, "--", cmd });
+}

@@ -94,7 +94,10 @@ const readonly_tools = [_][]const u8{ "read", "grep", "find", "ls" };
 /// Is pi here, and which version? Called when a delegation opens, so a definition
 /// naming a harness this machine does not have is refused THEN — before a record
 /// exists and before a receipt says work is under way. It is also where
-/// `runner_version` comes from (D7).
+/// `runner_version` comes from — and, as on the claude arm, that column is
+/// OBSERVED PROVENANCE rather than a pin: later rounds run whatever `pi`
+/// resolves to on PATH then, because a PATH binary offers nothing to pin
+/// (`record.Created`, D7).
 pub fn probe(
     alloc: std.mem.Allocator,
     io: std.Io,

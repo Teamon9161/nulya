@@ -73,38 +73,35 @@
       {
         "name": "run",
         "surface": "internal",
-        "description": "Drive one delegation until it has nothing left to answer, then print its report. For drivers: this is the command the background task started by `agent` runs; the report reaches the parent as that task's result.",
+        "description": "Drive one delegation until it has nothing left to answer, then print its report. For drivers: this is the command the background task started by `agent` runs; the report reaches the parent as that task's result. Give it `delegation` and everything else — which harness, which remote conversation, what it may do — is read from that delegation's record, which is where those facts were frozen.",
         "input": {
           "type": "object",
           "properties": {
             "delegation": {
               "type": "string",
-              "description": "The delegation to drive: whose runner lease this takes and whose interrupt marker it watches."
+              "description": "The delegation to drive: whose runner lease this takes, whose interrupt marker it watches, and whose record says what it is. The ordinary form."
             },
             "session": {
               "type": "string",
-              "description": "The remote conversation that delegation opened — the session to step."
+              "description": "A remote conversation to drive directly, WITHOUT a delegation — one round, by hand, against a bare session. Ignored when `delegation` is given: a delegation's facts come from its record."
             },
             "agent": {
               "type": "string",
-              "description": "Which definition it is running, for the report's framing."
+              "description": "Which definition it is running, for the report's framing. Hand-call form only (see `session`)."
             },
             "permissions": {
               "type": "string",
-              "description": "The ceiling this delegation was opened at — `readonly`, `default` or `unsafe`, as its record froze it. `readonly` holds the run to tools that declare themselves read-only, refusing everything else at the kernel's gate."
+              "description": "The ceiling for a hand call — `readonly`, `default` or `unsafe`. Hand-call form only: a delegation's ceiling was frozen into its record when it opened, and one that could be named here would be no ceiling at all."
             },
             "max_steps": {
               "type": "integer",
-              "description": "Step budget for the run; omitted means the kernel's own."
+              "description": "Step budget for a hand call; omitted means the kernel's own. Hand-call form only (see `permissions`)."
             },
             "depth": {
               "type": "integer",
-              "description": "How deep this delegation sits; the step it drives is told, so an indirect cycle of personas cannot recurse for ever."
+              "description": "How deep this delegation sits; the step it drives is told, so an indirect cycle of personas cannot recurse for ever. A fact about the chain rather than about the delegation, which is why it is still an argument."
             }
-          },
-          "required": [
-            "session"
-          ]
+          }
         }
       }
     ]

@@ -195,12 +195,14 @@ pub const StartOptions = struct {
 /// What opening a conversation came back with.
 pub const Started = struct {
     run: proc.Run,
-    /// What the harness says about its own version, to be frozen beside the
-    /// runner name (D7): every later round of this delegation goes to the same
-    /// harness, and a record that says which one it was is the only way to read
-    /// an old delegation afterwards. Empty where the harness does not say —
-    /// `codex app-server` reports no version of its own, and this nulya is the
-    /// binary running the record.
+    /// Which implementation this delegation opened on, to be recorded beside
+    /// the runner name (D7). Every later round of a delegation goes to the same
+    /// HARNESS; whether it goes to the same VERSION depends on the arm, and
+    /// `record.Created.runner_version` is where that difference is written
+    /// down — a pinned `v-…` for `ext:<id>`, observed provenance for a binary
+    /// on PATH. Empty where the harness does not say: `codex app-server`
+    /// reports no version of its own, and this nulya is the binary running the
+    /// record.
     version: []const u8 = "",
 };
 
