@@ -1,0 +1,18 @@
+{
+  "schema": "nulya.extension/v2",
+  "id": "ground",
+  "runtime": { "entry": "bin/ground" },
+  "contributes": {
+    "tools": [
+      {
+        "name": "render",
+        "surface": "internal",
+        "description": "Render this workspace's starting facts — project layout, the project's own instruction files, environment and git state — into a file, and answer where it is. Call it before `session new` and pass the path to `--prompt`; nothing here opens or steps a session.",
+        "input": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    ]
+  }
+}

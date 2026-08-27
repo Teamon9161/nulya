@@ -135,6 +135,18 @@ pub fn build(b: *std.Build) void {
     const agent_external_tests = b.addTest(.{ .root_module = agent_external_mod, .filters = test_filters });
     test_step.dependOn(&b.addRunArtifact(agent_external_tests).step);
 
+    // …and the `ground` package, whose whole job is shaping text: the two-level
+    // map's per-directory budget and the cut that must not split a character.
+    // Rooted at its `main.zig`, which imports the three modules that do the
+    // work — none of them imports another, so one root reaches them all.
+    const ground_ext_mod = b.createModule(.{
+        .root_source_file = b.path("extensions/ground/src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const ground_ext_tests = b.addTest(.{ .root_module = ground_ext_mod, .filters = test_filters });
+    test_step.dependOn(&b.addRunArtifact(ground_ext_tests).step);
+
     // End-to-end closed-loop test (DESIGN §16 milestone): init -> build -> run.
     // It uses the host's own zig (no embed needed) via NULYA_TEST_ZIG, so it
     // actually compiles and runs a real extension. Everything reachable from a

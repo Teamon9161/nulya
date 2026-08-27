@@ -180,7 +180,10 @@ test("in ask mode a read-only command runs unasked, and the card says why", asyn
         state={state}
         // `ask`, straight from the defaults: the classifier is the only reason
         // this call is not a question.
-        style={createStyle({ ...default_settings, extensions: { ...default_settings.extensions, session_with: [] } }, {})}
+        style={createStyle(
+          { ...default_settings, extensions: { ...default_settings.extensions, session_with: [], ground: false } },
+          {},
+        )}
         driver={{ env: scripted_env }}
         statePath={join(ws.dir, `tui-state-${id}.json`)}
         created

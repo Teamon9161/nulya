@@ -106,6 +106,7 @@ import { createPluginHost, pluginKeyOf } from "../plugins/host.ts"
 import { PluginContext } from "../plugins/context.ts"
 import { wrapExtNote } from "../extnote.ts"
 import { runCompact } from "../compact.ts"
+import { ground_id, renderGround } from "../ground.ts"
 import { headline, nextHandoff, type HandoffFile } from "../handoff.ts"
 import { formatWithRef, parseWithRef, type WithRef } from "../with.ts"
 import { orphanPins, resolvableStandingPins, toolId } from "../pins.ts"
@@ -1205,7 +1206,7 @@ export function App(props: AppProps) {
    * §1, `SpawnPolicy` in its minimal form). Which is why this lives here and not
    * in `startAgent`, the thing that composes a child.
    */
-  const sessionExtras = async (): Promise<{ with?: string[]; pin?: string[] }> => {
+  const sessionExtras = async (): Promise<{ with?: string[]; pin?: string[]; prompt?: string[] }> => {
     const withRefs: string[] = []
     const pins: string[] = []
     const missing: string[] = []
@@ -1218,10 +1219,24 @@ export function App(props: AppProps) {
       withRefs.push(formatWithRef({ id: member.id, version: member.version }))
       for (const pin of member.pins) if (!pins.includes(pin)) pins.push(pin)
     }
+    // `ground` is resolved by the same machinery and composed by none of it: it
+    // renders a file, and the FILE is what the session gets (`ground.ts`).
+    // Deliberately last, so the facts are read at the latest possible moment
+    // before `session new` freezes them.
+    const prompts: string[] = []
+    if (props.style.settings.extensions.ground) {
+      const member = await sessionMemberOnce(ground_id)
+      const rendered = member
+        ? await renderGround(props.ws, { id: member.id, version: member.version }).catch(() => null)
+        : null
+      if (rendered) prompts.push(rendered)
+      else missing.push(ground_id)
+    }
     if (missing.length > 0) setNotice(`${missing.join(" & ")} not composed in · /ext for what it said`)
     return {
       ...(withRefs.length > 0 ? { with: withRefs } : {}),
       ...(pins.length > 0 ? { pin: pins } : {}),
+      ...(prompts.length > 0 ? { prompt: prompts } : {}),
     }
   }
 

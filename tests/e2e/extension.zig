@@ -1566,6 +1566,76 @@ test "bundled handoff: a session that pins ext:handoff/handoff exposes it native
     try std.testing.expect(std.mem.indexOf(u8, written, launch.ScriptedProvider.handoff_sentinel) != null);
 }
 
+test "bundled ground: render answers a context file carrying this directory's own instructions but not a subdirectory's, and that file composes into a session as a frozen inline prompt" {
+    // `docs/goals/ground.md`. Two things are being pinned, and neither is the
+    // wording of a section. First, WHICH instruction files a rendered context
+    // may carry: root down to cwd, never below — that line is what lets the
+    // deeper layers live in `extensions/std` later without the two packages
+    // sharing any state. Second, that what `render` answers is a path a driver
+    // can hand straight to `session new --prompt`, which is the whole of how
+    // this package reaches a session.
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var ws_real: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
+
+    const ref = try buildBundled(alloc, io, ws, exe_abs, "ground");
+    defer alloc.free(ref);
+
+    try ws.writeFile(io, .{ .sub_path = "AGENTS.md", .data = "GROUND-HERE-SENTINEL\n" });
+    try ws.createDirPath(io, "sub");
+    try ws.writeFile(io, .{ .sub_path = "sub/AGENTS.md", .data = "GROUND-BELOW-SENTINEL\n" });
+
+    // PATH is pointed somewhere without a git, which makes this deterministic
+    // wherever the temporary directory happens to sit — `std.testing.tmpDir`
+    // puts it under `.zig-cache`, which is inside THIS repository, and a git
+    // that can answer would layer this repository's own instructions in too.
+    // It also exercises the arm a machine without git takes: a rendered context
+    // and an exit code of zero, never a failure.
+    const no_git: []const EnvPair = &.{.{ .key = "PATH", .value = ws_path }};
+
+    const rendered = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "render" }, no_git);
+    defer alloc.free(rendered.stdout);
+    try std.testing.expectEqual(@as(u8, 0), rendered.code);
+
+    const answer = try std.json.parseFromSlice(std.json.Value, alloc, std.mem.trim(u8, rendered.stdout, " \r\n"), .{});
+    defer answer.deinit();
+    const written_at = answer.value.object.get("prompt").?.string;
+
+    const context = try ws.readFileAlloc(io, written_at, alloc, .unlimited);
+    defer alloc.free(context);
+    try std.testing.expect(std.mem.indexOf(u8, context, "GROUND-HERE-SENTINEL") != null);
+    // The layer below cwd is not this package's to load: which of those matter
+    // depends on which files the work turns out to touch.
+    try std.testing.expect(std.mem.indexOf(u8, context, "GROUND-BELOW-SENTINEL") == null);
+    for ([_][]const u8{ "# Project instructions", "# Environment", "# Git" }) |needle| {
+        try std.testing.expect(std.mem.indexOf(u8, context, needle) != null);
+    }
+
+    // …and the answer is a path `session new` takes, landing in the frozen
+    // header as an inline prompt whose `source` is the file's stem (DESIGN
+    // §5.6) — which this package names after itself, so a session says who put
+    // the block there.
+    const created = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted", "--prompt", written_at });
+    defer alloc.free(created.stdout);
+    try std.testing.expectEqual(@as(u8, 0), created.code);
+
+    const listed = try runCli(alloc, io, ws, &.{ exe_abs, "session", "list", "--json" });
+    defer alloc.free(listed.stdout);
+    try std.testing.expectEqual(@as(u8, 0), listed.code);
+    try std.testing.expect(std.mem.indexOf(u8, listed.stdout, "\"ground\"") != null);
+}
+
 // ── M5f: `session list` (read-only projection of .nulya/sessions) ───────────
 
 test "cli ext build: a draft outside any store lands in the workspace store under its manifest id; --user lands in the user store; a draft inside a store lands in that store; in-store builds are byte-identical to before" {

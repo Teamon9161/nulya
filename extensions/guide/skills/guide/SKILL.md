@@ -199,7 +199,7 @@ Store and scope:
   what it just built (and at ids that have none) — it never moves a `current`
   that names something else, so going back to an older version survives. `--dry-run` says what it
   would do and writes nothing. Add `--seed` to bring in this binary's own
-  bundled drafts (`extensions/{agent,ask,coding,compact,evolution,guide,handoff,plan,std}`
+  bundled drafts (`extensions/{agent,ask,coding,compact,evolution,ground,guide,handoff,plan,std}`
   and any later ones) first — `nulya ext sync --seed --user` on a machine that
   has never seen this checkout writes and builds all of them in one call.
 - A build takes a copy instead of compiling when another root already holds that
@@ -232,6 +232,14 @@ Store and scope:
   first kind.
 - An extension with only skills and prompts needs no compiler, and its version
   is a pure content hash — the same id on every machine.
+- Text that belongs to ONE session belongs to `nulya session new --prompt <file>`
+  instead: the bytes are read at creation and frozen into that session's header,
+  so it needs no package, no version and no install. That is where a rendered
+  brief goes — today's facts, a persona, a task statement. Freezing it is the
+  point: it sits at the front of the cached prefix, paid for once. The bundled
+  `ground` package is the worked example — `nulya ext run ground@<v> render`
+  writes this workspace's layout, instruction files, environment and git state
+  to a file and answers the path, which the driver then passes to `--prompt`.
 
 ## Sessions and drivers
 

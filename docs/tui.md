@@ -1979,3 +1979,12 @@ T33 把 `internal` 行折起来时给的理由是**数量**（六个 driver tool
 **测试**：`test/readonlyshell.test.ts` 表驱动（每个否决向量一行、复合命令、引号藏操作符、`2>&1` 的边界），`approvals.test.ts` 补裁决链位置与 `readonly_commands` 三条，`gate.test.tsx` 加一条真二进制端到端（`ask` 档、没人按键，scripted 的 `echo hello-from-nulya` 直接跑完并带标记）。**同一个文件里其余的审批测试从此带一条 `[approvals] ask = ["shell:echo"]`**——`echo` 现在会被分类器放行，而那些测试问的是对话框本身，这条 checkpoint 正好也把"人写的表压得过分类器"钉在了那儿。`bun test` 全绿、`tsc` 干净。
 
 **没做**：不给分类器做 off 开关（`ask` 表已经是"就这一类还是要问我"的说法，`unsafe` 是另一头）；不改 `run_summary` 的收编规则（被折进 `⋯ read ×3` 的那些本来就是"跑完 + 成功 + 无身体"，摘要行自己就说了没人被问）；不拿它去松动任何 readonly 天花板（第 1 条）。
+
+### T66 · 开场就知道自己在哪：`ground` 渲染，`--prompt` 送进去（`goals/ground.md`，2026-08-27）
+
+**内核零改动**，前端只多一个模块与一次调用。起因是 kernel prompt 只有五句 harness 事实、`coding` 补了工作纪律，而**这一场具体跑在哪**（哪个目录、什么平台、今天几号、git 什么状态、项目长什么样、这个 checkout 自己写了什么规矩）一个字都没有——于是每场开头的头几个 tool call 都在问「我在哪」。
+
+1. **`ground` 不是 `session_with` 的一员**，所以它没有进那张列表。membership 带进 session 的是**冻在版本里的同一批字节**；这些是今天的日期、这个分支、这个目录，生命周期恰好一场 session——`--prompt` 那一侧（`goals/session-prompt.md` 的尺子）。所以开关是 `[extensions] ground`（布尔，缺省 `true`），不是列表里的一个 id。
+2. **调用点只有一个：`sessionExtras()`**，`ensureSession` 里 draft 变成 session 的那一刻，**排在 `session_with` 之后**——事实在 `session new` 冻结它们之前的最后一刻才读。版本解析借的是 `sessionMemberOnce`（自带 draft 就地 build、否则取 `current`，与别的自带包同一条路），拿到的只是版本；`renderGround`（`src/ground.ts`）跑 `ext run ground@<v> render`、读回 `{prompt}`，那个路径进 `SessionExtras.prompt`。
+3. **失败不挡开场**：渲染不出来就落进 `session_with` 那句同样的 `not composed in` 提示，session 照开，只是不带 context——与一个解析不了的成员包同一个态度。
+4. **没做**：没有 `/ground` 命令（它不是一个模式，没有可穿脱的东西）；没有把渲染结果画在 transcript 上（它是 system block，`/sessions` 的 composition 里看得见）；没有让它跟着每一步刷新（`--prompt` 冻在 header 里正是它该待的地方——重渲染一次就是把缓存前缀换掉）。

@@ -63,7 +63,13 @@ export const unsafe_settings: Settings = {
   // …and without the `handoff` or `agent` packages. Composing them is a real
   // behaviour with its own test; here they would put two more extensions in
   // every workspace whose store these tests then read back (tui.md §5.8/§5.10).
-  extensions: { ...default_settings.extensions, session_with: [] },
+  //
+  // `ground` is off for the same reason and one more: it is COMPILED, and a
+  // bundled draft is built the first time a session in that workspace asks for
+  // it. Every test here gets a fresh workspace, so leaving it on buys one Zig
+  // compile per test — which lands as wall-clock on every OTHER file in the
+  // parallel run, and reads as an unrelated timeout somewhere else entirely.
+  extensions: { ...default_settings.extensions, session_with: [], ground: false },
 }
 
 /**
