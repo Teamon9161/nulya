@@ -149,7 +149,15 @@ TUI 侧 `Workspace` 已经是每个 CLI 调用的显式参数（`nulya/cli.ts`�
    先例：`trusted-stores.jsonl` 因为同样的理由在 user 层）。
 4. **侧边栏按 workspace 分组**：当前 workspace 的会话 + recent 段；选中一个 workspace 就对那个目录跑
    `session list --json`。sub-agent 过滤（T70）每组照用。
-5. **信任与开屏流程按 workspace 首次使用时走**：trust gate / `ext sync` / `.nulya/agents` 问句这些今天发生在开屏，
+5. **无项目 session（2026-08-27 用户）**：只是问个问题、排查电脑，不需要任何项目目录也不需要 ground。
+   **内核零改动**——任何目录都能当 workspace，做法是一个**专用的家 workspace** `~/.nulya/home/`
+   （session / journal / scratch 都落在它的 `.nulya/` 下）。**不能直接拿 `~` 当 workspace**：
+   `~/.nulya` 是 user 层，塌在一起会让 user extension store 被 trust gate 误认成未信任的
+   workspace store 而拒开 session。TUI 侧三处：目录选择器**第一行是显式的 `no project` 选项**
+   （在 recents 之前）；该 workspace 的 tab **跳过 `[extensions] session_prompts`**（ground 渲染的是
+   项目地图与 git 状态，在这里全是空话——用户点名不要）；侧边栏这一组的标签写 `no project` 不写路径。
+   其余（模型、扩展、审批、后台任务）与普通 session 完全一致。
+6. **信任与开屏流程按 workspace 首次使用时走**：trust gate / `ext sync` / `.nulya/agents` 问句这些今天发生在开屏，
    改为发生在"第一个进入该 workspace 的 tab"上，拒绝显示在那个 tab 里。
 6. 观察者 / `<id>.lock` / SessionBusy 语义不变（全是 per-session 文件的事实）。
 
