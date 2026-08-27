@@ -94,11 +94,27 @@ WM = 宿主，window = surface（T2 面），tiling 规则 = 争抢规则。鼠�
   pane API 的内置 surface** 实现（宿主自己当第一个 consumer，API 才诚实；`/plan` 是包的同一先例）。
 - **扩展**：包的 T2 面（plan 评审、委派视图）、自定义预览器、额外工具面。
 
+### 5.1b 边界：这不是在造终端复用器
+
+担心（2026-08-27，用户）：这么做下去会不会自己实现出一个 ghostty / zellij / tmux？——担心成立，
+所以边界写死在这里。**复用器的第一对象是任意终端程序（PTY pane）；我们的第一对象是 agent
+workspace 的 surface**（transcript、sessions、包的 T2 面、agent 产物的预览）——结构化 widget，
+不是 VT 字节流。复用器的复杂度大头（VT 解析、detach/reattach、任意程序的 escape 透传、
+copy-mode）我们**一样都不需要**；pane 树本身（split/focus/resize 铺结构化 widget）在 OpenTUI
+的布局之上是小几百行的量级。
+
+**litmus test：一个 pane 类型如果放进 tmux、旁边没有 nulya 也照样成立，它就在边界的错误一侧。**
+通用 PTY 托管明确是 non-goal：TUI 本来就活在一个终端里，用户自己的复用器 / Windows Terminal
+分屏一个快捷键就有一个 shell 在旁边——claude code app 内嵌终端是因为 Electron 没有周边终端，
+我们有。所以内嵌终端 pane 从 S3 **降级为"大概率永不做"**：先赌"用你自己的分屏"够用，
+只有真实证据（用户反复要求、且外部分屏解决不了的具体场景）出现才重议；到那天也优先借库不自研。
+图片预览留在 S3——它预览的是 agent 的产物，过得了 litmus test。
+
 ### 5.2 诚实的成本清单
 
 - **平铺可以，浮动 / 重叠不行**（cell grid 的物理），恰好 Hyprland 主模式也是平铺。
-- **内嵌终端 pane 是最重的一块**：要 PTY + VT 解析 / 终端模拟 widget，量级接近半个 tmux；
-  单列一个里程碑，能借库（Bun PTY + 现成 VT parser / OpenTUI 若有）就借，不自研。
+- **内嵌终端 pane 已按 §5.1b 降级为 non-goal**（保留这行是给将来重议时的成本参考：
+  PTY + VT 解析 / 终端模拟 widget，量级接近半个 tmux）。
 - **图片预览依赖终端协议**（kitty graphics / sixel；OpenTUI 有 native images 支持，
   Windows Terminal 的 sixel 支持较新）——必须有降级（打不出图就给路径 + 打开系统查看器的动作）。
 - **鼠标的终端税**：拖拽在部分终端笨拙；Shift+选中绕过 app 鼠标进 copy-mode 是用户习惯，别抢。
@@ -119,7 +135,7 @@ surface 契约设计成 host 中立（T0/T1 数据契约 + T2 面注册），则
 - **S2**：plugin API 补 T2（page/pane 注册 + 焦点内 onKey + 点击回调 + 降级声明）+ chip 模型；
   第一批 consumer = 把 agent 委派卡与 plan 评审面板迁进各自的包（验收："两个包各有 T2 面、
   互不知情、不打架"）。
-- **S3**：utility pane：图片预览（带降级）→ 内嵌终端（PTY，最后做）。
+- **S3**：utility pane：图片预览（带降级）。内嵌终端不做（§5.1b）。
 - 每步的尺子：加进宿主的每样东西对着 §1 四类过一遍；API 增补要有现成 consumer。
 
 ## 6. 相关记录
