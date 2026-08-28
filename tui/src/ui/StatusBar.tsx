@@ -3,6 +3,7 @@ import { useScreen, useStyle } from "../render/theme.ts"
 import { onClick } from "./rows.ts"
 import { displayWidth, fit } from "./columns.ts"
 import { builtin_tools } from "../pins.ts"
+import { contextFill, fillGlyph } from "../state/context.ts"
 import type { SessionSnapshot } from "../state/session.ts"
 import type { Role } from "../state/attach.ts"
 import type { PermissionMode } from "../approvals.ts"
@@ -30,8 +31,11 @@ import type { PermissionMode } from "../approvals.ts"
  * changing it; standing here it was six columns of arithmetic that nobody was
  * reading between steps, and it pushed the model id — the answer to "what am I
  * talking to" — into being cut first on a narrow terminal. `/usage` still has
- * every number, and `ctx N%` still appears here when the window fills, because
- * that one is not a total but a warning.
+ * every number, and the context ring still stands here, because that one is not
+ * a total but a proportion: how much of what the next request may carry is
+ * already spoken for (T82). It is the one chip that opens a panel rather than a
+ * picker or a view — `ContextPanel`, the same three rows every other decision
+ * on this screen is made in.
  */
 export function StatusBar(props: {
   snapshot: SessionSnapshot
@@ -73,6 +77,8 @@ export function StatusBar(props: {
    * no fullness is shown at all rather than a made-up denominator.
    */
   contextWindow?: number | null
+  /** Clicking the context ring: the mouse half of `/context` (tui.md §11, T82). */
+  onOpenContext?: () => void
   /** Clicking the model: the mouse half of `/model` (tui.md §11, T20). */
   onPickModel?: () => void
   /** Clicking the "N more below" marker: the mouse half of Shift+End. */
@@ -113,6 +119,8 @@ export function StatusBar(props: {
   const modeClick = onClick(() => props.onPickMode?.())
   const extClick = onClick(() => props.onOpenExt?.())
   const toolsClick = onClick(() => props.onOpenExt?.())
+  const [overContext, setOverContext] = createSignal(false)
+  const contextClick = onClick(() => props.onOpenContext?.())
   const [overSidebar, setOverSidebar] = createSignal(false)
   const [overCwd, setOverCwd] = createSignal(false)
   const sidebarClick = onClick(() => props.onToggleSidebar?.())
@@ -172,17 +180,27 @@ export function StatusBar(props: {
 
   /**
    * How full the window is, after the last step. Nothing acts on this — nulya
-   * never compacts behind the user's back — but a number that only appears once
-   * it matters is how `/compact` gets found at the moment it is worth running.
+   * never compacts behind the user's back — but a meter that is on the screen
+   * before it matters is how a person knows what "nearly full" looks like when
+   * it arrives, and `/compact` gets found at the moment it is worth running.
+   *
+   * It used to appear only past 60%, which made the first sight of it the same
+   * event as the warning; now the ring is here from the first priced step and
+   * only its COLOUR is news (T82). Absent still means absent: a model the
+   * `[[models]]` catalog does not name has no denominator, and a session that
+   * has not been priced has no numerator (§6.1 rule 4).
    */
-  const context = createMemo(() => {
-    const window = props.contextWindow ?? 0
-    const used = props.snapshot.usage.lastPrompt
-    if (window <= 0 || used <= 0) return null
-    const percent = Math.round((used / window) * 100)
-    if (percent < 60) return null
-    return { percent, urgent: percent >= 80 }
-  })
+  const context = createMemo(() => contextFill(props.snapshot.usage.lastPrompt, props.contextWindow))
+  const contextTone = () => {
+    switch (context()?.band) {
+      case "urgent":
+        return style.theme.err
+      case "warn":
+        return style.theme.warn
+      default:
+        return style.theme.dim
+    }
+  }
 
   /**
    * The model, and the effort only when this tab has chosen one — `auto` is the
@@ -192,7 +210,17 @@ export function StatusBar(props: {
   const modelText = () => `${props.model || "…"}${props.effort ? ` (${props.effort})` : ""}`
 
   /** The right-hand chips, as strings first, so the middle can be cut to what they leave. */
-  const contextChip = () => (context() ? ` ctx ${context()!.percent}% · /compact` : "")
+  /**
+   * The ring and its number — and the way to `/compact` only once that is the
+   * useful thing to say. Naming the command at 12% would be advice; at 90% it
+   * is the answer to the question the colour just raised.
+   */
+  const contextChip = () => {
+    const fill = context()
+    if (!fill) return ""
+    const nudge = fill.band === "urgent" ? " · /compact" : ""
+    return ` ${fillGlyph(fill.percent, style.glyphs.ring)} ${fill.percent}%${nudge}`
+  }
   const behindChip = () =>
     (props.behind ?? 0) > 0 ? ` ${style.glyphs.below} ${props.behind} more below · Shift+End` : ""
   /**
@@ -388,10 +416,21 @@ export function StatusBar(props: {
               </box>
             </Show>
           </box>
+          {/* The ring answers to a click, like the model and the mode beside it:
+              it opens the panel that says what the percentage is made of
+              (`ContextPanel`), which is the mouse half of `/context`. */}
           {context() ? (
-            <text fg={context()!.urgent ? style.theme.warn : style.theme.dim} flexShrink={0}>
-              {contextChip()}
-            </text>
+            <box
+              flexShrink={0}
+              height={1}
+              backgroundColor={props.onOpenContext && overContext() ? style.theme.hover : undefined}
+              onMouseDown={props.onOpenContext ? contextClick.onMouseDown : undefined}
+              onMouseUp={props.onOpenContext ? contextClick.onMouseUp : undefined}
+              onMouseOver={() => setOverContext(true)}
+              onMouseOut={() => setOverContext(false)}
+            >
+              <text fg={contextTone()}>{contextChip()}</text>
+            </box>
           ) : null}
           {/* Scrolled away from the live end: the newest card is off screen, which
               is worth saying — otherwise a streaming answer looks like a stall. */}

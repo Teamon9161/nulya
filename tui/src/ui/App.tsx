@@ -22,6 +22,8 @@ import { ModePicker, initialChoice, modeAt, moveChoice } from "./ModePicker.tsx"
 import { AgentPicker } from "./AgentPicker.tsx"
 import { WithPicker, type Wearable } from "./WithPicker.tsx"
 import { StatusBar } from "./StatusBar.tsx"
+import { ContextPanel } from "./ContextPanel.tsx"
+import { contextFill, contextSections } from "../state/context.ts"
 import { pickTip } from "./Welcome.tsx"
 import { WorkingStatus, activityOf, type SyncProgress } from "./WorkingStatus.tsx"
 import { installCrashLog } from "../crashlog.ts"
@@ -541,6 +543,16 @@ export function App(props: AppProps) {
    */
   const [modePicker, setModePicker] = createSignal(false)
   const [modeChoice, setModeChoice] = createSignal(0)
+  /**
+   * Whether the context panel is open (`ui/ContextPanel.tsx`, T82) — the ring on
+   * the status row, opened out.
+   *
+   * Deliberately NOT one of `resolveFocus`'s dialogs: it chooses nothing, takes
+   * no keystroke, and everything on it is a number. What it does share with a
+   * package's panel is where it may appear — while a trusted zone is up it is
+   * not drawn at all, and comes back when the zone clears (`dialogUp`).
+   */
+  const [contextPanel, setContextPanel] = createSignal(false)
   /**
    * What `a` has collected. In memory and per run on purpose: trying a tool out
    * should cost nothing and leave nothing in a file somebody else reads — the
@@ -2314,6 +2326,9 @@ export function App(props: AppProps) {
    */
   const toggleModePicker = () => (modePicker() ? closeModePicker() : openModePicker())
 
+  /** `/context` and a click on the ring: the same gesture both ways (T82). */
+  const toggleContextPanel = () => setContextPanel((up) => !up)
+
   /**
    * Who holds the keyboard while a call waits: the dialog's note field, or
    * nobody (the list, which is this screen's own key handler). Never the
@@ -3082,6 +3097,10 @@ export function App(props: AppProps) {
       void compactNow(rest)
       return true
     }
+    if (command === "/context") {
+      toggleContextPanel()
+      return true
+    }
     // Collapse only. The other direction — one key that opens everything —
     // was a key (T38): a screenful of every tool body at once is not a view of
     // anything, and folding back down is what a person actually wants after
@@ -3331,6 +3350,14 @@ export function App(props: AppProps) {
   }
 
   const handleGlobalCancel = () => {
+    // Something opened on purpose a moment ago is what Esc is about, ahead of
+    // the handover proposal that may have been sitting there for minutes and
+    // ahead of the step — closing a panel of numbers costs nothing to get
+    // wrong, and cancelling a step to put one away would.
+    if (contextPanel()) {
+      setContextPanel(false)
+      return
+    }
     // A proposal on screen is what Esc is about while it is there.
     if (dismissHandoff()) return
     const here = live()
@@ -4053,6 +4080,17 @@ export function App(props: AppProps) {
                     onReady={(field) => (noteField = field)}
                   />
                 </Show>
+                {/* The context ring, opened out (T82). Lowest of the panels
+                    because it is the expansion of a chip on the row below the
+                    composer, and hidden outright while a host dialog is up —
+                    the same terms a package's panel lives under, for the same
+                    reason: nothing may come between a person and a question. */}
+                <Show when={contextPanel() && !dialogUp()}>
+                  <ContextPanel
+                    fill={contextFill(snapshot().usage.lastPrompt, contextWindow())}
+                    sections={contextSections(snapshot().usage, contextWindow())}
+                  />
+                </Show>
                 {/* What is happening, directly above the box you would type
                     into to change it (tui.md §4.4b, T38). Below the panels: a
                     question waiting for an answer outranks a report of work. */}
@@ -4122,6 +4160,7 @@ export function App(props: AppProps) {
                   hint={notice()?.text}
                   behind={behind()}
                   contextWindow={contextWindow()}
+                  onOpenContext={toggleContextPanel}
                   onPickModel={() => openOverlay("model")}
                   onScrollEnd={scrollToEnd}
                   sidebarOpen={sidebarOpen()}

@@ -225,7 +225,7 @@ tui/
 
 （**驱动侧的失败不在这一行**：`error · see transcript` 写在上面那一行（§4.4b），原文整段在 transcript 末尾，§4.2 `ErrorNotice`。）
 
-**权限 mode**（`ask` / `unsafe`，**行首**，可点 → mode picker（**再点一下收起**，T42），§5.7；`unsafe` 是 warn 色；T35 之前它在最右边——那是一行愿意先丢掉的东西所在的位置，而它是屏幕上每个 tool call 被裁决的立场，该在 model 之前读到） · `<model-id> [(effort)]`（**主语**，`fg`，可点 → `/model`；effort 只在本 tab 明确选过时才写括号——`auto` 就是内核默认，为它花七列不值） · `tools 1+N`（`dim`；1 = 那一个 builtin `shell`，DESIGN §5.1；draft 上 N = 合并 config pin ∪ `tui-state.json` 的 `session_pins` ∪ **每一场都被组合进来的那些包（`apply: "auto"` / config `[extensions] with` / `tui.toml` `session_with`）active 版本的 `surface: "auto"` tool**，再 ∪ 那几个包声明的 `surface: "manual"` tool（由 `sessionExtras` 在 `session new` 那一刻 `--pin` 进去，T52——**今天这一半是空的**：`handoff` 与 `agent` 的入口 tool 都是 `auto`，两个都由前一半数进来了，T53；不算进来的话开屏就在说 `agent` 没启用，T42））。**token 累计从 T42 起不在这一行**——它搬去了 §4.4b 那一行，只在跑着的时候写（`state/session.ts` 的 `usageLabel`，来源仍是 ledger 的 `assistant.usage`；`/usage` 里是全部账）。右：`ctx N%` · `↓ N more below` · **`◈ <id>`**（这一场戴着的、contribute 了 system prompt 的包，`accent.evolve`，可点 → `/ext`；draft 读 `--with` 的 ref，已开场的读冻结 `contributions`——顶上那张卡默认折着，不写这一格就一个字都没有，T31） · `step n`（**跑过步才写**）· `observer · driven elsewhere`（§5.6；**只有例外说自己**——当写者是常态，`driver` 那个词在每个人的每一场里都一模一样，一格恒定的东西不是信息，T35）。离开底部时插入 `↓ 3 new`。
+**权限 mode**（`ask` / `unsafe`，**行首**，可点 → mode picker（**再点一下收起**，T42），§5.7；`unsafe` 是 warn 色；T35 之前它在最右边——那是一行愿意先丢掉的东西所在的位置，而它是屏幕上每个 tool call 被裁决的立场，该在 model 之前读到） · `<model-id> [(effort)]`（**主语**，`fg`，可点 → `/model`；effort 只在本 tab 明确选过时才写括号——`auto` 就是内核默认，为它花七列不值） · `tools 1+N`（`dim`；1 = 那一个 builtin `shell`，DESIGN §5.1；draft 上 N = 合并 config pin ∪ `tui-state.json` 的 `session_pins` ∪ **每一场都被组合进来的那些包（`apply: "auto"` / config `[extensions] with` / `tui.toml` `session_with`）active 版本的 `surface: "auto"` tool**，再 ∪ 那几个包声明的 `surface: "manual"` tool（由 `sessionExtras` 在 `session new` 那一刻 `--pin` 进去，T52——**今天这一半是空的**：`handoff` 与 `agent` 的入口 tool 都是 `auto`，两个都由前一半数进来了，T53；不算进来的话开屏就在说 `agent` 没启用，T42））。**token 累计从 T42 起不在这一行**——它搬去了 §4.4b 那一行，只在跑着的时候写（`state/session.ts` 的 `usageLabel`，来源仍是 ledger 的 `assistant.usage`；`/usage` 里是全部账）。右：**context ring**（`◕ 72%`，可点 → `/context` 面板，T82） · `↓ N more below` · **`◈ <id>`**（这一场戴着的、contribute 了 system prompt 的包，`accent.evolve`，可点 → `/ext`；draft 读 `--with` 的 ref，已开场的读冻结 `contributions`——顶上那张卡默认折着，不写这一格就一个字都没有，T31） · `step n`（**跑过步才写**）· `observer · driven elsewhere`（§5.6；**只有例外说自己**——当写者是常态，`driver` 那个词在每个人的每一场里都一模一样，一格恒定的东西不是信息，T35）。离开底部时插入 `↓ 3 new`。
 
 **没有的东西不占列**：没跑过步就不写 `step 0`（T35 之前连"一场还没花过钱"都要用十二列写成 `no usage yet`；那一格后来整个搬走了，见上）。**键位提示也不在这里了**（T38）：`Esc cancel · Ctrl+O fold · /help` 常年挂在这一行，是两头都输——一个永远在那儿的提醒过了第一个小时就没人再读，而它占的是屏幕上最挤的一行。它搬去了开屏那一屏，一次一条 tip（§4.1、`Welcome.tips`），tcode 的做法；`/help` 那个可点的 box 也随之删掉——开屏的 `/help` 那一行本来就是同一个按钮。
 
@@ -233,7 +233,13 @@ tui/
 
 **窄屏让位的顺序是一句判断，不是平均分**：mode 与 model **永不让**；再窄就丢 `tools`（上面的 CompositionCard 已经把工具面写全了）。notice 不参与这场分配（T35 起它拿整行），活动也不参与了（T38 起它自己一行）。
 
-上下文占用（`ctx 72% · /compact`）只在 ≥60% 时出现、≥80% 转 warn 色。分母是 `[[models]]` 目录的 `context_window`（目录没写就整个不显示，不编分母）；分子是**最后一步**的 `input + cache_read + cache_write`——`provider.Usage.input_tokens` 是扣掉缓存之后的量，只读它会把一个快满的窗口报成几乎空的。它只是显示，不触发任何动作。
+上下文占用是**一个环 + 一个百分比**（`◕ 72%`，T82；从第一步有计数起就在，颜色分三档：<60% dim · ≥60% warn · ≥85% err，并在 err 档补一句 `· /compact`）。分母是 `[[models]]` 目录的 `context_window`（目录没写就整个不显示，不编分母）；分子是**最后一步**的 `input + cache_read + cache_write`——`provider.Usage.input_tokens` 是扣掉缓存之后的量，只读它会把一个快满的窗口报成几乎空的。它只是显示，不触发任何动作；点它（或 `/context`）展开 §4.5b 那个面板。
+
+### 4.5b context 面板（`/context`，T82）
+
+输入框上面的一块（与 `ModePicker` / `ApprovalPanel` / `PluginPanel` 同一区、同一套 `Dialog` 骨架），**被动**：不进 `resolveFocus`、不拿键盘、里面没有可选的东西。`Esc` 收（`handleGlobalCancel` 第一支——刚开的东西先答），再点一次环也收。**trusted zone 在时整个不画**（`dialogUp()`），zone 一走原样回来——与包的面板同一条规矩：没有任何东西能挤在人和一个审批问题之间。
+
+内容是 `state/context.ts` 的一个**分节数组**（纯函数）：① `context`（last prompt / window / free + 一条横条，横条用两个形状而不是两种颜色，`NO_COLOR` 下照样读得出满到哪儿） ② `this session`（input / cache read / cache write / output / priced steps，**为零的不写行、一行都没有就不写这一节**）。**留给第三节的是形状不是空位**：provider 自己报的订阅用量（codex 的 rate-limit 窗口）到时候就是多一节 —— 没有行的节永不产生，所以今天它一列都不占。全部数字来自 ledger 的 `assistant.usage`（`/usage` 仍是全部账；这里只是与一个决定有关的那几个）。
 
 ## 5. nulya 独有视图
 
@@ -2469,3 +2475,21 @@ tab 条的 `✕`/`+`/`▎`；`stripPlan` 的**不变量**"画出来的一切都�
 **③ 被 catch 的错误也要留栈**：`ui/crashlog.ts` → `src/crashlog.ts`（进程级设施，而 `state/` 从不 import `ui/`），多一个模块级 `noteCrash`；driver / attach / tabs 六处 `setError` 收成 `reportFailure(state, source, error)`。三个 process 钩子对**被捕获**的致命错误是聋的——屏幕上有消息、日志里没有栈，正是这次难读的原因。
 
 **测试**（+2）：byte array 读回文本（`test/ledger.test.ts`）· 读不懂的 call 只赔掉 run summary（`test/runs.test.ts`），都验证过在旧代码上会红。
+
+### T82 · context 占用有个环，环点开是一块面板（2026-08-28）
+
+**内核零改动**；新增 `test/context.test.tsx` 9 条，`tsc` 干净。新文件两个：`src/state/context.ts`（纯逻辑）与 `src/ui/ContextPanel.tsx`。
+
+**起点是屏幕上没有这个数**。窗口占用一直在 `StatusBar` 里算着，但只在 **≥60%** 才现身——于是**第一次看见它就是被它警告的那一次**，一个人从来没有机会知道"半满"长什么样。现在环从第一个有计数的 step 起就在那儿，**只有颜色是新闻**（<60% dim · ≥60% warn · ≥85% err，err 档才补 `· /compact`——12% 时念这个命令是建议，90% 时它才是刚才那个颜色的答案）。
+
+**环是一把梯子，不是五个字形**（`theme.glyphs.ring = ["○","◔","◑","◕","●"]`，ascii `[".",":","o","O","#"]`）。它们各自没有意思，只有在同一个刻度上的位置——所以是一个数组而不是五个具名字段，否则下一个调用者就会去挑其中一个单用。取整规则是**两头永不被取进去**（`fillGlyph`）：用掉了就绝不画空环，还有余量就绝不画满环。精确的百分比就写在旁边，环的职责只是一眼能读，外加**不在有人会据此行动的那两个状态上撒谎**。面板里的横条（`barCells`）用同一条规则，并且用**两个形状**而不是两种颜色——`NO_COLOR` 下也得看得出满到哪儿（`switchOn`/`switchOff` 的老理由）。
+
+**面板是被动的，这是它与那一区其它东西的全部区别**：不进 `resolveFocus`、不拿一个键、里面没有可选的东西——所以它不该在焦点仲裁里占一行。它与包的面板共享的只有**可以出现在哪儿**：`dialogUp()` 时整个不画，zone 一走原样回来。`Esc` 是 `handleGlobalCancel` 的**第一支**——刚开的东西先答，而且"关掉一块数字"弄错了不花钱，"为了收起它而砍掉一个 step"弄错了才花钱。开合三处同一个动作：`/context`、点环、`Esc`。
+
+**分节是形状，不是空位**（`contextSections`）。用户接下来要的是 codex 订阅的 rate-limit 用量，而那东西的形状已经知道了：多一节。所以今天写的是一个 `ContextSection[]`，规则一句话——**没有行的节不产生**，于是留给它的位置一列都不占，也不需要一个"待办"占位符。同一条规则往下一层：为零的计数器不成为一行（§4.5 那条"没有的东西不占列"）。
+
+**一处不对称是故意的**：状态行上没有 window 就整列消失，面板里没有 window 却写一行说"这个模型在 `[[models]]` 里没有条目"。两者不矛盾——一行是扫过去的，一块是**有人特地打开来问的**，而"为什么没有百分比"正是他要的答案。
+
+**回归测试（9 条）**：分子分母各缺一半都不造表 · 三档在每条边的两侧 · 过期目录导致的 >100% 夹到 100 · 环与横条那两头的不变量（对两套字形都测）· 梯子只升不降 · 为零的计数器不成行、没有行的节不成节 · 无 window 时面板仍答得出 · 一次真渲染证明**每一节**都上了屏（不是只有第一节——它是这个列表存在的全部理由）。**不钉**：任何文案、列宽、阈值字面量与具体字形。
+
+**顺带**：`/help` 快照多一行 `/context`，那条测试的视口跟着 +2 行（它自己写着"要高到装得下整页"）；`StatusBar` 头注释里"`ctx N%` 是个警告"那句改成它现在的样子。**没有当场目验**——机制由测试与两次探针渲染（状态行四个占用档 + 面板整块）钉住了，真终端上的观感还没看过。

@@ -52,10 +52,10 @@ exports[`/help lists the bindings that are actually in force 1`] = `
  drag over text                   select it; releasing copies it to the clipboard                 █ 
                                                                                                   █ 
  slash commands                                                                                   █ 
- /model                           pick the model the next session runs on                         ▀ 
- /mode [ask|unsafe]               ask before every tool call, or run them all unreviewed; no        
-                                  argument opens the picker                                         
- /provider                        endpoints and their keys                                          
+ /model                           pick the model the next session runs on                         █ 
+ /mode [ask|unsafe]               ask before every tool call, or run them all unreviewed; no      █ 
+                                  argument opens the picker                                       █ 
+ /provider                        endpoints and their keys                                        █ 
                                   add an OpenAI- or Anthropic-compatible one                        
  /effort <level|auto>             change this tab's effort now; the next step runs with it          
  /new [--profile p] [--model id]  a session on the last pick, or on the named profile               
@@ -69,6 +69,7 @@ exports[`/help lists the bindings that are actually in force 1`] = `
  /ext                             extensions: versions, what is active, what it is used for         
  /tasks                           background commands: what is running, its log, k stops one        
  /usage                           what this session cost, and the workspace's tool-usage journal    
+ /context                         how full the window is, and what is filling it                    
  /settings                        the effective tui.toml values and which file each came from       
  /compact [focus]                 summarise this session and continue in a new one; this file       
                                   stays                                                             
@@ -90,6 +91,7 @@ exports[`/help lists the bindings that are actually in force 1`] = `
  /<skill> [args]                  load an active skill's body as a user turn                        
                                   \`nulya skill list\` names them                                     
  anything else after /            goes to the model verbatim                                        
+                                                                                                    
  j/k · PgUp/PgDn scroll · Esc close                                                                 
 "
 `;

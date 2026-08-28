@@ -214,6 +214,25 @@ export interface Glyphs {
    */
   closeTab: string
   newTab: string
+  /**
+   * How full the context window is, empty → full (T82). A LADDER, not five
+   * glyphs: the entries have no meanings of their own, only positions in one
+   * scale, and naming them separately would invite a caller to pick one.
+   *
+   * Its unicode ends reuse `switchOff`/`switchOn`'s two circles, which is
+   * allowed for the same reason every ascii fallback in this table collides
+   * with something (§6.1 rule 6): one meaning per glyph per FACE, and no switch
+   * is ever drawn on the status row or in the context panel.
+   */
+  ring: readonly string[]
+  /**
+   * The bar under the ring: the filled cell and the empty one, in that order.
+   *
+   * TWO SHAPES, not one shape in two colours — a terminal asked for no colour
+   * at all still has to be able to see where the fill ends, the same reason
+   * `switchOn`/`switchOff` and `pointer`/`foldOpen` are pairs of shapes.
+   */
+  meter: readonly [string, string]
 }
 
 const unicode_glyphs: Glyphs = {
@@ -249,6 +268,8 @@ const unicode_glyphs: Glyphs = {
   workspaceMark: "▪",
   closeTab: "✕",
   newTab: "+",
+  ring: ["○", "◔", "◑", "◕", "●"],
+  meter: ["█", "░"],
 }
 
 const ascii_glyphs: Glyphs = {
@@ -284,6 +305,8 @@ const ascii_glyphs: Glyphs = {
   workspaceMark: "*",
   closeTab: "x",
   newTab: "+",
+  ring: [".", ":", "o", "O", "#"],
+  meter: ["#", "-"],
 }
 
 export interface Style {
