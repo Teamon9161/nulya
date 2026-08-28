@@ -200,13 +200,24 @@ export function Composer(props: {
    * tui-plugin D1/D8) — the same order dispatch uses (`ui/App.tsx`
    * `runCommand` → `runPackageCommand` → `skillTurn`), so what the menu
    * offers first is what Enter would run.
+   *
+   * A skill sharing a name with a declared package command (e.g. `evolution`'s
+   * `evolve` skill and its `/evolve` command) is not offered a second time: the
+   * dispatch chain already picks the command first (`runPackageCommand` runs
+   * before `skillTurn`), so listing both would show one entry the menu could
+   * never actually reach.
    */
-  const matches = (): { name: string; args?: string; what: string }[] => [
-    ...completions(line()),
-    ...packageCompletions(props.pluginCommands?.() ?? [], line()),
-    ...packageCompletions(resolvePackageCommands(props.packages?.entries() ?? [], builtin_names).winners, line()),
-    ...skillCompletions(props.skills?.entries() ?? [], line()),
-  ]
+  const matches = (): { name: string; args?: string; what: string }[] => {
+    const pluginRows = props.pluginCommands?.() ?? []
+    const packageRows = resolvePackageCommands(props.packages?.entries() ?? [], builtin_names).winners
+    const claimed = new Set([...pluginRows, ...packageRows].map((row) => row.name))
+    return [
+      ...completions(line()),
+      ...packageCompletions(pluginRows, line()),
+      ...packageCompletions(packageRows, line()),
+      ...skillCompletions((props.skills?.entries() ?? []).filter((skill) => !claimed.has(skill.name)), line()),
+    ]
+  }
 
   /**
    * Folded pastes, by the number in their placeholder (tui.md §11, T14).

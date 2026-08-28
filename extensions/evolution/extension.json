@@ -3,13 +3,13 @@
   "id": "evolution",
   "contributes": {
     "system_prompts": ["prompts/evolution.md"],
-    "skills": ["skills/evolution"],
+    "skills": ["skills/evolve"],
     "commands": [
       {
         "name": "evolve",
         "description": "a new tab that reviews finished sessions and judges what is worth keeping or building; nothing is activated",
         "action": {
-          "with": true
+          "with": "Read your most recent report, then review the sessions since it: what recurs, what is expensive, what fails often, what was built and never used. Propose or build only where the evidence supports it."
         }
       }
     ]

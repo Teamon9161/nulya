@@ -344,6 +344,7 @@ pub const Command = struct {
 /// A command's verb, written as an object with EXACTLY ONE key:
 ///
 ///     "action": { "with": true }
+///     "action": { "with": "Review the recent sessions and their outcomes…" }
 ///     "action": { "run": "propose" }
 ///     "action": { "skill": "review/checklist" }
 ///
@@ -357,6 +358,15 @@ pub const Command = struct {
 /// this SAME manifest declares (`UnknownCommandTool`), which is a fact about
 /// this file's own shape rather than a member of the vocabulary.
 ///
+/// `with`'s string form is not a second verb, it is the SAME shape every other
+/// verb already had: a string argument. `true` means "wear the package and
+/// wait for the person to say something"; a string means "wear it AND say
+/// this" — the package's own default first message, sent verbatim as the
+/// opening user turn when the person typed the command bare. Typing text
+/// after the command (`/evolve fix the shell timeout`) still wins over
+/// whatever default the manifest wrote — that argument is a person's own
+/// words, not the package's.
+///
 /// The object replaced a string mini-language (`"run propose"`), which had the
 /// reader splitting on a space to find out what it was holding. That form is
 /// gone: a string `action` is a `WrongType` like any other mistyped field.
@@ -364,8 +374,9 @@ pub const Action = struct {
     /// The single key. Empty only when the object had no keys at all, which
     /// `validate` refuses.
     verb: []const u8,
-    /// The string under the key (`{"run": "propose"}` → `"propose"`). Null when
-    /// the verb takes no argument (`{"with": true}`).
+    /// The string under the key (`{"run": "propose"}` → `"propose"`,
+    /// `{"with": "Review…"}` → `"Review…"`). Null when the verb takes no
+    /// argument (`{"with": true}`).
     target: ?[]const u8 = null,
     /// How many keys the object wrote — the one thing `validate` asks about an
     /// action's shape (exactly one).
@@ -375,6 +386,16 @@ pub const Action = struct {
     /// a `run` with no argument at all). The only reference `validate` follows.
     pub fn runTarget(self: Action) ?[]const u8 {
         if (!std.mem.eql(u8, self.verb, "run")) return null;
+        return self.target;
+    }
+
+    /// The default first message a `with` command sends when typed bare
+    /// (`{"with": "…"}`), or null when the verb is not `with`, or is `with`
+    /// but wrote `true` (wear-and-wait, the original shape). A caller still
+    /// prefers whatever the person typed after the command name over this —
+    /// this is only the fallback.
+    pub fn withPrompt(self: Action) ?[]const u8 {
+        if (!std.mem.eql(u8, self.verb, "with")) return null;
         return self.target;
     }
 };
@@ -1690,6 +1711,26 @@ test "an action is one key: zero or two is a shape error, and its value is `true
     try std.testing.expectError(error.MissingField, parse(alloc,
         \\{"schema":"nulya.extension/v2","id":"a","contributes":{"commands":[{"name":"x","description":""}]}}
     ));
+}
+
+test "`with`'s value may be a string — the default first message a bare command sends" {
+    const alloc = std.testing.allocator;
+    var m = try parse(alloc,
+        \\{"schema":"nulya.extension/v2","id":"a","contributes":{"commands":[
+        \\  {"name": "evolve", "description": "", "action": {"with": "Review the recent sessions."}},
+        \\  {"name": "plan", "description": "", "action": {"with": true}}
+        \\]}}
+    );
+    defer m.deinit();
+    try m.validate();
+
+    try std.testing.expectEqualStrings("with", m.commands[0].action.verb);
+    try std.testing.expectEqualStrings("Review the recent sessions.", m.commands[0].action.withPrompt().?);
+
+    // `true` still means "wear and wait" — no default to fall back on.
+    try std.testing.expect(m.commands[1].action.withPrompt() == null);
+    // `withPrompt` only answers for the `with` verb, same discipline as `runTarget`.
+    try std.testing.expect(m.commands[1].action.runTarget() == null);
 }
 
 test "a command name is [a-z0-9-]+ and may not repeat within a package" {

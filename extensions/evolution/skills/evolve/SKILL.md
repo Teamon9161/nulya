@@ -1,5 +1,5 @@
 ---
-name: evolution
+name: evolve
 description: Recipes and the report template for a slow-loop pass — how to read Nulya's evidence (sessions, tool usage, outcomes, prior reports) with aggregate shell commands, and the exact five-section report to write.
 ---
 

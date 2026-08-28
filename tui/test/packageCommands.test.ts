@@ -20,7 +20,7 @@ import {
 } from "../src/packageCommands.ts"
 
 test("parseAction reads the three verbs out of the object, keeping the run/skill target verbatim", () => {
-  expect(parseAction({ with: true })).toEqual({ kind: "with" })
+  expect(parseAction({ with: true })).toEqual({ kind: "with", prompt: null })
   expect(parseAction({ run: "propose" })).toEqual({ kind: "run", tool: "propose" })
   expect(parseAction({ skill: "std/note" })).toEqual({ kind: "skill", ref: "std/note" })
   // Whitespace inside a target is trimmed; the verb is a key, so it has none.
@@ -30,8 +30,18 @@ test("parseAction reads the three verbs out of the object, keeping the run/skill
   expect(deprecatedActionNote({ run: "propose" })).toBeNull()
 })
 
+test("parseAction: `with`'s value may be a string — the package's own default first message", () => {
+  expect(parseAction({ with: "Review the recent sessions." })).toEqual({
+    kind: "with",
+    prompt: "Review the recent sessions.",
+  })
+  // Same trimming discipline as `run`/`skill`'s target.
+  expect(parseAction({ with: "  hi  " })).toEqual({ kind: "with", prompt: "hi" })
+})
+
 test("parseAction: `wear` is the pre-D4 spelling of `with`, folded into the same kind", () => {
-  expect(parseAction({ wear: true })).toEqual({ kind: "with" })
+  expect(parseAction({ wear: true })).toEqual({ kind: "with", prompt: null })
+  expect(parseAction({ wear: "hi" })).toEqual({ kind: "with", prompt: "hi" })
   expect(deprecatedActionNote({ wear: true })).toContain("with")
 })
 

@@ -37,16 +37,22 @@ export interface PackageCommandRow extends PackageCommand {
  * an ALIAS on an open vocabulary rather than a retired shape — the kernel would
  * happily build either — so it stays, and `deprecatedActionNote` is what lets a
  * caller name the package in a warning.
+ *
+ * `with`'s value may also be a string (`manifest.Action.withPrompt`): the
+ * package's own default first message, sent verbatim when the command is
+ * typed bare. `prompt` carries it through unread — same "this reader never
+ * interprets the string" discipline `run`'s tool name and `skill`'s ref
+ * already have.
  */
 export type PackageAction =
-  | { kind: "with" }
+  | { kind: "with"; prompt: string | null }
   | { kind: "run"; tool: string }
   | { kind: "skill"; ref: string }
   | { kind: "unknown"; word: string }
 
 export function parseAction(action: PackageActionValue): PackageAction {
   const { verb, target } = splitAction(action)
-  if (verb === "with" || verb === "wear") return { kind: "with" }
+  if (verb === "with" || verb === "wear") return { kind: "with", prompt: target.length > 0 ? target : null }
   if (verb === "run" && target.length > 0) return { kind: "run", tool: target }
   if (verb === "skill" && target.length > 0) return { kind: "skill", ref: target }
   return { kind: "unknown", word: verb }

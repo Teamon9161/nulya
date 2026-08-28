@@ -108,9 +108,13 @@ test("/evolve is the evolution package's own command, and wearing it composes on
   await extSetCurrent(ws, "activate", "evolution", version)
   const declared = (await packageCommands(ws)).find((row) => row.command.name === "evolve")
   expect(declared?.id).toBe("evolution")
-  // `{with: true}`: typing it opens a tab wearing the package, activating nothing
-  // further — the same verb `/with` is.
-  expect(parseAction(declared!.command.action)).toEqual({ kind: "with" })
+  // `{with: "<text>"}`: typing it bare opens a tab wearing the package AND
+  // sends the package's own default first message — the same verb `/with` is,
+  // plus the default `/compact` already had. The exact wording is the
+  // package's prose, not a shape this test should pin.
+  const parsed = parseAction(declared!.command.action)
+  expect(parsed.kind).toBe("with")
+  expect(typeof (parsed as { prompt: string | null }).prompt).toBe("string")
   // And the declared command is the ONLY one — nothing invents a second
   // `/evolution` from the package's name (T54: commands exist by declaration).
   expect((await packageCommands(ws)).some((row) => row.command.name === "evolution")).toBe(false)

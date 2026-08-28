@@ -13,6 +13,7 @@ import { default_settings } from "../src/state/settings.ts"
 import { frameLines, settle } from "./support.ts"
 import type { ProjectIndex } from "../src/references.ts"
 import type { SkillTable } from "../src/skills.ts"
+import type { PackageCommandTable } from "../src/packageCommands.ts"
 
 const style = createStyle(default_settings, {})
 
@@ -245,6 +246,51 @@ test("both completion menus at eighty columns: one row a candidate, cut, nothing
     setup.renderer.destroy()
   }
 }, 60_000)
+
+test("a skill sharing a name with a declared package command is offered once, as the command", async () => {
+  // `evolution` contributes both a `/evolve` command and a skill directory
+  // whose SKILL.md is named `evolve` — dispatch always tries the package
+  // command first (`runPackageCommand` before `skillTurn`), so the skill
+  // entry can never actually be what Enter runs. Listing it too would show a
+  // row the menu could not reach.
+  const skills: SkillTable = {
+    entries: () => [{ ref: "ext:evolution@v-1/evolve", name: "evolve", description: "report template and recipes" }],
+    invalidate: () => {},
+    ready: async () => [],
+  }
+  const packages: PackageCommandTable = {
+    entries: () => [
+      {
+        id: "evolution",
+        name: "evolve",
+        description: "reviews finished sessions",
+        action: { with: "Review the recent sessions." },
+      },
+    ],
+    invalidate: () => {},
+    ready: async () => [],
+  }
+  const setup = await testRender(
+    () => (
+      <StyleContext.Provider value={style}>
+        <Composer onSubmit={() => {}} skills={skills} packages={packages} />
+      </StyleContext.Provider>
+    ),
+    { width: 76, height: 16 },
+  )
+  try {
+    await settle(setup, 3)
+    await setup.mockInput.typeText("/evo")
+    const frame = await settle(setup, 4)
+    // One row, not two — and it is the package's own description, not the
+    // skill's, since the package command is what dispatch would actually run.
+    expect((frame.match(/\/evolve\b/g) ?? []).length).toBe(1)
+    expect(frame).toContain("reviews finished sessions")
+    expect(frame).not.toContain("report template and recipes")
+  } finally {
+    setup.renderer.destroy()
+  }
+})
 
 test("an `@` lists project paths, ↑↓ picks one and Tab writes the path in", async () => {
   const sent: string[] = []

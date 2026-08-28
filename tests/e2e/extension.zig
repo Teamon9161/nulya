@@ -1179,7 +1179,10 @@ test "bundled evolution: ext build extensions/evolution is data kind and needs n
     try std.testing.expect(std.mem.indexOf(u8, identity.?, "don't build that") != null);
     try std.testing.expectEqual(@as(usize, 1), sess.composition.skills.skills.len);
     const descriptor = sess.composition.skills.skills[0];
-    try std.testing.expectEqualStrings("evolution", descriptor.name);
+    // The skill's own name is `evolve`, not the package id `evolution` — they
+    // used to collide only by accident, and the front end's `/evolve` command
+    // now depends on that collision to hide the redundant menu entry.
+    try std.testing.expectEqualStrings("evolve", descriptor.name);
     // No tools: evolution has no runtime and takes no native slot.
     try std.testing.expectEqual(@as(usize, 1), sess.composition.tools.tools.len);
 
@@ -1191,7 +1194,7 @@ test "bundled evolution: ext build extensions/evolution is data kind and needs n
     const on_disk = blk: {
         var src_dir = try std.Io.Dir.openDirAbsolute(io, evolution_src, .{});
         defer src_dir.close(io);
-        break :blk try src_dir.readFileAlloc(io, "skills" ++ std.fs.path.sep_str ++ "evolution" ++ std.fs.path.sep_str ++ "SKILL.md", alloc, .unlimited);
+        break :blk try src_dir.readFileAlloc(io, "skills" ++ std.fs.path.sep_str ++ "evolve" ++ std.fs.path.sep_str ++ "SKILL.md", alloc, .unlimited);
     };
     defer alloc.free(on_disk);
     try std.testing.expect(std.mem.indexOf(u8, loaded.stdout, on_disk) != null);

@@ -230,6 +230,16 @@ Store and scope:
   activating it IS installing it — every new session carries it until `nulya ext
   deactivate <id>`. In a nulya checkout, `extensions/evolution` is one of the
   first kind.
+- A package reachable by a typed `/name` declares `contributes.commands[]`:
+  `{name, description, action}`, `action` one key — `{"with": true}` wears the
+  package and waits for whatever the person types next; `{"with": "<text>"}`
+  wears it AND sends `<text>` as the opening message immediately, the way
+  `/compact` behaves without a package having to say so; `{"run": "<tool>"}`
+  calls one of this SAME package's own tools; `{"skill": "<ref>"}` sends a
+  skill's body as the turn. Typed text after the command name always wins over
+  a `with` default — the person's own words, not the package's. `evolution`'s
+  `/evolve` writes the string form so a bare `/evolve` reviews evidence right
+  away instead of leaving the person to guess what to type.
 - An extension with only skills and prompts needs no compiler, and its version
   is a pure content hash — the same id on every machine.
 - Text that belongs to ONE session belongs to `nulya session new --prompt <file>`

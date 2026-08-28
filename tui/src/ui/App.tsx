@@ -2820,6 +2820,12 @@ export function App(props: AppProps) {
    * package is active AT RIGHT NOW (not whatever it was when the table was
    * last read), and `skill <ref>` is T15's `skillTurn` with the ref standing
    * in for whatever the person would otherwise have typed after `/`.
+   *
+   * `with` alone is like `/compact`: it does not stop at wearing. Text typed
+   * after the command name is a person's own words and wins; with none, the
+   * package's own default (`action.prompt`, `manifest.Action.withPrompt`) is
+   * sent instead, if it wrote one. Neither present is the original shape —
+   * wear and wait for the person to say something, exactly as before.
    */
   const runPackageCommand = async (raw: string): Promise<boolean> => {
     const { name, args } = splitSlash(raw)
@@ -2832,9 +2838,18 @@ export function App(props: AppProps) {
     if (stale) console.warn(`${row.id}: command '/${row.name}' — ${stale}`)
     const action = parseAction(row.action)
     switch (action.kind) {
-      case "with":
+      case "with": {
         startDraft(undefined, false, { id: row.id })
+        const opening = args.length > 0 ? args : action.prompt
+        if (!opening) return true
+        const here = await ensureSession()
+        if (!here) {
+          composer?.restore(raw)
+          return true
+        }
+        await here.attach.send(opening)
         return true
+      }
       case "run": {
         const version = await activeVersionOf(ws(), row.id)
         if (!version) {
