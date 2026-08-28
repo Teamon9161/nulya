@@ -6,6 +6,7 @@ import { expect, test } from "bun:test"
 import {
   cancelMarkerOf,
   capabilitySummary,
+  friendlyTaskCommand,
   parseEventLine,
   shellExitCode,
   splitShellOutput,
@@ -43,6 +44,26 @@ test("a spilled result keeps its exit code even though emit appended a footer", 
   // The step-budget clip footer is the same shape.
   const clipped = "some text\n[exit 0]\n[tool result clipped by step output budget; full output: .nulya/scratch/x]"
   expect(splitShellOutput(clipped)).toEqual({ stdout: "some text", stderr: "", exit: 0 })
+})
+
+/**
+ * `friendlyTaskCommand` (id-vs-task readability pass): a delegation's driving
+ * task always runs the same internal invocation (`proc.zig`'s
+ * `startDelegationTask`), and a person reading `TaskFinishedCard` gets
+ * `agent round` instead — the delegation that started it already has its own
+ * card naming the agent and the task. Anything else is left exactly as it ran.
+ */
+test("a delegation's driving-task command reads as `agent round`; everything else stands", () => {
+  const win = String.raw`"C:\Program Files\nulya\v-abc123\bin\nulya.exe" ext run agent@v-9f8e7d run --arg delegation=d-0123456789ab --arg depth=0`
+  expect(friendlyTaskCommand(win)).toBe("agent round")
+  const posix = `"/usr/local/bin/nulya" ext run agent run --arg delegation=d-0123456789ab --arg depth=2`
+  expect(friendlyTaskCommand(posix)).toBe("agent round")
+  // A plain `zig build test` and a shell command that merely mentions
+  // "ext run" in passing are not this shape, and are shown as they stand.
+  expect(friendlyTaskCommand("zig build test")).toBe("zig build test")
+  expect(friendlyTaskCommand("echo 'ext run agent run --arg delegation=d-0123456789ab'")).toBe(
+    "echo 'ext run agent run --arg delegation=d-0123456789ab'",
+  )
 })
 
 test("an exit line inside the captured stdout does not win over the real one", () => {

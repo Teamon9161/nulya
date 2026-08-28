@@ -52,10 +52,13 @@ const ascii_border = {
  * The attribution line, as text (T72).
  *
  * A pure function so the one sentence this pane makes can be asserted without a
- * terminal: `⤷ explore · d-… · observing`. The persona comes from the watched
- * session's own frozen header through `personaOf` — the SAME reading the
- * sessions list filters delegated conversations by (T70) — so a pane and a row
- * cannot disagree about which agent a session is.
+ * terminal: `⤷ explore · find the writers · observing`. The persona comes from
+ * the watched session's own frozen header through `personaOf` — the SAME
+ * reading the sessions list filters delegated conversations by (T70) — so a
+ * pane and a row cannot disagree about which agent a session is; `label` is
+ * `SubSessionCard`'s task excerpt, not the delegation's `d-…` id (id-vs-task
+ * readability pass) — the persona already says which agent, so the label says
+ * what for instead of repeating it.
  */
 export function attributionOf(input: { persona: string | null; label: string }): string {
   // The glyph is not in here: it is the line's gutter (§6.5, "content from

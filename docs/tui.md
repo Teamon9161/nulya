@@ -2493,3 +2493,20 @@ tab 条的 `✕`/`+`/`▎`；`stripPlan` 的**不变量**"画出来的一切都�
 **回归测试（9 条）**：分子分母各缺一半都不造表 · 三档在每条边的两侧 · 过期目录导致的 >100% 夹到 100 · 环与横条那两头的不变量（对两套字形都测）· 梯子只升不降 · 为零的计数器不成行、没有行的节不成节 · 无 window 时面板仍答得出 · 一次真渲染证明**每一节**都上了屏（不是只有第一节——它是这个列表存在的全部理由）。**不钉**：任何文案、列宽、阈值字面量与具体字形。
 
 **顺带**：`/help` 快照多一行 `/context`，那条测试的视口跟着 +2 行（它自己写着"要高到装得下整页"）；`StatusBar` 头注释里"`ctx N%` 是个警告"那句改成它现在的样子。**没有当场目验**——机制由测试与两次探针渲染（状态行四个占用档 + 面板整块）钉住了，真终端上的观感还没看过。
+
+### T83 · id-vs-task readability pass：委派卡与观察 tab 说的是「谁在干什么」，不是它的 `d-…`/`s-…` 编号（2026-08-28）
+
+**内核零改动**；只在 `tui/` 内。用户对着屏幕说的话：委派卡那一行 `agent · explore → d-2c450129452b (s-…/t2 · running)` 里，`d-…`、`s-…`、任务的全名 `<sid>/tN` 没有一样对人有意义——人只想知道**派出了什么 agent**、**它在干什么**。这些 id 从没消失：它们仍是驱动重连一个 call 到它的对话所需要的东西，只是不再印在人读的那一行上。
+
+**四处改动，同一条读法**（`registry.ts` 的 `agentNameOf`/`agentTaskExcerptOf` 是唯一来源，`SubSessionCard` 与 `SubAgentPane` 都读它，不各自另猜）：
+
+1. **委派卡头行**：`agent · explore → d-2c450129452b` → `agent · explore · find the writers`。`agentNameOf(args, output)` 先读调用参数的 `name`；追问形态（`{session, task}`）没有自己的 `name`，退回读回执自己的引号（两种回执格式都恰好把 persona 引在单引号里：`delegated to 'explore' — …`、`sent to delegation d-… ('explore')`）。`agentTaskExcerptOf(args)` 读 `task` 字段的第一行，按宽度截断——头行与观察 tab 的标题共用同一个函数，不会各说各话。两个 id 仍在 `ToolPresentation.sessionId`/`delegationId` 上，`SubSessionCard` 的 watch 链接与它对 `Navigate.delegationRecord` 的 record fallback 照旧用它们，只是不再拼进头行的文字。
+2. **委派卡的 note**：`s-1787914414790-a83ac2/t2 · running` → `running 42s`。`state/tasks.ts` 的 `backgroundNote` 新增 `{showTask?: boolean}`（缺省 `true`，`ShellCard` 的后台变体不受影响——那一行的任务全名是 `nulya task status` 要用的真正句柄，没有别的东西替它说话）；`SubSessionCard` 传 `showTask: false`，因为头行已经说过是哪个 agent、在干什么。
+3. **观察 tab 标题**：`explore · d-2c450129452b · observing` → `explore · find the writers · observing`。`SubAgentPane` 的 `attributionOf` 没变，变的是 `SubSessionCard` 传给 `navigate.watchSession(target, label)` 的 `label`——从 `delegation()`（`d-…`）改成 `taskExcerpt()`。`persona` 那一半已经从被观察 session 自己冻结的 header 里读出了 agent 名字（`SubAgentPane`'s `personaOf`），所以 `label` 只需要说「在干什么」，把名字说第二遍不会更清楚。来自 `/sessions`／browse `Enter` 的普通 sub-session（没有 agent 概念）行为不变——`taskExcerpt()` 对那种调用天然是 `null`（参数里没有 `task` 字段），`label` 落回 `delegation() ?? undefined`，`SubAgentPane` 再落回 `props.view.id`（本地 session id，没有别的东西可说）。
+4. **watch 链接文案**：`↗ watch d-2c450129452b here` → `↗ watch here`。按下的行为一字未动——`onPress` 仍然 `navigate.watchSession(target, taskExcerpt() ?? delegation() ?? undefined)`。
+
+**顺带查过 `TaskFinishedCard`**（T29：它按全名 `<sid>/tN` 连回发起它的卡，这个连接机制没有动）。它的头行以前对一次委派回合直接打印内部 runner 调用——`"<exe>" ext run agent@v-… run --arg delegation=d-… --arg depth=0`（`proc.zig` 的 `startDelegationTask` 唯一会跑的那条命令）。新增 `ledger.ts` 的 `friendlyTaskCommand`：匹配这一个形状，读成 `agent round`；其余命令照原样显示（`zig build test` 之类）。没有去追问原始委派卡片拿 agent 名字——那需要跨 item 的新管线，而这条回合报告本来就是**同一个**委派、稍后而已，`agent round` 已经说清楚了它是什么。
+
+**第五处：run 摘要的视觉层级**（同一遍里顺手做的第二件事，用户指出的独立问题）。`⋯ read ×3 · grep ×2 · shell ▸` 整行原来是 `headTone="dim"`，工具名与计数同一个暗度，而单个 `ToolCard` 的头行是正常强调——同样重要的信息展示层级却不同。`CardFrame` 新增 `headParts?: HeadPart[]`（`{text, dim?}[]`，给了就替代 `head` 决定颜色，逐字符查表；`fit()` 裁剪与 shimmer 都照旧只是换了取色函数）；`runs.ts` 的 `runSummaryParts` 把工具名标普通（与 `ToolCard` 头行同级），把 ` ×N`、` · ` 标 `dim`（`shell` 在多于一次调用时的 `Run N commands` 整句按名字级处理——那句本身就是"发生了什么"，没有独立的计数半句）；`runSummary`（纯字符串版本）现在从 `runSummaryParts` 拼出来，两者不可能说两样话。`RunCard` 传 `headParts`、不再传 `headTone`。
+
+**测试**：`test/registry.test.ts` 改写原来断言 `→ d-…` 的那条为断言头行等于 `agent · explore · go`／`agent · explore · and then?` 且不含任何 id，新增 `agentTaskExcerptOf` 的纯函数单测（首行截断 · 超宽截断 · 无 `task` 字段返回 `null`）；`test/render.test.tsx` 两条委派测试改断言 `↗ watch here`、`watchedLabel` 是任务摘录而非 id、frame 不再含 `d-…`/`s-1/t1`；`test/ledger.test.ts` 新增 `friendlyTaskCommand`（Windows/POSIX 路径各一 · 非委派命令不变 · 恰好包含子串但不是这个形状的命令不误判）；`test/runs.test.ts` 新增 `runSummaryParts` 的分段断言（`join(text) === runSummary(...)`、逐段 `dim` 标记、`shell` 多次调用是单一非 dim 段）。`test/subpane.test.tsx` 的两条快照因链接文案变化而更新（连带刷新了一处与本次改动无关、快照早已过期的既有差异——`git stash` 验证过它在改动前就已经红，不是本次引入）。全部相关文件（`registry`/`runs`/`ledger`/`render`/`tasks`/`subpane`）与 `tsc --noEmit` 通过；未跑完整 `bun test`（含真实 workspace 的 e2e 分片按经验单趟数分钟，本次改动不触碰它们覆盖的路径）。

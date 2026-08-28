@@ -8,7 +8,7 @@
  * throwing.
  */
 import { expect, test } from "bun:test"
-import { describeTool, type ChecklistItem } from "../src/render/registry.ts"
+import { agentTaskExcerptOf, describeTool, type ChecklistItem } from "../src/render/registry.ts"
 import { createStyle } from "../src/render/theme.ts"
 import { default_settings } from "../src/state/settings.ts"
 
@@ -156,18 +156,21 @@ test("a background `nulya …` call is a shell card, not an evolution one", () =
  * mints a `d-…` delegation id, and only the FIRST delegate() receipt also
  * names the `s-…` remote a `nulya` runner opened — a follow-up turn's reply
  * (`sendTurn`) never repeats it, which is exactly the case `SubSessionCard`'s
- * record fallback exists for (`render.test.tsx`).
+ * record fallback exists for (`render.test.tsx`). Neither id ever reaches the
+ * head line (id-vs-task readability pass): a person reads which agent went
+ * out and what it was told, not a handle meant for a driver to reconnect a
+ * call to its conversation — the ids stay on the presentation for that.
  */
-test("an agent call reads as a sub-session named by its delegation, and only the opening receipt also names the remote", () => {
+test("an agent call reads as a sub-session named by its agent and its task, and both ids stay off the head line", () => {
   const glyphs = createStyle(default_settings, {}).glyphs
   const pending = describeTool({ tool: "agent", args: '{"name":"explore","task":"go"}', output: "" }, glyphs)
   expect(pending.kind).toBe("subsession")
-  expect(pending.head).toContain("agent · explore")
+  expect(pending.head).toBe("agent · explore · go")
   expect(pending.sessionId).toBeNull()
   expect(pending.delegationId).toBeNull()
 
-  // The first delegate() receipt names both — the delegation is what the head
-  // line shows, the remote is what `SubSessionCard` offers to open.
+  // The first delegate() receipt names both ids — the head line stays about
+  // the agent and its task; the ids are what `SubSessionCard` offers to open.
   const opened = describeTool(
     {
       tool: "agent",
@@ -178,11 +181,14 @@ test("an agent call reads as a sub-session named by its delegation, and only the
   )
   expect(opened.delegationId).toBe("d-0123456789ab")
   expect(opened.sessionId).toBe("s-1234-ab")
-  expect(opened.head).toContain("→ d-0123456789ab")
+  expect(opened.head).toBe("agent · explore · go")
+  expect(opened.head).not.toContain("d-0123456789ab")
+  expect(opened.head).not.toContain("s-1234-ab")
 
   // A follow-up's reply (`sendTurn`) names the delegation and the task it
   // started, but never repeats what it opened — there is no "session s-…" to
-  // read, on purpose.
+  // read, on purpose. Its args carry no `name` either, so the head line reads
+  // the persona back out of the receipt's own quoting.
   const followUp = describeTool(
     {
       tool: "agent",
@@ -193,7 +199,23 @@ test("an agent call reads as a sub-session named by its delegation, and only the
   )
   expect(followUp.delegationId).toBe("d-0123456789ab")
   expect(followUp.sessionId).toBeNull()
-  expect(followUp.head).toContain("→ d-0123456789ab")
+  expect(followUp.head).toBe("agent · explore · and then?")
+  expect(followUp.head).not.toContain("d-0123456789ab")
+})
+
+/**
+ * `agentTaskExcerptOf`'s two jobs, pinned without a whole `describeTool` call:
+ * only the FIRST line of a multi-line task (the head line has room for one),
+ * and cut when even that line runs past the given width — the head line and
+ * the watch tab's title both share this so a long task never wraps either.
+ */
+test("a delegation's task excerpt is the first line, cut to width", () => {
+  expect(agentTaskExcerptOf('{"task":"find the writers\\nand then summarise them"}')).toBe("find the writers")
+  const long = "x".repeat(80)
+  expect(agentTaskExcerptOf(`{"task":"${long}"}`, 10)).toBe(`${"x".repeat(9)}…`)
+  // No `task` field at all (malformed, or a call this shape does not apply
+  // to): nothing to excerpt, not a guess.
+  expect(agentTaskExcerptOf('{"name":"explore"}')).toBeNull()
 })
 
 // --- tui-plugin U2: the manifest's per-tool `render` claim (D12) -----------

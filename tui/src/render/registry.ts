@@ -156,15 +156,42 @@ export function isBackground(argsJson: string): boolean {
  * does not exist until the call returns. Same shape as `nulya session new`
  * through `shell` two functions down: the ledger keeps both halves, so a replay
  * reads the same fact.
+ *
+ * The OPENING call names the agent directly (`{name, task}`); a follow-up
+ * (`{session, task}`) has no `name` of its own, but every receipt this package
+ * writes quotes the persona once — `delegated to 'explore' — …`, `sent to
+ * delegation d-… ('explore')` — so a caller with the call's OUTPUT still reads
+ * the same name a follow-up's own args cannot carry.
  */
-function agentNameOf(argsJson: string): string | null {
+export function agentNameOf(argsJson: string, output = ""): string | null {
   try {
     const value = JSON.parse(argsJson)
     if (value && typeof value === "object" && typeof (value as { name?: unknown }).name === "string") {
       return (value as { name: string }).name
     }
   } catch {
-    // Still streaming, or malformed: the head line says so rather than guessing.
+    // Still streaming, or malformed: fall through to the receipt below.
+  }
+  const quoted = /'([^']+)'/.exec(output)
+  return quoted ? quoted[1]! : null
+}
+
+/**
+ * The task's own first line, cut to `limit` — what a delegation is DOING, in
+ * its own words. Present on both the opening call and a follow-up (`task` is
+ * the one field the two argument shapes share), and read by `SubSessionCard`
+ * too for its watch tab's label, so a head line and the pane it opens agree on
+ * how to say what this delegation is for — an id neither of them says at all
+ * (a person did not ask for `d-2c450129452b`, they asked what got sent off).
+ */
+export function agentTaskExcerptOf(argsJson: string, limit = 48): string | null {
+  try {
+    const value = JSON.parse(argsJson)
+    if (value && typeof value === "object" && typeof (value as { task?: unknown }).task === "string") {
+      return firstLine((value as { task: string }).task, limit)
+    }
+  } catch {
+    // Still streaming, or malformed.
   }
   return null
 }
@@ -462,11 +489,19 @@ export function describeTool(view: ToolView, glyphs: Glyphs, hint: RenderHint = 
     // (`sendTurn` only names the delegation and the task it started) — that
     // case is `SubSessionCard`'s job, reading the delegation's own record.
     const remote = /\bsession (s-[A-Za-z0-9._-]+)/.exec(view.output)?.[1] ?? null
-    const named = delegation ?? remote
+    // WHAT WENT OUT, not what it is called: `d-2c450129452b` and `s-…` are
+    // handles a driver needs to reconnect a call to its conversation — they
+    // are not what a person reading the transcript wants from this row, which
+    // is which agent got sent off and what it was told to do. Both ids stay
+    // on the card (`sessionId`/`delegationId`, below) for the watch link and
+    // `SubSessionCard`'s record fallback; neither belongs in the head line.
+    const name = agentNameOf(view.args, view.output)
+    const taskExcerpt = agentTaskExcerptOf(view.args)
+    const said = [name, taskExcerpt].filter((part): part is string => Boolean(part)).join(" · ")
     return make({
       kind: "subsession",
       glyph: glyphs.subSession,
-      head: `agent · ${agentNameOf(view.args) ?? "(pending)"}${named ? ` → ${named}` : ""}`,
+      head: `agent · ${said.length > 0 ? said : "(pending)"}`,
       sessionId: remote,
       delegationId: delegation,
     })

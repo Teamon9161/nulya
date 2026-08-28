@@ -1,4 +1,4 @@
-import { Index, Show, createContext, createSignal, useContext, type Accessor, type JSX } from "solid-js"
+import { Index, Show, createContext, createMemo, createSignal, useContext, type Accessor, type JSX } from "solid-js"
 import { shimmerColor, useFrame, useScreen, useStyle } from "../theme.ts"
 import { displayWidth, fit } from "../../ui/columns.ts"
 import { onClick } from "../../ui/rows.ts"
@@ -11,6 +11,12 @@ import { useBrowse } from "../../state/browse.ts"
  * left to the two cases where something needs saying.
  */
 export type ChipTone = "err" | "warn" | "dim"
+
+/** One run of a two-tone head line: `dim` for chrome, muted (the default) for what matters. */
+export interface HeadPart {
+  text: string
+  dim?: boolean
+}
 
 /** True while the card under this provider represents work still in flight. */
 export const CardActivityContext = createContext<Accessor<boolean>>()
@@ -47,6 +53,15 @@ export function CardFrame(props: {
   glyph: string
   accent: string
   head: string
+  /**
+   * A head line with more than one emphasis in it (the run summary's tool
+   * names against its `×N` counts and `·` joints, T43-run-summary) — every
+   * other card leaves this out and colours the whole of `head` by `headTone`.
+   * When given, it REPLACES `head` for both layout and colour; `head` stays
+   * required anyway, as the plain-text form callers, tests and any other
+   * reader of the plain head still want.
+   */
+  headParts?: readonly HeadPart[]
   chip?: string
   chipTone?: ChipTone
   /** `dim` for a card that is context rather than something that happened. */
@@ -94,10 +109,27 @@ export function CardFrame(props: {
    */
   const room = () => Math.min(screen().width, style.maxWidth) - 2 - 2 - (props.foldable ? 2 : 0)
   const note = () => fit(props.chip ?? "", Math.max(0, Math.floor(room() / 2)))
-  const head = () => fit(props.head, Math.max(4, room() - (note().length > 0 ? displayWidth(note()) + 4 : 0)))
+  const plainHead = () => (props.headParts ? props.headParts.map((part) => part.text).join("") : props.head)
+  const head = () => fit(plainHead(), Math.max(4, room() - (note().length > 0 ? displayWidth(note()) + 4 : 0)))
   const headCells = () => Array.from(head())
   const active = () => contextualActive?.() ?? false
   const headBase = () => (props.headTone === "dim" ? style.theme.dim : style.theme.muted)
+  /**
+   * One character's tone in `headParts` — a cell that survived the `fit()` cut
+   * keeps its part's tone, and the `…` `fit()` appends past the end of every
+   * part is chrome (dim), the same as the separators either side of it.
+   */
+  const headPartTones = createMemo(() => {
+    if (!props.headParts) return null
+    const tones: boolean[] = []
+    for (const part of props.headParts) for (const _ of part.text) tones.push(Boolean(part.dim))
+    return tones
+  })
+  const toneAt = (index: number) => {
+    const tones = headPartTones()
+    if (!tones) return headBase()
+    return (tones[index] ?? true) ? style.theme.dim : style.theme.muted
+  }
 
   const chipColor = () => {
     switch (props.chipTone ?? "dim") {
@@ -139,8 +171,8 @@ export function CardFrame(props: {
               <text
                 fg={
                   active() && style.motion
-                    ? shimmerColor(frame(), index, headCells().length, headBase(), style.theme.lift)
-                    : headBase()
+                    ? shimmerColor(frame(), index, headCells().length, toneAt(index), style.theme.lift)
+                    : toneAt(index)
                 }
               >
                 {ch()}

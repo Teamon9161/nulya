@@ -8,7 +8,7 @@ exports[`a wide terminal puts the delegation beside the conversation that made i
 ● spawning a sub-session                                                │                                               
                                                                         │ ▎ what did the delegate find                  
   ⤷ sub-session · ###################### ▸                              │                                               
-    ↗ watch ###################### here                                 │ ● Let me probe the environment.               
+    ↗ watch here                                                        │ ● Let me probe the environment.               
                                                                         │                                               
                                                                         │   $ echo hello-from-nulya  (2 lines) ▸        
                                                                         │                                               
@@ -36,7 +36,7 @@ exports[`a narrow terminal stacks them instead, and the rule turns with the spli
 ● spawning a sub-session                                                        
                                                                                 
   ⤷ sub-session · ###################### ▸                                      
-    ↗ watch ###################### here                                         
+    ↗ watch here                                                                
                                                                                 
                                                                                 
                                                                                 

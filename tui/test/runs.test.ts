@@ -6,7 +6,7 @@
  * what refuses to.
  */
 import { expect, test } from "bun:test"
-import { foldsIntoRun, groupRuns, runSummary, type RunCandidate } from "../src/render/runs.ts"
+import { foldsIntoRun, groupRuns, runSummary, runSummaryParts, type RunCandidate } from "../src/render/runs.ts"
 import { transcriptRows } from "../src/ui/Transcript.tsx"
 import { createStyle } from "../src/render/theme.ts"
 import { default_settings } from "../src/state/settings.ts"
@@ -125,4 +125,37 @@ test("a call the grouping cannot read costs the run summary, not the screen", ()
   ] as TranscriptItem[]
   const rows = transcriptRows(items, createStyle(default_settings, {}), [])
   expect(rows.map((row) => row.key)).toEqual(["a", "b"])
+})
+
+/**
+ * `runSummaryParts` is what `RunCard` actually draws (`CardFrame`'s
+ * `headParts`, id-vs-task readability pass): the tool NAMES at the same
+ * weight a lone `ToolCard`'s head line uses, the counting and the joints
+ * around them dimmed like any other card's chrome. Joining the parts' text
+ * must always equal `runSummary`'s — one function built from the other, so
+ * they cannot say different words for the same run.
+ */
+test("a run summary's tool names are not dim, and its counting and joints are", () => {
+  const items = [
+    call({ key: "1", tool: "ext:std/read" }),
+    call({ key: "2", tool: "ext:std/read" }),
+    call({ key: "3", tool: "shell" }),
+    call({ key: "4", tool: "ext:std/read" }),
+    call({ key: "5", tool: "ext:std/grep" }),
+  ]
+  const parts = runSummaryParts(items)
+  expect(parts.map((part) => part.text).join("")).toBe(runSummary(items))
+  expect(parts).toEqual([
+    { text: "read" },
+    { text: " ×3", dim: true },
+    { text: " · ", dim: true },
+    { text: "shell" },
+    { text: " · ", dim: true },
+    { text: "grep" },
+  ])
+  // `shell` at more than one call earns its own sentence rather than a bare
+  // count, and the whole of it reads as WHAT HAPPENED — not split into a name
+  // half and a chrome half that do not exist here.
+  const commands = [call({ key: "a", tool: "shell" }), call({ key: "b", tool: "shell" })]
+  expect(runSummaryParts(commands)).toEqual([{ text: "Run 2 commands" }])
 })

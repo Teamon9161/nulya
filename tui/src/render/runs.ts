@@ -111,19 +111,45 @@ function shortName(tool: string): string {
  * layer draws something richer.
  */
 export function runSummary(items: readonly ToolItem[]): string {
-  const counts = new Map<string, number>()
-  for (const item of items) {
-    const name = shortName(item.tool)
-    counts.set(name, (counts.get(name) ?? 0) + 1)
-  }
-  return [...counts].map(([name, count]) => summaryPhrase(name, count)).join(" · ")
+  return runSummaryParts(items)
+    .map((part) => part.text)
+    .join("")
 }
 
 function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
   return `${count} ${count === 1 ? singular : pluralForm}`
 }
 
-function summaryPhrase(name: string, count: number): string {
-  if (name === "shell" && count > 1) return `Run ${plural(count, "command")}`
-  return count > 1 ? `${name} ×${count}` : name
+/** One run of a run summary's head line: what it did (muted) against the chrome around it (dim). */
+export interface RunSummaryPart {
+  text: string
+  dim?: boolean
+}
+
+/**
+ * `runSummary` broken into the two things a head line says at different
+ * volumes: WHAT the run did — a tool name, or the `Run N commands` sentence
+ * shell earns at more than one call — and the counting and joining around it,
+ * which is chrome the same way a fold marker or a `×3` on any other card is
+ * (`CardFrame`'s `headParts`, T43-run-summary). `runSummary` itself is built
+ * from this rather than the other way round, so the two can never say
+ * different words for the same run.
+ */
+export function runSummaryParts(items: readonly ToolItem[]): RunSummaryPart[] {
+  const counts = new Map<string, number>()
+  for (const item of items) {
+    const name = shortName(item.tool)
+    counts.set(name, (counts.get(name) ?? 0) + 1)
+  }
+  const parts: RunSummaryPart[] = []
+  ;[...counts].forEach(([name, count], index) => {
+    if (index > 0) parts.push({ text: " · ", dim: true })
+    if (name === "shell" && count > 1) {
+      parts.push({ text: `Run ${plural(count, "command")}` })
+      return
+    }
+    parts.push({ text: name })
+    if (count > 1) parts.push({ text: ` ×${count}`, dim: true })
+  })
+  return parts
 }

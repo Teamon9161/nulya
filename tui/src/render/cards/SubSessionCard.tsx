@@ -5,6 +5,7 @@ import { ShellOutput } from "./ShellCard.tsx"
 import { splitShellOutput, startedTaskOf } from "../../nulya/ledger.ts"
 import { backgroundNote, useTasks } from "../../state/tasks.ts"
 import { useNavigate } from "../../state/navigate.ts"
+import { agentTaskExcerptOf } from "../registry.ts"
 import type { ToolItem } from "../../state/session.ts"
 import type { ToolPresentation } from "../registry.ts"
 
@@ -23,7 +24,11 @@ import type { ToolPresentation } from "../registry.ts"
  * otherwise the live projection with the seconds on it. So `running 42s`
  * becomes `exit 0 · 41.8s` without anything being asked of the sub-agent, and
  * a session reopened tomorrow shows the same words, because by then the fact is
- * in the ledger.
+ * in the ledger. For a delegation specifically the note leaves the task's full
+ * name (`<sid>/tN`) out (`backgroundNote(…, {showTask: false})`) — the head
+ * line above it already says which agent and what for, and a `shell`
+ * background call's row is the one place that handle is worth printing (it is
+ * what `nulya task status` wants).
  *
  * TWO, IT CAN BE OPENED. `Enter` in browse mode has opened the named session
  * since T3 and nothing on screen said so — an affordance three keystrokes deep
@@ -32,14 +37,17 @@ import type { ToolPresentation } from "../registry.ts"
  * the same way (`state/navigate.ts`), and following it is how you watch a
  * delegation work rather than waiting for its report.
  *
- * THREE, SINCE ar-t2, THE NAME ON SCREEN IS THE DELEGATION'S OWN. Every runner
- * mints a `d-…` id (goals/agent-runner.md D2); only `nulya` also opens a local
+ * THREE, SINCE ar-t2, THE CARD KNOWS THE DELEGATION'S OWN `d-…` ID. Every
+ * runner mints one (goals/agent-runner.md D2); only `nulya` also opens a local
  * session a tab can show, and only the FIRST delegate() receipt says so out
  * loud (`registry.ts`'s extraction). A follow-up turn's reply never repeats
  * it, so the link falls back to the delegation's own record
  * (`nulya/files.ts`'s `readDelegationRecord`) — and when that record names a
  * runner that is not `nulya`, there is no local session to open at all, and
- * the row says so rather than guessing at one.
+ * the row says so rather than guessing at one. Neither id, though, is what
+ * this card SAYS: `d-2c450129452b` tells a person nothing, so the head line
+ * names the agent and its task instead (`registry.ts`'s `describeTool`), and
+ * the watch link and the tab it opens follow suit — see FOUR.
  */
 export function SubSessionCard(props: { item: ToolItem; presentation: ToolPresentation }) {
   const style = useStyle()
@@ -52,7 +60,11 @@ export function SubSessionCard(props: { item: ToolItem; presentation: ToolPresen
     if (props.item.state === "pending") return { text: "…", failed: false }
     if (props.item.state === "running") return { text: "starting", failed: false }
     const started = task()
-    if (started) return backgroundNote(started, props.item.taskResult, tasks())
+    // Reaching this branch at all means the receipt named a background task —
+    // which only a delegation's does, here (a `shell {background: true}` call
+    // draws through `ShellCard` instead) — so the task's full name is left out
+    // (see ONE, above): the head line already says which agent and what for.
+    if (started) return backgroundNote(started, props.item.taskResult, tasks(), { showTask: false })
     // `nulya session new` and the like: an action that already happened, and a
     // successful one says nothing (T26).
     const exit = shell().exit
@@ -62,6 +74,8 @@ export function SubSessionCard(props: { item: ToolItem; presentation: ToolPresen
 
   const session = () => props.presentation.sessionId
   const delegation = () => props.presentation.delegationId ?? null
+  /** What this delegation was told to do, cut for a label — null for a plain `nulya session new`/`session step` call, which names no task. */
+  const taskExcerpt = () => agentTaskExcerptOf(props.item.args)
 
   /**
    * The delegation's record, read only when the receipt itself named no
@@ -108,10 +122,18 @@ export function SubSessionCard(props: { item: ToolItem; presentation: ToolPresen
      * mode instead — the same word `/sessions` already uses for "and give it
      * a tab" (T70), so the vocabulary is one and the rare gesture costs no
      * pixels.
+     *
+     * The row's text carries no id — `watch here`, not `watch d-… here` —
+     * for the same reason the head line above it does not (THREE). The label
+     * the pane opens WITH is the task excerpt, not the id either: the pane's
+     * own attribution line already reads the agent's name from the watched
+     * session's own header (`SubAgentPane`'s `personaOf`), so pairing it with
+     * the task says what a `d-…` never could, and repeating the agent's name
+     * a second time would not.
      */
     return {
-      text: `watch ${delegation() ?? target} here`,
-      onPress: () => navigate.watchSession(target, delegation() ?? undefined),
+      text: "watch here",
+      onPress: () => navigate.watchSession(target, taskExcerpt() ?? delegation() ?? undefined),
     }
   })
 

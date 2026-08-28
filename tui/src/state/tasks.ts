@@ -119,22 +119,36 @@ export interface TaskOutcome {
  * receipt — which is why it is here rather than inside one of the cards. They
  * are the same fact about the same kind of thing, and a person should not have
  * to learn that `running 42s` and `still going` mean the same.
+ *
+ * `showTask` (default true) is the one thing the two callers disagree about.
+ * A background `shell` call's row is the one place its full name (`<sid>/tN`)
+ * is worth printing — it is the handle `nulya task status` wants, and the row
+ * names no agent to say it instead. A delegation's row already does (its head
+ * line names the agent and its task, `registry.ts`), so `SubSessionCard` asks
+ * for `showTask: false` and gets `exit 0 · 41.8s` rather than `s-1/t1 · exit 0
+ * · 41.8s` — the same state, said without a handle nobody there needed.
  */
 export function backgroundNote(
   task: string,
   reported: TaskOutcome | null,
   tasks: readonly TaskEntry[],
+  options?: { showTask?: boolean },
 ): { text: string; failed: boolean } {
+  const label = (options?.showTask ?? true) ? task : ""
+  const join = (...pieces: string[]) => [label, ...pieces].filter((piece) => piece.length > 0).join(" · ")
   if (reported) {
-    const how = reported.exitCode === 0 ? "" : ` · exit ${reported.exitCode}`
-    return { text: `${task}${how}${reported.duration ? ` · ${reported.duration}` : ""}`, failed: reported.exitCode !== 0 }
+    const how = reported.exitCode === 0 ? [] : [`exit ${reported.exitCode}`]
+    return {
+      text: join(...how, ...(reported.duration ? [reported.duration] : [])),
+      failed: reported.exitCode !== 0,
+    }
   }
   const live = taskNamed(tasks, task)
-  if (!live) return { text: task, failed: false }
+  if (!live) return { text: label, failed: false }
   if (live.state === "done") {
     const bad = live.exit_code !== null && live.exit_code !== 0
-    return { text: `${task}${bad ? ` · exit ${live.exit_code}` : ""}`, failed: bad }
+    return { text: join(...(bad ? [`exit ${live.exit_code}`] : [])), failed: bad }
   }
-  if (live.state === "lost") return { text: `${task} · lost`, failed: false }
-  return { text: `${task} · running${live.elapsed_s !== null ? ` ${seconds(live.elapsed_s)}` : ""}`, failed: false }
+  if (live.state === "lost") return { text: join("lost"), failed: false }
+  return { text: join(`running${live.elapsed_s !== null ? ` ${seconds(live.elapsed_s)}` : ""}`), failed: false }
 }

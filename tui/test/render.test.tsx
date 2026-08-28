@@ -642,9 +642,10 @@ test("a sub-session names the session it drives", async () => {
  * it says how that is going and offers a way in. Without a `Navigate` there is
  * no link at all — a card in a screen with no tabs must not offer one.
  *
- * Since ar-t2 the name on the head line is the delegation's OWN (`d-…`, every
- * runner mints one) rather than the remote session — only the `nulya` runner
- * has one of those, and only the first delegate() receipt names it.
+ * Since the id-vs-task readability pass the head line names the agent and
+ * its task rather than either id (`d-…` — every runner mints one — or the
+ * `s-…` remote only `nulya` opens): a person reading the transcript wants to
+ * know what got sent off and what for, not a handle meant for a driver.
  */
 test("a delegation says how its background task is going, and offers the session", async () => {
   const delegated = toolItem({
@@ -656,16 +657,21 @@ test("a delegation says how its background task is going, and offers the session
   })
 
   const without = await frameOf([delegated], 76, 12)
-  expect(without).toContain("⤷ agent · explore → d-0123456789ab")
+  expect(without).toContain("⤷ agent · explore · find the writers")
+  expect(without).not.toContain("d-0123456789ab")
   expect(without).not.toContain("open s-")
 
   let watched = null as string | null
+  let watchedLabel: string | undefined
   let opened = null as string | null
   const setup = await testRender(
     () => (
       <NavigateContext.Provider
         value={{
-          watchSession: (id) => (watched = id),
+          watchSession: (id, label) => {
+            watched = id
+            watchedLabel = label
+          },
           openSession: (id) => (opened = id),
           delegationRecord: async () => null,
           openTasks: () => {},
@@ -678,17 +684,23 @@ test("a delegation says how its background task is going, and offers the session
   )
   try {
     const frame = await settle(setup)
-    // The live projection, in the same words a background shell call uses.
-    expect(frame).toContain("s-1/t1 · running 42s")
+    // The live projection, in the same words a background shell call uses —
+    // minus the task's full name (`s-1/t1`), which the head line above it
+    // already said enough about (id-vs-task readability pass).
+    expect(frame).toContain("running 42s")
+    expect(frame).not.toContain("s-1/t1")
     // The one row the card offers goes to a PANE of this tab, not to a tab of
-    // its own (T72), and it names the delegation because that is the name on
-    // the head line right above it.
-    expect(frame).toContain("↗ watch d-0123456789ab here")
+    // its own (T72), and carries no id either — `watch here`.
+    expect(frame).toContain("↗ watch here")
     // …and the row is the affordance, not decoration: clicking it navigates.
     const rows = frame.split("\n")
     const at = rows.findIndex((row) => row.includes("↗ watch"))
     await setup.mockMouse.click(6, at)
     expect(watched).toBe("s-1786815442964-8462dd")
+    // The pane's label is the task excerpt, not either id — its own
+    // attribution line already reads the agent's name off the watched
+    // session's header (`SubAgentPane`'s `personaOf`).
+    expect(watchedLabel).toBe("find the writers")
     expect(opened).toBeNull()
   } finally {
     setup.renderer.destroy()
@@ -712,13 +724,17 @@ test("a follow-up's receipt names no remote, so the card reads the delegation's 
   })
 
   let watched = null as string | null
+  let watchedLabel: string | undefined
   let opened = null as string | null
   let asked = null as string | null
   const setup = await testRender(
     () => (
       <NavigateContext.Provider
         value={{
-          watchSession: (id) => (watched = id),
+          watchSession: (id, label) => {
+            watched = id
+            watchedLabel = label
+          },
           openSession: (id) => (opened = id),
           delegationRecord: async (id) => {
             asked = id
@@ -733,15 +749,22 @@ test("a follow-up's receipt names no remote, so the card reads the delegation's 
     { width: 76, height: 12 },
   )
   try {
-    await until(async () => (await settle(setup)).includes("↗ watch d-0123456789ab here"))
+    await until(async () => (await settle(setup)).includes("↗ watch here"))
     expect(asked).toBe("d-0123456789ab")
     const frame = await settle(setup)
+    // The head line reads the persona out of the receipt's own quoting (the
+    // args carry no `name` on a follow-up) and the id nowhere at all.
+    expect(frame).toContain("agent · explore · and then?")
+    expect(frame).not.toContain("d-0123456789ab")
     const rows = frame.split("\n")
     const at = rows.findIndex((row) => row.includes("↗ watch"))
     await setup.mockMouse.click(6, at)
-    // The row NAMES the delegation and FOLLOWS the record's remote: one is
-    // what a person calls it, the other is the ledger there is to tail.
+    // The row FOLLOWS the record's remote: the id is what a driver reconnects
+    // to a conversation with, not what a person reads on screen.
     expect(watched).toBe("s-1786815442964-8462dd")
+    // …and the pane it opens is labelled by the task, since the args this
+    // call carries have no agent name of their own to repeat.
+    expect(watchedLabel).toBe("and then?")
     expect(opened).toBeNull()
   } finally {
     setup.renderer.destroy()

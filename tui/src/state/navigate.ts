@@ -26,9 +26,12 @@ export interface Navigate {
    * the tab's content area — sideways on a wide terminal, stacked on a narrow
    * one — and closes with Esc, its own `✕`, or the tab.
    *
-   * `label` is what the delegation calls itself (`d-…`) when the card knows it;
-   * the pane says that rather than the local session id, because the id a
-   * person was just reading is the one they should recognise.
+   * `label` is what the card knows about the task at hand when it opens the
+   * pane — a delegation's own task excerpt, cut for a title, when the card had
+   * one to give (`SubSessionCard`); the pane says that rather than the local
+   * session id, because the id was never what a person reading it wanted.
+   * Absent, the pane falls back to the local session id — the best any card
+   * with no agent to name can offer.
    */
   watchSession(id: string, label?: string): void
   /** Open this session in a tab of its own, and put it in front. */

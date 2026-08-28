@@ -376,6 +376,23 @@ export function taskReportOf(text: string): TaskReport | null {
 }
 
 /**
+ * The one shape `extensions/agent`'s own driving task ever runs
+ * (`proc.zig`'s `startDelegationTask`): `"<exe>" ext run <id>[@<version>] run
+ * --arg delegation=d-… --arg depth=N`. That command line carries a delegation
+ * id and nothing a person watching the transcript reads for — the delegation
+ * that started it already has its own card naming the agent and the task
+ * (`registry.ts`), and this report is the SAME delegation, later. So a
+ * `task_finished` for one reads as `agent round` rather than the internal
+ * invocation; every other command is shown exactly as it ran (id-vs-task
+ * readability pass).
+ */
+const delegation_round_command = /\bext run \S+ run --arg delegation=d-[0-9a-f]{12}(?: --arg depth=\d+)?$/
+
+export function friendlyTaskCommand(command: string): string {
+  return delegation_round_command.test(command) ? "agent round" : command
+}
+
+/**
  * `[exit N]` is the last line `tools/shell.zig` writes — but not always the
  * last line of the RESULT: when the output was truncated, `emit.zig` appends
  * `[full output: <path>]` (or the step-budget clip footer) after it. So the

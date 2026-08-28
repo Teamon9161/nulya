@@ -1,7 +1,7 @@
 import { Show, createMemo } from "solid-js"
 import { useStyle } from "../theme.ts"
 import { CardFrame } from "./CardFrame.tsx"
-import { taskReportOf } from "../../nulya/ledger.ts"
+import { friendlyTaskCommand, taskReportOf } from "../../nulya/ledger.ts"
 import type { TaskItem } from "../../state/session.ts"
 
 /**
@@ -29,10 +29,13 @@ export function TaskFinishedCard(props: { item: TaskItem }) {
     return `background ${props.item.task}${how}${ended}${parsed?.duration ? ` · ${parsed.duration}` : ""}`
   }
 
-  // The command, as the report itself names it. A report this build cannot read
-  // is shown whole in the body and says so on the head line rather than being
+  // The command, as the report itself names it — friendlied (`ledger.ts`'s
+  // `friendlyTaskCommand`) so a delegation's driving-task invocation reads as
+  // `agent round` rather than the internal `ext run … --arg delegation=d-…`
+  // line, id-vs-task readability pass. A report this build cannot read is
+  // shown whole in the body and says so on the head line rather than being
   // dropped: the ledger holds it either way.
-  const head = () => report()?.command ?? props.item.task
+  const head = () => (report() ? friendlyTaskCommand(report()!.command) : props.item.task)
   const body = () => report()?.tail ?? props.item.text
 
   return (
