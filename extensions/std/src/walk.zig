@@ -383,6 +383,25 @@ pub fn display(alloc: std.mem.Allocator, base_display: []const u8, rel: []const 
     return std.mem.concat(alloc, u8, &.{ base_display, std.fs.path.sep_str, native });
 }
 
+/// Walk up from `path` (which need not exist, and neither need any of its
+/// ancestors) to the nearest one that IS an existing directory. A filesystem
+/// root always exists, so this terminates. Used when a search `path` names
+/// something absent: the answer can then point at real ground — "here is
+/// what actually exists" — instead of just saying no. (docs/goals/std.md,
+/// the "existence answers" note: no tcode equivalent, since tcode always
+/// searched a workspace root that existed by construction.)
+pub fn nearestExistingAncestor(io: std.Io, path: []const u8) []const u8 {
+    var candidate = path;
+    while (true) {
+        if (std.Io.Dir.cwd().statFile(io, candidate, .{})) |st| {
+            if (st.kind == .directory) return candidate;
+        } else |_| {}
+        const parent = std.fs.path.dirname(candidate) orelse return candidate;
+        if (std.mem.eql(u8, parent, candidate)) return candidate;
+        candidate = parent;
+    }
+}
+
 /// `s` with every invalid UTF-8 sequence replaced by U+FFFD; `s` itself when it
 /// is already valid. A tool's text answer must be valid UTF-8 — the JSON encoder
 /// would otherwise emit a byte array instead of a string — and a searched file
@@ -460,6 +479,37 @@ test "relDisplay strips cwd and keeps outsiders absolute; display joins with the
     const sep = std.fs.path.sep_str;
     try std.testing.expectEqualStrings("a" ++ sep ++ "b.zig", try display(alloc, "", "a/b.zig"));
     try std.testing.expectEqualStrings("src" ++ sep ++ "a" ++ sep ++ "b.zig", try display(alloc, "src", "a/b.zig"));
+}
+
+test "nearestExistingAncestor climbs past absent and non-directory ancestors to the nearest real directory" {
+    const io = std.testing.io;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "a/b");
+    try tmp.dir.writeFile(io, .{ .sub_path = "a/file.txt", .data = "" });
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = buf[0..try tmp.dir.realPath(io, &buf)];
+
+    // One missing level under a real directory: that directory itself.
+    const one = try std.fs.path.join(alloc, &.{ root, "a", "b", "missing" });
+    try std.testing.expectEqualStrings(try std.fs.path.join(alloc, &.{ root, "a", "b" }), nearestExistingAncestor(io, one));
+
+    // Several missing levels: climbs all the way to the real ancestor, not
+    // just the immediate parent.
+    const deep = try std.fs.path.join(alloc, &.{ root, "a", "x", "y", "z" });
+    try std.testing.expectEqualStrings(try std.fs.path.join(alloc, &.{ root, "a" }), nearestExistingAncestor(io, deep));
+
+    // A path component that exists but is a FILE, not a directory, is skipped
+    // like an absent one.
+    const through_file = try std.fs.path.join(alloc, &.{ root, "a", "file.txt", "sub" });
+    try std.testing.expectEqualStrings(try std.fs.path.join(alloc, &.{ root, "a" }), nearestExistingAncestor(io, through_file));
+
+    // A path that already exists (as a directory) answers itself.
+    try std.testing.expectEqualStrings(root, nearestExistingAncestor(io, root));
 }
 
 test "lossyUtf8 keeps valid text as is and replaces every bad sequence with U+FFFD" {

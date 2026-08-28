@@ -18,9 +18,10 @@
 //! so the paging note's `offset=` is exact and the kernel's own output guard
 //! never has to clip a listing and eat the notes.
 //!
-//! Every answer that is not a host fault is TEXT: "no matches" and "offset past
-//! the end" are results a model can act on, not errors. Only a missing path and
-//! a pattern that will not compile are refusals.
+//! Every answer that is not a host fault is TEXT: "no matches", "offset past
+//! the end" and a search path that does not exist are results a model can act
+//! on, not errors — the last of these names the nearest real ancestor instead
+//! of just failing. Only a pattern that will not compile refuses.
 
 const std = @import("std");
 const rpc = @import("rpc.zig");
@@ -102,7 +103,10 @@ fn answer(ctx: *const rpc.Ctx, args: std.json.ObjectMap) anyerror!rpc.Outcome {
 
     const base = if (path_arg) |p| try ctx.resolve(p) else ctx.cwd;
     const base_stat = std.Io.Dir.cwd().statFile(io, base, .{}) catch |err| switch (err) {
-        error.FileNotFound, error.NotDir => return rpc.refuse(alloc, "search path does not exist: {s}", .{base}),
+        // A missing search path is not a malfunction — the caller just named
+        // the wrong place, the way "no matches" is not one either. Answer
+        // with what IS there instead of failing the call.
+        error.FileNotFound, error.NotDir => return notFoundAnswer(alloc, io, base, ctx.cwd),
         else => return rpc.refuse(alloc, "search path could not be read: {s} ({s})", .{ base, @errorName(err) }),
     };
 
@@ -221,6 +225,24 @@ fn answer(ctx: *const rpc.Ctx, args: std.json.ObjectMap) anyerror!rpc.Outcome {
     }
     if (prune_note) |note| try out.writer.print("\n{s}", .{note});
     return .{ .text = try out.toOwnedSlice() };
+}
+
+/// `base` (already known not to exist as a directory) is a wrong path, not a
+/// broken tool: the answer names the nearest real ancestor so the model can
+/// correct course with `glob` rather than guessing again. (docs/goals/std.md
+/// "existence answers".)
+fn notFoundAnswer(alloc: std.mem.Allocator, io: std.Io, base: []const u8, cwd: []const u8) !rpc.Outcome {
+    const ancestor = walk.nearestExistingAncestor(io, base);
+    const base_disp = try walk.relDisplay(alloc, base, cwd);
+    const ancestor_disp = try walk.relDisplay(alloc, ancestor, cwd);
+    return .{ .text = try std.fmt.allocPrint(
+        alloc,
+        "{s} does not exist. Nearest existing directory: {s}. Use `glob` to see what is actually there, then retry with a corrected path.",
+        .{
+            if (base_disp.len == 0) "." else base_disp,
+            if (ancestor_disp.len == 0) "." else ancestor_disp,
+        },
+    ) };
 }
 
 fn optionalString(args: std.json.ObjectMap, key: []const u8) error{BadType}!?[]const u8 {
@@ -792,7 +814,7 @@ test "grep run: an omitted head_limit pages at the default of 50" {
     try std.testing.expectEqual(@as(usize, default_match_limit), shown);
 }
 
-test "grep run: no matches / oversized / explicit file / invalid regex / missing path" {
+test "grep run: no matches / oversized / explicit file / invalid regex / a missing path answers instead of refusing" {
     var t: TestCtx = undefined;
     try t.init();
     defer t.deinit();
@@ -833,8 +855,12 @@ test "grep run: no matches / oversized / explicit file / invalid regex / missing
     try std.testing.expect(std.mem.indexOf(u8, inline_flag, "case_insensitive=true") != null);
     try std.testing.expectEqualStrings("large.rs:\n2: TARGET", try t.grep("{\"pattern\":\"(?:TAR)GET\",\"path\":\"large.rs\"}"));
 
-    const missing = try t.grep("{\"pattern\":\"x\",\"path\":\"nowhere\"}");
-    try std.testing.expect(std.mem.startsWith(u8, missing, "search path does not exist: "));
+    // A missing search path is an answer, not a refusal: it names the
+    // nearest real ancestor (here cwd itself) and points at `glob`.
+    const missing_outcome = try run(&t.ctx, (try std.json.parseFromSliceLeaky(std.json.Value, t.arena.allocator(), "{\"pattern\":\"x\",\"path\":\"nowhere\"}", .{})).object);
+    try std.testing.expect(missing_outcome == .text);
+    try std.testing.expect(std.mem.startsWith(u8, missing_outcome.text, "nowhere does not exist. Nearest existing directory: ."));
+    try std.testing.expect(std.mem.indexOf(u8, missing_outcome.text, "Use `glob`") != null);
 }
 
 test "grep run: per-file cap across files, single file exempt, binary and CRLF files" {

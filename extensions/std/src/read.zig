@@ -7,6 +7,13 @@
 //! loaded), directory / too large / binary, then the window, then freshness.
 //! The output is capped below the host's own budget so its footer
 //! (`continue with offset=…`) always survives.
+//!
+//! A missing file is an ANSWER, not a refusal (docs/goals/std.md "existence
+//! answers"): the caller named the wrong path, and `notFoundHelp`'s listing of
+//! the parent directory is exactly the correction a model needs — the same
+//! genre as `grep`'s "no matches". A directory in place of a file, a file too
+//! large or binary, and a bad argument are still refusals: those are shape
+//! mismatches or malfunctions, not "nothing there".
 
 const std = @import("std");
 const rpc = @import("rpc.zig");
@@ -48,8 +55,12 @@ pub fn run(ctx: *const rpc.Ctx, args: std.json.ObjectMap) anyerror!rpc.Outcome {
     const cwd = std.Io.Dir.cwd();
 
     // Stat first so a huge file is rejected before it is loaded into memory.
+    // A missing file is not a malfunction — the caller named the wrong path —
+    // so this is an answer (what the parent directory actually holds), not a
+    // refusal. A directory in place of a file, or an unreadable path, still
+    // is: those are host faults or a shape mismatch, not "nothing there".
     const st = cwd.statFile(io, path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return rpc.refuse(alloc, "{s}", .{try text.notFoundHelp(alloc, io, path)}),
+        error.FileNotFound => return .{ .text = try text.notFoundHelp(alloc, io, path) },
         else => return rpc.refuse(alloc, "cannot read {s}: {s}", .{ path, @errorName(err) }),
     };
     if (st.kind == .directory) {
@@ -60,7 +71,8 @@ pub fn run(ctx: *const rpc.Ctx, args: std.json.ObjectMap) anyerror!rpc.Outcome {
     if (st.size > max_file_bytes) return tooLarge(alloc, shown, st.size);
 
     const bytes = cwd.readFileAlloc(io, path, alloc, .limited(max_file_bytes + 1)) catch |err| switch (err) {
-        error.FileNotFound => return rpc.refuse(alloc, "{s}", .{try text.notFoundHelp(alloc, io, path)}),
+        // It vanished between stat and read — same non-refusal as above.
+        error.FileNotFound => return .{ .text = try text.notFoundHelp(alloc, io, path) },
         // It grew past the limit between stat and read.
         error.StreamTooLong => return tooLarge(alloc, shown, max_file_bytes + 1),
         else => return rpc.refuse(alloc, "cannot read {s}: {s}", .{ path, @errorName(err) }),
@@ -231,7 +243,7 @@ test "read: window footers, minimum window, offset past the end, new range retur
     try std.testing.expectEqualStrings("big.txt has 300 lines; offset 301 is past the end of the file.", past.text);
 }
 
-test "read: changed on disk is noted; a directory, a missing file, a binary file are refused with help" {
+test "read: changed on disk is noted; a directory and a binary file are refused, a missing file answers with what its parent holds" {
     const f = try TestFixture.init("s-chg");
     defer f.deinit();
     const io = std.testing.io;
@@ -247,15 +259,15 @@ test "read: changed on disk is noted; a directory, a missing file, a binary file
     try std.testing.expect(std.mem.indexOf(u8, dir.failed, "is a directory, not a file. It contains: inner.txt") != null);
 
     const missing = try f.call(run, "{{\"path\":\"d/nope.txt\"}}", .{});
-    try std.testing.expect(std.mem.startsWith(u8, missing.failed, "File not found: "));
-    try std.testing.expect(std.mem.endsWith(u8, missing.failed, "exists and contains: inner.txt"));
+    try std.testing.expect(std.mem.startsWith(u8, missing.text, "File not found: "));
+    try std.testing.expect(std.mem.endsWith(u8, missing.text, "exists and contains: inner.txt"));
 
     try f.tmp.dir.writeFile(io, .{ .sub_path = "bin.dat", .data = "abc\x00def" });
     const bin = try f.call(run, "{{\"path\":\"bin.dat\"}}", .{});
     try std.testing.expect(std.mem.indexOf(u8, bin.failed, "is a binary file (7 bytes); refusing to dump it into context.") != null);
 
     const empty_path = try f.call(run, "{{\"path\":\"e.txt\"}}", .{});
-    try std.testing.expect(std.mem.startsWith(u8, empty_path.failed, "File not found: "));
+    try std.testing.expect(std.mem.startsWith(u8, empty_path.text, "File not found: "));
     try f.tmp.dir.writeFile(io, .{ .sub_path = "e.txt", .data = "" });
     const empty = try f.call(run, "{{\"path\":\"e.txt\"}}", .{});
     try std.testing.expectEqualStrings("(empty file)", empty.text);

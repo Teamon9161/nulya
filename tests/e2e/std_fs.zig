@@ -81,7 +81,7 @@ fn numberedLines(alloc: std.mem.Allocator, count: usize, width: usize) ![]u8 {
     return body.toOwnedSlice(alloc);
 }
 
-test "bundled std read: verbatim without gutter; unchanged stub in a session and force; window footers and the widened minimum; new range returns only the gap; offset past the end; directory / not-found help / binary refusals; changed-on-disk note; empty file" {
+test "bundled std read: verbatim without gutter; unchanged stub in a session and force; window footers and the widened minimum; new range returns only the gap; offset past the end; directory / binary refusals, a missing file answers instead; changed-on-disk note; empty file" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     const exe = try nulyaExe(alloc);
@@ -139,8 +139,10 @@ test "bundled std read: verbatim without gutter; unchanged stub in a session and
         try expectOk(past, "big.txt has 300 lines; offset 301 is past the end of the file.");
     }
 
-    // Refusals that teach: a directory lists itself, a missing file lists its
-    // parent (or says the parent is missing too), a binary file is named.
+    // A directory and a binary file are refused, each naming what is wrong. A
+    // missing file is not a refusal: it answers with its parent's contents
+    // (or that the parent is missing too), so a wrong path costs no failed
+    // call (docs/goals/std.md "existence answers").
     try tmp.dir.createDirPath(io, "d");
     try tmp.dir.writeFile(io, .{ .sub_path = "d/inner.txt", .data = "" });
     try tmp.dir.writeFile(io, .{ .sub_path = "bin.dat", .data = "abc\x00def" });
@@ -151,12 +153,12 @@ test "bundled std read: verbatim without gutter; unchanged stub in a session and
 
         const missing = try ws.read("{\"path\":\"d/nope.txt\"}", sid);
         defer alloc.free(missing.stdout);
-        try expectRefusal(missing, "File not found: ");
-        try expectRefusal(missing, "exists and contains: inner.txt");
+        try expectOkContains(missing, "File not found: ");
+        try expectOkContains(missing, "exists and contains: inner.txt");
 
         const no_parent = try ws.read("{\"path\":\"nowhere/nope.txt\"}", sid);
         defer alloc.free(no_parent.stdout);
-        try expectRefusal(no_parent, "does not exist either.");
+        try expectOkContains(no_parent, "does not exist either.");
 
         const bin = try ws.read("{\"path\":\"bin.dat\"}", sid);
         defer alloc.free(bin.stdout);
