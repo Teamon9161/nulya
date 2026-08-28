@@ -1871,6 +1871,30 @@ export function App(props: AppProps) {
   }
 
   /**
+   * Replace the front tab with a fresh draft, IN PLACE (`/clear`) — the
+   * opposite move from `startDraft`, which leaves the front tab alone and
+   * opens another beside it. The old tab's session, if it had one, is not
+   * touched: `tabs.clear` only releases this tab's own attachment (and
+   * un-creates the session behind it if this process made it and nothing was
+   * ever said — the same rule closing a tab follows), the file stays on disk.
+   *
+   * `pick` and `remember` mean what they mean in `startDraft`: named on the
+   * command line, a one-off; otherwise the last remembered pick.
+   */
+  const startClear = (pick?: ModelPick, remember = pick !== undefined) => {
+    const chosen = pick ?? loadTuiState(props.statePath).model
+    tabs.clear(tab().key, {
+      ...(chosen ? { pick: chosen } : {}),
+      ...(chosen?.effort ? { effort: chosen.effort } : {}),
+    })
+    closeOverlay()
+    setGuide(null)
+    const who = chosen ? `${modelOf(chosen)}` : "the default model"
+    setNotice(`new draft here · ${who} · starts when you send a message`)
+    if (remember && chosen) rememberModel(chosen, props.statePath)
+  }
+
+  /**
    * The session this tab is about to have. A draft becomes one here and nowhere
    * else, so this is the single moment the composition of a TUI session is
    * decided — with whatever `/ext` and `/model` have been told by then.
@@ -3046,9 +3070,9 @@ export function App(props: AppProps) {
     /** Everything after the command word, verbatim — a note keeps its spacing. */
     const rest = raw.slice(raw.indexOf(command!) + command!.length).trim()
     // `/exit` is the word other harnesses use for this, kept for the same
-    // reason `/clear` and `/resume` are (commands.ts): a muscle-memory `/exit`
-    // that fell through would be offered to the skill catalog and then sent to
-    // the model verbatim, which is the worst possible answer to "leave".
+    // reason `/resume` is (commands.ts): a muscle-memory `/exit` that fell
+    // through would be offered to the skill catalog and then sent to the model
+    // verbatim, which is the worst possible answer to "leave".
     if (command === "/quit" || command === "/exit") {
       quit(true)
       return true
@@ -3178,12 +3202,11 @@ export function App(props: AppProps) {
       chooseWorkspace(expandPath(said, ws().dir))
       return true
     }
-    // `/clear` is `/new` under the name other harnesses use for it, and an alias
-    // costs one line here while a muscle-memory `/clear` that fell through would
-    // be offered to the skill catalog and then sent to the model as prose
-    // (commands.ts). It is not listed, and it clears nothing: the session it
-    // leaves behind keeps its tab, its file and every event in it.
-    if (command === "/new" || command === "/clear") {
+    // `/new` opens a SECOND tab beside this one (or, if the front tab is
+    // already an untouched draft, just retunes it — there is no reason for
+    // two). The tab in front, and whatever session is behind it, is left
+    // exactly as it is: `/new` never closes a tab or drops a session.
+    if (command === "/new") {
       const flag = (name: string) => {
         const at = words.indexOf(name)
         return at >= 0 ? words[at + 1] : undefined
@@ -3197,6 +3220,28 @@ export function App(props: AppProps) {
       const pick: ModelPick | undefined =
         profile || model ? { profile: profile ?? last?.profile ?? "", model, effort: last?.effort } : undefined
       startDraft(pick, false)
+      return true
+    }
+    // `/clear` is the word other harnesses use for starting a conversation
+    // over, and the honest nulya shape of that is a NEW session in the SAME
+    // tab slot rather than the second tab `/new` opens: a ledger only appends
+    // (physics #1), so nothing is actually cleared — the old session, if this
+    // tab had one, keeps its file and every event in it, exactly one
+    // `/sessions` away. What clears is this tab's display, back to a draft.
+    // An observer tab (one this process is only watching, not driving) clears
+    // the same way: there is nothing special about a fresh draft taking the
+    // place of a tab that used to be watching something.
+    if (command === "/clear") {
+      const flag = (name: string) => {
+        const at = words.indexOf(name)
+        return at >= 0 ? words[at + 1] : undefined
+      }
+      const profile = flag("--profile")
+      const model = flag("--model")
+      const last = loadTuiState(props.statePath).model
+      const pick: ModelPick | undefined =
+        profile || model ? { profile: profile ?? last?.profile ?? "", model, effort: last?.effort } : undefined
+      startClear(pick)
       return true
     }
     if (command === "/model") {

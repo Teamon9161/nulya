@@ -19,7 +19,7 @@ import { createSessionState } from "../src/state/session.ts"
 import { default_settings } from "../src/state/settings.ts"
 import { readHeader, sessionExists } from "../src/nulya/files.ts"
 import { sessionList, sessionNew } from "../src/nulya/cli.ts"
-import { rememberSessionPins } from "../src/state/tui_state.ts"
+import { loadTuiState, rememberSessionPins } from "../src/state/tui_state.ts"
 import { unsafe_settings, scripted_env, settle, tempWorkspace, until, type TempWorkspace } from "./support.ts"
 
 const style = createStyle(unsafe_settings, {})
@@ -257,18 +257,22 @@ test("a session merely opened by id is never a candidate, empty or not", async (
 
 /**
  * `/sessions <id>` — `/resume <id>` under its other name — is the only way to
- * reach a session by id from inside the screen; `/clear` is `/new` under the
- * name other harnesses use.
+ * reach a session by id from inside the screen; `/clear` replaces the FRONT
+ * tab with a fresh draft, in place (T84; before that it was an alias for
+ * `/new`, which opens a second tab instead).
  *
  * Both are tested here because both are about the same claim: neither one
  * destroys anything. A resumed session is opened, not created — so the guard
  * above does not apply to it and it survives the window that opened it — and a
  * `/clear` leaves the session it stepped away from exactly where it was, on
- * disk and in its own tab.
+ * disk, while THIS screen still has only the one tab it always had (the thing
+ * that tells `/clear` apart from `/new`, which would have grown the strip).
  *
- * The alias is exercised rather than the listed name deliberately: an alias
- * that reached different code than `/sessions` would be a second command
- * wearing a nickname, which is the thing this front end refuses to have.
+ * `/resume` is exercised as the alias rather than the listed name
+ * deliberately: an alias that reached different code than `/sessions` would
+ * be a second command wearing a nickname, which is the thing this front end
+ * refuses to have. `/clear` is its own listed command now, so it is typed by
+ * its own name.
  */
 test("/resume opens a past session by id; /clear steps away without touching it", async () => {
   const dir = mkdtempSync(join(tmpdir(), "nulya-tui-state-"))
@@ -318,6 +322,10 @@ test("/resume opens a past session by id; /clear steps away without touching it"
     await until(() => setup.captureCharFrame().includes("starts when you send a message"), 15_000)
     // Nothing was created by either of them: a draft is nothing on disk.
     expect((await sessionList(ws)).length).toBe(before)
+    // IN PLACE, not a second tab: `/clear` took the slot the session tab was
+    // already in rather than opening one beside it (which is what `/new`
+    // does, and what `/clear` itself used to do while it was `/new`'s alias).
+    await until(() => (loadTuiState(statePath).tabs ?? []).length === 1, 15_000)
   } finally {
     setup.renderer.destroy()
     rmSync(dir, { recursive: true, force: true })

@@ -3,10 +3,10 @@
 exports[`/sessions lists the store and opens the highlighted session 1`] = `
 " sessions · 3   s-<id>
 
+   + new tab
+
  ▾ rename the toolchain flag                                                                                   <when>
    make the budgets configurable                                                                    ▎ this tab <when>
-
-
 
 
 

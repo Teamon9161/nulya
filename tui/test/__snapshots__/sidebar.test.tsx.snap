@@ -3,10 +3,10 @@
 exports[`the sidebar comes up docked, beside a transcript that is still there 1`] = `
 " sessions · 2                                                                   
                     ▎ session · ---------------- · frozen composition         ▸ 
-   budgets       ▎  ▎ model    scripted/scripted-demo · tools 1+0               
-   older one                                                                    
-                    ▎ budgets                                                   
+   + new tab        ▎ model    scripted/scripted-demo · tools 1+0               
                                                                                 
+   budgets       ▎  ▎ budgets                                                   
+   older one                                                                    
                     ● Let me probe the environment.                             
                                                                                 
                       $ echo hello-from-nulya  (2 lines) ▸                      
@@ -31,10 +31,10 @@ exports[`the sidebar comes up docked, beside a transcript that is still there 1`
 exports[`a wider terminal spends the room on the rail's own columns 1`] = `
 " sessions · 2                                                                                                           
                               ▎ session · ---------------- · frozen composition                                       ▸ 
-   budgets        ▎ ~~~~~~~~  ▎ model    scripted/scripted-demo · tools 1+0                                             
-   older one        ~~~~~~~~                                                                                            
-                              ▎ budgets                                                                                 
+   + new tab                  ▎ model    scripted/scripted-demo · tools 1+0                                             
                                                                                                                         
+   budgets        ▎ ~~~~~~~~  ▎ budgets                                                                                 
+   older one        ~~~~~~~~                                                                                            
                               ● Let me probe the environment.                                                           
                                                                                                                         
                                 $ echo hello-from-nulya  (2 lines) ▸                                                    

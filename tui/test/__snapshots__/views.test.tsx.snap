@@ -4,94 +4,98 @@ exports[`/help lists the bindings that are actually in force 1`] = `
 " help · keys and commands                                                                           
                                                                                                     
  keys                                                                                             █ 
- escape                           cancel the step (kernel stops at its next step boundary)        █ 
-                                  browse when idle                                                █ 
- f2                               /ext — the extension store                                      █ 
- f3                               /sessions — the session store                                   █ 
- f5                               /model — the models that can run; Enter starts a session on one █ 
- f6                               /provider — endpoints and their keys; Enter on a ready one goes █ 
-                                  to its models                                                   █ 
- f7                               /tasks — background commands still running, their logs, k to    █ 
-                                  stop one                                                        █ 
- f8                               /sidebar — the session list, docked beside the transcript       █ 
- ctrl+left                        keyboard to the pane on the left · Esc sends it back            █ 
- ctrl+right                       keyboard to the pane on the right                               █ 
- ctrl+up                          keyboard to the pane above                                      █ 
- ctrl+down                        keyboard to the pane below                                      █ 
- f1                               this page                                                       █ 
- pageup                           scroll the transcript back a page                               █ 
- pagedown                         scroll it forward a page                                        █ 
- shift+end                        back to the live end of the transcript                          █ 
- f4                               next tab (tabs appear once a second session is open)            █ 
- ctrl+w                           close the current tab                                           █ 
- ctrl+l                           redraw the screen                                               █ 
- ctrl+c                           kill the running step; press again to quit                      █ 
+ escape                            cancel the step (kernel stops at its next step boundary)       █ 
+                                   browse when idle                                               █ 
+ f2                                /ext — the extension store                                     █ 
+ f3                                /sessions — the session store                                  █ 
+ f5                                /model — the models that can run; Enter starts a session on    █ 
+                                   one                                                            █ 
+ f6                                /provider — endpoints and their keys; Enter on a ready one     █ 
+                                   goes to its models                                             █ 
+ f7                                /tasks — background commands still running, their logs, k to   █ 
+                                   stop one                                                       █ 
+ f8                                /sidebar — the session list, docked beside the transcript      █ 
+ ctrl+left                         keyboard to the pane on the left · Esc sends it back           █ 
+ ctrl+right                        keyboard to the pane on the right                              █ 
+ ctrl+up                           keyboard to the pane above                                     █ 
+ ctrl+down                         keyboard to the pane below                                     █ 
+ f1                                this page                                                      █ 
+ pageup                            scroll the transcript back a page                              █ 
+ pagedown                          scroll it forward a page                                       █ 
+ shift+end                         back to the live end of the transcript                         █ 
+ f4                                next tab (tabs appear once a second session is open)           █ 
+ ctrl+w                            close the current tab                                          █ 
+ ctrl+l                            redraw the screen                                              █ 
+ ctrl+c                            kill the running step; press again to quit                     █ 
                                                                                                   █ 
- Enter                            send · in browse, watch a sub-session here or fold              █ 
-                                  as observer on an empty composer, take over                     █ 
- t                                in browse: give the selected sub-session a tab of its own       █ 
- ↑↓ / 1-9, Tab                    in the approval dialog: choose an answer, or write a note that  █ 
-                                  rides on it                                                     █ 
- Shift+Enter / Ctrl+J             newline                                                         █ 
- / then Tab                       complete a slash command; Enter always sends what is written    █ 
- ↑ / ↓                            previous / next message, on an empty composer                   █ 
- j / k, Space                     in browse and in the overlays: move, fold                       █ 
- ?                                in an overlay: the rest of its keys                             █ 
+ Enter                             send · in browse, watch a sub-session here or fold             █ 
+                                   as observer on an empty composer, take over                    █ 
+ t                                 in browse: give the selected sub-session a tab of its own      █ 
+ ↑↓ / 1-9, Tab                     in the approval dialog: choose an answer, or write a note that █ 
+                                   rides on it                                                    █ 
+ Shift+Enter / Ctrl+J              newline                                                        █ 
+ / then Tab                        complete a slash command; Enter always sends what is written   █ 
+ ↑ / ↓                             previous / next message, on an empty composer                  █ 
+ j / k, Space                      in browse and in the overlays: move, fold                      █ 
+ ?                                 in an overlay: the rest of its keys                            █ 
                                                                                                   █ 
  mouse                                                                                            █ 
- wheel                            scroll the transcript                                           █ 
- click a head line                fold / unfold that card · Esc then Enter is the keyboard way    █ 
- click a row                      move the cursor there · click it again for what Enter does      █ 
- click the model                  in the line under the composer or the composition card: open    █ 
-                                  /model                                                          █ 
- click ask / unsafe               open the permission-mode picker, the same as /mode              █ 
- click a tab / a pane             go to it                                                        █ 
- click the sidebar mark           at the head of the line under the composer: show or hide the    █ 
-                                  session list                                                    █ 
- click [x]                        in /ext's tools pane: pin or unpin that tool                    █ 
- drag over text                   select it; releasing copies it to the clipboard                 █ 
+ wheel                             scroll the transcript                                          █ 
+ click a head line                 fold / unfold that card · Esc then Enter is the keyboard way   █ 
+ click a row                       move the cursor there · click it again for what Enter does     █ 
+ click the model                   in the line under the composer or the composition card: open   █ 
+                                   /model                                                         █ 
+ click ask / unsafe                open the permission-mode picker, the same as /mode             █ 
+ click a tab / a pane              go to it                                                       █ 
+ click the sidebar mark            at the head of the line under the composer: show or hide the   █ 
+                                   session list                                                   █ 
+ click [x]                         in /ext's tools pane: pin or unpin that tool                   █ 
+ drag over text                    select it; releasing copies it to the clipboard                █ 
                                                                                                   █ 
  slash commands                                                                                   █ 
- /model                           pick the model the next session runs on                         █ 
- /mode [ask|unsafe]               ask before every tool call, or run them all unreviewed; no      █ 
-                                  argument opens the picker                                       █ 
- /provider                        endpoints and their keys                                        █ 
-                                  add an OpenAI- or Anthropic-compatible one                        
- /effort <level|auto>             change this tab's effort now; the next step runs with it          
- /new [--profile p] [--model id]  a session on the last pick, or on the named profile               
-                                  \`/clear\` is another name for it                                   
- /sessions [<id>]                 everything in .nulya/sessions · Enter opens one                   
-                                  an id opens that one · \`/resume\` is another name for it           
- /cwd [<path>]                    which directory this tab works in                                 
-                                  no argument opens the browser · \`no project\` needs none           
- /sidebar [<percent>]             the session list, docked down the left edge                       
-                                  a number sets its width                                           
- /ext                             extensions: versions, what is active, what it is used for         
- /tasks                           background commands: what is running, its log, k stops one        
- /usage                           what this session cost, and the workspace's tool-usage journal    
- /context                         how full the window is, and what is filling it                    
- /settings                        the effective tui.toml values and which file each came from       
- /compact [focus]                 summarise this session and continue in a new one; this file       
-                                  stays                                                             
- /outcome <verdict> [note]        success | partial | failure — unjudged is not the same as         
-                                  failed                                                            
- /with [<id>[@version]]           a new tab carrying a registered extension's prompt and skills;    
-                                  nothing is activated. no argument lists what is registered        
-                                  (\`/as\` is the old name)                                           
- /agent [<name> <task…>]          delegate a task to an agent defined in .nulya/agents or           
-                                  ~/.nulya/agents: a session of its own, in its own tab, whose      
-                                  report comes back here. no name lists them                        
- /step                            continue after a spent step budget (nothing continues by          
-                                  itself)                                                           
- /cancel                          stop the running step at the kernel's next step boundary          
- /fold                            collapse every card                                               
- /help                            every key and every command                                       
- /quit                            leave                                                             
- /<package command>               declared by an active extension · /ext lists them                 
- /<skill> [args]                  load an active skill's body as a user turn                        
-                                  \`nulya skill list\` names them                                     
- anything else after /            goes to the model verbatim                                        
+ /model                            pick the model the next session runs on                        █ 
+ /mode [ask|unsafe]                ask before every tool call, or run them all unreviewed; no     █ 
+                                   argument opens the picker                                      █ 
+ /provider                         endpoints and their keys                                       █ 
+                                   add an OpenAI- or Anthropic-compatible one                     █ 
+ /effort <level|auto>              change this tab's effort now; the next step runs with it       █ 
+ /new [--profile p] [--model id]   a SECOND tab, on the last pick or the named profile — this tab █ 
+                                   is untouched                                                   █ 
+ /clear [--profile p] [--model i…  replace THIS tab with a fresh draft, in place — the old        █ 
+                                   session's file stays on disk                                   █ 
+ /sessions [<id>]                  everything in .nulya/sessions · Enter opens one                █ 
+                                   an id opens that one · \`/resume\` is another name for it        █ 
+ /cwd [<path>]                     which directory this tab works in                                
+                                   no argument opens the browser · \`no project\` needs none          
+ /sidebar [<percent>]              the session list, docked down the left edge                      
+                                   a number sets its width                                          
+ /ext                              extensions: versions, what is active, what it is used for        
+ /tasks                            background commands: what is running, its log, k stops one       
+ /usage                            what this session cost, and the workspace's tool-usage journal   
+ /context                          how full the window is, and what is filling it                   
+ /settings                         the effective tui.toml values and which file each came from      
+ /compact [focus]                  summarise this session and continue in a new one; this file      
+                                   stays                                                            
+ /outcome <verdict> [note]         success | partial | failure — unjudged is not the same as        
+                                   failed                                                           
+ /with [<id>[@version]]            a new tab carrying a registered extension's prompt and skills;   
+                                   nothing is activated. no argument lists what is registered       
+                                   (\`/as\` is the old name)                                          
+ /agent [<name> <task…>]           delegate a task to an agent defined in .nulya/agents or          
+                                   ~/.nulya/agents: a session of its own, in its own tab, whose     
+                                   report comes back here. no name lists them                       
+ /step                             continue after a spent step budget (nothing continues by         
+                                   itself)                                                          
+ /cancel                           stop the running step at the kernel's next step boundary         
+ /fold                             collapse every card                                              
+ /help                             every key and every command                                      
+ /quit                             leave                                                            
+ /<package command>                declared by an active extension · /ext lists them                
+ /<skill> [args]                   load an active skill's body as a user turn                       
+                                   \`nulya skill list\` names them                                    
+ anything else after /             goes to the model verbatim                                       
                                                                                                     
+ a session has one writer                                                                           
  j/k · PgUp/PgDn scroll · Esc close                                                                 
 "
 `;

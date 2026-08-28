@@ -383,6 +383,50 @@ function depthOf(row: ListRow): number {
  */
 const min_path = 16
 
+/**
+ * A visible, clickable way to start a new tab from the sessions list (T84).
+ *
+ * Before this row the only way to reach `onNew` from here was `n` on the
+ * keyboard — a key nobody who has not already read the footer knows about —
+ * or the tab strip's own `+`, which draws nothing at all while a single tab
+ * is open (`TabBar.tsx`, `Show when={props.tabs.length > 1}`): the ordinary
+ * state for anybody who has not yet split their work into two conversations.
+ * Somebody who opened this list — the one place in the front end whose whole
+ * job is "which conversation next" — is squarely in "or a new one" territory,
+ * so the list gets its own row for it rather than assuming the key is known.
+ *
+ * Styled like every other row this file draws (`onClick`, a hover
+ * background) rather than as a button, because it sits directly above rows
+ * that already look exactly like this — a fourth visual language for "you
+ * can press this" would be the thing that stood out, not the thing that
+ * belongs.
+ */
+function NewTabRow(props: { onNew: () => void; width: number }) {
+  const style = useStyle()
+  const [hovered, setHovered] = createSignal(false)
+  const click = onClick(() => props.onNew())
+  return (
+    <box
+      flexDirection="row"
+      width="100%"
+      height={1}
+      flexShrink={0}
+      backgroundColor={hovered() ? style.theme.hover : undefined}
+      onMouseDown={click.onMouseDown}
+      onMouseUp={click.onMouseUp}
+      onMouseOver={() => setHovered(true)}
+      onMouseOut={() => setHovered(false)}
+    >
+      <text fg={style.theme.faint} flexShrink={0}>
+        {"  "}
+      </text>
+      <text fg={hovered() ? style.theme.accent.user : style.theme.fg} flexShrink={0}>
+        {fit(`${style.glyphs.newTab} new tab`, Math.max(0, props.width - 2))}
+      </text>
+    </box>
+  )
+}
+
 function GroupHeading(props: { ws: Workspace; width: number }) {
   const style = useStyle()
   const name = () => workspaceLabel(props.ws.dir)
@@ -678,6 +722,8 @@ export function SessionsView(props: {
         {fit(`sessions · ${entries().length}`, inner())}
       </text>
       <box height={1} flexShrink={0} />
+      <NewTabRow onNew={props.onNew} width={inner()} />
+      <box height={1} flexShrink={0} />
       <scrollbox
         ref={(box: ScrollBoxRenderable) => (list = box)}
         flexGrow={1}
@@ -847,6 +893,8 @@ export function SessionsView(props: {
           {fit(pointed(), Math.max(0, inner() - 16))}
         </text>
       </box>
+      <box height={1} />
+      <NewTabRow onNew={props.onNew} width={inner()} />
       <box height={1} />
       <scrollbox
         ref={(box: ScrollBoxRenderable) => (list = box)}

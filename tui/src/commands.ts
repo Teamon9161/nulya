@@ -16,14 +16,22 @@
  *
  * The built-ins are tried first, so a skill can never take `/model` away.
  *
- * Four names dispatch without being listed: `/as` (what `/with` was called
- * until T36), `/clear` (the word other harnesses use for what `/new` does),
- * `/resume` (theirs for what `/sessions` does) and `/exit` (theirs for
- * `/quit`). None is on the table, because a command in this table is a command
- * this front end says exists, and each of these would put a second word on the
- * table for a concept that already has one. `/clear` would also name the one
- * thing that never happens here: a ledger is append-only, nothing is cleared,
- * and a new session is a new session (physics #1, #4).
+ * Three names dispatch without being listed: `/as` (what `/with` was called
+ * until T36), `/resume` (the word other harnesses use for what `/sessions`
+ * does) and `/exit` (theirs for `/quit`). None is on the table, because a
+ * command in this table is a command this front end says exists, and each of
+ * these would put a second word on the table for a concept that already has
+ * one.
+ *
+ * `/clear` used to be a fourth — an alias for `/new` — until T84: the two
+ * looked interchangeable because neither ever touched what was on disk (a
+ * ledger is append-only, physics #1), but they disagreed about the TAB, and
+ * that difference is exactly what somebody typing `/clear` from another
+ * harness is asking for. `/new` opens a second tab and leaves the front one
+ * exactly as it was; `/clear` replaces the front tab's own display with a
+ * fresh draft, in place — same slot, same directory, and the session that was
+ * there (if any) keeps its file and stays one `/sessions` away. Two words, two
+ * things, so `/clear` is listed now instead of aliased.
  *
  * They ARE completed, though (`alias_commands`), and that is not a
  * contradiction: not listing is about what this front end advertises, and
@@ -56,7 +64,12 @@ export const commands: Command[] = [
   {
     name: "/new",
     args: "[--profile p] [--model id]",
-    what: "a session on the last pick, or on the named profile · `/clear` is another name for it",
+    what: "a SECOND tab, on the last pick or the named profile — this tab is untouched",
+  },
+  {
+    name: "/clear",
+    args: "[--profile p] [--model id]",
+    what: "replace THIS tab with a fresh draft, in place — the old session's file stays on disk",
   },
   {
     name: "/sessions",
@@ -103,15 +116,14 @@ export const commands: Command[] = [
  * against.
  *
  * `ui/App.tsx` decides what each one does (`/resume` shares its branch with
- * `/sessions`, `/clear` with `/new`, `/as` with `/with`), but the RESERVATION
- * belongs here: an alias is dispatched before a package command is even looked
- * up, so a package allowed to claim `/clear` would register a command that could
- * never fire. Which is exactly why `/evolve` left this table when the evolution
- * package started declaring it (T53).
+ * `/sessions`, `/as` with `/with`), but the RESERVATION belongs here: an alias
+ * is dispatched before a package command is even looked up, so a package
+ * allowed to claim `/resume` would register a command that could never fire.
+ * Which is exactly why `/evolve` left this table when the evolution package
+ * started declaring it (T53).
  */
 export const aliases: Readonly<Record<string, string>> = {
   as: "/with",
-  clear: "/new",
   exit: "/quit",
   resume: "/sessions",
 }
@@ -148,8 +160,8 @@ export function completions(text: string): Command[] {
  * The aliases as completions: offered, but never LISTED.
  *
  * The distinction the table's header draws still holds — `/help` and the
- * command table name one word per concept, and `/clear` would advertise a verb
- * nulya does not have. But refusing to complete them made a different claim:
+ * command table name one word per concept, and `/resume` would advertise a
+ * second name for `/sessions`. But refusing to complete them made a different claim:
  * somebody typing `/res` from muscle memory got an empty menu, which is what
  * this front end says when a command does not exist, and the honest answer is
  * that it does and it is spelled `/sessions`. So an alias only shows up once

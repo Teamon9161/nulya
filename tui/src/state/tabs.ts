@@ -234,6 +234,27 @@ export interface TabStore {
    */
   replace(oldKey: string, id: string, options?: OpenOptions): SessionTab
   /**
+   * Replace the tab keyed `key` with a fresh DRAFT, in its place: same
+   * position, same directory unless `opened.ws` says otherwise, the old
+   * attachment released (and the old session un-created if this process made
+   * it and nobody ever said anything in it — the same rule `close` and
+   * `replace` follow, `release`).
+   *
+   * This is `/clear`'s kernel move, and the point of it is what it does NOT
+   * do: a ledger only appends (physics #1), so nothing on disk is cleared —
+   * the old session's file, if there was one, is exactly where it was and
+   * `/sessions` still finds it. What is cleared is this tab's DISPLAY: it
+   * goes back to being a draft, the same screen a brand new tab starts on.
+   *
+   * `replace` is the sibling move for "go to a different EXISTING session
+   * here"; `clear` is for "start a new one here". Works on any tab — a
+   * session this process is driving, one it is only observing, or a draft
+   * already — because none of those change what "clear" means: whatever was
+   * in front of this slot stays exactly as it was, and the slot gets a fresh
+   * draft.
+   */
+  clear(key: string, opened?: DraftOptions): DraftTab
+  /**
    * Point a DRAFT tab at another directory (goals/tui-shell.md §5.3b).
    *
    * Only a draft, and that is the invariant rather than a restriction: a
@@ -460,12 +481,36 @@ export function createTabStore(home: Workspace, first: FirstTab, options: TabSto
     return tab
   }
 
+  /**
+   * `clear`'s implementation: release whatever is at `key` — a session tab is
+   * let go the same way `close` and `replace` let one go, a draft has nothing
+   * to release — and put a fresh draft in the same slot. Falls back to
+   * appending one (the same shape `draft()` returns) if `key` names nothing,
+   * which should not happen but leaves the caller with a tab either way.
+   */
+  function clearTab(key: string, opened: DraftOptions = {}): DraftTab {
+    const list = tabs()
+    const at = list.findIndex((tab) => tab.key === key)
+    if (at < 0) {
+      const tab = makeDraft(opened)
+      setTabs([...list, tab])
+      setActiveIndex(list.length)
+      return tab
+    }
+    release(list[at]!)
+    const tab = makeDraft({ ws: list[at]!.ws, ...opened })
+    setTabs(list.map((old, index) => (index === at ? tab : old)))
+    setActiveIndex(at)
+    return tab
+  }
+
   return {
     tabs,
     activeIndex,
     active: () => tabs()[Math.min(activeIndex(), tabs().length - 1)]!,
     open,
     replace,
+    clear: clearTab,
     draft(opened = {}) {
       const tab = makeDraft(opened)
       setTabs([...tabs(), tab])
