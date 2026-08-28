@@ -294,6 +294,14 @@ Driver 演化比 Tool 保守，因为**归因难**（任务难度 / model / seed
 
 **exec target 的三件已知欠账**（都等真实使用证据，一件都不先做）：① **没有 config 缺省**——`session new --env` 是按场的决定，而给 `[environment]` 加一个默认值就要回答"`wsl` 比 `local` 更严还是更松"，§9.5 的收窄规则对这个问题没有诚实答案；每场都用同一个目标该由驱动者记住一个选择（TUI 已经这么做）。② **对面的进程不保证被 kill 带走**——`Tree` 杀得到本地的 `wsl.exe` / `ssh` 客户端，远端命令通常跟着死但 detach 过的活得下来；真要保证得让远端也有一个 supervisor，那已经是"remote backend"而不是"包一层命令"。③ **`NULYA_EXE` / `NULYA_SESSION` 到不了对面**（WSL 只转发 `WSLENV`、ssh 只转发 `SendEnv`），所以在 WSL 里跑 `nulya …` 得自己找路径；翻译一个 `/mnt/` 形式的 `NULYA_EXE` 是可做的，但 harness 本体仍在 host、store 与 journal 也在 host，做了只会让"只有 shell 搬走"这条边界模糊。真要整个 harness 跑在别处，那是 `remote` backend 的题目。
 
+**Remote environment 设计笔记（2026-08-29 记，未排期——单独一轮来做）**。动机是 ssh target 的裂脑：`shell` 的命令在远端，而 `std` 的 read/grep 是 host 进程、读的是本地盘（DESIGN §8.1 那句"只有 shell 移动"对 ops 型任务够用，对"工作区在远端"的任务不够；过渡期的止血是 TUI 的 per-env profile——ssh 场干脆不带 std）。**正确的形状不是让工具感知环境**：`read` 自己跑 `ssh cat` 意味着每个工具各学一遍连接、引用、超时、credential，第三方工具还要再抄一遍——正是"同一个决定在多层各做一遍"那条坏味道。该动的是 **`Environment` 的第二个 vtable 实现**：`runShell` / `runExtension` / `startShellTask` 三个动词一起搬到远端，工具一字不改就在那边跑。这也是 T86 选 switch 而不是独立类型时写下的翻转条件——当时三个 target 之间变的只有 argv 一个决定，所以住在 `shellArgv` 的 switch 里；三个动词都要变的那天，才配一个新类型。
+
+已经躺在现有设计里的拼图（这些**不是**要新造的东西）：① store 的 version id 本来就含 target（`hash(snapshot + compiler + target)`，DESIGN §7.4）——"给远端 linux 编的 std"天然是同一个包的另一个版本，无新概念；② Zig 交叉编译让本地就能出远端二进制，远端不需要工具链；③ 内容寻址让"把冻结版本同步过去"变成幂等的一次 scp/rsync，hash 即校验；④ plain wire 就是 stdin 参数 / stdout 结果 / 退出码——`ssh <dest> <bin>` 逐位满足，唯一障碍是 `NULYA_TOOL` / `NULYA_ARG_*` 过不了 ssh（SendEnv），解法是把它们并进 stdin 的参数对象（env 形式本来只是便利面，DESIGN §7.3）。
+
+真正要设计的缺口（此处只列不答，动手那轮再答）：远端 scratch / spill 的落点与 `emit` footer 指针指向哪边的文件系统（模型看到的指针必须在它够得着的盘上）· freshness journal 跟工作区走到哪边 · gate 跨边界（问答仍在 host 的 step 进程里，不受影响；kill 要远端 supervisor——上面欠账 ② 那件事在这里成为必答题）· `--env` 的 exec target（只搬 shell）与 remote backend（全搬）是一根轴的两点还是两根轴，header 怎么记 · 往远端放二进制并执行 = 授权语义（trust gate 的对偶：这回是"这台机器信任那台机器替它跑什么"）。
+
+**与 `root.zig` 库（`b.addModule("nulya")`）正交，别混**：extension 永不 import 内核——自包含 + 内容寻址是支柱（vendored mvzr 与 `nulya journal` CLI 动词都是这条纪律的产物），远端化是 Environment 侧的工作，工具保持无知；库服务的是进程内嵌入内核的宿主应用，与哪台机器执行无关。
+
 ### 3.8.1 权限：gate 是 substrate，mode / 规则是 driver 的 policy `[gate 已落地 · 2026-08 → DESIGN §4/§14；分类器占位]`
 
 `3.8` 是"发生时能碰什么"（OS 强制，未做）。这一节是它前面那半步：**这一次要不要发生**。两件事不该合并，因为它们的答案由不同的东西给。
