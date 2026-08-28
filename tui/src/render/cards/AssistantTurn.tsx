@@ -1,4 +1,4 @@
-import { For, Show, createMemo } from "solid-js"
+import { For, Show, createEffect, createMemo, createSignal, onCleanup, untrack } from "solid-js"
 import { useBodyWidth, useStyle } from "../theme.ts"
 import { hardWrapLines } from "../../ui/columns.ts"
 import type { AssistantItem } from "../../state/session.ts"
@@ -33,10 +33,21 @@ import type { AssistantItem } from "../../state/session.ts"
 export function AssistantTurn(props: { item: AssistantItem }) {
   const style = useStyle()
   const body = useBodyWidth()
-  const plain = () => isPlainProse(props.item.text)
+  const live = () => props.item.text
+  const plain = () => isPlainProse(live())
   // − 2 the glyph column, − 2 the transcript's padding, − 1 the scrollbar's.
   const room = () => Math.max(12, Math.min(body(), style.maxWidth) - 5)
-  const lines = createMemo(() => hardWrapLines(stripInlineMarkdown(props.item.text), room()))
+  const lines = createMemo(() => hardWrapLines(stripInlineMarkdown(live()), room()))
+  // ONLY the markdown branch is sampled. The plain branch above is already
+  // stable under append — one more character rewrites the last row and nothing
+  // else — so slowing it down would buy nothing and cost the smoothness it
+  // already has. The markdown branch re-lays-out its trailing block on every
+  // change, which is the flicker (`sampled`, BUGS.md #21).
+  const stream = sampled(
+    live,
+    () => props.item.streaming,
+    () => style.settings.transcript.stream_interval_ms,
+  )
   return (
     <box flexDirection="row" width="100%">
       <text fg={style.theme.accent.assistant}>{style.glyphs.assistant} </text>
@@ -45,10 +56,10 @@ export function AssistantTurn(props: { item: AssistantItem }) {
           when={plain()}
           fallback={
             <markdown
-              content={props.item.text}
+              content={stream.text()}
               syntaxStyle={style.syntax}
               fg={style.theme.fg}
-              streaming={props.item.streaming}
+              streaming={!stream.done()}
               width={room()}
             />
           }
@@ -58,6 +69,79 @@ export function AssistantTurn(props: { item: AssistantItem }) {
       </box>
     </box>
   )
+}
+
+/**
+ * Follow `source`, but while `live` is true report it at most once per
+ * `interval` milliseconds.
+ *
+ * WHY A CLOCK AND NOT A PARSER. A markdown document is re-parsed and re-laid-out
+ * whole on every content change, and OpenTUI keeps the TRAILING block unstable
+ * for as long as `streaming` is set — only the blocks before it are reused
+ * (`Markdown.d.ts`, `parseMarkdownIncremental`'s stable count). An answer that
+ * has not reached its first blank line yet IS that one trailing block, so every
+ * delta re-lays-out all of it, and in a sticky-bottom scrollbox a height that
+ * changes moves the whole screen. The instability is upstream and correct — a
+ * half-written fence really is not a fence yet. What was ours was looking at it
+ * thirty times a second.
+ *
+ * The alternative was to split the text at the last CLOSED block ourselves and
+ * hand markdown only the settled part. That is a second markdown parser living
+ * here, maintained against a first one, for a problem whose actual shape is
+ * frequency.
+ *
+ * THE LAST DELTA IS NEVER HELD BACK. `live` going false flushes at once, so what
+ * settles on screen is the whole turn — a sampler that could drop the tail
+ * would be trading a flicker for a lie. `interval <= 0` means follow every
+ * change, which is what this did before.
+ */
+export function sampled(
+  source: () => string,
+  live: () => boolean,
+  interval: () => number,
+): { text: () => string; done: () => boolean } {
+  const [shown, setShown] = createSignal(untrack(source))
+  const [done, setDone] = createSignal(!untrack(live))
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const stop = () => {
+    if (timer === null) return
+    clearTimeout(timer)
+    timer = null
+  }
+  createEffect(() => {
+    const next = source()
+    const ms = interval()
+    if (live()) {
+      setDone(false)
+      if (ms <= 0) {
+        stop()
+        setShown(next)
+      } else if (next !== untrack(shown) && timer === null) {
+        // A timer already running will pick up whatever `source` says WHEN IT
+        // FIRES, so the deltas that arrive inside the window cost nothing at
+        // all — not a render, not a re-parse, not another timer.
+        timer = setTimeout(() => {
+          timer = null
+          setShown(untrack(source))
+        }, ms)
+      }
+      return
+    }
+    stop()
+    setShown(next)
+    // FINALISATION IS DELIBERATELY ONE UPDATE LATE. OpenTUI's markdown stops
+    // taking content the moment `streaming` goes false — that is what
+    // finalising the trailing token means to it — so a final text that arrived
+    // in the SAME update as the flag was simply dropped, and the last words of
+    // an answer stayed off the screen (measured: with the flag and the text
+    // changing together, the renderable kept showing the text from two deltas
+    // earlier). Handing the content over first and the flag on the next tick is
+    // the whole ordering this needs, and it is why `done` exists instead of the
+    // card reading `item.streaming` straight.
+    if (!untrack(done)) queueMicrotask(() => setDone(true))
+  })
+  onCleanup(stop)
+  return { text: shown, done }
 }
 
 function isPlainProse(text: string): boolean {

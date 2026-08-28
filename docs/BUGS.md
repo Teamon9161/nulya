@@ -146,12 +146,14 @@ ai回复:
 
 21. 模型报告的时候, 报告实时增加, 但是渲染的时候会闪烁
 
-**未修，机制已定位——正是 17 ③ 说的"再看到新的闪烁按新形状单独抓"。** 两个来源，一个是我们的，一个是 OpenTUI 自己写明的语义。
+**已修（TUI 层，tui.md §11 T80；内核零改动）——正是 17 ③ 说的"再看到新的闪烁按新形状单独抓"。** 两个来源，一个是我们的，一个是 OpenTUI 自己写明的语义。
 
 **① 我们这边（一轮跳一次）**：`render/cards/AssistantTurn.tsx` 用 `isPlainProse(text)` 在两条渲染路之间选——纯散文走 `hardWrapLines` + 一行一个 `<text>`（稳定：追加只改最后一行），出现任何结构（`#`、`- `、`1. `、fence、`|`）就整个交给 `<markdown>`。这个判断**每个 delta 重算一次**，而一份报告几乎一定在中途冒出第一个 bullet；那一刻 `<Show>` 把整个正文子树拆掉重建成另一种渲染，在 sticky-bottom 的 scrollbox 里就是整屏重排。判断是单调的（一旦出现结构就不会变回去），所以一轮只跳一次——不是持续闪的那一半。
 
 **② OpenTUI 那边（持续闪的那一半）**：`Markdown.d.ts` 自己写着 `streaming: true` 的语义是「**尾部那个 block 保持不稳定**」，只有它前面的 block 稳定复用（`parseMarkdownIncremental` 的 `stableTokenCount`）。所以一段长报告在遇到第一个空行之前，**整篇就是那一个尾部 block**，每个 delta 重排一次。
 
-**打算怎么修（未做）**：和这个文件自己的 T43 教训是同一条（"没有它，块数只会增长"）——流式期间不要让不稳定的尾部经过 markdown。在最后一个**已闭合**的块边界（fence 外的最后一个空行）切一刀，前半交给 `<markdown>`、尾部走稳定的 `hardWrapLines` 路，turn 结束再整篇交给 markdown 渲染一次。约二三十行加回归测试。
+**修法（用户提的，比我原来的好）**：我本来打算在最后一个**已闭合**的块边界自己切一刀，前半交给 `<markdown>`、尾部走 `hardWrapLines`。用户问的是「不能每隔多久重新渲染一次吗」——他是对的：切块是在这里养第二个 markdown parser，去对付一个形状其实是**频率**的问题。所以改成 `render/cards/AssistantTurn.tsx` 的 `sampled()`，`transcript.stream_interval_ms` 缺省 100 ms（`0` = 从前的行为），**只采样 markdown 那一支**——散文那一支本来就在追加下稳定，加时钟只会拿走它已有的顺滑。
 
-**为什么先记录不动手**：这是个跑不起来就验证不了的视觉改动，而这块地方（T73 / T76 / T77 / T78）已经烧了四次，每次都是"看起来对、实际引入新的反馈回路"。上面两条机制都是从代码与 OpenTUI 的类型声明里读出来的，可以先证伪再动手；② 尤其值得先确认一次——如果 OpenTUI 后续版本改了尾部块的处理，这条就自己消失了。
+**顺序是踩出来的**：第一版在 `streaming` 转 false 的同一次更新里 flush 最终文本，屏幕停在两个 delta 之前——探针查明 **OpenTUI 一旦 `streaming` 变 false 就不再接受 content 更新**（既有行为，把采样关掉也一样）。所以 `sampled` 返回 `{text, done}`，`done` 用 `queueMicrotask` 故意晚一次更新，卡片的 `streaming` prop 从 `!done()` 来：**先把内容交过去，下一拍再收尾**。回归测试 `test/sampled.test.tsx` 四条，其中"收尾当场 flush"那条正是抓到这个顺序问题的。
+
+**还没目验**：机制与顺序由测试和探针钉住了，"看起来还闪不闪"要在真终端上看。`stream_interval_ms` 就是留给这次目验的旋钮——调大更稳，调 0 回到从前。

@@ -2440,3 +2440,20 @@ tab 条的 `✕`/`+`/`▎`；`stripPlan` 的**不变量**"画出来的一切都�
 3. **`/agent <name> <task>` 先开 destination tab，再等定义刷新、prompt render 与 `session new`。** 旧路径把三个 subprocess 全等完才 `tabs.draft()`，健康的慢启动看起来也像 Enter 没生效。现在只要确实给了 task，就同步开一个继承当前 workspace/model 的 draft 并切过去，状态行写 `loading its definition…`；定义随后给出 model override 时就地更新，再 materialize 同一 tab。未知 agent、外部 runner 或不受信 workspace 会只收回这个 untouched draft，回到原 tab，不留下假任务。无 task 的语法提示与 bare picker 照旧不创建 tab。
 
 **回归测试**：composer 真按 Ctrl+V 事件走图片 token → 提交 bytes → 整体删除；clipboard 魔数；session stream 钉住 tool end + step end + 下一轮 responding 后仍高光、下一 tool 接棒、run done 清空；delegate 测试在 agent session 出现之前先看到第二个 `(new)` tab 与 loading 状态。`tsc --noEmit` 干净；相关 45 + 33 + 33 + delegate 5 项均通过，完整 `bun test` 两趟分别在 harness 的 180 / 300 秒上限被终止前无失败（套件本身超过五分钟），随后相关分片补跑通过；`bun run compile` 通过。
+
+
+### T80 · 流式 markdown 按时钟重画，不按 delta（2026-08-28）
+
+**内核零改动**；`bun test` 595 → **599**、`tsc` 干净。BUGS.md #21 那条"报告实时增加时闪烁"。
+
+**这个想法不是我的**：我原来打算在最后一个已闭合的块边界自己切一刀，把稳定的前半交给 markdown、不稳定的尾部走 `hardWrapLines`——用户问的是「不能每隔多久重新渲染一次吗」。他是对的：那是在这里养第二个 markdown parser，去对付一个形状其实是**频率**的问题。
+
+**闪烁的机制在上游而且是对的。** OpenTUI 的 `Markdown.d.ts` 自己写着 `streaming: true` 的语义——**尾部那个 block 保持不稳定**，只有它前面的 block 被复用（`parseMarkdownIncremental` 的 stable count）。一段还没遇到第一个空行的报告**整篇就是那一个尾部 block**，于是每个 delta 重排全文；而 sticky-bottom 的 scrollbox 里高度一变就是整屏移动。半写完的 fence 确实还不是 fence，所以那份不稳定没有错——**错的是我们一秒钟看它三十次**。
+
+**改动**：`render/cards/AssistantTurn.tsx` 新增 `sampled(source, live, interval)`，`transcript.stream_interval_ms` 缺省 **100 ms**（`0` = 跟每个 delta，就是从前的行为）。**只有 markdown 那一支被采样**：散文那一支本来就在追加下稳定（多一个字重写最后一行、别的不动），给它加时钟只会拿走它已经有的顺滑。窗口内到达的 delta **一个渲染都不花**——已经在跑的定时器**触发时**才读 `source`，所以窗口里既不重画也不重解析、也不再开第二个定时器。
+
+**收尾的顺序是踩出来的，不是想出来的。** 第一版在 `streaming` 转 false 时同一次更新里 flush 最终文本，测试红：屏幕停在**两个 delta 之前**的内容。探针查明——**OpenTUI 一旦 `streaming` 变 false 就不再接受 content 更新**（这正是它说的"finalize trailing token"，且这是既有行为：把采样关掉、`streaming` 先转 false 再改 content，同样进不去）。所以 `sampled` 返回的是 `{text, done}`，`done` 用 `queueMicrotask` **故意晚一次更新**，卡片的 `streaming` prop 从 `!stream.done()` 来而不再直接读 `item.streaming`：**先把内容交过去，下一拍再收尾**。
+
+**回归测试 `test/sampled.test.tsx`（4 条）**：一个窗口里的多个 delta 只换来一次更新、且窗口结束时显示的是**最后**那个（显示开窗那个值的采样器会永远晚一个窗口，比它要修的 bug 更糟）· 收尾当场 flush（间隔设成 60 秒，没有这条断言最后一段会在屏幕外待一分钟——**这条正是抓到上面那个顺序问题的**）· 散文不被采样 · `0` 跟每个 delta。**不钉**间隔本身（那是设定）与窗口内任一时刻的画面（那是口味）。
+
+**没有当场目验。** 机制、上游语义与顺序都由测试与探针钉住了，但"看起来还闪不闪"要在真终端上看；`stream_interval_ms` 就是留给这次目验的旋钮（调大更稳、调 0 回到从前）。

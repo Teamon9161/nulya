@@ -56,6 +56,28 @@ export interface Settings {
      * keeps a long session's typing latency flat (tui.md §11, T4).
      */
     history_window: number
+    /**
+     * How often a streaming assistant turn's markdown may be re-rendered, in
+     * milliseconds. 0 renders every delta, which is what this used to do.
+     *
+     * A markdown document is re-parsed and re-laid-out whole on every content
+     * change, and OpenTUI keeps the TRAILING block unstable while `streaming`
+     * is set (its own documented semantics — only the blocks before it are
+     * reused). A report that has not reached its first blank line yet IS that
+     * one trailing block, so every delta re-lays-out the whole answer, and in a
+     * sticky-bottom scrollbox every height change moves the screen. That is the
+     * flicker (BUGS.md #21).
+     *
+     * Sampling the text instead of following it is the cheap half of the fix:
+     * it does not stop the trailing block from being unstable, it stops us from
+     * looking at it thirty times a second. The alternative — splitting the text
+     * at the last closed block ourselves — is a markdown parser of our own, for
+     * a problem that is really about frequency.
+     *
+     * The last delta is never held back: `streaming` going false flushes
+     * immediately, so what settles on screen is always the whole turn.
+     */
+    stream_interval_ms: number
   }
   ui: {
     theme: "nulya-dark" | "nulya-light"
@@ -159,6 +181,7 @@ export const default_settings: Settings = {
     max_width: 100,
     ascii: false,
     history_window: 400,
+    stream_interval_ms: 100,
   },
   ui: { theme: "nulya-dark", motion: true },
   extensions: {
@@ -216,6 +239,9 @@ function mergeLayer(into: Settings, layer: unknown, source: string) {
     }
     if (typeof transcript["run_summary"] === "boolean") into.transcript.run_summary = transcript["run_summary"]
     if (typeof transcript["ascii"] === "boolean") into.transcript.ascii = transcript["ascii"]
+    if (typeof transcript["stream_interval_ms"] === "number" && transcript["stream_interval_ms"] >= 0) {
+      into.transcript.stream_interval_ms = Math.floor(transcript["stream_interval_ms"])
+    }
     if (typeof transcript["history_window"] === "number" && transcript["history_window"] >= 0) {
       into.transcript.history_window = Math.floor(transcript["history_window"])
     }
