@@ -20,6 +20,7 @@
 import { createSignal, type Accessor } from "solid-js"
 import { createSessionState, type SessionState } from "./session.ts"
 import { createAttachment, type AttachOptions, type Attachment } from "./attach.ts"
+import { reportFailure } from "./driver.ts"
 import { createTaskWatch, type TaskWatch } from "./tasks.ts"
 import { sessionPins, type ModelPick } from "./tui_state.ts"
 import { discardIfUntouched, readActiveContributions, readHeader, type Contributions } from "../nulya/files.ts"
@@ -274,7 +275,7 @@ async function hydrate(
   try {
     state.applyEvents(await sessionEvents(ws, id))
   } catch (error) {
-    state.setError(error instanceof Error ? error.message : String(error))
+    reportFailure(state, "tabs", error)
   }
 }
 

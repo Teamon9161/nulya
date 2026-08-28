@@ -26,7 +26,7 @@ import { createSignal, type Accessor } from "solid-js"
 import { wrapMidTask } from "../midtask.ts"
 import { sessionAppend, sessionCancel, sessionFollow, type FollowHandle, type ImageInput } from "../nulya/cli.ts"
 import { probeWriterLease } from "../nulya/files.ts"
-import { createDriver, type Driver, type DriverOptions, type DriverStatus } from "./driver.ts"
+import { createDriver, reportFailure, type Driver, type DriverOptions, type DriverStatus } from "./driver.ts"
 import type { Workspace } from "../nulya/bin.ts"
 import type { SessionState } from "./session.ts"
 
@@ -204,7 +204,7 @@ export function createAttachment(
     try {
       await sessionAppend(ws, id, wire, images)
     } catch (error) {
-      state.setError(error instanceof Error ? error.message : String(error))
+      reportFailure(state, "attach", error)
     } finally {
       setSending(false)
       setQueuedAt(null)
@@ -228,7 +228,7 @@ export function createAttachment(
     try {
       await sessionCancel(ws, id)
     } catch (error) {
-      state.setError(error instanceof Error ? error.message : String(error))
+      reportFailure(state, "attach", error)
     }
   }
 

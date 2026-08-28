@@ -3,7 +3,13 @@
  * result that a card turns into a chip. No renderer, no binary.
  */
 import { expect, test } from "bun:test"
-import { cancelMarkerOf, capabilitySummary, shellExitCode, splitShellOutput } from "../src/nulya/ledger.ts"
+import {
+  cancelMarkerOf,
+  capabilitySummary,
+  parseEventLine,
+  shellExitCode,
+  splitShellOutput,
+} from "../src/nulya/ledger.ts"
 
 test("a plain shell result splits into stdout, stderr and the exit code", () => {
   const split = splitShellOutput("hello\nworld\n--- stderr ---\nwarn: x\n[exit 3]")
@@ -63,4 +69,18 @@ test("a capability note's head line names its tools and skills", () => {
     ["Tools:", "- lint_zig — Lint Zig sources.", "  invoke: …", "", "Skills:", "- zig-style — House style."].join("\n"),
   )
   expect(summary).toEqual({ tools: ["lint_zig"], skills: ["zig-style"] })
+})
+
+test("a tool result recorded as a byte array is read back as the text it was", () => {
+  // Sessions written before BUGS.md #22: Zig's JSON encoder writes non-UTF-8
+  // bytes as an array of numbers, and every card here does string work.
+  const bytes = [...new TextEncoder().encode("head "), 0xb0, ...new TextEncoder().encode(" tail")]
+  const event = parseEventLine(
+    JSON.stringify({ seq: 3, kind: "tool_results", results: [{ call_id: "c1", ok: true, output: bytes }] }),
+  )
+  const output = (event as { results: { output: unknown }[] }).results[0]!.output
+  expect(typeof output).toBe("string")
+  expect(output as string).toContain("head ")
+  expect(output as string).toContain(" tail")
+  expect(cancelMarkerOf(output as string)).toBeNull()
 })

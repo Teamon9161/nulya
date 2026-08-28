@@ -153,6 +153,114 @@ test "durable ledger: an assistant-with-calls tail left on disk by a crash is re
     try std.testing.expectEqual(@as(usize, 4), c.l.len());
 }
 
+/// Non-UTF-8 bytes out of a real subprocess (BUGS.md #22). Both dialects write
+/// bytes rather than a string, so no encoding layer fixes them up on the way.
+fn nonUtf8Command(d: environment.Dialect) []const u8 {
+    return switch (d) {
+        .bash => "printf 'head \\260\\346 tail\\n'",
+        .powershell =>
+        \\$o = [Console]::OpenStandardOutput(); $b = [byte[]](104,101,97,100,32,176,230,32,116,97,105,108,10); $o.Write($b, 0, $b.Length); $o.Flush()
+        ,
+    };
+}
+
+test "durable ledger: a tool result carrying non-utf-8 bytes is still a JSON string on disk" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    var ws_real: [std.fs.max_path_bytes]u8 = undefined;
+    const ws_path = ws_real[0..try ws.realPath(io, &ws_real)];
+    try ws.createDirPath(io, sessions_dir_rel);
+
+    var lenv = try environment.LocalEnvironment.init(alloc, io, .{});
+    defer lenv.deinit();
+
+    var args = [_][]const u8{ try shellCallArgs(alloc, nonUtf8Command(lenv.dialect_val)), "" };
+    defer alloc.free(args[0]);
+    var model = SelfBuildModel{ .args_per_step = &args };
+    var s = try session.AgentSession.createDurable(alloc, .{
+        .model = .{ .ptr = &model, .vtable = &SelfBuildModel.vtable },
+        .step_ctx = .{
+            .tool_context = .{ .environment = lenv.environment(), .cwd = ws_path },
+            .scratch_dir = ".nulya/scratch",
+        },
+    }, .{ .workspace = ws, .session_path = session_file_rel, .session_id = "s" });
+    defer s.deinit();
+    try s.appendUser("go");
+    _ = try s.step();
+
+    const file = try readSessionFile(alloc, io, ws, "s");
+    defer alloc.free(file);
+
+    // Without the repair `std.json.Stringify` would have written the output as
+    // an array of numbers, which is not the shape DESIGN §3 describes.
+    try std.testing.expect(std.unicode.utf8ValidateSlice(file));
+
+    var lines = std.mem.splitScalar(u8, file, '\n');
+    var checked = false;
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, "\"kind\":\"tool_results\"") == null) continue;
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, line, .{});
+        defer parsed.deinit();
+        const results = parsed.value.object.get("results").?.array.items;
+        const output = results[0].object.get("output").?;
+        try std.testing.expect(output == .string);
+        try std.testing.expect(std.mem.indexOf(u8, output.string, "not valid UTF-8") != null);
+        try std.testing.expect(std.mem.indexOf(u8, output.string, "head ") != null);
+        try std.testing.expect(std.mem.indexOf(u8, output.string, " tail") != null);
+        // The originals are one path away (`emit` guarantee 3).
+        try std.testing.expect(results[0].object.get("spill_path").? == .string);
+        checked = true;
+    }
+    try std.testing.expect(checked);
+}
+
+test "session cli: append refuses a message that is not valid UTF-8 and records nothing" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(new.stdout);
+    try std.testing.expectEqual(@as(u8, 0), new.code);
+    const id = std.mem.trim(u8, new.stdout, " \r\n");
+
+    try ws.writeFile(io, .{ .sub_path = "note.txt", .data = "hello \xff\xfe\n" });
+    const said = try runCliStderr(alloc, io, ws, &.{ exe_abs, "session", "append", id, "--file", "note.txt" }, &.{});
+    defer alloc.free(said);
+    try std.testing.expect(std.mem.indexOf(u8, said, "not valid UTF-8") != null);
+
+    // Refused before delivery, so the inbox the next step boundary drains is
+    // still empty — the session cannot even be resumed into a broken state.
+    const inbox = try std.fmt.allocPrint(alloc, "{s}{c}{s}.inbox", .{ sessions_dir_rel, std.fs.path.sep, id });
+    defer alloc.free(inbox);
+    var delivered: usize = 0;
+    if (ws.openDir(io, inbox, .{ .iterate = true })) |opened| {
+        var dir = opened;
+        defer dir.close(io);
+        var it = dir.iterate();
+        while (try it.next(io)) |_| delivered += 1;
+    } else |err| switch (err) {
+        // Never created, because nothing was ever deposited into it.
+        error.FileNotFound => {},
+        else => return err,
+    }
+    try std.testing.expectEqual(@as(usize, 0), delivered);
+}
+
 test "durable ledger: a capability_note appended by a separate CLI process is read on the next step" {
     const alloc = std.testing.allocator;
     const io = std.testing.io; // EndTurnModel issues no tool calls, so no async shell.

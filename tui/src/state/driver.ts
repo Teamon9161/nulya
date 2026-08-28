@@ -14,6 +14,7 @@
  * pick it up — and neither ever steps on an empty inbox.
  */
 import { createSignal, type Accessor } from "solid-js"
+import { noteCrash } from "../crashlog.ts"
 import { wrapMidTask } from "../midtask.ts"
 import {
   sessionAppend,
@@ -138,6 +139,17 @@ export interface DriverOptions {
    * it.
    */
   onLine?: (line: StepLine, session: string) => void
+}
+
+/**
+ * A driver-side failure: the message on screen, the stack in the crash log.
+ *
+ * The message alone is what made BUGS.md #22 hard to read — "output.startsWith
+ * is not a function" says nothing about where it came from.
+ */
+export function reportFailure(state: SessionState, source: string, error: unknown): void {
+  noteCrash(source, error)
+  state.setError(error instanceof Error ? error.message : String(error))
 }
 
 /** The kernel's refusal to hand over the writer lease, on the `--stream` wire. */
@@ -267,7 +279,7 @@ export function createDriver(
         if (pendingAfter === 0 || pendingAfter >= pendingBefore) break
       }
     } catch (error) {
-      state.setError(error instanceof Error ? error.message : String(error))
+      reportFailure(state, "driver", error)
     } finally {
       driving = false
       noted = false
@@ -302,7 +314,7 @@ export function createDriver(
     try {
       await sessionAppend(ws, id, wire, images)
     } catch (error) {
-      state.setError(error instanceof Error ? error.message : String(error))
+      reportFailure(state, "driver", error)
       if (!running) setStatus("idle")
       return
     }
@@ -329,7 +341,7 @@ export function createDriver(
     try {
       await sessionCancel(ws, id)
     } catch (error) {
-      state.setError(error instanceof Error ? error.message : String(error))
+      reportFailure(state, "driver", error)
     }
     // The kernel consumes the marker at the step boundary; `drive()` returns
     // to idle when the run ends, so no status is forced here.

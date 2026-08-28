@@ -7,6 +7,9 @@
  */
 import { expect, test } from "bun:test"
 import { foldsIntoRun, groupRuns, runSummary, type RunCandidate } from "../src/render/runs.ts"
+import { transcriptRows } from "../src/ui/Transcript.tsx"
+import { createStyle } from "../src/render/theme.ts"
+import { default_settings } from "../src/state/settings.ts"
 import type { ToolItem, TranscriptItem } from "../src/state/session.ts"
 
 function call(over: Partial<ToolItem> & { key: string; tool: string }): ToolItem {
@@ -110,4 +113,16 @@ test("a run says which tools it was, in the order they first appeared", () => {
     call({ key: "5", tool: "ext:std/grep" }),
   ]
   expect(runSummary(items)).toBe("read ×3 · shell · grep")
+})
+
+test("a call the grouping cannot read costs the run summary, not the screen", () => {
+  // The projection runs above the per-row ErrorBoundary, so it has to be total
+  // (BUGS.md #22): a ledger from before the kernel fix holds an `output` that
+  // is not a string, and every fold rule does string work on it.
+  const items = [
+    call({ key: "a", tool: "shell", args: '{"command":"ls"}', output: "fine\n[exit 0]" }),
+    call({ key: "b", tool: "shell", args: '{"command":"ls"}', output: [1, 2, 3] as unknown as string }),
+  ] as TranscriptItem[]
+  const rows = transcriptRows(items, createStyle(default_settings, {}), [])
+  expect(rows.map((row) => row.key)).toEqual(["a", "b"])
 })

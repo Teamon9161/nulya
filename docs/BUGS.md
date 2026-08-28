@@ -157,3 +157,26 @@ ai回复:
 **顺序是踩出来的**：第一版在 `streaming` 转 false 的同一次更新里 flush 最终文本，屏幕停在两个 delta 之前——探针查明 **OpenTUI 一旦 `streaming` 变 false 就不再接受 content 更新**（既有行为，把采样关掉也一样）。所以 `sampled` 返回 `{text, done}`，`done` 用 `queueMicrotask` 故意晚一次更新，卡片的 `streaming` prop 从 `!done()` 来：**先把内容交过去，下一拍再收尾**。回归测试 `test/sampled.test.tsx` 四条，其中"收尾当场 flush"那条正是抓到这个顺序问题的。
 
 **还没目验**：机制与顺序由测试和探针钉住了，"看起来还闪不闪"要在真终端上看。`stream_interval_ms` 就是留给这次目验的旋钮——调大更稳，调 0 回到从前。
+22. nulya tui 又卡住了, 之前应该会输出 crash 报告了
+
+**已修（内核 + TUI；根因在内核）。** 一条工具输出里有**非 UTF-8 字节**，`std.json.Stringify` 就把它写成**数字数组**而不是字符串——`"output":[45,45,…]`——于是 session 文件不再是 DESIGN §3 的形状，而 TS 侧把 `output` 当字符串用的第一处（`render/runs.ts` 的 `foldsIntoRun` → `cancelMarkerOf`）当场 `output.startsWith is not a function`。
+
+**触发它的字节**：模型在探 `shell` 到底跑的是哪个解释器，命令里带了一句 `cmd`，而 `cmd.exe` 的 banner 在中文 Windows 上是 CP936——`Microsoft Windows [\xb0\xe6\xb1\xbe …]`。同一个形状还有别的入口（`grep` 撞上二进制文件、后台任务 log 从字符中间截尾）。
+
+**为什么是卡住而不是一行「card failed to draw」**：抛点在 `ui/Transcript.tsx` 的 `transcriptRows`，它在 **per-row `ErrorBoundary` 的上面**（那道 fence 只包一张卡）。于是 `state.applyEvent` 触发的重算一路冒到 driver 的 `for await`，driver `step.kill()` + `setError`——ledger 停在 seq 13，`rows()` 停在上一次好的值（截图里那三张卡还是 `(…)` 的未完成形态）。
+
+**为什么没有 crash 报告**：`crashlog.ts` 只挂 `uncaughtException` / `unhandledRejection` / `render:error` 三个钩子，而这个异常**被 driver 自己 catch 了**，一个都没触发。屏幕上有消息，日志里没有栈——17 ③ 说的「子树死亡的哨兵是 crash log 自己」在这条路上是空的。
+
+**四处修法，从根到叶**：
+
+**① 内核（根因）**：`emit.zig` 多一条 guarantee——**返回的文本一定是合法 UTF-8**。新的 `emit.utf8Lossy` 在裁剪之前把非法字节逐个换成 U+FFFD，正文前面加一行说明换了几个，并且**当作一次 truncation**，所以原始字节照常落盘、footer 指得到。同一条纪律给 `task_finished` 的正文（`cli/task.zig`，`readLogTail` 本来就可能从字符中间开始读）；`presentation` 那一列与 `session append` 的正文则是**拒绝**而不是修复——工具输出已经发生了、只能修，而 presentation 是包自己的结构化主张、user turn 是人自己的话，两者拼不出来就等于没有。
+
+**② TUI 的 wire 边界**：`parseEventLine` 不再无条件 `as LedgerEvent`——已知的字符串字段该是字符串（数字数组按 UTF-8 解回来）。这是「未知 **kind** 必须活下来」那条规矩的对偶：**已知字段的未知类型永远不该进渲染**。修了内核之后仍然要做，因为这之前写下的 session 还在盘上、还会被重放。
+
+**③ 投影层要是全函数**：`transcriptRows` 包一层 try/catch，兜到「不分组的普通行」，让每张卡自己的 fence 去处理——一张读不懂的卡该赔掉一个 run summary，不是整块屏幕。
+
+**④ 补上那条空掉的哨兵**：`crashlog.ts` 从 `ui/` 挪到 `src/`（它是进程级设施、和 UI 无关，而 `state/` 从不 import `ui/`），多一个模块级 `noteCrash`；driver / attach / tabs 六处 `setError` 收成一个 `reportFailure(state, source, error)`——**消息照旧上屏，栈进 `.nulya/tui-crash.log`**。
+
+**测试**：`emit` 两条（合法输入零拷贝 / 修复+计数）+ e2e 一条（真子进程吐非 UTF-8 字节，断言 session 文件整体合法 UTF-8 且那条 `output` 是 JSON 字符串）+ TUI 两条（byte array 读回文本 / 读不懂的 call 只赔掉 run summary）；三条都**验证过在旧代码上会红**。
+
+**那一场**：`tui/.nulya/sessions/s-1787918696336-f983.jsonl` 的第 13 条就地修好了（原文件留 `.bak`），可以直接续。

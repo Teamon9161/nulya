@@ -24,7 +24,7 @@ import { WithPicker, type Wearable } from "./WithPicker.tsx"
 import { StatusBar } from "./StatusBar.tsx"
 import { pickTip } from "./Welcome.tsx"
 import { WorkingStatus, activityOf, type SyncProgress } from "./WorkingStatus.tsx"
-import { installCrashLog } from "./crashlog.ts"
+import { installCrashLog } from "../crashlog.ts"
 import { QueueLane } from "./QueueLane.tsx"
 import { parseMidTask } from "../midtask.ts"
 import { TabBar } from "./TabBar.tsx"
@@ -1355,7 +1355,7 @@ export function App(props: AppProps) {
   })
 
   // Every error OpenTUI swallows lands in `.nulya/tui-crash.log`
-  // (`ui/crashlog.ts`, BUGS.md #17) — the renderer registers process-level
+  // (`crashlog.ts`, BUGS.md #17) — the renderer registers process-level
   // handlers that reduce a fatal error to an invisible console line, and the
   // log is what turned the third freeze from a mystery into a stack trace.
   {

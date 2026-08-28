@@ -14,6 +14,9 @@
 //!                          contains the spill path
 //!   4. determinism       — spill filename derives from `seq`, never a runtime
 //!                          counter, so a replayed ledger reproduces byte-for-byte
+//!   5. valid UTF-8       — the returned text is valid UTF-8 whatever the tool
+//!                          wrote, because the ledger's strings have to be
+//!                          (`utf8Lossy`)
 
 const std = @import("std");
 
@@ -61,9 +64,16 @@ pub fn emit(
 ) !Emitted {
     var truncated = false;
 
+    // Replacing bytes is a loss like a clip, so it forces the spill too.
+    const clean = try utf8Lossy(alloc, raw);
+    defer if (clean) |c| alloc.free(c.text);
+    if (clean != null) truncated = true;
+    const body = if (clean) |c| c.text else raw;
+
     var clipped: std.ArrayList(u8) = .empty;
     defer clipped.deinit(alloc);
-    try clipLongLines(alloc, raw, budget.max_line_bytes, &clipped, &truncated);
+    if (clean) |c| try clipped.print(alloc, invalid_utf8_note, .{c.replaced});
+    try clipLongLines(alloc, body, budget.max_line_bytes, &clipped, &truncated);
 
     if (clipped.items.len > budget.max_bytes) truncated = true;
 
@@ -98,6 +108,50 @@ pub fn emit(
         .text = try final_text.toOwnedSlice(alloc),
         .spill_path = spill_path,
     };
+}
+
+/// A header, not a footer: survives head+tail elision, stays clear of `[exit N]`.
+const invalid_utf8_note = "[note: {d} byte(s) of this output were not valid UTF-8 and were replaced with \u{FFFD}]\n";
+
+pub const Lossy = struct {
+    /// Owned, valid UTF-8.
+    text: []u8,
+    /// Input bytes replaced, one U+FFFD each.
+    replaced: usize,
+};
+
+/// `raw` as valid UTF-8, or null when it already is (no copy). Caller owns `text`.
+///
+/// Why it has to happen: `std.json.Stringify` writes a `[]const u8` that is not
+/// valid UTF-8 as an ARRAY OF NUMBERS, so one stray byte from a subprocess
+/// changes the shape of the session file and of every request built from it
+/// (BUGS.md #22).
+pub fn utf8Lossy(alloc: std.mem.Allocator, raw: []const u8) !?Lossy {
+    if (std.unicode.utf8ValidateSlice(raw)) return null;
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    try out.ensureTotalCapacity(alloc, raw.len);
+
+    var replaced: usize = 0;
+    var i: usize = 0;
+    while (i < raw.len) {
+        const good: usize = blk: {
+            const len = std.unicode.utf8ByteSequenceLength(raw[i]) catch break :blk 0;
+            if (i + len > raw.len) break :blk 0;
+            _ = std.unicode.utf8Decode(raw[i..][0..len]) catch break :blk 0;
+            break :blk len;
+        };
+        if (good > 0) {
+            try out.appendSlice(alloc, raw[i..][0..good]);
+            i += good;
+            continue;
+        }
+        try out.appendSlice(alloc, "\u{FFFD}");
+        replaced += 1;
+        i += 1;
+    }
+    return .{ .text = try out.toOwnedSlice(alloc), .replaced = replaced };
 }
 
 /// The head+tail discipline on its own, without the spill: `body` trimmed to
@@ -385,6 +439,45 @@ test "emit does not split utf-8 while clipping a line" {
     try std.testing.expect(std.unicode.utf8ValidateSlice(out.text));
     try std.testing.expect(std.mem.startsWith(u8, out.text, "你"));
     if (out.spill_path) |p| std.Io.Dir.cwd().deleteFile(io, p) catch {};
+}
+
+test "utf8Lossy leaves valid input alone and repairs the rest byte for byte" {
+    const alloc = std.testing.allocator;
+    try std.testing.expect(try utf8Lossy(alloc, "plain ascii and 你好") == null);
+
+    // The shape that started BUGS.md #22: a CP936 console banner.
+    const gbk = "Microsoft Windows [\xb0\xe6\xb1\xbe 10.0.26200]\n";
+    const fixed = (try utf8Lossy(alloc, gbk)).?;
+    defer alloc.free(fixed.text);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(fixed.text));
+    // GBK and UTF-8 overlap by accident, so the count is not the byte count.
+    try std.testing.expect(fixed.replaced > 0);
+    try std.testing.expect(std.mem.startsWith(u8, fixed.text, "Microsoft Windows ["));
+    try std.testing.expect(std.mem.endsWith(u8, fixed.text, " 10.0.26200]\n"));
+
+    // A character cut in half: the valid prefix survives, the orphans count.
+    const torn = (try utf8Lossy(alloc, "ok \xe4\xbd")).?;
+    defer alloc.free(torn.text);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(torn.text));
+    try std.testing.expectEqual(@as(usize, 2), torn.replaced);
+}
+
+test "emit repairs invalid utf-8, says so, and keeps the raw bytes on disk" {
+    const alloc = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const raw = "before \xb0\xe6 after\n[exit 0]";
+    const out = try emit(alloc, io, raw, "shell", 91, 0, ".", .{});
+    defer out.deinit(alloc);
+
+    try std.testing.expect(std.unicode.utf8ValidateSlice(out.text));
+    try std.testing.expect(std.mem.indexOf(u8, out.text, "not valid UTF-8") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.text, "[exit 0]\n[full output: ") != null);
+
+    const path = out.spill_path.?;
+    const spilled = try std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .unlimited);
+    defer alloc.free(spilled);
+    try std.testing.expectEqualStrings(raw, spilled);
+    std.Io.Dir.cwd().deleteFile(io, path) catch {};
 }
 
 test "step output limiter clips an oversized aggregate result and spills it" {

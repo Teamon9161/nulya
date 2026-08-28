@@ -719,9 +719,14 @@ fn reportText(alloc: std.mem.Allocator, io: std.Io, req: ReportRequest) ![]u8 {
 
     const raw = try readLogTail(alloc, io, req.log_path);
     defer alloc.free(raw);
+    // A `task_finished` event owes the ledger the same UTF-8 a tool result does
+    // (BUGS.md #22) — and `readLogTail` starts at an offset that can fall inside
+    // a character. No note or spill: the report names the full log below.
+    const clean = try emit.utf8Lossy(alloc, raw);
+    defer if (clean) |c| alloc.free(c.text);
     // Already spilled: `output.log` is the complete bytes, so this needs the
     // head/tail budget WITHOUT a second copy on disk (`emit.headTail`).
-    const tail = try emit.headTail(alloc, raw, .{});
+    const tail = try emit.headTail(alloc, if (clean) |c| c.text else raw, .{});
     defer alloc.free(tail);
 
     var out: std.ArrayList(u8) = .empty;

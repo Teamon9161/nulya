@@ -2457,3 +2457,15 @@ tab 条的 `✕`/`+`/`▎`；`stripPlan` 的**不变量**"画出来的一切都�
 **回归测试 `test/sampled.test.tsx`（4 条）**：一个窗口里的多个 delta 只换来一次更新、且窗口结束时显示的是**最后**那个（显示开窗那个值的采样器会永远晚一个窗口，比它要修的 bug 更糟）· 收尾当场 flush（间隔设成 60 秒，没有这条断言最后一段会在屏幕外待一分钟——**这条正是抓到上面那个顺序问题的**）· 散文不被采样 · `0` 跟每个 delta。**不钉**间隔本身（那是设定）与窗口内任一时刻的画面（那是口味）。
 
 **没有当场目验。** 机制、上游语义与顺序都由测试与探针钉住了，但"看起来还闪不闪"要在真终端上看；`stream_interval_ms` 就是留给这次目验的旋钮（调大更稳、调 0 回到从前）。
+
+### T81 · 一条非 UTF-8 的工具输出冻住 transcript（BUGS.md #22，2026-08-28）
+
+**根因在内核**（`emit.utf8Lossy`，见 DESIGN §4 与 BUGS #22）：Zig 的 JSON 编码器把不合法的 `[]const u8` 写成数字数组，于是 `"output":[45,45,…]` 进了 session 文件，TS 侧第一处字符串操作当场炸。这里记 TUI 那三处。
+
+**① wire 边界**：`nulya/ledger.ts` 的 `parseEventLine` 对已知的字符串字段做一次归一（数字数组按 UTF-8 解回来）。「未知 kind 必须活下来」的对偶——**已知字段的未知类型不该进渲染**；内核修好之后仍然要做，因为这之前写下的 session 还在盘上、还会被重放。
+
+**② 投影层全函数**：`transcriptRows` 在 per-row `ErrorBoundary` **上面**，抛出去的是整块屏幕而不是一张卡（这次就是这么冻的）。包一层 try/catch 兜到不分组的普通行，让每张卡自己的 fence 去处理——读不懂的一张卡赔掉一个 run summary，不赔掉屏幕。
+
+**③ 被 catch 的错误也要留栈**：`ui/crashlog.ts` → `src/crashlog.ts`（进程级设施，而 `state/` 从不 import `ui/`），多一个模块级 `noteCrash`；driver / attach / tabs 六处 `setError` 收成 `reportFailure(state, source, error)`。三个 process 钩子对**被捕获**的致命错误是聋的——屏幕上有消息、日志里没有栈，正是这次难读的原因。
+
+**测试**（+2）：byte array 读回文本（`test/ledger.test.ts`）· 读不懂的 call 只赔掉 run summary（`test/runs.test.ts`），都验证过在旧代码上会红。

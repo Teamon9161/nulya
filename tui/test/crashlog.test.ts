@@ -1,12 +1,12 @@
 /**
- * `ui/crashlog.ts`: what OpenTUI swallows, this writes down — once per
+ * `crashlog.ts`: what OpenTUI swallows, this writes down — once per
  * distinct error, not once per timer tick that re-throws it.
  */
 import { expect, test } from "bun:test"
 import { mkdtempSync, readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { createCrashLog, formatCrash } from "../src/ui/crashlog.ts"
+import { createCrashLog, formatCrash, installCrashLog, noteCrash } from "../src/crashlog.ts"
 
 test("an entry carries the moment, the hook and the stack", () => {
   const line = formatCrash(new Date("2026-08-28T07:00:00Z"), "uncaughtException", new Error("boom"))
@@ -35,4 +35,20 @@ test("a repeating error collapses into a count", () => {
 test("a log that cannot be written stays silent", () => {
   const sink = createCrashLog("/proc/definitely/not/writable/tui-crash.log")
   expect(() => sink.note("uncaughtException", new Error("boom"))).not.toThrow()
+})
+
+test("noteCrash reaches the installed log, and is a no-op before and after", () => {
+  // The path a CAUGHT error takes (BUGS.md #22): the driver turns one into a red
+  // notice, and without this it left no stack anywhere.
+  expect(() => noteCrash("driver", new Error("nobody listening"))).not.toThrow()
+
+  const dir = mkdtempSync(join(tmpdir(), "crashlog-"))
+  const renderer = { on() {}, off() {} }
+  const sink = installCrashLog(dir, renderer)
+  noteCrash("driver", new Error("caught by the driver"))
+  expect(readFileSync(join(dir, ".nulya", "tui-crash.log"), "utf8")).toContain("caught by the driver")
+
+  sink.dispose()
+  expect(() => noteCrash("driver", new Error("after dispose"))).not.toThrow()
+  expect(readFileSync(join(dir, ".nulya", "tui-crash.log"), "utf8")).not.toContain("after dispose")
 })

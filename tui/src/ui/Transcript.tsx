@@ -6,6 +6,7 @@ import { describeTool } from "../render/registry.ts"
 import { foldsIntoRun, groupRuns, type TranscriptRow } from "../render/runs.ts"
 import { usePlugins } from "../plugins/context.ts"
 import { CompositionCard } from "../render/cards/CompositionCard.tsx"
+import { noteCrash } from "../crashlog.ts"
 import { ErrorNotice } from "../render/cards/ErrorNotice.tsx"
 import { Welcome, type NextSession } from "./Welcome.tsx"
 import { useStyle, type Style } from "../render/theme.ts"
@@ -103,7 +104,16 @@ export function transcriptRows(
       drawnByPlugin: drawnByPlugin?.(item.tool) ?? false,
     })
   }
-  return groupRuns(shown, folds, style.settings.transcript.run_summary)
+  // This runs ABOVE the per-row ErrorBoundary, so a throw here takes the whole
+  // screen rather than one card — that is how a single malformed tool result
+  // froze the transcript mid-turn (BUGS.md #22). Degrade to ungrouped rows and
+  // let each card's own fence deal with it.
+  try {
+    return groupRuns(shown, folds, style.settings.transcript.run_summary)
+  } catch (error) {
+    noteCrash("transcriptRows", error)
+    return shown.map((item) => ({ kind: "item" as const, key: item.key, item }))
+  }
 }
 
 /**

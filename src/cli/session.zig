@@ -694,6 +694,13 @@ fn sessionAppend(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
         return 1;
     };
     defer alloc.free(text);
+    // The same boundary `--prompt` draws above, for the same reason (BUGS.md
+    // #22). A user turn is the person's own words, so it is refused rather than
+    // repaired the way a tool's output is.
+    if (!std.unicode.utf8ValidateSlice(text)) {
+        try printErr(io, "message is not valid UTF-8\n");
+        return 1;
+    }
 
     const spath = try launch.sessionPath(alloc, id);
     defer alloc.free(spath);

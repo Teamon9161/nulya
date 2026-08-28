@@ -618,7 +618,10 @@ fn readPresentationFile(alloc: std.mem.Allocator, io: std.Io, path: ?[]const u8)
     const bytes = std.Io.Dir.cwd().readFileAlloc(io, p, alloc, .limited(max_presentation_bytes)) catch return null;
     errdefer alloc.free(bytes);
     const trimmed = std.mem.trim(u8, bytes, " \t\r\n");
-    if (trimmed.len == 0) {
+    // Stored in the ledger verbatim, so it owes the file valid UTF-8 (BUGS.md
+    // #22). Refused rather than repaired: unlike tool output, this is the
+    // package's own claim, and one it cannot spell is not one.
+    if (trimmed.len == 0 or !std.unicode.utf8ValidateSlice(trimmed)) {
         alloc.free(bytes);
         return null;
     }

@@ -75,6 +75,21 @@ export function createCrashLog(file: string, now: () => Date = () => new Date())
   }
 }
 
+let current: CrashSink | null = null
+
+/**
+ * Write an entry to whatever crash log this process installed, if any.
+ *
+ * For the errors that never reach a process hook because something CAUGHT them
+ * — the driver turns one into a red notice with no stack, and that is what made
+ * BUGS.md #22 a mystery. Module-level because the sink belongs to the process,
+ * not to the App: threading it into `state/` would invert the layering for a
+ * log line.
+ */
+export function noteCrash(source: string, error: unknown): void {
+  current?.note(source, error)
+}
+
 /**
  * Hook the three places OpenTUI makes errors disappear. Returns the sink so
  * the caller can add its own notes (the reactive-heartbeat verdict does) and
@@ -95,13 +110,16 @@ export function installCrashLog(
   process.on("uncaughtException", onException)
   process.on("unhandledRejection", onRejection)
   renderer.on("render:error", onRenderError)
-  return {
+  const installed: CrashSink = {
     note: sink.note,
     count: sink.count,
     dispose() {
       process.off("uncaughtException", onException)
       process.off("unhandledRejection", onRejection)
       renderer.off?.("render:error", onRenderError)
+      if (current === installed) current = null
     },
   }
+  current = installed
+  return installed
 }

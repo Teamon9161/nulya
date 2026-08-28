@@ -114,6 +114,36 @@ export type LedgerEvent =
    */
   | { seq: number; origin?: string; kind: string; [field: string]: unknown }
 
+/**
+ * A field the kernel promises is a string, turned into one whatever arrived.
+ *
+ * Sessions written before BUGS.md #22 carry `"output":[45,45,…]` — Zig's JSON
+ * encoder writes non-UTF-8 bytes as an array — and replaying one used to freeze
+ * the transcript. The counterpart of the unknown-KIND rule above: an unknown
+ * shape survives, a known field in an unknown type never reaches the render.
+ */
+function asText(value: unknown): string {
+  if (typeof value === "string") return value
+  if (value === undefined || value === null) return ""
+  if (Array.isArray(value) && value.every((byte) => typeof byte === "number")) {
+    return new TextDecoder().decode(Uint8Array.from(value as number[]))
+  }
+  return String(value)
+}
+
+/** Every known string field of one event, made a string. Mutates `record`. */
+function repairText(record: Record<string, unknown>): void {
+  if ("text" in record) record["text"] = asText(record["text"])
+  const results = record["results"]
+  if (!Array.isArray(results)) return
+  for (const result of results) {
+    if (result && typeof result === "object") {
+      const entry = result as Record<string, unknown>
+      entry["output"] = asText(entry["output"])
+    }
+  }
+}
+
 export function parseEventLine(line: string): LedgerEvent | null {
   const trimmed = line.trim()
   if (trimmed.length === 0) return null
@@ -128,6 +158,7 @@ export function parseEventLine(line: string): LedgerEvent | null {
   if (typeof record["kind"] !== "string") return null
   if (record["kind"] === "header") return null
   if (typeof record["seq"] !== "number") return null
+  repairText(record)
   return record as unknown as LedgerEvent
 }
 
