@@ -308,8 +308,10 @@ test("/resume opens a past session by id; /clear steps away without touching it"
     await setup.mockInput.typeText(`/resume ${id}`)
     setup.mockInput.pressEnter()
     // Named, it is the same action `Enter` in that list performs — which since
-    // T70 is "go there in this tab", not "open a second one".
-    await until(() => setup.captureCharFrame().includes(`switched to ${id}`), 20_000)
+    // T70 is "go there in this tab", not "open a second one". The action does
+    // not put a full-width reading notice below the composer.
+    await settle(setup, 3)
+    expect(setup.captureCharFrame()).not.toContain(`switched to ${id}`)
 
     await setup.mockInput.typeText("/clear")
     setup.mockInput.pressEnter()

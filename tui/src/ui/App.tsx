@@ -1642,7 +1642,6 @@ export function App(props: AppProps) {
     tabs.replace(tabs.active().key, id, { ws: where })
     closeOverlay()
     void enterWorkspace(where)
-    setNotice(`switched to ${id}`)
   }
 
   /**

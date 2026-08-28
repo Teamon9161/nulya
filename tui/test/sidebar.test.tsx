@@ -473,11 +473,15 @@ test("one click in the rail goes to that session in this tab, and the strip does
     expect(at).toBeGreaterThanOrEqual(0)
 
     await setup.mockMouse.click(4, at)
-    await until(() => setup.captureCharFrame().includes(`switched to ${other}`), 30_000)
+    const switched = await settle(setup, 3)
+    // Selecting a session is the action itself; it does not need a full-width
+    // reading notice underneath the composer.
+    expect(switched).not.toContain(`switched to ${other}`)
+    expect(switched).toContain(style.glyphs.sidebar)
     // One tab still: a switch replaces what was in front rather than adding to
     // it, so nothing has to be closed afterwards.
-    expect(await settle(setup, 3)).not.toContain("(observer)")
-    expect((await settle(setup, 2)).split("\n")[0]).not.toContain(style.glyphs.closeTab)
+    expect(switched).not.toContain("(observer)")
+    expect(switched.split("\n")[0]).not.toContain(style.glyphs.closeTab)
   } finally {
     setup.renderer.destroy()
   }
@@ -495,9 +499,17 @@ test("two clicks in the rail give that session a tab of its own", async () => {
     await setup.mockMouse.click(4, at)
     await until(() => setup.captureCharFrame().includes(`opened ${other}`), 30_000)
     // …and NOW there are two, which is what the strip appearing means.
-    const strip = (await settle(setup, 3)).split("\n")[0]!
+    const opened = await settle(setup, 3)
+    const strip = opened.split("\n")[0]!
     expect(strip).toContain(style.glyphs.closeTab)
     expect(strip).toContain(style.glyphs.newTab)
+    // A different notice may still be useful, but it must not remove the only
+    // visible way to close the rail.
+    const statusAt = opened.split("\n").findIndex((row) => row.includes(`opened ${other}`))
+    expect(statusAt).toBeGreaterThanOrEqual(0)
+    expect(opened.split("\n")[statusAt]).toContain(style.glyphs.sidebar)
+    await setup.mockMouse.click(1, statusAt)
+    await until(() => !railUp(setup.captureCharFrame()), 30_000)
   } finally {
     setup.renderer.destroy()
   }

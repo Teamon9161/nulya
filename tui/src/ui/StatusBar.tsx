@@ -154,6 +154,22 @@ export function StatusBar(props: {
         ? `${style.glyphs.sidebar} sessions  `
         : `${style.glyphs.sidebar} `
 
+  /** The sidebar control stays discoverable while a transient notice is shown. */
+  const SidebarHandle = () =>
+    sidebarChip().length > 0 ? (
+      <box
+        flexShrink={0}
+        height={1}
+        backgroundColor={overSidebar() ? style.theme.hover : undefined}
+        onMouseDown={sidebarClick.onMouseDown}
+        onMouseUp={sidebarClick.onMouseUp}
+        onMouseOver={() => setOverSidebar(true)}
+        onMouseOut={() => setOverSidebar(false)}
+      >
+        <text fg={props.sidebarOpen ? style.theme.accent.evolve : style.theme.faint}>{sidebarChip()}</text>
+      </box>
+    ) : null
+
   /**
    * How full the window is, after the last step. Nothing acts on this — nulya
    * never compacts behind the user's back — but a number that only appears once
@@ -256,49 +272,34 @@ export function StatusBar(props: {
   })
 
   /**
-   * A notice takes the whole line for as long as it is up (T35).
+   * A notice replaces the ordinary status contents for as long as it is up
+   * (T35), but never the sidebar handle: that control must remain available to
+   * close the rail while any transient feedback is visible.
    *
    * It used to be one more segment competing for the leftovers, which put the
    * news of the moment — `Ctrl+C again to quit` — in the last few columns of a
    * row that already carried the model, the cost, the mode and the step count,
    * and let it sit there afterwards as if it were still true. News is not a
-   * chip: it covers the line, and `App` takes it away again on its own clock.
+   * chip: it covers the ordinary line, and `App` takes it away again on its own
+   * clock.
    */
-  const noticeText = () => (props.hint === undefined ? null : fit(props.hint, Math.max(0, screen().width - 2)))
+  const noticeText = () =>
+    props.hint === undefined
+      ? null
+      : fit(props.hint, Math.max(0, screen().width - 2 - displayWidth(sidebarChip())))
 
   return (
     <box flexDirection="row" width="100%" height={1} flexShrink={0} paddingLeft={1} paddingRight={1}>
       {noticeText() !== null ? (
-        <text fg={style.theme.fg}>{noticeText()}</text>
+        <box flexDirection="row" width="100%" height={1}>
+          <SidebarHandle />
+          <text flexGrow={1} flexShrink={1} fg={style.theme.fg}>
+            {noticeText()}
+          </text>
+        </box>
       ) : (
         <box flexDirection="row" width="100%" height={1}>
-          {/* The sessions sidebar's handle, in this line's own two-column
-              gutter — the left edge of the screen, which is where the pane it
-              opens appears (T69). Lit while the sidebar is up and furniture
-              while it is not; the shape never changes, because the sidebar
-              being on screen is already the state and a glyph that repeated it
-              would be a second answer to a question the screen has answered at
-              full size (§6.1 rule 1's shape rule is about facts that would
-              OTHERWISE be invisible).
-
-              What DOES change with width is whether it says its own name
-              (T70): a glyph nobody has met, at the one edge of the line the
-              eye does not sweep, is a control that is never found. Under the
-              pointer it takes `hover`, like every other clickable thing in
-              this front end. */}
-          {sidebarChip().length > 0 ? (
-            <box
-              flexShrink={0}
-              height={1}
-              backgroundColor={overSidebar() ? style.theme.hover : undefined}
-              onMouseDown={sidebarClick.onMouseDown}
-              onMouseUp={sidebarClick.onMouseUp}
-              onMouseOver={() => setOverSidebar(true)}
-              onMouseOut={() => setOverSidebar(false)}
-            >
-              <text fg={props.sidebarOpen ? style.theme.accent.evolve : style.theme.faint}>{sidebarChip()}</text>
-            </box>
-          ) : null}
+          <SidebarHandle />
           {/* The permission mode leads the line, and the click opens its picker
               — the mouse half of `/mode`. `unsafe` is warn-coloured: it is the
               stance where tool calls run without anybody looking, and that
