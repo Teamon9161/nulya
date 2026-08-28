@@ -20,7 +20,15 @@ const store = @import("extension/store.zig");
 
 /// The most kernel steps one `run` may take, whatever the caller asks for
 /// (DESIGN §4, §14). A driver can lower the budget per call, never raise it.
-pub const max_steps_ceiling: usize = 50;
+///
+/// A RUNAWAY GUARD, NOT A BUDGET. It exists so a loop that has stopped making
+/// progress cannot bill without end, and it is set high enough that honest work
+/// never reaches it — because a ceiling the model can feel is a ceiling that
+/// distorts the work. At 50 it was felt: a single ordinary editing pass spends
+/// one step per tool batch, and a session that made fifty of them had to be
+/// resumed by hand twice in the middle, which teaches the model nothing except
+/// that it is running out of room.
+pub const max_steps_ceiling: usize = 500;
 
 /// Consecutive RETRIABLE `max_tokens` steps before `run` stops on its own. Only a
 /// truncation that carried tool calls is retriable: it ends in a marker batch, so

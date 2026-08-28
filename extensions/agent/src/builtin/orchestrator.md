@@ -2,7 +2,6 @@
 name: orchestrator
 description: Coordinates a caller-defined pipeline needing several distinct roles — plan-gated implementation, debate, verify loops, multiple workers. For one bounded task delegate `general` directly instead
 agents: [explore, plan, general]
-max_steps: 30
 max_exchanges: 4
 ---
 # nulya orchestrator sub-agent

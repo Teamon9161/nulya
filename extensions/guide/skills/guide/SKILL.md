@@ -265,7 +265,10 @@ Store and scope:
   `.nulya/agents/<name>.md` (or the same under this machine's nulya home). Its
   front matter is a set of `session new` arguments — `permissions`, `pins`,
   `model: <profile>[/<id>]`, `max_steps`, `max_exchanges`, `agents` — and its
-  body is the system prompt. `runner:` says which harness holds the
+  body is the system prompt. Leave `max_steps` out unless you mean it: without
+  it a sub-agent runs on the kernel's own runaway guard, which is what the
+  bundled personas do, and a small one cuts the investigation off in the middle
+  where everything it found is in a session the caller never reads. `runner:` says which harness holds the
   conversation: `nulya` (the default, a session of its own), `codex` (a Codex
   thread over `codex app-server`), `claude` (a Claude Code session over
   `claude -p`'s stream-json stdio) or `pi` (a pi session over `pi --mode rpc`).

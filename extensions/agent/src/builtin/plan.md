@@ -2,7 +2,6 @@
 name: plan
 description: Implementation-plan draft the parent reviews and submits
 pins: [ext:std/read, ext:std/grep, ext:std/glob]
-max_steps: 20
 ---
 # nulya plan sub-agent
 

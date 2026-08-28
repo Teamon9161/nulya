@@ -316,6 +316,8 @@ pub fn run(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args: Args) !r
     // driving it again, so what is owed here is the truth rather than another
     // attempt (see `stranded_note`).
     var stranded = false;
+    // Have we already spent a round asking for the report? See `wrap_up`.
+    var asked_to_wrap_up = false;
     // `while (true)`: every way out of this loop is a `break` written on
     // purpose, so no exit can be created by a counter running out.
     while (true) {
@@ -328,6 +330,21 @@ pub fn run(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args: Args) !r
         if (round.code != 0 and round.text.len == 0) {
             stranded = runners.pending(kind, alloc, io, cwd, settled.remote, settled.delegation);
             break;
+        }
+
+        // A round that spent its whole budget on tool calls and never said
+        // anything has, from the parent's side, produced nothing at all — the
+        // work happened, and every trace of it stays in a session the parent
+        // will never read. Asking for it costs one message and one round, and
+        // the alternative is throwing away everything the round found. Once
+        // per task: if the answer to "stop and report" is another silent
+        // budget, the honest thing left is to say so.
+        if (round.text.len == 0 and !round.interrupted and !asked_to_wrap_up and
+            std.mem.eql(u8, round.stopped, "budget"))
+        {
+            asked_to_wrap_up = true;
+            const sent = try runners.send(kind, alloc, io, cwd, exe, settled.remote, settled.delegation, .{ .text = wrap_up });
+            if (sent.code == 0) continue;
         }
 
         if (round.text.len != 0 or round.interrupted) {
@@ -367,7 +384,7 @@ pub fn run(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args: Args) !r
     else if (last.code != 0)
         try std.fmt.allocPrint(alloc, "the delegated session did not finish: {s}", .{firstLine(last.stderr)})
     else if (std.mem.eql(u8, last.stopped, "budget"))
-        "the delegated session ran out of its step budget before saying anything final."
+        "the delegated session ran out of its step budget, and asking it to stop and report produced nothing either."
     else
         "the delegated session ended without a final message.";
 
@@ -380,6 +397,20 @@ pub fn run(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args: Args) !r
     try out.writer.print(report_contract, .{ named, try runners.transcriptHint(kind, alloc, settled.remote) });
     return .{ .text = try out.toOwnedSlice() };
 }
+
+/// What is said to a sub-agent that used up its steps without ever answering.
+///
+/// Sent by the runner rather than by anyone in the conversation, so it does not
+/// go through `main.deliver` and does not count against `max_exchanges`: this is
+/// not a turn somebody took, it is the harness collecting what was already paid
+/// for. Delivery is `runners.send`, which every arm implements, so the sentence
+/// is written once for all five.
+const wrap_up =
+    "Your step budget is spent, so this is your last chance to answer. Reply now " ++
+    "with your report, in text only — do not call any more tools. Report what you " ++
+    "actually established, say plainly which parts of the question you did not get " ++
+    "to, and do not present a guess as a finding. A partial answer that is honest " ++
+    "about its edges is worth far more to the caller than nothing at all.";
 
 /// What a report says when the task gave up with a message still unanswered.
 ///

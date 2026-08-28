@@ -1102,6 +1102,77 @@ test "bundled agent: the record is what a delegation is driven by — its budget
     }
 }
 
+test "bundled agent: a sub-agent that spends every step on tools is asked to stop and report, and what it then says is the report the parent gets" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const ref = try buildBundled(alloc, io, ws, exe_abs, "agent");
+    defer alloc.free(ref);
+
+    // A ceiling of one step, so the very first round ends on `budget` with the
+    // child having said nothing at all. That is the whole failure this is
+    // about: a session's worth of real work, and an empty report.
+    try ws.createDirPath(io, ".nulya/agents");
+    try ws.writeFile(io, .{
+        .sub_path = ".nulya/agents/digger.md",
+        .data = "---\ndescription: digs and digs\nmax_steps: 1\n---\nYou investigate.\n",
+    });
+
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(new.stdout);
+    const parent = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(parent);
+    const session_file = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{parent});
+    defer alloc.free(session_file);
+
+    // `wrapup`: the child calls a tool on every step it is given and never ends
+    // a turn by itself, so its budget always runs out — until somebody asks it
+    // to stop and report, which is the one thing that makes it answer.
+    const in_parent: []const EnvPair = &.{
+        .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SCRIPTED_MODE", .value = "wrapup" },
+    };
+
+    const opened = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"digger\",\"task\":\"find something\"}" }, in_parent);
+    defer alloc.free(opened.stdout);
+    try std.testing.expectEqual(@as(u8, 0), opened.code);
+    const child = try remoteOf(alloc, opened.stdout);
+    defer alloc.free(child);
+    {
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", wait_budget_ms });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+    }
+
+    // The ask is a turn in the CHILD's ledger — the runner sent it, so it is
+    // there and the parent never sees it.
+    {
+        const events = try runCli(alloc, io, ws, &.{ exe_abs, "session", "events", child });
+        defer alloc.free(events.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, events.stdout, support.launch.ScriptedProvider.wrap_up_opening) != null);
+    }
+
+    // …and the parent's report carries what the child said when asked, not the
+    // sentence that used to stand in for having nothing. Before this, the same
+    // run reported only that the budget ran out.
+    {
+        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent }, in_parent);
+        defer alloc.free(stepped.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "here is what I found before the budget ran out") != null);
+        try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "ran out of its step budget") == null);
+    }
+}
+
 /// The delegation id out of a receipt (`… — delegation d-…, session s-…`).
 fn delegationOf(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
     const at = std.mem.indexOf(u8, text, "delegation d-").? + "delegation ".len;

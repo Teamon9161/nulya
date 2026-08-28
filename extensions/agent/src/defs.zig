@@ -862,7 +862,11 @@ test "the bundled personas parse, and explore is the read-only one" {
         try std.testing.expectEqual(@as(usize, 0), warnings.items.len);
         try std.testing.expectEqualStrings(b.name, def.name);
         try std.testing.expect(def.description.len != 0);
-        try std.testing.expect(def.max_steps != 0);
+        // No builtin carries its own step ceiling: they run on the kernel's
+        // runaway guard like the parent does. A persona-sized budget looks
+        // prudent and is not — it cuts the sub-agent off mid-investigation,
+        // and everything it found dies in a session nobody will ever read.
+        try std.testing.expectEqual(@as(u32, 0), def.max_steps);
         // The coordinator has no pins on purpose: delegation is its whole job.
         try std.testing.expect(def.pins.len != 0 or def.agents.len != 0);
         for (def.pins) |pin| try std.testing.expect(isPin(pin));

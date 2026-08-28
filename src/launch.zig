@@ -59,7 +59,7 @@ pub fn sessionTasksDir(alloc: std.mem.Allocator, id: []const u8) ![]u8 {
 pub const tasks_subdir = "tasks";
 
 /// A deterministic, terminating scripted provider — the offline stand-in for a
-/// real model (DESIGN §13). Four modes, selected by `NULYA_SCRIPTED_MODE`:
+/// real model (DESIGN §13). The modes are selected by `NULYA_SCRIPTED_MODE`:
 ///
 ///   finish (default): make one `shell` call, then end the turn once a tool
 ///                     result is already in the transcript. A turn completes in
@@ -74,6 +74,13 @@ pub const tasks_subdir = "tasks";
 ///                     was forked from it. That makes the whole /goal loop —
 ///                     model proposes, driver forks, work continues in the child
 ///                     — testable with no network and no real model.
+///   wrapup:           never end a turn on its own — like `loop` — until a user
+///                     turn asks it to stop and report, and then answer in text.
+///                     The offline stand-in for the one thing a spent step
+///                     budget is worth doing something about: everything the
+///                     sub-agent found is in a session the caller never reads,
+///                     so the runner asks for it (`extensions/agent`'s
+///                     `wrap_up`) rather than reporting an empty round.
 ///   background:       start ONE background command, then end the turn — saying
 ///                     `background done` once a `task_finished` turn is in the
 ///                     transcript and `waiting` while it is not, so a test can
@@ -82,7 +89,13 @@ pub const tasks_subdir = "tasks";
 pub const ScriptedProvider = struct {
     mode: Mode = .finish,
 
-    pub const Mode = enum { finish, loop, truncate, handoff, batch, background };
+    pub const Mode = enum { finish, loop, truncate, handoff, batch, background, wrapup };
+
+    /// The opening words of what a runner sends a sub-agent whose steps ran out.
+    /// Spelled out rather than imported for the same reason `summary_marker` is:
+    /// the sentence lives in `extensions/agent`, a separate artifact this
+    /// offline stand-in only has to AGREE with, not share a type with.
+    pub const wrap_up_opening = "Your step budget is spent";
 
     /// What the `background` mode's command prints. `echo` means the same thing
     /// in both dialects, so the stand-in needs no dialect of its own.
@@ -164,6 +177,17 @@ pub const ScriptedProvider = struct {
             try sink.emit(.{ .done = .tool_use });
             return;
         }
+        if (self.mode == .wrapup) {
+            if (hasUserTextContaining(request.prompt_ir.turns, wrap_up_opening)) {
+                try sink.emit(.{ .text_delta = "here is what I found before the budget ran out" });
+                try sink.emit(.{ .done = .end_turn });
+                return;
+            }
+            try sink.emit(.{ .tool_use_start = .{ .index = 0, .id = "w1", .name = "shell" } });
+            try sink.emit(.{ .tool_use_input_delta = .{ .index = 0, .fragment = "{\"command\":\"echo still-looking\"}" } });
+            try sink.emit(.{ .done = .tool_use });
+            return;
+        }
         if (self.mode == .background) {
             // The report landed: say so in a way a test can distinguish from
             // "was stepped again but read nothing".
@@ -225,6 +249,14 @@ fn hasToolResult(turns: []const prompt.Turn) bool {
     for (turns) |turn| {
         if (turn == .tool_results) return true;
     }
+    return false;
+}
+
+fn hasUserTextContaining(turns: []const prompt.Turn, needle: []const u8) bool {
+    for (turns) |turn| switch (turn) {
+        .user_text => |u| if (std.mem.indexOf(u8, u.text, needle) != null) return true,
+        else => {},
+    };
     return false;
 }
 

@@ -16,7 +16,7 @@
           "properties": {
             "name": {
               "type": "string",
-              "description": "Which agent definition to delegate to. Give this OR session, not both."
+              "description": "Which agent definition to delegate to. Four come with this package — `explore` (read-only reconnaissance that returns a report), `plan` (an implementation-plan draft you review), `general` (independent multi-step work with the full toolset) and `orchestrator` (coordinates several roles; for one bounded task delegate `general` instead) — and a workspace or user may define more in `.nulya/agents/*.md` or `~/.nulya/agents/*.md`. A name that does not exist is refused with the full list, so guess only if you would rather spend a round-trip than read one. Give this OR session, not both."
             },
             "session": {
               "type": "string",

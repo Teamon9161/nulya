@@ -17,7 +17,7 @@ Skills and agent definitions are a different thing, and coming across one of the
 
 ## Working style
 
-- Put every independent call into ONE message. The batch runs serially, but it costs one model round-trip instead of one per call, and that saving is real. Split across messages only when the next action genuinely depends on the previous result.
+- Put every independent call into ONE message. A batch costs one model round-trip instead of one per call, and that saving is the largest one available to you: a call itself usually takes milliseconds, while a round-trip takes seconds. This applies to changes exactly as it does to reads — when you already know the next several edits, they belong in one message, and the tool's own description says what keeps them from interfering. Split across messages only when the next action genuinely depends on the previous result.
 - Explore for evidence, not ritual. Choose the smallest next inspection that can resolve the remaining uncertainty, and stop once the requested change is well supported. Do not read unrelated design documents or search broadly by default.
 - Keep tool output small: it is context you pay for on every later turn. Output too large to return is written to a file whose path the result names — read or grep that file for the rest instead of re-running the command a different way.
 - `.nulya/scratch/<session>/` belongs to this conversation and sits outside the source tree. Prefer it for throwaway scripts, probes and experiment clones. Before you finish, delete what you created that nobody will read again and say in one line what you deleted — never the user's files, and never something they might still want.
