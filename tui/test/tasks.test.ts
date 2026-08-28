@@ -18,6 +18,8 @@ import { backgroundStartOf, taskReportOf } from "../src/nulya/ledger.ts"
 import { inboxPending } from "../src/nulya/files.ts"
 import { sessionAppend, sessionEvents, sessionNew, sessionStep, taskList } from "../src/nulya/cli.ts"
 import { elapsed, outcome } from "../src/ui/overlays/TasksView.tsx"
+import { stopTask } from "../src/state/tasks.ts"
+import { taskStoppedNoteOf } from "../src/taskstop.ts"
 import {
   scripted_background_env,
   scripted_env,
@@ -222,6 +224,47 @@ test("`task list --json` is the projection every view reads", async () => {
   expect(elapsed(task!)).toMatch(/^\d+\.\ds$/)
   expect(outcome(task!)).toBe("")
 }, 120_000)
+
+/**
+ * `state/tasks.stopTask` (tui.md §11, tasks panel): the one place that pairs
+ * a kill with the note that says a PERSON asked for it. Both `TasksPanel`'s
+ * stop button and `/tasks`'s `k` go through this, so this is the one test
+ * that has to prove the pairing rather than each caller proving it again.
+ */
+test("stopTask kills the task and appends a note the model can tell apart from its own `task kill`", async () => {
+  const id = await sessionNew(ws, { profile: "scripted" })
+  await sessionAppend(ws, id, "go")
+  await stepOnce(id, scripted_background_env)
+  await until(async () => (await taskList(ws, id)).some((task) => task.state === "done"), 60_000)
+  const [task] = await taskList(ws, id)
+
+  const sent: string[] = []
+  const result = await stopTask(
+    ws,
+    async (text) => {
+      sent.push(text)
+      await sessionAppend(ws, id, text)
+    },
+    task!.task,
+  )
+  // `nulya task kill` on a task that already finished says so rather than
+  // erroring — the note still gets appended, because the button was still
+  // pressed and the fact is still true.
+  expect(typeof result).toBe("string")
+  expect(sent.length).toBe(1)
+  const note = taskStoppedNoteOf({ key: "k", seq: 1, kind: "user", text: sent[0]!, queued: false })
+  expect(note?.task).toBe(task!.task)
+
+  // `session append` only lands in the inbox — it enters the ledger at the
+  // NEXT step boundary, the same rule every other queued turn in this file
+  // follows (`sessionAppend`'s own doc comment).
+  await stepOnce(id, scripted_env)
+  const events = await sessionEvents(ws, id)
+  const landed = events.find(
+    (event) => event.kind === "user_text" && (event as { text: string }).text === sent[0],
+  )
+  expect(landed).toBeDefined()
+})
 
 // --- reading the kernel's two texts -----------------------------------------
 

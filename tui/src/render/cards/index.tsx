@@ -6,6 +6,7 @@ import { SkillEchoCard } from "./SkillEchoCard.tsx"
 import { skillEchoOf } from "../../skills.ts"
 import { midTaskOf } from "../../midtask.ts"
 import { approvalNoteOf } from "../../approvalnote.ts"
+import { taskStoppedNoteOf } from "../../taskstop.ts"
 import { extNoteBadge, extNoteOf } from "../../extnote.ts"
 import { AssistantTurn } from "./AssistantTurn.tsx"
 import { Thinking } from "./Thinking.tsx"
@@ -48,6 +49,16 @@ export function Card(props: { item: TranscriptItem; contributions?: Contribution
           item={props.item as Extract<TranscriptItem, { kind: "user" }>}
           text={approvalNoteOf(props.item)!.text}
           badge={`note on ${approvalNoteOf(props.item)!.tool}`}
+        />
+      </Match>
+      {/* A background task's stop button, pressed on screen (`taskstop.ts`):
+          the TUI attesting to who asked for the kill, not the person typing —
+          checked beside the approval note for the same reason it exists. */}
+      <Match when={taskStoppedNoteOf(props.item) !== null}>
+        <UserTurn
+          item={props.item as Extract<TranscriptItem, { kind: "user" }>}
+          text={taskStoppedNoteOf(props.item)!.text}
+          badge="stopped from the TUI"
         />
       </Match>
       {/* Assembled by a plugin on the person's behalf (`extnote.ts`, tui-plugin

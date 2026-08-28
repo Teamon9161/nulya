@@ -14,7 +14,8 @@
  * pure store with nothing to dispose.
  */
 import { createContext, createSignal, useContext, type Accessor } from "solid-js"
-import { taskIsDone, taskList, type TaskEntry } from "../nulya/cli.ts"
+import { taskIsDone, taskKill, taskList, type TaskEntry } from "../nulya/cli.ts"
+import { wrapTaskStoppedNote } from "../taskstop.ts"
 import type { Workspace } from "../nulya/bin.ts"
 
 export interface TaskWatch {
@@ -98,6 +99,34 @@ export function seconds(total: number): string {
   if (total < 60) return `${total}s`
   const minutes = Math.floor(total / 60)
   return `${minutes}m ${String(total % 60).padStart(2, "0")}s`
+}
+
+/**
+ * Stop a background task FROM THE TUI, and say so to the model in the same
+ * breath (tui.md §11, tasks panel).
+ *
+ * `nulya task kill` alone leaves the model unable to tell a person's stop
+ * button apart from its own `shell` call — both produce the same `· killed`
+ * marker on the task's report (DESIGN §6.1). This is the one place that pairs
+ * the kill with the attribution (`taskstop.ts`), so `TasksPanel` and
+ * `TasksView` (`/tasks`) cannot drift into two different answers for "what do
+ * we tell the model when a person presses stop". The note is appended only
+ * after the kill call itself succeeds — a kill that failed said nothing
+ * happened, and there is nothing to attribute.
+ *
+ * `send` is `Attachment.send` from whichever tab owns this task: `framed:
+ * true` so the note lands exactly as written, whether that tab is driving
+ * (drained at the next step boundary) or only observing (still appended,
+ * never taking the writer lease — DESIGN §3.4).
+ */
+export async function stopTask(
+  ws: Workspace,
+  send: (text: string, framed?: boolean) => Promise<void>,
+  task: string,
+): Promise<string> {
+  const result = await taskKill(ws, task)
+  await send(wrapTaskStoppedNote(task), true)
+  return result
 }
 
 /** How a call's own report of its task ended, once one has landed in the ledger. */

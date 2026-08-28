@@ -866,7 +866,14 @@ test("/tasks lists this session's background commands and shows one's log", asyn
   const refresh = async () => setTasks(await taskList(ws, id))
   await refresh()
   const setup = await overlayFrame(() => (
-    <TasksView ws={ws} sessionId={id} tasks={tasks()} onRefresh={() => void refresh()} onClose={() => {}} />
+    <TasksView
+      ws={ws}
+      sessionId={id}
+      tasks={tasks()}
+      send={() => Promise.resolve()}
+      onRefresh={() => void refresh()}
+      onClose={() => {}}
+    />
   ))
   try {
     const frame = await settle(setup, 4)
@@ -887,7 +894,7 @@ test("/tasks lists this session's background commands and shows one's log", asyn
 
 test("/tasks on a tab with no session says so instead of drawing an empty list", async () => {
   const setup = await overlayFrame(() => (
-    <TasksView ws={ws} sessionId="" tasks={[]} onRefresh={() => {}} onClose={() => {}} />
+    <TasksView ws={ws} sessionId="" tasks={[]} send={() => Promise.resolve()} onRefresh={() => {}} onClose={() => {}} />
   ))
   try {
     const frame = await settle(setup, 3)

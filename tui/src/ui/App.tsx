@@ -64,7 +64,8 @@ import { resolveFocus } from "../pane/focus.ts"
 import { PaneHost } from "./PaneHost.tsx"
 import { SubAgentPane } from "./SubAgentPane.tsx"
 import { hostSurfaces } from "./surfaces.tsx"
-import { TasksContext } from "../state/tasks.ts"
+import { TasksContext, stopTask } from "../state/tasks.ts"
+import { TasksPanel } from "./TasksPanel.tsx"
 import { NavigateContext, type Navigate } from "../state/navigate.ts"
 import type { TranscriptRow } from "../render/runs.ts"
 import { createTabStore, type DraftTab, type FirstTab, type SessionTab } from "../state/tabs.ts"
@@ -599,6 +600,19 @@ export function App(props: AppProps) {
   const [agentWarnings, setAgentWarnings] = createSignal<readonly string[]>([])
   /** Whether the picker is up, and which row its cursor is on (`AgentPicker`). */
   const [agentPicker, setAgentPicker] = createSignal(false)
+  /**
+   * Whether the composer-area background-tasks panel is open (`TasksPanel`,
+   * tui.md §11) — the background count on the activity line, opened out.
+   *
+   * Deliberately NOT one of `resolveFocus`'s dialogs: it chooses nothing and
+   * takes no keystroke of its own (its stop buttons are mouse-only, `ui/rows.
+   * ts`). What it shares with a package's panel is where it may appear —
+   * while a trusted zone is up it is not drawn at all, and comes back when
+   * the zone clears (`dialogUp`). `/tasks` (F7) is a separate, full-screen
+   * view and this signal does not touch it.
+   */
+  const [tasksPanel, setTasksPanel] = createSignal(false)
+  const toggleTasksPanel = () => setTasksPanel((up) => !up)
   /** Bare `/with`: the registered packages a session may name (`WithPicker`). */
   const [withPicker, setWithPicker] = createSignal(false)
   const [withChoice, setWithChoice] = createSignal(0)
@@ -799,6 +813,23 @@ export function App(props: AppProps) {
   /** This tab's background tasks, and how many of them have not ended (§5.9). */
   const tasks = (): TaskEntry[] => live()?.tasks.tasks() ?? []
   const runningTasks = () => live()?.tasks.live() ?? 0
+  /**
+   * A stop button pressed on screen — the tasks panel's and `/tasks`'s only
+   * write, and `state/tasks.stopTask` is the one place it happens (its own
+   * doc comment says why: the kill and the "stopped by the user" note have to
+   * land together or not at all). Bound here to the front tab's `ws` and
+   * `attach.send` so neither caller needs to know either exists.
+   */
+  const stopBackgroundTask = async (task: string) => {
+    const here = live()
+    if (!here) return
+    try {
+      await stopTask(props.ws, here.attach.send, task)
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error))
+    }
+    void here.tasks.refresh()
+  }
 
   createEffect(() => {
     if (!props.style.motion) return
@@ -3478,8 +3509,12 @@ export function App(props: AppProps) {
   const handleGlobalCancel = () => {
     // Something opened on purpose a moment ago is what Esc is about, ahead of
     // the handover proposal that may have been sitting there for minutes and
-    // ahead of the step — closing a panel of numbers costs nothing to get
-    // wrong, and cancelling a step to put one away would.
+    // ahead of the step — closing a panel of numbers or task rows costs
+    // nothing to get wrong, and cancelling a step to put one away would.
+    if (tasksPanel()) {
+      setTasksPanel(false)
+      return
+    }
     if (contextPanel()) {
       setContextPanel(false)
       return
@@ -4025,6 +4060,7 @@ export function App(props: AppProps) {
         ws={props.ws}
         sessionId={live()?.id ?? ""}
         tasks={tasks()}
+        send={(text, framed) => live()?.attach.send(text, framed) ?? Promise.resolve()}
         onRefresh={() => void live()?.tasks.refresh()}
         onClose={closeOverlay}
       />
@@ -4206,7 +4242,7 @@ export function App(props: AppProps) {
                     onReady={(field) => (noteField = field)}
                   />
                 </Show>
-                {/* The context ring, opened out (T82). Lowest of the panels
+                {/* The context ring, opened out (T82). Low among the panels
                     because it is the expansion of a chip on the row below the
                     composer, and hidden outright while a host dialog is up —
                     the same terms a package's panel lives under, for the same
@@ -4216,6 +4252,13 @@ export function App(props: AppProps) {
                     fill={contextFill(snapshot().usage.lastPrompt, contextWindow())}
                     sections={contextSections(snapshot().usage, contextWindow())}
                   />
+                </Show>
+                {/* The background count on the activity line, opened out
+                    (`TasksPanel`, tui.md §11 T87). Same terms as the context
+                    panel above: expansion of a chip, gone while a host dialog
+                    is up. */}
+                <Show when={tasksPanel() && !dialogUp()}>
+                  <TasksPanel tasks={tasks()} onStop={(task) => void stopBackgroundTask(task)} />
                 </Show>
                 {/* What is happening, directly above the box you would type
                     into to change it (tui.md §4.4b, T38). Below the panels: a
@@ -4227,7 +4270,7 @@ export function App(props: AppProps) {
                   since={live()?.attach.startedAt() ?? null}
                   now={clockNow()}
                   usage={usageLabel(displayUsage())}
-                  onOpenTasks={() => openOverlay("tasks")}
+                  onOpenTasks={toggleTasksPanel}
                 />
                 {/* The inbox, drawn out (agent-runner ar-t1): turns waiting on
                     a step boundary to drain them. Same region as the activity

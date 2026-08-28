@@ -49,6 +49,17 @@ export interface Activity {
   /** The one entry here that is a place rather than a state: `/tasks`. */
   opens?: "tasks"
   /**
+   * How many background tasks are running, alongside whatever else `text`
+   * says (T87 tasks panel). Kept off `text` on purpose: a count folded into
+   * the sentence would fight the step's own words for the same columns, and
+   * it needs its own click zone regardless of what is currently in flight —
+   * a foreground step and a background task are two different things
+   * happening at once, and the step being cancelable does not make the task
+   * one too. `undefined` when there are none, so a session with no
+   * background task costs no column (T35's "nothing at rest draws nothing").
+   */
+  background?: number
+  /**
    * When THIS activity began, when that is not the driver's own clock. A step
    * is the usual case and the caller passes `attach.startedAt()` for it; work
    * that is not a step (the start-up extension pass) has its own start and
@@ -119,32 +130,45 @@ export function activityOf(facts: {
   background: number
   syncing?: SyncProgress | null
 }): Activity | null {
+  // Every branch below but the last one is about something OTHER than the
+  // background count, and a background task does not stop existing just
+  // because a step started — so whatever this function is about to say, the
+  // count rides along beside it (T87 tasks panel). The last branch is where
+  // the count IS the whole sentence, and does not need to say itself twice.
+  const withBackground = (activity: Activity): Activity =>
+    facts.background > 0 ? { ...activity, background: facts.background } : activity
   // The kernel is stopped on a call, waiting for a verdict (tui.md §5.7). It
   // outranks everything: nothing else can be happening while it is true.
-  if (facts.awaiting) return { text: "waiting for your answer", tone: "warn", moving: false }
+  if (facts.awaiting) return withBackground({ text: "waiting for your answer", tone: "warn", moving: false })
   // The message is in the transcript in full (`ErrorNotice`); this is the
   // pointer to it, for when the transcript has been scrolled away.
-  if (facts.snapshot.error) return { text: "error · see transcript", tone: "err", moving: false }
+  if (facts.snapshot.error) return withBackground({ text: "error · see transcript", tone: "err", moving: false })
   if (facts.role === "observer") {
-    if (facts.takeoverReady) return { text: "press ↵ to take over", tone: "warn", moving: false }
-    if (facts.status === "sending") return { text: "queued for the other writer", tone: "run", moving: true }
+    if (facts.takeoverReady) return withBackground({ text: "press ↵ to take over", tone: "warn", moving: false })
+    if (facts.status === "sending") {
+      return withBackground({ text: "queued for the other writer", tone: "run", moving: true })
+    }
     // Following is not an activity — it is what this tab IS, and the row under
     // the composer says so on its right.
     return null
   }
-  if (facts.status === "canceling") return { text: "canceling", tone: "run", moving: true }
+  if (facts.status === "canceling") return withBackground({ text: "canceling", tone: "run", moving: true })
   // The live phase of a step: model request, streamed answer, streamed tool
   // call, executor, or result commit. `activeTool` alone only covered the
   // executor and made every other part read as generic thinking.
   if (facts.status === "stepping") {
-    return { text: stepActivity(facts.snapshot), tone: "run", moving: true, cancelable: true }
+    return withBackground({ text: stepActivity(facts.snapshot), tone: "run", moving: true, cancelable: true })
   }
-  if (facts.status === "sending") return { text: "sending", tone: "run", moving: true }
+  if (facts.status === "sending") return withBackground({ text: "sending", tone: "run", moving: true })
   if (facts.snapshot.lastStopped === "budget") {
-    return { text: "step budget spent · /step to continue", tone: "warn", moving: false }
+    return withBackground({ text: "step budget spent · /step to continue", tone: "warn", moving: false })
   }
   if (facts.snapshot.lastStopped === "max_tokens") {
-    return { text: "reply cut off (max_tokens) · send a message to continue", tone: "warn", moving: false }
+    return withBackground({
+      text: "reply cut off (max_tokens) · send a message to continue",
+      tone: "warn",
+      moving: false,
+    })
   }
   // Below every row above it on purpose: a store pass never blocks the
   // conversation, so a step in flight, a spent budget or a waiting approval is
@@ -153,16 +177,17 @@ export function activityOf(facts: {
   // the first message.
   if (facts.syncing) {
     const { what, done, total, since } = facts.syncing
-    return {
+    return withBackground({
       text: total > 0 ? `${what} (${done}/${total})` : what,
       tone: "run",
       moving: true,
       since,
-    }
+    })
   }
   // Last, and only when nothing else is running: a detached command outlives
   // the step that started it, so an idle driver with one going is the one case
-  // where saying nothing would be a lie (tui.md §5.9).
+  // where saying nothing would be a lie (tui.md §5.9). The count IS the text
+  // here, so it does not also ride in `background` (T35: nothing said twice).
   if (facts.background > 0) {
     return { text: `${facts.background} background`, tone: "run", moving: true, opens: "tasks" }
   }
@@ -205,6 +230,8 @@ export function WorkingStatus(props: {
   const screen = useScreen()
   const [over, setOver] = createSignal(false)
   const tasksClick = onClick(() => props.onOpenTasks?.())
+  const [bgOver, setBgOver] = createSignal(false)
+  const bgClick = onClick(() => props.onOpenTasks?.())
 
   const base = () => {
     switch (props.activity?.tone) {
@@ -248,11 +275,27 @@ export function WorkingStatus(props: {
     return `${age}${esc}${spent}`
   }
 
-  /** Cut to one row: a tool name is as long as whoever wrote it made it. */
+  /**
+   * The background count, said beside whatever else this line is about
+   * (T87 tasks panel) — its own segment rather than a fourth thing packed
+   * into `tail()`, because it answers to a click and the rest of the tail
+   * does not.
+   */
+  const bgText = () => (props.activity?.background ? ` · ${props.activity.background} background` : "")
+  const bgClickable = () => (props.activity?.background ?? 0) > 0 && props.onOpenTasks !== undefined
+
+  /**
+   * Cut to one row: a tool name is as long as whoever wrote it made it. Lead
+   * gets first claim on the width, then the dim tail, then the background
+   * segment last — the same "worth losing in this order" the tail's own
+   * comment states, one step further down.
+   */
   const room = () => Math.max(8, screen().width - 4)
-  const lead = () => fit(head(), Math.max(4, room() - displayWidth(tail())))
+  const lead = () => fit(head(), Math.max(4, room() - displayWidth(tail()) - displayWidth(bgText())))
   const cells = () => Array.from(lead())
   const clickable = () => props.activity?.opens === "tasks" && props.onOpenTasks !== undefined
+  const tailFit = () => fit(tail(), Math.max(0, room() - displayWidth(lead())))
+  const bgFit = () => fit(bgText(), Math.max(0, room() - displayWidth(lead()) - displayWidth(tailFit())))
 
   return (
     <Show when={props.activity}>
@@ -291,8 +334,27 @@ export function WorkingStatus(props: {
           </box>
         </box>
         <text fg={style.theme.dim} flexShrink={1}>
-          {fit(tail(), Math.max(0, room() - displayWidth(lead())))}
+          {tailFit()}
         </text>
+        {/* The background count's own click zone, separate from the tail's
+            plain text: a foreground step and a background task coexist, and
+            only this segment should answer to a click while one does
+            (T87 tasks panel). Same shape as the status row's `tools 1+N`
+            chip (`StatusBar.tsx`) — a `·` the click does not own, then a box
+            that does. */}
+        <Show when={bgFit().length > 0}>
+          <box
+            flexShrink={0}
+            height={1}
+            backgroundColor={bgClickable() && bgOver() ? style.theme.hover : undefined}
+            onMouseDown={bgClickable() ? bgClick.onMouseDown : undefined}
+            onMouseUp={bgClickable() ? bgClick.onMouseUp : undefined}
+            onMouseOver={() => setBgOver(true)}
+            onMouseOut={() => setBgOver(false)}
+          >
+            <text fg={style.theme.dim}>{bgFit()}</text>
+          </box>
+        </Show>
       </box>
     </Show>
   )

@@ -22,8 +22,8 @@ import { useScreen, useStyle } from "../../render/theme.ts"
 import { displayWidth, fit } from "../columns.ts"
 import { createHover, onClick, rowBackground, rowGutter } from "../rows.ts"
 import { OverlayFooter, createKeyHelp } from "./Footer.tsx"
-import { seconds } from "../../state/tasks.ts"
-import { taskIsDone, taskKill, type TaskEntry } from "../../nulya/cli.ts"
+import { seconds, stopTask } from "../../state/tasks.ts"
+import { taskIsDone, type TaskEntry } from "../../nulya/cli.ts"
 import { readTaskLog } from "../../nulya/files.ts"
 import type { Workspace } from "../../nulya/bin.ts"
 
@@ -48,6 +48,13 @@ export function TasksView(props: {
   /** The session in front; a draft tab has none and the panel says so. */
   sessionId: string
   tasks: TaskEntry[]
+  /**
+   * `Attachment.send` for the session in front — `k`/`K` route the kill
+   * through `state/tasks.stopTask`, which appends the same "stopped by the
+   * user" note the composer-area panel does (`taskstop.ts`), so the two do
+   * not drift into two different answers for the same gesture.
+   */
+  send: (text: string, framed?: boolean) => Promise<void>
   /** Read the list again — the panel's own `r`, and after a kill. */
   onRefresh: () => void
   onClose: () => void
@@ -114,7 +121,7 @@ export function TasksView(props: {
     const task = current()
     if (!task) return
     try {
-      setNotice(await taskKill(props.ws, task.task))
+      setNotice(await stopTask(props.ws, props.send, task.task))
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error))
     }
@@ -130,7 +137,7 @@ export function TasksView(props: {
     }
     for (const task of live) {
       try {
-        await taskKill(props.ws, task.task)
+        await stopTask(props.ws, props.send, task.task)
       } catch {
         // Already gone, or never started: the summary counts what was asked.
       }

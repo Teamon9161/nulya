@@ -2547,3 +2547,17 @@ tab 条的 `✕`/`+`/`▎`；`stripPlan` 的**不变量**"画出来的一切都�
 **③ 说出来。** `/env` 无参数**报告现状而不是开 picker**：这里可选集不可枚举（ssh destination 是对方 `ssh_config` 里的名字，发行版清单在 `wsl -l` 里），一个「两个词 + 第三个你自己打」的 picker 是在假装自己知道答案。状态栏多一个 `⇥ <spec>` chip，**没有的东西不占列**（T35）——本机跑就是空的，与今天所有人的屏幕逐字节相同；非空时用 `theme.warn` 而不是 dim：它不是装饰，是让 `rm -rf build` 变成两件事的那个事实。chip 的两个来源**不可互换**：已开始的 session 读 header（那是冻的，`/env` 动不了它），draft 读待定选择（那是它第一条消息会冻下的东西）。
 
 **不校验拼写。** `session new` 已经会拒绝并在消息里带上整套词表，而那句拒绝本来就会经 `ensureSession` 到屏幕上。这边再写一个 parser 就是一个问题两个答案。
+
+### T87 · 后台任务的 composer 面板：能停、能并存显示、停的人是谁模型知道（2026-08-28）
+
+**内核零改动。**
+
+1. **`TasksPanel.tsx`**：`WorkingStatus` 的 `N background` 点击目标从 `openOverlay("tasks")`（F7 全屏视图）改开这个 composer 区面板——与 `ApprovalPanel`/`PluginPanel` 同一个区域、同一条"trusted zone 在场就整个不画"的规矩（`dialogUp()`），Esc 收起排在 `handleGlobalCancel` 最前（与将来的 `contextPanel` 同一优先级理由：关一个数字面板不该有代价，取消一个 step 才有）。它不是纯被动的——每个还在跑的任务一行，带一个可点的 stop（只用鼠标，不进 `resolveFocus`、不抢键盘），一行 hint 指路 `/tasks` 看日志、`k`/`K` 走键盘。F7 与 `/tasks` 命令不变，仍开全屏 `TasksView`。
+
+2. **`state/tasks.stopTask`**：kill 与"是谁停的"这条归因收成一处——`nulya task kill` 之后 `send(wrapTaskStoppedNote(task), true)`。`TasksPanel` 的 stop 按钮与 `TasksView`（`/tasks`）的 `k`/`K` 都改调它，不再各自直接调 `taskKill`：一处实现，两个调用点，不会各说各话。`send` 是调用方绑的 `Attachment.send`——driver 与 observer 两种角色都成立（`session append` 本就不取写锁），面板据此不需要关心当前 tab 是谁在开车。
+
+3. **`taskstop.ts`**：新 sentinel，approvalnote.ts / extnote.ts 同一纪律——wrap 与 parse 同一个模块、parse 只认 sentinel 不认 contract 措辞。内核已经在 `task_finished` 里说"· killed"，但分不出是模型自己 `shell` 调的 `task kill` 还是人在屏幕上按的——只有屏幕知道这件事，所以这条 note 只在人从 TUI 发起停止（面板或 `/tasks`）时追加，模型自己的 `task kill` 从不经过这条路。卡片渲染在 `render/cards/index.tsx` 挂在 `approvalNoteOf` 旁边，`badge="stopped from the TUI"`。
+
+4. **`WorkingStatus.Activity.background?: number`**：前台 step 在跑时，`N background` 从前会被挤没——`activityOf` 现在给除"background 本身就是唯一内容"那一支之外的每一支都挂上这个计数（`withBackground` 包一层），渲染上单独一段带自己的点击区（`bgFit`/`bgClick`，同一条 `· ` 分隔 + 悬停背景色的写法照抄 `StatusBar.tsx` 的 `tools 1+N` chip），裁剪顺序 lead → tail → background，background 最先被挤掉。`opens: "tasks"` 那一支（idle、只有 background）不重复挂这个字段——数字已经是 `text` 本身。
+
+**回归测试**：`test/taskstop.test.ts`（sentinel round-trip、contract 剥离、与另外两个 sentinel 互不认领）· `test/taskspanel.test.tsx`（空态、跑中/已完成两种行的呈现、点 stop 只对那一行生效）· `test/tasks.test.ts` 新增一条真二进制端到端（起后台任务 → 完成 → `stopTask` → 归因 note 落进下一个 step 边界的 ledger）· `test/workingstatus.test.ts` 六条既有 `toEqual` 断言按新的并存语义更新（`canceling`/`stepping`/`sending`/`budget`/`max_tokens`/`awaiting`/`error` 各自验证 `background` 字段随行、"background 独占" 那一支验证不重复）。`bunx tsc --noEmit` 干净。

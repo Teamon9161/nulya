@@ -68,7 +68,7 @@ function assistant(text: string): TranscriptItem {
   return { key: "p0:assistant", seq: null, kind: "assistant", text, streaming: true }
 }
 
-test("activityOf: awaiting a gate verdict outranks everything, including an error and a run in flight", () => {
+test("activityOf: awaiting a gate verdict outranks everything, including an error and a run in flight — but a background count still rides along", () => {
   const a = activityOf(
     facts({
       awaiting: true,
@@ -79,14 +79,16 @@ test("activityOf: awaiting a gate verdict outranks everything, including an erro
       background: 3,
     }),
   )
-  expect(a).toEqual({ text: "waiting for your answer", tone: "warn", moving: false })
+  // `text` says what OUTRANKED everything; `background` says a task is still
+  // running regardless of which row won (T87 tasks panel: the two coexist).
+  expect(a).toEqual({ text: "waiting for your answer", tone: "warn", moving: false, background: 3 })
 })
 
-test("activityOf: a session error outranks the role/status/background rows beneath it", () => {
+test("activityOf: a session error outranks the role/status rows beneath it, and still carries the background count", () => {
   const a = activityOf(
     facts({ snapshot: { error: "boom" }, role: "observer", takeoverReady: true, status: "stepping", background: 2 }),
   )
-  expect(a).toEqual({ text: "error · see transcript", tone: "err", moving: false })
+  expect(a).toEqual({ text: "error · see transcript", tone: "err", moving: false, background: 2 })
 })
 
 test("activityOf: an observer never reaches the driver rows below it, even mid-step with tasks running", () => {
@@ -110,12 +112,12 @@ test("activityOf: observer — takeover-ready outranks queued-behind-the-writer"
   expect(queued?.cancelable).toBeUndefined()
 })
 
-test("activityOf: driver — canceling outranks a background count", () => {
+test("activityOf: driver — canceling outranks a background count as the LINE'S TEXT, but the count still shows beside it", () => {
   const a = activityOf(facts({ status: "canceling", background: 5 }))
-  expect(a).toEqual({ text: "canceling", tone: "run", moving: true })
+  expect(a).toEqual({ text: "canceling", tone: "run", moving: true, background: 5 })
 })
 
-test("activityOf: driver — stepping outranks sending, a stale lastStopped, and background, and is the only row that is cancelable", () => {
+test("activityOf: driver — stepping outranks sending and a stale lastStopped, is the only row that is cancelable, and a background count rides along with it", () => {
   const withTool = activityOf(
     facts({
       status: "stepping",
@@ -123,12 +125,15 @@ test("activityOf: driver — stepping outranks sending, a stale lastStopped, and
       background: 2,
     }),
   )
-  expect(withTool).toEqual({ text: "running shell", tone: "run", moving: true, cancelable: true })
+  expect(withTool).toEqual({ text: "running shell", tone: "run", moving: true, cancelable: true, background: 2 })
 
   // No stream yet: the model request itself is the thing being waited on.
   const thinking = activityOf(facts({ status: "stepping", snapshot: { activeTool: null } }))
   expect(thinking?.text).toBe("waiting for model")
   expect(thinking?.cancelable).toBe(true)
+  // No background task running: the field is absent, not zero — nothing at
+  // rest costs a column (T35).
+  expect(thinking?.background).toBeUndefined()
 })
 
 test("stepActivity: streamed transcript tail names the live phase before, during, and after a tool", () => {
@@ -140,28 +145,32 @@ test("stepActivity: streamed transcript tail names the live phase before, during
   )
 })
 
-test("activityOf: driver — sending outranks a stale lastStopped and background, but is not cancelable", () => {
+test("activityOf: driver — sending outranks a stale lastStopped as the line's text, is not cancelable, and still carries the background count", () => {
   const a = activityOf(facts({ status: "sending", snapshot: { lastStopped: "budget" }, background: 3 }))
-  expect(a).toEqual({ text: "sending", tone: "run", moving: true })
+  expect(a).toEqual({ text: "sending", tone: "run", moving: true, background: 3 })
   expect(a?.cancelable).toBeUndefined()
 })
 
-test("activityOf: driver, idle — lastStopped budget outranks background, and max_tokens outranks background too", () => {
+test("activityOf: driver, idle — lastStopped budget and max_tokens outrank background as the line's text, but the count still rides along", () => {
   const budget = activityOf(facts({ snapshot: { lastStopped: "budget" }, background: 4 }))
-  expect(budget).toEqual({ text: "step budget spent · /step to continue", tone: "warn", moving: false })
+  expect(budget).toEqual({ text: "step budget spent · /step to continue", tone: "warn", moving: false, background: 4 })
 
   const cutOff = activityOf(facts({ snapshot: { lastStopped: "max_tokens" }, background: 4 }))
   expect(cutOff).toEqual({
     text: "reply cut off (max_tokens) · send a message to continue",
     tone: "warn",
     moving: false,
+    background: 4,
   })
 })
 
-test("activityOf: driver, idle, nothing else — background alone survives, moving but not cancelable", () => {
+test("activityOf: driver, idle, nothing else — background alone survives, moving but not cancelable, and does not say itself twice", () => {
   const a = activityOf(facts({ background: 2 }))
   expect(a).toEqual({ text: "2 background", tone: "run", moving: true, opens: "tasks" })
   expect(a?.cancelable).toBeUndefined()
+  // The count IS `text` here, so it is not ALSO on `background` — that field
+  // is for when something else is the text and the count rides beside it.
+  expect(a?.background).toBeUndefined()
 })
 
 test("activityOf: a store pass names the draft it is on and carries its own clock", () => {
