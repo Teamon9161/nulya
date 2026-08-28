@@ -113,3 +113,45 @@ ai回复:
 **终局（同日第三次冻结，crash log 拿到完整堆栈——tui.md T77）**：冻结前人眼可见的疯狂闪烁（回复在一小栏与全宽之间翻）就是 T76 每帧量宽的**反馈振荡**——量出的宽度喂给换行、换行改内容、内容改盒宽。每翻一次重建整卡 `<text>` 行，native TextBuffer 海量创建直到分配器给出 null：`createTextBuffer` 抛错（第一个受害者是正在渲染的 ErrorNotice——连报错都渲染不了），throw 在 `setStore` 传播中逃成 unhandledRejection、被 OpenTUI 吞掉、更新队列烂在半路，transcript 冻结。**根治**：宽度改为 pane 树派生的纯数字（`BodyWidthContext`，恒预留滚动条一列——内容对宽度没有投票权），`ui/measure.ts` 整个删除；T75 的 watchdog（前提已被活体取证推翻）一并删除；crashlog 与心跳保留。三次冻结、三层假设、每层都被下一份证据修正——最后立住的是：**别测量一个会被你的输出改变的东西**。
 
 **真·终局（同日第四次冻结，无闪烁、2 分钟即死——tui.md T78）**：native TextBuffer 池是 u16（实测 **65,534** 个 live buffer 封顶，destroy 回收正常），而 `Transcript.tsx` 一个读了 `row()` 的 IIFE 子表达式让**每个流式 delta 重建每一张可见卡**——销毁排在 nextTick，一个 tick 内的 delta burst 把重建叠着推到池顶，`createTextBuffer` 抛错、graph 毒化、冻屏。这一条同时是缩团、高 CPU、GC 压力、「resume 大 session 死得更快」的总根。修法：IIFE → 惰性 props（Card 挂载一次、原地更新），burst 瞬时占用 10,080 → 0（回归测试断言代价与 transcript 大小无关，旧代码差值 50,400）；每行卡片加 ErrorBoundary（画不出的卡 = 一行错误，不再是冻屏）。四次冻结、四层修正，最终三样留下：crash log、心跳、这一行 props 写法——以及一条教训：**JSX 里不要写读响应式值的 IIFE 子表达式**。
+
+18. 我发现ai每个edit似乎单独是一个step, 然后改一大堆没一会就到step上限了, 还要用户手动/step, 你看下这里是不是可以优化, 探索虽然不鼓励batch广泛搜索, 但是是不是修改这种应该建议一起修改
+
+**已修（内核一个常数 + 三处 model-facing 文本 + 一处 driver policy，commit `2f119b5`）。** 证据是那一场本身（`tui/.nulya/sessions/s-…840504-de4328.jsonl`，140 个 assistant turn）：**121 个 turn 只有一个调用**，75 次 `edit` 的执行时间合计 **1.2 秒**（中位数 12 ms），而同一场的 29 次 `shell` 是 716 秒。也就是说 step 预算几乎全花在了「为一个 12 毫秒的调用买一次 model round-trip」上，两次撞上天花板、两次要人手动接。
+
+**它不是"提示词没写"。** `extensions/coding/prompts/coding.md` 早就写了 "Put every independent call into ONE message"，而模型对 `read`/`grep`/`shell` **确实照做了**（seq 8–20 每 turn 5–7 个调用，验证期的 shell 也是 2–3 个一批）——**只有 mutation 塌成 1**。所以真正缺的不是鼓励而是一条事实：同一个文件的多个 `edit` 批在一起安不安全。它安全，两条都成立而两处描述都没说——批次串行执行且每个 `edit` 是独立进程从磁盘现读，所以区域不重叠时后面的 `old_string` 照样匹配；freshness 门也不挡，因为 `extensions/std/src/edit.zig:159` 每次编辑后按新 hash `recordRead`。旁证：那 75 次 edit **全部**是 `{path, old_string, new_string}` 形态、一次 `target_line` 都没用（用了才会因行号漂移而必须串行）、**0 次失败**——模型有能力批，只是不知道被允许。
+
+**四处改动。**
+
+**① 内核天花板 50 → 500**（`src/session.zig:23`，DESIGN §4）。tcode 的 `DEFAULT_MAX_STEPS` 就是 500，它的注释写着理由：这是**失控护栏而不是预算**，要设得高到正常工作永远碰不到它，**因为一个模型感觉得到的天花板会扭曲它的工作**。50 是感觉得到的。
+
+**② 四个内置 persona 的 `max_steps` 全部删除**，跟着内核护栏跑（tcode 的四个 builtin 同样一个都没设）。这条是本次分析里损失最大的一个，单独记在 19。
+
+**③ 预算真的用完时，runner 先要一次报告**（`extensions/agent/src/runner.zig` 的 `wrap_up`）。见 19。
+
+**④ 三处 model-facing 文本**：`extensions/std/extension.json` 的 `edit` 描述加上"多个 edit 可以放进一条消息，包括同一个文件的多个"以及它们为什么不会互相干扰；`coding.md` 那条批量规则把**改动**点名进去（原来 "The batch runs serially, but…" 单读像是在警告 mutation 会互相干扰，而它想说的正好相反）；`extensions/agent/extension.json` 的 `name` 列出四个自带 persona——同一场里模型第一次委派就猜了个不存在的 `investigator`，花一个 round-trip 才被错误消息告知真名。
+
+**为什么修法主要在描述而不在内核**：批量本来就被允许，缺的是让模型知道。tool description 也是这条纪律唯一该住的地方——同一场里探索期在 seq 22 就从 7 个/turn 塌回 1 个/turn（当时还全是 read/grep，离编辑期还早），说明放在 system prompt 最前面的高频纪律会被后面几十 KB 的 tool 输出稀释，而 tool description 离决策点最近。
+
+19. （同一场里发现的）主 agent 委派给 explore，146 秒、73 次 read/grep，报告只有一句"the delegated session ran out of its step budget before saying anything final"
+
+**已修（`extensions/agent`，内核零改动，同一个 commit）。** 用户没报这条——它藏在 18 的转录里。子场 `s-…855560-2aebc4` 探索得**很好**：12 个 turn、每 turn 4–8 个调用、共 73 次 `grep`/`read`/`glob`，正是想要的批量探索。然后 12 步用完，**12 个 turn 的 assistant text 全是空的**，471 KB 的 ledger 换回父场 0 bit——而父场随后自己从头又探索了 30 多个 step，同一件事买了两遍。
+
+**根因是两件事叠在一起**：`explore.md` 的 `max_steps: 12` 撞上「模型看不见自己的预算」。persona 正文里没有一个字提到有上限（**也不该有**——那正是 18 ① 说的"感觉得到的天花板会扭曲工作"），所以模型按"探索到足够为止"的节奏走，不知道第 12 步之后没有然后了；而 `runner.zig` 看到 `stopped == "budget"` 就打一句罐头话，把整轮的发现连同最后一条非空 assistant text 一起丢掉。
+
+**修法两条，都在 driver 层（physics #8）**：内置 persona 不再自带步数上限（一个 persona 尺寸的预算看着谨慎，实际是在调查中途把它砍断，而砍下来的东西全留在调用者永远读不到的 session 里）；预算真的用完且一个字都没说时，runner **发一条消息进去要报告**（"你的步数用完了，现在只用文字答、别再调工具，说清你确实查明了什么、哪些没来得及"）再驱动一轮，每个 task 只做一次，第二次还空才照实说。这条消息由 runner 发、不经 `main.deliver`，所以**不占 `max_exchanges`**——它不是谁说的一轮话，是 harness 去收已经付过钱的东西；走 `runners.send`，所以五个 arm（nulya / codex / claude / pi / ext）一份实现全覆盖。离线替身是新的 scripted 模式 `wrapup`（`launch.zig`：一直调工具永不收尾，直到看见那句话才用文字回答），e2e `tests/e2e/agent.zig` **验证过它在旧代码上会红**。
+
+20. 显示 preparing editing 的时候是在做啥, 总感觉这也消耗了不少时间, 理论上zig edit应该很快吧
+
+**不是 bug，是在等模型吐字，跟 Zig 无关。** `ui/WorkingStatus.tsx:95` 的 `preparing <tool>` 表示这个 call 已经开始从流里出来、但还没走到 `running`——也就是**模型还在逐 token 生成调用参数**，对 `edit` 就是 `old_string` + `new_string` 两段代码。数据对得上：那 75 个 edit turn 的 output token 中位数是 120，而 `edit` 本身执行时间中位数 12 ms、75 次合计 1.2 秒；`running edit` 那一瞬间快到看不见。**这也是 18 那条批量修法省下的第二样东西**：一条消息里连续吐五个 edit 的参数，比五次「生成参数 → 等 12 ms → 重新起一轮」快得多。
+
+21. 模型报告的时候, 报告实时增加, 但是渲染的时候会闪烁
+
+**未修，机制已定位——正是 17 ③ 说的"再看到新的闪烁按新形状单独抓"。** 两个来源，一个是我们的，一个是 OpenTUI 自己写明的语义。
+
+**① 我们这边（一轮跳一次）**：`render/cards/AssistantTurn.tsx` 用 `isPlainProse(text)` 在两条渲染路之间选——纯散文走 `hardWrapLines` + 一行一个 `<text>`（稳定：追加只改最后一行），出现任何结构（`#`、`- `、`1. `、fence、`|`）就整个交给 `<markdown>`。这个判断**每个 delta 重算一次**，而一份报告几乎一定在中途冒出第一个 bullet；那一刻 `<Show>` 把整个正文子树拆掉重建成另一种渲染，在 sticky-bottom 的 scrollbox 里就是整屏重排。判断是单调的（一旦出现结构就不会变回去），所以一轮只跳一次——不是持续闪的那一半。
+
+**② OpenTUI 那边（持续闪的那一半）**：`Markdown.d.ts` 自己写着 `streaming: true` 的语义是「**尾部那个 block 保持不稳定**」，只有它前面的 block 稳定复用（`parseMarkdownIncremental` 的 `stableTokenCount`）。所以一段长报告在遇到第一个空行之前，**整篇就是那一个尾部 block**，每个 delta 重排一次。
+
+**打算怎么修（未做）**：和这个文件自己的 T43 教训是同一条（"没有它，块数只会增长"）——流式期间不要让不稳定的尾部经过 markdown。在最后一个**已闭合**的块边界（fence 外的最后一个空行）切一刀，前半交给 `<markdown>`、尾部走稳定的 `hardWrapLines` 路，turn 结束再整篇交给 markdown 渲染一次。约二三十行加回归测试。
+
+**为什么先记录不动手**：这是个跑不起来就验证不了的视觉改动，而这块地方（T73 / T76 / T77 / T78）已经烧了四次，每次都是"看起来对、实际引入新的反馈回路"。上面两条机制都是从代码与 OpenTUI 的类型声明里读出来的，可以先证伪再动手；② 尤其值得先确认一次——如果 OpenTUI 后续版本改了尾部块的处理，这条就自己消失了。
