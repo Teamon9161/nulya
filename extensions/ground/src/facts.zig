@@ -12,7 +12,12 @@ const git = @import("git.zig");
 /// How many `git status --porcelain` lines to show before summarising.
 const status_preview: usize = 15;
 
-pub fn renderEnvironment(alloc: std.mem.Allocator, io: std.Io, w: *std.Io.Writer) !void {
+pub fn renderEnvironment(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    w: *std.Io.Writer,
+    env: *const std.process.Environ.Map,
+) !void {
     try w.writeAll("# Environment\n\n");
 
     if (std.process.currentPathAlloc(io, alloc)) |cwd| {
@@ -24,13 +29,19 @@ pub fn renderEnvironment(alloc: std.mem.Allocator, io: std.Io, w: *std.Io.Writer
     try w.writeAll("\n");
 
     // Not "which shells exist" but which command line the `shell` tool actually
-    // runs (DESIGN §8): a model that knows it is under `bash -lc` knows why its
-    // profile is sourced, and one told "bash is available" would only be
-    // guessing.
-    try w.print("shell: {s}\n", .{if (builtin.os.tag == .windows)
+    // runs (DESIGN §8). The parent Environment resolves this once and passes the
+    // result through the sanitized child environment; do not duplicate that
+    // decision here. The fallback keeps standalone ground binaries useful.
+    const shell = if (env.get("NULYA_SHELL_DIALECT")) |dialect|
+        if (std.mem.eql(u8, dialect, "bash"))
+            "bash -lc"
+        else
+            "powershell -NoProfile -NonInteractive -Command"
+    else if (builtin.os.tag == .windows)
         "powershell -NoProfile -NonInteractive -Command"
     else
-        "bash -lc"});
+        "bash -lc";
+    try w.print("shell: {s}\n", .{shell});
 
     try w.print("date: {s}\n", .{try today(alloc, io)});
 }

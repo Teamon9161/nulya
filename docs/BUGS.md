@@ -180,3 +180,13 @@ ai回复:
 **测试**：`emit` 两条（合法输入零拷贝 / 修复+计数）+ e2e 一条（真子进程吐非 UTF-8 字节，断言 session 文件整体合法 UTF-8 且那条 `output` 是 JSON 字符串）+ TUI 两条（byte array 读回文本 / 读不懂的 call 只赔掉 run summary）；三条都**验证过在旧代码上会红**。
 
 **那一场**：`tui/.nulya/sessions/s-1787918696336-f983.jsonl` 的第 13 条就地修好了（原文件留 `.bak`），可以直接续。
+
+23. `zig build e2e` 并行跑时有一两组 `test runner failed to respond`（单跑全过）
+
+**是测试的问题，不是产品的；修一行。** 活体取证（每 10 秒抓一次进程树）：挂住的 `test.exe` 底下永远只有一个 `nulya.exe session step s-…`，而它的孙进程 `bash -lc "echo still-looking"` **每次采样都换 PID**——不是死锁，是一个停不下来的 step 循环。那句 `echo still-looking` 只出现在 `launch.zig` 的 scripted `wrapup` 档。
+
+**根因**：`tests/e2e/agent.zig` 里 18 那条「预算用完先要一次报告」的测试，最后那句 `session step <parent>` 是**该文件唯一没带 `--max-steps` 的**（另外 20 处都带 `--max-steps 1`）。`wrapup` 的语义就是「永不自己收尾」，而父场用的也是它，于是那一步一路跑到内核天花板——**18 ① 刚把天花板从 50 抬到 500**，这一步就成了 500 轮 spawn shell。实测：带 `--max-steps 1` 是 2 秒，不带在 120 秒时还没跑完。单跑勉强爬得完，四组并行时每次 spawn 变慢就越过了 zig 测试 runner 的 75 秒无响应阈值。
+
+**它不削弱断言**：断言的是第一步的输出（父场读到子场的报告），后面 499 步本来就是白跑的。修完全量并行 e2e 2m32s 通过。
+
+**顺带一条读数教训**：这条最初被我读成「负载抖动」，因为我把命令写成了 `zig build e2e | tail -20 && echo OK`——`tail` 成功就把 build 的非零退出盖掉了，两轮「通过」都是假的。**管道里的退出码是最后一段的**，要判断构建结果就别在它后面接 `&&`。

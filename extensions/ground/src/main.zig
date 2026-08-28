@@ -68,7 +68,8 @@ pub fn main(init: std.process.Init) !void {
     var reader = std.Io.File.stdin().readerStreaming(io, &in_buf);
     _ = reader.interface.allocRemaining(alloc, .limited(1 << 20)) catch {};
 
-    const document = render(alloc, io) catch |err| return fail(io, alloc, err);
+    var host = try init.minimal.environ.createMap(alloc);
+    const document = render(alloc, io, &host) catch |err| return fail(io, alloc, err);
     const written_at = write(alloc, io, document) catch |err| return fail(io, alloc, err);
 
     // One field, because one is all a caller uses: the path. A byte count rode
@@ -87,7 +88,7 @@ pub fn main(init: std.process.Init) !void {
 /// is, what it asks of you, then where you are standing. A section with nothing
 /// to report writes no heading — an empty "# Project instructions" would read
 /// as "this project has no conventions", which is a claim, not an absence.
-fn render(alloc: std.mem.Allocator, io: std.Io) ![]const u8 {
+fn render(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map) ![]const u8 {
     const repo = git.locate(alloc, io);
 
     var out: std.Io.Writer.Allocating = .init(alloc);
@@ -95,7 +96,7 @@ fn render(alloc: std.mem.Allocator, io: std.Io) ![]const u8 {
 
     if (try layout.render(alloc, io, w, repo)) try w.writeAll("\n");
     if (try instructions.render(alloc, io, w, repo)) try w.writeAll("\n");
-    try facts.renderEnvironment(alloc, io, w);
+    try facts.renderEnvironment(alloc, io, w, env);
     try w.writeAll("\n");
     try facts.renderGit(alloc, io, w, repo);
 

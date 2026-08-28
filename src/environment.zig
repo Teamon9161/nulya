@@ -327,6 +327,11 @@ pub const LocalEnvironment = struct {
         } else |_| {}
 
         const bash_exe = if (builtin.os.tag == .windows) findWindowsBash(io, &host) orelse default_bash_exe else default_bash_exe;
+        const dialect_val = opts.dialect orelse defaultDialect(io, &host);
+        // Grounding is an extension, but its environment section must describe
+        // the shell this handle will actually spawn. Passing the resolved value
+        // avoids making that package duplicate the host/config detection logic.
+        try sanitized.put("NULYA_SHELL_DIALECT", dialect_val.label());
 
         var session_path: ?[]u8 = null;
         errdefer if (session_path) |p| alloc.free(p);
@@ -340,7 +345,7 @@ pub const LocalEnvironment = struct {
         return .{
             .io = io,
             .alloc = alloc,
-            .dialect_val = opts.dialect orelse defaultDialect(io, &host),
+            .dialect_val = dialect_val,
             .bash_exe = bash_exe,
             .env = sanitized,
             .session_path = session_path,
@@ -835,6 +840,14 @@ test "isSecretKey strips provider/cloud/ssh secrets and keeps PATH" {
     try std.testing.expect(!isSecretKey("PATH"));
     try std.testing.expect(!isSecretKey("HOME"));
     try std.testing.expect(!isSecretKey("USERPROFILE"));
+}
+
+test "local environment publishes the resolved shell dialect to children" {
+    var lenv = try LocalEnvironment.init(std.testing.allocator, std.testing.io, .{});
+    defer lenv.deinit();
+
+    const published = lenv.env.get("NULYA_SHELL_DIALECT") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(lenv.dialect_val.label(), published);
 }
 
 test "local environment sanitizes its child env map" {

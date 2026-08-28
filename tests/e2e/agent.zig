@@ -1063,9 +1063,9 @@ test "bundled agent: the record is what a delegation is driven by — its budget
         const arg_d = try std.fmt.allocPrint(alloc, "delegation={s}", .{d});
         defer alloc.free(arg_d);
         const forced = try runCliEnvs(alloc, io, ws, &.{
-            exe_abs, "ext",   "run",
-            ref,     "run",   "--arg",
-            arg_d,   "--arg", "permissions=unsafe",
+            exe_abs, "ext",                    "run",
+            ref,     "run",                    "--arg",
+            arg_d,   "--arg",                  "permissions=unsafe",
             "--arg", "session=s-000000000000",
         }, &.{
             .{ .key = "NULYA_SCRIPTED_MODE", .value = "loop" },
@@ -1166,7 +1166,11 @@ test "bundled agent: a sub-agent that spends every step on tools is asked to sto
     // sentence that used to stand in for having nothing. Before this, the same
     // run reported only that the budget ran out.
     {
-        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent }, in_parent);
+        // One step, like every other parent step here: the report is what this
+        // is about. Unbounded, the parent's own `wrapup` stand-in never ends a
+        // turn either, so it spends the whole kernel ceiling spawning shells —
+        // slow alone, and past the test runner's patience under a parallel run.
+        const stepped = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "session", "step", parent, "--max-steps", "1" }, in_parent);
         defer alloc.free(stepped.stdout);
         try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "here is what I found before the budget ran out") != null);
         try std.testing.expect(std.mem.indexOf(u8, stepped.stdout, "ran out of its step budget") == null);
