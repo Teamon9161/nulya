@@ -57,8 +57,11 @@ async function frames(items: TranscriptItem[], widths: number[], height: number,
     const out: string[] = []
     for (const width of widths) {
       setup.resize(width, height)
-      // Two passes: one for the resize, one for the width it hands the body.
+      // Three beats: the resize lays the boxes out, the deferred width read
+      // runs (a macrotask — `ui/measure.ts` keeps it off the frame's own
+      // stack), and the next frame paints at the corrected width.
       await setup.renderOnce()
+      await new Promise((resolve) => setTimeout(resolve, 1))
       await setup.renderOnce()
     }
     out.push(setup.captureCharFrame())

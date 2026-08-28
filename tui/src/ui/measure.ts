@@ -21,26 +21,30 @@
  * itself rather than the terminal's width — a card lives inside a pane, and the
  * sidebar takes a quarter of the screen away from it (`state/sidebar.ts`).
  *
- * HOW THE NUMBER IS KEPT TRUE: two triggers, one read.
+ * HOW THE NUMBER IS KEPT TRUE: re-read `box.width` after every painted frame,
+ * on a CLEAN STACK.
  *
- * The box's own `resize` event is the fast path — it fires during the frame
- * that laid the box out, so the correction lands as early as it can. But it
- * CANNOT be the only path, because OpenTUI drops it: `onLayoutResize` emits
- * only `if (this._visible)`, while a scrollbox's viewport culling still runs
- * `updateFromLayout()` on culled children — their `_widthValue` is updated
- * silently, and when the node scrolls into view its width already matches the
- * layout, so `sizeChanged` is false and the event never comes at all. A card
- * whose first layout happened off-viewport (streaming appends do this all the
- * time) would keep the pre-layout width forever — an answer wrapped at the
- * 12-cell floor was this bug on screen (BUGS.md #17).
+ * It used to be the box's own `resize` event, and that was wrong twice over.
+ * First, OpenTUI drops the event: `onLayoutResize` emits only
+ * `if (this._visible)`, while a scrollbox's viewport culling still lays culled
+ * children out — their width updates silently and the event never comes, so a
+ * card first laid out off-viewport kept the pre-layout width forever (a whole
+ * answer wrapped at the 12-cell floor, BUGS.md #17). Second, and worse, the
+ * event fires from INSIDE `updateFromLayout` — mid-frame, mid-layout-walk,
+ * inside the render loop's try/catch. A signal write there propagates
+ * synchronously into Solid, rebuilding a card's children while yoga is walking
+ * the very tree they hang from, and anything that throws along the way is
+ * swallowed by the loop's own error handling with the reactive graph left
+ * half-updated. Both freezes in BUGS.md #17 happened while exactly this card
+ * was streaming.
  *
- * So the safety net is the renderer's `frame` event: after every painted frame,
- * re-read `box.width`. The read is a property access and an equality-compared
- * signal set — nothing downstream moves unless the number actually changed —
- * and a frame is the one trigger that cannot be missed, because a layout that
- * changed anything is only ever seen through the frame that painted it. One
- * renderer-level listener walks all live readers (`Set`), not one listener per
- * card: EventEmitter warns at ten.
+ * So: one listener on the renderer's `frame` event, and even that only
+ * SCHEDULES the reads — `setTimeout(0)`, one flush for all readers — so the
+ * signal writes run outside the loop, on a stack where an error is an error
+ * and a layout is not being mutated mid-walk. A frame is the one trigger that
+ * cannot be missed, because a layout that changed anything is only ever seen
+ * through the frame that painted it; and the correcting write itself requests
+ * the next frame, so the correction always lands.
  *
  * The cost is one frame: on a resize the body draws at the previous width
  * before the new one arrives. That was already true — every table was stale at
@@ -49,10 +53,9 @@
 import { createSignal, onCleanup, type Accessor } from "solid-js"
 import { useRenderer } from "@opentui/solid"
 
-/** The subset of a renderable this needs: its width, and word that it changed. */
+/** The subset of a renderable this needs: its laid-out width. */
 interface Sized {
   readonly width: number
-  on(event: "resize", listener: () => void): unknown
 }
 
 /** The subset of the renderer: frames land, and each one is announced. */
@@ -60,21 +63,31 @@ interface Frames {
   on(event: "frame", listener: () => void): unknown
 }
 
-/** One "frame" listener per renderer, however many bodies are measuring. */
-const readers = new WeakMap<Frames, Set<() => void>>()
+interface Flush {
+  readers: Set<() => void>
+  scheduled: boolean
+}
+
+/** One "frame" listener and one deferred flush per renderer. */
+const flushes = new WeakMap<Frames, Flush>()
 
 function onFrame(renderer: Frames, read: () => void): () => void {
-  let set = readers.get(renderer)
-  if (!set) {
-    const live = new Set<() => void>()
-    set = live
-    readers.set(renderer, live)
+  let flush = flushes.get(renderer)
+  if (!flush) {
+    const live: Flush = { readers: new Set(), scheduled: false }
+    flush = live
+    flushes.set(renderer, live)
     renderer.on("frame", () => {
-      for (const fn of live) fn()
+      if (live.scheduled) return
+      live.scheduled = true
+      setTimeout(() => {
+        live.scheduled = false
+        for (const fn of live.readers) fn()
+      }, 0)
     })
   }
-  set.add(read)
-  return () => set.delete(read)
+  flush.readers.add(read)
+  return () => flush.readers.delete(read)
 }
 
 /**
@@ -94,14 +107,13 @@ export function boxWidth(fallback: number): [Accessor<number>, (box: Sized) => v
     // threshold (two self-consistent fixed points, T73's residual) lands in
     // the same one however it was reached — "the same width draws the same
     // table" leans on this. The narrow first paint lasts one frame at most:
-    // the resize event or the next frame's re-read corrects it.
+    // the next frame's re-read corrects it.
     if (tracked) setWidth(Math.max(1, tracked.width))
   }
   onCleanup(onFrame(renderer, read))
   const attach = (box: Sized) => {
     tracked = box
     read()
-    box.on("resize", read)
   }
   return [width, attach]
 }

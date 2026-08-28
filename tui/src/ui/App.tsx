@@ -25,6 +25,7 @@ import { StatusBar } from "./StatusBar.tsx"
 import { pickTip } from "./Welcome.tsx"
 import { WorkingStatus, activityOf, type SyncProgress } from "./WorkingStatus.tsx"
 import { createRenderWatchdog, tick_ms as watchdog_tick_ms } from "./watchdog.ts"
+import { installCrashLog } from "./crashlog.ts"
 import { QueueLane } from "./QueueLane.tsx"
 import { parseMidTask } from "../midtask.ts"
 import { TabBar } from "./TabBar.tsx"
@@ -307,6 +308,13 @@ export function noticeHold(text: string): number {
 
 /** The window in which a second Ctrl+C means what the first one offered. */
 const ctrl_c_ms = 3000
+
+/**
+ * The heartbeat echo going this stale means the reactive layer is dead — the
+ * beat is written every second, so five missed echoes is not a busy loop, it
+ * is a broken one (BUGS.md #17).
+ */
+const reactive_stall_ms = 5000
 
 /**
  * The cards browse mode walks: everything with a body that is actually on
@@ -1352,11 +1360,50 @@ export function App(props: AppProps) {
   // screen dies — so the watchdog is the difference between a stall nobody
   // sees the end of and one frame of hiccup.
   {
+    const crashes = installCrashLog(props.ws.dir, renderer)
     const watchdog = createRenderWatchdog(renderer, () => activity()?.moving === true)
     const timer = setInterval(() => watchdog.tick(), watchdog_tick_ms)
+    // The reactive heartbeat (BUGS.md #17): a signal written every second, an
+    // effect that echoes it. When the echo goes stale the renderer is fine but
+    // Solid is not — updates no longer reach the screen, which no frame-level
+    // watchdog can see. The verdict goes to the crash log, and the console
+    // overlay is opened DELIBERATELY: it is renderer-level, so it still draws,
+    // and it is where OpenTUI cached the very error that broke the graph. A
+    // dead UI showing its reason beats a dead UI pretending to work.
+    const [beat, setBeat] = createSignal(0)
+    let echoAt = Date.now()
+    createEffect(() => {
+      beat()
+      echoAt = Date.now()
+    })
+    let verdictGiven = false
+    let lastTick = Date.now()
+    const beatTimer = setInterval(() => {
+      const tickNow = Date.now()
+      // An event loop that was itself starved (heavy load, a debugger paused
+      // the process) proves nothing about the graph: rebase instead of judging
+      // on a clock nobody was advancing.
+      if (tickNow - lastTick > 3000) echoAt = tickNow
+      lastTick = tickNow
+      if (!verdictGiven && tickNow - echoAt >= reactive_stall_ms) {
+        verdictGiven = true
+        crashes.note(
+          "heartbeat",
+          new Error("reactive layer stalled: signal writes no longer reach effects; opening the console overlay"),
+        )
+        renderer.console.show()
+      }
+      try {
+        setBeat((tick) => tick + 1)
+      } catch (error) {
+        crashes.note("heartbeat-write", error)
+      }
+    }, 1000)
     onCleanup(() => {
       clearInterval(timer)
+      clearInterval(beatTimer)
       watchdog.dispose()
+      crashes.dispose()
     })
   }
 

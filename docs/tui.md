@@ -2385,3 +2385,17 @@ tab 条的 `✕`/`+`/`▎`；`stripPlan` 的**不变量**"画出来的一切都�
 **测试**（`test/watchdog.test.ts` 4 条纯逻辑 + `test/measure.test.tsx` 2 条走真 testRender）：停摆才 nudge、静止不 nudge、一个窗口一次 retry、真帧解除；无 resize 事件的宽度照样被读到（**在旧代码上会红**，验证过——culled first layout 正是「从不 emit resize 的 box」）、resize 快路径仍在。没断言 stall 阈值的字面值与 OpenTUI 的内部状态名：那是常量与别人的实现。
 
 **没做的**：升级 OpenTUI（0.5.9 两处代码逐字节相同，升了也一样）· 给上游发 patch（该发，但屏幕不能等它合并）· 把 nudge 次数画上屏（它是证据不是行为，真要看走 debug）。
+
+### T76 · 第二次冻结的活体取证：诊断修正，吞错误的三张嘴装上记录（2026-08-28）
+
+**内核零改动**；`bun test` 594 → 597 pass、`tsc` 干净。T75 提交后一小时内第二次冻结，同样的两个症状（`preparing write` 停摆 + 流式那张卡缩成 12 cells）——但这次进程没被关掉，第一次有活体可查。
+
+**活体证据链**（`/proc` 直读，全部当场取证）：`session step` 子进程已消失、fd 表里连管道都没有（内核那半早就跑完了）· 主线程停在 epoll、10 秒只积 24 tick · `wchar` 零增长 · GC 线程有稳定小负载——合起来只有一种读法：**T75 的 watchdog 每 2 秒都在强制一帧、帧也成功了、只是画的内容一模一样**（diff 为空所以零字节），**渲染器完全健康，死的是 Solid 响应层**：信号写不再传播到 renderable，连 90ms 的 spinner 信号都停了。T75 的「feed 死等」诊断对这台机器**不成立**——Linux 上 `useThread` 被 OpenTUI 强制关掉，而这个 app 不传自定义 stdout、`useFeedOutput` 恒 false，**根本没有 feed**；watchdog 保留（别的平台/配置真有 feed，帧级停摆它照样救），但它对「图死了、帧还活着」这一类无能为力，这正是它这次一直在勤恳工作却救不了屏幕的原因。
+
+**错误为什么不可见**：OpenTUI 在构造时挂了 `process.on("uncaughtException")` / `("unhandledRejection")`，handler 是一行 `console.error`——而 console 被它截进一个 overlay，这个 app `openConsoleOnError: false`（有正当理由：抢焦点、Esc 只 blur）。三样加起来 = **致命错误进程不死、屏幕不变、原因躺在一个永远打不开的缓存里**。两次冻结都在同一形状的流式卡上、都在 T73 落地之后；主嫌疑是 T73 的 `resize` 监听——它在 `updateFromLayout` **布局中途、渲染循环的 try 里**同步驱动 Solid 传播（重建 `<For>` 子节点时 yoga 正在走那棵树），抛出的任何东西被 loop 的 catch 吞掉、图留在半更新。
+
+**改动三件**：① `ui/measure.ts` **删掉 resize 监听**，frame 事件只**调度**一次 `setTimeout(0)` 的统一 flush（全部读者一次），信号写从此在干净栈上跑——错误是错误（能浮到 process 钩子）、布局不在走到一半时被改；修正照旧一帧内落地（写本身会请求下一帧）。② 新 `ui/crashlog.ts`：把三张吞错误的嘴（`uncaughtException` / `unhandledRejection` / renderer 的 `render:error`）全部接到 **`.nulya/tui-crash.log`**（时间戳 + 完整栈；同一错误 10Hz 重复时折叠成计数——被毒化的图会在每个 timer tick 上抛同一个错，刷屏会埋掉真正点名案发时刻的第一行）；App 卸载时摘钩（每次挂载漏一个 process 监听器，测试挂两次就是泄漏）。③ **响应层心跳**（App 内）：每秒写一个信号、一个 effect 回声进普通变量，5 秒无回声 = 图死——记 log 并**故意打开 console overlay**（它是 renderer 级的，Solid 死了照样画，而且里面正是被吞的错误原文）：一个说得出死因的死屏幕好过一个装活的。事件循环自己被饿（重负载、调试器）不算证据，tick 间隔 >3s 就 rebase 而不是裁决。
+
+**测试**（594 → 597）：measure 的两条改写（无事件的宽度照样被读到 · **修正必须不在帧自己的栈上落地**——后一条钉的就是这次的案发机制）+ crashlog 三条（格式 · 重复折叠 · 写不进去保持沉默）；markdown 的 frames() 助手多让一拍（宏任务 settle），T73 的三条断言一字未动。
+
+**没做的**：自动重挂 Solid 根（盲目 remount 可能变成循环崩溃；等第一份 crash log 指认真凶、修掉源头之后再评估要不要兜底）· 升级 OpenTUI（0.5.9 与 0.5.3 在这些路径上逐字节相同）· 给上游报 issue（该报：visible-gated resize、swallowed handler 两处，等 crash log 拿到实锤一起带上复现）。
