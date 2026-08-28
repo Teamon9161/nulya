@@ -1,4 +1,4 @@
-import { Index, Match, Show, Switch, createMemo } from "solid-js"
+import { ErrorBoundary, Index, Match, Show, Switch, createMemo } from "solid-js"
 import type { ScrollBoxRenderable } from "@opentui/core"
 import { Card } from "../render/cards/index.tsx"
 import { RunCard } from "../render/cards/RunCard.tsx"
@@ -114,6 +114,11 @@ export function transcriptRows(
 function rowSubject(row: TranscriptRow | undefined): TranscriptItem | undefined {
   if (!row) return undefined
   return row.kind === "item" ? row.item : row.items[0]
+}
+
+/** An item row's item, for prop getters — read where the getter runs. */
+function itemOf(row: TranscriptRow): TranscriptItem {
+  return (row as Extract<TranscriptRow, { kind: "item" }>).item
 }
 
 export function capabilityPreviousVersions(
@@ -266,6 +271,17 @@ export function Transcript(props: {
             width="100%"
             marginTop={gapBefore(rowSubject(rows()[index - 1]), rowSubject(row())!)}
           >
+            {/* One boundary per row: a card that cannot draw becomes one line
+                that says so, not a poisoned reactive graph and a frozen
+                screen. Four freezes in a day earned this fence (BUGS.md #17)
+                — the last one died rendering the ERROR notice. */}
+            <ErrorBoundary
+              fallback={(error: unknown) => (
+                <text fg={style.theme.err}>
+                  {`✗ card failed to draw: ${error instanceof Error ? error.message : String(error)}`}
+                </text>
+              )}
+            >
             <Switch>
               <Match when={row().kind === "run"}>
                 <RunCard
@@ -274,19 +290,25 @@ export function Transcript(props: {
                   contributions={props.contributions}
                 />
               </Match>
+              {/* Props as getters, NEVER an IIFE that reads `row()` (BUGS.md
+                  #17): an immediately-invoked child compiles into a reactive
+                  insert, so a new row OBJECT — which every snapshot update
+                  produces for every row — tore down and rebuilt the whole
+                  card. Every streamed delta was recreating every visible
+                  card's every <text>; destruction runs on nextTick, so one
+                  burst of deltas inside a tick stacked tens of thousands of
+                  live native text buffers against a pool of 65,534 — and the
+                  pool running dry is the frozen screen. With getters the Card
+                  mounts once per row and its content updates in place. */}
               <Match when={row().kind === "item"}>
-                {(() => {
-                  const item = (row() as Extract<TranscriptRow, { kind: "item" }>).item
-                  return (
-                    <Card
-                      item={item}
-                      contributions={props.contributions}
-                      capabilityPreviousVersion={capabilityPrevious().get(item.key) ?? null}
-                    />
-                  )
-                })()}
+                <Card
+                  item={itemOf(row())}
+                  contributions={props.contributions}
+                  capabilityPreviousVersion={capabilityPrevious().get(itemOf(row()).key) ?? null}
+                />
               </Match>
             </Switch>
+            </ErrorBoundary>
           </box>
         )}
       </Index>

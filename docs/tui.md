@@ -2413,3 +2413,17 @@ tab 条的 `✕`/`+`/`▎`；`stripPlan` 的**不变量**"画出来的一切都�
 **测试**：markdown 的三条回到本来的形状（`frames()` 三拍——第三拍是 scrollbox 对新内容高度的裁决），「同一宽度画同一张表」把**滚动条 thumb 掩出比较**——thumb 的几何反映一个 OpenTUI 不总重算的 scrollHeight，两条路径到同一宽度时**内容逐字节相同**而 thumb 可以诚实地不同（列位置是 OpenTUI 的事，thumb 也是）。watchdog / measure 的 6 条测试随机制一起删除。
 
 **留给上游的**：`createTextBuffer` 返回 null 时一行不带上下文的 `Failed to create TextBuffer` · `uncaughtException`/`unhandledRejection` 被降格成看不见的 console 行 · culled 节点不发 `resize` · scrollbar thumb 的 scrollHeight 缓存——四处都该给 opentui 报 issue，现在有最小案情与堆栈了。
+
+### T78 · 第四次冻结定案：一个 IIFE 让每个 delta 重建整个 transcript，撞上 65,534 的 native 池（2026-08-28）
+
+**内核零改动**；`bun test` 591 → 592、`tsc` 干净。第四次冻结**没有闪烁**（T77 已除掉振荡）、新进程开跑 2 分钟就死，crash log 又是同一条 `createTextBuffer` 抛错——振荡耗尽的解释被推翻，真相还要再深一层。
+
+**两个测量钉死的事实**：① native TextBuffer 池是 **u16：65,534 个 live buffer 封顶**（脚本实测 65,534 处 `Failed to create TextBuffer`，churn 30 万次无碍——destroy 会回收，所以这不是泄漏，是**瞬时占用**撞顶）；② `Transcript.tsx` 的 `<Match>` 里那个读了 `row()` 的 **IIFE 子表达式**编译成响应式 insert——而 `rows()` 每次 snapshot 更新都产出全新 row 对象，于是**每个流式 delta 都拆掉重建每一张可见卡**（Index 的注释明说选它就是为了避免这件事，IIFE 把它废了）。销毁排在 nextTick：stream reader 一次排干管道里的一批行时，同一 tick 里的每个 delta 的重建**全部叠加着活到 tick 结束**——玩具规模（21 卡 × 30 delta）实测瞬时 **10,080**，真实 transcript 直接走到 65,534。**这一条也是全部前情的总根**：最早的缩团（卡片每 delta 重建，宽度纠正永远追不上下一次重建）、持续的高 CPU 与 GC 压力、以及「resume 大 session 后更快死」。
+
+**修法一行**：IIFE 换成**惰性 props**（`<Card item={itemOf(row())} …/>`——props 编译成 getter，Card 每个位置挂载一次、内容原地更新；`Card` 本就是响应式 `Switch` dispatch，天然支持 item 变化）。burst 探针从 10,080 → **0**。**回归测试**（`test/churn.test.tsx`）钉的是机制不是数字：同一场 30-delta burst，在 0 张与 20 张旧卡的 transcript 上做两遍，断言差值 < 1000——**代价 ∝ 变化的内容、与 transcript 大小无关**（旧代码差值 50,400，验证过会红）；tick 尾销毁跑完后零泄漏。
+
+**每行卡片加 `ErrorBoundary`**：四次冻结换来的一道栅栏——一张画不出来的卡从此是一行 `✗ card failed to draw: <原因>`，不是一张毒化整图的静默炸弹（第三次冻结死在渲染 ErrorNotice 的路上，「连报错都渲染不了」不该有第二次）。
+
+**Welcome / ProviderView 各有一个同形 IIFE**：都在低频路径（开屏空 transcript、设置面板），重建代价有界，未改——但这个模式从此该躲着写（本条注释已在案发处说明白）。
+
+**回答「是不是该换 libvaxis」**：这轮四个 bug 里，真正属于 OpenTUI 的是四处——u16 池上限 + 无上下文的错误文案、吞掉 uncaughtException、culled 节点不发 resize、scrollbar 的 scrollHeight 缓存；属于**我们自己**的是最重的这个 IIFE（任何响应式框架上写这个形状都churn，只是别的栈没有 65,534 这根引信）。换 libvaxis 换掉的是引信不是炸药，而代价是整套组件 + Solid 响应模型全部自造。**结论：不换**；四处上游问题该带着最小复现报 issue，本仓已全部在应用层封住或绕开。
