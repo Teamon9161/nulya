@@ -260,6 +260,8 @@ export interface ModelView {
   efforts: string[]
   default_effort: string | null
   context_window: number | null
+  /** Whether the catalog explicitly permits `session append --image`. */
+  vision: boolean
 }
 
 /**
@@ -350,6 +352,7 @@ function model(m: ModelView): ModelView {
     efforts: Array.isArray(m.efforts) ? m.efforts : [],
     default_effort: m.default_effort ?? null,
     context_window: m.context_window ?? null,
+    vision: m.vision ?? false,
   }
 }
 
@@ -963,14 +966,19 @@ const appends = new Map<string, Promise<void>>()
  * so the caller must treat it as queued until the matching `user_text` arrives.
  * Calls for the same session run one after another, in call order.
  */
-export function sessionAppend(ws: Workspace, id: string, text: string): Promise<void> {
+export interface ImageInput {
+  bytes: Uint8Array
+  mediaType: "image/png" | "image/jpeg"
+}
+
+export function sessionAppend(ws: Workspace, id: string, text: string, images: readonly ImageInput[] = []): Promise<void> {
   // The id first: it has a fixed alphabet (`s-[A-Za-z0-9._-]+`), so `@` cannot
   // be part of it and the key is unambiguous whatever the directory contains.
   const key = `${id}@${ws.dir}`
   const previous = appends.get(key) ?? Promise.resolve()
   const mine = previous.then(
-    () => appendNow(ws, id, text),
-    () => appendNow(ws, id, text),
+    () => appendNow(ws, id, text, images),
+    () => appendNow(ws, id, text, images),
   )
   // The chain must never break on one failure; the caller sees its own.
   const settled = mine.then(
@@ -984,11 +992,19 @@ export function sessionAppend(ws: Workspace, id: string, text: string): Promise<
   return mine
 }
 
-async function appendNow(ws: Workspace, id: string, text: string): Promise<void> {
+async function appendNow(ws: Workspace, id: string, text: string, images: readonly ImageInput[]): Promise<void> {
   const nonce = Math.random().toString(36).slice(2, 10)
-  const rel = `.nulya/scratch/tui-${Date.now().toString(36)}-${nonce}.txt`
-  await Bun.write(`${ws.dir}/${rel}`, text)
-  const result = await run(ws, ["session", "append", id, "--file", rel])
+  const stem = `.nulya/scratch/tui-${Date.now().toString(36)}-${nonce}`
+  const textPath = `${stem}.txt`
+  await Bun.write(`${ws.dir}/${textPath}`, text)
+  const args = ["session", "append", id, "--file", textPath]
+  for (let index = 0; index < images.length; index++) {
+    const image = images[index]!
+    const path = `${stem}-${index}.${image.mediaType === "image/png" ? "png" : "jpg"}`
+    await Bun.write(`${ws.dir}/${path}`, image.bytes)
+    args.push("--image", path)
+  }
+  const result = await run(ws, args)
   if (result.code !== 0) fail("session append failed", result)
 }
 

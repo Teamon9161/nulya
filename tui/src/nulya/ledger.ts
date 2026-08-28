@@ -85,7 +85,7 @@ export interface ToolResultEntry {
  * only appears on events drained from the inbox.
  */
 export type LedgerEvent =
-  | { seq: number; origin?: string; kind: "user_text"; text: string }
+  | { seq: number; origin?: string; kind: "user_text"; text: string; images?: { media_type: string; data: string }[] }
   | {
       seq: number
       origin?: string

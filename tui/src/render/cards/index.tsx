@@ -21,7 +21,7 @@ import type { Contributions } from "../../nulya/files.ts"
  * One transcript item → one card. Live and replay both come through here, so a
  * card can never depend on having seen the stream (tui.md §3).
  */
-export function Card(props: { item: TranscriptItem; contributions?: Contributions[]; capabilityPreviousVersion?: string | null }) {
+export function Card(props: { item: TranscriptItem; contributions?: Contributions[]; capabilityPreviousVersion?: string | null; highlightedCallId?: string | null }) {
   return (
     <Switch>
       {/* Compaction's two turns are user turns as far as the ledger is
@@ -87,6 +87,7 @@ export function Card(props: { item: TranscriptItem; contributions?: Contribution
           <ToolCard
             item={props.item as Extract<TranscriptItem, { kind: "tool" }>}
             contributions={props.contributions}
+            highlighted={(props.item as Extract<TranscriptItem, { kind: "tool" }>).callId === props.highlightedCallId}
           />
           <Show when={(props.item as Extract<TranscriptItem, { kind: "tool" }>).awaiting}>
             <ApprovalPrompt />

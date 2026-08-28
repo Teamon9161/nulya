@@ -151,6 +151,8 @@ export function Transcript(props: {
   items: TranscriptItem[]
   header?: SessionHeader | null
   contributions?: Contributions[]
+  /** The one tool card whose sweep remains alive until this run settles. */
+  highlightedCallId?: string | null
   /** On a tab with no session yet: what the first message will freeze (T22). */
   plan?: NextSession
   /**
@@ -288,6 +290,7 @@ export function Transcript(props: {
                   items={(row() as Extract<TranscriptRow, { kind: "run" }>).items}
                   itemKey={row().key}
                   contributions={props.contributions}
+                  highlightedCallId={props.highlightedCallId}
                 />
               </Match>
               {/* Props as getters, NEVER an IIFE that reads `row()` (BUGS.md
@@ -305,6 +308,7 @@ export function Transcript(props: {
                   item={itemOf(row())}
                   contributions={props.contributions}
                   capabilityPreviousVersion={capabilityPrevious().get(itemOf(row()).key) ?? null}
+                  highlightedCallId={props.highlightedCallId}
                 />
               </Match>
             </Switch>

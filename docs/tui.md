@@ -2427,3 +2427,16 @@ tab 条的 `✕`/`+`/`▎`；`stripPlan` 的**不变量**"画出来的一切都�
 **Welcome / ProviderView 各有一个同形 IIFE**：都在低频路径（开屏空 transcript、设置面板），重建代价有界，未改——但这个模式从此该躲着写（本条注释已在案发处说明白）。
 
 **回答「是不是该换 libvaxis」**：这轮四个 bug 里，真正属于 OpenTUI 的是四处——u16 池上限 + 无上下文的错误文案、吞掉 uncaughtException、culled 节点不发 resize、scrollbar 的 scrollHeight 缓存；属于**我们自己**的是最重的这个 IIFE（任何响应式框架上写这个形状都churn，只是别的栈没有 65,534 这根引信）。换 libvaxis 换掉的是引信不是炸药，而代价是整套组件 + Solid 响应模型全部自造。**结论：不换**；四处上游问题该带着最小复现报 issue，本仓已全部在应用层封住或绕开。
+
+
+### T79 · 三个等待感知缺口：工具扫光延续、图片粘贴、任务先切页（2026-08-28）
+
+**内核零改动**；vision 复用已经落地的 `session append --image`，不再停留在 T14 当时的“图片等内核 track”。
+
+1. **工具卡的动效由一次 run 的生命周期决定，不再由 provisional 卡是否尚未落盘决定。** 旧的 `ToolCard.active = !resolved || state != done` 让调用一流出来就亮、tool end / ledger promotion 一到就灭；下一轮模型开始 responding 时，用户刚看见的工具已经失去唯一的视觉锚点。`SessionSnapshot.highlightedToolCallId` 现在只在 executor 的 `tool begin` 时指向该 call，tool end、step end 和随后一轮 model delta 都保留；下一个 tool begin 才换过去，`run done/error` 才清空。这样是同一条柔和扫光继续经过“执行 → 记录结果 → 模型解释结果”，不是另造一个永驻状态；pending 卡也不再先闪一下。T78 的惰性 Card props 仍在，卡不因 delta 重挂。
+
+2. **composer 的 Ctrl+V 能拿桌面剪贴板里的 PNG/JPEG。** 终端的 bracketed paste 只有文本字节，图片没有可等待的 `PasteEvent`，所以 `clipboard.ts` 在应用收到 Ctrl+V 时直接问 host clipboard：Wayland 用 `wl-paste`，X11 用 `xclip`，macOS 用 `pngpaste`；helper 可缺，按顺序静默降级，最终以魔数而不是 helper 声称的 MIME 判型。图片变成 `[Image #N]` 草稿 token，下面一行说 MIME 与大小，Backspace 整体删除；提交时 token 从文字里拿掉，原 bytes 经 `nulya/cli.ts` 写进本场 workspace 的 scratch，再以可重复 `--image` 与同一条 `--file` 一起送进 `session append`。driver / observer / interrupt 三条 append 路径都携带同一组图片；图片-only turn 合法。ledger 投影保留 `images` 列并在 user 卡/queue 上显示 `1 image`，不把 base64 画进 transcript。模型目录的 `vision` 列也终于由 TUI 的 `ModelView` 类型读回；真正能不能收仍由内核按冻结 model identity 设门，TUI 不猜。
+
+3. **`/agent <name> <task>` 先开 destination tab，再等定义刷新、prompt render 与 `session new`。** 旧路径把三个 subprocess 全等完才 `tabs.draft()`，健康的慢启动看起来也像 Enter 没生效。现在只要确实给了 task，就同步开一个继承当前 workspace/model 的 draft 并切过去，状态行写 `loading its definition…`；定义随后给出 model override 时就地更新，再 materialize 同一 tab。未知 agent、外部 runner 或不受信 workspace 会只收回这个 untouched draft，回到原 tab，不留下假任务。无 task 的语法提示与 bare picker 照旧不创建 tab。
+
+**回归测试**：composer 真按 Ctrl+V 事件走图片 token → 提交 bytes → 整体删除；clipboard 魔数；session stream 钉住 tool end + step end + 下一轮 responding 后仍高光、下一 tool 接棒、run done 清空；delegate 测试在 agent session 出现之前先看到第二个 `(new)` tab 与 loading 状态。`tsc --noEmit` 干净；相关 45 + 33 + 33 + delegate 5 项均通过，完整 `bun test` 两趟分别在 harness 的 180 / 300 秒上限被终止前无失败（套件本身超过五分钟），随后相关分片补跑通过；`bun run compile` 通过。

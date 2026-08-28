@@ -13,9 +13,10 @@ export function UserTurn(props: { item: UserItem; text?: string; badge?: string 
   const style = useStyle()
   const screen = useScreen()
   const body = () => {
-    const suffix = [props.badge, props.item.queued ? "queued" : null].filter(Boolean).join(" · ")
+    const images = props.item.imageCount ? `${props.item.imageCount} image${props.item.imageCount === 1 ? "" : "s"}` : null
+    const suffix = [props.badge, images, props.item.queued ? "queued" : null].filter(Boolean).join(" · ")
     const text = props.text ?? props.item.text
-    return suffix.length > 0 ? `${text} · ${suffix}` : text
+    return suffix.length > 0 ? (text.length > 0 ? `${text} · ${suffix}` : suffix) : text
   }
   const room = () => Math.max(12, Math.min(screen().width, style.maxWidth) - 5)
   const lines = createMemo(() => hardWrapLines(body(), room()))

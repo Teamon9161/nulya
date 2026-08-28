@@ -26,7 +26,7 @@ import type { Contributions } from "../../nulya/files.ts"
  * nothing worth showing — a `(6 calls)` beside `read ×3 · grep ×2 · shell`
  * would be the same sentence twice. Success is silent here too.
  */
-export function RunCard(props: { items: ToolItem[]; itemKey: string; contributions?: Contributions[] }) {
+export function RunCard(props: { items: ToolItem[]; itemKey: string; contributions?: Contributions[]; highlightedCallId?: string | null }) {
   const style = useStyle()
   return (
     <CardFrame
@@ -38,7 +38,7 @@ export function RunCard(props: { items: ToolItem[]; itemKey: string; contributio
       defaultOpen={style.settings.transcript.tool_output === "expanded"}
       foldable
     >
-      <For each={props.items}>{(item) => <ToolCard item={item} contributions={props.contributions} />}</For>
+      <For each={props.items}>{(item) => <ToolCard item={item} contributions={props.contributions} highlighted={item.callId === props.highlightedCallId} />}</For>
     </CardFrame>
   )
 }

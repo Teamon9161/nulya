@@ -24,7 +24,7 @@
  */
 import { createSignal, type Accessor } from "solid-js"
 import { wrapMidTask } from "../midtask.ts"
-import { sessionAppend, sessionCancel, sessionFollow, type FollowHandle } from "../nulya/cli.ts"
+import { sessionAppend, sessionCancel, sessionFollow, type FollowHandle, type ImageInput } from "../nulya/cli.ts"
 import { probeWriterLease } from "../nulya/files.ts"
 import { createDriver, type Driver, type DriverOptions, type DriverStatus } from "./driver.ts"
 import type { Workspace } from "../nulya/bin.ts"
@@ -40,7 +40,7 @@ export interface Attachment {
   /** The lease has looked free for a while: `Enter` would take over. */
   takeoverReady: Accessor<boolean>
   /** `framed`: the text already carries its own framing (`Driver.send`). */
-  send(text: string, framed?: boolean): Promise<void>
+  send(text: string, framed?: boolean, images?: readonly ImageInput[]): Promise<void>
   step(): Promise<void>
   cancel(): Promise<void>
   kill(): void
@@ -52,7 +52,7 @@ export interface Attachment {
    * composer already does while observing: the append lands in the inbox and
    * the other writer drains it at its own next step boundary.
    */
-  interruptAndDeliver(text: string, framed?: boolean): Promise<void>
+  interruptAndDeliver(text: string, framed?: boolean, images?: readonly ImageInput[]): Promise<void>
   /** Stop observing and try to drive again (tui.md §5.6, "press ↵ to take over"). */
   takeOver(): void
   dispose(): void
@@ -183,12 +183,12 @@ export function createAttachment(
   // Named rather than object-literal methods, so `interruptAndDeliver` below
   // can call `send` directly instead of a second copy of the observer's
   // append path.
-  async function send(text: string, framed = false): Promise<void> {
+  async function send(text: string, framed = false, images: readonly ImageInput[] = []): Promise<void> {
     const trimmed = text.trim()
-    if (trimmed.length === 0) return
+    if (trimmed.length === 0 && images.length === 0) return
     if (role() === "driver") {
       driven = true
-      await driver.send(trimmed, framed)
+      await driver.send(trimmed, framed, images)
       return
     }
     // Observer: append only. The turn is deposited in the inbox and the other
@@ -198,11 +198,11 @@ export function createAttachment(
     // and the turn carries the mid-task framing (midtask.ts); "free" and
     // "unknown" claim nothing, so they wrap nothing.
     const wire = !framed && probeWriterLease(ws, id) === "held" ? wrapMidTask(trimmed) : trimmed
-    state.enqueueUser(wire)
+    state.enqueueUser(wire, images.length)
     setSending(true)
     setQueuedAt(Date.now())
     try {
-      await sessionAppend(ws, id, wire)
+      await sessionAppend(ws, id, wire, images)
     } catch (error) {
       state.setError(error instanceof Error ? error.message : String(error))
     } finally {
@@ -244,13 +244,13 @@ export function createAttachment(
    * `send` already does while observing (D3): the message joins the inbox and
    * whoever actually holds the lease drains it at its own next boundary.
    */
-  async function interruptAndDeliver(text: string, framed = false): Promise<void> {
+  async function interruptAndDeliver(text: string, framed = false, images: readonly ImageInput[] = []): Promise<void> {
     if (role() === "driver") {
       driven = true
-      await driver.interruptAndDeliver(text, framed)
+      await driver.interruptAndDeliver(text, framed, images)
       return
     }
-    await send(text, framed)
+    await send(text, framed, images)
   }
 
   function takeOver(): void {

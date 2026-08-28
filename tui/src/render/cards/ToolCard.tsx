@@ -23,7 +23,7 @@ import type { ToolItem } from "../../state/session.ts"
  * Cancellation wins over the tool's own identity: what matters about a call the
  * kernel closed out is that it did not finish, not that it was a `shell`.
  */
-export function ToolCard(props: { item: ToolItem; contributions?: Contributions[] }) {
+export function ToolCard(props: { item: ToolItem; contributions?: Contributions[]; highlighted?: boolean }) {
   const style = useStyle()
   const plugins = usePlugins()
   /**
@@ -44,7 +44,10 @@ export function ToolCard(props: { item: ToolItem; contributions?: Contributions[
     }),
   )
   const marker = createMemo(() => (props.item.output ? cancelMarkerOf(props.item.output) : null))
-  const active = () => props.item.awaiting || !props.item.resolved || props.item.state !== "done"
+  // Waiting for approval is visibly live; otherwise the session projection
+  // chooses exactly one card and keeps it sweeping through the following model
+  // response. A merely streamed/pending card does not flash on and off.
+  const active = () => props.item.awaiting || props.highlighted === true
 
   return (
     <CardActivityContext.Provider value={active}>

@@ -110,6 +110,7 @@ test("a profile's own catalog beats the global one: the same id is a different m
             efforts: ["low", "medium", "high", "xhigh"],
             default_effort: "high",
             context_window: 258_400,
+            vision: false,
           },
         ],
       },

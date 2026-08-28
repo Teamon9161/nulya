@@ -98,6 +98,13 @@ test("/agent opens a second tab on a session wearing the definition's prompt, an
     await setup.mockInput.typeText("/agent probe find the parser")
     setup.mockInput.pressEnter()
 
+    // The destination appears before definition rendering and `session new`.
+    // Starting a task must acknowledge Enter with a page switch, not leave the
+    // old conversation frozen-looking behind a subprocess.
+    const launching = await settle(setup, 2)
+    expect(launching).toContain("loading its definition")
+    expect((launching.match(/\(new\)/g) ?? []).length).toBeGreaterThanOrEqual(2)
+
     // A session of its own, wearing the persona as BYTES its header froze —
     // rendered from the markdown, and installed nowhere at all.
     await until(async () => (await agentSession("probe")) !== null, 60_000)

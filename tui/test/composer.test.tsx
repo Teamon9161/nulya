@@ -403,3 +403,44 @@ test("disabled composer stays visible but does not take text", async () => {
     setup.renderer.destroy()
   }
 }, 60_000)
+
+
+test("Ctrl+V attaches a clipboard image and submits it as an image block", async () => {
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3])
+  const sent: { text: string; images: readonly { bytes: Uint8Array; mediaType: string }[] }[] = []
+  const setup = await testRender(
+    () => (
+      <StyleContext.Provider value={style}>
+        <Composer
+          readClipboardImage={async () => ({ bytes: png, mediaType: "image/png" })}
+          onSubmit={(text, _interrupt, images = []) => sent.push({ text, images })}
+        />
+      </StyleContext.Provider>
+    ),
+    { width: 70, height: 10 },
+  )
+  try {
+    await settle(setup, 3)
+    setup.mockInput.pressKey("v", { ctrl: true })
+    let frame = await settle(setup, 4)
+    expect(frame).toContain("[Image #1]")
+    expect(frame).toContain("image/png")
+
+    await setup.mockInput.typeText(" explain this")
+    setup.mockInput.pressEnter()
+    await settle(setup, 3)
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toBe(" explain this")
+    expect(sent[0]!.images).toHaveLength(1)
+    expect(sent[0]!.images[0]!.bytes).toEqual(png)
+
+    // The same whole-token Backspace behaviour as folded text attachments.
+    setup.mockInput.pressKey("v", { ctrl: true })
+    frame = await settle(setup, 4)
+    expect(frame).toContain("[Image #2]")
+    setup.mockInput.pressBackspace()
+    expect(await settle(setup, 3)).not.toContain("[Image #2]")
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 60_000)

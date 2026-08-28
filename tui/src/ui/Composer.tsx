@@ -25,6 +25,8 @@ import {
 } from "../paste.ts"
 import { skillCompletions, type SkillTable } from "../skills.ts"
 import { packageCompletions, resolve as resolvePackageCommands, type PackageCommandTable } from "../packageCommands.ts"
+import { clipboardImage } from "../clipboard.ts"
+import type { ImageInput } from "../nulya/cli.ts"
 
 /**
  * The composer's border in ascii mode: the one bordered object on screen still
@@ -130,8 +132,17 @@ export interface ComposerApi {
   triggerInterrupt(): void
 }
 
+export interface ImageAttachment extends ImageInput {
+  id: number
+}
+
+const imagePlaceholder = (id: number) => `[Image #${id}]`
+
 export function Composer(props: {
-  onSubmit: (text: string, interrupt?: boolean) => void
+  onSubmit: (text: string, interrupt?: boolean, images?: readonly ImageInput[]) => void
+  /** Test seam; the real path asks the desktop clipboard on Ctrl+V. */
+  readClipboardImage?: () => Promise<ImageInput | null>
+  onNotice?: (text: string) => void
   /**
    * Enter on an empty composer. Returns true when it meant something — the
    * take-over gesture of observer mode (tui.md §5.6) — and false when Enter on
@@ -206,6 +217,7 @@ export function Composer(props: {
    * the token drops both.
    */
   const [attachments, setAttachments] = createSignal<PasteAttachment[]>([])
+  const [images, setImages] = createSignal<ImageAttachment[]>([])
   /**
    * Whether the keyboard is in the box. The border is the only thing on screen
    * that says so, and it has to say it: in browse mode and under an overlay the
@@ -215,6 +227,7 @@ export function Composer(props: {
   let nextAttachment = 1
   /** The ones the draft currently refers to — what the line under the box shows. */
   const drafted = () => referenced(line(), attachments())
+  const draftedImages = () => images().filter((image) => line().includes(imagePlaceholder(image.id)))
 
   /**
    * The `@` menu. Recomputed from the buffer and the cursor on every change
@@ -352,6 +365,18 @@ export function Composer(props: {
     sync()
   }
 
+  const pasteImage = async () => {
+    const image = await (props.readClipboardImage ?? clipboardImage)()
+    if (!image) {
+      props.onNotice?.("the clipboard has no PNG or JPEG image · text paste still uses your terminal")
+      return
+    }
+    const attachment: ImageAttachment = { id: nextAttachment++, ...image }
+    setImages([...images(), attachment])
+    area?.insertText(imagePlaceholder(attachment.id))
+    sync()
+  }
+
   /**
    * Backspace right after a placeholder takes the whole token. Without this it
    * would chew the `]` off and leave a shape that no longer stands for
@@ -360,11 +385,13 @@ export function Composer(props: {
   const backspaceAttachment = (): boolean => {
     if (!area) return false
     const found = placeholderBefore(area.plainText, area.cursorOffset, attachments())
-    if (!found) return false
-    const token = placeholderFor(found.id)
+    const image = images().find((entry) => area!.plainText.slice(0, area!.cursorOffset).endsWith(imagePlaceholder(entry.id)))
+    if (!found && !image) return false
+    const token = found ? placeholderFor(found.id) : imagePlaceholder(image!.id)
     area.setSelection(area.cursorOffset - [...token].length, area.cursorOffset)
     area.deleteSelection()
-    setAttachments(attachments().filter((entry) => entry.id !== found.id))
+    if (found) setAttachments(attachments().filter((entry) => entry.id !== found.id))
+    if (image) setImages(images().filter((entry) => entry.id !== image.id))
     sync()
     return true
   }
@@ -397,6 +424,7 @@ export function Composer(props: {
         // leaving them would keep a thousand folded lines alive behind an empty
         // box, and the next `[Pasted text #1]` would stand for the old one.
         setAttachments([])
+        setImages([])
         shown = null
       },
       restore: (text: string) => {
@@ -421,16 +449,20 @@ export function Composer(props: {
     const text = area?.plainText ?? ""
     clear()
     shown = null
-    if (text.trim().length === 0) {
+    const sentImages = images().filter((image) => text.includes(imagePlaceholder(image.id)))
+    if (text.trim().length === 0 && sentImages.length === 0) {
       props.onEmptySubmit?.()
       return
     }
     // The history keeps the draft as it was on screen — placeholders and all —
     // so recalling it shows what was typed rather than the thousand lines it
-    // stood for. The expansion happens only on the way out.
+    // stood for. The expansion happens only on the way out. Image tokens are UI
+    // handles; the image blocks themselves carry that content to the model.
     history.push(text)
     cursor = history.length
-    props.onSubmit(expandPastes(text, attachments()), interrupt)
+    let expanded = expandPastes(text, attachments())
+    for (const image of sentImages) expanded = expanded.split(imagePlaceholder(image.id)).join("")
+    props.onSubmit(expanded, interrupt, sentImages)
   }
 
   /**
@@ -465,6 +497,11 @@ export function Composer(props: {
   const onKeyDown = (event: KeyEvent) => {
     if (props.disabled) {
       event.preventDefault()
+      return
+    }
+    if (event.name === "v" && event.ctrl) {
+      event.preventDefault()
+      void pasteImage()
       return
     }
     if (event.name === "tab") {
@@ -570,10 +607,13 @@ export function Composer(props: {
       </Show>
       {/* What each placeholder in the draft stands for. A fold that did not say
           how much it folded would be a fold that hid something. */}
-      <Show when={drafted().length > 0}>
+      <Show when={drafted().length > 0 || draftedImages().length > 0}>
         <box flexDirection="column" width="100%" paddingLeft={3} paddingRight={1}>
           <For each={drafted()}>
             {(attachment) => <text fg={style.theme.dim}>{describeAttachment(attachment)}</text>}
+          </For>
+          <For each={draftedImages()}>
+            {(image) => <text fg={style.theme.dim}>{`${imagePlaceholder(image.id)} · ${image.mediaType} · ${Math.ceil(image.bytes.length / 1024)} KB`}</text>}
           </For>
         </box>
       </Show>

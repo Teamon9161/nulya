@@ -23,6 +23,7 @@ import {
   type GateVerdict,
   type StepHandle,
   type StepLine,
+  type ImageInput,
 } from "../nulya/cli.ts"
 import { inboxPending } from "../nulya/files.ts"
 import type { Workspace } from "../nulya/bin.ts"
@@ -49,7 +50,7 @@ export interface Driver {
    * a second time — two sentinels for one turn is one card the transcript
    * cannot fold and one contract too many for the model to read.
    */
-  send(text: string, framed?: boolean): Promise<void>
+  send(text: string, framed?: boolean, images?: readonly ImageInput[]): Promise<void>
   /** Run a step now (used to continue after a spent budget). */
   step(): Promise<void>
   /**
@@ -86,7 +87,7 @@ export interface Driver {
    * is already queued" gesture (a click on the queue lane), and it still
    * forces the kill-and-immediate-restep when a step is running.
    */
-  interruptAndDeliver(text: string, framed?: boolean): Promise<void>
+  interruptAndDeliver(text: string, framed?: boolean, images?: readonly ImageInput[]): Promise<void>
   dispose(): void
 }
 
@@ -280,9 +281,9 @@ export function createDriver(
   // Named rather than object-literal methods, so `interruptAndDeliver` below
   // can call `send`/`kill`/`step` directly instead of reaching for `this` on
   // an object that has not finished being built yet.
-  async function send(text: string, framed = false): Promise<void> {
+  async function send(text: string, framed = false, images: readonly ImageInput[] = []): Promise<void> {
     const trimmed = text.trim()
-    if (trimmed.length === 0) return
+    if (trimmed.length === 0 && images.length === 0) return
     // A step in flight means the model is mid-task, and a bare user turn
     // after tool results reads like a stop signal — so the turn carries its
     // own framing (midtask.ts). "sending" is not mid-task: that run has not
@@ -291,7 +292,7 @@ export function createDriver(
     const midTask = !framed && (status() === "stepping" || status() === "canceling")
     const wire = midTask ? wrapMidTask(trimmed, !noted) : trimmed
     if (midTask) noted = true
-    state.enqueueUser(wire)
+    state.enqueueUser(wire, images.length)
     // Anything but idle means a step is running or about to: the turn is
     // appended and the run in flight (or the one the earlier send is about to
     // start) drains it at its next step boundary. Starting a second `drive()`
@@ -299,7 +300,7 @@ export function createDriver(
     const running = status() !== "idle"
     if (!running) setStatus("sending")
     try {
-      await sessionAppend(ws, id, wire)
+      await sessionAppend(ws, id, wire, images)
     } catch (error) {
       state.setError(error instanceof Error ? error.message : String(error))
       if (!running) setStatus("idle")
@@ -363,17 +364,17 @@ export function createDriver(
    * queued" gesture (the queue lane's own click), and it still has to kill and
    * re-step when a step is running.
    */
-  async function interruptAndDeliver(text: string, framed = false): Promise<void> {
+  async function interruptAndDeliver(text: string, framed = false, images: readonly ImageInput[] = []): Promise<void> {
     const trimmed = text.trim()
     if (status() === "idle") {
-      if (trimmed.length === 0) {
+      if (trimmed.length === 0 && images.length === 0) {
         await wake()
         return
       }
-      await send(trimmed, framed)
+      await send(trimmed, framed, images)
       return
     }
-    if (trimmed.length > 0) await send(trimmed, framed)
+    if (trimmed.length > 0 || images.length > 0) await send(trimmed, framed, images)
     kill()
     await idleOnce()
     if (disposed) return

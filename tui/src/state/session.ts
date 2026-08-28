@@ -29,6 +29,8 @@ interface ItemBase {
 export interface UserItem extends ItemBase {
   kind: "user"
   text: string
+  /** Image blocks carried beside the text; bytes stay in the ledger, not the card. */
+  imageCount?: number
   /** Deposited into the inbox but not yet drained into the ledger. */
   queued: boolean
 }
@@ -216,6 +218,12 @@ export interface SessionSnapshot {
   lastStopped: StopReason | null
   /** The tool currently executing, for the status bar spinner. */
   activeTool: string | null
+  /**
+   * The latest tool card whose sweep stays visible through result recording and
+   * the following model response. Cleared only when the run ends; a later tool
+   * replaces it when execution begins.
+   */
+  highlightedToolCallId: string | null
   error: string | null
 }
 
@@ -229,7 +237,7 @@ export interface SessionState {
   /** Highest ledger seq applied so far — where a follower must resume from. */
   lastSeq(): number
   /** Optimistic echo of a just-sent turn; promoted when its `user_text` lands. */
-  enqueueUser(text: string): void
+  enqueueUser(text: string, imageCount?: number): void
   pendingCount(): number
   setError(message: string | null): void
   /**
@@ -264,6 +272,7 @@ export const no_snapshot: SessionSnapshot = {
   lastStepStatus: null,
   lastStopped: null,
   activeTool: null,
+  highlightedToolCallId: null,
   error: null,
 }
 
@@ -292,6 +301,7 @@ export function createSessionState(id: string): SessionState {
     lastStepStatus: null,
     lastStopped: null,
     activeTool: null,
+    highlightedToolCallId: null,
     error: null,
   })
 
@@ -411,7 +421,9 @@ export function createSessionState(id: string): SessionState {
       const seq = event.seq
       switch (event.kind) {
         case "user_text": {
-          const text = (event as Extract<LedgerEvent, { kind: "user_text" }>).text
+          const user = event as Extract<LedgerEvent, { kind: "user_text" }>
+          const text = user.text
+          const imageCount = user.images?.length ?? 0
           const at = draft.items.findIndex(
             (item) => item.kind === "user" && item.seq === null && item.queued && item.text === text,
           )
@@ -420,9 +432,10 @@ export function createSessionState(id: string): SessionState {
             promoted.seq = seq
             promoted.key = `e${seq}`
             promoted.queued = false
+            promoted.imageCount = imageCount
             insertCommitted(draft, [promoted])
           } else {
-            insertCommitted(draft, [{ key: `e${seq}`, seq, kind: "user", text, queued: false }])
+            insertCommitted(draft, [{ key: `e${seq}`, seq, kind: "user", text, imageCount, queued: false }])
           }
           break
         }
@@ -639,6 +652,7 @@ export function createSessionState(id: string): SessionState {
             dropInFlight(draft)
             for (const usage of streamed.splice(0)) addUsage(draft, usage, -1)
             draft.activeTool = null
+            draft.highlightedToolCallId = null
             draft.error = `model request failed (${retry.error}); retry ${retry.attempt}/${retry.max_retries} in ${Math.round(retry.delay_ms / 1000)}s`
             break
           }
@@ -654,6 +668,7 @@ export function createSessionState(id: string): SessionState {
           if (line.event === "begin") {
             item.state = "running"
             draft.activeTool = item.tool
+            draft.highlightedToolCallId = item.callId
           } else if (line.event === "end") {
             item.state = "done"
             item.ok = (line as { ok?: boolean }).ok ?? null
@@ -684,9 +699,11 @@ export function createSessionState(id: string): SessionState {
         if (line.event === "done") {
           draft.lastStopped = ((line as { stopped?: StopReason }).stopped ?? "end_turn") as StopReason
           draft.activeTool = null
+          draft.highlightedToolCallId = null
         } else if (line.event === "error") {
           draft.error = (line as { message?: string }).message ?? "step failed"
           draft.activeTool = null
+          draft.highlightedToolCallId = null
         }
       }
     })
@@ -710,9 +727,9 @@ export function createSessionState(id: string): SessionState {
     applyEvent,
     applyStream,
     lastSeq: () => applied,
-    enqueueUser(text) {
+    enqueueUser(text, imageCount = 0) {
       edit((draft) => {
-        draft.items.push({ key: `q:${Date.now()}:${draft.items.length}`, seq: null, kind: "user", text, queued: true })
+        draft.items.push({ key: `q:${Date.now()}:${draft.items.length}`, seq: null, kind: "user", text, imageCount, queued: true })
       })
     },
     pendingCount() {

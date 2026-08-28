@@ -113,6 +113,7 @@ import {
   type ModelView as ModelParams,
   type ProfileView,
   type TaskEntry,
+  type ImageInput,
 } from "../nulya/cli.ts"
 import {
   activateUnattended,
@@ -2598,20 +2599,23 @@ export function App(props: AppProps) {
    * A visible tab rather than a hidden run, because a delegation that goes wrong
    * is a delegation somebody has to be able to watch, cancel and read afterwards.
    */
-  const startAgent = async (entry: AgentEntry, task: string): Promise<SessionTab | null> => {
+  const startAgent = async (entry: AgentEntry, task: string, draft: DraftTab): Promise<SessionTab | null> => {
     // This path IS the nulya runner, hand-driven: a tab needs a local session
     // to step. A persona on another harness has no such session — opening one
     // anyway would run it on a harness its definition did not name (the very
     // thing defs.zig refuses a whole definition over). Delegating to it is the
     // model's `agent` tool's job, not a tab's (goals/agent-runner.md D1).
     if (entry.runner !== "nulya") {
+      tabs.close(draft.key)
       setNotice(`'${entry.name}' runs on '${entry.runner}', which a tab cannot drive · delegate to it from a conversation instead`)
       return null
     }
-    if (entry.layer === "workspace" && agentsTrustedIn(ws()) === false) {
+    if (entry.layer === "workspace" && agentsTrustedIn(draft.ws) === false) {
+      tabs.close(draft.key)
       setNotice(`'${entry.name}' came with this checkout and was not trusted · its prompt would enter a session here · answer the question again by clearing asked_agents in tui-state.json`)
       return null
     }
+    const inherited = draft.pick()
     setNotice(`agent ${entry.name} · rendering its prompt…`)
     const pkg = await agentPackage()
     if (!pkg) {
@@ -2623,17 +2627,17 @@ export function App(props: AppProps) {
       // The package renders the definition and checks that the packages its
       // pins name can be brought in — one implementation of both, and the same
       // one the model reaches through the `agent` tool.
-      m = await renderAgent(ws(), pkg, entry.name)
+      m = await renderAgent(draft.ws, pkg, entry.name)
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error))
       return null
     }
-    // The parent's model unless the definition names one.
-    const inherited = currentPick()
+    // The parent's model unless the definition names one. The draft is already
+    // visible; refine its inherited choice in place once rendering answers.
     const pick =
       agentPick(m) ??
       (inherited ? { profile: inherited.profile, ...(inherited.model ? { model: inherited.model } : {}) } : undefined)
-    const draft = tabs.draft(pick ? { pick } : {})
+    if (pick) draft.setPick(pick)
     try {
       const child = await tabs.materialize(draft, {
         // The persona rides as BYTES the header freezes (DESIGN §3): nothing is
@@ -2701,9 +2705,29 @@ export function App(props: AppProps) {
       await openAgentPicker()
       return
     }
+    if (task.trim().length === 0) {
+      const defs = await refreshAgents()
+      const def = defs.find((entry) => entry.name === name)
+      setNotice(
+        def
+          ? `/agent ${def.name} <task> · it starts a session of its own and sees nothing of this one, so say the whole task`
+          : defs.length === 0
+            ? `no agent '${name}' · no definitions in .nulya/agents or ~/.nulya/agents`
+            : `no agent '${name}' · ${defs.map((entry) => entry.name).join(" ")}`,
+      )
+      return
+    }
+
+    // A real task gets its destination immediately, before package discovery,
+    // rendering or `session new`. If discovery later refuses the name, remove
+    // only this untouched draft and return to the tab the user came from.
+    const inherited = currentPick()
+    const waiting = tabs.draft({ ws: ws(), ...(inherited ? { pick: inherited } : {}) })
+    setNotice(`agent ${name} · loading its definition…`)
     const defs = await refreshAgents()
     const def = defs.find((entry) => entry.name === name)
     if (!def) {
+      tabs.close(waiting.key)
       setNotice(
         defs.length === 0
           ? `no agent '${name}' · no definitions in .nulya/agents or ~/.nulya/agents`
@@ -2711,11 +2735,7 @@ export function App(props: AppProps) {
       )
       return
     }
-    if (task.trim().length === 0) {
-      setNotice(`/agent ${def.name} <task> · it starts a session of its own and sees nothing of this one, so say the whole task`)
-      return
-    }
-    void startAgent(def, task.trim())
+    void startAgent(def, task.trim(), waiting)
   }
 
   /**
@@ -3211,9 +3231,9 @@ export function App(props: AppProps) {
    * (agent-runner ar-t1) rather than a plain Enter — the only thing that
    * changes is which `Attachment` verb the turn ends up going through.
    */
-  const sendTurn = async (text: string, interrupt = false) => {
+  const sendTurn = async (text: string, interrupt = false, images: readonly ImageInput[] = []) => {
     let turn = text
-    if (text.startsWith("/")) {
+    if (images.length === 0 && text.startsWith("/")) {
       if (await runPluginCommand(text)) return
       if (await runPackageCommand(text)) return
       try {
@@ -3228,14 +3248,14 @@ export function App(props: AppProps) {
       composer?.restore(text)
       return
     }
-    if (interrupt) await here.attach.interruptAndDeliver(turn)
-    else await here.attach.send(turn)
+    if (interrupt) await here.attach.interruptAndDeliver(turn, false, images)
+    else await here.attach.send(turn, false, images)
   }
 
-  const submit = (text: string, interrupt = false) => {
+  const submit = (text: string, interrupt = false, images: readonly ImageInput[] = []) => {
     setNotice(null)
-    if (runCommand(text)) return
-    void sendTurn(text, interrupt)
+    if (images.length === 0 && runCommand(text)) return
+    void sendTurn(text, interrupt, images)
   }
 
   /**
@@ -3261,7 +3281,10 @@ export function App(props: AppProps) {
     snapshot().items.filter((item): item is Extract<TranscriptItem, { kind: "user" }> => item.kind === "user" && item.queued)
       // A mid-run append rides inside the mid-task sentinel (midtask.ts); the
       // lane shows the user's own words, the same fold the transcript card does.
-      .map((item) => ({ key: item.key, text: parseMidTask(item.text)?.text ?? item.text }))
+      .map((item) => ({
+        key: item.key,
+        text: (parseMidTask(item.text)?.text ?? item.text) || `${item.imageCount ?? 0} image${item.imageCount === 1 ? "" : "s"}`,
+      }))
 
   /**
    * Whether `ctrl+j` currently means anything (`keymap.ts` `interrupt`,
@@ -3770,6 +3793,7 @@ export function App(props: AppProps) {
           items={snapshot().items}
           header={snapshot().header}
           contributions={live()?.contributions() ?? []}
+          highlightedCallId={snapshot().highlightedToolCallId}
           plan={plan()}
           // A draft has no snapshot to carry one, so the refusal that kept it a
           // draft rides the same channel a live session's driver failure does —
@@ -4068,6 +4092,7 @@ export function App(props: AppProps) {
                 />
                 <Composer
                   onSubmit={submit}
+                  onNotice={setNotice}
                   onEmptySubmit={() => followHandoff() || takeOverIfOffered()}
                   // Clicking the input box means "type here": browse mode holds
                   // the keyboard and the textarea cannot let itself out of it.

@@ -314,3 +314,26 @@ test("replaying a session recovers what it cost, without ever watching a step", 
   // Nothing was watched here: steps and priced steps are different facts.
   expect(state.snapshot.steps).toBe(0)
 })
+
+
+test("the last executing tool stays highlighted through the following model response", () => {
+  const state = createSessionState("s-x")
+  state.applyStream({ stream: "model", event: "started" })
+  state.applyStream({ stream: "model", event: "tool_use_start", index: 0, id: "c1", name: "shell" })
+  state.applyStream({ stream: "tool", event: "begin", call_id: "c1" })
+  expect(state.snapshot.highlightedToolCallId).toBe("c1")
+
+  state.applyStream({ stream: "tool", event: "end", call_id: "c1", ok: true })
+  state.applyStream({ stream: "step", event: "end", status: "completed" })
+  state.applyStream({ stream: "model", event: "started" })
+  state.applyStream({ stream: "model", event: "text_delta", text: "Here is what it found." })
+  // Result recording and the next response are still the same visible run.
+  expect(state.snapshot.highlightedToolCallId).toBe("c1")
+
+  state.applyStream({ stream: "model", event: "tool_use_start", index: 0, id: "c2", name: "read" })
+  state.applyStream({ stream: "tool", event: "begin", call_id: "c2" })
+  expect(state.snapshot.highlightedToolCallId).toBe("c2")
+
+  state.applyStream({ stream: "run", event: "done", stopped: "end_turn" })
+  expect(state.snapshot.highlightedToolCallId).toBeNull()
+})
