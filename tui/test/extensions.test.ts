@@ -1035,3 +1035,31 @@ test("session_with is one list, replaced rather than merged by a nearer layer", 
     layer.cleanup()
   }
 })
+
+test("[env.ssh] parses field by field, leaving fields it did not mention at the default", async () => {
+  expect(default_settings.env).toEqual({})
+
+  const layer = tempWorkspace()
+  try {
+    mkdirSync(join(layer.dir, ".nulya"), { recursive: true })
+    writeFileSync(
+      join(layer.dir, ".nulya", "tui.toml"),
+      '[env.ssh]\nwith = ["ops"]\npins = ["ext:std/read"]\n',
+    )
+    const settings = await loadSettings(layer.dir, {})
+    expect(settings.env.ssh).toEqual({ with: ["ops"], pins: ["ext:std/read"] })
+    // Nothing under `[env.local]` or `[env.wsl]` — a table for one kind must
+    // not leak a field into another.
+    expect(settings.env.local).toBeUndefined()
+    expect(settings.env.wsl).toBeUndefined()
+
+    // `bare` is a plain boolean; overwriting the file with just that field
+    // must not carry the previous layer's list fields forward — this is one
+    // `loadSettings` call over one fresh file, so it is `mergeLayer`'s own
+    // per-field behaviour under test, not layering across files.
+    writeFileSync(join(layer.dir, ".nulya", "tui.toml"), "[env.ssh]\nbare = false\n")
+    expect((await loadSettings(layer.dir, {})).env.ssh).toEqual({ bare: false })
+  } finally {
+    layer.cleanup()
+  }
+})

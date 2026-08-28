@@ -9,6 +9,7 @@ import { existsSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { default_rules, normalizeMode, type ApprovalRules, type PermissionMode } from "../approvals.ts"
+import type { EnvProfiles } from "./envprofile.ts"
 
 export type FoldDefault = "expanded" | "collapsed"
 /**
@@ -154,6 +155,18 @@ export interface Settings {
      */
     plugins: boolean
   }
+  /**
+   * Per exec-target-KIND overrides of `session_with` / `session_prompts` /
+   * pins (`tui.toml` `[env.local]` / `[env.wsl]` / `[env.ssh]`, tui.md §11
+   * T88, `state/envprofile.ts`). A table for a kind that never gets a session
+   * (nobody uses `/env`) costs nothing and is never read.
+   *
+   * Kept apart from `extensions` above rather than nested inside it: those
+   * fields ARE the `local`/`wsl` default (`envprofile.ts`'s
+   * `defaultProfile`), so folding this table into that one would make a
+   * setting read itself.
+   */
+  env: EnvProfiles
   driver: {
     /**
      * The permission mode a run STARTS in: `ask` puts every tool call the rules
@@ -191,6 +204,7 @@ export const default_settings: Settings = {
     session_prompts: ["ground"],
     plugins: true,
   },
+  env: {},
   driver: { mode: "ask" },
   approvals: { ...default_rules },
   keys: {},
@@ -265,6 +279,24 @@ function mergeLayer(into: Settings, layer: unknown, source: string) {
     // nearer layer that wants FEWER packages must be able to say so.
     if (Array.isArray(extensions["session_with"])) {
       into.extensions.session_with = extensions["session_with"].filter((e): e is string => typeof e === "string")
+    }
+  }
+  const envTable = record["env"] as Record<string, unknown> | undefined
+  if (envTable) {
+    for (const kind of ["local", "wsl", "ssh"] as const) {
+      const table = envTable[kind] as Record<string, unknown> | undefined
+      if (!table) continue
+      const target = { ...(into.env[kind] ?? {}) }
+      if (typeof table["bare"] === "boolean") target.bare = table["bare"]
+      // Replaced, not merged — the same discipline every other list-shaped
+      // setting on this page follows: a nearer layer that wants FEWER things
+      // must be able to say so.
+      if (Array.isArray(table["with"])) target.with = table["with"].filter((e): e is string => typeof e === "string")
+      if (Array.isArray(table["pins"])) target.pins = table["pins"].filter((e): e is string => typeof e === "string")
+      if (Array.isArray(table["session_prompts"])) {
+        target.session_prompts = table["session_prompts"].filter((e): e is string => typeof e === "string")
+      }
+      into.env[kind] = target
     }
   }
   const driver = record["driver"] as Record<string, unknown> | undefined

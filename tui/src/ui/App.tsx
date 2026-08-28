@@ -70,6 +70,7 @@ import { NavigateContext, type Navigate } from "../state/navigate.ts"
 import type { TranscriptRow } from "../render/runs.ts"
 import { createTabStore, type DraftTab, type FirstTab, type SessionTab } from "../state/tabs.ts"
 import type { PaneStore } from "../state/panes.ts"
+import { execTargetKind, resolveEnvProfile, type ResolvedEnvProfile } from "../state/envprofile.ts"
 import {
   execEnv,
   loadTuiState,
@@ -675,14 +676,17 @@ export function App(props: AppProps) {
     try {
       const [listed, config] = await Promise.all([listExtensions(ws()), configShow(ws(), props.driver?.env)])
       healStandingPins(listed)
+      const profile = envProfile(execEnv(props.statePath))
       // Three ways a package is in every session started here (T52): it asked
       // and the kernel recorded it (`standing` — the kernel's own answer, never
       // an `apply` re-read here, T56), config named it, or this front end always
-      // brings it.
-      const named = new Set([...config.extensions.with, ...props.style.settings.extensions.session_with])
+      // brings it. Under `--bare` (T88's `ssh` default) neither standing table
+      // applies — config's `with` and every `apply:"auto"` package's own bit —
+      // so only THIS list's own `--with` refs count.
+      const named = profile.bare ? new Set(profile.with) : new Set([...config.extensions.with, ...profile.with])
       setComposedWithTools(
         listed
-          .filter((entry) => entry.current && !entry.shadowed && (named.has(entry.id) || entry.standing))
+          .filter((entry) => entry.current && !entry.shadowed && (named.has(entry.id) || (!profile.bare && entry.standing)))
           .flatMap((entry) => entry.autoTools.map((tool) => toolId(entry.id, tool))),
       )
     } catch {
@@ -690,6 +694,23 @@ export function App(props: AppProps) {
       setComposedWithTools([])
     }
   }
+  /**
+   * The profile the NEXT `session new` from this screen would compose with,
+   * for the exec target `spec` names — `/env`'s pending choice on a draft, or
+   * a started session's frozen `environment` (T88, `state/envprofile.ts`).
+   *
+   * One function two call sites read: `sessionExtras()` (what is actually
+   * sent to the kernel) and the draft screen's tool count
+   * (`refreshComposedMembership` / `plannedFaceTools`) — never two answers to
+   * "what does this env compose".
+   */
+  const envProfile = (spec: string): ResolvedEnvProfile =>
+    resolveEnvProfile(
+      execTargetKind(spec),
+      props.style.settings.extensions.session_with,
+      props.style.settings.extensions.session_prompts,
+      props.style.settings.env,
+    )
 
   /**
    * Take back standing pins this front end should no longer hold — before the
@@ -1778,7 +1799,10 @@ export function App(props: AppProps) {
   /**
    * What the next `session new` from this TUI would put on the model's face:
    * the merged config pins, this TUI's own pin list, and `surface:"auto"` tools
-   * from packages composed into every session started here.
+   * from packages composed into every session started here — all of it
+   * filtered through the exec-target profile (`envProfile`, T88): under
+   * `--bare` the config's own pin list drops out entirely, and the env
+   * profile's own `pins` list joins in.
    *
    * The composed entries are counted for display only. They are not passed as
    * `--pin`; the kernel derives them from the `--with` membership when the
@@ -1789,8 +1813,10 @@ export function App(props: AppProps) {
   // change when something wrote that file — which is what `planTick` says.
   const plannedFaceTools = createMemo((): string[] => {
     planTick()
-    const face = [...(props.pinnedTools ?? [])]
+    const profile = envProfile(execEnv(props.statePath))
+    const face = profile.bare ? [] : [...(props.pinnedTools ?? [])]
     for (const pin of sessionPins(props.statePath)) if (!face.includes(pin)) face.push(pin)
+    for (const pin of profile.pins) if (!face.includes(pin)) face.push(pin)
     for (const id of composedWithTools()) if (!face.includes(id)) face.push(id)
     return face
   })
@@ -1841,6 +1867,10 @@ export function App(props: AppProps) {
    * shows is the pending choice — what its first message would freeze.
    */
   const runsIn = (): string => {
+    // Tracked so `/env` (which writes `tui-state.json`, not a signal) shows up
+    // on this row the moment it is typed rather than the next time `tab()`
+    // happens to change for an unrelated reason (`setExecEnv` bumps this).
+    planTick()
     const here = tab()
     if (here.kind === "draft") return execEnv(props.statePath)
     return snapshot().header?.environment ?? ""
@@ -1974,7 +2004,12 @@ export function App(props: AppProps) {
 
   /**
    * Everything the SCREEN adds to a top-level `session new`: one `--with` for
-   * each id in `[extensions] session_with` (tui.md §5.8 / §5.10).
+   * each id the exec-target profile brings in — `[extensions] session_with`
+   * on `local` / `wsl`, or whatever `tui.toml`'s `[env.<kind>]` says instead
+   * (T88, `envProfile`). `/env`'s pending choice decides which profile this
+   * is, and it is read once, right here, at the same moment as everything
+   * else on this list — a choice made after this line is a choice about the
+   * NEXT session, which is exactly what `/env` says it is.
    *
    * One list, where until T52 there were two — this one and `/ext`'s own
    * `standing_with`. A package that belongs in every session says so in its
@@ -1988,7 +2023,9 @@ export function App(props: AppProps) {
    * member's `surface:"manual"` tools DO need a pin in the same argv, since
    * membership is not a tool face; that is `SessionMember.pins`, read off the
    * version being composed, so a package that moves a tool between surfaces is
-   * followed without an edit here.
+   * followed without an edit here. The profile's own `pins` list (T88) joins
+   * the same argv for the same reason — an extra native slot this env's
+   * `--with` members did not ask for on their own.
    *
    * A package that cannot be resolved costs the session nothing: it starts
    * without it and says so, rather than not starting.
@@ -2001,11 +2038,13 @@ export function App(props: AppProps) {
    */
   const sessionExtras = async (
     target: Workspace,
-  ): Promise<{ with?: string[]; pin?: string[]; prompt?: string[]; execEnv?: string }> => {
+  ): Promise<{ with?: string[]; pin?: string[]; prompt?: string[]; execEnv?: string; bare?: boolean }> => {
+    const where = execEnv(props.statePath)
+    const profile = envProfile(where)
     const withRefs: string[] = []
-    const pins: string[] = []
+    const pins: string[] = [...profile.pins]
     const missing: string[] = []
-    for (const id of props.style.settings.extensions.session_with) {
+    for (const id of profile.with) {
       const member = await sessionMemberOnce(target, id)
       if (!member) {
         missing.push(id)
@@ -2028,7 +2067,7 @@ export function App(props: AppProps) {
     // cached prefix. The renderer is not asked rather than asked and ignored:
     // there is nothing here for it to be right about.
     const grounded = !isHomeWorkspaceDir(target.dir)
-    for (const id of grounded ? props.style.settings.extensions.session_prompts : []) {
+    for (const id of grounded ? profile.session_prompts : []) {
       const member = await sessionMemberOnce(target, id)
       if (!member) {
         missing.push(id)
@@ -2052,16 +2091,12 @@ export function App(props: AppProps) {
       ? [`${missing.join(" & ")} not composed in · /ext for what it said`, ...broke]
       : broke
     if (notices.length > 0) setNotice(notices.join(" · "))
-    // Where its `shell` runs (`/env`, DESIGN §8.1). Read here, at the same
-    // moment as everything else on this list, because it is frozen by the same
-    // `session new`: a choice made after this line is a choice about the NEXT
-    // session, which is exactly what `/env` says it is.
-    const where = execEnv(props.statePath)
     return {
       ...(withRefs.length > 0 ? { with: withRefs } : {}),
       ...(pins.length > 0 ? { pin: pins } : {}),
       ...(prompts.length > 0 ? { prompt: prompts } : {}),
       ...(where.length > 0 ? { execEnv: where } : {}),
+      ...(profile.bare ? { bare: true } : {}),
     }
   }
 
@@ -3134,6 +3169,12 @@ export function App(props: AppProps) {
         ? `next session's shell runs in ${now} · extensions, tasks and the store stay on this host`
         : "next session's shell runs on this host",
     )
+    // The tool-face count and the `⇥` chip both read `tui-state.json` through
+    // functions Solid cannot see as reactive (a file, not a signal) — `/env`
+    // changed what the NEXT session composes (T88's per-kind profile), so this
+    // is the same "something wrote that file" bump `healStandingPins` uses.
+    setPlanTick((tick) => tick + 1)
+    void refreshComposedMembership()
   }
 
   /**

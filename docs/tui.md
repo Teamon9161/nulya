@@ -571,6 +571,16 @@ session_prompts = ["ground"] # 每场开场前问一次「这一场的开场文�
 plugins       = true        # 代码层总开关（T40）：加载 trusted + 已激活/本场戴着的包的 `contributes.ui.tui.entry`
                             # false = 只剩声明层（commands / policy / 每个 tool 的 ui 照常，逐字节等于 T39 结束时）
 
+# T88——按 `/env` 目标的种类覆盖上面这两个列表 + 一份额外的 pin 列表。不写这一节，
+# 或写出来但留空，就是下面这行注释里那份缺省；`bare` 缺省时 local/wsl = false、ssh = true。
+[env.local]                 # 不写 = local 的缺省：bare=false，用 [extensions] 那两个列表
+[env.wsl]                   # 不写 = 与 local 相同——WSL 经 /mnt/ 共享主机文件系统
+[env.ssh]                   # 不写 = { bare = true, with = [], pins = [], session_prompts = [] }
+# bare = true                 # 缺省已是 true；两张常驻表（config with / pinned_native_tools）都不读
+# with  = []                  # 缺省已是 []；想在 ssh 场里也带某个包，写它的 id
+# pins  = []                  # 缺省已是 []；额外的 `--pin`，与 `with` 成员自己声明的 pin 一起生效
+# session_prompts = []        # 缺省已是 []；ground 的本地事实对远端没有意义
+
 [keys]                      # 覆盖默认键；名字表见 keymap.ts
 cancel = "escape"
 ```
@@ -2561,3 +2571,34 @@ tab 条的 `✕`/`+`/`▎`；`stripPlan` 的**不变量**"画出来的一切都�
 4. **`WorkingStatus.Activity.background?: number`**：前台 step 在跑时，`N background` 从前会被挤没——`activityOf` 现在给除"background 本身就是唯一内容"那一支之外的每一支都挂上这个计数（`withBackground` 包一层），渲染上单独一段带自己的点击区（`bgFit`/`bgClick`，同一条 `· ` 分隔 + 悬停背景色的写法照抄 `StatusBar.tsx` 的 `tools 1+N` chip），裁剪顺序 lead → tail → background，background 最先被挤掉。`opens: "tasks"` 那一支（idle、只有 background）不重复挂这个字段——数字已经是 `text` 本身。
 
 **回归测试**：`test/taskstop.test.ts`（sentinel round-trip、contract 剥离、与另外两个 sentinel 互不认领）· `test/taskspanel.test.tsx`（空态、跑中/已完成两种行的呈现、点 stop 只对那一行生效）· `test/tasks.test.ts` 新增一条真二进制端到端（起后台任务 → 完成 → `stopTask` → 归因 note 落进下一个 step 边界的 ledger）· `test/workingstatus.test.ts` 六条既有 `toEqual` 断言按新的并存语义更新（`canceling`/`stepping`/`sending`/`budget`/`max_tokens`/`awaiting`/`error` 各自验证 `background` 字段随行、"background 独占" 那一支验证不重复）。`bunx tsc --noEmit` 干净。
+
+### T88 · `/env` target 按种类配不同的工具面 profile（2026-08-29）
+
+**内核零改动**——T86 的 `--bare` 早就在那儿，这一条只是 TUI 第一次真正用它。
+
+**动机**：`session new --env ssh:<dest>` 的场里只有 `shell` 命令跑在远端，`std` 的 read/grep/glob 读的仍是**本地**文件系统——pin 着它们只会制造 "not found"；`ground` 渲染的开场事实（本地 cwd / 分支 / git 状态）对远端命令也是错的。`wsl` 没有这个问题——经 `/mnt/` 是同一个文件系统换个名字看，`std` 与 `ground` 在那边照样成立。所以同一个 `session_with` / `session_prompts` 缺省值不能三种 target 通吃。
+
+**`state/envprofile.ts`（新文件，纯函数，零 IO）**：`execTargetKind(spec)` 把 `/env` 的 spec 语法（DESIGN §8.1）分成 `local | wsl | ssh` 三类——不是第二个校验器，认不出的一律读成 `local`（更宽的那一档，反正拼错了 `session new` 自己会拒）。`resolveEnvProfile(kind, sessionWith, sessionPrompts, overrides)` 把每种 kind 的**零配置缺省**与 `tui.toml` `[env.<kind>]` 的**逐字段覆盖**合成一份 `ResolvedEnvProfile{bare, with, pins, session_prompts}`：
+
+```toml
+# tui.toml — 缺省已经是这样，写出来只是示例
+[env.local]   # 与不写这一节完全一样：bare=false，用 [extensions] session_with/session_prompts
+[env.wsl]     # 同上——WSL 共享主机文件系统，std/ground 一样有意义
+[env.ssh]
+bare = true          # 缺省已是 true；两张常驻表（config with / pinned_native_tools）都不读
+with = []             # 缺省已是 []；想在 ssh 场里也带 handoff，写 with = ["handoff"]
+pins = []             # 缺省已是 []；额外的 --pin，比如 pins = ["ext:std/read"] 换成远端也想用的读工具
+session_prompts = []  # 缺省已是 []；ground 的本地事实对远端没有意义
+```
+
+字段语义：**写了的字段整体替换缺省，没写的字段沿用**——与 `session_with` 那条"替换不合并"的纪律一致（一个更近的层要能说"更少"）。`pins` 是新字段，直接进 `--pin` 的 argv（与 `with` 成员自己声明的 `manual` tool pins 同一个列表），不是 `with`/`session_with` 的别名。
+
+**两处调用点，同一份计算**（`App.tsx`）：`envProfile(spec)` = `resolveEnvProfile(execTargetKind(spec), session_with, session_prompts, settings.env)`，① `sessionExtras()`——原来直接读 `props.style.settings.extensions.session_with/session_prompts` 的两处循环改读 `profile.with/session_prompts`，`pins` 数组起手就带上 `profile.pins`，返回值多一个 `bare`（`profile.bare` 时为 `true`）；② `refreshComposedMembership`（喂 `composedWithTools` 信号，`plannedFaceTools` 唯一的信号输入）——`named` 集合在 `profile.bare` 时只取 `profile.with`（**两张常驻表**——config 的 `extensions.with` 与每个 `apply:"auto"` 包自己的 `standing` 位——都不算数，与 kernel `--bare` 的语义对齐），`plannedFaceTools` 本身在 `profile.bare` 时不再把 `props.pinnedTools`（`registry.pinned_native_tools`）加进面，并把 `profile.pins` 并进去。草稿页的 `tools 1+N`（`Welcome.tsx` 经 `plan().tools`）与状态栏（`faceSize()`）不认第二份逻辑，因为它们读的就是同一个 `plannedFaceTools()`。
+
+**顺手修的一个洞**：`tabs.ts` 的 `SessionExtras.bare` / `NewSessionOptions.bare` 从 T86 起就在——但 `createTabStore().materialize()` 从没把 `extra.bare` 转发给 `sessionNew()`（只转发了 `with`/`pin`/`prompt`/`execEnv`），此前唯一的潜在调用方（子 agent 委派）走的是内核自带 `extensions/agent` 自己的进程，从不经过这条路，所以这行漏转发一直没有观测后果。这条改动第一次让 TUI 顶层给自己开的 session 用上 `--bare`。
+
+**响应性**：`/env` 写 `tui-state.json`（一个文件，不是信号），`runsIn()`（状态栏 `⇥` chip）与 `plannedFaceTools`（工具计数）都靠 `planTick` 信号才会重新求值——`setExecEnv` 因此在 `rememberExecEnv` 之后补一次 `setPlanTick` + `refreshComposedMembership()`，与 `healStandingPins` 已有的那句"某个文件被写了"同一个套路；`runsIn()` 顶部补一句 `planTick()` 读，让它进同一张依赖表。
+
+**`/ext` 不动**：store / activate 是全机一份，这一期只在 `tui.toml` + `/settings` 里可见，工具计数如实反映。
+
+**测试**：`test/envprofile.test.ts`（`execTargetKind` 的三类判定 + 未识别 spec 落 `local`；`resolveEnvProfile` 的三种 zero-config 缺省；逐字段覆盖——只覆盖写出来的字段、`pins` 与 `with` 同时生效、空表等于不写、一个 kind 的表不泄漏进另一个）· `test/extensions.test.ts` 新增一条 `loadSettings` 断言 `[env.ssh]` 逐字段解析且不泄漏进 `env.local`/`env.wsl`。`bunx tsc --noEmit` 干净；`bun test` 全量见下（负载下个别 perf/lease 测试按既有纪律隔离重跑确认）。

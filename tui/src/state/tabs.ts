@@ -542,6 +542,7 @@ export function createTabStore(home: Workspace, first: FirstTab, options: TabSto
         ...(pick ? { profile: pick.profile, model: pick.model } : {}),
         ...(members.length > 0 ? { with: members } : {}),
         ...(pins.length > 0 ? { pin: pins } : {}),
+        ...(extra.bare ? { bare: true } : {}),
         ...((extra.prompt?.length ?? 0) > 0 ? { prompt: extra.prompt } : {}),
         ...(extra.execEnv ? { execEnv: extra.execEnv } : {}),
       })
