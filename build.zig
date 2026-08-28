@@ -147,18 +147,20 @@ pub fn build(b: *std.Build) void {
     const ground_ext_tests = b.addTest(.{ .root_module = ground_ext_mod, .filters = test_filters });
     test_step.dependOn(&b.addRunArtifact(ground_ext_tests).step);
 
-    // End-to-end closed-loop test (DESIGN §16 milestone): init -> build -> run.
-    // It uses the host's own zig (no embed needed) via NULYA_TEST_ZIG, so it
-    // actually compiles and runs a real extension. Everything reachable from a
-    // group root lives in the single `support` facade module rooted under src/,
-    // so no file straddles two module graphs (Zig 0.16 forbids that); the
-    // facade's own anonymous `zig_archive` import covers build/toolchain.zig's
-    // @embedFile.
-    const e2e_support_mod = b.createModule(.{ .root_source_file = b.path("src/e2e_support.zig"), .target = target, .optimize = optimize });
-    e2e_support_mod.addAnonymousImport("zig_archive", .{ .root_source_file = zig_archive });
+    // The kernel as a library (`src/root.zig`): registered as the PUBLIC
+    // `nulya` module, so a dependent's build.zig can say
+    // `b.dependency("nulya", …).module("nulya")` and embed the kernel
+    // in-process. The e2e groups import the same module under the name
+    // `support`: everything reachable from a group root lives in this one
+    // facade rooted under src/, so no file straddles two module graphs
+    // (Zig 0.16 forbids that) — and the e2e suite therefore exercises exactly
+    // the surface a dependent gets. The module's own anonymous `zig_archive`
+    // import covers build/toolchain.zig's @embedFile.
+    const nulya_mod = b.addModule("nulya", .{ .root_source_file = b.path("src/root.zig"), .target = target, .optimize = optimize });
+    nulya_mod.addAnonymousImport("zig_archive", .{ .root_source_file = zig_archive });
     // The facade re-exports config.zig, which reads the baked-in default.toml.
-    e2e_support_mod.addImport("toml", toml);
-    e2e_support_mod.addOptions("config_options", config_options);
+    nulya_mod.addImport("toml", toml);
+    nulya_mod.addOptions("config_options", config_options);
 
     // A `codex app-server` that answers the protocol offline (`tests/fake_codex.zig`).
     // The Codex runner is a JSON-RPC conversation, and everything worth pinning
@@ -259,7 +261,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         mod.addAnonymousImport("zig_archive", .{ .root_source_file = zig_archive });
-        mod.addImport("support", e2e_support_mod);
+        mod.addImport("support", nulya_mod);
         const group_tests = b.addTest(.{ .root_module = mod, .filters = test_filters });
         const run_group = b.addRunArtifact(group_tests);
         run_group.setEnvironmentVariable("NULYA_TEST_ZIG", b.graph.zig_exe);
@@ -302,7 +304,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    integration_mod.addImport("support", e2e_support_mod);
+    integration_mod.addImport("support", nulya_mod);
     const integration_tests = b.addTest(.{ .root_module = integration_mod, .filters = test_filters });
     const run_integration = b.addRunArtifact(integration_tests);
     run_integration.has_side_effects = true; // network; never cached

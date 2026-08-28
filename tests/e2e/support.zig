@@ -2,9 +2,10 @@
 //! extension scaffolds, the deterministic models, and the small readers the
 //! grouped test files below all reach for.
 //!
-//! It also re-exports `src/e2e_support.zig` (the build module named `support`),
-//! so every test file has ONE import: core modules and test helpers arrive
-//! under the same name.
+//! It also re-exports `src/root.zig` — the public `nulya` library module,
+//! imported here under the build name `support` — so every test file has ONE
+//! import: core modules and test helpers arrive under the same name, and the
+//! suite exercises exactly the surface a dependent package gets.
 
 const std = @import("std");
 const support = @import("support");
