@@ -298,7 +298,7 @@ Driver 演化比 Tool 保守，因为**归因难**（任务难度 / model / seed
 
 已经躺在现有设计里的拼图（这些**不是**要新造的东西）：① store 的 version id 本来就含 target（`hash(snapshot + compiler + target)`，DESIGN §7.4）——"给远端 linux 编的 std"天然是同一个包的另一个版本，无新概念；② Zig 交叉编译让本地就能出远端二进制，远端不需要工具链；③ 内容寻址让"把冻结版本同步过去"变成幂等的一次 scp/rsync，hash 即校验；④ plain wire 就是 stdin 参数 / stdout 结果 / 退出码——`ssh <dest> <bin>` 逐位满足，唯一障碍是 `NULYA_TOOL` / `NULYA_ARG_*` 过不了 ssh（SendEnv），解法是把它们并进 stdin 的参数对象（env 形式本来只是便利面，DESIGN §7.3）。
 
-真正要设计的缺口（此处只列不答，动手那轮再答）：远端 scratch / spill 的落点与 `emit` footer 指针指向哪边的文件系统（模型看到的指针必须在它够得着的盘上）· freshness journal 跟工作区走到哪边 · gate 跨边界（问答仍在 host 的 step 进程里，不受影响；kill 要远端 supervisor——上面欠账 ② 那件事在这里成为必答题）· `--env` 的 exec target（只搬 shell）与 remote backend（全搬）是一根轴的两点还是两根轴，header 怎么记 · 往远端放二进制并执行 = 授权语义（trust gate 的对偶：这回是"这台机器信任那台机器替它跑什么"）。
+真正要设计的缺口（此处只列不答，动手那轮再答）：远端 scratch / spill 的落点与 `emit` footer 指针指向哪边的文件系统（模型看到的指针必须在它够得着的盘上）· freshness journal 跟工作区走到哪边 · gate 跨边界（问答仍在 host 的 step 进程里，不受影响；kill 要远端 supervisor——上面欠账 ② 那件事在这里成为必答题）· `--env` 的 exec target（只搬 shell）与 remote backend（全搬）是一根轴的两点还是两根轴，header 怎么记 · 往远端放二进制并执行 = 授权语义（trust gate 的对偶：这回是"这台机器信任那台机器替它跑什么"）· **一个包的两个 target 版本与冻结身份**——version id 含 target，远端化后同一包有 host 版（TUI 从本地 store 加载 ui entry、driver tool 在 host 跑）与 remote 版（交叉编译的 bin）两个 v，composition 冻结点哪个？候选答案是把冻结身份收敛到 package snapshot digest、per-target 二进制降格为同一 digest 的派生 artifact。**不需要答的**：贡献面的归属——ui entry 本来就只在前端进程里跑（kernel 从不加载它，DESIGN §7.2.1）、prompt/skills 由 kernel 在 host 投影、声明由 driver 在 host 读，会移动的只有 runtime tool 的那次 spawn；区分的单位是包的**面**不是包，manifest 结构已经把这条线画好了。
 
 **与 `root.zig` 库（`b.addModule("nulya")`）正交，别混**：extension 永不 import 内核——自包含 + 内容寻址是支柱（vendored mvzr 与 `nulya journal` CLI 动词都是这条纪律的产物），远端化是 Environment 侧的工作，工具保持无知；库服务的是进程内嵌入内核的宿主应用，与哪台机器执行无关。
 
