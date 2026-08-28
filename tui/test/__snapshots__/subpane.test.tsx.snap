@@ -24,7 +24,7 @@ exports[`a wide terminal puts the delegation beside the conversation that made i
 ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
 │ › still typing here                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
- watching ###################### · Ctrl+arrow to go there · Esc there closes it                                         
+ ◧ sessions  watching ###################### · Ctrl+arrow to go there · Esc there closes it                             
 "
 `;
 
@@ -52,6 +52,6 @@ exports[`a narrow terminal stacks them instead, and the rule turns with the spli
 ╭──────────────────────────────────────────────────────────────────────────────╮
 │ › message nulya  ·  / for commands  ·  @ for files                           │
 ╰──────────────────────────────────────────────────────────────────────────────╯
- watching ###################### · Ctrl+arrow to go there · Esc there closes it 
+ ◧ watching ###################### · Ctrl+arrow to go there · Esc there closes… 
 "
 `;
