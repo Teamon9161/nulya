@@ -290,6 +290,9 @@ Driver 演化比 Tool 保守，因为**归因难**（任务难度 / model / seed
 - 不变量：**capability 绝不因被生成或被晋升而自动获得 authority**；始终 `capability authority ⊆ session authority`。
 - 与 config 项目层"只能收窄"是同一不变量的两面：checkout 一个 repo 不该能拓宽机器权限。第三面已落地：**workspace store 的 trust gate**（DESIGN §9）——`.nulya/extensions` 也在 checkout 里，所以随 clone 到达的 store 要被人信任一次才进 composition。
 - read-only subagent（reviewer）在 sandbox 之前不给 unrestricted shell（`local` 下无法区分 `cat` 与 `rm`）。
+- **exec target（DESIGN §8.1）不属于这一节，别把它读成半个 sandbox。** `session new --env wsl|ssh:…` 换的是"命令在哪台机器上跑"，不是"跑的时候能碰什么"——WSL 经 `/mnt/` 看得见整个工作区，ssh 那侧是对方账号的全部权限。它与 backend 是两根轴：backend 有"只能更严"的排序，target 没有（别处不是更严）。
+
+**exec target 的三件已知欠账**（都等真实使用证据，一件都不先做）：① **没有 config 缺省**——`session new --env` 是按场的决定，而给 `[environment]` 加一个默认值就要回答"`wsl` 比 `local` 更严还是更松"，§9.5 的收窄规则对这个问题没有诚实答案；每场都用同一个目标该由驱动者记住一个选择（TUI 已经这么做）。② **对面的进程不保证被 kill 带走**——`Tree` 杀得到本地的 `wsl.exe` / `ssh` 客户端，远端命令通常跟着死但 detach 过的活得下来；真要保证得让远端也有一个 supervisor，那已经是"remote backend"而不是"包一层命令"。③ **`NULYA_EXE` / `NULYA_SESSION` 到不了对面**（WSL 只转发 `WSLENV`、ssh 只转发 `SendEnv`），所以在 WSL 里跑 `nulya …` 得自己找路径；翻译一个 `/mnt/` 形式的 `NULYA_EXE` 是可做的，但 harness 本体仍在 host、store 与 journal 也在 host，做了只会让"只有 shell 搬走"这条边界模糊。真要整个 harness 跑在别处，那是 `remote` backend 的题目。
 
 ### 3.8.1 权限：gate 是 substrate，mode / 规则是 driver 的 policy `[gate 已落地 · 2026-08 → DESIGN §4/§14；分类器占位]`
 

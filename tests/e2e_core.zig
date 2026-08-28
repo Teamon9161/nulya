@@ -28,6 +28,8 @@
 //!   e2e/background.zig   background tasks: the supervisor, `nulya task …`,
 //!                        `shell {background:true}` and the report it deposits
 //!   e2e/gate_pin.zig     the gate request's frozen columns, and pin ⇒ membership
+//!   e2e/exec_env.zig     `session new --env`: where a session's shell commands
+//!                        run, frozen in the header, never silently local
 //!   e2e/cli.zig          the self-description entry: `nulya help`, `ext api`
 //!                        topics, the kernel prompt's bootstrap sentence, guide
 //!   e2e/journal.zig      `nulya journal append|read`: the append-only JSONL
@@ -44,6 +46,7 @@ comptime {
     _ = @import("e2e/vision.zig");
     _ = @import("e2e/background.zig");
     _ = @import("e2e/gate_pin.zig");
+    _ = @import("e2e/exec_env.zig");
     _ = @import("e2e/cli.zig");
     _ = @import("e2e/journal.zig");
 }

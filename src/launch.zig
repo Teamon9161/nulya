@@ -584,17 +584,35 @@ pub fn nonEmpty(value: []const u8, fallback: []const u8) []const u8 {
 /// Both halves are computed HERE rather than derived down in the environment —
 /// where a workspace keeps its sidecars is the shell layer's decision, exactly
 /// as `StepContext.scratch_dir` is.
+/// `exec` is the session's `--env` spec (`""` = local, DESIGN §8) — a different
+/// axis from `backend`: it says which machine's shell reads a `shell` command,
+/// not how confined that command is. It is a parameter rather than a config key
+/// because it is decided per session and frozen in that session's header, the
+/// way the model identity is.
 pub fn localEnvironment(
     alloc: std.mem.Allocator,
     io: std.Io,
     cfg: *const config.Config,
     session: ?environment.SessionRef,
+    exec: []const u8,
 ) !environment.LocalEnvironment {
     if (cfg.environment.backend != .local) return error.UnsupportedEnvironmentBackend;
     return environment.LocalEnvironment.init(alloc, io, .{
         .dialect = cfg.environment.shell.toLocalOption(),
         .session = session,
+        .exec = exec,
     });
+}
+
+/// Say why an `--env` spec cannot be used, or null when it can — so a CLI verb
+/// can refuse BEFORE it creates anything, the way a missing `--prompt` file
+/// does. The two answers are kept apart on purpose: one is a typo, the other is
+/// the wrong machine.
+pub fn execTargetRefusal(exec: []const u8) ?[]const u8 {
+    const target = environment.parseExecTarget(environment.normalizeExecSpec(exec)) catch
+        return "unrecognized (want " ++ environment.exec_target_syntax ++ ")";
+    if (!environment.execTargetSupportedOnHost(target)) return "cannot be reached from this host (wsl needs Windows)";
+    return null;
 }
 
 /// The extension store roots this process searches, in order (DESIGN §7.2):
@@ -1144,15 +1162,25 @@ test "only the local environment backend runs; sandbox / remote are refused, not
     defer cfg.deinit();
 
     // The default backend builds an environment as usual…
-    var local = try localEnvironment(alloc, std.testing.io, &cfg, null);
+    var local = try localEnvironment(alloc, std.testing.io, &cfg, null, "");
     local.deinit();
 
     // …and a backend this build cannot honour fails rather than running the
     // tools locally under a config that asked for isolation (DESIGN §8).
     cfg.environment.backend = .sandbox;
-    try std.testing.expectError(error.UnsupportedEnvironmentBackend, localEnvironment(alloc, std.testing.io, &cfg, null));
+    try std.testing.expectError(error.UnsupportedEnvironmentBackend, localEnvironment(alloc, std.testing.io, &cfg, null, ""));
     cfg.environment.backend = .remote;
-    try std.testing.expectError(error.UnsupportedEnvironmentBackend, localEnvironment(alloc, std.testing.io, &cfg, null));
+    try std.testing.expectError(error.UnsupportedEnvironmentBackend, localEnvironment(alloc, std.testing.io, &cfg, null, ""));
+}
+
+test "an exec target is refused before anything is built, and the two refusals differ" {
+    try std.testing.expectEqual(@as(?[]const u8, null), execTargetRefusal(""));
+    try std.testing.expectEqual(@as(?[]const u8, null), execTargetRefusal("local"));
+    try std.testing.expectEqual(@as(?[]const u8, null), execTargetRefusal("ssh:me@box"));
+    // A typo and an unreachable target are different problems with different
+    // fixes, so they are not the same sentence.
+    try std.testing.expect(execTargetRefusal("wsl2") != null);
+    try std.testing.expectEqual(builtin.os.tag != .windows, execTargetRefusal("wsl") != null);
 }
 
 test "a session's tasks live beside its spills, under one removable subtree" {

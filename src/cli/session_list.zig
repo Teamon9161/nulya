@@ -32,6 +32,10 @@ const SessionView = struct {
     model_id: []const u8,
     /// Which binary created it (DESIGN §3.4). Empty for a pre-stamp session.
     nulya: ledger.Stamp,
+    /// Where its `shell` commands run (DESIGN §8). Empty = this host, which is
+    /// almost every session — so the human table only spends a column on it when
+    /// there is something to say.
+    environment: []const u8,
     events: usize,
     composition: Composition,
     /// Sum of every assistant event's recorded usage (DESIGN §3.1). Steps whose
@@ -199,6 +203,7 @@ fn readSessionView(
         .provider = h.model_identity.provider,
         .model_id = h.model_identity.model,
         .nulya = h.nulya,
+        .environment = h.environment,
         .events = events,
         .composition = .{
             .active = active,
@@ -348,6 +353,9 @@ fn printSessionList(alloc: std.mem.Allocator, io: std.Io, views: []const Session
                 }
                 try out.writer.writeAll("]");
             }
+            // Same rule as `root`: a session that runs where everything else
+            // does has nothing to say here, so it spends no width saying it.
+            if (v.environment.len != 0) try out.writer.print("  env {s}", .{v.environment});
             if (v.nulya.version.len != 0) try out.writer.print("  nulya {s}", .{v.nulya.version});
             if (v.first_user_text.len != 0) try out.writer.print("  {s}", .{v.first_user_text});
             try out.writer.writeByte('\n');
@@ -372,6 +380,7 @@ test "resolveEpisodes walks a fork chain to its root and totals the episode's us
                 .provider = "",
                 .model_id = "",
                 .nulya = .{},
+                .environment = "",
                 .events = 0,
                 .composition = .{ .active = &.{}, .native_tools = &.{}, .system_prompts = &.{}, .prompts = &.{} },
                 .usage = .{ .input_tokens = input },

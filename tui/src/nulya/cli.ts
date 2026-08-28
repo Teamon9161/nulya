@@ -187,6 +187,18 @@ export interface NewSessionOptions {
    * caller (`agents.ts`).
    */
   prompt?: readonly string[]
+  /**
+   * `--env <spec>`: where this session's `shell` commands run — `local` (or
+   * absent), `wsl`, `wsl:<distro>`, `ssh:<destination>` (DESIGN §8.1). Frozen
+   * in the header, so there is no per-step twin: a resume runs the commands
+   * where the session says or refuses to run them at all.
+   *
+   * The spec is passed through unvalidated on purpose. The kernel already
+   * refuses a bad one before creating anything, and its refusal names both the
+   * vocabulary and the reason; a second parser here would be a second answer to
+   * "is this spelling any good".
+   */
+  execEnv?: string
 }
 
 /** `nulya session new` — stdout is the session id. `env` is a test seam (`NULYA_HOME`). */
@@ -200,6 +212,7 @@ export async function sessionNew(
   if (options.model) args.push("--model", options.model)
   if (options.parent) args.push("--parent", `${options.parent.session}:${options.parent.seq}`)
   if (options.bare) args.push("--bare")
+  if (options.execEnv) args.push("--env", options.execEnv)
   for (const ref of options.with ?? []) args.push("--with", ref)
   for (const pin of options.pin ?? []) args.push("--pin", pin)
   for (const file of options.prompt ?? []) args.push("--prompt", file)

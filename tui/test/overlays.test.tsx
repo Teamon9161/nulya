@@ -225,6 +225,7 @@ test("/ext shows the version line, the current pointer and the usage counts", as
     parent: null,
     model: "scripted",
     model_identity: { provider: "scripted", model: "", base_url: "", api_key_env: "" },
+    environment: "",
     created: "",
     composition: { active: [{ id: "lint", version }], native_tools: ["ext:lint/lint"], prompts: [] },
   }
@@ -386,6 +387,7 @@ test("/ext names the drift between what this session froze and what the store po
     parent: null,
     model: "scripted",
     model_identity: { provider: "scripted", model: "", base_url: "", api_key_env: "" },
+    environment: "",
     created: "",
     composition: { active: [{ id: "lint", version: "v-old" }], native_tools: [], prompts: [] },
   }

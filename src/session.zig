@@ -108,6 +108,10 @@ pub const AgentSession = struct {
         /// caller resolves this from config at the creation boundary; the kernel
         /// only stores it. Empty provider = a scripted/legacy session.
         model_identity: ledger.ModelDescriptor = .{},
+        /// The exec target's spec, frozen into the header (DESIGN §8). The
+        /// kernel only stores it: which machine a shell command runs on is a
+        /// creation-boundary decision, exactly like the model identity.
+        environment: []const u8 = "",
         created: []const u8 = "",
         /// The creating binary's version string (`launch.version`). The other
         /// half of the header's provenance stamp — the kernel hash — comes from
@@ -167,6 +171,7 @@ pub const AgentSession = struct {
             .parent = d.parent,
             .model = d.model_profile,
             .model_identity = d.model_identity,
+            .environment = d.environment,
             .created = d.created,
             .nulya = .{ .version = d.nulya_version, .kernel_hash = kernel_hash },
             // The inline prompts go in by VALUE — they have no store entry to

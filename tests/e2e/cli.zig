@@ -70,8 +70,10 @@ test "cli help: help / --help / -h print the same usage covering every verb fami
     // guess; `session new --bare`, +1 — a session that ignores the config's two
     // standing lists cannot be inferred from the other flags; `nulya journal`,
     // +2 — the append-only JSONL discipline exposed to extensions, one line per
-    // verb since neither takes a flag worth documenting).
-    try std.testing.expect(std.mem.count(u8, help.stdout, "\n") <= 54);
+    // verb since neither takes a flag worth documenting; `session new --env`,
+    // +1 — WHERE a session's shell commands run is not inferable from any other
+    // flag, and the three spellings are the whole of that vocabulary).
+    try std.testing.expect(std.mem.count(u8, help.stdout, "\n") <= 55);
 
     // The two flag spellings a terminal user reaches for reach the same text.
     for ([_][]const u8{ "--help", "-h" }) |flag| {

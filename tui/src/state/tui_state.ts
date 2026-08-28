@@ -43,6 +43,22 @@ export interface TuiState {
    */
   asked_stores?: string[]
   /**
+   * Where the NEXT session's `shell` commands run (`/env`, DESIGN §8.1) — the
+   * spec verbatim, `""`/absent meaning this host.
+   *
+   * Program state for the model pick's reason: a person working inside a WSL
+   * distribution today should not have to type `--env wsl` for every new tab.
+   * It is not `tui.toml` and deliberately not the kernel's config either — the
+   * kernel has no such key, because "is wsl narrower or wider than local" has
+   * no honest answer in a config chain whose project layer may only narrow
+   * (DESIGN §8.1). Remembering a choice is a front end's job; ranking targets
+   * would not be.
+   *
+   * The spelling is never checked here. `session new` refuses a bad one with
+   * the vocabulary in the message, and that refusal already reaches the screen.
+   */
+  exec_env?: string
+  /**
    * Agent-definition directories the question has already been put for, by
    * absolute path, and the ones that were answered yes (tui.md §5.10).
    *
@@ -145,6 +161,8 @@ export function loadTuiState(path = tuiStatePath()): TuiState {
     if (Array.isArray(sessionPinsList)) {
       state.session_pins = sessionPinsList.filter((s): s is string => typeof s === "string")
     }
+    const execEnv = record["exec_env"]
+    if (typeof execEnv === "string" && execEnv.length > 0) state.exec_env = execEnv
     const mode = record["mode"]
     if (typeof mode === "string") {
       const known = normalizeMode(mode)
@@ -236,6 +254,24 @@ export function rememberSidebar(sidebar: { open: boolean; ratio: number }, path 
 export function rememberTabs(tabs: readonly { ws: string; session?: string }[], path = tuiStatePath()): void {
   const state = loadTuiState(path)
   state.tabs = tabs.map((tab) => ({ ws: tab.ws, ...(tab.session ? { session: tab.session } : {}) }))
+  saveTuiState(state, path)
+}
+
+/** Where the next `session new` from this TUI runs its shell (DESIGN §8.1). */
+export function execEnv(path = tuiStatePath()): string {
+  return loadTuiState(path).exec_env ?? ""
+}
+
+/**
+ * Remember it. An empty spec (or the word `local`) is the absence of a choice,
+ * so it is REMOVED rather than stored — otherwise the file would keep saying
+ * something about a session that is exactly like every other one.
+ */
+export function rememberExecEnv(spec: string, path = tuiStatePath()): void {
+  const state = loadTuiState(path)
+  const trimmed = spec.trim()
+  if (trimmed.length === 0 || trimmed === "local") delete state.exec_env
+  else state.exec_env = trimmed
   saveTuiState(state, path)
 }
 

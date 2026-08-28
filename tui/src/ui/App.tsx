@@ -70,7 +70,9 @@ import type { TranscriptRow } from "../render/runs.ts"
 import { createTabStore, type DraftTab, type FirstTab, type SessionTab } from "../state/tabs.ts"
 import type { PaneStore } from "../state/panes.ts"
 import {
+  execEnv,
   loadTuiState,
+  rememberExecEnv,
   rememberModel,
   rememberMode,
   rememberSessionPins,
@@ -1797,6 +1799,22 @@ export function App(props: AppProps) {
     ]
   }
 
+  /**
+   * Where this tab's `shell` commands run, when that is not this host
+   * (DESIGN §8.1). Empty means the ordinary answer and the status line spends
+   * no column on it.
+   *
+   * Two sources for one fact, and they are not interchangeable: a started
+   * session's target is FROZEN in its header, so `/env` cannot move it and the
+   * header is the only truthful answer; a draft has no header yet, so what it
+   * shows is the pending choice — what its first message would freeze.
+   */
+  const runsIn = (): string => {
+    const here = tab()
+    if (here.kind === "draft") return execEnv(props.statePath)
+    return snapshot().header?.environment ?? ""
+  }
+
   /** What a draft tab's first message would freeze — the welcome screen's facts. */
   const plan = (): NextSession | undefined => {
     const here = draft()
@@ -1952,7 +1970,7 @@ export function App(props: AppProps) {
    */
   const sessionExtras = async (
     target: Workspace,
-  ): Promise<{ with?: string[]; pin?: string[]; prompt?: string[] }> => {
+  ): Promise<{ with?: string[]; pin?: string[]; prompt?: string[]; execEnv?: string }> => {
     const withRefs: string[] = []
     const pins: string[] = []
     const missing: string[] = []
@@ -2003,10 +2021,16 @@ export function App(props: AppProps) {
       ? [`${missing.join(" & ")} not composed in · /ext for what it said`, ...broke]
       : broke
     if (notices.length > 0) setNotice(notices.join(" · "))
+    // Where its `shell` runs (`/env`, DESIGN §8.1). Read here, at the same
+    // moment as everything else on this list, because it is frozen by the same
+    // `session new`: a choice made after this line is a choice about the NEXT
+    // session, which is exactly what `/env` says it is.
+    const where = execEnv(props.statePath)
     return {
       ...(withRefs.length > 0 ? { with: withRefs } : {}),
       ...(pins.length > 0 ? { pin: pins } : {}),
       ...(prompts.length > 0 ? { prompt: prompts } : {}),
+      ...(where.length > 0 ? { execEnv: where } : {}),
     }
   }
 
@@ -3044,6 +3068,44 @@ export function App(props: AppProps) {
   }
 
   /**
+   * `/env [<spec>]`: where the shell commands of the sessions this TUI starts
+   * from now on will run (DESIGN §8.1).
+   *
+   * Deliberately NOT a change to the tab in front of you: the target is frozen
+   * in a session's header, exactly like its model identity, because a
+   * transcript only means something against the machine that produced it. So
+   * the answer is always about the NEXT session, and the sentence says so.
+   *
+   * No argument reports where things stand rather than opening a picker: the
+   * useful set here is not enumerable — an ssh destination is whatever that
+   * person's `ssh_config` calls a host, and the distributions on this machine
+   * are a `wsl -l` away — so a list of two words plus "type the third one
+   * yourself" would be a picker pretending to have the answer.
+   *
+   * The spelling is not checked here. `session new` refuses a bad one with the
+   * vocabulary in the message, and that refusal already reaches the screen
+   * (`ensureSession`) — checking twice would be two answers to one question.
+   */
+  const setExecEnv = (raw: string | undefined) => {
+    if (raw === undefined) {
+      const now = execEnv(props.statePath)
+      setNotice(
+        now.length > 0
+          ? `shell runs in ${now} for new sessions · /env local to come back · only shell moves, this harness stays here`
+          : "shell runs on this host · /env wsl | wsl:<distro> | ssh:<dest> for the next session",
+      )
+      return
+    }
+    rememberExecEnv(raw, props.statePath)
+    const now = execEnv(props.statePath)
+    setNotice(
+      now.length > 0
+        ? `next session's shell runs in ${now} · extensions, tasks and the store stay on this host`
+        : "next session's shell runs on this host",
+    )
+  }
+
+  /**
    * `ask` is only for the deliberate `/quit`: a session that did work and was
    * never judged leaves a hole in the slow loop — no verdict means `unknown`,
    * which is not failure but is not knowledge either (DESIGN §3.3) — and the
@@ -3269,6 +3331,10 @@ export function App(props: AppProps) {
     }
     if (command === "/effort") {
       setEffort(words[1])
+      return true
+    }
+    if (command === "/env") {
+      setExecEnv(words[1])
       return true
     }
     if (command === "/help") {
@@ -4216,6 +4282,7 @@ export function App(props: AppProps) {
                   mode={mode()}
                   onPickMode={toggleModePicker}
                   wearing={wearing()}
+                  execEnv={runsIn()}
                   onOpenExt={() => openOverlay("ext")}
                   hint={notice()?.text}
                   behind={behind()}

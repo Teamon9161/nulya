@@ -470,6 +470,18 @@ pub const Header = struct {
     /// separately in `model_identity`, which config changes can never alter.
     model: []const u8 = "",
     model_identity: ModelDescriptor = .{},
+    /// WHERE this session's `shell` commands run (`environment.ExecTarget`'s
+    /// spec: `""` = this host, `wsl`, `wsl:<distro>`, `ssh:<destination>`).
+    ///
+    /// Frozen for the same reason `model_identity` is, and not for cache
+    /// reasons — it never reaches the model's prompt. A transcript only means
+    /// something against the machine that produced it: paths, the platform the
+    /// model believes it is on, and which files a later step can still see all
+    /// come from here. A session that ran twenty steps inside a distro and
+    /// resumed on the host would be a different conversation wearing the same
+    /// id. Empty for every session that never asked, which is why this is a
+    /// defaulted field rather than a header version bump (DESIGN §3.4, §8).
+    environment: []const u8 = "",
     created: []const u8 = "",
     /// Which binary wrote this session (see `Stamp`). Provenance, not a gate.
     nulya: Stamp = .{},

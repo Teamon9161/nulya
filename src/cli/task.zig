@@ -275,6 +275,15 @@ fn taskSupervise(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     const dir = flagValue(args, "--dir") orelse return superviseUsage(io);
     const session_path = flagValue(args, "--session") orelse return superviseUsage(io);
     const run_cwd = flagValue(args, "--cwd") orelse return superviseUsage(io);
+    // Where the WATCHED command runs (DESIGN §8). The supervisor itself is
+    // always a host process — it holds the lease, drains the log and deposits
+    // the event into a file on this machine — so this only ever reaches
+    // `shellArgv`.
+    const exec = flagValue(args, "--env") orelse "";
+    if (launch.execTargetRefusal(exec)) |why| {
+        try printErrFmt(alloc, io, "--env {s}: {s}\n", .{ exec, why });
+        return 1;
+    }
     var timeout_ms: ?u32 = null;
     if (flagValue(args, "--timeout-ms")) |v| {
         timeout_ms = std.fmt.parseInt(u32, v, 10) catch {
@@ -345,7 +354,7 @@ fn taskSupervise(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
         var cfg = try config.load(alloc, io, &cfg_host);
         defer cfg.deinit();
         // No session ref: a supervisor runs one command, it never starts tasks.
-        var lenv = try launch.localEnvironment(alloc, io, &cfg, null);
+        var lenv = try launch.localEnvironment(alloc, io, &cfg, null, exec);
         defer lenv.deinit();
 
         const outcome = try runWatched(alloc, io, &lenv, .{
@@ -402,7 +411,7 @@ fn taskSupervise(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
 }
 
 fn superviseUsage(io: std.Io) !u8 {
-    try printErr(io, "usage: nulya task supervise --dir <task-dir> --session <session-file> --cwd <dir> [--timeout-ms N] -- <command>\n");
+    try printErr(io, "usage: nulya task supervise --dir <task-dir> --session <session-file> --cwd <dir> [--env <spec>] [--timeout-ms N] -- <command>\n");
     return 1;
 }
 
@@ -505,8 +514,8 @@ fn runWatched(alloc: std.mem.Allocator, io: std.Io, lenv: *environment.LocalEnvi
     var log = try cwd.createFile(io, req.log_path, .{});
     defer log.close(io);
 
-    var argv_buf: [5][]const u8 = undefined;
-    const cmdline = try lenv.shellArgv(alloc, req.command, &argv_buf);
+    var argv_buf: [8][]const u8 = undefined;
+    const cmdline = try lenv.shellArgv(alloc, req.command, req.cwd, &argv_buf);
     defer cmdline.deinit(alloc);
 
     // `Tree`, so a kill reaches the grandchildren a shell forks (DESIGN §6.1).
@@ -860,10 +869,14 @@ fn taskRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
 
     const spath = try launch.sessionPath(alloc, session_id);
     defer alloc.free(spath);
-    std.Io.Dir.cwd().access(io, spath, .{}) catch {
+    // The header, not just the file's existence: a task belongs to a session, so
+    // it runs where that session runs (DESIGN §8). Reading it here is what keeps
+    // this verb and `shell {background:true}` from drifting into two answers.
+    var hdr = ledger.readHeader(alloc, io, std.Io.Dir.cwd(), spath) catch {
         try printErrFmt(alloc, io, "no such session '{s}'\n", .{session_id});
         return 1;
     };
+    defer hdr.deinit();
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const here = try cwdRealPath(io, &cwd_buf);
@@ -881,9 +894,13 @@ fn taskRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     var lenv = launch.localEnvironment(alloc, io, &cfg, .{
         .session_path = spath,
         .tasks_dir = tasks_dir,
-    }) catch |err| switch (err) {
+    }, hdr.value.environment) catch |err| switch (err) {
         error.UnsupportedEnvironmentBackend => {
             try printErrFmt(alloc, io, "environment backend '{s}' is not implemented; only local\n", .{@tagName(cfg.environment.backend)});
+            return 1;
+        },
+        error.InvalidExecTarget, error.ExecTargetUnsupportedOnHost => {
+            try printErrFmt(alloc, io, "session '{s}' runs its commands in '{s}', which this host cannot reach\n", .{ session_id, hdr.value.environment });
             return 1;
         },
         else => return err,

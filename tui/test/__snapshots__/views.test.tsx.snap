@@ -59,12 +59,15 @@ exports[`/help lists the bindings that are actually in force 1`] = `
  /provider                         endpoints and their keys                                       █ 
                                    add an OpenAI- or Anthropic-compatible one                     █ 
  /effort <level|auto>              change this tab's effort now; the next step runs with it       █ 
- /new [--profile p] [--model id]   a SECOND tab, on the last pick or the named profile — this tab █ 
-                                   is untouched                                                   █ 
- /clear [--profile p] [--model i…  replace THIS tab with a fresh draft, in place — the old        █ 
-                                   session's file stays on disk                                   █ 
- /sessions [<id>]                  everything in .nulya/sessions · Enter opens one                █ 
-                                   an id opens that one · \`/resume\` is another name for it        █ 
+ /env [<target>]                   where the next session's shell runs: local | wsl |             █ 
+                                   wsl:<distro> | ssh:<dest>                                        
+                                   only shell moves, this harness stays here                        
+ /new [--profile p] [--model id]   a SECOND tab, on the last pick or the named profile — this tab   
+                                   is untouched                                                     
+ /clear [--profile p] [--model i…  replace THIS tab with a fresh draft, in place — the old          
+                                   session's file stays on disk                                     
+ /sessions [<id>]                  everything in .nulya/sessions · Enter opens one                  
+                                   an id opens that one · \`/resume\` is another name for it          
  /cwd [<path>]                     which directory this tab works in                                
                                    no argument opens the browser · \`no project\` needs none          
  /sidebar [<percent>]              the session list, docked down the left edge                      
@@ -95,7 +98,6 @@ exports[`/help lists the bindings that are actually in force 1`] = `
                                    \`nulya skill list\` names them                                    
  anything else after /             goes to the model verbatim                                       
                                                                                                     
- a session has one writer                                                                           
  j/k · PgUp/PgDn scroll · Esc close                                                                 
 "
 `;

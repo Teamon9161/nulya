@@ -122,7 +122,7 @@ test("an alias completes, behind the listed names, and says where it goes", () =
   expect(completions("/res").map((c) => c.name)).toEqual(["/resume"])
   expect(completions("/resume")[0]?.what).toContain("/sessions")
   // A listed name beats an alias for the same prefix: `/effort` is the concept.
-  expect(completions("/e").map((c) => c.name)).toEqual(["/effort", "/ext", "/exit"])
+  expect(completions("/e").map((c) => c.name)).toEqual(["/effort", "/env", "/ext", "/exit"])
 })
 
 test("a `/` line lists the commands it could still be, and Tab finishes it", async () => {

@@ -285,6 +285,7 @@ const header_fixture: SessionHeader = {
     base_url: "https://api.anthropic.com",
     api_key_env: "ANTHROPIC_API_KEY",
   },
+  environment: "",
   created: "2026-08-16T14:02:11Z",
   composition: { active: [{ id: "lint", version: "v-3f2a91" }], native_tools: ["ext:lint/lint_zig"], prompts: [] },
 }

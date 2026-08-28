@@ -140,7 +140,7 @@ UI / trajectory / metrics 是 ledger 的投影，不持久化 mutable 状态。*
 一场 session = 一个 JSONL 文件 `.nulya/sessions/<id>.jsonl`：第一行是冻结的 header，之后每行一个 `{"seq":n,…}` 事件（seq 从 1 单调递增）。
 
 ```jsonl
-{"kind":"header","v":1,"session":"s-…","parent":{"session":"s-…","seq":41}|null,"model":"openai","model_identity":{"provider":"openai","model":"gpt-4o-mini","base_url":"https://…","api_key_env":"OPENAI_API_KEY"},"created":"…","nulya":{"version":"0.0.0","kernel_hash":"f49f…"},"composition":{"active":[{"id":"web.search","version":"v-…"}],"native_tools":["ext:web.search/web_search"],"prompts":[{"source":"agent-explore","text":"You only read…"}]}}
+{"kind":"header","v":1,"session":"s-…","parent":{"session":"s-…","seq":41}|null,"model":"openai","model_identity":{"provider":"openai","model":"gpt-4o-mini","base_url":"https://…","api_key_env":"OPENAI_API_KEY"},"environment":"","created":"…","nulya":{"version":"0.0.0","kernel_hash":"f49f…"},"composition":{"active":[{"id":"web.search","version":"v-…"}],"native_tools":["ext:web.search/web_search"],"prompts":[{"source":"agent-explore","text":"You only read…"}]}}
 {"seq":1,"origin":"msg-….json","kind":"user_text","text":"…","images":[{"media_type":"image/png","data":"<base64>"}]}
 {"seq":2,"kind":"assistant","reasoning":"[{\"type\":\"thinking\",…}]","text":"…","calls":[{"id":"…","tool":"…","args":"…"}],"usage":{"input_tokens":1200,"output_tokens":80,"cache_read_tokens":1100,"cache_write_tokens":0},"stop_reason":"max_tokens"}
 {"seq":3,"kind":"tool_results","results":[{"call_id":"…","ok":true,"output":"…","spill_path":null,"presentation":"{\"kind\":\"diff\",…}"}]}
@@ -153,6 +153,7 @@ UI / trajectory / metrics 是 ledger 的投影，不持久化 mutable 状态。*
 - **一个文件 = 一个 generation = 一个 cache scope。** 文件只 append，所以 PromptIR 的 turn 前缀不变量（§1）成了文件系统性质。没有会 bump generation 的事件（§11）。
 - **header 的 JSON 形状就是 `ledger.Header` 结构体**（`std.json` 类型化编解码，`OwnedHeader = std.json.Parsed(Header)`）；读端忽略未知字段，所以新写者多出的字段不破坏旧读者；**但 `v` 不同就拒绝**（`ledger.format_version` = 1，别的值一律 `UnsupportedLedgerVersion`）——多出的字段不改变已有字段的含义，换了版本号则正是在宣告"改了"，把未来格式当 v1 读只会读出一个像是对的答案。`session step` / `session new --parent` 把它翻成"这个文件由更新的 nulya 写的，本二进制读 ledger v1"并退出 1，`session list` 跳过该文件（它本来就跳过读不了的）。事件行保持平铺的 `kind` 形状（driver 读起来方便），解码经 `WireEvent`。
 - **composition + 模型身份冻结进 header。** header 的 `composition.active` 记录本场**每个成员 extension** 的具体版本——activate 来的**和** `session new --with` 带进来的（§14），键名 `active` 是 v1 wire 遗留（那时成员只能来自 activate），下次升 header schema 版本时一起改名；`native_tools` 是被选为 native 的 tool 稳定 id（两根轴分开：冻结版本 ≠ 进模型工具面）。`prompts` 是 `session new --prompt <file>` 冻进来的 **per-session system prompt 的字节本身**（`{source, text}`，缺省空表；这个字段之前写的老 header 读回空，所以 header `v` 仍是 1）——**冻字节而不是冻引用**：一段只对这一场有意义的文本，家在 session 文件里（与 `model_identity` 同一条理由），冻路径会漂、经 store 则 resume 与 `ext prune` 耦合。`source` 是**内核从不解释**的标签，原样进 `PromptIR` 的 block source，谁写的谁定义它的含义（`extensions/agent` 的 `agent-<name>` 就是这样一条包内的写/读约定）。还有创建时**解析后的模型身份** `model_identity`（`provider` / 具体 `model` / `base_url` / `api_key_env`——`model` 字段本身只是 profile 别名，供显示与 effort 查询）。任何进程 `openDurable` 重开时都用 header 重建 composition（`composition.initFrozen`：读那些冻结版本、把 `native_tools` 当 pin），**绝不重扫 `current`、绝不重排 usage journal**——每个 `session step` 进程都看到**同一** composition，中途 `activate` 也移不动它（§5.1、§7.5、physics #2）。replay 时模型看到的一切 = header + events 的纯函数。header 还记 `nulya{version, kernel_hash}`（build 的版本串 + kernel system prompt 与 builtin 定义的 hash，`composition.kernelHash`）——**纯 provenance**：这两样是**二进制的**编译期常量却进了本场冻结的 model-visible 状态（§5.1、§7.5），升级 nulya 就会在既有 session 底下换掉它们，而 header 原本无从指认；记下来只是让它可见，resume 时对不上就在 stderr 警告一行照跑（不拒绝、不改任何东西），空 stamp = 这个字段之前写的老 header = unknown，永不警告。
+- **`environment` 冻的是"这一场的 `shell` 命令跑在哪"**（§8.1 的 exec target spec：`""` = 本机、`wsl`、`wsl:<distro>`、`ssh:<destination>`；`session new --env` 决定一次，这个字段之前写的老 header 读回 `""`，header `v` 仍是 1）。它**不投影给模型**，冻它的理由与 `model_identity` 一样而与缓存无关：一份转录只在产出它的那台机器上才有意义。`session step` 因此没有 `--env`，只读 header；目标不可达就与 `MissingCredential` 一样响亮失败，绝不改在本机跑。
 - **模型身份创建时冻结、resume 不可变（physics #2/#5）。** 模型解析**只有一处决定**：`launch.resolveDescriptor(prov, env, profile)` 在**创建**时把 profile 解析成 `model_identity`，运行用的 handle 也**只从这个 descriptor** 构建（`launch.buildFromDescriptor`）——所以"实际跑的" == "header 冻结的"，不存在 fork。`resolveDescriptor` 是 **credential-aware** 的：openai profile 若 `api_key_env` 在环境里解析不出 credential，创建时就冻结成 scripted（因为那正是会跑的东西）；此后 config 改动**永不**改变已有 session 的模型。resume 时 `session step` 用 header 的 `model_identity` 重建**恰好那个**模型，只从 `api_key_env` 重解 credential——**不存密钥**，也**没有静默 fallback**：openai session 的密钥不在了就 `MissingCredential` 显式拒跑。**durable credential 只以 `api_key_env` 引用**；inline `api_key` 无法在 resume 时从环境恢复（否则又让 session 依赖 mutable config），因此不参与 durable openai 身份。`provider==""` 的旧 header 当 scripted 处理。
 - **resume。** `openDurable` 读回 header + 每条完整事件行；被截断的**最后一行**（写到一半崩溃）丢弃并把文件截回最后一条完整行，坏的**中间**行或乱序 `seq` 则是硬错误（`CorruptLedger`）。崩在 assistant-with-calls 之后（合法但未闭合的 batch）由 `completeInterruptedToolBatch` 在下一步补齐（§4）。
 - **一场 session 的旁车清单**（都由 id 派生，都不是 session 文件本身）：`<id>.lock`（单写者租约）· `<id>.inbox/`（跨进程事件投递）· `<id>.cancel`（取消标记）· `.nulya/scratch/<id>/tool-output/`（`emit` 的落盘，§4）· `.nulya/scratch/<id>/tasks/t<N>/`（后台任务，§6.1：`status.json` / `output.log` / `.lock` / `kill` / `notify`）。后两者同在 `scratch/<id>/` 下是有意的——一场 session 的全部副产品是一棵子树，`rm -rf .nulya/scratch/<id>` 一次清干净。
@@ -335,7 +336,7 @@ inline 排在成员之后、catalog 之前：它与成员贡献的 prompt 同是
 
 ### 6.1 shell
 
-单一工具，schema 恒定 `{ command, cwd?, timeout_ms? }`；系统提示告知 `shell_dialect = bash | powershell`（由 Environment 决定，§8）。所有 `nulya …` CLI 都经它调用 → 模型工具面极小。读文件也交给 shell（`cat` / `rg` / `sed`）：读本就要一个 round-trip，native read 不省，故不单列。
+单一工具，schema 恒定 `{ command, cwd?, timeout_ms? }`；命令用哪种语言写由 Environment 的 dialect 决定，**跑在哪台机器上**由它的 exec target 决定（`session new --env`，§8.1——只有这个 tool 的命令搬得走）。所有 `nulya …` CLI 都经它调用 → 模型工具面极小。读文件也交给 shell（`cat` / `rg` / `sed`）：读本就要一个 round-trip，native read 不省，故不单列。
 
 **超时是内核常量，不是 config**（`tool.Timeouts`，base-tools.md §3）：默认 120s、上限 600s，模型给的 `timeout_ms` 夹进 `[1, 600000]`（非正整数当场教学式拒绝，不替它换个数）。到点 `kill` 子进程，并把**被杀前已捕获的输出**连同 `[timed out after <n> ms; process killed, output above is partial]` 一起返回（`ok=false`、`[exit 1]`）——超时不是丢弃。实现上 `child.wait` 仍是唯一的取消点，只是和一个 sleep 任务放进 `std.Io.Select` 赛跑（与 §13 stall watchdog 同一个形状）；io 给不出两个并发单元就裸跑（没有假超时，只是没有守卫）。
 
@@ -346,6 +347,8 @@ inline 排在成员之后、catalog 之前：它与成员贡献的 prompt 同是
 OS 不给 job（老 Windows 的嵌套限制、或 nulya 自己跑在受限 job 里）就降级成只杀直接子进程并在 stderr 说一句——**不因此让 spawn 失败**。extension 的 oneshot 调用走同一个 `Tree`、同一张表的 30s（§7.3）。
 
 **`background: true`：活得过这个 step 的命令。** schema 多一个 bool（`{command, cwd?, timeout_ms?, background?}`），语义完全不同：调用**立刻返回一张回执**（任务全名 `<sid>/t<N>`、log 路径、以及 status / wait / kill 三条命令），命令本身交给一个 **supervisor 进程**（`NULYA_EXE task supervise`，§8/§14）看着跑，结束时由它把 `task_finished` 投进本场 session 的 inbox，下一个 step 边界排干（§3.1、§4）。为什么是 `shell` 上的一个 flag 而不是另一个 CLI 动词：gate 与前端的审批规则读的是 `shell` 自己的 `command`（§4/§9），一层 `nulya task run -- …` 的包装会让它们同时失明，转录上显示的也不再是真命令。代价是 builtin 定义变了一次，于是 `kernel_hash` 变一次（纯 provenance，老 session resume 警告一行照跑，§3.4）。
+
+后台命令与前台命令**跑在同一台机器上**：supervisor 自己永远是 host 进程（它持租约、排日志、往本机文件投递事件），但 `startShellTask` 把本场的 exec target spec 作为 `--env <spec>` 传给它，`nulya task run` 则从那一场的 header 读同一个字段（§8.1）——一个 session 里两个入口不会给出两个答案。
 
 三条与前台相反的纪律：**没有缺省 timeout、没有上限**——活得过 step 正是它的意义，收口靠 `nulya task kill`（前台的 120s / 600s 一字不动）；**取消 step 不碰任务**（§4 的 cancel 是关于这一步的，杀任务只有 `task kill` 一个动词）；**usage journal 记的是那次发射**（`ok=true`、耗时≈spawn 的时间）——那正是 `builtin.shell` 这一次真正做的事，把后台命令的成败记到它头上是不诚实的（§5.5）。没有 session 可报告（`session new` 的 environment、demo、库调用）→ `ok=false` + 一句教学式文案，**什么都不启动**；`background` 不是 bool 就当场拒绝，与 `timeout_ms` 同一条纪律（不替它猜）。
 
@@ -752,6 +755,33 @@ Environment { runShell(cmd, dialect) / runExtension(entry, request_json) / start
 
 只有 `local` backend。`sandbox` / `remote` 在 config 里能解析，但 `session new` / `session step` 建 environment 时（`launch.localEnvironment`，唯一一处）直接报 `UnsupportedEnvironmentBackend`——不会悄悄按 local 跑一个要求隔离的 config（PLAN §3.8）。ACP 不是 Environment（那是 editor→agent 的通信协议，方向相反，归前端层）。
 
+### 8.1 Exec target：`shell` 的命令跑在哪（`session new --env`）
+
+**第三根轴**，与已有的两根正交：`Dialect` 说命令用哪种语言写、`config.environment.backend` 说它被关得多紧（仍只有 `local`，那是 sandbox 那根轴），这一根说**哪台机器的 shell 读它**。`wsl` 与 `ssh` 既不比 host 窄也不比它宽，它们在**别处**——所以不是 `EnvironmentBackend` 的第四个词，backend 的"project 层只能更严"那条排序对它无意义。
+
+```
+ExecTarget = local | wsl{distro?} | ssh{destination}
+spec 语法    local | wsl | wsl:<distro> | ssh:<destination>
+```
+
+**只有 `shell` 的命令搬走。** extension 子进程、task supervisor、extension store、三条 journal、`emit` 的 spill 文件——全部留在 host。理由不是省事：这些是 harness 自己的机器，它们是为这个 host 编译的，一条远程 shell 不会让 harness 变成远程的。收益是这条边界**可实现且说得清**；代价一条条写在 `shellArgv` 的注释里，也写在下面。
+
+**为什么冻进 header**（`Header.environment`，可空字段、header `v` 仍是 1、老 header 读回 `""`，§3.4）：与 `model_identity` 同一个理由，且**不是**缓存理由——它从不进模型的 prompt。一份转录只在产出它的那台机器上才有意义：路径、模型以为自己在什么平台上、下一步还看得见哪些文件，全从这里来。一场跑了二十步 WSL 然后在 host 上 resume 的 session，是顶着同一个 id 的另一场对话。所以 `session new --env` 决定一次，`session step` 不认这个 flag、只读 header；resume 时目标不可达就**响亮失败**（与 `MissingCredential` 对称），绝不改在本机跑。同理 `nulya task run` 读的是那一场的 header——**任务跑在它那场 session 跑的地方**，与 `shell {background:true}` 不会给出两个答案（后者由 `startShellTask` 把 `--env <spec>` 传给 supervisor 实现）。
+
+**没有对应的 config 键**，这是有意的：它是按场的决定，而给 `[environment]` 加一个默认值就要回答"`wsl` 比 `local` 更严还是更松"——project 层收窄规则（§9.5）对这个问题没有诚实答案。想每场都用同一个目标，那是驱动者记住一个选择的事（PLAN §3.8）。
+
+**argv 与 cwd**（`LocalEnvironment.shellArgv`，仍是 argv 决定的唯一一处；`local` 分支逐字节不变）：
+
+- `wsl.exe [-d <distro>] -e bash -lc "cd '<translated>' || exit 1\n<command>"`。`-e` 绕开发行版的默认 shell，所以解释器一定是 bash。cwd 由**纯函数** `wslPath` 翻译（`C:\code\x` → `/mnt/c/code/x`）；翻不了的（UNC 共享）**原样传过去**，于是 `cd` 在发行版里用它自己的话报错——比悄悄丢掉 `cd`、在别的目录里跑完再报成功要诚实。`|| exit 1` 与换行而不是 `;`：`cd` 失败不许接着跑，首行是注释的命令也不许把 `;` 后面吞掉。
+- `ssh -o BatchMode=yes <destination> "bash -lc '<command>'"`。destination 是**独立的一个 argv 词**（永不拼进命令串）。`BatchMode` 是因为这个子进程的 stdin 是关掉的：没有它，一次密码或 host-key 提示会一直坐到 step 超时，有它则第一秒就带着缺什么的消息失败（首次连接因此需要 `known_hosts` 里已有该主机——绝不自动接受主机密钥）。远端包一层 `bash -lc` 是为了让"dialect = bash"这句话在对方的登录 shell 是 fish/csh 时也成立。
+- 目标非 local 时 dialect **恒为 bash**，config 的 `environment.shell` 与 host 探测都不参与——命令由哪个 shell 读是目标的答案。
+
+**三条如实记录的局限**（不是欠账，是这条边界的形状）：
+
+1. **kill 杀得到本地客户端，不保证杀得到对面。** `Tree` 照旧包着 `wsl.exe` / `ssh`，所以超时与取消**一定**结束这一步；对面那个进程会不会跟着死是对面的事——ssh 通道关闭通常让远端命令收到 SIGHUP、杀掉 WSL relay 通常带走它的 Linux 进程，但自己 detach 了的命令两种都活得下来。不声称做不到的保证。
+2. **子进程环境是目标那侧的。** WSL 只转发 `WSLENV` 点名的、ssh 只转发 `SendEnv` 点名的，所以 `NULYA_EXE` / `NULYA_SESSION` **到不了对面**（模型在 WSL 里想调 `nulya` 得自己找路径）。physics #6 不受影响——净化过的 map 正是 `wsl.exe` / `ssh` 自己拿到的那份，没有 secret 可供转发；顺带一条：`SSH_AUTH_SOCK` 在 denylist 上，所以 **ssh 目标只能用密钥文件认证，用不了本机的 ssh-agent**。
+3. **cwd 只对 WSL 有意义。** WSL 下工作区是同一个目录换个名字看；ssh 那侧是另一台机器的文件系统，命令从远端账号的 home 开始，本地工作区（包括每个 `emit` spill 文件）它看不见——对 ops 型任务仍然有用，对"读一下我刚才写的文件"不适用。
+
 ---
 
 ## 9. Authority（诚实版）
@@ -761,6 +791,7 @@ Environment { runShell(cmd, dialect) / runExtension(entry, request_json) / start
 - extension 与 shell 共享同一个 session authority（≈ 当前用户全权限）。明说，不给虚假安全感。
 - **env 净化**：子进程 env 过 `isSecretKey` denylist（大小写不敏感子串：`SECRET / TOKEN / PASSWORD / API_KEY / ACCESS_KEY / PRIVATE_KEY / CREDENTIAL / SSH_AUTH_SOCK …`）。非 secret 变量（PATH / HOME）照传，命令才能工作。host env 的**来源**是 `environment.registerHostEnviron`：std 0.16 删掉了全局 environ（OS block 只交给 `main` 的 `std.process.Init` 与 test runner 的 `std.testing.environ`），`main` 启动时注册一次，所有读 host env 的层（config 链、`NULYA_*`、净化）都走 `environment.hostEnvironMap`；测试构建缺省落回 test runner 的 environ。边界是"无明显 secret 泄漏"，**不是**完全不继承、也不是 fs 隔离。kernel 往这份净化 env 里**加**两个非 secret 变量：`NULYA_EXE`（本进程可执行文件的绝对路径，`LocalEnvironment.init`）与 `NULYA_SESSION`（活着的 session 文件路径，只有 `session step` 放）——都是 provenance 型信息，不拓宽任何权限（§7.6）。
 - 不变量：`extension_permissions ⊆ session_authority`；注册成 extension 不获得 shell 没有的权限。
+- **exec target 不是权限边界**（§8.1）。把 `shell` 指向一个 WSL 发行版或一台 ssh 主机改变的是命令**在哪跑**，不是它**能碰什么**——WSL 经 `/mnt/` 看得见整个工作区，ssh 那侧则是对方账号的全部权限。净化这一侧仍然成立（`wsl.exe` / `ssh` 拿到的就是那份剥过 secret 的 map，所以 `WSLENV` / `SendEnv` 没有 secret 可转发），代价是 `NULYA_EXE` / `NULYA_SESSION` 也到不了对面；顺带一条：`SSH_AUTH_SOCK` 在 denylist 上，**ssh 目标只能用密钥文件认证**。
 - **driver 手上有一票否决**（§4 的 gate，`session step --gate`，§14）：每个 tool call 执行前问一次，只跑被允许的，拒绝作为该 call 的 `tool_results` 回给模型（没跑、什么都没变）。这**不是** sandbox：它拦的是"这一次要不要发生"，不是"发生时能碰什么"——一个被允许的 call 照旧与 shell 同权。manifest 的 `readonly`（§7.2.1）同理是**给答题人的提示**，不是边界：kernel 记下这个主张、不强制，driver 有权不信（TUI 的 `[approvals] manifest_readonly = false`）。
 - **workspace store 是 checkout 内容，却是第一优先 root——所以它要被信任一次（trust gate）。** §9.5 把 project 层的 `extensions.paths` 挡在门外，理由是 checkout 不该决定哪些目录供给 `current`；但 `.nulya/extensions` 本身就在 checkout 里，且首个持有者胜（§7.2）。clone 一个带 store 的 repo，从前 `session new` 会机械地把其中 active 版本合进 composition——system_prompts 进 system blocks、tools 经 CLI 可调、配合 project 层允许的 pin 还能上 native 面——中间没有任何人的确认。现在有一道门：
 
@@ -924,7 +955,9 @@ nulya ext init [--zig] [--user] <id> [tool] | build <path> [--user]
                                                            `inspect <id>@<version>` = **点名那个版本**的冻结 manifest（session header 记的正是这个形状，§3.4）
                                                            `inspect <path>`（含路径分隔符，或是带 `extension.json` 的目录）= 那份 draft，未建未冻
 nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--with <id>[@<version>]]… [--pin ext:<id>/<tool>]…
-                  [--prompt <file>]…                     ← 把这个文件的字节冻成本场的一个 system block（§5.6）；不安装任何东西
+                  [--prompt <file>]… [--env <spec>]      ← `--prompt` 把这个文件的字节冻成本场的一个 system block（§5.6）；不安装任何东西
+                                                           `--env` = 本场 `shell` 命令跑在哪（`local` | `wsl` | `wsl:<distro>` | `ssh:<dest>`，§8.1）
+                                                           冻进 header；解析不出或本 host 够不着 → stderr + **exit 1，什么都不创建**
                                                          ← 冻结 composition + 模型身份、写 header，打印 session id
                                                            点名的 profile 解析不到 credential（config / env / credentials.toml / codex auth）
                                                            → stderr 指路 + **exit 1，什么都不创建**（§9.5；`nulya demo` 是唯一保留 stand-in 的调用点）
@@ -932,6 +965,7 @@ nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--with <id>[
                                                          ← 把一条 user turn 投进 inbox（下一 step 边界进 ledger）；`--image` 可重复，与文本合成**同一条**事件
           | step <id> [--max-steps N] [--effort E] [--stream] [--gate]
                                                          ← 跑到本 turn 结束或预算耗尽；stdout = 本次 append 的事件 JSONL（`--stream` / `--gate` 见下）
+                                                           **没有 `--env`**：命令跑在哪由 header 说了算（§8.1），够不着就响亮失败
           | events <id> [--since N] [--follow]           ← 只读 tail 原始事件行（follow 轮询）
           | cancel <id>                                  ← 写 cancel 标记，下一 step 边界消化
           | outcome <id> <success|partial|failure> [--note <text>] [--seq N]
@@ -939,6 +973,7 @@ nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--with <id>[
           | list [--json]                                ← `.nulya/sessions/` 的只读投影（composition / 事件数 / usage / episode / verdict）
 nulya task run [--session <id>] [--cwd <dir>] [--timeout-ms N] -- <command>
                                                          ← 起一个脱离本 step 的命令，打印 `<sid>/t<N>` 与 log 路径（`shell {background:true}` 的 CLI 孪生）
+                                                           命令跑在**那一场 session 跑的地方**（读它的 header `environment`，§8.1）
           | list [--session <id>] [--running] [--json]    ← starting | running | done | lost，一行一个
           | status <task> [--json]                        ← 一个任务的全部字段
           | wait (<task> | --any [--session <id>]) [--timeout-ms N]

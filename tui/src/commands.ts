@@ -62,6 +62,12 @@ export const commands: Command[] = [
   { name: "/provider", what: "endpoints and their keys · add an OpenAI- or Anthropic-compatible one" },
   { name: "/effort", args: "<level|auto>", what: "change this tab's effort now; the next step runs with it" },
   {
+    name: "/env",
+    args: "[<target>]",
+    what:
+      "where the next session's shell runs: local | wsl | wsl:<distro> | ssh:<dest> · only shell moves, this harness stays here",
+  },
+  {
     name: "/new",
     args: "[--profile p] [--model id]",
     what: "a SECOND tab, on the last pick or the named profile — this tab is untouched",

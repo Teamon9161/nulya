@@ -68,6 +68,17 @@ export function StatusBar(props: {
   wearing?: string[]
   /** Clicking what this session wears: the mouse half of `/ext`. */
   onOpenExt?: () => void
+  /**
+   * Where this session's `shell` commands run, when that is not this host
+   * (DESIGN §8.1) — the frozen spec on a started session, the pending `/env`
+   * choice on a draft.
+   *
+   * Empty for every session anybody has had until now, and then no column is
+   * taken (T35: what has nothing to say does not occupy a slot). When it is
+   * not empty it is the single fact that changes what every command on the
+   * screen actually did, so it is worth the width.
+   */
+  execEnv?: string
   hint?: string
   /** Rows of transcript below the viewport: >0 means somebody is reading back. */
   behind?: number
@@ -254,6 +265,14 @@ export function StatusBar(props: {
     return worn.length > 0 && screen().width >= 60 ? ` ${style.glyphs.picker} ${worn.join(" ")}` : ""
   }
   /**
+   * ` ⇥ wsl:Ubuntu` — where the commands go. Warn-coloured rather than dim: it
+   * is not a decoration but the thing that makes `rm -rf build` mean two
+   * different acts, and a person who forgot they set it has to be reminded by
+   * the line rather than by the result.
+   */
+  const envChip = () =>
+    props.execEnv && props.execEnv.length > 0 && screen().width >= 60 ? ` ⇥ ${props.execEnv}` : ""
+  /**
    * Being the writer is the ordinary case and the word `driver` was on this
    * line in every session anybody ever had — a chip that is always the same is
    * not information (T35). Only the exception says itself. The step count goes
@@ -283,6 +302,7 @@ export function StatusBar(props: {
       displayWidth(contextChip()) +
       displayWidth(behindChip()) +
       displayWidth(wearingChip()) +
+      displayWidth(envChip()) +
       displayWidth(roleChip())
     // Cut too, not just measured. A model id is as long as whoever named it
     // made it, and a segment that overflows its row does not stop at the edge —
@@ -462,6 +482,12 @@ export function StatusBar(props: {
             >
               <text fg={style.theme.accent.evolve}>{wearingChip()}</text>
             </box>
+          ) : null}
+          {/* Where the commands go, when that is not this machine (DESIGN §8.1). */}
+          {envChip().length > 0 ? (
+            <text fg={style.theme.warn} flexShrink={0}>
+              {envChip()}
+            </text>
           ) : null}
           {roleChip().length > 0 ? (
             <text fg={props.role === "observer" ? style.theme.warn : style.theme.dim} flexShrink={0}>

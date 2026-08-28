@@ -59,6 +59,13 @@ export interface SessionHeader {
   /** The provider PROFILE name chosen at creation (display only). */
   model: string
   model_identity: ModelDescriptor
+  /**
+   * WHERE this session's `shell` commands run (DESIGN §8.1): `""` for this
+   * host, else `wsl`, `wsl:<distro>` or `ssh:<destination>`. Frozen at
+   * `session new --env`, so it is a property of the session and not of whoever
+   * is stepping it. Empty from any binary that predates the field.
+   */
+  environment: string
   created: string
   composition: FrozenComposition
 }
@@ -186,6 +193,7 @@ export function parseHeaderLine(line: string): SessionHeader | null {
       base_url: "",
       api_key_env: "",
     },
+    environment: typeof record["environment"] === "string" ? record["environment"] : "",
     created: typeof record["created"] === "string" ? record["created"] : "",
     composition: {
       active: [],

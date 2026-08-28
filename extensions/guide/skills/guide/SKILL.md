@@ -263,6 +263,20 @@ Store and scope:
 - `nulya session new --parent <id>:<seq>` forks: a new file continuing an
   existing one. Compaction and handover are both this. Composition is not
   inherited — pass `--with` and `--pin` again if the fork needs them.
+- `nulya session new --env <spec>` chooses WHERE this session's `shell` commands
+  run: `local` (the default), `wsl`, `wsl:<distro>`, or `ssh:<destination>`. It
+  is frozen in the header, so `step` takes no such flag and a resume that cannot
+  reach the target fails rather than running the commands here instead.
+  **Only `shell` moves.** Extension processes, background-task supervisors, the
+  extension store, the journals and every spilled tool output stay on this
+  host — under WSL the workspace is the same directory seen as `/mnt/<drive>`,
+  but over ssh the far side is a different filesystem and cannot see any of it.
+  Two more honest limits: killing a command reaches the local `wsl.exe` / `ssh`
+  client, not necessarily the process on the other end; and `NULYA_EXE` /
+  `NULYA_SESSION` do not survive the hop (WSL forwards only what `WSLENV` names,
+  ssh only what `SendEnv` does), so a command that wants to call `nulya` again
+  has to find it itself. An `ssh` target authenticates with a key file: this
+  harness strips `SSH_AUTH_SOCK` from every child environment.
 - `nulya session step <id> --stream` adds a line protocol: transient
   `{"stream":…}` lines while it runs, interleaved with the same event lines the
   log receives. Behaviour is otherwise identical to a plain step.

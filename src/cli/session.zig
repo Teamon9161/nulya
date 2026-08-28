@@ -441,6 +441,16 @@ pub fn createSession(
         identity = launch.resolveDescriptor(alloc, io, cfg.provider, &host, profile, model_id);
     }
 
+    // Where this session's `shell` commands will run, for its whole life
+    // (DESIGN §8). Checked here, before a session id exists, for the same reason
+    // a bad `--prompt` is: a session frozen onto a machine it cannot reach would
+    // fail identically on every step it ever takes.
+    const exec = environment.normalizeExecSpec(flagValue(args, "--env") orelse "");
+    if (launch.execTargetRefusal(exec)) |why| {
+        try printErrFmt(alloc, io, "--env {s}: {s}\n", .{ exec, why });
+        return null;
+    }
+
     // Read before anything exists on disk: a `--prompt` that cannot be read must
     // leave no session behind at all (D8 — the missing-credential discipline).
     const prompts = (try promptRefs(alloc, io, args)) orelse return null;
@@ -459,8 +469,10 @@ pub fn createSession(
     try std.Io.Dir.cwd().createDirPath(io, launch.sessions_dir);
 
     // No session ref: `session new` composes and writes a header, it never runs
-    // a tool, so nothing here can start a background task.
-    var lenv = launch.localEnvironment(alloc, io, &cfg, null) catch |err| switch (err) {
+    // a tool, so nothing here can start a background task. The exec target is
+    // passed anyway so this environment is the one the session describes — and
+    // `exec` was already vetted above, so the two target errors cannot land here.
+    var lenv = launch.localEnvironment(alloc, io, &cfg, null, exec) catch |err| switch (err) {
         error.UnsupportedEnvironmentBackend => {
             try printErrFmt(alloc, io, "environment backend '{s}' is not implemented; only local\n", .{@tagName(cfg.environment.backend)});
             return null;
@@ -514,6 +526,7 @@ pub fn createSession(
         .session_id = id,
         .model_profile = profile,
         .model_identity = identity,
+        .environment = exec,
         .created = created,
         .nulya_version = launch.version,
         .parent = parent,
@@ -988,12 +1001,19 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     // live beside this session's spills (DESIGN §6.1).
     const tasks_dir = try launch.sessionTasksDir(alloc, id);
     defer alloc.free(tasks_dir);
+    // Where this session's commands run comes from the HEADER, never from a flag
+    // or today's config: it was decided once, at creation (DESIGN §8). A target
+    // this host cannot reach fails loudly, the way a missing credential does —
+    // running the commands here instead would be the same silent substitution.
     var lenv = launch.localEnvironment(alloc, io, &cfg, .{
         .session_path = spath,
         .tasks_dir = tasks_dir,
-    }) catch |err| switch (err) {
+    }, hdr.value.environment) catch |err| switch (err) {
         error.UnsupportedEnvironmentBackend => {
             return stepFail(alloc, io, stream, "environment backend '{s}' is not implemented; only local", .{@tagName(cfg.environment.backend)});
+        },
+        error.InvalidExecTarget, error.ExecTargetUnsupportedOnHost => {
+            return stepFail(alloc, io, stream, "session '{s}' runs its commands in '{s}', which this binary on this host cannot reach; refusing to run them here instead", .{ id, hdr.value.environment });
         },
         else => return err,
     };

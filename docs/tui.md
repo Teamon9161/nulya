@@ -2533,3 +2533,17 @@ tab 条的 `✕`/`+`/`▎`；`stripPlan` 的**不变量**"画出来的一切都�
 **skill 与包命令重名不再重复出现在补全里。** 根因：`evolution` 包同时贡献了命令 `evolve`（tui-plugin D1/D8 那条链）与一个 `SKILL.md` 恰好也叫 `evolution`（T15 那条链）——两条完全不知道对方存在的链各自往补全菜单里塞一行，而 dispatch 早就是包命令先赢（`runPackageCommand` 排在 `skillTurn` 之前），所以那一行 skill 是敲了 Enter 也永远跑不到的死路。把 skill 目录改名 `extensions/evolution/skills/evolve/`（frontmatter `name: evolve` 同步）让两者的名字**变得一样**，`ui/Composer.tsx` 的 `matches()` 现在先算出插件命令与已解析包命令占用的名字集合，喂给 `skillCompletions` 之前把撞名的 skill 过滤掉——菜单从此只显示一次真正点得到的那个入口，而不是替代任何人决定"两个名字该合并成一个"（不同名字的包命令与 skill 仍然各占一行）。
 
 **测试**：`src/extension/manifest.zig` 新增一条单测（`{"with": "…"}` 解析出字符串、`{"with": true}` 答 `withPrompt() == null`、`runTarget()` 对 `with` 动词恒 `null`）；`zig build e2e-ext -Dtest-filter="bundled evolution"` 与全量 `e2e-ext` 绿（顺带发现并修好两处忘记跟着改名的地方：`extension.json` 自己的 `skills` 路径、e2e 断言 `descriptor.name`）；`tui/test/packageCommands.test.ts` 的 `parseAction` 三个用例改口 `{kind:"with", prompt: null | "…"}`、新增字符串值一条；`tui/test/composer.test.tsx` 新增一条整屏渲染断言——skill 与包命令同名时补全只出现一次、且用的是包命令自己的描述；`tui/test/with.test.ts` 的真实二进制集成测试改成断言 `withPrompt()` 答出的是个字符串而不钉字面文案（那是 `evolution` 的措辞，不是这条机制的形状）。`bunx tsc --noEmit` 干净；单独跑 `packageCommands` / `composer` / `with` / `skills` / `plugin` 五个测试文件全绿；完整 `bun test` 这次没能在五分钟内跑完收尾（`delegate.test.tsx` 那条已知在负载下会超时，见 tui-test-gotchas 笔记，与本次改动无关）。
+
+### T86 · `/env`：这一场的 shell 跑在哪（2026-08-28）
+
+**内核有改动**（DESIGN §8.1，`session new --env` + header `environment`）；TUI 侧是**最小接线**，`bun test` 与 `tsc` 干净。
+
+**这条轴不是权限也不是 backend。** `Dialect` 说命令用哪种语言写、`environment.backend` 说它被关得多紧（仍只有 `local`），exec target 说**哪台机器的 shell 读它**。所以 TUI 这侧要做的只有三件事，一件都不多：把选择传下去、把选择记住、把结果说出来。
+
+**① 传下去。** `NewSessionOptions.execEnv` → `--env`；`SessionExtras.execEnv` → `materialize`。落点是 `sessionExtras()`，与 `session_with` / `session_prompts` **同一处、同一时刻**——一场 session 冻结什么，全部在那一行之前读完。
+
+**② 记住。** `tui-state.json` 的 `exec_env`（`state/tui_state.ts` 的 `execEnv` / `rememberExecEnv`），与 model pick 同一条理由：在 WSL 里工作的人不该每开一个 tab 打一次 `--env wsl`。**内核没有对应的 config 键**，也不该有——给 `[environment]` 加一个默认值就要回答「`wsl` 比 `local` 更严还是更松」，而 §9.5 的 project 层收窄规则对这个问题没有诚实答案（DESIGN §8.1）。记住一个选择是前端的事；给目标排序不是。空 / `local` 是**删掉那个键**而不是存一个空串——文件不该对一场跟别人一模一样的 session 说什么。
+
+**③ 说出来。** `/env` 无参数**报告现状而不是开 picker**：这里可选集不可枚举（ssh destination 是对方 `ssh_config` 里的名字，发行版清单在 `wsl -l` 里），一个「两个词 + 第三个你自己打」的 picker 是在假装自己知道答案。状态栏多一个 `⇥ <spec>` chip，**没有的东西不占列**（T35）——本机跑就是空的，与今天所有人的屏幕逐字节相同；非空时用 `theme.warn` 而不是 dim：它不是装饰，是让 `rm -rf build` 变成两件事的那个事实。chip 的两个来源**不可互换**：已开始的 session 读 header（那是冻的，`/env` 动不了它），draft 读待定选择（那是它第一条消息会冻下的东西）。
+
+**不校验拼写。** `session new` 已经会拒绝并在消息里带上整套词表，而那句拒绝本来就会经 `ensureSession` 到屏幕上。这边再写一个 parser 就是一个问题两个答案。

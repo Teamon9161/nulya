@@ -58,6 +58,125 @@ pub const Dialect = enum {
     }
 };
 
+/// WHERE a `shell` command runs (DESIGN §8).
+///
+/// A third axis, orthogonal to the two that were already here. `Dialect` says
+/// which language the command is written in; `config.EnvironmentBackend` says
+/// how confined it is (still `local` only — that is the sandbox axis, PLAN
+/// §3.8). This one says which machine's shell reads it. A WSL distribution or
+/// an ssh host is neither narrower nor wider than the host: it is ELSEWHERE,
+/// which is why it is not a fourth `EnvironmentBackend` word.
+///
+/// **Only the `shell` builtin's commands move.** Extension processes, the task
+/// supervisor, the extension store, the journals and every spill file stay on
+/// the host: those are this harness's own machinery, they are built for this
+/// host, and a `remote` shell does not make the harness remote. The consequences
+/// are honest rather than hidden — see `shellArgv` and DESIGN §8.
+pub const ExecTarget = union(enum) {
+    local,
+    /// `wsl.exe [-d <distro>] -e bash -lc …`; an empty payload means WSL's
+    /// default distribution.
+    wsl: []const u8,
+    /// `ssh -o BatchMode=yes <destination> …`; the payload is the ssh
+    /// destination exactly as the user spelled it (`host`, `user@host`, or an
+    /// alias from their `ssh_config`).
+    ssh: []const u8,
+};
+
+/// The spelling of an `ExecTarget`, in one place: it is what `session new
+/// --env` takes, what the session header freezes, and what a supervisor is
+/// handed on its command line.
+pub const exec_target_syntax = "local | wsl | wsl:<distro> | ssh:<destination>";
+
+/// Parse the spec. Pure syntax — whether THIS host can reach the target is a
+/// separate question (`execTargetSupportedOnHost`), because the two have
+/// different fixes: a typo versus the wrong machine.
+///
+/// The returned payload borrows `spec`.
+pub fn parseExecTarget(spec: []const u8) error{InvalidExecTarget}!ExecTarget {
+    if (spec.len == 0 or std.mem.eql(u8, spec, "local")) return .local;
+    if (std.mem.eql(u8, spec, "wsl")) return .{ .wsl = "" };
+    if (std.mem.startsWith(u8, spec, "wsl:")) {
+        const distro = spec["wsl:".len..];
+        if (distro.len == 0) return error.InvalidExecTarget;
+        return .{ .wsl = distro };
+    }
+    if (std.mem.startsWith(u8, spec, "ssh:")) {
+        const dest = spec["ssh:".len..];
+        if (dest.len == 0) return error.InvalidExecTarget;
+        return .{ .ssh = dest };
+    }
+    return error.InvalidExecTarget;
+}
+
+/// `wsl.exe` is a Windows program; nothing else can reach a WSL distribution.
+/// `ssh` is assumed present rather than probed — a missing binary reports
+/// itself when the first command is spawned, and probing a PATH here would
+/// answer a different question than "did the spawn work".
+pub fn execTargetSupportedOnHost(target: ExecTarget) bool {
+    return switch (target) {
+        .local, .ssh => true,
+        .wsl => builtin.os.tag == .windows,
+    };
+}
+
+/// The spelling a session freezes: `local` and the empty string are the same
+/// answer, and the header records the absence rather than the word (so a
+/// session that never asked for a target reads back exactly as every session
+/// written before this existed did). Everything else is stored verbatim — the
+/// kernel does not rewrite what the operator typed.
+pub fn normalizeExecSpec(spec: []const u8) []const u8 {
+    return if (std.mem.eql(u8, spec, "local")) "" else spec;
+}
+
+/// A Windows path as a WSL distribution sees it: `C:\code\x` → `/mnt/c/code/x`.
+///
+/// Null when the path is not drive-lettered — a UNC share has no `/mnt/` name,
+/// and inventing one would be a guess. The caller then passes the path through
+/// UNTRANSLATED on purpose: `cd 'C:\…'` fails inside the distro with the
+/// distro's own message, which is a truthful error the model can read, whereas
+/// silently dropping the `cd` would run the command in some other directory and
+/// call it a success.
+pub fn wslPath(alloc: std.mem.Allocator, path: []const u8) !?[]u8 {
+    if (path.len < 2 or path[1] != ':' or !std.ascii.isAlphabetic(path[0])) return null;
+    if (path.len > 2 and path[2] != '\\' and path[2] != '/') return null;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    try out.appendSlice(alloc, "/mnt/");
+    try out.append(alloc, std.ascii.toLower(path[0]));
+    for (path[2..]) |c| try out.append(alloc, if (c == '\\') '/' else c);
+    return try out.toOwnedSlice(alloc);
+}
+
+/// The bash script a WSL command is wrapped in: enter the workspace as the
+/// distribution sees it, then the command verbatim.
+///
+/// `|| exit 1` and a NEWLINE, not `;`: a `cd` that failed must not be followed
+/// by the command running somewhere else, and a command whose first line is a
+/// comment must not swallow what a `;` put after it.
+fn wslScript(alloc: std.mem.Allocator, cwd: []const u8, command: []const u8) ![]u8 {
+    const translated = try wslPath(alloc, cwd);
+    defer if (translated) |t| alloc.free(t);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    try out.appendSlice(alloc, "cd ");
+    try appendSingleQuoted(alloc, &out, translated orelse cwd);
+    try out.appendSlice(alloc, " || exit 1\n");
+    try out.appendSlice(alloc, command);
+    return try out.toOwnedSlice(alloc);
+}
+
+/// Append `s` as one POSIX single-quoted word. Inside single quotes a shell
+/// interprets nothing at all, so the only thing to handle is the quote itself:
+/// close, escape one, reopen.
+fn appendSingleQuoted(alloc: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
+    try out.append(alloc, '\'');
+    for (s) |c| {
+        if (c == '\'') try out.appendSlice(alloc, "'\\''") else try out.append(alloc, c);
+    }
+    try out.append(alloc, '\'');
+}
+
 /// A completed shell run. `stdout`/`stderr` are owned by the caller's allocator.
 pub const ShellOutcome = struct {
     stdout: []u8,
@@ -260,12 +379,19 @@ fn isWindowsBashLauncherDir(path: []const u8) bool {
 }
 
 pub const LocalOptions = struct {
-    /// Override the OS-derived shell dialect.
+    /// Override the OS-derived shell dialect. Ignored when `exec` names a
+    /// target: which shell runs a WSL / ssh command is the target's answer, not
+    /// this host's.
     dialect: ?Dialect = null,
     /// The durable session background tasks started here belong to, when there
     /// is one. `session new`, `nulya demo` and the tests leave it null: nothing
     /// they do can start a task.
     session: ?SessionRef = null,
+    /// Where `shell` commands run (`ExecTarget`), as its spec string — `""` is
+    /// local. A string rather than the parsed union so this struct owns nothing
+    /// and the environment can keep the ONE copy that both the parsed payload
+    /// and a supervisor's `--env` argument borrow from.
+    exec: []const u8 = "",
 };
 
 /// How many `t<N>` slots one session may hand out. High enough that no real
@@ -275,7 +401,8 @@ const max_tasks_per_session: usize = 10_000;
 /// One assembled shell invocation: the argv and whatever heap string it borrows.
 pub const ShellCommandLine = struct {
     argv: []const []const u8,
-    /// The one string the powershell form allocates; null for bash.
+    /// The one string a wrapping form allocates (powershell's encoding preamble,
+    /// the WSL `cd` prefix, the ssh remote script); null for plain bash.
     owned_script: ?[]u8,
 
     pub fn deinit(self: ShellCommandLine, alloc: std.mem.Allocator) void {
@@ -299,6 +426,12 @@ pub const LocalEnvironment = struct {
     /// `startShellTask` refuses (see `SessionRef`).
     session_path: ?[]u8 = null,
     tasks_dir: ?[]u8 = null,
+    /// The normalized `--env` spec, owned; null for `local`. It is both what a
+    /// supervisor is handed (so a background command runs where the foreground
+    /// one does) and the backing store for `target`'s payload.
+    exec_spec: ?[]u8 = null,
+    /// Where `shell` commands go. Payload borrows `exec_spec`.
+    target: ExecTarget = .local,
 
     pub fn init(alloc: std.mem.Allocator, io: std.Io, opts: LocalOptions) !LocalEnvironment {
         var host = try hostEnvironMap(alloc);
@@ -327,7 +460,27 @@ pub const LocalEnvironment = struct {
         } else |_| {}
 
         const bash_exe = if (builtin.os.tag == .windows) findWindowsBash(io, &host) orelse default_bash_exe else default_bash_exe;
-        const dialect_val = opts.dialect orelse defaultDialect(io, &host);
+
+        // The exec target is validated HERE, once, before anything can be
+        // spawned: a spec that does not parse, or one this host cannot reach,
+        // must not degrade into a local shell — a command written for a distro
+        // and run on the host is the kind of failure that looks like success.
+        const spec = normalizeExecSpec(opts.exec);
+        var exec_spec: ?[]u8 = null;
+        errdefer if (exec_spec) |p| alloc.free(p);
+        var target: ExecTarget = .local;
+        if (spec.len != 0) {
+            if (!execTargetSupportedOnHost(try parseExecTarget(spec))) return error.ExecTargetUnsupportedOnHost;
+            exec_spec = try alloc.dupe(u8, spec);
+            // Re-parsed from the owned copy so the payload outlives the caller's
+            // string: there is one allocation, and `target` points into it.
+            target = try parseExecTarget(exec_spec.?);
+        }
+
+        // A targeted command is read by that target's bash, whatever this host
+        // runs, so the dialect is decided by the target and the host's answer
+        // (config or detection) does not apply.
+        const dialect_val = if (target == .local) opts.dialect orelse defaultDialect(io, &host) else .bash;
         // Grounding is an extension, but its environment section must describe
         // the shell this handle will actually spawn. Passing the resolved value
         // avoids making that package duplicate the host/config detection logic.
@@ -350,6 +503,8 @@ pub const LocalEnvironment = struct {
             .env = sanitized,
             .session_path = session_path,
             .tasks_dir = tasks_dir,
+            .exec_spec = exec_spec,
+            .target = target,
         };
     }
 
@@ -357,6 +512,7 @@ pub const LocalEnvironment = struct {
         self.env.deinit();
         if (self.session_path) |p| self.alloc.free(p);
         if (self.tasks_dir) |p| self.alloc.free(p);
+        if (self.exec_spec) |p| self.alloc.free(p);
         self.* = undefined;
     }
 
@@ -369,19 +525,90 @@ pub const LocalEnvironment = struct {
         return self.dialect_val;
     }
 
-    /// The argv that runs `command` in this environment's dialect — the ONE
-    /// place that decision is made. Two consumers: an in-process `shell` call
-    /// below, and `nulya task supervise`, which runs a BACKGROUND command and
-    /// must reach the same interpreter with the same flags (DESIGN §6.1).
+    /// The argv that runs `command` in this environment's dialect AND on its
+    /// exec target — the ONE place both decisions are made. Two consumers: an
+    /// in-process `shell` call below, and `nulya task supervise`, which runs a
+    /// BACKGROUND command and must reach the same interpreter, with the same
+    /// flags, on the same machine (DESIGN §6.1, §8).
     ///
-    /// `buf` backs the argv and must outlive the returned value; the powershell
-    /// form additionally owns one heap string, released by `deinit`.
+    /// `buf` backs the argv and must outlive the returned value; every form but
+    /// plain bash additionally owns one heap string, released by `deinit`.
+    ///
+    /// What a non-local target does NOT change, stated where the wrapping is
+    /// written so nobody has to infer it:
+    ///
+    ///   - **Killing reaches the local client, not always the far side.** The
+    ///     `Tree` around `wsl.exe` / `ssh` is terminated exactly as before, so a
+    ///     timeout or a cancel always ends this step. Whether the process on the
+    ///     other end dies with it is the far side's business: closing an ssh
+    ///     channel usually gets the remote command SIGHUP, and killing the WSL
+    ///     relay usually takes its Linux process down, but a command that
+    ///     detached itself survives both. Nulya does not claim otherwise.
+    ///   - **The child environment is the target's, not the sanitized map.** WSL
+    ///     forwards only what `WSLENV` names and ssh only what `SendEnv` does,
+    ///     so `NULYA_EXE` / `NULYA_SESSION` do not arrive on the far side. The
+    ///     secret denylist still holds — the sanitized map is what `wsl.exe` /
+    ///     `ssh` themselves get, so there is nothing secret left to forward —
+    ///     and note that `SSH_AUTH_SOCK` is on that denylist: an ssh target
+    ///     authenticates with a key file, never with this host's agent.
+    ///   - **`cwd` is a WSL-only translation.** Under WSL the workspace is the
+    ///     same directory seen through `/mnt/<drive>`, so the command is run
+    ///     from there. Over ssh the far side is a different filesystem: the
+    ///     command starts in the remote account's home, and the local workspace
+    ///     (including every `emit` spill file) is not visible to it.
     pub fn shellArgv(
         self: *const LocalEnvironment,
         alloc: std.mem.Allocator,
         command: []const u8,
-        buf: *[5][]const u8,
+        cwd: []const u8,
+        buf: *[8][]const u8,
     ) !ShellCommandLine {
+        switch (self.target) {
+            .local => {},
+            .wsl => |distro| {
+                const script = try wslScript(alloc, cwd, command);
+                errdefer alloc.free(script);
+                var n: usize = 0;
+                buf[n] = "wsl.exe";
+                n += 1;
+                if (distro.len != 0) {
+                    buf[n] = "-d";
+                    buf[n + 1] = distro;
+                    n += 2;
+                }
+                // `-e` runs the named program directly rather than handing the
+                // rest to the distribution's default shell, so `bash` is the
+                // interpreter whatever that default happens to be.
+                buf[n] = "-e";
+                buf[n + 1] = "bash";
+                buf[n + 2] = "-lc";
+                buf[n + 3] = script;
+                n += 4;
+                return .{ .argv = buf[0..n], .owned_script = script };
+            },
+            .ssh => |dest| {
+                // `bash -lc '<command>'` rather than the bare command: ssh hands
+                // what follows the destination to the remote account's LOGIN
+                // shell, which may be anything, and the dialect this session
+                // reports is bash. One layer of quoting buys that guarantee.
+                var script: std.ArrayList(u8) = .empty;
+                errdefer script.deinit(alloc);
+                try script.appendSlice(alloc, "bash -lc ");
+                try appendSingleQuoted(alloc, &script, command);
+                const owned = try script.toOwnedSlice(alloc);
+                errdefer alloc.free(owned);
+                // `BatchMode=yes` because this child's stdin is closed: without
+                // it a passphrase or host-key prompt would sit there until the
+                // step's timeout instead of failing in the first second with a
+                // message that says what is missing.
+                buf[0] = "ssh";
+                buf[1] = "-o";
+                buf[2] = "BatchMode=yes";
+                buf[3] = dest;
+                buf[4] = owned;
+                return .{ .argv = buf[0..5], .owned_script = owned };
+            },
+        }
         switch (self.dialect_val) {
             .bash => {
                 buf[0] = self.bash_exe;
@@ -395,7 +622,12 @@ pub const LocalEnvironment = struct {
                     "try {{ [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8 }} catch {{}}; {s}",
                     .{command},
                 );
-                buf.* = .{ "powershell", "-NoProfile", "-NonInteractive", "-Command", script };
+                errdefer alloc.free(script);
+                buf[0] = "powershell";
+                buf[1] = "-NoProfile";
+                buf[2] = "-NonInteractive";
+                buf[3] = "-Command";
+                buf[4] = script;
                 return .{ .argv = buf[0..5], .owned_script = script };
             },
         }
@@ -404,8 +636,8 @@ pub const LocalEnvironment = struct {
     fn runShellImpl(ptr: *anyopaque, alloc: std.mem.Allocator, req: ShellRequest) anyerror!ShellOutcome {
         const self: *LocalEnvironment = @ptrCast(@alignCast(ptr));
 
-        var argv_buf: [5][]const u8 = undefined;
-        const cmdline = try self.shellArgv(alloc, req.command, &argv_buf);
+        var argv_buf: [8][]const u8 = undefined;
+        const cmdline = try self.shellArgv(alloc, req.command, req.cwd, &argv_buf);
         defer cmdline.deinit(alloc);
         const argv = cmdline.argv;
         // `argv[0]` is resolved via the *parent* PATH (std.process contract), so a
@@ -702,6 +934,11 @@ pub const LocalEnvironment = struct {
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(alloc);
         try argv.appendSlice(alloc, &.{ exe, "task", "supervise", "--dir", dir_rel, "--session", session_path, "--cwd", req.cwd });
+        // The supervisor is a HOST process either way (it holds the lease, drains
+        // the log, deposits the event); what it is told here is where the COMMAND
+        // it watches runs, so a background command lands on the same machine as
+        // the foreground ones of the same session (DESIGN §8).
+        if (self.exec_spec) |spec| try argv.appendSlice(alloc, &.{ "--env", spec });
         if (req.timeout_ms) |ms| {
             try argv.appendSlice(alloc, &.{ "--timeout-ms", try std.fmt.bufPrint(&timeout_buf, "{d}", .{ms}) });
         }
@@ -879,6 +1116,108 @@ test "local environment tells its children where the harness is" {
     // Not secret-shaped, so sanitization keeps it (this is the pairing that
     // makes the variable reach an extension at all).
     try std.testing.expect(!isSecretKey("NULYA_EXE"));
+}
+
+test "exec target specs parse into the three targets, and nothing else does" {
+    try std.testing.expectEqual(ExecTarget.local, try parseExecTarget(""));
+    try std.testing.expectEqual(ExecTarget.local, try parseExecTarget("local"));
+    try std.testing.expectEqualStrings("", (try parseExecTarget("wsl")).wsl);
+    try std.testing.expectEqualStrings("Ubuntu-22.04", (try parseExecTarget("wsl:Ubuntu-22.04")).wsl);
+    try std.testing.expectEqualStrings("me@build-box", (try parseExecTarget("ssh:me@build-box")).ssh);
+
+    // A prefix with nothing after it names no distro and no host: refused, not
+    // read as "the default one" — the colon says something was meant to follow.
+    for ([_][]const u8{ "wsl:", "ssh:", "ssh", "docker:x", "WSL", " wsl" }) |bad| {
+        try std.testing.expectError(error.InvalidExecTarget, parseExecTarget(bad));
+    }
+
+    // `local` and absence are the same session, so they freeze the same way.
+    try std.testing.expectEqualStrings("", normalizeExecSpec("local"));
+    try std.testing.expectEqualStrings("", normalizeExecSpec(""));
+    try std.testing.expectEqualStrings("wsl:Ubuntu", normalizeExecSpec("wsl:Ubuntu"));
+}
+
+test "a windows path becomes the /mnt path a distribution sees, or nothing" {
+    const alloc = std.testing.allocator;
+
+    const c = (try wslPath(alloc, "C:\\code\\zig\\nulya")).?;
+    defer alloc.free(c);
+    try std.testing.expectEqualStrings("/mnt/c/code/zig/nulya", c);
+
+    // Drive letters are folded and forward slashes are already fine.
+    const d = (try wslPath(alloc, "D:/work")).?;
+    defer alloc.free(d);
+    try std.testing.expectEqualStrings("/mnt/d/work", d);
+
+    const root = (try wslPath(alloc, "E:\\")).?;
+    defer alloc.free(root);
+    try std.testing.expectEqualStrings("/mnt/e/", root);
+
+    // No drive letter, no honest answer (the caller then passes the original
+    // through so the distro reports the failure itself).
+    for ([_][]const u8{ "\\\\server\\share\\x", "/already/posix", "relative\\x", "1:\\x" }) |p| {
+        try std.testing.expectEqual(@as(?[]u8, null), try wslPath(alloc, p));
+    }
+}
+
+test "a targeted environment wraps the command and leaves the local one byte-identical" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var buf: [8][]const u8 = undefined;
+
+    // Local: exactly the argv this has always produced.
+    {
+        var lenv = try LocalEnvironment.init(alloc, io, .{ .dialect = .bash });
+        defer lenv.deinit();
+        const cl = try lenv.shellArgv(alloc, "echo hi", "/anywhere", &buf);
+        defer cl.deinit(alloc);
+        try std.testing.expectEqual(@as(usize, 3), cl.argv.len);
+        try std.testing.expectEqualStrings("-lc", cl.argv[1]);
+        try std.testing.expectEqualStrings("echo hi", cl.argv[2]);
+    }
+
+    // ssh: the destination is its own argv word (never interpolated into a
+    // command string) and the remote side is forced through bash.
+    {
+        var lenv = try LocalEnvironment.init(alloc, io, .{ .exec = "ssh:me@box" });
+        defer lenv.deinit();
+        // Whatever this host would have chosen, a targeted session is bash.
+        try std.testing.expectEqual(Dialect.bash, lenv.dialect_val);
+        const cl = try lenv.shellArgv(alloc, "echo 'it''s'", "/anywhere", &buf);
+        defer cl.deinit(alloc);
+        try std.testing.expectEqualStrings("ssh", cl.argv[0]);
+        try std.testing.expectEqualStrings("me@box", cl.argv[3]);
+        try std.testing.expectEqualStrings("bash -lc 'echo '\\''it'\\'''\\''s'\\'''", cl.argv[4]);
+    }
+
+    // WSL is reachable only from Windows; elsewhere the environment refuses to
+    // exist rather than quietly running the command on this host.
+    if (builtin.os.tag != .windows) {
+        try std.testing.expectError(
+            error.ExecTargetUnsupportedOnHost,
+            LocalEnvironment.init(alloc, io, .{ .exec = "wsl" }),
+        );
+    } else {
+        var lenv = try LocalEnvironment.init(alloc, io, .{ .exec = "wsl:Ubuntu" });
+        defer lenv.deinit();
+        const cl = try lenv.shellArgv(alloc, "make", "C:\\code\\nulya", &buf);
+        defer cl.deinit(alloc);
+        try std.testing.expectEqualStrings("wsl.exe", cl.argv[0]);
+        try std.testing.expectEqualStrings("-d", cl.argv[1]);
+        try std.testing.expectEqualStrings("Ubuntu", cl.argv[2]);
+        try std.testing.expectEqualStrings("bash", cl.argv[4]);
+        try std.testing.expectEqualStrings("cd '/mnt/c/code/nulya' || exit 1\nmake", cl.argv[6]);
+
+        // No distro named: WSL's own default, and two fewer argv words.
+        var dflt = try LocalEnvironment.init(alloc, io, .{ .exec = "wsl" });
+        defer dflt.deinit();
+        const cl2 = try dflt.shellArgv(alloc, "make", "C:\\code\\nulya", &buf);
+        defer cl2.deinit(alloc);
+        try std.testing.expectEqualStrings("-e", cl2.argv[1]);
+    }
+
+    // A spec that does not parse never becomes a silently-local environment.
+    try std.testing.expectError(error.InvalidExecTarget, LocalEnvironment.init(alloc, io, .{ .exec = "podman:x" }));
 }
 
 test "windows bash launcher dirs are not treated as native bash" {

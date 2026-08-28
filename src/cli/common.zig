@@ -204,10 +204,11 @@ pub const ext_usage =
 ;
 
 pub const session_usage =
-    \\  nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--with <id>[@<ver>]]… [--pin ext:<id>/<tool>]… [--prompt <file>]… [--bare]
+    \\  nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--with <id>[@<ver>]]… [--pin ext:<id>/<tool>]… [--prompt <file>]… [--env <spec>] [--bare]
     \\                                                    freeze composition + model, print a new session id; --with composes a built
     \\                                                    version in, --pin puts one of its tools on the model's tool face, --parent
     \\                                                    forks that session, --prompt freezes a file as this session's system prompt,
+    \\                                                    --env freezes where shell runs (wsl | wsl:<distro> | ssh:<dest>; only shell moves),
     \\                                                    --bare reads no standing layer: neither config list, nor apply: auto packages
     \\  nulya session append <id> [<text> | --file <p>] [--image <p>]…
     \\                                                    queue a user turn for the next step boundary; --image inlines a

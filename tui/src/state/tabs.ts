@@ -186,6 +186,13 @@ export interface SessionExtras {
    * is what wants this (`agents.ts`).
    */
   prompt?: readonly string[]
+  /**
+   * `--env <spec>`: where this session's `shell` commands run (DESIGN §8.1).
+   * It joins the composition here rather than in `DraftTab` because it is the
+   * same kind of thing every other entry on this list is — a decision the
+   * screen makes once, at the moment a draft freezes, and never again.
+   */
+  execEnv?: string
   /** The step budget the resulting tab drives with (`OpenOptions.maxSteps`). */
   maxSteps?: number
 }
@@ -536,6 +543,7 @@ export function createTabStore(home: Workspace, first: FirstTab, options: TabSto
         ...(members.length > 0 ? { with: members } : {}),
         ...(pins.length > 0 ? { pin: pins } : {}),
         ...((extra.prompt?.length ?? 0) > 0 ? { prompt: extra.prompt } : {}),
+        ...(extra.execEnv ? { execEnv: extra.execEnv } : {}),
       })
       return replace(draft.key, id, {
         created: true,
