@@ -421,3 +421,31 @@ export const FrameContext = createContext<Accessor<number>>()
 export function useFrame(): Accessor<number> {
   return useContext(FrameContext) ?? (() => 0)
 }
+
+/**
+ * The width of the column a transcript's cards are laid out in — a NUMBER
+ * derived from the pane tree, never measured from a box.
+ *
+ * This is T73's "a width is a number" carried to its conclusion (BUGS.md #17).
+ * The number first came from `useScreen()`, which is a quarter too wide when
+ * the sidebar is open; T73 then MEASURED the card's own box, which turned out
+ * to be a box whose width can follow its content — so the measurement fed the
+ * wrap width, the wrap width fed the layout, and the layout fed the next
+ * measurement: two self-consistent widths alternating at frame rate. The
+ * flicker rebuilt every `<text>` row of the card on every flip until the
+ * native allocator gave out (`createTextBuffer` returning null is what finally
+ * froze the screen). A derived number cannot feed back: the pane tree knows
+ * nothing about what the cards did with the width it gave them.
+ *
+ * Whoever puts a Transcript somewhere provides the pane's width here (`App`'s
+ * portal, `SubAgentPane`'s split); a bare Transcript (tests) falls back to the
+ * terminal, which is exactly what the screen was before panes existed.
+ */
+export const BodyWidthContext = createContext<Accessor<number>>()
+
+export function useBodyWidth(): Accessor<number> {
+  const width = useContext(BodyWidthContext)
+  if (width) return width
+  const screen = useScreen()
+  return () => screen().width
+}

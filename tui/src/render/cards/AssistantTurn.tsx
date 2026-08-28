@@ -1,7 +1,6 @@
 import { For, Show, createMemo } from "solid-js"
-import { useScreen, useStyle } from "../theme.ts"
+import { useBodyWidth, useStyle } from "../theme.ts"
 import { hardWrapLines } from "../../ui/columns.ts"
-import { boxWidth } from "../../ui/measure.ts"
 import type { AssistantItem } from "../../state/session.ts"
 
 /**
@@ -23,23 +22,25 @@ import type { AssistantItem } from "../../state/session.ts"
  * still uses OpenTUI's markdown primitive because code blocks and lists need
  * their own renderer more than they need the plain-prose fast path.
  *
- * BOTH BODIES ARE SIZED BY THE BOX THEY SIT IN, not by the terminal. For the
- * markdown one that is what stops a table from flickering (`ui/measure.ts` has
- * the mechanism); for the prose one it is the same fact said properly — the
- * old `screen - 4` was the full terminal's width, which is a quarter too wide
- * whenever the sessions rail is open.
+ * THE BODY'S WIDTH IS A DERIVED NUMBER (`useBodyWidth`, BUGS.md #17): the
+ * pane's width minus the glyph column and padding, minus ONE COLUMN ALWAYS
+ * RESERVED for the scrollbox's scrollbar. Reserving it unconditionally is what
+ * removes the last feedback path — a width that depends on whether the content
+ * overflows is a width the content gets a vote on, and that vote is the T73
+ * flicker. Measuring the box instead of deriving the number was tried twice
+ * (T73, T76) and both endings are in the bug log.
  */
 export function AssistantTurn(props: { item: AssistantItem }) {
   const style = useStyle()
-  const screen = useScreen()
+  const body = useBodyWidth()
   const plain = () => isPlainProse(props.item.text)
-  const [measured, attach] = boxWidth(Math.min(screen().width, style.maxWidth) - 4)
-  const room = () => Math.max(12, measured())
+  // − 2 the glyph column, − 2 the transcript's padding, − 1 the scrollbar's.
+  const room = () => Math.max(12, Math.min(body(), style.maxWidth) - 5)
   const lines = createMemo(() => hardWrapLines(stripInlineMarkdown(props.item.text), room()))
   return (
     <box flexDirection="row" width="100%">
       <text fg={style.theme.accent.assistant}>{style.glyphs.assistant} </text>
-      <box flexDirection="column" flexGrow={1} ref={attach}>
+      <box flexDirection="column" flexGrow={1}>
         <Show
           when={plain()}
           fallback={

@@ -25,7 +25,7 @@ import { Show, createMemo, createSignal } from "solid-js"
 import { useKeyboard } from "@opentui/solid"
 import type { ScrollBoxRenderable } from "@opentui/core"
 import { Transcript } from "./Transcript.tsx"
-import { useStyle } from "../render/theme.ts"
+import { BodyWidthContext, useStyle } from "../render/theme.ts"
 import { onClick } from "./rows.ts"
 import { fit } from "./columns.ts"
 import { personaOf } from "../agents.ts"
@@ -174,14 +174,17 @@ export function SubAgentPane(props: {
         {/* No `onCommand`, no `cwd`, no `plan`: this transcript has no composer
             under it, so it makes no offers. The welcome screen is the
             composer's invitation and stays out of here by that fact alone
-            (`Transcript`). */}
-        <Transcript
-          items={props.view.state.snapshot.items}
-          header={props.view.state.snapshot.header}
-          contributions={props.view.contributions()}
-          error={props.view.state.snapshot.error}
-          ref={(box) => (scroll = box)}
-        />
+            (`Transcript`). Cards wrap at THIS pane's width, not the
+            terminal's (`BodyWidthContext`, BUGS.md #17). */}
+        <BodyWidthContext.Provider value={() => props.width}>
+          <Transcript
+            items={props.view.state.snapshot.items}
+            header={props.view.state.snapshot.header}
+            contributions={props.view.contributions()}
+            error={props.view.state.snapshot.error}
+            ref={(box) => (scroll = box)}
+          />
+        </BodyWidthContext.Provider>
       </TasksContext.Provider>
 
       {/* One dim line of "what can I do here", like every other face (§6.1

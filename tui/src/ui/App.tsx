@@ -24,7 +24,6 @@ import { WithPicker, type Wearable } from "./WithPicker.tsx"
 import { StatusBar } from "./StatusBar.tsx"
 import { pickTip } from "./Welcome.tsx"
 import { WorkingStatus, activityOf, type SyncProgress } from "./WorkingStatus.tsx"
-import { createRenderWatchdog, tick_ms as watchdog_tick_ms } from "./watchdog.ts"
 import { installCrashLog } from "./crashlog.ts"
 import { QueueLane } from "./QueueLane.tsx"
 import { parseMidTask } from "../midtask.ts"
@@ -37,7 +36,7 @@ import { UsageView } from "./overlays/UsageView.tsx"
 import { ModelView } from "./overlays/ModelView.tsx"
 import { ProviderView } from "./overlays/ProviderView.tsx"
 import { TasksView } from "./overlays/TasksView.tsx"
-import { ScreenContext, FrameContext, StyleContext, useScreen, useStyle, type Style } from "../render/theme.ts"
+import { BodyWidthContext, ScreenContext, FrameContext, StyleContext, useScreen, useStyle, type Style } from "../render/theme.ts"
 import { FoldContext, createFoldStore } from "../state/folds.ts"
 import { BrowseContext, createBrowseStore } from "../state/browse.ts"
 import { OverlayContext, type OverlayKind } from "../state/overlay.ts"
@@ -1354,19 +1353,16 @@ export function App(props: AppProps) {
     setDisplayUsage((current) => smoothUsageTotals(current, target))
   })
 
-  // While the line above says something is moving, frames must actually land;
-  // when OpenTUI wedges itself and stops painting, force one (`ui/watchdog.ts`
-  // has the whole story). Input and the driver survive that state — only the
-  // screen dies — so the watchdog is the difference between a stall nobody
-  // sees the end of and one frame of hiccup.
+  // Every error OpenTUI swallows lands in `.nulya/tui-crash.log`
+  // (`ui/crashlog.ts`, BUGS.md #17) — the renderer registers process-level
+  // handlers that reduce a fatal error to an invisible console line, and the
+  // log is what turned the third freeze from a mystery into a stack trace.
   {
     const crashes = installCrashLog(props.ws.dir, renderer)
-    const watchdog = createRenderWatchdog(renderer, () => activity()?.moving === true)
-    const timer = setInterval(() => watchdog.tick(), watchdog_tick_ms)
     // The reactive heartbeat (BUGS.md #17): a signal written every second, an
     // effect that echoes it. When the echo goes stale the renderer is fine but
-    // Solid is not — updates no longer reach the screen, which no frame-level
-    // watchdog can see. The verdict goes to the crash log, and the console
+    // Solid is not — updates no longer reach the screen, which nothing
+    // frame-level can see. The verdict goes to the crash log, and the console
     // overlay is opened DELIBERATELY: it is renderer-level, so it still draws,
     // and it is where OpenTUI cached the very error that broke the graph. A
     // dead UI showing its reason beats a dead UI pretending to work.
@@ -1400,9 +1396,7 @@ export function App(props: AppProps) {
       }
     }, 1000)
     onCleanup(() => {
-      clearInterval(timer)
       clearInterval(beatTimer)
-      watchdog.dispose()
       crashes.dispose()
     })
   }
@@ -3763,22 +3757,32 @@ export function App(props: AppProps) {
       )
     },
     transcript: () => (
-      <Transcript
-        items={snapshot().items}
-        header={snapshot().header}
-        contributions={live()?.contributions() ?? []}
-        plan={plan()}
-        // A draft has no snapshot to carry one, so the refusal that kept it a
-        // draft rides the same channel a live session's driver failure does —
-        // one notice, one place to read a failure in full.
-        error={snapshot().error ?? refusal()}
-        cwd={ws().dir}
-        onPickCwd={() => openOverlay("cwd")}
-        onPickModel={() => openOverlay("model")}
-        onCommand={submit}
-        tip={tip}
-        ref={(box) => (scroll = box)}
-      />
+      // The cards' wrap width, as a number from the pane tree (BUGS.md #17):
+      // this pane's own box when the tab is split, the portal otherwise.
+      <BodyWidthContext.Provider
+        value={() =>
+          tabPanes()
+            .boxes(portalRect())
+            .find((box) => box.surface === main_surface)?.rect.width ?? portalRect().width
+        }
+      >
+        <Transcript
+          items={snapshot().items}
+          header={snapshot().header}
+          contributions={live()?.contributions() ?? []}
+          plan={plan()}
+          // A draft has no snapshot to carry one, so the refusal that kept it a
+          // draft rides the same channel a live session's driver failure does —
+          // one notice, one place to read a failure in full.
+          error={snapshot().error ?? refusal()}
+          cwd={ws().dir}
+          onPickCwd={() => openOverlay("cwd")}
+          onPickModel={() => openOverlay("model")}
+          onCommand={submit}
+          tip={tip}
+          ref={(box) => (scroll = box)}
+        />
+      </BodyWidthContext.Provider>
     ),
     sessions: (mount: SurfaceMount) => (
       <SessionsView

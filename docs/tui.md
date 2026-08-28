@@ -2399,3 +2399,17 @@ tab 条的 `✕`/`+`/`▎`；`stripPlan` 的**不变量**"画出来的一切都�
 **测试**（594 → 597）：measure 的两条改写（无事件的宽度照样被读到 · **修正必须不在帧自己的栈上落地**——后一条钉的就是这次的案发机制）+ crashlog 三条（格式 · 重复折叠 · 写不进去保持沉默）；markdown 的 frames() 助手多让一拍（宏任务 settle），T73 的三条断言一字未动。
 
 **没做的**：自动重挂 Solid 根（盲目 remount 可能变成循环崩溃；等第一份 crash log 指认真凶、修掉源头之后再评估要不要兜底）· 升级 OpenTUI（0.5.9 与 0.5.3 在这些路径上逐字节相同）· 给上游报 issue（该报：visible-gated resize、swallowed handler 两处，等 crash log 拿到实锤一起带上复现）。
+
+### T77 · crash log 抓到真凶：量宽反馈振荡耗尽 native 分配器；宽度成为 pane 树派生的纯数字（2026-08-28）
+
+**内核零改动**；`bun test` 597 → 591 pass（删 6 新增 0——本条的主要工作是**删**）、`tsc` 干净。第三次冻结带来了两样新证据：人眼看到的**前奏**（回复在「只剩左边一小栏」与「拉开」之间疯狂闪烁，然后才冻）与 T76 埋下的 crash log 的**第一份战果**——一条完整堆栈。
+
+**堆栈读出来的因果链**（`.nulya/tui-crash.log`，五步闭环）：① T73/T76 的量宽机制量的是一个**宽度会跟随内容**的盒子——量出的数喂给换行、换行改内容、内容改盒宽、盒宽改量出的数，**两个自洽定点**；② T76 的每帧重读把「稳定地错」翻成 **30fps 的振荡**（人看到的闪烁就是它）；③ 每翻一次都重建整张卡的全部 `<text>` 行，native TextBuffer 每秒成百上千地创建；④ native 分配器最终给出 null——`createTextBuffer` 抛错，第一个受害者恰好是正在渲染的 `ErrorNotice`（driver catch 里的 `setError` 本身就是前一击的二次受害者：**连报错都没法渲染**）；⑤ 这个 throw 发生在 `setStore` 的同步传播里、外层是 async 的 `drive`，于是成为 unhandledRejection → 被 OpenTUI 吞掉（如今被 crashlog 记下）→ **那条更新队列烂在半路，transcript 子树从此冻结**。心跳这次**没有**触发——图是局部死的，App 层的 beat effect 还活着；如实记录：心跳只覆盖全图死亡，子树死亡的哨兵是 crash log 自己。
+
+**修法是把 T73 那句话走到头：宽度是一个数，而这个数只能从 pane 树来**（`render/theme.ts` 的 `BodyWidthContext` / `useBodyWidth`）。App 的 portal 提供 transcript pane 自己的盒宽（tab 树分裂时是分裂后的那块）、`SubAgentPane` 提供它已有的 `width` prop，裸 Transcript（测试）退回终端宽——恰是 pane 出现之前屏幕的定义。卡片侧 `min(pane, maxWidth) − 常数`，其中**恒预留滚动条一列**：一个取决于「内容会不会溢出」的宽度就是内容对宽度有投票权，那张票正是 T73 的闪烁与这次的振荡；恒预留把最后一条反馈路径拆掉（T73 当年记为「设计决定，没做」的那条轨道，现在做了）。**`ui/measure.ts` 整个删除**——测量这个动作本身就是错的抽象，两次修补（T75 事件 + T76 轮询）两次出事。
+
+**按「定位到根因后盘点还原」的原则**（用户点名），T75 的 **watchdog 一并删除**：它的前提（feed 死等的 lost wakeup）被 T76 的活体取证推翻（这台机器上没有 feed、Linux 也不用写线程），而真正的死法（Solid 局部死亡）它测不到也救不了——一个前提被推翻的机制留着只会误导下一个读者。**crashlog 与心跳保留**：前者是破案的那一击，后者便宜且覆盖全图死亡的变体。
+
+**测试**：markdown 的三条回到本来的形状（`frames()` 三拍——第三拍是 scrollbox 对新内容高度的裁决），「同一宽度画同一张表」把**滚动条 thumb 掩出比较**——thumb 的几何反映一个 OpenTUI 不总重算的 scrollHeight，两条路径到同一宽度时**内容逐字节相同**而 thumb 可以诚实地不同（列位置是 OpenTUI 的事，thumb 也是）。watchdog / measure 的 6 条测试随机制一起删除。
+
+**留给上游的**：`createTextBuffer` 返回 null 时一行不带上下文的 `Failed to create TextBuffer` · `uncaughtException`/`unhandledRejection` 被降格成看不见的 console 行 · culled 节点不发 `resize` · scrollbar thumb 的 scrollHeight 缓存——四处都该给 opentui 报 issue，现在有最小案情与堆栈了。

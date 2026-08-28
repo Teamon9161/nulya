@@ -2,7 +2,8 @@
  * A markdown table is as wide as the box it is in — at every width, whatever
  * widths came before, and for as long as it is on screen.
  *
- * The bug this pins is OpenTUI's, not ours (`ui/measure.ts` says how it works):
+ * The bug this pins is OpenTUI's, not ours (`useBodyWidth` in
+ * `render/theme.ts` says how the width is derived):
  * a table fits its columns once and never re-fits when the space narrows, so it
  * was drawn one column wider than its box, and because its row count decides
  * whether the scrollbox needs a scrollbar at all — which is what narrowed it —
@@ -57,11 +58,10 @@ async function frames(items: TranscriptItem[], widths: number[], height: number,
     const out: string[] = []
     for (const width of widths) {
       setup.resize(width, height)
-      // Three beats: the resize lays the boxes out, the deferred width read
-      // runs (a macrotask — `ui/measure.ts` keeps it off the frame's own
-      // stack), and the next frame paints at the corrected width.
+      // Three passes: the resize, the width it hands the body, and the
+      // scrollbox's own verdict on the new content height (scrollbar or not).
       await setup.renderOnce()
-      await new Promise((resolve) => setTimeout(resolve, 1))
+      await setup.renderOnce()
       await setup.renderOnce()
     }
     out.push(setup.captureCharFrame())
@@ -91,6 +91,20 @@ test("a markdown table stays inside its box", async () => {
   }
 })
 
+/**
+ * The scrollbar thumb is masked out of the comparison: its geometry reflects a
+ * scrollHeight OpenTUI does not always recompute after a resize, so the thumb
+ * can honestly disagree between two ways of reaching the same width while
+ * every content cell is identical. The claim under test is the TABLE — the
+ * thumb is OpenTUI's business, like the column positions.
+ */
+function content(frame: string): string {
+  return frame
+    .split("\n")
+    .map((line) => line.replace(/[█▄▀\s]+$/u, ""))
+    .join("\n")
+}
+
 test("the same width draws the same table, however it was reached", async () => {
   const items = tables(3)
   for (const height of [14, 30]) {
@@ -101,7 +115,7 @@ test("the same width draws the same table, however it was reached", async () => 
       [90, 60, 78],
     ]) {
       const [reached] = await frames(items, path, height)
-      expect(reached).toBe(direct!)
+      expect(content(reached!)).toBe(content(direct!))
     }
   }
 })
