@@ -47,6 +47,14 @@ beforeAll(async () => {
   }
   await step.exited
   second = await sessionNew(ws, { profile: "scripted" })
+  // A turn of its own: a session with NO events is not listed (`sessionKind`),
+  // and this fixture needs two rows to click between.
+  await sessionAppend(ws, second, "rename the toolchain flag")
+  const second_step = sessionStep(ws, second, { env: scripted_env })
+  for await (const _ of second_step.lines) {
+    // Drained for the same reason as the first.
+  }
+  await second_step.exited
 
   const run = (args: string[]) => Bun.spawnSync({ cmd: [ws.bin, ...args], cwd: ws.dir, env: process.env })
   run(["ext", "init", "--script", "lint"])

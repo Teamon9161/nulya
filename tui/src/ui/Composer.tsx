@@ -3,6 +3,7 @@ import type { KeyEvent, PasteEvent, TextareaRenderable } from "@opentui/core"
 import { SyntaxStyle } from "@opentui/core"
 import { useScreen, useStyle } from "../render/theme.ts"
 import { columnWidth, displayWidth, fit, squeeze, wrapWords } from "./columns.ts"
+import { pointer } from "./pointer.ts"
 import { builtin_names, completions } from "../commands.ts"
 import {
   activeReference,
@@ -581,6 +582,10 @@ export function Composer(props: {
         be squeezed. Without it a long transcript (or a long overlay list) wins
         the flex negotiation and the input box collapses to a line, then to
         nothing — the screen still works, but there is visibly nowhere to type.
+
+        onMouseOver/onMouseOut: the mouse pointer says which of the two things
+        under it is true — text to type into here, an interface to click
+        everywhere else (`ui/pointer.ts`).
       */}
       <box
         flexDirection="row"
@@ -595,6 +600,8 @@ export function Composer(props: {
         onMouseDown={() => {
           if (!props.disabled) props.onActivate?.()
         }}
+        onMouseOver={() => pointer("text")}
+        onMouseOut={() => pointer("default")}
       >
         {/* `flexShrink={0}`, or a buffer wide enough to fill the row wins the
             flex negotiation and the prompt glyph is squeezed out of existence —

@@ -211,6 +211,18 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
                 try printErrFmt(alloc, io, "ext build: {s}/extension.json is not a valid manifest ({s}); `nulya ext api` prints the wire contract and `nulya ext init` a working manifest\n", .{ ext_dir, @errorName(err) });
                 return 1;
             }
+            // The manifest parses but names a file this build cannot freeze: a
+            // system prompt that is missing, too large or not UTF-8, a skill
+            // whose frontmatter is wrong, a declared entry or front-end module
+            // that was never written. This is the moment the AUTHOR can learn
+            // it — the alternative is a `session step` that gets a 400 out of
+            // the provider on every step of somebody else's session — so it is
+            // a sentence, not a stack trace. `ext sync` has always answered
+            // these; only this verb was missing them.
+            if (isDraftFault(err)) {
+                try printErrFmt(alloc, io, "ext build: {s} declares a file this build cannot freeze ({s}); `nulya ext api manifest` says what each contribution must be\n", .{ ext_dir, @errorName(err) });
+                return 1;
+            }
             return err;
         },
     };

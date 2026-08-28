@@ -568,6 +568,69 @@ test "a word outside a closed manifest vocabulary is refused before anything is 
     }
 }
 
+test "a draft that declares a file it cannot freeze is answered with a sentence, not a stack trace" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_abs = try nulyaExe(alloc, &host_env);
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    // A system prompt that is not valid UTF-8 would otherwise reach a session,
+    // where every step is a 400 out of the provider and nothing on screen says
+    // why. The build is where the AUTHOR is standing, so the build is where it
+    // is said — and `ext sync` has always said it, so the only question here is
+    // whether this verb does too.
+    for ([_]struct { id: []const u8, bytes: ?[]const u8 }{
+        .{ .id = "bad.utf8", .bytes = "tone \xff\xfe\n" },
+        .{ .id = "bad.absent", .bytes = null },
+    }) |bad| {
+        const draft = try std.fs.path.join(alloc, &.{ ".nulya", "extensions", bad.id });
+        defer alloc.free(draft);
+        const prompts = try std.fs.path.join(alloc, &.{ draft, "prompts" });
+        defer alloc.free(prompts);
+        try ws.createDirPath(io, prompts);
+        const manifest_body = try std.fmt.allocPrint(
+            alloc,
+            "{{\"schema\":\"nulya.extension/v2\",\"id\":\"{s}\",\"contributes\":{{\"system_prompts\":[\"prompts/tone.md\"]}}}}",
+            .{bad.id},
+        );
+        defer alloc.free(manifest_body);
+        const manifest_path = try std.fs.path.join(alloc, &.{ draft, "extension.json" });
+        defer alloc.free(manifest_path);
+        try ws.writeFile(io, .{ .sub_path = manifest_path, .data = manifest_body });
+        if (bad.bytes) |bytes| {
+            const tone_path = try std.fs.path.join(alloc, &.{ prompts, "tone.md" });
+            defer alloc.free(tone_path);
+            try ws.writeFile(io, .{ .sub_path = tone_path, .data = bytes });
+        }
+
+        const argv = [_][]const u8{ exe_abs, "ext", "build", draft };
+        const refused = try runCli(alloc, io, ws, &argv);
+        defer alloc.free(refused.stdout);
+        try std.testing.expectEqual(@as(u8, 1), refused.code);
+        const said = try runCliStderr(alloc, io, ws, &argv, &.{});
+        defer alloc.free(said);
+        std.testing.expect(std.mem.indexOf(u8, said, "ext build:") != null) catch |err| {
+            std.debug.print("`ext build {s}` said:\n{s}\n", .{ bad.id, said });
+            return err;
+        };
+        // The whole point: no compiler-shaped answer to an author-shaped fault.
+        std.testing.expect(std.mem.indexOf(u8, said, ".zig:") == null) catch |err| {
+            std.debug.print("`ext build {s}` traced instead of answering:\n{s}\n", .{ bad.id, said });
+            return err;
+        };
+        const versions = try std.fs.path.join(alloc, &.{ draft, "versions" });
+        defer alloc.free(versions);
+        try std.testing.expectError(error.FileNotFound, ws.access(io, versions, .{}));
+    }
+}
+
 test "--with <id> onto a broken current names the version and refuses the session" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;

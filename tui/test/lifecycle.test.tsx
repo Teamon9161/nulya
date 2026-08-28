@@ -299,7 +299,10 @@ test("/resume opens a past session by id; /clear steps away without touching it"
     await setup.mockInput.typeText("/resume")
     setup.mockInput.pressEnter()
     await until(() => setup.captureCharFrame().includes("sessions ·"), 15_000)
-    setup.mockInput.pressKey("escape")
+    // `pressEscape`, not `pressKey("escape")`: the latter types the six letters
+    // of the word, which land on the list's own keys (`a` toggles, `n` opens a
+    // new tab) and only LOOKED like closing it.
+    setup.mockInput.pressEscape()
     await settle(setup, 3)
 
     await setup.mockInput.typeText(`/resume ${id}`)

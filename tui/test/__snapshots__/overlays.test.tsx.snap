@@ -1,9 +1,9 @@
 // Bun Snapshot v1, https://bun.sh/docs/test/snapshots
 
 exports[`/sessions lists the store and opens the highlighted session 1`] = `
-" sessions · 2   s-<id>
+" sessions · 3   s-<id>
 
- ▾ nothing said yet                                                                                            <when>
+ ▾ rename the toolchain flag                                                                                   <when>
    make the budgets configurable                                                                    ▎ this tab <when>
 
 
@@ -20,7 +20,7 @@ exports[`/sessions lists the store and opens the highlighted session 1`] = `
 
 
 
- j/k move · Enter go there · t new tab · Esc close · ? keys
+ j/k move · Enter go there · t new tab · Esc close · 1 empty session not listed · ? keys
 "
 `;
 

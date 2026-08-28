@@ -2337,3 +2337,39 @@ tab 条的 `✕`/`+`/`▎`；`stripPlan` 的**不变量**"画出来的一切都�
 **没做**：pane→tab 提升手势（§5.3c 点 2 说「或后续做」，第一个真实需求还没出现）· 子 pane 落进 `tui-state.json`（观察面是临时的：它跟着一次「我想看看那个」而来，重开一场时那个委派多半已经结束，恢复它等于替人做一个他没做过的决定；tab 的 `tabs` 状态照旧只记 tab）· 拖拽调整 seam（没有第一个 consumer 的手势）· 子 pane 自己的 workspace（一个 tab 的所有 pane 共用它的目录——`openWorkspaces()` 因此仍然是「屏幕上有哪些目录」的唯一答案，T71 的提醒说对了，它一个字没改）。
 
 **给 S2 的提醒**：① 包的 T2 面走的是**同一条路**——注册一个 surface，让 tab 树的一个叶指着它；`host:subagent` 就是宿主自己当第一个 consumer 的那个例子（按 **pane** 反查内容、`claimsKeyboard: true`、自己按 `mount.focused` 关掉监听）。② 但它是**宿主自己的面**，所以还留着一个 S2 必须补的洞：包的面装不了全局 `useKeyboard`，键要从 `SurfaceDefinition.onKey` 走——那个字段从 T68 起就在，今天仍然零 consumer。③ 一块 pane 的宽度**从 pane 拿**（`panes.boxes(portalRect())`），`useScreen()` 答的是终端；S1d 又多了一层，所以「portal 的盒子」是包的面该问的那个矩形。④ 打开一个面 ≠ 把键盘送过去（`focusNew: false`），送过去的那一半记得把输入框还回来。
+
+### T73 · 表格不再闪：markdown 的宽度是一个数，不是一个百分比；顺带把鼠标指针交回给屏幕（2026-08-28）
+
+**内核零改动**（`src/` 那半是另一件事，见下），`tui/plugin-api.d.ts` 一个字节没动；`bun test` 582 → 587 pass（新 5 条）、`tsc` 干净、既有快照零 diff。
+
+**症状**：resume 一场带 markdown 表格的 session，表格里的一格**一会儿在同一行、一会儿换行，一直闪**。
+
+**是 OpenTUI 的 bug，判据不是「闪」而是「同一个宽度下布局不唯一」**。78 列上直接开，与从 100 列缩回 78 列，画出来的是两张不同的表；渲染树把责任指得很死——`MarkdownRenderable w=75` 里装着 `TextTableRenderable w=76`，**子比父宽一列**。`TextTableRenderable`（markdown 的表格块）经 yoga 的 measure func 把列宽 fit 一次就缓存住（`_cachedMeasureLayout` / `_layoutDirty`），而它自己的 `width` 不变、`onResize` 不触发，所以**空间后来变窄它不会重新 fit**——第一趟布局时 scrollbox 的竖直滚动条还没占掉那一列，表格按宽一列定了列宽，此后只有一次真正的 resize 才会重算。**闪**是这条与滚动条的回路：错的列宽给出错的行数，行数决定内容高不高过视口，高度决定滚动条在不在，滚动条决定那一列在不在——两套列宽于是交替。
+
+排除项都实测了：不在 scrollbox 里不复现 · 同样内容的**散文**在同一个 scrollbox 里 stable（只有表格有 measure-func 这条路）· `clearCache()` / `refreshStyles()` / 重设 content 都修不好 · **升级没用**（0.5.9 的 `rebuildLayoutForCurrentWidth` 与 0.5.3 逐字节相同）。
+
+**修法：`<markdown>` 的 `width` 必须是一个数**。布局派生的写法一律失败（`100%` / auto / `flexGrow` / `alignSelf: stretch` 全都一样），只有布局开始之前就定下的数字稳定，而数字变了表格**会**跟着变。数从哪来是这条改动真正的问题——`useScreen()` 答的是终端，而一张卡活在 pane 里、侧边栏拿走它四分之一（T72 给 S2 的提醒 ③ 就是这句话）。所以新的 `ui/measure.ts` 的 `boxWidth()` 问**盒子自己**：每个 renderable 在自己排出来的尺寸变化时都 emit `resize`，一个 body 一个监听，**没有第二份布局算术会跟画面吵架**（与 `App` 那句「rows below 只有盒子自己是诚实的来源」同一条纪律）。代价是一帧：resize 之后 body 先按上一个宽度画一次。那本来就是它每时每刻的状态，区别是现在它会自己纠正。
+
+两个 consumer：`AssistantTurn`（顺带把散文那条 `screen - 4` 也换成量出来的宽度——那个数在侧边栏开着时宽了四分之一，只是软 wrap 把它兜住了没人看见）与 `MarkdownToolCard`。
+
+**留下的一处、说清楚**：内容高度正好卡在滚动条阈值上（差一行）时，**滚不滚**仍取决于怎么走到这个宽度的——两个自洽的定点，各自稳定，不再交替。要抹掉它得让滚动条那一列**恒占**，那是一个设计决定（一条永远画着的轨道），不是一个 bug 修复，所以没做。
+
+**测试**（`test/markdown.test.tsx`，3 条）：表格的右边框在框里（每个宽度、开着和不开滚动条两种高度）· 同一个宽度画同一张表，无论是直接到的还是经 resize 到的（**在旧代码上会红**，验证过）· 没人碰的屏幕不变（这条旧代码也绿——交替要终端自己的帧循环，测试渲染器只在被要求时画；它守的是人真正看见的那条性质）。列的具体位置一个都没断言：那是 OpenTUI 的事。
+
+**鼠标指针（同一条改动里的第二件事）**：终端默认在整个窗口里画文字光标，于是 transcript、tab 条、每一行可点的东西上，指针都在说「这里有字可以选」。**唯一说对了的地方是输入框**。杠杆是 OSC 22（kitty 起的头，ghostty / wezterm 跟着），空名字 = 交回终端自己的默认。OpenTUI 有这个 API（`renderer.setMousePointer`），但 **0.5.3 与 0.5.9 上调它一个字节都不发**（实测：teardown 时发一次空的，请求一次也不发），所以字节由 `ui/pointer.ts` 自己写：开屏 `default`、进输入框 `text`、离开 `default`、退出交回。**去重是承重的**——`onMouseOver` 每跨一格就 fire 一次，不去重就是按鼠标移动的速率往线上灌转义序列。只写给真终端（`bun test` 下 stdout 是管道，什么都不写）。真 pty 里录到的就是 `default → text → default`。最后一句话仍在人的终端配置里（kitty 的 `pointer_shape_when_grabbed`）。
+
+**内核那半（`src/`，与 TUI 无关，同一轮）**：`ext build` 撞上「manifest 解析得了、但它点名的文件冻不进去」（system prompt 不是 UTF-8 / 太大 / 不存在，skill frontmatter 坏了，声明的 entry 或前端模块没写）时，答的是一整屏 Zig 栈回溯——`isDraftFault` 早就列全了这些错，但只有 `ext sync` 用它。现在这个动词也用它，答一句话。**理由是落点**：这些错真正的代价是一场 session 每一步都被 provider 400，而作者站着的地方是 build。顺带修掉它暴露的一处泄漏：`integrity.collectPackageSnapshot` 的 `errdefer` 只释放了条目内容、没释放列表自己的缓冲，而 `ext sync` 会在一个进程里走过每一个坏 draft。两条测试都验证过在旧代码上会红。
+
+### T74 · 一场什么都没说过的 session 不是一行（2026-08-28）
+
+**内核零改动**；`bun test` 587 → 588 pass、`tsc` 干净、一份快照变了三行。
+
+`/sessions` 与侧栏列的是 `session list --json` 的全部投影，于是 `events == 0` 的 session 也占一行——**header 有、ledger 一条事件都没有**，进程被杀在 `discardIfUntouched` 之前留下的空壳，打开它是一屏空白。T22 之后新消息本来就冻一场新 session，所以少列它不丢任何东西。
+
+**判据只有 `events === 0`**，一处实现：`sessionKind(entry)` 答 `own` / `delegated` / `empty`，`partitionSessions` 由它分桶，`groupedRows` 由它过滤。**空的排在第一位**——一场空的委派场先是空的，不然「有一场对话你没看见」那个计数里会混进没有对话的行。
+
+**与 `a` 那条规则的区别写在类型里**：委派场藏起来是**有键可以翻出来的**（那是真的对话，只是不该默认占满列表）；空场没有键——那个键会掀开一批什么都没有的行。所以它只被**数出来**：rail 底下那行多一段 `N empty`（宽度不够时它第一个被让掉，因为没有键要教），整屏视图的键行多一句 `N empty sessions not listed`（`a` 开着关着都说，它不属于那个键切换的两类）。标题那个 `sessions · N` 仍是**库里有多少**——与今天藏着委派场时的行为一致：标题说库，底下那行说没画什么。
+
+**没有做的**：删掉它们（内核只 append，前端更不该删文件）· 给它一个键（见上）· 把「inbox 里已经有一条消息、但还没有哪一步把它排干」也算进来（那种 session 也确实 `events == 0`，窗口只有一步之长，而 `/sessions <id>` 与 `nulya session list` 照样到得了它——与委派场那条「什么都没有对内核、对 `session list`、对 `/sessions <id>` 隐藏」同一句话）。
+
+**顺带修掉一条靠巧合通过的测试**：`/resume` 那条用的是 `pressKey("escape")`，而它打出去的是 **escape 这六个字母**——`a` 切了委派场的显示、`n` 开了一个新 tab，看起来像是关掉了列表。此后 `/resume <id>` 的字符继续落在列表上，最后那个 `Enter` 打开的是**光标所在的行**，而那一行恰好就是它想要的那场，于是它一路绿着断言了一件没发生过的事。改成 `pressEscape()`。列表变短之后它才露出来（没有行可选，Enter 什么都不做）——这类测试的真实成本就是这样：它不响的时候，你不知道它在测什么。

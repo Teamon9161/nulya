@@ -19,6 +19,7 @@ import { App } from "../src/ui/App.tsx"
 import { personaOf } from "../src/agents.ts"
 import {
   SessionsView,
+  groupedRows,
   partitionSessions,
   railFooter,
   sidebarRowPlan,
@@ -156,6 +157,31 @@ test("a session an agent was handed is told apart by the prompt it wears, not by
   expect(personaOf([])).toBeNull()
 })
 
+test("a session nothing was ever said into is not a row, whichever way `a` is set", () => {
+  // `events` is the whole test: a header with no ledger events behind it. They
+  // exist because a process was killed before it could take its own empty
+  // session back, and opening one shows an empty screen.
+  const row = (id: string, events: number, ...sources: string[]) =>
+    ({ id, events, composition: { prompts: sources.map((source) => ({ source, bytes: 1 })) } }) as never
+  const entries = [row("s-1", 12), row("s-2", 0), row("s-3", 8, "agent-explore"), row("s-4", 0, "agent-plan")]
+  const { own, delegated, empty } = partitionSessions(entries)
+  expect(own.map((entry) => entry.id)).toEqual(["s-1"])
+  expect(delegated.map((entry) => entry.id)).toEqual(["s-3"])
+  // An empty delegated session is empty first: the count that means "there is
+  // a conversation here you are not seeing" must not include rows with none.
+  expect(empty.map((entry) => entry.id)).toEqual(["s-2", "s-4"])
+
+  const ws = { dir: "/w", bin: "nulya" } as never
+  const ids = (showAgents: boolean) =>
+    groupedRows([{ ws, entries }], showAgents)
+      .map((listed) => (listed.kind === "session" ? listed.entry.id : listed.kind))
+      .join(",")
+  expect(ids(false)).toBe("s-1")
+  // `a` switches between the two kinds of conversation; it does not uncover
+  // rows with nothing in them.
+  expect(ids(true)).toBe("s-1,s-3")
+})
+
 test("the rail's one dim line is chosen for the width it has, and the count outlives the keys", () => {
   // Focused and nothing hidden: the long form while it fits, the short one after.
   expect(railFooter(40, true, 0)).toContain("t tab")
@@ -171,6 +197,15 @@ test("the rail's one dim line is chosen for the width it has, and the count outl
   // Narrower than any candidate: nothing, rather than a truncated key list
   // that would teach the wrong key.
   expect(railFooter(4, true, 3)).toBe("")
+  // Sessions with nothing in them are counted too — a list quietly shorter
+  // than the store is lying — but no key rides with that count, and it is the
+  // first thing given up when the line has to shrink.
+  expect(railFooter(60, true, 0, 2)).toContain("2 empty")
+  expect(railFooter(60, false, 0, 2)).toBe("2 empty")
+  expect(railFooter(60, true, 3, 2)).toContain("2 empty")
+  expect(railFooter(18, true, 3, 2)).toContain("3 agent")
+  expect(railFooter(18, true, 3, 2)).not.toContain("empty")
+  expect(railFooter(18, true, 0, 2)).toBe("j/k · Enter · Esc")
 })
 
 test("a full-screen view opens in the main pane even when the keyboard is in the sidebar", () => {

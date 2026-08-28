@@ -1,6 +1,7 @@
 import { For, Show, createMemo } from "solid-js"
 import { useScreen, useStyle } from "../theme.ts"
 import { hardWrapLines } from "../../ui/columns.ts"
+import { boxWidth } from "../../ui/measure.ts"
 import type { AssistantItem } from "../../state/session.ts"
 
 /**
@@ -21,17 +22,24 @@ import type { AssistantItem } from "../../state/session.ts"
  * terminal decide a different row count between frames. Structured markdown
  * still uses OpenTUI's markdown primitive because code blocks and lists need
  * their own renderer more than they need the plain-prose fast path.
+ *
+ * BOTH BODIES ARE SIZED BY THE BOX THEY SIT IN, not by the terminal. For the
+ * markdown one that is what stops a table from flickering (`ui/measure.ts` has
+ * the mechanism); for the prose one it is the same fact said properly — the
+ * old `screen - 4` was the full terminal's width, which is a quarter too wide
+ * whenever the sessions rail is open.
  */
 export function AssistantTurn(props: { item: AssistantItem }) {
   const style = useStyle()
   const screen = useScreen()
   const plain = () => isPlainProse(props.item.text)
-  const room = () => Math.max(12, Math.min(screen().width, style.maxWidth) - 4)
+  const [measured, attach] = boxWidth(Math.min(screen().width, style.maxWidth) - 4)
+  const room = () => Math.max(12, measured())
   const lines = createMemo(() => hardWrapLines(stripInlineMarkdown(props.item.text), room()))
   return (
     <box flexDirection="row" width="100%">
       <text fg={style.theme.accent.assistant}>{style.glyphs.assistant} </text>
-      <box flexDirection="column" flexGrow={1}>
+      <box flexDirection="column" flexGrow={1} ref={attach}>
         <Show
           when={plain()}
           fallback={
@@ -40,7 +48,7 @@ export function AssistantTurn(props: { item: AssistantItem }) {
               syntaxStyle={style.syntax}
               fg={style.theme.fg}
               streaming={props.item.streaming}
-              width="100%"
+              width={room()}
             />
           }
         >

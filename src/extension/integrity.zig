@@ -19,6 +19,9 @@ pub const exe_suffix = if (builtin.os.tag == .windows) ".exe" else "";
 
 const max_snapshot_file_bytes: usize = 16 * 1024 * 1024;
 const digest_bytes = 12;
+/// How much of a file `fileDigestHex` holds at once. Only a hashing buffer —
+/// it bounds memory, never the file.
+const digest_read_chunk_bytes: usize = 64 * 1024;
 
 pub const SnapshotFile = struct {
     rel: []u8,
@@ -125,7 +128,7 @@ pub fn collectPackageSnapshot(
     m: manifest.Manifest,
 ) !PackageSnapshot {
     var files: std.ArrayList(SnapshotFile) = .empty;
-    errdefer deinitFiles(alloc, files.items);
+    errdefer deinitPartialSnapshot(alloc, &files);
 
     try files.append(alloc, .{ .rel = try alloc.dupe(u8, manifest_file), .bytes = try alloc.dupe(u8, manifest_bytes) });
 
@@ -171,7 +174,7 @@ pub fn collectFrozenSnapshot(
     m: manifest.Manifest,
 ) !PackageSnapshot {
     var files: std.ArrayList(SnapshotFile) = .empty;
-    errdefer deinitFiles(alloc, files.items);
+    errdefer deinitPartialSnapshot(alloc, &files);
 
     try files.append(alloc, .{ .rel = try alloc.dupe(u8, manifest_file), .bytes = try alloc.dupe(u8, manifest_bytes) });
 
@@ -236,10 +239,34 @@ pub fn packageDigestHex(alloc: std.mem.Allocator, snapshot: PackageSnapshot) ![]
     return digestHex(alloc, canonical);
 }
 
+/// Digest a file on disk, hashed as it is read rather than after it is held.
+///
+/// This used to read the whole file under `max_snapshot_file_bytes`, which put
+/// the COMPILER'S OUTPUT under a cap meant for one source file inside a package
+/// snapshot — a ceiling nobody chose for a binary, and one that announced
+/// itself as `VersionEntryNotFound`: what a person read was "that version has no
+/// entry", what had happened was "the entry is 18 MB". Nothing on this path
+/// wants the bytes, only their digest, so there is no size left to cap.
+///
+/// A file that will not open stays `VersionEntryNotFound` — that IS the entry
+/// missing, and `store.isExtensionFault` reads it as a broken extension. A read
+/// that fails after the file opened is a host fault and travels as itself.
 pub fn fileDigestHex(alloc: std.mem.Allocator, io: std.Io, root: std.Io.Dir, sub_path: []const u8) ![]u8 {
-    const bytes = root.readFileAlloc(io, sub_path, alloc, .limited(max_snapshot_file_bytes)) catch return error.VersionEntryNotFound;
-    defer alloc.free(bytes);
-    return digestHex(alloc, bytes);
+    var file = root.openFile(io, sub_path, .{}) catch return error.VersionEntryNotFound;
+    defer file.close(io);
+
+    const buf = try alloc.alloc(u8, digest_read_chunk_bytes);
+    defer alloc.free(buf);
+
+    var h = std.crypto.hash.sha2.Sha256.init(.{});
+    var offset: u64 = 0;
+    while (true) {
+        const n = try file.readPositionalAll(io, buf, offset);
+        h.update(buf[0..n]);
+        offset += n;
+        if (n < buf.len) break; // short read is end of file
+    }
+    return finishHex(alloc, &h);
 }
 
 pub fn sealJson(alloc: std.mem.Allocator, package_digest: []const u8, compiler: []const u8, target: []const u8, binary_digest: ?[]const u8) ![]u8 {
@@ -435,6 +462,31 @@ fn requirePackagePath(
     root.access(io, sub, .{}) catch |err| return cancelable(err, error.VersionPackageMissing);
 }
 
+test "a built binary is digested at any size, and streaming does not change the digest" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Past the snapshot's per-source-file cap, and not a whole number of read
+    // chunks: the size a compiled extension actually reaches is what used to
+    // fail here, and the last partial chunk is what ends the read loop.
+    const size = max_snapshot_file_bytes + digest_read_chunk_bytes + 7;
+    const bytes = try alloc.alloc(u8, size);
+    defer alloc.free(bytes);
+    for (bytes, 0..) |*b, i| b.* = @truncate(i *% 31);
+    try tmp.dir.writeFile(io, .{ .sub_path = "bin", .data = bytes });
+
+    const streamed = try fileDigestHex(alloc, io, tmp.dir, "bin");
+    defer alloc.free(streamed);
+    const one_shot = try digestHex(alloc, bytes);
+    defer alloc.free(one_shot);
+    try std.testing.expectEqualStrings(one_shot, streamed);
+
+    // An entry that is not there is still the extension fault it always was.
+    try std.testing.expectError(error.VersionEntryNotFound, fileDigestHex(alloc, io, tmp.dir, "absent"));
+}
+
 test "validates version id shape" {
     try std.testing.expect(isVersionId("v-0123456789abcdefabcdef01"));
     try std.testing.expect(!isVersionId("v-0123456789abcdefabcdef0"));
@@ -499,11 +551,22 @@ fn collectTree(
     if (!saw_any) return error.SourceUnreadable;
 }
 
-fn deinitFiles(alloc: std.mem.Allocator, files: []SnapshotFile) void {
-    for (files) |file| {
+/// Free a snapshot that was never finished: the strings each entry owns AND the
+/// list holding them.
+///
+/// On the success path `finishSnapshot` hands the buffer on with
+/// `toOwnedSlice`, so nothing here runs. Every path that REFUSES arrives here
+/// instead — a declared file that will not read, a duplicate path — and freeing
+/// only the entries left the list itself behind. That leak was reachable only
+/// by a build that had already decided to refuse, so what it corrupted was the
+/// refusal: the allocator's report printed its stack traces underneath the
+/// sentence the author is supposed to read.
+fn deinitPartialSnapshot(alloc: std.mem.Allocator, files: *std.ArrayList(SnapshotFile)) void {
+    for (files.items) |file| {
         alloc.free(file.rel);
         alloc.free(file.bytes);
     }
+    files.deinit(alloc);
 }
 
 pub fn lessFileRel(_: void, a: SnapshotFile, b: SnapshotFile) bool {
@@ -551,6 +614,12 @@ pub fn joinCanonical(alloc: std.mem.Allocator, parent: []const u8, child: []cons
 fn digestHex(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
     var h = std.crypto.hash.sha2.Sha256.init(.{});
     h.update(bytes);
+    return finishHex(alloc, &h);
+}
+
+/// The hex of a finished hash. Shared so the one-shot and the streamed path
+/// cannot drift into two different spellings of the same digest.
+fn finishHex(alloc: std.mem.Allocator, h: *std.crypto.hash.sha2.Sha256) ![]u8 {
     var digest: [32]u8 = undefined;
     h.final(&digest);
     const out = try alloc.alloc(u8, digest.len * 2);

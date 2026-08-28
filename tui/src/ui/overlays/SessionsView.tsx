@@ -115,17 +115,36 @@ export const double_click_ms = 350
  * carries an `agent-<name>` prompt, and this side does not get a second opinion
  * about that. It is a filter over a projection: nothing is hidden from the
  * kernel, from `session list`, or from `/sessions <id>`.
+ *
+ * There is a third kind, and it is not a conversation of either sort: a session
+ * whose ledger has NO events. A header exists and nothing was ever said into
+ * it — a process that was killed before `discardIfUntouched` could take its
+ * empty session back. Opening one shows an empty screen, and since T22 a new
+ * message freezes a new session anyway, so nothing is lost by leaving it out.
+ * It is counted rather than silently dropped (a list quietly shorter than the
+ * store is a list that is lying), but unlike the delegated ones there is no key
+ * to reveal them: the key would uncover rows with nothing in them.
  */
+export type SessionKind = "own" | "delegated" | "empty"
+
+export function sessionKind(entry: SessionListEntry): SessionKind {
+  if (entry.events === 0) return "empty"
+  return personaOf(entry.composition.prompts) === null ? "own" : "delegated"
+}
+
 export function partitionSessions(entries: readonly SessionListEntry[]): {
   own: SessionListEntry[]
   delegated: SessionListEntry[]
+  empty: SessionListEntry[]
 } {
   const own: SessionListEntry[] = []
   const delegated: SessionListEntry[] = []
+  const empty: SessionListEntry[] = []
   for (const entry of entries) {
-    ;(personaOf(entry.composition.prompts) === null ? own : delegated).push(entry)
+    const into = { own, delegated, empty }[sessionKind(entry)]
+    into.push(entry)
   }
-  return { own, delegated }
+  return { own, delegated, empty }
 }
 
 /**
@@ -137,19 +156,37 @@ export function partitionSessions(entries: readonly SessionListEntry[]): {
  * longest first, and the first that fits wins: the same "give up cells from the
  * outside in" rule `sidebarRowPlan` follows one function up.
  *
- * The keys are only true while the rail holds the keyboard; the hidden count is
- * true either way, because a list that is quietly shorter than the store is a
- * list that is lying, focused or not.
+ * The keys are only true while the rail holds the keyboard; the counts are true
+ * either way, because a list that is quietly shorter than the store is a list
+ * that is lying, focused or not. `empty` has no key beside it — nothing is
+ * withheld that anybody could want back (`partitionSessions`) — so it is the
+ * first thing given up when the rail is narrow.
  */
-export function railFooter(width: number, focused: boolean, hidden: number): string {
+export function railFooter(width: number, focused: boolean, hidden: number, empty = 0): string {
+  const keys = focused ? "j/k · Enter · Esc" : ""
+  // Longest first; each entry is a line somebody reads, so they are written
+  // out rather than assembled. `a` rides with the agent count because that is
+  // the key that undoes it; the empty count has none.
   const candidates =
-    hidden > 0
+    hidden > 0 && empty > 0
       ? focused
-        ? [`j/k · Enter · Esc · ${hidden} agent · a`, `${hidden} agent hidden · a`, `${hidden} agent · a`]
-        : [`${hidden} agent hidden`, `${hidden} agent`]
-      : focused
-        ? ["j/k · Enter go · t tab · Esc", "j/k · Enter · Esc"]
-        : []
+        ? [
+            `${keys} · ${hidden} agent · a · ${empty} empty`,
+            `${hidden} agent · a · ${empty} empty`,
+            `${hidden} agent · a`,
+          ]
+        : [`${hidden} agent hidden · ${empty} empty`, `${hidden} agent · ${empty} empty`, `${hidden} agent`]
+      : hidden > 0
+        ? focused
+          ? [`${keys} · ${hidden} agent · a`, `${hidden} agent hidden · a`, `${hidden} agent · a`]
+          : [`${hidden} agent hidden`, `${hidden} agent`]
+        : empty > 0
+          ? focused
+            ? [`j/k · Enter go · t tab · Esc · ${empty} empty`, `${keys} · ${empty} empty`, keys, `${empty} empty`]
+            : [`${empty} empty`]
+          : focused
+            ? ["j/k · Enter go · t tab · Esc", keys]
+            : []
   // When both cannot fit, the count wins: a key that is missing from this line
   // is still in `/sessions` and in `/help`, while a list that is quietly
   // shorter than the store has nowhere else to say so.
@@ -201,7 +238,10 @@ export function groupedRows(groups: readonly SessionGroup[], showAgents: boolean
   const many = groups.length > 1
   const out: ListRow[] = []
   for (const group of groups) {
-    const shown = showAgents ? group.entries : partitionSessions(group.entries).own
+    const shown = group.entries.filter((entry) => {
+      const kind = sessionKind(entry)
+      return kind === "own" || (kind === "delegated" && showAgents)
+    })
     if (many) out.push({ kind: "group", ws: group.ws })
     for (const row of sessionRows(shown)) {
       out.push({ kind: "session", ws: group.ws, entry: row.entry, depth: row.depth })
@@ -554,9 +594,13 @@ export function SessionsView(props: {
    * "these are hidden".
    */
   const asideText = () => {
-    if (showAgents()) return split().delegated.length > 0 ? " · a hides delegated sessions" : ""
+    const nothing = split().empty.length
+    // Said whichever way `a` is set: an empty session is not one of the two
+    // kinds that key switches between, it is a row with nothing in it.
+    const aside = nothing > 0 ? ` · ${nothing} empty ${nothing === 1 ? "session" : "sessions"} not listed` : ""
+    if (showAgents()) return (split().delegated.length > 0 ? " · a hides delegated sessions" : "") + aside
     const n = hidden()
-    return n > 0 ? ` · ${n} agent ${n === 1 ? "session" : "sessions"} hidden · a shows` : ""
+    return (n > 0 ? ` · ${n} agent ${n === 1 ? "session" : "sessions"} hidden · a shows` : "") + aside
   }
 
   const move = (delta: number) => {
@@ -753,9 +797,9 @@ export function SessionsView(props: {
           for this width and this state by `railFooter`. The keys are only true
           while the keyboard is here; the count of what is not being shown is
           true either way (T70). */}
-      <Show when={railFooter(inner(), owns_keys(), hidden()).length > 0}>
+      <Show when={railFooter(inner(), owns_keys(), hidden(), split().empty.length).length > 0}>
         <text fg={style.theme.dim} height={1} flexShrink={0}>
-          {railFooter(inner(), owns_keys(), hidden())}
+          {railFooter(inner(), owns_keys(), hidden(), split().empty.length)}
         </text>
       </Show>
     </box>

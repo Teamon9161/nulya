@@ -38,6 +38,7 @@ const style: Style = createStyle(unsafe_settings, {})
 let ws: TempWorkspace
 let first: string
 let second: string
+let blank: string
 let version: string
 
 beforeAll(async () => {
@@ -50,6 +51,15 @@ beforeAll(async () => {
   }
   await step.exited
   second = await sessionNew(ws, { profile: "scripted" })
+  await sessionAppend(ws, second, "rename the toolchain flag")
+  const second_step = sessionStep(ws, second, { env: scripted_env })
+  for await (const _ of second_step.lines) {
+    // Drained for the same reason as the first.
+  }
+  await second_step.exited
+  // A session nothing was ever said into: it exists on disk and is NOT a row
+  // (`sessionKind`), which is what the assertions below pin.
+  blank = await sessionNew(ws, { profile: "scripted" })
 
   const run = (args: string[]) => Bun.spawnSync({ cmd: [ws.bin, ...args], cwd: ws.dir, env: process.env })
   run(["ext", "init", "--script", "lint"])
@@ -122,14 +132,20 @@ test("/sessions lists the store and opens the highlighted session", async () => 
     // A row is the sentence that started the session (T47): what was asked
     // first, and how long ago. The id is unreadable and only sometimes needed,
     // so it is printed once, in the title line, for the row under the cursor —
-    // which starts on the newest session, the one nothing was ever said to.
+    // which starts on the newest listed session.
     expect(frame).toContain("make the budgets configurable")
-    expect(frame).toContain("nothing said yet")
+    expect(frame).toContain("rename the toolchain flag")
     expect(frame).toContain(second)
     expect(frame).not.toContain(first)
+    // The session nothing was said into is not a row — and the line at the
+    // bottom says so, because a list quietly shorter than the store is lying.
+    expect(frame).not.toContain(blank)
+    expect(frame).toContain("1 empty session not listed")
     expect(frame).not.toContain("events")
-    // One line of keys, the rest behind `?` (tui.md §11, T18).
-    expect(frame).toContain("j/k move · Enter go there · t new tab · Esc close · ? keys")
+    // One line of keys, the rest behind `?` (tui.md §11, T18) — with what the
+    // list is not drawing said between them.
+    expect(frame).toContain("j/k move · Enter go there · t new tab · Esc close ·")
+    expect(frame).toContain("? keys")
     expect(frame).not.toContain("n new")
     expect(stable(frame)).toMatchSnapshot()
 

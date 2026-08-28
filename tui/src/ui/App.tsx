@@ -16,6 +16,7 @@ import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
 import type { InputRenderable, KeyEvent, ScrollBoxRenderable, Selection } from "@opentui/core"
 import { Transcript, rowsBelow, transcriptRows } from "./Transcript.tsx"
 import { Composer, type ComposerApi } from "./Composer.tsx"
+import { pointer, releasePointer } from "./pointer.ts"
 import { ApprovalPanel, type ApprovalChoice } from "./ApprovalPanel.tsx"
 import { ModePicker, initialChoice, modeAt, moveChoice } from "./ModePicker.tsx"
 import { AgentPicker } from "./AgentPicker.tsx"
@@ -1163,6 +1164,15 @@ export function App(props: AppProps) {
   // rather than parallel for that ordering alone — `syncStores` returns at once
   // when there is nothing to sync (a test, `sync_on_start = false`).
   onMount(() => void syncStores().then(loadPlugins).then(refreshComposedMembership))
+
+  // The screen is an interface, so the pointer over it is an arrow; the
+  // composer asks for the beam back while the mouse is inside it
+  // (`ui/pointer.ts`). Terminals default to a beam over the whole window, which
+  // said "text to select" over the tab bar and every clickable row.
+  onMount(() => {
+    pointer("default")
+    onCleanup(releasePointer)
+  })
 
   // "Ctrl+C again to quit" is an offer about THIS step. It lapses when a new
   // step starts (the first press must kill again, not quit) and after a short
@@ -2934,6 +2944,7 @@ export function App(props: AppProps) {
       return
     }
     tabs.disposeAll()
+    releasePointer()
     renderer.destroy()
     process.exit(0)
   }
