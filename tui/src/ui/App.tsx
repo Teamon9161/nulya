@@ -24,6 +24,7 @@ import { WithPicker, type Wearable } from "./WithPicker.tsx"
 import { StatusBar } from "./StatusBar.tsx"
 import { pickTip } from "./Welcome.tsx"
 import { WorkingStatus, activityOf, type SyncProgress } from "./WorkingStatus.tsx"
+import { createRenderWatchdog, tick_ms as watchdog_tick_ms } from "./watchdog.ts"
 import { QueueLane } from "./QueueLane.tsx"
 import { parseMidTask } from "../midtask.ts"
 import { TabBar } from "./TabBar.tsx"
@@ -1344,6 +1345,20 @@ export function App(props: AppProps) {
     spinnerTick()
     setDisplayUsage((current) => smoothUsageTotals(current, target))
   })
+
+  // While the line above says something is moving, frames must actually land;
+  // when OpenTUI wedges itself and stops painting, force one (`ui/watchdog.ts`
+  // has the whole story). Input and the driver survive that state — only the
+  // screen dies — so the watchdog is the difference between a stall nobody
+  // sees the end of and one frame of hiccup.
+  {
+    const watchdog = createRenderWatchdog(renderer, () => activity()?.moving === true)
+    const timer = setInterval(() => watchdog.tick(), watchdog_tick_ms)
+    onCleanup(() => {
+      clearInterval(timer)
+      watchdog.dispose()
+    })
+  }
 
   /**
    * `Date.now()`, resampled on the animation tick rather than read during a

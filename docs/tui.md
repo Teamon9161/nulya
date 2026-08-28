@@ -2373,3 +2373,15 @@ tab 条的 `✕`/`+`/`▎`；`stripPlan` 的**不变量**"画出来的一切都�
 **没有做的**：删掉它们（内核只 append，前端更不该删文件）· 给它一个键（见上）· 把「inbox 里已经有一条消息、但还没有哪一步把它排干」也算进来（那种 session 也确实 `events == 0`，窗口只有一步之长，而 `/sessions <id>` 与 `nulya session list` 照样到得了它——与委派场那条「什么都没有对内核、对 `session list`、对 `/sessions <id>` 隐藏」同一句话）。
 
 **顺带修掉一条靠巧合通过的测试**：`/resume` 那条用的是 `pressKey("escape")`，而它打出去的是 **escape 这六个字母**——`a` 切了委派场的显示、`n` 开了一个新 tab，看起来像是关掉了列表。此后 `/resume <id>` 的字符继续落在列表上，最后那个 `Enter` 打开的是**光标所在的行**，而那一行恰好就是它想要的那场，于是它一路绿着断言了一件没发生过的事。改成 `pressEscape()`。列表变短之后它才露出来（没有行可选，Enter 什么都不做）——这类测试的真实成本就是这样：它不响的时候，你不知道它在测什么。
+
+### T75 · 屏幕不许死：渲染 watchdog + 量宽不再依赖一个会被丢掉的事件（2026-08-28）
+
+**内核零改动**；`bun test` 588 → 594 pass（新 6 条）、`tsc` 干净。两个 bug 同一场撞见（BUGS.md #17）：屏幕整个冻住（spinner 与计时停在 `preparing write · 2m 52s`，Ctrl+C 两下照样退出），以及一整段回答缩成 12 cells 宽的一团。
+
+**卡死是 OpenTUI 的调度死等（`ui/watchdog.ts`）。** 判据不是「看起来卡」而是责任链每一环都排查过：Ctrl+C 在 raw mode 下是应用自己处理的按键，能退出 = 事件循环、键盘、定时器全活着；那场 session 的 ledger 最后一批 tool_results 落盘正常 = 内核也活着；死的只有画屏幕。机制在 `@opentui/core` 0.5.3（0.5.9 逐字节相同）：native 帧因终端 backpressure 被 SKIP 时，renderer 停在 `feed.idle()` 上等，而等待期间 `requestRender()` 第一行就把**一切**渲染请求静默丢弃——没有超时、没有重试；`idle()` 的 resolve 又依赖「变空闲的那一刻恰好有人调 `resolveIdleIfNeeded()`」，可空闲判定读的是 native 线程写的共享内存 refcount，释放不带 JS 事件——教科书 lost wakeup。**出路是 `loop()` 自己不查那些标志**：公开的 `intermediateRender()` 强制跑一帧，lost wakeup 的场合当场解冻并重置停摆状态，真 backpressure 的场合这一帧再被 SKIP、无损失——**nudge 就是上游忘了排的那次 retry**。何时 nudge 借屏幕自己的承诺：`Activity.moving`（输入框上面那条会扫光的线）在场时，光 spinner tick 就每 90ms 改一次状态，两秒没有一帧落地不是安静、是死了。每 500ms 查一次、每个 stall 窗口只 nudge 一次、真帧一到钟就归位；静止的屏幕不动是对的，钟随 motion 重新起步。`nudges()` 计数留作证据。
+
+**缩成一团是 T73 的量宽机制信了一个 OpenTUI 会丢的事件（`ui/measure.ts`）。** `onLayoutResize` 只在 `_visible` 时 `emit("resize")`，而 scrollbox 的视口剔除对**不可见**的孩子照样跑 `updateFromLayout()`——宽度被悄悄记下、事件没发；等它滚进视野，宽度已等于布局宽度、`sizeChanged == false`，**事件永远不补发**。流式追加的卡第一次布局常在视口外，于是 `measured()` 停在布局前的值，`room() = max(12, …)` 把整段回答按 12 cells 硬换行——截图上正好每行六个汉字。修法：**两个触发器、一次读取**——box 自己的 `resize` 仍是快路径（布局那一帧内就纠正），renderer 的 `frame` 事件是兜底（每画完一帧便宜地重读 `box.width`，相等则信号不动；帧是唯一丢不掉的触发器，因为改变了什么的布局只能经画出它的那一帧被看见）。一个 renderer 一个 frame 监听器走一张 `Set`（EventEmitter 十个就警告）。**attach 时把布局前的 `0` 读成 1 是故意的、这次试图「修掉」又撤回**：让 fallback 站到布局开口，第一帧的宽度就随创建时的屏宽走、变成路径相关，而 T73 的「同一宽度画同一张表」正躺在「每个 body 都从同一个最窄起点出发、于是滚动条阈值上的两个定点永远落进同一个」上（探针实测：height 30 时 fallback 起步的各路径落进**不同**定点且各自稳定不再收敛）。窄起点最多存活一帧——resize 事件或下一帧的重读就把它纠正，代价与 T73 已写明的「代价是一帧」同一笔。
+
+**测试**（`test/watchdog.test.ts` 4 条纯逻辑 + `test/measure.test.tsx` 2 条走真 testRender）：停摆才 nudge、静止不 nudge、一个窗口一次 retry、真帧解除；无 resize 事件的宽度照样被读到（**在旧代码上会红**，验证过——culled first layout 正是「从不 emit resize 的 box」）、resize 快路径仍在。没断言 stall 阈值的字面值与 OpenTUI 的内部状态名：那是常量与别人的实现。
+
+**没做的**：升级 OpenTUI（0.5.9 两处代码逐字节相同，升了也一样）· 给上游发 patch（该发，但屏幕不能等它合并）· 把 nudge 次数画上屏（它是证据不是行为，真要看走 debug）。
