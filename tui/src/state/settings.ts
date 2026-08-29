@@ -165,10 +165,12 @@ export interface Settings {
   }
   /**
    * Per exec-target-KIND overrides of `session_with` / `session_prompts` /
-   * pins (`tui.toml` `[env.local]` / `[env.wsl]` / `[env.ssh]` / `[env.
-   * remote]`, tui.md §11 T88/T101, `state/envprofile.ts`). A table for a kind
-   * that never gets a session (nobody uses `/env`) costs nothing and is never
-   * read.
+   * pins (`tui.toml` `[env.local]` / `[env.wsl]` / `[env.remote]`, tui.md §11
+   * T88/T101, `state/envprofile.ts`). A table for a kind that never gets a
+   * session (nobody uses `/env`) costs nothing and is never read. (`[env.
+   * ssh]` used to be a fourth table, for the bare `ssh:<dest>` exec target —
+   * retired 2026-08-30, goals/remote-env.md §7.1 — and is now simply an
+   * unrecognised key, same as any other typo.)
    *
    * Kept apart from `extensions` above rather than nested inside it: those
    * fields ARE the `local`/`wsl` default (`envprofile.ts`'s
@@ -293,7 +295,7 @@ function mergeLayer(into: Settings, layer: unknown, source: string) {
   }
   const envTable = record["env"] as Record<string, unknown> | undefined
   if (envTable) {
-    for (const kind of ["local", "wsl", "ssh", "remote"] as const) {
+    for (const kind of ["local", "wsl", "remote"] as const) {
       const table = envTable[kind] as Record<string, unknown> | undefined
       if (!table) continue
       const target = { ...(into.env[kind] ?? {}) }
@@ -374,9 +376,10 @@ function mergeLayer(into: Settings, layer: unknown, source: string) {
  *
  * A closed list is chosen from, a number and a list are typed. A field with no
  * `edit` is one this screen will not write — `keys.*`, whose names are an open
- * set, and the `env.<kind>` rows, whose one line stands for four tables (T101
- * added `remote` to `local`/`wsl`/`ssh`) and so has no single value to put
- * anywhere.
+ * set, and the `env.<kind>` rows, whose one line stands for three tables (T101
+ * added `remote` to `local`/`wsl`; the fourth, `ssh`, was retired 2026-08-30
+ * along with the bare `ssh:<dest>` exec target, goals/remote-env.md §7.1) and
+ * so has no single value to put anywhere.
  */
 export type SettingEdit =
   | { kind: "choice"; values: readonly string[]; boolean?: true }
@@ -454,7 +457,7 @@ const yesno = "true | false"
 const shown = (xs: readonly string[]) => (xs.length === 0 ? "—" : xs.join(", "))
 /** Which `[env.<kind>]` tables set this key, since which one applies is per session. */
 const envSet = (settings: Settings, has: (table: EnvProfileOverride) => boolean) => {
-  const kinds = (["local", "wsl", "ssh", "remote"] as const).filter((kind) => {
+  const kinds = (["local", "wsl", "remote"] as const).filter((kind) => {
     const table = settings.env[kind]
     return table !== undefined && has(table)
   })
@@ -523,15 +526,15 @@ export const setting_fields: readonly SettingField[] = [
     note: "read just before the next `session new`",
     value: (s) => shown(s.extensions.session_prompts),
   },
-  { key: "env.<local|wsl|ssh|remote>.bare", accepts: yesno, value: (s) => envSet(s, (t) => t.bare !== undefined) },
-  { key: "env.<local|wsl|ssh|remote>.with", accepts: "package ids", value: (s) => envSet(s, (t) => t.with !== undefined) },
+  { key: "env.<local|wsl|remote>.bare", accepts: yesno, value: (s) => envSet(s, (t) => t.bare !== undefined) },
+  { key: "env.<local|wsl|remote>.with", accepts: "package ids", value: (s) => envSet(s, (t) => t.with !== undefined) },
   {
-    key: "env.<local|wsl|ssh|remote>.pins",
+    key: "env.<local|wsl|remote>.pins",
     accepts: "ext:<id>/<tool>",
     value: (s) => envSet(s, (t) => t.pins !== undefined),
   },
   {
-    key: "env.<local|wsl|ssh|remote>.session_prompts",
+    key: "env.<local|wsl|remote>.session_prompts",
     accepts: "package ids",
     value: (s) => envSet(s, (t) => t.session_prompts !== undefined),
   },

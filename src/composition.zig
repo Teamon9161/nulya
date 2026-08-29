@@ -175,8 +175,8 @@ pub const Options = struct {
     /// learns where the bytes came from, and it never interprets `source`.
     prompts: []const ledger.InlinePrompt = &.{},
     /// Which machine's binaries will serve this session's extension calls, when
-    /// that is not this one. Null for an ordinary session (and for a `wsl` /
-    /// `ssh` exec target, which moves the command and keeps the workspace here).
+    /// that is not this one. Null for an ordinary session (and for a `wsl`
+    /// exec target, which moves the command and keeps the workspace here).
     exec_target: ?ExecTargetProbe = null,
 };
 

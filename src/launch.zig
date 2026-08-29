@@ -704,10 +704,34 @@ pub fn isRemoteSpec(exec: []const u8) bool {
     return remote.isSpec(environment.normalizeExecSpec(exec));
 }
 
+/// The sentence `ssh:<destination>` gets, now that the exec-target spelling it
+/// used to name is gone (goals/remote-env.md §7.1, 2026-08-30): it wrapped one
+/// command while the workspace, extensions and every spill file stayed on the
+/// host, which was dishonest the moment anything beyond `shell` mattered — the
+/// same split `runExtension` moving over the channel exists to end (DESIGN
+/// §8.2). A resume that finds this spelling frozen into an old header gets the
+/// same words appended to its own refusal, not a silent re-interpretation as
+/// `remote:ssh:` — the two move different things (only the command versus the
+/// whole workspace, which is why `--workspace` matters for one and not the
+/// other), so guessing which one an old session meant would be a second
+/// silent substitution of exactly the kind `MissingCredential` refuses to make.
+pub const legacy_ssh_hint =
+    "ssh as an exec target was retired; use --env remote:ssh:<destination> instead " ++
+    "to move the whole workspace there (see --workspace), or --env wsl to keep only the shell elsewhere";
+
+/// Null unless `spec` (already `normalizeExecSpec`d) is the retired
+/// `ssh:<destination>` exec-target spelling — `remote:ssh:` does not match
+/// (checked before this runs, in every caller) and neither does anything else.
+pub fn legacySshHint(spec: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, spec, "ssh:")) return null;
+    return legacy_ssh_hint;
+}
+
 /// Say why an `--env` spec cannot be used, or null when it can — so a CLI verb
 /// can refuse BEFORE it creates anything, the way a missing `--prompt` file
-/// does. The three answers are kept apart on purpose: a typo, the wrong
-/// machine, and a spelling from the other family are three different fixes.
+/// does. The four answers are kept apart on purpose: a typo, the wrong
+/// machine, a spelling from the other family, and the one spelling that used
+/// to work and now needs a specific pointer are four different fixes.
 pub fn execTargetRefusal(exec: []const u8) ?[]const u8 {
     const spec = environment.normalizeExecSpec(exec);
     if (remote.isSpec(spec)) {
@@ -716,6 +740,7 @@ pub fn execTargetRefusal(exec: []const u8) ?[]const u8 {
         if (!remote.supportedOnHost(launch)) return "cannot be reached from this host (wsl needs Windows)";
         return null;
     }
+    if (legacySshHint(spec)) |hint| return hint;
     const target = environment.parseExecTarget(spec) catch
         return "unrecognized (want " ++ environment.exec_target_syntax ++ ", or " ++ remote.spec_syntax ++ ")";
     if (!environment.execTargetSupportedOnHost(target)) return "cannot be reached from this host (wsl needs Windows)";
@@ -1341,7 +1366,7 @@ test "the scripted handoff mode plays a two-phase goal: propose, then stop, then
     }
 }
 
-test "only the local environment backend runs; sandbox / remote are refused, not silently localized" {
+test "only the local environment backend runs; sandbox is refused, not silently localized" {
     const alloc = std.testing.allocator;
 
     var cfg = config.Config.init(alloc);
@@ -1355,18 +1380,29 @@ test "only the local environment backend runs; sandbox / remote are refused, not
     // tools locally under a config that asked for isolation (DESIGN §8).
     cfg.environment.backend = .sandbox;
     try std.testing.expectError(error.UnsupportedEnvironmentBackend, localEnvironment(alloc, std.testing.io, &cfg, null, "", &.{}));
-    cfg.environment.backend = .remote;
-    try std.testing.expectError(error.UnsupportedEnvironmentBackend, localEnvironment(alloc, std.testing.io, &cfg, null, "", &.{}));
 }
 
 test "an exec target is refused before anything is built, and the two refusals differ" {
     try std.testing.expectEqual(@as(?[]const u8, null), execTargetRefusal(""));
     try std.testing.expectEqual(@as(?[]const u8, null), execTargetRefusal("local"));
-    try std.testing.expectEqual(@as(?[]const u8, null), execTargetRefusal("ssh:me@box"));
+    // The exec-target `ssh:<dest>` spelling was retired 2026-08-30
+    // (goals/remote-env.md §7.1): it is refused with a SPECIFIC sentence
+    // naming the replacement, distinct from the generic "unrecognized" a typo
+    // gets (which happens to also mention `remote:ssh:` as part of the whole
+    // vocabulary, so the two are told apart by identity, not substring).
+    try std.testing.expectEqualStrings(legacy_ssh_hint, execTargetRefusal("ssh:me@box").?);
     // A typo and an unreachable target are different problems with different
-    // fixes, so they are not the same sentence.
-    try std.testing.expect(execTargetRefusal("wsl2") != null);
+    // fixes, so they are not the same sentence as either of the above.
+    const typo = execTargetRefusal("wsl2").?;
+    try std.testing.expect(!std.mem.eql(u8, typo, legacy_ssh_hint));
     try std.testing.expectEqual(builtin.os.tag != .windows, execTargetRefusal("wsl") != null);
+}
+
+test "legacySshHint only fires on the retired ssh: exec-target prefix" {
+    try std.testing.expectEqualStrings(legacy_ssh_hint, legacySshHint("ssh:me@box").?);
+    try std.testing.expectEqual(@as(?[]const u8, null), legacySshHint("local"));
+    try std.testing.expectEqual(@as(?[]const u8, null), legacySshHint("wsl"));
+    try std.testing.expectEqual(@as(?[]const u8, null), legacySshHint("remote:ssh:me@box"));
 }
 
 test "a session's tasks live beside its spills, under one removable subtree" {

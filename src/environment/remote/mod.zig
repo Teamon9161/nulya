@@ -3,12 +3,16 @@
 //! there (DESIGN §8.1, `docs/goals/remote-env.md`).
 //!
 //! **How this differs from the exec target already in `environment.zig`.**
-//! `--env wsl|ssh` WRAPS each command in a launcher: the workspace stays here,
+//! `--env wsl` WRAPS each command in a launcher: the workspace stays here,
 //! extensions stay here, and every call pays a fresh connection. This one moves
 //! the workspace: the far side is where files are read and written, and the
 //! channel is opened once per session process. They are two points on the same
-//! axis, not two spellings of one thing, so they have different words
-//! (`ssh:me@box` vs `remote:ssh:me@box`) and the older one is untouched.
+//! axis, not two spellings of one thing, so they have different words. The
+//! exec target's own `ssh:<dest>` spelling was retired 2026-08-30
+//! (goals/remote-env.md §7.1) precisely because it collided with this family
+//! in the way that mattered most — `ssh:me@box` wrapped one command while
+//! `remote:ssh:me@box` moves the whole workspace, and the two are easy to
+//! confuse when only one of them still needs a machine reachable over ssh.
 //!
 //! **Three verbs move so far.** `runShell`, `runExtension` and
 //! `putWorkspaceFile` go over the channel; only `startShellTask` refuses, in a

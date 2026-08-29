@@ -264,19 +264,24 @@ Store and scope:
   existing one. Compaction and handover are both this. Composition is not
   inherited — pass `--with` and `--pin` again if the fork needs them.
 - `nulya session new --env <spec>` chooses WHERE this session's `shell` commands
-  run: `local` (the default), `wsl`, `wsl:<distro>`, or `ssh:<destination>`. It
-  is frozen in the header, so `step` takes no such flag and a resume that cannot
-  reach the target fails rather than running the commands here instead.
+  run: `local` (the default), `wsl`, or `wsl:<distro>`. It is frozen in the
+  header, so `step` takes no such flag and a resume that cannot reach the
+  target fails rather than running the commands here instead.
   **Only `shell` moves.** Extension processes, background-task supervisors, the
   extension store, the journals and every spilled tool output stay on this
-  host — under WSL the workspace is the same directory seen as `/mnt/<drive>`,
-  but over ssh the far side is a different filesystem and cannot see any of it.
-  Two more honest limits: killing a command reaches the local `wsl.exe` / `ssh`
-  client, not necessarily the process on the other end; and `NULYA_EXE` /
-  `NULYA_SESSION` do not survive the hop (WSL forwards only what `WSLENV` names,
-  ssh only what `SendEnv` does), so a command that wants to call `nulya` again
-  has to find it itself. An `ssh` target authenticates with a key file: this
-  harness strips `SSH_AUTH_SOCK` from every child environment.
+  host — the workspace is the same directory seen as `/mnt/<drive>` under WSL.
+  Two more honest limits: killing a command reaches the local `wsl.exe` client,
+  not necessarily the process on the other end; and `NULYA_EXE` /
+  `NULYA_SESSION` do not survive the hop (WSL forwards only what `WSLENV`
+  names), so a command that wants to call `nulya` again has to find it itself.
+  (There used to be a bare `ssh:<destination>` spelling here too — retired
+  2026-08-30, because it moved only the shell while the workspace, extensions
+  and every spilled file stayed on this host, which was dishonest the moment
+  anything besides `shell` mattered. `--env ssh:…` is refused now, pointing at
+  the replacement below. Want a machine reachable over ssh but only for
+  `shell`, with the workspace staying here? Nothing offers that today — use
+  `wsl`, or reach for the `remote:` family and accept that the workspace moves
+  too.)
 - **When the WORKSPACE itself lives on the other machine**, `--env` takes a
   second family of spellings: `remote:wsl`, `remote:wsl:<distro>`,
   `remote:ssh:<destination>`, or the general `remote:exec:<argv…>` — which is

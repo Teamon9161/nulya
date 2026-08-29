@@ -61,7 +61,8 @@ export interface SessionHeader {
   model_identity: ModelDescriptor
   /**
    * WHERE this session's `shell` commands run (DESIGN §8.1): `""` for this
-   * host, else `wsl`, `wsl:<distro>` or `ssh:<destination>`. Frozen at
+   * host, else `wsl` or `wsl:<distro>`, or a `remote:…` spec (§8.2) that moves
+   * the whole workspace rather than just the command. Frozen at
    * `session new --env`, so it is a property of the session and not of whoever
    * is stepping it. Empty from any binary that predates the field.
    */

@@ -306,7 +306,7 @@ export function SettingsView(props: {
       return setNotice(
         entry.row.key.startsWith("keys.")
           ? `a binding is any key name · edit ${userPath()} under [keys]`
-          : `this row stands for four tables · edit ${userPath()} under [env.local] / [env.wsl] / [env.ssh] / [env.remote]`,
+          : `this row stands for three tables · edit ${userPath()} under [env.local] / [env.wsl] / [env.remote]`,
       )
     }
     if (entry.project) {

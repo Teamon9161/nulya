@@ -79,7 +79,7 @@ function tipsOf(glyphs: Glyphs): string[] {
     "shell {background:true} outlives the step · /tasks shows what is still running",
     "/outcome success|partial|failure records how a session went · nothing recorded is not failure",
     "Ctrl+C stops the step and never exits on the first press",
-    "/env runs the next session's shell in WSL or over ssh · bare /env lists what this machine can reach",
+    "/env runs the next session's shell in WSL, or moves the whole workspace elsewhere with remote:… · bare /env lists what this machine can reach",
     "the settings screen names every key tui.toml takes, and what each one accepts",
     // Alt+V is named FIRST on purpose: Ctrl+V reaches this application only on
     // terminals that do not paste on it themselves, and the people who most

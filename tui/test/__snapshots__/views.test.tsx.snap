@@ -57,11 +57,10 @@ exports[`/help lists the bindings that are actually in force 1`] = `
  /mode [ask|unsafe]                ask before every tool call, or run them all unreviewed; no     █ 
                                    argument opens the picker                                      █ 
  /provider                         endpoints and their keys                                       █ 
-                                   add an OpenAI- or Anthropic-compatible one                       
- /effort <level|auto>              change this tab's effort now; the next step runs with it         
- /env [<target>]                   where the next session's shell runs: local | wsl |               
-                                   wsl:<distro> | ssh:<dest>                                        
-                                   no argument lists what this machine can reach                    
+                                   add an OpenAI- or Anthropic-compatible one                     █ 
+ /effort <level|auto>              change this tab's effort now; the next step runs with it       █ 
+ /env [<target>]                   where the next session's shell runs: local | wsl |             █ 
+                                   wsl:<distro> · no argument lists what this machine can reach     
                                    only shell moves, this harness stays here                        
  /new [--profile p] [--model id]   a SECOND tab, on the last pick or the named profile — this tab   
                                    is untouched                                                     
@@ -98,6 +97,7 @@ exports[`/help lists the bindings that are actually in force 1`] = `
  /<skill> [args]                   load an active skill's body as a user turn                       
                                    \`nulya skill list\` names them                                    
  anything else after /             goes to the model verbatim                                       
+                                                                                                    
  j/k · PgUp/PgDn scroll · Esc close                                                                 
 "
 `;

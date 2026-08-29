@@ -10,14 +10,19 @@
 //!   2. the accepted spec is FROZEN in the header and read back from there, so
 //!      the answer is the session's rather than today's command line;
 //!   3. a session frozen onto a target NEVER falls back to running its command
-//!      on this host. That is the whole safety property of the feature, and it
-//!      is assertable with no wsl and no reachable ssh host: an unreachable
-//!      target must produce anything at all EXCEPT the output the command
-//!      would have printed here.
+//!      on this host. That is the whole safety property of the feature.
 //!
-//! Actually reaching a distribution is a smoke test that skips when there is no
-//! WSL to reach (the `zig build integration` discipline: a machine without the
-//! thing does not go red over it).
+//! `wsl` is the only non-local exec target left (`ssh:<destination>` was
+//! retired 2026-08-30, goals/remote-env.md §7.1 — `--env remote:ssh:<dest>`
+//! moves the whole workspace instead, and is exercised in `remote.zig`), and
+//! `execTargetSupportedOnHost` accepts any `wsl:<distro>` spelling on Windows
+//! whether or not that distro actually exists — so property 3 is pinned with a
+//! distro name that does not, WITHOUT needing an actual reachable distribution:
+//! `wsl.exe` itself reports the failure, and that is not this host running the
+//! command. That needs Windows to freeze at all, so it is gated accordingly;
+//! actually reaching a REAL distribution is a separate smoke test that skips
+//! when there is no WSL to reach (the `zig build integration` discipline: a
+//! machine without the thing does not go red over it).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -71,7 +76,17 @@ test "session new --env: a bad spec creates nothing, a good one is frozen, and t
         const err = try runCliStderr(alloc, io, ws, &.{ exe, "session", "new", "--profile", "scripted", "--env", "wsl2" }, &.{});
         defer alloc.free(err);
         try std.testing.expect(std.mem.indexOf(u8, err, "--env") != null);
-        try std.testing.expect(std.mem.indexOf(u8, err, "ssh:<destination>") != null);
+        try std.testing.expect(std.mem.indexOf(u8, err, "wsl:<distro>") != null);
+        try std.testing.expectError(error.FileNotFound, ws.access(io, ".nulya/sessions", .{}));
+    }
+
+    // ①b The retired `ssh:<destination>` exec-target spelling is refused with a
+    // SPECIFIC pointer at its replacement (goals/remote-env.md §7.1) — not just
+    // folded into the generic "unrecognized" message above.
+    {
+        const err = try runCliStderr(alloc, io, ws, &.{ exe, "session", "new", "--profile", "scripted", "--env", "ssh:nobody@e2e.invalid" }, &.{});
+        defer alloc.free(err);
+        try std.testing.expect(std.mem.indexOf(u8, err, "remote:ssh:") != null);
         try std.testing.expectError(error.FileNotFound, ws.access(io, ".nulya/sessions", .{}));
     }
 
@@ -97,25 +112,36 @@ test "session new --env: a bad spec creates nothing, a good one is frozen, and t
         try std.testing.expect(std.mem.indexOf(u8, header, "\"environment\":\"\"") != null);
     }
 
-    // ④ A real spec is frozen verbatim and reported by the read-only projection.
-    // `.invalid` is the reserved TLD that never resolves, so nothing here can
-    // reach a real host by accident.
-    const new = try runCli(alloc, io, ws, &.{ exe, "session", "new", "--profile", "scripted", "--env", "ssh:nobody@e2e.invalid" });
-    defer alloc.free(new.stdout);
-    try std.testing.expectEqual(@as(u8, 0), new.code);
-    const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
-    defer alloc.free(id);
+    // ④ A real (non-local) spec is frozen verbatim and reported by the
+    // read-only projection. `wsl` is the only such spec left, and
+    // `execTargetSupportedOnHost` accepts any distro NAME on Windows without
+    // checking it exists — so this needs only Windows, not an actual WSL
+    // install, and a name nothing will ever really register keeps it from
+    // accidentally matching a real distribution on the machine running this.
+    if (builtin.os.tag == .windows) {
+        const new = try runCli(alloc, io, ws, &.{ exe, "session", "new", "--profile", "scripted", "--env", "wsl:e2e-nonexistent-distro-nulya-test" });
+        defer alloc.free(new.stdout);
+        try std.testing.expectEqual(@as(u8, 0), new.code);
+        const id = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+        defer alloc.free(id);
 
-    const header = try readSessionFile(alloc, io, ws, id);
-    defer alloc.free(header);
-    try std.testing.expect(std.mem.indexOf(u8, header, "\"environment\":\"ssh:nobody@e2e.invalid\"") != null);
+        const header = try readSessionFile(alloc, io, ws, id);
+        defer alloc.free(header);
+        try std.testing.expect(std.mem.indexOf(u8, header, "\"environment\":\"wsl:e2e-nonexistent-distro-nulya-test\"") != null);
 
-    const listed = try runCli(alloc, io, ws, &.{ exe, "session", "list", "--json" });
-    defer alloc.free(listed.stdout);
-    try std.testing.expect(std.mem.indexOf(u8, listed.stdout, "\"environment\":\"ssh:nobody@e2e.invalid\"") != null);
+        const listed = try runCli(alloc, io, ws, &.{ exe, "session", "list", "--json" });
+        defer alloc.free(listed.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, listed.stdout, "\"environment\":\"wsl:e2e-nonexistent-distro-nulya-test\"") != null);
+    }
 }
 
 test "session step: a session frozen onto an unreachable target never runs its command on this host" {
+    // `wsl` is the only non-local exec target left, and it needs Windows to
+    // freeze at all — see the doc comment at the top of this file for why a
+    // nonexistent distro NAME is enough to pin this property without an
+    // actual reachable distribution.
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
@@ -133,7 +159,7 @@ test "session step: a session frozen onto an unreachable target never runs its c
     const here_id = try alloc.dupe(u8, std.mem.trim(u8, here.stdout, " \r\n"));
     defer alloc.free(here_id);
 
-    const away = try runCli(alloc, io, ws, &.{ exe, "session", "new", "--profile", "scripted", "--env", "ssh:nobody@e2e.invalid" });
+    const away = try runCli(alloc, io, ws, &.{ exe, "session", "new", "--profile", "scripted", "--env", "wsl:e2e-nonexistent-distro-nulya-test" });
     defer alloc.free(away.stdout);
     const away_id = try alloc.dupe(u8, std.mem.trim(u8, away.stdout, " \r\n"));
     defer alloc.free(away_id);
@@ -148,8 +174,8 @@ test "session step: a session frozen onto an unreachable target never runs its c
         try std.testing.expect(std.mem.indexOf(u8, results, local_marker) != null);
     }
 
-    // The property: whatever happened — `ssh` missing from PATH, a name that
-    // does not resolve, a refused connection — the one thing that must NOT have
+    // The property: whatever happened — `wsl.exe` reporting no such
+    // distribution, or missing entirely — the one thing that must NOT have
     // happened is the command running here. A silent fallback to the host is
     // the failure this whole axis exists to prevent, and it would look like
     // success in every other way.

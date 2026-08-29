@@ -916,6 +916,13 @@ fn taskRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
             return 1;
         },
         error.InvalidExecTarget, error.ExecTargetUnsupportedOnHost => {
+            // Same pointer `execTargetRefusal` gives a fresh `--env ssh:…`, for
+            // a header frozen before the exec-target spelling was retired
+            // (goals/remote-env.md §7.1) — never a silent re-interpretation.
+            if (launch.legacySshHint(environment.normalizeExecSpec(hdr.value.environment))) |hint| {
+                try printErrFmt(alloc, io, "session '{s}' runs its commands in '{s}', which this host cannot reach ({s})\n", .{ session_id, hdr.value.environment, hint });
+                return 1;
+            }
             try printErrFmt(alloc, io, "session '{s}' runs its commands in '{s}', which this host cannot reach\n", .{ session_id, hdr.value.environment });
             return 1;
         },

@@ -24,16 +24,16 @@ describe("execTargetKind", () => {
     expect(execTargetKind("wsl:")).toBe("wsl")
   })
 
-  test("ssh: always has a destination", () => {
-    expect(execTargetKind("ssh:box")).toBe("ssh")
-    expect(execTargetKind("ssh:user@host")).toBe("ssh")
-  })
-
   test("anything unrecognised reads as local — the fuller composition, not the stripped one", () => {
     // `session new` is the one that refuses a bad spelling; this classifier
     // only picks a profile, and the conservative pick costs nothing extra.
+    // `ssh:<dest>` used to be its own kind — retired 2026-08-30
+    // (goals/remote-env.md §7.1) — and now falls in here with any other
+    // spelling `session new` will refuse.
     expect(execTargetKind("docker:box")).toBe("local")
     expect(execTargetKind("ssh")).toBe("local")
+    expect(execTargetKind("ssh:box")).toBe("local")
+    expect(execTargetKind("ssh:user@host")).toBe("local")
   })
 
   test("surrounding whitespace does not change the kind", () => {
@@ -71,16 +71,7 @@ describe("resolveEnvProfile: zero-config defaults", () => {
     })
   })
 
-  test("ssh only has shell: bare, no members, no renderers, no extra pins", () => {
-    expect(resolveEnvProfile("ssh", session_with, session_prompts, no_overrides)).toEqual({
-      bare: true,
-      with: [],
-      pins: [],
-      session_prompts: [],
-    })
-  })
-
-  test("remote gets ssh's treatment, not wsl's — a different machine's filesystem either way (T101)", () => {
+  test("remote only has shell/workspace: bare, no members, no renderers, no extra pins", () => {
     expect(resolveEnvProfile("remote", session_with, session_prompts, no_overrides)).toEqual({
       bare: true,
       with: [],
@@ -95,19 +86,19 @@ describe("resolveEnvProfile: field-level override", () => {
   const session_prompts = ["ground"]
 
   test("a field written in tui.toml replaces the default outright", () => {
-    const overrides: EnvProfiles = { ssh: { with: ["ops"] } }
-    const profile = resolveEnvProfile("ssh", session_with, session_prompts, overrides)
+    const overrides: EnvProfiles = { remote: { with: ["ops"] } }
+    const profile = resolveEnvProfile("remote", session_with, session_prompts, overrides)
     expect(profile.with).toEqual(["ops"])
     // The fields NOT written keep the kind's own default — `bare` stays true
-    // for ssh, `pins`/`session_prompts` stay empty, because only one field
+    // for remote, `pins`/`session_prompts` stay empty, because only one field
     // was mentioned.
     expect(profile.bare).toBe(true)
     expect(profile.pins).toEqual([])
     expect(profile.session_prompts).toEqual([])
   })
 
-  test("bare can be turned off for ssh without touching its other fields", () => {
-    const profile = resolveEnvProfile("ssh", session_with, session_prompts, { ssh: { bare: false } })
+  test("bare can be turned off for remote without touching its other fields", () => {
+    const profile = resolveEnvProfile("remote", session_with, session_prompts, { remote: { bare: false } })
     expect(profile.bare).toBe(false)
     expect(profile.with).toEqual([])
   })
@@ -119,12 +110,12 @@ describe("resolveEnvProfile: field-level override", () => {
   })
 
   test("pins is additive tool ids, not a replacement for with — both apply at once", () => {
-    const profile = resolveEnvProfile("ssh", session_with, session_prompts, {
-      ssh: { pins: ["ext:std/read"], session_prompts: ["ground"] },
+    const profile = resolveEnvProfile("remote", session_with, session_prompts, {
+      remote: { pins: ["ext:std/read"], session_prompts: ["ground"] },
     })
     expect(profile.pins).toEqual(["ext:std/read"])
     expect(profile.session_prompts).toEqual(["ground"])
-    expect(profile.with).toEqual([]) // not mentioned, still the ssh default
+    expect(profile.with).toEqual([]) // not mentioned, still the remote default
   })
 
   test("an empty override table for a kind is exactly its default", () => {
@@ -134,7 +125,7 @@ describe("resolveEnvProfile: field-level override", () => {
   })
 
   test("a table for one kind never leaks into another", () => {
-    const overrides: EnvProfiles = { ssh: { with: ["ops"], bare: false } }
+    const overrides: EnvProfiles = { remote: { with: ["ops"], bare: false } }
     expect(resolveEnvProfile("local", session_with, session_prompts, overrides)).toEqual({
       bare: false,
       with: session_with,
@@ -147,17 +138,9 @@ describe("resolveEnvProfile: field-level override", () => {
       pins: [],
       session_prompts,
     })
-    // …and `remote` is its own fourth kind, not a synonym `ssh`'s table
-    // happens to also answer for.
-    expect(resolveEnvProfile("remote", session_with, session_prompts, overrides)).toEqual({
-      bare: true,
-      with: [],
-      pins: [],
-      session_prompts: [],
-    })
   })
 
-  test("[env.remote] overrides remote alone, same field-level discipline as the other three", () => {
+  test("[env.remote] overrides remote alone, same field-level discipline as the other two", () => {
     const profile = resolveEnvProfile("remote", session_with, session_prompts, {
       remote: { bare: false, with: ["agent"] },
     })

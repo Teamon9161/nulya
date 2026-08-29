@@ -1099,6 +1099,13 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
             return stepFail(alloc, io, stream, "environment backend '{s}' is not implemented; only local", .{@tagName(cfg.environment.backend)});
         },
         error.InvalidExecTarget, error.ExecTargetUnsupportedOnHost, error.InvalidRemoteSpec, error.RemoteSpecUnsupportedOnHost => {
+            // A header frozen before ssh-as-exec-target was retired (DESIGN
+            // §8.1, goals/remote-env.md §7.1) gets the same specific pointer a
+            // fresh `--env ssh:…` does — never a silent re-interpretation as
+            // `remote:ssh:` (`launch.legacySshHint`'s own doc explains why).
+            if (launch.legacySshHint(environment.normalizeExecSpec(hdr.value.environment))) |hint| {
+                return stepFail(alloc, io, stream, "session '{s}' runs its commands in '{s}', which this binary on this host cannot reach; refusing to run them here instead ({s})", .{ id, hdr.value.environment, hint });
+            }
             return stepFail(alloc, io, stream, "session '{s}' runs its commands in '{s}', which this binary on this host cannot reach; refusing to run them here instead", .{ id, hdr.value.environment });
         },
         // The machine is named and reachable in principle, but did not answer.

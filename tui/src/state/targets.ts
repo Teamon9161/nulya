@@ -12,12 +12,17 @@
  * exists only in DNS, an `Include`d config fragment — is why the dialog keeps a
  * row that hands the typing back.
  *
- * Two families ride the same two sources (`wsl -l`, `~/.ssh/config`): `wsl:`/
- * `ssh:` move only the SHELL (DESIGN §8.1), `remote:wsl:`/`remote:ssh:` move
- * the whole WORKSPACE too (goals/remote-env.md §3.9) — picking one of the
- * latter is the first half of a two-part choice, the second being WHICH
- * directory on that machine (`ui/App.tsx`'s remote-browse flow, `dirsource.
- * ts`'s `remoteDirSource`).
+ * Two sources feed two different things: `wsl -l` also seeds `wsl:` (moves
+ * only the SHELL, DESIGN §8.1); both sources seed the `remote:wsl:`/
+ * `remote:ssh:` rows, which move the whole WORKSPACE too (goals/remote-env.md
+ * §3.9) — picking one of those is the first half of a two-part choice, the
+ * second being WHICH directory on that machine (`ui/App.tsx`'s remote-browse
+ * flow, `dirsource.ts`'s `remoteDirSource`). There is no bare `ssh:` row any
+ * more: that exec-target spelling was retired 2026-08-30
+ * (goals/remote-env.md §7.1) because it moved only the shell while the
+ * workspace stayed here, which was dishonest the moment anything else read a
+ * file — `remote:ssh:` is the only ssh-shaped spec `session new` still
+ * accepts.
  *
  * NOTHING HERE DECIDES ANYTHING. The kernel parses the spec
  * (`environment.parseExecTarget`) and refuses a bad one with the vocabulary in
@@ -63,7 +68,6 @@ export async function execChoices(probe: TargetProbe = hostProbe): Promise<ExecC
     // the spec is frozen into a session header, and a name still means the same
     // distribution after somebody runs `wsl --set-default`.
     ...distros.map((name) => ({ spec: `wsl:${name}`, what: "a WSL distribution · the workspace as /mnt/…" })),
-    ...hosts.map((host) => ({ spec: `ssh:${host}`, what: "from your ssh config · the remote account's own home" })),
     // The `remote:` family (goals/remote-env.md §3.9): the WORKSPACE moves,
     // not just the shell — `extensions/std`, `ground`, everything that reads
     // files reads THAT machine's, over a channel this harness itself opens

@@ -23,9 +23,14 @@ pub const ProviderKind = enum {
     codex,
 };
 
+/// `remote` was retired 2026-08-30 (goals/remote-env.md §7.1): it named a
+/// third confinement level that was never implemented, and it read as though
+/// it were the same axis as `--env remote:…` (DESIGN §8.2) when it is not —
+/// this enum is the SANDBOX axis (how confined a command is), `--env` is which
+/// MACHINE runs it. Keeping a word here that nothing built and that collided
+/// in name with an unrelated, shipped feature was worse than deleting it.
 pub const EnvironmentBackend = enum {
     local,
-    remote,
     sandbox,
 };
 
@@ -449,8 +454,7 @@ fn dupeStringList(arena: std.mem.Allocator, values: []const []const u8) ![]const
 fn backendStrictness(backend: EnvironmentBackend) u8 {
     return switch (backend) {
         .local => 0,
-        .remote => 1,
-        .sandbox => 2,
+        .sandbox => 1,
     };
 }
 
@@ -703,6 +707,21 @@ test "project layer may tighten but not loosen trusted authority" {
     // looser execution backend than a trusted layer chose (DESIGN §9.5).
     try std.testing.expectEqual(EnvironmentBackend.sandbox, cfg.environment.backend);
     try std.testing.expectEqual(@as(u32, 4), cfg.registry.max_tools);
+}
+
+test "a config file naming the retired 'remote' backend fails to load, rather than reading as local" {
+    // `remote` was deleted from `EnvironmentBackend` (goals/remote-env.md §7.1)
+    // rather than kept as a synonym for `local` or `sandbox` — an old file with
+    // `backend = "remote"` must say so loudly (the enum-decode error every
+    // other unrecognized TOML value already gets), not silently downgrade to a
+    // laxer backend than whoever wrote that file asked for.
+    try std.testing.expectError(error.InvalidValueType, loadFromLayers(std.testing.allocator, &.{
+        .{ .source = default_toml },
+        .{ .source =
+        \\[environment]
+        \\backend = "remote"
+        },
+    }));
 }
 
 test "project layer cannot add an extension store root" {

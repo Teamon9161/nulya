@@ -214,7 +214,7 @@ pub const session_usage =
     \\                                                    freeze composition + model, print a new session id; --with composes a built
     \\                                                    version in, --pin puts one of its tools on the model's tool face, --parent
     \\                                                    forks that session, --prompt freezes a file as this session's system prompt,
-    \\                                                    --env freezes where shell runs: wsl | wsl:<distro> | ssh:<dest> move only the command;
+    \\                                                    --env freezes where shell runs: wsl | wsl:<distro> move only the command;
     \\                                                    remote:wsl | remote:ssh:<dest> | remote:exec:<argv…> move the workspace (--workspace says where),
     \\                                                    --bare reads no standing layer: neither config list, nor apply: auto packages
     \\  nulya session append <id> [<text> | --file <p>] [--image <p>]…

@@ -4,7 +4,7 @@
  * the last `ext push` outcome per package.
  */
 import { expect, test } from "bun:test"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
@@ -56,6 +56,25 @@ test("clearing the spec (local, or empty) clears the workspace too", () => {
     expect(execEnv(state.path)).toBe("")
     expect(execWorkspace(state.path)).toBe("")
     expect(loadTuiState(state.path).exec_workspace).toBeUndefined()
+  } finally {
+    state.cleanup()
+  }
+})
+
+test("a remembered bare ssh: exec target (retired 2026-08-30) is dropped back to local, not rewritten", () => {
+  const state = statePath()
+  try {
+    // Written directly, not through `rememberExecEnv`: this is state left
+    // behind by an OLDER build, from before `ssh:<dest>` was refused as an
+    // exec target (goals/remote-env.md §7.1) — the load path is what has to
+    // cope with it, not the write path.
+    writeFileSync(state.path, JSON.stringify({ exec_env: "ssh:box" }))
+    expect(loadTuiState(state.path).exec_env).toBeUndefined()
+    expect(execEnv(state.path)).toBe("")
+    // `remote:ssh:` is a DIFFERENT spec (moves the workspace, not just the
+    // shell) — dropping must never silently upgrade one into the other.
+    writeFileSync(state.path, JSON.stringify({ exec_env: "remote:ssh:box" }))
+    expect(execEnv(state.path)).toBe("remote:ssh:box")
   } finally {
     state.cleanup()
   }

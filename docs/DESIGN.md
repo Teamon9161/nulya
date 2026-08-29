@@ -153,7 +153,7 @@ UI / trajectory / metrics 是 ledger 的投影，不持久化 mutable 状态。*
 - **一个文件 = 一个 generation = 一个 cache scope。** 文件只 append，所以 PromptIR 的 turn 前缀不变量（§1）成了文件系统性质。没有会 bump generation 的事件（§11）。
 - **header 的 JSON 形状就是 `ledger.Header` 结构体**（`std.json` 类型化编解码，`OwnedHeader = std.json.Parsed(Header)`）；读端忽略未知字段，所以新写者多出的字段不破坏旧读者；**但 `v` 不同就拒绝**（`ledger.format_version` = 1，别的值一律 `UnsupportedLedgerVersion`）——多出的字段不改变已有字段的含义，换了版本号则正是在宣告"改了"，把未来格式当 v1 读只会读出一个像是对的答案。`session step` / `session new --parent` 把它翻成"这个文件由更新的 nulya 写的，本二进制读 ledger v1"并退出 1，`session list` 跳过该文件（它本来就跳过读不了的）。事件行保持平铺的 `kind` 形状（driver 读起来方便），解码经 `WireEvent`。
 - **composition + 模型身份冻结进 header。** header 的 `composition.active` 记录本场**每个成员 extension** 的具体版本——activate 来的**和** `session new --with` 带进来的（§14），键名 `active` 是 v1 wire 遗留（那时成员只能来自 activate），下次升 header schema 版本时一起改名；每条 ref 还有一个可空列 `exec_version`（缺省 `""`，老 header 读回空、header `v` 仍是 1——`usage?` / `images` / `environment` 同一条纪律），只在**这一场的工具跑在另一台机器上**且该包是 `compiled` 时非空：那时**成员身份**是 `(id, v_host)`（manifest / prompt / skills / `ext run` 说的是它），而**服务调用的**是为那台机器的 target 建的兄弟版本。两列而不是一列的理由见 §8.2；`native_tools` 是被选为 native 的 tool 稳定 id（两根轴分开：冻结版本 ≠ 进模型工具面）。`prompts` 是 `session new --prompt <file>` 冻进来的 **per-session system prompt 的字节本身**（`{source, text}`，缺省空表；这个字段之前写的老 header 读回空，所以 header `v` 仍是 1）——**冻字节而不是冻引用**：一段只对这一场有意义的文本，家在 session 文件里（与 `model_identity` 同一条理由），冻路径会漂、经 store 则 resume 与 `ext prune` 耦合。`source` 是**内核从不解释**的标签，原样进 `PromptIR` 的 block source，谁写的谁定义它的含义（`extensions/agent` 的 `agent-<name>` 就是这样一条包内的写/读约定）。还有创建时**解析后的模型身份** `model_identity`（`provider` / 具体 `model` / `base_url` / `api_key_env`——`model` 字段本身只是 profile 别名，供显示与 effort 查询）。任何进程 `openDurable` 重开时都用 header 重建 composition（`composition.initFrozen`：读那些冻结版本、把 `native_tools` 当 pin），**绝不重扫 `current`、绝不重排 usage journal**——每个 `session step` 进程都看到**同一** composition，中途 `activate` 也移不动它（§5.1、§7.5、physics #2）。replay 时模型看到的一切 = header + events 的纯函数。header 还记 `nulya{version, kernel_hash}`（build 的版本串 + kernel system prompt 与 builtin 定义的 hash，`composition.kernelHash`）——**纯 provenance**：这两样是**二进制的**编译期常量却进了本场冻结的 model-visible 状态（§5.1、§7.5），升级 nulya 就会在既有 session 底下换掉它们，而 header 原本无从指认；记下来只是让它可见，resume 时对不上就在 stderr 警告一行照跑（不拒绝、不改任何东西），空 stamp = 这个字段之前写的老 header = unknown，永不警告。
-- **`environment` 冻的是"这一场的 `shell` 命令跑在哪"**（§8.1 的 exec target spec：`""` = 本机、`wsl`、`wsl:<distro>`、`ssh:<destination>`；`session new --env` 决定一次，这个字段之前写的老 header 读回 `""`，header `v` 仍是 1）。它**不投影给模型**，冻它的理由与 `model_identity` 一样而与缓存无关：一份转录只在产出它的那台机器上才有意义。`session step` 因此没有 `--env`，只读 header；目标不可达就与 `MissingCredential` 一样响亮失败，绝不改在本机跑。
+- **`environment` 冻的是"这一场的 `shell` 命令跑在哪"**（§8.1 的 exec target spec：`""` = 本机、`wsl`、`wsl:<distro>`，或 §8.2 的 `remote:…` 一族；`session new --env` 决定一次，这个字段之前写的老 header 读回 `""`，header `v` 仍是 1）。它**不投影给模型**，冻它的理由与 `model_identity` 一样而与缓存无关：一份转录只在产出它的那台机器上才有意义。`session step` 因此没有 `--env`，只读 header；目标不可达就与 `MissingCredential` 一样响亮失败，绝不改在本机跑。
 - **模型身份创建时冻结、resume 不可变（physics #2/#5）。** 模型解析**只有一处决定**：`launch.resolveDescriptor(prov, env, profile)` 在**创建**时把 profile 解析成 `model_identity`，运行用的 handle 也**只从这个 descriptor** 构建（`launch.buildFromDescriptor`）——所以"实际跑的" == "header 冻结的"，不存在 fork。`resolveDescriptor` 是 **credential-aware** 的：openai profile 若 `api_key_env` 在环境里解析不出 credential，创建时就冻结成 scripted（因为那正是会跑的东西）；此后 config 改动**永不**改变已有 session 的模型。resume 时 `session step` 用 header 的 `model_identity` 重建**恰好那个**模型，只从 `api_key_env` 重解 credential——**不存密钥**，也**没有静默 fallback**：openai session 的密钥不在了就 `MissingCredential` 显式拒跑。**durable credential 只以 `api_key_env` 引用**；inline `api_key` 无法在 resume 时从环境恢复（否则又让 session 依赖 mutable config），因此不参与 durable openai 身份。`provider==""` 的旧 header 当 scripted 处理。
 - **resume。** `openDurable` 读回 header + 每条完整事件行；被截断的**最后一行**（写到一半崩溃）丢弃并把文件截回最后一条完整行，坏的**中间**行或乱序 `seq` 则是硬错误（`CorruptLedger`）。崩在 assistant-with-calls 之后（合法但未闭合的 batch）由 `completeInterruptedToolBatch` 在下一步补齐（§4）。
 - **一场 session 的旁车清单**（都由 id 派生，都不是 session 文件本身）：`<id>.lock`（单写者租约）· `<id>.inbox/`（跨进程事件投递）· `<id>.cancel`（取消标记）· `.nulya/scratch/<id>/tool-output/`（`emit` 的落盘，§4）· `.nulya/scratch/<id>/tasks/t<N>/`（后台任务，§6.1：`status.json` / `output.log` / `.lock` / `kill` / `notify`）。后两者同在 `scratch/<id>/` 下是有意的——一场 session 的全部副产品是一棵子树，`rm -rf .nulya/scratch/<id>` 一次清干净。
@@ -777,16 +777,18 @@ Environment { runShell(cmd, dialect) / runExtension(id, version, tool, request_j
 
 **这里曾经还有一个 `WorkspaceFs`**（`readFileAlloc` / `atomicWriteFile` 的 vtable，只为 builtin `edit` 存在）。`edit` 搬进 `extensions/std`（§6、§7.8）之后它一个读者都没有了——extension 子进程本来就自己开文件（authority 上与 shell 同级，§9），所以留着它就是"一个字段只写不读"，删了：`ToolContext` 现在是 `{environment, cwd}`，几处测试里的 `DummyFs` 桩一并消失。真要 sandbox / remote backend 时，能拦住文件访问的是那一层本身，不是一个 in-core tool 早已不用的 vtable。
 
-只有 `local` backend。`sandbox` / `remote` 在 config 里能解析，但 `session new` / `session step` 建 environment 时（`launch.localEnvironment`，唯一一处）直接报 `UnsupportedEnvironmentBackend`——不会悄悄按 local 跑一个要求隔离的 config（PLAN §3.8）。ACP 不是 Environment（那是 editor→agent 的通信协议，方向相反，归前端层）。
+只有 `local` backend。`sandbox` 在 config 里能解析，但 `session new` / `session step` 建 environment 时（`launch.localEnvironment`，唯一一处）直接报 `UnsupportedEnvironmentBackend`——不会悄悄按 local 跑一个要求隔离的 config（PLAN §3.8）。**`remote` 这个词 2026-08-30 已从 `EnvironmentBackend` 删除**（goals/remote-env.md §7.1）：它从未实现，且与 §8.2 的 `--env remote:…`（哪台机器跑，不是关得多紧）撞了名——一个没有实现、名字还撞车的词，删比留着诚实。老配置文件写着 `backend = "remote"` 现在解析直接失败（`error.InvalidValueType`，与任何认不出的 TOML 值同一条路），不会被静默读成 `local`。ACP 不是 Environment（那是 editor→agent 的通信协议，方向相反，归前端层）。
 
 ### 8.1 Exec target：`shell` 的命令跑在哪（`session new --env`）
 
-**第三根轴**（这一节是它的一半：**只搬命令**；搬整个工作区的那一半是 §8.2 的 `remote:` 一族），与已有的两根正交：`Dialect` 说命令用哪种语言写、`config.environment.backend` 说它被关得多紧（仍只有 `local`，那是 sandbox 那根轴），这一根说**哪台机器的 shell 读它**。`wsl` 与 `ssh` 既不比 host 窄也不比它宽，它们在**别处**——所以不是 `EnvironmentBackend` 的第四个词，backend 的"project 层只能更严"那条排序对它无意义。
+**第三根轴**（这一节是它的一半：**只搬命令**；搬整个工作区的那一半是 §8.2 的 `remote:` 一族），与已有的两根正交：`Dialect` 说命令用哪种语言写、`config.environment.backend` 说它被关得多紧（仍只有 `local`，那是 sandbox 那根轴），这一根说**哪台机器的 shell 读它**。`wsl` 既不比 host 窄也不比它宽，它在**别处**——所以不是 `EnvironmentBackend` 的第四个词，backend 的"project 层只能更严"那条排序对它无意义。
 
 ```
-ExecTarget = local | wsl{distro?} | ssh{destination}
-spec 语法    local | wsl | wsl:<distro> | ssh:<destination>
+ExecTarget = local | wsl{distro?}
+spec 语法    local | wsl | wsl:<distro>
 ```
+
+**`ssh:<destination>` 这个拼法 2026-08-30 已删除**（goals/remote-env.md §7.1）：它只搬 `shell` 而工作区、extension、每个 spill 文件全留 host——一旦有什么超出 `shell` 本身，这条边界就是裂脑的，与 §8.2 的 `remote:` 一族存在的理由完全相同。想搬 `shell` 到一台 ssh 机器上、工作区跟着一起搬，写 `--env remote:ssh:<destination>`（外加 `--workspace`，两个词语义不同：一个只搬命令，一个搬整个工作区）；只想搬命令、不搬工作区，`wsl` 仍然是那个答案（WSL 经 `/mnt/` 本来就与 host 共享文件系统，裂脑的代价不成立）。老 session header 里冻着这个拼法的场 resume 时**响亮失败**，refusal 里带上指向 `remote:ssh:` 与 `--workspace` 的那句话，绝不静默改跑别处（`launch.legacySshHint`）。
 
 **只有 `shell` 的命令搬走。** extension 子进程、task supervisor、extension store、三条 journal、`emit` 的 spill 文件——全部留在 host。理由不是省事：这些是 harness 自己的机器，它们是为这个 host 编译的，一条远程 shell 不会让 harness 变成远程的。收益是这条边界**可实现且说得清**；代价一条条写在 `shellArgv` 的注释里，也写在下面。
 
@@ -797,14 +799,12 @@ spec 语法    local | wsl | wsl:<distro> | ssh:<destination>
 **argv 与 cwd**（`LocalEnvironment.shellArgv`，仍是 argv 决定的唯一一处；`local` 分支逐字节不变）：
 
 - `wsl.exe [-d <distro>] -e bash -lc "cd '<translated>' || exit 1\n<command>"`。`-e` 绕开发行版的默认 shell，所以解释器一定是 bash。cwd 由**纯函数** `wslPath` 翻译（`C:\code\x` → `/mnt/c/code/x`）；翻不了的（UNC 共享）**原样传过去**，于是 `cd` 在发行版里用它自己的话报错——比悄悄丢掉 `cd`、在别的目录里跑完再报成功要诚实。`|| exit 1` 与换行而不是 `;`：`cd` 失败不许接着跑，首行是注释的命令也不许把 `;` 后面吞掉。
-- `ssh -o BatchMode=yes <destination> "bash -lc '<command>'"`。destination 是**独立的一个 argv 词**（永不拼进命令串）。`BatchMode` 是因为这个子进程的 stdin 是关掉的：没有它，一次密码或 host-key 提示会一直坐到 step 超时，有它则第一秒就带着缺什么的消息失败（首次连接因此需要 `known_hosts` 里已有该主机——绝不自动接受主机密钥）。远端包一层 `bash -lc` 是为了让"dialect = bash"这句话在对方的登录 shell 是 fish/csh 时也成立。
 - 目标非 local 时 dialect **恒为 bash**，config 的 `environment.shell` 与 host 探测都不参与——命令由哪个 shell 读是目标的答案。
 
-**三条如实记录的局限**（不是欠账，是这条边界的形状）：
+**两条如实记录的局限**（不是欠账，是这条边界的形状）：
 
-1. **kill 杀得到本地客户端，不保证杀得到对面**（`remote:` 一族没有这条局限——对面有一个真的 `Tree`，§8.2）**。** `Tree` 照旧包着 `wsl.exe` / `ssh`，所以超时与取消**一定**结束这一步；对面那个进程会不会跟着死是对面的事——ssh 通道关闭通常让远端命令收到 SIGHUP、杀掉 WSL relay 通常带走它的 Linux 进程，但自己 detach 了的命令两种都活得下来。不声称做不到的保证。
-2. **子进程环境是目标那侧的。** WSL 只转发 `WSLENV` 点名的、ssh 只转发 `SendEnv` 点名的，所以 `NULYA_EXE` / `NULYA_SESSION` **到不了对面**（模型在 WSL 里想调 `nulya` 得自己找路径）。physics #6 不受影响——净化过的 map 正是 `wsl.exe` / `ssh` 自己拿到的那份，没有 secret 可供转发；顺带一条：`SSH_AUTH_SOCK` 在 denylist 上，所以 **ssh 目标只能用密钥文件认证，用不了本机的 ssh-agent**。
-3. **cwd 只对 WSL 有意义。** WSL 下工作区是同一个目录换个名字看；ssh 那侧是另一台机器的文件系统，命令从远端账号的 home 开始，本地工作区（包括每个 `emit` spill 文件）它看不见——对 ops 型任务仍然有用，对"读一下我刚才写的文件"不适用。
+1. **kill 杀得到本地客户端，不保证杀得到对面**（`remote:` 一族没有这条局限——对面有一个真的 `Tree`，§8.2）**。** `Tree` 照旧包着 `wsl.exe`，所以超时与取消**一定**结束这一步；杀掉 WSL relay 通常带走它的 Linux 进程，但自己 detach 了的命令能活下来。不声称做不到的保证。
+2. **子进程环境是目标那侧的。** WSL 只转发 `WSLENV` 点名的，所以 `NULYA_EXE` / `NULYA_SESSION` **到不了对面**（模型在 WSL 里想调 `nulya` 得自己找路径）。physics #6 不受影响——净化过的 map 正是 `wsl.exe` 自己拿到的那份，没有 secret 可供转发。WSL 下工作区是同一个目录换个名字看（经 `/mnt/`），所以这条局限只关于 env，不关于 cwd。
 
 ### 8.2 Remote environment：工作区住在别的机器上（`--env remote:…`，`environment/remote/`）
 
@@ -850,7 +850,7 @@ argv  wsl.exe [-d D] -e nulya remote serve  /  ssh -o BatchMode=yes <dest> nulya
 - extension 与 shell 共享同一个 session authority（≈ 当前用户全权限）。明说，不给虚假安全感。
 - **env 净化**：子进程 env 过 `isSecretKey` denylist（大小写不敏感子串：`SECRET / TOKEN / PASSWORD / API_KEY / ACCESS_KEY / PRIVATE_KEY / CREDENTIAL / SSH_AUTH_SOCK …`）。非 secret 变量（PATH / HOME）照传，命令才能工作。host env 的**来源**是 `environment.registerHostEnviron`：std 0.16 删掉了全局 environ（OS block 只交给 `main` 的 `std.process.Init` 与 test runner 的 `std.testing.environ`），`main` 启动时注册一次，所有读 host env 的层（config 链、`NULYA_*`、净化）都走 `environment.hostEnvironMap`；测试构建缺省落回 test runner 的 environ。边界是"无明显 secret 泄漏"，**不是**完全不继承、也不是 fs 隔离。kernel 往这份净化 env 里**加**两个非 secret 变量：`NULYA_EXE`（本进程可执行文件的绝对路径，`LocalEnvironment.init`）与 `NULYA_SESSION`（活着的 session 文件路径，只有 `session step` 放）——都是 provenance 型信息，不拓宽任何权限（§7.6）。
 - 不变量：`extension_permissions ⊆ session_authority`；注册成 extension 不获得 shell 没有的权限。
-- **exec target 不是权限边界**（§8.1）。把 `shell` 指向一个 WSL 发行版或一台 ssh 主机改变的是命令**在哪跑**，不是它**能碰什么**——WSL 经 `/mnt/` 看得见整个工作区，ssh 那侧则是对方账号的全部权限。净化这一侧仍然成立（`wsl.exe` / `ssh` 拿到的就是那份剥过 secret 的 map，所以 `WSLENV` / `SendEnv` 没有 secret 可转发），代价是 `NULYA_EXE` / `NULYA_SESSION` 也到不了对面；顺带一条：`SSH_AUTH_SOCK` 在 denylist 上，**ssh 目标只能用密钥文件认证**。
+- **exec target 不是权限边界**（§8.1）。把 `shell` 指向一个 WSL 发行版改变的是命令**在哪跑**，不是它**能碰什么**——WSL 经 `/mnt/` 看得见整个工作区。净化这一侧仍然成立（`wsl.exe` 拿到的就是那份剥过 secret 的 map，所以 `WSLENV` 没有 secret 可转发），代价是 `NULYA_EXE` / `NULYA_SESSION` 也到不了对面。（搬整个工作区、且可能经 ssh 到达的那一族是 §8.2 的 `remote:…`——那一侧同样净化 env，且 `SSH_AUTH_SOCK` 在 denylist 上，所以 `remote:ssh:` 目标只能用密钥文件认证，用不了本机的 ssh-agent。）
 - **driver 手上有一票否决**（§4 的 gate，`session step --gate`，§14）：每个 tool call 执行前问一次，只跑被允许的，拒绝作为该 call 的 `tool_results` 回给模型（没跑、什么都没变）。这**不是** sandbox：它拦的是"这一次要不要发生"，不是"发生时能碰什么"——一个被允许的 call 照旧与 shell 同权。manifest 的 `readonly`（§7.2.1）同理是**给答题人的提示**，不是边界：kernel 记下这个主张、不强制，driver 有权不信（TUI 的 `[approvals] manifest_readonly = false`）。
 - **workspace store 是 checkout 内容，却是第一优先 root——所以它要被信任一次（trust gate）。** §9.5 把 project 层的 `extensions.paths` 挡在门外，理由是 checkout 不该决定哪些目录供给 `current`；但 `.nulya/extensions` 本身就在 checkout 里，且首个持有者胜（§7.2）。clone 一个带 store 的 repo，从前 `session new` 会机械地把其中 active 版本合进 composition——system_prompts 进 system blocks、tools 经 CLI 可调、配合 project 层允许的 pin 还能上 native 面——中间没有任何人的确认。现在有一道门：
 
@@ -1023,7 +1023,7 @@ nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--with <id>[
                   [--prompt <file>]… [--env <spec>] [--workspace <dir>]
                                                          ← `--prompt` 把这个文件的字节冻成本场的一个 system block（§5.6）；不安装任何东西
                                                            `--env` = 本场跑在哪（§8.1）——两族词汇：
-                                                             `local` | `wsl` | `wsl:<distro>` | `ssh:<dest>`  只搬 `shell` 的命令
+                                                             `local` | `wsl` | `wsl:<distro>`  只搬 `shell` 的命令（`ssh:<dest>` 2026-08-30 已删除，指路 `remote:ssh:`）
                                                              `remote:wsl` | `remote:wsl:<distro>` | `remote:ssh:<dest>` | `remote:exec:<argv…>`  搬整个工作区
                                                            `--workspace` = 远端那台机器上的绝对目录，**只对 `remote:` 族接受**（写在别处是一个没人读的字段，所以拒）
                                                            两者都冻进 header；解析不出或本 host 够不着 → stderr + **exit 1，什么都不创建**

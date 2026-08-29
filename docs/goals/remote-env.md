@@ -11,6 +11,7 @@
 今天的 `--env ssh:<dest>` 是**裂脑**的：`shell` 的命令在远端跑，而 `ext:std/read` 是 host 上的一个进程、读的是**本地**盘。
 对 ops 型任务（"去那台机器上重启一下服务"）这条边界够用且诚实；对"这个项目住在那台机器上"不够用——
 模型 `grep` 出来的是本地的文件，`shell` 里 `cat` 的是远端的文件，两个答案说的不是同一个仓库。
+（**该词已删**：2026-08-30 起 `ssh:<dest>` 不再是一个 exec target 拼法，`--env` 拒绝它并指路 `remote:ssh:`——见 §7.1。）
 过渡期的止血是 TUI 的 per-env profile（tui.md T88：ssh 场干脆 `bare=true`、一个 std 都不带），
 这是对的止血，也正好说明了病：**能力被关掉，不是因为它没用，是因为它在错的机器上。**
 
@@ -494,6 +495,19 @@ e2e 里一条通道连跑三次并断言每次都答对（`one channel serves ma
    > **已裁决（2026-08-29，人确认）**：**删 `ssh:`，退休 backend 的 `"remote"` 词**——pre-release 不留兼容（`runtime.wire` 先例）。
    > `wsl:` 保留（独立含义：同一个工作区经 `/mnt/` 看，extension 留 host）。旧 header 里冻着 `ssh:` spec 的场 resume 时
    > 响亮失败并指路 `remote:ssh:`，不静默翻译。
+   >
+   > **已执行（2026-08-30）**：`environment.ExecTarget` 的 `ssh` 变体、`exec_target_syntax`、`parseExecTarget`／
+   > `execTargetSupportedOnHost`／`shellArgv` 的 ssh 分支一并删除（`exec_target_syntax` 现在只剩 `local | wsl | wsl:<distro>`）；
+   > `config.EnvironmentBackend` 删 `remote`，只剩 `local | sandbox`——老配置文件写 `backend = "remote"` 现在解析直接
+   > 失败（`error.InvalidValueType`，与任何认不出的 TOML 值同一条路），**不会**被静默读成 `local`（单测钉住）。
+   > `launch.legacySshHint` / `legacy_ssh_hint` 是新增的那一句指路，接在 `execTargetRefusal` 里（覆盖 `session new`
+   > 与 `taskSupervise` 的预检查），也接在 `cli/session.zig`（`session step`）与 `cli/task.zig`（`task run`）两处
+   > resume 路径的 `InvalidExecTarget` / `ExecTargetUnsupportedOnHost` catch 分支里——老 header 冻着 `ssh:` spec 的场
+   > resume 时同样响亮失败并带这句指路。TUI 跟随：`state/targets.ts` 的 picker 不再给出裸 `ssh:<host>` 行（`remote:ssh:<host>`
+   > 保留）、`state/envprofile.ts` 的 `ExecTargetKind` 删 `"ssh"`（`[env.ssh]` 从此是未知键）、`state/settings.ts` 的
+   > `env.<kind>` 三处硬编码数组跟着改，以及 `state/tui_state.ts` 的 `loadTuiState` 把盘上记着的 `ssh:` 前缀 `exec_env`
+   > 丢弃回 local（不改写成 `remote:ssh:`——两个词语义不同）。`zig build test` / 五组 e2e / `bun test`（726）/
+   > `bunx tsc --noEmit` 全绿。
 2. **两个 target 版本的冻结身份**（§3.1）：冻两列（本文倾向）vs. 收敛到 package digest（PLAN 的候选）。
    后者有 schema 后果，值得在动手前定死。
    > **已裁决（2026-08-29，人确认）**：**冻两列**——成员是 `(id, v_host)`，远端场额外冻 `exec_version`（可空列，

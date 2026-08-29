@@ -193,7 +193,17 @@ export function loadTuiState(path = tuiStatePath()): TuiState {
       state.session_pins = sessionPinsList.filter((s): s is string => typeof s === "string")
     }
     const execEnv = record["exec_env"]
-    if (typeof execEnv === "string" && execEnv.length > 0) state.exec_env = execEnv
+    // The bare `ssh:<destination>` exec target was retired 2026-08-30
+    // (goals/remote-env.md §7.1) — `session new` refuses it outright now, so a
+    // value remembered from before that would make every session this front
+    // end starts fail at creation. This file is a convenience, not the
+    // header, so a spec it can no longer use is simply DROPPED back to
+    // "nothing remembered" (= local) rather than rewritten into the
+    // similarly-spelled `remote:ssh:` — that word moves the whole workspace,
+    // not just the shell, which is a choice only a person should make.
+    if (typeof execEnv === "string" && execEnv.length > 0 && !execEnv.startsWith("ssh:")) {
+      state.exec_env = execEnv
+    }
     const execWorkspaceValue = record["exec_workspace"]
     if (typeof execWorkspaceValue === "string" && execWorkspaceValue.length > 0) {
       state.exec_workspace = execWorkspaceValue

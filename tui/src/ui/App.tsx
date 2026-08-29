@@ -758,7 +758,9 @@ export function App(props: AppProps) {
       // Three ways a package is in every session started here (T52): it asked
       // and the kernel recorded it (`standing` — the kernel's own answer, never
       // an `apply` re-read here, T56), config named it, or this front end always
-      // brings it. Under `--bare` (T88's `ssh` default) neither standing table
+      // brings it. Under `--bare` (T88/T101's `remote` default — `ssh` was a
+      // second kind with the same default until the bare `ssh:<dest>` exec
+      // target was retired, goals/remote-env.md §7.1) neither standing table
       // applies — config's `with` and every `apply:"auto"` package's own bit —
       // so only THIS list's own `--with` refs count.
       const named = profile.bare ? new Set(profile.with) : new Set([...config.extensions.with, ...profile.with])

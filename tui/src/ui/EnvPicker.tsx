@@ -140,7 +140,7 @@ export function EnvPicker(props: {
           exists: an ssh destination is whatever `ssh` itself would accept. */}
       <For
         each={wrapWords(
-          "listed from wsl -l and your ssh config · anything else: /env ssh:<destination>",
+          "listed from wsl -l and your ssh config · anything else: /env remote:ssh:<destination>",
           room() - dialog_gutter,
         )}
       >

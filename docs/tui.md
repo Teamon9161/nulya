@@ -586,13 +586,15 @@ session_prompts = ["ground"] # 每场开场前问一次「这一场的开场文�
 plugins       = true        # 代码层总开关（T40）：加载 trusted + 已激活/本场戴着的包的 `contributes.ui.tui.entry`
                             # false = 只剩声明层（commands / policy / 每个 tool 的 ui 照常，逐字节等于 T39 结束时）
 
-# T88——按 `/env` 目标的种类覆盖上面这两个列表 + 一份额外的 pin 列表。不写这一节，
-# 或写出来但留空，就是下面这行注释里那份缺省；`bare` 缺省时 local/wsl = false、ssh = true。
+# T88/T104——按 `/env` 目标的种类覆盖上面这两个列表 + 一份额外的 pin 列表。不写这一节，
+# 或写出来但留空，就是下面这行注释里那份缺省；`bare` 缺省时 local/wsl = false、remote = true。
+# （曾经还有第三档 [env.ssh]，对应已退休的裸 `ssh:<dest>` exec target——2026-08-30 起
+#  那个词被 `--env` 拒绝，[env.ssh] 因此是未识别键，写了也不生效；`remote:ssh:` 走 [env.remote]。）
 [env.local]                 # 不写 = local 的缺省：bare=false，用 [extensions] 那两个列表
 [env.wsl]                   # 不写 = 与 local 相同——WSL 经 /mnt/ 共享主机文件系统
-[env.ssh]                   # 不写 = { bare = true, with = [], pins = [], session_prompts = [] }
+[env.remote]                # 不写 = { bare = true, with = [], pins = [], session_prompts = [] }
 # bare = true                 # 缺省已是 true；两张常驻表（config with / pinned_native_tools）都不读
-# with  = []                  # 缺省已是 []；想在 ssh 场里也带某个包，写它的 id
+# with  = []                  # 缺省已是 []；想在远端场里也带某个包，写它的 id
 # pins  = []                  # 缺省已是 []；额外的 `--pin`，与 `with` 成员自己声明的 pin 一起生效
 # session_prompts = []        # 缺省已是 []；ground 的本地事实对远端没有意义
 
@@ -2941,3 +2943,21 @@ Alt 走的是 `option`。翻编译产物确认了两条解析路径（原始 ESC
 **测试**：`test/paste.test.ts` 新增 5 条纯函数测试（marker 自己的编号空间不与既有两种占位符冲突、结算换掉 marker 而不管前后被插入了什么文字、两个并发 pending 各自独立结算互不干扰、marker 被手动删除后结算是空操作、空字符串结算等于纯粹移除 marker）· `test/composer.test.tsx` 新增一条端到端（`readImage` 故意延迟 150ms，粘贴之后立刻移动光标到最前打字、再移动到最后打字，最后 `[Image #1]` 落在**粘贴发生的那个位置**而不是延迟结束时光标所在的最末尾——这条测试如果把 `settleToken` 换回旧的"插在 cursor"就会红）。`bun run typecheck` 干净。
 
 `bun test` **726 pass / 0 fail**（65 文件），`bun run typecheck` 干净，`bun run compile` 出单文件。
+
+
+### T104 · exec target 的 `ssh:<dest>` 拼法退休，`config.environment.backend` 的 `remote` 词一起退休（2026-08-30）
+
+**内核有改动**（DESIGN §8/§8.1/§9/§14，裁决记在 goals/remote-env.md §7.1，2026-08-29 人确认、本轮执行）；TUI 侧只是跟随，**零新概念**。
+
+**为什么**：`--env ssh:<dest>` 只搬 `shell` 的命令，工作区、extension、每个 spill 文件全留 host——一旦有什么超出 `shell` 本身这条边界就是裂脑的，与 §8.2 的 `remote:` 一族存在的理由完全相同；而 `remote:ssh:<dest>` 落地后严格覆盖它（也搬 shell、还搬整个工作区、kill 更真）。留着两个词就是留着一个更弱又更容易被误选的拼法，`wsl:` 不同——它有独立含义（同一个工作区经 `/mnt/` 看，extension 留 host）——保留不动。`config.environment.backend` 的 `remote` 词同理：它是一个从未实现、且与 `--env remote:…` 撞了名的词（一个说"关得多紧"，一个说"哪台机器跑"，是两根轴），删比留着诚实。
+
+**内核侧**（`src/environment.zig` / `src/launch.zig` / `src/config.zig` / `src/cli/{session,task}.zig`）：`ExecTarget` 删 `ssh` 变体，`exec_target_syntax` 收窄成 `local | wsl | wsl:<distro>`，`parseExecTarget`/`execTargetSupportedOnHost`/`shellArgv` 的 ssh 分支一并删除。`config.EnvironmentBackend` 删 `remote`，只剩 `local | sandbox`——老配置文件写 `backend = "remote"` 现在解析直接失败（zig-toml 对认不出的枚举字符串本来就是 `error.InvalidValueType`），**不会**被静默读成 `local`（新增单测钉住这一点，不是靠猜）。**拒绝要指路**：新的 `launch.legacySshHint(spec)` / `launch.legacy_ssh_hint` 只在 spec 以 `ssh:` 开头时给出一句指路 `remote:ssh:<destination>`（外加 `--workspace`，因为语义不同），接在 `execTargetRefusal` 里——`session new` 与 `taskSupervise` 的预检查因此自动覆盖；`session step`（`cli/session.zig`）与 `task run`（`cli/task.zig`）两处读**冻结 header**的 resume 路径原本直接把 `InvalidExecTarget` 翻成一句通用话，现在也各接一次 `legacySshHint`——老 session 冻着 `ssh:` spec 照样响亮失败，**且带同一句指路**，不静默改跑别处、也不悄悄读成 `remote:ssh:`（两个词移动的东西不同，猜一个等于替人做选择）。
+
+**TUI 侧四个文件、零新状态形状**：
+
+- **`state/targets.ts`**：picker 不再给出裸 `ssh:<host>` 行（`wsl:<distro>` 保留、`remote:wsl:<distro>`/`remote:ssh:<host>` 保留——两个来源不变，`~/.ssh/config` 现在只喂 `remote:ssh:` 这一族）。
+- **`state/envprofile.ts`**：`ExecTargetKind` 从四个收成三个（`local | wsl | remote`），`execTargetKind` 认不出 `ssh:<dest>` 时和任何其它拼错的 spec 一样落回 `"local"`（保守读法，反正 `session new` 自己会拒）；`defaultProfile` 的 bare 分支从 `kind === "ssh" || kind === "remote"` 收成 `kind === "remote"`。
+- **`state/settings.ts`**：三处硬编码的 `["local", "wsl", "ssh", "remote"]` 数组与 `env.<local|wsl|ssh|remote>.*` 的字段名列表跟着收窄——`[env.ssh]` 从此是 `tui.toml` 里的一个**未识别键**，和任何其它拼错的表名同一条命运（悄悄不生效，不报错）。
+- **`state/tui_state.ts`**：`loadTuiState` 读到盘上记着的 `exec_env` 以 `ssh:` 开头时**丢弃**（读作"没记住" = local），不改写成 `remote:ssh:`——那是一个便利状态文件，不是 header，替人换语义比丢弃更糟。新测试直接写一份带 `ssh:box` 的 `tui-state.json` 验证被丢弃，另写一份 `remote:ssh:box` 验证它原样保留（两个词形状相似，行为必须不同）。
+
+**测试**：`zig build test`（`config.zig`/`launch.zig`/`environment.zig` 新增或改写的单测）、五组 e2e 全绿（`tests/e2e/exec_env.zig` 改用 Windows-only 的 `wsl:<不存在的发行版名>` 钉住"冻结在不可达目标上的场绝不悄悄在本机跑"这条性质——`execTargetSupportedOnHost` 对 `wsl:<任意名字>` 在 Windows 上恒真，不需要真的装了那个发行版；`ssh:` 相关的两条断言改成钉"被拒绝且带指路"而不是"被冻结"）、`cd tui && bun test`（726 pass）与 `bunx tsc --noEmit` 干净。

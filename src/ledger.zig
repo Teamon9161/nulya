@@ -480,8 +480,9 @@ pub const Header = struct {
     /// separately in `model_identity`, which config changes can never alter.
     model: []const u8 = "",
     model_identity: ModelDescriptor = .{},
-    /// WHERE this session's `shell` commands run (`environment.ExecTarget`'s
-    /// spec: `""` = this host, `wsl`, `wsl:<distro>`, `ssh:<destination>`).
+    /// WHERE this session's `shell` commands run: `""` = this host, `wsl`,
+    /// `wsl:<distro>` (`environment.ExecTarget`'s spec), or a `remote:…` spec
+    /// (§8.2) that moves the whole workspace rather than just the command.
     ///
     /// Frozen for the same reason `model_identity` is, and not for cache
     /// reasons — it never reaches the model's prompt. A transcript only means

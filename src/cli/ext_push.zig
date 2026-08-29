@@ -8,7 +8,7 @@
 //! does the rest — the hash IS the check, so pushing twice is a no-op and there
 //! is nothing to negotiate about staleness.
 //!
-//! **Only `remote:` specs.** An exec target (`--env ssh:me@box`) runs commands
+//! **Only `remote:` specs.** An exec target (`--env wsl`) runs commands
 //! elsewhere but keeps the workspace and the store HERE, so pushing to one would
 //! be copying a version into the store it just came out of.
 //!
@@ -68,7 +68,7 @@ pub fn extPush(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         try printErrFmt(
             alloc,
             io,
-            "ext push --env {s}: only a remote workspace has a store of its own to push into ({s}); wsl / ssh exec targets move the command and keep this machine's store\n",
+            "ext push --env {s}: only a remote workspace has a store of its own to push into ({s}); a wsl exec target moves the command and keeps this machine's store\n",
             .{ spec, remote.spec_syntax },
         );
         return 1;

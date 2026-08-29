@@ -1,17 +1,23 @@
 /**
  * Per exec-target-KIND tool-face profile (`tui.toml` `[env.local]` / `[env.wsl]`
- * / `[env.ssh]`, tui.md §11 T88).
+ * / `[env.remote]`, tui.md §11 T88).
  *
  * `/env` (T86, DESIGN §8.1) moves where a session's `shell` commands run, but
  * the screen's own composition choices — which packages ride along as
  * `--with`, which extra tools get `--pin`ned, which packages render this
  * session's opening prompt — do not automatically follow. `ext:std/read` reads
- * THIS machine's filesystem; on an `ssh:` target that is a filesystem the
+ * THIS machine's filesystem; on a `remote:` target that is a filesystem the
  * commands never touch, so pinning it there manufactures "not found" rather
  * than a working tool. `ground`'s opening facts (this cwd, this branch, this
  * git status) are wrong for the same reason. `local` and `wsl` do not have
  * this problem — WSL shares the host filesystem through `/mnt/`, so a `std`
  * pin or `ground`'s facts are exactly as true there as on the host.
+ *
+ * (The exec-target `ssh:<dest>` spelling this file used to carry a third kind
+ * for was retired 2026-08-30, goals/remote-env.md §7.1 — it wrapped the shell
+ * elsewhere while leaving `std`/`ground` pointed at the host, exactly the
+ * mismatch this profile exists to route around, so removing the word removed
+ * the kind rather than leaving an unreachable branch behind.)
  *
  * Nothing here talks to disk or the kernel. `resolveEnvProfile` is a pure
  * merge of a per-kind zero-config default with whatever `tui.toml` overrode,
@@ -21,14 +27,19 @@
  */
 
 /**
- * The four kinds `/env`'s spec grammar can name (DESIGN §8.1, goals/
+ * The three kinds `/env`'s spec grammar can name (DESIGN §8.1, goals/
  * remote-env.md §3.9). `remote` covers the whole `remote:` family — `wsl` vs
  * `ssh` vs `exec` moves the CHANNEL, not what this profile should compose,
  * and the reasoning below (§3.9's own: no `std` pin, no `ground`, `--bare`)
- * applies identically to all three, unlike the old `wsl`/`ssh` split where
- * `wsl` keeps today's defaults and `ssh` does not.
+ * applies identically to all three.
+ *
+ * There used to be a fourth, `ssh`, for the bare `ssh:<dest>` exec-target
+ * spelling — retired 2026-08-30 (goals/remote-env.md §7.1). `[env.ssh]` is
+ * therefore an unrecognised key in `tui.toml` now (`settings.ts` no longer
+ * reads it), and a spec still typed that way reads as `local` below, same as
+ * any other spelling this classifier does not know.
  */
-export type ExecTargetKind = "local" | "wsl" | "ssh" | "remote"
+export type ExecTargetKind = "local" | "wsl" | "remote"
 
 /**
  * Classify an exec target spec into which KIND it is, for picking a profile —
@@ -36,20 +47,20 @@ export type ExecTargetKind = "local" | "wsl" | "ssh" | "remote"
  * any good (`nulya/cli.ts`'s `NewSessionOptions.execEnv`); a spec this
  * function does not recognise is treated as `local` here, which is the
  * conservative reading (the fuller composition, not the stripped one) and
- * costs nothing extra since the kernel will refuse the bad spelling anyway.
+ * costs nothing extra since the kernel will refuse the bad spelling anyway —
+ * `ssh:<dest>` included, now that `session new` refuses it too.
  *
- * `remote:` is checked before `wsl`/`ssh` on purpose: `remote:wsl:distro` and
- * `remote:ssh:host` both start with neither of those two prefixes, so order
- * would not actually matter here — but a `remote:` spec that DID happen to
- * read as one of the shorter prefixes first would be the wrong kind of wrong,
- * composing a workspace-moving session with the old shell-only profile.
+ * `remote:` is checked before `wsl` on purpose: `remote:wsl:distro` does not
+ * start with `wsl:`, so order would not actually matter here — but a
+ * `remote:` spec that DID happen to read as the shorter prefix first would be
+ * the wrong kind of wrong, composing a workspace-moving session with the
+ * shell-only profile.
  */
 export function execTargetKind(spec: string): ExecTargetKind {
   const trimmed = spec.trim()
   if (trimmed.length === 0 || trimmed === "local") return "local"
   if (trimmed.startsWith("remote:")) return "remote"
   if (trimmed === "wsl" || trimmed.startsWith("wsl:")) return "wsl"
-  if (trimmed.startsWith("ssh:")) return "ssh"
   return "local"
 }
 
@@ -70,7 +81,6 @@ export interface EnvProfileOverride {
 export interface EnvProfiles {
   local?: EnvProfileOverride
   wsl?: EnvProfileOverride
-  ssh?: EnvProfileOverride
   remote?: EnvProfileOverride
 }
 
@@ -90,21 +100,20 @@ export interface ResolvedEnvProfile {
  * Zero-config defaults, one per kind. `local` and `wsl` are the screen's
  * existing behaviour verbatim — the front end's `session_with` /
  * `session_prompts` lists, no extra pins, the standing tables left alone.
- * `ssh` and `remote` only have `shell`/the workspace itself: no members, no
- * renderers, and `--bare` so the config's own standing packages (which were
- * configured with a local filesystem in mind) do not creep in either. `remote`
- * gets the same treatment as `ssh` rather than `wsl`'s, and for the SAME
- * reason `ssh` does not get `wsl`'s: this is a different machine's filesystem,
- * `std`'s read/grep/glob would answer questions about the wrong one, and
- * `ground`'s facts (this cwd, this branch) would describe the host, not the
- * workspace the session is actually about (goals/remote-env.md §3.2).
+ * `remote` only has `shell`/the workspace itself: no members, no renderers,
+ * and `--bare` so the config's own standing packages (which were configured
+ * with a local filesystem in mind) do not creep in either — this is a
+ * different machine's filesystem, `std`'s read/grep/glob would answer
+ * questions about the wrong one, and `ground`'s facts (this cwd, this branch)
+ * would describe the host, not the workspace the session is actually about
+ * (goals/remote-env.md §3.2).
  */
 function defaultProfile(
   kind: ExecTargetKind,
   sessionWith: readonly string[],
   sessionPrompts: readonly string[],
 ): ResolvedEnvProfile {
-  if (kind === "ssh" || kind === "remote") return { bare: true, with: [], pins: [], session_prompts: [] }
+  if (kind === "remote") return { bare: true, with: [], pins: [], session_prompts: [] }
   return { bare: false, with: sessionWith, pins: [], session_prompts: sessionPrompts }
 }
 
