@@ -10,6 +10,7 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 import { default_rules, normalizeMode, type ApprovalRules, type PermissionMode } from "../approvals.ts"
 import type { EnvProfiles } from "./envprofile.ts"
+import { code_theme_names, type CodeThemeName } from "../render/syntax.ts"
 
 export type FoldDefault = "expanded" | "collapsed"
 /**
@@ -82,6 +83,12 @@ export interface Settings {
   }
   ui: {
     theme: "nulya-dark" | "nulya-light"
+    /**
+     * What fenced code is coloured with (`render/syntax.ts`). `auto` — the
+     * default — is the palette that goes with the interface theme; `theme`
+     * is the old behaviour, code drawn in the interface's own accents.
+     */
+    code_theme: CodeThemeName
     motion: boolean
   }
   extensions: {
@@ -196,7 +203,7 @@ export const default_settings: Settings = {
     history_window: 400,
     stream_interval_ms: 100,
   },
-  ui: { theme: "nulya-dark", motion: true },
+  ui: { theme: "nulya-dark", code_theme: "auto", motion: true },
   extensions: {
     sync_on_start: true,
     auto_activate: true,
@@ -263,6 +270,7 @@ function mergeLayer(into: Settings, layer: unknown, source: string) {
   const ui = record["ui"] as Record<string, unknown> | undefined
   if (ui) {
     into.ui.theme = pick(ui["theme"], ["nulya-dark", "nulya-light"], into.ui.theme)
+    into.ui.code_theme = pick(ui["code_theme"], code_theme_names, into.ui.code_theme)
     if (typeof ui["motion"] === "boolean") into.ui.motion = ui["motion"]
   }
   const extensions = record["extensions"] as Record<string, unknown> | undefined

@@ -18,7 +18,8 @@
  * mouse is passing through.
  */
 import { createContext, useContext, type Accessor } from "solid-js"
-import { RGBA, SyntaxStyle } from "@opentui/core"
+import { SyntaxStyle } from "@opentui/core"
+import { syntaxStyleFor } from "./syntax.ts"
 import { useTerminalDimensions } from "@opentui/solid"
 import { default_settings, type Settings } from "../state/settings.ts"
 
@@ -318,7 +319,12 @@ export interface Style {
   historyWindow: number
   motion: boolean
   spinner: string[]
-  /** Derived from the same tokens, so highlighted code cannot drift from the theme. */
+  /**
+   * What `<markdown>` paints code with (`render/syntax.ts`). A choice of its
+   * own rather than a derivation of the tokens above: prose is this front
+   * end's document and follows the interface, code is a quoted language and
+   * gets the palette people already read code in.
+   */
   syntax: SyntaxStyle
 }
 
@@ -370,23 +376,6 @@ function channels(hex: string): [number, number, number] | null {
 export const spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 export const ascii_spinner_frames = ["-", "\\", "|", "/"]
 
-function syntaxOf(theme: Theme): SyntaxStyle {
-  return SyntaxStyle.fromStyles({
-    default: { fg: RGBA.fromHex(theme.fg) },
-    comment: { fg: RGBA.fromHex(theme.dim) },
-    string: { fg: RGBA.fromHex(theme.accent.assistant) },
-    number: { fg: RGBA.fromHex(theme.accent.evolve) },
-    keyword: { fg: RGBA.fromHex(theme.accent.user), bold: true },
-    function: { fg: RGBA.fromHex(theme.accent.user) },
-    type: { fg: RGBA.fromHex(theme.accent.evolve) },
-    "markup.heading": { fg: RGBA.fromHex(theme.accent.assistant), bold: true },
-    "markup.heading.1": { fg: RGBA.fromHex(theme.accent.assistant), bold: true },
-    "markup.list": { fg: RGBA.fromHex(theme.dim) },
-    "markup.raw": { fg: RGBA.fromHex(theme.accent.evolve) },
-    "markup.link": { fg: RGBA.fromHex(theme.accent.user), underline: true },
-  })
-}
-
 export function createStyle(settings: Settings, env: Record<string, string | undefined> = process.env): Style {
   const no_color = typeof env["NO_COLOR"] === "string" && env["NO_COLOR"] !== ""
   const theme = no_color ? monochrome() : settings.ui.theme === "nulya-light" ? nulya_light : nulya_dark
@@ -399,7 +388,10 @@ export function createStyle(settings: Settings, env: Record<string, string | und
     historyWindow: settings.transcript.history_window,
     motion: settings.ui.motion && !no_color,
     spinner: ascii ? ascii_spinner_frames : spinner_frames,
-    syntax: syntaxOf(theme),
+    syntax: syntaxStyleFor(settings.ui.code_theme, theme, {
+      dark: settings.ui.theme !== "nulya-light",
+      noColor: no_color,
+    }),
   }
 }
 

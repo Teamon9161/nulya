@@ -466,7 +466,7 @@ PLAN §3.2 早就把答案写死了——**一个 agent 就是 `session new` 的
 | `diff.add` / `diff.del` | **只有前景色**，无背景块；上下文行 dim |
 | `hairline` `selection` `hover` `lift` | 家具底色：框线 · 光标行 · 指针行（永远比光标那档更淡）· 扫光抬起的方向（主题自报，`NO_COLOR` 即 `fg`，扫光变成 no-op） |
 
-语法高亮由同一套 tokens 派生（OpenTUI `SyntaxStyle`），所以代码块不可能和主题脱节。
+**代码有自己的配色**（T91，`render/syntax.ts`）：`markup.*`（正文的标题 / 列表 / 链接）与 `default` 仍来自上面这套 tokens——那是本前端自己的文档；而 fenced code 里的 14 个角色（comment / string / number / boolean / constant / keyword / function / type / variable / property / operator / punctuation / tag / attribute）来自一张**独立的调色板**，`[ui] code_theme` 选：`auto`（缺省，按界面主题的明暗给出 one-dark / github-light）· `theme`（旧行为：代码也用界面 tokens）· `one-dark` · `github-dark` · `github-light`。scoped capture 名（`keyword.control` 之类）不列——OpenTUI 的 `getStyleId` 会回落到第一个点之前的基名。`NO_COLOR` 压过一切调色板。
 主题：`nulya-dark`（默认）/ `nulya-light` / `NO_COLOR` 全塌成终端自己的前景色。
 
 ### 6.3 glyph 词表（封闭）
@@ -547,8 +547,9 @@ history_window = 400           # 同时挂载的卡片数（从最新往回数�
 ascii          = false
 
 [ui]
-theme  = "nulya-dark"       # nulya-dark | nulya-light
-motion = true
+theme      = "nulya-dark"   # nulya-dark | nulya-light
+code_theme = "auto"         # auto | theme | one-dark | github-dark | github-light —— 只作用于 fenced code（T91）
+motion     = true
 
 [driver]                    # T24
 mode = "ask"                # ask | unsafe —— 一趟从哪一档开始；chip 与 `/mode` 的选择记在 tui-state.json 里、优先级更高
@@ -2651,3 +2652,20 @@ S1c 把 checkout 的两个问题（store 的 trust、`.nulya/agents`）从 `main
 **顺带盘点了「升上去之后哪些自己的兜底可以删」，结论是一条都不能删**，记在这里免得下一个人重查：T75 的 render watchdog 与 T76/T73 的 `ui/measure.ts` **早在 T77 就随根因一起删掉了**，而 0.5.9 修的那几条正是它们当年在绕的东西——也就是说这次升级追认了那次删除，没有留下新的可删项。逐条查过仍然成立的四处：① `<span fg>` 在 @opentui/solid 0.5.9 上**依然被丢弃**（实测两个 `<span fg>` 落成一个白色 span），所以 `WorkingStatus` 的「一格一个 `<text>`」留着；② renderer 构造时**照旧**挂 `uncaughtException` / `unhandledRejection` 并把它们降格成看不见的 console 行（0.5.9 源码 1220–1221 行），所以 `crashlog.ts` 与响应层心跳留着；③ `renderables/Markdown.ts` 在 0.5.3 与 0.5.9 之间**逐字节相同**，所以 `sampled()` 那条「finalisation 故意晚一拍」的排序补偿留着；④ `setMousePointer` 仍然只写 cursor style options，`ui/pointer.ts` 自己写 OSC 22 的三个字节留着。
 
 **结果**：`bunx tsc --noEmit` 干净；`bun test` **656 pass / 0 fail**；`bun run compile` 通过；`createHostClipboard`（T89 那条路）在 0.5.9 上实测照常。
+
+
+### T91 · 代码有自己的配色（2026-08-29）
+
+**内核零改动。**
+
+**问题**：语法高亮一直是从界面 tokens 派生的（`syntaxOf(theme)`），理由写在注释里——"代码块不可能和主题脱节"。它确实没脱节，而这正是问题：一段 fenced code 用的就是周围每一张卡框、每个 glyph、每条状态 chip 的那两个 accent（蓝与金），于是**屏幕上唯一一段"另一种语言"读起来和其它一切一样**。实测一段 TypeScript：`const` / `function` / `go` / `return` 全是同一个 `#8fb3ff`，`x` 与 `1` 全是同一个 `#e0b978`——关键字与函数名不分、变量与数字不分。代码的颜色不是装饰，它是这段文字在被读懂之前唯一的结构。
+
+**`render/syntax.ts`（新文件）**：14 个代码角色（comment · string · number · boolean · constant · keyword · function · type · variable · property · operator · punctuation · tag · attribute）组成 `CodePalette`，**每个角色都必填**——忘掉 `operator` 的调色板不该悄悄继承别人的，没有意见的角色就把一个颜色写两遍。四张表：`one-dark`（Atom One Dark）· `github-dark` · `github-light` · `theme`（**旧行为原样保留**，写成表里的一项而不是一条特判——"代码跟着界面走"是一个选择，不是第二条代码路径）。
+
+**一条边界，也是这条改动的全部克制**：**code theme 只管代码**。`markup.heading` / `markup.list` / `markup.link` 与 `default` 照旧来自界面主题——那是模型回答的正文，是本前端自己画的文档，不是被引用进来的一门外语；`default` 还是没被 capture 到的散文的回落色。所以换 code theme 只改 fenced block，别的一个像素不动，正是要这个功能的人想发生的事。scoped capture 名一个都不列：OpenTUI 的 `getStyleId` 会回落到第一个点之前的基名，所以基名覆盖了语法自己发明的每一种变体，而列出来的那张表只会变成一张按语言维护、语法却不归我们管的表。
+
+**缺省是 `auto` 而不是某一张表**：暗色界面给 one-dark、亮色界面给 github-light。判据是**背景的明暗**而不是界面主题的名字（`paletteFor(name, theme, dark)`），所以将来第三个界面主题到这里已经有答案了；亮底上铺一张暗色代码表不是口味问题，是读不了。`NO_COLOR` 压过调色板而不是作为其中一项——整屏一个颜色的时候还把 keyword 画成紫色，等于把那个变量读成了建议。
+
+**切换**：`tui.toml` 的 `[ui] code_theme`，与 `ui.theme` 同一层级、同一种切法（`/settings` 只显示不写入——设定的作者是文件，见 §7）。
+
+**测试**（`test/syntax.test.ts` 6 条 + `test/extensions.test.ts` 1 条）：断言的是决定的形状而不是十六进制——`auto` 由背景作答（暗/亮给出不同的表，且同一背景下与界面主题无关）· 具名表不随界面主题变 · `theme` 随界面 tokens 动 · **换 code theme 时 `markup.*` 与 `default` 逐字段不变而 `keyword` 变**（这条就是上面那条边界） · `NO_COLOR` 与 `theme` 等价 · 词表里每个名字都解析得出一张表（`tui.toml` 认的名字与 switch 认的名字是两处，这条让它们对齐）· `[ui] code_theme` 从文件读得到、不认识的名字保留缺省。

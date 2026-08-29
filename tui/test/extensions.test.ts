@@ -1063,3 +1063,19 @@ test("[env.ssh] parses field by field, leaving fields it did not mention at the 
     layer.cleanup()
   }
 })
+
+test("ui.code_theme is read from tui.toml, and an unknown name leaves the default standing", async () => {
+  const layer = tempWorkspace()
+  try {
+    mkdirSync(join(layer.dir, ".nulya"), { recursive: true })
+    writeFileSync(join(layer.dir, ".nulya", "tui.toml"), '[ui]\ncode_theme = "github-dark"\n')
+    expect((await loadSettings(layer.dir, {})).ui.code_theme).toBe("github-dark")
+
+    // A palette this build does not have is not a reason to fail to open, and
+    // not a reason to pretend it was applied either.
+    writeFileSync(join(layer.dir, ".nulya", "tui.toml"), '[ui]\ncode_theme = "dracula"\n')
+    expect((await loadSettings(layer.dir, {})).ui.code_theme).toBe(default_settings.ui.code_theme)
+  } finally {
+    layer.cleanup()
+  }
+})

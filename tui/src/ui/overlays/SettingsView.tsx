@@ -35,6 +35,7 @@ export function settingRows(settings: Settings): Array<{ key: string; value: str
   add("transcript.history_window", t.history_window, d.history_window)
   add("transcript.ascii", t.ascii, d.ascii)
   add("ui.theme", settings.ui.theme, default_settings.ui.theme)
+  add("ui.code_theme", settings.ui.code_theme, default_settings.ui.code_theme)
   add("ui.motion", settings.ui.motion, default_settings.ui.motion)
   for (const [action, binding] of Object.entries(settings.keys)) {
     rows.push({ key: `keys.${action}`, value: binding, changed: true })
