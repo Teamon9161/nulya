@@ -53,7 +53,8 @@ test "cli help: help / --help / -h print the same usage covering every verb fami
         "session cancel", "outcome",    "session list", "--image",    "config show",
         "config refresh", "skill load", "src",          "toolchain",  "help",
         "demo",           "task run",   "task list",    "wait",       "retarget",
-        "--running",      "journal append", "journal read",
+        "--running",      "journal append", "journal read", "remote check",
+        "remote ls",      "remote serve",   "--workspace",  "remote:ssh:<dest>",
     }) |needle| {
         std.testing.expect(std.mem.indexOf(u8, help.stdout, needle) != null) catch |err| {
             std.debug.print("`nulya help` never mentions '{s}'\n", .{needle});
@@ -72,8 +73,12 @@ test "cli help: help / --help / -h print the same usage covering every verb fami
     // +2 — the append-only JSONL discipline exposed to extensions, one line per
     // verb since neither takes a flag worth documenting; `session new --env`,
     // +1 — WHERE a session's shell commands run is not inferable from any other
-    // flag, and the three spellings are the whole of that vocabulary).
-    try std.testing.expect(std.mem.count(u8, help.stdout, "\n") <= 55);
+    // flag, and the three spellings are the whole of that vocabulary; `nulya
+    // remote`, +5 — a whole verb family (three verbs plus the spec vocabulary a
+    // driver cannot guess), and one more continuation line on `session new`,
+    // because moving the WORKSPACE and moving only the command are two different
+    // things that must not read as one).
+    try std.testing.expect(std.mem.count(u8, help.stdout, "\n") <= 60);
 
     // The two flag spellings a terminal user reaches for reach the same text.
     for ([_][]const u8{ "--help", "-h" }) |flag| {

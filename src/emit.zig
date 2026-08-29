@@ -30,11 +30,23 @@ pub const OutputBudget = struct {
     head_percent: u8 = 25,
     /// Percentage of the body budget reserved for the tail on byte overflow.
     tail_percent: u8 = 75,
+    /// Appended inside the spill footer, after the path. Empty by default, and
+    /// the shell layer is the only thing that ever sets it (`launch.zig`), for
+    /// the one case where the pointer is not reachable by the reader: a session
+    /// whose commands run on another machine spills HERE, and saying nothing
+    /// would hand the model a path it cannot open (goals/remote-env.md §3.2).
+    /// `emit` does not compose the sentence — it knows nothing about machines,
+    /// it only refuses to print a pointer without whatever the caller attached
+    /// to it.
+    spill_note: []const u8 = "",
 };
 
 pub const StepOutputBudget = struct {
     /// Hard byte ceiling for all tool result text returned by one model step.
     max_bytes: usize = 128 * 1024,
+    /// See `OutputBudget.spill_note`: the same clause, for the step-level
+    /// footer, so one session cannot say two different things about one file.
+    spill_note: []const u8 = "",
 };
 
 pub const Emitted = struct {
@@ -85,7 +97,7 @@ pub fn emit(
     errdefer final_text.deinit(alloc);
 
     if (spill_path) |path| {
-        const footer = try std.fmt.allocPrint(alloc, "\n[full output: {s}]", .{path});
+        const footer = try std.fmt.allocPrint(alloc, "\n[full output: {s}{s}]", .{ path, budget.spill_note });
         defer alloc.free(footer);
         const body_budget = budget.max_bytes -| footer.len;
 
@@ -284,7 +296,7 @@ pub const StepOutputLimiter = struct {
         var path_owned = spill_path.* == null;
         const path = spill_path.* orelse try stepSpillPath(alloc, self.scratch_dir, tool_name, self.event_seq, call_index);
         errdefer if (path_owned) alloc.free(path);
-        const footer = try std.fmt.allocPrint(alloc, "\n[tool result clipped by step output budget; full output: {s}]", .{path});
+        const footer = try std.fmt.allocPrint(alloc, "\n[tool result clipped by step output budget; full output: {s}{s}]", .{ path, self.budget.spill_note });
         defer alloc.free(footer);
 
         // A replacement must never cost more than what it replaces: a result

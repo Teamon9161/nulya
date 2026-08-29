@@ -140,7 +140,7 @@ UI / trajectory / metrics 是 ledger 的投影，不持久化 mutable 状态。*
 一场 session = 一个 JSONL 文件 `.nulya/sessions/<id>.jsonl`：第一行是冻结的 header，之后每行一个 `{"seq":n,…}` 事件（seq 从 1 单调递增）。
 
 ```jsonl
-{"kind":"header","v":1,"session":"s-…","parent":{"session":"s-…","seq":41}|null,"model":"openai","model_identity":{"provider":"openai","model":"gpt-4o-mini","base_url":"https://…","api_key_env":"OPENAI_API_KEY"},"environment":"","created":"…","nulya":{"version":"0.0.0","kernel_hash":"f49f…"},"composition":{"active":[{"id":"web.search","version":"v-…"}],"native_tools":["ext:web.search/web_search"],"prompts":[{"source":"agent-explore","text":"You only read…"}]}}
+{"kind":"header","v":1,"session":"s-…","parent":{"session":"s-…","seq":41}|null,"model":"openai","model_identity":{"provider":"openai","model":"gpt-4o-mini","base_url":"https://…","api_key_env":"OPENAI_API_KEY"},"environment":"","remote_workspace":"","created":"…","nulya":{"version":"0.0.0","kernel_hash":"f49f…"},"composition":{"active":[{"id":"web.search","version":"v-…"}],"native_tools":["ext:web.search/web_search"],"prompts":[{"source":"agent-explore","text":"You only read…"}]}}
 {"seq":1,"origin":"msg-….json","kind":"user_text","text":"…","images":[{"media_type":"image/png","data":"<base64>"}]}
 {"seq":2,"kind":"assistant","reasoning":"[{\"type\":\"thinking\",…}]","text":"…","calls":[{"id":"…","tool":"…","args":"…"}],"usage":{"input_tokens":1200,"output_tokens":80,"cache_read_tokens":1100,"cache_write_tokens":0},"stop_reason":"max_tokens"}
 {"seq":3,"kind":"tool_results","results":[{"call_id":"…","ok":true,"output":"…","spill_path":null,"presentation":"{\"kind\":\"diff\",…}"}]}
@@ -757,7 +757,7 @@ Environment { runShell(cmd, dialect) / runExtension(entry, request_json) / start
 
 ### 8.1 Exec target：`shell` 的命令跑在哪（`session new --env`）
 
-**第三根轴**，与已有的两根正交：`Dialect` 说命令用哪种语言写、`config.environment.backend` 说它被关得多紧（仍只有 `local`，那是 sandbox 那根轴），这一根说**哪台机器的 shell 读它**。`wsl` 与 `ssh` 既不比 host 窄也不比它宽，它们在**别处**——所以不是 `EnvironmentBackend` 的第四个词，backend 的"project 层只能更严"那条排序对它无意义。
+**第三根轴**（这一节是它的一半：**只搬命令**；搬整个工作区的那一半是 §8.2 的 `remote:` 一族），与已有的两根正交：`Dialect` 说命令用哪种语言写、`config.environment.backend` 说它被关得多紧（仍只有 `local`，那是 sandbox 那根轴），这一根说**哪台机器的 shell 读它**。`wsl` 与 `ssh` 既不比 host 窄也不比它宽，它们在**别处**——所以不是 `EnvironmentBackend` 的第四个词，backend 的"project 层只能更严"那条排序对它无意义。
 
 ```
 ExecTarget = local | wsl{distro?} | ssh{destination}
@@ -778,9 +778,34 @@ spec 语法    local | wsl | wsl:<distro> | ssh:<destination>
 
 **三条如实记录的局限**（不是欠账，是这条边界的形状）：
 
-1. **kill 杀得到本地客户端，不保证杀得到对面。** `Tree` 照旧包着 `wsl.exe` / `ssh`，所以超时与取消**一定**结束这一步；对面那个进程会不会跟着死是对面的事——ssh 通道关闭通常让远端命令收到 SIGHUP、杀掉 WSL relay 通常带走它的 Linux 进程，但自己 detach 了的命令两种都活得下来。不声称做不到的保证。
+1. **kill 杀得到本地客户端，不保证杀得到对面**（`remote:` 一族没有这条局限——对面有一个真的 `Tree`，§8.2）**。** `Tree` 照旧包着 `wsl.exe` / `ssh`，所以超时与取消**一定**结束这一步；对面那个进程会不会跟着死是对面的事——ssh 通道关闭通常让远端命令收到 SIGHUP、杀掉 WSL relay 通常带走它的 Linux 进程，但自己 detach 了的命令两种都活得下来。不声称做不到的保证。
 2. **子进程环境是目标那侧的。** WSL 只转发 `WSLENV` 点名的、ssh 只转发 `SendEnv` 点名的，所以 `NULYA_EXE` / `NULYA_SESSION` **到不了对面**（模型在 WSL 里想调 `nulya` 得自己找路径）。physics #6 不受影响——净化过的 map 正是 `wsl.exe` / `ssh` 自己拿到的那份，没有 secret 可供转发；顺带一条：`SSH_AUTH_SOCK` 在 denylist 上，所以 **ssh 目标只能用密钥文件认证，用不了本机的 ssh-agent**。
 3. **cwd 只对 WSL 有意义。** WSL 下工作区是同一个目录换个名字看；ssh 那侧是另一台机器的文件系统，命令从远端账号的 home 开始，本地工作区（包括每个 `emit` spill 文件）它看不见——对 ops 型任务仍然有用，对"读一下我刚才写的文件"不适用。
+
+### 8.2 Remote environment：工作区住在别的机器上（`--env remote:…`，`environment/remote/`）
+
+`--env wsl|ssh` **包住每条命令**：工作区仍在本机，extension 仍在本机，每次调用都付一次连接。`--env remote:…` 是**同一根轴上的另一个点**——第二个 `Environment` 实现（`environment/remote/mod.zig`）：工作区在对面，通道**一场 session 开一次**，对面那个常驻进程**就是 nulya 自己**（`nulya remote serve`，与 `nulya task supervise` 同一个壳层角色先例，§6.1/§14）。两族词汇分开，老的一族一个字未改。
+
+```
+spec  remote:wsl | remote:wsl:<distro> | remote:ssh:<destination> | remote:exec:<argv…>
+argv  wsl.exe [-d D] -e nulya remote serve  /  ssh -o BatchMode=yes <dest> nulya remote serve  /  <argv…> remote serve
+```
+
+`remote:exec:` 是**通用形**（另外两个只是常用拼法的便利名）：内核因此永远不必学会 "docker" 这个词（physics #8），而**离线 e2e 正是靠它把 `--env` 指向本二进制**，于是通道两端跑的都是生产代码。它按空格切分、**没有引用规则**——路径带空格拼不出来，这条限制写在 `launcherArgv` 上而不是被引用方言掩盖。命名的两族假定对面 PATH 上有 `nulya`；别的一切用 `exec:` 写全，**一条规则，没有第二处配置**。
+
+**Phase 1 只搬一个动词。** `runShell` 过通道；`runExtension` 与 `startShellTask` **明说拒绝**（前者答成一次**失败的调用**——`exit 1` + 一句话，走 `invoke.zig` 每次失败调用本来就走的那条路，没有新分支；后者是一个 error，由 `tools/shell.zig` 翻成模型读的那句话，与 `NoDurableSession` 同一先例）。拒绝就是这一期的内容：一个 extension 在工作区不在本机的 session 里**静悄悄读了本机的文件**，正是这条设计要终结的裂脑，只是穿着成功的外衣。`nulya task run` 与 `task supervise` 同理对 `remote:` 硬拒。
+
+**帧协议**（`environment/remote/protocol.zig`，契约写在模块注释顶部 = `nulya src` 打印的东西，`extension/protocol.zig` 先例）：**一行 JSON 头 + 定长裸负载**。头是 JSON 好让抓下来的通道人读得懂；负载是**裸字节**，因为它装的是任意字节（命令、命令的 stdout），而 `std.json.Stringify` 会把非法 UTF-8 写成数字数组——session 文件当年就是这样不再是 session 文件的（BUGS #22）。动词 `hello` / `run-shell` / `list-dir` / `cancel`；`run-extension` / `put-file` / `start-task` 在词表里、由 serve 端答一句"这一期不做"（新旧两端相遇时得到一句话而不是"unknown op"）。四条规则：**一次一个请求**（没有 request id，因为不存在第二个待匹配的答案）· **在飞的请求期间 host 只可能发 `cancel`，发了就不再复用这条通道**（正是这条让 agent 用同一个 reader 读控制帧：命令先完成时取消那次读，不可能吃掉半个帧）· **每个请求恰好一个回复帧**（含被取消的那个）· **`hello` 是唯一的协商**，`v` 对不上就**拒绝并说清**，绝不猜。
+
+**取消真的杀得到对面**（§8.1 的第一条局限在这条路上消失）：agent 在**它那台机器上**用同一个 `Tree` 跑命令，`cancel` 是通道上的一条消息，收到即 `killAll`；**兜底是 stdin EOF**——`Channel.deinit` **先关 stdin 再 kill 传输进程**，所以 host 进程无论怎么退出，对面都收得到"该收工了"。host 这侧另有一层耐心（`remote.Bounds`：请求自己的 timeout + margin，没有 timeout 的用一个固定值）——**不是** `providers/wire.zig` 那种字节级心跳：一条正当的十分钟构建在这条通道上**按设计就是静默的**，心跳会杀掉它要保护的那件事；agent 的契约（一个请求一个回复，在它自己的 timeout 之内）才让 deadline 成为对的形状。**连接中断 = 状态未知**：`ok=false` + 一句如实的话，**不编退出码、不重试**（已经跑过的命令不许再跑一次）。
+
+**远端永不需要 credential**（§9 的直接推论，也是这条设计的卖点）：模型连接留在 host，对面只执行。协议里**没有能装 credential 的字段**，host 从不转发自己的 env map，而传输子进程拿到的是 `environment.sanitizedChildEnv`（`isSecretKey` 剥过、加了 `NULYA_EXE` 的那一份——**同一个函数，两台机器各跑一次**：agent 在对面用它给自己的子进程建环境）。`NULYA_SESSION` **不下传**：那是 host 上一个文件的路径，发过去就是一句假话。
+
+**`.nulya/` 的归属按"谁读它"切**：session 文件、三条 journal、extension store 的宿主面全部留 host；工作树在对面。`emit` 的 spill 这一期仍写 host，footer 因此**多一句**说明它够不着（`emit.OutputBudget.spill_note`，由壳层填）——一个指向读不到的盘的指针比没有更糟。把 spill 也搬过去是下一期。
+
+**cwd 不翻译**：模型面上的路径从来都是工作区相对的（`ToolContext.cwd` 恒为 `"."`、`emit.joinRel` 全平台 `/`），所以每一侧把 `.` 理解成自己那个工作区就够了。远端工作区由 `session new --workspace` 冻进 header（可空列 `remote_workspace`，§3.4），调用方传下来的 cwd 被**故意忽略**——那是本机的路径。
+
+进度与被否掉的备选见 `docs/goals/remote-env.md`。
 
 ---
 
@@ -955,9 +980,13 @@ nulya ext init [--zig] [--user] <id> [tool] | build <path> [--user]
                                                            `inspect <id>@<version>` = **点名那个版本**的冻结 manifest（session header 记的正是这个形状，§3.4）
                                                            `inspect <path>`（含路径分隔符，或是带 `extension.json` 的目录）= 那份 draft，未建未冻
 nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--with <id>[@<version>]]… [--pin ext:<id>/<tool>]…
-                  [--prompt <file>]… [--env <spec>]      ← `--prompt` 把这个文件的字节冻成本场的一个 system block（§5.6）；不安装任何东西
-                                                           `--env` = 本场 `shell` 命令跑在哪（`local` | `wsl` | `wsl:<distro>` | `ssh:<dest>`，§8.1）
-                                                           冻进 header；解析不出或本 host 够不着 → stderr + **exit 1，什么都不创建**
+                  [--prompt <file>]… [--env <spec>] [--workspace <dir>]
+                                                         ← `--prompt` 把这个文件的字节冻成本场的一个 system block（§5.6）；不安装任何东西
+                                                           `--env` = 本场跑在哪（§8.1）——两族词汇：
+                                                             `local` | `wsl` | `wsl:<distro>` | `ssh:<dest>`  只搬 `shell` 的命令
+                                                             `remote:wsl` | `remote:wsl:<distro>` | `remote:ssh:<dest>` | `remote:exec:<argv…>`  搬整个工作区
+                                                           `--workspace` = 远端那台机器上的绝对目录，**只对 `remote:` 族接受**（写在别处是一个没人读的字段，所以拒）
+                                                           两者都冻进 header；解析不出或本 host 够不着 → stderr + **exit 1，什么都不创建**
                                                          ← 冻结 composition + 模型身份、写 header，打印 session id
                                                            点名的 profile 解析不到 credential（config / env / credentials.toml / codex auth）
                                                            → stderr 指路 + **exit 1，什么都不创建**（§9.5；`nulya demo` 是唯一保留 stand-in 的调用点）
@@ -981,6 +1010,10 @@ nulya task run [--session <id>] [--cwd <dir>] [--timeout-ms N] -- <command>
           | kill <task>                                   ← 写 kill 标记（幂等）；supervisor 杀整棵树
           | retarget <task> --to <id>                     ← 把结果改投另一场 session（`extensions/compact` 的用法）
           | supervise …                                   ← internal：`startShellTask` 起的那个进程，不给人用
+nulya remote check --env <spec> [--json]                  ← 开一条通道并报告对面答了什么（nulya 版本 / os / arch / home / cwd / dialect）
+          | ls --env <spec> [<dir>] [--json]              ← 列那台机器上的一个目录（协议动词而不是解析 `ls`：文件名里可以有换行）
+                                                           目录不存在 → stderr + exit 1；截断（> 1000 条）或跳过非法 UTF-8 名字时 stderr 说一句、exit 0
+          | serve                                         ← **就是那台机器那一端**：stdin/stdout 就是帧协议，不给人直接敲（launcher 替你接上）
 nulya journal append <path>                               ← stdin 读一条记录（去掉结尾换行后须是单行合法 JSON），持锁 append；不满足即拒、不写一个字节
           | read <path>                                   ← 打印全部完整行，忽略残尾；文件不存在 = 空输出、exit 0
 nulya config show [--json]                               ← 有效配置链的投影：profiles（含 credential 是否可用）+ 模型目录；无 secret，一个字节都不联网

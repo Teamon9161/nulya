@@ -1,0 +1,98 @@
+//! A remote agent that MISBEHAVES, so the host side can be tested against the
+//! failures a real `nulya remote serve` will never produce.
+//!
+//! **Why this exists, and why it is not the happy path.** The offline test for
+//! a working channel points `--env remote:exec:` at the real nulya binary: both
+//! ends are then the production code, over a pipe, which is a stronger test
+//! than any stand-in could be. What that cannot exercise is a peer that lies —
+//! answers a version it does not speak, stops talking mid-command, writes half
+//! a frame, or claims a payload length nobody can honour. Those are the four
+//! shapes the host's framing has to survive, and only a deliberately broken
+//! peer can produce them. Same reason `tests/fake_codex.zig` exists.
+//!
+//! **The mode is argv, not an environment variable**, because that is what the
+//! spec can carry: `remote:exec:<this binary> <mode>` splits on spaces and the
+//! launcher appends `remote serve`, so this process sees `[<mode>, "remote",
+//! "serve"]`. An environment variable would need a spawn this test does not
+//! control.
+//!
+//!   version    answers `hello` with a version nobody speaks
+//!   die        answers `hello`, then exits without replying to the next request
+//!   halfframe  answers `hello`, then writes half a header line and exits
+//!   liar       answers `hello`, then claims a payload larger than any reader
+//!              will accept
+//!   silent     answers nothing at all, ever
+//!
+//! The frames are written by hand rather than through `protocol.zig`: a fake
+//! whose encoder is the real one could not produce a frame the real one refuses
+//! to produce, which is exactly what half of these modes are.
+
+const std = @import("std");
+
+/// How long `silent` sits there before giving up, so a test that never kills it
+/// fails rather than hangs the suite.
+const silent_ticks: u32 = 1500; // 30s at 20ms
+
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const alloc = init.arena.allocator();
+
+    const argv = try init.minimal.args.toSlice(alloc);
+    const mode: []const u8 = if (argv.len > 1) argv[1] else "die";
+
+    var in_buf: [1 << 16]u8 = undefined;
+    var reader = std.Io.File.stdin().readerStreaming(io, &in_buf);
+    const out = std.Io.File.stdout();
+
+    if (std.mem.eql(u8, mode, "silent")) {
+        var ticks: u32 = 0;
+        while (ticks < silent_ticks) : (ticks += 1) {
+            std.Io.sleep(io, .fromMilliseconds(20), .awake) catch {};
+        }
+        return;
+    }
+
+    // The handshake. The version is echoed back from the request (plus one in
+    // `version` mode), so this file does not have to be edited every time the
+    // protocol's number changes — and the mismatch it tests stays a mismatch.
+    const hello = reader.interface.takeDelimiter('\n') catch return orelse return;
+    const asked = versionIn(hello) orelse 1;
+    const answer = if (std.mem.eql(u8, mode, "version")) asked + 1 else asked;
+    const line = try std.fmt.allocPrint(
+        alloc,
+        "{{\"ok\":true,\"v\":{d},\"nulya\":\"fake\",\"os\":\"fake\",\"arch\":\"fake\",\"home\":\"\",\"cwd\":\"\",\"dialect\":\"bash\"}}\n",
+        .{answer},
+    );
+    try out.writeStreamingAll(io, line);
+    if (std.mem.eql(u8, mode, "version")) return;
+
+    // One more request, answered badly (or not at all).
+    const req = reader.interface.takeDelimiter('\n') catch return orelse return;
+    // Whatever payload it carries is left unread on purpose: this side is about
+    // to stop being a protocol peer anyway.
+    _ = req;
+    if (std.mem.eql(u8, mode, "halfframe")) {
+        try out.writeStreamingAll(io, "{\"ok\":true,\"exit_c");
+        return;
+    }
+    if (std.mem.eql(u8, mode, "liar")) {
+        try out.writeStreamingAll(io, "{\"ok\":true,\"exit_code\":0,\"bytes\":99999999999,\"out\":0}\n");
+        return;
+    }
+    // `die`: nothing at all, and the process ends. The host sees EOF where a
+    // reply belongs, which is the "connection lost mid-command" case.
+}
+
+/// The `v` out of a request header, without a JSON parser: this file is testing
+/// framing, and a parser here would be one more thing that could be right when
+/// the host is wrong.
+fn versionIn(line: []const u8) ?u32 {
+    const key = "\"v\":";
+    const at = std.mem.indexOf(u8, line, key) orelse return null;
+    var i = at + key.len;
+    while (i < line.len and line[i] == ' ') i += 1;
+    var end = i;
+    while (end < line.len and std.ascii.isDigit(line[end])) end += 1;
+    if (end == i) return null;
+    return std.fmt.parseInt(u32, line[i..end], 10) catch null;
+}

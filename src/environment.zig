@@ -378,6 +378,46 @@ fn isWindowsBashLauncherDir(path: []const u8) bool {
         std.ascii.endsWithIgnoreCase(path, "\\Microsoft\\WindowsApps");
 }
 
+/// The host environment as a child of this process may see it: every
+/// secret-shaped variable stripped (`isSecretKey`, physics #6), plus the one
+/// thing children are ADDED (`NULYA_EXE`). Caller deinits.
+///
+/// One implementation, two callers, and that is the point: the local backend
+/// builds its children's environment from this, and so does the remote
+/// backend's transport — so a `wsl.exe` / `ssh` / `docker` process this harness
+/// starts can never be handed a key, whatever `WSLENV` or `SendEnv` is set to.
+/// The remote AGENT runs this same function on its own machine for its own
+/// children, which is why the denylist holds on both ends without a second
+/// implementation of it (goals/remote-env.md §3.5).
+pub fn sanitizedChildEnv(alloc: std.mem.Allocator, io: std.Io) !std.process.Environ.Map {
+    var host = try hostEnvironMap(alloc);
+    defer host.deinit();
+
+    var sanitized: std.process.Environ.Map = .init(alloc);
+    errdefer sanitized.deinit();
+    var it = host.iterator();
+    while (it.next()) |entry| {
+        if (isSecretKey(entry.key_ptr.*)) continue;
+        try sanitized.put(entry.key_ptr.*, entry.value_ptr.*);
+    }
+
+    // Children get to find the harness that spawned them. A driver written as
+    // an extension (`extensions/compact`, PLAN §3.6) has to run `nulya session
+    // append|step|new`, and it cannot assume a `nulya` on PATH — the one that
+    // matters is THIS binary, not whichever copy an installer left behind. Not
+    // a secret and not model-visible state: an absolute path to the running
+    // executable, next to `NULYA_SESSION` (which `session step` puts here to
+    // name the live session file). Unknowable path (a deleted binary, an exotic
+    // OS) leaves it unset: building an environment must never fail over
+    // provenance.
+    if (std.process.executablePathAlloc(io, alloc)) |exe_path| {
+        defer alloc.free(exe_path);
+        try sanitized.put("NULYA_EXE", exe_path);
+    } else |_| {}
+
+    return sanitized;
+}
+
 pub const LocalOptions = struct {
     /// Override the OS-derived shell dialect. Ignored when `exec` names a
     /// target: which shell runs a WSL / ssh command is the target's answer, not
@@ -437,27 +477,8 @@ pub const LocalEnvironment = struct {
         var host = try hostEnvironMap(alloc);
         defer host.deinit();
 
-        var sanitized: std.process.Environ.Map = .init(alloc);
+        var sanitized = try sanitizedChildEnv(alloc, io);
         errdefer sanitized.deinit();
-        var it = host.iterator();
-        while (it.next()) |entry| {
-            if (isSecretKey(entry.key_ptr.*)) continue;
-            try sanitized.put(entry.key_ptr.*, entry.value_ptr.*);
-        }
-
-        // Children get to find the harness that spawned them. A driver written
-        // as an extension (`extensions/compact`, PLAN §3.6) has to run
-        // `nulya session append|step|new`, and it cannot assume a `nulya` on
-        // PATH — the one that matters is THIS binary, not whichever copy an
-        // installer left behind. Not a secret and not model-visible state: an
-        // absolute path to the running executable, next to `NULYA_SESSION`
-        // (which `session step` puts here to name the live session file).
-        // Unknowable path (a deleted binary, an exotic OS) leaves it unset:
-        // building an environment must never fail over provenance.
-        if (std.process.executablePathAlloc(io, alloc)) |exe_path| {
-            defer alloc.free(exe_path);
-            try sanitized.put("NULYA_EXE", exe_path);
-        } else |_| {}
 
         const bash_exe = if (builtin.os.tag == .windows) findWindowsBash(io, &host) orelse default_bash_exe else default_bash_exe;
 

@@ -204,11 +204,12 @@ pub const ext_usage =
 ;
 
 pub const session_usage =
-    \\  nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--with <id>[@<ver>]]… [--pin ext:<id>/<tool>]… [--prompt <file>]… [--env <spec>] [--bare]
+    \\  nulya session new [--profile P] [--model ID] [--parent <id>:<seq>] [--with <id>[@<ver>]]… [--pin ext:<id>/<tool>]… [--prompt <file>]… [--env <spec>] [--workspace <dir>] [--bare]
     \\                                                    freeze composition + model, print a new session id; --with composes a built
     \\                                                    version in, --pin puts one of its tools on the model's tool face, --parent
     \\                                                    forks that session, --prompt freezes a file as this session's system prompt,
-    \\                                                    --env freezes where shell runs (wsl | wsl:<distro> | ssh:<dest>; only shell moves),
+    \\                                                    --env freezes where shell runs: wsl | wsl:<distro> | ssh:<dest> move only the command;
+    \\                                                    remote:wsl | remote:ssh:<dest> | remote:exec:<argv…> move the workspace (--workspace says where),
     \\                                                    --bare reads no standing layer: neither config list, nor apply: auto packages
     \\  nulya session append <id> [<text> | --file <p>] [--image <p>]…
     \\                                                    queue a user turn for the next step boundary; --image inlines a
@@ -231,6 +232,14 @@ pub const task_usage =
     \\  nulya task list [--session <id>] [--running] [--json] | status <task> [--json] | wait (<task> | --any) [--timeout-ms N] | kill <task> | retarget <task> --to <id>
     \\                                                    watch them; wait exits 0 finished / 2 timed out / 3 nothing to wait
     \\                                                    for; kill ends the whole tree; retarget delivers the result elsewhere
+    \\
+;
+
+pub const remote_usage =
+    \\  nulya remote check --env <spec> [--json]          open a channel to that machine and report what answered
+    \\  nulya remote ls --env <spec> [<dir>] [--json]     list a directory on that machine, names and kinds exactly
+    \\  nulya remote serve                                BE that machine's end of a channel; stdin/stdout are the wire
+    \\  <spec> is remote:wsl | remote:wsl:<distro> | remote:ssh:<destination> | remote:exec:<argv…>
     \\
 ;
 
@@ -272,7 +281,7 @@ pub fn usage(io: std.Io) !u8 {
         \\
         \\sessions — composition freezes at `new` and never changes; only `step` writes the file
         \\
-    ++ session_usage ++ task_usage ++ journal_usage ++
+    ++ session_usage ++ task_usage ++ remote_usage ++ journal_usage ++
         \\
         \\reading this harness
         \\

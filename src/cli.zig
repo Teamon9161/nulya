@@ -12,6 +12,7 @@ const skill = @import("cli/skill.zig");
 const cli_toolchain = @import("cli/toolchain.zig");
 const cli_session = @import("cli/session.zig");
 const cli_task = @import("cli/task.zig");
+const cli_remote = @import("cli/remote.zig");
 const cli_journal = @import("cli/journal.zig");
 const cli_src = @import("cli/src.zig");
 const cli_config = @import("cli/config.zig");
@@ -39,6 +40,7 @@ pub fn dispatch(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) 
     if (std.mem.eql(u8, args[0], "toolchain")) return cli_toolchain.dispatchToolchain(alloc, io, args[1..]);
     if (std.mem.eql(u8, args[0], "session")) return cli_session.dispatchSession(alloc, io, args[1..]);
     if (std.mem.eql(u8, args[0], "task")) return cli_task.dispatchTask(alloc, io, args[1..]);
+    if (std.mem.eql(u8, args[0], "remote")) return cli_remote.dispatchRemote(alloc, io, args[1..]);
     if (std.mem.eql(u8, args[0], "journal")) return cli_journal.dispatchJournal(alloc, io, args[1..]);
     if (std.mem.eql(u8, args[0], "src")) return cli_src.dispatchSrc(alloc, io, args[1..]);
     if (std.mem.eql(u8, args[0], "config")) return cli_config.dispatchConfig(alloc, io, args[1..]);

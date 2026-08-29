@@ -451,6 +451,22 @@ pub fn createSession(
         return null;
     }
 
+    // Which directory ON THAT MACHINE this session works in. Only a remote
+    // environment has the question: a local session works where nulya was
+    // started, and a `wsl` / `ssh` exec target does not move the workspace at
+    // all (DESIGN §8.1). Accepting the flag anyway would freeze a fact nothing
+    // ever reads — the kind of field this repo keeps deleting.
+    const remote_workspace = flagValue(args, "--workspace") orelse "";
+    if (remote_workspace.len != 0 and !launch.isRemoteSpec(exec)) {
+        try printErrFmt(
+            alloc,
+            io,
+            "--workspace names a directory on the machine a remote session runs on; it applies only with --env remote:… ({s})\n",
+            .{launch.remote_spec_syntax},
+        );
+        return null;
+    }
+
     // Read before anything exists on disk: a `--prompt` that cannot be read must
     // leave no session behind at all (D8 — the missing-credential discipline).
     const prompts = (try promptRefs(alloc, io, args)) orelse return null;
@@ -472,7 +488,13 @@ pub fn createSession(
     // a tool, so nothing here can start a background task. The exec target is
     // passed anyway so this environment is the one the session describes — and
     // `exec` was already vetted above, so the two target errors cannot land here.
-    var lenv = launch.localEnvironment(alloc, io, &cfg, null, exec) catch |err| switch (err) {
+    //
+    // A REMOTE spec is deliberately not passed: building that environment means
+    // opening a connection, and `session new` runs nothing. Freezing the spec is
+    // the whole of its job here; the first `step` is where that machine has to
+    // answer, and where an unreachable one fails loudly (DESIGN §8.1).
+    const compose_exec = if (launch.isRemoteSpec(exec)) "" else exec;
+    var lenv = launch.localEnvironment(alloc, io, &cfg, null, compose_exec) catch |err| switch (err) {
         error.UnsupportedEnvironmentBackend => {
             try printErrFmt(alloc, io, "environment backend '{s}' is not implemented; only local\n", .{@tagName(cfg.environment.backend)});
             return null;
@@ -527,6 +549,7 @@ pub fn createSession(
         .model_profile = profile,
         .model_identity = identity,
         .environment = exec,
+        .remote_workspace = remote_workspace,
         .created = created,
         .nulya_version = launch.version,
         .parent = parent,
@@ -1005,22 +1028,35 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     // or today's config: it was decided once, at creation (DESIGN §8). A target
     // this host cannot reach fails loudly, the way a missing credential does —
     // running the commands here instead would be the same silent substitution.
-    var lenv = launch.localEnvironment(alloc, io, &cfg, .{
+    var lenv = launch.sessionEnvironment(alloc, io, &cfg, .{
         .session_path = spath,
         .tasks_dir = tasks_dir,
-    }, hdr.value.environment) catch |err| switch (err) {
+    }, hdr.value.environment, hdr.value.remote_workspace) catch |err| switch (err) {
         error.UnsupportedEnvironmentBackend => {
             return stepFail(alloc, io, stream, "environment backend '{s}' is not implemented; only local", .{@tagName(cfg.environment.backend)});
         },
-        error.InvalidExecTarget, error.ExecTargetUnsupportedOnHost => {
+        error.InvalidExecTarget, error.ExecTargetUnsupportedOnHost, error.InvalidRemoteSpec, error.RemoteSpecUnsupportedOnHost => {
             return stepFail(alloc, io, stream, "session '{s}' runs its commands in '{s}', which this binary on this host cannot reach; refusing to run them here instead", .{ id, hdr.value.environment });
+        },
+        // The machine is named and reachable in principle, but did not answer.
+        // Distinct from the line above on purpose: one is "this host has no way
+        // to get there", the other is "it is not answering right now", and the
+        // two have different fixes. The transport's own diagnostic (ssh's
+        // "Permission denied", wsl's "no distribution") has already gone to
+        // stderr unmodified — this only says which session it stopped.
+        error.RemoteChannelLost, error.RemoteChannelStalled => {
+            return stepFail(alloc, io, stream, "session '{s}' runs its commands on '{s}', which did not answer; nothing was run here instead", .{ id, hdr.value.environment });
+        },
+        error.RemoteVersionMismatch => {
+            return stepFail(alloc, io, stream, "session '{s}' reached '{s}', but the nulya there speaks a different remote protocol; install a matching build on that machine", .{ id, hdr.value.environment });
         },
         else => return err,
     };
     defer lenv.deinit();
     // Let shell children (e.g. `nulya ext activate`) find the live session so
-    // they can deposit capability notes into its inbox (DESIGN §5.3).
-    try lenv.env.put("NULYA_SESSION", spath);
+    // they can deposit capability notes into its inbox (DESIGN §5.3). A no-op on
+    // a remote environment — see `SessionEnvironment.publishSessionPath`.
+    try lenv.publishSessionPath(spath);
 
     // Reconstruct the model frozen at creation, re-resolving only the credential.
     // No silent fallback: a real session whose key is gone fails loudly rather
@@ -1053,11 +1089,17 @@ fn sessionStep(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
 
     const scratch = try launch.sessionScratchDir(alloc, id);
     defer alloc.free(scratch);
+    // A spill lands where the harness runs. When the commands do not, the
+    // pointer the model reads has to say so (goals/remote-env.md §3.2); the
+    // shell layer is the only place that knows both facts.
+    const spill_note = lenv.spillNote();
     var sess = session.AgentSession.openDurable(alloc, .{
         .model = holder.model(),
         .step_ctx = .{
-            .tool_context = .{ .environment = lenv.environment(), .cwd = cwd_path },
+            .tool_context = .{ .environment = lenv.handle(), .cwd = cwd_path },
             .scratch_dir = scratch,
+            .budget = .{ .spill_note = spill_note },
+            .step_budget = .{ .spill_note = spill_note },
             .retry = cfg.provider.retry,
             .observer = if (stream) |s| s.observer() else null,
             .gate = if (gate) |g| g.gate() else null,

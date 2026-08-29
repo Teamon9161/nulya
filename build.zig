@@ -208,7 +208,23 @@ pub fn build(b: *std.Build) void {
         .dest_dir = .{ .override = .{ .custom = "test-bin" } },
     });
 
-    // The suite is FOUR test binaries, not one: `zig build` runs independent run
+    // …and a deliberately BROKEN remote peer (`tests/fake_remote.zig`), handed
+    // over as `NULYA_FAKE_REMOTE`. The working peer in those tests is the real
+    // nulya binary over a pipe; this one only produces the frames a correct
+    // agent never would.
+    const fake_remote = b.addExecutable(.{
+        .name = "fake_remote",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/fake_remote.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const install_fake_remote = b.addInstallArtifact(fake_remote, .{
+        .dest_dir = .{ .override = .{ .custom = "test-bin" } },
+    });
+
+    // The suite is FIVE test binaries, not one: `zig build` runs independent run
     // artifacts concurrently, and one binary is one core. The split is by what a
     // group proves — `e2e-ext` the extension lifecycle, `e2e-core` the kernel
     // session surface, `e2e-agent` delegation, `e2e-std` the bundled file/search
@@ -222,7 +238,7 @@ pub fn build(b: *std.Build) void {
     // writers there are serialized by the store's own `<id>/.lock`, the same
     // exclusive lease two `nulya ext build` processes take (DESIGN §7.4), so
     // the group that gets there second waits and then finds the version built.
-    const e2e_step = b.step("e2e", "Run the whole end-to-end suite (ext + core + agent + std)");
+    const e2e_step = b.step("e2e", "Run the whole end-to-end suite (ext + core + agent + std + remote)");
     const e2e_groups = [_]struct {
         step: []const u8,
         root: []const u8,
@@ -231,6 +247,9 @@ pub fn build(b: *std.Build) void {
         /// group speaks to them, and a group that does not should not have to
         /// build them before it can start.
         fakes: bool = false,
+        /// The broken remote peer, plus the two probe variables the secret
+        /// denylist is checked against. Only the remote group needs either.
+        remote: bool = false,
     }{
         .{
             .step = "e2e-ext",
@@ -252,6 +271,12 @@ pub fn build(b: *std.Build) void {
             .step = "e2e-std",
             .root = "tests/e2e_std.zig",
             .desc = "Run the end-to-end tests for the bundled `std` extension",
+        },
+        .{
+            .step = "e2e-remote",
+            .root = "tests/e2e_remote.zig",
+            .desc = "Run the end-to-end tests for the remote environment: the channel, `nulya remote …`, a remote session",
+            .remote = true,
         },
     };
     for (e2e_groups) |group| {
@@ -290,6 +315,18 @@ pub fn build(b: *std.Build) void {
                 "NULYA_FAKE_PI",
                 b.getInstallPath(.{ .custom = "test-bin" }, fake_pi.out_filename),
             );
+        }
+        if (group.remote) {
+            run_group.step.dependOn(&install_fake_remote.step);
+            run_group.setEnvironmentVariable(
+                "NULYA_FAKE_REMOTE",
+                b.getInstallPath(.{ .custom = "test-bin" }, fake_remote.out_filename),
+            );
+            // Two probes for one assertion: a secret-shaped name that must NOT
+            // reach a command the agent runs, and an ordinary one that must, so
+            // the test proves filtering rather than a broken environment.
+            run_group.setEnvironmentVariable("NULYA_REMOTE_PROBE_API_KEY", "sentinel-must-not-travel");
+            run_group.setEnvironmentVariable("NULYA_REMOTE_PROBE", "sentinel-may-travel");
         }
         run_group.has_side_effects = true; // exercises the filesystem; always run
         b.step(group.step, group.desc).dependOn(&run_group.step);

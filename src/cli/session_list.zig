@@ -36,6 +36,10 @@ const SessionView = struct {
     /// almost every session — so the human table only spends a column on it when
     /// there is something to say.
     environment: []const u8,
+    /// The workspace on that machine, when `environment` names a remote one.
+    /// Projected beside it because the two are one answer: which machine, and
+    /// which directory on it.
+    remote_workspace: []const u8,
     events: usize,
     composition: Composition,
     /// Sum of every assistant event's recorded usage (DESIGN §3.1). Steps whose
@@ -204,6 +208,7 @@ fn readSessionView(
         .model_id = h.model_identity.model,
         .nulya = h.nulya,
         .environment = h.environment,
+        .remote_workspace = h.remote_workspace,
         .events = events,
         .composition = .{
             .active = active,
@@ -381,6 +386,7 @@ test "resolveEpisodes walks a fork chain to its root and totals the episode's us
                 .model_id = "",
                 .nulya = .{},
                 .environment = "",
+                .remote_workspace = "",
                 .events = 0,
                 .composition = .{ .active = &.{}, .native_tools = &.{}, .system_prompts = &.{}, .prompts = &.{} },
                 .usage = .{ .input_tokens = input },

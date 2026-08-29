@@ -112,6 +112,10 @@ pub const AgentSession = struct {
         /// kernel only stores it: which machine a shell command runs on is a
         /// creation-boundary decision, exactly like the model identity.
         environment: []const u8 = "",
+        /// For a remote environment, the absolute workspace on that machine —
+        /// the other half of "where does this session run" (DESIGN §8.1). Empty
+        /// otherwise; the kernel only stores it.
+        remote_workspace: []const u8 = "",
         created: []const u8 = "",
         /// The creating binary's version string (`launch.version`). The other
         /// half of the header's provenance stamp — the kernel hash — comes from
@@ -172,6 +176,7 @@ pub const AgentSession = struct {
             .model = d.model_profile,
             .model_identity = d.model_identity,
             .environment = d.environment,
+            .remote_workspace = d.remote_workspace,
             .created = d.created,
             .nulya = .{ .version = d.nulya_version, .kernel_hash = kernel_hash },
             // The inline prompts go in by VALUE — they have no store entry to

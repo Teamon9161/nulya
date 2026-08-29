@@ -280,6 +280,13 @@ fn taskSupervise(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8)
     // the event into a file on this machine — so this only ever reaches
     // `shellArgv`.
     const exec = flagValue(args, "--env") orelse "";
+    // A supervisor wraps the command with `shellArgv`; a remote environment is
+    // a channel, not a wrapping, and it has no supervisor on the far side yet
+    // (goals/remote-env.md §4, Phase 4). Refused rather than run here.
+    if (launch.isRemoteSpec(exec)) {
+        try printErr(io, launch.remote_background_refusal);
+        return 1;
+    }
     if (launch.execTargetRefusal(exec)) |why| {
         try printErrFmt(alloc, io, "--env {s}: {s}\n", .{ exec, why });
         return 1;
@@ -886,6 +893,14 @@ fn taskRun(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     defer host.deinit();
     var cfg = try config.load(alloc, io, &host);
     defer cfg.deinit();
+
+    // Same answer as `shell {background:true}` gives in such a session, and for
+    // the same reason: the supervisor is a host process and the command belongs
+    // on the machine the session runs on. Checked before anything is allocated.
+    if (launch.isRemoteSpec(hdr.value.environment)) {
+        try printErr(io, launch.remote_background_refusal);
+        return 1;
+    }
 
     const tasks_dir = try launch.sessionTasksDir(alloc, session_id);
     defer alloc.free(tasks_dir);

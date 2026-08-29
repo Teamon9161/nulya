@@ -50,6 +50,8 @@ test {
     _ = @import("providers/codex.zig");
     _ = @import("environment.zig");
     _ = @import("environment/tree.zig");
+    _ = @import("environment/remote/mod.zig");
+    _ = @import("environment/remote/protocol.zig");
     _ = @import("config.zig");
     _ = @import("extension/protocol.zig");
     _ = @import("extension/invoke.zig");
@@ -66,6 +68,7 @@ test {
     _ = @import("cli/session.zig");
     _ = @import("cli/session_list.zig");
     _ = @import("cli/task.zig");
+    _ = @import("cli/remote.zig");
     _ = @import("cli/step_stream.zig");
     _ = @import("cli/ext.zig");
     _ = @import("cli/ext_seed.zig");

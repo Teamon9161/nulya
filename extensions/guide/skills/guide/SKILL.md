@@ -277,6 +277,24 @@ Store and scope:
   ssh only what `SendEnv` does), so a command that wants to call `nulya` again
   has to find it itself. An `ssh` target authenticates with a key file: this
   harness strips `SSH_AUTH_SOCK` from every child environment.
+- **When the WORKSPACE itself lives on the other machine**, `--env` takes a
+  second family of spellings: `remote:wsl`, `remote:wsl:<distro>`,
+  `remote:ssh:<destination>`, or the general `remote:exec:<argv…>` — which is
+  simply the command that starts a process over there (a container runtime, or
+  a nulya you name by path); `remote serve` is appended for you. The named
+  forms assume a `nulya` on that machine's PATH. Add
+  `--workspace <absolute dir>` to say which directory over there this session
+  works in; it is accepted only with a `remote:` spec, and frozen alongside it.
+  The far end is a `nulya remote serve` reached through one long-lived channel,
+  so there is no per-command connection, cancelling a step really does kill the
+  command's process tree over there, and **that machine never needs an API key
+  — the model connection stays here**. Today `remote:` moves `shell` and
+  nothing else: extension tools and background tasks refuse in such a session
+  rather than quietly touching this machine's files, and a spilled tool output
+  still lands here (its footer says so). Two verbs answer the questions a
+  driver has before offering a machine to someone: `nulya remote check --env
+  <spec>` reports what answered, and `nulya remote ls --env <spec> [<dir>]`
+  lists a directory over there exactly, names and kinds.
 - `nulya session step <id> --stream` adds a line protocol: transient
   `{"stream":…}` lines while it runs, interleaved with the same event lines the
   log receives. Behaviour is otherwise identical to a plain step.

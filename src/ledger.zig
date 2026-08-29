@@ -482,6 +482,18 @@ pub const Header = struct {
     /// id. Empty for every session that never asked, which is why this is a
     /// defaulted field rather than a header version bump (DESIGN §3.4, §8).
     environment: []const u8 = "",
+    /// The absolute directory ON THAT MACHINE this session works in — set only
+    /// when `environment` names the remote backend (`remote:…`), where the
+    /// workspace itself lives elsewhere and "." has to mean something over
+    /// there. Empty for every other session, including every one written before
+    /// this existed, which is why it is a defaulted field and not a header
+    /// version bump — the same discipline `environment` and `usage` follow
+    /// (DESIGN §3.4, §8.1).
+    ///
+    /// Frozen for the same reason the target is: a transcript whose paths mean
+    /// one directory for twenty steps and another after a resume is two
+    /// conversations wearing one id.
+    remote_workspace: []const u8 = "",
     created: []const u8 = "",
     /// Which binary wrote this session (see `Stamp`). Provenance, not a gate.
     nulya: Stamp = .{},

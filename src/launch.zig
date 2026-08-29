@@ -18,6 +18,7 @@ const config = @import("config.zig");
 const ledger = @import("ledger.zig");
 const emit = @import("emit.zig");
 const environment = @import("environment.zig");
+const remote = @import("environment/remote/mod.zig");
 const store = @import("extension/store.zig");
 const ext_manifest = @import("extension/manifest.zig");
 const trust = @import("journals/trust.zig");
@@ -659,15 +660,116 @@ pub fn localEnvironment(
     });
 }
 
+/// The remote vocabulary, re-exported so a CLI refusal can quote it without
+/// every verb file importing the backend.
+pub const remote_spec_syntax = remote.spec_syntax;
+
+/// Whether an `--env` spec names the REMOTE backend (the workspace lives over
+/// there) rather than the exec target (only the command travels). One predicate,
+/// so the four call sites that must branch cannot each invent their own test.
+pub fn isRemoteSpec(exec: []const u8) bool {
+    return remote.isSpec(environment.normalizeExecSpec(exec));
+}
+
 /// Say why an `--env` spec cannot be used, or null when it can — so a CLI verb
 /// can refuse BEFORE it creates anything, the way a missing `--prompt` file
-/// does. The two answers are kept apart on purpose: one is a typo, the other is
-/// the wrong machine.
+/// does. The three answers are kept apart on purpose: a typo, the wrong
+/// machine, and a spelling from the other family are three different fixes.
 pub fn execTargetRefusal(exec: []const u8) ?[]const u8 {
-    const target = environment.parseExecTarget(environment.normalizeExecSpec(exec)) catch
-        return "unrecognized (want " ++ environment.exec_target_syntax ++ ")";
+    const spec = environment.normalizeExecSpec(exec);
+    if (remote.isSpec(spec)) {
+        const launch = remote.parseSpec(spec) catch
+            return "unrecognized (want " ++ remote.spec_syntax ++ ")";
+        if (!remote.supportedOnHost(launch)) return "cannot be reached from this host (wsl needs Windows)";
+        return null;
+    }
+    const target = environment.parseExecTarget(spec) catch
+        return "unrecognized (want " ++ environment.exec_target_syntax ++ ", or " ++ remote.spec_syntax ++ ")";
     if (!environment.execTargetSupportedOnHost(target)) return "cannot be reached from this host (wsl needs Windows)";
     return null;
+}
+
+/// The sentence a background-task or supervisor verb prints when it is handed a
+/// remote session. Written once because three call sites say it (DESIGN §8.1).
+pub const remote_background_refusal =
+    "background tasks run where the harness runs, and this session's commands run elsewhere; " ++
+    "run it in the foreground with `shell`, or start it on that machine yourself\n";
+
+/// The clause a spill footer carries in a remote session. The file is real and
+/// the path is right — it is just on the WRONG MACHINE for the reader, and a
+/// pointer that says nothing about that is a pointer the model will waste a
+/// turn on (goals/remote-env.md §3.2). Phase 2 moves the file instead.
+pub const remote_spill_note = " — on the harness host, which this session's commands cannot reach";
+
+/// The execution environment a session runs its tools behind: today's local
+/// backend, or the remote channel (DESIGN §8.1). A union rather than two call
+/// paths so every verb keeps one shape — build it, hand out the handle, deinit.
+pub const SessionEnvironment = union(enum) {
+    local: environment.LocalEnvironment,
+    remote: remote.RemoteEnvironment,
+
+    pub fn handle(self: *SessionEnvironment) environment.Environment {
+        return switch (self.*) {
+            .local => |*l| l.environment(),
+            .remote => |*r| r.environment(),
+        };
+    }
+
+    pub fn deinit(self: *SessionEnvironment) void {
+        switch (self.*) {
+            .local => |*l| l.deinit(),
+            .remote => |*r| r.deinit(),
+        }
+    }
+
+    /// Let shell children find the live session file (DESIGN §5.3). Local only,
+    /// and not as an oversight: that path names a file on THIS machine, so
+    /// publishing it to a process on another one would be a lie a capability
+    /// note would then be deposited against. The identity half of what
+    /// `NULYA_SESSION` carries is a separate question, and Phase 1 does not
+    /// need it (nothing runs over there but `shell`).
+    pub fn publishSessionPath(self: *SessionEnvironment, session_path: []const u8) !void {
+        switch (self.*) {
+            .local => |*l| try l.env.put("NULYA_SESSION", session_path),
+            .remote => {},
+        }
+    }
+
+    /// The clause `emit` appends inside a spill footer, for this environment.
+    pub fn spillNote(self: *const SessionEnvironment) []const u8 {
+        return switch (self.*) {
+            .local => "",
+            .remote => remote_spill_note,
+        };
+    }
+};
+
+/// Build the environment a session runs behind. `exec` decides which of the two
+/// it is; everything else (config backend, the session ref for background
+/// tasks) applies to the local one exactly as before.
+///
+/// A remote spec CONNECTS here — the transport is spawned and the handshake
+/// completes — because there is no honest way to hand back a handle to a
+/// machine that has not answered. A failure is therefore loud and at the top of
+/// the step, which is where an unreachable machine belongs.
+pub fn sessionEnvironment(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    cfg: *const config.Config,
+    session: ?environment.SessionRef,
+    exec: []const u8,
+    workspace: []const u8,
+) !SessionEnvironment {
+    const spec = environment.normalizeExecSpec(exec);
+    if (remote.isSpec(spec)) {
+        if (cfg.environment.backend != .local) return error.UnsupportedEnvironmentBackend;
+        return .{ .remote = try remote.RemoteEnvironment.connect(alloc, io, .{
+            .spec = spec,
+            .workspace = workspace,
+            .version = version,
+        }) };
+    }
+    return .{ .local = try localEnvironment(alloc, io, cfg, session, exec) };
 }
 
 /// The extension store roots this process searches, in order (DESIGN §7.2):
