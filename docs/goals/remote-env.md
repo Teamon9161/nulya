@@ -420,7 +420,7 @@ e2e 里一条通道连跑三次并断言每次都答对（`one channel serves ma
 **顺手抓到的一个真 bug（测试先红）**：`Channel.connect` 的 `std.process.spawn` **漏了 `environ_map`**——传输进程（以及 agent，以及它跑的每条命令）会整份继承本进程的环境，secret 在内。是 §5 那条"没有 host secret 到得了 agent 跑的命令"的 e2e 把它照出来的（`build.zig` 给这一组注入一对探针：一个 secret 形状的必须消失，一个普通的必须还在——后者才让前者是关于 denylist 的断言，而不是关于一个坏掉的环境）。
 
 **测试**：`zig build test` **556 pass / 4 skip**（`environment/remote/{mod,protocol}.zig` 的单测在内）。e2e 逐组：`e2e-ext` 47 · `e2e-core` 48 · `e2e-agent` 23 · `e2e-std` 8 · **`e2e-remote` 12**（约 11 s）。
-**`zig build e2e` 这个聚合步在本机不稳**，而且**与本次改动无关**：把全部改动 `git stash` 之后连跑两次，同样以 `test runner failed to respond for 1m…` 失败三组——单组 `e2e-ext` 本身就要 50 s，而那个 watchdog 的窗口是 60 s 静默，并行起来任何一个跑得久的 `nulya ext build` 都会撞上。记在这里，不在本轮修（要修的是分组或那个静默窗口，不是这条边界）。
+**`zig build e2e` 这个聚合步在本机不稳**，而且**与本次改动无关**（把全部改动 `git stash` 之后连跑两次同样失败）。**后来查清并修掉了（同日）**：不是负载也不是哪个测试慢——失败形状是"每个测试都 pass、run step 却报 `test runner failed to respond for 1m…`"，因为 Zig 0.16 的 Windows spawn 是 `bInheritHandles=TRUE` 且没有 handle allowlist（`std/Io/Threaded.zig`），build runner 并发起五个测试进程时，兄弟进程（连同它们 spawn 的每个 `nulya.exe`）互相继承对方 stdout 管道的写端——先跑完的组等 EOF 等到被最慢的进程树扣押超过 watchdog 的 60 s 窗口（`Step/Run.zig` 的 `response_timeout` 只在**没有测试在跑**时计时，恰好就是"全部跑完等关流"那一刻）。这正是 `environment.DetachedStdio` 在单组内部防的同一个病，跨 build-runner 兄弟只有不同时跑能治。修法在 build.zig：**Windows 宿主上聚合步的五个 run 串成链**（每组一份聚合专用的 run step 克隆，命名的单组步保持无链、互不拖累；POSIX 无此继承竞争，保持并行）。代价如实：Windows 上 `zig build e2e` 从"理论 50 s"变成实测约 4 分钟（各组之和），单组仍是迭代的快路。
 
 ## 7. 开放问题（此处只列，动手那轮拍板）
 

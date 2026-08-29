@@ -121,7 +121,9 @@ Nulya 是一个用 Zig 写的极小 agent harness：**不可变内核 + 可自�
 
 ```bash
 zig build test      # 单元测试（每个模块同文件的 test 块，由 main.zig 聚合）
-zig build e2e       # 全套 e2e = 下面四组，zig build 并行跑（一个 run artifact 一个进程）
+zig build e2e       # 全套 e2e = 下面五组。POSIX 并行（一个 run artifact 一个进程）；Windows 串行——
+                    #   Zig 0.16 spawn 无 handle allowlist，并发的兄弟测试进程互相继承 stdout 写端，
+                    #   先完成的组等 EOF 超过 60s watchdog（build.zig 有注释；单组仍是迭代快路）
 zig build e2e-ext   #   tests/e2e_ext.zig   extension 生命周期：build / store roots / wire / 自造
 zig build e2e-core  #   tests/e2e_core.zig  内核面：durable ledger、`session *`、gate、vision、后台任务
 zig build e2e-agent #   tests/e2e_agent.zig 委派：`extensions/agent` 与它的五种 runner（离线 fake）

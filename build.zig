@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 /// The package manifest, read at configure time so the binary's version string
 /// has exactly one source (DESIGN §3.4: it is stamped into every session header).
@@ -238,6 +239,24 @@ pub fn build(b: *std.Build) void {
     // writers there are serialized by the store's own `<id>/.lock`, the same
     // exclusive lease two `nulya ext build` processes take (DESIGN §7.4), so
     // the group that gets there second waits and then finds the version built.
+    //
+    // ON WINDOWS THE FIVE RUN STEPS ARE CHAINED, NOT CONCURRENT. Zig 0.16
+    // spawns children with `bInheritHandles=TRUE` and no handle allowlist
+    // (std/Io/Threaded.zig), so when the build runner starts several test
+    // processes at once, each one — and every `nulya.exe` its tests spawn —
+    // inherits the write end of its SIBLINGS' stdout pipes. A group that
+    // finishes early then waits for EOF that cannot arrive until the slowest
+    // sibling's whole process tree exits, and the runner's between-tests
+    // watchdog (60 s, Step/Run.zig `response_timeout`) kills it first. The
+    // observable shape is exactly that: every test passes, and the aggregate
+    // still fails with "test runner failed to respond for 1m…" while each
+    // group run by itself is green. Same disease `environment.DetachedStdio`
+    // guards against inside one group; across build-runner siblings only
+    // not-running-together fixes it. POSIX has no handle inheritance race, so
+    // the groups stay concurrent there and the wall clock stays the largest
+    // group rather than the sum.
+    const serialize_e2e = builtin.os.tag == .windows;
+    var previous_e2e_run: ?*std.Build.Step = null;
     const e2e_step = b.step("e2e", "Run the whole end-to-end suite (ext + core + agent + std + remote)");
     const e2e_groups = [_]struct {
         step: []const u8,
@@ -288,49 +307,66 @@ pub fn build(b: *std.Build) void {
         mod.addAnonymousImport("zig_archive", .{ .root_source_file = zig_archive });
         mod.addImport("support", nulya_mod);
         const group_tests = b.addTest(.{ .root_module = mod, .filters = test_filters });
-        const run_group = b.addRunArtifact(group_tests);
-        run_group.setEnvironmentVariable("NULYA_TEST_ZIG", b.graph.zig_exe);
-        // The CLI tests spawn the real `nulya` binary (the runner's own stdout
-        // is the test protocol, so an in-process `cli.dispatch` would corrupt
-        // it). Point at the installed binary, relative to where `zig build` was
-        // run.
-        run_group.step.dependOn(b.getInstallStep());
-        run_group.setEnvironmentVariable("NULYA_EXE", b.getInstallPath(.bin, exe.out_filename));
-        // The repo root, so a test can build the extensions this repo ships
-        // (`extensions/evolution`) from their real source rather than a copy.
-        run_group.setEnvironmentVariable("NULYA_REPO", b.build_root.path orelse ".");
-        if (group.fakes) {
-            run_group.step.dependOn(&install_fake_codex.step);
-            run_group.setEnvironmentVariable(
-                "NULYA_FAKE_CODEX",
-                b.getInstallPath(.{ .custom = "test-bin" }, fake_codex.out_filename),
-            );
-            run_group.step.dependOn(&install_fake_claude.step);
-            run_group.setEnvironmentVariable(
-                "NULYA_FAKE_CLAUDE",
-                b.getInstallPath(.{ .custom = "test-bin" }, fake_claude.out_filename),
-            );
-            run_group.step.dependOn(&install_fake_pi.step);
-            run_group.setEnvironmentVariable(
-                "NULYA_FAKE_PI",
-                b.getInstallPath(.{ .custom = "test-bin" }, fake_pi.out_filename),
-            );
+        // Two run steps of the SAME test binary when the aggregate must be
+        // chained (Windows, see above): the named step (`zig build e2e-agent`)
+        // keeps a run with no chain edges — a person iterating on one group
+        // must never pay for the four they did not name — and the aggregate
+        // gets its own copy with the serializing edge. Off Windows one run
+        // serves both.
+        const copies: usize = if (serialize_e2e) 2 else 1;
+        for (0..copies) |copy| {
+            const run_group = b.addRunArtifact(group_tests);
+            run_group.setEnvironmentVariable("NULYA_TEST_ZIG", b.graph.zig_exe);
+            // The CLI tests spawn the real `nulya` binary (the runner's own
+            // stdout is the test protocol, so an in-process `cli.dispatch`
+            // would corrupt it). Point at the installed binary, relative to
+            // where `zig build` was run.
+            run_group.step.dependOn(b.getInstallStep());
+            run_group.setEnvironmentVariable("NULYA_EXE", b.getInstallPath(.bin, exe.out_filename));
+            // The repo root, so a test can build the extensions this repo ships
+            // (`extensions/evolution`) from their real source rather than a copy.
+            run_group.setEnvironmentVariable("NULYA_REPO", b.build_root.path orelse ".");
+            if (group.fakes) {
+                run_group.step.dependOn(&install_fake_codex.step);
+                run_group.setEnvironmentVariable(
+                    "NULYA_FAKE_CODEX",
+                    b.getInstallPath(.{ .custom = "test-bin" }, fake_codex.out_filename),
+                );
+                run_group.step.dependOn(&install_fake_claude.step);
+                run_group.setEnvironmentVariable(
+                    "NULYA_FAKE_CLAUDE",
+                    b.getInstallPath(.{ .custom = "test-bin" }, fake_claude.out_filename),
+                );
+                run_group.step.dependOn(&install_fake_pi.step);
+                run_group.setEnvironmentVariable(
+                    "NULYA_FAKE_PI",
+                    b.getInstallPath(.{ .custom = "test-bin" }, fake_pi.out_filename),
+                );
+            }
+            if (group.remote) {
+                run_group.step.dependOn(&install_fake_remote.step);
+                run_group.setEnvironmentVariable(
+                    "NULYA_FAKE_REMOTE",
+                    b.getInstallPath(.{ .custom = "test-bin" }, fake_remote.out_filename),
+                );
+                // Two probes for one assertion: a secret-shaped name that must
+                // NOT reach a command the agent runs, and an ordinary one that
+                // must, so the test proves filtering rather than a broken
+                // environment.
+                run_group.setEnvironmentVariable("NULYA_REMOTE_PROBE_API_KEY", "sentinel-must-not-travel");
+                run_group.setEnvironmentVariable("NULYA_REMOTE_PROBE", "sentinel-may-travel");
+            }
+            run_group.has_side_effects = true; // exercises the filesystem; always run
+            const for_aggregate = copy + 1 == copies;
+            if (copy == 0) b.step(group.step, group.desc).dependOn(&run_group.step);
+            if (for_aggregate) {
+                if (serialize_e2e) {
+                    if (previous_e2e_run) |prev| run_group.step.dependOn(prev);
+                    previous_e2e_run = &run_group.step;
+                }
+                e2e_step.dependOn(&run_group.step);
+            }
         }
-        if (group.remote) {
-            run_group.step.dependOn(&install_fake_remote.step);
-            run_group.setEnvironmentVariable(
-                "NULYA_FAKE_REMOTE",
-                b.getInstallPath(.{ .custom = "test-bin" }, fake_remote.out_filename),
-            );
-            // Two probes for one assertion: a secret-shaped name that must NOT
-            // reach a command the agent runs, and an ordinary one that must, so
-            // the test proves filtering rather than a broken environment.
-            run_group.setEnvironmentVariable("NULYA_REMOTE_PROBE_API_KEY", "sentinel-must-not-travel");
-            run_group.setEnvironmentVariable("NULYA_REMOTE_PROBE", "sentinel-may-travel");
-        }
-        run_group.has_side_effects = true; // exercises the filesystem; always run
-        b.step(group.step, group.desc).dependOn(&run_group.step);
-        e2e_step.dependOn(&run_group.step);
     }
 
     // Live-provider checks (PLAN §1 M4 acceptance). Kept out of `test` / `e2e`,
