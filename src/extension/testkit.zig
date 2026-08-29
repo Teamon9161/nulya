@@ -10,9 +10,14 @@ const std = @import("std");
 const integrity = @import("integrity.zig");
 const manifest = @import("manifest.zig");
 const store = @import("store.zig");
+const target_mod = @import("target.zig");
 
 const compiler = "zig test";
-const target = "test-target";
+/// A fixture's binary is written with the HOST's exe suffix, so its seal has to
+/// say so: validation reads the suffix off `seal.target` (`integrity.openVersion`),
+/// and a made-up target word would send it looking for `bin/demo` next to a
+/// `bin/demo.exe` this file just wrote.
+const target = target_mod.host;
 const default_main = "pub fn main() void {}\n";
 const stub_binary = "stub-binary\n";
 

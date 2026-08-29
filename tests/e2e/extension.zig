@@ -8,6 +8,7 @@
 //! its own (`zig build e2e-agent`).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const support = @import("support.zig");
 
 const build_ext = support.build_ext;
@@ -19,6 +20,7 @@ const ledger = support.ledger;
 const manifest_mod = support.manifest;
 const session = support.session;
 const store = support.store;
+const target_mod = support.target;
 const templates = support.templates;
 const tool_stats = support.tool_stats;
 
@@ -36,6 +38,118 @@ const runCliStderr = support.runCliStderr;
 const scaffoldAndBuild = support.scaffoldAndBuild;
 
 const ext_dir_rel = ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "demo";
+
+/// A target this host is NOT, so "another version" is observable. The pair is
+/// chosen for cheapness: neither of these links a libc for a program that uses
+/// none, so the cross build is a compile, not a toolchain download.
+const cross_target: target_mod.Target = if (builtin.os.tag == .linux)
+    .{ .arch = .x86_64, .os = .windows }
+else
+    .{ .arch = .x86_64, .os = .linux };
+
+test "a cross build is another version of the same package, and it says which machine it is for" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const zig_exe = host_env.get("NULYA_TEST_ZIG") orelse return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    // The smallest compiled package there is: this test is about identity and
+    // the seal, and every second spent compiling is spent on neither.
+    try ws.createDirPath(io, "draft" ++ std.fs.path.sep_str ++ "src");
+    try ws.writeFile(io, .{ .sub_path = "draft" ++ std.fs.path.sep_str ++ "extension.json", .data =
+        \\{"schema":"nulya.extension/v2","id":"crossed","runtime":{"entry":"bin/crossed"},"contributes":{"tools":[{"name":"greet","input":{}}]}}
+    });
+    try ws.writeFile(io, .{ .sub_path = "draft" ++ std.fs.path.sep_str ++ "src" ++ std.fs.path.sep_str ++ "main.zig", .data = "pub fn main() void {}\n" });
+
+    var zig = build_ext.Zig.init(zig_exe);
+    defer zig.deinit(alloc);
+
+    var here = try build_ext.buildExtension(alloc, io, ws, "draft", ws, &zig);
+    defer here.deinit(alloc);
+    if (!here.compile_ok) {
+        std.debug.print("host build failed:\n{s}\n", .{here.stderr});
+        return error.ExtensionBuildFailed;
+    }
+
+    var there = try build_ext.buildExtensionReusing(alloc, io, ws, "draft", ws, &zig, .{ .target = cross_target });
+    defer there.deinit(alloc);
+    if (!there.compile_ok) {
+        std.debug.print("cross build failed:\n{s}\n", .{there.stderr});
+        return error.ExtensionBuildFailed;
+    }
+
+    // Same source, same compiler, different machine: a DIFFERENT version, side
+    // by side under the same id. That is the whole shape of per-target support —
+    // no new store layout and no new seal field, because the target has been part
+    // of a compiled version's identity since DESIGN §7.4 was written.
+    try std.testing.expect(!std.mem.eql(u8, here.version, there.version));
+
+    const version_rel = try std.fs.path.join(alloc, &.{ "crossed", "versions", there.version });
+    defer alloc.free(version_rel);
+    const seal_sub = try std.fs.path.join(alloc, &.{ version_rel, "seal.json" });
+    defer alloc.free(seal_sub);
+    const seal_bytes = try ws.readFileAlloc(io, seal_sub, alloc, .limited(1 << 16));
+    defer alloc.free(seal_bytes);
+    var seal = try integrity.parseSeal(alloc, seal_bytes);
+    defer seal.deinit();
+    // The two words the CLI accepts are the two words the seal records — which
+    // is what lets a donor lookup, and a later `exec_version` reverse lookup,
+    // use one key.
+    try std.testing.expectEqualStrings(cross_target.words(), seal.target);
+
+    // The built file is named for the TARGET, not for the machine that produced
+    // it, and the version still validates here — validation reads the suffix off
+    // the seal, so a host looking at a foreign version is not looking for a file
+    // that was never going to be there.
+    try std.testing.expectEqualStrings(cross_target.exeSuffix(), std.fs.path.extension(there.entry_rel.?));
+    try integrity.validateVersionDir(alloc, io, ws, version_rel, there.version, "crossed", .sealed);
+
+    // Reproducible: the same cross build again is the same id and no compile.
+    // (Nothing here ever RUNS the artifact — it is for another machine.)
+    var again = try build_ext.buildExtensionReusing(alloc, io, ws, "draft", ws, &zig, .{ .target = cross_target });
+    defer again.deinit(alloc);
+    try std.testing.expect(again.already_built);
+    try std.testing.expectEqualStrings(there.version, again.version);
+}
+
+test "a package with no binary refuses a target instead of quietly building the ordinary version" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+    try ws.createDirPath(io, "skilled" ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "demo");
+    try ws.writeFile(io, .{ .sub_path = "skilled" ++ std.fs.path.sep_str ++ "extension.json", .data =
+        \\{"schema":"nulya.extension/v2","id":"skilled","contributes":{"skills":["skills/demo"]}}
+    });
+    try ws.writeFile(io, .{ .sub_path = "skilled" ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "demo" ++ std.fs.path.sep_str ++ "SKILL.md", .data = "---\nname: demo\ndescription: demo\n---\nbody\n" });
+
+    const err = try runCliStderr(alloc, io, ws, &.{ exe, "ext", "build", "skilled", "--target", cross_target.words() }, &.{});
+    defer alloc.free(err);
+    try std.testing.expect(err.len != 0);
+    // …and nothing was built, so the refusal cannot be mistaken for a build that
+    // ignored the flag.
+    try std.testing.expectError(error.FileNotFound, ws.access(io, ".nulya" ++ std.fs.path.sep_str ++ "extensions" ++ std.fs.path.sep_str ++ "skilled", .{}));
+
+    // A target nobody has is refused too, and by the same verb, so the two
+    // failures are not one message with two meanings.
+    const unknown = try runCliStderr(alloc, io, ws, &.{ exe, "ext", "build", "skilled", "--target", "x86_64-plan9" }, &.{});
+    defer alloc.free(unknown);
+    try std.testing.expect(std.mem.indexOf(u8, unknown, "x86_64-plan9") != null);
+}
 
 test "closed loop: init -> build -> activate -> run round-trips JSON" {
     const alloc = std.testing.allocator;

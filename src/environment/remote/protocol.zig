@@ -32,6 +32,10 @@
 //!                                                       payload: the file's bytes
 //!     {"op":"list-dir","path":"<dir>"}
 //!     {"op":"cancel"}
+//!     {"op":"store-stat","id":"<ext id>","version":"v-<hash>"}
+//!     {"op":"store-put","path":"<version-relative>","exec":B,"bytes":L}
+//!                                                       payload: the file's bytes
+//!     {"op":"store-commit"}
 //!
 //! agent → host
 //!     {"ok":true,"v":2,"nulya":…,"os":…,"arch":…,"home":…,"cwd":…,"dialect":…}
@@ -42,12 +46,42 @@
 //!                                     payload: [{"name":"…","dir":B},…] — the
 //!                                     directory listing, as JSON (`encodeEntries`)
 //!     {"ok":true}                     put-file wrote it
+//!     {"ok":true,"held":B}            store-stat: whether that machine's user
+//!                                     store already holds that version, sealed
 //!     {"ok":false,"message":"…"}
 //!
 //! `run-extension` and `start-task` are named in `Op` and answered `ok:false`
 //! with a sentence saying which phase implements them. They are in the
 //! vocabulary and not in this build on purpose: a host talking to a newer agent,
 //! or the reverse, gets a sentence rather than "unknown op".
+//!
+//! ── Pushing an extension version (`nulya ext push`, DESIGN §7.4) ────────────
+//!
+//! The three `store-*` verbs are one sequence, and they are three rather than
+//! one because a version is a TREE and a frame carries one payload:
+//!
+//!     store-stat   → held:true  … nothing more to do; the hash IS the check
+//!                  → held:false … the agent opens a staging directory for this
+//!                                 version under `<id>/` and takes that id's
+//!                                 writer lease (`Store.lease`), which it holds
+//!                                 until commit or until the channel closes
+//!     store-put ×N   one file each, version-relative and `/`-spelled
+//!     store-commit   the agent validates the staging tree AS a version
+//!                    (`.sealed`, its own bytes, its own machine) and only then
+//!                    renames it into `<id>/versions/<v>`
+//!
+//! `store-put` and `store-commit` name no id: the agent is holding exactly one
+//! open push (rule 1 — one request in flight, one channel) and inventing a
+//! second place to say which one would be a second answer to drift from. What
+//! makes this safe is the commit: a torn or tampered tree fails validation and
+//! is deleted, so a half-copied version can never become visible under
+//! `versions/`, whatever happened to the channel in the middle.
+//!
+//! `exec` on `store-put` says these bytes are meant to be executed — the host
+//! sets it for the compiled entry under `bin/`. It exists because the bytes
+//! travel as bytes: a file copy carries its mode, a payload does not, and a
+//! pushed binary that arrives without the bit is a version that is there and
+//! cannot run. Hosts that have no such bit ignore it.
 //!
 //! ── The rules ───────────────────────────────────────────────────────────────
 //!
@@ -99,6 +133,13 @@ const std = @import("std");
 ///
 /// v2: `list-dir` answers its entries as a payload instead of a header field
 /// (rule 6), and `put-file` became a real verb instead of a refusal.
+///
+/// The three `store-*` verbs arrived WITHOUT a bump, which is the rule working
+/// rather than an exception to it: no existing frame changed meaning, and an
+/// older agent asked for one answers the `unknown` sentence naming what it does
+/// know. A push against such a machine therefore fails with a sentence about
+/// that machine's build — the outcome a version number could only have produced
+/// earlier and less precisely, at the cost of breaking every other verb too.
 pub const version: u32 = 2;
 
 /// The longest header line either side will read before refusing. Headers are
@@ -139,6 +180,9 @@ pub const Op = enum {
     run_extension,
     put_file,
     start_task,
+    store_stat,
+    store_put,
+    store_commit,
     unknown,
 
     /// The wire spelling: kebab-case, because that is what a reader of a
@@ -152,6 +196,9 @@ pub const Op = enum {
             .run_extension => "run-extension",
             .put_file => "put-file",
             .start_task => "start-task",
+            .store_stat => "store-stat",
+            .store_put => "store-put",
+            .store_commit => "store-commit",
             .unknown => "unknown",
         };
     }
@@ -190,6 +237,14 @@ pub const Request = struct {
     /// `run-shell`: the runner-level capture cap, applied on the agent side so
     /// an enormous output never crosses the channel at all.
     max_output_bytes: usize = 0,
+    /// `store-stat`: which extension, and which immutable version of it. The
+    /// two later verbs of a push name neither — the agent has exactly one open
+    /// push, and a second spelling of "which one" is a second thing to drift.
+    id: []const u8 = "",
+    version: []const u8 = "",
+    /// `store-put`: these bytes are meant to be executed (the compiled entry
+    /// under `bin/`). A file copy carries its mode; a payload does not.
+    exec: bool = false,
     /// Payload length, in octets, following this header's newline.
     bytes: usize = 0,
 };
@@ -244,6 +299,11 @@ pub const Reply = struct {
     /// The command was killed because the host asked (rule 3), so the output
     /// below is partial and the exit code means nothing.
     canceled: bool = false,
+    /// `store-stat`: that machine's user store already holds this exact version
+    /// and it still validates against its seal. A version is content-addressed,
+    /// so this is the whole of "do I need to send it" — no manifest, no
+    /// timestamps, no negotiation.
+    held: bool = false,
     /// Payload length: `run-shell`'s stdout followed by its stderr, or
     /// `list-dir`'s encoded entries.
     bytes: usize = 0,
@@ -423,8 +483,9 @@ test "a header that would outgrow the reader's buffer is refused instead of writ
 
 test "unknown verbs stay in the vocabulary instead of becoming errors" {
     // Every named verb parses back to itself…
-    for ([_]Op{ .hello, .run_shell, .list_dir, .cancel, .run_extension, .put_file, .start_task }) |op| {
-        try std.testing.expectEqual(op, Op.parse(op.wire()));
+    inline for (@typeInfo(Op).@"enum".fields) |f| {
+        const op: Op = @enumFromInt(f.value);
+        if (op != .unknown) try std.testing.expectEqual(op, Op.parse(op.wire()));
     }
     // …and anything else is a value the agent can answer with a sentence,
     // which is what makes a newer host talking to an older agent legible.

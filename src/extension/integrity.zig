@@ -10,12 +10,18 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const manifest = @import("manifest.zig");
+const target_mod = @import("target.zig");
 
 pub const version_prefix = "v-";
 pub const manifest_file = "extension.json";
 pub const package_dir = "package";
 pub const seal_file = "seal.json";
-pub const exe_suffix = if (builtin.os.tag == .windows) ".exe" else "";
+/// The suffix a version built FOR THIS HOST carries. Derived from the same one
+/// function a seal's target goes through (`target.exeSuffixFor`), so the host
+/// case is not a second rule — it is the general rule asked about this machine.
+/// Callers that are about to run something here want this one; validation wants
+/// the seal's (see `openVersion`).
+pub const exe_suffix = target_mod.exeSuffixFor(target_mod.host);
 
 const max_snapshot_file_bytes: usize = 16 * 1024 * 1024;
 const digest_bytes = 12;
@@ -405,8 +411,14 @@ pub fn openVersion(
         } else {
             // A compiled entry is never per-OS (`manifest.validate` refuses the
             // object form for `bin/` paths), so the host always has one.
+            //
+            // The SUFFIX comes off the seal, not off this machine: a version
+            // cross-built for another target (`ext build --target`, DESIGN §7.4)
+            // is validated here — on the host that produced it, and again on the
+            // machine it was pushed to — and asking `builtin` would send both of
+            // them looking for a file named for the wrong platform.
             const compiled_entry = rt.entry.forHost() orelse return error.VersionEntryNotFound;
-            const entry = try std.fmt.allocPrint(alloc, "{s}{s}", .{ compiled_entry, exe_suffix });
+            const entry = try std.fmt.allocPrint(alloc, "{s}{s}", .{ compiled_entry, target_mod.exeSuffixFor(seal.target) });
             defer alloc.free(entry);
             const entry_sub = try std.fs.path.join(alloc, &.{ version_rel, entry });
             defer alloc.free(entry_sub);

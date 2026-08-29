@@ -26,6 +26,7 @@ pub const remote = support.remote;
 pub const remote_protocol = support.remote_protocol;
 pub const session = support.session;
 pub const store = support.store;
+pub const target = support.target;
 pub const templates = support.templates;
 pub const tool = support.tool;
 pub const tool_stats = support.tool_stats;

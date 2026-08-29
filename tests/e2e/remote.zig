@@ -14,7 +14,10 @@
 //!   6. a spill lands on the machine whose files the model can open, at the very
 //!      path its footer names (Phase 2);
 //!   7. what is NOT moved yet says so: extension tools and background tasks
-//!      refuse, in sentences, rather than silently touching this machine.
+//!      refuse, in sentences, rather than silently touching this machine;
+//!   8. an extension version pushed over the channel is validated against its
+//!      own seal ON THAT MACHINE before it becomes a version anyone can use,
+//!      and pushing one that is already there does nothing (Phase 3).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -23,6 +26,10 @@ const support = @import("support.zig");
 const remote = support.remote;
 const environment = support.environment;
 const emit = support.emit;
+const integrity = support.integrity;
+const launch = support.launch;
+const protocol = support.remote_protocol;
+const templates = support.templates;
 
 const runCli = support.runCli;
 const runCliEnv = support.runCliEnv;
@@ -511,6 +518,179 @@ test "put-file creates the directories the path names" {
     const back = try far.dir.readFileAlloc(io, ".nulya/scratch/s-x/tool-output/deep.txt", alloc, .unlimited);
     defer alloc.free(back);
     try std.testing.expectEqualStrings("bytes", back);
+}
+
+// ── pushing an extension version ────────────────────────────────────────────
+//
+// The far machine has to be a DIFFERENT machine in the one respect this is
+// about: its user store. Offline the far side is this same binary over a pipe,
+// which inherits the harness's environment — so these tests go through
+// `tests/remote_home.zig`, a transport that adds `NULYA_HOME` and then spawns
+// the real nulya. Without it "the far store" and "this store" would be one
+// directory, and every assertion below would be true for the wrong reason.
+
+/// A spec whose agent has `home` as its own nulya home.
+fn homedSpec(alloc: std.mem.Allocator, exe: []const u8, home: []const u8) ![]u8 {
+    const wrapper_rel = (try envVar(alloc, "NULYA_REMOTE_HOME_EXE")) orelse return error.SkipZigTest;
+    defer alloc.free(wrapper_rel);
+    const wrapper = try std.fs.path.resolve(alloc, &.{wrapper_rel});
+    defer alloc.free(wrapper);
+    const extra = try std.fmt.allocPrint(alloc, "{s} {s}", .{ home, exe });
+    defer alloc.free(extra);
+    return execSpec(alloc, wrapper, extra);
+}
+
+/// The extension store of a nulya whose home is `home`, asked of the same
+/// function the agent itself will use — so the test looks where the product
+/// looks rather than where the test author remembers the layout being.
+fn userStoreOf(alloc: std.mem.Allocator, home: []const u8) ![]u8 {
+    var map = try std.testing.environ.createMap(alloc);
+    defer map.deinit();
+    try map.put("NULYA_HOME", home);
+    return (try launch.userExtensionsRoot(alloc, &map)) orelse error.SkipZigTest;
+}
+
+/// A compiled extension built into `ws`'s workspace store — the thing worth
+/// pushing, because it has a `bin/` and therefore a mode to carry. Compiled at
+/// most once per checkout (the suite's shared prebuilt cache).
+fn pushable(alloc: std.mem.Allocator, io: std.Io, ws: std.Io.Dir, id: []const u8) ![]u8 {
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const zig_exe = host_env.get("NULYA_TEST_ZIG") orelse return error.SkipZigTest;
+    const manifest_bytes = try templates.manifestJson(alloc, id, "greet");
+    defer alloc.free(manifest_bytes);
+    return support.installPrebuilt(alloc, io, ws, zig_exe, id, manifest_bytes, support.plain_main_zig);
+}
+
+/// "That machine's home": a directory that is neither this workspace's store
+/// nor the developer's real one. Returns the absolute path, in `buf`.
+fn farHome(io: std.Io, ws: std.Io.Dir, buf: *[std.fs.max_path_bytes]u8) ![]u8 {
+    try ws.createDirPath(io, "far-home");
+    var dir = try ws.openDir(io, "far-home", .{});
+    defer dir.close(io);
+    return absOf(io, dir, buf);
+}
+
+test "a pushed version lands in the far machine's own store, and pushing it again does nothing" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    const exe = try nulyaExe(alloc);
+    defer alloc.free(exe);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const id = "pushed";
+    const version = try pushable(alloc, io, ws, id);
+    defer alloc.free(version);
+    const ref = try std.fmt.allocPrint(alloc, "{s}@{s}", .{ id, version });
+    defer alloc.free(ref);
+
+    var far_home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const far_home = try farHome(io, ws, &far_home_buf);
+    const spec = try homedSpec(alloc, exe, far_home);
+    defer alloc.free(spec);
+
+    const pushed = try runCli(alloc, io, ws, &.{ exe, "ext", "push", ref, "--env", spec });
+    defer alloc.free(pushed.stdout);
+    try std.testing.expectEqual(@as(u8, 0), pushed.code);
+
+    // It is there, and it is that version — proved the way every other consumer
+    // of a store proves it, against the seal.
+    const far_store = try userStoreOf(alloc, far_home);
+    defer alloc.free(far_store);
+    var far_root = try std.Io.Dir.openDirAbsolute(io, far_store, .{ .iterate = true });
+    defer far_root.close(io);
+    const version_rel = try std.fs.path.join(alloc, &.{ id, "versions", version });
+    defer alloc.free(version_rel);
+    try integrity.validateVersionDir(alloc, io, far_root, version_rel, version, id, .sealed);
+
+    // A marker INSIDE the installed version, which no push writes and the seal
+    // does not cover. A second push that re-sent the tree would stage a fresh
+    // directory and rename it over this one, so the marker surviving IS the
+    // no-op — not a sentence claiming one.
+    const marker = try std.fs.path.join(alloc, &.{ version_rel, "pushed-once" });
+    defer alloc.free(marker);
+    try far_root.writeFile(io, .{ .sub_path = marker, .data = "x" });
+
+    const again = try runCli(alloc, io, ws, &.{ exe, "ext", "push", ref, "--env", spec });
+    defer alloc.free(again.stdout);
+    try std.testing.expectEqual(@as(u8, 0), again.code);
+    try far_root.access(io, marker, .{});
+
+    // An exec target keeps this machine's store, so there is nothing over there
+    // to push into — and the copy must not happen silently into our own.
+    const wrong = try runCliStderr(alloc, io, ws, &.{ exe, "ext", "push", ref, "--env", "ssh:me@box" }, &.{});
+    defer alloc.free(wrong);
+    try std.testing.expect(std.mem.indexOf(u8, wrong, "ssh:me@box") != null);
+}
+
+test "a version that does not arrive intact never becomes visible over there" {
+    const alloc = std.testing.allocator;
+    var threaded = threadedIo(alloc);
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const exe = try nulyaExe(alloc);
+    defer alloc.free(exe);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const id = "pushed";
+    const version = try pushable(alloc, io, ws, id);
+    defer alloc.free(version);
+
+    var far_home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const far_home = try farHome(io, ws, &far_home_buf);
+    const spec = try homedSpec(alloc, exe, far_home);
+    defer alloc.free(spec);
+
+    // The frames are driven by hand, because `ext push` validates its own copy
+    // before sending: the only way to ask "does the FAR side check?" is to be a
+    // host that sends bytes it should not have.
+    var ch = try remote.Channel.connect(alloc, io, try remote.parseSpec(spec), "e2e", .default);
+    defer ch.deinit();
+
+    const stat = try ch.controlRound(.{ .op = protocol.Op.store_stat.wire(), .id = id, .version = version }, "");
+    try std.testing.expect(stat.ok and !stat.held);
+
+    const version_rel = try std.fs.path.join(alloc, &.{ ".nulya/extensions", id, "versions", version });
+    defer alloc.free(version_rel);
+    var src = try ws.openDir(io, version_rel, .{ .iterate = true });
+    defer src.close(io);
+    var walker = try src.walk(alloc);
+    defer walker.deinit();
+    while (try walker.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        const rel = try integrity.canonicalRel(alloc, entry.path);
+        defer alloc.free(rel);
+        const bytes = try src.readFileAlloc(io, entry.path, alloc, .unlimited);
+        defer alloc.free(bytes);
+        // One file arrives altered — the shape a truncated transfer, a mangled
+        // copy and a tampering host all produce.
+        const send = if (std.mem.eql(u8, rel, "extension.json")) bytes[0 .. bytes.len - 1] else bytes;
+        const put = try ch.controlRound(.{ .op = protocol.Op.store_put.wire(), .path = rel, .bytes = send.len }, send);
+        try std.testing.expect(put.ok);
+    }
+
+    // The commit is where the far side does its own checking, and it refuses.
+    const commit = try ch.controlRound(.{ .op = protocol.Op.store_commit.wire() }, "");
+    try std.testing.expect(!commit.ok);
+
+    // And nothing half-installed is left behind: no version directory at all,
+    // which is what keeps a failed push from becoming a broken extension some
+    // later session over there composes.
+    const far_store = try userStoreOf(alloc, far_home);
+    defer alloc.free(far_store);
+    var far_root = try std.Io.Dir.openDirAbsolute(io, far_store, .{ .iterate = true });
+    defer far_root.close(io);
+    const far_version_rel = try std.fs.path.join(alloc, &.{ id, "versions", version });
+    defer alloc.free(far_version_rel);
+    try std.testing.expectError(error.FileNotFound, far_root.access(io, far_version_rel, .{}));
 }
 
 // ── what is not moved yet ───────────────────────────────────────────────────

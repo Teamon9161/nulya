@@ -34,6 +34,7 @@ pub const remote = @import("environment/remote/mod.zig");
 pub const remote_protocol = @import("environment/remote/protocol.zig");
 pub const session = @import("session.zig");
 pub const store = @import("extension/store.zig");
+pub const target = @import("extension/target.zig");
 pub const templates = @import("extension/build/templates.zig");
 pub const tool = @import("tool.zig");
 pub const tool_stats = @import("journals/tool_stats.zig");

@@ -1,7 +1,8 @@
 # Remote environment — 工作区住在别的机器上
 
-> **状态：设计已审阅通过；§4 的 Phase 1 与 Phase 2 已落地**（2026-08-29，见 DESIGN §8 的第四个动词、§8.2 的 `remote:` 一族与 §14 的 `remote` 动词族）。
-> Phase 3–5 未实施。原有的 [DESIGN §8/§8.1](../DESIGN.md) exec target（`session new --env wsl|ssh`，**只有 `shell` 的命令移动**）；
+> **状态：设计已审阅通过；§4 的 Phase 1 与 Phase 2 已落地，Phase 3 前半已落地**（2026-08-29，见 DESIGN §8 的第四个动词、§8.2 的 `remote:` 一族与 §14 的 `remote` 动词族；
+> Phase 3 的 `ext build --target` 与 `ext push` 见 §6.3 与 DESIGN §7.4，`ExtensionRequest` 搬迁与 header 的 `exec_version` 列在下一轮）。
+> Phase 4–5 未实施。原有的 [DESIGN §8/§8.1](../DESIGN.md) exec target（`session new --env wsl|ssh`，**只有 `shell` 的命令移动**）；
 > 方向笔记在 [PLAN §3.8](../PLAN.md)（「真·remote environment = 第二个 `Environment` 实现」）。本文件答那一节列出而没答的缺口。
 > 八条 physics 与「内核只长 substrate」是尺子（[CLAUDE.md](../../CLAUDE.md)）。
 
@@ -358,9 +359,9 @@ nulya ext push <id>@<v> --env <spec>          # 内容寻址的一次拷贝 + �
 - 内核：`Environment` 第四个动词 `putWorkspaceFile`；`emit` 的 spill 与 `StepOutputLimiter` 经它写。local 实现 = 今天那行。
 - 这之前 footer 用 §3.2 的诚实降级措辞。
 
-**Phase 3 · extension 搬走**（用户诉求真正被满足的那一步）
+**Phase 3 · extension 搬走**（用户诉求真正被满足的那一步）· **进行中：`--target` / `push` 已落地（§6.3），`ExtensionRequest` 搬迁与 `exec_version` 在下一轮**
 - 内核：`ExtensionRequest` 从 `entry_path` 改成 `(id, version, tool)`，解析与 `.sealed` 复验移到执行侧
-  （§7.5 的"冻绝对路径"随之删除——**是收窄不是新增**）· `ext build --target <triple>` · `ext push` · header 的 `exec_version` 列。
+  （§7.5 的"冻绝对路径"随之删除——**是收窄不是新增**）· ~~`ext build --target <triple>`~~ ✅（两词形，不是 triple——见 §6.3 偏差 1）· ~~`ext push`~~ ✅ · header 的 `exec_version` 列。
 - TUI：`/ext` 的 push 动作与 per-target 状态；`[env.*]` profile 由人放宽。
 - **`handoff` 显式不进远端 composition**（§3.2），并给它的"提议变成数据"记一条 follow-up。
 
@@ -452,6 +453,36 @@ e2e 里一条通道连跑三次并断言每次都答对（`one channel serves ma
 **任务 1 那半是一个真 bug，不是清理**：`serveListDir` 用 `max_entries` 这个**条数**去保证 `max_header_bytes` 这个**字节数**，而 1000 个 255 字节的文件名是四分之一兆——host 侧 `takeDelimiter('\n')` 的 buffer 只有 `max_header_bytes`，于是一个完全合法的目录就能把整条通道判死。修法不止是把 entries 搬进负载：**编码器现在拒绝超界的头**（`error.HeaderTooLarge`），所以下一个往头里塞会长的字段的动词，在造出那一帧的地方就被拦住，而不是在对面变成一条突然不说话的通道。单测钉的是机制而不是数字：1000 个 250 字节名字的 listing 走新路径，头仍在界内、entries 无损回来；一个超界的 `message` / `path` 编不出来。
 
 **测试**：`zig build test` **558 pass / 4 skip**（`protocol.zig` 新增两条：大 listing 走负载、超界的头被拒）。e2e 逐组：`e2e-ext` 47 · `e2e-core` 48 · `e2e-agent` 23 · `e2e-std` 8 · **`e2e-remote` 14**（Phase 2 新增两条：spill 落在远端工作区且 host 上没有、put-file 建得出多层父目录）。
+
+### 6.3 Phase 3 前半（2026-08-29）：`ext build --target` + `ext push`
+
+**落地了什么**（现状写进 DESIGN §7.4 / §8.2 / §14；本节只记过程与偏差）：
+
+| 新增 | 是什么 |
+|---|---|
+| `src/extension/target.zig` | 两词 target 的唯一定义：闭集 `Arch`×`Os`、`words()`（进 id / seal 的那两个词）、`zigTriple()`（abi 在这里选）、`exeSuffixFor(words)`（后缀属于 target，不属于读它的机器）、`host` |
+| `ext build --target <arch>-<os>` | `build_ext.Options{donors, target}`；`-target <triple>` 只在点名时出现（host build 保持 **native**，不改字节）；data/script 写它是 `TargetNotApplicable` |
+| `ext push <id>@<v> --env remote:…` | `src/cli/ext_push.zig`：本机 `.sealed` → 逐文件过通道 → 对面 staging → 对面 `.sealed` → 原子 rename |
+| 协议 `store-stat` / `store-put` / `store-commit` | **不 bump `v`**（加动词由 unknown-op 那句话覆盖，规则 4）；Request 多 `id` / `version` / `exec`，Reply 多 `held` |
+| `tests/remote_home.zig` + `zig build` 接线 | 一个**传输**（不是假 peer）：加一个 `NULYA_HOME` 再 spawn 真 nulya，好让"远端 store"真的是另一个目录 |
+
+**与设计的偏差，逐条**：
+
+1. **`--target` 收两个词，不收 zig triple。** §3.1 写的是 `--target <triple>`，而 seal 的 `target` 列从第一天起就是 `<arch>-<os>` 两个词，且**它就是 donor 匹配的键**（DESIGN §7.4）。收三个词就会让 `x86_64-linux-musl` 与那台机器本机建出的 `x86_64-linux` 成为两个版本——身份必须与已有的那一列逐位对上，而不是与 zig 的命令行对上。于是 abi 是**这里选的**（linux→musl / windows→gnu / macos→none），闭集校验，认不出即拒并列词表。
+2. **exe 后缀从 host 常量变成 seal 那一列的函数**，这是一个必须改的既有 bug 面：`integrity.openVersion` 从前用 `builtin.os.tag` 拼 `bin/<entry><exe>`，所以 Windows 上刚建好的 linux 版本会在校验时被找 `bin/x.exe`。改成 `target.exeSuffixFor(seal.target)`——**同一个函数**也定义 host 那个常量（`integrity.exe_suffix`），所以不是两条规则。`testkit` 的 fixture 因此把假 target 词 `"test-target"` 换成 `target.host`：它写的二进制一直用 host 后缀，seal 就得这么说。
+3. **ABI 收敛的代价写成结论而不是欠账**：一个 id 不含 host，所以 Linux 本机（glibc）与别处交叉（musl）都记 `x86_64-linux`。安全性不靠这个区分——每台机器对自己持有的字节重验 `.sealed`；而两者都可能出现的那台机器上，`findMatchingVersion` 找到已在的那份、不编译，所以一个 store 里不会有两份字节争一个 id。把 abi/host 塞进 id 换来的是没人提过的区分，付出的是"一个 id 一个答案"。
+4. **`--target` 拒绝 data/script 而不是照建**：那不是被婉拒的请求，是没有含义的请求；默默产出普通版本会让调用方以为交叉编译发生过。拒绝发生在拿 lease 与写任何东西之前。
+5. **三个动词而不是一个**，因为一个版本是一棵**树**而一帧只有一个负载。`store-put` / `store-commit` **不带 id**：一条通道同时只有一个 push（规则 1），第二处"是哪一个"就是第二个会漂移的答案；让这件事安全的是 commit 的复验 + `<id>/.push-<version>/` 这个**不在 `versions/` 底下**的 staging 位置（`listVersions` 看不见它，`<id>/.lock` 盖得住它）。
+6. **`exec` 位是一个真读者的字段**：文件拷贝带 mode，负载不带，而一个到了对面却不可执行的二进制正是 push 要避免的失败。host 按 store 布局定它（`bin/` 下就是编译入口），对面没有这个位就忽略。判据没有第二处实现，也不读 manifest。
+7. **落点是 user store 且由对面解析**（§3.3）。host 不为远端拼路径；user store 而不是 workspace store，因为后者正是 §9 的门要管的那一个。
+8. **"已持有"用 `.sealed` 而不是 `.structural`**：否则一份坏掉的副本会挡住那次本可以修好它的 push。
+9. **不 bump 协议版本，并确认过这条路真的成立**：老 agent 收到 `store-stat` 走 `Op.unknown`，答的是那句列出自己会什么的话——"对面那个 build 太老"于是作为一句话到达，而不是让每个动词一起判死。
+10. **`remote check` 没有报告远端 store root**（可做可不做那一条选了不做）：它要往 `hello` 加一列，而 `hello` 是唯一的协商帧，为一个只有 push 用得上的诊断去动它不值。`ext push` 的每一句失败已经点名了 spec 与对面自己的话。
+11. **交叉版本仍可以在本机 `activate`**，本轮**不加新规则**（任务书要求发现即报、不自作主张）：`ext build --target` 自己一个字都不碰 `current`，但人手动 `ext activate` 一个交叉版本是允许的，之后 `ext run` 会去 spawn 一个别的平台的可执行文件并失败。真正的修法是 Phase 3 后半的 `exec_version`——**哪一份字节服务这一场**成为一个被冻的答案之后，"本机 composition 用哪个版本"就不再需要靠人不去做错事。
+12. **e2e 分两组按语义放**：交叉编译不需要远端，进 `e2e-ext`（用一个最小的 `pub fn main() void {}` draft，不付 `std` 的编译时间，也**从不执行**产物）；push 走真通道，进 `e2e-remote`。远端隔离用 `tests/remote_home.zig` 这个**传输**而不是假 peer——通道两端仍是生产代码，只是对面那个 nulya 有自己的 home。篡改那条**先红过**（把"改一个字节"去掉之后 commit 成功，测试失败），所以它测的是对面的复验而不是别的什么。
+13. **`nulya help` 的一屏预算 +1**（60 → 61）：`ext push` 是一个新动词，按那个测试自己写的规矩（"预算只在真能力到场时动，并写下是什么"）记一笔；`--target` **没有花掉一行**——一个既有动词的 flag 属于那个动词那一行。
+
+**测试**：`zig build test` **566 pass / 4 skip**（新增 `target.zig` 三条 + `build_ext` 一条 target 拒绝）。e2e 逐组：`e2e-ext` **49**（+2）· `e2e-core` 48 · `e2e-agent` 23 · `e2e-std` 8 · `e2e-remote` **16**（+2）。
 
 ## 7. 开放问题（此处只列，动手那轮拍板）
 

@@ -77,8 +77,11 @@ test "cli help: help / --help / -h print the same usage covering every verb fami
     // remote`, +5 — a whole verb family (three verbs plus the spec vocabulary a
     // driver cannot guess), and one more continuation line on `session new`,
     // because moving the WORKSPACE and moving only the command are two different
-    // things that must not read as one).
-    try std.testing.expect(std.mem.count(u8, help.stdout, "\n") <= 60);
+    // things that must not read as one; `ext push`, +1 — a new verb, and the one
+    // way an extension reaches a machine that has no toolchain and no checkout,
+    // while `ext build --target` paid nothing because a flag on an existing verb
+    // belongs on that verb's line).
+    try std.testing.expect(std.mem.count(u8, help.stdout, "\n") <= 61);
 
     // The two flag spellings a terminal user reaches for reach the same text.
     for ([_][]const u8{ "--help", "-h" }) |flag| {

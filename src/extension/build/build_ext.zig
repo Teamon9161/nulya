@@ -16,7 +16,7 @@ const integrity = @import("../integrity.zig");
 const ext_skills = @import("../skills.zig");
 const store = @import("../store.zig");
 const prompt = @import("../../prompt.zig");
-const toolchain = @import("toolchain.zig");
+const target_mod = @import("../target.zig");
 
 pub const exe_suffix = integrity.exe_suffix;
 const manifest_file = integrity.manifest_file;
@@ -59,6 +59,28 @@ pub const BuildResult = struct {
 /// has it, which other root could supply it — and then stops, so `ext sync
 /// --dry-run` and `ext sync` cannot disagree about what a build would do.
 pub const Mode = enum { build, plan };
+
+/// The two things a build can be told beyond "this draft into that root".
+///
+/// A struct rather than two more positionals because they are unrelated
+/// questions asked by different callers: `ext sync` supplies donors and never a
+/// target, `ext build --target` the reverse.
+pub const Options = struct {
+    /// The OTHER store roots this machine searches, in that order, as places
+    /// this version may already exist (DESIGN §7.2, §7.4).
+    donors: []const std.Io.Dir = &.{},
+    /// Build for another machine instead of this one (DESIGN §7.4). The two
+    /// words go into the version id and the seal exactly as a host build's do,
+    /// so a per-target build is simply ANOTHER VERSION of the same package —
+    /// no new store layout, no new seal field, and `findMatchingVersion`
+    /// already keys on the target it is asked about.
+    ///
+    /// Refused for a `data` or `script` package (`error.TargetNotApplicable`):
+    /// their identity is the snapshot alone and is the same everywhere, so
+    /// naming a target for one is a request with no meaning rather than a
+    /// request this build declines to serve.
+    target: ?target_mod.Target = null,
+};
 
 /// The compiler a run of builds uses: which executable, plus its identity
 /// (`zig version`) asked of the host AT MOST ONCE.
@@ -145,7 +167,7 @@ pub fn buildExtension(
     dest_root: std.Io.Dir,
     zig: *Zig,
 ) !BuildResult {
-    return buildExtensionReusing(alloc, io, workspace, ext_dir_rel, dest_root, zig, &.{});
+    return buildExtensionReusing(alloc, io, workspace, ext_dir_rel, dest_root, zig, .{});
 }
 
 /// What `buildExtensionReusing` WOULD do, without doing any of it: the same
@@ -163,11 +185,12 @@ pub fn planExtension(
     zig: *Zig,
     donors: []const std.Io.Dir,
 ) !BuildResult {
-    return build(alloc, io, workspace, ext_dir_rel, dest_root, zig, donors, .plan);
+    return build(alloc, io, workspace, ext_dir_rel, dest_root, zig, .{ .donors = donors }, .plan);
 }
 
-/// `buildExtension`, plus the OTHER store roots this machine searches — in that
-/// order — as places the version may already exist (DESIGN §7.2, §7.4).
+/// `buildExtension`, plus what `Options` adds: the OTHER store roots this
+/// machine searches — in that order — as places the version may already exist
+/// (DESIGN §7.2, §7.4), and the target to build for.
 ///
 /// A version is content-addressed, so a root that holds this exact package
 /// snapshot (same digest, same target and, when this machine can name its
@@ -187,9 +210,9 @@ pub fn buildExtensionReusing(
     ext_dir_rel: []const u8,
     dest_root: std.Io.Dir,
     zig: *Zig,
-    donors: []const std.Io.Dir,
+    opts: Options,
 ) !BuildResult {
-    return build(alloc, io, workspace, ext_dir_rel, dest_root, zig, donors, .build);
+    return build(alloc, io, workspace, ext_dir_rel, dest_root, zig, opts, .build);
 }
 
 fn build(
@@ -199,7 +222,7 @@ fn build(
     ext_dir_rel: []const u8,
     dest_root: std.Io.Dir,
     zig: *Zig,
-    donors: []const std.Io.Dir,
+    opts: Options,
     mode: Mode,
 ) !BuildResult {
     const manifest_rel = try std.fs.path.join(alloc, &.{ ext_dir_rel, manifest_file });
@@ -231,7 +254,12 @@ fn build(
     // zig at all (DESIGN §7.1, §7.4).
     const kind = manifest.implementationKind(m);
     const compiled = kind == .compiled;
-    const target = if (compiled) toolchain.host_target else "";
+    // Refused before anything is written or leased: a data or script version is
+    // the same everywhere, so "build it for that machine" is a request with no
+    // meaning — and answering it by quietly producing the ordinary version would
+    // leave the caller believing something happened.
+    if (opts.target != null and !compiled) return error.TargetNotApplicable;
+    const target = if (compiled) (if (opts.target) |t| t.words() else target_mod.host) else "";
     // Ask for the compiler identity, but do not fail on its absence yet: a
     // machine with no toolchain cannot COMPILE this package, and can still adopt
     // a copy some other root already holds. Not knowing it only widens the search
@@ -253,8 +281,12 @@ fn build(
         m.runtime.?.entry.forHost() orelse return error.EntryUnsupportedOnHost
     else
         "";
+    // The suffix belongs to the TARGET, not to this machine: a version built
+    // here for Linux has `bin/x`, and one built anywhere for Windows has
+    // `bin/x.exe`. `target` is the host's own words when nothing was named, so
+    // the ordinary build is the same expression, not a second branch.
     const entry_rel: ?[]u8 = if (compiled)
-        try std.fmt.allocPrint(alloc, "{s}{s}", .{ declared_entry, exe_suffix })
+        try std.fmt.allocPrint(alloc, "{s}{s}", .{ declared_entry, target_mod.exeSuffixFor(target) })
     else
         null;
     errdefer if (entry_rel) |entry| alloc.free(entry);
@@ -262,7 +294,7 @@ fn build(
     if (try findMatchingVersion(alloc, io, dest_root, m.id, package_digest, target, compiler)) |found| {
         return sealed(alloc, m.id, found, entry_rel, true, null);
     }
-    for (donors, 0..) |donor, donor_index| {
+    for (opts.donors, 0..) |donor, donor_index| {
         const found = (try findMatchingVersion(alloc, io, donor, m.id, package_digest, target, compiler)) orelse continue;
         errdefer alloc.free(found);
         if (mode == .plan) return sealed(alloc, m.id, found, entry_rel, false, donor_index);
@@ -309,8 +341,20 @@ fn build(
     // Fixed, reproducible invocation — the AI gets no say in the flags. Compile
     // from the frozen package, never the mutable draft tree. Source and output
     // are both inside the version directory, so the store root is the cwd.
+    //
+    // `-target` appears only when one was named. A host build is left NATIVE
+    // rather than spelled out as this host's triple: those are not the same
+    // invocation (a native build detects the machine's own abi and libc
+    // version), and turning every existing build into a cross-shaped one would
+    // change the bytes — and therefore nothing about the id, which records only
+    // the two words. Bytes nobody asked to change are bytes nobody verified.
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(alloc);
+    try argv.appendSlice(alloc, &.{ zig.exe, "build-exe", frozen_source, "-O", "ReleaseSafe", emit_arg, "--name", std.fs.path.stem(declared_entry) });
+    if (opts.target) |t| try argv.appendSlice(alloc, &.{ "-target", t.zigTriple() });
+
     const result = std.process.run(alloc, io, .{
-        .argv = &.{ zig.exe, "build-exe", frozen_source, "-O", "ReleaseSafe", emit_arg, "--name", std.fs.path.stem(declared_entry) },
+        .argv = argv.items,
         .cwd = .{ .dir = dest_root },
         .stdout_limit = .limited(1 << 20),
         .stderr_limit = .limited(1 << 20),
@@ -1033,6 +1077,39 @@ test "a script extension builds with no compiler and its version ignores compile
     defer with.deinit(alloc);
     try std.testing.expect(with.already_built);
     try std.testing.expectEqualStrings(without.version, with.version);
+}
+
+// A `data` package's identity is its snapshot and nothing else, so it is the
+// SAME version on every machine. `--target` on one is therefore not a request
+// this build declines to serve — it is a request with no meaning, and answering
+// it with the ordinary version would leave the caller believing a cross build
+// happened. No compiler is involved either way, so this is a cheap unit test of
+// the rule rather than an e2e of a compile.
+test "naming a target for a package that has no binary is refused" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(io, "ext" ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "demo");
+    try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ manifest_file, .data =
+        \\{"schema":"nulya.extension/v2","id":"skills","contributes":{"skills":["skills/demo"]}}
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "ext" ++ std.fs.path.sep_str ++ "skills" ++ std.fs.path.sep_str ++ "demo" ++ std.fs.path.sep_str ++ "SKILL.md", .data = "---\nname: demo\ndescription: demo\n---\nbody\n" });
+
+    var zig = Zig.init("");
+    defer zig.deinit(alloc);
+    try std.testing.expectError(error.TargetNotApplicable, buildExtensionReusing(
+        alloc,
+        io,
+        tmp.dir,
+        "ext",
+        tmp.dir,
+        &zig,
+        .{ .target = .{ .arch = .x86_64, .os = .linux } },
+    ));
+    // And nothing was written on the way to refusing.
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "skills", .{}));
 }
 
 test "system prompt file changes the version id" {

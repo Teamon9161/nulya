@@ -10,6 +10,7 @@ const store = @import("../extension/store.zig");
 const roots_mod = @import("../extension/roots.zig");
 const invoke = @import("../extension/invoke.zig");
 const manifest = @import("../extension/manifest.zig");
+const target_mod = @import("../extension/target.zig");
 const templates = @import("../extension/build/templates.zig");
 const notes = @import("../extension/notes.zig");
 // `tool` is a common local name below (a tool NAME), so the module keeps a
@@ -20,6 +21,7 @@ const trust = @import("../journals/trust.zig");
 const launch = @import("../launch.zig");
 const bundled = @import("../bundled.zig");
 const ext_seed = @import("ext_seed.zig");
+const ext_push = @import("ext_push.zig");
 const cli_src = @import("src.zig");
 const cli_toolchain = @import("toolchain.zig");
 const ZigExe = cli_toolchain.ZigExe;
@@ -27,6 +29,7 @@ const resolveZig = cli_toolchain.resolveZig;
 const noteUnpinnedZig = cli_toolchain.noteUnpinnedZig;
 const common = @import("common.zig");
 const RootSearch = common.RootSearch;
+const flagValue = common.flagValue;
 const writeRootSpec = common.writeRootSpec;
 const takeUserFlag = common.takeUserFlag;
 const targetRootSpec = common.targetRootSpec;
@@ -51,6 +54,7 @@ pub fn dispatchExt(alloc: std.mem.Allocator, io: std.Io, args: []const []const u
     if (std.mem.eql(u8, sub, "deactivate")) return extDeactivate(alloc, io, rest);
     if (std.mem.eql(u8, sub, "sync")) return extSync(alloc, io, rest);
     if (std.mem.eql(u8, sub, "seed")) return ext_seed.extSeed(alloc, io, rest);
+    if (std.mem.eql(u8, sub, "push")) return ext_push.extPush(alloc, io, rest);
     if (std.mem.eql(u8, sub, "prune")) return extPrune(alloc, io, rest);
     if (std.mem.eql(u8, sub, "list")) return extList(alloc, io);
     if (std.mem.eql(u8, sub, "inspect")) return extInspect(alloc, io, rest);
@@ -140,11 +144,34 @@ fn extInit(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
 fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     const flags = try takeUserFlag(alloc, args);
     defer alloc.free(flags.rest);
-    if (flags.rest.len < 1) {
-        try printErr(io, "usage: nulya ext build <path> [--user]\n");
+
+    // `--target` is parsed here, before anything is opened: an unrecognized
+    // spelling has to name the vocabulary it failed against, and the two words
+    // are a closed set precisely so this refusal can list them.
+    var cross: ?target_mod.Target = null;
+    if (flagValue(flags.rest, "--target")) |spec| {
+        cross = target_mod.parse(spec) catch {
+            try printErrFmt(alloc, io, "ext build --target {s}: not a target this build knows ({s})\n", .{ spec, target_mod.vocabulary });
+            return 1;
+        };
+    }
+    var positional: std.ArrayList([]const u8) = .empty;
+    defer positional.deinit(alloc);
+    {
+        var i: usize = 0;
+        while (i < flags.rest.len) : (i += 1) {
+            if (std.mem.eql(u8, flags.rest[i], "--target")) {
+                i += 1;
+                continue;
+            }
+            try positional.append(alloc, flags.rest[i]);
+        }
+    }
+    if (positional.items.len < 1) {
+        try printErr(io, "usage: nulya ext build <path> [--user] [--target <arch>-<os>]\n");
         return 1;
     }
-    const ext_dir = flags.rest[0];
+    const ext_dir = positional.items[0];
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_path = try cwdRealPath(io, &cwd_buf);
@@ -182,7 +209,17 @@ fn extBuild(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 
     var zig = build_ext.Zig.init(if (zig_exe) |z| z.path else "");
     defer zig.deinit(alloc);
 
-    var result = build_ext.buildExtensionReusing(alloc, io, std.Io.Dir.cwd(), ext_dir, dest_root, &zig, donors.dirs.items) catch |err| switch (err) {
+    var result = build_ext.buildExtensionReusing(alloc, io, std.Io.Dir.cwd(), ext_dir, dest_root, &zig, .{
+        .donors = donors.dirs.items,
+        .target = cross,
+    }) catch |err| switch (err) {
+        // Only a compiled package has a binary, so only a compiled package has
+        // a target. Say what the draft is rather than what the flag is: the
+        // author asked for something their package cannot have.
+        error.TargetNotApplicable => {
+            try printErrFmt(alloc, io, "ext build --target: '{s}' declares no compiled runtime, and a package without one is the same version on every machine\n", .{ext_dir});
+            return 1;
+        },
         // Either nothing answered, or what answered could not say its own
         // version — and that difference is the whole repair hint, so it is not
         // flattened into one sentence.
@@ -499,7 +536,7 @@ fn extSync(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
         var result = (if (dry_run)
             build_ext.planExtension(alloc, io, root_dir, draft, root_dir, &zig, donors.dirs.items)
         else
-            build_ext.buildExtensionReusing(alloc, io, root_dir, draft, root_dir, &zig, donors.dirs.items)) catch |err| switch (err) {
+            build_ext.buildExtensionReusing(alloc, io, root_dir, draft, root_dir, &zig, .{ .donors = donors.dirs.items })) catch |err| switch (err) {
             error.ZigVersionUnreadable => {
                 failed += 1;
                 // Two different walls behind one word: no compiler at all, or one

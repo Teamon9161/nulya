@@ -297,6 +297,25 @@ Store and scope:
   driver has before offering a machine to someone: `nulya remote check --env
   <spec>` reports what answered, and `nulya remote ls --env <spec> [<dir>]`
   lists a directory over there exactly, names and kinds.
+- **Getting an extension onto that machine** is two commands, and it needs no
+  toolchain and no checkout over there:
+
+      nulya ext build extensions/std --target x86_64-linux   # prints v-<hash>
+      nulya ext push std@v-<hash> --env remote:ssh:me@box
+
+  `--target <arch>-<os>` compiles the binary for another machine. The two words
+  are a closed set — `x86_64` or `aarch64`, then `linux`, `windows` or `macos` —
+  and they are exactly what a compiled version's identity already records, so a
+  per-target build is simply another version of the same package, sitting beside
+  the host one. It is refused for a package with no compiled runtime: those are
+  the same version everywhere. `ext push` copies one immutable version into that
+  machine's user store; it validates your copy here first, and the far side
+  validates what arrived against its own seal before the version becomes visible
+  at all, so a broken transfer leaves nothing rather than something half there.
+  Pushing a version that is already there does nothing and says so — the version
+  id is a content hash, which is the whole of the check. Push does not activate
+  anything over there; which machine holds which capability stays a decision
+  somebody makes, and the record of it is that store's own contents.
 - `nulya session step <id> --stream` adds a line protocol: transient
   `{"stream":…}` lines while it runs, interleaved with the same event lines the
   log receives. Behaviour is otherwise identical to a plain step.

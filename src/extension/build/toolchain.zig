@@ -25,9 +25,6 @@ const builtin = @import("builtin");
 /// The single Zig version nulya builds every extension with (DESIGN §10).
 pub const pinned_version = "0.16.0";
 
-/// Host target triple used in the reproducible-build version hash (DESIGN §7.4).
-pub const host_target = @tagName(builtin.cpu.arch) ++ "-" ++ @tagName(builtin.os.tag);
-
 pub const exe_name = if (builtin.os.tag == .windows) "zig.exe" else "zig";
 
 /// Where the pinned compiler lives under nulya's data directory — the one path
@@ -156,10 +153,8 @@ fn zigExeAbsPath(alloc: std.mem.Allocator, io: std.Io, data_dir: std.Io.Dir, rel
     return error.ZigExeNotFound;
 }
 
-test "host target and pinned version are non-empty compile-time constants" {
+test "the pinned version is a non-empty compile-time constant" {
     try std.testing.expect(pinned_version.len != 0);
-    try std.testing.expect(host_target.len != 0);
-    try std.testing.expect(std.mem.indexOfScalar(u8, host_target, '-') != null);
 }
 
 test "ensureExtracted reports a clear error when nothing is embedded and nothing is there" {

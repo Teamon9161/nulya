@@ -225,6 +225,23 @@ pub fn build(b: *std.Build) void {
         .dest_dir = .{ .override = .{ .custom = "test-bin" } },
     });
 
+    // …and a transport that hands the agent a HOME of its own
+    // (`tests/remote_home.zig`), as `NULYA_REMOTE_HOME_EXE`. `ext push` writes
+    // into the FAR machine's user store, and offline the far machine is this
+    // binary over a pipe — which inherits the harness's environment, so without
+    // this the two ends would resolve one directory while the test claimed two.
+    const remote_home = b.addExecutable(.{
+        .name = "remote_home",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/remote_home.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const install_remote_home = b.addInstallArtifact(remote_home, .{
+        .dest_dir = .{ .override = .{ .custom = "test-bin" } },
+    });
+
     // The suite is FIVE test binaries, not one: `zig build` runs independent run
     // artifacts concurrently, and one binary is one core. The split is by what a
     // group proves — `e2e-ext` the extension lifecycle, `e2e-core` the kernel
@@ -348,6 +365,11 @@ pub fn build(b: *std.Build) void {
                 run_group.setEnvironmentVariable(
                     "NULYA_FAKE_REMOTE",
                     b.getInstallPath(.{ .custom = "test-bin" }, fake_remote.out_filename),
+                );
+                run_group.step.dependOn(&install_remote_home.step);
+                run_group.setEnvironmentVariable(
+                    "NULYA_REMOTE_HOME_EXE",
+                    b.getInstallPath(.{ .custom = "test-bin" }, remote_home.out_filename),
                 );
                 // Two probes for one assertion: a secret-shaped name that must
                 // NOT reach a command the agent runs, and an ordinary one that

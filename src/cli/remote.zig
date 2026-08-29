@@ -25,6 +25,9 @@ const config = @import("../config.zig");
 const environment = @import("../environment.zig");
 const remote = @import("../environment/remote/mod.zig");
 const protocol = @import("../environment/remote/protocol.zig");
+const integrity = @import("../extension/integrity.zig");
+const ext_manifest = @import("../extension/manifest.zig");
+const ext_store = @import("../extension/store.zig");
 const launch = @import("../launch.zig");
 const common = @import("common.zig");
 
@@ -157,6 +160,10 @@ const Agent = struct {
     reader: std.Io.File.Reader,
     arena: std.heap.ArenaAllocator,
     lenv: *environment.LocalEnvironment,
+    /// The one extension version currently being pushed into this machine's
+    /// user store, if any (`store-stat` opens it, `store-commit` closes it).
+    /// One, because the channel is one request at a time (protocol rule 1).
+    push: ?StagedPush = null,
     /// Set when the host closed the channel: the loop stops, and whatever was
     /// running has already been killed.
     stop: bool = false,
@@ -173,7 +180,55 @@ const Agent = struct {
     fn refuse(self: *Agent, message: []const u8) !void {
         try self.reply(.{ .ok = false, .message = message }, "", "");
     }
+
+    /// Refuse with a sentence that has a value in it. The message dies with the
+    /// frame, which is exactly how long it is needed.
+    fn refuseFmt(self: *Agent, comptime fmt: []const u8, args: anytype) !void {
+        const msg = try std.fmt.allocPrint(self.alloc, fmt, args);
+        defer self.alloc.free(msg);
+        try self.refuse(msg);
+    }
 };
+
+/// A version being copied into THIS machine's user store, one file per frame.
+///
+/// It is staged rather than written into `versions/<v>` directly for the reason
+/// `build_ext.adoptVersionDir` copies-then-validates: a version directory that
+/// exists is a version other processes will compose and run, so it may only
+/// appear once these bytes have been checked against their own seal HERE. A
+/// channel that dies mid-push therefore leaves a staging directory (cleared by
+/// the next push of the same id) and nothing under `versions/`.
+///
+/// The id's writer lease is held for the whole sequence — the same lease a
+/// build or an activate of that id takes (`Store.lease`), so a push and a local
+/// build cannot interleave inside one `<id>/`.
+const StagedPush = struct {
+    root: std.Io.Dir,
+    id: []u8,
+    version: []u8,
+    /// `<id>/.push-<version>` — under `<id>/`, so the lease covers it, and NOT
+    /// under `versions/`, where `Store.listVersions` would see it.
+    staging_rel: []u8,
+    lease: std.Io.File,
+
+    fn versionRel(self: StagedPush, alloc: std.mem.Allocator) ![]u8 {
+        return std.fs.path.join(alloc, &.{ self.id, "versions", self.version });
+    }
+};
+
+/// Abandon whatever push is open: remove the staging tree, release the lease.
+/// Called on commit, on a second `store-stat`, and when the channel ends — the
+/// three ways a push stops being the current one.
+fn closePush(agent: *Agent) void {
+    var p = agent.push orelse return;
+    agent.push = null;
+    p.root.deleteTree(agent.io, p.staging_rel) catch {};
+    p.lease.close(agent.io);
+    p.root.close(agent.io);
+    agent.alloc.free(p.id);
+    agent.alloc.free(p.version);
+    agent.alloc.free(p.staging_rel);
+}
 
 fn remoteServe(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     _ = args;
@@ -199,6 +254,9 @@ fn remoteServe(alloc: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         .lenv = &lenv,
     };
     defer agent.arena.deinit();
+    // A channel that ends mid-push leaves no half-installed version and no held
+    // lease — the staging tree goes with the connection that was filling it.
+    defer closePush(&agent);
 
     while (!agent.stop) {
         _ = agent.arena.reset(.retain_capacity);
@@ -231,9 +289,12 @@ fn serveOne(agent: *Agent, req: protocol.Request, payload: []const u8) !void {
         // legitimate and the host is about to close the channel anyway.
         .cancel => try agent.reply(.{ .ok = true }, "", ""),
         .put_file => try servePutFile(agent, req, payload),
+        .store_stat => try serveStoreStat(agent, req),
+        .store_put => try serveStorePut(agent, req, payload),
+        .store_commit => try serveStoreCommit(agent),
         .run_extension => try agent.refuse("extension tools do not run over this channel yet; they still run on the machine the harness runs on"),
         .start_task => try agent.refuse("background tasks do not run over this channel yet; they still run on the machine the harness runs on"),
-        .unknown => try agent.refuse("unknown request; this build understands hello, run-shell, put-file, list-dir and cancel"),
+        .unknown => try agent.refuse("unknown request; this build understands hello, run-shell, put-file, list-dir, store-stat, store-put, store-commit and cancel"),
     }
 }
 
@@ -391,6 +452,158 @@ fn servePutFile(agent: *Agent, req: protocol.Request, payload: []const u8) !void
         const msg = try std.fmt.allocPrint(agent.alloc, "could not write '{s}': {s}", .{ req.path, @errorName(err) });
         defer agent.alloc.free(msg);
         try agent.refuse(msg);
+        return;
+    };
+    try agent.reply(.{ .ok = true }, "", "");
+}
+
+// ── receiving an extension version (`nulya ext push`) ───────────────────────
+//
+// The far side of a push is deliberately thin: it opens a staging directory,
+// takes bytes, and then asks `integrity.validateVersionDir` — the same function
+// activation, `ext run` and a donor copy ask — whether what arrived is that
+// version. There is no second definition of "a valid version" over here,
+// because over here is nulya too.
+
+/// Where a pushed version lands: this machine's USER store.
+///
+/// Not the workspace store, and not a choice the host gets to make. The user
+/// store is the one root that is by definition this machine's own (DESIGN §9:
+/// the trust gate exists for the workspace root, which arrives with a
+/// checkout), and the host resolving a path over here would be the host
+/// modelling another machine's file system — the thing goals/remote-env.md §3.3
+/// exists to prevent.
+fn openUserStore(agent: *Agent) !?std.Io.Dir {
+    const spec = (try common.writeRootSpec(agent.alloc, true)) orelse return null;
+    defer agent.alloc.free(spec);
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd = try common.cwdRealPath(agent.io, &cwd_buf);
+    return try ext_store.openOrCreateRoot(agent.io, cwd, spec);
+}
+
+/// A version-relative path this agent is willing to write, or null.
+///
+/// The host is nulya's own `ext push`, so this is not a defence against a peer
+/// — it is the ordinary rule that a directory being filled from a stream may
+/// only grow inwards. A `..` or an absolute path would put bytes outside the
+/// staging tree, where nothing would ever validate them.
+fn safeVersionRel(path: []const u8) ?[]const u8 {
+    if (path.len == 0) return null;
+    if (std.fs.path.isAbsolute(path)) return null;
+    var it = std.mem.splitAny(u8, path, "/\\");
+    var parts: usize = 0;
+    while (it.next()) |part| {
+        if (part.len == 0 or std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, "..")) return null;
+        // A drive-relative spelling (`C:foo`) is absolute on one platform and a
+        // legal file name on another; neither belongs in a frozen version.
+        if (std.mem.indexOfScalar(u8, part, ':') != null) return null;
+        parts += 1;
+    }
+    return if (parts == 0) null else path;
+}
+
+fn serveStoreStat(agent: *Agent, req: protocol.Request) !void {
+    if (!ext_manifest.isValidId(req.id) or !integrity.isVersionId(req.version)) {
+        try agent.refuse("store-stat needs an extension id and a v-<hash> version");
+        return;
+    }
+    // Whatever was being pushed before is abandoned: one channel, one push.
+    closePush(agent);
+
+    var root = (try openUserStore(agent)) orelse {
+        try agent.refuse("this machine has no home directory, so it has no user extension store to push into");
+        return;
+    };
+    var keep_root = false;
+    defer if (!keep_root) root.close(agent.io);
+
+    // `.sealed`, not `.structural`: "already there" has to mean the bytes are
+    // still the ones this id names, otherwise a corrupted copy would refuse
+    // every future push of the version that would have repaired it.
+    if (ext_store.Store.init(agent.io, root).versionExists(agent.alloc, req.id, req.version, .sealed)) {
+        try agent.reply(.{ .ok = true, .held = true }, "", "");
+        return;
+    }
+
+    const id = try agent.alloc.dupe(u8, req.id);
+    errdefer agent.alloc.free(id);
+    const version = try agent.alloc.dupe(u8, req.version);
+    errdefer agent.alloc.free(version);
+    const staging_rel = try std.fmt.allocPrint(agent.alloc, "{s}{c}.push-{s}", .{ id, std.fs.path.sep, version });
+    errdefer agent.alloc.free(staging_rel);
+
+    var lease = ext_store.Store.init(agent.io, root).lease(agent.alloc, req.id) catch {
+        try agent.refuse("could not take the writer lease for that extension here");
+        return;
+    };
+    errdefer lease.close(agent.io);
+
+    // A leftover staging tree from a channel that died mid-push is cleared
+    // rather than resumed: partial bytes from an earlier attempt would either
+    // fail the commit or, worse, pass it while describing two pushes.
+    root.deleteTree(agent.io, staging_rel) catch {};
+    try root.createDirPath(agent.io, staging_rel);
+
+    agent.push = .{ .root = root, .id = id, .version = version, .staging_rel = staging_rel, .lease = lease };
+    keep_root = true;
+    try agent.reply(.{ .ok = true, .held = false }, "", "");
+}
+
+fn serveStorePut(agent: *Agent, req: protocol.Request, payload: []const u8) !void {
+    const p = agent.push orelse {
+        try agent.refuse("no version is being pushed here; send store-stat first");
+        return;
+    };
+    const rel = safeVersionRel(req.path) orelse {
+        try agent.refuseFmt("'{s}' is not a path inside a version directory", .{req.path});
+        return;
+    };
+
+    const dest = try std.fs.path.join(agent.alloc, &.{ p.staging_rel, rel });
+    defer agent.alloc.free(dest);
+    if (std.fs.path.dirname(dest)) |dir| try p.root.createDirPath(agent.io, dir);
+    p.root.writeFile(agent.io, .{ .sub_path = dest, .data = payload }) catch |err| {
+        try agent.refuseFmt("could not write '{s}': {s}", .{ rel, @errorName(err) });
+        return;
+    };
+    // The mode a copy would have carried. Refused rather than shrugged off: a
+    // binary that is there and cannot run is the failure a push exists to avoid,
+    // and this is the last moment anyone can see it happen.
+    if (req.exec and std.Io.File.Permissions.has_executable_bit) {
+        p.root.setFilePermissions(agent.io, dest, .executable_file, .{}) catch |err| {
+            try agent.refuseFmt("could not make '{s}' executable: {s}", .{ rel, @errorName(err) });
+            return;
+        };
+    }
+    try agent.reply(.{ .ok = true }, "", "");
+}
+
+fn serveStoreCommit(agent: *Agent) !void {
+    const p = agent.push orelse {
+        try agent.refuse("no version is being pushed here; send store-stat first");
+        return;
+    };
+    defer closePush(agent);
+
+    // The whole point of the verb. These bytes arrived over a channel, so this
+    // is a WRITE of bytes from somewhere else — `adoptVersionDir`'s moment, and
+    // the same level: re-digest the package, prove it reproduces this very
+    // version id, prove the binary is the sealed one. Anything less and "the
+    // remote validates what it was sent" would be a claim rather than a check.
+    integrity.validateVersionDir(agent.alloc, agent.io, p.root, p.staging_rel, p.version, p.id, .sealed) catch |err| {
+        try agent.refuseFmt("what arrived is not {s}@{s} ({s}); nothing was installed", .{ p.id, p.version, @errorName(err) });
+        return;
+    };
+
+    const version_rel = try p.versionRel(agent.alloc);
+    defer agent.alloc.free(version_rel);
+    const versions_dir = std.fs.path.dirname(version_rel).?;
+    try p.root.createDirPath(agent.io, versions_dir);
+    // Only reached when this root held no VALID copy (`store-stat`), so what is
+    // being replaced, if anything, is a broken one.
+    p.root.deleteTree(agent.io, version_rel) catch {};
+    p.root.rename(p.staging_rel, p.root, version_rel, agent.io) catch |err| {
+        try agent.refuseFmt("could not install {s}@{s}: {s}", .{ p.id, p.version, @errorName(err) });
         return;
     };
     try agent.reply(.{ .ok = true }, "", "");
