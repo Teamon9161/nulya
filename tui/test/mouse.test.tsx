@@ -20,6 +20,7 @@ import { TabBar, stripPlan, min_tab_label } from "../src/ui/TabBar.tsx"
 import { SessionsView } from "../src/ui/overlays/SessionsView.tsx"
 import { ExtView } from "../src/ui/overlays/ExtView.tsx"
 import { StyleContext, createStyle, type Style } from "../src/render/theme.ts"
+import { lifted, rowBackground } from "../src/ui/rows.ts"
 import { FoldContext, createFoldStore } from "../src/state/folds.ts"
 import { BrowseContext, createBrowseStore } from "../src/state/browse.ts"
 import { createSessionState, type TranscriptItem } from "../src/state/session.ts"
@@ -582,3 +583,25 @@ test("the model is a click target wherever it is written: the line under the com
     setup.renderer.destroy()
   }
 }, 120_000)
+
+test("the pointer lifts a row's own colours and paints nothing behind it", () => {
+  // T95. The one background left belongs to the KEYBOARD cursor; a second band
+  // for the pointer made a row the mouse had merely crossed look chosen.
+  expect(rowBackground(style, { selected: false, hovered: true })).toBeUndefined()
+  expect(rowBackground(style, { selected: true, hovered: true })).toBe(style.theme.selection)
+  // Lifted, not replaced: a warn-coloured cell under the pointer is still
+  // nearer warn than it is to the colour it was lifted toward. That is the
+  // whole reason this is a mix and not a second palette.
+  const warm = lifted(style, true, style.theme.warn)
+  expect(warm).not.toBe(style.theme.warn)
+  expect(warm).not.toBe(style.theme.lift)
+  expect(lifted(style, false, style.theme.warn)).toBe(style.theme.warn)
+})
+
+test("with no colour to lift toward, the pointer says nothing rather than something wrong", () => {
+  // `NO_COLOR` collapses every token onto the terminal's own foreground, so
+  // `lift` IS `fg` and the mix is a no-op — the same way T38's shimmer stops
+  // moving. What is left of the pointer there is the gutter mark.
+  const mono = createStyle(default_settings, { NO_COLOR: "1" })
+  expect(lifted(mono, true, mono.theme.fg).toLowerCase()).toBe(mono.theme.fg.toLowerCase())
+})

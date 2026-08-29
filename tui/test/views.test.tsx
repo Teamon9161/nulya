@@ -152,7 +152,7 @@ test("/settings at eighty columns: a path too long for its column is cut, the cl
     expect(key).toMatch(/transcript\.history_window {2,}\S/)
 
     // The footer is one line until `?` asks for the rest (tui.md §11, T18).
-    expect(frame).toContain("Esc close · ? keys")
+    expect(frame).toContain("Esc close · j/k scroll · ? keys")
     expect(frame).not.toContain("the kernel's own config is a different chain")
 
     setup.mockInput.pressKey("?")

@@ -8,8 +8,8 @@
 import { existsSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
-import { default_rules, normalizeMode, type ApprovalRules, type PermissionMode } from "../approvals.ts"
-import type { EnvProfiles } from "./envprofile.ts"
+import { default_rules, modes, normalizeMode, type ApprovalRules, type PermissionMode } from "../approvals.ts"
+import type { EnvProfileOverride, EnvProfiles } from "./envprofile.ts"
 import { code_theme_names, type CodeThemeName } from "../render/syntax.ts"
 
 export type FoldDefault = "expanded" | "collapsed"
@@ -338,6 +338,98 @@ function mergeLayer(into: Settings, layer: unknown, source: string) {
   }
   into.sources.push(source)
 }
+
+
+/**
+ * Every key `mergeLayer` above reads, what it accepts, and how to show what it
+ * is set to (tui.md §11, T94).
+ *
+ * WHY IT EXISTS. `/settings` used to list nine of these and say nothing about
+ * what any of them would take, so the only way to find out that
+ * `transcript.thinking` has three values — or that `extensions.session_with`
+ * is a key at all — was to read this file. A settings screen whose only
+ * instruction is "edit the file" has to at least say WHICH words the file
+ * accepts.
+ *
+ * WHY IT IS A TABLE AND NOT A PARSER. The parser above is hand-written on
+ * purpose: the list-shaped keys replace rather than merge, two of the numbers
+ * have floors, and `diff` still answers to its old name. A schema general
+ * enough to drive all of that would be a bigger thing to get right than the
+ * branches it replaced. So this describes and does not parse — and the test
+ * that keeps the two honest writes a non-default value for every row here
+ * through `loadSettings` and checks it arrives (`test/extensions.test.ts`). A
+ * row for a key nobody reads fails; a key read but not listed is the one thing
+ * that test cannot catch, which is why the order here follows the parser's.
+ */
+export interface SettingField {
+  key: string
+  /** The values it takes — a closed list, or the shape of an open one. */
+  accepts: string
+  /** What it is set to, as one line. */
+  value(settings: Settings): string
+}
+
+const yesno = "true | false"
+/** A list-shaped value: replaced by a nearer layer, never merged into. */
+const shown = (xs: readonly string[]) => (xs.length === 0 ? "—" : xs.join(" "))
+/** Which `[env.<kind>]` tables set this key, since which one applies is per session. */
+const envSet = (settings: Settings, has: (table: EnvProfileOverride) => boolean) => {
+  const kinds = (["local", "wsl", "ssh"] as const).filter((kind) => {
+    const table = settings.env[kind]
+    return table !== undefined && has(table)
+  })
+  return kinds.length === 0 ? "—" : `set for ${kinds.join(" ")}`
+}
+
+export const setting_fields: readonly SettingField[] = [
+  { key: "transcript.diff", accepts: "expanded | collapsed", value: (s) => s.transcript.diff },
+  { key: "transcript.tool_output", accepts: "expanded | collapsed", value: (s) => s.transcript.tool_output },
+  { key: "transcript.thinking", accepts: "expanded | collapsed | hidden", value: (s) => s.transcript.thinking },
+  { key: "transcript.composition", accepts: "expanded | collapsed", value: (s) => s.transcript.composition },
+  { key: "transcript.run_summary", accepts: yesno, value: (s) => String(s.transcript.run_summary) },
+  { key: "transcript.max_width", accepts: "columns, above 0", value: (s) => String(s.transcript.max_width) },
+  { key: "transcript.history_window", accepts: "items, 0 draws all", value: (s) => String(s.transcript.history_window) },
+  {
+    key: "transcript.stream_interval_ms",
+    accepts: "ms, 0 renders every delta",
+    value: (s) => String(s.transcript.stream_interval_ms),
+  },
+  { key: "transcript.ascii", accepts: yesno, value: (s) => String(s.transcript.ascii) },
+  { key: "ui.theme", accepts: "nulya-dark | nulya-light", value: (s) => s.ui.theme },
+  { key: "ui.code_theme", accepts: code_theme_names.join(" | "), value: (s) => s.ui.code_theme },
+  { key: "ui.motion", accepts: yesno, value: (s) => String(s.ui.motion) },
+  { key: "extensions.sync_on_start", accepts: yesno, value: (s) => String(s.extensions.sync_on_start) },
+  { key: "extensions.auto_activate", accepts: yesno, value: (s) => String(s.extensions.auto_activate) },
+  { key: "extensions.plugins", accepts: yesno, value: (s) => String(s.extensions.plugins) },
+  {
+    key: "extensions.session_with",
+    accepts: "package ids · --with, every session",
+    value: (s) => shown(s.extensions.session_with),
+  },
+  {
+    key: "extensions.session_prompts",
+    accepts: "package ids · their render tool writes --prompt",
+    value: (s) => shown(s.extensions.session_prompts),
+  },
+  { key: "env.<local|wsl|ssh>.bare", accepts: yesno, value: (s) => envSet(s, (t) => t.bare !== undefined) },
+  { key: "env.<local|wsl|ssh>.with", accepts: "package ids", value: (s) => envSet(s, (t) => t.with !== undefined) },
+  { key: "env.<local|wsl|ssh>.pins", accepts: "ext:<id>/<tool>", value: (s) => envSet(s, (t) => t.pins !== undefined) },
+  {
+    key: "env.<local|wsl|ssh>.session_prompts",
+    accepts: "package ids",
+    value: (s) => envSet(s, (t) => t.session_prompts !== undefined),
+  },
+  { key: "driver.mode", accepts: modes.join(" | "), value: (s) => s.driver.mode },
+  { key: "approvals.allow", accepts: "command patterns", value: (s) => shown(s.approvals.allow) },
+  { key: "approvals.ask", accepts: "command patterns", value: (s) => shown(s.approvals.ask) },
+  { key: "approvals.deny", accepts: "command patterns · nothing overrules it", value: (s) => shown(s.approvals.deny) },
+  { key: "approvals.manifest_readonly", accepts: yesno, value: (s) => String(s.approvals.manifest_readonly) },
+  {
+    key: "approvals.readonly_commands",
+    accepts: "program names the ask mode may run unasked",
+    value: (s) => shown(s.approvals.readonly_commands),
+  },
+]
 
 export async function loadSettings(
   workspaceDir: string,

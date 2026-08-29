@@ -35,7 +35,7 @@ import type { InputRenderable } from "@opentui/core"
 import { useScreen, useStyle } from "../../render/theme.ts"
 import { listBudget, windowRange } from "../list.ts"
 import { columnWidth, fit, squeeze, wrapWords } from "../columns.ts"
-import { createHover, onClick, rowBackground, rowGutter } from "../rows.ts"
+import { createHover, onClick, rowBackground, rowGutter, rowText } from "../rows.ts"
 import { OverlayFooter, createKeyHelp } from "./Footer.tsx"
 import { blockedReason, keyable, modelIdsOf } from "./providers.ts"
 import { configShow, type ConfigView, type ProfileView } from "../../nulya/cli.ts"
@@ -564,18 +564,28 @@ export function ProviderView(props: {
                     {gutter().text}
                   </text>
                   <box width={cols().name} flexShrink={0}>
-                    <text fg={isCurrent(profile) ? style.theme.accent.user : ready ? style.theme.fg : style.theme.dim}>
+                    <text
+                      fg={rowText(
+                        style,
+                        tone(),
+                        isCurrent(profile) ? style.theme.accent.user : ready ? style.theme.fg : style.theme.dim,
+                      )}
+                    >
                       {fit(profile.name, cols().name - 2)}
                     </text>
                   </box>
                   <box width={cols().endpoint} flexShrink={0}>
-                    <text fg={style.theme.muted}>{fit(endpointOf(profile), cols().endpoint - 2)}</text>
+                    <text fg={rowText(style, tone(), style.theme.muted)}>
+                      {fit(endpointOf(profile), cols().endpoint - 2)}
+                    </text>
                   </box>
                   <box width={cols().models} flexShrink={0}>
-                    <text fg={style.theme.dim}>{fit(countOf(profile), cols().models - 2)}</text>
+                    <text fg={rowText(style, tone(), style.theme.dim)}>{fit(countOf(profile), cols().models - 2)}</text>
                   </box>
                   <box width={cols().status} flexShrink={0}>
-                    <text fg={ready ? style.theme.ok : style.theme.warn}>{fit(statusOf(profile), cols().status)}</text>
+                    <text fg={rowText(style, tone(), ready ? style.theme.ok : style.theme.warn)}>
+                      {fit(statusOf(profile), cols().status)}
+                    </text>
                   </box>
                 </box>
               )
@@ -601,7 +611,7 @@ export function ProviderView(props: {
                   <text fg={gutter().fg} flexShrink={0}>
                     {gutter().text}
                   </text>
-                  <text fg={onAddRow() ? style.theme.accent.evolve : style.theme.dim}>
+                  <text fg={rowText(style, tone(), onAddRow() ? style.theme.accent.evolve : style.theme.dim)}>
                     {fit("+ add an OpenAI- or Anthropic-compatible provider", inner() - 2)}
                   </text>
                 </box>
@@ -642,7 +652,9 @@ export function ProviderView(props: {
                     <text fg={gutter().fg} flexShrink={0}>
                       {gutter().text}
                     </text>
-                    <text fg={selected() ? style.theme.fg : style.theme.muted}>{fit(wire.label, inner() - 2)}</text>
+                    <text fg={rowText(style, tone(), selected() ? style.theme.fg : style.theme.muted)}>
+                      {fit(wire.label, inner() - 2)}
+                    </text>
                   </box>
                   <For each={wrapWords(wire.hint, inner() - 4)}>
                     {(line) => (

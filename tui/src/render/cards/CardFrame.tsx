@@ -1,7 +1,7 @@
 import { Index, Show, createContext, createMemo, createSignal, useContext, type Accessor, type JSX } from "solid-js"
 import { shimmerColor, useFrame, useScreen, useStyle } from "../theme.ts"
 import { displayWidth, fit } from "../../ui/columns.ts"
-import { onClick } from "../../ui/rows.ts"
+import { lifted, onClick } from "../../ui/rows.ts"
 import { useFolds } from "../../state/folds.ts"
 import { useBrowse } from "../../state/browse.ts"
 
@@ -100,6 +100,12 @@ export function CardFrame(props: {
   // itself because somebody selected its head line would make copying text out
   // of the transcript rearrange the transcript (`ui/rows.ts`).
   const click = onClick(toggle)
+  /**
+   * A head-line cell's colour while the pointer is on it. Only when the line is
+   * a handle at all: a card that cannot be folded is not answering to a click,
+   * and lighting it up would promise something (`ui/rows.ts`).
+   */
+  const lift = (base: string) => lifted(style, Boolean(props.foldable) && hovered(), base)
 
   /**
    * The line's own width discipline. The note keeps what it needs (it is short
@@ -147,11 +153,9 @@ export function CardFrame(props: {
       <box
         flexDirection="row"
         width="100%"
-        backgroundColor={
-          selected() ? style.theme.selection : props.foldable && hovered() ? style.theme.hover : undefined
-        }
+        backgroundColor={selected() ? style.theme.selection : undefined}
         // Clicking the head line is the mouse half of the fold interaction
-        // (tui.md §4.2); the keyboard half is browse mode. The tint under the
+        // (tui.md §4.2); the keyboard half is browse mode. The lift under the
         // pointer is the only thing that says a head line answers to a click
         // at all — a card has no button to look like.
         onMouseDown={click.onMouseDown}
@@ -159,7 +163,7 @@ export function CardFrame(props: {
         onMouseOver={() => setHovered(true)}
         onMouseOut={() => setHovered(false)}
       >
-        <text fg={props.accent} flexShrink={0}>
+        <text fg={lift(props.accent)} flexShrink={0}>
           {props.glyph}{" "}
         </text>
         {/* `muted`, not `fg`: a call is what the model DID, and the brightest
@@ -169,11 +173,11 @@ export function CardFrame(props: {
           <Index each={headCells()}>
             {(ch, index) => (
               <text
-                fg={
+                fg={lift(
                   active() && style.motion
                     ? shimmerColor(frame(), index, headCells().length, toneAt(index), style.theme.lift)
-                    : toneAt(index)
-                }
+                    : toneAt(index),
+                )}
               >
                 {ch()}
               </text>
@@ -181,10 +185,10 @@ export function CardFrame(props: {
           </Index>
         </box>
         <Show when={note().length > 0}>
-          <text fg={chipColor()} flexShrink={0}>{`  (${note()})`}</text>
+          <text fg={lift(chipColor())} flexShrink={0}>{`  (${note()})`}</text>
         </Show>
         <Show when={props.foldable}>
-          <text fg={style.theme.faint} flexShrink={0}>
+          <text fg={lift(style.theme.faint)} flexShrink={0}>
             {" "}
             {open() ? style.glyphs.foldOpen : style.glyphs.foldClosed}
           </text>
@@ -231,13 +235,12 @@ function ActionRow(props: { action: { text: string; onPress: () => void } }) {
     <box
       paddingLeft={2}
       flexDirection="row"
-      backgroundColor={hovered() ? style.theme.hover : undefined}
       onMouseDown={click.onMouseDown}
       onMouseUp={click.onMouseUp}
       onMouseOver={() => setHovered(true)}
       onMouseOut={() => setHovered(false)}
     >
-      <text fg={style.theme.accent.evolve} flexShrink={0}>
+      <text fg={lifted(style, hovered(), style.theme.accent.evolve)} flexShrink={0}>
         {fit(`${style.glyphs.open} ${props.action.text}`, room())}
       </text>
     </box>

@@ -20,7 +20,7 @@
  */
 import { Index, Show, createSignal } from "solid-js"
 import { shimmerColor, useScreen, useStyle } from "../render/theme.ts"
-import { onClick } from "./rows.ts"
+import { lifted, onClick } from "./rows.ts"
 import { displayWidth, fit } from "./columns.ts"
 import { seconds } from "../state/tasks.ts"
 import type { DriverStatus } from "../state/driver.ts"
@@ -303,7 +303,6 @@ export function WorkingStatus(props: {
         <box
           flexShrink={0}
           height={1}
-          backgroundColor={clickable() && over() ? style.theme.hover : undefined}
           onMouseDown={clickable() ? tasksClick.onMouseDown : undefined}
           onMouseUp={clickable() ? tasksClick.onMouseUp : undefined}
           onMouseOver={() => setOver(true)}
@@ -322,11 +321,13 @@ export function WorkingStatus(props: {
             <Index each={cells()}>
               {(ch, index) => (
                 <text
-                  fg={
+                  fg={lifted(
+                    style,
+                    clickable() && over(),
                     props.activity?.moving && style.motion
                       ? shimmerColor(props.frame, index, cells().length, base(), style.theme.lift)
-                      : base()
-                  }
+                      : base(),
+                  )}
                 >
                   {ch()}
                 </text>
@@ -347,13 +348,12 @@ export function WorkingStatus(props: {
           <box
             flexShrink={0}
             height={1}
-            backgroundColor={bgClickable() && bgOver() ? style.theme.hover : undefined}
             onMouseDown={bgClickable() ? bgClick.onMouseDown : undefined}
             onMouseUp={bgClickable() ? bgClick.onMouseUp : undefined}
             onMouseOver={() => setBgOver(true)}
             onMouseOut={() => setBgOver(false)}
           >
-            <text fg={style.theme.dim}>{bgFit()}</text>
+            <text fg={lifted(style, bgClickable() && bgOver(), style.theme.dim)}>{bgFit()}</text>
           </box>
         </Show>
       </box>

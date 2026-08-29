@@ -1,6 +1,6 @@
 import { Show, createMemo, createSignal } from "solid-js"
 import { useScreen, useStyle } from "../theme.ts"
-import { onClick } from "../../ui/rows.ts"
+import { lifted, onClick } from "../../ui/rows.ts"
 import { Fact } from "../../ui/Fact.tsx"
 import { displayWidth, fit } from "../../ui/columns.ts"
 import { useFolds } from "../../state/folds.ts"
@@ -172,17 +172,16 @@ export function CompositionCard(props: {
         flexDirection="row"
         width="100%"
         height={1}
-        backgroundColor={overHead() ? style.theme.hover : undefined}
         onMouseDown={headClick.onMouseDown}
         onMouseUp={headClick.onMouseUp}
         onMouseOver={() => setOverHead(true)}
         onMouseOut={() => setOverHead(false)}
       >
-        <text fg={style.theme.accent.evolve}>{`${style.glyphs.bar} `}</text>
+        <text fg={lifted(style, overHead(), style.theme.accent.evolve)}>{`${style.glyphs.bar} `}</text>
         <box flexGrow={1} flexShrink={1} flexBasis={0}>
-          <text fg={style.theme.muted}>{title()}</text>
+          <text fg={lifted(style, overHead(), style.theme.muted)}>{title()}</text>
         </box>
-        <text fg={style.theme.faint} flexShrink={0}>
+        <text fg={lifted(style, overHead(), style.theme.faint)} flexShrink={0}>
           {open() ? style.glyphs.foldOpen : style.glyphs.foldClosed}
         </text>
       </box>
@@ -199,13 +198,14 @@ export function CompositionCard(props: {
         <box
           height={1}
           flexShrink={0}
-          backgroundColor={props.onPickModel && overModel() ? style.theme.hover : undefined}
           onMouseDown={props.onPickModel ? modelClick.onMouseDown : undefined}
           onMouseUp={props.onPickModel ? modelClick.onMouseUp : undefined}
           onMouseOver={() => setOverModel(true)}
           onMouseOut={() => setOverModel(false)}
         >
-          <text fg={style.theme.fg}>{fit(model(), valueWidth())}</text>
+          <text fg={lifted(style, Boolean(props.onPickModel) && overModel(), style.theme.fg)}>
+            {fit(model(), valueWidth())}
+          </text>
         </box>
         <Show when={trailing().length > 0}>
           <text fg={style.theme.dim}>{trailing()}</text>

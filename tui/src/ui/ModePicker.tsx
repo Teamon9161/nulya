@@ -1,6 +1,6 @@
 import { For } from "solid-js"
 import { useScreen, useStyle } from "../render/theme.ts"
-import { createHover, onClick, rowBackground, rowGutter } from "./rows.ts"
+import { createHover, onClick, rowBackground, rowGutter, rowText } from "./rows.ts"
 import { fit } from "./columns.ts"
 import { DialogHint, DialogTitle } from "./Dialog.tsx"
 import { modes, type PermissionMode } from "../approvals.ts"
@@ -109,18 +109,20 @@ export function ModePicker(props: {
               </text>
               <box width={nameCol()} flexShrink={0}>
                 <text
-                  fg={
+                  fg={rowText(
+                    style,
+                    tone(),
                     choice.mode === "unsafe"
                       ? style.theme.warn
                       : tone().selected
                         ? style.theme.fg
-                        : style.theme.muted
-                  }
+                        : style.theme.muted,
+                  )}
                 >
                   {choice.mode}
                 </text>
               </box>
-              <text fg={style.theme.dim} flexShrink={0}>
+              <text fg={rowText(style, tone(), style.theme.dim)} flexShrink={0}>
                 {fit(choice.what, Math.max(0, room() - nameCol() - 4))}
               </text>
               <text fg={style.theme.ok} flexShrink={0}>

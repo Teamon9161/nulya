@@ -224,6 +224,7 @@ const nobody: FocusState = {
   checkout: false,
   withPicker: false,
   agentPicker: false,
+  envPicker: false,
   modePicker: false,
   approval: false,
   keyboardPane: null,
@@ -242,6 +243,7 @@ test("the keyboard is claimed in one order, outermost first", () => {
     ...nobody,
     withPicker: true,
     agentPicker: true,
+    envPicker: true,
     modePicker: true,
     approval: true,
     keyboardPane: { pane: "one", surface: overlay_surfaces.ext },
@@ -250,12 +252,14 @@ test("the keyboard is claimed in one order, outermost first", () => {
   }
   expect(resolveFocus(all)).toEqual({ kind: "dialog", dialog: "with" })
   expect(resolveFocus({ ...all, withPicker: false })).toEqual({ kind: "dialog", dialog: "agent" })
-  expect(resolveFocus({ ...all, withPicker: false, agentPicker: false })).toEqual({ kind: "dialog", dialog: "mode" })
-  expect(resolveFocus({ ...all, withPicker: false, agentPicker: false, modePicker: false })).toEqual({
+  expect(resolveFocus({ ...all, withPicker: false, agentPicker: false })).toEqual({ kind: "dialog", dialog: "env" })
+  const afterEnv = { ...all, withPicker: false, agentPicker: false, envPicker: false }
+  expect(resolveFocus(afterEnv)).toEqual({ kind: "dialog", dialog: "mode" })
+  expect(resolveFocus({ ...afterEnv, modePicker: false })).toEqual({
     kind: "dialog",
     dialog: "approval",
   })
-  const noDialogs = { ...all, withPicker: false, agentPicker: false, modePicker: false, approval: false }
+  const noDialogs = { ...afterEnv, modePicker: false, approval: false }
   expect(resolveFocus(noDialogs)).toEqual({ kind: "surface", pane: "one", surface: overlay_surfaces.ext })
   expect(resolveFocus({ ...noDialogs, keyboardPane: null })).toEqual({ kind: "plugin-panel" })
   expect(resolveFocus({ ...noDialogs, keyboardPane: null, pluginPanel: false })).toEqual({ kind: "browse" })

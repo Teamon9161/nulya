@@ -1,6 +1,6 @@
 import { Show, createMemo, createSignal } from "solid-js"
 import { useScreen, useStyle } from "../render/theme.ts"
-import { onClick } from "./rows.ts"
+import { lifted, onClick } from "./rows.ts"
 import { displayWidth, fit } from "./columns.ts"
 import { builtin_tools } from "../pins.ts"
 import { contextFill, fillGlyph } from "../state/context.ts"
@@ -79,6 +79,8 @@ export function StatusBar(props: {
    * screen actually did, so it is worth the width.
    */
   execEnv?: string
+  /** Clicking it: the mouse half of bare `/env`, which opens the picker (T93). */
+  onPickEnv?: () => void
   hint?: string
   /** Rows of transcript below the viewport: >0 means somebody is reading back. */
   behind?: number
@@ -152,6 +154,8 @@ export function StatusBar(props: {
   const [overCwd, setOverCwd] = createSignal(false)
   const sidebarClick = onClick(() => props.onToggleSidebar?.())
   const cwdClick = onClick(() => props.onPickCwd?.())
+  const [overEnv, setOverEnv] = createSignal(false)
+  const envClick = onClick(() => props.onPickEnv?.())
   const [overSettings, setOverSettings] = createSignal(false)
   const settingsClick = onClick(() => props.onOpenSettings?.())
   /**
@@ -211,13 +215,14 @@ export function StatusBar(props: {
       <box
         flexShrink={0}
         height={1}
-        backgroundColor={overSidebar() ? style.theme.hover : undefined}
         onMouseDown={sidebarClick.onMouseDown}
         onMouseUp={sidebarClick.onMouseUp}
         onMouseOver={() => setOverSidebar(true)}
         onMouseOut={() => setOverSidebar(false)}
       >
-        <text fg={props.sidebarOpen ? style.theme.accent.evolve : style.theme.faint}>{sidebarChip()}</text>
+        <text fg={lifted(style, overSidebar(), props.sidebarOpen ? style.theme.accent.evolve : style.theme.faint)}>
+          {sidebarChip()}
+        </text>
       </box>
     ) : null
 
@@ -389,13 +394,20 @@ export function StatusBar(props: {
             <box
               flexShrink={0}
               height={1}
-              backgroundColor={props.onPickMode && overMode() ? style.theme.hover : undefined}
               onMouseDown={props.onPickMode ? modeClick.onMouseDown : undefined}
               onMouseUp={props.onPickMode ? modeClick.onMouseUp : undefined}
               onMouseOver={() => setOverMode(true)}
               onMouseOut={() => setOverMode(false)}
             >
-              <text fg={props.mode === "unsafe" ? style.theme.warn : style.theme.dim}>{modeChip()}</text>
+              <text
+                fg={lifted(
+                  style,
+                  Boolean(props.onPickMode) && overMode(),
+                  props.mode === "unsafe" ? style.theme.warn : style.theme.dim,
+                )}
+              >
+                {modeChip()}
+              </text>
             </box>
           ) : null}
           <Show when={modeChip().length > 0}>
@@ -414,13 +426,12 @@ export function StatusBar(props: {
               <box
                 flexShrink={0}
                 height={1}
-                backgroundColor={props.onPickCwd && overCwd() ? style.theme.hover : undefined}
                 onMouseDown={props.onPickCwd ? cwdClick.onMouseDown : undefined}
                 onMouseUp={props.onPickCwd ? cwdClick.onMouseUp : undefined}
                 onMouseOver={() => setOverCwd(true)}
                 onMouseOut={() => setOverCwd(false)}
               >
-                <text fg={style.theme.dim}>{cwdChip()}</text>
+                <text fg={lifted(style, Boolean(props.onPickCwd) && overCwd(), style.theme.dim)}>{cwdChip()}</text>
               </box>
               <text fg={style.theme.dim} flexShrink={0}>
                 {" · "}
@@ -435,13 +446,14 @@ export function StatusBar(props: {
             <box
               flexShrink={0}
               height={1}
-              backgroundColor={props.onPickModel && overModel() ? style.theme.hover : undefined}
               onMouseDown={props.onPickModel ? modelClick.onMouseDown : undefined}
               onMouseUp={props.onPickModel ? modelClick.onMouseUp : undefined}
               onMouseOver={() => setOverModel(true)}
               onMouseOut={() => setOverModel(false)}
             >
-              <text fg={style.theme.fg}>{layout().model}</text>
+              <text fg={lifted(style, Boolean(props.onPickModel) && overModel(), style.theme.fg)}>
+                {layout().model}
+              </text>
             </box>
             {/* An empty segment is not rendered at all: a `<text>` with nothing
                 in it still takes a column, and two of them side by side is how
@@ -459,13 +471,14 @@ export function StatusBar(props: {
               <box
                 flexShrink={0}
                 height={1}
-                backgroundColor={props.onOpenExt && overTools() ? style.theme.hover : undefined}
                 onMouseDown={props.onOpenExt ? toolsClick.onMouseDown : undefined}
                 onMouseUp={props.onOpenExt ? toolsClick.onMouseUp : undefined}
                 onMouseOver={() => setOverTools(true)}
                 onMouseOut={() => setOverTools(false)}
               >
-                <text fg={style.theme.dim}>{layout().tools}</text>
+                <text fg={lifted(style, Boolean(props.onOpenExt) && overTools(), style.theme.dim)}>
+                  {layout().tools}
+                </text>
               </box>
             </Show>
           </box>
@@ -476,13 +489,14 @@ export function StatusBar(props: {
             <box
               flexShrink={0}
               height={1}
-              backgroundColor={props.onOpenContext && overContext() ? style.theme.hover : undefined}
               onMouseDown={props.onOpenContext ? contextClick.onMouseDown : undefined}
               onMouseUp={props.onOpenContext ? contextClick.onMouseUp : undefined}
               onMouseOver={() => setOverContext(true)}
               onMouseOut={() => setOverContext(false)}
             >
-              <text fg={contextTone()}>{contextChip()}</text>
+              <text fg={lifted(style, Boolean(props.onOpenContext) && overContext(), contextTone())}>
+                {contextChip()}
+              </text>
             </box>
           ) : null}
           {/* Scrolled away from the live end: the newest card is off screen, which
@@ -491,13 +505,12 @@ export function StatusBar(props: {
             <box
               flexShrink={0}
               height={1}
-              backgroundColor={overBehind() ? style.theme.hover : undefined}
               onMouseDown={behindClick.onMouseDown}
               onMouseUp={behindClick.onMouseUp}
               onMouseOver={() => setOverBehind(true)}
               onMouseOut={() => setOverBehind(false)}
             >
-              <text fg={style.theme.accent.evolve}>{behindChip()}</text>
+              <text fg={lifted(style, overBehind(), style.theme.accent.evolve)}>{behindChip()}</text>
             </box>
           ) : null}
           {/* What this session is WEARING — a `--with` package's system prompt, the
@@ -507,20 +520,31 @@ export function StatusBar(props: {
             <box
               flexShrink={0}
               height={1}
-              backgroundColor={props.onOpenExt && overWearing() ? style.theme.hover : undefined}
               onMouseDown={props.onOpenExt ? extClick.onMouseDown : undefined}
               onMouseUp={props.onOpenExt ? extClick.onMouseUp : undefined}
               onMouseOver={() => setOverWearing(true)}
               onMouseOut={() => setOverWearing(false)}
             >
-              <text fg={style.theme.accent.evolve}>{wearingChip()}</text>
+              <text fg={lifted(style, Boolean(props.onOpenExt) && overWearing(), style.theme.accent.evolve)}>
+                {wearingChip()}
+              </text>
             </box>
           ) : null}
-          {/* Where the commands go, when that is not this machine (DESIGN §8.1). */}
+          {/* Where the commands go, when that is not this machine (DESIGN §8.1).
+              A click opens the picker, like every other chip on this line that
+              names a decision — and the one it opens is about the NEXT session,
+              since a started one froze this in its header. */}
           {envChip().length > 0 ? (
-            <text fg={style.theme.warn} flexShrink={0}>
-              {envChip()}
-            </text>
+            <box
+              flexShrink={0}
+              height={1}
+              onMouseDown={props.onPickEnv ? envClick.onMouseDown : undefined}
+              onMouseUp={props.onPickEnv ? envClick.onMouseUp : undefined}
+              onMouseOver={() => setOverEnv(true)}
+              onMouseOut={() => setOverEnv(false)}
+            >
+              <text fg={lifted(style, Boolean(props.onPickEnv) && overEnv(), style.theme.warn)}>{envChip()}</text>
+            </box>
           ) : null}
           {roleChip().length > 0 ? (
             <text fg={props.role === "observer" ? style.theme.warn : style.theme.dim} flexShrink={0}>
@@ -532,13 +556,12 @@ export function StatusBar(props: {
             <box
               flexShrink={0}
               height={1}
-              backgroundColor={overSettings() ? style.theme.hover : undefined}
               onMouseDown={settingsClick.onMouseDown}
               onMouseUp={settingsClick.onMouseUp}
               onMouseOver={() => setOverSettings(true)}
               onMouseOut={() => setOverSettings(false)}
             >
-              <text fg={style.theme.faint}>{settingsChip()}</text>
+              <text fg={lifted(style, overSettings(), style.theme.faint)}>{settingsChip()}</text>
             </box>
           ) : null}
         </box>

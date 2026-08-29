@@ -176,6 +176,10 @@ export function Transcript(props: {
   cwd?: string
   /** Clicking the `cwd` row opens the directory browser (§5.3b). */
   onPickCwd?: () => void
+  /** Where a `shell` command would run — the welcome screen's second half (T93). */
+  shell?: string
+  /** Clicking the `shell` row opens the exec-target picker. */
+  onPickEnv?: () => void
   /** The model line of the composition card was clicked: open `/model`. */
   onPickModel?: () => void
   /** A `/command` on the welcome screen was clicked: run it as if typed. */
@@ -270,6 +274,8 @@ export function Transcript(props: {
           plan={props.plan}
           onCommand={props.onCommand}
           onPickCwd={props.onPickCwd}
+          shell={props.shell}
+          onPickEnv={props.onPickEnv}
           tip={props.tip}
         />
       </Show>

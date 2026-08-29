@@ -1,6 +1,6 @@
 import { For, Show } from "solid-js"
 import { useScreen, useStyle } from "../render/theme.ts"
-import { createHover, onClick, rowBackground, rowGutter } from "./rows.ts"
+import { createHover, onClick, rowBackground, rowGutter, rowText } from "./rows.ts"
 import { fit, wrapWords } from "./columns.ts"
 import { DialogHint, DialogTitle, dialog_gutter } from "./Dialog.tsx"
 
@@ -98,9 +98,11 @@ export function WithPicker(props: {
                 {rowGutter(style, tone()).text}
               </text>
               <box width={idCol()} flexShrink={0}>
-                <text fg={tone().selected ? style.theme.fg : style.theme.muted}>{fit(one.id, idCol() - 1)}</text>
+                <text fg={rowText(style, tone(), tone().selected ? style.theme.fg : style.theme.muted)}>
+                  {fit(one.id, idCol() - 1)}
+                </text>
               </box>
-              <text fg={style.theme.dim} flexShrink={0}>
+              <text fg={rowText(style, tone(), style.theme.dim)} flexShrink={0}>
                 {fit(what(), Math.max(0, room() - idCol() - dialog_gutter))}
               </text>
             </box>

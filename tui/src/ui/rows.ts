@@ -14,16 +14,27 @@
  *    conditional on still owning the slot — otherwise crossing a column
  *    boundary blinks the highlight off and on.
  *  - HOW A ROW LOOKS. Cursor and pointer are two different facts (the keyboard
- *    is here / the mouse is passing through) and they get two different
- *    backgrounds and two different gutter marks, so neither can be mistaken for
- *    the other when a colour is missing.
+ *    is here / the mouse is passing through), so they are said in two different
+ *    ways and neither can be mistaken for the other: the cursor gets a band
+ *    behind the row, the pointer LIFTS the row's own colours toward
+ *    `theme.lift`. Both keep their own gutter mark, which is what survives a
+ *    terminal with no colour at all.
+ *
+ *    The pointer used to get a band too, a fainter one. Two bands of nearly the
+ *    same weight is a distinction nobody reads, and the quieter one was a slab
+ *    of background drawn under text that had not been chosen — it made a row
+ *    look picked when the mouse had merely crossed it. A lift says the same
+ *    thing without painting anything: the row brightens where its own colours
+ *    are, so a warn-coloured cell stays warn (T38's shimmer took this route
+ *    first, and `theme.lift` is the token it introduced for exactly this —
+ *    "brighter" is not a direction a colour has on a light background).
  *
  * Mouse handling itself stays in each component's own JSX: there is no global
  * dispatcher, and a row's click calls the very function its `Enter` calls.
  */
 import { createSignal, type Accessor } from "solid-js"
 import type { MouseEvent } from "@opentui/core"
-import type { Style } from "../render/theme.ts"
+import { mixHex, type Style } from "../render/theme.ts"
 
 /** The pointer's row within one list. `-1` is "not over any of them". */
 export interface Hover {
@@ -89,11 +100,32 @@ export interface RowTone {
   hovered: boolean
 }
 
-/** The row background: the cursor's, the pointer's fainter one, or none. */
+/**
+ * How far a pointed-at cell moves toward `theme.lift`.
+ *
+ * Enough to be unmistakable on `dim` furniture, little enough that `warn` is
+ * still warn and `accent.user` is still that accent: the point of lifting a
+ * colour rather than replacing it is that the row keeps saying what it said.
+ */
+const pointer_lift = 0.34
+
+/**
+ * A cell's colour while the pointer is on its row — `base` itself when it is
+ * not. Every clickable thing in this front end goes through here, so "what
+ * hover looks like" has one answer and one number.
+ */
+export function lifted(style: Style, on: boolean, base: string): string {
+  return on ? mixHex(base, style.theme.lift, pointer_lift) : base
+}
+
+/** The same, for a row that already has a `RowTone`. */
+export function rowText(style: Style, tone: RowTone, base: string): string {
+  return lifted(style, tone.hovered, base)
+}
+
+/** The row background: the cursor's band, or none. The pointer lifts instead. */
 export function rowBackground(style: Style, tone: RowTone): string | undefined {
-  if (tone.selected) return style.theme.selection
-  if (tone.hovered) return style.theme.hover
-  return undefined
+  return tone.selected ? style.theme.selection : undefined
 }
 
 /**
@@ -103,6 +135,8 @@ export function rowBackground(style: Style, tone: RowTone): string | undefined {
  */
 export function rowGutter(style: Style, tone: RowTone): { text: string; fg: string } {
   if (tone.selected) return { text: `${style.glyphs.foldOpen} `, fg: style.theme.fg }
-  if (tone.hovered) return { text: `${style.glyphs.pointer} `, fg: style.theme.faint }
+  // Lifted like the rest of the row it marks: with no band behind it, the mark
+  // and the lift are the whole of what the pointer says.
+  if (tone.hovered) return { text: `${style.glyphs.pointer} `, fg: lifted(style, true, style.theme.faint) }
   return { text: "  ", fg: style.theme.faint }
 }

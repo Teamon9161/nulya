@@ -1,7 +1,7 @@
 import { For, createMemo } from "solid-js"
 import type { InputRenderable } from "@opentui/core"
 import { useScreen, useStyle } from "../render/theme.ts"
-import { createHover, onClick, rowBackground, rowGutter } from "./rows.ts"
+import { createHover, onClick, rowBackground, rowGutter, rowText } from "./rows.ts"
 import { fit, wrapWords } from "./columns.ts"
 import { DialogBody, DialogHint, DialogTitle, dialog_gutter } from "./Dialog.tsx"
 
@@ -127,10 +127,13 @@ export function ApprovalPanel(props: {
               <text fg={rowGutter(style, tone()).fg} flexShrink={0}>
                 {rowGutter(style, tone()).text}
               </text>
-              <text fg={style.theme.dim} flexShrink={0}>
+              <text fg={rowText(style, tone(), style.theme.dim)} flexShrink={0}>
                 {`${index() + 1}  `}
               </text>
-              <text fg={tone().selected ? toneColor(choice.tone) : style.theme.muted} flexShrink={0}>
+              <text
+                fg={rowText(style, tone(), tone().selected ? toneColor(choice.tone) : style.theme.muted)}
+                flexShrink={0}
+              >
                 {fit(choice.label, room() - dialog_gutter - 3)}
               </text>
             </box>

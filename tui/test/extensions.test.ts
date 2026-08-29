@@ -47,7 +47,7 @@ import {
 import { planProjectAgents } from "../src/agents.ts"
 import { modelTools, readHeader, type PackageCommand } from "../src/nulya/files.ts"
 import { rememberSessionPins } from "../src/state/tui_state.ts"
-import { default_settings, loadSettings } from "../src/state/settings.ts"
+import { default_settings, loadSettings, setting_fields } from "../src/state/settings.ts"
 import { draftHelp } from "../src/ui/overlays/ExtView.tsx"
 import { tempWorkspace, type TempWorkspace } from "./support.ts"
 
@@ -1015,6 +1015,67 @@ test("a manifest that says `apply: auto` is read as such, and kept off the unatt
     expect(what.apply).toBe("auto")
   } finally {
     store.cleanup()
+  }
+})
+
+test("every key /settings lists is a key the parser actually reads", async () => {
+  // `setting_fields` describes what `mergeLayer` reads, and nothing enforces
+  // that from the type system: the two are a table and a hand-written parser
+  // sitting in one file. This is what keeps them honest — a file that sets
+  // every listed key, put through the real loader, with every row expected to
+  // have MOVED off its default. A row naming a key the parser ignores (a typo,
+  // a key that was removed) leaves its value at the default and fails here.
+  const every = `
+[transcript]
+diff = "collapsed"
+tool_output = "expanded"
+thinking = "collapsed"
+composition = "expanded"
+run_summary = false
+max_width = 90
+history_window = 42
+stream_interval_ms = 0
+ascii = true
+
+[ui]
+theme = "nulya-light"
+code_theme = "one-dark"
+motion = false
+
+[extensions]
+sync_on_start = false
+auto_activate = false
+plugins = false
+session_with = ["handoff"]
+session_prompts = []
+
+[env.wsl]
+bare = true
+with = ["agent"]
+pins = ["ext:std/read"]
+session_prompts = ["ground"]
+
+[driver]
+mode = "unsafe"
+
+[approvals]
+allow = ["git status"]
+ask = ["git push"]
+deny = ["rm -rf /"]
+manifest_readonly = false
+readonly_commands = ["rg"]
+`
+  const layer = tempWorkspace()
+  try {
+    mkdirSync(join(layer.dir, ".nulya"), { recursive: true })
+    writeFileSync(join(layer.dir, ".nulya", "tui.toml"), every)
+    const settings = await loadSettings(layer.dir, {})
+    const stuck = setting_fields
+      .filter((field) => field.value(settings) === field.value(default_settings))
+      .map((field) => field.key)
+    expect(stuck).toEqual([])
+  } finally {
+    layer.cleanup()
   }
 })
 

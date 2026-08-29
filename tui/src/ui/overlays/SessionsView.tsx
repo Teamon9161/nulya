@@ -29,7 +29,7 @@ import { useKeyboard } from "@opentui/solid"
 import type { ScrollBoxRenderable } from "@opentui/core"
 import { useScreen, useStyle } from "../../render/theme.ts"
 import { displayWidth, fit } from "../columns.ts"
-import { createHover, onClick, rowBackground, rowGutter } from "../rows.ts"
+import { createHover, onClick, rowBackground, rowGutter, rowText } from "../rows.ts"
 import { OverlayFooter, createKeyHelp } from "./Footer.tsx"
 import { personaOf } from "../../agents.ts"
 import { sessionList, type SessionListEntry, type Verdict } from "../../nulya/cli.ts"
@@ -411,7 +411,6 @@ function NewTabRow(props: { onNew: () => void; width: number }) {
       width="100%"
       height={1}
       flexShrink={0}
-      backgroundColor={hovered() ? style.theme.hover : undefined}
       onMouseDown={click.onMouseDown}
       onMouseUp={click.onMouseUp}
       onMouseOver={() => setHovered(true)}
@@ -420,6 +419,9 @@ function NewTabRow(props: { onNew: () => void; width: number }) {
       <text fg={style.theme.faint} flexShrink={0}>
         {"  "}
       </text>
+      {/* No lift here: this row already says the pointer is on it by changing
+          colour outright — it is the one control in the rail whose whole text
+          is the button. */}
       <text fg={hovered() ? style.theme.accent.user : style.theme.fg} flexShrink={0}>
         {fit(`${style.glyphs.newTab} new tab`, Math.max(0, props.width - 2))}
       </text>
@@ -782,48 +784,52 @@ export function SessionsView(props: {
                 </text>
                 <box flexDirection="row" flexGrow={1} flexShrink={1} flexBasis={0}>
                   <text
-                    fg={
+                    fg={rowText(
+                      style,
+                      tone(),
                       entry().first_user_text.length === 0
                         ? style.theme.faint
                         : here()
-                          ? style.theme.accent.user
-                          : style.theme.fg
-                    }
+                        ? style.theme.accent.user
+                        : style.theme.fg,
+                    )}
                   >
                     {fit(title(entry()), plan().said)}
                   </text>
                 </box>
                 <Show when={plan().persona.length > 0}>
-                  <text fg={style.theme.accent.evolve} flexShrink={0}>
+                  <text fg={rowText(style, tone(), style.theme.accent.evolve)} flexShrink={0}>
                     {plan().persona}
                   </text>
                 </Show>
                 <Show when={plan().here.length > 0}>
-                  <text fg={style.theme.accent.user} flexShrink={0}>
+                  <text fg={rowText(style, tone(), style.theme.accent.user)} flexShrink={0}>
                     {plan().here}
                   </text>
                 </Show>
                 <Show when={plan().verdict.length > 0}>
                   <text
-                    fg={
+                    fg={rowText(
+                      style,
+                      tone(),
                       verdict() === "failure"
                         ? style.theme.err
                         : verdict() === "success"
-                          ? style.theme.ok
-                          : style.theme.warn
-                    }
+                        ? style.theme.ok
+                        : style.theme.warn,
+                    )}
                     flexShrink={0}
                   >
                     {plan().verdict}
                   </text>
                 </Show>
                 <Show when={plan().live.length > 0}>
-                  <text fg={style.theme.warn} flexShrink={0}>
+                  <text fg={rowText(style, tone(), style.theme.warn)} flexShrink={0}>
                     {plan().live}
                   </text>
                 </Show>
                 <Show when={plan().clock.length > 0}>
-                  <text fg={style.theme.muted} flexShrink={0}>
+                  <text fg={rowText(style, tone(), style.theme.muted)} flexShrink={0}>
                     {plan().clock}
                   </text>
                 </Show>
@@ -968,13 +974,15 @@ export function SessionsView(props: {
                 {/* The subject of the row, and the reason the row exists. */}
                 <box flexDirection="row" flexGrow={1} flexShrink={1} flexBasis={0}>
                   <text
-                    fg={
+                    fg={rowText(
+                      style,
+                      tone(),
                       entry().first_user_text.length === 0
                         ? style.theme.faint
                         : here()
-                          ? style.theme.accent.user
-                          : style.theme.fg
-                    }
+                        ? style.theme.accent.user
+                        : style.theme.fg,
+                    )}
                   >
                     {fit(title(entry()), said())}
                   </text>
@@ -984,7 +992,7 @@ export function SessionsView(props: {
                     already "the identity this one is running as" (§6.3) — the
                     same mark the status bar wears it with. */}
                 <Show when={persona()}>
-                  <text fg={style.theme.accent.evolve} flexShrink={0}>
+                  <text fg={rowText(style, tone(), style.theme.accent.evolve)} flexShrink={0}>
                     {" "}
                     {style.glyphs.picker} {persona()}
                   </text>
@@ -992,7 +1000,7 @@ export function SessionsView(props: {
                 {/* Which one is on screen right now: a colour alone cannot say it
                     where there are no colours (NO_COLOR, a mono terminal). */}
                 <Show when={here()}>
-                  <text fg={style.theme.accent.user} flexShrink={0}>
+                  <text fg={rowText(style, tone(), style.theme.accent.user)} flexShrink={0}>
                     {" "}
                     {style.glyphs.bar} this tab
                   </text>
@@ -1001,7 +1009,11 @@ export function SessionsView(props: {
                     an unjudged session shows nothing rather than a neutral chip. */}
                 <Show when={verdict()}>
                   <text
-                    fg={verdict() === "failure" ? style.theme.err : verdict() === "success" ? style.theme.ok : style.theme.warn}
+                    fg={rowText(
+                      style,
+                      tone(),
+                      verdict() === "failure" ? style.theme.err : verdict() === "success" ? style.theme.ok : style.theme.warn,
+                    )}
                     flexShrink={0}
                   >
                     {" "}
@@ -1009,14 +1021,14 @@ export function SessionsView(props: {
                   </text>
                 </Show>
                 <Show when={live()}>
-                  <text fg={style.theme.warn} flexShrink={0}>
+                  <text fg={rowText(style, tone(), style.theme.warn)} flexShrink={0}>
                     {" "}
                     {style.glyphs.assistant} live
                   </text>
                 </Show>
                 {/* Last, so that it is a column: chips come and go, and a clock
                     that moves left when one appears is not one. */}
-                <text fg={style.theme.muted} flexShrink={0}>
+                <text fg={rowText(style, tone(), style.theme.muted)} flexShrink={0}>
                   {clock_cell()}
                 </text>
               </box>

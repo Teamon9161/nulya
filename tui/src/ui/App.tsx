@@ -21,6 +21,8 @@ import { ApprovalPanel, type ApprovalChoice } from "./ApprovalPanel.tsx"
 import { ModePicker, initialChoice, modeAt, moveChoice } from "./ModePicker.tsx"
 import { AgentPicker } from "./AgentPicker.tsx"
 import { WithPicker, type Wearable } from "./WithPicker.tsx"
+import { EnvPicker } from "./EnvPicker.tsx"
+import { execChoices, withCurrent, type ExecChoice } from "../state/targets.ts"
 import { StatusBar } from "./StatusBar.tsx"
 import { ContextPanel } from "./ContextPanel.tsx"
 import { contextFill, contextSections } from "../state/context.ts"
@@ -643,6 +645,17 @@ export function App(props: AppProps) {
   const [withPicker, setWithPicker] = createSignal(false)
   const [withChoice, setWithChoice] = createSignal(0)
   const [wearables, setWearables] = createSignal<Wearable[]>([])
+  /** Bare `/env`: where this machine can run a shell (`EnvPicker`, T93). */
+  const [envPicker, setEnvPicker] = createSignal(false)
+  const [envChoice, setEnvChoice] = createSignal(0)
+  const [envTargets, setEnvTargets] = createSignal<ExecChoice[]>([])
+  /**
+   * Any of the composer's pickers is up. One accessor because every rule about
+   * them is about ALL of them — who holds the keyboard, whether the composer
+   * may blink, whether a shortcut layer answers — and a fifth picker should
+   * change one line rather than six (T93).
+   */
+  const pickerUp = () => modePicker() || withPicker() || agentPicker() || envPicker()
   const [agentChoice, setAgentChoice] = createSignal(0)
   /**
    * Which tabs are running an agent definition, and which one — the tab-level
@@ -2188,16 +2201,14 @@ export function App(props: AppProps) {
    * not fail — it waits, and lands the moment the zone clears, which is the
    * behaviour a plugin cannot tell apart from having opened slowly.
    *
-   * The `/with` and `/agent` pickers are in here too, for a duller reason:
-   * they are dialogs in the same three rows, and two of them drawn at once is
-   * just a mess. Nothing is being protected there.
+   * The `/with`, `/agent` and `/env` pickers are in here too, for a duller
+   * reason: they are dialogs in the same three rows, and two of them drawn at
+   * once is just a mess. Nothing is being protected there.
    */
   const dialogUp = (): boolean =>
     pending() !== null ||
     checkout() !== null ||
-    modePicker() ||
-    withPicker() ||
-    agentPicker() ||
+    pickerUp() ||
     overlay.kind() === "provider"
 
   /** The front tab's session, in the read-only shape the contract projects. */
@@ -2533,9 +2544,7 @@ export function App(props: AppProps) {
       if (
         !overlay.active() &&
         !browse.active() &&
-        !modePicker() &&
-        !agentPicker() &&
-        !withPicker() &&
+        !pickerUp() &&
         checkout() === null &&
         !plugins.panel()
       ) {
@@ -2554,7 +2563,7 @@ export function App(props: AppProps) {
    * choose from if `j` goes into the composer behind it.
    */
   createEffect(() => {
-    if (modePicker() || agentPicker() || withPicker() || checkout() !== null) composer?.blur()
+    if (pickerUp() || checkout() !== null) composer?.blur()
     else if (!pending() && !overlay.active() && !browse.active() && !plugins.panel()) composer?.focus()
   })
 
@@ -2565,7 +2574,7 @@ export function App(props: AppProps) {
    */
   createEffect(() => {
     if (plugins.panel()) composer?.blur()
-    else if (!pending() && !overlay.active() && !browse.active() && !modePicker() && !agentPicker() && !withPicker()) {
+    else if (!pending() && !overlay.active() && !browse.active() && !pickerUp()) {
       composer?.focus()
     }
   })
@@ -2582,7 +2591,7 @@ export function App(props: AppProps) {
    */
   createEffect(() => {
     if (overlay.active()) composer?.blur()
-    else if (!pending() && !browse.active() && !modePicker() && !agentPicker() && !withPicker() && !plugins.panel()) {
+    else if (!pending() && !browse.active() && !pickerUp() && !plugins.panel()) {
       composer?.focus()
     }
   })
@@ -3136,6 +3145,52 @@ export function App(props: AppProps) {
   }
 
   /**
+   * Bare `/env`, the `⇥` chip and the welcome screen's `shell` row (T93).
+   *
+   * The list is what this machine answers (`state/targets.ts`), never a pair of
+   * words written here — and it is probed on every open rather than cached,
+   * because a distribution installed since the TUI started is exactly the case
+   * where somebody goes looking for this dialog.
+   *
+   * The cursor opens on the target in force, so the first thing the dialog says
+   * is where things stand — which is what bare `/env` used to print as a notice.
+   */
+  const openEnvPicker = async () => {
+    const now = execEnv(props.statePath)
+    let listed: ExecChoice[] = []
+    try {
+      listed = withCurrent(await execChoices(), now)
+    } catch {
+      // A probe that throws is a shorter list, never a screen that failed to
+      // open: `local` and the typing row are always an answer.
+      listed = withCurrent([], now)
+    }
+    setEnvTargets(listed)
+    const at = listed.findIndex((one) => one.spec === (now || "local"))
+    setEnvChoice(at >= 0 ? at : 0)
+    setEnvPicker(true)
+  }
+
+  const closeEnvPicker = () => setEnvPicker(false)
+
+  /**
+   * Taking a row applies it — except the last one, which is not a target but
+   * the way out of a list that cannot be complete: it writes the command into
+   * the composer, the same move the bare `/agent` picker makes with a name.
+   * Running `/env` bare there would CLEAR the target, which is the one thing a
+   * person on this dialog cannot have meant.
+   */
+  const takeEnvChoice = () => {
+    const one = envTargets()[envChoice()]
+    setEnvPicker(false)
+    if (!one) {
+      composer?.restore("/env ")
+      return
+    }
+    setExecEnv(one.spec)
+  }
+
+  /**
    * `/outcome <verdict> [note]` — how this session turned out (DESIGN §3.3).
    *
    * It goes to the outcome journal, never to the ledger: a judgment ABOUT a
@@ -3227,11 +3282,13 @@ export function App(props: AppProps) {
    * transcript only means something against the machine that produced it. So
    * the answer is always about the NEXT session, and the sentence says so.
    *
-   * No argument reports where things stand rather than opening a picker: the
-   * useful set here is not enumerable — an ssh destination is whatever that
-   * person's `ssh_config` calls a host, and the distributions on this machine
-   * are a `wsl -l` away — so a list of two words plus "type the third one
-   * yourself" would be a picker pretending to have the answer.
+   * No argument opens the picker (T93). It used to print a notice instead, on
+   * the reasoning that the useful set is not enumerable — an ssh destination is
+   * whatever that person's `ssh_config` calls a host, and the distributions on
+   * this machine are "a `wsl -l` away". Both halves of that sentence name a
+   * source, and `state/targets.ts` asks them: a list built from `wsl -l` and
+   * `~/.ssh/config` reports rather than pretends, and the row that hands the
+   * typing back is what keeps it from claiming to be everything.
    *
    * The spelling is not checked here. `session new` refuses a bad one with the
    * vocabulary in the message, and that refusal already reaches the screen
@@ -3239,12 +3296,7 @@ export function App(props: AppProps) {
    */
   const setExecEnv = (raw: string | undefined) => {
     if (raw === undefined) {
-      const now = execEnv(props.statePath)
-      setNotice(
-        now.length > 0
-          ? `shell runs in ${now} for new sessions · /env local to come back · only shell moves, this harness stays here`
-          : "shell runs on this host · /env wsl | wsl:<distro> | ssh:<dest> for the next session",
-      )
+      void openEnvPicker()
       return
     }
     rememberExecEnv(raw, props.statePath)
@@ -3696,9 +3748,7 @@ export function App(props: AppProps) {
   const shortcutLayerBlocked = () =>
     Boolean(
       checkout() !== null ||
-        withPicker() ||
-        agentPicker() ||
-        modePicker() ||
+        pickerUp() ||
         pending() ||
         browse.active() ||
         plugins.panel(),
@@ -3836,6 +3886,7 @@ export function App(props: AppProps) {
       checkout: checkout() !== null,
       withPicker: withPicker(),
       agentPicker: agentPicker(),
+      envPicker: envPicker(),
       modePicker: modePicker(),
       approval: pending() !== null,
       keyboardPane: overlay.active() ? { pane: keyboardLeaf().pane, surface: keyboardLeaf().surface ?? "" } : null,
@@ -3877,6 +3928,25 @@ export function App(props: AppProps) {
         return consume(key, () => {
           setWithChoice(Number(key.name) - 1)
           takeWithChoice()
+        })
+      }
+      return consume(key, () => {})
+    }
+    if (owner.kind === "dialog" && owner.dialog === "env") {
+      // One more row than there are targets: the last one hands the typing back.
+      const count = envTargets().length + 1
+      if (matches(keys.cancel, key)) return consume(key, closeEnvPicker)
+      if (key.name === "up" || key.name === "k") {
+        return consume(key, () => setEnvChoice((at) => Math.max(at - 1, 0)))
+      }
+      if (key.name === "down" || key.name === "j") {
+        return consume(key, () => setEnvChoice((at) => Math.min(at + 1, count - 1)))
+      }
+      if (key.name === "return") return consume(key, takeEnvChoice)
+      if (key.name && /^[1-9]$/.test(key.name) && Number(key.name) <= count) {
+        return consume(key, () => {
+          setEnvChoice(Number(key.name) - 1)
+          takeEnvChoice()
         })
       }
       return consume(key, () => {})
@@ -4114,6 +4184,11 @@ export function App(props: AppProps) {
           error={snapshot().error ?? refusal()}
           cwd={ws().dir}
           onPickCwd={() => openOverlay("cwd")}
+          // Always a value on this screen, `this machine` included: here it is
+          // still a decision (T93). The status line below says the opposite
+          // thing by staying silent about the ordinary answer.
+          shell={runsIn() || "this machine"}
+          onPickEnv={() => void openEnvPicker()}
           onPickModel={() => openOverlay("model")}
           onCommand={submit}
           tip={tip}
@@ -4205,18 +4280,13 @@ export function App(props: AppProps) {
           { label: "model", value: modelName(), command: "/model", open: () => openOverlay("model") },
           { label: "permission mode", value: mode() ?? "ask", command: "/mode", open: toggleModePicker },
           { label: "directory", value: workspaceLabel(ws().dir), command: "/cwd", open: () => openOverlay("cwd") },
-          // `/env` takes an argument and has no picker of its own, so this row
-          // writes the command into the composer rather than running it — the
-          // same thing the bare `/agent` picker does with a name. Running it
-          // bare would CLEAR the exec target, which is the one thing a person
-          // clicking a row labelled "shell runs in" cannot have meant.
           {
             label: "shell runs in",
             value: runsIn() || "this machine",
-            command: "/env <target>",
+            command: "/env",
             open: () => {
               closeOverlay()
-              composer?.restore("/env ")
+              void openEnvPicker()
             },
           },
           { label: "packages and pins", value: `tools ${builtin_tools}+${faceSize()}`, command: "/ext", open: () => openOverlay("ext") },
@@ -4343,6 +4413,22 @@ export function App(props: AppProps) {
                     onPick={(one) => {
                       setWithChoice(wearables().indexOf(one))
                       takeWithChoice()
+                    }}
+                  />
+                </Show>
+                {/* Where the next session's shell runs (T93). Same dialog shape
+                    as the pickers around it, and the same rule: a target is
+                    frozen when a session starts, so this is always about the
+                    next one. */}
+                <Show when={envPicker()}>
+                  <EnvPicker
+                    choices={envTargets()}
+                    current={execEnv(props.statePath) || "local"}
+                    selected={envChoice()}
+                    onSelect={setEnvChoice}
+                    onPick={(choice) => {
+                      setEnvChoice(choice ? envTargets().indexOf(choice) : envTargets().length)
+                      takeEnvChoice()
                     }}
                   />
                 </Show>
@@ -4482,6 +4568,7 @@ export function App(props: AppProps) {
                   onPickMode={toggleModePicker}
                   wearing={wearing()}
                   execEnv={runsIn()}
+                  onPickEnv={() => void openEnvPicker()}
                   onOpenExt={() => openOverlay("ext")}
                   hint={notice()?.text}
                   behind={behind()}

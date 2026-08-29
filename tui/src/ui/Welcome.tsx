@@ -29,7 +29,7 @@
  */
 import { For, Show, createSignal } from "solid-js"
 import { useScreen, useStyle, type Glyphs } from "../render/theme.ts"
-import { onClick } from "./rows.ts"
+import { lifted, onClick } from "./rows.ts"
 import { Fact, label_width } from "./Fact.tsx"
 import { fit, wrapWords } from "./columns.ts"
 
@@ -79,6 +79,8 @@ function tipsOf(glyphs: Glyphs): string[] {
     "shell {background:true} outlives the step · /tasks shows what is still running",
     "/outcome success|partial|failure records how a session went · nothing recorded is not failure",
     "Ctrl+C stops the step and never exits on the first press",
+    "/env runs the next session's shell in WSL or over ssh · bare /env lists what this machine can reach",
+    "the settings screen names every key tui.toml takes, and what each one accepts",
     // Alt+V is named FIRST on purpose: Ctrl+V reaches this application only on
     // terminals that do not paste on it themselves, and the people who most
     // need to know a picture can be pasted are the ones whose terminal quietly
@@ -143,6 +145,19 @@ export function Welcome(props: {
    * below behave without `onCommand`.
    */
   onPickCwd?: () => void
+  /**
+   * Where this session's `shell` commands would run (DESIGN §8.1) — always a
+   * value, `this machine` included, because on THIS screen that is a decision
+   * and not a fact. The status line under it is the opposite case and stays
+   * silent about the ordinary answer: there the target is frozen, and a chip
+   * that always said the same thing would not be information (T35).
+   *
+   * It is the second half of the pair the `cwd` row starts: where the files
+   * are, and where the commands go. A click opens the picker, exactly as the
+   * `cwd` row above opens the directory browser.
+   */
+  shell?: string
+  onPickEnv?: () => void
 }) {
   const style = useStyle()
   const screen = useScreen()
@@ -154,6 +169,7 @@ export function Welcome(props: {
    * one of them — one signal, so two rows can never be lit at once.
    */
   const cwd_row = -2
+  const shell_row = -3
   /** The width a value has beside its label, less the box's own left pad. */
   const valueWidth = () => Math.max(8, screen().width - 2 - label_width - 1)
 
@@ -193,13 +209,47 @@ export function Welcome(props: {
             <box
               flexDirection="column"
               width="100%"
-              backgroundColor={live() && hovered() === cwd_row ? style.theme.hover : undefined}
               onMouseDown={live() ? click.onMouseDown : undefined}
               onMouseUp={live() ? click.onMouseUp : undefined}
               onMouseOver={() => setHovered(cwd_row)}
               onMouseOut={() => setHovered((now) => (now === cwd_row ? -1 : now))}
             >
-              <Fact label="cwd" value={props.cwd!} width={valueWidth()} />
+              <Fact
+                label="cwd"
+                value={props.cwd!}
+                width={valueWidth()}
+                fg={lifted(style, live() && hovered() === cwd_row, style.theme.muted)}
+              />
+            </box>
+          )
+        })()}
+      </Show>
+      <Show when={props.shell}>
+        {(() => {
+          const click = onClick(() => props.onPickEnv?.())
+          const live = () => props.onPickEnv !== undefined
+          return (
+            <box
+              flexDirection="column"
+              width="100%"
+              onMouseDown={live() ? click.onMouseDown : undefined}
+              onMouseUp={live() ? click.onMouseUp : undefined}
+              onMouseOver={() => setHovered(shell_row)}
+              onMouseOut={() => setHovered((now) => (now === shell_row ? -1 : now))}
+            >
+              {/* Warn-coloured when it is not this machine, the same as the chip
+                  that reports it once this screen is gone: it is the fact that
+                  makes `rm -rf build` two different acts. */}
+              <Fact
+                label="shell"
+                value={props.shell!}
+                width={valueWidth()}
+                fg={lifted(
+                  style,
+                  live() && hovered() === shell_row,
+                  props.shell === "this machine" ? style.theme.muted : style.theme.warn,
+                )}
+              />
             </box>
           )
         })()}
@@ -213,7 +263,7 @@ export function Welcome(props: {
           <Fact label="with" value={props.plan!.bring!} width={valueWidth()} fg={style.theme.accent.evolve} />
         </Show>
       </Show>
-      <Show when={props.cwd || props.plan}>
+      <Show when={props.cwd || props.shell || props.plan}>
         <box height={1} />
       </Show>
 
@@ -226,18 +276,19 @@ export function Welcome(props: {
               flexDirection="row"
               width="100%"
               height={1}
-              backgroundColor={live() && hovered() === index() ? style.theme.hover : undefined}
               onMouseDown={live() ? click.onMouseDown : undefined}
               onMouseUp={live() ? click.onMouseUp : undefined}
               onMouseOver={() => setHovered(index())}
               onMouseOut={() => setHovered((now) => (now === index() ? -1 : now))}
             >
               <box width={label_width} flexShrink={0}>
-                <text fg={style.theme.accent.evolve}>{command}</text>
+                <text fg={lifted(style, live() && hovered() === index(), style.theme.accent.evolve)}>{command}</text>
               </box>
               {/* Cut, never wrapped: a one-row box clips a second line, and a
                   caption that wraps re-lays itself under the pointer (`ui/columns.ts`). */}
-              <text fg={style.theme.dim}>{fit(what, valueWidth())}</text>
+              <text fg={lifted(style, live() && hovered() === index(), style.theme.dim)}>
+                {fit(what, valueWidth())}
+              </text>
             </box>
           )
         }}

@@ -1,6 +1,6 @@
 import { For, Show, createSignal } from "solid-js"
 import { useScreen, useStyle } from "../render/theme.ts"
-import { onClick, createHover } from "./rows.ts"
+import { onClick, createHover, lifted } from "./rows.ts"
 import { displayWidth, fit } from "./columns.ts"
 import type { Tab } from "../state/tabs.ts"
 
@@ -138,6 +138,7 @@ export function TabBar(props: {
             // `stop`, and the release only: the tab under it would otherwise
             // select the very tab this closes (`ui/rows.ts`).
             const close = onClick(() => props.onClose?.(index()), true)
+            const over = () => hover.at() === index()
             return (
               <>
                 {/* The gap between tabs stays outside both boxes: a highlight
@@ -149,21 +150,22 @@ export function TabBar(props: {
                   flexDirection="row"
                   flexShrink={0}
                   height={1}
-                  backgroundColor={
-                    here() ? style.theme.selection : hover.at() === index() ? style.theme.hover : undefined
-                  }
+                  backgroundColor={here() ? style.theme.selection : undefined}
                   onMouseDown={click.onMouseDown}
                   onMouseUp={click.onMouseUp}
                   {...hover.row(index())}
                 >
-                  <text fg={here() ? style.theme.accent.user : style.theme.faint} flexShrink={0}>
+                  <text
+                    fg={lifted(style, over(), here() ? style.theme.accent.user : style.theme.faint)}
+                    flexShrink={0}
+                  >
                     {here() ? `${style.glyphs.bar} ` : "  "}
                   </text>
-                  <text fg={here() ? style.theme.fg : style.theme.muted} flexShrink={0}>
+                  <text fg={lifted(style, over(), here() ? style.theme.fg : style.theme.muted)} flexShrink={0}>
                     {fit(labels()[index()] ?? "", plan().label)}
                   </text>
                   <Show when={tab.kind === "session" && tab.attach.role() === "observer"}>
-                    <text fg={style.theme.dim} flexShrink={0}>
+                    <text fg={lifted(style, over(), style.theme.dim)} flexShrink={0}>
                       {" (observer)"}
                     </text>
                   </Show>
@@ -196,13 +198,12 @@ export function TabBar(props: {
           <box
             flexShrink={0}
             height={1}
-            backgroundColor={overNew() ? style.theme.hover : undefined}
             onMouseDown={newClick.onMouseDown}
             onMouseUp={newClick.onMouseUp}
             onMouseOver={() => setOverNew(true)}
             onMouseOut={() => setOverNew(false)}
           >
-            <text fg={style.theme.faint}>
+            <text fg={lifted(style, overNew(), style.theme.faint)}>
               {"  "}
               {style.glyphs.newTab}
             </text>

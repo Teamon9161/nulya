@@ -13,7 +13,7 @@
  * The order, outermost first:
  *
  *  1. the composer dialogs the host owns — the checkout question, `/with`,
- *     `/agent`, `/mode`, and the approval question. These are the TRUSTED ZONE
+ *     `/agent`, `/env`, `/mode`, and the approval question. These are the TRUSTED ZONE
  *     (§1.1): the screens that would be a security incident if a package could
  *     imitate or outrank them.
  *  2. the focused pane, when its surface claims the keyboard (a full-screen
@@ -36,7 +36,7 @@
  */
 import type { PaneId, SurfaceId } from "./tree.ts"
 
-export type DialogKind = "checkout" | "with" | "agent" | "mode" | "approval"
+export type DialogKind = "checkout" | "with" | "agent" | "env" | "mode" | "approval"
 
 export type FocusOwner =
   | { readonly kind: "dialog"; readonly dialog: DialogKind }
@@ -58,6 +58,7 @@ export interface FocusState {
   readonly checkout: boolean
   readonly withPicker: boolean
   readonly agentPicker: boolean
+  readonly envPicker: boolean
   readonly modePicker: boolean
   /** A tool call is stopped at the gate, waiting for an answer. */
   readonly approval: boolean
@@ -69,13 +70,14 @@ export interface FocusState {
 
 export function resolveFocus(state: FocusState): FocusOwner {
   if (!state.modified) {
-    // The three pickers in the order they can stack: `/with` and `/agent` are
-    // only ever opened on purpose, while the mode picker can be opened FROM the
-    // approval dialog by clicking the chip — the one moment two of these are on
-    // screen at once (tui.md §5.7, T31).
+    // The pickers in the order they can stack: `/with`, `/agent` and `/env`
+    // are only ever opened on purpose, while the mode picker can be opened FROM
+    // the approval dialog by clicking the chip — the one moment two of these are
+    // on screen at once (tui.md §5.7, T31).
     if (state.checkout) return { kind: "dialog", dialog: "checkout" }
     if (state.withPicker) return { kind: "dialog", dialog: "with" }
     if (state.agentPicker) return { kind: "dialog", dialog: "agent" }
+    if (state.envPicker) return { kind: "dialog", dialog: "env" }
     if (state.modePicker) return { kind: "dialog", dialog: "mode" }
     if (state.approval) return { kind: "dialog", dialog: "approval" }
   }

@@ -18,7 +18,7 @@
  */
 import { For, Show, createSignal } from "solid-js"
 import { useScreen, useStyle } from "../render/theme.ts"
-import { onClick } from "./rows.ts"
+import { lifted, onClick } from "./rows.ts"
 import { fit } from "./columns.ts"
 
 export interface QueuedMessage {
@@ -48,14 +48,15 @@ export function QueueLane(props: { messages: readonly QueuedMessage[]; onSelect?
                 width="100%"
                 height={1}
                 flexShrink={0}
-                backgroundColor={hovered() === message.key ? style.theme.hover : undefined}
                 onMouseDown={click.onMouseDown}
                 onMouseUp={click.onMouseUp}
                 onMouseOver={() => setHovered(message.key)}
                 onMouseOut={() => setHovered((now) => (now === message.key ? null : now))}
               >
                 <text fg={style.theme.dim}>{"  "}</text>
-                <text fg={style.theme.faint}>{fit(message.text.replace(/\n/g, " "), room())}</text>
+                <text fg={lifted(style, hovered() === message.key, style.theme.faint)}>
+                  {fit(message.text.replace(/\n/g, " "), room())}
+                </text>
               </box>
             )
           }}

@@ -1,7 +1,7 @@
 import { For, Show, createMemo, createSignal } from "solid-js"
 import { useScreen, useStyle } from "../render/theme.ts"
 import { useFolds } from "../state/folds.ts"
-import { onClick } from "./rows.ts"
+import { lifted, onClick } from "./rows.ts"
 import { PluginSurface, surfaceWidth, tokenColor } from "../plugins/surface.tsx"
 import type { PluginWidget } from "../plugins/host.ts"
 
@@ -59,6 +59,8 @@ function Widget(props: { widget: PluginWidget; revision: number }) {
   const click = onClick(() => {
     if (foldable()) folds.toggle(key, false)
   })
+  /** Only a head line that IS a handle lights up under the pointer. */
+  const lift = (base: string) => lifted(style, foldable() && hovered(), base)
 
   return (
     <box flexDirection="column" width="100%" flexShrink={0}>
@@ -67,18 +69,17 @@ function Widget(props: { widget: PluginWidget; revision: number }) {
         width="100%"
         height={1}
         flexShrink={0}
-        backgroundColor={foldable() && hovered() ? style.theme.hover : undefined}
         onMouseDown={click.onMouseDown}
         onMouseUp={click.onMouseUp}
         onMouseOver={() => setHovered(true)}
         onMouseOut={() => setHovered(false)}
       >
-        <text fg={style.theme.accent.evolve} flexShrink={0}>
+        <text fg={lift(style.theme.accent.evolve)} flexShrink={0}>
           {`  ${style.glyphs.picker} `}
         </text>
         <For each={head()}>
           {(span) => (
-            <text fg={tokenColor(style, span.token)} flexShrink={0}>
+            <text fg={lift(tokenColor(style, span.token))} flexShrink={0}>
               {typeof span?.text === "string" ? span.text.replace(/[\r\n\t]/g, " ") : ""}
             </text>
           )}

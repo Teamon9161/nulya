@@ -32,7 +32,7 @@ import { readdirSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { useScreen, useStyle } from "../../render/theme.ts"
 import { displayWidth, fit } from "../columns.ts"
-import { createHover, onClick, rowBackground, rowGutter } from "../rows.ts"
+import { createHover, onClick, rowBackground, rowGutter, rowText } from "../rows.ts"
 import { OverlayFooter, createKeyHelp } from "./Footer.tsx"
 import { browserRows, resolveTyped, type DirChild, type DirRow, type DirSection } from "../../browsedir.ts"
 import { homeWorkspaceDir, workspaceLabel } from "../../workspaces.ts"
@@ -255,20 +255,22 @@ export function DirBrowser(props: {
                     {gutter().text}
                   </text>
                   <text
-                    fg={
+                    fg={rowText(
+                      style,
+                      tone(),
                       row().kind === "use" || row().kind === "home"
                         ? style.theme.accent.evolve
                         : row().kind === "parent"
-                          ? style.theme.faint
-                          : style.theme.fg
-                    }
+                        ? style.theme.faint
+                        : style.theme.fg,
+                    )}
                     flexGrow={1}
                     flexShrink={1}
                   >
                     {fit(row().label, Math.max(4, inner() - 4 - displayWidth(mark())))}
                   </text>
                   <Show when={mark().length > 0}>
-                    <text fg={style.theme.accent.evolve} flexShrink={0}>
+                    <text fg={rowText(style, tone(), style.theme.accent.evolve)} flexShrink={0}>
                       {mark()}
                     </text>
                   </Show>

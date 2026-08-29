@@ -20,7 +20,7 @@ import { useKeyboard } from "@opentui/solid"
 import type { ScrollBoxRenderable } from "@opentui/core"
 import { useScreen, useStyle } from "../../render/theme.ts"
 import { displayWidth, fit } from "../columns.ts"
-import { createHover, onClick, rowBackground, rowGutter } from "../rows.ts"
+import { createHover, onClick, rowBackground, rowGutter, rowText } from "../rows.ts"
 import { OverlayFooter, createKeyHelp } from "./Footer.tsx"
 import { seconds, stopTask } from "../../state/tasks.ts"
 import { taskIsDone, type TaskEntry } from "../../nulya/cli.ts"
@@ -225,14 +225,21 @@ export function TasksView(props: {
                 <text fg={gutter().fg} flexShrink={0}>
                   {gutter().text}
                 </text>
-                <text fg={running() ? style.theme.fg : style.theme.muted} flexShrink={0}>
+                <text fg={rowText(style, tone(), running() ? style.theme.fg : style.theme.muted)} flexShrink={0}>
                   {lead()}
                 </text>
-                <text fg={style.theme.dim} flexShrink={0}>
+                <text fg={rowText(style, tone(), style.theme.dim)} flexShrink={0}>
                   {fit(row().command, room())}
                 </text>
                 <Show when={note().length > 0}>
-                  <text fg={row().exit_code === 0 && row().state === "done" ? style.theme.dim : style.theme.err} flexShrink={0}>
+                  <text
+                    fg={rowText(
+                      style,
+                      tone(),
+                      row().exit_code === 0 && row().state === "done" ? style.theme.dim : style.theme.err,
+                    )}
+                    flexShrink={0}
+                  >
                     {"  "}
                     {note()}
                   </text>

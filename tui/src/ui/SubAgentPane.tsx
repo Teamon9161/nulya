@@ -140,7 +140,6 @@ export function SubAgentPane(props: {
         width="100%"
         height={1}
         flexShrink={0}
-        backgroundColor={hovered() ? style.theme.hover : undefined}
         onMouseOver={() => setHovered(true)}
         onMouseOut={() => setHovered(false)}
       >

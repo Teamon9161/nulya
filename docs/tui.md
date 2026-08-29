@@ -199,7 +199,7 @@ tui/
 - 粘贴：> 1000 字符或 > 15 行折叠成 `[Pasted text #N]`，提交时展开回原文；`Backspace` 落在占位尾部整条删掉（T14）。
 - 有 tool call 在等批准时（§5.7），**审批对话框拿着键盘**：`↑↓` / 数字键选答案、`Enter` 作答、`Tab` 在答案列表与 note 之间切、直接打字即写 note、`Esc` 在列表上 = deny（在 note 里先清空）。带 modifier 的键（`Ctrl+C`）照旧穿过去。
 - 全局：`Esc` cancel（stepping 时）/ browse 模式；**`Ctrl+C` 由近及远，永远不在第一下退出**（T27）：输入框里有字 → 先清空（`ComposerApi.clear`）· 正在 stepping → 先 kill 这一步 · 都没有 → 先说一句 `Ctrl+C again to quit`，**再按一下才退**（提示 3 秒后失效，所以几分钟后的一下永远不是意外退出）。半条写了一半的消息、和整个屏幕，都不是第二次按键能撤销的东西；`main.tsx` 的 `exitOnCtrlC: false` 是这条链成立的前提。`Ctrl+L` 重绘；`F2` `/ext`；`F3` `/sessions`；`F4` 下一个 tab；`F7` `/tasks`；`Ctrl+W` 关掉当前 tab（最后一个不关）。
-- 鼠标（T18）：列表行点一下落光标、点已选中的行执行它的 Enter；`/ext` 的 pane 条、`[x]` 与 id 行的开关记号、TabBar、状态栏的 `↓ N more below`、输入框都可点（点输入框也会退出 browse 模式）；拖过文本是选取，松手复制（OSC 52）。**模型这一行处处可点**（T20 → T22）：**输入框下面那一行开头的 `<model-id> [(effort)]`**、CompositionCard 的 `model` 值都开 `/model`；Welcome 的那几条 `/` 命令行、那一行末尾的 `/help` 也是按钮。所有可点的东西悬停都是同一个 `hover` 底色。
+- 鼠标（T18）：列表行点一下落光标、点已选中的行执行它的 Enter；`/ext` 的 pane 条、`[x]` 与 id 行的开关记号、TabBar、状态栏的 `↓ N more below`、输入框都可点（点输入框也会退出 browse 模式）；拖过文本是选取，松手复制（OSC 52）。**模型这一行处处可点**（T20 → T22）：**输入框下面那一行开头的 `<model-id> [(effort)]`**、CompositionCard 的 `model` 值都开 `/model`；Welcome 的那几条 `/` 命令行、那一行末尾的 `/help` 也是按钮。所有可点的东西悬停都是同一种反馈：**把这一行自己的颜色朝 `lift` 抬起来**（T95，`ui/rows.ts`），背后不刷底色——底色只留给光标（`selection`），两个事实两种手法。
 - **第一条消息才建 session**（T22，D11）：开屏是 draft，`Enter` 发送时先解 skill（`/name`）、再 `session new`、再 append+step。内核在这一步的拒绝（缺 key / store 未信任 / pin 认不出）**留在屏幕上**：notice 是内核原话，tab 仍是 draft，**打的字回到输入框**（`ComposerApi.restore`，只在框还空着时放回去——人在等的时候又打了别的，那是人的）。draft 上 `/outcome` `/compact` `/step` `/cancel` `Esc` 各回一句"这个 tab 还没有 session"，一个都不炸。
 - `/model`（F5）与 `/provider`（F6）是**两个命令、两个问题**（T5 → T6 → T20 → T21，与 tcode 的 `/model` ÷ `/provider` 同一刀）：
   - `/model` **只有模型**：每个能跑的 provider 的每个 model 一行（`provider · label · id · ctx · ‹ effort › · ✓ current`），`h/l` 拨 effort、Enter 开新场；跑不了的 provider 不出模型行（这才是让表变短的东西），`provider` 那一列保证"这是谁家的模型"一眼可读。一个 model 的 ctx / effort 档位**先读该 profile 自己的 catalog**、没有才回落全局 `[[models]]`——同一个 id 在订阅口与公共 API 口是两个东西。一个 provider 都跑不了时只有一行 `no provider can run yet · /provider …`，Enter / `p` 就是过去。
@@ -464,7 +464,7 @@ PLAN §3.2 早就把答案写死了——**一个 agent 就是 `session new` 的
 | `accent.evolve` | 演化与去处：`⚙ ⚡ ↺ ⌕ ☰ ⤷` 的 glyph、面的标题、`↗` 可点行、状态栏 `◈`、`↓ N more below` |
 | `ok` / `warn` / `err` | 判决：`✓ current` / `unsafe`·等你回答·漂移 / `exit 1`·`✗`·deny |
 | `diff.add` / `diff.del` | **只有前景色**，无背景块；上下文行 dim |
-| `hairline` `selection` `hover` `lift` | 家具底色：框线 · 光标行 · 指针行（永远比光标那档更淡）· 扫光抬起的方向（主题自报，`NO_COLOR` 即 `fg`，扫光变成 no-op） |
+| `hairline` `selection` `lift` | 框线 · **光标行的底色**（唯一的行底色）· 抬色的方向：指针经过的行与扫光都朝它抬（主题自报，`NO_COLOR` 即 `fg`，两者都变成 no-op；T95 把 `hover` 那格底色删了） |
 
 **代码有自己的配色**（T91，`render/syntax.ts`）：`markup.*`（正文的标题 / 列表 / 链接）与 `default` 仍来自上面这套 tokens——那是本前端自己的文档；而 fenced code 里的 14 个角色（comment / string / number / boolean / constant / keyword / function / type / variable / property / operator / punctuation / tag / attribute）来自一张**独立的调色板**，`[ui] code_theme` 选：`auto`（缺省，按界面主题的明暗给出 one-dark / github-light）· `theme`（旧行为：代码也用界面 tokens）· `one-dark` · `github-dark` · `github-light`。scoped capture 名（`keyword.control` 之类）不列——OpenTUI 的 `getStyleId` 会回落到第一个点之前的基名。`NO_COLOR` 压过一切调色板。
 主题：`nulya-dark`（默认）/ `nulya-light` / `NO_COLOR` 全塌成终端自己的前景色。
@@ -544,6 +544,7 @@ run_summary    = true          # 一串跑完且成功的无身体调用折成�
 composition    = "collapsed"   # collapsed | expanded —— 顶上那张 session 卡（T25）
 max_width      = 100
 history_window = 400           # 同时挂载的卡片数（从最新往回数）；0 = 全挂（T4）
+stream_interval_ms = 100       # 流式 markdown 最多多久重画一次；0 = 每个 delta 都画（BUGS #21）
 ascii          = false
 
 [ui]
@@ -560,6 +561,7 @@ allow = []
 ask   = []                  # 连 unsafe 也弹
 deny  = []                  # 连 ask 也不弹，直接拒
 manifest_readonly = true    # 信一个 tool 自己声明的 `"readonly": true`（DESIGN §7.2.1；是提示不是边界）
+readonly_commands = []      # ask 档下额外算作只读、因而不打断人的程序名（T65 的分类器可扩，但否决压不掉）
 
 [extensions]                # T11
 sync_on_start = true        # 开屏时后台 build 各 store root 下的 draft（`nulya ext sync`）
@@ -588,7 +590,7 @@ cancel = "escape"
 
 `[extensions]` 两个键都只作用于**这一趟 sync**：`auto_activate` 永远不会盖掉指着别处的 `current`（那是 DESIGN §7.2 的规则，前端无从违反），所以一次 rollback 活得过下一次启动。**对一个 `apply: "manual"` 的包，`activate` 只是移动一个指针**（`current`，ext-review-2 Lane K）——无论它贡献了什么，activate 本身都不改变任何 session 的 composition，所以这一趟对它没有什么需要挡的。**唯一的例外是 `apply: "auto"` 的包**（T52）：对它 activate 就是 compose，内核从那一刻起把它组进这台机器上每一场非 `--bare` 的 fresh session，所以这一趟**永不**激活一个还没有 `current` 的这种包（`extensions.autoActivatable`，与内核给自己的 `ext sync --activate` 同一条规矩），只把它点名到状态栏那一行上，让 `/ext` 的 Enter 去按。project store 的那道 trust 问句**不受这两个键管**——它是 DESIGN §9 的边界，只有按键能推动。
 
-`/settings` 只显示当前生效值与来源文件；不在 TUI 里写配置（编辑器改文件即可，第二个诉求出现再做）。
+`/settings` 只显示当前生效值与来源文件；不在 TUI 里写配置（编辑器改文件即可，第二个诉求出现再做）。但它**说得出这个文件收哪些字段**（T94）：上面这一整张表的每个键都在屏幕上，每行带着它接受的词表或形状，以及——当它不是缺省时——缺省是什么；能在界面里选、记在 `tui-state.json` 里的那些（模型 / 权限档 / 目录 / shell 跑在哪 / 包与 pin）排在最前面，每行就是一个入口（T92）。
 
 **`tui-recents.json`（T71）**：user 层下**第二个**由程序写的文件，JSON `{"recent": ["<绝对路径>", …]}`（新的在前，上限 12）。为什么不是 `tui-state.json` 的一个键：那个文件在其它每一处都是 **workspace 层**的事实（这个项目的 pin、它的侧边栏、它的档），而这一条是**关于好几个目录**的事实——一份别的目录的清单不能住在其中一个目录里面（`trusted-stores.jsonl` 因为同一个理由在 user 层，DESIGN §9）。**只在真的建起一场 session 时写**：浏览到一个地方不等于在那儿工作过。读不出来 = 没记住，永不阻止启动。
 
@@ -2682,3 +2684,52 @@ S1c 把 checkout 的两个问题（store 的 trust、`.nulya/agents`）从 `main
 **② 面板顶上多一段"chosen here"**（`SettingsView`）：不是每个选择都住在 `tui.toml` 里——模型、权限档、工作目录、shell 跑在哪、装了哪些包与 pin，都是在界面里选、记在 `tui-state.json` 的，那是**本前端写给自己的便条，不是谁的设定的第二个作者**（§7 那条"只显示不写入"说的是 `tui.toml`，一个字都没松）。这些排在最前面，每行**都写着自己的命令**——`command` 不是装饰，它是键盘到达这一行的唯一方式，只能点的行是一个这个前端用不了一半的控件——并且**点一行就是那个命令**（`open` 与状态栏对应 chip 调的是同一个函数，两个入口不可能漂移）。`/env` 是唯一的例外：它要参数、没有自己的 picker，**裸跑 `/env` 是清空 exec target**，恰恰是点"shell runs in"的人不可能想要的，所以那一行把 `/env ` 写进输入框（裸 `/agent` picker 的同一个先例）。
 
 **测试**：`test/layout.test.tsx` 一条（状态行**以** `⚙` 结尾——它是那一头的 chrome，不是排在本场事实里的又一个 chip——且点它开出 `settings · tui.toml`；那一行**按 `tools 1+` 找而不是按字形找**，免得将来某张卡画了齿轮就把这条测试指向别处）· `test/views.test.tsx` 一条（choices 行画得出、命令写在行上、点一行调的是那一行的 `open`，而文件那张表仍在）。`sidebar.test.tsx` 的宽屏快照按预期多了行尾这一个词。`bun test` 665 pass / 0 fail；`bunx tsc --noEmit` 干净。
+
+
+### T93 · shell 跑在哪，是一个能点的选择（2026-08-29）
+
+**内核零改动。**
+
+**问题**：进 WSL 只有一条路——打 `/env wsl`。而这句话本身没有任何地方写着：`⇥` chip 只在**已经**设了非 local 的时候才出现（T86 的规矩，也是对的：一个永远说同一句话的 chip 不是信息），于是"这个 harness 能把 shell 放到别的机器上跑"这件事，屏幕上零处提及。当年 `setExecEnv` 的注释还给出了不做 picker 的理由：这个集合不可枚举——ssh 目标是那个人的 `ssh_config` 叫它什么，而这台机器上的发行版"离一句 `wsl -l` 只有一步"。**这句话的两半各点了一个数据源**，所以答案不是硬编两个词的列表，是去问那两个源。
+
+**`state/targets.ts`（新）**：`local` 恒在（这是本进程所在的地方，一个可能空掉的 picker 就是一个没话说的对话框）· Windows 上 `wsl.exe -l -q` 的每个发行版 → `wsl:<name>`（**点名而不是裸 `wsl`**：spec 会被冻进 session header，而"默认发行版"是一个会移动的设定）· `~/.ssh/config` 里非模式的 `Host` → `ssh:<host>`。两处解析都是纯函数：`wsl.exe` 在没有 `WSL_UTF8` 的机器上写 **UTF-16LE**（所以既设那个变量，又按字节嗅——正文里的 NUL 是 UTF-8 永远不会产生的东西），`Host *` 是一段缺省而不是一台机器。`Include` 不跟：那正是最后一行存在的理由，而一个会跟 include 的解析器就是把 `ssh` 自己的查找逻辑在这里再写一遍。探测失败 = 少一行，永不是错误。
+
+**`ui/EnvPicker.tsx`（新）**：与 `/mode` `/with` `/agent` 同一个输入框上面的对话框（**也正是提问的人指的那个位置**）。最后一行 `somewhere else…` **不是一个 target**——它把 `/env ` 写进输入框（裸 `/agent` picker 的先例），列表下面还写着 `ssh:<destination>` 的语法：一个 picker 最不该做的事，就是暗示它列出来的就是全部。标题说一次「the next session」——已经开跑的那一场把 target 冻在 header 里，与它的模型身份同理。
+
+**四个入口，一个函数**：裸 `/env`（原来是打印一句 notice，那句话现在由 picker 自己的 `✓` 说了）· 状态栏的 `⇥` chip 可点 · `/settings` 的 "shell runs in" 那一行（T92 时它写 `/env ` 进输入框，因为当时没有 picker）· **欢迎屏新增一行 `shell`**。最后这个是这条改动里唯一的新常驻像素，判据写在两处注释里：**在 draft 屏上 `local` 是一个还没做的决定，在状态行上它是一个没什么可说的事实**——所以欢迎屏永远写（`this machine` 也写），状态行照旧只在非 local 时占一列。它与 `cwd` 那一行组成一对：文件在哪，命令去哪。
+
+**顺带**：`App` 里那五处"哪个 picker 开着"的布尔列表收成一个 `pickerUp()`——关于它们的每一条规矩都是关于**全部**的（谁拿键盘、输入框能不能闪、快捷层答不答），第五个 picker 该改一行而不是六行。`pane/focus.ts` 多一个 `env` dialog kind，排在 `agent` 与 `mode` 之间。
+
+**不做的两件事，写在这里免得下次重想**：① **WSL 里的某个目录**——今天办不到，而且这不是 `/env` 的洞：`--env wsl` 只搬 `shell`，它的 cwd 是"工作目录在发行版眼里的样子"（`/mnt/c/...`），而 store / journal / extension 子进程全在 host。真要在 Linux 侧的文件上工作，缺的是 remote environment（PLAN §3.8），不是把 `\\wsl.localhost\<distro>\...` 翻译一下就能补的（翻译只在 UNC 里的发行版名与 target 相同时才是对的，而"默认发行版"那一档根本对不上）。② ssh 目标**不传 cwd**——命令落在远端账号自己的登录目录，这是 DESIGN §8.1 就写着的如实记录。
+
+**测试**（`test/targets.test.tsx` 5 条）：UTF-16LE 的发行版名还原得出（读成 UTF-8 的话每个名字里都是洞）· `Host *` 不进列表 · 非 Windows 上不提供 `wsl:`（一个这台机器够不着的 target） · 手打的 target 仍被标成"在用的那个"（空串与 `local` 是同一个答案） · 最后一行回的是 `null` 而不是一个 spec。
+
+
+### T94 · 设置面板说得出这个文件收哪些字段（2026-08-29）
+
+**内核零改动。**
+
+**问题**：`/settings` 列的是**九个**键，而解析器读的有二十七个；每一行只写着"现在是什么"，没有一行写着"能填什么"。于是想知道 `transcript.thinking` 除了 `hidden` 还有什么、或者 `extensions.session_with` 是不是一个键，唯一的办法是去读 `state/settings.ts`。**一个只会说"去编辑文件"的设置屏，至少得说出那个文件收哪些词**。
+
+**`setting_fields`**（`state/settings.ts`）：一张表，每行 `{key, accepts, value(settings)}`——`accepts` 是封闭词表（`expanded | collapsed`）或那个开放集合的形状（`columns, above 0` / `package ids`）。**它描述而不解析**：上面那个手写的 `mergeLayer` 是有意手写的（列表型的键是替换不是合并、两个数字有下限、`diff` 还认得它的旧名 `edit_diff`），一个通用到能驱动这些的 schema 比它替掉的那些分支更难写对。
+
+**让两者不漂移的是测试而不是类型**（`test/extensions.test.ts` 一条）：写一个把**每个列出的键都设成非缺省值**的 `tui.toml`，过真的 `loadSettings`，断言**每一行都离开了它的缺省**。表里出现一个解析器不读的键（打错了、或那个键被删了），它的值留在缺省上，这条就红——验证过：临时加一行 `ui.nonesuch` 立刻失败。反过来"读了但没列"这条测试抓不到，所以表的顺序跟着解析器走，就近对读。
+
+**面板**：第三列写 `accepts`，值不是缺省时补一句 `· default <x>`（撤销一次编辑时唯一需要、别处也拿不到的东西），原来那句"· not the default"因此退休——值的颜色已经在说同一件事。表长过一屏，于是身体是一个 `scrollbox`、`j/k` 滚，与 `/help` 同一个形状同一个理由。`keys.*` 仍然一行一个**已覆盖**的绑定、`accepts` 留空：它不是一组固定的键（`keys.<任意动作>` 才是形状，动作名在 `/help` 里），一个动作一行会把整张 keymap 抄第二遍。
+
+**为什么仍然不写文件**（§7 那条一个字没松）：`tui.toml` 是人写的、带注释与排版，程序回写要 toml_edit 那一档的东西；而在界面里做的选择本来就有自己的家（`tui-state.json`，面板顶上那一段）。现在的分工因此是完整的一句话：**能在界面里选的，面板上面那段就是入口；只在文件里的，面板下面那张表说出它叫什么、收什么、现在是什么、缺省是什么。**
+
+
+### T95 · 悬停是把这一行的颜色抬起来，不是在它背后刷一条带子（2026-08-29）
+
+**内核零改动。**
+
+**问题**：可点的东西悬停时铺一条 `hover` 底色。两条底色（光标 `selection` + 指针 `hover`）本来就分不太开，而更本质的是：**那条带子看起来像"这一行被选中了"，可鼠标只是路过**。
+
+**改法**：`hover` 这个 token **删掉**，指针改为把这一行自己的颜色朝 `theme.lift` 抬 0.34（`ui/rows.ts` 的 `lifted` / `rowText`，一个数字一处定义）。`lift` 不是新概念——T38 的扫光就是为这件事引入它的：**"更亮"不是颜色自带的方向**，亮底上出挑的方向是朝墨色，所以每个主题自报自己那一端。抬起而不是替换，于是 `warn` 还是 warn、`accent.user` 还是那个 accent：这一行**继续说着它本来在说的话**，只是站出来了一点。光标那条 `selection` 底色**留着**——两个事实（键盘在这儿 / 鼠标路过）从此用两种不同的手法说，再也不会互相冒充。列表行的 `›` 指针记号跟着一起抬（没有带子之后，记号和抬色就是指针的全部）。
+
+**代价，如实记**：`NO_COLOR` 下 `lift` 就是 `fg`，抬色是 no-op——列表行还有 `›`，但状态栏那些 chip 在无色终端下不再有悬停反馈（从前是一整块反相底色）。光标那条带子不受影响。这是"整屏一个颜色"这个要求自带的边界，不是回头再补一条特判的理由。
+
+**波及面**：三十处 `backgroundColor={… theme.hover …}`（状态栏的每个 chip、tab 条、卡片头行、欢迎屏的每一行、任务面板、queue lane…）加上十来个用 `rowBackground` 的列表（`/sessions` `/ext` `/model` `/provider` `/tasks` `/cwd` 与四个 picker），逐个改成对**这一行里的每一个 `<text>`** 抬色——半亮的一行看起来像 bug，所以是整行而不是主列。唯一的例外是 `/sessions` 那条 `+ new tab`：它本来就整行换色，一个已经在说话的控件不需要第二种说法。
+
+**测试**（`test/mouse.test.tsx` 两条，就在"指针"这个文件里）：断言的是**机制**——悬停不给背景（`rowBackground` 只答光标那一档）、抬色是混合而不是替换（`warn` 抬完既不等于 `warn` 也不等于 `lift`，将来有人把它改成"直接换成某个高亮色"就红）、不悬停时逐字节是原色、`NO_COLOR` 下抬色是 no-op。没有断言那个 0.34，也没有断言任何十六进制。

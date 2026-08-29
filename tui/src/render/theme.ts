@@ -13,9 +13,10 @@
  *   dim    what is written about it: captions, hints, footers, labels
  *   faint  furniture: the hover marker, an empty gutter, a disabled cell
  *
- * `selection` and `hover` are the two row backgrounds, and hover is always the
- * quieter of the two: one says where the keyboard is, the other only that the
- * mouse is passing through.
+ * `selection` is the one row background: it says where the KEYBOARD is. The
+ * pointer says itself by lifting a row's own colours toward `lift` instead of
+ * painting behind them (`ui/rows.ts`), so the two are never confused and a row
+ * the mouse merely crossed does not look chosen.
  */
 import { createContext, useContext, type Accessor } from "solid-js"
 import { SyntaxStyle } from "@opentui/core"
@@ -42,10 +43,9 @@ export interface Theme {
   diff: { add: string; del: string; addBg: string; delBg: string }
   hairline: string
   selection: string
-  /** The quieter of the two row backgrounds: the pointer is merely here. */
-  hover: string
   /**
-   * Where a cell goes when the running highlight passes over it (T38).
+   * Where a cell goes when the pointer is on its row, and when the running
+   * highlight passes over it (T38).
    *
    * "Brighter" is not a direction a colour has on its own — on a light theme
    * the way to stand out is DOWN, toward ink. So each theme names its own end
@@ -68,7 +68,6 @@ const nulya_dark: Theme = {
   diff: { add: "#7fbf8a", del: "#e08a86", addBg: "#1f3a2d", delBg: "#432624" },
   hairline: "#2c3140",
   selection: "#2f3550",
-  hover: "#242937",
   lift: "#f2f5fb",
 }
 
@@ -84,7 +83,6 @@ const nulya_light: Theme = {
   diff: { add: "#1f7a45", del: "#b03a35", addBg: "#dcefe1", delBg: "#f5dddd" },
   hairline: "#d3d7de",
   selection: "#dfe4f0",
-  hover: "#eef1f7",
   lift: "#0b0e14",
 }
 
@@ -103,7 +101,6 @@ function monochrome(): Theme {
     diff: { add: fg, del: fg, addBg: "transparent", delBg: "transparent" },
     hairline: fg,
     selection: fg,
-    hover: fg,
     lift: fg,
   }
 }

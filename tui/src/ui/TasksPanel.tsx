@@ -23,7 +23,7 @@ import { Index, Show, createSignal } from "solid-js"
 import { useScreen, useStyle } from "../render/theme.ts"
 import { DialogHint, DialogTitle, dialog_gutter } from "./Dialog.tsx"
 import { columnWidth, fit } from "./columns.ts"
-import { onClick } from "./rows.ts"
+import { lifted, onClick } from "./rows.ts"
 import { seconds } from "../state/tasks.ts"
 import { taskIsDone, type TaskEntry } from "../nulya/cli.ts"
 
@@ -94,13 +94,12 @@ export function TasksPanel(props: {
                   <box
                     flexShrink={0}
                     height={1}
-                    backgroundColor={hovered() ? style.theme.hover : undefined}
                     onMouseDown={stop.onMouseDown}
                     onMouseUp={stop.onMouseUp}
                     onMouseOver={() => setStopOver(task().task)}
                     onMouseOut={() => setStopOver((now) => (now === task().task ? null : now))}
                   >
-                    <text fg={style.theme.err}>{"  stop"}</text>
+                    <text fg={lifted(style, hovered(), style.theme.err)}>{"  stop"}</text>
                   </box>
                 </Show>
               </box>

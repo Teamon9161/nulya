@@ -41,7 +41,7 @@ import { useKeyboard } from "@opentui/solid"
 import { useScreen, useStyle } from "../../render/theme.ts"
 import { listBudget, windowRange } from "../list.ts"
 import { columnWidth, fit, squeeze, wrapWords } from "../columns.ts"
-import { createHover, onClick, rowBackground, rowGutter } from "../rows.ts"
+import { createHover, onClick, rowBackground, rowGutter, rowText } from "../rows.ts"
 import { OverlayFooter, createKeyHelp } from "./Footer.tsx"
 import { blockedReason, keyable, modelIdsOf } from "./providers.ts"
 import { configShow, type ConfigView, type ModelView as ModelParams, type ProfileView } from "../../nulya/cli.ts"
@@ -466,23 +466,29 @@ export function ModelView(props: {
                   {`  ${gutter().text}`}
                 </text>
                 <box width={cols().label} flexShrink={0}>
-                  <text fg={isCurrentModel(row) ? style.theme.accent.user : ready ? style.theme.fg : style.theme.dim}>
+                  <text
+                    fg={rowText(
+                      style,
+                      tone(),
+                      isCurrentModel(row) ? style.theme.accent.user : ready ? style.theme.fg : style.theme.dim,
+                    )}
+                  >
                     {fit(labelOf(row), cols().label - 2)}
                   </text>
                 </box>
                 <box width={cols().id} flexShrink={0}>
-                  <text fg={style.theme.muted}>{fit(idOf(row), cols().id - 2)}</text>
+                  <text fg={rowText(style, tone(), style.theme.muted)}>{fit(idOf(row), cols().id - 2)}</text>
                 </box>
                 <box width={cols().ctx} flexShrink={0}>
-                  <text fg={style.theme.dim}>{fit(contextOf(row.params), cols().ctx - 2)}</text>
+                  <text fg={rowText(style, tone(), style.theme.dim)}>{fit(contextOf(row.params), cols().ctx - 2)}</text>
                 </box>
                 <box width={cols().dial} flexShrink={0}>
-                  <text fg={selected() ? style.theme.accent.evolve : style.theme.dim}>
+                  <text fg={rowText(style, tone(), selected() ? style.theme.accent.evolve : style.theme.dim)}>
                     {fit(dialOf(row, effortOf(row)), cols().dial - 2)}
                   </text>
                 </box>
                 <box width={cols().mark} flexShrink={0}>
-                  <text fg={style.theme.ok}>{fit(currentMark(row), cols().mark)}</text>
+                  <text fg={rowText(style, tone(), style.theme.ok)}>{fit(currentMark(row), cols().mark)}</text>
                 </box>
               </box>
             )

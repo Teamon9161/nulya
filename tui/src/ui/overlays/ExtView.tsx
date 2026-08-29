@@ -39,7 +39,7 @@ import { join } from "node:path"
 import { useKeyboard } from "@opentui/solid"
 import { useScreen, useStyle } from "../../render/theme.ts"
 import { columnWidth, fit, squeeze, wrapWords } from "../columns.ts"
-import { createHover, onClick, rowBackground, rowGutter } from "../rows.ts"
+import { createHover, lifted, onClick, rowBackground, rowGutter, rowText } from "../rows.ts"
 import { OverlayFooter, createKeyHelp } from "./Footer.tsx"
 import {
   draftEntries,
@@ -1372,32 +1372,34 @@ export function ExtView(props: {
                     An internal or auto-surface tool has no box: there is no
                     pin state this checkbox can honestly change. */}
                 <text
-                  fg={
+                  fg={rowText(
+                    style,
+                    tone(),
                     row().state === "other"
                       ? style.theme.warn
                       : on()
-                        ? style.theme.ok
-                        : style.theme.faint
-                  }
+                      ? style.theme.ok
+                      : style.theme.faint,
+                  )}
                 >
                   {row().internal || row().auto ? " ·  " : on() ? "[x] " : "[ ] "}
                 </text>
               </box>
               <box width={toolCols().id} flexShrink={0}>
-                <text fg={on() || here() ? style.theme.fg : style.theme.muted}>
+                <text fg={rowText(style, tone(), on() || here() ? style.theme.fg : style.theme.muted)}>
                   {fit(row().id, toolCols().id - 2)}
                 </text>
               </box>
               <box width={toolCols().state} flexShrink={0}>
-                <text fg={row().state === "other" ? style.theme.warn : style.theme.dim}>
+                <text fg={rowText(style, tone(), row().state === "other" ? style.theme.warn : style.theme.dim)}>
                   {fit(labelOf(row()), toolCols().state - 2)}
                 </text>
               </box>
               <box width={toolCols().uses} flexShrink={0}>
-                <text fg={style.theme.dim}>{fit(usesOf(row()), toolCols().uses - 2)}</text>
+                <text fg={rowText(style, tone(), style.theme.dim)}>{fit(usesOf(row()), toolCols().uses - 2)}</text>
               </box>
               <box width={toolCols().ok} flexShrink={0}>
-                <text fg={style.theme.dim}>{fit(okOf(row()), toolCols().ok)}</text>
+                <text fg={rowText(style, tone(), style.theme.dim)}>{fit(okOf(row()), toolCols().ok)}</text>
               </box>
             </box>
           )
@@ -1435,16 +1437,17 @@ export function ExtView(props: {
           width="100%"
           height={1}
           flexShrink={0}
-          backgroundColor={foldHover() ? style.theme.hover : undefined}
           onMouseOver={() => setFoldHover(true)}
           onMouseOut={() => setFoldHover(false)}
           onMouseDown={foldClick.onMouseDown}
           onMouseUp={foldClick.onMouseUp}
         >
           <box width={4} height={1} flexShrink={0}>
-            <text fg={style.theme.faint}>{` ${foldOpen() ? style.glyphs.foldOpen : style.glyphs.foldClosed}  `}</text>
+            <text fg={lifted(style, foldHover(), style.theme.faint)}>
+              {` ${foldOpen() ? style.glyphs.foldOpen : style.glyphs.foldClosed}  `}
+            </text>
           </box>
-          <text fg={style.theme.dim}>{fit(foldLine(folded(), foldOpen()), inner() - 4)}</text>
+          <text fg={lifted(style, foldHover(), style.theme.dim)}>{fit(foldLine(folded(), foldOpen()), inner() - 4)}</text>
         </box>
       </Show>
     </box>
@@ -1469,14 +1472,20 @@ export function ExtView(props: {
               <box
                 flexShrink={0}
                 height={1}
-                backgroundColor={
-                  here() ? style.theme.selection : paneHover.at() === index() ? style.theme.hover : undefined
-                }
+                backgroundColor={here() ? style.theme.selection : undefined}
                 onMouseDown={click.onMouseDown}
                 onMouseUp={click.onMouseUp}
                 {...paneHover.row(index())}
               >
-                <text fg={here() ? style.theme.accent.evolve : style.theme.dim}>{name}</text>
+                <text
+                  fg={lifted(
+                    style,
+                    paneHover.at() === index(),
+                    here() ? style.theme.accent.evolve : style.theme.dim,
+                  )}
+                >
+                  {name}
+                </text>
               </box>
             </>
           )
@@ -1577,19 +1586,21 @@ export function ExtView(props: {
                       onMouseDown={flip.onMouseDown}
                       onMouseUp={flip.onMouseUp}
                     >
-                      <text fg={switchColor(on())}>
+                      <text fg={rowText(style, tone(), switchColor(on()))}>
                         {on() === "inactive" ? style.glyphs.switchOff : style.glyphs.switchOn}{" "}
                       </text>
                     </box>
                     <box width={idCols().id} flexShrink={0}>
                       <text
-                        fg={
+                        fg={rowText(
+                          style,
+                          tone(),
                           entry().shadowed
                             ? style.theme.dim
                             : on() === "active" || here()
-                              ? style.theme.fg
-                              : style.theme.muted
-                        }
+                            ? style.theme.fg
+                            : style.theme.muted,
+                        )}
                       >
                         {fit(entry().id, idCols().id - 2)}
                       </text>
@@ -1599,21 +1610,23 @@ export function ExtView(props: {
                         it is active — that is the state somebody has to be able
                         to spot without reading a detail pane. */}
                     <box width={idCols().standing} flexShrink={0}>
-                      <text fg={on() === "inactive" ? style.theme.faint : style.theme.warn}>
+                      <text fg={rowText(style, tone(), on() === "inactive" ? style.theme.faint : style.theme.warn)}>
                         {fit(standingCell(entry()), Math.max(0, idCols().standing - 2))}
                       </text>
                     </box>
                     {/* Half active: which half. `3/5 tools` and `pins only` are
                         the two ways the kernel's two axes come apart. */}
                     <box width={idCols().on} flexShrink={0}>
-                      <text fg={style.theme.warn}>{fit(switchCell(entry()), Math.max(0, idCols().on - 2))}</text>
+                      <text fg={rowText(style, tone(), style.theme.warn)}>
+                        {fit(switchCell(entry()), Math.max(0, idCols().on - 2))}
+                      </text>
                     </box>
                     {/* What the SOURCE beside those versions would build to. An
                         id whose draft has moved on shows `not built` here while
                         its old version is still current — the difference `ext
                         sync` is for. */}
                     <box width={idCols().draft} flexShrink={0}>
-                      <text fg={draft() === "active" ? style.theme.dim : style.theme.warn}>
+                      <text fg={rowText(style, tone(), draft() === "active" ? style.theme.dim : style.theme.warn)}>
                         {fit(draft(), idCols().draft - 2)}
                       </text>
                     </box>
@@ -1621,7 +1634,9 @@ export function ExtView(props: {
                         runs (DESIGN §7.2). Saying so is the whole point — a
                         silently omitted duplicate is how it becomes a mystery. */}
                     <box width={idCols().shadow} flexShrink={0}>
-                      <text fg={style.theme.warn}>{entry().shadowed ? fit("shadowed", idCols().shadow) : ""}</text>
+                      <text fg={rowText(style, tone(), style.theme.warn)}>
+                        {entry().shadowed ? fit("shadowed", idCols().shadow) : ""}
+                      </text>
                     </box>
                   </box>
                 )
@@ -1777,7 +1792,13 @@ export function ExtView(props: {
                             {gutter().text}
                           </text>
                           <box width={versionCols().version} flexShrink={0}>
-                            <text fg={isCurrent() ? style.theme.accent.evolve : here() ? style.theme.fg : style.theme.muted}>
+                            <text
+                              fg={rowText(
+                                style,
+                                tone(),
+                                isCurrent() ? style.theme.accent.evolve : here() ? style.theme.fg : style.theme.muted,
+                              )}
+                            >
                               {fit(
                                 versionCols().full ? version.version : shortVersion(version.version),
                                 versionCols().version - 2,
@@ -1785,7 +1806,9 @@ export function ExtView(props: {
                             </text>
                           </box>
                           <box width={versionCols().when} flexShrink={0}>
-                            <text fg={style.theme.dim}>{fit(stamp(version.mtime), versionCols().when - 2)}</text>
+                            <text fg={rowText(style, tone(), style.theme.dim)}>
+                              {fit(stamp(version.mtime), versionCols().when - 2)}
+                            </text>
                           </box>
                           <box width={versionCols().current} flexShrink={0}>
                             {/* `✓ current` is the same mark in the same colour as
@@ -1793,12 +1816,12 @@ export function ExtView(props: {
                                 meaning — "this is the one in force". It used to be
                                 `⚡`, which is what an extension GAINED, not which
                                 build it points at. */}
-                            <text fg={style.theme.ok}>
+                            <text fg={rowText(style, tone(), style.theme.ok)}>
                               {isCurrent() ? fit(`${style.glyphs.check} current`, versionCols().current - 2) : ""}
                             </text>
                           </box>
                           <box width={versionCols().mine} flexShrink={0}>
-                            <text fg={style.theme.accent.user}>
+                            <text fg={rowText(style, tone(), style.theme.accent.user)}>
                               {isFrozen() ? fit(`${style.glyphs.bar} this session`, versionCols().mine) : ""}
                             </text>
                           </box>
