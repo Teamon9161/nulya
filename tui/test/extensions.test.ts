@@ -1125,6 +1125,24 @@ test("[env.ssh] parses field by field, leaving fields it did not mention at the 
   }
 })
 
+test("[env.remote] parses the same way, and does not leak into [env.ssh] / [env.wsl] / [env.local] (T101)", async () => {
+  const layer = tempWorkspace()
+  try {
+    mkdirSync(join(layer.dir, ".nulya"), { recursive: true })
+    writeFileSync(
+      join(layer.dir, ".nulya", "tui.toml"),
+      '[env.remote]\nbare = false\nwith = ["agent"]\nsession_prompts = ["ground"]\n',
+    )
+    const settings = await loadSettings(layer.dir, {})
+    expect(settings.env.remote).toEqual({ bare: false, with: ["agent"], session_prompts: ["ground"] })
+    expect(settings.env.ssh).toBeUndefined()
+    expect(settings.env.wsl).toBeUndefined()
+    expect(settings.env.local).toBeUndefined()
+  } finally {
+    layer.cleanup()
+  }
+})
+
 test("ui.code_theme is read from tui.toml, and an unknown name leaves the default standing", async () => {
   const layer = tempWorkspace()
   try {

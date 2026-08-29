@@ -54,6 +54,8 @@ export interface HostViews {
   model: (mount: SurfaceMount) => JSX.Element
   provider: (mount: SurfaceMount) => JSX.Element
   cwd: (mount: SurfaceMount) => JSX.Element
+  /** The same browser, choosing a directory on a `remote:` `/env` target instead of this tab's own (T101). */
+  envdir: (mount: SurfaceMount) => JSX.Element
 }
 
 function surface(
@@ -117,5 +119,15 @@ export function hostSurfaces(views: HostViews): SurfaceDefinition<JSX.Element>[]
      * skeletons.
      */
     surface(overlay_surfaces.cwd, "directory", true, views.cwd),
+    /**
+     * The same browser, a second registration: choosing WHERE on a `remote:`
+     * target a session's workspace goes, rather than this tab's own directory
+     * (goals/remote-env.md §3.9, T101). Two surface ids because two things
+     * can be true at once about "is the directory browser up" — this tab's
+     * own `/cwd` and a pending `/env` choice are unrelated questions, and one
+     * flag answering both would make picking a remote workspace look like it
+     * also moved the tab.
+     */
+    surface(overlay_surfaces.envdir, "remote directory", true, views.envdir),
   ]
 }

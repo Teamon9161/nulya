@@ -54,6 +54,7 @@ import {
   extBuild,
   extDeactivate,
   extPrune,
+  extPush,
   extSeed,
   extSetCurrent,
   type SyncLine,
@@ -78,7 +79,7 @@ import {
   type PinSources,
   type PinState,
 } from "../../pins.ts"
-import { rememberSessionPins, sessionPins } from "../../state/tui_state.ts"
+import { execEnv, lastPush, rememberPush, rememberSessionPins, sessionPins } from "../../state/tui_state.ts"
 import { UsageTable } from "./UsageTable.tsx"
 import type { Workspace } from "../../nulya/bin.ts"
 import type { SessionHeader } from "../../nulya/ledger.ts"
@@ -447,6 +448,13 @@ export function ExtView(props: {
   const [foldOpen, setFoldOpen] = createSignal(false)
   const [pane, setPane] = createSignal<Pane>("extensions")
   const [notice, setNotice] = createSignal<string | null>(null)
+  /**
+   * Bumped after `pushExtension` records an outcome (T102): `lastPush` is a
+   * plain file read, not a signal, so nothing tells the footer's `more` line
+   * to look again just because the file changed underneath it — the same
+   * "something wrote that file" bump `App.tsx`'s `planTick` exists for.
+   */
+  const [pushTick, setPushTick] = createSignal(0)
   const [drafts, setDrafts] = createSignal<SyncLine[]>([])
   const [confirm, setConfirm] = createSignal<Pending | null>(null)
   // The three places a pin can be written, plus the quota the kernel enforces.
@@ -1193,6 +1201,75 @@ export function ExtView(props: {
     setConfirm({ kind: "activate", id: entry.id, version })
   }
 
+  /**
+   * The `remote:` target THIS tab runs on, or null when it does not — the
+   * gate `r` (push) reads (goals/remote-env.md §3.9, T102). A started
+   * session's target is FROZEN in its header, same rule `App.tsx`'s `runsIn`
+   * lives by; a draft has no header yet, so it reads the pending `/env`
+   * choice instead (`tui_state.ts`).
+   */
+  const remoteTarget = (): string | null => {
+    const spec = props.header ? props.header.environment : execEnv(props.statePath)
+    return spec.startsWith("remote:") ? spec : null
+  }
+
+  /**
+   * The footer's `r` line: the action, and — only when there is one — the
+   * last time it ran for whatever is selected right now. Deliberately not a
+   * present-tense claim ("pushed" / "not pushed"): a record of what the
+   * kernel said LAST time is the whole of what this front end can honestly
+   * keep between the moment it asked and now (T102's own reasoning — a push
+   * is answered once, by the kernel, and re-asking is what content addressing
+   * makes cheap).
+   */
+  function pushHint(spec: string, entry: ExtensionEntry | null): string {
+    pushTick() // read for the dependency: `lastPush` below is a file, not a signal
+    const record = entry ? lastPush(entry.id, props.statePath) : undefined
+    const base = "r push the selected package's active version"
+    if (!record || !entry || record.spec !== spec) return `${base} to ${spec}`
+    return `${base} to ${spec} · last time: ${record.said}`
+  }
+
+  /**
+   * `r`: `nulya ext push <id>@<version> --env <spec>` — copy the selected
+   * package's ACTIVE version onto the machine this tab's target names
+   * (T102). Only the active version, never a draft's plan or an older one on
+   * the timeline: pushing is about running what this tab is about to run,
+   * not about publishing a choice this screen has no UI for making.
+   *
+   * No standing "is it there" cache is kept (see the module doc's decision
+   * on this): the kernel's own sentence — "already there" or "pushed" — is
+   * shown once, as the notice, and the LAST one is remembered
+   * (`tui_state.ts`'s `remote_pushed`) so the row can say when that was
+   * without claiming to know the present.
+   */
+  const pushExtension = async () => {
+    const spec = remoteTarget()
+    if (!spec) return
+    const entry = selected()
+    if (!entry) return
+    if (!entry.current) {
+      setNotice(`${entry.id} has no active version to push · activate one first`)
+      return
+    }
+    if (busy(entry.id)) {
+      setNotice(`${entry.id} · still working on the last press`)
+      return
+    }
+    hold(entry.id)
+    setNotice(`pushing ${entry.id}@${entry.current} to ${spec}…`)
+    try {
+      const said = await extPush(props.ws, `${entry.id}@${entry.current}`, spec)
+      rememberPush(entry.id, spec, said, props.statePath)
+      setPushTick((tick) => tick + 1)
+      setNotice(`${entry.id}: ${said}`)
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error))
+    } finally {
+      release(entry.id)
+    }
+  }
+
   const prune = () => {
     const entry = selected()
     if (!entry) return
@@ -1297,6 +1374,10 @@ export function ExtView(props: {
     // key that appears to do nothing, which is worse than a key that is unbound.
     if (key.name === "d" && pane() === "tools" && (foldOpen() || folded().length > 0)) return toggleFold()
     if (key.name === "p") return prune()
+    // Only reachable at all when this tab HAS a remote target (T102) — an
+    // unbound key elsewhere in this view is quieter than one that answers
+    // with a notice explaining a machine nobody chose.
+    if (key.name === "r" && remoteTarget()) return void pushExtension()
     if (key.name === "t") return setPane(pane() === "tools" ? "extensions" : "tools")
     if (key.name === "u") return setPane(pane() === "usage" ? "extensions" : "usage")
   })
@@ -1874,6 +1955,7 @@ export function ExtView(props: {
           "h/l ←/→ Tab move across the panes · j/k ↑/↓ move down a list",
           "Space pin one tool · A promote it to always · d fold the internal tools in or out · b build the source · s take this binary's copy of a bundled draft (`differs`) · p prune old versions",
           "a activate one named version, on the version line — an older one is the rollback · t tools · u usage",
+          ...(remoteTarget() ? [pushHint(remoteTarget()!, selected())] : []),
         ]}
       />
     </box>

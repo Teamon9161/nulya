@@ -193,6 +193,12 @@ export interface SessionExtras {
    * screen makes once, at the moment a draft freezes, and never again.
    */
   execEnv?: string
+  /**
+   * `--workspace <dir>`: the remote machine's absolute directory this
+   * session's `shell` and every workspace-reading tool run against — only
+   * meaningful beside a `remote:` `execEnv` (goals/remote-env.md §3.3, T101).
+   */
+  workspace?: string
   /** The step budget the resulting tab drives with (`OpenOptions.maxSteps`). */
   maxSteps?: number
 }
@@ -545,6 +551,7 @@ export function createTabStore(home: Workspace, first: FirstTab, options: TabSto
         ...(extra.bare ? { bare: true } : {}),
         ...((extra.prompt?.length ?? 0) > 0 ? { prompt: extra.prompt } : {}),
         ...(extra.execEnv ? { execEnv: extra.execEnv } : {}),
+        ...(extra.workspace ? { workspace: extra.workspace } : {}),
       })
       return replace(draft.key, id, {
         created: true,

@@ -199,6 +199,15 @@ export interface NewSessionOptions {
    * "is this spelling any good".
    */
   execEnv?: string
+  /**
+   * `--workspace <dir>`: the remote machine's absolute directory this
+   * session's `shell` and every workspace-reading tool run against (DESIGN
+   * §8.2, goals/remote-env.md §3.3). Only meaningful alongside a `remote:`
+   * `execEnv` — the kernel is the one that enforces that, same reasoning as
+   * `execEnv` itself: it already refuses the combination it does not like, so
+   * this is passed through rather than checked twice.
+   */
+  workspace?: string
 }
 
 /** `nulya session new` — stdout is the session id. `env` is a test seam (`NULYA_HOME`). */
@@ -213,6 +222,7 @@ export async function sessionNew(
   if (options.parent) args.push("--parent", `${options.parent.session}:${options.parent.seq}`)
   if (options.bare) args.push("--bare")
   if (options.execEnv) args.push("--env", options.execEnv)
+  if (options.workspace) args.push("--workspace", options.workspace)
   for (const ref of options.with ?? []) args.push("--with", ref)
   for (const pin of options.pin ?? []) args.push("--pin", pin)
   for (const file of options.prompt ?? []) args.push("--prompt", file)
@@ -1126,6 +1136,89 @@ export async function extDeactivate(ws: Workspace, id: string, options: { user?:
   const result = await run(ws, args)
   if (result.code !== 0) fail("ext deactivate failed", result)
   return result.stdout.trim()
+}
+
+// ── remote environment (DESIGN §8.2, goals/remote-env.md §3.9) ─────────────
+
+/** `nulya remote check --env <spec> --json`: one round trip, answered by whatever agent is on the other end of that channel. */
+export interface RemoteHello {
+  nulya: string
+  os: string
+  arch: string
+  /** Empty when the agent could not say — never invented. */
+  home: string
+  /** The directory the agent started in; the workspace a session with no `--workspace` would use. */
+  cwd: string
+  dialect: string
+}
+
+/**
+ * `nulya remote check --env <spec> --json` — open a channel and report what
+ * answered, without starting a session. The one thing this front end uses it
+ * for is a starting point for the remote directory browser (`dirsource.ts`'s
+ * `remoteDirSource`) when nothing is remembered for `spec` yet
+ * (`tui_state.ts`'s `remote_cwd`): `home`, falling back to `cwd` when the
+ * agent has no `$HOME` to report.
+ *
+ * Throws on refusal — a bad spec, an unreachable machine, a version mismatch
+ * — with the kernel's own sentence, which already names what to do about it
+ * (`CliError`'s `detail`).
+ */
+export async function remoteCheck(ws: Workspace, spec: string, env?: Record<string, string>): Promise<RemoteHello> {
+  const result = await run(ws, ["remote", "check", "--env", spec, "--json"], env)
+  if (result.code !== 0) fail(`could not reach ${spec}`, result)
+  try {
+    return JSON.parse(result.stdout) as RemoteHello
+  } catch {
+    fail(`could not reach ${spec}`, result)
+  }
+}
+
+/** One entry of `nulya remote ls --json` — a name and whether it is a directory. */
+export interface RemoteEntry {
+  name: string
+  dir: boolean
+}
+
+/**
+ * `nulya remote ls --env <spec> [<path>] --json` — one directory's children on
+ * the machine `spec` names, read exactly (DESIGN §8.2): a protocol verb
+ * rather than a parsed `ls -1p`, because a file name may contain a newline.
+ *
+ * Throws on refusal, same as `remoteCheck` — `state/dirsource.ts`'s
+ * `remoteDirSource` is the one caller, and it catches this to answer "cannot
+ * list this path" the same way the local reader answers a directory it
+ * cannot open: a shorter listing, never a crash.
+ */
+export async function remoteLs(
+  ws: Workspace,
+  spec: string,
+  path: string,
+  env?: Record<string, string>,
+): Promise<RemoteEntry[]> {
+  const result = await run(ws, ["remote", "ls", "--env", spec, path, "--json"], env)
+  if (result.code !== 0) fail(`could not list ${path} on ${spec}`, result)
+  try {
+    return JSON.parse(result.stdout) as RemoteEntry[]
+  } catch {
+    fail(`could not list ${path} on ${spec}`, result)
+  }
+}
+
+/**
+ * `nulya ext push <id>@<version> --env <spec>` — copy that built version into
+ * the machine `spec` names, content-addressed and idempotent: pushing what is
+ * already there is a no-op the kernel itself reports (DESIGN §7.4). The
+ * sentence returned is the kernel's own — "already there" or "pushed" or a
+ * refusal — because that sentence is what `/ext`'s push action shows, and a
+ * second wording here would be a second answer to what the kernel already
+ * said once.
+ */
+export async function extPush(ws: Workspace, ref: string, spec: string, env?: Record<string, string>): Promise<string> {
+  const result = await run(ws, ["ext", "push", ref, "--env", spec], env)
+  const said = (result.stdout.trim() || result.stderr.trim() || `exit ${result.code}`).split("\n")[0] ?? ""
+  if (result.code !== 0) throw new CliError(`ext push failed: ${said}`, result.stderr.trim() || result.stdout.trim())
+  return said
 }
 
 export interface StepHandle {

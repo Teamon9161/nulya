@@ -8,7 +8,7 @@
  * leave it alone.
  */
 import { afterAll, beforeAll, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { JSX } from "solid-js"
@@ -17,7 +17,7 @@ import { SettingsView, draftOf } from "../src/ui/overlays/SettingsView.tsx"
 import { StyleContext, liveStyle } from "../src/render/theme.ts"
 import { FoldContext, createFoldStore } from "../src/state/folds.ts"
 import { loadSettings, settingsPaths } from "../src/state/settings.ts"
-import { layerSets, placeSetting, readLayer, writeSetting } from "../src/state/settingsfile.ts"
+import { layerSets, patchAgainstFreshest, placeSetting, readLayer, writeSetting } from "../src/state/settingsfile.ts"
 import { frameLines, settle, tempWorkspace, type TempWorkspace } from "./support.ts"
 
 // ---------------------------------------------------------------- the writer
@@ -97,6 +97,54 @@ test("a file this scanner cannot follow is refused rather than half-written", ()
     writeFileSync(path, before)
     expect(() => writeSetting(path, "transcript.diff", "collapsed")).toThrow()
     expect(readFileSync(path, "utf8")).toBe(before)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test("a write commits against the FRESHEST read, not the one it started with — a concurrent human edit is never lost", () => {
+  // The shape of the race: `read()` answers A the first time (what the
+  // write started patching against) and B — a person's own editor having
+  // saved an extra line in between — the second (right before the commit).
+  const A = '[transcript]\ndiff = "expanded"\n'
+  const B = '[transcript]\ndiff = "expanded"\nmax_width = 120\n'
+  let calls = 0
+  const written: string[] = []
+  const after = patchAgainstFreshest(
+    () => (calls++ === 0 ? A : B),
+    "transcript",
+    "diff",
+    "collapsed",
+  )
+  written.push(after)
+  expect(after).toContain('diff = "collapsed"')
+  // B's own edit — the human's — survived the write that raced it.
+  expect(after).toContain("max_width = 120")
+  expect(calls).toBe(2) // read exactly twice: once to patch, once to confirm nothing moved
+})
+
+test("when the freshest read agrees with the first, nothing about the result changes", () => {
+  const same = '[transcript]\ndiff = "expanded"\n'
+  const after = patchAgainstFreshest(() => same, "transcript", "diff", "collapsed")
+  expect(after).toBe(placeSetting(same, "transcript", "diff", '"collapsed"'))
+})
+
+test("writeSetting leaves no temp file behind, on either a success or a refusal", () => {
+  const home = mkdtempSync(join(tmpdir(), "nulya-settings-atomic-"))
+  try {
+    const path = join(home, "tui.toml")
+    writeFileSync(path, '[transcript]\ndiff = "expanded"\n')
+    writeSetting(path, "transcript.diff", "collapsed")
+    expect(readFileSync(path, "utf8")).toContain('diff = "collapsed"')
+
+    const brokenPath = join(home, "broken.toml")
+    writeFileSync(brokenPath, ['[ui]', 'note = """', "[transcript]", 'diff = "expanded"', '"""', ""].join("\n"))
+    expect(() => writeSetting(brokenPath, "transcript.diff", "collapsed")).toThrow()
+
+    // Neither the successful write nor the refused one left a `.tmp-*`
+    // sibling — the rename either landed or nothing was written at all.
+    const leftover = readdirSync(home).filter((name) => name.includes(".tmp-"))
+    expect(leftover).toEqual([])
   } finally {
     rmSync(home, { recursive: true, force: true })
   }

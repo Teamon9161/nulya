@@ -66,6 +66,14 @@ export interface SessionHeader {
    * is stepping it. Empty from any binary that predates the field.
    */
   environment: string
+  /**
+   * The remote workspace's absolute path, when `environment` names a `remote:`
+   * target (goals/remote-env.md §3.3): the directory this session's `shell`,
+   * `std` and any other workspace-reading tool run against on that machine.
+   * Empty for every other `environment` value, and for any header written
+   * before this field existed.
+   */
+  remote_workspace: string
   created: string
   composition: FrozenComposition
 }
@@ -194,6 +202,7 @@ export function parseHeaderLine(line: string): SessionHeader | null {
       api_key_env: "",
     },
     environment: typeof record["environment"] === "string" ? record["environment"] : "",
+    remote_workspace: typeof record["remote_workspace"] === "string" ? record["remote_workspace"] : "",
     created: typeof record["created"] === "string" ? record["created"] : "",
     composition: {
       active: [],

@@ -70,7 +70,35 @@ test("a target this host cannot reach is not offered", async () => {
   // …and on the host that can, the distribution is named rather than left to
   // `wsl`'s default, which is a setting that can move under a frozen session.
   const onWindows = await execChoices(probe({ wsl: async () => ["Ubuntu"], ssh: async () => ["box"] }))
-  expect(onWindows.map((one) => one.spec)).toEqual(["local", "wsl:Ubuntu", "ssh:box"])
+  expect(onWindows.map((one) => one.spec)).toEqual([
+    "local",
+    "wsl:Ubuntu",
+    "ssh:box",
+    "remote:wsl:Ubuntu",
+    "remote:ssh:box",
+  ])
+})
+
+test("the remote: family rides the same two sources, one row each behind the shell-only pair", async () => {
+  // Same data (`wsl -l`, `~/.ssh/config`), a second family of rows — not a
+  // second probe, and not the SAME spec doing double duty (T101,
+  // goals/remote-env.md §3.9). `local` never gets a `remote:local` twin: this
+  // machine's own workspace is not a target `--workspace` would move to.
+  const listed = await execChoices(probe({ wsl: async () => ["Ubuntu"], ssh: async () => ["box"] }))
+  expect(listed.map((one) => one.spec)).toEqual([
+    "local",
+    "wsl:Ubuntu",
+    "ssh:box",
+    "remote:wsl:Ubuntu",
+    "remote:ssh:box",
+  ])
+  // The sentence is the only thing telling the two families apart, so it has
+  // to actually say the workspace moves — the whole reason a person would
+  // pick the `remote:` row over the plain one right above it.
+  const remoteWsl = listed.find((one) => one.spec === "remote:wsl:Ubuntu")!
+  const remoteSsh = listed.find((one) => one.spec === "remote:ssh:box")!
+  expect(remoteWsl.what.toUpperCase()).toContain("WORKSPACE")
+  expect(remoteSsh.what.toUpperCase()).toContain("WORKSPACE")
 })
 
 test("a target typed by hand is still shown as the one in force", () => {

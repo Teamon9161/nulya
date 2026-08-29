@@ -84,10 +84,13 @@ import type { PaneStore } from "../state/panes.ts"
 import { execTargetKind, resolveEnvProfile, type ResolvedEnvProfile } from "../state/envprofile.ts"
 import {
   execEnv,
+  execWorkspace,
   loadTuiState,
+  remoteCwd,
   rememberExecEnv,
   rememberModel,
   rememberMode,
+  rememberRemoteCwd,
   rememberSessionPins,
   rememberSidebar,
   rememberTabs,
@@ -125,6 +128,7 @@ import {
   extRun,
   extSync,
   isVerdict,
+  remoteCheck,
   sessionOutcome,
   verdicts,
   type ModelView as ModelParams,
@@ -179,6 +183,7 @@ import {
 } from "../agents.ts"
 import { createKeymap, matches, type Action } from "../keymap.ts"
 import { expandPath } from "../browsedir.ts"
+import { remoteDirSource } from "../dirsource.ts"
 import { DirBrowser } from "./overlays/DirBrowser.tsx"
 import { CheckoutPrompt } from "./CheckoutPrompt.tsx"
 import {
@@ -666,6 +671,16 @@ export function App(props: AppProps) {
   const [envPicker, setEnvPicker] = createSignal(false)
   const [envChoice, setEnvChoice] = createSignal(0)
   const [envTargets, setEnvTargets] = createSignal<ExecChoice[]>([])
+  /**
+   * The remote directory browser's pending target, between picking a
+   * `remote:` row in `EnvPicker` and choosing a directory on it — the second
+   * half of a two-part choice (goals/remote-env.md §3.9, T101). `null` means
+   * the `envdir` overlay has nothing to show, which is also why opening it is
+   * never the picker's own move: `beginRemoteBrowse` sets this and THEN opens
+   * the overlay, so the two can never disagree about whether there is a
+   * target.
+   */
+  const [remoteBrowse, setRemoteBrowse] = createSignal<{ spec: string; start: string; home: string } | null>(null)
   /**
    * Any of the composer's pickers is up. One accessor because every rule about
    * them is about ALL of them — who holds the keyboard, whether the composer
@@ -2013,6 +2028,33 @@ export function App(props: AppProps) {
     return snapshot().header?.environment ?? ""
   }
 
+  /**
+   * The directory the welcome screen's `cwd` row (and, once a session
+   * exists, the same row read off its header) is actually about — this
+   * machine's own `ws().dir` unless a `remote:` target is in force, in which
+   * case it is the WORKSPACE that target's `--workspace` names, not the
+   * directory this process happens to be running in (goals/remote-env.md §3.9,
+   * T101; "the pair on the welcome screen — where the files are, where the
+   * commands go" already said this for `shell`, this is the other half).
+   *
+   * Two sources, same split `runsIn` already draws: a draft reads the pending
+   * choice (`tui_state.ts`), a started session reads its FROZEN header — `/env`
+   * cannot move either one after the fact.
+   */
+  const displayCwd = (): string => {
+    planTick()
+    const here = tab()
+    if (here.kind === "draft") {
+      const dir = execEnv(props.statePath).startsWith("remote:") ? execWorkspace(props.statePath) : ""
+      return dir.length > 0 ? dir : ws().dir
+    }
+    const header = snapshot().header
+    if (header && header.environment.startsWith("remote:") && header.remote_workspace.length > 0) {
+      return header.remote_workspace
+    }
+    return ws().dir
+  }
+
   /** What a draft tab's first message would freeze — the welcome screen's facts. */
   const plan = (): NextSession | undefined => {
     const here = draft()
@@ -2175,7 +2217,14 @@ export function App(props: AppProps) {
    */
   const sessionExtras = async (
     target: Workspace,
-  ): Promise<{ with?: string[]; pin?: string[]; prompt?: string[]; execEnv?: string; bare?: boolean }> => {
+  ): Promise<{
+    with?: string[]
+    pin?: string[]
+    prompt?: string[]
+    execEnv?: string
+    workspace?: string
+    bare?: boolean
+  }> => {
     const where = execEnv(props.statePath)
     const profile = envProfile(where)
     const withRefs: string[] = []
@@ -2228,11 +2277,17 @@ export function App(props: AppProps) {
       ? [`${missing.join(" & ")} not composed in · /ext for what it said`, ...broke]
       : broke
     if (notices.length > 0) setNotice(notices.join(" · "))
+    // `--workspace` only ever makes sense beside a `remote:` target (DESIGN
+    // §8.2) — read here rather than passed down from wherever `where` was
+    // chosen, because the two are frozen in the SAME call to `rememberExecEnv`
+    // and travel together in `tui-state.json` for exactly this reason.
+    const workspace = where.startsWith("remote:") ? execWorkspace(props.statePath) : ""
     return {
       ...(withRefs.length > 0 ? { with: withRefs } : {}),
       ...(pins.length > 0 ? { pin: pins } : {}),
       ...(prompts.length > 0 ? { prompt: prompts } : {}),
       ...(where.length > 0 ? { execEnv: where } : {}),
+      ...(workspace.length > 0 ? { workspace } : {}),
       ...(profile.bare ? { bare: true } : {}),
     }
   }
@@ -3254,6 +3309,12 @@ export function App(props: AppProps) {
    * the composer, the same move the bare `/agent` picker makes with a name.
    * Running `/env` bare there would CLEAR the target, which is the one thing a
    * person on this dialog cannot have meant.
+   *
+   * A `remote:` row is not applied on the spot (T101, goals/remote-env.md
+   * §3.9): choosing THAT target is only half a decision — the workspace, the
+   * directory this machine's `--workspace` will freeze in, is the other half
+   * — so it hands off to the directory browser instead of calling `setExecEnv`
+   * directly.
    */
   const takeEnvChoice = () => {
     const one = envTargets()[envChoice()]
@@ -3262,7 +3323,59 @@ export function App(props: AppProps) {
       composer?.restore("/env ")
       return
     }
+    if (one.spec.startsWith("remote:")) {
+      void beginRemoteBrowse(one.spec)
+      return
+    }
     setExecEnv(one.spec)
+  }
+
+  /**
+   * The first half of the remote flow's second half: open a channel to
+   * confirm `spec` is reachable, then open the browser there
+   * (goals/remote-env.md §3.9). A check that fails is shown exactly as it
+   * came back and the browser never opens — a directory listing over a
+   * channel that just refused would be a screen of round trips that can only
+   * fail the same way again.
+   *
+   * The starting point is whatever this front end remembered for `spec` last
+   * time (`tui_state.ts`'s `remote_cwd`), or the agent's own home when there
+   * is nothing remembered yet — `remote check`'s `home`, falling back to its
+   * `cwd` when the far side has no `$HOME` to report.
+   */
+  const beginRemoteBrowse = async (spec: string) => {
+    setNotice(`reaching ${spec}…`)
+    let hello: Awaited<ReturnType<typeof remoteCheck>>
+    try {
+      hello = await remoteCheck(ws(), spec)
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error))
+      return
+    }
+    const home = hello.home.length > 0 ? hello.home : hello.cwd
+    setRemoteBrowse({ spec, start: remoteCwd(spec, props.statePath) ?? home, home })
+    setNotice(null)
+    openOverlay("envdir")
+  }
+
+  /**
+   * A directory was chosen on the pending remote target: freeze the pair
+   * together (`rememberExecEnv`'s own rule — a spec and its workspace travel
+   * as one) and remember it as that spec's own starting point for next time
+   * (`rememberRemoteCwd`).
+   */
+  const applyRemoteWorkspace = (dir: string) => {
+    const at = remoteBrowse()
+    if (!at) return
+    rememberRemoteCwd(at.spec, dir, props.statePath)
+    rememberExecEnv(at.spec, props.statePath, dir)
+    setRemoteBrowse(null)
+    closeOverlay()
+    setNotice(`next session's shell and workspace run on ${at.spec} · ${dir}`)
+    // Same bump `setExecEnv` makes: the tool-face count and the `⇥` chip both
+    // read `tui-state.json` through functions Solid cannot see as reactive.
+    setPlanTick((tick) => tick + 1)
+    void refreshComposedMembership()
   }
 
   /**
@@ -4257,7 +4370,7 @@ export function App(props: AppProps) {
           // draft rides the same channel a live session's driver failure does —
           // one notice, one place to read a failure in full.
           error={snapshot().error ?? refusal()}
-          cwd={ws().dir}
+          cwd={displayCwd()}
           onPickCwd={() => openOverlay("cwd")}
           // Always a value on this screen, `this machine` included: here it is
           // still a decision (T93). The status line below says the opposite
@@ -4401,6 +4514,35 @@ export function App(props: AppProps) {
         onClose={closeOverlay}
       />
     ),
+    /**
+     * The same browser, a channel to `remoteBrowse()!.spec` for a data source
+     * instead of this machine's disk (`dirsource.ts`'s `remoteDirSource`,
+     * T101). `remoteBrowse` is only ever null before `beginRemoteBrowse` sets
+     * it and after `applyRemoteWorkspace`/`onClose` clears it — both of which
+     * close this overlay in the same breath — so a mount that somehow sees
+     * null draws nothing rather than guessing at a target.
+     */
+    envdir: () => {
+      const at = remoteBrowse()
+      if (!at) return null
+      return (
+        <DirBrowser
+          start={at.start}
+          recents={[]}
+          homeDir={at.home}
+          label={(dir) => dir}
+          source={remoteDirSource(ws(), at.spec)}
+          onChoose={applyRemoteWorkspace}
+          onClose={() => {
+            // Esc/cancel: no target was chosen, so nothing about `/env`
+            // moves — but the pending target itself is cleared too, rather
+            // than lingering as a stale value nothing on screen still means.
+            setRemoteBrowse(null)
+            closeOverlay()
+          }}
+        />
+      )
+    },
     provider: () => (
       <ProviderView
         // The tab's directory, for the same reason `/model` reads it there.

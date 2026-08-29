@@ -578,6 +578,69 @@ test("a pasted image PATH is the picture; a path to anything else is still text"
 }, 60_000)
 
 
+/**
+ * The pending-placeholder fix (tui.md §11 T101, an external review point):
+ * `readImage` here is DELAYED on purpose, so the test can move the cursor
+ * and keep typing while the disk read is still in flight — exactly the race
+ * that used to land `[Image #1]` wherever the cursor happened to be when the
+ * promise settled, rather than where the paste gesture actually happened.
+ */
+test("an async paste settles at the spot it was pasted, not wherever the cursor ended up while it was in flight", async () => {
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3])
+  const dir = mkdtempSync(join(tmpdir(), "nulya-tui-pending-"))
+  writeFileSync(join(dir, "shot.png"), png)
+  const sent: { text: string; images: readonly { bytes: Uint8Array }[] }[] = []
+  const setup = await testRender(
+    () => (
+      <StyleContext.Provider value={style}>
+        <Composer
+          readImage={async (path) => {
+            await new Promise((resolve) => setTimeout(resolve, 150))
+            return path.endsWith("shot.png") ? { kind: "image", image: { bytes: png, mediaType: "image/png" } } : { kind: "none" }
+          }}
+          onSubmit={(text, _interrupt, images = []) => sent.push({ text, images })}
+        />
+      </StyleContext.Provider>
+    ),
+    { width: 70, height: 12 },
+  )
+  try {
+    await settle(setup, 3)
+    await setup.mockInput.pasteBracketedText(`"${join(dir, "shot.png")}"`)
+    // The pending marker is in the box IMMEDIATELY — the read has not
+    // answered yet, but the gesture already claimed a spot.
+    expect(await settle(setup, 1)).toContain("Pasting")
+
+    // Move to the front and type — text lands AHEAD of the marker.
+    setup.mockInput.pressKey("HOME")
+    await setup.mockInput.typeText("caption: ")
+    // Move to the very end and type — the cursor is now well past the
+    // marker's own position by the time the read finally answers.
+    setup.mockInput.pressKey("END")
+    await setup.mockInput.typeText(" done")
+    expect(await settle(setup, 1)).not.toContain("[Image #1]") // still in flight
+
+    // Let the delayed read answer, and only then check.
+    const frame = await settle(setup, 5)
+    expect(frame).toContain("[Image #1]")
+    expect(frame).not.toContain("Pasting")
+    // The marker resolved AT ITS OWN SPOT — between "caption: " and " done"
+    // — not appended at the cursor, which sat at the very end the whole time.
+    expect(frame).toContain("caption: [Image #1] done")
+
+    setup.mockInput.pressEnter()
+    await settle(setup, 3)
+    expect(sent).toHaveLength(1)
+    // On submit the placeholder is stripped out of the text (the image rides
+    // as its own block, `sentImages`) — same rule the existing image-path
+    // test already pins, just with the marker in the middle this time.
+    expect(sent[0]!.text).toBe("caption:  done")
+    expect(sent[0]!.images[0]!.bytes).toEqual(png)
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 60_000)
+
 test("right-click in the composer pastes from the clipboard, no key required", async () => {
   // The third route to the clipboard (`ui/Composer.tsx` onMouseDown), for the
   // same reason Alt+V exists: on a terminal that keeps a modifier for itself,

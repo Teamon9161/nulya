@@ -12,6 +12,13 @@
  * exists only in DNS, an `Include`d config fragment — is why the dialog keeps a
  * row that hands the typing back.
  *
+ * Two families ride the same two sources (`wsl -l`, `~/.ssh/config`): `wsl:`/
+ * `ssh:` move only the SHELL (DESIGN §8.1), `remote:wsl:`/`remote:ssh:` move
+ * the whole WORKSPACE too (goals/remote-env.md §3.9) — picking one of the
+ * latter is the first half of a two-part choice, the second being WHICH
+ * directory on that machine (`ui/App.tsx`'s remote-browse flow, `dirsource.
+ * ts`'s `remoteDirSource`).
+ *
  * NOTHING HERE DECIDES ANYTHING. The kernel parses the spec
  * (`environment.parseExecTarget`) and refuses a bad one with the vocabulary in
  * the message; this only shortens the walk to a spelling that already works. So
@@ -57,6 +64,20 @@ export async function execChoices(probe: TargetProbe = hostProbe): Promise<ExecC
     // distribution after somebody runs `wsl --set-default`.
     ...distros.map((name) => ({ spec: `wsl:${name}`, what: "a WSL distribution · the workspace as /mnt/…" })),
     ...hosts.map((host) => ({ spec: `ssh:${host}`, what: "from your ssh config · the remote account's own home" })),
+    // The `remote:` family (goals/remote-env.md §3.9): the WORKSPACE moves,
+    // not just the shell — `extensions/std`, `ground`, everything that reads
+    // files reads THAT machine's, over a channel this harness itself opens
+    // (no ssh/wsl config of its own to read, so these ride the same two
+    // sources the rows above already asked). Same names, same source data —
+    // the sentence is what tells the two families apart.
+    ...distros.map((name) => ({
+      spec: `remote:wsl:${name}`,
+      what: "a WSL distribution · the WORKSPACE moves there too",
+    })),
+    ...hosts.map((host) => ({
+      spec: `remote:ssh:${host}`,
+      what: "from your ssh config · the WORKSPACE moves there too",
+    })),
   ]
 }
 

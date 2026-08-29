@@ -29,8 +29,17 @@
  * and refuses unless the key really did come back with the intended value: a
  * settings file that no longer parses would take the whole screen's
  * configuration with it, and a wrong guess must cost nothing but a message.
+ *
+ * TWO MORE GUARANTEES, ADDED WHEN AN EXTERNAL REVIEW ASKED FOR THEM (T103).
+ * The edit is patched against the FRESHEST read of `path`, taken again right
+ * before it is accepted (`patchAgainstFreshest`) — a person's own editor
+ * saving the file in between never loses to this screen's copy, because the
+ * later answer always wins. And the write itself is ATOMIC: the new text
+ * lands in a sibling temp file and is renamed over `path`, so nobody watching
+ * the file — this process's own next `loadSettings` included — ever sees it
+ * half-written.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { dirname } from "node:path"
 
 /** The values `/settings` can put in the file. A list is always a list of strings. */
@@ -227,25 +236,77 @@ export function layerSets(layer: Record<string, unknown> | null, dotted: string)
 }
 
 /**
- * Set one key in the file at `path`, creating it and its directory when
- * absent. Returns the text written; throws with the reason when it cannot,
- * which the screen shows as it stands.
+ * The patch-and-validate half of `writeSetting`, with the disk read handed
+ * in as a function (T103, an external review point).
+ *
+ * `read` is called TWICE on purpose: once to compute the edit, once more
+ * right before it is accepted. Re-patching against a second, later answer
+ * costs nothing (`placeSetting` is a pure function of the text it is given),
+ * while committing against a copy that stopped being what is on disk would
+ * silently drop whatever changed it — a person's own editor saving `tui.toml`
+ * in the moment between the two, most concretely. The second answer always
+ * wins when it differs, which is the same rule a compare-and-swap follows:
+ * the freshest read is the only one that can still be true when the write
+ * lands.
+ *
+ * A seam rather than folded into `writeSetting` also because it is what
+ * makes the race TESTABLE: a `read` that answers differently the second time
+ * is a fake, not a timing accident to chase on a real filesystem.
  */
-export function writeSetting(path: string, dotted: string, value: TomlValue): string {
-  const cut = dotted.lastIndexOf(".")
-  if (cut <= 0) throw new Error(`'${dotted}' is not a <table>.<key> name`)
-  const before = existsSync(path) ? readFileSync(path, "utf8") : ""
-  const after = placeSetting(before, dotted.slice(0, cut), dotted.slice(cut + 1), literalOf(value))
+export function patchAgainstFreshest(
+  read: () => string,
+  table: string,
+  key: string,
+  value: TomlValue,
+): string {
+  const literal = literalOf(value)
+  const first = read()
+  let against = first
+  let after = placeSetting(against, table, key, literal)
+  const latest = read()
+  if (latest !== first) {
+    against = latest
+    after = placeSetting(against, table, key, literal)
+  }
   let parsed: unknown
   try {
     parsed = Bun.TOML.parse(after)
   } catch (err) {
-    throw new Error(`${path} would not parse after the edit (${err instanceof Error ? err.message : String(err)})`)
+    throw new Error(`would not parse after the edit (${err instanceof Error ? err.message : String(err)})`)
   }
-  if (JSON.stringify(valueAt(parsed, dotted)) !== JSON.stringify(value)) {
-    throw new Error(`${dotted} could not be edited in place in ${path}; change it there by hand`)
+  if (JSON.stringify(valueAt(parsed, `${table}.${key}`)) !== JSON.stringify(value)) {
+    throw new Error(`${table}.${key} could not be edited in place; change it there by hand`)
+  }
+  return after
+}
+
+/**
+ * Set one key in the file at `path`, creating it and its directory when
+ * absent. Returns the text written; throws with the reason when it cannot,
+ * which the screen shows as it stands.
+ *
+ * The write is ATOMIC: the new text lands in a sibling temp file in the same
+ * directory (so the rename is same-volume, which is what makes it one
+ * operation) and is renamed over `path`. A reader of `path` — this process's
+ * own next `loadSettings`, or a person's editor watching the file — never
+ * observes a half-written file; on Windows, `renameSync` replaces an
+ * existing destination the same way POSIX `rename(2)` does.
+ */
+export function writeSetting(path: string, dotted: string, value: TomlValue): string {
+  const cut = dotted.lastIndexOf(".")
+  if (cut <= 0) throw new Error(`'${dotted}' is not a <table>.<key> name`)
+  const table = dotted.slice(0, cut)
+  const key = dotted.slice(cut + 1)
+  const read = () => (existsSync(path) ? readFileSync(path, "utf8") : "")
+  let after: string
+  try {
+    after = patchAgainstFreshest(read, table, key, value)
+  } catch (err) {
+    throw new Error(`${path}: ${err instanceof Error ? err.message : String(err)}`)
   }
   mkdirSync(dirname(path), { recursive: true })
-  writeFileSync(path, after)
+  const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
+  writeFileSync(tmp, after)
+  renameSync(tmp, path)
   return after
 }

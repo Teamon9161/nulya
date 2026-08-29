@@ -18,10 +18,12 @@ import {
   measure,
   nextAttachmentAfter,
   pasteShouldFold,
+  pendingPlaceholder,
   placeholderBefore,
   placeholderFor,
   placeholderRanges,
   referenced,
+  tokenAt,
   type PasteAttachment,
 } from "../paste.ts"
 import { skillCompletions, type SkillTable } from "../skills.ts"
@@ -389,6 +391,10 @@ export function Composer(props: {
    * `preventDefault()` is what stops the textarea from inserting the bytes
    * itself: this listener runs first, and the default insert is skipped once
    * the event is claimed.
+   *
+   * The image-path branch is async (`readImageFile`, a disk read) — see
+   * `pastePath` for why it inserts a PLACEHOLDER here and settles it later,
+   * rather than inserting at whatever the cursor is once the read returns.
    */
   const onPaste = (event: PasteEvent) => {
     if (props.disabled) {
@@ -402,7 +408,7 @@ export function Composer(props: {
       // name is a question about bytes on disk, and that answer arrives after
       // this handler has already had to decide who inserts.
       event.preventDefault()
-      void pastePath(path, text)
+      void pastePath(path, text, plantPending())
       return
     }
     if (!foldPaste(text)) {
@@ -415,6 +421,45 @@ export function Composer(props: {
       return
     }
     event.preventDefault()
+  }
+
+  /**
+   * The synchronous half of an async paste (tui.md §11 T103, an external
+   * review point): claim a spot with a fresh, never-reused marker AT THE
+   * CURSOR the instant the gesture happens, before anything is awaited. The
+   * async caller settles it later with `settleToken`, wherever the marker
+   * ended up — never at "the cursor", which may have moved by then.
+   *
+   * The counter lives on the component instance, like `nextAttachment` above
+   * it, and is never reset: unlike a numbered attachment it never has to read
+   * well on screen (it is on screen for milliseconds), it only has to be
+   * unique against every OTHER marker still in flight.
+   */
+  let nextPending = 1
+  const plantPending = (): string => {
+    const token = pendingPlaceholder(nextPending++)
+    area?.insertText(token)
+    sync()
+    return token
+  }
+
+  /**
+   * Replace the pending marker `token` with `replacement`, wherever it ended
+   * up in the buffer — never at the cursor. A `token` no longer there means
+   * the person deleted it (backspace, a selection, `Ctrl+U`) before the
+   * answer arrived; the content is not put back, the same rule
+   * `backspaceAttachment` already lives by for a settled attachment's own
+   * placeholder — putting it back would silently undo an edit made on
+   * purpose. An empty `replacement` just removes the marker.
+   */
+  const settleToken = (token: string, replacement: string) => {
+    if (!area) return
+    const at = tokenAt(area.plainText, token)
+    if (at < 0) return
+    area.setSelection(at, at + [...token].length)
+    area.deleteSelection()
+    if (replacement.length > 0) area.insertText(replacement)
+    sync()
   }
 
   /**
@@ -441,40 +486,74 @@ export function Composer(props: {
   }
 
   /**
+   * Whatever the resolved text of a paste should read as at its spot: folded
+   * into an attachment if it is long enough, the raw text otherwise. The
+   * SYNCHRONOUS twin of `foldPaste`/`insertPaste`, for `settleToken` to place
+   * at a pending marker instead of at the cursor.
+   */
+  const settleText = (token: string, text: string) => {
+    const size = measure(text)
+    if (pasteShouldFold(size.chars, size.lines)) {
+      const attachment: PasteAttachment = { id: nextId(), text, ...size }
+      setAttachments([...attachments(), attachment])
+      settleToken(token, placeholderFor(attachment.id))
+      return
+    }
+    settleToken(token, text)
+  }
+
+  /**
    * Hang an image on the draft, or say why this one cannot be — the two
    * refusals the kernel would make at submit (DESIGN §9.5/§14), made here where
    * the gesture is, because a draft built around an image that can never be
    * sent is worse than a paste that said no.
+   *
+   * Bookkeeping only: it does not insert anything — both async paste paths
+   * settle a PENDING MARKER instead of the cursor (`settleToken`), which is
+   * the whole reason this is split from what used to be `attachImage`'s own
+   * insert.
    */
-  const attachImage = (image: ImageInput): boolean => {
+  const registerImage = (image: ImageInput): ImageAttachment | null => {
     const claim = props.vision?.() ?? null
     if (claim && !claim.accepted) {
       props.onNotice?.(
         `${claim.model} is not catalogued as accepting images · add a [[models]] entry with vision = true to your user config`,
       )
-      return false
+      return null
     }
     if (image.bytes.length > max_image_bytes) {
       props.onNotice?.(tooLarge(image.bytes.length))
-      return false
+      return null
     }
     const attachment: ImageAttachment = { id: nextId(), ...image }
     setImages([...images(), attachment])
-    area?.insertText(imagePlaceholder(attachment.id))
-    sync()
-    return true
+    return attachment
   }
 
   /**
    * A paste that is exactly the path of an image file (`image.ts`): the picture,
    * if the bytes agree. When they do not — or when it cannot be attached — the
    * paste is still a paste, and the text goes in as it always would have.
+   *
+   * `token` is the marker `plantPending`/`pasteFromClipboard` already put at
+   * the gesture's own spot; this settles it once the disk answers, which may
+   * be well after the cursor has moved on.
    */
-  const pastePath = async (path: string, text: string) => {
+  const pastePath = async (path: string, text: string, token: string) => {
     const found = await (props.readImage ?? readImageFile)(path)
-    if (found.kind === "image" && attachImage(found.image)) return
+    if (found.kind === "image") {
+      const attachment = registerImage(found.image)
+      if (attachment) {
+        settleToken(token, imagePlaceholder(attachment.id))
+        return
+      }
+      // `registerImage` already posted the refusal notice; the paste is still
+      // a paste, so its text goes where the picture would have.
+      settleText(token, text)
+      return
+    }
     if (found.kind === "oversize") props.onNotice?.(tooLarge(found.bytes))
-    insertPaste(text)
+    settleText(token, text)
   }
 
   /**
@@ -486,29 +565,40 @@ export function Composer(props: {
    * reason for it to behave differently. Taking the key and then only looking
    * for an image is what made this half a gesture: on a terminal that does
    * hand it over, a plain text paste did nothing at all.
+   *
+   * `readClipboard` is a real read too (spawns a host clipboard reader) and
+   * gets the same pending-marker treatment `pastePath` does, for the same
+   * reason: the answer can arrive after the cursor has moved.
    */
   const pasteFromClipboard = async () => {
+    const token = plantPending()
     const found = await readClipboard(props.readClipboard)
     switch (found.kind) {
       case "image": {
-        attachImage(found.image)
+        const attachment = registerImage(found.image)
+        settleToken(token, attachment ? imagePlaceholder(attachment.id) : "")
         return
       }
       case "text": {
         // A copied FILE reaches a clipboard as its path, so the same text can
         // mean the same picture here as it does through the bracketed route.
         const path = imagePathIn(found.text)
-        if (path) await pastePath(path, found.text)
-        else insertPaste(found.text)
+        if (path) {
+          await pastePath(path, found.text, token)
+        } else {
+          settleText(token, found.text)
+        }
         return
       }
       case "empty":
+        settleToken(token, "")
         props.onNotice?.("the clipboard is empty")
         return
       default:
         // Say what is wrong AND what still works: the terminal's own paste
         // (`Ctrl+Shift+V`, `Shift+Insert`, a middle click) never went through
         // here and is unaffected by whatever this could not reach.
+        settleToken(token, "")
         props.onNotice?.(`${found.why} · your terminal's own paste still works`)
     }
   }

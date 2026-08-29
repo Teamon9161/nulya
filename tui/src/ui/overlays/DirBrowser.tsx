@@ -28,53 +28,15 @@
 import { Index, Show, createEffect, createMemo, createSignal, onMount } from "solid-js"
 import { useKeyboard } from "@opentui/solid"
 import type { InputRenderable, ScrollBoxRenderable } from "@opentui/core"
-import { readdirSync, statSync } from "node:fs"
-import { join } from "node:path"
 import { useScreen, useStyle } from "../../render/theme.ts"
 import { displayWidth, fit } from "../columns.ts"
 import { createHover, onClick, rowBackground, rowGutter, rowText } from "../rows.ts"
 import { OverlayFooter, createKeyHelp } from "./Footer.tsx"
-import { browserRows, resolveTyped, type DirChild, type DirRow, type DirSection } from "../../browsedir.ts"
+import { browseAt, browserRows, type DirChild, type DirRow, type DirSection, type DirSource } from "../../browsedir.ts"
+import { holdsWorkspace, localDirSource } from "../../dirsource.ts"
 import { homeWorkspaceDir, workspaceLabel } from "../../workspaces.ts"
 
-/** Whether a directory already holds a `.nulya/` — "this one is already a workspace". */
-export function holdsWorkspace(dir: string): boolean {
-  try {
-    return statSync(join(dir, ".nulya")).isDirectory()
-  } catch {
-    return false
-  }
-}
-
-/**
- * The subdirectories of `dir`, or nothing at all.
- *
- * A directory that cannot be read is an empty listing rather than an error:
- * this browser walks past permission-denied trees all day (`/proc`, another
- * user's home, a disconnected network drive), and a screen that stopped at the
- * first of them would be unusable. What CANNOT be read is said by the rows that
- * are not there plus the notice line, not by a thrown error.
- */
-export function readDirs(dir: string): DirChild[] {
-  try {
-    const out: DirChild[] = []
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue
-      out.push({ name: entry.name, workspace: holdsWorkspace(join(dir, entry.name)) })
-    }
-    return out
-  } catch {
-    return []
-  }
-}
-
-function isDir(path: string): boolean {
-  try {
-    return statSync(path).isDirectory()
-  } catch {
-    return false
-  }
-}
+export { holdsWorkspace } from "../../dirsource.ts"
 
 /** The heading a run of rows sits under, or nothing for the standing first row. */
 const section_title: Record<DirSection, string> = {
@@ -87,11 +49,24 @@ const section_title: Record<DirSection, string> = {
 export function DirBrowser(props: {
   /** Where the browser opens: the workspace the tab is in right now. */
   start: string
-  /** Remembered workspaces, newest first (`state/recents.ts`). */
+  /** Remembered workspaces, newest first (`state/recents.ts`). Meaningless for a remote `source` — pass `[]`. */
   recents: readonly string[]
   /** Take this directory as the tab's workspace. */
   onChoose: (dir: string) => void
   onClose: () => void
+  /**
+   * Where listings and existence checks come from — this machine's disk by
+   * default (`dirsource.ts`'s `localDirSource`), or a channel to another one
+   * (`remoteDirSource`) when this browser is choosing a `remote:` `/env`
+   * target's workspace rather than this tab's own directory (T101).
+   */
+  source?: DirSource
+  /** The standing first row's target and what it says — `no project` locally; meaningless (and omittable) for a remote source, which has no such answer. */
+  homeDir?: string
+  /** How a row's directory is drawn. Defaults to `workspaceLabel` (trust wording, `.nulya/` mentions) — none of which apply to a machine this process cannot inspect that way. */
+  label?: (dir: string) => string
+  /** Whether a directory already holds a `.nulya/`. Defaults to `holdsWorkspace` (a local `stat`); omit for a remote source, which cannot answer this without a round trip per row it has no use for (`remoteDirSource`'s own doc). */
+  isWorkspace?: (dir: string) => boolean
 }) {
   const style = useStyle()
   const screen = useScreen()
@@ -103,11 +78,38 @@ export function DirBrowser(props: {
   let list: ScrollBoxRenderable | null = null
 
   const inner = () => Math.max(24, screen().width - 2)
-  const home = homeWorkspaceDir()
+  const source = () => props.source ?? localDirSource()
+  const home = props.homeDir ?? homeWorkspaceDir()
 
-  /** Where the typed line points, and what is left of it as a filter. */
-  const where = createMemo(() => resolveTyped(typed(), props.start, isDir))
-  const children = createMemo(() => readDirs(where().dir))
+  /**
+   * What `typed()` resolves to against `source()`, refetched every time
+   * either changes. A signal rather than a memo: the read is async, so there
+   * is no synchronous value for a memo to hold between the input changing and
+   * the round trip answering it — `browsed` starts each pass holding what it
+   * last knew and only moves once the newest request settles, so typing
+   * ahead of a slow remote answer never shows a directory nobody asked for.
+   *
+   * `seq` guards against exactly that: a stale reply from an earlier
+   * keystroke landing after a newer one already changed what should be on
+   * screen (`browseAt` for `remote:` targets is a real round trip and pays no
+   * attention to arrival order on its own).
+   */
+  const [browsed, setBrowsed] = createSignal<{ dir: string; filter: string; children: DirChild[] }>({
+    dir: props.start,
+    filter: "",
+    children: [],
+  })
+  let seq = 0
+  createEffect(() => {
+    const input = typed()
+    const src = source()
+    const mine = ++seq
+    void browseAt(input, props.start, src).then((result) => {
+      if (mine === seq) setBrowsed(result)
+    })
+  })
+  const where = () => ({ dir: browsed().dir, filter: browsed().filter })
+  const children = () => browsed().children
   const rows = createMemo(() =>
     browserRows({
       dir: where().dir,
@@ -115,8 +117,10 @@ export function DirBrowser(props: {
       filter: where().filter,
       recents: props.recents,
       homeDir: home,
-      label: (dir) => workspaceLabel(dir),
-      isWorkspace: holdsWorkspace,
+      label: props.label ?? ((dir) => workspaceLabel(dir)),
+      isWorkspace: props.isWorkspace ?? holdsWorkspace,
+      join: source().join,
+      dirname: source().dirname,
     }),
   )
 

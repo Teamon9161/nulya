@@ -16,10 +16,12 @@ import {
   paste_fold_chars,
   paste_fold_lines,
   pasteShouldFold,
+  pendingPlaceholder,
   placeholderBefore,
   placeholderFor,
   placeholderRanges,
   referenced,
+  tokenAt,
   type PasteAttachment,
 } from "../src/paste.ts"
 
@@ -90,6 +92,64 @@ test("the next attachment id resumes just past the highest one history can still
   // Spread across several messages, not just the most recent one — Up walks
   // the whole history, not only the last entry.
   expect(nextAttachmentAfter(["one [Pasted text #1]", "two [Image #4]", "three [Pasted text #2]"])).toBe(5)
+})
+
+// ── pending pastes: settling an async paste at its own spot, not the cursor ─
+
+/**
+ * `Composer.tsx`'s `settleToken`, modelled as a pure splice — the same
+ * `text.slice(0, at) + replacement + text.slice(at + token.length)` the real
+ * one does after finding `at` with `tokenAt`, minus the OpenTUI selection
+ * calls that make it. This is what these tests exercise: `Composer.tsx`
+ * calls `tokenAt`, computes the same range, and hands it to
+ * `setSelection`/`deleteSelection`/`insertText`.
+ */
+function settle(text: string, token: string, replacement: string): string | null {
+  const at = tokenAt(text, token)
+  if (at < 0) return null
+  return text.slice(0, at) + replacement + text.slice(at + token.length)
+}
+
+test("a pending marker is its own id space — it cannot collide with [Pasted text #N] / [Image #N]", () => {
+  expect(pendingPlaceholder(1)).toBe("[Pasting… #1]")
+  expect(nextAttachmentAfter([pendingPlaceholder(7)])).toBe(1) // not counted as a numbered attachment
+})
+
+test("settling replaces the marker wherever it sits, regardless of what else changed around it", () => {
+  const token = pendingPlaceholder(3)
+  // Typed before AND after the marker, same as a person keeps typing while
+  // the paste is still in flight.
+  const text = `see ${token} in this sentence`
+  expect(settle(text, token, "[Image #1]")).toBe("see [Image #1] in this sentence")
+  expect(settle(text, token, "")).toBe("see  in this sentence") // a refusal: the marker just disappears
+})
+
+test("two pending pastes in flight resolve independently, in either order", () => {
+  const a = pendingPlaceholder(1)
+  const b = pendingPlaceholder(2)
+  const text = `first ${a}, second ${b}.`
+  // Settle the SECOND one first — a slower first paste finishing later must
+  // not disturb a token that already resolved.
+  const afterB = settle(text, b, "[Image #2]")!
+  expect(afterB).toBe(`first ${a}, second [Image #2].`)
+  const afterA = settle(afterB, a, "[Image #1]")!
+  expect(afterA).toBe("first [Image #1], second [Image #2].")
+})
+
+test("a marker deleted before the paste resolved is simply gone — nothing is put back", () => {
+  const token = pendingPlaceholder(4)
+  // The person backspaced the whole token away (or selected and deleted it)
+  // before the async read returned.
+  const textWithoutToken = "the token used to be here but is not now"
+  expect(settle(textWithoutToken, token, "[Image #9]")).toBeNull()
+})
+
+test("text typed exactly where the marker was does not confuse the splice with an empty replacement", () => {
+  const token = pendingPlaceholder(5)
+  const text = `notes: ${token}`
+  // A refused paste (vision not accepted, or the clipboard was empty):
+  // settling with "" must leave the surrounding text untouched.
+  expect(settle(text, token, "")).toBe("notes: ")
 })
 
 test("placeholders are accented by their shape, wherever they sit in the line", () => {

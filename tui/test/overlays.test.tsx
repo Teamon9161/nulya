@@ -226,6 +226,7 @@ test("/ext shows the version line, the current pointer and the usage counts", as
     model: "scripted",
     model_identity: { provider: "scripted", model: "", base_url: "", api_key_env: "" },
     environment: "",
+    remote_workspace: "",
     created: "",
     composition: { active: [{ id: "lint", version }], native_tools: ["ext:lint/lint"], prompts: [] },
   }
@@ -388,6 +389,7 @@ test("/ext names the drift between what this session froze and what the store po
     model: "scripted",
     model_identity: { provider: "scripted", model: "", base_url: "", api_key_env: "" },
     environment: "",
+    remote_workspace: "",
     created: "",
     composition: { active: [{ id: "lint", version: "v-old" }], native_tools: [], prompts: [] },
   }
@@ -844,6 +846,88 @@ test("/ext: a full tool face leaves the extension half on rather than refusing i
     }
   } finally {
     full.cleanup()
+  }
+}, 120_000)
+
+/**
+ * `/ext`'s push action (goals/remote-env.md §3.9, tui.md §11 T102). The
+ * "remote" is a real channel — `remote:exec:` pointed at the same binary,
+ * same trick the kernel's own e2e-remote uses — so this exercises the real
+ * `nulya ext push` round trip, not a stand-in for it.
+ */
+test("/ext's r pushes the selected package's active version to this tab's remote target, and only when there is one", async () => {
+  const remote = tempWorkspace()
+  try {
+    const run = (args: string[]) => Bun.spawnSync({ cmd: [remote.bin, ...args], cwd: remote.dir, env: process.env })
+    run(["ext", "init", "--script", "pushable"])
+    const built = run(["ext", "build", join(".nulya", "extensions", "pushable")])
+    const pushed_version = /v-[0-9a-zA-Z]+/.exec(built.stdout.toString())?.[0] ?? ""
+    expect(pushed_version).not.toBe("")
+    run(["ext", "activate", "pushable", pushed_version])
+
+    const spec = `remote:exec:${remote.bin} remote serve`
+    const statePath = join(remote.dir, "push-state.json")
+
+    // Not remote (no header, no pending `/env` choice in `statePath`): `r` is
+    // not even in the footer, and pressing it does nothing the frame would show.
+    const local = await overlayFrame(() => <ExtView ws={remote} header={null} statePath={statePath} onClose={() => {}} />)
+    try {
+      await settle(local, 5)
+      local.mockInput.pressKey("?")
+      const before = await settle(local, 2)
+      expect(before).not.toContain("push the selected package")
+      local.mockInput.pressKey("?")
+      local.mockInput.pressKey("r")
+      const after = await settle(local, 2)
+      expect(after).not.toContain("pushed")
+      expect(after).not.toContain("already there")
+    } finally {
+      local.renderer.destroy()
+    }
+
+    // A started session's header FREEZES its target — same rule `runsIn`
+    // lives by — so this is what a real remote session's `ExtView` sees.
+    const header: SessionHeader = {
+      kind: "header",
+      v: 1,
+      session: "s-fake",
+      parent: null,
+      model: "scripted",
+      model_identity: { provider: "scripted", model: "", base_url: "", api_key_env: "" },
+      environment: spec,
+      remote_workspace: remote.dir,
+      created: "",
+      composition: { active: [], native_tools: [], prompts: [] },
+    }
+    const setup = await overlayFrame(() => (
+      <ExtView ws={remote} header={header} statePath={statePath} onClose={() => {}} />
+    ))
+    try {
+      await settle(setup, 5)
+      // `more` lines (the `r` hint among them) are one `?` away (T18); `r`
+      // itself is not consumed by that toggle, so this both confirms the hint
+      // is there AND leaves the panel ready for the keypress below.
+      setup.mockInput.pressKey("?")
+      const frame = await settle(setup, 2)
+      expect(frame).toContain(`push the selected package's active version to ${spec}`)
+      setup.mockInput.pressKey("r")
+      // The kernel's own sentence — content-addressed, so it is "pushed" or
+      // "already there" and never a made-up wording from this front end.
+      await until(() => {
+        const now = setup.captureCharFrame()
+        return now.includes("pushed") || now.includes("already there")
+      }, 20_000)
+      const after = setup.captureCharFrame()
+      expect(after).toContain("pushable")
+      expect(after).toContain(pushed_version)
+      // Remembered, and shown as "last time" on the next render — never as a
+      // present-tense claim this front end cannot back up (T102's own choice).
+      expect(await settle(setup, 3)).toContain("last time:")
+    } finally {
+      setup.renderer.destroy()
+    }
+  } finally {
+    remote.cleanup()
   }
 }, 120_000)
 

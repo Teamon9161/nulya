@@ -141,3 +141,43 @@ export function nextAttachmentAfter(history: readonly string[]): number {
   }
   return max + 1
 }
+
+// ── pending pastes: where async content lands (tui.md §11 T103, review ③) ──
+
+/**
+ * `Ctrl+V`, `Alt+V`, a right-click and a bracketed paste that might be an
+ * image path are all fire-and-forget in `Composer.tsx`: the read that
+ * decides what a paste WAS (a file's bytes, the system clipboard) takes real
+ * time, and the composer's cursor does not wait for it — a person keeps
+ * typing, or moves the cursor, while it is in flight. Inserting "wherever
+ * the cursor is when the promise settles" is therefore inserting in the
+ * wrong place the moment either of those happens.
+ *
+ * The fix is the one every async UI needs: claim a spot with a token the
+ * instant the gesture happens (synchronously, before anything is awaited),
+ * and when the answer arrives, replace THAT token wherever it ended up —
+ * never "the cursor", never "the first token of this shape". Editing before
+ * or after the token, and more than one paste in flight at once, both fall
+ * out of "find and replace this exact substring" for free, which is why the
+ * seam below is as small as it is: `Composer.tsx` mints a fresh marker with
+ * `pendingPlaceholder`, inserts it, and later looks it up with `tokenAt` to
+ * know what selection to replace.
+ */
+
+/**
+ * A fresh marker for a paste whose content is not known yet. Its own id
+ * space, so it can never collide with `[Pasted text #N]` / `[Image #N]`
+ * (`numbered_placeholder` above) and is never mistaken for a real attachment
+ * on the rare path where it reaches a submitted message unresolved (nothing
+ * here waits for a pending paste before letting Enter submit — a message
+ * sent mid-paste keeps the marker as literal text, the same way an ordinary
+ * typo would).
+ */
+export function pendingPlaceholder(id: number): string {
+  return `[Pasting… #${id}]`
+}
+
+/** Where `token` sits in `text`, or -1 when it is no longer there (deleted before the paste resolved). */
+export function tokenAt(text: string, token: string): number {
+  return text.indexOf(token)
+}

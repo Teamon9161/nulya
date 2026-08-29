@@ -39,6 +39,13 @@ describe("execTargetKind", () => {
   test("surrounding whitespace does not change the kind", () => {
     expect(execTargetKind("  wsl:Ubuntu  ")).toBe("wsl")
   })
+
+  test("remote: covers the whole family — wsl, ssh, and exec — as one kind (T101)", () => {
+    expect(execTargetKind("remote:wsl")).toBe("remote")
+    expect(execTargetKind("remote:wsl:Ubuntu")).toBe("remote")
+    expect(execTargetKind("remote:ssh:box")).toBe("remote")
+    expect(execTargetKind("remote:exec:/bin/nulya remote serve")).toBe("remote")
+  })
 })
 
 describe("resolveEnvProfile: zero-config defaults", () => {
@@ -66,6 +73,15 @@ describe("resolveEnvProfile: zero-config defaults", () => {
 
   test("ssh only has shell: bare, no members, no renderers, no extra pins", () => {
     expect(resolveEnvProfile("ssh", session_with, session_prompts, no_overrides)).toEqual({
+      bare: true,
+      with: [],
+      pins: [],
+      session_prompts: [],
+    })
+  })
+
+  test("remote gets ssh's treatment, not wsl's — a different machine's filesystem either way (T101)", () => {
+    expect(resolveEnvProfile("remote", session_with, session_prompts, no_overrides)).toEqual({
       bare: true,
       with: [],
       pins: [],
@@ -131,5 +147,22 @@ describe("resolveEnvProfile: field-level override", () => {
       pins: [],
       session_prompts,
     })
+    // …and `remote` is its own fourth kind, not a synonym `ssh`'s table
+    // happens to also answer for.
+    expect(resolveEnvProfile("remote", session_with, session_prompts, overrides)).toEqual({
+      bare: true,
+      with: [],
+      pins: [],
+      session_prompts: [],
+    })
+  })
+
+  test("[env.remote] overrides remote alone, same field-level discipline as the other three", () => {
+    const profile = resolveEnvProfile("remote", session_with, session_prompts, {
+      remote: { bare: false, with: ["agent"] },
+    })
+    expect(profile.bare).toBe(false)
+    expect(profile.with).toEqual(["agent"])
+    expect(profile.pins).toEqual([]) // not mentioned, stays remote's default
   })
 })

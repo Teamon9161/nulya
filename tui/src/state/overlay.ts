@@ -19,6 +19,13 @@ export type OverlayKind =
   | "tasks"
   /** The directory browser: which workspace this tab works in (§5.3b). */
   | "cwd"
+  /**
+   * The directory browser again, pointed at a `remote:` `/env` target
+   * instead of this tab's own directory — picking WHERE on that machine a
+   * session's workspace goes, the second half of `/env`'s remote choice
+   * (goals/remote-env.md §3.9, tui.md §11 T101).
+   */
+  | "envdir"
 
 export interface OverlayStore {
   kind(): OverlayKind | null

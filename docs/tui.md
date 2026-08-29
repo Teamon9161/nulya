@@ -2888,3 +2888,56 @@ Alt 走的是 `option`。翻编译产物确认了两条解析路径（原始 ESC
 **测试**（`test/settingsedit.test.tsx` 新，13 条）：纯函数八条守的是那几条保证——就地替换后**除了那个值以外逐字节相同**（行尾注释与它的空白一起留着）· 新键落在它那张表里而不是文件末尾 · 新表带标记 · CRLF 进 CRLF 出 · 多行数组整体换掉、后面那张表不动 · **扫描器跟不上的文件抛错且文件一字未变** · `layerSets` 只回答一个问题 · 列表按显示的形状回填。面板五条驱动的是真的按键与真的鼠标，断言的是**盘上的文件**与**屏幕上的那一行**（面板挂在真的 `liveStyle` 上，所以「写完生效」这条回路本身就在被跑，而不是被 stub 掉）：两值键的 `Enter` 写反面并让那一行当场变过来、再按一次写回去且**文件里仍然只有一行 `diff =`** · 三值键开列表、选一个写一次 · 列表按逗号切开、坏数字被拒且不落盘 · 项目层设过的键被标出来且拒绝写 · `keys.*` 不写、只说去哪儿改。断言全落在机制上，没有钉任何列宽或十六进制。
 
 `bun test` **694 pass / 0 fail**（62 文件），`bun run typecheck` 干净，`bun run compile` 出单文件。
+
+
+### T101 · `/env` 的 remote 档：选机器只是一半，选目录是另一半（2026-08-29）
+
+**内核零改动**——`nulya remote check`/`nulya remote ls`/`session new --env remote:… --workspace <dir>` 都已经在（goals/remote-env.md §3/§6）；这一条是 TUI 第一次接上它们。
+
+**问题**：`/env` 早就能选 `wsl`/`ssh`（T93），但那两档**只搬 shell**——`std` 的 read/grep/glob 读的仍是这台机器的盘。`remote:wsl:<d>` / `remote:ssh:<host>` 把**整个工作区**搬过去（goals/remote-env.md §2），可选中它之后还差一件事：**在那台机器上，哪个目录**。这不是 `/env` 拼写的一部分（内核的 `--workspace` 是独立的一个 flag），而是选择本身的第二半——正如欢迎屏那对 `cwd`/`shell` 行说的，一个是"文件在哪"，一个是"命令去哪"，remote 档第一次让这两个问题需要**两次**回答。
+
+**`state/targets.ts`**：`execChoices` 在 `wsl:`/`ssh:` 两档后面，用**同一份探测数据**（`wsl -l -q`、`~/.ssh/config`）再产两档 `remote:wsl:<d>` / `remote:ssh:<host>`——不是第二个探针，是同一个源被问了两次，问法不同。`what` 那句话是两个家族唯一的区分（"the WORKSPACE moves there too"），因为 spec 本身只有一个前缀之差。`local` 没有 `remote:local` 这个词：这台机器自己的工作区不是一个 `--workspace` 会搬去的目标。
+
+**选中一个 `remote:` 行之后接目录浏览器**（`ui/App.tsx` 的 `takeEnvChoice` → `beginRemoteBrowse`）：`nulya remote check --env <spec> --json` 开一次真通道，用它的 `home`（答不出就退到 `cwd`）当浏览起点，`remote_cwd`（见下）有记录就优先用记录；check 失败就把内核的错误原样显示，**浏览器不开**——对一台连不上的机器展示"选个目录"没有意义，只会是同一个失败的第二次重复。第二个 overlay 面板 `envdir`（`state/overlay.ts`/`state/panes.ts`/`ui/surfaces.tsx` 各加一个 `OverlayKind`/`SurfaceId`）与 `/cwd` 用**同一个** `DirBrowser` 组件、不同的 props：`start`/`homeDir` 来自 `remoteBrowse()` 信号、`recents=[]`（远端没有"最近工作区"这个概念，只有下面的单点记忆）、`label={(dir) => dir}`（本地那套"trust 措辞"对够不着的机器没有意义）、`source={remoteDirSource(ws(), spec)}`。选中一行（`onChoose`）就是 `applyRemoteWorkspace`：`rememberRemoteCwd` 记住这次选的目录（下次同一个 spec 的起点）+ `rememberExecEnv(spec, path, dir)`（**同一次调用**冻结 spec 与 workspace——见下）+ 照 `setExecEnv` 的规矩发一条 notice、弹 `planTick`、重算工具面。
+
+**`browsedir.ts` 长出一个 `DirSource` 接口 + `resolveTypedAsync` + `browseAt`**：本地与远端浏览是**同一个函数**在跑，换的只是四件事——`list`（读一层目录）、`exists`（一条路径是不是目录）、`join`/`dirname`（这台"机器"的路径怎么拼）——`browserRows` 也跟着长出可选的 `join`/`dirname` 覆盖（缺省仍是 `node:path`，逐字节不变，零风险）。**这是收窄而不是新增复杂度**：以前 `DirBrowser.tsx` 里硬编了 `readdirSync`/`statSync`，现在这两行 I/O 搬进 `dirsource.ts` 的 `localDirSource()`，`remoteDirSource(ws, spec)` 是它的镜像（`nulya remote ls` 一次往返，`exists` 复用同一份 list 结果的缓存）。**为什么 join/dirname 必须是参数而不是常量**：Windows 宿主上 `node:path.join("/srv/app","logs")` 答的是 `\srv\app\logs`——对本地路径这是对的，对一条要发给远端 Linux 机器的相对路径这是错的字节；`remoteDirSource` 永远用 `node:path/posix`。**`DirBrowser.tsx` 因此从同步变成信号驱动的异步**（`browsed` 信号 + `seq` 守护乱序应答），但本地路径的默认行为逐字节保留（`source` 缺省是 `localDirSource()`），既有 `/cwd` 测试不改一行就过。
+
+**`state/tui_state.ts` 两个新字段**：`exec_workspace`（跟 `exec_env` **同一次 `rememberExecEnv` 调用**冻结、同一次调用清空——spec 与 workspace 永远成对移动，绝不会出现"记着一个 spec，配着上一次别的 spec 选的目录"这种错配）、`remote_cwd: Record<spec, dir>`（每台机器自己的起点记忆，一个键不是新文件）。`sessionExtras()`/`tabs.ts` 的 `SessionExtras`/`NewSessionOptions` 各多一个 `workspace` 字段，一路传到 `session new --workspace`；`nulya/ledger.ts` 的 `SessionHeader` 补上 `remote_workspace`（内核header已有这一列，只是 TS 类型没跟上）。欢迎屏与状态行的 `cwd` 那一格（`App.tsx` 新的 `displayCwd()`）在 remote 场里显示远端路径——判据与 `runsIn()` 完全对称：draft 读 `tui-state.json` 的待定选择，已开始的 session 读冻结 header，`/env` 都动不了已经开始的那一场。
+
+**测试**：`test/browsedir.test.ts`（新，5 条，纯 fake `DirSource`——一个 POSIX 味、一个盘符味——证明 `browseAt`/`resolveTypedAsync`/`browserRows` 的 `join`/`dirname` 覆盖对两种路径语法给出一致答案，且只问 source 真正需要问的路径）· `test/dirsource.test.ts`（新，5 条，真实现——`localDirSource` 走真文件系统，`remoteDirSource` 走 `remote:exec:<本机 nulya> remote serve` 的真通道，与内核自己的 e2e-remote 同一先例）· `test/tuistate.test.ts`（新，7 条，`exec_workspace` 与 `exec_env` 成对写入/成对清空、`remote_cwd` 按 spec 互不干扰、损坏条目只丢自己）· `test/targets.test.tsx`/`test/envprofile.test.ts` 各补几条 remote 档的断言。`bun run typecheck` 干净。
+
+
+### T102 · `/ext` 的 push 动作：把选中的包送到这一场的 remote 目标（2026-08-29）
+
+**内核零改动**——`nulya ext push <id>@<v> --env <spec>` 已经在（DESIGN §7.4）。
+
+**这一条只在当前 tab 是 remote 场时出现**（`ExtView.tsx` 的 `remoteTarget()`：已开始的 session 读冻结 header，draft 读 `tui_state.ts` 的待定 `/env` 选择——与 T101 的 `displayCwd()` 同一判据）：键位 `r`（`a`/`p`/`d`/`t` 都已占用），按下就是 `nulya ext push <选中包>@<它的 active 版本> --env <这一场的 spec>`，成功或失败都是内核那句话原样显示在 notice 里——**从不发明第二种措辞**：内容寻址意味着"already there"与"pushed"都是真实、可信的答案，这里不需要也不该猜。
+
+**没有做的事，写在这里免得下次重想：不做一个"已推到"的常驻状态列**。理由是它要么要连一次远端才答得出（贵，每一行一次往返），要么只能是一个会过期的主张——版本可以在这之后重新 build，远端 store 也可能被另一台机器上的另一个 nulya 动过。选的是更小的那个：**只记"上次这个前端做过的动作与它说了什么"**（`tui_state.ts` 新字段 `remote_pushed: Record<id, {spec, said, at}>`），footer 的 `r` 提示行显式标成"last time: …"——一句关于过去的诚实陈述，不是一句关于现在的、这个前端答不上来的主张。
+
+**实现细节**：`pushHint()` 读 `pushTick()`（一个新信号，`pushExtension` 完成后 bump）再读 `lastPush()`——`lastPush` 是文件读不是信号，Solid 的细粒度响应式不会因为磁盘文件变了就重新跑 JSX 表达式，这是 `App.tsx` 里 `planTick` 那个"某个文件被写了"套路在这个小面板里的复刻。
+
+**测试**：`test/overlays.test.tsx` 新增一条真二进制端到端（`remote:exec:` loopback 起一个真通道，build+activate 一个包，断言：① 非 remote 场时 `r` 连帮助行都不出现、按下也什么都不发生；② remote 场时帮助行说出目标 spec，按 `r` 后 notice 与帮助行都出现内核的原话，且下一次渲染帮助行说"last time: …"）。`bun run typecheck` 干净。
+
+
+### T103 · 外部 review 的两条 P2：设置面板不再能被并发编辑吃掉，异步粘贴不再能落错地方（2026-08-29）
+
+**内核零改动。**
+
+#### ② `writeSetting` 现在对着最新的文件写，而且落盘是一步
+
+**问题**：`state/settingsfile.ts` 的 `writeSetting` 原来是 `read → patch → validate → writeFileSync` 四步走一遍——`read` 只在函数开头做一次，而 `writeFileSync` 直接盖写目标路径。前者意味着如果 `tui.toml` 在这次编辑算出结果之前被别的进程（人手工的编辑器、另一个 nulya 进程）改过，那次改动会被无声吞掉；后者意味着一次写到一半被打断（进程被杀、断电）会留下一个半成品文件。
+
+**改法**：`patchAgainstFreshest(read, table, key, value)`（`settingsfile.ts` 新导出）把 `read` 变成参数，**调两次**——一次算出打算写的结果，提交前**再读一次**；两次不一样就用**更新的那次**重新 `placeSetting`。之所以安全且便宜：`placeSetting` 是纯函数，重新跑一次不花什么，而"更新的答案总是更接近真相"这条规则和 compare-and-swap 是同一个道理。`writeSetting(path, …)` 现在是这个函数的一个瘦壳：`read = () => 磁盘上 path 的内容`，`write` 落盘时先写到同目录下的 `<path>.tmp-<pid>-<random>`，再 `renameSync` 到 `path`——同目录保证是同一个卷，`rename` 因此是一步操作，Windows 上 `renameSync` 对已存在的目标做的也是替换而不是报错。**校验时机不变**：还是"解析回来的值必须和意图的值逐位相等，否则整条拒绝、一个字节都不落盘"（T100 的既有纪律），只是现在校验的对象是重新 patch 过的最新版本。
+
+**测试**：`test/settingsedit.test.tsx` 新增三条——`patchAgainstFreshest` 模拟"读到 A 之后文件变成 B"（人的 B 版本里多出的那一行在结果里存活）· 两次读一致时结果与旧版 `placeSetting` 调用逐字节相同（没有引入新行为，只是多一层保险）· `writeSetting` 无论成功还是被拒都不留下 `.tmp-*` 残留文件。既有的"scanner 追不上就拒绝且文件不动"那条测试原样通过，未改一行断言。
+
+#### ③ 异步粘贴用一个占位 token 认领落点，不再信任"完成时的 cursor"
+
+**问题**：bracketed paste 里疑似图片路径的分支、`Ctrl+V`/`Alt+V`、composer 右键——三条路都在 `void pastePath(...)`/`void pasteFromClipboard()`，读盘或读剪贴板是真实的异步操作。旧代码在这段 await 之后直接 `area?.insertText(...)`，也就是插在**那一刻**的 cursor 位置——如果这段时间里人已经继续打字或移动了光标，`[Image #N]`（或读失败时退回的原始文本）就会插在错的地方。
+
+**改法**：`paste.ts` 新增 `pendingPlaceholder(id)`（`[Pasting… #N]`，自己的编号空间，形状上不可能与 `[Pasted text #N]`/`[Image #N]` 撞车，即便极端情况下一条未解决的 paste 被提交出去也不会被误认成真实附件）与 `tokenAt(text, token)`。`Composer.tsx` 里手势发生的**那一刻**（同步，早于任何 `await`）先 `plantPending()`：铸一个新 id、把 marker 插在当前 cursor、`sync()`。三条异步路径此后统一改成"结算 token"（`settleToken`）而不是"插在 cursor"：先在**当前**（可能已经变化的）`area.plainText` 里用 `tokenAt` 重新找到那个 marker 的位置，`setSelection`+`deleteSelection`+`insertText` 把它换成最终内容——`[Image #N]`、折叠后的 `[Pasted text #N]`、或者失败时的原始文本（`settleText`，`foldPaste`/`insertPaste` 的异步镜像）。**marker 找不到就什么都不做**：与既有的 `backspaceAttachment` 同一条纪律——人已经手动删掉了它，把内容塞回去是在无声撤销一次故意的编辑。`registerImage`（原 `attachImage` 拆出的纯记账半边）让两条路径（假想中未来的同步直接附加、以及这两条异步路径）共用同一份"该不该收下这张图"的判断，而不共用"插在哪"的决定。
+
+**测试**：`test/paste.test.ts` 新增 5 条纯函数测试（marker 自己的编号空间不与既有两种占位符冲突、结算换掉 marker 而不管前后被插入了什么文字、两个并发 pending 各自独立结算互不干扰、marker 被手动删除后结算是空操作、空字符串结算等于纯粹移除 marker）· `test/composer.test.tsx` 新增一条端到端（`readImage` 故意延迟 150ms，粘贴之后立刻移动光标到最前打字、再移动到最后打字，最后 `[Image #1]` 落在**粘贴发生的那个位置**而不是延迟结束时光标所在的最末尾——这条测试如果把 `settleToken` 换回旧的"插在 cursor"就会红）。`bun run typecheck` 干净。
+
+`bun test` **726 pass / 0 fail**（65 文件），`bun run typecheck` 干净，`bun run compile` 出单文件。

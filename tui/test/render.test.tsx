@@ -286,6 +286,7 @@ const header_fixture: SessionHeader = {
     api_key_env: "ANTHROPIC_API_KEY",
   },
   environment: "",
+  remote_workspace: "",
   created: "2026-08-16T14:02:11Z",
   composition: { active: [{ id: "lint", version: "v-3f2a91" }], native_tools: ["ext:lint/lint_zig"], prompts: [] },
 }

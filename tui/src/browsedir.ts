@@ -133,6 +133,16 @@ export interface BrowserInput {
   readonly label: (dir: string) => string
   /** Whether a recent still holds a `.nulya/`. Unknown is fine: it only marks. */
   readonly isWorkspace?: (dir: string) => boolean
+  /**
+   * Path arithmetic for whichever machine `dir` lives on — defaults to this
+   * host's own (`node:path`'s `join`/`dirname`). A remote listing passes
+   * POSIX ones (`node:path/posix`), since the far side of a `remote:` target
+   * is not necessarily this host's platform and `node:path`'s `join` on a
+   * Windows host hands back backslashes no shell over there would understand
+   * (`state/dirsource.ts`, goals/remote-env.md §3.9).
+   */
+  readonly join?: (dir: string, name: string) => string
+  readonly dirname?: (dir: string) => string
 }
 
 /**
@@ -145,6 +155,8 @@ export interface BrowserInput {
  */
 export function browserRows(input: BrowserInput): DirRow[] {
   const marks = input.isWorkspace ?? (() => false)
+  const j = input.join ?? join
+  const d = input.dirname ?? dirname
   const rows: DirRow[] = []
   rows.push({
     kind: "home",
@@ -173,7 +185,7 @@ export function browserRows(input: BrowserInput): DirRow[] {
     workspace: marks(input.dir),
     action: "choose",
   })
-  const up = dirname(input.dir)
+  const up = d(input.dir)
   if (up !== input.dir) {
     rows.push({ kind: "parent", section: "subdirs", path: up, label: "..", workspace: false, action: "enter" })
   }
@@ -181,7 +193,7 @@ export function browserRows(input: BrowserInput): DirRow[] {
     rows.push({
       kind: "child",
       section: "subdirs",
-      path: join(input.dir, child.name),
+      path: j(input.dir, child.name),
       label: child.name,
       workspace: child.workspace,
       action: "enter",
@@ -202,4 +214,82 @@ export function browserRows(input: BrowserInput): DirRow[] {
 function samePlace(a: string, b: string): boolean {
   const norm = (s: string) => s.replace(/[\\/]+$/, "").replace(/\\/g, "/")
   return process.platform === "win32" ? norm(a).toLowerCase() === norm(b).toLowerCase() : norm(a) === norm(b)
+}
+
+// ── DirSource: local disk or a channel to another machine ──────────────────
+
+/**
+ * Where a browser's listing and existence checks actually come from — this
+ * machine's disk for `/cwd`, or a channel to another machine for the
+ * directory a `remote:` `/env` target will use as its workspace
+ * (`state/dirsource.ts`'s two implementations, goals/remote-env.md §3.9).
+ *
+ * Every method answers one question about ONE path; nothing here reads a
+ * directory SPECULATIVELY (no walking ahead, no stat-every-child-of-every-
+ * child) — a remote implementation pays a round trip per call, and a browser
+ * that made more of them than a person's own clicks and keystrokes would be
+ * slow for a reason nobody asked for.
+ */
+export interface DirSource {
+  /**
+   * `dir`'s subdirectories, or an empty list — a directory this source
+   * cannot read is a shorter listing, never a thrown error (both
+   * implementations follow the rule `browserRows` already lives by: a
+   * listing that came back short still draws).
+   */
+  list(dir: string): Promise<DirChild[]>
+  /** Whether `path` is itself a directory this source can see. */
+  exists(path: string): Promise<boolean>
+  /** How this source's filesystem joins a directory and one child's name. */
+  join(dir: string, name: string): string
+  /** This source's filesystem's parent of `dir` (its own fixed point at the root — same contract as `node:path`'s `dirname`). */
+  dirname(dir: string): string
+  /** The last component of a path, in this source's filesystem. */
+  basename(path: string): string
+  /**
+   * What a typed line resolves to before it is checked against `exists` — the
+   * local source expands `~` and drive letters (`expandPath`); a remote
+   * source has no host environment to expand against, so it can only
+   * recognise what already looks absolute to it and otherwise reads the
+   * input as relative to `base`, the directory being browsed.
+   */
+  expand(input: string, base: string): string
+}
+
+/**
+ * `resolveTyped`, for a source that can only answer "does this exist" over a
+ * round trip. The same three-way read of a typed line — a trailing separator
+ * or an empty line means "inside this one", already-exists means "this is
+ * the place", otherwise the last segment is a filter on its parent — just
+ * awaited, and every path operation routed through `source` rather than
+ * `node:path` directly.
+ */
+export async function resolveTypedAsync(
+  input: string,
+  base: string,
+  source: Pick<DirSource, "expand" | "exists" | "dirname" | "basename">,
+): Promise<{ dir: string; filter: string }> {
+  const raw = input.trim()
+  const expanded = source.expand(raw, base)
+  if (/[\\/]$/.test(raw) || raw.length === 0) return { dir: expanded, filter: "" }
+  if (await source.exists(expanded)) return { dir: expanded, filter: "" }
+  const parent = source.dirname(expanded)
+  if (parent === expanded) return { dir: expanded, filter: "" }
+  return { dir: parent, filter: source.basename(expanded) }
+}
+
+/**
+ * What one browser screen shows for `input`, read through `source` — the
+ * single function local and remote browsing both call, so "what does this
+ * typed line mean" and "what is in this directory" cannot be answered two
+ * different ways for the two machines (`ui/overlays/DirBrowser.tsx`).
+ */
+export async function browseAt(
+  input: string,
+  base: string,
+  source: DirSource,
+): Promise<{ dir: string; filter: string; children: DirChild[] }> {
+  const resolved = await resolveTypedAsync(input, base, source)
+  const children = await source.list(resolved.dir)
+  return { ...resolved, children }
 }

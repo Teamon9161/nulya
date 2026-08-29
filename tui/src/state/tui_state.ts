@@ -59,6 +59,37 @@ export interface TuiState {
    */
   exec_env?: string
   /**
+   * The remote workspace `exec_env` would freeze in with `--workspace`
+   * (goals/remote-env.md §3.3, tui.md §11 T101) — the directory a person
+   * picked in the remote directory browser after choosing a `remote:` target
+   * in `/env`. Meaningless (and never read) unless `exec_env` names a
+   * `remote:` target; travels WITH `exec_env` rather than being looked up by
+   * it, so a stale workspace from an earlier remote choice can never be sent
+   * alongside a spec it was not chosen for — `rememberExecEnv` clears both
+   * together whenever the spec itself changes without a new workspace given.
+   */
+  exec_workspace?: string
+  /**
+   * Where the remote directory browser last left off, per exec-target spec
+   * (goals/remote-env.md §3.9) — "every machine remembers its own recents".
+   * Seeds the NEXT time that same spec is picked in `/env`, so choosing
+   * `remote:ssh:box` a second time opens where the first session's workspace
+   * was rather than back at that account's home. `remote check`'s `home` (or
+   * `cwd`) is the fallback the first time a spec is ever picked.
+   */
+  remote_cwd?: Record<string, string>
+  /**
+   * The last `nulya ext push` this front end ran for one (package, target)
+   * pair — id, the spec it was pushed to, what the kernel said, and when.
+   * Deliberately not a standing "is it there" table: a push is answered once,
+   * by the kernel, at the moment it happens (DESIGN §7.4's content addressing
+   * makes a repeat push a free correctness check, not a cost to avoid) — a
+   * cached "yes" would be a claim this front end cannot back up the moment
+   * either side changes without going through it. `/ext`'s push action shows
+   * this as "last time" explicitly, never as present-tense status.
+   */
+  remote_pushed?: Record<string, { spec: string; said: string; at: string }>
+  /**
    * Agent-definition directories the question has already been put for, by
    * absolute path, and the ones that were answered yes (tui.md §5.10).
    *
@@ -163,6 +194,33 @@ export function loadTuiState(path = tuiStatePath()): TuiState {
     }
     const execEnv = record["exec_env"]
     if (typeof execEnv === "string" && execEnv.length > 0) state.exec_env = execEnv
+    const execWorkspaceValue = record["exec_workspace"]
+    if (typeof execWorkspaceValue === "string" && execWorkspaceValue.length > 0) {
+      state.exec_workspace = execWorkspaceValue
+    }
+    const remoteCwdValue = record["remote_cwd"]
+    if (typeof remoteCwdValue === "object" && remoteCwdValue !== null && !Array.isArray(remoteCwdValue)) {
+      const kept: Record<string, string> = {}
+      for (const [spec, dir] of Object.entries(remoteCwdValue as Record<string, unknown>)) {
+        if (typeof dir === "string" && dir.length > 0) kept[spec] = dir
+      }
+      state.remote_cwd = kept
+    }
+    const remotePushedValue = record["remote_pushed"]
+    if (typeof remotePushedValue === "object" && remotePushedValue !== null && !Array.isArray(remotePushedValue)) {
+      const kept: Record<string, { spec: string; said: string; at: string }> = {}
+      for (const [id, entry] of Object.entries(remotePushedValue as Record<string, unknown>)) {
+        if (typeof entry !== "object" || entry === null || Array.isArray(entry)) continue
+        const slot = entry as Record<string, unknown>
+        const spec = slot["spec"]
+        const said = slot["said"]
+        const at = slot["at"]
+        if (typeof spec === "string" && typeof said === "string" && typeof at === "string") {
+          kept[id] = { spec, said, at }
+        }
+      }
+      state.remote_pushed = kept
+    }
     const mode = record["mode"]
     if (typeof mode === "string") {
       const known = normalizeMode(mode)
@@ -263,15 +321,64 @@ export function execEnv(path = tuiStatePath()): string {
 }
 
 /**
+ * The remote workspace that would ride along with `execEnv` as `--workspace`
+ * — meaningless (and the caller's to ignore) unless `execEnv` itself names a
+ * `remote:` target (goals/remote-env.md §3.9, tui.md §11 T102).
+ */
+export function execWorkspace(path = tuiStatePath()): string {
+  return loadTuiState(path).exec_workspace ?? ""
+}
+
+/**
  * Remember it. An empty spec (or the word `local`) is the absence of a choice,
  * so it is REMOVED rather than stored — otherwise the file would keep saying
  * something about a session that is exactly like every other one.
+ *
+ * `workspace` travels with the spec in the SAME call, never set on its own:
+ * the two are chosen together (pick a `remote:` target, then a directory on
+ * it) and must be cleared together too, so a later `/env` typed without a
+ * workspace (switching back to `local`, or to a different target entirely)
+ * can never leave a stale remote directory paired with a spec it was never
+ * chosen for.
  */
-export function rememberExecEnv(spec: string, path = tuiStatePath()): void {
+export function rememberExecEnv(spec: string, path = tuiStatePath(), workspace?: string): void {
   const state = loadTuiState(path)
   const trimmed = spec.trim()
-  if (trimmed.length === 0 || trimmed === "local") delete state.exec_env
-  else state.exec_env = trimmed
+  if (trimmed.length === 0 || trimmed === "local") {
+    delete state.exec_env
+    delete state.exec_workspace
+  } else {
+    state.exec_env = trimmed
+    if (workspace && workspace.trim().length > 0) state.exec_workspace = workspace.trim()
+    else delete state.exec_workspace
+  }
+  saveTuiState(state, path)
+}
+
+/**
+ * Where the remote directory browser last left off for `spec` — the seed for
+ * the next time that same target is picked (goals/remote-env.md §3.9).
+ */
+export function remoteCwd(spec: string, path = tuiStatePath()): string | undefined {
+  return loadTuiState(path).remote_cwd?.[spec]
+}
+
+/** Remember it: read-modify-write, so browsing one machine never forgets another's. */
+export function rememberRemoteCwd(spec: string, dir: string, path = tuiStatePath()): void {
+  const state = loadTuiState(path)
+  state.remote_cwd = { ...(state.remote_cwd ?? {}), [spec]: dir }
+  saveTuiState(state, path)
+}
+
+/** The last `nulya ext push` this front end ran for `id`, if any (`/ext`'s push action). */
+export function lastPush(id: string, path = tuiStatePath()): { spec: string; said: string; at: string } | undefined {
+  return loadTuiState(path).remote_pushed?.[id]
+}
+
+/** Remember one push's outcome, by package id — read-modify-write, same as `rememberRemoteCwd`. */
+export function rememberPush(id: string, spec: string, said: string, path = tuiStatePath()): void {
+  const state = loadTuiState(path)
+  state.remote_pushed = { ...(state.remote_pushed ?? {}), [id]: { spec, said, at: new Date().toISOString() } }
   saveTuiState(state, path)
 }
 
