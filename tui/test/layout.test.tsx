@@ -149,6 +149,26 @@ test("the 'more below' marker is the one clickable thing on the status bar", asy
   }
 }, 120_000)
 
+test("the status line ends in a settings control, and clicking it opens the panel", async () => {
+  // 100 columns is where the line has slack for its two pieces of chrome; the
+  // width the helper renders at is exactly that threshold.
+  const { setup } = await crowded(24)
+  try {
+    await settle(setup, 5)
+    const rows = setup.captureCharFrame().split("\n")
+    const at = rows.findIndex((row) => row.includes("settings"))
+    expect(at).toBeGreaterThanOrEqual(0)
+    // It is chrome at the far end, opposite the sidebar handle — not one more
+    // chip queued among this session's facts.
+    expect(rows[at]!.trimEnd().endsWith("settings")).toBe(true)
+
+    await setup.mockMouse.click(rows[at]!.lastIndexOf("settings"), at)
+    await untilFrame(setup, (frame) => frame.includes("settings · tui.toml"))
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 120_000)
+
 test("rowsBelow is zero for a box that does not exist yet", () => {
   expect(rowsBelow(null)).toBe(0)
 })

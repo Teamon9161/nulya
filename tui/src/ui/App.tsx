@@ -163,7 +163,7 @@ import { runCompact } from "../compact.ts"
 import { headline, nextHandoff, type HandoffFile } from "../handoff.ts"
 import { renderSessionPrompt } from "../sessionprompt.ts"
 import { formatWithRef, parseWithRef, type WithRef } from "../with.ts"
-import { orphanPins, resolvableStandingPins, toolId } from "../pins.ts"
+import { builtin_tools, orphanPins, resolvableStandingPins, toolId } from "../pins.ts"
 import {
   agent_id,
   agentPick,
@@ -4192,7 +4192,37 @@ export function App(props: AppProps) {
       />
     ),
     help: () => <HelpView keys={keys} onClose={closeOverlay} />,
-    settings: () => <SettingsView ws={ws()} onClose={closeOverlay} />,
+    settings: () => (
+      <SettingsView
+        ws={ws()}
+        onClose={closeOverlay}
+        // The choices this front end makes and remembers for itself, each
+        // opening the same thing its status-line chip opens (T92). They are
+        // computed here rather than in the view because every one of them is
+        // already an accessor this component holds: a second reading of "what
+        // model is this tab on" would be a second answer waiting to disagree.
+        choices={[
+          { label: "model", value: modelName(), command: "/model", open: () => openOverlay("model") },
+          { label: "permission mode", value: mode() ?? "ask", command: "/mode", open: toggleModePicker },
+          { label: "directory", value: workspaceLabel(ws().dir), command: "/cwd", open: () => openOverlay("cwd") },
+          // `/env` takes an argument and has no picker of its own, so this row
+          // writes the command into the composer rather than running it — the
+          // same thing the bare `/agent` picker does with a name. Running it
+          // bare would CLEAR the exec target, which is the one thing a person
+          // clicking a row labelled "shell runs in" cannot have meant.
+          {
+            label: "shell runs in",
+            value: runsIn() || "this machine",
+            command: "/env <target>",
+            open: () => {
+              closeOverlay()
+              composer?.restore("/env ")
+            },
+          },
+          { label: "packages and pins", value: `tools ${builtin_tools}+${faceSize()}`, command: "/ext", open: () => openOverlay("ext") },
+        ]}
+      />
+    ),
     usage: () => <UsageView ws={ws()} snapshot={snapshot()} onClose={closeOverlay} />,
     model: () => (
       <ModelView
@@ -4463,6 +4493,7 @@ export function App(props: AppProps) {
                   onToggleSidebar={toggleSidebar}
                   workspace={workspaceChip()}
                   onPickCwd={() => openOverlay("cwd")}
+                  onOpenSettings={() => openOverlay("settings")}
                 />
               </box>
               </NavigateContext.Provider>

@@ -2669,3 +2669,16 @@ S1c 把 checkout 的两个问题（store 的 trust、`.nulya/agents`）从 `main
 **切换**：`tui.toml` 的 `[ui] code_theme`，与 `ui.theme` 同一层级、同一种切法（`/settings` 只显示不写入——设定的作者是文件，见 §7）。
 
 **测试**（`test/syntax.test.ts` 6 条 + `test/extensions.test.ts` 1 条）：断言的是决定的形状而不是十六进制——`auto` 由背景作答（暗/亮给出不同的表，且同一背景下与界面主题无关）· 具名表不随界面主题变 · `theme` 随界面 tokens 动 · **换 code theme 时 `markup.*` 与 `default` 逐字段不变而 `keyword` 变**（这条就是上面那条边界） · `NO_COLOR` 与 `theme` 等价 · 词表里每个名字都解析得出一张表（`tui.toml` 认的名字与 switch 认的名字是两处，这条让它们对齐）· `[ui] code_theme` 从文件读得到、不认识的名字保留缺省。
+
+
+### T92 · 设置有一个能点的入口，面板也不再只是一张只读表（2026-08-29）
+
+**内核零改动。**
+
+**问题**：`/settings` 一直只能靠打字进去。状态栏左端早有 `◧ sessions` 这个可点的把手（T70 的教训：*一个没人见过的控件，能被找到靠的是它的名字*），右端却什么都没有；而进去之后是一张纯只读表 + 一句"去编辑文件"——一个点开之后什么都不能改的面板，第二次就没人点了。
+
+**① 行尾一个 `settings`**（`StatusBar`）：与 `◧ sessions` 对称，**两端是 host chrome，中间是这一场自己的事实**。是**一个词而不是一个 glyph**——glyph 词表是封闭的（§6.3）且 `⚙` 已经是 `ext build`，为它多铸一个意思比一个词贵；也因此**没有 glyph 可退**，所以宽度不够时它整个消失（`sidebar_label_width = 100`，与把手花掉自己那个词的门槛同一个常量，两件 chrome 都不会拿模型 id 去换），`/settings` 照旧在。前面两列是**空气不是接缝**：`· ` 说"下一个"，空格说"另一类东西"——与把手尾部那两列同一个理由，在同一行的另一头。它也进 `layout()` 的 `right` 预算，所以不会挤掉模型 id。
+
+**② 面板顶上多一段"chosen here"**（`SettingsView`）：不是每个选择都住在 `tui.toml` 里——模型、权限档、工作目录、shell 跑在哪、装了哪些包与 pin，都是在界面里选、记在 `tui-state.json` 的，那是**本前端写给自己的便条，不是谁的设定的第二个作者**（§7 那条"只显示不写入"说的是 `tui.toml`，一个字都没松）。这些排在最前面，每行**都写着自己的命令**——`command` 不是装饰，它是键盘到达这一行的唯一方式，只能点的行是一个这个前端用不了一半的控件——并且**点一行就是那个命令**（`open` 与状态栏对应 chip 调的是同一个函数，两个入口不可能漂移）。`/env` 是唯一的例外：它要参数、没有自己的 picker，**裸跑 `/env` 是清空 exec target**，恰恰是点"shell runs in"的人不可能想要的，所以那一行把 `/env ` 写进输入框（裸 `/agent` picker 的同一个先例）。
+
+**测试**：`test/layout.test.tsx` 一条（这一行**以** `settings` 结尾——它是那一头的 chrome，不是排在本场事实里的又一个 chip——且点它开出 `settings · tui.toml`）· `test/views.test.tsx` 一条（choices 行画得出、命令写在行上、点一行调的是那一行的 `open`，而文件那张表仍在）。`sidebar.test.tsx` 的宽屏快照按预期多了行尾这一个词。`bun test` 665 pass / 0 fail；`bunx tsc --noEmit` 干净。

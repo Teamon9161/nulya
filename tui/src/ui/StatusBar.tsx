@@ -117,6 +117,19 @@ export function StatusBar(props: {
   workspace?: string
   /** The mouse half of `/cwd`: open the directory browser. */
   onPickCwd?: () => void
+  /**
+   * The mouse half of `/settings` (T92): the standing, clickable way into the
+   * screen that says what this front end is configured to do and which file
+   * said so.
+   *
+   * It closes the line the way the sidebar handle opens it — host chrome at
+   * both ends, this session's own facts in between — and it is a WORD rather
+   * than a glyph for the reason the handle learned the hard way (T70): a
+   * control nobody has met is findable by its name and by nothing else. The
+   * glyph vocabulary is closed (§6.3) and `⚙` already means `ext build`, so
+   * minting a second meaning for it would cost more than the word does.
+   */
+  onOpenSettings?: () => void
 }) {
   const style = useStyle()
   const screen = useScreen()
@@ -136,6 +149,8 @@ export function StatusBar(props: {
   const [overCwd, setOverCwd] = createSignal(false)
   const sidebarClick = onClick(() => props.onToggleSidebar?.())
   const cwdClick = onClick(() => props.onPickCwd?.())
+  const [overSettings, setOverSettings] = createSignal(false)
+  const settingsClick = onClick(() => props.onOpenSettings?.())
   /**
    * The handle is there whenever the sidebar could be. Under 60 columns it
    * cannot open at all (`sidebar_min_width`, the same width the chips on the
@@ -172,6 +187,24 @@ export function StatusBar(props: {
       : screen().width >= sidebar_label_width
         ? `${style.glyphs.sidebar} sessions  `
         : `${style.glyphs.sidebar} `
+
+  /**
+   * `settings`, at the far end, on a terminal with room for it.
+   *
+   * The same threshold the handle spends its own label at: at 100 columns
+   * `layout()` still has slack after the model, the mode and the chips, so
+   * neither piece of chrome is ever bought with the model id. Under it this
+   * simply is not there — an entrance that has to be cut to `set…` is worse
+   * than one you reach by typing `/settings`, and unlike the sidebar handle
+   * there is no glyph to fall back to (§6.1 rule 4).
+   *
+   * The two leading columns are air, not a joint: the chips before it are
+   * facts about this session and this is not one of them. A ` · ` would say
+   * "next thing"; a gap says "different thing" (T70's reasoning for the
+   * handle's own trailing gap, at the other end of the same line).
+   */
+  const settingsChip = () =>
+    props.onOpenSettings && screen().width >= sidebar_label_width ? "  settings" : ""
 
   /** The sidebar control stays discoverable while a transient notice is shown. */
   const SidebarHandle = () =>
@@ -303,7 +336,8 @@ export function StatusBar(props: {
       displayWidth(behindChip()) +
       displayWidth(wearingChip()) +
       displayWidth(envChip()) +
-      displayWidth(roleChip())
+      displayWidth(roleChip()) +
+      displayWidth(settingsChip())
     // Cut too, not just measured. A model id is as long as whoever named it
     // made it, and a segment that overflows its row does not stop at the edge —
     // it runs into the chips beside it and both become one unreadable word
@@ -493,6 +527,20 @@ export function StatusBar(props: {
             <text fg={props.role === "observer" ? style.theme.warn : style.theme.dim} flexShrink={0}>
               {roleChip()}
             </text>
+          ) : null}
+          {/* …and the far end of the line, opposite the sidebar handle. */}
+          {settingsChip().length > 0 ? (
+            <box
+              flexShrink={0}
+              height={1}
+              backgroundColor={overSettings() ? style.theme.hover : undefined}
+              onMouseDown={settingsClick.onMouseDown}
+              onMouseUp={settingsClick.onMouseUp}
+              onMouseOver={() => setOverSettings(true)}
+              onMouseOut={() => setOverSettings(false)}
+            >
+              <text fg={style.theme.faint}>{settingsChip()}</text>
+            </box>
           ) : null}
         </box>
       )}

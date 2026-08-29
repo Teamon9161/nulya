@@ -8,15 +8,25 @@
  * are listed either way, so the answer to "where do I put it" is on screen even
  * when no file exists yet.
  *
+ * WHAT IT DOES LEAD TO (T92). Not every choice on this screen lives in that
+ * file: the model, the permission mode, the working directory and where the
+ * shell runs are chosen in the interface and remembered in `tui-state.json`,
+ * which is this front end's own note to itself and not a second author of
+ * anybody's settings. Those are listed FIRST, each naming the command that
+ * opens it and answering to a click — so a person who came here by clicking
+ * `settings` finds the things they can actually change, rather than a table
+ * whose only instruction is to go and edit a file.
+ *
  * A path is the one thing on this screen with no length limit, so both tables
  * are cut to their columns and the closing sentence is broken at its joints
  * rather than wrapped by the terminal (`ui/columns.ts`).
  */
-import { For, Show, createMemo } from "solid-js"
+import { For, Show, createMemo, createSignal } from "solid-js"
 import { existsSync } from "node:fs"
 import { useKeyboard } from "@opentui/solid"
 import { useScreen, useStyle } from "../../render/theme.ts"
 import { columnWidth, fit } from "../columns.ts"
+import { onClick } from "../rows.ts"
 import { OverlayFooter, createKeyHelp } from "./Footer.tsx"
 import { settingsPaths, default_settings, type Settings } from "../../state/settings.ts"
 import type { Workspace } from "../../nulya/bin.ts"
@@ -43,7 +53,26 @@ export function settingRows(settings: Settings): Array<{ key: string; value: str
   return rows
 }
 
-export function SettingsView(props: { ws: Workspace; onClose: () => void }) {
+/**
+ * One live choice: what it is, what it is set to, and the way to change it.
+ *
+ * `command` is not decoration — it is what a keyboard reaches this by, and the
+ * row would be a mouse-only control without it. `open` is the same function the
+ * status line’s own chip calls, so the two entrances cannot drift.
+ */
+export interface SettingChoice {
+  label: string
+  value: string
+  command: string
+  open: () => void
+}
+
+export function SettingsView(props: {
+  ws: Workspace
+  onClose: () => void
+  /** The choices this front end makes and remembers itself. Absent in tests. */
+  choices?: readonly SettingChoice[]
+}) {
   const style = useStyle()
   const screen = useScreen()
   const settings = style.settings
@@ -69,6 +98,10 @@ export function SettingsView(props: { ws: Workspace; onClose: () => void }) {
     Math.min(columnWidth(rows().map((row) => row.key), 2, 30), Math.max(10, inner() - 16)),
   )
   const valueCol = createMemo(() => columnWidth(rows().map((row) => row.value), 2, 20))
+  const choices = () => props.choices ?? []
+  const choiceCol = createMemo(() => columnWidth(choices().map((one) => one.label), 2, 18))
+  const choiceValueCol = createMemo(() => columnWidth(choices().map((one) => one.value), 2, 24))
+  const [overChoice, setOverChoice] = createSignal(-1)
 
   return (
     <box flexDirection="column" width="100%" flexGrow={1} paddingLeft={1} paddingRight={1}>
@@ -76,6 +109,41 @@ export function SettingsView(props: { ws: Workspace; onClose: () => void }) {
         {fit("settings · tui.toml · read-only here, edit the file", inner())}
       </text>
       <box height={1} />
+
+      <Show when={choices().length > 0}>
+        <text fg={style.theme.dim} height={1}>
+          {fit("chosen here and remembered in tui-state.json", inner())}
+        </text>
+        <For each={choices()}>
+          {(one, index) => {
+            const click = onClick(() => one.open())
+            return (
+              <box
+                flexDirection="row"
+                width="100%"
+                height={1}
+                flexShrink={0}
+                backgroundColor={overChoice() === index() ? style.theme.hover : undefined}
+                onMouseDown={click.onMouseDown}
+                onMouseUp={click.onMouseUp}
+                onMouseOver={() => setOverChoice(index())}
+                onMouseOut={() => setOverChoice((at) => (at === index() ? -1 : at))}
+              >
+                <box width={choiceCol()} flexShrink={0}>
+                  <text fg={style.theme.fg}>{fit(one.label, choiceCol() - 2)}</text>
+                </box>
+                <box width={choiceValueCol()} flexShrink={0}>
+                  <text fg={style.theme.muted}>{fit(one.value, choiceValueCol() - 2)}</text>
+                </box>
+                <text fg={style.theme.accent.evolve}>
+                  {fit(one.command, Math.max(0, inner() - choiceCol() - choiceValueCol()))}
+                </text>
+              </box>
+            )
+          }}
+        </For>
+        <box height={1} />
+      </Show>
 
       <For each={candidates()}>
         {(entry) => (

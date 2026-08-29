@@ -275,6 +275,44 @@ test("/settings shows the effective values and which file they came from", async
   }
 })
 
+test("/settings leads to the choices this front end makes, and a click opens one", async () => {
+  const settings = await loadSettings(ws.dir, {})
+  const opened: string[] = []
+  const setup = await overlay(
+    () => (
+      <SettingsView
+        ws={ws}
+        onClose={() => {}}
+        choices={[
+          { label: "model", value: "deepseek-v4", command: "/model", open: () => opened.push("model") },
+          { label: "permission mode", value: "ask", command: "/mode", open: () => opened.push("mode") },
+        ]}
+      />
+    ),
+    createStyle(settings, {}),
+  )
+  try {
+    const frame = await settle(setup, 4)
+    // The file-owned table is still the body of this screen; the choices are
+    // what a person who came here by clicking `settings` can actually change.
+    expect(frame).toContain("transcript.history_window")
+    expect(frame).toContain("permission mode")
+    // The command is on the row because that is how a keyboard reaches it: a
+    // row that could only be clicked would be a control half this front end
+    // cannot use.
+    expect(frame).toContain("/model")
+
+    const rows = frame.split("\n")
+    const at = rows.findIndex((row) => row.includes("permission mode"))
+    expect(at).toBeGreaterThanOrEqual(0)
+    await setup.mockMouse.click(rows[at]!.indexOf("permission mode"), at)
+    await settle(setup, 3)
+    expect(opened).toEqual(["mode"])
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 60_000)
+
 test("/usage separates this session's tokens from the durable tool journal", async () => {
   const state = createSessionState("s-usage")
   // A whole step, both mouths: the stream as it happened, then the ledger line
