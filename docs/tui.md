@@ -2636,3 +2636,18 @@ S1c 把 checkout 的两个问题（store 的 trust、`.nulya/agents`）从 `main
 - **多认一个 `Alt+V`**（tcode 的 `(ctrl || alt) && v`）：这条改动**解决不了**的那一半是——终端如果自己在 `Ctrl+V` 上粘贴，这个键根本到不了应用（Windows Terminal 的缺省绑定就是），于是那台机器上没有任何办法够到剪贴板里的图。多一个键是应用内唯一的出路；开屏 tip 里**先写 `Alt+V`**，因为最需要知道"图片可以粘"的正是那批被终端拿走了 `Ctrl+V` 的人。
 
 **测试**：`test/clipboard.test.ts`（四态映射 · 标称是图而字节不是 → 既不是图也不是文本 · 抛错 = `unavailable` 而不是崩）· `test/composer.test.tsx` 新增"`Ctrl+V` 也粘文本，长的照样折"（旧代码上这一条必红：那时根本没有文本分支）；原有的图片粘贴测试改用新的 seam（`readClipboard`），断言未变。`bun run compile` 通过。
+
+
+### T90 · OpenTUI 0.5.3 → 0.5.9（2026-08-29）
+
+**内核零改动**；`tui/package.json` 三个包一起升（`core` / `solid` / `keymap`）。
+
+**为什么升**：0.5.4–0.5.9 里有好几条正好落在 T73–T80 花了大力气对付的那片地上——`renderer: prevent backpressure revive`（#1170）、`renderer: ignore invalid terminal dimensions`（#1440）、`renderer: clear stale mouse input`（#1382）、`fix(core): align bordered hit-grid clipping`（#1441，带边框的盒子里点击命中格对齐——这个前端到处是可点的行）、`fix(native): silence standard library logs`（#1425，原生库不再往 alternate screen 底下打日志）、以及 `fix(core): preserve edit cursors across tab widths`（#1449）。这些都是我们自己写 watchdog / 重读宽度去绕的那一类症状的上游修法。
+
+**一处真实的行为变化，需要我们这边应答**：0.5.7 的 `core: add double/triple click support`（#1407）让**每个 selectable renderable** 都有了终端的连击选择——同一处第二次点击选中一个词（`behavior: "word"`），第三次选中一行。而这个前端在 T18 定的规矩是"选择结束就复制"（OSC 52）。两件事撞在一起的后果是：**任何一次双击都会静默改写剪贴板**，而 `/sessions` 的双击本来就有含义（"在自己的 tab 里打开"）——实测那一下把行里的一个词复制走了，并把 `copied 5 characters` 盖在 `opened s-…` 上面（tab 确实开了，只是它说的话被换掉了）。这一条也正好是 T89 刚把粘贴接完整之后最不该有的东西。
+
+**修法是一行，落在规矩本来就写着的地方**：`App` 的 `selection` handler 只对 `behavior === "cell"`（拖拽产生的那种）复制。另一条路——给每个可点的行加 `selectable={false}`——被否掉了：那是**同一个决定在每张列表里各做一遍**，而忘掉它的那张表恰恰是没人会注意到的那张（本次改动波及 `SessionsView` 的两个 row renderer 就有 18 处 `<text>`）。连击仍然**高亮**（终端自己的反馈），只是不再自作主张伸手去拿剪贴板。回归由既有的 `test/sidebar.test.tsx` "two clicks in the rail give that session a tab of its own" 守着——升级后它是**唯一**一条红的测试，正是因为它断言的是那条通知。
+
+**顺带盘点了「升上去之后哪些自己的兜底可以删」，结论是一条都不能删**，记在这里免得下一个人重查：T75 的 render watchdog 与 T76/T73 的 `ui/measure.ts` **早在 T77 就随根因一起删掉了**，而 0.5.9 修的那几条正是它们当年在绕的东西——也就是说这次升级追认了那次删除，没有留下新的可删项。逐条查过仍然成立的四处：① `<span fg>` 在 @opentui/solid 0.5.9 上**依然被丢弃**（实测两个 `<span fg>` 落成一个白色 span），所以 `WorkingStatus` 的「一格一个 `<text>`」留着；② renderer 构造时**照旧**挂 `uncaughtException` / `unhandledRejection` 并把它们降格成看不见的 console 行（0.5.9 源码 1220–1221 行），所以 `crashlog.ts` 与响应层心跳留着；③ `renderables/Markdown.ts` 在 0.5.3 与 0.5.9 之间**逐字节相同**，所以 `sampled()` 那条「finalisation 故意晚一拍」的排序补偿留着；④ `setMousePointer` 仍然只写 cursor style options，`ui/pointer.ts` 自己写 OSC 22 的三个字节留着。
+
+**结果**：`bunx tsc --noEmit` 干净；`bun test` **656 pass / 0 fail**；`bun run compile` 通过；`createHostClipboard`（T89 那条路）在 0.5.9 上实测照常。

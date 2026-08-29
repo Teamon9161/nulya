@@ -1376,6 +1376,22 @@ export function App(props: AppProps) {
    */
   onMount(() => {
     const copy = (selection: Selection | null) => {
+      // A DRAG, and only a drag. OpenTUI 0.5.7 gave every selectable renderable
+      // the terminal's click-repeat selection — a second click selects the word
+      // under it (`behavior: "word"`), a third the line — and those arrive here
+      // as finished selections like any other. Copying them would mean every
+      // double click anywhere silently overwrites the clipboard, including the
+      // double click the sessions list already spends on "open this in a tab of
+      // its own": that gesture was putting a word from the row on the clipboard
+      // and "copied N characters" over the notice saying what it had done.
+      //
+      // The alternative — opting each clickable row out with `selectable:
+      // false` — is the same decision made again in every list that ever grows
+      // a click, and the one that forgets is the one nobody notices. So the
+      // rule stays where it was written: dragging selects, letting go copies.
+      // A click-repeat still highlights, which is the terminal's own feedback;
+      // it just does not reach for the clipboard on its own.
+      if (selection && selection.behavior !== "cell") return
       const text = selection?.getSelectedText() ?? ""
       // Every plain click ends a zero-width selection; only a real one is news.
       if (text.length === 0) return

@@ -311,8 +311,9 @@ export function WorkingStatus(props: {
         >
           {/* One cell, one `<text>`, so the band can cross the line while each
               character keeps its own colour underneath it. (`<span fg>` is the
-              obvious way and does nothing in @opentui/solid 0.5.3 — the prop is
-              dropped and the whole run comes out in one colour.) `Index` and not
+              obvious way and does nothing in @opentui/solid — the prop is
+              dropped and the whole run comes out in one colour; checked again
+              on 0.5.9, where two `<span fg>` still land as one white span.) `Index` and not
               `For`: the positions are fixed and the characters change, which is
               the case those two are named for. At rest — and under
               `motion = false` — every cell is exactly `base()`, so the still
