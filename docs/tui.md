@@ -2451,7 +2451,7 @@ tab 条的 `✕`/`+`/`▎`；`stripPlan` 的**不变量**"画出来的一切都�
 
 1. **工具卡的动效由一次 run 的生命周期决定，不再由 provisional 卡是否尚未落盘决定。** 旧的 `ToolCard.active = !resolved || state != done` 让调用一流出来就亮、tool end / ledger promotion 一到就灭；下一轮模型开始 responding 时，用户刚看见的工具已经失去唯一的视觉锚点。`SessionSnapshot.highlightedToolCallId` 现在只在 executor 的 `tool begin` 时指向该 call，tool end、step end 和随后一轮 model delta 都保留；下一个 tool begin 才换过去，`run done/error` 才清空。这样是同一条柔和扫光继续经过“执行 → 记录结果 → 模型解释结果”，不是另造一个永驻状态；pending 卡也不再先闪一下。T78 的惰性 Card props 仍在，卡不因 delta 重挂。
 
-2. **composer 的 Ctrl+V 能拿桌面剪贴板里的 PNG/JPEG。** 终端的 bracketed paste 只有文本字节，图片没有可等待的 `PasteEvent`，所以 `clipboard.ts` 在应用收到 Ctrl+V 时直接问 host clipboard：Wayland 用 `wl-paste`，X11 用 `xclip`，macOS 用 `pngpaste`；helper 可缺，按顺序静默降级，最终以魔数而不是 helper 声称的 MIME 判型。图片变成 `[Image #N]` 草稿 token，下面一行说 MIME 与大小，Backspace 整体删除；提交时 token 从文字里拿掉，原 bytes 经 `nulya/cli.ts` 写进本场 workspace 的 scratch，再以可重复 `--image` 与同一条 `--file` 一起送进 `session append`。driver / observer / interrupt 三条 append 路径都携带同一组图片；图片-only turn 合法。ledger 投影保留 `images` 列并在 user 卡/queue 上显示 `1 image`，不把 base64 画进 transcript。模型目录的 `vision` 列也终于由 TUI 的 `ModelView` 类型读回；真正能不能收仍由内核按冻结 model identity 设门，TUI 不猜。
+2. **composer 的 Ctrl+V 能拿桌面剪贴板里的 PNG/JPEG。** 终端的 bracketed paste 只有文本字节，图片没有可等待的 `PasteEvent`，所以 `clipboard.ts` 在应用收到 Ctrl+V 时直接问 host clipboard：Wayland 用 `wl-paste`，X11 用 `xclip`，macOS 用 `pngpaste`；helper 可缺，按顺序静默降级，最终以魔数而不是 helper 声称的 MIME 判型（**这三个 helper 与「只找图」2026-08-29 已整个换掉：OpenTUI 自带的原生 host clipboard，一次读回图或文本，Windows 也有——见 T89**）。图片变成 `[Image #N]` 草稿 token，下面一行说 MIME 与大小，Backspace 整体删除；提交时 token 从文字里拿掉，原 bytes 经 `nulya/cli.ts` 写进本场 workspace 的 scratch，再以可重复 `--image` 与同一条 `--file` 一起送进 `session append`。driver / observer / interrupt 三条 append 路径都携带同一组图片；图片-only turn 合法。ledger 投影保留 `images` 列并在 user 卡/queue 上显示 `1 image`，不把 base64 画进 transcript。模型目录的 `vision` 列也终于由 TUI 的 `ModelView` 类型读回；真正能不能收仍由内核按冻结 model identity 设门，TUI 不猜。
 
 3. **`/agent <name> <task>` 先开 destination tab，再等定义刷新、prompt render 与 `session new`。** 旧路径把三个 subprocess 全等完才 `tabs.draft()`，健康的慢启动看起来也像 Enter 没生效。现在只要确实给了 task，就同步开一个继承当前 workspace/model 的 draft 并切过去，状态行写 `loading its definition…`；定义随后给出 model override 时就地更新，再 materialize 同一 tab。未知 agent、外部 runner 或不受信 workspace 会只收回这个 untouched draft，回到原 tab，不留下假任务。无 task 的语法提示与 bare picker 照旧不创建 tab。
 
@@ -2602,3 +2602,37 @@ session_prompts = []  # 缺省已是 []；ground 的本地事实对远端没有�
 **`/ext` 不动**：store / activate 是全机一份，这一期只在 `tui.toml` + `/settings` 里可见，工具计数如实反映。
 
 **测试**：`test/envprofile.test.ts`（`execTargetKind` 的三类判定 + 未识别 spec 落 `local`；`resolveEnvProfile` 的三种 zero-config 缺省；逐字段覆盖——只覆盖写出来的字段、`pins` 与 `with` 同时生效、空表等于不写、一个 kind 的表不泄漏进另一个）· `test/extensions.test.ts` 新增一条 `loadSettings` 断言 `[env.ssh]` 逐字段解析且不泄漏进 `env.local`/`env.wsl`。`bunx tsc --noEmit` 干净；`bun test` 全量见下（负载下个别 perf/lease 测试按既有纪律隔离重跑确认）。
+
+
+### T89 · 外部 review 的三条（2026-08-29）
+
+**内核零改动。**（同一轮 review 的第四条在 `extensions/agent` 侧——"最后汇报一次"从一句叮嘱变成一个机械约束，见 `docs/goals/agent-runner.md` §6 的 2026-08-29 条。）
+
+#### 1. 走进一个 workspace 是一台状态机，不是一个"来过了"的记号
+
+S1c 把 checkout 的两个问题（store 的 trust、`.nulya/agents`）从 `main.tsx` 的一次启动挪成**每个目录一次**，但承载答案的数据形状没跟上，于是三个洞连在一起：① `entered` 在 `enterWorkspace` 的**第一行**就写下了，它说的是"开始处理过"而不是"问出了答案"；② 整个 App 只有**一个** `checkout` 信号，而恢复多 tab 的 `onMount` 是一个循环里 `void enterWorkspace(...)` **并发**打出去的——后一个问题直接盖掉前一个，而被盖掉的那个目录已经在 `entered` 里，此后**永远不会再问**；③ `startAgent` 只在 `=== false` 时拒绝，而 `undefined` 明确定义为"还没问"——于是**问题还挂在屏幕上的时候，随 checkout 到达的 agent 定义可以启动**，而那份定义正文会成为一场 session 的 system prompt、materialize 还可能往这个 checkout 的 extension store 里 build（DESIGN §9）。
+
+不是再补一个 boolean 特判，是**让非法状态不存在**（新文件 `src/state/enter.ts`，纯函数 + 普通信号，不需要屏幕就能问答）：
+
+- **`WorkspaceTrust = pending | trusted | denied`**，`agentStart(layer, trust)` 只对 `trusted` 放行；`pending` 与 `denied` 各说各的话（一个指屏幕上那个问题，一个保留今天关于 `asked_agents` 的措辞）。`user` / `builtin` 层不受影响——这道门只管随 checkout 到达的东西。缺席的 `agentsTrusted` prop 现在读作 `pending`（fail-closed），`main.tsx` 总是给 boolean，所以只有测试碰得到。
+- **`trustAfter(planKind, answered)`** 是对 `planProjectAgents` 三种 kind 的**唯一一次**解读，"从没问过"与"刚被回答"两条路共用它，两者因此不可能给出不同答案。顺手补掉同一函数里的第二个 fail-open：`action.agentsTrust || !agentsAsked` 在"以前问过并且拒绝了"（`planProjectAgents` 报 `none`）这一档上，会拿一个 **store** 的答案去授予 **definitions** 的信任。
+- **`createAskQueue<Q>()`**：问题排队，`head` 是屏幕上那个，`push` 的 promise 在**它自己**离开队列时才 settle——于是每条 start-up 流等的是自己的答案，不是别人的。
+- **`createEntryOnce(seeded)`**：一个条目**就是那次运行**，不是进门时画的记号；并发的第二个 tab join 同一个 promise。**抛异常时条目丢弃**（写在注释里的决定）：一次没能问出答案的运行不该让这个目录终生看起来像"已经处理过"，下一个 tab 会再驱动一次；promise 仍 resolve 不 reject——所有调用点都是 `void`，一个答不上来的目录不该把屏幕掀了。
+
+#### 2. sub-agent pane 的分割方向跟着终端走
+
+`subSplitDirection(width)` 定了 100 列这个阈值，但 App 只在 `openSubPane()` 那一刻读一次 `screen().width`，方向随后作为**值**写进 pane tree——120 列开、缩到 80 还是两个三十几列的截断句子；80 列开、放大到 120 还是上下堆着。（`subSplitOf` 的注释早就说"从树里读，免得 resize 之后 hairline 画在没有邻居的边上"——hairline 跟上了，它命名的那个 split 从来不转。）
+
+`pane/tree.ts` 多一个 `setSplitDirection`（`resizeSplit` 旁边，同样按 split 节点寻址、同样在已经是那个方向时返回 identity）· `state/subpanes.ts` 多一个纯函数 `reflowSubSplits(tree, width)`（**只转轴，不动 ratio**——拖出来的份额不是 resize 有资格重置的东西；没有 split 需要转时按 identity 交回原树）· App 一个 `createEffect` 读 `screen().width` 并对**每个 tab** 应用（一个 tab 持有自己的 pane tree，只做前台那个会让后台 tab 切回来时还按某个更早的终端分着；identity 返回意味着没有 sub-agent pane 的 tab 一个字都不写，所以不需要"切到前台再重算"那条退路）。**这不是 T73–T78 删掉的那个 measure→layout→measure 环**：终端宽度是**外部输入**（有人拖了窗口），不是这棵树自己产生的测量值，返回的东西改不了它——注释里写着，免得下一个人重新怕它。
+
+#### 3. 粘贴是一整个剪贴板，不是半个
+
+**问题**：T79 的 `Ctrl+V` 只做了一半。`clipboard.ts` 靠 spawn 三个 helper 取图（`pngpaste` / `wl-paste` / `xclip`）——**Windows 一个分支都没有**，那台机器上图片粘贴根本不存在；而 Composer 收到 `Ctrl+V` 是**先 `preventDefault()` 再异步找图**，没找到就只留一句"text paste still uses your terminal"。于是在真把这个键交给应用的终端上，一次普通文本粘贴被我们吃掉、什么都没发生。
+
+**改法不是把 `Ctrl+V` 还回去，是把剪贴板接完整**——tcode 用 `arboard` 走到的同一步（`app/input.rs::paste_from_clipboard`：先问图，没有就问文本）。这里代价为零：**OpenTUI 0.5.3 自带原生 host clipboard**（`createHostClipboard`，三平台都有；Windows 上把 `CF_BITMAP` 直接转成 PNG 交回来——本机实测 `image/png → read`）。所以：
+
+- **`src/clipboard.ts` 重写**：不再 spawn 任何东西，一次 `read({preferredTypes: ["image/png","image/jpeg","text/plain"]})` 回一个 `ClipboardPaste` 四态——`image` / `text` / `empty`（读得到但没有可粘的东西）/ `unavailable`（这里根本够不到剪贴板：远端、无桌面、服务抛错）。**判型仍以魔数为准**（`sniffImage`）：标称 `image/png` 而字节不是的，两边都不算，绝不把任意字节当图片送进一个 turn。服务是**进程级懒单例**（tcode 的理由：每次粘贴新开一个要付启动开销，X11 上还可能往 alternate screen 底下打字），`dispose` 不是退出的前提。踩到的一个真坑记在注释里：`preferredTypes` 只收 MIME **essence**，带参数的 `text/plain;charset=utf-8` 会在读之前就抛。
+- **Composer 两种粘贴走同一条路**：`Ctrl+V` 拿到图就是 `[Image #N]`（与 T79 一样），拿到文本就**插进输入框**，长文本照样折成 `[Pasted text #N]`——折叠逻辑抽成 `foldPaste(text)`，bracketed paste 与剪贴板 paste 共用它，**"是哪个键送来的"不构成行为差异**。够不到剪贴板时那句话同时说清还有什么能用（终端自己的 `Ctrl+Shift+V` / `Shift+Insert` 从来不经过这里）。
+- **多认一个 `Alt+V`**（tcode 的 `(ctrl || alt) && v`）：这条改动**解决不了**的那一半是——终端如果自己在 `Ctrl+V` 上粘贴，这个键根本到不了应用（Windows Terminal 的缺省绑定就是），于是那台机器上没有任何办法够到剪贴板里的图。多一个键是应用内唯一的出路；开屏 tip 里**先写 `Alt+V`**，因为最需要知道"图片可以粘"的正是那批被终端拿走了 `Ctrl+V` 的人。
+
+**测试**：`test/clipboard.test.ts`（四态映射 · 标称是图而字节不是 → 既不是图也不是文本 · 抛错 = `unavailable` 而不是崩）· `test/composer.test.tsx` 新增"`Ctrl+V` 也粘文本，长的照样折"（旧代码上这一条必红：那时根本没有文本分支）；原有的图片粘贴测试改用新的 seam（`readClipboard`），断言未变。`bun run compile` 通过。

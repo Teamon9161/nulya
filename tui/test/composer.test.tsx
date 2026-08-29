@@ -451,6 +451,47 @@ test("disabled composer stays visible but does not take text", async () => {
 }, 60_000)
 
 
+test("Ctrl+V pastes clipboard TEXT too, and a long one folds like any other paste", async () => {
+  const long = Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\n")
+  let holds = "just this"
+  const sent: string[] = []
+  const setup = await testRender(
+    () => (
+      <StyleContext.Provider value={style}>
+        <Composer
+          readClipboard={async () => ({
+            status: "read",
+            representation: { mimeType: "text/plain", bytes: new TextEncoder().encode(holds) },
+          })}
+          onSubmit={(text) => sent.push(text)}
+        />
+      </StyleContext.Provider>
+    ),
+    { width: 70, height: 12 },
+  )
+  try {
+    await settle(setup, 3)
+    // The gesture used to be claimed and then spent looking for an image, so on
+    // a terminal that hands the key over a text paste vanished.
+    setup.mockInput.pressKey("v", { ctrl: true })
+    expect(await settle(setup, 4)).toContain("just this")
+
+    holds = long
+    setup.mockInput.pressKey("v", { ctrl: true })
+    expect(await settle(setup, 4)).toContain("[Pasted text #1]")
+
+    setup.mockInput.pressEnter()
+    await settle(setup, 3)
+    // What the placeholder stood for is what gets sent, exactly as through the
+    // bracketed path: one gesture, one fold, one expansion.
+    expect(sent).toHaveLength(1)
+    expect(sent[0]).toBe(`just this${long}`)
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 60_000)
+
+
 test("Ctrl+V attaches a clipboard image and submits it as an image block", async () => {
   const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3])
   const sent: { text: string; images: readonly { bytes: Uint8Array; mediaType: string }[] }[] = []
@@ -458,7 +499,7 @@ test("Ctrl+V attaches a clipboard image and submits it as an image block", async
     () => (
       <StyleContext.Provider value={style}>
         <Composer
-          readClipboardImage={async () => ({ bytes: png, mediaType: "image/png" })}
+          readClipboard={async () => ({ status: "read", representation: { mimeType: "image/png", bytes: png } })}
           onSubmit={(text, _interrupt, images = []) => sent.push({ text, images })}
         />
       </StyleContext.Provider>

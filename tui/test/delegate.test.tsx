@@ -140,6 +140,46 @@ test("/agent opens a second tab on a session wearing the definition's prompt, an
   }
 }, 180_000)
 
+/**
+ * A definition that arrived with a CHECKOUT may only run in a directory
+ * somebody has actually answered for (tui.md §5.10, DESIGN §9). Its body
+ * becomes a session's system prompt, and materialising the tab builds into that
+ * checkout's own extension store — so "nobody has answered yet" has to refuse,
+ * exactly as "answered no" does. It used to be the one state that ran.
+ */
+test("a directory with no answer yet starts none of the definitions it shipped", async () => {
+  // No `agentsTrusted`: this screen was handed no answer for its directory,
+  // which is the state a workspace whose question is still queued behind
+  // another one is in as well.
+  const setup = await testRender(
+    () => (
+      <App
+        ws={ws}
+        pick={{ profile: "scripted" }}
+        style={style}
+        driver={{ env: scripted_env }}
+        statePath={join(ws.dir, `tui-state-${Math.random().toString(36).slice(2)}.json`)}
+      />
+    ),
+    { width: 100, height: 30 },
+  )
+  try {
+    await settle(setup, 3)
+    const before = (await sessionList(ws)).length
+    await setup.mockInput.typeText("/agent writer do the thing")
+    setup.mockInput.pressEnter()
+    // The command opens its destination tab first (the strip appears), and the
+    // refusal takes it away again — a delegation that was refused leaves the
+    // screen exactly where it found it.
+    await until(() => setup.captureCharFrame().includes("✕"), 300_000)
+    await until(() => !setup.captureCharFrame().includes("✕"), 300_000)
+    // …and nothing at all was created for it.
+    expect((await sessionList(ws)).length).toBe(before)
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 300_000)
+
 test("an unknown name lists the ones there are, and creates nothing", async () => {
   const setup = await open()
   try {

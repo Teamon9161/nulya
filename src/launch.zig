@@ -81,6 +81,13 @@ pub const tasks_subdir = "tasks";
 ///                     sub-agent found is in a session the caller never reads,
 ///                     so the runner asks for it (`extensions/agent`'s
 ///                     `wrap_up`) rather than reporting an empty round.
+///   wrapdefy:         the same run with a model that does NOT take the hint:
+///                     it calls a tool on every step, including the one it was
+///                     asked to spend on its report. Each call writes a file
+///                     named for which side of the ask it is on, so a test can
+///                     say whether a tool RAN rather than whether one was
+///                     asked for — the difference between a constraint and a
+///                     sentence.
 ///   background:       start ONE background command, then end the turn — saying
 ///                     `background done` once a `task_finished` turn is in the
 ///                     transcript and `waiting` while it is not, so a test can
@@ -89,13 +96,22 @@ pub const tasks_subdir = "tasks";
 pub const ScriptedProvider = struct {
     mode: Mode = .finish,
 
-    pub const Mode = enum { finish, loop, truncate, handoff, batch, background, wrapup };
+    pub const Mode = enum { finish, loop, truncate, handoff, batch, background, wrapup, wrapdefy };
 
     /// The opening words of what a runner sends a sub-agent whose steps ran out.
     /// Spelled out rather than imported for the same reason `summary_marker` is:
     /// the sentence lives in `extensions/agent`, a separate artifact this
     /// offline stand-in only has to AGREE with, not share a type with.
     pub const wrap_up_opening = "Your step budget is spent";
+
+    /// The files the `wrapdefy` mode's two commands create, in the session's
+    /// working directory. Two names rather than one because the question is
+    /// which ROUND ran a tool: the first says an ordinary round is untouched,
+    /// and the absence of the second is the whole point.
+    pub const defiant_before_file = "wrapup-before.txt";
+    pub const defiant_after_file = "wrapup-after.txt";
+    const defiant_before_args = "{\"command\":\"echo ran > " ++ defiant_before_file ++ "\"}";
+    const defiant_after_args = "{\"command\":\"echo ran > " ++ defiant_after_file ++ "\"}";
 
     /// What the `background` mode's command prints. `echo` means the same thing
     /// in both dialects, so the stand-in needs no dialect of its own.
@@ -185,6 +201,16 @@ pub const ScriptedProvider = struct {
             }
             try sink.emit(.{ .tool_use_start = .{ .index = 0, .id = "w1", .name = "shell" } });
             try sink.emit(.{ .tool_use_input_delta = .{ .index = 0, .fragment = "{\"command\":\"echo still-looking\"}" } });
+            try sink.emit(.{ .done = .tool_use });
+            return;
+        }
+        if (self.mode == .wrapdefy) {
+            const asked = hasUserTextContaining(request.prompt_ir.turns, wrap_up_opening);
+            try sink.emit(.{ .tool_use_start = .{ .index = 0, .id = if (asked) "d2" else "d1", .name = "shell" } });
+            try sink.emit(.{ .tool_use_input_delta = .{
+                .index = 0,
+                .fragment = if (asked) defiant_after_args else defiant_before_args,
+            } });
             try sink.emit(.{ .done = .tool_use });
             return;
         }

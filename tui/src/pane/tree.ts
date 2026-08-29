@@ -242,6 +242,21 @@ export function resizeSplit(tree: PaneTree, split: PaneId, ratio: number): PaneT
   return root === tree.root ? tree : { ...tree, root }
 }
 
+/**
+ * Turn a seam. `split` names the split node, as `resizeSplit` does, and for the
+ * same reason: an axis belongs to neither of the panes it separates.
+ *
+ * Identity when it already divides that way, so a caller that re-derives the
+ * axis from something that changes constantly — a terminal width — can do so on
+ * every change without writing a new tree each time.
+ */
+export function setSplitDirection(tree: PaneTree, split: PaneId, direction: SplitDirection): PaneTree {
+  const root = replaceNode(tree.root, split, (found) =>
+    found.kind === "split" && found.direction !== direction ? { ...found, direction } : found,
+  )
+  return root === tree.root ? tree : { ...tree, root }
+}
+
 /** Move the keyboard to a named pane. A pane that is not there is ignored. */
 export function focusPane(tree: PaneTree, pane: PaneId): PaneTree {
   if (tree.focus === pane) return tree

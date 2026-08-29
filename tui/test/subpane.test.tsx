@@ -32,6 +32,7 @@ import {
   closeSubPane,
   default_sub_ratio,
   openSubPane,
+  reflowSubSplits,
   subPanes,
   subSplitDirection,
   subSplitOf,
@@ -88,6 +89,37 @@ test("the split goes sideways where two conversations fit and stacks where they 
   tab.apply((tree) => openSubPane(tree, "main", { direction: "column", id: "sub" }))
   expect(subSplitOf(tab.tree(), "sub")).toBe("column")
   expect(subSplitOf(tab.tree(), "main")).toBe("column")
+})
+
+test("the split turns when the terminal crosses the width it was decided at", () => {
+  const tab = createPaneStore(main_surface, "main")
+  tab.apply((tree) => openSubPane(tree, "main", { direction: "row", id: "sub" }))
+  const wide = tab.tree()
+
+  // Squeezed under the threshold the pair stacks, instead of staying two
+  // thirty-odd column transcripts of cut sentences: the direction is a
+  // function of a width somebody goes on changing after the pane is open.
+  const narrow = reflowSubSplits(wide, sub_row_min_width - 1)
+  expect(subSplitOf(narrow, "sub")).toBe("column")
+  // Only the AXIS turns — the share is the person's, and a seam somebody
+  // dragged is not something a resize gets to reset.
+  expect(parentSplit(narrow, "sub")!.ratio).toBe(parentSplit(wide, "sub")!.ratio)
+  // …and widening turns it back.
+  expect(subSplitOf(reflowSubSplits(narrow, sub_row_min_width), "sub")).toBe("row")
+
+  // A width that does not cross the threshold gives back the very tree it was
+  // handed, which is what lets the screen re-derive this on every resize.
+  expect(reflowSubSplits(wide, sub_row_min_width + 40)).toBe(wide)
+})
+
+test("a tree with no sub-agent pane in it is left exactly as it was", () => {
+  const alone = createPaneStore(main_surface, "main").tree()
+  expect(reflowSubSplits(alone, 40)).toBe(alone)
+  // And it names the SUB-AGENT splits, not every seam on the screen: the
+  // sidebar's own split is across tabs and decides its axis for itself.
+  const app = createPaneStore(tab_surface, "portal")
+  app.apply((tree) => openSidebar(tree, "portal"))
+  expect(reflowSubSplits(app.tree(), 40)).toBe(app.tree())
 })
 
 test("closing a sub-agent pane gives the box back without stranding the keyboard", () => {

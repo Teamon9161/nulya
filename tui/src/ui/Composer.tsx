@@ -25,7 +25,7 @@ import {
 } from "../paste.ts"
 import { skillCompletions, type SkillTable } from "../skills.ts"
 import { packageCompletions, resolve as resolvePackageCommands, type PackageCommandTable } from "../packageCommands.ts"
-import { clipboardImage } from "../clipboard.ts"
+import { readClipboard, type ClipboardReader } from "../clipboard.ts"
 import type { ImageInput } from "../nulya/cli.ts"
 
 /**
@@ -141,7 +141,7 @@ const imagePlaceholder = (id: number) => `[Image #${id}]`
 export function Composer(props: {
   onSubmit: (text: string, interrupt?: boolean, images?: readonly ImageInput[]) => void
   /** Test seam; the real path asks the desktop clipboard on Ctrl+V. */
-  readClipboardImage?: () => Promise<ImageInput | null>
+  readClipboard?: ClipboardReader
   onNotice?: (text: string) => void
   /**
    * Enter on an empty composer. Returns true when it meant something — the
@@ -359,8 +359,7 @@ export function Composer(props: {
       return
     }
     const text = new TextDecoder().decode(event.bytes)
-    const size = measure(text)
-    if (!pasteShouldFold(size.chars, size.lines)) {
+    if (!foldPaste(text)) {
       // The textarea will insert it; the mirror has to follow, or the buffer and
       // everything derived from it (the menus, the box's own height) go on
       // describing what was there before the paste. Keystrokes sync through
@@ -370,22 +369,60 @@ export function Composer(props: {
       return
     }
     event.preventDefault()
+  }
+
+  /**
+   * Fold a paste into `[Pasted text #N]` if it is long enough to bury the
+   * screen, and say whether it did. The caller that has a textarea insert of its
+   * own to suppress uses the answer; the caller that is doing the inserting
+   * itself gets the short text put in for it.
+   */
+  const foldPaste = (text: string): boolean => {
+    const size = measure(text)
+    if (!pasteShouldFold(size.chars, size.lines)) return false
     const attachment: PasteAttachment = { id: nextAttachment++, text, ...size }
     setAttachments([...attachments(), attachment])
     area?.insertText(placeholderFor(attachment.id))
     sync()
+    return true
   }
 
-  const pasteImage = async () => {
-    const image = await (props.readClipboardImage ?? clipboardImage)()
-    if (!image) {
-      props.onNotice?.("the clipboard has no PNG or JPEG image · text paste still uses your terminal")
-      return
+  /**
+   * `Ctrl+V`, when the terminal hands the key over instead of pasting itself.
+   *
+   * Both representations, one gesture (`clipboard.ts`): an image becomes an
+   * attachment, and text is inserted here — including the fold a long one gets
+   * through the bracketed path, because which key delivered a paste is not a
+   * reason for it to behave differently. Taking the key and then only looking
+   * for an image is what made this half a gesture: on a terminal that does
+   * hand it over, a plain text paste did nothing at all.
+   */
+  const pasteFromClipboard = async () => {
+    const found = await readClipboard(props.readClipboard)
+    switch (found.kind) {
+      case "image": {
+        const attachment: ImageAttachment = { id: nextAttachment++, ...found.image }
+        setImages([...images(), attachment])
+        area?.insertText(imagePlaceholder(attachment.id))
+        sync()
+        return
+      }
+      case "text": {
+        if (!foldPaste(found.text)) {
+          area?.insertText(found.text)
+          sync()
+        }
+        return
+      }
+      case "empty":
+        props.onNotice?.("the clipboard is empty")
+        return
+      default:
+        // Say what is wrong AND what still works: the terminal's own paste
+        // (`Ctrl+Shift+V`, `Shift+Insert`, a middle click) never went through
+        // here and is unaffected by whatever this could not reach.
+        props.onNotice?.(`${found.why} · your terminal's own paste still works`)
     }
-    const attachment: ImageAttachment = { id: nextAttachment++, ...image }
-    setImages([...images(), attachment])
-    area?.insertText(imagePlaceholder(attachment.id))
-    sync()
   }
 
   /**
@@ -510,9 +547,15 @@ export function Composer(props: {
       event.preventDefault()
       return
     }
-    if (event.name === "v" && event.ctrl) {
+    // `Alt+V` as well as `Ctrl+V`, which is tcode's rule (`app/mod.rs`) for the
+    // situation this cannot do anything about: a terminal that pastes on
+    // `Ctrl+V` itself never delivers that key, so on Windows Terminal's default
+    // binding there would otherwise be no way to reach the clipboard's image at
+    // all. A second key costs nothing and is the only escape hatch available
+    // from inside the application.
+    if (event.name === "v" && (event.ctrl || event.meta)) {
       event.preventDefault()
-      void pasteImage()
+      void pasteFromClipboard()
       return
     }
     if (event.name === "tab") {

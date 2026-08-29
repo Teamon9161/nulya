@@ -318,10 +318,16 @@ pub fn run(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args: Args) !r
     var stranded = false;
     // Have we already spent a round asking for the report? See `wrap_up`.
     var asked_to_wrap_up = false;
+    // …and is the round about to be driven THAT round? Consumed by the next
+    // `driveOnce`, so the constraint lands on the round the request was sent
+    // for and on no other.
+    var wrap_up_next = false;
     // `while (true)`: every way out of this loop is a `break` written on
     // purpose, so no exit can be created by a counter running out.
     while (true) {
-        const round = try driveOnce(alloc, io, exe, settled, &backend, cwd, interrupt_path);
+        const mode: RoundMode = if (wrap_up_next) .wrap_up else .ordinary;
+        wrap_up_next = false;
+        const round = try driveOnce(alloc, io, exe, settled, &backend, cwd, interrupt_path, mode);
         if (round.text.len != 0) report = round.text;
         last = round;
 
@@ -344,7 +350,10 @@ pub fn run(alloc: std.mem.Allocator, io: std.Io, exe: []const u8, args: Args) !r
         {
             asked_to_wrap_up = true;
             const sent = try runners.send(kind, alloc, io, cwd, exe, settled.remote, settled.delegation, .{ .text = wrap_up });
-            if (sent.code == 0) continue;
+            if (sent.code == 0) {
+                wrap_up_next = true;
+                continue;
+            }
         }
 
         if (round.text.len != 0 or round.interrupted) {
@@ -552,6 +561,22 @@ const Round = struct {
     interrupted: bool = false,
 };
 
+/// What this round is FOR.
+///
+/// `wrap_up` is the round after a budget ran out silently, and the difference is
+/// mechanical rather than persuasive: one model turn, no tool ever executed.
+/// The sentence that asks for the report says "text only — do not call any more
+/// tools", and a sentence is not a budget. Without this the wrap-up round is an
+/// ordinary round carrying an ordinary `--max-steps`, so a sub-agent that does
+/// not take the hint answers the request to stop by starting again — with the
+/// bundled personas now running on the kernel's own ceiling, that is up to 500
+/// more steps of tools in a session the parent will still never read.
+///
+/// Only the nulya arm can be held to it: the other four are somebody else's
+/// harness and take the sentence alone. That asymmetry is real and is why the
+/// mode is passed rather than assumed.
+const RoundMode = enum { ordinary, wrap_up };
+
 fn driveOnce(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -560,6 +585,7 @@ fn driveOnce(
     backend: *Backend,
     cwd: std.Io.Dir,
     interrupt_path: []const u8,
+    mode: RoundMode,
 ) !Round {
     // A marker left over from before this round starts means nothing: an
     // interrupt asks a run IN FLIGHT to stop, and a round that has not begun
@@ -571,7 +597,7 @@ fn driveOnce(
 
     const d = args.delegation;
     return switch (backend.*) {
-        .nulya => driveNulyaRound(alloc, io, exe, args, cwd, interrupt_path),
+        .nulya => driveNulyaRound(alloc, io, exe, args, cwd, interrupt_path, mode),
         .ext => |*s| roundFrom(try external.driveRound(alloc, io, s, cwd, d, interrupt_path)),
         .pi => |*s| roundFrom(try pi.driveRound(alloc, io, s, cwd, d, interrupt_path)),
         .claude => |*s| roundFrom(try claude.driveRound(alloc, io, s, cwd, d, interrupt_path)),
@@ -600,16 +626,24 @@ fn driveNulyaRound(
     args: Settled,
     cwd: std.Io.Dir,
     interrupt_path: []const u8,
+    mode: RoundMode,
 ) !Round {
+    const wrapping_up = mode == .wrap_up;
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(alloc, &.{ exe, "session", "step", args.remote, "--stream" });
-    if (args.max_steps != 0) {
+    if (wrapping_up) {
+        // One turn. Not the delegation's budget, which is the budget that just
+        // ran out, and not the kernel's ceiling either: what is being asked for
+        // is a single answer, and a step is exactly one model turn.
+        try argv.appendSlice(alloc, &.{ "--max-steps", "1" });
+    } else if (args.max_steps != 0) {
         try argv.appendSlice(alloc, &.{ "--max-steps", try std.fmt.allocPrint(alloc, "{d}", .{args.max_steps}) });
     }
     // `--gate` only when there is something to refuse. Without it the step runs
     // exactly as it always has — the kernel's own "not gated is byte-identical"
     // property, kept on this side too.
-    if (args.permissions.isReadonly()) try argv.append(alloc, "--gate");
+    const gated = args.permissions.isReadonly() or wrapping_up;
+    if (gated) try argv.append(alloc, "--gate");
 
     // The step inherits this process's environment plus two facts about the
     // chain it is running in: how deep it is, and which delegation it IS. A
@@ -632,7 +666,7 @@ fn driveNulyaRound(
     var child = try std.process.spawn(io, .{
         .argv = argv.items,
         .environ_map = &child_env,
-        .stdin = if (args.permissions.isReadonly()) .pipe else .ignore,
+        .stdin = if (gated) .pipe else .ignore,
         .stdout = .pipe,
         .stderr = .pipe,
     });
@@ -655,7 +689,7 @@ fn driveNulyaRound(
         defer alloc.free(out_buf);
         var reader = child.stdout.?.readerStreaming(io, out_buf);
         var in_buf: [256]u8 = undefined;
-        var writer = if (args.permissions.isReadonly()) child.stdin.?.writerStreaming(io, &in_buf) else null;
+        var writer = if (gated) child.stdin.?.writerStreaming(io, &in_buf) else null;
 
         // One line at a time, in arrival order. The gate is strictly
         // request-then-answer — the kernel is blocked on our verdict while we
@@ -692,7 +726,7 @@ fn driveNulyaRound(
             };
             if (rpc.stringField(obj, "stream")) |stream| {
                 if (std.mem.eql(u8, stream, "gate") and writer != null) {
-                    const verdict = gateVerdict(alloc, obj);
+                    const verdict = if (wrapping_up) wrap_up_verdict else gateVerdict(alloc, obj);
                     writer.?.interface.writeAll(verdict) catch {};
                     writer.?.interface.flush() catch {};
                     continue;
@@ -756,6 +790,16 @@ fn driveNulyaRound(
     };
     return out;
 }
+
+/// The wrap-up round's verdict, for every call without looking at it.
+///
+/// The round exists to collect an answer, not to do more work, and the gate is
+/// where that is a fact rather than a request: `--max-steps 1` already bounds it
+/// to one turn, and this makes that turn tool-free even when the sub-agent
+/// reaches for one anyway. The note is what it will read about the refusal, so
+/// it says what to do instead — the deny is that call's `tool_results` and the
+/// turn continues (DESIGN §4), which is exactly the room a text answer needs.
+const wrap_up_verdict = "deny your step budget is spent: this round is for your report, and no tool will run in it. Answer in text with what you established.\n";
 
 /// `allow` / `deny <note>`, mechanically (tui.md §5.10's ceiling, with nobody at
 /// the keyboard). Both refusals say what the sub-agent may do instead, because

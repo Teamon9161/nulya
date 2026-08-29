@@ -18,6 +18,7 @@ import {
   closePane,
   leaves,
   parentSplit,
+  setSplitDirection,
   splitPane,
   type PaneId,
   type PaneTree,
@@ -100,4 +101,32 @@ export function closeSubPane(tree: PaneTree, pane: PaneId): PaneTree {
  */
 export function subSplitOf(tree: PaneTree, pane: PaneId): SplitDirection | null {
   return parentSplit(tree, pane)?.direction ?? null
+}
+
+/**
+ * Turn every sub-agent split to the axis this width calls for, leaving the
+ * ratios alone.
+ *
+ * `subSplitDirection` is a function of the terminal's width, so a direction
+ * decided once — at the moment the pane opened — is an answer to a question
+ * that has since been asked again. A pane opened at 120 columns and squeezed to
+ * 80 was two thirty-odd column transcripts of cut sentences; one opened at 80
+ * and widened stayed stacked with half the screen spare. Only the AXIS turns:
+ * the ratio is the person's, and a share somebody dragged is not something a
+ * resize gets to reset.
+ *
+ * THIS IS NOT THE MEASURE→LAYOUT→MEASURE LOOP T73–T78 DELETED. The terminal's
+ * width is an EXTERNAL input — the window somebody dragged — not a measurement
+ * of what this tree produced, so nothing this returns can change it. And the
+ * tree comes back by IDENTITY when no split needs turning, so a width that
+ * changes without crossing the threshold writes nothing at all.
+ */
+export function reflowSubSplits(tree: PaneTree, width: number): PaneTree {
+  const want = subSplitDirection(width)
+  let out = tree
+  for (const pane of subPanes(tree)) {
+    const split = parentSplit(out, pane)
+    if (split) out = setSplitDirection(out, split.id, want)
+  }
+  return out
 }

@@ -46,6 +46,7 @@ import { createPaneStore, focusThrough, main_surface, overlayAdapter, tab_surfac
 import {
   closeSubPane,
   openSubPane,
+  reflowSubSplits,
   subSplitDirection,
   subSplitOf,
 } from "../state/subpanes.ts"
@@ -58,6 +59,13 @@ import {
   sidebarWidth,
   sidebar_min_width,
 } from "../state/sidebar.ts"
+import {
+  agentStart,
+  createAskQueue,
+  createEntryOnce,
+  trustAfter,
+  type WorkspaceTrust,
+} from "../state/enter.ts"
 import { claimsKeyboard, createSurfaceRegistry, type SurfaceMount } from "../pane/registry.ts"
 import { leaves, nextPaneId, type FocusDirection } from "../pane/tree.ts"
 import { resolveFocus } from "../pane/focus.ts"
@@ -444,6 +452,23 @@ export function App(props: AppProps) {
     // (tui-plugin U3, `api.observe`). A pure observer: it runs after the
     // transcript has been told, and it decides nothing.
     onLine: (line, session) => plugins.observe(line, session),
+  })
+
+  /**
+   * A sub-agent split follows the terminal it is drawn in (§5.3c, T72).
+   *
+   * `subSplitDirection` answers "is there room to read two conversations side
+   * by side" from the width, and the width is something a person changes by
+   * dragging a window — so the answer has to be re-derived rather than kept
+   * from the moment the pane opened. Every tab, not only the one in front: a
+   * tab holds its own tree and a background one would otherwise come forward
+   * still divided the way some earlier terminal was. It costs nothing to do so,
+   * because `reflowSubSplits` hands back the tree it was given whenever no
+   * split needs turning — and a tab with no sub-agent pane is exactly that case.
+   */
+  createEffect(() => {
+    const width = screen().width
+    for (const one of tabs.tabs()) one.panes.apply((tree) => reflowSubSplits(tree, width))
   })
 
   /**
@@ -1096,44 +1121,67 @@ export function App(props: AppProps) {
   // ── Walking into a workspace for the first time (§5.3b point 6) ───────────
 
   /**
-   * Directories this process has already put the checkout question for.
+   * The start-up flow this process has driven, per directory
+   * (`state/enter.ts`).
    *
    * The launch workspace is in it from the start: `main` asked about that one
    * on the bare terminal, before the alternate screen, which is still the right
    * place for it — it is the only workspace that exists before the screen does.
    * Every other one is walked into by a TAB, and a question asked on a bare
    * terminal at that point would be a question asked underneath the screen.
+   *
+   * An entry is the RUN, and it means the flow reached an answer rather than
+   * that somebody started it. A mark written on the way in describes a
+   * directory whose question is still on screen exactly as it describes one
+   * that was answered — so a question that got lost was never asked again.
    */
-  const entered = new Set<string>([props.ws.dir])
+  const entered = createEntryOnce([props.ws.dir])
   /**
-   * Whether the agent definitions that came with a CHECKOUT may be used, per
-   * workspace (tui.md §5.10).
+   * What the agent definitions that came with a CHECKOUT may do, per workspace
+   * (tui.md §5.10).
    *
    * A map rather than the single prop it used to be, for the same reason
    * everything else in S1c became one: this is a fact about a directory, and
    * the screen now holds tabs in several. `props.agentsTrusted` is the launch
    * workspace's answer, already given.
+   *
+   * THREE STATES, not a boolean (`WorkspaceTrust`): "not answered yet" is a
+   * state this screen is really in — the question is on screen, or it is behind
+   * another workspace's — and a boolean could only spell it as one of the two
+   * answers. It was spelled as the permissive one. An absent prop is `pending`
+   * for the same reason: a host that never asked has no answer to report, and
+   * the word for that is not "trusted".
    */
-  const [agentsTrust, setAgentsTrust] = createSignal<ReadonlyMap<string, boolean>>(
-    new Map(props.agentsTrusted === undefined ? [] : [[props.ws.dir, props.agentsTrusted]]),
+  const [agentsTrust, setAgentsTrust] = createSignal<ReadonlyMap<string, WorkspaceTrust>>(
+    new Map<string, WorkspaceTrust>(
+      props.agentsTrusted === undefined ? [] : [[props.ws.dir, props.agentsTrusted ? "trusted" : "denied"]],
+    ),
   )
-  const noteAgentsTrust = (where: Workspace, trusted: boolean) =>
-    setAgentsTrust((now) => new Map([...now, [where.dir, trusted]]))
-  /**
-   * `undefined` is "never asked", which is NOT "refused" — the same shape the
-   * prop had, so `startAgent`'s `=== false` test still means what it meant.
-   */
-  const agentsTrustedIn = (where: Workspace): boolean | undefined => agentsTrust().get(where.dir)
+  const noteAgentsTrust = (where: Workspace, trust: WorkspaceTrust) =>
+    setAgentsTrust((now) => new Map([...now, [where.dir, trust]]))
+  const agentsTrustIn = (where: Workspace): WorkspaceTrust => agentsTrust().get(where.dir) ?? "pending"
 
-  /** The checkout question, waiting for a key (`ui/CheckoutPrompt.tsx`). */
-  const [checkout, setCheckout] = createSignal<{
+  /** One directory's unanswered checkout question, and the start-up it holds up. */
+  interface Asking {
     ws: Workspace
     plan: Extract<CheckoutPlan, { kind: "ask" }>
     store: string
     agentsDir: string
     storeAsked: boolean
-    agentsAsked: boolean
-  } | null>(null)
+    /** Which `planProjectAgents` kind this directory had — what the answer is worth. */
+    agentsPlan: "none" | "ready" | "ask"
+  }
+  /**
+   * The checkout questions waiting for a key (`ui/CheckoutPrompt.tsx`), in line.
+   *
+   * A QUEUE rather than one slot, because tabs enter their directories
+   * concurrently — restoring a remembered screen walks into all of them at
+   * once. With one slot the second question overwrote the first, and the
+   * checkout it silently dropped was left with an untrusted store and
+   * unanswered definitions that nothing would ever ask about again.
+   */
+  const asking = createAskQueue<Asking>()
+  const checkout = asking.head
 
   /**
    * The start-up flow, per workspace rather than per launch (§5.3b point 6).
@@ -1149,49 +1197,51 @@ export function App(props: AppProps) {
    * this refuses to trust makes `session new` fail in that tab, with the
    * kernel's paragraph shown in full where the draft is (`refusal`, T46).
    */
-  const enterWorkspace = async (where: Workspace) => {
-    if (entered.has(where.dir)) return
-    entered.add(where.dir)
-    const store = workspaceStorePath(where)
-    let storePlan = (await (async () => {
-      if (!props.style.settings.extensions.sync_on_start) return { kind: "none" as const }
-      try {
-        return planProjectStore(
-          store,
-          await inventory(where, false),
-          storeTrusted(store),
-          loadTuiState(props.statePath).asked_stores ?? [],
-        )
-      } catch {
-        // No store, no binary answer — the session's own gate still speaks.
-        return { kind: "none" as const }
+  const enterWorkspace = (where: Workspace) =>
+    entered.enter(where.dir, async () => {
+      const store = workspaceStorePath(where)
+      const storePlan = await (async () => {
+        if (!props.style.settings.extensions.sync_on_start) return { kind: "none" as const }
+        try {
+          return planProjectStore(
+            store,
+            await inventory(where, false),
+            storeTrusted(store),
+            loadTuiState(props.statePath).asked_stores ?? [],
+          )
+        } catch {
+          // No store, no binary answer — the session's own gate still speaks.
+          return { kind: "none" as const }
+        }
+      })()
+      const agentsDir = agentsDirOf(where, "workspace")
+      const state = loadTuiState(props.statePath)
+      const trustedAlready = (state.trusted_agents ?? []).some((known) => samePath(known, agentsDir))
+      const agentsPlan = planProjectAgents(
+        agentsDir,
+        workspaceAgentFiles(where),
+        trustedAlready,
+        state.asked_agents ?? [],
+        samePath,
+      )
+      const plan = planCheckout(storePlan, agentsPlan)
+      if (plan.kind !== "ask") {
+        noteAgentsTrust(where, trustAfter(agentsPlan.kind, null))
+        if (storePlan.kind === "ready") await syncEntered(where)
+        return
       }
-    })())
-    const agentsDir = agentsDirOf(where, "workspace")
-    const state = loadTuiState(props.statePath)
-    const trustedAlready = (state.trusted_agents ?? []).some((known) => samePath(known, agentsDir))
-    const agentsPlan = planProjectAgents(
-      agentsDir,
-      workspaceAgentFiles(where),
-      trustedAlready,
-      state.asked_agents ?? [],
-      samePath,
-    )
-    const plan = planCheckout(storePlan, agentsPlan)
-    if (plan.kind !== "ask") {
-      noteAgentsTrust(where, agentsPlan.kind === "ready")
-      if (storePlan.kind === "ready") await syncEntered(where)
-      return
-    }
-    setCheckout({
-      ws: where,
-      plan,
-      store,
-      agentsDir,
-      storeAsked: storePlan.kind === "ask",
-      agentsAsked: agentsPlan.kind === "ask",
+      // In line, and this flow is not finished until that question is answered:
+      // an entry means an ANSWER, so a second tab walking in here waits with it
+      // rather than deciding the directory has been dealt with.
+      await asking.push({
+        ws: where,
+        plan,
+        store,
+        agentsDir,
+        storeAsked: storePlan.kind === "ask",
+        agentsPlan: agentsPlan.kind,
+      })
     })
-  }
 
   /** That workspace's project store, built on the same pass the launch one gets. */
   const syncEntered = (where: Workspace) =>
@@ -1208,22 +1258,31 @@ export function App(props: AppProps) {
    * are answers, here as on the bare terminal.
    */
   const answerCheckout = async (key: string) => {
-    const asking = checkout()
-    if (!asking) return
-    const action: CheckoutAction | null = asking.plan.apply(key)
+    const asked = checkout()
+    if (!asked) return
+    const action: CheckoutAction | null = asked.plan.apply(key)
     if (!action) return
-    setCheckout(null)
-    if (asking.storeAsked) rememberStoreAsked(asking.store, props.statePath)
-    if (asking.agentsAsked) rememberAgentsAnswer(asking.agentsDir, action.agentsTrust, props.statePath)
-    noteAgentsTrust(asking.ws, action.agentsTrust || !asking.agentsAsked)
-    const where = workspaceLabel(asking.ws.dir)
+    // The answered question leaves the queue and releases ITS OWN start-up
+    // flow — the next directory's question is then on screen, having waited
+    // rather than been overwritten. It is released here rather than after the
+    // install below because what a flow was waiting for is the ANSWER; the
+    // install is what the answer then causes, and it reports for itself.
+    asking.settleHead()
+    if (asked.storeAsked) rememberStoreAsked(asked.store, props.statePath)
+    if (asked.agentsPlan === "ask") rememberAgentsAnswer(asked.agentsDir, action.agentsTrust, props.statePath)
+    // What the answer is worth to the definitions is `trustAfter`'s one
+    // reading, the same one the never-asked path uses: a question that did not
+    // speak for them (they were already trusted, or there are none) does not
+    // get to grant them anything on the strength of a store answer.
+    noteAgentsTrust(asked.ws, trustAfter(asked.agentsPlan, action.agentsTrust))
+    const where = workspaceLabel(asked.ws.dir)
     if (!action.store.trust && !action.store.sync) {
       setNotice(`${where} · left alone · \`nulya ext trust\` whenever you mean to`)
       return
     }
     try {
       setSyncing({ what: `installing ${where}`, done: 0, total: 0, since: Date.now() })
-      const report = await applyStoreAction(asking.ws, action.store)
+      const report = await applyStoreAction(asked.ws, action.store)
       setSyncing(null)
       setNotice(report ? summarize(where, report) : `${where} · trusted`)
       setPlanTick((tick) => tick + 1)
@@ -2738,9 +2797,19 @@ export function App(props: AppProps) {
       setNotice(`'${entry.name}' runs on '${entry.runner}', which a tab cannot drive · delegate to it from a conversation instead`)
       return null
     }
-    if (entry.layer === "workspace" && agentsTrustedIn(draft.ws) === false) {
+    // Only a directory that has actually been ANSWERED for may start what
+    // arrived in it: a definition is a system prompt, and materialising the tab
+    // builds into that checkout's extension store (DESIGN §9). "Not answered
+    // yet" is its own refusal rather than a yes — the question may be on screen
+    // this very second, and starting the persona would be answering it.
+    const gate = agentStart(entry.layer, agentsTrustIn(draft.ws))
+    if (gate !== "allow") {
       tabs.close(draft.key)
-      setNotice(`'${entry.name}' came with this checkout and was not trusted · its prompt would enter a session here · answer the question again by clearing asked_agents in tui-state.json`)
+      setNotice(
+        gate === "denied"
+          ? `'${entry.name}' came with this checkout and was not trusted · its prompt would enter a session here · answer the question again by clearing asked_agents in tui-state.json`
+          : `'${entry.name}' came with this checkout and ${workspaceLabel(draft.ws.dir)} has not been answered for yet · its prompt would enter a session here · answer that question first`,
+      )
       return null
     }
     const inherited = draft.pick()

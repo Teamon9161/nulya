@@ -79,6 +79,11 @@ function tipsOf(glyphs: Glyphs): string[] {
     "shell {background:true} outlives the step · /tasks shows what is still running",
     "/outcome success|partial|failure records how a session went · nothing recorded is not failure",
     "Ctrl+C stops the step and never exits on the first press",
+    // Alt+V is named FIRST on purpose: Ctrl+V reaches this application only on
+    // terminals that do not paste on it themselves, and the people who most
+    // need to know a picture can be pasted are the ones whose terminal quietly
+    // took that key.
+    "Alt+V (or Ctrl+V) pastes what is on the desktop clipboard, a picture included",
     // Three ways into one pane, in one line, because the report that prompted
     // T70 was "I never found the sidebar at all". The handle is named as well
     // as pointed at: it is the only one of the three that can be seen without

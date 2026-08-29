@@ -140,6 +140,12 @@
   - **文档**：本文件 §1（ar-g 划掉）与新 §7 · DESIGN §7.8 新增「runner 可以住在别的扩展里」整段并把 `runner:` 那段的"四个 arm"更新为五个 · guide skill 在 agent 定义那条 bullet 后面补一条完整配方（两个 op 的表 + manifest 骨架 + 装法与版本冻结那句）。CLAUDE.md 现状条目按前几轮的先例留给 review 后统一收。
   - **交接给 review 的一点**：TUI 侧 `render/registry.ts` 与 `AgentPicker` 判断"非 nulya runner"用的是 `runner !== "nulya"` 的字符串比较，`ext:<id>` 天然落在正确的一侧（显示 runner 名、退化成 `/tasks` 提示、`startAgent` 当场拒绝），所以本轮 `tui/` 无需改动；但 `/ext` 那张表不会告诉任何人某个扩展是一个 runner（manifest 里也没有说"我是 runner"的字段——`agent_runner` 这个名字就是全部声明）。要不要让前端认出它，属于 ar-t 系列的下一轮判断。
 
+- 2026-08-29 · **「最后汇报一次」是一个机械约束，不是一句叮嘱**（外部 review 的 P1）。上一轮加的 wrap-up（预算跑光却什么都没说 → runner 送一条"停下来汇报"）方向对，实现只写在句子里：那句话说"text only — do not call any more tools"，而 runner 送完就 `continue`，下一轮仍是普通的 `session step`，带的仍是这条委派自己的 `--max-steps`——同一轮还把自带 persona 的小预算删掉了，于是缺省落到内核 500 的 runaway 天花板。**不听那句话的模型，可以把"最后一次汇报"跑成又一整份预算。**
+  - 修法：`RoundMode{ordinary, wrap_up}` 穿过 `driveOnce`，只有 nulya arm 认它——**`--max-steps 1`（一个 model turn）+ `--gate` 且每个请求一律 deny**。deny 是那个 call 的 `tool_results`（DESIGN §4），所以模型读得到为什么、这一轮照样能用文字作答；executor 一次都不跑。这一档与 readonly 的 gate 共用同一条 stdin 通道（`gated = readonly or wrapping_up`），没有第二套 plumbing。
+  - **外部四个 arm 仍然只有那句话**：codex/claude/pi/ext 是别人的 harness，"一个 turn、零 tool"没有可强制的旋钮。不假装对称——mode 是**传进去的参数**而不是全局假设，正因为只有一个 arm 能被它约束。
+  - 一个刻意留下的边角：wrap-up 发出与下一轮之间恰好到达的真实追问，会落在这一轮受约束的边界里（一个 turn、无 tool）。它仍会被答，下一轮就是普通轮——比让"停下来汇报"变成一张空白支票便宜得多。
+  - 测试：新 scripted 档 `wrapdefy`（每一步都调 tool，被要求汇报的那一步**也**调），两个 shell 命令各写一个以自己所在轮次命名的文件——于是断言的是**工具有没有跑**，而不是有没有被请求。e2e `tests/e2e/agent.zig` 断言 ordinary 轮那个文件在（约束没有变成永久 gate）、wrap-up 轮那个文件不在、且 ask 之后**恰好一条** assistant turn。**验证过它在旧代码上会红**（`expected error.FileNotFound, found void`）。
+
 ## 7. `agent_runner` 契约（ar-g 定稿）
 
 > 这一节是**给第三方看的**：接一个新 harness 要写的全部东西。同一份契约还写在

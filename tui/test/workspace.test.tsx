@@ -34,6 +34,8 @@ import type { JSX } from "solid-js"
 import { DirBrowser } from "../src/ui/overlays/DirBrowser.tsx"
 import { CheckoutPrompt, choiceHint, promptLines } from "../src/ui/CheckoutPrompt.tsx"
 import { planCheckout } from "../src/extensions.ts"
+import { agentsDirOf } from "../src/agents.ts"
+import { agentStart, createAskQueue, createEntryOnce, trustAfter } from "../src/state/enter.ts"
 import { SessionsView } from "../src/ui/overlays/SessionsView.tsx"
 import { StyleContext } from "../src/render/theme.ts"
 import { FoldContext, createFoldStore } from "../src/state/folds.ts"
@@ -259,6 +261,96 @@ test("the cursor walks sessions and steps over headings", () => {
   // Nothing further that way leaves the cursor alone rather than wrapping.
   expect(nextSelectable(rows, 4, 1)).toBe(4)
   expect(nextSelectable(rows, 1, -1)).toBe(1)
+})
+
+// ── walking into a workspace (§5.3b point 6, `state/enter.ts`) ─────────────
+
+test("a directory nobody has answered for cannot start what arrived in it", () => {
+  // The gate is only about what came with a CHECKOUT: a definition in
+  // `~/.nulya/agents` or one the binary ships got there because somebody put it
+  // there, and no directory's answer has anything to say about it.
+  expect(agentStart("user", "pending")).toBe("allow")
+  expect(agentStart("builtin", "denied")).toBe("allow")
+  // For a workspace one, only an answer is a yes. `pending` is not — the
+  // question may be on screen this very second — and the two refusals stay
+  // apart because they point at different things.
+  expect(agentStart("workspace", "trusted")).toBe("allow")
+  expect(agentStart("workspace", "pending")).toBe("pending")
+  expect(agentStart("workspace", "denied")).toBe("denied")
+})
+
+test("what a checkout's answer is worth to the definitions beside it", () => {
+  // A question that was asked is worth exactly what was answered — and worth
+  // nothing at all until it is.
+  expect(trustAfter("ask", null)).toBe("pending")
+  expect(trustAfter("ask", true)).toBe("trusted")
+  expect(trustAfter("ask", false)).toBe("denied")
+  // A machine that already recorded the trust is the one yes that needs no
+  // question; nothing to grant, and a directory asked about before and not
+  // trusted, are both "not trusted" — never a yes arrived at by way of an
+  // answer that was about the extension store.
+  expect(trustAfter("ready", null)).toBe("trusted")
+  expect(trustAfter("none", true)).toBe("denied")
+})
+
+test("two questions asked at once are a queue: neither is lost, and each flow waits for its own", async () => {
+  const queue = createAskQueue<string>()
+  let secondAnswered = false
+  const first = queue.push("alpha")
+  const second = queue.push("beta").then(() => {
+    secondAnswered = true
+  })
+  expect(queue.head()).toBe("alpha")
+  expect(queue.all()).toEqual(["alpha", "beta"])
+
+  queue.settleHead()
+  await first
+  // The one behind it is on screen now rather than having been overwritten
+  // while nobody was looking, and its own flow is still waiting for it.
+  expect(queue.head()).toBe("beta")
+  expect(secondAnswered).toBe(false)
+
+  queue.settleHead()
+  await second
+  expect(queue.head()).toBeNull()
+})
+
+test("a directory's start-up runs once, and once means it reached an answer", async () => {
+  const entered = createEntryOnce(["asked-before-the-screen"])
+  expect(entered.driven("asked-before-the-screen")).toBe(true)
+
+  let runs = 0
+  let release!: () => void
+  const held = new Promise<void>((resolve) => (release = resolve))
+  const work = () => {
+    runs += 1
+    return held
+  }
+  // Two tabs walking into the same directory join the SAME run: not a second
+  // question, and not "somebody started this, so it has been dealt with".
+  const a = entered.enter("one", work)
+  const b = entered.enter("one", work)
+  expect(runs).toBe(1)
+  release()
+  await Promise.all([a, b])
+
+  await entered.enter("one", work)
+  expect(runs).toBe(1)
+  await entered.enter("two", async () => void (runs += 1))
+  expect(runs).toBe(2)
+})
+
+test("a start-up that threw reached no answer, so the next tab into that directory drives it again", async () => {
+  const entered = createEntryOnce()
+  let runs = 0
+  await entered.enter("one", async () => {
+    runs += 1
+    throw new Error("that directory would not answer")
+  })
+  expect(entered.driven("one")).toBe(false)
+  await entered.enter("one", async () => void (runs += 1))
+  expect(runs).toBe(2)
+  expect(entered.driven("one")).toBe(true)
 })
 
 // ── the browser and the grouped list, on screen ─────────────────────────────
@@ -624,6 +716,67 @@ test("a remembered tab in another directory comes back beside the launch tab", a
     expect(await settle(setup, 3)).toContain("✕")
   } finally {
     setup.renderer.destroy()
+  }
+}, 90_000)
+
+test("two directories walked into at once each get their question, one after the other", async () => {
+  const first = tempWorkspace()
+  const second = tempWorkspace()
+  try {
+    // A marker per directory, so which question is on screen is legible without
+    // reading a temp path out of a wrapped line.
+    const marks = ["alphamark", "betamark"]
+    const sessions = [first, second].map((one, at) => {
+      mkdirSync(agentsDirOf(one, "workspace"), { recursive: true })
+      writeFileSync(
+        join(agentsDirOf(one, "workspace"), `${marks[at]}.md`),
+        "---\ndescription: one this checkout ships\n---\nA body, which is a system prompt.\n",
+      )
+      const run = Bun.spawnSync({
+        cmd: [one.bin, "session", "new", "--profile", "scripted"],
+        cwd: one.dir,
+        env: process.env,
+      })
+      return run.stdout.toString().trim().split(/\s+/).pop() ?? ""
+    })
+    const state = join(mkdtempSync(join(tmpdir(), "nulya-state-")), "tui-state.json")
+    rememberTabs(
+      [{ ws: here.dir }, { ws: first.dir, session: sessions[0]! }, { ws: second.dir, session: sessions[1]! }],
+      state,
+    )
+
+    const setup = await testRender(
+      () => (
+        <App
+          ws={here}
+          pick={{ profile: "scripted", model: "scripted-demo" }}
+          style={style}
+          statePath={state}
+          driver={{ env: scripted_env }}
+        />
+      ),
+      { width: 100, height: 30 },
+    )
+    try {
+      // Restoring walks into both directories at once, and each of them holds
+      // definitions a session there would run with. One question is on screen.
+      await until(() => marks.some((mark) => setup.captureCharFrame().includes(mark)), 30_000)
+      const shown = marks.filter((mark) => setup.captureCharFrame().includes(mark))
+      expect(shown).toHaveLength(1)
+
+      // Answering it does not end the matter: the other directory's question
+      // waited its turn rather than being overwritten by this one — which is
+      // what left a checkout permanently unanswered, and so unanswered-for.
+      await setup.mockInput.typeText("n")
+      const waiting = marks.find((mark) => mark !== shown[0])!
+      await until(() => setup.captureCharFrame().includes(waiting), 20_000)
+      expect(setup.captureCharFrame()).not.toContain(shown[0]!)
+    } finally {
+      setup.renderer.destroy()
+    }
+  } finally {
+    first.cleanup()
+    second.cleanup()
   }
 }, 90_000)
 

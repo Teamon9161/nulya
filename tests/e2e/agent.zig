@@ -1177,6 +1177,78 @@ test "bundled agent: a sub-agent that spends every step on tools is asked to sto
     }
 }
 
+test "bundled agent: the round a sub-agent is given for its report is one turn with no tool in it, whatever the sub-agent tries to call" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host_env = try std.testing.environ.createMap(alloc);
+    defer host_env.deinit();
+    const exe_rel = host_env.get("NULYA_EXE") orelse return error.SkipZigTest;
+    const exe_abs = try std.fs.path.resolve(alloc, &.{exe_rel});
+    defer alloc.free(exe_abs);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = tmp.dir;
+
+    const ref = try buildBundled(alloc, io, ws, exe_abs, "agent");
+    defer alloc.free(ref);
+
+    // A ceiling of one step again, so the first round ends on `budget` having
+    // said nothing and the runner asks for the report.
+    try ws.createDirPath(io, ".nulya/agents");
+    try ws.writeFile(io, .{
+        .sub_path = ".nulya/agents/stubborn.md",
+        .data = "---\ndescription: does not take hints\nmax_steps: 1\n---\nYou investigate.\n",
+    });
+
+    const new = try runCli(alloc, io, ws, &.{ exe_abs, "session", "new", "--profile", "scripted" });
+    defer alloc.free(new.stdout);
+    const parent = try alloc.dupe(u8, std.mem.trim(u8, new.stdout, " \r\n"));
+    defer alloc.free(parent);
+    const session_file = try std.fmt.allocPrint(alloc, ".nulya/sessions/{s}.jsonl", .{parent});
+    defer alloc.free(session_file);
+
+    // `wrapdefy`: the sub-agent calls a tool on every step it is given, the
+    // round it was asked to spend on its report included. The request says
+    // "text only — do not call any more tools"; this model does not care, which
+    // is the only interesting case, because a sentence the model obeys proves
+    // nothing about what the harness allows.
+    const opened = try runCliEnvs(alloc, io, ws, &.{ exe_abs, "ext", "run", ref, "agent", "{\"name\":\"stubborn\",\"task\":\"find something\"}" }, &.{
+        .{ .key = "NULYA_SESSION", .value = session_file },
+        .{ .key = "NULYA_SCRIPTED_MODE", .value = "wrapdefy" },
+    });
+    defer alloc.free(opened.stdout);
+    try std.testing.expectEqual(@as(u8, 0), opened.code);
+    const child = try remoteOf(alloc, opened.stdout);
+    defer alloc.free(child);
+    {
+        const waited = try runCli(alloc, io, ws, &.{ exe_abs, "task", "wait", "--any", "--session", parent, "--timeout-ms", wait_budget_ms });
+        defer alloc.free(waited.stdout);
+        try std.testing.expectEqual(@as(u8, 0), waited.code);
+    }
+
+    const Scripted = support.launch.ScriptedProvider;
+    // The ordinary round ran its tool: the constraint is on the wrap-up round
+    // and on no other, and a gate that had quietly become permanent would show
+    // up here first.
+    try ws.access(io, Scripted.defiant_before_file, .{});
+    // …and the round asked for the report ran none. Before this the wrap-up
+    // round was an ordinary `session step` carrying the delegation's own
+    // budget, so a sub-agent that ignored the sentence simply started again —
+    // and with the bundled personas on the kernel's ceiling, started again for
+    // up to 500 more steps.
+    try std.testing.expectError(error.FileNotFound, ws.access(io, Scripted.defiant_after_file, .{}));
+
+    // One turn, not a second budget: exactly one assistant turn follows the ask.
+    {
+        const events = try runCli(alloc, io, ws, &.{ exe_abs, "session", "events", child });
+        defer alloc.free(events.stdout);
+        const at = std.mem.indexOf(u8, events.stdout, Scripted.wrap_up_opening) orelse return error.TestExpectedEqual;
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, events.stdout[at..], "\"kind\":\"assistant\""));
+    }
+}
+
 /// The delegation id out of a receipt (`… — delegation d-…, session s-…`).
 fn delegationOf(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
     const at = std.mem.indexOf(u8, text, "delegation d-").? + "delegation ".len;
