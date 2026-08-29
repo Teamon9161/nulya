@@ -86,6 +86,9 @@ function tipsOf(glyphs: Glyphs): string[] {
     // need to know a picture can be pasted are the ones whose terminal quietly
     // took that key.
     "Alt+V (or Ctrl+V) pastes what is on the desktop clipboard, a picture included",
+    // The route that needs no key at all, and therefore the one that works on
+    // the terminals where the tip above cannot help.
+    "paste or drag the path of a .png or .jpg and the picture goes in, not the path",
     // Three ways into one pane, in one line, because the report that prompted
     // T70 was "I never found the sidebar at all". The handle is named as well
     // as pointed at: it is the only one of the three that can be seen without

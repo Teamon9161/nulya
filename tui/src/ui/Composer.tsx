@@ -26,6 +26,7 @@ import {
 import { skillCompletions, type SkillTable } from "../skills.ts"
 import { packageCompletions, resolve as resolvePackageCommands, type PackageCommandTable } from "../packageCommands.ts"
 import { readClipboard, type ClipboardReader } from "../clipboard.ts"
+import { imagePathIn, max_image_bytes, readImageFile, tooLarge, type PastedImage } from "../image.ts"
 import type { ImageInput } from "../nulya/cli.ts"
 
 /**
@@ -142,6 +143,22 @@ export function Composer(props: {
   onSubmit: (text: string, interrupt?: boolean, images?: readonly ImageInput[]) => void
   /** Test seam; the real path asks the desktop clipboard on Ctrl+V. */
   readClipboard?: ClipboardReader
+  /**
+   * Read what a pasted path names. The seam is here rather than in `image.ts`
+   * because a relative path is relative to the tab's workspace, which only the
+   * screen around this box knows.
+   */
+  readImage?: (path: string) => Promise<PastedImage>
+  /**
+   * Whether the model this tab talks to is catalogued as accepting images, and
+   * what it is called — the same `[[models]]` claim the kernel's vision gate
+   * reads at submit (DESIGN §14), asked here so a picture that could never be
+   * sent is refused on the gesture instead of on the turn.
+   *
+   * `null` when nothing told us: an absent catalog is not a claim either way,
+   * and the kernel is still the one that answers.
+   */
+  vision?: () => { model: string; accepted: boolean } | null
   onNotice?: (text: string) => void
   /**
    * Enter on an empty composer. Returns true when it meant something — the
@@ -349,6 +366,11 @@ export function Composer(props: {
    * `[Pasted text #N]` and the text is kept beside the draft, so a thousand-line
    * stack trace does not bury the screen and the draft stays editable.
    *
+   * One shape is not text at all: a paste that is exactly the path of an image
+   * file is the image (`image.ts`). That is what a file manager's copy and a
+   * drag onto the window produce, and on a terminal that keeps `Ctrl+V` for
+   * itself it is the only route a picture has.
+   *
    * `preventDefault()` is what stops the textarea from inserting the bytes
    * itself: this listener runs first, and the default insert is skipped once
    * the event is claimed.
@@ -359,6 +381,15 @@ export function Composer(props: {
       return
     }
     const text = new TextDecoder().decode(event.bytes)
+    const path = imagePathIn(text)
+    if (path) {
+      // Claimed before we know: whether this paste is a picture or only its
+      // name is a question about bytes on disk, and that answer arrives after
+      // this handler has already had to decide who inserts.
+      event.preventDefault()
+      void pastePath(path, text)
+      return
+    }
     if (!foldPaste(text)) {
       // The textarea will insert it; the mirror has to follow, or the buffer and
       // everything derived from it (the menus, the box's own height) go on
@@ -373,9 +404,9 @@ export function Composer(props: {
 
   /**
    * Fold a paste into `[Pasted text #N]` if it is long enough to bury the
-   * screen, and say whether it did. The caller that has a textarea insert of its
-   * own to suppress uses the answer; the caller that is doing the inserting
-   * itself gets the short text put in for it.
+   * screen, and say whether it did. The caller with a textarea insert of its own
+   * to suppress uses the answer; the caller doing the inserting itself goes
+   * through `insertPaste`, which asks this first.
    */
   const foldPaste = (text: string): boolean => {
     const size = measure(text)
@@ -385,6 +416,50 @@ export function Composer(props: {
     area?.insertText(placeholderFor(attachment.id))
     sync()
     return true
+  }
+
+  /** Pasted text, put in the box by us. The fold applies wherever it came from. */
+  const insertPaste = (text: string) => {
+    if (foldPaste(text)) return
+    area?.insertText(text)
+    sync()
+  }
+
+  /**
+   * Hang an image on the draft, or say why this one cannot be — the two
+   * refusals the kernel would make at submit (DESIGN §9.5/§14), made here where
+   * the gesture is, because a draft built around an image that can never be
+   * sent is worse than a paste that said no.
+   */
+  const attachImage = (image: ImageInput): boolean => {
+    const claim = props.vision?.() ?? null
+    if (claim && !claim.accepted) {
+      props.onNotice?.(
+        `${claim.model} is not catalogued as accepting images · add a [[models]] entry with vision = true to your user config`,
+      )
+      return false
+    }
+    if (image.bytes.length > max_image_bytes) {
+      props.onNotice?.(tooLarge(image.bytes.length))
+      return false
+    }
+    const attachment: ImageAttachment = { id: nextAttachment++, ...image }
+    setImages([...images(), attachment])
+    area?.insertText(imagePlaceholder(attachment.id))
+    sync()
+    return true
+  }
+
+  /**
+   * A paste that is exactly the path of an image file (`image.ts`): the picture,
+   * if the bytes agree. When they do not — or when it cannot be attached — the
+   * paste is still a paste, and the text goes in as it always would have.
+   */
+  const pastePath = async (path: string, text: string) => {
+    const found = await (props.readImage ?? readImageFile)(path)
+    if (found.kind === "image" && attachImage(found.image)) return
+    if (found.kind === "oversize") props.onNotice?.(tooLarge(found.bytes))
+    insertPaste(text)
   }
 
   /**
@@ -401,17 +476,15 @@ export function Composer(props: {
     const found = await readClipboard(props.readClipboard)
     switch (found.kind) {
       case "image": {
-        const attachment: ImageAttachment = { id: nextAttachment++, ...found.image }
-        setImages([...images(), attachment])
-        area?.insertText(imagePlaceholder(attachment.id))
-        sync()
+        attachImage(found.image)
         return
       }
       case "text": {
-        if (!foldPaste(found.text)) {
-          area?.insertText(found.text)
-          sync()
-        }
+        // A copied FILE reaches a clipboard as its path, so the same text can
+        // mean the same picture here as it does through the bracketed route.
+        const path = imagePathIn(found.text)
+        if (path) await pastePath(path, found.text)
+        else insertPaste(found.text)
         return
       }
       case "empty":

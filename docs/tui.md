@@ -2746,3 +2746,20 @@ S1c 把 checkout 的两个问题（store 的 trust、`.nulya/agents`）从 `main
 **而那一项本来就是死的**：它想表达"transcript 内容宽度封顶在 `transcript.max_width`"，但它从来没有做到过——**每张卡自己就已经按 `min(screen, max_width)` 裁**（`AssistantTurn` / `UserTurn` / `CardFrame` / `CompositionCard` 全都是这么算 `room()` 的），因为这个前端的规矩是**自己裁自己的文本**，从不指望某个盒子替它裁。一个写了不生效、还顺手制造了一列溢出的选项，正是该删的那种。同样的 `contentOptions` 其它七个 scrollbox 都没有传 `maxWidth`，所以 `/help` `/sessions` `/ext` 这些从来没有这条横条——实测确认过。
 
 **测试**：不加。这一条要守的是"content 不比 viewport 宽"，而它已经被每一张现有的帧快照守着了（这次改动 26 个快照零变化——如果 content 宽度真的变了，卡片的裁剪点会跟着变）；再写一条断言某个 `scrollWidth` 数值的测试，只是把一个实现细节钉在两个地方。
+
+
+### T97 · 剪贴板里的图片，和一条通向它的路（2026-08-29）
+
+**内核零改动**（同一个 commit 里另有一处 `default.toml` 与 DESIGN §9.5，那不是 TUI）。
+
+**问题**：T89 把剪贴板接完整了，可那条路只在**终端肯把 `Ctrl+V` 交出来**时存在——Windows Terminal 的缺省绑定不交，于是剪贴板里只有一张位图时，粘贴键粘了个空，屏幕上什么都不发生。而它还有下游：内核的 vision 门读 `[[models]]` 的 `vision = true`，**自带目录里一条都没写**，所以就算图片粘上了，`session append --image` 也必然被拒（实测 `session append refused: no [[models]] entry for '…'`）。两头都堵着，中间那段做得再对也到不了模型。
+
+**改法三处**：
+
+1. **自带目录说出哪些模型收图**：`default.toml` 给 claude 四个 / gpt-5.6 三个 / codex 的 gpt-5.5 写上 `vision = true`；deepseek 两个与 openrouter 那个测试模型不写——**这一列是主张不是猜测**，目录只替查得准的模型说话。
+2. **路径粘贴就是图片粘贴**（新 `src/image.ts`）：一段粘贴如果**整个**就是一张图片文件的路径（剥一层引号、认 `file://`、单行、后缀 png/jpg/jpeg），就去读它；**后缀只决定要不要看，字节才决定它是什么**（`sniffImage` 从 `clipboard.ts` 搬进来，两条路共用；这也是内核 `--image` 自己的规矩）。而那正是文件管理器复制一个文件、以及把文件拖进窗口时终端粘出来的东西——于是**每一个终端上都有一条路**，不再取决于哪个键被让了出来。读出来不是图片就照常插入那段文本：一次粘贴永远产出点什么。
+3. **拒绝落在手势上，不落在轮次上**（`Composer.attachImage`）：内核在 `session append` 会拒的两件事（模型没被目录标 vision、单图 > 5 MB），composer 在**粘的那一刻**用同一张 `[[models]]` 表先答一遍（`App.visionHere`）——围着一张永远发不出去的图片写完一段话再被拒，比当场说"这个模型没标 vision，去 config 加一行"糟得多。目录读不到就**不主张**（`null`），仍由内核回答：前端可以复述内核的答案，不许发明一个它不会给的。
+
+**代价，如实记**：`Ctrl+V` 被终端拿走这件事**仍然没解**，`Alt+V` 还是应用内唯一的按键出路（tcode 亦然）；这次买到的是第二条**不靠按键**的路。另外路径粘贴要先认下这次粘贴的所有权（`preventDefault` 早于读盘），所以放在慢盘上的路径会晚一点显示——换来的是不先闪一段文本再变成卡片。
+
+**测试**：`test/image.test.ts`（字节判型 · 路径只在"整个粘贴就是它"时算数：引号、`file://`、散文里提到一个文件名不算、多行不算 · 读盘四态：真图 / 名字像图而字节不是 / 不存在 / 超限 · 相对路径相对**这个 tab 的工作区**而不是进程 cwd）· `test/composer.test.tsx` 两条（真粘一条路径 → `[Image #1]` → 提交带出 bytes，名字像图片的文本文件仍是文本 · 模型没标 vision 时图片不进草稿、notice 点名模型与 `vision = true`）。内核侧照旧 `zig build test` / `zig build e2e-core` 全绿，并用真二进制走了一遍门：同一张图在 `gpt-5.6-luna` 上从 exit 1 变成 exit 0。

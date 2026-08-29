@@ -28,6 +28,7 @@ import { ContextPanel } from "./ContextPanel.tsx"
 import { contextFill, contextSections } from "../state/context.ts"
 import { pickTip } from "./Welcome.tsx"
 import { WorkingStatus, activityOf, type SyncProgress } from "./WorkingStatus.tsx"
+import { readImageFile } from "../image.ts"
 import { installCrashLog } from "../crashlog.ts"
 import { QueueLane } from "./QueueLane.tsx"
 import { parseMidTask } from "../midtask.ts"
@@ -1874,6 +1875,22 @@ export function App(props: AppProps) {
     if (!pick) return ""
     if (pick.model) return pick.model
     return props.profiles?.find((profile) => profile.name === pick.profile)?.model || pick.profile
+  }
+
+  /**
+   * Whether that model is catalogued as accepting images (`[[models]]` with
+   * `vision = true`) — the same question, against the same table, that the
+   * kernel's gate asks when the turn is appended (DESIGN §14). An id the
+   * catalog does not mention is a refusal there, so it is one here too.
+   *
+   * Null only when this launch has no catalog at all: the front end may repeat
+   * the kernel's answer, never invent one it would not have given.
+   */
+  const visionHere = (): { model: string; accepted: boolean } | null => {
+    const catalog = props.models
+    const model = modelName()
+    if (!catalog || model.length === 0) return null
+    return { model, accepted: catalog.find((entry) => entry.id === model)?.vision ?? false }
   }
 
   /** The model the front tab talks to: frozen on a session, chosen on a draft. */
@@ -4547,6 +4564,8 @@ export function App(props: AppProps) {
                   onActivate={() => {
                     if (browse.active()) leaveBrowse()
                   }}
+                  readImage={(path) => readImageFile(path, ws().dir)}
+                  vision={visionHere}
                   references={references()}
                   skills={skills()}
                   packages={packageCmds()}

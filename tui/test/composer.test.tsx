@@ -3,6 +3,9 @@
  * that a key the screen consumed does not also edit the buffer.
  */
 import { expect, test } from "bun:test"
+import { mkdtempSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
+import { tmpdir } from "node:os"
 import { testRender } from "@opentui/solid"
 import { useKeyboard } from "@opentui/solid"
 import { Composer, wrappedRows } from "../src/ui/Composer.tsx"
@@ -527,6 +530,77 @@ test("Ctrl+V attaches a clipboard image and submits it as an image block", async
     expect(frame).toContain("[Image #2]")
     setup.mockInput.pressBackspace()
     expect(await settle(setup, 3)).not.toContain("[Image #2]")
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 60_000)
+
+
+test("a pasted image PATH is the picture; a path to anything else is still text", async () => {
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3])
+  const dir = mkdtempSync(join(tmpdir(), "nulya-tui-paste-"))
+  writeFileSync(join(dir, "shot.png"), png)
+  writeFileSync(join(dir, "liar.png"), "not a picture")
+  const sent: { text: string; images: readonly { bytes: Uint8Array }[] }[] = []
+  const setup = await testRender(
+    () => (
+      <StyleContext.Provider value={style}>
+        <Composer onSubmit={(text, _interrupt, images = []) => sent.push({ text, images })} />
+      </StyleContext.Provider>
+    ),
+    { width: 70, height: 12 },
+  )
+  try {
+    await settle(setup, 3)
+    // The gesture every terminal allows: a file manager's copy, or a drag onto
+    // the window, arrives as a bracketed paste of the path.
+    await setup.mockInput.pasteBracketedText(`"${join(dir, "shot.png")}"`)
+    expect(await settle(setup, 6)).toContain("[Image #1]")
+
+    await setup.mockInput.typeText(" what is this")
+    setup.mockInput.pressEnter()
+    await settle(setup, 3)
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toBe(" what is this")
+    expect(sent[0]!.images[0]!.bytes).toEqual(png)
+
+    // A name is not evidence: those bytes are not a picture, so the paste was
+    // only ever text and goes in as text.
+    const liar = join(dir, "liar.png")
+    await setup.mockInput.pasteBracketedText(liar)
+    const frame = await settle(setup, 6)
+    expect(frame).not.toContain("[Image #2]")
+    expect(frame).toContain("liar.png")
+  } finally {
+    setup.renderer.destroy()
+  }
+}, 60_000)
+
+
+test("an image the model is not catalogued for is refused on the gesture", async () => {
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3])
+  const notices: string[] = []
+  const setup = await testRender(
+    () => (
+      <StyleContext.Provider value={style}>
+        <Composer
+          readClipboard={async () => ({ status: "read", representation: { mimeType: "image/png", bytes: png } })}
+          vision={() => ({ model: "deepseek-v4-pro", accepted: false })}
+          onNotice={(text) => notices.push(text)}
+          onSubmit={() => {}}
+        />
+      </StyleContext.Provider>
+    ),
+    { width: 70, height: 10 },
+  )
+  try {
+    await settle(setup, 3)
+    setup.mockInput.pressKey("v", { ctrl: true })
+    // The kernel would refuse this turn at `session append`; a draft built
+    // around it would only find that out after it was written.
+    expect(await settle(setup, 4)).not.toContain("[Image #1]")
+    expect(notices.join(" ")).toContain("deepseek-v4-pro")
+    expect(notices.join(" ")).toContain("vision = true")
   } finally {
     setup.renderer.destroy()
   }
